@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# mount — insère/éjecte un CD À CHAUD dans l'OS 9 en cours (lecteur 'gamecd'),
+#          sans quitter la partie. Pilote le moniteur QEMU de run_os9.sh.
+#
+#   ./mount            # mini-menu graphique (zenity) des CD disponibles
+#   ./mount <nom>      # insère le CD (nom partiel ok : Myst, doom, caesar…)
+#   ./mount eject      # éjecte le CD du lecteur gamecd
+#   ./mount list       # montre l'état des lecteurs
+#
+# Les images CD vivent dans disks/cdr/ (.cdr/.iso/.img/.toast).
+set -uo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MON="${POMPPC_SCRATCH:-$ROOT/.run}/os9-mon.sock"
+CDDIR="$ROOT/disks/cdr"
+
+hmp(){ python3 "$ROOT/.run/moncmd.py" "$MON" "$1" 2>/dev/null; }
+list_imgs(){ find "$CDDIR" "$ROOT/disks" -maxdepth 1 -type f \
+    \( -iname '*.cdr' -o -iname '*.iso' -o -iname '*.img' -o -iname '*.toast' \) 2>/dev/null \
+    | grep -v '/games\.iso$' | sort; }
+
+# OS 9 doit tourner (moniteur présent)
+if [ ! -S "$MON" ]; then
+  echo "⚠ OS 9 ne tourne pas. Lance d'abord : ./run_os9.sh" >&2
+  command -v zenity >/dev/null && DISPLAY="${DISPLAY:-:1}" zenity --error \
+    --text="OS 9 ne tourne pas.\nLance d'abord ./run_os9.sh" 2>/dev/null
+  exit 1
+fi
+
+arg="${1:-}"
+case "$arg" in
+  eject)          hmp "eject gamecd" >/dev/null; echo "⏏ CD éjecté"; exit 0 ;;
+  list|status)    hmp "info block" | grep -iE 'gamecd|cd|iso|cdr'; exit 0 ;;
+  "")
+    mapfile -t imgs < <(list_imgs)
+    [ ${#imgs[@]} -eq 0 ] && { echo "Aucune image CD dans disks/cdr/. Extrais-en une d'abord." >&2; exit 1; }
+    rows=(); for f in "${imgs[@]}"; do rows+=("$(basename "$f")"); done
+    export DISPLAY="${DISPLAY:-:1}"
+    sel=$(zenity --list --title="Monter un CD dans OS 9" \
+          --text="CD à insérer dans le lecteur (à chaud) :" \
+          --column="CD" "${rows[@]}" --extra-button="⏏ Éjecter" \
+          --width=440 --height=380 2>/dev/null) || exit 0
+    [ "$sel" = "⏏ Éjecter" ] && { hmp "eject gamecd" >/dev/null; exit 0; }
+    [ -z "$sel" ] && exit 0
+    target="$CDDIR/$sel"; [ -f "$target" ] || target="$ROOT/disks/$sel"
+    ;;
+  *)
+    target=$(list_imgs | grep -i "$arg" | head -1)
+    [ -z "$target" ] && { echo "Aucun CD ne correspond à « $arg ». Disponibles :" >&2
+                          list_imgs | xargs -r -n1 basename >&2; exit 1; }
+    ;;
+esac
+
+hmp "eject gamecd" >/dev/null
+hmp "change gamecd \"$target\"" >/dev/null
+echo "✓ Inséré : $(basename "$target")  → apparaît sur le bureau OS 9"
+command -v notify-send >/dev/null && DISPLAY="${DISPLAY:-:1}" \
+  notify-send "OS 9" "CD monté : $(basename "$target")" 2>/dev/null

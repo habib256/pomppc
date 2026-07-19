@@ -1,0 +1,36 @@
+# ─── Disques, OS et jeux copyrightés — JAMAIS commités ───────────────
+# (illégal de redistribuer + limite GitHub 100 Mo/fichier)
+disks/*.qcow2
+disks/*.iso
+disks/*.img
+disks/*.dsk
+disks/*.toast
+disks/*.cdr
+disks/cdr/
+images/
+work/
+*.hfs
+*.rom
+# On GARDE les petits pilotes tiers open-source nécessaires aux features
+# (disks/extras/classicvirtio/ndrv/ndrvloader, USBTabletINIT.sit) — pas d'exclusion dessus
+disks/extras/*.zip
+
+# ─── Runtime / éphémère ──────────────────────────────────────────────
+.run/
+.claude/
+shared/*
+!shared/.gitkeep
+
+# ─── Artefacts (pas de source) ───────────────────────────────────────
+bench/
+*.ppm
+*.png
+*.wav
+*.pram
+*.raw
+*.pid
+*.data
+*.data.old
+imgui.ini
+__pycache__/
+*.pyc

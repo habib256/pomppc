@@ -1,0 +1,13 @@
+# POMPPC — accès aux manettes USB pour QEMU (usb-host) sans lancer QEMU en root.
+# Donne au groupe "plugdev" (dont l'utilisateur fait partie) l'accès rw au nœud USB.
+# Ajoute une ligne par manette (idVendor/idProduct via `lsusb`).
+
+# Sony DualShock 4 USB Wireless Adaptor
+SUBSYSTEM=="usb", ATTR{idVendor}=="054c", ATTR{idProduct}=="0ba0", MODE="0660", GROUP="plugdev"
+# DualShock 4 (câble direct, 1re et 2e révisions)
+SUBSYSTEM=="usb", ATTR{idVendor}=="054c", ATTR{idProduct}=="05c4", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTR{idVendor}=="054c", ATTR{idProduct}=="09cc", MODE="0660", GROUP="plugdev"
+# DualSense (PS5)
+SUBSYSTEM=="usb", ATTR{idVendor}=="054c", ATTR{idProduct}=="0ce6", MODE="0660", GROUP="plugdev"
+# Xbox 360 / Xbox One (Microsoft)
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", MODE="0660", GROUP="plugdev"

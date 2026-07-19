@@ -1,0 +1,106 @@
+diff --git a/hw/ppc/ppc.c b/hw/ppc/ppc.c
+index be16771..62c53c5 100644
+--- a/hw/ppc/ppc.c
++++ b/hw/ppc/ppc.c
+@@ -28,6 +28,7 @@
+ #include "hw/ppc/ppc_e500.h"
+ #include "qemu/timer.h"
+ #include "sysemu/cpus.h"
++#include "sysemu/cpu-timers.h"
+ #include "qemu/log.h"
+ #include "qemu/main-loop.h"
+ #include "qemu/error-report.h"
+@@ -501,6 +502,38 @@ static uint64_t ns_to_tb(uint32_t freq, int64_t clock)
+     return muldiv64(clock, freq, NANOSECONDS_PER_SECOND);
+ }
+ 
++/*
++ * Variante rapide de ns_to_tb pour le chemin chaud (lecture/écriture du TB).
++ * clock * tb_freq / 1e9 sans division 128 bits: on précalcule le réciproque
++ * recip = (tb_freq << 64) / 1e9 (fait uniquement quand tb_freq change), puis
++ * on prend les 64 bits de poids fort de clock*recip. Résultat identique à
++ * muldiv64 à ≤1 tick près, et monotone. clock est >= 0 (horloge virtuelle).
++ */
++static uint64_t ns_to_tb_cached(ppc_tb_t *tb_env, int64_t clock)
++{
++    uint32_t freq = tb_env->tb_freq;
++
++    if (unlikely(freq != tb_env->tb_freq_cached)) {
++        tb_env->tb_freq_cached = freq;
++        tb_env->tb_freq_recip = freq ?
++            (uint64_t)(((__uint128_t)freq << 64) / NANOSECONDS_PER_SECOND) : 0;
++    }
++    return (uint64_t)(((__uint128_t)(uint64_t)clock * tb_env->tb_freq_recip) >> 64);
++}
++
++/*
++ * Horloge virtuelle pour le timebase. Hors icount, qemu_clock_get_ns(VIRTUAL)
++ * se réduit à cpu_get_clock() en passant par 2 appels/indirections
++ * (cpus_get_virtual_clock + le pointeur get_virtual_clock, nul hors icount).
++ * On court-circuite ces indirections dans le chemin chaud (mftb), tout en
++ * gardant le chemin icount correct.
++ */
++static inline int64_t ppc_get_vclock(void)
++{
++    return icount_enabled() ? qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)
++                            : cpu_get_clock();
++}
++
+ /* virtual clock in TB ticks, not adjusted by TB offset */
+ static int64_t tb_to_ns_round_up(uint32_t freq, uint64_t tb)
+ {
+@@ -509,8 +542,8 @@ static int64_t tb_to_ns_round_up(uint32_t freq, uint64_t tb)
+ 
+ uint64_t cpu_ppc_get_tb(ppc_tb_t *tb_env, uint64_t vmclk, int64_t tb_offset)
+ {
+-    /* TB time in tb periods */
+-    return ns_to_tb(tb_env->tb_freq, vmclk) + tb_offset;
++    /* TB time in tb periods (chemin chaud: réciproque précalculé) */
++    return ns_to_tb_cached(tb_env, vmclk) + tb_offset;
+ }
+ 
+ uint64_t cpu_ppc_load_tbl (CPUPPCState *env)
+@@ -522,7 +555,7 @@ uint64_t cpu_ppc_load_tbl (CPUPPCState *env)
+         return env->spr[SPR_TBL];
+     }
+ 
+-    tb = cpu_ppc_get_tb(tb_env, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
++    tb = cpu_ppc_get_tb(tb_env, ppc_get_vclock(),
+                         tb_env->tb_offset);
+     trace_ppc_tb_load(tb);
+ 
+@@ -534,7 +567,7 @@ static inline uint32_t _cpu_ppc_load_tbu(CPUPPCState *env)
+     ppc_tb_t *tb_env = env->tb_env;
+     uint64_t tb;
+ 
+-    tb = cpu_ppc_get_tb(tb_env, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
++    tb = cpu_ppc_get_tb(tb_env, ppc_get_vclock(),
+                         tb_env->tb_offset);
+     trace_ppc_tb_load(tb);
+ 
+@@ -553,7 +586,7 @@ uint32_t cpu_ppc_load_tbu (CPUPPCState *env)
+ static inline void cpu_ppc_store_tb(ppc_tb_t *tb_env, uint64_t vmclk,
+                                     int64_t *tb_offsetp, uint64_t value)
+ {
+-    *tb_offsetp = value - ns_to_tb(tb_env->tb_freq, vmclk);
++    *tb_offsetp = value - ns_to_tb_cached(tb_env, vmclk);
+ 
+     trace_ppc_tb_store(value, *tb_offsetp);
+ }
+diff --git a/include/hw/ppc/ppc.h b/include/hw/ppc/ppc.h
+index d5d119e..2a72cf4 100644
+--- a/include/hw/ppc/ppc.h
++++ b/include/hw/ppc/ppc.h
+@@ -27,6 +27,12 @@ struct ppc_tb_t {
+     int64_t  atb_offset;   /* Compensation                    */
+     int64_t  vtb_offset;
+     uint32_t tb_freq;      /* TB frequency                    */
++    /* Réciproque précalculé de tb_freq/1e9 (Q0.64), pour remplacer la division
++     * 128 bits par une multiplication haute à chaque lecture du TB (mftb).
++     * Recalculé seulement quand tb_freq change (rare). tb_freq_cached mémorise
++     * la fréquence pour laquelle tb_freq_recip a été calculé. */
++    uint32_t tb_freq_cached;
++    uint64_t tb_freq_recip;
+     /* Decrementer management */
+     uint64_t decr_next;    /* Tick for next decr interrupt    */
+     uint32_t decr_freq;    /* decrementer frequency           */

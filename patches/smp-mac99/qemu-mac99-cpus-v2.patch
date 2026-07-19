@@ -1,0 +1,188 @@
+diff --git a/hw/intc/openpic.c b/hw/intc/openpic.c
+index 78a82d0d30..2f479c23dd 100644
+--- a/hw/intc/openpic.c
++++ b/hw/intc/openpic.c
+@@ -1580,12 +1580,12 @@ static void openpic_realize(DeviceState *dev, Error **errp)
+         opp->irq_tim0 = KEYLARGO_TMR_IRQ;
+         opp->brr1 = -1;
+         opp->mpic_mode_mask = GCR_MODE_MIXED;
+-
++#if 0
+         if (opp->nb_cpus != 1) {
+             error_setg(errp, "Only UP supported today");
+             return;
+         }
+-
++#endif
+         map_list(opp, list_le, &list_count);
+         break;
+     }
+diff --git a/hw/misc/macio/gpio.c b/hw/misc/macio/gpio.c
+index 06be5a4f98..abdba3ec84 100644
+--- a/hw/misc/macio/gpio.c
++++ b/hw/misc/macio/gpio.c
+@@ -79,6 +79,17 @@ void macio_set_gpio(MacIOGPIOState *s, uint32_t gpio, bool state)
+         }
+         break;
+ 
++    case 4:
++        /* Active low, CPU1 reset */
++        if (!state) {
++            trace_macio_gpio_irq_assert(gpio);
++            qemu_irq_raise(s->gpio_extirqs[gpio]);
++        } else {
++            trace_macio_gpio_irq_deassert(gpio);
++            qemu_irq_lower(s->gpio_extirqs[gpio]);
++        }
++        break;
++
+     case 9:
+         /* Edge, triggered by NMI below */
+         if (state) {
+@@ -118,7 +129,14 @@ static void macio_gpio_write(void *opaque, hwaddr addr, uint64_t value,
+             ibit = s->gpio_regs[addr] & IN_DATA;
+         }
+ 
+-        s->gpio_regs[addr] = value | ibit;
++        if (addr == 4) {
++            if (!(value & OUT_ENABLE)) {
++                ibit = 1; /* high unless driven low */
++            }
++            macio_set_gpio(s, addr, ibit);
++        } else {
++            s->gpio_regs[addr] = value | ibit;
++        }
+     }
+ }
+ 
+@@ -184,6 +202,7 @@ static void macio_gpio_reset(DeviceState *dev)
+ 
+     /* GPIO 1 is up by default */
+     macio_set_gpio(s, 1, true);
++    macio_set_gpio(s, 4, true);
+ }
+ 
+ static void macio_gpio_nmi(NMIState *n, int cpu_index, Error **errp)
+diff --git a/hw/nvram/mac_nvram.c b/hw/nvram/mac_nvram.c
+index 0d82e5a128..3ef53d26ca 100644
+--- a/hw/nvram/mac_nvram.c
++++ b/hw/nvram/mac_nvram.c
+@@ -46,7 +46,7 @@ static void macio_nvram_writeb(void *opaque, hwaddr addr,
+     MacIONVRAMState *s = opaque;
+ 
+     addr = (addr >> s->it_shift) & (s->size - 1);
+-    trace_macio_nvram_write(addr, value);
++//    trace_macio_nvram_write(addr, value);
+     s->data[addr] = value;
+     if (s->blk) {
+         if (blk_pwrite(s->blk, addr, 1, &s->data[addr], 0) < 0) {
+@@ -64,7 +64,7 @@ static uint64_t macio_nvram_readb(void *opaque, hwaddr addr,
+ 
+     addr = (addr >> s->it_shift) & (s->size - 1);
+     value = s->data[addr];
+-    trace_macio_nvram_read(addr, value);
++//    trace_macio_nvram_read(addr, value);
+ 
+     return value;
+ }
+diff --git a/hw/ppc/mac_newworld.c b/hw/ppc/mac_newworld.c
+index cb3dc3ab48..57d83f989c 100644
+--- a/hw/ppc/mac_newworld.c
++++ b/hw/ppc/mac_newworld.c
+@@ -73,6 +73,7 @@
+ #include "kvm_ppc.h"
+ #include "hw/usb.h"
+ #include "hw/sysbus.h"
++#include "hw/irq.h"
+ #include "trace.h"
+ 
+ #define MAX_IDE_BUS 2
+@@ -128,12 +129,25 @@ static void ppc_core99_reset(void *opaque)
+     cpu->env.nip = PROM_BASE + 0x100;
+ }
+ 
++static void cpu_kick(void *opaque, int n, int level)
++{
++    PowerPCCPU *cpu = opaque;
++    CPUState *cs = CPU(cpu);
++
++    if (level) {
++        cpu->env.excp_prefix = 0;
++        cpu_reset(cs);
++        ppc_cpu_do_system_reset(cs);
++    }
++}
++
+ /* PowerPC Mac99 hardware initialisation */
+ static void ppc_core99_init(MachineState *machine)
+ {
+     Core99MachineState *core99_machine = CORE99_MACHINE(machine);
+     MachineClass *mc = MACHINE_GET_CLASS(machine);
+-    PowerPCCPU *cpu = NULL;
++    qemu_irq kick;
++    PowerPCCPU **cpus = NULL;
+     CPUPPCState *env = NULL;
+     char *filename;
+     IrqLines *openpic_irqs;
+@@ -157,14 +171,18 @@ static void ppc_core99_init(MachineState *machine)
+     uint64_t tbfreq = kvm_enabled() ? kvmppc_get_tbfreq() : TBFREQ;
+ 
+     /* init CPUs */
++    cpus = g_new0(PowerPCCPU *, machine->smp.cpus);
+     for (i = 0; i < machine->smp.cpus; i++) {
+-        cpu = POWERPC_CPU(cpu_create(machine->cpu_type));
+-        env = &cpu->env;
+-
++        cpus[i] = POWERPC_CPU(cpu_create(machine->cpu_type));
++fprintf(stderr, "cpus[%d] = %p %p\n", i, (void *)cpus[i], (void *)&cpus[i]->env);
++        /* Secondary CPUs start halted */
++        object_property_set_bool(OBJECT(cpus[i]), "start-powered-off", i != 0,
++                                 &error_abort);
+         /* Set time-base frequency to 100 Mhz */
+-        cpu_ppc_tb_init(env, TBFREQ);
+-        qemu_register_reset(ppc_core99_reset, cpu);
++        cpu_ppc_tb_init(&cpus[i]->env, TBFREQ);
++        qemu_register_reset(ppc_core99_reset, cpus[i]);
+     }
++    env = &cpus[0]->env;
+ 
+     /* allocate RAM */
+     if (machine->ram_size > 2 * GiB) {
+@@ -256,8 +274,8 @@ static void ppc_core99_init(MachineState *machine)
+     }
+ 
+     openpic_irqs = g_new0(IrqLines, machine->smp.cpus);
+-    dev = DEVICE(cpu);
+     for (i = 0; i < machine->smp.cpus; i++) {
++        dev = DEVICE(cpus[i]);
+         /* Mac99 IRQ connection between OpenPIC outputs pins
+          * and PowerPC input pins
+          */
+@@ -369,9 +387,17 @@ static void ppc_core99_init(MachineState *machine)
+     qdev_prop_set_chr(dev, "chrA", serial_hd(0));
+     qdev_prop_set_chr(dev, "chrB", serial_hd(1));
+ 
++    pic_dev = DEVICE(object_resolve_path_component(macio, "pic"));
++    qdev_prop_set_uint32(pic_dev, "nb_cpus", machine->smp.cpus);
++
+     pci_realize_and_unref(PCI_DEVICE(macio), pci_bus, &error_fatal);
+ 
+-    pic_dev = DEVICE(object_resolve_path_component(macio, "pic"));
++    s = SYS_BUS_DEVICE(object_resolve_path_component(macio, "gpio"));
++    for (i = 1; i < machine->smp.cpus; i++) {
++        kick = qemu_allocate_irq(cpu_kick, cpus[i], i);
++        sysbus_connect_irq(s, 4, kick);
++    }
++
+     for (i = 0; i < 4; i++) {
+         qdev_connect_gpio_out(uninorth_pci_dev, i,
+                               qdev_get_gpio_in(pic_dev, 0x1b + i));
+@@ -576,7 +602,7 @@ static void core99_machine_class_init(ObjectClass *oc, void *data)
+     mc->init = ppc_core99_init;
+     mc->block_default_type = IF_IDE;
+     /* SMP is not supported currently */
+-    mc->max_cpus = 1;
++    mc->max_cpus = 2;
+     mc->default_boot_order = "cd";
+     mc->default_display = "std";
+     mc->default_nic = "sungem";

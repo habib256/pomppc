@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# add-pad — ajoute la manette USB actuellement branchée à la règle udev de POMPPC.
+#
+#   ./add-pad            # détecte /dev/input/js0, ajoute sa ligne, affiche la cmd sudo
+#
+# Branche la manette AVANT de lancer. Après, applique la règle (une fois) :
+#   sudo cp pack/99-qemu-gamepad.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
+# puis rebranche la manette. Ensuite ./run_os9.sh la passe automatiquement.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RULES="$ROOT/pack/99-qemu-gamepad.rules"
+
+JS=""
+for j in /dev/input/js*; do [ -e "$j" ] && { JS="$j"; break; }; done
+[ -n "$JS" ] || { echo "✗ Aucune manette détectée (/dev/input/js*). Branche-la d'abord." >&2; exit 1; }
+
+VID=$(udevadm info -q property -n "$JS" 2>/dev/null | sed -n 's/^ID_VENDOR_ID=//p')
+PID=$(udevadm info -q property -n "$JS" 2>/dev/null | sed -n 's/^ID_MODEL_ID=//p')
+MDL=$(udevadm info -q property -n "$JS" 2>/dev/null | sed -n 's/^ID_MODEL=//p')
+[ -n "$VID" ] && [ -n "$PID" ] || { echo "✗ Impossible de lire vendor:product de $JS" >&2; exit 1; }
+
+echo "Manette : $MDL  ($VID:$PID)  sur $JS"
+
+if grep -qiE "idVendor}==\"$VID\", ATTR\{idProduct}==\"$PID\"" "$RULES" \
+   || grep -qiE "idVendor}==\"$VID\"[^,]*$" "$RULES"; then
+  echo "✓ Déjà présente dans $RULES — rien à faire."
+  exit 0
+fi
+
+printf '# %s\nSUBSYSTEM=="usb", ATTR{idVendor}=="%s", ATTR{idProduct}=="%s", MODE="0660", GROUP="plugdev"\n' \
+  "$MDL" "$VID" "$PID" >> "$RULES"
+echo "✓ Ligne ajoutée à $RULES"
+echo
+echo "Applique la règle (sudo, une fois) puis rebranche la manette :"
+echo "  sudo cp \"$RULES\" /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger"

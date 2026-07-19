@@ -1,0 +1,147 @@
+diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+index 6a4af14..b4d0a66 100644
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -258,6 +258,7 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, vaddr pc,
+         tb = qatomic_load_acquire(&jc->array[hash].tb);
+ 
+         if (likely(tb &&
++                   jc->array[hash].gen == jc->cur_gen &&
+                    jc->array[hash].pc == pc &&
+                    tb->cs_base == cs_base &&
+                    tb->flags == flags &&
+@@ -269,13 +270,15 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, vaddr pc,
+             return NULL;
+         }
+         jc->array[hash].pc = pc;
+-        /* Ensure pc is written first. */
++        jc->array[hash].gen = jc->cur_gen;
++        /* Ensure pc/gen are written first. */
+         qatomic_store_release(&jc->array[hash].tb, tb);
+     } else {
+         /* Use rcu_read to ensure current load of pc from *tb. */
+         tb = qatomic_rcu_read(&jc->array[hash].tb);
+ 
+         if (likely(tb &&
++                   jc->array[hash].gen == jc->cur_gen &&
+                    tb->pc == pc &&
+                    tb->cs_base == cs_base &&
+                    tb->flags == flags &&
+@@ -287,6 +290,7 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, vaddr pc,
+             return NULL;
+         }
+         /* Use the pc value already stored in tb->pc. */
++        jc->array[hash].gen = jc->cur_gen;
+         qatomic_set(&jc->array[hash].tb, tb);
+     }
+ 
+@@ -1014,10 +1018,12 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+                 jc = cpu->tb_jmp_cache;
+                 if (cflags & CF_PCREL) {
+                     jc->array[h].pc = pc;
+-                    /* Ensure pc is written first. */
++                    jc->array[h].gen = jc->cur_gen;
++                    /* Ensure pc/gen are written first. */
+                     qatomic_store_release(&jc->array[h].tb, tb);
+                 } else {
+                     /* Use the pc value already stored in tb->pc. */
++                    jc->array[h].gen = jc->cur_gen;
+                     qatomic_set(&jc->array[h].tb, tb);
+                 }
+             }
+@@ -1100,6 +1106,8 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
+     }
+ 
+     cpu->tb_jmp_cache = g_new0(CPUJumpCache, 1);
++    /* gen 0 = "jamais écrit" (entrées à NULL); on démarre les entrées valides à 1 */
++    cpu->tb_jmp_cache->cur_gen = 1;
+     tlb_init(cpu);
+ #ifndef CONFIG_USER_ONLY
+     tcg_iommu_init_notifier_list(cpu);
+diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+index db3f93f..b181279 100644
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -346,7 +346,8 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
+ 
+     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+ 
+-    tcg_flush_jmp_cache(cpu);
++    /* Changement de contexte: ne libère pas de TB -> invalidation O(1). */
++    tcg_bump_jmp_cache_gen(cpu);
+ 
+     if (to_clean == ALL_MMUIDX_BITS) {
+         qatomic_set(&cpu->neg.tlb.c.full_flush_count,
+diff --git a/accel/tcg/tb-jmp-cache.h b/accel/tcg/tb-jmp-cache.h
+index bb424c8..2ed23b7 100644
+--- a/accel/tcg/tb-jmp-cache.h
++++ b/accel/tcg/tb-jmp-cache.h
+@@ -9,19 +9,26 @@
+ #ifndef ACCEL_TCG_TB_JMP_CACHE_H
+ #define ACCEL_TCG_TB_JMP_CACHE_H
+ 
+-#define TB_JMP_CACHE_BITS 12
++#define TB_JMP_CACHE_BITS 14
+ #define TB_JMP_CACHE_SIZE (1 << TB_JMP_CACHE_BITS)
+ 
+ /*
+  * Accessed in parallel; all accesses to 'tb' must be atomic.
+  * For CF_PCREL, accesses to 'pc' must be protected by a
+  * load_acquire/store_release to 'tb'.
++ *
++ * Invalidation par génération: un flush lié à un changement de contexte (TLB)
++ * n'efface plus les entrées une par une (O(N)), il incrémente 'cur_gen' (O(1)).
++ * Une entrée n'est valide que si son 'gen' vaut 'cur_gen'. 'gen' et 'cur_gen'
++ * ne sont écrits que par le thread du CPU propriétaire.
+  */
+ struct CPUJumpCache {
+     struct rcu_head rcu;
++    uint32_t cur_gen;
+     struct {
+         TranslationBlock *tb;
+         vaddr pc;
++        uint32_t gen;
+     } array[TB_JMP_CACHE_SIZE];
+ };
+ 
+diff --git a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
+index c1708af..86028d1 100644
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -671,3 +671,25 @@ void tcg_flush_jmp_cache(CPUState *cpu)
+         qatomic_set(&jc->array[i].tb, NULL);
+     }
+ }
++
++/*
++ * Invalidation O(1) du jmp cache pour un changement de contexte (flush TLB).
++ * On incrémente la génération: les entrées d'une génération antérieure sont
++ * ignorées au lookup. À réserver aux flushs qui NE libèrent PAS de TB
++ * (les libérations passent par tcg_flush_jmp_cache, qui efface réellement).
++ * Débordement 32 bits (~très rare): on retombe sur un effacement complet.
++ */
++void tcg_bump_jmp_cache_gen(CPUState *cpu)
++{
++    CPUJumpCache *jc = cpu->tb_jmp_cache;
++
++    if (unlikely(jc == NULL)) {
++        return;
++    }
++    if (unlikely(++jc->cur_gen == 0)) {
++        for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
++            qatomic_set(&jc->array[i].tb, NULL);
++        }
++        jc->cur_gen = 1;
++    }
++}
+diff --git a/include/exec/tb-flush.h b/include/exec/tb-flush.h
+index 142c240..1bbeffc 100644
+--- a/include/exec/tb-flush.h
++++ b/include/exec/tb-flush.h
+@@ -24,5 +24,6 @@
+ void tb_flush(CPUState *cs);
+ 
+ void tcg_flush_jmp_cache(CPUState *cs);
++void tcg_bump_jmp_cache_gen(CPUState *cs);
+ 
+ #endif /* _TB_FLUSH_H_ */
