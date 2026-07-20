@@ -152,8 +152,15 @@ echo "  $SOUND  |  moniteur QEMU : $MON"
 [ -n "${SHARE:-}" ] && echo "  dossier partagé : $SHARE → volume 'Shared' sur le bureau (+ souris absolue virtio)"
 [ -n "${PAD_INFO:-}" ] && echo "  🎮 $PAD_INFO"
 
+# Affichage : DBUS_DISPLAY=1 → -display dbus,p2p=on pour le frontend ImGui.
+if [ -n "${DBUS_DISPLAY:-}" ]; then DISP="dbus,p2p=on"; else DISP="gtk"; fi
+QMP_ARGS=()
+[ -n "${QMP_SOCK:-}" ] && QMP_ARGS=(-qmp "unix:$QMP_SOCK,server=on,wait=off")
+# SNAPSHOT=1 : disque jetable (writes annulés → boot toujours propre).
+SNAP_ARGS=(); [ -n "${SNAPSHOT:-}" ] && SNAP_ARGS=(-snapshot)
+
 exec "$BIN" -M "mac99,via=$VIA" -cpu g4 -m "$RAM" -smp 1 \
-  -display gtk -g "$RES" "${BIOS_ARGS[@]}" \
+  -display "$DISP" -g "$RES" "${BIOS_ARGS[@]}" "${SNAP_ARGS[@]}" \
   "${DRIVES[@]}" -nic none "${AUDIO[@]}" "${TABLET_DEV[@]}" "${VIRTIO_ARGS[@]}" "${PAD_ARGS[@]}" \
   -prom-env 'auto-boot?=true' -prom-env "boot-device=$BOOTDEV" "${BOOTCMD_ARGS[@]}" \
-  -name "MacOS9" -monitor "unix:$MON,server,nowait"
+  -name "MacOS9" "${QMP_ARGS[@]}" -monitor "unix:$MON,server,nowait"

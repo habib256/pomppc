@@ -26,6 +26,7 @@ source "$ROOT/config.env"
 [ -n "$USER_RES" ] && RES="$USER_RES"
 
 SMP_N="${USER_SMP:-2}"                     # défaut = 2 cœurs (la nouveauté)
+SND_TAG=""; [ -z "${NOSOUND:-}" ] && SND_TAG=" + SON"   # évite $(...) sous set -e
 # OpenBIOS UNIFIÉ : bring-up SMP (balaton) + nœud audio screamer (mcayland),
 # buildé en -O1 (gcc-13 miscompile ce code OpenBIOS à -Os). Marche mono ET SMP.
 UNI_OBIOS="$ROOT/patches/smp-mac99/openbios-smp-screamer.elf"
@@ -54,20 +55,32 @@ if [ "$SMP_N" -ge 2 ]; then
   [ -x "$QEMU_BIN64" ] || { echo "⚠  SMP demandé mais $QEMU_BIN64 introuvable." >&2; exit 1; }
   BIN="$QEMU_BIN64"
   EXTRA+=(-accel tcg,thread=multi)
-  MODE="SMP ${SMP_N} cœurs (MTTCG, ppc64)$([ -z "${NOSOUND:-}" ] && echo ' + SON')"
+  MODE="SMP ${SMP_N} cœurs (MTTCG, ppc64)${SND_TAG}"
 else
   BIN="$QEMU_BIN"
-  MODE="mono-cœur$([ -z "${NOSOUND:-}" ] && echo ' + SON')"
+  MODE="mono-cœur${SND_TAG}"
 fi
 
 # --- Affichage ---
-if [ -n "${HEADLESS:-}" ]; then DISP="none"; else DISP="gtk"; export DISPLAY="${DISPLAY:-:1}"; fi
+# DBUS_DISPLAY=1 : sortie via -display dbus,p2p=on pour le frontend ImGui
+# (POMPPC/frontend). Le frontend fournit QMP_SOCK et se branche en add_client.
+if [ -n "${DBUS_DISPLAY:-}" ]; then DISP="dbus,p2p=on";
+elif [ -n "${HEADLESS:-}" ]; then DISP="none";
+else DISP="gtk"; export DISPLAY="${DISPLAY:-:1}"; fi
+
+# QMP pour pilotage par le frontend (add_client @dbus-display, reset, etc.).
+QMP_ARGS=()
+[ -n "${QMP_SOCK:-}" ] && QMP_ARGS=(-qmp "unix:$QMP_SOCK,server=on,wait=off")
 
 # --- Réseau (coupé par défaut : build sans slirp) ---
 if [ -n "${NET:-}" ]; then NET_ARGS=(-netdev "$NETDEV" -device "$NETNIC"); else NET_ARGS=(-nic none); fi
 
 # --- Disque jetable optionnel ---
 SNAP_ARGS=(); [ -n "${SNAPSHOT:-}" ] && SNAP_ARGS=(-snapshot)
+
+# --- Lecteur CD amovible 'gamecd' (vide) : insertion à chaud via le frontend
+#     (QMP blockdev-change-medium) ou ./mount. NOCD=1 pour l'omettre. ---
+CD_ARGS=(); [ -z "${NOCD:-}" ] && CD_ARGS=(-drive "id=gamecd,if=ide,media=cdrom")
 
 BOOTDEV='hd:10,\System\Library\CoreServices\BootX'
 SCR="${POMPPC_SCRATCH:-$ROOT/.run}"; mkdir -p "$SCR"
@@ -94,11 +107,12 @@ fi
 
 exec "$BIN" -M "$MACHINE" -cpu "$CPU" -m "$RAM" -smp "$SMP_N" \
   -display "$DISP" -g "$RES" \
-  -drive "file=$DISK,format=qcow2,media=disk" "${SNAP_ARGS[@]}" \
+  -drive "file=$DISK,format=qcow2,media=disk" "${SNAP_ARGS[@]}" "${CD_ARGS[@]}" \
   "${NET_ARGS[@]}" "${EXTRA[@]}" "${AUDIO[@]}" \
   -device usb-tablet "${PAD_ARGS[@]}" \
   -prom-env 'auto-boot?=true' \
   -prom-env "boot-device=$BOOTDEV" \
   -prom-env 'boot-args=-v' \
   -name "Tiger" \
+  "${QMP_ARGS[@]}" \
   -monitor "unix:$MON,server,nowait"

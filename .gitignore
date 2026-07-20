@@ -34,3 +34,7 @@ bench/
 imgui.ini
 __pycache__/
 *.pyc
+
+# --- frontend (ImGui + QEMU dbus) ---
+frontend/imgui/
+frontend/build/
