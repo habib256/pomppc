@@ -63,7 +63,7 @@ int main(int argc, char** argv) {
         // Clipboard: offer host text to the guest; QEMU should accept the Grab
         // (the async completion logs "grab accepted by QEMU"). Full text
         // transfer additionally needs a guest clipboard agent (absent on PPC).
-        if (resetTest && i == resetAt - 20 && got)
+        if (i == resetAt - 20 && got)
             bridge.publishLocalClipboard("POMPPC clipboard test ✔");
         // CDTEST=<image> : verify hot-insert into the gamecd drive over QMP.
         if (const char* cd = getenv("CDTEST"))

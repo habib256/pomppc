@@ -177,7 +177,11 @@ int main(int argc, char** argv) {
             guestW = w; guestH = h;
             glBindTexture(GL_TEXTURE_2D, tex);
             glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_BGRA,
+            // QEMU's mac99 scanout is PIXMAN_x8r8g8b8: the high byte is
+            // padding, not alpha, and is commonly zero. An RGBA texture made
+            // ImGui blend the whole guest display as transparent. Store RGB
+            // so OpenGL supplies an opaque alpha value when sampling.
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, w, h, 0, GL_BGRA,
                          GL_UNSIGNED_BYTE, fb.data());
         }
 
