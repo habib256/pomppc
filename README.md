@@ -84,6 +84,22 @@ POMPPC_DISPLAY=gtk scripts/boot.sh # fenêtre à l'écran (interaction directe)
 
 Le socket moniteur QEMU est dans `.run/mon.sock` (screendump, sendkey, quit…).
 
+## Écran paravirtuel QFB (kext Tiger)
+
+Portage PCI/PowerPC du framebuffer paravirtualisé « qfb1 » de Solra Bizna
+([mac_qfb_driver](https://github.com/SolraBizna/mac_qfb_driver), à l'origine NuBus/68k) :
+device QEMU `qfb-pci` + kext `POMPPCQFB` côté Tiger.
+
+```bash
+./scripts/build_qemu_qfb.sh        # QEMU 9.2.0 + SMP mac99 + device qfb-pci
+python3 tests/qfb_smoke.py         # test de bout en bout (Open Firmware, sans invité)
+QFB=1 ./run_tiger.sh               # Tiger + écran QFB en second moniteur
+./scripts/make_kext_iso.sh         # sources du kext sur un CD, à compiler dans l'invité
+```
+
+Détails : `kext/POMPPCQFB/README.md` ; contexte et alternatives (dont pourquoi une
+RTX 4060 Ti ne peut pas être passée en direct) : `docs/gpu-tiger-4060ti.md`.
+
 ## Optimisations (guidées par le profiling)
 
 Méthode : `scripts/profile-boot.sh` (perf record) pour **localiser** un hotspot → patcher `../qemu`

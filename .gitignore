@@ -11,6 +11,8 @@ images/
 work/
 *.hfs
 *.rom
+input/
+roms/
 # On GARDE les petits pilotes tiers open-source nécessaires aux features
 # (disks/extras/classicvirtio/ndrv/ndrvloader, USBTabletINIT.sit) — pas d'exclusion dessus
 disks/extras/*.zip

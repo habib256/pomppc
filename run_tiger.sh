@@ -8,6 +8,8 @@
 #   SNAPSHOT=1 ./run_tiger.sh # disque jetable (writes annulés -> boot toujours propre, pas de fsck)
 #   NET=1 ./run_tiger.sh      # réseau (si ton QEMU a slirp compilé)
 #   HEADLESS=1 ./run_tiger.sh # sans fenêtre (moniteur seul, pour scripting)
+#   QFB=1 ./run_tiger.sh      # + écran paravirtuel qfb-pci (kext POMPPCQFB)
+#   EXTRA_ARGS="-device ..."  # arguments QEMU supplémentaires
 #
 # Build UNIFIÉ : QEMU 9.2 (device Screamer porté du fork mcayland) + OpenBIOS
 # fusionné (bring-up SMP balaton + nœud audio screamer). SMP *et* son ensemble.
@@ -82,6 +84,25 @@ SNAP_ARGS=(); [ -n "${SNAPSHOT:-}" ] && SNAP_ARGS=(-snapshot)
 #     (QMP blockdev-change-medium) ou ./mount. NOCD=1 pour l'omettre. ---
 CD_ARGS=(); [ -z "${NOCD:-}" ] && CD_ARGS=(-drive "id=gamecd,if=ide,media=cdrom")
 
+# --- Écran paravirtuel QFB (device qfb-pci + kext POMPPCQFB) ---
+#     QFB=1 ajoute un second écran piloté par notre kext ; l'écran VGA reste la
+#     console Open Firmware. QFB_RES=LxH choisit le mode par défaut proposé.
+QFB_ARGS=()
+if [ -n "${QFB:-}" ]; then
+  if "$BIN" -device help 2>/dev/null | grep -q '"qfb-pci"'; then
+    QFB_RES="${QFB_RES:-1280x800}"
+    QFB_ARGS=(-device "qfb-pci,id=qfb0,width=${QFB_RES%x*},height=${QFB_RES#*x},depth=8")
+    echo "  🖵  écran QFB ${QFB_RES} (second moniteur)"
+  else
+    echo "⚠  QFB=1 demandé mais ce QEMU n'a pas le device qfb-pci." >&2
+    echo "   Reconstruis-le : ./scripts/build_qemu_qfb.sh" >&2
+    exit 1
+  fi
+fi
+
+# --- Arguments QEMU ad hoc : EXTRA_ARGS="-device ..." ./run_tiger.sh ---
+read -r -a USER_EXTRA <<< "${EXTRA_ARGS:-}"
+
 BOOTDEV='hd:10,\System\Library\CoreServices\BootX'
 SCR="${POMPPC_SCRATCH:-$ROOT/.run}"; mkdir -p "$SCR"
 MON="$SCR/mon.sock"; rm -f "$MON"
@@ -109,7 +130,7 @@ exec "$BIN" -M "$MACHINE" -cpu "$CPU" -m "$RAM" -smp "$SMP_N" \
   -display "$DISP" -g "$RES" \
   -drive "file=$DISK,format=qcow2,media=disk" "${SNAP_ARGS[@]}" "${CD_ARGS[@]}" \
   "${NET_ARGS[@]}" "${EXTRA[@]}" "${AUDIO[@]}" \
-  -device usb-tablet "${PAD_ARGS[@]}" \
+  -device usb-tablet "${PAD_ARGS[@]}" "${QFB_ARGS[@]}" "${USER_EXTRA[@]}" \
   -prom-env 'auto-boot?=true' \
   -prom-env "boot-device=$BOOTDEV" \
   -prom-env 'boot-args=-v' \
