@@ -30,8 +30,10 @@ qemu_common() {
     -boot "$bootdev"
     -g "$RES"
     -drive "file=$DISK,format=qcow2,media=disk"
-    -netdev "$NETDEV"
-    -device "$NETNIC"
+    # NET_ARGS vient de config.env : vide si NONET=1. Le passer en dur ici rendait
+    # NONET inopérant — or le build source par défaut est compilé SANS slirp, donc
+    # '-netdev user' y échoue au démarrage.
+    "${NET_ARGS[@]}"
     # -v = boot verbeux du kernel XNU : indispensable pour diagnostiquer un boot qui cale.
     -prom-env 'boot-args=-v'
   )

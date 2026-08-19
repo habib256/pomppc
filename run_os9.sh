@@ -6,8 +6,10 @@
 #   ./run_os9.sh install    # force le boot CD (pour (ré)installer sur le disque)
 #   ./run_os9.sh disk       # force le boot du disque installé
 #   OS9_CD=/chemin/os9.iso ./run_os9.sh install   # CD d'install ailleurs que disks/
-#   CDR=USB_Tablet.iso ./run_os9.sh   # monte le CD de l'extension souris absolue
-#   TABLET=1 ./run_os9.sh   # souris absolue/fluide (via=cuda + usb-tablet ; extension requise)
+#   CDR=<image> ./run_os9.sh          # monte une image CD de disks/cdr/ (ou chemin absolu)
+#   TABLET=1 ./run_os9.sh   # souris absolue via usb-tablet (via=cuda + extension à installer
+#                           # d'abord — voir disks/extras/README.md ; INUTILE par défaut :
+#                           # le partage virtio donne déjà la souris absolue en via=pmu)
 #   (dossier partagé ./shared monté PAR DÉFAUT au boot disque, volume 'Shared' + souris absolue virtio)
 #   SHARE=/chemin ./run_os9.sh  # partage un autre dossier hôte à la place de ./shared
 #   NOSHARE=1 ./run_os9.sh  # coupe le partage/virtio (boot disque nu)
@@ -29,9 +31,12 @@ RAM=512
 MODE="${1:-auto}"
 
 # --- Souris absolue/fluide via USB tablet (extension invité kanjitalk755) ---
-# L'extension USBTabletINIT EXIGE via=cuda (elle plante sous via=pmu). Installe
-# d'abord l'extension : CDR=USB_Tablet.iso ./run_os9.sh  (StuffIt Expander -> Dossier Système),
-# puis lance en mode tablette : TABLET=1 ./run_os9.sh
+# Voie SECONDAIRE : le partage virtio ci-dessous fournit déjà virtio-tablet-pci, donc la
+# souris absolue en via=pmu sans rien installer. TABLET=1 n'a d'intérêt que si tu veux
+# spécifiquement usb-tablet (ex. NOSHARE=1).
+# L'extension USBTabletINIT EXIGE via=cuda (elle plante sous via=pmu) et doit être installée
+# à la main dans le Dossier Système. Le dépôt fournit l'archive .sit, pas un CD prêt à
+# monter : recette de fabrication du CD dans disks/extras/README.md.
 VIA=pmu; TABLET_DEV=()
 if [ -n "${TABLET:-}" ]; then
   VIA=cuda

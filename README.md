@@ -36,9 +36,11 @@ pas un miracle.
 plusieurs années (OS mort, aucun SDK). Gelé. Gain graphique réaliste à court terme :
 framebuffer 2D — c'est exactement ce qui a été fait (device `qfb-pci` + kext `POMPPCQFB`,
 section « Écran paravirtuel QFB »), pas un pont OpenGL.
-- **SMP** : fait, mais pas par OpenPIC. Le bring-up passe par le **GPIO KeyLargo** (série de
-patches de BALATON Zoltan, `patches/smp-mac99/`) ; `run_tiger.sh` démarre Tiger sur **2 cœurs
-MTTCG** par défaut. OS 9 reste mono-cœur (SMP buggé côté invité).
+- **SMP** : fait, en deux morceaux (`patches/smp-mac99/qemu-mac99-cpus-v2.patch`, d'après la série
+de BALATON Zoltan). D'abord le garde-fou `« Only UP supported today »` d'`hw/intc/openpic.c` est
+neutralisé ; ensuite le **GPIO 4 de KeyLargo** — la ligne de reset du CPU1 sur un vrai bi-G4 — est
+câblé à un `cpu_kick()` qui `cpu_reset()` puis relâche le cœur secondaire. `run_tiger.sh` démarre
+Tiger sur **2 cœurs MTTCG** par défaut ; OS 9 reste mono-cœur (SMP buggé côté invité).
 
 
 
@@ -50,8 +52,10 @@ MTTCG** par défaut. OS 9 reste mono-cœur (SMP buggé côté invité).
    **retombe sur le paquet distro** s'il est absent ; `QEMU_BIN=/chemin/qemu-system-ppc` force
    un binaire précis. En revanche `run_tiger.sh` / `run_os9.sh` **exigent le build source** :
    son (Screamer), OpenBIOS unifié et `qfb-pci` n'existent pas dans le paquet distro.
-2. **Une image d'installation Tiger PPC que tu possèdes** (ISO/DMG) → à déposer dans `images/`
-   (dossier à créer, gitignoré), nom ajusté dans `config.env` (`INSTALL_MEDIA`). Aucune ROM
+2. **Une image d'installation Tiger PPC que tu possèdes** → à déposer dans `images/`
+   (dossier à créer, gitignoré), nom ajusté dans `config.env` (`INSTALL_MEDIA`). Elle est
+   passée à QEMU en `format=raw` : un ISO convient tel quel, un **DMG compressé (UDIF) doit
+   d'abord être converti** (`dmg2img`, ou `hdiutil convert -format UDRO` côté Mac). Aucune ROM
    Apple nécessaire : OpenBIOS (fourni avec QEMU) suffit à booter.
 3. Pour Mac OS 9 : **ton CD 9.2.2** dans `disks/os9-install.iso`, ou
    `OS9_CD=/chemin/os9.iso ./run_os9.sh install`.
@@ -227,11 +231,10 @@ l'optimisation du JIT, avec le même protocole A/B qu'au-dessus.
 | `run_tiger.sh` / `run_os9.sh` | lanceurs d'usage quotidien (SMP, son, manette, partage, QFB) |
 | `mount` / `add-pad` | CD à chaud dans OS 9 ; enregistrement d'une manette dans la règle udev |
 | `frontend/` | frontend Dear ImGui embarquant l'affichage QEMU via D-Bus (`frontend/README.md`) |
-| `patches/qfb/` | device QEMU `qfb-pci` + câblage meson/Kconfig |
-| `patches/smp-mac99/` | SMP mac99 (BALATON Zoltan) + OpenBIOS unifié SMP/Screamer |
-| `patches/0*.patch` | optimisations TCG tentées puis revertées, gardées pour référence |
+| `patches/` | patches QEMU et firmware OpenBIOS. Ce qui est appliqué vs. ce qui n'est là que pour référence : `patches/README.md` |
 | `kext/POMPPCQFB/` | pilote Tiger du framebuffer QFB (`kext/POMPPCQFB/README.md`) |
 | `tests/qfb_smoke.py` | test de bout en bout du device QFB, sans invité |
 | `docs/gpu-tiger-4060ti.md` | étude GPU : passthrough, paravirtualisation, plan par phases |
 | `pack/` | règle udev pour le passthrough manette |
+| `disks/extras/` | petits pilotes tiers pour OS 9 (virtio, tablette USB) — `disks/extras/README.md` |
 | `disks/`, `images/`, `shared/`, `bench/` | données locales, gitignorées (sauf `disks/extras/`) |
