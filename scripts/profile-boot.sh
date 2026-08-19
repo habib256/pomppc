@@ -9,6 +9,7 @@ DUR="${1:-55}"
 
 SCR="${POMPPC_SCRATCH:-$ROOT/.run}"; mkdir -p "$SCR"
 MON="$SCR/mon.sock"; rm -f "$MON"
+mkdir -p "$ROOT/bench"          # gitignoré : absent d'un clone neuf
 DATA="$ROOT/bench/perf.data"
 BOOTDEV='hd:10,\System\Library\CoreServices\BootX'
 
@@ -29,7 +30,7 @@ echo "PID qemu=$QPID — perf record ${DUR}s (tout le boot)…"
 perf record -g --call-graph dwarf -F 400 -o "$DATA" -p "$QPID" -- sleep "$DUR" 2>&1 | tail -3
 
 echo "--- arrêt VM ---"
-python3 "$SCR/moncmd.py" "$MON" "quit" >/dev/null 2>&1 || true
+python3 "$ROOT/scripts/moncmd.py" "$MON" "quit" >/dev/null 2>&1 || true
 
 echo
 echo "=== TOP fonctions hôte (self) ==="

@@ -13,7 +13,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MON="${POMPPC_SCRATCH:-$ROOT/.run}/os9-mon.sock"
 CDDIR="$ROOT/disks/cdr"
 
-hmp(){ python3 "$ROOT/.run/moncmd.py" "$MON" "$1" 2>/dev/null; }
+hmp(){ python3 "$ROOT/scripts/moncmd.py" "$MON" "$1" 2>/dev/null; }
 list_imgs(){ find "$CDDIR" "$ROOT/disks" -maxdepth 1 -type f \
     \( -iname '*.cdr' -o -iname '*.iso' -o -iname '*.img' -o -iname '*.toast' \) 2>/dev/null \
     | grep -v '/games\.iso$' | sort; }

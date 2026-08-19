@@ -41,7 +41,7 @@ Détails et protocole : `kext/POMPPCQFB/README.md`.
 
 ## 1. Contexte matériel et logiciel (ce sur quoi on s'appuie)
 
-- Machine émulée : `mac99,via=pmu`, CPU G4, OpenBIOS (build unifié `patches/smp-mac99/openbios-smp-screamer.elf`), QEMU 8.2 distro (`/usr/bin/qemu-system-ppc`) — `vfio-pci`, `ati-vga`, `virtio-gpu-pci` sont **présents** dans ce binaire (`qemu-system-ppc -device help`).
+- Machine émulée : `mac99,via=pmu`, CPU G4, OpenBIOS (build unifié `patches/smp-mac99/openbios-smp-screamer.elf`), QEMU **9.2.0 reconstruit depuis les sources** (`scripts/build_qemu_qfb.sh` → `$HOME/src/qemu/build/`, le binaire par défaut de `config.env`) — `vfio-pci`, `ati-vga`, `virtio-gpu-pci` y sont **présents** (`qemu-system-ppc -device help`). Le paquet distro (8.2) les a aussi, mais lui manque le Screamer, l'OpenBIOS unifié et `qfb-pci`.
 - Affichage actuel : device `VGA` (std) + `qemu_vga.ndrv` chargé par OpenBIOS → l'invité passe par `IONDRVFramebuffer`, ce qui explique le catalogue de modes figé (1920x1080 OK, 1440x900 retombe en 800x600 — cf. commentaires de `run_tiger.sh`).
 - Frontend : `frontend/` (CMake + ImGui + `QemuBridge` GDBus, `-display dbus,p2p=on`, fast-path `Unix.Map`/mmap déjà prouvé). C'est **là** que la 4060 Ti travaille aujourd'hui, et là qu'elle travaillera demain.
 - Côté invité, Tiger PPC embarque `NVDAResmanPPC.kext` + `NVDANV40HalPPC.kext` (NV4x/G70 = GeForce 6/7, Quadro FX 4500) et `ATIRage128` / `ATIRadeon`. C'est le plafond absolu du support NVIDIA sur PPC : **cinq générations avant Ada**.
@@ -119,15 +119,20 @@ console, ce qui est exactement le partage des rôles voulu (§4.4).
 
 ### 4.3 Le kext `POMPPCQFB.kext` (invité)
 
-Arborescence :
+> Cette section était la **spécification écrite avant le code**. Le kext existe désormais
+> (`kext/POMPPCQFB/`) : en cas de désaccord, **c'est la source qui fait foi**, et le tableau
+> de registres de référence est `kext/POMPPCQFB/qfb_regs.h`. Les identifiants ci-dessous ont
+> été réalignés sur l'implémentation ; les « points d'implémentation » gardent leur valeur de
+> notes de conception, avec les écarts assumés signalés.
+
+Arborescence réelle (pas de sous-dossier `src/`) :
 
 ```
-POMPPCQFB.kext/Contents/
-  Info.plist
-  MacOS/POMPPCFB          (mach-o ppc, kmod)
-src/
-  POMPPCFB.h  POMPPCFB.cpp        (sous-classe IOFramebuffer)
-  POMPPCFBRegs.h                  (le tableau §4.2, partagé avec le device QEMU)
+kext/POMPPCQFB/
+  POMPPCQFB.h  POMPPCQFB.cpp     (sous-classe IOFramebuffer)
+  qfb_regs.h                     (le tableau §4.2, miroir du device QEMU)
+  Info.plist  Makefile  go.sh
+→ produit POMPPCQFB.kext/Contents/{Info.plist,MacOS/POMPPCQFB}
 ```
 
 `Info.plist` — points sensibles pour 10.4 (Darwin 8) :
@@ -142,65 +147,57 @@ src/
   <key>com.apple.iokit.IOGraphicsFamily</key> <string>1.4</string>
 </dict>
 <key>IOKitPersonalities</key>
-<dict><key>POMPPCFB</key><dict>
-  <key>CFBundleIdentifier</key>   <string>net.pomppc.POMPPCFB</string>
-  <key>IOClass</key>              <string>POMPPCFB</string>
+<dict><key>POMPPCQFB</key><dict>
+  <key>CFBundleIdentifier</key>   <string>net.pomppc.POMPPCQFB</string>
+  <key>IOClass</key>              <string>POMPPCQFB</string>
   <key>IOProviderClass</key>      <string>IOPCIDevice</string>
-  <key>IOPCIPrimaryMatch</key>    <string>0x0f011b36</string>
+  <key>IOPCIPrimaryMatch</key>    <string>0x0fb11234</string>
   <key>IOProbeScore</key>         <integer>60000</integer>
 </dict></dict>
 ```
 
-Squelette (méthodes `IOFramebuffer` à fournir — les deux premières sont pures virtuelles) :
+`IOPCIPrimaryMatch` attend `0xDDDDVVVV` — **device dans les 16 bits de poids fort, vendor dans
+ceux de poids faible**. D'où `0x0fb11234` : device `0x0fb1` (`PCI_DEVICE_ID_QEMU_QFB`) sous le
+vendor QEMU `0x1234`, tous deux définis dans `patches/qfb/qfb-pci.c`. Inverser les deux moitiés
+est la façon habituelle de se retrouver avec un kext qui charge sans jamais matcher.
 
-```cpp
-class POMPPCQFB : public IOFramebuffer {
-    OSDeclareDefaultStructors(POMPPCFB)
-public:
-    // cycle de vie
-    virtual bool     start(IOService *provider);
-    virtual void     stop(IOService *provider);
-    virtual IOReturn enableController(void);            // init device, lecture catalogue
-
-    // obligatoires
-    virtual IODeviceMemory *getApertureRange(IOPixelAperture aperture);
-    virtual const char     *getPixelFormats(void);      // IO32BitDirectPixels "\0" ...
-    virtual IOItemCount     getDisplayModeCount(void);
-    virtual IOReturn        getDisplayModes(IODisplayModeID *allModes);
-    virtual IOReturn        getInformationForDisplayMode(IODisplayModeID, IODisplayModeInformation *);
-    virtual UInt64          getPixelFormatsForDisplayMode(IODisplayModeID, IOIndex depth);
-    virtual IOReturn        getPixelInformation(IODisplayModeID, IOIndex depth,
-                                               IOPixelAperture, IOPixelInformation *);
-    virtual IOReturn        getCurrentDisplayMode(IODisplayModeID *, IOIndex *depth);
-    virtual IOReturn        setDisplayMode(IODisplayModeID, IOIndex depth);
-
-    // fortement conseillées
-    virtual IODeviceMemory *getVRAMRange(void);
-    virtual IOItemCount     getConnectionCount(void);
-    virtual IOReturn        connectFlags(IOIndex, IODisplayModeID, IOOptionBits *flags);
-    virtual IOReturn        getAttribute(IOSelect, uintptr_t *);
-    virtual IOReturn        setAttribute(IOSelect, uintptr_t);
-    virtual IOReturn        getAttributeForConnection(IOIndex, IOSelect, uintptr_t *);
-    virtual IOReturn        setAttributeForConnection(IOIndex, IOSelect, uintptr_t);
-    virtual IOReturn        setCLUTWithEntries(IOColorEntry *, UInt32 index, UInt32 n, IOOptionBits);
-    virtual IOReturn        setGammaTable(UInt32 chan, UInt32 count, UInt32 width, void *data);
-    virtual bool            hasDDCConnect(IOIndex);     // false d'abord
-    virtual IOReturn        setCursorImage(void *img);
-    virtual IOReturn        setCursorState(SInt32 x, SInt32 y, bool visible);
-    virtual IOReturn        registerForInterruptType(IOSelect, IOFBInterruptProc, OSObject *,
-                                                    void *, void **);
-};
-```
+**Attention ABI 10.4** : les attributs `IOFramebuffer` se passent en `UInt32 *` sur Darwin 8 ;
+`uintptr_t` n'arrive qu'en 10.5. Copier une signature d'un exemple moderne empêche le
+`start()` d'être appelé. Voir l'en-tête de `POMPPCQFB.h`, qui liste les méthodes réellement
+implémentées.
 
 Points d'implémentation qui font gagner ou perdre une semaine :
 
-1. **Mapping** : `provider->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0)` → `map()` pour les registres ; `…BaseAddress1` → renvoyé tel quel par `getApertureRange()`/`getVRAMRange()`. `IOFramebuffer` mappera l'ouverture pour le WindowServer avec le cache-mode qu'on annonce dans `getPixelInformation` (`kIOMapWriteCombineCache` inadapté sur PPC ; rester en **cacheable write-back** — la région est de la RAM côté QEMU et le dirty-logging fonctionne malgré le cache, mais valider visuellement des zones « rémanentes »).
-2. **Catalogue de modes** : lire `MODE_COUNT` dans `enableController()`, construire un tableau ; `IODisplayModeID` = index+1 (jamais 0). Renseigner `IODisplayModeInformation.flags` avec `kDisplayModeValidFlag | kDisplayModeSafeFlag` (+ `kDisplayModeDefaultFlag` sur un seul).
-3. **`getPixelInformation`** : `bytesPerRow` = `FB_STRIDE` relu **après** application du mode, `bitsPerPixel` 32, `componentCount` 3, masques `0xFF0000/0x00FF00/0x0000FF`, `pixelType = kIORGBDirectPixels`, `pixelFormat = IO32BitDirectPixels`. Toute incohérence ici = bureau strié ou panic du WindowServer.
-4. **Ordre PPC 32 bpp** : l'invité est big-endian, la mémoire contient `xRGB` ; côté QEMU déclarer le format `PIXMAN_x8r8g8b8` en BE. Se tromper d'ordre est le bug n°1 de ce genre de driver (canaux permutés / bleu-rouge inversés).
-5. **Curseur** : `setCursorImage` reçoit un `IOHardwareCursorDescriptor` à remplir via `convertCursorImage()` (helper d'`IOFramebuffer`) vers un buffer 32 bits ARGB alloué dans la VRAM ; publier `kIOFBHardwareCursorAttribute` = 1 dans `getAttribute`, sinon 10.4 garde le curseur logiciel.
-6. **Interruptions** : implémenter au minimum `kIOFBVBLInterruptType` (via `registerForInterruptType`) et un `IOFilterInterruptEventSource` sur l'INTx du device. Si `vblank=off`, répondre `kIOReturnUnsupported` proprement — ne pas simuler avec un timer non déclaré.
-7. **Pas de 64 bits** : `IOPhysicalAddress` fait 32 bits sur PPC 10.4 (à confirmer dans le SDK 10.4 avant d'écrire du code qui suppose autre chose).
+1. **Mapping** : `provider->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0)` → **VRAM**
+   (BAR0), renvoyée par `getApertureRange()`/`getVRAMRange()` ; `…BaseAddress1` → les
+   registres, qu'on `map()`. `IOFramebuffer` mappera l'ouverture pour le WindowServer avec le
+   cache-mode annoncé dans `getPixelInformation` (`kIOMapWriteCombineCache` inadapté sur PPC ;
+   rester en **cacheable write-back** — la région est de la RAM côté QEMU et le dirty-logging
+   fonctionne malgré le cache, mais valider visuellement des zones « rémanentes »).
+2. **Catalogue de modes** : le protocole qfb1 **n'a pas de registre `MODE_COUNT`** — il ne
+   publie que le mode courant et le mode demandé sur la ligne de commande
+   (`CUSTOM_WIDTH`/`HEIGHT`/`DEPTH`). Le kext porte donc un catalogue fixe (640×480 →
+   1920×1200), filtré par ce qui tient dans les 32 Mio de VRAM, auquel s'ajoute le mode
+   `CUSTOM_*` s'il n'y figure pas déjà. `IODisplayModeID` = index+1 (jamais 0). Renseigner
+   `IODisplayModeInformation.flags` avec `kDisplayModeValidFlag | kDisplayModeSafeFlag`
+   (+ `kDisplayModeDefaultFlag` sur un seul).
+3. **`getPixelInformation`** : `bytesPerRow` = `QFB_MODE_STRIDE` relu **après** application du
+   mode, `bitsPerPixel` 32, `componentCount` 3, masques `0xFF0000/0x00FF00/0x0000FF`,
+   `pixelType = kIORGBDirectPixels`, `pixelFormat = IO32BitDirectPixels`. Toute incohérence
+   ici = bureau strié ou panic du WindowServer.
+4. **Ordre PPC 32 bpp** : l'invité est big-endian, la mémoire contient `xRGB` ; côté QEMU
+   déclarer le format `PIXMAN_x8r8g8b8` en BE. Se tromper d'ordre est le bug n°1 de ce genre
+   de driver (canaux permutés / bleu-rouge inversés).
+5. **Curseur : non implémenté, et c'est définitif** — le protocole qfb1 n'a aucun registre de
+   curseur (§4.6). Le kext répond donc `kIOHardwareCursorAttribute` = 0 et laisse 10.4
+   compositer un curseur logiciel. Ne pas ressortir `setCursorImage`/`convertCursorImage`
+   sans avoir d'abord étendu le device — ce qui casserait la compatibilité avec le `nubus-qfb`
+   d'origine.
+6. **Interruptions** : `kIOFBVBLInterruptType` via `registerForInterruptType`, servi par un
+   `IOFilterInterruptEventSource` sur l'INTx du device. Le kext ne démasque `IRQ_MASK` que
+   lorsqu'un client s'abonne (`setInterruptState`) : une IRQ 60 Hz coûte cher sous TCG.
+7. **Pas de 64 bits** : `IOPhysicalAddress` fait 32 bits sur PPC 10.4 (à confirmer dans le
+   SDK 10.4 avant d'écrire du code qui suppose autre chose).
 
 ### 4.4 Boot et cohabitation avec la console Open Firmware
 
@@ -257,8 +254,8 @@ sudo touch /System/Library/Extensions && sudo kextcache -e -v # régénère Exte
 
 ```sh
 kextstat | grep -i pomppc
-ioreg -l -w0 | grep -iE "POMPPCFB|IOFramebuffer|display"     # nub trouvé ? matché ?
-ioreg -c IOPCIDevice -l | grep -A5 -i 1b36                    # BARs mappés
+ioreg -l -w0 | grep -iE "POMPPCQFB|IOFramebuffer|display"    # nub trouvé ? matché ?
+ioreg -c IOPCIDevice -l | grep -A5 -i 1234                    # BARs mappés (0x1234:0x0fb1)
 ```
 
 ---
@@ -276,14 +273,8 @@ ioreg -c IOPCIDevice -l | grep -A5 -i 1b36                    # BARs mappés
 
 ### 6.1 Commandes exactes de la phase P0
 
-`run_tiger.sh` n'a pas encore de crochet pour ajouter des devices : commencer par cette
-retouche d'une ligne (utile pour tout le reste du projet), juste avant l'appel à `"$BIN"` :
-
-```sh
-# run_tiger.sh — pass-through d'arguments QEMU ad hoc
-read -r -a USER_EXTRA <<< "${EXTRA_ARGS:-}"
-#   ... puis ajouter "${USER_EXTRA[@]}" à la ligne de commande QEMU
-```
+`run_tiger.sh` expose le crochet nécessaire : `EXTRA_ARGS` est éclaté en tableau
+(`read -r -a USER_EXTRA`) et passé tel quel à QEMU. Rien à retoucher.
 
 ```sh
 # (a) Tiger voit-il l'ati-vga émulée ? (ajoutée en second écran, disque jetable)
@@ -296,7 +287,9 @@ SNAPSHOT=1 EXTRA_ARGS="-device ati-vga,model=rv100" ./run_tiger.sh
 ls /System/Library/Extensions | grep -iE "nvda|ati|IOGraphics|IONDRV"
 
 # (c) baseline chiffrée, protocole déterministe déjà validé sur ce projet
-SNAPSHOT=1 NONET=1 ./run_tiger.sh    # pas de fsck, chrono comparable — résultats dans bench/
+SNAPSHOT=1 ./run_tiger.sh            # pas de fsck, chrono comparable (réseau déjà off par défaut)
+#   pour un chiffre exploitable, préférer l'outil de mesure :
+EXTRA_ARGS="-snapshot" scripts/measure-boot.sh   # -> bench/last-boot.txt
 ```
 
 Total réaliste pour un affichage paravirtuel propre et exploité par la 4060 Ti : **4 à 6 semaines** de travail effectif, P1–P4.
@@ -313,7 +306,7 @@ Total réaliste pour un affichage paravirtuel propre et exploité par la 4060 Ti
 6. **IRQ en TCG** : une IRQ vblank à 60 Hz coûte cher sous TCG mono-cœur ; la rendre désactivable dès le début (`vblank=off`) et la mesurer.
 7. **SMP** : le kext doit être propre en verrouillage (`IOSimpleLock` autour des registres) — le projet tourne à 2 cœurs MTTCG par défaut.
 8. **Ne pas déclarer `kIOFBHardwareCursorAttribute`** avant que le curseur matériel fonctionne réellement : sinon curseur invisible, régression difficile à diagnostiquer.
-9. **Régression silencieuse du chrono de boot** : garder le protocole déjà établi (`SNAPSHOT=1 NONET=1`) pour comparer les temps de boot avant/après ajout du device.
+9. **Régression silencieuse du chrono de boot** : garder le protocole déjà établi (`EXTRA_ARGS="-snapshot" scripts/measure-boot.sh`, hôte au repos, runs interleavés) pour comparer les temps de boot avant/après ajout du device.
 
 ---
 

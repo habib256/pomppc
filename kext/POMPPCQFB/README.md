@@ -74,6 +74,14 @@ make                      # → POMPPCQFB.kext
 sudo make load            # kextload -t : vérifie dépendances et ABI
 ```
 
+Variante sans Finder ni Terminal, quand l'invité ne démarre plus qu'en single-user (`boot-args=-s`) :
+`go.sh` fait le diagnostic de toolchain, la compilation et l'installation en une passe, avec un
+journal dans `/var/log/pomppcqfb-build.log`.
+
+```sh
+mkdir /c ; mount_cd9660 /dev/disk1 /c ; sh /c/go.sh
+```
+
 **Toujours travailler avec `SNAPSHOT=1`** pendant la mise au point : un kext
 graphique fautif provoque une boucle de panic. Pour récupérer un disque
 persistant abîmé : démarrer avec `-prom-env 'boot-args=-s'` puis sortir le kext
@@ -112,6 +120,7 @@ l'écran principal.
 | `POMPPCQFB.h` / `.cpp` | la sous-classe `IOFramebuffer` |
 | `Info.plist` | appariement PCI `0x1234:0x0fb1`, dépendances IOKit |
 | `Makefile` | build/install/load dans l'invité (gcc 4.0) |
+| `go.sh` | build + install en une passe, utilisable en single-user depuis le CD |
 
 ## Licence et crédits
 

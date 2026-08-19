@@ -5,12 +5,20 @@
 #                           #        sinon boote le CD 9.2.2 en live (bureau direct)
 #   ./run_os9.sh install    # force le boot CD (pour (ré)installer sur le disque)
 #   ./run_os9.sh disk       # force le boot du disque installé
-#   CDR=USB_Tablet.iso ./run_os9.sh   # monte le CD de l'extension souris absolue
-#   TABLET=1 ./run_os9.sh   # souris absolue/fluide (via=cuda + usb-tablet ; extension requise)
+#   OS9_CD=/chemin/os9.iso ./run_os9.sh install   # CD d'install ailleurs que disks/
+#   CDR=<image> ./run_os9.sh          # monte une image CD de disks/cdr/ (ou chemin absolu)
+#   TABLET=1 ./run_os9.sh   # souris absolue via usb-tablet (via=cuda + extension à installer
+#                           # d'abord — voir disks/extras/README.md ; INUTILE par défaut :
+#                           # le partage virtio donne déjà la souris absolue en via=pmu)
 #   (dossier partagé ./shared monté PAR DÉFAUT au boot disque, volume 'Shared' + souris absolue virtio)
 #   SHARE=/chemin ./run_os9.sh  # partage un autre dossier hôte à la place de ./shared
 #   NOSHARE=1 ./run_os9.sh  # coupe le partage/virtio (boot disque nu)
 #   (manette USB auto-passthrough si branchée + accessible ; NOPAD=1 pour couper)
+#   NOSOUND=1 ./run_os9.sh  # coupe l'audio (repli sur l'OpenBIOS stock)
+#   SNAPSHOT=1 ./run_os9.sh # disque jetable (writes annulés -> boot toujours propre)
+#
+# Piloté par le frontend ImGui : DBUS_DISPLAY=1 (sortie -display dbus,p2p=on) et
+# QMP_SOCK=<chemin> (socket QMP). POMPPC_SCRATCH déplace .run/ (socket moniteur).
 #
 # OS 9 = mono-cœur (SMP OS 9 buggé). Fenêtre GTK ; ferme-la pour quitter.
 # Auto-boot activé : aucune invite OpenFirmware. (Secours '0 >' : boot cd:,\:tbxi)
@@ -18,15 +26,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$ROOT/config.env"
 
-OS9_DISK="$ROOT/disks/os9.qcow2"
-OS9_CD="/home/gistarcade/src/pom68k/input/MAC_OS_9-2-2_693-4669_0.ISO"
+# OS9_DISK / OS9_CD viennent de config.env (surchargeables par l'environnement).
 RAM=512
 MODE="${1:-auto}"
 
 # --- Souris absolue/fluide via USB tablet (extension invité kanjitalk755) ---
-# L'extension USBTabletINIT EXIGE via=cuda (elle plante sous via=pmu). Installe
-# d'abord l'extension : CDR=USB_Tablet.iso ./run_os9.sh  (StuffIt Expander -> Dossier Système),
-# puis lance en mode tablette : TABLET=1 ./run_os9.sh
+# Voie SECONDAIRE : le partage virtio ci-dessous fournit déjà virtio-tablet-pci, donc la
+# souris absolue en via=pmu sans rien installer. TABLET=1 n'a d'intérêt que si tu veux
+# spécifiquement usb-tablet (ex. NOSHARE=1).
+# L'extension USBTabletINIT EXIGE via=cuda (elle plante sous via=pmu) et doit être installée
+# à la main dans le Dossier Système. Le dépôt fournit l'archive .sit, pas un CD prêt à
+# monter : recette de fabrication du CD dans disks/extras/README.md.
 VIA=pmu; TABLET_DEV=()
 if [ -n "${TABLET:-}" ]; then
   VIA=cuda
@@ -36,11 +46,13 @@ fi
 export DISPLAY="${DISPLAY:-:1}"
 SCR="${POMPPC_SCRATCH:-$ROOT/.run}"; mkdir -p "$SCR"
 MON="$SCR/os9-mon.sock"; rm -f "$MON"
-[ -f "$OS9_DISK" ] || qemu-img create -f qcow2 "$OS9_DISK" 8G >/dev/null
+[ -f "$OS9_DISK" ] || qemu-img create -f qcow2 "$OS9_DISK" "$OS9_DISK_SIZE" >/dev/null
 
 # --- SON via le build UNIFIÉ (QEMU 9.2 + device Screamer porté + OpenBIOS fusionné) ---
-# Un seul binaire pour OS 9 ET Tiger. L'OpenBIOS fusionné publie le nœud audio ;
-# il faut le passer explicitement (l'OpenBIOS stock du 9.2 n'a pas le screamer).
+# Un seul binaire pour OS 9 ET Tiger. Deux moitiés nécessaires : l'OpenBIOS fusionné
+# publie le nœud audio (il faut le passer explicitement, l'OpenBIOS stock du 9.2 ne
+# l'a pas), et le binaire QEMU doit avoir la classe 'screamer'. Cette dernière n'est
+# PAS produite par scripts/build_qemu_qfb.sh -> NOSOUND=1 avec ce build.
 BIN="$QEMU_BIN"
 UNI_OBIOS="$ROOT/patches/smp-mac99/openbios-smp-screamer.elf"
 BIOS_ARGS=()
@@ -138,7 +150,9 @@ if [ "$BOOT" = disk ]; then
   [ -f "$GAMES_ISO" ] && echo "  CD 'OS9_GAMES' monté → décompresse les jeux avec StuffIt Expander"
   echo "  lecteur 'gamecd' prêt → ./mount <nom>  pour insérer un CD à chaud"
 else
-  [ -f "$OS9_CD" ] || { echo "⚠ CD introuvable : $OS9_CD" >&2; exit 1; }
+  [ -f "$OS9_CD" ] || { echo "⚠ CD d’installation OS 9 introuvable : $OS9_CD" >&2
+                        echo "   dépose ton ISO 9.2.2 dans disks/ sous ce nom, ou : OS9_CD=/chemin/os9.iso ./run_os9.sh $MODE" >&2
+                        exit 1; }
   DRIVES+=(-drive "file=$OS9_CD,format=raw,media=cdrom")
   BOOTDEV='cd:,\\:tbxi'
   if [ "$MODE" = install ]; then

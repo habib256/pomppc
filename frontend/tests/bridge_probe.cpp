@@ -12,7 +12,12 @@
 namespace fs = std::filesystem;
 
 int main(int argc, char** argv) {
-    std::string launcher = (argc > 1) ? argv[1] : "../../run_tiger.sh";
+    // Default launcher is resolved from the *binary* (build/ → repo root), like
+    // main.cpp does, so the probe works from any working directory. An explicit
+    // argument is still taken as given (relative to the cwd).
+    fs::path exeDir = fs::weakly_canonical(fs::path(argv[0])).parent_path();
+    std::string launcher =
+        (argc > 1) ? argv[1] : (exeDir / ".." / ".." / "run_tiger.sh").string();
     launcher = fs::weakly_canonical(launcher).string();
     std::string root = fs::path(launcher).parent_path().string();
     int timeoutSec = (argc > 2) ? atoi(argv[2]) : 40;

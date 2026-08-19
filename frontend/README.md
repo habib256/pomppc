@@ -23,8 +23,8 @@ framebuffer under a mutex.
 ## Build
 
 ```sh
-./setup.sh                 # fetch Dear ImGui into ./imgui
-cd build && cmake .. && make -j
+./setup.sh                                  # fetch Dear ImGui into ./imgui
+cmake -S . -B build && cmake --build build -j
 ```
 
 Requires `gio-unix-2.0`, `glfw3`, OpenGL, and `gdbus-codegen` (glib dev tools).
@@ -34,12 +34,26 @@ preprocessed `dbus/dbus-display1.xml` (copied from our QEMU 9.2 tree).
 ## Run
 
 ```sh
-./build/pomppc                     # boots Tiger (../../run_tiger.sh) by default
-./build/pomppc ../../run_os9.sh    # boot Mac OS 9 instead
-RES=1024x768x32 ./build/pomppc     # pick the guest resolution
+../run_frontend.sh                 # from anywhere in the repo (same binary, resolved path)
+./build/pomppc                     # boots Mac OS 9 (../run_os9.sh) by default
+./build/pomppc ../run_tiger.sh     # boot Mac OS X 10.4 instead
+RES=1024x768x32 ./build/pomppc     # pick the guest resolution (SMP=N works too)
 ```
 
-Click the **Écran** window once to route the keyboard to the guest.
+The *default* launcher is derived from the binary's own location (`build/` → repo root), so it
+works from any working directory; an explicit argument is taken relative to your cwd. `RES` and
+`SMP` are forwarded to whichever run script is launched, and the **OS** menu switches guests at
+runtime (each switch relaunches QEMU).
+
+The keyboard is routed to the guest from the start — toggle it with
+**Machine ▸ Clavier → invité** when you need to type into an ImGui field.
+
+The headless probe defaults to the *other* guest, and always runs `-snapshot`:
+
+```sh
+./build/bridge_probe               # run_tiger.sh, waits for the first live Scanout → PPM
+./build/bridge_probe ../run_os9.sh 60      # explicit launcher + timeout (s)
+```
 
 ## Status
 
@@ -69,11 +83,8 @@ Click the **Écran** window once to route the keyboard to the guest.
     lack — so it's a correct, verified peer that stays latent until a guest
     agent (or another D-Bus peer) provides content.
   - ✅ **Ludothèque** (Jeux ▸ Ludothèque): a window listing the game CD images
-    in `disks/cdr/`; click one to hot-insert it into the `gamecd` drive
+    in `disks/cdr/` and `disks/`; click one to hot-insert it into the `gamecd` drive
     (`blockdev-change-medium`, verified on a live OS 9), with an eject button
     and the currently-mounted title. `games.iso` (the auto-mounted master) is
     excluded.
   - Remaining: OS profiles.
-
-Startup boots **Mac OS 9 by default**; the **OS** menu switches to Mac OS X
-10.4 (Tiger) and back (each switch relaunches QEMU).

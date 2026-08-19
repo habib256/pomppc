@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time: fetch Dear ImGui into ./imgui and create ./build.
+# One-time: fetch Dear ImGui into ./imgui (CMake creates the build dir itself).
 # Mirrors pom68k/setup_imgui.sh. ImGui is not vendored in git (see .gitignore).
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,5 +20,4 @@ if [ ! -f imgui/imgui.cpp ]; then
 else
     echo "imgui/ already present."
 fi
-mkdir -p build
-echo "Done. Next: cd build && cmake .. && make -j"
+echo "Done. Next: cmake -S . -B build && cmake --build build -j"
