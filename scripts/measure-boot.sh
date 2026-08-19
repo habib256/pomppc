@@ -18,7 +18,7 @@ SMP_N="${SMP_N:-$SMP}"
 read -r -a EXTRA <<< "${EXTRA_ARGS:-}"
 echo "### config: SMP=$SMP_N  extra='${EXTRA_ARGS:-}'"
 
-qmon(){ python3 "$SCR/moncmd.py" "$MON" "$1" 2>/dev/null; }
+qmon(){ python3 "$ROOT/scripts/moncmd.py" "$MON" "$1" 2>/dev/null; }
 meancolor(){ # -> "R G B" moyen d'un ppm
   convert "$1" -resize 1x1 -format "%[fx:int(255*r)] %[fx:int(255*g)] %[fx:int(255*b)]" info:
 }
@@ -71,5 +71,5 @@ else
   echo "=== écran bleu non détecté (voir bench/frames/) | CPU_qemu=${CPU_T}s ==="
 fi
 # couper la VM (ne pas laisser tourner et polluer les mesures suivantes)
-python3 "$SCR/moncmd.py" "$MON" "quit" >/dev/null 2>&1 || true
+python3 "$ROOT/scripts/moncmd.py" "$MON" "quit" >/dev/null 2>&1 || true
 echo "Frames: $ROOT/bench/frames/"

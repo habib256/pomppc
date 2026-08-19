@@ -41,7 +41,7 @@ Détails et protocole : `kext/POMPPCQFB/README.md`.
 
 ## 1. Contexte matériel et logiciel (ce sur quoi on s'appuie)
 
-- Machine émulée : `mac99,via=pmu`, CPU G4, OpenBIOS (build unifié `patches/smp-mac99/openbios-smp-screamer.elf`), QEMU 8.2 distro (`/usr/bin/qemu-system-ppc`) — `vfio-pci`, `ati-vga`, `virtio-gpu-pci` sont **présents** dans ce binaire (`qemu-system-ppc -device help`).
+- Machine émulée : `mac99,via=pmu`, CPU G4, OpenBIOS (build unifié `patches/smp-mac99/openbios-smp-screamer.elf`), QEMU **9.2.0 reconstruit depuis les sources** (`scripts/build_qemu_qfb.sh` → `$HOME/src/qemu/build/`, le binaire par défaut de `config.env`) — `vfio-pci`, `ati-vga`, `virtio-gpu-pci` y sont **présents** (`qemu-system-ppc -device help`). Le paquet distro (8.2) les a aussi, mais lui manque le Screamer, l'OpenBIOS unifié et `qfb-pci`.
 - Affichage actuel : device `VGA` (std) + `qemu_vga.ndrv` chargé par OpenBIOS → l'invité passe par `IONDRVFramebuffer`, ce qui explique le catalogue de modes figé (1920x1080 OK, 1440x900 retombe en 800x600 — cf. commentaires de `run_tiger.sh`).
 - Frontend : `frontend/` (CMake + ImGui + `QemuBridge` GDBus, `-display dbus,p2p=on`, fast-path `Unix.Map`/mmap déjà prouvé). C'est **là** que la 4060 Ti travaille aujourd'hui, et là qu'elle travaillera demain.
 - Côté invité, Tiger PPC embarque `NVDAResmanPPC.kext` + `NVDANV40HalPPC.kext` (NV4x/G70 = GeForce 6/7, Quadro FX 4500) et `ATIRage128` / `ATIRadeon`. C'est le plafond absolu du support NVIDIA sur PPC : **cinq générations avant Ada**.
@@ -257,8 +257,8 @@ sudo touch /System/Library/Extensions && sudo kextcache -e -v # régénère Exte
 
 ```sh
 kextstat | grep -i pomppc
-ioreg -l -w0 | grep -iE "POMPPCFB|IOFramebuffer|display"     # nub trouvé ? matché ?
-ioreg -c IOPCIDevice -l | grep -A5 -i 1b36                    # BARs mappés
+ioreg -l -w0 | grep -iE "POMPPCQFB|IOFramebuffer|display"    # nub trouvé ? matché ?
+ioreg -c IOPCIDevice -l | grep -A5 -i 1234                    # BARs mappés (0x1234:0x0fb1)
 ```
 
 ---
@@ -276,14 +276,8 @@ ioreg -c IOPCIDevice -l | grep -A5 -i 1b36                    # BARs mappés
 
 ### 6.1 Commandes exactes de la phase P0
 
-`run_tiger.sh` n'a pas encore de crochet pour ajouter des devices : commencer par cette
-retouche d'une ligne (utile pour tout le reste du projet), juste avant l'appel à `"$BIN"` :
-
-```sh
-# run_tiger.sh — pass-through d'arguments QEMU ad hoc
-read -r -a USER_EXTRA <<< "${EXTRA_ARGS:-}"
-#   ... puis ajouter "${USER_EXTRA[@]}" à la ligne de commande QEMU
-```
+`run_tiger.sh` expose le crochet nécessaire : `EXTRA_ARGS` est éclaté en tableau
+(`read -r -a USER_EXTRA`) et passé tel quel à QEMU. Rien à retoucher.
 
 ```sh
 # (a) Tiger voit-il l'ati-vga émulée ? (ajoutée en second écran, disque jetable)
@@ -296,7 +290,9 @@ SNAPSHOT=1 EXTRA_ARGS="-device ati-vga,model=rv100" ./run_tiger.sh
 ls /System/Library/Extensions | grep -iE "nvda|ati|IOGraphics|IONDRV"
 
 # (c) baseline chiffrée, protocole déterministe déjà validé sur ce projet
-SNAPSHOT=1 NONET=1 ./run_tiger.sh    # pas de fsck, chrono comparable — résultats dans bench/
+SNAPSHOT=1 ./run_tiger.sh            # pas de fsck, chrono comparable (réseau déjà off par défaut)
+#   pour un chiffre exploitable, préférer l'outil de mesure :
+EXTRA_ARGS="-snapshot" scripts/measure-boot.sh   # -> bench/last-boot.txt
 ```
 
 Total réaliste pour un affichage paravirtuel propre et exploité par la 4060 Ti : **4 à 6 semaines** de travail effectif, P1–P4.
@@ -313,7 +309,7 @@ Total réaliste pour un affichage paravirtuel propre et exploité par la 4060 Ti
 6. **IRQ en TCG** : une IRQ vblank à 60 Hz coûte cher sous TCG mono-cœur ; la rendre désactivable dès le début (`vblank=off`) et la mesurer.
 7. **SMP** : le kext doit être propre en verrouillage (`IOSimpleLock` autour des registres) — le projet tourne à 2 cœurs MTTCG par défaut.
 8. **Ne pas déclarer `kIOFBHardwareCursorAttribute`** avant que le curseur matériel fonctionne réellement : sinon curseur invisible, régression difficile à diagnostiquer.
-9. **Régression silencieuse du chrono de boot** : garder le protocole déjà établi (`SNAPSHOT=1 NONET=1`) pour comparer les temps de boot avant/après ajout du device.
+9. **Régression silencieuse du chrono de boot** : garder le protocole déjà établi (`EXTRA_ARGS="-snapshot" scripts/measure-boot.sh`, hôte au repos, runs interleavés) pour comparer les temps de boot avant/après ajout du device.
 
 ---
 

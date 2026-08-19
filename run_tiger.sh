@@ -9,7 +9,13 @@
 #   NET=1 ./run_tiger.sh      # réseau (si ton QEMU a slirp compilé)
 #   HEADLESS=1 ./run_tiger.sh # sans fenêtre (moniteur seul, pour scripting)
 #   QFB=1 ./run_tiger.sh      # + écran paravirtuel qfb-pci (kext POMPPCQFB)
+#   QFB_RES=1280x800          # mode par défaut proposé par l'écran QFB (avec QFB=1)
+#   NOPAD=1 ./run_tiger.sh    # coupe le passthrough de la manette USB
+#   NOCD=1 ./run_tiger.sh     # omet le lecteur CD amovible vide 'gamecd'
 #   EXTRA_ARGS="-device ..."  # arguments QEMU supplémentaires
+#
+# Piloté par le frontend ImGui : DBUS_DISPLAY=1 (sortie -display dbus,p2p=on) et
+# QMP_SOCK=<chemin> (socket QMP). POMPPC_SCRATCH déplace .run/ (socket moniteur).
 #
 # Build UNIFIÉ : QEMU 9.2 (device Screamer porté du fork mcayland) + OpenBIOS
 # fusionné (bring-up SMP balaton + nœud audio screamer). SMP *et* son ensemble.

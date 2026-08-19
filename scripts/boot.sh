@@ -9,6 +9,7 @@ SCR="${POMPPC_SCRATCH:-$ROOT/.run}"
 mkdir -p "$SCR"
 MON="$SCR/mon.sock"; rm -f "$MON"
 
+mkdir -p "$ROOT/bench"          # gitignoré : absent d'un clone neuf
 STAMP="$(date +%Y%m%d-%H%M%S)"
 LOG="$ROOT/bench/run-$STAMP.log"
 date +%s > "$ROOT/bench/.run-start"

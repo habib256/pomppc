@@ -5,12 +5,18 @@
 #                           #        sinon boote le CD 9.2.2 en live (bureau direct)
 #   ./run_os9.sh install    # force le boot CD (pour (ré)installer sur le disque)
 #   ./run_os9.sh disk       # force le boot du disque installé
+#   OS9_CD=/chemin/os9.iso ./run_os9.sh install   # CD d'install ailleurs que disks/
 #   CDR=USB_Tablet.iso ./run_os9.sh   # monte le CD de l'extension souris absolue
 #   TABLET=1 ./run_os9.sh   # souris absolue/fluide (via=cuda + usb-tablet ; extension requise)
 #   (dossier partagé ./shared monté PAR DÉFAUT au boot disque, volume 'Shared' + souris absolue virtio)
 #   SHARE=/chemin ./run_os9.sh  # partage un autre dossier hôte à la place de ./shared
 #   NOSHARE=1 ./run_os9.sh  # coupe le partage/virtio (boot disque nu)
 #   (manette USB auto-passthrough si branchée + accessible ; NOPAD=1 pour couper)
+#   NOSOUND=1 ./run_os9.sh  # coupe l'audio (repli sur l'OpenBIOS stock)
+#   SNAPSHOT=1 ./run_os9.sh # disque jetable (writes annulés -> boot toujours propre)
+#
+# Piloté par le frontend ImGui : DBUS_DISPLAY=1 (sortie -display dbus,p2p=on) et
+# QMP_SOCK=<chemin> (socket QMP). POMPPC_SCRATCH déplace .run/ (socket moniteur).
 #
 # OS 9 = mono-cœur (SMP OS 9 buggé). Fenêtre GTK ; ferme-la pour quitter.
 # Auto-boot activé : aucune invite OpenFirmware. (Secours '0 >' : boot cd:,\:tbxi)
@@ -18,8 +24,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$ROOT/config.env"
 
-OS9_DISK="$ROOT/disks/os9.qcow2"
-OS9_CD="/home/gistarcade/src/pom68k/input/MAC_OS_9-2-2_693-4669_0.ISO"
+# OS9_DISK / OS9_CD viennent de config.env (surchargeables par l'environnement).
 RAM=512
 MODE="${1:-auto}"
 
@@ -36,7 +41,7 @@ fi
 export DISPLAY="${DISPLAY:-:1}"
 SCR="${POMPPC_SCRATCH:-$ROOT/.run}"; mkdir -p "$SCR"
 MON="$SCR/os9-mon.sock"; rm -f "$MON"
-[ -f "$OS9_DISK" ] || qemu-img create -f qcow2 "$OS9_DISK" 8G >/dev/null
+[ -f "$OS9_DISK" ] || qemu-img create -f qcow2 "$OS9_DISK" "$OS9_DISK_SIZE" >/dev/null
 
 # --- SON via le build UNIFIÉ (QEMU 9.2 + device Screamer porté + OpenBIOS fusionné) ---
 # Un seul binaire pour OS 9 ET Tiger. L'OpenBIOS fusionné publie le nœud audio ;
@@ -138,7 +143,9 @@ if [ "$BOOT" = disk ]; then
   [ -f "$GAMES_ISO" ] && echo "  CD 'OS9_GAMES' monté → décompresse les jeux avec StuffIt Expander"
   echo "  lecteur 'gamecd' prêt → ./mount <nom>  pour insérer un CD à chaud"
 else
-  [ -f "$OS9_CD" ] || { echo "⚠ CD introuvable : $OS9_CD" >&2; exit 1; }
+  [ -f "$OS9_CD" ] || { echo "⚠ CD d’installation OS 9 introuvable : $OS9_CD" >&2
+                        echo "   dépose ton ISO 9.2.2 dans disks/ sous ce nom, ou : OS9_CD=/chemin/os9.iso ./run_os9.sh $MODE" >&2
+                        exit 1; }
   DRIVES+=(-drive "file=$OS9_CD,format=raw,media=cdrom")
   BOOTDEV='cd:,\\:tbxi'
   if [ "$MODE" = install ]; then
