@@ -6,12 +6,23 @@
 #   ./scripts/build_qemu_qfb.sh              # build dans ~/src/qemu
 #   QEMU_SRC=/chemin ./scripts/build_qemu_qfb.sh
 #
-# Le binaire produit (build/qemu-system-ppc et ...ppc64) est celui que
+# Le binaire produit (build/qemu-system-ppc et ...ppc64) est à l'emplacement que
 # config.env attend par défaut.
 #
-# NOTE : ce build n'embarque PAS le device audio « screamer » (port maison
-# absent de l'arbre amont) ni slirp (libslirp-dev non installé) : utiliser
-# NOSOUND=1 et NET absent, ou réappliquer le port Screamer par-dessus.
+# ⚠ CE BUILD NE REPRODUIT PAS ENTIÈREMENT LE BINAIRE DE RÉFÉRENCE. Il lui manque :
+#
+#   • le device audio « screamer » — port maison depuis le fork mcayland, absent de
+#     l'arbre amont ET de ce dépôt (rien à réappliquer dans patches/) ;
+#   • slirp (libslirp-dev non installé), donc pas de réseau user-mode.
+#
+# Conséquence concrète : run_tiger.sh et run_os9.sh démarrent avec le SON ACTIF par
+# défaut, donc passent '-global screamer.audiodev=snd0'. Sur un binaire sans la classe
+# screamer, QEMU refuse le global et sort en erreur. Avec ce build, lancer :
+#
+#   NOSOUND=1 ./run_tiger.sh        (et ne pas utiliser NET=1)
+#
+# Pour retrouver le son, il faut réappliquer le port Screamer par-dessus cet arbre —
+# ce que ce script ne sait pas faire.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

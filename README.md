@@ -52,6 +52,14 @@ Tiger sur **2 cœurs MTTCG** par défaut ; OS 9 reste mono-cœur (SMP buggé cô
    **retombe sur le paquet distro** s'il est absent ; `QEMU_BIN=/chemin/qemu-system-ppc` force
    un binaire précis. En revanche `run_tiger.sh` / `run_os9.sh` **exigent le build source** :
    son (Screamer), OpenBIOS unifié et `qfb-pci` n'existent pas dans le paquet distro.
+
+   ⚠️ **`scripts/build_qemu_qfb.sh` ne reproduit pas entièrement le binaire de référence.**
+   Il apporte `qfb-pci` et le SMP mac99, mais **pas le device audio Screamer** (port maison
+   depuis le fork mcayland, absent de l'amont *et* de ce dépôt) ni slirp. Or les deux
+   lanceurs démarrent avec le **son actif par défaut** et passent alors
+   `-global screamer.audiodev=snd0`, que QEMU refuse s'il n'a pas cette classe. Sur un
+   binaire fraîchement construit par ce script, lancer donc :
+   `NOSOUND=1 ./run_tiger.sh` (et sans `NET=1`).
 2. **Une image d'installation Tiger PPC que tu possèdes** → à déposer dans `images/`
    (dossier à créer, gitignoré), nom ajusté dans `config.env` (`INSTALL_MEDIA`). Elle est
    passée à QEMU en `format=raw` : un ISO convient tel quel, un **DMG compressé (UDIF) doit

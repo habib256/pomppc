@@ -19,6 +19,8 @@
 #
 # Build UNIFIÉ : QEMU 9.2 (device Screamer porté du fork mcayland) + OpenBIOS
 # fusionné (bring-up SMP balaton + nœud audio screamer). SMP *et* son ensemble.
+# ⚠ Le son exige que le binaire ait la classe 'screamer' : scripts/build_qemu_qfb.sh
+# ne la fournit PAS (port absent du dépôt) -> utiliser NOSOUND=1 avec ce build.
 # SMP >= 2 : qemu-system-ppc64 (target MTTCG-safe) + réveil CPU secondaire via
 # GPIO KeyLargo. Vérifie le nb de CPU dans « À propos de ce Mac ». Son via
 # PulseAudio (activer la Mémoire Virtuelle côté invité aide). Fenêtre fermée -> quitte.

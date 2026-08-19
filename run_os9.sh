@@ -49,8 +49,10 @@ MON="$SCR/os9-mon.sock"; rm -f "$MON"
 [ -f "$OS9_DISK" ] || qemu-img create -f qcow2 "$OS9_DISK" "$OS9_DISK_SIZE" >/dev/null
 
 # --- SON via le build UNIFIÉ (QEMU 9.2 + device Screamer porté + OpenBIOS fusionné) ---
-# Un seul binaire pour OS 9 ET Tiger. L'OpenBIOS fusionné publie le nœud audio ;
-# il faut le passer explicitement (l'OpenBIOS stock du 9.2 n'a pas le screamer).
+# Un seul binaire pour OS 9 ET Tiger. Deux moitiés nécessaires : l'OpenBIOS fusionné
+# publie le nœud audio (il faut le passer explicitement, l'OpenBIOS stock du 9.2 ne
+# l'a pas), et le binaire QEMU doit avoir la classe 'screamer'. Cette dernière n'est
+# PAS produite par scripts/build_qemu_qfb.sh -> NOSOUND=1 avec ce build.
 BIN="$QEMU_BIN"
 UNI_OBIOS="$ROOT/patches/smp-mac99/openbios-smp-screamer.elf"
 BIOS_ARGS=()

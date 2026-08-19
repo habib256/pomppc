@@ -16,6 +16,18 @@ Le patch SMP suppose les constantes `IN_DATA` / `OUT_ENABLE`, absentes de `gpio.
 le script les réinjecte lui-même (mêmes valeurs que l'enum de `balaton2`, voir plus bas)
 plutôt que d'appliquer un second patch amont.
 
+## Ce qui manque ici — le device audio Screamer
+
+Le binaire de référence (celui qui fait tourner `run_tiger.sh` et `run_os9.sh` avec le son)
+contient un **port maison du device `screamer`** depuis le fork de Mark Cave-Ayland. Ce port
+**n'est pas dans ce dépôt** : ni source, ni patch. `scripts/build_qemu_qfb.sh` ne peut donc
+pas le reconstruire, et un binaire issu de ce script refusera
+`-global screamer.audiodev=snd0` — d'où le `NOSOUND=1` obligatoire avec ce build.
+
+L'OpenBIOS unifié, lui, *est* fourni pré-buildé (`openbios-smp-screamer.elf`) : il publie le
+nœud audio côté firmware, mais ne remplace pas le device côté QEMU. Les deux moitiés sont
+nécessaires pour avoir du son.
+
 ## Firmware pré-buildé
 
 | Fichier | État |
