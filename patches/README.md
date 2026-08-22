@@ -11,22 +11,35 @@ liste, essais revertés, binaires supplantés) gardé pour pouvoir refaire le ra
 | `smp-mac99/qemu-mac99-cpus-v2.patch` | SMP mac99. Neutralise le garde-fou `« Only UP supported today »` d'`hw/intc/openpic.c`, ajoute le GPIO 4 de KeyLargo (ligne de reset du CPU1) dans `hw/misc/macio/gpio.c`, et le `cpu_kick()` qui relâche le cœur secondaire dans `hw/ppc/mac_newworld.c`. Appliqué avec `--fuzz=3` sur QEMU 9.2.0. |
 | `qfb/qfb-pci.c` | Le device paravirtuel `qfb-pci`, copié dans `hw/display/`. Protocole « qfb1 » de Solra Bizna porté du NuBus vers PCI. |
 | `qfb/0002-wire-qfb-pci-build.patch` | Câblage meson/Kconfig du device ci-dessus. |
+| `screamer/screamer.c` + `screamer/screamer.h` | Le device audio **Screamer** (AWACS PowerMac), copiés dans `hw/audio/` et `include/hw/audio/`. |
+| `screamer/0001-wire-screamer-build.patch` | Câblage du Screamer : `hw/audio/Kconfig`, `hw/audio/meson.build`, `hw/ppc/Kconfig`, et surtout l'instanciation + les IRQ/DBDMA dans `hw/misc/macio/macio.c`. |
 
 Le patch SMP suppose les constantes `IN_DATA` / `OUT_ENABLE`, absentes de `gpio.c` en 9.2.0 :
 le script les réinjecte lui-même (mêmes valeurs que l'enum de `balaton2`, voir plus bas)
 plutôt que d'appliquer un second patch amont.
 
-## Ce qui manque ici — le device audio Screamer
+## Le device audio Screamer
 
-Le binaire de référence (celui qui fait tourner `run_tiger.sh` et `run_os9.sh` avec le son)
-contient un **port maison du device `screamer`** depuis le fork de Mark Cave-Ayland. Ce port
-**n'est pas dans ce dépôt** : ni source, ni patch. `scripts/build_qemu_qfb.sh` ne peut donc
-pas le reconstruire, et un binaire issu de ce script refusera
-`-global screamer.audiodev=snd0` — d'où le `NOSOUND=1` obligatoire avec ce build.
+`screamer/screamer.c` et `screamer/screamer.h` sont **vendus dans ce dépôt**, repris de la
+branche `screamer-v9.1.0` du fork de Mark Cave-Ayland
+([github.com/mcayland/qemu](https://github.com/mcayland/qemu)) — série de 11 commits sur
+`v9.1.0`, dont le delta hors firmware fait 590 lignes. Les copier ici plutôt que de les
+récupérer au build est délibéré : **le dépôt doit pouvoir reconstruire son binaire de
+référence sans dépendre d'un fork tiers**, qui peut disparaître ou se réécrire.
 
-L'OpenBIOS unifié, lui, *est* fourni pré-buildé (`openbios-smp-screamer.elf`) : il publie le
-nœud audio côté firmware, mais ne remplace pas le device côté QEMU. Les deux moitiés sont
-nécessaires pour avoir du son.
+Une seule modification par rapport à l'amont, signalée en tête de `screamer.c` : `dc->reset`
+a disparu entre QEMU 9.1 et 9.2, remplacé par `device_class_set_legacy_reset()` (même
+sémantique — `hw/display/qfb-pci.c` utilise déjà la forme 9.2).
+
+Le son a besoin des **deux moitiés** : ce device côté QEMU, et le nœud audio publié côté
+firmware par l'OpenBIOS unifié (`openbios-smp-screamer.elf`, plus bas).
+
+⚠ **Le Screamer n'apparaît pas dans `qemu-system-ppc -device help`** : ce n'est pas un device
+instanciable en ligne de commande, c'est un enfant interne du macio. Pour vérifier sa
+présence il faut interroger QOM — c'est ce que fait `scripts/caps.sh`, utilisé à la fois par
+les lanceurs et par la vérification de capacités de `scripts/build_qemu_qfb.sh`. Un premier
+jet de ce sondage s'est fait piéger par `-device help` et a conclu à tort à un binaire
+incomplet.
 
 ## Firmware pré-buildé
 
@@ -61,6 +74,8 @@ patché que pour des **fonctionnalités**, jamais pour la performance du JIT.
 ## Licences
 
 `qfb/qfb-pci.c` est sous GPL-2.0-or-later : il dérive de `hw/display/mac_qfb.c` (Solra Bizna),
-lui-même dérivé du code de Laurent Vivier et Hervé Poussineau. Les patches QEMU et les mails
+lui-même dérivé du code de Laurent Vivier et Hervé Poussineau.
+`screamer/screamer.c` et `screamer/screamer.h` sont sous licence MIT, © 2016 Mark
+Cave-Ayland — en-tête de licence conservé tel quel. Les patches QEMU et les mails
 de liste relèvent de la licence de QEMU (GPL-2.0). Voir aussi `kext/POMPPCQFB/README.md`
 § « Licence et crédits ».
