@@ -25,6 +25,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$ROOT/config.env"
+source "$ROOT/scripts/caps.sh"
 
 # OS9_DISK / OS9_CD viennent de config.env (surchargeables par l'environnement).
 RAM=512
@@ -46,6 +47,17 @@ fi
 export DISPLAY="${DISPLAY:-:1}"
 SCR="${POMPPC_SCRATCH:-$ROOT/.run}"; mkdir -p "$SCR"
 MON="$SCR/os9-mon.sock"; rm -f "$MON"
+
+# Verrou disque (run_os9.sh n'en avait aucun) : deux QEMU sur le même qcow2 le
+# corrompent. Le fd 8 survit à l'exec final, le verrou vit donc avec QEMU.
+if [ -z "${SNAPSHOT:-}" ]; then
+  exec 8>"$SCR/os9.lock"
+  if ! flock -n 8; then
+    echo "⚠  Mac OS 9 tourne déjà (verrou $SCR/os9.lock). Ferme-le d'abord," >&2
+    echo "   ou lance en disque jetable : SNAPSHOT=1 ./run_os9.sh" >&2
+    exit 1
+  fi
+fi
 [ -f "$OS9_DISK" ] || qemu-img create -f qcow2 "$OS9_DISK" "$OS9_DISK_SIZE" >/dev/null
 
 # --- SON via le build UNIFIÉ (QEMU 9.2 + device Screamer porté + OpenBIOS fusionné) ---
@@ -56,13 +68,21 @@ MON="$SCR/os9-mon.sock"; rm -f "$MON"
 BIN="$QEMU_BIN"
 UNI_OBIOS="$ROOT/patches/smp-mac99/openbios-smp-screamer.elf"
 BIOS_ARGS=()
-if [ -f "$UNI_OBIOS" ] && [ -z "${NOSOUND:-}" ]; then
+# Le son est SONDÉ, jamais supposé : QEMU n'émet qu'un warning sur un -global
+# visant une classe absente, donc un binaire sans 'screamer' démarrait
+# silencieusement muet en annonçant « son ON ».
+if [ -f "$UNI_OBIOS" ] && [ -z "${NOSOUND:-}" ] \
+   && qemu_machine_has "$BIN" "$MACHINE" screamer; then
   BIOS_ARGS=(-bios "$UNI_OBIOS")
   AUDIO=(-audiodev pa,id=snd0 -global screamer.audiodev=snd0)
   export PULSE_SERVER="${PULSE_SERVER:-unix:/run/user/$(id -u)/pulse/native}"
-  SOUND="son ON (Screamer intégré 9.2 + PulseAudio)"
+  SOUND="son ON (Screamer + PulseAudio)"
 else
   AUDIO=(); SOUND="son OFF (OpenBIOS stock)"
+  if [ -z "${NOSOUND:-}" ] && ! qemu_machine_has "$BIN" "$MACHINE" screamer; then
+    echo "⚠  son indisponible : ce QEMU n'a pas le device 'screamer'." >&2
+    echo "   Reconstruis le binaire de référence : ./scripts/build_qemu_qfb.sh" >&2
+  fi
 fi
 
 # --- Le disque a-t-il un système installé ? (heuristique : > 200 Mo de données écrites) ---
@@ -126,7 +146,7 @@ fi
 # udev pack/99-qemu-gamepad.rules). L'ID vendor:product est trouvé via udevadm.
 PAD_ARGS=()
 if [ -z "${NOPAD:-}" ] && [ "$BOOT" = disk ] && [ -e /dev/input/js0 ] \
-   && "$BIN" -device help 2>/dev/null | grep -q '"usb-host"'; then
+   && qemu_has_device "$BIN" usb-host; then
   PAD_VID=$(udevadm info -q property -n /dev/input/js0 2>/dev/null | sed -n 's/^ID_VENDOR_ID=//p')
   PAD_PID=$(udevadm info -q property -n /dev/input/js0 2>/dev/null | sed -n 's/^ID_MODEL_ID=//p')
   PAD_NODE=$(udevadm info -q property -n /dev/input/js0 2>/dev/null | sed -n 's/^DEVNAME=//p')
