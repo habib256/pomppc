@@ -146,7 +146,21 @@ int main(int argc, char** argv) {
 
     std::vector<uint32_t> fb;
     int guestW = 0, guestH = 0;
+    int texW = 0, texH = 0;          // géométrie actuellement allouée sur le GPU
+
+    // Ludothèque : le listing était refait À CHAQUE FRAME (deux directory_iterator,
+    // un stat par entrée, tri + unique, des dizaines d'allocations, 60 fois par
+    // seconde, même fenêtre fermée). Mis en cache, rafraîchi à la demande.
+    std::vector<std::string> cdImages = listCdImages(root);
+    bool cdImagesStale = false;
     bool grabbed = true;    // keyboard → guest (toggle in the Machine menu)
+    // Touches actuellement enfoncées côté invité. Sans ce suivi, décocher
+    // « Clavier → invité » (ou ouvrir un champ de saisie ImGui) pendant qu'une
+    // touche est tenue n'envoyait jamais le relâchement : Shift/Ctrl restaient
+    // collés dans l'invité.
+    constexpr int kKeyCount = (int)(sizeof(kKeys) / sizeof(kKeys[0]));
+    bool keyHeld[kKeyCount] = {};
+    bool keysWereLive = false;
     bool paused = false;
     float zoom = 1.0f;
     bool showLibrary = true;      // ludothèque window
@@ -161,8 +175,12 @@ int main(int argc, char** argv) {
         else
             curLauncher = launcher;
         guestW = guestH = 0;
+        texW = texH = 0;                 // la texture GPU sera réallouée
+        fb.clear();                      // force un latch complet
+        for (bool& k : keyHeld) k = false;
         paused = false;
         currentCd.clear();
+        cdImagesStale = true;
     };
 
     while (!glfwWindowShouldClose(window)) {
@@ -172,8 +190,9 @@ int main(int argc, char** argv) {
         ImGui::NewFrame();
         ImGuiIO& io = ImGui::GetIO();
 
-        int w = 0, h = 0;
-        if (bridge->latchFrame(fb, w, h)) {
+        int w = 0, h = 0, dy0 = 0, dy1 = 0;
+        bool resized = false;
+        if (bridge->latchFrame(fb, w, h, dy0, dy1, resized)) {
             guestW = w; guestH = h;
             glBindTexture(GL_TEXTURE_2D, tex);
             glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
@@ -181,9 +200,22 @@ int main(int argc, char** argv) {
             // padding, not alpha, and is commonly zero. An RGBA texture made
             // ImGui blend the whole guest display as transparent. Store RGB
             // so OpenGL supplies an opaque alpha value when sampling.
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, w, h, 0, GL_BGRA,
-                         GL_UNSIGNED_BYTE, fb.data());
+            if (resized || w != texW || h != texH) {
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, w, h, 0, GL_BGRA,
+                             GL_UNSIGNED_BYTE, fb.data());
+                texW = w; texH = h;
+            } else if (dy1 > dy0) {
+                // Réallouer la texture entière à chaque frame coûtait un
+                // upload complet (3 Mo en 1024x768) : on ne pousse que les
+                // lignes que QEMU a réellement modifiées.
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, dy0, w, dy1 - dy0, GL_BGRA,
+                                GL_UNSIGNED_BYTE, fb.data() + (size_t)dy0 * w);
+            }
         }
+
+        // QEMU peut mourir de son côté : sans ce test, le frontend affichait
+        // indéfiniment la dernière image en annonçant « en marche ».
+        bridge->checkAlive();
 
         // ── Menu bar → machine control over QMP ──────────────────────────
         if (ImGui::BeginMainMenuBar()) {
@@ -213,7 +245,7 @@ int main(int argc, char** argv) {
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Périphériques")) {
-                ImGui::TextDisabled("(prend effet au redémarrage)");
+                ImGui::TextDisabled("(bascule = redémarrage immédiat de la VM)");
                 if (ImGui::MenuItem("Son (PulseAudio)", nullptr, &sound))
                     relaunch(curLauncher);
                 if (ImGui::MenuItem("Manette USB", nullptr, &pad))
@@ -279,9 +311,12 @@ int main(int argc, char** argv) {
                     bridge->ejectCd();
                     currentCd.clear();
                 }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Rafraîchir")) cdImagesStale = true;
+                if (cdImagesStale) { cdImages = listCdImages(root); cdImagesStale = false; }
                 ImGui::Separator();
                 ImGui::BeginChild("games");
-                for (const std::string& g : listCdImages(root)) {
+                for (const std::string& g : cdImages) {
                     bool sel = (g == currentCd);
                     if (ImGui::Selectable(prettyName(g).c_str(), sel,
                                           ImGuiSelectableFlags_AllowDoubleClick)) {
@@ -306,12 +341,25 @@ int main(int argc, char** argv) {
             glfwSetClipboardString(window, gclip.c_str());
 
         // Keyboard → guest (skip while an ImGui text field wants input).
-        if (grabbed && !io.WantTextInput) {
-            for (const auto& e : kKeys) {
-                if (ImGui::IsKeyPressed(e.k, false)) bridge->keyPress(e.num);
-                if (ImGui::IsKeyReleased(e.k)) bridge->keyRelease(e.num);
+        bool keysLive = grabbed && !io.WantTextInput && bridge->running();
+        if (keysLive) {
+            for (int i = 0; i < kKeyCount; ++i) {
+                if (ImGui::IsKeyPressed(kKeys[i].k, false)) {
+                    bridge->keyPress(kKeys[i].num);
+                    keyHeld[i] = true;
+                }
+                if (ImGui::IsKeyReleased(kKeys[i].k)) {
+                    bridge->keyRelease(kKeys[i].num);
+                    keyHeld[i] = false;
+                }
+            }
+        } else if (keysWereLive) {
+            // On vient de perdre le clavier : relâcher tout ce qui est tenu.
+            for (int i = 0; i < kKeyCount; ++i) {
+                if (keyHeld[i]) { bridge->keyRelease(kKeys[i].num); keyHeld[i] = false; }
             }
         }
+        keysWereLive = keysLive;
 
         ImGui::Render();
         int fbw, fbh;
