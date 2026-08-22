@@ -7,8 +7,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DISK="$ROOT/disks/tiger.qcow2"
 BOOTX="$ROOT/work/BootX"
-NBD="/dev/nbd0"
 MP="$(mktemp -d)"
+SNAPTAG="pre-bootx-$(date +%Y%m%d-%H%M%S)"
+NBD=""            # choisi dynamiquement plus bas
 
 [[ $EUID -eq 0 ]]        || { echo "Lance-moi avec sudo."; exit 1; }
 [[ -f "$DISK" ]]         || { echo "Disque introuvable: $DISK"; exit 1; }
@@ -17,17 +18,40 @@ pgrep -f "qemu-system-ppc" >/dev/null && { echo "QEMU tourne encore — coupe-le
 
 cleanup() {
   mountpoint -q "$MP" && umount "$MP" || true
-  qemu-nbd -d "$NBD" >/dev/null 2>&1 || true
+  # N'agir QUE sur le device qu'on a réservé : un /dev/nbd0 codé en dur faisait
+  # qu'un échec ici déconnectait le nbd de quelqu'un d'autre.
+  [ -n "$NBD" ] && qemu-nbd -d "$NBD" >/dev/null 2>&1 || true
   rmdir "$MP" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+echo "0) instantané de sécurité du disque ($SNAPTAG)"
+# Ce script monte du HFS+ en écriture (pilote noyau réputé fragile) et patche à
+# la main les attributs du volume header. Sur l'unique image disque de
+# l'utilisateur, sans filet, c'était un pari. qemu-img snapshot coûte une ligne.
+if qemu-img snapshot -c "$SNAPTAG" "$DISK"; then
+  echo "   OK — restauration en cas de pépin :"
+  echo "     qemu-img snapshot -a $SNAPTAG $DISK"
+else
+  echo "   !! impossible de créer l'instantané. Continuer sans filet ? [o/N]"
+  read -r ans; [ "$ans" = "o" ] || [ "$ans" = "O" ] || exit 1
+fi
 
 echo "1) module nbd + hfsplus"
 modprobe nbd max_part=16
 modprobe hfsplus
 
-echo "2) exposition du qcow2 sur $NBD"
-qemu-nbd -c "$NBD" "$DISK"
+echo "2) réservation d'un device nbd libre"
+for i in $(seq 0 15); do
+  dev="/dev/nbd$i"
+  [ -b "$dev" ] || continue
+  # taille 0 = device non connecté
+  if [ "$(cat "/sys/block/nbd$i/size" 2>/dev/null || echo 1)" = "0" ]; then
+    if qemu-nbd -c "$dev" "$DISK" 2>/dev/null; then NBD="$dev"; break; fi
+  fi
+done
+[ -n "$NBD" ] || { echo "Aucun /dev/nbdN libre."; exit 1; }
+echo "   -> $NBD"
 sleep 1
 partprobe "$NBD" 2>/dev/null || true
 sleep 1
