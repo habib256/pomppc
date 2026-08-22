@@ -53,13 +53,12 @@ Tiger sur **2 cœurs MTTCG** par défaut ; OS 9 reste mono-cœur (SMP buggé cô
    un binaire précis. En revanche `run_tiger.sh` / `run_os9.sh` **exigent le build source** :
    son (Screamer), OpenBIOS unifié et `qfb-pci` n'existent pas dans le paquet distro.
 
-   ⚠️ **`scripts/build_qemu_qfb.sh` ne reproduit pas entièrement le binaire de référence.**
-   Il apporte `qfb-pci` et le SMP mac99, mais **pas le device audio Screamer** (port maison
-   depuis le fork mcayland, absent de l'amont *et* de ce dépôt) ni slirp. Or les deux
-   lanceurs démarrent avec le **son actif par défaut** et passent alors
-   `-global screamer.audiodev=snd0`, que QEMU refuse s'il n'a pas cette classe. Sur un
-   binaire fraîchement construit par ce script, lancer donc :
-   `NOSOUND=1 ./run_tiger.sh` (et sans `NET=1`).
+   ✅ **`scripts/build_qemu_qfb.sh` reproduit intégralement le binaire de référence** :
+   device audio Screamer (`patches/screamer/`, vendu dans le dépôt), `qfb-pci`, SMP mac99,
+   slirp et PulseAudio — tout est demandé explicitement à `configure`, jamais laissé à
+   l'autodétection. Le script se termine par une **vérification de capacités** et écrit le
+   verdict dans `bench/build-capabilities.txt` ; il sort en erreur si une capacité manque.
+   Aucun fork tiers n'est récupéré au build : seul l'amont `qemu-project` est cloné.
 2. **Une image d'installation Tiger PPC que tu possèdes** → à déposer dans `images/`
    (dossier à créer, gitignoré), nom ajusté dans `config.env` (`INSTALL_MEDIA`). Elle est
    passée à QEMU en `format=raw` : un ISO convient tel quel, un **DMG compressé (UDIF) doit
@@ -102,8 +101,20 @@ s'étonner d'un écart :
 | `config.env` | `run_tiger.sh` | `run_os9.sh` |
 | --- | --- | --- |
 | `SMP=1` | 2 cœurs MTTCG (`SMP=1` pour revenir en mono) | 1 (SMP OS 9 buggé) |
-| `RAM_MB=1024` | 768 quand le son est actif (le Screamer exige < 1 Go) | 512 |
-| réseau selon `NONET` | coupé sauf `NET=1` (build sans slirp) | coupé |
+| `RAM_MB=1024` | 768 **si et seulement si** le son est réellement actif (le Screamer exige < 1 Go) | 512 |
+| réseau selon `NONET` | coupé sauf `NET=1` | coupé |
+
+**Les lanceurs sondent le binaire, ils ne supposent rien.** Règle du dépôt : *un lanceur
+n'annonce jamais une capacité que le binaire n'a pas* (`scripts/caps.sh`). Elle vient d'un
+bug coûteux : le binaire de référence a été reconstruit sans le Screamer, et `run_tiger.sh` a
+continué d'afficher « + SON », de passer `-global screamer.audiodev=snd0` — que QEMU ignore
+avec un **simple warning**, pas une erreur — et surtout de raboter la RAM invité de 1024 à
+768 Mo pour un device absent. Désormais : pas de Screamer → message explicite, pas de
+plafond RAM, bannière sans « + SON ». Idem pour slirp avec `NET=1`.
+
+Les deux lanceurs prennent aussi un **verrou `flock`** sur leur disque (sauf en `SNAPSHOT=1`,
+où plusieurs instances sont légitimes) : deux QEMU sur le même qcow2 le corrompent. Le
+`fuser` précédent venait de `psmisc` et, si le paquet manquait, ne gardait plus rien.
 
 ## Recette de boot qui MARCHE (durement acquise)
 
@@ -205,22 +216,72 @@ boote en headless, détecte l'écran bleu de login à la couleur moyenne des `sc
 `wall=…  cpu=…` dans `bench/last-boot.txt` (les captures intermédiaires vont dans `bench/frames/`).
 **C'est `CPU_qemu` — et non le temps mur — qui sert de métrique**, car il est immunisé à la
 contention hôte. Le chrono n'est fiable qu'avec les TROIS précautions : (a) **hôte vraiment au
-repos** — vérifier `/proc/loadavg` AVANT (une charge de fond, ex. MAME, gonfle même le CPU_qemu car
-le guest spin-attend des timers en retard) ; (b) `EXTRA_ARGS="-snapshot"` — sinon un **fsck sur
-volume HFS+ sale** (on tue QEMU avant l'arrêt propre) ajoute ~35s de façon intermittente ; (c)
-**interleave** stock/patché (alterner run par run) pour annuler tout biais d'ordre/dérive. Le perf
-self% reste l'outil de profiling fin.
+repos** (une charge de fond, ex. MAME, gonfle même le CPU_qemu car le guest spin-attend des
+timers en retard) ; (b) `EXTRA_ARGS="-snapshot"` — sinon un **fsck sur volume HFS+ sale** (on
+tue QEMU avant l'arrêt propre) ajoute ~35s de façon intermittente ; (c) **interleave**
+stock/patché (alterner run par run) pour annuler tout biais d'ordre/dérive. Le perf self%
+reste l'outil de profiling fin.
+
+Les précautions (a) et le nettoyage sont désormais **appliqués par l'outil**, pas laissés à la
+discipline :
+
+- **pré-vol** : `measure-boot.sh` refuse de démarrer si un autre `qemu-system-ppc` tourne ou
+  si `/proc/loadavg` dépasse `MAXLOAD` (1.0 par défaut). `POMPPC_FORCE=1` passe outre — et le
+  dit : *« ce chiffre n'est pas publiable »*.
+- **PID via `-pidfile`** : le `pgrep -f qemu-system-ppc.*POMPPC-measure` d'avant pouvait
+  s'accrocher à un QEMU orphelin d'un run précédent et lire `/proc/<mauvais_pid>/stat`. Une
+  mesure fausse mais plausible est le pire mode de panne pour une campagne A/B.
+- **`trap` de nettoyage** : un Ctrl-C laissait tourner la VM `setsid`, c'est-à-dire exactement
+  la charge de fond que (a) interdit. `measure-boot.sh` et `profile-boot.sh` tuent la leur en
+  sortie, quoi qu'il arrive.
+- **outils vérifiés** : sans ImageMagick, la détection d'écran bleu renvoyait du vide, la
+  comparaison arithmétique valait 0, et on obtenait un timeout silencieux au lieu d'une erreur.
 
 ```bash
-cat /proc/loadavg                                            # (a) garde-fou charge
-EXTRA_ARGS="-snapshot" scripts/measure-boot.sh               # (b) un run propre
+EXTRA_ARGS="-snapshot" scripts/measure-boot.sh               # un run propre (pré-vol inclus)
 SMP_N=2 EXTRA_ARGS="-snapshot -accel tcg,thread=multi" \
   scripts/measure-boot.sh                                    # variante SMP/MTTCG
+scripts/ab-measure.sh <binA> <binB> 4                        # A/B interleavé, médiane
 ```
+
+`scripts/ab-measure.sh` applique le protocole complet (interleave A/B/A/B, `-snapshot` forcé,
+médiane sur n paires) et s'arrête de lui-même si le pré-vol refuse un run.
+
+⚠️ **Le coût du device Screamer sur le temps de boot n'a pas encore été mesuré en A/B.** Il est
+instancié dans le macio pour toute machine mac99, donc présent même en mesure headless. Deux
+binaires de comparaison sont prêts dans `bench/ab/` (gitignoré) :
+
+```bash
+scripts/ab-measure.sh bench/ab/qemu-no-screamer bench/ab/qemu-with-screamer 4
+```
+
+À lancer machine au repos. Neutraliser le backend audio (`-audiodev none`) ne change rien, donc
+si coût il y a, il ne vient pas du flux audio.
 
 `clock_gettime` vdso lui-même (~5%) = lecture d'horloge fondamentale, laissée telle quelle
 (la battre = rdtsc maison, risqué). Prochain gros poste : dispatch TCG
 (`tb_lookup`+`qht_lookup`+`helper_lookup_tb_ptr` ~20%).
+
+## Tests
+
+```bash
+./tests/run-all.sh          # rapide : syntaxe, shellcheck, doc↔binaire, registres QFB
+./tests/run-all.sh --slow   # + qfb_smoke.py et bridge_probe (bootent réellement)
+```
+
+Le dépôt est majoritairement du Bash et **les scripts sont l'interface utilisateur** : une
+faute dans un lanceur est un bug produit. Le harnais couvre quatre choses qu'aucune relecture
+ne garantit :
+
+1. **syntaxe** de tous les scripts shell et Python suivis par git ;
+2. **shellcheck** (si installé) ;
+3. **cohérence doc ↔ binaire** — on interroge `$QEMU_BIN` (Screamer, qfb-pci, slirp, audio pa)
+   au lieu de comparer la doc au dépôt. C'est précisément la classe de bug que deux passes de
+   « nettoyage de cohérence » n'avaient pas vue : le README décrivait un binaire qui n'était
+   plus celui qui tournait ;
+4. **alignement des registres QFB** entre l'hôte (`patches/qfb/qfb-pci.c`) et l'invité
+   (`kext/POMPPCQFB/qfb_regs.h`) — une divergence donne un écran corrompu très pénible à
+   diagnostiquer.
 
 ## Prochaine étape
 
@@ -229,6 +290,10 @@ Le build source et le profiling sont en place (`scripts/build_qemu_qfb.sh`,
 revertées. Le prochain gros poste identifié est le **dispatch TCG**
 (`tb_lookup` + `qht_lookup` + `helper_lookup_tb_ptr`, ~20 % du temps hôte) : c'est là que se joue
 l'optimisation du JIT, avec le même protocole A/B qu'au-dessus.
+
+⚠️ La baseline de 23,32 s a été mesurée avec l'ancien harnais (PID par `pgrep`, sans pré-vol
+ni `trap`). **Elle est à refaire** avec `measure-boot.sh` durci avant de servir de référence à
+la campagne TCG — c'est le seul chiffre du projet dont la provenance n'est plus vérifiable.
 
 ## Carte du dépôt
 
@@ -239,9 +304,12 @@ l'optimisation du JIT, avec le même protocole A/B qu'au-dessus.
 | `run_tiger.sh` / `run_os9.sh` | lanceurs d'usage quotidien (SMP, son, manette, partage, QFB) |
 | `mount` / `add-pad` | CD à chaud dans OS 9 ; enregistrement d'une manette dans la règle udev |
 | `frontend/` | frontend Dear ImGui embarquant l'affichage QEMU via D-Bus (`frontend/README.md`) |
-| `patches/` | patches QEMU et firmware OpenBIOS. Ce qui est appliqué vs. ce qui n'est là que pour référence : `patches/README.md` |
+| `patches/` | patches QEMU et firmware OpenBIOS, **dont le device audio Screamer vendu dans le dépôt** (`patches/screamer/`). Ce qui est appliqué vs. ce qui n'est là que pour référence : `patches/README.md` |
 | `kext/POMPPCQFB/` | pilote Tiger du framebuffer QFB (`kext/POMPPCQFB/README.md`) |
-| `tests/qfb_smoke.py` | test de bout en bout du device QFB, sans invité |
+| `tests/run-all.sh` | **harnais de non-régression** : syntaxe shell/Python, shellcheck, cohérence doc↔binaire, alignement des registres QFB hôte/invité. `--slow` ajoute les tests qui bootent réellement |
+| `tests/qfb_smoke.py` | test de bout en bout du device QFB, sans invité (dont la non-régression du scanout débordant) |
+| `scripts/caps.sh` | sondage des capacités réelles d'un binaire QEMU (QOM), partagé par les lanceurs, le build et les tests |
+| `scripts/ab-measure.sh` | A/B interleavé entre deux binaires QEMU, médiane de `CPU_qemu` |
 | `docs/gpu-tiger-4060ti.md` | étude GPU : passthrough, paravirtualisation, plan par phases |
 | `pack/` | règle udev pour le passthrough manette |
 | `disks/extras/` | petits pilotes tiers pour OS 9 (virtio, tablette USB) — `disks/extras/README.md` |

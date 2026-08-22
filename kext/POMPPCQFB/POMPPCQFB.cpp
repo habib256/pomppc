@@ -86,6 +86,7 @@ bool POMPPCQFB::start(IOService * provider)
     if (regRead(QFB_VERSION) != QFB_MAGIC) {
         QFBLog("signature invalide (0x%08lx au lieu de 'qfb1')\n",
                (unsigned long) regRead(QFB_VERSION));
+        fPCI->setMemoryEnable(false);   /* ne pas laisser le device armé */
         return false;
     }
 
@@ -230,6 +231,10 @@ void POMPPCQFB::buildModeList(void)
 
 void POMPPCQFB::programMode(void)
 {
+    /* BASE d'abord : côté QEMU la fenêtre de scanout est bornée par
+       (BASE, hauteur, stride), et c'est BASE qui décide de ce qui tient dans
+       la VRAM. L'écrire en premier garantit qu'aucun état intermédiaire ne
+       décrit un scanout qui déborde. */
     regWrite(QFB_MODE_BASE,   0);
     regWrite(QFB_MODE_WIDTH,  fModes[fCurrentMode].width);
     regWrite(QFB_MODE_HEIGHT, fModes[fCurrentMode].height);
@@ -372,8 +377,13 @@ IODeviceMemory * POMPPCQFB::getApertureRange(IOPixelAperture aperture)
     IOByteCount length = strideForMode(fCurrentMode, fCurrentDepth)
                        * fModes[fCurrentMode].height;
     length = (length + (PAGE_SIZE - 1)) & ~((IOByteCount) PAGE_SIZE - 1);
-    if (length > QFB_VRAM_SIZE) {
-        length = QFB_VRAM_SIZE;
+
+    IOByteCount vramLen = fVRAMRange->getLength();
+    if (vramLen > QFB_VRAM_SIZE) {
+        vramLen = QFB_VRAM_SIZE;
+    }
+    if (length > vramLen) {
+        length = vramLen;
     }
 
     return IODeviceMemory::withSubRange(fVRAMRange, 0, length);
@@ -384,7 +394,14 @@ IODeviceMemory * POMPPCQFB::getVRAMRange(void)
     if (!fVRAMRange) {
         return 0;
     }
-    return IODeviceMemory::withSubRange(fVRAMRange, 0, QFB_VRAM_SIZE);
+    /* Prendre la taille réelle du BAR plutôt que la constante : si Open
+       Firmware assigne une fenêtre plus petite que 32 Mio, fabriquer une
+       sous-plage de 32 Mio produit un mapping qui déborde du device. */
+    IOByteCount len = fVRAMRange->getLength();
+    if (len > QFB_VRAM_SIZE) {
+        len = QFB_VRAM_SIZE;
+    }
+    return IODeviceMemory::withSubRange(fVRAMRange, 0, len);
 }
 
 #pragma mark - connexion et attributs

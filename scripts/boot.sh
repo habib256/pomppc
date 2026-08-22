@@ -8,6 +8,7 @@ source "$ROOT/config.env"
 SCR="${POMPPC_SCRATCH:-$ROOT/.run}"
 mkdir -p "$SCR"
 MON="$SCR/mon.sock"; rm -f "$MON"
+PIDFILE="$SCR/boot.pid"; rm -f "$PIDFILE"
 
 mkdir -p "$ROOT/bench"          # gitignoré : absent d'un clone neuf
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -31,9 +32,13 @@ setsid "$QEMU_BIN" -M "$MACHINE" -cpu "$CPU" -m "$RAM_MB" -smp "$SMP" \
   -prom-env "boot-device=$BOOTDEV" \
   -prom-env 'boot-args=-v' \
   -serial "file:$LOG" -name "POMPPC-run" \
+  -pidfile "$PIDFILE" \
   -monitor "unix:$MON,server,nowait" \
   > "$LOG.stdout" 2>&1 &
 
+# $! est le PID de setsid, qui a déjà rendu la main : inutilisable pour tuer ou
+# mesurer QEMU. -pidfile donne le vrai.
+for _ in $(seq 1 30); do [ -s "$PIDFILE" ] && break; sleep 0.5; done
 echo "MON=$MON"
 echo "LOG=$LOG"
-echo "PID=$!"
+echo "PID=$(cat "$PIDFILE" 2>/dev/null || echo '?')"

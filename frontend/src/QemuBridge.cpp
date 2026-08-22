@@ -81,6 +81,8 @@ bool qmpReadLine(int fd, std::string& buf, std::string& line) {
 
 // Consume lines until we see a command reply ("return" or "error"), skipping
 // asynchronous events and the greeting. Returns false on an error reply/EOF.
+//
+// Used only for the handshake, where no id has been assigned yet.
 bool qmpWaitReturn(int fd, std::string& buf) {
     std::string line;
     while (qmpReadLine(fd, buf, line)) {
@@ -91,6 +93,32 @@ bool qmpWaitReturn(int fd, std::string& buf) {
         if (line.find("\"return\"") != std::string::npos) return true;
         // else: greeting ("QMP") or event ("event") — keep reading.
     }
+    return false;
+}
+
+// Wait for the reply carrying exactly `idTag`, skipping asynchronous events.
+//
+// Matching on a bare "return"/"error" substring was wrong twice over: QEMU
+// emits spontaneous events (RESET, STOP, DEVICE_TRAY_MOVED…) that can carry
+// those words, and a filename passed to blockdev-change-medium containing
+// "error" was enough to self-trap. Replies are correlated by id; events have
+// none, so they are simply skipped.
+//
+// `*fatal` is set when the channel can no longer be trusted (EOF or a read
+// timeout leaving a partial line in `buf`): the caller closes it rather than
+// reading desynchronised data forever after.
+bool qmpWaitId(int fd, std::string& buf, const std::string& idTag, bool* fatal) {
+    std::string line;
+    *fatal = false;
+    while (qmpReadLine(fd, buf, line)) {
+        if (line.find(idTag) == std::string::npos) continue;   // event or other cmd
+        if (line.find("\"error\"") != std::string::npos) {
+            std::fprintf(stderr, "QMP error: %s\n", line.c_str());
+            return false;
+        }
+        return line.find("\"return\"") != std::string::npos;
+    }
+    *fatal = true;   // EOF or timeout: `buf` may hold half a line
     return false;
 }
 
@@ -457,8 +485,11 @@ bool QemuBridge::start(const Config& cfg, std::string* err) {
         close(sv[0]); close(qmp); stop(); return false;
     }
     // Keep the QMP channel for machine control (reset, pause, CD…). Bound the
-    // reads so a wedged QEMU can't hang the UI thread.
-    struct timeval tv { 3, 0 };
+    // reads so a wedged QEMU can't hang the UI thread. 10 s plutôt que 3 :
+    // toutes ces commandes sont rapides sauf un changement de médium sur disque
+    // lent, et un timeout coûte désormais le canal de contrôle entier (voir
+    // qmpCommand) — autant ne l'atteindre que pour un QEMU réellement bloqué.
+    struct timeval tv { 10, 0 };
     setsockopt(qmp, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     qmpFd_ = qmp;
     qmpBuf_ = buf;  // carry over any bytes already read past the add_client reply
@@ -575,16 +606,35 @@ void QemuBridge::stop() {
         munmap(impl_->mapAddr, impl_->mapLen);
         impl_->mapAddr = nullptr; impl_->mapData = nullptr; impl_->mapLen = 0;
     }
-    if (qemuPid_ > 0) {
+    if (qemuPid_ > 0 && !qemuReaped_) {
         kill(qemuPid_, SIGTERM);
-        for (int i = 0; i < 40; ++i) {
-            if (waitpid(qemuPid_, nullptr, WNOHANG) == qemuPid_) break;
-            usleep(50 * 1000);
+        bool reaped = false;
+        for (int i = 0; i < 40 && !reaped; ++i) {
+            if (waitpid(qemuPid_, nullptr, WNOHANG) == qemuPid_) reaped = true;
+            else usleep(50 * 1000);
         }
-        kill(qemuPid_, SIGKILL);
-        waitpid(qemuPid_, nullptr, 0);
-        qemuPid_ = -1;
+        // Only escalate if it is still there. Signalling an already-reaped pid
+        // is not harmless: the number is free for reuse the instant waitpid()
+        // returns, and relaunch() spawns a new process immediately after —
+        // so the stray SIGKILL could land on an unrelated process.
+        if (!reaped) {
+            kill(qemuPid_, SIGKILL);
+            waitpid(qemuPid_, nullptr, 0);
+        }
     }
+    qemuPid_ = -1;
+    qemuReaped_ = false;
+}
+
+bool QemuBridge::checkAlive() {
+    if (qemuPid_ <= 0 || qemuReaped_) return false;
+    if (waitpid(qemuPid_, nullptr, WNOHANG) == qemuPid_) {
+        qemuReaped_ = true;
+        running_.store(false, std::memory_order_relaxed);
+        std::fprintf(stderr, "QemuBridge: QEMU (pid %ld) a quitté\n", qemuPid_);
+        return false;
+    }
+    return true;
 }
 
 // ── Framebuffer ingest (D-Bus thread) → shared buffer ────────────────────
@@ -599,6 +649,7 @@ void QemuBridge::ingestScanout(uint32_t w, uint32_t h, uint32_t stride,
     }
     if (w == 0 || h == 0 || stride < w * 4) return;  // P1: 32bpp only
     std::lock_guard<std::mutex> lk(fbMtx_);
+    if ((int)w != fbW_ || (int)h != fbH_) fbResized_ = true;
     fbW_ = (int)w;
     fbH_ = (int)h;
     fb_.assign((size_t)w * h, 0);
@@ -607,7 +658,17 @@ void QemuBridge::ingestScanout(uint32_t w, uint32_t h, uint32_t stride,
         if (off + w * 4 > len) break;
         std::memcpy(&fb_[(size_t)row * w], data + off, (size_t)w * 4);
     }
-    fbDirty_ = true;
+    markRows(0, fbH_);
+}
+
+// Widen the dirty row span. fbMtx_ is held by the caller.
+void QemuBridge::markRows(int y0, int y1) {
+    if (y0 < 0) y0 = 0;
+    if (y1 > fbH_) y1 = fbH_;
+    if (y0 >= y1) return;
+    if (!fbDirty_) { fbY0_ = y0; fbY1_ = y1; fbDirty_ = true; return; }
+    if (y0 < fbY0_) fbY0_ = y0;
+    if (y1 > fbY1_) fbY1_ = y1;
 }
 
 void QemuBridge::ingestUpdate(int x, int y, int w, int h, uint32_t stride,
@@ -615,19 +676,25 @@ void QemuBridge::ingestUpdate(int x, int y, int w, int h, uint32_t stride,
                               size_t len) {
     std::lock_guard<std::mutex> lk(fbMtx_);
     if (fbW_ == 0 || fbH_ == 0) return;
-    if (stride < (uint32_t)w * 4) return;
+    if (w <= 0 || h <= 0 || stride < (uint32_t)w * 4) return;
+
+    // Clamp the span once, then one memcpy per row. The previous version did a
+    // 4-byte memcpy per pixel with two branches: a full-screen update meant
+    // 786 000 calls instead of 768 copies of 4 KiB.
+    int sx = x < 0 ? -x : 0;                       // first source column kept
+    int dx0 = x + sx;
+    int cols = w - sx;
+    if (dx0 + cols > fbW_) cols = fbW_ - dx0;
+    if (cols <= 0) return;
+
     for (int row = 0; row < h; ++row) {
         int dy = y + row;
         if (dy < 0 || dy >= fbH_) continue;
-        size_t off = (size_t)row * stride;
-        if (off + (size_t)w * 4 > len) break;
-        for (int col = 0; col < w; ++col) {
-            int dx = x + col;
-            if (dx < 0 || dx >= fbW_) continue;
-            std::memcpy(&fb_[(size_t)dy * fbW_ + dx], data + off + (size_t)col * 4, 4);
-        }
+        size_t off = (size_t)row * stride + (size_t)sx * 4;
+        if (off + (size_t)cols * 4 > len) break;
+        std::memcpy(&fb_[(size_t)dy * fbW_ + dx0], data + off, (size_t)cols * 4);
     }
-    fbDirty_ = true;
+    markRows(y, y + h);
 }
 
 // ── Unix.Map fast path (D-Bus thread) ────────────────────────────────────
@@ -664,38 +731,67 @@ void QemuBridge::mapScanout(int fd, uint32_t offset, uint32_t w, uint32_t h,
 
     // Full surface → framebuffer.
     std::lock_guard<std::mutex> lk(fbMtx_);
+    if ((int)w != fbW_ || (int)h != fbH_) fbResized_ = true;
     fbW_ = (int)w; fbH_ = (int)h;
     fb_.assign((size_t)w * h, 0);
     for (uint32_t row = 0; row < h; ++row)
         std::memcpy(&fb_[(size_t)row * w],
                     impl_->mapData + (size_t)row * stride, (size_t)w * 4);
-    fbDirty_ = true;
+    markRows(0, fbH_);
 }
 
 void QemuBridge::mapUpdate(int x, int y, int w, int h) {
     std::lock_guard<std::mutex> lk(fbMtx_);
-    if (!impl_->mapData || fbW_ == 0) return;
+    if (!impl_->mapData || fbW_ == 0 || w <= 0 || h <= 0) return;
+
+    // Bound by the MAPPING as well as by the framebuffer. An inline Scanout
+    // arriving after a ScanoutMap resizes fb_ but leaves mapW/mapH/mapStride
+    // describing the old, smaller mmap — reading at fb_ dimensions then walked
+    // off the end of the mapping.
+    int maxW = fbW_ < (int)impl_->mapW ? fbW_ : (int)impl_->mapW;
+    int maxH = fbH_ < (int)impl_->mapH ? fbH_ : (int)impl_->mapH;
+
+    int dx0 = x < 0 ? 0 : x;
+    int cols = x + w - dx0;
+    if (dx0 + cols > maxW) cols = maxW - dx0;
+    if (cols <= 0) return;
+
     for (int row = 0; row < h; ++row) {
         int dy = y + row;
-        if (dy < 0 || dy >= fbH_) continue;
+        if (dy < 0 || dy >= maxH) continue;
         const uint8_t* src = impl_->mapData + (size_t)dy * impl_->mapStride;
-        for (int col = 0; col < w; ++col) {
-            int dx = x + col;
-            if (dx < 0 || dx >= fbW_) continue;
-            std::memcpy(&fb_[(size_t)dy * fbW_ + dx], src + (size_t)dx * 4, 4);
+        std::memcpy(&fb_[(size_t)dy * fbW_ + dx0], src + (size_t)dx0 * 4,
+                    (size_t)cols * 4);
+    }
+    markRows(y, y + h);
+}
+
+bool QemuBridge::latchFrame(std::vector<uint32_t>& out, int& w, int& h,
+                            int& y0, int& y1, bool& resized) {
+    std::lock_guard<std::mutex> lk(fbMtx_);
+    if (!fbDirty_ || fbW_ == 0) return false;
+
+    w = fbW_;
+    h = fbH_;
+    resized = fbResized_ || out.size() != fb_.size();
+    if (resized) {
+        out = fb_;                       // geometry changed: full copy
+        y0 = 0; y1 = fbH_;
+    } else {
+        y0 = fbY0_; y1 = fbY1_;
+        if (y1 > y0) {
+            std::memcpy(&out[(size_t)y0 * fbW_], &fb_[(size_t)y0 * fbW_],
+                        (size_t)(y1 - y0) * fbW_ * 4);
         }
     }
-    fbDirty_ = true;
+    fbDirty_ = false;
+    fbResized_ = false;
+    return true;
 }
 
 bool QemuBridge::latchFrame(std::vector<uint32_t>& out, int& w, int& h) {
-    std::lock_guard<std::mutex> lk(fbMtx_);
-    if (!fbDirty_ || fbW_ == 0) return false;
-    out = fb_;
-    w = fbW_;
-    h = fbH_;
-    fbDirty_ = false;
-    return true;
+    int y0, y1; bool resized;
+    return latchFrame(out, w, h, y0, y1, resized);
 }
 
 // ── Input: marshal onto the D-Bus thread via g_main_context_invoke ───────
@@ -777,8 +873,31 @@ std::string jsonEsc(const std::string& s) {
 bool QemuBridge::qmpCommand(const std::string& json) {
     if (qmpFd_ < 0) return false;
     std::lock_guard<std::mutex> lk(qmpMtx_);
-    if (!qmpSend(qmpFd_, json)) return false;
-    return qmpWaitReturn(qmpFd_, qmpBuf_);
+    if (json.size() < 2 || json.back() != '}') return false;
+
+    // Tag the command so its reply can be told apart from QEMU's asynchronous
+    // events (see qmpWaitId).
+    char idbuf[32];
+    std::snprintf(idbuf, sizeof idbuf, "pom-%u", ++qmpSeq_);
+    std::string tagged = json.substr(0, json.size() - 1) +
+                         ",\"id\":\"" + idbuf + "\"}";
+
+    if (!qmpSend(qmpFd_, tagged)) return false;
+
+    bool fatal = false;
+    // QEMU echoes the id back as {"return": {}, "id": "pom-1"}; be tolerant of
+    // spacing by matching on the id value alone.
+    std::string needle = std::string("\"") + idbuf + "\"";
+    bool ok = qmpWaitId(qmpFd_, qmpBuf_, needle, &fatal);
+    if (fatal) {
+        // A read timeout leaves half a line in qmpBuf_; every later command
+        // would then parse garbage. Drop the channel instead of limping on.
+        std::fprintf(stderr, "QemuBridge: canal QMP perdu — contrôle désactivé\n");
+        close(qmpFd_);
+        qmpFd_ = -1;
+        qmpBuf_.clear();
+    }
+    return ok;
 }
 bool QemuBridge::reset() { return qmpCommand("{\"execute\":\"system_reset\"}"); }
 bool QemuBridge::setPaused(bool p) {

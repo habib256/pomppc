@@ -1,0 +1,157 @@
+diff --git a/hw/audio/Kconfig b/hw/audio/Kconfig
+index daf060e1..a940493e 100644
+--- a/hw/audio/Kconfig
++++ b/hw/audio/Kconfig
+@@ -55,3 +55,9 @@ config VIRTIO_SND
+     bool
+     default y
+     depends on VIRTIO
++
++config MARVELL_88W8618
++    bool
++
++config SCREAMER
++    bool
+diff --git a/hw/audio/meson.build b/hw/audio/meson.build
+index 29909744..e0c32f96 100644
+--- a/hw/audio/meson.build
++++ b/hw/audio/meson.build
+@@ -11,6 +11,7 @@ system_ss.add(when: 'CONFIG_MARVELL_88W8618', if_true: files('marvell_88w8618.c'
+ system_ss.add(when: 'CONFIG_PCSPK', if_true: files('pcspk.c'))
+ system_ss.add(when: 'CONFIG_PL041', if_true: files('pl041.c', 'lm4549.c'))
+ system_ss.add(when: 'CONFIG_SB16', if_true: files('sb16.c'))
++system_ss.add(when: 'CONFIG_SCREAMER', if_true: files('screamer.c'))
+ system_ss.add(when: 'CONFIG_VT82C686', if_true: files('via-ac97.c'))
+ system_ss.add(when: 'CONFIG_WM8750', if_true: files('wm8750.c'))
+ system_ss.add(when: ['CONFIG_VIRTIO_SND', 'CONFIG_VIRTIO'], if_true: files('virtio-snd.c'))
+diff --git a/hw/misc/macio/macio.c b/hw/misc/macio/macio.c
+index 3f449f91..e8b3ef2d 100644
+--- a/hw/misc/macio/macio.c
++++ b/hw/misc/macio/macio.c
+@@ -102,6 +102,13 @@ static bool macio_common_realize(PCIDevice *d, Error **errp)
+     memory_region_add_subregion(&s->bar, 0x08000,
+                                 sysbus_mmio_get_region(sbd, 0));
+ 
++    if (!qdev_realize(DEVICE(&s->screamer), BUS(&s->macio_bus), errp)) {
++        return false;
++    }
++    sbd = SYS_BUS_DEVICE(&s->screamer);
++    memory_region_add_subregion(&s->bar, 0x14000,
++                                sysbus_mmio_get_region(sbd, 0));
++
+     qdev_prop_set_uint32(DEVICE(&s->escc), "disabled", 0);
+     qdev_prop_set_uint32(DEVICE(&s->escc), "frequency", ESCC_CLOCK);
+     qdev_prop_set_uint32(DEVICE(&s->escc), "it_shift", 4);
+@@ -110,7 +117,6 @@ static bool macio_common_realize(PCIDevice *d, Error **errp)
+     if (!qdev_realize(DEVICE(&s->escc), BUS(&s->macio_bus), errp)) {
+         return false;
+     }
+-
+     macio_bar_setup(s);
+     pci_register_bar(d, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar);
+ 
+@@ -191,6 +197,13 @@ static void macio_oldworld_realize(PCIDevice *d, Error **errp)
+                            0x1a, errp)) {
+         return;
+     }
++    
++    /* Screamer */
++    sbd = SYS_BUS_DEVICE(&s->screamer);
++    sysbus_connect_irq(sbd, 0, qdev_get_gpio_in(pic_dev, OLDWORLD_SCREAMER_TX_IRQ));
++    sysbus_connect_irq(sbd, 1, qdev_get_gpio_in(pic_dev, OLDWORLD_SCREAMER_TX_DMA_IRQ));
++    sysbus_connect_irq(sbd, 1, qdev_get_gpio_in(pic_dev, OLDWORLD_SCREAMER_RX_IRQ));
++    macio_screamer_register_dma(SCREAMER(sbd), &s->dbdma, 0x10, 0x12);
+ }
+ 
+ static void macio_init_ide(MacIOState *s, MACIOIDEState *ide, int index)
+@@ -344,6 +357,13 @@ static void macio_newworld_realize(PCIDevice *d, Error **errp)
+         memory_region_add_subregion(&s->bar, 0x16000,
+                                     sysbus_mmio_get_region(sbd, 0));
+     }
++
++    /* Screamer */
++    sbd = SYS_BUS_DEVICE(&s->screamer);
++    sysbus_connect_irq(sbd, 0, qdev_get_gpio_in(pic_dev, NEWWORLD_SCREAMER_IRQ));
++    sysbus_connect_irq(sbd, 1, qdev_get_gpio_in(pic_dev, NEWWORLD_SCREAMER_DMA_IRQ));
++    sysbus_connect_irq(sbd, 2, qdev_get_gpio_in(pic_dev, NEWWORLD_SCREAMER_RX_IRQ));
++    macio_screamer_register_dma(SCREAMER(sbd), &s->dbdma, 0x10, 0x12);
+ }
+ 
+ static void macio_newworld_init(Object *obj)
+@@ -373,6 +393,8 @@ static void macio_instance_init(Object *obj)
+     object_initialize_child(obj, "dbdma", &s->dbdma, TYPE_MAC_DBDMA);
+ 
+     object_initialize_child(obj, "escc", &s->escc, TYPE_ESCC);
++
++    object_initialize_child(obj, "screamer", &s->screamer, TYPE_SCREAMER);
+ }
+ 
+ static const VMStateDescription vmstate_macio_oldworld = {
+diff --git a/hw/ppc/Kconfig b/hw/ppc/Kconfig
+index 5addad11..05f6bea4 100644
+--- a/hw/ppc/Kconfig
++++ b/hw/ppc/Kconfig
+@@ -136,6 +136,7 @@ config MAC_OLDWORLD
+     select HEATHROW_PIC
+     select MACIO
+     select FW_CFG_PPC
++    select SCREAMER
+ 
+ config MAC_NEWWORLD
+     bool
+@@ -151,6 +152,7 @@ config MAC_NEWWORLD
+     select MAC_PMU
+     select UNIN_PCI
+     select FW_CFG_PPC
++    select SCREAMER
+ 
+ config E500
+     bool
+diff --git a/include/hw/misc/macio/macio.h b/include/hw/misc/macio/macio.h
+index 16aa95b8..c806fb5f 100644
+--- a/include/hw/misc/macio/macio.h
++++ b/include/hw/misc/macio/macio.h
+@@ -36,6 +36,7 @@
+ #include "hw/nvram/mac_nvram.h"
+ #include "hw/ppc/mac_dbdma.h"
+ #include "hw/ppc/openpic.h"
++#include "hw/audio/screamer.h"
+ #include "qom/object.h"
+ 
+ /* Old World IRQs */
+@@ -46,6 +47,9 @@
+ #define OLDWORLD_IDE0_DMA_IRQ  0x2
+ #define OLDWORLD_IDE1_IRQ      0xe
+ #define OLDWORLD_IDE1_DMA_IRQ  0x3
++#define OLDWORLD_SCREAMER_TX_IRQ  0x11
++#define OLDWORLD_SCREAMER_TX_DMA_IRQ 0x08
++#define OLDWORLD_SCREAMER_RX_IRQ  0x09
+ 
+ /* New World IRQs */
+ #define NEWWORLD_CUDA_IRQ      0x19
+@@ -58,6 +62,9 @@
+ #define NEWWORLD_IDE1_DMA_IRQ  0x3
+ #define NEWWORLD_EXTING_GPIO1  0x2f
+ #define NEWWORLD_EXTING_GPIO9  0x37
++#define NEWWORLD_SCREAMER_IRQ  0x18
++#define NEWWORLD_SCREAMER_DMA_IRQ 0x09
++#define NEWWORLD_SCREAMER_RX_IRQ 0x0a
+ 
+ /* MacIO virtual bus */
+ #define TYPE_MACIO_BUS "macio-bus"
+@@ -112,6 +119,7 @@ struct MacIOState {
+     PMUState pmu;
+     DBDMAState dbdma;
+     ESCCState escc;
++    ScreamerState screamer;
+     uint64_t frequency;
+ };
+ 
+@@ -140,6 +148,7 @@ struct NewWorldMacIOState {
+     bool has_pmu;
+     bool has_adb;
+     OpenPICState pic;
++
+     MACIOIDEState ide[2];
+     MacIOGPIOState gpio;
+ };

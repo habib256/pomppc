@@ -44,7 +44,22 @@ public:
 
     // Copy the newest framebuffer into `out` (BGRA, tightly packed WxH).
     // Returns true when a new frame has arrived since the last latch.
+    //
+    // Only the rows that actually changed are copied: `out` is expected to
+    // persist across calls (it mirrors the guest surface). `y0`/`y1` bound the
+    // touched rows [y0, y1); `resized` says the surface geometry changed, so
+    // the caller must re-upload everything. Copying the whole 3 MB surface on
+    // every frame — under the lock the D-Bus thread needs — was ~180 MB/s of
+    // pure memcpy at 60 fps.
+    bool latchFrame(std::vector<uint32_t>& out, int& w, int& h,
+                    int& y0, int& y1, bool& resized);
+    // Convenience wrapper (whole-surface semantics) for the headless probe.
     bool latchFrame(std::vector<uint32_t>& out, int& w, int& h);
+
+    // Reap QEMU if it died on its own; returns false once it is gone. Call it
+    // from the UI loop: nothing else clears running_, so a crashed QEMU used to
+    // leave the frontend showing a frozen frame labelled "en marche" forever.
+    bool checkAlive();
 
     // Input — thread-safe, marshalled onto the D-Bus thread.
     void keyPress(uint32_t qkeycode);
@@ -114,6 +129,11 @@ private:
     std::vector<uint32_t> fb_;      // BGRA, fbW_*fbH_
     int fbW_ = 0, fbH_ = 0;
     bool fbDirty_ = false;
+    bool fbResized_ = false;        // geometry changed since the last latch
+    int fbY0_ = 0, fbY1_ = 0;       // dirty row span [fbY0_, fbY1_)
+    void markRows(int y0, int y1);  // fbMtx_ held by the caller
 
     long qemuPid_ = -1;
+    bool qemuReaped_ = false;       // waitpid() already collected it
+    uint32_t qmpSeq_ = 0;           // correlates QMP replies with commands
 };

@@ -3,7 +3,7 @@
 #
 #   ./run_tiger.sh            # SMP 2 cœurs (MTTCG) + SON, fenêtre GTK, disque persistant
 #   SMP=1 ./run_tiger.sh      # mono-cœur + SON (chemin stable d'origine)
-#   NOSOUND=1 ./run_tiger.sh  # coupe l'audio (permet RAM 1024 au lieu de 768)
+#   NOSOUND=1 ./run_tiger.sh  # coupe l'audio (rend la RAM pleine : 1024 au lieu de 768)
 #   WIDE=1 ./run_tiger.sh     # 16:9 plein écran 1920x1080 (sinon RES=WxHxD au choix)
 #   SNAPSHOT=1 ./run_tiger.sh # disque jetable (writes annulés -> boot toujours propre, pas de fsck)
 #   NET=1 ./run_tiger.sh      # réseau (si ton QEMU a slirp compilé)
@@ -17,10 +17,12 @@
 # Piloté par le frontend ImGui : DBUS_DISPLAY=1 (sortie -display dbus,p2p=on) et
 # QMP_SOCK=<chemin> (socket QMP). POMPPC_SCRATCH déplace .run/ (socket moniteur).
 #
-# Build UNIFIÉ : QEMU 9.2 (device Screamer porté du fork mcayland) + OpenBIOS
-# fusionné (bring-up SMP balaton + nœud audio screamer). SMP *et* son ensemble.
-# ⚠ Le son exige que le binaire ait la classe 'screamer' : scripts/build_qemu_qfb.sh
-# ne la fournit PAS (port absent du dépôt) -> utiliser NOSOUND=1 avec ce build.
+# Build UNIFIÉ : QEMU 9.2 (device Screamer, patches/screamer/) + OpenBIOS fusionné
+# (bring-up SMP balaton + nœud audio screamer). SMP *et* son ensemble, produits
+# tous les deux par scripts/build_qemu_qfb.sh.
+# Le son est SONDÉ, pas supposé : si le binaire n'a pas la classe 'screamer', le
+# lanceur le dit, coupe l'audio et NE rabote PAS la RAM. (Un -global sur une
+# classe absente n'est qu'un warning côté QEMU : rien ne signalait la panne.)
 # SMP >= 2 : qemu-system-ppc64 (target MTTCG-safe) + réveil CPU secondaire via
 # GPIO KeyLargo. Vérifie le nb de CPU dans « À propos de ce Mac ». Son via
 # PulseAudio (activer la Mémoire Virtuelle côté invité aide). Fenêtre fermée -> quitte.
@@ -29,6 +31,7 @@ USER_SMP="${SMP:-}"                        # intention user AVANT que config.env
 USER_RES="${RES:-}"                        # RES explicite de l'utilisateur, prioritaire
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$ROOT/config.env"
+source "$ROOT/scripts/caps.sh"
 
 # WIDE=1 -> 16:9 plein écran (1920x1080). Le ndrv stock offre nativement ce mode
 # (contrairement à 1440x900/1600x900 qui retombent en 800x600). RES= reste prioritaire.
@@ -36,16 +39,25 @@ source "$ROOT/config.env"
 [ -n "$USER_RES" ] && RES="$USER_RES"
 
 SMP_N="${USER_SMP:-2}"                     # défaut = 2 cœurs (la nouveauté)
-SND_TAG=""; [ -z "${NOSOUND:-}" ] && SND_TAG=" + SON"   # évite $(...) sous set -e
 # OpenBIOS UNIFIÉ : bring-up SMP (balaton) + nœud audio screamer (mcayland),
 # buildé en -O1 (gcc-13 miscompile ce code OpenBIOS à -Os). Marche mono ET SMP.
 UNI_OBIOS="$ROOT/patches/smp-mac99/openbios-smp-screamer.elf"
 QEMU_BIN64="${QEMU_BIN}64"                # qemu-system-ppc -> qemu-system-ppc64
 
-# --- Disque déjà verrouillé ? ---
-if fuser "$DISK" >/dev/null 2>&1; then
-  echo "⚠  $DISK est déjà utilisé par un autre QEMU. Ferme-le d'abord." >&2
-  exit 1
+# --- Verrou disque ---
+# flock plutôt que fuser : fuser vient de psmisc, et s'il manque le test
+# échouait en silence — plus aucun garde-fou, deux QEMU sur le même qcow2,
+# corruption. Le fd 9 reste ouvert à travers l'exec final : le verrou vit donc
+# aussi longtemps que QEMU. En SNAPSHOT=1 les écritures sont jetées, plusieurs
+# instances sont légitimes : pas de verrou.
+SCR="${POMPPC_SCRATCH:-$ROOT/.run}"; mkdir -p "$SCR"
+if [ -z "${SNAPSHOT:-}" ]; then
+  exec 9>"$SCR/tiger.lock"
+  if ! flock -n 9; then
+    echo "⚠  Tiger tourne déjà (verrou $SCR/tiger.lock). Ferme-le d'abord," >&2
+    echo "   ou lance en disque jetable : SNAPSHOT=1 ./run_tiger.sh" >&2
+    exit 1
+  fi
 fi
 
 # --- Sélection binaire / accélérateur / firmware ---
@@ -54,12 +66,24 @@ EXTRA=(); AUDIO=(); RAM="$RAM_MB"
 [ -f "$UNI_OBIOS" ] || { echo "⚠  OpenBIOS unifié introuvable ($UNI_OBIOS)." >&2; exit 1; }
 EXTRA+=(-bios "$UNI_OBIOS")
 
-# Son ON par défaut (Screamer intégré au build 9.2) ; NOSOUND=1 pour couper.
+# Son ON par défaut ; NOSOUND=1 pour couper. On SONDE le binaire : sans la
+# classe 'screamer' QEMU se contente d'un warning sur le -global, et on se
+# retrouvait avec 768 Mo de RAM et zéro son sans le savoir.
+SND_ON=0
 if [ -z "${NOSOUND:-}" ]; then
-  AUDIO=(-audiodev pa,id=snd0 -global screamer.audiodev=snd0)
-  export PULSE_SERVER="${PULSE_SERVER:-unix:/run/user/$(id -u)/pulse/native}"
-  [ "$RAM" -gt 768 ] && RAM=768          # le Screamer exige < 1 Go
+  if qemu_machine_has "$QEMU_BIN" "$MACHINE" screamer; then
+    AUDIO=(-audiodev pa,id=snd0 -global screamer.audiodev=snd0)
+    export PULSE_SERVER="${PULSE_SERVER:-unix:/run/user/$(id -u)/pulse/native}"
+    [ "$RAM" -gt 768 ] && RAM=768        # le Screamer exige < 1 Go
+    SND_ON=1
+  else
+    echo "⚠  son indisponible : ce QEMU n'a pas le device 'screamer'." >&2
+    echo "   Reconstruis le binaire de référence : ./scripts/build_qemu_qfb.sh" >&2
+    echo "   (RAM laissée à ${RAM} Mo — pas de plafond 768 sans Screamer.)" >&2
+  fi
 fi
+
+SND_TAG=""; [ "$SND_ON" = 1 ] && SND_TAG=" + SON"   # reflète le sondage, pas l'intention
 
 if [ "$SMP_N" -ge 2 ]; then
   [ -x "$QEMU_BIN64" ] || { echo "⚠  SMP demandé mais $QEMU_BIN64 introuvable." >&2; exit 1; }
@@ -83,7 +107,14 @@ QMP_ARGS=()
 [ -n "${QMP_SOCK:-}" ] && QMP_ARGS=(-qmp "unix:$QMP_SOCK,server=on,wait=off")
 
 # --- Réseau (coupé par défaut : build sans slirp) ---
-if [ -n "${NET:-}" ]; then NET_ARGS=(-netdev "$NETDEV" -device "$NETNIC"); else NET_ARGS=(-nic none); fi
+if [ -n "${NET:-}" ]; then
+  if qemu_has_netdev "$QEMU_BIN" user; then
+    NET_ARGS=(-netdev "$NETDEV" -device "$NETNIC")
+  else
+    echo "⚠  NET=1 demandé mais ce QEMU n'a pas slirp — réseau coupé." >&2
+    NET_ARGS=(-nic none); NET=""
+  fi
+else NET_ARGS=(-nic none); fi
 
 # --- Disque jetable optionnel ---
 SNAP_ARGS=(); [ -n "${SNAPSHOT:-}" ] && SNAP_ARGS=(-snapshot)
@@ -97,7 +128,7 @@ CD_ARGS=(); [ -z "${NOCD:-}" ] && CD_ARGS=(-drive "id=gamecd,if=ide,media=cdrom"
 #     console Open Firmware. QFB_RES=LxH choisit le mode par défaut proposé.
 QFB_ARGS=()
 if [ -n "${QFB:-}" ]; then
-  if "$BIN" -device help 2>/dev/null | grep -q '"qfb-pci"'; then
+  if qemu_has_device "$BIN" qfb-pci; then
     QFB_RES="${QFB_RES:-1280x800}"
     QFB_ARGS=(-device "qfb-pci,id=qfb0,width=${QFB_RES%x*},height=${QFB_RES#*x},depth=8")
     echo "  🖵  écran QFB ${QFB_RES} (second moniteur)"
@@ -112,7 +143,6 @@ fi
 read -r -a USER_EXTRA <<< "${EXTRA_ARGS:-}"
 
 BOOTDEV='hd:10,\System\Library\CoreServices\BootX'
-SCR="${POMPPC_SCRATCH:-$ROOT/.run}"; mkdir -p "$SCR"
 MON="$SCR/mon.sock"; rm -f "$MON"
 
 echo "▶ Tiger : $MODE | cpu=$CPU ram=${RAM}Mo affichage=$DISP \
@@ -124,7 +154,7 @@ echo "  moniteur QEMU : $MON"
 # --- Manette USB : auto-passthrough (idem run_os9.sh) ; NOPAD=1 pour couper ---
 PAD_ARGS=()
 if [ -z "${NOPAD:-}" ] && [ -e /dev/input/js0 ] \
-   && "$BIN" -device help 2>/dev/null | grep -q '"usb-host"'; then
+   && qemu_has_device "$BIN" usb-host; then
   PAD_VID=$(udevadm info -q property -n /dev/input/js0 2>/dev/null | sed -n 's/^ID_VENDOR_ID=//p')
   PAD_PID=$(udevadm info -q property -n /dev/input/js0 2>/dev/null | sed -n 's/^ID_MODEL_ID=//p')
   PAD_USB="/dev/bus/usb/$(lsusb 2>/dev/null | awk -v v="$PAD_VID" -v p="$PAD_PID" 'tolower($6)==v":"p{printf "%s/%s", $2, substr($4,1,3)}')"
