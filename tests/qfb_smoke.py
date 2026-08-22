@@ -18,6 +18,14 @@ W, H = 640, 480
 VRAM, REGS = 0x82000000, 0x84000000      # BARs assignés par OpenBIOS sur mac99
 BAND = 0x4000                            # 16 Kio = 4096 pixels de test
 
+# Non-régression : un scanout qui déborde de la VRAM faisait ABORTER QEMU.
+# MODE_BASE accepte n'importe quel offset < 32 Mio pendant que width/height sont
+# bornés séparément, si bien qu'un invité pouvait programmer un mode dont les
+# lignes sortent de la région. Les lectures sont repliées par qfb_read_byte(),
+# mais pas la requête dirty : memory_region_snapshot_get_dirty() fait
+# assert(start + length <= snap->end) et l'HÔTE tombe.
+OVERFLOW_BASE = 0x1F00000                # 31 Mio, sur 32 Mio de VRAM
+
 FORTH = f"""
 {REGS:x} l@ .
 {W:x} {REGS + 4:x} l!
@@ -77,9 +85,27 @@ def main():
     qmp("qmp_capabilities")
     r = qmp("screendump", filename=shot)
     time.sleep(1.5)
-    qemu.kill()
     if "error" in r:
-        print("ÉCHEC screendump :", r); return 1
+        print("ÉCHEC screendump :", r); qemu.kill(); return 1
+
+    # ── Non-régression : scanout débordant de la VRAM ──────────────────────
+    # On repousse la base à 31 Mio en gardant un mode haut : les dernières
+    # lignes tombent au-delà des 32 Mio. Avant correctif, le screendump qui
+    # suit déclenchait l'assert de QEMU et tuait le processus.
+    for line in ("%x %x l!" % (OVERFLOW_BASE, REGS + 0x10),
+                 "%x %x l!" % (H, REGS + 8)):
+        qemu.stdin.write((line + "\n").encode()); qemu.stdin.flush()
+        time.sleep(0.5)
+    time.sleep(1.0)
+    overflow_shot = os.path.join(tmp, "overflow.ppm")
+    try:
+        qmp("screendump", filename=overflow_shot)
+        time.sleep(1.0)
+        survived = qemu.poll() is None
+    except (BrokenPipeError, ConnectionResetError, ValueError):
+        survived = False
+
+    qemu.kill()
 
     data = open(shot, "rb").read()
     _, dims, _, pixels = data.split(b"\n", 3)
@@ -95,6 +121,7 @@ def main():
         ("bande rouge", px(4, 2),      (255, 0, 0)),
         ("bande verte", px(4, 8),      (0, 255, 0)),
         ("fond gris",   px(320, 240),  (32, 32, 32)),
+        ("survie débordement", survived, True),   # non-régression : pas d'abort hôte
     ]
     failed = 0
     for name, got, want in checks:

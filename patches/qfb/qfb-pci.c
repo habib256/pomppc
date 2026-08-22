@@ -88,6 +88,11 @@ typedef struct QfbState {
 
     uint32_t regs[QFB_NUM_REGS];
 
+    /* Palette/gamma changed since the last redraw: the guest rewrites the
+       whole CLUT one register at a time (256 entries), and each write used to
+       mark all 32 MiB dirty. Coalesced into one invalidation per frame. */
+    bool pal_dirty;
+
     QEMUTimer *vbl_timer;
     qemu_irq irq;
 } QfbState;
@@ -243,11 +248,41 @@ static qfb_draw_line_func * const qfb_draw_line_table[QFB_DRAW_LINE_NB] = {
     qfb_draw_line24,
 };
 
+/*
+ * Number of scanlines that actually fit in VRAM below the current MODE_BASE.
+ *
+ * QFB_MODE_BASE accepts any offset inside the 32 MiB while width/height are
+ * clamped independently, so a guest can program a scanout that runs past the
+ * end of VRAM. Reads are wrapped by qfb_read_byte(), but the per-line dirty
+ * query in qfb_draw_graphic() is not: QEMU asserts
+ * (start + length <= snap->end, system/physmem.c) and the *host* aborts.
+ * Everything that walks the scanout must therefore go through this bound.
+ */
+static uint32_t qfb_visible_lines(QfbState *s)
+{
+    uint32_t base = s->regs[QFB_MODE_BASE >> 2];
+    uint32_t lines;
+
+    if (s->stride == 0 || base >= QFB_VRAM_SIZE) {
+        return 0;
+    }
+    lines = (QFB_VRAM_SIZE - base) / s->stride;
+
+    return lines < s->height ? lines : s->height;
+}
+
 static void qfb_invalidate_display(void *opaque)
 {
     QfbState *s = opaque;
+    uint32_t lines = qfb_visible_lines(s);
 
-    memory_region_set_dirty(&s->mem_vram, 0, QFB_VRAM_SIZE);
+    /* Only the scanout window is ever displayed. Marking the whole 32 MiB
+       dirty burnt 8192 page bits per call for nothing: a 1024x768x8 mode is
+       768 KiB, i.e. 2% of the VRAM. */
+    if (lines) {
+        memory_region_set_dirty(&s->mem_vram, s->regs[QFB_MODE_BASE >> 2],
+                                (uint64_t)lines * s->stride);
+    }
 }
 
 static void qfb_draw_graphic(QfbState *s)
@@ -256,6 +291,7 @@ static void qfb_draw_graphic(QfbState *s)
     DirtyBitmapSnapshot *snap = NULL;
     ram_addr_t page;
     uint32_t v = 0;
+    uint32_t base, lines;
     int y, ymin;
     int qfb_stride = s->stride;
     qfb_draw_line_func *qfb_draw_line;
@@ -284,13 +320,21 @@ static void qfb_draw_graphic(QfbState *s)
     qfb_draw_line = qfb_draw_line_table[v];
     assert(qfb_draw_line != NULL);
 
-    snap = memory_region_snapshot_and_clear_dirty(&s->mem_vram, 0x0,
-                                             memory_region_size(&s->mem_vram),
+    base  = s->regs[QFB_MODE_BASE >> 2];
+    lines = qfb_visible_lines(s);
+    if (lines == 0) {
+        return;
+    }
+
+    /* Snapshot only the scanout, never the whole 32 MiB: past the end of the
+       region memory_region_snapshot_get_dirty() asserts and takes QEMU down. */
+    snap = memory_region_snapshot_and_clear_dirty(&s->mem_vram, base,
+                                             (uint64_t)lines * qfb_stride,
                                              DIRTY_MEMORY_VGA);
 
     ymin = -1;
-    page = s->regs[QFB_MODE_BASE >> 2];
-    for (y = 0; y < s->height; y++, page += qfb_stride) {
+    page = base;
+    for (y = 0; y < lines; y++, page += qfb_stride) {
         if (memory_region_snapshot_get_dirty(&s->mem_vram, snap, page,
                                              qfb_stride)) {
             uint8_t *data_display;
@@ -350,6 +394,11 @@ static void qfb_update_display(void *opaque)
     if (s->width != surface_width(surface) ||
         s->height != surface_height(surface)) {
         qemu_console_resize(s->con, s->width, s->height);
+        qfb_invalidate_display(s);
+    }
+
+    if (s->pal_dirty) {
+        s->pal_dirty = false;
         qfb_invalidate_display(s);
     }
 
@@ -493,7 +542,7 @@ static void qfb_ctrl_write(void *opaque, hwaddr addr, uint64_t val,
         s->palette_red[s->palette_current] = (val >> 16) & 255;
         s->palette_green[s->palette_current] = (val >> 8) & 255;
         s->palette_blue[s->palette_current] = val & 255;
-        qfb_invalidate_display(s);
+        s->pal_dirty = true;
         break;
     case QFB_LUT_INDEX:
         s->gamma_current = val % 256;
@@ -503,7 +552,7 @@ static void qfb_ctrl_write(void *opaque, hwaddr addr, uint64_t val,
         s->gamma_red[s->gamma_current] = (val >> 16) & 255;
         s->gamma_green[s->gamma_current] = (val >> 8) & 255;
         s->gamma_blue[s->gamma_current] = val & 255;
-        qfb_invalidate_display(s);
+        s->pal_dirty = true;
         break;
     case QFB_IRQ_MASK:
         s->regs[addr >> 2] = val & QFB_IRQ_VBL;
