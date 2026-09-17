@@ -60,14 +60,66 @@ typedef struct QgpuTexture {
 /* Nombre de niveaux utilisables (0 = texture incomplète). */
 uint32_t qgpu_texture_levels(const QgpuTexture *t);
 
+/* ── v7 : état de l'étage géométrique, par contexte ──────────────────────────
+ *
+ * Tout est en flottants hôte-natifs, déjà validé par le cœur (pas de NaN, pas
+ * d'infini, bornes d'OpenGL respectées) : un backend lit et applique.
+ * Les matrices sont dans l'ORDRE COLONNE d'OpenGL (m[0..3] = 1re colonne),
+ * comme sur le fil et comme glLoadMatrixf les veut. */
+typedef struct QgpuLight {
+    bool  enabled;
+    float ambient[4], diffuse[4], specular[4];
+    float position[4];             /* EN COORDONNÉES ŒIL ; w = 0 : directionnelle */
+    float spot_dir[3];             /* idem, coordonnées œil */
+    float spot_exp, spot_cutoff;   /* cutoff : 0..90, ou 180 = pas de spot */
+    float att[3];                  /* constante, linéaire, quadratique */
+} QgpuLight;
+
+typedef struct QgpuMaterial {
+    float ambient[4], diffuse[4], specular[4], emission[4];
+    float shininess;
+} QgpuMaterial;
+
+typedef struct QgpuTexgen {
+    bool     enabled;
+    uint32_t mode;                 /* QGPU_TG_* */
+    float    obj_plane[4];
+    float    eye_plane[4];         /* déjà en coordonnées œil */
+} QgpuTexgen;
+
+typedef struct QgpuClipPlane {
+    bool  enabled;
+    float eq[4];                   /* coordonnées œil ; garde eq·p >= 0 */
+} QgpuClipPlane;
+
+typedef struct QgpuGeom {
+    float mtx[QGPU_MTX_COUNT][16];         /* modèle-vue, projection, textures 0..3 */
+    QgpuLight     light[QGPU_MAX_LIGHTS];
+    QgpuMaterial  mat[2];                  /* 0 = face avant, 1 = face arrière */
+    float         lm_ambient[4];           /* ambiante du modèle d'éclairage */
+    QgpuTexgen    texgen[QGPU_MAX_UNITS][4];   /* [unité][S,T,R,Q] */
+    QgpuClipPlane clip[QGPU_MAX_CLIP_PLANES];
+    /* valeurs courantes des attributs absents du format de sommet */
+    float cur_normal[3], cur_color[4], cur_sec[3], cur_fog;
+    float cur_tex[QGPU_MAX_UNITS][4];
+    int32_t vp[4];                         /* viewport GL : origine EN BAS à gauche */
+    bool    vp_set;                        /* un VIEWPORT a été posé */
+    float   depth_near, depth_far;
+} QgpuGeom;
+
 typedef struct QgpuContext {
     bool      used;
     int32_t   surf;                /* surface liée, -1 si aucune */
-    int32_t   vp[4];               /* viewport (réservé) */
     QgpuState st;
+    QgpuGeom  gm;                  /* v7 */
 } QgpuContext;
 
 void qgpu_state_init(QgpuState *st);
+void qgpu_geom_init(QgpuGeom *gm);              /* v7 : valeurs initiales d'OpenGL */
+
+/* v7 : offset (en mots) de l'attribut `bit` (QGPU_VF_*) dans un sommet de
+ * format `fmt`, ou -1 s'il est absent. La position est à l'offset 0. */
+int qgpu_vf_offset(uint32_t fmt, uint32_t bit);
 
 /*
  * Contrat d'un backend. Les pixels échangés avec le cœur sont des uint32_t
@@ -95,6 +147,19 @@ typedef struct QgpuBackend {
     bool (*draw)(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t prim,
                  QgpuTexture *const *tex,
                  const float *verts, uint32_t nverts, uint32_t words);
+    /* Dessin de sommets BRUTS (v7). Le cœur a tout validé et tout remis à plat :
+       `verts` tient `nverts` sommets SERRÉS de `words` = QGPU_VF_WORDS(fmt)
+       flottants hôte-natifs, dans l'ordre fixe du format ; `idx` tient `count`
+       indices hôte-natifs déjà bornés à nverts, ou vaut NULL et le dessin est
+       séquentiel de `first` à `first + count - 1`. `gm` porte matrices,
+       lumières, matériaux, texgen et plans de découpe ; `mode` est le mode GL.
+       C'est au backend de faire (ou de faire faire) transformation, éclairage,
+       découpe, division perspective et viewport. */
+    bool (*draw_raw)(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
+                     const QgpuGeom *gm, QgpuTexture *const *tex,
+                     uint32_t mode, uint32_t fmt, const float *verts,
+                     uint32_t nverts, uint32_t words,
+                     const uint32_t *idx, uint32_t count, uint32_t first);
     bool (*readback)(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
                      uint32_t w, uint32_t h, uint32_t *dst);
     bool (*upload)(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
@@ -134,6 +199,7 @@ struct QgpuCore {
     uint32_t *pbuf; uint32_t pbuf_cap;   /* en pixels */
     float    *dbuf; uint32_t dbuf_cap;   /* en pixels (profondeur) */
     uint8_t  *sbuf; uint32_t sbuf_cap;   /* en pixels (stencil, v6) */
+    uint32_t *ibuf; uint32_t ibuf_cap;   /* en indices (v7, DRAW_RAW) */
 };
 
 /* Accès big-endian, sans dépendre des helpers QEMU. */

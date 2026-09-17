@@ -56,6 +56,21 @@ static bool grow_sbuf(QgpuCore *c, uint32_t npix)
     return true;
 }
 
+static bool grow_ibuf(QgpuCore *c, uint32_t n)
+{
+    if (n <= c->ibuf_cap) {
+        return true;
+    }
+    {
+        uint32_t *p = realloc(c->ibuf, (size_t)n * sizeof(uint32_t));
+        if (!p) {
+            return false;
+        }
+        c->ibuf = p; c->ibuf_cap = n;
+    }
+    return true;
+}
+
 /* GL : état initial d'un contexte. */
 void qgpu_state_init(QgpuState *st)
 {
@@ -88,6 +103,104 @@ void qgpu_state_init(QgpuState *st)
     st->v[QGPU_SK_STENCIL_OP_FAIL]    = QGPU_SOP_KEEP;
     st->v[QGPU_SK_STENCIL_OP_ZFAIL]   = QGPU_SOP_KEEP;
     st->v[QGPU_SK_STENCIL_OP_ZPASS]   = QGPU_SOP_KEEP;
+    /* v7 : étage géométrique, valeurs initiales d'OpenGL. */
+    st->v[QGPU_SK_SHADE_MODEL]    = 0x1D01;        /* GL_SMOOTH */
+    st->v[QGPU_SK_CULL_MODE]      = 0x0405;        /* GL_BACK */
+    st->v[QGPU_SK_FRONT_FACE]     = 0x0901;        /* GL_CCW */
+    st->v[QGPU_SK_COLOR_MAT_FACE] = 0x0408;        /* GL_FRONT_AND_BACK */
+    st->v[QGPU_SK_COLOR_MAT_MODE] = 0x1602;        /* GL_AMBIENT_AND_DIFFUSE */
+    st->v[QGPU_SK_COLOR_CONTROL]  = 0x81F9;        /* GL_SINGLE_COLOR */
+    st->v[QGPU_SK_FOG_MODE]       = QGPU_FOG_VERTEX;
+    st->v[QGPU_SK_FOG_DENSITY]    = 0x3F800000;    /* 1.0 */
+    st->v[QGPU_SK_FOG_START]      = 0x00000000;    /* 0.0 */
+    st->v[QGPU_SK_FOG_END]        = 0x3F800000;    /* 1.0 */
+}
+
+static void set4(float *d, float a, float b, float c, float e)
+{
+    d[0] = a; d[1] = b; d[2] = c; d[3] = e;
+}
+
+/* v7 : état géométrique initial, celui d'OpenGL à la création d'un contexte. */
+void qgpu_geom_init(QgpuGeom *gm)
+{
+    int i, u, k;
+
+    memset(gm, 0, sizeof(*gm));
+    for (i = 0; i < QGPU_MTX_COUNT; i++) {
+        gm->mtx[i][0] = gm->mtx[i][5] = gm->mtx[i][10] = gm->mtx[i][15] = 1.0f;
+    }
+    for (i = 0; i < QGPU_MAX_LIGHTS; i++) {
+        QgpuLight *l = &gm->light[i];
+        set4(l->ambient, 0.0f, 0.0f, 0.0f, 1.0f);
+        /* GL : seule GL_LIGHT0 a une diffuse et une spéculaire blanches. */
+        set4(l->diffuse, i ? 0.0f : 1.0f, i ? 0.0f : 1.0f, i ? 0.0f : 1.0f, 1.0f);
+        set4(l->specular, i ? 0.0f : 1.0f, i ? 0.0f : 1.0f, i ? 0.0f : 1.0f, 1.0f);
+        set4(l->position, 0.0f, 0.0f, 1.0f, 0.0f);
+        l->spot_dir[0] = 0.0f; l->spot_dir[1] = 0.0f; l->spot_dir[2] = -1.0f;
+        l->spot_exp = 0.0f;
+        l->spot_cutoff = 180.0f;
+        l->att[0] = 1.0f; l->att[1] = 0.0f; l->att[2] = 0.0f;
+    }
+    for (i = 0; i < 2; i++) {
+        set4(gm->mat[i].ambient, 0.2f, 0.2f, 0.2f, 1.0f);
+        set4(gm->mat[i].diffuse, 0.8f, 0.8f, 0.8f, 1.0f);
+        set4(gm->mat[i].specular, 0.0f, 0.0f, 0.0f, 1.0f);
+        set4(gm->mat[i].emission, 0.0f, 0.0f, 0.0f, 1.0f);
+        gm->mat[i].shininess = 0.0f;
+    }
+    set4(gm->lm_ambient, 0.2f, 0.2f, 0.2f, 1.0f);
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        for (k = 0; k < 4; k++) {
+            QgpuTexgen *tg = &gm->texgen[u][k];
+            tg->mode = QGPU_TG_EYE_LINEAR;
+            /* GL : plans initiaux (1,0,0,0) pour S, (0,1,0,0) pour T, 0 pour R et Q */
+            if (k < 2) {
+                tg->obj_plane[k] = 1.0f;
+                tg->eye_plane[k] = 1.0f;
+            }
+        }
+        set4(gm->cur_tex[u], 0.0f, 0.0f, 0.0f, 1.0f);
+    }
+    gm->cur_normal[2] = 1.0f;
+    set4(gm->cur_color, 1.0f, 1.0f, 1.0f, 1.0f);
+    /* 1.0 = « pas de brouillard » dans la convention du fil (cf. qgpu_proto.h) */
+    gm->cur_fog = 1.0f;
+    gm->depth_near = 0.0f;
+    gm->depth_far = 1.0f;
+}
+
+/* v7 : offset d'un attribut dans un sommet, dans l'ordre fixe du protocole. */
+int qgpu_vf_offset(uint32_t fmt, uint32_t bit)
+{
+    static const uint32_t order[6] = {
+        QGPU_VF_NORMAL, QGPU_VF_COLOR, QGPU_VF_SEC_COLOR, QGPU_VF_FOG,
+        QGPU_VF_TEX(0), QGPU_VF_TEX(1)
+    };
+    static const int size[6] = { 3, 4, 3, 1, 4, 4 };
+    int off = QGPU_VF_POS_COUNT(fmt), i;
+
+    if (bit == 0) {
+        return 0;                                /* la position est toujours là */
+    }
+    for (i = 0; i < 6; i++) {
+        if (bit == order[i]) {
+            return (fmt & bit) ? off : -1;
+        }
+        if (fmt & order[i]) {
+            off += size[i];
+        }
+    }
+    /* unités 2 et 3, à la suite de l'unité 1 */
+    for (i = 2; i < QGPU_MAX_UNITS; i++) {
+        if (bit == (uint32_t)QGPU_VF_TEX(i)) {
+            return (fmt & bit) ? off : -1;
+        }
+        if (fmt & (uint32_t)QGPU_VF_TEX(i)) {
+            off += 4;
+        }
+    }
+    return -1;
 }
 
 static bool valid_base_format(uint32_t f)
@@ -197,6 +310,27 @@ static bool valid_blend_eq(uint32_t e)
     return e == 0x8006 || e == 0x800A || e == 0x800B;
 }
 
+/* v7 : GL_FRONT, GL_BACK, GL_FRONT_AND_BACK. */
+static bool valid_face(uint32_t f)
+{
+    return f == 0x0404 || f == 0x0405 || f == 0x0408;
+}
+
+/* v7 : un flottant du flux. Même règle que pour les sommets : ni NaN ni
+   infini ni valeur démesurée, pour que les backends n'en voient jamais. */
+static bool read_f(const uint32_t *a, int n, float *out)
+{
+    int i;
+    for (i = 0; i < n; i++) {
+        float v = qgpu_u2f(a[i]);
+        if (v != v || v > 1e9f || v < -1e9f) {
+            return false;
+        }
+        out[i] = v;
+    }
+    return true;
+}
+
 /* Valide une valeur d'état ; renvoie false si elle est hors du domaine. */
 static bool valid_state(uint32_t key, uint32_t val)
 {
@@ -256,6 +390,33 @@ static bool valid_state(uint32_t key, uint32_t val)
         float f = qgpu_u2f(val);
         return f == f && f > -1e6f && f < 1e6f;
     }
+    /* v7 */
+    case QGPU_SK_LIGHTING: case QGPU_SK_NORMALIZE: case QGPU_SK_RESCALE_NORMAL:
+    case QGPU_SK_CULL_FACE: case QGPU_SK_COLOR_MATERIAL:
+    case QGPU_SK_LOCAL_VIEWER: case QGPU_SK_TWO_SIDE:
+        return val <= 1;
+    case QGPU_SK_SHADE_MODEL:
+        return val == 0x1D00 || val == 0x1D01;       /* GL_FLAT, GL_SMOOTH */
+    case QGPU_SK_CULL_MODE: case QGPU_SK_COLOR_MAT_FACE:
+        return valid_face(val);
+    case QGPU_SK_FRONT_FACE:
+        return val == 0x0900 || val == 0x0901;       /* GL_CW, GL_CCW */
+    case QGPU_SK_COLOR_MAT_MODE:
+        return val == 0x1600 || val == 0x1200 || val == 0x1201 ||
+               val == 0x1202 || val == 0x1602;
+    case QGPU_SK_COLOR_CONTROL:
+        return val == 0x81F9 || val == 0x81FA;
+    case QGPU_SK_FOG_MODE:
+        return val == QGPU_FOG_VERTEX || val == QGPU_FOG_LINEAR ||
+               val == QGPU_FOG_EXP || val == QGPU_FOG_EXP2;
+    case QGPU_SK_FOG_DENSITY: {
+        float f = qgpu_u2f(val);
+        return f == f && f >= 0.0f && f < 1e9f;      /* GL : densité positive */
+    }
+    case QGPU_SK_FOG_START: case QGPU_SK_FOG_END: {
+        float f = qgpu_u2f(val);
+        return f == f && f > -1e9f && f < 1e9f;
+    }
     default:
         return false;
     }
@@ -286,6 +447,7 @@ bool qgpu_core_init(QgpuCore *c, const char *backend,
     for (i = 0; i < QGPU_MAX_CTX; i++) {
         c->ctx[i].surf = -1;
         qgpu_state_init(&c->ctx[i].st);
+        qgpu_geom_init(&c->ctx[i].gm);
     }
 
     if (!backend || !strcmp(backend, "auto")) {
@@ -320,6 +482,7 @@ void qgpu_core_reset(QgpuCore *c)
         memset(&c->ctx[i], 0, sizeof(c->ctx[i]));
         c->ctx[i].surf = -1;
         qgpu_state_init(&c->ctx[i].st);
+        qgpu_geom_init(&c->ctx[i].gm);
     }
     for (i = 0; i < QGPU_MAX_TEX; i++) {
         if (c->tex[i].used) {
@@ -342,6 +505,7 @@ void qgpu_core_fini(QgpuCore *c)
     free(c->pbuf); c->pbuf = NULL; c->pbuf_cap = 0;
     free(c->dbuf); c->dbuf = NULL; c->dbuf_cap = 0;
     free(c->sbuf); c->sbuf = NULL; c->sbuf_cap = 0;
+    free(c->ibuf); c->ibuf = NULL; c->ibuf_cap = 0;
 }
 
 uint32_t qgpu_core_backend_tag(const QgpuCore *c)
@@ -468,6 +632,108 @@ static uint32_t do_draw(QgpuCore *c, const uint32_t *a, uint32_t prim,
     return QGPU_ST_OK;
 }
 
+static QgpuGeom *cur_geom(QgpuCore *c)
+{
+    return &c->ctx[c->cur_ctx].gm;
+}
+
+/* v7 : DRAW_RAW [mode, n, voff, pas, format, ioff, itype, premier, nverts].
+   Toute la validation est ici : format, pas, bornes de BAR0, indices bornés
+   au nombre de sommets déclaré, NaN. Les sommets sont remis à plat (serrés,
+   hôte-natifs) et les indices élargis en uint32_t, pour qu'un backend n'ait
+   plus rien à vérifier ni à décoder. */
+static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a)
+{
+    QgpuTexture *tex[QGPU_MAX_UNITS];
+    uint32_t mode = a[0], count = a[1], voff = a[2], stride = a[3], fmt = a[4];
+    uint32_t ioff = a[5], itype = a[6], first = a[7], nverts = a[8];
+    uint32_t words, i, j, st;
+    QgpuSurface *s = bound_surface(c, &st);
+    QgpuState *cs;
+    int u;
+
+    if (!s) {
+        return st;
+    }
+    if (mode > QGPU_PRIM_MODE_POLYGON || itype > QGPU_IDX_U32) {
+        return QGPU_ST_BAD_ARG;
+    }
+    if ((fmt & ~(uint32_t)QGPU_VF_ALL) || (fmt & QGPU_VF_POS_MASK) == 3) {
+        return QGPU_ST_BAD_ARG;
+    }
+    words = (uint32_t)QGPU_VF_WORDS(fmt);
+    if (stride == 0) {
+        stride = words;
+    }
+    if (stride < words || stride > 4096) {          /* pas démesuré = flux douteux */
+        return QGPU_ST_BAD_ARG;
+    }
+    if (count == 0 || count > QGPU_MAX_VERTS ||
+        nverts == 0 || nverts > QGPU_MAX_VERTS) {
+        return QGPU_ST_BAD_ARG;
+    }
+    if (itype == QGPU_IDX_NONE) {
+        if ((uint64_t)first + count > nverts) {
+            return QGPU_ST_BAD_ARG;
+        }
+    } else if (first != 0) {
+        /* Un dessin indexé n'a pas de « premier » : le dire plutôt que de
+           l'ignorer silencieusement. */
+        return QGPU_ST_BAD_ARG;
+    }
+    if (!in_shmem(c, voff, (uint64_t)(nverts - 1) * stride * 4 + (uint64_t)words * 4)) {
+        return QGPU_ST_OOB;
+    }
+    if (itype != QGPU_IDX_NONE &&
+        !in_shmem(c, ioff, (uint64_t)count * (itype == QGPU_IDX_U16 ? 2 : 4))) {
+        return QGPU_ST_OOB;
+    }
+    if (!grow_vbuf(c, nverts * words)) {
+        return QGPU_ST_BACKEND;
+    }
+    for (i = 0; i < nverts; i++) {
+        const uint8_t *p = c->shmem + voff + (size_t)i * stride * 4;
+        for (j = 0; j < words; j++) {
+            float v = qgpu_u2f(qgpu_ld32(p + j * 4));
+            if (v != v || v > 1e9f || v < -1e9f) {
+                return QGPU_ST_BAD_ARG;
+            }
+            c->vbuf[(size_t)i * words + j] = v;
+        }
+    }
+    if (itype != QGPU_IDX_NONE) {
+        if (!grow_ibuf(c, count)) {
+            return QGPU_ST_BACKEND;
+        }
+        for (i = 0; i < count; i++) {
+            const uint8_t *p = c->shmem + ioff;
+            uint32_t idx;
+            if (itype == QGPU_IDX_U16) {
+                idx = ((uint32_t)p[i * 2] << 8) | p[i * 2 + 1];
+            } else {
+                idx = qgpu_ld32(p + i * 4);
+            }
+            if (idx >= nverts) {
+                return QGPU_ST_BAD_ARG;
+            }
+            c->ibuf[i] = idx;
+        }
+    }
+    cs = cur_state(c);
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        tex[u] = unit_texture(c, cs, u);
+    }
+    if (!c->be->draw_raw) {
+        return QGPU_ST_BACKEND;
+    }
+    if (!c->be->draw_raw(c, s, cs, cur_geom(c), tex, mode, fmt, c->vbuf, nverts,
+                         words, itype == QGPU_IDX_NONE ? NULL : c->ibuf,
+                         count, first)) {
+        return QGPU_ST_BACKEND;
+    }
+    return QGPU_ST_OK;
+}
+
 /* Exécute une commande déjà découpée ; renvoie QGPU_ST_*. */
 static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
                          uint32_t nargs)
@@ -493,6 +759,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         c->ctx[a[0]].used = true;
         c->ctx[a[0]].surf = -1;
         qgpu_state_init(&c->ctx[a[0]].st);
+        qgpu_geom_init(&c->ctx[a[0]].gm);
         return QGPU_ST_OK;
 
     case QGPU_OP_CTX_DESTROY:
@@ -729,9 +996,201 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (c->cur_ctx < 0) {
             return QGPU_ST_NO_CTX;
         }
-        c->ctx[c->cur_ctx].vp[0] = a[0]; c->ctx[c->cur_ctx].vp[1] = a[1];
-        c->ctx[c->cur_ctx].vp[2] = a[2]; c->ctx[c->cur_ctx].vp[3] = a[3];
+        /* v7 : le viewport a enfin un sens — pour le chemin brut seulement.
+           x et y sont signés et comptés depuis le coin BAS-GAUCHE de la
+           surface, comme glViewport ; w et h ne peuvent pas être négatifs. */
+        if ((int32_t)a[2] < 0 || (int32_t)a[3] < 0 ||
+            a[2] > QGPU_MAX_SURF_DIM || a[3] > QGPU_MAX_SURF_DIM ||
+            (int32_t)a[0] < -QGPU_MAX_SURF_DIM || (int32_t)a[0] > QGPU_MAX_SURF_DIM ||
+            (int32_t)a[1] < -QGPU_MAX_SURF_DIM || (int32_t)a[1] > QGPU_MAX_SURF_DIM) {
+            return QGPU_ST_BAD_ARG;
+        }
+        cur_geom(c)->vp[0] = (int32_t)a[0]; cur_geom(c)->vp[1] = (int32_t)a[1];
+        cur_geom(c)->vp[2] = (int32_t)a[2]; cur_geom(c)->vp[3] = (int32_t)a[3];
+        cur_geom(c)->vp_set = true;
         return QGPU_ST_OK;
+
+    /* ── v7 : état de l'étage géométrique ───────────────────────────────── */
+    case QGPU_OP_SET_MATRIX:
+        WANT(QGPU_LEN_SET_MATRIX);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (a[0] >= QGPU_MTX_COUNT) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (!read_f(a + 1, 16, cur_geom(c)->mtx[a[0]])) {
+            return QGPU_ST_BAD_ARG;
+        }
+        return QGPU_ST_OK;
+
+    case QGPU_OP_DEPTH_RANGE: {
+        float d[2];
+        WANT(QGPU_LEN_DEPTH_RANGE);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (!read_f(a, 2, d) || d[0] < 0.0f || d[0] > 1.0f ||
+            d[1] < 0.0f || d[1] > 1.0f) {
+            return QGPU_ST_BAD_ARG;
+        }
+        cur_geom(c)->depth_near = d[0];
+        cur_geom(c)->depth_far = d[1];
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_SET_LIGHT: {
+        QgpuLight l;
+        WANT(QGPU_LEN_SET_LIGHT);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (a[0] >= QGPU_MAX_LIGHTS || a[1] > 1) {
+            return QGPU_ST_BAD_ARG;
+        }
+        memset(&l, 0, sizeof(l));
+        l.enabled = a[1] != 0;
+        if (!read_f(a + 2, 4, l.ambient) || !read_f(a + 6, 4, l.diffuse) ||
+            !read_f(a + 10, 4, l.specular) || !read_f(a + 14, 4, l.position) ||
+            !read_f(a + 18, 3, l.spot_dir) || !read_f(a + 21, 1, &l.spot_exp) ||
+            !read_f(a + 22, 1, &l.spot_cutoff) || !read_f(a + 23, 3, l.att)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        /* Bornes d'OpenGL : elles sont vérifiées ICI, une fois pour toutes. */
+        if (l.spot_exp < 0.0f || l.spot_exp > 128.0f) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (!((l.spot_cutoff >= 0.0f && l.spot_cutoff <= 90.0f) ||
+              l.spot_cutoff == 180.0f)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (l.att[0] < 0.0f || l.att[1] < 0.0f || l.att[2] < 0.0f) {
+            return QGPU_ST_BAD_ARG;
+        }
+        cur_geom(c)->light[a[0]] = l;
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_SET_MATERIAL: {
+        QgpuMaterial m;
+        int f0, f1, i;
+        WANT(QGPU_LEN_SET_MATERIAL);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (!valid_face(a[0])) {
+            return QGPU_ST_BAD_ARG;
+        }
+        memset(&m, 0, sizeof(m));
+        if (!read_f(a + 1, 4, m.ambient) || !read_f(a + 5, 4, m.diffuse) ||
+            !read_f(a + 9, 4, m.specular) || !read_f(a + 13, 4, m.emission) ||
+            !read_f(a + 17, 1, &m.shininess)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (m.shininess < 0.0f || m.shininess > 128.0f) {
+            return QGPU_ST_BAD_ARG;
+        }
+        f0 = (a[0] == 0x0405) ? 1 : 0;                  /* GL_BACK */
+        f1 = (a[0] == 0x0404) ? 0 : 1;                  /* GL_FRONT */
+        for (i = f0; i <= f1; i++) {
+            cur_geom(c)->mat[i] = m;
+        }
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_SET_LIGHT_MODEL:
+        WANT(QGPU_LEN_SET_LIGHT_MODEL);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (!read_f(a, 4, cur_geom(c)->lm_ambient)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        return QGPU_ST_OK;
+
+    case QGPU_OP_SET_TEXGEN: {
+        QgpuTexgen tg;
+        WANT(QGPU_LEN_SET_TEXGEN);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (a[0] >= QGPU_MAX_UNITS || a[1] > QGPU_TG_Q || a[2] > 1) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (a[3] != QGPU_TG_OBJECT_LINEAR && a[3] != QGPU_TG_EYE_LINEAR &&
+            a[3] != QGPU_TG_SPHERE_MAP && a[3] != QGPU_TG_NORMAL_MAP &&
+            a[3] != QGPU_TG_REFLECTION_MAP) {
+            return QGPU_ST_BAD_ARG;
+        }
+        /* GL : SPHERE_MAP n'existe que pour S et T ; NORMAL_MAP et
+           REFLECTION_MAP que pour S, T et R. */
+        if ((a[3] == QGPU_TG_SPHERE_MAP && a[1] > QGPU_TG_T) ||
+            ((a[3] == QGPU_TG_NORMAL_MAP || a[3] == QGPU_TG_REFLECTION_MAP) &&
+             a[1] > QGPU_TG_R)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        memset(&tg, 0, sizeof(tg));
+        tg.enabled = a[2] != 0;
+        tg.mode = a[3];
+        if (!read_f(a + 4, 4, tg.obj_plane) || !read_f(a + 8, 4, tg.eye_plane)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        cur_geom(c)->texgen[a[0]][a[1]] = tg;
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_SET_CLIP_PLANE: {
+        QgpuClipPlane cp;
+        WANT(QGPU_LEN_SET_CLIP_PLANE);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (a[0] >= QGPU_MAX_CLIP_PLANES || a[1] > 1) {
+            return QGPU_ST_BAD_ARG;
+        }
+        memset(&cp, 0, sizeof(cp));
+        cp.enabled = a[1] != 0;
+        if (!read_f(a + 2, 4, cp.eq)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        cur_geom(c)->clip[a[0]] = cp;
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_SET_CURRENT: {
+        float v[4];
+        QgpuGeom *gm;
+        WANT(QGPU_LEN_SET_CURRENT);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (a[0] >= QGPU_CUR_COUNT || !read_f(a + 1, 4, v)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        gm = cur_geom(c);
+        switch (a[0]) {
+        case QGPU_CUR_NORMAL:
+            memcpy(gm->cur_normal, v, 3 * sizeof(float));
+            break;
+        case QGPU_CUR_COLOR:
+            memcpy(gm->cur_color, v, 4 * sizeof(float));
+            break;
+        case QGPU_CUR_SEC_COLOR:
+            memcpy(gm->cur_sec, v, 3 * sizeof(float));
+            break;
+        case QGPU_CUR_FOG:
+            gm->cur_fog = v[0];
+            break;
+        default:
+            memcpy(gm->cur_tex[a[0] - QGPU_CUR_TEXCOORD0], v, 4 * sizeof(float));
+            break;
+        }
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_DRAW_RAW:
+        WANT(QGPU_LEN_DRAW_RAW);
+        return do_draw_raw(c, a);
 
     case QGPU_OP_DRAW_TRIANGLES:
         WANT(QGPU_LEN_DRAW);
@@ -867,6 +1326,11 @@ static bool known_op(uint32_t op)
     case QGPU_OP_DRAW_TRIANGLES_TEX2: case QGPU_OP_DRAW_LINES: case QGPU_OP_DRAW_POINTS:
     case QGPU_OP_DRAW_TRIANGLES_TEXN:
     case QGPU_OP_TEX_IMAGE: case QGPU_OP_TEX_PARAM:
+    /* v7 */
+    case QGPU_OP_SET_MATRIX: case QGPU_OP_DEPTH_RANGE: case QGPU_OP_SET_LIGHT:
+    case QGPU_OP_SET_MATERIAL: case QGPU_OP_SET_LIGHT_MODEL:
+    case QGPU_OP_SET_TEXGEN: case QGPU_OP_SET_CLIP_PLANE:
+    case QGPU_OP_SET_CURRENT: case QGPU_OP_DRAW_RAW:
         return true;
     default:
         return false;
@@ -876,7 +1340,7 @@ static bool known_op(uint32_t op)
 uint32_t qgpu_core_execute(QgpuCore *c, uint32_t off, uint32_t len)
 {
     uint32_t nwords, pc = 0, st = QGPU_ST_OK;
-    uint32_t args[QGPU_LEN_SURF_XFER];    /* la plus longue commande (8 mots) */
+    uint32_t args[QGPU_MAX_CMD_ARGS];     /* v7 : la plus longue commande (SET_LIGHT) */
 
     c->status_pc = 0;
     if (!in_shmem(c, off, len) || (len & 3) || len == 0 ||
