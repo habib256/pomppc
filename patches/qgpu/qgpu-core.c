@@ -114,6 +114,22 @@ void qgpu_state_init(QgpuState *st)
     st->v[QGPU_SK_FOG_DENSITY]    = 0x3F800000;    /* 1.0 */
     st->v[QGPU_SK_FOG_START]      = 0x00000000;    /* 0.0 */
     st->v[QGPU_SK_FOG_END]        = 0x3F800000;    /* 1.0 */
+    /* v8 : fin du pipeline fixe, valeurs initiales d'OpenGL — toutes neutres,
+       c'est ce qui garde les flux v1–v7 inchangés. */
+    st->v[QGPU_SK_LOGIC_OP_MODE]  = QGPU_LO_COPY;
+    st->v[QGPU_SK_POLYGON_MODE_FRONT] = QGPU_POLY_FILL;
+    st->v[QGPU_SK_POLYGON_MODE_BACK]  = QGPU_POLY_FILL;
+    st->v[QGPU_SK_LINE_STIPPLE_FACTOR]  = 1;
+    st->v[QGPU_SK_LINE_STIPPLE_PATTERN] = 0xFFFF;
+}
+
+/* v8 : motif de pointillé initial — tout à 1, donc invisible. */
+void qgpu_stipple_init(QgpuStipple *sp)
+{
+    int i;
+    for (i = 0; i < 32; i++) {
+        sp->row[i] = 0xFFFFFFFFu;
+    }
 }
 
 static void set4(float *d, float a, float b, float c, float e)
@@ -287,10 +303,24 @@ static bool valid_blend_factor(uint32_t f)
     case 0x0300: case 0x0301: case 0x0302: case 0x0303:  /* SRC_COLOR … ONE_MINUS_SRC_ALPHA */
     case 0x0304: case 0x0305: case 0x0306: case 0x0307:  /* DST_ALPHA … ONE_MINUS_DST_COLOR */
     case 0x0308:                                     /* SRC_ALPHA_SATURATE */
+    /* v8 : facteurs à couleur constante (GL 1.4). */
+    case QGPU_BF_CONSTANT_COLOR: case QGPU_BF_ONE_MINUS_CONSTANT_COLOR:
+    case QGPU_BF_CONSTANT_ALPHA: case QGPU_BF_ONE_MINUS_CONSTANT_ALPHA:
         return true;
     default:
         return false;
     }
+}
+
+/* v8 : les 16 opérations logiques d'OpenGL sont contiguës. */
+static bool valid_logic_op(uint32_t o)
+{
+    return o >= QGPU_LO_CLEAR && o <= QGPU_LO_SET;
+}
+
+static bool valid_polygon_mode(uint32_t m)
+{
+    return m == QGPU_POLY_POINT || m == QGPU_POLY_LINE || m == QGPU_POLY_FILL;
 }
 
 static bool valid_stencil_op(uint32_t o)
@@ -307,7 +337,10 @@ static bool valid_stencil_op(uint32_t o)
 
 static bool valid_blend_eq(uint32_t e)
 {
-    return e == 0x8006 || e == 0x800A || e == 0x800B;
+    /* v8 : GL_MIN et GL_MAX s'ajoutent aux trois de la v2. */
+    return e == QGPU_BEQ_ADD || e == QGPU_BEQ_SUBTRACT ||
+           e == QGPU_BEQ_REVERSE_SUBTRACT ||
+           e == QGPU_BEQ_MIN || e == QGPU_BEQ_MAX;
 }
 
 /* v7 : GL_FRONT, GL_BACK, GL_FRONT_AND_BACK. */
@@ -417,6 +450,21 @@ static bool valid_state(uint32_t key, uint32_t val)
         float f = qgpu_u2f(val);
         return f == f && f > -1e9f && f < 1e9f;
     }
+    /* v8 */
+    case QGPU_SK_BLEND_COLOR:
+        return true;                                 /* 0xAARRGGBB, tout est valide */
+    case QGPU_SK_LOGIC_OP: case QGPU_SK_POLYGON_STIPPLE:
+    case QGPU_SK_POLY_OFFSET_LINE: case QGPU_SK_POLY_OFFSET_POINT:
+    case QGPU_SK_LINE_STIPPLE:
+        return val <= 1;
+    case QGPU_SK_LOGIC_OP_MODE:
+        return valid_logic_op(val);
+    case QGPU_SK_POLYGON_MODE_FRONT: case QGPU_SK_POLYGON_MODE_BACK:
+        return valid_polygon_mode(val);
+    case QGPU_SK_LINE_STIPPLE_FACTOR:
+        return val >= 1 && val <= 256;               /* borne d'OpenGL */
+    case QGPU_SK_LINE_STIPPLE_PATTERN:
+        return val <= 0xFFFF;
     default:
         return false;
     }
@@ -446,8 +494,10 @@ bool qgpu_core_init(QgpuCore *c, const char *backend,
     c->cur_ctx = -1;
     for (i = 0; i < QGPU_MAX_CTX; i++) {
         c->ctx[i].surf = -1;
+        c->ctx[i].query = -1;
         qgpu_state_init(&c->ctx[i].st);
         qgpu_geom_init(&c->ctx[i].gm);
+        qgpu_stipple_init(&c->ctx[i].stip);
     }
 
     if (!backend || !strcmp(backend, "auto")) {
@@ -465,6 +515,13 @@ bool qgpu_core_init(QgpuCore *c, const char *backend,
             c->be = &qgpu_backend_soft;
         }
     }
+    if (c->be) {
+        /* init() a pu ajouter des bits à chaud (v8 : QGPU_CAP_OCCLUSION) ;
+           ceux du backend sont acquis d'office. */
+        c->caps |= c->be->cap;
+    } else {
+        c->caps = 0;
+    }
     return c->be != NULL;
 }
 
@@ -481,14 +538,24 @@ void qgpu_core_reset(QgpuCore *c)
     for (i = 0; i < QGPU_MAX_CTX; i++) {
         memset(&c->ctx[i], 0, sizeof(c->ctx[i]));
         c->ctx[i].surf = -1;
+        c->ctx[i].query = -1;
         qgpu_state_init(&c->ctx[i].st);
         qgpu_geom_init(&c->ctx[i].gm);
+        qgpu_stipple_init(&c->ctx[i].stip);
     }
     for (i = 0; i < QGPU_MAX_TEX; i++) {
         if (c->tex[i].used) {
             tex_free(c, &c->tex[i]);
         }
     }
+    for (i = 0; i < QGPU_MAX_QUERIES; i++) {         /* v8 */
+        if (c->query[i].used && c->be->query_destroy) {
+            c->be->query_destroy(c, &c->query[i]);
+        }
+        memset(&c->query[i], 0, sizeof(c->query[i]));
+    }
+    c->cur_stip = NULL;
+    c->cur_query = NULL;
     c->cur_ctx = -1;
     c->status = QGPU_ST_OK;
     c->status_pc = 0;
@@ -589,6 +656,16 @@ static QgpuTexture *unit_texture(QgpuCore *c, const QgpuState *st, int u)
     return qgpu_texture_levels(t) ? t : NULL;
 }
 
+/* v8 : ce qu'un dessin doit voir du contexte courant en plus de l'état GL —
+   le motif de pointillé, et la requête d'occlusion ouverte s'il y en a une.
+   Posé ici pour qu'un backend n'ait jamais à remonter au contexte. */
+static void arm_draw(QgpuCore *c)
+{
+    QgpuContext *cx = &c->ctx[c->cur_ctx];
+    c->cur_stip = &cx->stip;
+    c->cur_query = (cx->query >= 0) ? &c->query[cx->query] : NULL;
+}
+
 /* Commun aux opcodes de dessin : a = [nverts, off] ; ntex unités texturées
    (coordonnées dans les sommets). */
 static uint32_t do_draw(QgpuCore *c, const uint32_t *a, uint32_t prim,
@@ -626,6 +703,7 @@ static uint32_t do_draw(QgpuCore *c, const uint32_t *a, uint32_t prim,
     for (u = 0; u < QGPU_MAX_UNITS; u++) {
         tex[u] = u < ntex ? unit_texture(c, cs, u) : NULL;
     }
+    arm_draw(c);
     if (!c->be->draw(c, s, cs, prim, tex, c->vbuf, nverts, words)) {
         return QGPU_ST_BACKEND;
     }
@@ -726,6 +804,7 @@ static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a)
     if (!c->be->draw_raw) {
         return QGPU_ST_BACKEND;
     }
+    arm_draw(c);
     if (!c->be->draw_raw(c, s, cs, cur_geom(c), tex, mode, fmt, c->vbuf, nverts,
                          words, itype == QGPU_IDX_NONE ? NULL : c->ibuf,
                          count, first)) {
@@ -758,14 +837,26 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         }
         c->ctx[a[0]].used = true;
         c->ctx[a[0]].surf = -1;
+        c->ctx[a[0]].query = -1;
         qgpu_state_init(&c->ctx[a[0]].st);
         qgpu_geom_init(&c->ctx[a[0]].gm);
+        qgpu_stipple_init(&c->ctx[a[0]].stip);
         return QGPU_ST_OK;
 
     case QGPU_OP_CTX_DESTROY:
         WANT(QGPU_LEN_CTX);
         if (a[0] >= QGPU_MAX_CTX || !c->ctx[a[0]].used) {
             return QGPU_ST_BAD_ARG;
+        }
+        /* v8 : une requête restée ouverte s'en va avec le contexte, sans quoi
+           son identifiant resterait bloqué « actif » pour toujours. */
+        if (c->ctx[a[0]].query >= 0) {
+            QgpuQuery *q = &c->query[c->ctx[a[0]].query];
+            if (c->be->query_end) {
+                c->be->query_end(c, q);
+            }
+            q->active = false;
+            c->ctx[a[0]].query = -1;
         }
         c->ctx[a[0]].used = false;
         c->ctx[a[0]].surf = -1;
@@ -1192,6 +1283,98 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         WANT(QGPU_LEN_DRAW_RAW);
         return do_draw_raw(c, a);
 
+    /* ── v8 : pointillé de polygone et requêtes d'occlusion ─────────────── */
+    case QGPU_OP_SET_POLYGON_STIPPLE: {
+        int i;
+        WANT(QGPU_LEN_SET_POLYGON_STIPPLE);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        /* Aucune valeur n'est invalide : 32 mots de bits bruts. */
+        for (i = 0; i < 32; i++) {
+            c->ctx[c->cur_ctx].stip.row[i] = a[i];
+        }
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_QUERY_BEGIN: {
+        QgpuContext *cx;
+        WANT(QGPU_LEN_QUERY);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (a[0] >= QGPU_MAX_QUERIES) {
+            return QGPU_ST_BAD_ARG;
+        }
+        cx = &c->ctx[c->cur_ctx];
+        /* OpenGL : pas d'imbrication, et une requête déjà ouverte (fût-ce par
+           un autre contexte) ne peut pas l'être deux fois. */
+        if (cx->query >= 0 || c->query[a[0]].active) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (!(c->caps & QGPU_CAP_OCCLUSION) || !c->be->query_begin) {
+            return QGPU_ST_BACKEND;
+        }
+        c->query[a[0]].samples = 0;
+        c->query[a[0]].used = true;
+        if (!c->be->query_begin(c, &c->query[a[0]])) {
+            return QGPU_ST_BACKEND;
+        }
+        c->query[a[0]].active = true;
+        cx->query = (int32_t)a[0];
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_QUERY_END: {
+        QgpuContext *cx;
+        WANT(QGPU_LEN_QUERY);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (a[0] >= QGPU_MAX_QUERIES) {
+            return QGPU_ST_BAD_ARG;
+        }
+        cx = &c->ctx[c->cur_ctx];
+        /* Fermer ce qui n'est pas ouvert ICI est une faute du flux, pas un
+           non-événement : c'est la seule façon de repérer un BEGIN perdu. */
+        if (cx->query != (int32_t)a[0]) {
+            return QGPU_ST_BAD_ARG;
+        }
+        cx->query = -1;
+        c->query[a[0]].active = false;
+        if (!c->be->query_end || !c->be->query_end(c, &c->query[a[0]])) {
+            return QGPU_ST_BACKEND;
+        }
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_QUERY_RESULT: {
+        QgpuQuery *q;
+        uint64_t n;
+        WANT(QGPU_LEN_QUERY_RESULT);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (a[0] >= QGPU_MAX_QUERIES) {
+            return QGPU_ST_BAD_ARG;
+        }
+        q = &c->query[a[0]];
+        if (!q->used || q->active) {
+            return QGPU_ST_BAD_ARG;       /* jamais lancée, ou encore ouverte */
+        }
+        if (!in_shmem(c, a[1], 8)) {
+            return QGPU_ST_OOB;
+        }
+        if (!c->be->query_result || !c->be->query_result(c, q)) {
+            return QGPU_ST_BACKEND;
+        }
+        /* Le device est synchrone : après un QUERY_END le résultat est là. */
+        n = q->samples > 0xFFFFFFFFu ? 0xFFFFFFFFu : q->samples;
+        qgpu_st32(c->shmem + a[1], 1);
+        qgpu_st32(c->shmem + a[1] + 4, (uint32_t)n);
+        return QGPU_ST_OK;
+    }
+
     case QGPU_OP_DRAW_TRIANGLES:
         WANT(QGPU_LEN_DRAW);
         return do_draw(c, a, QGPU_PRIM_TRIANGLES, QGPU_VERTEX_WORDS, 0);
@@ -1331,6 +1514,9 @@ static bool known_op(uint32_t op)
     case QGPU_OP_SET_MATERIAL: case QGPU_OP_SET_LIGHT_MODEL:
     case QGPU_OP_SET_TEXGEN: case QGPU_OP_SET_CLIP_PLANE:
     case QGPU_OP_SET_CURRENT: case QGPU_OP_DRAW_RAW:
+    /* v8 */
+    case QGPU_OP_SET_POLYGON_STIPPLE: case QGPU_OP_QUERY_BEGIN:
+    case QGPU_OP_QUERY_END: case QGPU_OP_QUERY_RESULT:
         return true;
     default:
         return false;
@@ -1340,7 +1526,8 @@ static bool known_op(uint32_t op)
 uint32_t qgpu_core_execute(QgpuCore *c, uint32_t off, uint32_t len)
 {
     uint32_t nwords, pc = 0, st = QGPU_ST_OK;
-    uint32_t args[QGPU_MAX_CMD_ARGS];     /* v7 : la plus longue commande (SET_LIGHT) */
+    /* v8 : la plus longue commande est SET_POLYGON_STIPPLE (32 arguments) */
+    uint32_t args[QGPU_MAX_CMD_ARGS];
 
     c->status_pc = 0;
     if (!in_shmem(c, off, len) || (len & 3) || len == 0 ||

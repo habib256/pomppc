@@ -60,6 +60,24 @@ typedef struct QgpuTexture {
 /* Nombre de niveaux utilisables (0 = texture incomplète). */
 uint32_t qgpu_texture_levels(const QgpuTexture *t);
 
+/* v8 : requête d'occlusion. Le cœur tient l'état d'ouverture (une seule active
+   par contexte, cf. qgpu_proto.h) ; le backend tient le COMPTE, parce que lui
+   seul sait quels fragments passent : le backend de référence incrémente
+   `samples` au fil de la rastérisation, le backend OpenGL le lit dans son objet
+   de requête à la fermeture. */
+typedef struct QgpuQuery {
+    bool     used;                 /* un QUERY_BEGIN a déjà eu lieu sur cet id */
+    bool     active;               /* entre BEGIN et END */
+    uint64_t samples;              /* fragments passés (saturé sur le fil) */
+    void    *priv;                 /* propriété du backend */
+} QgpuQuery;
+
+/* v8 : motif de pointillé de polygone d'un contexte, 32 lignes de 32 bits,
+   ligne 0 = yw 0 = BAS de l'image (convention glPolygonStipple). */
+typedef struct QgpuStipple {
+    uint32_t row[32];
+} QgpuStipple;
+
 /* ── v7 : état de l'étage géométrique, par contexte ──────────────────────────
  *
  * Tout est en flottants hôte-natifs, déjà validé par le cœur (pas de NaN, pas
@@ -108,14 +126,32 @@ typedef struct QgpuGeom {
 } QgpuGeom;
 
 typedef struct QgpuContext {
-    bool      used;
-    int32_t   surf;                /* surface liée, -1 si aucune */
-    QgpuState st;
-    QgpuGeom  gm;                  /* v7 */
+    bool        used;
+    int32_t     surf;              /* surface liée, -1 si aucune */
+    QgpuState   st;
+    QgpuGeom    gm;                /* v7 */
+    QgpuStipple stip;              /* v8 : pointillé de polygone */
+    int32_t     query;             /* v8 : requête ouverte, -1 si aucune */
 } QgpuContext;
 
 void qgpu_state_init(QgpuState *st);
 void qgpu_geom_init(QgpuGeom *gm);              /* v7 : valeurs initiales d'OpenGL */
+void qgpu_stipple_init(QgpuStipple *sp);        /* v8 : tout à 1, comme en OpenGL */
+
+/* v8 : mot du motif de pointillé à employer pour la ligne de SURFACE `ys`
+   d'une surface de hauteur `h`. Le motif est indexé par la coordonnée fenêtre
+   OpenGL yw = h − ys (cf. qgpu_proto.h) ; la fonction est ici pour que les deux
+   backends ne puissent pas en avoir deux idées. */
+static inline uint32_t qgpu_stipple_row(const QgpuStipple *sp, uint32_t h, int ys)
+{
+    return sp->row[(uint32_t)(((int)h - ys) % 32 + 32) % 32];
+}
+
+/* v8 : le bit du motif pour la colonne x (bit 31 = x 0, cf. qgpu_proto.h). */
+static inline bool qgpu_stipple_bit(uint32_t row, int x)
+{
+    return (row >> (31 - (uint32_t)(((x) % 32 + 32) % 32))) & 1u;
+}
 
 /* v7 : offset (en mots) de l'attribut `bit` (QGPU_VF_*) dans un sommet de
  * format `fmt`, ou -1 s'il est absent. La position est à l'offset 0. */
@@ -175,11 +211,23 @@ typedef struct QgpuBackend {
     bool (*stencil_upload)(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
                            uint32_t w, uint32_t h, const uint8_t *src);
     void (*tex_destroy)(QgpuCore *c, QgpuTexture *t);    /* libère t->priv */
+    /* v8 : requêtes d'occlusion. Le cœur a validé l'identifiant et
+       l'imbrication ; le backend remet le compte à zéro (begin), l'arrête
+       (end) et le publie dans q->samples (result, synchrone). Absents ou
+       init() n'ayant pas annoncé QGPU_CAP_OCCLUSION : les opcodes QUERY_*
+       répondent QGPU_ST_BACKEND, ils ne plantent pas. */
+    bool (*query_begin)(QgpuCore *c, QgpuQuery *q);
+    bool (*query_end)(QgpuCore *c, QgpuQuery *q);
+    bool (*query_result)(QgpuCore *c, QgpuQuery *q);
+    void (*query_destroy)(QgpuCore *c, QgpuQuery *q);    /* libère q->priv */
 } QgpuBackend;
 
 struct QgpuCore {
     const QgpuBackend *be;
     void              *be_priv;
+    /* QGPU_CAP_* réellement tenus : ceux du backend, plus ce que son init() a
+       pu résoudre à chaud (v8 : QGPU_CAP_OCCLUSION). */
+    uint32_t           caps;
 
     uint8_t  *shmem;               /* fenêtre partagée (BAR0), côté hôte */
     uint32_t  shmem_size;
@@ -187,7 +235,13 @@ struct QgpuCore {
     QgpuContext ctx[QGPU_MAX_CTX];
     QgpuSurface surf[QGPU_MAX_SURF];
     QgpuTexture tex[QGPU_MAX_TEX];
+    QgpuQuery   query[QGPU_MAX_QUERIES];   /* v8 */
     int32_t     cur_ctx;           /* -1 si aucun */
+
+    /* v8 : posés par le cœur juste avant chaque dessin, pour que le backend de
+       référence n'ait pas à remonter au contexte courant. */
+    const QgpuStipple *cur_stip;   /* motif de pointillé de polygone */
+    QgpuQuery         *cur_query;  /* requête ouverte, ou NULL */
 
     uint32_t status;               /* QGPU_ST_* de la dernière exécution */
     uint32_t status_pc;            /* index (mots) de la commande fautive */
