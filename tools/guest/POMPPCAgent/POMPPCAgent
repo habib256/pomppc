@@ -1,0 +1,19 @@
+#!/bin/sh
+# StartupItem : lance l'agent de la boucle de développement au démarrage normal
+# (bureau). Les secteurs des boîtes aux lettres sont dans /pomppc/agent.conf,
+# écrit par tools/guest/devloop.py prepare.
+. /etc/rc.common
+
+StartService()
+{
+    if [ -r /pomppc/agent.conf ]; then
+        ConsoleMessage "Starting POMPPC dev agent"
+        mkdir -p /tmp/pomppc-gui && chmod 1777 /tmp/pomppc-gui
+        nohup sh /pomppc/agent.sh $(cat /pomppc/agent.conf) > /var/log/pomppc-agent.log 2>&1 &
+    fi
+}
+
+StopService()  { return 0; }
+RestartService() { return 0; }
+
+RunService "$1"

@@ -1,0 +1,6 @@
+{
+  Description     = "POMPPC development agent";
+  Provides        = ("POMPPCAgent");
+  Uses            = ("Disks");
+  OrderPreference = "Last";
+}
