@@ -2109,6 +2109,550 @@ static void run_v7(QgpuCore *c, uint8_t *shmem)
     CHECK(st == QGPU_ST_OK, "v7 : retour au contexte 0 (st %u)", st);
 }
 
+/* ═════════════════════ v8 : la fin du pipeline fixe ═════════════════════════
+ *
+ * Même discipline que pour les versions précédentes : aucun point testé n'est
+ * sur une arête de primitive, et les valeurs qui passent par un arrondi sont
+ * comparées à ±2/255. Les tests de mode de polygone tracent leurs arêtes avec
+ * une largeur de ligne de 3 et sondent le MILIEU d'une arête horizontale ou
+ * verticale posée sur des centres de pixels : la ligne couvre alors trois
+ * rangées franches, et le point sondé est au centre de celle du milieu.
+ */
+#define QRES_OFF 0x18000u
+
+static void poly_stipple(Emit *e, const uint32_t *rows)
+{
+    int i;
+    emit(e, QGPU_CMD_HDR(QGPU_OP_SET_POLYGON_STIPPLE, QGPU_LEN_SET_POLYGON_STIPPLE));
+    for (i = 0; i < 32; i++) {
+        emit(e, rows[i]);
+    }
+}
+
+static void query_op(Emit *e, uint32_t op, uint32_t id)
+{
+    emit(e, QGPU_CMD_HDR(op, QGPU_LEN_QUERY));
+    emit(e, id);
+}
+
+static void query_result(Emit *e, uint32_t id, uint32_t off)
+{
+    emit(e, QGPU_CMD_HDR(QGPU_OP_QUERY_RESULT, QGPU_LEN_QUERY_RESULT));
+    emit(e, id); emit(e, off);
+}
+
+static uint32_t qword(const uint8_t *shmem, uint32_t off, int k)
+{
+    return qgpu_ld32(shmem + off + 4 * k);
+}
+
+/* Triangle rectangle posé sur des centres de pixels : arête du haut en
+   y = 10,5 (de x = 10,5 à 50,5), arête de gauche en x = 10,5. Dans l'ordre de
+   sommets donné, son aire à l'écran est HORAIRE : c'est une face ARRIÈRE. */
+static void raw_tri_bl(Emit *v, float r, float g, float b)
+{
+    rv2c(v, 10.5f, 10.5f, r, g, b, 1);
+    rv2c(v, 50.5f, 10.5f, r, g, b, 1);
+    rv2c(v, 10.5f, 50.5f, r, g, b, 1);
+}
+
+static void run_v8(QgpuCore *c, uint8_t *shmem)
+{
+    Emit e, v;
+    float m[16], mv[16];
+    uint32_t st, p, i;
+    uint32_t rows[32];
+
+    e.base = shmem; v.base = shmem;
+    mat_ortho_px(m);
+    mat_identity(mv);
+
+    /* Contexte neuf : tout l'état v8 est aux valeurs initiales d'OpenGL. */
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 2);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 2);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 2);
+    set_matrix(&e, QGPU_MTX_PROJECTION, m);
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "v8 : contexte neuf sur la surface 2 (st %u)", st);
+
+    /* ── (a) MÉLANGE À COULEUR CONSTANTE ────────────────────────────────────
+       Source blanche, destination noire, facteur de destination ZERO : le
+       pixel obtenu EST le facteur source, donc la constante elle-même. La
+       constante vaut 0x404080C0 — alpha 0x40, pour que CONSTANT_ALPHA (0x40)
+       et ONE_MINUS_CONSTANT_ALPHA (0xBF) ne se confondent pas. */
+    v.off = v.start = VTX_OFF;
+    tri_tl(&v, 64, 0, 1, 1, 1);
+    for (i = 0; i < 4; i++) {
+        static const uint32_t fac[4] = {
+            QGPU_BF_CONSTANT_COLOR, QGPU_BF_ONE_MINUS_CONSTANT_COLOR,
+            QGPU_BF_CONSTANT_ALPHA, QGPU_BF_ONE_MINUS_CONSTANT_ALPHA
+        };
+        static const uint32_t want[4] = { 0x4080C0, 0xBF7F3F, 0x404040, 0xBFBFBF };
+        static const char *nom[4] = { "CONSTANT_COLOR", "ONE_MINUS_CONSTANT_COLOR",
+                                      "CONSTANT_ALPHA", "ONE_MINUS_CONSTANT_ALPHA" };
+        e.off = e.start = CMD_OFF;
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+        state(&e, QGPU_SK_BLEND, 1);
+        state(&e, QGPU_SK_BLEND_COLOR, 0x404080C0);
+        state(&e, QGPU_SK_BLEND_SRC_RGB, fac[i]);
+        state(&e, QGPU_SK_BLEND_SRC_A, fac[i]);
+        state(&e, QGPU_SK_BLEND_DST_RGB, 0);          /* GL_ZERO */
+        state(&e, QGPU_SK_BLEND_DST_A, 0);
+        draw_cmd(&e, 3);
+        readback_cmd(&e, 2);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        p = px(shmem, 8, 8);
+        CHECK(st == QGPU_ST_OK && near_rgb(p, want[i]),
+              "(a) facteur %s : %06x (attendu %06x, st %u)", nom[i], p, want[i], st);
+    }
+
+    /* ── (b) ÉQUATIONS MINIMUM ET MAXIMUM ───────────────────────────────────
+       Les deux facteurs sont mis à ZERO : avec FUNC_ADD le pixel serait noir.
+       S'il ne l'est pas, c'est bien que MIN et MAX LES IGNORENT. */
+    v.off = v.start = VTX_OFF;
+    tri_tl(&v, 64, 0, 48 / 255.0f, 224 / 255.0f, 80 / 255.0f);
+    for (i = 0; i < 2; i++) {
+        uint32_t eq = i ? QGPU_BEQ_MAX : QGPU_BEQ_MIN;
+        uint32_t want = i ? 0xB0E050u : 0x301050u;
+        e.off = e.start = CMD_OFF;
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFFB01050, 1.0f);
+        state(&e, QGPU_SK_BLEND, 1);
+        state(&e, QGPU_SK_BLEND_SRC_RGB, 0); state(&e, QGPU_SK_BLEND_DST_RGB, 0);
+        state(&e, QGPU_SK_BLEND_SRC_A, 0);   state(&e, QGPU_SK_BLEND_DST_A, 0);
+        state(&e, QGPU_SK_BLEND_EQ_RGB, eq);
+        state(&e, QGPU_SK_BLEND_EQ_A, eq);
+        draw_cmd(&e, 3);
+        readback_cmd(&e, 2);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        p = px(shmem, 8, 8);
+        CHECK(st == QGPU_ST_OK && near_rgb(p, want),
+              "(b) équation %s, facteurs ignorés : %06x (attendu %06x, st %u)",
+              i ? "GL_MAX" : "GL_MIN", p, want, st);
+    }
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_BLEND, 0);
+    state(&e, QGPU_SK_BLEND_EQ_RGB, QGPU_BEQ_ADD);
+    state(&e, QGPU_SK_BLEND_EQ_A, QGPU_BEQ_ADD);
+    state(&e, QGPU_SK_BLEND_SRC_RGB, 1); state(&e, QGPU_SK_BLEND_SRC_A, 1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+
+    /* ── (c) OPÉRATIONS LOGIQUES ────────────────────────────────────────────
+       Source jaune 0xFFFF00 sur destination verte 0x00FF00 : chacune des six
+       opérations sondées donne une couleur distincte. */
+    v.off = v.start = VTX_OFF;
+    tri_tl(&v, 64, 0, 1, 1, 0);
+    {
+        static const struct { uint32_t op, want; const char *nom; } lops[6] = {
+            { QGPU_LO_XOR,           0xFF0000, "XOR" },
+            { QGPU_LO_INVERT,        0xFF00FF, "INVERT" },
+            { QGPU_LO_COPY_INVERTED, 0x0000FF, "COPY_INVERTED" },
+            { QGPU_LO_AND,           0x00FF00, "AND" },
+            { QGPU_LO_OR_REVERSE,    0xFFFFFF, "OR_REVERSE" },
+            { QGPU_LO_CLEAR,         0x000000, "CLEAR" }
+        };
+        for (i = 0; i < 6; i++) {
+            e.off = e.start = CMD_OFF;
+            clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF00FF00, 1.0f);
+            state(&e, QGPU_SK_LOGIC_OP, 1);
+            state(&e, QGPU_SK_LOGIC_OP_MODE, lops[i].op);
+            draw_cmd(&e, 3);
+            readback_cmd(&e, 2);
+            st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+            p = px(shmem, 8, 8);
+            CHECK(st == QGPU_ST_OK && p == lops[i].want,
+                  "(c) opération logique %s : %06x (attendu %06x, st %u)",
+                  lops[i].nom, p, lops[i].want, st);
+        }
+    }
+    /* Le mélange est IGNORÉ quand l'opération logique est active : avec
+       ZERO/ZERO il donnerait du noir, et GL_COPY doit rendre la source. */
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF00FF00, 1.0f);
+    state(&e, QGPU_SK_BLEND, 1);
+    state(&e, QGPU_SK_BLEND_SRC_RGB, 0); state(&e, QGPU_SK_BLEND_DST_RGB, 0);
+    state(&e, QGPU_SK_BLEND_SRC_A, 0);   state(&e, QGPU_SK_BLEND_DST_A, 0);
+    state(&e, QGPU_SK_LOGIC_OP_MODE, QGPU_LO_COPY);
+    draw_cmd(&e, 3);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = px(shmem, 8, 8);
+    CHECK(st == QGPU_ST_OK && p == 0xFFFF00,
+          "(c) le mélange est ignoré sous opération logique : %06x (st %u)", p, st);
+    /* … et le masque de couleur, lui, est respecté : INVERT à travers le seul
+       canal rouge donne ~0x00 en rouge, et le vert et le bleu du fond. */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_BLEND, 0);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF00FF00, 1.0f);
+    state(&e, QGPU_SK_LOGIC_OP_MODE, QGPU_LO_INVERT);
+    state(&e, QGPU_SK_COLOR_MASK, 0x1);
+    draw_cmd(&e, 3);
+    state(&e, QGPU_SK_COLOR_MASK, 0xF);
+    state(&e, QGPU_SK_LOGIC_OP, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = px(shmem, 8, 8);
+    CHECK(st == QGPU_ST_OK && p == 0xFFFF00,
+          "(c) opération logique sous masque de couleur : %06x (st %u)", p, st);
+
+    /* ── (d) MODES DE POLYGONE ──────────────────────────────────────────────
+       Triangle rectangle de DRAW_RAW, arêtes sur des centres de pixels. */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_LINE_WIDTH, qgpu_f2u(3.0f));
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+
+    v.off = v.start = VTX_OFF;
+    raw_tri_bl(&v, 0, 1, 0);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_POLYGON_MODE_FRONT, QGPU_POLY_LINE);
+    state(&e, QGPU_SK_POLYGON_MODE_BACK, QGPU_POLY_LINE);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2C, 3, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 10) == 0x00FF00 &&
+          px(shmem, 10, 30) == 0x00FF00 && px(shmem, 25, 25) == 0 &&
+          px(shmem, 30, 15) == 0,
+          "(d) mode GL_LINE : arêtes %06x %06x, intérieur %06x %06x (st %u)",
+          px(shmem, 30, 10), px(shmem, 10, 30), px(shmem, 25, 25),
+          px(shmem, 30, 15), st);
+
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_POINT_SIZE, qgpu_f2u(3.0f));
+    state(&e, QGPU_SK_POLYGON_MODE_FRONT, QGPU_POLY_POINT);
+    state(&e, QGPU_SK_POLYGON_MODE_BACK, QGPU_POLY_POINT);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2C, 3, QGPU_IDX_NONE, 0);
+    state(&e, QGPU_SK_POINT_SIZE, qgpu_f2u(1.0f));
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 10, 10) == 0x00FF00 &&
+          px(shmem, 30, 10) == 0 && px(shmem, 25, 25) == 0,
+          "(d) mode GL_POINT : sommet %06x, arête %06x, intérieur %06x (st %u)",
+          px(shmem, 10, 10), px(shmem, 30, 10), px(shmem, 25, 25), st);
+
+    /* Faces avant et arrière avec des modes DIFFÉRENTS. Le triangle ci-dessus
+       est une face ARRIÈRE (son aire à l'écran est horaire) : avec
+       avant = FILL et arrière = LINE il doit rester creux, et l'inverse le
+       remplit. C'est aussi ce qui vérifie que les deux backends s'accordent
+       sur le sens des faces. */
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_POLYGON_MODE_FRONT, QGPU_POLY_FILL);
+    state(&e, QGPU_SK_POLYGON_MODE_BACK, QGPU_POLY_LINE);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2C, 3, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 25, 25) == 0 && px(shmem, 30, 10) == 0x00FF00,
+          "(d) face arrière en GL_LINE : intérieur %06x, arête %06x (st %u)",
+          px(shmem, 25, 25), px(shmem, 30, 10), st);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_POLYGON_MODE_FRONT, QGPU_POLY_LINE);
+    state(&e, QGPU_SK_POLYGON_MODE_BACK, QGPU_POLY_FILL);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2C, 3, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 25, 25) == 0x00FF00,
+          "(d) la même face en GL_FILL quand les modes sont échangés : %06x (st %u)",
+          px(shmem, 25, 25), st);
+
+    /* CONTOUR SEUL d'un GL_QUADS : la diagonale de la décomposition en deux
+       triangles ne doit PAS être tracée. Elle passerait exactement par le
+       centre du pixel (30,30). */
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 10.5f, 10.5f, 1, 0, 1, 1); rv2c(&v, 50.5f, 10.5f, 1, 0, 1, 1);
+    rv2c(&v, 50.5f, 50.5f, 1, 0, 1, 1); rv2c(&v, 10.5f, 50.5f, 1, 0, 1, 1);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_POLYGON_MODE_FRONT, QGPU_POLY_LINE);
+    state(&e, QGPU_SK_POLYGON_MODE_BACK, QGPU_POLY_LINE);
+    draw_raw(&e, QGPU_PRIM_MODE_QUADS, 4, VF_P2C, 4, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 10) == 0xFF00FF &&
+          px(shmem, 10, 30) == 0xFF00FF && px(shmem, 30, 50) == 0xFF00FF &&
+          px(shmem, 30, 30) == 0 && px(shmem, 25, 35) == 0,
+          "(d) GL_QUADS en GL_LINE : contour %06x %06x %06x, diagonale %06x, "
+          "intérieur %06x (st %u)", px(shmem, 30, 10), px(shmem, 10, 30),
+          px(shmem, 30, 50), px(shmem, 30, 30), px(shmem, 25, 35), st);
+
+    /* MODE DE POLYGONE SUR LES ANCIENS OPCODES. Mêmes sommets, en pixels de
+       surface, par DRAW_TRIANGLES : le mode s'applique aussi, et le sens des
+       faces y est le même (ce triangle reste une face arrière). */
+    v.off = v.start = VTX_OFF;
+    vertexz(&v, 10.5f, 10.5f, 0, 0, 1, 1, 1);
+    vertexz(&v, 50.5f, 10.5f, 0, 0, 1, 1, 1);
+    vertexz(&v, 10.5f, 50.5f, 0, 0, 1, 1, 1);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_POLYGON_MODE_FRONT, QGPU_POLY_FILL);
+    state(&e, QGPU_SK_POLYGON_MODE_BACK, QGPU_POLY_LINE);
+    draw_cmd(&e, 3);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 10) == 0x00FFFF && px(shmem, 25, 25) == 0,
+          "(d) DRAW_TRIANGLES en GL_LINE (face arrière) : arête %06x, "
+          "intérieur %06x (st %u)", px(shmem, 30, 10), px(shmem, 25, 25), st);
+
+    /* DÉCALAGE DE POLYGONE POUR LES LIGNES. Le triangle plein rouge est posé à
+       z = 0,5 ; le même triangle en fil vert, à la même profondeur, échoue au
+       test LESS — sauf s'il est décalé vers l'avant. Sonde : (30,11), à
+       l'intérieur du triangle plein ET sous l'arête large de 3. */
+    v.off = v.start = VTX_OFF;
+    rv3c(&v, 10.5f, 10.5f, 0.5f, 1, 0, 0, 1);
+    rv3c(&v, 50.5f, 10.5f, 0.5f, 1, 0, 0, 1);
+    rv3c(&v, 10.5f, 50.5f, 0.5f, 1, 0, 0, 1);
+    rv3c(&v, 10.5f, 10.5f, 0.5f, 0, 1, 0, 1);
+    rv3c(&v, 50.5f, 10.5f, 0.5f, 0, 1, 0, 1);
+    rv3c(&v, 10.5f, 50.5f, 0.5f, 0, 1, 0, 1);
+    for (i = 0; i < 2; i++) {
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_DEPTH_WRITE, 1);
+        clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF000000, 1.0f);
+        state(&e, QGPU_SK_DEPTH_TEST, 1);
+        state(&e, QGPU_SK_DEPTH_FUNC, 0x0201);            /* LESS */
+        state(&e, QGPU_SK_POLYGON_MODE_FRONT, QGPU_POLY_FILL);
+        state(&e, QGPU_SK_POLYGON_MODE_BACK, QGPU_POLY_FILL);
+        draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P3C, 6, QGPU_IDX_NONE, 0);
+        state(&e, QGPU_SK_POLYGON_MODE_FRONT, QGPU_POLY_LINE);
+        state(&e, QGPU_SK_POLYGON_MODE_BACK, QGPU_POLY_LINE);
+        state(&e, QGPU_SK_POLY_FACTOR, qgpu_f2u(0.0f));
+        state(&e, QGPU_SK_POLY_UNITS, qgpu_f2u(-64.0f));
+        state(&e, QGPU_SK_POLY_OFFSET_LINE, i);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW));
+        emit(&e, QGPU_PRIM_MODE_TRIANGLES); emit(&e, 3); emit(&e, VTX_OFF);
+        emit(&e, 0); emit(&e, VF_P3C); emit(&e, 0); emit(&e, QGPU_IDX_NONE);
+        emit(&e, 3); emit(&e, 6);
+        state(&e, QGPU_SK_POLY_OFFSET_LINE, 0);
+        state(&e, QGPU_SK_DEPTH_TEST, 0);
+        readback_cmd(&e, 2);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        p = px(shmem, 30, 11);
+        CHECK(st == QGPU_ST_OK && p == (i ? 0x00FF00u : 0xFF0000u),
+              "(d) décalage de ligne %s : %06x (attendu %06x, st %u)",
+              i ? "actif" : "inactif", p, i ? 0x00FF00u : 0xFF0000u, st);
+    }
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_POLYGON_MODE_FRONT, QGPU_POLY_FILL);
+    state(&e, QGPU_SK_POLYGON_MODE_BACK, QGPU_POLY_FILL);
+    state(&e, QGPU_SK_POLY_UNITS, qgpu_f2u(0.0f));
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+
+    /* ── (e) POINTILLÉ DE LIGNE ─────────────────────────────────────────────
+       Motif 0x00FF, facteur 2 : le compteur s'incrémente d'un pixel d'axe
+       majeur, et le bit employé est (compteur / 2) & 15 — donc 16 pixels
+       allumés, 16 éteints, et ainsi de suite depuis l'extrémité de départ. */
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 4.5f, 20.5f, 1, 1, 0, 1); rv2c(&v, 44.5f, 20.5f, 1, 1, 0, 1);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_LINE_STIPPLE, 1);
+    state(&e, QGPU_SK_LINE_STIPPLE_FACTOR, 2);
+    state(&e, QGPU_SK_LINE_STIPPLE_PATTERN, 0x00FF);
+    draw_raw(&e, QGPU_PRIM_MODE_LINES, 2, VF_P2C, 2, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 10, 20) == 0xFFFF00 &&
+          px(shmem, 20, 20) == 0 && px(shmem, 24, 20) == 0 &&
+          px(shmem, 38, 20) == 0xFFFF00,
+          "(e) pointillé de ligne 0x00FF ×2 : x10 %06x x20 %06x x24 %06x "
+          "x38 %06x (st %u)", px(shmem, 10, 20), px(shmem, 20, 20),
+          px(shmem, 24, 20), px(shmem, 38, 20), st);
+
+    /* Continuité sur une bande : deux segments bout à bout. Si le compteur
+       repartait de zéro au second, x = 24 serait allumé. */
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 4.5f, 30.5f, 1, 1, 0, 1); rv2c(&v, 20.5f, 30.5f, 1, 1, 0, 1);
+    rv2c(&v, 44.5f, 30.5f, 1, 1, 0, 1);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_LINE_STRIP, 3, VF_P2C, 3, QGPU_IDX_NONE, 0);
+    state(&e, QGPU_SK_LINE_STIPPLE, 0);
+    state(&e, QGPU_SK_LINE_WIDTH, qgpu_f2u(1.0f));
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 10, 30) == 0xFFFF00 &&
+          px(shmem, 24, 30) == 0 && px(shmem, 38, 30) == 0xFFFF00,
+          "(e) le compteur court le long d'une bande : x10 %06x x24 %06x "
+          "x38 %06x (st %u)", px(shmem, 10, 30), px(shmem, 24, 30),
+          px(shmem, 38, 30), st);
+
+    /* ── (f) POINTILLÉ DE POLYGONE ──────────────────────────────────────────
+       Damier : lignes paires du MOTIF 0xAAAAAAAA (bit de poids fort = x 0,
+       donc les x pairs), lignes impaires 0x55555555. La surface fait 64
+       lignes, un multiple de 32, donc la ligne de surface ys emploie le mot
+       (64 − ys) mod 32, de même parité que ys : le pixel est allumé quand
+       x + ys est pair. */
+    for (i = 0; i < 32; i++) {
+        rows[i] = (i & 1) ? 0x55555555u : 0xAAAAAAAAu;
+    }
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 8, 8, 0, 1, 0, 1); rv2c(&v, 49, 8, 0, 1, 0, 1);
+    rv2c(&v, 49, 48, 0, 1, 0, 1); rv2c(&v, 8, 48, 0, 1, 0, 1);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    poly_stipple(&e, rows);
+    state(&e, QGPU_SK_POLYGON_STIPPLE, 1);
+    draw_raw(&e, QGPU_PRIM_MODE_QUADS, 4, VF_P2C, 4, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 10, 10) == 0x00FF00 &&
+          px(shmem, 11, 10) == 0 && px(shmem, 10, 11) == 0 &&
+          px(shmem, 11, 11) == 0x00FF00,
+          "(f) damier de pointillé : (10,10) %06x (11,10) %06x (10,11) %06x "
+          "(11,11) %06x (st %u)", px(shmem, 10, 10), px(shmem, 11, 10),
+          px(shmem, 10, 11), px(shmem, 11, 11), st);
+
+    /* LE SENS VERTICAL. Une seule ligne du motif est pleine, la quatrième. Le
+       mot 0 étant la ligne yw = 0 — le BAS de l'image —, la ligne de surface
+       allumée est celle où (64 − ys) mod 32 = 4, soit ys = 28 (et 60). Si
+       l'hôte indexait par ys, ce serait la ligne 4. */
+    for (i = 0; i < 32; i++) {
+        rows[i] = (i == 4) ? 0xFFFFFFFFu : 0u;
+    }
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    poly_stipple(&e, rows);
+    draw_raw(&e, QGPU_PRIM_MODE_QUADS, 4, VF_P2C, 4, QGPU_IDX_NONE, 0);
+    state(&e, QGPU_SK_POLYGON_STIPPLE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 20, 28) == 0x00FF00 &&
+          px(shmem, 20, 27) == 0 && px(shmem, 20, 29) == 0 &&
+          px(shmem, 20, 4) == 0,
+          "(f) sens vertical du motif : ys28 %06x ys27 %06x ys29 %06x ys4 %06x "
+          "(st %u)", px(shmem, 20, 28), px(shmem, 20, 27), px(shmem, 20, 29),
+          px(shmem, 20, 4), st);
+
+    /* ── (g) REQUÊTES D'OCCLUSION ───────────────────────────────────────────
+       Rectangle aligné (8,8)–(25,24) : 17 × 16 = 272 centres de pixels, et sa
+       diagonale de décomposition ne passe par AUCUN d'eux (17j − 16i − 7,5
+       n'est jamais nul) — le compte est donc exact des deux côtés. */
+    v.off = v.start = VTX_OFF;
+    rv3c(&v, 8, 8, 0.5f, 1, 1, 1, 1);   rv3c(&v, 25, 8, 0.5f, 1, 1, 1, 1);
+    rv3c(&v, 25, 24, 0.5f, 1, 1, 1, 1); rv3c(&v, 8, 24, 0.5f, 1, 1, 1, 1);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_DEPTH_TEST, 0);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    query_op(&e, QGPU_OP_QUERY_BEGIN, 0);
+    draw_raw(&e, QGPU_PRIM_MODE_QUADS, 4, VF_P3C, 4, QGPU_IDX_NONE, 0);
+    query_op(&e, QGPU_OP_QUERY_END, 0);
+    query_result(&e, 0, QRES_OFF);
+    query_result(&e, 0, QRES_OFF + 8);       /* relu une seconde fois */
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && qword(shmem, QRES_OFF, 0) == 1 &&
+          qword(shmem, QRES_OFF, 1) == 272 &&
+          qword(shmem, QRES_OFF + 8, 0) == 1 &&
+          qword(shmem, QRES_OFF + 8, 1) == 272,
+          "(g) quad visible : disponible %u, %u échantillons (272 attendus) ; "
+          "relecture %u/%u (st %u)", qword(shmem, QRES_OFF, 0),
+          qword(shmem, QRES_OFF, 1), qword(shmem, QRES_OFF + 8, 0),
+          qword(shmem, QRES_OFF + 8, 1), st);
+
+    /* Masque de couleur fermé : le compte ne change pas — c'est tout l'usage
+       d'une requête d'occlusion. */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_COLOR_MASK, 0x0);
+    query_op(&e, QGPU_OP_QUERY_BEGIN, 1);
+    draw_raw(&e, QGPU_PRIM_MODE_QUADS, 4, VF_P3C, 4, QGPU_IDX_NONE, 0);
+    query_op(&e, QGPU_OP_QUERY_END, 1);
+    state(&e, QGPU_SK_COLOR_MASK, 0xF);
+    query_result(&e, 1, QRES_OFF);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && qword(shmem, QRES_OFF, 1) == 272,
+          "(g) masque de couleur fermé : %u échantillons (272 attendus) (st %u)",
+          qword(shmem, QRES_OFF, 1), st);
+
+    /* Entièrement caché par la profondeur : fond effacé à 0,2, quad à 0,5,
+       test LESS → aucun fragment ne passe. */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_DEPTH_WRITE, 1);
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF000000, 0.2f);
+    state(&e, QGPU_SK_DEPTH_TEST, 1);
+    state(&e, QGPU_SK_DEPTH_FUNC, 0x0201);               /* LESS */
+    query_op(&e, QGPU_OP_QUERY_BEGIN, 2);
+    draw_raw(&e, QGPU_PRIM_MODE_QUADS, 4, VF_P3C, 4, QGPU_IDX_NONE, 0);
+    query_op(&e, QGPU_OP_QUERY_END, 2);
+    state(&e, QGPU_SK_DEPTH_TEST, 0);
+    query_result(&e, 2, QRES_OFF);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && qword(shmem, QRES_OFF, 0) == 1 &&
+          qword(shmem, QRES_OFF, 1) == 0,
+          "(g) quad caché par la profondeur : %u échantillons (0 attendu) (st %u)",
+          qword(shmem, QRES_OFF, 1), st);
+
+    /* À moitié masqué par les ciseaux : 17 colonnes × 8 lignes = 136. */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_SCISSOR, 1);
+    state(&e, QGPU_SK_SCISSOR_X, 8); state(&e, QGPU_SK_SCISSOR_Y, 8);
+    state(&e, QGPU_SK_SCISSOR_W, 17); state(&e, QGPU_SK_SCISSOR_H, 8);
+    query_op(&e, QGPU_OP_QUERY_BEGIN, 3);
+    draw_raw(&e, QGPU_PRIM_MODE_QUADS, 4, VF_P3C, 4, QGPU_IDX_NONE, 0);
+    query_op(&e, QGPU_OP_QUERY_END, 3);
+    state(&e, QGPU_SK_SCISSOR, 0);
+    query_result(&e, 3, QRES_OFF);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && qword(shmem, QRES_OFF, 1) == 136,
+          "(g) moitié coupée par les ciseaux : %u échantillons (136 attendus) (st %u)",
+          qword(shmem, QRES_OFF, 1), st);
+
+    /* Validations. Une requête est laissée OUVERTE par l'imbrication refusée
+       (le flux s'arrête sur la commande fautive) : on la referme ensuite. */
+    e.off = e.start = CMD_OFF;
+    query_op(&e, QGPU_OP_QUERY_BEGIN, 4);
+    query_op(&e, QGPU_OP_QUERY_BEGIN, 5);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(g) imbrication de requêtes refusée : st %u", st);
+    e.off = e.start = CMD_OFF;
+    query_op(&e, QGPU_OP_QUERY_END, 4);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "(g) la requête restée ouverte se referme : st %u", st);
+    e.off = e.start = CMD_OFF;
+    query_op(&e, QGPU_OP_QUERY_BEGIN, QGPU_MAX_QUERIES);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(g) identifiant hors bornes : st %u", st);
+    e.off = e.start = CMD_OFF;
+    query_op(&e, QGPU_OP_QUERY_END, 6);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(g) QUERY_END sans BEGIN : st %u", st);
+    e.off = e.start = CMD_OFF;
+    query_result(&e, 7, QRES_OFF);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(g) résultat d'une requête jamais lancée : st %u", st);
+    e.off = e.start = CMD_OFF;
+    query_result(&e, 0, SHMEM_SIZE - 4);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OOB, "(g) offset de résultat hors de BAR0 : st %u", st);
+
+    /* Validations des clés v8. */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_LOGIC_OP_MODE, 0x1510);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(g) opération logique inconnue : st %u", st);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_POLYGON_MODE_FRONT, 0x1B03);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(g) mode de polygone inconnu : st %u", st);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_LINE_STIPPLE_FACTOR, 0);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(g) facteur de pointillé 0 : st %u", st);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_LINE_STIPPLE_PATTERN, 0x10000);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(g) motif de pointillé sur plus de 16 bits : st %u", st);
+
+    /* état rendu au repos et contexte 0 repris pour la suite */
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_DESTROY, QGPU_LEN_CTX)); emit(&e, 2);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "v8 : retour au contexte 0 (st %u)", st);
+}
+
 /* Tests v2 : état GL par fragment, sur une surface avec profondeur (id 2). */
 static void run_v2(QgpuCore *c, uint8_t *shmem)
 {
@@ -2359,6 +2903,7 @@ static void run_backend(const char *name)
     run_v5(&c, shmem);
     run_v6(&c, shmem);
     run_v7(&c, shmem);
+    run_v8(&c, shmem);
 
     qgpu_core_reset(&c);
     e.off = e.start = CMD_OFF;

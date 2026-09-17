@@ -73,6 +73,17 @@ typedef struct GlState {
     void (*SecondaryColor3fv)(const GLfloat *);
     void (*MultiTexCoord4fv)(GLenum, const GLfloat *);
     void (*FogCoordf)(GLfloat);
+    /* v8 : couleur constante de mélange (GL 1.2 / EXT_blend_color) */
+    void (*BlendColor)(GLfloat, GLfloat, GLfloat, GLfloat);
+    /* v8 : requêtes d'occlusion (GL 1.5 / ARB_occlusion_query). Facultatives :
+       si l'hôte ne les a pas, le backend ne l'annonce pas (QGPU_CAP_OCCLUSION)
+       et les opcodes QUERY_* répondent proprement, au lieu de planter. */
+    void (*GenQueries)(GLsizei, GLuint *);
+    void (*DeleteQueries)(GLsizei, const GLuint *);
+    void (*BeginQuery)(GLenum, GLuint);
+    void (*EndQuery)(GLenum);
+    void (*GetQueryObjectuiv)(GLuint, GLenum, GLuint *);
+    bool has_query;
     const char *renderer;
 } GlState;
 
@@ -154,6 +165,33 @@ typedef struct GlSurface {
 #ifndef GL_FRAGMENT_DEPTH
 #define GL_FRAGMENT_DEPTH       0x8452
 #endif
+/* v8 : constantes du reste du pipeline fixe, définies ici pour ne dépendre
+   d'aucune version d'en-tête. */
+#ifndef GL_COLOR_LOGIC_OP
+#define GL_COLOR_LOGIC_OP       0x0BF2
+#endif
+#ifndef GL_POLYGON_OFFSET_POINT
+#define GL_POLYGON_OFFSET_POINT 0x2A01
+#endif
+#ifndef GL_POLYGON_OFFSET_LINE
+#define GL_POLYGON_OFFSET_LINE  0x2A02
+#endif
+#ifndef GL_LINE_STIPPLE
+#define GL_LINE_STIPPLE         0x0B24
+#endif
+#ifndef GL_POLYGON_STIPPLE
+#define GL_POLYGON_STIPPLE      0x0B42
+#endif
+#ifndef GL_UNPACK_LSB_FIRST
+#define GL_UNPACK_LSB_FIRST     0x0CF1
+#endif
+#ifndef GL_SAMPLES_PASSED
+#define GL_SAMPLES_PASSED       0x8914
+#endif
+#ifndef GL_QUERY_RESULT
+#define GL_QUERY_RESULT         0x8866
+#define GL_QUERY_RESULT_AVAILABLE 0x8867
+#endif
 
 static void *gl_proc(const char *name)
 {
@@ -205,12 +243,34 @@ static bool gl_resolve(GlState *g)
     g->SecondaryColor3fv = gl_proc("glSecondaryColor3fv");
     g->MultiTexCoord4fv = gl_proc("glMultiTexCoord4fv");
     g->FogCoordf = gl_proc("glFogCoordf");
+    /* v8 : couleur constante de mélange. Elle est exigée comme les autres
+       entrées du mélange : sans elle, les quatre facteurs constants seraient
+       silencieusement faux, ce qui est pire qu'un backend indisponible. */
+    g->BlendColor = gl_proc("glBlendColor");
+    if (!g->BlendColor) {
+        g->BlendColor = gl_proc("glBlendColorEXT");
+    }
+    /* v8 : requêtes d'occlusion — FACULTATIVES, cf. GlState. */
+    g->GenQueries = gl_proc("glGenQueries");
+    g->DeleteQueries = gl_proc("glDeleteQueries");
+    g->BeginQuery = gl_proc("glBeginQuery");
+    g->EndQuery = gl_proc("glEndQuery");
+    g->GetQueryObjectuiv = gl_proc("glGetQueryObjectuiv");
+    if (!g->GenQueries || !g->BeginQuery) {
+        g->GenQueries = gl_proc("glGenQueriesARB");
+        g->DeleteQueries = gl_proc("glDeleteQueriesARB");
+        g->BeginQuery = gl_proc("glBeginQueryARB");
+        g->EndQuery = gl_proc("glEndQueryARB");
+        g->GetQueryObjectuiv = gl_proc("glGetQueryObjectuivARB");
+    }
+    g->has_query = g->GenQueries && g->DeleteQueries && g->BeginQuery &&
+                   g->EndQuery && g->GetQueryObjectuiv;
     return g->GenFramebuffers && g->DeleteFramebuffers && g->BindFramebuffer &&
            g->FramebufferTexture2D && g->CheckFramebufferStatus &&
            g->BlendFuncSeparate && g->BlendEquationSeparate &&
            g->FogCoordPointer && g->ActiveTexture && g->ClientActiveTexture &&
            g->SecondaryColorPointer && g->SecondaryColor3fv &&
-           g->MultiTexCoord4fv && g->FogCoordf;
+           g->MultiTexCoord4fv && g->FogCoordf && g->BlendColor;
 }
 
 static bool gl_init(QgpuCore *c)
@@ -274,6 +334,9 @@ static bool gl_init(QgpuCore *c)
         goto fail;
     }
     g->renderer = (const char *)glGetString(GL_RENDERER);
+    if (g->has_query) {
+        c->caps |= QGPU_CAP_OCCLUSION;         /* v8 : annoncé seulement si tenu */
+    }
     if (c->trace) {
         fprintf(stderr, "qgpu: backend gl : %s / %s\n",
                 g->renderer ? g->renderer : "?",
@@ -435,6 +498,14 @@ static bool gl_target(QgpuCore *c, QgpuSurface *s, const QgpuState *st)
     glDisable(GL_CULL_FACE);
     glDisable(GL_DITHER);
     glShadeModel(GL_SMOOTH);
+    /* v8 : ce que le chemin brut comme l'ancien peuvent avoir allumé. Remis à
+       plat ici, l'unique porte d'entrée de toute opération. */
+    glDisable(GL_COLOR_LOGIC_OP);
+    glDisable(GL_LINE_STIPPLE);
+    glDisable(GL_POLYGON_STIPPLE);
+    glDisable(GL_POLYGON_OFFSET_LINE);
+    glDisable(GL_POLYGON_OFFSET_POINT);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     if (!st) {
         glDisable(GL_FOG);
         glDisable(GL_POLYGON_OFFSET_FILL);
@@ -470,12 +541,53 @@ static bool gl_target(QgpuCore *c, QgpuSurface *s, const QgpuState *st)
     glColorMask((st->v[QGPU_SK_COLOR_MASK] & 1) != 0, (st->v[QGPU_SK_COLOR_MASK] & 2) != 0,
                 (st->v[QGPU_SK_COLOR_MASK] & 4) != 0, (st->v[QGPU_SK_COLOR_MASK] & 8) != 0);
     if (st->v[QGPU_SK_BLEND]) {
+        uint32_t bc = st->v[QGPU_SK_BLEND_COLOR];       /* v8 */
         glEnable(GL_BLEND);
         g->BlendFuncSeparate(st->v[QGPU_SK_BLEND_SRC_RGB], st->v[QGPU_SK_BLEND_DST_RGB],
                              st->v[QGPU_SK_BLEND_SRC_A], st->v[QGPU_SK_BLEND_DST_A]);
         g->BlendEquationSeparate(st->v[QGPU_SK_BLEND_EQ_RGB], st->v[QGPU_SK_BLEND_EQ_A]);
+        g->BlendColor(((bc >> 16) & 255) / 255.0f, ((bc >> 8) & 255) / 255.0f,
+                      (bc & 255) / 255.0f, ((bc >> 24) & 255) / 255.0f);
     } else {
         glDisable(GL_BLEND);
+    }
+    /* v8 : l'opération logique REMPLACE le mélange. La spécification le dit,
+       mais on coupe GL_BLEND explicitement plutôt que de s'en remettre au
+       pilote : le backend de référence fait exactement cela. */
+    if (st->v[QGPU_SK_LOGIC_OP]) {
+        glDisable(GL_BLEND);
+        glLogicOp((GLenum)st->v[QGPU_SK_LOGIC_OP_MODE]);
+        glEnable(GL_COLOR_LOGIC_OP);
+    }
+    /* v8 : modes de polygone. Le sens des faces est posé par l'appelant
+       (gl_draw / gl_draw_raw), qui seul sait quel chemin il sert. */
+    glPolygonMode(GL_FRONT, (GLenum)st->v[QGPU_SK_POLYGON_MODE_FRONT]);
+    glPolygonMode(GL_BACK, (GLenum)st->v[QGPU_SK_POLYGON_MODE_BACK]);
+    if (st->v[QGPU_SK_LINE_STIPPLE]) {
+        glLineStipple((GLint)st->v[QGPU_SK_LINE_STIPPLE_FACTOR],
+                      (GLushort)st->v[QGPU_SK_LINE_STIPPLE_PATTERN]);
+        glEnable(GL_LINE_STIPPLE);
+    }
+    if (st->v[QGPU_SK_POLYGON_STIPPLE] && c->cur_stip) {
+        /* LE SENS DE L'IMAGE. glPolygonStipple indexe le motif par la ligne de
+           fenêtre d'OpenGL, qui vaut ICI la ligne de SURFACE (le FBO a sa ligne
+           0 en haut, et le chemin brut a déjà retourné sa géométrie). Le
+           protocole, lui, indexe par yw = hauteur − ys. On permute donc les 32
+           lignes une fois pour toutes, plutôt que de tordre les deux chemins. */
+        GLubyte mask[128];
+        int k, b;
+        for (k = 0; k < 32; k++) {
+            uint32_t row = qgpu_stipple_row(c->cur_stip, s->height, k);
+            for (b = 0; b < 4; b++) {
+                /* MSB d'abord : le bit 31 du mot est la colonne x = 0. */
+                mask[k * 4 + b] = (GLubyte)((row >> (24 - 8 * b)) & 0xFF);
+            }
+        }
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_UNPACK_LSB_FIRST, GL_FALSE);
+        glPolygonStipple(mask);
+        glEnable(GL_POLYGON_STIPPLE);
     }
     if (st->v[QGPU_SK_ALPHA_TEST]) {
         glEnable(GL_ALPHA_TEST);
@@ -498,12 +610,20 @@ static bool gl_target(QgpuCore *c, QgpuSurface *s, const QgpuState *st)
     } else {
         glDisable(GL_FOG);
     }
+    /* Décalage de polygone : les trois interrupteurs d'OpenGL partagent le même
+       facteur et les mêmes unités (v4 pour le rempli, v8 pour ligne et point). */
+    glPolygonOffset(qgpu_u2f(st->v[QGPU_SK_POLY_FACTOR]),
+                    qgpu_u2f(st->v[QGPU_SK_POLY_UNITS]));
     if (st->v[QGPU_SK_POLY_OFFSET]) {
         glEnable(GL_POLYGON_OFFSET_FILL);
-        glPolygonOffset(qgpu_u2f(st->v[QGPU_SK_POLY_FACTOR]),
-                        qgpu_u2f(st->v[QGPU_SK_POLY_UNITS]));
     } else {
         glDisable(GL_POLYGON_OFFSET_FILL);
+    }
+    if (st->v[QGPU_SK_POLY_OFFSET_LINE]) {
+        glEnable(GL_POLYGON_OFFSET_LINE);
+    }
+    if (st->v[QGPU_SK_POLY_OFFSET_POINT]) {
+        glEnable(GL_POLYGON_OFFSET_POINT);
     }
     glLineWidth(qgpu_u2f(st->v[QGPU_SK_LINE_WIDTH]));
     glPointSize(qgpu_u2f(st->v[QGPU_SK_POINT_SIZE]));
@@ -525,6 +645,10 @@ static bool gl_clear(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
     if (!gl_target(c, s, st)) {
         return false;
     }
+    /* v8 : glClear ne passe ni par le mélange ni par l'opération logique (il ne
+       voit que les ciseaux et les masques). On le rend explicite plutôt que de
+       s'en remettre au pilote — le backend de référence fait pareil. */
+    glDisable(GL_COLOR_LOGIC_OP);
     if (mask & QGPU_CLEAR_COLOR) {
         glClearColor(((argb >> 16) & 255) / 255.0f, ((argb >> 8) & 255) / 255.0f,
                      (argb & 255) / 255.0f, ((argb >> 24) & 255) / 255.0f);
@@ -693,6 +817,13 @@ static bool gl_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t p
     if (!gl_target(c, s, st)) {
         return false;
     }
+    /* v8 : SENS DES FACES DU CHEMIN HÉRITÉ. Ces sommets sont en pixels de
+       surface (y vers le BAS) et gl_target leur donne glOrtho(0, w, 0, h) : ce
+       qu'OpenGL voit comme trigonométrique est donc HORAIRE à l'écran. On
+       inverse, exactement comme le fait le chemin brut après son retournement,
+       pour que « face avant » veuille dire la même chose partout : le sens
+       trigonométrique tel qu'on le VOIT. */
+    glFrontFace(st->v[QGPU_SK_FRONT_FACE] == 0x0901 ? GL_CW : GL_CCW);
     /* Tableau entrelacé x y f r g b a [s t r q]… : un seul appel de dessin.
        Une unité sans texture reste coupée (gl_target) : elle laisse passer
        la couleur, comme en OpenGL. */
@@ -1164,6 +1295,75 @@ static bool gl_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
     return glGetError() == GL_NO_ERROR;
 }
 
+/* ═══════════════ v8 : requêtes d'occlusion sur le GPU hôte ═════════════════
+ *
+ * GL_SAMPLES_PASSED natif (GL 1.5 ou ARB_occlusion_query) : c'est le GPU qui
+ * compte, l'hôte ne rastérise rien. Le device étant synchrone, QUERY_RESULT
+ * ATTEND le résultat — glGetQueryObjectuiv(GL_QUERY_RESULT) bloque jusqu'à ce
+ * qu'il soit là, ce qui est exactement la sémantique attendue par l'invité.
+ * Si les points d'entrée manquent, gl_init n'annonce pas QGPU_CAP_OCCLUSION et
+ * le cœur refuse les opcodes avant d'arriver ici. */
+typedef struct GlQuery {
+    GLuint id;
+} GlQuery;
+
+static bool gl_query_begin(QgpuCore *c, QgpuQuery *q)
+{
+    GlState *g = c->be_priv;
+    GlQuery *gq = q->priv;
+
+    if (!g->has_query || !gl_make_current(g)) {
+        return false;
+    }
+    if (!gq) {
+        gq = calloc(1, sizeof(*gq));
+        if (!gq) {
+            return false;
+        }
+        g->GenQueries(1, &gq->id);
+        q->priv = gq;
+    }
+    g->BeginQuery(GL_SAMPLES_PASSED, gq->id);
+    return glGetError() == GL_NO_ERROR;
+}
+
+static bool gl_query_end(QgpuCore *c, QgpuQuery *q)
+{
+    GlState *g = c->be_priv;
+
+    if (!g->has_query || !q->priv || !gl_make_current(g)) {
+        return false;
+    }
+    g->EndQuery(GL_SAMPLES_PASSED);
+    return glGetError() == GL_NO_ERROR;
+}
+
+static bool gl_query_result(QgpuCore *c, QgpuQuery *q)
+{
+    GlState *g = c->be_priv;
+    GlQuery *gq = q->priv;
+    GLuint n = 0;
+
+    if (!g->has_query || !gq || !gl_make_current(g)) {
+        return false;
+    }
+    g->GetQueryObjectuiv(gq->id, GL_QUERY_RESULT, &n);
+    q->samples = n;
+    return glGetError() == GL_NO_ERROR;
+}
+
+static void gl_query_destroy(QgpuCore *c, QgpuQuery *q)
+{
+    GlState *g = c->be_priv;
+    GlQuery *gq = q->priv;
+
+    if (gq && g->has_query && gl_make_current(g)) {
+        g->DeleteQueries(1, &gq->id);
+    }
+    free(gq);
+    q->priv = NULL;
+}
+
 const QgpuBackend qgpu_backend_gl = {
     .name           = "gl",
     .cap            = QGPU_CAP_GL,
@@ -1181,6 +1381,10 @@ const QgpuBackend qgpu_backend_gl = {
     .stencil_readback = gl_stencil_readback,
     .stencil_upload = gl_stencil_upload,
     .tex_destroy    = gl_tex_destroy,
+    .query_begin    = gl_query_begin,      /* v8 */
+    .query_end      = gl_query_end,
+    .query_result   = gl_query_result,
+    .query_destroy  = gl_query_destroy,
 };
 
 #else /* ni CGL ni EGL : stub */

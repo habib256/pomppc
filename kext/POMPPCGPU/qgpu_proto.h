@@ -41,12 +41,16 @@
 #define QGPU_IOPCI_PRIMARY_MATCH 0x0fb21234
 
 #define QGPU_MAGIC              0x71677031  /* 'qgp1' */
-#define QGPU_PROTO_VERSION      7   /* v2 : profondeur, état GL ; v3 : textures ;
+#define QGPU_PROTO_VERSION      8   /* v2 : profondeur, état GL ; v3 : textures ;
                                        v4 : brouillard, 2e unité, lignes, points ;
                                        v5 : 4 unités, GL_COMBINE ;
                                        v6 : stencil ;
                                        v7 : géométrie brute (matrices, éclairage,
-                                            texgen, découpe, DRAW_RAW) */
+                                            texgen, découpe, DRAW_RAW) ;
+                                       v8 : fin du pipeline fixe (mélange à couleur
+                                            constante, MIN/MAX, opérations logiques,
+                                            modes de polygone, pointillés,
+                                            requêtes d'occlusion) */
 
 /* ── BAR0 : fenêtre partagée (RAM) ───────────────────────────────────────── */
 #define QGPU_SHMEM_DEFAULT_MB   64
@@ -74,6 +78,12 @@
 
 #define QGPU_CAP_SOFT           0x00000001  /* backend logiciel de référence */
 #define QGPU_CAP_GL             0x00000002  /* backend OpenGL (rendu sur le GPU hôte) */
+/* v8 : le backend actif sait compter les échantillons (QUERY_*). Le backend de
+ * référence le sait toujours ; le backend OpenGL ne l'annonce que s'il a résolu
+ * glGenQueries/glBeginQuery/glEndQuery/glGetQueryObjectuiv (GL 1.5 ou
+ * ARB_occlusion_query). Sans ce bit, les opcodes QUERY_* répondent
+ * QGPU_ST_BACKEND : l'invité se replie, il ne plante pas. */
+#define QGPU_CAP_OCCLUSION      0x00000004
 
 #define QGPU_IRQ_DONE           0x00000001
 
@@ -101,10 +111,17 @@
 #define QGPU_MAX_UNITS          4           /* v5 : unités de texture */
 #define QGPU_MAX_LIGHTS         8           /* v7 : GL_LIGHT0..GL_LIGHT7 */
 #define QGPU_MAX_CLIP_PLANES    6           /* v7 : GL_CLIP_PLANE0..5 */
-/* v7 : les commandes de géométrie sont longues (SET_LIGHT en fait 26). Le cœur
-   recopie les arguments dans un tableau de cette taille : la borne est NOMMÉE
-   ici pour que l'hôte et l'invité ne puissent pas en avoir deux idées. */
-#define QGPU_MAX_CMD_ARGS       26
+/* v8 : requêtes d'occlusion. Le découpage est celui des textures : l'espace
+   d'identifiants est GLOBAL au device et le kext en donne une tranche à chaque
+   client (query_base = index × QGPU_CLIENT_QUERY_IDS), pour qu'aucun client ne
+   puisse lire ni écraser la requête d'un autre. 16 requêtes en vol par client
+   est très au-delà de ce que GLEngine demande (une à la fois par contexte). */
+#define QGPU_MAX_QUERIES        64
+/* v7 : les commandes de géométrie sont longues (SET_LIGHT en fait 26), et la v8
+   ajoute SET_POLYGON_STIPPLE, qui en fait 32. Le cœur recopie les arguments
+   dans un tableau de cette taille : la borne est NOMMÉE ici pour que l'hôte et
+   l'invité ne puissent pas en avoir deux idées. */
+#define QGPU_MAX_CMD_ARGS       32
 
 /* ── Flux de commandes ───────────────────────────────────────────────────────
  *
@@ -160,6 +177,12 @@
 #define QGPU_OP_DRAW_RAW        0x0058  /* [mode, n, voff, pas, format, ioff, itype,
                                            premier, nverts] */
 
+/* v8 : fin du pipeline fixe. Détail du contrat plus bas, section « v8 ». */
+#define QGPU_OP_SET_POLYGON_STIPPLE 0x0060 /* [32 mots de 32 bits, cf. ci-dessous] */
+#define QGPU_OP_QUERY_BEGIN     0x0061  /* [id] */
+#define QGPU_OP_QUERY_END       0x0062  /* [id] */
+#define QGPU_OP_QUERY_RESULT    0x0063  /* [id, off] : 2 mots BE écrits à `off` */
+
 /* Longueurs (en mots, en-tête compris) attendues par opcode. */
 #define QGPU_LEN_NOP            1
 #define QGPU_LEN_CTX            2
@@ -183,6 +206,9 @@
 #define QGPU_LEN_SET_CLIP_PLANE 7
 #define QGPU_LEN_SET_CURRENT    6
 #define QGPU_LEN_DRAW_RAW       10
+#define QGPU_LEN_SET_POLYGON_STIPPLE 33     /* v8 : la plus longue commande */
+#define QGPU_LEN_QUERY          2
+#define QGPU_LEN_QUERY_RESULT   3
 
 /* Formats de surface. Le mot de pixel échangé est 0xAARRGGBB big-endian :
  * l'octet « x » du framebuffer Tiger EST l'alpha (v2 ; v1 l'ignorait). */
@@ -300,7 +326,41 @@
 #define QGPU_SK_FOG_DENSITY     74  /* flottant (bits IEEE), >= 0 ; initial 1.0 */
 #define QGPU_SK_FOG_START       75  /* flottant ; initial 0.0 */
 #define QGPU_SK_FOG_END         76  /* flottant ; initial 1.0 */
-#define QGPU_SK_COUNT           77
+/* ── v8 : ce qui manquait au pipeline fixe ──────────────────────────────────
+ *
+ * Contrairement aux clés v7, celles-ci valent pour TOUS les chemins de dessin :
+ * elles agissent au fragment (mélange, opération logique, pointillé de polygone)
+ * ou sur l'assemblage des triangles (mode de polygone, pointillé de ligne), donc
+ * après l'endroit où les deux chemins se rejoignent. Un flux v1–v7 qui ne les
+ * pose jamais garde exactement son rendu : leurs valeurs initiales sont celles
+ * d'OpenGL, et elles sont toutes neutres. */
+#define QGPU_SK_BLEND_COLOR     77  /* 0xAARRGGBB ; couleur constante de mélange
+                                       (GL_CONSTANT_COLOR & co.) ; initial 0 */
+/* Opération logique. Quand elle est active, elle REMPLACE le mélange (le
+ * mélange est ignoré, comme le dit la spécification d'OpenGL) ; elle travaille
+ * sur les quatre canaux de 8 bits du pixel et son résultat passe par le masque
+ * de couleur. glClear n'en dépend pas. */
+#define QGPU_SK_LOGIC_OP        78  /* booléen (GL_COLOR_LOGIC_OP) ; initial 0 */
+#define QGPU_SK_LOGIC_OP_MODE   79  /* GL_CLEAR 0x1500 … GL_SET 0x150F ; initial GL_COPY */
+/* Modes de polygone. Ils s'appliquent aux triangles de DRAW_RAW comme à ceux
+ * des DRAW_TRIANGLES* antérieurs (pour ceux-là, la face avant est établie sur
+ * le sens trigonométrique À L'ÉCRAN, comme en v7 pour le chemin brut). */
+#define QGPU_SK_POLYGON_MODE_FRONT 80  /* GL_POINT 0x1B00, GL_LINE 0x1B01,
+                                          GL_FILL 0x1B02 (initial) */
+#define QGPU_SK_POLYGON_MODE_BACK  81  /* idem */
+#define QGPU_SK_POLY_OFFSET_LINE   82  /* booléen ; décalage en mode LINE */
+#define QGPU_SK_POLY_OFFSET_POINT  83  /* booléen ; décalage en mode POINT.
+                                          Facteur et unités sont ceux de la v4
+                                          (QGPU_SK_POLY_FACTOR / _UNITS). */
+/* Pointillé de ligne. Le compteur repart de 0 à chaque primitive et à chaque
+ * SEGMENT de GL_LINES (et de l'ancien DRAW_LINES) ; il court le long d'un
+ * GL_LINE_STRIP et d'un GL_LINE_LOOP. Bit employé : (compteur / facteur) & 15. */
+#define QGPU_SK_LINE_STIPPLE       84  /* booléen ; initial 0 */
+#define QGPU_SK_LINE_STIPPLE_FACTOR 85 /* 1..256 ; initial 1 */
+#define QGPU_SK_LINE_STIPPLE_PATTERN 86 /* 16 bits ; initial 0xFFFF */
+#define QGPU_SK_POLYGON_STIPPLE    87  /* booléen ; motif posé par
+                                          QGPU_OP_SET_POLYGON_STIPPLE */
+#define QGPU_SK_COUNT           88
 
 /* Valeurs d'énumération d'OpenGL utilisées par les clés v7, nommées pour que
  * l'invité n'ait pas à les recopier à la main. */
@@ -613,6 +673,101 @@
    QGPU_VF_WORDS(QGPU_VF_ALL) lirait un champ de position invalide (3). */
 #define QGPU_VF_MAX_WORDS       31
 
+/* ── v8 : ce qui manquait au pipeline fixe ───────────────────────────────────
+ *
+ *   Rien n'est retiré, aucune longueur de commande existante ne change : la v8
+ *   n'ajoute que des clés d'état et quatre opcodes. Les valeurs initiales sont
+ *   celles d'OpenGL, et toutes neutres : un flux v1–v7 rend exactement pareil.
+ *
+ * MÉLANGE À COULEUR CONSTANTE (GL 1.4 / ARB_imaging)
+ *
+ *   Les quatre clés de facteurs existantes (QGPU_SK_BLEND_SRC_RGB et sœurs)
+ *   acceptent en plus GL_CONSTANT_COLOR, GL_ONE_MINUS_CONSTANT_COLOR,
+ *   GL_CONSTANT_ALPHA et GL_ONE_MINUS_CONSTANT_ALPHA ; la constante est
+ *   QGPU_SK_BLEND_COLOR, un 0xAARRGGBB comme les autres couleurs du fil.
+ *
+ * ÉQUATIONS MINIMUM ET MAXIMUM (GL 1.4 / EXT_blend_minmax)
+ *
+ *   Les deux clés d'équation acceptent GL_MIN et GL_MAX. Rappel de la
+ *   spécification : avec MIN et MAX, LES FACTEURS SONT IGNORÉS — la sortie est
+ *   min(source, destination) ou max(source, destination), canal par canal.
+ */
+#define QGPU_BF_CONSTANT_COLOR      0x8001
+#define QGPU_BF_ONE_MINUS_CONSTANT_COLOR 0x8002
+#define QGPU_BF_CONSTANT_ALPHA      0x8003
+#define QGPU_BF_ONE_MINUS_CONSTANT_ALPHA 0x8004
+#define QGPU_BEQ_ADD                0x8006  /* GL_FUNC_ADD (v2) */
+#define QGPU_BEQ_MIN                0x8007  /* v8 */
+#define QGPU_BEQ_MAX                0x8008  /* v8 */
+#define QGPU_BEQ_SUBTRACT           0x800A
+#define QGPU_BEQ_REVERSE_SUBTRACT   0x800B
+
+/* OPÉRATIONS LOGIQUES (les 16 d'OpenGL, valeurs recopiées telles quelles).
+ *   s = fragment, d = pixel de la surface, sur 8 bits par canal. */
+#define QGPU_LO_CLEAR           0x1500  /* 0 */
+#define QGPU_LO_AND             0x1501  /* s & d */
+#define QGPU_LO_AND_REVERSE     0x1502  /* s & ~d */
+#define QGPU_LO_COPY            0x1503  /* s (initial) */
+#define QGPU_LO_AND_INVERTED    0x1504  /* ~s & d */
+#define QGPU_LO_NOOP            0x1505  /* d */
+#define QGPU_LO_XOR             0x1506  /* s ^ d */
+#define QGPU_LO_OR              0x1507  /* s | d */
+#define QGPU_LO_NOR             0x1508  /* ~(s | d) */
+#define QGPU_LO_EQUIV           0x1509  /* ~(s ^ d) */
+#define QGPU_LO_INVERT          0x150A  /* ~d */
+#define QGPU_LO_OR_REVERSE      0x150B  /* s | ~d */
+#define QGPU_LO_COPY_INVERTED   0x150C  /* ~s */
+#define QGPU_LO_OR_INVERTED     0x150D  /* ~s | d */
+#define QGPU_LO_NAND            0x150E  /* ~(s & d) */
+#define QGPU_LO_SET             0x150F  /* tous les bits à 1 */
+
+/* MODES DE POLYGONE (valeurs d'OpenGL). */
+#define QGPU_POLY_POINT         0x1B00
+#define QGPU_POLY_LINE          0x1B01
+#define QGPU_POLY_FILL          0x1B02  /* initial */
+
+/* POINTILLÉ DE POLYGONE — QGPU_OP_SET_POLYGON_STIPPLE [m0..m31]
+ *
+ *   32 mots de 32 bits big-endian, un par ligne du motif 32×32. Deux
+ *   conventions, à ne pas confondre :
+ *
+ *   - EN X, le bit de POIDS FORT du mot (bit 31) est la colonne x = 0 du motif,
+ *     comme le premier octet d'un octet de glPolygonStipple (MSB à gauche).
+ *     Le motif se répète tous les 32 pixels : colonne = x mod 32.
+ *
+ *   - EN Y, le mot 0 est la ligne yw = 0 de la COORDONNÉE FENÊTRE OpenGL,
+ *     c'est-à-dire le BAS de l'image — la convention de glPolygonStipple. Or le
+ *     protocole range les surfaces avec la ligne 0 EN HAUT (QuickDraw). L'hôte
+ *     fait donc la même couture qu'en v7 pour la géométrie : la ligne de
+ *     surface ys emploie le mot (hauteur_de_la_surface − ys) mod 32. Les deux
+ *     chemins de dessin, brut et hérité, suivent cette même règle : un motif
+ *     donné produit la même image, quel que soit l'opcode employé.
+ *
+ *   Le pointillé de polygone ne s'applique qu'aux polygones REMPLIS : en mode
+ *   GL_LINE ou GL_POINT, c'est le pointillé de ligne (ou rien) qui vaut, comme
+ *   en OpenGL.
+ *
+ * REQUÊTES D'OCCLUSION (OpenGL 1.5 / ARB_occlusion_query)
+ *
+ *   QGPU_OP_QUERY_BEGIN [id] ouvre la requête `id` (0..QGPU_MAX_QUERIES-1) sur
+ *   le contexte courant et remet son compte à zéro ; QGPU_OP_QUERY_END [id] la
+ *   ferme. UNE SEULE requête active à la fois par contexte : ouvrir une requête
+ *   alors qu'une autre court, ou fermer une requête qui ne court pas, vaut
+ *   QGPU_ST_BAD_ARG — c'est la règle d'OpenGL, dite ici plutôt que laissée au
+ *   backend.
+ *
+ *   QGPU_OP_QUERY_RESULT [id, off] écrit à `off` dans BAR0 DEUX mots de 32 bits
+ *   big-endian : « disponible » (0 ou 1) puis le nombre d'échantillons passés,
+ *   saturé à 2^32−1. Le device est synchrone : le résultat est toujours
+ *   disponible après un QUERY_END, et il peut être relu autant de fois qu'on
+ *   veut. `off` doit être multiple de 4 et laisser 8 octets dans la fenêtre,
+ *   sinon QGPU_ST_OOB. Une requête jamais ouverte vaut QGPU_ST_BAD_ARG.
+ *
+ *   Est compté tout fragment qui passe TOUS les tests — ciseaux, alpha,
+ *   stencil, profondeur —, que le masque de couleur soit ouvert ou fermé (c'est
+ *   précisément l'usage : dessiner une boîte englobante sans rien peindre).
+ */
+
 /* ── Interface du kext POMPPCGPU (IOUserClient) ──────────────────────────────
  *
  *   Sélecteurs de IOConnectMethodScalarIScalarO, et types de
@@ -634,13 +789,15 @@
 #define QGPU_CLIENT_CTX_IDS     (QGPU_MAX_CTX / QGPU_MAX_CLIENTS)    /* 4 */
 #define QGPU_CLIENT_SURF_IDS    (QGPU_MAX_SURF / QGPU_MAX_CLIENTS)   /* 16 */
 #define QGPU_CLIENT_TEX_IDS     (QGPU_MAX_TEX / QGPU_MAX_CLIENTS)    /* 128 */
+#define QGPU_CLIENT_QUERY_IDS   (QGPU_MAX_QUERIES / QGPU_MAX_CLIENTS) /* 16, v8 */
 
 #define QGPU_UC_GET_INFO        0   /* in : —              out : version, caps, taille de tranche, fence */
 #define QGPU_UC_SUBMIT          1   /* in : off, len       out : fence, status, status_pc (off relatif à la tranche) */
 #define QGPU_UC_WAIT_FENCE      2   /* in : fence, ms      out : fence courante */
 #define QGPU_UC_RESET           3   /* in : —              out : — (détruit les objets du client) */
 #define QGPU_UC_GET_SLOT        4   /* in : —              out : index, slot_base, ctx_base, surf_base
-                                       (tex_base = index × QGPU_CLIENT_TEX_IDS) */
+                                       (tex_base   = index × QGPU_CLIENT_TEX_IDS,
+                                        query_base = index × QGPU_CLIENT_QUERY_IDS) */
 #define QGPU_UC_METHOD_COUNT    5
 
 #define QGPU_UC_MEM_SHMEM       0   /* IOConnectMapMemory : la tranche du client */
