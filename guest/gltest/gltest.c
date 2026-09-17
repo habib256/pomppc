@@ -333,6 +333,55 @@ int main(int argc, char **argv)
             glFinish();
         }
         glDeleteTextures(1, &id);
+    } else if (!strcmp(scene, "texpack")) {
+        /* Formats de texels compacts (jeux Mac : Zenerchi charge ses textures
+           en GL_BGRA + GL_UNSIGNED_INT_8_8_8_8). Une bande par format, couleur
+           unie, GL_REPLACE : la couleur lue doit être exacte. Les valeurs 16
+           bits sont choisies pour que l'extension en 8 bits soit sans ambiguïté. */
+        static const unsigned long bgra8888[4] = { 0x563412FF, 0x563412FF, 0x563412FF, 0x563412FF };
+        static const unsigned long rgba8888r[4] = { 0xFFDEBC9A, 0xFFDEBC9A, 0xFFDEBC9A, 0xFFDEBC9A };
+        static const unsigned short argb1555[4] = { 0xFE00, 0xFE00, 0xFE00, 0xFE00 };
+        static const unsigned short rgb565[4] = { 0x041F, 0x041F, 0x041F, 0x041F };
+        static const unsigned short rgba4444[4] = { 0x8F0F, 0x8F0F, 0x8F0F, 0x8F0F };
+        static const unsigned long want[5] = { 0x123456, 0x9ABCDE, 0xFF8400, 0x0082FF, 0x88FF00 };
+        static const char *const name[5] = {
+            "BGRA UINT_8_8_8_8", "RGBA UINT_8_8_8_8_REV", "BGRA USHORT_1_5_5_5_REV",
+            "RGB USHORT_5_6_5", "RGBA USHORT_4_4_4_4",
+        };
+        GLuint id;
+        int f;
+        glGenTextures(1, &id);
+        glBindTexture(GL_TEXTURE_2D, id);
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        for (f = 0; f < 5; f++) {
+            float y0 = f * H / 5.0f;
+            switch (f) {
+            case 0: glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_BGRA,
+                                 GL_UNSIGNED_INT_8_8_8_8, bgra8888); break;
+            case 1: glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA,
+                                 GL_UNSIGNED_INT_8_8_8_8_REV, rgba8888r); break;
+            case 2: glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_BGRA,
+                                 GL_UNSIGNED_SHORT_1_5_5_5_REV, argb1555); break;
+            case 3: glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 2, 2, 0, GL_RGB,
+                                 GL_UNSIGNED_SHORT_5_6_5, rgb565); break;
+            default: glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA,
+                                  GL_UNSIGNED_SHORT_4_4_4_4, rgba4444); break;
+            }
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glBegin(GL_QUADS);
+            glTexCoord2f(0, 0); glVertex2f(0, y0);
+            glTexCoord2f(1, 0); glVertex2f(W, y0);
+            glTexCoord2f(1, 1); glVertex2f(W, y0 + H / 5.0f);
+            glTexCoord2f(0, 1); glVertex2f(0, y0 + H / 5.0f);
+            glEnd();
+            glFinish();
+            check(name[f], W / 2, (int)(y0 + H / 10.0f), want[f]);
+        }
+        glDeleteTextures(1, &id);
     } else if (!strcmp(scene, "probe2")) {
         /* Sonde n°2 : lignes, points, brouillard, décalage de polygone, unité 1. */
         static const float fogc[4] = { 0.125f, 0.25f, 0.375f, 0.5f };
@@ -484,6 +533,126 @@ int main(int argc, char **argv)
         if (frames > 1)
             printf("game : %d images %dx%d, couloir multitexture + brouillard : %.2f img/s\n",
                    frames, W, H, frames / (now() - tstart));
+    } else if (!strcmp(scene, "comb")) {
+        /* GL_COMBINE et quatre unités (Marble Blast, moteur Torque) : une
+           bande par montage, textures 1×1 pour que le résultat soit exact.
+           Comparé au rendu d'Apple par l'image entière. */
+        static const unsigned char ta[4] = { 128, 64, 255, 128 };   /* RGBA */
+        static const unsigned char tb[4] = { 128, 255, 0, 255 };
+        static const float envc[4] = { 0.25f, 0, 0, 1 };
+        GLuint id[2];
+        int f, u;
+        glGenTextures(2, id);
+        for (f = 0; f < 2; f++) {
+            glActiveTextureARB(GL_TEXTURE0_ARB + f);
+            glBindTexture(GL_TEXTURE_2D, id[f]);
+            glTexImage2D(GL_TEXTURE_2D, 0, f ? GL_RGB : GL_RGBA, 1, 1, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, f ? tb : ta);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        for (f = 0; f < 4; f++) {
+            float y0 = f * H / 4.0f;
+            int nunits = f + 1;
+            for (u = 0; u < 4; u++) {
+                glActiveTextureARB(GL_TEXTURE0_ARB + u);
+                if (u >= nunits) {
+                    glDisable(GL_TEXTURE_2D);
+                    continue;
+                }
+                glBindTexture(GL_TEXTURE_2D, id[u & 1]);
+                glEnable(GL_TEXTURE_2D);
+                glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, envc);
+                if (u == 0) {
+                    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+                    continue;
+                }
+                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+                if (u == 1) {                   /* INTERPOLATE, échelle RGB 2 */
+                    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_INTERPOLATE);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_TEXTURE);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE1_RGB, GL_CONSTANT);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE2_RGB, GL_PRIMARY_COLOR);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND2_RGB, GL_SRC_ALPHA);
+                    glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, 2.0f);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_REPLACE);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_ALPHA, GL_PREVIOUS);
+                } else if (u == 2) {            /* ADD_SIGNED avec la couleur */
+                    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_ADD_SIGNED);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_PREVIOUS);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE1_RGB, GL_PRIMARY_COLOR);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_MODULATE);
+                } else {                        /* SUBTRACT d'une constante */
+                    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_SUBTRACT);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_PREVIOUS);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE1_RGB, GL_CONSTANT);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_REPLACE);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_ALPHA, GL_PREVIOUS);
+                }
+            }
+            glColor4f(1, 0.5f, 0.25f, 0.5f);
+            glBegin(GL_QUADS);
+            glMultiTexCoord2fARB(GL_TEXTURE0_ARB, 0.5f, 0.5f);
+            glMultiTexCoord2fARB(GL_TEXTURE1_ARB, 0.5f, 0.5f);
+            glMultiTexCoord2fARB(GL_TEXTURE2_ARB, 0.5f, 0.5f);
+            glMultiTexCoord2fARB(GL_TEXTURE3_ARB, 0.5f, 0.5f);
+            glVertex2f(0, y0);
+            glVertex2f(W, y0);
+            glVertex2f(W, y0 + H / 4.0f);
+            glVertex2f(0, y0 + H / 4.0f);
+            glEnd();
+            glFinish();
+            printf("  bande %d (%d unités) = %06lx\n", f, nunits,
+                   px(W / 2, (int)(y0 + H / 8.0f)));
+        }
+        for (u = 3; u >= 0; u--) {
+            glActiveTextureARB(GL_TEXTURE0_ARB + u);
+            glDisable(GL_TEXTURE_2D);
+        }
+        glActiveTextureARB(GL_TEXTURE0_ARB);
+        glDeleteTextures(2, id);
+    } else if (!strcmp(scene, "combprobe")) {
+        /* Sonde GL_COMBINE et unités 2–3 : un réglage par glClear (le traceur
+           vide l'état GL à chaque effacement avec POMPPC_GLTRACE_STATE=1). */
+        static const GLenum steps[][3] = {        /* unité, paramètre, valeur */
+            { 0, 0, 0 },                                            /*  1 référence */
+            { 0, GL_TEXTURE_ENV_MODE, GL_COMBINE },                 /*  2 */
+            { 0, GL_COMBINE_RGB, GL_INTERPOLATE },                  /*  3 */
+            { 0, GL_COMBINE_ALPHA, GL_ADD_SIGNED },                 /*  4 */
+            { 0, GL_SOURCE0_RGB, GL_CONSTANT },                     /*  5 */
+            { 0, GL_SOURCE1_RGB, GL_PRIMARY_COLOR },                /*  6 */
+            { 0, GL_SOURCE2_RGB, GL_PREVIOUS },                     /*  7 */
+            { 0, GL_OPERAND0_RGB, GL_ONE_MINUS_SRC_ALPHA },         /*  8 */
+            { 0, GL_OPERAND1_RGB, GL_SRC_ALPHA },                   /*  9 */
+            { 0, GL_OPERAND2_RGB, GL_ONE_MINUS_SRC_COLOR },         /* 10 */
+            { 0, GL_SOURCE0_ALPHA, GL_PRIMARY_COLOR },              /* 11 */
+            { 0, GL_SOURCE1_ALPHA, GL_CONSTANT },                   /* 12 */
+            { 0, GL_SOURCE2_ALPHA, GL_TEXTURE },                    /* 13 */
+            { 0, GL_OPERAND0_ALPHA, GL_ONE_MINUS_SRC_ALPHA },       /* 14 */
+            { 0, GL_OPERAND1_ALPHA, GL_ONE_MINUS_SRC_ALPHA },       /* 15 */
+            { 0, GL_OPERAND2_ALPHA, GL_ONE_MINUS_SRC_ALPHA },       /* 16 */
+            { 0, GL_RGB_SCALE, 4 },                                 /* 17 */
+            { 0, GL_ALPHA_SCALE, 2 },                               /* 18 */
+            { 1, GL_COMBINE_RGB, GL_DOT3_RGB },                     /* 19 */
+            { 2, GL_TEXTURE_2D, 1 },                                /* 20 */
+            { 3, GL_COMBINE_RGB, GL_SUBTRACT },                     /* 21 */
+            { 2, GL_COMBINE_RGB, GL_DOT3_RGBA },                    /* 22 */
+        };
+        int i;
+        glClearColor(0, 0, 0, 1);
+        for (i = 0; i < (int)(sizeof(steps) / sizeof(steps[0])); i++) {
+            glActiveTextureARB(GL_TEXTURE0_ARB + steps[i][0]);
+            if (steps[i][1] == GL_TEXTURE_2D)
+                glEnable(GL_TEXTURE_2D);
+            else if (steps[i][1] == GL_RGB_SCALE || steps[i][1] == GL_ALPHA_SCALE)
+                glTexEnvf(GL_TEXTURE_ENV, steps[i][1], (float)steps[i][2]);
+            else if (steps[i][1])
+                glTexEnvi(GL_TEXTURE_ENV, steps[i][1], steps[i][2]);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+        glActiveTextureARB(GL_TEXTURE0_ARB);
     } else if (!strcmp(scene, "texprobe")) {
         /* Sonde texture : réglages un par un, chacun suivi d'un glClear que le
            traceur vide (état GL + objet texture de l'unité 0). */

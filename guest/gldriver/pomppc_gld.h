@@ -151,6 +151,7 @@ void pomppc_context_created(void *ctx);
 void pomppc_context_destroyed(void *ctx);
 void pomppc_drawable_attached(void *ctx, long kind, long result);
 void pomppc_before_buffers_change(void *ctx);
+void pomppc_after_draw_buffer_change(void *ctx);
 void pomppc_texture_created(void *drvtex);
 void pomppc_texture_deleted(void *drvtex);
 void pomppc_texture_changed(void *drvtex, int levels);

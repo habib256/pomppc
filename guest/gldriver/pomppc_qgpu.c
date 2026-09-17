@@ -35,7 +35,8 @@ int qgpu_open(QgpuClient *q, const char **why)
     }
     kr = IOConnectMethodScalarIScalarO(q->conn, QGPU_UC_GET_INFO, 0, 4,
                                        &version, &caps, &size, &fence);
-    if (kr != KERN_SUCCESS || version != QGPU_PROTO_VERSION) {
+    /* le device accepte les flux des versions antérieures à la sienne */
+    if (kr != KERN_SUCCESS || version < QGPU_PROTO_VERSION) {
         *why = "version de protocole incompatible";
         goto fail;
     }

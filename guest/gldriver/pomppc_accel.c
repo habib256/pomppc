@@ -32,12 +32,17 @@
  * Variables d'environnement :
  *   POMPPC_GL_DISABLE=1   ne jamais accélérer (le plugin reste un mandataire)
  *   POMPPC_GL_STATS=1     bilan sur stderr à la fin du processus
+ *   POMPPC_GL_DIRECT=0    pas de présentation directe (voir present_direct)
+ *   POMPPC_GL_STATS=fichier  bilan ajouté au fichier toutes les 5 s (images/s,
+ *                         relectures, replis, temps passé à soumettre et à copier)
  *   POMPPC_GLTRACE=dir    trace (voir pomppc_gld.c)
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <sys/time.h>
+#include <dlfcn.h>
 
 #include "qgpu_proto.h"
 #include "pomppc_gld.h"
@@ -118,6 +123,15 @@
 #define TU_ENV_COLOR     0x00     /* float ×4 */
 #define TU_ENABLE        0x10     /* bits : 1 cube, 2 3D, 4 rectangle, 8 2D, 0x10 1D */
 #define TU_ENV_MODE      0x14     /* u16 */
+/* GL_COMBINE (relevé par la sonde « combprobe » de guest/gltest) : */
+#define TU_COMBINE_RGB   0x18     /* u16 */
+#define TU_COMBINE_A     0x1a
+#define TU_SRC0_RGB      0x1c     /* u16 ×3 */
+#define TU_SRC0_A        0x22     /* u16 ×3 */
+#define TU_OP0_RGB       0x28     /* u16 ×3 */
+#define TU_OP0_A         0x2e     /* u16 ×3 */
+#define TU_RGB_SCALE     0x34     /* float */
+#define TU_ALPHA_SCALE   0x38     /* float */
 #define GL_MAX_TEXUNITS  8
 /* Sommet GLEngine (0x100 octets) : */
 #define V_X 0x00
@@ -126,7 +140,7 @@
 #define V_COLOR 0x30              /* r g b a */
 #define V_FOG   0x4c              /* facteur de brouillard f (1 = pas de brouillard) */
 #define V_TEX0  0x80              /* s t r q de l'unité 0, déjà divisés par w */
-#define V_TEX1  0x90              /* s t r q de l'unité 1 */
+#define V_TEX(u) (V_TEX0 + 0x10 * (u))   /* unités 0 à 7 */
 
 #define GL_COLOR_BUFFER_BIT 0x4000
 #define GL_DEPTH_BUFFER_BIT 0x0100
@@ -148,10 +162,14 @@
 enum { SYNCED = 0, HOST_NEWER = 1, SW_NEWER = 2 };
 
 /* Genres de séries de sommets : opcode et taille des sommets. */
-enum { RK_TRI = 0, RK_TRI_TEX = 1, RK_TRI_TEX2 = 2, RK_LINES = 3, RK_POINTS = 4 };
-static const unsigned long rk_words[5] = {
+enum { RK_TRI = 0, RK_TRI_TEX = 1, RK_TRI_TEX2 = 2, RK_LINES = 3, RK_POINTS = 4,
+       RK_TRI_TEX3 = 5, RK_TRI_TEX4 = 6, RK_COUNT = 7 };
+/* unités de texture portées par le sommet, par genre */
+static const int rk_units[RK_COUNT] = { 0, 1, 2, 0, 0, 3, 4 };
+static const unsigned long rk_words[RK_COUNT] = {
     QGPU_VERTEX_WORDS, QGPU_VERTEX_TEX_WORDS, QGPU_VERTEX_TEX2_WORDS,
     QGPU_VERTEX_WORDS, QGPU_VERTEX_WORDS,
+    QGPU_VERTEX_TEXN_WORDS(3), QGPU_VERTEX_TEXN_WORDS(4),
 };
 
 typedef struct PCtx {
@@ -159,6 +177,7 @@ typedef struct PCtx {
     void          *ctx;                 /* contexte du GLDriver d'Apple */
     void         **procs;               /* table de procédures de GLEngine */
     void          *real[PROC_COUNT];    /* procédures d'Apple pour ce contexte */
+    void          *mine[PROC_COUNT];    /* ce que le plugin a installé (0 : rien) */
     long           qctx;                /* identifiant qgpu, -1 si aucun */
     long           surf;                /* surface qgpu, -1 si aucune */
     unsigned long  sw, sh;              /* taille de la surface */
@@ -171,6 +190,7 @@ typedef struct PCtx {
 
 typedef struct PTex {                   /* texture du GLDriver suivie par le plugin */
     struct PTex   *next;
+    struct PTex   *hnext;               /* chaînage de la table de hachage */
     void          *drvtex;
     long           qtex;                /* identifiant hôte, -1 si aucun */
     int            dirty;               /* niveaux à (re)téléverser */
@@ -181,10 +201,11 @@ typedef struct PTex {                   /* texture du GLDriver suivie par le plu
 typedef struct TexUnit {
     PTex          *t;                   /* 0 : unité inactive */
     unsigned long  env_mode, env_color;
+    unsigned long  combine, combine_src; /* GL_COMBINE empaqueté (v5) */
 } TexUnit;
 
 typedef struct TexInfo {                /* textures à appliquer pour le dessin en cours */
-    TexUnit        u[2];
+    TexUnit        u[QGPU_MAX_UNITS];
 } TexInfo;
 
 typedef struct Post {                   /* copie à faire après la soumission */
@@ -216,7 +237,95 @@ static struct {
     /* statistiques */
     unsigned long   n_tris, n_clears, n_submits, n_uploads, n_readbacks, n_fallback;
     unsigned long   n_textris, n_texuploads, n_lines, n_points;
+    unsigned long   n_frames, n_direct, n_tex_incomplete;
+    double          t_submit, t_copy, t_upload;   /* secondes cumulées */
 } G = { PTHREAD_MUTEX_INITIALIZER };
+
+static double now_s(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, 0);
+    return tv.tv_sec + tv.tv_usec * 1e-6;
+}
+
+/* Motifs de refus de l'accélération : compteurs et détail du premier cas,
+ * rapportés par le bilan périodique. */
+enum {
+    NO_BUFFER, NO_RASTER, NO_FOG, NO_POLYMODE, NO_DEPTH, NO_BLEND, NO_ALPHA,
+    NO_SURFACE, NO_TEX_UNITS, NO_TEX_TARGET, NO_TEX_ENV, NO_TEX_UNKNOWN,
+    NO_TEX_BASE, NO_TEX_SIZE, NO_TEX_FORMAT, NO_TEX_ID, NO_TEX_COMBINE, NO_COUNT
+};
+static const char *const no_name[NO_COUNT] = {
+    "tampon", "stencil/logicop/stipple", "brouillard", "polygonmode", "profondeur",
+    "melange", "alphatest", "surface", "unites>2", "cible-texture", "texenv",
+    "texture-inconnue", "format-base", "taille-texture", "format-texels", "id-texture",
+    "combine",
+};
+static unsigned long no_count[NO_COUNT];
+static char no_detail[NO_COUNT][64];
+static unsigned long fb_count[PROC_COUNT];      /* replis par procédure */
+
+static int no(int why, unsigned long a, unsigned long b)
+{
+    if (!no_count[why]++)
+        snprintf(no_detail[why], sizeof(no_detail[why]), "%lx/%lx", a, b);
+    return 0;
+}
+
+/* Bilan périodique (POMPPC_GL_STATS=<fichier>), appelé à chaque échange. */
+static void stats_frame(void)
+{
+    static const char *path;
+    static int init;
+    static double t0;
+    static unsigned long f0, tr0, rb0, up0, fb0, sub0, tu0, di0;
+    static double ts0, tc0, tu_0;
+    double t;
+
+    if (!init) {
+        const char *e = getenv("POMPPC_GL_STATS");
+        init = 1;
+        path = (e && e[0] == '/') ? e : 0;
+        t0 = now_s();
+    }
+    G.n_frames++;
+    if (!path)
+        return;
+    t = now_s();
+    if (t - t0 >= 5.0) {
+        FILE *f = fopen(path, "a");
+        if (f) {
+            double dt = t - t0;
+            fprintf(f, "%.1f img/s | tri %lu/img | relect %lu | televers %lu (tex %lu) | "
+                    "replis %lu | soumissions %lu | submit %.0f ms/img | copie %.0f ms/img | "
+                    "prep televers %.0f ms/img | directes %lu\n",
+                    (G.n_frames - f0) / dt,
+                    (G.n_tris - tr0) / (G.n_frames - f0 ? G.n_frames - f0 : 1),
+                    G.n_readbacks - rb0, G.n_uploads - up0, G.n_texuploads - tu0,
+                    G.n_fallback - fb0, G.n_submits - sub0,
+                    (G.t_submit - ts0) * 1000 / (G.n_frames - f0),
+                    (G.t_copy - tc0) * 1000 / (G.n_frames - f0),
+                    (G.t_upload - tu_0) * 1000 / (G.n_frames - f0),
+                    G.n_direct - di0);
+            {
+                int k;
+                for (k = 0; k < NO_COUNT; k++)
+                    if (no_count[k])
+                        fprintf(f, "    refus %s : %lu (premier : %s)\n",
+                                no_name[k], no_count[k], no_detail[k]);
+                for (k = 0; k < PROC_COUNT; k++)
+                    if (fb_count[k])
+                        fprintf(f, "    repli %s : %lu\n", pomppc_proc_name(k), fb_count[k]);
+                memset(no_count, 0, sizeof(no_count));
+                memset(fb_count, 0, sizeof(fb_count));
+            }
+            fclose(f);
+        }
+        t0 = t; f0 = G.n_frames; tr0 = G.n_tris; rb0 = G.n_readbacks; up0 = G.n_uploads;
+        fb0 = G.n_fallback; sub0 = G.n_submits; tu0 = G.n_texuploads; di0 = G.n_direct;
+        ts0 = G.t_submit; tc0 = G.t_copy; tu_0 = G.t_upload;
+    }
+}
 
 /* ────────────────────────────── utilitaires ────────────────────────────── */
 
@@ -308,14 +417,21 @@ static void close_run(void)
 {
     if (G.run_ctx && G.run_count) {
         unsigned long *c = G.cmd + G.ncmd;
-        static const unsigned long ops[5] = {
+        static const unsigned long ops[RK_COUNT] = {
             QGPU_OP_DRAW_TRIANGLES, QGPU_OP_DRAW_TRIANGLES_TEX, QGPU_OP_DRAW_TRIANGLES_TEX2,
             QGPU_OP_DRAW_LINES, QGPU_OP_DRAW_POINTS,
+            QGPU_OP_DRAW_TRIANGLES_TEXN, QGPU_OP_DRAW_TRIANGLES_TEXN,
         };
-        c[0] = QGPU_CMD_HDR(ops[G.run_kind], QGPU_LEN_DRAW);
+        int n = rk_units[G.run_kind];
+        c[0] = QGPU_CMD_HDR(ops[G.run_kind], n >= 3 ? QGPU_LEN_DRAW_N : QGPU_LEN_DRAW);
         c[1] = G.run_count;
         c[2] = G.q.base + VTX_OFF + G.run_start;
-        G.ncmd += QGPU_LEN_DRAW;
+        if (n >= 3) {
+            c[3] = n;                   /* DRAW_TRIANGLES_TEXN : nombre d'unités */
+            G.ncmd += QGPU_LEN_DRAW_N;
+        } else {
+            G.ncmd += QGPU_LEN_DRAW;
+        }
     }
     G.run_ctx = 0;
     G.run_count = 0;
@@ -326,7 +442,7 @@ static unsigned long *reserve(PCtx *p, unsigned long words)
 {
     unsigned long *c;
     close_run();
-    if (G.ncmd + words + 2 + QGPU_LEN_DRAW > CMD_WORDS)
+    if (G.ncmd + words + 2 + QGPU_LEN_DRAW_N > CMD_WORDS)
         flush();
     if (G.bound != p) {
         c = G.cmd + G.ncmd;
@@ -373,7 +489,10 @@ static void flush(void)
 
     close_run();
     if (G.ncmd) {
+        double t = now_s(), t2;
         st = qgpu_submit(&G.q, 0, G.ncmd * 4, &pc);
+        t2 = now_s();
+        G.t_submit += t2 - t;
         G.n_submits++;
         if (st != QGPU_ST_OK)
             broken_all("flush", st, pc);
@@ -395,6 +514,7 @@ static void flush(void)
                 }
             }
         }
+        G.t_copy += now_s() - t2;
     }
     G.ncmd = 0;
     G.vtx = 0;
@@ -429,10 +549,22 @@ static long alloc_tex_id(void)
     return -1;
 }
 
+/* Textures par adresse d'objet du GLDriver. Une recherche par unité de
+ * texture et par dessin : une liste suffisait aux tests, pas à un jeu qui
+ * garde des centaines de textures (vu en vrai : 8 % du temps de Zenerchi). */
+#define TEX_HASH 512
+static PTex *tex_hash[TEX_HASH];
+
+static unsigned long tex_bucket(void *drvtex)
+{
+    unsigned long a = (unsigned long)drvtex;
+    return ((a >> 4) ^ (a >> 13)) & (TEX_HASH - 1);
+}
+
 static PTex *find_tex(void *drvtex)
 {
     PTex *t;
-    for (t = G.textures; t; t = t->next)
+    for (t = tex_hash[tex_bucket(drvtex)]; t; t = t->hnext)
         if (t->drvtex == drvtex)
             return t;
     return 0;
@@ -452,6 +584,8 @@ void pomppc_texture_created(void *drvtex)
     pthread_mutex_lock(&G.mu);
     t->next = G.textures;
     G.textures = t;
+    t->hnext = tex_hash[tex_bucket(drvtex)];
+    tex_hash[tex_bucket(drvtex)] = t;
     pthread_mutex_unlock(&G.mu);
 }
 
@@ -468,6 +602,13 @@ void pomppc_texture_deleted(void *drvtex)
             continue;
         t = *pp;
         *pp = t->next;
+        {
+            PTex **hp = &tex_hash[tex_bucket(drvtex)];
+            while (*hp && *hp != t)
+                hp = &(*hp)->hnext;
+            if (*hp)
+                *hp = t->hnext;
+        }
         if (t->qtex >= 0) {
             unsigned long i = t->qtex - G.q.tex_base;
             close_run();
@@ -533,6 +674,51 @@ static int convert_level(const unsigned char *lv, unsigned long *out)
             out[i] = (wd[i] >> 8) | ((wd[i] & 0xFF) << 24);
         return 1;
     }
+    case (0x80E1 << 16) | 0x8035: {                      /* BGRA, UINT_8_8_8_8 (Zenerchi) */
+        const unsigned long *wd = (const unsigned long *)d;
+        for (i = 0; i < n; i++) {
+            unsigned long v = wd[i];                     /* B G R A → A R G B */
+            out[i] = (v >> 24) | ((v >> 8) & 0xFF00) | ((v & 0xFF00) << 8) | (v << 24);
+        }
+        return 1;
+    }
+    case (0x1908 << 16) | 0x8367: {                      /* RGBA, UINT_8_8_8_8_REV */
+        const unsigned long *wd = (const unsigned long *)d;
+        for (i = 0; i < n; i++) {
+            unsigned long v = wd[i];                     /* A B G R → A R G B */
+            out[i] = (v & 0xFF00FF00UL) | ((v & 0xFF) << 16) | ((v >> 16) & 0xFF);
+        }
+        return 1;
+    }
+    case (0x80E1 << 16) | 0x8366: {                      /* BGRA, USHORT_1_5_5_5_REV (ARGB1555) */
+        const unsigned short *wd = (const unsigned short *)d;
+        for (i = 0; i < n; i++) {
+            unsigned long v = wd[i];
+            unsigned long r = (v >> 10) & 31, g = (v >> 5) & 31, b = v & 31;
+            out[i] = ((v & 0x8000) ? 0xFF000000UL : 0) | (((r << 3) | (r >> 2)) << 16) |
+                     (((g << 3) | (g >> 2)) << 8) | ((b << 3) | (b >> 2));
+        }
+        return 1;
+    }
+    case (0x1907 << 16) | 0x8363: {                      /* RGB, USHORT_5_6_5 */
+        const unsigned short *wd = (const unsigned short *)d;
+        for (i = 0; i < n; i++) {
+            unsigned long v = wd[i];
+            unsigned long r = v >> 11, g = (v >> 5) & 63, b = v & 31;
+            out[i] = 0xFF000000UL | (((r << 3) | (r >> 2)) << 16) |
+                     (((g << 2) | (g >> 4)) << 8) | ((b << 3) | (b >> 2));
+        }
+        return 1;
+    }
+    case (0x1908 << 16) | 0x8033: {                      /* RGBA, USHORT_4_4_4_4 */
+        const unsigned short *wd = (const unsigned short *)d;
+        for (i = 0; i < n; i++) {
+            unsigned long v = wd[i];
+            out[i] = (((v & 15) * 17) << 24) | (((v >> 12) * 17) << 16) |
+                     ((((v >> 8) & 15) * 17) << 8) | (((v >> 4) & 15) * 17);
+        }
+        return 1;
+    }
     case (0x1909 << 16) | 0x1401:                        /* LUMINANCE */
         for (i = 0; i < n; i++)
             out[i] = 0xFF000000UL | (d[i] * 0x010101UL);
@@ -567,12 +753,23 @@ static int upload_texture(PCtx *p, PTex *t)
     unsigned long base = GLD_U32(dt, DT_BASE_FORMAT), prm[4], off, *c;
     int l, k;
 
-    if (!gp || !base_format_ok(base))
-        return 0;
+    if (!gp || !base_format_ok(base)) {
+        const unsigned char *lv0 = dt + DT_LEVEL0;
+        unsigned long lmask = 0;
+        int li;
+        for (li = 0; li < DT_LEVELS; li++) {
+            const unsigned char *lv = dt + DT_LEVEL0 + li * DT_LEVEL_SIZE;
+            if (S16(lv, LV_W) && GLD_U32(lv, LV_DATA))
+                lmask |= 1UL << li;
+        }
+        return no(NO_TEX_BASE, base | (lmask << 16),
+                  ((unsigned long)(unsigned short)S16(lv0, LV_W) << 16) |
+                  (unsigned short)S16(lv0, LV_H));
+    }
     if (t->qtex < 0) {
         t->qtex = alloc_tex_id();
         if (t->qtex < 0)
-            return 0;
+            return no(NO_TEX_ID, 0, 0);
         c = reserve(p, QGPU_LEN_TEX);
         c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX);
         c[1] = t->qtex;
@@ -587,9 +784,10 @@ static int upload_texture(PCtx *p, PTex *t)
                 continue;
             if (S16(lv, LV_BORDER) || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM ||
                 !arena_alloc(w * h * 4, &off))
-                return 0;
+                return no(NO_TEX_SIZE, w, h);
             if (!convert_level(lv, (unsigned long *)(G.q.win + off)))
-                return 0;
+                return no(NO_TEX_FORMAT, (U16(lv, LV_FORMAT) << 16) | U16(lv, LV_TYPE),
+                          ((unsigned long)S16(lv, LV_ROWPIX) << 16) | w);
             c = reserve(p, QGPU_LEN_TEX_IMAGE);
             c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE, QGPU_LEN_TEX_IMAGE);
             c[1] = t->qtex; c[2] = l; c[3] = w; c[4] = h; c[5] = base;
@@ -614,6 +812,77 @@ static int upload_texture(PCtx *p, PTex *t)
     return 1;
 }
 
+/* ─────────────────────── GL_COMBINE → état qgpu (v5) ───────────────────────
+ * GLEngine range les paramètres de combinaison dans le bloc de l'unité
+ * (offsets TU_*, relevés par la scène « combprobe » de guest/gltest).
+ * Les valeurs hors du domaine du device (fonction inconnue, source croisée
+ * d'une autre unité, échelle autre que 1, 2 ou 4) font retomber le dessin sur
+ * le rendu d'Apple, comme tout le reste. */
+static int combine_fn_code(unsigned long e, int rgb)
+{
+    switch (e) {
+    case 0x1E01: return QGPU_CB_REPLACE;
+    case 0x2100: return QGPU_CB_MODULATE;
+    case 0x0104: return QGPU_CB_ADD;
+    case 0x8574: return QGPU_CB_ADD_SIGNED;
+    case 0x8575: return QGPU_CB_INTERPOLATE;
+    case 0x84E7: return QGPU_CB_SUBTRACT;
+    case 0x86AE: case 0x8740: return rgb ? QGPU_CB_DOT3_RGB : -1;
+    case 0x86AF: case 0x8741: return rgb ? QGPU_CB_DOT3_RGBA : -1;
+    default:     return -1;
+    }
+}
+
+static int combine_src_code(unsigned long e, int unit)
+{
+    switch (e) {
+    case 0x1702: return QGPU_CS_TEXTURE;          /* GL_TEXTURE */
+    case 0x8576: return QGPU_CS_CONSTANT;
+    case 0x8577: return QGPU_CS_PRIMARY;
+    case 0x8578: return QGPU_CS_PREVIOUS;
+    default:
+        /* GL_TEXTUREn (crossbar) : accepté seulement pour sa propre unité */
+        if (e >= 0x84C0 && e < 0x84C0 + GL_MAX_TEXUNITS)
+            return (int)(e - 0x84C0) == unit ? QGPU_CS_TEXTURE : -1;
+        return -1;
+    }
+}
+
+static int combine_scale_code(float f)
+{
+    if (f > 0.5f && f < 1.5f) return 0;
+    if (f > 1.5f && f < 2.5f) return 1;
+    if (f > 3.5f && f < 4.5f) return 2;
+    return -1;
+}
+
+/* Remplit tu->combine et tu->combine_src ; 0 si l'unité sort du domaine. */
+static int combine_ok(const unsigned char *us, int unit, TexUnit *tu)
+{
+    int frgb = combine_fn_code(U16(us, TU_COMBINE_RGB), 1);
+    int fa = combine_fn_code(U16(us, TU_COMBINE_A), 0);
+    int rs = combine_scale_code(GLD_F32(us, TU_RGB_SCALE));
+    int as = combine_scale_code(GLD_F32(us, TU_ALPHA_SCALE));
+    unsigned long src = 0;
+    int i;
+
+    if (frgb < 0 || fa < 0 || rs < 0 || as < 0)
+        return no(NO_TEX_COMBINE, (U16(us, TU_COMBINE_RGB) << 16) | U16(us, TU_COMBINE_A), unit);
+    for (i = 0; i < 3; i++) {
+        int sr = combine_src_code(U16(us, TU_SRC0_RGB + 2 * i), unit);
+        int sa = combine_src_code(U16(us, TU_SRC0_A + 2 * i), unit);
+        unsigned long orgb = U16(us, TU_OP0_RGB + 2 * i);
+        unsigned long oa = U16(us, TU_OP0_A + 2 * i);
+        if (sr < 0 || sa < 0 || orgb < 0x300 || orgb > 0x303 || (oa != 0x302 && oa != 0x303))
+            return no(NO_TEX_COMBINE, (orgb << 16) | oa, unit);
+        src |= QGPU_COMBINE_SRC_RGB(i, sr, orgb - 0x300);
+        src |= QGPU_COMBINE_SRC_A(i, sa, oa == 0x303 ? QGPU_CA_ONE_MINUS_ALPHA : QGPU_CA_ALPHA);
+    }
+    tu->combine = QGPU_COMBINE(frgb, fa, rs, as);
+    tu->combine_src = src;
+    return 1;
+}
+
 /* Unité u : texture et environnement ; 0 = hors domaine (logiciel). */
 static int texture_unit_ok(PCtx *p, int u, TexUnit *tu)
 {
@@ -629,12 +898,28 @@ static int texture_unit_ok(PCtx *p, int u, TexUnit *tu)
     if (!mask)
         return 1;                                   /* unité coupée */
     if ((mask & 0x7) || !units)                      /* cube, 3D, rectangle */
+        return no(NO_TEX_TARGET, mask, units);
+    if (env != 0x2100 && env != 0x2101 && env != 0x0BE2 && env != 0x1E01 &&
+        env != 0x0104 && env != 0x8570)
+        return no(NO_TEX_ENV, env, u);
+    tu->combine = QGPU_COMBINE_DEFAULT;
+    tu->combine_src = QGPU_COMBINE_SRC_DEFAULT;
+    if (env == 0x8570 && !combine_ok(us, u, tu))
         return 0;
-    if (env != 0x2100 && env != 0x2101 && env != 0x0BE2 && env != 0x1E01 && env != 0x0104)
-        return 0;                                   /* GL_COMBINE… */
     dt = (void *)GLD_U32(units, u * 0x14 + ((mask & 8) ? 3 * 4 : 4 * 4));
     tu->t = dt ? find_tex(dt) : 0;
-    if (!tu->t || !upload_texture(p, tu->t))
+    if (!tu->t)
+        return no(NO_TEX_UNKNOWN, (unsigned long)dt, mask);
+    /* Texture sans image (jamais définie) : OpenGL la dit incomplète et coupe
+       le texturage de CETTE unité, sans toucher aux autres. Marble Blast
+       laisse ainsi des unités actives sans texture. */
+    if (!S16((unsigned char *)tu->t->drvtex + DT_LEVEL0, LV_W) ||
+        !GLD_U32((unsigned char *)tu->t->drvtex + DT_LEVEL0, LV_DATA)) {
+        tu->t = 0;
+        G.n_tex_incomplete++;
+        return 1;
+    }
+    if (!upload_texture(p, tu->t))
         return 0;
     ec = (const float *)(us + TU_ENV_COLOR);
     tu->env_mode = env;
@@ -648,13 +933,17 @@ static int texture_ok(PCtx *p, TexInfo *ti)
     unsigned char *g = gls(p);
     int i;
 
-    ti->u[0].t = ti->u[1].t = 0;
+    for (i = 0; i < QGPU_MAX_UNITS; i++)
+        ti->u[i].t = 0;
     if (!GLD_U8(p->ctx, CTX_TEXTURING))
         return 1;                                   /* pas de texture : dessin simple */
-    for (i = 2; i < GL_MAX_TEXUNITS; i++)
+    for (i = QGPU_MAX_UNITS; i < GL_MAX_TEXUNITS; i++)
         if (GLD_U32(g, GS_TEXUNIT0 + i * GS_TEXUNIT_SIZE + TU_ENABLE) & 0x1f)
-            return 0;                               /* 3 unités ou plus : logiciel */
-    return texture_unit_ok(p, 0, &ti->u[0]) && texture_unit_ok(p, 1, &ti->u[1]);
+            return no(NO_TEX_UNITS, i, 0);          /* 5 unités ou plus : logiciel */
+    for (i = 0; i < QGPU_MAX_UNITS; i++)
+        if (!texture_unit_ok(p, i, &ti->u[i]))
+            return 0;
+    return 1;
 }
 
 static void destroy_surface(PCtx *p)
@@ -706,6 +995,7 @@ static void sync_to_host(PCtx *p, int color, int depth)
     unsigned long off, y, x, *c;
     unsigned long w = p->sw, h = p->sh;
 
+    double t0 = now_s();
     if (color && p->color == SW_NEWER) {
         unsigned char *src = sw_color(p);
         if (src && arena_alloc(w * h * 4, &off)) {
@@ -737,9 +1027,10 @@ static void sync_to_host(PCtx *p, int color, int depth)
         }
         p->depth = SYNCED;
     }
+    G.t_upload += now_s() - t0;
 }
 
-static void queue_readback(PCtx *p, int depth, unsigned char *dst)
+static void queue_readback_to(PCtx *p, int depth, unsigned char *dst, unsigned long rowbytes)
 {
     unsigned long off, *c;
     unsigned long w = p->sw, h = p->sh;
@@ -755,10 +1046,15 @@ static void queue_readback(PCtx *p, int depth, unsigned char *dst)
     G.post[G.npost].dst = dst;
     G.post[G.npost].w = w;
     G.post[G.npost].h = h;
-    G.post[G.npost].rowbytes = sw_rowbytes(p);
+    G.post[G.npost].rowbytes = rowbytes;
     G.post[G.npost].scale = GLD_F32(p->ctx, CTX_DEPTH_SCALE);
     G.npost++;
     G.n_readbacks++;
+}
+
+static void queue_readback(PCtx *p, int depth, unsigned char *dst)
+{
+    queue_readback_to(p, depth, dst, sw_rowbytes(p));
 }
 
 /* Recopie dans le tampon invité ce que l'hôte a dessiné (verrou tenu).
@@ -840,27 +1136,28 @@ static int accel_ok(PCtx *p)
     g = gls(p);
     if (!g || !sw_color(p) || GLD_U32(p->ctx, CTX_COLOR_BITS) != 32 ||
         GLD_U32(p->ctx, CTX_ROWPIX) < GLD_U32(p->ctx, CTX_WIDTH))
-        return 0;
+        return no(NO_BUFFER, GLD_U32(p->ctx, CTX_COLOR_BITS), GLD_U32(p->ctx, CTX_ROWPIX));
     if ((GLD_U32(g, GS_STENCIL) & 1) || GLD_U8(g, GS_LOGIC_OP) ||
         GLD_U8(g, GS_POLY_STIPPLE) || GLD_U8(g, GS_POLY_SMOOTH))
-        return 0;
+        return no(NO_RASTER, GLD_U32(g, GS_STENCIL), GLD_U8(g, GS_LOGIC_OP));
     /* brouillard : GLEngine fournit le facteur par sommet, sauf en GL_NICEST
        où le GLDriver le calcule par fragment */
     if (GLD_U8(g, GS_FOG) && U16(g, GS_FOG_HINT) == 0x1102)
-        return 0;
+        return no(NO_FOG, U16(g, GS_FOG_MODE), 0);
     if (U16(g, GS_POLY_MODE) != GL_FILL || U16(g, GS_POLY_MODE + 2) != GL_FILL)
-        return 0;
+        return no(NO_POLYMODE, U16(g, GS_POLY_MODE), U16(g, GS_POLY_MODE + 2));
     if (GLD_U8(g, GS_DEPTH_TEST) &&
         (GLD_U32(p->ctx, CTX_DEPTH_BITS) != 32 || U16(g, GS_DEPTH_FUNC) < 0x200 ||
          U16(g, GS_DEPTH_FUNC) > 0x207))
-        return 0;
+        return no(NO_DEPTH, GLD_U32(p->ctx, CTX_DEPTH_BITS), U16(g, GS_DEPTH_FUNC));
     if (GLD_U8(g, GS_BLEND) &&
         (!blend_factor_ok(U16(g, GS_BLEND_SRC_RGB)) || !blend_factor_ok(U16(g, GS_BLEND_DST_RGB)) ||
          !blend_factor_ok(U16(g, GS_BLEND_SRC_A)) || !blend_factor_ok(U16(g, GS_BLEND_DST_A)) ||
          !blend_eq_ok(U16(g, GS_BLEND_EQ_RGB)) || !blend_eq_ok(U16(g, GS_BLEND_EQ_A))))
-        return 0;
+        return no(NO_BLEND, (U16(g, GS_BLEND_SRC_RGB) << 16) | U16(g, GS_BLEND_DST_RGB),
+                  (U16(g, GS_BLEND_EQ_RGB) << 16) | U16(g, GS_BLEND_EQ_A));
     if (GLD_U8(g, GS_ALPHA_TEST) && (U16(g, GS_ALPHA_FUNC) < 0x200 || U16(g, GS_ALPHA_FUNC) > 0x207))
-        return 0;
+        return no(NO_ALPHA, U16(g, GS_ALPHA_FUNC), 0);
     return 1;
 }
 
@@ -912,21 +1209,24 @@ static void compute_state(PCtx *p, const TexInfo *ti, unsigned long *v)
     }
     /* textures : liaison et environnement conservés quand l'unité est coupée */
     {
-        static const int keys[2][4] = {
-            { QGPU_SK_TEXTURE, QGPU_SK_TEX_BIND, QGPU_SK_TEX_ENV_MODE, QGPU_SK_TEX_ENV_COLOR },
-            { QGPU_SK_TEXTURE1, QGPU_SK_TEX1_BIND, QGPU_SK_TEX1_ENV_MODE, QGPU_SK_TEX1_ENV_COLOR },
-        };
-        int u;
-        for (u = 0; u < 2; u++) {
+        int u, kb;
+        for (u = 0; u < QGPU_MAX_UNITS; u++) {
             const TexUnit *tu = ti ? &ti->u[u] : 0;
-            v[keys[u][0]] = tu && tu->t;
-            v[keys[u][1]] = p->st_valid ? p->st[keys[u][1]] : 0;
-            v[keys[u][2]] = p->st_valid ? p->st[keys[u][2]] : 0x2100;
-            v[keys[u][3]] = p->st_valid ? p->st[keys[u][3]] : 0;
+            kb = QGPU_SK_UNIT(u);
+            v[kb + QGPU_SK_U_ENABLE] = tu && tu->t;
+            v[kb + QGPU_SK_U_BIND] = p->st_valid ? p->st[kb + QGPU_SK_U_BIND] : 0;
+            v[kb + QGPU_SK_U_ENV_MODE] = p->st_valid ? p->st[kb + QGPU_SK_U_ENV_MODE] : 0x2100;
+            v[kb + QGPU_SK_U_ENV_COLOR] = p->st_valid ? p->st[kb + QGPU_SK_U_ENV_COLOR] : 0;
+            v[QGPU_SK_COMBINE0 + u] = p->st_valid ? p->st[QGPU_SK_COMBINE0 + u]
+                                                  : QGPU_COMBINE_DEFAULT;
+            v[QGPU_SK_COMBINE_SRC0 + u] = p->st_valid ? p->st[QGPU_SK_COMBINE_SRC0 + u]
+                                                      : QGPU_COMBINE_SRC_DEFAULT;
             if (tu && tu->t) {
-                v[keys[u][1]] = tu->t->qtex;
-                v[keys[u][2]] = tu->env_mode;
-                v[keys[u][3]] = tu->env_color;
+                v[kb + QGPU_SK_U_BIND] = tu->t->qtex;
+                v[kb + QGPU_SK_U_ENV_MODE] = tu->env_mode;
+                v[kb + QGPU_SK_U_ENV_COLOR] = tu->env_color;
+                v[QGPU_SK_COMBINE0 + u] = tu->combine;
+                v[QGPU_SK_COMBINE_SRC0 + u] = tu->combine_src;
             }
         }
     }
@@ -1025,20 +1325,29 @@ static int begin_lp(PCtx *p, Batch *b, int lines)
 static int begin_tris(PCtx *p, Batch *b)
 {
     TexInfo ti;
-    if (!accel_ok(p) || !ensure_surface(p) || !texture_ok(p, &ti))
+    if (!accel_ok(p))
+        return 0;
+    if (!ensure_surface(p))
+        return no(NO_SURFACE, GLD_U32(p->ctx, CTX_WIDTH), GLD_U32(p->ctx, CTX_HEIGHT));
+    if (!texture_ok(p, &ti))
         return 0;
     begin_common(p, b, &ti);
-    b->kind = ti.u[1].t ? RK_TRI_TEX2 : ti.u[0].t ? RK_TRI_TEX : RK_TRI;
+    /* le sommet porte les coordonnées de toutes les unités jusqu'à la
+       dernière active (une unité coupée laisse passer la couleur) */
+    b->kind = RK_TRI;
+    if (ti.u[3].t)      b->kind = RK_TRI_TEX4;
+    else if (ti.u[2].t) b->kind = RK_TRI_TEX3;
+    else if (ti.u[1].t) b->kind = RK_TRI_TEX2;
+    else if (ti.u[0].t) b->kind = RK_TRI_TEX;
     return 1;
 }
 
 static void put_vertex(const Batch *b, float *o, const unsigned char *v, const unsigned char *col)
 {
     const float *c = (const float *)(col + V_COLOR);
-    if (b->kind == RK_TRI_TEX || b->kind == RK_TRI_TEX2)
-        memcpy(o + 8, v + V_TEX0, 4 * sizeof(float));
-    if (b->kind == RK_TRI_TEX2)
-        memcpy(o + 12, v + V_TEX1, 4 * sizeof(float));
+    int u, nu = rk_units[b->kind];
+    for (u = 0; u < nu; u++)
+        memcpy(o + 8 + 4 * u, v + V_TEX(u), 4 * sizeof(float));
     o[0] = GLD_F32(v, V_X);
     o[1] = b->h - GLD_F32(v, V_Y);
     o[2] = clamp01(GLD_F32(v, V_Z) * b->zinv);
@@ -1117,6 +1426,7 @@ static void *fallback(PCtx *p, int slot, int writes_color, int touches_depth)
         if (touches_depth && writes_depth(p))
             p->depth = SW_NEWER;
         G.n_fallback++;
+        fb_count[slot]++;
     }
     return p->real[slot];
 }
@@ -1389,6 +1699,118 @@ static long a_clear(void *ctx, long mask, long c, long d, long e, long f, long g
     return real(ctx, mask, c, d, e, f, g8, h);
 }
 
+/* ─────────────────────────── présentation directe ───────────────────────────
+ *
+ * Une application plein écran (menus cachés, fenêtre de la taille de l'écran,
+ * au premier plan) n'a pas besoin du WindowServer : l'image relue sur l'hôte
+ * est écrite droit dans la mémoire vidéo (CGDisplayBaseAddress), et l'échange
+ * d'Apple (gldSwapBuffers → glsSwapBuffers : copie dans la mémoire de la
+ * fenêtre puis attente du WindowServer) est remplacé par une procédure vide,
+ * comme le gldSwapNoop d'Apple pour un contexte à simple tampon.
+ *
+ * Vu en vrai (Zenerchi, 800x600) : l'échange attendait le WindowServer 41 %
+ * du temps, et le WindowServer passait un tiers d'un cœur à recopier.
+ *
+ * Les symboles sont cherchés dans le processus (dlsym) : sans HIToolbox ou
+ * CoreGraphics chargés, pas de présentation directe. POMPPC_GL_DIRECT=0 la
+ * coupe. Les conditions sont réévaluées toutes les 30 images. */
+typedef struct { unsigned long hi, lo; } Psn;
+static struct {
+    int            init, enabled, ok;
+    unsigned long  checked_at;
+    unsigned char *base;
+    unsigned long  rowbytes, w, h;
+    unsigned long (*main_display)(void);
+    void         *(*base_address)(unsigned long);
+    unsigned long (*bytes_per_row)(unsigned long);
+    unsigned long (*bits_per_pixel)(unsigned long);
+    unsigned long (*pixels_wide)(unsigned long);
+    unsigned long (*pixels_high)(unsigned long);
+    unsigned char (*menubar_visible)(void);
+    short         (*front_process)(Psn *);
+    short         (*current_process)(Psn *);
+    short         (*same_process)(const Psn *, const Psn *, unsigned char *);
+} D;
+
+static void direct_noop(void)
+{
+}
+
+static void direct_init(void)
+{
+    const char *e = getenv("POMPPC_GL_DIRECT");
+    D.init = 1;
+    D.enabled = !(e && e[0] == '0');
+    D.main_display    = dlsym(RTLD_DEFAULT, "CGMainDisplayID");
+    D.base_address    = dlsym(RTLD_DEFAULT, "CGDisplayBaseAddress");
+    D.bytes_per_row   = dlsym(RTLD_DEFAULT, "CGDisplayBytesPerRow");
+    D.bits_per_pixel  = dlsym(RTLD_DEFAULT, "CGDisplayBitsPerPixel");
+    D.pixels_wide     = dlsym(RTLD_DEFAULT, "CGDisplayPixelsWide");
+    D.pixels_high     = dlsym(RTLD_DEFAULT, "CGDisplayPixelsHigh");
+    D.menubar_visible = dlsym(RTLD_DEFAULT, "IsMenuBarVisible");
+    D.front_process   = dlsym(RTLD_DEFAULT, "GetFrontProcess");
+    D.current_process = dlsym(RTLD_DEFAULT, "GetCurrentProcess");
+    D.same_process    = dlsym(RTLD_DEFAULT, "SameProcess");
+    if (!D.main_display || !D.base_address || !D.bytes_per_row || !D.bits_per_pixel ||
+        !D.pixels_wide || !D.pixels_high || !D.menubar_visible || !D.front_process ||
+        !D.current_process || !D.same_process) {
+        if (D.enabled)
+            pomppc_log("POMPPC: présentation directe indisponible (symboles absents)\n");
+        D.enabled = 0;
+    }
+}
+
+/* Mémoire vidéo où présenter p, ou 0 (échange normal). Verrou tenu. */
+static unsigned char *direct_target(PCtx *p, unsigned long *rowbytes)
+{
+    if (!D.init)
+        direct_init();
+    if (!D.enabled)
+        return 0;
+    if (!D.checked_at || G.n_frames - D.checked_at >= 30 || p->sw != D.w || p->sh != D.h) {
+        unsigned long did = D.main_display();
+        Psn front, me;
+        unsigned char same = 0;
+        int ok;
+        D.w = D.pixels_wide(did);
+        D.h = D.pixels_high(did);
+        D.base = D.base_address(did);
+        D.rowbytes = D.bytes_per_row(did);
+        ok = D.base && D.bits_per_pixel(did) == 32 && D.rowbytes >= D.w * 4 &&
+             p->sw == D.w && p->sh == D.h && !D.menubar_visible() &&
+             D.front_process(&front) == 0 && D.current_process(&me) == 0 &&
+             D.same_process(&front, &me, &same) == 0 && same;
+        if (ok != D.ok)
+            pomppc_log("POMPPC: présentation directe %s (%lux%lu, écran %lux%lu)\n",
+                       ok ? "active" : "coupée", p->sw, p->sh, D.w, D.h);
+        D.ok = ok;
+        D.checked_at = G.n_frames ? G.n_frames : 1;
+    }
+    if (!D.ok)
+        return 0;
+    *rowbytes = D.rowbytes;
+    return D.base;
+}
+
+/* Échange (procédure 0x60) : présente directement si possible. Verrou tenu.
+ * Seulement si l'hôte a l'image la plus récente (sinon, chemin normal). */
+static int present_direct(PCtx *p)
+{
+    unsigned char *vram;
+    unsigned long rowbytes;
+    if (G.state <= 0 || p->broken || p->surf < 0 || p->color == SW_NEWER)
+        return 0;
+    vram = direct_target(p, &rowbytes);
+    if (!vram)
+        return 0;
+    queue_readback_to(p, 0, vram, rowbytes);
+    flush();
+    G.n_direct++;
+    /* le tampon arrière est indéfini après un échange : la copie hôte reste
+       la référence (p->color inchangé) */
+    return 1;
+}
+
 /* ───────────────────────────── table de procédures ───────────────────────────── */
 
 #define PROC_TRAMP(k) extern void pomppc_proc_##k(void);
@@ -1479,6 +1901,12 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
         abort();                        /* ne jamais sauter à une adresse nulle */
     }
     target = p->real[slot];
+    if (slot == PROC_Swap58 || slot == PROC_Swap5c || slot == PROC_Swap60)
+        stats_frame();
+    if (slot == PROC_Swap60 && present_direct(p)) {
+        pthread_mutex_unlock(&G.mu);
+        return direct_noop;
+    }
     kind &= 0xff;
     if (kind != K_NONE)
         fallback(p, slot, (kind & K_WRITE) != 0, (kind & K_DEPTH) != 0);
@@ -1497,15 +1925,29 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
     return target;
 }
 
-static int is_ours(void *f)
+/* Ce que le plugin installe dans chaque case (constant pour un processus). */
+static void *install_for(int k)
 {
-    int k;
-    for (k = 0; k < PROC_COUNT; k++)
-        if (f == proc_tramps[k] || (f && f == accel_proc(k)))
-            return 1;
-    return 0;
+    static void *tab[PROC_COUNT];
+    static int init;
+    if (!init) {
+        int i;
+        for (i = 0; i < PROC_COUNT; i++) {
+            tab[i] = 0;
+            if (G.state > 0 && accel_proc(i))
+                tab[i] = accel_proc(i);
+            else if (pomppc_tracing() || (G.state > 0 && proc_kind(i) != K_NONE))
+                tab[i] = proc_tramps[i];
+        }
+        init = G.state != 0;            /* état du device connu : table définitive */
+    }
+    return tab[k];
 }
 
+/* gldUpdateDispatch appelle ces deux fonctions autour de chaque mise à jour
+ * de la table, c'est-à-dire à chaque changement d'état GL : elles doivent
+ * rester en temps constant par case (vu en vrai : 15 % du temps de Zenerchi
+ * avec une recherche linéaire par case). */
 void pomppc_hook_procs(void *ctx, void **procs)
 {
     PCtx *p;
@@ -1515,13 +1957,12 @@ void pomppc_hook_procs(void *ctx, void **procs)
     if (p) {
         p->procs = procs;
         for (k = 0; k < PROC_COUNT; k++) {
-            if (!procs[k] || is_ours(procs[k]))
+            void *mine = install_for(k);
+            if (!procs[k] || !mine || procs[k] == mine)
                 continue;
             p->real[k] = procs[k];
-            if (G.state > 0 && accel_proc(k))
-                procs[k] = accel_proc(k);
-            else if (pomppc_tracing() || (G.state > 0 && proc_kind(k) != K_NONE))
-                procs[k] = proc_tramps[k];
+            p->mine[k] = mine;
+            procs[k] = mine;
         }
     }
     pthread_mutex_unlock(&G.mu);
@@ -1535,7 +1976,7 @@ void pomppc_unhook_procs(void *ctx, void **procs)
     p = find_ctx(ctx);
     if (p)
         for (k = 0; k < PROC_COUNT; k++)
-            if (procs[k] && is_ours(procs[k]))
+            if (p->mine[k] && procs[k] == p->mine[k])
                 procs[k] = p->real[k];
     pthread_mutex_unlock(&G.mu);
 }
@@ -1604,6 +2045,35 @@ void pomppc_context_destroyed(void *ctx)
 void pomppc_before_buffers_change(void *ctx)
 {
     sync_to_sw(ctx, 1);
+}
+
+/* Après une mise à jour de la table marquée « tampon de dessin changé »
+ * (glDrawBuffer, échange avant/arrière, et aussi chaque CGLFlushDrawable
+ * sans changement réel). Synchronisation paresseuse : si l'adresse n'a pas
+ * bougé, rien à faire ; sinon ce que l'hôte a dessiné va dans l'ancien tampon,
+ * toujours alloué. La profondeur, elle, n'est pas concernée.
+ * (Vu en vrai : relire la couleur avant chaque mise à jour coûtait deux
+ * relectures de 800x600 par image dans Zenerchi.) */
+void pomppc_after_draw_buffer_change(void *ctx)
+{
+    PCtx *p;
+    unsigned char *cur;
+    if (G.state <= 0)
+        return;
+    pthread_mutex_lock(&G.mu);
+    p = find_ctx(ctx);
+    if (p && p->surf >= 0) {
+        cur = sw_color(p);
+        if (cur != p->draw_seen) {
+            if (p->color == HOST_NEWER && p->draw_seen)
+                queue_readback(p, 0, p->draw_seen);
+            if (G.ncmd)
+                flush();
+            p->draw_seen = cur;
+            p->color = SW_NEWER;
+        }
+    }
+    pthread_mutex_unlock(&G.mu);
 }
 
 void pomppc_drawable_attached(void *ctx, long kind, long result)

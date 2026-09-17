@@ -86,12 +86,13 @@ typedef struct QgpuBackend {
     void (*surf_destroy)(QgpuCore *c, QgpuSurface *s);
     bool (*clear)(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
                   uint32_t mask, uint32_t argb, float depth);
-    /* Dessin (v4). prim : QGPU_PRIM_*. `words` mots par sommet (8, 12 ou 16) :
-       x y f… cf. qgpu_proto.h. tex0/tex1 : textures à appliquer (liées,
-       complètes, texturage actif) ou NULL ; leurs coordonnées sont aux mots
-       8–11 et 12–15. */
+    /* Dessin (v5). prim : QGPU_PRIM_*. `words` mots par sommet (8 + 4 par
+       unité) : x y z f r g b a, puis s t r q de chaque unité, cf.
+       qgpu_proto.h. tex[u] (u < QGPU_MAX_UNITS) : texture à appliquer par
+       l'unité u (liée, complète, texturage actif) ou NULL ; ses coordonnées
+       sont aux mots 8 + 4u … 11 + 4u. */
     bool (*draw)(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t prim,
-                 QgpuTexture *tex0, QgpuTexture *tex1,
+                 QgpuTexture *const *tex,
                  const float *verts, uint32_t nverts, uint32_t words);
     bool (*readback)(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
                      uint32_t w, uint32_t h, uint32_t *dst);

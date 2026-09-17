@@ -98,6 +98,27 @@ typedef struct GlSurface {
 #define GL_TEXTURE0             0x84C0
 #define GL_TEXTURE1             0x84C1
 #endif
+#ifndef GL_COMBINE
+#define GL_COMBINE              0x8570
+#define GL_COMBINE_RGB          0x8571
+#define GL_COMBINE_ALPHA        0x8572
+#define GL_RGB_SCALE            0x8573
+#define GL_ADD_SIGNED           0x8574
+#define GL_INTERPOLATE          0x8575
+#define GL_CONSTANT             0x8576
+#define GL_PRIMARY_COLOR        0x8577
+#define GL_PREVIOUS             0x8578
+#define GL_SOURCE0_RGB          0x8580
+#define GL_SOURCE0_ALPHA        0x8588
+#define GL_OPERAND0_RGB         0x8590
+#define GL_OPERAND0_ALPHA       0x8598
+#define GL_SUBTRACT             0x84E7
+#define GL_DOT3_RGB             0x86AE
+#define GL_DOT3_RGBA            0x86AF
+#endif
+#ifndef GL_ALPHA_SCALE
+#define GL_ALPHA_SCALE          0x0D1C
+#endif
 
 static void *gl_proc(const char *name)
 {
@@ -342,10 +363,13 @@ static bool gl_target(QgpuCore *c, QgpuSurface *s, const QgpuState *st)
     glOrtho(0.0, s->width, 0.0, s->height, 0.0, -1.0);
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
-    g->ActiveTexture(GL_TEXTURE1);
-    glDisable(GL_TEXTURE_2D);
-    g->ActiveTexture(GL_TEXTURE0);
-    glDisable(GL_TEXTURE_2D);
+    {
+        int u;
+        for (u = QGPU_MAX_UNITS - 1; u >= 0; u--) {
+            g->ActiveTexture(GL_TEXTURE0 + u);
+            glDisable(GL_TEXTURE_2D);
+        }
+    }
     glDisable(GL_LIGHTING);
     glDisable(GL_CULL_FACE);
     glDisable(GL_DITHER);
@@ -500,12 +524,42 @@ static bool gl_tex_sync(QgpuCore *c, QgpuTexture *t)
     return glGetError() == GL_NO_ERROR;
 }
 
-/* Active la texture de l'unité u (0 ou 1) avec son environnement. */
+/* GL_COMBINE (v5) : état empaqueté → paramètres d'environnement natifs. */
+static void gl_combine(const QgpuState *st, int u)
+{
+    static const GLenum fn[8] = {
+        GL_REPLACE, GL_MODULATE, GL_ADD, GL_ADD_SIGNED, GL_INTERPOLATE,
+        GL_SUBTRACT, GL_DOT3_RGB, GL_DOT3_RGBA,
+    };
+    static const GLenum srcs[4] = { GL_TEXTURE, GL_CONSTANT, GL_PRIMARY_COLOR, GL_PREVIOUS };
+    static const GLenum ops_rgb[4] = {
+        GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+    };
+    static const GLenum ops_a[2] = { GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA };
+    uint32_t cb = st->v[QGPU_SK_COMBINE0 + u];
+    uint32_t src = st->v[QGPU_SK_COMBINE_SRC0 + u];
+    int i;
+
+    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, fn[cb & 7]);
+    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, fn[(cb >> 4) & 7]);
+    glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, (GLfloat)(1u << ((cb >> 8) & 3)));
+    glTexEnvf(GL_TEXTURE_ENV, GL_ALPHA_SCALE, (GLfloat)(1u << ((cb >> 10) & 3)));
+    for (i = 0; i < 3; i++) {
+        uint32_t f = (src >> (5 * i)) & 31, g = (src >> (15 + 4 * i)) & 15;
+        glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB + i, srcs[f & 3]);
+        glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_RGB + i, ops_rgb[(f >> 3) & 3]);
+        glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_ALPHA + i, srcs[g & 3]);
+        glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_ALPHA + i, ops_a[(g >> 3) & 1]);
+    }
+}
+
+/* Active la texture de l'unité u avec son environnement. */
 static bool gl_bind_unit(QgpuCore *c, const QgpuState *st, int u, QgpuTexture *tex,
                          const float *verts, GLsizei stride)
 {
     GlState *g = c->be_priv;
-    uint32_t ec = st->v[u ? QGPU_SK_TEX1_ENV_COLOR : QGPU_SK_TEX_ENV_COLOR];
+    uint32_t ec = st->v[QGPU_SK_UNIT(u) + QGPU_SK_U_ENV_COLOR];
+    uint32_t mode = st->v[QGPU_SK_UNIT(u) + QGPU_SK_U_ENV_MODE];
     GLfloat col[4] = { ((ec >> 16) & 255) / 255.0f, ((ec >> 8) & 255) / 255.0f,
                        (ec & 255) / 255.0f, ((ec >> 24) & 255) / 255.0f };
     g->ActiveTexture(GL_TEXTURE0 + u);
@@ -514,8 +568,10 @@ static bool gl_bind_unit(QgpuCore *c, const QgpuState *st, int u, QgpuTexture *t
         return false;
     }
     glEnable(GL_TEXTURE_2D);
-    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE,
-              st->v[u ? QGPU_SK_TEX1_ENV_MODE : QGPU_SK_TEX_ENV_MODE]);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, mode);
+    if (mode == GL_COMBINE) {
+        gl_combine(st, u);
+    }
     glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, col);
     glMatrixMode(GL_TEXTURE);
     glLoadIdentity();
@@ -535,23 +591,25 @@ static void gl_unbind_unit(QgpuCore *c, int u)
 }
 
 static bool gl_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t prim,
-                    QgpuTexture *tex0, QgpuTexture *tex1,
+                    QgpuTexture *const *tex,
                     const float *verts, uint32_t nverts, uint32_t words)
 {
     static const GLenum mode[3] = { GL_TRIANGLES, GL_LINES, GL_POINTS };
     GlState *g = c->be_priv;
     const GLsizei stride = words * sizeof(float);
     bool ok = true;
+    int u;
 
     if (!gl_target(c, s, st)) {
         return false;
     }
-    /* Tableau entrelacé x y f r g b a [s t r q]… : un seul appel de dessin. */
-    if (tex0) {
-        ok = gl_bind_unit(c, st, 0, tex0, verts, stride);
-    }
-    if (ok && tex1) {
-        ok = gl_bind_unit(c, st, 1, tex1, verts, stride);
+    /* Tableau entrelacé x y f r g b a [s t r q]… : un seul appel de dessin.
+       Une unité sans texture reste coupée (gl_target) : elle laisse passer
+       la couleur, comme en OpenGL. */
+    for (u = 0; u < QGPU_MAX_UNITS && ok; u++) {
+        if (tex[u]) {
+            ok = gl_bind_unit(c, st, u, tex[u], verts, stride);
+        }
     }
     if (ok) {
         g->ClientActiveTexture(GL_TEXTURE0);
@@ -569,11 +627,10 @@ static bool gl_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t p
         glDisableClientState(GL_COLOR_ARRAY);
         glDisableClientState(GL_VERTEX_ARRAY);
     }
-    if (tex1) {
-        gl_unbind_unit(c, 1);
-    }
-    if (tex0) {
-        gl_unbind_unit(c, 0);
+    for (u = QGPU_MAX_UNITS - 1; u >= 0; u--) {
+        if (tex[u]) {
+            gl_unbind_unit(c, u);
+        }
     }
     g->ActiveTexture(GL_TEXTURE0);
     g->ClientActiveTexture(GL_TEXTURE0);

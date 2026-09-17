@@ -325,12 +325,92 @@ static Rgba sample(const QgpuTexture *t, uint32_t nlevels, float s, float tt, fl
     }
 }
 
-/* Fonctions d'environnement de texture (OpenGL 1.x, tables 3.22/3.23). */
-static void tex_env(const QgpuState *st, int unit, uint32_t fmt, Rgba tc, float *r,
-                    float *g, float *b, float *a)
+/* Composantes de source d'une texture selon son format de base (OpenGL 1.3,
+   table 3.19) : utilisées par GL_COMBINE. */
+static Rgba tex_source(uint32_t fmt, Rgba tc)
 {
-    uint32_t mode = st->v[unit ? QGPU_SK_TEX1_ENV_MODE : QGPU_SK_TEX_ENV_MODE];
-    uint32_t ec = st->v[unit ? QGPU_SK_TEX1_ENV_COLOR : QGPU_SK_TEX_ENV_COLOR];
+    Rgba o = tc;
+    switch (fmt) {
+    case 0x1906: o.r = o.g = o.b = 0.0f; break;                 /* ALPHA */
+    case 0x1909: o.g = o.b = tc.r; o.a = 1.0f; break;          /* LUMINANCE */
+    case 0x190A: o.g = o.b = tc.r; break;                       /* LUMINANCE_ALPHA */
+    case 0x8049: o.g = o.b = o.a = tc.r; break;                 /* INTENSITY */
+    case 0x1907: o.a = 1.0f; break;                             /* RGB */
+    default: break;                                             /* RGBA */
+    }
+    return o;
+}
+
+static float combine_fn(uint32_t fn, float a0, float a1, float a2)
+{
+    switch (fn) {
+    case QGPU_CB_REPLACE:     return a0;
+    case QGPU_CB_MODULATE:    return a0 * a1;
+    case QGPU_CB_ADD:         return a0 + a1;
+    case QGPU_CB_ADD_SIGNED:  return a0 + a1 - 0.5f;
+    case QGPU_CB_INTERPOLATE: return a0 * a2 + a1 * (1.0f - a2);
+    default:                  return a0 - a1;                   /* SUBTRACT */
+    }
+}
+
+/* GL_COMBINE (ARB_texture_env_combine, ARB_texture_env_dot3). */
+static void tex_combine(const QgpuState *st, int unit, uint32_t fmt, Rgba tc,
+                        const Rgba *prim, Rgba *cur)
+{
+    uint32_t cb = st->v[QGPU_SK_COMBINE0 + unit];
+    uint32_t src = st->v[QGPU_SK_COMBINE_SRC0 + unit];
+    uint32_t ec = st->v[QGPU_SK_UNIT(unit) + QGPU_SK_U_ENV_COLOR];
+    Rgba k = { ((ec >> 16) & 255) / 255.0f, ((ec >> 8) & 255) / 255.0f,
+               (ec & 255) / 255.0f, ((ec >> 24) & 255) / 255.0f };
+    Rgba t = tex_source(fmt, tc);
+    Rgba arg[3];
+    float aa[3], rs = (float)(1u << ((cb >> 8) & 3)), as = (float)(1u << ((cb >> 10) & 3));
+    uint32_t frgb = cb & 0xF, fa = (cb >> 4) & 0xF;
+    Rgba o;
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        uint32_t f = (src >> (5 * i)) & 31, g = (src >> (15 + 4 * i)) & 15;
+        const Rgba *sr, *sa;
+        const Rgba *pick[4] = { &t, &k, prim, cur };
+        sr = pick[(f & 7) & 3];
+        sa = pick[(g & 7) & 3];
+        switch (f >> 3) {
+        case QGPU_CO_COLOR:           arg[i] = *sr; break;
+        case QGPU_CO_ONE_MINUS_COLOR:
+            arg[i].r = 1 - sr->r; arg[i].g = 1 - sr->g; arg[i].b = 1 - sr->b; break;
+        case QGPU_CO_ALPHA:           arg[i].r = arg[i].g = arg[i].b = sr->a; break;
+        default:                      arg[i].r = arg[i].g = arg[i].b = 1 - sr->a; break;
+        }
+        aa[i] = (g >> 3) ? 1 - sa->a : sa->a;
+    }
+    if (frgb == QGPU_CB_DOT3_RGB || frgb == QGPU_CB_DOT3_RGBA) {
+        float d = 4.0f * ((arg[0].r - 0.5f) * (arg[1].r - 0.5f) +
+                          (arg[0].g - 0.5f) * (arg[1].g - 0.5f) +
+                          (arg[0].b - 0.5f) * (arg[1].b - 0.5f));
+        o.r = o.g = o.b = d;
+    } else {
+        o.r = combine_fn(frgb, arg[0].r, arg[1].r, arg[2].r);
+        o.g = combine_fn(frgb, arg[0].g, arg[1].g, arg[2].g);
+        o.b = combine_fn(frgb, arg[0].b, arg[1].b, arg[2].b);
+    }
+    if (frgb == QGPU_CB_DOT3_RGBA) {
+        o.a = o.r;                                  /* avant échelle, comme l'RGB */
+    } else {
+        o.a = combine_fn(fa, aa[0], aa[1], aa[2]) * as;
+    }
+    cur->r = clamp01(o.r * rs);
+    cur->g = clamp01(o.g * rs);
+    cur->b = clamp01(o.b * rs);
+    cur->a = clamp01(frgb == QGPU_CB_DOT3_RGBA ? o.a * rs : o.a);
+}
+
+/* Fonctions d'environnement de texture (OpenGL 1.x, tables 3.22/3.23). */
+static void tex_env(const QgpuState *st, int unit, uint32_t fmt, Rgba tc,
+                    const Rgba *prim, float *r, float *g, float *b, float *a)
+{
+    uint32_t mode = st->v[QGPU_SK_UNIT(unit) + QGPU_SK_U_ENV_MODE];
+    uint32_t ec = st->v[QGPU_SK_UNIT(unit) + QGPU_SK_U_ENV_COLOR];
     float cr = ((ec >> 16) & 255) / 255.0f, cg = ((ec >> 8) & 255) / 255.0f;
     float cb = (ec & 255) / 255.0f, ca = ((ec >> 24) & 255) / 255.0f;
     float L = tc.r, I = tc.r;
@@ -342,6 +422,12 @@ static void tex_env(const QgpuState *st, int unit, uint32_t fmt, Rgba tc, float 
     float tr = has_rgb ? tc.r : L, tg = has_rgb ? tc.g : L, tb = has_rgb ? tc.b : L;
 
     switch (mode) {
+    case 0x8570: {                                      /* COMBINE (v5) */
+        Rgba cur = { fr, fg, fb, fa };
+        tex_combine(st, unit, fmt, tc, prim, &cur);
+        fr = cur.r; fg = cur.g; fb = cur.b; fa = cur.a;
+        break;
+    }
     case 0x1E01:                                        /* REPLACE */
         if (has_rgb || has_l || is_i) { fr = tr; fg = tg; fb = tb; }
         if (has_a) fa = tc.a;
@@ -378,15 +464,14 @@ static void tex_env(const QgpuState *st, int unit, uint32_t fmt, Rgba tc, float 
     *r = clamp01(fr); *g = clamp01(fg); *b = clamp01(fb); *a = clamp01(fa);
 }
 
-/* Triangle générique : `words` mots par sommet, 0 à 2 unités de texture. */
-static void soft_tri(QgpuSurface *s, const QgpuState *st, const QgpuTexture *tex0,
-                     const QgpuTexture *tex1, const float *v0, const float *v1,
-                     const float *v2, uint32_t prim)
+static QgpuTexture *const no_tex[QGPU_MAX_UNITS];
+
+/* Triangle générique : `words` mots par sommet, 0 à 4 unités de texture. */
+static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *tex,
+                     const float *v0, const float *v1, const float *v2, uint32_t prim)
 {
-    const QgpuTexture *tex[2] = { tex0, tex1 };
-    uint32_t nlevels[2] = { tex0 ? qgpu_texture_levels(tex0) : 0,
-                            tex1 ? qgpu_texture_levels(tex1) : 0 };
-    float lod[2] = { 0.0f, 0.0f };
+    uint32_t nlevels[QGPU_MAX_UNITS];
+    float lod[QGPU_MAX_UNITS];
     SoftSurface *ss = s->priv;
     float area = edge(v0[0], v0[1], v1[0], v1[1], v2[0], v2[1]);
     float sign = 1.0f;
@@ -409,7 +494,9 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, const QgpuTexture *tex
         sign = -1.0f;
         area = -area;
     }
-    for (u = 0; u < 2; u++) {
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        nlevels[u] = tex[u] ? qgpu_texture_levels(tex[u]) : 0;
+        lod[u] = 0.0f;
         if (tex[u]) {
             /* λ par triangle : ρ² = aire en texels / aire en pixels */
             const QgpuTexLevel *l0 = &tex[u]->level[0];
@@ -448,6 +535,7 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, const QgpuTexture *tex
             float w1 = sign * edge(v2[0], v2[1], v0[0], v0[1], px, py);
             float w2 = sign * edge(v0[0], v0[1], v1[0], v1[1], px, py);
             float r, g, b, a, z;
+            Rgba prim_c;
             size_t idx;
 
             if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) {
@@ -460,7 +548,9 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, const QgpuTexture *tex
             a = w0 * v0[7] + w1 * v1[7] + w2 * v2[7];
             z = clamp01(w0 * v0[2] + w1 * v1[2] + w2 * v2[2] + zoff);
             idx = (size_t)y * s->width + x;
-            for (u = 0; u < 2; u++) {
+            prim_c.r = clamp01(r); prim_c.g = clamp01(g);
+            prim_c.b = clamp01(b); prim_c.a = clamp01(a);
+            for (u = 0; u < QGPU_MAX_UNITS; u++) {
                 int k = 8 + 4 * u;
                 float ts, tt, tq;
                 if (!tex[u]) {
@@ -471,7 +561,7 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, const QgpuTexture *tex
                 tq = w0 * v0[k + 3] + w1 * v1[k + 3] + w2 * v2[k + 3];
                 if (tq != 0.0f) {
                     Rgba tc = sample(tex[u], nlevels[u], ts / tq, tt / tq, lod[u]);
-                    tex_env(st, u, tex[u]->base_format, tc, &r, &g, &b, &a);
+                    tex_env(st, u, tex[u]->base_format, tc, &prim_c, &r, &g, &b, &a);
                 }
             }
             if (fog) {
@@ -497,7 +587,7 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, const QgpuTexture *tex
     }
 }
 
-#define MAXW QGPU_VERTEX_TEX2_WORDS
+#define MAXW QGPU_VERTEX_MAX_WORDS
 
 /* Segment épais : le parallélogramme d'OpenGL (sans anticrénelage), étiré
    perpendiculairement à l'axe majeur, en deux triangles. */
@@ -520,8 +610,8 @@ static void soft_line(QgpuSurface *s, const QgpuState *st, const float *a,
             q[k][0] += d;
         }
     }
-    soft_tri(s, st, NULL, NULL, q[0], q[1], q[2], QGPU_PRIM_LINES);
-    soft_tri(s, st, NULL, NULL, q[0], q[2], q[3], QGPU_PRIM_LINES);
+    soft_tri(s, st, no_tex, q[0], q[1], q[2], QGPU_PRIM_LINES);
+    soft_tri(s, st, no_tex, q[0], q[2], q[3], QGPU_PRIM_LINES);
 }
 
 /* Point : carré de côté QGPU_SK_POINT_SIZE centré sur le sommet. */
@@ -536,12 +626,12 @@ static void soft_point(QgpuSurface *s, const QgpuState *st, const float *v, uint
         q[k][0] += dx[k] * h;
         q[k][1] += dy[k] * h;
     }
-    soft_tri(s, st, NULL, NULL, q[0], q[1], q[2], QGPU_PRIM_POINTS);
-    soft_tri(s, st, NULL, NULL, q[0], q[2], q[3], QGPU_PRIM_POINTS);
+    soft_tri(s, st, no_tex, q[0], q[1], q[2], QGPU_PRIM_POINTS);
+    soft_tri(s, st, no_tex, q[0], q[2], q[3], QGPU_PRIM_POINTS);
 }
 
 static bool soft_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t prim,
-                      QgpuTexture *tex0, QgpuTexture *tex1,
+                      QgpuTexture *const *tex,
                       const float *verts, uint32_t nverts, uint32_t words)
 {
     uint32_t i;
@@ -550,7 +640,7 @@ static bool soft_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t
     switch (prim) {
     case QGPU_PRIM_TRIANGLES:
         for (i = 0; i + 2 < nverts; i += 3) {
-            soft_tri(s, st, tex0, tex1, verts + i * words, verts + (i + 1) * words,
+            soft_tri(s, st, tex, verts + i * words, verts + (i + 1) * words,
                      verts + (i + 2) * words, prim);
         }
         break;
