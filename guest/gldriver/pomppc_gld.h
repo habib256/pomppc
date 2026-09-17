@@ -138,11 +138,6 @@ int  pomppc_tracing(void);
 void pomppc_log(const char *fmt, ...);
 unsigned long pomppc_dump(const char *tag, const void *p, unsigned long len);
 int  pomppc_load_real(void);
-int  pomppc_tcl(void);                  /* sonde T&L matérielle : POMPPC_GL_TCL=1 */
-void *pomppc_tcl_proc(int slot);        /* procédure traceuse à installer, ou 0 */
-void pomppc_tcl_check(void *drvctx, const char *quand);
-long pomppc_tcl_dispatch_ret(long r, const char *quand);
-void *pomppc_tcl_gld(int id);
 long pomppc_call_real(int idx, long a, long b, long c, long d, long e, long f, long g, long h);
 
 /* pomppc_accel.c */
@@ -168,5 +163,9 @@ const char *pomppc_proc_name(int slot);
 void pomppc_unhook_procs(void *ctx, void **procs);
 void pomppc_sync_to_sw(void *ctx);
 const char *pomppc_override_string(long name, const char *apple);
+/* chemin brut (v7) : la géométrie non transformée part sur le GPU de l'hôte */
+void *pomppc_geom_proc(int slot);       /* Begin/EndPrimitiveBuffer, ou 0 */
+long pomppc_geom_dispatch(void *ctx);   /* bits à ajouter au retour du dispatch */
+void pomppc_geom_context(void *ctx, void *cfg);
 
 #endif

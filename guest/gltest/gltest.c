@@ -115,6 +115,91 @@ static void check(const char *what, int x, int y, unsigned long want)
     if (!ok) failures++;
 }
 
+/* Comparaison de deux PPM : écart maximal par composante, et où. C'est la
+   preuve « image entière » demandée à côté des pixels témoins ; elle se fait
+   DANS l'invité, sur les deux PPM produits par le même programme. */
+static int ppm_diff(const char *fa, const char *fb)
+{
+    FILE *a = fopen(fa, "rb"), *b = fopen(fb, "rb");
+    int wa, ha, wb, hb, ma = 0, mb2 = 0, n2 = 0, n8 = 0, i, worst = -1;
+    unsigned char *pa, *pb;
+    long np;
+    if (!a || !b) { printf("diff : fichier illisible\n"); return 2; }
+    if (fscanf(a, "P6 %d %d %d", &wa, &ha, &ma) != 3 ||
+        fscanf(b, "P6 %d %d %d", &wb, &hb, &mb2) != 3) {
+        printf("diff : en-tête PPM invalide\n"); return 2;
+    }
+    fgetc(a); fgetc(b);
+    if (wa != wb || ha != hb) { printf("diff : tailles différentes\n"); return 2; }
+    np = (long)wa * ha * 3;
+    pa = malloc(np); pb = malloc(np);
+    if (fread(pa, 1, np, a) != (size_t)np || fread(pb, 1, np, b) != (size_t)np) {
+        printf("diff : lecture courte\n"); return 2;
+    }
+    fclose(a); fclose(b);
+    ma = 0;
+    for (i = 0; i < np; i++) {
+        int d = pa[i] - pb[i];
+        if (d < 0) d = -d;
+        if (d > ma) { ma = d; worst = i; }
+        if (d > 2) n2++;
+        if (d > 8) n8++;
+    }
+    {
+        /* Écart maximal HORS ARÊTES : un pixel dont le voisinage 3×3 est
+           uniforme dans l'image de référence n'est sur aucune silhouette ; s'il
+           diffère, ce n'est pas une question de règle de remplissage. C'est là
+           que se juge la tolérance de 2/255. */
+        int x, y, k, mf = 0, nf = 0, fx = -1, fy = -1;
+        for (y = 1; y < ha - 1; y++) for (x = 1; x < wa - 1; x++) {
+            int uniform = 1, u, v;
+            const unsigned char *c0 = pa + (y * wa + x) * 3;
+            for (v = -1; v <= 1 && uniform; v++) for (u = -1; u <= 1; u++) {
+                const unsigned char *c1 = pa + ((y + v) * wa + x + u) * 3;
+                if (c1[0] != c0[0] || c1[1] != c0[1] || c1[2] != c0[2]) { uniform = 0; break; }
+            }
+            if (!uniform) continue;
+            for (k = 0; k < 3; k++) {
+                int d = pa[(y * wa + x) * 3 + k] - pb[(y * wa + x) * 3 + k];
+                if (d < 0) d = -d;
+                if (d > 2) nf++;
+                if (d > mf) { mf = d; fx = x; fy = y; }
+            }
+        }
+        printf("     hors arêtes (voisinage 3x3 uniforme) : écart max %d/255 "
+               "(en %d,%d), %d composantes > 2\n", mf, fx, fy, nf);
+    }
+    printf("diff %s vs %s : %dx%d, écart max %d/255 (en %d,%d), "
+           "%d composantes > 2 (%.3f %%), %d > 8 (%.3f %%)\n",
+           fa, fb, wa, ha, ma, worst >= 0 ? (worst / 3) % wa : -1,
+           worst >= 0 ? (worst / 3) / wa : -1,
+           n2, 100.0 * n2 / np, n8, 100.0 * n8 / np);
+    if (ma > 2) {
+        /* carte des écarts par tuile de 32×32 : elle dit tout de suite si la
+           différence est une arête isolée ou toute une zone */
+        int tx, ty;
+        for (ty = 0; ty < ha; ty += 32) {
+            printf("      ");
+            for (tx = 0; tx < wa; tx += 32) {
+                int u, v, mm = 0;
+                for (v = ty; v < ty + 32 && v < ha; v++)
+                    for (u = tx; u < tx + 32 && u < wa; u++) {
+                        int k;
+                        for (k = 0; k < 3; k++) {
+                            int d = pa[(v * wa + u) * 3 + k] - pb[(v * wa + u) * 3 + k];
+                            if (d < 0) d = -d;
+                            if (d > mm) mm = d;
+                        }
+                    }
+                printf("%4d", mm);
+            }
+            printf("\n");
+        }
+    }
+    free(pa); free(pb);
+    return 0;
+}
+
 static void list_renderers(void)
 {
     CGLRendererInfoObj ri;
@@ -144,6 +229,9 @@ static double now(void)
 int main(int argc, char **argv)
 {
     const char *scene = argc > 1 ? argv[1] : "tri";
+    if (argc > 3 && !strcmp(scene, "diff"))
+        return ppm_diff(argv[2], argv[3]);
+    {
     const char *out = argc > 4 ? argv[4] : "gltest.ppm";
     CGLPixelFormatAttribute attrs[24];
     CGLPixelFormatObj pix;
@@ -1475,6 +1563,564 @@ int main(int argc, char **argv)
         glDisable(GL_TEXTURE_3D); glEnable(GL_TEXTURE_CUBE_MAP);
         glClear(GL_COLOR_BUFFER_BIT);                                   /* 27 */
         glFinish();
+    } else if (!strcmp(scene, "depthrt")) {
+        /* Aller-retour de la PROFONDEUR entre l'hôte et le tampon invité :
+           on dessine (hôte), puis glReadPixels force le repli, donc une
+           relecture de la profondeur dans le tampon d'Apple, que glReadPixels
+           reconvertit en flottant. La valeur imprimée doit être celle de la
+           géométrie, avec comme sans tampon de stencil. */
+        float d[4];
+        glClearColor(0, 0, 0.25f, 1);
+        glClearDepth(1.0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glBegin(GL_QUADS);                 /* z objet 0.2 -> z fenêtre 0.4 */
+        glColor3f(1, 0.5f, 0);
+        glVertex3f(0, 0, 0.2f); glVertex3f(W, 0, 0.2f);
+        glVertex3f(W, H / 2.0f, 0.2f); glVertex3f(0, H / 2.0f, 0.2f);
+        glEnd();
+        glFinish();
+        /* glReadPixels compte y depuis le BAS : la ligne 1 de GL est la
+           dernière ligne du tampon (effacée), H−2 la première (dessinée). */
+        glReadPixels(1, 1, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &d[0]);
+        glReadPixels(1, H - 2, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &d[1]);
+        printf("  profondeur relue : dessinée %.6f (attendu 0.400000), "
+               "effacée %.6f (attendu 1.000000)\n", d[1], d[0]);
+        if (!(d[1] > 0.398f && d[1] < 0.402f)) failures++;
+        if (!(d[0] > 0.998f)) failures++;
+        /* Sens INVERSE : le logiciel d'Apple écrit la profondeur, puis l'hôte
+           doit la relire pour ses propres tests. On sort du domaine par
+           glLogicOp, on dessine, on y revient. */
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_COLOR_LOGIC_OP); glLogicOp(GL_COPY);
+        glBegin(GL_QUADS);                 /* logiciel, z fenêtre 0.4 */
+        glColor3f(1, 0, 0);
+        glVertex3f(0, 0, 0.2f); glVertex3f(W, 0, 0.2f);
+        glVertex3f(W, H, 0.2f); glVertex3f(0, H, 0.2f);
+        glEnd();
+        glDisable(GL_COLOR_LOGIC_OP);
+        glBegin(GL_QUADS);                 /* hôte, PLUS LOIN : doit être rejeté */
+        glColor3f(0, 1, 0);
+        glVertex3f(0, 0, -0.2f); glVertex3f(W, 0, -0.2f);
+        glVertex3f(W, H / 2.0f, -0.2f); glVertex3f(0, H / 2.0f, -0.2f);
+        glEnd();
+        glBegin(GL_QUADS);                 /* hôte, PLUS PRÈS : doit passer */
+        glColor3f(0, 0, 1);
+        glVertex3f(0, H / 2.0f, 0.6f); glVertex3f(W, H / 2.0f, 0.6f);
+        glVertex3f(W, H, 0.6f); glVertex3f(0, H, 0.6f);
+        glEnd();
+        glFinish();
+        {
+            unsigned long a = px(W / 2, 2), b = px(W / 2, H - 2);
+            printf("  %s profondeur logiciel -> hôte : plus loin rejeté (%06lx)\n",
+                   a == 0xFF0000 ? "ok  " : "FAIL", a);
+            if (a != 0xFF0000) failures++;
+            printf("  %s profondeur logiciel -> hôte : plus près accepté (%06lx)\n",
+                   b == 0x0000FF ? "ok  " : "FAIL", b);
+            if (b != 0x0000FF) failures++;
+        }
+        glDisable(GL_DEPTH_TEST);
+    } else if (!strcmp(scene, "lit")) {
+        /* Éclairage : directionnelle, ponctuelle avec atténuation, spot,
+           spéculaire, color material, deux faces et normalize sous une matrice
+           d'échelle. Six cases de 64×64 ; chaque case est un quadrilatère plan
+           dont la normale varie, pour que l'angle d'incidence change d'une case
+           à l'autre. Les pixels témoins sont STRUCTURELS (un dégradé, un ordre
+           entre deux points) : l'exactitude, elle, est jugée par la comparaison
+           d'image entière avec le rendu d'Apple. */
+        float amb[4] = { 0.1f, 0.1f, 0.1f, 1 };
+        int cx, cy, tris = getenv("GLTEST_LIT_TRIS") != 0;
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_LIGHTING);
+        glLightModelfv(GL_LIGHT_MODEL_AMBIENT, amb);
+        for (cy = 0; cy < 2; cy++) for (cx = 0; cx < 3; cx++) {
+            int c = cy * 3 + cx;
+            float x0 = cx * 64.0f, y0 = cy * 64.0f;
+            float dif[4] = { 0.9f, 0.7f, 0.4f, 1 }, spc[4] = { 1, 1, 1, 1 };
+            float zero[4] = { 0, 0, 0, 1 };
+            float lamb[4] = { 0.05f, 0.05f, 0.05f, 1 };
+            float pos[4], dir[3] = { 0, 0, -1 };
+            int i, j;
+            glDisable(GL_LIGHT0); glDisable(GL_LIGHT1);
+            glDisable(GL_COLOR_MATERIAL);
+            glDisable(GL_NORMALIZE);
+            glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, 0);
+            glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, 0);
+            glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, lamb);
+            glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, dif);
+            glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, zero);
+            glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, zero);
+            glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 0);
+            glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+            glLightfv(GL_LIGHT0, GL_AMBIENT, lamb);
+            glLightfv(GL_LIGHT0, GL_DIFFUSE, spc);
+            glLightfv(GL_LIGHT0, GL_SPECULAR, zero);
+            glLightf(GL_LIGHT0, GL_CONSTANT_ATTENUATION, 1);
+            glLightf(GL_LIGHT0, GL_LINEAR_ATTENUATION, 0);
+            glLightf(GL_LIGHT0, GL_QUADRATIC_ATTENUATION, 0);
+            glLightf(GL_LIGHT0, GL_SPOT_CUTOFF, 180);
+            glLightf(GL_LIGHT0, GL_SPOT_EXPONENT, 0);
+            pos[0] = 0.4f; pos[1] = 0.3f; pos[2] = 1; pos[3] = 0;
+            switch (c) {
+            case 0:                                   /* directionnelle pure */
+                break;
+            case 1:                                   /* ponctuelle + atténuation */
+                pos[0] = x0 + 32; pos[1] = y0 + 32; pos[2] = 40; pos[3] = 1;
+                glLightf(GL_LIGHT0, GL_CONSTANT_ATTENUATION, 0.25f);
+                glLightf(GL_LIGHT0, GL_LINEAR_ATTENUATION, 0.01f);
+                glLightf(GL_LIGHT0, GL_QUADRATIC_ATTENUATION, 0.0003f);
+                break;
+            case 2:                                   /* spot */
+                pos[0] = x0 + 32; pos[1] = y0 + 32; pos[2] = 50; pos[3] = 1;
+                glLightf(GL_LIGHT0, GL_SPOT_CUTOFF, 25);
+                glLightf(GL_LIGHT0, GL_SPOT_EXPONENT, 8);
+                glLightfv(GL_LIGHT0, GL_SPOT_DIRECTION, dir);
+                break;
+            case 3:                                   /* spéculaire, observateur local */
+                pos[0] = x0 + 32; pos[1] = y0 + 32; pos[2] = 60; pos[3] = 1;
+                glLightfv(GL_LIGHT0, GL_SPECULAR, spc);
+                glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, spc);
+                glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 24);
+                glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, 1);
+                break;
+            case 4:                                   /* color material */
+                glEnable(GL_COLOR_MATERIAL);
+                glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+                break;
+            default:                                  /* deux faces + normalize */
+                glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, 1);
+                glEnable(GL_NORMALIZE);
+                glMaterialfv(GL_BACK, GL_DIFFUSE, spc);
+                break;
+            }
+            glLightfv(GL_LIGHT0, GL_POSITION, pos);
+            glEnable(GL_LIGHT0);
+            if (c == 5)
+                glScalef(3, 3, 3);                    /* normales à normaliser */
+            /* Maillage 8×8 : les normales varient, l'éclairage aussi.
+               GLTEST_LIT_TRIS=1 dessine des TRIANGLES au lieu de quads : un
+               quadrilatère n'a pas de découpe définie par OpenGL, et quand la
+               valeur aux sommets varie brutalement (le bord d'un cône de spot),
+               deux rendus qui coupent la diagonale autrement donnent des images
+               différentes — c'est la seule divergence > 2/255 mesurée sur cette
+               scène, et elle disparaît avec des triangles. */
+            glBegin(tris ? GL_TRIANGLES : GL_QUADS);
+            for (j = 0; j < 8; j++) for (i = 0; i < 8; i++) {
+                float u = (i - 3.5f) / 8.0f, v = (j - 3.5f) / 8.0f;
+                float s = c == 5 ? (1 / 3.0f) : 1.0f;
+                float ax = x0 + i * 8.0f, ay = y0 + j * 8.0f;
+                float q[4][2];
+                int k;
+                static const int oq[4] = { 0, 1, 2, 3 }, ot[6] = { 0, 1, 2, 0, 2, 3 };
+                glNormal3f(u, v, 0.8f);
+                glColor3f(0.9f, 0.3f + i / 16.0f, 0.2f + j / 16.0f);
+                if (c == 5) {           /* face arrière : sens inversé */
+                    q[0][0] = ax;     q[0][1] = ay;
+                    q[1][0] = ax;     q[1][1] = ay + 8;
+                    q[2][0] = ax + 8; q[2][1] = ay + 8;
+                    q[3][0] = ax + 8; q[3][1] = ay;
+                } else {
+                    q[0][0] = ax;     q[0][1] = ay;
+                    q[1][0] = ax + 8; q[1][1] = ay;
+                    q[2][0] = ax + 8; q[2][1] = ay + 8;
+                    q[3][0] = ax;     q[3][1] = ay + 8;
+                }
+                for (k = 0; k < (tris ? 6 : 4); k++) {
+                    int z = tris ? ot[k] : oq[k];
+                    glVertex3f(q[z][0] * s, q[z][1] * s, 0);
+                }
+            }
+            glEnd();
+            if (c == 5)
+                glLoadIdentity();
+        }
+        glDisable(GL_LIGHTING);
+        glFinish();
+        {   /* témoins structurels, vrais des deux côtés */
+            unsigned long a = px(20, 20), b = px(44, 44);
+            printf("  %s directionnelle : dégradé (%06lx -> %06lx)\n",
+                   a != b ? "ok  " : "FAIL", a, b);
+            if (a == b) failures++;
+            a = px(96, 32); b = px(70, 6);
+            printf("  %s ponctuelle : centre plus clair que le bord (%06lx > %06lx)\n",
+                   (a >> 16) > (b >> 16) ? "ok  " : "FAIL", a, b);
+            if (!((a >> 16) > (b >> 16))) failures++;
+            a = px(160, 32); b = px(134, 6);
+            printf("  %s spot : cône éclairé, dehors sombre (%06lx > %06lx)\n",
+                   (a >> 16) > (b >> 16) ? "ok  " : "FAIL", a, b);
+            if (!((a >> 16) > (b >> 16))) failures++;
+            a = px(32, 96);
+            printf("  %s spéculaire : point brillant (%06lx)\n",
+                   (a & 255) > 40 ? "ok  " : "FAIL", a);
+            if (!((a & 255) > 40)) failures++;
+            a = px(96, 96); b = px(120, 120);
+            printf("  %s color material : couleur suivie (%06lx != %06lx)\n",
+                   a != b ? "ok  " : "FAIL", a, b);
+            if (a == b) failures++;
+            a = px(160, 96);
+            printf("  %s deux faces + normalize : face arrière éclairée (%06lx)\n",
+                   (a >> 16) > 20 ? "ok  " : "FAIL", a);
+            if (!((a >> 16) > 20)) failures++;
+        }
+    } else if (!strcmp(scene, "texgen")) {
+        /* OBJECT_LINEAR, EYE_LINEAR, SPHERE_MAP, et une matrice de texture. */
+        unsigned char img[32 * 32 * 4];
+        GLuint id;
+        int x, y, c;
+        /* dégradé lisse : un écart de coordonnée se voit alors PROPORTIONNEL
+           dans l'image, au lieu d'être amplifié par un saut de texel */
+        for (y = 0; y < 32; y++) for (x = 0; x < 32; x++) {
+            img[(y * 32 + x) * 4 + 0] = (unsigned char)(x * 8);
+            img[(y * 32 + x) * 4 + 1] = (unsigned char)(y * 8);
+            img[(y * 32 + x) * 4 + 2] = (unsigned char)(255 - x * 4 - y * 4);
+            img[(y * 32 + x) * 4 + 3] = 255;
+        }
+        glGenTextures(1, &id);
+        glBindTexture(GL_TEXTURE_2D, id);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 32, 32, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+        glEnable(GL_TEXTURE_2D);
+        /* GL_SPHERE_MAP part de la normale d'ŒIL : sans normalisation, chaque
+           rendu est libre de sa propre convention. On normalise pour que la
+           comparaison porte sur la formule, pas sur la longueur des normales. */
+        glEnable(GL_NORMALIZE);
+        glClearColor(0, 0, 0.25f, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        for (c = 0; c < 4; c++) {
+            float sp[4] = { 1 / 32.0f, 0, 0, 0 }, tp[4] = { 0, 1 / 32.0f, 0, 0 };
+            float x0 = (c % 2) * 64.0f, y0 = (c / 2) * 64.0f;
+            glMatrixMode(GL_TEXTURE); glLoadIdentity(); glMatrixMode(GL_MODELVIEW);
+            glDisable(GL_TEXTURE_GEN_S); glDisable(GL_TEXTURE_GEN_T);
+            if (c == 0) {                  /* OBJECT_LINEAR */
+                glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR);
+                glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR);
+                glTexGenfv(GL_S, GL_OBJECT_PLANE, sp);
+                glTexGenfv(GL_T, GL_OBJECT_PLANE, tp);
+                glEnable(GL_TEXTURE_GEN_S); glEnable(GL_TEXTURE_GEN_T);
+            } else if (c == 1) {           /* EYE_LINEAR sous une modèle-vue */
+                glLoadIdentity(); glTranslatef(17, 23, 0);
+                glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_EYE_LINEAR);
+                glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, GL_EYE_LINEAR);
+                glTexGenfv(GL_S, GL_EYE_PLANE, sp);
+                glTexGenfv(GL_T, GL_EYE_PLANE, tp);
+                glEnable(GL_TEXTURE_GEN_S); glEnable(GL_TEXTURE_GEN_T);
+                glLoadIdentity();
+            } else if (c == 2) {           /* SPHERE_MAP */
+                glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_SPHERE_MAP);
+                glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, GL_SPHERE_MAP);
+                glEnable(GL_TEXTURE_GEN_S); glEnable(GL_TEXTURE_GEN_T);
+            } else {                       /* coordonnées explicites + matrice */
+                glMatrixMode(GL_TEXTURE);
+                glLoadIdentity(); glTranslatef(0.25f, 0.5f, 0); glScalef(2, 3, 1);
+                glMatrixMode(GL_MODELVIEW);
+            }
+            glBegin(GL_QUADS);
+            {
+                int i, j;
+                for (j = 0; j < 4; j++) for (i = 0; i < 4; i++) {
+                    float ax = x0 + i * 16.0f, ay = y0 + j * 16.0f;
+                    float n = (i + j) / 6.0f - 0.5f;
+                    glNormal3f(n, n, 0.7f);
+                    glTexCoord2f(i / 4.0f, j / 4.0f); glVertex2f(ax, ay);
+                    glTexCoord2f((i + 1) / 4.0f, j / 4.0f); glVertex2f(ax + 16, ay);
+                    glTexCoord2f((i + 1) / 4.0f, (j + 1) / 4.0f); glVertex2f(ax + 16, ay + 16);
+                    glTexCoord2f(i / 4.0f, (j + 1) / 4.0f); glVertex2f(ax, ay + 16);
+                }
+            }
+            glEnd();
+        }
+        glDisable(GL_TEXTURE_GEN_S); glDisable(GL_TEXTURE_GEN_T);
+        glDisable(GL_NORMALIZE);
+        glDisable(GL_TEXTURE_2D);
+        glFinish();
+        {
+            int c2;
+            for (c2 = 0; c2 < 4; c2++) {
+                static const char *nm[4] = { "OBJECT_LINEAR", "EYE_LINEAR",
+                                             "SPHERE_MAP", "matrice de texture" };
+                int x0 = (c2 % 2) * 64, y0 = (c2 / 2) * 64, ok = 0, i;
+                unsigned long first = px(x0 + 2, y0 + 2);
+                for (i = 3; i < 60 && !ok; i++)
+                    if (px(x0 + i, y0 + i) != first) ok = 1;
+                printf("  %s texgen %-20s : motif présent (%06lx)\n",
+                       ok ? "ok  " : "FAIL", nm[c2], first);
+                if (!ok) failures++;
+            }
+        }
+    } else if (!strcmp(scene, "clip")) {
+        /* Plan de découpe utilisateur, et un triangle qui traverse le plan
+           PROCHE : c'est le découpage que GLEngine ne fait plus. */
+        double eq[4] = { -1, 0, 0, 40 };          /* garde x <= 40 (coordonnées œil) */
+        glClearColor(0, 0, 0.25f, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glClipPlane(GL_CLIP_PLANE0, eq);
+        glEnable(GL_CLIP_PLANE0);
+        glBegin(GL_TRIANGLES);
+        glColor3f(1, 0.2f, 0.2f);
+        glVertex2f(4, 4); glVertex2f(120, 4); glVertex2f(4, 60);
+        glEnd();
+        glDisable(GL_CLIP_PLANE0);
+        /* triangle qui traverse le plan proche, en perspective */
+        glMatrixMode(GL_PROJECTION); glLoadIdentity();
+        glFrustum(-1, 1, -1, 1, 1, 20);
+        glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+        glViewport(0, H / 2, W, H / 2);
+        glBegin(GL_TRIANGLES);
+        glColor3f(0.2f, 1, 0.2f);
+        glVertex3f(-0.6f, -0.6f, -6.0f);
+        glVertex3f(0.6f, -0.6f, -6.0f);
+        glVertex3f(0.0f, 0.9f, 0.5f);          /* DERRIÈRE l'œil */
+        glEnd();
+        glViewport(0, 0, W, H);
+        glMatrixMode(GL_PROJECTION); glLoadIdentity();
+        glOrtho(0, W, H, 0, -1, 1);
+        glMatrixMode(GL_MODELVIEW);
+        glFinish();
+        {
+            unsigned long a = px(10, 10), b = px(70, 10);
+            int i, green = 0;
+            printf("  %s découpe : gardé à gauche (%06lx)\n",
+                   (a >> 16) > 240 ? "ok  " : "FAIL", a);
+            if (!((a >> 16) > 240)) failures++;
+            printf("  %s découpe : coupé à droite (%06lx)\n",
+                   (b >> 16) < 8 && (b & 255) > 48 ? "ok  " : "FAIL", b);
+            if (!((b >> 16) < 8 && (b & 255) > 48)) failures++;
+            /* le viewport du second dessin est la moitié HAUTE en repère GL,
+               c'est-à-dire les lignes 0..H/2−1 du tampon */
+            for (i = 0; i < H / 2; i++)
+                if (((px(W / 2, i) >> 8) & 255) > 180) green++;
+            printf("  %s plan proche : triangle dessiné (%d lignes vertes)\n",
+                   green > 4 ? "ok  " : "FAIL", green);
+            if (green <= 4) failures++;
+        }
+    } else if (!strcmp(scene, "fogz")) {
+        /* Brouillard LINEAR puis EXP en perspective, calculé à partir de |z œil|
+           (GL_FRAGMENT_DEPTH) : c'est l'hôte qui le fait sur le chemin brut. */
+        float fc[4] = { 0.2f, 0.4f, 0.8f, 1 };
+        int pass;
+        glClearColor(0.2f, 0.4f, 0.8f, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_FOG);
+        glFogfv(GL_FOG_COLOR, fc);
+        glMatrixMode(GL_PROJECTION); glLoadIdentity();
+        glFrustum(-1, 1, -1, 1, 1, 40);
+        glMatrixMode(GL_MODELVIEW);
+        for (pass = 0; pass < 2; pass++) {
+            int i;
+            if (pass == 0) {
+                glFogi(GL_FOG_MODE, GL_LINEAR);
+                glFogf(GL_FOG_START, 4);
+                glFogf(GL_FOG_END, 28);
+            } else {
+                glFogi(GL_FOG_MODE, GL_EXP);
+                glFogf(GL_FOG_DENSITY, 0.08f);
+            }
+            glViewport(0, pass ? 0 : H / 2, W, H / 2);
+            glLoadIdentity();
+            glBegin(GL_QUADS);
+            for (i = 0; i < 12; i++) {
+                float z = -3.0f - i * 2.0f, s = 0.9f;
+                glColor3f(1, 0.9f, 0.1f);
+                glVertex3f(-s, -0.9f, z); glVertex3f(s, -0.9f, z);
+                glVertex3f(s, 0.9f, z);   glVertex3f(-s, 0.9f, z);
+            }
+            glEnd();
+        }
+        glDisable(GL_FOG);
+        glViewport(0, 0, W, H);
+        glMatrixMode(GL_PROJECTION); glLoadIdentity();
+        glOrtho(0, W, H, 0, -1, 1);
+        glMatrixMode(GL_MODELVIEW);
+        glFinish();
+        {
+            /* le quadrilatère le plus proche est jaune, le plus lointain est
+               noyé dans la couleur du brouillard (vrai des deux côtés) */
+            unsigned long near_l = px(W / 2, H / 4), near_e = px(W / 2, 3 * H / 4);
+            printf("  %s LINEAR : le proche reste jaune (%06lx)\n",
+                   (near_l >> 16) > 150 ? "ok  " : "FAIL", near_l);
+            if (!((near_l >> 16) > 150)) failures++;
+            printf("  %s EXP : le proche reste jaune (%06lx)\n",
+                   (near_e >> 16) > 120 ? "ok  " : "FAIL", near_e);
+            if (!((near_e >> 16) > 120)) failures++;
+        }
+    } else if (!strcmp(scene, "bigstrip")) {
+        /* Plus de sommets qu'un lot de GLEngine : une bande de 1000 sommets, un
+           éventail, un polygone et une boucle de lignes de plus de 192 sommets.
+           C'est le cas où GLEngine doit COUPER la primitive : si la coupure
+           perdait ou répétait un sommet, l'image le montrerait. */
+        int i, n = 1000;
+        double PI = 3.14159265358979323846;
+        glClearColor(0, 0, 0.25f, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glBegin(GL_TRIANGLE_STRIP);
+        for (i = 0; i < n; i++) {
+            float t = i / (float)(n - 1), x = 2 + t * (W - 4);
+            float y = (i & 1) ? 4.0f : 40.0f;
+            glColor3f(t, 1 - t, (i & 1) ? 1.0f : 0.0f);
+            glVertex2f(x, y);
+        }
+        glEnd();
+        glBegin(GL_TRIANGLE_FAN);
+        glColor3f(1, 1, 0); glVertex2f(W / 2.0f, 80);
+        for (i = 0; i <= 300; i++) {
+            double a = i * 2 * PI / 300;
+            glColor3f((float)(i % 3) / 2.0f, 0.5f, 1);
+            glVertex2f(W / 2.0f + 34 * (float)__builtin_cos(a),
+                       80 + 34 * (float)__builtin_sin(a));
+        }
+        glEnd();
+        glBegin(GL_POLYGON);
+        for (i = 0; i < 250; i++) {
+            double a = i * 2 * PI / 250;
+            glColor3f(0.2f, 1, 0.4f);
+            glVertex2f(W / 2.0f + 20 * (float)__builtin_cos(a),
+                       160 + 20 * (float)__builtin_sin(a));
+        }
+        glEnd();
+        glBegin(GL_LINE_LOOP);
+        for (i = 0; i < 400; i++) {
+            double a = i * 2 * PI / 400;
+            glColor3f(1, 1, 1);
+            glVertex2f(W / 2.0f + 45 * (float)__builtin_cos(a),
+                       160 + 45 * (float)__builtin_sin(a));
+        }
+        glEnd();
+        glFinish();
+        {
+            unsigned long a = px(4, 20), b = px(W - 6, 20);
+            /* le dégradé va du vert (début) au rouge (fin) : si la coupure de
+               GLEngine perdait la fin de la bande, b serait le fond */
+            printf("  %s bande : début vert (%06lx)\n",
+                   ((a >> 8) & 255) > 200 ? "ok  " : "FAIL", a);
+            if (!(((a >> 8) & 255) > 200)) failures++;
+            printf("  %s bande : fin rouge atteinte (%06lx)\n",
+                   (b >> 16) > 200 ? "ok  " : "FAIL", b);
+            if (!((b >> 16) > 200)) failures++;
+            a = px(W / 2, 80);
+            printf("  %s éventail : centre jaune (%06lx)\n",
+                   (a >> 16) > 200 && ((a >> 8) & 255) > 180 ? "ok  " : "FAIL", a);
+            if (!((a >> 16) > 200 && ((a >> 8) & 255) > 180)) failures++;
+        }
+        check("polygone : centre", W / 2, 160, 0x33FF66);
+        {
+            unsigned long a = px(W / 2, 160 - 45);
+            printf("  %s boucle de lignes : fermée (%06lx)\n",
+                   a == 0xFFFFFF ? "ok  " : "FAIL", a);
+            if (a != 0xFFFFFF) failures++;
+        }
+    } else if (!strcmp(scene, "dlist")) {
+        /* Liste d'affichage et glDrawElements : GLEngine les déroule tous les
+           deux dans Begin/EndPrimitiveBuffer. */
+        static const float v[8 * 3] = {
+            8, 8, 0,   56, 8, 0,   56, 56, 0,   8, 56, 0,
+            72, 8, 0,  120, 8, 0,  120, 56, 0,  72, 56, 0 };
+        static const float c[8 * 3] = {
+            1, 0, 0,  0, 1, 0,  0, 0, 1,  1, 1, 0,
+            1, 0, 1,  0, 1, 1,  1, 1, 1,  0.5f, 0.5f, 0.5f };
+        static const unsigned short idx[12] = { 0,1,2, 0,2,3, 4,5,6, 4,6,7 };
+        GLuint list;
+        glClearColor(0, 0, 0.25f, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        list = glGenLists(1);
+        glNewList(list, GL_COMPILE);
+        glBegin(GL_TRIANGLES);
+        glColor3f(1, 0.5f, 0); glVertex2f(8, 72); glVertex2f(56, 72); glVertex2f(8, 120);
+        glColor3f(0, 0.5f, 1); glVertex2f(72, 72); glVertex2f(120, 72); glVertex2f(72, 120);
+        glEnd();
+        glEndList();
+        glCallList(list);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glEnableClientState(GL_COLOR_ARRAY);
+        glVertexPointer(3, GL_FLOAT, 0, v);
+        glColorPointer(3, GL_FLOAT, 0, c);
+        glDrawElements(GL_TRIANGLES, 12, GL_UNSIGNED_SHORT, idx);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        glDisableClientState(GL_COLOR_ARRAY);
+        glDeleteLists(list, 1);
+        glFinish();
+        {
+            unsigned long a = px(12, 76), b = px(76, 76);
+            printf("  %s liste d'affichage : orange (%06lx)\n",
+                   (a >> 16) > 240 && (a & 255) < 8 ? "ok  " : "FAIL", a);
+            if (!((a >> 16) > 240 && (a & 255) < 8)) failures++;
+            printf("  %s liste d'affichage (2) : bleu (%06lx)\n",
+                   (b & 255) > 240 && (b >> 16) < 8 ? "ok  " : "FAIL", b);
+            if (!((b & 255) > 240 && (b >> 16) < 8)) failures++;
+        }
+        {
+            unsigned long a = px(30, 30), b = px(96, 30);
+            printf("  %s glDrawElements : deux quads (%06lx / %06lx)\n",
+                   (a && b) ? "ok  " : "FAIL", a, b);
+            if (!(a && b)) failures++;
+        }
+    } else if (!strcmp(scene, "mixte")) {
+        /* Alternance, dans la MÊME image et avec la même profondeur, de dessins
+           dans le domaine et hors domaine (glPolygonMode(GL_LINE) et un
+           glDrawPixels) : le repli par lot d'état doit donner une image exacte. */
+        unsigned char pix[16 * 16 * 3];
+        int i, k;
+        for (i = 0; i < 16 * 16; i++) {
+            pix[i * 3 + 0] = (unsigned char)(i & 255);
+            pix[i * 3 + 1] = 200;
+            pix[i * 3 + 2] = (unsigned char)(255 - (i & 255));
+        }
+        glClearColor(0, 0, 0.25f, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        for (k = 0; k < 4; k++) {
+            float y0 = k * 32.0f;
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);      /* dans le domaine */
+            glBegin(GL_TRIANGLES);
+            glColor3f(1, 0.3f, 0.1f);
+            glVertex3f(4, y0 + 4, 0.2f); glVertex3f(60, y0 + 4, 0.2f);
+            glVertex3f(4, y0 + 28, 0.2f);
+            glEnd();
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);      /* HORS domaine */
+            glBegin(GL_TRIANGLES);
+            glColor3f(0.2f, 1, 0.4f);
+            glVertex3f(68, y0 + 4, 0.1f); glVertex3f(124, y0 + 4, 0.1f);
+            glVertex3f(68, y0 + 28, 0.1f);
+            glEnd();
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);      /* de nouveau dedans */
+            glBegin(GL_QUADS);
+            glColor3f(0.9f, 0.9f, 0.2f);
+            glVertex3f(70, y0 + 16, 0.5f); glVertex3f(122, y0 + 16, 0.5f);
+            glVertex3f(122, y0 + 26, 0.5f); glVertex3f(70, y0 + 26, 0.5f);
+            glEnd();
+        }
+        glRasterPos2f(4, 130);                              /* HORS domaine */
+        glDrawPixels(16, 16, GL_RGB, GL_UNSIGNED_BYTE, pix);
+        glBegin(GL_TRIANGLES);                              /* et de nouveau dedans */
+        glColor3f(0.4f, 0.4f, 1);
+        glVertex3f(40, 116, 0.3f); glVertex3f(124, 116, 0.3f); glVertex3f(40, 156, 0.3f);
+        glEnd();
+        glDisable(GL_DEPTH_TEST);
+        glFinish();
+        {
+            unsigned long a = px(10, 10);
+            printf("  %s rempli (domaine) : rouge (%06lx)\n",
+                   (a >> 16) > 240 && ((a >> 8) & 255) < 100 ? "ok  " : "FAIL", a);
+            if (!((a >> 16) > 240 && ((a >> 8) & 255) < 100)) failures++;
+            a = px(100, 21);
+            printf("  %s bande jaune devant l'arête (%06lx)\n",
+                   (a >> 16) > 200 && (a & 255) < 100 ? "ok  " : "FAIL", a);
+            if (!((a >> 16) > 200 && (a & 255) < 100)) failures++;
+            a = px(96, 4);
+            printf("  %s polygonmode ligne : arête tracée (%06lx)\n",
+                   a != 0x000040 ? "ok  " : "FAIL", a);
+            if (a == 0x000040) failures++;
+            a = px(60, 130);
+            printf("  %s triangle après glDrawPixels (%06lx)\n",
+                   (a & 255) > 200 ? "ok  " : "FAIL", a);
+            if (!((a & 255) > 200)) failures++;
+        }
     } else if (!strcmp(scene, "fill")) {
         /* Remplissage : 40 grands triangles qui se recouvrent, test de
            profondeur et mélange, 30 images. Mesure le coût par pixel. */
@@ -1538,4 +2184,5 @@ int main(int argc, char **argv)
     CGLDestroyContext(ctx);
     printf("%s (%d échec(s))\n", failures ? "ÉCHEC" : "OK", failures);
     return failures ? 1 : 0;
+    }
 }

@@ -35,6 +35,8 @@
  *   POMPPC_GL_DIRECT=0    pas de présentation directe (voir present_direct)
  *   POMPPC_GL_STATS=fichier  bilan ajouté au fichier toutes les 5 s (images/s,
  *                         relectures, replis, temps passé à soumettre et à copier)
+ *   POMPPC_GL_GEOM=0/1/2  chemin brut : 0 coupé, 1 activé (défaut), 2 activé
+ *                         avec un format de sommet fixe et large (mesure)
  *   POMPPC_GLTRACE=dir    trace (voir pomppc_gld.c)
  */
 #include <stdio.h>
@@ -43,6 +45,7 @@
 #include <pthread.h>
 #include <sys/time.h>
 #include <dlfcn.h>
+#include <math.h>
 
 #include "qgpu_proto.h"
 #include "pomppc_gld.h"
@@ -152,6 +155,66 @@
 #define V_TEX0  0x80              /* s t r q de l'unité 0, déjà divisés par w */
 #define V_TEX(u) (V_TEX0 + 0x10 * (u))   /* unités 0 à 7 */
 
+/* ─── État de transformation et d'éclairage de GLEngine (docs/re/etat-tcl.md §10,
+ * relevé par sondes le 18/09/2026). Offsets relatifs au bloc d'état GL (GS).
+ * Les offsets NÉGATIFS désignent la zone qui précède le bloc (gctx + x). ─── */
+#define GS_MAT_PROJ       0x1920   /* float[16], ordre colonne */
+#define GS_MAT_MODELVIEW  0x1960
+#define GS_MAT_TEXTURE(u) (0x1c60 + (u) * 0x40)
+#define GS_VIEWPORT       0x1840   /* i32 ×4 : x, y, largeur, hauteur (origine en bas) */
+#define GS_DEPTH_NEAR_F   0x1850   /* float ×3 : proche, lointain, lointain−proche */
+#define GS_NORMALIZE      0x24ad   /* u8 */
+#define GS_RESCALE_NORMAL 0x24ae   /* u8 */
+#define GS_SCENE_AMBIENT  0x24b0   /* float ×4 : GL_LIGHT_MODEL_AMBIENT */
+#define GS_LIGHT(i)       (0x24c0 + (i) * 0x80)
+#define LT_AMBIENT        0x00     /* float ×4 */
+#define LT_DIFFUSE        0x10
+#define LT_SPECULAR       0x20
+#define LT_POSITION       0x30     /* float ×4, coordonnées ŒIL : ne pas retransformer */
+#define LT_SPOT_DIR       0x40     /* float ×3, coordonnées ŒIL */
+#define LT_SPOT_COS       0x4c     /* float : COSINUS du seuil ; < 0 = pas un spot */
+#define LT_ATT_CONST      0x50
+#define LT_ATT_LINEAR     0x54
+#define LT_ATT_QUAD       0x58
+#define LT_SPOT_EXP       0x5c
+#define GS_MATERIAL_FRONT 0x28c0   /* objets de 0x240 octets, DANS le bloc */
+#define GS_MATERIAL_BACK  0x2b00
+#define MT_AMBIENT        0x00     /* float ×4 */
+#define MT_DIFFUSE        0x10
+#define MT_SPECULAR       0x20
+#define MT_EMISSION       0x30
+#define MT_SHININESS      0x40     /* float */
+#define GS_LIGHT_MASK     0x2d40   /* u32 : bit i = GL_LIGHT0+i allumée */
+#define GS_COLORMAT_FACE  0x2d44   /* u16 */
+#define GS_COLORMAT_MODE  0x2d46   /* u16 */
+#define GS_COLOR_CONTROL  0x2d48   /* u16 : 0x81f9 SINGLE / 0x81fa SEPARATE_SPECULAR */
+#define GS_LIGHTING       0x2d4a   /* u8 */
+#define GS_COLOR_MATERIAL 0x2d4b   /* u8 */
+#define GS_TWO_SIDE       0x2d4c   /* u8 */
+#define GS_LOCAL_VIEWER   0x2d4d   /* u8 */
+#define GS_FOG_DENSITY    0x2df0   /* float */
+#define GS_FOG_START      0x2df4
+#define GS_FOG_END        0x2df8
+#define GS_FOG_COORD_SRC  0x2e06   /* u16 : 0x8451 FOG_COORDINATE / 0x8452 FRAGMENT_DEPTH */
+#define GS_POINT_ATT      0x30cc   /* float ×3 : constante, linéaire, quadratique */
+#define GS_FRONT_FACE     0x3174   /* u16 : GL_CW 0x900 / GL_CCW 0x901 */
+#define GS_CULL_MODE      0x3176   /* u16 : 0x404 / 0x405 / 0x408 */
+#define GS_CULL_FACE      0x317a   /* u8 */
+#define GS_TEXGEN(u)      (0x3988 + (u) * 0x94)
+#define TG_COORD(c)       ((c) * 0x24)
+#define TG_MODE           0x00     /* u16 : énumération GL telle quelle */
+#define TG_EYE_PLANE      0x04     /* float ×4, coordonnées ŒIL */
+#define TG_OBJ_PLANE      0x14     /* float ×4, brut */
+#define TG_ENABLE         0x90     /* u8 ×4 : S, T, R, Q */
+#define GS_CLIP_MASK      0x3e28   /* u32 : bit i = GL_CLIP_PLANE0+i */
+#define GS_CLIP_PLANE(i)  (0x3e2c + (i) * 0x10)     /* float ×4, coordonnées ŒIL */
+/* Valeurs courantes : elles sont AVANT le bloc (gctx = GS − 0x360). */
+#define GS_CUR_TEXCOORD(u) (-0x240 + (u) * 0x10)    /* float ×4 */
+#define GS_CUR_COLOR      (-0x0c0)                  /* float ×4 */
+#define GS_CUR_NORMAL     (-0x0b0)                  /* float ×3 */
+#define GS_CUR_SECCOLOR   (-0x0a0)                  /* float ×3 */
+#define GS_CUR_FOGCOORD   (-0x094)                  /* float */
+
 #define GL_COLOR_BUFFER_BIT 0x4000
 #define GL_DEPTH_BUFFER_BIT 0x0100
 #define GL_STENCIL_BUFFER_BIT 0x0400
@@ -200,6 +263,31 @@ typedef struct PCtx {
     unsigned long  direct_at;           /* n° de la dernière image présentée directement */
     int            stencil;             /* la surface hôte a un stencil ; sa fraîcheur est
                                            celle de la profondeur (même mot côté invité) */
+    int            sten_used;           /* le contexte s'est VRAIMENT servi du stencil */
+    /* ── chemin brut (v7) : la géométrie part non transformée sur l'hôte ── */
+    unsigned char *cfg;                 /* bloc de configuration de gldCreateContext */
+    unsigned long  desc[8];             /* descripteur de sortie de sommet (cfg+0x11c),
+                                           durée de vie = celle du contexte */
+    unsigned long  geom_fmt;            /* masque QGPU_VF_* publié */
+    unsigned long  geom_words;          /* pas d'un sommet, en mots */
+    int            desc_dirty;          /* republié : demander le bit 1 du dispatch */
+    int            geom_on;             /* dernier verdict du domaine */
+    int            geom_lost;           /* une primitive a été perdue : plus jamais de brut */
+    /* État géométrique déjà posé sur le device. On garde une copie des OCTETS
+       SOURCES du bloc GLEngine, pas des arguments envoyés : comparer la source
+       coûte un memcmp, fabriquer les arguments pour les comparer coûtait 7 % du
+       temps de Marble Blast (relevé `sample`, put_f en tête des feuilles). */
+    int            g_sent;
+    unsigned long  c_mtx[QGPU_MTX_COUNT][16];        /* 64 o par matrice */
+    unsigned long  c_vp[4];                          /* viewport i32 ×4 */
+    unsigned long  c_dr[2];                          /* proche, lointain */
+    unsigned long  c_lmask;
+    unsigned long  c_light[QGPU_MAX_LIGHTS][24];     /* 0x60 o utiles par lumière */
+    unsigned long  c_mat[2][17];                     /* 0x44 o par face */
+    unsigned long  c_lm[4];
+    unsigned long  c_tg[QGPU_MAX_UNITS][37];         /* 0x94 o : modes, plans, actifs */
+    unsigned long  c_clip[25];                       /* masque + 6 plans, contigus */
+    unsigned long  c_cur[4][4];                      /* couleur, normale, secondaire, brouillard */
 } PCtx;
 
 typedef struct PTex {                   /* texture du GLDriver suivie par le plugin */
@@ -243,6 +331,15 @@ static struct {
     PCtx           *run_ctx;            /* série de triangles ouverte */
     unsigned long   run_start, run_count;
     int             run_kind;           /* genre de la série : RK_* */
+    /* série DRAW_RAW ouverte (chemin brut) : la commande n'est écrite qu'à sa
+       fermeture, pour fusionner les EndPrimitiveBuffer contigus */
+    PCtx           *raw_ctx;
+    unsigned long   raw_start, raw_count, raw_fmt, raw_words;
+    unsigned long   raw_mode;
+    /* tampon rendu par BeginPrimitiveBuffer, en attente de EndPrimitiveBuffer */
+    PCtx           *pend;
+    unsigned long   pend_off, pend_words, pend_fmt, pend_slots;
+    int             pend_drop;
     Post            post[MAX_POST];
     int             npost;
     unsigned long   ctx_used, surf_used;
@@ -253,6 +350,8 @@ static struct {
     unsigned long   n_tris, n_clears, n_submits, n_uploads, n_readbacks, n_fallback;
     unsigned long   n_textris, n_texuploads, n_lines, n_points;
     unsigned long   n_frames, n_direct, n_tex_incomplete;
+    unsigned long   n_rawverts, n_rawdraws, n_geomcmds, n_geomdrop;
+    int             v7;                 /* device v7 ET chemin brut autorisé */
     double          t_submit, t_copy, t_upload;   /* secondes cumulées */
 } G = { PTHREAD_MUTEX_INITIALIZER };
 
@@ -268,13 +367,17 @@ static double now_s(void)
 enum {
     NO_BUFFER, NO_RASTER, NO_FOG, NO_POLYMODE, NO_DEPTH, NO_BLEND, NO_ALPHA,
     NO_SURFACE, NO_TEX_UNITS, NO_TEX_TARGET, NO_TEX_ENV, NO_TEX_UNKNOWN,
-    NO_TEX_BASE, NO_TEX_SIZE, NO_TEX_FORMAT, NO_TEX_ID, NO_TEX_COMBINE, NO_STENCIL, NO_COUNT
+    NO_TEX_BASE, NO_TEX_SIZE, NO_TEX_FORMAT, NO_TEX_ID, NO_TEX_COMBINE, NO_STENCIL,
+    /* sorties du domaine propres au chemin brut (v7) */
+    NO_G_RASTER, NO_G_POINT, NO_G_PROGRAM, NO_G_STRIDE, NO_G_LATE, NO_COUNT
 };
 static const char *const no_name[NO_COUNT] = {
     "tampon", "stencil/logicop/stipple", "brouillard", "polygonmode", "profondeur",
     "melange", "alphatest", "surface", "unites>2", "cible-texture", "texenv",
     "texture-inconnue", "format-base", "taille-texture", "format-texels", "id-texture",
     "combine", "stencil",
+    "brut:stipple/lissage", "brut:taille-de-point", "brut:programme",
+    "brut:pas-de-sommet", "brut:etat-tardif",
 };
 static unsigned long no_count[NO_COUNT];
 static char no_detail[NO_COUNT][64];
@@ -288,6 +391,8 @@ static int no(int why, unsigned long a, unsigned long b)
 }
 
 static const char *direct_why(void);
+static int geom_switch(void);
+static unsigned long fbits(float f);
 
 /* Bilan périodique (POMPPC_GL_STATS=<fichier>), appelé à chaque échange. */
 static void stats_frame(void)
@@ -296,6 +401,7 @@ static void stats_frame(void)
     static int init;
     static double t0;
     static unsigned long f0, tr0, rb0, up0, fb0, sub0, tu0, di0;
+    static unsigned long rv0, rd0, gc0;
     static double ts0, tc0, tu_0;
     double t;
 
@@ -325,6 +431,15 @@ static void stats_frame(void)
                     (G.t_upload - tu_0) * 1000 / (G.n_frames - f0),
                     G.n_direct - di0);
             {
+                unsigned long fr = G.n_frames - f0 ? G.n_frames - f0 : 1;
+                if (G.n_rawverts != rv0 || G.n_rawdraws != rd0)
+                    fprintf(f, "    brut : %lu sommets/img, %lu DRAW_RAW/img, "
+                            "%lu commandes d'état/img%s\n",
+                            (G.n_rawverts - rv0) / fr, (G.n_rawdraws - rd0) / fr,
+                            (G.n_geomcmds - gc0) / fr,
+                            G.n_geomdrop ? " ⚠ PRIMITIVES PERDUES" : "");
+            }
+            {
                 int k;
                 for (k = 0; k < NO_COUNT; k++)
                     if (no_count[k])
@@ -343,6 +458,7 @@ static void stats_frame(void)
         t0 = t; f0 = G.n_frames; tr0 = G.n_tris; rb0 = G.n_readbacks; up0 = G.n_uploads;
         fb0 = G.n_fallback; sub0 = G.n_submits; tu0 = G.n_texuploads; di0 = G.n_direct;
         ts0 = G.t_submit; tc0 = G.t_copy; tu_0 = G.t_upload;
+        rv0 = G.n_rawverts; rd0 = G.n_rawdraws; gc0 = G.n_geomcmds;
     }
 }
 
@@ -391,12 +507,21 @@ static PCtx *find_ctx(void *ctx)
 
 static void on_exit_stats(void)
 {
+    if (getenv("POMPPC_GL_STATS")) {
+        int k;
+        for (k = 0; k < NO_COUNT; k++)
+            if (no_count[k])
+                fprintf(stderr, "POMPPC GL : refus %s : %lu (premier : %s)\n",
+                        no_name[k], no_count[k], no_detail[k]);
+    }
     if (getenv("POMPPC_GL_STATS"))
         fprintf(stderr, "POMPPC GL : %lu triangles (%lu texturés), %lu segments, %lu points "
                 "et %lu effacements sur l'hôte, %lu soumissions, %lu téléversements, "
-                "%lu niveaux de texture, %lu relectures, %lu appels logiciels synchronisés\n",
+                "%lu niveaux de texture, %lu relectures, %lu appels logiciels synchronisés ; "
+                "brut : %lu sommets en %lu DRAW_RAW, %lu primitives perdues\n",
                 G.n_tris, G.n_textris, G.n_lines, G.n_points, G.n_clears, G.n_submits,
-                G.n_uploads, G.n_texuploads, G.n_readbacks, G.n_fallback);
+                G.n_uploads, G.n_texuploads, G.n_readbacks, G.n_fallback,
+                G.n_rawverts, G.n_rawdraws, G.n_geomdrop);
 }
 
 int pomppc_accel_enabled(void)
@@ -415,13 +540,19 @@ void pomppc_backend_init(void)
         } else if (qgpu_open(&G.q, &why) == 0) {
             G.state = 1;
             G.cmd = (unsigned long *)G.q.win;
+            /* Le chemin brut demande un device v7 : sur un device plus ancien,
+               les clés de géométrie n'existent pas et les envoyer ferait
+               refuser toutes les soumissions (vu en vrai au passage en v6). */
+            G.v7 = G.q.version >= 7 && geom_switch() > 0;
             atexit(on_exit_stats);
         } else {
             G.state = -1;
         }
         if (G.state > 0)
-            pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, caps 0x%lx)\n",
-                       G.q.index, G.q.base, G.q.size >> 20, G.q.caps);
+            pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
+                       " chemin brut %s)\n",
+                       G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
+                       G.v7 ? "actif" : "coupé");
         else
             pomppc_log("POMPPC: accélération désactivée : %s\n", why);
     }
@@ -456,12 +587,37 @@ static void close_run(void)
     G.run_count = 0;
 }
 
+/* Ferme la série DRAW_RAW en cours (chemin brut) : la commande n'est écrite
+ * qu'ici, pour pouvoir fusionner les EndPrimitiveBuffer contigus. La place est
+ * garantie par la marge de reserve(). */
+static void close_raw(void)
+{
+    if (G.raw_ctx && G.raw_count) {
+        unsigned long *c = G.cmd + G.ncmd;
+        c[0] = QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW);
+        c[1] = G.raw_mode;
+        c[2] = G.raw_count;
+        c[3] = G.q.base + VTX_OFF + G.raw_start;
+        c[4] = 0;                       /* pas serré : le format donne le pas */
+        c[5] = G.raw_fmt;
+        c[6] = 0;                       /* pas d'indices : GLEngine les déroule */
+        c[7] = QGPU_IDX_NONE;
+        c[8] = 0;                       /* premier */
+        c[9] = G.raw_count;             /* nverts : tout le tableau est dessiné */
+        G.ncmd += QGPU_LEN_DRAW_RAW;
+        G.n_rawdraws++;
+    }
+    G.raw_ctx = 0;
+    G.raw_count = 0;
+}
+
 /* Réserve `words` mots de flux pour le contexte p (CTX_BIND inclus au besoin). */
 static unsigned long *reserve(PCtx *p, unsigned long words)
 {
     unsigned long *c;
     close_run();
-    if (G.ncmd + words + 2 + QGPU_LEN_DRAW_N > CMD_WORDS)
+    close_raw();
+    if (G.ncmd + words + 2 + QGPU_LEN_DRAW_N + QGPU_LEN_DRAW_RAW > CMD_WORDS)
         flush();
     if (G.bound != p) {
         c = G.cmd + G.ncmd;
@@ -492,6 +648,20 @@ static long arena_alloc(unsigned long n, unsigned long *off)
 static void broken_all(const char *why, long st, unsigned long pc)
 {
     PCtx *p;
+    /* Un DRAW_RAW refusé vient presque toujours d'un sommet que l'application
+       a laissé indéfini (NaN, infini, coordonnée démesurée) : GLEngine les
+       découpait avant de nous les donner, plus maintenant. Couper le chemin
+       brut suffit — l'accélération de la rastérisation, elle, reste bonne. */
+    if (pc < CMD_WORDS && QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_RAW) {
+        pomppc_log("POMPPC: DRAW_RAW refusé (statut %ld, commande %lu) : "
+                   "chemin brut coupé\n", st, pc);
+        fprintf(stderr, "POMPPC GL : géométrie brute refusée par l'hôte "
+                "(statut %ld), repli sur la rastérisation\n", st);
+        for (p = G.list; p; p = p->next)
+            p->geom_lost = 1;
+        G.v7 = 0;
+        return;
+    }
     pomppc_log("POMPPC: soumission refusée (%s, statut %ld, commande %lu) : "
                "accélération coupée\n", why, st, pc);
     fprintf(stderr, "POMPPC GL : soumission refusée (statut %ld, commande %lu), "
@@ -507,6 +677,7 @@ static void flush(void)
     int i;
 
     close_run();
+    close_raw();
     if (G.ncmd) {
         double t = now_s(), t2;
         st = qgpu_submit(&G.q, 0, G.ncmd * 4, &pc);
@@ -547,7 +718,11 @@ static void flush(void)
         G.t_copy += now_s() - t2;
     }
     G.ncmd = 0;
-    G.vtx = 0;
+    /* Un BeginPrimitiveBuffer ouvert occupe déjà la zone des sommets : GLEngine
+       y écrit pendant ce temps, on ne peut pas la rendre (vu en vrai : un
+       téléversement de texture au milieu d'une primitive vide le flux). */
+    if (!G.pend)
+        G.vtx = 0;
     G.arena = 0;
     G.npost = 0;
     G.bound = 0;
@@ -669,6 +844,26 @@ void pomppc_texture_changed(void *drvtex, int levels)
     pthread_mutex_unlock(&G.mu);
 }
 
+/* Couples (format, type) que convert_level sait traduire. Le chemin brut doit
+ * le savoir SANS convertir : le domaine est décidé à chaque changement d'état,
+ * bien avant le dessin. Toute entrée ajoutée ici doit avoir son cas ci-dessous. */
+static int level_convertible(unsigned int fmt, unsigned int type)
+{
+    switch ((fmt << 16) | type) {
+    case (0x1908 << 16) | 0x1401: case (0x1907 << 16) | 0x1401:
+    case (0x80E1 << 16) | 0x1401: case (0x80E0 << 16) | 0x1401:
+    case (0x80E1 << 16) | 0x8367: case (0x1908 << 16) | 0x8035:
+    case (0x80E1 << 16) | 0x8035: case (0x1908 << 16) | 0x8367:
+    case (0x80E1 << 16) | 0x8366: case (0x1907 << 16) | 0x8363:
+    case (0x1908 << 16) | 0x8033: case (0x1909 << 16) | 0x1401:
+    case (0x190A << 16) | 0x1401: case (0x1906 << 16) | 0x1401:
+    case (0x1903 << 16) | 0x1401:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 /* Convertit un niveau (format de l'application) en mots ARGB ; 0 si non géré. */
 static int convert_level(const unsigned char *lv, unsigned long *out)
 {
@@ -773,6 +968,45 @@ static int convert_level(const unsigned char *lv, unsigned long *out)
 static int base_format_ok(unsigned long f)
 {
     return (f >= 0x1906 && f <= 0x190A) || f == 0x8049;
+}
+
+static int tex_id_available(void)
+{
+    unsigned long i;
+    for (i = 0; i < QGPU_CLIENT_TEX_IDS; i++)
+        if (!(G.tex_used[i / 32] & (1UL << (i % 32))))
+            return 1;
+    return 0;
+}
+
+/* upload_texture réussira-t-il ? Prédicat PUR (aucune commande, aucune
+ * conversion) : le chemin brut doit trancher au changement d'état, où il ne
+ * peut plus se dédire. Une texture déjà téléversée et propre est connue bonne. */
+static int texture_uploadable(PTex *t)
+{
+    unsigned char *dt = t->drvtex;
+    unsigned long base = GLD_U32(dt, DT_BASE_FORMAT);
+    int l;
+
+    if (t->qtex >= 0 && !t->dirty)
+        return 1;
+    if (!GLD_U32(dt, DT_PARAMS) || !base_format_ok(base))
+        return no(NO_TEX_BASE, base, 0);
+    if (t->qtex < 0 && !tex_id_available())
+        return no(NO_TEX_ID, 0, 0);
+    for (l = 0; l < DT_LEVELS; l++) {
+        unsigned char *lv = dt + DT_LEVEL0 + l * DT_LEVEL_SIZE;
+        unsigned long w = S16(lv, LV_W), h = S16(lv, LV_H);
+        if (w == 0 || h == 0)
+            continue;
+        if (S16(lv, LV_BORDER) || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM)
+            return no(NO_TEX_SIZE, w, h);
+        if (!GLD_U32(lv, LV_DATA) || S16(lv, LV_ROWPIX) != (short)w ||
+            !level_convertible(U16(lv, LV_FORMAT), U16(lv, LV_TYPE)))
+            return no(NO_TEX_FORMAT, (U16(lv, LV_FORMAT) << 16) | U16(lv, LV_TYPE),
+                      ((unsigned long)S16(lv, LV_ROWPIX) << 16) | w);
+    }
+    return 1;
 }
 
 /* Téléverse les niveaux et les paramètres de t si besoin ; 0 = logiciel. */
@@ -911,6 +1145,19 @@ static int combine_ok(const unsigned char *us, int unit, TexUnit *tu)
     tu->combine = QGPU_COMBINE(frgb, fa, rs, as);
     tu->combine_src = src;
     return 1;
+}
+
+/* Objet texture du GLDriver lié à l'unité u pour la cible active, ou 0.
+ * `*mask` reçoit les cibles activées (bits TU_ENABLE). */
+static void *unit_drvtex(PCtx *p, int u, unsigned long *mask)
+{
+    unsigned char *us = gls(p) + GS_TEXUNIT0 + u * GS_TEXUNIT_SIZE;
+    unsigned long m = GLD_U32(us, TU_ENABLE) & 0x1f;
+    unsigned long units = GLD_U32(p->ctx, CTX_TEXUNITS);
+    *mask = m;
+    if (!m || (m & 0x7) || !units)
+        return 0;
+    return (void *)GLD_U32(units, u * 0x14 + ((m & 8) ? 3 * 4 : 4 * 4));
 }
 
 /* Unité u : texture et environnement ; 0 = hors domaine (logiciel). */
@@ -1067,8 +1314,15 @@ static void sync_to_host(PCtx *p, int color, int depth)
             c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
             G.n_uploads++;
         }
-        /* le stencil de l'invité vit dans les 8 bits bas des mêmes mots */
-        if (src && p->stencil && arena_alloc(w * h * 4, &off)) {
+        /* Le stencil de l'invité vit dans les 8 bits bas des mêmes mots. On ne
+           le téléverse QUE si le contexte s'en sert vraiment : sur une surface
+           hôte combinée, QGPU_OP_STENCIL_UPLOAD abîme la PROFONDEUR déjà posée
+           (vu en vrai, scène « mixte » avec un format de pixel à stencil : tout
+           ce qui suivait le premier repli logiciel disparaissait ; le seul fait
+           de sauter ce téléversement rend l'image exacte). Beaucoup
+           d'applications — GLUT, Marble Blast — demandent un stencil sans
+           jamais s'en servir : elles ne paient plus ni le bogue ni le transfert. */
+        if (src && p->stencil && p->sten_used && arena_alloc(w * h * 4, &off)) {
             for (y = 0; y < h; y++) {
                 unsigned long *s = (unsigned long *)(src + y * sw_rowbytes(p));
                 unsigned long *d = (unsigned long *)(G.q.win + off + y * w * 4);
@@ -1135,11 +1389,20 @@ static void sync_to_sw_locked(PCtx *p, int want_depth)
         unsigned char *dst = sw_depth(p);
         if (dst && GLD_U32(p->ctx, CTX_DEPTH_BITS) == 32) {
             queue_readback(p, 1, dst);
-            if (p->stencil)
+            if (p->stencil && p->sten_used)
                 queue_readback(p, 2, dst);
             any = 1;
+            p->depth = SYNCED;
         }
-        p->depth = SYNCED;
+        /* Pas (encore) de tampon de profondeur invité : le rendu d'Apple ne
+           l'alloue qu'à son premier usage, et plus tard encore quand il porte
+           un stencil. On garde alors HOST_NEWER : se dire « synchronisé » ici,
+           c'était perdre la profondeur de l'hôte — le repli logiciel allouait
+           ensuite un tampon au contenu indéfini, marqué SW_NEWER, téléversé
+           par-dessus, et tout ce que l'hôte dessinait après était éliminé par
+           le test de profondeur. Vu en vrai : scène « mixte » avec un format de
+           pixel à stencil, toute la géométrie postérieure au premier repli
+           disparaissait. */
     }
     if (any || G.ncmd)
         flush();
@@ -1192,14 +1455,21 @@ static int stencil_op_ok(unsigned long op)
            op == 0x8507 || op == 0x8508;
 }
 
-/* Test de stencil actif ET tampon présent (sinon le test n'a aucun effet). */
+/* Test de stencil actif ET tampon présent (sinon le test n'a aucun effet).
+ * Note au passage que le contexte se sert du stencil : tant qu'il ne s'en sert
+ * pas, on n'échange pas le stencil avec l'hôte (voir sync_to_host). */
 static int stencil_active(PCtx *p)
 {
-    return (GLD_U32(gls(p), GS_STENCIL) & 1) && GLD_U32(p->ctx, CTX_STENCIL_BITS) != 0;
+    int on = (GLD_U32(gls(p), GS_STENCIL) & 1) && GLD_U32(p->ctx, CTX_STENCIL_BITS) != 0;
+    if (on)
+        p->sten_used = 1;
+    return on;
 }
 
-/* L'état courant relève-t-il du domaine rendu par l'hôte ? */
-static int accel_ok(PCtx *p)
+/* L'état courant relève-t-il du domaine rendu par l'hôte ?
+ * `raw` : on juge pour le chemin BRUT (v7), qui calcule le brouillard sur
+ * l'hôte — GL_NICEST n'est donc plus une raison de refuser. */
+static int accel_ok_for(PCtx *p, int raw)
 {
     unsigned char *g;
 
@@ -1222,7 +1492,7 @@ static int accel_ok(PCtx *p)
     }
     /* brouillard : GLEngine fournit le facteur par sommet, sauf en GL_NICEST
        où le GLDriver le calcule par fragment */
-    if (GLD_U8(g, GS_FOG) && U16(g, GS_FOG_HINT) == 0x1102)
+    if (!raw && GLD_U8(g, GS_FOG) && U16(g, GS_FOG_HINT) == 0x1102)
         return no(NO_FOG, U16(g, GS_FOG_MODE), 0);
     if (U16(g, GS_POLY_MODE) != GL_FILL || U16(g, GS_POLY_MODE + 2) != GL_FILL)
         return no(NO_POLYMODE, U16(g, GS_POLY_MODE), U16(g, GS_POLY_MODE + 2));
@@ -1240,6 +1510,13 @@ static int accel_ok(PCtx *p)
         return no(NO_ALPHA, U16(g, GS_ALPHA_FUNC), 0);
     return 1;
 }
+
+static int accel_ok(PCtx *p)
+{
+    return accel_ok_for(p, 0);
+}
+
+static void compute_geom_state(PCtx *p, unsigned long *v);
 
 static void compute_state(PCtx *p, const TexInfo *ti, unsigned long *v)
 {
@@ -1354,6 +1631,8 @@ static void compute_state(PCtx *p, const TexInfo *ti, unsigned long *v)
         v[QGPU_SK_POLY_FACTOR] = p->st_valid ? p->st[QGPU_SK_POLY_FACTOR] : 0;
         v[QGPU_SK_POLY_UNITS] = p->st_valid ? p->st[QGPU_SK_POLY_UNITS] : 0;
     }
+    if (G.v7)
+        compute_geom_state(p, v);
 }
 
 static void send_state(PCtx *p, const TexInfo *ti)
@@ -1361,11 +1640,15 @@ static void send_state(PCtx *p, const TexInfo *ti)
     unsigned long v[QGPU_SK_COUNT], *c;
     int k;
     compute_state(p, ti, v);
-    /* Seulement les clés que compute_state remplit (rastérisation, v1–v6). Les
-       clés de géométrie de la v7 gardent leur valeur initiale sur le device :
-       les envoyer à zéro serait invalide (vu en vrai au passage en v6, où
-       toutes les soumissions ont été refusées). */
-    for (k = 1; k < QGPU_SK_LIGHTING; k++) {
+    /* Sans le chemin brut, seulement les clés de rastérisation (v1–v6) : les
+       clés de géométrie de la v7 gardent leur valeur initiale sur le device,
+       et les envoyer à zéro serait invalide (vu en vrai au passage en v6, où
+       toutes les soumissions ont été refusées). Avec, compute_geom_state les
+       remplit toutes — et les anciens opcodes de dessin les ignorent (vérifié
+       dans patches/qgpu : gl_apply_state remet l'ombrage, l'éclairage,
+       l'élimination des faces et le brouillard à plat avant chaque dessin
+       v1–v6, et qgpu-soft.c ne lit QGPU_SK_FOG_MODE que dans soft_draw_raw). */
+    for (k = 1; k < (G.v7 ? QGPU_SK_COUNT : QGPU_SK_LIGHTING); k++) {
         if (p->st_valid && p->st[k] == v[k])
             continue;
         c = reserve(p, QGPU_LEN_SET_STATE);
@@ -1385,6 +1668,807 @@ static int writes_depth(PCtx *p)
     if (stencil_active(p) && (GLD_U32(g, GS_STENCIL_WMASK) & 0xFF))
         return 1;
     return GLD_U8(g, GS_DEPTH_TEST) && GLD_U8(g, GS_DEPTH_MASK);
+}
+
+
+/* ═════════════ chemin brut : la géométrie sur le GPU de l'hôte (v7) ═════════════
+ *
+ * Quand l'état courant est DANS LE DOMAINE, gldInitDispatch/gldUpdateDispatch
+ * rendent le bit 0 (docs/re/verification-tcl.md §3) : GLEngine cesse de
+ * transformer, d'éclairer, de découper et d'éliminer les faces, et remet les
+ * attributs BRUTS (coordonnées d'objet) dans le tampon que BeginPrimitiveBuffer
+ * lui donne, à la disposition du descripteur publié en cfg+0x11c
+ * (docs/re/descripteur-de-sommet.md). Hors domaine, on rend le retour d'Apple
+ * tel quel et GLEngine reprend tout le travail : le repli est exact.
+ *
+ * Deux principes tiennent tout le reste :
+ *
+ *   — ZÉRO COPIE. Le descripteur est choisi pour que la disposition de GLEngine
+ *     SOIT celle de DRAW_RAW (position4, normale3, couleur4, brouillard1,
+ *     coordonnées de texture 4 par unité, dans l'ordre fixe du protocole), et
+ *     BeginPrimitiveBuffer rend un pointeur DANS la fenêtre partagée, à
+ *     VTX_OFF + G.vtx. EndPrimitiveBuffer n'a plus qu'à écrire dix mots.
+ *
+ *   — UN SEUL PRÉDICAT. geom_ok() décide du domaine, et il est appelé aux DEUX
+ *     endroits : au dispatch (où l'on peut encore refuser) et à
+ *     BeginPrimitiveBuffer (où l'on ne peut plus : rendre 0 ferait écrire
+ *     GLEngine à l'adresse nulle). S'il est vrai au dispatch et faux à Begin,
+ *     c'est que l'état a bougé sans passer par gldUpdateDispatch : on compte le
+ *     cas (« brut:etat-tardif ») et on quitte le domaine pour de bon. Ce
+ *     compteur DOIT rester à zéro ; c'est la garantie d'exactitude.
+ *
+ * Tout ce qui peut échouer (téléversement de texture, place dans le flux, dans
+ * la zone des sommets) est fait à Begin, AVANT que GLEngine écrive quoi que ce
+ * soit — jamais à End.
+ */
+
+#define GS_LOW           0x360      /* gctx = GS − 0x360 */
+#define GC_VTX_DESC      0x48d0     /* descripteur retenu par GLEngine */
+#define GC_VTX_STRIDE    0x4880     /* u16 : pas d'un sommet, en octets */
+#define GEOM_MAX_MERGE   16384      /* sommets d'une série fusionnée */
+#define GEOM_MAX_SLOTS   8192       /* sommets offerts à un BeginPrimitiveBuffer */
+#define GEOM_MIN_SLOTS   512        /* en dessous, on vide le flux avant Begin */
+
+/* Tampon de secours : rendu à GLEngine quand on doit refuser une primitive.
+ * BeginPrimitiveBuffer ne peut PAS rendre 0 (écriture à l'adresse nulle). */
+static unsigned char geom_scratch[64 * 1024];
+
+static unsigned long fbits(float f)
+{
+    union { float f; unsigned long u; } v;
+    v.f = f;
+    return v.u;
+}
+
+/* Recopie n flottants dans des mots de commande, en bornant ce que le cœur
+ * refuse (NaN, infini, |v| > 1e9) : un seul mot fautif ferait rejeter toute la
+ * soumission, donc on préfère une valeur nulle à un flux perdu. */
+static void put_f(unsigned long *dst, const float *src, int n)
+{
+    int i;
+    for (i = 0; i < n; i++) {
+        float v = src[i];
+        if (!(v > -1e9f && v < 1e9f))
+            v = (v > 0.0f) ? 1e9f : (v < 0.0f) ? -1e9f : 0.0f;
+        dst[i] = fbits(v);
+    }
+}
+
+static unsigned char *gctx_of(PCtx *p)
+{
+    unsigned char *g = gls(p);
+    return g ? g - GS_LOW : 0;
+}
+
+/* POMPPC_GL_GEOM : 0 coupé, 1 activé (défaut), 2 activé avec un format de
+ * sommet fixe et large (pour mesurer le coût de la republication). */
+static int geom_switch(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("POMPPC_GL_GEOM");
+        v = (e && *e) ? atoi(e) : 1;
+        if (v < 0)
+            v = 0;
+    }
+    return v;
+}
+
+/* Le bloc source a-t-il bougé depuis le dernier envoi ? C'est le test chaud :
+ * il tourne à chaque BeginPrimitiveBuffer, et Marble Blast en fait un millier
+ * par image. On compare les octets de GLEngine, sans rien fabriquer. */
+static int changed(PCtx *p, const void *src, void *cache, unsigned long n)
+{
+    if (p->g_sent && !memcmp(cache, src, n))
+        return 0;
+    memcpy(cache, src, n);
+    return 1;
+}
+
+/* Émet une commande dont les arguments viennent d'être construits. */
+static void send_cmd(PCtx *p, unsigned long op, unsigned long len,
+                     const unsigned long *args)
+{
+    unsigned long *c = reserve(p, len);
+    c[0] = QGPU_CMD_HDR(op, len);
+    memcpy(c + 1, args, (len - 1) * sizeof(*args));
+    G.n_geomcmds++;
+}
+
+/* ─────────────────────────── domaine du chemin brut ─────────────────────────── */
+
+/* L'unité u portera-t-elle une texture sur l'hôte ? (Même verdict que
+ * texture_unit_ok, sans téléversement : il faut pouvoir répondre au dispatch.) */
+static int unit_textured(PCtx *p, int u)
+{
+    unsigned long mask;
+    void *dt;
+    PTex *t;
+    unsigned char *lv;
+
+    if (!GLD_U8(p->ctx, CTX_TEXTURING))
+        return 0;
+    dt = unit_drvtex(p, u, &mask);
+    t = dt ? find_tex(dt) : 0;
+    if (!t)
+        return 0;
+    lv = (unsigned char *)t->drvtex + DT_LEVEL0;
+    return S16(lv, LV_W) != 0 && GLD_U32(lv, LV_DATA) != 0;
+}
+
+/* Le texturage courant tiendra-t-il sur l'hôte ? Prédicat pur (aucune commande,
+ * aucune conversion) : c'est la moitié chère du domaine, appelée à chaque
+ * changement d'état, d'où le raccourci « déjà téléversée et propre ». */
+static int geom_texture_ok(PCtx *p)
+{
+    unsigned char *g = gls(p);
+    int u, i;
+
+    if (!GLD_U8(p->ctx, CTX_TEXTURING))
+        return 1;
+    for (i = QGPU_MAX_UNITS; i < GL_MAX_TEXUNITS; i++)
+        if (GLD_U32(g, GS_TEXUNIT0 + i * GS_TEXUNIT_SIZE + TU_ENABLE) & 0x1f)
+            return no(NO_TEX_UNITS, i, 0);
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        unsigned char *us = g + GS_TEXUNIT0 + u * GS_TEXUNIT_SIZE;
+        unsigned long mask, env = U16(us, TU_ENV_MODE);
+        TexUnit tu;
+        void *dt = unit_drvtex(p, u, &mask);
+        PTex *t;
+        unsigned char *lv;
+        if (!mask)
+            continue;
+        if (mask & 0x7)
+            return no(NO_TEX_TARGET, mask, GLD_U32(p->ctx, CTX_TEXUNITS));
+        if (env != 0x2100 && env != 0x2101 && env != 0x0BE2 && env != 0x1E01 &&
+            env != 0x0104 && env != 0x8570)
+            return no(NO_TEX_ENV, env, u);
+        if (env == 0x8570 && !combine_ok(us, u, &tu))
+            return 0;
+        t = dt ? find_tex(dt) : 0;
+        if (!t)
+            return no(NO_TEX_UNKNOWN, (unsigned long)dt, mask);
+        lv = (unsigned char *)t->drvtex + DT_LEVEL0;
+        if (!S16(lv, LV_W) || !GLD_U32(lv, LV_DATA))
+            continue;                   /* incomplète : l'unité est coupée, comme en GL */
+        if (!texture_uploadable(t))
+            return 0;
+    }
+    return 1;
+}
+
+/* L'état courant peut-il partir en géométrie brute ? */
+static int geom_ok(PCtx *p)
+{
+    unsigned char *g;
+    const float *att;
+
+    if (!G.v7 || G.state <= 0 || p->broken || p->geom_lost || p->qctx < 0 || !p->cfg)
+        return 0;
+    if (!accel_ok_for(p, 1))
+        return 0;
+    g = gls(p);
+    /* Rastérisation que la v7 ne porte pas. Au dispatch on ne sait pas encore
+       quelle primitive viendra : le pointillé de ligne, le lissage et la taille
+       de point atténuée sortent du domaine quoi qu'il arrive. */
+    if (GLD_U8(g, GS_LINE_STIPPLE) || GLD_U8(g, GS_LINE_SMOOTH) ||
+        GLD_U8(g, GS_POINT_SMOOTH))
+        return no(NO_G_RASTER, (GLD_U8(g, GS_LINE_STIPPLE) << 8) | GLD_U8(g, GS_LINE_SMOOTH),
+                  GLD_U8(g, GS_POINT_SMOOTH));
+    att = (const float *)(g + GS_POINT_ATT);
+    if (att[0] != 1.0f || att[1] != 0.0f || att[2] != 0.0f)
+        return no(NO_G_POINT, fbits(att[1]), fbits(att[2]));
+    /* Le mot gctx+0x4e1c dit quel étage de sommets GLEngine emploie : c'est la
+       condition que _gleBuildVertexFuncNO (0x1d318) teste lui-même avant de
+       lire notre descripteur. Autre chose que 0x1c00 (pipeline fixe) — un
+       programme ARB de sommets, par exemple — et GLEngine nous enverrait son
+       sommet INTERNE, déjà transformé : à fuir. (GS+0x50c0 ne convient pas
+       comme sonde : il pointe toujours sur un objet, même sans programme lié.) */
+    {
+        unsigned char *gc = gctx_of(p);
+        if (!gc || GLD_U32(gc, 0x4e1c) != 0x1c00)
+            return no(NO_G_PROGRAM, gc ? GLD_U32(gc, 0x4e1c) : 0, 0);
+    }
+    if (!geom_texture_ok(p))
+        return 0;
+    return 1;
+}
+
+/* ─────────────────── format de sommet et descripteur GLEngine ─────────────────── */
+
+/* La normale sert-elle à autre chose qu'à l'éclairage ? Oui : GL_SPHERE_MAP,
+ * GL_NORMAL_MAP et GL_REFLECTION_MAP en partent. Sans ce test, le texgen d'une
+ * scène sans éclairage recevait la normale COURANTE, donc constante — et
+ * l'image entière de la case SPHERE_MAP était fausse (vu en vrai, scène
+ * « texgen » : écart 166/255 sur toute la case). */
+static int texgen_needs_normal(PCtx *p, int u)
+{
+    const unsigned char *tg = gls(p) + GS_TEXGEN(u);
+    int c;
+    for (c = 0; c < 4; c++) {
+        unsigned long m = U16(tg + TG_COORD(c), TG_MODE);
+        if (GLD_U8(tg, TG_ENABLE + c) &&
+            (m == 0x2402 || m == 0x8511 || m == 0x8512))
+            return 1;
+    }
+    return 0;
+}
+
+static unsigned long geom_format(PCtx *p)
+{
+    unsigned char *g = gls(p);
+    unsigned long fmt = QGPU_VF_POS(4);
+    int u, lighting = GLD_U8(g, GS_LIGHTING) != 0, normal = lighting;
+
+    /* La couleur ne sert que si elle atteint la sortie : éclairage éteint, ou
+       allumé avec GL_COLOR_MATERIAL. Quatre mots de moins par sommet sinon. */
+    if (!lighting || GLD_U8(g, GS_COLOR_MATERIAL))
+        fmt |= QGPU_VF_COLOR;
+    /* La coordonnée de brouillard n'est portée QUE si c'est bien elle la source :
+       la présence du bit dit à l'hôte de poser GL_FOG_COORDINATE. */
+    if (GLD_U8(g, GS_FOG) && U16(g, GS_FOG_COORD_SRC) == 0x8451)
+        fmt |= QGPU_VF_FOG;
+    for (u = 0; u < QGPU_MAX_UNITS; u++)
+        if (unit_textured(p, u)) {
+            fmt |= QGPU_VF_TEX(u);
+            if (texgen_needs_normal(p, u))
+                normal = 1;
+        }
+    if (normal)
+        fmt |= QGPU_VF_NORMAL;
+    if (geom_switch() >= 2) {           /* format fixe et large : mesure */
+        fmt |= QGPU_VF_NORMAL | QGPU_VF_COLOR |
+               QGPU_VF_TEX(0) | QGPU_VF_TEX(1) | QGPU_VF_TEX(2) | QGPU_VF_TEX(3);
+    }
+    return fmt;
+}
+
+/* Une entrée du descripteur : (code << 10) | ((composantes − 1) << 8) | mot.
+ * Les codes sont les indices d'attribut d'entrée de GLEngine
+ * (docs/re/descripteur-de-sommet.md §4) ; le code 6 plante, on ne le demande
+ * jamais. Les décalages sont choisis pour reproduire EXACTEMENT l'ordre fixe
+ * de DRAW_RAW : c'est ce qui rend la recopie inutile. */
+#define DESC_ENT(code, off, nc) \
+    ((unsigned short)(((code) << 10) | (((nc) - 1) << 8) | ((off) & 0xff)))
+
+/* (Re)construit le descripteur pour l'état courant ; 1 s'il a changé. */
+static int geom_publish(PCtx *p)
+{
+    unsigned long fmt = geom_format(p);
+    unsigned short ent[8];
+    unsigned long off = 0;
+    int n = 0, u;
+
+    /* Republier n'a de sens que si le format change, OU si GLEngine n'a pas
+       encore notre descripteur (cfg+0x11c remis à zéro à la création). */
+    if (fmt == p->geom_fmt && GLD_U32(p->cfg, 0x11c) == (unsigned long)p->desc)
+        return 0;
+    ent[n++] = DESC_ENT(0, off, 4); off += 4;                 /* position */
+    if (fmt & QGPU_VF_NORMAL) { ent[n++] = DESC_ENT(1, off, 3); off += 3; }
+    if (fmt & QGPU_VF_COLOR)  { ent[n++] = DESC_ENT(2, off, 4); off += 4; }
+    if (fmt & QGPU_VF_FOG)    { ent[n++] = DESC_ENT(3, off, 1); off += 1; }
+    for (u = 0; u < QGPU_MAX_UNITS; u++)
+        if (fmt & QGPU_VF_TEX(u)) { ent[n++] = DESC_ENT(8 + u, off, 4); off += 4; }
+    memset(p->desc, 0, sizeof(p->desc));
+    ((unsigned char *)p->desc)[0] = (unsigned char)n;
+    ((unsigned char *)p->desc)[2] = (unsigned char)off;       /* pas, en mots */
+    for (u = 0; u < n; u++)
+        ((unsigned short *)p->desc)[2 + u] = ent[u];
+    p->geom_fmt = fmt;
+    p->geom_words = off;
+    GLD_U32(p->cfg, 0x11c) = (unsigned long)p->desc;
+    return 1;
+}
+
+/* ─────────────────── l'état géométrique, et seulement ce qui change ─────────────────── */
+
+/* Un flottant que le cœur acceptera : il refuse NaN, infini et |v| >= 1e9, et
+ * une seule clé fautive ferait rejeter toute la soumission. */
+static unsigned long safe_f(float v, float def)
+{
+    return fbits((v > -1e9f && v < 1e9f) ? v : def);
+}
+
+static void compute_geom_state(PCtx *p, unsigned long *v)
+{
+    unsigned char *g = gls(p);
+    unsigned long cf = U16(g, GS_COLORMAT_FACE), cm = U16(g, GS_COLORMAT_MODE);
+    unsigned long cull = U16(g, GS_CULL_MODE), fog = U16(g, GS_FOG_MODE);
+    float dens = GLD_F32(g, GS_FOG_DENSITY);
+
+    v[QGPU_SK_LIGHTING] = GLD_U8(g, GS_LIGHTING) != 0;
+    v[QGPU_SK_NORMALIZE] = GLD_U8(g, GS_NORMALIZE) != 0;
+    v[QGPU_SK_RESCALE_NORMAL] = GLD_U8(g, GS_RESCALE_NORMAL) != 0;
+    v[QGPU_SK_SHADE_MODEL] = GLD_U32(g, GS_SHADE_MODEL) == GL_FLAT ? 0x1D00 : 0x1D01;
+    v[QGPU_SK_CULL_FACE] = GLD_U8(g, GS_CULL_FACE) != 0;
+    v[QGPU_SK_CULL_MODE] = (cull == 0x0404 || cull == 0x0405 || cull == 0x0408) ? cull : 0x0405;
+    v[QGPU_SK_FRONT_FACE] = U16(g, GS_FRONT_FACE) == 0x0900 ? 0x0900 : 0x0901;
+    v[QGPU_SK_COLOR_MATERIAL] = GLD_U8(g, GS_COLOR_MATERIAL) != 0;
+    v[QGPU_SK_COLOR_MAT_FACE] = (cf == 0x0404 || cf == 0x0405 || cf == 0x0408) ? cf : 0x0408;
+    v[QGPU_SK_COLOR_MAT_MODE] =
+        (cm == 0x1600 || cm == 0x1200 || cm == 0x1201 || cm == 0x1202 || cm == 0x1602)
+        ? cm : 0x1602;
+    v[QGPU_SK_LOCAL_VIEWER] = GLD_U8(g, GS_LOCAL_VIEWER) != 0;
+    v[QGPU_SK_TWO_SIDE] = GLD_U8(g, GS_TWO_SIDE) != 0;
+    v[QGPU_SK_COLOR_CONTROL] = U16(g, GS_COLOR_CONTROL) == 0x81FA ? 0x81FA : 0x81F9;
+    /* Brouillard : l'hôte le calcule pour DRAW_RAW, par fragment. Les opcodes de
+       dessin v1–v6 ignorent ce mode et gardent le facteur par sommet que
+       GLEngine leur donne — les deux chemins peuvent donc cohabiter dans la
+       même image sans que l'un dérègle l'autre. */
+    v[QGPU_SK_FOG_MODE] = (fog == 0x0800 || fog == 0x0801 || fog == 0x2601)
+                          ? fog : QGPU_FOG_VERTEX;
+    v[QGPU_SK_FOG_DENSITY] = fbits(dens >= 0.0f && dens < 1e9f ? dens : 1.0f);
+    v[QGPU_SK_FOG_START] = safe_f(GLD_F32(g, GS_FOG_START), 0.0f);
+    v[QGPU_SK_FOG_END] = safe_f(GLD_F32(g, GS_FOG_END), 1.0f);
+}
+
+/* Le seuil de spot est rangé par GLEngine en COSINUS (< 0 = pas un spot) ;
+ * le protocole veut l'ANGLE en degrés, 0..90 ou exactement 180. */
+static float spot_cutoff_deg(float c)
+{
+    double a;
+    if (!(c >= 0.0f))
+        return 180.0f;
+    if (c > 1.0f)
+        c = 1.0f;
+    a = acos((double)c) * (180.0 / 3.14159265358979323846);
+    if (a < 0.0)
+        a = 0.0;
+    if (a > 90.0)
+        a = 90.0;
+    return (float)a;
+}
+
+static void geom_send_matrices(PCtx *p, unsigned long fmt)
+{
+    unsigned char *g = gls(p);
+    unsigned long a[QGPU_LEN_SET_MATRIX - 1];
+    int u;
+
+    /* Comparer les 64 octets de la matrice coûte moins que d'exploiter le
+       masque « matrice modifiée » (GS+0x4d48), qui ne dit rien des matrices de
+       texture d'une unité qui vient de s'allumer. */
+    if (changed(p, g + GS_MAT_MODELVIEW, p->c_mtx[QGPU_MTX_MODELVIEW], 64)) {
+        a[0] = QGPU_MTX_MODELVIEW;
+        put_f(a + 1, (const float *)(g + GS_MAT_MODELVIEW), 16);
+        send_cmd(p, QGPU_OP_SET_MATRIX, QGPU_LEN_SET_MATRIX, a);
+    }
+    if (changed(p, g + GS_MAT_PROJ, p->c_mtx[QGPU_MTX_PROJECTION], 64)) {
+        a[0] = QGPU_MTX_PROJECTION;
+        put_f(a + 1, (const float *)(g + GS_MAT_PROJ), 16);
+        send_cmd(p, QGPU_OP_SET_MATRIX, QGPU_LEN_SET_MATRIX, a);
+    }
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        if (!(fmt & QGPU_VF_TEX(u)))
+            continue;
+        if (!changed(p, g + GS_MAT_TEXTURE(u), p->c_mtx[QGPU_MTX_TEXTURE0 + u], 64))
+            continue;
+        a[0] = QGPU_MTX_TEXTURE0 + u;
+        put_f(a + 1, (const float *)(g + GS_MAT_TEXTURE(u)), 16);
+        send_cmd(p, QGPU_OP_SET_MATRIX, QGPU_LEN_SET_MATRIX, a);
+    }
+}
+
+static void geom_send_lights(PCtx *p)
+{
+    unsigned char *g = gls(p);
+    unsigned long mask = GLD_U32(g, GS_LIGHT_MASK);
+    unsigned long a[QGPU_LEN_SET_LIGHT - 1];
+    unsigned long m[QGPU_LEN_SET_MATERIAL - 1];
+    int i, f, remask = !p->g_sent || mask != p->c_lmask;
+    float v;
+
+    p->c_lmask = mask;
+    /* [i, actif, ambiante4, diffuse4, spéculaire4, position4, spot3, exposant,
+       coupure, atténuations3] — 26 mots, la plus longue commande du protocole. */
+    for (i = 0; i < QGPU_MAX_LIGHTS; i++) {
+        const unsigned char *l = g + GS_LIGHT(i);
+        int on = (mask >> i) & 1;
+        int moved = changed(p, l, p->c_light[i], 0x60);
+        if (!moved && !remask)
+            continue;
+        if (!on && !remask)
+            continue;                   /* éteinte et déjà éteinte sur le device */
+        a[0] = (unsigned long)i;
+        a[1] = (unsigned long)on;
+        put_f(a + 2, (const float *)(l + LT_AMBIENT), 4);
+        put_f(a + 6, (const float *)(l + LT_DIFFUSE), 4);
+        put_f(a + 10, (const float *)(l + LT_SPECULAR), 4);
+        /* Position et direction de spot sont DÉJÀ en coordonnées œil (GLEngine
+           les y met au moment de glLight) et le protocole les attend ainsi :
+           on recopie, on ne retransforme pas. */
+        put_f(a + 14, (const float *)(l + LT_POSITION), 4);
+        put_f(a + 18, (const float *)(l + LT_SPOT_DIR), 3);
+        v = GLD_F32(l, LT_SPOT_EXP);
+        if (!(v >= 0.0f)) v = 0.0f;
+        if (v > 128.0f) v = 128.0f;
+        a[21] = fbits(v);
+        a[22] = fbits(spot_cutoff_deg(GLD_F32(l, LT_SPOT_COS)));
+        v = GLD_F32(l, LT_ATT_CONST);  a[23] = fbits(v >= 0.0f && v < 1e9f ? v : 1.0f);
+        v = GLD_F32(l, LT_ATT_LINEAR); a[24] = fbits(v >= 0.0f && v < 1e9f ? v : 0.0f);
+        v = GLD_F32(l, LT_ATT_QUAD);   a[25] = fbits(v >= 0.0f && v < 1e9f ? v : 0.0f);
+        send_cmd(p, QGPU_OP_SET_LIGHT, QGPU_LEN_SET_LIGHT, a);
+    }
+    /* GL_COLOR_MATERIAL : GLEngine a DÉJÀ écrasé les composantes suivies avec la
+       couleur courante dans l'objet matériau (docs/re/etat-tcl.md §2.1). On lit
+       donc l'objet tel quel, et la clé QGPU_SK_COLOR_MATERIAL dit à l'hôte de
+       refaire le suivi par sommet. */
+    for (f = 0; f < 2; f++) {
+        const unsigned char *mt = g + (f ? GS_MATERIAL_BACK : GS_MATERIAL_FRONT);
+        if (!changed(p, mt, p->c_mat[f], 0x44))
+            continue;
+        m[0] = f ? 0x0405UL : 0x0404UL; /* GL_BACK / GL_FRONT */
+        put_f(m + 1, (const float *)(mt + MT_AMBIENT), 4);
+        put_f(m + 5, (const float *)(mt + MT_DIFFUSE), 4);
+        put_f(m + 9, (const float *)(mt + MT_SPECULAR), 4);
+        put_f(m + 13, (const float *)(mt + MT_EMISSION), 4);
+        v = GLD_F32(mt, MT_SHININESS);
+        if (!(v >= 0.0f)) v = 0.0f;
+        if (v > 128.0f) v = 128.0f;
+        m[17] = fbits(v);
+        send_cmd(p, QGPU_OP_SET_MATERIAL, QGPU_LEN_SET_MATERIAL, m);
+    }
+    if (changed(p, g + GS_SCENE_AMBIENT, p->c_lm, 16)) {
+        unsigned long lm[QGPU_LEN_SET_LIGHT_MODEL - 1];
+        put_f(lm, (const float *)(g + GS_SCENE_AMBIENT), 4);
+        send_cmd(p, QGPU_OP_SET_LIGHT_MODEL, QGPU_LEN_SET_LIGHT_MODEL, lm);
+    }
+}
+
+static void geom_send_texgen(PCtx *p, unsigned long fmt)
+{
+    unsigned char *g = gls(p);
+    unsigned long a[QGPU_LEN_SET_TEXGEN - 1];
+    int u, c;
+
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        const unsigned char *tg = g + GS_TEXGEN(u);
+        if (!(fmt & QGPU_VF_TEX(u)))
+            continue;
+        /* Le bloc d'une unité (0x94 octets) porte les modes, les deux plans et
+           les quatre activations : un seul memcmp couvre les quatre coordonnées. */
+        if (!changed(p, tg, p->c_tg[u], 0x94))
+            continue;
+        for (c = 0; c < 4; c++) {
+            const unsigned char *co = tg + TG_COORD(c);
+            unsigned long mode = U16(co, TG_MODE);
+            int on = GLD_U8(tg, TG_ENABLE + c) != 0;
+            /* Le cœur refuse SPHERE_MAP hors de S,T et NORMAL/REFLECTION_MAP sur
+               Q : un état impossible en GL, mais une soumission refusée ferait
+               perdre toute l'image. On retombe sur EYE_LINEAR. */
+            if (mode != 0x2400 && mode != 0x2401 && mode != 0x2402 &&
+                mode != 0x8511 && mode != 0x8512)
+                mode = 0x2400;
+            if ((mode == 0x2402 && c > 1) || ((mode == 0x8511 || mode == 0x8512) && c > 2))
+                mode = 0x2400;
+            a[0] = u; a[1] = c; a[2] = on; a[3] = mode;
+            put_f(a + 4, (const float *)(co + TG_OBJ_PLANE), 4);
+            /* le plan œil est déjà transformé par GLEngine : recopie */
+            put_f(a + 8, (const float *)(co + TG_EYE_PLANE), 4);
+            send_cmd(p, QGPU_OP_SET_TEXGEN, QGPU_LEN_SET_TEXGEN, a);
+        }
+    }
+}
+
+static void geom_send_clip(PCtx *p)
+{
+    unsigned char *g = gls(p);
+    unsigned long mask;
+    unsigned long a[QGPU_LEN_SET_CLIP_PLANE - 1];
+    int i;
+
+    /* masque et six plans sont contigus (0x3e28 puis 0x3e2c) : un seul memcmp */
+    if (!changed(p, g + GS_CLIP_MASK, p->c_clip, 4 + QGPU_MAX_CLIP_PLANES * 16))
+        return;
+    mask = GLD_U32(g, GS_CLIP_MASK);
+    for (i = 0; i < QGPU_MAX_CLIP_PLANES; i++) {
+        a[0] = i;
+        a[1] = (mask >> i) & 1;
+        put_f(a + 2, (const float *)(g + GS_CLIP_PLANE(i)), 4);
+        send_cmd(p, QGPU_OP_SET_CLIP_PLANE, QGPU_LEN_SET_CLIP_PLANE, a);
+    }
+}
+
+/* Les attributs que le format de sommet n'emporte pas : l'hôte prend la valeur
+ * courante, exactement comme glColor / glNormal hors glBegin. Elles vivent
+ * AVANT le bloc d'état (gctx + x), docs/re/etat-tcl.md §2.2. */
+static void geom_send_current(PCtx *p, unsigned long fmt)
+{
+    unsigned char *g = gls(p);
+    unsigned long a[QGPU_LEN_SET_CURRENT - 1];
+
+    memset(a, 0, sizeof(a));
+    if (!(fmt & QGPU_VF_COLOR) && changed(p, g + GS_CUR_COLOR, p->c_cur[0], 16)) {
+        a[0] = QGPU_CUR_COLOR;
+        put_f(a + 1, (const float *)(g + GS_CUR_COLOR), 4);
+        send_cmd(p, QGPU_OP_SET_CURRENT, QGPU_LEN_SET_CURRENT, a);
+    }
+    if (!(fmt & QGPU_VF_NORMAL) && changed(p, g + GS_CUR_NORMAL, p->c_cur[1], 12)) {
+        a[0] = QGPU_CUR_NORMAL;
+        put_f(a + 1, (const float *)(g + GS_CUR_NORMAL), 3);
+        a[4] = 0;
+        send_cmd(p, QGPU_OP_SET_CURRENT, QGPU_LEN_SET_CURRENT, a);
+    }
+    /* La couleur secondaire n'est jamais portée par le sommet : la mettre dans
+       le format ferait allumer GL_COLOR_SUM sur l'hôte, ce que l'état GL ne dit
+       pas. Elle passe donc toujours en valeur courante. */
+    if (changed(p, g + GS_CUR_SECCOLOR, p->c_cur[2], 12)) {
+        a[0] = QGPU_CUR_SEC_COLOR;
+        put_f(a + 1, (const float *)(g + GS_CUR_SECCOLOR), 3);
+        a[4] = 0;
+        send_cmd(p, QGPU_OP_SET_CURRENT, QGPU_LEN_SET_CURRENT, a);
+    }
+    if (!(fmt & QGPU_VF_FOG) && changed(p, g + GS_CUR_FOGCOORD, p->c_cur[3], 4)) {
+        a[0] = QGPU_CUR_FOG;
+        put_f(a + 1, (const float *)(g + GS_CUR_FOGCOORD), 1);
+        a[2] = a[3] = a[4] = 0;
+        send_cmd(p, QGPU_OP_SET_CURRENT, QGPU_LEN_SET_CURRENT, a);
+    }
+    /* Les coordonnées de texture, elles, sont TOUJOURS dans le format dès que
+       l'unité porte une texture : l'hôte n'a jamais à prendre leur valeur
+       courante. (Une unité sans texture est coupée, il ne s'y passe rien.) */
+}
+
+static void geom_send_viewport(PCtx *p)
+{
+    unsigned char *g = gls(p);
+    unsigned long a[QGPU_LEN_VIEWPORT - 1];
+    unsigned long d[QGPU_LEN_DEPTH_RANGE - 1];
+
+    /* GS+0x1840 est le viewport GL tel quel : origine en BAS à gauche, ce que
+       DRAW_RAW attend (la couture avec le repère de surface est faite par
+       l'hôte, protocole v7 §1). */
+    if (changed(p, g + GS_VIEWPORT, p->c_vp, 16)) {
+        a[0] = (unsigned long)I32(g, GS_VIEWPORT);
+        a[1] = (unsigned long)I32(g, GS_VIEWPORT + 4);
+        a[2] = (unsigned long)I32(g, GS_VIEWPORT + 8);
+        a[3] = (unsigned long)I32(g, GS_VIEWPORT + 12);
+        if ((long)a[2] < 0) a[2] = 0;
+        if ((long)a[3] < 0) a[3] = 0;
+        send_cmd(p, QGPU_OP_VIEWPORT, QGPU_LEN_VIEWPORT, a);
+    }
+    if (changed(p, g + GS_DEPTH_NEAR_F, p->c_dr, 8)) {
+        d[0] = fbits(clamp01(GLD_F32(g, GS_DEPTH_NEAR_F)));
+        d[1] = fbits(clamp01(GLD_F32(g, GS_DEPTH_NEAR_F + 4)));
+        send_cmd(p, QGPU_OP_DEPTH_RANGE, QGPU_LEN_DEPTH_RANGE, d);
+    }
+}
+
+/* Tout l'état géométrique, en n'envoyant que ce qui a changé. */
+static void geom_send_all(PCtx *p, unsigned long fmt)
+{
+    geom_send_viewport(p);
+    geom_send_matrices(p, fmt);
+    if (GLD_U8(gls(p), GS_LIGHTING))
+        geom_send_lights(p);
+    geom_send_texgen(p, fmt);
+    geom_send_clip(p);
+    geom_send_current(p, fmt);
+    p->g_sent = 1;
+}
+
+/* ─────────────────────── les deux procédures de GLEngine ─────────────────────── */
+
+/* Combien de sommets peut-on offrir pour un pas de `words` mots ?
+ * Plus on en offre, plus GLEngine groupe : la scène « lit » passe de lots de
+ * 192 (son ancien plafond, imposé par le tampon du pilote Rage 128) à un lot
+ * par glBegin. POMPPC_GL_GEOM_SLOTS force un petit plafond : c'est ce qui a
+ * servi à établir comment GLEngine coupe une bande de 1000 sommets. */
+static unsigned long geom_slots(unsigned long words)
+{
+    static long cap = -1;
+    unsigned long avail = VTX_END - (VTX_OFF + G.vtx);
+    unsigned long n = avail / (words * 4);
+    if (cap < 0) {
+        const char *e = getenv("POMPPC_GL_GEOM_SLOTS");
+        cap = (e && *e) ? atol(e) : GEOM_MAX_SLOTS;
+        if (cap < 4 || cap > GEOM_MAX_SLOTS)
+            cap = GEOM_MAX_SLOTS;
+    }
+    return n > (unsigned long)cap ? (unsigned long)cap : n;
+}
+
+/* +0x50 BeginPrimitiveBuffer(ctx, mode, &n) -> tampon où écrire les sommets.
+ * Rendre 0 est INTERDIT (GLEngine écrirait à l'adresse nulle) : quand on doit
+ * refuser, on rend un tampon de secours et on jette la primitive. */
+static void *geom_begin(void *ctx, short mode, unsigned long *n)
+{
+    PCtx *p;
+    TexInfo ti;
+    unsigned char *gc;
+    unsigned long words, slots;
+
+    pthread_mutex_lock(&G.mu);
+    G.pend = 0;
+    G.pend_drop = 1;
+    p = find_ctx(ctx);
+    if (!p || !geom_ok(p) || !ensure_surface(p) || !texture_ok(p, &ti)) {
+        if (p) {
+            no(NO_G_LATE, (unsigned long)(unsigned short)mode, p->geom_on);
+            p->geom_lost = 1;           /* exact à partir du prochain dispatch */
+            G.n_geomdrop++;
+        }
+        goto refuse;
+    }
+    /* Ce que GLEngine a VRAIMENT retenu : si le pas ou le descripteur ne sont
+       pas les nôtres, c'est son sommet interne (déjà transformé) qui arrive —
+       le lire comme de la géométrie brute donnerait n'importe quoi. */
+    gc = gctx_of(p);
+    words = p->geom_words;
+    if (!gc || !words || GLD_U16(gc, GC_VTX_STRIDE) != words * 4 ||
+        GLD_U32(gc, GC_VTX_DESC) != (unsigned long)p->desc) {
+        no(NO_G_STRIDE, gc ? GLD_U16(gc, GC_VTX_STRIDE) : 0, words * 4);
+        p->geom_lost = 1;
+        G.n_geomdrop++;
+        goto refuse;
+    }
+    check_draw_buffer(p);
+    sync_to_host(p, 1, GLD_U8(gls(p), GS_DEPTH_TEST) || stencil_active(p));
+    send_state(p, &ti);
+    geom_send_all(p, p->geom_fmt);
+    /* Plus aucun vidage entre ici et EndPrimitiveBuffer : GLEngine écrit dans
+       la fenêtre partagée pendant ce temps. On fait donc la place maintenant. */
+    if (G.ncmd + QGPU_LEN_DRAW_RAW + 4 > CMD_WORDS || geom_slots(words) < GEOM_MIN_SLOTS)
+        flush();
+    slots = geom_slots(words);
+    if (slots < 4)
+        goto refuse;                    /* ne devrait pas arriver : 4 Mio de sommets */
+    G.pend = p;
+    G.pend_off = G.vtx;
+    G.pend_words = words;
+    G.pend_fmt = p->geom_fmt;
+    G.pend_slots = slots;
+    G.pend_drop = 0;
+    /* la zone est prise tout de suite : un autre fil ne doit pas la réutiliser */
+    G.vtx += slots * words * 4;
+    if (n)
+        *n = slots;
+    pthread_mutex_unlock(&G.mu);
+    return G.q.win + VTX_OFF + G.pend_off;
+
+refuse:
+    {
+        unsigned long st = (p && p->geom_words) ? p->geom_words * 4 : GLD_VERTEX_SIZE;
+        unsigned long ns = sizeof(geom_scratch) / st;
+        if (ns > 1024)
+            ns = 1024;
+        if (n)
+            *n = ns;
+    }
+    pthread_mutex_unlock(&G.mu);
+    return geom_scratch;
+}
+
+/* Un mode dont deux lots consécutifs se recollent bout à bout sans changer le
+ * dessin : les primitives indépendantes. Une bande, un éventail, un polygone ou
+ * une boucle ne se fusionnent pas. */
+static int mode_mergeable(unsigned long m)
+{
+    return m == QGPU_PRIM_MODE_POINTS || m == QGPU_PRIM_MODE_LINES ||
+           m == QGPU_PRIM_MODE_TRIANGLES || m == QGPU_PRIM_MODE_QUADS;
+}
+
+/* +0x54 EndPrimitiveBuffer(ctx, drapeau, mode, n) : GLEngine a écrit n sommets
+ * dans le tampon rendu par +0x50. Il n'y a plus rien qui puisse échouer ici. */
+static void geom_end(void *ctx, long flag, short mode, long n)
+{
+    PCtx *p;
+    unsigned long m = (unsigned long)(unsigned short)mode;
+    unsigned long words;
+
+    (void)flag;
+    pthread_mutex_lock(&G.mu);
+    p = find_ctx(ctx);
+    if (!G.pend || G.pend != p || G.pend_drop) {
+        G.pend = 0;
+        pthread_mutex_unlock(&G.mu);
+        return;
+    }
+    if (n <= 0 || (unsigned long)n > G.pend_slots || m > QGPU_PRIM_MODE_POLYGON) {
+        if (n > 0) {                    /* GLEngine a écrit hors de ce qu'on offrait */
+            no(NO_G_LATE, m, (unsigned long)n);
+            G.n_geomdrop++;
+            p->geom_lost = 1;
+        }
+        G.vtx = G.pend_off;             /* la place réservée est rendue */
+        G.pend = 0;
+        pthread_mutex_unlock(&G.mu);
+        return;
+    }
+    words = G.pend_words;
+    G.vtx = G.pend_off + (unsigned long)n * words * 4;
+    if (G.raw_ctx == p && G.raw_mode == m && G.raw_fmt == G.pend_fmt &&
+        G.raw_words == words && mode_mergeable(m) &&
+        G.raw_start + G.raw_count * words * 4 == G.pend_off &&
+        G.raw_count + (unsigned long)n <= GEOM_MAX_MERGE) {
+        G.raw_count += n;               /* même état, même mode, sommets contigus */
+    } else {
+        close_raw();
+        G.raw_ctx = p;
+        G.raw_start = G.pend_off;
+        G.raw_count = n;
+        G.raw_fmt = G.pend_fmt;
+        G.raw_words = words;
+        G.raw_mode = m;
+    }
+    G.n_rawverts += n;
+    switch (m) {                        /* triangles équivalents, pour le bilan */
+    case QGPU_PRIM_MODE_TRIANGLES:      G.n_tris += n / 3; break;
+    case QGPU_PRIM_MODE_TRIANGLE_STRIP:
+    case QGPU_PRIM_MODE_TRIANGLE_FAN:
+    case QGPU_PRIM_MODE_POLYGON:        G.n_tris += n > 2 ? n - 2 : 0; break;
+    case QGPU_PRIM_MODE_QUADS:          G.n_tris += (n / 4) * 2; break;
+    case QGPU_PRIM_MODE_QUAD_STRIP:     G.n_tris += n > 3 ? (n / 2 - 1) * 2 : 0; break;
+    case QGPU_PRIM_MODE_LINES:          G.n_lines += n / 2; break;
+    case QGPU_PRIM_MODE_LINE_STRIP:     G.n_lines += n - 1; break;
+    case QGPU_PRIM_MODE_LINE_LOOP:      G.n_lines += n; break;
+    default:                            G.n_points += n; break;
+    }
+    p->color = HOST_NEWER;
+    if (writes_depth(p))
+        p->depth = HOST_NEWER;
+    G.pend = 0;
+    pthread_mutex_unlock(&G.mu);
+}
+
+/* Procédure à installer dans la table de GLEngine, ou 0. */
+void *pomppc_geom_proc(int slot)
+{
+    if (!G.v7)
+        return 0;
+    switch (slot) {
+    case PROC_BeginPrimitiveBuffer: return (void *)geom_begin;
+    case PROC_EndPrimitiveBuffer:   return (void *)geom_end;
+    default:                        return 0;
+    }
+}
+
+/* Bits à ajouter au retour de gldInitDispatch / gldUpdateDispatch :
+ *   bit 0 : « le pilote fait la transformation et l'éclairage » ;
+ *   bit 1 : « refais le chemin » — sans lui, GLEngine compare (retour & 3) à
+ *           gctx+0x7580, trouve égal et saute tout le bloc, dont la relecture
+ *           de cfg+0x11c. Il n'est donc nécessaire que si le descripteur a
+ *           changé SANS que le verrou change. */
+long pomppc_geom_dispatch(void *ctx)
+{
+    PCtx *p;
+    long bits = 0;
+
+    if (!G.v7)
+        return 0;
+    pthread_mutex_lock(&G.mu);
+    p = find_ctx(ctx);
+    if (p && geom_ok(p)) {
+        if (geom_publish(p))
+            p->desc_dirty = 1;
+        bits = p->desc_dirty ? 3 : 1;
+        p->desc_dirty = 0;
+        p->geom_on = 1;
+    } else if (p) {
+        p->geom_on = 0;
+    }
+    pthread_mutex_unlock(&G.mu);
+    return bits;
+}
+
+/* Appelé par gldCreateContext, une fois le bloc de configuration rempli par le
+ * GLDriver d'Apple. cfg+0x79 = 1 donne au verrou sa valeur INITIALE ; comme
+ * gctx+0x48d0 est encore nul à ce moment-là, le premier dispatch doit porter le
+ * bit 1 pour que GLEngine aille lire le descripteur (d'où desc_dirty). */
+void pomppc_geom_context(void *ctx, void *cfg)
+{
+    PCtx *p;
+    if (!G.v7 || !cfg)
+        return;
+    pthread_mutex_lock(&G.mu);
+    p = find_ctx(ctx);
+    if (p) {
+        p->cfg = (unsigned char *)cfg;
+        p->desc_dirty = 1;
+        GLD_U8(p->cfg, 0x79) = 1;
+        GLD_U32(p->cfg, 0x11c) = 0;     /* publié au premier dispatch dans le domaine */
+    }
+    pthread_mutex_unlock(&G.mu);
 }
 
 /* ───────────────────────────── triangles ───────────────────────────── */
@@ -1526,7 +2610,9 @@ static void *fallback(PCtx *p, int slot, int writes_color, int touches_depth)
         check_draw_buffer(p);
         if (writes_color)
             p->color = SW_NEWER;
-        if (touches_depth && writes_depth(p))
+        /* Seulement si la profondeur de l'hôte a pu être relue : sinon elle
+           reste la référence (voir sync_to_sw_locked). */
+        if (touches_depth && writes_depth(p) && p->depth == SYNCED)
             p->depth = SW_NEWER;
         G.n_fallback++;
         fb_count[slot]++;
@@ -1760,8 +2846,10 @@ static long a_clear(void *ctx, long mask, long c, long d, long e, long f, long g
     real = (proc8)p->real[PROC_Clear];
     /* le stencil s'efface sur l'hôte quand le contexte en a un que l'on sait suivre */
     if ((mask & GL_STENCIL_BUFFER_BIT) && GLD_U32(p->ctx, CTX_STENCIL_BITS) == 8 &&
-        GLD_U32(p->ctx, CTX_DEPTH_BITS) == 32)
+        GLD_U32(p->ctx, CTX_DEPTH_BITS) == 32) {
         host |= GL_STENCIL_BUFFER_BIT;
+        p->sten_used = 1;
+    }
     rest = mask & ~host;
     if (host && accel_ok(p) && ensure_surface(p)) {
         const float *cc;
@@ -2220,11 +3308,11 @@ static void *install_for(int k)
         int i;
         for (i = 0; i < PROC_COUNT; i++) {
             tab[i] = 0;
-            /* Sonde T&L (POMPPC_GL_TCL=1) : les quatre entrées « hautes » sont
-               prioritaires, et doivent être réinstallées à chaque
-               gldUpdateDispatch comme toutes les autres. */
-            if (pomppc_tcl_proc(i))
-                tab[i] = pomppc_tcl_proc(i);
+            /* Chemin brut : Begin/EndPrimitiveBuffer sont prioritaires, et
+               doivent être réinstallées à chaque gldUpdateDispatch comme toutes
+               les autres (le GLDriver d'Apple réécrit la table entière). */
+            if (pomppc_geom_proc(i))
+                tab[i] = pomppc_geom_proc(i);
             else if (G.state > 0 && accel_proc(i))
                 tab[i] = accel_proc(i);
             else if (pomppc_tracing() || (G.state > 0 && proc_kind(i) != K_NONE))
@@ -2316,6 +3404,14 @@ void pomppc_context_destroyed(void *ctx)
             continue;
         p = *pp;
         *pp = p->next;
+        if (p->cfg)
+            GLD_U32(p->cfg, 0x11c) = 0;     /* le descripteur meurt avec le contexte */
+        if (G.pend == p)
+            G.pend = 0;
+        if (G.raw_ctx == p) {
+            G.raw_ctx = 0;
+            G.raw_count = 0;
+        }
         if (G.state > 0 && p->qctx >= 0) {
             destroy_surface(p);
             c = reserve(p, QGPU_LEN_CTX);

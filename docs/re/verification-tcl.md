@@ -463,6 +463,12 @@ rendu d'Apple (`cmp` des PPM).
 
 ## 10. Variables d'environnement de la sonde
 
+> **Historique.** Ces variables ont été retirées du plugin le 18/09/2026, quand
+> le chemin brut est devenu le vrai chemin (`docs/gpu-3d-tiger.md` §4.7) : le
+> verrou, le descripteur et les procédures `Begin`/`EndPrimitiveBuffer` ne sont
+> plus une sonde mais du code de production, réglé par `POMPPC_GL_GEOM`. Le
+> tableau reste ici parce qu'il décrit les essais qui ont produit ce relevé.
+
 Toutes sont sans effet si `POMPPC_GL_TCL` n'est pas défini.
 
 | variable | effet |

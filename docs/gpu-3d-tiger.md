@@ -258,6 +258,151 @@ textures 3D, cube et rectangle, stencil, opérations logiques, stipple, lissage,
 plein, brouillard en `GL_NICEST`, lignes et points texturés ou décalés, opérations de pixels
 (`glDrawPixels`, `glBitmap`, `glCopyPixels`, accumulation), tampons autres que 32 bits.
 
+### 4.7 Géométrie sur l'hôte — le chemin « brut » (protocole v7, lot 2)
+
+Jusqu'ici, **GLEngine transformait, éclairait, découpait et éliminait les faces sur le PowerPC
+émulé**, et le plugin ne recevait que des sommets en coordonnées fenêtre. C'était la limite : sur
+Marble Blast, le débit suivait le nombre de triangles. Le chemin brut sort ce travail de l'invité.
+
+#### Principe
+
+`docs/re/verification-tcl.md` et `docs/re/descripteur-de-sommet.md` ont établi le mécanisme :
+
+1. **Le verrou** est le **bit 0 de la valeur rendue par `gldInitDispatch`/`gldUpdateDispatch`**,
+   que `_gleUpdateDispatchCodeChange` relit **à chaque changement d'état GL**. Le plugin rend
+   `(retour d'Apple) | 1` quand l'état courant est dans son domaine, et le retour d'Apple **tel
+   quel** sinon. Le bit 1 (`| 3`) force la reconstruction du chemin ; il n'est demandé que
+   lorsque le descripteur change sans que le verrou change. `cfg+0x79 = 1` à la création donne la
+   valeur initiale.
+2. **Le descripteur de sortie de sommet**, publié en `cfg+0x11c` (durée de vie = celle du
+   contexte), dit à GLEngine où écrire chaque attribut : `u8 n ; u8 0 ; u8 pasEnMots ; u8 0 ;`
+   puis `n` entrées `(code << 10) | ((composantes − 1) << 8) | décalageEnMots`. Sans lui, GLEngine
+   prend le chemin T&L et **jette la géométrie en silence**. Le code 6 (drapeau d'arête) plante
+   GLEngine : il n'est jamais demandé.
+3. `BeginPrimitiveBuffer` (+0x50) rend le tampon où écrire, `EndPrimitiveBuffer` (+0x54) dit
+   combien de sommets y sont. **`BeginPrimitiveBuffer` ne peut pas refuser** : rendre 0 ferait
+   écrire GLEngine à l'adresse nulle.
+
+#### Zéro copie
+
+Le descripteur est choisi pour que la disposition de GLEngine **soit** celle de `DRAW_RAW`
+(position4, normale3, couleur4, brouillard1, coordonnées de texture 4 par unité, dans l'ordre fixe
+du protocole), et `BeginPrimitiveBuffer` rend un pointeur **dans la fenêtre partagée**
+(`VTX_OFF + G.vtx`). `EndPrimitiveBuffer` n'a plus qu'à écrire dix mots de commande : il n'y a
+aucune recopie de sommet. Les commandes s'accumulent dans le flux existant et partent aux points
+de synchronisation existants ; les `DRAW_RAW` consécutifs sont fusionnés quand le mode, l'état et
+la contiguïté le permettent (`TRIANGLES`, `QUADS`, `LINES`, `POINTS`).
+
+Le format suit l'état : la normale n'est portée que si l'éclairage est allumé **ou** si un texgen
+en a besoin (`SPHERE_MAP`, `NORMAL_MAP`, `REFLECTION_MAP` — l'oublier donnait une case entière
+fausse, écart 166/255) ; la couleur seulement si elle atteint la sortie ; la coordonnée de
+brouillard seulement si c'est bien elle la source ; les coordonnées de texture des seules unités
+texturées. Un format fixe et large (`POMPPC_GL_GEOM=2`) a été mesuré : il est plus lent sur une
+scène géométrique (730 contre 881 img/s sur `gltest spin` 16×16) parce qu'il fait écrire à
+GLEngine 27 mots par sommet au lieu de 11.
+
+**Combien de sommets offrir.** `*n` est le nombre d'emplacements que le plugin met à disposition.
+Avec les 192 du pilote Rage 128, GLEngine coupait les primitives ; en offrant tout ce que la zone
+des sommets permet (jusqu'à 8192), une bande de 1000 sommets arrive en **un seul** `DRAW_RAW`.
+Quand il doit couper, **GLEngine répète les sommets qu'il faut** : mesuré sur la scène `bigstrip`
+(bande de 1000, éventail de 302, polygone de 250, boucle de 400), un plafond de 8192, 512, 192, 64
+puis 16 sommets donne 1952, 1954, 1969, 2005 puis 2197 sommets transmis en 4, 5, 13, 33 puis 139
+`DRAW_RAW` — et **exactement la même image** à chaque fois.
+
+#### État envoyé, et seulement ce qui change
+
+Matrices modèle-vue et projection (et de texture des unités actives), viewport, plage de
+profondeur, les 8 lumières, les deux matériaux, l'ambiante du modèle, le texgen des unités
+texturées, les 6 plans de découpe, les valeurs courantes des attributs absents du format, et les
+clés d'état v7 (éclairage, normalisation, ombrage, faces, color material, deux faces, spéculaire
+séparée, brouillard). Chaque commande est comparée à ce qui a déjà été posé sur le device : sur
+Marble Blast, 30 à 55 commandes d'état par image pour 400 à 1000 `DRAW_RAW`.
+
+Pièges vus en vrai :
+
+- **Positions de lumière, directions de spot, plans œil et plans de découpe sont déjà en
+  coordonnées ŒIL** dans l'état GLEngine, et le protocole les attend ainsi : on recopie, on ne
+  retransforme rien.
+- Le **seuil de spot** est rangé en **cosinus** (`< 0` = pas un spot) alors que `SET_LIGHT` veut
+  l'**angle en degrés** (0..90, ou exactement 180) : conversion par `acos`.
+- Comparer les 64 octets d'une matrice coûte moins que d'exploiter le masque « matrice modifiée »
+  (`GS+0x4d48`), qui ne dit rien des matrices de texture d'une unité qui vient de s'allumer.
+- Les clés v7 n'influencent **pas** les opcodes de dessin v1–v6 : `gl_apply_state` remet
+  l'ombrage, l'éclairage, l'élimination des faces et le brouillard à plat avant chaque dessin
+  ancien, et `qgpu-soft.c` ne lit `QGPU_SK_FOG_MODE` que dans `soft_draw_raw`. Les deux chemins
+  cohabitent donc dans la même image sans se dérégler.
+
+#### Domaine, et repli
+
+Le domaine est **celui de la rastérisation** (`accel_ok`, `texture_ok`) **plus** ce que la v7 sait
+faire : éclairage complet, color material, deux faces, normalize/rescale, élimination des faces,
+ombrage plat, texgen des cinq modes, six plans de découpe, brouillard `LINEAR`/`EXP`/`EXP2` calculé
+par l'hôte (y compris en `GL_NICEST`, que le chemin de rastérisation refusait), matrices de
+texture. En sortent : mode de polygone non plein (le code 6 du descripteur plante), pointillés,
+lissage, opérations logiques, atténuation de la taille des points, programmes ARB
+(`gctx+0x4e1c ≠ 0x1c00`), plus de 4 unités, contexte sans surface accélérable.
+
+**Un seul prédicat, appelé à deux endroits.** `geom_ok()` décide au dispatch (où l'on peut encore
+refuser) *et* à `BeginPrimitiveBuffer` (où l'on ne peut plus). S'il est vrai au premier et faux au
+second, c'est que l'état a bougé sans passer par `gldUpdateDispatch` : le cas est compté
+(« brut:etat-tardif ») et le contexte quitte le domaine pour de bon. **Ce compteur doit rester à
+zéro** — c'est la garantie d'exactitude, et il l'est sur toutes les scènes et sur Marble Blast.
+Deux garde-fous complètent le prédicat à `BeginPrimitiveBuffer` : le pas réellement retenu par
+GLEngine (`gctx+0x4880`) et le descripteur qu'il a relu (`gctx+0x48d0`) doivent être les nôtres —
+sans quoi c'est son sommet **interne**, déjà transformé, qui arriverait.
+
+Tout ce qui peut échouer (téléversement de texture, place dans le flux et dans la zone des
+sommets) est fait **à `BeginPrimitiveBuffer`**, avant que GLEngine écrive quoi que ce soit.
+
+#### Mesures (18/09/2026)
+
+`gltest spin`, 400 triangles par image, 60 images :
+
+| Taille | Apple | plugin, `GEOM=0` | plugin, `GEOM=1` | gain |
+|---|---|---|---|---|
+| 16×16 | 520 img/s | 406 | **900** | ×2,22 |
+| 256×256 | 242 | 420 | **822** | ×1,96 |
+| 640×480 | 122 | 323 | **481** | ×1,49 |
+
+`gltest game` (couloir multitexturé + brouillard, 640×480) : 684 → **854 img/s** (×1,25) ;
+le rendu d'Apple seul y fait 2,75 img/s.
+
+**Marble Blast Gold**, en fenêtre 800×600, démo qui se joue toute seule, fenêtres de 5 s alignées
+sur le lancement (même séquence des deux côtés : les quatre premières fenêtres, les menus, donnent
+42,1 / 85,5 / 147,3 / 101,1 img/s contre 41,6 / 83,0 / 145,7 / 97,3) :
+
+| Fenêtre de jeu | `GEOM=0` | `GEOM=1` | gain |
+|---|---|---|---|
+| la plus lourde | 24,3 img/s | **47,6** | ×1,96 |
+| lourdes (5 fenêtres) | 25 à 30 | **43 à 49** | ×1,6 à ×1,9 |
+| moyenne des 16 fenêtres de jeu | 42,4 | **62,6** | **+48 %** |
+
+**Ce que le profileur a appris.** Un `sample` de 10 s sur Marble Blast a d'abord montré `put_f`
+en tête des feuilles de la pile principale (7,4 % du temps, devant `geom_begin` à 4,4 %) :
+fabriquer les arguments des commandes d'état pour les comparer ensuite coûtait plus cher que tout
+le reste du suivi d'état — parce que `BeginPrimitiveBuffer` est appelé **mille fois par image**,
+pas une fois par lot de rastérisation. Les comparaisons se font maintenant sur les **octets
+sources** du bloc GLEngine (un `memcmp` par matrice, par lumière, par unité de texgen), et les
+arguments ne sont fabriqués que quand ils partent : les scènes lourdes sont passées de 34 à
+47 img/s. Restent en tête `__memcpy` (13 %, ce que GLEngine écrit dans notre tampon) et
+`mach_msg_trap` (11 %, l'attente du device et du WindowServer).
+
+#### Écarts d'image avec le rendu d'Apple
+
+Toutes les scènes (22) sont comparées image entière au rendu d'Apple. **Hors arêtes** (pixel dont
+le voisinage 3×3 est uniforme dans l'image de référence), l'écart maximal est de **0 à 2/255**
+partout, sauf :
+
+- `game` : 3/255 (interpolation des couleurs en perspective) ;
+- `lit` : 19/255 sur 104 composantes, au **bord du cône du spot**. Cause établie : OpenGL ne
+  définit pas la découpe d'un quadrilatère en triangles, et quand la valeur aux sommets varie
+  brutalement, deux rendus qui coupent la diagonale autrement donnent des images différentes. Avec
+  la même scène en `GL_TRIANGLES` (`GLTEST_LIT_TRIS=1`), l'écart retombe à **3/255**.
+
+Sur les arêtes, les écarts vont jusqu'à 255/255 sur quelques dizaines de pixels : silhouettes d'un
+pixel de large (règles de remplissage et de tracé de ligne différentes entre le rasteriseur d'Apple
+et celui de l'hôte). C'était déjà le cas du chemin de rastérisation.
+
 ---
 
 ## 5. Vérification
@@ -268,7 +413,8 @@ plein, brouillard en `GL_NICEST`, lignes et points texturés ou décalés, opér
 | device, sans invité | `tests/qgpu_smoke.py` | 11/11, backend GL |
 | harnais complet | `tests/run-all.sh --slow` | 34 OK |
 | transport dans Tiger | `guest/qgpu-test` | OK, y compris pendant 4 applications GL |
-| plugin hors écran | `gltest` × 13 scènes | pixels témoins OK ; images comparées au rendu d'Apple (§0) ; `texpack` : formats compacts identiques à Apple |
+| plugin hors écran | `gltest` × 22 scènes | pixels témoins OK avec `POMPPC_GL_GEOM=0` **et** `=1` ; image entière comparée au rendu d'Apple, écart max **hors arêtes** de 0 à 3/255 (voir §4.7) |
+| géométrie sur l'hôte | `gltest lit texgen clip fogz bigstrip dlist mixte` | éclairage, texgen, découpe, brouillard, longues primitives, listes d'affichage, alternance domaine / hors domaine |
 | application réelle | Zenerchi (§4.6) | menus et partie corrects, 42 img/s en partie, présentation directe |
 | plugin en fenêtre, dans le bureau | `glwin` (GLUT) | OK ; image témoin visible dans la fenêtre à l'écran |
 | multi-processus | 5 × `gltest game` + `qgpu_test` | 4 accélérés, le 5e en logiciel, tous corrects |
