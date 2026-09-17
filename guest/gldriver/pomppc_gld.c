@@ -399,16 +399,22 @@ static void tcl_end_primitive_buffer(void *ctx, long flag, short mode, long n)
     if (bytes > 0x4000)
         bytes = 0x4000;
     pomppc_dump("tcl-prim", tcl_buf, bytes);
-    for (i = 0; i < (unsigned long)n && i < 4; i++) {
-        const float *f = (const float *)(tcl_buf + i * tcl_stride);
-        unsigned long nf = tcl_stride / 4;
-        if (nf > 12)
-            nf = 12;
+    /* Un sommet par ligne, TOUS les mots du pas (jusqu'à 32) : c'est ce
+       vidage qui identifie ce que GLEngine a écrit pour chaque code du
+       descripteur. Les mots jamais écrits gardent le motif témoin 0xEEEEEEEE
+       posé par BeginPrimitiveBuffer, journalisé « - ». */
+    for (i = 0; i < (unsigned long)n && i < 8; i++) {
+        const unsigned char *v = tcl_buf + i * tcl_stride;
+        unsigned long nf = tcl_stride / 4, j;
+        if (nf > 32)
+            nf = 32;
         pomppc_log("    s%lu :", i);
-        {
-            unsigned long j;
-            for (j = 0; j < nf; j++)
-                pomppc_log(" %g", f[j]);
+        for (j = 0; j < nf; j++) {
+            unsigned long u = GLD_U32(v, j * 4);
+            if (u == 0xEEEEEEEEul)
+                pomppc_log(" -");
+            else
+                pomppc_log(" %g", *(const float *)(v + j * 4));
         }
         pomppc_log("\n");
     }
@@ -724,6 +730,13 @@ long gldCreateContext(long a, long b, long c, long d, long e, long f, long g, lo
         int i;
         GLD_U8(cfg, 0x79) = 1;
         GLD_U8(cfg, 0x7a) = (unsigned char)pomppc_tcl_7a();
+        /* cfg+0x78 : posé à 1 par le Rage 128, le GeForce3 et le Radeon, à 0
+           par le GLDriver d'Apple. Sonde POMPPC_GL_TCL_78 (défaut 0, inchangé). */
+        {
+            const char *s78 = getenv("POMPPC_GL_TCL_78");
+            if (s78 && *s78)
+                GLD_U8(cfg, 0x78) = (unsigned char)atoi(s78);
+        }
         /* Six identifiants de format de sommet (GLEngine 0xda5a8-0xda65c) :
            Apple laisse 0, le GeForce3 publie {3,2,1,6,5,4}. Sans eux, GLEngine
            n'a rien à passer à gldAllocVertexBuffer. */
@@ -743,8 +756,23 @@ long gldCreateContext(long a, long b, long c, long d, long e, long f, long g, lo
                 int nent = 0, pasm = 4;
                 const char *q = d;
                 pasm = (int)strtol(q, (char **)&q, 0);
-                while (*q == ',' && nent < 24)
-                    ent[nent++] = (unsigned short)strtol(q + 1, (char **)&q, 0);
+                /* Chaque entrée s'écrit soit en brut (0x0300), soit
+                   « code:décalage[:composantes] » — l'entrée de 16 bits vaut
+                   (code << 10) | ((composantes − 1) << 8) | décalageEnMots
+                   (GLEngine 0x39e14-0x3a03c et 0xb4c00-0xb4c24). */
+                while (*q == ',' && nent < 24) {
+                    long v0 = strtol(q + 1, (char **)&q, 0);
+                    if (*q == ':') {
+                        long off = strtol(q + 1, (char **)&q, 0);
+                        long nc = 4;
+                        if (*q == ':')
+                            nc = strtol(q + 1, (char **)&q, 0);
+                        if (nc < 1 || nc > 4)
+                            nc = 4;
+                        v0 = ((v0 & 0x3f) << 10) | (((nc - 1) & 3) << 8) | (off & 0xff);
+                    }
+                    ent[nent++] = (unsigned short)v0;
+                }
                 if (pasm <= 0 || pasm > 64)
                     pasm = 4;
                 memset(desc, 0, sizeof desc);
@@ -758,6 +786,13 @@ long gldCreateContext(long a, long b, long c, long d, long e, long f, long g, lo
                 GLD_U32(cfg, 0x11c) = (unsigned long)desc;
                 pomppc_log("  POMPPC_GL_TCL_DESC : %d entrée(s), pas %d mots, mot0=%08lx\n",
                            nent, pasm, desc[0]);
+                {
+                    int i3;
+                    for (i3 = 0; i3 < nent; i3++)
+                        pomppc_log("    entrée %d = %04x (code %d, %d composante(s),"
+                                   " mot %d)\n", i3, ent[i3], (ent[i3] >> 10) & 0x3f,
+                                   ((ent[i3] >> 8) & 3) + 1, ent[i3] & 0xff);
+                }
             }
         }
         pomppc_log("  POMPPC_GL_TCL : cfg+0x79 = 1, cfg+0x7a = %u, cfg+0x7c..0x87 = 1..6,"

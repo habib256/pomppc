@@ -23,6 +23,22 @@
 #include <OpenGL/glu.h>
 #include <math.h>
 
+/* Entrées ARB/EXT utilisées par la scène « tclprobe » : libGL.dylib de 10.4.6
+   les exporte toutes (relevé dans OpenGL.framework/Libraries/libGL.dylib) ;
+   on les déclare ici pour ne dépendre d'aucune version de <OpenGL/glext.h>. */
+#ifndef GL_TEXTURE0_ARB
+#define GL_TEXTURE0_ARB 0x84C0
+#endif
+#ifndef GL_TEXTURE1_ARB
+#define GL_TEXTURE1_ARB 0x84C1
+#endif
+extern void glMultiTexCoord2fARB(GLenum, GLfloat, GLfloat);
+extern void glClientActiveTextureARB(GLenum);
+extern void glSecondaryColor3fvEXT(const GLfloat *);
+extern void glSecondaryColorPointerEXT(GLint, GLenum, GLsizei, const GLvoid *);
+extern void glFogCoordfEXT(GLfloat);
+extern void glFogCoordPointerEXT(GLenum, GLsizei, const GLvoid *);
+
 static int W = 64, H = 64;
 static int ROWB;                        /* octets par ligne (GLTEST_ROWPAD en plus de 4·W) */
 static unsigned char *buf;
@@ -857,6 +873,167 @@ int main(int argc, char **argv)
         check("quad B (glDrawElements) vert", (int)(48 * sx), (int)(32 * sy), 0x00FF00);
         check("entre les deux quads : fond", (int)(32 * sx), (int)(32 * sy), 0x0000FF);
         check("au-dessus des quads : fond", (int)(32 * sx), (int)(8 * sy), 0x0000FF);
+    } else if (!strcmp(scene, "tclprobe")) {
+        /* Sonde des codes du descripteur de sortie de sommet (docs/re/
+           descripteur-de-sommet.md). UN triangle, tous les attributs
+           DISTINCTS et reconnaissables dans le vidage de EndPrimitiveBuffer.
+           Ne vérifie aucun pixel : c'est la trace qui est le résultat. */
+        static const float pos[3][3] = { {1,2,3}, {4,5,6}, {7,8,9} };
+        static const float nrm[3][3] = { {0.1f,0.2f,0.3f}, {0.4f,0.5f,0.6f},
+                                         {0.7f,0.8f,0.9f} };
+        static const float col[3][4] = { {0.11f,0.22f,0.33f,0.44f},
+                                         {0.51f,0.52f,0.53f,0.54f},
+                                         {0.61f,0.62f,0.63f,0.64f} };
+        static const float sec[3][3] = { {0.71f,0.72f,0.73f},
+                                         {0.74f,0.75f,0.76f},
+                                         {0.77f,0.78f,0.79f} };
+        static const float t0c[3][2] = { {0.5f,0.25f}, {1.5f,1.25f}, {2.5f,2.25f} };
+        static const float t1c[3][2] = { {0.75f,0.125f}, {1.75f,1.125f}, {2.75f,2.125f} };
+        static const float fogc[3]   = { 0.9f, 1.9f, 2.9f };
+        static const GLushort idx[3] = { 0, 1, 2 };
+        static const float clip[3][3] = { {-5,-1,0}, {5,-1,0}, {0,5,0} };
+        const char *mode = getenv("TCLP_MODE") ? getenv("TCLP_MODE") : "imm";
+        const float *P = getenv("TCLP_CLIP") ? &clip[0][0] : &pos[0][0];
+        GLuint tex = 0, lst = 0;
+        int i;
+
+        glMatrixMode(GL_PROJECTION); glLoadIdentity();
+        if (getenv("TCLP_PERSP"))
+            glFrustum(-1, 1, -1, 1, 1, 100);
+        glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
+        if (!getenv("TCLP_CLIP"))
+            glTranslatef(10, 20, 30);       /* modèle-vue reconnaissable */
+        if (getenv("TCLP_TEXMAT")) {
+            glMatrixMode(GL_TEXTURE); glLoadIdentity();
+            glTranslatef(100, 200, 0);
+            glMatrixMode(GL_MODELVIEW);
+        }
+        if (getenv("TCLP_TEX")) {
+            static unsigned char t[4 * 4 * 4];
+            for (i = 0; i < 4 * 4 * 4; i++) t[i] = (unsigned char)(i * 4);
+            glGenTextures(1, &tex);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, t);
+            glEnable(GL_TEXTURE_2D);
+        }
+        if (getenv("TCLP_TEXGEN")) {
+            static const GLfloat ps[4] = { 1, 0, 0, 0.5f };
+            static const GLfloat pt[4] = { 0, 1, 0, 0.25f };
+            glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR);
+            glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR);
+            glTexGenfv(GL_S, GL_OBJECT_PLANE, ps);
+            glTexGenfv(GL_T, GL_OBJECT_PLANE, pt);
+            glEnable(GL_TEXTURE_GEN_S); glEnable(GL_TEXTURE_GEN_T);
+        }
+        if (getenv("TCLP_LIGHT")) {
+            static const GLfloat dir[4] = { 0, 0, 1, 0 };   /* directionnelle */
+            static const GLfloat dif[4] = { 1, 1, 1, 1 };
+            static const GLfloat amb[4] = { 0.25f, 0.25f, 0.25f, 1 };
+            glLightfv(GL_LIGHT0, GL_POSITION, dir);
+            glLightfv(GL_LIGHT0, GL_DIFFUSE, dif);
+            glLightModelfv(GL_LIGHT_MODEL_AMBIENT, amb);
+            glEnable(GL_LIGHT0);
+            glEnable(GL_LIGHTING);
+            if (getenv("TCLP_COLORMAT")) {
+                glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+                glEnable(GL_COLOR_MATERIAL);
+            }
+            if (getenv("TCLP_TWOSIDE"))
+                glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, 1);
+        }
+        if (getenv("TCLP_MATERIAL")) {
+            static const GLfloat amb[4] = { 0.31f, 0.32f, 0.33f, 0.34f };
+            static const GLfloat dif[4] = { 0.41f, 0.42f, 0.43f, 0.44f };
+            static const GLfloat spe[4] = { 0.81f, 0.82f, 0.83f, 0.84f };
+            static const GLfloat emi[4] = { 0.91f, 0.92f, 0.93f, 0.94f };
+            glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, amb);
+            glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, dif);
+            glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, spe);
+            glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, emi);
+        }
+        if (getenv("TCLP_CULL")) {
+            glCullFace(getenv("TCLP_CULLFRONT") ? GL_FRONT : GL_BACK);
+            glEnable(GL_CULL_FACE);
+        }
+        if (getenv("TCLP_FOG")) {
+            glFogi(GL_FOG_MODE, GL_LINEAR);
+            glEnable(GL_FOG);
+            if (getenv("TCLP_FOGCOORD"))
+                glFogi(0x8450 /* GL_FOG_COORDINATE_SOURCE */,
+                       0x8451 /* GL_FOG_COORDINATE */);
+        }
+        if (getenv("TCLP_SECCOL"))
+            glEnable(0x81F9 /* GL_COLOR_SUM */);
+        if (getenv("TCLP_UNFILLED"))
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        glClearColor(0, 0, 1, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        if (!strcmp(mode, "list")) {
+            lst = glGenLists(1);
+            glNewList(lst, GL_COMPILE);
+        }
+        if (!strcmp(mode, "arrays") || !strcmp(mode, "elements")) {
+            glEnableClientState(GL_VERTEX_ARRAY);
+            glVertexPointer(3, GL_FLOAT, 0, P);
+            glEnableClientState(GL_NORMAL_ARRAY);
+            glNormalPointer(GL_FLOAT, 0, nrm);
+            glEnableClientState(GL_COLOR_ARRAY);
+            glColorPointer(4, GL_FLOAT, 0, col);
+            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+            glTexCoordPointer(2, GL_FLOAT, 0, t0c);
+            glClientActiveTextureARB(GL_TEXTURE1_ARB);
+            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+            glTexCoordPointer(2, GL_FLOAT, 0, t1c);
+            glClientActiveTextureARB(GL_TEXTURE0_ARB);
+            glEnableClientState(0x845E /* GL_SECONDARY_COLOR_ARRAY_EXT */);
+            glSecondaryColorPointerEXT(3, GL_FLOAT, 0, sec);
+            glEnableClientState(0x8457 /* GL_FOG_COORDINATE_ARRAY_EXT */);
+            glFogCoordPointerEXT(GL_FLOAT, 0, fogc);
+            if (!strcmp(mode, "arrays"))
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+            else
+                glDrawElements(GL_TRIANGLES, 3, GL_UNSIGNED_SHORT, idx);
+            glDisableClientState(0x8457);
+            glDisableClientState(0x845E);
+            glClientActiveTextureARB(GL_TEXTURE1_ARB);
+            glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+            glClientActiveTextureARB(GL_TEXTURE0_ARB);
+            glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+            glDisableClientState(GL_COLOR_ARRAY);
+            glDisableClientState(GL_NORMAL_ARRAY);
+            glDisableClientState(GL_VERTEX_ARRAY);
+        } else {
+            glBegin(GL_TRIANGLES);
+            for (i = 0; i < 3; i++) {
+                int j = getenv("TCLP_BACKFACE") ? 2 - i : i;
+                if (getenv("TCLP_EDGE"))
+                    glEdgeFlag(i == 1 ? GL_FALSE : GL_TRUE);
+                glNormal3fv(nrm[j]);
+                glColor4fv(col[j]);
+                glSecondaryColor3fvEXT(sec[j]);
+                glFogCoordfEXT(fogc[j]);
+                glTexCoord2fv(t0c[j]);
+                glMultiTexCoord2fARB(GL_TEXTURE1_ARB, t1c[j][0], t1c[j][1]);
+                glVertex3fv(P + j * 3);
+            }
+            glEnd();
+        }
+        if (!strcmp(mode, "list")) {
+            glEndList();
+            glCallList(lst);
+            glCallList(lst);            /* deux fois : la 2ᵉ est « compilée » */
+        }
+        glFinish();
+        printf("tclprobe : mode=%s persp=%d light=%d texgen=%d cull=%d clip=%d\n",
+               mode, getenv("TCLP_PERSP") ? 1 : 0, getenv("TCLP_LIGHT") ? 1 : 0,
+               getenv("TCLP_TEXGEN") ? 1 : 0, getenv("TCLP_CULL") ? 1 : 0,
+               getenv("TCLP_CLIP") ? 1 : 0);
+        if (tex) glDeleteTextures(1, &tex);
+        if (lst) glDeleteLists(lst, 1);
     } else if (!strcmp(scene, "state")) {
         /* Sonde d'état : un réglage GL à la fois, suivi d'un glClear que le
            plugin traceur (POMPPC_GLTRACE_STATE=1) vide en entier. Les valeurs
