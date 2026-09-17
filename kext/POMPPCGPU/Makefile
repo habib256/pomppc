@@ -1,7 +1,7 @@
-# Makefile — construction de POMPPCQFB.kext DANS l'invité Tiger (PowerPC).
+# Makefile — construction de POMPPCGPU.kext DANS l'invité Tiger (PowerPC).
 #
 #   Prérequis : Xcode 2.5 (gcc 4.0.1 + SDK MacOSX10.4u) installé dans l'invité.
-#   Usage     : make          → POMPPCQFB.kext
+#   Usage     : make          → POMPPCGPU.kext
 #               sudo make install
 #               sudo make load
 #
@@ -19,9 +19,9 @@ CXX        = /usr/bin/g++-4.0
 CC         = /usr/bin/gcc-4.0
 LD         = /usr/bin/ld
 
-KEXT       = POMPPCQFB.kext
-BIN        = POMPPCQFB
-OBJS       = POMPPCQFB.o POMPPCQFB_info.o
+KEXT       = POMPPCGPU.kext
+BIN        = POMPPCGPU
+OBJS       = POMPPCGPU.o POMPPCGPU_info.o
 
 CXXFLAGS = -arch ppc -static -O2 -mlong-branch \
            -fno-builtin -fno-exceptions -fno-rtti -fno-common -fapple-kext \
@@ -44,7 +44,7 @@ LDLIBS   = -lkmodc++ -lkmod $(CC_KEXT)
 
 all: $(KEXT)
 
-%.o: %.cpp POMPPCQFB.h qfb_regs.h
+%.o: %.cpp POMPPCGPU.h qgpu_proto.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 %_info.o: %_info.c
@@ -74,7 +74,7 @@ load: $(KEXT)
 	kextload -t $(KEXT)
 
 unload:
-	kextunload -b net.pomppc.POMPPCQFB
+	kextunload -b net.pomppc.POMPPCGPU
 
 clean:
 	rm -rf $(OBJS) $(BIN) $(KEXT)
