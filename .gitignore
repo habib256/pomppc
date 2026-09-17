@@ -1,6 +1,7 @@
 # ─── Disques, OS et jeux copyrightés — JAMAIS commités ───────────────
 # (illégal de redistribuer + limite GitHub 100 Mo/fichier)
 disks/*.qcow2
+disks/*.raw
 disks/*.iso
 disks/*.img
 disks/*.dsk

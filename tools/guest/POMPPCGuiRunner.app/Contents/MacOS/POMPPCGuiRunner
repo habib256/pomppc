@@ -1,0 +1,19 @@
+#!/bin/sh
+# POMPPCGuiRunner — élément d'ouverture de session de l'utilisateur de test.
+# Exécute, DANS la session graphique, les jobs que l'agent racine dépose dans
+# /tmp/pomppc-gui/job-*/ (gui.sh). Un processus racine lancé au démarrage ne
+# peut pas ouvrir de fenêtre sous 10.4 : ce relais est le seul chemin.
+Q=/tmp/pomppc-gui
+LOG=/tmp/pomppc-gui-runner.log
+echo "runner démarré $(date) uid $(id -u)" >> $LOG
+while :; do
+  for d in $Q/job-*; do
+    [ -d "$d" ] || continue
+    [ -f "$d/ready" ] || continue
+    [ -f "$d/started" ] && continue
+    touch "$d/started"
+    echo "job $d" >> $LOG
+    ( cd "$d" && sh ./gui.sh > gui-log.txt 2>&1; echo "rc=$?" >> gui-log.txt; touch done )
+  done
+  sleep 1
+done

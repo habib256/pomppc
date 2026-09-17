@@ -32,7 +32,7 @@ NuBus/68k) a été porté sur PCI pour `mac99`.
 | Device QEMU `qfb-pci` | `patches/qfb/qfb-pci.c` + `scripts/build_qemu_qfb.sh` | **fait, testé** (QEMU 9.2.0 reconstruit dans `~/src/qemu`) |
 | Test de bout en bout sans invité | `tests/qfb_smoke.py` | **passe** : mode programmé en Forth depuis Open Firmware, `rowbytes` relu, pixels vérifiés sur `screendump` |
 | Non-régression Tiger | boot headless avec le device attaché | **OK** : bureau intact sur l'écran VGA, second écran QFB présent |
-| Kext `POMPPCQFB` (Tiger) | `kext/POMPPCQFB/` | **écrit**, reste à compiler dans l'invité (toolchain gcc 4.0) |
+| Kext `POMPPCQFB` (Tiger) | `kext/POMPPCQFB/` | **écrit** ; la toolchain est désormais dans le disque et son Makefile a reçu les correctifs validés sur `POMPPCGPU` (`docs/gpu-3d-tiger.md` §3) — reste à le charger et à valider l'écran |
 | Lancement | `QFB=1 ./run_tiger.sh` | ajoute l'écran QFB en second moniteur |
 
 Détails et protocole : `kext/POMPPCQFB/README.md`.

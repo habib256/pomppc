@@ -25,6 +25,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$ROOT/config.env"
+source "$ROOT/scripts/hostcompat.sh"
 source "$ROOT/scripts/caps.sh"
 
 # OS9_DISK / OS9_CD viennent de config.env (surchargeables par l'environnement).
@@ -44,7 +45,6 @@ if [ -n "${TABLET:-}" ]; then
   TABLET_DEV=(-device usb-tablet)
 fi
 
-export DISPLAY="${DISPLAY:-:1}"
 SCR="${POMPPC_SCRATCH:-$ROOT/.run}"; mkdir -p "$SCR"
 MON="$SCR/os9-mon.sock"; rm -f "$MON"
 
@@ -52,7 +52,7 @@ MON="$SCR/os9-mon.sock"; rm -f "$MON"
 # corrompent. Le fd 8 survit à l'exec final, le verrou vit donc avec QEMU.
 if [ -z "${SNAPSHOT:-}" ]; then
   exec 8>"$SCR/os9.lock"
-  if ! flock -n 8; then
+  if ! host_lock_fd 8; then
     echo "⚠  Mac OS 9 tourne déjà (verrou $SCR/os9.lock). Ferme-le d'abord," >&2
     echo "   ou lance en disque jetable : SNAPSHOT=1 ./run_os9.sh" >&2
     exit 1
@@ -74,9 +74,8 @@ BIOS_ARGS=()
 if [ -f "$UNI_OBIOS" ] && [ -z "${NOSOUND:-}" ] \
    && qemu_machine_has "$BIN" "$MACHINE" screamer; then
   BIOS_ARGS=(-bios "$UNI_OBIOS")
-  AUDIO=(-audiodev pa,id=snd0 -global screamer.audiodev=snd0)
-  export PULSE_SERVER="${PULSE_SERVER:-unix:/run/user/$(id -u)/pulse/native}"
-  SOUND="son ON (Screamer + PulseAudio)"
+  AUDIO=(-audiodev "$HOST_AUDIODEV,id=snd0" -global screamer.audiodev=snd0)
+  SOUND="son ON (Screamer + $HOST_AUDIODEV)"
 else
   AUDIO=(); SOUND="son OFF (OpenBIOS stock)"
   if [ -z "${NOSOUND:-}" ] && ! qemu_machine_has "$BIN" "$MACHINE" screamer; then
@@ -187,14 +186,15 @@ echo "  $SOUND  |  moniteur QEMU : $MON"
 [ -n "${PAD_INFO:-}" ] && echo "  🎮 $PAD_INFO"
 
 # Affichage : DBUS_DISPLAY=1 → -display dbus,p2p=on pour le frontend ImGui.
-if [ -n "${DBUS_DISPLAY:-}" ]; then DISP="dbus,p2p=on"; else DISP="gtk"; fi
+if [ -n "${DBUS_DISPLAY:-}" ]; then DISP="dbus,p2p=on"; else DISP="${POMPPC_DISPLAY:-$HOST_DISPLAY}"; fi
+host_audio_env
 QMP_ARGS=()
 [ -n "${QMP_SOCK:-}" ] && QMP_ARGS=(-qmp "unix:$QMP_SOCK,server=on,wait=off")
 # SNAPSHOT=1 : disque jetable (writes annulés → boot toujours propre).
 SNAP_ARGS=(); [ -n "${SNAPSHOT:-}" ] && SNAP_ARGS=(-snapshot)
 
 exec "$BIN" -M "mac99,via=$VIA" -cpu g4 -m "$RAM" -smp 1 \
-  -display "$DISP" -g "$RES" "${BIOS_ARGS[@]}" "${SNAP_ARGS[@]}" \
-  "${DRIVES[@]}" -nic none "${AUDIO[@]}" "${TABLET_DEV[@]}" "${VIRTIO_ARGS[@]}" "${PAD_ARGS[@]}" \
-  -prom-env 'auto-boot?=true' -prom-env "boot-device=$BOOTDEV" "${BOOTCMD_ARGS[@]}" \
-  -name "MacOS9" "${QMP_ARGS[@]}" -monitor "unix:$MON,server,nowait"
+  -display "$DISP" -g "$RES" ${BIOS_ARGS[@]+"${BIOS_ARGS[@]}"} ${SNAP_ARGS[@]+"${SNAP_ARGS[@]}"} \
+  ${DRIVES[@]+"${DRIVES[@]}"} -nic none ${AUDIO[@]+"${AUDIO[@]}"} ${TABLET_DEV[@]+"${TABLET_DEV[@]}"} ${VIRTIO_ARGS[@]+"${VIRTIO_ARGS[@]}"} ${PAD_ARGS[@]+"${PAD_ARGS[@]}"} \
+  -prom-env 'auto-boot?=true' -prom-env "boot-device=$BOOTDEV" ${BOOTCMD_ARGS[@]+"${BOOTCMD_ARGS[@]}"} \
+  -name "MacOS9" ${QMP_ARGS[@]+"${QMP_ARGS[@]}"} -monitor "unix:$MON,server,nowait"

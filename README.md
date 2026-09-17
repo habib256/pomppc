@@ -32,10 +32,12 @@ en « Métrologie » plus bas). Règle maintenue : on n'optimise rien sans A/B m
 (`Hypervisor.framework` = same-arch seulement). C'est du **pur JIT TCG**. Le fait que PPC et
 ARM64 partagent un *weak memory model* évite des barrières en **MTTCG** — gain réel mais borné,
 pas un miracle.
-- **GPU paravirtualisé (kext OpenGL→Metal) = piège *from-scratch*.** C'est un projet séparé de
-plusieurs années (OS mort, aucun SDK). Gelé. Gain graphique réaliste à court terme :
-framebuffer 2D — c'est exactement ce qui a été fait (device `qfb-pci` + kext `POMPPCQFB`,
-section « Écran paravirtuel QFB »), pas un pont OpenGL.
+- **GPU paravirtualisé : pas « un kext OpenGL→Metal », mais trois couches.** Un kext Tiger
+ne peut pas appeler Vulkan/OpenGL : le rendu se fait côté hôte. Le gel initial (« piège
+from-scratch ») visait un port de pile GL complète dans l'invité ; il est levé pour une
+architecture où l'invité ne porte qu'un traducteur : plugin OpenGL `GLDriver-POMPPC`, kext
+`POMPPCGPU` et device `qgpu-pci`, **faits et testés dans Tiger**. Voir « GPU 3D paravirtuel
+qgpu » et `docs/gpu-3d-tiger.md`. L'écran 2D reste `qfb-pci` + `POMPPCQFB`.
 - **SMP** : fait, en deux morceaux (`patches/smp-mac99/qemu-mac99-cpus-v2.patch`, d'après la série
 de BALATON Zoltan). D'abord le garde-fou `« Only UP supported today »` d'`hw/intc/openpic.c` est
 neutralisé ; ensuite le **GPIO 4 de KeyLargo** — la ligne de reset du CPU1 sur un vrai bi-G4 — est
@@ -150,6 +152,7 @@ scripts/profile-boot.sh              # perf record sur un boot complet
 ./run_tiger.sh              # Tiger : 2 cœurs MTTCG + son, fenêtre GTK, disque persistant
 SNAPSHOT=1 ./run_tiger.sh   # disque jetable (writes annulés → pas de fsck) : à utiliser en debug
 QFB=1 ./run_tiger.sh        # + écran paravirtuel QFB en second moniteur
+GPU=1 ./run_tiger.sh        # + GPU paravirtuel qgpu, et CD des sources du plugin GL
 ./run_os9.sh                # Mac OS 9 : boote le disque installé, sinon le CD en live
 ./run_os9.sh install        # force le boot CD pour (ré)installer
 ./run_frontend.sh           # frontend ImGui (affichage QEMU embarqué via D-Bus)
@@ -176,6 +179,32 @@ QFB=1 ./run_tiger.sh               # Tiger + écran QFB en second moniteur
 
 Détails : `kext/POMPPCQFB/README.md` ; contexte et alternatives (dont pourquoi une
 RTX 4060 Ti ne peut pas être passée en direct) : `docs/gpu-tiger-4060ti.md`.
+
+## GPU 3D paravirtuel qgpu (plugin OpenGL de Tiger → GPU de l'hôte)
+
+Les applications OpenGL de Tiger rendent sur le GPU de l'hôte. Trois couches : le plugin
+`GLDriver-POMPPC` (chargé par `OpenGL.framework` comme un pilote, il traduit la rastérisation de
+GLEngine en commandes), le kext `POMPPCGPU` (transport, 4 processus à la fois) et le device QEMU
+`qgpu-pci`, qui exécute les commandes par OpenGL sur l'hôte (CGL sur macOS, EGL sur Linux).
+Tout ce que le plugin n'accélère pas est rendu par le code d'Apple, qu'il enveloppe : le résultat
+reste exact.
+
+| Scène (dans Tiger) | Apple logiciel | POMPPC |
+|---|---|---|
+| couloir multitexture + brouillard, 640×480 | 3,0 img/s | 574 img/s |
+| plan en perspective trilinéaire, 512×384 | 14,2 img/s | 837 img/s |
+
+```bash
+./scripts/build_qemu_qfb.sh          # QEMU + qfb-pci + qgpu-pci
+./tests/run-all.sh --slow            # dont les tests qgpu (natif soft/GL, bout en bout)
+GPU=1 ./run_tiger.sh                 # Tiger + qgpu-pci + CD « POMPPCSRC » (sources du plugin,
+                                     # regravé si besoin ; GLISO=0 pour l'omettre). Une fois,
+                                     # dans Tiger : cp -R /Volumes/POMPPCSRC /tmp/src &&
+                                     #   sudo sh /tmp/src/guest/gldriver/install.sh
+```
+
+Domaine accéléré, rétro-ingénierie d'`OpenGL.framework`, protocole, mesures et boucle de
+développement dans l'invité : `docs/gpu-3d-tiger.md`. Plugin : `guest/gldriver/README.md`.
 
 ## Optimisations (guidées par le profiling)
 
@@ -281,7 +310,11 @@ ne garantit :
    plus celui qui tournait ;
 4. **alignement des registres QFB** entre l'hôte (`patches/qfb/qfb-pci.c`) et l'invité
    (`kext/POMPPCQFB/qfb_regs.h`) — une divergence donne un écran corrompu très pénible à
-   diagnostiquer.
+   diagnostiquer ;
+5. **GPU paravirtuel** : `qgpu_proto.h` identique au bit près hôte/invité, `qgpu_core_test`
+   (cœur + backends soft/gl) compilé et exécuté en natif, trampolines du plugin à jour de leur
+   générateur. `--slow` ajoute `qgpu_smoke.py`. Le plugin lui-même se teste dans l'invité
+   (`docs/gpu-3d-tiger.md` §5).
 
 ## Prochaine étape
 
@@ -306,11 +339,19 @@ la campagne TCG — c'est le seul chiffre du projet dont la provenance n'est plu
 | `frontend/` | frontend Dear ImGui embarquant l'affichage QEMU via D-Bus (`frontend/README.md`) |
 | `patches/` | patches QEMU et firmware OpenBIOS, **dont le device audio Screamer vendu dans le dépôt** (`patches/screamer/`). Ce qui est appliqué vs. ce qui n'est là que pour référence : `patches/README.md` |
 | `kext/POMPPCQFB/` | pilote Tiger du framebuffer QFB (`kext/POMPPCQFB/README.md`) |
+| `kext/POMPPCGPU/` | pilote Tiger du GPU paravirtuel qgpu : transport multi-processus (`kext/POMPPCGPU/README.md`) |
+| `patches/qgpu/` | device QEMU `qgpu-pci`, cœur d'exécution, backends logiciel et **OpenGL** (rendu sur le GPU hôte), contrat `qgpu_proto.h` |
+| `guest/gldriver/` | **plugin OpenGL de Tiger** et son installateur (`guest/gldriver/README.md`) |
+| `guest/gltest/`, `guest/qgpu-test/` | programmes de test à compiler dans l'invité (GL hors écran et fenêtré ; transport seul) |
+| `guest/verify.sh`, `scripts/verify-kext-in-guest.py` | première vérification du kext à l'aveugle (single-user) |
+| `tools/` | rétro-ingénierie PPC, générateur de trampolines, boucle de développement dans l'invité (`tools/README.md`) |
+| `tests/qgpu_core_test.c`, `tests/qgpu_smoke.py` | tests du GPU paravirtuel : natif hôte (soft + gl), et bout en bout depuis Open Firmware |
+| `docs/gpu-3d-tiger.md` | GPU 3D : architecture, rétro-ingénierie d'OpenGL.framework, protocole, mesures |
 | `tests/run-all.sh` | **harnais de non-régression** : syntaxe shell/Python, shellcheck, cohérence doc↔binaire, alignement des registres QFB hôte/invité. `--slow` ajoute les tests qui bootent réellement |
 | `tests/qfb_smoke.py` | test de bout en bout du device QFB, sans invité (dont la non-régression du scanout débordant) |
 | `scripts/caps.sh` | sondage des capacités réelles d'un binaire QEMU (QOM), partagé par les lanceurs, le build et les tests |
 | `scripts/ab-measure.sh` | A/B interleavé entre deux binaires QEMU, médiane de `CPU_qemu` |
-| `docs/gpu-tiger-4060ti.md` | étude GPU : passthrough, paravirtualisation, plan par phases |
+| `docs/gpu-tiger-4060ti.md` | étude GPU 2D : passthrough, paravirtualisation, plan par phases |
 | `pack/` | règle udev pour le passthrough manette |
 | `disks/extras/` | petits pilotes tiers pour OS 9 (virtio, tablette USB) — `disks/extras/README.md` |
 | `disks/`, `images/`, `shared/`, `bench/` | données locales, gitignorées (sauf `disks/extras/`) |

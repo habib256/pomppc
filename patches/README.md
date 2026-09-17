@@ -11,6 +11,8 @@ liste, essais revertés, binaires supplantés) gardé pour pouvoir refaire le ra
 | `smp-mac99/qemu-mac99-cpus-v2.patch` | SMP mac99. Neutralise le garde-fou `« Only UP supported today »` d'`hw/intc/openpic.c`, ajoute le GPIO 4 de KeyLargo (ligne de reset du CPU1) dans `hw/misc/macio/gpio.c`, et le `cpu_kick()` qui relâche le cœur secondaire dans `hw/ppc/mac_newworld.c`. Appliqué avec `--fuzz=3` sur QEMU 9.2.0. |
 | `qfb/qfb-pci.c` | Le device paravirtuel `qfb-pci`, copié dans `hw/display/`. Protocole « qfb1 » de Solra Bizna porté du NuBus vers PCI. |
 | `qfb/0002-wire-qfb-pci-build.patch` | Câblage meson/Kconfig du device ci-dessus. |
+| `qgpu/qgpu-pci.c`, `qgpu-core.[ch]`, `qgpu-soft.c`, `qgpu-gl.c`, `qgpu_proto.h` | Le GPU paravirtuel `qgpu-pci` (protocole v4) : device (transport), cœur d'exécution du flux de commandes (contextes, surfaces, textures, état GL), backend logiciel de référence, **backend OpenGL** (CGL/EGL, rendu sur le GPU hôte), et le contrat hôte/invité. Copiés dans `hw/display/`. |
+| `qgpu/0003-wire-qgpu-pci-build.patch` | Câblage meson/Kconfig de `qgpu-pci` ; lie `OpenGL.framework` (macOS) ou EGL+GL (Linux) si présents, sinon le backend GL est un stub. |
 | `screamer/screamer.c` + `screamer/screamer.h` | Le device audio **Screamer** (AWACS PowerMac), copiés dans `hw/audio/` et `include/hw/audio/`. |
 | `screamer/0001-wire-screamer-build.patch` | Câblage du Screamer : `hw/audio/Kconfig`, `hw/audio/meson.build`, `hw/ppc/Kconfig`, et surtout l'instanciation + les IRQ/DBDMA dans `hw/misc/macio/macio.c`. |
 
@@ -73,6 +75,7 @@ patché que pour des **fonctionnalités**, jamais pour la performance du JIT.
 
 ## Licences
 
+`qgpu/*.c` et `qgpu/*.h` sont sous GPL-2.0-or-later (code POMPPC).
 `qfb/qfb-pci.c` est sous GPL-2.0-or-later : il dérive de `hw/display/mac_qfb.c` (Solra Bizna),
 lui-même dérivé du code de Laurent Vivier et Hervé Poussineau.
 `screamer/screamer.c` et `screamer/screamer.h` sont sous licence MIT, © 2016 Mark

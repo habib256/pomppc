@@ -32,6 +32,12 @@
 # (les types QOM sont enregistrés indépendamment de la machine) : ~100 ms.
 #
 # Les trois sondages sont mémoïsés par binaire : les appeler en boucle est gratuit.
+#
+# ⚠ Jamais `printf … | grep -q` ici : les appelants tournent sous `set -o
+# pipefail`, grep -q s'arrête au premier résultat, printf prend SIGPIPE et le
+# tube échoue — « device absent » alors qu'il est présent. La liste des types
+# de qemu-system-ppc64 est assez longue pour que ça arrive (vu en vrai avec
+# GPU=1). D'où les redirections `<<<`.
 
 _CAPS_BIN=""; _CAPS_DEV=""; _CAPS_NET=""; _CAPS_AUD=""
 
@@ -71,18 +77,18 @@ _caps_load() {
 # est pire qu'un test faux. Les guillemets fermants suffisent à être exact.
 qemu_has_device() {
   _caps_load "$1" || return 2      # 2 = sondage impossible, ≠ 1 = absent
-  printf '%s\n' "$_CAPS_DEV" | grep -qF "\"name\": \"$2\""
+  grep -qF "\"name\": \"$2\"" <<< "$_CAPS_DEV"
 }
 
 # -netdev help / -audiodev help impriment un nom par ligne.
 qemu_has_netdev() {
   _caps_load "$1" || return 2
-  printf '%s\n' "$_CAPS_NET" | grep -qx "[[:space:]]*$2[[:space:]]*"
+  grep -qx "[[:space:]]*$2[[:space:]]*" <<< "$_CAPS_NET"
 }
 
 qemu_has_audiodev() {
   _caps_load "$1" || return 2
-  printf '%s\n' "$_CAPS_AUD" | grep -qx "[[:space:]]*$2[[:space:]]*"
+  grep -qx "[[:space:]]*$2[[:space:]]*" <<< "$_CAPS_AUD"
 }
 
 # Le device est-il réellement présent dans l'arbre QOM de la machine ?
@@ -103,5 +109,5 @@ qemu_machine_has() {
     echo "caps: sondage qom-tree de '$machine' échoué" >&2
     _MACH_KEY=""; return 2
   fi
-  printf '%s\n' "$_MACH_TREE" | grep -q "($name)"
+  grep -q "($name)" <<< "$_MACH_TREE"
 }

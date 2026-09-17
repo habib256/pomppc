@@ -26,7 +26,7 @@ fi
 
 log "=== copie des sources ==="
 rm -rf /tmp/qfb; mkdir -p /tmp/qfb
-cp "$SRC"/*.h "$SRC"/*.cpp "$SRC"/Info.plist "$SRC"/Makefile /tmp/qfb/ >> $LOG 2>&1
+cp "$SRC"/*.h "$SRC"/*.cpp "$SRC"/*.c "$SRC"/Info.plist "$SRC"/Makefile /tmp/qfb/ >> $LOG 2>&1
 cd /tmp/qfb || exit 1
 
 log "=== compilation ==="

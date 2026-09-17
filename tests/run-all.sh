@@ -22,19 +22,21 @@ noop() { echo "  – $* (ignoré)"; skip=$((skip+1)); }
 
 echo "=== 1. syntaxe des scripts shell ==="
 # Tout ce qui est exécutable et commence par un shebang bash/sh.
-mapfile -t SH < <(git ls-files | while read -r f; do
+# (boucle while plutôt que mapfile : le bash 3.2 de macOS n'a pas mapfile.)
+SH=()
+while read -r f; do SH+=("$f"); done < <(git ls-files | while read -r f; do
   [ -f "$f" ] || continue
   head -c 2 "$f" 2>/dev/null | grep -q '#!' || continue
   head -1 "$f" | grep -qE 'bash|/bin/sh' && echo "$f"
 done)
-for f in "${SH[@]}"; do
+for f in ${SH[@]+"${SH[@]}"}; do
   if bash -n "$f" 2>/dev/null; then ok "bash -n $f"; else ko "bash -n $f"; fi
 done
 
 echo
 echo "=== 2. shellcheck (si installé) ==="
 if command -v shellcheck >/dev/null 2>&1; then
-  for f in "${SH[@]}"; do
+  for f in ${SH[@]+"${SH[@]}"}; do
     # SC1091 : les 'source' dynamiques (config.env, caps.sh) ne sont pas suivis.
     if shellcheck -e SC1091 -S warning "$f" >/dev/null 2>&1; then ok "shellcheck $f"
     else ko "shellcheck $f  ($(shellcheck -e SC1091 -S warning -f gcc "$f" 2>/dev/null | head -1))"; fi
@@ -75,8 +77,13 @@ if [ -x "$QEMU_BIN" ] || command -v "$QEMU_BIN" >/dev/null 2>&1; then
   }
   cap "screamer instancié dans $MACHINE" qemu_machine_has "$QEMU_BIN" "$MACHINE" screamer
   cap "device qfb-pci"                   qemu_has_device   "$QEMU_BIN" qfb-pci
+  cap "device qgpu-pci"                  qemu_has_device   "$QEMU_BIN" qgpu-pci
   cap "slirp"                            qemu_has_netdev   "$QEMU_BIN" user
-  cap "backend audio pa"                 qemu_has_audiodev "$QEMU_BIN" pa
+  # PulseAudio est le backend de référence sur Linux ; sur macOS c'est coreaudio.
+  case "$(uname -s)" in
+    Darwin) cap "backend audio coreaudio"    qemu_has_audiodev "$QEMU_BIN" coreaudio ;;
+    *)      cap "backend audio pa"           qemu_has_audiodev "$QEMU_BIN" pa ;;
+  esac
 else
   noop "QEMU introuvable ($QEMU_BIN)"
 fi
@@ -104,11 +111,71 @@ sys.exit(1 if bad else 0)
 PY
 
 echo
+echo "=== 5 bis. contrat qgpu : une seule source de vérité, copiée à l'identique ==="
+# Le protocole du GPU paravirtuel n'est PAS relu par regex : le même fichier
+# est copié tel quel côté hôte et côté invité, et doit le rester au bit près.
+if cmp -s patches/qgpu/qgpu_proto.h kext/POMPPCGPU/qgpu_proto.h; then
+  ok "qgpu_proto.h identique hôte/invité"
+else
+  ko "qgpu_proto.h DIVERGE entre patches/qgpu/ et kext/POMPPCGPU/ (cp l'un sur l'autre)"
+fi
+
+echo
+echo "=== 5 ter. cœur qgpu + backends, en natif sur l'hôte ==="
+# Compile et exécute tests/qgpu_core_test.c : même flux que qgpu_smoke.py et
+# que le programme invité, sans QEMU. Le backend GL est testé s'il démarre ici.
+if command -v cc >/dev/null 2>&1; then
+  QGPU_BIN="${TMPDIR:-/tmp}/qgpu_core_test.$$"
+  case "$(uname -s)" in
+    Darwin) QGPU_LIBS=(-framework OpenGL) ;;
+    *)      QGPU_LIBS=(); pkg-config --exists egl gl 2>/dev/null && QGPU_LIBS=($(pkg-config --libs egl gl)) ;;
+  esac
+  if cc -std=gnu11 -O1 -I patches/qgpu tests/qgpu_core_test.c \
+        patches/qgpu/qgpu-core.c patches/qgpu/qgpu-soft.c patches/qgpu/qgpu-gl.c \
+        ${QGPU_LIBS[@]+"${QGPU_LIBS[@]}"} -lm -o "$QGPU_BIN" 2>/dev/null; then
+    if "$QGPU_BIN" >/dev/null 2>&1; then ok "qgpu_core_test (soft + gl si dispo)"
+    else ko "qgpu_core_test ($("$QGPU_BIN" 2>&1 | grep FAIL | head -1))"; fi
+  else
+    ko "qgpu_core_test ne compile pas"
+  fi
+  rm -f "$QGPU_BIN"
+else
+  noop "pas de compilateur C"
+fi
+
+echo
+echo "=== 5 quater. plugin OpenGL : sources générées à jour ==="
+# gld_tramp.s est produit par tools/gld/gen_tramp.py et livré tel quel à
+# l'invité (qui n'a pas Python) : il ne doit jamais diverger du générateur.
+if python3 tools/gld/gen_tramp.py | cmp -s - guest/gldriver/gld_tramp.s; then
+  ok "gld_tramp.s = sortie de gen_tramp.py"
+else
+  ko "gld_tramp.s périmé (python3 tools/gld/gen_tramp.py > guest/gldriver/gld_tramp.s)"
+fi
+# La liste des points d'entrée de pomppc_gld.h (X-macro) doit suivre le même
+# ordre que le générateur : c'est l'ordre de la table de GLEngine.
+if python3 - <<'PY'
+import re, subprocess, sys
+gen = subprocess.check_output(["python3", "tools/gld/gen_tramp.py", "--names"]).decode().split()
+hdr = re.findall(r"X\((\w+)\)", open("guest/gldriver/pomppc_gld.h").read().split("enum")[0])
+sys.exit(0 if gen == hdr else 1)
+PY
+then ok "GLD_LIST alignée sur le générateur"; else ko "GLD_LIST de pomppc_gld.h désalignée"; fi
+
+echo
 echo "=== 6. device QFB de bout en bout (Open Firmware, sans invité) ==="
 if [ "$SLOW" = 1 ]; then
   if python3 tests/qfb_smoke.py; then ok "qfb_smoke.py"; else ko "qfb_smoke.py"; fi
 else
   noop "qfb_smoke.py (--slow pour l'exécuter, ~30 s)"
+fi
+
+echo
+echo "=== 6 bis. device qgpu de bout en bout (Open Firmware, sans invité) ==="
+if [ "$SLOW" = 1 ]; then
+  if python3 tests/qgpu_smoke.py; then ok "qgpu_smoke.py"; else ko "qgpu_smoke.py"; fi
+else
+  noop "qgpu_smoke.py (--slow pour l'exécuter, ~60 s)"
 fi
 
 echo

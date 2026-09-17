@@ -34,7 +34,7 @@ echo "Binaire profilé: $QEMU_BIN"
 setsid "$QEMU_BIN" -M "$MACHINE" -cpu "$CPU" -m "$RAM_MB" -smp "$SMP" \
   -display none -g "$RES" \
   -drive "file=$DISK,format=qcow2,media=disk" \
-  "${NET_ARGS[@]}" \
+  ${NET_ARGS[@]+"${NET_ARGS[@]}"} \
   -prom-env 'auto-boot?=true' -prom-env "boot-device=$BOOTDEV" -prom-env 'boot-args=-v' \
   -serial "file:$ROOT/bench/measure.log" -name "POMPPC-profile" \
   -pidfile "$PIDFILE" \
