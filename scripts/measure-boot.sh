@@ -105,11 +105,11 @@ START=$(date +%s.%N)
 setsid "$QEMU_BIN" -M "$MACHINE" -cpu "$CPU" -m "$RAM_MB" -smp "$SMP_N" \
   -display none -g "$RES" \
   -drive "file=$DISK,format=qcow2,media=disk" \
-  "${NET_ARGS[@]}" \
+  ${NET_ARGS[@]+"${NET_ARGS[@]}"} \
   -prom-env 'auto-boot?=true' -prom-env "boot-device=$BOOTDEV" -prom-env 'boot-args=-v' \
   -serial "file:$ROOT/bench/measure.log" -name "POMPPC-measure" \
   -pidfile "$PIDFILE" \
-  -monitor "unix:$MON,server,nowait" "${EXTRA[@]}" \
+  -monitor "unix:$MON,server,nowait" ${EXTRA[@]+"${EXTRA[@]}"} \
   >/dev/null 2>"$SCR/measure-qemu.err" &
 
 # attendre le socket ET le pidfile (QEMU écrit le second juste après le premier)

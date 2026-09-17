@@ -46,8 +46,8 @@ for i in $(seq 1 "$N"); do
   done
 done
 
-MA=$(printf '%s\n' "${RA[@]}" | median)
-MB=$(printf '%s\n' "${RB[@]}" | median)
+MA=$(printf '%s\n' ${RA[@]+"${RA[@]}"} | median)
+MB=$(printf '%s\n' ${RB[@]+"${RB[@]}"} | median)
 echo
 echo "=== médianes sur $N paires ==="
 printf "  A  %-40s %ss\n" "$(basename "$A")" "$MA"

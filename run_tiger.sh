@@ -8,10 +8,15 @@
 #   SNAPSHOT=1 ./run_tiger.sh # disque jetable (writes annulés -> boot toujours propre, pas de fsck)
 #   NET=1 ./run_tiger.sh      # réseau (si ton QEMU a slirp compilé)
 #   HEADLESS=1 ./run_tiger.sh # sans fenêtre (moniteur seul, pour scripting)
+#   POMPPC_DISPLAY=sdl        # autre affichage (défaut : cocoa sous macOS, gtk sous Linux)
 #   QFB=1 ./run_tiger.sh      # + écran paravirtuel qfb-pci (kext POMPPCQFB)
 #   QFB_RES=1280x800          # mode par défaut proposé par l'écran QFB (avec QFB=1)
+#   GPU=1 ./run_tiger.sh      # + GPU paravirtuel qgpu-pci (kext POMPPCGPU, rendu hôte OpenGL)
+#   GPU_BACKEND=soft|gl|auto  # backend de rendu hôte du qgpu (défaut : auto)
 #   NOPAD=1 ./run_tiger.sh    # coupe le passthrough de la manette USB
 #   NOCD=1 ./run_tiger.sh     # omet le lecteur CD amovible vide 'gamecd'
+#   GLISO=1 ./run_tiger.sh    # insère l'ISO des sources du plugin GL (disks/pomppc-src.iso)
+#                             # dans 'gamecd' ; implicite avec GPU=1 (GLISO=0 pour l'éviter)
 #   EXTRA_ARGS="-device ..."  # arguments QEMU supplémentaires
 #
 # Piloté par le frontend ImGui : DBUS_DISPLAY=1 (sortie -display dbus,p2p=on) et
@@ -25,13 +30,15 @@
 # classe absente n'est qu'un warning côté QEMU : rien ne signalait la panne.)
 # SMP >= 2 : qemu-system-ppc64 (target MTTCG-safe) + réveil CPU secondaire via
 # GPIO KeyLargo. Vérifie le nb de CPU dans « À propos de ce Mac ». Son via
-# PulseAudio (activer la Mémoire Virtuelle côté invité aide). Fenêtre fermée -> quitte.
+# PulseAudio sous Linux, CoreAudio sous macOS (activer la Mémoire Virtuelle
+# côté invité aide). Fenêtre fermée -> quitte.
 set -euo pipefail
 USER_SMP="${SMP:-}"                        # intention user AVANT que config.env n'impose SMP=1
 USER_RES="${RES:-}"                        # RES explicite de l'utilisateur, prioritaire
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$ROOT/config.env"
 source "$ROOT/scripts/caps.sh"
+source "$ROOT/scripts/hostcompat.sh"
 
 # WIDE=1 -> 16:9 plein écran (1920x1080). Le ndrv stock offre nativement ce mode
 # (contrairement à 1440x900/1600x900 qui retombent en 800x600). RES= reste prioritaire.
@@ -45,15 +52,16 @@ UNI_OBIOS="$ROOT/patches/smp-mac99/openbios-smp-screamer.elf"
 QEMU_BIN64="${QEMU_BIN}64"                # qemu-system-ppc -> qemu-system-ppc64
 
 # --- Verrou disque ---
-# flock plutôt que fuser : fuser vient de psmisc, et s'il manque le test
-# échouait en silence — plus aucun garde-fou, deux QEMU sur le même qcow2,
+# Verrou sur un fd plutôt que fuser : fuser vient de psmisc, et s'il manque le
+# test échouait en silence — plus aucun garde-fou, deux QEMU sur le même qcow2,
 # corruption. Le fd 9 reste ouvert à travers l'exec final : le verrou vit donc
 # aussi longtemps que QEMU. En SNAPSHOT=1 les écritures sont jetées, plusieurs
-# instances sont légitimes : pas de verrou.
+# instances sont légitimes : pas de verrou. (host_lock_fd : flock sous Linux,
+# perl sous macOS, qui n'a pas flock(1).)
 SCR="${POMPPC_SCRATCH:-$ROOT/.run}"; mkdir -p "$SCR"
 if [ -z "${SNAPSHOT:-}" ]; then
   exec 9>"$SCR/tiger.lock"
-  if ! flock -n 9; then
+  if ! host_lock_fd 9; then
     echo "⚠  Tiger tourne déjà (verrou $SCR/tiger.lock). Ferme-le d'abord," >&2
     echo "   ou lance en disque jetable : SNAPSHOT=1 ./run_tiger.sh" >&2
     exit 1
@@ -72,8 +80,8 @@ EXTRA+=(-bios "$UNI_OBIOS")
 SND_ON=0
 if [ -z "${NOSOUND:-}" ]; then
   if qemu_machine_has "$QEMU_BIN" "$MACHINE" screamer; then
-    AUDIO=(-audiodev pa,id=snd0 -global screamer.audiodev=snd0)
-    export PULSE_SERVER="${PULSE_SERVER:-unix:/run/user/$(id -u)/pulse/native}"
+    AUDIO=(-audiodev "$HOST_AUDIODEV,id=snd0" -global screamer.audiodev=snd0)
+    host_audio_env
     [ "$RAM" -gt 768 ] && RAM=768        # le Screamer exige < 1 Go
     SND_ON=1
   else
@@ -100,7 +108,7 @@ fi
 # (POMPPC/frontend). Le frontend fournit QMP_SOCK et se branche en add_client.
 if [ -n "${DBUS_DISPLAY:-}" ]; then DISP="dbus,p2p=on";
 elif [ -n "${HEADLESS:-}" ]; then DISP="none";
-else DISP="gtk"; export DISPLAY="${DISPLAY:-:1}"; fi
+else DISP="${POMPPC_DISPLAY:-$HOST_DISPLAY}"; host_audio_env; fi
 
 # QMP pour pilotage par le frontend (add_client @dbus-display, reset, etc.).
 QMP_ARGS=()
@@ -139,6 +147,47 @@ if [ -n "${QFB:-}" ]; then
   fi
 fi
 
+# --- GPU paravirtuel qgpu (device qgpu-pci + kext POMPPCGPU) ---
+#     GPU=1 ajoute le coprocesseur de commandes 3D : l'invité y soumet des
+#     flux de commandes, l'hôte les rend en OpenGL (docs/gpu-3d-tiger.md).
+#     GPU_BACKEND choisit le backend hôte ; GPU_TRACE=1 journalise chaque
+#     commande sur stderr (verbeux).
+GPU_ARGS=()
+if [ -n "${GPU:-}" ]; then
+  if qemu_has_device "$BIN" qgpu-pci; then
+    # Pas de $([ … ] && echo …) ici : sous set -e, l'affectation prend le code
+    # de la substitution (1 sans GPU_TRACE) et le lanceur s'arrêtait en silence.
+    GPU_OPTS="backend=${GPU_BACKEND:-auto}"
+    [ -n "${GPU_TRACE:-}" ] && GPU_OPTS="$GPU_OPTS,trace=on"
+    GPU_ARGS=(-device "qgpu-pci,id=gpu0,$GPU_OPTS")
+    echo "  🎨 GPU paravirtuel qgpu (backend ${GPU_BACKEND:-auto})"
+  else
+    echo "⚠  GPU=1 demandé mais ce QEMU n'a pas le device qgpu-pci." >&2
+    echo "   Reconstruis-le : ./scripts/build_qemu_qfb.sh" >&2
+    exit 1
+  fi
+fi
+
+# --- CD des sources du plugin GL (kext POMPPCGPU + GLDriver-POMPPC) ---
+#     Inséré dans le lecteur 'gamecd' (donc éjectable/remplaçable à chaud comme
+#     avant). Régénéré si absent ou plus vieux qu'une source : le CD monté
+#     correspond toujours au dépôt. Dans l'invité, il apparaît comme POMPPCSRC.
+GLISO_WANT="${GLISO:-}"
+[ -z "$GLISO_WANT" ] && [ -n "${GPU:-}" ] && GLISO_WANT=1
+if [ "$GLISO_WANT" = 1 ]; then
+  GL_ISO="$ROOT/disks/pomppc-src.iso"
+  GL_SRCS=("$ROOT/kext/POMPPCGPU" "$ROOT/kext/POMPPCQFB" "$ROOT/guest/gldriver"
+           "$ROOT/guest/gltest" "$ROOT/guest/qgpu-test")
+  if [ ! -f "$GL_ISO" ] || [ -n "$(find "${GL_SRCS[@]}" -type f -newer "$GL_ISO" 2>/dev/null | head -1)" ]; then
+    echo "  💿 (re)génération de $(basename "$GL_ISO")…"
+    "$ROOT/scripts/make_kext_iso.sh" "$GL_ISO" >/dev/null || {
+      echo "⚠  impossible de graver l'ISO du plugin GL (scripts/make_kext_iso.sh)." >&2; exit 1; }
+  fi
+  CD_ARGS=(-drive "id=gamecd,if=ide,media=cdrom,format=raw,readonly=on,file=$GL_ISO")
+  echo "  💿 CD POMPPCSRC inséré. Dans Tiger (une seule fois, Terminal) :"
+  echo "       cp -R /Volumes/POMPPCSRC /tmp/src && sudo sh /tmp/src/guest/gldriver/install.sh"
+fi
+
 # --- Arguments QEMU ad hoc : EXTRA_ARGS="-device ..." ./run_tiger.sh ---
 read -r -a USER_EXTRA <<< "${EXTRA_ARGS:-}"
 
@@ -166,12 +215,12 @@ fi
 
 exec "$BIN" -M "$MACHINE" -cpu "$CPU" -m "$RAM" -smp "$SMP_N" \
   -display "$DISP" -g "$RES" \
-  -drive "file=$DISK,format=qcow2,media=disk" "${SNAP_ARGS[@]}" "${CD_ARGS[@]}" \
-  "${NET_ARGS[@]}" "${EXTRA[@]}" "${AUDIO[@]}" \
-  -device usb-tablet "${PAD_ARGS[@]}" "${QFB_ARGS[@]}" "${USER_EXTRA[@]}" \
+  -drive "file=$DISK,format=qcow2,media=disk" ${SNAP_ARGS[@]+"${SNAP_ARGS[@]}"} ${CD_ARGS[@]+"${CD_ARGS[@]}"} \
+  ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${EXTRA[@]+"${EXTRA[@]}"} ${AUDIO[@]+"${AUDIO[@]}"} \
+  -device usb-tablet ${PAD_ARGS[@]+"${PAD_ARGS[@]}"} ${QFB_ARGS[@]+"${QFB_ARGS[@]}"} ${GPU_ARGS[@]+"${GPU_ARGS[@]}"} ${USER_EXTRA[@]+"${USER_EXTRA[@]}"} \
   -prom-env 'auto-boot?=true' \
   -prom-env "boot-device=$BOOTDEV" \
   -prom-env 'boot-args=-v' \
   -name "Tiger" \
-  "${QMP_ARGS[@]}" \
+  ${QMP_ARGS[@]+"${QMP_ARGS[@]}"} \
   -monitor "unix:$MON,server,nowait"

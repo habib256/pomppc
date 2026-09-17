@@ -21,13 +21,14 @@ BOOTDEV='hd:10,\System\Library\CoreServices\BootX'
 # Mode d'affichage. DÉFAUT = fenêtre (c'est TON Mac).
 # Headless = mode de test pour l'assistant (Claude), pour ne pas encombrer le bureau hôte:
 #   POMPPC_DISPLAY=none scripts/boot.sh
-DISP="${POMPPC_DISPLAY:-gtk}"
-export DISPLAY="${DISPLAY:-:1}"
+source "$ROOT/scripts/hostcompat.sh"
+DISP="${POMPPC_DISPLAY:-$HOST_DISPLAY}"
+host_audio_env
 
-setsid "$QEMU_BIN" -M "$MACHINE" -cpu "$CPU" -m "$RAM_MB" -smp "$SMP" \
+host_detach "$QEMU_BIN" -M "$MACHINE" -cpu "$CPU" -m "$RAM_MB" -smp "$SMP" \
   -display "$DISP" -g "$RES" \
   -drive "file=$DISK,format=qcow2,media=disk" \
-  "${NET_ARGS[@]}" \
+  ${NET_ARGS[@]+"${NET_ARGS[@]}"} \
   -prom-env 'auto-boot?=true' \
   -prom-env "boot-device=$BOOTDEV" \
   -prom-env 'boot-args=-v' \

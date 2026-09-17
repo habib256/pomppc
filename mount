@@ -33,11 +33,11 @@ case "$arg" in
   "")
     mapfile -t imgs < <(list_imgs)
     [ ${#imgs[@]} -eq 0 ] && { echo "Aucune image CD dans disks/cdr/. Extrais-en une d'abord." >&2; exit 1; }
-    rows=(); for f in "${imgs[@]}"; do rows+=("$(basename "$f")"); done
+    rows=(); for f in ${imgs[@]+"${imgs[@]}"}; do rows+=("$(basename "$f")"); done
     export DISPLAY="${DISPLAY:-:1}"
     sel=$(zenity --list --title="Monter un CD dans OS 9" \
           --text="CD à insérer dans le lecteur (à chaud) :" \
-          --column="CD" "${rows[@]}" --extra-button="⏏ Éjecter" \
+          --column="CD" ${rows[@]+"${rows[@]}"} --extra-button="⏏ Éjecter" \
           --width=440 --height=380 2>/dev/null) || exit 0
     [ "$sel" = "⏏ Éjecter" ] && { hmp "eject gamecd" >/dev/null; exit 0; }
     [ -z "$sel" ] && exit 0
