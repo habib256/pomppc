@@ -73,7 +73,7 @@ int main(int argc, char **argv)
 {
     const char *scene = argc > 1 ? argv[1] : "tri";
     const char *out = argc > 4 ? argv[4] : "gltest.ppm";
-    CGLPixelFormatAttribute attrs[16];
+    CGLPixelFormatAttribute attrs[24];
     CGLPixelFormatObj pix;
     CGLContextObj ctx;
     long npix = 0, rid = 0;
@@ -90,6 +90,9 @@ int main(int argc, char **argv)
     attrs[k++] = kCGLPFAOffScreen;
     attrs[k++] = kCGLPFAColorSize; attrs[k++] = 32;
     attrs[k++] = kCGLPFADepthSize; attrs[k++] = 16;
+    if (getenv("GLTEST_STENCIL")) {         /* tampon de stencil de 8 bits */
+        attrs[k++] = kCGLPFAStencilSize; attrs[k++] = 8;
+    }
     if (getenv("GLTEST_RENDERER")) {
         attrs[k++] = kCGLPFARendererID;
         attrs[k++] = strtoul(getenv("GLTEST_RENDERER"), 0, 0);
@@ -613,6 +616,103 @@ int main(int argc, char **argv)
         }
         glActiveTextureARB(GL_TEXTURE0_ARB);
         glDeleteTextures(2, id);
+    } else if (!strcmp(scene, "stencil")) {
+        /* Stencil (GLTEST_STENCIL=1) : masque, comptage de recouvrement, zfail,
+           masque d'écriture. Pixels témoins au centre des zones, jamais sur une arête. */
+        glClearColor(0, 0, 0, 1);
+        glClearStencil(0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        glEnable(GL_STENCIL_TEST);
+        /* 1. masque : un carré écrit 1 dans le stencil, couleur fermée */
+        glColorMask(0, 0, 0, 0);
+        glStencilFunc(GL_ALWAYS, 1, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+        glRectf(W / 4.0f, H / 4.0f, 3 * W / 4.0f, 3 * H / 4.0f);
+        glColorMask(1, 1, 1, 1);
+        /* rouge partout où le stencil vaut 1, vert partout où il vaut 0 */
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        glStencilFunc(GL_EQUAL, 1, 0xFF);
+        glColor3f(1, 0, 0); glRectf(0, 0, W, H);
+        glStencilFunc(GL_EQUAL, 0, 0xFF);
+        glColor3f(0, 1, 0); glRectf(0, 0, W, H);
+        glFinish();
+        check("dans le masque : rouge", W / 2, H / 2, 0xFF0000);
+        check("hors du masque : vert", W / 8, H / 8, 0x00FF00);
+        /* 2. comptage : deux carrés qui se recouvrent, INCR ; bleu où le compte vaut 2 */
+        glClear(GL_STENCIL_BUFFER_BIT);
+        glColorMask(0, 0, 0, 0);
+        glStencilFunc(GL_ALWAYS, 0, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+        glRectf(0, 0, 5 * W / 8.0f, 5 * H / 8.0f);
+        glRectf(3 * W / 8.0f, 3 * H / 8.0f, W, H);
+        glColorMask(1, 1, 1, 1);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        glStencilFunc(GL_LEQUAL, 2, 0xFF);           /* 2 <= stencil */
+        glColor3f(0, 0, 1); glRectf(0, 0, W, H);
+        glFinish();
+        check("recouvrement : bleu", W / 2, H / 2, 0x0000FF);
+        check("un seul carré : inchangé (vert)", W / 8, H / 8, 0x00FF00);
+        /* 3. zfail : un plan proche écrit la profondeur, un plan lointain échoue en
+              profondeur et INVERSE le stencil ; jaune où le stencil vaut 0xFF */
+        glClear(GL_STENCIL_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glColorMask(0, 0, 0, 0);
+        glStencilFunc(GL_ALWAYS, 0, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        glBegin(GL_QUADS);                            /* proche : moitié gauche */
+        glVertex3f(0, 0, 0.5f); glVertex3f(W / 2.0f, 0, 0.5f);
+        glVertex3f(W / 2.0f, H, 0.5f); glVertex3f(0, H, 0.5f);
+        glEnd();
+        glStencilOp(GL_KEEP, GL_INVERT, GL_KEEP);
+        glBegin(GL_QUADS);                            /* lointain : partout */
+        glVertex3f(0, 0, -0.5f); glVertex3f(W, 0, -0.5f);
+        glVertex3f(W, H, -0.5f); glVertex3f(0, H, -0.5f);
+        glEnd();
+        glDisable(GL_DEPTH_TEST);
+        glColorMask(1, 1, 1, 1);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        glStencilFunc(GL_EQUAL, 0xFF, 0xFF);
+        glColor3f(1, 1, 0); glRectf(0, 0, W, H);
+        glFinish();
+        check("zfail à gauche : jaune", W / 4, H / 2, 0xFFFF00);
+        check("zpass à droite : inchangé (bleu)", 9 * W / 16, H / 2, 0x0000FF);
+        /* 4. masque d'écriture : REPLACE 0xFF sous le masque 0x0F donne 0x0F */
+        glClear(GL_STENCIL_BUFFER_BIT);
+        glColorMask(0, 0, 0, 0);
+        glStencilMask(0x0F);
+        glStencilFunc(GL_ALWAYS, 0xFF, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+        glRectf(0, 0, W, H);
+        glStencilMask(0xFF);
+        glColorMask(1, 1, 1, 1);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        glStencilFunc(GL_EQUAL, 0x0F, 0xFF);
+        glColor3f(1, 0, 1); glRectf(0, 0, W, H);
+        glFinish();
+        check("masque d'écriture 0x0F : magenta", W / 2, H / 2, 0xFF00FF);
+        glDisable(GL_STENCIL_TEST);
+    } else if (!strcmp(scene, "stencilprobe")) {
+        /* Sonde du stencil : un réglage par glClear (le traceur vide l'état GL à
+           chaque effacement avec POMPPC_GLTRACE_STATE=1 ; on diffe les vidages). */
+        int i;
+        glClearColor(0, 0, 0, 1);
+        for (i = 0; i < 12; i++) {
+            switch (i) {
+            case 0: break;                                              /*  1 référence */
+            case 1: glEnable(GL_STENCIL_TEST); break;                   /*  2 */
+            case 2: glStencilFunc(GL_EQUAL, 0, 0xFFFFFFFF); break;      /*  3 fonction */
+            case 3: glStencilFunc(GL_EQUAL, 0x5A, 0xFFFFFFFF); break;   /*  4 référence */
+            case 4: glStencilFunc(GL_EQUAL, 0x5A, 0x3C); break;         /*  5 masque de valeur */
+            case 5: glStencilMask(0xA5); break;                         /*  6 masque d'écriture */
+            case 6: glStencilOp(GL_REPLACE, GL_KEEP, GL_KEEP); break;   /*  7 fail */
+            case 7: glStencilOp(GL_REPLACE, GL_INCR, GL_KEEP); break;   /*  8 zfail */
+            case 8: glStencilOp(GL_REPLACE, GL_INCR, GL_INVERT); break; /*  9 zpass */
+            case 9: glClearStencil(0x77); break;                        /* 10 valeur d'effacement */
+            case 10: glStencilOp(GL_REPLACE, GL_INCR_WRAP, GL_DECR_WRAP); break; /* 11 */
+            default: glDisable(GL_STENCIL_TEST); break;                 /* 12 */
+            }
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
     } else if (!strcmp(scene, "combprobe")) {
         /* Sonde GL_COMBINE et unités 2–3 : un réglage par glClear (le traceur
            vide l'état GL à chaque effacement avec POMPPC_GLTRACE_STATE=1). */

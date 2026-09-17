@@ -43,6 +43,19 @@ static bool grow_dbuf(QgpuCore *c, uint32_t npix)
     return true;
 }
 
+static bool grow_sbuf(QgpuCore *c, uint32_t npix)
+{
+    if (npix <= c->sbuf_cap) {
+        return true;
+    }
+    uint8_t *n = realloc(c->sbuf, npix);
+    if (!n) {
+        return false;
+    }
+    c->sbuf = n; c->sbuf_cap = npix;
+    return true;
+}
+
 /* GL : état initial d'un contexte. */
 void qgpu_state_init(QgpuState *st)
 {
@@ -67,6 +80,14 @@ void qgpu_state_init(QgpuState *st)
     }
     st->v[QGPU_SK_LINE_WIDTH]    = 0x3F800000;     /* 1.0 */
     st->v[QGPU_SK_POINT_SIZE]    = 0x3F800000;
+    /* v6 : stencil, valeurs initiales d'OpenGL (masques à tous les bits,
+       tronqués à la largeur du tampon : 8 bits). */
+    st->v[QGPU_SK_STENCIL_FUNC]       = 0x0207;    /* GL_ALWAYS */
+    st->v[QGPU_SK_STENCIL_VALUE_MASK] = 0xFF;
+    st->v[QGPU_SK_STENCIL_WRITE_MASK] = 0xFF;
+    st->v[QGPU_SK_STENCIL_OP_FAIL]    = QGPU_SOP_KEEP;
+    st->v[QGPU_SK_STENCIL_OP_ZFAIL]   = QGPU_SOP_KEEP;
+    st->v[QGPU_SK_STENCIL_OP_ZPASS]   = QGPU_SOP_KEEP;
 }
 
 static bool valid_base_format(uint32_t f)
@@ -159,6 +180,18 @@ static bool valid_blend_factor(uint32_t f)
     }
 }
 
+static bool valid_stencil_op(uint32_t o)
+{
+    switch (o) {
+    case QGPU_SOP_ZERO: case QGPU_SOP_INVERT: case QGPU_SOP_KEEP:
+    case QGPU_SOP_REPLACE: case QGPU_SOP_INCR: case QGPU_SOP_DECR:
+    case QGPU_SOP_INCR_WRAP: case QGPU_SOP_DECR_WRAP:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static bool valid_blend_eq(uint32_t e)
 {
     return e == 0x8006 || e == 0x800A || e == 0x800B;
@@ -209,6 +242,16 @@ static bool valid_state(uint32_t key, uint32_t val)
         float f = qgpu_u2f(val);
         return f > 0.0f && f <= 64.0f;
     }
+    case QGPU_SK_STENCIL_TEST:
+        return val <= 1;
+    case QGPU_SK_STENCIL_FUNC:
+        return valid_func(val);
+    case QGPU_SK_STENCIL_REF: case QGPU_SK_STENCIL_VALUE_MASK:
+    case QGPU_SK_STENCIL_WRITE_MASK: case QGPU_SK_STENCIL_CLEAR:
+        return val <= 255;                           /* stencil de 8 bits */
+    case QGPU_SK_STENCIL_OP_FAIL: case QGPU_SK_STENCIL_OP_ZFAIL:
+    case QGPU_SK_STENCIL_OP_ZPASS:
+        return valid_stencil_op(val);
     case QGPU_SK_POLY_FACTOR: case QGPU_SK_POLY_UNITS: {
         float f = qgpu_u2f(val);
         return f == f && f > -1e6f && f < 1e6f;
@@ -298,6 +341,7 @@ void qgpu_core_fini(QgpuCore *c)
     free(c->vbuf); c->vbuf = NULL; c->vbuf_cap = 0;
     free(c->pbuf); c->pbuf = NULL; c->pbuf_cap = 0;
     free(c->dbuf); c->dbuf = NULL; c->dbuf_cap = 0;
+    free(c->sbuf); c->sbuf = NULL; c->sbuf_cap = 0;
 }
 
 uint32_t qgpu_core_backend_tag(const QgpuCore *c)
@@ -475,9 +519,15 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         WANT(QGPU_LEN_SURF_CREATE);
         if (a[0] >= QGPU_MAX_SURF ||
             (a[3] & QGPU_FMT_MASK) != QGPU_FMT_XRGB8888 ||
-            (a[3] & ~(uint32_t)(QGPU_FMT_MASK | QGPU_FMT_FLAG_DEPTH)) ||
+            (a[3] & ~(uint32_t)(QGPU_FMT_MASK | QGPU_FMT_FLAG_DEPTH |
+                                QGPU_FMT_FLAG_STENCIL)) ||
             a[1] == 0 || a[2] == 0 ||
             a[1] > QGPU_MAX_SURF_DIM || a[2] > QGPU_MAX_SURF_DIM) {
+            return QGPU_ST_BAD_ARG;
+        }
+        /* v6 : le stencil exige la profondeur (cf. qgpu_proto.h) — l'hôte GL
+           n'a alors qu'un seul tampon combiné à gérer. */
+        if ((a[3] & QGPU_FMT_FLAG_STENCIL) && !(a[3] & QGPU_FMT_FLAG_DEPTH)) {
             return QGPU_ST_BAD_ARG;
         }
         if (c->surf[a[0]].used) {
@@ -486,6 +536,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         s = &c->surf[a[0]];
         s->width = a[1]; s->height = a[2]; s->format = a[3]; s->priv = NULL;
         s->has_depth = (a[3] & QGPU_FMT_FLAG_DEPTH) != 0;
+        s->has_stencil = (a[3] & QGPU_FMT_FLAG_STENCIL) != 0;
         if (!c->be->surf_create(c, s)) {
             return QGPU_ST_BACKEND;
         }
@@ -601,6 +652,48 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         return QGPU_ST_OK;
     }
 
+    case QGPU_OP_STENCIL_READBACK:
+    case QGPU_OP_STENCIL_UPLOAD: {
+        uint32_t off, stride, x, y, w, h, row, i;
+        WANT(QGPU_LEN_SURF_XFER);
+        st = check_xfer(c, a, &s);
+        if (st != QGPU_ST_OK) {
+            return st;
+        }
+        if (!s->has_stencil) {
+            return QGPU_ST_BAD_ARG;
+        }
+        off = a[1]; stride = a[2]; x = a[3]; y = a[4]; w = a[5]; h = a[6];
+        if (!grow_sbuf(c, w * h)) {
+            return QGPU_ST_BACKEND;
+        }
+        if (op == QGPU_OP_STENCIL_READBACK) {
+            if (!c->be->stencil_readback(c, s, x, y, w, h, c->sbuf)) {
+                return QGPU_ST_BACKEND;
+            }
+            for (row = 0; row < h; row++) {
+                uint8_t *dst = c->shmem + off + (size_t)row * stride;
+                for (i = 0; i < w; i++) {
+                    /* un mot de 32 bits par pixel, 24 bits de poids fort nuls */
+                    qgpu_st32(dst + i * 4, c->sbuf[(size_t)row * w + i]);
+                }
+            }
+        } else {
+            for (row = 0; row < h; row++) {
+                const uint8_t *src = c->shmem + off + (size_t)row * stride;
+                for (i = 0; i < w; i++) {
+                    /* les bits au-delà du 8e sont ignorés, comme en OpenGL */
+                    c->sbuf[(size_t)row * w + i] =
+                        (uint8_t)(qgpu_ld32(src + i * 4) & 0xFF);
+                }
+            }
+            if (!c->be->stencil_upload(c, s, x, y, w, h, c->sbuf)) {
+                return QGPU_ST_BACKEND;
+            }
+        }
+        return QGPU_ST_OK;
+    }
+
     case QGPU_OP_SET_STATE:
         WANT(QGPU_LEN_SET_STATE);
         if (c->cur_ctx < 0) {
@@ -618,7 +711,8 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (!s) {
             return st;
         }
-        if (a[0] & ~(uint32_t)(QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH)) {
+        if (a[0] & ~(uint32_t)(QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH |
+                               QGPU_CLEAR_STENCIL)) {
             return QGPU_ST_BAD_ARG;
         }
         {
@@ -766,7 +860,8 @@ static bool known_op(uint32_t op)
     case QGPU_OP_NOP: case QGPU_OP_CTX_CREATE: case QGPU_OP_CTX_DESTROY:
     case QGPU_OP_CTX_BIND: case QGPU_OP_SURF_CREATE: case QGPU_OP_SURF_DESTROY:
     case QGPU_OP_SURF_BIND: case QGPU_OP_SURF_READBACK: case QGPU_OP_SURF_UPLOAD:
-    case QGPU_OP_DEPTH_READBACK: case QGPU_OP_DEPTH_UPLOAD: case QGPU_OP_CLEAR:
+    case QGPU_OP_DEPTH_READBACK: case QGPU_OP_DEPTH_UPLOAD:
+    case QGPU_OP_STENCIL_READBACK: case QGPU_OP_STENCIL_UPLOAD: case QGPU_OP_CLEAR:
     case QGPU_OP_VIEWPORT: case QGPU_OP_SET_STATE: case QGPU_OP_DRAW_TRIANGLES:
     case QGPU_OP_DRAW_TRIANGLES_TEX: case QGPU_OP_TEX_CREATE: case QGPU_OP_TEX_DESTROY:
     case QGPU_OP_DRAW_TRIANGLES_TEX2: case QGPU_OP_DRAW_LINES: case QGPU_OP_DRAW_POINTS:

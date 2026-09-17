@@ -59,6 +59,8 @@
 #define CTX_DRAWSLOT     0x94     /* → mot contenant l'adresse du tampon de dessin */
 #define CTX_COLOR_BITS   0xc0     /* 32 : xRGB */
 #define CTX_DEPTH_BITS   0xcc     /* 32 : mots de 32 bits */
+#define CTX_STENCIL_BITS 0xd0     /* 0 ou 8 : le stencil occupe alors les 8 bits BAS de
+                                     chaque mot du tampon de profondeur (24 bits hauts) */
 #define CTX_TEXUNITS     0x10     /* table des textures liées : unité·0x14 + cible·4 */
 #define CTX_TEXTURING    0x6f4    /* octet : texturage effectif (textures complètes) */
 /* Objet texture du GLDriver (créé par gldCreateTexture) : */
@@ -117,7 +119,15 @@
 #define GS_SCISSOR_RECT  0x3180   /* i32 x, y, w, h (origine en bas à gauche) */
 #define GS_SCISSOR       0x3190
 #define GS_SHADE_MODEL   0x3194   /* u32 : 0x1d00 plat, 0x1d01 lisse */
-#define GS_STENCIL       0x31c0   /* bit 0 */
+#define GS_STENCIL       0x31c0   /* bit 0 : test de stencil (docs/re/stencil.md) */
+#define GS_STENCIL_VMASK 0x3198   /* u32 : masque de valeur */
+#define GS_STENCIL_REF   0x319c   /* u32 */
+#define GS_STENCIL_FUNC  0x31a0   /* u16 (face avant ; arrière à +0x18) */
+#define GS_STENCIL_FAIL  0x31a2   /* u16 ×3 : fail, zfail, zpass */
+#define GS_STENCIL_ZFAIL 0x31a4
+#define GS_STENCIL_ZPASS 0x31a6
+#define GS_STENCIL_WMASK 0x2e38   /* u32 : masque d'écriture */
+#define GS_STENCIL_CLEAR 0x2db4   /* u32 : valeur d'effacement */
 #define GS_TEXUNIT0      0x31c4   /* unité i : +i·0x7c */
 #define GS_TEXUNIT_SIZE  0x7c
 #define TU_ENV_COLOR     0x00     /* float ×4 */
@@ -144,6 +154,7 @@
 
 #define GL_COLOR_BUFFER_BIT 0x4000
 #define GL_DEPTH_BUFFER_BIT 0x0100
+#define GL_STENCIL_BUFFER_BIT 0x0400
 #define GL_FLAT             0x1d00
 #define GL_FILL             0x1b02
 
@@ -186,6 +197,9 @@ typedef struct PCtx {
     unsigned long  st[QGPU_SK_COUNT];   /* état envoyé au device */
     int            st_valid;
     unsigned char *draw_seen;           /* tampon de dessin connu */
+    unsigned long  direct_at;           /* n° de la dernière image présentée directement */
+    int            stencil;             /* la surface hôte a un stencil ; sa fraîcheur est
+                                           celle de la profondeur (même mot côté invité) */
 } PCtx;
 
 typedef struct PTex {                   /* texture du GLDriver suivie par le plugin */
@@ -209,7 +223,8 @@ typedef struct TexInfo {                /* textures à appliquer pour le dessin 
 } TexInfo;
 
 typedef struct Post {                   /* copie à faire après la soumission */
-    int            depth;
+    int            depth;               /* 0 couleur, 1 profondeur, 2 stencil */
+    int            packed;              /* profondeur 24 bits + stencil 8 bits dans le mot */
     unsigned long  off;                 /* dans l'arène */
     unsigned char *dst;
     unsigned long  w, h, rowbytes;
@@ -253,13 +268,13 @@ static double now_s(void)
 enum {
     NO_BUFFER, NO_RASTER, NO_FOG, NO_POLYMODE, NO_DEPTH, NO_BLEND, NO_ALPHA,
     NO_SURFACE, NO_TEX_UNITS, NO_TEX_TARGET, NO_TEX_ENV, NO_TEX_UNKNOWN,
-    NO_TEX_BASE, NO_TEX_SIZE, NO_TEX_FORMAT, NO_TEX_ID, NO_TEX_COMBINE, NO_COUNT
+    NO_TEX_BASE, NO_TEX_SIZE, NO_TEX_FORMAT, NO_TEX_ID, NO_TEX_COMBINE, NO_STENCIL, NO_COUNT
 };
 static const char *const no_name[NO_COUNT] = {
     "tampon", "stencil/logicop/stipple", "brouillard", "polygonmode", "profondeur",
     "melange", "alphatest", "surface", "unites>2", "cible-texture", "texenv",
     "texture-inconnue", "format-base", "taille-texture", "format-texels", "id-texture",
-    "combine",
+    "combine", "stencil",
 };
 static unsigned long no_count[NO_COUNT];
 static char no_detail[NO_COUNT][64];
@@ -271,6 +286,8 @@ static int no(int why, unsigned long a, unsigned long b)
         snprintf(no_detail[why], sizeof(no_detail[why]), "%lx/%lx", a, b);
     return 0;
 }
+
+static const char *direct_why(void);
 
 /* Bilan périodique (POMPPC_GL_STATS=<fichier>), appelé à chaque échange. */
 static void stats_frame(void)
@@ -313,6 +330,8 @@ static void stats_frame(void)
                     if (no_count[k])
                         fprintf(f, "    refus %s : %lu (premier : %s)\n",
                                 no_name[k], no_count[k], no_detail[k]);
+                if (direct_why()[0])
+                    fprintf(f, "    présentation directe coupée : %s\n", direct_why());
                 for (k = 0; k < PROC_COUNT; k++)
                     if (fb_count[k])
                         fprintf(f, "    repli %s : %lu\n", pomppc_proc_name(k), fb_count[k]);
@@ -507,9 +526,20 @@ static void flush(void)
                     memcpy(d, s, po->w * 4);
                 } else {
                     unsigned long *dd = (unsigned long *)d;
-                    for (x = 0; x < po->w; x++) {
-                        float f = *(float *)(s + x);
-                        dd[x] = (unsigned long)(clamp01(f) * po->scale + 0.5f);
+                    if (po->depth == 2) {           /* stencil : 8 bits bas du mot */
+                        for (x = 0; x < po->w; x++)
+                            dd[x] = (dd[x] & 0xFFFFFF00UL) | (s[x] & 0xFF);
+                    } else if (po->packed) {        /* profondeur : 24 bits hauts */
+                        for (x = 0; x < po->w; x++) {
+                            float f = *(float *)(s + x);
+                            unsigned long z = (unsigned long)(clamp01(f) * po->scale + 0.5f);
+                            dd[x] = (z & 0xFFFFFF00UL) | (dd[x] & 0xFF);
+                        }
+                    } else {
+                        for (x = 0; x < po->w; x++) {
+                            float f = *(float *)(s + x);
+                            dd[x] = (unsigned long)(clamp01(f) * po->scale + 0.5f);
+                        }
                     }
                 }
             }
@@ -963,10 +993,16 @@ static int ensure_surface(PCtx *p)
 {
     unsigned long w = GLD_U32(p->ctx, CTX_WIDTH), h = GLD_U32(p->ctx, CTX_HEIGHT);
     unsigned long *c;
+    int want_stencil;
 
     if (p->qctx < 0 || w == 0 || h == 0 || w > QGPU_MAX_SURF_DIM || h > QGPU_MAX_SURF_DIM)
         return 0;
-    if (p->surf >= 0 && p->sw == w && p->sh == h)
+    /* stencil de 8 bits logé dans une profondeur de 32 bits (cas du GLDriver d'Apple) */
+    /* (le tampon invité lui-même n'est alloué par Apple qu'à son premier usage :
+       ne pas l'exiger ici — la synchronisation saute un tampon absent) */
+    want_stencil = GLD_U32(p->ctx, CTX_STENCIL_BITS) == 8 &&
+                   GLD_U32(p->ctx, CTX_DEPTH_BITS) == 32;
+    if (p->surf >= 0 && p->sw == w && p->sh == h && p->stencil == want_stencil)
         return 1;
     destroy_surface(p);
     p->surf = alloc_id(&G.surf_used, G.q.surf_base, QGPU_CLIENT_SURF_IDS);
@@ -977,7 +1013,8 @@ static int ensure_surface(PCtx *p)
     c[1] = p->surf;
     c[2] = w;
     c[3] = h;
-    c[4] = QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH;
+    c[4] = QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH | (want_stencil ? QGPU_FMT_FLAG_STENCIL : 0);
+    p->stencil = want_stencil;
     c[5] = QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF);
     c[6] = p->surf;
     p->sw = w;
@@ -1016,11 +1053,30 @@ static void sync_to_host(PCtx *p, int color, int depth)
             for (y = 0; y < h; y++) {
                 unsigned long *s = (unsigned long *)(src + y * sw_rowbytes(p));
                 float *d = (float *)(G.q.win + off + y * w * 4);
-                for (x = 0; x < w; x++)
-                    d[x] = clamp01(s[x] * inv);
+                if (p->stencil) {
+                    for (x = 0; x < w; x++)
+                        d[x] = clamp01((s[x] & 0xFFFFFF00UL) * inv);
+                } else {
+                    for (x = 0; x < w; x++)
+                        d[x] = clamp01(s[x] * inv);
+                }
             }
             c = reserve(p, QGPU_LEN_SURF_XFER);
             c[0] = QGPU_CMD_HDR(QGPU_OP_DEPTH_UPLOAD, QGPU_LEN_SURF_XFER);
+            c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
+            c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
+            G.n_uploads++;
+        }
+        /* le stencil de l'invité vit dans les 8 bits bas des mêmes mots */
+        if (src && p->stencil && arena_alloc(w * h * 4, &off)) {
+            for (y = 0; y < h; y++) {
+                unsigned long *s = (unsigned long *)(src + y * sw_rowbytes(p));
+                unsigned long *d = (unsigned long *)(G.q.win + off + y * w * 4);
+                for (x = 0; x < w; x++)
+                    d[x] = s[x] & 0xFF;
+            }
+            c = reserve(p, QGPU_LEN_SURF_XFER);
+            c[0] = QGPU_CMD_HDR(QGPU_OP_STENCIL_UPLOAD, QGPU_LEN_SURF_XFER);
             c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
             c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
             G.n_uploads++;
@@ -1037,11 +1093,13 @@ static void queue_readback_to(PCtx *p, int depth, unsigned char *dst, unsigned l
     if (!arena_alloc(w * h * 4, &off))
         return;
     c = reserve(p, QGPU_LEN_SURF_XFER);
-    c[0] = QGPU_CMD_HDR(depth ? QGPU_OP_DEPTH_READBACK : QGPU_OP_SURF_READBACK,
+    c[0] = QGPU_CMD_HDR(depth == 2 ? QGPU_OP_STENCIL_READBACK :
+                        depth ? QGPU_OP_DEPTH_READBACK : QGPU_OP_SURF_READBACK,
                         QGPU_LEN_SURF_XFER);
     c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
     c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
     G.post[G.npost].depth = depth;
+    G.post[G.npost].packed = p->stencil;
     G.post[G.npost].off = off;
     G.post[G.npost].dst = dst;
     G.post[G.npost].w = w;
@@ -1077,6 +1135,8 @@ static void sync_to_sw_locked(PCtx *p, int want_depth)
         unsigned char *dst = sw_depth(p);
         if (dst && GLD_U32(p->ctx, CTX_DEPTH_BITS) == 32) {
             queue_readback(p, 1, dst);
+            if (p->stencil)
+                queue_readback(p, 2, dst);
             any = 1;
         }
         p->depth = SYNCED;
@@ -1126,6 +1186,18 @@ static int blend_eq_ok(unsigned long e)
     return e == 0x8006 || e == 0x800A || e == 0x800B;
 }
 
+static int stencil_op_ok(unsigned long op)
+{
+    return op == 0 || op == 0x150A || (op >= 0x1E00 && op <= 0x1E03) ||
+           op == 0x8507 || op == 0x8508;
+}
+
+/* Test de stencil actif ET tampon présent (sinon le test n'a aucun effet). */
+static int stencil_active(PCtx *p)
+{
+    return (GLD_U32(gls(p), GS_STENCIL) & 1) && GLD_U32(p->ctx, CTX_STENCIL_BITS) != 0;
+}
+
 /* L'état courant relève-t-il du domaine rendu par l'hôte ? */
 static int accel_ok(PCtx *p)
 {
@@ -1137,9 +1209,17 @@ static int accel_ok(PCtx *p)
     if (!g || !sw_color(p) || GLD_U32(p->ctx, CTX_COLOR_BITS) != 32 ||
         GLD_U32(p->ctx, CTX_ROWPIX) < GLD_U32(p->ctx, CTX_WIDTH))
         return no(NO_BUFFER, GLD_U32(p->ctx, CTX_COLOR_BITS), GLD_U32(p->ctx, CTX_ROWPIX));
-    if ((GLD_U32(g, GS_STENCIL) & 1) || GLD_U8(g, GS_LOGIC_OP) ||
-        GLD_U8(g, GS_POLY_STIPPLE) || GLD_U8(g, GS_POLY_SMOOTH))
-        return no(NO_RASTER, GLD_U32(g, GS_STENCIL), GLD_U8(g, GS_LOGIC_OP));
+    if (GLD_U8(g, GS_LOGIC_OP) || GLD_U8(g, GS_POLY_STIPPLE) || GLD_U8(g, GS_POLY_SMOOTH))
+        return no(NO_RASTER, GLD_U8(g, GS_LOGIC_OP), GLD_U8(g, GS_POLY_STIPPLE));
+    /* stencil : sans tampon, le test passe toujours (OpenGL) ; avec, il faut le
+       format que l'on sait synchroniser (8 bits dans la profondeur de 32) */
+    if (stencil_active(p)) {
+        if (GLD_U32(p->ctx, CTX_STENCIL_BITS) != 8 || GLD_U32(p->ctx, CTX_DEPTH_BITS) != 32 ||
+            U16(g, GS_STENCIL_FUNC) < 0x200 || U16(g, GS_STENCIL_FUNC) > 0x207 ||
+            !stencil_op_ok(U16(g, GS_STENCIL_FAIL)) || !stencil_op_ok(U16(g, GS_STENCIL_ZFAIL)) ||
+            !stencil_op_ok(U16(g, GS_STENCIL_ZPASS)))
+            return no(NO_STENCIL, U16(g, GS_STENCIL_FUNC), GLD_U32(p->ctx, CTX_STENCIL_BITS));
+    }
     /* brouillard : GLEngine fournit le facteur par sommet, sauf en GL_NICEST
        où le GLDriver le calcule par fragment */
     if (GLD_U8(g, GS_FOG) && U16(g, GS_FOG_HINT) == 0x1102)
@@ -1230,6 +1310,22 @@ static void compute_state(PCtx *p, const TexInfo *ti, unsigned long *v)
             }
         }
     }
+    /* stencil (v6) : le device borne tout à 8 bits ; test coupé = valeurs neutres,
+       mais masque d'écriture et valeur d'effacement réels (l'effacement s'en sert) */
+    v[QGPU_SK_STENCIL_TEST] = p->stencil && stencil_active(p);
+    v[QGPU_SK_STENCIL_FUNC] = 0x0207;
+    v[QGPU_SK_STENCIL_VALUE_MASK] = 0xFF;
+    v[QGPU_SK_STENCIL_OP_FAIL] = v[QGPU_SK_STENCIL_OP_ZFAIL] = v[QGPU_SK_STENCIL_OP_ZPASS] = 0x1E00;
+    v[QGPU_SK_STENCIL_WRITE_MASK] = GLD_U32(g, GS_STENCIL_WMASK) & 0xFF;
+    v[QGPU_SK_STENCIL_CLEAR] = GLD_U32(g, GS_STENCIL_CLEAR) & 0xFF;
+    if (v[QGPU_SK_STENCIL_TEST]) {
+        v[QGPU_SK_STENCIL_FUNC] = U16(g, GS_STENCIL_FUNC);
+        v[QGPU_SK_STENCIL_REF] = GLD_U32(g, GS_STENCIL_REF) & 0xFF;
+        v[QGPU_SK_STENCIL_VALUE_MASK] = GLD_U32(g, GS_STENCIL_VMASK) & 0xFF;
+        v[QGPU_SK_STENCIL_OP_FAIL] = U16(g, GS_STENCIL_FAIL);
+        v[QGPU_SK_STENCIL_OP_ZFAIL] = U16(g, GS_STENCIL_ZFAIL);
+        v[QGPU_SK_STENCIL_OP_ZPASS] = U16(g, GS_STENCIL_ZPASS);
+    }
     v[QGPU_SK_FOG] = GLD_U8(g, GS_FOG) != 0;
     if (v[QGPU_SK_FOG]) {
         const float *fc = (const float *)(g + GS_FOG_COLOR);
@@ -1281,6 +1377,9 @@ static void send_state(PCtx *p, const TexInfo *ti)
 static int writes_depth(PCtx *p)
 {
     unsigned char *g = gls(p);
+    /* le stencil partage le mot (et donc la fraîcheur) de la profondeur */
+    if (stencil_active(p) && (GLD_U32(g, GS_STENCIL_WMASK) & 0xFF))
+        return 1;
     return GLD_U8(g, GS_DEPTH_TEST) && GLD_U8(g, GS_DEPTH_MASK);
 }
 
@@ -1298,7 +1397,7 @@ typedef struct Batch {
 static void begin_common(PCtx *p, Batch *b, const TexInfo *ti)
 {
     check_draw_buffer(p);
-    sync_to_host(p, 1, GLD_U8(gls(p), GS_DEPTH_TEST));
+    sync_to_host(p, 1, GLD_U8(gls(p), GS_DEPTH_TEST) || stencil_active(p));
     send_state(p, ti);
     b->p = p;
     b->h = (float)p->sh;
@@ -1645,7 +1744,7 @@ static long a_clear(void *ctx, long mask, long c, long d, long e, long f, long g
     unsigned char *g;
     unsigned long v[QGPU_SK_COUNT], *cmd;
     long host = mask & (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    long rest = mask & ~host;
+    long rest;
     proc8 real = 0;
 
     pthread_mutex_lock(&G.mu);
@@ -1655,9 +1754,14 @@ static long a_clear(void *ctx, long mask, long c, long d, long e, long f, long g
         return 0;
     }
     real = (proc8)p->real[PROC_Clear];
+    /* le stencil s'efface sur l'hôte quand le contexte en a un que l'on sait suivre */
+    if ((mask & GL_STENCIL_BUFFER_BIT) && GLD_U32(p->ctx, CTX_STENCIL_BITS) == 8 &&
+        GLD_U32(p->ctx, CTX_DEPTH_BITS) == 32)
+        host |= GL_STENCIL_BUFFER_BIT;
+    rest = mask & ~host;
     if (host && accel_ok(p) && ensure_surface(p)) {
         const float *cc;
-        int full, color_full, depth_full;
+        int full, color_full, depth_full, ds_written;
         g = gls(p);
         check_draw_buffer(p);
         compute_state(p, 0, v);
@@ -1669,31 +1773,40 @@ static long a_clear(void *ctx, long mask, long c, long d, long e, long f, long g
         /* Un effacement complet rend l'ancienne copie inutile : pas de téléversement. */
         if ((host & GL_COLOR_BUFFER_BIT) && color_full && p->color == SW_NEWER)
             p->color = SYNCED;
+        /* profondeur et stencil partagent leur fraîcheur : l'ancienne copie n'est
+           inutile que si TOUT le mot est réécrit */
+        if (p->stencil)
+            depth_full = depth_full && (host & GL_STENCIL_BUFFER_BIT) &&
+                         v[QGPU_SK_STENCIL_WRITE_MASK] == 0xFF;
         if ((host & GL_DEPTH_BUFFER_BIT) && depth_full && p->depth == SW_NEWER)
             p->depth = SYNCED;
         sync_to_host(p, (host & GL_COLOR_BUFFER_BIT) != 0,
-                     (host & GL_DEPTH_BUFFER_BIT) != 0);
+                     (host & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0);
         send_state(p, 0);
         cc = (const float *)(g + GS_CLEAR_COLOR);
         cmd = reserve(p, QGPU_LEN_CLEAR);
         cmd[0] = QGPU_CMD_HDR(QGPU_OP_CLEAR, QGPU_LEN_CLEAR);
         cmd[1] = ((host & GL_COLOR_BUFFER_BIT) ? QGPU_CLEAR_COLOR : 0) |
-                 ((host & GL_DEPTH_BUFFER_BIT) ? QGPU_CLEAR_DEPTH : 0);
+                 ((host & GL_DEPTH_BUFFER_BIT) ? QGPU_CLEAR_DEPTH : 0) |
+                 (((host & GL_STENCIL_BUFFER_BIT) && p->stencil) ? QGPU_CLEAR_STENCIL : 0);
         cmd[2] = (to_u8(cc[3]) << 24) | (to_u8(cc[0]) << 16) | (to_u8(cc[1]) << 8) | to_u8(cc[2]);
         *(float *)&cmd[3] = clamp01((float)F64(g, GS_CLEAR_DEPTH));
         if (host & GL_COLOR_BUFFER_BIT)
             p->color = HOST_NEWER;
-        if ((host & GL_DEPTH_BUFFER_BIT) && v[QGPU_SK_DEPTH_WRITE])
+        ds_written = ((host & GL_DEPTH_BUFFER_BIT) && v[QGPU_SK_DEPTH_WRITE]) ||
+                     ((host & GL_STENCIL_BUFFER_BIT) && p->stencil &&
+                      v[QGPU_SK_STENCIL_WRITE_MASK]);
+        if (ds_written)
             p->depth = HOST_NEWER;
         G.n_clears++;
         pthread_mutex_unlock(&G.mu);
-        /* stencil / accumulation : toujours par le logiciel, sans rapport avec
-           nos deux tampons */
+        /* accumulation (et stencil d'un format non suivi) : par le logiciel */
         return rest ? real(ctx, rest, c, d, e, f, g8, h) : 0;
     }
     fallback(p, PROC_Clear, (mask & GL_COLOR_BUFFER_BIT) != 0,
-             (mask & GL_DEPTH_BUFFER_BIT) != 0);
-    if ((mask & GL_DEPTH_BUFFER_BIT) && GLD_U8(gls(p), GS_DEPTH_MASK) && p->surf >= 0)
+             (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0);
+    if ((((mask & GL_DEPTH_BUFFER_BIT) && GLD_U8(gls(p), GS_DEPTH_MASK)) ||
+         (mask & GL_STENCIL_BUFFER_BIT)) && p->surf >= 0)
         p->depth = SW_NEWER;
     pthread_mutex_unlock(&G.mu);
     return real(ctx, mask, c, d, e, f, g8, h);
@@ -1711,15 +1824,32 @@ static long a_clear(void *ctx, long mask, long c, long d, long e, long f, long g
  * Vu en vrai (Zenerchi, 800x600) : l'échange attendait le WindowServer 41 %
  * du temps, et le WindowServer passait un tiers d'un cœur à recopier.
  *
+ * En FENÊTRE (Marble Blast : un tiers de chaque image dans cette attente), la
+ * même écriture directe vise le rectangle de la surface à l'écran, tant que
+ * rien ne la recouvre et que le curseur n'y est pas ; la mémoire de la fenêtre
+ * est rafraîchie par un échange normal toutes les DIRECT_REFRESH images.
+ *
  * Les symboles sont cherchés dans le processus (dlsym) : sans HIToolbox ou
  * CoreGraphics chargés, pas de présentation directe. POMPPC_GL_DIRECT=0 la
- * coupe. Les conditions sont réévaluées toutes les 30 images. */
+ * coupe, =f la limite au plein écran. Les conditions sont réévaluées toutes
+ * les DIRECT_RECHECK images. */
 typedef struct { unsigned long hi, lo; } Psn;
+typedef struct { float x, y, w, h; } CgRect;     /* CGRect de Tiger (32 bits) */
+typedef struct { float x, y; } CgPoint;
+/* Objet « drawable » de libGLSystem (ctx+4), relevé dans les vidages de trace : */
+#define GD_CID   0x80             /* connexion CGS */
+#define GD_WID   0x84             /* fenêtre */
+#define GD_SID   0x90             /* surface de la fenêtre */
+#define DIRECT_RECHECK   10       /* images entre deux réévaluations */
+#define DIRECT_REFRESH   90       /* en fenêtre : un échange normal de temps en temps */
 static struct {
-    int            init, enabled, ok;
+    int            init, enabled, ok, windowed, over_cursor;
+    char           why[96];             /* pourquoi la voie directe est coupée */
     unsigned long  checked_at;
     unsigned char *base;
     unsigned long  rowbytes, w, h;
+    long           x, y;                /* position de la surface à l'écran */
+    float          cur_x, cur_y;        /* curseur à la dernière vérification */
     unsigned long (*main_display)(void);
     void         *(*base_address)(unsigned long);
     unsigned long (*bytes_per_row)(unsigned long);
@@ -1730,10 +1860,23 @@ static struct {
     short         (*front_process)(Psn *);
     short         (*current_process)(Psn *);
     short         (*same_process)(const Psn *, const Psn *, unsigned char *);
+    /* en fenêtre (SPI CoreGraphics de Tiger ; absentes : plein écran seulement) */
+    long          (*window_bounds)(long cid, long wid, CgRect *);
+    long          (*surface_bounds)(long cid, long wid, long sid, CgRect *);
+    long          (*onscreen_list)(long cid, long owner, long max, long *list, long *count);
+    long          (*cursor_location)(long cid, CgPoint *);
+    long          (*cursor_visible)(void);
+    long          (*surface_list)(long cid, long wid, long max, long *list, long *count);
+    long          (*window_alpha)(long cid, long wid, float *alpha);
 } D;
 
 static void direct_noop(void)
 {
+}
+
+static const char *direct_why(void)
+{
+    return D.why;
 }
 
 static void direct_init(void)
@@ -1741,6 +1884,8 @@ static void direct_init(void)
     const char *e = getenv("POMPPC_GL_DIRECT");
     D.init = 1;
     D.enabled = !(e && e[0] == '0');
+    D.windowed = !(e && e[0] == 'f');   /* POMPPC_GL_DIRECT=f : plein écran seulement */
+    D.over_cursor = e && e[0] == 'c';   /* =c : même avec un curseur en mouvement */
     D.main_display    = dlsym(RTLD_DEFAULT, "CGMainDisplayID");
     D.base_address    = dlsym(RTLD_DEFAULT, "CGDisplayBaseAddress");
     D.bytes_per_row   = dlsym(RTLD_DEFAULT, "CGDisplayBytesPerRow");
@@ -1751,6 +1896,13 @@ static void direct_init(void)
     D.front_process   = dlsym(RTLD_DEFAULT, "GetFrontProcess");
     D.current_process = dlsym(RTLD_DEFAULT, "GetCurrentProcess");
     D.same_process    = dlsym(RTLD_DEFAULT, "SameProcess");
+    D.window_bounds   = dlsym(RTLD_DEFAULT, "CGSGetWindowBounds");
+    D.surface_bounds  = dlsym(RTLD_DEFAULT, "CGSGetSurfaceBounds");
+    D.onscreen_list   = dlsym(RTLD_DEFAULT, "CGSGetOnScreenWindowList");
+    D.cursor_location = dlsym(RTLD_DEFAULT, "CGSGetCurrentCursorLocation");
+    D.cursor_visible  = dlsym(RTLD_DEFAULT, "CGCursorIsVisible");
+    D.surface_list    = dlsym(RTLD_DEFAULT, "CGSGetSurfaceList");
+    D.window_alpha    = dlsym(RTLD_DEFAULT, "CGSGetWindowAlpha");
     if (!D.main_display || !D.base_address || !D.bytes_per_row || !D.bits_per_pixel ||
         !D.pixels_wide || !D.pixels_high || !D.menubar_visible || !D.front_process ||
         !D.current_process || !D.same_process) {
@@ -1758,6 +1910,105 @@ static void direct_init(void)
             pomppc_log("POMPPC: présentation directe indisponible (symboles absents)\n");
         D.enabled = 0;
     }
+    if (!D.window_bounds || !D.surface_bounds || !D.onscreen_list || !D.cursor_location ||
+        !D.cursor_visible)
+        D.windowed = 0;
+}
+
+static float window_alpha(long cid, long wid)
+{
+    float a = 1.0f;
+    if (D.window_alpha && D.window_alpha(cid, wid, &a) != 0)
+        a = 1.0f;
+    return a;
+}
+
+/* Fenêtre à l'écran mais entièrement transparente (vu en vrai : 128x128 en 0,0). */
+static int window_invisible(long cid, long wid)
+{
+    return window_alpha(cid, wid) < 0.004f;
+}
+
+static int rects_touch(long ax, long ay, long aw, long ah, const CgRect *r)
+{
+    return (float)ax < r->x + r->w && r->x < (float)(ax + aw) &&
+           (float)ay < r->y + r->h && r->y < (float)(ay + ah);
+}
+
+/* En fenêtre : la surface GL est-elle entièrement visible à l'écran, sans
+ * rien au-dessus d'elle (autre fenêtre, Dock, barre des menus) ni curseur
+ * dessiné dedans ? (Le curseur de la VGA de QEMU est composé en logiciel par
+ * le WindowServer dans la mémoire vidéo : écrire par-dessus l'effacerait.)
+ * Remplit D.x / D.y. */
+static int direct_window_ok(PCtx *p)
+{
+    unsigned char *gd = (unsigned char *)GLD_U32(p->ctx, 4);
+    long cid, wid, sid, list[96], n = 0, i;
+    CgRect wr, sr, o;
+    CgPoint cur;
+
+#define WHY(...) (snprintf(D.why, sizeof(D.why), __VA_ARGS__), 0)
+    if (!D.windowed || !gd)
+        return WHY("fenêtre : SPI absentes ou pas de drawable");
+    cid = GLD_U32(gd, GD_CID); wid = GLD_U32(gd, GD_WID); sid = GLD_U32(gd, GD_SID);
+    {
+        long e1 = D.window_bounds(cid, wid, &wr), e2 = D.surface_bounds(cid, wid, sid, &sr);
+        if (!e1 && e2 && D.surface_list) {
+            /* l'identifiant du drawable n'est pas (toujours) celui de la surface :
+               on cherche, parmi les surfaces de la fenêtre, celle qui a notre taille */
+            long sl[16], sn = 0, k;
+            if (D.surface_list(cid, wid, 16, sl, &sn) == 0 && sn > 0 && sn <= 16)
+                for (k = 0; k < sn && e2; k++)
+                    if (D.surface_bounds(cid, wid, sl[k], &sr) == 0 &&
+                        (unsigned long)sr.w == p->sw && (unsigned long)sr.h == p->sh)
+                        e2 = 0;
+            if (e2)
+                return WHY("surface introuvable : %ld surfaces, 1re %lx (wid %lx sid %lx)",
+                           sn, sn > 0 ? sl[0] : 0, wid, sid);
+        }
+        if (e1 || e2)
+            return WHY("bornes refusées : fenêtre %ld, surface %ld (cid %lx wid %lx sid %lx)",
+                       e1, e2, cid, wid, sid);
+    }
+    if ((unsigned long)sr.w != p->sw || (unsigned long)sr.h != p->sh)
+        return WHY("surface %gx%g en %g,%g ≠ drawable %lux%lu", sr.w, sr.h, sr.x, sr.y,
+                   p->sw, p->sh);
+    D.x = (long)(wr.x + sr.x);
+    D.y = (long)(wr.y + sr.y);
+    if (D.x < 0 || D.y < 0 || D.x + p->sw > D.w || D.y + p->sh > D.h)
+        return WHY("dépasse de l'écran (%ld,%ld)", D.x, D.y);
+    /* fenêtres à l'écran, de l'avant vers l'arrière : rien au-dessus ne doit toucher */
+    if (D.onscreen_list(cid, 0, 96, list, &n) != 0 || n <= 0 || n > 96)
+        return WHY("liste des fenêtres refusée (n %ld)", n);
+    for (i = 0; i < n && list[i] != wid; i++)
+        if (D.window_bounds(cid, list[i], &o) == 0 &&
+            /* Une fenêtre qui couvre tout l'écran devant une application au
+               premier plan est un voile transparent du système (vu en vrai :
+               rang 0, 1024x768) : une vraie fenêtre plein écran d'une autre
+               application nous aurait ôté le premier plan. */
+            !(o.x <= 0 && o.y <= 0 && o.w >= (float)D.w && o.h >= (float)D.h) &&
+            /* Le Dock gare ses tuiles de travail (128x128 au plus, vides) dans
+               le coin 0,0 de l'écran, au niveau du Dock (vu en vrai : 13 fenêtres). */
+            !(o.x == 0 && o.y == 0 && o.w <= 128 && o.h <= 128) &&
+            rects_touch(D.x, D.y, p->sw, p->sh, &o) && !window_invisible(cid, list[i]))
+            return WHY("recouverte par la fenêtre %lx (%g,%g %gx%g), rang %ld/%ld, alpha %g",
+                       list[i], o.x, o.y, o.w, o.h, i, n, window_alpha(cid, list[i]));
+    if (i == n)
+        return WHY("fenêtre %lx absente de la liste (%ld fenêtres)", wid, n);
+    /* Curseur visible dans la surface : écrire par-dessus l'efface jusqu'à son
+       prochain mouvement. Tant qu'il BOUGE (menus, interface), chemin normal ;
+       immobile d'une vérification à l'autre (jeu qui le ramène au centre à
+       chaque image, comme Marble Blast, ou souris au repos), voie directe. */
+    if (!D.over_cursor && D.cursor_visible() && D.cursor_location(cid, &cur) == 0) {
+        int still = cur.x == D.cur_x && cur.y == D.cur_y;
+        D.cur_x = cur.x; D.cur_y = cur.y;
+        o.x = cur.x - 32; o.y = cur.y - 32; o.w = 64; o.h = 64;
+        if (!still && rects_touch(D.x, D.y, p->sw, p->sh, &o))
+            return WHY("curseur en mouvement dans la surface (%g,%g)", cur.x, cur.y);
+    }
+    D.why[0] = 0;
+    return 1;
+#undef WHY
 }
 
 /* Mémoire vidéo où présenter p, ou 0 (échange normal). Verrou tenu. */
@@ -1767,29 +2018,45 @@ static unsigned char *direct_target(PCtx *p, unsigned long *rowbytes)
         direct_init();
     if (!D.enabled)
         return 0;
-    if (!D.checked_at || G.n_frames - D.checked_at >= 30 || p->sw != D.w || p->sh != D.h) {
+    if (!D.checked_at || G.n_frames - D.checked_at >= DIRECT_RECHECK) {
         unsigned long did = D.main_display();
         Psn front, me;
         unsigned char same = 0;
-        int ok;
+        int ok, full;
         D.w = D.pixels_wide(did);
         D.h = D.pixels_high(did);
         D.base = D.base_address(did);
         D.rowbytes = D.bytes_per_row(did);
         ok = D.base && D.bits_per_pixel(did) == 32 && D.rowbytes >= D.w * 4 &&
-             p->sw == D.w && p->sh == D.h && !D.menubar_visible() &&
              D.front_process(&front) == 0 && D.current_process(&me) == 0 &&
              D.same_process(&front, &me, &same) == 0 && same;
+        if (!ok)
+            snprintf(D.why, sizeof(D.why), "pas au premier plan, ou écran non 32 bits");
+        full = ok && p->sw == D.w && p->sh == D.h && !D.menubar_visible();
+        if (full) {
+            D.x = D.y = 0;
+            ok = 1;
+        } else {
+            ok = ok && direct_window_ok(p);
+            if (ok)
+                ok = 2;                 /* en fenêtre */
+        }
         if (ok != D.ok)
-            pomppc_log("POMPPC: présentation directe %s (%lux%lu, écran %lux%lu)\n",
-                       ok ? "active" : "coupée", p->sw, p->sh, D.w, D.h);
+            pomppc_log("POMPPC: présentation directe %s (%lux%lu en %ld,%ld ; écran %lux%lu)\n",
+                       ok == 1 ? "plein écran" : ok ? "en fenêtre" : "coupée",
+                       p->sw, p->sh, D.x, D.y, D.w, D.h);
         D.ok = ok;
         D.checked_at = G.n_frames ? G.n_frames : 1;
     }
     if (!D.ok)
         return 0;
+    /* En fenêtre, la mémoire de la fenêtre côté WindowServer n'est plus à jour :
+       un échange normal de temps en temps la rafraîchit (déplacement, Exposé,
+       capture d'écran). */
+    if (D.ok == 2 && G.n_frames % DIRECT_REFRESH == 0)
+        return 0;
     *rowbytes = D.rowbytes;
-    return D.base;
+    return D.base + D.y * D.rowbytes + D.x * 4;
 }
 
 /* Échange (procédure 0x60) : présente directement si possible. Verrou tenu.
@@ -1806,6 +2073,7 @@ static int present_direct(PCtx *p)
     queue_readback_to(p, 0, vram, rowbytes);
     flush();
     G.n_direct++;
+    p->direct_at = G.n_frames;
     /* le tampon arrière est indéfini après un échange : la copie hôte reste
        la référence (p->color inchangé) */
     return 1;
@@ -1901,9 +2169,23 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
         abort();                        /* ne jamais sauter à une adresse nulle */
     }
     target = p->real[slot];
-    if (slot == PROC_Swap58 || slot == PROC_Swap5c || slot == PROC_Swap60)
+    /* Une image = un échange (0x60). Les vidages 0x58/0x5c (glFlush, glFinish)
+       n'en sont pas : Marble Blast en fait un par image, et les compter doublait
+       le débit affiché (vu en vrai). */
+    if (slot == PROC_Swap60)
         stats_frame();
     if (slot == PROC_Swap60 && present_direct(p)) {
+        pthread_mutex_unlock(&G.mu);
+        return direct_noop;
+    }
+    /* glFlush / glFinish d'un contexte qui présente directement : l'application
+       attend la fin du dessin, pas une copie dans le tampon invité (l'image
+       part en mémoire vidéo à l'échange). Marble Blast fait un glFinish par
+       image : sans ceci, chaque image était relue deux fois (vu en vrai). */
+    if ((slot == PROC_Swap58 || slot == PROC_Swap5c) && p->direct_at &&
+        G.n_frames - p->direct_at <= 1 && p->color == HOST_NEWER) {
+        if (G.ncmd)
+            flush();
         pthread_mutex_unlock(&G.mu);
         return direct_noop;
     }

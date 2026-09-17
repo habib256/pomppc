@@ -28,6 +28,7 @@ enum { QGPU_PRIM_TRIANGLES = 0, QGPU_PRIM_LINES = 1, QGPU_PRIM_POINTS = 2 };
 typedef struct QgpuSurface {
     bool     used;
     bool     has_depth;            /* v2 : QGPU_FMT_FLAG_DEPTH */
+    bool     has_stencil;          /* v6 : QGPU_FMT_FLAG_STENCIL (implique has_depth) */
     uint32_t width, height, format;
     void    *priv;                 /* propriété du backend */
 } QgpuSurface;
@@ -102,6 +103,12 @@ typedef struct QgpuBackend {
                            uint32_t w, uint32_t h, float *dst);
     bool (*depth_upload)(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
                          uint32_t w, uint32_t h, const float *src);
+    /* v6 : stencil, un OCTET par pixel côté cœur (le fil en fait un mot de 32
+       bits, cf. qgpu_proto.h). Appelés seulement si s->has_stencil. */
+    bool (*stencil_readback)(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
+                             uint32_t w, uint32_t h, uint8_t *dst);
+    bool (*stencil_upload)(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
+                           uint32_t w, uint32_t h, const uint8_t *src);
     void (*tex_destroy)(QgpuCore *c, QgpuTexture *t);    /* libère t->priv */
 } QgpuBackend;
 
@@ -126,6 +133,7 @@ struct QgpuCore {
     float    *vbuf; uint32_t vbuf_cap;   /* en floats */
     uint32_t *pbuf; uint32_t pbuf_cap;   /* en pixels */
     float    *dbuf; uint32_t dbuf_cap;   /* en pixels (profondeur) */
+    uint8_t  *sbuf; uint32_t sbuf_cap;   /* en pixels (stencil, v6) */
 };
 
 /* Accès big-endian, sans dépendre des helpers QEMU. */
