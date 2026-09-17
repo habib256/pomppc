@@ -20,6 +20,12 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 - **Dans les deux jeux c'est le PowerPC émulé qui limite** : GLEngine transforme, éclaire et
   découpe chaque sommet sur l'invité ; le débit de Marble Blast suit le nombre de triangles.
 - Le renderer annonce « 1.1 APPLE-1.1 » (chaîne du rendu logiciel d'Apple, transmise telle quelle).
+- **Lot 2 fait (18/09/2026)** : protocole **v7** et **chemin brut** dans le plugin — GLEngine ne
+  transforme, n'éclaire, ne découpe ni n'élimine plus les faces tant que l'état est dans le
+  domaine ; tout cela s'exécute sur le GPU de l'hôte. `gltest spin` ×2,2, `gltest game` ×1,25,
+  Marble Blast **×1,6 à ×1,96 sur les scènes lourdes** (24 → 48 img/s au plus lourd), +48 % en
+  moyenne. Le PowerPC émulé reste le facteur limitant, mais pour une autre raison : le nombre de
+  dessins (voir ci-dessous).
 
 ## Règles de travail (plusieurs agents)
 
@@ -40,8 +46,8 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 |---|---|---|
 | 1.1 | ✅ *relevé fait (`docs/re/capacites-glengine.md`) et **vérifié dans l'invité le 18/09/2026** (`docs/re/verification-tcl.md`, V1 et V6) : le bloc de configuration est confirmé à l'octet près, mais le verrou réel est le **bit 0 du retour de `gldInitDispatch`/`gldUpdateDispatch`**, relu à chaque changement d'état (donc repli possible par lot d'état), et il faut en plus publier un descripteur de sortie de sommet en `cfg+0x11c` sans quoi GLEngine jette la géométrie. Avec les deux, les sommets arrivent en `BeginPrimitiveBuffer`/`EndPrimitiveBuffer` en **coordonnées d'objet**. Restent V2–V5 et V7.* **Codes du descripteur relevés le 18/09/2026** (`docs/re/descripteur-de-sommet.md`) : une entrée vaut `(code << 10) | ((composantes − 1) << 8) | décalageEnMots`, les codes sont les indices d'attribut d'entrée (0 position, 1 normale, 2 couleur, 3 brouillard, 4 couleur secondaire, 5 poids, 8..15 coordonnées de texture, 16..31 attributs génériques, 32..39 matériau ; **le code 6, drapeau d'arête, plante GLEngine**). Confirmé dans l'invité : on reçoit les attributs **bruts** — ni transformation, ni éclairage, ni texgen, ni matrice de texture, ni découpage, ni élimination de face — et **aucun code ne donne de sortie transformée ou éclairée** ; `glDrawArrays`, `glDrawElements` et les listes d'affichage passent tous par `Begin`/`EndPrimitiveBuffer`, les modes de primitive (rubans, éventails, quads) sont transmis tels quels. Aucun pilote de 10.4.6 ne publie `cfg+0x11c` : le GeForce3 et le Radeon annoncent la T&L matérielle mais passent par `RenderVertexArray`/`RenderVertexBuffer`, le Rage 128 reçoit des sommets **déjà transformés** dans le sommet interne de GLEngine. **Décision : option A (attributs bruts, DRAW_RAW v7)** ; borne supérieure du gain mesurée sur `gltest spin` à rastérisation négligeable : 415 → 788 img/s (×1,9).* Le verrou est **l'octet `+0x79` du bloc de configuration passé à `gldCreateContext`** : à 1, GLEngine envoie la géométrie brute (`BeginPrimitiveBuffer` +0x50, `RenderVertexBuffer` +0x4c, `RenderVertexArray` +0x70) ; il est figé à la création du contexte. **Relever la négociation des capacités** : ce qui décide GLEngine à appeler les entrées « hautes » du pilote (`CreateVertexArray`, `RenderVertexArray` +0x70, `AllocVertexBuffer`, `CreatePipelineProgram`) plutôt que de transformer lui-même. Lire comment les pilotes ATI/NVIDIA de 10.4.6 répondent à `GetRendererInfo`, `GetInteger`, `GetString`. **Verrou de tout l'axe.** | relevé ✅, **vérifié** ✅ |
 | 1.2 | ✅ **Fait le 18/09/2026** : relevé par lecture (`docs/re/tableaux-de-sommets.md`) **puis établi par l'expérience dans l'invité** (`docs/re/etat-tcl.md`, sondes `lightprobe`, `matprobe`, `mtxprobe`, `tgprobe`, `xformprobe` de `guest/gltest`, diff des vidages par `tools/re/diffstate.py`). Sont confirmés offset par offset : les 24 matrices (`GS+0x1860 + m·0x40`, index de mode `16+u` pour la texture de l'unité `u`), le viewport et `glDepthRange` avec la formule exacte échelle/biais, l'élimination des faces, la normalisation, l'ombrage, les 8 lumières (`GS+0x24c0 + i·0x80`, position et direction de spot **en coordonnées œil**, seuil de spot stocké en **cosinus**), le modèle d'éclairage, les **deux matériaux qui sont DANS le bloc** (`GS+0x28c0`/`GS+0x2b00`, et non hors de lui), `GL_COLOR_MATERIAL`, le TexGen (pas `0x94` par unité, `0x24` par coordonnée, plan œil transformé), les 6 plans de découpe (coordonnées œil), le brouillard complet (densité/début/fin/source de coordonnée) et les paramètres de point. Les **valeurs courantes** (couleur, normale, couleur secondaire, coordonnée de brouillard, coordonnées de texture) sont **avant** le bloc, en `GS − 0x360 + x`. Le bloc `#define GS_…` prêt à recopier est en §10 de `docs/re/etat-tcl.md`. | ✅ **fait** |
-| 1.3 | Protocole : matrices, éclairage/matériau, texgen, plans de découpe, dessin indexé de sommets bruts. Backends logiciel (référence) et OpenGL. | à faire |
-| 1.4 | Plugin : envoyer les sommets non transformés ; repli sur le chemin actuel hors domaine. Mesurer sur Marble Blast. | à faire |
+| 1.3 | ✅ **Fait** : protocole **v7** — `SET_MATRIX`, `VIEWPORT`, `DEPTH_RANGE`, `SET_LIGHT`, `SET_MATERIAL`, `SET_LIGHT_MODEL`, `SET_TEXGEN`, `SET_CLIP_PLANE`, `SET_CURRENT`, `DRAW_RAW` (10 modes, indexé), 17 clés d'état de géométrie ; étage géométrique complet dans le backend de référence et dans le backend OpenGL ; `run_v7` de `tests/qgpu_core_test.c` sur les deux backends. `docs/protocole-v7-geometrie.md`. | ✅ **fait** |
+| 1.4 | ✅ **Fait le 18/09/2026** : le plugin pose le verrou par le **bit 0 du retour de `gldInitDispatch`/`gldUpdateDispatch`**, publie son **descripteur de sortie de sommet** en `cfg+0x11c`, et reçoit les attributs bruts dans `Begin`/`EndPrimitiveBuffer` — `BeginPrimitiveBuffer` rend un pointeur **dans la fenêtre partagée**, à la disposition exacte de `DRAW_RAW` : **zéro recopie de sommet**. L'état T&L (matrices, viewport, 8 lumières, 2 matériaux, texgen, 6 plans de découpe, valeurs courantes, clés v7) ne part que quand il change. Hors domaine, le retour d'Apple est rendu tel quel et GLEngine reprend tout : le repli est **par lot d'état**, vérifié exact. Interrupteur `POMPPC_GL_GEOM` (défaut : **activé**). **Mesures** : `gltest spin` 406 → **900 img/s** (16×16), 420 → **822** (256×256), 323 → **481** (640×480) ; `gltest game` 684 → **854** ; **Marble Blast Gold, scènes lourdes 25-30 → 43-48 img/s (×1,6 à ×1,96)**, moyenne des fenêtres de jeu 42,4 → **62,6 img/s (+48 %)**. Voir `docs/gpu-3d-tiger.md` §4.7. | ✅ **fait** |
 
 ## Axe 2 — Ne plus recopier, ne plus attendre
 
@@ -93,8 +99,31 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 |---|---|---|---|
 | Vérifier dans l'invité l'octet `+0x79` et observer ce que GLEngine envoie (`POMPPC_GL_TCL=1`, procédures traceuses) → `docs/re/verification-tcl.md` | agent Opus, **seul sur la VM** | `guest/gldriver`, `guest/gltest` | en cours |
 | Protocole **v7** côté hôte : matrices, viewport, lumières, matériaux, texgen, plans de découpe, brouillard calculé par l'hôte, `DRAW_RAW` (10 modes, indexé), étage géométrique complet dans le backend de référence, tests → `docs/protocole-v7-geometrie.md` | agent Opus, copie de travail isolée | `patches/qgpu`, `tests` | en cours |
-| Plugin : recevoir la géométrie brute, l'envoyer en v7, repli hors domaine ; mesurer sur Marble Blast | à lancer quand les deux précédentes sont rendues | `guest/gldriver` | à faire |
+| Plugin : recevoir la géométrie brute, l'envoyer en v7, repli hors domaine ; mesurer sur Marble Blast | agent Opus, seul sur la VM | `guest/gldriver`, `guest/gltest` | ✅ **fait** (18/09/2026) |
 | Annoncer version et extensions tenues (4.1) | après le plugin | `guest/gldriver` | à faire |
+
+### Ce que le lot 2 a laissé derrière lui
+
+- **Le goulot d'étranglement a changé de nature.** Sur Marble Blast, une scène lourde envoie
+  ~8 200 sommets bruts en **~1 065 `DRAW_RAW` par image**, soit **7,7 sommets par dessin** : ce sont
+  des rubans et des éventails courts, que le protocole ne permet pas de fusionner (seuls
+  `TRIANGLES`, `QUADS`, `LINES` et `POINTS` se recollent bout à bout). Chaque `DRAW_RAW` fait
+  reposer à l'hôte tout l'étage géométrique (`gl_draw_raw` puis `gl_reset_raw`). **Prochaine
+  tâche de vitesse évidente** : convertir rubans, éventails et polygones en `TRIANGLES` **indexés**
+  côté invité (`DRAW_RAW` sait lire des indices), pour n'émettre qu'un dessin par lot d'état.
+- **Bogue hôte contourné** : `QGPU_OP_STENCIL_UPLOAD` sur une surface combinée
+  profondeur+stencil **abîme la profondeur déjà posée** (reproduction : `gltest mixte` avec
+  `GLTEST_STENCIL=1` ; sauter ce seul téléversement rend l'image exacte, avec comme sans le chemin
+  brut). Contournement dans le plugin : le stencil n'est échangé avec l'hôte que si le contexte
+  s'en sert vraiment (test de stencil activé, ou effacement du stencil demandé) — ce qui est en
+  plus un gain, beaucoup d'applications demandant un stencil sans jamais s'en servir.
+- **Couleur secondaire par sommet** non portée par le chemin brut : la mettre dans le format de
+  sommet allumerait `GL_COLOR_SUM` sur l'hôte, et l'état GL relevé ne dit pas si l'application l'a
+  demandé. Reste à trouver l'octet de `GL_COLOR_SUM` dans le bloc d'état de GLEngine.
+- **Mode de rendu `GL_FEEDBACK`/`GL_SELECT`** : non relevé dans le bloc d'état, donc non testé
+  explicitement dans le domaine. GLEngine emploie alors un autre étage de sommets
+  (`gctx+0x4e1c ≠ 0x1c00`), que le prédicat rejette — mais cela n'a pas été vérifié par
+  l'expérience.
 
 ## Ordre d'attaque
 
