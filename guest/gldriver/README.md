@@ -30,6 +30,16 @@ Conception, rétro-ingénierie et mesures : `docs/gpu-3d-tiger.md`.
   changent. Hors domaine, on rend le retour d'Apple tel quel et GLEngine reprend
   tout le travail : le repli se fait **par lot d'état** et l'image reste exacte.
   `POMPPC_GL_GEOM=0` coupe ce chemin.
+- **Fusion des dessins.** GLEngine remet la géométrie par `glBegin`/`glEnd`, et
+  les jeux en font des rubans et des éventails **courts** : Marble Blast en
+  envoyait ~1 065 par image pour 8 200 sommets, soit 7,7 sommets par dessin, et
+  chaque dessin coûte à l'hôte un `gl_target` complet (mesuré : **2 µs**). Le
+  plugin recolle les lots **consécutifs** — même contexte, même format, sommets
+  contigus — en **un seul `DRAW_RAW` en `GL_TRIANGLES` indexés** : seuls des
+  indices u16 sont écrits, les sommets ne bougent pas. Le sommet provoquant de
+  l'ombrage plat est respecté mode par mode, l'alternance d'orientation des
+  rubans aussi, et l'ordre de dessin n'est jamais changé. Tout changement d'état
+  ferme la série. `POMPPC_GL_MERGE=0` coupe la fusion.
 - **Deux copies, un drapeau de fraîcheur.** La surface hôte double le tampon de
   dessin du rendu logiciel (couleur et profondeur). Avant un dessin hôte, ce que
   le logiciel a dessiné est téléversé ; avant un échange, un vidage ou tout
@@ -73,9 +83,10 @@ GL_RESOURCES=$PWD/glres/ ./mon_application   # GLEngine lit ce dossier au lieu d
 |---|---|
 | `POMPPC_GL_DISABLE=1` | aucune accélération : le plugin n'est qu'un mandataire |
 | `POMPPC_GL_STATS=1` | bilan sur stderr en fin de processus (triangles, soumissions, relectures…) |
-| `POMPPC_GL_STATS=/chemin` | bilan ajouté au fichier toutes les 5 s : images/s, relectures, replis logiciels, temps de soumission, sommets bruts / `DRAW_RAW` / commandes d'état par image, et motifs de refus de l'accélération avec le premier cas |
+| `POMPPC_GL_STATS=/chemin` | bilan ajouté au fichier toutes les 5 s : images/s, relectures, replis logiciels, temps de soumission, sommets bruts / `DRAW_RAW` / commandes d'état / **dessins fusionnés** / **sommets par dessin** par image, et motifs de refus de l'accélération avec le premier cas |
 | `POMPPC_GL_DIRECT=0` | pas de présentation directe (voir ci-dessous) ; `=f` : plein écran seulement ; `=c` : même avec un curseur en mouvement dans la surface |
 | `POMPPC_GL_GEOM=0` | coupe le **chemin brut** : GLEngine transforme et éclaire de nouveau lui-même, comportement d'avant le lot 2. `=1` (défaut) l'active ; `=2` l'active avec un format de sommet fixe et large, pour mesurer |
+| `POMPPC_GL_MERGE=0` | coupe la **fusion** des `DRAW_RAW` consécutifs en triangles indexés (repli et comparaison). `=1` (défaut) l'active. Sans elle, seuls les lots `TRIANGLES`, `QUADS`, `LINES` et `POINTS` de même mode se recollent bout à bout, comme avant |
 | `POMPPC_GL_GEOM_SLOTS=n` | plafonne le nombre de sommets offerts à un `BeginPrimitiveBuffer` (mesure : c'est ainsi qu'on a établi comment GLEngine coupe une longue primitive) |
 | `POMPPC_GLTRACE=dossier` | trace de chaque appel `gld*` et de chaque procédure, avec vidages binaires |
 | `POMPPC_GLTRACE_STATE=1` | en trace, vide l'état GL complet à chaque effacement |
