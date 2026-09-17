@@ -245,6 +245,9 @@ Disposition établie : `u8 n ; u8 ? ; u8 pasEnMots ; u8 ? ; u16 entrée[n]`
 
 **Ni `GeForce3GLDriver` ni le `GLDriver` d'Apple ne posent ce champ** :
 `GeForce3GLDriver 0x3ab34 li r11,0 ; 0x3ab98 stw r11,0x11c(r30)` — c'est **0**.
+*(18/09/2026 : ni le `ATIRage128GLDriver`, qui ne l'écrit jamais, ni le
+`ATIRadeonGLDriver`, qui y met 0 en `0x1404c`. Aucun pilote de 10.4.6 ne publie
+ce champ — voir `docs/re/descripteur-de-sommet.md` §7.)*
 C'est cohérent avec `tableaux-de-sommets.md` §6.5 : GeForce3 n'arme jamais
 `Begin/EndPrimitiveBuffer` et passe par `RenderVertexArray`/`RenderVertexBuffer`.
 Le descripteur est donc **le commutateur du chemin « à la Rage 128 »**
@@ -329,6 +332,18 @@ sur une scène colorée et texturée). **[H]** : les codes sont des identifiants
 sortie du « vertex program » interne (`_gleVPSetFuncOutputDesc`), pas des
 numéros d'attribut GL.
 
+> **Note du 18/09/2026 — élucidé, voir `docs/re/descripteur-de-sommet.md`.**
+> Les valeurs essayées ici (`0`, `1`, `2`, `4`) ne sont pas des codes mais des
+> **décalages** : une entrée vaut
+> `(code << 10) | ((composantes − 1) << 8) | décalageEnMots`. Les quatre essais
+> demandaient donc quatre fois le code 0 (la position) à des décalages
+> différents, ce qui explique exactement la « duplication » observée. Avec le
+> bon encodage, les codes sont les **indices d'attribut d'entrée** :
+> 0 position, 1 normale, 2 couleur, 3 brouillard, 4 couleur secondaire,
+> 5 poids, 6 drapeau d'arête (⚠ plante), 8..15 coordonnées de texture,
+> 16..31 attributs génériques, 32..39 paramètres de matériau. L'hypothèse
+> **[H]** ci-dessus est donc **infirmée**.
+
 ### 6.5 `cfg+0x7a` à 0 puis à 1
 
 Aucune différence observée sur `tri`, `gouraud` ni `varray` : traces identiques,
@@ -381,8 +396,15 @@ Pour recevoir la géométrie brute et l'envoyer à l'hôte, le plugin doit :
 2. **Publier un descripteur de sortie de sommet en `cfg+0x11c`**
    (`u8 n ; u8 ? ; u8 pasEnMots ; u8 ? ; u16 entrée[n]`, durée de vie ≥ celle du
    contexte). Sans lui, GLEngine prend le chemin T&L et **jette la géométrie**.
-   Reste à relever : la table des codes d'entrée (§6.4) pour obtenir couleur,
-   normale et coordonnées de texture à côté de la position.
+   **Fait le 18/09/2026** (`docs/re/descripteur-de-sommet.md`) : une entrée vaut
+   `(code << 10) | ((composantes − 1) << 8) | décalageEnMots`, et les codes sont
+   les indices d'attribut d'entrée (0 position, 1 normale, 2 couleur,
+   3 brouillard, 4 couleur secondaire, 8..15 coordonnées de texture,
+   32..39 matériau) ; **ne pas demander le code 6**, il plante GLEngine.
+   Vérifié dans l'invité : on reçoit les attributs **bruts**, sans
+   transformation, sans éclairage, sans texgen ni matrice de texture, sans
+   découpage ni élimination de face, et il n'existe **aucun code donnant une
+   sortie transformée ou éclairée**.
 3. **Installer les quatre procédures** `+0x50` `BeginPrimitiveBuffer`,
    `+0x54` `EndPrimitiveBuffer`, `+0x4c` `RenderVertexBuffer`,
    `+0x70` `RenderVertexArray` **à chaque `gldInitDispatch` et chaque
@@ -414,9 +436,12 @@ Pour recevoir la géométrie brute et l'envoyer à l'hôte, le plugin doit :
    `gldCreateVertexArray`/`gldCreatePipelineProgram` : ni l'un ni les autres ne
    disent quoi que ce soit de la T&L.
 
-Restes à établir avant 1.3/1.4 : les codes du descripteur (§6.4) ; le chemin
-`RenderVertexArray`/`RenderVertexBuffer` « à la GeForce3 », jamais atteint ici ;
-le comportement de `cfg+0x7a = 0` sur un changement d'état en cours de primitive.
+Restes à établir avant 1.3/1.4 : ~~les codes du descripteur (§6.4)~~ **fait le
+18/09/2026** ; le chemin `RenderVertexArray`/`RenderVertexBuffer` « à la
+GeForce3 », jamais atteint ici (le GeForce3 et le Radeon **annoncent bien la
+T&L matérielle** — `cfg+0x78..0x7b = 1`, retour de dispatch 7 — mais laissent
+`cfg+0x11c = 0` et n'installent pas `Begin`/`EndPrimitiveBuffer`) ; le
+comportement de `cfg+0x7a = 0` sur un changement d'état en cours de primitive.
 
 ---
 
@@ -446,4 +471,5 @@ Toutes sont sans effet si `POMPPC_GL_TCL` n'est pas défini.
 | `POMPPC_GL_TCL=2` | en plus, force `gctx+0x7580 = 1` à chaque dispatch |
 | `POMPPC_GL_TCL_7A=0` | pose `cfg+0x7a = 0` (défaut 1) |
 | `POMPPC_GL_TCL_BITS=n` | bits ajoutés au retour de `gldInitDispatch`/`gldUpdateDispatch` (défaut 3 ; `0` = retour d'Apple inchangé) |
-| `POMPPC_GL_TCL_DESC=pas,e0,e1,…` | publie un descripteur en `cfg+0x11c` (`pas` en mots de 4 octets) |
+| `POMPPC_GL_TCL_DESC=pas,e0,e1,…` | publie un descripteur en `cfg+0x11c` (`pas` en mots de 4 octets) ; depuis le 18/09/2026 chaque entrée s'écrit aussi `code:décalage[:composantes]` |
+| `POMPPC_GL_TCL_78=v` | pose `cfg+0x78 = v` (défaut : inchangé) |
