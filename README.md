@@ -369,8 +369,11 @@ la campagne TCG — c'est le seul chiffre du projet dont la provenance n'est plu
 | `tools/` | rétro-ingénierie PPC, générateur de trampolines, boucle de développement dans l'invité (`tools/README.md`) |
 | `tests/qgpu_core_test.c`, `tests/qgpu_smoke.py` | tests du GPU paravirtuel : natif hôte (soft + gl), et bout en bout depuis Open Firmware |
 | `docs/gpu-3d-tiger.md` | GPU 3D : architecture, rétro-ingénierie d'OpenGL.framework, protocole, mesures |
+| `docs/todo-gpu-3d.md` | GPU 3D : ce qui reste à faire à court terme |
+| `docs/roadmap-opengl15.md` | GPU 3D : feuille de route OpenGL 1.5, Quartz Extreme et Core Image |
 | `tests/run-all.sh` | **harnais de non-régression** : syntaxe shell/Python, shellcheck, cohérence doc↔binaire, alignement des registres QFB hôte/invité. `--slow` ajoute les tests qui bootent réellement |
 | `tests/qfb_smoke.py` | test de bout en bout du device QFB, sans invité (dont la non-régression du scanout débordant) |
+| `scripts/web-proxy.py`, `guest/net/proxy.sh` | Internet sous Tiger : relais HTTPS→HTTP sur l'hôte, réglage du proxy dans l'invité |
 | `scripts/caps.sh` | sondage des capacités réelles d'un binaire QEMU (QOM), partagé par les lanceurs, le build et les tests |
 | `scripts/ab-measure.sh` | A/B interleavé entre deux binaires QEMU, médiane de `CPU_qemu` |
 | `docs/gpu-tiger-4060ti.md` | étude GPU 2D : passthrough, paravirtualisation, plan par phases |

@@ -202,6 +202,34 @@ est relu. Un effacement complet ne téléverse rien ; la profondeur n'est relue 
 logiciel s'en sert. Les triangles de plusieurs appels consécutifs sont regroupés en une seule
 commande de dessin.
 
+Le drapeau `0x80` de `gldUpdateDispatch` (« tampon de dessin changé ») arrive aussi à chaque
+`CGLFlushDrawable`, sans changement réel : la synchronisation est donc paresseuse. Après la mise à
+jour, si l'adresse du tampon a vraiment changé, l'image hôte est relue dans l'ancien tampon, qui
+reste alloué.
+
+**Présentation directe.** `gldSwapBuffers` (procédure `+0x60`) ne fait que sauter vers
+`glsSwapBuffers(drawable, ctx+0x60, …)` de `libGLSystem`, qui recopie le tampon dans la mémoire de
+la fenêtre puis attend que le WindowServer l'ait affichée. Quand l'application est au premier plan,
+menus cachés, avec un drawable de la taille de l'écran en 32 bits, le plugin écrit l'image hôte
+droit dans la mémoire vidéo (`CGDisplayBaseAddress`) et remplace l'échange par une procédure vide,
+comme le `gldSwapNoop` d'Apple. Les conditions sont réévaluées toutes les 30 images ; une fenêtre
+ordinaire garde le chemin normal. `POMPPC_GL_DIRECT=0` coupe ce mode.
+
+### 4.6 Cas réel : Zenerchi (PlayFirst, 2007)
+
+Jeu 2D Carbon/AGL, plein écran en 800x600, quelques centaines de quads texturés par image. Mesures
+dans l'invité à 2 cœurs (`POMPPC_GL_STATS=<fichier>`, outil `sample` de Tiger) :
+
+| Étape | Partie en cours | Cause levée |
+|---|---|---|
+| départ | ~1 img/s, chargement de plusieurs minutes (« écran blanc ») | textures en BGRA + `UNSIGNED_INT_8_8_8_8` refusées : tout passait par le rastériseur logiciel |
+| formats compacts | 16 img/s | 41 % du temps à attendre le WindowServer dans `glsSwapBuffers` |
+| présentation directe, recâblage en temps constant | 42 img/s | recherche linéaire parmi des centaines de textures (8 %) |
+| table de hachage des textures | 50 img/s | le jeu est désormais limité par le processeur émulé |
+
+Le rendu logiciel d'Apple seul ne démarre pas ce jeu : `aglChoosePixelFormat` échoue
+(« invalid pixel format »). Un jeu PlayFirst au second plan se limite volontairement à 1 img/s.
+
 ### 4.5 Domaine accéléré
 
 Accéléré : effacement couleur/profondeur ; triangles, bandes, éventails, quads, bandes de quads,
@@ -209,7 +237,9 @@ polygones ; lignes, bandes et boucles de lignes ; points ; profondeur (toutes fo
 mélange (facteurs et équations d'OpenGL 1.x), test alpha, ciseaux, ombrage lisse et plat,
 brouillard (facteur par sommet), décalage de polygone plein ; **textures 2D et 1D sur deux unités**
 (formats de base ALPHA, RGB, RGBA, LUMINANCE, LUMINANCE_ALPHA, INTENSITY ; données RGBA, RGB, BGRA,
-BGR, LUMINANCE, LUMINANCE_ALPHA, ALPHA, RED en octets, et les deux formats 32 bits entiers ; filtres
+BGR, LUMINANCE, LUMINANCE_ALPHA, ALPHA, RED en octets ; RGBA et BGRA en `UNSIGNED_INT_8_8_8_8`
+et `_REV`, BGRA en `UNSIGNED_SHORT_1_5_5_5_REV`, RGB en `UNSIGNED_SHORT_5_6_5`, RGBA en
+`UNSIGNED_SHORT_4_4_4_4` ; filtres
 avec mipmaps, REPEAT/CLAMP/CLAMP_TO_EDGE ; environnements MODULATE, REPLACE, DECAL, BLEND, ADD).
 
 Rendu par le code d'Apple (exact, plus lent) : trois unités de texture ou plus, GL_COMBINE,
@@ -227,7 +257,8 @@ plein, brouillard en `GL_NICEST`, lignes et points texturés ou décalés, opér
 | device, sans invité | `tests/qgpu_smoke.py` | 11/11, backend GL |
 | harnais complet | `tests/run-all.sh --slow` | 34 OK |
 | transport dans Tiger | `guest/qgpu-test` | OK, y compris pendant 4 applications GL |
-| plugin hors écran | `gltest` × 12 scènes | pixels témoins OK ; images comparées au rendu d'Apple (§0) |
+| plugin hors écran | `gltest` × 13 scènes | pixels témoins OK ; images comparées au rendu d'Apple (§0) ; `texpack` : formats compacts identiques à Apple |
+| application réelle | Zenerchi (§4.6) | menus et partie corrects, 42 img/s en partie, présentation directe |
 | plugin en fenêtre, dans le bureau | `glwin` (GLUT) | OK ; image témoin visible dans la fenêtre à l'écran |
 | multi-processus | 5 × `gltest game` + `qgpu_test` | 4 accélérés, le 5e en logiciel, tous corrects |
 
@@ -242,7 +273,11 @@ export DEVDISK=disks/tiger-dev.raw
 python3 tools/guest/devloop.py prepare        # VM arrêtée : agent, boîtes aux lettres, relais
 python3 tools/guest/devloop.py start --gui    # bureau ; sans --gui : single-user
 python3 tools/guest/devloop.py run mon_job/   # exécute mon_job/job.sh, rapatrie out/
+python3 tools/guest/devloop.py click 400 150 800x600   # clic souris (résolution courante)
 ```
+
+`SMP=2` et `SND=1` (ou `SND=none`, Screamer muet) au démarrage reproduisent les conditions de
+`run_tiger.sh` : deux cœurs MTTCG, son, RAM plafonnée à 768 Mo.
 
 En mode bureau, un processus racine ne peut pas ouvrir de fenêtre (ni même de contexte CGL :
 erreur 10006) : `gui_run 'commande'` (`tools/guest/guilib.sh`) fait exécuter la commande dans la
@@ -277,14 +312,14 @@ pas et le plugin se comporte exactement comme le rendu logiciel d'Apple.
 
 ## 7. Pistes
 
-1. **Zero-copy** : les images relues à chaque échange passent par la RAM invitée. Rendre dans la
-   VRAM de `qfb-pci` (ou composer côté hôte dans le frontend) supprimerait la relecture, qui domine
-   sur les petites scènes.
-2. **Exécution asynchrone** : le device exécute dans l'écriture MMIO du doorbell ; un thread de
-   rendu hôte libérerait le vCPU. `FENCE` et l'IRQ `DONE` sont déjà en place.
-3. **Domaine accéléré** : GL_COMBINE, stencil, textures rectangle (utilisées par Core Image),
-   `glDrawPixels` / `glBitmap` (texte).
-4. **Accélérateur IOKit** : publier `IOGLBundleName` sur un nœud `IOAccelerator` rattaché à
-   l'écran remplacerait l'astuce du nom de bundle et ouvrirait la voie à Quartz Extreme.
-5. **Autres backends hôte** : Vulkan (natif ou Zink), Metal (ANGLE) ; la suite de tests hôte
-   s'applique telle quelle.
+Le plan à court terme est dans **`docs/todo-gpu-3d.md`**, la feuille de route (OpenGL 1.5,
+Quartz Extreme, Core Image) dans **`docs/roadmap-opengl15.md`**. En résumé :
+
+1. **Monter d'un étage** : se brancher au niveau du tableau de sommets et du programme de
+   pipeline pour envoyer les sommets non transformés — transformation et éclairage sur le GPU
+   hôte. Plus gros gain restant, plus gros travail.
+2. **Stencil**, puis modes de polygone, pointillés et lissage : ce qui manque à OpenGL 1.3.
+3. **Zero-copy** : laisser le device écrire dans la VRAM plutôt que recopier l'image relue.
+4. **Exécution asynchrone** du doorbell (FENCE et IRQ DONE déjà en place).
+5. **Accélérateur IOKit** (`IOGLBundleName`) à la place de l'astuce du nom de bundle.
+6. **Autres backends hôte** : Vulkan (natif ou Zink), Metal (ANGLE).
