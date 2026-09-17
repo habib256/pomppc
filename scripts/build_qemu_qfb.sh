@@ -3,12 +3,19 @@
 #
 #   • le device audio « screamer » (AWACS PowerMac)  — patches/screamer/
 #   • le device paravirtuel « qfb-pci »              — patches/qfb/
+#   • le GPU paravirtuel « qgpu-pci » (+ backends)   — patches/qgpu/
 #   • le bring-up SMP mac99 de BALATON Zoltan        — patches/smp-mac99/
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
 #   ./scripts/build_qemu_qfb.sh              # build dans ~/src/qemu
 #   QEMU_SRC=/chemin ./scripts/build_qemu_qfb.sh
 #   RECONFIGURE=1 ./scripts/build_qemu_qfb.sh   # force un ../configure
+#   PYTHON=/chemin/python3 ./scripts/build_qemu_qfb.sh   # Python pour configure
+#
+# macOS : affichage Cocoa et son CoreAudio au lieu de GTK/SDL et PulseAudio.
+# Le configure de QEMU 9.2 exige un Python ≥ 3.8 avec « tomli » (ou ≥ 3.11) et
+# « distlib » : sur macOS, un venv suffit (python3 -m venv v && v/bin/pip
+# install distlib tomli ; PYTHON=v/bin/python3).
 #
 # Le binaire produit (build/qemu-system-ppc et ...ppc64) est à l'emplacement que
 # config.env attend par défaut. TOUT est dans ce dépôt : aucun fork tiers n'est
@@ -23,7 +30,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="${QEMU_SRC:-$HOME/src/qemu}"
 TAG="${QEMU_TAG:-v9.2.0}"
-JOBS="${JOBS:-$(nproc)}"
+JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}"
 
 if [ ! -d "$SRC/.git" ]; then
   echo "▶ clone de QEMU $TAG dans $SRC"
@@ -79,14 +86,32 @@ if ! grep -q "qfb-pci.c" hw/display/meson.build; then
   patch -p1 < "$ROOT/patches/qfb/0002-wire-qfb-pci-build.patch"
 fi
 
+# --- 4 bis. GPU paravirtuel qgpu-pci : device + cœur + backends soft/GL ---
+# Le backend GL se compile toujours ; sans OpenGL.framework (macOS) ni EGL+GL
+# (Linux) il devient un stub et le device retombe sur le backend logiciel.
+echo "▶ installation de hw/display/qgpu-*.c"
+cp "$ROOT"/patches/qgpu/qgpu-pci.c "$ROOT"/patches/qgpu/qgpu-core.c \
+   "$ROOT"/patches/qgpu/qgpu-core.h "$ROOT"/patches/qgpu/qgpu-soft.c \
+   "$ROOT"/patches/qgpu/qgpu-gl.c "$ROOT"/patches/qgpu/qgpu_proto.h hw/display/
+if ! grep -q "qgpu-pci.c" hw/display/meson.build; then
+  echo "▶ câblage meson/Kconfig qgpu"
+  patch -p1 < "$ROOT/patches/qgpu/0003-wire-qgpu-pci-build.patch"
+fi
+
 # --- 5. Build ---
 mkdir -p build && cd build
 if [ ! -f build.ninja ] || [ -n "${RECONFIGURE:-}" ]; then
   # slirp et pa sont demandés EXPLICITEMENT : sans cela ils sont auto-détectés,
   # et leur absence produit un binaire silencieusement amputé (le piège qui a
   # coûté le son et le réseau une première fois).
+  case "$(uname -s)" in
+    Darwin) UI_OPTS=(--enable-cocoa --audio-drv-list=coreaudio) ;;
+    *)      UI_OPTS=(--enable-gtk --enable-sdl --audio-drv-list=pa,alsa) ;;
+  esac
+  PY_OPTS=()
+  [ -n "${PYTHON:-}" ] && PY_OPTS=(--python="$PYTHON")
   ../configure --target-list=ppc-softmmu,ppc64-softmmu \
-               --enable-gtk --enable-sdl --enable-slirp --audio-drv-list=pa,alsa \
+               ${UI_OPTS[@]+"${UI_OPTS[@]}"} --enable-slirp ${PY_OPTS[@]+"${PY_OPTS[@]}"} \
                --disable-docs --disable-werror
 fi
 ninja -j"$JOBS"
@@ -97,7 +122,7 @@ mkdir -p "$ROOT/bench"
 CAPS="$ROOT/bench/build-capabilities.txt"
 fail=0
 {
-  echo "# généré par scripts/build_qemu_qfb.sh le $(date -Is)"
+  echo "# généré par scripts/build_qemu_qfb.sh le $(date "+%Y-%m-%dT%H:%M:%S%z")"
   echo "binaire=$BIN"
   echo "version=$("$BIN" --version | head -1)"
 } > "$CAPS"
@@ -118,8 +143,12 @@ echo "=== capacités du binaire produit ==="
 # screamer : sondage MACHINE (le type peut être enregistré sans être câblé).
 check screamer   qemu_machine_has  "$BIN" "mac99,via=pmu" screamer
 check qfb-pci    qemu_has_device   "$BIN" qfb-pci
+check qgpu-pci   qemu_has_device   "$BIN" qgpu-pci
 check slirp      qemu_has_netdev   "$BIN" user
-check audio-pa   qemu_has_audiodev "$BIN" pa
+case "$(uname -s)" in
+  Darwin) check audio-coreaudio qemu_has_audiodev "$BIN" coreaudio ;;
+  *)      check audio-pa        qemu_has_audiodev "$BIN" pa ;;
+esac
 check smp-mac99  has_smp
 echo
 echo "→ $CAPS"
