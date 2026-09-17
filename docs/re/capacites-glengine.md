@@ -26,6 +26,13 @@ Convention : **[É]** = établi par lecture du code ; **[H]** = hypothèse à v�
    éclaire et découpe lui-même (chemin actuel) ; à 1, il remet la géométrie **non transformée** au
    pilote par `BeginPrimitiveBuffer`/`EndPrimitiveBuffer` (+0x50/+0x54), `RenderVertexBuffer`
    (+0x4c) et `RenderVertexArray` (+0x70). **[É]**
+
+   > **Nuancé par l'expérience du 18/09/2026** (`docs/re/verification-tcl.md`) : `+0x79` ne donne
+   > que la valeur **initiale** de `ctx+0x7580`. `_gleUpdateDispatchCodeChange` (0xc8d20) la refait
+   > à partir du **bit 0 de la valeur rendue par `gldInitDispatch`/`gldUpdateDispatch`**, à chaque
+   > changement d'état ; le `GLDriver` d'Apple rend 4, donc le verrou retombe à 0 dès le premier
+   > `gldUpdateDispatch`. Et poser le verrou ne suffit pas : sans descripteur de sortie de sommet
+   > en `+0x11c`, GLEngine prend le chemin T&L et **jette la géométrie en silence**.
 5. `RendererInfo` ne contient **aucun** bit de fonctionnalité : identifiant, drapeaux (dont
    `0x100` accéléré), masques de formats de pixel, mémoire. Il sert au choix du renderer, pas à la
    négociation des capacités. **[É]**
@@ -299,6 +306,8 @@ Mise en correspondance automatique des constantes d'énumération avec les offse
 | `+0xc6`/`+0xc7` | u8 | valeurs par défaut d'indications (`GL_FOG_HINT`…) | 0 | 0 | 0 | 3 / 1 |
 | `+0xe8` | u32 | `GL_MAX_RECTANGLE_TEXTURE_SIZE_ARB` (0x84F8) | 0 | 16384 | 0 | 4096 |
 | `+0xec`..`+0x11c` | u16/u32 | limites de programmes (instructions, paramètres, indirections) | 0 | remplis | 0 | remplis |
+| `+0x11c` | ptr | **descripteur de sortie de sommet** → `ctx+0x48d0` ; garde du chemin `Begin/EndPrimitiveBuffer`. `u8 n ; u8 ? ; u8 pas_en_mots ; u8 ? ; u16 entrée[n]`. **Note du 18/09/2026** | 0 | | | **0** |
+| `+0x120` | ptr | second descripteur → `ctx+0x48d4`. **Note du 18/09/2026** | 0 | | | 0 |
 | `+0x124`/`+0x128`/`+0x12c` | u32 ×3 | **bits d'extensions** (§3) | | | | |
 
 `GL_MAX_TEXTURE_UNITS` et `GL_MAX_TEXTURE_SIZE`, extraits (GLEngine) :
@@ -448,6 +457,13 @@ est forcé à 1) et par `_gleDrawArraysOrElements_Exec` (0xa7434) et `_gleDrawAr
 C'est **la sonde la moins chère** pour vérifier tout ce document depuis l'invité : notre
 identifiant est `0x7700`, donc non masqué. **[É]**
 
+> **Correction du 18/09/2026** (`docs/re/verification-tcl.md` §1) : seul le sélecteur **310** est
+> une sonde valide. Le 311 rend `(ctx+0x7581 != 0)`, et `ctx+0x7581` **n'est pas** l'image de
+> `+0x79` : il est réécrit à partir du **bit 2 du retour de `gldInitDispatch`**
+> (`_gliSetCurrentPluginDispatchTable` 0x9f24, `_gleUpdateDispatchCodeChange` 0xc8bd0). Le
+> `GLDriver` d'Apple rendant 4, `CGLGetParameter(311)` vaut **1** même en rendu purement logiciel —
+> mesuré dans l'invité.
+
 ### 5.5 Ce que fait le pilote logiciel d'Apple des entrées « hautes »
 
 GLEngine **appelle toujours** `gldCreateVertexArray` et `gldCreatePipelineProgram`, pour **tous les
@@ -574,6 +590,10 @@ Rien là-dedans ne décrit une capacité : ce sont des paramètres de dessin et 
 Toutes se font avec une seule reconstruction du plugin (`guest/gldriver`) ; aucune n'exige le
 protocole hôte.
 
+> **État au 18/09/2026** : V1 et V6 ont été faites dans l'invité ; le résultat, les divergences et
+> ce qu'il faut pour implémenter sont dans **`docs/re/verification-tcl.md`**. V1 est **confirmée à
+> l'octet près**. V2, V3, V4, V5 et V7 restent à faire.
+
 ### V1 — Le bloc de configuration est bien le 5ᵉ argument
 
 Dans `gldCreateContext` (`guest/gldriver/pomppc_gld.c:340`), **après** `FWD8(GLD_CreateContext)`,
@@ -610,7 +630,7 @@ Poser `+0xb4 = +0xb6 = +0xba = 4` et `+0xbc = 2048`, puis lire dans `gltest`
 vérifier que `glActiveTexture(GL_TEXTURE4)` rend `GL_INVALID_ENUM`. C'est aussi la façon d'aligner
 enfin l'annonce sur ce que le plugin tient réellement (4 unités aujourd'hui).
 
-### V6 — Le verrou T&L (l'expérience décisive)
+### V6 — Le verrou T&L (l'expérience décisive) — **faite, voir `verification-tcl.md`**
 
 1. Sans rien changer : `CGLGetParameter(ctx, 310 /* kCGLCPGPUVertexProcessing */, &v)` doit rendre
    **0**, et `311` doit rendre **0** (mais pour la raison du §5.4 il faudrait un identifiant Apple ;
@@ -677,6 +697,14 @@ logiciel au premier changement d'état). Mais elle engage tout le reste :
    de moyen de refuser primitive par primitive** : `+0x79` est fixé une fois pour toutes à la
    création du contexte. Le repli doit donc être décidé **avant** `gldCreateContext` (par exemple
    sur variable d'environnement `POMPPC_GL_TCL=1`), pas en cours de route.
+
+   > **Infirmé le 18/09/2026** (`docs/re/verification-tcl.md` §3) : le verrou est réévalué à
+   > **chaque changement d'état GL**, puisque `_gleUpdateDispatchCodeChange` le refait à partir du
+   > bit 0 du retour de `gldUpdateDispatch`. Le repli est donc décidable **par lot d'état**, ce qui
+   > est exactement la granularité utile — et vérifié : quand le bit retombe à 0, l'image redevient
+   > exacte. Il n'existe en revanche toujours pas de refus **primitive par primitive** :
+   > `BeginPrimitiveBuffer` n'a pas de valeur de retour « non pris en charge » (0 = écriture à
+   > l'adresse nulle).
 4. Ne pas se fier aux appels à `gldCreateVertexArray` / `gldCreatePipelineProgram` déjà observés :
    GLEngine les émet aussi pour le rendu logiciel (§5.5).
 

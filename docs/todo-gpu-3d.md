@@ -38,7 +38,7 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 
 | # | Tâche | Statut |
 |---|---|---|
-| 1.1 | ✅ *relevé fait (`docs/re/capacites-glengine.md`), reste à le vérifier dans l'invité (expériences V1–V7 du relevé).* Le verrou est **l'octet `+0x79` du bloc de configuration passé à `gldCreateContext`** : à 1, GLEngine envoie la géométrie brute (`BeginPrimitiveBuffer` +0x50, `RenderVertexBuffer` +0x4c, `RenderVertexArray` +0x70) ; il est figé à la création du contexte. **Relever la négociation des capacités** : ce qui décide GLEngine à appeler les entrées « hautes » du pilote (`CreateVertexArray`, `RenderVertexArray` +0x70, `AllocVertexBuffer`, `CreatePipelineProgram`) plutôt que de transformer lui-même. Lire comment les pilotes ATI/NVIDIA de 10.4.6 répondent à `GetRendererInfo`, `GetInteger`, `GetString`. **Verrou de tout l'axe.** | relevé ✅, vérification à faire |
+| 1.1 | ✅ *relevé fait (`docs/re/capacites-glengine.md`) et **vérifié dans l'invité le 18/09/2026** (`docs/re/verification-tcl.md`, V1 et V6) : le bloc de configuration est confirmé à l'octet près, mais le verrou réel est le **bit 0 du retour de `gldInitDispatch`/`gldUpdateDispatch`**, relu à chaque changement d'état (donc repli possible par lot d'état), et il faut en plus publier un descripteur de sortie de sommet en `cfg+0x11c` sans quoi GLEngine jette la géométrie. Avec les deux, les sommets arrivent en `BeginPrimitiveBuffer`/`EndPrimitiveBuffer` en **coordonnées d'objet**. Restent V2–V5, V7 et les codes du descripteur.* Le verrou est **l'octet `+0x79` du bloc de configuration passé à `gldCreateContext`** : à 1, GLEngine envoie la géométrie brute (`BeginPrimitiveBuffer` +0x50, `RenderVertexBuffer` +0x4c, `RenderVertexArray` +0x70) ; il est figé à la création du contexte. **Relever la négociation des capacités** : ce qui décide GLEngine à appeler les entrées « hautes » du pilote (`CreateVertexArray`, `RenderVertexArray` +0x70, `AllocVertexBuffer`, `CreatePipelineProgram`) plutôt que de transformer lui-même. Lire comment les pilotes ATI/NVIDIA de 10.4.6 répondent à `GetRendererInfo`, `GetInteger`, `GetString`. **Verrou de tout l'axe.** | relevé ✅, **vérifié** ✅ |
 | 1.2 | ✅ *relevé par lecture fait (`docs/re/tableaux-de-sommets.md` : objet tableau de sommets, signatures, matrices, lumières, texgen, plans de découpe ; `ctx+0x0c = gctx+0x360`) ; 6 sondes `gltest` y sont décrites pour confirmer les offsets incertains (lumières, matériau).* Relever la disposition des tableaux de sommets, des programmes de pipeline, des matrices, des lumières et matériaux, du texgen et des plans de découpe dans l'état GLEngine (sondes `gltest` : un réglage, un vidage, un diff). | relevé ✅, sondes à écrire |
 | 1.3 | Protocole : matrices, éclairage/matériau, texgen, plans de découpe, dessin indexé de sommets bruts. Backends logiciel (référence) et OpenGL. | à faire |
 | 1.4 | Plugin : envoyer les sommets non transformés ; repli sur le chemin actuel hors domaine. Mesurer sur Marble Blast. | à faire |
@@ -87,11 +87,20 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
   partagée avec la profondeur depuis le début).
 - Plus de 4 clients GL accélérés (tranches du kext) — à lever avant 4.4.
 
+## Lot 2 en cours (18/09/2026) — la géométrie sur l'hôte
+
+| Partie | Qui | Où | État |
+|---|---|---|---|
+| Vérifier dans l'invité l'octet `+0x79` et observer ce que GLEngine envoie (`POMPPC_GL_TCL=1`, procédures traceuses) → `docs/re/verification-tcl.md` | agent Opus, **seul sur la VM** | `guest/gldriver`, `guest/gltest` | en cours |
+| Protocole **v7** côté hôte : matrices, viewport, lumières, matériaux, texgen, plans de découpe, brouillard calculé par l'hôte, `DRAW_RAW` (10 modes, indexé), étage géométrique complet dans le backend de référence, tests → `docs/protocole-v7-geometrie.md` | agent Opus, copie de travail isolée | `patches/qgpu`, `tests` | en cours |
+| Plugin : recevoir la géométrie brute, l'envoyer en v7, repli hors domaine ; mesurer sur Marble Blast | à lancer quand les deux précédentes sont rendues | `guest/gldriver` | à faire |
+| Annoncer version et extensions tenues (4.1) | après le plugin | `guest/gldriver` | à faire |
+
 ## Ordre d'attaque
 
-1. **Vérifier 1.1 dans l'invité** : sonde `CGLGetParameter(ctx, 310)` (rend `ctx+0x7580`), puis
-   poser `+0x79 = 1` avec des procédures `+0x50/+0x54/+0x4c/+0x70` qui ne font que tracer.
-   ⚠ Poser l'octet sans brancher `+0x50` fait écrire GLEngine à l'adresse 0.
+1. ✅ **Vérifié dans l'invité** le 18/09/2026 (`docs/re/verification-tcl.md`). Prochaine étape de
+   l'axe : relever les **codes d'entrée du descripteur `cfg+0x11c`** (§6.4 de ce relevé), pour
+   obtenir couleur, normale et coordonnées de texture à côté de la position — puis 1.3.
 2. **4.1** est débloquée : `GL_VERSION` sort tel quel de `gldGetString`, les extensions d'un
    tableau de 79 bits du bloc de configuration. À n'annoncer que ce qui est tenu.
 3. Puis 1.3 → 1.4 (géométrie), 2.1 (tampons), 2.2 (asynchrone), 3.x par lots.

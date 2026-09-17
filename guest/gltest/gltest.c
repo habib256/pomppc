@@ -115,6 +115,17 @@ int main(int argc, char **argv)
     printf("GL_VENDOR   = %s\n", glGetString(GL_VENDOR));
     printf("GL_RENDERER = %s\n", glGetString(GL_RENDERER));
     printf("GL_VERSION  = %s\n", glGetString(GL_VERSION));
+    {
+        /* Sonde V1 de docs/re/capacites-glengine.md §9 : _gliGetInteger rend
+           ctx+0x7580 pour 310 (kCGLCPGPUVertexProcessing) et ctx+0x7581 pour
+           311 (kCGLCPGPUFragmentProcessing) — c'est-à-dire l'octet +0x79 du
+           bloc de configuration. La sonde la moins chère du verrou T&L. */
+        long v310 = -1, v311 = -1;
+        CGLError e310 = CGLGetParameter(ctx, (CGLContextParameter)310, &v310);
+        CGLError e311 = CGLGetParameter(ctx, (CGLContextParameter)311, &v311);
+        printf("CGLGetParameter 310 (GPUVertexProcessing)   = %ld (err %d)\n", v310, e310);
+        printf("CGLGetParameter 311 (GPUFragmentProcessing) = %ld (err %d)\n", v311, e311);
+    }
 
     glViewport(0, 0, W, H);
     glMatrixMode(GL_PROJECTION); glLoadIdentity();
@@ -799,6 +810,53 @@ int main(int argc, char **argv)
         glEnd();
         glClear(GL_DEPTH_BUFFER_BIT);                                           /* 9 */
         glFinish();
+    } else if (!strcmp(scene, "varray")) {
+        /* Sonde des tableaux de sommets (axe 1) : glDrawArrays puis
+           glDrawElements, avec une projection en PERSPECTIVE et une modèle-vue
+           non triviale. Les coordonnées d'objet sont choisies pour être
+           reconnaissables dans un vidage : si le tampon remis au pilote les
+           contient telles quelles, la géométrie arrive NON transformée.
+           Repère : translation (0.25, 0.125, -2) puis glFrustum(-1,1,-1,1,1,10),
+           donc x_ndc = x_œil / 2 et y_ndc = y_œil / 2. */
+        static const float qa[6 * 3] = {          /* quad A, deux triangles */
+            -2.0625f, -1.125f, 0.0f,  -0.4375f, -1.125f, 0.0f,  -0.4375f, 0.875f, 0.0f,
+            -2.0625f, -1.125f, 0.0f,  -0.4375f,  0.875f, 0.0f,  -2.0625f, 0.875f, 0.0f,
+        };
+        static const float ca[6 * 3] = {
+            1, 0, 0,  1, 0, 0,  1, 0, 0,  1, 0, 0,  1, 0, 0,  1, 0, 0,
+        };
+        static const float qb[4 * 3] = {          /* quad B, indexé */
+            -0.0625f, -1.125f, 0.0f,   1.5625f, -1.125f, 0.0f,
+             1.5625f,  0.875f, 0.0f,  -0.0625f,  0.875f, 0.0f,
+        };
+        static const float cb[4 * 3] = { 0, 1, 0,  0, 1, 0,  0, 1, 0,  0, 1, 0 };
+        static const GLushort ib[6] = { 0, 1, 2, 0, 2, 3 };
+        float sx = W / 64.0f, sy = H / 64.0f;
+
+        glMatrixMode(GL_PROJECTION); glLoadIdentity();
+        glFrustum(-1, 1, -1, 1, 1, 10);
+        glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
+        glTranslatef(0.25f, 0.125f, -2.0f);
+        glClearColor(0, 0, 1, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glEnableClientState(GL_COLOR_ARRAY);
+        glVertexPointer(3, GL_FLOAT, 0, qa);
+        glColorPointer(3, GL_FLOAT, 0, ca);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glVertexPointer(3, GL_FLOAT, 0, qb);
+        glColorPointer(3, GL_FLOAT, 0, cb);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, ib);
+        glDisableClientState(GL_COLOR_ARRAY);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        glFinish();
+
+        /* y est compté depuis le HAUT ; y_œil = +1 tombe à la ligne 16 sur 64. */
+        check("quad A (glDrawArrays) rouge", (int)(16 * sx), (int)(32 * sy), 0xFF0000);
+        check("quad B (glDrawElements) vert", (int)(48 * sx), (int)(32 * sy), 0x00FF00);
+        check("entre les deux quads : fond", (int)(32 * sx), (int)(32 * sy), 0x0000FF);
+        check("au-dessus des quads : fond", (int)(32 * sx), (int)(8 * sy), 0x0000FF);
     } else if (!strcmp(scene, "state")) {
         /* Sonde d'état : un réglage GL à la fois, suivi d'un glClear que le
            plugin traceur (POMPPC_GLTRACE_STATE=1) vide en entier. Les valeurs

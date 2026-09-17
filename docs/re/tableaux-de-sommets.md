@@ -43,6 +43,9 @@ boucles par unité de texture et par lumière). Conséquence pratique immédiate
 > (`guest/gldriver/pomppc_gld.c:192`, `pomppc_dump("clear-glstate", gls, 0x4000)`).
 > Le bloc est plus grand : **passer le vidage à 0x5400** avant d'écrire les sondes ci-dessous,
 > sinon les plans de découpe (`GS+0x3e28`) sont au bord et la zone `GS+0x42c0` est tronquée.
+> — **Fait le 18/09/2026** : le vidage est à `0x5400`, et les objets pointés par `GS+0x4700`
+> (tableau de sommets), `GS+0x4a70`/`GS+0x4a74` (matériaux) et `GS+0x50c0` (pipeline program) sont
+> vidés eux aussi à chaque `glClear` (préalables 7.0.1 à 7.0.4).
 
 ---
 
@@ -713,6 +716,13 @@ celui des coordonnées de texture courantes, §5.9).
 `gctx+0x7580` vient de `rendererInfo[0x79]` (`0x5498 lbz r0, 0x79(r10)` / `0x54a0 stb r0, 0x7580(r30)`).
 **C'est le verrou de la tâche 1.1** : sans ce bit, GLEngine n'appelle jamais `RenderVertexArray`.
 
+> **Correction du 18/09/2026** (`docs/re/verification-tcl.md`) : `r10` en `0x5498` vient de
+> `lwz r10, 0x468c(r30)` — c'est le **bloc de configuration** (5ᵉ argument de `gldCreateContext`),
+> **pas** `rendererInfo`. Et cette lecture ne donne que la valeur initiale : `gctx+0x7580` est
+> refait à chaque changement d'état par `_gleUpdateDispatchCodeChange` (0xc8d20) à partir du
+> **bit 0 de la valeur rendue par `gldInitDispatch`/`gldUpdateDispatch`**. C'est **là** qu'est le
+> verrou utilisable, et il est réévaluable par lot d'état.
+
 ### 6.2 `RenderVertexBuffer` (`+0x4c`) et le trio `AllocVertexBuffer`
 
 ```c
@@ -749,6 +759,21 @@ sur le PowerPC mais écrit les sommets **directement dans le tampon DMA du pilot
 rendu par `Begin` devient `gctx+0x4858`, la limite `gctx+0x485c`, le pas `gctx+0x487c`).
 Garde : `gctx+0x48d0 != 0` (`_gleUpdatePrimitiveData 0x6780`) **[L]**.
 La sémantique de `drapeau` (2 = cas nominal, 0/1 sur les chemins `GL_LINE_LOOP`) est **[H]**.
+
+> **Vérifié et corrigé le 18/09/2026** (`docs/re/verification-tcl.md` §6) :
+> - GLEngine **ne transforme pas** : les sommets écrits dans le tampon sont en **coordonnées
+>   d'objet**, telles que l'application les a données (mesuré sur `glVertex2f`, sur `glDrawArrays`
+>   et sur `glDrawElements` avec projection en perspective et modèle-vue non triviale).
+> - Le tirage **indexé est déroulé** par GLEngine : `glDrawElements(GL_TRIANGLES, 6, …)` donne
+>   `n = 6` sommets à plat, et `RenderVertexBuffer`/`RenderVertexArray` ne sont pas appelées.
+> - `drapeau = 2` est bien le cas nominal (confirmé sur toutes les scènes essayées).
+> - Le **pas** est en `gctx+0x4880` (u16, en octets) ; `gctx+0x487c` est aussi un **u16**, pas un
+>   mot de 32 bits.
+> - `gctx+0x48d0` vient de **`config+0x11c`** (`_gleUpdateDispatchCodeChange 0xc8d48`), que ni le
+>   `GLDriver` d'Apple ni le `GeForce3GLDriver` ne posent (`GeForce3 0x3ab34/0x3ab98` : 0). Sa
+>   disposition : `u8 n ; u8 ? ; u8 pas_en_mots ; u8 ? ; u16 entrée[n]` (`0x1d360`, copie de
+>   `((n+1)/2)+1` mots vers `_gleVPSetFuncOutputDesc`). Sans lui, poser le verrou fait **perdre la
+>   géométrie en silence**.
 
 ### 6.4 `BufferSubData` (`+0x80`)
 
@@ -1053,6 +1078,13 @@ pas de sonde GL mais **une trace du plugin** : journaliser, dans `gldGetRenderer
 `+0x79` de la structure rendue par le `GLDriver` d'Apple, puis le forcer à 1 dans notre copie et
 observer si `RenderVertexArray` (`PROC_RenderVertexArray`) commence à être appelé. C'est le
 préalable de tout l'axe 1 et cela se teste avec la scène `gltest spin` inchangée.
+
+> **Faite le 18/09/2026, et l'énoncé était faux sur deux points** : l'octet est celui du **bloc de
+> configuration**, pas de `rendererInfo` ; et il faut en plus rendre le bit 0 depuis
+> `gldInitDispatch`/`gldUpdateDispatch` et publier `config+0x11c`. Résultat complet, traces et
+> conséquences pour l'implémentation : **`docs/re/verification-tcl.md`**. Les sondes 7.1 à 7.6
+> restent à écrire ; les préalables 7.0.1 à 7.0.4 (vidage de `0x5400` octets, de l'objet tableau de
+> sommets, des deux matériaux et du pipeline program) sont **faits** dans `pomppc_gld.c`.
 
 ---
 
