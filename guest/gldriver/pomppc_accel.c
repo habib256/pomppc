@@ -1361,7 +1361,11 @@ static void send_state(PCtx *p, const TexInfo *ti)
     unsigned long v[QGPU_SK_COUNT], *c;
     int k;
     compute_state(p, ti, v);
-    for (k = 1; k < QGPU_SK_COUNT; k++) {
+    /* Seulement les clés que compute_state remplit (rastérisation, v1–v6). Les
+       clés de géométrie de la v7 gardent leur valeur initiale sur le device :
+       les envoyer à zéro serait invalide (vu en vrai au passage en v6, où
+       toutes les soumissions ont été refusées). */
+    for (k = 1; k < QGPU_SK_LIGHTING; k++) {
         if (p->st_valid && p->st[k] == v[k])
             continue;
         c = reserve(p, QGPU_LEN_SET_STATE);
