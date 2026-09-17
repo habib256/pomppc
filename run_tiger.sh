@@ -6,7 +6,9 @@
 #   NOSOUND=1 ./run_tiger.sh  # coupe l'audio (rend la RAM pleine : 1024 au lieu de 768)
 #   WIDE=1 ./run_tiger.sh     # 16:9 plein écran 1920x1080 (sinon RES=WxHxD au choix)
 #   SNAPSHOT=1 ./run_tiger.sh # disque jetable (writes annulés -> boot toujours propre, pas de fsck)
-#   NET=1 ./run_tiger.sh      # réseau (si ton QEMU a slirp compilé)
+#   NET=0 ./run_tiger.sh      # coupe le réseau (actif par défaut si QEMU a slirp :
+#                             # NAT, DHCP 10.0.2.15, passerelle 10.0.2.2, DNS 10.0.2.3)
+#   WEBPROXY=0                # ne lance pas le relais web HTTPS→HTTP (10.0.2.2:8080)
 #   HEADLESS=1 ./run_tiger.sh # sans fenêtre (moniteur seul, pour scripting)
 #   POMPPC_DISPLAY=sdl        # autre affichage (défaut : cocoa sous macOS, gtk sous Linux)
 #   QFB=1 ./run_tiger.sh      # + écran paravirtuel qfb-pci (kext POMPPCQFB)
@@ -114,15 +116,34 @@ else DISP="${POMPPC_DISPLAY:-$HOST_DISPLAY}"; host_audio_env; fi
 QMP_ARGS=()
 [ -n "${QMP_SOCK:-}" ] && QMP_ARGS=(-qmp "unix:$QMP_SOCK,server=on,wait=off")
 
-# --- Réseau (coupé par défaut : build sans slirp) ---
-if [ -n "${NET:-}" ]; then
-  if qemu_has_netdev "$QEMU_BIN" user; then
+# --- Réseau ---
+# Actif par défaut dès que le binaire a slirp (NAT utilisateur, aucun droit
+# requis) ; NET=0 le coupe. Une demande explicite NET=1 sur un binaire sans
+# slirp est signalée ; le défaut, lui, se replie en silence.
+NET_WANT="${NET:-auto}"
+NET=""
+NET_ARGS=(-nic none)
+if [ "$NET_WANT" != 0 ]; then
+  if qemu_has_netdev "$BIN" user; then
     NET_ARGS=(-netdev "$NETDEV" -device "$NETNIC")
-  else
+    NET=1
+  elif [ "$NET_WANT" = 1 ]; then
     echo "⚠  NET=1 demandé mais ce QEMU n'a pas slirp — réseau coupé." >&2
-    NET_ARGS=(-nic none); NET=""
   fi
-else NET_ARGS=(-nic none); fi
+fi
+
+# --- Relais web pour Safari/curl de Tiger (scripts/web-proxy.py) ---
+#     Tiger ne parle plus le TLS des sites actuels : le relais, sur l'hôte, les
+#     sert en HTTP. Il n'écoute que sur 127.0.0.1 (l'invité le voit en
+#     10.0.2.2) et s'arrête avec QEMU : $$ devient le PID de QEMU à l'exec final.
+WEBPROXY_PORT="${WEBPROXY_PORT:-8080}"
+WEBPROXY_ON=""
+if [ -n "$NET" ] && [ "${WEBPROXY:-1}" != 0 ] && command -v python3 >/dev/null 2>&1; then
+  mkdir -p "${POMPPC_SCRATCH:-$ROOT/.run}"
+  nohup python3 "$ROOT/scripts/web-proxy.py" --port "$WEBPROXY_PORT" --parent-pid $$ \
+    >> "${POMPPC_SCRATCH:-$ROOT/.run}/web-proxy.log" 2>&1 &
+  WEBPROXY_ON=1
+fi
 
 # --- Disque jetable optionnel ---
 SNAP_ARGS=(); [ -n "${SNAPSHOT:-}" ] && SNAP_ARGS=(-snapshot)
@@ -177,7 +198,7 @@ GLISO_WANT="${GLISO:-}"
 if [ "$GLISO_WANT" = 1 ]; then
   GL_ISO="$ROOT/disks/pomppc-src.iso"
   GL_SRCS=("$ROOT/kext/POMPPCGPU" "$ROOT/kext/POMPPCQFB" "$ROOT/guest/gldriver"
-           "$ROOT/guest/gltest" "$ROOT/guest/qgpu-test")
+           "$ROOT/guest/gltest" "$ROOT/guest/qgpu-test" "$ROOT/guest/net")
   if [ ! -f "$GL_ISO" ] || [ -n "$(find "${GL_SRCS[@]}" -type f -newer "$GL_ISO" 2>/dev/null | head -1)" ]; then
     echo "  💿 (re)génération de $(basename "$GL_ISO")…"
     "$ROOT/scripts/make_kext_iso.sh" "$GL_ISO" >/dev/null || {
@@ -186,6 +207,7 @@ if [ "$GLISO_WANT" = 1 ]; then
   CD_ARGS=(-drive "id=gamecd,if=ide,media=cdrom,format=raw,readonly=on,file=$GL_ISO")
   echo "  💿 CD POMPPCSRC inséré. Dans Tiger (une seule fois, Terminal) :"
   echo "       cp -R /Volumes/POMPPCSRC /tmp/src && sudo sh /tmp/src/guest/gldriver/install.sh"
+  echo "       sudo sh /Volumes/POMPPCSRC/guest/net/proxy.sh on     # web via le relais"
 fi
 
 # --- Arguments QEMU ad hoc : EXTRA_ARGS="-device ..." ./run_tiger.sh ---
@@ -198,6 +220,7 @@ echo "▶ Tiger : $MODE | cpu=$CPU ram=${RAM}Mo affichage=$DISP \
 réseau=$([ -n "${NET:-}" ] && echo on || echo off) \
 disque=$([ -n "${SNAPSHOT:-}" ] && echo jetable || echo persistant)"
 echo "  moniteur QEMU : $MON"
+[ -n "$WEBPROXY_ON" ] && echo "  🌐 relais web : 10.0.2.2:$WEBPROXY_PORT (proxy HTTP de Tiger ; journal .run/web-proxy.log)"
 [ "$SMP_N" -ge 2 ] && echo "  (1er boot en persistant = fsck possible ~1min ; ensuite rapide)"
 
 # --- Manette USB : auto-passthrough (idem run_os9.sh) ; NOPAD=1 pour couper ---

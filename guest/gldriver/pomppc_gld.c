@@ -379,12 +379,13 @@ long gldUpdateDispatch(long a, long b, long c, long d, long e, long f, long g, l
 {
     long r;
     /* 0x80 : le tampon de dessin change (gldSetDrawBufferPtrs chez Apple) */
-    if (c && (*(unsigned long *)c & 0x80))
-        pomppc_before_buffers_change((void *)a);
+    int buf = c && (*(unsigned long *)c & 0x80);
     pomppc_unhook_procs((void *)a, (void **)b);
     r = FWD8(GLD_UpdateDispatch);
     pomppc_log("gldUpdateDispatch(%08lx %08lx changes %08lx) -> %ld\n", a, b,
                c ? *(unsigned long *)c : 0, r);
+    if (buf)
+        pomppc_after_draw_buffer_change((void *)a);
     pomppc_hook_procs((void *)a, (void **)b);
     return r;
 }

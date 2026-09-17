@@ -57,8 +57,14 @@ void qgpu_state_init(QgpuState *st)
     st->v[QGPU_SK_BLEND_EQ_RGB]  = 0x8006;         /* GL_FUNC_ADD */
     st->v[QGPU_SK_BLEND_EQ_A]    = 0x8006;
     st->v[QGPU_SK_ALPHA_FUNC]    = 0x0207;         /* GL_ALWAYS */
-    st->v[QGPU_SK_TEX_ENV_MODE]  = 0x2100;         /* GL_MODULATE */
-    st->v[QGPU_SK_TEX1_ENV_MODE] = 0x2100;
+    {
+        int u;
+        for (u = 0; u < QGPU_MAX_UNITS; u++) {
+            st->v[QGPU_SK_UNIT(u) + QGPU_SK_U_ENV_MODE] = 0x2100;   /* GL_MODULATE */
+            st->v[QGPU_SK_COMBINE0 + u] = QGPU_COMBINE_DEFAULT;
+            st->v[QGPU_SK_COMBINE_SRC0 + u] = QGPU_COMBINE_SRC_DEFAULT;
+        }
+    }
     st->v[QGPU_SK_LINE_WIDTH]    = 0x3F800000;     /* 1.0 */
     st->v[QGPU_SK_POINT_SIZE]    = 0x3F800000;
 }
@@ -70,7 +76,21 @@ static bool valid_base_format(uint32_t f)
 
 static bool valid_env_mode(uint32_t m)
 {
-    return m == 0x2100 || m == 0x2101 || m == 0x0BE2 || m == 0x1E01 || m == 0x0104;
+    return m == 0x2100 || m == 0x2101 || m == 0x0BE2 || m == 0x1E01 || m == 0x0104 ||
+           m == 0x8570;                              /* v5 : GL_COMBINE */
+}
+
+/* QGPU_SK_COMBINE* : champs connus, échelles 1, 2 ou 4. */
+static bool valid_combine(uint32_t v)
+{
+    return (v & ~0xFFFu) == 0 && (v & 0xF) <= QGPU_CB_DOT3_RGBA &&
+           ((v >> 4) & 0xF) <= QGPU_CB_SUBTRACT &&
+           ((v >> 8) & 3) <= 2 && ((v >> 10) & 3) <= 2;
+}
+
+static bool valid_combine_src(uint32_t v)
+{
+    return (v & ~((1u << 27) - 1)) == 0;             /* tout champ de 5 / 4 bits est valide */
 }
 
 static bool valid_filter(uint32_t f, bool min)
@@ -167,15 +187,24 @@ static bool valid_state(uint32_t key, uint32_t val)
     case QGPU_SK_SCISSOR_X: case QGPU_SK_SCISSOR_Y:
     case QGPU_SK_SCISSOR_W: case QGPU_SK_SCISSOR_H:
         return val <= QGPU_MAX_SURF_DIM;
-    case QGPU_SK_TEXTURE: case QGPU_SK_TEXTURE1: case QGPU_SK_FOG:
-    case QGPU_SK_POLY_OFFSET:
+    case QGPU_SK_TEXTURE: case QGPU_SK_TEXTURE1: case QGPU_SK_TEXTURE2:
+    case QGPU_SK_TEXTURE3: case QGPU_SK_FOG: case QGPU_SK_POLY_OFFSET:
         return val <= 1;
-    case QGPU_SK_TEX_BIND: case QGPU_SK_TEX1_BIND:
+    case QGPU_SK_TEX_BIND: case QGPU_SK_TEX1_BIND: case QGPU_SK_TEX2_BIND:
+    case QGPU_SK_TEX3_BIND:
         return val < QGPU_MAX_TEX;
-    case QGPU_SK_TEX_ENV_MODE: case QGPU_SK_TEX1_ENV_MODE:
+    case QGPU_SK_TEX_ENV_MODE: case QGPU_SK_TEX1_ENV_MODE: case QGPU_SK_TEX2_ENV_MODE:
+    case QGPU_SK_TEX3_ENV_MODE:
         return valid_env_mode(val);
-    case QGPU_SK_TEX_ENV_COLOR: case QGPU_SK_TEX1_ENV_COLOR: case QGPU_SK_FOG_COLOR:
+    case QGPU_SK_TEX_ENV_COLOR: case QGPU_SK_TEX1_ENV_COLOR: case QGPU_SK_TEX2_ENV_COLOR:
+    case QGPU_SK_TEX3_ENV_COLOR: case QGPU_SK_FOG_COLOR:
         return true;
+    case QGPU_SK_COMBINE0: case QGPU_SK_COMBINE0 + 1:
+    case QGPU_SK_COMBINE0 + 2: case QGPU_SK_COMBINE0 + 3:
+        return valid_combine(val);
+    case QGPU_SK_COMBINE_SRC0: case QGPU_SK_COMBINE_SRC0 + 1:
+    case QGPU_SK_COMBINE_SRC0 + 2: case QGPU_SK_COMBINE_SRC0 + 3:
+        return valid_combine_src(val);
     case QGPU_SK_LINE_WIDTH: case QGPU_SK_POINT_SIZE: {
         float f = qgpu_u2f(val);
         return f > 0.0f && f <= 64.0f;
@@ -341,21 +370,24 @@ static uint32_t check_xfer(QgpuCore *c, const uint32_t *a, QgpuSurface **sp)
     return QGPU_ST_OK;
 }
 
-/* Texture de l'unité u (0 ou 1) si le texturage y est actif et la texture complète. */
+/* Texture de l'unité u si le texturage y est actif et la texture complète. */
 static QgpuTexture *unit_texture(QgpuCore *c, const QgpuState *st, int u)
 {
     QgpuTexture *t;
-    if (!st->v[u ? QGPU_SK_TEXTURE1 : QGPU_SK_TEXTURE]) {
+    if (!st->v[QGPU_SK_UNIT(u) + QGPU_SK_U_ENABLE]) {
         return NULL;
     }
-    t = &c->tex[st->v[u ? QGPU_SK_TEX1_BIND : QGPU_SK_TEX_BIND]];
+    t = &c->tex[st->v[QGPU_SK_UNIT(u) + QGPU_SK_U_BIND]];
     return qgpu_texture_levels(t) ? t : NULL;
 }
 
-/* Commun aux opcodes de dessin : a = [nverts, off]. */
+/* Commun aux opcodes de dessin : a = [nverts, off] ; ntex unités texturées
+   (coordonnées dans les sommets). */
 static uint32_t do_draw(QgpuCore *c, const uint32_t *a, uint32_t prim,
                         uint32_t words, int ntex)
 {
+    QgpuTexture *tex[QGPU_MAX_UNITS];
+    int u;
     static const uint32_t group[3] = { 3, 2, 1 };
     uint32_t nverts = a[0], off = a[1], i, st;
     QgpuSurface *s = bound_surface(c, &st);
@@ -383,9 +415,10 @@ static uint32_t do_draw(QgpuCore *c, const uint32_t *a, uint32_t prim,
         c->vbuf[i] = v;
     }
     cs = cur_state(c);
-    if (!c->be->draw(c, s, cs, prim, ntex >= 1 ? unit_texture(c, cs, 0) : NULL,
-                     ntex >= 2 ? unit_texture(c, cs, 1) : NULL,
-                     c->vbuf, nverts, words)) {
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        tex[u] = u < ntex ? unit_texture(c, cs, u) : NULL;
+    }
+    if (!c->be->draw(c, s, cs, prim, tex, c->vbuf, nverts, words)) {
         return QGPU_ST_BACKEND;
     }
     return QGPU_ST_OK;
@@ -615,6 +648,12 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
     case QGPU_OP_DRAW_TRIANGLES_TEX2:
         WANT(QGPU_LEN_DRAW);
         return do_draw(c, a, QGPU_PRIM_TRIANGLES, QGPU_VERTEX_TEX2_WORDS, 2);
+    case QGPU_OP_DRAW_TRIANGLES_TEXN:
+        WANT(QGPU_LEN_DRAW_N);
+        if (a[2] < 1 || a[2] > QGPU_MAX_UNITS) {
+            return QGPU_ST_BAD_ARG;
+        }
+        return do_draw(c, a, QGPU_PRIM_TRIANGLES, QGPU_VERTEX_TEXN_WORDS(a[2]), a[2]);
     case QGPU_OP_DRAW_LINES:
         WANT(QGPU_LEN_DRAW);
         return do_draw(c, a, QGPU_PRIM_LINES, QGPU_VERTEX_WORDS, 0);
@@ -731,6 +770,7 @@ static bool known_op(uint32_t op)
     case QGPU_OP_VIEWPORT: case QGPU_OP_SET_STATE: case QGPU_OP_DRAW_TRIANGLES:
     case QGPU_OP_DRAW_TRIANGLES_TEX: case QGPU_OP_TEX_CREATE: case QGPU_OP_TEX_DESTROY:
     case QGPU_OP_DRAW_TRIANGLES_TEX2: case QGPU_OP_DRAW_LINES: case QGPU_OP_DRAW_POINTS:
+    case QGPU_OP_DRAW_TRIANGLES_TEXN:
     case QGPU_OP_TEX_IMAGE: case QGPU_OP_TEX_PARAM:
         return true;
     default:

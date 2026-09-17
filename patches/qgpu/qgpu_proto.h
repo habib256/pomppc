@@ -41,8 +41,9 @@
 #define QGPU_IOPCI_PRIMARY_MATCH 0x0fb21234
 
 #define QGPU_MAGIC              0x71677031  /* 'qgp1' */
-#define QGPU_PROTO_VERSION      4   /* v2 : profondeur, état GL ; v3 : textures ;
-                                       v4 : brouillard, 2e unité, lignes, points */
+#define QGPU_PROTO_VERSION      5   /* v2 : profondeur, état GL ; v3 : textures ;
+                                       v4 : brouillard, 2e unité, lignes, points ;
+                                       v5 : 4 unités, GL_COMBINE */
 
 /* ── BAR0 : fenêtre partagée (RAM) ───────────────────────────────────────── */
 #define QGPU_SHMEM_DEFAULT_MB   64
@@ -94,6 +95,7 @@
 #define QGPU_MAX_TEX            512         /* v3 */
 #define QGPU_MAX_TEX_DIM        2048
 #define QGPU_MAX_TEX_LEVELS     12
+#define QGPU_MAX_UNITS          4           /* v5 : unités de texture */
 
 /* ── Flux de commandes ───────────────────────────────────────────────────────
  *
@@ -127,6 +129,7 @@
 #define QGPU_OP_DRAW_TRIANGLES_TEX2 0x0032 /* v4, [nverts, off]  deux unités de texture */
 #define QGPU_OP_DRAW_LINES      0x0033  /* v4, [nverts, off]  segments (paires), sommets de 8 mots */
 #define QGPU_OP_DRAW_POINTS     0x0034  /* v4, [nverts, off]  points, sommets de 8 mots */
+#define QGPU_OP_DRAW_TRIANGLES_TEXN 0x0035 /* v5, [nverts, off, nunits]  1 à 4 unités, cf. ci-dessous */
 
 #define QGPU_OP_TEX_CREATE      0x0040  /* v3, [tex] */
 #define QGPU_OP_TEX_DESTROY     0x0041  /* v3, [tex] */
@@ -142,6 +145,7 @@
 #define QGPU_LEN_CLEAR          4
 #define QGPU_LEN_VIEWPORT       5
 #define QGPU_LEN_DRAW           3
+#define QGPU_LEN_DRAW_N         4
 #define QGPU_LEN_SET_STATE      3
 #define QGPU_LEN_TEX            2
 #define QGPU_LEN_TEX_IMAGE      7
@@ -183,7 +187,8 @@
 #define QGPU_SK_SCISSOR_H       19
 #define QGPU_SK_TEXTURE         20  /* v3, booléen : texturage de l'unité unique */
 #define QGPU_SK_TEX_BIND        21  /* v3, identifiant de texture */
-#define QGPU_SK_TEX_ENV_MODE    22  /* v3, GL_MODULATE, GL_DECAL, GL_BLEND, GL_REPLACE, GL_ADD */
+#define QGPU_SK_TEX_ENV_MODE    22  /* v3, GL_MODULATE, GL_DECAL, GL_BLEND, GL_REPLACE, GL_ADD ;
+                                       v5 : GL_COMBINE (cf. QGPU_SK_COMBINE*) */
 #define QGPU_SK_TEX_ENV_COLOR   23  /* v3, 0xAARRGGBB */
 #define QGPU_SK_FOG             24  /* v4, booléen : le mot w du sommet est le facteur f */
 #define QGPU_SK_FOG_COLOR       25  /* v4, 0xAARRGGBB */
@@ -196,7 +201,69 @@
 #define QGPU_SK_POLY_OFFSET     32  /* v4, booléen : décalage des triangles pleins */
 #define QGPU_SK_POLY_FACTOR     33  /* v4, flottant (bits IEEE) */
 #define QGPU_SK_POLY_UNITS      34  /* v4, flottant (bits IEEE) */
-#define QGPU_SK_COUNT           35
+#define QGPU_SK_TEXTURE2        35  /* v5, unités 2 et 3 : mêmes quatre clés */
+#define QGPU_SK_TEX2_BIND       36
+#define QGPU_SK_TEX2_ENV_MODE   37
+#define QGPU_SK_TEX2_ENV_COLOR  38
+#define QGPU_SK_TEXTURE3        39
+#define QGPU_SK_TEX3_BIND       40
+#define QGPU_SK_TEX3_ENV_MODE   41
+#define QGPU_SK_TEX3_ENV_COLOR  42
+#define QGPU_SK_COMBINE0        43  /* v5, unités 0..3 : fonctions et échelles, QGPU_COMBINE() */
+#define QGPU_SK_COMBINE_SRC0    47  /* v5, unités 0..3 : sources et opérandes, QGPU_COMBINE_SRC_*() */
+#define QGPU_SK_COUNT           51
+
+/* Groupe de quatre clés de l'unité u (0..3) : +0 texturage, +1 texture,
+ * +2 mode d'environnement, +3 couleur d'environnement. */
+#define QGPU_SK_UNIT(u)         ((u) == 0 ? QGPU_SK_TEXTURE : (u) == 1 ? QGPU_SK_TEXTURE1 : \
+                                 QGPU_SK_TEXTURE2 + 4 * ((u) - 2))
+#define QGPU_SK_U_ENABLE        0
+#define QGPU_SK_U_BIND          1
+#define QGPU_SK_U_ENV_MODE      2
+#define QGPU_SK_U_ENV_COLOR     3
+
+/* GL_COMBINE (v5, ARB_texture_env_combine + dot3), actif quand le mode
+ * d'environnement de l'unité vaut GL_COMBINE (0x8570).
+ *   QGPU_SK_COMBINE<u>     = fonction RGB | fonction alpha << 4
+ *                            | log2(RGB_SCALE) << 8 | log2(ALPHA_SCALE) << 10
+ *   QGPU_SK_COMBINE_SRC<u> = pour i = 0..2 : (source | opérande << 3) << 5i pour RGB,
+ *                            puis (source | opérande << 3) << (15 + 4i) pour alpha.
+ * Valeur initiale d'OpenGL : MODULATE/MODULATE, échelles 1 ;
+ * sources TEXTURE, PREVIOUS, CONSTANT ; opérandes RGB SRC_COLOR, SRC_COLOR,
+ * SRC_ALPHA ; opérandes alpha SRC_ALPHA. */
+#define QGPU_CB_REPLACE         0
+#define QGPU_CB_MODULATE        1
+#define QGPU_CB_ADD             2
+#define QGPU_CB_ADD_SIGNED      3
+#define QGPU_CB_INTERPOLATE     4
+#define QGPU_CB_SUBTRACT        5
+#define QGPU_CB_DOT3_RGB        6   /* RGB seulement */
+#define QGPU_CB_DOT3_RGBA       7   /* RGB seulement ; l'alpha prend aussi le produit */
+#define QGPU_CS_TEXTURE         0
+#define QGPU_CS_CONSTANT        1
+#define QGPU_CS_PRIMARY         2
+#define QGPU_CS_PREVIOUS        3
+#define QGPU_CO_COLOR           0   /* opérandes RGB */
+#define QGPU_CO_ONE_MINUS_COLOR 1
+#define QGPU_CO_ALPHA           2
+#define QGPU_CO_ONE_MINUS_ALPHA 3
+#define QGPU_CA_ALPHA           0   /* opérandes alpha */
+#define QGPU_CA_ONE_MINUS_ALPHA 1
+#define QGPU_COMBINE(rgb, a, rgb_shift, a_shift) \
+    ((unsigned long)(rgb) | ((unsigned long)(a) << 4) | \
+     ((unsigned long)(rgb_shift) << 8) | ((unsigned long)(a_shift) << 10))
+#define QGPU_COMBINE_SRC_RGB(i, src, op) \
+    (((unsigned long)(src) | ((unsigned long)(op) << 3)) << (5 * (i)))
+#define QGPU_COMBINE_SRC_A(i, src, op) \
+    (((unsigned long)(src) | ((unsigned long)(op) << 3)) << (15 + 4 * (i)))
+#define QGPU_COMBINE_DEFAULT    QGPU_COMBINE(QGPU_CB_MODULATE, QGPU_CB_MODULATE, 0, 0)
+#define QGPU_COMBINE_SRC_DEFAULT \
+    (QGPU_COMBINE_SRC_RGB(0, QGPU_CS_TEXTURE, QGPU_CO_COLOR) | \
+     QGPU_COMBINE_SRC_RGB(1, QGPU_CS_PREVIOUS, QGPU_CO_COLOR) | \
+     QGPU_COMBINE_SRC_RGB(2, QGPU_CS_CONSTANT, QGPU_CO_ALPHA) | \
+     QGPU_COMBINE_SRC_A(0, QGPU_CS_TEXTURE, QGPU_CA_ALPHA) | \
+     QGPU_COMBINE_SRC_A(1, QGPU_CS_PREVIOUS, QGPU_CA_ALPHA) | \
+     QGPU_COMBINE_SRC_A(2, QGPU_CS_CONSTANT, QGPU_CA_ALPHA))
 
 /* Textures (v3) : une seule unité, cible 2D. TEX_IMAGE reçoit toujours des
  * texels ARGB ; le format de base (GL_ALPHA, GL_RGB, GL_RGBA, GL_LUMINANCE,
@@ -235,6 +302,13 @@
  * GL_TEXTURE1 en OpenGL 1.3. */
 #define QGPU_VERTEX_TEX2_WORDS  16
 #define QGPU_VERTEX_TEX2_BYTES  (QGPU_VERTEX_TEX2_WORDS * 4)
+
+/* DRAW_TRIANGLES_TEXN (v5) : les 8 mots de base, puis s, t, r, q de chaque
+ * unité 0..nunits-1 (1 ≤ nunits ≤ QGPU_MAX_UNITS). Une unité dont le
+ * texturage est coupé garde ses quatre mots, ignorés. Les unités
+ * s'appliquent dans l'ordre, comme GL_TEXTURE0..3. */
+#define QGPU_VERTEX_TEXN_WORDS(n) (8 + 4 * (n))
+#define QGPU_VERTEX_MAX_WORDS   QGPU_VERTEX_TEXN_WORDS(QGPU_MAX_UNITS)
 
 /* DRAW_LINES / DRAW_POINTS (v4) : sommets de QGPU_VERTEX_WORDS mots, sans
  * texture. Lignes : largeur QGPU_SK_LINE_WIDTH, chaque paire est un segment.

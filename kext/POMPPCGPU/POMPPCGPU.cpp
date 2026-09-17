@@ -54,8 +54,10 @@ bool POMPPCGPU::start(IOService * provider)
     fVersion   = regRead(QGPU_REG_VERSION);
     fCaps      = regRead(QGPU_REG_CAPS);
     fShmemSize = regRead(QGPU_REG_SHMEM_SIZE);
-    if (fVersion != QGPU_PROTO_VERSION) {
-        GPULog("protocole v%lu, ce kext parle v%d : refus\n",
+    /* Un device plus récent comprend les flux des versions précédentes
+       (chaque version ne fait qu'ajouter des opcodes et des clés). */
+    if (fVersion < QGPU_PROTO_VERSION) {
+        GPULog("protocole v%lu, ce kext exige au moins v%d : refus\n",
                (unsigned long) fVersion, QGPU_PROTO_VERSION);
         fPCI->setMemoryEnable(false);
         return false;

@@ -3,7 +3,7 @@
 # programme de test invité (guest/qgpu-test) sur un CD ISO, à monter dans
 # l'invité Tiger pour les y compiler (l'hôte n'a pas de toolchain
 # ppc-apple-darwin8). Arborescence du CD : kext/{POMPPCQFB,POMPPCGPU},
-# guest/{qgpu-test,gldriver,gltest}.
+# guest/{qgpu-test,gldriver,gltest,net}.
 #
 #   ./scripts/make_kext_iso.sh
 #   GPU=1 ./run_tiger.sh     # (re)grave l'ISO si besoin et l'insère lui-même
@@ -17,7 +17,8 @@ STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 # Même disposition que le dépôt : le plugin retrouve le kext en ../../kext.
 mkdir -p "$STAGE/kext" "$STAGE/guest"
 cp -R "$ROOT/kext/POMPPCQFB" "$ROOT/kext/POMPPCGPU" "$STAGE/kext/"
-cp -R "$ROOT/guest/qgpu-test" "$ROOT/guest/gldriver" "$ROOT/guest/gltest" "$STAGE/guest/"
+cp -R "$ROOT/guest/qgpu-test" "$ROOT/guest/gldriver" "$ROOT/guest/gltest" \
+      "$ROOT/guest/net" "$STAGE/guest/"
 
 if command -v xorriso >/dev/null; then
   xorriso -as mkisofs -quiet -R -J -V POMPPCSRC -o "$OUT" "$STAGE"

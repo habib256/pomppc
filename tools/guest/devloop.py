@@ -13,6 +13,7 @@ Pas de reboot, pas de conversion d'image : une itération = le temps du job.
     devloop.py run DOSSIER [--timeout S]   # exécute DOSSIER/job.sh, rapatrie out/
     devloop.py shot [FICHIER.png] # capture d'écran
     devloop.py type "texte\\n"     # frappe au clavier
+    devloop.py click X Y [LxH]    # clic souris (LxH = résolution courante)
     devloop.py stop
 
 Disque : $DEVDISK (raw), par défaut le tiger-dev.raw du scratchpad n'est pas
@@ -205,6 +206,18 @@ def shot(q, path):
     return open(path, "rb").read() if os.path.exists(path) else b""
 
 
+def click(q, x, y, screen=(1024, 768)):
+    """Clic gauche en (x, y) pixels d'écran, par la tablette USB (absolue)."""
+    ax = int(x * 32767 / (screen[0] - 1)); ay = int(y * 32767 / (screen[1] - 1))
+    q("input-send-event", events=[
+        {"type": "abs", "data": {"axis": "x", "value": ax}},
+        {"type": "abs", "data": {"axis": "y", "value": ay}}])
+    time.sleep(0.2)
+    for down in (True, False):
+        q("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": "left"}}])
+        time.sleep(0.12)
+
+
 def start(gui=False):
     need_disk()
     boxes = find_mailbox(b"IN"), find_mailbox(b"OU")
@@ -212,10 +225,25 @@ def start(gui=False):
     if os.path.exists(QMP):
         os.remove(QMP)
     backend = os.environ.get("GPU_BACKEND", "auto")
-    args = [QEMU, "-M", "mac99,via=pmu", "-cpu", "g4", "-m", "1024", "-smp", "1",
-            "-display", "none", "-bios", BIOS, "-g", os.environ.get("RES", "1024x768x32"),
+    # SMP=2 / SND=1 : mêmes conditions que run_tiger.sh (MTTCG ppc64,
+    # Screamer avec RAM plafonnée à 768 Mo). SND=none : Screamer muet.
+    smp = int(os.environ.get("SMP", "1"))
+    qemu = QEMU + "64" if smp > 1 else QEMU
+    extra = ["-accel", "tcg,thread=multi"] if smp > 1 else []
+    ram = "1024"
+    snd = os.environ.get("SND", "")
+    if snd in ("1", "none"):
+        drv = "coreaudio" if snd == "1" else "none"
+        extra += ["-audiodev", "%s,id=snd0" % drv, "-global", "screamer.audiodev=snd0"]
+        ram = "768"
+    args = [qemu, "-M", "mac99,via=pmu", "-cpu", "g4", "-m", ram, "-smp", str(smp),
+            *extra,
+            "-display", "none", "-bios", BIOS,
+            "-g", os.environ.get("RES", "1024x768x32"),
             "-drive", "file=%s,format=raw,media=disk" % DISK,
             "-device", "usb-tablet",
+            *(["-netdev", "user,id=net0", "-device", "sungem,netdev=net0"]
+              if os.environ.get("NET") == "1" else ["-nic", "none"]),
             "-device", "qgpu-pci,id=gpu0,backend=%s%s" % (
                 backend, ",trace=on" if os.environ.get("GPU_TRACE") else ""),
             "-prom-env", "auto-boot?=true",
@@ -348,6 +376,10 @@ def main():
         shot(Qmp(), p); print(p)
     elif a[0] == "type":
         type_text(Qmp(), a[1].encode().decode("unicode_escape"))
+    elif a[0] == "click":
+        # click X Y [LxH] : coordonnées dans la résolution d'écran courante
+        scr = tuple(int(v) for v in a[3].split("x")) if len(a) > 3 else (1024, 768)
+        click(Qmp(), int(a[1]), int(a[2]), scr)
     elif a[0] == "stop":
         stop()
     return 0

@@ -427,6 +427,156 @@ static void run_v4(QgpuCore *c, uint8_t *shmem)
     CHECK(st == QGPU_ST_BAD_ARG, "nombre impair de sommets de ligne refusé : st %u", st);
 }
 
+/* Tests v5 : quatre unités, GL_COMBINE. */
+static int near8(uint32_t a, uint32_t b)
+{
+    int d = (int)a - (int)b;
+    return d >= -2 && d <= 2;
+}
+
+static int near_rgb(uint32_t p, uint32_t want)
+{
+    p &= 0xFFFFFF;
+    return near8(p >> 16, want >> 16) && near8((p >> 8) & 255, (want >> 8) & 255) &&
+           near8(p & 255, want & 255);
+}
+
+static void texn_op(Emit *e, uint32_t n, uint32_t units)
+{
+    emit(e, QGPU_CMD_HDR(QGPU_OP_DRAW_TRIANGLES_TEXN, QGPU_LEN_DRAW_N));
+    emit(e, n); emit(e, VTX_OFF); emit(e, units);
+}
+
+static void tex1x1(Emit *e, uint32_t id, uint32_t fmt, uint32_t off)
+{
+    emit(e, QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX)); emit(e, id);
+    emit(e, QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE, QGPU_LEN_TEX_IMAGE));
+    emit(e, id); emit(e, 0); emit(e, 1); emit(e, 1); emit(e, fmt); emit(e, off);
+    tparam(e, id, QGPU_TP_MIN_FILTER, 0x2600);
+    tparam(e, id, QGPU_TP_MAG_FILTER, 0x2600);
+}
+
+/* triangle plein écran, `units` unités de coordonnées (0.5, 0.5) */
+static void tri_units(Emit *v, uint32_t units, float r, float g, float b, float a)
+{
+    static const float xy[3][2] = { {0, 0}, {64, 0}, {0, 64} };
+    uint32_t i, u;
+    v->off = v->start = VTX_OFF;
+    for (i = 0; i < 3; i++) {
+        vert8(v, xy[i][0], xy[i][1], 0, 1, r, g, b, a);
+        for (u = 0; u < units; u++) {
+            emitf(v, 0.5f); emitf(v, 0.5f); emitf(v, 0); emitf(v, 1);
+        }
+    }
+}
+
+static void run_v5(QgpuCore *c, uint8_t *shmem)
+{
+    Emit e, v, t;
+    uint32_t st, p;
+
+    t.base = shmem; t.off = t.start = TEX_OFF;
+    emit(&t, 0x80803FFF);      /* 20 : RGBA (0.5, 0.25, 1), alpha 0.5 */
+    emit(&t, 0xFF80FF00);      /* 21 : RGB (0.5, 1, 0) */
+    emit(&t, 0xFFFF8080);      /* 22 : RGB (1, 0.5, 0.5) */
+    v.base = shmem;
+    e.base = shmem; e.off = e.start = CMD_OFF;
+    tex1x1(&e, 20, 0x1908, TEX_OFF);
+    tex1x1(&e, 21, 0x1907, TEX_OFF + 4);
+    tex1x1(&e, 22, 0x1907, TEX_OFF + 8);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "v5 : textures 1×1 (st %u)", st);
+
+    /* ADD_SIGNED(texture, primaire) : (0.5+1-0.5, 0.25+0.5-0.5, 1+0-0.5) */
+    tri_units(&v, 1, 1, 0.5f, 0, 1);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_TEXTURE, 1); state(&e, QGPU_SK_TEX_BIND, 20);
+    state(&e, QGPU_SK_TEX_ENV_MODE, 0x8570);
+    state(&e, QGPU_SK_COMBINE0, QGPU_COMBINE(QGPU_CB_ADD_SIGNED, QGPU_CB_REPLACE, 0, 0));
+    state(&e, QGPU_SK_COMBINE_SRC0,
+          QGPU_COMBINE_SRC_RGB(0, QGPU_CS_TEXTURE, QGPU_CO_COLOR) |
+          QGPU_COMBINE_SRC_RGB(1, QGPU_CS_PRIMARY, QGPU_CO_COLOR) |
+          QGPU_COMBINE_SRC_A(0, QGPU_CS_PRIMARY, QGPU_CA_ALPHA));
+    texn_op(&e, 3, 1);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = pxa(shmem, 8, 8);
+    CHECK(st == QGPU_ST_OK && near_rgb(p, 0xFF4080) && (p >> 24) == 255,
+          "COMBINE ADD_SIGNED : %08x (st %u)", p, st);
+
+    /* INTERPOLATE(texture, constante, 1 − alpha texture) ×2 */
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_TEX_ENV_COLOR, 0xFF000000);
+    state(&e, QGPU_SK_COMBINE0, QGPU_COMBINE(QGPU_CB_INTERPOLATE, QGPU_CB_MODULATE, 1, 0));
+    state(&e, QGPU_SK_COMBINE_SRC0,
+          QGPU_COMBINE_SRC_RGB(0, QGPU_CS_TEXTURE, QGPU_CO_COLOR) |
+          QGPU_COMBINE_SRC_RGB(1, QGPU_CS_CONSTANT, QGPU_CO_COLOR) |
+          QGPU_COMBINE_SRC_RGB(2, QGPU_CS_TEXTURE, QGPU_CO_ONE_MINUS_ALPHA) |
+          QGPU_COMBINE_SRC_A(0, QGPU_CS_TEXTURE, QGPU_CA_ALPHA) |
+          QGPU_COMBINE_SRC_A(1, QGPU_CS_PRIMARY, QGPU_CA_ONE_MINUS_ALPHA));
+    texn_op(&e, 3, 1);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = pxa(shmem, 8, 8);
+    /* a2 = 0.5 : rgb = (0.25, 0.125, 0.5) × 2 ; alpha = 0.5 × (1 − 1) = 0 */
+    CHECK(st == QGPU_ST_OK && near_rgb(p, 0x8040FF) && (p >> 24) <= 2,
+          "COMBINE INTERPOLATE, échelle 2 : %08x (st %u)", p, st);
+
+    /* DOT3_RGB(texture, primaire) : 4 × (0.25 + 0 + 0) = 1 */
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_TEX_BIND, 22);
+    state(&e, QGPU_SK_COMBINE0, QGPU_COMBINE(QGPU_CB_DOT3_RGB, QGPU_CB_MODULATE, 0, 0));
+    state(&e, QGPU_SK_COMBINE_SRC0, QGPU_COMBINE_SRC_RGB(0, QGPU_CS_TEXTURE, QGPU_CO_COLOR) |
+          QGPU_COMBINE_SRC_RGB(1, QGPU_CS_PRIMARY, QGPU_CO_COLOR));
+    tri_units(&v, 1, 1, 0.5f, 0.5f, 1);
+    texn_op(&e, 3, 1);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = px(shmem, 8, 8);
+    CHECK(st == QGPU_ST_OK && near_rgb(p, 0xFFFFFF), "COMBINE DOT3_RGB : %06x (st %u)", p, st);
+
+    /* unités 2 et 3 seules : MODULATE (0.5, 1, 0), puis SUBTRACT(précédent, constante) */
+    tri_units(&v, 4, 1, 1, 1, 1);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_TEXTURE, 0);
+    state(&e, QGPU_SK_TEX_ENV_MODE, 0x2100);
+    state(&e, QGPU_SK_COMBINE0, QGPU_COMBINE_DEFAULT);
+    state(&e, QGPU_SK_COMBINE_SRC0, QGPU_COMBINE_SRC_DEFAULT);
+    state(&e, QGPU_SK_TEXTURE2, 1); state(&e, QGPU_SK_TEX2_BIND, 21);
+    state(&e, QGPU_SK_TEXTURE3, 1); state(&e, QGPU_SK_TEX3_BIND, 21);
+    state(&e, QGPU_SK_TEX3_ENV_MODE, 0x8570);
+    state(&e, QGPU_SK_TEX3_ENV_COLOR, 0xFF400000);
+    state(&e, QGPU_SK_COMBINE0 + 3, QGPU_COMBINE(QGPU_CB_SUBTRACT, QGPU_CB_REPLACE, 0, 0));
+    state(&e, QGPU_SK_COMBINE_SRC0 + 3,
+          QGPU_COMBINE_SRC_RGB(0, QGPU_CS_PREVIOUS, QGPU_CO_COLOR) |
+          QGPU_COMBINE_SRC_RGB(1, QGPU_CS_CONSTANT, QGPU_CO_COLOR) |
+          QGPU_COMBINE_SRC_A(0, QGPU_CS_PREVIOUS, QGPU_CA_ALPHA));
+    texn_op(&e, 3, 4);
+    state(&e, QGPU_SK_TEXTURE2, 0); state(&e, QGPU_SK_TEXTURE3, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = px(shmem, 8, 8);
+    CHECK(st == QGPU_ST_OK && near_rgb(p, 0x40FF00), "unités 2 et 3 : %06x (st %u)", p, st);
+
+    /* validations */
+    e.off = e.start = CMD_OFF;
+    texn_op(&e, 3, 5);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "5 unités refusées : st %u", st);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_COMBINE0, QGPU_COMBINE(QGPU_CB_MODULATE, QGPU_CB_MODULATE, 3, 0));
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "échelle 8 refusée : st %u", st);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_COMBINE0, QGPU_COMBINE(QGPU_CB_MODULATE, QGPU_CB_DOT3_RGB, 0, 0));
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "DOT3 en alpha refusé : st %u", st);
+}
+
 /* Tests v2 : état GL par fragment, sur une surface avec profondeur (id 2). */
 static void run_v2(QgpuCore *c, uint8_t *shmem)
 {
@@ -674,6 +824,7 @@ static void run_backend(const char *name)
     run_v2(&c, shmem);
     run_v3(&c, shmem);
     run_v4(&c, shmem);
+    run_v5(&c, shmem);
 
     qgpu_core_reset(&c);
     e.off = e.start = CMD_OFF;
