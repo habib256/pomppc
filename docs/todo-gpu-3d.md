@@ -8,13 +8,17 @@ Ce fichier est le tableau de bord ; il est tenu à jour à chaque lot. Le contex
 `docs/roadmap-opengl15.md`, la conception et les offsets relevés dans `docs/gpu-3d-tiger.md`,
 les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 
-## État (17/09/2026)
+## État (18/09/2026)
 
-- Protocole **v5** : rastérisation sur l'hôte, 4 unités de texture, GL_COMBINE, brouillard,
-  lignes, points. Sous-ensemble d'OpenGL 1.3.
-- Zenerchi ~50 img/s, Marble Blast Gold 20-80 img/s. **Dans les deux cas c'est le PowerPC émulé
-  qui limite** : GLEngine transforme, éclaire et découpe chaque sommet sur l'invité ; le plugin
-  ne reçoit que des sommets déjà en coordonnées fenêtre.
+- Protocole **v6** : rastérisation sur l'hôte, 4 unités de texture, GL_COMBINE, brouillard,
+  lignes, points, **stencil**. Sous-ensemble d'OpenGL 1.3.
+- Zenerchi ~50 img/s (plein écran). Marble Blast Gold, en fenêtre 800x600 : **28 img/s sur une
+  scène de 2 600 triangles, 63 sur 650** depuis la présentation directe en fenêtre (16-17 avant).
+  ⚠ Les « 20-80 img/s » notés le 17/09 pour ce jeu étaient **doublés** : le compteur comptait
+  aussi le `glFinish` que Marble Blast fait à chaque image. Corrigé ; les chiffres de Zenerchi,
+  qui n'en fait pas, étaient justes.
+- **Dans les deux jeux c'est le PowerPC émulé qui limite** : GLEngine transforme, éclaire et
+  découpe chaque sommet sur l'invité ; le débit de Marble Blast suit le nombre de triangles.
 - Le renderer annonce « 1.1 APPLE-1.1 » (chaîne du rendu logiciel d'Apple, transmise telle quelle).
 
 ## Règles de travail (plusieurs agents)
@@ -34,8 +38,8 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 
 | # | Tâche | Statut |
 |---|---|---|
-| 1.1 | **Relever la négociation des capacités** : ce qui décide GLEngine à appeler les entrées « hautes » du pilote (`CreateVertexArray`, `RenderVertexArray` +0x70, `AllocVertexBuffer`, `CreatePipelineProgram`) plutôt que de transformer lui-même. Lire comment les pilotes ATI/NVIDIA de 10.4.6 répondent à `GetRendererInfo`, `GetInteger`, `GetString`. **Verrou de tout l'axe.** | à faire |
-| 1.2 | Relever la disposition des tableaux de sommets, des programmes de pipeline, des matrices, des lumières et matériaux, du texgen et des plans de découpe dans l'état GLEngine (sondes `gltest` : un réglage, un vidage, un diff). | à faire |
+| 1.1 | ✅ *relevé fait (`docs/re/capacites-glengine.md`), reste à le vérifier dans l'invité (expériences V1–V7 du relevé).* Le verrou est **l'octet `+0x79` du bloc de configuration passé à `gldCreateContext`** : à 1, GLEngine envoie la géométrie brute (`BeginPrimitiveBuffer` +0x50, `RenderVertexBuffer` +0x4c, `RenderVertexArray` +0x70) ; il est figé à la création du contexte. **Relever la négociation des capacités** : ce qui décide GLEngine à appeler les entrées « hautes » du pilote (`CreateVertexArray`, `RenderVertexArray` +0x70, `AllocVertexBuffer`, `CreatePipelineProgram`) plutôt que de transformer lui-même. Lire comment les pilotes ATI/NVIDIA de 10.4.6 répondent à `GetRendererInfo`, `GetInteger`, `GetString`. **Verrou de tout l'axe.** | relevé ✅, vérification à faire |
+| 1.2 | ✅ *relevé par lecture fait (`docs/re/tableaux-de-sommets.md` : objet tableau de sommets, signatures, matrices, lumières, texgen, plans de découpe ; `ctx+0x0c = gctx+0x360`) ; 6 sondes `gltest` y sont décrites pour confirmer les offsets incertains (lumières, matériau).* Relever la disposition des tableaux de sommets, des programmes de pipeline, des matrices, des lumières et matériaux, du texgen et des plans de découpe dans l'état GLEngine (sondes `gltest` : un réglage, un vidage, un diff). | relevé ✅, sondes à écrire |
 | 1.3 | Protocole : matrices, éclairage/matériau, texgen, plans de découpe, dessin indexé de sommets bruts. Backends logiciel (référence) et OpenGL. | à faire |
 | 1.4 | Plugin : envoyer les sommets non transformés ; repli sur le chemin actuel hors domaine. Mesurer sur Marble Blast. | à faire |
 
@@ -46,7 +50,7 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 | 2.1 | **Objets tampon** (`CreateBuffer`, `FlushBuffer`, `BufferSubData`) sur tampons hôte : les maillages statiques ne retraversent plus la fenêtre partagée. (OpenGL 1.5.) | à faire |
 | 2.2 | **Doorbell asynchrone** : thread de rendu hôte, l'invité continue pendant que le GPU dessine. `FENCE` et IRQ `DONE` existent ; les barrières `CreateFence`/`TestObject`/`FinishObject` donnent la sémantique invité. | à faire |
 | 2.3 | **Zero-copy à la présentation** : le device écrit lui-même dans la VRAM (plage déclarée par le kext) ; plus de relecture ni de recopie par l'invité. | à faire |
-| 2.4 | **Présentation en fenêtre sans attendre le WindowServer** (Marble Blast tourne en fenêtre) — dépend de 4.2 ou d'une composition côté hôte. | à faire |
+| 2.4 | **Présentation en fenêtre sans attendre le WindowServer** : écriture directe dans le rectangle de la surface à l'écran, tant que rien ne la recouvre et que le curseur n'y bouge pas ; un échange normal toutes les 90 images rafraîchit la fenêtre. Marble Blast : +70 %. | ✅ fait |
 | 2.5 | Téléversement de textures sans conversion invité quand le format est connu de l'hôte (BGRA, 565, 1555…) : la conversion passe sur l'hôte. | à faire |
 | 2.6 | Opérations de pixels sur l'hôte (`DrawPixels`, `CopyPixels`, `Bitmap`, `ReadPixels`, `CopyTexSubImage`) : chacune force aujourd'hui une relecture complète. | à faire |
 
@@ -54,7 +58,7 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 
 | # | Tâche | Statut |
 |---|---|---|
-| 3.1 | **Stencil** : tampon hôte, clés de protocole, backend de référence, offsets GLEngine. Absent de toute la chaîne. | à faire |
+| 3.1 | **Stencil** (protocole v6) : tampon hôte combiné profondeur+stencil, 9 clés d'état, transferts, backend de référence, offsets GLEngine (`docs/re/stencil.md`), plugin. Scène `stencil` identique au rendu d'Apple à l'octet près. | ✅ fait |
 | 3.2 | Modes de polygone (ligne, point), pointillés de ligne et de polygone, lissage. | à faire |
 | 3.3 | Opérations logiques ; mélange à couleur constante, équations minimum et maximum. | à faire |
 | 3.4 | Textures 3D, cube, rectangle ; bordures ; compressées (S3TC passé tel quel à l'hôte). | à faire |
@@ -75,12 +79,19 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 
 ## Points ouverts
 
-- **Zenerchi, fin de partie** : ralentissement quand les cristaux brillent, non diagnostiqué. Le
-  bilan `POMPPC_GL_STATS=<fichier>` donne les motifs de refus et les replis par procédure.
+- **Zenerchi, fin de partie** : ralentissement quand les cristaux brillent, non diagnostiqué
+  (il faut jouer une partie jusqu'au bout ; mis de côté au profit de Marble Blast). Le bilan
+  `POMPPC_GL_STATS=<fichier>` donne les motifs de refus et les replis par procédure.
+- Le tampon profondeur+stencil du rendu d'Apple n'est alloué qu'à son premier usage : si un
+  repli logiciel survient alors que seul l'hôte a dessiné, il part d'un tampon vide (limite
+  partagée avec la profondeur depuis le début).
 - Plus de 4 clients GL accélérés (tranches du kext) — à lever avant 4.4.
 
 ## Ordre d'attaque
 
-1. **1.1** d'abord : sans elle, ni l'axe 1 ni l'annonce 4.1 ne peuvent démarrer.
-2. En parallèle, sans VM : **3.1** (stencil) côté hôte, puis **2.2** (asynchrone).
-3. Puis 1.2 → 1.3 → 1.4 (géométrie), 2.1 (tampons), 3.x par lots, 4.1 dès que la liste tient.
+1. **Vérifier 1.1 dans l'invité** : sonde `CGLGetParameter(ctx, 310)` (rend `ctx+0x7580`), puis
+   poser `+0x79 = 1` avec des procédures `+0x50/+0x54/+0x4c/+0x70` qui ne font que tracer.
+   ⚠ Poser l'octet sans brancher `+0x50` fait écrire GLEngine à l'adresse 0.
+2. **4.1** est débloquée : `GL_VERSION` sort tel quel de `gldGetString`, les extensions d'un
+   tableau de 79 bits du bloc de configuration. À n'annoncer que ce qui est tenu.
+3. Puis 1.3 → 1.4 (géométrie), 2.1 (tampons), 2.2 (asynchrone), 3.x par lots.
