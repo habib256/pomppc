@@ -235,6 +235,9 @@
 
 enum { SYNCED = 0, HOST_NEWER = 1, SW_NEWER = 2 };
 
+/* Dernière clé d'état remplie par le plugin, plus un (clés v7 de géométrie). */
+#define PLUGIN_SK_END_GEOM (QGPU_SK_FOG_END + 1)
+
 /* Genres de séries de sommets : opcode et taille des sommets. */
 enum { RK_TRI = 0, RK_TRI_TEX = 1, RK_TRI_TEX2 = 2, RK_LINES = 3, RK_POINTS = 4,
        RK_TRI_TEX3 = 5, RK_TRI_TEX4 = 6, RK_COUNT = 7 };
@@ -1648,7 +1651,11 @@ static void send_state(PCtx *p, const TexInfo *ti)
        dans patches/qgpu : gl_apply_state remet l'ombrage, l'éclairage,
        l'élimination des faces et le brouillard à plat avant chaque dessin
        v1–v6, et qgpu-soft.c ne lit QGPU_SK_FOG_MODE que dans soft_draw_raw). */
-    for (k = 1; k < (G.v7 ? QGPU_SK_COUNT : QGPU_SK_LIGHTING); k++) {
+    /* Bornes EXPLICITES : jamais QGPU_SK_COUNT, qui grandit à chaque version du
+       protocole — les clés que compute_state ne remplit pas partiraient à zéro,
+       valeur souvent invalide, et tout le flux serait refusé (vu en vrai à
+       chaque changement de version : v6, puis v7, puis v8). */
+    for (k = 1; k < (G.v7 ? PLUGIN_SK_END_GEOM : QGPU_SK_LIGHTING); k++) {
         if (p->st_valid && p->st[k] == v[k])
             continue;
         c = reserve(p, QGPU_LEN_SET_STATE);
