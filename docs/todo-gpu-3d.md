@@ -20,6 +20,13 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 - **Dans les deux jeux c'est le PowerPC émulé qui limite** : GLEngine transforme, éclaire et
   découpe chaque sommet sur l'invité ; le débit de Marble Blast suit le nombre de triangles.
 - Le renderer annonce « 1.1 APPLE-1.1 » (chaîne du rendu logiciel d'Apple, transmise telle quelle).
+- **Fusion des dessins faite (18/09/2026)** : le plugin recolle les `DRAW_RAW`
+  **consécutifs** en `GL_TRIANGLES` **indexés** (rubans, éventails, quads, bandes de quads,
+  polygones), sans déplacer un seul sommet — seuls des indices u16 sont écrits. Marble Blast :
+  **1 065 → 65-85 `DRAW_RAW` par image**, 7 → 90-125 sommets par dessin, soumission 3,5 → 1,6 ms
+  par image, **+10,7 % d'images par seconde en moyenne** (jusqu'à +23 % sur une fenêtre lourde).
+  Image **identique au pixel près** à celle sans fusion sur les 23 scènes de `gltest`.
+  Interrupteur `POMPPC_GL_MERGE` (défaut : activé). Voir `docs/gpu-3d-tiger.md` §4.7.
 - **Lot 2 fait (18/09/2026)** : protocole **v7** et **chemin brut** dans le plugin — GLEngine ne
   transforme, n'éclaire, ne découpe ni n'élimine plus les faces tant que l'état est dans le
   domaine ; tout cela s'exécute sur le GPU de l'hôte. `gltest spin` ×2,2, `gltest game` ×1,25,
@@ -100,17 +107,23 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 | Vérifier dans l'invité l'octet `+0x79` et observer ce que GLEngine envoie (`POMPPC_GL_TCL=1`, procédures traceuses) → `docs/re/verification-tcl.md` | agent Opus, **seul sur la VM** | `guest/gldriver`, `guest/gltest` | en cours |
 | Protocole **v7** côté hôte : matrices, viewport, lumières, matériaux, texgen, plans de découpe, brouillard calculé par l'hôte, `DRAW_RAW` (10 modes, indexé), étage géométrique complet dans le backend de référence, tests → `docs/protocole-v7-geometrie.md` | agent Opus, copie de travail isolée | `patches/qgpu`, `tests` | en cours |
 | Plugin : recevoir la géométrie brute, l'envoyer en v7, repli hors domaine ; mesurer sur Marble Blast | agent Opus, seul sur la VM | `guest/gldriver`, `guest/gltest` | ✅ **fait** (18/09/2026) |
+| Plugin : **fusion des dessins consécutifs** en `GL_TRIANGLES` indexés ; scène `fusion` de `guest/gltest` (ombrage plat et sommet provoquant, alternance des rubans sous `GL_CULL_FACE`, ordre sous mélange, coupures par changement d'état) ; mesure sur Marble Blast | agent Opus, seul sur la VM | `guest/gldriver`, `guest/gltest` | ✅ **fait** (18/09/2026) |
 | Annoncer version et extensions tenues (4.1) | après le plugin | `guest/gldriver` | à faire |
 
 ### Ce que le lot 2 a laissé derrière lui
 
-- **Le goulot d'étranglement a changé de nature.** Sur Marble Blast, une scène lourde envoie
-  ~8 200 sommets bruts en **~1 065 `DRAW_RAW` par image**, soit **7,7 sommets par dessin** : ce sont
-  des rubans et des éventails courts, que le protocole ne permet pas de fusionner (seuls
-  `TRIANGLES`, `QUADS`, `LINES` et `POINTS` se recollent bout à bout). Chaque `DRAW_RAW` fait
-  reposer à l'hôte tout l'étage géométrique (`gl_draw_raw` puis `gl_reset_raw`). **Prochaine
-  tâche de vitesse évidente** : convertir rubans, éventails et polygones en `TRIANGLES` **indexés**
-  côté invité (`DRAW_RAW` sait lire des indices), pour n'émettre qu'un dessin par lot d'état.
+- ✅ **Le goulot des ~1 065 `DRAW_RAW` par image est levé (18/09/2026).** Rubans, éventails,
+  quads, bandes de quads et polygones **consécutifs** sont convertis en `GL_TRIANGLES` indexés
+  côté invité : un seul dessin par lot d'état, 65 à 85 par image au lieu de 1 065. Le coût hôte
+  d'un `DRAW_RAW` a été **chiffré à 2,0 µs** (le temps de soumission est affine en nombre de
+  dessins) : avant la fusion il pesait 2,1 ms sur une image de 26 ms, après il pèse moins de
+  0,2 ms. **Il n'y a donc plus de gain à prendre dans `qgpu-gl.c`** en mémorisant l'état de
+  `gl_target` entre deux dessins.
+- **Le nouveau goulot** (profil `sample`, 18/09/2026) : `__memcpy` **15,8 %** — les sommets que
+  GLEngine écrit dans la fenêtre partagée — et `mach_msg_trap` **13,9 %** — l'attente du device et
+  du WindowServer. Le coût par appel du plugin est retombé de 17 % à 8 %. Les deux tâches qui
+  attaquent ce qui reste sont **2.1** (objets tampon : les maillages statiques ne retraversent
+  plus la fenêtre) et **2.2** (doorbell asynchrone : l'invité n'attend plus l'hôte).
 - **Bogue hôte contourné** : `QGPU_OP_STENCIL_UPLOAD` sur une surface combinée
   profondeur+stencil **abîme la profondeur déjà posée** (reproduction : `gltest mixte` avec
   `GLTEST_STENCIL=1` ; sauter ce seul téléversement rend l'image exacte, avec comme sans le chemin

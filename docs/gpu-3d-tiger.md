@@ -309,6 +309,62 @@ Quand il doit couper, **GLEngine répète les sommets qu'il faut** : mesuré sur
 puis 16 sommets donne 1952, 1954, 1969, 2005 puis 2197 sommets transmis en 4, 5, 13, 33 puis 139
 `DRAW_RAW` — et **exactement la même image** à chaque fois.
 
+#### Fusion des dessins : un `DRAW_RAW` par lot d'état (18/09/2026)
+
+Le chemin brut a déplacé le goulot d'étranglement : sur une scène lourde de
+Marble Blast, **8 200 sommets partaient en ~1 065 `DRAW_RAW` par image, soit 7,7
+sommets par dessin**. GLEngine remet la géométrie par `glBegin`/`glEnd`, et un
+jeu de 2001 la décrit en rubans et éventails **courts**. Or chaque `DRAW_RAW`
+coûte à l'hôte un `gl_target` complet (liaison du FBO, remise à plat de tout
+l'état) plus `gl_draw_raw` et `gl_reset_raw` : **2 µs, mesurés** (voir plus bas).
+
+Bout à bout, seules les primitives **indépendantes** se recollent (`TRIANGLES`,
+`QUADS`, `LINES`, `POINTS`). La fusion convertit donc rubans, éventails, quads,
+bandes de quads et polygones en **`GL_TRIANGLES` indexés** : les sommets restent
+exactement où GLEngine les a écrits — toujours zéro recopie de sommet — et le
+plugin n'écrit que des **indices u16**, 2 octets par sommet de triangle contre 44
+pour un sommet recopié. Les indices vivent dans les 256 derniers kio de la zone
+des sommets (`IDX_OFF`), donc dans la fenêtre partagée, et meurent avec elle.
+
+Une série est prolongée si et seulement si le lot suivant a le **même contexte**,
+le **même format de sommet**, et des sommets **contigus** dans la zone partagée.
+Il n'y a rien d'autre à vérifier : tout changement d'état passe par `send_cmd` →
+`reserve` → `close_raw`, donc il ferme la série de lui-même. Et **on ne fusionne
+que des lots consécutifs** : jamais de réordonnancement, sans quoi le mélange et
+l'égalité de profondeur changeraient l'image. Une série reste non indexée tant
+qu'elle n'a qu'un seul mode recollable : une bande de 1 000 sommets part comme
+avant, en un seul `DRAW_RAW` non indexé.
+
+Pièges, tous vus en vrai :
+
+- **Le sommet provoquant de l'ombrage plat n'est pas le même selon le mode**
+  (`assemble` de `qgpu-soft.c`) : dernier sommet du triangle pour `TRIANGLES`,
+  `TRIANGLE_STRIP` et `TRIANGLE_FAN` ; **4ᵉ sommet du quadrilatère** pour
+  `QUADS`, pour ses **deux** triangles ; sommet `i+3` pour `QUAD_STRIP` ;
+  **premier** sommet du polygone pour `POLYGON`. Comme `GL_TRIANGLES` prend le
+  dernier, chaque triangle est ordonné pour que son dernier indice soit le
+  provoquant. Une **rotation circulaire** suffit partout (même triangle, même
+  orientation, donc même élimination de face) sauf pour `GL_QUADS` : sa diagonale
+  de référence (0–2) laisse le premier triangle sans le sommet 3, donc en ombrage
+  **plat** on coupe sur la diagonale 1–3 — exact, puisque la couleur du
+  quadrilatère y est uniforme. En ombrage lisse on garde 0–2, celle du backend de
+  référence.
+- **L'alternance d'orientation d'un ruban** (un triangle sur deux retourné) doit
+  être reproduite par les indices, sinon `GL_CULL_FACE` élimine un triangle sur
+  deux.
+- **`ioff` doit être un multiple de 4** (`in_shmem` du cœur), mais tous les
+  indices d'une série sont lus d'affilée depuis ce seul offset : aligner *au
+  milieu* d'une série glisse deux octets de bourrage dans le tableau et les
+  triangles pointent sur les sommets du lot voisin (symptôme : un polygone sur
+  trois faux). L'alignement se fait donc **à l'ouverture de la série, et nulle
+  part ailleurs**.
+- La zone des sommets du **chemin de rastérisation** (`prim`) devait elle aussi
+  s'arrêter à `VTX_LIMIT` : les deux chemins cohabitent dans une même image.
+
+**Résultat.** Marble Blast, scènes lourdes : **1 065 → 65-85 `DRAW_RAW` par
+image** (7 sommets par dessin → 90-125), et le temps de soumission tombe de 3,5 à
+1,6 ms par image. `POMPPC_GL_MERGE=0` coupe la fusion.
+
 #### État envoyé, et seulement ce qui change
 
 Matrices modèle-vue et projection (et de texture des unités actives), viewport, plage de
@@ -377,6 +433,43 @@ sur le lancement (même séquence des deux côtés : les quatre premières fenê
 | lourdes (5 fenêtres) | 25 à 30 | **43 à 49** | ×1,6 à ×1,9 |
 | moyenne des 16 fenêtres de jeu | 42,4 | **62,6** | **+48 %** |
 
+#### Mesures de la fusion (18/09/2026)
+
+**Marble Blast Gold**, fenêtre 800×600, 2 cœurs, même démo jouée toute seule,
+**même binaire** : `POMPPC_GL_MERGE=0` contre `=1`, fenêtres de 5 s appariées par
+leur nombre de sommets (à ±2 % près : ce sont les mêmes images).
+
+| Sommets/img | `DRAW_RAW`/img | sommets/dessin | submit ms/img | img/s |
+|---|---|---|---|---|
+| 8 100 | 969 → **85** | 8 → **94** | 3,39 → **1,66** | 40,1 → **43,9** |
+| 7 900 | 1 031 → **80** | 7 → **101** | 3,46 → **1,62** | 37,5 → **39,9** |
+| 7 800 | 1 030 → **65** | 7 → **122** | 3,47 → **1,61** | 38,1 → **43,0** |
+| 7 450 | 971 → **80** | 7 → **93** | 3,36 → **1,63** | 38,4 → **47,2** |
+| 5 050 | 602 → **60** | 8 → **82** | 2,63 → **1,58** | 37,4 → **42,4** |
+| 3 800 | 480 → **30** | 7 → **125** | 2,25 → **1,35** | 64,1 → **74,9** |
+| 3 100 | 442 → **36** | 6 → **87** | 2,15 → **1,34** | 63,2 → **71,2** |
+| **moyenne des 16 fenêtres de jeu** | **−92 %** | | **−41 %** | **52,6 → 58,2 (+10,7 %)** |
+
+`gltest` n'y gagne rien de mesurable, et c'est attendu : `spin` dessine ses 400
+triangles en `GL_TRIANGLES`, donc en **un** `DRAW_RAW` déjà sans la fusion (845
+contre 838 img/s en 16×16, 422 contre 413 en 640×480 — l'écart entre deux
+passes de la même mesure atteint 25 %). `game`, qui a des bandes, passe de 719 à
+785 img/s en moyenne de deux passes, mais dans le même bruit. **La fusion ne
+sert que là où les primitives sont courtes et nombreuses**, c'est-à-dire dans les
+jeux réels.
+
+**Le coût hôte d'un `DRAW_RAW`, chiffré.** Le temps de soumission par image est
+affine en nombre de dessins : les fenêtres de menu (11 à 15 dessins) coûtent
+1,27 ms, et chaque dessin ajoute **2,0 µs** (3,39 − 1,27 sur 969 dessins ;
+3,47 − 1,27 sur 1 030 ; 2,15 − 1,27 sur 442 — les trois donnent 1,9 à 2,0 µs).
+C'est `gl_target` + `gl_draw_raw` + `gl_reset_raw`, soit ~150 appels GL. **Ne pas
+refaire la liaison du FBO et la remise à plat quand deux dessins consécutifs
+partagent contexte, surface et état** ferait donc gagner, *avant* la fusion,
+2,1 ms sur une image de 26 ms (8 %) ; **après** la fusion il ne reste que 30 à
+85 dessins par image, soit **0,06 à 0,17 ms — moins de 1 %**. Le gain hôte est
+donc déjà pris par la fusion : il n'y a plus lieu de toucher `qgpu-gl.c` pour
+cela.
+
 **Ce que le profileur a appris.** Un `sample` de 10 s sur Marble Blast a d'abord montré `put_f`
 en tête des feuilles de la pile principale (7,4 % du temps, devant `geom_begin` à 4,4 %) :
 fabriquer les arguments des commandes d'état pour les comparer ensuite coûtait plus cher que tout
@@ -386,6 +479,21 @@ sources** du bloc GLEngine (un `memcmp` par matrice, par lumière, par unité de
 arguments ne sont fabriqués que quand ils partent : les scènes lourdes sont passées de 34 à
 47 img/s. Restent en tête `__memcpy` (13 %, ce que GLEngine écrit dans notre tampon) et
 `mach_msg_trap` (11 %, l'attente du device et du WindowServer).
+
+Après la fusion, un `sample` de 12 s sur les mêmes scènes montre que le coût par
+appel du plugin est retombé de **17 % à 8 %** du temps (sur 1 140 échantillons :
+`geom_begin` 18 contre 35, `bcmp`+`memcmp` 15 contre 33, `changed` 10 contre 17,
+`texture_ok` sorti des trente premières feuilles). Deux économies par appel y
+contribuent, et elles comptent parce que `BeginPrimitiveBuffer` est appelé mille
+fois par image : `geom_send_texgen` lit les **quatre octets d'activation** d'une
+unité avant de comparer ses 148 octets, et `geom_send_clip` lit le **masque** des
+plans avant de comparer les cent octets du bloc — dans les deux cas, « rien
+d'allumé et rien à défaire » est le cas courant. Restent en tête `__memcpy`
+(15,8 %, les sommets que GLEngine écrit dans notre tampon) et `mach_msg_trap`
+(13,9 %, l'attente du device et du WindowServer) : **c'est là qu'est le prochain
+gain**, et il demande soit un doorbell asynchrone (tâche 2.2), soit des objets
+tampon pour que les maillages statiques ne retraversent plus la fenêtre partagée
+(tâche 2.1).
 
 #### Écarts d'image avec le rendu d'Apple
 

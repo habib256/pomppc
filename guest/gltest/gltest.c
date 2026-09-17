@@ -226,6 +226,14 @@ static double now(void)
     return tv.tv_sec + tv.tv_usec / 1e6;
 }
 
+/* Six couleurs unies, en OCTETS : l'aller-retour 8 bits → flottant → 8 bits est
+   exact, donc les pixels témoins de la scène « fusion » le sont aussi. */
+static const unsigned char fus_col[6][3] = {
+    { 255, 0, 0 }, { 0, 255, 0 }, { 0, 0, 255 },
+    { 255, 255, 0 }, { 255, 0, 255 }, { 0, 255, 255 }
+};
+#define FCOL(k) fus_col[k][0], fus_col[k][1], fus_col[k][2]
+
 int main(int argc, char **argv)
 {
     const char *scene = argc > 1 ? argv[1] : "tri";
@@ -2121,6 +2129,314 @@ int main(int argc, char **argv)
                    (a & 255) > 200 ? "ok  " : "FAIL", a);
             if (!((a & 255) > 200)) failures++;
         }
+    } else if (!strcmp(scene, "fusion")) {
+        /* BEAUCOUP de primitives COURTES et CONSÉCUTIVES : c'est exactement ce
+           que Marble Blast envoie (7,7 sommets par dessin), et ce que le plugin
+           recolle en un seul DRAW_RAW indexé (POMPPC_GL_MERGE=0 pour couper).
+           La scène vérifie que la conversion en triangles indexés ne change
+           RIEN : ombrage lisse, ombrage PLAT (le sommet provoquant n'est pas le
+           même selon le mode), alternance d'orientation dans un ruban sous
+           GL_CULL_FACE, ordre de dessin sous mélange, et coupures de la fusion
+           par un changement d'état. Taille attendue : 160x160.
+           Les couleurs unies passent par glColor3ub : elles font l'aller-retour
+           8 bits sans arrondi, donc les pixels témoins sont exacts. */
+        int c, i;
+        unsigned char timg[8 * 8 * 4];
+        GLuint tid = 0;
+        float xm;
+#define FX0(k) ((float)((k) * 20 + 2))
+#define FX1(k) ((float)((k) * 20 + 18))
+        for (i = 0; i < 8 * 8; i++) {
+            timg[i * 4 + 0] = 255; timg[i * 4 + 1] = 0;
+            timg[i * 4 + 2] = 255; timg[i * 4 + 3] = 255;
+        }
+        glGenTextures(1, &tid);
+        glBindTexture(GL_TEXTURE_2D, tid);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 8, 8, 0, GL_RGBA, GL_UNSIGNED_BYTE, timg);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        /* 64/255 plutôt que 0,25 : 0,25 × 255 = 63,75, et le rendu d'Apple
+           tronque là où le GPU de l'hôte arrondit — un écart de 1/255 qui
+           interdirait des pixels témoins exacts. */
+        glClearColor(0, 0, 64.0f / 255.0f, 1);  /* fond 0x000040 */
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        /* ── bande 1 (y 2..18) : huit RUBANS courts, ombrage lisse ── */
+        for (c = 0; c < 8; c++) {
+            float x0 = FX0(c), x1 = FX1(c);
+            glBegin(GL_TRIANGLE_STRIP);
+            if (c < 6) {                        /* couleur unie : pixel témoin exact */
+                glColor3ub(FCOL(c));
+                glVertex2f(x0, 2); glVertex2f(x0, 18);
+                glVertex2f(x1, 2); glVertex2f(x1, 18);
+            } else {                            /* dégradé : jugé par le diff */
+                glColor3ub(255, 0, 0); glVertex2f(x0, 2);
+                glColor3ub(0, 255, 0); glVertex2f(x0, 18);
+                glColor3ub(0, 0, 255); glVertex2f(x1, 2);
+                glColor3ub(255, 255, 0); glVertex2f(x1, 18);
+            }
+            glEnd();
+        }
+        /* ── bande 2 (y 20..36) : huit ÉVENTAILS courts ── */
+        for (c = 0; c < 8; c++) {
+            float x0 = FX0(c), x1 = FX1(c);
+            glBegin(GL_TRIANGLE_FAN);
+            glColor3ub(FCOL((c + 2) % 6));
+            glVertex2f(x0, 20); glVertex2f(x0, 36);
+            glVertex2f(x1, 36); glVertex2f(x1, 20);
+            glEnd();
+        }
+        /* ── bande 3 (y 38..54) : quatre QUADS puis quatre BANDES DE QUADS ── */
+        for (c = 0; c < 4; c++) {
+            float x0 = FX0(c), x1 = FX1(c);
+            glBegin(GL_QUADS);
+            glColor3ub(FCOL((c + 4) % 6));
+            glVertex2f(x0, 38); glVertex2f(x0, 54);
+            glVertex2f(x1, 54); glVertex2f(x1, 38);
+            glEnd();
+        }
+        for (c = 4; c < 8; c++) {
+            float x0 = FX0(c), x1 = FX1(c);
+            xm = (x0 + x1) / 2;
+            glBegin(GL_QUAD_STRIP);
+            glColor3ub(FCOL((c + 1) % 6));
+            glVertex2f(x0, 38); glVertex2f(x0, 54);
+            glVertex2f(xm, 38); glVertex2f(xm, 54);
+            glVertex2f(x1, 38); glVertex2f(x1, 54);
+            glEnd();
+        }
+        /* ── bande 4 (y 56..72) : huit POLYGONES convexes de 5 sommets ── */
+        for (c = 0; c < 8; c++) {
+            float x0 = FX0(c), x1 = FX1(c);
+            xm = (x0 + x1) / 2;
+            glBegin(GL_POLYGON);
+            glColor3ub(FCOL((c + 3) % 6));
+            glVertex2f(x0, 58); glVertex2f(xm, 56); glVertex2f(x1, 58);
+            glVertex2f(x1, 70); glVertex2f(x0, 70);
+            glEnd();
+        }
+        /* ── bande 5 (y 74..90) : OMBRAGE PLAT, toutes les couleurs de sommet
+              différentes. C'est le sommet PROVOQUANT que l'on vérifie, et il
+              n'est pas le même selon le mode (dernier sommet du triangle pour
+              TRIANGLES/STRIP/FAN, 4ᵉ du quadrilatère pour QUADS, i+3 pour
+              QUAD_STRIP, PREMIER sommet pour POLYGON). ── */
+        glShadeModel(GL_FLAT);
+        {   /* cellule 0 : ruban */
+            float x0 = FX0(0), x1 = FX1(0);
+            glBegin(GL_TRIANGLE_STRIP);
+            glColor3ub(255, 0, 0);   glVertex2f(x0, 74);
+            glColor3ub(0, 255, 0);   glVertex2f(x0, 90);
+            glColor3ub(0, 0, 255);   glVertex2f(x1, 74);
+            glColor3ub(255, 255, 0); glVertex2f(x1, 90);
+            glEnd();
+        }
+        {   /* cellule 1 : éventail */
+            float x0 = FX0(1), x1 = FX1(1);
+            glBegin(GL_TRIANGLE_FAN);
+            glColor3ub(255, 0, 255);   glVertex2f(x0, 74);
+            glColor3ub(0, 255, 255);   glVertex2f(x0, 90);
+            glColor3ub(255, 255, 255); glVertex2f(x1, 90);
+            glColor3ub(128, 128, 128); glVertex2f(x1, 74);
+            glEnd();
+        }
+        {   /* cellule 2 : quadrilatère — le 4ᵉ sommet colore les DEUX triangles */
+            float x0 = FX0(2), x1 = FX1(2);
+            glBegin(GL_QUADS);
+            glColor3ub(255, 0, 0);   glVertex2f(x0, 74);
+            glColor3ub(0, 255, 0);   glVertex2f(x0, 90);
+            glColor3ub(0, 0, 255);   glVertex2f(x1, 90);
+            glColor3ub(255, 128, 0); glVertex2f(x1, 74);
+            glEnd();
+        }
+        {   /* cellule 3 : bande de quads — un provoquant par quadrilatère */
+            float x0 = FX0(3), x1 = FX1(3);
+            xm = (x0 + x1) / 2;
+            glBegin(GL_QUAD_STRIP);
+            glColor3ub(255, 0, 255); glVertex2f(x0, 74);
+            glColor3ub(255, 0, 0);   glVertex2f(x0, 90);
+            glColor3ub(128, 64, 32); glVertex2f(xm, 74);
+            glColor3ub(0, 255, 0);   glVertex2f(xm, 90);
+            glColor3ub(64, 64, 64);  glVertex2f(x1, 74);
+            glColor3ub(0, 0, 255);   glVertex2f(x1, 90);
+            glEnd();
+        }
+        {   /* cellule 4 : polygone — c'est le PREMIER sommet qui colore tout */
+            float x0 = FX0(4), x1 = FX1(4);
+            xm = (x0 + x1) / 2;
+            glBegin(GL_POLYGON);
+            glColor3ub(255, 255, 0);   glVertex2f(x0, 76);
+            glColor3ub(0, 255, 0);     glVertex2f(xm, 74);
+            glColor3ub(0, 0, 255);     glVertex2f(x1, 76);
+            glColor3ub(255, 0, 255);   glVertex2f(x1, 90);
+            glColor3ub(255, 255, 255); glVertex2f(x0, 90);
+            glEnd();
+        }
+        glShadeModel(GL_SMOOTH);
+        /* ── bande 6 (y 92..108) : GL_CULL_FACE sur des RUBANS. Un triangle sur
+              deux d'un ruban est retourné pour garder l'orientation : si les
+              indices ne reproduisaient pas cette alternance, un triangle sur
+              deux disparaîtrait. ── */
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);                    /* les rubans sont FACE AVANT */
+        for (c = 0; c < 4; c++) {
+            float x0 = FX0(c), x1 = FX1(c);
+            xm = (x0 + x1) / 2;
+            glBegin(GL_TRIANGLE_STRIP);
+            glColor3ub(FCOL(c));
+            glVertex2f(x0, 92); glVertex2f(x0, 108);
+            glVertex2f(xm, 92); glVertex2f(xm, 108);
+            glVertex2f(x1, 92); glVertex2f(x1, 108);
+            glEnd();
+        }
+        glCullFace(GL_FRONT);                   /* les mêmes : tout doit disparaître */
+        for (c = 4; c < 8; c++) {
+            float x0 = FX0(c), x1 = FX1(c);
+            xm = (x0 + x1) / 2;
+            glBegin(GL_TRIANGLE_STRIP);
+            glColor3ub(FCOL(c % 6));
+            glVertex2f(x0, 92); glVertex2f(x0, 108);
+            glVertex2f(xm, 92); glVertex2f(xm, 108);
+            glVertex2f(x1, 92); glVertex2f(x1, 108);
+            glEnd();
+        }
+        glDisable(GL_CULL_FACE);
+        /* ── bande 7 (y 110..126) : MÉLANGE avec recouvrement. La fusion ne doit
+              jamais réordonner : en additif le recouvrement s'ajoute, et en
+              « source par-dessus » c'est le DERNIER dessiné qui gagne. ── */
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE);            /* additif */
+        for (c = 0; c < 4; c++) {               /* barre rouge, x 2..78 */
+            glBegin(GL_QUADS);
+            glColor3ub(255, 0, 0);
+            glVertex2f(FX0(c) - 2, 110); glVertex2f(FX0(c) - 2, 117);
+            glVertex2f(FX1(c) + 2, 117); glVertex2f(FX1(c) + 2, 110);
+            glEnd();
+        }
+        for (c = 2; c < 6; c++) {               /* barre bleue, x 40..120 */
+            glBegin(GL_TRIANGLE_STRIP);
+            glColor3ub(0, 0, 255);
+            glVertex2f(FX0(c) - 2, 110); glVertex2f(FX0(c) - 2, 117);
+            glVertex2f(FX1(c) + 2, 110); glVertex2f(FX1(c) + 2, 117);
+            glEnd();
+        }
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   /* alpha = 1 : le dernier gagne */
+        for (c = 0; c < 4; c++) {
+            glBegin(GL_TRIANGLE_FAN);
+            glColor4ub(255, 0, 0, 255);
+            glVertex2f(FX0(c) - 2, 119); glVertex2f(FX0(c) - 2, 126);
+            glVertex2f(FX1(c) + 2, 126); glVertex2f(FX1(c) + 2, 119);
+            glEnd();
+        }
+        for (c = 2; c < 6; c++) {
+            glBegin(GL_QUADS);
+            glColor4ub(0, 255, 0, 255);
+            glVertex2f(FX0(c) - 2, 119); glVertex2f(FX0(c) - 2, 126);
+            glVertex2f(FX1(c) + 2, 126); glVertex2f(FX1(c) + 2, 119);
+            glEnd();
+        }
+        glDisable(GL_BLEND);
+        /* ── bande 8 (y 128..144) : changements d'état INTERCALÉS. Chacun coupe
+              la fusion (il part en commande avant le dessin suivant) ; l'image
+              doit rester celle d'un rendu sans fusion. ── */
+        for (c = 0; c < 2; c++) {               /* sans rien : rouge, en place */
+            glBegin(GL_TRIANGLE_STRIP);
+            glColor3ub(255, 0, 0);
+            glVertex2f(FX0(c), 128); glVertex2f(FX0(c), 140);
+            glVertex2f(FX1(c), 128); glVertex2f(FX1(c), 140);
+            glEnd();
+        }
+        glPushMatrix();
+        glTranslatef(0, 4, 0);                  /* SET_MATRIX : coupe la fusion */
+        for (c = 2; c < 4; c++) {               /* vert, décalé de 4 pixels vers le bas */
+            glBegin(GL_TRIANGLE_FAN);
+            glColor3ub(0, 255, 0);
+            glVertex2f(FX0(c), 128); glVertex2f(FX0(c), 140);
+            glVertex2f(FX1(c), 140); glVertex2f(FX1(c), 128);
+            glEnd();
+        }
+        glPopMatrix();
+        glEnable(GL_TEXTURE_2D);                /* format de sommet changé : coupe aussi */
+        for (c = 4; c < 6; c++) {
+            glBegin(GL_QUADS);
+            glColor3ub(255, 255, 255);
+            glTexCoord2f(0, 0); glVertex2f(FX0(c), 128);
+            glTexCoord2f(0, 1); glVertex2f(FX0(c), 140);
+            glTexCoord2f(1, 1); glVertex2f(FX1(c), 140);
+            glTexCoord2f(1, 0); glVertex2f(FX1(c), 128);
+            glEnd();
+        }
+        glDisable(GL_TEXTURE_2D);
+        for (c = 6; c < 8; c++) {               /* bleu, en place */
+            glBegin(GL_TRIANGLE_STRIP);
+            glColor3ub(0, 0, 255);
+            glVertex2f(FX0(c), 128); glVertex2f(FX0(c), 140);
+            glVertex2f(FX1(c), 128); glVertex2f(FX1(c), 140);
+            glEnd();
+        }
+        glFinish();
+
+        {   /* pixels témoins */
+            static const unsigned long sol[6] = {
+                0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0xFF00FF, 0x00FFFF };
+            char nm[64];
+            for (c = 0; c < 6; c++) {
+                sprintf(nm, "ruban lisse %d", c);
+                check(nm, c * 20 + 10, 10, sol[c]);
+                sprintf(nm, "éventail lisse %d", c);
+                check(nm, c * 20 + 10, 28, sol[(c + 2) % 6]);
+                sprintf(nm, "polygone lisse %d", c);
+                check(nm, c * 20 + 10, 64, sol[(c + 3) % 6]);
+            }
+            for (c = 0; c < 4; c++) {
+                sprintf(nm, "quad lisse %d", c);
+                check(nm, c * 20 + 10, 46, sol[(c + 4) % 6]);
+            }
+            for (c = 4; c < 8; c++) {
+                sprintf(nm, "bande de quads lisse %d", c);
+                check(nm, c * 20 + 6, 46, sol[(c + 1) % 6]);
+                sprintf(nm, "bande de quads lisse %d (2e)", c);
+                check(nm, c * 20 + 14, 46, sol[(c + 1) % 6]);
+            }
+            /* ombrage plat : chaque triangle prend la couleur de SON provoquant */
+            check("plat ruban, 1er triangle", 5, 77, 0x0000FF);
+            check("plat ruban, 2e triangle", 15, 87, 0xFFFF00);
+            check("plat éventail, 1er triangle", 25, 87, 0xFFFFFF);
+            check("plat éventail, 2e triangle", 35, 77, 0x808080);
+            check("plat quad, moitié 0-1-2", 45, 77, 0xFF8000);
+            check("plat quad, moitié 2-3", 55, 87, 0xFF8000);
+            check("plat bande de quads, quad 0", 66, 82, 0x00FF00);
+            check("plat bande de quads, quad 1", 74, 82, 0x0000FF);
+            check("plat polygone, haut", 90, 80, 0xFFFF00);
+            check("plat polygone, bas", 90, 88, 0xFFFF00);
+            /* alternance d'orientation : les QUATRE triangles du ruban sont là */
+            for (c = 0; c < 4; c++) {
+                sprintf(nm, "cull arrière, ruban %d gauche", c);
+                check(nm, c * 20 + 5, 100, sol[c]);
+                sprintf(nm, "cull arrière, ruban %d droite", c);
+                check(nm, c * 20 + 15, 100, sol[c]);
+            }
+            for (c = 4; c < 8; c++) {
+                sprintf(nm, "cull avant, ruban %d éliminé", c);
+                check(nm, c * 20 + 10, 100, 0x000040);
+            }
+            /* mélange : additif (recouvrement = somme), puis le dernier gagne */
+            check("additif : rouge seul", 10, 113, 0xFF0040);
+            check("additif : recouvrement", 50, 113, 0xFF00FF);
+            check("additif : bleu seul", 110, 113, 0x0000FF);
+            check("ordre : rouge seul", 10, 122, 0xFF0000);
+            check("ordre : le dernier gagne (vert)", 50, 122, 0x00FF00);
+            check("ordre : vert seul", 110, 122, 0x00FF00);
+            /* coupures de la fusion par un changement d'état */
+            check("avant translation : rouge en place", 10, 134, 0xFF0000);
+            check("après translation : décalé (fond)", 50, 129, 0x000040);
+            check("après translation : vert décalé", 50, 143, 0x00FF00);
+            check("texture activée : magenta", 90, 134, 0xFF00FF);
+            check("texture coupée : bleu", 130, 134, 0x0000FF);
+        }
+        glDeleteTextures(1, &tid);
+#undef FX0
+#undef FX1
     } else if (!strcmp(scene, "fill")) {
         /* Remplissage : 40 grands triangles qui se recouvrent, test de
            profondeur et mélange, 30 images. Mesure le coût par pixel. */

@@ -230,6 +230,13 @@
 #define CMD_WORDS   (0x40000 / 4)       /* flux : 256 Kio */
 #define VTX_OFF     0x40000             /* sommets : jusqu'à 4 Mio */
 #define VTX_END     0x400000
+/* Les indices de la FUSION (v7 indexée) vivent en HAUT de la zone des sommets :
+   ils naissent et meurent avec elle (même vidage, même remise à zéro), et le
+   cœur les veut dans la fenêtre partagée comme les sommets. 256 Kio = 131 072
+   indices u16, soit largement plus que les ~24 000 d'une image de Marble Blast. */
+#define IDX_SIZE    0x40000
+#define IDX_OFF     (VTX_END - IDX_SIZE)
+#define VTX_LIMIT   IDX_OFF             /* les sommets s'arrêtent là */
 #define ARENA_OFF   0x400000            /* transferts : le reste de la tranche */
 #define MAX_POST    16
 
@@ -289,6 +296,7 @@ typedef struct PCtx {
     unsigned long  c_mat[2][17];                     /* 0x44 o par face */
     unsigned long  c_lm[4];
     unsigned long  c_tg[QGPU_MAX_UNITS][37];         /* 0x94 o : modes, plans, actifs */
+    unsigned char  c_tg_on[QGPU_MAX_UNITS];          /* du texgen est-il posé sur le device ? */
     unsigned long  c_clip[25];                       /* masque + 6 plans, contigus */
     unsigned long  c_cur[4][4];                      /* couleur, normale, secondaire, brouillard */
 } PCtx;
@@ -339,10 +347,16 @@ static struct {
     PCtx           *raw_ctx;
     unsigned long   raw_start, raw_count, raw_fmt, raw_words;
     unsigned long   raw_mode;
+    unsigned long   raw_vend;           /* octet APRÈS le dernier sommet de la série */
+    unsigned long   raw_idx;            /* offset des indices dans la fenêtre, 0 = aucun */
+    unsigned long   raw_nidx;           /* indices déjà écrits pour cette série */
+    unsigned long   raw_lots;           /* lots recollés dans cette série */
+    unsigned long   idx;                /* octets d'indices pris depuis IDX_OFF */
     /* tampon rendu par BeginPrimitiveBuffer, en attente de EndPrimitiveBuffer */
     PCtx           *pend;
     unsigned long   pend_off, pend_words, pend_fmt, pend_slots;
     int             pend_drop;
+    int             pend_flat;          /* ombrage plat : change l'ordre des indices */
     Post            post[MAX_POST];
     int             npost;
     unsigned long   ctx_used, surf_used;
@@ -353,7 +367,7 @@ static struct {
     unsigned long   n_tris, n_clears, n_submits, n_uploads, n_readbacks, n_fallback;
     unsigned long   n_textris, n_texuploads, n_lines, n_points;
     unsigned long   n_frames, n_direct, n_tex_incomplete;
-    unsigned long   n_rawverts, n_rawdraws, n_geomcmds, n_geomdrop;
+    unsigned long   n_rawverts, n_rawdraws, n_geomcmds, n_geomdrop, n_rawmerged;
     int             v7;                 /* device v7 ET chemin brut autorisé */
     double          t_submit, t_copy, t_upload;   /* secondes cumulées */
 } G = { PTHREAD_MUTEX_INITIALIZER };
@@ -404,7 +418,7 @@ static void stats_frame(void)
     static int init;
     static double t0;
     static unsigned long f0, tr0, rb0, up0, fb0, sub0, tu0, di0;
-    static unsigned long rv0, rd0, gc0;
+    static unsigned long rv0, rd0, gc0, rm0;
     static double ts0, tc0, tu_0;
     double t;
 
@@ -423,8 +437,8 @@ static void stats_frame(void)
         if (f) {
             double dt = t - t0;
             fprintf(f, "%.1f img/s | tri %lu/img | relect %lu | televers %lu (tex %lu) | "
-                    "replis %lu | soumissions %lu | submit %.0f ms/img | copie %.0f ms/img | "
-                    "prep televers %.0f ms/img | directes %lu\n",
+                    "replis %lu | soumissions %lu | submit %.2f ms/img | copie %.2f ms/img | "
+                    "prep televers %.2f ms/img | directes %lu\n",
                     (G.n_frames - f0) / dt,
                     (G.n_tris - tr0) / (G.n_frames - f0 ? G.n_frames - f0 : 1),
                     G.n_readbacks - rb0, G.n_uploads - up0, G.n_texuploads - tu0,
@@ -435,12 +449,16 @@ static void stats_frame(void)
                     G.n_direct - di0);
             {
                 unsigned long fr = G.n_frames - f0 ? G.n_frames - f0 : 1;
-                if (G.n_rawverts != rv0 || G.n_rawdraws != rd0)
+                if (G.n_rawverts != rv0 || G.n_rawdraws != rd0) {
+                    unsigned long nd = G.n_rawdraws - rd0;
                     fprintf(f, "    brut : %lu sommets/img, %lu DRAW_RAW/img, "
-                            "%lu commandes d'état/img%s\n",
-                            (G.n_rawverts - rv0) / fr, (G.n_rawdraws - rd0) / fr,
-                            (G.n_geomcmds - gc0) / fr,
+                            "%lu commandes d'état/img, %lu fusionnés/img, "
+                            "%lu sommets/dessin%s\n",
+                            (G.n_rawverts - rv0) / fr, nd / fr,
+                            (G.n_geomcmds - gc0) / fr, (G.n_rawmerged - rm0) / fr,
+                            nd ? (G.n_rawverts - rv0) / nd : 0,
                             G.n_geomdrop ? " ⚠ PRIMITIVES PERDUES" : "");
+                }
             }
             {
                 int k;
@@ -462,6 +480,7 @@ static void stats_frame(void)
         fb0 = G.n_fallback; sub0 = G.n_submits; tu0 = G.n_texuploads; di0 = G.n_direct;
         ts0 = G.t_submit; tc0 = G.t_copy; tu_0 = G.t_upload;
         rv0 = G.n_rawverts; rd0 = G.n_rawdraws; gc0 = G.n_geomcmds;
+        rm0 = G.n_rawmerged;
     }
 }
 
@@ -599,19 +618,28 @@ static void close_raw(void)
         unsigned long *c = G.cmd + G.ncmd;
         c[0] = QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW);
         c[1] = G.raw_mode;
-        c[2] = G.raw_count;
+        c[2] = G.raw_count;             /* sommets, ou INDICES si la série est indexée */
         c[3] = G.q.base + VTX_OFF + G.raw_start;
         c[4] = 0;                       /* pas serré : le format donne le pas */
         c[5] = G.raw_fmt;
-        c[6] = 0;                       /* pas d'indices : GLEngine les déroule */
-        c[7] = QGPU_IDX_NONE;
-        c[8] = 0;                       /* premier */
-        c[9] = G.raw_count;             /* nverts : tout le tableau est dessiné */
+        c[6] = G.raw_idx ? G.q.base + G.raw_idx : 0;
+        c[7] = G.raw_idx ? QGPU_IDX_U16 : QGPU_IDX_NONE;
+        c[8] = 0;                       /* premier : toujours 0, et le cœur l'exige
+                                           quand des indices sont donnés */
+        /* nverts : le cœur valide les indices contre lui, et relit tout le
+           tableau. C'est l'étendue des sommets de la série, pas le nombre
+           d'indices — les deux coïncident quand la série n'est pas indexée. */
+        c[9] = (G.raw_vend - G.raw_start) / (G.raw_words * 4);
         G.ncmd += QGPU_LEN_DRAW_RAW;
         G.n_rawdraws++;
+        if (G.raw_lots > 1)
+            G.n_rawmerged += G.raw_lots - 1;
     }
     G.raw_ctx = 0;
     G.raw_count = 0;
+    G.raw_idx = 0;
+    G.raw_nidx = 0;
+    G.raw_lots = 0;
 }
 
 /* Réserve `words` mots de flux pour le contexte p (CTX_BIND inclus au besoin). */
@@ -664,6 +692,22 @@ static void broken_all(const char *why, long st, unsigned long pc)
             p->geom_lost = 1;
         G.v7 = 0;
         return;
+    }
+    {   /* Dire QUELLE commande, avec ses arguments : sans cela un refus coûte
+           un aller-retour dans l'invité pour deviner. */
+        unsigned long k, n = 0;
+        char buf[160];
+        int at = 0;
+        if (pc < CMD_WORDS) {
+            n = QGPU_CMD_LEN(G.cmd[pc]);
+            if (n == 0 || n > 16 || pc + n > CMD_WORDS)
+                n = 1;
+        }
+        for (k = 0; k < n && at < (int)sizeof(buf) - 10; k++)
+            at += snprintf(buf + at, sizeof(buf) - at, " %lx", G.cmd[pc + k]);
+        buf[at] = 0;
+        pomppc_log("POMPPC: commande fautive (op %lx) :%s\n",
+                   pc < CMD_WORDS ? (unsigned long)QGPU_CMD_OP(G.cmd[pc]) : 0UL, buf);
     }
     pomppc_log("POMPPC: soumission refusée (%s, statut %ld, commande %lu) : "
                "accélération coupée\n", why, st, pc);
@@ -724,8 +768,10 @@ static void flush(void)
     /* Un BeginPrimitiveBuffer ouvert occupe déjà la zone des sommets : GLEngine
        y écrit pendant ce temps, on ne peut pas la rendre (vu en vrai : un
        téléversement de texture au milieu d'une primitive vide le flux). */
-    if (!G.pend)
+    if (!G.pend) {
         G.vtx = 0;
+        G.idx = 0;
+    }
     G.arena = 0;
     G.npost = 0;
     G.bound = 0;
@@ -2130,12 +2176,21 @@ static void geom_send_texgen(PCtx *p, unsigned long fmt)
 
     for (u = 0; u < QGPU_MAX_UNITS; u++) {
         const unsigned char *tg = g + GS_TEXGEN(u);
+        int on;
         if (!(fmt & QGPU_VF_TEX(u)))
+            continue;
+        /* Le cas de loin le plus courant est « aucune coordonnée engendrée, et
+           rien à défaire sur le device » : quatre octets lus au lieu de cent
+           quarante-huit comparés, et cela mille fois par image. */
+        on = GLD_U8(tg, TG_ENABLE) | GLD_U8(tg, TG_ENABLE + 1) |
+             GLD_U8(tg, TG_ENABLE + 2) | GLD_U8(tg, TG_ENABLE + 3);
+        if (!on && !p->c_tg_on[u])
             continue;
         /* Le bloc d'une unité (0x94 octets) porte les modes, les deux plans et
            les quatre activations : un seul memcmp couvre les quatre coordonnées. */
         if (!changed(p, tg, p->c_tg[u], 0x94))
             continue;
+        p->c_tg_on[u] = on != 0;
         for (c = 0; c < 4; c++) {
             const unsigned char *co = tg + TG_COORD(c);
             unsigned long mode = U16(co, TG_MODE);
@@ -2164,6 +2219,10 @@ static void geom_send_clip(PCtx *p)
     unsigned long a[QGPU_LEN_SET_CLIP_PLANE - 1];
     int i;
 
+    /* Rien de découpé, rien à défaire : quatre octets lus, pas cent comparés.
+       C'est le cas de presque toutes les images, et on passe ici mille fois. */
+    if (p->g_sent && !GLD_U32(g, GS_CLIP_MASK) && !p->c_clip[0])
+        return;
     /* masque et six plans sont contigus (0x3e28 puis 0x3e2c) : un seul memcmp */
     if (!changed(p, g + GS_CLIP_MASK, p->c_clip, 4 + QGPU_MAX_CLIP_PLANES * 16))
         return;
@@ -2264,14 +2323,22 @@ static void geom_send_all(PCtx *p, unsigned long fmt)
 static unsigned long geom_slots(unsigned long words)
 {
     static long cap = -1;
-    unsigned long avail = VTX_END - (VTX_OFF + G.vtx);
+    unsigned long avail = VTX_LIMIT - (VTX_OFF + G.vtx);
     unsigned long n = avail / (words * 4);
+    unsigned long ni;
     if (cap < 0) {
         const char *e = getenv("POMPPC_GL_GEOM_SLOTS");
         cap = (e && *e) ? atol(e) : GEOM_MAX_SLOTS;
         if (cap < 4 || cap > GEOM_MAX_SLOTS)
             cap = GEOM_MAX_SLOTS;
     }
+    /* La fusion peut écrire jusqu'à 3 indices par sommet (ruban, éventail,
+       polygone) : on n'offre jamais plus de sommets que la zone d'indices ne
+       peut en suivre, sinon un lot arriverait sans pouvoir être fusionné —
+       et le vidage se déciderait APRÈS que GLEngine a commencé à écrire. */
+    ni = (IDX_SIZE - G.idx) / 6;
+    if (n > ni)
+        n = ni;
     return n > (unsigned long)cap ? (unsigned long)cap : n;
 }
 
@@ -2326,6 +2393,9 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
     G.pend_fmt = p->geom_fmt;
     G.pend_slots = slots;
     G.pend_drop = 0;
+    /* L'ombrage décide de l'ordre des indices d'un quadrilatère ; il ne peut
+       plus changer entre ici et EndPrimitiveBuffer. */
+    G.pend_flat = GLD_U32(gls(p), GS_SHADE_MODEL) == GL_FLAT;
     /* la zone est prise tout de suite : un autre fil ne doit pas la réutiliser */
     G.vtx += slots * words * 4;
     if (n)
@@ -2346,13 +2416,208 @@ refuse:
     return geom_scratch;
 }
 
+/* ───────────────────── fusion des dessins consécutifs ─────────────────────
+ *
+ * Marble Blast envoie ~8 200 sommets par image en ~1 065 DRAW_RAW : 7,7 sommets
+ * par dessin, des rubans et des éventails COURTS. Chaque DRAW_RAW coûte à
+ * l'hôte un gl_target complet (liaison du FBO, remise à plat de tout l'état
+ * géométrique) plus un appel de dessin. Bout à bout, seules les primitives
+ * INDÉPENDANTES se recollent (TRIANGLES, QUADS, LINES, POINTS) ; un ruban ou un
+ * éventail, non.
+ *
+ * La fusion les convertit donc en GL_TRIANGLES INDEXÉS : les sommets restent
+ * EXACTEMENT où GLEngine les a écrits (toujours zéro recopie de sommet), et on
+ * n'écrit que des indices u16 — 2 octets par sommet de triangle contre 44 pour
+ * un sommet recopié. Un seul DRAW_RAW sort alors par lot d'état.
+ *
+ * Ce qui se fusionne : des lots CONSÉCUTIFS (jamais de réordonnancement : le
+ * mélange et l'égalité de profondeur dépendent de l'ordre), du même contexte,
+ * du même format de sommet, aux sommets CONTIGUS dans la zone partagée. Tout
+ * changement d'état coupe la série de lui-même : il passe par send_cmd →
+ * reserve → close_raw.
+ *
+ * LE SOMMET PROVOQUANT. En ombrage plat, la couleur du triangle vient d'un
+ * sommet précis, et ce n'est pas le même selon le mode (qgpu-soft.c, assemble) :
+ *   TRIANGLES, STRIP, FAN : le DERNIER sommet du triangle ;
+ *   QUADS                 : le 4ᵉ sommet du quadrilatère, pour ses DEUX triangles ;
+ *   QUAD_STRIP            : le sommet i+3 du quadrilatère (i, i+1, i+3, i+2) ;
+ *   POLYGON               : le PREMIER sommet du polygone, pour tous ses triangles.
+ * Comme GL_TRIANGLES prend le dernier, on ordonne chaque triangle pour que son
+ * dernier indice SOIT le sommet provoquant. Une rotation circulaire suffit
+ * partout (même triangle, même orientation, donc même élimination de face)
+ * SAUF pour GL_QUADS, dont la diagonale de référence (0–2) laisse le premier
+ * triangle sans le sommet 3 : en ombrage PLAT on coupe alors sur la diagonale
+ * 1–3, ce qui est exact puisque la couleur du quadrilatère y est uniforme. En
+ * ombrage lisse on garde la diagonale 0–2, celle du backend de référence.
+ *
+ * L'ALTERNANCE DES RUBANS. Un triangle sur deux d'un GL_TRIANGLE_STRIP est
+ * retourné pour garder l'orientation ; les indices la reproduisent, sans quoi
+ * GL_CULL_FACE éliminerait un triangle sur deux (vu en vrai avant correction).
+ */
+
+/* POMPPC_GL_MERGE : 0 coupe la fusion (repli et comparaison), 1 par défaut. */
+static int merge_switch(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("POMPPC_GL_MERGE");
+        v = (e && *e) ? atoi(e) : 1;
+        if (v < 0)
+            v = 0;
+    }
+    return v;
+}
+
 /* Un mode dont deux lots consécutifs se recollent bout à bout sans changer le
  * dessin : les primitives indépendantes. Une bande, un éventail, un polygone ou
- * une boucle ne se fusionnent pas. */
+ * une boucle ne se fusionnent pas ainsi — elles passent par les indices. */
 static int mode_mergeable(unsigned long m)
 {
     return m == QGPU_PRIM_MODE_POINTS || m == QGPU_PRIM_MODE_LINES ||
            m == QGPU_PRIM_MODE_TRIANGLES || m == QGPU_PRIM_MODE_QUADS;
+}
+
+/* Les modes qui donnent des triangles, donc convertibles en TRIANGLES indexés.
+ * Les lignes et les points n'en sont pas ; les bandes et boucles de lignes non
+ * plus (elles se convertiraient en LINES, mais le pointillé court le long de la
+ * bande : on ne touche pas). */
+static int mode_tris(unsigned long m)
+{
+    return m == QGPU_PRIM_MODE_TRIANGLES || m == QGPU_PRIM_MODE_TRIANGLE_STRIP ||
+           m == QGPU_PRIM_MODE_TRIANGLE_FAN || m == QGPU_PRIM_MODE_QUADS ||
+           m == QGPU_PRIM_MODE_QUAD_STRIP || m == QGPU_PRIM_MODE_POLYGON;
+}
+
+/* Combien d'indices la conversion d'un lot de n sommets produira-t-elle ? */
+static unsigned long tris_nidx(unsigned long m, unsigned long n)
+{
+    switch (m) {
+    case QGPU_PRIM_MODE_TRIANGLES:      return (n / 3) * 3;
+    case QGPU_PRIM_MODE_TRIANGLE_STRIP:
+    case QGPU_PRIM_MODE_TRIANGLE_FAN:
+    case QGPU_PRIM_MODE_POLYGON:        return n >= 3 ? (n - 2) * 3 : 0;
+    case QGPU_PRIM_MODE_QUADS:          return (n / 4) * 6;
+    case QGPU_PRIM_MODE_QUAD_STRIP:     return n >= 4 ? (n / 2 - 1) * 6 : 0;
+    default:                            return 0;
+    }
+}
+
+/* Écrit les indices du lot [base, base+n) et rend leur nombre. Les u16 sont
+ * écrits tels quels : le PowerPC est gros-boutiste, comme le protocole. */
+static unsigned long tris_emit(unsigned short *o, unsigned long m,
+                               unsigned long base, unsigned long n, int flat)
+{
+    unsigned long i, k = 0;
+#define IX(v) (o[k++] = (unsigned short)(base + (v)))
+    switch (m) {
+    case QGPU_PRIM_MODE_TRIANGLES:
+        for (i = 0; i + 2 < n; i += 3) {
+            IX(i); IX(i + 1); IX(i + 2);
+        }
+        break;
+    case QGPU_PRIM_MODE_TRIANGLE_STRIP:
+        for (i = 0; i + 2 < n; i++) {
+            if (i & 1) {                /* un triangle sur deux est retourné */
+                IX(i + 1); IX(i); IX(i + 2);
+            } else {
+                IX(i); IX(i + 1); IX(i + 2);
+            }
+        }
+        break;
+    case QGPU_PRIM_MODE_TRIANGLE_FAN:
+        for (i = 1; i + 1 < n; i++) {
+            IX(0); IX(i); IX(i + 1);
+        }
+        break;
+    case QGPU_PRIM_MODE_POLYGON:
+        /* provoquant = sommet 0 : on tourne (0, i, i+1) en (i, i+1, 0) */
+        for (i = 1; i + 1 < n; i++) {
+            IX(i); IX(i + 1); IX(0);
+        }
+        break;
+    case QGPU_PRIM_MODE_QUADS:
+        for (i = 0; i + 3 < n; i += 4) {
+            if (flat) {                 /* diagonale 1–3 : les deux finissent par 3 */
+                IX(i); IX(i + 1); IX(i + 3);
+                IX(i + 1); IX(i + 2); IX(i + 3);
+            } else {                    /* diagonale 0–2, celle de qgpu-soft.c */
+                IX(i); IX(i + 1); IX(i + 2);
+                IX(i); IX(i + 2); IX(i + 3);
+            }
+        }
+        break;
+    case QGPU_PRIM_MODE_QUAD_STRIP:
+        for (i = 0; i + 3 < n; i += 2) {
+            /* quadrilatère (i, i+1, i+3, i+2), provoquant i+3 : la diagonale de
+               référence i–(i+3) le contient déjà, une rotation suffit. */
+            IX(i); IX(i + 1); IX(i + 3);
+            IX(i + 2); IX(i); IX(i + 3);
+        }
+        break;
+    default:
+        break;
+    }
+#undef IX
+    return k;
+}
+
+/* Place pour k indices de plus dans la série courante ? */
+static unsigned short *idx_room(unsigned long k)
+{
+    if (G.idx + k * 2 > IDX_SIZE)
+        return 0;
+    return (unsigned short *)(G.q.win + IDX_OFF + G.idx);
+}
+
+/* Convertit la série NON indexée déjà ouverte en TRIANGLES indexés. 0 si la
+ * place manque — l'appelant ferme alors la série et en ouvre une neuve. */
+static int raw_promote(void)
+{
+    unsigned long n = (G.raw_vend - G.raw_start) / (G.raw_words * 4);
+    unsigned long need = tris_nidx(G.raw_mode, n);
+    unsigned short *o;
+    /* L'alignement se fait ICI et NULLE PART AILLEURS. Le cœur refuse un `ioff`
+       qui n'est pas multiple de 4 (in_shmem), mais tous les indices d'une série
+       sont lus d'affilée depuis ce seul offset : aligner au milieu glisserait
+       deux octets de bourrage dans le tableau, et les triangles pointeraient
+       sur les sommets du lot voisin (vu en vrai : un polygone sur trois faux). */
+    G.idx = (G.idx + 3) & ~3UL;
+    o = idx_room(need);
+    if (!o)
+        return 0;
+    G.raw_idx = IDX_OFF + G.idx;
+    G.raw_nidx = tris_emit(o, G.raw_mode, 0, n, G.pend_flat);
+    G.idx += G.raw_nidx * 2;
+    G.raw_mode = QGPU_PRIM_MODE_TRIANGLES;
+    G.raw_count = G.raw_nidx;
+    return 1;
+}
+
+/* Ajoute le lot qui vient d'être écrit (mode m, n sommets en G.pend_off) à la
+ * série ouverte, en TRIANGLES indexés. 0 = impossible : l'appelant ferme la
+ * série et en ouvre une neuve, ce qui est toujours exact. */
+static int merge_batch(unsigned long m, unsigned long n, unsigned long words)
+{
+    unsigned long base = (G.pend_off - G.raw_start) / (words * 4);
+    unsigned long need = tris_nidx(m, n);
+    unsigned short *o;
+
+    if (base + n > 65536)               /* les indices sont des u16 */
+        return 0;
+    if (!G.raw_idx && !raw_promote())
+        return 0;
+    /* `n` de DRAW_RAW, c'est le nombre d'INDICES quand la série est indexée :
+       il est borné par QGPU_MAX_VERTS dans le cœur. */
+    if (G.raw_nidx + need > QGPU_MAX_VERTS)
+        return 0;
+    o = idx_room(need);
+    if (!o)
+        return 0;
+    G.idx += tris_emit(o, m, base, n, G.pend_flat) * 2;
+    G.raw_nidx += need;
+    G.raw_count = G.raw_nidx;
+    G.raw_lots++;
+    return 1;
 }
 
 /* +0x54 EndPrimitiveBuffer(ctx, drapeau, mode, n) : GLEngine a écrit n sommets
@@ -2362,6 +2627,7 @@ static void geom_end(void *ctx, long flag, short mode, long n)
     PCtx *p;
     unsigned long m = (unsigned long)(unsigned short)mode;
     unsigned long words;
+    int same;
 
     (void)flag;
     pthread_mutex_lock(&G.mu);
@@ -2384,11 +2650,23 @@ static void geom_end(void *ctx, long flag, short mode, long n)
     }
     words = G.pend_words;
     G.vtx = G.pend_off + (unsigned long)n * words * 4;
-    if (G.raw_ctx == p && G.raw_mode == m && G.raw_fmt == G.pend_fmt &&
-        G.raw_words == words && mode_mergeable(m) &&
-        G.raw_start + G.raw_count * words * 4 == G.pend_off &&
-        G.raw_count + (unsigned long)n <= GEOM_MAX_MERGE) {
-        G.raw_count += n;               /* même état, même mode, sommets contigus */
+    /* Les trois conditions de TOUTE fusion : même contexte, même format de
+       sommet, sommets CONTIGUS dans la zone partagée. Il n'y a rien à vérifier
+       de l'état : tout changement d'état passe par send_cmd → reserve →
+       close_raw, donc la série est déjà fermée quand on arrive ici. Et on ne
+       fusionne que des lots CONSÉCUTIFS : jamais de réordonnancement, sans quoi
+       le mélange et l'égalité de profondeur changeraient l'image. */
+    same = (G.raw_ctx == p && G.raw_fmt == G.pend_fmt && G.raw_words == words &&
+            G.raw_vend == G.pend_off &&
+            (G.raw_vend - G.raw_start) / (words * 4) + (unsigned long)n
+                <= GEOM_MAX_MERGE);
+    if (same && !G.raw_idx && G.raw_mode == m && mode_mergeable(m)) {
+        G.raw_count += n;               /* bout à bout, sans un seul indice */
+        G.raw_lots++;
+    } else if (same && merge_switch() && mode_tris(m) &&
+               (G.raw_idx || mode_tris(G.raw_mode)) &&
+               merge_batch(m, (unsigned long)n, words)) {
+        /* recollé en TRIANGLES indexés : les sommets n'ont pas bougé */
     } else {
         close_raw();
         G.raw_ctx = p;
@@ -2397,7 +2675,9 @@ static void geom_end(void *ctx, long flag, short mode, long n)
         G.raw_fmt = G.pend_fmt;
         G.raw_words = words;
         G.raw_mode = m;
+        G.raw_lots = 1;
     }
+    G.raw_vend = G.vtx;
     G.n_rawverts += n;
     switch (m) {                        /* triangles équivalents, pour le bilan */
     case QGPU_PRIM_MODE_TRIANGLES:      G.n_tris += n / 3; break;
@@ -2559,7 +2839,9 @@ static void prim(Batch *b, int n, const unsigned char **v, const unsigned char *
     float *o;
     unsigned long vw = rk_words[b->kind];
     int i;
-    if (VTX_OFF + G.vtx + n * vw * 4 > VTX_END)
+    /* VTX_LIMIT, pas VTX_END : le haut de la zone porte les indices de la
+       fusion, et les deux chemins cohabitent dans la même image (scène mixte). */
+    if (VTX_OFF + G.vtx + n * vw * 4 > VTX_LIMIT)
         flush();                        /* l'état GL reste sur le device, par contexte */
     if (G.run_ctx != b->p || G.bound != b->p || G.run_kind != b->kind) {
         reserve(b->p, 0);               /* ferme la série précédente, lie le contexte */
