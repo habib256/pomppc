@@ -22,6 +22,7 @@
 #include <OpenGL/gl.h>
 #include <OpenGL/glu.h>
 #include <math.h>
+#include <dlfcn.h>
 
 /* Entrées ARB/EXT utilisées par la scène « tclprobe » : libGL.dylib de 10.4.6
    les exporte toutes (relevé dans OpenGL.framework/Libraries/libGL.dylib) ;
@@ -32,12 +33,67 @@
 #ifndef GL_TEXTURE1_ARB
 #define GL_TEXTURE1_ARB 0x84C1
 #endif
+#ifndef GL_TEXTURE2_ARB
+#define GL_TEXTURE2_ARB 0x84C2
+#endif
+#ifndef GL_TEXTURE3_ARB
+#define GL_TEXTURE3_ARB 0x84C3
+#endif
 extern void glMultiTexCoord2fARB(GLenum, GLfloat, GLfloat);
 extern void glClientActiveTextureARB(GLenum);
 extern void glSecondaryColor3fvEXT(const GLfloat *);
 extern void glSecondaryColorPointerEXT(GLint, GLenum, GLsizei, const GLvoid *);
 extern void glFogCoordfEXT(GLfloat);
 extern void glFogCoordPointerEXT(GLenum, GLsizei, const GLvoid *);
+
+/* Constantes et entrées des sondes d'état T&L (docs/re/etat-tcl.md). */
+#ifndef GL_RESCALE_NORMAL
+#define GL_RESCALE_NORMAL 0x803A
+#endif
+#ifndef GL_LIGHT_MODEL_COLOR_CONTROL
+#define GL_LIGHT_MODEL_COLOR_CONTROL 0x81F8
+#endif
+#ifndef GL_SINGLE_COLOR
+#define GL_SINGLE_COLOR 0x81F9
+#endif
+#ifndef GL_SEPARATE_SPECULAR_COLOR
+#define GL_SEPARATE_SPECULAR_COLOR 0x81FA
+#endif
+#ifndef GL_FOG_COORDINATE_SOURCE_EXT
+#define GL_FOG_COORDINATE_SOURCE_EXT 0x8450
+#define GL_FOG_COORDINATE_EXT        0x8451
+#define GL_FRAGMENT_DEPTH_EXT        0x8452
+#endif
+#ifndef GL_POINT_SIZE_MIN_ARB
+#define GL_POINT_SIZE_MIN_ARB              0x8126
+#define GL_POINT_SIZE_MAX_ARB              0x8127
+#define GL_POINT_FADE_THRESHOLD_SIZE_ARB   0x8128
+#define GL_POINT_DISTANCE_ATTENUATION_ARB  0x8129
+#endif
+#ifndef GL_NORMAL_MAP_ARB
+#define GL_NORMAL_MAP_ARB     0x8511
+#define GL_REFLECTION_MAP_ARB 0x8512
+#endif
+/* glPointParameter* : résolu par dlsym pour ne dépendre d'aucun nom de symbole
+   (ARB ou EXT) à l'édition de liens. */
+typedef void (*pp_f)(GLenum, GLfloat);
+typedef void (*pp_fv)(GLenum, const GLfloat *);
+static void *gl_sym(const char *a, const char *b)
+{
+    void *p = dlsym(RTLD_DEFAULT, a);
+    return p ? p : dlsym(RTLD_DEFAULT, b);
+}
+
+/* Une étape de sonde = un réglage GL suivi d'un glClear ; avec
+   POMPPC_GLTRACE_STATE=1 le traceur vide l'état GL à chaque effacement, et la
+   ligne imprimée ici nomme l'appel qui a produit le vidage de même rang
+   (fichier d'étiquettes de tools/re/diffstate.py). */
+static int probe_step;
+static void pstep(const char *what)
+{
+    glClear(GL_COLOR_BUFFER_BIT);
+    printf("ÉTAPE %2d %s\n", ++probe_step, what);
+}
 
 static int W = 64, H = 64;
 static int ROWB;                        /* octets par ligne (GLTEST_ROWPAD en plus de 4·W) */
@@ -1034,6 +1090,348 @@ int main(int argc, char **argv)
                getenv("TCLP_CLIP") ? 1 : 0);
         if (tex) glDeleteTextures(1, &tex);
         if (lst) glDeleteLists(lst, 1);
+    } else if (!strcmp(scene, "lightprobe")) {
+        /* Sonde de l'éclairage (docs/re/etat-tcl.md §1) : un réglage GL par
+           glClear. Toutes les valeurs sont des multiples distincts de 1/32 pour
+           être retrouvées par recherche dans le vidage autant que par diff. */
+        static const float amb[4]  = { 0.0625f, 0.125f,  0.1875f, 0.25f   };
+        static const float dif[4]  = { 0.3125f, 0.375f,  0.4375f, 0.5f    };
+        static const float spc[4]  = { 0.5625f, 0.625f,  0.6875f, 0.75f   };
+        static const float pos[4]  = { 1.5f,    2.5f,    3.5f,    1.0f    };
+        static const float dirl[4] = { 4.5f,    5.5f,    6.5f,    0.0f    };
+        static const float sdir[3] = { 0.25f,   0.5f,    0.75f            };
+        static const float scn[4]  = { 0.8125f, 0.875f,  0.9375f, 1.0f    };
+        static const float l7d[4]  = { 0.03125f,0.0625f, 0.09375f,0.125f  };
+        static const float l7a[4]  = { 0.15625f,0.1875f, 0.21875f,0.25f   };
+        glClearColor(0, 0, 0, 1);
+        pstep("référence");
+        glEnable(GL_LIGHTING);
+        pstep("glEnable(GL_LIGHTING)");
+        glEnable(GL_LIGHT0);
+        pstep("glEnable(GL_LIGHT0)");
+        glLightfv(GL_LIGHT0, GL_AMBIENT, amb);
+        pstep("glLightfv(L0, GL_AMBIENT, .0625 .125 .1875 .25)");
+        glLightfv(GL_LIGHT0, GL_DIFFUSE, dif);
+        pstep("glLightfv(L0, GL_DIFFUSE, .3125 .375 .4375 .5)");
+        glLightfv(GL_LIGHT0, GL_SPECULAR, spc);
+        pstep("glLightfv(L0, GL_SPECULAR, .5625 .625 .6875 .75)");
+        glLightfv(GL_LIGHT0, GL_POSITION, pos);
+        pstep("glLightfv(L0, GL_POSITION, 1.5 2.5 3.5 1) modèle-vue identité");
+        glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+        glTranslatef(10, 20, 30);
+        glLightfv(GL_LIGHT0, GL_POSITION, pos);
+        glPopMatrix();
+        pstep("glLightfv(L0, GL_POSITION, 1.5 2.5 3.5 1) sous translate(10,20,30)");
+        glLightfv(GL_LIGHT0, GL_POSITION, dirl);
+        pstep("glLightfv(L0, GL_POSITION, 4.5 5.5 6.5 0) directionnelle");
+        glLightfv(GL_LIGHT0, GL_SPOT_DIRECTION, sdir);
+        pstep("glLightfv(L0, GL_SPOT_DIRECTION, .25 .5 .75) identité");
+        glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+        glScalef(2, 4, 8);
+        glLightfv(GL_LIGHT0, GL_SPOT_DIRECTION, sdir);
+        glPopMatrix();
+        pstep("glLightfv(L0, GL_SPOT_DIRECTION, .25 .5 .75) sous scale(2,4,8)");
+        glLightf(GL_LIGHT0, GL_SPOT_CUTOFF, 60.0f);
+        pstep("glLightf(L0, GL_SPOT_CUTOFF, 60)");
+        glLightf(GL_LIGHT0, GL_SPOT_CUTOFF, 30.0f);
+        pstep("glLightf(L0, GL_SPOT_CUTOFF, 30)");
+        glLightf(GL_LIGHT0, GL_SPOT_EXPONENT, 12.0f);
+        pstep("glLightf(L0, GL_SPOT_EXPONENT, 12)");
+        glLightf(GL_LIGHT0, GL_CONSTANT_ATTENUATION, 3.0f);
+        pstep("glLightf(L0, GL_CONSTANT_ATTENUATION, 3)");
+        glLightf(GL_LIGHT0, GL_LINEAR_ATTENUATION, 5.0f);
+        pstep("glLightf(L0, GL_LINEAR_ATTENUATION, 5)");
+        glLightf(GL_LIGHT0, GL_QUADRATIC_ATTENUATION, 7.0f);
+        pstep("glLightf(L0, GL_QUADRATIC_ATTENUATION, 7)");
+        glLightf(GL_LIGHT0, GL_SPOT_CUTOFF, 180.0f);
+        pstep("glLightf(L0, GL_SPOT_CUTOFF, 180)");
+        glEnable(GL_LIGHT5);
+        pstep("glEnable(GL_LIGHT5)");
+        glLightfv(GL_LIGHT5, GL_DIFFUSE, dif);
+        pstep("glLightfv(L5, GL_DIFFUSE, .3125 .375 .4375 .5)");
+        glEnable(GL_LIGHT7);
+        pstep("glEnable(GL_LIGHT7)");
+        glLightfv(GL_LIGHT7, GL_DIFFUSE, l7d);
+        pstep("glLightfv(L7, GL_DIFFUSE, .03125 .0625 .09375 .125)");
+        glLightfv(GL_LIGHT7, GL_AMBIENT, l7a);
+        pstep("glLightfv(L7, GL_AMBIENT, .15625 .1875 .21875 .25)");
+        glLightModelfv(GL_LIGHT_MODEL_AMBIENT, scn);
+        pstep("glLightModelfv(GL_LIGHT_MODEL_AMBIENT, .8125 .875 .9375 1)");
+        glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_TRUE);
+        pstep("glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, 1)");
+        glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_TRUE);
+        pstep("glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, 1)");
+        glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, GL_SEPARATE_SPECULAR_COLOR);
+        pstep("glLightModeli(COLOR_CONTROL, GL_SEPARATE_SPECULAR_COLOR)");
+        glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, GL_SINGLE_COLOR);
+        pstep("glLightModeli(COLOR_CONTROL, GL_SINGLE_COLOR)");
+        glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_FALSE);
+        pstep("glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, 0)");
+        glDisable(GL_LIGHT7);
+        pstep("glDisable(GL_LIGHT7)");
+        glDisable(GL_LIGHT5); glDisable(GL_LIGHT0); glDisable(GL_LIGHTING);
+        pstep("glDisable(LIGHT5, LIGHT0, LIGHTING)");
+        glFinish();
+    } else if (!strcmp(scene, "matprobe")) {
+        /* Sonde du matériau, de GL_COLOR_MATERIAL et des valeurs COURANTES
+           (docs/re/etat-tcl.md §2). Les deux objets matériau sont vidés par le
+           traceur (clear-matf / clear-matb, pointeurs GS+0x4a70/0x4a74). */
+        static const float mam[4] = { 0.03125f, 0.0625f, 0.09375f, 0.125f  };
+        static const float mdi[4] = { 0.15625f, 0.1875f, 0.21875f, 0.25f   };
+        static const float msp[4] = { 0.28125f, 0.3125f, 0.34375f, 0.375f  };
+        static const float mem[4] = { 0.40625f, 0.4375f, 0.46875f, 0.5f    };
+        static const float bam[4] = { 0.53125f, 0.5625f, 0.59375f, 0.625f  };
+        static const float bdi[4] = { 0.65625f, 0.6875f, 0.71875f, 0.75f   };
+        static const float bsp[4] = { 0.78125f, 0.8125f, 0.84375f, 0.875f  };
+        static const float bem[4] = { 0.90625f, 0.9375f, 0.96875f, 1.0f    };
+        static const float scol[3] = { 0.5625f, 0.6875f, 0.8125f };
+        glClearColor(0, 0, 0, 1);
+        pstep("référence");
+        glMaterialfv(GL_FRONT, GL_AMBIENT, mam);
+        pstep("glMaterialfv(FRONT, AMBIENT, .03125 .0625 .09375 .125)");
+        glMaterialfv(GL_FRONT, GL_DIFFUSE, mdi);
+        pstep("glMaterialfv(FRONT, DIFFUSE, .15625 .1875 .21875 .25)");
+        glMaterialfv(GL_FRONT, GL_SPECULAR, msp);
+        pstep("glMaterialfv(FRONT, SPECULAR, .28125 .3125 .34375 .375)");
+        glMaterialfv(GL_FRONT, GL_EMISSION, mem);
+        pstep("glMaterialfv(FRONT, EMISSION, .40625 .4375 .46875 .5)");
+        glMaterialf(GL_FRONT, GL_SHININESS, 37.0f);
+        pstep("glMaterialf(FRONT, SHININESS, 37)");
+        glMaterialfv(GL_BACK, GL_AMBIENT, bam);
+        pstep("glMaterialfv(BACK, AMBIENT, .53125 .5625 .59375 .625)");
+        glMaterialfv(GL_BACK, GL_DIFFUSE, bdi);
+        pstep("glMaterialfv(BACK, DIFFUSE, .65625 .6875 .71875 .75)");
+        glMaterialfv(GL_BACK, GL_SPECULAR, bsp);
+        pstep("glMaterialfv(BACK, SPECULAR, .78125 .8125 .84375 .875)");
+        glMaterialfv(GL_BACK, GL_EMISSION, bem);
+        pstep("glMaterialfv(BACK, EMISSION, .90625 .9375 .96875 1)");
+        glMaterialf(GL_BACK, GL_SHININESS, 23.0f);
+        pstep("glMaterialf(BACK, SHININESS, 23)");
+        glEnable(GL_COLOR_MATERIAL);
+        pstep("glEnable(GL_COLOR_MATERIAL)");
+        glColorMaterial(GL_FRONT, GL_SPECULAR);
+        pstep("glColorMaterial(GL_FRONT, GL_SPECULAR)");
+        glColorMaterial(GL_BACK, GL_EMISSION);
+        pstep("glColorMaterial(GL_BACK, GL_EMISSION)");
+        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+        pstep("glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)");
+        glDisable(GL_COLOR_MATERIAL);
+        pstep("glDisable(GL_COLOR_MATERIAL)");
+        glColor4f(0.0625f, 0.1875f, 0.3125f, 0.4375f);
+        pstep("glColor4f(.0625 .1875 .3125 .4375)");
+        glNormal3f(0.09375f, 0.15625f, 0.21875f);
+        pstep("glNormal3f(.09375 .15625 .21875)");
+        glSecondaryColor3fvEXT(scol);
+        pstep("glSecondaryColor3fvEXT(.5625 .6875 .8125)");
+        glFogCoordfEXT(0.34375f);
+        pstep("glFogCoordfEXT(.34375)");
+        glTexCoord4f(0.28125f, 0.46875f, 0.59375f, 0.71875f);
+        pstep("glTexCoord4f(.28125 .46875 .59375 .71875) unité 0");
+        glMultiTexCoord4fARB(GL_TEXTURE3_ARB, 0.03125f, 0.09375f, 0.15625f, 0.90625f);
+        pstep("glMultiTexCoord4fARB(TEXTURE3, .03125 .09375 .15625 .90625)");
+        glFinish();
+    } else if (!strcmp(scene, "mtxprobe")) {
+        /* Sonde des matrices et des piles (docs/re/etat-tcl.md §4). */
+        static const float M[16] = { 1,2,3,4, 5,6,7,8, 9,10,11,12, 13,14,15,16 };
+        static const float N[16] = { 2,0,0,0, 0,2,0,0, 0,0,2,0,
+                                     0.125f, 0.25f, 0.375f, 1 };
+        static const float P[16] = { 0.0625f,0,0,0, 0,0.0625f,0,0, 0,0,0.0625f,0,
+                                     0.5625f, 0.6875f, 0.8125f, 1 };
+        glClearColor(0, 0, 0, 1);
+        pstep("référence");
+        glMatrixMode(GL_MODELVIEW); glLoadMatrixf(M);
+        pstep("glMatrixMode(MODELVIEW); glLoadMatrixf(1..16)");
+        glMatrixMode(GL_PROJECTION); glLoadMatrixf(N);
+        pstep("glMatrixMode(PROJECTION); glLoadMatrixf(N)");
+        glMatrixMode(GL_TEXTURE); glLoadMatrixf(M);
+        pstep("glMatrixMode(TEXTURE) unité 0 ; glLoadMatrixf(1..16)");
+        glActiveTextureARB(GL_TEXTURE1_ARB);
+        glMatrixMode(GL_TEXTURE); glLoadMatrixf(N);
+        pstep("unité 1 : glMatrixMode(TEXTURE) ; glLoadMatrixf(N)");
+        glActiveTextureARB(GL_TEXTURE2_ARB);
+        glMatrixMode(GL_TEXTURE); glLoadMatrixf(P);
+        pstep("unité 2 : glMatrixMode(TEXTURE) ; glLoadMatrixf(P)");
+        glActiveTextureARB(GL_TEXTURE0_ARB);
+        glMatrixMode(GL_COLOR); glLoadMatrixf(M);
+        pstep("glMatrixMode(GL_COLOR) ; glLoadMatrixf(1..16)");
+        glMatrixMode(GL_MODELVIEW);
+        pstep("glMatrixMode(GL_MODELVIEW) seul");
+        glPushMatrix();
+        pstep("glPushMatrix() (modèle-vue)");
+        glLoadIdentity();
+        pstep("glLoadIdentity()");
+        glPushMatrix(); glTranslatef(0.5f, 0.25f, 0.125f);
+        pstep("glPushMatrix() ; glTranslatef(.5 .25 .125)");
+        glPopMatrix();
+        pstep("glPopMatrix()");
+        glPopMatrix();
+        pstep("glPopMatrix()");
+        glMatrixMode(GL_PROJECTION); glLoadIdentity();
+        glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
+        pstep("projection et modèle-vue remises à l'identité");
+        glFinish();
+    } else if (!strcmp(scene, "tgprobe")) {
+        /* Sonde TexGen (docs/re/etat-tcl.md §5). */
+        static const float sp[4] = { 0.0625f, 0.125f, 0.1875f, 0.25f };
+        static const float tp[4] = { 0.3125f, 0.375f, 0.4375f, 0.5f  };
+        static const float rp[4] = { 0.5625f, 0.625f, 0.6875f, 0.75f };
+        static const float qp[4] = { 0.8125f, 0.875f, 0.9375f, 1.0f  };
+        static const float ep[4] = { 0.5f, 0.25f, 0.125f, 0.0625f };
+        glClearColor(0, 0, 0, 1);
+        pstep("référence");
+        glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR);
+        pstep("glTexGeni(S, MODE, GL_OBJECT_LINEAR)");
+        glTexGenfv(GL_S, GL_OBJECT_PLANE, sp);
+        pstep("glTexGenfv(S, OBJECT_PLANE, .0625 .125 .1875 .25)");
+        glTexGenfv(GL_S, GL_EYE_PLANE, sp);
+        pstep("glTexGenfv(S, EYE_PLANE, .0625 .125 .1875 .25) identité");
+        glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+        glTranslatef(10, 20, 30);
+        glTexGenfv(GL_S, GL_EYE_PLANE, ep);
+        glPopMatrix();
+        pstep("glTexGenfv(S, EYE_PLANE, .5 .25 .125 .0625) sous translate(10,20,30)");
+        glEnable(GL_TEXTURE_GEN_S);
+        pstep("glEnable(GL_TEXTURE_GEN_S)");
+        glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_SPHERE_MAP);
+        pstep("glTexGeni(S, MODE, GL_SPHERE_MAP)");
+        glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_REFLECTION_MAP_ARB);
+        pstep("glTexGeni(S, MODE, GL_REFLECTION_MAP_ARB)");
+        glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR);
+        pstep("glTexGeni(T, MODE, GL_OBJECT_LINEAR)");
+        glTexGenfv(GL_T, GL_OBJECT_PLANE, tp);
+        pstep("glTexGenfv(T, OBJECT_PLANE, .3125 .375 .4375 .5)");
+        glTexGenfv(GL_T, GL_EYE_PLANE, tp);
+        pstep("glTexGenfv(T, EYE_PLANE, .3125 .375 .4375 .5)");
+        glEnable(GL_TEXTURE_GEN_T);
+        pstep("glEnable(GL_TEXTURE_GEN_T)");
+        glTexGeni(GL_R, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR);
+        pstep("glTexGeni(R, MODE, GL_OBJECT_LINEAR)");
+        glTexGenfv(GL_R, GL_OBJECT_PLANE, rp);
+        pstep("glTexGenfv(R, OBJECT_PLANE, .5625 .625 .6875 .75)");
+        glTexGenfv(GL_R, GL_EYE_PLANE, rp);
+        pstep("glTexGenfv(R, EYE_PLANE, .5625 .625 .6875 .75)");
+        glTexGeni(GL_Q, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR);
+        pstep("glTexGeni(Q, MODE, GL_OBJECT_LINEAR)");
+        glTexGenfv(GL_Q, GL_OBJECT_PLANE, qp);
+        pstep("glTexGenfv(Q, OBJECT_PLANE, .8125 .875 .9375 1)");
+        glTexGenfv(GL_Q, GL_EYE_PLANE, qp);
+        pstep("glTexGenfv(Q, EYE_PLANE, .8125 .875 .9375 1)");
+        glEnable(GL_TEXTURE_GEN_R); glEnable(GL_TEXTURE_GEN_Q);
+        pstep("glEnable(GL_TEXTURE_GEN_R) ; glEnable(GL_TEXTURE_GEN_Q)");
+        glActiveTextureARB(GL_TEXTURE2_ARB);
+        glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_NORMAL_MAP_ARB);
+        pstep("unité 2 : glTexGeni(S, MODE, GL_NORMAL_MAP_ARB)");
+        glTexGenfv(GL_S, GL_OBJECT_PLANE, qp);
+        pstep("unité 2 : glTexGenfv(S, OBJECT_PLANE, .8125 .875 .9375 1)");
+        glEnable(GL_TEXTURE_GEN_S);
+        pstep("unité 2 : glEnable(GL_TEXTURE_GEN_S)");
+        glDisable(GL_TEXTURE_GEN_S);
+        glActiveTextureARB(GL_TEXTURE0_ARB);
+        glDisable(GL_TEXTURE_GEN_S); glDisable(GL_TEXTURE_GEN_T);
+        glDisable(GL_TEXTURE_GEN_R); glDisable(GL_TEXTURE_GEN_Q);
+        pstep("toutes les générations désactivées");
+        glFinish();
+    } else if (!strcmp(scene, "xformprobe")) {
+        /* Sonde viewport / profondeur / faces / normalisation / plans de
+           découpe / brouillard / points (docs/re/etat-tcl.md §3, §6, §7, §8, §9). */
+        static const double p0[4] = { 0.125, 0.25, 0.375, 0.5 };
+        static const double p3[4] = { 0.0625, 0.125, 0.1875, 0.25 };
+        static const double p5[4] = { 0.5, 0.25, 0.125, 0.0625 };
+        static const float fogc[4] = { 0.0625f, 0.1875f, 0.3125f, 0.4375f };
+        static const float patt[3] = { 0.5f, 0.25f, 0.125f };
+        pp_f  ppf  = (pp_f) gl_sym("glPointParameterfARB", "glPointParameterfEXT");
+        pp_fv ppfv = (pp_fv)gl_sym("glPointParameterfvARB", "glPointParameterfvEXT");
+        glClearColor(0, 0, 0, 1);
+        pstep("référence");
+        glViewport(3, 5, 17, 19);
+        pstep("glViewport(3, 5, 17, 19)");
+        glDepthRange(0.25, 0.75);
+        pstep("glDepthRange(0.25, 0.75)");
+        glDepthRange(0.0, 1.0);
+        pstep("glDepthRange(0, 1)");
+        glEnable(GL_CULL_FACE);
+        pstep("glEnable(GL_CULL_FACE)");
+        glCullFace(GL_FRONT);
+        pstep("glCullFace(GL_FRONT)");
+        glCullFace(GL_FRONT_AND_BACK);
+        pstep("glCullFace(GL_FRONT_AND_BACK)");
+        glCullFace(GL_BACK);
+        pstep("glCullFace(GL_BACK)");
+        glFrontFace(GL_CW);
+        pstep("glFrontFace(GL_CW)");
+        glFrontFace(GL_CCW);
+        pstep("glFrontFace(GL_CCW)");
+        glDisable(GL_CULL_FACE);
+        pstep("glDisable(GL_CULL_FACE)");
+        glEnable(GL_NORMALIZE);
+        pstep("glEnable(GL_NORMALIZE)");
+        glEnable(GL_RESCALE_NORMAL);
+        pstep("glEnable(GL_RESCALE_NORMAL)");
+        glDisable(GL_NORMALIZE); glDisable(GL_RESCALE_NORMAL);
+        pstep("glDisable(GL_NORMALIZE) ; glDisable(GL_RESCALE_NORMAL)");
+        glShadeModel(GL_FLAT);
+        pstep("glShadeModel(GL_FLAT)");
+        glShadeModel(GL_SMOOTH);
+        pstep("glShadeModel(GL_SMOOTH)");
+        glClipPlane(GL_CLIP_PLANE0, p0);
+        pstep("glClipPlane(CLIP_PLANE0, .125 .25 .375 .5) identité");
+        glEnable(GL_CLIP_PLANE0);
+        pstep("glEnable(GL_CLIP_PLANE0)");
+        glClipPlane(GL_CLIP_PLANE3, p3);
+        pstep("glClipPlane(CLIP_PLANE3, .0625 .125 .1875 .25) identité");
+        glEnable(GL_CLIP_PLANE3);
+        pstep("glEnable(GL_CLIP_PLANE3)");
+        glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+        glTranslatef(10, 20, 30);
+        glClipPlane(GL_CLIP_PLANE5, p5);
+        glPopMatrix();
+        pstep("glClipPlane(CLIP_PLANE5, .5 .25 .125 .0625) sous translate(10,20,30)");
+        glEnable(GL_CLIP_PLANE5);
+        pstep("glEnable(GL_CLIP_PLANE5)");
+        glDisable(GL_CLIP_PLANE0); glDisable(GL_CLIP_PLANE3);
+        glDisable(GL_CLIP_PLANE5);
+        pstep("tous les plans de découpe désactivés");
+        glFogi(GL_FOG_MODE, GL_EXP2);
+        pstep("glFogi(GL_FOG_MODE, GL_EXP2)");
+        glFogf(GL_FOG_DENSITY, 0.1875f);
+        pstep("glFogf(GL_FOG_DENSITY, .1875)");
+        glFogf(GL_FOG_START, 0.3125f);
+        pstep("glFogf(GL_FOG_START, .3125)");
+        glFogf(GL_FOG_END, 0.4375f);
+        pstep("glFogf(GL_FOG_END, .4375)");
+        glFogfv(GL_FOG_COLOR, fogc);
+        pstep("glFogfv(GL_FOG_COLOR, .0625 .1875 .3125 .4375)");
+        glFogi(GL_FOG_MODE, GL_LINEAR);
+        pstep("glFogi(GL_FOG_MODE, GL_LINEAR)");
+        glFogi(GL_FOG_COORDINATE_SOURCE_EXT, GL_FOG_COORDINATE_EXT);
+        pstep("glFogi(FOG_COORDINATE_SOURCE, GL_FOG_COORDINATE)");
+        glFogi(GL_FOG_COORDINATE_SOURCE_EXT, GL_FRAGMENT_DEPTH_EXT);
+        pstep("glFogi(FOG_COORDINATE_SOURCE, GL_FRAGMENT_DEPTH)");
+        glEnable(GL_FOG);
+        pstep("glEnable(GL_FOG)");
+        glDisable(GL_FOG);
+        pstep("glDisable(GL_FOG)");
+        glPointSize(5.5f);
+        pstep("glPointSize(5.5)");
+        if (ppfv) ppfv(GL_POINT_DISTANCE_ATTENUATION_ARB, patt);
+        pstep(ppfv ? "glPointParameterfv(POINT_DISTANCE_ATTENUATION, .5 .25 .125)"
+                   : "(glPointParameterfv absent)");
+        if (ppf) ppf(GL_POINT_SIZE_MIN_ARB, 0.75f);
+        pstep(ppf ? "glPointParameterf(POINT_SIZE_MIN, .75)" : "(absent)");
+        if (ppf) ppf(GL_POINT_SIZE_MAX_ARB, 19.5f);
+        pstep(ppf ? "glPointParameterf(POINT_SIZE_MAX, 19.5)" : "(absent)");
+        if (ppf) ppf(GL_POINT_FADE_THRESHOLD_SIZE_ARB, 3.25f);
+        pstep(ppf ? "glPointParameterf(POINT_FADE_THRESHOLD_SIZE, 3.25)" : "(absent)");
+        glLineWidth(3.25f);
+        pstep("glLineWidth(3.25)");
+        glPolygonMode(GL_FRONT, GL_LINE);
+        pstep("glPolygonMode(GL_FRONT, GL_LINE)");
+        glPolygonMode(GL_BACK, GL_POINT);
+        pstep("glPolygonMode(GL_BACK, GL_POINT)");
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        glViewport(0, 0, W, H);
+        pstep("glPolygonMode(FRONT_AND_BACK, GL_FILL) ; glViewport(0,0,W,H)");
+        glFinish();
     } else if (!strcmp(scene, "state")) {
         /* Sonde d'état : un réglage GL à la fois, suivi d'un glClear que le
            plugin traceur (POMPPC_GLTRACE_STATE=1) vide en entier. Les valeurs
