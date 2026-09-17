@@ -1,90 +1,86 @@
-# TODO — GPU 3D paravirtuel (device qgpu, kext POMPPCGPU, plugin GLDriver-POMPPC)
+# TODO — Tiger en OpenGL 1.5, le plus vite possible, avec le maximum de travail sur le GPU hôte
 
-État et liste courte au 17/09/2026. La conception, les offsets relevés et les mesures sont dans
-`docs/gpu-3d-tiger.md` ; **le plan à long terme (OpenGL 1.5, Quartz Extreme, Core Image) est dans
-`docs/roadmap-opengl15.md`**. Ce fichier ne garde que ce qui reste à faire à court terme.
+**Objectif unique** : que Mac OS X Tiger sous QEMU annonce et tienne OpenGL 1.5, et que tout ce
+qui peut s'exécuter sur le GPU de l'hôte s'y exécute. Chaque tâche ci-dessous est jugée à cette
+aune : *combien de travail quitte le PowerPC émulé ?*
 
-## 1. Où passe le temps aujourd'hui
+Ce fichier est le tableau de bord ; il est tenu à jour à chaque lot. Le contexte long est dans
+`docs/roadmap-opengl15.md`, la conception et les offsets relevés dans `docs/gpu-3d-tiger.md`,
+les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 
-Le protocole en est à la v5 (4 unités de texture, GL_COMBINE). Zenerchi tourne à ~50 img/s et
-Marble Blast Gold (moteur Torque, vraie 3D) entre 20 et 80 img/s : dans les deux cas, **c'est le
-processeur émulé qui limite, plus le rendu**.
+## État (17/09/2026)
 
-Trois postes restent à la charge de l'invité, en plus de la géométrie :
+- Protocole **v5** : rastérisation sur l'hôte, 4 unités de texture, GL_COMBINE, brouillard,
+  lignes, points. Sous-ensemble d'OpenGL 1.3.
+- Zenerchi ~50 img/s, Marble Blast Gold 20-80 img/s. **Dans les deux cas c'est le PowerPC émulé
+  qui limite** : GLEngine transforme, éclaire et découpe chaque sommet sur l'invité ; le plugin
+  ne reçoit que des sommets déjà en coordonnées fenêtre.
+- Le renderer annonce « 1.1 APPLE-1.1 » (chaîne du rendu logiciel d'Apple, transmise telle quelle).
 
-- la conversion des texels au format du protocole ;
-- l'assemblage des sommets dans la fenêtre partagée ;
-- la recopie de l'image relue à chaque échange.
+## Règles de travail (plusieurs agents)
 
-## 2. Pourquoi l'invité fait encore toute la géométrie
+- **Une seule VM de développement** (`disks/tiger-dev.raw`, `tools/guest/devloop.py`) : un seul
+  agent à la fois y lance des jobs. Le travail hôte (protocole, backends, tests natifs) et la
+  lecture des désassemblages se font en parallèle, sans VM.
+- Un lot = une fonction, avec sa **preuve** : cas dans `tests/qgpu_core_test.c` (mêmes pixels sur
+  les backends logiciel et OpenGL), scène `guest/gltest` comparée au rendu d'Apple
+  (`POMPPC_GL_DISABLE=1`), et mesure avant/après sur un jeu quand c'est une tâche de vitesse.
+- Hors domaine, le rendu d'Apple reprend la main. **Rien n'est annoncé qui ne soit tenu.**
+- Tout relevé dans `OpenGL.framework` s'écrit dans `docs/re/`, avec l'adresse et la méthode.
 
-Le plugin se branche **tout en bas** de la chaîne OpenGL de Tiger. GLEngine, la partie commune du
-framework, transforme les sommets, applique l'éclairage, découpe, élimine les faces arrière,
-génère les coordonnées de texture, déroule les listes d'affichage et les tableaux de sommets.
-Elle appelle ensuite les procédures de rastérisation du pilote avec des sommets **déjà en
-coordonnées fenêtre** : ce sont elles que le plugin remplace. Tout ce qui est au-dessus reste du
-code PowerPC émulé.
+---
 
-Ce choix était le seul praticable au départ : l'interface de rastérisation est petite, stable, et
-c'est elle que la rétro-ingénierie a établie en premier. Les vrais pilotes matériels d'Apple
-prennent la main plus haut, par les interfaces de programme de pipeline
-(`gldCreatePipelineProgram`) et de tableau de sommets (`gldCreateVertexArray`). On les voit
-passer dans la trace des jeux ; le plugin se contente aujourd'hui de les transmettre au moteur
-logiciel d'Apple.
+## Axe 1 — Sortir la géométrie de l'invité (le plus gros gain de vitesse)
 
-## 3. Le grand chantier : monter d'un étage
+| # | Tâche | Statut |
+|---|---|---|
+| 1.1 | **Relever la négociation des capacités** : ce qui décide GLEngine à appeler les entrées « hautes » du pilote (`CreateVertexArray`, `RenderVertexArray` +0x70, `AllocVertexBuffer`, `CreatePipelineProgram`) plutôt que de transformer lui-même. Lire comment les pilotes ATI/NVIDIA de 10.4.6 répondent à `GetRendererInfo`, `GetInteger`, `GetString`. **Verrou de tout l'axe.** | à faire |
+| 1.2 | Relever la disposition des tableaux de sommets, des programmes de pipeline, des matrices, des lumières et matériaux, du texgen et des plans de découpe dans l'état GLEngine (sondes `gltest` : un réglage, un vidage, un diff). | à faire |
+| 1.3 | Protocole : matrices, éclairage/matériau, texgen, plans de découpe, dessin indexé de sommets bruts. Backends logiciel (référence) et OpenGL. | à faire |
+| 1.4 | Plugin : envoyer les sommets non transformés ; repli sur le chemin actuel hors domaine. Mesurer sur Marble Blast. | à faire |
 
-(Étape B de `docs/roadmap-opengl15.md`.)
+## Axe 2 — Ne plus recopier, ne plus attendre
 
-**Se brancher au niveau du tableau de sommets et du programme de pipeline**, c'est-à-dire envoyer
-à l'hôte les sommets **non transformés**, avec les matrices et l'état d'éclairage. Le GPU de
-l'hôte ferait alors la transformation et l'éclairage, et l'invité ne ferait plus que préparer des
-commandes.
+| # | Tâche | Statut |
+|---|---|---|
+| 2.1 | **Objets tampon** (`CreateBuffer`, `FlushBuffer`, `BufferSubData`) sur tampons hôte : les maillages statiques ne retraversent plus la fenêtre partagée. (OpenGL 1.5.) | à faire |
+| 2.2 | **Doorbell asynchrone** : thread de rendu hôte, l'invité continue pendant que le GPU dessine. `FENCE` et IRQ `DONE` existent ; les barrières `CreateFence`/`TestObject`/`FinishObject` donnent la sémantique invité. | à faire |
+| 2.3 | **Zero-copy à la présentation** : le device écrit lui-même dans la VRAM (plage déclarée par le kext) ; plus de relecture ni de recopie par l'invité. | à faire |
+| 2.4 | **Présentation en fenêtre sans attendre le WindowServer** (Marble Blast tourne en fenêtre) — dépend de 4.2 ou d'une composition côté hôte. | à faire |
+| 2.5 | Téléversement de textures sans conversion invité quand le format est connu de l'hôte (BGRA, 565, 1555…) : la conversion passe sur l'hôte. | à faire |
+| 2.6 | Opérations de pixels sur l'hôte (`DrawPixels`, `CopyPixels`, `Bitmap`, `ReadPixels`, `CopyTexSubImage`) : chacune force aujourd'hui une relecture complète. | à faire |
 
-Ce que cela demande :
+## Axe 3 — Compléter le pipeline fixe jusqu'à 1.5 (condition pour annoncer 1.5)
 
-1. relever dans GLEngine la disposition des descripteurs de tableaux de sommets, des programmes
-   de pipeline, des matrices (modèle-vue, projection, texture) et des lumières — même méthode que
-   la sonde `combprobe` de `guest/gltest` pour GL_COMBINE : un réglage, un vidage d'état, un diff ;
-2. étendre le protocole : matrices, état d'éclairage et de matériau, tableaux de sommets ;
-3. côté hôte, poser ces états en OpenGL classique et dessiner sans retransformer.
+| # | Tâche | Statut |
+|---|---|---|
+| 3.1 | **Stencil** : tampon hôte, clés de protocole, backend de référence, offsets GLEngine. Absent de toute la chaîne. | à faire |
+| 3.2 | Modes de polygone (ligne, point), pointillés de ligne et de polygone, lissage. | à faire |
+| 3.3 | Opérations logiques ; mélange à couleur constante, équations minimum et maximum. | à faire |
+| 3.4 | Textures 3D, cube, rectangle ; bordures ; compressées (S3TC passé tel quel à l'hôte). | à faire |
+| 3.5 | Lignes et points texturés ; sprites de points ; couleur secondaire. | à faire |
+| 3.6 | Textures de profondeur et comparaison d'ombre ; génération automatique de mipmaps (`GenerateTexMipmaps` repérée). | à faire |
+| 3.7 | **Requêtes d'occlusion** (`CreateQuery`, `GetQueryInfo`). (OpenGL 1.5.) | à faire |
+| 3.8 | Multiéchantillonnage. | à faire |
+| 3.9 | Brouillard par fragment (`GL_NICEST`) ; niveau de détail des mipmaps par fragment dans le backend de référence. | à faire |
 
-C'est le plus gros gain restant, et aussi le plus gros travail. À faire par étapes, en gardant à
-chaque étape le repli vers le chemin actuel.
+## Axe 4 — Annoncer 1.5, et brancher le système
 
-## 4. OpenGL 1.3 : ce qui manque, par ordre de coût
+| # | Tâche | Statut |
+|---|---|---|
+| 4.1 | **Annoncer version et extensions** telles que tenues (dépend de 1.1) : `GL_VERSION`, liste d'extensions, limites (`GetInteger`). | à faire |
+| 4.2 | **Accélérateur IOKit** : nœud `IOAccelerator` + `IOGLBundleName`, chargement comme un vrai pilote de carte. Préalable de Quartz Extreme. | à faire |
+| 4.3 | Programmes ARB de sommets et de fragments (`CreatePipelineProgram`) — au-delà de 1.5 strict, mais condition de Core Image. | à faire |
+| 4.4 | Quartz Extreme (surfaces de fenêtre sur l'hôte), puis Core Image, puis Quartz 2D Extreme. Objectif visible : « QE/CI géré » dans Informations Système. | à faire |
 
-1. **Stencil** : n'existe nulle part dans la chaîne — ni tampon hôte, ni clé de protocole, ni
-   rendu logiciel de référence. C'est le plus gros morceau.
-2. **Modes de polygone non pleins**, pointillés et lissage des lignes, points et polygones.
-3. **Opérations logiques**, textures 3D, cube et compressées, bordures de texture, lignes et
-   points texturés, multiéchantillonnage, facteurs de mélange à couleur constante, équations
-   minimum et maximum.
-4. **Opérations de pixels** (`glDrawPixels`, `glBitmap`, `glCopyPixels`, accumulation) : déjà
-   correctes, mais rendues par le code d'Apple.
+## Points ouverts
 
-## 5. Écarts de fidélité connus
+- **Zenerchi, fin de partie** : ralentissement quand les cristaux brillent, non diagnostiqué. Le
+  bilan `POMPPC_GL_STATS=<fichier>` donne les motifs de refus et les replis par procédure.
+- Plus de 4 clients GL accélérés (tranches du kext) — à lever avant 4.4.
 
-- Brouillard par fragment en `GL_NICEST` (GLEngine ne fournit alors pas le facteur par sommet).
-- Niveau de détail des mipmaps calculé **par triangle** dans le backend logiciel de référence.
-- Pixels exactement sur une arête : règle de remplissage du GPU hôte.
+## Ordre d'attaque
 
-## 6. Autres pistes, indépendantes
-
-1. **Zero-copy** : laisser le device écrire lui-même dans la VRAM (plage déclarée par le kext,
-   jamais par le plugin) supprimerait la recopie de l'image relue ; en fenêtre, composer côté
-   hôte dans le frontend supprimerait aussi le WindowServer.
-2. **Exécution asynchrone** : le device exécute dans l'écriture MMIO du doorbell ; un thread de
-   rendu hôte libérerait le vCPU. `FENCE` et l'IRQ `DONE` sont déjà en place.
-3. **Accélérateur IOKit** : publier `IOGLBundleName` sur un nœud `IOAccelerator` rattaché à
-   l'écran remplacerait l'astuce du nom de bundle et ouvrirait la voie à Quartz Extreme.
-4. **Autres backends hôte** : Vulkan (natif ou Zink), Metal (ANGLE) ; la suite de tests hôte
-   s'applique telle quelle.
-
-## 7. En cours / à vérifier
-
-- **Zenerchi, fin de partie** : ralentissement quand les cristaux brillent — pas encore
-  diagnostiqué. Le bilan périodique (`POMPPC_GL_STATS=<fichier>`) donne maintenant les motifs de
-  refus et les replis par procédure : relancer une partie jusqu'à la fin et lire ces lignes.
-- **Présentation directe en fenêtre** : Marble Blast tourne en fenêtre 800x600, donc sans
-  présentation directe ; il attend le WindowServer à chaque image.
+1. **1.1** d'abord : sans elle, ni l'axe 1 ni l'annonce 4.1 ne peuvent démarrer.
+2. En parallèle, sans VM : **3.1** (stencil) côté hôte, puis **2.2** (asynchrone).
+3. Puis 1.2 → 1.3 → 1.4 (géométrie), 2.1 (tampons), 3.x par lots, 4.1 dès que la liste tient.
