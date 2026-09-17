@@ -209,6 +209,11 @@ static void trace_proc(int id, unsigned long *a)
                docs/re/tableaux-de-sommets.md §7 lisent GS+0x4700/0x4a70/0x50c0. */
             pomppc_dump("clear-glstate", (void *)gls, 0x5400);
             pomppc_dump("clear-ctx", ctx, 0x704);
+            /* les 0x360 octets qui PRÉCÈDENT le bloc pilote (gctx+0x000 …
+               gctx+0x35f) : attributs courants hors glBegin — coordonnées de
+               texture gctx+0x120+u·0x10, couleur gctx+0x2a0, normale gctx+0x2b0
+               (tableaux-de-sommets.md §5.9). Trace seulement. */
+            pomppc_dump("clear-gctxlow", (void *)(gls - 0x360), 0x360);
             /* objets désignés par des pointeurs du bloc : tableau de sommets
                courant (GS+0x4700), matériaux avant/arrière (GS+0x4a70/0x4a74),
                pipeline program courant (GS+0x50c0). */

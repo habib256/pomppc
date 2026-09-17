@@ -519,6 +519,13 @@ Correspondance énumération → index de mode **[L]** (`_glMatrixMode_Exec 0x16
 | 8..15 | `0x1a60`..`0x1c20` | `GL_MATRIX0..7_ARB` **[H]** (calcul) |
 | 16+u | `0x1c60 + u·0x40` | **`GL_TEXTURE` de l'unité `u`** (`_gleTextureMatTrans 0x51374`) |
 
+> **Vérifié dans l'invité le 18/09/2026** (`docs/re/etat-tcl.md` §4, sonde `mtxprobe`) :
+> les index 2 (`GL_COLOR`), 3, 4 et `16+u` sont confirmés par les écritures observées
+> **et** par le pointeur de matrice courante `GS+0x4c8c`, qui suit exactement
+> `base + index·0x40`. Les unités de texture 0, 1 et 2 écrivent bien en `GS+0x1c60`,
+> `0x1ca0`, `0x1ce0`. Le masque « matrice modifiée » est en **`GS+0x4d48`** (et non
+> `0x4d4c`, qui reste nul) ; `GS+0x5074` est l'unité de texture active.
+
 L'inverse de la modèle-vue est donc en **`GS+0x1f60`** (= `0x1e60 + 4·0x40`) : c'est la matrice de
 normales (après mise à l'échelle par le facteur de `GL_RESCALE_NORMAL`).
 Format : **float 32 bits** ; `glLoadMatrixd` convertit (`_gleLoadMatrixd 0x522a4` : `lfd`/`frsp`/`stfs`) **[L]**.
@@ -538,6 +545,12 @@ Format : **float 32 bits** ; `glLoadMatrixd` convertit (`_gleLoadMatrixd 0x522a4
 Valeurs par défaut posées par `_gleInitGLDState` : échelle `(1, 1, 0.5, 1)`, biais `(0, 0, 0.5, 0)`,
 `near = 0.0` (double), `far = 1.0` (double) — cohérent avec `glDepthRange(0,1)` **[L]**
 (`0x4ef4–0x4f18`, `r25 = 0x3f800000`, `r23 = 0x3f000000`).
+
+> **Mesuré dans l'invité le 18/09/2026** (`docs/re/etat-tcl.md` §8, sonde `xformprobe`) :
+> `échelle.x = (largeur/2)·0.99995`, `biais.x = x + largeur/2` (exact), idem en y ;
+> `échelle.z = ((far−near)/2)·D`, `biais.z = ((far+near)/2)·D` avec `D = ctx+0x14`
+> (= 1073741760.0 sur le contexte mesuré). `GS+0x46cc…0x46d8` porte les mêmes grandeurs
+> **sans** le facteur `0.99995`, `GS+0x46dc/0x46e0` les porte normalisées dans `[0,1]`.
 
 ### 5.3 Élimination des faces
 
@@ -576,6 +589,12 @@ unité active lue en `gctx+0x53d4`).
 | `0x3d54 / 0x3d58 / 0x3d68` | `0x39f4 / 0x39f8 / 0x3a08` | u16 / float[4] / float[4] | mode Q, plan œil Q, plan objet Q |
 | `0x3d78/79/7a/7b + u·0x94` | `0x3a18/19/1a/1b + u·0x94` | u8 | activation `GL_TEXTURE_GEN_S/T/R/Q` |
 
+> **Vérifié dans l'invité le 18/09/2026** (`docs/re/etat-tcl.md` §5, sonde `tgprobe`) : le pas
+> `0x94` par unité est prouvé sur l'unité 2 (mode S en `GS+0x3ab0`), le pas `0x24` par coordonnée
+> l'est sur les quatre coordonnées, et le plan **œil** est bien transformé à l'appel par l'inverse
+> de la modèle-vue (`(.5,.25,.125,.0625)` sous `glTranslatef(10,20,30)` est rangé
+> `(.5,.25,.125,−13.6875)`). Le mode est l'énumération GL telle quelle.
+
 Preuve des bits d'activation **[L]**, `_gleSetEnable_TEXTURE_GEN_S 0xcb304–0xcb320` :
 `lwz r29, 0x53d4(r3)` / `mulli r2, r29, 0x94` / `addi r2, r2, 0x3d70` / `lbz r0, 8(r2)` / `stb r5, 8(r2)`.
 
@@ -586,6 +605,10 @@ Preuve des bits d'activation **[L]**, `_gleSetEnable_TEXTURE_GEN_S 0xcb304–0xc
 | `0x2804` | **`0x24a4`** | float | facteur de mise à l'échelle des normales (1.0 par défaut) | `_gleModelMatInvert 0x3354c/0x33558` ; init `_gleInitGLDState 0x4d40` **[L]** |
 | `0x280d` | **`0x24ad`** | u8 | `GL_NORMALIZE` (`0x0ba1`) | `_gleSetEnable_NORMALIZE 0x46168/0x46180` ; init `0x4d38` **[L]** |
 | `0x280e` | **`0x24ae`** | u8 | `GL_RESCALE_NORMAL` (`0x803a`) | `_gleSetEnable_RESCALE_NORMAL_EXT 0x31da0/0x31db8` ; init `0x4d3c` **[L]** |
+
+> **Vérifié dans l'invité le 18/09/2026** : `GS+0x24ad` et `GS+0x24ae` bougent bien avec
+> `glEnable(GL_NORMALIZE)` / `glEnable(GL_RESCALE_NORMAL)`. `GS+0x24a4` n'a pas été mis à
+> l'épreuve (pas de modèle-vue à échelle non uniforme dans la sonde).
 
 ### 5.7 Éclairage
 
@@ -613,6 +636,21 @@ Disposition d'un bloc de lumière (`0x80` octets) :
 | `+0x5c` | float | exposant du spot | **[L]** `0x7a40`, passé à `log`/`exp` |
 | `+0x60..0x7f` | — | dérivés | **[H]** |
 
+> **Vérifié champ par champ dans l'invité le 18/09/2026** (`docs/re/etat-tcl.md` §1, sonde
+> `lightprobe`) : le pas de `0x80` est prouvé (lumières 5 et 7), `+0x00` ambiante est **confirmée**,
+> `+0x30` position est bien en coordonnées **œil** (`(1.5,2.5,3.5,1)` sous `glTranslatef(10,20,30)`
+> donne `(11.5,22.5,33.5,1)`), `+0x40` direction de spot aussi, transformée **comme une normale**
+> (inverse-transposée) et **non normalisée**, `+0x4c` est bien le **cosinus** du seuil
+> (`60°` → `0.49999997`). `+0x60` est le vecteur demi-chemin dérivé, `+0x70` le seuil en degrés
+> mais **non fiable** (180 à l'init, 0 après un retour explicite à 180).
+>
+> **Correction du 18/09/2026** sur la ligne `gctx+0x30ad` / `GS+0x2d4d` ci-dessus : la répartition
+> réelle est `GS+0x2d44` u16 face de `glColorMaterial`, `GS+0x2d46` u16 mode,
+> `GS+0x2d48` u16 `GL_LIGHT_MODEL_COLOR_CONTROL`, `GS+0x2d4a` `GL_LIGHTING`,
+> `GS+0x2d4b` `GL_COLOR_MATERIAL`, `GS+0x2d4c` `GL_LIGHT_MODEL_TWO_SIDE`,
+> `GS+0x2d4d` `GL_LIGHT_MODEL_LOCAL_VIEWER`. `GS+0x24b0` (ambiante de scène) est **confirmée**,
+> avec le défaut GL `(0.2, 0.2, 0.2, 1)` et non `(0,0,0,1)`.
+
 L'état **dérivé** par lumière vit hors du bloc pilote, en `gctx+0x4a70 + i·0x6c`
 (`+0x00..0x0b` direction normalisée, `+0x64` `1/atténuation constante`, `+0x68/0x69/0x6a/0x6b` drapeaux) **[L]**.
 
@@ -633,6 +671,16 @@ Le matériau **n'est pas un champ de structure** : c'est un objet séparé, dés
 | `+0x40` | float | brillance | **[H]** | pname `GL_SHININESS 0x1601` |
 | `+0x234` | u16 | masque des composantes modifiées | — | `0xdc0c4/0xdc0d4` **[L]** |
 
+> **Corrigé le 18/09/2026** (`docs/re/etat-tcl.md` §2) : les deux objets matériau sont **dans le
+> bloc transmis**, en `GS+0x28c0` (avant) et `GS+0x2b00` (arrière), et ce sont exactement les
+> cibles des pointeurs `GS+0x4a70`/`GS+0x4a74` (vérifié par égalité octet pour octet des vidages
+> `clear-matf`/`clear-matb` avec `glstate[0x28c0…]`/`glstate[0x2b00…]`, et par le calcul de la base
+> du bloc). Taille `0x240`. La brillance `+0x40` est **confirmée**. Le masque `+0x234` n'a que son
+> **octet bas** mis à jour : brillance `0x01`, émission `0x02`, ambiante `0x04`, diffuse `0x08`,
+> spéculaire `0x10` ; son octet haut vaut `0x1f` dès le premier vidage.
+> `glEnable(GL_COLOR_MATERIAL)` écrase aussitôt dans l'objet les composantes suivies avec la
+> couleur courante : il suffit donc au plugin de lire l'objet matériau.
+
 ### 5.9 Attributs courants (hors tableau) — **hors du bloc pilote**
 
 | `gctx` | Type | Sens | Preuve |
@@ -640,6 +688,13 @@ Le matériau **n'est pas un champ de structure** : c'est un objet séparé, dés
 | `0x2a0..0x2ac` | float[4] | couleur courante | `_glColor4f_NoColorMat_Exec 0x398ec` **[L]** |
 | `0x2b0..0x2b8` | float[3] | normale courante | `_glNormal3f_Exec 0x3a940` **[L]** |
 | `0x120 + u·0x10` | float[4] | coordonnée de texture courante de l'unité `u` | `_glTexCoord4f_Exec 0x93e54`, `_glMultiTexCoord4f_Exec 0x96374` **[L]** |
+| `0x2c0..0x2c8` | float[3] | **couleur secondaire courante** | observé 18/09/2026 (`glSecondaryColor3fvEXT`) |
+| `0x2cc` | float | **coordonnée de brouillard courante** | observé 18/09/2026 (`glFogCoordfEXT`) |
+
+> **Vérifié dans l'invité le 18/09/2026** (`docs/re/etat-tcl.md` §2.2) : aucun de ces appels ne
+> bouge un seul octet de `GS+0…0x5400`. Le plugin doit les lire **avant** le bloc, à
+> `GS − 0x360 + x`. Le pas de `0x10` entre unités de texture est prouvé (unité 3 en `gctx+0x150`).
+> Le traceur vide désormais cette zone (`clear-gctxlow`, 0x360 octets) en mode trace.
 
 Ces offsets sont **inférieurs à `0x360`** : ils ne sont pas dans le bloc passé au pilote — GLEngine
 les consomme lui-même en construisant les sommets.
@@ -817,6 +872,11 @@ Modèle : la scène `combprobe` de `guest/gltest/gltest.c` — **un réglage GL,
 avec `POMPPC_GLTRACE_STATE=1` le plugin traceur vide l'état à chaque effacement et l'on diffe
 les vidages successifs. Chaque sonde ci-dessous donne la **liste exacte des appels GL**.
 
+> **État au 18/09/2026** : les sondes 7.1 à 7.4 sont écrites et passées
+> (`xformprobe`, `mtxprobe`, `lightprobe` + `matprobe`, `tgprobe` dans `guest/gltest/gltest.c`),
+> leurs résultats sont dans **`docs/re/etat-tcl.md`**. Le diff des vidages se fait avec
+> `tools/re/diffstate.py`. Restent 7.5 (`vaprobe`) et 7.6 (`ppprobe`).
+
 ### 7.0 Préalables dans le traceur (`guest/gldriver/pomppc_gld.c`, cas `PROC_Clear`)
 
 1. **Agrandir le vidage de l'état** : `pomppc_dump("clear-glstate", gls, 0x4000)` → **`0x5400`**.
@@ -834,6 +894,10 @@ les vidages successifs. Chaque sonde ci-dessous donne la **liste exacte des appe
 
 Ces quatre ajouts sont **la condition** de toutes les sondes qui suivent ; ils ne changent rien au
 rendu (le traceur ne fait que lire).
+
+> **Fait le 18/09/2026**, plus un cinquième : `clear-gctxlow`, les `0x360` octets qui **précèdent**
+> le bloc (`gctx+0x000…0x35f`), sans quoi les valeurs courantes (couleur, normale, couleur
+> secondaire, coordonnée de brouillard, coordonnées de texture) restent invisibles.
 
 ### 7.1 `xformprobe` — viewport, profondeur, faces, normalisation, plans de découpe
 
