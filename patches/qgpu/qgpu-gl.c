@@ -1182,64 +1182,83 @@ static bool gl_depth_readback(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t 
     return glGetError() == GL_NO_ERROR;
 }
 
-/* Tampon combiné (v6) : glTexSubImage2D exige le format de base de la texture,
- * donc on ne peut PAS écrire GL_DEPTH_COMPONENT seul dans un DEPTH24_STENCIL8.
- * On relit la composante qu'on ne change pas, on empaquette les deux en
- * GL_UNSIGNED_INT_24_8 (profondeur en poids fort, stencil en poids faible) et
- * on écrit le bloc. Le FBO est déjà lié et tous les tests coupés par
- * gl_target(…, NULL) : le glReadPixels lit bien la surface visée. */
+/* Tampon combiné (v6) : on n'écrit QUE la composante demandée, et on ne
+ * relit JAMAIS l'autre pour la remettre.
+ *
+ * POURQUOI (vu en vrai, sur cet hôte, avec tests/qgpu_core_test.c) : la
+ * version précédente passait par glTexSubImage2D, qui exige le format de base
+ * de la texture — donc GL_DEPTH_STENCIL / GL_UNSIGNED_INT_24_8 pour un
+ * DEPTH24_STENCIL8. Elle relisait la composante à préserver, empaquetait les
+ * deux sur 24+8 bits et réécrivait le bloc. Deux dégâts bien réels, tous deux
+ * reproduits sur une surface 128×160 :
+ *
+ *   1. DÉBORDEMENT À 1,0 — le cas grave, et celui que l'invité voyait. Le
+ *      calcul « (uint32_t)(d * 16777215.0f + 0.5f) » se fait en binary32 : au
+ *      delà de 2^23 le pas vaut 1, donc 16777215.0f + 0.5f s'arrondit à
+ *      16777216.0f, d24 vaut 0x1000000 et « d24 << 8 » déborde des 32 bits à
+ *      ZÉRO. La profondeur 1,0 — celle que TOUT effacement pose sur le fond —
+ *      devenait 0,0, c'est-à-dire un mur collé à l'œil : après un simple
+ *      STENCIL_UPLOAD, plus aucune géométrie ne passait le test LESS.
+ *   2. DÉRIVE À CHAQUE ALLER-RETOUR pour les autres valeurs. Sur Apple
+ *      Silicon, GL_DEPTH24_STENCIL8 est émulé par un depth32float_stencil8
+ *      (le GPU n'a pas de profondeur 24 bits entière) : le tampon garde donc
+ *      un flottant 32 bits, et le passage par 24 bits entiers PERD de
+ *      l'information. Mesuré ici : le pilote rend floor(d·(2^24−1)) pour la
+ *      relecture 24_8, si bien qu'une profondeur relue puis réécrite se
+ *      déplaçait d'un cran à chaque tour (0,5 → 0,50000006 → 0,500000119…),
+ *      toujours vers le LOIN. Un LEQUAL sur une surface redessinée à la même
+ *      profondeur finit par basculer.
+ *
+ * La seule façon sûre est donc de ne pas faire de lecture-modification-
+ * écriture du tout. glDrawPixels le permet : GL_STENCIL_INDEX n'écrit que le
+ * stencil (les fragments court-circuitent le pipeline, seuls comptent les
+ * ciseaux et le masque d'écriture de stencil), et GL_DEPTH_COMPONENT en
+ * GL_FLOAT laisse le pilote faire lui-même la conversion, exactement comme
+ * pour le rastériseur et comme pour une surface à profondeur seule — donc
+ * l'aller-retour redevient idempotent bit à bit. Il faut seulement fermer ce
+ * qu'on ne veut pas toucher : le masque de couleur dans les deux cas, le
+ * masque de stencil quand on pose la profondeur, le masque de profondeur
+ * quand on pose le stencil. Et, pour la profondeur, RALLUMER le test en
+ * GL_ALWAYS : sans test de profondeur, OpenGL n'écrit pas le tampon.
+ *
+ * gl_target(…, NULL) a déjà lié le FBO, posé le viewport et glDepthRange(0,1),
+ * coupé tous les tests et ouvert tous les masques ; glWindowPos2i pose la
+ * position de rastérisation en coordonnées de fenêtre, sans passer par les
+ * matrices ni risquer d'être écartée par le test de validité. */
 static bool gl_packed_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
                              uint32_t w, uint32_t h,
                              const float *depth, const uint8_t *sten)
 {
-    GlSurface *gs = s->priv;
-    size_t n = (size_t)w * h, i;
-    uint32_t *words = malloc(n * sizeof(uint32_t));
-    float *dtmp = NULL;
-    uint8_t *stmp = NULL;
-    bool ok = false;
-    (void)c;
-
-    if (!words) {
-        return false;
-    }
-    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
-    if (!depth) {
-        dtmp = malloc(n * sizeof(float));
-        if (!dtmp) {
-            goto out;
-        }
-        glPixelStorei(GL_PACK_ALIGNMENT, 4);
-        glReadPixels(x, y, w, h, GL_DEPTH_COMPONENT, GL_FLOAT, dtmp);
-        depth = dtmp;
-    }
-    if (!sten) {
-        stmp = malloc(n);
-        if (!stmp) {
-            goto out;
-        }
-        glPixelStorei(GL_PACK_ALIGNMENT, 1);
-        glReadPixels(x, y, w, h, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, stmp);
-        sten = stmp;
-    }
-    for (i = 0; i < n; i++) {
-        float d = depth[i];
-        uint32_t d24;
-        d = !(d > 0.0f) ? 0.0f : d > 1.0f ? 1.0f : d;
-        d24 = (uint32_t)(d * 16777215.0f + 0.5f);
-        words[i] = (d24 << 8) | sten[i];
-    }
-    glBindTexture(GL_TEXTURE_2D, gs->depth);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    (void)c; (void)s;
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h,
-                    GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, words);
-    ok = glGetError() == GL_NO_ERROR;
-out:
-    free(words);
-    free(dtmp);
-    free(stmp);
-    return ok;
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+    /* aucun transfert de pixels ne doit s'interposer : ni échelle et biais sur
+       la profondeur, ni décalage et décalage d'index sur le stencil */
+    glPixelTransferf(GL_DEPTH_SCALE, 1.0f);
+    glPixelTransferf(GL_DEPTH_BIAS, 0.0f);
+    glPixelTransferi(GL_INDEX_SHIFT, 0);
+    glPixelTransferi(GL_INDEX_OFFSET, 0);
+    glPixelZoom(1.0f, 1.0f);
+    glWindowPos2i((GLint)x, (GLint)y);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    if (depth) {
+        glStencilMask(0);
+        glDepthMask(GL_TRUE);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_ALWAYS);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glDrawPixels((GLsizei)w, (GLsizei)h, GL_DEPTH_COMPONENT, GL_FLOAT, depth);
+        glDisable(GL_DEPTH_TEST);
+        glStencilMask(0xFF);
+    } else {
+        glDepthMask(GL_FALSE);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glDrawPixels((GLsizei)w, (GLsizei)h, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, sten);
+        glDepthMask(GL_TRUE);
+    }
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    return glGetError() == GL_NO_ERROR;
 }
 
 static bool gl_depth_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,

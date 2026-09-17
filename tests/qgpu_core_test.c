@@ -2817,6 +2817,264 @@ static uint32_t build_scene(uint8_t *shmem)
     return e.off - e.start;
 }
 
+/* ══════ v6/v8 : aller-retour profondeur/stencil, exigé BIT À BIT ══════
+ *
+ * Le bogue signalé depuis l'invité : sur une surface COMBINÉE
+ * profondeur+stencil, QGPU_OP_STENCIL_UPLOAD abîme la profondeur déjà posée,
+ * au point qu'une géométrie PLUS PROCHE se fait éliminer par un test LESS.
+ * Les deux tests croisés de la v6 ne le voient pas : ils comparent une
+ * profondeur à 0,01 près, et sur une valeur du milieu (0,1) — or le dégât est
+ * soit d'un bit de poids faible d'un tampon 24 bits (6e-8), soit total mais
+ * réservé à la valeur 1,0 (le fond, celui qu'un CLEAR pose partout).
+ *
+ * On exige donc ici : l'égalité BIT À BIT des relectures de part et d'autre
+ * d'un téléversement, l'IDEMPOTENCE de l'aller-retour, et l'ÉGALITÉ des
+ * valeurs relues entre une surface combinée et une surface à profondeur seule
+ * (même tampon 24 bits : les deux doivent rendre exactement la même chose).
+ * Puis on rejoue le flux réel de l'invité à quatre profondeurs voisines.
+ * Surface 128×160 : ni carrée, ni de la taille des autres tests, pour
+ * attraper au passage une erreur de pas ou de sens. */
+#define ZW      128u
+#define ZH      160u
+#define ZSTR    (ZW * 4)
+#define ZD0_OFF 0x40000u
+#define ZD1_OFF 0x58000u
+#define ZS0_OFF 0x70000u
+#define ZS1_OFF 0x88000u
+#define ZS2_OFF 0xA0000u
+#define ZC_OFF  0xB8000u
+
+static void zxfer(Emit *e, uint32_t op, uint32_t surf, uint32_t off)
+{
+    emit(e, QGPU_CMD_HDR(op, QGPU_LEN_SURF_XFER));
+    emit(e, surf); emit(e, off); emit(e, ZSTR); emit(e, 0); emit(e, 0);
+    emit(e, ZW); emit(e, ZH);
+}
+
+static uint32_t zld(const uint8_t *shmem, uint32_t off, uint32_t x, uint32_t y)
+{
+    return qgpu_ld32(shmem + off + y * ZSTR + x * 4);
+}
+
+/* Premier pixel où deux blocs relus diffèrent, ou -1 s'ils sont identiques. */
+static long zdiff(const uint8_t *shmem, uint32_t a, uint32_t b)
+{
+    uint32_t x, y;
+    for (y = 0; y < ZH; y++) {
+        for (x = 0; x < ZW; x++) {
+            if (zld(shmem, a, x, y) != zld(shmem, b, x, y)) {
+                return (long)(y * ZW + x);
+            }
+        }
+    }
+    return -1;
+}
+
+static void zshow(const uint8_t *shmem, uint32_t a, uint32_t b, long k)
+{
+    if (k >= 0) {
+        float u = qgpu_u2f(qgpu_ld32(shmem + a + (size_t)k * 4));
+        float v = qgpu_u2f(qgpu_ld32(shmem + b + (size_t)k * 4));
+        printf("       pixel %ld (%lu,%lu) : %.9g → %.9g (écart %g)\n",
+               k, (unsigned long)(k % ZW), (unsigned long)(k / ZW),
+               (double)u, (double)v, (double)(v - u));
+    }
+}
+
+/* Rectangle plein (deux triangles) à la profondeur z. */
+static void zrect(Emit *v, float x0, float y0, float x1, float y1,
+                  float z, float r, float g, float b)
+{
+    vertexz(v, x0, y0, z, r, g, b, 1);
+    vertexz(v, x1, y0, z, r, g, b, 1);
+    vertexz(v, x1, y1, z, r, g, b, 1);
+    vertexz(v, x0, y0, z, r, g, b, 1);
+    vertexz(v, x1, y1, z, r, g, b, 1);
+    vertexz(v, x0, y1, z, r, g, b, 1);
+}
+
+/* Points d'observation : trois dans la moitié gauche (là où la géométrie de
+   base pose sa profondeur), deux dans la moitié droite (restée au fond, à
+   1,0 — la valeur que le bogue de débordement détruit). Aucun sur une arête
+   ni sur la diagonale qui sépare les deux triangles. */
+static const uint32_t zpx[5] = { 2, 10, 40, 125, 110 };
+static const uint32_t zpy[5] = { 3, 150, 120, 157, 10 };
+
+static uint32_t zcolor_all(const uint8_t *shmem, uint32_t want)
+{
+    uint32_t k;
+    for (k = 0; k < 5; k++) {
+        uint32_t p = zld(shmem, ZC_OFF, zpx[k], zpy[k]) & 0xFFFFFFu;
+        if (p != want) {
+            return p;
+        }
+    }
+    return want;
+}
+
+static void run_zs(QgpuCore *c, uint8_t *shmem)
+{
+    /* Profondeurs « réalistes » et voisines : au milieu, tout près de 1 et
+       tout près de 0. L'écart le plus fin (1e-4) reste très au-dessus du pas
+       d'un tampon 24 bits : seul un aller-retour cassé peut le rater. */
+    static const float zbase[4] = { 0.5f,    0.5f,  0.99f,   0.01f  };
+    static const float znear[4] = { 0.4999f, 0.49f, 0.9899f, 0.0099f };
+    static const float zedge[8] = { 0.0f, 1.0f, 0.5f, 0.4999f,
+                                    0.99f, 0.999999f, 1e-6f, 0.25f };
+    Emit e, v;
+    uint32_t st, i, x, y;
+    long bad;
+
+    e.base = shmem; v.base = shmem;
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 11); emit(&e, ZW); emit(&e, ZH);
+    emit(&e, QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH | QGPU_FMT_FLAG_STENCIL);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 12); emit(&e, ZW); emit(&e, ZH);
+    emit(&e, QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK,
+          "z/s : surfaces 128×160, combinée et profondeur seule (st %u)", st);
+
+    /* (1) Motif couvrant tout [0,1] plus les valeurs de bord (0, 1, 1−ε…),
+       téléversé sur les deux surfaces. La relecture doit être la MÊME des
+       deux côtés (même tampon 24 bits), et un second aller-retour ne doit
+       plus rien changer (idempotence). */
+    for (y = 0; y < ZH; y++) {
+        for (x = 0; x < ZW; x++) {
+            uint32_t k = y * ZW + x;
+            float d = k < 8 ? zedge[k] : (float)k / (float)(ZW * ZH - 1);
+            qgpu_st32(shmem + ZD0_OFF + y * ZSTR + x * 4, qgpu_f2u(d));
+        }
+    }
+    for (i = 0; i < 2; i++) {
+        uint32_t surf = i ? 12 : 11;
+        uint32_t r1 = i ? ZS2_OFF : ZD1_OFF;
+        e.off = e.start = CMD_OFF;
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, surf);
+        zxfer(&e, QGPU_OP_DEPTH_UPLOAD, surf, ZD0_OFF);
+        zxfer(&e, QGPU_OP_DEPTH_READBACK, surf, r1);        /* R1 */
+        zxfer(&e, QGPU_OP_DEPTH_UPLOAD, surf, r1);
+        zxfer(&e, QGPU_OP_DEPTH_READBACK, surf, ZS1_OFF);   /* R2 */
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        bad = zdiff(shmem, r1, ZS1_OFF);
+        CHECK(st == QGPU_ST_OK && bad < 0,
+              "aller-retour de profondeur idempotent (%s) : %s (st %u)",
+              i ? "profondeur seule" : "combinée",
+              bad < 0 ? "identique" : "DIVERGE", st);
+        zshow(shmem, r1, ZS1_OFF, bad);
+    }
+    bad = zdiff(shmem, ZD1_OFF, ZS2_OFF);
+    CHECK(bad < 0, "profondeur relue identique, surface combinée ou non : %s",
+          bad < 0 ? "identique" : "DIVERGE");
+    zshow(shmem, ZD1_OFF, ZS2_OFF, bad);
+
+    /* (2) STENCIL_UPLOAD ne doit RIEN changer à la profondeur, bit à bit, sur
+       tout le dégradé laissé par (1) sur la surface combinée. */
+    for (y = 0; y < ZH; y++) {
+        for (x = 0; x < ZW; x++) {
+            qgpu_st32(shmem + ZS0_OFF + y * ZSTR + x * 4, (y * 7u + x * 3u) & 0xFFu);
+        }
+    }
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 11);
+    zxfer(&e, QGPU_OP_DEPTH_READBACK, 11, ZD1_OFF);
+    zxfer(&e, QGPU_OP_STENCIL_UPLOAD, 11, ZS0_OFF);
+    zxfer(&e, QGPU_OP_DEPTH_READBACK, 11, ZS1_OFF);
+    zxfer(&e, QGPU_OP_STENCIL_READBACK, 11, ZS2_OFF);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    bad = zdiff(shmem, ZD1_OFF, ZS1_OFF);
+    CHECK(st == QGPU_ST_OK && bad < 0,
+          "STENCIL_UPLOAD laisse la profondeur intacte bit à bit : %s (st %u)",
+          bad < 0 ? "identique" : "DIVERGE", st);
+    zshow(shmem, ZD1_OFF, ZS1_OFF, bad);
+    bad = zdiff(shmem, ZS0_OFF, ZS2_OFF);
+    CHECK(st == QGPU_ST_OK && bad < 0,
+          "aller-retour de stencil exact sur 128×160 : %s (st %u)",
+          bad < 0 ? "identique" : "DIVERGE", st);
+
+    /* (3) réciproque : DEPTH_UPLOAD ne doit rien changer au stencil. */
+    e.off = e.start = CMD_OFF;
+    zxfer(&e, QGPU_OP_DEPTH_UPLOAD, 11, ZD1_OFF);
+    zxfer(&e, QGPU_OP_STENCIL_READBACK, 11, ZS2_OFF);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    bad = zdiff(shmem, ZS0_OFF, ZS2_OFF);
+    CHECK(st == QGPU_ST_OK && bad < 0,
+          "DEPTH_UPLOAD laisse le stencil intact bit à bit : %s (st %u)",
+          bad < 0 ? "identique" : "DIVERGE", st);
+
+    /* (4) Le flux exact rapporté par l'invité, à quatre profondeurs. La
+       profondeur est posée par un DRAW (pas par un CLEAR) sur la MOITIÉ
+       GAUCHE seulement : la moitié droite reste au fond (1,0), la valeur que
+       tout CLEAR pose et que le débordement de la conversion 24 bits
+       transforme en 0,0 — c'est-à-dire en un mur devant toute la scène.
+       Les deux tirs de contrôle n'écrivent pas la profondeur : LESS et LEQUAL
+       jugent donc la même valeur relue puis réécrite. */
+    for (i = 0; i < 4; i++) {
+        v.off = v.start = VTX_OFF;
+        zrect(&v, 0, 0, ZW / 2, ZH, zbase[i], 0, 0, 1);
+        e.off = e.start = CMD_OFF;
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 11);
+        state(&e, QGPU_SK_STENCIL_TEST, 0);
+        state(&e, QGPU_SK_STENCIL_WRITE_MASK, 0xFF);
+        state(&e, QGPU_SK_STENCIL_CLEAR, 0x3C);
+        state(&e, QGPU_SK_DEPTH_WRITE, 1);
+        clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH | QGPU_CLEAR_STENCIL,
+                  0xFF000000, 1.0f);
+        /* le test doit être ACTIF pour que la profondeur soit écrite : c'est
+           la règle d'OpenGL, et le backend logiciel la suit aussi. */
+        state(&e, QGPU_SK_DEPTH_TEST, 1);
+        state(&e, QGPU_SK_DEPTH_FUNC, 0x0207);          /* ALWAYS */
+        draw_cmd(&e, 6);
+        zxfer(&e, QGPU_OP_DEPTH_READBACK, 11, ZD0_OFF);
+        zxfer(&e, QGPU_OP_DEPTH_UPLOAD, 11, ZD0_OFF);
+        zxfer(&e, QGPU_OP_STENCIL_READBACK, 11, ZS0_OFF);
+        zxfer(&e, QGPU_OP_STENCIL_UPLOAD, 11, ZS0_OFF);
+        zxfer(&e, QGPU_OP_DEPTH_READBACK, 11, ZD1_OFF);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        bad = zdiff(shmem, ZD0_OFF, ZD1_OFF);
+        CHECK(st == QGPU_ST_OK && bad < 0,
+              "flux invité z=%g : STENCIL_UPLOAD préserve la profondeur : %s (st %u)",
+              (double)zbase[i], bad < 0 ? "identique" : "DIVERGE", st);
+        zshow(shmem, ZD0_OFF, ZD1_OFF, bad);
+
+        v.off = v.start = VTX_OFF;
+        zrect(&v, 0, 0, ZW, ZH, znear[i], 1, 0, 0);
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_DEPTH_WRITE, 0);
+        state(&e, QGPU_SK_DEPTH_FUNC, 0x0201);          /* LESS */
+        draw_cmd(&e, 6);
+        zxfer(&e, QGPU_OP_SURF_READBACK, 11, ZC_OFF);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_OK && zcolor_all(shmem, 0xFF0000u) == 0xFF0000u,
+              "flux invité z=%g : LESS accepte %g après l'aller-retour : %06x (st %u)",
+              (double)zbase[i], (double)znear[i], zcolor_all(shmem, 0xFF0000u), st);
+
+        v.off = v.start = VTX_OFF;
+        zrect(&v, 0, 0, ZW, ZH, zbase[i], 0, 1, 0);
+        e.off = e.start = CMD_OFF;
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+        state(&e, QGPU_SK_DEPTH_FUNC, 0x0203);          /* LEQUAL */
+        draw_cmd(&e, 6);
+        zxfer(&e, QGPU_OP_SURF_READBACK, 11, ZC_OFF);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_OK && zcolor_all(shmem, 0x00FF00u) == 0x00FF00u,
+              "flux invité z=%g : LEQUAL repasse à profondeur égale : %06x (st %u)",
+              (double)zbase[i], zcolor_all(shmem, 0x00FF00u), st);
+    }
+
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_DEPTH_WRITE, 1);
+    state(&e, QGPU_SK_DEPTH_TEST, 0);
+    state(&e, QGPU_SK_DEPTH_FUNC, 0x0201);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_DESTROY, QGPU_LEN_SURF)); emit(&e, 11);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_DESTROY, QGPU_LEN_SURF)); emit(&e, 12);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "z/s : surfaces rendues (st %u)", st);
+}
+
 static void run_backend(const char *name)
 {
     uint8_t *shmem = calloc(1, SHMEM_SIZE);
@@ -2904,6 +3162,7 @@ static void run_backend(const char *name)
     run_v6(&c, shmem);
     run_v7(&c, shmem);
     run_v8(&c, shmem);
+    run_zs(&c, shmem);
 
     qgpu_core_reset(&c);
     e.off = e.start = CMD_OFF;
