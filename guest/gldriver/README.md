@@ -33,9 +33,10 @@ Conception, rétro-ingénierie et mesures : `docs/gpu-3d-tiger.md`.
   mipmaps, modes de répétition, environnements MODULATE/REPLACE/DECAL/BLEND/ADD).
   Hors de ce domaine (liste complète : `docs/gpu-3d-tiger.md` §4.5), le plugin
   synchronise puis laisse faire le code d'Apple.
-- **Présentation directe.** Une application plein écran (premier plan, menus
-  cachés, drawable de la taille de l'écran) reçoit son image directement dans la
-  mémoire vidéo, sans passer par le WindowServer (`docs/gpu-3d-tiger.md` §4.4).
+- **Présentation directe.** Une application au premier plan reçoit son image
+  directement dans la mémoire vidéo, sans passer par le WindowServer : en plein
+  écran, et en fenêtre tant que rien ne recouvre la surface et que le curseur
+  n'y bouge pas (`docs/gpu-3d-tiger.md` §4.4).
 - **Identité.** Identifiant de plugin `0x7700` (renderer `0x00027700`), annoncé
   accéléré ; `GL_VENDOR = POMPPC`, `GL_RENDERER = POMPPC qgpu (OpenGL host GPU)`.
   Le bundle s'appelle `GLDriver-POMPPC` pour être chargé avant le GLDriver
@@ -63,7 +64,7 @@ GL_RESOURCES=$PWD/glres/ ./mon_application   # GLEngine lit ce dossier au lieu d
 | `POMPPC_GL_DISABLE=1` | aucune accélération : le plugin n'est qu'un mandataire |
 | `POMPPC_GL_STATS=1` | bilan sur stderr en fin de processus (triangles, soumissions, relectures…) |
 | `POMPPC_GL_STATS=/chemin` | bilan ajouté au fichier toutes les 5 s : images/s, relectures, replis logiciels, temps de soumission, et motifs de refus de l'accélération avec le premier cas |
-| `POMPPC_GL_DIRECT=0` | pas de présentation directe (voir ci-dessous) |
+| `POMPPC_GL_DIRECT=0` | pas de présentation directe (voir ci-dessous) ; `=f` : plein écran seulement ; `=c` : même avec un curseur en mouvement dans la surface |
 | `POMPPC_GLTRACE=dossier` | trace de chaque appel `gld*` et de chaque procédure, avec vidages binaires |
 | `POMPPC_GLTRACE_STATE=1` | en trace, vide l'état GL complet à chaque effacement |
 

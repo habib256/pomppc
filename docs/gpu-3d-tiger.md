@@ -74,7 +74,7 @@ Principes fixés une fois pour toutes :
 
 | Fichier | Rôle |
 |---|---|
-| `patches/qgpu/qgpu_proto.h` | **le contrat** v4 : registres, opcodes, clés d'état, tranches des clients |
+| `patches/qgpu/qgpu_proto.h` | **le contrat** v6 : registres, opcodes, clés d'état, tranches des clients |
 | `patches/qgpu/qgpu-core.[ch]` | analyse et validation du flux, contextes, surfaces, textures ; indépendant de QEMU |
 | `patches/qgpu/qgpu-soft.c` | backend logiciel de référence : pipeline OpenGL 1.x par fragment |
 | `patches/qgpu/qgpu-gl.c` | **backend OpenGL** : CGL (macOS) / EGL (Linux), FBO + profondeur par surface |
@@ -91,7 +91,7 @@ Principes fixés une fois pour toutes :
 
 ---
 
-## 3. Le protocole qgpu (v4)
+## 3. Le protocole qgpu (v6)
 
 Flux de mots big-endian ; en-tête `opcode << 16 | longueur en mots`. Détail : `qgpu_proto.h`.
 
@@ -212,8 +212,19 @@ reste alloué.
 la fenêtre puis attend que le WindowServer l'ait affichée. Quand l'application est au premier plan,
 menus cachés, avec un drawable de la taille de l'écran en 32 bits, le plugin écrit l'image hôte
 droit dans la mémoire vidéo (`CGDisplayBaseAddress`) et remplace l'échange par une procédure vide,
-comme le `gldSwapNoop` d'Apple. Les conditions sont réévaluées toutes les 30 images ; une fenêtre
-ordinaire garde le chemin normal. `POMPPC_GL_DIRECT=0` coupe ce mode.
+comme le `gldSwapNoop` d'Apple.
+
+**En fenêtre** (Marble Blast y passait un tiers de chaque image), la même écriture vise le
+rectangle de la surface à l'écran. La position vient de `CGSGetWindowBounds` et
+`CGSGetSurfaceBounds` (SPI de CoreGraphics), l'identifiant de surface de `CGSGetSurfaceList`
+(celui du drawable n'est pas toujours le bon). Garde-fous : application au premier plan ; aucune
+fenêtre au-dessus ne touche le rectangle (`CGSGetOnScreenWindowList`, en ignorant le voile plein
+écran du système et les tuiles 128x128 que le Dock gare en 0,0) ; curseur immobile s'il est dans
+la surface — le curseur de la VGA de QEMU est composé en logiciel dans la mémoire vidéo, écrire
+par-dessus l'efface jusqu'à son prochain mouvement. Un échange normal toutes les 90 images
+rafraîchit la mémoire de la fenêtre. Un `glFinish` juste avant l'échange ne relit plus l'image.
+Conditions réévaluées toutes les 10 images. `POMPPC_GL_DIRECT=0` coupe tout, `=f` limite au
+plein écran, `=c` présente même avec un curseur en mouvement.
 
 ### 4.6 Cas réel : Zenerchi (PlayFirst, 2007)
 

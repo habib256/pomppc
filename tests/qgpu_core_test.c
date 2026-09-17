@@ -577,6 +577,373 @@ static void run_v5(QgpuCore *c, uint8_t *shmem)
     CHECK(st == QGPU_ST_BAD_ARG, "DOT3 en alpha refusé : st %u", st);
 }
 
+/* ───────────────────────────── v6 : stencil ─────────────────────────────
+ *
+ * Sur une NOUVELLE surface couleur + profondeur + stencil (id 3). Comme
+ * ailleurs dans ce fichier, aucun point testé n'est sur une arête : les règles
+ * de remplissage diffèrent entre le rasteriseur logiciel et le GPU hôte.
+ * Points de référence : (8,8) dans le quart haut-gauche, (16,32) hors de ce
+ * quart mais dans le triangle plein, (56,56) dans le quart bas-droit. */
+static uint32_t sten(const uint8_t *shmem, uint32_t x, uint32_t y)
+{
+    return qgpu_ld32(shmem + RB_OFF + y * STRIDE + x * 4);
+}
+
+static void sten_xfer(Emit *e, uint32_t op, uint32_t surf)
+{
+    emit(e, QGPU_CMD_HDR(op, QGPU_LEN_SURF_XFER));
+    emit(e, surf); emit(e, RB_OFF); emit(e, STRIDE); emit(e, 0); emit(e, 0);
+    emit(e, W); emit(e, H);
+}
+
+static void sop(Emit *e, uint32_t fail, uint32_t zfail, uint32_t zpass)
+{
+    state(e, QGPU_SK_STENCIL_OP_FAIL, fail);
+    state(e, QGPU_SK_STENCIL_OP_ZFAIL, zfail);
+    state(e, QGPU_SK_STENCIL_OP_ZPASS, zpass);
+}
+
+/* Triangle rectangle de côté `side` au coin haut-gauche, puis au coin bas-droit. */
+static void tri_tl(Emit *v, float side, float z, float r, float g, float b)
+{
+    vertexz(v, 0, 0, z, r, g, b, 1);
+    vertexz(v, side, 0, z, r, g, b, 1);
+    vertexz(v, 0, side, z, r, g, b, 1);
+}
+
+static void tri_br(Emit *v, float side, float z, float r, float g, float b)
+{
+    vertexz(v, W, H, z, r, g, b, 1);
+    vertexz(v, W - side, H, z, r, g, b, 1);
+    vertexz(v, W, H - side, z, r, g, b, 1);
+}
+
+/* Le second triangle du tampon de sommets : 3 sommets de 8 mots. */
+#define VTX2 (VTX_OFF + 24 * 4)
+
+static void draw_second(Emit *e)
+{
+    emit(e, QGPU_CMD_HDR(QGPU_OP_DRAW_TRIANGLES, QGPU_LEN_DRAW));
+    emit(e, 3); emit(e, VTX2);
+}
+
+static void run_v6(QgpuCore *c, uint8_t *shmem)
+{
+    Emit e, v;
+    uint32_t st, i;
+
+    e.base = shmem; e.off = e.start = CMD_OFF;
+    v.base = shmem;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 3); emit(&e, W); emit(&e, H);
+    emit(&e, QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH | QGPU_FMT_FLAG_STENCIL);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "v6 : surface couleur + profondeur + stencil (st %u)", st);
+
+    /* (a) masquage classique : un quart marque le stencil à 1 (couleur fermée),
+       puis un triangle plein ne peint que là où le stencil vaut 1. */
+    v.off = v.start = VTX_OFF;
+    tri_tl(&v, 32, 0, 1, 1, 1);
+    v.off = v.start = VTX2;
+    tri_tl(&v, 64, 0, 1, 1, 1);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_DEPTH_TEST, 0);
+    state(&e, QGPU_SK_DEPTH_WRITE, 1);
+    state(&e, QGPU_SK_STENCIL_CLEAR, 0);
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH | QGPU_CLEAR_STENCIL, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_STENCIL_TEST, 1);
+    state(&e, QGPU_SK_STENCIL_FUNC, 0x0207);          /* ALWAYS */
+    state(&e, QGPU_SK_STENCIL_REF, 1);
+    sop(&e, QGPU_SOP_KEEP, QGPU_SOP_KEEP, QGPU_SOP_REPLACE);
+    state(&e, QGPU_SK_COLOR_MASK, 0x0);
+    draw_cmd(&e, 3);
+    state(&e, QGPU_SK_COLOR_MASK, 0xF);
+    state(&e, QGPU_SK_STENCIL_FUNC, 0x0202);          /* EQUAL */
+    sop(&e, QGPU_SOP_KEEP, QGPU_SOP_KEEP, QGPU_SOP_KEEP);
+    draw_second(&e);
+    readback_cmd(&e, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 8, 8) == 0xFFFFFF && px(shmem, 16, 32) == 0 &&
+          px(shmem, 50, 50) == 0,
+          "masquage EQUAL 1 : %06x (dedans) %06x (hors du masque) %06x (fond) (st %u)",
+          px(shmem, 8, 8), px(shmem, 16, 32), px(shmem, 50, 50), st);
+
+    /* (b) INCR deux fois (stencil = 2 dans le quart), puis LESS 1 et GREATER 1. */
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_STENCIL, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_STENCIL_FUNC, 0x0207);
+    sop(&e, QGPU_SOP_KEEP, QGPU_SOP_KEEP, QGPU_SOP_INCR);
+    state(&e, QGPU_SK_COLOR_MASK, 0x0);
+    draw_cmd(&e, 3);
+    draw_cmd(&e, 3);
+    state(&e, QGPU_SK_COLOR_MASK, 0xF);
+    sop(&e, QGPU_SOP_KEEP, QGPU_SOP_KEEP, QGPU_SOP_KEEP);
+    state(&e, QGPU_SK_STENCIL_FUNC, 0x0201);          /* LESS : 1 < 2 dedans */
+    draw_second(&e);
+    readback_cmd(&e, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 8, 8) == 0xFFFFFF && px(shmem, 16, 32) == 0,
+          "INCR ×2 puis LESS 1 : %06x %06x (st %u)",
+          px(shmem, 8, 8), px(shmem, 16, 32), st);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_STENCIL_FUNC, 0x0204);          /* GREATER : 1 > 0 hors du quart */
+    draw_second(&e);
+    readback_cmd(&e, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 8, 8) == 0 && px(shmem, 16, 32) == 0xFFFFFF,
+          "GREATER 1 : le complément : %06x %06x (st %u)",
+          px(shmem, 8, 8), px(shmem, 16, 32), st);
+
+    /* (b bis) saturation de INCR/DECR, bouclage des variantes _WRAP, INVERT.
+       Le triangle plein est toujours au second emplacement de sommets. */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_STENCIL_CLEAR, 0);
+    clear_cmd(&e, QGPU_CLEAR_STENCIL, 0, 1.0f);
+    state(&e, QGPU_SK_STENCIL_FUNC, 0x0207);
+    state(&e, QGPU_SK_COLOR_MASK, 0x0);
+    sop(&e, QGPU_SOP_KEEP, QGPU_SOP_KEEP, QGPU_SOP_DECR);
+    draw_second(&e);                                  /* 0 − 1 sature à 0 */
+    sop(&e, QGPU_SOP_KEEP, QGPU_SOP_KEEP, QGPU_SOP_DECR_WRAP);
+    draw_second(&e);                                  /* 0 − 1 boucle à 255 */
+    sten_xfer(&e, QGPU_OP_STENCIL_READBACK, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && sten(shmem, 8, 8) == 255 && sten(shmem, 16, 32) == 255,
+          "DECR sature puis DECR_WRAP boucle : %u %u (st %u)",
+          sten(shmem, 8, 8), sten(shmem, 16, 32), st);
+    e.off = e.start = CMD_OFF;
+    sop(&e, QGPU_SOP_KEEP, QGPU_SOP_KEEP, QGPU_SOP_INCR);
+    draw_second(&e);                                  /* 255 + 1 sature à 255 */
+    sop(&e, QGPU_SOP_KEEP, QGPU_SOP_KEEP, QGPU_SOP_INCR_WRAP);
+    draw_second(&e);                                  /* 255 + 1 boucle à 0 */
+    sop(&e, QGPU_SOP_KEEP, QGPU_SOP_KEEP, QGPU_SOP_INVERT);
+    draw_second(&e);                                  /* ~0 = 255 */
+    state(&e, QGPU_SK_COLOR_MASK, 0xF);
+    sten_xfer(&e, QGPU_OP_STENCIL_READBACK, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && sten(shmem, 8, 8) == 255 && sten(shmem, 16, 32) == 255,
+          "INCR sature, INCR_WRAP boucle, INVERT : %u %u (st %u)",
+          sten(shmem, 8, 8), sten(shmem, 16, 32), st);
+
+    /* (c) zfail contre zpass, profondeur active : le quart haut-gauche est
+       derrière le fond effacé (échec LESS → zfail = INCR), le quart bas-droit
+       devant (zpass = REPLACE par REF = 5). */
+    v.off = v.start = VTX_OFF;
+    tri_tl(&v, 32, 0.8f, 1, 0, 0);
+    tri_br(&v, 32, 0.2f, 0, 1, 0);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_STENCIL_CLEAR, 0);
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH | QGPU_CLEAR_STENCIL, 0xFF000000, 0.5f);
+    state(&e, QGPU_SK_DEPTH_TEST, 1);
+    state(&e, QGPU_SK_DEPTH_FUNC, 0x0201);            /* LESS */
+    state(&e, QGPU_SK_STENCIL_FUNC, 0x0207);
+    state(&e, QGPU_SK_STENCIL_REF, 5);
+    sop(&e, QGPU_SOP_KEEP, QGPU_SOP_INCR, QGPU_SOP_REPLACE);
+    state(&e, QGPU_SK_COLOR_MASK, 0x0);
+    draw_cmd(&e, 3);
+    draw_second(&e);
+    state(&e, QGPU_SK_COLOR_MASK, 0xF);
+    sten_xfer(&e, QGPU_OP_STENCIL_READBACK, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && sten(shmem, 8, 8) == 1 && sten(shmem, 56, 56) == 5 &&
+          sten(shmem, 16, 32) == 0,
+          "zfail = INCR, zpass = REPLACE : %u %u %u (st %u)",
+          sten(shmem, 8, 8), sten(shmem, 56, 56), sten(shmem, 16, 32), st);
+
+    /* (f) STENCIL_UPLOAD : 3 partout, relu tel quel, et le test le voit. */
+    for (i = 0; i < W * H; i++) {
+        qgpu_st32(shmem + RB_OFF + i * 4, 3);
+    }
+    e.off = e.start = CMD_OFF;
+    sten_xfer(&e, QGPU_OP_STENCIL_UPLOAD, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    /* deux soumissions : la zone de relecture est aussi celle de l'envoi, on la
+       salit entre les deux pour ne rien relire de rémanent. */
+    for (i = 0; i < W * H; i++) {
+        qgpu_st32(shmem + RB_OFF + i * 4, 0xDEADBEEF);
+    }
+    e.off = e.start = CMD_OFF;
+    sten_xfer(&e, QGPU_OP_STENCIL_READBACK, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && sten(shmem, 8, 8) == 3 && sten(shmem, 56, 56) == 3 &&
+          sten(shmem, 16, 32) == 3,
+          "STENCIL_UPLOAD puis relecture : %u %u %u (st %u)",
+          sten(shmem, 8, 8), sten(shmem, 56, 56), sten(shmem, 16, 32), st);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_DEPTH_TEST, 0);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_STENCIL_FUNC, 0x0202);          /* EQUAL 3 */
+    state(&e, QGPU_SK_STENCIL_REF, 3);
+    v.off = v.start = VTX2;
+    tri_tl(&v, 64, 0, 0, 1, 1);
+    draw_second(&e);
+    readback_cmd(&e, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 8, 8) == 0x00FFFF && px(shmem, 16, 32) == 0x00FFFF,
+          "le stencil envoyé pilote le test : %06x %06x (st %u)",
+          px(shmem, 8, 8), px(shmem, 16, 32), st);
+
+    /* (d) masque d'écriture : REPLACE de 0xFF à travers 0x0F ne pose que 0x0F. */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_STENCIL_CLEAR, 0);
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_STENCIL, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_STENCIL_WRITE_MASK, 0x0F);
+    state(&e, QGPU_SK_STENCIL_FUNC, 0x0207);
+    state(&e, QGPU_SK_STENCIL_REF, 0xFF);
+    sop(&e, QGPU_SOP_KEEP, QGPU_SOP_KEEP, QGPU_SOP_REPLACE);
+    state(&e, QGPU_SK_COLOR_MASK, 0x0);
+    draw_second(&e);
+    state(&e, QGPU_SK_COLOR_MASK, 0xF);
+    state(&e, QGPU_SK_STENCIL_WRITE_MASK, 0xFF);
+    sten_xfer(&e, QGPU_OP_STENCIL_READBACK, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && sten(shmem, 8, 8) == 0x0F && sten(shmem, 16, 32) == 0x0F &&
+          sten(shmem, 50, 50) == 0,
+          "masque d'écriture 0x0F : %02x %02x %02x (st %u)",
+          sten(shmem, 8, 8), sten(shmem, 16, 32), sten(shmem, 50, 50), st);
+
+    /* (d bis) masque de valeur : EQUAL 0xFF passe à travers 0x0F, pas à travers 0xFF. */
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    sop(&e, QGPU_SOP_KEEP, QGPU_SOP_KEEP, QGPU_SOP_KEEP);
+    state(&e, QGPU_SK_STENCIL_VALUE_MASK, 0x0F);
+    state(&e, QGPU_SK_STENCIL_FUNC, 0x0202);
+    draw_second(&e);
+    readback_cmd(&e, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 8, 8) == 0x00FFFF,
+          "masque de valeur 0x0F : EQUAL 0xFF passe : %06x (st %u)", px(shmem, 8, 8), st);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_STENCIL_VALUE_MASK, 0xFF);
+    draw_second(&e);
+    readback_cmd(&e, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 8, 8) == 0,
+          "masque de valeur 0xFF : EQUAL 0xFF échoue : %06x (st %u)", px(shmem, 8, 8), st);
+
+    /* (e) effacement à une valeur non nulle, limité par les ciseaux. */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_STENCIL_CLEAR, 0);
+    clear_cmd(&e, QGPU_CLEAR_STENCIL, 0, 1.0f);
+    state(&e, QGPU_SK_STENCIL_CLEAR, 0x42);
+    state(&e, QGPU_SK_SCISSOR, 1);
+    state(&e, QGPU_SK_SCISSOR_X, 0); state(&e, QGPU_SK_SCISSOR_Y, 0);
+    state(&e, QGPU_SK_SCISSOR_W, 8); state(&e, QGPU_SK_SCISSOR_H, 8);
+    clear_cmd(&e, QGPU_CLEAR_STENCIL, 0, 1.0f);
+    state(&e, QGPU_SK_SCISSOR, 0);
+    sten_xfer(&e, QGPU_OP_STENCIL_READBACK, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && sten(shmem, 2, 2) == 0x42 && sten(shmem, 20, 20) == 0,
+          "effacement du stencil à 0x42 sous ciseaux : %02x %02x (st %u)",
+          sten(shmem, 2, 2), sten(shmem, 20, 20), st);
+    /* et il respecte le masque d'écriture, comme glClear */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_STENCIL_WRITE_MASK, 0xF0);
+    state(&e, QGPU_SK_STENCIL_CLEAR, 0x0F);
+    clear_cmd(&e, QGPU_CLEAR_STENCIL, 0, 1.0f);
+    state(&e, QGPU_SK_STENCIL_WRITE_MASK, 0xFF);
+    sten_xfer(&e, QGPU_OP_STENCIL_READBACK, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && sten(shmem, 2, 2) == 0x02 && sten(shmem, 20, 20) == 0,
+          "effacement à travers le masque 0xF0 : %02x %02x (st %u)",
+          sten(shmem, 2, 2), sten(shmem, 20, 20), st);
+
+    /* La profondeur doit continuer à marcher sur un tampon combiné : c'est le
+       chemin que le backend GL a dû refaire (DEPTH24_STENCIL8). */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_STENCIL_TEST, 0);
+    state(&e, QGPU_SK_DEPTH_WRITE, 1);
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_DEPTH_TEST, 1);
+    v.off = v.start = VTX2;
+    tri_tl(&v, 64, 0.25f, 1, 0, 0);
+    draw_second(&e);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DEPTH_READBACK, QGPU_LEN_SURF_XFER));
+    emit(&e, 3); emit(&e, RB_OFF); emit(&e, STRIDE); emit(&e, 0); emit(&e, 0);
+    emit(&e, W); emit(&e, H);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    {
+        float d = qgpu_u2f(qgpu_ld32(shmem + RB_OFF + 8 * STRIDE + 8 * 4));
+        float bg = qgpu_u2f(qgpu_ld32(shmem + RB_OFF + 50 * STRIDE + 50 * 4));
+        CHECK(st == QGPU_ST_OK && d > 0.24f && d < 0.26f && bg > 0.999f,
+              "profondeur sur surface avec stencil : %g (triangle) %g (fond)", d, bg);
+    }
+    for (i = 0; i < W * H; i++) {
+        qgpu_st32(shmem + RB_OFF + i * 4, qgpu_f2u(0.1f));
+    }
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DEPTH_UPLOAD, QGPU_LEN_SURF_XFER));
+    emit(&e, 3); emit(&e, RB_OFF); emit(&e, STRIDE); emit(&e, 0); emit(&e, 0);
+    emit(&e, W); emit(&e, H);
+    v.off = v.start = VTX2;
+    tri_tl(&v, 64, 0.15f, 0, 1, 0);
+    draw_second(&e);
+    readback_cmd(&e, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 8, 8) == 0xFF0000,
+          "DEPTH_UPLOAD sur tampon combiné respecté : %06x (st %u)", px(shmem, 8, 8), st);
+    /* et il n'a pas écrasé le stencil (0x02 depuis l'effacement masqué) */
+    e.off = e.start = CMD_OFF;
+    sten_xfer(&e, QGPU_OP_STENCIL_READBACK, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && sten(shmem, 2, 2) == 0x02,
+          "DEPTH_UPLOAD préserve le stencil : %02x (st %u)", sten(shmem, 2, 2), st);
+    /* et réciproquement : STENCIL_UPLOAD ne doit pas toucher la profondeur
+       (0,1 partout depuis le DEPTH_UPLOAD ci-dessus). */
+    for (i = 0; i < W * H; i++) {
+        qgpu_st32(shmem + RB_OFF + i * 4, 0x55);
+    }
+    e.off = e.start = CMD_OFF;
+    sten_xfer(&e, QGPU_OP_STENCIL_UPLOAD, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DEPTH_READBACK, QGPU_LEN_SURF_XFER));
+    emit(&e, 3); emit(&e, RB_OFF); emit(&e, STRIDE); emit(&e, 0); emit(&e, 0);
+    emit(&e, W); emit(&e, H);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    {
+        float d = qgpu_u2f(qgpu_ld32(shmem + RB_OFF + 8 * STRIDE + 8 * 4));
+        CHECK(st == QGPU_ST_OK && d > 0.09f && d < 0.11f,
+              "STENCIL_UPLOAD préserve la profondeur : %g (st %u)", d, st);
+    }
+
+    /* (g) validations */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_STENCIL_FUNC, 0x1234);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "fonction de stencil invalide refusée : st %u", st);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_STENCIL_OP_ZPASS, 0x1234);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "opération de stencil invalide refusée : st %u", st);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_STENCIL_REF, 256);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "REF hors de 0..255 refusé : st %u", st);
+    e.off = e.start = CMD_OFF;
+    sten_xfer(&e, QGPU_OP_STENCIL_READBACK, 2);       /* surface 2 : profondeur seule */
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "relecture de stencil sans tampon refusée : st %u", st);
+    e.off = e.start = CMD_OFF;
+    sten_xfer(&e, QGPU_OP_STENCIL_UPLOAD, 1);         /* surface 1 : couleur seule */
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "envoi de stencil sans tampon refusé : st %u", st);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 4); emit(&e, W); emit(&e, H);
+    emit(&e, QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_STENCIL);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "stencil sans profondeur refusé : st %u", st);
+
+    /* état rendu au repos pour la suite */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_DEPTH_TEST, 0);
+    state(&e, QGPU_SK_STENCIL_TEST, 0);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+}
+
 /* Tests v2 : état GL par fragment, sur une surface avec profondeur (id 2). */
 static void run_v2(QgpuCore *c, uint8_t *shmem)
 {
@@ -825,6 +1192,7 @@ static void run_backend(const char *name)
     run_v3(&c, shmem);
     run_v4(&c, shmem);
     run_v5(&c, shmem);
+    run_v6(&c, shmem);
 
     qgpu_core_reset(&c);
     e.off = e.start = CMD_OFF;

@@ -41,9 +41,10 @@
 #define QGPU_IOPCI_PRIMARY_MATCH 0x0fb21234
 
 #define QGPU_MAGIC              0x71677031  /* 'qgp1' */
-#define QGPU_PROTO_VERSION      5   /* v2 : profondeur, état GL ; v3 : textures ;
+#define QGPU_PROTO_VERSION      6   /* v2 : profondeur, état GL ; v3 : textures ;
                                        v4 : brouillard, 2e unité, lignes, points ;
-                                       v5 : 4 unités, GL_COMBINE */
+                                       v5 : 4 unités, GL_COMBINE ;
+                                       v6 : stencil */
 
 /* ── BAR0 : fenêtre partagée (RAM) ───────────────────────────────────────── */
 #define QGPU_SHMEM_DEFAULT_MB   64
@@ -120,6 +121,8 @@
 #define QGPU_OP_SURF_UPLOAD     0x0014  /* [surf, off, stride, x, y, w, h]  BAR0 → hôte */
 #define QGPU_OP_DEPTH_READBACK  0x0015  /* v2, idem, valeurs de profondeur f32 BE dans [0,1] */
 #define QGPU_OP_DEPTH_UPLOAD    0x0016  /* v2, idem, BAR0 → hôte */
+#define QGPU_OP_STENCIL_READBACK 0x0017 /* v6, idem, valeurs de stencil, cf. ci-dessous */
+#define QGPU_OP_STENCIL_UPLOAD  0x0018  /* v6, idem, BAR0 → hôte */
 
 #define QGPU_OP_CLEAR           0x0020  /* [mask, color 0xxxRRGGBB, depth f32] */
 #define QGPU_OP_VIEWPORT        0x0021  /* [x, y, w, h]  (réservé : accepté, sans effet) */
@@ -156,11 +159,24 @@
 #define QGPU_FMT_XRGB8888       1   /* 32 bpp ARGB big-endian */
 #define QGPU_FMT_MASK           0xFF
 #define QGPU_FMT_FLAG_DEPTH     0x100  /* v2 : la surface a un tampon de profondeur */
+/* v6 : la surface a un tampon de stencil de 8 bits. IL EXIGE LA PROFONDEUR
+ * (QGPU_FMT_FLAG_STENCIL seul = QGPU_ST_BAD_ARG) : le stencil sans profondeur
+ * n'a aucun usage dans GLEngine, et l'imposer laisse l'hôte OpenGL n'allouer
+ * qu'UN tampon combiné GL_DEPTH24_STENCIL8 — le seul format de stencil garanti
+ * partout (EXT_packed_depth_stencil, GL 3.0), et le seul qui rende un FBO
+ * complet sur tous les pilotes testés. */
+#define QGPU_FMT_FLAG_STENCIL   0x200
 
 /* CLEAR : masque. Comme glClear, l'effacement respecte les ciseaux, le
  * masque de couleur et le masque de profondeur du contexte courant. */
 #define QGPU_CLEAR_COLOR        0x1
 #define QGPU_CLEAR_DEPTH        0x2   /* sans effet si la surface n'a pas de profondeur */
+/* v6 : efface le stencil à QGPU_SK_STENCIL_CLEAR, en respectant le masque
+ * d'écriture QGPU_SK_STENCIL_WRITE_MASK et les ciseaux, comme glClear. La
+ * valeur d'effacement est une CLÉ D'ÉTAT et non un mot de la commande : la
+ * longueur de CLEAR reste QGPU_LEN_CLEAR (4 mots), donc un hôte v6 accepte
+ * tels quels les flux v1–v5. */
+#define QGPU_CLEAR_STENCIL      0x4
 
 /* SET_STATE : clés. Les valeurs d'énumération sont celles d'OpenGL
  * (GL_LESS, GL_SRC_ALPHA, GL_FUNC_ADD…), l'invité les recopie telles quelles.
@@ -211,7 +227,31 @@
 #define QGPU_SK_TEX3_ENV_COLOR  42
 #define QGPU_SK_COMBINE0        43  /* v5, unités 0..3 : fonctions et échelles, QGPU_COMBINE() */
 #define QGPU_SK_COMBINE_SRC0    47  /* v5, unités 0..3 : sources et opérandes, QGPU_COMBINE_SRC_*() */
-#define QGPU_SK_COUNT           51
+/* v6 : stencil. Sans tampon de stencil sur la surface, le test est inopérant
+ * (le fragment passe) et rien n'est écrit, comme en OpenGL. REF, les deux
+ * masques et la valeur d'effacement sont bornés à 0..255 (stencil de 8 bits) ;
+ * la comparaison est (REF & VALUE_MASK) fonc (stencil & VALUE_MASK). */
+#define QGPU_SK_STENCIL_TEST    51  /* booléen ; initial 0 */
+#define QGPU_SK_STENCIL_FUNC    52  /* GL_NEVER..GL_ALWAYS ; initial GL_ALWAYS */
+#define QGPU_SK_STENCIL_REF     53  /* 0..255 ; initial 0 */
+#define QGPU_SK_STENCIL_VALUE_MASK 54  /* 0..255 ; initial 0xFF */
+#define QGPU_SK_STENCIL_WRITE_MASK 55  /* 0..255 ; initial 0xFF */
+#define QGPU_SK_STENCIL_OP_FAIL 56  /* QGPU_SOP_* ; initial GL_KEEP */
+#define QGPU_SK_STENCIL_OP_ZFAIL 57 /* idem ; test de stencil réussi, profondeur échouée */
+#define QGPU_SK_STENCIL_OP_ZPASS 58 /* idem ; les deux réussis, OU pas de test de
+                                       profondeur (le fragment « passe » la profondeur) */
+#define QGPU_SK_STENCIL_CLEAR   59  /* 0..255 ; valeur lue par QGPU_CLEAR_STENCIL */
+#define QGPU_SK_COUNT           60
+
+/* Opérations de stencil (valeurs OpenGL, recopiées telles quelles). */
+#define QGPU_SOP_ZERO           0x0000
+#define QGPU_SOP_INVERT         0x150A
+#define QGPU_SOP_KEEP           0x1E00
+#define QGPU_SOP_REPLACE        0x1E01  /* met REF (non masqué par VALUE_MASK) */
+#define QGPU_SOP_INCR           0x1E02  /* sature à 255 */
+#define QGPU_SOP_DECR           0x1E03  /* sature à 0 */
+#define QGPU_SOP_INCR_WRAP      0x8507  /* v6, GL 1.4 / EXT_stencil_wrap */
+#define QGPU_SOP_DECR_WRAP      0x8508
 
 /* Groupe de quatre clés de l'unité u (0..3) : +0 texturage, +1 texture,
  * +2 mode d'environnement, +3 couleur d'environnement. */
@@ -313,6 +353,15 @@
 /* DRAW_LINES / DRAW_POINTS (v4) : sommets de QGPU_VERTEX_WORDS mots, sans
  * texture. Lignes : largeur QGPU_SK_LINE_WIDTH, chaque paire est un segment.
  * Points : carrés de QGPU_SK_POINT_SIZE pixels centrés sur le sommet. */
+
+/* STENCIL_READBACK / STENCIL_UPLOAD (v6) : mêmes sept arguments et même
+ * longueur QGPU_LEN_SURF_XFER que DEPTH_*. Sur le fil, UN MOT DE 32 BITS
+ * BIG-ENDIAN PAR PIXEL, de valeur 0..255 (les 24 bits de poids fort sont nuls
+ * en relecture, ignorés en envoi). Un octet par pixel aurait été plus compact,
+ * mais ce choix garde le pas (stride) et les offsets multiples de 4 — donc les
+ * MÊMES contraintes que tous les autres transferts, et aucun cas particulier
+ * ni côté invité PowerPC ni dans la validation du cœur. Les deux commandes
+ * exigent QGPU_FMT_FLAG_STENCIL sur la surface (sinon QGPU_ST_BAD_ARG). */
 
 /* ── Interface du kext POMPPCGPU (IOUserClient) ──────────────────────────────
  *

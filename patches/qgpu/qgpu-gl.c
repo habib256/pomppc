@@ -73,6 +73,7 @@ typedef struct GlState {
 
 typedef struct GlSurface {
     GLuint fbo, tex, depth;        /* depth : texture DEPTH_COMPONENT, ou 0 */
+    bool   packed;                 /* v6 : `depth` est un DEPTH24_STENCIL8 combiné */
 } GlSurface;
 
 #ifndef GL_FRAMEBUFFER
@@ -85,6 +86,18 @@ typedef struct GlSurface {
 #endif
 #ifndef GL_DEPTH_COMPONENT24
 #define GL_DEPTH_COMPONENT24    0x81A6
+#endif
+#ifndef GL_STENCIL_ATTACHMENT
+#define GL_STENCIL_ATTACHMENT   0x8D20
+#endif
+#ifndef GL_DEPTH_STENCIL
+#define GL_DEPTH_STENCIL        0x84F9
+#endif
+#ifndef GL_UNSIGNED_INT_24_8
+#define GL_UNSIGNED_INT_24_8    0x84FA
+#endif
+#ifndef GL_DEPTH24_STENCIL8
+#define GL_DEPTH24_STENCIL8     0x88F0
 #endif
 #ifndef GL_FUNC_ADD
 #define GL_FUNC_ADD             0x8006
@@ -289,12 +302,21 @@ static bool gl_surf_create(QgpuCore *c, QgpuSurface *s)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, s->width, s->height, 0,
                  GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, NULL);
     if (s->has_depth) {
+        /* v6 : avec stencil, UN SEUL tampon combiné DEPTH24_STENCIL8 — c'est le
+           format universellement disponible, et le seul qui donne un FBO
+           complet partout. Sans stencil, on garde le DEPTH_COMPONENT24 de v2. */
+        gs->packed = s->has_stencil;
         glGenTextures(1, &gs->depth);
         glBindTexture(GL_TEXTURE_2D, gs->depth);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, s->width, s->height, 0,
-                     GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+        if (gs->packed) {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, s->width, s->height, 0,
+                         GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL);
+        } else {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, s->width, s->height, 0,
+                         GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+        }
     }
     g->GenFramebuffers(1, &gs->fbo);
     g->BindFramebuffer(GL_FRAMEBUFFER, gs->fbo);
@@ -303,6 +325,13 @@ static bool gl_surf_create(QgpuCore *c, QgpuSurface *s)
     if (gs->depth) {
         g->FramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                                 GL_TEXTURE_2D, gs->depth, 0);
+        if (gs->packed) {
+            /* Les deux points d'attache plutôt que DEPTH_STENCIL_ATTACHMENT :
+               c'est la forme qu'accepte AUSSI EXT_framebuffer_object, qui ne
+               connaît pas ce point d'attache unique. */
+            g->FramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT,
+                                    GL_TEXTURE_2D, gs->depth, 0);
+        }
     }
     if (g->CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         g->BindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -314,13 +343,17 @@ static bool gl_surf_create(QgpuCore *c, QgpuSurface *s)
         free(gs);
         return false;
     }
-    /* Contenu initial défini (couleur 0, profondeur 1), comme le backend logiciel. */
+    /* Contenu initial défini (couleur 0, profondeur 1, stencil 0), comme le
+       backend logiciel. */
     glDisable(GL_SCISSOR_TEST);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glDepthMask(GL_TRUE);
+    glStencilMask(0xFF);
     glClearColor(0, 0, 0, 0);
     glClearDepth(1.0);
-    glClear(GL_COLOR_BUFFER_BIT | (gs->depth ? GL_DEPTH_BUFFER_BIT : 0));
+    glClearStencil(0);
+    glClear(GL_COLOR_BUFFER_BIT | (gs->depth ? GL_DEPTH_BUFFER_BIT : 0) |
+            (gs->packed ? GL_STENCIL_BUFFER_BIT : 0));
     g->BindFramebuffer(GL_FRAMEBUFFER, 0);
     s->priv = gs;
     return true;
@@ -381,8 +414,10 @@ static bool gl_target(QgpuCore *c, QgpuSurface *s, const QgpuState *st)
         glDisable(GL_SCISSOR_TEST);
         glDisable(GL_BLEND);
         glDisable(GL_ALPHA_TEST);
+        glDisable(GL_STENCIL_TEST);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDepthMask(GL_TRUE);
+        glStencilMask(0xFF);
         return true;
     }
     if (st->v[QGPU_SK_DEPTH_TEST] && gs->depth) {
@@ -392,6 +427,18 @@ static bool gl_target(QgpuCore *c, QgpuSurface *s, const QgpuState *st)
         glDisable(GL_DEPTH_TEST);
     }
     glDepthMask(st->v[QGPU_SK_DEPTH_WRITE] ? GL_TRUE : GL_FALSE);
+    /* v6 : le masque d'écriture vaut aussi pour glClear, donc il est posé même
+       quand le test est coupé. */
+    if (st->v[QGPU_SK_STENCIL_TEST] && gs->packed) {
+        glEnable(GL_STENCIL_TEST);
+        glStencilFunc(st->v[QGPU_SK_STENCIL_FUNC], (GLint)st->v[QGPU_SK_STENCIL_REF],
+                      st->v[QGPU_SK_STENCIL_VALUE_MASK]);
+        glStencilOp(st->v[QGPU_SK_STENCIL_OP_FAIL], st->v[QGPU_SK_STENCIL_OP_ZFAIL],
+                    st->v[QGPU_SK_STENCIL_OP_ZPASS]);
+    } else {
+        glDisable(GL_STENCIL_TEST);
+    }
+    glStencilMask(st->v[QGPU_SK_STENCIL_WRITE_MASK]);
     glColorMask((st->v[QGPU_SK_COLOR_MASK] & 1) != 0, (st->v[QGPU_SK_COLOR_MASK] & 2) != 0,
                 (st->v[QGPU_SK_COLOR_MASK] & 4) != 0, (st->v[QGPU_SK_COLOR_MASK] & 8) != 0);
     if (st->v[QGPU_SK_BLEND]) {
@@ -458,6 +505,10 @@ static bool gl_clear(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
     if ((mask & QGPU_CLEAR_DEPTH) && gs->depth) {
         glClearDepth(depth);
         bits |= GL_DEPTH_BUFFER_BIT;
+    }
+    if ((mask & QGPU_CLEAR_STENCIL) && gs->packed) {
+        glClearStencil((GLint)st->v[QGPU_SK_STENCIL_CLEAR]);
+        bits |= GL_STENCIL_BUFFER_BIT;
     }
     if (bits) {
         glClear(bits);
@@ -660,6 +711,66 @@ static bool gl_depth_readback(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t 
     return glGetError() == GL_NO_ERROR;
 }
 
+/* Tampon combiné (v6) : glTexSubImage2D exige le format de base de la texture,
+ * donc on ne peut PAS écrire GL_DEPTH_COMPONENT seul dans un DEPTH24_STENCIL8.
+ * On relit la composante qu'on ne change pas, on empaquette les deux en
+ * GL_UNSIGNED_INT_24_8 (profondeur en poids fort, stencil en poids faible) et
+ * on écrit le bloc. Le FBO est déjà lié et tous les tests coupés par
+ * gl_target(…, NULL) : le glReadPixels lit bien la surface visée. */
+static bool gl_packed_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
+                             uint32_t w, uint32_t h,
+                             const float *depth, const uint8_t *sten)
+{
+    GlSurface *gs = s->priv;
+    size_t n = (size_t)w * h, i;
+    uint32_t *words = malloc(n * sizeof(uint32_t));
+    float *dtmp = NULL;
+    uint8_t *stmp = NULL;
+    bool ok = false;
+    (void)c;
+
+    if (!words) {
+        return false;
+    }
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    if (!depth) {
+        dtmp = malloc(n * sizeof(float));
+        if (!dtmp) {
+            goto out;
+        }
+        glPixelStorei(GL_PACK_ALIGNMENT, 4);
+        glReadPixels(x, y, w, h, GL_DEPTH_COMPONENT, GL_FLOAT, dtmp);
+        depth = dtmp;
+    }
+    if (!sten) {
+        stmp = malloc(n);
+        if (!stmp) {
+            goto out;
+        }
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(x, y, w, h, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, stmp);
+        sten = stmp;
+    }
+    for (i = 0; i < n; i++) {
+        float d = depth[i];
+        uint32_t d24;
+        d = !(d > 0.0f) ? 0.0f : d > 1.0f ? 1.0f : d;
+        d24 = (uint32_t)(d * 16777215.0f + 0.5f);
+        words[i] = (d24 << 8) | sten[i];
+    }
+    glBindTexture(GL_TEXTURE_2D, gs->depth);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h,
+                    GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, words);
+    ok = glGetError() == GL_NO_ERROR;
+out:
+    free(words);
+    free(dtmp);
+    free(stmp);
+    return ok;
+}
+
 static bool gl_depth_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
                             uint32_t w, uint32_t h, const float *src)
 {
@@ -667,10 +778,35 @@ static bool gl_depth_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
     if (!gl_target(c, s, NULL)) {
         return false;
     }
+    if (gs->packed) {
+        return gl_packed_upload(c, s, x, y, w, h, src, NULL);
+    }
     glBindTexture(GL_TEXTURE_2D, gs->depth);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, GL_DEPTH_COMPONENT, GL_FLOAT, src);
     return glGetError() == GL_NO_ERROR;
+}
+
+static bool gl_stencil_readback(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
+                                uint32_t w, uint32_t h, uint8_t *dst)
+{
+    if (!gl_target(c, s, NULL)) {
+        return false;
+    }
+    /* un octet par pixel, lignes jointives : alignement 1 */
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glReadPixels(x, y, w, h, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, dst);
+    return glGetError() == GL_NO_ERROR;
+}
+
+static bool gl_stencil_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
+                              uint32_t w, uint32_t h, const uint8_t *src)
+{
+    if (!gl_target(c, s, NULL)) {
+        return false;
+    }
+    return gl_packed_upload(c, s, x, y, w, h, NULL, src);
 }
 
 static bool gl_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
@@ -701,6 +837,8 @@ const QgpuBackend qgpu_backend_gl = {
     .upload         = gl_upload,
     .depth_readback = gl_depth_readback,
     .depth_upload   = gl_depth_upload,
+    .stencil_readback = gl_stencil_readback,
+    .stencil_upload = gl_stencil_upload,
     .tex_destroy    = gl_tex_destroy,
 };
 

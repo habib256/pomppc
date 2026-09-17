@@ -4,7 +4,8 @@
  * Rasteriseur simple (fonctions d'arête, interpolation barycentrique des
  * couleurs et de la profondeur, centre de pixel à +0,5) avec le pipeline par
  * fragment d'OpenGL 1.x, dans l'ordre de la spécification :
- *   ciseaux → test alpha → test de profondeur (+ écriture) → mélange → masque.
+ *   ciseaux → test alpha → test de stencil → test de profondeur (+ écriture)
+ *   → mélange → masque.
  * Il sert de vérité terrain aux tests (le backend GL doit donner les mêmes
  * pixels à l'intérieur des primitives) et de repli sans OpenGL hôte. Aucune
  * ambition de performance.
@@ -20,6 +21,7 @@
 typedef struct SoftSurface {
     uint32_t *px;                  /* width*height, 0xAARRGGBB */
     float    *depth;               /* width*height, ou NULL */
+    uint8_t  *stencil;             /* width*height, ou NULL (v6) */
 } SoftSurface;
 
 static bool soft_init(QgpuCore *c)
@@ -51,9 +53,14 @@ static bool soft_surf_create(QgpuCore *c, QgpuSurface *s)
             }
         }
     }
-    if (!ss->px || (s->has_depth && !ss->depth)) {
+    if (s->has_stencil) {
+        ss->stencil = calloc(n, 1);    /* stencil initial : 0, comme en OpenGL */
+    }
+    if (!ss->px || (s->has_depth && !ss->depth) ||
+        (s->has_stencil && !ss->stencil)) {
         free(ss->px);
         free(ss->depth);
+        free(ss->stencil);
         free(ss);
         return false;
     }
@@ -68,6 +75,7 @@ static void soft_surf_destroy(QgpuCore *c, QgpuSurface *s)
     if (ss) {
         free(ss->px);
         free(ss->depth);
+        free(ss->stencil);
         free(ss);
     }
     s->priv = NULL;
@@ -130,6 +138,44 @@ static inline bool compare(uint32_t func, float a, float b)
     }
 }
 
+/* Comparaison du test de stencil : (ref & masque) fonc (tampon & masque),
+   sur des entiers — `compare` ci-dessus travaille sur des flottants. */
+static inline bool compare_u(uint32_t func, uint32_t a, uint32_t b)
+{
+    switch (func) {
+    case 0x0200: return false;        /* NEVER */
+    case 0x0201: return a <  b;       /* LESS */
+    case 0x0202: return a == b;       /* EQUAL */
+    case 0x0203: return a <= b;       /* LEQUAL */
+    case 0x0204: return a >  b;       /* GREATER */
+    case 0x0205: return a != b;       /* NOTEQUAL */
+    case 0x0206: return a >= b;       /* GEQUAL */
+    default:     return true;         /* ALWAYS */
+    }
+}
+
+/* Nouvelle valeur d'un texel de stencil après l'opération `op`. INCR et DECR
+   saturent, leurs variantes _WRAP bouclent sur 8 bits. */
+static inline uint8_t stencil_op(uint32_t op, uint8_t sv, uint32_t ref)
+{
+    switch (op) {
+    case QGPU_SOP_ZERO:       return 0;
+    case QGPU_SOP_REPLACE:    return (uint8_t)ref;
+    case QGPU_SOP_INCR:       return sv < 255 ? (uint8_t)(sv + 1) : 255;
+    case QGPU_SOP_DECR:       return sv > 0 ? (uint8_t)(sv - 1) : 0;
+    case QGPU_SOP_INVERT:     return (uint8_t)~sv;
+    case QGPU_SOP_INCR_WRAP:  return (uint8_t)(sv + 1);
+    case QGPU_SOP_DECR_WRAP:  return (uint8_t)(sv - 1);
+    default:                  return sv;                 /* KEEP */
+    }
+}
+
+/* Écrit le stencil en respectant le masque d'écriture. */
+static inline void stencil_write(uint8_t *p, uint8_t nv, uint32_t wmask)
+{
+    *p = (uint8_t)((*p & ~wmask) | (nv & wmask));
+}
+
 /* Facteur de mélange pour un canal (ch 0..2 = RGB, 3 = A). */
 static inline float factor(uint32_t f, const float *s, const float *d, int ch)
 {
@@ -190,18 +236,25 @@ static bool soft_clear(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
     SoftSurface *ss = s->priv;
     int x0, y0, x1, y1, x, y;
     uint32_t cmask = st->v[QGPU_SK_COLOR_MASK];
+    uint32_t swmask = st->v[QGPU_SK_STENCIL_WRITE_MASK];
+    uint8_t sclear = (uint8_t)st->v[QGPU_SK_STENCIL_CLEAR];
     (void)c;
 
     clip_rect(s, st, &x0, &y0, &x1, &y1);
     for (y = y0; y < y1; y++) {
         uint32_t *row = ss->px + (size_t)y * s->width;
         float *drow = ss->depth ? ss->depth + (size_t)y * s->width : NULL;
+        uint8_t *srow = ss->stencil ? ss->stencil + (size_t)y * s->width : NULL;
         for (x = x0; x < x1; x++) {
             if (mask & QGPU_CLEAR_COLOR) {
                 row[x] = masked(row[x], argb, cmask);
             }
             if ((mask & QGPU_CLEAR_DEPTH) && drow && st->v[QGPU_SK_DEPTH_WRITE]) {
                 drow[x] = depth;
+            }
+            /* glClear : l'effacement du stencil passe par le masque d'écriture */
+            if ((mask & QGPU_CLEAR_STENCIL) && srow) {
+                stencil_write(&srow[x], sclear, swmask);
             }
         }
     }
@@ -480,6 +533,12 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *te
     bool dtest = st->v[QGPU_SK_DEPTH_TEST] && ss->depth;
     bool dwrite = dtest && st->v[QGPU_SK_DEPTH_WRITE];
     bool atest = st->v[QGPU_SK_ALPHA_TEST];
+    /* v6 : sans tampon de stencil, le test est inopérant, comme en OpenGL. */
+    bool stest = st->v[QGPU_SK_STENCIL_TEST] && ss->stencil;
+    uint32_t sfunc = st->v[QGPU_SK_STENCIL_FUNC];
+    uint32_t sref = st->v[QGPU_SK_STENCIL_REF];
+    uint32_t svmask = st->v[QGPU_SK_STENCIL_VALUE_MASK];
+    uint32_t swmask = st->v[QGPU_SK_STENCIL_WRITE_MASK];
     bool fog = st->v[QGPU_SK_FOG];
     uint32_t fc = st->v[QGPU_SK_FOG_COLOR];
     float fcr = ((fc >> 16) & 255) / 255.0f, fcg = ((fc >> 8) & 255) / 255.0f;
@@ -574,7 +633,26 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *te
             if (atest && !compare(st->v[QGPU_SK_ALPHA_FUNC], clamp01(a), aref)) {
                 continue;
             }
-            if (dtest) {
+            if (stest) {
+                /* Le test de stencil précède celui de profondeur, et c'est le
+                   RÉSULTAT de ce dernier qui choisit entre zfail et zpass.
+                   Sans tampon de profondeur ou test coupé, le fragment « passe »
+                   la profondeur : c'est zpass. */
+                uint8_t sv = ss->stencil[idx];
+                bool spass = compare_u(sfunc, sref & svmask, (uint32_t)sv & svmask);
+                bool zpass = spass && (!dtest ||
+                    compare(st->v[QGPU_SK_DEPTH_FUNC], z, ss->depth[idx]));
+                uint32_t sop = !spass ? st->v[QGPU_SK_STENCIL_OP_FAIL] :
+                               zpass ? st->v[QGPU_SK_STENCIL_OP_ZPASS] :
+                                       st->v[QGPU_SK_STENCIL_OP_ZFAIL];
+                stencil_write(&ss->stencil[idx], stencil_op(sop, sv, sref), swmask);
+                if (!spass || !zpass) {
+                    continue;
+                }
+                if (dwrite) {
+                    ss->depth[idx] = z;
+                }
+            } else if (dtest) {
                 if (!compare(st->v[QGPU_SK_DEPTH_FUNC], z, ss->depth[idx])) {
                     continue;
                 }
@@ -716,6 +794,34 @@ static bool soft_depth_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t 
     return true;
 }
 
+static bool soft_stencil_readback(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
+                                  uint32_t w, uint32_t h, uint8_t *dst)
+{
+    SoftSurface *ss = s->priv;
+    uint32_t row;
+    (void)c;
+
+    for (row = 0; row < h; row++) {
+        memcpy(dst + (size_t)row * w,
+               ss->stencil + (size_t)(y + row) * s->width + x, w);
+    }
+    return true;
+}
+
+static bool soft_stencil_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
+                                uint32_t w, uint32_t h, const uint8_t *src)
+{
+    SoftSurface *ss = s->priv;
+    uint32_t row;
+    (void)c;
+
+    for (row = 0; row < h; row++) {
+        memcpy(ss->stencil + (size_t)(y + row) * s->width + x,
+               src + (size_t)row * w, w);
+    }
+    return true;
+}
+
 const QgpuBackend qgpu_backend_soft = {
     .name           = "soft",
     .cap            = QGPU_CAP_SOFT,
@@ -729,5 +835,7 @@ const QgpuBackend qgpu_backend_soft = {
     .upload         = soft_upload,
     .depth_readback = soft_depth_readback,
     .depth_upload   = soft_depth_upload,
+    .stencil_readback = soft_stencil_readback,
+    .stencil_upload = soft_stencil_upload,
     .tex_destroy    = NULL,                /* les niveaux appartiennent au cœur */
 };
