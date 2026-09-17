@@ -104,7 +104,7 @@ s'étonner d'un écart :
 | --- | --- | --- |
 | `SMP=1` | 2 cœurs MTTCG (`SMP=1` pour revenir en mono) | 1 (SMP OS 9 buggé) |
 | `RAM_MB=1024` | 768 **si et seulement si** le son est réellement actif (le Screamer exige < 1 Go) | 512 |
-| réseau selon `NONET` | coupé sauf `NET=1` | coupé |
+| réseau selon `NONET` | actif si slirp (`NET=0` pour couper) | coupé |
 
 **Les lanceurs sondent le binaire, ils ne supposent rien.** Règle du dépôt : *un lanceur
 n'annonce jamais une capacité que le binaire n'a pas* (`scripts/caps.sh`). Elle vient d'un
@@ -153,6 +153,7 @@ scripts/profile-boot.sh              # perf record sur un boot complet
 SNAPSHOT=1 ./run_tiger.sh   # disque jetable (writes annulés → pas de fsck) : à utiliser en debug
 QFB=1 ./run_tiger.sh        # + écran paravirtuel QFB en second moniteur
 GPU=1 ./run_tiger.sh        # + GPU paravirtuel qgpu, et CD des sources du plugin GL
+NET=0 ./run_tiger.sh        # sans réseau (actif par défaut, avec le relais web)
 ./run_os9.sh                # Mac OS 9 : boote le disque installé, sinon le CD en live
 ./run_os9.sh install        # force le boot CD pour (ré)installer
 ./run_frontend.sh           # frontend ImGui (affichage QEMU embarqué via D-Bus)
@@ -179,6 +180,27 @@ QFB=1 ./run_tiger.sh               # Tiger + écran QFB en second moniteur
 
 Détails : `kext/POMPPCQFB/README.md` ; contexte et alternatives (dont pourquoi une
 RTX 4060 Ti ne peut pas être passée en direct) : `docs/gpu-tiger-4060ti.md`.
+
+## Internet sous Tiger
+
+`run_tiger.sh` active le réseau par défaut (NAT utilisateur de QEMU : Tiger reçoit
+`10.0.2.15` par DHCP, l'hôte est `10.0.2.2`, le DNS `10.0.2.3`). HTTP fonctionne tel quel,
+mais **HTTPS non** : Tiger n'a qu'OpenSSL 0.9.7 et des certificats de 2006, que les sites
+actuels refusent.
+
+D'où le relais `scripts/web-proxy.py`, lancé et arrêté avec QEMU : il n'écoute que sur
+`127.0.0.1:8080` (vu de Tiger : `10.0.2.2:8080`), va chercher les pages en HTTPS moderne
+avec les certificats de l'hôte et les rend en HTTP, liens réécrits. Dans Tiger, une fois :
+
+```sh
+sudo sh /Volumes/POMPPCSRC/guest/net/proxy.sh on    # CD présent avec GPU=1 ou GLISO=1
+```
+
+(ou Préférences Système → Réseau → Proxys → Proxy web (HTTP) : `10.0.2.2`, port `8080`),
+puis taper les adresses en `http://` dans Safari. Vérifié : Google, Apple, GitHub,
+Wikipédia s'affichent ; la mise en page des sites récents reste celle que Safari 2 sait
+rendre (préférer les versions légères, p. ex. `http://fr.m.wikipedia.org`,
+`http://lite.duckduckgo.com`). `WEBPROXY=0` ne lance pas le relais, `NET=0` coupe le réseau.
 
 ## GPU 3D paravirtuel qgpu (plugin OpenGL de Tiger → GPU de l'hôte)
 
