@@ -126,6 +126,7 @@ enum {
 #define APPLE_GENERIC_ID     0x0200
 
 #define GLD_U32(p, off)  (*(unsigned long *)((unsigned char *)(p) + (off)))
+#define GLD_U16(p, off)  (*(unsigned short *)((unsigned char *)(p) + (off)))
 #define GLD_U8(p, off)   (*((unsigned char *)(p) + (off)))
 #define GLD_F32(p, off)  (*(float *)((unsigned char *)(p) + (off)))
 
@@ -137,6 +138,11 @@ int  pomppc_tracing(void);
 void pomppc_log(const char *fmt, ...);
 unsigned long pomppc_dump(const char *tag, const void *p, unsigned long len);
 int  pomppc_load_real(void);
+int  pomppc_tcl(void);                  /* sonde T&L matérielle : POMPPC_GL_TCL=1 */
+void *pomppc_tcl_proc(int slot);        /* procédure traceuse à installer, ou 0 */
+void pomppc_tcl_check(void *drvctx, const char *quand);
+long pomppc_tcl_dispatch_ret(long r, const char *quand);
+void *pomppc_tcl_gld(int id);
 long pomppc_call_real(int idx, long a, long b, long c, long d, long e, long f, long g, long h);
 
 /* pomppc_accel.c */

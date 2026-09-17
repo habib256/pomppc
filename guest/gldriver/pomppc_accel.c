@@ -2216,7 +2216,12 @@ static void *install_for(int k)
         int i;
         for (i = 0; i < PROC_COUNT; i++) {
             tab[i] = 0;
-            if (G.state > 0 && accel_proc(i))
+            /* Sonde T&L (POMPPC_GL_TCL=1) : les quatre entrées « hautes » sont
+               prioritaires, et doivent être réinstallées à chaque
+               gldUpdateDispatch comme toutes les autres. */
+            if (pomppc_tcl_proc(i))
+                tab[i] = pomppc_tcl_proc(i);
+            else if (G.state > 0 && accel_proc(i))
                 tab[i] = accel_proc(i);
             else if (pomppc_tracing() || (G.state > 0 && proc_kind(i) != K_NONE))
                 tab[i] = proc_tramps[i];
