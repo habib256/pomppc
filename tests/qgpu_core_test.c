@@ -944,6 +944,1171 @@ static void run_v6(QgpuCore *c, uint8_t *shmem)
     st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
 }
 
+/* ═══════════════════════ v7 : géométrie brute ═══════════════════════════════
+ *
+ * Tout passe par DRAW_RAW : c'est l'hôte qui transforme, éclaire, découpe et
+ * aplatit. Deux règles de lecture :
+ *   - aucun point testé n'est sur une arête (les règles de remplissage
+ *     diffèrent entre le rasteriseur de référence et le GPU) ;
+ *   - la projection « pixels » mat_ortho_px est glOrtho(0, W, H, 0, 0, −1) :
+ *     un sommet (x, y, z) y donne le pixel (x, y) et la profondeur fenêtre z,
+ *     exactement comme le chemin DRAW_TRIANGLES. C'est elle qui rend les deux
+ *     chemins comparables, et c'est celle que le plugin invité utilisera.
+ */
+#define IDX_OFF 0xC000u
+
+static void mat_identity(float *m)
+{
+    memset(m, 0, 16 * sizeof(float));
+    m[0] = m[5] = m[10] = m[15] = 1.0f;
+}
+
+/* glOrtho, en ordre colonne. */
+static void mat_ortho(float *m, float l, float r, float b, float t, float n, float f)
+{
+    memset(m, 0, 16 * sizeof(float));
+    m[0] = 2.0f / (r - l);
+    m[5] = 2.0f / (t - b);
+    m[10] = -2.0f / (f - n);
+    m[12] = -(r + l) / (r - l);
+    m[13] = -(t + b) / (t - b);
+    m[14] = -(f + n) / (f - n);
+    m[15] = 1.0f;
+}
+
+static void mat_ortho_px(float *m)
+{
+    mat_ortho(m, 0.0f, (float)W, (float)H, 0.0f, 0.0f, -1.0f);
+}
+
+/* glFrustum, en ordre colonne. */
+static void mat_frustum(float *m, float l, float r, float b, float t, float n, float f)
+{
+    memset(m, 0, 16 * sizeof(float));
+    m[0] = 2.0f * n / (r - l);
+    m[5] = 2.0f * n / (t - b);
+    m[8] = (r + l) / (r - l);
+    m[9] = (t + b) / (t - b);
+    m[10] = -(f + n) / (f - n);
+    m[11] = -1.0f;
+    m[14] = -2.0f * f * n / (f - n);
+}
+
+static void set_matrix(Emit *e, uint32_t which, const float *m)
+{
+    int i;
+    emit(e, QGPU_CMD_HDR(QGPU_OP_SET_MATRIX, QGPU_LEN_SET_MATRIX));
+    emit(e, which);
+    for (i = 0; i < 16; i++) {
+        emitf(e, m[i]);
+    }
+}
+
+static void set_current(Emit *e, uint32_t what, float x, float y, float z, float w)
+{
+    emit(e, QGPU_CMD_HDR(QGPU_OP_SET_CURRENT, QGPU_LEN_SET_CURRENT));
+    emit(e, what); emitf(e, x); emitf(e, y); emitf(e, z); emitf(e, w);
+}
+
+static void set_light(Emit *e, uint32_t i, uint32_t on, const float *amb,
+                      const float *dif, const float *spec, const float *pos,
+                      const float *sdir, float sexp, float scut,
+                      float a0, float a1, float a2)
+{
+    int k;
+    emit(e, QGPU_CMD_HDR(QGPU_OP_SET_LIGHT, QGPU_LEN_SET_LIGHT));
+    emit(e, i); emit(e, on);
+    for (k = 0; k < 4; k++) { emitf(e, amb[k]); }
+    for (k = 0; k < 4; k++) { emitf(e, dif[k]); }
+    for (k = 0; k < 4; k++) { emitf(e, spec[k]); }
+    for (k = 0; k < 4; k++) { emitf(e, pos[k]); }
+    for (k = 0; k < 3; k++) { emitf(e, sdir[k]); }
+    emitf(e, sexp); emitf(e, scut);
+    emitf(e, a0); emitf(e, a1); emitf(e, a2);
+}
+
+static void set_material(Emit *e, uint32_t face, const float *amb, const float *dif,
+                         const float *spec, const float *emi, float shin)
+{
+    int k;
+    emit(e, QGPU_CMD_HDR(QGPU_OP_SET_MATERIAL, QGPU_LEN_SET_MATERIAL));
+    emit(e, face);
+    for (k = 0; k < 4; k++) { emitf(e, amb[k]); }
+    for (k = 0; k < 4; k++) { emitf(e, dif[k]); }
+    for (k = 0; k < 4; k++) { emitf(e, spec[k]); }
+    for (k = 0; k < 4; k++) { emitf(e, emi[k]); }
+    emitf(e, shin);
+}
+
+static void set_light_model(Emit *e, float r, float g, float b, float a)
+{
+    emit(e, QGPU_CMD_HDR(QGPU_OP_SET_LIGHT_MODEL, QGPU_LEN_SET_LIGHT_MODEL));
+    emitf(e, r); emitf(e, g); emitf(e, b); emitf(e, a);
+}
+
+static void set_texgen(Emit *e, uint32_t unit, uint32_t coord, uint32_t on,
+                       uint32_t mode, const float *obj, const float *eye)
+{
+    int k;
+    emit(e, QGPU_CMD_HDR(QGPU_OP_SET_TEXGEN, QGPU_LEN_SET_TEXGEN));
+    emit(e, unit); emit(e, coord); emit(e, on); emit(e, mode);
+    for (k = 0; k < 4; k++) { emitf(e, obj[k]); }
+    for (k = 0; k < 4; k++) { emitf(e, eye[k]); }
+}
+
+static void set_clip_plane(Emit *e, uint32_t i, uint32_t on,
+                           float a, float b, float c, float d)
+{
+    emit(e, QGPU_CMD_HDR(QGPU_OP_SET_CLIP_PLANE, QGPU_LEN_SET_CLIP_PLANE));
+    emit(e, i); emit(e, on);
+    emitf(e, a); emitf(e, b); emitf(e, c); emitf(e, d);
+}
+
+/* [mode, n, voff, pas serré, format, ioff, itype, premier, nverts] */
+static void draw_raw(Emit *e, uint32_t mode, uint32_t count, uint32_t fmt,
+                     uint32_t nverts, uint32_t itype, uint32_t ioff)
+{
+    emit(e, QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW));
+    emit(e, mode); emit(e, count); emit(e, VTX_OFF); emit(e, 0); emit(e, fmt);
+    emit(e, ioff); emit(e, itype); emit(e, 0); emit(e, nverts);
+}
+
+/* Sommets bruts, format par format. */
+static void rv2(Emit *v, float x, float y) { emitf(v, x); emitf(v, y); }
+
+static void rv2c(Emit *v, float x, float y, float r, float g, float b, float a)
+{
+    emitf(v, x); emitf(v, y); emitf(v, r); emitf(v, g); emitf(v, b); emitf(v, a);
+}
+
+static void rv3c(Emit *v, float x, float y, float z,
+                 float r, float g, float b, float a)
+{
+    emitf(v, x); emitf(v, y); emitf(v, z);
+    emitf(v, r); emitf(v, g); emitf(v, b); emitf(v, a);
+}
+
+/* POS3 + normale : l'ordre du format est position, normale, couleur… */
+static void rv3n(Emit *v, float x, float y, float z, float nx, float ny, float nz)
+{
+    emitf(v, x); emitf(v, y); emitf(v, z);
+    emitf(v, nx); emitf(v, ny); emitf(v, nz);
+}
+
+static uint32_t snap[W * H];
+
+static void take_snap(const uint8_t *shmem)
+{
+    memcpy(snap, shmem + RB_OFF, sizeof(snap));
+}
+
+static int same_snap(const uint8_t *shmem)
+{
+    return memcmp(snap, shmem + RB_OFF, sizeof(snap)) == 0;
+}
+
+#define VF_P2   ((uint32_t)QGPU_VF_POS(2))
+#define VF_P3   ((uint32_t)QGPU_VF_POS(3))
+#define VF_P2C  (VF_P2 | QGPU_VF_COLOR)
+#define VF_P3C  (VF_P3 | QGPU_VF_COLOR)
+
+static void run_v7(QgpuCore *c, uint8_t *shmem)
+{
+    Emit e, v, t;
+    float m[16], mv[16];
+    uint32_t st, p, i;
+    static const float zero4[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    static const float black4[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    static const float white4[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    static const float red4[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
+    static const float green4[4] = { 0.0f, 1.0f, 0.0f, 1.0f };
+    static const float dir_z[4] = { 0.0f, 0.0f, 1.0f, 0.0f };
+    static const float nospot[3] = { 0.0f, 0.0f, -1.0f };
+
+    e.base = shmem; v.base = shmem; t.base = shmem;
+    mat_ortho_px(m);
+    mat_identity(mv);
+
+    /* Contexte neuf : état GL et état géométrique aux valeurs initiales. */
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 2);
+    set_matrix(&e, QGPU_MTX_PROJECTION, m);
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "v7 : contexte neuf et projection en pixels (st %u)", st);
+
+    /* (a) ÉQUIVALENCE DES CHEMINS ET SENS DE L'IMAGE. Le même triangle
+       asymétrique par DRAW_TRIANGLES (pixels) et par DRAW_RAW (ortho
+       équivalente) : mêmes pixels, donc même sens — (30,8) est dedans,
+       (8,30) dehors, ce qui ne serait pas vrai si l'image était retournée. */
+    v.off = v.start = VTX_OFF;
+    vertex(&v, 4, 4, 1, 0, 0); vertex(&v, 60, 4, 1, 0, 0); vertex(&v, 4, 20, 1, 0, 0);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF0000FF, 1.0f);
+    draw_cmd(&e, 3);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF0000 &&
+          px(shmem, 8, 10) == 0xFF0000 && px(shmem, 8, 30) == 0x0000FF &&
+          px(shmem, 50, 16) == 0x0000FF,
+          "(a) chemin pixels : %06x %06x %06x %06x (st %u)", px(shmem, 30, 8),
+          px(shmem, 8, 10), px(shmem, 8, 30), px(shmem, 50, 16), st);
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 4, 4, 1, 0, 0, 1); rv2c(&v, 60, 4, 1, 0, 0, 1); rv2c(&v, 4, 20, 1, 0, 0, 1);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF0000FF, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2C, 3, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF0000 &&
+          px(shmem, 8, 10) == 0xFF0000 && px(shmem, 8, 30) == 0x0000FF &&
+          px(shmem, 50, 16) == 0x0000FF,
+          "(a) chemin brut, MÊME image et MÊME sens : %06x %06x %06x %06x (st %u)",
+          px(shmem, 30, 8), px(shmem, 8, 10), px(shmem, 8, 30), px(shmem, 50, 16), st);
+
+    /* (b) MODÈLE-VUE ET PROJECTION. Translation. */
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 0, 0, 0, 1, 0, 1); rv2c(&v, 16, 0, 0, 1, 0, 1);
+    rv2c(&v, 16, 16, 0, 1, 0, 1); rv2c(&v, 0, 16, 0, 1, 0, 1);
+    mat_identity(mv); mv[12] = 20.0f; mv[13] = 10.0f;
+    e.off = e.start = CMD_OFF;
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_QUADS, 4, VF_P2C, 4, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 24, 14) == 0x00FF00 &&
+          px(shmem, 34, 24) == 0x00FF00 && px(shmem, 10, 10) == 0 &&
+          px(shmem, 40, 30) == 0,
+          "(b) translation (20,10) : %06x %06x | %06x %06x (st %u)",
+          px(shmem, 24, 14), px(shmem, 34, 24), px(shmem, 10, 10),
+          px(shmem, 40, 30), st);
+
+    /* Rotation de 90° autour de z, puis translation : le +x objet part vers le
+       +y écran. Le triangle (0,0)(24,0)(0,8) atterrit en (32,20)(32,44)(24,20). */
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 0, 0, 0, 1, 1, 1); rv2c(&v, 24, 0, 0, 1, 1, 1); rv2c(&v, 0, 8, 0, 1, 1, 1);
+    mat_identity(mv);
+    mv[0] = 0.0f; mv[1] = 1.0f; mv[4] = -1.0f; mv[5] = 0.0f;
+    mv[12] = 32.0f; mv[13] = 20.0f;
+    e.off = e.start = CMD_OFF;
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2C, 3, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 24) == 0x00FFFF &&
+          px(shmem, 40, 22) == 0,
+          "(b) rotation 90° : dedans %06x, hors (sans rotation il serait dedans) %06x",
+          px(shmem, 30, 24), px(shmem, 40, 22));
+
+    /* Perspective : glFrustum(±1, ±1, 1, 100). Un quad de côté 2 à z = −2 se
+       projette sur la moitié centrale de l'écran (16..48 en x comme en y). */
+    v.off = v.start = VTX_OFF;
+    rv3c(&v, -1, -1, -2, 1, 1, 0, 1); rv3c(&v, 1, -1, -2, 1, 1, 0, 1);
+    rv3c(&v, 1, 1, -2, 1, 1, 0, 1); rv3c(&v, -1, 1, -2, 1, 1, 0, 1);
+    mat_frustum(m, -1, 1, -1, 1, 1, 100);
+    mat_identity(mv);
+    e.off = e.start = CMD_OFF;
+    set_matrix(&e, QGPU_MTX_PROJECTION, m);
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_QUADS, 4, VF_P3C, 4, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 32, 32) == 0xFFFF00 &&
+          px(shmem, 20, 44) == 0xFFFF00 && px(shmem, 10, 32) == 0 &&
+          px(shmem, 32, 56) == 0,
+          "(b) perspective : %06x %06x | %06x %06x",
+          px(shmem, 32, 32), px(shmem, 20, 44), px(shmem, 10, 32), px(shmem, 32, 56));
+
+    /* (h bis) DÉCOUPE PAR LE PLAN PROCHE : un triangle dont un sommet est
+       DERRIÈRE l'œil (z = +2). Il doit devenir le trapèze (16,48) (48,48)
+       (56,56) (8,56), calculé à la main. */
+    v.off = v.start = VTX_OFF;
+    rv3c(&v, -1, -1, -2, 0, 1, 1, 1); rv3c(&v, 1, -1, -2, 0, 1, 1, 1);
+    rv3c(&v, 0, 0, 2, 0, 1, 1, 1);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P3C, 3, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 32, 52) == 0x00FFFF &&
+          px(shmem, 32, 40) == 0 && px(shmem, 32, 60) == 0,
+          "(h) découpe par le plan proche : %06x (dedans) %06x %06x (dehors) (st %u)",
+          px(shmem, 32, 52), px(shmem, 32, 40), px(shmem, 32, 60), st);
+
+    /* (c) LES DIX MODES, non indexés puis indexés en u16 et u32. */
+    mat_ortho_px(m);
+    mat_identity(mv);
+    e.off = e.start = CMD_OFF;
+    set_matrix(&e, QGPU_MTX_PROJECTION, m);
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    {
+        /* Tableaux d'indices identité, en u16 et en u32 : l'image doit être
+           la même que sans indices, au pixel près. */
+        static const struct {
+            uint32_t mode, n;
+            const char *name;
+        } modes[10] = {
+            { QGPU_PRIM_MODE_POINTS,         2, "POINTS" },
+            { QGPU_PRIM_MODE_LINES,          4, "LINES" },
+            { QGPU_PRIM_MODE_LINE_LOOP,      4, "LINE_LOOP" },
+            { QGPU_PRIM_MODE_LINE_STRIP,     4, "LINE_STRIP" },
+            { QGPU_PRIM_MODE_TRIANGLES,      3, "TRIANGLES" },
+            { QGPU_PRIM_MODE_TRIANGLE_STRIP, 4, "TRIANGLE_STRIP" },
+            { QGPU_PRIM_MODE_TRIANGLE_FAN,   4, "TRIANGLE_FAN" },
+            { QGPU_PRIM_MODE_QUADS,          4, "QUADS" },
+            { QGPU_PRIM_MODE_QUAD_STRIP,     6, "QUAD_STRIP" },
+            { QGPU_PRIM_MODE_POLYGON,        5, "POLYGON" }
+        };
+        uint32_t k;
+        int all_indexed_ok = 1;
+
+        for (k = 0; k < 10; k++) {
+            v.off = v.start = VTX_OFF;
+            switch (modes[k].mode) {
+            case QGPU_PRIM_MODE_POINTS:
+                rv2c(&v, 10, 10, 1, 0, 1, 1); rv2c(&v, 50, 50, 1, 0, 1, 1);
+                break;
+            case QGPU_PRIM_MODE_LINES:
+                rv2c(&v, 4, 10.5f, 0, 1, 0, 1); rv2c(&v, 60, 10.5f, 0, 1, 0, 1);
+                rv2c(&v, 4, 40.5f, 0, 1, 0, 1); rv2c(&v, 60, 40.5f, 0, 1, 0, 1);
+                break;
+            case QGPU_PRIM_MODE_LINE_LOOP:
+            case QGPU_PRIM_MODE_LINE_STRIP:
+                rv2c(&v, 4.5f, 20.5f, 0, 1, 0, 1); rv2c(&v, 40.5f, 20.5f, 0, 1, 0, 1);
+                rv2c(&v, 40.5f, 50.5f, 0, 1, 0, 1); rv2c(&v, 4.5f, 50.5f, 0, 1, 0, 1);
+                break;
+            case QGPU_PRIM_MODE_TRIANGLES:
+                rv2c(&v, 4, 4, 1, 1, 0, 1); rv2c(&v, 60, 4, 1, 1, 0, 1);
+                rv2c(&v, 4, 60, 1, 1, 0, 1);
+                break;
+            case QGPU_PRIM_MODE_TRIANGLE_STRIP:
+                rv2c(&v, 8, 8, 0, 1, 1, 1); rv2c(&v, 8, 56, 0, 1, 1, 1);
+                rv2c(&v, 56, 8, 0, 1, 1, 1); rv2c(&v, 56, 56, 0, 1, 1, 1);
+                break;
+            case QGPU_PRIM_MODE_TRIANGLE_FAN:
+                rv2c(&v, 32, 32, 1, 1, 1, 1); rv2c(&v, 8, 8, 1, 1, 1, 1);
+                rv2c(&v, 56, 8, 1, 1, 1, 1); rv2c(&v, 56, 56, 1, 1, 1, 1);
+                break;
+            case QGPU_PRIM_MODE_QUADS:
+                rv2c(&v, 8, 8, 1, 0, 0, 1); rv2c(&v, 56, 8, 1, 0, 0, 1);
+                rv2c(&v, 56, 56, 1, 0, 0, 1); rv2c(&v, 8, 56, 1, 0, 0, 1);
+                break;
+            case QGPU_PRIM_MODE_QUAD_STRIP:
+                rv2c(&v, 8, 8, 0, 0, 1, 1); rv2c(&v, 8, 56, 0, 0, 1, 1);
+                rv2c(&v, 32, 8, 0, 0, 1, 1); rv2c(&v, 32, 56, 0, 0, 1, 1);
+                rv2c(&v, 56, 8, 0, 0, 1, 1); rv2c(&v, 56, 56, 0, 0, 1, 1);
+                break;
+            default:                                     /* POLYGON : pentagone */
+                rv2c(&v, 32, 6, 1, 1, 1, 1); rv2c(&v, 58, 26, 1, 1, 1, 1);
+                rv2c(&v, 48, 58, 1, 1, 1, 1); rv2c(&v, 16, 58, 1, 1, 1, 1);
+                rv2c(&v, 6, 26, 1, 1, 1, 1);
+                break;
+            }
+            e.off = e.start = CMD_OFF;
+            clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+            state(&e, QGPU_SK_POINT_SIZE, qgpu_f2u(4.0f));
+            draw_raw(&e, modes[k].mode, modes[k].n, VF_P2C, modes[k].n,
+                     QGPU_IDX_NONE, 0);
+            state(&e, QGPU_SK_POINT_SIZE, qgpu_f2u(1.0f));
+            readback_cmd(&e, 2);
+            st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+            take_snap(shmem);
+            switch (modes[k].mode) {
+            case QGPU_PRIM_MODE_POINTS:
+                CHECK(st == QGPU_ST_OK && px(shmem, 9, 9) == 0xFF00FF &&
+                      px(shmem, 51, 51) == 0xFF00FF && px(shmem, 30, 30) == 0,
+                      "(c) POINTS : %06x %06x %06x", px(shmem, 9, 9),
+                      px(shmem, 51, 51), px(shmem, 30, 30));
+                break;
+            case QGPU_PRIM_MODE_LINES:
+                CHECK(st == QGPU_ST_OK && px(shmem, 30, 10) == 0x00FF00 &&
+                      px(shmem, 30, 40) == 0x00FF00 && px(shmem, 30, 25) == 0,
+                      "(c) LINES : %06x %06x %06x", px(shmem, 30, 10),
+                      px(shmem, 30, 40), px(shmem, 30, 25));
+                break;
+            case QGPU_PRIM_MODE_LINE_STRIP:
+                CHECK(st == QGPU_ST_OK && px(shmem, 20, 20) == 0x00FF00 &&
+                      px(shmem, 40, 35) == 0x00FF00 && px(shmem, 4, 35) == 0,
+                      "(c) LINE_STRIP (3 côtés) : %06x %06x | %06x",
+                      px(shmem, 20, 20), px(shmem, 40, 35), px(shmem, 4, 35));
+                break;
+            case QGPU_PRIM_MODE_LINE_LOOP:
+                CHECK(st == QGPU_ST_OK && px(shmem, 20, 20) == 0x00FF00 &&
+                      px(shmem, 4, 35) == 0x00FF00,
+                      "(c) LINE_LOOP (le 4e côté ferme) : %06x %06x",
+                      px(shmem, 20, 20), px(shmem, 4, 35));
+                break;
+            case QGPU_PRIM_MODE_TRIANGLES:
+                CHECK(st == QGPU_ST_OK && px(shmem, 8, 8) == 0xFFFF00 &&
+                      px(shmem, 50, 50) == 0,
+                      "(c) TRIANGLES : %06x %06x", px(shmem, 8, 8), px(shmem, 50, 50));
+                break;
+            case QGPU_PRIM_MODE_TRIANGLE_STRIP:
+                CHECK(st == QGPU_ST_OK && px(shmem, 16, 16) == 0x00FFFF &&
+                      px(shmem, 48, 48) == 0x00FFFF && px(shmem, 4, 4) == 0,
+                      "(c) TRIANGLE_STRIP : %06x %06x %06x", px(shmem, 16, 16),
+                      px(shmem, 48, 48), px(shmem, 4, 4));
+                break;
+            case QGPU_PRIM_MODE_TRIANGLE_FAN:
+                CHECK(st == QGPU_ST_OK && px(shmem, 32, 20) == 0xFFFFFF &&
+                      px(shmem, 48, 32) == 0xFFFFFF && px(shmem, 12, 50) == 0,
+                      "(c) TRIANGLE_FAN : %06x %06x %06x", px(shmem, 32, 20),
+                      px(shmem, 48, 32), px(shmem, 12, 50));
+                break;
+            case QGPU_PRIM_MODE_QUADS:
+                CHECK(st == QGPU_ST_OK && px(shmem, 32, 32) == 0xFF0000 &&
+                      px(shmem, 4, 4) == 0,
+                      "(c) QUADS : %06x %06x", px(shmem, 32, 32), px(shmem, 4, 4));
+                break;
+            case QGPU_PRIM_MODE_QUAD_STRIP:
+                CHECK(st == QGPU_ST_OK && px(shmem, 20, 32) == 0x0000FF &&
+                      px(shmem, 44, 32) == 0x0000FF && px(shmem, 4, 4) == 0,
+                      "(c) QUAD_STRIP : %06x %06x %06x", px(shmem, 20, 32),
+                      px(shmem, 44, 32), px(shmem, 4, 4));
+                break;
+            default:
+                CHECK(st == QGPU_ST_OK && px(shmem, 32, 32) == 0xFFFFFF &&
+                      px(shmem, 2, 2) == 0,
+                      "(c) POLYGON : %06x %06x", px(shmem, 32, 32), px(shmem, 2, 2));
+                break;
+            }
+            /* mêmes sommets, indices identité : image identique */
+            for (i = 0; i < modes[k].n; i++) {
+                qgpu_st32(shmem + IDX_OFF + i * 2, 0);
+                shmem[IDX_OFF + i * 2] = (uint8_t)(i >> 8);
+                shmem[IDX_OFF + i * 2 + 1] = (uint8_t)i;
+                qgpu_st32(shmem + IDX_OFF + 0x400 + i * 4, i);
+            }
+            e.off = e.start = CMD_OFF;
+            clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+            state(&e, QGPU_SK_POINT_SIZE, qgpu_f2u(4.0f));
+            draw_raw(&e, modes[k].mode, modes[k].n, VF_P2C, modes[k].n,
+                     QGPU_IDX_U16, IDX_OFF);
+            state(&e, QGPU_SK_POINT_SIZE, qgpu_f2u(1.0f));
+            readback_cmd(&e, 2);
+            st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+            if (st != QGPU_ST_OK || !same_snap(shmem)) {
+                all_indexed_ok = 0;
+                printf("       (u16 diffère pour %s, st %u)\n", modes[k].name, st);
+            }
+            e.off = e.start = CMD_OFF;
+            clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+            state(&e, QGPU_SK_POINT_SIZE, qgpu_f2u(4.0f));
+            draw_raw(&e, modes[k].mode, modes[k].n, VF_P2C, modes[k].n,
+                     QGPU_IDX_U32, IDX_OFF + 0x400);
+            state(&e, QGPU_SK_POINT_SIZE, qgpu_f2u(1.0f));
+            readback_cmd(&e, 2);
+            st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+            if (st != QGPU_ST_OK || !same_snap(shmem)) {
+                all_indexed_ok = 0;
+                printf("       (u32 diffère pour %s, st %u)\n", modes[k].name, st);
+            }
+        }
+        CHECK(all_indexed_ok, "(c) indices u16 et u32 : image identique dans les 10 modes");
+    }
+
+    /* (d) OMBRAGE PLAT : sommet provoquant. TRIANGLES → le 3e sommet ;
+       TRIANGLE_STRIP → le sommet i+2 de chaque triangle ; QUADS → le 4e. */
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 4, 4, 1, 0, 0, 1); rv2c(&v, 60, 4, 0, 1, 0, 1); rv2c(&v, 4, 60, 0, 0, 1, 1);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_SHADE_MODEL, 0x1D00);              /* GL_FLAT */
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2C, 3, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 8, 8) == 0x0000FF &&
+          px(shmem, 40, 8) == 0x0000FF,
+          "(d) TRIANGLES plat : couleur du 3e sommet : %06x %06x",
+          px(shmem, 8, 8), px(shmem, 40, 8));
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 8, 8, 1, 0, 0, 1); rv2c(&v, 8, 56, 0, 1, 0, 1);
+    rv2c(&v, 56, 8, 0, 0, 1, 1); rv2c(&v, 56, 56, 1, 1, 1, 1);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLE_STRIP, 4, VF_P2C, 4, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 16, 16) == 0x0000FF &&
+          px(shmem, 48, 48) == 0xFFFFFF,
+          "(d) TRIANGLE_STRIP plat : sommets 2 puis 3 : %06x %06x",
+          px(shmem, 16, 16), px(shmem, 48, 48));
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 8, 8, 1, 0, 0, 1); rv2c(&v, 56, 8, 0, 1, 0, 1);
+    rv2c(&v, 56, 56, 0, 0, 1, 1); rv2c(&v, 8, 56, 1, 1, 0, 1);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_QUADS, 4, VF_P2C, 4, QGPU_IDX_NONE, 0);
+    state(&e, QGPU_SK_SHADE_MODEL, 0x1D01);              /* GL_SMOOTH */
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 20, 20) == 0xFFFF00 &&
+          px(shmem, 44, 44) == 0xFFFF00,
+          "(d) QUADS plat : couleur du 4e sommet : %06x %06x",
+          px(shmem, 20, 20), px(shmem, 44, 44));
+
+    /* (e) ÉLIMINATION DES FACES. En coordonnées fenêtre GL (y vers le haut),
+       (4,4)(60,4)(4,60) en pixels tourne dans le sens horaire : c'est la face
+       ARRIÈRE quand l'avant est GL_CCW. L'ordre inverse est l'avant. */
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 4, 4, 1, 0, 0, 1); rv2c(&v, 60, 4, 1, 0, 0, 1); rv2c(&v, 4, 60, 1, 0, 0, 1);
+    rv2c(&v, 4, 4, 0, 1, 0, 1); rv2c(&v, 4, 60, 0, 1, 0, 1); rv2c(&v, 60, 4, 0, 1, 0, 1);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_CULL_FACE, 1);
+    state(&e, QGPU_SK_CULL_MODE, 0x0405);                /* GL_BACK */
+    state(&e, QGPU_SK_FRONT_FACE, 0x0901);               /* GL_CCW */
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 6, VF_P2C, 6, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 8, 8) == 0x00FF00,
+          "(e) CULL_BACK + CCW : seule la face avant (verte) reste : %06x",
+          px(shmem, 8, 8));
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_FRONT_FACE, 0x0900);               /* GL_CW */
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 6, VF_P2C, 6, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 8, 8) == 0xFF0000,
+          "(e) FRONT_FACE inversé : l'autre reste : %06x", px(shmem, 8, 8));
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_CULL_MODE, 0x0408);                /* GL_FRONT_AND_BACK */
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 6, VF_P2C, 6, QGPU_IDX_NONE, 0);
+    state(&e, QGPU_SK_CULL_FACE, 0);
+    state(&e, QGPU_SK_CULL_MODE, 0x0405);
+    state(&e, QGPU_SK_FRONT_FACE, 0x0901);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 8, 8) == 0,
+          "(e) FRONT_AND_BACK : plus rien : %06x", px(shmem, 8, 8));
+
+    /* (f) ÉCLAIRAGE. Ombrage PLAT partout : le triangle prend la couleur du
+       sommet provoquant, qu'on calcule à la main — plus d'interpolation, donc
+       plus d'écart de rastérisation entre les deux backends.
+       Triangle (60,4) (4,60) (0,0) : le provoquant est l'origine de l'œil,
+       et (20,20) est bien à l'intérieur. */
+    v.off = v.start = VTX_OFF;
+    rv3n(&v, 60, 4, 0, 0, 0.6f, 0.8f); rv3n(&v, 4, 60, 0, 0, 0.6f, 0.8f);
+    rv3n(&v, 0, 0, 0, 0, 0.6f, 0.8f);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_SHADE_MODEL, 0x1D00);
+    state(&e, QGPU_SK_LIGHTING, 1);
+    set_light_model(&e, 0, 0, 0, 1);
+    set_material(&e, 0x0408, black4, red4, black4, black4, 0.0f);
+    set_light(&e, 0, 1, black4, white4, black4, dir_z, nospot, 0.0f, 180.0f,
+              1.0f, 0.0f, 0.0f);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P3 | QGPU_VF_NORMAL, 3,
+             QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = px(shmem, 20, 20);
+    /* n·VP = (0, 0.6, 0.8)·(0, 0, 1) = 0.8 ; 0.8 × 255 = 204 */
+    CHECK(st == QGPU_ST_OK && near_rgb(p, 0xCC0000),
+          "(f) diffuse directionnelle sur face inclinée (204 attendu) : %06x (st %u)",
+          p, st);
+
+    /* Normalisation : modèle-vue diag(1,1,0.5) → l'inverse-transposée est
+       diag(1,1,2), la normale devient (0, 0.6, 1.6) (n·VP = 1.6, saturé à 255)
+       et, normalisée, 1.6/√2.92 = 0.9363 → 239. */
+    mat_identity(mv);
+    mv[10] = 0.5f;
+    e.off = e.start = CMD_OFF;
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P3 | QGPU_VF_NORMAL, 3,
+             QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = px(shmem, 20, 20);
+    CHECK(st == QGPU_ST_OK && near_rgb(p, 0xFF0000),
+          "(f) sans NORMALIZE, l'échelle sature (255) : %06x", p);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_NORMALIZE, 1);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P3 | QGPU_VF_NORMAL, 3,
+             QGPU_IDX_NONE, 0);
+    state(&e, QGPU_SK_NORMALIZE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = px(shmem, 20, 20);
+    CHECK(st == QGPU_ST_OK && near_rgb(p, 0xEF0000),
+          "(f) avec NORMALIZE (239 attendu) : %06x", p);
+    mat_identity(mv);
+    e.off = e.start = CMD_OFF;
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+
+    /* Lumière ponctuelle avec atténuation : à (0,0,10), sommet en (0,0,0),
+       d = 10, atténuation 1/(1 + 0.01×100) = 0.5 → 128. Normale (0,0,1). */
+    v.off = v.start = VTX_OFF;
+    rv3n(&v, 60, 4, 0, 0, 0, 1); rv3n(&v, 4, 60, 0, 0, 0, 1); rv3n(&v, 0, 0, 0, 0, 0, 1);
+    e.off = e.start = CMD_OFF;
+    set_material(&e, 0x0408, black4, white4, black4, black4, 0.0f);
+    {
+        float pos[4] = { 0.0f, 0.0f, 10.0f, 1.0f };
+        set_light(&e, 0, 1, black4, white4, black4, pos, nospot, 0.0f, 180.0f,
+                  1.0f, 0.0f, 0.01f);
+    }
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P3 | QGPU_VF_NORMAL, 3,
+             QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = px(shmem, 20, 20);
+    CHECK(st == QGPU_ST_OK && near_rgb(p, 0x808080),
+          "(f) ponctuelle, atténuation quadratique (128 attendu) : %06x (st %u)", p, st);
+
+    /* Spot : axe à 45° du sommet, coupure 60° (donc dedans), exposant 2 :
+       cos45^2 = 0.5 → 128. Puis coupure 30° : dehors → noir. */
+    e.off = e.start = CMD_OFF;
+    {
+        float pos[4] = { 0.0f, 0.0f, 10.0f, 1.0f };
+        float sd[3] = { 0.0f, -0.70710678f, -0.70710678f };
+        set_light(&e, 0, 1, black4, white4, black4, pos, sd, 2.0f, 60.0f,
+                  1.0f, 0.0f, 0.0f);
+    }
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P3 | QGPU_VF_NORMAL, 3,
+             QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = px(shmem, 20, 20);
+    CHECK(st == QGPU_ST_OK && near_rgb(p, 0x808080),
+          "(f) spot à 45°, exposant 2 (128 attendu) : %06x", p);
+    e.off = e.start = CMD_OFF;
+    {
+        float pos[4] = { 0.0f, 0.0f, 10.0f, 1.0f };
+        float sd[3] = { 0.0f, -0.70710678f, -0.70710678f };
+        set_light(&e, 0, 1, black4, white4, black4, pos, sd, 2.0f, 30.0f,
+                  1.0f, 0.0f, 0.0f);
+    }
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P3 | QGPU_VF_NORMAL, 3,
+             QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 20, 20) == 0,
+          "(f) spot hors du cône de 30° : noir : %06x", px(shmem, 20, 20));
+
+    /* Spéculaire, observateur à l'infini : n = (0, 0.6, 0.8), VP = h = (0,0,1),
+       n·h = 0.8, brillance 4 → 0.8⁴ = 0.4096 → 104. */
+    v.off = v.start = VTX_OFF;
+    rv3n(&v, 60, 4, 0, 0, 0.6f, 0.8f); rv3n(&v, 4, 60, 0, 0, 0.6f, 0.8f);
+    rv3n(&v, 0, 0, 0, 0, 0.6f, 0.8f);
+    e.off = e.start = CMD_OFF;
+    set_material(&e, 0x0408, black4, black4, white4, black4, 4.0f);
+    set_light(&e, 0, 1, black4, black4, white4, dir_z, nospot, 0.0f, 180.0f,
+              1.0f, 0.0f, 0.0f);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P3 | QGPU_VF_NORMAL, 3,
+             QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = px(shmem, 20, 20);
+    CHECK(st == QGPU_ST_OK && near_rgb(p, 0x686868),
+          "(f) spéculaire, brillance 4 (104 attendu) : %06x (st %u)", p, st);
+
+    /* Observateur LOCAL : sommet provoquant en (40,40,0), donc VPe =
+       −(40,40,0) normalisé ; h normalisé = (−0.5, −0.5, 0.7071), n = (0,0,1),
+       n·h = 0.7071, brillance 2 → 0.5 → 128. */
+    v.off = v.start = VTX_OFF;
+    rv3n(&v, 0, 0, 0, 0, 0, 1); rv3n(&v, 60, 0, 0, 0, 0, 1); rv3n(&v, 40, 40, 0, 0, 0, 1);
+    e.off = e.start = CMD_OFF;
+    set_material(&e, 0x0408, black4, black4, white4, black4, 2.0f);
+    state(&e, QGPU_SK_LOCAL_VIEWER, 1);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P3 | QGPU_VF_NORMAL, 3,
+             QGPU_IDX_NONE, 0);
+    state(&e, QGPU_SK_LOCAL_VIEWER, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = px(shmem, 30, 10);
+    CHECK(st == QGPU_ST_OK && near_rgb(p, 0x808080),
+          "(f) observateur local, brillance 2 (128 attendu) : %06x", p);
+
+    /* Color material : la couleur du sommet remplace la diffuse. */
+    v.off = v.start = VTX_OFF;
+    emitf(&v, 60); emitf(&v, 4); emitf(&v, 0); emitf(&v, 0); emitf(&v, 0); emitf(&v, 1);
+    emitf(&v, 0.5f); emitf(&v, 0); emitf(&v, 0); emitf(&v, 1);
+    emitf(&v, 4); emitf(&v, 60); emitf(&v, 0); emitf(&v, 0); emitf(&v, 0); emitf(&v, 1);
+    emitf(&v, 0.5f); emitf(&v, 0); emitf(&v, 0); emitf(&v, 1);
+    emitf(&v, 0); emitf(&v, 0); emitf(&v, 0); emitf(&v, 0); emitf(&v, 0); emitf(&v, 1);
+    emitf(&v, 0.5f); emitf(&v, 0); emitf(&v, 0); emitf(&v, 1);
+    e.off = e.start = CMD_OFF;
+    set_material(&e, 0x0408, black4, white4, black4, black4, 0.0f);
+    set_light(&e, 0, 1, black4, white4, black4, dir_z, nospot, 0.0f, 180.0f,
+              1.0f, 0.0f, 0.0f);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3,
+             VF_P3 | QGPU_VF_NORMAL | QGPU_VF_COLOR, 3, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && near_rgb(px(shmem, 20, 20), 0xFFFFFF),
+          "(f) sans COLOR_MATERIAL, la diffuse du matériau gagne : %06x",
+          px(shmem, 20, 20));
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_COLOR_MATERIAL, 1);
+    state(&e, QGPU_SK_COLOR_MAT_MODE, 0x1602);           /* AMBIENT_AND_DIFFUSE */
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3,
+             VF_P3 | QGPU_VF_NORMAL | QGPU_VF_COLOR, 3, QGPU_IDX_NONE, 0);
+    state(&e, QGPU_SK_COLOR_MATERIAL, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && near_rgb(px(shmem, 20, 20), 0x800000),
+          "(f) COLOR_MATERIAL : la couleur du sommet (128,0,0) : %06x",
+          px(shmem, 20, 20));
+
+    /* Deux faces : matériau avant rouge, arrière vert ; la normale du triangle
+       arrière est retournée pour qu'il s'éclaire aussi. */
+    v.off = v.start = VTX_OFF;
+    rv3n(&v, 4, 4, 0, 0, 0, 1); rv3n(&v, 4, 60, 0, 0, 0, 1); rv3n(&v, 60, 4, 0, 0, 0, 1);
+    rv3n(&v, 4, 4, 0, 0, 0, -1); rv3n(&v, 60, 4, 0, 0, 0, -1); rv3n(&v, 4, 60, 0, 0, 0, -1);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_TWO_SIDE, 1);
+    set_material(&e, 0x0404, black4, red4, black4, black4, 0.0f);
+    set_material(&e, 0x0405, black4, green4, black4, black4, 0.0f);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P3 | QGPU_VF_NORMAL, 6,
+             QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && near_rgb(px(shmem, 8, 8), 0xFF0000),
+          "(f) deux faces : la face avant est rouge : %06x", px(shmem, 8, 8));
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW));
+    emit(&e, QGPU_PRIM_MODE_TRIANGLES); emit(&e, 3); emit(&e, VTX_OFF);
+    emit(&e, 0); emit(&e, VF_P3 | QGPU_VF_NORMAL); emit(&e, 0);
+    emit(&e, QGPU_IDX_NONE); emit(&e, 3); emit(&e, 6);
+    state(&e, QGPU_SK_TWO_SIDE, 0);
+    state(&e, QGPU_SK_LIGHTING, 0);
+    state(&e, QGPU_SK_SHADE_MODEL, 0x1D01);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && near_rgb(px(shmem, 8, 8), 0x00FF00),
+          "(f) deux faces : la face arrière est verte : %06x", px(shmem, 8, 8));
+
+    /* (g) TEXGEN et matrice de texture, sur une texture 2×2 à couleurs franches. */
+    t.off = t.start = TEX_OFF;
+    emit(&t, 0xFFFF0000); emit(&t, 0xFF00FF00);       /* rouge, vert */
+    emit(&t, 0xFF0000FF); emit(&t, 0xFFFFFFFF);       /* bleu, blanc */
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX)); emit(&e, 33);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE, QGPU_LEN_TEX_IMAGE));
+    emit(&e, 33); emit(&e, 0); emit(&e, 2); emit(&e, 2); emit(&e, 0x1908);
+    emit(&e, TEX_OFF);
+    tparam(&e, 33, QGPU_TP_MIN_FILTER, 0x2600);
+    tparam(&e, 33, QGPU_TP_MAG_FILTER, 0x2600);
+    tparam(&e, 33, QGPU_TP_WRAP_S, 0x812F);
+    tparam(&e, 33, QGPU_TP_WRAP_T, 0x812F);
+    state(&e, QGPU_SK_TEXTURE, 1);
+    state(&e, QGPU_SK_TEX_BIND, 33);
+    state(&e, QGPU_SK_TEX_ENV_MODE, 0x1E01);          /* REPLACE */
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "(g) texture 2×2 à zones franches (st %u)", st);
+
+    v.off = v.start = VTX_OFF;
+    rv2(&v, 0, 0); rv2(&v, 0, 64); rv2(&v, 64, 0); rv2(&v, 64, 64);
+    e.off = e.start = CMD_OFF;
+    {
+        float ps[4] = { 1.0f / 64.0f, 0.0f, 0.0f, 0.0f };
+        float pt[4] = { 0.0f, 1.0f / 64.0f, 0.0f, 0.0f };
+        set_texgen(&e, 0, QGPU_TG_S, 1, QGPU_TG_OBJECT_LINEAR, ps, ps);
+        set_texgen(&e, 0, QGPU_TG_T, 1, QGPU_TG_OBJECT_LINEAR, pt, pt);
+    }
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLE_STRIP, 4, VF_P2, 4, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 10, 10) == 0xFF0000 &&
+          px(shmem, 50, 10) == 0x00FF00 && px(shmem, 10, 50) == 0x0000FF &&
+          px(shmem, 50, 50) == 0xFFFFFF,
+          "(g) OBJECT_LINEAR : %06x %06x %06x %06x (st %u)", px(shmem, 10, 10),
+          px(shmem, 50, 10), px(shmem, 10, 50), px(shmem, 50, 50), st);
+
+    /* Matrice de texture : translation de 0,5 en s → tout glisse d'une colonne. */
+    mat_identity(m);
+    m[12] = 0.5f;
+    e.off = e.start = CMD_OFF;
+    set_matrix(&e, QGPU_MTX_TEXTURE0, m);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLE_STRIP, 4, VF_P2, 4, QGPU_IDX_NONE, 0);
+    mat_identity(m);
+    set_matrix(&e, QGPU_MTX_TEXTURE0, m);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 10, 10) == 0x00FF00 &&
+          px(shmem, 10, 50) == 0xFFFFFF,
+          "(g) matrice de texture (+0,5 en s) : %06x %06x",
+          px(shmem, 10, 10), px(shmem, 10, 50));
+
+    /* EYE_LINEAR : modèle-vue qui translate de −16 en x, géométrie décalée de
+       +16 pour rester à l'écran. En x = 24 à l'écran, l'œil vaut 24 → s =
+       0,375, donc la colonne 0 : avec OBJECT_LINEAR on aurait eu la colonne 1. */
+    v.off = v.start = VTX_OFF;
+    rv2(&v, 16, 0); rv2(&v, 16, 64); rv2(&v, 80, 0); rv2(&v, 80, 64);
+    mat_identity(mv);
+    mv[12] = -16.0f;
+    e.off = e.start = CMD_OFF;
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    {
+        float ps[4] = { 1.0f / 64.0f, 0.0f, 0.0f, 0.0f };
+        float pt[4] = { 0.0f, 1.0f / 64.0f, 0.0f, 0.0f };
+        set_texgen(&e, 0, QGPU_TG_S, 1, QGPU_TG_EYE_LINEAR, ps, ps);
+        set_texgen(&e, 0, QGPU_TG_T, 1, QGPU_TG_EYE_LINEAR, pt, pt);
+    }
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLE_STRIP, 4, VF_P2, 4, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 24, 10) == 0xFF0000 &&
+          px(shmem, 40, 10) == 0x00FF00,
+          "(g) EYE_LINEAR : %06x (colonne 0) %06x (colonne 1) (st %u)",
+          px(shmem, 24, 10), px(shmem, 40, 10), st);
+
+    /* SPHERE_MAP : projection centrée sur l'œil (l'origine est au milieu de
+       l'écran), quad de l'œil (−32,−32) à (32,32). Aux coins, u est à 45° :
+       s et t valent 0,25 ou 0,75 — un quadrant par texel. */
+    mat_ortho(m, -32.0f, 32.0f, 32.0f, -32.0f, 0.0f, -1.0f);
+    mat_identity(mv);
+    v.off = v.start = VTX_OFF;
+    rv2(&v, -32, -32); rv2(&v, -32, 32); rv2(&v, 32, -32); rv2(&v, 32, 32);
+    e.off = e.start = CMD_OFF;
+    set_matrix(&e, QGPU_MTX_PROJECTION, m);
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    {
+        float z4[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        set_texgen(&e, 0, QGPU_TG_S, 1, QGPU_TG_SPHERE_MAP, z4, z4);
+        set_texgen(&e, 0, QGPU_TG_T, 1, QGPU_TG_SPHERE_MAP, z4, z4);
+    }
+    set_current(&e, QGPU_CUR_NORMAL, 0, 0, 1, 0);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLE_STRIP, 4, VF_P2, 4, QGPU_IDX_NONE, 0);
+    {
+        float z4[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        set_texgen(&e, 0, QGPU_TG_S, 0, QGPU_TG_EYE_LINEAR, z4, z4);
+        set_texgen(&e, 0, QGPU_TG_T, 0, QGPU_TG_EYE_LINEAR, z4, z4);
+    }
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 10, 10) == 0xFF0000 &&
+          px(shmem, 50, 10) == 0x00FF00 && px(shmem, 10, 50) == 0x0000FF &&
+          px(shmem, 50, 50) == 0xFFFFFF,
+          "(g) SPHERE_MAP : %06x %06x %06x %06x (st %u)", px(shmem, 10, 10),
+          px(shmem, 50, 10), px(shmem, 10, 50), px(shmem, 50, 50), st);
+
+    /* (k) MULTITEXTURE BRUTE sur deux unités, la seconde en GL_COMBINE :
+       blanc REPLACE, puis MODULATE(texture, précédent) avec (0.5, 1, 0). */
+    t.off = t.start = TEX_OFF;
+    emit(&t, 0xFFFFFFFF); emit(&t, 0xFF80FF00);
+    mat_ortho_px(m);
+    e.off = e.start = CMD_OFF;
+    set_matrix(&e, QGPU_MTX_PROJECTION, m);
+    tex1x1(&e, 30, 0x1908, TEX_OFF);
+    tex1x1(&e, 31, 0x1907, TEX_OFF + 4);
+    state(&e, QGPU_SK_TEXTURE, 1); state(&e, QGPU_SK_TEX_BIND, 30);
+    state(&e, QGPU_SK_TEX_ENV_MODE, 0x1E01);
+    state(&e, QGPU_SK_TEXTURE1, 1); state(&e, QGPU_SK_TEX1_BIND, 31);
+    state(&e, QGPU_SK_TEX1_ENV_MODE, 0x8570);          /* GL_COMBINE */
+    state(&e, QGPU_SK_COMBINE0 + 1, QGPU_COMBINE(QGPU_CB_MODULATE, QGPU_CB_MODULATE, 0, 0));
+    state(&e, QGPU_SK_COMBINE_SRC0 + 1,
+          QGPU_COMBINE_SRC_RGB(0, QGPU_CS_TEXTURE, QGPU_CO_COLOR) |
+          QGPU_COMBINE_SRC_RGB(1, QGPU_CS_PREVIOUS, QGPU_CO_COLOR) |
+          QGPU_COMBINE_SRC_A(0, QGPU_CS_TEXTURE, QGPU_CA_ALPHA) |
+          QGPU_COMBINE_SRC_A(1, QGPU_CS_PREVIOUS, QGPU_CA_ALPHA));
+    v.off = v.start = VTX_OFF;
+    for (i = 0; i < 3; i++) {
+        static const float xy[3][2] = { { 0, 0 }, { 64, 0 }, { 0, 64 } };
+        emitf(&v, xy[i][0]); emitf(&v, xy[i][1]);
+        emitf(&v, 0.5f); emitf(&v, 0.5f); emitf(&v, 0.0f); emitf(&v, 1.0f);
+        emitf(&v, 0.5f); emitf(&v, 0.5f); emitf(&v, 0.0f); emitf(&v, 1.0f);
+    }
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3,
+             VF_P2 | QGPU_VF_TEX(0) | QGPU_VF_TEX(1), 3, QGPU_IDX_NONE, 0);
+    state(&e, QGPU_SK_TEXTURE, 0); state(&e, QGPU_SK_TEXTURE1, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = px(shmem, 8, 8);
+    CHECK(st == QGPU_ST_OK && near_rgb(p, 0x80FF00),
+          "(k) deux unités brutes, GL_COMBINE : %06x (st %u)", p, st);
+
+    /* (j) VALEURS COURANTES : un format sans couleur prend SET_CURRENT. */
+    v.off = v.start = VTX_OFF;
+    rv2(&v, 4, 4); rv2(&v, 60, 4); rv2(&v, 4, 60);
+    e.off = e.start = CMD_OFF;
+    set_current(&e, QGPU_CUR_COLOR, 0.0f, 1.0f, 1.0f, 1.0f);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2, 3, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 8, 8) == 0x00FFFF,
+          "(j) couleur courante pour un format sans couleur : %06x", px(shmem, 8, 8));
+    /* Coordonnée de texture courante : (0.75, 0.25) désigne le texel vert. */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_TEXTURE, 1); state(&e, QGPU_SK_TEX_BIND, 33);
+    state(&e, QGPU_SK_TEX_ENV_MODE, 0x1E01);
+    set_current(&e, QGPU_CUR_TEXCOORD0, 0.75f, 0.25f, 0.0f, 1.0f);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2, 3, QGPU_IDX_NONE, 0);
+    state(&e, QGPU_SK_TEXTURE, 0);
+    set_current(&e, QGPU_CUR_TEXCOORD0, 0.0f, 0.0f, 0.0f, 1.0f);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 8, 8) == 0x00FF00,
+          "(j) coordonnée de texture courante : %06x", px(shmem, 8, 8));
+
+    /* (h) PLAN DE DÉCOUPE UTILISATEUR : garde x <= 32 (en coordonnées œil). */
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 0, 0, 1, 1, 0, 1); rv2c(&v, 0, 64, 1, 1, 0, 1);
+    rv2c(&v, 64, 0, 1, 1, 0, 1); rv2c(&v, 64, 64, 1, 1, 0, 1);
+    e.off = e.start = CMD_OFF;
+    set_clip_plane(&e, 0, 1, -1.0f, 0.0f, 0.0f, 32.0f);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLE_STRIP, 4, VF_P2C, 4, QGPU_IDX_NONE, 0);
+    set_clip_plane(&e, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 20, 20) == 0xFFFF00 &&
+          px(shmem, 45, 20) == 0,
+          "(h) plan de découpe x <= 32 : %06x (gardé) %06x (coupé) (st %u)",
+          px(shmem, 20, 20), px(shmem, 45, 20), st);
+
+    /* (i) BROUILLARD CALCULÉ PAR L'HÔTE. Projection ortho de z œil ∈ [0, −20],
+       modèle-vue qui pose le quad à z œil = −10 : la distance vaut 10 partout,
+       donc le facteur est constant et les deux backends peuvent s'accorder. */
+    mat_ortho(m, 0.0f, (float)W, (float)H, 0.0f, 0.0f, 20.0f);
+    mat_identity(mv);
+    mv[14] = -10.0f;
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 0, 0, 1, 0, 0, 1); rv2c(&v, 0, 64, 1, 0, 0, 1);
+    rv2c(&v, 64, 0, 1, 0, 0, 1); rv2c(&v, 64, 64, 1, 0, 0, 1);
+    e.off = e.start = CMD_OFF;
+    set_matrix(&e, QGPU_MTX_PROJECTION, m);
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    state(&e, QGPU_SK_FOG, 1);
+    state(&e, QGPU_SK_FOG_COLOR, 0xFF0000FF);
+    state(&e, QGPU_SK_FOG_MODE, QGPU_FOG_LINEAR);
+    state(&e, QGPU_SK_FOG_START, qgpu_f2u(0.0f));
+    state(&e, QGPU_SK_FOG_END, qgpu_f2u(20.0f));
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLE_STRIP, 4, VF_P2C, 4, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = px(shmem, 20, 20);
+    /* f = (20 − 10)/20 = 0,5 → moitié rouge, moitié bleu */
+    CHECK(st == QGPU_ST_OK && near_rgb(p, 0x800080),
+          "(i) brouillard LINEAR (128,0,128 attendu) : %06x (st %u)", p, st);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_FOG_MODE, QGPU_FOG_EXP);
+    state(&e, QGPU_SK_FOG_DENSITY, qgpu_f2u(0.05f));
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLE_STRIP, 4, VF_P2C, 4, QGPU_IDX_NONE, 0);
+    state(&e, QGPU_SK_FOG, 0);
+    state(&e, QGPU_SK_FOG_MODE, QGPU_FOG_VERTEX);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = px(shmem, 20, 20);
+    /* f = e^(−0,05 × 10) = 0,6065 → (155, 0, 100) */
+    CHECK(st == QGPU_ST_OK && near_rgb(p, 0x9B0064),
+          "(i) brouillard EXP (155,0,100 attendu) : %06x", p);
+
+    /* VIEWPORT. Il est en repère OpenGL : origine EN BAS à gauche. Un viewport
+       (0, 0, 32, 32) occupe donc le quart BAS-gauche de la surface — c'est la
+       preuve que l'hôte rapporte bien le viewport GL au bas de l'image. */
+    mat_ortho_px(m);
+    mat_identity(mv);
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 0, 0, 1, 0, 1, 1); rv2c(&v, 0, 64, 1, 0, 1, 1);
+    rv2c(&v, 64, 0, 1, 0, 1, 1); rv2c(&v, 64, 64, 1, 0, 1, 1);
+    e.off = e.start = CMD_OFF;
+    set_matrix(&e, QGPU_MTX_PROJECTION, m);
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_VIEWPORT, QGPU_LEN_VIEWPORT));
+    emit(&e, 0); emit(&e, 0); emit(&e, 32); emit(&e, 32);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLE_STRIP, 4, VF_P2C, 4, QGPU_IDX_NONE, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_VIEWPORT, QGPU_LEN_VIEWPORT));
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 10, 50) == 0xFF00FF &&
+          px(shmem, 10, 10) == 0 && px(shmem, 50, 50) == 0 &&
+          px(shmem, 50, 10) == 0,
+          "viewport (0,0,32,32) = quart BAS-gauche : %06x | %06x %06x %06x (st %u)",
+          px(shmem, 10, 50), px(shmem, 10, 10), px(shmem, 50, 50),
+          px(shmem, 50, 10), st);
+
+    /* DEPTH_RANGE : z objet 0 donne zd = −1, donc la borne « proche ». */
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DEPTH_RANGE, QGPU_LEN_DEPTH_RANGE));
+    emitf(&e, 0.5f); emitf(&e, 1.0f);
+    state(&e, QGPU_SK_DEPTH_WRITE, 1);
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF000000, 1.0f);
+    /* le test doit être actif pour que la profondeur s'écrive, comme en GL */
+    state(&e, QGPU_SK_DEPTH_TEST, 1);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLE_STRIP, 4, VF_P2C, 4, QGPU_IDX_NONE, 0);
+    state(&e, QGPU_SK_DEPTH_TEST, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DEPTH_RANGE, QGPU_LEN_DEPTH_RANGE));
+    emitf(&e, 0.0f); emitf(&e, 1.0f);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DEPTH_READBACK, QGPU_LEN_SURF_XFER));
+    emit(&e, 2); emit(&e, RB_OFF); emit(&e, STRIDE); emit(&e, 0); emit(&e, 0);
+    emit(&e, W); emit(&e, H);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    {
+        float d = qgpu_u2f(qgpu_ld32(shmem + RB_OFF + 20 * STRIDE + 20 * 4));
+        CHECK(st == QGPU_ST_OK && d > 0.49f && d < 0.51f,
+              "DEPTH_RANGE (0,5 ; 1) : profondeur fenêtre %g (0,5 attendu)", d);
+    }
+
+    /* COULEUR SECONDAIRE : ajoutée à la primaire. 0,25 + 0,5 = 0,75 → 191. */
+    v.off = v.start = VTX_OFF;
+    for (i = 0; i < 3; i++) {
+        static const float xy[3][2] = { { 4, 4 }, { 60, 4 }, { 4, 60 } };
+        emitf(&v, xy[i][0]); emitf(&v, xy[i][1]);
+        emitf(&v, 0.25f); emitf(&v, 0.0f); emitf(&v, 0.0f); emitf(&v, 1.0f);
+        emitf(&v, 0.5f); emitf(&v, 0.0f); emitf(&v, 0.0f);
+    }
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2C | QGPU_VF_SEC_COLOR, 3,
+             QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = px(shmem, 8, 8);
+    CHECK(st == QGPU_ST_OK && near_rgb(p, 0xBF0000),
+          "couleur secondaire ajoutée (191 attendu) : %06x (st %u)", p, st);
+
+    /* (l) STENCIL ET PROFONDEUR avec DRAW_RAW, sur la surface 3. */
+    mat_ortho_px(m);
+    mat_identity(mv);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 3);
+    set_matrix(&e, QGPU_MTX_PROJECTION, m);
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    v.off = v.start = VTX_OFF;
+    rv3c(&v, 0, 0, 0, 1, 1, 1, 1); rv3c(&v, 32, 0, 0, 1, 1, 1, 1);
+    rv3c(&v, 0, 32, 0, 1, 1, 1, 1);
+    rv3c(&v, 0, 0, 0, 0, 1, 1, 1); rv3c(&v, 64, 0, 0, 0, 1, 1, 1);
+    rv3c(&v, 0, 64, 0, 0, 1, 1, 1);
+    state(&e, QGPU_SK_DEPTH_TEST, 0);
+    state(&e, QGPU_SK_DEPTH_WRITE, 1);
+    state(&e, QGPU_SK_STENCIL_CLEAR, 0);
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH | QGPU_CLEAR_STENCIL,
+              0xFF000000, 1.0f);
+    state(&e, QGPU_SK_STENCIL_TEST, 1);
+    state(&e, QGPU_SK_STENCIL_FUNC, 0x0207);             /* ALWAYS */
+    state(&e, QGPU_SK_STENCIL_REF, 1);
+    sop(&e, QGPU_SOP_KEEP, QGPU_SOP_KEEP, QGPU_SOP_REPLACE);
+    state(&e, QGPU_SK_COLOR_MASK, 0x0);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P3C, 6, QGPU_IDX_NONE, 0);
+    state(&e, QGPU_SK_COLOR_MASK, 0xF);
+    state(&e, QGPU_SK_STENCIL_FUNC, 0x0202);             /* EQUAL */
+    sop(&e, QGPU_SOP_KEEP, QGPU_SOP_KEEP, QGPU_SOP_KEEP);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW));
+    emit(&e, QGPU_PRIM_MODE_TRIANGLES); emit(&e, 3); emit(&e, VTX_OFF);
+    emit(&e, 0); emit(&e, VF_P3C); emit(&e, 0); emit(&e, QGPU_IDX_NONE);
+    emit(&e, 3); emit(&e, 6);
+    state(&e, QGPU_SK_STENCIL_TEST, 0);
+    readback_cmd(&e, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 8, 8) == 0x00FFFF &&
+          px(shmem, 16, 32) == 0 && px(shmem, 50, 50) == 0,
+          "(l) stencil avec DRAW_RAW : %06x %06x %06x (st %u)",
+          px(shmem, 8, 8), px(shmem, 16, 32), px(shmem, 50, 50), st);
+    v.off = v.start = VTX_OFF;
+    rv3c(&v, 0, 0, 0.2f, 1, 0, 0, 1); rv3c(&v, 64, 0, 0.2f, 1, 0, 0, 1);
+    rv3c(&v, 0, 64, 0.2f, 1, 0, 0, 1);
+    rv3c(&v, 0, 0, 0.5f, 0, 1, 0, 1); rv3c(&v, 64, 0, 0.5f, 0, 1, 0, 1);
+    rv3c(&v, 0, 64, 0.5f, 0, 1, 0, 1);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_DEPTH_TEST, 1);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 6, VF_P3C, 6, QGPU_IDX_NONE, 0);
+    state(&e, QGPU_SK_DEPTH_TEST, 0);
+    readback_cmd(&e, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 16, 16) == 0xFF0000,
+          "(l) profondeur avec DRAW_RAW : le plus proche gagne : %06x",
+          px(shmem, 16, 16));
+
+    /* (m) VALIDATIONS. Toutes dans le cœur, aucune dans un backend. */
+    e.off = e.start = CMD_OFF;
+    qgpu_st32(shmem + IDX_OFF, 0x00000005);              /* indices u16 0 puis 5 */
+    qgpu_st32(shmem + IDX_OFF + 4, 0x00000000);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2C, 3, QGPU_IDX_U16, IDX_OFF);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(m) indice hors bornes : st %u", st);
+    e.off = e.start = CMD_OFF;
+    draw_raw(&e, 10, 3, VF_P2C, 3, QGPU_IDX_NONE, 0);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(m) mode inconnu : st %u", st);
+    e.off = e.start = CMD_OFF;
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, 0x400, 3, QGPU_IDX_NONE, 0);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(m) bit de format inconnu : st %u", st);
+    e.off = e.start = CMD_OFF;
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, 3, 3, QGPU_IDX_NONE, 0);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(m) position à 5 composantes : st %u", st);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW));
+    emit(&e, QGPU_PRIM_MODE_TRIANGLES); emit(&e, 3); emit(&e, VTX_OFF);
+    emit(&e, 3); emit(&e, VF_P2C); emit(&e, 0); emit(&e, QGPU_IDX_NONE);
+    emit(&e, 0); emit(&e, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(m) pas plus petit que le format : st %u", st);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW));
+    emit(&e, QGPU_PRIM_MODE_TRIANGLES); emit(&e, 3); emit(&e, SHMEM_SIZE - 8);
+    emit(&e, 0); emit(&e, VF_P2C); emit(&e, 0); emit(&e, QGPU_IDX_NONE);
+    emit(&e, 0); emit(&e, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OOB, "(m) sommets hors de la fenêtre : st %u", st);
+    e.off = e.start = CMD_OFF;
+    mat_identity(m);
+    m[5] = 0.0f / 0.0f;
+    set_matrix(&e, QGPU_MTX_MODELVIEW, m);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(m) matrice avec un NaN : st %u", st);
+    e.off = e.start = CMD_OFF;
+    set_light(&e, QGPU_MAX_LIGHTS, 1, black4, white4, black4, dir_z, nospot,
+              0.0f, 180.0f, 1.0f, 0.0f, 0.0f);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(m) lumière 8 : st %u", st);
+    e.off = e.start = CMD_OFF;
+    set_clip_plane(&e, QGPU_MAX_CLIP_PLANES, 1, 1.0f, 0.0f, 0.0f, 0.0f);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(m) plan de découpe 6 : st %u", st);
+    e.off = e.start = CMD_OFF;
+    set_texgen(&e, QGPU_MAX_UNITS, QGPU_TG_S, 1, QGPU_TG_EYE_LINEAR, zero4, zero4);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(m) unité de texgen 4 : st %u", st);
+    e.off = e.start = CMD_OFF;
+    set_light(&e, 0, 1, black4, white4, black4, dir_z, nospot, 0.0f, 120.0f,
+              1.0f, 0.0f, 0.0f);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(m) angle de coupure 120° : st %u", st);
+
+    /* état rendu au repos et contexte 0 repris pour la suite */
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_DESTROY, QGPU_LEN_CTX)); emit(&e, 1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "v7 : retour au contexte 0 (st %u)", st);
+}
+
 /* Tests v2 : état GL par fragment, sur une surface avec profondeur (id 2). */
 static void run_v2(QgpuCore *c, uint8_t *shmem)
 {
@@ -1193,6 +2358,7 @@ static void run_backend(const char *name)
     run_v4(&c, shmem);
     run_v5(&c, shmem);
     run_v6(&c, shmem);
+    run_v7(&c, shmem);
 
     qgpu_core_reset(&c);
     e.off = e.start = CMD_OFF;

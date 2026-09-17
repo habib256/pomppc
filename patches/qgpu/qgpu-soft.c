@@ -18,6 +18,14 @@
 
 #include "qgpu-core.h"
 
+/* v7 : format de sommet INTERNE du chemin brut. C'est celui du protocole
+   (8 mots + 4 par unité de texture) allongé de trois mots de couleur
+   secondaire : OpenGL l'ajoute APRÈS l'environnement de texture, donc elle ne
+   peut pas être fondue dans la couleur primaire. Les chemins v1–v6 n'en ont
+   pas et passent sec_off = -1. */
+#define SOFT_SEC_OFF    QGPU_VERTEX_TEXN_WORDS(QGPU_MAX_UNITS)
+#define SOFT_RAW_WORDS  (SOFT_SEC_OFF + 3)
+
 typedef struct SoftSurface {
     uint32_t *px;                  /* width*height, 0xAARRGGBB */
     float    *depth;               /* width*height, ou NULL */
@@ -521,7 +529,8 @@ static QgpuTexture *const no_tex[QGPU_MAX_UNITS];
 
 /* Triangle générique : `words` mots par sommet, 0 à 4 unités de texture. */
 static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *tex,
-                     const float *v0, const float *v1, const float *v2, uint32_t prim)
+                     const float *v0, const float *v1, const float *v2, uint32_t prim,
+                     int sec_off)
 {
     uint32_t nlevels[QGPU_MAX_UNITS];
     float lod[QGPU_MAX_UNITS];
@@ -623,6 +632,13 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *te
                     tex_env(st, u, tex[u]->base_format, tc, &prim_c, &r, &g, &b, &a);
                 }
             }
+            if (sec_off >= 0) {
+                /* v7 : la couleur secondaire s'ajoute après l'environnement de
+                   texture et avant le brouillard, comme en OpenGL. */
+                r += w0 * v0[sec_off] + w1 * v1[sec_off] + w2 * v2[sec_off];
+                g += w0 * v0[sec_off + 1] + w1 * v1[sec_off + 1] + w2 * v2[sec_off + 1];
+                b += w0 * v0[sec_off + 2] + w1 * v1[sec_off + 2] + w2 * v2[sec_off + 2];
+            }
             if (fog) {
                 float f = clamp01(w0 * v0[3] + w1 * v1[3] + w2 * v2[3]);
                 r = f * clamp01(r) + (1 - f) * fcr;
@@ -665,12 +681,12 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *te
     }
 }
 
-#define MAXW QGPU_VERTEX_MAX_WORDS
+#define MAXW SOFT_RAW_WORDS
 
 /* Segment épais : le parallélogramme d'OpenGL (sans anticrénelage), étiré
    perpendiculairement à l'axe majeur, en deux triangles. */
 static void soft_line(QgpuSurface *s, const QgpuState *st, const float *a,
-                      const float *b, uint32_t words)
+                      const float *b, uint32_t words, int sec_off)
 {
     float q[4][MAXW];
     float hw = qgpu_u2f(st->v[QGPU_SK_LINE_WIDTH]) * 0.5f;
@@ -688,12 +704,13 @@ static void soft_line(QgpuSurface *s, const QgpuState *st, const float *a,
             q[k][0] += d;
         }
     }
-    soft_tri(s, st, no_tex, q[0], q[1], q[2], QGPU_PRIM_LINES);
-    soft_tri(s, st, no_tex, q[0], q[2], q[3], QGPU_PRIM_LINES);
+    soft_tri(s, st, no_tex, q[0], q[1], q[2], QGPU_PRIM_LINES, sec_off);
+    soft_tri(s, st, no_tex, q[0], q[2], q[3], QGPU_PRIM_LINES, sec_off);
 }
 
 /* Point : carré de côté QGPU_SK_POINT_SIZE centré sur le sommet. */
-static void soft_point(QgpuSurface *s, const QgpuState *st, const float *v, uint32_t words)
+static void soft_point(QgpuSurface *s, const QgpuState *st, const float *v, uint32_t words,
+                       int sec_off)
 {
     float q[4][MAXW];
     float h = qgpu_u2f(st->v[QGPU_SK_POINT_SIZE]) * 0.5f;
@@ -704,8 +721,8 @@ static void soft_point(QgpuSurface *s, const QgpuState *st, const float *v, uint
         q[k][0] += dx[k] * h;
         q[k][1] += dy[k] * h;
     }
-    soft_tri(s, st, no_tex, q[0], q[1], q[2], QGPU_PRIM_POINTS);
-    soft_tri(s, st, no_tex, q[0], q[2], q[3], QGPU_PRIM_POINTS);
+    soft_tri(s, st, no_tex, q[0], q[1], q[2], QGPU_PRIM_POINTS, sec_off);
+    soft_tri(s, st, no_tex, q[0], q[2], q[3], QGPU_PRIM_POINTS, sec_off);
 }
 
 static bool soft_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t prim,
@@ -719,20 +736,731 @@ static bool soft_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t
     case QGPU_PRIM_TRIANGLES:
         for (i = 0; i + 2 < nverts; i += 3) {
             soft_tri(s, st, tex, verts + i * words, verts + (i + 1) * words,
-                     verts + (i + 2) * words, prim);
+                     verts + (i + 2) * words, prim, -1);
         }
         break;
     case QGPU_PRIM_LINES:
         for (i = 0; i + 1 < nverts; i += 2) {
-            soft_line(s, st, verts + i * words, verts + (i + 1) * words, words);
+            soft_line(s, st, verts + i * words, verts + (i + 1) * words, words, -1);
         }
         break;
     default:
         for (i = 0; i < nverts; i++) {
-            soft_point(s, st, verts + i * words, words);
+            soft_point(s, st, verts + i * words, words, -1);
         }
         break;
     }
+    return true;
+}
+
+/* ═══════════════ v7 : étage géométrique de référence ═══════════════════════
+ *
+ * Tout le pipeline fixe d'OpenGL 1.x, écrit pour être LU (c'est la vérité
+ * terrain des tests, pas un chemin rapide) : transformation modèle-vue et
+ * projection, éclairage, normalisation, génération de coordonnées, découpe
+ * (les six plans du volume de vue et les plans utilisateur), division
+ * perspective, viewport, élimination des faces, assemblage des dix modes de
+ * primitives, brouillard. La sortie est faite de sommets au format INTERNE
+ * (celui du chemin existant, allongé de la couleur secondaire) : ce sont
+ * soft_tri / soft_line / soft_point qui rastérisent, exactement comme pour les
+ * opcodes v1–v6. Un seul rasteriseur, donc un seul jeu de règles de remplissage.
+ *
+ * Repère : le viewport est donné en coordonnées OpenGL (origine EN BAS à
+ * gauche de la surface). La ligne de surface vaut « hauteur − yw », et le SENS
+ * DES FACES est établi AVANT ce retournement, sur les coordonnées fenêtre GL :
+ * GL_CCW veut donc dire la même chose côté invité et côté hôte.
+ */
+
+/* Sommet au sortir de l'étage sommet. Un seul tableau de flottants : la
+   découpe interpole alors tous les attributs par une boucle, sans oubli. */
+enum {
+    GV_CLIP = 0,          /* 4 : position en espace de découpe */
+    GV_EYE  = 4,          /* 4 : position en coordonnées œil (plans utilisateur) */
+    GV_COL  = 8,          /* 4 : couleur primaire, face avant */
+    GV_BCOL = 12,         /* 4 : couleur primaire, face arrière */
+    GV_SEC  = 16,         /* 3 : couleur secondaire, face avant */
+    GV_BSEC = 19,         /* 3 : couleur secondaire, face arrière */
+    GV_FOG  = 22,         /* 1 : facteur de brouillard */
+    GV_TC   = 23,         /* 4 par unité : coordonnées de texture finales */
+    GV_N    = GV_TC + 4 * QGPU_MAX_UNITS
+};
+typedef struct GVert { float v[GV_N]; } GVert;
+
+/* 3 sommets + au plus un par plan de découpe (6 + 6) : 16 suffit, 32 rassure. */
+#define GV_MAXPOLY 32
+
+typedef struct Geo {
+    const QgpuState    *st;
+    const QgpuGeom     *gm;
+    QgpuSurface        *s;
+    QgpuTexture *const *tex;
+    float    inv3[9];          /* inverse 3×3 de la modèle-vue, rangée par LIGNES */
+    float    rescale;          /* facteur de GL_RESCALE_NORMAL */
+    bool     lighting, two_side, sep_spec, local_viewer, color_material;
+    bool     cm_front, cm_back, flat;
+    uint32_t cm_mode, fog_mode;
+    int      pos_n, off_n, off_c, off_sc, off_f, off_t[QGPU_MAX_UNITS];
+    int      sec_off;          /* mot de la couleur secondaire, ou -1 */
+    float    vx, vy, vw, vh, dn, df;
+} Geo;
+
+/* m est en ORDRE COLONNE : m[4c + r] est la ligne r, colonne c. */
+static void mat_vec4(const float *m, const float *v, float *o)
+{
+    int i;
+    for (i = 0; i < 4; i++) {
+        o[i] = m[i] * v[0] + m[4 + i] * v[1] + m[8 + i] * v[2] + m[12 + i] * v[3];
+    }
+}
+
+static float vdot3(const float *a, const float *b)
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static float vdot4(const float *a, const float *b)
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+}
+
+static void vnorm3(float *v)
+{
+    float l = sqrtf(vdot3(v, v));
+    if (l > 0.0f) {
+        v[0] /= l; v[1] /= l; v[2] /= l;
+    }
+}
+
+/* Inverse du bloc 3×3 supérieur gauche, rangé par LIGNES (o[3r + c]). */
+static bool mat3_inverse(const float *m, float *o)
+{
+    float a00 = m[0], a01 = m[4], a02 = m[8];
+    float a10 = m[1], a11 = m[5], a12 = m[9];
+    float a20 = m[2], a21 = m[6], a22 = m[10];
+    float c00 =  (a11 * a22 - a12 * a21);
+    float c01 = -(a10 * a22 - a12 * a20);
+    float c02 =  (a10 * a21 - a11 * a20);
+    float det = a00 * c00 + a01 * c01 + a02 * c02;
+
+    if (det == 0.0f || det != det) {
+        return false;
+    }
+    o[0] = c00 / det;
+    o[1] = -(a01 * a22 - a02 * a21) / det;
+    o[2] =  (a01 * a12 - a02 * a11) / det;
+    o[3] = c01 / det;
+    o[4] =  (a00 * a22 - a02 * a20) / det;
+    o[5] = -(a00 * a12 - a02 * a10) / det;
+    o[6] = c02 / det;
+    o[7] = -(a00 * a21 - a01 * a20) / det;
+    o[8] =  (a00 * a11 - a01 * a10) / det;
+    return true;
+}
+
+/* GL : n' = n · M⁻¹ (vecteur ligne), soit (M⁻¹)ᵀ · n en colonne. */
+static void xform_normal(const float *inv3, const float *n, float *o)
+{
+    o[0] = inv3[0] * n[0] + inv3[3] * n[1] + inv3[6] * n[2];
+    o[1] = inv3[1] * n[0] + inv3[4] * n[1] + inv3[7] * n[2];
+    o[2] = inv3[2] * n[0] + inv3[5] * n[1] + inv3[8] * n[2];
+}
+
+/* Éclairage d'OpenGL 1.x, formule de la spécification, pour UNE face.
+   `nrm` est déjà retournée quand on éclaire la face arrière. */
+static void light_face(const Geo *G, const float *eye, const float *nrm,
+                       const float *vcol, int face, float *col, float *sec)
+{
+    const QgpuGeom *gm = G->gm;
+    const QgpuMaterial *m = &gm->mat[face];
+    float amb[4], dif[4], spc[4], emi[4], shin = m->shininess;
+    float acc[3], sacc[3];
+    float pe[3], vpe[3];
+    bool cm = G->color_material && (face == 0 ? G->cm_front : G->cm_back);
+    int i, k;
+
+    memcpy(amb, m->ambient, sizeof(amb));
+    memcpy(dif, m->diffuse, sizeof(dif));
+    memcpy(spc, m->specular, sizeof(spc));
+    memcpy(emi, m->emission, sizeof(emi));
+    if (cm) {
+        switch (G->cm_mode) {
+        case 0x1600: memcpy(emi, vcol, sizeof(emi)); break;      /* GL_EMISSION */
+        case 0x1200: memcpy(amb, vcol, sizeof(amb)); break;      /* GL_AMBIENT */
+        case 0x1201: memcpy(dif, vcol, sizeof(dif)); break;      /* GL_DIFFUSE */
+        case 0x1202: memcpy(spc, vcol, sizeof(spc)); break;      /* GL_SPECULAR */
+        default:                                                 /* AMBIENT_AND_DIFFUSE */
+            memcpy(amb, vcol, sizeof(amb));
+            memcpy(dif, vcol, sizeof(dif));
+            break;
+        }
+    }
+    for (k = 0; k < 3; k++) {
+        pe[k] = (eye[3] != 0.0f) ? eye[k] / eye[3] : eye[k];
+        acc[k] = emi[k] + amb[k] * gm->lm_ambient[k];
+        sacc[k] = 0.0f;
+    }
+    if (G->local_viewer) {
+        vpe[0] = -pe[0]; vpe[1] = -pe[1]; vpe[2] = -pe[2];
+        vnorm3(vpe);
+    } else {
+        vpe[0] = 0.0f; vpe[1] = 0.0f; vpe[2] = 1.0f;
+    }
+    for (i = 0; i < QGPU_MAX_LIGHTS; i++) {
+        const QgpuLight *l = &gm->light[i];
+        float vp[3], att = 1.0f, spot = 1.0f, ndotvp, f;
+        if (!l->enabled) {
+            continue;
+        }
+        if (l->position[3] != 0.0f) {
+            float d, den;
+            for (k = 0; k < 3; k++) {
+                vp[k] = l->position[k] / l->position[3] - pe[k];
+            }
+            d = sqrtf(vdot3(vp, vp));
+            if (d > 0.0f) {
+                vp[0] /= d; vp[1] /= d; vp[2] /= d;
+            }
+            den = l->att[0] + l->att[1] * d + l->att[2] * d * d;
+            att = (den > 0.0f) ? 1.0f / den : 1.0f;
+            if (l->spot_cutoff != 180.0f) {
+                float sd[3], cosang;
+                memcpy(sd, l->spot_dir, sizeof(sd));
+                vnorm3(sd);
+                /* angle entre la direction lumière → sommet et l'axe du spot */
+                cosang = -vdot3(vp, sd);
+                if (cosang <= 0.0f ||
+                    cosang < cosf(l->spot_cutoff * 3.14159265358979f / 180.0f)) {
+                    spot = 0.0f;
+                } else {
+                    spot = powf(cosang, l->spot_exp);
+                }
+            }
+        } else {
+            memcpy(vp, l->position, 3 * sizeof(float));
+            vnorm3(vp);                       /* lumière directionnelle */
+        }
+        f = att * spot;
+        for (k = 0; k < 3; k++) {
+            acc[k] += f * amb[k] * l->ambient[k];
+        }
+        ndotvp = vdot3(nrm, vp);
+        if (ndotvp > 0.0f) {
+            float h[3], ndoth, sf;
+            for (k = 0; k < 3; k++) {
+                acc[k] += f * ndotvp * dif[k] * l->diffuse[k];
+                h[k] = vp[k] + vpe[k];
+            }
+            vnorm3(h);
+            ndoth = vdot3(nrm, h);
+            sf = (ndoth > 0.0f) ? powf(ndoth, shin) : 0.0f;
+            for (k = 0; k < 3; k++) {
+                float v = f * sf * spc[k] * l->specular[k];
+                if (G->sep_spec) {
+                    sacc[k] += v;
+                } else {
+                    acc[k] += v;
+                }
+            }
+        }
+    }
+    for (k = 0; k < 3; k++) {
+        col[k] = clamp01(acc[k]);
+        sec[k] = clamp01(sacc[k]);
+    }
+    col[3] = clamp01(dif[3]);                 /* GL : l'alpha vient de la diffuse */
+}
+
+/* Génération des coordonnées d'une unité, les cinq modes d'OpenGL 1.3. */
+static void texgen_unit(const Geo *G, int u, const float *obj, const float *eye,
+                        const float *nrm, float *tcv)
+{
+    const QgpuTexgen *tg = G->gm->texgen[u];
+    float uv[3], refl[3], m = 1.0f;
+    bool need_refl = false;
+    int k;
+
+    for (k = 0; k < 4; k++) {
+        if (tg[k].enabled && (tg[k].mode == QGPU_TG_SPHERE_MAP ||
+                              tg[k].mode == QGPU_TG_REFLECTION_MAP)) {
+            need_refl = true;
+        }
+    }
+    if (need_refl) {
+        float d;
+        for (k = 0; k < 3; k++) {
+            uv[k] = (eye[3] != 0.0f) ? eye[k] / eye[3] : eye[k];
+        }
+        vnorm3(uv);                            /* u : origine → sommet, en œil */
+        d = 2.0f * vdot3(nrm, uv);
+        for (k = 0; k < 3; k++) {
+            refl[k] = uv[k] - d * nrm[k];
+        }
+        m = 2.0f * sqrtf(refl[0] * refl[0] + refl[1] * refl[1] +
+                         (refl[2] + 1.0f) * (refl[2] + 1.0f));
+    }
+    for (k = 0; k < 4; k++) {
+        if (!tg[k].enabled) {
+            continue;
+        }
+        switch (tg[k].mode) {
+        case QGPU_TG_OBJECT_LINEAR:
+            tcv[k] = vdot4(tg[k].obj_plane, obj);
+            break;
+        case QGPU_TG_EYE_LINEAR:
+            tcv[k] = vdot4(tg[k].eye_plane, eye);
+            break;
+        case QGPU_TG_SPHERE_MAP:
+            tcv[k] = (m != 0.0f ? refl[k] / m : 0.0f) + 0.5f;
+            break;
+        case QGPU_TG_NORMAL_MAP:
+            tcv[k] = nrm[k];
+            break;
+        default:                               /* QGPU_TG_REFLECTION_MAP */
+            tcv[k] = refl[k];
+            break;
+        }
+    }
+}
+
+static float fog_factor(const Geo *G, const float *eye, float fogc)
+{
+    float c, f, d;
+
+    if (G->fog_mode == QGPU_FOG_VERTEX) {
+        return clamp01(fogc);                  /* v4 : le sommet donne le facteur */
+    }
+    /* Sans coordonnée de brouillard dans le sommet, GL prend |z œil|. */
+    c = (G->off_f >= 0) ? fogc : fabsf(eye[2]);
+    switch (G->fog_mode) {
+    case QGPU_FOG_LINEAR: {
+        float s = qgpu_u2f(G->st->v[QGPU_SK_FOG_START]);
+        float e = qgpu_u2f(G->st->v[QGPU_SK_FOG_END]);
+        f = (e == s) ? 1.0f : (e - c) / (e - s);
+        break;
+    }
+    case QGPU_FOG_EXP:
+        d = qgpu_u2f(G->st->v[QGPU_SK_FOG_DENSITY]);
+        f = expf(-d * c);
+        break;
+    default:                                   /* QGPU_FOG_EXP2 */
+        d = qgpu_u2f(G->st->v[QGPU_SK_FOG_DENSITY]) * c;
+        f = expf(-d * d);
+        break;
+    }
+    return clamp01(f);
+}
+
+/* Étage sommet : un sommet brut du protocole → un GVert prêt à découper. */
+static void vstage(const Geo *G, const float *src, GVert *g)
+{
+    const QgpuGeom *gm = G->gm;
+    float obj[4], eye[4], nrm[3], neye[3], vcol[4], vsec[3], fogc;
+    int u, k;
+
+    obj[0] = src[0];
+    obj[1] = src[1];
+    obj[2] = (G->pos_n >= 3) ? src[2] : 0.0f;
+    obj[3] = (G->pos_n >= 4) ? src[3] : 1.0f;
+    memcpy(nrm, G->off_n >= 0 ? src + G->off_n : gm->cur_normal, 3 * sizeof(float));
+    memcpy(vcol, G->off_c >= 0 ? src + G->off_c : gm->cur_color, 4 * sizeof(float));
+    memcpy(vsec, G->off_sc >= 0 ? src + G->off_sc : gm->cur_sec, 3 * sizeof(float));
+    fogc = (G->off_f >= 0) ? src[G->off_f] : gm->cur_fog;
+
+    mat_vec4(gm->mtx[QGPU_MTX_MODELVIEW], obj, eye);
+    xform_normal(G->inv3, nrm, neye);
+    if (G->st->v[QGPU_SK_NORMALIZE]) {
+        vnorm3(neye);
+    } else if (G->st->v[QGPU_SK_RESCALE_NORMAL]) {
+        for (k = 0; k < 3; k++) {
+            neye[k] *= G->rescale;
+        }
+    }
+
+    if (G->lighting) {
+        light_face(G, eye, neye, vcol, 0, g->v + GV_COL, g->v + GV_SEC);
+        if (G->two_side) {
+            float back[3];
+            for (k = 0; k < 3; k++) {
+                back[k] = -neye[k];
+            }
+            light_face(G, eye, back, vcol, 1, g->v + GV_BCOL, g->v + GV_BSEC);
+        } else {
+            memcpy(g->v + GV_BCOL, g->v + GV_COL, 4 * sizeof(float));
+            memcpy(g->v + GV_BSEC, g->v + GV_SEC, 3 * sizeof(float));
+        }
+    } else {
+        memcpy(g->v + GV_COL, vcol, 4 * sizeof(float));
+        memcpy(g->v + GV_BCOL, vcol, 4 * sizeof(float));
+        memcpy(g->v + GV_SEC, vsec, 3 * sizeof(float));
+        memcpy(g->v + GV_BSEC, vsec, 3 * sizeof(float));
+    }
+
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        float gen[4];
+        memcpy(gen, G->off_t[u] >= 0 ? src + G->off_t[u] : gm->cur_tex[u],
+               4 * sizeof(float));
+        texgen_unit(G, u, obj, eye, neye, gen);
+        mat_vec4(gm->mtx[QGPU_MTX_TEXTURE0 + u], gen, g->v + GV_TC + 4 * u);
+    }
+
+    mat_vec4(gm->mtx[QGPU_MTX_PROJECTION], eye, g->v + GV_CLIP);
+    memcpy(g->v + GV_EYE, eye, 4 * sizeof(float));
+    g->v[GV_FOG] = fog_factor(G, eye, fogc);
+}
+
+/* Distance signée au plan `p` : 0..5 = volume de vue (espace de découpe),
+   6.. = plans utilisateur (coordonnées œil). */
+static float plane_dist(const Geo *G, int p, const GVert *v)
+{
+    const float *c = v->v + GV_CLIP;
+    switch (p) {
+    case 0:  return c[3] + c[0];
+    case 1:  return c[3] - c[0];
+    case 2:  return c[3] + c[1];
+    case 3:  return c[3] - c[1];
+    case 4:  return c[3] + c[2];
+    case 5:  return c[3] - c[2];
+    default: return vdot4(G->gm->clip[p - 6].eq, v->v + GV_EYE);
+    }
+}
+
+static bool plane_live(const Geo *G, int p)
+{
+    return p < 6 || G->gm->clip[p - 6].enabled;
+}
+
+static void gv_lerp(GVert *o, const GVert *a, const GVert *b, float t)
+{
+    int i;
+    for (i = 0; i < GV_N; i++) {
+        o->v[i] = a->v[i] + t * (b->v[i] - a->v[i]);
+    }
+}
+
+/* Sutherland-Hodgman sur tous les plans actifs ; renvoie le nouveau nombre de
+   sommets, 0 si le polygone disparaît. */
+static int clip_poly(const Geo *G, GVert *poly, int n)
+{
+    GVert tmp[GV_MAXPOLY];
+    int p, i, m;
+
+    for (p = 0; p < 6 + QGPU_MAX_CLIP_PLANES && n >= 3; p++) {
+        if (!plane_live(G, p)) {
+            continue;
+        }
+        m = 0;
+        for (i = 0; i < n; i++) {
+            const GVert *a = &poly[i], *b = &poly[(i + 1) % n];
+            float da = plane_dist(G, p, a), db = plane_dist(G, p, b);
+            if (da >= 0.0f && m < GV_MAXPOLY) {
+                tmp[m++] = *a;
+            }
+            if ((da >= 0.0f) != (db >= 0.0f) && m < GV_MAXPOLY) {
+                gv_lerp(&tmp[m++], a, b, da / (da - db));
+            }
+        }
+        n = m;
+        memcpy(poly, tmp, (size_t)n * sizeof(GVert));
+    }
+    return n >= 3 ? n : 0;
+}
+
+/* Division perspective, viewport, profondeur, puis mise au format interne. */
+static void project(const Geo *G, const GVert *g, bool back, float *out)
+{
+    float w = g->v[GV_CLIP + 3];
+    float iw = (w != 0.0f) ? 1.0f / w : 0.0f;
+    float xd = g->v[GV_CLIP] * iw, yd = g->v[GV_CLIP + 1] * iw;
+    float zd = g->v[GV_CLIP + 2] * iw;
+    const float *col = g->v + (back ? GV_BCOL : GV_COL);
+    const float *sec = g->v + (back ? GV_BSEC : GV_SEC);
+    int u, k;
+
+    out[0] = G->vx + (xd + 1.0f) * 0.5f * G->vw;
+    /* passage au repère de surface : origine en haut, y vers le bas */
+    out[1] = (float)G->s->height - (G->vy + (yd + 1.0f) * 0.5f * G->vh);
+    out[2] = clamp01(G->dn + (zd + 1.0f) * 0.5f * (G->df - G->dn));
+    out[3] = g->v[GV_FOG];
+    for (k = 0; k < 4; k++) {
+        out[4 + k] = col[k];
+    }
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        for (k = 0; k < 4; k++) {
+            /* le rasteriseur attend s/w, t/w, r/w, q/w (cf. DRAW_TRIANGLES_TEX) */
+            out[8 + 4 * u + k] = g->v[GV_TC + 4 * u + k] * iw;
+        }
+    }
+    for (k = 0; k < 3; k++) {
+        out[SOFT_SEC_OFF + k] = sec[k];
+    }
+}
+
+static void raw_tri(const Geo *G, const GVert *a, const GVert *b, const GVert *c)
+{
+    GVert poly[GV_MAXPOLY];
+    float sv[GV_MAXPOLY][SOFT_RAW_WORDS];
+    float area = 0.0f;
+    bool front;
+    int n, i;
+
+    poly[0] = *a; poly[1] = *b; poly[2] = *c;
+    n = clip_poly(G, poly, 3);
+    if (!n) {
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        project(G, &poly[i], false, sv[i]);
+    }
+    /* Aire signée en coordonnées fenêtre GL. sv[] a y vers le bas, d'où le
+       signe inversé : c'est ce qui fait que GL_CCW veut dire la même chose
+       ici que chez l'invité. */
+    for (i = 0; i < n; i++) {
+        int j = (i + 1) % n;
+        area += sv[i][0] * sv[j][1] - sv[j][0] * sv[i][1];
+    }
+    area = -area;
+    front = (area > 0.0f) == (G->st->v[QGPU_SK_FRONT_FACE] == 0x0901);
+    if (G->st->v[QGPU_SK_CULL_FACE]) {
+        uint32_t cm = G->st->v[QGPU_SK_CULL_MODE];
+        if (cm == 0x0408 || (cm == 0x0405 && !front) || (cm == 0x0404 && front)) {
+            return;
+        }
+    }
+    if (!front) {
+        for (i = 0; i < n; i++) {
+            project(G, &poly[i], true, sv[i]);     /* couleurs de la face arrière */
+        }
+    }
+    for (i = 1; i + 1 < n; i++) {
+        soft_tri(G->s, G->st, G->tex, sv[0], sv[i], sv[i + 1],
+                 QGPU_PRIM_TRIANGLES, G->sec_off);
+    }
+}
+
+static void raw_line(const Geo *G, const GVert *a, const GVert *b)
+{
+    GVert p = *a, q = *b, t;
+    float sa[SOFT_RAW_WORDS], sb[SOFT_RAW_WORDS];
+    int pl;
+
+    for (pl = 0; pl < 6 + QGPU_MAX_CLIP_PLANES; pl++) {
+        float da, db;
+        if (!plane_live(G, pl)) {
+            continue;
+        }
+        da = plane_dist(G, pl, &p);
+        db = plane_dist(G, pl, &q);
+        if (da < 0.0f && db < 0.0f) {
+            return;
+        }
+        if (da < 0.0f) {
+            gv_lerp(&t, &p, &q, da / (da - db));
+            p = t;
+        } else if (db < 0.0f) {
+            gv_lerp(&t, &p, &q, da / (da - db));
+            q = t;
+        }
+    }
+    project(G, &p, false, sa);
+    project(G, &q, false, sb);
+    soft_line(G->s, G->st, sa, sb, SOFT_RAW_WORDS, G->sec_off);
+}
+
+static void raw_point(const Geo *G, const GVert *a)
+{
+    float sa[SOFT_RAW_WORDS];
+    int pl;
+
+    for (pl = 0; pl < 6 + QGPU_MAX_CLIP_PLANES; pl++) {
+        if (plane_live(G, pl) && plane_dist(G, pl, a) < 0.0f) {
+            return;
+        }
+    }
+    project(G, a, false, sa);
+    soft_point(G->s, G->st, sa, SOFT_RAW_WORDS, G->sec_off);
+}
+
+/* Ombrage plat : la primitive entière prend les couleurs du sommet dit
+   « provoquant » (OpenGL 1.x, table 2.12). */
+static void flat_set(GVert *d, const GVert *src, const GVert *prov)
+{
+    *d = *src;
+    memcpy(d->v + GV_COL, prov->v + GV_COL, 4 * sizeof(float));
+    memcpy(d->v + GV_BCOL, prov->v + GV_BCOL, 4 * sizeof(float));
+    memcpy(d->v + GV_SEC, prov->v + GV_SEC, 3 * sizeof(float));
+    memcpy(d->v + GV_BSEC, prov->v + GV_BSEC, 3 * sizeof(float));
+}
+
+static void emit_tri(const Geo *G, const GVert *a, const GVert *b, const GVert *c,
+                     const GVert *prov)
+{
+    if (G->flat) {
+        GVert t[3];
+        flat_set(&t[0], a, prov);
+        flat_set(&t[1], b, prov);
+        flat_set(&t[2], c, prov);
+        raw_tri(G, &t[0], &t[1], &t[2]);
+    } else {
+        raw_tri(G, a, b, c);
+    }
+}
+
+static void emit_line(const Geo *G, const GVert *a, const GVert *b, const GVert *prov)
+{
+    if (G->flat) {
+        GVert t[2];
+        flat_set(&t[0], a, prov);
+        flat_set(&t[1], b, prov);
+        raw_line(G, &t[0], &t[1]);
+    } else {
+        raw_line(G, a, b);
+    }
+}
+
+static const GVert *gv_at(const GVert *gv, const uint32_t *idx, uint32_t first,
+                          uint32_t i)
+{
+    return idx ? &gv[idx[i]] : &gv[first + i];
+}
+
+/* Assemblage des dix modes, avec le sommet provoquant de chacun. */
+static void assemble(const Geo *G, const GVert *gv, const uint32_t *idx,
+                     uint32_t first, uint32_t count, uint32_t mode)
+{
+    uint32_t i;
+#define V(k) gv_at(gv, idx, first, (k))
+
+    switch (mode) {
+    case QGPU_PRIM_MODE_POINTS:
+        for (i = 0; i < count; i++) {
+            raw_point(G, V(i));
+        }
+        break;
+    case QGPU_PRIM_MODE_LINES:
+        for (i = 0; i + 1 < count; i += 2) {
+            emit_line(G, V(i), V(i + 1), V(i + 1));
+        }
+        break;
+    case QGPU_PRIM_MODE_LINE_STRIP:
+        for (i = 0; i + 1 < count; i++) {
+            emit_line(G, V(i), V(i + 1), V(i + 1));
+        }
+        break;
+    case QGPU_PRIM_MODE_LINE_LOOP:
+        for (i = 0; i + 1 < count; i++) {
+            emit_line(G, V(i), V(i + 1), V(i + 1));
+        }
+        if (count > 2) {
+            /* GL : le segment de fermeture prend la couleur du PREMIER sommet */
+            emit_line(G, V(count - 1), V(0), V(0));
+        }
+        break;
+    case QGPU_PRIM_MODE_TRIANGLES:
+        for (i = 0; i + 2 < count; i += 3) {
+            emit_tri(G, V(i), V(i + 1), V(i + 2), V(i + 2));
+        }
+        break;
+    case QGPU_PRIM_MODE_TRIANGLE_STRIP:
+        for (i = 0; i + 2 < count; i++) {
+            /* un triangle sur deux est retourné, pour garder l'orientation */
+            if (i & 1) {
+                emit_tri(G, V(i + 1), V(i), V(i + 2), V(i + 2));
+            } else {
+                emit_tri(G, V(i), V(i + 1), V(i + 2), V(i + 2));
+            }
+        }
+        break;
+    case QGPU_PRIM_MODE_TRIANGLE_FAN:
+        for (i = 1; i + 1 < count; i++) {
+            emit_tri(G, V(0), V(i), V(i + 1), V(i + 1));
+        }
+        break;
+    case QGPU_PRIM_MODE_QUADS:
+        for (i = 0; i + 3 < count; i += 4) {
+            emit_tri(G, V(i), V(i + 1), V(i + 2), V(i + 3));
+            emit_tri(G, V(i), V(i + 2), V(i + 3), V(i + 3));
+        }
+        break;
+    case QGPU_PRIM_MODE_QUAD_STRIP:
+        for (i = 0; i + 3 < count; i += 2) {
+            emit_tri(G, V(i), V(i + 1), V(i + 3), V(i + 3));
+            emit_tri(G, V(i), V(i + 3), V(i + 2), V(i + 3));
+        }
+        break;
+    default:                                   /* QGPU_PRIM_MODE_POLYGON */
+        for (i = 1; i + 1 < count; i++) {
+            emit_tri(G, V(0), V(i), V(i + 1), V(0));
+        }
+        break;
+    }
+#undef V
+}
+
+static bool soft_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
+                          const QgpuGeom *gm, QgpuTexture *const *tex,
+                          uint32_t mode, uint32_t fmt, const float *verts,
+                          uint32_t nverts, uint32_t words,
+                          const uint32_t *idx, uint32_t count, uint32_t first)
+{
+    Geo G;
+    GVert *gv;
+    uint32_t i;
+    int u;
+    (void)c;
+
+    memset(&G, 0, sizeof(G));
+    G.st = st; G.gm = gm; G.s = s; G.tex = tex;
+    G.pos_n = QGPU_VF_POS_COUNT(fmt);
+    G.off_n = qgpu_vf_offset(fmt, QGPU_VF_NORMAL);
+    G.off_c = qgpu_vf_offset(fmt, QGPU_VF_COLOR);
+    G.off_sc = qgpu_vf_offset(fmt, QGPU_VF_SEC_COLOR);
+    G.off_f = qgpu_vf_offset(fmt, QGPU_VF_FOG);
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        G.off_t[u] = qgpu_vf_offset(fmt, (uint32_t)QGPU_VF_TEX(u));
+    }
+    G.lighting = st->v[QGPU_SK_LIGHTING] != 0;
+    G.two_side = st->v[QGPU_SK_TWO_SIDE] != 0;
+    G.sep_spec = st->v[QGPU_SK_COLOR_CONTROL] == 0x81FA;
+    G.local_viewer = st->v[QGPU_SK_LOCAL_VIEWER] != 0;
+    G.color_material = st->v[QGPU_SK_COLOR_MATERIAL] != 0;
+    G.cm_front = st->v[QGPU_SK_COLOR_MAT_FACE] != 0x0405;      /* pas GL_BACK seul */
+    G.cm_back = st->v[QGPU_SK_COLOR_MAT_FACE] != 0x0404;       /* pas GL_FRONT seul */
+    G.cm_mode = st->v[QGPU_SK_COLOR_MAT_MODE];
+    G.fog_mode = st->v[QGPU_SK_FOG_MODE];
+    G.flat = st->v[QGPU_SK_SHADE_MODEL] == 0x1D00;
+    /* La couleur secondaire ne coûte son étage que si elle peut être non nulle. */
+    G.sec_off = ((G.lighting && G.sep_spec) || G.off_sc >= 0) ? SOFT_SEC_OFF : -1;
+    if (!mat3_inverse(gm->mtx[QGPU_MTX_MODELVIEW], G.inv3)) {
+        /* Modèle-vue singulière : GL laisse le résultat indéfini ; l'identité
+           vaut mieux que des NaN dans le rasteriseur. */
+        memset(G.inv3, 0, sizeof(G.inv3));
+        G.inv3[0] = G.inv3[4] = G.inv3[8] = 1.0f;
+    }
+    {
+        /* GL_RESCALE_NORMAL : 1/‖3e ligne de l'inverse de la modèle-vue‖. */
+        float l = sqrtf(G.inv3[6] * G.inv3[6] + G.inv3[7] * G.inv3[7] +
+                        G.inv3[8] * G.inv3[8]);
+        G.rescale = (l > 0.0f) ? 1.0f / l : 1.0f;
+    }
+    if (gm->vp_set) {
+        G.vx = (float)gm->vp[0]; G.vy = (float)gm->vp[1];
+        G.vw = (float)gm->vp[2]; G.vh = (float)gm->vp[3];
+    } else {
+        G.vx = 0.0f; G.vy = 0.0f;
+        G.vw = (float)s->width; G.vh = (float)s->height;
+    }
+    G.dn = gm->depth_near;
+    G.df = gm->depth_far;
+
+    gv = malloc((size_t)nverts * sizeof(GVert));
+    if (!gv) {
+        return false;
+    }
+    for (i = 0; i < nverts; i++) {
+        vstage(&G, verts + (size_t)i * words, &gv[i]);
+    }
+    assemble(&G, gv, idx, first, count, mode);
+    free(gv);
     return true;
 }
 
@@ -831,6 +1559,7 @@ const QgpuBackend qgpu_backend_soft = {
     .surf_destroy   = soft_surf_destroy,
     .clear          = soft_clear,
     .draw           = soft_draw,
+    .draw_raw       = soft_draw_raw,
     .readback       = soft_readback,
     .upload         = soft_upload,
     .depth_readback = soft_depth_readback,

@@ -68,6 +68,11 @@ typedef struct GlState {
     void (*FogCoordPointer)(GLenum, GLsizei, const GLvoid *);
     void (*ActiveTexture)(GLenum);
     void (*ClientActiveTexture)(GLenum);
+    /* v7 : couleur secondaire et coordonnées multitexture hors tableau */
+    void (*SecondaryColorPointer)(GLint, GLenum, GLsizei, const GLvoid *);
+    void (*SecondaryColor3fv)(const GLfloat *);
+    void (*MultiTexCoord4fv)(GLenum, const GLfloat *);
+    void (*FogCoordf)(GLfloat);
     const char *renderer;
 } GlState;
 
@@ -132,6 +137,23 @@ typedef struct GlSurface {
 #ifndef GL_ALPHA_SCALE
 #define GL_ALPHA_SCALE          0x0D1C
 #endif
+/* v7 : constantes de l'étage géométrique, définies ici pour ne dépendre
+   d'aucune version d'en-tête (le profil hérité d'Apple les a toutes). */
+#ifndef GL_COLOR_SUM
+#define GL_COLOR_SUM            0x8458
+#endif
+#ifndef GL_SECONDARY_COLOR_ARRAY
+#define GL_SECONDARY_COLOR_ARRAY 0x845E
+#endif
+#ifndef GL_RESCALE_NORMAL
+#define GL_RESCALE_NORMAL       0x803A
+#endif
+#ifndef GL_LIGHT_MODEL_COLOR_CONTROL
+#define GL_LIGHT_MODEL_COLOR_CONTROL 0x81F8
+#endif
+#ifndef GL_FRAGMENT_DEPTH
+#define GL_FRAGMENT_DEPTH       0x8452
+#endif
 
 static void *gl_proc(const char *name)
 {
@@ -179,10 +201,16 @@ static bool gl_resolve(GlState *g)
     g->FogCoordPointer = gl_proc("glFogCoordPointer");
     g->ActiveTexture = gl_proc("glActiveTexture");
     g->ClientActiveTexture = gl_proc("glClientActiveTexture");
+    g->SecondaryColorPointer = gl_proc("glSecondaryColorPointer");
+    g->SecondaryColor3fv = gl_proc("glSecondaryColor3fv");
+    g->MultiTexCoord4fv = gl_proc("glMultiTexCoord4fv");
+    g->FogCoordf = gl_proc("glFogCoordf");
     return g->GenFramebuffers && g->DeleteFramebuffers && g->BindFramebuffer &&
            g->FramebufferTexture2D && g->CheckFramebufferStatus &&
            g->BlendFuncSeparate && g->BlendEquationSeparate &&
-           g->FogCoordPointer && g->ActiveTexture && g->ClientActiveTexture;
+           g->FogCoordPointer && g->ActiveTexture && g->ClientActiveTexture &&
+           g->SecondaryColorPointer && g->SecondaryColor3fv &&
+           g->MultiTexCoord4fv && g->FogCoordf;
 }
 
 static bool gl_init(QgpuCore *c)
@@ -604,9 +632,10 @@ static void gl_combine(const QgpuState *st, int u)
     }
 }
 
-/* Active la texture de l'unité u avec son environnement. */
-static bool gl_bind_unit(QgpuCore *c, const QgpuState *st, int u, QgpuTexture *tex,
-                         const float *verts, GLsizei stride)
+/* Rend l'unité u courante, y lie sa texture et pose son environnement.
+   Séparé de gl_bind_unit parce que le chemin brut (v7) partage tout cela mais
+   pose lui-même la matrice de texture et le pointeur de coordonnées. */
+static bool gl_unit_env(QgpuCore *c, const QgpuState *st, int u, QgpuTexture *tex)
 {
     GlState *g = c->be_priv;
     uint32_t ec = st->v[QGPU_SK_UNIT(u) + QGPU_SK_U_ENV_COLOR];
@@ -624,6 +653,16 @@ static bool gl_bind_unit(QgpuCore *c, const QgpuState *st, int u, QgpuTexture *t
         gl_combine(st, u);
     }
     glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, col);
+    return true;
+}
+
+/* Active la texture de l'unité u avec son environnement. */
+static bool gl_bind_unit(QgpuCore *c, const QgpuState *st, int u, QgpuTexture *tex,
+                         const float *verts, GLsizei stride)
+{
+    if (!gl_unit_env(c, st, u, tex)) {
+        return false;
+    }
     glMatrixMode(GL_TEXTURE);
     glLoadIdentity();
     glMatrixMode(GL_MODELVIEW);
@@ -683,6 +722,307 @@ static bool gl_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t p
             gl_unbind_unit(c, u);
         }
     }
+    g->ActiveTexture(GL_TEXTURE0);
+    g->ClientActiveTexture(GL_TEXTURE0);
+    return ok && glGetError() == GL_NO_ERROR;
+}
+
+/* ═══════════════ v7 : la géométrie sur le GPU hôte ═════════════════════════
+ *
+ * Ici, rien n'est calculé : on REPOSE l'état d'OpenGL que l'invité nous a
+ * transmis (matrices, lumières, matériaux, texgen, plans de découpe, brouillard,
+ * élimination des faces) et on laisse le pipeline fixe du GPU faire le travail
+ * que GLEngine faisait sur le PowerPC émulé.
+ *
+ * LE RETOURNEMENT. Le chemin existant écrit en pixels de surface (origine en
+ * haut, y vers le bas) et gl_target lui donne glOrtho(0, w, 0, h) : la ligne 0
+ * de la surface est la ligne 0 de la texture du FBO, donc y de surface = y de
+ * fenêtre GL. Le chemin brut, lui, reçoit un viewport en repère OpenGL (origine
+ * EN BAS). Pour que la ligne de surface vaille « hauteur − yw » — donc pour que
+ * les deux chemins produisent une image dans le même sens — on fait deux choses,
+ * et deux seulement :
+ *   1. projection = diag(1, −1, 1, 1) × P, et viewport posé à
+ *      (vx, hauteur − vy − vh) : la composition des deux redonne exactement
+ *      yw_surface = hauteur − yw_GL ;
+ *   2. le sens des faces est INVERSÉ (GL_CCW ↔ GL_CW), puisque le retournement
+ *      change l'orientation de tous les triangles. Le cœur, lui, garde la
+ *      convention de l'invité.
+ */
+
+/* Coupe tout ce que le chemin brut a pu allumer : les opcodes v1–v6 qui
+   suivront ne doivent rien voir de l'étage géométrique. */
+static void gl_reset_raw(QgpuCore *c)
+{
+    GlState *g = c->be_priv;
+    int i;
+
+    glDisable(GL_LIGHTING);
+    glDisable(GL_NORMALIZE);
+    glDisable(GL_RESCALE_NORMAL);
+    glDisable(GL_COLOR_MATERIAL);
+    glDisable(GL_COLOR_SUM);
+    glDisable(GL_CULL_FACE);
+    glFrontFace(GL_CCW);
+    for (i = 0; i < QGPU_MAX_LIGHTS; i++) {
+        glDisable(GL_LIGHT0 + i);
+    }
+    for (i = 0; i < QGPU_MAX_CLIP_PLANES; i++) {
+        glDisable(GL_CLIP_PLANE0 + i);
+    }
+    for (i = QGPU_MAX_UNITS - 1; i >= 0; i--) {
+        g->ActiveTexture(GL_TEXTURE0 + i);
+        g->ClientActiveTexture(GL_TEXTURE0 + i);
+        glDisable(GL_TEXTURE_GEN_S);
+        glDisable(GL_TEXTURE_GEN_T);
+        glDisable(GL_TEXTURE_GEN_R);
+        glDisable(GL_TEXTURE_GEN_Q);
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+        glDisable(GL_TEXTURE_2D);
+        glMatrixMode(GL_TEXTURE);
+        glLoadIdentity();
+    }
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_NORMAL_ARRAY);
+    glDisableClientState(GL_SECONDARY_COLOR_ARRAY);
+    glDisableClientState(GL_FOG_COORDINATE_ARRAY);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+}
+
+/* Lumières, matériaux, plans de découpe et plans œil du texgen sont posés
+   AVEC UNE MODÈLE-VUE IDENTITÉ : OpenGL les transforme au moment de l'appel,
+   et l'invité nous les a déjà donnés en coordonnées œil. */
+static void gl_set_lights(const QgpuGeom *gm)
+{
+    int i;
+
+    for (i = 0; i < QGPU_MAX_LIGHTS; i++) {
+        const QgpuLight *l = &gm->light[i];
+        GLenum id = GL_LIGHT0 + i;
+        if (!l->enabled) {
+            glDisable(id);
+            continue;
+        }
+        glLightfv(id, GL_AMBIENT, l->ambient);
+        glLightfv(id, GL_DIFFUSE, l->diffuse);
+        glLightfv(id, GL_SPECULAR, l->specular);
+        glLightfv(id, GL_POSITION, l->position);
+        glLightfv(id, GL_SPOT_DIRECTION, l->spot_dir);
+        glLightf(id, GL_SPOT_EXPONENT, l->spot_exp);
+        glLightf(id, GL_SPOT_CUTOFF, l->spot_cutoff);
+        glLightf(id, GL_CONSTANT_ATTENUATION, l->att[0]);
+        glLightf(id, GL_LINEAR_ATTENUATION, l->att[1]);
+        glLightf(id, GL_QUADRATIC_ATTENUATION, l->att[2]);
+        glEnable(id);
+    }
+}
+
+static void gl_set_material(const QgpuGeom *gm, GLenum face, int idx)
+{
+    const QgpuMaterial *m = &gm->mat[idx];
+    glMaterialfv(face, GL_AMBIENT, m->ambient);
+    glMaterialfv(face, GL_DIFFUSE, m->diffuse);
+    glMaterialfv(face, GL_SPECULAR, m->specular);
+    glMaterialfv(face, GL_EMISSION, m->emission);
+    glMaterialf(face, GL_SHININESS, m->shininess);
+}
+
+static void gl_set_texgen(QgpuCore *c, const QgpuGeom *gm)
+{
+    GlState *g = c->be_priv;
+    static const GLenum coord[4] = {
+        GL_S, GL_T, GL_R, GL_Q
+    };
+    static const GLenum enab[4] = {
+        GL_TEXTURE_GEN_S, GL_TEXTURE_GEN_T, GL_TEXTURE_GEN_R, GL_TEXTURE_GEN_Q
+    };
+    int u, k;
+
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        g->ActiveTexture(GL_TEXTURE0 + u);
+        for (k = 0; k < 4; k++) {
+            const QgpuTexgen *tg = &gm->texgen[u][k];
+            if (!tg->enabled) {
+                glDisable(enab[k]);
+                continue;
+            }
+            glTexGeni(coord[k], GL_TEXTURE_GEN_MODE, (GLint)tg->mode);
+            glTexGenfv(coord[k], GL_OBJECT_PLANE, tg->obj_plane);
+            glTexGenfv(coord[k], GL_EYE_PLANE, tg->eye_plane);
+            glEnable(enab[k]);
+        }
+    }
+    g->ActiveTexture(GL_TEXTURE0);
+}
+
+static void gl_set_clip(const QgpuGeom *gm)
+{
+    int i, k;
+
+    for (i = 0; i < QGPU_MAX_CLIP_PLANES; i++) {
+        if (!gm->clip[i].enabled) {
+            glDisable(GL_CLIP_PLANE0 + i);
+            continue;
+        }
+        {
+            GLdouble eq[4];
+            for (k = 0; k < 4; k++) {
+                eq[k] = gm->clip[i].eq[k];
+            }
+            glClipPlane(GL_CLIP_PLANE0 + i, eq);
+            glEnable(GL_CLIP_PLANE0 + i);
+        }
+    }
+}
+
+static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
+                        const QgpuGeom *gm, QgpuTexture *const *tex,
+                        uint32_t mode, uint32_t fmt, const float *verts,
+                        uint32_t nverts, uint32_t words,
+                        const uint32_t *idx, uint32_t count, uint32_t first)
+{
+    GlState *g = c->be_priv;
+    const GLsizei stride = (GLsizei)(words * sizeof(float));
+    int off_n = qgpu_vf_offset(fmt, QGPU_VF_NORMAL);
+    int off_c = qgpu_vf_offset(fmt, QGPU_VF_COLOR);
+    int off_sc = qgpu_vf_offset(fmt, QGPU_VF_SEC_COLOR);
+    int off_f = qgpu_vf_offset(fmt, QGPU_VF_FOG);
+    int vx, vy, vw, vh;
+    bool ok = true;
+    int u;
+
+    (void)nverts;
+    if (!gl_target(c, s, st)) {
+        return false;
+    }
+    if (gm->vp_set) {
+        vx = gm->vp[0]; vy = gm->vp[1]; vw = gm->vp[2]; vh = gm->vp[3];
+    } else {
+        vx = 0; vy = 0; vw = (int)s->width; vh = (int)s->height;
+    }
+    glViewport(vx, (int)s->height - vy - vh, vw, vh);
+    glDepthRange(gm->depth_near, gm->depth_far);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glScalef(1.0f, -1.0f, 1.0f);                  /* cf. LE RETOURNEMENT */
+    glMultMatrixf(gm->mtx[QGPU_MTX_PROJECTION]);
+
+    /* modèle-vue identité pendant qu'on pose ce qu'OpenGL transformerait */
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    gl_set_lights(gm);
+    gl_set_clip(gm);
+    gl_set_texgen(c, gm);
+    glLoadMatrixf(gm->mtx[QGPU_MTX_MODELVIEW]);
+
+    gl_set_material(gm, GL_FRONT, 0);
+    gl_set_material(gm, GL_BACK, 1);
+    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, gm->lm_ambient);
+    glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, st->v[QGPU_SK_LOCAL_VIEWER] ? 1 : 0);
+    glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, st->v[QGPU_SK_TWO_SIDE] ? 1 : 0);
+    glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, (GLint)st->v[QGPU_SK_COLOR_CONTROL]);
+    if (st->v[QGPU_SK_COLOR_MATERIAL]) {
+        glColorMaterial(st->v[QGPU_SK_COLOR_MAT_FACE], st->v[QGPU_SK_COLOR_MAT_MODE]);
+        glEnable(GL_COLOR_MATERIAL);
+    } else {
+        glDisable(GL_COLOR_MATERIAL);
+    }
+    if (st->v[QGPU_SK_LIGHTING]) {
+        glEnable(GL_LIGHTING);
+    } else {
+        glDisable(GL_LIGHTING);
+    }
+    if (st->v[QGPU_SK_NORMALIZE]) {
+        glEnable(GL_NORMALIZE);
+        glDisable(GL_RESCALE_NORMAL);
+    } else {
+        glDisable(GL_NORMALIZE);
+        if (st->v[QGPU_SK_RESCALE_NORMAL]) {
+            glEnable(GL_RESCALE_NORMAL);
+        } else {
+            glDisable(GL_RESCALE_NORMAL);
+        }
+    }
+    glShadeModel(st->v[QGPU_SK_SHADE_MODEL]);
+    if (st->v[QGPU_SK_CULL_FACE]) {
+        glEnable(GL_CULL_FACE);
+        glCullFace(st->v[QGPU_SK_CULL_MODE]);
+    } else {
+        glDisable(GL_CULL_FACE);
+    }
+    /* sens inversé : le retournement en y a changé l'orientation des triangles */
+    glFrontFace(st->v[QGPU_SK_FRONT_FACE] == 0x0901 ? GL_CW : GL_CCW);
+    if (st->v[QGPU_SK_FOG] && st->v[QGPU_SK_FOG_MODE] != QGPU_FOG_VERTEX) {
+        /* Brouillard calculé par l'hôte : les valeurs d'énumération du mode
+           sont celles d'OpenGL, on les repasse telles quelles. */
+        glFogi(GL_FOG_MODE, (GLint)st->v[QGPU_SK_FOG_MODE]);
+        glFogf(GL_FOG_DENSITY, qgpu_u2f(st->v[QGPU_SK_FOG_DENSITY]));
+        glFogf(GL_FOG_START, qgpu_u2f(st->v[QGPU_SK_FOG_START]));
+        glFogf(GL_FOG_END, qgpu_u2f(st->v[QGPU_SK_FOG_END]));
+        glFogi(GL_FOG_COORDINATE_SOURCE,
+               off_f >= 0 ? GL_FOG_COORDINATE : GL_FRAGMENT_DEPTH);
+    }
+
+    /* Tableaux de sommets : un attribut absent devient une valeur courante. */
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(QGPU_VF_POS_COUNT(fmt), GL_FLOAT, stride, verts);
+    if (off_n >= 0) {
+        glEnableClientState(GL_NORMAL_ARRAY);
+        glNormalPointer(GL_FLOAT, stride, verts + off_n);
+    } else {
+        glDisableClientState(GL_NORMAL_ARRAY);
+        glNormal3fv(gm->cur_normal);
+    }
+    if (off_c >= 0) {
+        glEnableClientState(GL_COLOR_ARRAY);
+        glColorPointer(4, GL_FLOAT, stride, verts + off_c);
+    } else {
+        glDisableClientState(GL_COLOR_ARRAY);
+        glColor4fv(gm->cur_color);
+    }
+    if (off_sc >= 0) {
+        glEnableClientState(GL_SECONDARY_COLOR_ARRAY);
+        g->SecondaryColorPointer(3, GL_FLOAT, stride, verts + off_sc);
+        glEnable(GL_COLOR_SUM);
+    } else {
+        glDisableClientState(GL_SECONDARY_COLOR_ARRAY);
+        g->SecondaryColor3fv(gm->cur_sec);
+        glDisable(GL_COLOR_SUM);
+    }
+    if (off_f >= 0) {
+        glEnableClientState(GL_FOG_COORDINATE_ARRAY);
+        g->FogCoordPointer(GL_FLOAT, stride, verts + off_f);
+    } else {
+        glDisableClientState(GL_FOG_COORDINATE_ARRAY);
+        g->FogCoordf(gm->cur_fog);
+    }
+    for (u = 0; u < QGPU_MAX_UNITS && ok; u++) {
+        int off_t = qgpu_vf_offset(fmt, (uint32_t)QGPU_VF_TEX(u));
+        if (!tex[u]) {
+            continue;
+        }
+        ok = gl_unit_env(c, st, u, tex[u]);
+        glMatrixMode(GL_TEXTURE);
+        glLoadMatrixf(gm->mtx[QGPU_MTX_TEXTURE0 + u]);
+        glMatrixMode(GL_MODELVIEW);
+        if (off_t >= 0) {
+            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+            glTexCoordPointer(4, GL_FLOAT, stride, verts + off_t);
+        } else {
+            glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+            g->MultiTexCoord4fv(GL_TEXTURE0 + u, gm->cur_tex[u]);
+        }
+    }
+    if (ok) {
+        g->ClientActiveTexture(GL_TEXTURE0);
+        if (idx) {
+            glDrawElements(mode, (GLsizei)count, GL_UNSIGNED_INT, idx);
+        } else {
+            glDrawArrays(mode, (GLint)first, (GLsizei)count);
+        }
+    }
+    gl_reset_raw(c);
     g->ActiveTexture(GL_TEXTURE0);
     g->ClientActiveTexture(GL_TEXTURE0);
     return ok && glGetError() == GL_NO_ERROR;
@@ -833,6 +1173,7 @@ const QgpuBackend qgpu_backend_gl = {
     .surf_destroy   = gl_surf_destroy,
     .clear          = gl_clear,
     .draw           = gl_draw,
+    .draw_raw       = gl_draw_raw,
     .readback       = gl_readback,
     .upload         = gl_upload,
     .depth_readback = gl_depth_readback,

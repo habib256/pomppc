@@ -41,10 +41,12 @@
 #define QGPU_IOPCI_PRIMARY_MATCH 0x0fb21234
 
 #define QGPU_MAGIC              0x71677031  /* 'qgp1' */
-#define QGPU_PROTO_VERSION      6   /* v2 : profondeur, état GL ; v3 : textures ;
+#define QGPU_PROTO_VERSION      7   /* v2 : profondeur, état GL ; v3 : textures ;
                                        v4 : brouillard, 2e unité, lignes, points ;
                                        v5 : 4 unités, GL_COMBINE ;
-                                       v6 : stencil */
+                                       v6 : stencil ;
+                                       v7 : géométrie brute (matrices, éclairage,
+                                            texgen, découpe, DRAW_RAW) */
 
 /* ── BAR0 : fenêtre partagée (RAM) ───────────────────────────────────────── */
 #define QGPU_SHMEM_DEFAULT_MB   64
@@ -97,6 +99,12 @@
 #define QGPU_MAX_TEX_DIM        2048
 #define QGPU_MAX_TEX_LEVELS     12
 #define QGPU_MAX_UNITS          4           /* v5 : unités de texture */
+#define QGPU_MAX_LIGHTS         8           /* v7 : GL_LIGHT0..GL_LIGHT7 */
+#define QGPU_MAX_CLIP_PLANES    6           /* v7 : GL_CLIP_PLANE0..5 */
+/* v7 : les commandes de géométrie sont longues (SET_LIGHT en fait 26). Le cœur
+   recopie les arguments dans un tableau de cette taille : la borne est NOMMÉE
+   ici pour que l'hôte et l'invité ne puissent pas en avoir deux idées. */
+#define QGPU_MAX_CMD_ARGS       26
 
 /* ── Flux de commandes ───────────────────────────────────────────────────────
  *
@@ -139,6 +147,19 @@
 #define QGPU_OP_TEX_IMAGE       0x0042  /* v3, [tex, niveau, w, h, format de base, off] texels 0xAARRGGBB BE, w×h */
 #define QGPU_OP_TEX_PARAM       0x0043  /* v3, [tex, clé QGPU_TP_*, valeur] */
 
+/* v7 : géométrie brute. Détail du contrat plus bas, section « v7 ». */
+#define QGPU_OP_SET_MATRIX      0x0050  /* [quelle, 16 flottants, ordre colonne] */
+#define QGPU_OP_DEPTH_RANGE     0x0051  /* [proche, lointain] flottants dans [0,1] */
+#define QGPU_OP_SET_LIGHT       0x0052  /* [i, actif, amb4, diff4, spec4, pos4, spot3,
+                                           exposant, coupure, att3] */
+#define QGPU_OP_SET_MATERIAL    0x0053  /* [face, amb4, diff4, spec4, emis4, brillance] */
+#define QGPU_OP_SET_LIGHT_MODEL 0x0054  /* [ambiante4 du modèle d'éclairage] */
+#define QGPU_OP_SET_TEXGEN      0x0055  /* [unité, coord, actif, mode, plan objet4, plan œil4] */
+#define QGPU_OP_SET_CLIP_PLANE  0x0056  /* [i, actif, équation4 en coordonnées œil] */
+#define QGPU_OP_SET_CURRENT     0x0057  /* [quoi QGPU_CUR_*, x, y, z, w] */
+#define QGPU_OP_DRAW_RAW        0x0058  /* [mode, n, voff, pas, format, ioff, itype,
+                                           premier, nverts] */
+
 /* Longueurs (en mots, en-tête compris) attendues par opcode. */
 #define QGPU_LEN_NOP            1
 #define QGPU_LEN_CTX            2
@@ -153,6 +174,15 @@
 #define QGPU_LEN_TEX            2
 #define QGPU_LEN_TEX_IMAGE      7
 #define QGPU_LEN_TEX_PARAM      4
+#define QGPU_LEN_SET_MATRIX     18          /* v7 */
+#define QGPU_LEN_DEPTH_RANGE    3
+#define QGPU_LEN_SET_LIGHT      27
+#define QGPU_LEN_SET_MATERIAL   19
+#define QGPU_LEN_SET_LIGHT_MODEL 5
+#define QGPU_LEN_SET_TEXGEN     13
+#define QGPU_LEN_SET_CLIP_PLANE 7
+#define QGPU_LEN_SET_CURRENT    6
+#define QGPU_LEN_DRAW_RAW       10
 
 /* Formats de surface. Le mot de pixel échangé est 0xAARRGGBB big-endian :
  * l'octet « x » du framebuffer Tiger EST l'alpha (v2 ; v1 l'ignorait). */
@@ -241,7 +271,43 @@
 #define QGPU_SK_STENCIL_OP_ZPASS 58 /* idem ; les deux réussis, OU pas de test de
                                        profondeur (le fragment « passe » la profondeur) */
 #define QGPU_SK_STENCIL_CLEAR   59  /* 0..255 ; valeur lue par QGPU_CLEAR_STENCIL */
-#define QGPU_SK_COUNT           60
+/* v7 : étage géométrique. Ces clés ne servent QU'À DRAW_RAW — les opcodes de
+ * dessin antérieurs reçoivent des sommets déjà transformés, éclairés, aplatis
+ * et découpés, et continuent de les prendre tels quels quelles que soient ces
+ * valeurs. Une seule exception assumée, dite là où elle est : le brouillard. */
+#define QGPU_SK_LIGHTING        60  /* booléen ; initial 0 */
+#define QGPU_SK_NORMALIZE       61  /* booléen (GL_NORMALIZE) */
+#define QGPU_SK_RESCALE_NORMAL  62  /* booléen (GL_RESCALE_NORMAL) ; ignoré si NORMALIZE */
+#define QGPU_SK_SHADE_MODEL     63  /* GL_FLAT 0x1D00 / GL_SMOOTH 0x1D01 ; initial SMOOTH */
+#define QGPU_SK_CULL_FACE       64  /* booléen */
+#define QGPU_SK_CULL_MODE       65  /* GL_FRONT 0x0404, GL_BACK 0x0405, GL_FRONT_AND_BACK 0x0408 */
+#define QGPU_SK_FRONT_FACE      66  /* GL_CW 0x0900 / GL_CCW 0x0901 ; initial CCW */
+#define QGPU_SK_COLOR_MATERIAL  67  /* booléen */
+#define QGPU_SK_COLOR_MAT_FACE  68  /* GL_FRONT, GL_BACK, GL_FRONT_AND_BACK ; initial les deux */
+#define QGPU_SK_COLOR_MAT_MODE  69  /* GL_EMISSION 0x1600, GL_AMBIENT 0x1200, GL_DIFFUSE 0x1201,
+                                       GL_SPECULAR 0x1202, GL_AMBIENT_AND_DIFFUSE 0x1602 (initial) */
+#define QGPU_SK_LOCAL_VIEWER    70  /* booléen : observateur local */
+#define QGPU_SK_TWO_SIDE        71  /* booléen : éclairage deux faces */
+#define QGPU_SK_COLOR_CONTROL   72  /* GL_SINGLE_COLOR 0x81F9 (initial) /
+                                       GL_SEPARATE_SPECULAR_COLOR 0x81FA */
+/* Brouillard calculé par l'hôte (v7). QGPU_SK_FOG_MODE vaut initialement
+ * QGPU_FOG_VERTEX : le facteur vient du sommet, comme en v4 — c'est ce qui
+ * garde les flux v4–v6 valides. Avec GL_LINEAR / GL_EXP / GL_EXP2, DRAW_RAW
+ * calcule f depuis la coordonnée de brouillard du sommet si le format en a
+ * une, sinon depuis |z œil| (GL_FRAGMENT_DEPTH). Les opcodes antérieurs
+ * ignorent ce mode et gardent le facteur par sommet. */
+#define QGPU_SK_FOG_MODE        73  /* QGPU_FOG_VERTEX, GL_LINEAR, GL_EXP, GL_EXP2 */
+#define QGPU_SK_FOG_DENSITY     74  /* flottant (bits IEEE), >= 0 ; initial 1.0 */
+#define QGPU_SK_FOG_START       75  /* flottant ; initial 0.0 */
+#define QGPU_SK_FOG_END         76  /* flottant ; initial 1.0 */
+#define QGPU_SK_COUNT           77
+
+/* Valeurs d'énumération d'OpenGL utilisées par les clés v7, nommées pour que
+ * l'invité n'ait pas à les recopier à la main. */
+#define QGPU_FOG_VERTEX         0       /* v7 : « le sommet fournit le facteur » (v4) */
+#define QGPU_FOG_EXP            0x0800  /* GL_EXP */
+#define QGPU_FOG_EXP2           0x0801  /* GL_EXP2 */
+#define QGPU_FOG_LINEAR         0x2601  /* GL_LINEAR */
 
 /* Opérations de stencil (valeurs OpenGL, recopiées telles quelles). */
 #define QGPU_SOP_ZERO           0x0000
@@ -362,6 +428,190 @@
  * MÊMES contraintes que tous les autres transferts, et aucun cas particulier
  * ni côté invité PowerPC ni dans la validation du cœur. Les deux commandes
  * exigent QGPU_FMT_FLAG_STENCIL sur la surface (sinon QGPU_ST_BAD_ARG). */
+
+/* ── v7 : la géométrie sur l'hôte ────────────────────────────────────────────
+ *
+ *   Jusqu'à la v6, l'invité envoyait des sommets DÉJÀ transformés, éclairés,
+ *   découpés et aplatis par GLEngine sur le PowerPC émulé. C'est ce travail-là
+ *   qui limite les jeux. La v7 ajoute de quoi confier TOUT le pipeline fixe
+ *   d'OpenGL 1.x à l'hôte : matrices, viewport, éclairage, matériaux,
+ *   génération de coordonnées, plans de découpe, et un dessin indexé de
+ *   sommets BRUTS (coordonnées objet, normales, couleurs, coordonnées de
+ *   texture non divisées).
+ *
+ *   Règle de compatibilité, comme à chaque version : rien n'est retiré, aucune
+ *   longueur de commande existante ne change. Les opcodes de dessin v1–v6
+ *   ignorent tout l'état ci-dessous et gardent exactement leur sémantique.
+ *
+ * REPÈRES ET SENS DE L'IMAGE (le point à ne pas se tromper)
+ *
+ *   Le chemin existant travaille en PIXELS DE SURFACE : origine EN HAUT à
+ *   gauche, y vers le BAS. Le chemin brut travaille en coordonnées OpenGL :
+ *   l'invité recopie ses matrices et son viewport tels que GL les lui donne,
+ *   donc en repère GL (origine du viewport EN BAS à gauche, y vers le HAUT).
+ *   L'hôte fait la couture : une coordonnée fenêtre GL yw devient la ligne de
+ *   surface (hauteur de la surface − yw). Autrement dit, LE VIEWPORT EST
+ *   RAPPORTÉ AU BAS DE LA SURFACE, et les deux chemins produisent une image
+ *   dans le même sens — l'invité relit la surface de la même façon dans les
+ *   deux cas.
+ *
+ *   Conséquence pratique : pour dessiner en pixels par le chemin brut, il
+ *   suffit de poser modèle-vue = identité et projection = glOrtho(0, w, h, 0,
+ *   0, −1), c'est-à-dire exactement la projection que le plugin utilise déjà.
+ *   Un sommet (x, y, z) y donne le pixel (x, y) et la profondeur fenêtre z.
+ *
+ *   Le sens des faces suit OpenGL : il est établi sur les coordonnées fenêtre
+ *   GL (y vers le haut), AVANT le retournement, pour que GL_CCW veuille dire
+ *   la même chose côté invité et côté hôte.
+ *
+ * VIEWPORT ET PROFONDEUR
+ *
+ *   QGPU_OP_VIEWPORT [x, y, w, h] — jusqu'ici « réservé, sans effet » — porte
+ *   maintenant le viewport GL du chemin brut : x et y sont comptés depuis le
+ *   coin BAS-GAUCHE de la surface, comme glViewport. Sans VIEWPORT, le chemin
+ *   brut prend toute la surface. Le chemin existant, lui, continue d'ignorer
+ *   ce rectangle : il est déjà en pixels de surface.
+ *   QGPU_OP_DEPTH_RANGE [proche, lointain] : comme glDepthRange, deux
+ *   flottants bornés à [0,1], initialement 0 et 1.
+ *
+ * MATRICES
+ *
+ *   QGPU_OP_SET_MATRIX [quelle, m0..m15] : 16 flottants big-endian dans
+ *   L'ORDRE COLONNE d'OpenGL (m0..m3 = première colonne), c'est-à-dire la
+ *   disposition que glLoadMatrixf attend et que GLEngine range en mémoire :
+ *   l'invité recopie, il ne transpose pas.
+ */
+#define QGPU_MTX_MODELVIEW      0
+#define QGPU_MTX_PROJECTION     1
+#define QGPU_MTX_TEXTURE0       2   /* unités 0..3 : QGPU_MTX_TEXTURE0 + u */
+#define QGPU_MTX_COUNT          (QGPU_MTX_TEXTURE0 + QGPU_MAX_UNITS)
+
+/* LUMIÈRES — QGPU_OP_SET_LIGHT
+ *
+ *   [i (0..7), actif, ambiante4, diffuse4, spéculaire4, position4,
+ *    direction de spot3, exposant, angle de coupure, atténuation constante,
+ *    linéaire, quadratique]
+ *
+ *   La position ET la direction de spot sont EN COORDONNÉES ŒIL : OpenGL les
+ *   transforme par la modèle-vue au moment de glLight, et c'est la valeur
+ *   transformée que GLEngine garde. L'invité envoie donc ce qu'il lit dans
+ *   l'état GL, sans rien retransformer. position[3] = 0 : lumière
+ *   directionnelle (pas d'atténuation, pas de spot). Angle de coupure : 0..90,
+ *   ou exactement 180 (pas de spot). Exposant : 0..128.
+ *
+ * MATÉRIAU — QGPU_OP_SET_MATERIAL
+ *
+ *   [face, ambiante4, diffuse4, spéculaire4, émission4, brillance]
+ *   face : GL_FRONT, GL_BACK ou GL_FRONT_AND_BACK. Brillance : 0..128.
+ *   L'ambiante du MODÈLE d'éclairage est à part (QGPU_OP_SET_LIGHT_MODEL,
+ *   [ambiante4]) ; observateur local, deux faces et spéculaire séparée sont
+ *   des clés d'état (QGPU_SK_LOCAL_VIEWER, _TWO_SIDE, _COLOR_CONTROL).
+ *
+ * TEXGEN — QGPU_OP_SET_TEXGEN
+ *
+ *   [unité (0..3), coordonnée (0=S, 1=T, 2=R, 3=Q), actif, mode,
+ *    plan objet4, plan œil4]
+ *   Le plan œil est DÉJÀ en coordonnées œil, pour la même raison que la
+ *   position des lumières. Le plan objet, lui, est pris tel quel.
+ */
+#define QGPU_TG_S               0
+#define QGPU_TG_T               1
+#define QGPU_TG_R               2
+#define QGPU_TG_Q               3
+#define QGPU_TG_OBJECT_LINEAR   0x2401
+#define QGPU_TG_EYE_LINEAR      0x2400
+#define QGPU_TG_SPHERE_MAP      0x2402
+#define QGPU_TG_NORMAL_MAP      0x8511
+#define QGPU_TG_REFLECTION_MAP  0x8512
+
+/* PLANS DE DÉCOUPE — QGPU_OP_SET_CLIP_PLANE [i (0..5), actif, équation4]
+ *   L'équation est en coordonnées œil (même raison). Un point est gardé si
+ *   (a,b,c,d)·(x,y,z,w) >= 0, comme en OpenGL.
+ *
+ * VALEURS COURANTES — QGPU_OP_SET_CURRENT [quoi, x, y, z, w]
+ *   L'équivalent de glColor / glNormal / glTexCoord hors tableau : un attribut
+ *   ABSENT du format de sommet prend cette valeur pour tous les sommets du
+ *   dessin. Les composantes inutilisées par `quoi` sont ignorées (mais doivent
+ *   être des flottants valides : la commande a toujours la même longueur). */
+#define QGPU_CUR_NORMAL         0   /* x, y, z ; initial (0, 0, 1) */
+#define QGPU_CUR_COLOR          1   /* r, g, b, a ; initial (1, 1, 1, 1) */
+#define QGPU_CUR_SEC_COLOR      2   /* r, g, b ; initial (0, 0, 0) */
+#define QGPU_CUR_FOG            3   /* x ; initial 1.0 (pas de brouillard) */
+#define QGPU_CUR_TEXCOORD0      4   /* s, t, r, q ; unités 0..3 : +u ; initial (0,0,0,1) */
+#define QGPU_CUR_COUNT          (QGPU_CUR_TEXCOORD0 + QGPU_MAX_UNITS)
+
+/* DESSIN BRUT — QGPU_OP_DRAW_RAW
+ *
+ *   [mode, n, voff, pas, format, ioff, itype, premier, nverts]
+ *
+ *   mode     : un des dix modes d'OpenGL (QGPU_PRIM_MODE_* ci-dessous, valeurs
+ *              d'OpenGL recopiées telles quelles).
+ *   n        : nombre de sommets dessinés (itype = AUCUN) ou d'indices lus.
+ *   voff     : offset des sommets dans BAR0 (multiple de 4).
+ *   pas      : pas d'un sommet EN MOTS ; 0 = serré (= QGPU_VF_WORDS(format)).
+ *              Un pas inférieur au format est refusé.
+ *   format   : masque QGPU_VF_* ; dit quels attributs sont présents.
+ *   ioff     : offset des indices dans BAR0 (ignoré si itype = AUCUN).
+ *   itype    : QGPU_IDX_NONE, QGPU_IDX_U16 ou QGPU_IDX_U32, big-endian.
+ *   premier  : premier sommet dessiné (comme glDrawArrays) ; doit valoir 0
+ *              quand des indices sont donnés.
+ *   nverts   : NOMBRE DE SOMMETS PRÉSENTS dans le tableau à partir de voff.
+ *              C'est contre lui que les indices sont validés : un indice >=
+ *              nverts vaut QGPU_ST_BAD_ARG, et l'hôte ne lit jamais hors de
+ *              BAR0. Il est explicite plutôt que déduit parce qu'un tableau
+ *              indexé ne dit pas sa propre taille.
+ *
+ *   FORMAT DE SOMMET. Des flottants big-endian, dans un ordre FIXE, chaque
+ *   attribut n'occupant de la place que s'il est présent :
+ *      position (2, 3 ou 4 composantes — champ de 2 bits, toujours présente),
+ *      normale (3), couleur (4), couleur secondaire (3), brouillard (1),
+ *      puis coordonnées de texture des unités 0, 1, 2, 3 (4 chacune).
+ *   Un attribut absent prend la valeur courante (QGPU_OP_SET_CURRENT).
+ *   Une position à 2 composantes complète z = 0 et w = 1 ; à 3, w = 1.
+ *   Comme pour les autres dessins, un NaN ou un infini dans les sommets vaut
+ *   QGPU_ST_BAD_ARG. */
+#define QGPU_PRIM_MODE_POINTS         0x0000
+#define QGPU_PRIM_MODE_LINES          0x0001
+#define QGPU_PRIM_MODE_LINE_LOOP      0x0002
+#define QGPU_PRIM_MODE_LINE_STRIP     0x0003
+#define QGPU_PRIM_MODE_TRIANGLES      0x0004
+#define QGPU_PRIM_MODE_TRIANGLE_STRIP 0x0005
+#define QGPU_PRIM_MODE_TRIANGLE_FAN   0x0006
+#define QGPU_PRIM_MODE_QUADS          0x0007
+#define QGPU_PRIM_MODE_QUAD_STRIP     0x0008
+#define QGPU_PRIM_MODE_POLYGON        0x0009
+
+#define QGPU_IDX_NONE           0
+#define QGPU_IDX_U16            1
+#define QGPU_IDX_U32            2
+
+/* Masque de format. Les deux bits de poids faible portent le nombre de
+   composantes de position moins deux (0 → 2, 1 → 3, 2 → 4) ; 3 est invalide. */
+#define QGPU_VF_POS(n)          ((unsigned long)((n) - 2))
+#define QGPU_VF_POS_MASK        0x0003
+#define QGPU_VF_POS_COUNT(m)    ((int)((m) & QGPU_VF_POS_MASK) + 2)
+#define QGPU_VF_NORMAL          0x0004
+#define QGPU_VF_COLOR           0x0008
+#define QGPU_VF_SEC_COLOR       0x0010
+#define QGPU_VF_FOG             0x0020
+#define QGPU_VF_TEX0            0x0040      /* unités 0..3 : QGPU_VF_TEX(u) */
+#define QGPU_VF_TEX(u)          (QGPU_VF_TEX0 << (u))
+#define QGPU_VF_ALL             0x03FF      /* tout bit hors de là = QGPU_ST_BAD_ARG */
+
+/* Taille d'un sommet, en mots, dans l'ordre fixe ci-dessus. */
+#define QGPU_VF_WORDS(m) \
+    (QGPU_VF_POS_COUNT(m) + \
+     (((m) & QGPU_VF_NORMAL)    ? 3 : 0) + \
+     (((m) & QGPU_VF_COLOR)     ? 4 : 0) + \
+     (((m) & QGPU_VF_SEC_COLOR) ? 3 : 0) + \
+     (((m) & QGPU_VF_FOG)       ? 1 : 0) + \
+     (((m) & QGPU_VF_TEX(0))    ? 4 : 0) + \
+     (((m) & QGPU_VF_TEX(1))    ? 4 : 0) + \
+     (((m) & QGPU_VF_TEX(2))    ? 4 : 0) + \
+     (((m) & QGPU_VF_TEX(3))    ? 4 : 0))
+/* Sommet le plus gros : 4 + 3 + 4 + 3 + 1 + 4×4. Écrit en clair, parce que
+   QGPU_VF_WORDS(QGPU_VF_ALL) lirait un champ de position invalide (3). */
+#define QGPU_VF_MAX_WORDS       31
 
 /* ── Interface du kext POMPPCGPU (IOUserClient) ──────────────────────────────
  *
