@@ -11,10 +11,12 @@
  * 0 de la surface est la ligne 0 de la texture, donc glReadPixels rend les
  * lignes dans l'ordre attendu, sans retournement.
  *
- * Threads : QEMU peut frapper le doorbell depuis n'importe quel thread vCPU
- * (MTTCG à 2 cœurs par défaut dans ce dépôt), et un contexte GL n'est courant
- * que pour un thread. On le rend donc courant AU DÉBUT DE CHAQUE OPÉRATION —
- * c'est bon marché et c'est le seul schéma sûr sans thread de rendu dédié.
+ * Threads : un contexte GL n'est courant que pour un thread, et EGL interdit
+ * de le rendre courant ailleurs tant qu'un thread le tient (EGL_BAD_ACCESS ;
+ * CGL est plus laxiste). Deux règles, donc : init() rend le contexte LIBRE en
+ * sortant, et chaque opération le rend courant À SON DÉBUT. Depuis la v9, le
+ * device appelle tout le reste — exécution, reset, libération — depuis son
+ * seul thread de rendu (qgpu-pci.c) ; tests/qgpu_core_test.c fait de même.
  *
  * Sans OpenGL à la compilation, ce fichier fournit un stub dont init() renvoie
  * false : le cœur retombe sur le backend logiciel et QGPU_REG_CAPS le dit.
@@ -342,6 +344,17 @@ static bool gl_init(QgpuCore *c)
                 g->renderer ? g->renderer : "?",
                 (const char *)glGetString(GL_VERSION));
     }
+    /* Le contexte NAÎT LIBRE. L'initialisation se fait sur le thread qui
+       réalise le device, l'exécution sur le thread de rendu (v9) : un contexte
+       EGL encore courant ici ne peut pas y être rendu courant — eglMakeCurrent
+       rend EGL_BAD_ACCESS sur le pilote NVIDIA, et toute soumission répondait
+       QGPU_ST_BACKEND. CGL ne l'interdit pas, d'où un bogue resté invisible
+       sur macOS. */
+#ifdef QGPU_GL_CGL
+    CGLSetCurrentContext(NULL);
+#else
+    eglMakeCurrent(g->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+#endif
     c->be_priv = g;
     return true;
 
@@ -1268,13 +1281,18 @@ static bool gl_depth_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
     if (!gl_target(c, s, NULL)) {
         return false;
     }
-    if (gs->packed) {
-        return gl_packed_upload(c, s, x, y, w, h, src, NULL);
-    }
-    glBindTexture(GL_TEXTURE_2D, gs->depth);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, GL_DEPTH_COMPONENT, GL_FLOAT, src);
-    return glGetError() == GL_NO_ERROR;
+    /* Profondeur seule ou combinée : le MÊME chemin, celui des fragments.
+       glTexSubImage2D passait par la conversion des transferts de pixels, qui
+       n'arrondit pas forcément comme l'écriture d'un fragment : sur une RTX
+       4060 Ti (pilote NVIDIA, Linux), 648/20479 devenait 0,0316421427 par
+       glTexSubImage2D et 0,0316422023 par glDrawPixels — un cran de 24 bits
+       d'écart : une application relisait une autre profondeur selon qu'elle
+       avait demandé un stencil ou non. (Ce qui n'est PAS garanti, et ne l'était
+       pas avant : qu'une profondeur téléversée soit bit à bit celle qu'aurait
+       posée le rastériseur au même z — la transformation des sommets arrondit
+       déjà, sur les deux backends.) */
+    (void)gs;
+    return gl_packed_upload(c, s, x, y, w, h, src, NULL);
 }
 
 static bool gl_stencil_readback(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,

@@ -130,7 +130,7 @@ if command -v cc >/dev/null 2>&1; then
     Darwin) QGPU_LIBS=(-framework OpenGL) ;;
     *)      QGPU_LIBS=(); pkg-config --exists egl gl 2>/dev/null && QGPU_LIBS=($(pkg-config --libs egl gl)) ;;
   esac
-  if cc -std=gnu11 -O1 -I patches/qgpu tests/qgpu_core_test.c \
+  if cc -std=gnu11 -O1 -pthread -I patches/qgpu tests/qgpu_core_test.c \
         patches/qgpu/qgpu-core.c patches/qgpu/qgpu-soft.c patches/qgpu/qgpu-gl.c \
         ${QGPU_LIBS[@]+"${QGPU_LIBS[@]}"} -lm -o "$QGPU_BIN" 2>/dev/null; then
     if "$QGPU_BIN" >/dev/null 2>&1; then ok "qgpu_core_test (soft + gl si dispo)"

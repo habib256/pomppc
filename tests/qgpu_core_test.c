@@ -8,9 +8,16 @@
  * produire les mêmes pixels aux points testés (intérieur des primitives et
  * fond — jamais sur une arête, où les règles de rastérisation diffèrent).
  *
- *   cc -I patches/qgpu tests/qgpu_core_test.c patches/qgpu/qgpu-{core,soft,gl}.c \
+ *   cc -pthread -I patches/qgpu tests/qgpu_core_test.c patches/qgpu/qgpu-{core,soft,gl}.c \
  *      [-framework OpenGL | -lEGL -lGL] -o qgpu_core_test && ./qgpu_core_test
+ *
+ * Comme dans le device (v9), le backend est initialisé sur un thread et tout le
+ * reste — exécution, reset, libération — se fait sur UN AUTRE : c'est ce qui a
+ * révélé qu'un contexte EGL laissé courant par l'initialisation ne peut plus
+ * être pris par le thread de rendu (EGL_BAD_ACCESS sur le pilote NVIDIA ; CGL,
+ * lui, ne l'interdit pas).
  */
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -3164,24 +3171,20 @@ static void run_v9(QgpuCore *c, uint8_t *shmem)
     (void)qgpu_core_execute(c, CMD_OFF, e.off - e.start);
 }
 
-static void run_backend(const char *name)
+typedef struct { QgpuCore *c; uint8_t *shmem; } BackendRun;
+
+/* Tout ce qui suit l'initialisation, sur le thread « de rendu ». */
+static void *run_backend_body(void *arg)
 {
-    uint8_t *shmem = calloc(1, SHMEM_SIZE);
-    QgpuCore c;
+    BackendRun *r = arg;
+    QgpuCore *c = r->c;
+    uint8_t *shmem = r->shmem;
     uint32_t len, st;
     Emit e;
 
-    printf("== backend %s\n", name);
-    if (!qgpu_core_init(&c, name, shmem, SHMEM_SIZE)) {
-        printf("  –    indisponible sur cet hôte (ignoré)\n");
-        free(shmem);
-        return;
-    }
-    CHECK(!strcmp(c.be->name, name), "backend actif : %s", c.be->name);
-
     len = build_scene(shmem);
-    st = qgpu_core_execute(&c, CMD_OFF, len);
-    CHECK(st == QGPU_ST_OK, "scène : statut %u (pc %u)", st, c.status_pc);
+    st = qgpu_core_execute(c, CMD_OFF, len);
+    CHECK(st == QGPU_ST_OK, "scène : statut %u (pc %u)", st, c->status_pc);
     CHECK(px(shmem, 8, 8) == 0xFF0000, "intérieur du triangle rouge : %06x", px(shmem, 8, 8));
     CHECK(px(shmem, 58, 58) == 0x00FF00, "intérieur du triangle vert (sens horaire) : %06x", px(shmem, 58, 58));
     CHECK(px(shmem, 40, 30) == 0x0000FF, "fond bleu : %06x", px(shmem, 40, 30));
@@ -3194,7 +3197,7 @@ static void run_backend(const char *name)
     emit(&e, QGPU_CMD_HDR(QGPU_OP_DRAW_TRIANGLES, QGPU_LEN_DRAW)); emit(&e, 3); emit(&e, VTX_OFF);
     emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER));
     emit(&e, 1); emit(&e, RB_OFF); emit(&e, STRIDE); emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H);
-    st = qgpu_core_execute(&c, CMD_OFF, e.off - e.start);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
     {
         uint32_t p = px(shmem, 31, 1), r = p >> 16, g = (p >> 8) & 255;
         CHECK(st == QGPU_ST_OK && r > 100 && r < 156 && g > 100 && g < 156,
@@ -3209,7 +3212,7 @@ static void run_backend(const char *name)
     emit(&e, 1); emit(&e, VTX_OFF); emit(&e, 8); emit(&e, 10); emit(&e, 20); emit(&e, 2); emit(&e, 1);
     emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER));
     emit(&e, 1); emit(&e, RB_OFF); emit(&e, STRIDE); emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H);
-    st = qgpu_core_execute(&c, CMD_OFF, e.off - e.start);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
     CHECK(st == QGPU_ST_OK && px(shmem, 10, 20) == 0x123456 && px(shmem, 11, 20) == 0xABCDEF,
           "upload/readback : %06x %06x", px(shmem, 10, 20), px(shmem, 11, 20));
 
@@ -3217,50 +3220,73 @@ static void run_backend(const char *name)
     e.off = e.start = CMD_OFF;
     emit(&e, QGPU_CMD_HDR(QGPU_OP_NOP, 1));
     emit(&e, QGPU_CMD_HDR(0x7777, 1));
-    st = qgpu_core_execute(&c, CMD_OFF, e.off - e.start);
-    CHECK(st == QGPU_ST_BAD_OPCODE && c.status_pc == 1, "opcode inconnu : st %u pc %u", st, c.status_pc);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_OPCODE && c->status_pc == 1, "opcode inconnu : st %u pc %u", st, c->status_pc);
 
     e.off = e.start = CMD_OFF;
     emit(&e, QGPU_CMD_HDR(QGPU_OP_DRAW_TRIANGLES, QGPU_LEN_DRAW)); emit(&e, 3); emit(&e, SHMEM_SIZE - 8);
-    st = qgpu_core_execute(&c, CMD_OFF, e.off - e.start);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
     CHECK(st == QGPU_ST_OOB, "sommets hors fenêtre : st %u", st);
 
     e.off = e.start = CMD_OFF;
     emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER));
     emit(&e, 1); emit(&e, SHMEM_SIZE - 64); emit(&e, STRIDE); emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H);
-    st = qgpu_core_execute(&c, CMD_OFF, e.off - e.start);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
     CHECK(st == QGPU_ST_OOB, "readback débordant : st %u", st);
 
     e.off = e.start = CMD_OFF;
     emit(&e, QGPU_CMD_HDR(QGPU_OP_CLEAR, 9));
-    st = qgpu_core_execute(&c, CMD_OFF, e.off - e.start);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
     CHECK(st == QGPU_ST_BAD_HEADER, "longueur dépassant le flux : st %u", st);
 
-    st = qgpu_core_execute(&c, SHMEM_SIZE - 4, 8);
+    st = qgpu_core_execute(c, SHMEM_SIZE - 4, 8);
     CHECK(st == QGPU_ST_BAD_SUBMIT, "soumission hors fenêtre : st %u", st);
 
     e.off = e.start = CMD_OFF;
     emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 5);
-    st = qgpu_core_execute(&c, CMD_OFF, e.off - e.start);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
     CHECK(st == QGPU_ST_BAD_ARG, "bind d'un contexte inexistant : st %u", st);
 
-    run_v2(&c, shmem);
-    run_v3(&c, shmem);
-    run_v4(&c, shmem);
-    run_v5(&c, shmem);
-    run_v6(&c, shmem);
-    run_v7(&c, shmem);
-    run_v8(&c, shmem);
-    run_zs(&c, shmem);
-    run_v9(&c, shmem);
+    run_v2(c, shmem);
+    run_v3(c, shmem);
+    run_v4(c, shmem);
+    run_v5(c, shmem);
+    run_v6(c, shmem);
+    run_v7(c, shmem);
+    run_v8(c, shmem);
+    run_zs(c, shmem);
+    run_v9(c, shmem);
 
-    qgpu_core_reset(&c);
+    qgpu_core_reset(c);
     e.off = e.start = CMD_OFF;
     emit(&e, QGPU_CMD_HDR(QGPU_OP_CLEAR, QGPU_LEN_CLEAR)); emit(&e, 1); emit(&e, 0); emit(&e, 0);
-    st = qgpu_core_execute(&c, CMD_OFF, e.off - e.start);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
     CHECK(st == QGPU_ST_NO_CTX, "après reset, plus de contexte : st %u", st);
 
-    qgpu_core_fini(&c);
+    qgpu_core_fini(c);
+    return NULL;
+}
+
+static void run_backend(const char *name)
+{
+    uint8_t *shmem = calloc(1, SHMEM_SIZE);
+    QgpuCore c;
+    BackendRun r = { &c, shmem };
+    pthread_t th;
+
+    printf("== backend %s\n", name);
+    if (!qgpu_core_init(&c, name, shmem, SHMEM_SIZE)) {
+        printf("  –    indisponible sur cet hôte (ignoré)\n");
+        free(shmem);
+        return;
+    }
+    CHECK(!strcmp(c.be->name, name), "backend actif : %s", c.be->name);
+    if (pthread_create(&th, NULL, run_backend_body, &r) != 0) {
+        CHECK(0, "thread de rendu du test");
+        qgpu_core_fini(&c);
+    } else {
+        pthread_join(th, NULL);
+    }
     free(shmem);
 }
 

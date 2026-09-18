@@ -135,6 +135,30 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
   commande qui désignera l'arène, sinon `reserve()` pouvait vider le flux entre les deux et
   envoyer la commande dans une **autre moitié** que la mémoire qu'elle désigne.
 
+### Premier passage sur l'hôte Linux + RTX 4060 Ti (18/09/2026)
+
+Les lots 1 à 3 ont été développés et mesurés sur un hôte macOS (CGL, Apple Silicon). Le
+premier passage sur l'hôte Linux (EGL, pilote NVIDIA) a trouvé deux bogues, **tous deux
+invisibles sous CGL** et tous deux côté hôte :
+
+- **Le device v9 ne rendait plus rien** : `qgpu_smoke.py` en backend GL, 12 échecs, statut
+  `QGPU_ST_BACKEND` dès la première scène. `gl_init` laissait le contexte EGL courant sur le
+  thread qui réalise le device, et EGL refuse de le rendre courant sur le thread de rendu tant
+  qu'un autre thread le tient (`EGL_BAD_ACCESS`). CGL ne l'interdit pas. Corrigé : le contexte
+  naît libre, et le **reset du cœur** et la **libération du backend** passent eux aussi par le
+  thread de rendu (le reset fait sur le vCPU y laissait le contexte). `tests/qgpu_core_test.c`
+  initialise désormais sur un thread et exécute sur un autre, comme le device : il reproduit le
+  bogue sans QEMU (177 échecs avant la correction).
+- **Profondeur relue différente selon la présence d'un stencil** : un cran de 24 bits d'écart
+  entre surface combinée (téléversée par `glDrawPixels`) et surface à profondeur seule (par
+  `glTexSubImage2D`) — le pilote n'arrondit pas pareil dans les deux chemins. Les deux passent
+  maintenant par `glDrawPixels`.
+
+Après correction, sur cet hôte : `qgpu_core_test` 0 échec (logiciel + GL), `qgpu_smoke.py` 0 échec
+(GL et logiciel), `run-all.sh` 47 OK. **Non refait ici** : tout ce qui demande l'invité
+(`gltest`, jeux) — la VM de développement et `devloop.py prepare` (qui passe par `hdiutil`)
+n'existent que sur l'hôte macOS.
+
 ## Points ouverts
 
 - **Zenerchi, fin de partie** : ralentissement quand les cristaux brillent, non diagnostiqué
