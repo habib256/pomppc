@@ -138,6 +138,16 @@ Le tableau de sauts (0x11dc0, 79 mots) précède 79 corps de cas à partir de 0x
 4 octets près, sur les 79 chaînes consécutives du binaire** : la correspondance ci-dessous est donc
 vérifiée par les longueurs, pas devinée. **[É]**
 
+> ⚠ **INFIRMÉ EN PARTIE le 18/09/2026.** L'expérience **V3** du §9 a été faite
+> (`POMPPC_GL_ALLEXT=1` : les 79 bits allumés d'un coup, liste lue par `gltest caps`). GLEngine
+> émet les noms **dans l'ordre des bits**, donc la lecture donne la table sans déduction. Le
+> tableau ci-dessous est **juste jusqu'au bit 23 et décalé d'un cran ensuite** : trois bits
+> émettent **deux** noms (25, 43 et 49), ce que l'alignement par les longueurs n'avait pas vu, et
+> `GL_EXT_framebuffer_object` manquait au bit 24. **La table corrigée, et son contrôle sur les 14
+> bits que pose le `GLDriver` d'Apple, sont dans `docs/re/version-extensions.md` §4** — c'est
+> celle-là qu'il faut employer. Les recommandations du §10(a) ci-dessous sont à relire à sa
+> lumière.
+
 | bit | extension | bit | extension |
 |---|---|---|---|
 | 0 | `GL_ARB_imaging` | 40 | `GL_EXT_stencil_two_side` |
@@ -610,20 +620,36 @@ Toujours après la transmission, poser un bit isolé et sans effet ailleurs, par
 et rien d'autre n'a bougé. Reprendre avec le bit 20 en posant aussi le paramètre `ctx+0x7584` pour
 vérifier la condition particulière de `GL_ARB_vertex_buffer_object`.
 
-### V3 — Le tableau de correspondance bit → extension
+### V3 — Le tableau de correspondance bit → extension — **faite le 18/09/2026**
 
-Poser `+0x124 = +0x128 = +0x12c = 0xFFFFFFFF` (uniquement dans une version de sonde, jamais
-livrée), lire `GL_EXTENSIONS` et comparer mot à mot au tableau du §3.2 (79 noms attendus après les
-25 fixes). C'est la vérification complète et bon marché du décodage.
+Poser `+0x124 = +0x128 = 0xFFFFFFFF` et `+0x12c = 0x7FFF` (sonde `POMPPC_GL_ALLEXT=1` du plugin,
+jamais active par défaut), lire `GL_EXTENSIONS` et le comparer au tableau du §3.2.
 
-### V4 — `GL_VERSION` vient du pilote
+**Résultat** : 107 noms — 25 fixes puis **82 pour 79 bits**, trois bits en émettant deux. Le
+tableau du §3.2 est **faux à partir du bit 24**. Table corrigée et contrôlée :
+`docs/re/version-extensions.md` §4.
+
+### V4 — `GL_VERSION` vient du pilote — **faite le 18/09/2026**
+
+*(Confirmée : `pomppc_override_string` rend « 1.1 POMPPC-1.0 » et c'est exactement ce que
+`glGetString(GL_VERSION)` donne, y compris pour Marble Blast. La version annoncée reste 1.1 parce
+que 1.2 exige les textures 3D, absentes : `docs/re/version-extensions.md`.)*
+
+
 
 Ajouter `case 0x1f02: return "1.5 POMPPC-1.0";` dans `pomppc_override_string`
 (`guest/gldriver/pomppc_accel.c:2296`) et lire `glGetString(GL_VERSION)` depuis `gltest`. Attendu :
 la chaîne sort inchangée, et `atof` d'une application voit 1.5. **À ne pas livrer tant que 1.5
 n'est pas tenu** (règle « rien n'est annoncé qui ne soit tenu »).
 
-### V5 — Les limites
+### V5 — Les limites — **faite le 18/09/2026, et la recommandation est INVERSÉE**
+
+*(Mesuré : au-delà de 4 unités et de 2048 pixels de côté, le plugin refuse proprement et le rendu
+d'Apple tient — 8 unités et une texture de 4096 de large rendent la bonne image sous le plugin.
+Abaisser `+0xb4` à 4, comme le §10(a).3 le recommandait, **retirerait** une capacité que la chaîne
+tient. Les limites d'Apple sont donc laissées telles quelles.)*
+
+
 
 Poser `+0xb4 = +0xb6 = +0xba = 4` et `+0xbc = 2048`, puis lire dans `gltest`
 `glGetIntegerv(GL_MAX_TEXTURE_UNITS)`, `(GL_MAX_TEXTURE_IMAGE_UNITS)`, `(GL_MAX_TEXTURE_SIZE)`, et

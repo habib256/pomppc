@@ -113,6 +113,20 @@
 #define GS_POLY_OFS_PT   0x317b
 #define GS_POLY_OFS_LINE 0x317c
 #define GS_LOGIC_OP      0x2e33
+/* ─── v8 : relevé le 18/09/2026 par la sonde « v8probe » de guest/gltest
+ * (un réglage GL par glClear, diff des vidages par tools/re/diffstate.py ;
+ * docs/re/etat-v8.md). Tous ces offsets ont été confirmés par un second
+ * réglage de valeur différente, et recoupés par glGet dans la même scène. ─── */
+#define GS_BLEND_COLOR   0x2d70   /* float ×4 : R, G, B, A (glBlendColor) */
+#define GS_LOGIC_OP_MODE 0x2e30   /* u16 : GL_CLEAR 0x1500 … GL_SET 0x150F */
+#define GS_LINE_STIP_FACT 0x2e26  /* u16 : facteur 1..256 */
+#define GS_LINE_STIP_PAT 0x2e28   /* u16 : motif */
+#define GS_POLY_STIP_MASK 0x30e8  /* 128 octets, DANS L'ORDRE de glPolygonStipple :
+                                     octet 0 = première ligne du masque = bas de
+                                     l'image, MSB à gauche. Le PowerPC étant
+                                     gros-boutiste, une lecture de 32 bits donne
+                                     déjà le mot que SET_POLYGON_STIPPLE attend :
+                                     ni retournement, ni échange d'octets. */
 #define GS_COLOR_MASK    0x2e40   /* octets R G B A */
 #define GS_DEPTH_MASK    0x2e44
 #define GS_POLY_MODE     0x3170   /* u16 avant, u16 arrière */
@@ -244,6 +258,9 @@ enum { SYNCED = 0, HOST_NEWER = 1, SW_NEWER = 2 };
 
 /* Dernière clé d'état remplie par le plugin, plus un (clés v7 de géométrie). */
 #define PLUGIN_SK_END_GEOM (QGPU_SK_FOG_END + 1)
+/* Idem pour les clés v8 (mélange constant, opération logique, modes de polygone,
+ * pointillés) : elles sont CONTIGUËS et commencent juste après les clés v7. */
+#define PLUGIN_SK_END_V8   (QGPU_SK_POLYGON_STIPPLE + 1)
 
 /* Genres de séries de sommets : opcode et taille des sommets. */
 enum { RK_TRI = 0, RK_TRI_TEX = 1, RK_TRI_TEX2 = 2, RK_LINES = 3, RK_POINTS = 4,
@@ -299,6 +316,13 @@ typedef struct PCtx {
     unsigned char  c_tg_on[QGPU_MAX_UNITS];          /* du texgen est-il posé sur le device ? */
     unsigned long  c_clip[25];                       /* masque + 6 plans, contigus */
     unsigned long  c_cur[4][4];                      /* couleur, normale, secondaire, brouillard */
+    /* ── v8 ── */
+    unsigned long  c_pstip[32];         /* motif de pointillé posé sur le device */
+    int            c_pstip_valid;
+    long           q_open;              /* requête d'occlusion ouverte, -1 si aucune */
+    unsigned long  q_extra;             /* fragments dessinés par le LOGICIEL pendant
+                                           la requête : comptés en trop, jamais en
+                                           moins (voir q_end) */
 } PCtx;
 
 typedef struct PTex {                   /* texture du GLDriver suivie par le plugin */
@@ -357,6 +381,8 @@ static struct {
     unsigned long   pend_off, pend_words, pend_fmt, pend_slots;
     int             pend_drop;
     int             pend_flat;          /* ombrage plat : change l'ordre des indices */
+    int             pend_wire;          /* mode de polygone ≠ GL_FILL : pas de fusion
+                                           en triangles, elle perdrait le contour */
     Post            post[MAX_POST];
     int             npost;
     unsigned long   ctx_used, surf_used;
@@ -369,6 +395,8 @@ static struct {
     unsigned long   n_frames, n_direct, n_tex_incomplete;
     unsigned long   n_rawverts, n_rawdraws, n_geomcmds, n_geomdrop, n_rawmerged;
     int             v7;                 /* device v7 ET chemin brut autorisé */
+    int             v8;                 /* device v8 : pipeline fixe complet */
+    unsigned long   query_base;         /* premier identifiant de requête du client */
     double          t_submit, t_copy, t_upload;   /* secondes cumulées */
 } G = { PTHREAD_MUTEX_INITIALIZER };
 
@@ -386,15 +414,18 @@ enum {
     NO_SURFACE, NO_TEX_UNITS, NO_TEX_TARGET, NO_TEX_ENV, NO_TEX_UNKNOWN,
     NO_TEX_BASE, NO_TEX_SIZE, NO_TEX_FORMAT, NO_TEX_ID, NO_TEX_COMBINE, NO_STENCIL,
     /* sorties du domaine propres au chemin brut (v7) */
-    NO_G_RASTER, NO_G_POINT, NO_G_PROGRAM, NO_G_STRIDE, NO_G_LATE, NO_COUNT
+    NO_G_RASTER, NO_G_POINT, NO_G_PROGRAM, NO_G_STRIDE, NO_G_LATE,
+    /* v8 : ce qui reste hors domaine une fois les fonctions v8 branchées */
+    NO_Q_FALLBACK, NO_TEX_PARAM, NO_COUNT
 };
 static const char *const no_name[NO_COUNT] = {
-    "tampon", "stencil/logicop/stipple", "brouillard", "polygonmode", "profondeur",
+    "tampon", "logicop/stipple/lissage", "brouillard", "polygonmode", "profondeur",
     "melange", "alphatest", "surface", "unites>2", "cible-texture", "texenv",
     "texture-inconnue", "format-base", "taille-texture", "format-texels", "id-texture",
     "combine", "stencil",
-    "brut:stipple/lissage", "brut:taille-de-point", "brut:programme",
+    "brut:lissage", "taille-de-point-attenuee", "brut:programme",
     "brut:pas-de-sommet", "brut:etat-tardif",
+    "requete:repli-logiciel", "param-texture",
 };
 static unsigned long no_count[NO_COUNT];
 static char no_detail[NO_COUNT][64];
@@ -410,6 +441,10 @@ static int no(int why, unsigned long a, unsigned long b)
 static const char *direct_why(void);
 static int geom_switch(void);
 static unsigned long fbits(float f);
+/* Requêtes d'occlusion : coupées si l'hôte ne les tient pas (le refus arrive
+   par le statut d'une soumission, donc dans broken_all, bien avant la section
+   qui les réalise). */
+static int qry_off;
 
 /* Bilan périodique (POMPPC_GL_STATS=<fichier>), appelé à chaque échange. */
 static void stats_frame(void)
@@ -566,15 +601,20 @@ void pomppc_backend_init(void)
                les clés de géométrie n'existent pas et les envoyer ferait
                refuser toutes les soumissions (vu en vrai au passage en v6). */
             G.v7 = G.q.version >= 7 && geom_switch() > 0;
+            /* La v8 (mélange constant, opération logique, modes de polygone,
+               pointillés, requêtes) vaut pour les DEUX chemins de dessin : elle
+               ne dépend donc pas de POMPPC_GL_GEOM, seulement du device. */
+            G.v8 = G.q.version >= 8;
+            G.query_base = G.q.index * QGPU_CLIENT_QUERY_IDS;
             atexit(on_exit_stats);
         } else {
             G.state = -1;
         }
         if (G.state > 0)
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
-                       " chemin brut %s)\n",
+                       " chemin brut %s, pipeline fixe v8 %s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
-                       G.v7 ? "actif" : "coupé");
+                       G.v7 ? "actif" : "coupé", G.v8 ? "actif" : "coupé");
         else
             pomppc_log("POMPPC: accélération désactivée : %s\n", why);
     }
@@ -691,6 +731,19 @@ static void broken_all(const char *why, long st, unsigned long pc)
         for (p = G.list; p; p = p->next)
             p->geom_lost = 1;
         G.v7 = 0;
+        return;
+    }
+    /* Un opcode de requête refusé veut dire que l'hôte ne tient pas
+       QGPU_CAP_OCCLUSION (le bit n'est pas encore publié dans QGPU_REG_CAPS,
+       cf. docs/protocole-v8 §5 : on le reconnaît au statut). On coupe les
+       requêtes, et rien d'autre : le dessin, lui, marche. */
+    if (pc < CMD_WORDS && QGPU_CMD_OP(G.cmd[pc]) >= QGPU_OP_QUERY_BEGIN &&
+        QGPU_CMD_OP(G.cmd[pc]) <= QGPU_OP_QUERY_RESULT) {
+        pomppc_log("POMPPC: opcode de requête refusé (statut %ld) : "
+                   "requêtes d'occlusion coupées\n", st);
+        qry_off = 1;
+        for (p = G.list; p; p = p->next)
+            p->q_open = -1;
         return;
     }
     {   /* Dire QUELLE commande, avec ses arguments : sans cela un refus coûte
@@ -1019,6 +1072,32 @@ static int base_format_ok(unsigned long f)
     return (f >= 0x1906 && f <= 0x190A) || f == 0x8049;
 }
 
+/* Les quatre paramètres que le plugin transmet tels quels (QGPU_TP_*). Le cœur
+ * n'accepte que GL_REPEAT, GL_CLAMP et GL_CLAMP_TO_EDGE pour la répétition, et
+ * les six filtres d'OpenGL : tout le reste ferait REFUSER LA SOUMISSION, donc
+ * couper l'accélération pour tout le processus.
+ *
+ * VU EN VRAI (scène « v15 ») : un seul glTexParameteri(GL_TEXTURE_WRAP_S,
+ * GL_MIRRORED_REPEAT) — une extension que ni GLEngine ni nous ne tenons, mais
+ * qu'une application a le droit de DEMANDER — suffisait à faire rejeter le
+ * flux et à faire retomber tout le processus sur le rendu logiciel. Un refus
+ * propre (repli sur Apple pour cette texture) coûte infiniment moins. */
+static int tex_filter_ok(unsigned long f)
+{
+    return f == 0x2600 || f == 0x2601 || (f >= 0x2700 && f <= 0x2703);
+}
+
+static int tex_wrap_ok(unsigned long w)
+{
+    return w == 0x2900 || w == 0x2901 || w == 0x812F;
+}
+
+static int tex_params_ok(const unsigned char *gp)
+{
+    return tex_filter_ok(U16(gp, TP_MIN)) && tex_filter_ok(U16(gp, TP_MAG)) &&
+           tex_wrap_ok(U16(gp, TP_WRAP_S)) && tex_wrap_ok(U16(gp, TP_WRAP_T));
+}
+
 static int tex_id_available(void)
 {
     unsigned long i;
@@ -1037,10 +1116,13 @@ static int texture_uploadable(PTex *t)
     unsigned long base = GLD_U32(dt, DT_BASE_FORMAT);
     int l;
 
-    if (t->qtex >= 0 && !t->dirty)
-        return 1;
     if (!GLD_U32(dt, DT_PARAMS) || !base_format_ok(base))
         return no(NO_TEX_BASE, base, 0);
+    if (!tex_params_ok((const unsigned char *)GLD_U32(dt, DT_PARAMS)))
+        return no(NO_TEX_PARAM, U16((unsigned char *)GLD_U32(dt, DT_PARAMS), TP_WRAP_S),
+                  U16((unsigned char *)GLD_U32(dt, DT_PARAMS), TP_MIN));
+    if (t->qtex >= 0 && !t->dirty)
+        return 1;
     if (t->qtex < 0 && !tex_id_available())
         return no(NO_TEX_ID, 0, 0);
     for (l = 0; l < DT_LEVELS; l++) {
@@ -1066,6 +1148,8 @@ static int upload_texture(PCtx *p, PTex *t)
     unsigned long base = GLD_U32(dt, DT_BASE_FORMAT), prm[4], off, *c;
     int l, k;
 
+    if (gp && base_format_ok(base) && !tex_params_ok(gp))
+        return no(NO_TEX_PARAM, U16(gp, TP_WRAP_S), U16(gp, TP_MIN));
     if (!gp || !base_format_ok(base)) {
         const unsigned char *lv0 = dt + DT_LEVEL0;
         unsigned long lmask = 0;
@@ -1490,12 +1574,29 @@ static void check_draw_buffer(PCtx *p)
 
 static int blend_factor_ok(unsigned long f)
 {
-    return f <= 1 || (f >= 0x300 && f <= 0x308);
+    /* v8 : les quatre facteurs à couleur constante (GL_CONSTANT_COLOR 0x8001 …
+       GL_ONE_MINUS_CONSTANT_ALPHA 0x8004) passent dans les clés que le plugin
+       remplissait déjà ; seule la couleur est une clé neuve. */
+    return f <= 1 || (f >= 0x300 && f <= 0x308) ||
+           (G.v8 && f >= QGPU_BF_CONSTANT_COLOR && f <= QGPU_BF_ONE_MINUS_CONSTANT_ALPHA);
 }
 
 static int blend_eq_ok(unsigned long e)
 {
-    return e == 0x8006 || e == 0x800A || e == 0x800B;
+    /* v8 : GL_MIN et GL_MAX. Rappel de la spécification, tenu par l'hôte :
+       avec eux les FACTEURS SONT IGNORÉS (docs/protocole-v8 §1). */
+    return e == QGPU_BEQ_ADD || e == QGPU_BEQ_SUBTRACT || e == QGPU_BEQ_REVERSE_SUBTRACT ||
+           (G.v8 && (e == QGPU_BEQ_MIN || e == QGPU_BEQ_MAX));
+}
+
+static int logic_op_ok(unsigned long m)
+{
+    return m >= QGPU_LO_CLEAR && m <= QGPU_LO_SET;
+}
+
+static int poly_mode_ok(unsigned long m)
+{
+    return m == QGPU_POLY_POINT || m == QGPU_POLY_LINE || m == QGPU_POLY_FILL;
 }
 
 static int stencil_op_ok(unsigned long op)
@@ -1528,8 +1629,16 @@ static int accel_ok_for(PCtx *p, int raw)
     if (!g || !sw_color(p) || GLD_U32(p->ctx, CTX_COLOR_BITS) != 32 ||
         GLD_U32(p->ctx, CTX_ROWPIX) < GLD_U32(p->ctx, CTX_WIDTH))
         return no(NO_BUFFER, GLD_U32(p->ctx, CTX_COLOR_BITS), GLD_U32(p->ctx, CTX_ROWPIX));
-    if (GLD_U8(g, GS_LOGIC_OP) || GLD_U8(g, GS_POLY_STIPPLE) || GLD_U8(g, GS_POLY_SMOOTH))
-        return no(NO_RASTER, GLD_U8(g, GS_LOGIC_OP), GLD_U8(g, GS_POLY_STIPPLE));
+    /* v8 : l'opération logique et le pointillé de polygone sont des étages de
+       FRAGMENT — ils agissent après l'endroit où les deux chemins de dessin se
+       rejoignent, donc ils valent pour le chemin brut comme pour l'ancien. Le
+       lissage de polygone, lui, reste hors périmètre (protocole v8 §6). */
+    if (GLD_U8(g, GS_POLY_SMOOTH) ||
+        (!G.v8 && (GLD_U8(g, GS_LOGIC_OP) || GLD_U8(g, GS_POLY_STIPPLE))))
+        return no(NO_RASTER, (GLD_U8(g, GS_LOGIC_OP) << 8) | GLD_U8(g, GS_POLY_STIPPLE),
+                  GLD_U8(g, GS_POLY_SMOOTH));
+    if (G.v8 && GLD_U8(g, GS_LOGIC_OP) && !logic_op_ok(U16(g, GS_LOGIC_OP_MODE)))
+        return no(NO_RASTER, U16(g, GS_LOGIC_OP_MODE), 0);
     /* stencil : sans tampon, le test passe toujours (OpenGL) ; avec, il faut le
        format que l'on sait synchroniser (8 bits dans la profondeur de 32) */
     if (stencil_active(p)) {
@@ -1543,8 +1652,18 @@ static int accel_ok_for(PCtx *p, int raw)
        où le GLDriver le calcule par fragment */
     if (!raw && GLD_U8(g, GS_FOG) && U16(g, GS_FOG_HINT) == 0x1102)
         return no(NO_FOG, U16(g, GS_FOG_MODE), 0);
-    if (U16(g, GS_POLY_MODE) != GL_FILL || U16(g, GS_POLY_MODE + 2) != GL_FILL)
-        return no(NO_POLYMODE, U16(g, GS_POLY_MODE), U16(g, GS_POLY_MODE + 2));
+    /* Modes de polygone : réservés au chemin BRUT. Sur le chemin de
+       rastérisation, GLEngine nous a déjà donné des TRIANGLES décomposés — le
+       contour du quadrilatère ou du polygone d'origine est perdu avant l'hôte,
+       et en mode GL_LINE les diagonales de la décomposition seraient tracées
+       (docs/protocole-v8-pipeline-fixe.md §3, « écart assumé »). Mesuré dans
+       l'invité : la scène « polymode » par le chemin hérité montre bien la
+       diagonale du quadrilatère. On préfère donc le repli exact d'Apple. */
+    if (U16(g, GS_POLY_MODE) != GL_FILL || U16(g, GS_POLY_MODE + 2) != GL_FILL) {
+        if (!raw || !G.v8 || !poly_mode_ok(U16(g, GS_POLY_MODE)) ||
+            !poly_mode_ok(U16(g, GS_POLY_MODE + 2)))
+            return no(NO_POLYMODE, U16(g, GS_POLY_MODE), U16(g, GS_POLY_MODE + 2));
+    }
     if (GLD_U8(g, GS_DEPTH_TEST) &&
         (GLD_U32(p->ctx, CTX_DEPTH_BITS) != 32 || U16(g, GS_DEPTH_FUNC) < 0x200 ||
          U16(g, GS_DEPTH_FUNC) > 0x207))
@@ -1567,7 +1686,50 @@ static int accel_ok(PCtx *p)
 
 static void compute_geom_state(PCtx *p, unsigned long *v);
 
-static void compute_state(PCtx *p, const TexInfo *ti, unsigned long *v)
+/* ─── v8 : la fin du pipeline fixe (docs/protocole-v8-pipeline-fixe.md) ───
+ *
+ * Ces clés agissent au FRAGMENT (mélange, opération logique, pointillé de
+ * polygone) ou à l'assemblage des triangles (mode de polygone, pointillé de
+ * ligne) : elles valent pour les deux chemins de dessin, contrairement aux
+ * clés de géométrie de la v7. Seuls les modes de polygone dépendent du chemin,
+ * parce que l'ancien reçoit des triangles déjà décomposés (cf. accel_ok_for).
+ */
+static void compute_v8_state(PCtx *p, unsigned long *v, int raw)
+{
+    unsigned char *g = gls(p);
+    const float *bc = (const float *)(g + GS_BLEND_COLOR);
+    unsigned long fr = U16(g, GS_POLY_MODE), bk = U16(g, GS_POLY_MODE + 2);
+    unsigned long fact = U16(g, GS_LINE_STIP_FACT);
+
+    /* Couleur constante : toujours envoyée, qu'un facteur s'en serve ou non.
+       C'est une valeur d'état comme la couleur de brouillard, et l'envoyer
+       inconditionnellement évite un cas de plus dans le cache. */
+    v[QGPU_SK_BLEND_COLOR] = (to_u8(bc[3]) << 24) | (to_u8(bc[0]) << 16) |
+                             (to_u8(bc[1]) << 8) | to_u8(bc[2]);
+    v[QGPU_SK_LOGIC_OP] = GLD_U8(g, GS_LOGIC_OP) != 0;
+    v[QGPU_SK_LOGIC_OP_MODE] = logic_op_ok(U16(g, GS_LOGIC_OP_MODE))
+                               ? U16(g, GS_LOGIC_OP_MODE) : QGPU_LO_COPY;
+    /* Hors chemin brut, on laisse GL_FILL : le domaine a déjà refusé le dessin
+       si l'application demandait autre chose (accel_ok_for), et poser la clé
+       ferait rendre en fil de fer les triangles que l'ancien chemin envoie. */
+    v[QGPU_SK_POLYGON_MODE_FRONT] = (raw && poly_mode_ok(fr)) ? fr : QGPU_POLY_FILL;
+    v[QGPU_SK_POLYGON_MODE_BACK] = (raw && poly_mode_ok(bk)) ? bk : QGPU_POLY_FILL;
+    v[QGPU_SK_POLY_OFFSET_LINE] = GLD_U8(g, GS_POLY_OFS_LINE) != 0;
+    v[QGPU_SK_POLY_OFFSET_POINT] = GLD_U8(g, GS_POLY_OFS_PT) != 0;
+    v[QGPU_SK_LINE_STIPPLE] = GLD_U8(g, GS_LINE_STIPPLE) != 0;
+    /* Le cœur borne le facteur à 1..256 ; GLEngine le range sur 16 bits et
+       glLineStipple l'a déjà écrêté, mais une clé fautive ferait refuser TOUTE
+       la soumission : on borne ici aussi. */
+    if (fact < 1) fact = 1;
+    if (fact > 256) fact = 256;
+    v[QGPU_SK_LINE_STIPPLE_FACTOR] = fact;
+    v[QGPU_SK_LINE_STIPPLE_PATTERN] = U16(g, GS_LINE_STIP_PAT);
+    v[QGPU_SK_POLYGON_STIPPLE] = GLD_U8(g, GS_POLY_STIPPLE) != 0;
+}
+
+/* `raw` : l'état est calculé pour un dessin du chemin BRUT (DRAW_RAW). Seuls
+ * les modes de polygone en dépendent — cf. accel_ok_for. */
+static void compute_state(PCtx *p, const TexInfo *ti, unsigned long *v, int raw)
 {
     unsigned char *g = gls(p);
     long sx = I32(g, GS_SCISSOR_RECT), sy = I32(g, GS_SCISSOR_RECT + 4);
@@ -1682,13 +1844,46 @@ static void compute_state(PCtx *p, const TexInfo *ti, unsigned long *v)
     }
     if (G.v7)
         compute_geom_state(p, v);
+    if (G.v8)
+        compute_v8_state(p, v, raw);
 }
 
-static void send_state(PCtx *p, const TexInfo *ti)
+/* Le motif de pointillé de polygone : 32 mots pris dans le bloc de GLEngine,
+ * décalés d'UNE LIGNE. En x il n'y a rien à faire — le bit de poids fort est la
+ * colonne 0 des deux côtés, et le PowerPC est gros-boutiste comme le fil.
+ *
+ * En y, le protocole dit que la ligne de surface `ys` emploie le mot
+ * `(hauteur − ys) mod 32` (docs/protocole-v8-pipeline-fixe.md §4). Or la
+ * coordonnée fenêtre OpenGL de cette ligne est `hauteur − 1 − ys`, et c'est
+ * elle que la spécification indexe. Les deux formules diffèrent d'une ligne :
+ * le plugin envoie donc `motif[(j − 1) mod 32]` au mot `j`.
+ *
+ * VU EN VRAI (scène « stipple », motif de 16 lignes allumées sur 32) : sans ce
+ * décalage, exactement 384 pixels — les 6 lignes de changement de bande du
+ * quadrilatère de 64 de large — diffèrent du rendu d'Apple, et l'écart y est de
+ * 255/255. Avec, l'image est identique. Le motif en COLONNES, lui, était déjà
+ * juste : c'est bien un décalage vertical d'une ligne, pas une erreur de sens. */
+static void send_polygon_stipple(PCtx *p)
+{
+    const unsigned long *src = (const unsigned long *)(gls(p) + GS_POLY_STIP_MASK);
+    unsigned long *c;
+    int j;
+    if (p->c_pstip_valid && !memcmp(p->c_pstip, src, sizeof(p->c_pstip)))
+        return;
+    memcpy(p->c_pstip, src, sizeof(p->c_pstip));
+    p->c_pstip_valid = 1;
+    c = reserve(p, QGPU_LEN_SET_POLYGON_STIPPLE);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_SET_POLYGON_STIPPLE, QGPU_LEN_SET_POLYGON_STIPPLE);
+    for (j = 0; j < 32; j++)
+        c[1 + j] = p->c_pstip[(j + 31) & 31];
+}
+
+static void send_state(PCtx *p, const TexInfo *ti, int raw)
 {
     unsigned long v[QGPU_SK_COUNT], *c;
-    int k;
-    compute_state(p, ti, v);
+    int k, r, nr = 0;
+    struct { int lo, hi; } rg[2];
+    compute_state(p, ti, v, raw);
     /* Sans le chemin brut, seulement les clés de rastérisation (v1–v6) : les
        clés de géométrie de la v7 gardent leur valeur initiale sur le device,
        et les envoyer à zéro serait invalide (vu en vrai au passage en v6, où
@@ -1700,17 +1895,27 @@ static void send_state(PCtx *p, const TexInfo *ti)
     /* Bornes EXPLICITES : jamais QGPU_SK_COUNT, qui grandit à chaque version du
        protocole — les clés que compute_state ne remplit pas partiraient à zéro,
        valeur souvent invalide, et tout le flux serait refusé (vu en vrai à
-       chaque changement de version : v6, puis v7, puis v8). */
-    for (k = 1; k < (G.v7 ? PLUGIN_SK_END_GEOM : QGPU_SK_LIGHTING); k++) {
-        if (p->st_valid && p->st[k] == v[k])
-            continue;
-        c = reserve(p, QGPU_LEN_SET_STATE);
-        c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
-        c[1] = k;
-        c[2] = v[k];
-        p->st[k] = v[k];
-    }
+       chaque changement de version : v6, puis v7, puis v8). D'où deux plages :
+       les clés de géométrie (v7) ne partent qu'avec le chemin brut, les clés de
+       fragment (v8) partent dès que le device est un v8 — elles servent aux
+       deux chemins. Quand les deux sont là, les plages se touchent. */
+    rg[nr].lo = 1; rg[nr].hi = G.v7 ? PLUGIN_SK_END_GEOM : QGPU_SK_LIGHTING; nr++;
+    if (G.v8) { rg[nr].lo = QGPU_SK_BLEND_COLOR; rg[nr].hi = PLUGIN_SK_END_V8; nr++; }
+    for (r = 0; r < nr; r++)
+        for (k = rg[r].lo; k < rg[r].hi; k++) {
+            if (p->st_valid && p->st[k] == v[k])
+                continue;
+            c = reserve(p, QGPU_LEN_SET_STATE);
+            c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
+            c[1] = k;
+            c[2] = v[k];
+            p->st[k] = v[k];
+        }
     p->st_valid = 1;
+    /* Le motif ne part que s'il sert : 33 mots de flux, c'est la commande la
+       plus longue du protocole. */
+    if (G.v8 && v[QGPU_SK_POLYGON_STIPPLE])
+        send_polygon_stipple(p);
 }
 
 /* Le dessin qui suit écrira-t-il la profondeur ? (GL : seulement si le test est actif) */
@@ -1723,6 +1928,186 @@ static int writes_depth(PCtx *p)
     return GLD_U8(g, GS_DEPTH_TEST) && GLD_U8(g, GS_DEPTH_MASK);
 }
 
+
+/* ═══════════════ requêtes d'occlusion (v8, OpenGL 1.5) ═══════════════
+ *
+ * Relevé par lecture de GLEngine (docs/re/etat-v8.md §3) : le moteur tient
+ * l'objet de requête lui-même (table de hachage, compte de références) et ne
+ * demande au pilote que cinq choses, une par renderer du contexte :
+ *
+ *   gldCreateQuery(drvctx, &poignée)                entrée gld n° 45 (+0x1c8)
+ *   gldDestroyQuery(drvctx, poignée)                entrée gld n° 46 (+0x1cc)
+ *   gldGetQueryInfo(drvctx, poignée, nom, &valeur)  entrée gld n° 47 (+0x1d0)
+ *   procédure +0x68 (drvctx, poignée)               glBeginQuery
+ *   procédure +0x6c (drvctx, poignée)               glEndQuery
+ *
+ * Les trois entrées gld du GLDriver d'Apple sont des bouchons (`li r3,0; blr`)
+ * et il n'installe rien en +0x68 / +0x6c. Mesuré dans l'invité (scène
+ * « qprobe ») : sous le rendu d'Apple seul, glBeginQuery / glEndQuery /
+ * glGetQueryObjectuiv ne rendent AUCUNE erreur GL et n'écrivent rien — une
+ * application lit le contenu initial de sa variable. C'est donc la seule
+ * fonction de ce lot que le repli logiciel ne tient pas du tout : le plugin la
+ * tient entièrement, ou elle n'est pas annoncée.
+ *
+ * La poignée rendue au moteur est `identifiant + 1` : GLEngine range 0 dans
+ * l'objet quand il n'y a pas de requête, et le premier client a justement
+ * l'identifiant 0 (query_base = index de tranche × QGPU_CLIENT_QUERY_IDS).
+ *
+ * EXACTITUDE. Le compte de l'hôte ne porte que les fragments qu'il a
+ * rastérisés. Si un dessin retombe sur le rendu d'Apple pendant qu'une requête
+ * court, ses fragments manqueraient. On ajoute alors l'aire de la surface au
+ * compte : sur-estimer est la SEULE direction sans danger, puisqu'une requête
+ * d'occlusion se lit « si le compte est nul, je peux sauter l'objet » — un
+ * objet déclaré visible est dessiné, donc l'image reste exacte, seule la
+ * vitesse souffre. Le bilan compte le cas (« requete:repli-logiciel ») ; il
+ * doit rester à zéro sur les scènes et sur les jeux.
+ */
+#define GL_QUERY_RESULT_AVAILABLE 0x8867
+
+static unsigned long qry_used;                        /* identifiants pris */
+static unsigned long qry_extra[QGPU_CLIENT_QUERY_IDS];/* replis pendant la requête */
+
+static unsigned long sat_add(unsigned long a, unsigned long b)
+{
+    return (a > 0xFFFFFFFFUL - b) ? 0xFFFFFFFFUL : a + b;
+}
+
+/* Les deux procédures de rastérisation. GLEngine ignore leur valeur de retour. */
+static long q_begin(void *ctx, unsigned long h)
+{
+    PCtx *p;
+    unsigned long *c, id;
+    pthread_mutex_lock(&G.mu);
+    p = find_ctx(ctx);
+    if (p && G.v8 && !qry_off && h && !p->broken && p->qctx >= 0 &&
+        h - 1 < QGPU_CLIENT_QUERY_IDS) {
+        id = G.query_base + (h - 1);
+        /* Le cœur refuse une seconde ouverture ; GLEngine l'interdit déjà, mais
+           un contexte détruit puis recréé pourrait laisser la nôtre ouverte. */
+        if (p->q_open >= 0) {
+            c = reserve(p, QGPU_LEN_QUERY);
+            c[0] = QGPU_CMD_HDR(QGPU_OP_QUERY_END, QGPU_LEN_QUERY);
+            c[1] = (unsigned long)p->q_open;
+        }
+        c = reserve(p, QGPU_LEN_QUERY);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_QUERY_BEGIN, QGPU_LEN_QUERY);
+        c[1] = id;
+        qry_extra[h - 1] = 0;
+        p->q_open = (long)id;
+        p->q_extra = 0;
+    }
+    pthread_mutex_unlock(&G.mu);
+    return 0;
+}
+
+static long q_end(void *ctx, unsigned long h)
+{
+    PCtx *p;
+    unsigned long *c;
+    pthread_mutex_lock(&G.mu);
+    p = find_ctx(ctx);
+    if (p && p->q_open >= 0 && h && h - 1 < QGPU_CLIENT_QUERY_IDS &&
+        (unsigned long)p->q_open == G.query_base + (h - 1) && !p->broken) {
+        c = reserve(p, QGPU_LEN_QUERY);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_QUERY_END, QGPU_LEN_QUERY);
+        c[1] = (unsigned long)p->q_open;
+        qry_extra[h - 1] = p->q_extra;
+        p->q_open = -1;
+        p->q_extra = 0;
+    }
+    pthread_mutex_unlock(&G.mu);
+    return 0;
+}
+
+/* gldCreateQuery : GLEngine veut UNE poignée par renderer, écrite à *out. */
+static long q_create(void *ctx, unsigned long *out)
+{
+    unsigned long i;
+    if (!out)
+        return 0;
+    *out = 0;
+    pthread_mutex_lock(&G.mu);
+    for (i = 0; i < QGPU_CLIENT_QUERY_IDS; i++)
+        if (!(qry_used & (1UL << i))) {
+            qry_used |= 1UL << i;
+            qry_extra[i] = 0;
+            *out = i + 1;
+            break;
+        }
+    pthread_mutex_unlock(&G.mu);
+    (void)ctx;
+    return 0;
+}
+
+static long q_destroy(void *ctx, unsigned long h)
+{
+    PCtx *p;
+    pthread_mutex_lock(&G.mu);
+    if (h && h - 1 < QGPU_CLIENT_QUERY_IDS) {
+        p = find_ctx(ctx);
+        /* Détruire une requête encore ouverte : la refermer d'abord, sinon son
+           identifiant resterait bloqué côté hôte. */
+        if (p && p->q_open >= 0 && (unsigned long)p->q_open == G.query_base + (h - 1) &&
+            !p->broken && p->qctx >= 0) {
+            unsigned long *c = reserve(p, QGPU_LEN_QUERY);
+            c[0] = QGPU_CMD_HDR(QGPU_OP_QUERY_END, QGPU_LEN_QUERY);
+            c[1] = (unsigned long)p->q_open;
+            p->q_open = -1;
+        }
+        qry_used &= ~(1UL << (h - 1));
+        qry_extra[h - 1] = 0;
+    }
+    pthread_mutex_unlock(&G.mu);
+    return 0;
+}
+
+/* gldGetQueryInfo(drvctx, poignée, nom, &valeur). Le device est synchrone : le
+ * résultat est là au retour du doorbell. On lit quand même le mot
+ * « disponible » plutôt que de le supposer — c'est ce que le protocole demande
+ * pour le jour où le device deviendra asynchrone (tâche 2.2). */
+static long q_info(void *ctx, unsigned long h, unsigned long pname, unsigned long *out)
+{
+    PCtx *p;
+    unsigned long off, *c, id, avail = 1, n = 0;
+
+    if (!out)
+        return 0;
+    pthread_mutex_lock(&G.mu);
+    p = find_ctx(ctx);
+    if (p && G.v8 && !qry_off && h && h - 1 < QGPU_CLIENT_QUERY_IDS &&
+        !p->broken && p->qctx >= 0 && arena_alloc(8, &off)) {
+        id = G.query_base + (h - 1);
+        c = reserve(p, QGPU_LEN_QUERY_RESULT);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_QUERY_RESULT, QGPU_LEN_QUERY_RESULT);
+        c[1] = id;
+        c[2] = G.q.base + off;
+        flush();
+        if (!qry_off && !p->broken) {
+            const unsigned long *w = (const unsigned long *)(G.q.win + off);
+            avail = w[0] ? 1 : 0;
+            n = sat_add(w[1], qry_extra[h - 1]);
+        }
+    }
+    *out = (pname == GL_QUERY_RESULT_AVAILABLE) ? avail : n;
+    pthread_mutex_unlock(&G.mu);
+    return 0;
+}
+
+/* Entrées gld que le plugin réalise lui-même, au lieu de les transmettre au
+ * rendu d'Apple. Le crochet pomppc_pre rend l'adresse à appeler : il suffit d'y
+ * rendre la nôtre, le trampoline saute dedans avec les arguments d'origine.
+ * (C'est aussi ce qui évite de toucher à gld_tramp.s, qui est engendré.) */
+void *pomppc_gld_override(int id)
+{
+    if (G.state <= 0 || !G.v8 || qry_off)
+        return 0;
+    switch (id) {
+    case GLD_CreateQuery:  return (void *)q_create;
+    case GLD_DestroyQuery: return (void *)q_destroy;
+    case GLD_GetQueryInfo: return (void *)q_info;
+    default:               return 0;
+    }
+}
 
 /* ═════════════ chemin brut : la géométrie sur le GPU de l'hôte (v7) ═════════════
  *
@@ -1901,10 +2286,13 @@ static int geom_ok(PCtx *p)
     if (!accel_ok_for(p, 1))
         return 0;
     g = gls(p);
-    /* Rastérisation que la v7 ne porte pas. Au dispatch on ne sait pas encore
-       quelle primitive viendra : le pointillé de ligne, le lissage et la taille
-       de point atténuée sortent du domaine quoi qu'il arrive. */
-    if (GLD_U8(g, GS_LINE_STIPPLE) || GLD_U8(g, GS_LINE_SMOOTH) ||
+    /* Rastérisation que le protocole ne porte pas. Au dispatch on ne sait pas
+       encore quelle primitive viendra : le lissage et la taille de point
+       atténuée sortent du domaine quoi qu'il arrive. Le pointillé de LIGNE, lui,
+       est entré dans le domaine avec la v8 — et c'est bien ici qu'il faut le
+       laisser passer, puisque l'hôte tient le compteur primitive par primitive
+       (remise à zéro par segment pour GL_LINES, continu le long d'un ruban). */
+    if ((!G.v8 && GLD_U8(g, GS_LINE_STIPPLE)) || GLD_U8(g, GS_LINE_SMOOTH) ||
         GLD_U8(g, GS_POINT_SMOOTH))
         return no(NO_G_RASTER, (GLD_U8(g, GS_LINE_STIPPLE) << 8) | GLD_U8(g, GS_LINE_SMOOTH),
                   GLD_U8(g, GS_POINT_SMOOTH));
@@ -2378,7 +2766,7 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
     }
     check_draw_buffer(p);
     sync_to_host(p, 1, GLD_U8(gls(p), GS_DEPTH_TEST) || stencil_active(p));
-    send_state(p, &ti);
+    send_state(p, &ti, 1);
     geom_send_all(p, p->geom_fmt);
     /* Plus aucun vidage entre ici et EndPrimitiveBuffer : GLEngine écrit dans
        la fenêtre partagée pendant ce temps. On fait donc la place maintenant. */
@@ -2396,6 +2784,14 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
     /* L'ombrage décide de l'ordre des indices d'un quadrilatère ; il ne peut
        plus changer entre ici et EndPrimitiveBuffer. */
     G.pend_flat = GLD_U32(gls(p), GS_SHADE_MODEL) == GL_FLAT;
+    /* Fil de fer ou points : la fusion recollerait les quadrilatères et les
+       polygones en TRIANGLES indexés, et l'hôte tracerait alors les diagonales
+       de la décomposition — c'est exactement l'information de contour que la v8
+       tient pour DRAW_RAW. On garde donc les primitives telles quelles.
+       Vu en vrai (scène « polymode ») : sans ceci, la diagonale du
+       quadrilatère en fil de fer est tracée, et 3 % de l'image diffère. */
+    G.pend_wire = U16(gls(p), GS_POLY_MODE) != GL_FILL ||
+                  U16(gls(p), GS_POLY_MODE + 2) != GL_FILL;
     /* la zone est prise tout de suite : un autre fil ne doit pas la réutiliser */
     G.vtx += slots * words * 4;
     if (n)
@@ -2663,7 +3059,7 @@ static void geom_end(void *ctx, long flag, short mode, long n)
     if (same && !G.raw_idx && G.raw_mode == m && mode_mergeable(m)) {
         G.raw_count += n;               /* bout à bout, sans un seul indice */
         G.raw_lots++;
-    } else if (same && merge_switch() && mode_tris(m) &&
+    } else if (same && merge_switch() && !G.pend_wire && mode_tris(m) &&
                (G.raw_idx || mode_tris(G.raw_mode)) &&
                merge_batch(m, (unsigned long)n, words)) {
         /* recollé en TRIANGLES indexés : les sommets n'ont pas bougé */
@@ -2773,7 +3169,7 @@ static void begin_common(PCtx *p, Batch *b, const TexInfo *ti)
 {
     check_draw_buffer(p);
     sync_to_host(p, 1, GLD_U8(gls(p), GS_DEPTH_TEST) || stencil_active(p));
-    send_state(p, ti);
+    send_state(p, ti, 0);
     b->p = p;
     b->h = (float)p->sh;
     b->zinv = 1.0f / GLD_F32(p->ctx, CTX_DEPTH_SCALE);
@@ -2781,16 +3177,33 @@ static void begin_common(PCtx *p, Batch *b, const TexInfo *ti)
     b->fog = GLD_U8(gls(p), GS_FOG) != 0;
 }
 
-/* Lignes et points : ni texture, ni stipple, ni lissage, ni décalage. */
+/* Lignes et points : ni texture, ni stipple, ni lissage, ni décalage.
+ *
+ * Le pointillé de LIGNE reste hors de ce chemin même avec la v8 : l'hôte remet
+ * son compteur à zéro à chaque segment d'un `DRAW_LINES`, ce qui est la règle
+ * d'OpenGL pour `GL_LINES` mais pas pour un ruban — et le plugin découpe ici
+ * les rubans en segments indépendants. Le chemin brut, lui, transmet le mode de
+ * primitive et l'hôte tient le compteur correctement : c'est là que le
+ * pointillé de ligne est accéléré.
+ *
+ * Les paramètres de point (GL 1.4) ne sont pas portés par le protocole : avec
+ * une atténuation par la distance, GLEngine calcule une taille PAR SOMMET que
+ * `QGPU_SK_POINT_SIZE`, qui est une seule valeur d'état, ne peut pas rendre.
+ * Sans ce test, les points sortaient à la taille de base — le seul cas de ce
+ * lot où le plugin rendait une image fausse en silence. */
 static int begin_lp(PCtx *p, Batch *b, int lines)
 {
     unsigned char *g;
+    const float *att;
     if (!accel_ok(p) || GLD_U8(p->ctx, CTX_TEXTURING) || !ensure_surface(p))
         return 0;
     g = gls(p);
     if (lines ? (GLD_U8(g, GS_LINE_STIPPLE) || GLD_U8(g, GS_LINE_SMOOTH) || GLD_U8(g, GS_POLY_OFS_LINE))
               : (GLD_U8(g, GS_POINT_SMOOTH) || GLD_U8(g, GS_POLY_OFS_PT)))
         return 0;
+    att = (const float *)(g + GS_POINT_ATT);
+    if (!lines && (att[0] != 1.0f || att[1] != 0.0f || att[2] != 0.0f))
+        return no(NO_G_POINT, fbits(att[1]), fbits(att[2]));
     begin_common(p, b, 0);
     b->kind = lines ? RK_LINES : RK_POINTS;
     return 1;
@@ -2903,6 +3316,13 @@ static void *fallback(PCtx *p, int slot, int writes_color, int touches_depth)
            reste la référence (voir sync_to_sw_locked). */
         if (touches_depth && writes_depth(p) && p->depth == SYNCED)
             p->depth = SW_NEWER;
+        /* Requête d'occlusion ouverte : l'hôte ne verra pas ces fragments. On
+           majore (voir la section « requêtes d'occlusion ») plutôt que de
+           rendre un compte trop petit, qui ferait sauter un objet visible. */
+        if (p->q_open >= 0 && (writes_color || touches_depth)) {
+            p->q_extra = sat_add(p->q_extra, p->sw * p->sh);
+            no(NO_Q_FALLBACK, (unsigned long)slot, p->q_extra);
+        }
         G.n_fallback++;
         fb_count[slot]++;
     }
@@ -3145,7 +3565,7 @@ static long a_clear(void *ctx, long mask, long c, long d, long e, long f, long g
         int full, color_full, depth_full, ds_written;
         g = gls(p);
         check_draw_buffer(p);
-        compute_state(p, 0, v);
+        compute_state(p, 0, v, 0);
         full = !v[QGPU_SK_SCISSOR] ||
                (v[QGPU_SK_SCISSOR_X] == 0 && v[QGPU_SK_SCISSOR_Y] == 0 &&
                 v[QGPU_SK_SCISSOR_W] == p->sw && v[QGPU_SK_SCISSOR_H] == p->sh);
@@ -3163,7 +3583,7 @@ static long a_clear(void *ctx, long mask, long c, long d, long e, long f, long g
             p->depth = SYNCED;
         sync_to_host(p, (host & GL_COLOR_BUFFER_BIT) != 0,
                      (host & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0);
-        send_state(p, 0);
+        send_state(p, 0, 0);
         cc = (const float *)(g + GS_CLEAR_COLOR);
         cmd = reserve(p, QGPU_LEN_CLEAR);
         cmd[0] = QGPU_CMD_HDR(QGPU_OP_CLEAR, QGPU_LEN_CLEAR);
@@ -3502,9 +3922,13 @@ static int proc_kind(int slot)
     case PROC_Accum:
         return K_READ | K_WRITE;
     case PROC_DrawPixels: case PROC_CopyPixels: case PROC_RenderBitmap:
-    case PROC_RenderVertexArray: case PROC_Proc68: case PROC_Proc6c:
+    case PROC_RenderVertexArray:
     case PROC_Proc84: case PROC_Proc88: case PROC_Proc8c:
         return K_READ | K_WRITE | K_DEPTH;
+    case PROC_Proc68: case PROC_Proc6c:
+        /* glBeginQuery / glEndQuery (relevé v8) : ils ne lisent ni n'écrivent
+           aucun tampon, et le GLDriver d'Apple ne les installe même pas. */
+        return K_NONE;
     case PROC_ModifyTexSubImage: case PROC_GenerateTexMipmaps:
         return K_NONE | 0x100;            /* suivi de texture seulement (voir plus bas) */
     default:  /* Noop, Begin/EndPrimitiveBuffer, RenderVertexBuffer (vides chez Apple),
@@ -3530,8 +3954,18 @@ static void *accel_proc(int slot)
     case PROC_RenderLinesPtr:      return a_lines_ptr;
     case PROC_RenderPoints:        return a_points;
     case PROC_RenderPointsPtr:     return a_points_ptr;
+    case PROC_Proc68:              return G.v8 ? (void *)q_begin : 0;
+    case PROC_Proc6c:              return G.v8 ? (void *)q_end : 0;
     default:                       return 0;
     }
+}
+
+/* Emplacements que le plugin remplit même si le GLDriver d'Apple n'y a RIEN
+ * posé : ce sont ceux où l'on n'a pas besoin de lui pour être exact. Les deux
+ * procédures de requête sont dans ce cas (sa table les laisse nulles). */
+static int proc_standalone(int slot)
+{
+    return slot == PROC_Proc68 || slot == PROC_Proc6c;
 }
 
 /* Appelé par les trampolines de procédures : synchronise puis rend la cible. */
@@ -3626,8 +4060,10 @@ void pomppc_hook_procs(void *ctx, void **procs)
         p->procs = procs;
         for (k = 0; k < PROC_COUNT; k++) {
             void *mine = install_for(k);
-            if (!procs[k] || !mine || procs[k] == mine)
+            if (!mine || procs[k] == mine)
                 continue;
+            if (!procs[k] && !proc_standalone(k))
+                continue;               /* rien à quoi se replier : on s'abstient */
             p->real[k] = procs[k];
             p->mine[k] = mine;
             procs[k] = mine;
@@ -3660,6 +4096,7 @@ void pomppc_context_created(void *ctx)
     p->ctx = ctx;
     p->qctx = -1;
     p->surf = -1;
+    p->q_open = -1;
     p->color = p->depth = SW_NEWER;
     pthread_mutex_lock(&G.mu);
     if (G.state > 0) {
@@ -3703,6 +4140,9 @@ void pomppc_context_destroyed(void *ctx)
         }
         if (G.state > 0 && p->qctx >= 0) {
             destroy_surface(p);
+            /* Le cœur referme la requête laissée ouverte par un contexte
+               détruit, mais l'identifiant, lui, est à nous : on le rend. */
+            p->q_open = -1;
             c = reserve(p, QGPU_LEN_CTX);
             c[0] = QGPU_CMD_HDR(QGPU_OP_CTX_DESTROY, QGPU_LEN_CTX);
             c[1] = p->qctx;
@@ -3877,6 +4317,102 @@ void pomppc_unpatch_pixel_list(void *pf)
         pomppc_unpatch_pixel_format(pf);
 }
 
+/* ─── Sonde : forcer une limite du bloc de configuration (relevé seulement) ───
+ * POMPPC_GL_TRY3D=n déclare une taille maximale de texture 3D, que le GLDriver
+ * d'Apple laisse à 0. Cela sert à répondre par l'expérience à « le repli
+ * logiciel sait-il faire les textures 3D d'OpenGL 1.2 ? » — question dont
+ * dépend la version que l'on peut annoncer. Jamais actif par défaut. */
+static void caps_probe(unsigned char *cfg)
+{
+    const char *e;
+    /* POMPPC_GL_ALLEXT=1 : allume les 79 bits d'extensions. C'est l'expérience
+       V3 de docs/re/capacites-glengine.md §9 — GLEngine émet les noms DANS
+       L'ORDRE DES BITS, donc la liste lue donne la table bit → nom sans la
+       moindre déduction. Sonde seulement, jamais livrée active. */
+    e = getenv("POMPPC_GL_ALLEXT");
+    if (e && e[0] == '1') {
+        GLD_U32(cfg, 0x124) = 0xFFFFFFFFUL;
+        GLD_U32(cfg, 0x128) = 0xFFFFFFFFUL;
+        GLD_U32(cfg, 0x12c) = 0x00007FFFUL;   /* bits 64..78 */
+    }
+    e = getenv("POMPPC_GL_TRY3D");
+    if (e && *e) {
+        unsigned long n = (unsigned long)atoi(e);
+        if (n < 1 || n > 4096)
+            n = 256;
+        GLD_U16(cfg, 0xbe) = (unsigned short)n;     /* GL_MAX_3D_TEXTURE_SIZE */
+        GLD_U16(cfg, 0xc0) = (unsigned short)n;
+    }
+}
+
+/* ─── Tâche 4.1 : n'annoncer QUE ce que la chaîne tient ───────────────────────
+ *
+ * `GL_EXTENSIONS` n'est pas une chaîne du pilote : GLEngine la fabrique à
+ * partir de 25 noms fixes (les extensions qu'il réalise lui-même) et d'un
+ * TABLEAU DE 79 BITS que le pilote pose en cfg+0x124..0x12c
+ * (docs/re/capacites-glengine.md §3). Les pilotes font un `|=` : on ajoute des
+ * bits, on n'en retire jamais.
+ *
+ * Ce que l'on ajoute, et pourquoi (relevé complet et preuves dans
+ * docs/re/version-extensions.md, scène « v15 ») :
+ *
+ *   bit 17 GL_ARB_occlusion_query        tenu par NOUS (v8) : GLEngine appelle
+ *                                        gldCreateQuery / +0x68 / +0x6c /
+ *                                        gldGetQueryInfo, que le rendu d'Apple
+ *                                        laisse en bouchon. Annoncé seulement
+ *                                        si le device est un v8.
+ *   bit 20 GL_ARB_vertex_buffer_object   tenu par GLEngine lui-même (mesuré :
+ *                                        glGenBuffers/glBufferData/glDrawArrays
+ *                                        dessinent juste, avec et sans nous).
+ *   bit 39 GL_EXT_blend_func_separate    mesuré tenu, et accéléré : les quatre
+ *                                        facteurs partent depuis la v2.
+ *
+ * Les NUMÉROS DE BIT viennent de l'expérience, pas de la table lue : les 79
+ * bits allumés d'un coup (POMPPC_GL_ALLEXT=1) donnent la liste dans l'ordre des
+ * bits, et elle corrige la table de docs/re/capacites-glengine.md §3.2 à partir
+ * du bit 24 (table corrigée : docs/re/version-extensions.md §4). La première
+ * version de ce code annonçait ainsi GL_EXT_texture_rectangle et
+ * GL_EXT_secondary_color — deux extensions que la chaîne NE TIENT PAS — en
+ * croyant poser GL_EXT_texture_env_add et GL_EXT_blend_func_separate.
+ *
+ * Ce que l'on N'AJOUTE PAS, bien que le nom soit tentant : les textures 3D et
+ * les cartes de cube (GLEngine rend GL_INVALID_VALUE), la compression S3TC
+ * (aucune erreur, mais l'image est fausse), la couleur secondaire
+ * (GL_COLOR_SUM n'ajoute rien), GL_MIRRORED_REPEAT (traité comme GL_REPEAT),
+ * les textures de profondeur et le multiéchantillonnage. Tout cela est mesuré,
+ * pas supposé.
+ *
+ * Les LIMITES d'Apple sont laissées telles quelles : 8 unités de texture et
+ * 4096 de côté. Le chemin accéléré n'en tient que 4 et 2048 — au-delà, le
+ * plugin refuse proprement et le rendu d'Apple reprend la main, ce qui est
+ * exact (vérifié : « multitexture 8 unites » et « texture 4096 » de la scène
+ * « v15 » rendent la bonne image avec le plugin). Annoncer moins serait mentir
+ * dans l'autre sens.
+ */
+static void caps_extensions(unsigned char *cfg)
+{
+    unsigned long w0 = 0, w1 = 0;
+    if (G.v8)
+        w0 |= 1UL << 17;                /* GL_ARB_occlusion_query */
+    w0 |= 1UL << 20;                    /* GL_ARB_vertex_buffer_object */
+    w1 |= 1UL << (39 - 32);             /* GL_EXT_blend_func_separate */
+    GLD_U32(cfg, 0x124) |= w0;
+    GLD_U32(cfg, 0x128) |= w1;
+}
+
+void pomppc_patch_caps(void *cfg)
+{
+    if (G.state <= 0 || !cfg)
+        return;
+    caps_probe((unsigned char *)cfg);
+    {   /* POMPPC_GL_ANNOUNCE=0 : laisser l'annonce d'Apple intacte (comparaison) */
+        const char *e = getenv("POMPPC_GL_ANNOUNCE");
+        if (e && e[0] == '0')
+            return;
+    }
+    caps_extensions((unsigned char *)cfg);
+}
+
 const char *pomppc_override_string(long name, const char *apple)
 {
     static char renderer[64];
@@ -3890,6 +4426,20 @@ const char *pomppc_override_string(long name, const char *apple)
             snprintf(renderer, sizeof(renderer), "POMPPC qgpu (%s host GPU)",
                      (G.q.caps & QGPU_CAP_GL) ? "OpenGL" : "software");
         return renderer;
+    case 0x1f02:
+        /* GL_VERSION sort TEL QUEL de gldGetString : GLEngine ne le recoupe ni
+           avec les bits d'extensions ni avec les limites (relevé
+           docs/re/capacites-glengine.md §2). Autrement dit, c'est un simple
+           strcpy — et donc une promesse que rien ne vérifie. On y met la plus
+           haute version dont TOUTES les fonctions sont tenues, et elle est 1.1 :
+           OpenGL 1.2 exige les textures 3D, que GLEngine refuse
+           (GL_MAX_3D_TEXTURE_SIZE = 0, glTexImage3D → GL_INVALID_VALUE) et que
+           le protocole qgpu ne porte pas non plus. Le détail, fonction par
+           fonction, est dans docs/re/version-extensions.md ; ce qui manque pour
+           1.2, 1.3, 1.4 et 1.5 y est nommé. Le suffixe, lui, dit qui rend. */
+        if (getenv("POMPPC_GL_ANNOUNCE") && getenv("POMPPC_GL_ANNOUNCE")[0] == '0')
+            return apple;
+        return "1.1 POMPPC-1.0";
     default:
         return apple;
     }

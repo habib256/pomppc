@@ -1571,6 +1571,950 @@ int main(int argc, char **argv)
         glDisable(GL_TEXTURE_3D); glEnable(GL_TEXTURE_CUBE_MAP);
         glClear(GL_COLOR_BUFFER_BIT);                                   /* 27 */
         glFinish();
+    } else if (!strcmp(scene, "v15")) {
+        /* Relevé, fonction par fonction, de ce que la chaîne TIENT vraiment —
+           c'est la matière de docs/re/version-extensions.md et la condition de
+           la tâche 4.1 (« rien n'est annoncé qui ne soit tenu »). Chaque sous-
+           test fait l'appel, note l'erreur GL, dessine une case de 24×24 et
+           compare le pixel du centre à ce qu'OpenGL exige. Le verdict est
+           imprimé ; la scène ne compte AUCUN échec, c'est un relevé. */
+        int cell = 0;
+        GLuint tid[4];
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glGenTextures(4, tid);
+#define V15_BEGIN(nm) do { const char *v15n = nm; GLenum v15e; unsigned long v15g; \
+                           int v15x = (cell % 5) * 25 + 4, v15y = (cell / 5) * 25 + 4; \
+                           cell++; while (glGetError() != GL_NO_ERROR) { }
+#define V15_QUAD() do { glBegin(GL_QUADS); \
+              glVertex2f((float)v15x, (float)v15y); \
+              glVertex2f((float)v15x + 20, (float)v15y); \
+              glVertex2f((float)v15x + 20, (float)v15y + 20); \
+              glVertex2f((float)v15x, (float)v15y + 20); glEnd(); } while (0)
+#define V15_END(want) glFinish(); v15e = glGetError(); \
+                      v15g = px(v15x + 10, v15y + 10); \
+                      printf("  %-28s err 0x%-4x pixel %06lx attendu %06lx : %s\n", \
+                             v15n, (unsigned)v15e, v15g, (unsigned long)(want), \
+                             (v15e == GL_NO_ERROR && v15g == (unsigned long)(want)) \
+                             ? "TENU" : "NON TENU"); } while (0)
+
+        /* ── 1.2 : textures 3D ── */
+        V15_BEGIN("1.2 texture 3D")
+        {
+            typedef void (*t3_f)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei,
+                                 GLint, GLenum, GLenum, const GLvoid *);
+            t3_f t3 = (t3_f)gl_sym("glTexImage3D", "glTexImage3DEXT");
+            static GLubyte d3[2 * 2 * 2 * 3];
+            int i2;
+            for (i2 = 0; i2 < 8; i2++) {
+                d3[i2 * 3 + 0] = 255; d3[i2 * 3 + 1] = 128; d3[i2 * 3 + 2] = 0;
+            }
+            glBindTexture(0x806F /* GL_TEXTURE_3D */, tid[0]);
+            if (t3) t3(0x806F, 0, GL_RGB, 2, 2, 2, 0, GL_RGB, GL_UNSIGNED_BYTE, d3);
+            glTexParameteri(0x806F, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(0x806F, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glEnable(0x806F);
+            glColor3ub(255, 255, 255);
+            glTexCoord3f(0.5f, 0.5f, 0.5f);
+            V15_QUAD();
+            glDisable(0x806F);
+        }
+        V15_END(0xFF8000);
+
+        /* ── 1.3 : cartes de cube ── */
+        V15_BEGIN("1.3 cube map")
+        {
+            static GLubyte f6[4 * 3];
+            int i2, f;
+            for (i2 = 0; i2 < 4; i2++) {
+                f6[i2 * 3 + 0] = 0; f6[i2 * 3 + 1] = 255; f6[i2 * 3 + 2] = 128;
+            }
+            glBindTexture(0x8513 /* GL_TEXTURE_CUBE_MAP */, tid[1]);
+            for (f = 0; f < 6; f++)
+                glTexImage2D(0x8515 + f, 0, GL_RGB, 2, 2, 0, GL_RGB, GL_UNSIGNED_BYTE, f6);
+            glTexParameteri(0x8513, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(0x8513, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glEnable(0x8513);
+            glColor3ub(255, 255, 255);
+            glTexCoord3f(0.0f, 0.0f, 1.0f);
+            V15_QUAD();
+            glDisable(0x8513);
+        }
+        V15_END(0x00FF80);
+
+        /* ── 1.3 : textures compressées (S3TC) ── */
+        V15_BEGIN("1.3 compression S3TC")
+        {
+            typedef void (*ct_f)(GLenum, GLint, GLenum, GLsizei, GLsizei, GLint,
+                                 GLsizei, const GLvoid *);
+            ct_f ct = (ct_f)gl_sym("glCompressedTexImage2D", "glCompressedTexImage2DARB");
+            int i2;
+            /* Bloc DXT1 uni : deux couleurs 565 identiques (rouge pur). Le
+               tableau fait 256 octets alors que le bloc en fait 8, parce que le
+               rasteriseur d'Apple, qui ne sait pas décompresser, lit la texture
+               comme si elle était brute et déborde : avec un tableau trop
+               court, l'image dépendrait de la mémoire du processus, et la
+               comparaison n'aurait aucun sens. */
+            static GLubyte blk[256];
+            blk[0] = 0x00; blk[1] = 0xF8; blk[2] = 0x00; blk[3] = 0xF8;
+            for (i2 = 4; i2 < 256; i2++) blk[i2] = 0x40;
+            glBindTexture(GL_TEXTURE_2D, tid[2]);
+            if (ct) ct(GL_TEXTURE_2D, 0, 0x83F0 /* COMPRESSED_RGB_S3TC_DXT1 */,
+                       4, 4, 0, 8, blk);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glEnable(GL_TEXTURE_2D);
+            glColor3ub(255, 255, 255);
+            glTexCoord2f(0.5f, 0.5f);
+            V15_QUAD();
+            glDisable(GL_TEXTURE_2D);
+        }
+        V15_END(0xFF0000);
+
+        /* ── 1.4 : mélange à facteurs séparés ── */
+        V15_BEGIN("1.4 blend func separate")
+        {
+            typedef void (*bfs_f)(GLenum, GLenum, GLenum, GLenum);
+            bfs_f bfs = (bfs_f)gl_sym("glBlendFuncSeparate", "glBlendFuncSeparateEXT");
+            glColor3ub(64, 64, 64);
+            V15_QUAD();                      /* destination connue */
+            glEnable(GL_BLEND);
+            if (bfs) bfs(GL_ONE, GL_ONE, GL_ZERO, GL_ZERO);
+            glColor4ub(32, 32, 32, 255);
+            V15_QUAD();
+            glDisable(GL_BLEND);
+            glBlendFunc(GL_ONE, GL_ZERO);
+        }
+        V15_END(0x606060);
+
+        /* ── 1.4 : couleur secondaire ── */
+        V15_BEGIN("1.4 couleur secondaire")
+        {
+            typedef void (*sc_f)(GLfloat, GLfloat, GLfloat);
+            sc_f sc = (sc_f)gl_sym("glSecondaryColor3f", "glSecondaryColor3fEXT");
+            glEnable(0x8458 /* GL_COLOR_SUM */);
+            if (sc) sc(128 / 255.0f, 0, 0);
+            glColor3ub(0, 128, 0);
+            V15_QUAD();
+            glDisable(0x8458);
+            if (sc) sc(0, 0, 0);
+        }
+        V15_END(0x808000);
+
+        /* ── 1.4 : paramètres de point (taille bornée) ── */
+        V15_BEGIN("1.4 point parameters")
+        {
+            pp_f ppf = (pp_f)gl_sym("glPointParameterf", "glPointParameterfARB");
+            pp_fv ppv = (pp_fv)gl_sym("glPointParameterfv", "glPointParameterfvARB");
+            static const GLfloat att[3] = { 1, 0, 0 };
+            if (ppv) ppv(GL_POINT_DISTANCE_ATTENUATION_ARB, att);
+            if (ppf) ppf(GL_POINT_SIZE_MIN_ARB, 9.0f);
+            glPointSize(1);
+            glColor3ub(0, 255, 255);
+            glBegin(GL_POINTS);
+            glVertex2f((float)v15x + 10.5f, (float)v15y + 10.5f);
+            glEnd();
+            if (ppf) ppf(GL_POINT_SIZE_MIN_ARB, 1.0f);
+            glPointSize(1);
+        }
+        V15_END(0x00FFFF);
+
+        /* ── 1.4 : mipmaps automatiques (GL_GENERATE_MIPMAP) ── */
+        V15_BEGIN("1.4 mipmaps automatiques")
+        {
+            /* Niveau 0 : damier 4×4 noir et blanc. Avec les mipmaps engendrés,
+               un quadrilatère très minifié doit rendre le GRIS moyen ; sans, on
+               échantillonnerait le damier et on verrait du noir ou du blanc. */
+            static GLubyte ck[16 * 16 * 3];
+            int u2, v2;
+            for (v2 = 0; v2 < 16; v2++)
+                for (u2 = 0; u2 < 16; u2++) {
+                    GLubyte c2 = ((u2 + v2) & 1) ? 255 : 0;
+                    ck[(v2 * 16 + u2) * 3 + 0] = c2;
+                    ck[(v2 * 16 + u2) * 3 + 1] = c2;
+                    ck[(v2 * 16 + u2) * 3 + 2] = c2;
+                }
+            glBindTexture(GL_TEXTURE_2D, tid[3]);
+            glTexParameteri(GL_TEXTURE_2D, 0x8191 /* GL_GENERATE_MIPMAP */, GL_TRUE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 16, 16, 0, GL_RGB, GL_UNSIGNED_BYTE, ck);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glEnable(GL_TEXTURE_2D);
+            glColor3ub(255, 255, 255);
+            /* 128 texels pour 20 pixels : très minifié, donc un niveau de
+               mipmap élevé — le damier doit devenir gris uniforme. Sans
+               mipmaps engendrés, on échantillonnerait le damier lui-même. */
+            glBegin(GL_QUADS);
+            glTexCoord2f(0, 0); glVertex2f((float)v15x, (float)v15y);
+            glTexCoord2f(8, 0); glVertex2f((float)v15x + 20, (float)v15y);
+            glTexCoord2f(8, 8); glVertex2f((float)v15x + 20, (float)v15y + 20);
+            glTexCoord2f(0, 8); glVertex2f((float)v15x, (float)v15y + 20);
+            glEnd();
+            glDisable(GL_TEXTURE_2D);
+            glTexParameteri(GL_TEXTURE_2D, 0x8191, GL_FALSE);
+        }
+        V15_END(0x7F7F7F);
+
+        /* ── 1.5 : objets tampon de sommets ── */
+        V15_BEGIN("1.5 VBO (glBindBuffer)")
+        {
+            typedef void (*gb_f)(GLsizei, GLuint *);
+            typedef void (*bb_f)(GLenum, GLuint);
+            typedef void (*bd_f)(GLenum, long, const GLvoid *, GLenum);
+            gb_f gb = (gb_f)gl_sym("glGenBuffers", "glGenBuffersARB");
+            bb_f bb = (bb_f)gl_sym("glBindBuffer", "glBindBufferARB");
+            bd_f bd = (bd_f)gl_sym("glBufferData", "glBufferDataARB");
+            gb_f db = (gb_f)gl_sym("glDeleteBuffers", "glDeleteBuffersARB");
+            GLuint vb = 0;
+            GLfloat vv[8];
+            vv[0] = (float)v15x;      vv[1] = (float)v15y;
+            vv[2] = (float)v15x + 20; vv[3] = (float)v15y;
+            vv[4] = (float)v15x + 20; vv[5] = (float)v15y + 20;
+            vv[6] = (float)v15x;      vv[7] = (float)v15y + 20;
+            if (gb && bb && bd) {
+                gb(1, &vb);
+                bb(0x8892 /* GL_ARRAY_BUFFER */, vb);
+                bd(0x8892, (long)sizeof(vv), vv, 0x88E4 /* GL_STATIC_DRAW */);
+                glEnableClientState(GL_VERTEX_ARRAY);
+                glVertexPointer(2, GL_FLOAT, 0, (const GLvoid *)0);
+                glColor3ub(255, 0, 255);
+                glDrawArrays(GL_QUADS, 0, 4);
+                glDisableClientState(GL_VERTEX_ARRAY);
+                bb(0x8892, 0);
+                if (db) db(1, &vb);
+            }
+        }
+        V15_END(0xFF00FF);
+
+        /* ── 1.4 : répétition en miroir ── */
+        V15_BEGIN("1.4 GL_MIRRORED_REPEAT")
+        {
+            static GLubyte ramp[2 * 3] = { 255, 0, 0, 0, 0, 255 };
+            glBindTexture(GL_TEXTURE_2D, tid[2]);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 2, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, ramp);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, 0x8370 /* MIRRORED_REPEAT */);
+            glEnable(GL_TEXTURE_2D);
+            glColor3ub(255, 255, 255);
+            glTexCoord2f(1.25f, 0.5f);       /* miroir : équivaut à s = 0.75 → bleu */
+            V15_QUAD();
+            glDisable(GL_TEXTURE_2D);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        }
+        V15_END(0x0000FF);
+
+        /* ── 1.4 : position de rastérisation en coordonnées fenêtre ── */
+        V15_BEGIN("1.4 glWindowPos + glDrawPixels")
+        {
+            typedef void (*wp_f)(GLint, GLint);
+            wp_f wp = (wp_f)gl_sym("glWindowPos2i", "glWindowPos2iARB");
+            static GLubyte im[8 * 8 * 3];
+            int i2;
+            for (i2 = 0; i2 < 64; i2++) {
+                im[i2 * 3 + 0] = 0; im[i2 * 3 + 1] = 200; im[i2 * 3 + 2] = 255;
+            }
+            if (wp) wp(v15x + 6, H - (v15y + 14));   /* fenêtre : y vers le HAUT */
+            glDrawPixels(8, 8, GL_RGB, GL_UNSIGNED_BYTE, im);
+        }
+        V15_END(0x00C8FF);
+
+        /* ── 1.2 : GL_CLAMP_TO_EDGE ── */
+        V15_BEGIN("1.2 GL_CLAMP_TO_EDGE")
+        {
+            static GLubyte ramp[2 * 3] = { 255, 0, 0, 0, 255, 0 };
+            glBindTexture(GL_TEXTURE_2D, tid[2]);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 2, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, ramp);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, 0x812F /* CLAMP_TO_EDGE */);
+            glEnable(GL_TEXTURE_2D);
+            glColor3ub(255, 255, 255);
+            glTexCoord2f(3.0f, 0.5f);        /* borné : dernier texel → vert */
+            V15_QUAD();
+            glDisable(GL_TEXTURE_2D);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        }
+        V15_END(0x00FF00);
+
+        /* ── 1.3 : multitexture, 4 unités ── */
+        V15_BEGIN("1.3 multitexture 4 unites")
+        {
+            static GLubyte g1[3] = { 128, 128, 128 };
+            int u2;
+            for (u2 = 0; u2 < 4; u2++) {
+                glActiveTextureARB(GL_TEXTURE0_ARB + u2);
+                glBindTexture(GL_TEXTURE_2D, tid[2]);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 1, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, g1);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+                glEnable(GL_TEXTURE_2D);
+                glMultiTexCoord2fARB(GL_TEXTURE0_ARB + u2, 0.5f, 0.5f);
+            }
+            glColor3ub(255, 255, 255);
+            V15_QUAD();                      /* 0.5^4 = 0.0625 → 16 */
+            for (u2 = 3; u2 >= 0; u2--) {
+                glActiveTextureARB(GL_TEXTURE0_ARB + u2);
+                glDisable(GL_TEXTURE_2D);
+            }
+            glActiveTextureARB(GL_TEXTURE0_ARB);
+        }
+        V15_END(0x101010);
+
+        /* ── 1.3 : multitexture, 8 unités (au-delà du chemin accéléré : c'est le
+           repli sur le rendu d'Apple qui doit tenir) ── */
+        V15_BEGIN("1.3 multitexture 8 unites")
+        {
+            static GLubyte g1[3] = { 128, 128, 128 };
+            int u2;
+            for (u2 = 0; u2 < 8; u2++) {
+                glActiveTextureARB(GL_TEXTURE0_ARB + u2);
+                glBindTexture(GL_TEXTURE_2D, tid[2]);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 1, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, g1);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+                glEnable(GL_TEXTURE_2D);
+                glMultiTexCoord2fARB(GL_TEXTURE0_ARB + u2, 0.5f, 0.5f);
+            }
+            glColor3ub(255, 255, 255);
+            V15_QUAD();                      /* 0.5^8 · 255 = 0,996 → 1 */
+            for (u2 = 7; u2 >= 0; u2--) {
+                glActiveTextureARB(GL_TEXTURE0_ARB + u2);
+                glDisable(GL_TEXTURE_2D);
+            }
+            glActiveTextureARB(GL_TEXTURE0_ARB);
+        }
+        V15_END(0x010101);
+
+        /* ── limite annoncée : une texture de 4096 de large (au-delà du chemin
+           accéléré, qui s'arrête à QGPU_MAX_TEX_DIM = 2048) ── */
+        V15_BEGIN("limite texture 4096 de large")
+        {
+            static GLubyte wide[4096 * 3];
+            int i2;
+            for (i2 = 0; i2 < 4096; i2++) {
+                wide[i2 * 3 + 0] = 0; wide[i2 * 3 + 1] = 128; wide[i2 * 3 + 2] = 255;
+            }
+            glBindTexture(GL_TEXTURE_2D, tid[3]);
+            glTexParameteri(GL_TEXTURE_2D, 0x8191, GL_FALSE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 4096, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, wide);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glEnable(GL_TEXTURE_2D);
+            glColor3ub(255, 255, 255);
+            glTexCoord2f(0.5f, 0.5f);
+            V15_QUAD();
+            glDisable(GL_TEXTURE_2D);
+        }
+        V15_END(0x0080FF);
+
+        /* ── 1.2 : glDrawRangeElements ── */
+        V15_BEGIN("1.2 glDrawRangeElements")
+        {
+            typedef void (*dre_f)(GLenum, GLuint, GLuint, GLsizei, GLenum, const GLvoid *);
+            dre_f dre = (dre_f)gl_sym("glDrawRangeElements", "glDrawRangeElementsEXT");
+            GLfloat vv[8];
+            static const GLuint ii[4] = { 0, 1, 2, 3 };
+            vv[0] = (float)v15x;      vv[1] = (float)v15y;
+            vv[2] = (float)v15x + 20; vv[3] = (float)v15y;
+            vv[4] = (float)v15x + 20; vv[5] = (float)v15y + 20;
+            vv[6] = (float)v15x;      vv[7] = (float)v15y + 20;
+            if (dre) {
+                glEnableClientState(GL_VERTEX_ARRAY);
+                glVertexPointer(2, GL_FLOAT, 0, vv);
+                glColor3ub(200, 200, 0);
+                dre(GL_QUADS, 0, 3, 4, GL_UNSIGNED_INT, ii);
+                glDisableClientState(GL_VERTEX_ARRAY);
+            }
+        }
+        V15_END(0xC8C800);
+
+        /* ── 1.3 : matrices transposées ── */
+        V15_BEGIN("1.3 glLoadTransposeMatrix")
+        {
+            typedef void (*lt_f)(const GLfloat *);
+            lt_f lt = (lt_f)gl_sym("glLoadTransposeMatrixf", "glLoadTransposeMatrixfARB");
+            static const GLfloat idm[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+            glMatrixMode(GL_MODELVIEW);
+            glPushMatrix();
+            if (lt) lt(idm);
+            glColor3ub(0, 200, 200);
+            V15_QUAD();
+            glPopMatrix();
+        }
+        V15_END(0x00C8C8);
+
+        /* ── 1.4 : coordonnée de brouillard explicite ── */
+        V15_BEGIN("1.4 glFogCoord")
+        {
+            typedef void (*fc_f)(GLfloat);
+            fc_f fc = (fc_f)gl_sym("glFogCoordf", "glFogCoordfEXT");
+            GLfloat fogc[4] = { 0, 0, 1, 1 };
+            glFogi(GL_FOG_MODE, GL_LINEAR);
+            glFogf(GL_FOG_START, 0);
+            glFogf(GL_FOG_END, 1);
+            glFogfv(GL_FOG_COLOR, fogc);
+            glFogi(GL_FOG_COORDINATE_SOURCE_EXT, GL_FOG_COORDINATE_EXT);
+            glEnable(GL_FOG);
+            if (fc) fc(1.0f);               /* f = 0 → couleur du brouillard pure */
+            glColor3ub(255, 0, 0);
+            V15_QUAD();
+            glDisable(GL_FOG);
+            glFogi(GL_FOG_COORDINATE_SOURCE_EXT, GL_FRAGMENT_DEPTH_EXT);
+        }
+        V15_END(0x0000FF);
+#undef V15_BEGIN
+#undef V15_QUAD
+#undef V15_END
+        glDeleteTextures(4, tid);
+        glFinish();
+    } else if (!strcmp(scene, "blendc")) {
+        /* Mélange à couleur constante et équations minimum/maximum (v8).
+           Six bandes verticales sur un fond connu ; les couleurs sont choisies
+           exactes en 8 bits pour que les témoins des bandes MIN et MAX (où
+           aucun arrondi n'intervient) soient comparables au bit près. */
+        typedef void (*bc_f)(GLfloat, GLfloat, GLfloat, GLfloat);
+        typedef void (*be_f)(GLenum);
+        bc_f blend_color = (bc_f)gl_sym("glBlendColor", "glBlendColorEXT");
+        be_f blend_eq = (be_f)gl_sym("glBlendEquation", "glBlendEquationEXT");
+        static const struct { GLenum src, dst, eq; } bands[6] = {
+            { 0x8001 /* CONSTANT_COLOR */,       GL_ZERO, 0x8006 },
+            { 0x8002 /* 1-CONSTANT_COLOR */,     GL_ZERO, 0x8006 },
+            { 0x8003 /* CONSTANT_ALPHA */,       GL_ZERO, 0x8006 },
+            { 0x8004 /* 1-CONSTANT_ALPHA */,     GL_ZERO, 0x8006 },
+            { GL_ZERO, GL_ZERO, 0x8007 /* GL_MIN */ },
+            { GL_ZERO, GL_ZERO, 0x8008 /* GL_MAX */ },
+        };
+        int i;
+        float bw = W / 6.0f;
+        printf("glBlendColor=%p glBlendEquation=%p\n", (void *)blend_color, (void *)blend_eq);
+        glClearColor(64 / 255.0f, 128 / 255.0f, 192 / 255.0f, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_BLEND);
+        if (blend_color) blend_color(0.5f, 0.25f, 0.75f, 0.5f);
+        for (i = 0; i < 6; i++) {
+            glBlendFunc(bands[i].src, bands[i].dst);
+            if (blend_eq) blend_eq(bands[i].eq);
+            glColor3ub(192, 64, 128);
+            glBegin(GL_QUADS);
+            glVertex2f(i * bw, 8); glVertex2f((i + 1) * bw, 8);
+            glVertex2f((i + 1) * bw, (float)H - 8); glVertex2f(i * bw, (float)H - 8);
+            glEnd();
+        }
+        if (blend_eq) blend_eq(0x8006);
+        glDisable(GL_BLEND);
+        glFinish();
+        {
+            int x4 = (int)(4.5f * bw), x5 = (int)(5.5f * bw);
+            /* min / max, canal par canal, entre (192,64,128) et (64,128,192) :
+               les facteurs sont IGNORÉS, c'est la lettre de la spécification. */
+            check("GL_MIN", x4, H / 2, 0x404080);
+            check("GL_MAX", x5, H / 2, 0xC080C0);
+            check("fond intact (haut)", W / 2, 2, 0x4080C0);
+        }
+    } else if (!strcmp(scene, "logicop")) {
+        /* Opérations logiques (v8). Six carrés, une opération chacun, sur un
+           fond dont chaque octet est connu : la sortie est exacte au bit près,
+           il n'y a aucun arrondi dans cette fonction. */
+        static const struct { GLenum op; const char *n; } ops[6] = {
+            { GL_XOR, "XOR" }, { GL_INVERT, "INVERT" }, { GL_AND, "AND" },
+            { GL_OR, "OR" }, { GL_COPY_INVERTED, "COPY_INVERTED" }, { GL_NAND, "NAND" },
+        };
+        static const unsigned char S[3] = { 0xF0, 0x3C, 0xA5 };
+        static const unsigned char D[3] = { 0x5A, 0xFF, 0x0F };
+        int i;
+        float bw = W / 6.0f;
+        glClearColor(D[0] / 255.0f, D[1] / 255.0f, D[2] / 255.0f, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_COLOR_LOGIC_OP);
+        for (i = 0; i < 6; i++) {
+            glLogicOp(ops[i].op);
+            glColor3ub(S[0], S[1], S[2]);
+            glBegin(GL_QUADS);
+            glVertex2f(i * bw, 8); glVertex2f((i + 1) * bw, 8);
+            glVertex2f((i + 1) * bw, (float)H - 8); glVertex2f(i * bw, (float)H - 8);
+            glEnd();
+        }
+        glDisable(GL_COLOR_LOGIC_OP);
+        glFinish();
+        {
+            int k;
+            unsigned long want[6];
+            for (k = 0; k < 6; k++) {
+                unsigned long r, g2, b;
+                switch (ops[k].op) {
+                case GL_XOR:  r = S[0] ^ D[0]; g2 = S[1] ^ D[1]; b = S[2] ^ D[2]; break;
+                case GL_INVERT: r = ~D[0]; g2 = ~D[1]; b = ~D[2]; break;
+                case GL_AND:  r = S[0] & D[0]; g2 = S[1] & D[1]; b = S[2] & D[2]; break;
+                case GL_OR:   r = S[0] | D[0]; g2 = S[1] | D[1]; b = S[2] | D[2]; break;
+                case GL_COPY_INVERTED: r = ~S[0]; g2 = ~S[1]; b = ~S[2]; break;
+                default:      r = ~(S[0] & D[0]); g2 = ~(S[1] & D[1]); b = ~(S[2] & D[2]); break;
+                }
+                want[k] = ((r & 0xFF) << 16) | ((g2 & 0xFF) << 8) | (b & 0xFF);
+                check(ops[k].n, (int)((k + 0.5f) * bw), H / 2, want[k]);
+            }
+            check("fond intact (haut)", W / 2, 2, 0x5AFF0F);
+        }
+    } else if (!strcmp(scene, "polymode")) {
+        /* Modes de polygone (v8). Un quadrilatère et un triangle en fil de fer,
+           puis en points, puis les deux faces en modes différents. Le point à
+           regarder est la DIAGONALE du quadrilatère : elle ne doit pas être
+           tracée (c'est le contour, pas la décomposition en triangles). */
+        /* 64/255 et non 0.25 : 0.25·255 = 63,75, que le rendu d'Apple arrondit
+           à 63 et l'hôte à 64 — un écart de 1/255 qui n'apprend rien. */
+        glClearColor(0, 0, 64 / 255.0f, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glColor3ub(255, 255, 0);
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        /* Coordonnées en .5, c'est-à-dire au CENTRE des pixels. Une arête posée
+           sur un y ENTIER tombe exactement sur la frontière entre deux lignes,
+           et deux rasteriseurs conformes ont le droit d'en choisir chacun une —
+           c'est ce qui sépare l'hôte du rendu d'Apple dans la scène « mixte ».
+           Ici on sort du cas ambigu, et les deux images doivent coïncider. */
+        glBegin(GL_QUADS);
+        glVertex2f(8.5f, 8.5f); glVertex2f((float)W / 2 - 8.5f, 8.5f);
+        glVertex2f((float)W / 2 - 8.5f, (float)H / 2 - 8.5f);
+        glVertex2f(8.5f, (float)H / 2 - 8.5f);
+        glEnd();
+        glColor3ub(0, 255, 255);
+        glBegin(GL_TRIANGLES);
+        glVertex2f((float)W / 2 + 8.5f, 8.5f); glVertex2f((float)W - 8.5f, 8.5f);
+        glVertex2f((float)W / 2 + 8.5f, (float)H / 2 - 8.5f);
+        glEnd();
+        /* points : taille 1, pour que la comparaison avec le rendu d'Apple ne
+           dépende pas de la façon dont chacun centre un gros point. */
+        glPolygonMode(GL_FRONT_AND_BACK, GL_POINT);
+        glColor3ub(255, 0, 255);
+        glBegin(GL_POLYGON);
+        glVertex2f(8.5f, (float)H / 2 + 8.5f);
+        glVertex2f((float)W / 2 - 8.5f, (float)H / 2 + 8.5f);
+        glVertex2f((float)W / 2 - 8.5f, (float)H - 8.5f);
+        glVertex2f(8.5f, (float)H - 8.5f);
+        glEnd();
+        /* une face pleine, l'autre en fil de fer : le quadrilatère est arrière */
+        glPolygonMode(GL_FRONT, GL_FILL);
+        glPolygonMode(GL_BACK, GL_LINE);
+        glColor3ub(0, 255, 0);
+        glBegin(GL_QUADS);                  /* sens horaire = face arrière en CCW */
+        glVertex2f((float)W / 2 + 8.5f, (float)H / 2 + 8.5f);
+        glVertex2f((float)W / 2 + 8.5f, (float)H - 8.5f);
+        glVertex2f((float)W - 8.5f, (float)H - 8.5f);
+        glVertex2f((float)W - 8.5f, (float)H / 2 + 8.5f);
+        glEnd();
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        glFinish();
+        {
+            int cx = W / 4, cy = H / 4;
+            /* (cx,cy) est EXACTEMENT sur la diagonale de la décomposition du
+               quadrilatère en deux triangles : c'est le témoin de l'écart que
+               la v8 supprime sur le chemin brut. */
+            check("diagonale NON tracee", cx, cy, 0x000040);
+            check("diagonale NON tracee (2)", cx + 1, cy + 1, 0x000040);
+            check("interieur du quad, hors diagonale", cx + 8, cy - 8, 0x000040);
+        }
+    } else if (!strcmp(scene, "stipple")) {
+        /* Pointillés (v8). À gauche : un motif de polygone en bandes
+           HORIZONTALES de 16 lignes — il dit le sens vertical (c'est la couture
+           entre la ligne yw=0 de glPolygonStipple, en bas, et la ligne 0 des
+           surfaces du protocole, en haut). À droite : un motif en colonnes de
+           8 — il dit le sens horizontal (bit de poids fort = x = 0). En bas :
+           des segments pointillés. */
+        GLubyte rows[128], cols[128];
+        int i, r;
+        for (r = 0; r < 32; r++)
+            for (i = 0; i < 4; i++) {
+                rows[r * 4 + i] = (r < 16) ? 0xFF : 0x00;
+                cols[r * 4 + i] = 0xF0;      /* 8 pixels allumés, 8 éteints */
+            }
+        glClearColor(0, 0, 64 / 255.0f, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_POLYGON_STIPPLE);
+        glPolygonStipple(rows);
+        glColor3ub(255, 128, 0);
+        glBegin(GL_QUADS);
+        glVertex2f(0, 0); glVertex2f((float)W / 2, 0);
+        glVertex2f((float)W / 2, (float)H * 3 / 4); glVertex2f(0, (float)H * 3 / 4);
+        glEnd();
+        glPolygonStipple(cols);
+        glColor3ub(0, 255, 128);
+        glBegin(GL_QUADS);
+        glVertex2f((float)W / 2, 0); glVertex2f((float)W, 0);
+        glVertex2f((float)W, (float)H * 3 / 4); glVertex2f((float)W / 2, (float)H * 3 / 4);
+        glEnd();
+        glDisable(GL_POLYGON_STIPPLE);
+        /* pointillé de ligne : segments indépendants puis un ruban */
+        glEnable(GL_LINE_STIPPLE);
+        glLineStipple(2, 0x00FF);
+        glColor3ub(255, 255, 255);
+        glBegin(GL_LINES);
+        glVertex2f(4, (float)H - 12); glVertex2f((float)W - 4, (float)H - 12);
+        glEnd();
+        glLineStipple(1, 0x0F0F);
+        glBegin(GL_LINE_STRIP);
+        glVertex2f(4, (float)H - 5); glVertex2f((float)W / 2, (float)H - 5);
+        glVertex2f((float)W - 4, (float)H - 5);
+        glEnd();
+        glDisable(GL_LINE_STIPPLE);
+        glFinish();
+    } else if (!strcmp(scene, "occl")) {
+        /* Requêtes d'occlusion (v8 / OpenGL 1.5). Le compte est vérifié EXACT :
+           un rectangle dont l'aire est connue, puis le même coupé de moitié par
+           les ciseaux, puis le même entièrement caché par la profondeur. Le
+           rendu d'Apple seul n'écrit rien dans la variable de sortie (bouchon
+           gldGetQueryInfo) : la scène accepte donc aussi « 0 partout », ce qui
+           est précisément la preuve que le repli logiciel NE TIENT PAS cette
+           fonction. */
+        typedef void (*gen_f)(GLsizei, GLuint *);
+        typedef void (*bq_f)(GLenum, GLuint);
+        typedef void (*eq_f)(GLenum);
+        typedef void (*gq_f)(GLuint, GLenum, GLuint *);
+        gen_f gen = (gen_f)gl_sym("glGenQueries", "glGenQueriesARB");
+        bq_f beg = (bq_f)gl_sym("glBeginQuery", "glBeginQueryARB");
+        eq_f end = (eq_f)gl_sym("glEndQuery", "glEndQueryARB");
+        gq_f getq = (gq_f)gl_sym("glGetQueryObjectuiv", "glGetQueryObjectuivARB");
+        gen_f del = (gen_f)gl_sym("glDeleteQueries", "glDeleteQueriesARB");
+        GLuint q = 0, got[3], avail[3];
+        unsigned long want[3];
+        int i, quarter = W / 4, half = H / 2;
+        const char *names[3] = { "visible en entier", "coupe par les ciseaux",
+                                 "cache par la profondeur" };
+        want[0] = (unsigned long)(2 * quarter) * half;
+        want[1] = want[0] / 2;
+        want[2] = 0;
+        for (i = 0; i < 3; i++) { got[i] = 0; avail[i] = 0; }
+        glClearColor(0, 0, 64 / 255.0f, 1);
+        glClearDepth(1.0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        if (!gen || !beg || !end || !getq) {
+            printf("occl : points d'entree absents\n");
+        } else {
+            /* un mur opaque à mi-profondeur, sur toute l'image */
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LESS);
+            glColor3ub(32, 32, 32);
+            glBegin(GL_QUADS);
+            glVertex3f(0, 0, 0); glVertex3f((float)W, 0, 0);
+            glVertex3f((float)W, (float)H, 0); glVertex3f(0, (float)H, 0);
+            glEnd();
+            glDisable(GL_DEPTH_TEST);
+            for (i = 0; i < 3; i++) {
+                /* glOrtho(0,W,H,0,−1,1) NIE z : un z positif donne une
+                   profondeur plus PETITE, donc plus près de l'observateur. Le
+                   troisième cas doit donc passer DERRIÈRE le mur (z < 0). */
+                float z = (i == 2) ? -0.5f : 0.5f;
+                gen(1, &q);
+                if (i == 1) { glEnable(GL_SCISSOR_TEST); glScissor(quarter, half, quarter, half); }
+                if (i == 2) { glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS); }
+                beg(0x8914 /* GL_SAMPLES_PASSED */, q);
+                glColor3ub(255, 200, 0);
+                glBegin(GL_QUADS);
+                glVertex3f((float)quarter, 0, z);
+                glVertex3f((float)(3 * quarter), 0, z);
+                glVertex3f((float)(3 * quarter), (float)half, z);
+                glVertex3f((float)quarter, (float)half, z);
+                glEnd();
+                end(0x8914);
+                getq(q, 0x8867 /* GL_QUERY_RESULT_AVAILABLE */, &avail[i]);
+                getq(q, 0x8866 /* GL_QUERY_RESULT */, &got[i]);
+                if (i == 1) glDisable(GL_SCISSOR_TEST);
+                if (i == 2) glDisable(GL_DEPTH_TEST);
+                if (del) del(1, &q);
+                printf("occl %-26s : %u echantillons (attendu %lu), disponible %u\n",
+                       names[i], got[i], want[i], avail[i]);
+            }
+            if (got[0] == 0 && got[1] == 0) {
+                printf("occl : aucune requete tenue (rendu d'Apple seul) — attendu\n");
+            } else {
+                for (i = 0; i < 3; i++) {
+                    int ok = (got[i] == want[i]);
+                    printf("  %s requete %-26s = %u\n", ok ? "ok  " : "FAIL", names[i], got[i]);
+                    if (!ok) failures++;
+                }
+            }
+        }
+        glFinish();
+    } else if (!strcmp(scene, "v8probe")) {
+        /* Sonde des états du pipeline fixe que la v8 ajoute (mélange constant,
+           minimum/maximum, opération logique, pointillés, modes de polygone) :
+           un réglage GL par glClear, le traceur vide l'état de GLEngine à
+           chaque effacement (POMPPC_GLTRACE_STATE=1) et on diffe les vidages
+           avec tools/re/diffstate.py. Même méthode que « stencilprobe ». */
+        typedef void (*bc_f)(GLfloat, GLfloat, GLfloat, GLfloat);
+        typedef void (*be_f)(GLenum);
+        bc_f blend_color = (bc_f)gl_sym("glBlendColor", "glBlendColorEXT");
+        be_f blend_eq = (be_f)gl_sym("glBlendEquation", "glBlendEquationEXT");
+        GLubyte stipA[128], stipB[128];
+        int i;
+        for (i = 0; i < 128; i++) {
+            /* Octets tous distincts : le diff nomme alors l'octet du motif,
+               pas seulement « quelque chose a bougé ». */
+            stipA[i] = (GLubyte)(0x40 + i);
+            stipB[i] = (GLubyte)(0xBF - i);
+        }
+        glClearColor(0, 0, 0, 1);
+        pstep("1 reference");
+        if (blend_color) blend_color(0.125f, 0.25f, 0.375f, 0.5f);
+        pstep("2 glBlendColor(.125 .25 .375 .5)");
+        if (blend_color) blend_color(0.75f, 0.875f, 0.0625f, 0.25f);
+        pstep("3 glBlendColor(.75 .875 .0625 .25)");
+        glBlendFunc(0x8001 /* GL_CONSTANT_COLOR */, 0x8004 /* GL_ONE_MINUS_CONSTANT_ALPHA */);
+        pstep("4 glBlendFunc(CONSTANT_COLOR, ONE_MINUS_CONSTANT_ALPHA)");
+        if (blend_eq) blend_eq(0x8007 /* GL_MIN */);
+        pstep("5 glBlendEquation(GL_MIN)");
+        if (blend_eq) blend_eq(0x8008 /* GL_MAX */);
+        pstep("6 glBlendEquation(GL_MAX)");
+        glLogicOp(GL_XOR);
+        pstep("7 glLogicOp(GL_XOR)");
+        glLogicOp(GL_NAND);
+        pstep("8 glLogicOp(GL_NAND)");
+        glEnable(GL_COLOR_LOGIC_OP);
+        pstep("9 glEnable(GL_COLOR_LOGIC_OP)");
+        glLineStipple(3, 0xA5A5);
+        pstep("10 glLineStipple(3, 0xA5A5)");
+        glLineStipple(97, 0x1234);
+        pstep("11 glLineStipple(97, 0x1234)");
+        glEnable(GL_LINE_STIPPLE);
+        pstep("12 glEnable(GL_LINE_STIPPLE)");
+        glPolygonStipple(stipA);
+        pstep("13 glPolygonStipple(0x40..0xBF)");
+        glPolygonStipple(stipB);
+        pstep("14 glPolygonStipple(0xBF..0x40)");
+        glEnable(GL_POLYGON_STIPPLE);
+        pstep("15 glEnable(GL_POLYGON_STIPPLE)");
+        glPolygonMode(GL_FRONT, GL_LINE);
+        pstep("16 glPolygonMode(FRONT, LINE)");
+        glPolygonMode(GL_BACK, GL_POINT);
+        pstep("17 glPolygonMode(BACK, POINT)");
+        glEnable(GL_POLYGON_OFFSET_LINE);
+        pstep("18 glEnable(GL_POLYGON_OFFSET_LINE)");
+        glEnable(GL_POLYGON_OFFSET_POINT);
+        pstep("19 glEnable(GL_POLYGON_OFFSET_POINT)");
+        glPolygonOffset(2.5f, 3.25f);
+        pstep("20 glPolygonOffset(2.5, 3.25)");
+        glFinish();
+        /* Relecture par glGet : elle dit ce que GLEngine croit avoir retenu,
+           et sert de contrôle croisé des offsets relevés par le diff. */
+        {
+            GLfloat bc[4] = { -1, -1, -1, -1 };
+            GLint li[4] = { 0, 0, 0, 0 };
+            glGetFloatv(0x8005 /* GL_BLEND_COLOR */, bc);
+            printf("GL_BLEND_COLOR = %g %g %g %g\n", bc[0], bc[1], bc[2], bc[3]);
+            glGetIntegerv(GL_LOGIC_OP_MODE, li);
+            printf("GL_LOGIC_OP_MODE = 0x%x\n", (unsigned)li[0]);
+            glGetIntegerv(GL_LINE_STIPPLE_REPEAT, li);
+            printf("GL_LINE_STIPPLE_REPEAT = %d\n", (int)li[0]);
+            glGetIntegerv(GL_LINE_STIPPLE_PATTERN, li);
+            printf("GL_LINE_STIPPLE_PATTERN = 0x%x\n", (unsigned)li[0]);
+            glGetIntegerv(GL_POLYGON_MODE, li);
+            printf("GL_POLYGON_MODE = 0x%x 0x%x\n", (unsigned)li[0], (unsigned)li[1]);
+            printf("glGetError = 0x%x\n", (unsigned)glGetError());
+        }
+    } else if (!strcmp(scene, "qprobe")) {
+        /* Requêtes d'occlusion : les points d'entrée existent-ils dans
+           libGL/GLEngine, et que se passe-t-il si on les appelle alors que
+           GL_ARB_occlusion_query n'est PAS annoncée ? (Le tableau de bits du
+           bloc de configuration, docs/re/capacites-glengine.md §3.2, ne porte
+           pas le bit 17 chez le GLDriver d'Apple.) */
+        typedef void (*gen_f)(GLsizei, GLuint *);
+        typedef void (*bq_f)(GLenum, GLuint);
+        typedef void (*eq_f)(GLenum);
+        typedef void (*gq_f)(GLuint, GLenum, GLuint *);
+        typedef GLboolean (*isq_f)(GLuint);
+        gen_f gen = (gen_f)gl_sym("glGenQueries", "glGenQueriesARB");
+        bq_f beg = (bq_f)gl_sym("glBeginQuery", "glBeginQueryARB");
+        eq_f end = (eq_f)gl_sym("glEndQuery", "glEndQueryARB");
+        gq_f getq = (gq_f)gl_sym("glGetQueryObjectuiv", "glGetQueryObjectuivARB");
+        isq_f isq = (isq_f)gl_sym("glIsQuery", "glIsQueryARB");
+        gen_f del = (gen_f)gl_sym("glDeleteQueries", "glDeleteQueriesARB");
+        const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+        GLuint q = 0, avail = 0, n = 0;
+        printf("glGenQueries=%p glBeginQuery=%p glEndQuery=%p glGetQueryObjectuiv=%p "
+               "glIsQuery=%p glDeleteQueries=%p\n",
+               (void *)gen, (void *)beg, (void *)end, (void *)getq, (void *)isq, (void *)del);
+        printf("ARB_occlusion_query annoncee : %s\n",
+               (ext && strstr(ext, "GL_ARB_occlusion_query")) ? "oui" : "non");
+        if (!gen || !beg || !end || !getq) {
+            printf("qprobe : points d'entree absents, rien a tester\n");
+        } else {
+            gen(1, &q);
+            printf("glGenQueries -> %u (err 0x%x)\n", q, (unsigned)glGetError());
+            printf("glIsQuery(%u) = %d\n", q, isq ? (int)isq(q) : -1);
+            glClearColor(0, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            beg(0x8914 /* GL_SAMPLES_PASSED */, q);
+            printf("glBeginQuery -> err 0x%x\n", (unsigned)glGetError());
+            glColor3f(1, 1, 1);
+            glBegin(GL_TRIANGLES);
+            glVertex2f(0, 0); glVertex2f((float)W, 0); glVertex2f(0, (float)H);
+            glEnd();
+            end(0x8914);
+            printf("glEndQuery -> err 0x%x\n", (unsigned)glGetError());
+            getq(q, 0x8867 /* GL_QUERY_RESULT_AVAILABLE */, &avail);
+            printf("disponible = %u (err 0x%x)\n", avail, (unsigned)glGetError());
+            getq(q, 0x8866 /* GL_QUERY_RESULT */, &n);
+            printf("echantillons = %u (err 0x%x) ; attendu ~%d (moitie de %dx%d)\n",
+                   n, (unsigned)glGetError(), W * H / 2, W, H);
+            if (del) del(1, &q);
+            printf("glDeleteQueries -> err 0x%x\n", (unsigned)glGetError());
+        }
+        glFinish();
+    } else if (!strcmp(scene, "caps")) {
+        /* Ce que l'application VOIT : version, extensions, limites. C'est la
+           preuve de la tâche 4.1 — et la liste se relit telle quelle. */
+        static const struct { GLenum e; const char *n; int nv; } gi[] = {
+            { 0x0D33, "GL_MAX_TEXTURE_SIZE", 1 },
+            { 0x84E2, "GL_MAX_TEXTURE_UNITS", 1 },
+            { 0x8872, "GL_MAX_TEXTURE_IMAGE_UNITS", 1 },
+            { 0x8871, "GL_MAX_TEXTURE_COORDS", 1 },
+            { 0x8073, "GL_MAX_3D_TEXTURE_SIZE", 1 },
+            { 0x851C, "GL_MAX_CUBE_MAP_TEXTURE_SIZE", 1 },
+            { 0x84F8, "GL_MAX_RECTANGLE_TEXTURE_SIZE", 1 },
+            { 0x0D31, "GL_MAX_LIGHTS", 1 },
+            { 0x0D32, "GL_MAX_CLIP_PLANES", 1 },
+            { 0x80E8, "GL_MAX_ELEMENTS_VERTICES", 1 },
+            { 0x80E9, "GL_MAX_ELEMENTS_INDICES", 1 },
+            { 0x0D50, "GL_SUBPIXEL_BITS", 1 },
+            { 0x0D56, "GL_DEPTH_BITS", 1 },
+            { 0x0D57, "GL_STENCIL_BITS", 1 },
+            { 0x80A8, "GL_SAMPLE_BUFFERS", 1 },
+            { 0x80A9, "GL_SAMPLES", 1 },
+            { 0x0B12, "GL_POINT_SIZE_RANGE", 2 },
+            { 0x846D, "GL_ALIASED_POINT_SIZE_RANGE", 2 },
+            { 0x0B22, "GL_LINE_WIDTH_RANGE", 2 },
+            { 0x846E, "GL_ALIASED_LINE_WIDTH_RANGE", 2 },
+            { 0x84FF, "GL_MAX_TEXTURE_MAX_ANISOTROPY", 1 },
+            { 0x84FD, "GL_MAX_TEXTURE_LOD_BIAS", 1 },
+            { 0x86A2, "GL_NUM_COMPRESSED_TEXTURE_FORMATS", 1 },
+        };
+        const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+        int i, nl = 0;
+        printf("== VERSION == %s\n", (const char *)glGetString(GL_VERSION));
+        printf("== VENDOR   == %s\n", (const char *)glGetString(GL_VENDOR));
+        printf("== RENDERER == %s\n", (const char *)glGetString(GL_RENDERER));
+        printf("== EXTENSIONS ==\n");
+        if (ext) {
+            const char *p = ext;
+            while (*p) {
+                const char *q2 = p;
+                while (*q2 && *q2 != ' ') q2++;
+                printf("  %.*s\n", (int)(q2 - p), p);
+                nl++;
+                p = *q2 ? q2 + 1 : q2;
+            }
+        }
+        printf("  (%d extensions)\n", nl);
+        printf("== LIMITES ==\n");
+        for (i = 0; i < (int)(sizeof(gi) / sizeof(gi[0])); i++) {
+            GLfloat f[4] = { 0, 0, 0, 0 };
+            while (glGetError() != GL_NO_ERROR) { }
+            glGetFloatv(gi[i].e, f);
+            if (glGetError() != GL_NO_ERROR)
+                printf("  %-34s : (refuse)\n", gi[i].n);
+            else if (gi[i].nv == 2)
+                printf("  %-34s : %g %g\n", gi[i].n, f[0], f[1]);
+            else
+                printf("  %-34s : %g\n", gi[i].n, f[0]);
+        }
+        glFinish();
+    } else if (!strcmp(scene, "entry")) {
+        /* Un appel par fonction de chaque version annoncée, résolu par la
+           liaison normale du processus : la question n'est pas « la chaîne
+           dit-elle 1.5 » mais « l'appel passe-t-il, sans erreur GL ni
+           plantage ». Le rendu est vérifié à l'image par la scène « entry »
+           elle-même (un quadrilatère par fonction). */
+        struct ent { const char *a, *b; void *p; };
+        static struct ent es[] = {
+            { "glTexImage3D", "glTexImage3DEXT", 0 },              /* 1.2 */
+            { "glDrawRangeElements", "glDrawRangeElementsEXT", 0 },/* 1.2 */
+            { "glBlendColor", "glBlendColorEXT", 0 },              /* 1.2 imaging / 1.4 */
+            { "glBlendEquation", "glBlendEquationEXT", 0 },        /* 1.2 imaging / 1.4 */
+            { "glActiveTexture", "glActiveTextureARB", 0 },        /* 1.3 */
+            { "glMultiTexCoord2f", "glMultiTexCoord2fARB", 0 },    /* 1.3 */
+            { "glCompressedTexImage2D", "glCompressedTexImage2DARB", 0 }, /* 1.3 */
+            { "glLoadTransposeMatrixf", "glLoadTransposeMatrixfARB", 0 }, /* 1.3 */
+            { "glSampleCoverage", "glSampleCoverageARB", 0 },      /* 1.3 */
+            { "glBlendFuncSeparate", "glBlendFuncSeparateEXT", 0 },/* 1.4 */
+            { "glFogCoordf", "glFogCoordfEXT", 0 },                /* 1.4 */
+            { "glSecondaryColor3f", "glSecondaryColor3fEXT", 0 },  /* 1.4 */
+            { "glPointParameterf", "glPointParameterfARB", 0 },    /* 1.4 */
+            { "glMultiDrawArrays", "glMultiDrawArraysEXT", 0 },    /* 1.4 */
+            { "glWindowPos2i", "glWindowPos2iARB", 0 },            /* 1.4 */
+            { "glBindBuffer", "glBindBufferARB", 0 },              /* 1.5 */
+            { "glGenBuffers", "glGenBuffersARB", 0 },              /* 1.5 */
+            { "glBufferData", "glBufferDataARB", 0 },              /* 1.5 */
+            { "glMapBuffer", "glMapBufferARB", 0 },                /* 1.5 */
+            { "glGenQueries", "glGenQueriesARB", 0 },              /* 1.5 */
+            { "glBeginQuery", "glBeginQueryARB", 0 },              /* 1.5 */
+        };
+        int i, miss = 0;
+        for (i = 0; i < (int)(sizeof(es) / sizeof(es[0])); i++) {
+            es[i].p = gl_sym(es[i].a, es[i].b);
+            printf("  %-26s %s\n", es[i].a, es[i].p ? "present" : "ABSENT");
+            if (!es[i].p) miss++;
+        }
+        printf("entry : %d point(s) d'entree absent(s) sur %d\n", miss,
+               (int)(sizeof(es) / sizeof(es[0])));
+        /* Appels réels, chacun suivi d'un carré de 16x16 dont la couleur dit
+           « appel passé sans erreur GL » (vert) ou « erreur » (rouge). */
+        glClearColor(0, 0, 0.25f, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        {
+            static const GLuint ix[3] = { 0, 1, 2 };
+            static const GLfloat vp[9] = { 0, 0, 0, 1, 0, 0, 0, 1, 0 };
+            static GLubyte t3[2 * 2 * 2 * 4];
+            static const GLfloat idm[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+            GLuint buf = 0, qid = 0;
+            float sc[3] = { 1, 0, 0 };
+            int col = 0;
+            while (glGetError() != GL_NO_ERROR) { }
+/* Macro variadique : le corps d'appel contient des virgules de plus haut
+   niveau (listes d'initialisation), que seule `...` protège. */
+#define CALLED(name, ...) do { \
+            void *fp_ = gl_sym(name, name "ARB"); \
+            if (!fp_) fp_ = gl_sym(name, name "EXT"); \
+            if (fp_) { __VA_ARGS__; } \
+            { GLenum e_ = glGetError(); int cx_ = (col % 8) * 16, cy_ = (col / 8) * 16; \
+              glColor3f(fp_ && e_ == GL_NO_ERROR ? 0.0f : 1.0f, \
+                        fp_ && e_ == GL_NO_ERROR ? 1.0f : 0.0f, 0.0f); \
+              glBegin(GL_QUADS); \
+              glVertex2f((float)cx_ + 1, (float)cy_ + 1); \
+              glVertex2f((float)cx_ + 15, (float)cy_ + 1); \
+              glVertex2f((float)cx_ + 15, (float)cy_ + 15); \
+              glVertex2f((float)cx_ + 1, (float)cy_ + 15); \
+              glEnd(); \
+              printf("  appel %-26s %s (err 0x%x)\n", name, fp_ ? "ok" : "ABSENT", (unsigned)e_); \
+              col++; } \
+        } while (0)
+            CALLED("glBlendColor", ((void (*)(GLfloat, GLfloat, GLfloat, GLfloat))fp_)(0.25f, 0.5f, 0.75f, 1.0f));
+            CALLED("glBlendEquation", ((void (*)(GLenum))fp_)(0x8006));
+            CALLED("glActiveTexture", ((void (*)(GLenum))fp_)(GL_TEXTURE0_ARB));
+            CALLED("glMultiTexCoord2f", ((void (*)(GLenum, GLfloat, GLfloat))fp_)(GL_TEXTURE0_ARB, 0.5f, 0.5f));
+            CALLED("glLoadTransposeMatrixf", ((void (*)(const GLfloat *))fp_)(idm));
+            CALLED("glSampleCoverage", ((void (*)(GLfloat, GLboolean))fp_)(1.0f, GL_FALSE));
+            CALLED("glBlendFuncSeparate", ((void (*)(GLenum, GLenum, GLenum, GLenum))fp_)(GL_ONE, GL_ZERO, GL_ONE, GL_ZERO));
+            CALLED("glFogCoordf", ((void (*)(GLfloat))fp_)(0.5f));
+            CALLED("glSecondaryColor3f", ((void (*)(GLfloat, GLfloat, GLfloat))fp_)(sc[0], sc[1], sc[2]));
+            CALLED("glPointParameterf", ((void (*)(GLenum, GLfloat))fp_)(0x8126 /* GL_POINT_SIZE_MIN */, 1.0f));
+            CALLED("glWindowPos2i", ((void (*)(GLint, GLint))fp_)(2, 2));
+            CALLED("glGenBuffers", ((void (*)(GLsizei, GLuint *))fp_)(1, &buf));
+            CALLED("glBindBuffer", ((void (*)(GLenum, GLuint))fp_)(0x8892 /* GL_ARRAY_BUFFER */, buf));
+            CALLED("glBufferData", ((void (*)(GLenum, long, const GLvoid *, GLenum))fp_)(0x8892, 64, 0, 0x88E4 /* GL_STATIC_DRAW */));
+            /* Délier : avec un GL_ARRAY_BUFFER lié, un pointeur de tableau de
+               sommets est un OFFSET dans le tampon (OpenGL 1.5). Laisser le
+               nôtre lié faisait lire GLEngine à une adresse absurde au premier
+               glDrawRangeElements — l'application est fautive, mais autant ne
+               pas l'être ici. */
+            CALLED("glBindBuffer", ((void (*)(GLenum, GLuint))fp_)(0x8892, 0));
+            CALLED("glGenQueries", ((void (*)(GLsizei, GLuint *))fp_)(1, &qid));
+            CALLED("glBeginQuery", ((void (*)(GLenum, GLuint))fp_)(0x8914, qid));
+            CALLED("glEndQuery", ((void (*)(GLenum))fp_)(0x8914));
+            CALLED("glDrawRangeElements", glEnableClientState(GL_VERTEX_ARRAY); glVertexPointer(3, GL_FLOAT, 0, vp); ((void (*)(GLenum, GLuint, GLuint, GLsizei, GLenum, const GLvoid *))fp_)(GL_TRIANGLES, 0, 2, 3, GL_UNSIGNED_INT, ix); glDisableClientState(GL_VERTEX_ARRAY));
+            CALLED("glTexImage3D", ((void (*)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const GLvoid *))fp_)(0x806F /* GL_TEXTURE_3D */, 0, GL_RGBA, 2, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, t3));
+#undef CALLED
+        }
+        glFinish();
     } else if (!strcmp(scene, "depthrt")) {
         /* Aller-retour de la PROFONDEUR entre l'hôte et le tampon invité :
            on dessine (hôte), puis glReadPixels force le repli, donc une
@@ -2120,7 +3064,13 @@ int main(int argc, char **argv)
             printf("  %s bande jaune devant l'arête (%06lx)\n",
                    (a >> 16) > 200 && (a & 255) < 100 ? "ok  " : "FAIL", a);
             if (!((a >> 16) > 200 && (a & 255) < 100)) failures++;
-            a = px(96, 4);
+            /* L'arête horizontale de ce triangle est à y = 4 ENTIER : elle tombe
+               exactement sur la frontière entre les lignes 3 et 4, et deux
+               rasteriseurs conformes ont chacun le droit d'en choisir une.
+               GLEngine prend la 4, l'hôte la 3 (mesuré). On regarde donc les
+               deux : ce que la scène veut prouver, c'est que le mode LIGNE a
+               tracé une arête là où le mode PLEIN aurait rempli. */
+            a = px(96, 4) != 0x000040 ? px(96, 4) : px(96, 3);
             printf("  %s polygonmode ligne : arête tracée (%06lx)\n",
                    a != 0x000040 ? "ok  " : "FAIL", a);
             if (a == 0x000040) failures++;

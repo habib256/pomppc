@@ -243,20 +243,37 @@ Le rendu logiciel d'Apple seul ne démarre pas ce jeu : `aglChoosePixelFormat` �
 
 ### 4.5 Domaine accéléré
 
-Accéléré : effacement couleur/profondeur ; triangles, bandes, éventails, quads, bandes de quads,
-polygones ; lignes, bandes et boucles de lignes ; points ; profondeur (toutes fonctions), masques,
-mélange (facteurs et équations d'OpenGL 1.x), test alpha, ciseaux, ombrage lisse et plat,
-brouillard (facteur par sommet), décalage de polygone plein ; **textures 2D et 1D sur deux unités**
-(formats de base ALPHA, RGB, RGBA, LUMINANCE, LUMINANCE_ALPHA, INTENSITY ; données RGBA, RGB, BGRA,
-BGR, LUMINANCE, LUMINANCE_ALPHA, ALPHA, RED en octets ; RGBA et BGRA en `UNSIGNED_INT_8_8_8_8`
-et `_REV`, BGRA en `UNSIGNED_SHORT_1_5_5_5_REV`, RGB en `UNSIGNED_SHORT_5_6_5`, RGBA en
-`UNSIGNED_SHORT_4_4_4_4` ; filtres
-avec mipmaps, REPEAT/CLAMP/CLAMP_TO_EDGE ; environnements MODULATE, REPLACE, DECAL, BLEND, ADD).
+*(À jour du lot 3, 18/09/2026 — protocole v8.)*
 
-Rendu par le code d'Apple (exact, plus lent) : trois unités de texture ou plus, GL_COMBINE,
-textures 3D, cube et rectangle, stencil, opérations logiques, stipple, lissage, mode polygone non
-plein, brouillard en `GL_NICEST`, lignes et points texturés ou décalés, opérations de pixels
-(`glDrawPixels`, `glBitmap`, `glCopyPixels`, accumulation), tampons autres que 32 bits.
+Accéléré : effacement couleur/profondeur/**stencil** ; triangles, bandes, éventails, quads, bandes
+de quads, polygones ; lignes, bandes et boucles de lignes ; points ; **toute la géométrie**
+(matrices, viewport, 8 lumières, 2 matériaux, texgen, 6 plans de découpe, élimination des faces)
+par le chemin brut, cf. §4.7 ; profondeur (toutes fonctions), masques, **stencil** (9 clés),
+mélange — facteurs et équations d'OpenGL 1.x **plus, depuis la v8, la couleur constante
+(`GL_CONSTANT_COLOR` et sœurs) et les équations `GL_MIN` / `GL_MAX`** —, test alpha, ciseaux,
+ombrage lisse et plat, brouillard (facteur par sommet, ou calculé par l'hôte sur le chemin brut),
+décalage de polygone (plein, **ligne et point**) ; **opérations logiques** (les 16) ; **pointillé
+de polygone** (les deux chemins) ; **pointillé de ligne** et **modes de polygone** `GL_POINT` /
+`GL_LINE` (chemin brut seulement, cf. §4.8) ; **requêtes d'occlusion** ; **quatre unités de
+texture** 2D et 1D (formats de base ALPHA, RGB, RGBA, LUMINANCE, LUMINANCE_ALPHA, INTENSITY ;
+données RGBA, RGB, BGRA, BGR, LUMINANCE, LUMINANCE_ALPHA, ALPHA, RED en octets ; RGBA et BGRA en
+`UNSIGNED_INT_8_8_8_8` et `_REV`, BGRA en `UNSIGNED_SHORT_1_5_5_5_REV`, RGB en
+`UNSIGNED_SHORT_5_6_5`, RGBA en `UNSIGNED_SHORT_4_4_4_4` ; filtres avec mipmaps,
+REPEAT/CLAMP/CLAMP_TO_EDGE ; environnements MODULATE, REPLACE, DECAL, BLEND, ADD et **GL_COMBINE**
+avec dot3).
+
+Rendu par le code d'Apple (exact, plus lent) : cinq unités de texture ou plus, textures 3D, cube et
+rectangle, **textures compressées**, modes de répétition autres que REPEAT/CLAMP/CLAMP_TO_EDGE,
+filtres inconnus, lissage (`GL_*_SMOOTH`), **taille de point atténuée par la distance**, mode de
+polygone non plein **par le chemin hérité**, pointillé de ligne par le chemin hérité, brouillard en
+`GL_NICEST` hors chemin brut, lignes et points texturés ou décalés, opérations de pixels
+(`glDrawPixels`, `glBitmap`, `glCopyPixels`, accumulation), programmes ARB de sommets ou de
+fragments, tampons autres que 32 bits.
+
+Le bilan `POMPPC_GL_STATS` nomme chaque sortie du domaine et son premier cas : depuis le lot 3,
+les motifs `logicop/stipple/lissage` et `polygonmode` ne comptent plus que ce qui reste vraiment
+hors domaine, et deux motifs sont nés — `param-texture` (une valeur de filtre ou de répétition que
+le cœur refuserait, donc que le plugin n'envoie pas) et `taille-de-point-attenuee`.
 
 ### 4.7 Géométrie sur l'hôte — le chemin « brut » (protocole v7, lot 2)
 
@@ -511,6 +528,65 @@ Sur les arêtes, les écarts vont jusqu'à 255/255 sur quelques dizaines de pixe
 pixel de large (règles de remplissage et de tracé de ligne différentes entre le rasteriseur d'Apple
 et celui de l'hôte). C'était déjà le cas du chemin de rastérisation.
 
+### 4.8 La fin du pipeline fixe (protocole v8, lot 3)
+
+Cinq fonctions du pipeline fixe manquaient encore. Elles sont branchées depuis le 18/09/2026 ; les
+offsets de l'état de GLEngine ont été relevés par la sonde `v8probe` (`docs/re/etat-v8.md`).
+
+| Fonction | Chemin | Preuve (`gltest`, 128×128, image entière vs rendu d'Apple) |
+|---|---|---|
+| Mélange à couleur constante, `GL_MIN` / `GL_MAX` | les **deux** | `blendc` : témoins exacts, **0/255** |
+| Opérations logiques (les 16) | les **deux** | `logicop` : les six opérations vérifiées au bit près, **0/255** |
+| Pointillé de polygone | les **deux** | `stipple` : **0/255** |
+| Pointillé de ligne | brut | `stipple` : **0/255** |
+| Modes de polygone `GL_POINT` / `GL_LINE` | **brut seulement** | `polymode` : **0/255** |
+| Requêtes d'occlusion | brut et hérité | `occl` : 4 096 / 2 048 / 0 échantillons exacts |
+
+Trois points méritent d'être retenus.
+
+**Les clés v8 valent pour les deux chemins**, contrairement à celles de la v7 : elles agissent au
+fragment (mélange, opération logique, pointillé de polygone) ou à l'assemblage des triangles, donc
+après l'endroit où le chemin brut et le chemin hérité se rejoignent. `send_state` a désormais deux
+plages de clés : les clés de géométrie ne partent qu'avec le chemin brut, les clés de fragment dès
+que le device est un v8.
+
+**Les modes de polygone sont réservés au chemin brut.** Sur le chemin hérité, GLEngine a déjà
+décomposé le quadrilatère en triangles : le contour est perdu avant d'arriver à l'hôte, et en mode
+`GL_LINE` les diagonales seraient tracées. Le plugin refuse donc, et le rendu d'Apple reprend la
+main — image exacte. Même sur le chemin brut, il a fallu **couper la fusion** des dessins quand le
+mode n'est pas `GL_FILL` : elle recolle les lots en `GL_TRIANGLES` indexés, ce qui détruit
+exactement l'information que `glPolygonMode` consomme (vu en vrai : 3 % de l'image fausse).
+
+**Le pointillé de polygone demandait un décalage d'une ligne.** Le protocole indexe le motif par
+`(hauteur − ys) mod 32`, la spécification par la coordonnée fenêtre `hauteur − 1 − ys` : le plugin
+envoie `motif[(j − 1) mod 32]` au mot `j`. Sans cela, exactement 384 composantes différaient du
+rendu d'Apple, avec un écart de 255/255 (`docs/re/etat-v8.md` §1).
+
+### 4.9 Ce que le renderer annonce (tâche 4.1)
+
+`GL_VERSION` sort tel quel de `gldGetString`, et `GL_EXTENSIONS` est fabriqué par GLEngine à partir
+de 25 noms fixes et d'un tableau de 79 bits que le pilote pose dans le bloc de configuration. Le
+plugin y ajoute **ce que la chaîne tient, et rien d'autre**, établi fonction par fonction dans
+**`docs/re/version-extensions.md`** :
+
+* `GL_VERSION = "1.1 POMPPC-1.0"`. Ce n'est pas 1.5, ni même 1.2 : **OpenGL 1.2 exige les textures
+  3D**, que GLEngine refuse (`GL_MAX_3D_TEXTURE_SIZE = 0`, `glTexImage3D` → `GL_INVALID_VALUE`) et
+  que le protocole qgpu ne porte pas davantage. Manquent aussi, mesurés : cartes de cube,
+  compression de texture, multiéchantillonnage (1.3) ; couleur secondaire, `GL_MIRRORED_REPEAT`,
+  textures de profondeur, paramètres de point (1.4).
+* Trois extensions ajoutées : `GL_ARB_occlusion_query` (tenue par nous, et seulement sur un device
+  v8), `GL_ARB_vertex_buffer_object` et `GL_EXT_blend_func_separate` (tenues, et vérifiées au
+  rendu). 42 extensions au lieu de 39.
+* **Les limites d'Apple sont laissées telles quelles** — 8 unités de texture, 4096 de côté. Le
+  chemin accéléré n'en tient que 4 et 2048, mais au-delà le repli sur le rendu d'Apple est exact :
+  c'est vérifié, pas supposé. Abaisser ces limites aurait retiré une capacité que la chaîne tient.
+
+Le relevé de la table bit → extension de `docs/re/capacites-glengine.md` §3.2 s'est révélé
+**décalé d'un cran à partir du bit 24** ; il est corrigé, par l'expérience, dans
+`docs/re/version-extensions.md` §4. La première version du code d'annonce, écrite d'après
+l'ancienne table, annonçait deux extensions non tenues : c'est la scène `caps`, qui imprime la
+liste telle qu'une application la lit, qui l'a montré.
+
 ---
 
 ## 5. Vérification
@@ -521,7 +597,9 @@ et celui de l'hôte). C'était déjà le cas du chemin de rastérisation.
 | device, sans invité | `tests/qgpu_smoke.py` | 11/11, backend GL |
 | harnais complet | `tests/run-all.sh --slow` | 34 OK |
 | transport dans Tiger | `guest/qgpu-test` | OK, y compris pendant 4 applications GL |
-| plugin hors écran | `gltest` × 22 scènes | pixels témoins OK avec `POMPPC_GL_GEOM=0` **et** `=1` ; image entière comparée au rendu d'Apple, écart max **hors arêtes** de 0 à 3/255 (voir §4.7) |
+| plugin hors écran | `gltest` × 28 scènes | pixels témoins OK avec `POMPPC_GL_GEOM=0` **et** `=1` ; image entière comparée au rendu d'Apple, écart max **hors arêtes** de 0 à 3/255 (voir §4.7) |
+| pipeline fixe v8 | `gltest blendc logicop polymode stipple occl` | mélange constant, min/max, opérations logiques, modes de polygone, pointillés, requêtes d'occlusion — **0/255 sur l'image entière**, comptes d'occlusion exacts (§4.8) |
+| version et extensions | `gltest caps entry v15` | ce qui est annoncé est tenu, fonction par fonction (`docs/re/version-extensions.md`) |
 | géométrie sur l'hôte | `gltest lit texgen clip fogz bigstrip dlist mixte` | éclairage, texgen, découpe, brouillard, longues primitives, listes d'affichage, alternance domaine / hors domaine |
 | application réelle | Zenerchi (§4.6) | menus et partie corrects, 42 img/s en partie, présentation directe |
 | plugin en fenêtre, dans le bureau | `glwin` (GLUT) | OK ; image témoin visible dans la fenêtre à l'écran |

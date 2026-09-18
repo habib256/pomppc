@@ -19,7 +19,10 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
   qui n'en fait pas, étaient justes.
 - **Dans les deux jeux c'est le PowerPC émulé qui limite** : GLEngine transforme, éclaire et
   découpe chaque sommet sur l'invité ; le débit de Marble Blast suit le nombre de triangles.
-- Le renderer annonce « 1.1 APPLE-1.1 » (chaîne du rendu logiciel d'Apple, transmise telle quelle).
+- Le renderer annonce **« 1.1 POMPPC-1.0 » et 42 extensions** (18/09/2026, tâche 4.1) : la plus
+  haute version dont *toutes* les fonctions sont tenues. Pas 1.2, parce que les **textures 3D**
+  manquent dans toute la chaîne. Le relevé fonction par fonction est dans
+  `docs/re/version-extensions.md`.
 - **Fusion des dessins faite (18/09/2026)** : le plugin recolle les `DRAW_RAW`
   **consécutifs** en `GL_TRIANGLES` **indexés** (rubans, éventails, quads, bandes de quads,
   polygones), sans déplacer un seul sommet — seuls des indices u16 sont écrits. Marble Blast :
@@ -72,12 +75,12 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 | # | Tâche | Statut |
 |---|---|---|
 | 3.1 | **Stencil** (protocole v6) : tampon hôte combiné profondeur+stencil, 9 clés d'état, transferts, backend de référence, offsets GLEngine (`docs/re/stencil.md`), plugin. Scène `stencil` identique au rendu d'Apple à l'octet près. | ✅ fait |
-| 3.2 | Modes de polygone (ligne, point), pointillés de ligne et de polygone, lissage. | à faire |
-| 3.3 | Opérations logiques ; mélange à couleur constante, équations minimum et maximum. | à faire |
+| 3.2 | Modes de polygone (ligne, point), pointillés de ligne et de polygone, lissage. | ✅ **fait le 18/09/2026** sauf le **lissage** (hors périmètre v8). Offsets relevés par la sonde `v8probe` (`docs/re/etat-v8.md`) : motif de ligne `GS+0x2e26`/`0x2e28`, motif de polygone **128 octets en `GS+0x30e8`**, dans l'ordre de `glPolygonStipple`. Modes de polygone **réservés au chemin brut** (le chemin hérité reçoit des triangles déjà décomposés : le contour est perdu avant l'hôte) et **la fusion des dessins est coupée** quand le mode n'est pas `GL_FILL`. Le motif de polygone demande un **décalage d'une ligne** (le protocole indexe par `hauteur − ys`, OpenGL par `hauteur − 1 − ys`). Scènes `polymode` et `stipple` : **0/255 sur l'image entière** par les deux chemins. |
+| 3.3 | Opérations logiques ; mélange à couleur constante, équations minimum et maximum. | ✅ **fait le 18/09/2026**. Couleur de mélange en `GS+0x2d70`, opération logique en `GS+0x2e30` ; les facteurs `0x8001`-`0x8004` et les équations `GL_MIN`/`GL_MAX` passent par les clés existantes. Clés v8 envoyées pour **les deux chemins**. Scènes `blendc` et `logicop` : témoins exacts au bit près, **0/255**. Le motif de refus « stencil/logicop/stipple » ne couvre plus que le lissage de polygone. |
 | 3.4 | Textures 3D, cube, rectangle ; bordures ; compressées (S3TC passé tel quel à l'hôte). | à faire |
 | 3.5 | Lignes et points texturés ; sprites de points ; couleur secondaire. | à faire |
 | 3.6 | Textures de profondeur et comparaison d'ombre ; génération automatique de mipmaps (`GenerateTexMipmaps` repérée). | à faire |
-| 3.7 | **Requêtes d'occlusion** (`CreateQuery`, `GetQueryInfo`). (OpenGL 1.5.) | à faire |
+| 3.7 | **Requêtes d'occlusion** (`CreateQuery`, `GetQueryInfo`). (OpenGL 1.5.) | ✅ **fait le 18/09/2026**. Interface relevée par lecture et vérifiée dans l'invité (`docs/re/etat-v8.md` §4) : `gldCreateQuery` (n° 45), `gldDestroyQuery` (46), `gldGetQueryInfo` (47) et **les procédures `+0x68` / `+0x6c`** = `glBeginQuery` / `glEndQuery`. Le `GLDriver` d'Apple ne tient **rien** (bouchons, et rien d'installé en `+0x68`/`+0x6c`) : sous lui, `glGetQueryObjectuiv` n'écrit même pas dans la variable de sortie. Le plugin tient la fonction entièrement ; un repli logiciel pendant une requête **majore** le compte (seule direction sans danger). Scène `occl` : 4 096 / 2 048 / 0 échantillons exacts. |
 | 3.8 | Multiéchantillonnage. | à faire |
 | 3.9 | Brouillard par fragment (`GL_NICEST`) ; niveau de détail des mipmaps par fragment dans le backend de référence. | à faire |
 
@@ -85,10 +88,32 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 
 | # | Tâche | Statut |
 |---|---|---|
-| 4.1 | **Annoncer version et extensions** telles que tenues (dépend de 1.1) : `GL_VERSION`, liste d'extensions, limites (`GetInteger`). | à faire |
+| 4.1 | **Annoncer version et extensions** telles que tenues (dépend de 1.1) : `GL_VERSION`, liste d'extensions, limites (`GetInteger`). | ✅ **fait le 18/09/2026** — mais le verdict n'est pas celui qu'on espérait. Relevé fonction par fonction dans **`docs/re/version-extensions.md`** (scène `v15` : un sous-test par fonction, joué sous le rendu d'Apple seul **et** sous le plugin). **La plus haute version entièrement tenue est 1.1** : OpenGL 1.2 exige les **textures 3D**, que GLEngine refuse (`GL_MAX_3D_TEXTURE_SIZE = 0`) et que le protocole ne porte pas. Annoncé : `GL_VERSION = "1.1 POMPPC-1.0"`, plus **trois** extensions ajoutées au tableau de bits (`GL_ARB_occlusion_query`, `GL_ARB_vertex_buffer_object`, `GL_EXT_blend_func_separate`) → 42 au lieu de 39. **Les limites d'Apple sont laissées telles quelles** (8 unités, 4096) : au-delà du chemin accéléré, le repli tient, c'est vérifié. Au passage, l'expérience **V3** a montré que la table bit → extension de `docs/re/capacites-glengine.md` §3.2 est **décalée d'un cran à partir du bit 24** ; elle est corrigée. |
 | 4.2 | **Accélérateur IOKit** : nœud `IOAccelerator` + `IOGLBundleName`, chargement comme un vrai pilote de carte. Préalable de Quartz Extreme. | à faire |
 | 4.3 | Programmes ARB de sommets et de fragments (`CreatePipelineProgram`) — au-delà de 1.5 strict, mais condition de Core Image. | à faire |
 | 4.4 | Quartz Extreme (surfaces de fenêtre sur l'hôte), puis Core Image, puis Quartz 2D Extreme. Objectif visible : « QE/CI géré » dans Informations Système. | à faire |
+
+### Ce que le lot 3 a laissé derrière lui (côté invité)
+
+- **Le pipeline fixe est complet, sauf le lissage.** Restent hors domaine : `GL_LINE_SMOOTH`,
+  `GL_POINT_SMOOTH`, `GL_POLYGON_SMOOTH` (3.2, fin), le multiéchantillonnage (3.8) et les sprites
+  de points (3.5).
+- **Deux inexactitudes trouvées en chemin et corrigées**, toutes deux invisibles jusqu'ici :
+  *(a)* un `glTexParameteri(GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT)` — une valeur que le cœur
+  refuse — faisait **rejeter toute la soumission** et retombait le processus entier sur le rendu
+  logiciel ; le plugin valide désormais filtres et modes de répétition avant de les envoyer
+  (motif `param-texture`). *(b)* Avec une **atténuation de la taille des points par la distance**,
+  le chemin hérité dessinait les points à la taille de base : GLEngine calcule une taille par
+  sommet que la clé d'état unique du protocole ne peut pas rendre. Le plugin refuse maintenant
+  (motif `taille-de-point-attenuee`).
+- **Ce qui manque pour annoncer 1.2** (et donc pour espérer 1.5) est nommé précisément dans
+  `docs/re/version-extensions.md` §7 : textures 3D d'abord, puis cartes de cube et compression,
+  puis couleur secondaire, `GL_MIRRORED_REPEAT`, textures de profondeur et paramètres de point.
+- **La couleur secondaire n'est pas tenue du tout**, même par le rendu d'Apple
+  (`GL_COLOR_SUM` + `glSecondaryColor3f` n'ajoutent rien) : ce n'est donc pas seulement le chemin
+  brut qui la perd, comme le lot 2 le croyait.
+- **La compression de texture est le pire cas rencontré** : `glCompressedTexImage2D` ne rend
+  aucune erreur et l'image est fausse, silencieusement, des deux côtés.
 
 ## Points ouverts
 
@@ -137,6 +162,14 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
   explicitement dans le domaine. GLEngine emploie alors un autre étage de sommets
   (`gctx+0x4e1c ≠ 0x1c00`), que le prédicat rejette — mais cela n'a pas été vérifié par
   l'expérience.
+
+## Lot 3 en cours (18/09/2026) — annoncer 1.5, et ne plus attendre le GPU
+
+| Partie | Qui | Où | État |
+|---|---|---|---|
+| Plugin : brancher les fonctions v8 (mélange constant, min/max, opérations logiques, modes de polygone, pointillés, requêtes d'occlusion via `gldCreateQuery`) — relevé des offsets par sondes, scènes comparées à Apple | agent Opus, **seul sur la VM** | `guest/` | ✅ **fait** (18/09/2026) |
+| Annoncer `GL_VERSION` et la liste d'extensions **tenues** (4.1), par la chaîne de `gldGetString` et le tableau de bits du bloc de configuration | même agent, ensuite | `guest/gldriver` | ✅ **fait** (18/09/2026) — **1.1**, pas 1.5 : voir 4.1 |
+| Device asynchrone (2.2) côté hôte : soumissions exécutées par un thread de rendu, file d'attente, `FENCE`/IRQ `DONE`, sémantique documentée ; kext et plugin suivront | agent Opus, copie isolée | `patches/qgpu`, `tests` | en cours |
 
 ## Ordre d'attaque
 

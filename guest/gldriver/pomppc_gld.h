@@ -163,6 +163,12 @@ const char *pomppc_proc_name(int slot);
 void pomppc_unhook_procs(void *ctx, void **procs);
 void pomppc_sync_to_sw(void *ctx);
 const char *pomppc_override_string(long name, const char *apple);
+/* Entrée gld que le plugin réalise lui-même (requêtes d'occlusion v8), ou 0 :
+   pomppc_pre la rend au trampoline à la place de celle du rendu d'Apple. */
+void *pomppc_gld_override(int id);
+/* Ajuste le bloc de configuration (5e argument de gldCreateContext) : limites et
+   tableau de bits d'extensions, pour n'annoncer QUE ce que la chaîne tient. */
+void pomppc_patch_caps(void *cfg);
 /* chemin brut (v7) : la géométrie non transformée part sur le GPU de l'hôte */
 void *pomppc_geom_proc(int slot);       /* Begin/EndPrimitiveBuffer, ou 0 */
 long pomppc_geom_dispatch(void *ctx);   /* bits à ajouter au retour du dispatch */
