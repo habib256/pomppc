@@ -169,6 +169,9 @@ typedef struct QgpuContext {
 } QgpuContext;
 
 void qgpu_state_init(QgpuState *st);
+/* v10 : paramètres de point (chemin brut). */
+bool  qgpu_points_plain(const QgpuState *st);
+float qgpu_point_size(const QgpuState *st, float d);
 void qgpu_geom_init(QgpuGeom *gm);              /* v7 : valeurs initiales d'OpenGL */
 void qgpu_stipple_init(QgpuStipple *sp);        /* v8 : tout à 1, comme en OpenGL */
 

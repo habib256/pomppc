@@ -3288,8 +3288,8 @@ static void run_v10(QgpuCore *c, uint8_t *shmem)
     state(&e, QGPU_SK_TEXTURE, 1);
     state(&e, QGPU_SK_TEX_ENV_MODE, 0x1E01);            /* REPLACE */
     st = v10_exec(c, &e);
-    CHECK(st == QGPU_ST_OK && (c->caps & QGPU_CAP_TEXTURES),
-          "v10 : contexte, surface, QGPU_CAP_TEXTURES annoncé (caps 0x%x, st %u)",
+    CHECK(st == QGPU_ST_OK && (c->caps & QGPU_CAP_GL14),
+          "v10 : contexte, surface, QGPU_CAP_GL14 annoncé (caps 0x%x, st %u)",
           c->caps, st);
     CHECK(QGPU_SK_TEX_LOD_BIAS0 + 3 < QGPU_SK_COUNT && QGPU_LEN_TEX_SUBIMAGE <= QGPU_MAX_CMD_ARGS + 1,
           "v10 : clés et longueurs dans leurs bornes (%d clés, SUBIMAGE %d mots)",
@@ -3872,6 +3872,141 @@ static void run_v10(QgpuCore *c, uint8_t *shmem)
         v10_exec(c, &e);
     }
 
+    /* (s) COULEUR SECONDAIRE (1.4), chemin brut : primaire (0, 0,4, 0),
+       secondaire (0,4, 0, 0). QGPU_CSUM_FORMAT (initial) garde la règle v7–v9. */
+    {
+        static const float q[6][2] = { { 0, 0 }, { 64, 0 }, { 64, 64 }, { 0, 0 }, { 64, 64 }, { 0, 64 } };
+        static const struct { uint32_t cs; bool sec_in_fmt; uint32_t want; const char *what; } sc[] = {
+            { QGPU_CSUM_FORMAT, true,  0x666600, "initiale, secondaire dans le format → ajoutée (v7–v9)" },
+            { QGPU_CSUM_OFF,    true,  0x006600, "coupée, secondaire dans le format → ignorée" },
+            { QGPU_CSUM_ON,     false, 0x666600, "allumée, valeur courante → ajoutée" },
+            { QGPU_CSUM_FORMAT, false, 0x006600, "initiale, hors du format → ignorée (v7–v9)" },
+        };
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_TEXTURE, 0);
+        set_current(&e, QGPU_CUR_SEC_COLOR, 0.4f, 0.0f, 0.0f, 0.0f);
+        v10_exec(c, &e);
+        for (i = 0; i < sizeof(sc) / sizeof(sc[0]); i++) {
+            uint32_t fmt = VF_P2 | QGPU_VF_COLOR | (sc[i].sec_in_fmt ? QGPU_VF_SEC_COLOR : 0);
+            v.off = v.start = VTX_OFF;
+            for (k = 0; k < 6; k++) {
+                emitf(&v, q[k][0]); emitf(&v, q[k][1]);
+                emitf(&v, 0.0f); emitf(&v, 0.4f); emitf(&v, 0.0f); emitf(&v, 1.0f);
+                if (sc[i].sec_in_fmt) {
+                    emitf(&v, 0.4f); emitf(&v, 0.0f); emitf(&v, 0.0f);
+                }
+            }
+            e.off = e.start = CMD_OFF;
+            state(&e, QGPU_SK_COLOR_SUM, sc[i].cs);
+            clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+            draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 6, fmt, 6, QGPU_IDX_NONE, 0);
+            readback_cmd(&e, V10_SURF);
+            st = v10_exec(c, &e);
+            CHECK(st == QGPU_ST_OK && px(shmem, 32, 32) == sc[i].want,
+                  "(s) GL_COLOR_SUM %s : %06x (attendu %06x, st %u)", sc[i].what,
+                  px(shmem, 32, 32), sc[i].want, st);
+        }
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_COLOR_SUM, QGPU_CSUM_FORMAT);
+        set_current(&e, QGPU_CUR_SEC_COLOR, 0.0f, 0.0f, 0.0f, 0.0f);
+        v10_exec(c, &e);
+    }
+
+    /* (t) PARAMÈTRES DE POINT (1.4), chemin brut. Trois points à 20, 40 et 60
+       de l'œil (modèle-vue identité : d = |(x, y)|), taille 8, c = 1/400 :
+       tailles dérivées 8, 4 et 2,67. Chaque pixel testé est à plus d'un
+       demi-pixel du bord de son carré : aucune règle de couverture ne décide. */
+    {
+        static const float pt[3][2] = { { 12, 16 }, { 24, 32 }, { 36, 48 } };
+        uint32_t in1, out1, in2, out2, mx1, mn3;
+        v.off = v.start = VTX_OFF;
+        for (k = 0; k < 3; k++) {
+            emitf(&v, pt[k][0]); emitf(&v, pt[k][1]);
+        }
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_POINT_SIZE, 0x41000000);            /* 8 */
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+        draw_raw(&e, QGPU_PRIM_MODE_POINTS, 3, VF_P2, 3, QGPU_IDX_NONE, 0);
+        readback_cmd(&e, V10_SURF);
+        st = v10_exec(c, &e);
+        CHECK(st == QGPU_ST_OK && px(shmem, 27, 32) == 0xFFFFFF && px(shmem, 38, 48) == 0xFFFFFF,
+              "(t) sans atténuation : taille 8 partout : %06x %06x (st %u)",
+              px(shmem, 27, 32), px(shmem, 38, 48), st);
+
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_POINT_ATT_CONST, 0);
+        state(&e, QGPU_SK_POINT_ATT_QUAD, qgpu_f2u(1.0f / 400.0f));
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+        draw_raw(&e, QGPU_PRIM_MODE_POINTS, 3, VF_P2, 3, QGPU_IDX_NONE, 0);
+        readback_cmd(&e, V10_SURF);
+        st = v10_exec(c, &e);
+        in1 = px(shmem, 14, 18); out1 = px(shmem, 17, 16);
+        in2 = px(shmem, 25, 33); out2 = px(shmem, 27, 32);
+        CHECK(st == QGPU_ST_OK && in1 == 0xFFFFFF && out1 == 0 && in2 == 0xFFFFFF && out2 == 0,
+              "(t) atténuation c·d² : d=20 → 8 (%06x dedans, %06x dehors), d=40 → 4 "
+              "(%06x dedans, %06x dehors) (st %u)", in1, out1, in2, out2, st);
+
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_POINT_SIZE_MAX, 0x40C00000);        /* 6 */
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+        draw_raw(&e, QGPU_PRIM_MODE_POINTS, 3, VF_P2, 3, QGPU_IDX_NONE, 0);
+        readback_cmd(&e, V10_SURF);
+        st = v10_exec(c, &e);
+        mx1 = px(shmem, 15, 16);
+        CHECK(st == QGPU_ST_OK && mx1 == 0 && px(shmem, 14, 16) == 0xFFFFFF,
+              "(t) POINT_SIZE_MAX 6 : d=20 borné à 6 : %06x dehors, %06x dedans (st %u)",
+              mx1, px(shmem, 14, 16), st);
+
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_POINT_SIZE_MAX, 0x42800000);
+        state(&e, QGPU_SK_POINT_SIZE_MIN, 0x40C00000);        /* 6 */
+        state(&e, QGPU_SK_POINT_FADE, 0x42000000);            /* 32 : sans effet */
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+        draw_raw(&e, QGPU_PRIM_MODE_POINTS, 3, VF_P2, 3, QGPU_IDX_NONE, 0);
+        readback_cmd(&e, V10_SURF);
+        st = v10_exec(c, &e);
+        mn3 = px(shmem, 38, 48);
+        CHECK(st == QGPU_ST_OK && mn3 == 0xFFFFFF && pxa(shmem, 25, 33) == 0xFFFFFFFF,
+              "(t) POINT_SIZE_MIN 6 : d=60 porté à 6 (%06x) ; seuil de fondu sans effet "
+              "(%08x) (st %u)", mn3, pxa(shmem, 25, 33), st);
+
+        /* mode de polygone GL_POINT : mêmes tailles dérivées, sommet par sommet */
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_POINT_SIZE_MIN, 0);
+        state(&e, QGPU_SK_POLYGON_MODE_FRONT, QGPU_POLY_POINT);
+        state(&e, QGPU_SK_POLYGON_MODE_BACK, QGPU_POLY_POINT);
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+        draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2, 3, QGPU_IDX_NONE, 0);
+        readback_cmd(&e, V10_SURF);
+        st = v10_exec(c, &e);
+        CHECK(st == QGPU_ST_OK && px(shmem, 25, 33) == 0xFFFFFF && px(shmem, 27, 32) == 0 &&
+              px(shmem, 14, 18) == 0xFFFFFF,
+              "(t) polygone en GL_POINT : d=40 → 4 (%06x dedans, %06x dehors) (st %u)",
+              px(shmem, 25, 33), px(shmem, 27, 32), st);
+
+        /* les anciens opcodes n'en voient rien : DRAW_POINTS reste à 8 */
+        v.off = v.start = VTX_OFF;
+        vertex(&v, 24, 32, 1, 1, 1);
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_POLYGON_MODE_FRONT, QGPU_POLY_FILL);
+        state(&e, QGPU_SK_POLYGON_MODE_BACK, QGPU_POLY_FILL);
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_DRAW_POINTS, QGPU_LEN_DRAW)); emit(&e, 1); emit(&e, VTX_OFF);
+        readback_cmd(&e, V10_SURF);
+        st = v10_exec(c, &e);
+        CHECK(st == QGPU_ST_OK && px(shmem, 27, 32) == 0xFFFFFF,
+              "(t) DRAW_POINTS (v4) ignore l'atténuation : taille 8 : %06x (st %u)",
+              px(shmem, 27, 32), st);
+
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_POINT_ATT_CONST, 0x3F800000);
+        state(&e, QGPU_SK_POINT_ATT_QUAD, 0);
+        state(&e, QGPU_SK_POINT_FADE, 0x3F800000);
+        state(&e, QGPU_SK_POINT_SIZE, 0x3F800000);
+        state(&e, QGPU_SK_TEXTURE, 1);
+        v10_exec(c, &e);
+    }
+
     /* (r) REFUS : chacun doit rendre le bon statut sans rien casser. */
     {
         static const struct { uint32_t want; const char *what; } er[] = {
@@ -3893,8 +4028,10 @@ static void run_v10(QgpuCore *c, uint8_t *shmem)
             { QGPU_ST_BAD_ARG, "mode de comparaison inconnu" },
             { QGPU_ST_BAD_ARG, "biais d'unité NaN (SET_STATE)" },
             { QGPU_ST_BAD_ARG, "profondeur sur une texture 3D" },
+            { QGPU_ST_BAD_ARG, "COLOR_SUM = 3" },
+            { QGPU_ST_BAD_ARG, "POINT_SIZE_MAX = 0" },
         };
-        uint32_t n = sizeof(er) / sizeof(er[0]), got[18];
+        uint32_t n = sizeof(er) / sizeof(er[0]), got[20];
         bool ok = true;
         for (i = 0; i < n; i++) {
             e.off = e.start = CMD_OFF;
@@ -3919,7 +4056,9 @@ static void run_v10(QgpuCore *c, uint8_t *shmem)
             case 14: tparam(&e, T + 7, QGPU_TP_LOD_BIAS, 0x41880000); break;
             case 15: tparam(&e, T + 9, QGPU_TP_COMPARE_MODE, 0x884D); break;
             case 16: state(&e, QGPU_SK_TEX_LOD_BIAS0 + 1, 0x7FC00000); break;
-            default: timage3(&e, T, QGPU_TT_3D, 0, 1, 1, 1, 0x1902, 0x1902, 0x1406, TEX_OFF, 0, 0); break;
+            case 17: timage3(&e, T, QGPU_TT_3D, 0, 1, 1, 1, 0x1902, 0x1902, 0x1406, TEX_OFF, 0, 0); break;
+            case 18: state(&e, QGPU_SK_COLOR_SUM, 3); break;
+            default: state(&e, QGPU_SK_POINT_SIZE_MAX, 0); break;
             }
             got[i] = v10_exec(c, &e);
             if (got[i] != er[i].want) {

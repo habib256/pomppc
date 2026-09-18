@@ -38,7 +38,7 @@ static bool soft_init(QgpuCore *c)
        lui la vérité terrain des tests de requête d'occlusion. */
     c->caps |= QGPU_CAP_OCCLUSION;
     /* v10 : il tient aussi toutes les cibles et tous les paramètres de texture. */
-    c->caps |= QGPU_CAP_TEXTURES;
+    c->caps |= QGPU_CAP_GL14;
     return true;
 }
 
@@ -1050,12 +1050,15 @@ static void soft_line(QgpuSurface *s, const QgpuState *st, const float *a,
 }
 
 /* Point : carré de côté QGPU_SK_POINT_SIZE centré sur le sommet. */
+/* Point carré de `size` pixels centré sur le sommet (v10 : la taille est
+   dérivée par l'appelant — celle de l'état pour les anciens opcodes, celle des
+   paramètres de point pour le chemin brut). */
 static void soft_point(QgpuSurface *s, const QgpuState *st, const float *v, uint32_t words,
-                       int sec_off, const SoftAux *aux)
+                       float size, int sec_off, const SoftAux *aux)
 {
     float q[4][MAXW];
     SoftAux pa = *aux;
-    float h = qgpu_u2f(st->v[QGPU_SK_POINT_SIZE]) * 0.5f;
+    float h = size * 0.5f;
     static const float dx[4] = { -1, 1, 1, -1 }, dy[4] = { -1, -1, 1, 1 };
     int k;
     pa.line_stip = false;                  /* un point n'est jamais pointillé */
@@ -1133,7 +1136,7 @@ static void soft_legacy_tri(QgpuSurface *s, const QgpuState *st,
         if (mode == QGPU_POLY_LINE) {
             soft_line(s, st, q[i], q[(i + 1) % 3], words, -1, aux, NULL);
         } else {
-            soft_point(s, st, q[i], words, -1, aux);
+            soft_point(s, st, q[i], words, qgpu_u2f(st->v[QGPU_SK_POINT_SIZE]), -1, aux);
         }
     }
 }
@@ -1162,7 +1165,8 @@ static bool soft_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t
         break;
     default:
         for (i = 0; i < nverts; i++) {
-            soft_point(s, st, verts + i * words, words, -1, &aux);
+            soft_point(s, st, verts + i * words, words, qgpu_u2f(st->v[QGPU_SK_POINT_SIZE]),
+                       -1, &aux);
         }
         break;
     }
@@ -1625,6 +1629,17 @@ static void project(const Geo *G, const GVert *g, bool back, float *out)
     }
 }
 
+/* v10 : taille d'un point du chemin brut, distance à l'œil prise en
+   coordonnées œil (paramètres de point d'OpenGL 1.4). */
+static float raw_point_size(const Geo *G, const GVert *g)
+{
+    const float *e = g->v + GV_EYE;
+    if (qgpu_points_plain(G->st)) {
+        return qgpu_u2f(G->st->v[QGPU_SK_POINT_SIZE]);
+    }
+    return qgpu_point_size(G->st, sqrtf(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]));
+}
+
 /* `eflags` : bit i = l'arête (i, i+1) du triangle est une arête du CONTOUR de la
    primitive d'origine. TRIANGLES, STRIP et FAN passent 7 ; QUADS, QUAD_STRIP et
    POLYGON marquent la diagonale de leur décomposition comme interne. */
@@ -1699,7 +1714,8 @@ static void raw_tri(const Geo *G, const GVert *a, const GVert *b, const GVert *c
             soft_line(G->s, G->st, sv[i], sv[(i + 1) % n], SOFT_RAW_WORDS,
                       G->sec_off, &G->aux, NULL);
         } else {
-            soft_point(G->s, G->st, sv[i], SOFT_RAW_WORDS, G->sec_off, &G->aux);
+            soft_point(G->s, G->st, sv[i], SOFT_RAW_WORDS, raw_point_size(G, &poly[i]),
+                       G->sec_off, &G->aux);
         }
     }
 }
@@ -1744,7 +1760,7 @@ static void raw_point(const Geo *G, const GVert *a)
         }
     }
     project(G, a, false, sa);
-    soft_point(G->s, G->st, sa, SOFT_RAW_WORDS, G->sec_off, &G->aux);
+    soft_point(G->s, G->st, sa, SOFT_RAW_WORDS, raw_point_size(G, a), G->sec_off, &G->aux);
 }
 
 /* Ombrage plat : la primitive entière prend les couleurs du sommet dit
@@ -1909,8 +1925,14 @@ static bool soft_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
     G.cm_mode = st->v[QGPU_SK_COLOR_MAT_MODE];
     G.fog_mode = st->v[QGPU_SK_FOG_MODE];
     G.flat = st->v[QGPU_SK_SHADE_MODEL] == 0x1D00;
-    /* La couleur secondaire ne coûte son étage que si elle peut être non nulle. */
-    G.sec_off = ((G.lighting && G.sep_spec) || G.off_sc >= 0) ? SOFT_SEC_OFF : -1;
+    /* La couleur secondaire ne coûte son étage que si elle peut être non nulle :
+       spéculaire séparée de l'éclairage (toujours ajoutée), ou GL_COLOR_SUM
+       (v10 : la clé, ou comme en v7–v9 la présence dans le format). */
+    {
+        uint32_t cs = st->v[QGPU_SK_COLOR_SUM];
+        bool sum = cs == QGPU_CSUM_ON || (cs == QGPU_CSUM_FORMAT && G.off_sc >= 0);
+        G.sec_off = ((G.lighting && G.sep_spec) || (sum && !G.lighting)) ? SOFT_SEC_OFF : -1;
+    }
     if (!mat3_inverse(gm->mtx[QGPU_MTX_MODELVIEW], G.inv3)) {
         /* Modèle-vue singulière : GL laisse le résultat indéfini ; l'identité
            vaut mieux que des NaN dans le rasteriseur. */

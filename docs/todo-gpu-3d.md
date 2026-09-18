@@ -10,15 +10,16 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 
 ## État (19/09/2026)
 
-- **Lot 4, côté hôte (19/09/2026) : protocole v10, les textures d'OpenGL 1.2 à 1.5.** Cibles 1D,
+- **Lot 4, côté hôte (19/09/2026) : protocole v10, ce qui manquait à 1.2–1.4.** Cibles 1D,
   3D, cube et rectangle (`TEX_CREATE3`), données **au format de l'application converties par
   l'hôte** (18 couples format/type, profondeur, S3TC décompressé par le cœur, `TEX_IMAGE3`),
   sous-images (`TEX_SUBIMAGE`), `GL_MIRRORED_REPEAT`, `GL_CLAMP_TO_BORDER` et couleur de
   bordure, niveaux de base et max, bornes et biais de LOD (texture et unité), textures de
-  profondeur et comparaison d'ombre, mipmaps automatiques calculés par le cœur. `run_v10` :
+  profondeur et comparaison d'ombre, mipmaps automatiques calculés par le cœur ; couleur
+  secondaire (`QGPU_SK_COLOR_SUM`) et paramètres de point. `run_v10` :
   **0 échec sur le backend logiciel et sur le GPU hôte** (RTX 4060 Ti), cube compris — son
   orientation est vérifiée contre le pilote. `QGPU_REG_CAPS` publie enfin les bits résolus à
-  chaud (occlusion, et le nouveau `QGPU_CAP_TEXTURES`). **Rien n'est encore visible des
+  chaud (occlusion, et le nouveau `QGPU_CAP_GL14`). **Rien n'est encore visible des
   applications** : le plugin doit suivre, et cela demande la VM de développement.
   `docs/protocole-v10-textures.md`.
 
@@ -90,7 +91,7 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 | 3.2 | Modes de polygone (ligne, point), pointillés de ligne et de polygone, lissage. | ✅ **fait le 18/09/2026** sauf le **lissage** (hors périmètre v8). Offsets relevés par la sonde `v8probe` (`docs/re/etat-v8.md`) : motif de ligne `GS+0x2e26`/`0x2e28`, motif de polygone **128 octets en `GS+0x30e8`**, dans l'ordre de `glPolygonStipple`. Modes de polygone **réservés au chemin brut** (le chemin hérité reçoit des triangles déjà décomposés : le contour est perdu avant l'hôte) et **la fusion des dessins est coupée** quand le mode n'est pas `GL_FILL`. Le motif de polygone demande un **décalage d'une ligne** (le protocole indexe par `hauteur − ys`, OpenGL par `hauteur − 1 − ys`). Scènes `polymode` et `stipple` : **0/255 sur l'image entière** par les deux chemins. |
 | 3.3 | Opérations logiques ; mélange à couleur constante, équations minimum et maximum. | ✅ **fait le 18/09/2026**. Couleur de mélange en `GS+0x2d70`, opération logique en `GS+0x2e30` ; les facteurs `0x8001`-`0x8004` et les équations `GL_MIN`/`GL_MAX` passent par les clés existantes. Clés v8 envoyées pour **les deux chemins**. Scènes `blendc` et `logicop` : témoins exacts au bit près, **0/255**. Le motif de refus « stencil/logicop/stipple » ne couvre plus que le lissage de polygone. |
 | 3.4 | Textures 3D, cube, rectangle ; bordures ; compressées (S3TC passé tel quel à l'hôte). | **hôte fait (v10, 19/09/2026)** : 3D, cube, rectangle, 1D, `CLAMP_TO_BORDER` et couleur de bordure, `MIRRORED_REPEAT`, S3TC (DXT1/3/5, décompressé par le cœur pour que les backends voient les mêmes texels). Les **texels de bordure** (`border = 1` de `glTexImage`) ne sont pas portés : l'invité doit les refuser. Reste le plugin : `cfg+0xbe`, `cfg+0xc2`, relevé des niveaux 3D et des faces de cube dans GLEngine (`docs/protocole-v10-textures.md` §7) |
-| 3.5 | Lignes et points texturés ; sprites de points ; couleur secondaire. | à faire |
+| 3.5 | Lignes et points texturés ; sprites de points ; couleur secondaire. | **hôte fait pour la couleur secondaire et les paramètres de point (v10, 19/09/2026)** : `QGPU_SK_COLOR_SUM` (trois valeurs, la règle v7–v9 par défaut), atténuation, bornes et seuil de fondu, calculés par le cœur. Restent : lignes et points texturés, sprites de points, et tout le plugin (octet de `GL_COLOR_SUM` à relever ; attention au `POINT_SIZE_MAX` initial de GLEngine, `docs/protocole-v10-textures.md` §7) |
 | 3.6 | Textures de profondeur et comparaison d'ombre ; génération automatique de mipmaps (`GenerateTexMipmaps` repérée). | **hôte fait (v10, 19/09/2026)** : `GL_DEPTH_COMPONENT` en `FLOAT`, `UNSIGNED_INT`, `UNSIGNED_SHORT`, comparaison texel par texel avant filtrage, `DEPTH_TEXTURE_MODE` ; niveaux de base et max, bornes et biais de LOD ; mipmaps générés par le cœur à chaque image du niveau de base. Reste le plugin |
 | 3.7 | **Requêtes d'occlusion** (`CreateQuery`, `GetQueryInfo`). (OpenGL 1.5.) | ✅ **fait le 18/09/2026**. Interface relevée par lecture et vérifiée dans l'invité (`docs/re/etat-v8.md` §4) : `gldCreateQuery` (n° 45), `gldDestroyQuery` (46), `gldGetQueryInfo` (47) et **les procédures `+0x68` / `+0x6c`** = `glBeginQuery` / `glEndQuery`. Le `GLDriver` d'Apple ne tient **rien** (bouchons, et rien d'installé en `+0x68`/`+0x6c`) : sous lui, `glGetQueryObjectuiv` n'écrit même pas dans la variable de sortie. Le plugin tient la fonction entièrement ; un repli logiciel pendant une requête **majore** le compte (seule direction sans danger). Scène `occl` : 4 096 / 2 048 / 0 échantillons exacts. |
 | 3.8 | Multiéchantillonnage. | à faire |

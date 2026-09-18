@@ -8,6 +8,7 @@
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -121,6 +122,38 @@ void qgpu_state_init(QgpuState *st)
     st->v[QGPU_SK_POLYGON_MODE_BACK]  = QGPU_POLY_FILL;
     st->v[QGPU_SK_LINE_STIPPLE_FACTOR]  = 1;
     st->v[QGPU_SK_LINE_STIPPLE_PATTERN] = 0xFFFF;
+    /* v10 : couleur secondaire comme en v7–v9, points sans atténuation. */
+    st->v[QGPU_SK_COLOR_SUM]        = QGPU_CSUM_FORMAT;
+    st->v[QGPU_SK_POINT_SIZE_MAX]   = 0x42800000;    /* 64.0 */
+    st->v[QGPU_SK_POINT_FADE]       = 0x3F800000;    /* 1.0 */
+    st->v[QGPU_SK_POINT_ATT_CONST]  = 0x3F800000;    /* 1.0 */
+}
+
+/* v10 : vrai si les paramètres de point sont ceux de l'état initial — la
+   taille de QGPU_SK_POINT_SIZE passe alors telle quelle. */
+bool qgpu_points_plain(const QgpuState *st)
+{
+    return st->v[QGPU_SK_POINT_ATT_CONST] == 0x3F800000 &&
+           st->v[QGPU_SK_POINT_ATT_LINEAR] == 0 && st->v[QGPU_SK_POINT_ATT_QUAD] == 0 &&
+           st->v[QGPU_SK_POINT_SIZE_MIN] == 0 && st->v[QGPU_SK_POINT_SIZE_MAX] == 0x42800000;
+}
+
+/* v10 : taille dérivée d'un point de DRAW_RAW à la distance d de l'œil
+   (OpenGL 1.4 §3.3, ARB_point_parameters) — la formule est ici pour que les
+   deux backends ne puissent pas en avoir deux idées. */
+float qgpu_point_size(const QgpuState *st, float d)
+{
+    float size = qgpu_u2f(st->v[QGPU_SK_POINT_SIZE]);
+    float den = qgpu_u2f(st->v[QGPU_SK_POINT_ATT_CONST]) +
+                qgpu_u2f(st->v[QGPU_SK_POINT_ATT_LINEAR]) * d +
+                qgpu_u2f(st->v[QGPU_SK_POINT_ATT_QUAD]) * d * d;
+    float mn = qgpu_u2f(st->v[QGPU_SK_POINT_SIZE_MIN]);
+    float mx = qgpu_u2f(st->v[QGPU_SK_POINT_SIZE_MAX]);
+
+    size = den > 0.0f ? size * sqrtf(1.0f / den) : mx;
+    if (size > mx) size = mx;
+    if (size < mn) size = mn;
+    return size;
 }
 
 /* v8 : motif de pointillé initial — tout à 1, donc invisible. */
@@ -914,6 +947,16 @@ static bool valid_state(uint32_t key, uint32_t val)
     case QGPU_SK_TEX_LOD_BIAS0: case QGPU_SK_TEX_LOD_BIAS0 + 1:
     case QGPU_SK_TEX_LOD_BIAS0 + 2: case QGPU_SK_TEX_LOD_BIAS0 + 3:
         return finite_f(val, QGPU_MAX_LOD_BIAS);
+    case QGPU_SK_COLOR_SUM:
+        return val <= QGPU_CSUM_FORMAT;
+    case QGPU_SK_POINT_SIZE_MIN:
+        return finite_f(val, 64.0f) && qgpu_u2f(val) >= 0.0f;
+    case QGPU_SK_POINT_SIZE_MAX:
+        return finite_f(val, 64.0f) && qgpu_u2f(val) > 0.0f;
+    case QGPU_SK_POINT_FADE:
+    case QGPU_SK_POINT_ATT_CONST: case QGPU_SK_POINT_ATT_LINEAR:
+    case QGPU_SK_POINT_ATT_QUAD:
+        return finite_f(val, 1e9f) && qgpu_u2f(val) >= 0.0f;
     default:
         return false;
     }
@@ -1509,6 +1552,17 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (a[0] == 0 || a[0] >= QGPU_SK_COUNT || !valid_state(a[0], a[1])) {
             return QGPU_ST_BAD_ARG;
         }
+        /* v10 : une atténuation de point que le backend ne sait pas faire est
+           refusée au moment où elle est posée (cf. QGPU_CAP_GL14), sans rien
+           écrire. */
+        if (a[0] >= QGPU_SK_POINT_SIZE_MIN && a[0] <= QGPU_SK_POINT_ATT_QUAD &&
+            a[0] != QGPU_SK_POINT_FADE && !(c->caps & QGPU_CAP_GL14)) {
+            QgpuState tmp = *cur_state(c);
+            tmp.v[a[0]] = a[1];
+            if (!qgpu_points_plain(&tmp)) {
+                return QGPU_ST_BACKEND;
+            }
+        }
         cur_state(c)->v[a[0]] = a[1];
         return QGPU_ST_OK;
 
@@ -1861,7 +1915,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (c->tex[a[0]].used) {
             return QGPU_ST_LIMIT;
         }
-        if (target != QGPU_TT_2D && !(c->caps & QGPU_CAP_TEXTURES)) {
+        if (target != QGPU_TT_2D && !(c->caps & QGPU_CAP_GL14)) {
             return QGPU_ST_BACKEND;
         }
         tex_init(&c->tex[a[0]], target);
@@ -1885,11 +1939,11 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         }
         t = &c->tex[a[0]];
         rect = t->target == QGPU_TT_RECTANGLE;
-        /* v10 : ce que le backend doit savoir faire lui-même (cf. QGPU_CAP_TEXTURES) */
+        /* v10 : ce que le backend doit savoir faire lui-même (cf. QGPU_CAP_GL14) */
         if (((a[1] >= QGPU_TP_WRAP_R && a[1] <= QGPU_TP_DEPTH_MODE) ||
              ((a[1] >= QGPU_TP_WRAP_S && a[1] <= QGPU_TP_WRAP_T) &&
               (a[2] == QGPU_TW_MIRRORED_REPEAT || a[2] == QGPU_TW_CLAMP_TO_BORDER))) &&
-            !(c->caps & QGPU_CAP_TEXTURES)) {
+            !(c->caps & QGPU_CAP_GL14)) {
             return QGPU_ST_BACKEND;
         }
         switch (a[1]) {
@@ -2012,7 +2066,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         default:                                         /* 2D */
             if (d != 1 || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM) return QGPU_ST_BAD_ARG;
         }
-        if (src.depth && !(c->caps & QGPU_CAP_TEXTURES)) {
+        if (src.depth && !(c->caps & QGPU_CAP_GL14)) {
             return QGPU_ST_BACKEND;
         }
         if (off != QGPU_TEX_NO_DATA) {

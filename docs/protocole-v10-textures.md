@@ -1,18 +1,21 @@
-# Protocole qgpu v10 — les textures d'OpenGL 1.2 à 1.5
+# Protocole qgpu v10 — ce qui manquait à OpenGL 1.2–1.4 côté hôte : textures, couleur secondaire, paramètres de point
 
 Jusqu'à la v9, une texture qgpu était **2D**, ses texels arrivaient en ARGB **déjà convertis par
-l'invité** sur le PowerPC émulé, et seuls trois modes de répétition existaient. C'est ce qui
-bloquait l'annonce d'une version d'OpenGL supérieure à 1.1 (`docs/re/version-extensions.md` §7) :
+l'invité** sur le PowerPC émulé, et seuls trois modes de répétition existaient. La couleur
+secondaire ne pouvait pas être envoyée sans allumer `GL_COLOR_SUM`, et la taille d'un point ne
+dépendait pas de sa distance. C'est ce qui bloquait, côté hôte, l'annonce d'une version d'OpenGL
+supérieure à 1.1 (`docs/re/version-extensions.md` §7) :
 
-| Version | Ce qui manquait côté textures |
+| Version | Ce qui manquait |
 |---|---|
 | 1.2 | **textures 3D** (le seul vrai verrou), niveaux de base et max, bornes de LOD |
 | 1.3 | cartes de cube, compression (S3TC), `GL_CLAMP_TO_BORDER` |
-| 1.4 | textures de profondeur et comparaison d'ombre, `GL_MIRRORED_REPEAT`, biais de LOD, mipmaps automatiques |
+| 1.4 | textures de profondeur et comparaison d'ombre, `GL_MIRRORED_REPEAT`, biais de LOD, mipmaps automatiques ; **couleur secondaire** ; **paramètres de point** |
 
-La v10 les ajoute **côté hôte** (tâches 3.4 et 3.6, et la moitié hôte de 2.5 de
+La v10 les ajoute **côté hôte** (tâches 3.4 et 3.6, la moitié hôte de 2.5 et de 3.5 de
 `docs/todo-gpu-3d.md`). Elle ajoute aussi les textures **rectangle**, hors OpenGL 1.5 strict mais
-indispensables à Quartz Extreme et Core Image plus tard (4.4).
+indispensables à Quartz Extreme et Core Image plus tard (4.4). Le multiéchantillonnage (3.8) et
+les sprites de points restent hors de la v10.
 
 Règle inchangée : **rien n'est retiré, aucune longueur de commande existante ne change**.
 `TEX_CREATE` crée une texture 2D, `TEX_IMAGE` envoie des texels ARGB, exactement comme avant ; les
@@ -129,6 +132,30 @@ La coordonnée r du sommet, « ignorée » depuis la v3, sert maintenant à troi
 coordonnée des textures 3D, troisième composante de la direction d'un cube, valeur de référence
 des textures de profondeur. Un invité v3–v9 y mettait 0 ; cela ne change rien à ses textures 2D.
 
+## 3 bis. Couleur secondaire et paramètres de point
+
+Deux groupes de clés d'état, qui ne servent **qu'à `DRAW_RAW`** comme les clés v7 : les sommets
+des anciens opcodes n'ont pas de couleur secondaire, et leur taille de point est déjà calculée par
+GLEngine.
+
+**`QGPU_SK_COLOR_SUM`** a **trois** valeurs, pas deux, pour tenir la promesse de compatibilité.
+Jusqu'à la v9, `DRAW_RAW` ajoutait la couleur secondaire dès que le format de sommet en portait
+une : c'est ce qui empêchait le plugin de l'envoyer (`todo-gpu-3d.md`, « Ce que le lot 2 a laissé
+derrière lui »). La valeur initiale, `QGPU_CSUM_FORMAT`, garde exactement cette règle ;
+`QGPU_CSUM_OFF` et `QGPU_CSUM_ON` sont `glDisable` / `glEnable(GL_COLOR_SUM)`. Avec l'éclairage,
+c'est lui qui produit la couleur secondaire (la spéculaire en `GL_SEPARATE_SPECULAR_COLOR`, zéro
+sinon), et elle s'ajoute toujours : règle d'OpenGL, suivie à l'identique par les deux backends.
+
+**Paramètres de point** : `QGPU_SK_POINT_SIZE_MIN`, `_MAX`, `QGPU_SK_POINT_FADE` et les trois
+coefficients a, b, c de `GL_POINT_DISTANCE_ATTENUATION`. Taille dérivée
+`taille · sqrt(1 / (a + b·d + c·d²))`, bornée à [MIN, MAX], d étant la distance à l'œil en
+coordonnées œil, `sqrt(x² + y² + z²)`. La formule est écrite **une fois**, dans
+`qgpu_point_size()` du cœur, et le backend de référence l'emploie pour `GL_POINTS` comme pour les
+sommets d'un polygone en mode `GL_POINT` ; le backend OpenGL passe les mêmes valeurs à
+`glPointParameter`. Le **seuil de fondu** est accepté et sans effet : OpenGL 1.4 (§3.3) ne l'emploie
+qu'en multiéchantillonnage, que qgpu ne fait pas — et le test (t) vérifie que le GPU hôte ne fond
+pas l'alpha non plus.
+
 ## 4. Écarts assumés du backend de référence
 
 * **λ reste calculé par triangle**, sur les aires, comme depuis la v3. En 3D, ρ ne tient compte
@@ -143,12 +170,15 @@ des textures de profondeur. Un invité v3–v9 y mettait 0 ; cela ne change rien
 
 ## 5. Capacité
 
-`QGPU_CAP_TEXTURES` (0x10) dit que le backend actif sait échantillonner ce que la v10 décrit. Le
-backend de référence l'annonce toujours. Le backend OpenGL l'annonce si l'hôte est en OpenGL 1.4
-au moins et que `glTexImage3D` se résout. Sans ce bit, `TEX_CREATE3` d'une autre cible que 2D,
-une image de profondeur et les paramètres propres à la v10 répondent `QGPU_ST_BACKEND` : l'invité
-se replie, il ne plante pas. Conversions, S3TC, sous-images et mipmaps, faits par le cœur, n'en
-dépendent pas.
+`QGPU_CAP_GL14` (0x10) dit que le backend actif sait faire ce que la v10 demande au GPU :
+échantillonner les nouvelles cibles et appliquer les nouveaux paramètres de texture, et
+l'atténuation des points. Le backend de référence l'annonce toujours. Le backend OpenGL l'annonce
+si l'hôte est en OpenGL 1.4 au moins et que `glTexImage3D` et `glPointParameterf(v)` se
+résolvent. Sans ce bit, `TEX_CREATE3` d'une autre cible que 2D, une image de profondeur, les
+paramètres de texture propres à la v10 et des paramètres de point autres qu'initiaux répondent
+`QGPU_ST_BACKEND` — refusés au moment où ils sont posés, sans rien écrire : l'invité se replie, il
+ne plante pas. Conversions, S3TC, sous-images et mipmaps, faits par le cœur, n'en dépendent pas,
+pas plus que `QGPU_SK_COLOR_SUM` (`GL_COLOR_SUM` sert depuis la v7).
 
 **`QGPU_REG_CAPS` publie désormais ces bits.** Jusqu'à la v9, `qgpu-pci.c` publiait
 `core.be->cap`, c'est-à-dire les bits *fixes* du backend : `QGPU_CAP_OCCLUSION`, résolu à chaud
@@ -177,7 +207,9 @@ constante :
 | (o) | S3TC : DXT1 à 4 couleurs, DXT1 à 3 couleurs et noir transparent, DXT3, DXT5 à 8 alphas |
 | (p) | niveau sans données puis sous-image |
 | (q) | **chemin brut** (v7) : 3D par coordonnées brutes, cube par texgen `GL_NORMAL_MAP` |
-| (r) | 18 refus, chacun avec son statut, et le cœur intact après eux |
+| (s) | `GL_COLOR_SUM` : règle v7–v9 par défaut, coupée malgré une couleur secondaire dans le format, allumée avec la valeur courante |
+| (t) | paramètres de point : atténuation c·d² (tailles 8 et 4 à 20 et 40 de l'œil), `POINT_SIZE_MAX`, `POINT_SIZE_MIN`, seuil de fondu sans effet, polygone en `GL_POINT`, et `DRAW_POINTS` (v4) indifférent à tout cela |
+| (r) | 20 refus, chacun avec son statut, et le cœur intact après eux |
 
 Résultat : **0 échec** sur les deux backends, et `tests/qgpu_smoke.py` vert à travers QEMU.
 
@@ -204,6 +236,17 @@ de développement ; rien n'a donc été touché côté invité. Dans l'ordre :
 5. **Profondeur et comparaison**, `MIRRORED_REPEAT`, `CLAMP_TO_BORDER`, bornes et biais de LOD :
    relever les offsets des nouveaux paramètres dans `DT_PARAMS` (seuls `TP_WRAP_S/T`, `TP_MIN`,
    `TP_MAG` le sont), par sonde comme d'habitude, puis les recopier.
+6. **Couleur secondaire** : trouver l'octet de `GL_COLOR_SUM` dans le bloc d'état de GLEngine
+   (toujours pas relevé), puis mettre la couleur secondaire dans le format de `DRAW_RAW` et poser
+   `QGPU_SK_COLOR_SUM` explicitement. Sous le rendu d'Apple, elle n'est **pas** ajoutée du tout
+   (`version-extensions.md` §2) : ce sera une fonction tenue par l'hôte seul, comme les requêtes
+   d'occlusion.
+7. **Paramètres de point** : les offsets sont déjà relevés (`docs/re/etat-tcl.md` §9,
+   `GS+0x30c0` à `GS+0x30cc`) ; le motif de refus `taille-de-point-attenuee` peut tomber sur le
+   chemin brut. **Attention** : GLEngine part d'un `GL_POINT_SIZE_MAX` de **1**, observé par la
+   sonde, et non de la taille maximale. Le recopier tel quel ramènerait tous les points du chemin
+   brut à 1 pixel. Il faut vérifier dans l'invité comment GLEngine l'applique, et ne pas envoyer
+   de borne plus stricte que ce qu'il applique vraiment.
 
 Avec 2 et les vérifications [H] de `version-extensions.md` (couleur spéculaire séparée, niveaux et
 LOD), l'annonce de **1.2** devient possible. 1.3 demande encore le multiéchantillonnage (3.8) ;

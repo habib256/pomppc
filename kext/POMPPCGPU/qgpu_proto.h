@@ -58,10 +58,13 @@
                                             requêtes d'occlusion) ;
                                        v9 : doorbell asynchrone (file de
                                             soumissions, thread de rendu hôte) ;
-                                       v10 : textures 1D, 3D, cube, rectangle,
+                                       v10 : ce qui manquait à OpenGL 1.2–1.4 :
+                                            textures 1D, 3D, cube, rectangle,
                                             profondeur et comparaison, S3TC,
                                             formats de l'application convertis
-                                            par l'hôte, sous-images, LOD */
+                                            par l'hôte, sous-images, LOD ;
+                                            couleur secondaire, paramètres de
+                                            point */
 
 /* ── BAR0 : fenêtre partagée (RAM) ───────────────────────────────────────── */
 #define QGPU_SHMEM_DEFAULT_MB   64
@@ -125,15 +128,17 @@
  * QGPU_DOORBELL_GO (exécution synchrone) : un invité v9 reste correct sur un
  * device qui n'a pas le thread, il est seulement aussi lent qu'en v8. */
 #define QGPU_CAP_ASYNC          0x00000008
-/* v10 : le backend actif tient les cibles et les paramètres de texture de la
- * v10 (1D, 3D, cube, rectangle, profondeur et comparaison, MIRRORED_REPEAT,
- * CLAMP_TO_BORDER, LOD). Le backend de référence les tient toujours ; le
- * backend OpenGL ne l'annonce que s'il a résolu glTexImage3D et que l'hôte est
- * en OpenGL 1.4 au moins. Sans ce bit, TEX_CREATE3 d'une autre cible que 2D, et
- * toute image de profondeur, répondent QGPU_ST_BACKEND. Les conversions de
+/* v10 : le backend actif tient ce que la v10 demande au GPU : cibles et
+ * paramètres de texture (1D, 3D, cube, rectangle, profondeur et comparaison,
+ * MIRRORED_REPEAT, CLAMP_TO_BORDER, LOD) et paramètres de point. Le backend de
+ * référence le tient toujours ; le backend OpenGL ne l'annonce que si l'hôte
+ * est en OpenGL 1.4 au moins et qu'il a résolu glTexImage3D et
+ * glPointParameterf(v). Sans ce bit, TEX_CREATE3 d'une autre cible que 2D, toute
+ * image de profondeur, les paramètres de texture v10 et des paramètres de
+ * point autres qu'initiaux répondent QGPU_ST_BACKEND. Les conversions de
  * format, la décompression S3TC, TEX_SUBIMAGE et la génération des mipmaps
  * sont faites par le CŒUR : elles ne dépendent pas de ce bit. */
-#define QGPU_CAP_TEXTURES       0x00000010
+#define QGPU_CAP_GL14           0x00000010
 
 #define QGPU_IRQ_DONE           0x00000001
 
@@ -434,7 +439,20 @@
  * GL_TEXTURE_LOD_BIAS de glTexEnv, OpenGL 1.4), flottant (bits IEEE), initial
  * 0. Il s'ajoute au biais de la texture (QGPU_TP_LOD_BIAS), cf. section v10. */
 #define QGPU_SK_TEX_LOD_BIAS0      88  /* unités 0..3 : + u */
-#define QGPU_SK_COUNT           92
+/* v10 : couleur secondaire et paramètres de point (OpenGL 1.4). Comme les clés
+ * v7, elles ne servent QU'À DRAW_RAW : les sommets des anciens opcodes n'ont pas
+ * de couleur secondaire, et leur taille de point est déjà calculée. */
+#define QGPU_SK_COLOR_SUM          92  /* QGPU_CSUM_* ; initial QGPU_CSUM_FORMAT */
+#define QGPU_SK_POINT_SIZE_MIN     93  /* flottant dans [0, 64] ; initial 0 */
+#define QGPU_SK_POINT_SIZE_MAX     94  /* flottant dans ]0, 64] ; initial 64 */
+#define QGPU_SK_POINT_FADE         95  /* flottant ≥ 0 ; initial 1. Sans effet :
+                                          le fondu n'existe qu'en
+                                          multiéchantillonnage (GL 1.4 §3.3) */
+#define QGPU_SK_POINT_ATT_CONST    96  /* flottants ≥ 0 : a, b, c de
+                                          GL_POINT_DISTANCE_ATTENUATION ; */
+#define QGPU_SK_POINT_ATT_LINEAR   97  /* initial 1, 0, 0 */
+#define QGPU_SK_POINT_ATT_QUAD     98
+#define QGPU_SK_COUNT           99
 
 /* Valeurs d'énumération d'OpenGL utilisées par les clés v7, nommées pour que
  * l'invité n'ait pas à les recopier à la main. */
@@ -1105,6 +1123,33 @@
 #define QGPU_TW_CLAMP_TO_BORDER 0x812D
 #define QGPU_TC_NONE            0x0000
 #define QGPU_TC_COMPARE_R       0x884E  /* GL_COMPARE_R_TO_TEXTURE */
+
+/* COULEUR SECONDAIRE — QGPU_SK_COLOR_SUM (OpenGL 1.4)
+ *
+ *   Jusqu'à la v9, DRAW_RAW ajoutait la couleur secondaire dès que le format
+ *   de sommet en portait une (QGPU_VF_SEC_COLOR) : l'invité ne pouvait donc pas
+ *   l'envoyer sans allumer GL_COLOR_SUM. La clé le dit maintenant :
+ *     QGPU_CSUM_OFF    : coupée, comme glDisable(GL_COLOR_SUM) ;
+ *     QGPU_CSUM_ON     : allumée — la couleur secondaire du sommet, ou à défaut
+ *                        la valeur courante (QGPU_CUR_SEC_COLOR), s'ajoute ;
+ *     QGPU_CSUM_FORMAT : comportement v7–v9, la valeur INITIALE : allumée si et
+ *                        seulement si le format porte QGPU_VF_SEC_COLOR.
+ *   Éclairage allumé : c'est l'éclairage qui fournit la couleur secondaire (la
+ *   spéculaire en GL_SEPARATE_SPECULAR_COLOR, zéro sinon), et elle s'ajoute
+ *   toujours, quelle que soit la clé — règle d'OpenGL.
+ *
+ * PARAMÈTRES DE POINT — QGPU_SK_POINT_* (OpenGL 1.4, ARB_point_parameters)
+ *
+ *   Taille dérivée d'un point de DRAW_RAW, d étant la distance à l'œil en
+ *   coordonnées œil (sqrt(x² + y² + z²)) :
+ *     taille · sqrt(1 / (a + b·d + c·d²)), bornée à [MIN, MAX]
+ *   (un dénominateur nul ou négatif donne MAX). Elle vaut pour GL_POINTS comme
+ *   pour les sommets d'un polygone en mode GL_POINT. Les valeurs initiales
+ *   rendent la taille de QGPU_SK_POINT_SIZE telle quelle : un flux v9 ne voit
+ *   aucune différence. */
+#define QGPU_CSUM_OFF           0
+#define QGPU_CSUM_ON            1
+#define QGPU_CSUM_FORMAT        2
 
 /* ── Interface du kext POMPPCGPU (IOUserClient) ──────────────────────────────
  *

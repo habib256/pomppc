@@ -86,9 +86,12 @@ typedef struct GlState {
     void (*EndQuery)(GLenum);
     void (*GetQueryObjectuiv)(GLuint, GLenum, GLuint *);
     bool has_query;
-    /* v10 : textures 3D (GL 1.2) ; `has_tex` = QGPU_CAP_TEXTURES annoncé */
+    /* v10 : textures 3D (GL 1.2) et paramètres de point (GL 1.4) ; `has_tex` =
+       QGPU_CAP_GL14 annoncé */
     void (*TexImage3D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint,
                        GLenum, GLenum, const GLvoid *);
+    void (*PointParameterf)(GLenum, GLfloat);
+    void (*PointParameterfv)(GLenum, const GLfloat *);
     bool has_tex;
     const char *renderer;
 } GlState;
@@ -155,6 +158,12 @@ typedef struct GlSurface {
 #endif
 #ifndef GL_TEXTURE_BORDER_COLOR
 #define GL_TEXTURE_BORDER_COLOR 0x1004
+#endif
+#ifndef GL_POINT_SIZE_MIN
+#define GL_POINT_SIZE_MIN       0x8126
+#define GL_POINT_SIZE_MAX       0x8127
+#define GL_POINT_FADE_THRESHOLD_SIZE 0x8128
+#define GL_POINT_DISTANCE_ATTENUATION 0x8129
 #endif
 #ifndef GL_FOG_COORDINATE_SOURCE
 #define GL_FOG_COORDINATE_SOURCE 0x8450
@@ -303,10 +312,16 @@ static bool gl_resolve(GlState *g)
     }
     g->has_query = g->GenQueries && g->DeleteQueries && g->BeginQuery &&
                    g->EndQuery && g->GetQueryObjectuiv;
-    /* v10 : FACULTATIF, comme les requêtes (cf. QGPU_CAP_TEXTURES). */
+    /* v10 : FACULTATIF, comme les requêtes (cf. QGPU_CAP_GL14). */
     g->TexImage3D = gl_proc("glTexImage3D");
     if (!g->TexImage3D) {
         g->TexImage3D = gl_proc("glTexImage3DEXT");
+    }
+    g->PointParameterf = gl_proc("glPointParameterf");
+    g->PointParameterfv = gl_proc("glPointParameterfv");
+    if (!g->PointParameterf || !g->PointParameterfv) {
+        g->PointParameterf = gl_proc("glPointParameterfARB");
+        g->PointParameterfv = gl_proc("glPointParameterfvARB");
     }
     return g->GenFramebuffers && g->DeleteFramebuffers && g->BindFramebuffer &&
            g->FramebufferTexture2D && g->CheckFramebufferStatus &&
@@ -385,9 +400,10 @@ static bool gl_init(QgpuCore *c)
         const char *ver = (const char *)glGetString(GL_VERSION);
         int maj = 0, min = 0;
         if (ver && sscanf(ver, "%d.%d", &maj, &min) == 2 &&
-            (maj > 1 || (maj == 1 && min >= 4)) && g->TexImage3D) {
+            (maj > 1 || (maj == 1 && min >= 4)) && g->TexImage3D &&
+            g->PointParameterf && g->PointParameterfv) {
             g->has_tex = true;
-            c->caps |= QGPU_CAP_TEXTURES;
+            c->caps |= QGPU_CAP_GL14;
         }
     }
     if (c->trace) {
@@ -1028,6 +1044,14 @@ static void gl_reset_raw(QgpuCore *c)
     GlState *g = c->be_priv;
     int i;
 
+    if (g->has_tex) {
+        /* v10 : points sans atténuation pour les anciens opcodes */
+        static const GLfloat att[3] = { 1.0f, 0.0f, 0.0f };
+        g->PointParameterf(GL_POINT_SIZE_MIN, 0.0f);
+        g->PointParameterf(GL_POINT_SIZE_MAX, 64.0f);
+        g->PointParameterf(GL_POINT_FADE_THRESHOLD_SIZE, 1.0f);
+        g->PointParameterfv(GL_POINT_DISTANCE_ATTENUATION, att);
+    }
     glDisable(GL_LIGHTING);
     glDisable(GL_NORMALIZE);
     glDisable(GL_RESCALE_NORMAL);
@@ -1256,11 +1280,30 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
     if (off_sc >= 0) {
         glEnableClientState(GL_SECONDARY_COLOR_ARRAY);
         g->SecondaryColorPointer(3, GL_FLOAT, stride, verts + off_sc);
-        glEnable(GL_COLOR_SUM);
     } else {
         glDisableClientState(GL_SECONDARY_COLOR_ARRAY);
         g->SecondaryColor3fv(gm->cur_sec);
+    }
+    /* v10 : GL_COLOR_SUM selon la clé ; QGPU_CSUM_FORMAT garde la règle v7–v9.
+       Éclairage allumé, OpenGL ajoute de lui-même la couleur secondaire qu'il a
+       calculée : rien à faire de plus, comme le backend de référence. */
+    if (st->v[QGPU_SK_COLOR_SUM] == QGPU_CSUM_ON ||
+        (st->v[QGPU_SK_COLOR_SUM] == QGPU_CSUM_FORMAT && off_sc >= 0)) {
+        glEnable(GL_COLOR_SUM);
+    } else {
         glDisable(GL_COLOR_SUM);
+    }
+    /* v10 : paramètres de point (le cœur a refusé tout autre réglage que
+       l'initial si l'hôte ne les a pas) */
+    if (g->has_tex) {
+        GLfloat att[3] = { qgpu_u2f(st->v[QGPU_SK_POINT_ATT_CONST]),
+                           qgpu_u2f(st->v[QGPU_SK_POINT_ATT_LINEAR]),
+                           qgpu_u2f(st->v[QGPU_SK_POINT_ATT_QUAD]) };
+        g->PointParameterf(GL_POINT_SIZE_MIN, qgpu_u2f(st->v[QGPU_SK_POINT_SIZE_MIN]));
+        g->PointParameterf(GL_POINT_SIZE_MAX, qgpu_u2f(st->v[QGPU_SK_POINT_SIZE_MAX]));
+        g->PointParameterf(GL_POINT_FADE_THRESHOLD_SIZE,
+                           qgpu_u2f(st->v[QGPU_SK_POINT_FADE]));
+        g->PointParameterfv(GL_POINT_DISTANCE_ATTENUATION, att);
     }
     if (off_f >= 0) {
         glEnableClientState(GL_FOG_COORDINATE_ARRAY);
