@@ -175,7 +175,7 @@ echo "=== 6 bis. device qgpu de bout en bout (Open Firmware, sans invité) ==="
 if [ "$SLOW" = 1 ]; then
   if python3 tests/qgpu_smoke.py; then ok "qgpu_smoke.py"; else ko "qgpu_smoke.py"; fi
 else
-  noop "qgpu_smoke.py (--slow pour l'exécuter, ~60 s)"
+  noop "qgpu_smoke.py (--slow pour l'exécuter, ~3 min)"
 fi
 
 echo

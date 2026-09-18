@@ -3075,6 +3075,95 @@ static void run_zs(QgpuCore *c, uint8_t *shmem)
     CHECK(st == QGPU_ST_OK, "z/s : surfaces rendues (st %u)", st);
 }
 
+/* ── v9 : la file de soumissions ─────────────────────────────────────────────
+ *
+ * Le cœur n'a pas de file — elle est dans le device (qgpu-pci.c), avec son
+ * thread de rendu, et c'est tests/qgpu_smoke.py qui l'exerce de bout en bout.
+ * Ce qui SE TESTE ici, et qui casserait très silencieusement, c'est la CARTE
+ * DES REGISTRES du contrat : les cinq registres ajoutés en v9 doivent être
+ * distincts, alignés, sous QGPU_CTRL_TOPADDR — c'est ce même fichier que le
+ * kext recopie, et une collision d'offset donnerait un invité qui lit la
+ * barrière dans le compteur d'erreurs.
+ *
+ * Il exerce aussi l'invariant que le device tient sans thread : deux
+ * soumissions à la suite s'exécutent dans l'ordre, chacune voyant l'état
+ * laissée par la précédente — c'est exactement ce que la file promet. */
+static void run_v9(QgpuCore *c, uint8_t *shmem)
+{
+    static const uint32_t regs[] = {
+        QGPU_REG_MAGIC, QGPU_REG_VERSION, QGPU_REG_CAPS, QGPU_REG_SHMEM_SIZE,
+        QGPU_REG_SUBMIT_OFF, QGPU_REG_SUBMIT_LEN, QGPU_REG_DOORBELL,
+        QGPU_REG_FENCE, QGPU_REG_STATUS, QGPU_REG_STATUS_PC,
+        QGPU_REG_IRQ_MASK, QGPU_REG_IRQ, QGPU_REG_DEBUG, QGPU_REG_BACKEND_NAME,
+        QGPU_REG_QUEUE_FREE, QGPU_REG_FENCE_SUBMITTED, QGPU_REG_SUBMIT_ST,
+        QGPU_REG_ERRORS, QGPU_REG_QUEUE_DEPTH,
+    };
+    const unsigned n = sizeof(regs) / sizeof(regs[0]);
+    unsigned i, j, bad = 0;
+    Emit e; uint32_t st;
+
+    printf("-- v9 : file de soumissions --\n");
+    for (i = 0; i < n; i++) {
+        if ((regs[i] & 3) || regs[i] >= QGPU_CTRL_TOPADDR) {
+            bad++;
+        }
+        for (j = i + 1; j < n; j++) {
+            if (regs[i] == regs[j]) {
+                bad++;
+            }
+        }
+    }
+    CHECK(bad == 0, "carte des registres : %u offsets alignés et distincts "
+          "sous 0x%x (%u fautes)", n, (unsigned)QGPU_CTRL_TOPADDR, bad);
+    CHECK(QGPU_PROTO_VERSION == 9, "version du protocole %d", QGPU_PROTO_VERSION);
+    CHECK(QGPU_QUEUE_DEPTH >= 2 && (QGPU_QUEUE_DEPTH & (QGPU_QUEUE_DEPTH - 1)) == 0,
+          "profondeur de file %d (puissance de 2, >= 2)", QGPU_QUEUE_DEPTH);
+    CHECK((QGPU_DOORBELL_GO & QGPU_DOORBELL_ASYNC) == 0 && QGPU_DOORBELL_GO == 1,
+          "bits du doorbell : GO=%d ASYNC=%d disjoints",
+          QGPU_DOORBELL_GO, QGPU_DOORBELL_ASYNC);
+    CHECK(QGPU_ST_QUEUE_FULL > QGPU_ST_BACKEND,
+          "QGPU_ST_QUEUE_FULL=%d ne recouvre aucun statut antérieur",
+          QGPU_ST_QUEUE_FULL);
+    CHECK((QGPU_CAP_ASYNC & (QGPU_CAP_SOFT | QGPU_CAP_GL | QGPU_CAP_OCCLUSION)) == 0,
+          "QGPU_CAP_ASYNC=0x%x disjoint des autres capacités", QGPU_CAP_ASYNC);
+
+    /* Ordre : deux soumissions successives, la seconde relit ce que la
+       première a laissé sur la surface. La file garantit cet ordre-là. */
+    qgpu_core_reset(c);                 /* on repart d'un device vide */
+    e.base = shmem; e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 1); emit(&e, W); emit(&e, H); emit(&e, QGPU_FMT_XRGB8888);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CLEAR, QGPU_LEN_CLEAR));
+    emit(&e, QGPU_CLEAR_COLOR); emit(&e, 0x00FF00); emit(&e, qgpu_f2u(1.0f));
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "v9 : première soumission (st %u)", st);
+
+    /* Soumission fautive entre les deux : elle ne doit rien casser pour la
+       suivante — c'est l'indépendance que la file promet aussi. */
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(0x7777, 1));
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_OPCODE, "v9 : soumission fautive (st %u)", st);
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER));
+    emit(&e, 1); emit(&e, RB_OFF); emit(&e, STRIDE);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "v9 : soumission suivante exécutée (st %u)", st);
+    CHECK(px(shmem, 8, 8) == 0x00FF00,
+          "v9 : elle voit l'état laissé par la première (0x%06x)",
+          px(shmem, 8, 8));
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_DESTROY, QGPU_LEN_SURF)); emit(&e, 1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_DESTROY, QGPU_LEN_CTX)); emit(&e, 0);
+    (void)qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+}
+
 static void run_backend(const char *name)
 {
     uint8_t *shmem = calloc(1, SHMEM_SIZE);
@@ -3163,6 +3252,7 @@ static void run_backend(const char *name)
     run_v7(&c, shmem);
     run_v8(&c, shmem);
     run_zs(&c, shmem);
+    run_v9(&c, shmem);
 
     qgpu_core_reset(&c);
     e.off = e.start = CMD_OFF;

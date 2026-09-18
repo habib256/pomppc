@@ -7,11 +7,40 @@
  * exécuté par qgpu-core.c sur un backend (qgpu-soft.c ou qgpu-gl.c) — le
  * device ne connaît pas les opcodes. Contrat complet : qgpu_proto.h.
  *
- * Exécution SYNCHRONE dans l'écriture MMIO du doorbell : quand le vCPU
- * revient de son `stw`, FENCE, STATUS et STATUS_PC sont déjà à jour. C'est
- * volontairement simple (et déterministe pour les tests) ; un thread de rendu
- * asynchrone viendra si la mesure le justifie — l'IRQ DONE et le registre
- * FENCE sont déjà là pour ça, l'invité n'aura rien à changer.
+ * v9 — THREAD DE RENDU. Un seul thread possède le backend (donc le contexte
+ * GL) pour toute la vie du device, et une file bornée le nourrit :
+ *
+ *   - doorbell ASYNCHRONE (QGPU_DOORBELL_GO|QGPU_DOORBELL_ASYNC) : la
+ *     soumission est mise en file, l'écriture MMIO rend la main tout de suite,
+ *     le vCPU repart pendant que le GPU hôte dessine. C'est le gain visé.
+ *   - doorbell SYNCHRONE (QGPU_DOORBELL_GO, le défaut de v1–v8) : la
+ *     soumission passe par LA MÊME file, et l'écriture MMIO attend qu'elle soit
+ *     terminée. Au retour du `stw`, FENCE, STATUS, STATUS_PC et les relectures
+ *     sont à jour : un invité v1–v8 ne voit aucune différence.
+ *
+ * Pourquoi tout passer par le thread, y compris le synchrone, plutôt que de
+ * garder l'exécution en place quand la file est vide : un contexte CGL peut
+ * être rendu courant sur des threads différents à des moments différents (ce
+ * que fait déjà qgpu-gl.c), mais JAMAIS sur deux threads à la fois. Exécuter
+ * parfois sur le vCPU et parfois sur le thread de rendu obligerait à prouver
+ * cette exclusion à chaque chemin, pour économiser deux réveils de condition
+ * (quelques microsecondes) sur une opération qui en coûte des centaines. Un
+ * seul propriétaire du contexte, un seul ordre d'exécution : c'est aussi ce qui
+ * rend gratuite la garantie « l'ordre d'exécution est l'ordre de soumission »,
+ * y compris quand un invité mélange les deux modes ou plusieurs clients.
+ *
+ * Publication des résultats. Le thread de rendu ne prend JAMAIS le BQL :
+ *   - FENCE, STATUS, STATUS_PC et ERRORS sont écrits par qatomic_*, FENCE en
+ *     dernier et en RELEASE — c'est la barrière qui publie aussi les
+ *     relectures écrites dans BAR0 (de la RAM QEMU ordinaire, accessible depuis
+ *     n'importe quel thread) ;
+ *   - l'interruption est levée par un bottom half (qemu_bh_schedule est sûr
+ *     depuis n'importe quel thread), jamais par pci_set_irq depuis le thread.
+ * Le vCPU, lui, tient le BQL puis le mutex de la file ; le thread de rendu ne
+ * prend que le mutex : pas d'inversion possible.
+ *
+ * Hors périmètre : migration et retrait à chaud (la file est drainée avant de
+ * sauver l'état, les objets hôte ne migrent toujours pas).
  *
  *   -device qgpu-pci[,shmem_mb=64][,backend=auto|soft|gl][,trace=on]
  *
@@ -21,12 +50,16 @@
 #include "qemu/osdep.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
+#include "qemu/atomic.h"
+#include "qemu/main-loop.h"
+#include "qemu/thread.h"
 #include "hw/irq.h"
 #include "hw/pci/pci_device.h"
 #include "hw/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qom/object.h"
+#include "sysemu/sysemu.h"
 
 #include "qgpu-core.h"
 
@@ -34,6 +67,11 @@
 OBJECT_DECLARE_SIMPLE_TYPE(QgpuPCIState, QGPU_PCI)
 
 #define QGPU_NUM_REGS (QGPU_CTRL_TOPADDR / sizeof(uint32_t))
+
+/* Une soumission en attente : ce que le doorbell a lu dans les registres. */
+typedef struct QgpuJob {
+    uint32_t off, len;
+} QgpuJob;
 
 struct QgpuPCIState {
     PCIDevice parent_obj;
@@ -50,6 +88,23 @@ struct QgpuPCIState {
 
     QgpuCore core;
     bool core_ok;
+
+    /* v9 : file de soumissions et thread de rendu. `lock` protège la file et
+       les compteurs qui la décrivent ; `cond_work` réveille le thread,
+       `cond_done` réveille le vCPU qui attend (doorbell synchrone, drainage). */
+    QemuThread render_thread;
+    QemuMutex  lock;
+    QemuCond   cond_work;
+    QemuCond   cond_done;
+    QgpuJob    queue[QGPU_QUEUE_DEPTH];
+    unsigned   q_head;             /* première soumission non terminée */
+    unsigned   q_count;            /* en attente + celle en cours */
+    bool       q_running;          /* queue[q_head] est entre les mains du thread */
+    uint32_t   q_submitted;        /* copie interne de FENCE_SUBMITTED */
+    bool       q_stop;             /* demande d'arrêt du thread */
+    bool       thread_ok;
+    QEMUBH    *irq_bh;
+    Notifier   exit_notifier;
 };
 
 static void qgpu_update_irq(QgpuPCIState *s)
@@ -59,38 +114,176 @@ static void qgpu_update_irq(QgpuPCIState *s)
     qemu_set_irq(s->irq, pending != 0);
 }
 
-static void qgpu_doorbell(QgpuPCIState *s)
+/* Bottom half : lève QGPU_IRQ_DONE depuis le thread principal, sous BQL. Le
+   thread de rendu ne fait que le planifier — pci_set_irq n'est appelé qu'ici et
+   depuis les chemins vCPU. L'interruption est de NIVEAU et se coalesce : un
+   seul BH peut couvrir plusieurs soumissions terminées, l'invité relit FENCE. */
+static void qgpu_irq_bh(void *opaque)
 {
-    uint32_t off = s->regs[QGPU_REG_SUBMIT_OFF >> 2];
-    uint32_t len = s->regs[QGPU_REG_SUBMIT_LEN >> 2];
-    uint32_t st;
+    QgpuPCIState *s = opaque;
 
-    if (s->core_ok) {
-        st = qgpu_core_execute(&s->core, off, len);
-        s->regs[QGPU_REG_STATUS_PC >> 2] = s->core.status_pc;
-    } else {
-        st = QGPU_ST_BACKEND;
-        s->regs[QGPU_REG_STATUS_PC >> 2] = 0;
-    }
-    s->regs[QGPU_REG_STATUS >> 2] = st;
-    s->regs[QGPU_REG_FENCE >> 2]++;
-    if (s->trace) {
-        fprintf(stderr, "qgpu-pci: soumission off=0x%x len=%u -> statut %u "
-                "(pc %u), fence %u\n", off, len, st,
-                s->regs[QGPU_REG_STATUS_PC >> 2], s->regs[QGPU_REG_FENCE >> 2]);
-    }
     s->regs[QGPU_REG_IRQ >> 2] |= QGPU_IRQ_DONE;
     qgpu_update_irq(s);
 }
 
+/* Exécute UNE soumission et publie son résultat. Appelé par le seul thread de
+   rendu : c'est lui qui possède le backend (et donc le contexte GL). */
+static void qgpu_run_job(QgpuPCIState *s, const QgpuJob *job)
+{
+    uint32_t st, pc;
+
+    if (s->core_ok) {
+        st = qgpu_core_execute(&s->core, job->off, job->len);
+        pc = s->core.status_pc;
+    } else {
+        st = QGPU_ST_BACKEND;
+        pc = 0;
+    }
+    qatomic_set(&s->regs[QGPU_REG_STATUS_PC >> 2], pc);
+    qatomic_set(&s->regs[QGPU_REG_STATUS >> 2], st);
+    if (st != QGPU_ST_OK) {
+        qatomic_set(&s->regs[QGPU_REG_ERRORS >> 2],
+                    qatomic_read(&s->regs[QGPU_REG_ERRORS >> 2]) + 1);
+    }
+    /* FENCE EN DERNIER, en release : c'est la publication. Elle ordonne le
+       statut ci-dessus ET tout ce que la soumission a écrit dans BAR0 (les
+       relectures) avant que l'invité ne puisse voir la barrière avancer. */
+    qatomic_store_release(&s->regs[QGPU_REG_FENCE >> 2],
+                          qatomic_read(&s->regs[QGPU_REG_FENCE >> 2]) + 1);
+    if (s->trace) {
+        fprintf(stderr, "qgpu-pci: soumission off=0x%x len=%u -> statut %u "
+                "(pc %u), fence %u\n", job->off, job->len, st, pc,
+                qatomic_read(&s->regs[QGPU_REG_FENCE >> 2]));
+    }
+    if (s->irq_bh) {
+        qemu_bh_schedule(s->irq_bh);
+    }
+}
+
+static void *qgpu_render_thread(void *opaque)
+{
+    QgpuPCIState *s = opaque;
+
+    qemu_mutex_lock(&s->lock);
+    for (;;) {
+        QgpuJob job;
+
+        while (!s->q_stop && s->q_count == 0) {
+            qemu_cond_wait(&s->cond_work, &s->lock);
+        }
+        if (s->q_stop) {
+            break;
+        }
+        /* La soumission reste DANS la file pendant son exécution : c'est ce qui
+           fait que QGPU_REG_DOORBELL lu vaut « en attente + en cours ». */
+        job = s->queue[s->q_head];
+        s->q_running = true;
+        qemu_mutex_unlock(&s->lock);
+
+        qgpu_run_job(s, &job);          /* hors verrou, hors BQL */
+
+        qemu_mutex_lock(&s->lock);
+        s->q_head = (s->q_head + 1) % QGPU_QUEUE_DEPTH;
+        s->q_count--;
+        s->q_running = false;
+        qemu_cond_broadcast(&s->cond_done);
+    }
+    qemu_mutex_unlock(&s->lock);
+    return NULL;
+}
+
+/* Attend que la file soit vide. `discard` jette ce qui n'a pas commencé (reset)
+   et n'attend alors que la soumission en cours. À appeler `lock` pris. */
+static void qgpu_drain_locked(QgpuPCIState *s, bool discard)
+{
+    if (discard) {
+        /* Ne reste que celle qui est DÉJÀ entre les mains du thread : les
+           autres n'avanceront jamais FENCE — c'est dit dans qgpu_proto.h. */
+        s->q_count = s->q_running ? 1 : 0;
+    }
+    while (s->q_count > 0) {
+        qemu_cond_wait(&s->cond_done, &s->lock);
+    }
+}
+
+/* Écriture de QGPU_REG_DOORBELL. Appelée par le vCPU, BQL pris. */
+static void qgpu_doorbell(QgpuPCIState *s, bool async)
+{
+    QgpuJob job;
+    uint32_t target;
+
+    job.off = s->regs[QGPU_REG_SUBMIT_OFF >> 2];
+    job.len = s->regs[QGPU_REG_SUBMIT_LEN >> 2];
+
+    if (!s->thread_ok) {
+        /* Pas de thread (realize incomplet) : v8 à l'identique. */
+        s->regs[QGPU_REG_FENCE_SUBMITTED >> 2]++;
+        qgpu_run_job(s, &job);
+        s->regs[QGPU_REG_IRQ >> 2] |= QGPU_IRQ_DONE;
+        qgpu_update_irq(s);
+        s->regs[QGPU_REG_SUBMIT_ST >> 2] = QGPU_ST_OK;
+        return;
+    }
+
+    qemu_mutex_lock(&s->lock);
+    if (async && s->q_count == QGPU_QUEUE_DEPTH) {
+        /* Refus : rien n'est mis en file, aucun compteur n'avance. */
+        qemu_mutex_unlock(&s->lock);
+        s->regs[QGPU_REG_SUBMIT_ST >> 2] = QGPU_ST_QUEUE_FULL;
+        if (s->trace) {
+            fprintf(stderr, "qgpu-pci: file pleine, soumission asynchrone "
+                    "off=0x%x len=%u refusée\n", job.off, job.len);
+        }
+        return;
+    }
+    /* Synchrone : jamais de refus, on attend une place. Un invité v1–v8 ne
+       peut de toute façon pas remplir la file — il en vide une à la fois. */
+    while (s->q_count == QGPU_QUEUE_DEPTH) {
+        qemu_cond_wait(&s->cond_done, &s->lock);
+    }
+    s->queue[(s->q_head + s->q_count) % QGPU_QUEUE_DEPTH] = job;
+    s->q_count++;
+    target = ++s->q_submitted;
+    qemu_cond_signal(&s->cond_work);
+    if (!async) {
+        /* Le BQL reste pris pendant l'attente : c'est exactement ce que
+           faisait la v8, donc aucune régression de comportement pour un
+           invité synchrone. */
+        while ((int32_t)(qatomic_read(&s->regs[QGPU_REG_FENCE >> 2]) - target)
+               < 0) {
+            qemu_cond_wait(&s->cond_done, &s->lock);
+        }
+    }
+    qemu_mutex_unlock(&s->lock);
+    /* FENCE_SUBMITTED n'est écrit que par le vCPU, sous BQL : pas d'atomique. */
+    s->regs[QGPU_REG_FENCE_SUBMITTED >> 2] = target;
+    s->regs[QGPU_REG_SUBMIT_ST >> 2] = QGPU_ST_OK;
+}
+
 static void qgpu_soft_reset(QgpuPCIState *s)
 {
+    if (s->thread_ok) {
+        qemu_mutex_lock(&s->lock);
+        qgpu_drain_locked(s, true);
+        s->q_head = 0;
+        s->q_submitted = 0;
+        qemu_mutex_unlock(&s->lock);
+    }
+    if (s->irq_bh) {
+        /* Un BH encore en attente lèverait DONE APRÈS le reset, pour une
+           soumission qui n'existe plus du point de vue de l'invité. */
+        qemu_bh_cancel(s->irq_bh);
+    }
     memset(s->regs, 0, sizeof(s->regs));
     s->regs[QGPU_REG_MAGIC >> 2] = QGPU_MAGIC;
     s->regs[QGPU_REG_VERSION >> 2] = QGPU_PROTO_VERSION;
     s->regs[QGPU_REG_CAPS >> 2] = s->core_ok ? s->core.be->cap : 0;
+    if (s->thread_ok) {
+        s->regs[QGPU_REG_CAPS >> 2] |= QGPU_CAP_ASYNC;
+    }
     s->regs[QGPU_REG_SHMEM_SIZE >> 2] = s->shmem_mb * MiB;
     s->regs[QGPU_REG_BACKEND_NAME >> 2] = qgpu_core_backend_tag(&s->core);
+    s->regs[QGPU_REG_QUEUE_DEPTH >> 2] = QGPU_QUEUE_DEPTH;
     if (s->core_ok) {
         qgpu_core_reset(&s->core);
     }
@@ -106,7 +299,26 @@ static uint64_t qgpu_ctrl_read(void *opaque, hwaddr addr, unsigned size)
     }
     switch (addr) {
     case QGPU_REG_DOORBELL:
-        return 0;                       /* jamais occupé : exécution synchrone */
+    case QGPU_REG_QUEUE_FREE: {
+        unsigned busy = 0;
+
+        if (s->thread_ok) {
+            qemu_mutex_lock(&s->lock);
+            busy = s->q_count;
+            qemu_mutex_unlock(&s->lock);
+        }
+        /* Section critique minuscule, et le thread de rendu ne prend jamais le
+           BQL : ce verrou pris sous BQL ne peut pas s'inverser. */
+        return addr == QGPU_REG_DOORBELL ? busy : QGPU_QUEUE_DEPTH - busy;
+    }
+    case QGPU_REG_FENCE:
+        /* Pendant du release de qgpu_run_job : voir FENCE avancer, c'est voir
+           tout ce que la soumission a publié avant. */
+        return qatomic_load_acquire(&s->regs[QGPU_REG_FENCE >> 2]);
+    case QGPU_REG_STATUS:
+    case QGPU_REG_STATUS_PC:
+    case QGPU_REG_ERRORS:
+        return qatomic_read(&s->regs[addr >> 2]);
     case QGPU_REG_DEBUG:
         return 0;
     default:
@@ -136,8 +348,10 @@ static void qgpu_ctrl_write(void *opaque, hwaddr addr, uint64_t val,
         s->regs[addr >> 2] = v;
         break;
     case QGPU_REG_DOORBELL:
-        if (v & 1) {
-            qgpu_doorbell(s);
+        /* Sans le bit 0, rien ne part (v1). Avec le bit 1 en plus, la
+           soumission est mise en file au lieu d'être attendue (v9). */
+        if (v & QGPU_DOORBELL_GO) {
+            qgpu_doorbell(s, (v & QGPU_DOORBELL_ASYNC) != 0);
         }
         break;
     case QGPU_REG_IRQ_MASK:
@@ -170,6 +384,27 @@ static const MemoryRegionOps qgpu_ctrl_ops = {
 static void qgpu_pci_set_irq(void *opaque, int n, int level)
 {
     pci_set_irq(PCI_DEVICE(opaque), level);
+}
+
+/* Arrête le thread de rendu après avoir laissé finir ce qui est en cours.
+   Idempotent : appelé à la sortie de QEMU ET à la destruction du device. */
+static void qgpu_stop_thread(QgpuPCIState *s)
+{
+    if (!s->thread_ok) {
+        return;
+    }
+    qemu_mutex_lock(&s->lock);
+    qgpu_drain_locked(s, true);
+    s->q_stop = true;
+    qemu_cond_signal(&s->cond_work);
+    qemu_mutex_unlock(&s->lock);
+    qemu_thread_join(&s->render_thread);
+    s->thread_ok = false;
+}
+
+static void qgpu_exit_notify(Notifier *n, void *data)
+{
+    qgpu_stop_thread(container_of(n, QgpuPCIState, exit_notifier));
 }
 
 static void qgpu_pci_realize(PCIDevice *dev, Error **errp)
@@ -209,6 +444,19 @@ static void qgpu_pci_realize(PCIDevice *dev, Error **errp)
         fprintf(stderr, "qgpu-pci: backend %s, fenêtre %u Mio\n",
                 s->core.be->name, s->shmem_mb);
     }
+
+    /* v9 : la file et son thread. Créés AVANT le premier reset, pour que
+       QGPU_REG_CAPS annonce QGPU_CAP_ASYNC dès la première lecture. */
+    qemu_mutex_init(&s->lock);
+    qemu_cond_init(&s->cond_work);
+    qemu_cond_init(&s->cond_done);
+    s->irq_bh = qemu_bh_new(qgpu_irq_bh, s);
+    s->thread_ok = true;
+    qemu_thread_create(&s->render_thread, "qgpu-render", qgpu_render_thread, s,
+                       QEMU_THREAD_JOINABLE);
+    s->exit_notifier.notify = qgpu_exit_notify;
+    qemu_add_exit_notifier(&s->exit_notifier);
+
     qgpu_soft_reset(s);
 }
 
@@ -216,6 +464,18 @@ static void qgpu_pci_exit(PCIDevice *dev)
 {
     QgpuPCIState *s = QGPU_PCI(dev);
 
+    if (s->thread_ok) {
+        qemu_remove_exit_notifier(&s->exit_notifier);
+        qgpu_stop_thread(s);
+        qemu_cond_destroy(&s->cond_done);
+        qemu_cond_destroy(&s->cond_work);
+        qemu_mutex_destroy(&s->lock);
+    }
+    if (s->irq_bh) {
+        qemu_bh_delete(s->irq_bh);
+        s->irq_bh = NULL;
+    }
+    /* Le backend n'est libéré qu'une fois le thread joint : lui seul y touchait. */
     if (s->core_ok) {
         qgpu_core_fini(&s->core);
         s->core_ok = false;
@@ -228,6 +488,20 @@ static void qgpu_pci_reset_handler(DeviceState *d)
     qgpu_soft_reset(QGPU_PCI(d));
 }
 
+static int qgpu_pre_save(void *opaque)
+{
+    /* Hors périmètre, mais au moins cohérent : rien ne doit être en vol
+       pendant qu'on recopie les registres et BAR0. */
+    QgpuPCIState *s = opaque;
+
+    if (s->thread_ok) {
+        qemu_mutex_lock(&s->lock);
+        qgpu_drain_locked(s, false);
+        qemu_mutex_unlock(&s->lock);
+    }
+    return 0;
+}
+
 static int qgpu_post_load(void *opaque, int version_id)
 {
     /* Les objets hôte (contextes, surfaces) ne migrent pas : l'invité repart
@@ -237,13 +511,18 @@ static int qgpu_post_load(void *opaque, int version_id)
 
     qgpu_soft_reset(s);
     s->regs[QGPU_REG_FENCE >> 2] = fence;
+    s->regs[QGPU_REG_FENCE_SUBMITTED >> 2] = fence;
+    s->q_submitted = fence;
     return 0;
 }
 
+/* version_id 2 : la fenêtre de registres est passée de 0x40 à 0x50 octets
+   (v9), donc le tableau sauvé n'a plus la même taille qu'en v8. */
 static const VMStateDescription vmstate_qgpu_pci = {
     .name = "qgpu-pci",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
+    .pre_save = qgpu_pre_save,
     .post_load = qgpu_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, QgpuPCIState),

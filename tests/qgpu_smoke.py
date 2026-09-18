@@ -10,6 +10,12 @@ chemin exact que suivra le kext.
 Le scénario est celui de tests/qgpu_core_test.c (rouge sur fond bleu, puis
 un opcode invalide), avec les mêmes pixels témoins.
 
+Depuis le protocole v9 le test enchaîne sur le DOORBELL ASYNCHRONE : rafale
+qui remplit la file (QGPU_ST_QUEUE_FULL), barrière qui rattrape, relecture qui
+n'apparaît qu'à l'avancement de la barrière, soumission fautive au milieu de la
+file qui n'arrête pas les suivantes, interruption DONE, et enfin une soumission
+synchrone pour vérifier que le mode v1–v8 est resté ce qu'il était.
+
     python3 tests/qgpu_smoke.py                     # backend auto
     QGPU_BACKEND=soft python3 tests/qgpu_smoke.py   # force un backend
     QEMU_BIN=/chemin/qemu-system-ppc python3 tests/qgpu_smoke.py
@@ -23,6 +29,10 @@ QEMU = os.environ.get("QEMU_BIN",
 BACKEND = os.environ.get("QGPU_BACKEND", "auto")
 
 CMD_OFF, VTX_OFF, RB_OFF = 0x1000, 0x4000, 0x10000
+# v9 : trois scènes de plus, à des offsets distincts, pour pouvoir en mettre
+# plusieurs en file d'un coup — chacune avec sa propre zone de relecture.
+CMD_A, CMD_B, CMD_C = 0x20000, 0x21000, 0x22000
+RB_A, RB_C = 0x30000, 0x40000
 W = H = 64
 STRIDE = W * 4
 
@@ -30,9 +40,19 @@ STRIDE = W * 4
 OP_CTX_CREATE, OP_CTX_BIND = 0x0001, 0x0003
 OP_SURF_CREATE, OP_SURF_BIND, OP_SURF_READBACK = 0x0010, 0x0012, 0x0013
 OP_CLEAR, OP_DRAW = 0x0020, 0x0030
-REG_MAGIC, REG_CAPS, REG_SUBMIT_OFF, REG_SUBMIT_LEN = 0x00, 0x08, 0x10, 0x14
+REG_MAGIC, REG_VERSION, REG_CAPS = 0x00, 0x04, 0x08
+REG_SHMEM_SIZE, REG_SUBMIT_OFF, REG_SUBMIT_LEN = 0x0C, 0x10, 0x14
 REG_DOORBELL, REG_FENCE, REG_STATUS, REG_STATUS_PC = 0x18, 0x1C, 0x20, 0x24
-ST_OK, ST_BAD_OPCODE = 0, 3
+REG_IRQ_MASK, REG_IRQ = 0x28, 0x2C
+# v9
+REG_QUEUE_FREE, REG_FENCE_SUBMITTED = 0x38, 0x3C
+REG_SUBMIT_ST, REG_ERRORS, REG_QUEUE_DEPTH = 0x40, 0x44, 0x48
+DOORBELL_GO, DOORBELL_ASYNC = 1, 2
+ST_OK, ST_BAD_OPCODE, ST_QUEUE_FULL = 0, 3, 10
+CAP_ASYNC = 0x8
+IRQ_DONE = 0x1
+BURST = 0x28           # 40 doorbells asynchrones d'affilée (file = 16)
+SENTINEL = 0xDEADBEEF
 
 
 def hdr(op, n):
@@ -58,6 +78,21 @@ SCENE = [
 ]
 VERTS = vertex(4, 4, 1, 0, 0) + vertex(60, 4, 1, 0, 0) + vertex(4, 60, 1, 0, 0)
 BAD = [hdr(0, 1), hdr(0x7777, 1)]
+
+
+def scene(color, rb_off):
+    """Scène v9 : le contexte et la surface existent déjà (SCENE les a créés),
+    on ne fait que les relier, effacer et relire."""
+    return [
+        hdr(OP_CTX_BIND, 2), 0,
+        hdr(OP_SURF_BIND, 2), 1,
+        hdr(OP_CLEAR, 4), 1, color, f2u(1.0),
+        hdr(OP_SURF_READBACK, 8), 1, rb_off, STRIDE, 0, 0, W, H,
+    ]
+
+
+SCENE_A = scene(0x00FF00, RB_A)       # vert
+SCENE_C = scene(0xFF00FF, RB_C)       # magenta
 
 
 def main():
@@ -177,6 +212,100 @@ def main():
     status2 = read_val(regs + REG_STATUS)
     pc2 = read_val(regs + REG_STATUS_PC)
 
+    # ── v9 : le doorbell asynchrone ────────────────────────────────────────
+    # Un binaire QEMU antérieur à la v9 n'a pas ces registres : le dire
+    # franchement plutôt que de laisser une avalanche d'échecs obscurs.
+    version = read_val(regs + REG_VERSION)
+    if (version or 0) < 9:
+        print("\nÉCHEC : le device annonce le protocole v%s, la v9 est attendue."
+              % version)
+        print("  Ce binaire QEMU est périmé : ./scripts/build_qemu_qfb.sh")
+        qemu.kill()
+        return 1
+
+    # Après les deux soumissions synchrones ci-dessus, le device doit être au
+    # repos : rien en file, autant d'acceptées que de terminées.
+    depth = read_val(regs + REG_QUEUE_DEPTH)
+    sub0 = read_val(regs + REG_FENCE_SUBMITTED)
+    db0 = read_val(regs + REG_DOORBELL)
+    free0 = read_val(regs + REG_QUEUE_FREE)
+    err0 = read_val(regs + REG_ERRORS)
+
+    poke_words(shmem + CMD_A, SCENE_A)
+    poke_words(shmem + CMD_B, BAD)
+    poke_words(shmem + CMD_C, SCENE_C)
+
+    # Des mots Forth pour les trois registres, puis un mot par scène : sans
+    # cela une ligne de rafale dépasserait la soixantaine de caractères que
+    # l'invite Open Firmware avale sans broncher.
+    send(": qdb %x ;" % (regs + REG_DOORBELL))
+    send(": qso %x ;" % (regs + REG_SUBMIT_OFF))
+    send(": qsl %x ;" % (regs + REG_SUBMIT_LEN))
+    send(": qa %x qso l! %x qsl l! 3 qdb l! ;" % (CMD_A, len(SCENE_A) * 4))
+    send(": qb %x qso l! %x qsl l! 3 qdb l! ;" % (CMD_B, len(BAD) * 4))
+    send(": qc %x qso l! %x qsl l! 3 qdb l! ;" % (CMD_C, len(SCENE_C) * 4))
+
+    def drain(timeout=30.0):
+        """Attend que QGPU_REG_DOORBELL retombe à 0 (plus rien en vol)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if read_val(regs + REG_DOORBELL) == 0:
+                return True
+            time.sleep(0.2)
+        return False
+
+    # (a) Rafale : BURST doorbells asynchrones d'affilée sur la scène A. La
+    # file fait 16 places et une scène coûte bien plus qu'une écriture MMIO :
+    # la file DOIT déborder, donc moins de BURST soumissions sont acceptées.
+    # C'est la preuve que le device ne les a PAS exécutées dans l'écriture.
+    send("%x qso l!" % CMD_A)
+    send("%x qsl l!" % (len(SCENE_A) * 4))
+    send(": qburst %x 0 do 3 qdb l! loop ;" % BURST)
+    send("qburst", 0.5)
+    sub1 = read_val(regs + REG_FENCE_SUBMITTED)
+    subst1 = read_val(regs + REG_SUBMIT_ST)
+    accepted = None if sub1 is None or sub0 is None else sub1 - sub0
+    drained1 = drain()
+    fence3 = read_val(regs + REG_FENCE)
+    free1 = read_val(regs + REG_QUEUE_FREE)
+    err1 = read_val(regs + REG_ERRORS)
+
+    def px_at(base, x, y):
+        v = read_val(shmem + base + y * STRIDE + x * 4)
+        return None if v is None else v & 0xFFFFFF
+
+    p_burst = px_at(RB_A, 8, 8)
+
+    # (b) Trois soumissions asynchrones EN FILE, celle du milieu fautive. Les
+    # deux zones de relecture sont d'abord salies : seule l'exécution des
+    # scènes peut y remettre du vert et du magenta.
+    send("%x %x l!" % (SENTINEL, shmem + RB_A + 8 * STRIDE + 8 * 4))
+    send("%x %x l!" % (SENTINEL, shmem + RB_C + 8 * STRIDE + 8 * 4))
+    send(": qseq qa qb qc ;")
+    send("qseq", 0.5)
+    sub2 = read_val(regs + REG_FENCE_SUBMITTED)
+    drained2 = drain()
+    fence4 = read_val(regs + REG_FENCE)
+    err2 = read_val(regs + REG_ERRORS)
+    status4 = read_val(regs + REG_STATUS)
+    p_a, p_c = px_at(RB_A, 8, 8), px_at(RB_C, 8, 8)
+
+    # (c) L'interruption DONE a bien été posée par le thread de rendu (par un
+    # bottom half) ; elle est masquée, donc seule la ligne « en attente » la
+    # montre. Elle s'acquitte comme en v8.
+    irq1 = read_val(regs + REG_IRQ)
+    send("%x %x l!" % (IRQ_DONE, regs + REG_IRQ))
+    irq2 = read_val(regs + REG_IRQ)
+
+    # (d) Le mode synchrone n'a pas bougé : au retour du `stw`, tout est là.
+    send("%x %x l!" % (CMD_C, regs + REG_SUBMIT_OFF))
+    send("%x %x l!" % (len(SCENE_C) * 4, regs + REG_SUBMIT_LEN))
+    send("%x %x l!" % (DOORBELL_GO, regs + REG_DOORBELL), 1.0)
+    sub3 = read_val(regs + REG_FENCE_SUBMITTED)
+    fence5 = read_val(regs + REG_FENCE)
+    db3 = read_val(regs + REG_DOORBELL)
+    status5 = read_val(regs + REG_STATUS)
+
     qemu.kill()
 
     checks = [
@@ -191,6 +320,34 @@ def main():
         ("fence après erreur", fence2, 2),
         ("statut opcode inconnu", status2, ST_BAD_OPCODE),
         ("index de la commande fautive", pc2, 1),
+        # v9
+        ("device asynchrone (caps)", ((caps or 0) & CAP_ASYNC) != 0, True),
+        ("profondeur de file annoncée", (depth or 0) > 0, True),
+        ("acceptées = terminées au repos", sub0, 2),
+        ("rien en vol au repos", db0, 0),
+        ("file vide au repos", free0, depth),
+        ("compteur d'erreurs après l'opcode inconnu", err0, 1),
+        ("rafale : file débordée", (accepted or 0) < BURST, True),
+        ("rafale : au moins la file acceptée", (accepted or 0) >= (depth or 0), True),
+        ("dernier doorbell refusé (file pleine)", subst1, ST_QUEUE_FULL),
+        ("rafale : file drainée", drained1, True),
+        ("barrière rattrape les acceptées", fence3, sub1),
+        ("file de nouveau vide", free1, depth),
+        ("un refus ne compte pas comme erreur", err1, err0),
+        ("relecture visible après la barrière", p_burst, 0x00FF00),
+        ("3 soumissions mises en file", None if sub2 is None else sub2 - sub1, 3),
+        ("file drainée après la séquence", drained2, True),
+        ("barrière = acceptées après la séquence", fence4, sub2),
+        ("une seule erreur dans la séquence", None if err2 is None else err2 - err1, 1),
+        ("statut = celui de la dernière terminée", status4, ST_OK),
+        ("la scène avant l'erreur s'est exécutée", p_a, 0x00FF00),
+        ("la scène APRÈS l'erreur aussi", p_c, 0xFF00FF),
+        ("IRQ DONE posée par le thread de rendu", (irq1 or 0) & IRQ_DONE, IRQ_DONE),
+        ("IRQ DONE acquittée", (irq2 or 0) & IRQ_DONE, 0),
+        ("synchrone : une acceptée de plus", None if sub3 is None else sub3 - sub2, 1),
+        ("synchrone : terminée au retour du stw", fence5, sub3),
+        ("synchrone : plus rien en vol", db3, 0),
+        ("synchrone : statut lisible tout de suite", status5, ST_OK),
     ]
     failed = 0
     for name, got, want in checks:
@@ -198,7 +355,7 @@ def main():
         failed += (not ok)
         shown = ("0x%x" % got) if isinstance(got, int) and not isinstance(got, bool) else str(got)
         print("%-30s %-12s %s" % (name, shown, "OK" if ok else "ÉCHEC (attendu %s)" % (want,)))
-    print("backend hôte : caps=0x%x (1=soft, 2=gl)" % (caps or 0))
+    print("backend hôte : caps=0x%x (1=soft, 2=gl, 8=doorbell asynchrone)" % (caps or 0))
     return 1 if failed else 0
 
 
