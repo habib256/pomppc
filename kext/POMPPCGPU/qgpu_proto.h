@@ -21,6 +21,11 @@
  *   démasquée. Les surfaces vivent côté hôte ; l'invité les lit avec
  *   SURF_READBACK (hôte → BAR0) et les remplit avec SURF_UPLOAD (BAR0 → hôte).
  *
+ *   Depuis la v9 le doorbell a DEUX modes : synchrone (valeur 1, celui de
+ *   v1–v8, inchangé au bit près) et asynchrone (valeur 3, la soumission est
+ *   mise en file et la main est rendue tout de suite). Voir la section « v9 »
+ *   en fin de fichier : c'est là qu'est écrit le contrat mémoire.
+ *
  * ── Endianness ──────────────────────────────────────────────────────────────
  *
  *   L'invité est un PowerPC big-endian. Les registres (BAR1) sont déclarés
@@ -41,7 +46,7 @@
 #define QGPU_IOPCI_PRIMARY_MATCH 0x0fb21234
 
 #define QGPU_MAGIC              0x71677031  /* 'qgp1' */
-#define QGPU_PROTO_VERSION      8   /* v2 : profondeur, état GL ; v3 : textures ;
+#define QGPU_PROTO_VERSION      9   /* v2 : profondeur, état GL ; v3 : textures ;
                                        v4 : brouillard, 2e unité, lignes, points ;
                                        v5 : 4 unités, GL_COMBINE ;
                                        v6 : stencil ;
@@ -50,7 +55,9 @@
                                        v8 : fin du pipeline fixe (mélange à couleur
                                             constante, MIN/MAX, opérations logiques,
                                             modes de polygone, pointillés,
-                                            requêtes d'occlusion) */
+                                            requêtes d'occlusion) ;
+                                       v9 : doorbell asynchrone (file de
+                                            soumissions, thread de rendu hôte) */
 
 /* ── BAR0 : fenêtre partagée (RAM) ───────────────────────────────────────── */
 #define QGPU_SHMEM_DEFAULT_MB   64
@@ -59,7 +66,9 @@
 
 /* ── BAR1 : registres (4 Kio, accès 32 bits, big-endian) ─────────────────── */
 #define QGPU_CTRL_BAR_SIZE      4096
-#define QGPU_CTRL_TOPADDR       0x40
+/* v9 : la fenêtre de registres passe de 0x40 à 0x50 octets. Au-delà, la
+ * lecture rend 0xFFFFFFFF et l'écriture est ignorée, comme avant. */
+#define QGPU_CTRL_TOPADDR       0x50
 
 #define QGPU_REG_MAGIC          0x00  /* r  : QGPU_MAGIC ; w : reset complet */
 #define QGPU_REG_VERSION        0x04  /* r  : QGPU_PROTO_VERSION */
@@ -67,14 +76,37 @@
 #define QGPU_REG_SHMEM_SIZE     0x0C  /* r  : taille de BAR0 en octets */
 #define QGPU_REG_SUBMIT_OFF     0x10  /* rw : offset du flux dans BAR0 (mult. de 4) */
 #define QGPU_REG_SUBMIT_LEN     0x14  /* rw : longueur du flux en octets (mult. de 4) */
-#define QGPU_REG_DOORBELL       0x18  /* w  : 1 = exécuter ; r : 1 tant que ça tourne */
-#define QGPU_REG_FENCE          0x1C  /* r  : nombre de soumissions terminées */
-#define QGPU_REG_STATUS         0x20  /* r  : QGPU_ST_* de la dernière soumission */
+#define QGPU_REG_DOORBELL       0x18  /* w  : QGPU_DOORBELL_* ; r : soumissions en
+                                              attente ou en cours (0 = tout est fini) */
+#define QGPU_REG_FENCE          0x1C  /* r  : nombre de soumissions TERMINÉES */
+#define QGPU_REG_STATUS         0x20  /* r  : QGPU_ST_* de la dernière TERMINÉE */
 #define QGPU_REG_STATUS_PC      0x24  /* r  : index (en mots) de la commande fautive */
 #define QGPU_REG_IRQ_MASK       0x28  /* rw : QGPU_IRQ_* démasquées */
 #define QGPU_REG_IRQ            0x2C  /* r  : en attente ; w : acquitte les bits écrits */
 #define QGPU_REG_DEBUG          0x30  /* w  : un octet vers stderr de QEMU (trace invité) */
 #define QGPU_REG_BACKEND_NAME   0x34  /* r  : 4 premiers caractères du backend ('soft'/'gl  ') */
+/* v9 — file de soumissions. Détail et contrat mémoire : section « v9 ». */
+#define QGPU_REG_QUEUE_FREE     0x38  /* r  : places libres dans la file
+                                              (QGPU_QUEUE_DEPTH − DOORBELL) */
+#define QGPU_REG_FENCE_SUBMITTED 0x3C /* r  : nombre de soumissions ACCEPTÉES ; la
+                                              barrière de celle qu'on vient de
+                                              soumettre est sa valeur juste après
+                                              l'écriture du doorbell */
+#define QGPU_REG_SUBMIT_ST      0x40  /* r  : QGPU_ST_OK ou QGPU_ST_QUEUE_FULL —
+                                              suite donnée à la DERNIÈRE écriture
+                                              du doorbell (acceptation, pas rendu) */
+#define QGPU_REG_ERRORS         0x44  /* r  : nombre de soumissions TERMINÉES avec un
+                                              statut ≠ QGPU_ST_OK depuis le reset */
+#define QGPU_REG_QUEUE_DEPTH    0x48  /* r  : profondeur de la file de CE device */
+
+/* v9 : valeurs écrites dans QGPU_REG_DOORBELL. */
+#define QGPU_DOORBELL_GO        0x00000001  /* v1 : exécuter, synchrone */
+#define QGPU_DOORBELL_ASYNC     0x00000002  /* v9 : … mais en file (écrire GO|ASYNC = 3) */
+
+/* v9 : profondeur de la file du device de référence. Le device publie la
+ * sienne dans QGPU_REG_QUEUE_DEPTH — un invité prudent lit le registre
+ * plutôt que cette macro. */
+#define QGPU_QUEUE_DEPTH        16
 
 #define QGPU_CAP_SOFT           0x00000001  /* backend logiciel de référence */
 #define QGPU_CAP_GL             0x00000002  /* backend OpenGL (rendu sur le GPU hôte) */
@@ -84,6 +116,11 @@
  * ARB_occlusion_query). Sans ce bit, les opcodes QUERY_* répondent
  * QGPU_ST_BACKEND : l'invité se replie, il ne plante pas. */
 #define QGPU_CAP_OCCLUSION      0x00000004
+/* v9 : le device sait mettre les soumissions en file et les exécuter sur un
+ * thread de rendu. Sans ce bit, QGPU_DOORBELL_ASYNC est traité comme
+ * QGPU_DOORBELL_GO (exécution synchrone) : un invité v9 reste correct sur un
+ * device qui n'a pas le thread, il est seulement aussi lent qu'en v8. */
+#define QGPU_CAP_ASYNC          0x00000008
 
 #define QGPU_IRQ_DONE           0x00000001
 
@@ -98,6 +135,13 @@
 #define QGPU_ST_NO_SURF         7   /* surface inexistante ou aucune surface liée */
 #define QGPU_ST_LIMIT           8   /* trop d'objets (QGPU_MAX_*) */
 #define QGPU_ST_BACKEND         9   /* erreur du backend hôte */
+/* v9 : file pleine. Ce statut ne décrit PAS un flux : il dit qu'une écriture
+ * de QGPU_DOORBELL_ASYNC a été REFUSÉE. Rien n'a été mis en file, rien ne sera
+ * exécuté, ni FENCE ni QGPU_REG_FENCE_SUBMITTED n'avancent, et QGPU_REG_ERRORS
+ * ne bouge pas non plus (aucune soumission n'a fini en erreur). Il n'apparaît
+ * que dans QGPU_REG_SUBMIT_ST, jamais dans QGPU_REG_STATUS. Le doorbell
+ * SYNCHRONE ne le rend jamais : il attend une place. */
+#define QGPU_ST_QUEUE_FULL      10
 
 /* ── Limites ─────────────────────────────────────────────────────────────── */
 #define QGPU_MAX_CTX            16
@@ -768,6 +812,113 @@
  *   précisément l'usage : dessiner une boîte englobante sans rien peindre).
  */
 
+/* ── v9 : le doorbell asynchrone ─────────────────────────────────────────────
+ *
+ *   Jusqu'à la v8, l'hôte exécutait le flux DANS l'écriture MMIO du doorbell :
+ *   le vCPU restait gelé pendant tout le rendu. Le profil de Marble Blast le
+ *   disait sans détour — 14 % du temps invité passé à attendre le device. La
+ *   v9 ajoute une FILE DE SOUMISSIONS et un THREAD DE RENDU côté hôte : le
+ *   vCPU dépose, l'hôte dessine pendant que l'invité continue.
+ *
+ *   RIEN N'EST RETIRÉ. Un invité v1–v8 qui écrit 1 dans QGPU_REG_DOORBELL puis
+ *   lit QGPU_REG_STATUS / QGPU_REG_FENCE juste après voit exactement ce qu'il
+ *   voyait : l'écriture ne rend la main qu'une fois la soumission terminée.
+ *   Le mode synchrone reste le DÉFAUT ; l'asynchrone se demande par soumission.
+ *
+ * LES DEUX MODES
+ *
+ *   QGPU_DOORBELL_GO (1)                 : exécution SYNCHRONE. Au retour du
+ *     `stw`, FENCE, STATUS, STATUS_PC et toutes les relectures de la
+ *     soumission sont à jour. Si des soumissions asynchrones sont encore en
+ *     file, celle-ci passe APRÈS elles (une seule file, l'ordre est l'ordre de
+ *     soumission), donc l'écriture attend aussi leur fin. Si la file est
+ *     pleine, elle ATTEND une place — un doorbell synchrone n'est jamais
+ *     refusé, c'est ce qui garde les invités v1–v8 exacts.
+ *
+ *   QGPU_DOORBELL_GO|QGPU_DOORBELL_ASYNC (3) : la soumission (SUBMIT_OFF,
+ *     SUBMIT_LEN, lus au moment du doorbell) est mise en FILE et l'écriture
+ *     rend la main tout de suite. Si la file est pleine, RIEN n'est mis en
+ *     file : QGPU_REG_SUBMIT_ST vaut QGPU_ST_QUEUE_FULL et l'invité réessaie
+ *     (ou se replie sur le mode synchrone). Toute autre valeur portant le bit 0
+ *     sans le bit 1 est un doorbell synchrone ; une valeur sans le bit 0 ne
+ *     fait rien, comme en v1.
+ *
+ * LES COMPTEURS
+ *
+ *   QGPU_REG_FENCE_SUBMITTED  soumissions ACCEPTÉES (mises en file).
+ *   QGPU_REG_FENCE            soumissions TERMINÉES. Toujours ≤ SUBMITTED.
+ *   QGPU_REG_DOORBELL (lu)    SUBMITTED − FENCE : en attente ou en cours.
+ *                             0 = l'hôte n'a plus rien à faire.
+ *   QGPU_REG_QUEUE_FREE       QGPU_REG_QUEUE_DEPTH − QGPU_REG_DOORBELL.
+ *   QGPU_REG_ERRORS           soumissions terminées avec un statut ≠ OK.
+ *   QGPU_REG_STATUS/_PC       statut de la DERNIÈRE TERMINÉE (inchangé).
+ *
+ *   ORDRE DE LECTURE. L'hôte publie FENCE EN DERNIER, après le statut et après
+ *   les relectures : FENCE >= n GARANTIT que tout ce qu'a produit la soumission
+ *   n° n est visible. L'invité lit donc FENCE D'ABORD, STATUS/STATUS_PC
+ *   ensuite — dans l'autre sens il pourrait attribuer à la soumission n° n un
+ *   statut plus ancien qu'elle. (Avec plusieurs soumissions en vol, le statut
+ *   ainsi lu peut au contraire venir d'une soumission PLUS RÉCENTE : c'est
+ *   inévitable, et c'est pourquoi QGPU_REG_ERRORS existe, cf. plus bas.)
+ *
+ *   ATTENDRE UNE SOUMISSION : noter f = QGPU_REG_FENCE_SUBMITTED juste après
+ *   avoir frappé le doorbell (c'est le numéro de barrière de CETTE
+ *   soumission), puis attendre QGPU_REG_FENCE ≥ f. Les compteurs sont des
+ *   entiers de 32 bits qui bouclent : comparer par (SInt32)(fence − f) >= 0.
+ *
+ *   ERREURS. Chaque soumission est indépendante, comme en v8 : une soumission
+ *   qui échoue n'empêche pas les suivantes de la file de s'exécuter. Elle
+ *   avance FENCE comme les autres, pose son statut dans QGPU_REG_STATUS et
+ *   incrémente QGPU_REG_ERRORS. Avec plusieurs soumissions en vol, STATUS ne
+ *   suffit donc plus à conclure « tout s'est bien passé » : c'est QGPU_REG_ERRORS
+ *   qui fait foi — le lire avant la rafale et après la barrière dit s'il y a eu
+ *   une erreur, et STATUS/STATUS_PC disent laquelle pour la dernière.
+ *
+ *   INTERRUPTION. QGPU_IRQ_DONE est levée à CHAQUE soumission terminée, comme
+ *   en v8, et se démasque de la même façon (QGPU_REG_IRQ_MASK). Elle est de
+ *   niveau et se coalesce : une seule interruption peut couvrir plusieurs
+ *   soumissions terminées. Le gestionnaire acquitte puis relit FENCE — il ne
+ *   compte pas les interruptions.
+ *
+ * CONTRAT MÉMOIRE (le point à ne pas se tromper)
+ *
+ *   Tant que QGPU_REG_FENCE n'a pas dépassé une soumission, elle est « en
+ *   vol » et l'hôte peut lire ou écrire à tout moment les zones de BAR0
+ *   qu'elle désigne. L'invité doit donc, pour une soumission de barrière n,
+ *   ET JUSQU'À CE QUE FENCE ≥ n :
+ *
+ *   1. NE PAS MODIFIER le flux de commandes [SUBMIT_OFF, SUBMIT_OFF+SUBMIT_LEN)
+ *      ni aucune zone qu'il désigne : sommets et indices de DRAW_* / DRAW_RAW,
+ *      texels de TEX_IMAGE, pixels de SURF_UPLOAD / DEPTH_UPLOAD /
+ *      STENCIL_UPLOAD. Concrètement, l'invité qui veut vraiment recouvrir le
+ *      rendu et la préparation double (ou triple) ces tampons.
+ *   2. NE PAS LIRE les zones de destination : les relectures (SURF_READBACK,
+ *      DEPTH_READBACK, STENCIL_READBACK, QUERY_RESULT) n'apparaissent dans
+ *      BAR0 qu'à l'avancement de FENCE. Avant, leur contenu est indéterminé —
+ *      ancien, partiel ou en cours d'écriture.
+ *   3. NE PAS RÉUTILISER SUBMIT_OFF / SUBMIT_LEN comme mémoire : le device les
+ *      a lus au doorbell et n'y revient pas. Les réécrire pour la soumission
+ *      suivante est donc sans danger, même file pleine.
+ *
+ *   OBJETS ET ORDRE. Contextes, surfaces, textures et requêtes sont partagés
+ *   par toutes les soumissions ; il n'y a qu'UNE file et UN thread de rendu, et
+ *   l'exécution suit l'ordre de soumission — sans réordonnancement, y compris
+ *   entre clients différents du kext. Une soumission voit donc l'état laissé
+ *   par celle qui la précède, exactement comme en v8. Le device reste
+ *   mono-contexte courant : chaque soumission commence par un CTX_BIND.
+ *
+ *   RESET. Écrire QGPU_REG_MAGIC vide la file (les soumissions en attente sont
+ *   JETÉES, elles n'avanceront jamais FENCE) et attend la fin de celle qui est
+ *   en cours, puis remet tous les compteurs à zéro. Une soumission jetée ne
+ *   touche plus BAR0 après le retour de l'écriture : c'est ce qui rend le reset
+ *   sûr avant de rendre la mémoire d'un client.
+ *
+ *   HORS PÉRIMÈTRE. La migration et le retrait à chaud du device ne sont pas
+ *   tenus en v9 (ils ne l'étaient pas davantage avant : les objets hôte ne
+ *   migrent pas). Le device draine sa file avant de sauver son état, et
+ *   l'invité repart d'un device vide au chargement.
+ */
+
 /* ── Interface du kext POMPPCGPU (IOUserClient) ──────────────────────────────
  *
  *   Sélecteurs de IOConnectMethodScalarIScalarO, et types de
@@ -794,6 +945,13 @@
 #define QGPU_UC_GET_INFO        0   /* in : —              out : version, caps, taille de tranche, fence */
 #define QGPU_UC_SUBMIT          1   /* in : off, len       out : fence, status, status_pc (off relatif à la tranche) */
 #define QGPU_UC_WAIT_FENCE      2   /* in : fence, ms      out : fence courante */
+/* v9 : l'ABI du user client ne change pas, sa SÉMANTIQUE peut changer quand le
+ * kext posera le doorbell asynchrone (QGPU_CAP_ASYNC) : QGPU_UC_SUBMIT rendra
+ * alors la BARRIÈRE DE LA SOUMISSION (QGPU_REG_FENCE_SUBMITTED) au lieu de la
+ * fence déjà atteinte, et `status` dira l'acceptation (QGPU_ST_OK ou
+ * QGPU_ST_QUEUE_FULL) et non le résultat du rendu — le résultat se lit après
+ * QGPU_UC_WAIT_FENCE, qui dormira sur l'interruption DONE au lieu de scruter.
+ * Détail et plan de bascule : docs/protocole-v9-asynchrone.md. */
 #define QGPU_UC_RESET           3   /* in : —              out : — (détruit les objets du client) */
 #define QGPU_UC_GET_SLOT        4   /* in : —              out : index, slot_base, ctx_base, surf_base
                                        (tex_base   = index × QGPU_CLIENT_TEX_IDS,
