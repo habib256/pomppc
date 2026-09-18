@@ -174,6 +174,12 @@ n'existent que sur l'hôte macOS.
 
 ## Points ouverts
 
+- **`qgpu_smoke.py`, contrôle « dernier doorbell refusé (file pleine) »** : il dépend de la course
+  entre la rafale envoyée par la console d'Open Firmware et le thread de rendu. Sur un hôte chargé
+  (charge moyenne 25 à 44 pendant une compilation LTO, 19/09/2026), il a échoué 1 fois sur 6, et
+  les relectures console ont rendu `None` ou décalé d'un mot 2 fois sur 6. Ce n'est pas une
+  régression : relancer à vide avant de conclure.
+
 - **Zenerchi, fin de partie** : ralentissement quand les cristaux brillent, non diagnostiqué
   (il faut jouer une partie jusqu'au bout ; mis de côté au profit de Marble Blast). Le bilan
   `POMPPC_GL_STATS=<fichier>` donne les motifs de refus et les replis par procédure.
