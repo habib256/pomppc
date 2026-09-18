@@ -138,13 +138,20 @@ static void trace_proc(int id, unsigned long *a);
 void *pomppc_pre(int id, unsigned long *a)
 {
     if (id < 1000) {
+        void *ours;
         if (!pomppc_load_real())
             return 0;            /* impossible : GLEngine ne nous appelle qu'après Initialize */
         if (pomppc_tracing())
             pomppc_log("gld%s(%08lx %08lx %08lx %08lx %08lx %08lx)\n",
                        id < GLD_COUNT ? pomppc_gld_names[id] : "?",
                        a[0], a[1], a[2], a[3], a[4], a[5]);
-        return pomppc_real[id];
+        /* Quelques entrées sont RÉALISÉES par le plugin et non transmises : le
+           rendu d'Apple n'y répond que par un bouchon (requêtes d'occlusion).
+           Le trampoline saute dans ce qu'on rend ici, avec les arguments
+           d'origine — pas besoin d'une fonction C exportée, donc pas besoin de
+           toucher à gld_tramp.s, qui est engendré. */
+        ours = pomppc_gld_override(id);
+        return ours ? ours : pomppc_real[id];
     }
     id -= 1000;
     if (pomppc_tracing())
@@ -399,6 +406,11 @@ long gldCreateContext(long a, long b, long c, long d, long e, long f, long g, lo
                    GLD_U32(cfg, 0x00), GLD_U32(cfg, 0x08), GLD_U32(cfg, 0x0c),
                    GLD_U32(cfg, 0x10));
     }
+    /* Le bloc de configuration est rempli par le GLDriver d'Apple pendant
+       l'appel ci-dessus : c'est APRÈS qu'on l'ajuste à ce que la chaîne tient
+       (docs/re/version-extensions.md). */
+    if (r == 0 && e)
+        pomppc_patch_caps((void *)e);
     if (r == 0 && a && *(long *)a) {
         pomppc_context_created((void *)*(long *)a);
         /* 5ᵉ argument = bloc de configuration. Le chemin brut y pose cfg+0x79

@@ -40,17 +40,34 @@ Conception, rétro-ingénierie et mesures : `docs/gpu-3d-tiger.md`.
   l'ombrage plat est respecté mode par mode, l'alternance d'orientation des
   rubans aussi, et l'ordre de dessin n'est jamais changé. Tout changement d'état
   ferme la série. `POMPPC_GL_MERGE=0` coupe la fusion.
+- **Fin du pipeline fixe (protocole v8).** Mélange à couleur constante et équations `GL_MIN` /
+  `GL_MAX`, les seize **opérations logiques**, **pointillé de polygone**, **pointillé de ligne**,
+  **modes de polygone** `GL_POINT` / `GL_LINE`, décalage de polygone en ligne et en point, et les
+  **requêtes d'occlusion** d'OpenGL 1.5. Contrairement aux clés de la v7, celles-ci valent pour les
+  **deux** chemins de dessin : elles agissent au fragment ou à l'assemblage des triangles, après
+  l'endroit où les deux chemins se rejoignent. Deux exceptions, et elles sont dites par le test :
+  les **modes de polygone** sont réservés au chemin brut (le chemin hérité reçoit des triangles
+  déjà décomposés, le contour du quadrilatère est perdu avant l'hôte), et le **pointillé de ligne**
+  aussi (l'hôte tient le compteur primitive par primitive, ce que le découpage en segments du
+  chemin hérité ne permet pas). Offsets relevés : `docs/re/etat-v8.md`.
+- **Requêtes d'occlusion, tenues entièrement par le plugin.** GLEngine les remet au pilote par
+  `gldCreateQuery`, `gldDestroyQuery`, `gldGetQueryInfo` et les procédures `+0x68` / `+0x6c` ; le
+  rendu d'Apple n'en tient **aucune** (bouchons, rien d'installé), au point que
+  `glGetQueryObjectuiv` n'écrit même pas dans la variable de sortie. Si un dessin retombe sur le
+  logiciel pendant qu'une requête court, le plugin **majore** le compte de l'aire de la surface :
+  sur-estimer est la seule direction sans danger, un objet déclaré visible étant simplement
+  dessiné.
 - **Deux copies, un drapeau de fraîcheur.** La surface hôte double le tampon de
   dessin du rendu logiciel (couleur et profondeur). Avant un dessin hôte, ce que
   le logiciel a dessiné est téléversé ; avant un échange, un vidage ou tout
   chemin logiciel, ce que l'hôte a dessiné est relu. Un effacement complet ne
   téléverse rien, et la profondeur n'est relue que si un chemin logiciel s'en
   sert.
-- **État accéléré.** Profondeur, masques, mélange, test alpha, ciseaux, ombrage
-  lisse ou plat, brouillard, décalage de polygone, largeur de ligne et taille de
-  point, et deux unités de texture 2D/1D (six formats de base, texels en octets
-  ou compacts 8888/1555/565/4444, filtres avec
-  mipmaps, modes de répétition, environnements MODULATE/REPLACE/DECAL/BLEND/ADD).
+- **État accéléré.** Profondeur, stencil, masques, mélange (y compris couleur constante et
+  min/max), opérations logiques, test alpha, ciseaux, ombrage lisse ou plat, brouillard, décalage
+  de polygone, pointillés, largeur de ligne et taille de point, et **quatre** unités de texture
+  2D/1D (six formats de base, texels en octets ou compacts 8888/1555/565/4444, filtres avec
+  mipmaps, modes de répétition, environnements MODULATE/REPLACE/DECAL/BLEND/ADD et `GL_COMBINE`).
   Hors de ce domaine (liste complète : `docs/gpu-3d-tiger.md` §4.5), le plugin
   synchronise puis laisse faire le code d'Apple.
 - **Présentation directe.** Une application au premier plan reçoit son image
@@ -62,6 +79,14 @@ Conception, rétro-ingénierie et mesures : `docs/gpu-3d-tiger.md`.
   Le bundle s'appelle `GLDriver-POMPPC` pour être chargé avant le GLDriver
   d'Apple : CGL retient le premier renderer qui convient, et le nôtre est aussi
   le seul à répondre à `kCGLPFAAccelerated`.
+- **Ce qui est annoncé est tenu.** `GL_VERSION = "1.1 POMPPC-1.0"` — la plus haute version dont
+  *toutes* les fonctions sont tenues par la chaîne (plugin + hôte + repli exact sur le rendu
+  d'Apple). Pas 1.2, parce que les **textures 3D** manquent partout dans la chaîne. Le plugin
+  ajoute au tableau de bits d'extensions d'Apple exactement trois noms, chacun vérifié au rendu :
+  `GL_ARB_occlusion_query` (et seulement sur un device v8), `GL_ARB_vertex_buffer_object` et
+  `GL_EXT_blend_func_separate` — 42 extensions au lieu de 39. Les limites d'Apple (8 unités de
+  texture, 4096 de côté) sont **laissées telles quelles** : au-delà du chemin accéléré, le repli
+  tient, c'est mesuré. Le relevé fonction par fonction est dans `docs/re/version-extensions.md`.
 
 ## Construire et installer (dans l'invité)
 
@@ -90,20 +115,28 @@ GL_RESOURCES=$PWD/glres/ ./mon_application   # GLEngine lit ce dossier au lieu d
 | `POMPPC_GL_GEOM_SLOTS=n` | plafonne le nombre de sommets offerts à un `BeginPrimitiveBuffer` (mesure : c'est ainsi qu'on a établi comment GLEngine coupe une longue primitive) |
 | `POMPPC_GLTRACE=dossier` | trace de chaque appel `gld*` et de chaque procédure, avec vidages binaires |
 | `POMPPC_GLTRACE_STATE=1` | en trace, vide l'état GL complet à chaque effacement |
+| `POMPPC_GL_ANNOUNCE=0` | n'ajoute rien à l'annonce d'Apple : `GL_VERSION` et la liste d'extensions redeviennent les siennes (comparaison) |
+| `POMPPC_GL_ALLEXT=1` | **sonde** : allume les 79 bits du tableau d'extensions, pour lire la table bit → nom (expérience V3 de `docs/re/capacites-glengine.md`) |
+| `POMPPC_GL_TRY3D=n` | **sonde** : déclare une taille maximale de texture 3D, pour vérifier par l'expérience que le repli logiciel ne sait pas les échantillonner |
 
 ## Limites connues
 
-- Textures 3D/cube/rectangle, plus de 4 unités, opérations de pixels
-  (`glBitmap`, `glDrawPixels`) : rendus par le logiciel, correctement, avec une
-  relecture à chaque changement de chemin.
+- Textures 3D/cube/rectangle, textures compressées, plus de 4 unités, modes de répétition ou
+  filtres hors du domaine du protocole, opérations de pixels (`glBitmap`, `glDrawPixels`) : rendus
+  par le logiciel, correctement, avec une relecture à chaque changement de chemin.
 - **Hors du domaine du chemin brut** (le rendu d'Apple reprend tout le pipeline
-  de sommets, image exacte) : mode de polygone non plein, pointillés de ligne ou
-  de polygone, lissage, opérations logiques, atténuation de la taille des points,
-  programmes ARB de sommets ou de fragments, et tout ce qui sort déjà du domaine
+  de sommets, image exacte) : lissage (`GL_*_SMOOTH`), atténuation de la taille des points par la
+  distance, programmes ARB de sommets ou de fragments, et tout ce qui sort déjà du domaine
   de la rastérisation.
-- Le chemin brut ne porte pas la **couleur secondaire par sommet** : la mettre
-  dans le format de sommet allumerait `GL_COLOR_SUM` sur l'hôte, ce que l'état GL
-  relevé ne dit pas. Elle passe en valeur courante (`SET_CURRENT`).
+- **Modes de polygone et pointillé de ligne : chemin brut seulement** (voir plus haut) ; par le
+  chemin hérité, le rendu d'Apple les fait, exactement.
+- Le chemin brut ne porte pas la **couleur secondaire par sommet** ; elle passe en valeur courante
+  (`SET_CURRENT`). Mesuré depuis : **ni GLEngine ni le rendu d'Apple ne tiennent `GL_COLOR_SUM`**,
+  qui n'ajoute rien à la couleur primaire — ce n'est donc pas une perte du chemin brut, et
+  `GL_EXT_secondary_color` n'est pas annoncée.
+- Une **arête posée exactement sur une frontière de pixels** (coordonnée entière) peut tomber sur
+  l'une ou l'autre des deux lignes voisines : GLEngine et l'hôte ne choisissent pas la même. C'est
+  dans la latitude d'OpenGL, et cela ne se voit que sur les tracés en fil de fer.
 - 4 processus GL accélérés à la fois au plus (tranches du kext) ; le 5e est rendu
   en logiciel.
 - Chaque échange (`glFinish`, `CGLFlushDrawable`) relit l'image hôte dans la
