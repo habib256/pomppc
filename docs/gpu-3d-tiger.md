@@ -712,7 +712,8 @@ tools/guest/jobs/stage.sh gpu /tmp/j && python3 tools/guest/devloop.py run /tmp/
 
 `tools/guest/jobs/` garde les jobs réutilisables : `xcode` (chaîne de compilation), `gpu` (kext
 chargé, `qgpu_test`, plugin installé, `gltest` sous le plugin et sous Apple, conversion des
-textures par l'hôte contre par l'invité), `texup` (débit de téléversement), `diag`. `stage.sh`
+textures par l'hôte contre par l'invité), `texup` (débit de téléversement), `glwin` (mode
+bureau), `diag`. `stage.sh`
 leur joint les sources invité du dépôt.
 
 | Symptôme | Cause |
@@ -725,7 +726,10 @@ leur joint les sources invité du dépôt.
 
 Résultat du premier passage (RTX 4060 Ti, device v10) : `qgpu_test` 0 échec ; **`gltest`
 32 scènes sur 32**, écart au rendu d'Apple hors arêtes de 0 à 3/255 ; textures converties par
-l'hôte **identiques au pixel près** à la conversion par l'invité sur les 8 scènes texturées.
+l'hôte **identiques au pixel près** à la conversion par l'invité sur les 8 scènes texturées. En
+mode bureau (`start --gui`, job `glwin`) : StartupItem et relais de session installés par la
+préparation Linux fonctionnent, `glwin` 320×240 rend ses pixels témoins exacts, **64,6 img/s**
+sous le plugin contre 56,8 sous le rendu d'Apple (un cœur).
 
 ---
 
