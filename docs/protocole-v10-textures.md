@@ -218,9 +218,10 @@ Résultat : **0 échec** sur les deux backends, et `tests/qgpu_smoke.py` vert à
 Rien de ceci n'est visible par une application tant que le plugin n'a pas suivi. Il faut une VM
 de développement ; rien n'a donc été touché côté invité. Dans l'ordre :
 
-1. **Formats convertis par l'hôte** (gain de vitesse immédiat, sans relevé nouveau) : envoyer
-   `TEX_IMAGE3` avec le `LV_FORMAT` / `LV_TYPE` du niveau et son pas réel (`LV_ROWPIX`), au lieu de
-   `convert_level` suivi de `TEX_IMAGE`. Les niveaux à pas aligné cessent d'être refusés.
+1. ✅ **Formats convertis par l'hôte — fait le 19/09/2026.** Le plugin envoie `TEX_IMAGE3` avec
+   le `LV_FORMAT` / `LV_TYPE` du niveau et son pas réel (`LV_ROWPIX`) ; les niveaux à pas aligné
+   ne sont plus refusés. Images identiques au pixel près à l'ancien chemin ; +7 à +9 % sur la
+   scène `texup` en RGBA et RGB, rien en 565 et BGRA (`todo-gpu-3d.md`, 2.5).
 2. **Textures 3D** : poser `cfg+0xbe` (`GL_MAX_3D_TEXTURE_SIZE`) à `QGPU_MAX_TEX_3D_DIM`. La sonde
    `POMPPC_GL_TRY3D` a montré que GLEngine accepte alors `glTexImage3D` et remet les niveaux par
    `gldCreateTextureLevel`. **À relever** : où le niveau porte sa profondeur (la structure de

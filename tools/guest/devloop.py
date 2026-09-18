@@ -6,7 +6,8 @@ tools/guest/agent.sh ; chaque « job » est un dossier contenant job.sh (et ce
 qu'il faut compiler), transmis par une boîte aux lettres sur le disque brut.
 Pas de reboot, pas de conversion d'image : une itération = le temps du job.
 
-    devloop.py prepare            # (VM arrêtée, macOS) installe agent + boîtes aux lettres
+    devloop.py prepare            # (VM arrêtée) installe agent + boîtes aux lettres :
+                                  # par hdiutil sur macOS, DANS l'invité ailleurs
     devloop.py start              # boote la VM en single-user et lance l'agent (frappe)
     devloop.py start --gui        # boote le bureau : agent lancé par un StartupItem,
                                   # jobs graphiques relayés par POMPPCGuiRunner (gui.sh)
@@ -17,9 +18,11 @@ Pas de reboot, pas de conversion d'image : une itération = le temps du job.
     devloop.py stop
 
 Disque : $DEVDISK (raw), par défaut le tiger-dev.raw du scratchpad n'est pas
-connu du dépôt : il faut le passer explicitement.
+connu du dépôt : il faut le passer explicitement. CDROM=image[:image…] ajoute
+des lecteurs en lecture seule au démarrage (le DVD de Tiger pour installer les
+Xcode Tools, par exemple).
 """
-import json, os, socket, struct, subprocess, sys, tarfile, io, time
+import json, os, shutil, socket, struct, subprocess, sys, tarfile, tempfile, io, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 QEMU = os.environ.get("QEMU_BIN", os.path.expanduser("~/src/qemu/build/qemu-system-ppc"))
@@ -78,6 +81,14 @@ def scan_mailboxes(nonce):
     for tag, sec in want.items():
         if sec is None:
             raise SystemExit("boîte %s introuvable dans l'image" % tag)
+        # l'agent lit les secteurs sec+1.. en brut : la boîte DOIT être contiguë
+        with open(DISK, "rb") as f:
+            f.seek(sec * 512)
+            data = f.read(MBX_SECTORS * 512)
+        for k in range(0, MBX_SECTORS, 97):
+            blk = data[k * 512:k * 512 + 18]
+            if blk[:6] != MAGIC + tag or struct.unpack(">I", blk[6:10])[0] != k or blk[10:18] != nonce:
+                raise SystemExit("boîte %s fragmentée (secteur %d) : refaire prepare" % (tag, k))
         with open(DISK, "rb") as f:
             for k in (1, MBX_SECTORS // 2, MBX_SECTORS - 1):
                 f.seek((sec + k) * 512)
@@ -132,6 +143,8 @@ def write_conf(boxes):
 def prepare():
     """VM arrêtée : monte l'image (macOS), écrit agent + boîtes, démonte, localise."""
     need_disk()
+    if not shutil.which("hdiutil"):
+        return prepare_guest()
     os.makedirs(STATE, exist_ok=True)
     nonce = os.urandom(8)
     out = subprocess.check_output(["hdiutil", "attach", "-nobrowse", "-imagekey",
@@ -160,6 +173,213 @@ def prepare():
     boxes["mtime_disk_prepared"] = time.time()
     json.dump(boxes, open(os.path.join(STATE, "mailbox.json"), "w"))
     print("boîtes : inbox secteur %d, outbox secteur %d" % (boxes["IN"], boxes["OU"]))
+
+
+SETUP_SH = r"""#!/bin/sh
+# setup.sh — préparation de la VM de dev PAR L'INVITÉ (devloop.py prepare sans
+# hdiutil). Lancé à la main (frappe) en single-user, racine, / monté en écriture.
+#   sh /cd/setup.sh /cd <nonce en hexadécimal> <utilisateur de session>
+CD=$1; HEX=$2; U=$3
+echo "setup: début"
+mkdir -p /pomppc
+cp "$CD/agent.sh" /pomppc/agent.sh
+rm -rf /Library/StartupItems/POMPPCAgent /Applications/POMPPCGuiRunner.app
+mkdir -p /Library/StartupItems
+cp -R "$CD/POMPPCAgent" /Library/StartupItems/POMPPCAgent
+cp -R "$CD/POMPPCGuiRunner.app" /Applications/POMPPCGuiRunner.app
+chown -R root:wheel /pomppc /Library/StartupItems/POMPPCAgent /Applications/POMPPCGuiRunner.app
+chmod -R 755 /Library/StartupItems/POMPPCAgent /Applications/POMPPCGuiRunner.app
+if [ -f "$CD/loginwindow.plist" ]; then
+  cp "$CD/loginwindow.plist" /Users/$U/Library/Preferences/loginwindow.plist
+  chown $(stat -f %%u /Users/$U) /Users/$U/Library/Preferences/loginwindow.plist
+fi
+# Boîtes aux lettres : 512 octets par secteur, PMBX + étiquette + index + nonce.
+# L'agent et l'hôte les lisent en secteurs bruts CONSÉCUTIFS : chaque boîte est
+# préallouée d'un seul tenant (fcntl F_PREALLOCATE = 42, F_ALLOCATECONTIG |
+# F_ALLOCATEALL, F_PEOFPOSMODE), sinon HFS+ la découpe (vu : un morceau à 6 Mio).
+for t in IN OU; do
+  f=/pomppc/mbx-in.bin; [ $t = OU ] && f=/pomppc/mbx-out.bin
+  rm -f $f
+  perl -e 'my ($t, $n, $h, $f) = @ARGV; my $x = pack("H*", $h); my $z = "\0" x 494;
+           open(F, ">", $f) or die "$f : $!";
+           fcntl(F, 42, pack("LlNNNNNN", 6, 3, 0, 0, 0, $n * 512, 0, 0))
+             or die "$f : préallocation contiguë refusée ($!)\n";
+           for my $k (0 .. $n - 1) { print F "PMBX", $t, pack("N", $k), $x, $z }
+           close(F) or die "$f : $!";' \
+       $t %(sectors)d $HEX $f || echo "setup: ÉCHEC boîte $t"
+done
+sync; sync
+echo "setup: fini"
+"""
+
+
+def vm_args(gui, cdroms=()):
+    """Ligne de commande QEMU de la VM de dev (single-user sauf `gui`)."""
+    smp = int(os.environ.get("SMP", "1"))
+    qemu = QEMU + "64" if smp > 1 else QEMU
+    extra = ["-accel", "tcg,thread=multi"] if smp > 1 else []
+    ram = "1024"
+    snd = os.environ.get("SND", "")
+    if snd in ("1", "none"):
+        drv = ("coreaudio" if sys.platform == "darwin" else "pa") if snd == "1" else "none"
+        extra += ["-audiodev", "%s,id=snd0" % drv, "-global", "screamer.audiodev=snd0"]
+        ram = "768"
+    for cd in cdroms:
+        extra += ["-drive", "file=%s,format=raw,media=cdrom,readonly=on" % cd]
+    backend = os.environ.get("GPU_BACKEND", "auto")
+    return [qemu, "-M", "mac99,via=pmu", "-cpu", "g4", "-m", ram, "-smp", str(smp),
+            *extra,
+            "-display", "none", "-bios", BIOS,
+            "-g", os.environ.get("RES", "1024x768x32"),
+            "-drive", "file=%s,format=raw,media=disk" % DISK,
+            "-device", "usb-tablet",
+            *(["-netdev", "user,id=net0", "-device", "sungem,netdev=net0"]
+              if os.environ.get("NET") == "1" else ["-nic", "none"]),
+            "-device", "qgpu-pci,id=gpu0,backend=%s%s" % (
+                backend, ",trace=on" if os.environ.get("GPU_TRACE") else ""),
+            "-prom-env", "auto-boot?=true",
+            "-prom-env", "boot-device=hd:10,\\System\\Library\\CoreServices\\BootX",
+            "-prom-env", "boot-args=%s" % ("-v" if gui else "-v -s"),
+            "-qmp", "unix:%s,server=on,wait=off" % QMP]
+
+
+def boot_vm(gui, cdroms=()):
+    os.makedirs(STATE, exist_ok=True)
+    if os.path.exists(QMP):
+        os.remove(QMP)
+    log = open(os.path.join(STATE, "qemu.log"), "wb")
+    p = subprocess.Popen(vm_args(gui, cdroms), stdin=subprocess.DEVNULL, stdout=log,
+                         stderr=log, start_new_session=True)
+    open(os.path.join(STATE, "qemu.pid"), "w").write(str(p.pid))
+    time.sleep(3)
+    return p, Qmp()
+
+
+def wait_stable(q, first=35, still=15, name="boot.png"):
+    """Attend un écran immobile `still` secondes (single-user : l'invite)."""
+    time.sleep(first)
+    prev, same, n = None, time.time(), 0
+    while True:
+        s = shot(q, os.path.join(STATE, name)); n += 1
+        if s == prev and time.time() - same >= still:
+            return
+        if s != prev:
+            prev, same = s, time.time()
+        if n > 90:
+            sys.exit("écran jamais stable : voir %s/%s" % (STATE, name))
+        time.sleep(4)
+
+
+def prepare_guest():
+    """Sans hdiutil (Linux) : c'est l'INVITÉ qui se prépare. Démarrage en
+    single-user avec un CD (agent, StartupItem, relais de session, setup.sh,
+    loginwindow.plist complété ici) ; l'invité recopie tout et crée lui-même ses
+    boîtes aux lettres, marquées d'un nonce ; l'hôte les retrouve dans l'image,
+    fait écrire agent.conf, puis arrête la VM. Aucune écriture HFS+ côté hôte."""
+    import plistlib
+    os.makedirs(STATE, exist_ok=True)
+    nonce = os.urandom(8)
+    stage = tempfile.mkdtemp(prefix="devloop-prep-")
+    try:
+        shutil.copy(os.path.join(ROOT, "tools", "guest", "agent.sh"), stage)
+        shutil.copytree(os.path.join(ROOT, "tools", "guest", "POMPPCAgent"),
+                        os.path.join(stage, "POMPPCAgent"))
+        shutil.copytree(os.path.join(ROOT, "tools", "guest", "POMPPCGuiRunner.app"),
+                        os.path.join(stage, "POMPPCGuiRunner.app"))
+        with open(os.path.join(stage, "setup.sh"), "w") as f:
+            f.write(SETUP_SH % {"sectors": MBX_SECTORS})
+        lw = loginwindow_plist()
+        if lw is not None:
+            items = lw.setdefault("AutoLaunchedApplicationDictionary", [])
+            if not any(i.get("Path") == "/Applications/POMPPCGuiRunner.app" for i in items):
+                items.append({"Hide": False, "Path": "/Applications/POMPPCGuiRunner.app"})
+            with open(os.path.join(stage, "loginwindow.plist"), "wb") as f:
+                plistlib.dump(lw, f, fmt=plistlib.FMT_XML)
+        else:
+            print("⚠ loginwindow.plist illisible : le relais graphique ne démarrera pas")
+        iso = os.path.join(STATE, "prepare.iso")
+        subprocess.check_call(["xorriso", "-as", "mkisofs", "-quiet", "-R", "-J",
+                               "-V", "POMPPCPREP", "-o", iso, stage])
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+    p, q = boot_vm(False, [iso])
+    try:
+        boxes = prepare_in_guest(p, q, nonce)
+    except BaseException:
+        stop()                      # ne jamais laisser une VM orpheline
+        raise
+    boxes["mtime_disk_prepared"] = time.time()
+    json.dump(boxes, open(os.path.join(STATE, "mailbox.json"), "w"))
+    print("boîtes : inbox secteur %d, outbox secteur %d ; capture %s/prepare.png"
+          % (boxes["IN"], boxes["OU"], STATE))
+
+
+def prepare_in_guest(p, q, nonce):
+    wait_stable(q)
+    type_text(q, "mount -uw /\n"); time.sleep(4)
+    # le CD d'un lecteur IDE de mac99 : /dev/diskNs0 (la tranche de session) ;
+    # mount_cd9660 sur /dev/diskN rend « Invalid argument » (vu en vrai)
+    type_text(q, "mkdir -p /cd; for d in 1 2 3 4; do mount_cd9660 /dev/disk${d}s0 /cd 2>/dev/null "
+                 "&& break; done; sh /cd/setup.sh /cd %s %s\n" % (nonce.hex(), GUI_USER))
+    # perl écrit 2 × 32 Mio : on attend que l'écran se fige de nouveau
+    wait_stable(q, first=20, still=12, name="prepare.png")
+    boxes = scan_mailboxes(nonce)
+    type_text(q, "echo %d %d > /pomppc/agent.conf; chown root:wheel /pomppc/agent.conf; "
+                 "sync; sync\n" % (boxes["IN"], boxes["OU"]))
+    time.sleep(6)
+    shot(q, os.path.join(STATE, "prepare.png"))
+    type_text(q, "umount /cd; halt\n")
+    try:
+        p.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        stop()
+    return boxes
+
+
+def loginwindow_plist():
+    """loginwindow.plist de l'utilisateur de session, LU dans l'image par 7z
+    (HFS+ embarqué dans une enveloppe HFS : décalages calculés ici)."""
+    import plistlib
+    if not shutil.which("7z"):
+        return None
+    tmp = tempfile.mkdtemp(prefix="devloop-lw-")
+    try:
+        with open(DISK, "rb") as f:
+            f.seek(512)
+            n = struct.unpack(">I", f.read(512)[4:8])[0]
+            part = None
+            for i in range(n):
+                f.seek(512 * (1 + i))
+                e = f.read(512)
+                if e[48:80].split(b"\0")[0] == b"Apple_HFS":
+                    part = struct.unpack(">II", e[8:16])
+            if not part:
+                return None
+            base = part[0] * 512
+            f.seek(base + 1024)
+            m = f.read(162)
+            if m[:2] == b"BD" and m[0x7C:0x7E] == b"H+":        # enveloppe HFS
+                alblk = struct.unpack(">I", m[0x14:0x18])[0]
+                alst = struct.unpack(">H", m[0x1C:0x1E])[0]
+                sb, bc = struct.unpack(">HH", m[0x7E:0x82])
+                base += alst * 512 + sb * alblk
+                size = bc * alblk
+            else:
+                size = part[1] * 512
+        img = os.path.join(tmp, "vol.hfs")
+        # copie creuse du seul volume HFS+ (7z ne lit pas l'enveloppe)
+        subprocess.check_call(["dd", "if=" + DISK, "of=" + img, "bs=4M", "conv=sparse",
+                               "iflag=skip_bytes,count_bytes", "skip=%d" % base,
+                               "count=%d" % size, "status=none"])
+        rel = "Users/%s/Library/Preferences/loginwindow.plist" % GUI_USER
+        subprocess.call(["7z", "x", "-y", "-o" + tmp, img, "*/" + rel],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for root, _, files in os.walk(tmp):
+            if "loginwindow.plist" in files and root.endswith("Preferences"):
+                return plistlib.load(open(os.path.join(root, "loginwindow.plist"), "rb"))
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 class Qmp:
@@ -221,66 +441,15 @@ def click(q, x, y, screen=(1024, 768)):
 def start(gui=False):
     need_disk()
     boxes = find_mailbox(b"IN"), find_mailbox(b"OU")
-    os.makedirs(STATE, exist_ok=True)
-    if os.path.exists(QMP):
-        os.remove(QMP)
-    backend = os.environ.get("GPU_BACKEND", "auto")
-    # SMP=2 / SND=1 : mêmes conditions que run_tiger.sh (MTTCG ppc64,
-    # Screamer avec RAM plafonnée à 768 Mo). SND=none : Screamer muet.
-    smp = int(os.environ.get("SMP", "1"))
-    qemu = QEMU + "64" if smp > 1 else QEMU
-    extra = ["-accel", "tcg,thread=multi"] if smp > 1 else []
-    ram = "1024"
-    snd = os.environ.get("SND", "")
-    if snd in ("1", "none"):
-        drv = "coreaudio" if snd == "1" else "none"
-        extra += ["-audiodev", "%s,id=snd0" % drv, "-global", "screamer.audiodev=snd0"]
-        ram = "768"
-    args = [qemu, "-M", "mac99,via=pmu", "-cpu", "g4", "-m", ram, "-smp", str(smp),
-            *extra,
-            "-display", "none", "-bios", BIOS,
-            "-g", os.environ.get("RES", "1024x768x32"),
-            "-drive", "file=%s,format=raw,media=disk" % DISK,
-            "-device", "usb-tablet",
-            *(["-netdev", "user,id=net0", "-device", "sungem,netdev=net0"]
-              if os.environ.get("NET") == "1" else ["-nic", "none"]),
-            "-device", "qgpu-pci,id=gpu0,backend=%s%s" % (
-                backend, ",trace=on" if os.environ.get("GPU_TRACE") else ""),
-            "-prom-env", "auto-boot?=true",
-            "-prom-env", "boot-device=hd:10,\\System\\Library\\CoreServices\\BootX",
-            "-prom-env", "boot-args=%s" % ("-v" if gui else "-v -s"),
-            "-qmp", "unix:%s,server=on,wait=off" % QMP]
-    log = open(os.path.join(STATE, "qemu.log"), "wb")
-    p = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                         start_new_session=True)
-    open(os.path.join(STATE, "qemu.pid"), "w").write(str(p.pid))
-    time.sleep(3)
-    q = Qmp()
+    cds = [c for c in os.environ.get("CDROM", "").split(":") if c]
+    p, q = boot_vm(gui, cds)
     if gui:
         # bureau : l'agent part tout seul (StartupItem) ; on attend le bureau
         # stable puis on vérifie que l'agent répond par un job vide.
-        time.sleep(60)
-        prev, same, n = None, time.time(), 0
-        while n < 90:
-            s = shot(q, os.path.join(STATE, "boot.png")); n += 1
-            if s == prev and time.time() - same >= 20:
-                break
-            if s != prev:
-                prev, same = s, time.time()
-            time.sleep(5)
+        wait_stable(q, first=60, still=20)
         print("bureau stable (pid %d) ; capture %s/boot.png" % (p.pid, STATE))
         return
-    time.sleep(35)
-    prev, same, n = None, time.time(), 0
-    while True:
-        s = shot(q, os.path.join(STATE, "boot.png")); n += 1
-        if s == prev and time.time() - same >= 15:
-            break
-        if s != prev:
-            prev, same = s, time.time()
-        if n > 60:
-            sys.exit("écran jamais stable : voir %s/boot.png" % STATE)
-        time.sleep(4)
+    wait_stable(q)
     type_text(q, "mount -uw /\n"); time.sleep(4)
     type_text(q, "sh /pomppc/agent.sh %d %d\n" % boxes)
     time.sleep(5)

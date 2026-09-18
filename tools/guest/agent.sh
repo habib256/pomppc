@@ -31,7 +31,12 @@ if [ "$(id -u)" = 0 ]; then
   u=$(stat -f %u /Users/tiger 2>/dev/null)
   [ -n "$u" ] && chown "$u" /Users/tiger/Library/Preferences/loginwindow.plist 2>/dev/null
 fi
-last=""
+# Un job resté dans la boîte d'une session précédente (fait, ou interrompu)
+# n'est PAS rejoué : vu en vrai, l'agent relancé reprenait un job bloquant.
+# devloop.py n'écrit un job qu'une fois l'agent prêt, rien ne se perd.
+hdr=$(dd if=/dev/rdisk0 bs=512 skip=$IN count=1 2>/dev/null | tr -d '\000' | head -1)
+set -- $hdr
+last=""; [ "$1" = JOB ] && last=$2
 echo "agent: prêt (inbox $IN, outbox $OUT)"
 while :; do
   hdr=$(dd if=/dev/rdisk0 bs=512 skip=$IN count=1 2>/dev/null | tr -d '\000' | head -1)

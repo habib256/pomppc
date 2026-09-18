@@ -3409,6 +3409,61 @@ int main(int argc, char **argv)
         }
         printf("fill : %d images %dx%d, 40 grands triangles : %.2f img/s\n",
                frames, W, H, frames / (now() - t0));
+    } else if (!strcmp(scene, "texup")) {
+        /* Débit de téléversement de textures (tâche 2.5, protocole v10) : une
+           texture de TEXUP_SIZE² texels (256 par défaut), modifiée et renvoyée
+           à CHAQUE image par glTexSubImage2D, puis dessinée. TEXUP_FMT = rgba
+           (octets, défaut), rgb, rgb565, bgra (8_8_8_8_REV : le seul format
+           que l'invité recopiait déjà sans convertir). À comparer avec
+           POMPPC_GL_TEX3=0 (conversion par l'invité) et POMPPC_GL_DISABLE=1. */
+        int frames = 60, f, i, n = getenv("TEXUP_SIZE") ? atoi(getenv("TEXUP_SIZE")) : 256;
+        const char *fm = getenv("TEXUP_FMT") ? getenv("TEXUP_FMT") : "rgba";
+        GLenum fmt = GL_RGBA, type = GL_UNSIGNED_BYTE;
+        int bpp = 4;
+        unsigned char *pix;
+        unsigned int v = 0;
+        GLuint id;
+        double t0;
+        if (!strcmp(fm, "rgb")) { fmt = GL_RGB; bpp = 3; }
+        else if (!strcmp(fm, "rgb565")) { fmt = GL_RGB; type = GL_UNSIGNED_SHORT_5_6_5; bpp = 2; }
+        else if (!strcmp(fm, "bgra")) { fmt = GL_BGRA; type = GL_UNSIGNED_INT_8_8_8_8_REV; }
+        pix = calloc(n * n, bpp);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glGenTextures(1, &id);
+        glBindTexture(GL_TEXTURE_2D, id);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, n, n, 0, fmt, type, pix);
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        t0 = now();
+        for (f = 0; f < frames; f++) {
+            v = (f * 4) & 0xF8;                /* gris exact aussi en 5_6_5 */
+            if (bpp == 2) {
+                unsigned short g = (unsigned short)(((v >> 3) << 11) | ((v >> 2) << 5) | (v >> 3));
+                for (i = 0; i < n * n; i++)
+                    ((unsigned short *)pix)[i] = g;
+            } else {
+                memset(pix, (int)v, (size_t)n * n * bpp);
+            }
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, n, n, fmt, type, pix);
+            glBegin(GL_QUADS);
+            glTexCoord2f(0, 0); glVertex2f(0, 0);
+            glTexCoord2f(1, 0); glVertex2f(W, 0);
+            glTexCoord2f(1, 1); glVertex2f(W, H);
+            glTexCoord2f(0, 1); glVertex2f(0, H);
+            glEnd();
+            glFinish();
+        }
+        printf("texup %s %dx%d : %d images, %.2f img/s\n", fm, n, n, frames,
+               frames / (now() - t0));
+        /* la dernière image : gris v, étendu à 8 bits comme le fait OpenGL */
+        {
+            unsigned long c = bpp == 2 ? ((v | (v >> 5)) << 16) | ((v | (v >> 6)) << 8) | (v | (v >> 5))
+                                       : v * 0x010101UL;
+            check("dernière image téléversée", W / 2, H / 2, c);
+        }
+        free(pix);
     } else if (!strcmp(scene, "spin")) {
         int frames = 60, f, i;
         double t0;
