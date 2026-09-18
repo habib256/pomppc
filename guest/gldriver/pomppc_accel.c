@@ -37,6 +37,8 @@
  *                         relectures, replis, temps passé à soumettre et à copier)
  *   POMPPC_GL_GEOM=0/1/2  chemin brut : 0 coupé, 1 activé (défaut), 2 activé
  *                         avec un format de sommet fixe et large (mesure)
+ *   POMPPC_GL_ASYNC=0/1   doorbell asynchrone (défaut : activé si le device et
+ *                         le kext le tiennent ; voir « soumission » plus bas)
  *   POMPPC_GLTRACE=dir    trace (voir pomppc_gld.c)
  */
 #include <stdio.h>
@@ -240,10 +242,31 @@
 #define I32(p, o) (*(long *)((unsigned char *)(p) + (o)))
 #define F64(p, o) (*(double *)((unsigned char *)(p) + (o)))
 
-/* ───────────────────────────── disposition de la tranche ───────────────────────────── */
+/* ───────────────────────────── disposition de la tranche ─────────────────────────────
+ *
+ * La tranche du client (16 Mio sur une fenêtre de 64) est coupée en DEUX
+ * MOITIÉS identiques, alternées à chaque soumission. C'est ce que le contrat
+ * mémoire de la v9 exige : tant que FENCE n'a pas dépassé une soumission,
+ * l'hôte peut lire à tout moment son flux de commandes, ses sommets, ses
+ * indices et les texels qu'elle désigne, et écrire dans ses zones de
+ * relecture. Écrire l'image n+1 dans la même moitié pendant que l'hôte dessine
+ * la n, ce serait des triangles qui clignotent — pas un plantage, ce qui est
+ * bien pire à diagnostiquer.
+ *
+ * DEUX, et pas trois : à 5,3 Mio la troisième moitié ne laisserait plus la
+ * place à DEUX transferts plein écran dans l'arène (1024×768×4 = 3 Mio chacun,
+ * couleur + profondeur), et chaque manque de place coûte un vidage de plus. Et
+ * deux suffisent à ce qu'on cherche : une soumission en vol pendant qu'on
+ * prépare la suivante.
+ *
+ * Les offsets ci-dessous sont RELATIFS à la moitié courante. G.hb en donne le
+ * début dans la tranche, G.win/G.base/G.cmd les adresses correspondantes ;
+ * SEULE l'arène est adressée en absolu (G.q.win + off), parce que ses copies
+ * différées survivent au changement de moitié. */
+#define HALVES      2
 #define CMD_WORDS   (0x40000 / 4)       /* flux : 256 Kio */
-#define VTX_OFF     0x40000             /* sommets : jusqu'à 4 Mio */
-#define VTX_END     0x400000
+#define VTX_OFF     0x40000             /* sommets : jusqu'à 1,5 Mio */
+#define VTX_END     0x200000
 /* Les indices de la FUSION (v7 indexée) vivent en HAUT de la zone des sommets :
    ils naissent et meurent avec elle (même vidage, même remise à zéro), et le
    cœur les veut dans la fenêtre partagée comme les sommets. 256 Kio = 131 072
@@ -251,8 +274,13 @@
 #define IDX_SIZE    0x40000
 #define IDX_OFF     (VTX_END - IDX_SIZE)
 #define VTX_LIMIT   IDX_OFF             /* les sommets s'arrêtent là */
-#define ARENA_OFF   0x400000            /* transferts : le reste de la tranche */
+#define ARENA_OFF   0x200000            /* transferts : le reste de la moitié */
 #define MAX_POST    16
+/* Place de flux que arena_alloc garantit en plus de l'arène : de quoi écrire la
+   commande qui désignera l'arène SANS que reserve() vide le flux entre les
+   deux. Sinon la commande partirait dans une autre soumission — et, depuis la
+   v9, dans une autre MOITIÉ — que la mémoire qu'elle désigne. */
+#define ARENA_CMD_ROOM 64
 
 enum { SYNCED = 0, HOST_NEWER = 1, SW_NEWER = 2 };
 
@@ -345,20 +373,42 @@ typedef struct TexInfo {                /* textures à appliquer pour le dessin 
     TexUnit        u[QGPU_MAX_UNITS];
 } TexInfo;
 
-typedef struct Post {                   /* copie à faire après la soumission */
+typedef struct Post {                   /* copie à faire APRÈS la barrière */
     int            depth;               /* 0 couleur, 1 profondeur, 2 stencil */
     int            packed;              /* profondeur 24 bits + stencil 8 bits dans le mot */
-    unsigned long  off;                 /* dans l'arène */
+    unsigned long  off;                 /* dans l'arène, ABSOLU dans la tranche */
     unsigned char *dst;
     unsigned long  w, h, rowbytes;
     float          scale;
 } Post;
 
+/* Une moitié de la tranche, et la soumission qui l'occupe (v9). */
+typedef struct Half {
+    unsigned long  fence;               /* barrière de la soumission en vol */
+    int            busy;                /* elle n'est pas encore terminée */
+    Post           post[MAX_POST];      /* relectures à recopier après la barrière */
+    int            npost;
+} Half;
+
 static struct {
     pthread_mutex_t mu;
     int             state;              /* 0 inconnu, 1 actif, -1 désactivé */
     QgpuClient      q;
-    unsigned long  *cmd;                /* = q.win */
+    /* ── moitiés de la tranche (v9) ── */
+    Half            h[HALVES];
+    int             cur;                /* moitié en cours d'écriture */
+    int             nhalf;              /* 2 en asynchrone, 1 sinon */
+    unsigned long   half;               /* taille d'une moitié */
+    unsigned long   hb;                 /* début de la moitié courante dans la tranche */
+    unsigned char  *win;                /* = q.win + hb */
+    unsigned long   base;               /* = q.base + hb (offsets écrits DANS le flux) */
+    int             async;              /* doorbell asynchrone actif MAINTENANT */
+    int             async_avail;        /* … et disponible tout court */
+    unsigned long   async_retry_at;     /* image où le reprendre (voir check_errors) */
+    const char     *async_why;          /* pourquoi il ne l'est pas */
+    unsigned long   errors;             /* QGPU_REG_ERRORS vu à la dernière soumission */
+    int             err_valid;
+    unsigned long  *cmd;                /* = win */
     unsigned long   ncmd;
     unsigned long   vtx;                /* octets utilisés depuis VTX_OFF */
     unsigned long   arena;              /* octets utilisés depuis ARENA_OFF */
@@ -378,13 +428,12 @@ static struct {
     unsigned long   idx;                /* octets d'indices pris depuis IDX_OFF */
     /* tampon rendu par BeginPrimitiveBuffer, en attente de EndPrimitiveBuffer */
     PCtx           *pend;
+    unsigned long   pend_half;          /* moitié où GLEngine écrit en ce moment */
     unsigned long   pend_off, pend_words, pend_fmt, pend_slots;
     int             pend_drop;
     int             pend_flat;          /* ombrage plat : change l'ordre des indices */
     int             pend_wire;          /* mode de polygone ≠ GL_FILL : pas de fusion
                                            en triangles, elle perdrait le contour */
-    Post            post[MAX_POST];
-    int             npost;
     unsigned long   ctx_used, surf_used;
     unsigned long   tex_used[(QGPU_CLIENT_TEX_IDS + 31) / 32];
     PCtx           *list;
@@ -398,6 +447,12 @@ static struct {
     int             v8;                 /* device v8 : pipeline fixe complet */
     unsigned long   query_base;         /* premier identifiant de requête du client */
     double          t_submit, t_copy, t_upload;   /* secondes cumulées */
+    /* ── bilan du mode asynchrone ── */
+    unsigned long   n_waits;            /* barrières réellement attendues */
+    unsigned long   n_qfull;            /* soumissions refusées (file pleine) */
+    unsigned long   n_syncfall;         /* retours en synchrone sur ERRORS */
+    unsigned long   n_qsamples, n_qsum; /* profondeur de file échantillonnée */
+    double          t_wait;             /* secondes passées à attendre une barrière */
 } G = { PTHREAD_MUTEX_INITIALIZER };
 
 static double now_s(void)
@@ -440,6 +495,7 @@ static int no(int why, unsigned long a, unsigned long b)
 
 static const char *direct_why(void);
 static int geom_switch(void);
+static void async_rearm(void);
 static unsigned long fbits(float f);
 /* Requêtes d'occlusion : coupées si l'hôte ne les tient pas (le refus arrive
    par le statut d'une soumission, donc dans broken_all, bien avant la section
@@ -453,8 +509,8 @@ static void stats_frame(void)
     static int init;
     static double t0;
     static unsigned long f0, tr0, rb0, up0, fb0, sub0, tu0, di0;
-    static unsigned long rv0, rd0, gc0, rm0;
-    static double ts0, tc0, tu_0;
+    static unsigned long rv0, rd0, gc0, rm0, w0, qf0;
+    static double ts0, tc0, tu_0, tw0;
     double t;
 
     if (!init) {
@@ -464,8 +520,18 @@ static void stats_frame(void)
         t0 = now_s();
     }
     G.n_frames++;
+    async_rearm();
     if (!path)
         return;
+    /* Profondeur de la file du device, une fois par image et SEULEMENT quand
+       le bilan périodique est demandé : c'est un appel au kext de plus. */
+    if (G.async) {
+        unsigned long inflight = 0, fr = 0, depth = 0;
+        if (qgpu_queue(&G.q, &inflight, &fr, &depth) == 0) {
+            G.n_qsum += inflight;
+            G.n_qsamples++;
+        }
+    }
     t = now_s();
     if (t - t0 >= 5.0) {
         FILE *f = fopen(path, "a");
@@ -482,6 +548,17 @@ static void stats_frame(void)
                     (G.t_copy - tc0) * 1000 / (G.n_frames - f0),
                     (G.t_upload - tu_0) * 1000 / (G.n_frames - f0),
                     G.n_direct - di0);
+            {   /* v9 : ce que coûte (ou ne coûte plus) l'attente de l'hôte. */
+                unsigned long fr = G.n_frames - f0 ? G.n_frames - f0 : 1;
+                fprintf(f, "    soumission %s : %lu barrière(s) attendue(s)/img, "
+                        "%.2f ms d'attente/img, file %.2f en vol, %lu QUEUE_FULL, "
+                        "%lu repli(s) synchrone(s)\n",
+                        G.async ? "asynchrone" : "synchrone",
+                        (G.n_waits - w0) / fr, (G.t_wait - tw0) * 1000 / fr,
+                        G.n_qsamples ? (double)G.n_qsum / G.n_qsamples : 0.0,
+                        G.n_qfull - qf0, G.n_syncfall);
+                G.n_qsum = 0; G.n_qsamples = 0;
+            }
             {
                 unsigned long fr = G.n_frames - f0 ? G.n_frames - f0 : 1;
                 if (G.n_rawverts != rv0 || G.n_rawdraws != rd0) {
@@ -515,7 +592,7 @@ static void stats_frame(void)
         fb0 = G.n_fallback; sub0 = G.n_submits; tu0 = G.n_texuploads; di0 = G.n_direct;
         ts0 = G.t_submit; tc0 = G.t_copy; tu_0 = G.t_upload;
         rv0 = G.n_rawverts; rd0 = G.n_rawdraws; gc0 = G.n_geomcmds;
-        rm0 = G.n_rawmerged;
+        rm0 = G.n_rawmerged; w0 = G.n_waits; qf0 = G.n_qfull; tw0 = G.t_wait;
     }
 }
 
@@ -575,15 +652,59 @@ static void on_exit_stats(void)
         fprintf(stderr, "POMPPC GL : %lu triangles (%lu texturés), %lu segments, %lu points "
                 "et %lu effacements sur l'hôte, %lu soumissions, %lu téléversements, "
                 "%lu niveaux de texture, %lu relectures, %lu appels logiciels synchronisés ; "
-                "brut : %lu sommets en %lu DRAW_RAW, %lu primitives perdues\n",
+                "brut : %lu sommets en %lu DRAW_RAW, %lu primitives perdues ; "
+                "soumission %s : %lu barrières attendues (%.0f ms), %lu QUEUE_FULL, "
+                "%lu repli(s) synchrone(s)\n",
                 G.n_tris, G.n_textris, G.n_lines, G.n_points, G.n_clears, G.n_submits,
                 G.n_uploads, G.n_texuploads, G.n_readbacks, G.n_fallback,
-                G.n_rawverts, G.n_rawdraws, G.n_geomdrop);
+                G.n_rawverts, G.n_rawdraws, G.n_geomdrop,
+                G.async ? "asynchrone" : "synchrone", G.n_waits, G.t_wait * 1000,
+                G.n_qfull, G.n_syncfall);
 }
 
 int pomppc_accel_enabled(void)
 {
     return G.state > 0;
+}
+
+/* POMPPC_GL_ASYNC : doorbell asynchrone. Défaut ACTIVÉ dès que les quatre
+ * preuves passent — device v9, QGPU_CAP_ASYNC annoncé, kext qui sait poser le
+ * drapeau (sondé par un « peek » qu'un kext plus ancien refuse proprement), et
+ * tranche assez grande pour deux moitiés utilisables. Une seule manque et on
+ * reste en synchrone, exactement comme avant : le mode asynchrone n'est pas un
+ * repli, c'est un supplément. */
+static void async_switch(void)
+{
+    const char *e = getenv("POMPPC_GL_ASYNC");
+    unsigned long half = (G.q.size / HALVES) & ~0xFFFUL;
+
+    G.async = 0;
+    if (e && e[0] == '0') {
+        G.async_why = "POMPPC_GL_ASYNC=0";
+        return;
+    }
+    if (G.q.version < 9) {
+        G.async_why = "device antérieur à la v9";
+        return;
+    }
+    if (!(G.q.caps & QGPU_CAP_ASYNC)) {
+        G.async_why = "le device n'annonce pas QGPU_CAP_ASYNC";
+        return;
+    }
+    /* Une moitié doit porter le flux, les sommets, les indices et une arène
+       digne de ce nom (deux transferts plein écran). Sinon, une seule moitié. */
+    if (half < ARENA_OFF + 0x100000) {
+        G.async_why = "tranche trop petite pour deux moitiés";
+        return;
+    }
+    if (!qgpu_async_ok(&G.q)) {
+        G.async_why = "le kext installé ne connaît pas le doorbell asynchrone";
+        return;
+    }
+    G.half  = half;
+    G.nhalf = HALVES;
+    G.async = 1;
+    G.async_avail = 1;
 }
 
 void pomppc_backend_init(void)
@@ -596,7 +717,16 @@ void pomppc_backend_init(void)
             why = "POMPPC_GL_DISABLE";
         } else if (qgpu_open(&G.q, &why) == 0) {
             G.state = 1;
-            G.cmd = (unsigned long *)G.q.win;
+            /* Une seule moitié par défaut : le mode synchrone garde alors
+               exactement la disposition et le comportement d'avant la v9. */
+            G.nhalf = 1;
+            G.half  = G.q.size;
+            G.cur   = 0;
+            G.hb    = 0;
+            G.win   = G.q.win;
+            G.base  = G.q.base;
+            G.cmd   = (unsigned long *)G.win;
+            async_switch();
             /* Le chemin brut demande un device v7 : sur un device plus ancien,
                les clés de géométrie n'existent pas et les envoyer ferait
                refuser toutes les soumissions (vu en vrai au passage en v6). */
@@ -612,9 +742,11 @@ void pomppc_backend_init(void)
         }
         if (G.state > 0)
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
-                       " chemin brut %s, pipeline fixe v8 %s)\n",
+                       " chemin brut %s, pipeline fixe v8 %s, soumission %s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
-                       G.v7 ? "actif" : "coupé", G.v8 ? "actif" : "coupé");
+                       G.v7 ? "actif" : "coupé", G.v8 ? "actif" : "coupé",
+                       G.async ? "asynchrone (2 moitiés)" : "synchrone",
+                       G.async ? "" : " : ", G.async ? "" : G.async_why);
         else
             pomppc_log("POMPPC: accélération désactivée : %s\n", why);
     }
@@ -637,7 +769,7 @@ static void close_run(void)
         int n = rk_units[G.run_kind];
         c[0] = QGPU_CMD_HDR(ops[G.run_kind], n >= 3 ? QGPU_LEN_DRAW_N : QGPU_LEN_DRAW);
         c[1] = G.run_count;
-        c[2] = G.q.base + VTX_OFF + G.run_start;
+        c[2] = G.base + VTX_OFF + G.run_start;
         if (n >= 3) {
             c[3] = n;                   /* DRAW_TRIANGLES_TEXN : nombre d'unités */
             G.ncmd += QGPU_LEN_DRAW_N;
@@ -655,14 +787,28 @@ static void close_run(void)
 static void close_raw(void)
 {
     if (G.raw_ctx && G.raw_count) {
-        unsigned long *c = G.cmd + G.ncmd;
+        unsigned long *c;
+        /* Un vidage a pu survenir entre l'ouverture de la série et ici :
+           geom_begin vide le flux APRÈS avoir envoyé l'état, quand la place des
+           sommets manque. Le flux est alors neuf et plus aucun contexte n'y est
+           lié — sans ce CTX_BIND, le DRAW_RAW serait la première commande d'une
+           soumission et l'hôte répondrait QGPU_ST_NO_CTX (le device est
+           mono-contexte courant : chaque soumission commence par un CTX_BIND). */
+        if (G.bound != G.raw_ctx) {
+            c = G.cmd + G.ncmd;
+            c[0] = QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX);
+            c[1] = G.raw_ctx->qctx;
+            G.ncmd += QGPU_LEN_CTX;
+            G.bound = G.raw_ctx;
+        }
+        c = G.cmd + G.ncmd;
         c[0] = QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW);
         c[1] = G.raw_mode;
         c[2] = G.raw_count;             /* sommets, ou INDICES si la série est indexée */
-        c[3] = G.q.base + VTX_OFF + G.raw_start;
+        c[3] = G.base + VTX_OFF + G.raw_start;
         c[4] = 0;                       /* pas serré : le format donne le pas */
         c[5] = G.raw_fmt;
-        c[6] = G.raw_idx ? G.q.base + G.raw_idx : 0;
+        c[6] = G.raw_idx ? G.base + G.raw_idx : 0;
         c[7] = G.raw_idx ? QGPU_IDX_U16 : QGPU_IDX_NONE;
         c[8] = 0;                       /* premier : toujours 0, et le cœur l'exige
                                            quand des indices sont donnés */
@@ -682,13 +828,15 @@ static void close_raw(void)
     G.raw_lots = 0;
 }
 
-/* Réserve `words` mots de flux pour le contexte p (CTX_BIND inclus au besoin). */
+/* Réserve `words` mots de flux pour le contexte p (CTX_BIND inclus au besoin).
+   La marge couvre ce que close_run et close_raw peuvent encore écrire, leurs
+   CTX_BIND compris (4 mots : deux liaisons possibles). */
 static unsigned long *reserve(PCtx *p, unsigned long words)
 {
     unsigned long *c;
     close_run();
     close_raw();
-    if (G.ncmd + words + 2 + QGPU_LEN_DRAW_N + QGPU_LEN_DRAW_RAW > CMD_WORDS)
+    if (G.ncmd + words + 4 + QGPU_LEN_DRAW_N + QGPU_LEN_DRAW_RAW > CMD_WORDS)
         flush();
     if (G.bound != p) {
         c = G.cmd + G.ncmd;
@@ -702,16 +850,26 @@ static unsigned long *reserve(PCtx *p, unsigned long words)
     return c;
 }
 
-/* Réserve n octets d'arène (alignés sur 4) ; peut vider le flux. 0 = impossible. */
+/* Réserve n octets d'arène (alignés sur 4) ET la place de flux de la commande
+ * qui les désignera ; peut vider le flux. 0 = impossible.
+ *
+ * La place de flux est réservée ICI, et c'est essentiel : tous les appelants
+ * font « arena_alloc puis reserve », et si reserve vidait le flux entre les
+ * deux, la commande partirait dans une soumission — depuis la v9, dans une
+ * MOITIÉ — différente de la mémoire qu'elle désigne. L'hôte lirait alors une
+ * arène qu'on est déjà en train de réécrire. */
 static long arena_alloc(unsigned long n, unsigned long *off)
 {
     n = (n + 3) & ~3UL;
-    if (ARENA_OFF + G.arena + n > G.q.size || G.npost >= MAX_POST) {
+    if (ARENA_OFF + G.arena + n > G.half || G.h[G.cur].npost >= MAX_POST ||
+        G.ncmd + ARENA_CMD_ROOM > CMD_WORDS) {
         flush();
-        if (ARENA_OFF + n > G.q.size)
+        if (ARENA_OFF + n > G.half)
             return 0;
     }
-    *off = ARENA_OFF + G.arena;
+    /* ABSOLU dans la tranche : une copie différée peut survivre au changement
+       de moitié, et se relit alors par G.q.win + off. */
+    *off = G.hb + ARENA_OFF + G.arena;
     G.arena += n;
     return 1;
 }
@@ -770,64 +928,275 @@ static void broken_all(const char *why, long st, unsigned long pc)
         p->broken = 1;
 }
 
-static void flush(void)
+/* ─────────────────────────── soumission (v9) ───────────────────────────────
+ *
+ * MODE SYNCHRONE (v1–v8, et repli). `qgpu_submit` ne rend la main qu'une fois
+ * la soumission TERMINÉE : les relectures sont là, on les recopie tout de
+ * suite, la moitié est libre. Une image = une attente du GPU hôte par
+ * soumission.
+ *
+ * MODE ASYNCHRONE. `qgpu_submit_async` dépose et rend la main. La moitié qui
+ * porte le flux, les sommets, les indices et l'arène reste EN VOL jusqu'à ce
+ * que FENCE dépasse sa barrière : on n'y touche plus, et on écrit la suite
+ * dans l'autre. Il n'y a donc jamais plus d'UNE de nos soumissions en vol, ce
+ * qui est exactement ce qu'on cherche — l'hôte dessine l'image n pendant que
+ * l'invité prépare la n+1.
+ *
+ * QUAND ON ATTEND, ET SEULEMENT ALORS :
+ *   — au moment de REPRENDRE une moitié (wait_half depuis switch_half) ;
+ *   — quand l'invité a BESOIN d'une relecture (sync_to_sw_locked avant un
+ *     chemin logiciel, q_info pour un compte d'occlusion) ;
+ *   — à la présentation directe, pour l'image PRÉCÉDENTE (present_direct).
+ * Une soumission sans relecture — dessins, changements d'état, téléversements,
+ * c'est-à-dire l'immense majorité — n'est jamais attendue.
+ *
+ * ERREURS. Avec plusieurs soumissions en vol, QGPU_REG_STATUS ne décrit que la
+ * dernière TERMINÉE : il ne dit plus « tout s'est bien passé ». C'est
+ * QGPU_REG_ERRORS qui fait foi, et le kext le rend à chaque soumission
+ * asynchrone (à la place de status_pc, qui n'a pas de sens à la soumission).
+ * Voir check_errors : on ne peut pas nommer la fautive après coup, on repasse
+ * en synchrone pour que la prochaine se nomme elle-même.
+ */
+#define WAIT_MS   5000                  /* délai maximal d'une barrière */
+
+/* Recopie ce qu'une soumission terminée a déposé dans l'arène. */
+static void run_posts(Half *h)
 {
-    unsigned long pc = 0;
-    long st;
+    double t;
     int i;
 
-    close_run();
-    close_raw();
-    if (G.ncmd) {
-        double t = now_s(), t2;
-        st = qgpu_submit(&G.q, 0, G.ncmd * 4, &pc);
-        t2 = now_s();
-        G.t_submit += t2 - t;
-        G.n_submits++;
-        if (st != QGPU_ST_OK)
-            broken_all("flush", st, pc);
-        for (i = 0; i < G.npost && st == QGPU_ST_OK; i++) {
-            Post *po = &G.post[i];
-            unsigned long *src = (unsigned long *)(G.q.win + po->off);
-            unsigned long y, x;
-            for (y = 0; y < po->h; y++) {
-                unsigned long *s = src + y * po->w;
-                unsigned char *d = po->dst + y * po->rowbytes;
-                if (!po->depth) {
-                    memcpy(d, s, po->w * 4);
+    if (!h->npost)
+        return;
+    t = now_s();
+    for (i = 0; i < h->npost; i++) {
+        Post *po = &h->post[i];
+        /* arène = offset ABSOLU dans la tranche : la moitié courante a pu
+           changer depuis que la relecture a été demandée. */
+        unsigned long *src = (unsigned long *)(G.q.win + po->off);
+        unsigned long y, x;
+        for (y = 0; y < po->h; y++) {
+            unsigned long *s = src + y * po->w;
+            unsigned char *d = po->dst + y * po->rowbytes;
+            if (!po->depth) {
+                memcpy(d, s, po->w * 4);
+            } else {
+                unsigned long *dd = (unsigned long *)d;
+                if (po->depth == 2) {           /* stencil : 8 bits bas du mot */
+                    for (x = 0; x < po->w; x++)
+                        dd[x] = (dd[x] & 0xFFFFFF00UL) | (s[x] & 0xFF);
+                } else if (po->packed) {        /* profondeur : 24 bits hauts */
+                    for (x = 0; x < po->w; x++) {
+                        float f = *(float *)(s + x);
+                        unsigned long z = (unsigned long)(clamp01(f) * po->scale + 0.5f);
+                        dd[x] = (z & 0xFFFFFF00UL) | (dd[x] & 0xFF);
+                    }
                 } else {
-                    unsigned long *dd = (unsigned long *)d;
-                    if (po->depth == 2) {           /* stencil : 8 bits bas du mot */
-                        for (x = 0; x < po->w; x++)
-                            dd[x] = (dd[x] & 0xFFFFFF00UL) | (s[x] & 0xFF);
-                    } else if (po->packed) {        /* profondeur : 24 bits hauts */
-                        for (x = 0; x < po->w; x++) {
-                            float f = *(float *)(s + x);
-                            unsigned long z = (unsigned long)(clamp01(f) * po->scale + 0.5f);
-                            dd[x] = (z & 0xFFFFFF00UL) | (dd[x] & 0xFF);
-                        }
-                    } else {
-                        for (x = 0; x < po->w; x++) {
-                            float f = *(float *)(s + x);
-                            dd[x] = (unsigned long)(clamp01(f) * po->scale + 0.5f);
-                        }
+                    for (x = 0; x < po->w; x++) {
+                        float f = *(float *)(s + x);
+                        dd[x] = (unsigned long)(clamp01(f) * po->scale + 0.5f);
                     }
                 }
             }
         }
-        G.t_copy += now_s() - t2;
     }
+    h->npost = 0;
+    G.t_copy += now_s() - t;
+}
+
+/* Attend la barrière de la moitié i (si elle est en vol), puis fait ses copies
+   différées. Après quoi la moitié est libre : on peut la réécrire. */
+static void wait_half(int i)
+{
+    Half *h = &G.h[i];
+
+    if (!h->busy) {
+        run_posts(h);                   /* mode synchrone : rien à attendre */
+        return;
+    }
+    {
+        double t = now_s();
+        int ok = qgpu_wait(&G.q, h->fence, WAIT_MS) == 0;
+        G.t_wait += now_s() - t;
+        G.n_waits++;
+        if (!ok) {
+            /* L'hôte ne répond plus. On ne peut pas réécrire une moitié encore
+               en vol : on coupe l'accélération pour tout le processus plutôt
+               que de dessiner sur ce que l'hôte est en train de lire. */
+            PCtx *p;
+            pomppc_log("POMPPC: barrière %lu jamais atteinte (%d ms) : "
+                       "accélération coupée\n", h->fence, WAIT_MS);
+            fprintf(stderr, "POMPPC GL : l'hôte n'a pas terminé une soumission "
+                    "en %d ms, retour au rendu logiciel\n", WAIT_MS);
+            G.async = 0;
+            G.async_avail = 0;
+            for (p = G.list; p; p = p->next)
+                p->broken = 1;
+            h->npost = 0;
+            h->busy = 0;
+            return;
+        }
+    }
+    h->busy = 0;
+    run_posts(h);
+}
+
+/* ── détection d'erreur en asynchrone ────────────────────────────────────────
+ *
+ * QGPU_REG_ERRORS a-t-il bougé ? Le kext le rend à chaque soumission
+ * asynchrone, à la place de status_pc — qui n'a pas de sens à la soumission.
+ * C'est le seul verdict utilisable : avec plusieurs soumissions en vol,
+ * QGPU_REG_STATUS ne décrit que la DERNIÈRE TERMINÉE, qui n'est pas forcément
+ * la nôtre.
+ *
+ * MAIS ERRORS EST GLOBAL AU DEVICE, et il bouge sans que personne n'ait de
+ * bogue. Vu en vrai au premier essai : 8 877 erreurs comptées sur une VM qui
+ * rend des images justes depuis des heures. C'est le balayage de fermeture du
+ * kext (destroyClientObjects détruit les 148 identifiants de la plage d'un
+ * client, dont la plupart n'existent pas — une erreur chacun, attendue et sans
+ * conséquence). Chaque application GL qui se ferme en ajoute donc ~148.
+ *
+ * On ne peut ni nommer la soumission fautive après coup (sa moitié a pu être
+ * réécrite), ni attribuer le compteur à quelqu'un. D'où la règle, bornée et
+ * qui se répare toute seule : ERRORS bouge → on repasse en SYNCHRONE pendant
+ * ASYNC_RETRY images. Si l'erreur était la nôtre, elle est déterministe (un
+ * sommet indéfini, un opcode que l'hôte ne tient pas, un paramètre hors
+ * domaine) : la prochaine image la reproduit, et broken_all a alors SON statut
+ * et SON pc, exacts, comme avant la v9. Si elle ne revient pas — c'était le
+ * ménage d'un autre client — on reprend l'asynchrone et on se recale.
+ */
+#define ASYNC_RETRY   120               /* images de synchrone avant de réessayer */
+
+static void check_errors(unsigned long errors)
+{
+    unsigned long e2 = 0, status = 0, pc = 0;
+
+    if (!G.err_valid) {
+        G.errors = errors;
+        G.err_valid = 1;
+        return;
+    }
+    if (errors == G.errors)
+        return;
+    pomppc_log("POMPPC: QGPU_REG_ERRORS %lu → %lu", G.errors, errors);
+    G.errors = errors;
+    qgpu_peek(&G.q, &e2, &status, &pc);
+    pomppc_log(" (dernier statut %lu, commande %lu) : synchrone pendant %d images "
+               "pour retrouver la fautive\n", status, pc, ASYNC_RETRY);
+    G.async = 0;
+    G.n_syncfall++;
+    G.async_retry_at = G.n_frames + ASYNC_RETRY;
+}
+
+/* Reprend l'asynchrone si la fenêtre de synchrone n'a rien trouvé. */
+static void async_rearm(void)
+{
+    if (G.async || !G.async_avail || !G.async_retry_at)
+        return;
+    if (G.n_frames < G.async_retry_at)
+        return;
+    G.async_retry_at = 0;
+    G.err_valid = 0;                    /* on se recale sur ERRORS */
+    G.async = 1;
+    pomppc_log("POMPPC: aucune erreur de notre fait en %d images : "
+               "doorbell asynchrone repris\n", ASYNC_RETRY);
+}
+
+/* Soumet la moitié courante. Pose sa barrière (asynchrone) ou fait ses copies
+   tout de suite (synchrone). */
+static void submit_cur(void)
+{
+    Half *h = &G.h[G.cur];
+    double t = now_s();
+    unsigned long pc = 0, fence = 0, errors = 0;
+    long st;
+    /* Pendant un BeginPrimitiveBuffer, GLEngine écrit dans CETTE moitié à une
+       adresse qu'on lui a déjà donnée : on ne peut pas en changer, donc pas la
+       laisser en vol non plus. Synchrone, comme avant la v9. C'est rare —
+       geom_begin fait la place avant d'ouvrir — et c'est la seule façon
+       d'être exact (vu en vrai : un téléversement de texture au milieu d'une
+       primitive vide le flux). */
+    int async = G.async && !G.pend;
+
+    if (async) {
+        st = qgpu_submit_async(&G.q, G.hb, G.ncmd * 4, &fence, &errors);
+        if (st == QGPU_ST_QUEUE_FULL) {
+            /* Rien n'a été mis en file, et SUBMIT_OFF/SUBMIT_LEN se réécrivent
+               sans danger : on attend notre plus ancienne barrière (il n'y en a
+               qu'une : l'autre moitié) et on réessaie. */
+            G.n_qfull++;
+            wait_half(G.cur ^ 1);
+            st = qgpu_submit_async(&G.q, G.hb, G.ncmd * 4, &fence, &errors);
+        }
+        if (st != QGPU_ST_OK) {
+            /* File toujours pleine (un autre client l'occupe) ou appel refusé :
+               le doorbell SYNCHRONE, lui, n'est jamais refusé — il attend sa
+               place. C'est le repli le plus simple et le plus sûr. */
+            if (st == QGPU_ST_QUEUE_FULL)
+                G.n_qfull++;
+            async = 0;
+        }
+    }
+    if (async) {
+        G.t_submit += now_s() - t;
+        G.n_submits++;
+        h->fence = fence;
+        h->busy = 1;
+        check_errors(errors);
+        return;
+    }
+    st = qgpu_submit(&G.q, G.hb, G.ncmd * 4, &pc);
+    G.t_submit += now_s() - t;
+    G.n_submits++;
+    h->busy = 0;
+    if (st != QGPU_ST_OK) {
+        broken_all("flush", st, pc);
+        h->npost = 0;
+        return;
+    }
+    run_posts(h);
+}
+
+/* Passe à l'autre moitié, en attendant qu'elle soit libre. */
+static void switch_half(void)
+{
+    if (G.nhalf < 2)
+        return;
+    G.cur ^= 1;
+    G.hb   = (unsigned long)G.cur * G.half;
+    G.win  = G.q.win + G.hb;
+    G.base = G.q.base + G.hb;
+    G.cmd  = (unsigned long *)G.win;
+    /* La moitié qu'on reprend peut encore être en vol : contrat mémoire,
+       point 1. C'est ici, et seulement ici, que le pipeline se referme. */
+    wait_half(G.cur);
+}
+
+static void flush(void)
+{
+    close_run();
+    close_raw();
+    if (G.ncmd)
+        submit_cur();
     G.ncmd = 0;
-    /* Un BeginPrimitiveBuffer ouvert occupe déjà la zone des sommets : GLEngine
-       y écrit pendant ce temps, on ne peut pas la rendre (vu en vrai : un
-       téléversement de texture au milieu d'une primitive vide le flux). */
-    if (!G.pend) {
-        G.vtx = 0;
-        G.idx = 0;
-    }
     G.arena = 0;
-    G.npost = 0;
     G.bound = 0;
+    /* Un BeginPrimitiveBuffer ouvert occupe déjà la zone des sommets : GLEngine
+       y écrit pendant ce temps, on ne peut ni la rendre ni changer de moitié
+       (submit_cur a soumis en synchrone pour cette raison). */
+    if (G.pend)
+        return;
+    G.vtx = 0;
+    G.idx = 0;
+    switch_half();
+}
+
+/* Attend et recopie tout ce qui reste en vol (fin de contexte, changement de
+   tampon) : après quoi l'invité voit tout ce que l'hôte a dessiné. */
+static void drain_all(void)
+{
+    int i;
+    for (i = 0; i < HALVES; i++)
+        wait_half(i);
 }
 
 /* ───────────────────────────── objets qgpu ───────────────────────────── */
@@ -1485,15 +1854,21 @@ static void queue_readback_to(PCtx *p, int depth, unsigned char *dst, unsigned l
                         QGPU_LEN_SURF_XFER);
     c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
     c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
-    G.post[G.npost].depth = depth;
-    G.post[G.npost].packed = p->stencil;
-    G.post[G.npost].off = off;
-    G.post[G.npost].dst = dst;
-    G.post[G.npost].w = w;
-    G.post[G.npost].h = h;
-    G.post[G.npost].rowbytes = rowbytes;
-    G.post[G.npost].scale = GLD_F32(p->ctx, CTX_DEPTH_SCALE);
-    G.npost++;
+    {   /* La copie appartient à la MOITIÉ qui porte la soumission : elle ne se
+           fera qu'une fois sa barrière atteinte (contrat mémoire, point 2 —
+           avant, le contenu de l'arène est indéterminé). */
+        Half *hf = &G.h[G.cur];
+        Post *po = &hf->post[hf->npost];
+        po->depth = depth;
+        po->packed = p->stencil;
+        po->off = off;
+        po->dst = dst;
+        po->w = w;
+        po->h = h;
+        po->rowbytes = rowbytes;
+        po->scale = GLD_F32(p->ctx, CTX_DEPTH_SCALE);
+        hf->npost++;
+    }
     G.n_readbacks++;
 }
 
@@ -1537,8 +1912,17 @@ static void sync_to_sw_locked(PCtx *p, int want_depth)
            pixel à stencil, toute la géométrie postérieure au premier repli
            disparaissait. */
     }
-    if (any || G.ncmd)
+    if (any) {
+        /* C'est LE point où l'invité a besoin du résultat : le chemin logiciel
+           qui suit va lire ces pixels. On soumet, puis on attend la barrière de
+           cette soumission-là et on fait ses copies. Ailleurs, on ne les attend
+           jamais — c'est tout l'intérêt du mode asynchrone. */
+        int i = G.cur;
         flush();
+        wait_half(i);
+    } else if (G.ncmd) {
+        flush();
+    }
 }
 
 static void sync_to_sw(void *ctx, int want_depth)
@@ -2061,10 +2445,10 @@ static long q_destroy(void *ctx, unsigned long h)
     return 0;
 }
 
-/* gldGetQueryInfo(drvctx, poignée, nom, &valeur). Le device est synchrone : le
- * résultat est là au retour du doorbell. On lit quand même le mot
- * « disponible » plutôt que de le supposer — c'est ce que le protocole demande
- * pour le jour où le device deviendra asynchrone (tâche 2.2). */
+/* gldGetQueryInfo(drvctx, poignée, nom, &valeur). L'application demande le
+ * compte : c'est un des rares endroits où l'invité a vraiment besoin d'une
+ * relecture, donc un des rares où l'on attend la barrière (v9). On lit le mot
+ * « disponible » plutôt que de le supposer, comme le protocole le demande. */
 static long q_info(void *ctx, unsigned long h, unsigned long pname, unsigned long *out)
 {
     PCtx *p;
@@ -2081,7 +2465,11 @@ static long q_info(void *ctx, unsigned long h, unsigned long pname, unsigned lon
         c[0] = QGPU_CMD_HDR(QGPU_OP_QUERY_RESULT, QGPU_LEN_QUERY_RESULT);
         c[1] = id;
         c[2] = G.q.base + off;
-        flush();
+        {
+            int i = G.cur;
+            flush();
+            wait_half(i);
+        }
         if (!qry_off && !p->broken) {
             const unsigned long *w = (const unsigned long *)(G.q.win + off);
             avail = w[0] ? 1 : 0;
@@ -2776,6 +3164,7 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
     if (slots < 4)
         goto refuse;                    /* ne devrait pas arriver : 4 Mio de sommets */
     G.pend = p;
+    G.pend_half = G.hb;                 /* la moitié ne doit plus changer d'ici End */
     G.pend_off = G.vtx;
     G.pend_words = words;
     G.pend_fmt = p->geom_fmt;
@@ -2797,7 +3186,7 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
     if (n)
         *n = slots;
     pthread_mutex_unlock(&G.mu);
-    return G.q.win + VTX_OFF + G.pend_off;
+    return G.win + VTX_OFF + G.pend_off;
 
 refuse:
     {
@@ -2962,7 +3351,7 @@ static unsigned short *idx_room(unsigned long k)
 {
     if (G.idx + k * 2 > IDX_SIZE)
         return 0;
-    return (unsigned short *)(G.q.win + IDX_OFF + G.idx);
+    return (unsigned short *)(G.win + IDX_OFF + G.idx);
 }
 
 /* Convertit la série NON indexée déjà ouverte en TRIANGLES indexés. 0 si la
@@ -3029,6 +3418,18 @@ static void geom_end(void *ctx, long flag, short mode, long n)
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
     if (!G.pend || G.pend != p || G.pend_drop) {
+        G.pend = 0;
+        pthread_mutex_unlock(&G.mu);
+        return;
+    }
+    /* La moitié a changé sous les pieds de GLEngine : impossible par
+       construction (flush() n'alterne pas tant que G.pend est ouvert, et
+       submit_cur soumet alors en synchrone), mais si cela arrivait, les sommets
+       écrits ne sont plus ceux que DRAW_RAW désignerait. On jette. */
+    if (G.hb != G.pend_half) {
+        no(NO_G_LATE, G.pend_half, G.hb);
+        G.n_geomdrop++;
+        p->geom_lost = 1;
         G.pend = 0;
         pthread_mutex_unlock(&G.mu);
         return;
@@ -3263,7 +3664,7 @@ static void prim(Batch *b, int n, const unsigned char **v, const unsigned char *
         G.run_count = 0;
         G.run_kind = b->kind;
     }
-    o = (float *)(G.q.win + VTX_OFF + G.vtx);
+    o = (float *)(G.win + VTX_OFF + G.vtx);
     for (i = 0; i < n; i++)
         put_vertex(b, o + i * vw, v[i], b->flat ? prov : v[i]);
     G.vtx += n * vw * 4;
@@ -3861,13 +4262,29 @@ static unsigned char *direct_target(PCtx *p, unsigned long *rowbytes)
 }
 
 /* Échange (procédure 0x60) : présente directement si possible. Verrou tenu.
- * Seulement si l'hôte a l'image la plus récente (sinon, chemin normal). */
+ * Seulement si l'hôte a l'image la plus récente (sinon, chemin normal).
+ *
+ * v9 — UNE IMAGE DE DÉCALAGE, ET C'EST VOULU. En asynchrone, la relecture de
+ * l'image n part avec sa soumission mais n'est recopiée en mémoire vidéo
+ * qu'une fois sa barrière atteinte. Attendre ici serait attendre l'hôte à
+ * chaque échange, c'est-à-dire ne rien gagner. On place donc l'attente le plus
+ * tard possible : AU DÉBUT DE L'ÉCHANGE SUIVANT. L'écran montre alors l'image
+ * n−1 pendant qu'on prépare la n+1 — une image de latence, jamais plus, et
+ * l'hôte a eu toute la construction d'une image pour finir la précédente : la
+ * barrière est en général déjà atteinte quand on arrive ici.
+ *
+ * Contrepartie assumée : une application qui CESSE de dessiner laisse sa
+ * dernière image en vol jusqu'au prochain point de synchronisation (un
+ * glReadPixels, un chemin logiciel, la fermeture du contexte), qui la
+ * présente. */
 static int present_direct(PCtx *p)
 {
     unsigned char *vram;
     unsigned long rowbytes;
     if (G.state <= 0 || p->broken || p->surf < 0 || p->color == SW_NEWER)
         return 0;
+    /* L'image PRÉCÉDENTE part maintenant en mémoire vidéo. */
+    wait_half(G.cur ^ 1);
     vram = direct_target(p, &rowbytes);
     if (!vram)
         return 0;
@@ -4147,6 +4564,10 @@ void pomppc_context_destroyed(void *ctx)
             c[0] = QGPU_CMD_HDR(QGPU_OP_CTX_DESTROY, QGPU_LEN_CTX);
             c[1] = p->qctx;
             flush();
+            /* Rien ne doit rester en vol : les copies différées visent des
+               tampons (et une mémoire vidéo) que ce contexte laisse derrière
+               lui, et la dernière image présentée directement est là-dedans. */
+            drain_all();
             G.ctx_used &= ~(1UL << (p->qctx - G.q.ctx_base));
         }
         if (G.run_ctx == p)
@@ -4181,10 +4602,17 @@ void pomppc_after_draw_buffer_change(void *ctx)
     if (p && p->surf >= 0) {
         cur = sw_color(p);
         if (cur != p->draw_seen) {
-            if (p->color == HOST_NEWER && p->draw_seen)
+            int any = p->color == HOST_NEWER && p->draw_seen;
+            if (any)
                 queue_readback(p, 0, p->draw_seen);
-            if (G.ncmd)
+            if (any || G.ncmd) {
+                /* L'ancien tampon repart au rendu d'Apple : il doit contenir ce
+                   que l'hôte a dessiné AVANT qu'on rende la main (v9). */
+                int i = G.cur;
                 flush();
+                if (any)
+                    wait_half(i);
+            }
             p->draw_seen = cur;
             p->color = SW_NEWER;
         }
