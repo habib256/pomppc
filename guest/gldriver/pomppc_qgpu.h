@@ -6,6 +6,28 @@
 
 #include <IOKit/IOKitLib.h>
 
+/* ── v9 : drapeaux passés DANS `len` à QGPU_UC_SUBMIT ────────────────────────
+ *
+ *   COPIE IDENTIQUE dans kext/POMPPCGPU/POMPPCGPU.h. Les deux doivent rester
+ *   au bit près, comme les deux copies de qgpu_proto.h.
+ *
+ *   POURQUOI DANS `len` ET PAS UN SCALAIRE DE PLUS. qgpu_proto.h fige
+ *   QGPU_UC_METHOD_COUNT et les sélecteurs : on ne peut pas ajouter de
+ *   méthode. Et on ne peut pas non plus ajouter un argument à QGPU_UC_SUBMIT :
+ *   l'ABI de Darwin 8 compare le NOMBRE d'arguments scalaires au bit près
+ *   (is_io_connect_method_scalarI_scalarO refuse l'appel dès que inputCount ≠
+ *   IOExternalMethod::count0), donc passer count0 de 2 à 3 ferait rendre
+ *   kIOReturnBadArgument à TOUS les appelants existants. `len` est un multiple
+ *   de 4 borné par la tranche (16 Mio sur une fenêtre de 64) : ses bits hauts
+ *   sont libres, et un appelant qui ne les connaît pas les laisse à zéro —
+ *   c'est-à-dire exactement le comportement v8. LES DEUX FORMES D'APPEL
+ *   RESTENT DONC LE MÊME APPEL.
+ */
+#define POMPPC_SUB_ASYNC        0x80000000UL
+#define POMPPC_SUB_PEEK         0x40000000UL
+#define POMPPC_SUB_QUEUE        0x20000000UL
+#define POMPPC_SUB_FLAGS        (POMPPC_SUB_ASYNC | POMPPC_SUB_PEEK | POMPPC_SUB_QUEUE)
+
 typedef struct QgpuClient {
     io_connect_t   conn;
     unsigned char *win;          /* notre tranche de BAR0, mappée */
@@ -25,5 +47,26 @@ void qgpu_close(QgpuClient *q);
 /* Soumet [off, off+len) de la tranche. Renvoie le statut QGPU_ST_* (ou -1
    si l'appel au kext lui-même a échoué) ; *pc = commande fautive. */
 long qgpu_submit(QgpuClient *q, unsigned long off, unsigned long len, unsigned long *pc);
+
+/* ── v9 ──────────────────────────────────────────────────────────────────────
+ * Le kext sait-il poser le doorbell asynchrone ? Sonde UNE fois (un
+ * QGPU_UC_SUBMIT « peek », qu'un kext d'avant la v9 refuse proprement) et
+ * vérifie aussi la version et QGPU_CAP_ASYNC du device. */
+int  qgpu_async_ok(QgpuClient *q);
+/* Met [off, off+len) en file et rend la main tout de suite. Renvoie le statut
+   d'ACCEPTATION (QGPU_ST_OK, QGPU_ST_QUEUE_FULL, ou -1 si l'appel a échoué) ;
+   *fence = barrière de CETTE soumission, *errors = QGPU_REG_ERRORS.
+   Sur QGPU_ST_QUEUE_FULL rien n'a été mis en file : *fence ne vaut rien. */
+long qgpu_submit_async(QgpuClient *q, unsigned long off, unsigned long len,
+                       unsigned long *fence, unsigned long *errors);
+/* Attend QGPU_REG_FENCE ≥ fence. 0 = atteinte, -1 = délai dépassé ou erreur. */
+int  qgpu_wait(QgpuClient *q, unsigned long fence, unsigned long ms);
+/* Sans rien soumettre : compteur d'erreurs, statut et pc de la dernière
+   soumission TERMINÉE. */
+int  qgpu_peek(QgpuClient *q, unsigned long *errors, unsigned long *status,
+               unsigned long *pc);
+/* Sans rien soumettre : soumissions en vol, places libres, profondeur. */
+int  qgpu_queue(QgpuClient *q, unsigned long *inflight, unsigned long *freeslots,
+                unsigned long *depth);
 
 #endif

@@ -92,3 +92,79 @@ long qgpu_submit(QgpuClient *q, unsigned long off, unsigned long len, unsigned l
         *pc = spc;
     return status;
 }
+
+/* ─────────────────────────── v9 : doorbell asynchrone ───────────────────────
+ *
+ * Même sélecteur, même nombre d'arguments : seuls les bits hauts de `len`
+ * changent (voir pomppc_qgpu.h, « pourquoi dans len »). Un kext d'avant la v9
+ * voit alors un `len` démesuré et rend kIOReturnBadArgument — c'est ce qui
+ * sert de sonde à qgpu_async_ok(), et c'est ce qui garantit qu'aucune
+ * soumission ne part en asynchrone sans que l'autre bout sache la traiter.
+ */
+
+long qgpu_submit_async(QgpuClient *q, unsigned long off, unsigned long len,
+                       unsigned long *fence, unsigned long *errors)
+{
+    unsigned int f, status, err;
+    kern_return_t kr = IOConnectMethodScalarIScalarO(q->conn, QGPU_UC_SUBMIT, 2, 3,
+                                                     (unsigned int)off,
+                                                     (unsigned int)(len | POMPPC_SUB_ASYNC),
+                                                     &f, &status, &err);
+    if (kr != KERN_SUCCESS)
+        return -1;
+    if (fence)
+        *fence = f;
+    if (errors)
+        *errors = err;
+    return status;
+}
+
+int qgpu_peek(QgpuClient *q, unsigned long *errors, unsigned long *status,
+              unsigned long *pc)
+{
+    unsigned int e, st, spc;
+    kern_return_t kr = IOConnectMethodScalarIScalarO(q->conn, QGPU_UC_SUBMIT, 2, 3,
+                                                     0u, (unsigned int)POMPPC_SUB_PEEK,
+                                                     &e, &st, &spc);
+    if (kr != KERN_SUCCESS)
+        return -1;
+    if (errors) *errors = e;
+    if (status) *status = st;
+    if (pc)     *pc = spc;
+    return 0;
+}
+
+int qgpu_queue(QgpuClient *q, unsigned long *inflight, unsigned long *freeslots,
+               unsigned long *depth)
+{
+    unsigned int a, b, c;
+    kern_return_t kr = IOConnectMethodScalarIScalarO(q->conn, QGPU_UC_SUBMIT, 2, 3,
+                                                     0u, (unsigned int)POMPPC_SUB_QUEUE,
+                                                     &a, &b, &c);
+    if (kr != KERN_SUCCESS)
+        return -1;
+    if (inflight)  *inflight = a;
+    if (freeslots) *freeslots = b;
+    if (depth)     *depth = c;
+    return 0;
+}
+
+int qgpu_wait(QgpuClient *q, unsigned long fence, unsigned long ms)
+{
+    unsigned int cur = 0;
+    kern_return_t kr = IOConnectMethodScalarIScalarO(q->conn, QGPU_UC_WAIT_FENCE, 2, 1,
+                                                     (unsigned int)fence,
+                                                     (unsigned int)ms, &cur);
+    if (kr != KERN_SUCCESS)
+        return -1;
+    /* Compteurs de 32 bits qui bouclent : comparer par différence signée. */
+    return ((long)(cur - fence) >= 0) ? 0 : -1;
+}
+
+int qgpu_async_ok(QgpuClient *q)
+{
+    unsigned long e, st, pc;
+    if (q->version < 9 || !(q->caps & QGPU_CAP_ASYNC))
+        return 0;
+    return qgpu_peek(q, &e, &st, &pc) == 0;
+}

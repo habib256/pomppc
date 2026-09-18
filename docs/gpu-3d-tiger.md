@@ -226,6 +226,56 @@ rafraîchit la mémoire de la fenêtre. Un `glFinish` juste avant l'échange ne 
 Conditions réévaluées toutes les 10 images. `POMPPC_GL_DIRECT=0` coupe tout, `=f` limite au
 plein écran, `=c` présente même avec un curseur en mouvement.
 
+**Le mode asynchrone (protocole v9, tâche 2.2).** Jusqu'à la v8 l'hôte exécutait le flux *dans*
+l'écriture MMIO du doorbell : le vCPU restait gelé pendant tout le rendu. La v9 met les soumissions
+en file sur un thread de rendu hôte, et le plugin y dépose sans attendre (`POMPPC_GL_ASYNC`, défaut
+**activé**). Ce qui change côté invité :
+
+*Deux moitiés de tranche.* Tant que `FENCE` n'a pas dépassé une soumission, l'hôte peut lire ou
+écrire à tout moment ce qu'elle désigne — flux de commandes, sommets, indices, texels — et écrire
+dans ses zones de relecture. Écrire l'image *n+1* là où l'hôte lit encore la *n* ne planterait pas :
+cela ferait **clignoter des triangles**, ce qui est bien pire à diagnostiquer. La tranche du client
+(16 Mio) est donc coupée en deux moitiés de 8 Mio, alternées à chaque soumission ; les offsets de
+flux, de sommets et d'indices sont relatifs à la moitié courante, **seule l'arène** est adressée en
+absolu, parce qu'une copie différée survit au changement de moitié. Deux, et pas trois : à 5,3 Mio,
+la troisième moitié ne laisserait plus la place à deux transferts plein écran dans l'arène.
+
+*Où tombe l'attente.* Une soumission sans relecture — dessins, changements d'état, téléversements,
+c'est-à-dire l'immense majorité — n'est **jamais** attendue. On n'attend qu'aux endroits où
+l'invité a *besoin* du résultat : avant un chemin logiciel (`sync_to_sw_locked`), pour un compte
+d'occlusion (`gldGetQueryInfo`), et quand il faut **reprendre** une moitié encore en vol. La
+présentation directe, elle, place son attente le plus tard possible : au **début de l'échange
+suivant**. L'écran montre alors l'image *n−1* pendant qu'on prépare la *n+1* — **une image de
+latence, jamais plus**, et l'hôte a eu toute la construction d'une image pour finir la précédente
+(mesuré : 0,1 ms d'attente restante par image). Contrepartie assumée : une application qui *cesse*
+de dessiner laisse sa dernière image en vol jusqu'au prochain point de synchronisation, qui la
+présente.
+
+*Le `BeginPrimitiveBuffer` ouvert est le point délicat.* Entre `Begin` et `EndPrimitiveBuffer`,
+GLEngine écrit les sommets **lui-même**, dans la moitié courante, à une adresse qu'on lui a déjà
+donnée : on ne peut ni changer de moitié ni laisser celle-ci en vol. Un vidage qui survient dans cet
+intervalle (vu en vrai : un téléversement de texture au milieu d'une primitive) repasse donc en
+**synchrone** pour cette soumission-là. C'est rare — `geom_begin` fait la place avant d'ouvrir — et
+c'est la seule façon d'être exact.
+
+*Erreurs.* Avec plusieurs soumissions en vol, `QGPU_REG_STATUS` ne décrit que la dernière
+**terminée** : il ne dit plus « tout s'est bien passé ». C'est `QGPU_REG_ERRORS` qui fait foi, et le
+kext le rend à chaque soumission asynchrone, à la place de `status_pc` (qui n'a pas de sens à la
+soumission). **Mais ce compteur est global au device**, et il monte sans que personne n'ait de
+bogue : le balayage de fermeture du kext détruit les 148 identifiants de la plage d'un client, dont
+la plupart n'existent pas — une erreur chacun. Relevé au premier essai : **8 877 erreurs** sur une
+VM qui rendait des images justes depuis des heures. On ne peut donc ni nommer la soumission fautive
+après coup (sa moitié a pu être réécrite), ni attribuer le compteur. D'où la règle, bornée et qui se
+répare toute seule : le compteur bouge → **synchrone pendant 120 images**. Si l'erreur était la
+nôtre elle est déterministe, la prochaine image la reproduit, et `broken_all` a alors *son* statut
+et *son* `pc`, exacts, comme avant la v9 ; sinon on reprend l'asynchrone et on se recale. Vu en
+vrai : un repli par application GL qui se ferme à côté, suivi d'une reprise.
+
+*File pleine.* `QGPU_ST_QUEUE_FULL` ne met rien en file et n'avance rien : on attend notre plus
+ancienne barrière (il n'y en a qu'une, l'autre moitié) et on réessaie ; si la file reste pleine —
+un autre client l'occupe — on frappe le doorbell **synchrone**, qui n'est jamais refusé et attend
+sa place. Sur Marble Blast, jamais rencontré.
+
 ### 4.6 Cas réel : Zenerchi (PlayFirst, 2007)
 
 Jeu 2D Carbon/AGL, plein écran en 800x600, quelques centaines de quads texturés par image. Mesures
@@ -604,6 +654,9 @@ liste telle qu'une application la lit, qui l'a montré.
 | application réelle | Zenerchi (§4.6) | menus et partie corrects, 42 img/s en partie, présentation directe |
 | plugin en fenêtre, dans le bureau | `glwin` (GLUT) | OK ; image témoin visible dans la fenêtre à l'écran |
 | multi-processus | 5 × `gltest game` + `qgpu_test` | 4 accélérés, le 5e en logiciel, tous corrects |
+| doorbell asynchrone (v9) | `guest/qgpu-test`, section v9 | soumission asynchrone, barrière, relecture visible **seulement après** elle, rafale de 64 dont 3 refusées file pleine, erreur comptée dans `ERRORS`, puis un `SUBMIT` **synchrone** qui marche toujours — **les deux formes d'appel cohabitent** |
+| plugin asynchrone (v9) | `gltest` × 29 scènes × {`ASYNC=0`, `ASYNC=1`}, + sans fusion | tout « OK (0 échec) », et **0/255 sur l'image entière** entre synchrone, asynchrone et asynchrone-sans-fusion ; `glwin` OK |
+| stress asynchrone | 4 × `gltest game` simultanés + `qgpu_test` | tous « OK (0 échec) », images des clients 1 et 4 identiques au pixel près |
 
 ### 5.1 La boucle de développement dans l'invité
 
@@ -636,6 +689,7 @@ Pièges rencontrés, tous corrigés et commentés dans le code :
 | StartupItem ignoré (« not owned by UID 0 ») | fichiers posés depuis l'hôte : l'agent single-user corrige les propriétaires |
 | `ld: unknown flag: -nostdlib`, `can't locate file for: -lcc_kext`, « doesn't contain kernel extension code », « relocation overflow » | chaîne kext PPC : voir `kext/POMPPCGPU/README.md` |
 | `non-relocatable subtraction expression` | l'as d'Apple refuse une référence PIC vers un symbole non défini dans le fichier : les trampolines reçoivent leur cible du crochet C |
+| un kext qui panique fige la VM, et `-prom-env boot-args=-x` n'est pas disponible par `devloop` | on **compile puis `kextload`** le kext depuis son dossier de sources, `/System/Library/Extensions` gardant l'ancien : un panic au chargement se répare par `devloop stop/start`. L'installation ne vient qu'après un `qgpu_test` vert |
 
 ---
 

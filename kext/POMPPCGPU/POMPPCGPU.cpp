@@ -11,6 +11,12 @@
 
 #define GPULog(fmt, args...) IOLog("POMPPCGPU: " fmt, ## args)
 
+/* v9 : période du chien de garde des attentes de barrière, et donc résolution
+   du délai maximal de QGPU_UC_WAIT_FENCE. 10 ms : assez fin pour un délai qui
+   se compte en secondes, assez gros pour ne rien coûter quand personne
+   n'attend (le timer n'est armé QUE tant qu'il y a des dormeurs). */
+#define WAIT_TICK_MS    10
+
 #define super IOService
 OSDefineMetaClassAndStructors(POMPPCGPU, IOService)
 
@@ -95,11 +101,30 @@ bool POMPPCGPU::start(IOService * provider)
         GPULog("pas de source d'interruption : fonctionnement en scrutation\n");
     }
 
+    /* Chien de garde des attentes de barrière (v9). Sans lui, pas de sommeil
+       sur la command gate : on retombe sur la scrutation d'avant la v9. */
+    fTimer = IOTimerEventSource::timerEventSource(this,
+                 (IOTimerEventSource::Action) &POMPPCGPU::timerAction);
+    if (fTimer && fWorkLoop->addEventSource(fTimer) != kIOReturnSuccess) {
+        fTimer->release();
+        fTimer = 0;
+    }
+
+    /* v9 : le doorbell asynchrone n'est posé que si le device l'annonce. Sans
+       le bit, QGPU_DOORBELL_ASYNC serait traité comme un doorbell synchrone
+       par le device — correct, mais le kext rendrait alors une « barrière »
+       déjà atteinte et un statut de rendu là où le client attend une
+       acceptation. On préfère le dire une fois pour toutes ici. */
+    fAsync = (fVersion >= 9 && (fCaps & QGPU_CAP_ASYNC) && fTimer) ? 1 : 0;
+
     /* Propriétés visibles dans ioreg, pour le diagnostic et pour que le
        userland sache ce qu'il a en face avant même d'ouvrir le service. */
     setProperty("QGPUVersion",   (unsigned long long) fVersion, 32);
     setProperty("QGPUCaps",      (unsigned long long) fCaps, 32);
     setProperty("QGPUShmemSize", (unsigned long long) fShmemSize, 32);
+    setProperty("QGPUQueueDepth",
+                (unsigned long long) (fVersion >= 9 ? regRead(QGPU_REG_QUEUE_DEPTH) : 0), 32);
+    setProperty("QGPUAsync",     (unsigned long long) fAsync, 32);
     {
         UInt32 tag = regRead(QGPU_REG_BACKEND_NAME);
         char   name[5];
@@ -107,9 +132,11 @@ bool POMPPCGPU::start(IOService * provider)
         name[3] = tag; name[4] = 0;
         setProperty("QGPUBackend", name);
         GPULog("démarré : protocole v%lu, backend hôte '%s', caps 0x%lx, "
-               "fenêtre %lu Mio, %d clients × %lu Mio\n", (unsigned long) fVersion, name,
+               "fenêtre %lu Mio, %d clients × %lu Mio, soumission %s\n",
+               (unsigned long) fVersion, name,
                (unsigned long) fCaps, (unsigned long) (fShmemSize >> 20),
-               QGPU_MAX_CLIENTS, (unsigned long) (fSlotSize >> 20));
+               QGPU_MAX_CLIENTS, (unsigned long) (fSlotSize >> 20),
+               fAsync ? "asynchrone disponible" : "synchrone seulement");
     }
 
     registerService();
@@ -128,6 +155,14 @@ void POMPPCGPU::stop(IOService * provider)
         }
         fIRQSource->release();
         fIRQSource = 0;
+    }
+    if (fTimer) {
+        fTimer->cancelTimeout();
+        if (fWorkLoop) {
+            fWorkLoop->removeEventSource(fTimer);
+        }
+        fTimer->release();
+        fTimer = 0;
     }
     if (fGate && fWorkLoop) {
         fWorkLoop->removeEventSource(fGate);
@@ -167,16 +202,50 @@ void POMPPCGPU::irqAction(OSObject * owner, IOInterruptEventSource * src, int co
     POMPPCGPU * self = (POMPPCGPU *) owner;
 
     self->fIRQCount += count;
-    /* Réveille d'éventuels dormeurs de waitFence (contexte gated). */
+    /* Réveille les dormeurs de waitFence (contexte gated). L'IRQ DONE est de
+       NIVEAU et se COALESCE : une seule peut couvrir plusieurs soumissions
+       terminées. Le dormeur ne compte donc pas les interruptions, il RELIT
+       FENCE à chaque réveil. */
     if (self->fGate) {
         self->fGate->commandWakeup(&self->fIRQCount, false);
     }
 }
 
-/* ─────────────────────────────── soumission ─────────────────────────────── */
+/* Chien de garde des attentes : bat tant qu'il y a des dormeurs. Il fournit la
+   base de temps du délai maximal ET le réveil de secours si une interruption
+   DONE se perd — un kext qui dort sans réveil garanti fige la VM. */
+void POMPPCGPU::timerAction(OSObject * owner, IOTimerEventSource * src)
+{
+    POMPPCGPU * self = (POMPPCGPU *) owner;
+
+    self->fTicks++;
+    if (self->fSleepers) {
+        self->fGate->commandWakeup(&self->fIRQCount, false);
+        src->setTimeoutMS(WAIT_TICK_MS);
+    }
+}
+
+/* ─────────────────────────────── soumission ───────────────────────────────
+ *
+ * v9. Deux modes, choisis PAR SOUMISSION par le drapeau POMPPC_SUB_ASYNC que
+ * le client pose dans les bits hauts de `len` (voir POMPPCGPU.h : l'ABI de
+ * Darwin 8 interdit d'ajouter un scalaire sans casser tous les appelants) :
+ *
+ *   sans drapeau  doorbell 1 : l'écriture MMIO ne rend la main qu'une fois la
+ *                 soumission TERMINÉE. Inchangé au bit près depuis la v1.
+ *   ASYNC         doorbell 3 : la soumission est mise en file et l'écriture
+ *                 rend la main tout de suite. On rend la BARRIÈRE de cette
+ *                 soumission et l'ACCEPTATION, pas le résultat du rendu.
+ *
+ * Sur QGPU_ST_QUEUE_FULL rien n'est mis en file : le kext RÉPOND, il ne boucle
+ * pas. La command gate sérialise tous les clients ; y attendre une place
+ * bloquerait les trois autres et le gestionnaire d'interruption avec eux.
+ * C'est au client de décider (attendre une barrière et réessayer, ou se
+ * replier sur le doorbell synchrone, qui lui n'est jamais refusé).
+ */
 
 struct SubmitArgs {
-    UInt32 off, len;
+    UInt32 off, len, flags;
     UInt32 fence, status, statusPC;
     IOReturn result;
 };
@@ -186,14 +255,40 @@ IOReturn POMPPCGPU::submitGated(OSObject * owner, void * a0, void *, void *, voi
     POMPPCGPU * self = (POMPPCGPU *) owner;
     SubmitArgs * a = (SubmitArgs *) a0;
 
+    a->result = kIOReturnSuccess;
+    if (a->flags & POMPPC_SUB_PEEK) {
+        /* Rien à soumettre : de quoi nommer la dernière terminée en erreur.
+           FENCE d'abord serait inutile ici — c'est ERRORS qui fait foi. */
+        a->fence    = self->regRead(QGPU_REG_ERRORS);
+        a->status   = self->regRead(QGPU_REG_STATUS);
+        a->statusPC = self->regRead(QGPU_REG_STATUS_PC);
+        return kIOReturnSuccess;
+    }
+    if (a->flags & POMPPC_SUB_QUEUE) {
+        a->fence    = self->regRead(QGPU_REG_DOORBELL);      /* en vol */
+        a->status   = self->regRead(QGPU_REG_QUEUE_FREE);
+        a->statusPC = self->regRead(QGPU_REG_QUEUE_DEPTH);
+        return kIOReturnSuccess;
+    }
+
     self->regWrite(QGPU_REG_SUBMIT_OFF, a->off);
     self->regWrite(QGPU_REG_SUBMIT_LEN, a->len);
-    self->regWrite(QGPU_REG_DOORBELL, 1);
-    /* Exécution synchrone côté QEMU : les résultats sont déjà là. */
-    a->fence    = self->regRead(QGPU_REG_FENCE);
-    a->status   = self->regRead(QGPU_REG_STATUS);
-    a->statusPC = self->regRead(QGPU_REG_STATUS_PC);
-    a->result   = kIOReturnSuccess;
+    if ((a->flags & POMPPC_SUB_ASYNC) && self->fAsync) {
+        self->regWrite(QGPU_REG_DOORBELL, QGPU_DOORBELL_GO | QGPU_DOORBELL_ASYNC);
+        /* Le statut d'ACCEPTATION d'abord : sur QGPU_ST_QUEUE_FULL,
+           FENCE_SUBMITTED n'a pas bougé et la valeur rendue désigne une
+           soumission PRÉCÉDENTE — le client regarde le statut avant elle. */
+        a->status   = self->regRead(QGPU_REG_SUBMIT_ST);
+        a->fence    = self->regRead(QGPU_REG_FENCE_SUBMITTED);
+        a->statusPC = self->regRead(QGPU_REG_ERRORS);
+    } else {
+        self->regWrite(QGPU_REG_DOORBELL, QGPU_DOORBELL_GO);
+        /* Exécution terminée au retour de l'écriture. FENCE d'abord : l'hôte
+           la publie EN DERNIER, après le statut et après les relectures. */
+        a->fence    = self->regRead(QGPU_REG_FENCE);
+        a->status   = self->regRead(QGPU_REG_STATUS);
+        a->statusPC = self->regRead(QGPU_REG_STATUS_PC);
+    }
     return kIOReturnSuccess;
 }
 
@@ -202,28 +297,106 @@ IOReturn POMPPCGPU::submit(int slot, UInt32 off, UInt32 len,
 {
     SubmitArgs a;
 
-    /* Le device revérifie, mais un flux hors de la tranche du client ne doit
-       même pas partir : c'est un bug du client, pas un état du matériel. */
-    if (slot < 0 || slot >= QGPU_MAX_CLIENTS ||
-        (off & 3) || (len & 3) || len == 0 || off > fSlotSize ||
-        len > fSlotSize - off) {
+    a.flags = len & POMPPC_SUB_FLAGS;
+    len    &= ~POMPPC_SUB_FLAGS;
+    if (slot < 0 || slot >= QGPU_MAX_CLIENTS) {
         return kIOReturnBadArgument;
     }
-    a.off = off + (UInt32) slot * fSlotSize; a.len = len;
+    if (a.flags & (POMPPC_SUB_PEEK | POMPPC_SUB_QUEUE)) {
+        a.off = 0; a.len = 0;           /* on ne soumet rien : pas de bornes à vérifier */
+    } else {
+        /* Le device revérifie, mais un flux hors de la tranche du client ne doit
+           même pas partir : c'est un bug du client, pas un état du matériel. */
+        if ((off & 3) || (len & 3) || len == 0 || off > fSlotSize ||
+            len > fSlotSize - off) {
+            return kIOReturnBadArgument;
+        }
+        a.off = off + (UInt32) slot * fSlotSize; a.len = len;
+    }
     fGate->runAction(&POMPPCGPU::submitGated, &a);
     *fence = a.fence; *status = a.status; *statusPC = a.statusPC;
     return a.result;
 }
 
+/* ───────────────────────── attente de barrière (v9) ─────────────────────────
+ *
+ * Avant la v9, la fence était déjà atteinte au retour du doorbell et la
+ * scrutation à IOSleep(1) ne servait à rien ; avec la file elle coûterait
+ * jusqu'à une milliseconde par attente — c'est-à-dire tout le gain. On dort
+ * donc sur la command gate, réveillé par irqAction (IRQ DONE).
+ *
+ * Deux pièges, tous deux vus dans la conception :
+ *   — l'IRQ DONE se COALESCE : on relit FENCE à chaque réveil, on ne compte
+ *     jamais les interruptions ;
+ *   — Tiger n'a pas commandSleep(event, DEADLINE, …), arrivé en 10.5. Le délai
+ *     maximal vient donc du chien de garde (fTicks), qui garantit aussi un
+ *     réveil si une interruption se perd : un kext qui dort sans réveil
+ *     garanti fige la VM, et `-x` n'est pas disponible pour la dépanner.
+ *
+ * commandSleep relâche le verrou du work loop : pendant qu'un client attend,
+ * les autres soumettent et l'interruption est servie.
+ */
+
+struct WaitArgs {
+    UInt32   target, timeoutMs, current;
+    IOReturn result;
+};
+
+IOReturn POMPPCGPU::waitGated(OSObject * owner, void * a0, void *, void *, void *)
+{
+    POMPPCGPU * self = (POMPPCGPU *) owner;
+    WaitArgs * a = (WaitArgs *) a0;
+    UInt32 start = self->fTicks;
+
+    self->fSleepers++;
+    if (self->fSleepers == 1) {
+        self->fTimer->setTimeoutMS(WAIT_TICK_MS);
+    }
+    for (;;) {
+        UInt32 f = self->regRead(QGPU_REG_FENCE);
+        a->current = f;
+        /* Compteurs de 32 bits qui bouclent : comparer par différence signée. */
+        if ((SInt32) (f - a->target) >= 0) {
+            a->result = kIOReturnSuccess;
+            break;
+        }
+        if ((self->fTicks - start) * WAIT_TICK_MS >= a->timeoutMs) {
+            a->result = kIOReturnTimeout;
+            break;
+        }
+        /* THREAD_UNINT : un signal ne doit pas rendre la main au client avec
+           une moitié de tampon encore en vol. Le chien de garde borne. */
+        self->fGate->commandSleep(&self->fIRQCount, THREAD_UNINT);
+    }
+    if (self->fSleepers && --self->fSleepers == 0) {
+        self->fTimer->cancelTimeout();
+    }
+    return kIOReturnSuccess;
+}
+
 IOReturn POMPPCGPU::waitFence(UInt32 target, UInt32 timeoutMs, UInt32 * current)
 {
+    UInt32 f = regRead(QGPU_REG_FENCE);
     UInt32 waited = 0;
 
-    /* Avec un device synchrone la fence est déjà atteinte ; la boucle ne sert
-       qu'au futur device asynchrone. Scrutation à 1 ms, bornée : jamais de
-       sommeil sans réveil garanti dans un kext de bring-up. */
+    /* Cas le plus fréquent, et le seul qui existait avant la v9 : rien à
+       attendre. Aucune entrée dans la gate, aucun réveil. */
+    *current = f;
+    if ((SInt32) (f - target) >= 0) {
+        return kIOReturnSuccess;
+    }
+    if (fGate && fTimer && fIRQSource) {
+        WaitArgs a;
+        a.target = target; a.timeoutMs = timeoutMs;
+        a.current = f; a.result = kIOReturnTimeout;
+        fGate->runAction(&POMPPCGPU::waitGated, &a);
+        *current = a.current;
+        return a.result;
+    }
+    /* Repli : ni interruption ni timer, on scrute comme avant la v9. Hors
+       gate : la lecture d'un registre est atomique et ne gêne personne. */
     for (;;) {
-        UInt32 f = regRead(QGPU_REG_FENCE);
+        f = regRead(QGPU_REG_FENCE);
         *current = f;
         if ((SInt32) (f - target) >= 0) {
             return kIOReturnSuccess;
@@ -233,6 +406,23 @@ IOReturn POMPPCGPU::waitFence(UInt32 target, UInt32 timeoutMs, UInt32 * current)
         }
         IOSleep(1);
         waited++;
+    }
+}
+
+/* Attend que la file du device soit VIDE (contexte gated). Sert avant de
+   détruire les objets d'un client : une soumission encore en vol peut s'en
+   servir. Borné, et sans effet sur un device v8 (DOORBELL y est toujours 0 au
+   retour du doorbell). */
+void POMPPCGPU::drainQueue(void)
+{
+    UInt32 spins = 0;
+
+    if (fVersion < 9) {
+        return;
+    }
+    while (regRead(QGPU_REG_DOORBELL) != 0 && spins < 5000) {
+        IODelay(200);
+        spins++;
     }
 }
 
@@ -293,10 +483,22 @@ IODeviceMemory * POMPPCGPU::slotRange(int slot)
 /* Contexte gated. Détruit les objets de la plage du client, une soumission par
    objet : un identifiant inutilisé fait échouer SA commande (et arrêterait un
    flux groupé), ce qui est ici attendu et sans conséquence. Le flux est écrit
-   dans la première page de la tranche, que le client n'utilise plus. */
+   dans la première page de la tranche, que le client n'utilise plus.
+
+   v9 — DEUX RAISONS DE DRAINER D'ABORD. (1) Le client a pu mourir en laissant
+   des soumissions EN VOL qui lisent sa tranche : elle est rendue juste après,
+   et un nouveau client y écrirait pendant que l'hôte la lit. (2) Une
+   soumission en vol peut se servir des objets qu'on s'apprête à détruire.
+   Les destructions elles-mêmes restent SYNCHRONES (doorbell 1) : un doorbell
+   synchrone passe après tout ce qui est en file et ne rend la main qu'une fois
+   exécuté — au retour, plus rien ne touche la tranche. Les passer en
+   asynchrone sans attendre la barrière serait le bogue. */
 void POMPPCGPU::destroyClientObjects(int slot)
 {
-    IODeviceMemory * page = IODeviceMemory::withSubRange(fShmemRange,
+    IODeviceMemory * page;
+
+    drainQueue();
+    page = IODeviceMemory::withSubRange(fShmemRange,
                                 (IOPhysicalAddress) slot * fSlotSize, PAGE_SIZE);
     IOMemoryMap * map = page ? page->map() : 0;
     UInt32 * w = map ? (UInt32 *) map->getVirtualAddress() : 0;

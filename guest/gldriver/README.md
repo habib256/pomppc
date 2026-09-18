@@ -74,6 +74,20 @@ Conception, rétro-ingénierie et mesures : `docs/gpu-3d-tiger.md`.
   directement dans la mémoire vidéo, sans passer par le WindowServer : en plein
   écran, et en fenêtre tant que rien ne recouvre la surface et que le curseur
   n'y bouge pas (`docs/gpu-3d-tiger.md` §4.4).
+- **Soumission asynchrone (protocole v9).** Le plugin ne frappe plus le doorbell
+  synchrone : il dépose et repart, l'hôte dessine pendant que l'invité prépare
+  l'image suivante. La tranche du client est coupée en **deux moitiés**
+  alternées à chaque soumission (flux, sommets, indices, arène) : tant que
+  `FENCE` n'a pas dépassé une soumission, l'hôte peut lire ou écrire tout ce
+  qu'elle désigne, et écrire l'image *n+1* dans la même moitié donnerait des
+  triangles qui clignotent. Une seule de nos soumissions est en vol à la fois.
+  L'attente de barrière ne tombe qu'aux trois endroits où l'invité a **besoin**
+  du résultat : avant un chemin logiciel (`sync_to_sw`), pour un compte
+  d'occlusion, et — au plus tard possible — au **début de l'échange suivant**,
+  qui présente l'image *n−1* pendant qu'on prépare la *n+1*. Une image de
+  latence, jamais plus. Mesuré sur Marble Blast : temps de soumission
+  **1,6 → 0,06 ms par image**, attente restante 0,1 ms, **+11 %** d'images par
+  seconde. `POMPPC_GL_ASYNC=0` revient au doorbell synchrone, au bit près.
 - **Identité.** Identifiant de plugin `0x7700` (renderer `0x00027700`), annoncé
   accéléré ; `GL_VENDOR = POMPPC`, `GL_RENDERER = POMPPC qgpu (OpenGL host GPU)`.
   Le bundle s'appelle `GLDriver-POMPPC` pour être chargé avant le GLDriver
@@ -108,10 +122,11 @@ GL_RESOURCES=$PWD/glres/ ./mon_application   # GLEngine lit ce dossier au lieu d
 |---|---|
 | `POMPPC_GL_DISABLE=1` | aucune accélération : le plugin n'est qu'un mandataire |
 | `POMPPC_GL_STATS=1` | bilan sur stderr en fin de processus (triangles, soumissions, relectures…) |
-| `POMPPC_GL_STATS=/chemin` | bilan ajouté au fichier toutes les 5 s : images/s, relectures, replis logiciels, temps de soumission, sommets bruts / `DRAW_RAW` / commandes d'état / **dessins fusionnés** / **sommets par dessin** par image, et motifs de refus de l'accélération avec le premier cas |
+| `POMPPC_GL_STATS=/chemin` | bilan ajouté au fichier toutes les 5 s : images/s, relectures, replis logiciels, temps de soumission, sommets bruts / `DRAW_RAW` / commandes d'état / **dessins fusionnés** / **sommets par dessin** par image, **barrières attendues et temps d'attente par image, profondeur de file, `QUEUE_FULL`, replis synchrones**, et motifs de refus de l'accélération avec le premier cas |
 | `POMPPC_GL_DIRECT=0` | pas de présentation directe (voir ci-dessous) ; `=f` : plein écran seulement ; `=c` : même avec un curseur en mouvement dans la surface |
 | `POMPPC_GL_GEOM=0` | coupe le **chemin brut** : GLEngine transforme et éclaire de nouveau lui-même, comportement d'avant le lot 2. `=1` (défaut) l'active ; `=2` l'active avec un format de sommet fixe et large, pour mesurer |
 | `POMPPC_GL_MERGE=0` | coupe la **fusion** des `DRAW_RAW` consécutifs en triangles indexés (repli et comparaison). `=1` (défaut) l'active. Sans elle, seuls les lots `TRIANGLES`, `QUADS`, `LINES` et `POINTS` de même mode se recollent bout à bout, comme avant |
+| `POMPPC_GL_ASYNC=0` | coupe le **doorbell asynchrone** : chaque soumission attend la fin du rendu hôte, comme avant la v9 (repli et comparaison). `=1` (défaut) l'active, à condition que le device soit v9, qu'il annonce `QGPU_CAP_ASYNC`, que le kext installé connaisse le drapeau et que la tranche tienne deux moitiés — sinon le mode synchrone est gardé et la raison est dite dans le journal |
 | `POMPPC_GL_GEOM_SLOTS=n` | plafonne le nombre de sommets offerts à un `BeginPrimitiveBuffer` (mesure : c'est ainsi qu'on a établi comment GLEngine coupe une longue primitive) |
 | `POMPPC_GLTRACE=dossier` | trace de chaque appel `gld*` et de chaque procédure, avec vidages binaires |
 | `POMPPC_GLTRACE_STATE=1` | en trace, vide l'état GL complet à chaque effacement |
@@ -142,6 +157,21 @@ GL_RESOURCES=$PWD/glres/ ./mon_application   # GLEngine lit ce dossier au lieu d
 - Chaque échange (`glFinish`, `CGLFlushDrawable`) relit l'image hôte dans la
   mémoire invitée : c'est le coût dominant sur les petites scènes. En fenêtre,
   le WindowServer recopie ensuite l'image et l'échange l'attend.
+- **En asynchrone, la présentation directe a une image de retard** : l'écran
+  montre l'image *n−1* pendant qu'on prépare la *n+1*. Une application qui
+  **cesse** de dessiner laisse donc sa dernière image en vol jusqu'au prochain
+  point de synchronisation (un `glReadPixels`, un chemin logiciel, la fermeture
+  du contexte), qui la présente. Et si la fenêtre bouge entre la demande de
+  relecture et la copie, une image part à l'ancienne position.
+- **`QGPU_REG_ERRORS` est global au device**, et le balayage de fermeture du
+  kext (148 identifiants détruits par client qui s'en va, dont la plupart
+  n'existent pas) le fait monter sans que personne n'ait de bogue : 8 877
+  erreurs comptées sur une VM qui rendait des images justes depuis des heures.
+  Le plugin ne peut donc pas s'en servir pour **nommer** une soumission
+  fautive ; quand le compteur bouge, il repasse en synchrone pendant 120 images
+  — le temps que l'erreur, si elle est la nôtre, revienne avec son statut et son
+  `pc` exacts — puis reprend l'asynchrone. Vu en vrai : un repli par application
+  GL qui se ferme à côté, suivi d'une reprise.
 - Tampons 32 bits seulement (couleur « Millions », profondeur 32 bits du rendu
   d'Apple) ; sinon, logiciel.
 - Les pixels exactement sur une arête peuvent différer du rendu d'Apple (règle

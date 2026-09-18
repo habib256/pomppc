@@ -64,7 +64,7 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 | # | Tâche | Statut |
 |---|---|---|
 | 2.1 | **Objets tampon** (`CreateBuffer`, `FlushBuffer`, `BufferSubData`) sur tampons hôte : les maillages statiques ne retraversent plus la fenêtre partagée. (OpenGL 1.5.) | à faire |
-| 2.2 | **Doorbell asynchrone** : thread de rendu hôte, l'invité continue pendant que le GPU dessine. `FENCE` et IRQ `DONE` existent ; les barrières `CreateFence`/`TestObject`/`FinishObject` donnent la sémantique invité. | à faire |
+| 2.2 | ✅ **Fait le 18/09/2026**, de bout en bout. **Hôte** : protocole **v9** — file de 16 soumissions, thread de rendu, `QGPU_DOORBELL_ASYNC`, `FENCE_SUBMITTED`, `SUBMIT_ST`, `QUEUE_FREE`, `ERRORS`, `QUEUE_DEPTH`, IRQ `DONE` posée par un *bottom half* (`docs/protocole-v9-asynchrone.md`). **Kext** : le drapeau voyage dans les bits hauts de `len` de `QGPU_UC_SUBMIT` — l'ABI de Darwin 8 compare le *nombre* d'arguments scalaires au bit près, donc ajouter un scalaire aurait cassé tous les appelants existants ; `QGPU_UC_WAIT_FENCE` ne scrute plus, il dort sur la command gate et `irqAction` le réveille, avec un `IOTimerEventSource` comme base de temps du délai maximal (Tiger n'a pas `commandSleep(event, deadline, …)`, arrivé en 10.5) ; `destroyClientObjects` draine la file avant de rendre la tranche. **Plugin** : `POMPPC_GL_ASYNC` (défaut **activé**), tranche coupée en **deux moitiés** alternées à chaque soumission, relectures **différées** jusqu'au moment où l'invité en a besoin, présentation directe de l'image *n−1* au début de l'échange suivant (**une image de latence, jamais plus**). **Mesures Marble Blast** : temps de soumission **1,6 → 0,06 ms/image** (÷26), attente restante **0,1 ms/image**, **79,4 → 88,1 img/s (+11 %)** sur les fenêtres de jeu. Sur `gltest` (hors écran, relecture à chaque image) : **aucun gain**, c'est attendu. | ✅ **fait** |
 | 2.3 | **Zero-copy à la présentation** : le device écrit lui-même dans la VRAM (plage déclarée par le kext) ; plus de relecture ni de recopie par l'invité. | à faire |
 | 2.4 | **Présentation en fenêtre sans attendre le WindowServer** : écriture directe dans le rectangle de la surface à l'écran, tant que rien ne la recouvre et que le curseur n'y bouge pas ; un échange normal toutes les 90 images rafraîchit la fenêtre. Marble Blast : +70 %. | ✅ fait |
 | 2.5 | Téléversement de textures sans conversion invité quand le format est connu de l'hôte (BGRA, 565, 1555…) : la conversion passe sur l'hôte. | à faire |
@@ -114,6 +114,26 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
   brut qui la perd, comme le lot 2 le croyait.
 - **La compression de texture est le pire cas rencontré** : `glCompressedTexImage2D` ne rend
   aucune erreur et l'image est fausse, silencieusement, des deux côtés.
+- **Le doorbell asynchrone rapporte moins que l'attente qu'il supprime ne le laissait croire.**
+  `t_submit` tombe de 1,6 ms à 0,06 ms par image (÷26), mais la file du device est vue **vide**
+  à chaque échantillon (`0,00 en vol`) : l'hôte n'a jamais de retard, il n'y a donc presque rien à
+  *recouvrir*. Le 1,5 ms gagné était le coût de l'aller-retour MMIO et du BQL, pas du dessin. Le
+  gain final est **+11 %** sur Marble Blast, et **zéro** sur `gltest`, qui relit son image à chaque
+  échange et doit donc attendre de toute façon.
+- **`QGPU_REG_ERRORS` ne peut pas servir de verdict par client.** Il est global au device et le
+  balayage de fermeture du kext (148 identifiants détruits par client, la plupart inexistants) le
+  fait monter de ~148 à chaque application GL qui s'en va : **8 877** relevés sur une VM saine. Le
+  plugin s'en sert donc comme d'un *signal*, pas d'un verdict — il repasse en synchrone 120 images
+  pour que l'erreur, si elle est la sienne, se renomme d'elle-même avec son statut et son `pc`. Un
+  vrai verdict par client demanderait que le device publie le statut **par barrière**, ce que la v9
+  ne fait pas.
+- **Bogue latent trouvé en chemin** (il ne s'était jamais déclenché, et le double tampon le rendait
+  probable) : quand `geom_begin` vide le flux *après* avoir envoyé l'état — parce que la place des
+  sommets manque — le `DRAW_RAW` suivant partait en **première commande d'une soumission neuve**,
+  sans `CTX_BIND`, ce que l'hôte refuse (`QGPU_ST_NO_CTX`). `close_raw` lie maintenant le contexte
+  s'il ne l'est plus. Même famille : `arena_alloc` réserve désormais aussi la place de flux de la
+  commande qui désignera l'arène, sinon `reserve()` pouvait vider le flux entre les deux et
+  envoyer la commande dans une **autre moitié** que la mémoire qu'elle désigne.
 
 ## Points ouverts
 
@@ -149,6 +169,11 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
   du WindowServer. Le coût par appel du plugin est retombé de 17 % à 8 %. Les deux tâches qui
   attaquent ce qui reste sont **2.1** (objets tampon : les maillages statiques ne retraversent
   plus la fenêtre) et **2.2** (doorbell asynchrone : l'invité n'attend plus l'hôte).
+  **2.2 est faite** (18/09/2026) : le temps de soumission tombe de 1,6 ms à 0,06 ms par image et
+  Marble Blast gagne 11 %. Ce qui reste de `mach_msg_trap` après elle est l'attente du
+  **WindowServer**, pas celle du device — c'est 2.3 (le device écrit lui-même dans la VRAM) qui
+  l'attaquera ; `__memcpy` (les sommets que GLEngine écrit dans la fenêtre partagée) reste pour
+  2.1.
 - **Bogue hôte contourné** : `QGPU_OP_STENCIL_UPLOAD` sur une surface combinée
   profondeur+stencil **abîme la profondeur déjà posée** (reproduction : `gltest mixte` avec
   `GLTEST_STENCIL=1` ; sauter ce seul téléversement rend l'image exacte, avec comme sans le chemin
@@ -169,7 +194,8 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 |---|---|---|---|
 | Plugin : brancher les fonctions v8 (mélange constant, min/max, opérations logiques, modes de polygone, pointillés, requêtes d'occlusion via `gldCreateQuery`) — relevé des offsets par sondes, scènes comparées à Apple | agent Opus, **seul sur la VM** | `guest/` | ✅ **fait** (18/09/2026) |
 | Annoncer `GL_VERSION` et la liste d'extensions **tenues** (4.1), par la chaîne de `gldGetString` et le tableau de bits du bloc de configuration | même agent, ensuite | `guest/gldriver` | ✅ **fait** (18/09/2026) — **1.1**, pas 1.5 : voir 4.1 |
-| Device asynchrone (2.2) côté hôte : soumissions exécutées par un thread de rendu, file d'attente, `FENCE`/IRQ `DONE`, sémantique documentée ; kext et plugin suivront | agent Opus, copie isolée | `patches/qgpu`, `tests` | en cours |
+| Device asynchrone (2.2) côté hôte : soumissions exécutées par un thread de rendu, file d'attente, `FENCE`/IRQ `DONE`, sémantique documentée | agent Opus, copie isolée | `patches/qgpu`, `tests` | ✅ **fait** (18/09/2026) |
+| Kext et plugin asynchrones (2.2) : `QGPU_UC_SUBMIT` avec drapeau, attente de barrière sur la command gate, double tampon de la tranche, relectures différées, présentation de l'image *n−1* ; `guest/qgpu-test` étendu ; mesures sur Marble Blast | agent Opus, **seul sur la VM** | `kext/POMPPCGPU`, `guest/` | ✅ **fait** (18/09/2026) |
 
 ## Ordre d'attaque
 
