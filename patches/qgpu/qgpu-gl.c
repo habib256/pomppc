@@ -86,6 +86,10 @@ typedef struct GlState {
     void (*EndQuery)(GLenum);
     void (*GetQueryObjectuiv)(GLuint, GLenum, GLuint *);
     bool has_query;
+    /* v10 : textures 3D (GL 1.2) ; `has_tex` = QGPU_CAP_TEXTURES annoncé */
+    void (*TexImage3D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint,
+                       GLenum, GLenum, const GLvoid *);
+    bool has_tex;
     const char *renderer;
 } GlState;
 
@@ -119,6 +123,38 @@ typedef struct GlSurface {
 #endif
 #ifndef GL_FUNC_ADD
 #define GL_FUNC_ADD             0x8006
+#endif
+/* v10 : cibles et paramètres de texture d'OpenGL 1.2 à 1.4 */
+#ifndef GL_TEXTURE_3D
+#define GL_TEXTURE_3D           0x806F
+#endif
+#ifndef GL_TEXTURE_WRAP_R
+#define GL_TEXTURE_WRAP_R       0x8072
+#endif
+#ifndef GL_TEXTURE_CUBE_MAP
+#define GL_TEXTURE_CUBE_MAP     0x8513
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_X 0x8515
+#endif
+#ifndef GL_TEXTURE_RECTANGLE
+#define GL_TEXTURE_RECTANGLE    0x84F5
+#endif
+#ifndef GL_TEXTURE_MIN_LOD
+#define GL_TEXTURE_MIN_LOD      0x813A
+#define GL_TEXTURE_MAX_LOD      0x813B
+#define GL_TEXTURE_BASE_LEVEL   0x813C
+#define GL_TEXTURE_MAX_LEVEL    0x813D
+#endif
+#ifndef GL_TEXTURE_LOD_BIAS
+#define GL_TEXTURE_FILTER_CONTROL 0x8500
+#define GL_TEXTURE_LOD_BIAS     0x8501
+#endif
+#ifndef GL_TEXTURE_COMPARE_MODE
+#define GL_DEPTH_TEXTURE_MODE   0x884B
+#define GL_TEXTURE_COMPARE_MODE 0x884C
+#define GL_TEXTURE_COMPARE_FUNC 0x884D
+#endif
+#ifndef GL_TEXTURE_BORDER_COLOR
+#define GL_TEXTURE_BORDER_COLOR 0x1004
 #endif
 #ifndef GL_FOG_COORDINATE_SOURCE
 #define GL_FOG_COORDINATE_SOURCE 0x8450
@@ -267,6 +303,11 @@ static bool gl_resolve(GlState *g)
     }
     g->has_query = g->GenQueries && g->DeleteQueries && g->BeginQuery &&
                    g->EndQuery && g->GetQueryObjectuiv;
+    /* v10 : FACULTATIF, comme les requêtes (cf. QGPU_CAP_TEXTURES). */
+    g->TexImage3D = gl_proc("glTexImage3D");
+    if (!g->TexImage3D) {
+        g->TexImage3D = gl_proc("glTexImage3DEXT");
+    }
     return g->GenFramebuffers && g->DeleteFramebuffers && g->BindFramebuffer &&
            g->FramebufferTexture2D && g->CheckFramebufferStatus &&
            g->BlendFuncSeparate && g->BlendEquationSeparate &&
@@ -339,6 +380,16 @@ static bool gl_init(QgpuCore *c)
     if (g->has_query) {
         c->caps |= QGPU_CAP_OCCLUSION;         /* v8 : annoncé seulement si tenu */
     }
+    {
+        /* v10 : cibles, profondeur, comparaison, LOD — tout OpenGL 1.4. */
+        const char *ver = (const char *)glGetString(GL_VERSION);
+        int maj = 0, min = 0;
+        if (ver && sscanf(ver, "%d.%d", &maj, &min) == 2 &&
+            (maj > 1 || (maj == 1 && min >= 4)) && g->TexImage3D) {
+            g->has_tex = true;
+            c->caps |= QGPU_CAP_TEXTURES;
+        }
+    }
     if (c->trace) {
         fprintf(stderr, "qgpu: backend gl : %s / %s\n",
                 g->renderer ? g->renderer : "?",
@@ -389,6 +440,20 @@ static void gl_fini(QgpuCore *c)
 #endif
     free(g);
     c->be_priv = NULL;
+}
+
+/* v10 : coupe TOUTES les cibles de l'unité active. Une seule allumée à la
+   fois ensuite, celle de la texture liée : la priorité d'OpenGL entre cibles
+   (cube > 3D > rectangle > 2D > 1D) ne joue donc jamais. */
+static void gl_disable_targets(const GlState *g)
+{
+    glDisable(GL_TEXTURE_1D);
+    glDisable(GL_TEXTURE_2D);
+    if (g->has_tex) {
+        glDisable(GL_TEXTURE_3D);
+        glDisable(GL_TEXTURE_CUBE_MAP);
+        glDisable(GL_TEXTURE_RECTANGLE);
+    }
 }
 
 static bool gl_surf_create(QgpuCore *c, QgpuSurface *s)
@@ -504,7 +569,7 @@ static bool gl_target(QgpuCore *c, QgpuSurface *s, const QgpuState *st)
         int u;
         for (u = QGPU_MAX_UNITS - 1; u >= 0; u--) {
             g->ActiveTexture(GL_TEXTURE0 + u);
-            glDisable(GL_TEXTURE_2D);
+            gl_disable_targets(g);
         }
     }
     glDisable(GL_LIGHTING);
@@ -685,6 +750,7 @@ static bool gl_clear(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
 
 typedef struct GlTexture {
     GLuint id;
+    GLenum target;                 /* v10 : cible GL de l'objet */
 } GlTexture;
 
 static void gl_tex_destroy(QgpuCore *c, QgpuTexture *t)
@@ -698,11 +764,40 @@ static void gl_tex_destroy(QgpuCore *c, QgpuTexture *t)
     t->priv = NULL;
 }
 
+/* Envoie un niveau d'une face. Les texels sont déjà des mots ARGB hôte-natifs
+   (ou des flottants de profondeur) : le cœur a fait conversions et
+   décompression. internalformat = format de base : L et I viennent du rouge,
+   et les fonctions d'environnement suivent la table d'OpenGL. */
+static void gl_tex_level(const GlState *g, const QgpuTexture *t, GLenum target,
+                         uint32_t face, uint32_t l)
+{
+    const QgpuTexLevel *lv = &t->level[face][l];
+    bool depth = lv->fmt == 0x1902;
+    GLint ifmt = depth ? GL_DEPTH_COMPONENT24 : (GLint)lv->fmt;
+    GLenum fmt = depth ? GL_DEPTH_COMPONENT : GL_BGRA;
+    GLenum type = depth ? GL_FLOAT : GL_UNSIGNED_INT_8_8_8_8_REV;
+
+    switch (target) {
+    case GL_TEXTURE_1D:
+        glTexImage1D(target, l, ifmt, lv->w, 0, fmt, type, lv->px);
+        break;
+    case GL_TEXTURE_3D:
+        g->TexImage3D(target, l, ifmt, lv->w, lv->h, lv->d, 0, fmt, type, lv->px);
+        break;
+    case GL_TEXTURE_CUBE_MAP:
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, l, ifmt, lv->w, lv->h, 0,
+                     fmt, type, lv->px);
+        break;
+    default:                                              /* 2D, RECTANGLE */
+        glTexImage2D(target, l, ifmt, lv->w, lv->h, 0, fmt, type, lv->px);
+    }
+}
+
 static bool gl_tex_sync(QgpuCore *c, QgpuTexture *t)
 {
+    GlState *g = c->be_priv;
     GlTexture *gt = t->priv;
-    uint32_t l;
-    (void)c;
+    uint32_t f, l;
 
     if (!gt) {
         gt = calloc(1, sizeof(*gt));
@@ -710,32 +805,59 @@ static bool gl_tex_sync(QgpuCore *c, QgpuTexture *t)
             return false;
         }
         glGenTextures(1, &gt->id);
+        gt->target = t->target;     /* QGPU_TT_* = valeurs d'OpenGL */
         t->priv = gt;
         t->params_dirty = true;
-        t->dirty = ~0u;
+        for (f = 0; f < QGPU_TEX_FACES; f++) {
+            t->dirty[f] = ~0u;
+        }
     }
-    glBindTexture(GL_TEXTURE_2D, gt->id);
+    glBindTexture(gt->target, gt->id);
     if (t->params_dirty) {
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, t->min_filter);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, t->mag_filter);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, t->wrap_s);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, t->wrap_t);
+        GLenum tg = gt->target;
+        glTexParameteri(tg, GL_TEXTURE_MIN_FILTER, t->min_filter);
+        glTexParameteri(tg, GL_TEXTURE_MAG_FILTER, t->mag_filter);
+        glTexParameteri(tg, GL_TEXTURE_WRAP_S, t->wrap_s);
+        glTexParameteri(tg, GL_TEXTURE_WRAP_T, t->wrap_t);
+        if (g->has_tex) {
+            uint32_t bc = t->border;
+            GLfloat border[4] = { ((bc >> 16) & 255) / 255.0f, ((bc >> 8) & 255) / 255.0f,
+                                  (bc & 255) / 255.0f, ((bc >> 24) & 255) / 255.0f };
+            glTexParameterfv(tg, GL_TEXTURE_BORDER_COLOR, border);
+            glTexParameteri(tg, GL_TEXTURE_WRAP_R, t->wrap_r);
+            glTexParameterf(tg, GL_TEXTURE_LOD_BIAS, t->lod_bias);
+            if (tg != GL_TEXTURE_RECTANGLE) {
+                /* refusés sur un rectangle (GL_INVALID_OPERATION chez NVIDIA),
+                   et le cœur ne les accepte pas pour cette cible */
+                glTexParameterf(tg, GL_TEXTURE_MIN_LOD, t->min_lod);
+                glTexParameterf(tg, GL_TEXTURE_MAX_LOD, t->max_lod);
+                glTexParameteri(tg, GL_TEXTURE_BASE_LEVEL, t->base_level);
+                glTexParameteri(tg, GL_TEXTURE_MAX_LEVEL, t->max_level);
+            }
+            glTexParameteri(tg, GL_TEXTURE_COMPARE_MODE, t->compare_mode);
+            glTexParameteri(tg, GL_TEXTURE_COMPARE_FUNC, t->compare_func);
+            glTexParameteri(tg, GL_DEPTH_TEXTURE_MODE, t->depth_mode);
+        } else {
+            /* hôte < 1.4 : la bordure seule (GL 1.0), pour GL_CLAMP */
+            uint32_t bc = t->border;
+            GLfloat border[4] = { ((bc >> 16) & 255) / 255.0f, ((bc >> 8) & 255) / 255.0f,
+                                  (bc & 255) / 255.0f, ((bc >> 24) & 255) / 255.0f };
+            glTexParameterfv(tg, GL_TEXTURE_BORDER_COLOR, border);
+        }
         t->params_dirty = false;
     }
-    if (t->dirty) {
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-        for (l = 0; l < QGPU_MAX_TEX_LEVELS; l++) {
-            const QgpuTexLevel *lv = &t->level[l];
-            if (!(t->dirty & (1u << l)) || !lv->px) {
-                continue;
-            }
-            /* internalformat = format de base : L et I viennent du rouge, et
-               les fonctions d'environnement suivent la table d'OpenGL. */
-            glTexImage2D(GL_TEXTURE_2D, l, t->base_format, lv->w, lv->h, 0,
-                         GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, lv->px);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    for (f = 0; f < t->nfaces; f++) {
+        if (!t->dirty[f]) {
+            continue;
         }
-        t->dirty = 0;
+        for (l = 0; l < QGPU_MAX_TEX_LEVELS; l++) {
+            if ((t->dirty[f] & (1u << l)) && t->level[f][l].px) {
+                gl_tex_level(g, t, gt->target, f, l);
+            }
+        }
+        t->dirty[f] = 0;
     }
     return glGetError() == GL_NO_ERROR;
 }
@@ -784,7 +906,13 @@ static bool gl_unit_env(QgpuCore *c, const QgpuState *st, int u, QgpuTexture *te
     if (!gl_tex_sync(c, tex)) {
         return false;
     }
-    glEnable(GL_TEXTURE_2D);
+    gl_disable_targets(g);
+    glEnable(((GlTexture *)tex->priv)->target);
+    if (g->has_tex) {
+        /* v10 : biais de LOD de l'unité (OpenGL 1.4) */
+        glTexEnvf(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS,
+                  qgpu_u2f(st->v[QGPU_SK_TEX_LOD_BIAS0 + u]));
+    }
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, mode);
     if (mode == GL_COMBINE) {
         gl_combine(st, u);
@@ -814,7 +942,7 @@ static void gl_unbind_unit(QgpuCore *c, int u)
     g->ActiveTexture(GL_TEXTURE0 + u);
     g->ClientActiveTexture(GL_TEXTURE0 + u);
     glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-    glDisable(GL_TEXTURE_2D);
+    gl_disable_targets(g);
 }
 
 static bool gl_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t prim,
@@ -921,7 +1049,7 @@ static void gl_reset_raw(QgpuCore *c)
         glDisable(GL_TEXTURE_GEN_R);
         glDisable(GL_TEXTURE_GEN_Q);
         glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-        glDisable(GL_TEXTURE_2D);
+        gl_disable_targets(g);
         glMatrixMode(GL_TEXTURE);
         glLoadIdentity();
     }

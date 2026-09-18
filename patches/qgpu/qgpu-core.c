@@ -251,44 +251,489 @@ static bool valid_filter(uint32_t f, bool min)
     return min && f >= 0x2700 && f <= 0x2703;
 }
 
-static bool valid_wrap(uint32_t w)
+/* v10 : GL_MIRRORED_REPEAT et GL_CLAMP_TO_BORDER s'ajoutent ; une texture
+   RECTANGLE n'accepte que les modes qui bornent (règle d'OpenGL). */
+static bool valid_wrap(uint32_t w, uint32_t target)
 {
-    return w == 0x2901 || w == 0x2900 || w == 0x812F;
+    if (w == 0x2900 || w == 0x812F || w == QGPU_TW_CLAMP_TO_BORDER) {
+        return true;
+    }
+    return target != QGPU_TT_RECTANGLE &&
+           (w == 0x2901 || w == QGPU_TW_MIRRORED_REPEAT);
 }
+
+static bool valid_target(uint32_t t)
+{
+    return t == QGPU_TT_1D || t == QGPU_TT_2D || t == QGPU_TT_3D ||
+           t == QGPU_TT_CUBE_MAP || t == QGPU_TT_RECTANGLE;
+}
+
+static bool finite_f(uint32_t u, float bound)
+{
+    float f = qgpu_u2f(u);
+    return f == f && f >= -bound && f <= bound;
+}
+
+/* ── Textures (v3, v10) ─────────────────────────────────────────────────────
+ *
+ * Tout ce qui touche au CONTENU d'une texture est ici, dans le cœur : les
+ * conversions de format, la décompression S3TC et la génération des mipmaps.
+ * Les backends ne voient que des mots ARGB (ou des flottants de profondeur),
+ * donc ils ne peuvent pas en avoir deux idées — et le backend de référence
+ * reste la vérité terrain pour le GPU hôte. */
 
 static void tex_free(QgpuCore *c, QgpuTexture *t)
 {
-    int l;
+    int f, l;
     if (c->be && c->be->tex_destroy) {
         c->be->tex_destroy(c, t);
     }
-    for (l = 0; l < QGPU_MAX_TEX_LEVELS; l++) {
-        free(t->level[l].px);
+    for (f = 0; f < QGPU_TEX_FACES; f++) {
+        for (l = 0; l < QGPU_MAX_TEX_LEVELS; l++) {
+            free(t->level[f][l].px);
+        }
     }
     memset(t, 0, sizeof(*t));
 }
 
-/* OpenGL 1.x : complétude d'une texture 2D. */
+/* Valeurs initiales d'OpenGL d'une texture de cible `target`. */
+static void tex_init(QgpuTexture *t, uint32_t target)
+{
+    memset(t, 0, sizeof(*t));
+    t->used = true;
+    t->target = target;
+    t->nfaces = target == QGPU_TT_CUBE_MAP ? QGPU_TEX_FACES : 1;
+    if (target == QGPU_TT_RECTANGLE) {
+        t->min_filter = 0x2601;                          /* LINEAR */
+        t->wrap_s = t->wrap_t = t->wrap_r = 0x812F;      /* CLAMP_TO_EDGE */
+    } else {
+        t->min_filter = 0x2702;                          /* NEAREST_MIPMAP_LINEAR */
+        t->wrap_s = t->wrap_t = t->wrap_r = 0x2901;      /* REPEAT */
+    }
+    t->mag_filter = 0x2601;                              /* LINEAR */
+    t->min_lod = -1000.0f;
+    t->max_lod = 1000.0f;
+    t->max_level = 1000;
+    t->compare_func = 0x0203;                            /* LEQUAL */
+    t->depth_mode = 0x1909;                              /* LUMINANCE */
+    t->params_dirty = true;
+}
+
+/* Le format de base d'une texture est celui de son niveau de base. */
+static void tex_refresh_format(QgpuTexture *t)
+{
+    const QgpuTexLevel *lv = &t->level[0][t->base_level];
+    t->base_format = lv->px ? lv->fmt : 0;
+}
+
+static uint32_t ilog2u(uint32_t v)
+{
+    uint32_t n = 0;
+    while (v >>= 1) {
+        n++;
+    }
+    return n;
+}
+
+/* Dernier niveau q de la chaîne qui part du niveau de base (OpenGL 1.2) :
+   q = min(b + log2 de la plus grande dimension, MAX_LEVEL). */
+static uint32_t tex_last_level(const QgpuTexture *t, const QgpuTexLevel *base)
+{
+    uint32_t m = base->w;
+    if (base->h > m) m = base->h;
+    if (base->d > m) m = base->d;
+    m = t->base_level + ilog2u(m);
+    return t->max_level < m ? t->max_level : m;
+}
+
+/* OpenGL 1.2 à 1.4 : complétude, niveau de base et MAX_LEVEL compris ; pour
+   une carte de cube, les six faces carrées, de même taille et de même format. */
 uint32_t qgpu_texture_levels(const QgpuTexture *t)
 {
-    uint32_t w, h, n;
-    if (!t->used || !t->level[0].px) {
+    uint32_t b = t->base_level, f, n, q, w, h, d;
+    const QgpuTexLevel *l0;
+
+    if (!t->used || b >= QGPU_MAX_TEX_LEVELS || !t->level[0][b].px) {
         return 0;
     }
-    if (t->min_filter == 0x2600 || t->min_filter == 0x2601) {
-        return 1;                                    /* pas de mipmap requis */
-    }
-    w = t->level[0].w;
-    h = t->level[0].h;
-    for (n = 1; w > 1 || h > 1; n++) {
-        w = w > 1 ? w / 2 : 1;
-        h = h > 1 ? h / 2 : 1;
-        if (n >= QGPU_MAX_TEX_LEVELS || !t->level[n].px ||
-            t->level[n].w != w || t->level[n].h != h) {
+    l0 = &t->level[0][b];
+    for (f = 1; f < t->nfaces; f++) {
+        const QgpuTexLevel *lf = &t->level[f][b];
+        if (!lf->px || lf->w != l0->w || lf->h != l0->h || lf->fmt != l0->fmt) {
             return 0;
         }
     }
-    return n;
+    if (t->min_filter == 0x2600 || t->min_filter == 0x2601) {
+        return 1;                                        /* pas de mipmap requis */
+    }
+    q = tex_last_level(t, l0);
+    if (q < b) {
+        return 0;                                        /* MAX_LEVEL < BASE_LEVEL */
+    }
+    w = l0->w; h = l0->h; d = l0->d;
+    for (n = b + 1; n <= q; n++) {
+        w = w > 1 ? w / 2 : 1;
+        h = h > 1 ? h / 2 : 1;
+        d = d > 1 ? d / 2 : 1;
+        if (n >= QGPU_MAX_TEX_LEVELS) {
+            return 0;
+        }
+        for (f = 0; f < t->nfaces; f++) {
+            const QgpuTexLevel *lv = &t->level[f][n];
+            if (!lv->px || lv->w != w || lv->h != h || lv->d != d || lv->fmt != l0->fmt) {
+                return 0;
+            }
+        }
+    }
+    return q - b + 1;
+}
+
+/* Face désignée par une cible d'IMAGE, ou -1 si elle ne va pas à la texture. */
+static int tex_face(const QgpuTexture *t, uint32_t itarget)
+{
+    if (t->target == QGPU_TT_CUBE_MAP) {
+        return (itarget >= QGPU_TT_CUBE_FACE(0) && itarget <= QGPU_TT_CUBE_FACE(5))
+               ? (int)(itarget - QGPU_TT_CUBE_FACE(0)) : -1;
+    }
+    return itarget == t->target ? 0 : -1;
+}
+
+/* Format des données d'une image (v10) : un couple (format, type) d'OpenGL. */
+typedef struct TexSrc {
+    uint32_t fmt, type;
+    uint32_t bpp;            /* octets par texel ; 0 pour un format compressé */
+    uint32_t block;          /* octets par bloc de 4×4 (compressé), 0 sinon */
+    bool     depth;
+} TexSrc;
+
+static bool tex_src(uint32_t fmt, uint32_t type, TexSrc *s)
+{
+    s->fmt = fmt; s->type = type; s->bpp = 0; s->block = 0; s->depth = false;
+    switch (type) {
+    case 0x1401:                                         /* GL_UNSIGNED_BYTE */
+        switch (fmt) {
+        case 0x1908: case 0x80E1: s->bpp = 4; return true;           /* RGBA, BGRA */
+        case 0x1907: case 0x80E0: s->bpp = 3; return true;           /* RGB, BGR */
+        case 0x190A: s->bpp = 2; return true;                        /* LUMINANCE_ALPHA */
+        case 0x1909: case 0x1906: case 0x1903: s->bpp = 1; return true; /* L, A, RED */
+        }
+        return false;
+    case 0x8035: case 0x8367:                            /* UINT_8_8_8_8 (_REV) */
+        s->bpp = 4;
+        return fmt == 0x1908 || fmt == 0x80E1;
+    case 0x8363: case 0x8364:                            /* USHORT_5_6_5 (_REV) */
+        s->bpp = 2;
+        return fmt == 0x1907;
+    case 0x8033: case 0x8034:                            /* USHORT_4_4_4_4, _5_5_5_1 */
+        s->bpp = 2;
+        return fmt == 0x1908;
+    case 0x8365: case 0x8366:                            /* USHORT_4_4_4_4_REV, _1_5_5_5_REV */
+        s->bpp = 2;
+        return fmt == 0x80E1;
+    case 0x1406: case 0x1405:                            /* FLOAT, UNSIGNED_INT */
+        s->bpp = 4; s->depth = true;
+        return fmt == 0x1902;
+    case 0x1403:                                         /* UNSIGNED_SHORT */
+        s->bpp = 2; s->depth = true;
+        return fmt == 0x1902;
+    case 0:
+        if (fmt == QGPU_TF_DXT1_RGB || fmt == QGPU_TF_DXT1_RGBA) {
+            s->block = 8;
+            return true;
+        }
+        if (fmt == QGPU_TF_DXT3 || fmt == QGPU_TF_DXT5) {
+            s->block = 16;
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+static inline uint32_t argb(uint32_t a, uint32_t r, uint32_t g, uint32_t b)
+{
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
+static inline uint32_t x5(uint32_t v) { return (v << 3) | (v >> 2); }
+static inline uint32_t x6(uint32_t v) { return (v << 2) | (v >> 4); }
+
+static inline uint32_t ld16(const uint8_t *p) { return ((uint32_t)p[0] << 8) | p[1]; }
+
+/* Un texel des données de l'application → mot ARGB hôte-natif (ou flottant de
+   profondeur rangé bit à bit). Règles d'OpenGL : L donne R = G = B, ALPHA donne
+   (0, 0, 0, A), RED donne (R, 0, 0, 1) ; les types compactés sont des mots
+   big-endian, comme tout le fil. */
+static uint32_t unpack_texel(const TexSrc *s, const uint8_t *p)
+{
+    uint32_t v;
+
+    switch (s->type) {
+    case 0x1401:
+        switch (s->fmt) {
+        case 0x1908: return argb(p[3], p[0], p[1], p[2]);
+        case 0x80E1: return argb(p[3], p[2], p[1], p[0]);
+        case 0x1907: return argb(255, p[0], p[1], p[2]);
+        case 0x80E0: return argb(255, p[2], p[1], p[0]);
+        case 0x190A: return argb(p[1], p[0], p[0], p[0]);
+        case 0x1909: return argb(255, p[0], p[0], p[0]);
+        case 0x1906: return argb(p[0], 0, 0, 0);
+        default:     return argb(255, p[0], 0, 0);          /* RED */
+        }
+    case 0x8035:                                            /* 1er composant en poids fort */
+        v = qgpu_ld32(p);
+        return s->fmt == 0x1908
+               ? argb(v & 255, v >> 24, (v >> 16) & 255, (v >> 8) & 255)
+               : argb(v & 255, (v >> 8) & 255, (v >> 16) & 255, v >> 24);
+    case 0x8367:                                            /* 1er composant en poids faible */
+        v = qgpu_ld32(p);
+        return s->fmt == 0x1908
+               ? argb(v >> 24, v & 255, (v >> 8) & 255, (v >> 16) & 255)
+               : v;                                         /* BGRA _REV = ARGB big-endian */
+    case 0x8363:
+        v = ld16(p);
+        return argb(255, x5(v >> 11), x6((v >> 5) & 63), x5(v & 31));
+    case 0x8364:
+        v = ld16(p);
+        return argb(255, x5(v & 31), x6((v >> 5) & 63), x5(v >> 11));
+    case 0x8033:
+        v = ld16(p);
+        return argb((v & 15) * 17, (v >> 12) * 17, ((v >> 8) & 15) * 17, ((v >> 4) & 15) * 17);
+    case 0x8365:
+        v = ld16(p);
+        return argb((v >> 12) * 17, ((v >> 8) & 15) * 17, ((v >> 4) & 15) * 17, (v & 15) * 17);
+    case 0x8034:
+        v = ld16(p);
+        return argb((v & 1) * 255, x5(v >> 11), x5((v >> 6) & 31), x5((v >> 1) & 31));
+    case 0x8366:
+        v = ld16(p);
+        return argb((v >> 15) * 255, x5((v >> 10) & 31), x5((v >> 5) & 31), x5(v & 31));
+    case 0x1406: {
+        float f = qgpu_u2f(qgpu_ld32(p));
+        f = (f == f) ? (f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f) : 0.0f;
+        return qgpu_f2u(f);
+    }
+    case 0x1405:
+        return qgpu_f2u((float)((double)qgpu_ld32(p) / 4294967295.0));
+    case 0x1403:
+        return qgpu_f2u((float)ld16(p) / 65535.0f);
+    }
+    return 0;
+}
+
+/* ── S3TC (EXT_texture_compression_s3tc) ──────────────────────────────────────
+ * Les blocs sont définis OCTET PAR OCTET, en petit-boutiste : l'invité les
+ * recopie tels que l'application les a donnés, sans rien échanger. Les
+ * couleurs intermédiaires sont arrondies au plus proche ; la spécification
+ * laisse l'arrondi libre, et le cœur décode pour tous les backends — ils
+ * voient donc exactement les mêmes texels. */
+static inline uint32_t le16(const uint8_t *p) { return p[0] | ((uint32_t)p[1] << 8); }
+
+static void dxt_colors(const uint8_t *b, bool four, bool punch, uint32_t out[16])
+{
+    uint32_t c0 = le16(b), c1 = le16(b + 2), bits, i;
+    uint32_t r[4], g[4], bl[4], a[4] = { 255, 255, 255, 255 };
+
+    r[0] = x5(c0 >> 11); g[0] = x6((c0 >> 5) & 63); bl[0] = x5(c0 & 31);
+    r[1] = x5(c1 >> 11); g[1] = x6((c1 >> 5) & 63); bl[1] = x5(c1 & 31);
+    if (four || c0 > c1) {
+        r[2] = (2 * r[0] + r[1] + 1) / 3; g[2] = (2 * g[0] + g[1] + 1) / 3;
+        bl[2] = (2 * bl[0] + bl[1] + 1) / 3;
+        r[3] = (r[0] + 2 * r[1] + 1) / 3; g[3] = (g[0] + 2 * g[1] + 1) / 3;
+        bl[3] = (bl[0] + 2 * bl[1] + 1) / 3;
+    } else {
+        r[2] = (r[0] + r[1] + 1) / 2; g[2] = (g[0] + g[1] + 1) / 2;
+        bl[2] = (bl[0] + bl[1] + 1) / 2;
+        r[3] = g[3] = bl[3] = 0;
+        a[3] = punch ? 0 : 255;                          /* noir transparent en RGBA */
+    }
+    bits = b[4] | ((uint32_t)b[5] << 8) | ((uint32_t)b[6] << 16) | ((uint32_t)b[7] << 24);
+    for (i = 0; i < 16; i++) {
+        uint32_t k = (bits >> (2 * i)) & 3;
+        out[i] = argb(a[k], r[k], g[k], bl[k]);
+    }
+}
+
+/* Décode un bloc de 4×4 texels, rangés ligne par ligne. */
+static void dxt_block(uint32_t fmt, const uint8_t *b, uint32_t out[16])
+{
+    uint32_t i;
+
+    if (fmt == QGPU_TF_DXT1_RGB || fmt == QGPU_TF_DXT1_RGBA) {
+        dxt_colors(b, false, fmt == QGPU_TF_DXT1_RGBA, out);
+        return;
+    }
+    dxt_colors(b + 8, true, false, out);                 /* DXT3/5 : toujours 4 couleurs */
+    if (fmt == QGPU_TF_DXT3) {
+        for (i = 0; i < 16; i++) {
+            uint32_t al = (b[i / 2] >> (4 * (i & 1))) & 15;
+            out[i] = (out[i] & 0xFFFFFF) | ((al * 17) << 24);
+        }
+    } else {
+        uint32_t a0 = b[0], a1 = b[1], al[8], k;
+        uint64_t bits = 0;
+        al[0] = a0; al[1] = a1;
+        if (a0 > a1) {
+            for (k = 1; k < 7; k++) {
+                al[k + 1] = ((7 - k) * a0 + k * a1 + 3) / 7;
+            }
+        } else {
+            for (k = 1; k < 5; k++) {
+                al[k + 1] = ((5 - k) * a0 + k * a1 + 2) / 5;
+            }
+            al[6] = 0; al[7] = 255;
+        }
+        for (k = 0; k < 6; k++) {
+            bits |= (uint64_t)b[2 + k] << (8 * k);
+        }
+        for (i = 0; i < 16; i++) {
+            out[i] = (out[i] & 0xFFFFFF) | (al[(bits >> (3 * i)) & 7] << 24);
+        }
+    }
+}
+
+/* Taille en octets des données d'une boîte w×h×d, et validation des pas. */
+static bool tex_src_size(const TexSrc *s, uint32_t w, uint32_t h, uint32_t d,
+                         uint32_t *row, uint32_t *img, uint64_t *total)
+{
+    uint64_t line;
+
+    if (s->block) {
+        *row = *img = 0;
+        *total = (uint64_t)((w + 3) / 4) * ((h + 3) / 4) * s->block * d;
+        return true;
+    }
+    line = (uint64_t)w * s->bpp;
+    if (*row == 0) {
+        *row = (uint32_t)line;
+    }
+    if (*row < line) {
+        return false;
+    }
+    if (*img == 0) {
+        *img = *row * h;
+    }
+    if (*img < (uint64_t)*row * (h - 1) + line) {
+        return false;
+    }
+    *total = (uint64_t)*img * (d - 1) + (uint64_t)*row * (h - 1) + line;
+    return true;
+}
+
+/* Recopie une boîte de données (fenêtre partagée) dans un niveau déjà alloué. */
+static void tex_store(QgpuTexLevel *lv, const TexSrc *s, const uint8_t *src,
+                      uint32_t x, uint32_t y, uint32_t z,
+                      uint32_t w, uint32_t h, uint32_t d, uint32_t row, uint32_t img)
+{
+    uint32_t i, j, k;
+
+    if (s->block) {
+        uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4, bx, by, blk[16];
+        for (by = 0; by < bh; by++) {
+            for (bx = 0; bx < bw; bx++) {
+                dxt_block(s->fmt, src + ((size_t)by * bw + bx) * s->block, blk);
+                for (j = 0; j < 4 && by * 4 + j < h; j++) {
+                    for (i = 0; i < 4 && bx * 4 + i < w; i++) {
+                        lv->px[((size_t)(y + by * 4 + j)) * lv->w + x + bx * 4 + i] =
+                            blk[j * 4 + i];
+                    }
+                }
+            }
+        }
+        return;
+    }
+    for (k = 0; k < d; k++) {
+        for (j = 0; j < h; j++) {
+            const uint8_t *p = src + (size_t)k * img + (size_t)j * row;
+            uint32_t *o = lv->px + ((size_t)(z + k) * lv->h + y + j) * lv->w + x;
+            for (i = 0; i < w; i++, p += s->bpp) {
+                o[i] = unpack_texel(s, p);
+            }
+        }
+    }
+}
+
+/* Alloue (ou réemploie) un niveau de w×h×d texels. */
+static bool tex_alloc_level(QgpuTexLevel *lv, uint32_t w, uint32_t h, uint32_t d,
+                            uint32_t fmt, bool zero)
+{
+    size_t n = (size_t)w * h * d;
+    uint32_t *px = lv->px;
+
+    if (!px || (size_t)lv->w * lv->h * lv->d != n) {
+        px = malloc(n * sizeof(uint32_t));
+        if (!px) {
+            return false;
+        }
+        free(lv->px);
+    }
+    if (zero) {
+        memset(px, 0, n * sizeof(uint32_t));
+    }
+    lv->px = px;
+    lv->w = w; lv->h = h; lv->d = d;
+    lv->fmt = fmt;
+    return true;
+}
+
+/* Mipmaps automatiques (OpenGL 1.4) d'une face : niveaux b+1..q recalculés
+   depuis le niveau de base, moyenne des blocs de 2×2 (2×2×2 en 3D) du niveau
+   précédent. Une dimension impaire perd sa dernière rangée (liberté laissée par
+   la spécification) ; une dimension de 1 ne se moyenne pas. */
+static bool tex_gen_mipmaps(QgpuTexture *t, uint32_t face)
+{
+    const QgpuTexLevel *base = &t->level[face][t->base_level];
+    bool depth = base->fmt == 0x1902;
+    uint32_t q, n;
+
+    if (t->target == QGPU_TT_RECTANGLE || !base->px) {
+        return true;
+    }
+    q = tex_last_level(t, base);
+    if (q > QGPU_MAX_TEX_LEVELS - 1) {
+        q = QGPU_MAX_TEX_LEVELS - 1;
+    }
+    for (n = t->base_level + 1; n <= q; n++) {
+        const QgpuTexLevel *src = &t->level[face][n - 1];
+        QgpuTexLevel *dst = &t->level[face][n];
+        uint32_t w = src->w > 1 ? src->w / 2 : 1, h = src->h > 1 ? src->h / 2 : 1;
+        uint32_t d = src->d > 1 ? src->d / 2 : 1;
+        uint32_t sx = src->w > 1 ? 2 : 1, sy = src->h > 1 ? 2 : 1, sz = src->d > 1 ? 2 : 1;
+        uint32_t x, y, z, i, j, k;
+
+        if (!tex_alloc_level(dst, w, h, d, base->fmt, false)) {
+            return false;
+        }
+        for (z = 0; z < d; z++) {
+            for (y = 0; y < h; y++) {
+                for (x = 0; x < w; x++) {
+                    uint32_t cnt = sx * sy * sz, acc[4] = { 0, 0, 0, 0 }, ch;
+                    float fd = 0.0f;
+                    for (k = 0; k < sz; k++) {
+                        for (j = 0; j < sy; j++) {
+                            for (i = 0; i < sx; i++) {
+                                uint32_t p = src->px[((size_t)(z * sz + k) * src->h +
+                                                      y * sy + j) * src->w + x * sx + i];
+                                if (depth) {
+                                    fd += qgpu_u2f(p);
+                                } else {
+                                    for (ch = 0; ch < 4; ch++) {
+                                        acc[ch] += (p >> (8 * ch)) & 255;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    dst->px[((size_t)z * h + y) * w + x] = depth
+                        ? qgpu_f2u(fd / (float)cnt)
+                        : ((acc[0] + cnt / 2) / cnt) | (((acc[1] + cnt / 2) / cnt) << 8) |
+                          (((acc[2] + cnt / 2) / cnt) << 16) | (((acc[3] + cnt / 2) / cnt) << 24);
+                }
+            }
+        }
+        t->dirty[face] |= 1u << n;
+    }
+    return true;
 }
 
 static bool valid_func(uint32_t f)
@@ -465,6 +910,10 @@ static bool valid_state(uint32_t key, uint32_t val)
         return val >= 1 && val <= 256;               /* borne d'OpenGL */
     case QGPU_SK_LINE_STIPPLE_PATTERN:
         return val <= 0xFFFF;
+    /* v10 : biais de LOD d'unité (initial 0.0, donc neutre pour un flux v9) */
+    case QGPU_SK_TEX_LOD_BIAS0: case QGPU_SK_TEX_LOD_BIAS0 + 1:
+    case QGPU_SK_TEX_LOD_BIAS0 + 2: case QGPU_SK_TEX_LOD_BIAS0 + 3:
+        return finite_f(val, QGPU_MAX_LOD_BIAS);
     default:
         return false;
     }
@@ -1398,21 +1847,26 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         return do_draw(c, a, QGPU_PRIM_POINTS, QGPU_VERTEX_WORDS, 0);
 
     case QGPU_OP_TEX_CREATE:
-        WANT(QGPU_LEN_TEX);
-        if (a[0] >= QGPU_MAX_TEX) {
+    case QGPU_OP_TEX_CREATE3: {
+        uint32_t target = QGPU_TT_2D;
+        if (op == QGPU_OP_TEX_CREATE) {
+            WANT(QGPU_LEN_TEX);
+        } else {
+            WANT(QGPU_LEN_TEX_CREATE3);
+            target = a[1];
+        }
+        if (a[0] >= QGPU_MAX_TEX || !valid_target(target)) {
             return QGPU_ST_BAD_ARG;
         }
         if (c->tex[a[0]].used) {
             return QGPU_ST_LIMIT;
         }
-        memset(&c->tex[a[0]], 0, sizeof(c->tex[a[0]]));
-        c->tex[a[0]].used = true;
-        /* valeurs initiales d'OpenGL */
-        c->tex[a[0]].min_filter = 0x2702;          /* NEAREST_MIPMAP_LINEAR */
-        c->tex[a[0]].mag_filter = 0x2601;          /* LINEAR */
-        c->tex[a[0]].wrap_s = c->tex[a[0]].wrap_t = 0x2901;
-        c->tex[a[0]].params_dirty = true;
+        if (target != QGPU_TT_2D && !(c->caps & QGPU_CAP_TEXTURES)) {
+            return QGPU_ST_BACKEND;
+        }
+        tex_init(&c->tex[a[0]], target);
         return QGPU_ST_OK;
+    }
 
     case QGPU_OP_TEX_DESTROY:
         WANT(QGPU_LEN_TEX);
@@ -1424,14 +1878,23 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
 
     case QGPU_OP_TEX_PARAM: {
         QgpuTexture *t;
+        bool rect;
         WANT(QGPU_LEN_TEX_PARAM);
         if (a[0] >= QGPU_MAX_TEX || !c->tex[a[0]].used) {
             return QGPU_ST_BAD_ARG;
         }
         t = &c->tex[a[0]];
+        rect = t->target == QGPU_TT_RECTANGLE;
+        /* v10 : ce que le backend doit savoir faire lui-même (cf. QGPU_CAP_TEXTURES) */
+        if (((a[1] >= QGPU_TP_WRAP_R && a[1] <= QGPU_TP_DEPTH_MODE) ||
+             ((a[1] >= QGPU_TP_WRAP_S && a[1] <= QGPU_TP_WRAP_T) &&
+              (a[2] == QGPU_TW_MIRRORED_REPEAT || a[2] == QGPU_TW_CLAMP_TO_BORDER))) &&
+            !(c->caps & QGPU_CAP_TEXTURES)) {
+            return QGPU_ST_BACKEND;
+        }
         switch (a[1]) {
         case QGPU_TP_MIN_FILTER:
-            if (!valid_filter(a[2], true)) return QGPU_ST_BAD_ARG;
+            if (!valid_filter(a[2], !rect)) return QGPU_ST_BAD_ARG;
             t->min_filter = a[2];
             break;
         case QGPU_TP_MAG_FILTER:
@@ -1439,12 +1902,50 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             t->mag_filter = a[2];
             break;
         case QGPU_TP_WRAP_S:
-            if (!valid_wrap(a[2])) return QGPU_ST_BAD_ARG;
-            t->wrap_s = a[2];
-            break;
         case QGPU_TP_WRAP_T:
-            if (!valid_wrap(a[2])) return QGPU_ST_BAD_ARG;
-            t->wrap_t = a[2];
+        case QGPU_TP_WRAP_R:
+            if (!valid_wrap(a[2], t->target)) return QGPU_ST_BAD_ARG;
+            *(a[1] == QGPU_TP_WRAP_S ? &t->wrap_s :
+              a[1] == QGPU_TP_WRAP_T ? &t->wrap_t : &t->wrap_r) = a[2];
+            break;
+        case QGPU_TP_BORDER_COLOR:
+            t->border = a[2];
+            break;
+        case QGPU_TP_MIN_LOD:
+        case QGPU_TP_MAX_LOD:
+            /* RECTANGLE : pas de mipmaps, et le pilote NVIDIA refuse ces deux
+               paramètres (GL_INVALID_OPERATION) — refusés ici pour tous. */
+            if (rect || !finite_f(a[2], 1e6f)) return QGPU_ST_BAD_ARG;
+            *(a[1] == QGPU_TP_MIN_LOD ? &t->min_lod : &t->max_lod) = qgpu_u2f(a[2]);
+            break;
+        case QGPU_TP_BASE_LEVEL:
+            if (a[2] >= QGPU_MAX_TEX_LEVELS || (rect && a[2] != 0)) return QGPU_ST_BAD_ARG;
+            t->base_level = a[2];
+            tex_refresh_format(t);
+            break;
+        case QGPU_TP_MAX_LEVEL:
+            if (a[2] > 1000) return QGPU_ST_BAD_ARG;
+            t->max_level = a[2];
+            break;
+        case QGPU_TP_LOD_BIAS:
+            if (!finite_f(a[2], QGPU_MAX_LOD_BIAS)) return QGPU_ST_BAD_ARG;
+            t->lod_bias = qgpu_u2f(a[2]);
+            break;
+        case QGPU_TP_COMPARE_MODE:
+            if (a[2] != QGPU_TC_NONE && a[2] != QGPU_TC_COMPARE_R) return QGPU_ST_BAD_ARG;
+            t->compare_mode = a[2];
+            break;
+        case QGPU_TP_COMPARE_FUNC:
+            if (!valid_func(a[2])) return QGPU_ST_BAD_ARG;
+            t->compare_func = a[2];
+            break;
+        case QGPU_TP_DEPTH_MODE:
+            if (a[2] != 0x1909 && a[2] != 0x8049 && a[2] != 0x1906) return QGPU_ST_BAD_ARG;
+            t->depth_mode = a[2];
+            break;
+        case QGPU_TP_GENERATE_MIPMAP:
+            if (a[2] > 1) return QGPU_ST_BAD_ARG;
+            t->gen_mipmap = a[2];
             break;
         default:
             return QGPU_ST_BAD_ARG;
@@ -1453,40 +1954,131 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         return QGPU_ST_OK;
     }
 
-    case QGPU_OP_TEX_IMAGE: {
+    case QGPU_OP_TEX_IMAGE:
+    case QGPU_OP_TEX_IMAGE3: {
+        /* TEX_IMAGE (v3) est TEX_IMAGE3 sur une texture 2D, avec des texels
+           ARGB big-endian — c'est-à-dire GL_BGRA + GL_UNSIGNED_INT_8_8_8_8_REV. */
         QgpuTexture *t;
         QgpuTexLevel *lv;
-        uint32_t lvl = a[1], w = a[2], h = a[3], fmt = a[4], off = a[5], n, i;
-        uint32_t *px;
-        WANT(QGPU_LEN_TEX_IMAGE);
-        if (a[0] >= QGPU_MAX_TEX || !c->tex[a[0]].used || lvl >= QGPU_MAX_TEX_LEVELS ||
-            w == 0 || h == 0 || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM ||
-            !valid_base_format(fmt)) {
+        TexSrc src;
+        uint32_t itarget, lvl, w, h, d, bfmt, off, row, img;
+        uint64_t total = 0;
+        int face;
+
+        if (op == QGPU_OP_TEX_IMAGE) {
+            WANT(QGPU_LEN_TEX_IMAGE);
+            itarget = QGPU_TT_2D; lvl = a[1]; w = a[2]; h = a[3]; d = 1;
+            bfmt = a[4]; off = a[5]; row = img = 0;
+            tex_src(0x80E1, 0x8367, &src);
+            if (!valid_base_format(bfmt)) {
+                return QGPU_ST_BAD_ARG;
+            }
+        } else {
+            WANT(QGPU_LEN_TEX_IMAGE3);
+            itarget = a[1]; lvl = a[2]; w = a[3]; h = a[4]; d = a[5];
+            bfmt = a[6]; off = a[9]; row = a[10]; img = a[11];
+            if (!tex_src(a[7], a[8], &src)) {
+                return QGPU_ST_BAD_ARG;
+            }
+            if (src.depth ? bfmt != 0x1902
+                : src.block ? bfmt != (src.fmt == QGPU_TF_DXT1_RGB ? 0x1907u : 0x1908u)
+                : !valid_base_format(bfmt)) {
+                return QGPU_ST_BAD_ARG;
+            }
+        }
+        if (a[0] >= QGPU_MAX_TEX || !c->tex[a[0]].used) {
             return QGPU_ST_BAD_ARG;
         }
-        n = w * h;
-        if (!in_shmem(c, off, (uint64_t)n * 4)) {
-            return QGPU_ST_OOB;
-        }
         t = &c->tex[a[0]];
-        lv = &t->level[lvl];
-        px = (lv->px && lv->w * lv->h == n) ? lv->px : malloc((size_t)n * sizeof(uint32_t));
-        if (!px) {
+        face = tex_face(t, itarget);
+        if (face < 0 || lvl >= QGPU_MAX_TEX_LEVELS || w == 0 || h == 0 || d == 0) {
+            return QGPU_ST_BAD_ARG;
+        }
+        switch (t->target) {
+        case QGPU_TT_1D:
+            if (h != 1 || d != 1 || w > QGPU_MAX_TEX_DIM || src.block) return QGPU_ST_BAD_ARG;
+            break;
+        case QGPU_TT_3D:
+            if (w > QGPU_MAX_TEX_3D_DIM || h > QGPU_MAX_TEX_3D_DIM ||
+                d > QGPU_MAX_TEX_3D_DIM || src.depth || src.block) return QGPU_ST_BAD_ARG;
+            break;
+        case QGPU_TT_CUBE_MAP:
+            if (w != h || d != 1 || w > QGPU_MAX_TEX_DIM || src.depth) return QGPU_ST_BAD_ARG;
+            break;
+        case QGPU_TT_RECTANGLE:
+            if (lvl != 0 || d != 1 || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM ||
+                src.block) return QGPU_ST_BAD_ARG;
+            break;
+        default:                                         /* 2D */
+            if (d != 1 || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM) return QGPU_ST_BAD_ARG;
+        }
+        if (src.depth && !(c->caps & QGPU_CAP_TEXTURES)) {
             return QGPU_ST_BACKEND;
         }
-        if (px != lv->px) {
-            free(lv->px);
+        if (off != QGPU_TEX_NO_DATA) {
+            if (!tex_src_size(&src, w, h, d, &row, &img, &total)) {
+                return QGPU_ST_BAD_ARG;
+            }
+            if (!in_shmem(c, off, total)) {
+                return QGPU_ST_OOB;
+            }
         }
-        for (i = 0; i < n; i++) {
-            px[i] = qgpu_ld32(c->shmem + off + (size_t)i * 4);
+        lv = &t->level[face][lvl];
+        if (!tex_alloc_level(lv, w, h, d, bfmt, off == QGPU_TEX_NO_DATA)) {
+            return QGPU_ST_BACKEND;
         }
-        lv->px = px;
-        lv->w = w;
-        lv->h = h;
-        if (lvl == 0) {
-            t->base_format = fmt;
+        if (off != QGPU_TEX_NO_DATA) {
+            tex_store(lv, &src, c->shmem + off, 0, 0, 0, w, h, d, row, img);
         }
-        t->dirty |= 1u << lvl;
+        t->dirty[face] |= 1u << lvl;
+        if (t->gen_mipmap && lvl == t->base_level && !tex_gen_mipmaps(t, face)) {
+            return QGPU_ST_BACKEND;
+        }
+        tex_refresh_format(t);
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_TEX_SUBIMAGE: {
+        QgpuTexture *t;
+        QgpuTexLevel *lv;
+        TexSrc src;
+        uint32_t lvl, x, y, z, w, h, d, off, row, img;
+        uint64_t total;
+        int face;
+        WANT(QGPU_LEN_TEX_SUBIMAGE);
+        lvl = a[2]; x = a[3]; y = a[4]; z = a[5]; w = a[6]; h = a[7]; d = a[8];
+        off = a[11]; row = a[12]; img = a[13];
+        if (a[0] >= QGPU_MAX_TEX || !c->tex[a[0]].used || !tex_src(a[9], a[10], &src)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        t = &c->tex[a[0]];
+        face = tex_face(t, a[1]);
+        if (face < 0 || lvl >= QGPU_MAX_TEX_LEVELS || !t->level[face][lvl].px) {
+            return QGPU_ST_BAD_ARG;
+        }
+        lv = &t->level[face][lvl];
+        if ((uint64_t)x + w > lv->w || (uint64_t)y + h > lv->h || (uint64_t)z + d > lv->d ||
+            src.depth != (lv->fmt == 0x1902)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (src.block && ((x | y) & 3 || ((w & 3) && x + w != lv->w) ||
+                          ((h & 3) && y + h != lv->h) || t->target == QGPU_TT_3D)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (w == 0 || h == 0 || d == 0) {
+            return QGPU_ST_OK;                           /* comme OpenGL : sans effet */
+        }
+        if (!tex_src_size(&src, w, h, d, &row, &img, &total)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (!in_shmem(c, off, total)) {
+            return QGPU_ST_OOB;
+        }
+        tex_store(lv, &src, c->shmem + off, x, y, z, w, h, d, row, img);
+        t->dirty[face] |= 1u << lvl;
+        if (t->gen_mipmap && lvl == t->base_level && !tex_gen_mipmaps(t, face)) {
+            return QGPU_ST_BACKEND;
+        }
         return QGPU_ST_OK;
     }
 
@@ -1509,6 +2101,8 @@ static bool known_op(uint32_t op)
     case QGPU_OP_DRAW_TRIANGLES_TEX2: case QGPU_OP_DRAW_LINES: case QGPU_OP_DRAW_POINTS:
     case QGPU_OP_DRAW_TRIANGLES_TEXN:
     case QGPU_OP_TEX_IMAGE: case QGPU_OP_TEX_PARAM:
+    /* v10 */
+    case QGPU_OP_TEX_CREATE3: case QGPU_OP_TEX_IMAGE3: case QGPU_OP_TEX_SUBIMAGE:
     /* v7 */
     case QGPU_OP_SET_MATRIX: case QGPU_OP_DEPTH_RANGE: case QGPU_OP_SET_LIGHT:
     case QGPU_OP_SET_MATERIAL: case QGPU_OP_SET_LIGHT_MODEL:

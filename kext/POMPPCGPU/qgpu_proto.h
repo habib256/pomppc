@@ -46,7 +46,7 @@
 #define QGPU_IOPCI_PRIMARY_MATCH 0x0fb21234
 
 #define QGPU_MAGIC              0x71677031  /* 'qgp1' */
-#define QGPU_PROTO_VERSION      9   /* v2 : profondeur, état GL ; v3 : textures ;
+#define QGPU_PROTO_VERSION      10  /* v2 : profondeur, état GL ; v3 : textures ;
                                        v4 : brouillard, 2e unité, lignes, points ;
                                        v5 : 4 unités, GL_COMBINE ;
                                        v6 : stencil ;
@@ -57,7 +57,11 @@
                                             modes de polygone, pointillés,
                                             requêtes d'occlusion) ;
                                        v9 : doorbell asynchrone (file de
-                                            soumissions, thread de rendu hôte) */
+                                            soumissions, thread de rendu hôte) ;
+                                       v10 : textures 1D, 3D, cube, rectangle,
+                                            profondeur et comparaison, S3TC,
+                                            formats de l'application convertis
+                                            par l'hôte, sous-images, LOD */
 
 /* ── BAR0 : fenêtre partagée (RAM) ───────────────────────────────────────── */
 #define QGPU_SHMEM_DEFAULT_MB   64
@@ -121,6 +125,15 @@
  * QGPU_DOORBELL_GO (exécution synchrone) : un invité v9 reste correct sur un
  * device qui n'a pas le thread, il est seulement aussi lent qu'en v8. */
 #define QGPU_CAP_ASYNC          0x00000008
+/* v10 : le backend actif tient les cibles et les paramètres de texture de la
+ * v10 (1D, 3D, cube, rectangle, profondeur et comparaison, MIRRORED_REPEAT,
+ * CLAMP_TO_BORDER, LOD). Le backend de référence les tient toujours ; le
+ * backend OpenGL ne l'annonce que s'il a résolu glTexImage3D et que l'hôte est
+ * en OpenGL 1.4 au moins. Sans ce bit, TEX_CREATE3 d'une autre cible que 2D, et
+ * toute image de profondeur, répondent QGPU_ST_BACKEND. Les conversions de
+ * format, la décompression S3TC, TEX_SUBIMAGE et la génération des mipmaps
+ * sont faites par le CŒUR : elles ne dépendent pas de ce bit. */
+#define QGPU_CAP_TEXTURES       0x00000010
 
 #define QGPU_IRQ_DONE           0x00000001
 
@@ -152,6 +165,8 @@
 #define QGPU_MAX_TEX            512         /* v3 */
 #define QGPU_MAX_TEX_DIM        2048
 #define QGPU_MAX_TEX_LEVELS     12
+#define QGPU_MAX_TEX_3D_DIM     256         /* v10 : largeur, hauteur et profondeur */
+#define QGPU_MAX_LOD_BIAS       16          /* v10 : |biais de texture + biais d'unité| */
 #define QGPU_MAX_UNITS          4           /* v5 : unités de texture */
 #define QGPU_MAX_LIGHTS         8           /* v7 : GL_LIGHT0..GL_LIGHT7 */
 #define QGPU_MAX_CLIP_PLANES    6           /* v7 : GL_CLIP_PLANE0..5 */
@@ -207,6 +222,14 @@
 #define QGPU_OP_TEX_DESTROY     0x0041  /* v3, [tex] */
 #define QGPU_OP_TEX_IMAGE       0x0042  /* v3, [tex, niveau, w, h, format de base, off] texels 0xAARRGGBB BE, w×h */
 #define QGPU_OP_TEX_PARAM       0x0043  /* v3, [tex, clé QGPU_TP_*, valeur] */
+/* v10 : textures générales. Détail du contrat plus bas, section « v10 ». */
+#define QGPU_OP_TEX_CREATE3     0x0044  /* [tex, cible] */
+#define QGPU_OP_TEX_IMAGE3      0x0045  /* [tex, cible d'image, niveau, w, h, d,
+                                           format de base, format, type, off,
+                                           octets par ligne, octets par tranche] */
+#define QGPU_OP_TEX_SUBIMAGE    0x0046  /* [tex, cible d'image, niveau, x, y, z,
+                                           w, h, d, format, type, off,
+                                           octets par ligne, octets par tranche] */
 
 /* v7 : géométrie brute. Détail du contrat plus bas, section « v7 ». */
 #define QGPU_OP_SET_MATRIX      0x0050  /* [quelle, 16 flottants, ordre colonne] */
@@ -241,6 +264,9 @@
 #define QGPU_LEN_TEX            2
 #define QGPU_LEN_TEX_IMAGE      7
 #define QGPU_LEN_TEX_PARAM      4
+#define QGPU_LEN_TEX_CREATE3    3           /* v10 */
+#define QGPU_LEN_TEX_IMAGE3     13
+#define QGPU_LEN_TEX_SUBIMAGE   15
 #define QGPU_LEN_SET_MATRIX     18          /* v7 */
 #define QGPU_LEN_DEPTH_RANGE    3
 #define QGPU_LEN_SET_LIGHT      27
@@ -404,7 +430,11 @@
 #define QGPU_SK_LINE_STIPPLE_PATTERN 86 /* 16 bits ; initial 0xFFFF */
 #define QGPU_SK_POLYGON_STIPPLE    87  /* booléen ; motif posé par
                                           QGPU_OP_SET_POLYGON_STIPPLE */
-#define QGPU_SK_COUNT           88
+/* v10 : biais de LOD de l'UNITÉ u (GL_TEXTURE_FILTER_CONTROL /
+ * GL_TEXTURE_LOD_BIAS de glTexEnv, OpenGL 1.4), flottant (bits IEEE), initial
+ * 0. Il s'ajoute au biais de la texture (QGPU_TP_LOD_BIAS), cf. section v10. */
+#define QGPU_SK_TEX_LOD_BIAS0      88  /* unités 0..3 : + u */
+#define QGPU_SK_COUNT           92
 
 /* Valeurs d'énumération d'OpenGL utilisées par les clés v7, nommées pour que
  * l'invité n'ait pas à les recopier à la main. */
@@ -480,11 +510,26 @@
  * GL_LUMINANCE_ALPHA, GL_INTENSITY) dit quels canaux la texture garde, comme
  * le paramètre internalformat d'OpenGL : L et I viennent du canal rouge. Une
  * texture incomplète (filtre de réduction avec mipmaps et chaîne de niveaux
- * incomplète) désactive le texturage, comme en OpenGL. */
+ * incomplète) désactive le texturage, comme en OpenGL. (v10 : autres cibles,
+ * autres formats et paramètres ci-dessous, section « v10 ».) */
 #define QGPU_TP_MIN_FILTER      1   /* GL_NEAREST, GL_LINEAR, GL_*_MIPMAP_* */
 #define QGPU_TP_MAG_FILTER      2   /* GL_NEAREST, GL_LINEAR */
-#define QGPU_TP_WRAP_S          3   /* GL_REPEAT, GL_CLAMP, GL_CLAMP_TO_EDGE */
+#define QGPU_TP_WRAP_S          3   /* GL_REPEAT, GL_CLAMP, GL_CLAMP_TO_EDGE ;
+                                       v10 : GL_MIRRORED_REPEAT, GL_CLAMP_TO_BORDER */
 #define QGPU_TP_WRAP_T          4
+/* v10 */
+#define QGPU_TP_WRAP_R          5   /* comme WRAP_S ; ne sert qu'aux textures 3D */
+#define QGPU_TP_BORDER_COLOR    6   /* 0xAARRGGBB ; initial 0 */
+#define QGPU_TP_MIN_LOD         7   /* flottant (bits IEEE) ; initial −1000 */
+#define QGPU_TP_MAX_LOD         8   /* flottant ; initial 1000 ; MIN_LOD ≤ MAX_LOD
+                                       n'est PAS exigé (OpenGL ne l'exige pas) */
+#define QGPU_TP_BASE_LEVEL      9   /* 0..QGPU_MAX_TEX_LEVELS−1 ; initial 0 */
+#define QGPU_TP_MAX_LEVEL       10  /* 0..1000 ; initial 1000 */
+#define QGPU_TP_LOD_BIAS        11  /* flottant, |biais| ≤ QGPU_MAX_LOD_BIAS ; initial 0 */
+#define QGPU_TP_COMPARE_MODE    12  /* GL_NONE 0 (initial) / GL_COMPARE_R_TO_TEXTURE 0x884E */
+#define QGPU_TP_COMPARE_FUNC    13  /* GL_NEVER..GL_ALWAYS ; initial GL_LEQUAL */
+#define QGPU_TP_DEPTH_MODE      14  /* GL_LUMINANCE (initial), GL_INTENSITY, GL_ALPHA */
+#define QGPU_TP_GENERATE_MIPMAP 15  /* booléen ; initial 0 */
 
 /* DRAW_TRIANGLES : nverts multiple de 3 ; à `off` dans BAR0, nverts sommets de
  * QGPU_VERTEX_WORDS mots chacun, tous des flottants big-endian :
@@ -503,7 +548,10 @@
 /* DRAW_TRIANGLES_TEX (v3) : les 8 mots ci-dessus, puis s, t, r, q. Ces
  * coordonnées sont interpolées linéairement en espace écran, puis s/q et t/q
  * adressent la texture : c'est la forme que produit GLEngine (déjà divisée
- * par w), et le texturage reste correct en perspective. r est ignoré. */
+ * par w), et le texturage reste correct en perspective. r était ignoré
+ * jusqu'à la v9 ; depuis la v10, r/q sert aux textures 3D (troisième
+ * coordonnée), aux cartes de cube ((s, t, r) est la direction) et à la
+ * comparaison des textures de profondeur (valeur de référence). */
 #define QGPU_VERTEX_TEX_WORDS   12
 #define QGPU_VERTEX_TEX_BYTES   (QGPU_VERTEX_TEX_WORDS * 4)
 
@@ -918,6 +966,145 @@
  *   migrent pas). Le device draine sa file avant de sauver son état, et
  *   l'invité repart d'un device vide au chargement.
  */
+
+/* ── v10 : les textures d'OpenGL 1.2 à 1.5 ───────────────────────────────────
+ *
+ *   Jusqu'à la v9, une texture était 2D, ses texels arrivaient en ARGB déjà
+ *   convertis par l'invité, et seuls trois modes de répétition existaient. Ce
+ *   qui manquait bloquait l'annonce d'OpenGL 1.2 (textures 3D), 1.3 (cartes de
+ *   cube, compression, CLAMP_TO_BORDER) et 1.4 (textures de profondeur et
+ *   comparaison, MIRRORED_REPEAT, biais de LOD, mipmaps automatiques).
+ *
+ *   RIEN N'EST RETIRÉ, aucune longueur de commande existante ne change.
+ *   TEX_CREATE crée une texture 2D, TEX_IMAGE envoie des texels ARGB, comme
+ *   avant ; les valeurs initiales des nouveaux paramètres sont celles
+ *   d'OpenGL et elles sont neutres.
+ *
+ * CIBLES — QGPU_OP_TEX_CREATE3 [tex, cible]
+ *
+ *   La cible d'une texture est fixée À SA CRÉATION, comme par le premier
+ *   glBindTexture : c'est elle qui dit quels paramètres ont un sens et quelles
+ *   images la texture accepte. TEX_CREATE [tex] vaut TEX_CREATE3 [tex, 2D].
+ *   Valeurs d'OpenGL, recopiées telles quelles : */
+#define QGPU_TT_1D              0x0DE0  /* images de hauteur 1 ; t est ignoré */
+#define QGPU_TT_2D              0x0DE1
+#define QGPU_TT_3D              0x806F
+#define QGPU_TT_CUBE_MAP        0x8513  /* images : une par face, cf. ci-dessous */
+#define QGPU_TT_RECTANGLE       0x84F5  /* coordonnées en texels, sans mipmap */
+#define QGPU_TT_CUBE_FACE(f)    (0x8515 + (f))  /* f : 0 +X, 1 −X, 2 +Y, 3 −Y, 4 +Z, 5 −Z */
+/*
+ *   Valeurs initiales propres à la cible, comme en OpenGL : une texture
+ *   RECTANGLE part en GL_LINEAR / GL_CLAMP_TO_EDGE, toutes les autres en
+ *   GL_NEAREST_MIPMAP_LINEAR / GL_REPEAT. Une texture RECTANGLE refuse
+ *   (QGPU_ST_BAD_ARG) les filtres avec mipmaps, REPEAT, MIRRORED_REPEAT, un
+ *   niveau de base autre que 0, et MIN_LOD / MAX_LOD (sans objet sans mipmaps,
+ *   et refusés par des pilotes hôtes).
+ *
+ * IMAGES — QGPU_OP_TEX_IMAGE3
+ *
+ *   [tex, cible d'image, niveau, w, h, d, format de base, format, type, off,
+ *    octets par ligne, octets par tranche]
+ *
+ *   Définit (ou redéfinit) un niveau, comme glTexImage1D/2D/3D.
+ *   cible d'image : la cible de la texture, sauf pour une carte de cube où
+ *                   c'est la FACE (QGPU_TT_CUBE_FACE(f)). Toute autre valeur
+ *                   vaut QGPU_ST_BAD_ARG.
+ *   w, h, d       : 1D : h = d = 1 ; 2D, cube, rectangle : d = 1 ; face de
+ *                   cube : w = h. Bornes : QGPU_MAX_TEX_DIM (1D, 2D, cube,
+ *                   rectangle), QGPU_MAX_TEX_3D_DIM (3D). Tailles quelconques,
+ *                   pas seulement des puissances de 2.
+ *   format de base: GL_ALPHA, GL_RGB, GL_RGBA, GL_LUMINANCE,
+ *                   GL_LUMINANCE_ALPHA, GL_INTENSITY comme en v3, et
+ *                   GL_DEPTH_COMPONENT (0x1902 : 1D, 2D et rectangle
+ *                   seulement, et seulement avec un format de profondeur).
+ *   format, type  : les DONNÉES, telles que l'application les a données à
+ *                   glTexImage — l'hôte fait la conversion que l'invité faisait
+ *                   jusqu'ici sur le PowerPC émulé. Couples acceptés :
+ *
+ *     GL_UNSIGNED_BYTE (0x1401) avec GL_RGBA, GL_RGB, GL_BGRA, GL_BGR,
+ *         GL_LUMINANCE, GL_LUMINANCE_ALPHA, GL_ALPHA, GL_RED ;
+ *     GL_UNSIGNED_INT_8_8_8_8 (0x8035) et _REV (0x8367) avec GL_RGBA, GL_BGRA ;
+ *     GL_UNSIGNED_SHORT_5_6_5 (0x8363) et _REV (0x8364) avec GL_RGB ;
+ *     GL_UNSIGNED_SHORT_4_4_4_4 (0x8033) avec GL_RGBA, _REV (0x8365) avec GL_BGRA ;
+ *     GL_UNSIGNED_SHORT_5_5_5_1 (0x8034) avec GL_RGBA, _1_5_5_5_REV (0x8366)
+ *         avec GL_BGRA ;
+ *     GL_DEPTH_COMPONENT (0x1902) avec GL_FLOAT (0x1406, borné à [0,1]),
+ *         GL_UNSIGNED_INT (0x1405), GL_UNSIGNED_SHORT (0x1403) ;
+ *     les formats COMPRESSÉS S3TC, avec type = 0 : QGPU_TF_DXT1_RGB,
+ *         QGPU_TF_DXT1_RGBA, QGPU_TF_DXT3, QGPU_TF_DXT5 (2D et faces de cube
+ *         seulement ; le format de base doit être GL_RGB pour le premier,
+ *         GL_RGBA pour les trois autres).
+ *
+ *   Les types compactés (USHORT, UINT, FLOAT) sont des mots BIG-ENDIAN, comme
+ *   tout le fil ; les octets de GL_UNSIGNED_BYTE sont dans l'ordre de la
+ *   mémoire. GL_BGRA + GL_UNSIGNED_INT_8_8_8_8_REV est exactement le mot ARGB
+ *   de TEX_IMAGE : c'est ainsi que TEX_IMAGE se réécrit en v10.
+ *
+ *   off           : offset des données dans BAR0, multiple de 4 ; ou
+ *                   QGPU_TEX_NO_DATA : le niveau est défini, à zéro (comme
+ *                   glTexImage avec un pointeur nul — une sous-image le
+ *                   remplira ensuite).
+ *   octets par ligne / par tranche : pas des données, pour les données
+ *                   alignées (GL_UNPACK_ALIGNMENT, _ROW_LENGTH, _IMAGE_HEIGHT
+ *                   déjà appliqués par l'invité) ; 0 = serré. Un pas plus petit
+ *                   qu'une ligne (ou qu'une tranche) vaut QGPU_ST_BAD_ARG.
+ *                   Ignorés pour un format compressé : les blocs de 4×4
+ *                   sont serrés, ceil(w/4)·ceil(h/4) blocs de 8 (DXT1) ou 16
+ *                   octets.
+ *
+ *   Un niveau garde son format de base : la texture est complète quand les
+ *   niveaux requis ont tous le format de base du niveau de base (règle
+ *   d'OpenGL). Pour une carte de cube, les six faces doivent en plus être
+ *   carrées, de même taille et de même format à chaque niveau.
+ *
+ * SOUS-IMAGES — QGPU_OP_TEX_SUBIMAGE
+ *
+ *   [tex, cible d'image, niveau, x, y, z, w, h, d, format, type, off,
+ *    octets par ligne, octets par tranche]
+ *
+ *   Remplace la boîte [x, x+w) × [y, y+h) × [z, z+d) d'un niveau DÉJÀ défini,
+ *   comme glTexSubImage. La boîte doit tenir dans le niveau. Le format de
+ *   profondeur n'est accepté que sur un niveau de profondeur, et inversement.
+ *   Format compressé : x et y multiples de 4, w et h multiples de 4 ou
+ *   atteignant le bord du niveau.
+ *
+ * PARAMÈTRES (QGPU_OP_TEX_PARAM, clés QGPU_TP_* ci-dessus)
+ *
+ *   Répétition : GL_MIRRORED_REPEAT (0x8370) et GL_CLAMP_TO_BORDER (0x812D)
+ *   s'ajoutent. GL_CLAMP et GL_CLAMP_TO_BORDER prennent la COULEUR DE BORDURE
+ *   (QGPU_TP_BORDER_COLOR) — c'était le noir transparent jusqu'ici, qui est
+ *   aussi la valeur initiale : rien ne change pour un flux v9.
+ *
+ *   LOD (OpenGL 1.2 et 1.4). Avec λb = log2 ρ :
+ *     λ' = λb + borné(biais de texture + biais d'unité, ±QGPU_MAX_LOD_BIAS)
+ *     λ  = λ' borné à [MIN_LOD, MAX_LOD]
+ *   Les niveaux employés vont du niveau de base b à q = min(b + p, MAX_LEVEL),
+ *   p = log2 de la plus grande dimension du niveau b ; ce sont eux que la
+ *   complétude exige quand le filtre de réduction emploie les mipmaps.
+ *
+ *   Profondeur (OpenGL 1.4, ARB_depth_texture et ARB_shadow). Une texture de
+ *   format de base GL_DEPTH_COMPONENT rend sa valeur D, ou, en mode
+ *   GL_COMPARE_R_TO_TEXTURE, le résultat 0 ou 1 de « r fonc D » (r = r/q,
+ *   borné à [0,1]) ; avec un filtre linéaire, chacun des texels est comparé
+ *   PUIS pondéré. Le résultat devient une luminance, une intensité ou un alpha
+ *   selon QGPU_TP_DEPTH_MODE, et l'environnement de texture le voit comme une
+ *   texture de ce format de base. La bordure d'une texture de profondeur vaut
+ *   la composante rouge de QGPU_TP_BORDER_COLOR.
+ *
+ *   Mipmaps automatiques (OpenGL 1.4). Avec QGPU_TP_GENERATE_MIPMAP, toute
+ *   image ou sous-image du NIVEAU DE BASE recalcule les niveaux b+1..q (bornés
+ *   à QGPU_MAX_TEX_LEVELS−1), par moyenne des blocs de 2×2 (2×2×2 en 3D) du
+ *   niveau précédent, sur l'HÔTE — donc identiques pour tous les backends.
+ */
+#define QGPU_TEX_NO_DATA        0xFFFFFFFFUL
+#define QGPU_TF_DXT1_RGB        0x83F0  /* GL_COMPRESSED_RGB_S3TC_DXT1_EXT */
+#define QGPU_TF_DXT1_RGBA       0x83F1  /* GL_COMPRESSED_RGBA_S3TC_DXT1_EXT */
+#define QGPU_TF_DXT3            0x83F2  /* GL_COMPRESSED_RGBA_S3TC_DXT3_EXT */
+#define QGPU_TF_DXT5            0x83F3  /* GL_COMPRESSED_RGBA_S3TC_DXT5_EXT */
+#define QGPU_TW_MIRRORED_REPEAT 0x8370
+#define QGPU_TW_CLAMP_TO_BORDER 0x812D
+#define QGPU_TC_NONE            0x0000
+#define QGPU_TC_COMPARE_R       0x884E  /* GL_COMPARE_R_TO_TEXTURE */
 
 /* ── Interface du kext POMPPCGPU (IOUserClient) ──────────────────────────────
  *

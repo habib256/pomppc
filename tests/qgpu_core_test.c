@@ -3122,7 +3122,7 @@ static void run_v9(QgpuCore *c, uint8_t *shmem)
     }
     CHECK(bad == 0, "carte des registres : %u offsets alignés et distincts "
           "sous 0x%x (%u fautes)", n, (unsigned)QGPU_CTRL_TOPADDR, bad);
-    CHECK(QGPU_PROTO_VERSION == 9, "version du protocole %d", QGPU_PROTO_VERSION);
+    CHECK(QGPU_PROTO_VERSION == 10, "version du protocole %d", QGPU_PROTO_VERSION);
     CHECK(QGPU_QUEUE_DEPTH >= 2 && (QGPU_QUEUE_DEPTH & (QGPU_QUEUE_DEPTH - 1)) == 0,
           "profondeur de file %d (puissance de 2, >= 2)", QGPU_QUEUE_DEPTH);
     CHECK((QGPU_DOORBELL_GO & QGPU_DOORBELL_ASYNC) == 0 && QGPU_DOORBELL_GO == 1,
@@ -3169,6 +3169,781 @@ static void run_v9(QgpuCore *c, uint8_t *shmem)
     emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_DESTROY, QGPU_LEN_SURF)); emit(&e, 1);
     emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_DESTROY, QGPU_LEN_CTX)); emit(&e, 0);
     (void)qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+}
+
+/* ══════ v10 : textures 1D, 3D, cube, rectangle, profondeur, formats, LOD ══════
+ *
+ * Chaque cas a sa valeur attendue écrite à la main, et elle doit sortir
+ * IDENTIQUE des deux backends : le logiciel est la référence, le GPU hôte doit
+ * suivre. Les points testés sont au centre de texels (ou de bandes à couleur
+ * constante) : jamais sur une frontière où l'arrondi du matériel décide. */
+
+#define V10_CTX   12
+#define V10_SURF  20
+#define V10_TEX   300
+
+static void tcreate3(Emit *e, uint32_t tex, uint32_t target)
+{
+    emit(e, QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3));
+    emit(e, tex); emit(e, target);
+}
+
+static void timage3(Emit *e, uint32_t tex, uint32_t itarget, uint32_t lvl,
+                    uint32_t w, uint32_t h, uint32_t d, uint32_t bfmt,
+                    uint32_t fmt, uint32_t type, uint32_t off, uint32_t row, uint32_t img)
+{
+    emit(e, QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3));
+    emit(e, tex); emit(e, itarget); emit(e, lvl); emit(e, w); emit(e, h); emit(e, d);
+    emit(e, bfmt); emit(e, fmt); emit(e, type); emit(e, off); emit(e, row); emit(e, img);
+}
+
+static void tsub(Emit *e, uint32_t tex, uint32_t itarget, uint32_t lvl,
+                 uint32_t x, uint32_t y, uint32_t z, uint32_t w, uint32_t h, uint32_t d,
+                 uint32_t fmt, uint32_t type, uint32_t off)
+{
+    emit(e, QGPU_CMD_HDR(QGPU_OP_TEX_SUBIMAGE, QGPU_LEN_TEX_SUBIMAGE));
+    emit(e, tex); emit(e, itarget); emit(e, lvl); emit(e, x); emit(e, y); emit(e, z);
+    emit(e, w); emit(e, h); emit(e, d); emit(e, fmt); emit(e, type); emit(e, off);
+    emit(e, 0); emit(e, 0);
+}
+
+/* Image ARGB (mots big-endian) : GL_BGRA + GL_UNSIGNED_INT_8_8_8_8_REV. */
+static void timage_argb(Emit *e, uint8_t *shmem, uint32_t tex, uint32_t itarget,
+                        uint32_t lvl, uint32_t w, uint32_t h, uint32_t d,
+                        const uint32_t *px, uint32_t off)
+{
+    uint32_t i;
+    for (i = 0; i < w * h * d; i++) {
+        qgpu_st32(shmem + off + i * 4, px[i]);
+    }
+    timage3(e, tex, itarget, lvl, w, h, d, 0x1908, 0x80E1, 0x8367, off, 0, 0);
+}
+
+static void vtx_str(Emit *v, float x, float y, uint32_t col, float s, float t, float r)
+{
+    emitf(v, x); emitf(v, y); emitf(v, 0.0f); emitf(v, 1.0f);
+    emitf(v, ((col >> 16) & 255) / 255.0f); emitf(v, ((col >> 8) & 255) / 255.0f);
+    emitf(v, (col & 255) / 255.0f); emitf(v, 1.0f);
+    emitf(v, s); emitf(v, t); emitf(v, r); emitf(v, 1.0f);
+}
+
+/* Rectangle de pixels, (s, t) interpolés de (s0, t0) à (s1, t1), r constant. */
+static void quad_str(Emit *v, float x0, float y0, float x1, float y1,
+                     float s0, float t0, float s1, float t1, float r, uint32_t col)
+{
+    vtx_str(v, x0, y0, col, s0, t0, r); vtx_str(v, x1, y0, col, s1, t0, r);
+    vtx_str(v, x1, y1, col, s1, t1, r); vtx_str(v, x0, y0, col, s0, t0, r);
+    vtx_str(v, x1, y1, col, s1, t1, r); vtx_str(v, x0, y1, col, s0, t1, r);
+}
+
+/* Bande pleine largeur à direction constante (cartes de cube). */
+static void band_dir(Emit *v, float y0, float y1, float dx, float dy, float dz)
+{
+    quad_str(v, 0, y0, (float)W, y1, dx, dy, dx, dy, dz, 0xFFFFFF);
+}
+
+/* Une soumission : pose la texture sur l'unité 0, efface, dessine `n`
+   sommets texturés, relit la surface v10. */
+static uint32_t v10_draw(QgpuCore *c, Emit *e, uint32_t tex, uint32_t n)
+{
+    state(e, QGPU_SK_TEX_BIND, tex);
+    clear_cmd(e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    emit(e, QGPU_CMD_HDR(QGPU_OP_DRAW_TRIANGLES_TEX, QGPU_LEN_DRAW));
+    emit(e, n); emit(e, VTX_OFF);
+    readback_cmd(e, V10_SURF);
+    return qgpu_core_execute(c, CMD_OFF, e->off - e->start);
+}
+
+static uint32_t v10_exec(QgpuCore *c, Emit *e)
+{
+    return qgpu_core_execute(c, CMD_OFF, e->off - e->start);
+}
+
+static bool near_argb(uint32_t a, uint32_t b, int tol)
+{
+    int k;
+    for (k = 0; k < 32; k += 8) {
+        int d = (int)((a >> k) & 255) - (int)((b >> k) & 255);
+        if (d < -tol || d > tol) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void run_v10(QgpuCore *c, uint8_t *shmem)
+{
+    Emit e, v;
+    uint32_t st, i, k;
+    const uint32_t T = V10_TEX;
+
+    printf("-- v10 : textures --\n");
+    e.base = v.base = shmem;
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, V10_CTX);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, V10_CTX);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, V10_SURF); emit(&e, W); emit(&e, H); emit(&e, QGPU_FMT_XRGB8888);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, V10_SURF);
+    state(&e, QGPU_SK_TEXTURE, 1);
+    state(&e, QGPU_SK_TEX_ENV_MODE, 0x1E01);            /* REPLACE */
+    st = v10_exec(c, &e);
+    CHECK(st == QGPU_ST_OK && (c->caps & QGPU_CAP_TEXTURES),
+          "v10 : contexte, surface, QGPU_CAP_TEXTURES annoncé (caps 0x%x, st %u)",
+          c->caps, st);
+    CHECK(QGPU_SK_TEX_LOD_BIAS0 + 3 < QGPU_SK_COUNT && QGPU_LEN_TEX_SUBIMAGE <= QGPU_MAX_CMD_ARGS + 1,
+          "v10 : clés et longueurs dans leurs bornes (%d clés, SUBIMAGE %d mots)",
+          QGPU_SK_COUNT, QGPU_LEN_TEX_SUBIMAGE);
+
+    /* (a) TEXTURE 3D, au plus proche : 2×2×4, une couleur par tranche, envoyée
+       en RGBA octets (conversion par l'hôte). Quatre bandes, r au centre de
+       chaque tranche. */
+    {
+        static const uint8_t sl[4][4] = {
+            { 255, 0, 0, 255 }, { 0, 255, 0, 255 }, { 0, 0, 255, 255 }, { 255, 255, 255, 255 } };
+        for (k = 0; k < 4; k++) {
+            for (i = 0; i < 4; i++) {
+                memcpy(shmem + TEX_OFF + (k * 4 + i) * 4, sl[k], 4);
+            }
+        }
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, T, QGPU_TT_3D);
+        timage3(&e, T, QGPU_TT_3D, 0, 2, 2, 4, 0x1908, 0x1908, 0x1401, TEX_OFF, 0, 0);
+        tparam(&e, T, QGPU_TP_MIN_FILTER, 0x2600);
+        tparam(&e, T, QGPU_TP_MAG_FILTER, 0x2600);
+        v.off = v.start = VTX_OFF;
+        for (k = 0; k < 4; k++) {
+            quad_str(&v, 0, 16.0f * k, (float)W, 16.0f * k + 16, 0, 0, 1, 1,
+                     (k + 0.5f) / 4.0f, 0xFFFFFF);
+        }
+        st = v10_draw(c, &e, T, 24);
+        CHECK(st == QGPU_ST_OK && px(shmem, 32, 8) == 0xFF0000 && px(shmem, 32, 24) == 0x00FF00 &&
+              px(shmem, 32, 40) == 0x0000FF && px(shmem, 32, 56) == 0xFFFFFF,
+              "(a) 3D au plus proche, une tranche par bande : %06x %06x %06x %06x (st %u)",
+              px(shmem, 32, 8), px(shmem, 32, 24), px(shmem, 32, 40), px(shmem, 32, 56), st);
+
+        /* (b) filtrage LINÉAIRE en r : à mi-chemin des tranches 1 et 2 */
+        e.off = e.start = CMD_OFF;
+        tparam(&e, T, QGPU_TP_MIN_FILTER, 0x2601);
+        tparam(&e, T, QGPU_TP_MAG_FILTER, 0x2601);
+        v.off = v.start = VTX_OFF;
+        quad_str(&v, 0, 0, (float)W, (float)H, 0, 0, 1, 1, 0.5f, 0xFFFFFF);
+        st = v10_draw(c, &e, T, 6);
+        CHECK(st == QGPU_ST_OK && near_argb(px(shmem, 32, 32), 0x008080, 2),
+              "(b) 3D trilinéaire, r entre deux tranches : %06x ≈ 008080 (st %u)",
+              px(shmem, 32, 32), st);
+
+        /* (c) répétition en r : REPEAT puis CLAMP_TO_EDGE */
+        e.off = e.start = CMD_OFF;
+        tparam(&e, T, QGPU_TP_MIN_FILTER, 0x2600);
+        tparam(&e, T, QGPU_TP_MAG_FILTER, 0x2600);
+        v.off = v.start = VTX_OFF;
+        quad_str(&v, 0, 0, (float)W, 32, 0, 0, 1, 1, 1.125f, 0xFFFFFF);
+        quad_str(&v, 0, 32, (float)W, (float)H, 0, 0, 1, 1, -0.625f, 0xFFFFFF);
+        st = v10_draw(c, &e, T, 12);
+        CHECK(st == QGPU_ST_OK && px(shmem, 32, 16) == 0xFF0000 && px(shmem, 32, 48) == 0x00FF00,
+              "(c) WRAP_R REPEAT : r=1,125 → tranche 0, r=−0,625 → tranche 1 : %06x %06x (st %u)",
+              px(shmem, 32, 16), px(shmem, 32, 48), st);
+        e.off = e.start = CMD_OFF;
+        tparam(&e, T, QGPU_TP_WRAP_R, 0x812F);
+        v.off = v.start = VTX_OFF;
+        quad_str(&v, 0, 0, (float)W, 32, 0, 0, 1, 1, 1.3f, 0xFFFFFF);
+        quad_str(&v, 0, 32, (float)W, (float)H, 0, 0, 1, 1, -0.2f, 0xFFFFFF);
+        st = v10_draw(c, &e, T, 12);
+        CHECK(st == QGPU_ST_OK && px(shmem, 32, 16) == 0xFFFFFF && px(shmem, 32, 48) == 0xFF0000,
+              "(c) WRAP_R CLAMP_TO_EDGE : %06x %06x (st %u)",
+              px(shmem, 32, 16), px(shmem, 32, 48), st);
+    }
+
+    /* (d) CARTE DE CUBE : six faces 1×1 de couleurs distinctes, six bandes à
+       direction constante, chacune vers une face. */
+    {
+        static const uint32_t fc[6] = { 0xFFFF0000, 0xFF00FF00, 0xFF0000FF,
+                                        0xFFFFFF00, 0xFFFF00FF, 0xFF00FFFF };
+        static const float dir[6][3] = { { 1, .1f, .2f }, { -1, .2f, .1f }, { .1f, 1, .2f },
+                                         { .2f, -1, .1f }, { .1f, .2f, 1 }, { .2f, .1f, -1 } };
+        bool ok = true;
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, T + 1, QGPU_TT_CUBE_MAP);
+        for (k = 0; k < 6; k++) {
+            timage_argb(&e, shmem, T + 1, QGPU_TT_CUBE_FACE(k), 0, 1, 1, 1, &fc[k], TEX_OFF + k * 4);
+        }
+        tparam(&e, T + 1, QGPU_TP_MIN_FILTER, 0x2600);
+        tparam(&e, T + 1, QGPU_TP_MAG_FILTER, 0x2600);
+        v.off = v.start = VTX_OFF;
+        for (k = 0; k < 6; k++) {
+            band_dir(&v, 10.0f * k, 10.0f * k + 10, dir[k][0], dir[k][1], dir[k][2]);
+        }
+        st = v10_draw(c, &e, T + 1, 36);
+        for (k = 0; k < 6; k++) {
+            ok = ok && px(shmem, 32, 10 * k + 5) == (fc[k] & 0xFFFFFF);
+        }
+        CHECK(st == QGPU_ST_OK && ok,
+              "(d) cube, une face par axe : %06x %06x %06x %06x %06x %06x (st %u)",
+              px(shmem, 32, 5), px(shmem, 32, 15), px(shmem, 32, 25), px(shmem, 32, 35),
+              px(shmem, 32, 45), px(shmem, 32, 55), st);
+    }
+
+    /* (e) ORIENTATION DES FACES : +X en 2×2 [rouge, vert ; bleu, blanc] ; le
+       GPU hôte fait foi, la table 3.21 d'OpenGL doit la reproduire. */
+    {
+        static const uint32_t px_x[4] = { 0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFFFF };
+        static const uint32_t blk[4] = { 0xFF000000, 0xFF000000, 0xFF000000, 0xFF000000 };
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, T + 2, QGPU_TT_CUBE_MAP);
+        timage_argb(&e, shmem, T + 2, QGPU_TT_CUBE_FACE(0), 0, 2, 2, 1, px_x, TEX_OFF);
+        for (k = 1; k < 6; k++) {
+            timage_argb(&e, shmem, T + 2, QGPU_TT_CUBE_FACE(k), 0, 2, 2, 1, blk, TEX_OFF + 16);
+        }
+        tparam(&e, T + 2, QGPU_TP_MIN_FILTER, 0x2600);
+        tparam(&e, T + 2, QGPU_TP_MAG_FILTER, 0x2600);
+        v.off = v.start = VTX_OFF;
+        band_dir(&v, 0, 16, 1, 0.5f, 0.5f);         /* s=t=0,25 → (0,0) rouge */
+        band_dir(&v, 16, 32, 1, 0.5f, -0.5f);       /* s=0,75 t=0,25 → (1,0) vert */
+        band_dir(&v, 32, 48, 1, -0.5f, 0.5f);       /* s=0,25 t=0,75 → (0,1) bleu */
+        band_dir(&v, 48, 64, 1, -0.5f, -0.5f);      /* (1,1) blanc */
+        st = v10_draw(c, &e, T + 2, 24);
+        CHECK(st == QGPU_ST_OK && px(shmem, 32, 8) == 0xFF0000 && px(shmem, 32, 24) == 0x00FF00 &&
+              px(shmem, 32, 40) == 0x0000FF && px(shmem, 32, 56) == 0xFFFFFF,
+              "(e) cube, orientation de la face +X : %06x %06x %06x %06x (st %u)",
+              px(shmem, 32, 8), px(shmem, 32, 24), px(shmem, 32, 40), px(shmem, 32, 56), st);
+
+        /* (f) cube INCOMPLET (cinq faces) : texturage coupé, couleur du sommet */
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, T + 3, QGPU_TT_CUBE_MAP);
+        for (k = 0; k < 5; k++) {
+            timage_argb(&e, shmem, T + 3, QGPU_TT_CUBE_FACE(k), 0, 2, 2, 1, px_x, TEX_OFF);
+        }
+        tparam(&e, T + 3, QGPU_TP_MIN_FILTER, 0x2600);
+        v.off = v.start = VTX_OFF;
+        quad_str(&v, 0, 0, (float)W, (float)H, 1, 0.5f, 0.5f, 1, 0.5f, 0xFF3399);
+        st = v10_draw(c, &e, T + 3, 6);
+        CHECK(st == QGPU_ST_OK && px(shmem, 32, 32) == 0xFF3399,
+              "(f) cube incomplet : texturage coupé, couleur du sommet %06x (st %u)",
+              px(shmem, 32, 32), st);
+    }
+
+    /* (g) RECTANGLE 3×2, coordonnées en texels. */
+    {
+        static const uint32_t rp[6] = { 0xFFFF0000, 0xFF00FF00, 0xFF0000FF,
+                                        0xFFFFFF00, 0xFFFF00FF, 0xFF00FFFF };
+        static const int cx[3] = { 10, 32, 53 }, cy[2] = { 16, 48 };
+        bool ok = true;
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, T + 4, QGPU_TT_RECTANGLE);
+        timage_argb(&e, shmem, T + 4, QGPU_TT_RECTANGLE, 0, 3, 2, 1, rp, TEX_OFF);
+        tparam(&e, T + 4, QGPU_TP_MIN_FILTER, 0x2600);
+        tparam(&e, T + 4, QGPU_TP_MAG_FILTER, 0x2600);
+        v.off = v.start = VTX_OFF;
+        quad_str(&v, 0, 0, (float)W, (float)H, 0, 0, 3, 2, 0, 0xFFFFFF);
+        st = v10_draw(c, &e, T + 4, 6);
+        for (k = 0; k < 6; k++) {
+            ok = ok && px(shmem, cx[k % 3], cy[k / 3]) == (rp[k] & 0xFFFFFF);
+        }
+        CHECK(st == QGPU_ST_OK && ok,
+              "(g) rectangle 3×2 en texels : %06x %06x %06x / %06x %06x %06x (st %u)",
+              px(shmem, 10, 16), px(shmem, 32, 16), px(shmem, 53, 16),
+              px(shmem, 10, 48), px(shmem, 32, 48), px(shmem, 53, 48), st);
+        {
+            uint32_t s1, s2, s3, s4;
+            e.off = e.start = CMD_OFF; tparam(&e, T + 4, QGPU_TP_WRAP_S, 0x2901); s1 = v10_exec(c, &e);
+            e.off = e.start = CMD_OFF; tparam(&e, T + 4, QGPU_TP_MIN_FILTER, 0x2703); s2 = v10_exec(c, &e);
+            e.off = e.start = CMD_OFF; tparam(&e, T + 4, QGPU_TP_BASE_LEVEL, 1); s3 = v10_exec(c, &e);
+            e.off = e.start = CMD_OFF;
+            timage_argb(&e, shmem, T + 4, QGPU_TT_RECTANGLE, 1, 1, 1, 1, rp, TEX_OFF);
+            s4 = v10_exec(c, &e);
+            CHECK(s1 == QGPU_ST_BAD_ARG && s2 == QGPU_ST_BAD_ARG && s3 == QGPU_ST_BAD_ARG &&
+                  s4 == QGPU_ST_BAD_ARG,
+                  "(g) rectangle : REPEAT, mipmaps, niveau de base 1, niveau 1 refusés : st %u %u %u %u",
+                  s1, s2, s3, s4);
+        }
+    }
+
+    /* (h) 1D : t est ignoré — même en GL_CLAMP et filtre linéaire, qui
+       mêleraient la bordure noire à une texture 2D d'une ligne. */
+    {
+        static const uint32_t one[4] = { 0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFFFF };
+        static const uint32_t g1 = 0xFF00FF00;
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, T + 5, QGPU_TT_1D);
+        timage_argb(&e, shmem, T + 5, QGPU_TT_1D, 0, 4, 1, 1, one, TEX_OFF);
+        tparam(&e, T + 5, QGPU_TP_MIN_FILTER, 0x2600);
+        tparam(&e, T + 5, QGPU_TP_MAG_FILTER, 0x2600);
+        v.off = v.start = VTX_OFF;
+        quad_str(&v, 0, 0, (float)W, (float)H, 0, -5.3f, 1, 7.7f, 0, 0xFFFFFF);
+        st = v10_draw(c, &e, T + 5, 6);
+        CHECK(st == QGPU_ST_OK && px(shmem, 8, 5) == 0xFF0000 && px(shmem, 24, 30) == 0x00FF00 &&
+              px(shmem, 40, 50) == 0x0000FF && px(shmem, 56, 60) == 0xFFFFFF,
+              "(h) 1D au plus proche, t quelconque : %06x %06x %06x %06x (st %u)",
+              px(shmem, 8, 5), px(shmem, 24, 30), px(shmem, 40, 50), px(shmem, 56, 60), st);
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, T + 6, QGPU_TT_1D);
+        timage_argb(&e, shmem, T + 6, QGPU_TT_1D, 0, 1, 1, 1, &g1, TEX_OFF);
+        tparam(&e, T + 6, QGPU_TP_MIN_FILTER, 0x2601);
+        tparam(&e, T + 6, QGPU_TP_MAG_FILTER, 0x2601);
+        tparam(&e, T + 6, QGPU_TP_WRAP_T, 0x2900);         /* GL_CLAMP */
+        st = v10_draw(c, &e, T + 6, 6);
+        CHECK(st == QGPU_ST_OK && px(shmem, 5, 3) == 0x00FF00 && px(shmem, 60, 62) == 0x00FF00,
+              "(h) 1D linéaire en GL_CLAMP : aucune bordure mêlée par t : %06x %06x (st %u)",
+              px(shmem, 5, 3), px(shmem, 60, 62), st);
+    }
+
+    /* (i) GL_MIRRORED_REPEAT (1.4) : 2×1 rouge, bleu ; s de 0 à 2. */
+    {
+        static const uint32_t rb[2] = { 0xFFFF0000, 0xFF0000FF };
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, T + 7, QGPU_TT_2D);
+        timage_argb(&e, shmem, T + 7, QGPU_TT_2D, 0, 2, 1, 1, rb, TEX_OFF);
+        tparam(&e, T + 7, QGPU_TP_MIN_FILTER, 0x2600);
+        tparam(&e, T + 7, QGPU_TP_MAG_FILTER, 0x2600);
+        tparam(&e, T + 7, QGPU_TP_WRAP_S, QGPU_TW_MIRRORED_REPEAT);
+        v.off = v.start = VTX_OFF;
+        quad_str(&v, 0, 0, (float)W, (float)H, 0, 0, 2, 1, 0, 0xFFFFFF);
+        st = v10_draw(c, &e, T + 7, 6);
+        CHECK(st == QGPU_ST_OK && px(shmem, 8, 32) == 0xFF0000 && px(shmem, 24, 32) == 0x0000FF &&
+              px(shmem, 40, 32) == 0x0000FF && px(shmem, 56, 32) == 0xFF0000,
+              "(i) MIRRORED_REPEAT : %06x %06x | %06x %06x (st %u)", px(shmem, 8, 32),
+              px(shmem, 24, 32), px(shmem, 40, 32), px(shmem, 56, 32), st);
+    }
+
+    /* (j) GL_CLAMP_TO_BORDER (1.3) et couleur de bordure, alpha compris. */
+    {
+        static const uint32_t wh[4] = { 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF };
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, T + 8, QGPU_TT_2D);
+        timage_argb(&e, shmem, T + 8, QGPU_TT_2D, 0, 2, 2, 1, wh, TEX_OFF);
+        tparam(&e, T + 8, QGPU_TP_MIN_FILTER, 0x2600);
+        tparam(&e, T + 8, QGPU_TP_MAG_FILTER, 0x2600);
+        tparam(&e, T + 8, QGPU_TP_WRAP_S, QGPU_TW_CLAMP_TO_BORDER);
+        tparam(&e, T + 8, QGPU_TP_WRAP_T, QGPU_TW_CLAMP_TO_BORDER);
+        tparam(&e, T + 8, QGPU_TP_BORDER_COLOR, 0x80FF8000);
+        v.off = v.start = VTX_OFF;
+        quad_str(&v, 0, 0, (float)W, (float)H, -1, 0, 2, 1, 0, 0xFFFFFF);
+        st = v10_draw(c, &e, T + 8, 6);
+        CHECK(st == QGPU_ST_OK && pxa(shmem, 10, 32) == 0x80FF8000 &&
+              pxa(shmem, 32, 32) == 0xFFFFFFFF && pxa(shmem, 54, 32) == 0x80FF8000,
+              "(j) CLAMP_TO_BORDER, bordure 80FF8000 : %08x %08x %08x (st %u)",
+              pxa(shmem, 10, 32), pxa(shmem, 32, 32), pxa(shmem, 54, 32), st);
+    }
+
+    /* (k) PROFONDEUR (1.4) : 2×2 [0,2 0,4 ; 0,6 0,8] en GL_FLOAT, r = 0,5. */
+    {
+        static const float dv[4] = { 0.2f, 0.4f, 0.6f, 0.8f };
+        uint32_t tl, tr, bl, br;
+        for (i = 0; i < 4; i++) {
+            qgpu_st32(shmem + TEX_OFF + i * 4, qgpu_f2u(dv[i]));
+        }
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, T + 9, QGPU_TT_2D);
+        timage3(&e, T + 9, QGPU_TT_2D, 0, 2, 2, 1, 0x1902, 0x1902, 0x1406, TEX_OFF, 0, 0);
+        tparam(&e, T + 9, QGPU_TP_MIN_FILTER, 0x2600);
+        tparam(&e, T + 9, QGPU_TP_MAG_FILTER, 0x2600);
+        tparam(&e, T + 9, QGPU_TP_COMPARE_MODE, QGPU_TC_COMPARE_R);
+        v.off = v.start = VTX_OFF;
+        quad_str(&v, 0, 0, (float)W, (float)H, 0, 0, 1, 1, 0.5f, 0xFFFFFF);
+        st = v10_draw(c, &e, T + 9, 6);
+        tl = px(shmem, 16, 16); tr = px(shmem, 48, 16); bl = px(shmem, 16, 48); br = px(shmem, 48, 48);
+        CHECK(st == QGPU_ST_OK && tl == 0 && tr == 0 && bl == 0xFFFFFF && br == 0xFFFFFF,
+              "(k) comparaison LEQUAL, r=0,5 : %06x %06x / %06x %06x (st %u)", tl, tr, bl, br, st);
+        e.off = e.start = CMD_OFF;
+        tparam(&e, T + 9, QGPU_TP_COMPARE_FUNC, 0x0206);          /* GEQUAL */
+        tparam(&e, T + 9, QGPU_TP_DEPTH_MODE, 0x1906);            /* ALPHA */
+        st = v10_draw(c, &e, T + 9, 6);
+        tl = pxa(shmem, 16, 16); bl = pxa(shmem, 16, 48);
+        CHECK(st == QGPU_ST_OK && tl == 0xFFFFFFFF && bl == 0x00FFFFFF,
+              "(k) GEQUAL, résultat en alpha : %08x / %08x (st %u)", tl, bl, st);
+        e.off = e.start = CMD_OFF;
+        tparam(&e, T + 9, QGPU_TP_COMPARE_MODE, QGPU_TC_NONE);
+        tparam(&e, T + 9, QGPU_TP_DEPTH_MODE, 0x1909);            /* LUMINANCE */
+        st = v10_draw(c, &e, T + 9, 6);
+        tl = px(shmem, 16, 16); br = px(shmem, 48, 48);
+        CHECK(st == QGPU_ST_OK && near_argb(tl, 0x333333, 1) && near_argb(br, 0xCCCCCC, 1),
+              "(k) sans comparaison, D en luminance : %06x ≈ 333333, %06x ≈ cccccc (st %u)",
+              tl, br, st);
+        /* UNSIGNED_SHORT : 0xCCCC = 0,8 ≥ 0,5 */
+        shmem[TEX_OFF] = 0xCC; shmem[TEX_OFF + 1] = 0xCC;
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, T + 10, QGPU_TT_2D);
+        timage3(&e, T + 10, QGPU_TT_2D, 0, 1, 1, 1, 0x1902, 0x1902, 0x1403, TEX_OFF, 0, 0);
+        tparam(&e, T + 10, QGPU_TP_MIN_FILTER, 0x2600);
+        tparam(&e, T + 10, QGPU_TP_COMPARE_MODE, QGPU_TC_COMPARE_R);
+        st = v10_draw(c, &e, T + 10, 6);
+        CHECK(st == QGPU_ST_OK && px(shmem, 32, 32) == 0xFFFFFF,
+              "(k) profondeur en UNSIGNED_SHORT, 0,5 ≤ 0,8 : %06x (st %u)", px(shmem, 32, 32), st);
+    }
+
+    /* (l) LOD (1.2, 1.4) : 4×4 rouge, 2×2 vert, 1×1 bleu, NEAREST_MIPMAP_NEAREST.
+       Quad de 64 px : s de 0 à 16 → λ = 0, à 32 → λ = 1, à 64 → λ = 2. */
+    {
+        static const uint32_t red16[16] = {
+            0xFFFF0000, 0xFFFF0000, 0xFFFF0000, 0xFFFF0000, 0xFFFF0000, 0xFFFF0000,
+            0xFFFF0000, 0xFFFF0000, 0xFFFF0000, 0xFFFF0000, 0xFFFF0000, 0xFFFF0000,
+            0xFFFF0000, 0xFFFF0000, 0xFFFF0000, 0xFFFF0000 };
+        static const uint32_t green4[4] = { 0xFF00FF00, 0xFF00FF00, 0xFF00FF00, 0xFF00FF00 };
+        static const uint32_t blue1 = 0xFF0000FF;
+        static const struct { uint32_t key, val; float smax; uint32_t want; const char *what; } lc[] = {
+            { 0, 0, 16, 0xFF0000, "λ=0 → niveau 0" },
+            { 0, 0, 32, 0x00FF00, "λ=1 → niveau 1" },
+            { 0, 0, 64, 0x0000FF, "λ=2 → niveau 2" },
+            { QGPU_TP_BASE_LEVEL, 1, 16, 0x00FF00, "BASE_LEVEL 1" },
+            { QGPU_TP_MAX_LEVEL, 1, 64, 0x00FF00, "MAX_LEVEL 1 à λ=2" },
+            { QGPU_TP_MIN_LOD, 0x40000000, 16, 0x0000FF, "MIN_LOD 2 à λ=0" },
+            { QGPU_TP_MAX_LOD, 0x3ECCCCCD, 64, 0xFF0000, "MAX_LOD 0,4 à λ=2" },
+            { QGPU_TP_LOD_BIAS, 0x3F800000, 16, 0x00FF00, "biais de texture +1 à λ=0" },
+        };
+        static const uint32_t reset[] = { 0, 0, 0, 0, 1000, 0xC47A0000, 0x447A0000, 0 };
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, T + 11, QGPU_TT_2D);
+        timage_argb(&e, shmem, T + 11, QGPU_TT_2D, 0, 4, 4, 1, red16, TEX_OFF);
+        timage_argb(&e, shmem, T + 11, QGPU_TT_2D, 1, 2, 2, 1, green4, TEX_OFF + 64);
+        timage_argb(&e, shmem, T + 11, QGPU_TT_2D, 2, 1, 1, 1, &blue1, TEX_OFF + 80);
+        tparam(&e, T + 11, QGPU_TP_MIN_FILTER, 0x2700);           /* NEAREST_MIPMAP_NEAREST */
+        tparam(&e, T + 11, QGPU_TP_MAG_FILTER, 0x2600);
+        st = v10_exec(c, &e);
+        for (i = 0; i < sizeof(lc) / sizeof(lc[0]); i++) {
+            e.off = e.start = CMD_OFF;
+            if (lc[i].key) {
+                tparam(&e, T + 11, lc[i].key, lc[i].val);
+            }
+            v.off = v.start = VTX_OFF;
+            quad_str(&v, 0, 0, (float)W, (float)H, 0, 0, lc[i].smax, lc[i].smax, 0, 0xFFFFFF);
+            st = v10_draw(c, &e, T + 11, 6);
+            CHECK(st == QGPU_ST_OK && px(shmem, 20, 20) == lc[i].want &&
+                  px(shmem, 45, 50) == lc[i].want,
+                  "(l) %s : %06x (attendu %06x, st %u)", lc[i].what, px(shmem, 20, 20),
+                  lc[i].want, st);
+            if (lc[i].key) {
+                e.off = e.start = CMD_OFF;
+                tparam(&e, T + 11, lc[i].key, reset[i]);
+                v10_exec(c, &e);
+            }
+        }
+        /* biais d'UNITÉ (glTexEnv, 1.4), qui s'ajoute à celui de la texture */
+        e.off = e.start = CMD_OFF;
+        tparam(&e, T + 11, QGPU_TP_LOD_BIAS, 0x3F800000);
+        state(&e, QGPU_SK_TEX_LOD_BIAS0, 0x3F800000);
+        v.off = v.start = VTX_OFF;
+        quad_str(&v, 0, 0, (float)W, (float)H, 0, 0, 16, 16, 0, 0xFFFFFF);
+        st = v10_draw(c, &e, T + 11, 6);
+        CHECK(st == QGPU_ST_OK && px(shmem, 20, 20) == 0x0000FF,
+              "(l) biais de texture +1 et d'unité +1 à λ=0 → niveau 2 : %06x (st %u)",
+              px(shmem, 20, 20), st);
+        e.off = e.start = CMD_OFF;
+        tparam(&e, T + 11, QGPU_TP_LOD_BIAS, 0);
+        state(&e, QGPU_SK_TEX_LOD_BIAS0, 0);
+        v10_exec(c, &e);
+    }
+
+    /* (m) MIPMAPS AUTOMATIQUES (1.4), calculés par le cœur : base 4×4 en quatre
+       blocs 2×2 [rouge, bleu ; bleu, rouge]. */
+    {
+        uint32_t base[16], y, x;
+        for (y = 0; y < 4; y++) {
+            for (x = 0; x < 4; x++) {
+                base[y * 4 + x] = ((x < 2) == (y < 2)) ? 0xFFFF0000 : 0xFF0000FF;
+            }
+        }
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, T + 12, QGPU_TT_2D);
+        tparam(&e, T + 12, QGPU_TP_GENERATE_MIPMAP, 1);
+        timage_argb(&e, shmem, T + 12, QGPU_TT_2D, 0, 4, 4, 1, base, TEX_OFF);
+        tparam(&e, T + 12, QGPU_TP_MIN_FILTER, 0x2700);
+        tparam(&e, T + 12, QGPU_TP_MAG_FILTER, 0x2600);
+        v.off = v.start = VTX_OFF;
+        quad_str(&v, 0, 0, (float)W, (float)H, 0, 0, 64, 64, 0, 0xFFFFFF);
+        st = v10_draw(c, &e, T + 12, 6);
+        CHECK(st == QGPU_ST_OK && px(shmem, 20, 20) == 0x800080,
+              "(m) mipmap généré, niveau 2 = moyenne : %06x (attendu 800080, st %u)",
+              px(shmem, 20, 20), st);
+        e.off = e.start = CMD_OFF;
+        v.off = v.start = VTX_OFF;
+        quad_str(&v, 0, 0, (float)W, (float)H, 0, 0, 32, 32, 0, 0xFFFFFF);
+        st = v10_draw(c, &e, T + 12, 6);
+        CHECK(st == QGPU_ST_OK && px(shmem, 10, 10) == 0xFF0000 && px(shmem, 11, 10) == 0x0000FF &&
+              px(shmem, 10, 11) == 0x0000FF && px(shmem, 11, 11) == 0xFF0000,
+              "(m) niveau 1 généré : %06x %06x / %06x %06x (st %u)", px(shmem, 10, 10),
+              px(shmem, 11, 10), px(shmem, 10, 11), px(shmem, 11, 11), st);
+        /* une SOUS-IMAGE du niveau de base régénère la chaîne */
+        for (i = 0; i < 16; i++) {
+            qgpu_st32(shmem + TEX_OFF + i * 4, 0xFF00FF00);
+        }
+        e.off = e.start = CMD_OFF;
+        tsub(&e, T + 12, QGPU_TT_2D, 0, 0, 0, 0, 4, 4, 1, 0x80E1, 0x8367, TEX_OFF);
+        v.off = v.start = VTX_OFF;
+        quad_str(&v, 0, 0, (float)W, (float)H, 0, 0, 64, 64, 0, 0xFFFFFF);
+        st = v10_draw(c, &e, T + 12, 6);
+        CHECK(st == QGPU_ST_OK && px(shmem, 20, 20) == 0x00FF00,
+              "(m) sous-image du niveau de base → niveau 2 régénéré : %06x (st %u)",
+              px(shmem, 20, 20), st);
+    }
+
+    /* (n) FORMATS DE L'APPLICATION, convertis par l'hôte : deux texels chacun,
+       RGBA de base, REPLACE — le mot relu est le texel. */
+    {
+        static const struct {
+            uint32_t fmt, type; uint8_t b[8]; uint32_t want[2]; const char *name;
+        } fc[] = {
+            { 0x1908, 0x1401, { 10, 20, 30, 40, 50, 60, 70, 80 }, { 0x280A141E, 0x50323C46 }, "RGBA octets" },
+            { 0x1907, 0x1401, { 10, 20, 30, 50, 60, 70 }, { 0xFF0A141E, 0xFF323C46 }, "RGB octets" },
+            { 0x80E1, 0x1401, { 30, 20, 10, 40, 70, 60, 50, 80 }, { 0x280A141E, 0x50323C46 }, "BGRA octets" },
+            { 0x80E0, 0x1401, { 30, 20, 10, 70, 60, 50 }, { 0xFF0A141E, 0xFF323C46 }, "BGR octets" },
+            { 0x1909, 0x1401, { 10, 200 }, { 0xFF0A0A0A, 0xFFC8C8C8 }, "LUMINANCE" },
+            { 0x190A, 0x1401, { 10, 40, 200, 80 }, { 0x280A0A0A, 0x50C8C8C8 }, "LUMINANCE_ALPHA" },
+            { 0x1906, 0x1401, { 40, 80 }, { 0x28000000, 0x50000000 }, "ALPHA" },
+            { 0x1903, 0x1401, { 10, 200 }, { 0xFF0A0000, 0xFFC80000 }, "RED" },
+            { 0x1908, 0x8035, { 10, 20, 30, 40, 50, 60, 70, 80 }, { 0x280A141E, 0x50323C46 }, "RGBA 8888" },
+            { 0x80E1, 0x8035, { 30, 20, 10, 40, 70, 60, 50, 80 }, { 0x280A141E, 0x50323C46 }, "BGRA 8888" },
+            { 0x1908, 0x8367, { 40, 30, 20, 10, 80, 70, 60, 50 }, { 0x280A141E, 0x50323C46 }, "RGBA 8888_REV" },
+            { 0x80E1, 0x8367, { 40, 10, 20, 30, 80, 50, 60, 70 }, { 0x280A141E, 0x50323C46 }, "BGRA 8888_REV" },
+            { 0x1907, 0x8363, { 0x84, 0x08, 0xF8, 0x00 }, { 0xFF848242, 0xFFFF0000 }, "RGB 565" },
+            { 0x1907, 0x8364, { 0x44, 0x10, 0x00, 0x1F }, { 0xFF848242, 0xFFFF0000 }, "RGB 565_REV" },
+            { 0x1908, 0x8033, { 0x12, 0x34, 0xF0, 0x0F }, { 0x44112233, 0xFFFF0000 }, "RGBA 4444" },
+            { 0x80E1, 0x8365, { 0x41, 0x23, 0xFF, 0x00 }, { 0x44112233, 0xFFFF0000 }, "BGRA 4444_REV" },
+            { 0x1908, 0x8034, { 0xFC, 0x03, 0xF8, 0x00 }, { 0xFFFF8408, 0x00FF0000 }, "RGBA 5551" },
+            { 0x80E1, 0x8366, { 0xFE, 0x01, 0x7C, 0x00 }, { 0xFFFF8408, 0x00FF0000 }, "BGRA 1555_REV" },
+        };
+        for (i = 0; i < sizeof(fc) / sizeof(fc[0]); i++) {
+            memcpy(shmem + TEX_OFF, fc[i].b, 8);
+            e.off = e.start = CMD_OFF;
+            tcreate3(&e, T + 20 + i, QGPU_TT_2D);
+            timage3(&e, T + 20 + i, QGPU_TT_2D, 0, 2, 1, 1, 0x1908, fc[i].fmt, fc[i].type,
+                    TEX_OFF, 0, 0);
+            tparam(&e, T + 20 + i, QGPU_TP_MIN_FILTER, 0x2600);
+            tparam(&e, T + 20 + i, QGPU_TP_MAG_FILTER, 0x2600);
+            v.off = v.start = VTX_OFF;
+            quad_str(&v, 0, 0, (float)W, (float)H, 0, 0, 1, 1, 0, 0xFFFFFF);
+            st = v10_draw(c, &e, T + 20 + i, 6);
+            CHECK(st == QGPU_ST_OK && pxa(shmem, 16, 32) == fc[i].want[0] &&
+                  pxa(shmem, 48, 32) == fc[i].want[1],
+                  "(n) %-15s : %08x %08x (attendu %08x %08x, st %u)", fc[i].name,
+                  pxa(shmem, 16, 32), pxa(shmem, 48, 32), fc[i].want[0], fc[i].want[1], st);
+        }
+        /* pas de ligne (alignement) et pas de tranche (3D) */
+        {
+            static const uint8_t rows[16] = { 10, 20, 30, 50, 60, 70, 0xEE, 0xEE,
+                                              90, 100, 110, 130, 140, 150, 0xEE, 0xEE };
+            memcpy(shmem + TEX_OFF, rows, 16);
+            e.off = e.start = CMD_OFF;
+            tcreate3(&e, T + 40, QGPU_TT_2D);
+            timage3(&e, T + 40, QGPU_TT_2D, 0, 2, 2, 1, 0x1907, 0x1907, 0x1401, TEX_OFF, 8, 0);
+            tparam(&e, T + 40, QGPU_TP_MIN_FILTER, 0x2600);
+            tparam(&e, T + 40, QGPU_TP_MAG_FILTER, 0x2600);
+            v.off = v.start = VTX_OFF;
+            quad_str(&v, 0, 0, (float)W, (float)H, 0, 0, 1, 1, 0, 0xFFFFFF);
+            st = v10_draw(c, &e, T + 40, 6);
+            CHECK(st == QGPU_ST_OK && px(shmem, 16, 16) == 0x0A141E && px(shmem, 48, 16) == 0x323C46 &&
+                  px(shmem, 16, 48) == 0x5A646E && px(shmem, 48, 48) == 0x828C96,
+                  "(n) RGB avec 8 octets par ligne : %06x %06x / %06x %06x (st %u)",
+                  px(shmem, 16, 16), px(shmem, 48, 16), px(shmem, 16, 48), px(shmem, 48, 48), st);
+            qgpu_st32(shmem + TEX_OFF, 0xFFFF0000);
+            qgpu_st32(shmem + TEX_OFF + 4, 0xEEEEEEEE);
+            qgpu_st32(shmem + TEX_OFF + 8, 0xFF00FF00);
+            e.off = e.start = CMD_OFF;
+            tcreate3(&e, T + 41, QGPU_TT_3D);
+            timage3(&e, T + 41, QGPU_TT_3D, 0, 1, 1, 2, 0x1908, 0x80E1, 0x8367, TEX_OFF, 0, 8);
+            tparam(&e, T + 41, QGPU_TP_MIN_FILTER, 0x2600);
+            tparam(&e, T + 41, QGPU_TP_MAG_FILTER, 0x2600);
+            v.off = v.start = VTX_OFF;
+            quad_str(&v, 0, 0, (float)W, 32, 0, 0, 1, 1, 0.25f, 0xFFFFFF);
+            quad_str(&v, 0, 32, (float)W, (float)H, 0, 0, 1, 1, 0.75f, 0xFFFFFF);
+            st = v10_draw(c, &e, T + 41, 12);
+            CHECK(st == QGPU_ST_OK && px(shmem, 32, 16) == 0xFF0000 && px(shmem, 32, 48) == 0x00FF00,
+                  "(n) 3D avec 8 octets par tranche : %06x %06x (st %u)",
+                  px(shmem, 32, 16), px(shmem, 32, 48), st);
+        }
+    }
+
+    /* (o) S3TC, décompressé par le cœur. Un bloc 4×4, index 0,1,2,3 sur chaque
+       ligne : les quatre couleurs du bloc, colonne par colonne. */
+    {
+        static const struct { uint32_t fmt, bfmt; uint8_t b[16]; uint32_t want[4]; const char *name; } dc[] = {
+            { QGPU_TF_DXT1_RGB, 0x1907,
+              { 0x00, 0xF8, 0x1F, 0x00, 0xE4, 0xE4, 0xE4, 0xE4 },
+              { 0xFFFF0000, 0xFF0000FF, 0xFFAA0055, 0xFF5500AA }, "DXT1 RGB, 4 couleurs" },
+            { QGPU_TF_DXT1_RGBA, 0x1908,
+              { 0x1F, 0x00, 0x00, 0xF8, 0xE4, 0xE4, 0xE4, 0xE4 },
+              { 0xFF0000FF, 0xFFFF0000, 0xFF800080, 0x00000000 }, "DXT1 RGBA, 3 couleurs" },
+            { QGPU_TF_DXT3, 0x1908,
+              { 0x8F, 0x04, 0x8F, 0x04, 0x8F, 0x04, 0x8F, 0x04,
+                0x00, 0xF8, 0x1F, 0x00, 0xE4, 0xE4, 0xE4, 0xE4 },
+              { 0xFFFF0000, 0x880000FF, 0x44AA0055, 0x005500AA }, "DXT3" },
+            { QGPU_TF_DXT5, 0x1908,
+              { 0xFF, 0x00, 0x88, 0x8E, 0xE8, 0x88, 0x8E, 0xE8,
+                0x00, 0xF8, 0x1F, 0x00, 0xE4, 0xE4, 0xE4, 0xE4 },
+              { 0xFFFF0000, 0x000000FF, 0xDBAA0055, 0x245500AA }, "DXT5" },
+        };
+        for (i = 0; i < sizeof(dc) / sizeof(dc[0]); i++) {
+            bool ok;
+            memcpy(shmem + TEX_OFF, dc[i].b, 16);
+            e.off = e.start = CMD_OFF;
+            tcreate3(&e, T + 50 + i, QGPU_TT_2D);
+            timage3(&e, T + 50 + i, QGPU_TT_2D, 0, 4, 4, 1, dc[i].bfmt, dc[i].fmt, 0,
+                    TEX_OFF, 0, 0);
+            tparam(&e, T + 50 + i, QGPU_TP_MIN_FILTER, 0x2600);
+            tparam(&e, T + 50 + i, QGPU_TP_MAG_FILTER, 0x2600);
+            v.off = v.start = VTX_OFF;
+            quad_str(&v, 0, 0, (float)W, (float)H, 0, 0, 1, 1, 0, 0xFFFFFF);
+            st = v10_draw(c, &e, T + 50 + i, 6);
+            ok = true;
+            for (k = 0; k < 4; k++) {
+                ok = ok && pxa(shmem, 8 + 16 * k, 40) == dc[i].want[k];
+            }
+            CHECK(st == QGPU_ST_OK && ok, "(o) %s : %08x %08x %08x %08x (st %u)", dc[i].name,
+                  pxa(shmem, 8, 40), pxa(shmem, 24, 40), pxa(shmem, 40, 40), pxa(shmem, 56, 40), st);
+        }
+    }
+
+    /* (p) NIVEAU SANS DONNÉES puis SOUS-IMAGE : noir transparent, puis la
+       moitié droite en vert. */
+    {
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, T + 60, QGPU_TT_2D);
+        timage3(&e, T + 60, QGPU_TT_2D, 0, 4, 4, 1, 0x1908, 0x80E1, 0x8367,
+                (uint32_t)QGPU_TEX_NO_DATA, 0, 0);
+        tparam(&e, T + 60, QGPU_TP_MIN_FILTER, 0x2600);
+        tparam(&e, T + 60, QGPU_TP_MAG_FILTER, 0x2600);
+        v.off = v.start = VTX_OFF;
+        quad_str(&v, 0, 0, (float)W, (float)H, 0, 0, 1, 1, 0, 0xFFFFFF);
+        st = v10_draw(c, &e, T + 60, 6);
+        CHECK(st == QGPU_ST_OK && pxa(shmem, 16, 16) == 0 && pxa(shmem, 48, 48) == 0,
+              "(p) niveau défini sans données : %08x %08x (st %u)",
+              pxa(shmem, 16, 16), pxa(shmem, 48, 48), st);
+        for (i = 0; i < 8; i++) {
+            qgpu_st32(shmem + TEX_OFF + i * 4, 0xFF00FF00);
+        }
+        e.off = e.start = CMD_OFF;
+        tsub(&e, T + 60, QGPU_TT_2D, 0, 2, 0, 0, 2, 4, 1, 0x80E1, 0x8367, TEX_OFF);
+        st = v10_draw(c, &e, T + 60, 6);
+        CHECK(st == QGPU_ST_OK && pxa(shmem, 16, 16) == 0 && pxa(shmem, 48, 16) == 0xFF00FF00 &&
+              pxa(shmem, 48, 56) == 0xFF00FF00,
+              "(p) sous-image 2×4 en (2,0) : %08x | %08x %08x (st %u)",
+              pxa(shmem, 16, 16), pxa(shmem, 48, 16), pxa(shmem, 48, 56), st);
+    }
+
+    /* (q) CHEMIN BRUT (v7) : la même texture 3D et la même carte de cube,
+       sommets bruts ; le cube par GL_NORMAL_MAP, la normale (−1, 0, 0) → face −X. */
+    {
+        float m[16], mv[16];
+        static const float z4[4] = { 0, 0, 0, 0 };
+        e.off = e.start = CMD_OFF;
+        mat_ortho_px(m);
+        mat_identity(mv);
+        set_matrix(&e, QGPU_MTX_PROJECTION, m);
+        set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+        state(&e, QGPU_SK_TEX_BIND, T);
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+        v.off = v.start = VTX_OFF;
+        {
+            static const float q[6][2] = { { 0, 0 }, { 64, 0 }, { 64, 64 }, { 0, 0 }, { 64, 64 }, { 0, 64 } };
+            for (i = 0; i < 6; i++) {
+                emitf(&v, q[i][0]); emitf(&v, q[i][1]);
+                emitf(&v, 0.5f); emitf(&v, 0.5f); emitf(&v, 0.625f); emitf(&v, 1.0f);
+            }
+        }
+        draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 6, VF_P2 | QGPU_VF_TEX(0), 6, QGPU_IDX_NONE, 0);
+        readback_cmd(&e, V10_SURF);
+        st = v10_exec(c, &e);
+        CHECK(st == QGPU_ST_OK && px(shmem, 32, 32) == 0x0000FF,
+              "(q) chemin brut, 3D, r = 0,625 → tranche 2 : %06x (st %u)", px(shmem, 32, 32), st);
+        e.off = e.start = CMD_OFF;
+        for (k = 0; k < 3; k++) {
+            set_texgen(&e, 0, k, 1, QGPU_TG_NORMAL_MAP, z4, z4);
+        }
+        state(&e, QGPU_SK_TEX_BIND, T + 1);
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+        v.off = v.start = VTX_OFF;
+        {
+            static const float q[6][2] = { { 0, 0 }, { 64, 0 }, { 64, 64 }, { 0, 0 }, { 64, 64 }, { 0, 64 } };
+            for (i = 0; i < 6; i++) {
+                emitf(&v, q[i][0]); emitf(&v, q[i][1]); emitf(&v, 0.0f);
+                emitf(&v, -1.0f); emitf(&v, 0.0f); emitf(&v, 0.0f);
+            }
+        }
+        draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 6, VF_P3 | QGPU_VF_NORMAL, 6, QGPU_IDX_NONE, 0);
+        readback_cmd(&e, V10_SURF);
+        st = v10_exec(c, &e);
+        CHECK(st == QGPU_ST_OK && px(shmem, 32, 32) == 0x00FF00,
+              "(q) chemin brut, cube par GL_NORMAL_MAP, normale −X : %06x (st %u)",
+              px(shmem, 32, 32), st);
+        e.off = e.start = CMD_OFF;
+        for (k = 0; k < 3; k++) {
+            set_texgen(&e, 0, k, 0, QGPU_TG_EYE_LINEAR, z4, z4);
+        }
+        v10_exec(c, &e);
+    }
+
+    /* (r) REFUS : chacun doit rendre le bon statut sans rien casser. */
+    {
+        static const struct { uint32_t want; const char *what; } er[] = {
+            { QGPU_ST_BAD_ARG, "TEX_CREATE3, cible inconnue" },
+            { QGPU_ST_BAD_ARG, "image 3D sur une texture 2D" },
+            { QGPU_ST_BAD_ARG, "face de cube non carrée" },
+            { QGPU_ST_BAD_ARG, "3D au-delà de QGPU_MAX_TEX_3D_DIM" },
+            { QGPU_ST_BAD_ARG, "couple (format, type) inconnu" },
+            { QGPU_ST_BAD_ARG, "données de profondeur, base RGBA" },
+            { QGPU_ST_BAD_ARG, "S3TC sur une texture 3D" },
+            { QGPU_ST_BAD_ARG, "pas de ligne plus court qu'une ligne" },
+            { QGPU_ST_OOB,     "données hors de la fenêtre" },
+            { QGPU_ST_BAD_ARG, "sous-image hors du niveau" },
+            { QGPU_ST_BAD_ARG, "sous-image d'un niveau non défini" },
+            { QGPU_ST_BAD_ARG, "sous-image S3TC non alignée" },
+            { QGPU_ST_BAD_ARG, "TEX_IMAGE (v3) sur une texture 3D" },
+            { QGPU_ST_BAD_ARG, "WRAP_S inconnu" },
+            { QGPU_ST_BAD_ARG, "biais de LOD de 17" },
+            { QGPU_ST_BAD_ARG, "mode de comparaison inconnu" },
+            { QGPU_ST_BAD_ARG, "biais d'unité NaN (SET_STATE)" },
+            { QGPU_ST_BAD_ARG, "profondeur sur une texture 3D" },
+        };
+        uint32_t n = sizeof(er) / sizeof(er[0]), got[18];
+        bool ok = true;
+        for (i = 0; i < n; i++) {
+            e.off = e.start = CMD_OFF;
+            switch (i) {
+            case 0: tcreate3(&e, T + 70, 0x1234); break;
+            case 1: timage3(&e, T + 7, QGPU_TT_3D, 0, 2, 1, 1, 0x1908, 0x80E1, 0x8367, TEX_OFF, 0, 0); break;
+            case 2: timage3(&e, T + 1, QGPU_TT_CUBE_FACE(0), 0, 2, 1, 1, 0x1908, 0x80E1, 0x8367, TEX_OFF, 0, 0); break;
+            case 3: timage3(&e, T, QGPU_TT_3D, 0, 512, 1, 1, 0x1908, 0x80E1, 0x8367, (uint32_t)QGPU_TEX_NO_DATA, 0, 0); break;
+            case 4: timage3(&e, T + 7, QGPU_TT_2D, 0, 2, 1, 1, 0x1908, 0x1908, 0x8363, TEX_OFF, 0, 0); break;
+            case 5: timage3(&e, T + 7, QGPU_TT_2D, 0, 2, 1, 1, 0x1908, 0x1902, 0x1406, TEX_OFF, 0, 0); break;
+            case 6: timage3(&e, T, QGPU_TT_3D, 0, 4, 4, 1, 0x1908, QGPU_TF_DXT5, 0, TEX_OFF, 0, 0); break;
+            case 7: timage3(&e, T + 7, QGPU_TT_2D, 0, 2, 1, 1, 0x1908, 0x1908, 0x1401, TEX_OFF, 4, 0); break;
+            case 8: timage3(&e, T + 7, QGPU_TT_2D, 0, 2, 1, 1, 0x1908, 0x1908, 0x1401, SHMEM_SIZE - 4, 0, 0); break;
+            case 9: tsub(&e, T + 60, QGPU_TT_2D, 0, 3, 0, 0, 2, 1, 1, 0x80E1, 0x8367, TEX_OFF); break;
+            case 10: tsub(&e, T + 60, QGPU_TT_2D, 1, 0, 0, 0, 1, 1, 1, 0x80E1, 0x8367, TEX_OFF); break;
+            case 11: tsub(&e, T + 50, QGPU_TT_2D, 0, 1, 0, 0, 1, 1, 1, QGPU_TF_DXT1_RGB, 0, TEX_OFF); break;
+            case 12:
+                emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE, QGPU_LEN_TEX_IMAGE));
+                emit(&e, T); emit(&e, 0); emit(&e, 1); emit(&e, 1); emit(&e, 0x1908); emit(&e, TEX_OFF);
+                break;
+            case 13: tparam(&e, T + 7, QGPU_TP_WRAP_S, 0x1234); break;
+            case 14: tparam(&e, T + 7, QGPU_TP_LOD_BIAS, 0x41880000); break;
+            case 15: tparam(&e, T + 9, QGPU_TP_COMPARE_MODE, 0x884D); break;
+            case 16: state(&e, QGPU_SK_TEX_LOD_BIAS0 + 1, 0x7FC00000); break;
+            default: timage3(&e, T, QGPU_TT_3D, 0, 1, 1, 1, 0x1902, 0x1902, 0x1406, TEX_OFF, 0, 0); break;
+            }
+            got[i] = v10_exec(c, &e);
+            if (got[i] != er[i].want) {
+                ok = false;
+                printf("       refus « %s » : st %u, attendu %u\n", er[i].what, got[i], er[i].want);
+            }
+        }
+        CHECK(ok, "(r) %u refus v10, chacun avec son statut", n);
+        /* et le cœur est toujours là : la texture 3D rend encore sa tranche */
+        v.off = v.start = VTX_OFF;
+        e.off = e.start = CMD_OFF;
+        quad_str(&v, 0, 0, (float)W, (float)H, 0, 0, 1, 1, 0.375f, 0xFFFFFF);
+        st = v10_draw(c, &e, T, 6);
+        CHECK(st == QGPU_ST_OK && px(shmem, 32, 32) == 0x00FF00,
+              "(r) après les refus, la texture 3D rend toujours : %06x (st %u)",
+              px(shmem, 32, 32), st);
+    }
+
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_TEXTURE, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_DESTROY, QGPU_LEN_CTX)); emit(&e, V10_CTX);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_DESTROY, QGPU_LEN_SURF)); emit(&e, V10_SURF);
+    st = v10_exec(c, &e);
+    CHECK(st == QGPU_ST_OK, "v10 : surface et contexte rendus (st %u)", st);
 }
 
 typedef struct { QgpuCore *c; uint8_t *shmem; } BackendRun;
@@ -3256,6 +4031,7 @@ static void *run_backend_body(void *arg)
     run_v8(c, shmem);
     run_zs(c, shmem);
     run_v9(c, shmem);
+    run_v10(c, shmem);
 
     qgpu_core_reset(c);
     e.off = e.start = CMD_OFF;

@@ -39,26 +39,60 @@ typedef struct QgpuState {
     uint32_t v[QGPU_SK_COUNT];
 } QgpuState;
 
-/* Texture (v3). Les niveaux sont tenus par le cœur, en ARGB hôte-natif :
-   le backend logiciel les échantillonne directement, le backend GL les
-   recopie dans ses objets texture (tex->dirty). */
+/* Texture (v3, v10). Les niveaux sont tenus par le cœur, en ARGB hôte-natif
+   — ou, pour une texture de profondeur, en flottants hôte-natifs rangés bit à
+   bit dans les mêmes mots (qgpu_u2f) : le backend logiciel les échantillonne
+   directement, le backend GL les recopie dans ses objets texture (dirty). Les
+   conversions de format et la décompression S3TC sont faites par le cœur :
+   un backend ne voit jamais que ces deux formes. */
+#define QGPU_TEX_FACES 6            /* cartes de cube ; les autres cibles : face 0 */
+
 typedef struct QgpuTexLevel {
-    uint32_t  w, h;
-    uint32_t *px;                  /* NULL si le niveau n'est pas défini */
+    uint32_t  w, h, d;              /* d = 1 sauf en 3D */
+    uint32_t  fmt;                  /* v10 : format de base de CE niveau */
+    uint32_t *px;                   /* NULL si le niveau n'est pas défini ;
+                                       w·h·d mots, tranche par tranche */
 } QgpuTexLevel;
 
 typedef struct QgpuTexture {
     bool         used;
-    uint32_t     base_format;      /* format de base du niveau 0 */
+    uint32_t     target;            /* v10 : QGPU_TT_* (QGPU_TT_2D en v3–v9) */
+    uint32_t     nfaces;            /* 6 pour une carte de cube, 1 sinon */
+    uint32_t     base_format;       /* format de base du niveau de base (face 0) */
     uint32_t     min_filter, mag_filter, wrap_s, wrap_t;
-    QgpuTexLevel level[QGPU_MAX_TEX_LEVELS];
-    uint32_t     dirty;            /* bit n : niveau n modifié depuis la dernière synchro */
+    /* v10 */
+    uint32_t     wrap_r;
+    uint32_t     border;            /* 0xAARRGGBB */
+    float        min_lod, max_lod, lod_bias;
+    uint32_t     base_level, max_level;
+    uint32_t     compare_mode, compare_func, depth_mode;
+    bool         gen_mipmap;
+    QgpuTexLevel level[QGPU_TEX_FACES][QGPU_MAX_TEX_LEVELS];
+    uint32_t     dirty[QGPU_TEX_FACES];  /* bit n : niveau n de la face modifié
+                                            depuis la dernière synchro */
     bool         params_dirty;
-    void        *priv;             /* propriété du backend */
+    void        *priv;              /* propriété du backend */
 } QgpuTexture;
 
-/* Nombre de niveaux utilisables (0 = texture incomplète). */
+/* Nombre de niveaux utilisables À PARTIR DU NIVEAU DE BASE (0 = texture
+   incomplète : le texturage de l'unité est coupé, comme en OpenGL). */
 uint32_t qgpu_texture_levels(const QgpuTexture *t);
+
+/* v10 : vrai si la texture rend une valeur de profondeur (format de base
+   GL_DEPTH_COMPONENT) ; son environnement la voit alors avec le format
+   qgpu_texture_env_format(). */
+static inline bool qgpu_texture_is_depth(const QgpuTexture *t)
+{
+    return t->base_format == 0x1902;
+}
+
+/* v10 : format de base VU PAR L'ENVIRONNEMENT de texture : le format de base,
+   sauf pour une texture de profondeur, qui se présente selon son
+   QGPU_TP_DEPTH_MODE (luminance, intensité ou alpha). */
+static inline uint32_t qgpu_texture_env_format(const QgpuTexture *t)
+{
+    return qgpu_texture_is_depth(t) ? t->depth_mode : t->base_format;
+}
 
 /* v8 : requête d'occlusion. Le cœur tient l'état d'ouverture (une seule active
    par contexte, cf. qgpu_proto.h) ; le backend tient le COMPTE, parce que lui

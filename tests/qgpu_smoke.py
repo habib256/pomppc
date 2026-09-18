@@ -49,7 +49,9 @@ REG_QUEUE_FREE, REG_FENCE_SUBMITTED = 0x38, 0x3C
 REG_SUBMIT_ST, REG_ERRORS, REG_QUEUE_DEPTH = 0x40, 0x44, 0x48
 DOORBELL_GO, DOORBELL_ASYNC = 1, 2
 ST_OK, ST_BAD_OPCODE, ST_QUEUE_FULL = 0, 3, 10
+CAP_OCCLUSION = 0x4
 CAP_ASYNC = 0x8
+CAP_TEXTURES = 0x10
 IRQ_DONE = 0x1
 BURST = 0x28           # 40 doorbells asynchrones d'affilée (file = 16)
 SENTINEL = 0xDEADBEEF
@@ -322,6 +324,11 @@ def main():
         ("index de la commande fautive", pc2, 1),
         # v9
         ("device asynchrone (caps)", ((caps or 0) & CAP_ASYNC) != 0, True),
+        # v10 : les bits que init() du backend résout à chaud atteignent
+        # QGPU_REG_CAPS (jusqu'à la v9 le device publiait be->cap, sans eux)
+        ("version du protocole", version, 10),
+        ("requêtes d'occlusion publiées (caps)", ((caps or 0) & CAP_OCCLUSION) != 0, True),
+        ("textures v10 publiées (caps)", ((caps or 0) & CAP_TEXTURES) != 0, True),
         ("profondeur de file annoncée", (depth or 0) > 0, True),
         ("acceptées = terminées au repos", sub0, 2),
         ("rien en vol au repos", db0, 0),
@@ -355,7 +362,8 @@ def main():
         failed += (not ok)
         shown = ("0x%x" % got) if isinstance(got, int) and not isinstance(got, bool) else str(got)
         print("%-30s %-12s %s" % (name, shown, "OK" if ok else "ÉCHEC (attendu %s)" % (want,)))
-    print("backend hôte : caps=0x%x (1=soft, 2=gl, 8=doorbell asynchrone)" % (caps or 0))
+    print("backend hôte : caps=0x%x (1=soft, 2=gl, 4=occlusion, 8=doorbell asynchrone, "
+          "0x10=textures v10)" % (caps or 0))
     return 1 if failed else 0
 
 

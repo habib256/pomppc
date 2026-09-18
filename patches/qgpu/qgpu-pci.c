@@ -303,7 +303,9 @@ static void qgpu_soft_reset(QgpuPCIState *s)
     memset(s->regs, 0, sizeof(s->regs));
     s->regs[QGPU_REG_MAGIC >> 2] = QGPU_MAGIC;
     s->regs[QGPU_REG_VERSION >> 2] = QGPU_PROTO_VERSION;
-    s->regs[QGPU_REG_CAPS >> 2] = s->core_ok ? s->core.be->cap : 0;
+    /* core.caps et non be->cap : ce que init() a résolu à chaud (v8 : requêtes
+       d'occlusion ; v10 : textures) doit atteindre l'invité. */
+    s->regs[QGPU_REG_CAPS >> 2] = s->core_ok ? s->core.caps : 0;
     if (s->thread_ok) {
         s->regs[QGPU_REG_CAPS >> 2] |= QGPU_CAP_ASYNC;
     }

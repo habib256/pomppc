@@ -37,6 +37,8 @@ static bool soft_init(QgpuCore *c)
     /* v8 : le backend de référence compte toujours les échantillons — c'est
        lui la vérité terrain des tests de requête d'occlusion. */
     c->caps |= QGPU_CAP_OCCLUSION;
+    /* v10 : il tient aussi toutes les cibles et tous les paramètres de texture. */
+    c->caps |= QGPU_CAP_TEXTURES;
     return true;
 }
 
@@ -340,31 +342,82 @@ static inline float edge(float ax, float ay, float bx, float by,
 
 typedef struct Rgba { float r, g, b, a; } Rgba;
 
+/* Répétition d'un indice de texel (OpenGL 1.4, et table 8.20 des versions
+   suivantes pour GL_MIRRORED_REPEAT). GL_CLAMP et GL_CLAMP_TO_BORDER sortent
+   sur la bordure ; GL_CLAMP_TO_EDGE borne. */
 static int wrap_index(int i, int n, uint32_t mode, bool *border)
 {
-    if (mode == 0x2901) {                               /* REPEAT */
+    switch (mode) {
+    case 0x2901:                                        /* REPEAT */
         i %= n;
         return i < 0 ? i + n : i;
+    case QGPU_TW_MIRRORED_REPEAT: {
+        int m = i % (2 * n);
+        if (m < 0) {
+            m += 2 * n;
+        }
+        m -= n;                                         /* dans [−n, n) */
+        return (n - 1) - (m >= 0 ? m : -(1 + m));
     }
-    if (mode == 0x2900 && (i < 0 || i >= n)) {          /* CLAMP : bordure */
-        *border = true;
-        return 0;
+    case 0x2900: case QGPU_TW_CLAMP_TO_BORDER:          /* CLAMP, CLAMP_TO_BORDER */
+        if (i < 0 || i >= n) {
+            *border = true;
+            return 0;
+        }
+        return i;
+    default:                                            /* CLAMP_TO_EDGE */
+        return i < 0 ? 0 : i >= n ? n - 1 : i;
     }
-    return i < 0 ? 0 : i >= n ? n - 1 : i;              /* CLAMP_TO_EDGE */
 }
 
-static Rgba texel(const QgpuTexture *t, const QgpuTexLevel *lv, int x, int y)
+/* Échantillonneur d'une unité pour un triangle : la texture, et ce qui ne
+   change pas d'un fragment à l'autre. `ref` (r/q borné à [0,1]) est posé par
+   fragment : c'est la valeur que compare une texture de profondeur. */
+typedef struct Samp {
+    const QgpuTexture *t;
+    bool  depth, cmp;
+    float ref;
+    Rgba  border;
+} Samp;
+
+static void samp_init(Samp *S, const QgpuTexture *t)
 {
+    uint32_t bc = t->border;
+    S->t = t;
+    S->depth = qgpu_texture_is_depth(t);
+    S->cmp = S->depth && t->compare_mode == QGPU_TC_COMPARE_R;
+    S->ref = 0.0f;
+    S->border.r = ((bc >> 16) & 255) / 255.0f;
+    S->border.g = ((bc >> 8) & 255) / 255.0f;
+    S->border.b = (bc & 255) / 255.0f;
+    S->border.a = ((bc >> 24) & 255) / 255.0f;
+}
+
+/* Un texel, répétition comprise. Profondeur : la valeur D, ou le résultat 0/1
+   de « ref fonc D » — comparé ICI, avant tout filtrage (ARB_shadow). */
+static Rgba fetch(const Samp *S, const QgpuTexLevel *lv, int x, int y, int z)
+{
+    const QgpuTexture *t = S->t;
     bool border = false;
     uint32_t p;
     Rgba c;
+
     x = wrap_index(x, lv->w, t->wrap_s, &border);
-    y = wrap_index(y, lv->h, t->wrap_t, &border);
-    if (border) {
-        c.r = c.g = c.b = c.a = 0.0f;                   /* couleur de bordure par défaut */
+    y = t->target == QGPU_TT_1D ? 0 : wrap_index(y, lv->h, t->wrap_t, &border);
+    z = t->target == QGPU_TT_3D ? wrap_index(z, lv->d, t->wrap_r, &border) : 0;
+    if (S->depth) {
+        float d = border ? S->border.r
+                         : qgpu_u2f(lv->px[((size_t)z * lv->h + y) * lv->w + x]);
+        if (S->cmp) {
+            d = compare(t->compare_func, S->ref, d) ? 1.0f : 0.0f;
+        }
+        c.r = c.g = c.b = c.a = d;
         return c;
     }
-    p = lv->px[(size_t)y * lv->w + x];
+    if (border) {
+        return S->border;
+    }
+    p = lv->px[((size_t)z * lv->h + y) * lv->w + x];
     c.r = ((p >> 16) & 255) / 255.0f;
     c.g = ((p >> 8) & 255) / 255.0f;
     c.b = (p & 255) / 255.0f;
@@ -372,79 +425,205 @@ static Rgba texel(const QgpuTexture *t, const QgpuTexLevel *lv, int x, int y)
     return c;
 }
 
-static Rgba sample_level(const QgpuTexture *t, const QgpuTexLevel *lv, float s, float tt,
-                         bool linear)
+static inline Rgba lerp_rgba(Rgba a, Rgba b, float f)
 {
-    float u, v, fu, fv;
-    int i0, j0;
-    Rgba c00, c10, c01, c11, r;
-
-    if (t->wrap_s == 0x2900) s = clamp01(s);            /* GL_CLAMP borne s */
-    if (t->wrap_t == 0x2900) tt = clamp01(tt);
-    u = s * lv->w;
-    v = tt * lv->h;
-    if (!linear) {
-        i0 = (int)floorf(u);
-        j0 = (int)floorf(v);
-        if (t->wrap_s != 0x2901 && i0 >= (int)lv->w) i0 = lv->w - 1;
-        if (t->wrap_t != 0x2901 && j0 >= (int)lv->h) j0 = lv->h - 1;
-        return texel(t, lv, i0, j0);
-    }
-    u -= 0.5f;
-    v -= 0.5f;
-    i0 = (int)floorf(u);
-    j0 = (int)floorf(v);
-    fu = u - i0;
-    fv = v - j0;
-    c00 = texel(t, lv, i0, j0);
-    c10 = texel(t, lv, i0 + 1, j0);
-    c01 = texel(t, lv, i0, j0 + 1);
-    c11 = texel(t, lv, i0 + 1, j0 + 1);
-#define LERP2(f) ((1 - fu) * (1 - fv) * c00.f + fu * (1 - fv) * c10.f + \
-                  (1 - fu) * fv * c01.f + fu * fv * c11.f)
-    r.r = LERP2(r); r.g = LERP2(g); r.b = LERP2(b); r.a = LERP2(a);
-#undef LERP2
+    Rgba r;
+    r.r = a.r + f * (b.r - a.r); r.g = a.g + f * (b.g - a.g);
+    r.b = a.b + f * (b.b - a.b); r.a = a.a + f * (b.a - a.a);
     return r;
 }
 
-/* Échantillonnage OpenGL 1.x ; `lod` = λ, constant par triangle ici (ρ calculé
-   sur les aires : approximation assumée du backend de référence). */
-static Rgba sample(const QgpuTexture *t, uint32_t nlevels, float s, float tt, float lod)
+/* Coordonnée de texel sur un axe : normalisée (× taille) ou non (RECTANGLE) ;
+   GL_CLAMP borne la coordonnée à [0, taille] avant tout. */
+static float texel_coord(float s, uint32_t n, uint32_t wrap, bool rect)
 {
+    float u = rect ? s : s * (float)n;
+    if (wrap == 0x2900) {
+        u = u < 0.0f ? 0.0f : u > (float)n ? (float)n : u;
+    }
+    return u;
+}
+
+/* Au plus proche : GL_CLAMP et CLAMP_TO_EDGE rendent le dernier texel pour
+   u = taille ; les autres modes passent par wrap_index (bordure, miroir). */
+static int nearest_index(float u, uint32_t n, uint32_t wrap)
+{
+    int i = (int)floorf(u);
+    if ((wrap == 0x2900 || wrap == 0x812F) && i >= (int)n) {
+        i = n - 1;
+    }
+    return i;
+}
+
+static Rgba sample_level(const Samp *S, const QgpuTexLevel *lv, float s, float tt,
+                         float r, bool linear)
+{
+    const QgpuTexture *t = S->t;
+    bool rect = t->target == QGPU_TT_RECTANGLE, is3d = t->target == QGPU_TT_3D;
+    float u = texel_coord(s, lv->w, t->wrap_s, rect);
+    float v = texel_coord(tt, lv->h, t->wrap_t, rect);
+    float w = is3d ? texel_coord(r, lv->d, t->wrap_r, false) : 0.0f;
+    float fu, fv, fw;
+    int i0, j0, k0;
+    Rgba lo, hi;
+
+    if (!linear) {
+        return fetch(S, lv, nearest_index(u, lv->w, t->wrap_s),
+                     nearest_index(v, lv->h, t->wrap_t),
+                     is3d ? nearest_index(w, lv->d, t->wrap_r) : 0);
+    }
+    u -= 0.5f; v -= 0.5f; w -= 0.5f;
+    i0 = (int)floorf(u); j0 = (int)floorf(v); k0 = is3d ? (int)floorf(w) : 0;
+    fu = u - i0; fv = v - j0; fw = is3d ? w - k0 : 0.0f;
+#define BILERP(k) lerp_rgba(lerp_rgba(fetch(S, lv, i0, j0, (k)), fetch(S, lv, i0 + 1, j0, (k)), fu), \
+                            lerp_rgba(fetch(S, lv, i0, j0 + 1, (k)), fetch(S, lv, i0 + 1, j0 + 1, (k)), fu), fv)
+    lo = BILERP(k0);
+    if (!is3d) {
+        return lo;
+    }
+    hi = BILERP(k0 + 1);
+#undef BILERP
+    return lerp_rgba(lo, hi, fw);
+}
+
+/* Carte de cube (OpenGL 1.3, table 3.21) : coordonnées (sc, tc) et axe
+   majeur signé ma d'une direction, rapportés à la face f (0 +X, 1 −X, 2 +Y,
+   3 −Y, 4 +Z, 5 −Z). ma > 0 si la direction regarde vers cette face. */
+static void cube_on_face(int f, float rx, float ry, float rz, float *sc, float *tc, float *ma)
+{
+    switch (f) {
+    case 0:  *sc = -rz; *tc = -ry; *ma = rx;  break;
+    case 1:  *sc = rz;  *tc = -ry; *ma = -rx; break;
+    case 2:  *sc = rx;  *tc = rz;  *ma = ry;  break;
+    case 3:  *sc = rx;  *tc = -rz; *ma = -ry; break;
+    case 4:  *sc = rx;  *tc = -ry; *ma = rz;  break;
+    default: *sc = -rx; *tc = -ry; *ma = -rz; break;
+    }
+}
+
+/* Face de l'axe majeur d'une direction. */
+static int cube_face(float rx, float ry, float rz)
+{
+    float ax = fabsf(rx), ay = fabsf(ry), az = fabsf(rz);
+    if (ax >= ay && ax >= az) {
+        return rx >= 0.0f ? 0 : 1;
+    }
+    if (ay >= az) {
+        return ry >= 0.0f ? 2 : 3;
+    }
+    return rz >= 0.0f ? 4 : 5;
+}
+
+/* Échantillonnage OpenGL 1.2 à 1.4 ; `lod` = λ déjà biaisé et borné à
+   [MIN_LOD, MAX_LOD], constant par triangle ici (ρ calculé sur les aires :
+   approximation assumée du backend de référence). Les niveaux sont comptés
+   DEPUIS LE NIVEAU DE BASE : nlevels = q − b + 1. */
+static Rgba sample(const Samp *S, uint32_t nlevels, float s, float tt, float r, float lod)
+{
+    const QgpuTexture *t = S->t;
+    const QgpuTexLevel *L;
     uint32_t minf = t->min_filter;
     bool mag_linear = t->mag_filter == 0x2601;
     float c = (mag_linear && (minf == 0x2700 || minf == 0x2702)) ? 0.5f : 0.0f;
     float maxd = (float)(nlevels - 1);
-    int d;
-    Rgba a, b, r;
+    int d, face = 0;
 
+    if (t->target == QGPU_TT_CUBE_MAP) {
+        float sc, tc, ma;
+        face = cube_face(s, tt, r);
+        cube_on_face(face, s, tt, r, &sc, &tc, &ma);
+        if (ma > 0.0f) {
+            s = 0.5f * (sc / ma + 1.0f);
+            tt = 0.5f * (tc / ma + 1.0f);
+        } else {
+            s = tt = 0.5f;
+        }
+    }
+    L = &t->level[face][t->base_level];
     if (lod <= c) {
-        return sample_level(t, &t->level[0], s, tt, mag_linear);
+        return sample_level(S, &L[0], s, tt, r, mag_linear);
     }
     switch (minf) {
-    case 0x2600: return sample_level(t, &t->level[0], s, tt, false);
-    case 0x2601: return sample_level(t, &t->level[0], s, tt, true);
+    case 0x2600: return sample_level(S, &L[0], s, tt, r, false);
+    case 0x2601: return sample_level(S, &L[0], s, tt, r, true);
     case 0x2700: case 0x2701:                           /* *_MIPMAP_NEAREST */
         d = (int)ceilf(lod + 0.5f) - 1;
         if (d < 0) d = 0;
         if (d > (int)maxd) d = (int)maxd;
-        return sample_level(t, &t->level[d], s, tt, minf == 0x2701);
+        return sample_level(S, &L[d], s, tt, r, minf == 0x2701);
     default: {                                          /* *_MIPMAP_LINEAR */
         float f;
-        int d2;
         if (lod >= maxd) {
-            return sample_level(t, &t->level[(int)maxd], s, tt, minf == 0x2703);
+            return sample_level(S, &L[(int)maxd], s, tt, r, minf == 0x2703);
         }
         d = (int)floorf(lod);
-        d2 = d + 1;
         f = lod - d;
-        a = sample_level(t, &t->level[d], s, tt, minf == 0x2703);
-        b = sample_level(t, &t->level[d2], s, tt, minf == 0x2703);
-        r.r = a.r + f * (b.r - a.r); r.g = a.g + f * (b.g - a.g);
-        r.b = a.b + f * (b.b - a.b); r.a = a.a + f * (b.a - a.a);
-        return r;
+        return lerp_rgba(sample_level(S, &L[d], s, tt, r, minf == 0x2703),
+                         sample_level(S, &L[d + 1], s, tt, r, minf == 0x2703), f);
     }
     }
+}
+
+/* λ d'un triangle pour une unité : ρ² = aire en texels / aire en pixels, sur
+   le niveau de base (en texels déjà pour RECTANGLE ; sur la face de l'axe
+   majeur du centre pour une carte de cube ; sur s et t seuls en 3D —
+   approximations du backend de référence). Puis le biais (texture + unité,
+   borné à ±QGPU_MAX_LOD_BIAS) et les bornes [MIN_LOD, MAX_LOD]. Des
+   coordonnées constantes donnent ρ = 0, donc λ = −∞ : grossissement. */
+static float tri_lod(const QgpuState *st, int u, const QgpuTexture *t,
+                     const float *v0, const float *v1, const float *v2, float area)
+{
+    const QgpuTexLevel *lb = &t->level[0][t->base_level];
+    const float *vv[3] = { v0, v1, v2 };
+    int k = 8 + 4 * u, i;
+    float s[3], tt[3], ta, lod, bias;
+
+    for (i = 0; i < 3; i++) {
+        float q = vv[i][k + 3];
+        s[i] = vv[i][k] / q;
+        tt[i] = vv[i][k + 1] / q;
+    }
+    if (t->target == QGPU_TT_CUBE_MAP) {
+        /* les trois sommets rapportés à la face du centre du triangle */
+        float cx = 0, cy = 0, cz = 0, sc, tc, ma;
+        int face;
+        for (i = 0; i < 3; i++) {
+            float q = vv[i][k + 3];
+            cx += vv[i][k] / q; cy += vv[i][k + 1] / q; cz += vv[i][k + 2] / q;
+        }
+        face = cube_face(cx, cy, cz);
+        for (i = 0; i < 3; i++) {
+            float q = vv[i][k + 3];
+            cube_on_face(face, vv[i][k] / q, vv[i][k + 1] / q, vv[i][k + 2] / q,
+                         &sc, &tc, &ma);
+            if (!(ma > 0.0f)) {
+                s[0] = s[1] = s[2] = tt[0] = tt[1] = tt[2] = 0.0f;   /* à cheval : λb = −∞ */
+                break;
+            }
+            s[i] = 0.5f * (sc / ma + 1.0f);
+            tt[i] = 0.5f * (tc / ma + 1.0f);
+        }
+    }
+    if (t->target == QGPU_TT_1D) {
+        /* t ne compte pas : ρ = max(|∂u/∂x|, |∂u/∂y|), gradients du plan de s */
+        float dx = fabsf((s[1] - s[0]) * (v2[1] - v0[1]) - (s[2] - s[0]) * (v1[1] - v0[1]));
+        float dy = fabsf((s[2] - s[0]) * (v1[0] - v0[0]) - (s[1] - s[0]) * (v2[0] - v0[0]));
+        float rho = (dx > dy ? dx : dy) * (float)lb->w / area;
+        lod = (rho > 0.0f) ? log2f(rho) : -1000.0f;
+    } else {
+        ta = fabsf((s[1] - s[0]) * (tt[2] - tt[0]) - (s[2] - s[0]) * (tt[1] - tt[0]));
+        if (t->target != QGPU_TT_RECTANGLE) {
+            ta *= (float)lb->w * (float)lb->h;
+        }
+        lod = (ta > 0.0f) ? 0.5f * log2f(ta / area) : -1000.0f;
+    }
+    bias = t->lod_bias + qgpu_u2f(st->v[QGPU_SK_TEX_LOD_BIAS0 + u]);
+    if (bias > QGPU_MAX_LOD_BIAS) bias = QGPU_MAX_LOD_BIAS;
+    if (bias < -QGPU_MAX_LOD_BIAS) bias = -QGPU_MAX_LOD_BIAS;
+    lod += bias;
+    if (lod > t->max_lod) lod = t->max_lod;
+    if (lod < t->min_lod) lod = t->min_lod;
+    return lod;
 }
 
 /* Composantes de source d'une texture selon son format de base (OpenGL 1.3,
@@ -637,6 +816,7 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *te
 {
     uint32_t nlevels[QGPU_MAX_UNITS];
     float lod[QGPU_MAX_UNITS];
+    Samp samp[QGPU_MAX_UNITS];
     SoftSurface *ss = s->priv;
     float area = edge(v0[0], v0[1], v1[0], v1[1], v2[0], v2[1]);
     float sign = 1.0f;
@@ -675,14 +855,8 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *te
         nlevels[u] = tex[u] ? qgpu_texture_levels(tex[u]) : 0;
         lod[u] = 0.0f;
         if (tex[u]) {
-            /* λ par triangle : ρ² = aire en texels / aire en pixels */
-            const QgpuTexLevel *l0 = &tex[u]->level[0];
-            int k = 8 + 4 * u;
-            float s0 = v0[k] / v0[k + 3], t0 = v0[k + 1] / v0[k + 3];
-            float s1 = v1[k] / v1[k + 3], t1 = v1[k + 1] / v1[k + 3];
-            float s2 = v2[k] / v2[k + 3], t2 = v2[k + 1] / v2[k + 3];
-            float ta = fabsf((s1 - s0) * (t2 - t0) - (s2 - s0) * (t1 - t0)) * l0->w * l0->h;
-            lod[u] = (ta > 0.0f) ? 0.5f * log2f(ta / area) : 0.0f;
+            samp_init(&samp[u], tex[u]);
+            lod[u] = tri_lod(st, u, tex[u], v0, v1, v2, area);
         }
     }
     if (prim == QGPU_PRIM_TRIANGLES && st->v[QGPU_SK_POLY_OFFSET]) {
@@ -745,16 +919,20 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *te
             prim_c.b = clamp01(b); prim_c.a = clamp01(a);
             for (u = 0; u < QGPU_MAX_UNITS; u++) {
                 int k = 8 + 4 * u;
-                float ts, tt, tq;
+                float ts, tt, tr, tq;
                 if (!tex[u]) {
                     continue;
                 }
                 ts = w0 * v0[k] + w1 * v1[k] + w2 * v2[k];
                 tt = w0 * v0[k + 1] + w1 * v1[k + 1] + w2 * v2[k + 1];
+                tr = w0 * v0[k + 2] + w1 * v1[k + 2] + w2 * v2[k + 2];
                 tq = w0 * v0[k + 3] + w1 * v1[k + 3] + w2 * v2[k + 3];
                 if (tq != 0.0f) {
-                    Rgba tc = sample(tex[u], nlevels[u], ts / tq, tt / tq, lod[u]);
-                    tex_env(st, u, tex[u]->base_format, tc, &prim_c, &r, &g, &b, &a);
+                    Rgba tc;
+                    samp[u].ref = clamp01(tr / tq);   /* v10 : référence de profondeur */
+                    tc = sample(&samp[u], nlevels[u], ts / tq, tt / tq, tr / tq, lod[u]);
+                    tex_env(st, u, qgpu_texture_env_format(tex[u]), tc, &prim_c,
+                            &r, &g, &b, &a);
                 }
             }
             if (sec_off >= 0) {

@@ -209,7 +209,8 @@ GL_QUERY_RESULT, …)` bloque, ce qui est exactement la sémantique attendue.
 `QGPU_ST_BACKEND` — l'invité se replie, il ne plante pas. Le backend de référence, lui, l'annonce
 toujours : c'est la vérité terrain des tests.
 
-*Note d'intégration, hors périmètre de ce lot* : `QgpuCore` porte désormais un champ `caps` (les
+*Réglé en v10* : le device publie désormais `core.caps` (`docs/protocole-v10-textures.md` §5).
+*Note d'origine* : `QgpuCore` porte désormais un champ `caps` (les
 `QGPU_CAP_*` réellement tenus, backend plus ce que son `init()` a résolu à chaud), alors que
 `qgpu-pci.c` publie encore `core.be->cap` dans `QGPU_REG_CAPS`. Une ligne à changer là-bas le jour
 où l'invité devra *lire* la capacité d'occlusion ; rien ne dépend de ce changement aujourd'hui,
