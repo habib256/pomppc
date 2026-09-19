@@ -186,6 +186,8 @@
 #define V_Z 0x08
 #define V_COLOR 0x30              /* r g b a */
 #define V_FOG   0x4c              /* facteur de brouillard f (1 = pas de brouillard) */
+#define V_SEC   0x50              /* r g b : spéculaire SÉPARÉE (GL_SEPARATE_SPECULAR_COLOR),
+                                     relevé le 19/09/2026 (docs/re/textures-3d.md §5) */
 #define V_TEX0  0x80              /* s t r q de l'unité 0, déjà divisés par w */
 #define V_TEX(u) (V_TEX0 + 0x10 * (u))   /* unités 0 à 7 */
 
@@ -310,13 +312,18 @@ enum { SYNCED = 0, HOST_NEWER = 1, SW_NEWER = 2 };
 
 /* Genres de séries de sommets : opcode et taille des sommets. */
 enum { RK_TRI = 0, RK_TRI_TEX = 1, RK_TRI_TEX2 = 2, RK_LINES = 3, RK_POINTS = 4,
-       RK_TRI_TEX3 = 5, RK_TRI_TEX4 = 6, RK_COUNT = 7 };
+       RK_TRI_TEX3 = 5, RK_TRI_TEX4 = 6,
+       /* v11 : triangles avec couleur secondaire, 0 à 4 unités */
+       RK_TRI_SEC0 = 7, RK_COUNT = 12 };
+#define RK_IS_SEC(k)  ((k) >= RK_TRI_SEC0)
 /* unités de texture portées par le sommet, par genre */
-static const int rk_units[RK_COUNT] = { 0, 1, 2, 0, 0, 3, 4 };
+static const int rk_units[RK_COUNT] = { 0, 1, 2, 0, 0, 3, 4, 0, 1, 2, 3, 4 };
 static const unsigned long rk_words[RK_COUNT] = {
     QGPU_VERTEX_WORDS, QGPU_VERTEX_TEX_WORDS, QGPU_VERTEX_TEX2_WORDS,
     QGPU_VERTEX_WORDS, QGPU_VERTEX_WORDS,
     QGPU_VERTEX_TEXN_WORDS(3), QGPU_VERTEX_TEXN_WORDS(4),
+    QGPU_VERTEX_SEC_WORDS(0), QGPU_VERTEX_SEC_WORDS(1), QGPU_VERTEX_SEC_WORDS(2),
+    QGPU_VERTEX_SEC_WORDS(3), QGPU_VERTEX_SEC_WORDS(4),
 };
 
 typedef struct PCtx {
@@ -803,13 +810,15 @@ static void close_run(void)
             QGPU_OP_DRAW_TRIANGLES, QGPU_OP_DRAW_TRIANGLES_TEX, QGPU_OP_DRAW_TRIANGLES_TEX2,
             QGPU_OP_DRAW_LINES, QGPU_OP_DRAW_POINTS,
             QGPU_OP_DRAW_TRIANGLES_TEXN, QGPU_OP_DRAW_TRIANGLES_TEXN,
+            QGPU_OP_DRAW_TRIANGLES_SEC, QGPU_OP_DRAW_TRIANGLES_SEC, QGPU_OP_DRAW_TRIANGLES_SEC,
+            QGPU_OP_DRAW_TRIANGLES_SEC, QGPU_OP_DRAW_TRIANGLES_SEC,
         };
-        int n = rk_units[G.run_kind];
-        c[0] = QGPU_CMD_HDR(ops[G.run_kind], n >= 3 ? QGPU_LEN_DRAW_N : QGPU_LEN_DRAW);
+        int n = rk_units[G.run_kind], wide = n >= 3 || RK_IS_SEC(G.run_kind);
+        c[0] = QGPU_CMD_HDR(ops[G.run_kind], wide ? QGPU_LEN_DRAW_N : QGPU_LEN_DRAW);
         c[1] = G.run_count;
         c[2] = G.base + VTX_OFF + G.run_start;
-        if (n >= 3) {
-            c[3] = n;                   /* DRAW_TRIANGLES_TEXN : nombre d'unités */
+        if (wide) {
+            c[3] = n;                   /* TEXN, SEC (v11) : nombre d'unités */
             G.ncmd += QGPU_LEN_DRAW_N;
         } else {
             G.ncmd += QGPU_LEN_DRAW;
@@ -3928,6 +3937,12 @@ static int begin_tris(PCtx *p, Batch *b)
     else if (ti.u[2].t) b->kind = RK_TRI_TEX3;
     else if (ti.u[1].t) b->kind = RK_TRI_TEX2;
     else if (ti.u[0].t) b->kind = RK_TRI_TEX;
+    /* v11 : sous la spéculaire séparée, GLEngine laisse la spéculaire HORS de
+       la couleur primaire (en V_SEC) ; l'hôte l'ajoute après la texture. Avant
+       la v11 elle était perdue — comme sous le rendu d'Apple, qui l'ignore. */
+    if (G.q.version >= 11 && GLD_U8(gls(p), GS_LIGHTING) &&
+        U16(gls(p), GS_COLOR_CONTROL) == 0x81FA)
+        b->kind = RK_TRI_SEC0 + rk_units[b->kind];
     return 1;
 }
 
@@ -3945,6 +3960,14 @@ static void put_vertex(const Batch *b, float *o, const unsigned char *v, const u
     o[5] = clamp01(c[1]);
     o[6] = clamp01(c[2]);
     o[7] = clamp01(c[3]);
+    if (RK_IS_SEC(b->kind)) {
+        /* après les coordonnées de texture ; en ombrage plat, celle du sommet
+           provoquant, comme la couleur primaire (`col`) */
+        const float *sc = (const float *)(col + V_SEC);
+        o[8 + 4 * nu] = clamp01(sc[0]);
+        o[9 + 4 * nu] = clamp01(sc[1]);
+        o[10 + 4 * nu] = clamp01(sc[2]);
+    }
 }
 
 /* Ajoute une primitive de n sommets (3, 2 ou 1) à la série du lot ;
@@ -3979,7 +4002,7 @@ static void tri(Batch *b, const unsigned char *v0, const unsigned char *v1,
     v[0] = v0; v[1] = v1; v[2] = v2;
     prim(b, 3, v, prov);
     G.n_tris++;
-    if (b->kind != RK_TRI)
+    if (rk_units[b->kind])
         G.n_textris++;
 }
 
@@ -5104,8 +5127,11 @@ static void caps_probe(unsigned char *cfg)
  * GL_EXT_secondary_color — deux extensions que la chaîne NE TIENT PAS — en
  * croyant poser GL_EXT_texture_env_add et GL_EXT_blend_func_separate.
  *
- * Ce que l'on N'AJOUTE PAS, bien que le nom soit tentant : les textures 3D et
- * les cartes de cube (GLEngine rend GL_INVALID_VALUE), la compression S3TC
+ * Depuis le 19/09/2026 (device v11) : GL_EXT_separate_specular_color et
+ * GL_SGIS_texture_lod, et les textures 3D (cfg+0xbe, qui n'est pas un bit).
+ *
+ * Ce que l'on N'AJOUTE PAS, bien que le nom soit tentant : les cartes de cube
+ * (GLEngine rend GL_INVALID_VALUE), la compression S3TC
  * (aucune erreur, mais l'image est fausse), la couleur secondaire
  * (GL_COLOR_SUM n'ajoute rien), GL_MIRRORED_REPEAT (traité comme GL_REPEAT),
  * les textures de profondeur et le multiéchantillonnage. Tout cela est mesuré,
@@ -5130,6 +5156,12 @@ static void caps_extensions(unsigned char *cfg)
         w0 |= 1UL << 17;                /* GL_ARB_occlusion_query */
     w0 |= 1UL << 20;                    /* GL_ARB_vertex_buffer_object */
     w1 |= 1UL << (39 - 32);             /* GL_EXT_blend_func_separate */
+    /* 19/09/2026 (scènes texlod et sepspec, docs/re/textures-3d.md) : */
+    if (G.q.version >= 11)
+        w1 |= 1UL << (37 - 32);         /* GL_EXT_separate_specular_color : les
+                                           deux chemins la tiennent (v11) */
+    if (G.v10 && (G.q.caps & QGPU_CAP_GL14))
+        GLD_U32(cfg, 0x12c) |= 1UL << (77 - 64);   /* GL_SGIS_texture_lod */
     GLD_U32(cfg, 0x124) |= w0;
     GLD_U32(cfg, 0x128) |= w1;
 }
@@ -5165,15 +5197,15 @@ const char *pomppc_override_string(long name, const char *apple)
            avec les bits d'extensions ni avec les limites (relevé
            docs/re/capacites-glengine.md §2). Autrement dit, c'est un simple
            strcpy — et donc une promesse que rien ne vérifie. On y met la plus
-           haute version dont TOUTES les fonctions sont tenues, et elle est 1.1 :
-           OpenGL 1.2 exige les textures 3D, que GLEngine refuse
-           (GL_MAX_3D_TEXTURE_SIZE = 0, glTexImage3D → GL_INVALID_VALUE) et que
-           le protocole qgpu ne porte pas non plus. Le détail, fonction par
-           fonction, est dans docs/re/version-extensions.md ; ce qui manque pour
-           1.2, 1.3, 1.4 et 1.5 y est nommé. Le suffixe, lui, dit qui rend. */
+           haute version dont TOUTES les fonctions sont tenues. Le suffixe dit
+           qui rend. Détail fonction par fonction : docs/re/version-extensions.md.
+             1.2 : textures 3D (v10, G.tex3d), niveaux et bornes de LOD (v10,
+                   relayés), spéculaire séparée sur les deux chemins (v11) —
+                   tout le reste de 1.2 l'était déjà ;
+             1.1 : sinon (device plus ancien, ou hôte sans QGPU_CAP_GL14). */
         if (getenv("POMPPC_GL_ANNOUNCE") && getenv("POMPPC_GL_ANNOUNCE")[0] == '0')
             return apple;
-        return "1.1 POMPPC-1.0";
+        return (G.tex3d && G.q.version >= 11) ? "1.2 POMPPC-1.0" : "1.1 POMPPC-1.0";
     default:
         return apple;
     }

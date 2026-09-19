@@ -46,7 +46,7 @@
 #define QGPU_IOPCI_PRIMARY_MATCH 0x0fb21234
 
 #define QGPU_MAGIC              0x71677031  /* 'qgp1' */
-#define QGPU_PROTO_VERSION      10  /* v2 : profondeur, état GL ; v3 : textures ;
+#define QGPU_PROTO_VERSION      11  /* v2 : profondeur, état GL ; v3 : textures ;
                                        v4 : brouillard, 2e unité, lignes, points ;
                                        v5 : 4 unités, GL_COMBINE ;
                                        v6 : stencil ;
@@ -64,7 +64,9 @@
                                             formats de l'application convertis
                                             par l'hôte, sous-images, LOD ;
                                             couleur secondaire, paramètres de
-                                            point */
+                                            point ;
+                                       v11 : couleur secondaire sur le chemin
+                                            hérité (DRAW_TRIANGLES_SEC) */
 
 /* ── BAR0 : fenêtre partagée (RAM) ───────────────────────────────────────── */
 #define QGPU_SHMEM_DEFAULT_MB   64
@@ -222,6 +224,8 @@
 #define QGPU_OP_DRAW_LINES      0x0033  /* v4, [nverts, off]  segments (paires), sommets de 8 mots */
 #define QGPU_OP_DRAW_POINTS     0x0034  /* v4, [nverts, off]  points, sommets de 8 mots */
 #define QGPU_OP_DRAW_TRIANGLES_TEXN 0x0035 /* v5, [nverts, off, nunits]  1 à 4 unités, cf. ci-dessous */
+#define QGPU_OP_DRAW_TRIANGLES_SEC 0x0036 /* v11, [nverts, off, nunits]  0 à 4 unités, plus la
+                                            couleur secondaire, cf. section v11 */
 
 #define QGPU_OP_TEX_CREATE      0x0040  /* v3, [tex] */
 #define QGPU_OP_TEX_DESTROY     0x0041  /* v3, [tex] */
@@ -585,6 +589,10 @@
  * s'appliquent dans l'ordre, comme GL_TEXTURE0..3. */
 #define QGPU_VERTEX_TEXN_WORDS(n) (8 + 4 * (n))
 #define QGPU_VERTEX_MAX_WORDS   QGPU_VERTEX_TEXN_WORDS(QGPU_MAX_UNITS)
+
+/* DRAW_TRIANGLES_SEC (v11) : les mots de DRAW_TRIANGLES_TEXN (0 à 4 unités),
+ * puis la couleur SECONDAIRE r, g, b. Cf. section « v11 ». */
+#define QGPU_VERTEX_SEC_WORDS(n) (QGPU_VERTEX_TEXN_WORDS(n) + 3)
 
 /* DRAW_LINES / DRAW_POINTS (v4) : sommets de QGPU_VERTEX_WORDS mots, sans
  * texture. Lignes : largeur QGPU_SK_LINE_WIDTH, chaque paire est un segment.
@@ -1150,6 +1158,23 @@
 #define QGPU_CSUM_OFF           0
 #define QGPU_CSUM_ON            1
 #define QGPU_CSUM_FORMAT        2
+
+/* ── v11 : la couleur secondaire sur le chemin hérité ────────────────────────
+ *
+ *   Sous la couleur spéculaire séparée (OpenGL 1.2), GLEngine éclaire lui-même
+ *   et range la spéculaire À PART de la couleur primaire dans ses sommets ; la
+ *   somme des couleurs d'OpenGL l'ajoute APRÈS l'environnement de texture et
+ *   AVANT le brouillard. Les opcodes hérités n'avaient pas de place pour elle :
+ *   la spéculaire séparée n'était tenue que par DRAW_RAW (l'hôte éclaire).
+ *
+ *   QGPU_OP_DRAW_TRIANGLES_SEC [nverts, off, nunits] : comme
+ *   DRAW_TRIANGLES_TEXN, mais nunits va de 0 à 4 et chaque sommet porte en plus,
+ *   après ses coordonnées de texture, la couleur secondaire r, g, b (flottants
+ *   big-endian, bornés à [0,1] par l'hôte comme la couleur primaire). La somme
+ *   est TOUJOURS faite pour ce dessin : l'invité n'emploie cet opcode que quand
+ *   OpenGL la ferait. Aucune clé d'état nouvelle ; rien ne change pour les
+ *   opcodes v1–v10.
+ */
 
 /* ── Interface du kext POMPPCGPU (IOUserClient) ──────────────────────────────
  *

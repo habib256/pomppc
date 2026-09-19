@@ -53,11 +53,12 @@ identique sur 28 scènes de `gltest`. Il n'y a donc rien à démontrer ici.
 | `GL_CLAMP_TO_EDGE` | (i) | `v15` « GL_CLAMP_TO_EDGE » TENU sous Apple **et** sous le plugin ; transmis en `QGPU_TP_WRAP_*` |
 | `glDrawRangeElements` | (ii) | `v15` TENU ; `GL_EXT_draw_range_elements` déjà annoncée |
 | Rescale normal | (i) | `GL_EXT_rescale_normal` déjà annoncée ; clé `QGPU_SK_RESCALE_NORMAL` (v7) |
-| Couleur spéculaire séparée | **(i) par le chemin brut, (iii) sinon** *(19/09/2026)* | scène `sepspec` : blanc attendu, rendu par le chemin brut (l'hôte éclaire) ; noir par le chemin hérité ET sous le rendu d'Apple seul, qui ignore la spéculaire que GLEngine range en `+0x50` du sommet (`docs/re/textures-3d.md` §5) |
+| Couleur spéculaire séparée | **(i) par les deux chemins avec un device v11** *(19/09/2026)* ; (iii) sous Apple | scène `sepspec` : blanc attendu, rendu par le chemin brut (l'hôte éclaire) et, depuis la v11, par le chemin hérité (`DRAW_TRIANGLES_SEC`, spéculaire lue en `+0x50` du sommet) ; noir sous le rendu d'Apple seul (`docs/protocole-v11-couleur-secondaire.md`) |
 | Niveaux et LOD de texture (`BASE_LEVEL`, `MIN_LOD`…) | **(i) en v10 ; (iii) sous Apple** *(19/09/2026)* | scène `texlod` : 8/8 sous le plugin, 3/8 sous le rendu d'Apple seul, qui ignore les quatre paramètres (`docs/re/textures-3d.md` §3) |
 | Sous-ensemble *imaging* | (ii) revendiqué par Apple (bit 0) | non vérifié de notre côté **[H]** |
 
-→ **1.2 n'est pas tenu.**
+→ **1.2 n'était pas tenu au 18/09/2026. Il l'est depuis le 19/09/2026** sous le plugin avec un
+device v11 : c'est ce qui est annoncé (§3).
 
 ### OpenGL 1.3
 
@@ -109,7 +110,14 @@ identique sur 28 scènes de `gltest`. Il n'y a donc rien à démontrer ici.
 
 ## 3. Ce qui est annoncé, et pourquoi
 
-### `GL_VERSION` = « 1.1 POMPPC-1.0 »
+### `GL_VERSION` = « 1.2 POMPPC-1.0 » (depuis le 19/09/2026, device v11)
+
+Textures 3D, niveaux et LOD, spéculaire séparée par les deux chemins : tout 1.2 est tenu, et le
+plugin l'annonce **seulement** si le device les tient (v11, `QGPU_CAP_GL14`) — sinon « 1.1 ».
+Deux extensions s'ajoutent sous la même condition : `GL_EXT_separate_specular_color` (bit 37) et
+`GL_SGIS_texture_lod` (bit 77), soit **44**. Le texte ci-dessous est l'état du 18/09/2026.
+
+### (18/09/2026) `GL_VERSION` = « 1.1 POMPPC-1.0 »
 
 `GL_VERSION` sort **tel quel** de `gldGetString` : GLEngine ne le recoupe ni avec les bits
 d'extensions ni avec les limites (`docs/re/capacites-glengine.md` §2). C'est un `strcpy`, donc une

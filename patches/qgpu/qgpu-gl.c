@@ -1000,7 +1000,17 @@ static bool gl_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t p
             glEnableClientState(GL_FOG_COORDINATE_ARRAY);
             g->FogCoordPointer(GL_FLOAT, stride, verts + 3);
         }
+        if (c->cur_sec >= 0) {
+            /* v11 : somme des couleurs, après l'environnement de texture */
+            glEnableClientState(GL_SECONDARY_COLOR_ARRAY);
+            g->SecondaryColorPointer(3, GL_FLOAT, stride, verts + c->cur_sec);
+            glEnable(GL_COLOR_SUM);
+        }
         glDrawArrays(mode[prim], 0, nverts);
+        if (c->cur_sec >= 0) {
+            glDisable(GL_COLOR_SUM);
+            glDisableClientState(GL_SECONDARY_COLOR_ARRAY);
+        }
         glDisableClientState(GL_FOG_COORDINATE_ARRAY);
         glDisableClientState(GL_COLOR_ARRAY);
         glDisableClientState(GL_VERTEX_ARRAY);

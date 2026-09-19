@@ -326,7 +326,7 @@ def main():
         ("device asynchrone (caps)", ((caps or 0) & CAP_ASYNC) != 0, True),
         # v10 : les bits que init() du backend résout à chaud atteignent
         # QGPU_REG_CAPS (jusqu'à la v9 le device publiait be->cap, sans eux)
-        ("version du protocole", version, 10),
+        ("version du protocole", version, 11),
         ("requêtes d'occlusion publiées (caps)", ((caps or 0) & CAP_OCCLUSION) != 0, True),
         ("v10 / OpenGL 1.4 publié (caps)", ((caps or 0) & CAP_GL14) != 0, True),
         ("profondeur de file annoncée", (depth or 0) > 0, True),

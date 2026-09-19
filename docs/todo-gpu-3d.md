@@ -10,6 +10,14 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 
 ## État (19/09/2026)
 
+- **OpenGL 1.2 ANNONCÉ et tenu (lot 5, 19/09/2026)** : `GL_VERSION = « 1.2 POMPPC-1.0 »`,
+  **44 extensions**, avec un device v11. Ce qui manquait, fait dans le plugin et vérifié dans
+  l'invité : textures 3D (`tex3d` 9/9 — jamais sous Apple), niveaux et bornes de LOD (`texlod`
+  8/8 — Apple 3/8), spéculaire séparée par les deux chemins (`sepspec` — Apple : non), cette
+  dernière grâce au protocole **v11** (`docs/protocole-v11-couleur-secondaire.md`). `gltest`
+  35/35. Relevés : `docs/re/textures-3d.md`. Limite assumée : une texture 3D **hors** du domaine
+  accéléré sort fausse (le rendu d'Apple n'a pas de 3D, il n'y a pas de repli).
+
 - **Lot 4, côté hôte (19/09/2026) : protocole v10, ce qui manquait à 1.2–1.4.** Cibles 1D,
   3D, cube et rectangle (`TEX_CREATE3`), données **au format de l'application converties par
   l'hôte** (18 couples format/type, profondeur, S3TC décompressé par le cœur, `TEX_IMAGE3`),
@@ -174,11 +182,12 @@ n'existent que sur l'hôte macOS.
 
 ## Points ouverts
 
-- **Vers l'annonce d'OpenGL 1.2 (19/09/2026).** Tenus sous le plugin v10 : textures 3D
-  (`tex3d`), niveaux et bornes de LOD (`texlod`, 8/8 — le rendu d'Apple n'en tient AUCUN),
-  plus tout ce qui l'était. Reste la **couleur spéculaire séparée** : tenue par le chemin brut,
-  pas par le chemin hérité (le rendu d'Apple ne la tient pas non plus). GLEngine la range en
-  `+0x50` du sommet hérité : il faut un dessin hérité avec couleur secondaire côté protocole.
+- **Après 1.2** (19/09/2026) : pour **1.3**, cartes de cube et compression S3TC dans le plugin
+  (l'hôte les tient depuis la v10 ; la compression est aujourd'hui fausse EN SILENCE sous Apple),
+  puis le multiéchantillonnage (3.8) ; pour **1.4**, couleur secondaire (octet de `GL_COLOR_SUM`
+  à relever ; le sommet hérité la porte sans doute en `+0x50`), textures de profondeur,
+  `MIRRORED_REPEAT`, paramètres de point. Le chemin brut sous texture 3D reste à comprendre
+  (GLEngine y jette la géométrie).
 
 - **`qgpu_smoke.py`, contrôle « dernier doorbell refusé (file pleine) »** : il dépend de la course
   entre la rafale envoyée par la console d'Open Firmware et le thread de rendu. Sur un hôte chargé

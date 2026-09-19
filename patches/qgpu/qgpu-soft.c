@@ -1110,7 +1110,7 @@ static uint32_t tri_polygon_mode(const QgpuState *st, const float *v0,
 static void soft_legacy_tri(QgpuSurface *s, const QgpuState *st,
                             QgpuTexture *const *tex, const float *v0,
                             const float *v1, const float *v2, uint32_t words,
-                            const SoftAux *aux)
+                            int sec, const SoftAux *aux)
 {
     uint32_t mode = tri_polygon_mode(st, v0, v1, v2);
     const float *v[3];
@@ -1119,7 +1119,7 @@ static void soft_legacy_tri(QgpuSurface *s, const QgpuState *st,
     int i;
 
     if (mode == QGPU_POLY_FILL) {
-        soft_tri(s, st, tex, v0, v1, v2, QGPU_PRIM_TRIANGLES, -1, aux);
+        soft_tri(s, st, tex, v0, v1, v2, QGPU_PRIM_TRIANGLES, sec, aux);
         return;
     }
     /* Le décalage garde la pente du POLYGONE, mais s'active sur la clé du mode
@@ -1134,9 +1134,9 @@ static void soft_legacy_tri(QgpuSurface *s, const QgpuState *st,
     }
     for (i = 0; i < 3; i++) {
         if (mode == QGPU_POLY_LINE) {
-            soft_line(s, st, q[i], q[(i + 1) % 3], words, -1, aux, NULL);
+            soft_line(s, st, q[i], q[(i + 1) % 3], words, sec, aux, NULL);
         } else {
-            soft_point(s, st, q[i], words, qgpu_u2f(st->v[QGPU_SK_POINT_SIZE]), -1, aux);
+            soft_point(s, st, q[i], words, qgpu_u2f(st->v[QGPU_SK_POINT_SIZE]), sec, aux);
         }
     }
 }
@@ -1153,7 +1153,7 @@ static bool soft_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t
     case QGPU_PRIM_TRIANGLES:
         for (i = 0; i + 2 < nverts; i += 3) {
             soft_legacy_tri(s, st, tex, verts + i * words, verts + (i + 1) * words,
-                            verts + (i + 2) * words, words, &aux);
+                            verts + (i + 2) * words, words, c->cur_sec, &aux);
         }
         break;
     case QGPU_PRIM_LINES:
