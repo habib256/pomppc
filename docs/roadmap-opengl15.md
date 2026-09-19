@@ -53,6 +53,11 @@ Rien n'est deviné : tout se vérifie contre le rendu d'Apple.
 
 ### A. Publier l'accélérateur IOKit (petit, à faire en premier)
 
+> ✅ **Fait le 19/09/2026** (`docs/re/accelerateur-iokit.md`). Le nœud n'est pas rattaché « à
+> l'écran » par une relation IOKit : c'est le **framebuffer** qui désigne l'accélérateur, par
+> `IOAccelTypes`/`IOAccelIndex`, et le kext pose ces propriétés lui-même. Le plugin vit dans
+> `/System/Library/Extensions` et passe avant le GLDriver d'Apple sans astuce de nom.
+
 Le kext publie un nœud `IOAccelerator` portant `IOGLBundleName = GLDriver-POMPPC`, rattaché à
 l'écran. GLEngine charge alors notre bundle **comme un vrai pilote de carte**, au lieu de l'astuce
 du nom de bundle qui trie avant celui d'Apple. C'est aussi le préalable de tout ce que le système

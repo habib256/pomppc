@@ -731,6 +731,24 @@ static void on_exit_stats(void)
                 G.n_qfull, G.n_syncfall);
 }
 
+/* gldTerminateLibrary : GLEngine décharge le plugin (NSUnLinkModule suit).
+   La tranche du kext est rendue tout de suite — le kext draine la file du
+   client avant de détruire ses objets — au lieu de rester prise jusqu'à la fin
+   du processus. Vu sur l'installation de la tâche 4.2 : une copie restée dans
+   Resources est rejetée par GLEngine juste après son gldInitializeLibrary. */
+void pomppc_backend_fini(void)
+{
+    pthread_mutex_lock(&G.mu);
+    if (G.state > 0) {
+        if (getenv("POMPPC_GL_STATS"))
+            on_exit_stats();
+        qgpu_close(&G.q);
+        pomppc_log("POMPPC: plugin déchargé, tranche %lu rendue\n", G.q.index);
+    }
+    G.state = -1;
+    pthread_mutex_unlock(&G.mu);
+}
+
 int pomppc_accel_enabled(void)
 {
     return G.state > 0;
@@ -832,7 +850,12 @@ void pomppc_backend_init(void)
             G.xbar = G.q.version >= 12 && (G.q.caps & QGPU_CAP_GL14) &&
                      !(getenv("POMPPC_GL_XBAR") && getenv("POMPPC_GL_XBAR")[0] == '0');
             G.query_base = G.q.index * QGPU_CLIENT_QUERY_IDS;
-            atexit(on_exit_stats);
+            /* Seulement si le bilan est demandé : un atexit pointe dans NOTRE
+               code, et GLEngine peut décharger le plugin (NSUnLinkModule) avant
+               la fin du processus — le bilan est alors écrit par
+               pomppc_backend_fini, et le processus planterait à sa sortie. */
+            if (getenv("POMPPC_GL_STATS"))
+                atexit(on_exit_stats);
         } else {
             G.state = -1;
         }

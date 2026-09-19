@@ -12,11 +12,16 @@
 # (../../prebuilt, job tools/guest/jobs/prebuilt) sont installés à la place ;
 # PREBUILT=1 les impose même avec gcc.
 #
-#   kext   → /System/Library/Extensions/POMPPCGPU.kext (chargé au démarrage)
-#   plugin → /System/Library/Frameworks/OpenGL.framework/Versions/A/Resources/
-#            GLDriver-POMPPC.bundle, que GLEngine charge pour toute application
-#            à côté du GLDriver d'Apple. Le renderer « POMPPC qgpu » est
-#            annoncé accéléré : CGL le préfère dès qu'il est disponible.
+#   kext   → /System/Library/Extensions/POMPPCGPU.kext (chargé au démarrage) ;
+#            il publie un IOAccelerator dont IOGLBundleName = GLDriver-POMPPC
+#   plugin → /System/Library/Extensions/GLDriver-POMPPC.bundle, que GLEngine
+#            charge alors comme le pilote d'une carte, AVANT le GLDriver
+#            d'Apple (docs/re/accelerateur-iokit.md). Sans le device, pas
+#            d'accélérateur, donc pas de plugin : rien d'Apple n'est modifié.
+#
+# Les installations d'avant la tâche 4.2 posaient le plugin dans le dossier
+# Resources d'OpenGL.framework : cette copie est retirée (sinon GLEngine
+# chargerait le plugin deux fois).
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 KEXTSRC=${KEXTSRC:-$HERE/../../kext/POMPPCGPU}
@@ -25,7 +30,8 @@ RES=/System/Library/Frameworks/OpenGL.framework/Versions/A/Resources
 
 if [ "$1" = "--remove" ]; then
   kextunload -b net.pomppc.POMPPCGPU 2>/dev/null || true
-  rm -rf "$EXT/POMPPCGPU.kext" "$RES/GLDriver-POMPPC.bundle" "$RES/GLDriverPOMPPC.bundle"
+  rm -rf "$EXT/POMPPCGPU.kext" "$EXT/GLDriver-POMPPC.bundle" \
+         "$RES/GLDriver-POMPPC.bundle" "$RES/GLDriverPOMPPC.bundle"
   touch "$EXT"
   echo "retiré ; redémarrer pour oublier le renderer"
   exit 0
@@ -58,11 +64,16 @@ if [ "$BUNDLE" = "$HERE/GLDriver-POMPPC.bundle" ]; then
   cp "$KEXTSRC/qgpu_proto.h" "$HERE/qgpu_proto.h"
   ( cd "$HERE" && make clean >/dev/null && make )
 fi
-rm -rf "$RES/GLDriver-POMPPC.bundle" "$RES/GLDriverPOMPPC.bundle"
-cp -R "$BUNDLE" "$RES/"
-chown -R root:wheel "$RES/GLDriver-POMPPC.bundle"
-chmod -R 755 "$RES/GLDriver-POMPPC.bundle"
+if [ ! -f "$BUNDLE/Contents/MacOS/GLDriver-POMPPC" ]; then
+  echo "$BUNDLE : disposition d'avant la tâche 4.2 (binaire à plat) — recompiler"
+  exit 1
+fi
+rm -rf "$RES/GLDriver-POMPPC.bundle" "$RES/GLDriverPOMPPC.bundle" "$EXT/GLDriver-POMPPC.bundle"
+cp -R "$BUNDLE" "$EXT/"
+chown -R root:wheel "$EXT/GLDriver-POMPPC.bundle"
+chmod -R 755 "$EXT/GLDriver-POMPPC.bundle"
 
 echo "✔ installé. Redémarrer, puis vérifier : kextstat | grep -i pomppc ;"
-echo "  ioreg -l -w 0 | grep -i pomppc ; une application GL doit"
-echo "  rapporter GL_RENDERER = « POMPPC qgpu (OpenGL host GPU) »."
+echo "  ioreg -c POMPPCAccelerator -w 0 (IOGLBundleName) et"
+echo "  ioreg -c IONDRVFramebuffer -w 0 | grep IOAccel (le framebuffer qui le désigne) ;"
+echo "  une application GL doit rapporter GL_RENDERER = « POMPPC qgpu (OpenGL host GPU) »."

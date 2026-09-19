@@ -132,6 +132,12 @@ Rien de ce qui suit n'est documenté par Apple. Tout a été lu dans l'image Tig
 - Un pixel format est rattaché au plugin par cet octet de son identifiant de rendu : le plugin
   réécrit `0x02xx → 0x77xx` dans `RendererInfo` et dans les pixel formats, et restaure avant de
   rendre la main au code d'Apple.
+- **Depuis le 19/09/2026 (tâche 4.2)**, le plugin est chargé comme le pilote d'une carte : le
+  kext publie un `IOAccelerator` (`IOGLBundleName = GLDriver-POMPPC`) que les framebuffers
+  désignent par `IOAccelTypes`, et GLEngine charge
+  `/System/Library/Extensions/GLDriver-POMPPC.bundle/Contents/MacOS/GLDriver-POMPPC` **avant**
+  les `GLDriver*` de `Resources` (`docs/re/accelerateur-iokit.md`). Le paragraphe suivant décrit
+  l'astuce d'avant, qui ne sert plus que dans la VM de dev en single-user (aucun framebuffer).
 - CGL retient **le premier renderer qui convient** : le bundle s'appelle `GLDriver-POMPPC` pour
   trier avant `GLDriver.bundle` (« - » < « . »). Il est aussi le seul à répondre à
   `kCGLPFAAccelerated` (l'attribut 73 est retiré de la copie passée au GLDriver d'Apple, et le
@@ -664,6 +670,7 @@ liste telle qu'une application la lit, qui l'a montré.
 | application réelle | Zenerchi (§4.6) | menus et partie corrects, 42 img/s en partie, présentation directe |
 | plugin en fenêtre, dans le bureau | `glwin` (GLUT) | OK ; image témoin visible dans la fenêtre à l'écran |
 | multi-processus | 5 × `gltest game` + `qgpu_test` | 4 accélérés, le 5e en logiciel, tous corrects |
+| accélérateur IOKit (4.2, 19/09/2026) | `accelprobe`, jobs `accel` et `install` | framebuffer → `POMPPCAccelerator` → `IOGLBundleName` ; plugin chargé depuis `Extensions` seulement ; renderer POMPPC en tête ; kext installé et chargé avant le WindowServer : bureau normal, Quartz Extreme inactif ; déchargement propre ; `gltest` 40/40 |
 | doorbell asynchrone (v9) | `guest/qgpu-test`, section v9 | soumission asynchrone, barrière, relecture visible **seulement après** elle, rafale de 64 dont 3 refusées file pleine, erreur comptée dans `ERRORS`, puis un `SUBMIT` **synchrone** qui marche toujours — **les deux formes d'appel cohabitent** |
 | plugin asynchrone (v9) | `gltest` × 29 scènes × {`ASYNC=0`, `ASYNC=1`}, + sans fusion | tout « OK (0 échec) », et **0/255 sur l'image entière** entre synchrone, asynchrone et asynchrone-sans-fusion ; `glwin` OK |
 | stress asynchrone | 4 × `gltest game` simultanés + `qgpu_test` | tous « OK (0 échec) », images des clients 1 et 4 identiques au pixel près |
@@ -730,6 +737,10 @@ leur joint les sources invité du dépôt.
 | boîte aux lettres « fragmentée (secteur 12319) » | HFS+ découpe un fichier écrit au fil de l'eau ; l'agent lit en secteurs consécutifs. `setup.sh` préalloue chaque boîte d'un seul tenant (`fcntl(F_PREALLOCATE)`, `F_ALLOCATECONTIG`), et `prepare` vérifie la contiguïté |
 | `installer -pkg` ne rend jamais la main, sans un octet écrit | en single-user, `installer` attend un service qui ne tourne pas : le job `xcode` dépaquette les `Archive.pax.gz` à la racine et refait `gcc_select 4.0` |
 | l'agent relancé rejoue un job d'avant (et s'y bloque) | l'agent ignore désormais, au démarrage, le job déjà présent dans la boîte |
+| en single-user, le plugin d'`Extensions` n'est pas chargé | **aucun framebuffer** : IONDRVSupport n'est chargé que par `kextd`, donc aucun écran ne désigne l'accélérateur. `plugin_layout` (`jobs/lib.sh`) pose alors aussi une copie « à plat » dans `Resources`, et la retire en mode bureau |
+| `ioreg -d`, `ioreg -r` : usage ; `ioreg -l` : « can't obtain properties » | l'ioreg de Tiger n'a ni `-d` ni `-r`, et `-l` y échoue en entier : interroger par classe (`ioreg -c POMPPCAccelerator`) ou compter les nœuds de l'arbre (`fb_count`) |
+| un job « bloqué », VM au repos | un `gui_run` en single-user attend un relais de session qui n'existe pas : vérifier le mode avant (`fb_count`) |
+| après `devloop.py stop` sur un job bloqué : « blocks on volume not allocated », `Input/output error` | l'arrêt coupe la VM comme une panne de courant, pendant des écritures. Réparer en single-user **avant** `mount -uw /` : `/sbin/fsck -fy`, `reboot`, puis `fsck` à nouveau jusqu'à « appears to be OK ». Les jobs marquent désormais leurs étapes sur la console avec un `sync` (`step`) |
 | `CGLChoosePixelFormat` → 10015 (`kCGLBadCodeModule`) avec `GL_RESOURCES` | `GL_RESOURCES` ne marche pas sur ce 10.4.6, **même** avec une copie complète des bundles du système : le job `gpu` installe le plugin dans `OpenGL.framework/Versions/A/Resources`, `POMPPC_GL_DISABLE=1` donnant la référence d'Apple |
 
 Résultat du premier passage (RTX 4060 Ti, device v10) : `qgpu_test` 0 échec ; **`gltest`
@@ -766,5 +777,5 @@ Quartz Extreme, Core Image) dans **`docs/roadmap-opengl15.md`**. En résumé :
 2. **Stencil**, puis modes de polygone, pointillés et lissage : ce qui manque à OpenGL 1.3.
 3. **Zero-copy** : laisser le device écrire dans la VRAM plutôt que recopier l'image relue.
 4. **Exécution asynchrone** du doorbell (FENCE et IRQ DONE déjà en place).
-5. **Accélérateur IOKit** (`IOGLBundleName`) à la place de l'astuce du nom de bundle.
+5. ✅ **Accélérateur IOKit** (`IOGLBundleName`) à la place de l'astuce du nom de bundle (tâche 4.2).
 6. **Autres backends hôte** : Vulkan (natif ou Zink), Metal (ANGLE).

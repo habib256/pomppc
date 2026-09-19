@@ -15,6 +15,9 @@
 #   QFB_RES=1280x800          # mode par défaut proposé par l'écran QFB (avec QFB=1)
 #   GPU=1 ./run_tiger.sh      # + GPU paravirtuel qgpu-pci (kext POMPPCGPU, rendu hôte OpenGL)
 #   GPU_BACKEND=soft|gl|auto  # backend de rendu hôte du qgpu (défaut : auto)
+#   FASTFP=1 ./run_tiger.sh   # flottant rapide (le FPU de l'hôte au lieu du
+#                             # logiciel) — opt-in, éteint par défaut tant que
+#                             # ce n'est pas mesuré ; docs/flottant-rapide.md
 #   NOPAD=1 ./run_tiger.sh    # coupe le passthrough de la manette USB
 #   NOCD=1 ./run_tiger.sh     # omet le lecteur CD amovible vide 'gamecd'
 #   GLISO=1 ./run_tiger.sh    # insère l'ISO des sources du plugin GL (disks/pomppc-src.iso)
@@ -103,6 +106,28 @@ if [ "$SMP_N" -ge 2 ]; then
 else
   BIN="$QEMU_BIN"
   MODE="mono-cœur${SND_TAG}"
+fi
+
+# --- Flottant rapide (propriété de CPU x-fast-fp, patches/fastfp/) ---
+# Laisse softfloat confier les opérations flottantes courantes au FPU de l'hôte.
+# Résultats identiques au bit près ; seuls FPSCR[FI] (constant à 1) et la règle
+# de transition de FX dévient. Voir docs/flottant-rapide.md.
+# OPT-IN : éteint par défaut tant que le gain n'est pas mesuré sur la VM.
+#
+# SONDÉ, jamais supposé — et pour une raison plus dure que d'habitude : une
+# propriété absente dans -cpu ne produit pas un warning, elle fait QUITTER QEMU.
+# Poser ,x-fast-fp=on à l'aveugle sur un binaire non patché ne dégraderait pas
+# le lanceur, il l'empêcherait de démarrer.
+CPU_SPEC="$CPU"
+if [ "${FASTFP:-0}" != 0 ]; then
+  if qemu_cpu_has_fastfp "$BIN" "$MACHINE" "$CPU"; then
+    CPU_SPEC="$CPU,x-fast-fp=on"
+    MODE="$MODE + FLOTTANT RAPIDE"
+  else
+    echo "⚠  FASTFP=1 demandé mais ce QEMU n'a pas la propriété 'x-fast-fp'." >&2
+    echo "   Reconstruis le binaire de référence : ./scripts/build_qemu_qfb.sh" >&2
+    echo "   (lancement en flottant exact, comme d'habitude.)" >&2
+  fi
 fi
 
 # --- Affichage ---
@@ -216,7 +241,7 @@ read -r -a USER_EXTRA <<< "${EXTRA_ARGS:-}"
 BOOTDEV='hd:10,\System\Library\CoreServices\BootX'
 MON="$SCR/mon.sock"; rm -f "$MON"
 
-echo "▶ Tiger : $MODE | cpu=$CPU ram=${RAM}Mo affichage=$DISP \
+echo "▶ Tiger : $MODE | cpu=$CPU_SPEC ram=${RAM}Mo affichage=$DISP \
 réseau=$([ -n "${NET:-}" ] && echo on || echo off) \
 disque=$([ -n "${SNAPSHOT:-}" ] && echo jetable || echo persistant)"
 echo "  moniteur QEMU : $MON"
@@ -236,7 +261,7 @@ if [ -z "${NOPAD:-}" ] && [ -e /dev/input/js0 ] \
   fi
 fi
 
-exec "$BIN" -M "$MACHINE" -cpu "$CPU" -m "$RAM" -smp "$SMP_N" \
+exec "$BIN" -M "$MACHINE" -cpu "$CPU_SPEC" -m "$RAM" -smp "$SMP_N" \
   -display "$DISP" -g "$RES" \
   -drive "file=$DISK,format=qcow2,media=disk" ${SNAP_ARGS[@]+"${SNAP_ARGS[@]}"} ${CD_ARGS[@]+"${CD_ARGS[@]}"} \
   ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${EXTRA[@]+"${EXTRA[@]}"} ${AUDIO[@]+"${AUDIO[@]}"} \

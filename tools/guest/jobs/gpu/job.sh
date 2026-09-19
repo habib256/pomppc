@@ -1,17 +1,17 @@
 #!/bin/sh
 # Chaîne GPU complète dans la VM de dev : kext compilé puis chargé depuis /tmp
 # (pas installé : un kext qui panique se répare par un redémarrage), qgpu_test,
-# plugin INSTALLÉ dans le Resources d'OpenGL.framework, gltest joué scène par
-# scène sous le plugin et sous le rendu d'Apple (POMPPC_GL_DISABLE=1), images
-# comparées.
+# plugin INSTALLÉ dans /System/Library/Extensions (GLEngine l'y charge par
+# l'IOGLBundleName de l'accélérateur que publie le kext, tâche 4.2), gltest
+# joué scène par scène sous le plugin et sous le rendu d'Apple
+# (POMPPC_GL_DISABLE=1), images comparées.
 #
 # Pourquoi installer le plugin : GL_RESOURCES ne marche pas sur ce 10.4.6 —
 # même une copie complète des bundles du système y donne kCGLBadCodeModule
 # (10015) à tout choix de pixel format (vu en vrai, job diag du 19/09/2026).
 #
 #   SCENES="tri tex" : restreindre ; KEEP=1 : garder les PPM dans out/
-SRC=$PWD/src; OUT=$PWD/out
-SDK=/Developer/SDKs/MacOSX10.4u.sdk
+. ./lib.sh          # SRC, OUT, SDK, RES, EXT, plugin_layout
 SCENES=${SCENES:-"tri gouraud depth fill prims tex texfmt texpack texpersp comb mix state
   stencil depthrt varray game lit texgen clip fogz bigstrip dlist mixte fusion blendc logicop
   polymode stipple occl caps entry v15 tex3d texlod sepspec cube tex13 tex14 tcprobe gl15"}
@@ -26,7 +26,8 @@ rm -rf /tmp/POMPPCGPU.kext && cp -R POMPPCGPU.kext /tmp/
 chown -R root:wheel /tmp/POMPPCGPU.kext && chmod -R 755 /tmp/POMPPCGPU.kext
 kextload -t /tmp/POMPPCGPU.kext 2>&1 | tail -2
 kextstat | grep -i pomppc
-ioreg -l -w 0 2>/dev/null | grep -E "POMPPCGPU|Version|Caps" | head -5   # (ioreg -r : 10.5 et plus)
+# (l'ioreg de Tiger n'a pas -r, et -l y échoue en entier : requête par classe)
+ioreg -c POMPPCGPU -w 0 2>/dev/null | grep -E '"QGPU(Version|Caps|Backend)"' | sed 's/^[ |]*//'
 
 echo "== qgpu_test"
 cd $SRC/guest/qgpu-test && make > $OUT/qgpu-test-build.txt 2>&1 || { tail -10 $OUT/qgpu-test-build.txt; exit 1; }
@@ -34,10 +35,11 @@ cd $SRC/guest/qgpu-test && make > $OUT/qgpu-test-build.txt 2>&1 || { tail -10 $O
 
 echo "== plugin"
 cd $SRC/guest/gldriver && make > $OUT/plugin-build.txt 2>&1 || { tail -15 $OUT/plugin-build.txt; exit 1; }
-ls -l GLDriver-POMPPC.bundle/GLDriver-POMPPC | awk '{print "plugin", $5, "octets"}'
-RES=/System/Library/Frameworks/OpenGL.framework/Versions/A/Resources
-rm -rf $RES/GLDriver-POMPPC.bundle && cp -R GLDriver-POMPPC.bundle $RES/
-chown -R root:wheel $RES/GLDriver-POMPPC.bundle && chmod -R 755 $RES/GLDriver-POMPPC.bundle
+ls -l GLDriver-POMPPC.bundle/Contents/MacOS/GLDriver-POMPPC | awk '{print "plugin", $5, "octets"}'
+rm -rf $EXT/GLDriver-POMPPC.bundle && cp -R GLDriver-POMPPC.bundle $EXT/
+chown -R root:wheel $EXT/GLDriver-POMPPC.bundle && chmod -R 755 $EXT/GLDriver-POMPPC.bundle
+plugin_layout
+ioreg -c POMPPCAccelerator -w 0 2>/dev/null | grep '"IOGLBundleName"' | sed 's/^[ |]*//'
 
 echo "== gltest"
 cd $SRC/guest/gltest

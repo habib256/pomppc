@@ -15,12 +15,44 @@ Pas de reboot, pas de conversion d'image : une itération = le temps du job.
     devloop.py shot [FICHIER.png] # capture d'écran
     devloop.py type "texte\\n"     # frappe au clavier
     devloop.py click X Y [LxH]    # clic souris (LxH = résolution courante)
-    devloop.py stop
+    devloop.py shutdown [--gui]   # ARRÊT SÛR (single-user, ou bureau) : voir plus bas
+    devloop.py stop               # coupe le courant — n'utiliser qu'en dernier recours
 
 Disque : $DEVDISK (raw), par défaut le tiger-dev.raw du scratchpad n'est pas
 connu du dépôt : il faut le passer explicitement. CDROM=image[:image…] ajoute
 des lecteurs en lecture seule au démarrage (le DVD de Tiger pour installer les
 Xcode Tools, par exemple).
+
+Variables d'environnement :
+    QEMU_BIN   binaire QEMU (défaut ~/src/qemu/build/qemu-system-ppc ; en SMP>1
+               le même nom suffixé « 64 »)
+    CPU_OPTS   options ajoutées au modèle de CPU. `-cpu g4` devient
+               `-cpu g4,$CPU_OPTS` — p. ex. CPU_OPTS=x-fast-fp=on pour le mode
+               « flottant rapide ». Vide (défaut) = `-cpu g4` inchangé.
+    DEVDISK, CDROM, SMP, SND, RES, NET, GPU_BACKEND, GPU_TRACE, GUI_USER
+
+Rejouer un banc avec un autre binaire et un autre mode de CPU :
+
+    export DEVDISK=disks/tiger-dev.raw
+    QEMU_BIN=~/src/qemu-fastfp/build/qemu-system-ppc CPU_OPTS=x-fast-fp=on \\
+        python3 tools/guest/devloop.py start
+    tools/guest/jobs/stage.sh fpbench /tmp/j
+    python3 tools/guest/devloop.py run /tmp/j --timeout 900
+    python3 tools/guest/devloop.py shutdown
+
+ARRÊT : `stop` coupe la VM comme une panne de courant. Fait pendant un job, ou
+racine montée en écriture sans `sync`, il ABÎME le HFS+ (« blocks on volume not
+allocated », Input/output error). `shutdown` fait la séquence sûre en
+single-user : Ctrl-C à l'agent, `sync`, `mount -ur /`, `sync`, fermeture de la
+connexion QMP, puis `halt` — qui démonte les volumes et éteint la VM lui-même
+(`stop` n'est appelé que si `halt` n'a rien donné). Vérifié : après un
+`shutdown`, `/sbin/fsck -fy` au démarrage suivant dit « appears to be OK ».
+En mode BUREAU il n'y a pas d'invite où taper : `shutdown --gui` passe par
+l'agent (job minuscule qui lance `shutdown -h now` en tâche de fond et rend la
+main tout de suite, sinon `run` attendrait son délai entier).
+Réparation après un arrêt brutal : démarrer en
+single-user et, AVANT `mount -uw /`, `/sbin/fsck -fy`, `reboot`, puis `fsck` de
+nouveau jusqu'à « appears to be OK ».
 """
 import json, os, shutil, socket, struct, subprocess, sys, tarfile, tempfile, io, time
 
@@ -227,7 +259,11 @@ def vm_args(gui, cdroms=()):
     for cd in cdroms:
         extra += ["-drive", "file=%s,format=raw,media=cdrom,readonly=on" % cd]
     backend = os.environ.get("GPU_BACKEND", "auto")
-    return [qemu, "-M", "mac99,via=pmu", "-cpu", "g4", "-m", ram, "-smp", str(smp),
+    # CPU_OPTS s'ajoute au modèle : CPU_OPTS=x-fast-fp=on → -cpu g4,x-fast-fp=on
+    cpu = "g4"
+    if os.environ.get("CPU_OPTS"):
+        cpu += "," + os.environ["CPU_OPTS"].lstrip(",")
+    return [qemu, "-M", "mac99,via=pmu", "-cpu", cpu, "-m", ram, "-smp", str(smp),
             *extra,
             "-display", "none", "-bios", BIOS,
             "-g", os.environ.get("RES", "1024x768x32"),
@@ -515,6 +551,95 @@ def run(folder, timeout):
     return 1
 
 
+def wait_gone(pid, halt_timeout, how):
+    """Attend que le processus QEMU disparaisse de lui-même ; `stop()` en repli."""
+    pidf = os.path.join(STATE, "qemu.pid")
+    t0 = time.time()
+    while pid and time.time() - t0 < halt_timeout:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            if os.path.exists(pidf):
+                os.remove(pidf)
+            print("VM arrêtée par %s en %d s (volume démonté proprement)" % (how, time.time() - t0))
+            return True
+        time.sleep(2)
+    print("%s n'a pas éteint la VM en %d s : extinction forcée" % (how, halt_timeout))
+    stop()
+    return False
+
+
+def shutdown_gui(halt_timeout=180):
+    """ARRÊT SÛR d'une VM lancée en mode BUREAU (`start --gui`).
+
+    Il n'y a pas d'invite single-user où taper : on passe par l'agent, avec un
+    job minuscule qui demande l'extinction EN TÂCHE DE FOND puis rend la main —
+    `shutdown -h now` tue l'agent, un job qui l'appellerait au premier plan ne
+    rendrait jamais son résultat et `run` attendrait son délai entier.
+    """
+    pidf = os.path.join(STATE, "qemu.pid")
+    pid = int(open(pidf).read()) if os.path.exists(pidf) else None
+    d = tempfile.mkdtemp(prefix="devloop-halt-")
+    try:
+        with open(os.path.join(d, "job.sh"), "w") as f:
+            f.write("#!/bin/sh\nsync; sync\n"
+                    "( sleep 5; sync; sync; /sbin/shutdown -h now ) &\n"
+                    "echo 'extinction demandee dans 5 s'\n")
+        run(d, 120)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    wait_gone(pid, halt_timeout, "`shutdown -h now`")
+
+
+def shutdown(wait=8, halt_timeout=120):
+    """ARRÊT SÛR d'une VM lancée en single-user (mode bureau : `shutdown --gui`).
+
+    `stop()` envoie `quit` à QEMU : c'est une coupure de courant. Fait pendant un
+    job, ou racine montée en écriture sans `sync`, il ABÎME le HFS+ (vu en vrai :
+    « blocks on volume not allocated », Input/output error ; réparation par
+    `/sbin/fsck -fy` AVANT tout `mount -uw /`). La séquence sûre :
+
+      1. Ctrl-C : l'agent rend la main au shell single-user (aucun job en cours —
+         `run` est synchrone, il rend la main quand le job est fini) ;
+      2. `sync` deux fois ;
+      3. `mount -ur /` : la racine repasse en lecture seule. Échoue souvent en
+         « mount_hfs: Resource busy » (un fichier reste ouvert en écriture) —
+         ce n'est PAS bloquant, l'étape 4 fait le travail ;
+      4. `halt` : Darwin synchronise et DÉMONTE les volumes, le journal HFS+ est
+         refermé et le volume marqué propre. C'est ce qui remplace la coupure ;
+         la VM s'éteint d'elle-même (mac99 via=pmu) ;
+      5. FERMER la connexion QMP (une seule à la fois) et n'appeler `stop()` que
+         si QEMU est encore là après `halt_timeout`.
+
+    La capture bench/devloop/shutdown.png montre le déroulé.
+    """
+    pidf = os.path.join(STATE, "qemu.pid")
+    pid = int(open(pidf).read()) if os.path.exists(pidf) else None
+    q = Qmp()
+    try:
+        # Ctrl-C à l'agent : retour à l'invite du shell single-user
+        q("send-key", keys=[{"type": "qcode", "data": "ctrl"},
+                            {"type": "qcode", "data": "c"}], **{"hold-time": 100})
+        time.sleep(3)
+        type_text(q, "\n")
+        time.sleep(2)
+        for cmd, pause in (("sync; sync\n", wait),
+                           ("mount -ur /\n", wait),
+                           ("sync; sync\n", wait),
+                           ("mount\n", 4)):
+            type_text(q, cmd)
+            time.sleep(pause)
+        shot(q, os.path.join(STATE, "shutdown.png"))
+        type_text(q, "sync; sync; halt\n")
+    finally:
+        try:
+            q.f.close(); q.s.close()
+        except OSError:
+            pass
+    # `halt` démonte puis coupe l'alimentation : on lui laisse le temps
+    wait_gone(pid, halt_timeout, "`halt`")
+
+
 def stop():
     try:
         q = Qmp(); q("quit")
@@ -549,6 +674,11 @@ def main():
         # click X Y [LxH] : coordonnées dans la résolution d'écran courante
         scr = tuple(int(v) for v in a[3].split("x")) if len(a) > 3 else (1024, 768)
         click(Qmp(), int(a[1]), int(a[2]), scr)
+    elif a[0] == "shutdown":
+        if "--gui" in a:
+            shutdown_gui()
+        else:
+            shutdown(int(a[a.index("--wait") + 1]) if "--wait" in a else 8)
     elif a[0] == "stop":
         stop()
     return 0

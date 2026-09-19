@@ -23,6 +23,30 @@ Pilote IOKit (Mac OS X 10.4, PowerPC, gcc 4.0) du device QEMU `qgpu-pci`
 - sert l'interruption `DONE` (filtre + acquittement), et s'en sert pour dormir
   pendant une attente de barrière.
 
+## 4.2 : l'accélérateur publié
+
+Un vrai pilote de carte se fait connaître d'OpenGL.framework par deux propriétés que **son kext
+pose sur le framebuffer** : `IOAccelTypes` (chemin d'un objet de classe `IOAccelerator`) et
+`IOAccelIndex`. CGL retrouve l'accélérateur de chaque écran (`IOAccelFindAccelerator`), et
+GLEngine charge le bundle nommé par son `IOGLBundleName` depuis `/System/Library/Extensions`,
+avant les `GLDriver*` d'OpenGL.framework (`docs/re/accelerateur-iokit.md`).
+
+Le kext fait de même :
+
+- il publie un **nub enfant** `POMPPCAccelerator` (classe `IOAccelerator`, d'où la dépendance à
+  `com.apple.iokit.IOGraphicsFamily`) portant `IOGLBundleName = GLDriver-POMPPC`. Pas
+  `POMPPCGPU` lui-même : ses clients l'ouvrent en type 0, qui est aussi
+  `kIOAccelSurfaceClientType`, le type qu'ouvriraient CGL (pbuffers) et le WindowServer. Le nub
+  **refuse toute ouverture** tant qu'il n'y a pas de surfaces (Quartz Extreme, tâche 4.4) ;
+- il pose `IOAccelTypes`/`IOAccelIndex` sur chaque `IOFramebuffer` publié (notification, donc
+  aussi en chargement à chaud), sauf sur un framebuffer qui désigne déjà un autre accélérateur,
+  et les retire au déchargement ;
+- il ne publie **pas** `AccelCaps` : le WindowServer tenterait alors Quartz Extreme.
+
+`ioreg -c POMPPCAccelerator` montre le nub ; `guest/gltest/accelprobe` montre ce qu'en voit CGL.
+En single-user il n'y a aucun framebuffer (IONDRVSupport n'est chargé que par `kextd`) : rien à
+lier, c'est normal.
+
 ## v9 : le doorbell asynchrone
 
 Le device exécute désormais les soumissions sur un **thread de rendu** et les met
@@ -81,7 +105,7 @@ Normalement par `guest/gldriver/install.sh`, qui installe kext et plugin. À la 
 cd /pomppc/POMPPCGPU        # ou le CD produit par scripts/make_kext_iso.sh
 make                        # gcc-4.0 + SDK MacOSX10.4u (Xcode Tools du DVD Tiger)
 sudo make load              # kextload -t : valide dépendances et ABI avant tout
-kextstat | grep POMPPCGPU ; ioreg -l -w 0 | grep -i pomppc   # (ioreg -r n'existe pas sous Tiger)
+kextstat | grep POMPPCGPU ; ioreg -c POMPPCAccelerator -w 0   # (ni -r ni -d sous Tiger)
 cd ../qgpu-test && make && ./qgpu_test     # scène de référence, pixels vérifiés, out.ppm
 ```
 

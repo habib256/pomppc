@@ -10,8 +10,11 @@ NAME=$1; DEST=$2
 rm -rf "$DEST"; mkdir -p "$DEST/src/kext" "$DEST/src/guest"
 cp "$ROOT/tools/guest/jobs/$NAME/job.sh" "$ROOT/tools/guest/jobs/lib.sh" "$DEST/"
 cp -R "$ROOT/kext/POMPPCGPU" "$DEST/src/kext/"
-cp -R "$ROOT/guest/gldriver" "$ROOT/guest/gltest" "$ROOT/guest/qgpu-test" "$DEST/src/guest/"
+cp -R "$ROOT/guest/gldriver" "$ROOT/guest/gltest" "$ROOT/guest/qgpu-test" \
+      "$ROOT/guest/fpbench" "$DEST/src/guest/"
 # rien de compilé côté hôte ne doit partir (objets d'une autre machine)
 find "$DEST/src" \( -name '*.o' -o -name '*.bundle' -o -name 'glres' -o -name '*.kext' \) \
      -prune -exec rm -rf {} +
+# (fpbench est AUSSI le nom du dossier : ne retirer que les exécutables)
+find "$DEST/src" -type f \( -name 'fpcheck' -o -name 'fpbench' \) -exec rm -f {} +
 echo "$DEST"

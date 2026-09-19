@@ -22,6 +22,8 @@
 	<string>0.1</string>
 	<key>OSBundleLibraries</key>
 	<dict>
+		<key>com.apple.iokit.IOGraphicsFamily</key>
+		<string>1.4</string>
 		<key>com.apple.iokit.IOPCIFamily</key>
 		<string>1.4</string>
 		<key>com.apple.kpi.iokit</key>

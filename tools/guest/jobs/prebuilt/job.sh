@@ -1,6 +1,6 @@
 #!/bin/sh
 # Binaires prêts à installer, pour un Tiger SANS Xcode Tools : kext, plugin
-# OpenGL, gltest et glwin, compilés ici puis rapportés dans out/prebuilt.
+# OpenGL, gltest, glwin et accelprobe, compilés ici puis rapportés dans out/prebuilt.
 # scripts/make_kext_iso.sh les grave sur le CD (disks/prebuilt), et
 # guest/gldriver/install.sh les installe quand gcc-4.0 manque.
 . ./lib.sh
@@ -11,7 +11,9 @@ P=$OUT/prebuilt; mkdir -p $P
   { tail -15 $OUT/plugin-build.txt; exit 1; }
 gltest_build || exit 1
 ( cd $SRC/guest/gltest &&
-  /usr/bin/gcc-4.0 -arch ppc -O1 -isysroot $SDK -o glwin glwin.c -framework GLUT -framework OpenGL ) || exit 1
+  /usr/bin/gcc-4.0 -arch ppc -O1 -isysroot $SDK -o glwin glwin.c -framework GLUT -framework OpenGL &&
+  /usr/bin/gcc-4.0 -arch ppc -O1 -isysroot $SDK -o accelprobe accelprobe.c -framework IOKit \
+    -framework CoreFoundation -framework OpenGL -framework ApplicationServices ) || exit 1
 cp -R $SRC/kext/POMPPCGPU/POMPPCGPU.kext $SRC/guest/gldriver/GLDriver-POMPPC.bundle $P/
-cp $SRC/guest/gltest/gltest $SRC/guest/gltest/glwin $P/
+cp $SRC/guest/gltest/gltest $SRC/guest/gltest/glwin $SRC/guest/gltest/accelprobe $P/
 ls -lR $P | head -30
