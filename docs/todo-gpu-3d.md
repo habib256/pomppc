@@ -6,7 +6,8 @@ aune : *combien de travail quitte le PowerPC émulé ?*
 
 Ce fichier est le tableau de bord ; il est tenu à jour à chaque lot. Le contexte long est dans
 `docs/roadmap-opengl15.md`, la conception et les offsets relevés dans `docs/gpu-3d-tiger.md`,
-les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
+les relevés de rétro-ingénierie nouveaux dans `docs/re/`. Les amorces de recherche déjà
+écrites, à ne pas refaire, sont en *Recherches amorcées*.
 
 ## État (19/09/2026)
 
@@ -113,7 +114,7 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 
 | # | Tâche | Statut |
 |---|---|---|
-| 1.1 | ✅ *relevé fait (`docs/re/capacites-glengine.md`) et **vérifié dans l'invité le 18/09/2026** (`docs/re/verification-tcl.md`, V1 et V6) : le bloc de configuration est confirmé à l'octet près, mais le verrou réel est le **bit 0 du retour de `gldInitDispatch`/`gldUpdateDispatch`**, relu à chaque changement d'état (donc repli possible par lot d'état), et il faut en plus publier un descripteur de sortie de sommet en `cfg+0x11c` sans quoi GLEngine jette la géométrie. Avec les deux, les sommets arrivent en `BeginPrimitiveBuffer`/`EndPrimitiveBuffer` en **coordonnées d'objet**. Restent V2–V5 et V7.* **Codes du descripteur relevés le 18/09/2026** (`docs/re/descripteur-de-sommet.md`) : une entrée vaut `(code << 10) | ((composantes − 1) << 8) | décalageEnMots`, les codes sont les indices d'attribut d'entrée (0 position, 1 normale, 2 couleur, 3 brouillard, 4 couleur secondaire, 5 poids, 8..15 coordonnées de texture, 16..31 attributs génériques, 32..39 matériau ; **le code 6, drapeau d'arête, plante GLEngine**). Confirmé dans l'invité : on reçoit les attributs **bruts** — ni transformation, ni éclairage, ni texgen, ni matrice de texture, ni découpage, ni élimination de face — et **aucun code ne donne de sortie transformée ou éclairée** ; `glDrawArrays`, `glDrawElements` et les listes d'affichage passent tous par `Begin`/`EndPrimitiveBuffer`, les modes de primitive (rubans, éventails, quads) sont transmis tels quels. Aucun pilote de 10.4.6 ne publie `cfg+0x11c` : le GeForce3 et le Radeon annoncent la T&L matérielle mais passent par `RenderVertexArray`/`RenderVertexBuffer`, le Rage 128 reçoit des sommets **déjà transformés** dans le sommet interne de GLEngine. **Décision : option A (attributs bruts, DRAW_RAW v7)** ; borne supérieure du gain mesurée sur `gltest spin` à rastérisation négligeable : 415 → 788 img/s (×1,9).* Le verrou est **l'octet `+0x79` du bloc de configuration passé à `gldCreateContext`** : à 1, GLEngine envoie la géométrie brute (`BeginPrimitiveBuffer` +0x50, `RenderVertexBuffer` +0x4c, `RenderVertexArray` +0x70) ; il est figé à la création du contexte. **Relever la négociation des capacités** : ce qui décide GLEngine à appeler les entrées « hautes » du pilote (`CreateVertexArray`, `RenderVertexArray` +0x70, `AllocVertexBuffer`, `CreatePipelineProgram`) plutôt que de transformer lui-même. Lire comment les pilotes ATI/NVIDIA de 10.4.6 répondent à `GetRendererInfo`, `GetInteger`, `GetString`. **Verrou de tout l'axe.** | relevé ✅, **vérifié** ✅ |
+| 1.1 | ✅ *relevé fait (`docs/re/capacites-glengine.md`) et **vérifié dans l'invité le 18/09/2026** (`docs/re/verification-tcl.md`, V1 et V6) : le bloc de configuration est confirmé à l'octet près, mais le verrou réel est le **bit 0 du retour de `gldInitDispatch`/`gldUpdateDispatch`**, relu à chaque changement d'état (donc repli possible par lot d'état), et il faut en plus publier un descripteur de sortie de sommet en `cfg+0x11c` sans quoi GLEngine jette la géométrie. Avec les deux, les sommets arrivent en `BeginPrimitiveBuffer`/`EndPrimitiveBuffer` en **coordonnées d'objet**. V3, V4, V5 faites ; restent V2 et V7.* **Codes du descripteur relevés le 18/09/2026** (`docs/re/descripteur-de-sommet.md`) : une entrée vaut `(code << 10) | ((composantes − 1) << 8) | décalageEnMots`, les codes sont les indices d'attribut d'entrée (0 position, 1 normale, 2 couleur, 3 brouillard, 4 couleur secondaire, 5 poids, 8..15 coordonnées de texture, 16..31 attributs génériques, 32..39 matériau ; **le code 6, drapeau d'arête, plante GLEngine**). Confirmé dans l'invité : on reçoit les attributs **bruts** — ni transformation, ni éclairage, ni texgen, ni matrice de texture, ni découpage, ni élimination de face — et **aucun code ne donne de sortie transformée ou éclairée** ; `glDrawArrays`, `glDrawElements` et les listes d'affichage passent tous par `Begin`/`EndPrimitiveBuffer`, les modes de primitive (rubans, éventails, quads) sont transmis tels quels. Aucun pilote de 10.4.6 ne publie `cfg+0x11c` : le GeForce3 et le Radeon annoncent la T&L matérielle mais passent par `RenderVertexArray`/`RenderVertexBuffer`, le Rage 128 reçoit des sommets **déjà transformés** dans le sommet interne de GLEngine. **Décision : option A (attributs bruts, DRAW_RAW v7)** ; borne supérieure du gain mesurée sur `gltest spin` à rastérisation négligeable : 415 → 788 img/s (×1,9).* Le verrou est **l'octet `+0x79` du bloc de configuration passé à `gldCreateContext`** : à 1, GLEngine envoie la géométrie brute (`BeginPrimitiveBuffer` +0x50, `RenderVertexBuffer` +0x4c, `RenderVertexArray` +0x70) ; il est figé à la création du contexte. **Relever la négociation des capacités** : ce qui décide GLEngine à appeler les entrées « hautes » du pilote (`CreateVertexArray`, `RenderVertexArray` +0x70, `AllocVertexBuffer`, `CreatePipelineProgram`) plutôt que de transformer lui-même. Lire comment les pilotes ATI/NVIDIA de 10.4.6 répondent à `GetRendererInfo`, `GetInteger`, `GetString`. **Verrou de tout l'axe.** | relevé ✅, **vérifié** ✅ |
 | 1.2 | ✅ **Fait le 18/09/2026** : relevé par lecture (`docs/re/tableaux-de-sommets.md`) **puis établi par l'expérience dans l'invité** (`docs/re/etat-tcl.md`, sondes `lightprobe`, `matprobe`, `mtxprobe`, `tgprobe`, `xformprobe` de `guest/gltest`, diff des vidages par `tools/re/diffstate.py`). Sont confirmés offset par offset : les 24 matrices (`GS+0x1860 + m·0x40`, index de mode `16+u` pour la texture de l'unité `u`), le viewport et `glDepthRange` avec la formule exacte échelle/biais, l'élimination des faces, la normalisation, l'ombrage, les 8 lumières (`GS+0x24c0 + i·0x80`, position et direction de spot **en coordonnées œil**, seuil de spot stocké en **cosinus**), le modèle d'éclairage, les **deux matériaux qui sont DANS le bloc** (`GS+0x28c0`/`GS+0x2b00`, et non hors de lui), `GL_COLOR_MATERIAL`, le TexGen (pas `0x94` par unité, `0x24` par coordonnée, plan œil transformé), les 6 plans de découpe (coordonnées œil), le brouillard complet (densité/début/fin/source de coordonnée) et les paramètres de point. Les **valeurs courantes** (couleur, normale, couleur secondaire, coordonnée de brouillard, coordonnées de texture) sont **avant** le bloc, en `GS − 0x360 + x`. Le bloc `#define GS_…` prêt à recopier est en §10 de `docs/re/etat-tcl.md`. | ✅ **fait** |
 | 1.3 | ✅ **Fait** : protocole **v7** — `SET_MATRIX`, `VIEWPORT`, `DEPTH_RANGE`, `SET_LIGHT`, `SET_MATERIAL`, `SET_LIGHT_MODEL`, `SET_TEXGEN`, `SET_CLIP_PLANE`, `SET_CURRENT`, `DRAW_RAW` (10 modes, indexé), 17 clés d'état de géométrie ; étage géométrique complet dans le backend de référence et dans le backend OpenGL ; `run_v7` de `tests/qgpu_core_test.c` sur les deux backends. `docs/protocole-v7-geometrie.md`. | ✅ **fait** |
 | 1.4 | ✅ **Fait le 18/09/2026** : le plugin pose le verrou par le **bit 0 du retour de `gldInitDispatch`/`gldUpdateDispatch`**, publie son **descripteur de sortie de sommet** en `cfg+0x11c`, et reçoit les attributs bruts dans `Begin`/`EndPrimitiveBuffer` — `BeginPrimitiveBuffer` rend un pointeur **dans la fenêtre partagée**, à la disposition exacte de `DRAW_RAW` : **zéro recopie de sommet**. L'état T&L (matrices, viewport, 8 lumières, 2 matériaux, texgen, 6 plans de découpe, valeurs courantes, clés v7) ne part que quand il change. Hors domaine, le retour d'Apple est rendu tel quel et GLEngine reprend tout : le repli est **par lot d'état**, vérifié exact. Interrupteur `POMPPC_GL_GEOM` (défaut : **activé**). **Mesures** : `gltest spin` 406 → **900 img/s** (16×16), 420 → **822** (256×256), 323 → **481** (640×480) ; `gltest game` 684 → **854** ; **Marble Blast Gold, scènes lourdes 25-30 → 43-48 img/s (×1,6 à ×1,96)**, moyenne des fenêtres de jeu 42,4 → **62,6 img/s (+48 %)**. Voir `docs/gpu-3d-tiger.md` §4.7. | ✅ **fait** |
@@ -122,23 +123,23 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 
 | # | Tâche | Statut |
 |---|---|---|
-| 2.1 | **Objets tampon** (`CreateBuffer`, `FlushBuffer`, `BufferSubData`) sur tampons hôte : les maillages statiques ne retraversent plus la fenêtre partagée. (OpenGL 1.5.) | à faire |
+| 2.1 | **Objets tampon** (`CreateBuffer`, `FlushBuffer`, `BufferSubData`) sur tampons hôte : les maillages statiques ne retraversent plus la fenêtre partagée. (OpenGL 1.5.) | à faire — **relevé par lecture déjà là** (`docs/re/tableaux-de-sommets.md` §3 ; voir *Recherches amorcées*) |
 | 2.2 | ✅ **Fait le 18/09/2026**, de bout en bout. **Hôte** : protocole **v9** — file de 16 soumissions, thread de rendu, `QGPU_DOORBELL_ASYNC`, `FENCE_SUBMITTED`, `SUBMIT_ST`, `QUEUE_FREE`, `ERRORS`, `QUEUE_DEPTH`, IRQ `DONE` posée par un *bottom half* (`docs/protocole-v9-asynchrone.md`). **Kext** : le drapeau voyage dans les bits hauts de `len` de `QGPU_UC_SUBMIT` — l'ABI de Darwin 8 compare le *nombre* d'arguments scalaires au bit près, donc ajouter un scalaire aurait cassé tous les appelants existants ; `QGPU_UC_WAIT_FENCE` ne scrute plus, il dort sur la command gate et `irqAction` le réveille, avec un `IOTimerEventSource` comme base de temps du délai maximal (Tiger n'a pas `commandSleep(event, deadline, …)`, arrivé en 10.5) ; `destroyClientObjects` draine la file avant de rendre la tranche. **Plugin** : `POMPPC_GL_ASYNC` (défaut **activé**), tranche coupée en **deux moitiés** alternées à chaque soumission, relectures **différées** jusqu'au moment où l'invité en a besoin, présentation directe de l'image *n−1* au début de l'échange suivant (**une image de latence, jamais plus**). **Mesures Marble Blast** : temps de soumission **1,6 → 0,06 ms/image** (÷26), attente restante **0,1 ms/image**, **79,4 → 88,1 img/s (+11 %)** sur les fenêtres de jeu. Sur `gltest` (hors écran, relecture à chaque image) : **aucun gain**, c'est attendu. | ✅ **fait** |
 | 2.3 | **Zero-copy à la présentation** : le device écrit lui-même dans la VRAM (plage déclarée par le kext) ; plus de relecture ni de recopie par l'invité. | à faire |
 | 2.4 | **Présentation en fenêtre sans attendre le WindowServer** : écriture directe dans le rectangle de la surface à l'écran, tant que rien ne la recouvre et que le curseur n'y bouge pas ; un échange normal toutes les 90 images rafraîchit la fenêtre. Marble Blast : +70 %. | ✅ fait |
 | 2.5 | Téléversement de textures sans conversion invité quand le format est connu de l'hôte (BGRA, 565, 1555…) : la conversion passe sur l'hôte. | ✅ **fait le 19/09/2026** : hôte (v10, `TEX_IMAGE3`) et plugin. Avec un device v10, le plugin recopie le niveau tel quel (pas de ligne compris : les niveaux alignés ne sont plus refusés) et l'hôte convertit ; `POMPPC_GL_TEX3=0` rend l'ancien chemin. Image identique au pixel près sur les 8 scènes texturées de `gltest`. **Gain mesuré modeste** (scène `texup`, 256×256 renvoyée à chaque image) : RGBA 362 → 388 img/s, RGB 410 → 445 (+7 à +9 %) ; 565 et BGRA inchangés — le temps y est dans GLEngine, pas dans la conversion |
-| 2.6 | Opérations de pixels sur l'hôte (`DrawPixels`, `CopyPixels`, `Bitmap`, `ReadPixels`, `CopyTexSubImage`) : chacune force aujourd'hui une relecture complète. | à faire |
+| 2.6 | Opérations de pixels sur l'hôte (`DrawPixels`, `CopyPixels`, `Bitmap`, `ReadPixels`, `CopyTexSubImage`) : chacune force aujourd'hui une relecture complète. | à faire — **amorce** : `cfg+0x7b` n'est lu que par `_glDrawPixels_Exec` |
 
 ## Axe 3 — Compléter le pipeline fixe jusqu'à 1.5 (condition pour annoncer 1.5)
 
 | # | Tâche | Statut |
 |---|---|---|
 | 3.1 | **Stencil** (protocole v6) : tampon hôte combiné profondeur+stencil, 9 clés d'état, transferts, backend de référence, offsets GLEngine (`docs/re/stencil.md`), plugin. Scène `stencil` identique au rendu d'Apple à l'octet près. | ✅ fait |
-| 3.2 | Modes de polygone (ligne, point), pointillés de ligne et de polygone, lissage. | ✅ **fait le 18/09/2026** sauf le **lissage** (hors périmètre v8). Offsets relevés par la sonde `v8probe` (`docs/re/etat-v8.md`) : motif de ligne `GS+0x2e26`/`0x2e28`, motif de polygone **128 octets en `GS+0x30e8`**, dans l'ordre de `glPolygonStipple`. Modes de polygone **réservés au chemin brut** (le chemin hérité reçoit des triangles déjà décomposés : le contour est perdu avant l'hôte) et **la fusion des dessins est coupée** quand le mode n'est pas `GL_FILL`. Le motif de polygone demande un **décalage d'une ligne** (le protocole indexe par `hauteur − ys`, OpenGL par `hauteur − 1 − ys`). Scènes `polymode` et `stipple` : **0/255 sur l'image entière** par les deux chemins. |
+| 3.2 | Modes de polygone (ligne, point), pointillés de ligne et de polygone, lissage. | ✅ **fait le 18/09/2026** sauf le **lissage** (hors périmètre v8). Offsets relevés par la sonde `v8probe` (`docs/re/etat-v8.md`) : motif de ligne `GS+0x2e26`/`0x2e28`, motif de polygone **128 octets en `GS+0x30e8`**, dans l'ordre de `glPolygonStipple`. Modes de polygone **réservés au chemin brut** (le chemin hérité reçoit des triangles déjà décomposés : le contour est perdu avant l'hôte) et **la fusion des dessins est coupée** quand le mode n'est pas `GL_FILL`. Le motif de polygone demande un **décalage d'une ligne** (le protocole indexe par `hauteur − ys`, OpenGL par `hauteur − 1 − ys`). Scènes `polymode` et `stipple` : **0/255 sur l'image entière** par les deux chemins. **Lissage : offsets déjà dans le plugin** (`GS_LINE_SMOOTH 0x2e2d`, `GS_POINT_SMOOTH 0x30dc`, `GS_POLY_SMOOTH 0x3179`) — refus seulement, pas de relais. |
 | 3.3 | Opérations logiques ; mélange à couleur constante, équations minimum et maximum. | ✅ **fait le 18/09/2026**. Couleur de mélange en `GS+0x2d70`, opération logique en `GS+0x2e30` ; les facteurs `0x8001`-`0x8004` et les équations `GL_MIN`/`GL_MAX` passent par les clés existantes. Clés v8 envoyées pour **les deux chemins**. Scènes `blendc` et `logicop` : témoins exacts au bit près, **0/255**. Le motif de refus « stencil/logicop/stipple » ne couvre plus que le lissage de polygone. |
-| 3.4 | Textures 3D, cube, rectangle ; bordures ; compressées (S3TC passé tel quel à l'hôte). | **hôte fait (v10)** ; **plugin : textures 3D faites le 19/09/2026** (`docs/re/textures-3d.md`) — `GL_MAX_3D_TEXTURE_SIZE` = 256 annoncé si le device les tient, profondeur lue dans l'objet texture de GLEngine, `WRAP_R` relayé. Scène `tex3d` : 9 cas sur 9, et le cas « 1.2 texture 3D » de `v15` est **TENU** (jamais sous Apple). Par le chemin hérité seulement : GLEngine jette la géométrie brute quand une texture 3D est active (non relevé pourquoi). **Cubes, bordure et compression faits le 19/09/2026** (`docs/re/cartes-de-cube.md`, `docs/re/bordure-et-compression.md`) ; reste le rectangle |
-| 3.5 | Lignes et points texturés ; sprites de points ; couleur secondaire. | **hôte fait pour la couleur secondaire et les paramètres de point (v10, 19/09/2026)** : `QGPU_SK_COLOR_SUM` (trois valeurs, la règle v7–v9 par défaut), atténuation, bornes et seuil de fondu, calculés par le cœur. Restent : lignes et points texturés, sprites de points, et tout le plugin (octet de `GL_COLOR_SUM` à relever ; attention au `POINT_SIZE_MAX` initial de GLEngine, `docs/protocole-v10-textures.md` §7) |
-| 3.6 | Textures de profondeur et comparaison d'ombre ; génération automatique de mipmaps (`GenerateTexMipmaps` repérée). | **hôte fait (v10, 19/09/2026)** : `GL_DEPTH_COMPONENT` en `FLOAT`, `UNSIGNED_INT`, `UNSIGNED_SHORT`, comparaison texel par texel avant filtrage, `DEPTH_TEXTURE_MODE` ; niveaux de base et max, bornes et biais de LOD ; mipmaps générés par le cœur à chaque image du niveau de base. Reste le plugin |
+| 3.4 | Textures 3D, cube, rectangle ; bordures ; compressées (S3TC passé tel quel à l'hôte). | **hôte fait (v10)** ; **plugin : textures 3D faites le 19/09/2026** (`docs/re/textures-3d.md`) — `GL_MAX_3D_TEXTURE_SIZE` = 256 annoncé si le device les tient, profondeur lue dans l'objet texture de GLEngine, `WRAP_R` relayé. Scène `tex3d` : 9 cas sur 9, et le cas « 1.2 texture 3D » de `v15` est **TENU** (jamais sous Apple). La perte de géométrie brute (3D/cube) est **élucidée** : coordonnée r/q entre `glBegin`/`glEnd` + `cfg+0x7a = 0` (`docs/re/opengl-1.4.md` §3) ; le plugin pose `cfg+0x7a = 1`. **Cubes, bordure et compression faits le 19/09/2026** (`docs/re/cartes-de-cube.md`, `docs/re/bordure-et-compression.md`) ; **reste le rectangle** (hôte déjà, emplacement 2, `cfg+0xe8`) |
+| 3.5 | Lignes et points texturés ; sprites de points ; couleur secondaire. | **hôte fait (v10)** ; **plugin fait pour la couleur secondaire et les paramètres de point (lot 5)** : octet `GS+0x2e0b` (`docs/re/opengl-1.4.md`), `POINT_SIZE_MAX` initial 1 traité comme « pas de borne » (envoie 64). Restent : lignes et points texturés, sprites de points |
+| 3.6 | Textures de profondeur et comparaison d'ombre ; génération automatique de mipmaps (`GenerateTexMipmaps` repérée). | **hôte fait (v10)** ; **plugin fait pour profondeur et ombre (lot 5)** : `DT+0x40/0x42/0x48` (`docs/re/opengl-1.4.md`). Mipmaps : le cœur les génère à chaque image du niveau de base ; `DT+0x4a = 0x8000` avec `GL_GENERATE_MIPMAP` **[H]** ; procédure `GenerateTexMipmaps` en `+0x7c` |
 | 3.7 | **Requêtes d'occlusion** (`CreateQuery`, `GetQueryInfo`). (OpenGL 1.5.) | ✅ **fait le 18/09/2026**. Interface relevée par lecture et vérifiée dans l'invité (`docs/re/etat-v8.md` §4) : `gldCreateQuery` (n° 45), `gldDestroyQuery` (46), `gldGetQueryInfo` (47) et **les procédures `+0x68` / `+0x6c`** = `glBeginQuery` / `glEndQuery`. Le `GLDriver` d'Apple ne tient **rien** (bouchons, et rien d'installé en `+0x68`/`+0x6c`) : sous lui, `glGetQueryObjectuiv` n'écrit même pas dans la variable de sortie. Le plugin tient la fonction entièrement ; un repli logiciel pendant une requête **majore** le compte (seule direction sans danger). Scène `occl` : 4 096 / 2 048 / 0 échantillons exacts. |
 | 3.8 | Multiéchantillonnage. | à faire |
 | 3.9 | Brouillard par fragment (`GL_NICEST`) ; niveau de détail des mipmaps par fragment dans le backend de référence. | à faire |
@@ -149,8 +150,8 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 |---|---|---|
 | 4.1 | **Annoncer version et extensions** telles que tenues (dépend de 1.1) : `GL_VERSION`, liste d'extensions, limites (`GetInteger`). | ✅ **fait le 18/09/2026** — mais le verdict n'est pas celui qu'on espérait. Relevé fonction par fonction dans **`docs/re/version-extensions.md`** (scène `v15` : un sous-test par fonction, joué sous le rendu d'Apple seul **et** sous le plugin). **La plus haute version entièrement tenue est 1.1** : OpenGL 1.2 exige les **textures 3D**, que GLEngine refuse (`GL_MAX_3D_TEXTURE_SIZE = 0`) et que le protocole ne porte pas. Annoncé : `GL_VERSION = "1.1 POMPPC-1.0"`, plus **trois** extensions ajoutées au tableau de bits (`GL_ARB_occlusion_query`, `GL_ARB_vertex_buffer_object`, `GL_EXT_blend_func_separate`) → 42 au lieu de 39. **Les limites d'Apple sont laissées telles quelles** (8 unités, 4096) : au-delà du chemin accéléré, le repli tient, c'est vérifié. Au passage, l'expérience **V3** a montré que la table bit → extension de `docs/re/capacites-glengine.md` §3.2 est **décalée d'un cran à partir du bit 24** ; elle est corrigée. |
 | 4.2 | **Accélérateur IOKit** : nœud `IOAccelerator` + `IOGLBundleName`, chargement comme un vrai pilote de carte. Préalable de Quartz Extreme. | ✅ **fait le 19/09/2026** (`docs/re/accelerateur-iokit.md`) : nub `POMPPCAccelerator` enfant de `POMPPCGPU` (le transport garde son type d'ouverture 0, qui est aussi celui des surfaces), qui refuse toute ouverture ; les framebuffers le désignent par `IOAccelTypes`/`IOAccelIndex`. Plugin dans `Extensions`. Pas d'`AccelCaps` : le WindowServer tenterait Quartz Extreme. Pour 4.4 : `AccelCaps`, client de surface, mémoire vidéo annoncée (0 aujourd'hui) |
-| 4.3 | Programmes ARB de sommets et de fragments (`CreatePipelineProgram`) — au-delà de 1.5 strict, mais condition de Core Image. | à faire |
-| 4.4 | Quartz Extreme (surfaces de fenêtre sur l'hôte), puis Core Image, puis Quartz 2D Extreme. Objectif visible : « QE/CI géré » dans Informations Système. | à faire |
+| 4.3 | Programmes ARB de sommets et de fragments (`CreatePipelineProgram`) — au-delà de 1.5 strict, mais condition de Core Image. | à faire — **relevé par lecture déjà là** (`docs/re/tableaux-de-sommets.md` §4 ; sonde `ppprobe` écrite, jamais jouée) |
+| 4.4 | Quartz Extreme (surfaces de fenêtre sur l'hôte), puis Core Image, puis Quartz 2D Extreme. Objectif visible : « QE/CI géré » dans Informations Système. | à faire — **porte et pièges relevés** (`docs/re/accelerateur-iokit.md` §6 et §9 ; voir *Recherches amorcées*) |
 
 ### Ce que le lot 3 a laissé derrière lui (côté invité)
 
@@ -252,6 +253,91 @@ n'existent que sur l'hôte macOS.
   WindowServer exige au moins `GLCompositorMinimumVRAM` pour Quartz Extreme, et des jeux lisent
   cette valeur. À poser avec 4.4 (`docs/re/accelerateur-iokit.md` §9).
 
+## Recherches amorcées (récupérées le 19/09/2026)
+
+Relevés commencés, assez avancés pour ne pas les refaire. Rien d'implémenté au-delà de ce que
+les tâches disent déjà.
+
+### 2.1 Objets tampon — `docs/re/tableaux-de-sommets.md` §3
+
+- Signatures **[L]** : `gldCreateBuffer(ctx, u32 *poignée, void **ptr, u32 *drapeaux)` ;
+  `FlushBuffer(ctx, poignée, ptr, longueur)` ; `BufferSubData` → `0` = refus (le moteur retombe
+  sur `memcpy` + `FlushBuffer`).
+- Objet GLEngine, taille `0x48 + 4·n_rendus` : poignées en `+0x10+4i`, données `+0x30`, taille
+  logique `+0x38`, drapeaux par rendu `+0x48+4i`. Le moteur pose `|= 3` après une écriture CPU ;
+  le pilote **efface les bits 0-1 dans `FlushBuffer`** (GeForce3).
+- Liaisons : `GL_ARRAY_BUFFER` → `A+0x348`, `ELEMENT` → `A+0x34c`, `PACK`/`UNPACK` →
+  `gctx+0x4a68`/`0x4a6c`.
+- Apple et Rage 128 : poignée 0. GeForce3 : `malloc(32)`, copie GPU paresseuse.
+- Pour nous : poignée non nulle + `FlushBuffer` qui téléverse vers un tampon hôte.
+
+### 4.3 Programmes ARB — `docs/re/tableaux-de-sommets.md` §4
+
+- `CreatePipelineProgram(ctx, *poignée, descripteur)` — **3 arguments**. `Modify` : masque
+  **1** = texte, **2** = paramètres locaux. `Relate` / `GetInfo` : **aucun appel** dans
+  GLEngine 10.4.6.
+- Le descripteur reçu est `ppobj+0x4c8` (premier `u16` = cible). GLEngine crée **deux objets
+  par défaut** à l'init du contexte, même sans aucun programme ARB, cible **0** (pipeline fixe).
+- Texte ASCII en `+0x14`, forme compilée en `+0x4e4`, locaux en `+0x4e0`. **[H]** : l'état fixe
+  n'est *pas* recodé en programme — sonde `ppprobe` (§7.6) écrite, **jamais jouée**.
+- Apple : jeton factice 4. Rage 128 : n'écrit même pas `*r4`. GeForce3 : compile au dessin.
+
+### 4.4 Quartz Extreme — `docs/re/accelerateur-iokit.md` §6 et §9
+
+- La porte : propriété **`AccelCaps`** sur l'accélérateur, **ou** un `IOAGPDevice` dont le
+  modèle n'est pas Rage 128. QEMU `mac99` n'a **aucun** `IOAGPDevice` : sans `AccelCaps`, pas
+  de QE (vérifié). Ensuite : VRAM ≥ `GLCompositorMinimumVRAM` (16), `_isAccelUsable` (1 par
+  défaut), formats de pixels accélérés.
+- Client de surface : `kIOAccelSurfaceClientType` **est le type 0**, déjà celui du transport
+  `POMPPCGPU` — d'où le nub enfant qui refuse toute ouverture (`kIOReturnUnsupported`).
+  `CGLSetPBuffer` appelle `IOAccelCreateSurface` et **s'en passe** si ça échoue.
+- Les cartes réelles publient aussi `IOCFPlugInTypes` (`ACCF0000-…` → plugin GA 2D) et
+  `IODVDBundleName` : pas commencé.
+- Mémoire vidéo annoncée : **0** (`kCGLRPVideoMemory`).
+
+### 3.4 Rectangle — hôte fait, plugin muet
+
+- Cœur : `QGPU_TT_RECTANGLE` (coordonnées en texels, pas de mipmap, `CLAMP` seulement).
+- GLEngine : `TU_ENABLE` bit **0x04**, emplacement **2** de la table liée (`textures-3d.md` §1).
+- Annonce : `cfg+0xe8` = `GL_MAX_RECTANGLE_TEXTURE_SIZE` (`capacites-glengine.md` §4) ; le
+  plugin le laisse à 0. Pas de sonde dédiée (il y a `t3dprobe` et `cubeprobe`).
+
+### 2.6 `DrawPixels` — amorce
+
+- `cfg+0x7b` n'est lu que par `_glDrawPixels_Exec` (0x642bc) et `_glDrawPixels_ListExec`
+  (0x63a78) (`capacites-glengine.md` §5.3). Sémantique **[H]**.
+- Procédures du plugin : `ReadPixels` `+0x08`, `DrawPixels` `+0x0c`, `CopyPixels` `+0x10`
+  (`docs/gpu-3d-tiger.md`). Aujourd'hui chacune force une relecture complète.
+
+### 3.2 Lissage — offsets déjà posés
+
+Dans `pomppc_accel.c`, pour le refus seulement : `GS_LINE_SMOOTH 0x2e2d`,
+`GS_POINT_SMOOTH 0x30dc`, `GS_POLY_SMOOTH 0x3179` (`0x3179` déjà dans
+`tableaux-de-sommets.md`). `etat-v8.md` §5 dit « non relevés » : faux.
+
+### RenderVertexArray « à la GeForce3 »
+
+Jamais atteint ici. Le GeForce3 et le Radeon annoncent la T&L (`cfg+0x79 = 1`, dispatch 7)
+mais laissent `cfg+0x11c = 0` et passent par `RenderVertexArray` `+0x70` /
+`RenderVertexBuffer` `+0x4c` ; le format vient des six identifiants `cfg+0x7c..0x87`
+(pas imposés par GLEngine : `0x10 0x18 0x20 0x14 0x20|0x24 0x2c|0x34`). **[H]** : le
+descripteur `cfg+0x11c` est le canal des cartes à programmes de sommets
+(`docs/re/descripteur-de-sommet.md` §7, `verification-tcl.md` §8).
+
+### Restes d'état, bas priorité
+
+- `etat-tcl.md` §12 : `GS+0x24a4` (`GL_RESCALE_NORMAL`, jamais exercé), usage de `GS+0x4d50`
+  et `GS+0x450f`, lequel des deux viewports consommer (`GS+0x1810` lu par le GeForce3, vs
+  `GS+0x46cc`), modes de matrice 1 et 5..15 (`MODELVIEW1..3_ARB`, `MATRIX0..7_ARB`).
+- `cfg+0x78` : lu par `_gleUpdatePolyMode` et `_gleDrawArraysOrElements_Exec` ; Rage 128 le
+  pose à 1 (pas de T&L). `cfg+0xc0` : taille max d'une cible non identifiée (le rectangle
+  est `+0xe8`). 7ᵉ argument de `gldCreateContext` (`config+0x130`).
+- Objet texture : `DT+0x1a = 0x85BD` (constant), `DT+0x2c` probablement anisotropie max **[H]**.
+- Sondes 7.1 à 7.6 de `tableaux-de-sommets.md` : préalables 7.0 **faits** dans le plugin
+  (vidage de `0x5400` octets, VAO, matériaux, pipeline program) ; les sondes elles-mêmes
+  n'ont jamais tourné — plusieurs ont été remplacées par `v8probe` / `v14probe` /
+  `t3dprobe` ; **`ppprobe` (7.6) et l'attribut générique (7.5 étape 26) restent utiles**.
+
 ## Lot 2 en cours (18/09/2026) — la géométrie sur l'hôte
 
 | Partie | Qui | Où | État |
@@ -287,9 +373,8 @@ n'existent que sur l'hôte macOS.
   brut). Contournement dans le plugin : le stencil n'est échangé avec l'hôte que si le contexte
   s'en sert vraiment (test de stencil activé, ou effacement du stencil demandé) — ce qui est en
   plus un gain, beaucoup d'applications demandant un stencil sans jamais s'en servir.
-- **Couleur secondaire par sommet** non portée par le chemin brut : la mettre dans le format de
-  sommet allumerait `GL_COLOR_SUM` sur l'hôte, et l'état GL relevé ne dit pas si l'application l'a
-  demandé. Reste à trouver l'octet de `GL_COLOR_SUM` dans le bloc d'état de GLEngine.
+- ✅ **Couleur secondaire** : octet trouvé le 19/09/2026 en `GS+0x2e0b` (copie `GS+0x4c8a`,
+  sonde `v14probe`) ; le plugin le pose et porte le code 4 au chemin brut.
 - **Mode de rendu `GL_FEEDBACK`/`GL_SELECT`** : non relevé dans le bloc d'état, donc non testé
   explicitement dans le domaine. GLEngine emploie alors un autre étage de sommets
   (`gctx+0x4e1c ≠ 0x1c00`), que le prédicat rejette — mais cela n'a pas été vérifié par
