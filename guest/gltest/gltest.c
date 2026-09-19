@@ -237,6 +237,7 @@ static const unsigned char fus_col[6][3] = {
 int main(int argc, char **argv)
 {
     const char *scene = argc > 1 ? argv[1] : "tri";
+    setvbuf(stdout, NULL, _IOLBF, 0);    /* un plantage garde ce qui précède */
     if (argc > 3 && !strcmp(scene, "diff"))
         return ppm_diff(argv[2], argv[3]);
     {
@@ -3618,6 +3619,452 @@ int main(int argc, char **argv)
 #undef TX
 #undef TY
         glDisable(GL_TEXTURE_3D);
+    } else if (!strcmp(scene, "tex13")) {
+        /* Répétitions et compression d'OpenGL 1.3/1.4, relayées à l'hôte v10 :
+           GL_CLAMP_TO_BORDER et GL_CLAMP avec la couleur de bordure,
+           GL_MIRRORED_REPEAT, S3TC (DXT1, DXT1 à alpha, DXT3, DXT5, mipmaps,
+           sous-image, carte de cube, format générique compressé par GLEngine).
+           Chaque cas est un carré de 16 px à coordonnée de texture CONSTANTE
+           (le texel échantillonné est exact), sauf les mipmaps. Valeurs
+           attendues : la règle d'OpenGL, et pour les couleurs interpolées de
+           S3TC, l'arrondi du décodeur de l'hôte (qgpu-core.c, dxt_block),
+           choisi exact quand c'est possible. Le rendu d'Apple échoue presque
+           partout : il ignore la bordure et le miroir, et ne décode pas S3TC
+           reçu par glCompressedTexImage2D. */
+        typedef void (*cti_f)(GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei,
+                              const GLvoid *);
+        typedef void (*ctsi_f)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum,
+                               GLsizei, const GLvoid *);
+        cti_f cti = (cti_f)gl_sym("glCompressedTexImage2D", "glCompressedTexImage2DARB");
+        ctsi_f ctsi = (ctsi_f)gl_sym("glCompressedTexSubImage2D", "glCompressedTexSubImage2DARB");
+        static const GLfloat bc[4] = { 0.2f, 0.6f, 1.0f, 1.0f };      /* → 3399ff */
+        static const unsigned char q4[2 * 2 * 4] = { 255, 0, 0, 255,  0, 255, 0, 255,
+                                                     0, 0, 255, 255,  255, 255, 255, 255 };
+        static const unsigned char wh[4] = { 255, 255, 255, 255 };
+        static const unsigned char rb[2 * 4] = { 255, 0, 0, 255,  0, 0, 255, 255 };
+        /* DXT1, c0 rouge > c1 bleu : quatre couleurs, texels 0,1,2,3 par ligne */
+        static const unsigned char d1[8] = { 0x00, 0xF8, 0x1F, 0x00, 0xE4, 0xE4, 0xE4, 0xE4 };
+        /* DXT1 à alpha, c0 (r5 = 4) < c1 (r5 = 28) : trois couleurs + transparent */
+        static const unsigned char d1a[8] = { 0x00, 0x20, 0x00, 0xE0, 0xE4, 0xE4, 0xE4, 0xE4 };
+        /* DXT3 blanc, alphas 15, 0, 8, 3 par ligne */
+        static const unsigned char d3[16] = { 0x0F, 0x38, 0x0F, 0x38, 0x0F, 0x38, 0x0F, 0x38,
+                                              0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0 };
+        /* DXT5 blanc, a0 = 252 > a1 = 0, codes 0, 1, 2, 7 par ligne */
+        static const unsigned char d5[16] = { 0xFC, 0x00, 0x88, 0x8E, 0xE8, 0x88, 0x8E, 0xE8,
+                                              0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0 };
+        static unsigned char mip[4][4 * 8], blk[8], mag[4 * 4 * 3];
+        static const unsigned short mipc[4] = { 0xF800, 0x07E0, 0x001F, 0xFFFF };
+        GLuint id[13];
+        int i, l;
+        if (!cti || !ctsi) {
+            printf("  glCompressedTexImage2D absent\n");
+            return 1;
+        }
+        glGenTextures(13, id);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+#define CQ(x0, y0, s, t) do { glBegin(GL_QUADS); glTexCoord2f(s, t); \
+            glVertex2f(x0, y0); glVertex2f((x0) + 16, y0); \
+            glVertex2f((x0) + 16, (y0) + 16); glVertex2f(x0, (y0) + 16); glEnd(); } while (0)
+#define T2(k, filt, wrap) do { glBindTexture(GL_TEXTURE_2D, id[k]); \
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filt); \
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt); \
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap); \
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap); \
+            glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, bc); } while (0)
+        /* ── rangée 0 : bordure et miroir ── */
+        T2(0, GL_NEAREST, 0x812D);                          /* CLAMP_TO_BORDER */
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, q4);
+        CQ(0, 0, -0.5f, 0.25f);
+        CQ(20, 0, 0.25f, 0.25f);
+        T2(1, GL_LINEAR, 0x812D);                           /* 1×1 blanc, linéaire */
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, wh);
+        CQ(40, 0, 0.0f, 0.5f);
+        T2(2, GL_LINEAR, GL_CLAMP);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, wh);
+        CQ(60, 0, 0.0f, 0.5f);
+        T2(3, GL_LINEAR, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, wh);
+        CQ(80, 0, 0.0f, 0.5f);
+        T2(4, GL_NEAREST, 0x8370);                          /* MIRRORED_REPEAT */
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, rb);
+        CQ(100, 0, 1.25f, 0.5f);
+        CQ(120, 0, -0.25f, 0.5f);
+        CQ(140, 0, 2.25f, 0.5f);
+        printf("  [tex13] rangée 1\n");
+        /* ── rangée 1 : DXT1 quatre couleurs ; DXT1 à alpha, test d'alpha ── */
+        T2(5, GL_NEAREST, GL_REPEAT);
+        cti(GL_TEXTURE_2D, 0, 0x83F0, 4, 4, 0, 8, d1);
+        for (i = 0; i < 4; i++)
+            CQ(20 * i, 40, (i + 0.5f) / 4, 0.5f);
+        glDisable(GL_TEXTURE_2D);
+        glColor3ub(0x40, 0x40, 0x40);
+        glRecti(80, 40, 156, 56);                           /* fond des cas 1.4–1.7 */
+        glColor3ub(255, 255, 255);
+        glEnable(GL_TEXTURE_2D);
+        T2(6, GL_NEAREST, GL_REPEAT);
+        cti(GL_TEXTURE_2D, 0, 0x83F1, 4, 4, 0, 8, d1a);
+        glEnable(GL_ALPHA_TEST);
+        glAlphaFunc(GL_GREATER, 0.5f);
+        for (i = 0; i < 4; i++)
+            CQ(80 + 20 * i, 40, (i + 0.5f) / 4, 0.5f);
+        glDisable(GL_ALPHA_TEST);
+        printf("  [tex13] rangée 2\n");
+        /* ── rangée 2 : DXT3 et DXT5 blancs, mélangés sur le noir ── */
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        T2(7, GL_NEAREST, GL_REPEAT);
+        cti(GL_TEXTURE_2D, 0, 0x83F2, 4, 4, 0, 16, d3);
+        for (i = 0; i < 4; i++)
+            CQ(20 * i, 80, (i + 0.5f) / 4, 0.5f);
+        T2(8, GL_NEAREST, GL_REPEAT);
+        cti(GL_TEXTURE_2D, 0, 0x83F3, 4, 4, 0, 16, d5);
+        for (i = 0; i < 4; i++)
+            CQ(80 + 20 * i, 80, (i + 0.5f) / 4, 0.5f);
+        glDisable(GL_BLEND);
+        printf("  [tex13] rangée 3\n");
+        /* ── rangée 3 : mipmaps DXT1 8×8 rouge, 4×4 vert, 2×2 bleu, 1×1 blanc ── */
+        for (l = 0; l < 4; l++)
+            for (i = 0; i < 4; i++) {
+                mip[l][i * 8 + 0] = mip[l][i * 8 + 2] = (unsigned char)(mipc[l] & 0xFF);
+                mip[l][i * 8 + 1] = mip[l][i * 8 + 3] = (unsigned char)(mipc[l] >> 8);
+            }
+        T2(9, GL_NEAREST, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+        for (l = 0; l < 4; l++)
+            cti(GL_TEXTURE_2D, l, 0x83F0, 8 >> l, 8 >> l, 0, l ? 8 : 32, mip[l]);
+        if (getenv("TEX13_STEP")) { glFinish(); printf("  [tex13] mips chargées\n"); }
+#define LQ(x0, y0, sz) do { glBegin(GL_QUADS); \
+            glTexCoord2f(0, 0); glVertex2f(x0, y0); glTexCoord2f(1, 0); glVertex2f((x0) + (sz), y0); \
+            glTexCoord2f(1, 1); glVertex2f((x0) + (sz), (y0) + (sz)); \
+            glTexCoord2f(0, 1); glVertex2f(x0, (y0) + (sz)); glEnd(); } while (0)
+        LQ(0, 120, 16);                                     /* grossi : niveau 0 */
+        LQ(20, 120, 4);                                     /* λ = 1 */
+        LQ(40, 120, 2);                                     /* λ = 2 */
+        LQ(60, 120, 1);                                     /* λ = 3 */
+#undef LQ
+        if (getenv("TEX13_STEP")) { glFinish(); printf("  [tex13] mips dessinées\n"); }
+        /* format générique : GLEngine compresse lui-même (DXT1) */
+        for (i = 0; i < 16; i++) {
+            mag[i * 3] = 255; mag[i * 3 + 1] = 0; mag[i * 3 + 2] = 255;
+        }
+        T2(10, GL_NEAREST, GL_REPEAT);
+        glTexImage2D(GL_TEXTURE_2D, 0, 0x84ED /* COMPRESSED_RGB */, 4, 4, 0, GL_RGB,
+                     GL_UNSIGNED_BYTE, mag);
+        CQ(80, 120, 0.5f, 0.5f);
+        if (getenv("TEX13_STEP")) { glFinish(); printf("  [tex13] générique dessinée\n"); }
+        /* sous-image compressée : 8×8 rouge, bloc (4,0) remplacé par du bleu */
+        T2(11, GL_NEAREST, GL_REPEAT);
+        cti(GL_TEXTURE_2D, 0, 0x83F0, 8, 8, 0, 32, mip[0]);
+        CQ(100, 120, 5.5f / 8, 1.5f / 8);                   /* dessiné AVANT : rouge */
+        glFinish();
+        blk[0] = 0x1F; blk[1] = 0x00; blk[2] = 0x1F; blk[3] = 0x00;
+        ctsi(GL_TEXTURE_2D, 0, 4, 0, 4, 4, 0x83F0, 8, blk);
+        CQ(120, 120, 5.5f / 8, 1.5f / 8);
+        CQ(140, 120, 1.5f / 8, 1.5f / 8);
+        glDisable(GL_TEXTURE_2D);
+        printf("  [tex13] rangée 4\n");
+        /* ── rangée 4 : carte de cube DXT1, face +X rouge, les autres bleues ── */
+        glBindTexture(GL_TEXTURE_CUBE_MAP, id[12]);
+        for (i = 0; i < 6; i++) {
+            unsigned short c = i ? 0x001F : 0xF800;
+            blk[0] = blk[2] = (unsigned char)(c & 0xFF);
+            blk[1] = blk[3] = (unsigned char)(c >> 8);
+            cti(0x8515 + i, 0, 0x83F0, 4, 4, 0, 8, blk);
+        }
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glEnable(GL_TEXTURE_CUBE_MAP);
+        glBegin(GL_QUADS);
+        glTexCoord3f(1, 0.1f, 0.2f);
+        glVertex2f(0, 160); glVertex2f(16, 160); glVertex2f(16, 176); glVertex2f(0, 176);
+        glTexCoord3f(0.1f, 0.2f, 1);
+        glVertex2f(20, 160); glVertex2f(36, 160); glVertex2f(36, 176); glVertex2f(20, 176);
+        glEnd();
+        glDisable(GL_TEXTURE_CUBE_MAP);
+#undef CQ
+#undef T2
+        glFinish();
+        printf("  erreur GL 0x%x\n", glGetError());
+        check("CLAMP_TO_BORDER : bordure", 8, 8, 0x3399ff);
+        check("CLAMP_TO_BORDER : dedans", 28, 8, 0xff0000);
+        check("TO_BORDER linéaire au bord", 48, 8, 0x99ccff);
+        check("GL_CLAMP linéaire au bord", 68, 8, 0x99ccff);
+        check("CLAMP_TO_EDGE (témoin)", 88, 8, 0xffffff);
+        check("MIRRORED s=1,25", 108, 8, 0x0000ff);
+        check("MIRRORED s=-0,25", 128, 8, 0xff0000);
+        check("MIRRORED s=2,25", 148, 8, 0xff0000);
+        check("DXT1 texel 0", 8, 48, 0xff0000);
+        check("DXT1 texel 1", 28, 48, 0x0000ff);
+        check("DXT1 texel 2 (2/3)", 48, 48, 0xaa0055);
+        check("DXT1 texel 3 (1/3)", 68, 48, 0x5500aa);
+        check("DXT1A texel 0", 88, 48, 0x210000);
+        check("DXT1A texel 1", 108, 48, 0xe70000);
+        check("DXT1A texel 2 (1/2)", 128, 48, 0x840000);
+        check("DXT1A texel 3 transparent", 148, 48, 0x404040);
+        check("DXT3 alpha 15", 8, 88, 0xffffff);
+        check("DXT3 alpha 0", 28, 88, 0x000000);
+        check("DXT3 alpha 8", 48, 88, 0x888888);
+        check("DXT3 alpha 3", 68, 88, 0x333333);
+        check("DXT5 alpha a0", 88, 88, 0xfcfcfc);
+        check("DXT5 alpha a1", 108, 88, 0x000000);
+        check("DXT5 alpha code 2", 128, 88, 0xd8d8d8);
+        check("DXT5 alpha code 7", 148, 88, 0x242424);
+        check("DXT1 mip grossi : niveau 0", 8, 128, 0xff0000);
+        check("DXT1 mip λ=1 : 4×4", 20, 120, 0x00ff00);
+        check("DXT1 mip λ=2 : 2×2", 40, 120, 0x0000ff);
+        check("DXT1 mip λ=3 : 1×1", 60, 120, 0xffffff);
+        check("COMPRESSED_RGB générique", 88, 128, 0xff00ff);
+        check("sous-image : avant", 108, 128, 0xff0000);
+        check("sous-image : après", 128, 128, 0x0000ff);
+        check("sous-image : bloc intact", 148, 128, 0xff0000);
+        check("cube DXT1 face +X", 8, 168, 0xff0000);
+        check("cube DXT1 face +Z", 28, 168, 0x0000ff);
+    } else if (!strcmp(scene, "cube")) {
+        /* Cartes de cube (OpenGL 1.3, protocole v10). Le rendu d'Apple ne les
+           tient pas : valeurs attendues de la table 3.21 d'OpenGL, dont le GPU
+           hôte a déjà confirmé l'orientation (run_v10 (e)). Texture A : une
+           couleur par face ; texture B : face +X à quatre texels distincts. */
+        static const unsigned long fc[6] = { 0xff0000, 0x00ff00, 0x0000ff,
+                                             0xffff00, 0xff00ff, 0x00ffff };
+        static const float dir[6][3] = { { 1, .1f, .2f }, { -1, .2f, .1f }, { .1f, 1, .2f },
+                                         { .2f, -1, .1f }, { .1f, .2f, 1 }, { .2f, .1f, -1 } };
+        static const unsigned long px4[4] = { 0xff0000, 0x00ff00, 0x0000ff, 0xffffff };
+        unsigned char face[4 * 4];
+        GLuint id[2];
+        int f, i, k;
+        glGenTextures(2, id);
+        for (k = 0; k < 2; k++) {
+            glBindTexture(GL_TEXTURE_CUBE_MAP, id[k]);
+            for (f = 0; f < 6; f++) {
+                for (i = 0; i < 4; i++) {
+                    unsigned long c = k ? (f ? 0 : px4[i]) : fc[f];
+                    face[i * 4] = (unsigned char)(c >> 16);
+                    face[i * 4 + 1] = (unsigned char)(c >> 8);
+                    face[i * 4 + 2] = (unsigned char)c;
+                    face[i * 4 + 3] = 255;
+                }
+                glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_RGBA, 2, 2, 0, GL_RGBA,
+                             GL_UNSIGNED_BYTE, face);
+            }
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+        {
+            GLint mx = 0;
+            GLenum err = glGetError();
+            glGetIntegerv(GL_MAX_CUBE_MAP_TEXTURE_SIZE, &mx);
+            printf("GL_MAX_CUBE_MAP_TEXTURE_SIZE = %d ; faces : erreur GL 0x%x\n", mx, err);
+            if (err || mx < 2)
+                failures++;
+        }
+        glEnable(GL_TEXTURE_CUBE_MAP);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glClearColor(0, 0, 0, 1);
+#define BAND(y0, y1, dx, dy, dz) do { glBegin(GL_QUADS); \
+            glTexCoord3f(dx, dy, dz); glVertex2f(0, y0); glTexCoord3f(dx, dy, dz); glVertex2f(W, y0); \
+            glTexCoord3f(dx, dy, dz); glVertex2f(W, y1); glTexCoord3f(dx, dy, dz); glVertex2f(0, y1); \
+            glEnd(); } while (0)
+        glBindTexture(GL_TEXTURE_CUBE_MAP, id[0]);
+        glClear(GL_COLOR_BUFFER_BIT);
+        for (f = 0; f < 6; f++)
+            BAND(H * f / 6.0f, H * (f + 1) / 6.0f, dir[f][0], dir[f][1], dir[f][2]);
+        glFinish();
+        {
+            static const char *nm[6] = { "face +X", "face -X", "face +Y", "face -Y",
+                                         "face +Z", "face -Z" };
+            for (f = 0; f < 6; f++)
+                check(nm[f], W / 2, (int)(H * (f + 0.5f) / 6), fc[f]);
+        }
+        glBindTexture(GL_TEXTURE_CUBE_MAP, id[1]);
+        glClear(GL_COLOR_BUFFER_BIT);
+        BAND(0, H / 4.0f, 1, 0.5f, 0.5f);
+        BAND(H / 4.0f, H / 2.0f, 1, 0.5f, -0.5f);
+        BAND(H / 2.0f, 3 * H / 4.0f, 1, -0.5f, 0.5f);
+        BAND(3 * H / 4.0f, H, 1, -0.5f, -0.5f);
+        glFinish();
+        check("orientation +X : (0,0)", W / 2, H / 8, 0xff0000);
+        check("orientation +X : (1,0)", W / 2, 3 * H / 8, 0x00ff00);
+        check("orientation +X : (0,1)", W / 2, 5 * H / 8, 0x0000ff);
+        check("orientation +X : (1,1)", W / 2, 7 * H / 8, 0xffffff);
+#undef BAND
+        /* génération GL_NORMAL_MAP : normale −X → face −X (verte) */
+        glBindTexture(GL_TEXTURE_CUBE_MAP, id[0]);
+        glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_NORMAL_MAP_ARB);
+        glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, GL_NORMAL_MAP_ARB);
+        glTexGeni(GL_R, GL_TEXTURE_GEN_MODE, GL_NORMAL_MAP_ARB);
+        glEnable(GL_TEXTURE_GEN_S); glEnable(GL_TEXTURE_GEN_T); glEnable(GL_TEXTURE_GEN_R);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBegin(GL_QUADS);
+        glNormal3f(-1, 0, 0);
+        glVertex2f(0, 0); glVertex2f(W, 0); glVertex2f(W, H); glVertex2f(0, H);
+        glEnd();
+        glFinish();
+        check("GL_NORMAL_MAP, normale -X", W / 2, H / 2, 0x00ff00);
+        /* génération GL_REFLECTION_MAP : oeil en (x, y, 0) avec x ≫ y, normale
+           +X → r = u − 2n(n·u) = (−x, y, 0)/|u| : face −X (verte). NORMAL_MAP
+           ou la position seule donneraient +X (rouge). */
+        glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, 0x8512 /* REFLECTION_MAP */);
+        glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, 0x8512);
+        glTexGeni(GL_R, GL_TEXTURE_GEN_MODE, 0x8512);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBegin(GL_QUADS);
+        glNormal3f(1, 0, 0);
+        glVertex2f(W * 0.75f, 0); glVertex2f(W, 0);
+        glVertex2f(W, H / 16.0f); glVertex2f(W * 0.75f, H / 16.0f);
+        glEnd();
+        glFinish();
+        check("GL_REFLECTION_MAP, normale +X", W * 7 / 8, H / 32, 0x00ff00);
+        glDisable(GL_TEXTURE_GEN_S); glDisable(GL_TEXTURE_GEN_T); glDisable(GL_TEXTURE_GEN_R);
+        glDisable(GL_TEXTURE_CUBE_MAP);
+    } else if (!strcmp(scene, "wrapprobe")) {
+        /* Sonde (relevé seulement), selon PROBE_MODE :
+             border  : WRAP_S = CLAMP_TO_BORDER, WRAP_T = MIRRORED_REPEAT, couleur
+                       de bordure (0,25 ; 0,5 ; 0,75 ; 1) — où GLEngine les range ;
+             dxt     : un bloc DXT1 4×4 par glCompressedTexImage2D — ce que le
+                       pilote reçoit (format, pas, données) ;
+             generic : GL_COMPRESSED_RGB par glTexImage2D (GLEngine compresse),
+                       puis relecture par glGetCompressedTexImage ;
+             genmip  : idem sur trois niveaux, dessinés minifiés.
+           Dans tous les modes : les formats compressés annoncés et les requêtes
+           de niveau (docs/re/bordure-et-compression.md).
+           La texture reste liée à l'unité 0 : le vidage à l'échange la montre. */
+        static const GLfloat bc[4] = { 0.25f, 0.5f, 0.75f, 1.0f };
+        static const unsigned char blk[8] = { 0x00, 0xF8, 0x1F, 0x00, 0xE4, 0xE4, 0xE4, 0xE4 };
+        static const unsigned char white[16] = { 255, 255, 255, 255, 255, 255, 255, 255,
+                                                 255, 255, 255, 255, 255, 255, 255, 255 };
+        static unsigned char white4[4 * 4 * 4];
+        const char *mode = getenv("PROBE_MODE") ? getenv("PROBE_MODE") : "border";
+        GLuint id;
+        memset(white4, 255, sizeof(white4));
+        glGenTextures(1, &id);
+        glBindTexture(GL_TEXTURE_2D, id);
+        {
+            GLint nf = -1, fl[16], i2;
+            glGetIntegerv(0x86A2 /* NUM_COMPRESSED_TEXTURE_FORMATS */, &nf);
+            printf("formats compressés annoncés : %d :", nf);
+            if (nf > 0 && nf <= 16) {
+                glGetIntegerv(0x86A3, fl);
+                for (i2 = 0; i2 < nf; i2++)
+                    printf(" %x", fl[i2]);
+            }
+            printf("\n");
+        }
+        if (!strcmp(mode, "genmip")) {
+            /* format générique, trois niveaux : GLEngine compresse chacun */
+            glTexImage2D(GL_TEXTURE_2D, 0, 0x84ED, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, white4);
+            glTexImage2D(GL_TEXTURE_2D, 1, 0x84ED, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, white4);
+            glTexImage2D(GL_TEXTURE_2D, 2, 0x84ED, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white4);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+            glEnable(GL_TEXTURE_2D);
+            glBegin(GL_QUADS);                                  /* λ = 2 */
+            glTexCoord2f(0, 0); glVertex2f(0, 0); glTexCoord2f(1, 0); glVertex2f(1, 0);
+            glTexCoord2f(1, 1); glVertex2f(1, 1); glTexCoord2f(0, 1); glVertex2f(0, 1);
+            glEnd();
+            glFinish();
+            printf("GL_COMPRESSED_RGB, mipmaps : dessinées, erreur GL 0x%x\n", glGetError());
+        } else if (!strcmp(mode, "generic")) {
+            GLint ifmt = 0, cmp = -1, sz = -1;
+            glTexImage2D(GL_TEXTURE_2D, 0, 0x84ED /* COMPRESSED_RGB */, 2, 2, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, white);
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &ifmt);
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, 0x86A1 /* TEXTURE_COMPRESSED */, &cmp);
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, 0x86A0 /* ..._IMAGE_SIZE */, &sz);
+            printf("GL_COMPRESSED_RGB : interne %x, compressée %d, taille %d, erreur GL 0x%x\n",
+                   ifmt, cmp, sz, glGetError());
+            {   /* ARB_texture_compression : relecture de l'image compressée */
+                typedef void (*gcti_f)(GLenum, GLint, GLvoid *);
+                gcti_f g = (gcti_f)gl_sym("glGetCompressedTexImage", "glGetCompressedTexImageARB");
+                unsigned char buf[64];
+                memset(buf, 0xAA, sizeof(buf));
+                if (g)
+                    g(GL_TEXTURE_2D, 0, buf);
+                printf("glGetCompressedTexImage : %s, erreur GL 0x%x, %02x%02x%02x%02x %02x%02x%02x%02x | %02x\n",
+                       g ? "appelé" : "absent", glGetError(), buf[0], buf[1], buf[2], buf[3],
+                       buf[4], buf[5], buf[6], buf[7], buf[8]);
+            }
+        } else if (!strcmp(mode, "dxt")) {
+            typedef void (*ctx_f)(GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei,
+                                  const GLvoid *);
+            ctx_f cti = (ctx_f)gl_sym("glCompressedTexImage2D", "glCompressedTexImage2DARB");
+            if (cti)
+                cti(GL_TEXTURE_2D, 0, 0x83F0, 4, 4, 0, 8, blk);
+            printf("glCompressedTexImage2D (DXT1) : %s, erreur GL 0x%x\n",
+                   cti ? "appelé" : "absent", glGetError());
+            {
+                GLint ifmt = 0, cmp = -1, sz = -1;
+                glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &ifmt);
+                glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, 0x86A1, &cmp);
+                glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, 0x86A0, &sz);
+                printf("  interne %x, compressée %d, taille %d\n", ifmt, cmp, sz);
+            }
+        } else {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, 0x812D);   /* CLAMP_TO_BORDER */
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, 0x8370);   /* MIRRORED_REPEAT */
+            glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, bc);
+            printf("CLAMP_TO_BORDER, MIRRORED_REPEAT, bordure : erreur GL 0x%x\n", glGetError());
+        }
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBegin(GL_QUADS);
+        glTexCoord2f(-1, 0); glVertex2f(0, 0); glTexCoord2f(2, 0); glVertex2f(W, 0);
+        glTexCoord2f(2, 1); glVertex2f(W, H); glTexCoord2f(-1, 1); glVertex2f(0, H);
+        glEnd();
+        glFinish();
+        printf("  pixels : gauche %06lx, milieu %06lx\n", px(W / 8, H / 2), px(W / 2, H / 2));
+    } else if (!strcmp(scene, "cubeprobe")) {
+        /* Sonde (relevé seulement) : carte de cube dont la face f a un niveau 0
+           de 4×4 (R = 40·f, G = 255 − 40·f, B = 7), un niveau 1 de 2×2
+           (R = 40·f, G = 100, B = 200) et un niveau 2 de 1×1 — pour retrouver
+           dans l'objet texture de GLEngine où vivent les six faces. Il faut
+           POMPPC_GL_TRYCUBE (cfg+0xc2) : sans lui, GLEngine refuse les faces. */
+        static unsigned char l0[16 * 4], l1[4 * 4], l2[4];
+        int f, i;
+        GLuint id;
+        glGenTextures(1, &id);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, id);
+        for (f = 0; f < 6; f++) {
+            for (i = 0; i < 16; i++) {
+                l0[i * 4] = (unsigned char)(40 * f); l0[i * 4 + 1] = (unsigned char)(255 - 40 * f);
+                l0[i * 4 + 2] = 7; l0[i * 4 + 3] = 255;
+            }
+            for (i = 0; i < 4; i++) {
+                l1[i * 4] = (unsigned char)(40 * f); l1[i * 4 + 1] = 100;
+                l1[i * 4 + 2] = 200; l1[i * 4 + 3] = 255;
+            }
+            l2[0] = (unsigned char)f; l2[1] = 1; l2[2] = 2; l2[3] = 255;
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_RGBA, 4, 4, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, l0);
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 1, GL_RGBA, 2, 2, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, l1);
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 2, GL_RGBA, 1, 1, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, l2);
+        }
+        printf("faces de cube : erreur GL 0x%x\n", glGetError());
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glEnable(GL_TEXTURE_CUBE_MAP);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBegin(GL_QUADS);
+        glTexCoord3f(1, 0.1f, 0.2f); glVertex2f(0, 0);
+        glTexCoord3f(1, 0.1f, 0.2f); glVertex2f(W, 0);
+        glTexCoord3f(1, 0.1f, 0.2f); glVertex2f(W, H);
+        glTexCoord3f(1, 0.1f, 0.2f); glVertex2f(0, H);
+        glEnd();
+        glFinish();
+        printf("  face +X au centre = %06lx (attendu 00ff07)\n", px(W / 2, H / 2));
+        glDisable(GL_TEXTURE_CUBE_MAP);
     } else if (!strcmp(scene, "t3dprobe")) {
         /* Sonde (relevé seulement) : une texture 3D 8×2×4 dont chaque texel
            code ses coordonnées (R = 30·x, G = 100·y, B = 60·z + 30), plus un

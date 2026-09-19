@@ -267,7 +267,7 @@ static void trace_proc(int id, unsigned long *a)
                 sprintf(tag, "swap-dt%d", k);
                 pomppc_dump(tag, dt, 0x600);
                 if (GLD_U32(dt, 0))
-                    { sprintf(tag, "swap-prm%d", k); pomppc_dump(tag, (void *)GLD_U32(dt, 0), 0x800); }
+                    { sprintf(tag, "swap-prm%d", k); pomppc_dump(tag, (void *)GLD_U32(dt, 0), 0x1000); }
                 for (l = 0; l < 2; l++) {
                     const unsigned char *lv = dt + 0x78 + l * 0x74;
                     if (GLD_U32(lv, 0x10))

@@ -67,13 +67,15 @@ device v11 : c'est ce qui est annoncé (§3).
 | Multitexture, 4 unités | (i) | `v15` « multitexture 4 unites » TENU (0,5⁴ = 16/255, exact) |
 | Multitexture, 5 à 8 unités | (ii) | `v15` « multitexture 8 unites » TENU **avec le plugin** : au-delà de `QGPU_MAX_UNITS`, le plugin refuse (`unites>2`) et Apple rend juste. C'est ce qui autorise à laisser `GL_MAX_TEXTURE_UNITS = 8`. |
 | `GL_COMBINE`, `GL_ADD`, dot3 | (i) | scène `comb` ; `QGPU_CB_*` (v5) |
-| Cartes de cube | **(iii)** | `GL_MAX_CUBE_MAP_TEXTURE_SIZE = 0` ; `glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X, …)` → `GL_INVALID_VALUE` |
-| Compression de texture | **(iii), et silencieusement fausse** | `GL_NUM_COMPRESSED_TEXTURE_FORMATS = 0`, mais `glCompressedTexImage2D` avec un bloc DXT1 **ne rend aucune erreur** et l'image est fausse (gris au lieu de rouge). C'est le pire des cas : une application n'a aucun moyen de s'en apercevoir. |
-| Multiéchantillonnage | **(iii)** | `GL_SAMPLE_BUFFERS = 0`, `GL_SAMPLES = 0` ; `glSampleCoverage` passe sans erreur et sans effet |
+| Cartes de cube | **(i) sous le plugin v10** *(19/09/2026 : scène `cube` 12/12 par les deux chemins, `NORMAL_MAP` et `REFLECTION_MAP` compris ; `v15` TENU ; `docs/re/cartes-de-cube.md`)* ; **(iii) sous Apple** — ancien relevé : | `GL_MAX_CUBE_MAP_TEXTURE_SIZE = 0` ; `glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X, …)` → `GL_INVALID_VALUE` |
+| Compression de texture | **(i) sous le plugin v10** *(19/09/2026 : les niveaux S3TC partent tels quels à l'hôte, scène `tex13` 34/34, `v15` TENU ; aucun format listé, ce que 1.3 permet ; les formats génériques, que GLEngine compresse lui-même en DXT1, sont relayés et le rendu d'Apple les tient aussi. **Exception, côté GLEngine** : `GL_TEXTURE_COMPRESSED` et `GL_TEXTURE_COMPRESSED_IMAGE_SIZE` restent sans réponse et `GL_TEXTURE_INTERNAL_FORMAT` vaut `GL_RGBA8` pour tout, sous Apple comme sous nous — `docs/re/bordure-et-compression.md` §2.4)* — ancien relevé : | `GL_NUM_COMPRESSED_TEXTURE_FORMATS = 0`, mais `glCompressedTexImage2D` avec un bloc DXT1 **ne rend aucune erreur** et l'image est fausse (gris au lieu de rouge). C'est le pire des cas : une application n'a aucun moyen de s'en apercevoir. |
+| Multiéchantillonnage | (ii) **au sens de la spécification** | `GL_SAMPLE_BUFFERS = 0`, `GL_SAMPLES = 0` ; `glSampleCoverage` passe sans erreur et sans effet — c'est exactement ce qu'OpenGL 1.3 exige quand il n'y a pas de tampon multiéchantillonné (§3.2.1). `GL_ARB_multisample` n'est pas annoncée. |
 | Matrices transposées | (ii) | `v15` TENU ; `GL_ARB_transpose_matrix` déjà annoncée |
-| `GL_CLAMP_TO_BORDER` | **non vérifié [H]** | — |
+| `GL_CLAMP_TO_BORDER` | **(i) sous le plugin v10** *(19/09/2026)* ; (iii) sous Apple | scène `tex13` : couleur de bordure, bord en linéaire, `GL_CLAMP` qui la prend aussi ; le rendu d'Apple rend le texel du bord (`docs/re/bordure-et-compression.md` §1) |
 
-→ **1.3 n'est pas tenu.**
+→ **1.3 n'était pas tenu au 18/09/2026. Il l'est depuis le 19/09/2026** sous le plugin avec un
+device v11, à l'exception des requêtes de niveau compressé que GLEngine ne sert pas (ci-dessus) :
+c'est ce qui est annoncé (§3).
 
 ### OpenGL 1.4
 
@@ -92,7 +94,7 @@ device v11 : c'est ce qui est annoncé (§3).
 | **Couleur secondaire** | **(iii)** | `v15` : `glEnable(GL_COLOR_SUM)` + `glSecondaryColor3f(0,5, 0, 0)` sur une couleur primaire `(0, 0,5, 0)` rend `008000` — la couleur secondaire n'est **pas** ajoutée. (Le chemin brut ne la porte pas non plus : elle passe en valeur courante.) |
 | Paramètres de point | **(iii) partiel** | les appels passent ; mais l'atténuation par la distance n'est pas portée par le protocole (une seule `QGPU_SK_POINT_SIZE` pour toute la primitive). Le plugin la **refuse** désormais sur les deux chemins ; le comportement exact de GLEngine n'a pas été vérifié au pixel **[H]** |
 | Textures de profondeur, comparaison d'ombre | **(iii)** | bits absents du tableau d'Apple ; le protocole n'a pas de format de profondeur pour les textures |
-| `GL_MIRRORED_REPEAT` | **(iii)** | `v15` : `s = 1,25` rend le texel 0 (rouge) au lieu du texel 1 (bleu) — c'est un `GL_REPEAT` |
+| `GL_MIRRORED_REPEAT` | **(i) sous le plugin v10** *(19/09/2026 : `v15` TENU, `tex13` 3/3)* ; (iii) sous Apple | `v15` sous Apple : `s = 1,25` rend le texel 0 (rouge) au lieu du texel 1 (bleu) — c'est un `GL_REPEAT` |
 
 → **1.4 n'est pas tenu.**
 
@@ -110,7 +112,20 @@ device v11 : c'est ce qui est annoncé (§3).
 
 ## 3. Ce qui est annoncé, et pourquoi
 
-### `GL_VERSION` = « 1.2 POMPPC-1.0 » (depuis le 19/09/2026, device v11)
+### `GL_VERSION` = « 1.3 POMPPC-1.0 » (depuis le 19/09/2026, device v11)
+
+Cartes de cube, `CLAMP_TO_BORDER` et compression tenues par le plugin (`G.cube`, `G.tex13` : v10
+et `QGPU_CAP_GL14`) ; le reste de 1.3 l'était déjà ; le multiéchantillonnage est à
+`GL_SAMPLE_BUFFERS = 0`, ce que 1.3 permet. Quatre extensions s'ajoutent :
+`GL_ARB_texture_border_clamp` (bit 3), `GL_ARB_texture_cube_map` (6),
+`GL_ARB_texture_compression` (10, sans format listé), `GL_ARB_texture_mirrored_repeat` (11) —
+soit **48**. Réserve, écrite ici pour ne rien cacher : les requêtes `GL_TEXTURE_COMPRESSED` et
+`GL_TEXTURE_COMPRESSED_IMAGE_SIZE` ne sont pas servies par GLEngine, et un pilote n'y a pas accès.
+`GL_EXT_texture_compression_s3tc` reste **non annoncée** : le relais est exact, mais le rendu
+d'Apple plante sur une texture S3TC à mipmaps, et un repli reste possible
+(`docs/re/bordure-et-compression.md` §3).
+
+### (19/09/2026, avant les cubes) `GL_VERSION` = « 1.2 POMPPC-1.0 »
 
 Textures 3D, niveaux et LOD, spéculaire séparée par les deux chemins : tout 1.2 est tenu, et le
 plugin l'annonce **seulement** si le device les tient (v11, `QGPU_CAP_GL14`) — sinon « 1.1 ».
@@ -152,7 +167,7 @@ version supérieure à 1.1.
 |---|---|---|
 | `GL_MAX_TEXTURE_UNITS` (`cfg+0xb4`) | 8 | 4 accélérées, 5–8 par le repli — **vérifié** (`v15`) |
 | `GL_MAX_TEXTURE_SIZE` (`cfg+0xbc`) | 4096 | ≤ 2048 accéléré (`QGPU_MAX_TEX_DIM`), au-delà par le repli — **vérifié** (`v15`, texture de 4096 de large) |
-| `GL_MAX_3D_TEXTURE_SIZE`, `_CUBE_MAP_`, `_RECTANGLE_` | 0 | exact : ces cibles sont absentes |
+| `GL_MAX_3D_TEXTURE_SIZE`, `_CUBE_MAP_`, `_RECTANGLE_` | 0 (Apple) ; **256, 2048, 0** sous le plugin v10 depuis le 19/09/2026 (`cfg+0xbe`, `cfg+0xc2`) | exact : l'hôte tient la 3D jusqu'à `QGPU_MAX_TEX_3D_DIM` et les cubes jusqu'à `QGPU_MAX_TEX_DIM` ; le rectangle reste absent |
 | tailles de point et de ligne | 0,1–50 et 0,1–10 | le device va jusqu'à 64 ; le plugin borne et arrondit comme le fait OpenGL pour les points et lignes non lissés |
 | `GL_MAX_LIGHTS`, `GL_MAX_CLIP_PLANES` | 8, 6 | `QGPU_MAX_LIGHTS` = 8, `QGPU_MAX_CLIP_PLANES` = 6 : exactement ce que l'hôte tient |
 
@@ -288,6 +303,8 @@ Pour **1.2**, dans l'ordre de difficulté :
 
 Puis, pour **1.3** : cartes de cube (même mécanique que les textures 3D) et compression S3TC
 (passée telle quelle à l'hôte, tâche 3.4) — le multiéchantillonnage (3.8) reste le plus lourd.
+*(Fait le 19/09/2026 : cubes, bordure et compression relayés, 1.3 annoncé ; le
+multiéchantillonnage n'était pas un verrou, `GL_SAMPLE_BUFFERS = 0` est conforme.)*
 Pour **1.4** : la couleur secondaire (il faut trouver l'octet de `GL_COLOR_SUM` dans l'état de
 GLEngine, cf. `docs/todo-gpu-3d.md`), les textures de profondeur et l'ombre (3.6),
 `GL_MIRRORED_REPEAT` (une valeur de plus dans `QGPU_TP_WRAP_*`), et les paramètres de point

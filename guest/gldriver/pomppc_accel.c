@@ -90,6 +90,8 @@
 #define TP_WRAP_R 0x14            /* relevé le 19/09/2026 (sonde t3dprobe) */
 #define TP_MIN    0x16
 #define TP_MAG    0x18
+#define TP_BORDER 0x1c            /* 4 × f32 : GL_TEXTURE_BORDER_COLOR (sonde
+                                     wrapprobe, docs/re/bordure-et-compression.md) */
 /* Niveaux et LOD (OpenGL 1.2), relevés le 19/09/2026 (sonde t3dprobe, T3D_LOD) */
 #define TP_MIN_LOD    0x30        /* f32, initial −1000 */
 #define TP_MAX_LOD    0x34        /* f32, initial 1000 */
@@ -102,8 +104,18 @@
    pas la 3D : la PROFONDEUR et la hauteur de tranche ne sont qu'ici. */
 #define TP_LEVEL0        0xa4
 #define TP_LEVEL_SIZE    0x18
+#define PL_W     0x00             /* u16 : largeur */
+#define PL_H     0x02             /* u16 : hauteur */
 #define PL_D     0x04             /* u16 : profondeur */
+#define PL_ROWPIX 0x08            /* u16 : pixels par ligne des données */
 #define PL_IMGH  0x0a             /* u16 : lignes par tranche des données */
+#define PL_FORMAT 0x0c            /* u16 */
+#define PL_TYPE  0x0e             /* u16 */
+#define PL_DATA  0x10             /* u32 */
+/* Cartes de cube : la face f a SON tableau de niveaux, au pas de 15 entrées
+   (relevé le 19/09/2026, sonde cubeprobe) ; le GLDriver, lui, ne voit que la
+   face 0 dans ses propres niveaux (LV_*). */
+#define TP_FACE_SIZE     0x168
 /* État GL de GLEngine : */
 #define GS_ALPHA_REF     0x2d60   /* float */
 #define GS_ALPHA_FUNC    0x2d64   /* u16 */
@@ -384,9 +396,10 @@ typedef struct PTex {                   /* texture du GLDriver suivie par le plu
     void          *drvtex;
     long           qtex;                /* identifiant hôte, -1 si aucun */
     int            dirty;               /* niveaux à (re)téléverser */
-    unsigned long  prm[9];              /* paramètres envoyés : min, mag, wrap s, wrap t,
+    unsigned long  prm[10];             /* paramètres envoyés : min, mag, wrap s, wrap t,
                                            wrap r (3D), puis (v10) min et max LOD en
-                                           bits IEEE, niveau de base, niveau max */
+                                           bits IEEE, niveau de base, niveau max,
+                                           couleur de bordure 0xAARRGGBB */
     int            prm_valid;
 } PTex;
 
@@ -476,6 +489,9 @@ static struct {
                                            l'application, convertis par l'hôte */
     int             tex3d;              /* textures 3D annoncées et tenues (v10 +
                                            QGPU_CAP_GL14) */
+    int             cube;               /* cartes de cube, idem */
+    int             tex13;              /* idem : CLAMP_TO_BORDER, MIRRORED_REPEAT,
+                                           couleur de bordure, niveaux S3TC */
     unsigned long   query_base;         /* premier identifiant de requête du client */
     double          t_submit, t_copy, t_upload;   /* secondes cumulées */
     /* ── bilan du mode asynchrone ── */
@@ -514,7 +530,7 @@ static const char *const no_name[NO_COUNT] = {
     "brut:lissage", "taille-de-point-attenuee", "brut:programme",
     "brut:pas-de-sommet", "brut:etat-tardif",
     "requete:repli-logiciel", "param-texture",
-    "brut:texture-3d",
+    "brut:texture-3d-ou-cube",
 };
 static unsigned long no_count[NO_COUNT];
 static char no_detail[NO_COUNT][64];
@@ -779,6 +795,14 @@ void pomppc_backend_init(void)
                coupe. */
             G.tex3d = G.v10 && (G.q.caps & QGPU_CAP_GL14) &&
                       !(getenv("POMPPC_GL_TEX3D") && getenv("POMPPC_GL_TEX3D")[0] == '0');
+            /* Cartes de cube (OpenGL 1.3) : pas de repli non plus. */
+            G.cube = G.v10 && (G.q.caps & QGPU_CAP_GL14) &&
+                     !(getenv("POMPPC_GL_CUBE") && getenv("POMPPC_GL_CUBE")[0] == '0');
+            /* Répétitions et couleur de bordure (1.3, 1.4), niveaux S3TC
+               relayés tels quels : l'hôte v10 les tient. POMPPC_GL_TEX13=0
+               revient au refus (repli sur Apple). */
+            G.tex13 = G.v10 && (G.q.caps & QGPU_CAP_GL14) &&
+                      !(getenv("POMPPC_GL_TEX13") && getenv("POMPPC_GL_TEX13")[0] == '0');
             G.query_base = G.q.index * QGPU_CLIENT_QUERY_IDS;
             atexit(on_exit_stats);
         } else {
@@ -1390,6 +1414,40 @@ static unsigned long host_texel_bytes(unsigned int fmt, unsigned int type)
     return 0;
 }
 
+/* S3TC : GLEngine range les blocs tels quels (format 0x83F0..0x83F3, type 0),
+ * qu'ils viennent de glCompressedTexImage2D ou de sa propre compression d'un
+ * format générique (GL_COMPRESSED_RGB → DXT1). L'hôte v10 les décode. */
+static int dxt_format(unsigned int fmt, unsigned int type)
+{
+    return type == 0 && fmt >= 0x83F0 && fmt <= 0x83F3;
+}
+
+/* Octets des données d'un niveau compressé de w × h : blocs de 4×4 serrés. */
+static unsigned long dxt_bytes(unsigned int fmt, unsigned long w, unsigned long h)
+{
+    return ((w + 3) / 4) * ((h + 3) / 4) * (fmt <= 0x83F1 ? 8 : 16);
+}
+
+/* Format de base pour l'hôte. Après glCompressedTexImage2D, le GLDriver range
+ * le format COMPRESSÉ comme format de base (0x83F0…) ; après une compression
+ * par GLEngine, c'est le vrai format de base (GL_RGB). */
+static unsigned long host_base(unsigned long base)
+{
+    if (base == 0x83F0)
+        return 0x1907;
+    if (base >= 0x83F1 && base <= 0x83F3)
+        return 0x1908;
+    return base;
+}
+
+/* Un niveau S3TC est-il accepté par l'hôte avec ce format de base ? DXT1 RGB
+ * veut GL_RGB, les trois autres GL_RGBA (qgpu_proto.h, section v10) : tout
+ * autre couple ferait REFUSER la soumission, pas seulement la texture. */
+static int dxt_ok(unsigned long base, unsigned int fmt)
+{
+    return G.tex13 && host_base(base) == (fmt == 0x83F0 ? 0x1907UL : 0x1908UL);
+}
+
 static int level_convertible(unsigned int fmt, unsigned int type)
 {
     if (G.v10)
@@ -1512,6 +1570,7 @@ static int convert_level(const unsigned char *lv, unsigned long *out)
 
 static int base_format_ok(unsigned long f)
 {
+    f = host_base(f);
     return (f >= 0x1906 && f <= 0x190A) || f == 0x8049;
 }
 
@@ -1532,7 +1591,21 @@ static int tex_filter_ok(unsigned long f)
 
 static int tex_wrap_ok(unsigned long w)
 {
-    return w == 0x2900 || w == 0x2901 || w == 0x812F;
+    return w == 0x2900 || w == 0x2901 || w == 0x812F ||
+           (G.tex13 && (w == 0x812D || w == 0x8370));   /* v10 : BORDER, MIRRORED */
+}
+
+/* Couleur de bordure de GLEngine en mot 0xAARRGGBB (QGPU_TP_BORDER_COLOR). */
+static unsigned long tex_border(const unsigned char *gp)
+{
+    unsigned long v = 0;
+    int i;
+    for (i = 0; i < 4; i++) {
+        float f = GLD_F32(gp, TP_BORDER + 4 * i);
+        unsigned long b = f > 0.0f ? (f >= 1.0f ? 255 : (unsigned long)(f * 255.0f + 0.5f)) : 0;
+        v |= b << (i == 3 ? 24 : 16 - 8 * i);
+    }
+    return v;
 }
 
 /* Niveaux et bornes de LOD (OpenGL 1.2). Avant la v10 l'hôte ne les connaît
@@ -1551,10 +1624,31 @@ static int tex_lod_ok(const unsigned char *gp)
 
 static int tex_params_ok(const unsigned char *gp)
 {
+    int t3 = GLD_U8(gp, TP_TARGET) == 1;
+    /* Avant la v10, GL_CLAMP prend le noir transparent chez l'hôte : une autre
+       couleur de bordure reste au rendu d'Apple. */
+    if (!G.tex13 && tex_border(gp) &&
+        (U16(gp, TP_WRAP_S) == 0x2900 || U16(gp, TP_WRAP_T) == 0x2900 ||
+         (t3 && U16(gp, TP_WRAP_R) == 0x2900)))
+        return 0;
     return tex_filter_ok(U16(gp, TP_MIN)) && tex_filter_ok(U16(gp, TP_MAG)) &&
            tex_wrap_ok(U16(gp, TP_WRAP_S)) && tex_wrap_ok(U16(gp, TP_WRAP_T)) &&
-           (GLD_U8(gp, TP_TARGET) != 1 || tex_wrap_ok(U16(gp, TP_WRAP_R))) &&
+           (!t3 || tex_wrap_ok(U16(gp, TP_WRAP_R))) &&
            tex_lod_ok(gp);
+}
+
+/* v10 : carte de cube (cible 0 de l'objet de GLEngine) ? */
+static int tex_is_cube(const PTex *t)
+{
+    const unsigned char *gp = (const unsigned char *)GLD_U32(t->drvtex, DT_PARAMS);
+    return gp && GLD_U8(gp, TP_TARGET) == 0;
+}
+
+/* Entrée du niveau l de la face f, dans l'objet de GLEngine. */
+static const unsigned char *cube_level(const void *drvtex, int f, int l)
+{
+    const unsigned char *gp = (const unsigned char *)GLD_U32(drvtex, DT_PARAMS);
+    return gp + TP_LEVEL0 + f * TP_FACE_SIZE + l * TP_LEVEL_SIZE;
 }
 
 /* Structure de niveau (LV_*) du NIVEAU DE BASE : c'est lui que la complétude
@@ -1585,6 +1679,32 @@ static int tex_complete(const void *drvtex)
     b = U16(gp, TP_BASE_LEVEL);
     if (b >= DT_LEVELS)
         return 0;
+    if (GLD_U8(gp, TP_TARGET) == 0) {
+        /* carte de cube : six faces carrées, de même taille, à chaque niveau */
+        const unsigned char *e0 = cube_level(drvtex, 0, b);
+        int f;
+        w = U16(e0, PL_W);
+        if (!w || U16(e0, PL_H) != w)
+            return 0;
+        minf = U16(gp, TP_MIN);
+        m = w;
+        for (q = b; m > 1; m >>= 1)
+            q++;
+        if (minf == 0x2600 || minf == 0x2601)
+            q = b;
+        else if (U16(gp, TP_MAX_LEVEL) < q)
+            q = U16(gp, TP_MAX_LEVEL);
+        if (q < b || q >= DT_LEVELS)
+            return 0;
+        for (n = b; n <= q; n++, w = w > 1 ? w / 2 : 1)
+            for (f = 0; f < 6; f++) {
+                const unsigned char *e = cube_level(drvtex, f, n);
+                if (U16(e, PL_W) != w || U16(e, PL_H) != w || !GLD_U32(e, PL_DATA) ||
+                    U16(e, PL_FORMAT) != U16(e0, PL_FORMAT))
+                    return 0;
+            }
+        return 1;
+    }
     lv = (const unsigned char *)drvtex + DT_LEVEL0 + b * DT_LEVEL_SIZE;
     w = S16(lv, LV_W); h = S16(lv, LV_H);
     if (!w || !h || !GLD_U32(lv, LV_DATA))
@@ -1665,6 +1785,26 @@ static int texture_uploadable(PTex *t)
         return no(NO_TEX_ID, 0, 0);
     if (tex_is_3d(t) && !G.tex3d)
         return no(NO_TEX_TARGET, 2, 0);
+    if (tex_is_cube(t)) {
+        int f;
+        if (!G.cube || S16(dt + DT_LEVEL0, LV_BORDER))
+            return no(NO_TEX_TARGET, 1, 0);
+        for (f = 0; f < 6; f++)
+            for (l = 0; l < DT_LEVELS; l++) {
+                const unsigned char *e = cube_level(dt, f, l);
+                unsigned long w = U16(e, PL_W), h = U16(e, PL_H);
+                if (!w || !h)
+                    continue;
+                if (w != h || w > QGPU_MAX_TEX_DIM || !GLD_U32(e, PL_DATA) ||
+                    (dxt_format(U16(e, PL_FORMAT), U16(e, PL_TYPE))
+                         ? !dxt_ok(base, U16(e, PL_FORMAT))
+                         : U16(e, PL_ROWPIX) < w ||
+                           !host_texel_bytes(U16(e, PL_FORMAT), U16(e, PL_TYPE))))
+                    return no(NO_TEX_FORMAT, (U16(e, PL_FORMAT) << 16) | U16(e, PL_TYPE),
+                              (f << 16) | w);
+            }
+        return 1;
+    }
     for (l = 0; l < DT_LEVELS; l++) {
         unsigned char *lv = dt + DT_LEVEL0 + l * DT_LEVEL_SIZE;
         unsigned long w = S16(lv, LV_W), h = S16(lv, LV_H);
@@ -1672,6 +1812,13 @@ static int texture_uploadable(PTex *t)
             continue;
         if (S16(lv, LV_BORDER) || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM)
             return no(NO_TEX_SIZE, w, h);
+        if (G.v10 && dxt_format(U16(lv, LV_FORMAT), U16(lv, LV_TYPE))) {
+            /* S3TC : 2D seulement, format de base assorti */
+            if (tex_is_3d(t) || !GLD_U32(lv, LV_DATA) || !dxt_ok(base, U16(lv, LV_FORMAT)))
+                return no(NO_TEX_FORMAT, (unsigned long)U16(lv, LV_FORMAT) << 16,
+                          (host_base(base) << 16) | w);
+            continue;
+        }
         if (tex_is_3d(t)) {
             unsigned long d, imgh;
             tex_level_depth(t, l, &d, &imgh);
@@ -1693,11 +1840,11 @@ static int upload_texture(PCtx *p, PTex *t)
 {
     unsigned char *dt = t->drvtex;
     unsigned char *gp = (unsigned char *)GLD_U32(dt, DT_PARAMS);
-    unsigned long base = GLD_U32(dt, DT_BASE_FORMAT), prm[9], off, *c;
-    static const unsigned long keys[9] = {
+    unsigned long base = GLD_U32(dt, DT_BASE_FORMAT), prm[10], off, *c;
+    static const unsigned long keys[10] = {
         QGPU_TP_MIN_FILTER, QGPU_TP_MAG_FILTER, QGPU_TP_WRAP_S, QGPU_TP_WRAP_T,
         QGPU_TP_WRAP_R, QGPU_TP_MIN_LOD, QGPU_TP_MAX_LOD, QGPU_TP_BASE_LEVEL,
-        QGPU_TP_MAX_LEVEL };
+        QGPU_TP_MAX_LEVEL, QGPU_TP_BORDER_COLOR };
     int l, k, t3 = tex_is_3d(t);
 
     if (gp && base_format_ok(base) && !tex_params_ok(gp))
@@ -1719,10 +1866,10 @@ static int upload_texture(PCtx *p, PTex *t)
         t->qtex = alloc_tex_id();
         if (t->qtex < 0)
             return no(NO_TEX_ID, 0, 0);
-        if (t3) {
+        if (t3 || tex_is_cube(t)) {
             c = reserve(p, QGPU_LEN_TEX_CREATE3);
             c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3);
-            c[1] = t->qtex; c[2] = QGPU_TT_3D;
+            c[1] = t->qtex; c[2] = t3 ? QGPU_TT_3D : QGPU_TT_CUBE_MAP;
         } else {
             c = reserve(p, QGPU_LEN_TEX);
             c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX);
@@ -1730,6 +1877,39 @@ static int upload_texture(PCtx *p, PTex *t)
         }
         t->dirty = 1;
         t->prm_valid = 0;
+    }
+    if (t->dirty && tex_is_cube(t)) {
+        /* carte de cube : les six faces, niveaux lus dans l'objet de GLEngine */
+        int f;
+        for (f = 0; f < 6; f++)
+            for (l = 0; l < DT_LEVELS; l++) {
+                const unsigned char *e = cube_level(dt, f, l);
+                unsigned long w = U16(e, PL_W), h = U16(e, PL_H);
+                unsigned int fmt = U16(e, PL_FORMAT), type = U16(e, PL_TYPE);
+                unsigned long bpp = host_texel_bytes(fmt, type);
+                unsigned long row = U16(e, PL_ROWPIX) * bpp, size;
+                int dxt = dxt_format(fmt, type);
+                if (!w || !h)
+                    continue;
+                if (dxt) {
+                    if (!dxt_ok(base, fmt))
+                        return no(NO_TEX_FORMAT, (unsigned long)fmt << 16, w);
+                    row = 0;
+                    size = dxt_bytes(fmt, w, h);
+                } else {
+                    size = row * (h - 1) + w * bpp;
+                }
+                if ((!bpp && !dxt) || !GLD_U32(e, PL_DATA) || !arena_alloc(size, &off))
+                    return no(NO_TEX_SIZE, w, h);
+                memcpy(G.q.win + off, (const void *)GLD_U32(e, PL_DATA), size);
+                c = reserve(p, QGPU_LEN_TEX_IMAGE3);
+                c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3);
+                c[1] = t->qtex; c[2] = QGPU_TT_CUBE_FACE(f); c[3] = l;
+                c[4] = w; c[5] = h; c[6] = 1; c[7] = host_base(base); c[8] = fmt; c[9] = type;
+                c[10] = G.q.base + off; c[11] = row; c[12] = 0;
+                G.n_texuploads++;
+            }
+        t->dirty = 0;
     }
     if (t->dirty) {
         for (l = 0; l < DT_LEVELS; l++) {
@@ -1751,7 +1931,11 @@ static int upload_texture(PCtx *p, PTex *t)
                     tex_level_depth(t, l, &dep, &imgh);
                 img = row * imgh;
                 size = img * (dep - 1) + row * (h - 1) + w * bpp;
-                if (!bpp || !d || S16(lv, LV_ROWPIX) < (short)w || !dep || imgh < h)
+                if (dxt_format(fmt, type) && !t3 && d && dxt_ok(base, fmt)) {
+                    /* S3TC : les blocs serrés, tels quels */
+                    row = 0;
+                    size = dxt_bytes(fmt, w, h);
+                } else if (!bpp || !d || S16(lv, LV_ROWPIX) < (short)w || !dep || imgh < h)
                     return no(NO_TEX_FORMAT, (fmt << 16) | type,
                               ((unsigned long)S16(lv, LV_ROWPIX) << 16) | w);
                 if (!arena_alloc(size, &off))
@@ -1760,7 +1944,7 @@ static int upload_texture(PCtx *p, PTex *t)
                 c = reserve(p, QGPU_LEN_TEX_IMAGE3);
                 c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3);
                 c[1] = t->qtex; c[2] = t3 ? QGPU_TT_3D : QGPU_TT_2D; c[3] = l;
-                c[4] = w; c[5] = h; c[6] = dep; c[7] = base; c[8] = fmt; c[9] = type;
+                c[4] = w; c[5] = h; c[6] = dep; c[7] = host_base(base); c[8] = fmt; c[9] = type;
                 c[10] = G.q.base + off; c[11] = row; c[12] = t3 ? img : 0;
                 G.n_texuploads++;
                 continue;
@@ -1787,10 +1971,12 @@ static int upload_texture(PCtx *p, PTex *t)
     prm[6] = GLD_U32(gp, TP_MAX_LOD);
     prm[7] = U16(gp, TP_BASE_LEVEL);
     prm[8] = U16(gp, TP_MAX_LEVEL);
-    for (k = 0; k < 9; k++) {
+    prm[9] = tex_border(gp);
+    for (k = 0; k < 10; k++) {
         /* wrap r : 3D seulement ; LOD et niveaux : v10 seulement (avant, ils
-           sont forcés aux valeurs initiales par tex_lod_ok) */
-        if ((k == 4 && !t3) || (k >= 5 && !G.v10))
+           sont forcés aux valeurs initiales par tex_lod_ok) ; bordure : avec
+           G.tex13 (sinon, seule la valeur initiale passe, cf. tex_params_ok) */
+        if ((k == 4 && !t3) || (k >= 5 && !G.v10) || (k == 9 && !G.tex13))
             continue;
         if (t->prm_valid && t->prm[k] == prm[k])
             continue;
@@ -1920,7 +2106,7 @@ static void target_probe(PCtx *p, int u, unsigned long mask, unsigned long units
 static int unit_slot(unsigned long m)
 {
     if (m & 1)
-        return -1;                                  /* carte de cube */
+        return G.cube ? 0 : -1;                     /* carte de cube (v10) */
     if (m & 2)
         return G.tex3d ? 1 : -1;                    /* 3D (v10) */
     if (m & 4)
@@ -2950,12 +3136,15 @@ static int geom_texture_ok(PCtx *p)
             continue;
         if (unit_slot(mask) < 0)
             return no(NO_TEX_TARGET, mask, GLD_U32(p->ctx, CTX_TEXUNITS));
-        /* Texture 3D : GLEngine JETTE la géométrie brute qu'on lui demande
-           (bit 0 posé, descripteur publié, et jamais un BeginPrimitiveBuffer ;
-           vu en vrai, scène tex3d). La 3D passe donc par le chemin hérité, où
-           GLEngine transforme et nous donne s, t, r, q : exact (docs/re/textures-3d.md). */
-        if (unit_slot(mask) == 1)
-            return no(NO_G_TEX3D, u, 0);
+        /* Texture 3D ou carte de cube : GLEngine JETTE la géométrie brute qu'on
+           lui demande (bit 0 posé, descripteur publié, et jamais un
+           BeginPrimitiveBuffer ; vu en vrai, scènes tex3d et cube). Le point
+           commun semble être une coordonnée r EXPLICITE : la carte de cube par
+           génération GL_NORMAL_MAP, elle, passe. Non élucidé : ces cibles vont
+           donc au chemin hérité, où GLEngine transforme et nous donne s, t, r, q
+           — exact (docs/re/textures-3d.md, docs/re/cartes-de-cube.md). */
+        if (unit_slot(mask) == 0 || unit_slot(mask) == 1)
+            return no(NO_G_TEX3D, u, mask);
         if (env != 0x2100 && env != 0x2101 && env != 0x0BE2 && env != 0x1E01 &&
             env != 0x0104 && env != 0x8570)
             return no(NO_TEX_ENV, env, u);
@@ -5087,6 +5276,14 @@ static void caps_probe(unsigned char *cfg)
         GLD_U32(cfg, 0x128) = 0xFFFFFFFFUL;
         GLD_U32(cfg, 0x12c) = 0x00007FFFUL;   /* bits 64..78 */
     }
+    /* POMPPC_GL_TRYCUBE=n : même sonde pour les cartes de cube (cfg+0xc2) */
+    e = getenv("POMPPC_GL_TRYCUBE");
+    if (e && *e) {
+        unsigned long n = (unsigned long)atoi(e);
+        if (n < 1 || n > 4096)
+            n = 256;
+        GLD_U16(cfg, 0xc2) = (unsigned short)n;     /* GL_MAX_CUBE_MAP_TEXTURE_SIZE */
+    }
     e = getenv("POMPPC_GL_TRY3D");
     if (e && *e) {
         unsigned long n = (unsigned long)atoi(e);
@@ -5129,13 +5326,23 @@ static void caps_probe(unsigned char *cfg)
  *
  * Depuis le 19/09/2026 (device v11) : GL_EXT_separate_specular_color et
  * GL_SGIS_texture_lod, et les textures 3D (cfg+0xbe, qui n'est pas un bit).
+ * Puis, pour OpenGL 1.3 (scènes cube et tex13, docs/re/bordure-et-compression.md) :
+ *   bit 6  GL_ARB_texture_cube_map       G.cube (et cfg+0xc2) ; sans repli ;
+ *   bit 3  GL_ARB_texture_border_clamp   G.tex13 : répétition et couleur
+ *   bit 11 GL_ARB_texture_mirrored_repeat  relayées (le rendu d'Apple les ignore) ;
+ *   bit 10 GL_ARB_texture_compression    G.tex13 : AUCUN format listé
+ *                                        (GL_NUM_COMPRESSED_TEXTURE_FORMATS = 0),
+ *                                        les formats génériques sont compressés
+ *                                        en DXT1 par GLEngine et relayés ; le
+ *                                        rendu d'Apple les tient aussi (repli sûr).
  *
- * Ce que l'on N'AJOUTE PAS, bien que le nom soit tentant : les cartes de cube
- * (GLEngine rend GL_INVALID_VALUE), la compression S3TC
- * (aucune erreur, mais l'image est fausse), la couleur secondaire
- * (GL_COLOR_SUM n'ajoute rien), GL_MIRRORED_REPEAT (traité comme GL_REPEAT),
- * les textures de profondeur et le multiéchantillonnage. Tout cela est mesuré,
- * pas supposé.
+ * Ce que l'on N'AJOUTE PAS, bien que le nom soit tentant :
+ * GL_EXT_texture_compression_s3tc (bit 43) — relayée et exacte (tex13), mais
+ * le rendu d'Apple PLANTE (Bus error) en dessinant une texture à mipmaps
+ * chargée par glCompressedTexImage2D : le moindre repli ferait tomber
+ * l'application ; la couleur secondaire en extension (bit 38 : le chemin brut
+ * ne la porte qu'en valeur courante), les textures de profondeur et le
+ * multiéchantillonnage. Tout cela est mesuré, pas supposé.
  *
  * Les LIMITES d'Apple sont laissées telles quelles : 8 unités de texture et
  * 4096 de côté. Le chemin accéléré n'en tient que 4 et 2048 — au-delà, le
@@ -5152,6 +5359,8 @@ static void caps_extensions(unsigned char *cfg)
        non identifiée, n'est PAS touchée. */
     if (G.tex3d)
         GLD_U16(cfg, 0xbe) = QGPU_MAX_TEX_3D_DIM;
+    if (G.cube)
+        GLD_U16(cfg, 0xc2) = QGPU_MAX_TEX_DIM;     /* GL_MAX_CUBE_MAP_TEXTURE_SIZE */
     if (G.v8)
         w0 |= 1UL << 17;                /* GL_ARB_occlusion_query */
     w0 |= 1UL << 20;                    /* GL_ARB_vertex_buffer_object */
@@ -5162,6 +5371,11 @@ static void caps_extensions(unsigned char *cfg)
                                            deux chemins la tiennent (v11) */
     if (G.v10 && (G.q.caps & QGPU_CAP_GL14))
         GLD_U32(cfg, 0x12c) |= 1UL << (77 - 64);   /* GL_SGIS_texture_lod */
+    if (G.cube)
+        w0 |= 1UL << 6;                 /* GL_ARB_texture_cube_map */
+    if (G.tex13)
+        w0 |= (1UL << 3) | (1UL << 10) | (1UL << 11);   /* border_clamp,
+                                           texture_compression, mirrored_repeat */
     GLD_U32(cfg, 0x124) |= w0;
     GLD_U32(cfg, 0x128) |= w1;
 }
@@ -5199,13 +5413,20 @@ const char *pomppc_override_string(long name, const char *apple)
            strcpy — et donc une promesse que rien ne vérifie. On y met la plus
            haute version dont TOUTES les fonctions sont tenues. Le suffixe dit
            qui rend. Détail fonction par fonction : docs/re/version-extensions.md.
+             1.3 : cartes de cube (G.cube), CLAMP_TO_BORDER et compression
+                   (G.tex13 ; aucun format listé, ce que 1.3 permet ; les
+                   formats génériques relayés) — multitexture, combinaisons,
+                   matrices transposées l'étaient déjà ; multiéchantillonnage
+                   avec GL_SAMPLE_BUFFERS = 0, ce que 1.3 permet aussi ;
              1.2 : textures 3D (v10, G.tex3d), niveaux et bornes de LOD (v10,
                    relayés), spéculaire séparée sur les deux chemins (v11) —
                    tout le reste de 1.2 l'était déjà ;
              1.1 : sinon (device plus ancien, ou hôte sans QGPU_CAP_GL14). */
         if (getenv("POMPPC_GL_ANNOUNCE") && getenv("POMPPC_GL_ANNOUNCE")[0] == '0')
             return apple;
-        return (G.tex3d && G.q.version >= 11) ? "1.2 POMPPC-1.0" : "1.1 POMPPC-1.0";
+        if (!G.tex3d || G.q.version < 11)
+            return "1.1 POMPPC-1.0";
+        return (G.cube && G.tex13) ? "1.3 POMPPC-1.0" : "1.2 POMPPC-1.0";
     default:
         return apple;
     }
