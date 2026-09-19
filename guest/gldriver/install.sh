@@ -63,5 +63,6 @@ cp -R "$BUNDLE" "$RES/"
 chown -R root:wheel "$RES/GLDriver-POMPPC.bundle"
 chmod -R 755 "$RES/GLDriver-POMPPC.bundle"
 
-echo "✔ installé. Vérifier : ioreg -c POMPPCGPU -r ; une application GL doit"
+echo "✔ installé. Redémarrer, puis vérifier : kextstat | grep -i pomppc ;"
+echo "  ioreg -l -w 0 | grep -i pomppc ; une application GL doit"
 echo "  rapporter GL_RENDERER = « POMPPC qgpu (OpenGL host GPU) »."

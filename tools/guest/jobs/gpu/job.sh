@@ -26,7 +26,7 @@ rm -rf /tmp/POMPPCGPU.kext && cp -R POMPPCGPU.kext /tmp/
 chown -R root:wheel /tmp/POMPPCGPU.kext && chmod -R 755 /tmp/POMPPCGPU.kext
 kextload -t /tmp/POMPPCGPU.kext 2>&1 | tail -2
 kextstat | grep -i pomppc
-ioreg -c POMPPCGPU -r 2>/dev/null | grep -E "POMPPCGPU|Version|Caps" | head -5
+ioreg -l -w 0 2>/dev/null | grep -E "POMPPCGPU|Version|Caps" | head -5   # (ioreg -r : 10.5 et plus)
 
 echo "== qgpu_test"
 cd $SRC/guest/qgpu-test && make > $OUT/qgpu-test-build.txt 2>&1 || { tail -10 $OUT/qgpu-test-build.txt; exit 1; }

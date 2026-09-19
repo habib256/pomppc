@@ -20,7 +20,7 @@ if make >> $R 2>&1; then say "STEP=build_kext OK"; else say "STEP=build_kext FAI
 chown -R root:wheel POMPPCGPU.kext; chmod -R 755 POMPPCGPU.kext
 if /sbin/kextload -t POMPPCGPU.kext >> $R 2>&1; then say "STEP=kextload OK"; else say "STEP=kextload FAIL"; say "VERDICT=LOAD_FAIL"; exit 1; fi
 /usr/sbin/kextstat 2>/dev/null | grep -i pomppc >> $R
-/usr/sbin/ioreg -c POMPPCGPU -r 2>/dev/null | grep -iE "QGPU|POMPPCGPU" | head -8 >> $R
+/usr/sbin/ioreg -l -w 0 2>/dev/null | grep -iE "QGPU|POMPPCGPU" | head -8 >> $R   # (ioreg -r : 10.5 et plus)
 
 cd /pomppc/qgpu-test || { say "VERDICT=NO_TEST"; exit 1; }
 make clean >/dev/null 2>&1

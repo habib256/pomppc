@@ -81,7 +81,7 @@ Normalement par `guest/gldriver/install.sh`, qui installe kext et plugin. À la 
 cd /pomppc/POMPPCGPU        # ou le CD produit par scripts/make_kext_iso.sh
 make                        # gcc-4.0 + SDK MacOSX10.4u (Xcode Tools du DVD Tiger)
 sudo make load              # kextload -t : valide dépendances et ABI avant tout
-kextstat | grep POMPPCGPU ; ioreg -c POMPPCGPU -r
+kextstat | grep POMPPCGPU ; ioreg -l -w 0 | grep -i pomppc   # (ioreg -r n'existe pas sous Tiger)
 cd ../qgpu-test && make && ./qgpu_test     # scène de référence, pixels vérifiés, out.ppm
 ```
 
