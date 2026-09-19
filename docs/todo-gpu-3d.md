@@ -309,8 +309,28 @@ n'existent que sur l'hôte macOS.
 **Au 19/09/2026, soir** (1.5 annoncé, accélérateur publié) :
 
 1. **Vitesse sur l'hôte Linux** : l'utilisateur trouve Marble Blast et Zenerchi plus lents sur
-   le PC (i7-10700F, RTX 4060 Ti) que sur l'hôte Apple Silicon. À mesurer ici, VM de dev
-   arrêtée et `/proc/loadavg` < 1 (`pomppc-metrologie`), avant de chercher où.
+   le PC (i7-10700F, RTX 4060 Ti) que sur l'hôte Apple Silicon, la musique saccade, et Marble
+   Blast en 16 bits « ralentit à mort ». **Diagnostic du 19/09/2026 soir** (job
+   `tools/guest/jobs/games`, bilan `POMPPC_GL_STATS`, `top` et `sample` dans l'invité) :
+   - **16 bits** : hors domaine du plugin (`CTX_COLOR_BITS != 32` → `NO_BUFFER`, profondeur 16
+     → `NO_DEPTH`) ; tout part au rendu logiciel d'Apple. Limite connue (§4.5 de
+     `gpu-3d-tiger.md`). Tâche : tampons 16 bits (RGB555, profondeur 16) avec conversion par
+     l'hôte à la relecture et au téléversement.
+   - **Le rendu n'est pas en cause** : `gltest game` 686 img/s ici (684-854 sur le Mac), aucun
+     refus, plugin < 5 ms par image. Dans l'invité, le WindowServer est à < 1 % et le jeu à 91 %.
+   - **Zenerchi** : 100 % des échantillons dans `TLoopMusicManager::LoadMusics → ov_read →
+     mdct_butterflies` — le jeu décode toutes ses musiques Ogg Vorbis au démarrage.
+     **Marble Blast** : fil principal à 96 %, dont ~35 % d'appels au système de fichiers
+     (chargements de niveau) et ~15 % de décodage Vorbis (musique en flux, d'où les saccades).
+   - **Cause de fond : le flottant PowerPC est entièrement émulé.** `fpu/softfloat.c` de QEMU 9.2
+     définit `QEMU_NO_HARDFLOAT 1` pour `TARGET_PPC` (le bit FI du FPSCR n'est pas collant), et
+     chaque instruction flottante fait `reset_fpstatus` + l'opération + `float_check_status`.
+     Même cause sur le Mac, dont le cœur est ~30 % plus rapide (rendu logiciel d'Apple dans
+     `glwin` : 81 contre 57 img/s).
+   - Piste : un mode « flottant rapide » pour la cible PPC (hardfloat quand FPSCR[XE] = 0,
+     FI approché), mesuré sur un banc flottant dans l'invité. Et la variante de compilation
+     (`-march=native`, LTO, sans `qom-cast-debug`) dont l'A/B de boot reste à faire, hôte au
+     repos : binaire prêt dans `~/src/qemu/build-opt`.
 2. **Vers Quartz Extreme (4.4)** : plus de 4 clients, mémoire vidéo annoncée, client de surface
    sur `POMPPCAccelerator`, puis `AccelCaps` (`docs/re/accelerateur-iokit.md` §9).
 3. Vitesse côté hôte et invité : **2.1** (objets tampon), **2.3** (zero-copy).
