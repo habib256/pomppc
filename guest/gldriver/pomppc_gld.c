@@ -335,19 +335,43 @@ long pomppc_call_real(int idx, long a, long b, long c, long d, long e, long f, l
 
 #define FWD8(idx) pomppc_call_real(idx, a, b, c, d, e, f, g, h)
 
+/* Un second exemplaire du plugin dans le même processus — celui d'Extensions
+   est chargé par l'IOGLBundleName de l'accélérateur, et une copie a pu rester
+   dans Resources (installation d'avant la tâche 4.2) : GLEngine rejette le
+   second, dont l'identifiant 0x77 est déjà pris, mais seulement APRÈS avoir
+   appelé son gldInitializeLibrary (_glepValidatePlugin). Il ne doit donc
+   rien ouvrir. Le propriétaire se signale par son pid dans l'environnement :
+   un processus fils en hérite sans avoir le même pid, et un plugin déchargé
+   puis rechargé retire la marque dans gldTerminateLibrary. */
+#define OWNER_ENV "POMPPC_GLD_OWNER"
+static int second_copy;
+
 long gldInitializeLibrary(long a, long b, long c, long d, long e, long f, long g, long h)
 {
     long r;
-    pomppc_log("gldInitializeLibrary(%08lx %08lx %08lx %08lx %08lx) pid %d\n",
-               a, b, c, d, e, (int)getpid());
+    char pid[16];
+    const char *owner = getenv(OWNER_ENV);
+
+    snprintf(pid, sizeof(pid), "%d", (int)getpid());
+    second_copy = owner && strcmp(owner, pid) == 0;
+    pomppc_log("gldInitializeLibrary(%08lx %08lx %08lx %08lx %08lx) pid %d%s\n",
+               a, b, c, d, e, (int)getpid(),
+               second_copy ? " : second exemplaire du plugin, inactif" : "");
     r = FWD8(GLD_InitializeLibrary);
-    pomppc_backend_init();
+    if (!second_copy) {
+        setenv(OWNER_ENV, pid, 1);
+        pomppc_backend_init();
+    }
     return r;
 }
 
 long gldTerminateLibrary(long a, long b, long c, long d, long e, long f, long g, long h)
 {
-    pomppc_log("gldTerminateLibrary()\n");
+    pomppc_log("gldTerminateLibrary()%s\n", second_copy ? " (second exemplaire)" : "");
+    if (!second_copy) {
+        pomppc_backend_fini();
+        unsetenv(OWNER_ENV);
+    }
     return FWD8(GLD_TerminateLibrary);
 }
 

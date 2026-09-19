@@ -90,9 +90,15 @@ Conception, rétro-ingénierie et mesures : `docs/gpu-3d-tiger.md`.
   seconde. `POMPPC_GL_ASYNC=0` revient au doorbell synchrone, au bit près.
 - **Identité.** Identifiant de plugin `0x7700` (renderer `0x00027700`), annoncé
   accéléré ; `GL_VENDOR = POMPPC`, `GL_RENDERER = POMPPC qgpu (OpenGL host GPU)`.
-  Le bundle s'appelle `GLDriver-POMPPC` pour être chargé avant le GLDriver
-  d'Apple : CGL retient le premier renderer qui convient, et le nôtre est aussi
-  le seul à répondre à `kCGLPFAAccelerated`.
+  Le kext publie un accélérateur IOKit dont `IOGLBundleName` est
+  `GLDriver-POMPPC` (tâche 4.2) : GLEngine charge le plugin depuis
+  `/System/Library/Extensions/GLDriver-POMPPC.bundle`, **avant** le GLDriver
+  d'Apple, comme le pilote d'une carte. CGL retient le premier renderer qui
+  convient, et le nôtre est aussi le seul à répondre à `kCGLPFAAccelerated`.
+  Un second exemplaire du plugin dans le même processus (une copie restée dans
+  `Resources`) est rejeté par GLEngine après son `gldInitializeLibrary` : il
+  reste inactif (marque `POMPPC_GLD_OWNER`), et `gldTerminateLibrary` rend la
+  tranche du kext (`docs/re/accelerateur-iokit.md` §4).
 - **Ce qui est annoncé est tenu.** `GL_VERSION = "1.1 POMPPC-1.0"` — la plus haute version dont
   *toutes* les fonctions sont tenues par la chaîne (plugin + hôte + repli exact sur le rendu
   d'Apple). Pas 1.2, parce que les **textures 3D** manquent partout dans la chaîne. Le plugin
@@ -109,12 +115,13 @@ sudo sh install.sh            # kext + plugin, voir l'en-tête du script
 sudo sh install.sh --remove
 ```
 
-Sans installation, pour un seul processus :
+Kext dans `/System/Library/Extensions/POMPPCGPU.kext`, plugin dans
+`/System/Library/Extensions/GLDriver-POMPPC.bundle` (disposition standard,
+`Contents/MacOS/`). Une installation d'avant la tâche 4.2 avait mis le plugin
+dans `Resources` d'OpenGL.framework : `install.sh` l'en retire.
 
-```sh
-make glres                                   # glres/ = ce plugin + le rendu flottant d'Apple
-GL_RESOURCES=$PWD/glres/ ./mon_application   # GLEngine lit ce dossier au lieu de Resources/
-```
+`GL_RESOURCES` ne marche pas sur Tiger 10.4.6 (`kCGLBadCodeModule`,
+`docs/gpu-3d-tiger.md` §5.1) : il n'y a pas d'essai « sans installation ».
 
 ## Variables d'environnement
 

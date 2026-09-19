@@ -7,14 +7,17 @@ CFLAGS  = -arch ppc -isysroot $(SDK) -O2 -Wall -Wno-unused-parameter -fno-common
 LDFLAGS = -arch ppc -isysroot $(SDK) -bundle
 LIBS    = -framework IOKit -framework CoreFoundation
 
-# Le tiret est voulu : GLEngine charge les « GLDriver* » dans l'ordre du
-# dossier, et CGL retient par défaut le premier renderer qui convient.
-# « GLDriver-POMPPC » trie avant « GLDriver » (« - » < « . ») : sans demande
-# explicite, les applications reçoivent le renderer accéléré (vu en vrai).
+# Le nom est celui que le kext publie dans IOGLBundleName (POMPPC_GL_BUNDLE_NAME,
+# kext/POMPPCGPU/POMPPCGPU.h) : GLEngine charge alors
+#   /System/Library/Extensions/GLDriver-POMPPC.bundle/Contents/MacOS/GLDriver-POMPPC
+# AVANT les GLDriver* d'OpenGL.framework, comme un vrai pilote de carte
+# (docs/re/accelerateur-iokit.md). Le tiret, qui faisait trier ce bundle avant
+# « GLDriver » quand il vivait dans Resources, ne sert plus.
 NAME    = GLDriver-POMPPC
+BIN     = $(NAME).bundle/Contents/MacOS/$(NAME)
 OBJS    = pomppc_gld.o pomppc_accel.o pomppc_qgpu.o gld_tramp.o
 
-all: $(NAME).bundle/$(NAME)
+all: $(BIN) $(NAME).bundle/Contents/Info.plist
 
 # qgpu_proto.h : copie du contrat hôte/invité (kext/POMPPCGPU/qgpu_proto.h)
 %.o: %.c pomppc_gld.h pomppc_qgpu.h qgpu_proto.h
@@ -31,19 +34,17 @@ endif
 gld_tramp.o: gld_tramp.s
 	$(CC) -arch ppc -c $< -o $@
 
-# Disposition « plate » attendue par GLEngine dans GL_RESOURCES :
-#   <dossier>/GLDriver-POMPPC.bundle/GLDriver-POMPPC
-$(NAME).bundle/$(NAME): $(OBJS)
-	mkdir -p $(NAME).bundle
+# Disposition standard d'un bundle, celle qu'impose IOGLBundleName (et non plus
+# la disposition « plate » des GLDriver* de Resources).
+$(BIN): $(OBJS)
+	mkdir -p $(NAME).bundle/Contents/MacOS
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 
-# Dossier GL_RESOURCES de test : notre plugin + le rendu flottant d'Apple.
-glres: all
-	rm -rf glres && mkdir glres
-	cp -R $(NAME).bundle glres/
-	ln -s /System/Library/Frameworks/OpenGL.framework/Versions/A/Resources/GLRendererFloat.bundle glres/
+$(NAME).bundle/Contents/Info.plist: Info.plist
+	mkdir -p $(NAME).bundle/Contents
+	cp Info.plist $@
 
 clean:
-	rm -rf *.o $(NAME).bundle glres
+	rm -rf *.o $(NAME).bundle
 
-.PHONY: all glres clean
+.PHONY: all clean

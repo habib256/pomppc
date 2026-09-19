@@ -10,6 +10,17 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 
 ## État (19/09/2026)
 
+- **Accélérateur IOKit publié (tâche 4.2, 19/09/2026)** : le kext publie un nub
+  `POMPPCAccelerator` (classe `IOAccelerator`, `IOGLBundleName = GLDriver-POMPPC`) et pose sur
+  chaque framebuffer `IOAccelTypes`/`IOAccelIndex`, comme le kext d'une vraie carte. GLEngine
+  charge alors le plugin **depuis `/System/Library/Extensions`**, avant le GLDriver d'Apple, sans
+  astuce de nom ni fichier ajouté dans OpenGL.framework ; sans le device, pas de plugin du tout.
+  Vérifié dans l'invité, kext installé et chargé avant le WindowServer : bureau normal, **Quartz
+  Extreme inactif** (pas d'`AccelCaps`, pas d'`IOAGPDevice` sous QEMU), renderer `0x00027700` en
+  tête de `CGLQueryRendererInfo`, `gltest` 40/40, `glwin` 68-69 img/s. Relevé :
+  `docs/re/accelerateur-iokit.md`. Deux défauts latents du plugin corrigés en chemin : un plugin
+  déchargé par GLEngine gardait sa tranche du kext et laissait un `atexit` dans du code déchargé.
+
 - **OpenGL 1.5 ANNONCÉ et tenu (lot 5, 19/09/2026) — l'objectif de cette feuille de route** :
   `GL_VERSION = « 1.5 POMPPC-1.0 »`, **55 extensions**, device v12. Ce que 1.5 ajoute à 1.4 était
   déjà là ou presque : objets tampon (GLEngine ; `glMapBuffer`/`glGetBufferSubData` vérifiés),
@@ -137,7 +148,7 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 | # | Tâche | Statut |
 |---|---|---|
 | 4.1 | **Annoncer version et extensions** telles que tenues (dépend de 1.1) : `GL_VERSION`, liste d'extensions, limites (`GetInteger`). | ✅ **fait le 18/09/2026** — mais le verdict n'est pas celui qu'on espérait. Relevé fonction par fonction dans **`docs/re/version-extensions.md`** (scène `v15` : un sous-test par fonction, joué sous le rendu d'Apple seul **et** sous le plugin). **La plus haute version entièrement tenue est 1.1** : OpenGL 1.2 exige les **textures 3D**, que GLEngine refuse (`GL_MAX_3D_TEXTURE_SIZE = 0`) et que le protocole ne porte pas. Annoncé : `GL_VERSION = "1.1 POMPPC-1.0"`, plus **trois** extensions ajoutées au tableau de bits (`GL_ARB_occlusion_query`, `GL_ARB_vertex_buffer_object`, `GL_EXT_blend_func_separate`) → 42 au lieu de 39. **Les limites d'Apple sont laissées telles quelles** (8 unités, 4096) : au-delà du chemin accéléré, le repli tient, c'est vérifié. Au passage, l'expérience **V3** a montré que la table bit → extension de `docs/re/capacites-glengine.md` §3.2 est **décalée d'un cran à partir du bit 24** ; elle est corrigée. |
-| 4.2 | **Accélérateur IOKit** : nœud `IOAccelerator` + `IOGLBundleName`, chargement comme un vrai pilote de carte. Préalable de Quartz Extreme. | à faire |
+| 4.2 | **Accélérateur IOKit** : nœud `IOAccelerator` + `IOGLBundleName`, chargement comme un vrai pilote de carte. Préalable de Quartz Extreme. | ✅ **fait le 19/09/2026** (`docs/re/accelerateur-iokit.md`) : nub `POMPPCAccelerator` enfant de `POMPPCGPU` (le transport garde son type d'ouverture 0, qui est aussi celui des surfaces), qui refuse toute ouverture ; les framebuffers le désignent par `IOAccelTypes`/`IOAccelIndex`. Plugin dans `Extensions`. Pas d'`AccelCaps` : le WindowServer tenterait Quartz Extreme. Pour 4.4 : `AccelCaps`, client de surface, mémoire vidéo annoncée (0 aujourd'hui) |
 | 4.3 | Programmes ARB de sommets et de fragments (`CreatePipelineProgram`) — au-delà de 1.5 strict, mais condition de Core Image. | à faire |
 | 4.4 | Quartz Extreme (surfaces de fenêtre sur l'hôte), puis Core Image, puis Quartz 2D Extreme. Objectif visible : « QE/CI géré » dans Informations Système. | à faire |
 
@@ -237,6 +248,9 @@ n'existent que sur l'hôte macOS.
   repli logiciel survient alors que seul l'hôte a dessiné, il part d'un tampon vide (limite
   partagée avec la profondeur depuis le début).
 - Plus de 4 clients GL accélérés (tranches du kext) — à lever avant 4.4.
+- **Mémoire vidéo annoncée : 0** (`kCGLRPVideoMemory`, héritée du GLDriver d'Apple). Le
+  WindowServer exige au moins `GLCompositorMinimumVRAM` pour Quartz Extreme, et des jeux lisent
+  cette valeur. À poser avec 4.4 (`docs/re/accelerateur-iokit.md` §9).
 
 ## Lot 2 en cours (18/09/2026) — la géométrie sur l'hôte
 
@@ -292,8 +306,17 @@ n'existent que sur l'hôte macOS.
 
 ## Ordre d'attaque
 
-**Au 19/09/2026**, ce qui débloque le plus est côté invité, sur la moitié hôte que la v10 vient de
-poser (`docs/protocole-v10-textures.md` §7) :
+**Au 19/09/2026, soir** (1.5 annoncé, accélérateur publié) :
+
+1. **Vitesse sur l'hôte Linux** : l'utilisateur trouve Marble Blast et Zenerchi plus lents sur
+   le PC (i7-10700F, RTX 4060 Ti) que sur l'hôte Apple Silicon. À mesurer ici, VM de dev
+   arrêtée et `/proc/loadavg` < 1 (`pomppc-metrologie`), avant de chercher où.
+2. **Vers Quartz Extreme (4.4)** : plus de 4 clients, mémoire vidéo annoncée, client de surface
+   sur `POMPPCAccelerator`, puis `AccelCaps` (`docs/re/accelerateur-iokit.md` §9).
+3. Vitesse côté hôte et invité : **2.1** (objets tampon), **2.3** (zero-copy).
+4. **4.3** (programmes ARB) : condition de Core Image et de nombreux jeux de 2004-2006.
+
+Au 19/09/2026, matin (fait depuis : 2.5, textures 3D, compression — 1.2 à 1.5 annoncés) :
 
 1. **Formats convertis par l'hôte** dans le plugin (2.5) : pure vitesse, aucun relevé nouveau.
 2. **Textures 3D** dans le plugin (`cfg+0xbe`, niveaux 3D de `gldCreateTextureLevel`) : avec les

@@ -142,6 +142,7 @@ long pomppc_call_real(int idx, long a, long b, long c, long d, long e, long f, l
 
 /* pomppc_accel.c */
 void pomppc_backend_init(void);
+void pomppc_backend_fini(void);
 void pomppc_patch_renderer_info(unsigned char *info);
 int  pomppc_translate_attribs(const long *attribs, long *out, int max);
 void pomppc_patch_pixel_list(void *head);

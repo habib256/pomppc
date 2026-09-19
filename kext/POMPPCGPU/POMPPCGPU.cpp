@@ -140,11 +140,13 @@ bool POMPPCGPU::start(IOService * provider)
     }
 
     registerService();
+    publishAccelerator();
     return true;
 }
 
 void POMPPCGPU::stop(IOService * provider)
 {
+    unpublishAccelerator();
     if (fRegs) {
         regWrite(QGPU_REG_IRQ_MASK, 0);
     }
@@ -175,12 +177,132 @@ void POMPPCGPU::stop(IOService * provider)
 
 void POMPPCGPU::free(void)
 {
+    if (fAccelPath)  { fAccelPath->release();  fAccelPath = 0; }
+    if (fFBLock)     { IOLockFree(fFBLock);    fFBLock = 0; }
     if (fGate)       { fGate->release();       fGate = 0; }
     if (fWorkLoop)   { fWorkLoop->release();   fWorkLoop = 0; }
     if (fRegsMap)    { fRegsMap->release();    fRegsMap = 0; }
     if (fRegsRange)  { fRegsRange->release();  fRegsRange = 0; }
     if (fShmemRange) { fShmemRange->release(); fShmemRange = 0; }
     super::free();
+}
+
+/* ──────────────────────── accélérateur publié (4.2) ────────────────────────
+ *
+ * Voir POMPPCGPU.h et docs/re/accelerateur-iokit.md. Le nub porte
+ * IOGLBundleName ; chaque framebuffer publié reçoit IOAccelTypes (le chemin du
+ * nub) et IOAccelIndex (son rang). Un échec ici laisse le transport intact,
+ * mais GLEngine ne trouvera plus le plugin, qui ne vit plus dans Resources :
+ * chaque échec est donc dit dans le journal du noyau. */
+
+void POMPPCGPU::publishAccelerator(void)
+{
+    char path[512];
+    int  len = sizeof(path);
+
+    fAccel = new POMPPCAccelerator;
+    if (!fAccel || !fAccel->init()) {
+        if (fAccel) { fAccel->release(); fAccel = 0; }
+        GPULog("accélérateur : allocation impossible\n");
+        return;
+    }
+    fAccel->setProperty("IOGLBundleName", POMPPC_GL_BUNDLE_NAME);
+    if (!fAccel->attach(this)) {
+        fAccel->release();
+        fAccel = 0;
+        GPULog("accélérateur : attach impossible\n");
+        return;
+    }
+    if (!fAccel->getPath(path, &len, gIOServicePlane) ||
+        !(fAccelPath = OSString::withCString(path))) {
+        GPULog("accélérateur : chemin introuvable, framebuffers non liés\n");
+        fAccel->registerService();
+        return;
+    }
+    fAccel->registerService();
+
+    fFBLock    = IOLockAlloc();
+    fLinkedFBs = OSArray::withCapacity(2);
+    if (!fFBLock || !fLinkedFBs) {
+        GPULog("accélérateur : framebuffers non liés (mémoire)\n");
+        return;
+    }
+    /* Appelé aussi, tout de suite, pour les framebuffers déjà publiés : le kext
+       peut être chargé à chaud (devloop) comme au démarrage. addNotification
+       consomme le dictionnaire. */
+    fFBNotifier = addNotification(gIOPublishNotification,
+                                  serviceMatching("IOFramebuffer"),
+                                  &POMPPCGPU::framebufferPublished, this, 0);
+    GPULog("accélérateur publié : %s (%s)\n", path, POMPPC_GL_BUNDLE_NAME);
+}
+
+bool POMPPCGPU::framebufferPublished(void * target, void * ref, IOService * fb)
+{
+    ((POMPPCGPU *) target)->linkFramebuffer(fb);
+    return true;
+}
+
+void POMPPCGPU::linkFramebuffer(IOService * fb)
+{
+    OSString * cur;
+    OSNumber * index;
+    UInt32     n;
+
+    IOLockLock(fFBLock);
+    if (fLinkedFBs->getNextIndexOfObject(fb, 0) != (unsigned int) -1) {
+        IOLockUnlock(fFBLock);
+        return;
+    }
+    /* Un framebuffer qui désigne déjà un AUTRE accélérateur a un vrai pilote
+       de carte derrière lui : on ne le lui prend pas. */
+    cur = OSDynamicCast(OSString, fb->getProperty(kIOAccelTypesKey));
+    if (cur && !cur->isEqualTo(fAccelPath)) {
+        IOLockUnlock(fFBLock);
+        GPULog("%s désigne déjà %s : laissé tel quel\n", fb->getName(),
+               cur->getCStringNoCopy());
+        return;
+    }
+    n = fLinkedFBs->getCount();
+    index = OSNumber::withNumber((unsigned long long) n, 32);
+    fb->setProperty(kIOAccelTypesKey, fAccelPath);
+    if (index) {
+        fb->setProperty(kIOAccelIndexKey, index);
+        index->release();
+    }
+    fLinkedFBs->setObject(fb);
+    IOLockUnlock(fFBLock);
+    GPULog("framebuffer %s lié à l'accélérateur (index %lu)\n", fb->getName(),
+           (unsigned long) n);
+}
+
+void POMPPCGPU::unpublishAccelerator(void)
+{
+    unsigned int i;
+
+    /* remove() attend la fin d'un appel de framebufferPublished en cours */
+    if (fFBNotifier) {
+        fFBNotifier->remove();
+        fFBNotifier = 0;
+    }
+    if (fLinkedFBs) {
+        for (i = 0; i < fLinkedFBs->getCount(); i++) {
+            IOService * fb = (IOService *) fLinkedFBs->getObject(i);
+            OSString *  cur = OSDynamicCast(OSString, fb->getProperty(kIOAccelTypesKey));
+            if (cur && fAccelPath && cur->isEqualTo(fAccelPath)) {
+                fb->removeProperty(kIOAccelTypesKey);
+                fb->removeProperty(kIOAccelIndexKey);
+            }
+        }
+        fLinkedFBs->release();
+        fLinkedFBs = 0;
+    }
+    /* Le nub est un client de POMPPCGPU : quand c'est notre terminaison qui
+       nous arrête, il est déjà terminé et terminate() ne fait rien. */
+    if (fAccel) {
+        fAccel->terminate();
+        fAccel->release();
+        fAccel = 0;
+    }
 }
 
 /* ─────────────────────────────── interruption ───────────────────────────── */
@@ -703,4 +825,20 @@ IOReturn POMPPCGPUUserClient::ucGetSlot(UInt32 * index, UInt32 * base, UInt32 * 
     *ctxBase  = (UInt32) fSlot * QGPU_CLIENT_CTX_IDS;
     *surfBase = (UInt32) fSlot * QGPU_CLIENT_SURF_IDS;
     return kIOReturnSuccess;
+}
+
+/* ───────────────────── nub IOAccelerator (tâche 4.2) ───────────────────── */
+
+#undef super
+#define super IOAccelerator
+OSDefineMetaClassAndStructors(POMPPCAccelerator, IOAccelerator)
+
+/* Aucune surface tant que Quartz Extreme n'est pas fait (4.4) : CGL (pbuffers,
+   CGLSetPBuffer) et le WindowServer reçoivent l'échec d'IOServiceOpen, et
+   prennent le même chemin que sans accélérateur (IOAccelCreateSurface échoue
+   aussi sur un accélérateur nul). Le transport, lui, s'ouvre sur POMPPCGPU. */
+IOReturn POMPPCAccelerator::newUserClient(task_t owningTask, void * securityID,
+                                          UInt32 type, IOUserClient ** handler)
+{
+    return kIOReturnUnsupported;
 }

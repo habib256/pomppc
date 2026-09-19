@@ -27,9 +27,44 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOUserClient.h>
 #include <IOKit/IOWorkLoop.h>
+#include <IOKit/graphics/IOAccelerator.h>
+#include <IOKit/graphics/IOGraphicsInterfaceTypes.h>   /* kIOAccelTypesKey… */
 #include <IOKit/pci/IOPCIDevice.h>
 
 #include "qgpu_proto.h"
+
+/* ── L'accélérateur publié (tâche 4.2) ───────────────────────────────────────
+ *
+ *   C'est ainsi qu'un vrai pilote de carte se fait connaître d'OpenGL.framework
+ *   (docs/re/accelerateur-iokit.md) :
+ *
+ *   1. CGL, pour chaque écran, lit sur le FRAMEBUFFER les propriétés
+ *      IOAccelTypes (chemin, dans le plan IOService, d'un objet de classe
+ *      IOAccelerator) et IOAccelIndex (IOAccelFindAccelerator, IOKit.framework) ;
+ *   2. GLEngine lit sur cet accélérateur IOGLBundleName et charge
+ *      /System/Library/Extensions/<nom>.bundle/Contents/MacOS/<nom> AVANT les
+ *      GLDriver* du dossier Resources d'OpenGL.framework, avec pour masque
+ *      d'écrans ceux dont le framebuffer le désigne.
+ *
+ *   L'accélérateur est un NUB ENFANT de POMPPCGPU, et non POMPPCGPU lui-même :
+ *   le plugin et qgpu_test ouvrent POMPPCGPU avec le type 0, qui est aussi
+ *   kIOAccelSurfaceClientType — le type qu'ouvrent CGL (pbuffers) et le
+ *   WindowServer (Quartz Extreme) sur un accélérateur. Le transport garde donc
+ *   son ABI, et le nub refuse toute ouverture tant qu'il n'y a pas de surfaces
+ *   (tâche 4.4).
+ *
+ *   Il ne publie PAS AccelCaps : le WindowServer tente Quartz Extreme dès que
+ *   ce masque est non nul (CGXGLDisplayContextInitialize, CoreGraphics). */
+#define POMPPC_GL_BUNDLE_NAME   "GLDriver-POMPPC"
+
+class POMPPCAccelerator : public IOAccelerator
+{
+    OSDeclareDefaultStructors(POMPPCAccelerator)
+
+public:
+    virtual IOReturn newUserClient(task_t owningTask, void * securityID,
+                                   UInt32 type, IOUserClient ** handler);
+};
 
 /* ── v9 : drapeaux passés DANS `len` à QGPU_UC_SUBMIT ────────────────────────
  *
@@ -111,6 +146,11 @@ private:
     static bool     irqFilter(OSObject * owner, IOFilterInterruptEventSource * src);
     static void     irqAction(OSObject * owner, IOInterruptEventSource * src, int count);
     static void     timerAction(OSObject * owner, IOTimerEventSource * src);
+    /* 4.2 : accélérateur publié et désigné par les framebuffers */
+    void            publishAccelerator(void);
+    void            unpublishAccelerator(void);
+    static bool     framebufferPublished(void * target, void * ref, IOService * fb);
+    void            linkFramebuffer(IOService * fb);
 
     IOPCIDevice *     fPCI;
     IODeviceMemory *  fShmemRange;
@@ -137,6 +177,12 @@ private:
     IOTimerEventSource *           fTimer;
     UInt32                         fTicks;
     UInt32                         fSleepers;
+
+    POMPPCAccelerator *            fAccel;
+    OSString *                     fAccelPath;    /* valeur d'IOAccelTypes */
+    IONotifier *                   fFBNotifier;
+    IOLock *                       fFBLock;       /* protège fLinkedFBs */
+    OSArray *                      fLinkedFBs;    /* framebuffers désignant fAccel */
 };
 
 class POMPPCGPUUserClient : public IOUserClient
