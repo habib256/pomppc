@@ -1156,12 +1156,13 @@ static void arm_draw(QgpuCore *c)
     QgpuContext *cx = &c->ctx[c->cur_ctx];
     c->cur_stip = &cx->stip;
     c->cur_query = (cx->query >= 0) ? &c->query[cx->query] : NULL;
+    c->cur_sec = -1;
 }
 
 /* Commun aux opcodes de dessin : a = [nverts, off] ; ntex unités texturées
    (coordonnées dans les sommets). */
 static uint32_t do_draw(QgpuCore *c, const uint32_t *a, uint32_t prim,
-                        uint32_t words, int ntex)
+                        uint32_t words, int ntex, bool sec)
 {
     QgpuTexture *tex[QGPU_MAX_UNITS];
     int u;
@@ -1196,6 +1197,18 @@ static uint32_t do_draw(QgpuCore *c, const uint32_t *a, uint32_t prim,
         tex[u] = u < ntex ? unit_texture(c, cs, u) : NULL;
     }
     arm_draw(c);
+    if (sec) {
+        /* v11 : couleur secondaire après les coordonnées, bornée comme la
+           primaire (le backend de référence l'ajoute telle quelle) */
+        c->cur_sec = (int32_t)QGPU_VERTEX_TEXN_WORDS(ntex);
+        for (i = 0; i < nverts; i++) {
+            float *sc = c->vbuf + i * words + c->cur_sec;
+            int k;
+            for (k = 0; k < 3; k++) {
+                sc[k] = sc[k] < 0.0f ? 0.0f : sc[k] > 1.0f ? 1.0f : sc[k];
+            }
+        }
+    }
     if (!c->be->draw(c, s, cs, prim, tex, c->vbuf, nverts, words)) {
         return QGPU_ST_BACKEND;
     }
@@ -1880,25 +1893,31 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
 
     case QGPU_OP_DRAW_TRIANGLES:
         WANT(QGPU_LEN_DRAW);
-        return do_draw(c, a, QGPU_PRIM_TRIANGLES, QGPU_VERTEX_WORDS, 0);
+        return do_draw(c, a, QGPU_PRIM_TRIANGLES, QGPU_VERTEX_WORDS, 0, false);
     case QGPU_OP_DRAW_TRIANGLES_TEX:
         WANT(QGPU_LEN_DRAW);
-        return do_draw(c, a, QGPU_PRIM_TRIANGLES, QGPU_VERTEX_TEX_WORDS, 1);
+        return do_draw(c, a, QGPU_PRIM_TRIANGLES, QGPU_VERTEX_TEX_WORDS, 1, false);
     case QGPU_OP_DRAW_TRIANGLES_TEX2:
         WANT(QGPU_LEN_DRAW);
-        return do_draw(c, a, QGPU_PRIM_TRIANGLES, QGPU_VERTEX_TEX2_WORDS, 2);
+        return do_draw(c, a, QGPU_PRIM_TRIANGLES, QGPU_VERTEX_TEX2_WORDS, 2, false);
     case QGPU_OP_DRAW_TRIANGLES_TEXN:
         WANT(QGPU_LEN_DRAW_N);
         if (a[2] < 1 || a[2] > QGPU_MAX_UNITS) {
             return QGPU_ST_BAD_ARG;
         }
-        return do_draw(c, a, QGPU_PRIM_TRIANGLES, QGPU_VERTEX_TEXN_WORDS(a[2]), a[2]);
+        return do_draw(c, a, QGPU_PRIM_TRIANGLES, QGPU_VERTEX_TEXN_WORDS(a[2]), a[2], false);
+    case QGPU_OP_DRAW_TRIANGLES_SEC:                     /* v11 */
+        WANT(QGPU_LEN_DRAW_N);
+        if (a[2] > QGPU_MAX_UNITS) {
+            return QGPU_ST_BAD_ARG;
+        }
+        return do_draw(c, a, QGPU_PRIM_TRIANGLES, QGPU_VERTEX_SEC_WORDS(a[2]), a[2], true);
     case QGPU_OP_DRAW_LINES:
         WANT(QGPU_LEN_DRAW);
-        return do_draw(c, a, QGPU_PRIM_LINES, QGPU_VERTEX_WORDS, 0);
+        return do_draw(c, a, QGPU_PRIM_LINES, QGPU_VERTEX_WORDS, 0, false);
     case QGPU_OP_DRAW_POINTS:
         WANT(QGPU_LEN_DRAW);
-        return do_draw(c, a, QGPU_PRIM_POINTS, QGPU_VERTEX_WORDS, 0);
+        return do_draw(c, a, QGPU_PRIM_POINTS, QGPU_VERTEX_WORDS, 0, false);
 
     case QGPU_OP_TEX_CREATE:
     case QGPU_OP_TEX_CREATE3: {
@@ -2157,6 +2176,8 @@ static bool known_op(uint32_t op)
     case QGPU_OP_TEX_IMAGE: case QGPU_OP_TEX_PARAM:
     /* v10 */
     case QGPU_OP_TEX_CREATE3: case QGPU_OP_TEX_IMAGE3: case QGPU_OP_TEX_SUBIMAGE:
+    /* v11 */
+    case QGPU_OP_DRAW_TRIANGLES_SEC:
     /* v7 */
     case QGPU_OP_SET_MATRIX: case QGPU_OP_DEPTH_RANGE: case QGPU_OP_SET_LIGHT:
     case QGPU_OP_SET_MATERIAL: case QGPU_OP_SET_LIGHT_MODEL:

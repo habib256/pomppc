@@ -279,6 +279,8 @@ struct QgpuCore {
        référence n'ait pas à remonter au contexte courant. */
     const QgpuStipple *cur_stip;   /* motif de pointillé de polygone */
     QgpuQuery         *cur_query;  /* requête ouverte, ou NULL */
+    int32_t            cur_sec;    /* v11 : mot de la couleur secondaire dans les
+                                      sommets du dessin hérité en cours, ou -1 */
 
     uint32_t status;               /* QGPU_ST_* de la dernière exécution */
     uint32_t status_pc;            /* index (mots) de la commande fautive */

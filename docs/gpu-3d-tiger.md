@@ -619,6 +619,12 @@ de 25 noms fixes et d'un tableau de 79 bits que le pilote pose dans le bloc de c
 plugin y ajoute **ce que la chaîne tient, et rien d'autre**, établi fonction par fonction dans
 **`docs/re/version-extensions.md`** :
 
+> **Mise à jour du 19/09/2026** : `GL_VERSION = "1.5 POMPPC-1.0"` et 55 extensions avec un device
+> v12 — textures 3D et niveaux (1.2), cubes, bordure, compression (1.3), biais de LOD, profondeur
+> et ombre, couleur secondaire, paramètres de point, crossbar (1.4), fonctions d'ombre (1.5). Le
+> détail fonction par fonction est dans `docs/re/version-extensions.md` ; le texte ci-dessous est
+> l'état du 18/09/2026.
+
 * `GL_VERSION = "1.1 POMPPC-1.0"`. Ce n'est pas 1.5, ni même 1.2 : **OpenGL 1.2 exige les textures
   3D**, que GLEngine refuse (`GL_MAX_3D_TEXTURE_SIZE = 0`, `glTexImage3D` → `GL_INVALID_VALUE`) et
   que le protocole qgpu ne porte pas davantage. Manquent aussi, mesurés : cartes de cube,
@@ -650,6 +656,8 @@ liste telle qu'une application la lit, qui l'a montré.
 | plugin hors écran | `gltest` × 28 scènes | pixels témoins OK avec `POMPPC_GL_GEOM=0` **et** `=1` ; image entière comparée au rendu d'Apple, écart max **hors arêtes** de 0 à 3/255 (voir §4.7) |
 | pipeline fixe v8 | `gltest blendc logicop polymode stipple occl` | mélange constant, min/max, opérations logiques, modes de polygone, pointillés, requêtes d'occlusion — **0/255 sur l'image entière**, comptes d'occlusion exacts (§4.8) |
 | textures v10 (hôte seul, 19/09/2026) | `tests/qgpu_core_test.c`, `run_v10` | 3D, cube (orientation vérifiée contre le pilote), rectangle, 1D, miroir, bordure, profondeur et comparaison, LOD, mipmaps générés, 18 formats, S3TC, sous-images, 18 refus — **0 échec**, backend logiciel et RTX 4060 Ti (EGL, NVIDIA). Côté invité : rien encore (`docs/protocole-v10-textures.md` §7) |
+| OpenGL 1.2 (19/09/2026, invité, device v11) | `gltest tex3d texlod sepspec v15 caps`, `run_v11` | textures 3D 9/9, niveaux et LOD 8/8, spéculaire séparée par les deux chemins ; `GL_VERSION` « 1.2 POMPPC-1.0 », 44 extensions ; `gltest` 35/35 |
+| OpenGL 1.3 à 1.5 (19/09/2026, invité, device v12) | `gltest cube tex13 tex14 tcprobe gl15 v15 caps`, `run_v12` | cubes 12/12, bordure et S3TC 34/34, 1.4 33/33, 1.5 18/18, **par les deux chemins** ; `GL_VERSION` « 1.5 POMPPC-1.0 », 55 extensions ; `gltest` 40/40 ; `run-all` 58 OK |
 | hôte Linux + NVIDIA (19/09/2026) | `qgpu_core_test`, `qgpu_smoke.py`, `run-all.sh` | verts après deux corrections (contexte EGL partagé entre threads, profondeur selon la présence d'un stencil) ; `qgpu_smoke.py` publie désormais `caps = 0x1e` |
 | version et extensions | `gltest caps entry v15` | ce qui est annoncé est tenu, fonction par fonction (`docs/re/version-extensions.md`) |
 | géométrie sur l'hôte | `gltest lit texgen clip fogz bigstrip dlist mixte` | éclairage, texgen, découpe, brouillard, longues primitives, listes d'affichage, alternance domaine / hors domaine |

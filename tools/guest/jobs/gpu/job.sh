@@ -14,7 +14,7 @@ SRC=$PWD/src; OUT=$PWD/out
 SDK=/Developer/SDKs/MacOSX10.4u.sdk
 SCENES=${SCENES:-"tri gouraud depth fill prims tex texfmt texpack texpersp comb mix state
   stencil depthrt varray game lit texgen clip fogz bigstrip dlist mixte fusion blendc logicop
-  polymode stipple occl caps entry v15"}
+  polymode stipple occl caps entry v15 tex3d texlod sepspec cube tex13 tex14 tcprobe gl15"}
 
 echo "== kext"
 cd $SRC/kext/POMPPCGPU && make clean >/dev/null 2>&1
@@ -44,7 +44,7 @@ cd $SRC/guest/gltest
 /usr/bin/gcc-4.0 -arch ppc -O1 -isysroot $SDK -o gltest gltest.c -framework OpenGL \
   > $OUT/gltest-build.txt 2>&1 || { tail -15 $OUT/gltest-build.txt; exit 1; }
 # environnement propre à une scène
-scene_env() { case $1 in stencil) echo GLTEST_STENCIL=1 ;; *) echo GLTEST_NOWS=1 ;; esac; }
+scene_env() { case $1 in stencil|tex14) echo GLTEST_STENCIL=1 ;; *) echo GLTEST_NOWS=1 ;; esac; }
 ok=0; ko=0; bad=""
 for s in $SCENES; do
   env GLTEST_NOWS=1 $(scene_env $s) ./gltest $s 256 256 p-$s.ppm > $OUT/$s.txt 2>&1; rp=$?

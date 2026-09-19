@@ -3122,7 +3122,7 @@ static void run_v9(QgpuCore *c, uint8_t *shmem)
     }
     CHECK(bad == 0, "carte des registres : %u offsets alignés et distincts "
           "sous 0x%x (%u fautes)", n, (unsigned)QGPU_CTRL_TOPADDR, bad);
-    CHECK(QGPU_PROTO_VERSION == 10, "version du protocole %d", QGPU_PROTO_VERSION);
+    CHECK(QGPU_PROTO_VERSION == 12, "version du protocole %d", QGPU_PROTO_VERSION);
     CHECK(QGPU_QUEUE_DEPTH >= 2 && (QGPU_QUEUE_DEPTH & (QGPU_QUEUE_DEPTH - 1)) == 0,
           "profondeur de file %d (puissance de 2, >= 2)", QGPU_QUEUE_DEPTH);
     CHECK((QGPU_DOORBELL_GO & QGPU_DOORBELL_ASYNC) == 0 && QGPU_DOORBELL_GO == 1,
@@ -3872,6 +3872,43 @@ static void run_v10(QgpuCore *c, uint8_t *shmem)
         v10_exec(c, &e);
     }
 
+    /* (u) CHEMIN BRUT et PROFONDEUR (1.4) : la texture de (k) — 2×2
+       [0,2 0,4 ; 0,6 0,8] — dessinée par DRAW_RAW, r = 0,5 dans le sommet. */
+    {
+        static const struct { float s, t; uint32_t cmp; uint32_t want; const char *what; } dc[] = {
+            { 0.25f, 0.25f, QGPU_TC_NONE,      0x333333, "D = 0,2 en luminance" },
+            { 0.75f, 0.75f, QGPU_TC_NONE,      0xCCCCCC, "D = 0,8 en luminance" },
+            { 0.25f, 0.25f, QGPU_TC_COMPARE_R, 0x000000, "LEQUAL 0,5 ≤ 0,2 → 0" },
+            { 0.25f, 0.75f, QGPU_TC_COMPARE_R, 0xFFFFFF, "LEQUAL 0,5 ≤ 0,6 → 1" },
+        };
+        static const float q[6][2] = { { 0, 0 }, { 64, 0 }, { 64, 64 }, { 0, 0 }, { 64, 64 }, { 0, 64 } };
+        for (k = 0; k < (int)(sizeof(dc) / sizeof(dc[0])); k++) {
+            uint32_t got;
+            e.off = e.start = CMD_OFF;
+            tparam(&e, T + 9, QGPU_TP_COMPARE_MODE, dc[k].cmp);
+            tparam(&e, T + 9, QGPU_TP_COMPARE_FUNC, 0x0203);
+            tparam(&e, T + 9, QGPU_TP_DEPTH_MODE, 0x1909);
+            state(&e, QGPU_SK_TEX_BIND, T + 9);
+            state(&e, QGPU_SK_UNIT(0) + QGPU_SK_U_ENV_MODE, 0x1E01);   /* REPLACE */
+            clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+            v.off = v.start = VTX_OFF;
+            for (i = 0; i < 6; i++) {
+                emitf(&v, q[i][0]); emitf(&v, q[i][1]);
+                emitf(&v, dc[k].s); emitf(&v, dc[k].t); emitf(&v, 0.5f); emitf(&v, 1.0f);
+            }
+            draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 6, VF_P2 | QGPU_VF_TEX(0), 6, QGPU_IDX_NONE, 0);
+            readback_cmd(&e, V10_SURF);
+            st = v10_exec(c, &e);
+            got = px(shmem, 32, 32);
+            CHECK(st == QGPU_ST_OK && near_argb(got, dc[k].want, 1),
+                  "(u) chemin brut, profondeur, %s : %06x (st %u)", dc[k].what, got, st);
+        }
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_UNIT(0) + QGPU_SK_U_ENV_MODE, 0x2100);       /* MODULATE */
+        tparam(&e, T + 9, QGPU_TP_COMPARE_MODE, QGPU_TC_NONE);
+        v10_exec(c, &e);
+    }
+
     /* (s) COULEUR SECONDAIRE (1.4), chemin brut : primaire (0, 0,4, 0),
        secondaire (0,4, 0, 0). QGPU_CSUM_FORMAT (initial) garde la règle v7–v9. */
     {
@@ -4085,6 +4122,229 @@ static void run_v10(QgpuCore *c, uint8_t *shmem)
     CHECK(st == QGPU_ST_OK, "v10 : surface et contexte rendus (st %u)", st);
 }
 
+/* ══════ v11 : couleur secondaire sur le chemin hérité ══════ */
+
+static void vtx_sec(Emit *v, float x, float y, float f, float pr, float sr, float sg,
+                    float sb, int nunits)
+{
+    emitf(v, x); emitf(v, y); emitf(v, 0.0f); emitf(v, f);
+    emitf(v, pr); emitf(v, pr); emitf(v, pr); emitf(v, 1.0f);
+    if (nunits) {
+        emitf(v, 0.5f); emitf(v, 0.5f); emitf(v, 0.0f); emitf(v, 1.0f);
+    }
+    emitf(v, sr); emitf(v, sg); emitf(v, sb);
+}
+
+static void quad_sec(Emit *v, float f, float pr, float sr, float sg, float sb, int nunits)
+{
+    vtx_sec(v, 0, 0, f, pr, sr, sg, sb, nunits); vtx_sec(v, 64, 0, f, pr, sr, sg, sb, nunits);
+    vtx_sec(v, 64, 64, f, pr, sr, sg, sb, nunits); vtx_sec(v, 0, 0, f, pr, sr, sg, sb, nunits);
+    vtx_sec(v, 64, 64, f, pr, sr, sg, sb, nunits); vtx_sec(v, 0, 64, f, pr, sr, sg, sb, nunits);
+}
+
+static uint32_t sec_draw(QgpuCore *c, Emit *e, uint32_t op, uint32_t nunits)
+{
+    emit(e, QGPU_CMD_HDR(op, QGPU_LEN_DRAW_N)); emit(e, 6); emit(e, VTX_OFF); emit(e, nunits);
+    readback_cmd(e, 21);
+    return qgpu_core_execute(c, CMD_OFF, e->off - e->start);
+}
+
+static void run_v11(QgpuCore *c, uint8_t *shmem)
+{
+    Emit e, v;
+    uint32_t st, s1, s2;
+    static const uint32_t black = 0xFF000000;
+
+    printf("-- v11 : couleur secondaire sur le chemin hérité --\n");
+    CHECK(QGPU_VERTEX_SEC_WORDS(0) == 11 && QGPU_VERTEX_SEC_WORDS(4) == 27,
+          "v11 : sommets de %d à %d mots", QGPU_VERTEX_SEC_WORDS(0), QGPU_VERTEX_SEC_WORDS(4));
+    e.base = v.base = shmem;
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 13);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 13);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 21); emit(&e, W); emit(&e, H); emit(&e, QGPU_FMT_XRGB8888);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 21);
+    qgpu_st32(shmem + TEX_OFF, black);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX)); emit(&e, 380);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE, QGPU_LEN_TEX_IMAGE));
+    emit(&e, 380); emit(&e, 0); emit(&e, 1); emit(&e, 1); emit(&e, 0x1908); emit(&e, TEX_OFF);
+    tparam(&e, 380, QGPU_TP_MIN_FILTER, 0x2600);
+    tparam(&e, 380, QGPU_TP_MAG_FILTER, 0x2600);
+    state(&e, QGPU_SK_TEXTURE, 1);
+    state(&e, QGPU_SK_TEX_BIND, 380);
+    state(&e, QGPU_SK_TEX_ENV_MODE, 0x2100);            /* MODULATE */
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "v11 : contexte, surface, texture noire en MODULATE (st %u)", st);
+
+    /* (a) spéculaire séparée : primaire × texture noire = 0, + secondaire */
+    v.off = v.start = VTX_OFF;
+    quad_sec(&v, 1, 0.2f, 0.4f, 0.6f, 1.0f, 1);
+    e.off = e.start = CMD_OFF;
+    st = sec_draw(c, &e, QGPU_OP_DRAW_TRIANGLES_SEC, 1);
+    CHECK(st == QGPU_ST_OK && px(shmem, 32, 32) == 0x6699ff,
+          "(a) texture noire, secondaire ajoutée APRÈS elle : %06x (attendu 6699ff, st %u)",
+          px(shmem, 32, 32), st);
+
+    /* (b) le même sommet par TEXN : pas de somme */
+    v.off = v.start = VTX_OFF;
+    {
+        int k;
+        for (k = 0; k < 6; k++) {
+            float x = (k == 1 || k == 2 || k == 4) ? 64.0f : 0.0f;
+            float y = (k == 2 || k == 4 || k == 5) ? 64.0f : 0.0f;
+            emitf(&v, x); emitf(&v, y); emitf(&v, 0.0f); emitf(&v, 1.0f);
+            emitf(&v, 0.2f); emitf(&v, 0.2f); emitf(&v, 0.2f); emitf(&v, 1.0f);
+            emitf(&v, 0.5f); emitf(&v, 0.5f); emitf(&v, 0.0f); emitf(&v, 1.0f);
+        }
+    }
+    e.off = e.start = CMD_OFF;
+    st = sec_draw(c, &e, QGPU_OP_DRAW_TRIANGLES_TEXN, 1);
+    CHECK(st == QGPU_ST_OK && px(shmem, 32, 32) == 0x000000,
+          "(b) DRAW_TRIANGLES_TEXN : aucune somme : %06x (st %u)", px(shmem, 32, 32), st);
+
+    /* (c) sans texture : 0,2 + 0,4 = 0,6 ; saturation 0,8 + 0,8 */
+    v.off = v.start = VTX_OFF;
+    quad_sec(&v, 1, 0.2f, 0.4f, 0.4f, 0.4f, 0);
+    e.off = e.start = CMD_OFF;
+    st = sec_draw(c, &e, QGPU_OP_DRAW_TRIANGLES_SEC, 0);
+    CHECK(st == QGPU_ST_OK && px(shmem, 32, 32) == 0x999999,
+          "(c) sans texture : 0,2 + 0,4 → %06x (attendu 999999, st %u)", px(shmem, 32, 32), st);
+    v.off = v.start = VTX_OFF;
+    quad_sec(&v, 1, 0.8f, 0.8f, 0.8f, 0.8f, 0);
+    e.off = e.start = CMD_OFF;
+    st = sec_draw(c, &e, QGPU_OP_DRAW_TRIANGLES_SEC, 0);
+    CHECK(st == QGPU_ST_OK && px(shmem, 32, 32) == 0xffffff,
+          "(c) somme saturée : %06x (st %u)", px(shmem, 32, 32), st);
+
+    /* (d) le brouillard vient APRÈS la somme : facteur 0 → couleur du brouillard */
+    v.off = v.start = VTX_OFF;
+    quad_sec(&v, 0, 0.2f, 0.4f, 0.6f, 1.0f, 1);
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_FOG, 1);
+    state(&e, QGPU_SK_FOG_COLOR, 0xFFFF0000);
+    st = sec_draw(c, &e, QGPU_OP_DRAW_TRIANGLES_SEC, 1);
+    CHECK(st == QGPU_ST_OK && px(shmem, 32, 32) == 0xff0000,
+          "(d) brouillard après la somme : %06x (attendu ff0000, st %u)", px(shmem, 32, 32), st);
+
+    /* (e) refus : 5 unités, longueur fausse */
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DRAW_TRIANGLES_SEC, QGPU_LEN_DRAW_N));
+    emit(&e, 6); emit(&e, VTX_OFF); emit(&e, 5);
+    s1 = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DRAW_TRIANGLES_SEC, QGPU_LEN_DRAW)); emit(&e, 6); emit(&e, VTX_OFF);
+    s2 = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(s1 == QGPU_ST_BAD_ARG && s2 == QGPU_ST_BAD_ARG,
+          "(e) 5 unités, longueur fausse : st %u %u", s1, s2);
+
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_FOG, 0);
+    state(&e, QGPU_SK_TEXTURE, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_DESTROY, QGPU_LEN_CTX)); emit(&e, 13);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_DESTROY, QGPU_LEN_SURF)); emit(&e, 21);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "v11 : contexte et surface rendus (st %u)", st);
+}
+
+/* ══════ v12 : sources croisées de GL_COMBINE (crossbar, OpenGL 1.4) ══════ */
+
+/* Deux unités par DRAW_TRIANGLES_TEXN : sommet x y z brouillard, couleur, puis
+   (s t r q) par unité. Unité 0 rouge, unité 1 (0,6 ; 1 ; 1). */
+static uint32_t xbar_draw(QgpuCore *c, Emit *e, Emit *v, float pr, float pg, float pb)
+{
+    int k;
+    v->off = v->start = VTX_OFF;
+    for (k = 0; k < 6; k++) {
+        float x = (k == 1 || k == 2 || k == 4) ? 64.0f : 0.0f;
+        float y = (k == 2 || k == 4 || k == 5) ? 64.0f : 0.0f;
+        emitf(v, x); emitf(v, y); emitf(v, 0.0f); emitf(v, 1.0f);
+        emitf(v, pr); emitf(v, pg); emitf(v, pb); emitf(v, 1.0f);
+        emitf(v, 0.5f); emitf(v, 0.5f); emitf(v, 0.0f); emitf(v, 1.0f);
+        emitf(v, 0.5f); emitf(v, 0.5f); emitf(v, 0.0f); emitf(v, 1.0f);
+    }
+    clear_cmd(e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    emit(e, QGPU_CMD_HDR(QGPU_OP_DRAW_TRIANGLES_TEXN, QGPU_LEN_DRAW_N));
+    emit(e, 6); emit(e, VTX_OFF); emit(e, 2);
+    readback_cmd(e, 22);
+    return qgpu_core_execute(c, CMD_OFF, e->off - e->start);
+}
+
+static void run_v12(QgpuCore *c, uint8_t *shmem)
+{
+    Emit e, v;
+    uint32_t st, p;
+    static const struct {
+        uint32_t env0, cb0, src0, env1, src1; float pr, pg, pb; uint32_t want; const char *what;
+    } xc[] = {
+        /* unité 0 : REPLACE la texture de l'unité 1 ; unité 1 : REPLACE PREVIOUS */
+        { 0x8570, QGPU_COMBINE(QGPU_CB_REPLACE, QGPU_CB_REPLACE, 0, 0),
+          QGPU_COMBINE_SRC_RGB(0, QGPU_CS_TEXTURE0 + 1, QGPU_CO_COLOR) |
+          QGPU_COMBINE_SRC_A(0, QGPU_CS_TEXTURE0 + 1, QGPU_CA_ALPHA),
+          0x8570, QGPU_COMBINE_SRC_RGB(0, QGPU_CS_PREVIOUS, QGPU_CO_COLOR) |
+                  QGPU_COMBINE_SRC_A(0, QGPU_CS_PREVIOUS, QGPU_CA_ALPHA),
+          1, 1, 1, 0x99FFFF, "unité 0 ← texture de l'unité 1" },
+        /* unité 0 : MODULATE(TEXTURE0, TEXTURE1) = (0,6 0 0) */
+        { 0x8570, QGPU_COMBINE(QGPU_CB_MODULATE, QGPU_CB_MODULATE, 0, 0),
+          QGPU_COMBINE_SRC_RGB(0, QGPU_CS_TEXTURE0, QGPU_CO_COLOR) |
+          QGPU_COMBINE_SRC_RGB(1, QGPU_CS_TEXTURE0 + 1, QGPU_CO_COLOR) |
+          QGPU_COMBINE_SRC_A(0, QGPU_CS_TEXTURE0, QGPU_CA_ALPHA) |
+          QGPU_COMBINE_SRC_A(1, QGPU_CS_TEXTURE0 + 1, QGPU_CA_ALPHA),
+          0x8570, QGPU_COMBINE_SRC_RGB(0, QGPU_CS_PREVIOUS, QGPU_CO_COLOR) |
+                  QGPU_COMBINE_SRC_A(0, QGPU_CS_PREVIOUS, QGPU_CA_ALPHA),
+          1, 1, 1, 0x990000, "MODULATE(TEXTURE0, TEXTURE1)" },
+        /* unité 0 : MODULATE ordinaire avec le vert primaire → noir ; unité 1
+           REPLACE la texture de l'unité 0 (et non PREVIOUS) → rouge */
+        { 0x2100, QGPU_COMBINE_DEFAULT, QGPU_COMBINE_SRC_DEFAULT,
+          0x8570, QGPU_COMBINE_SRC_RGB(0, QGPU_CS_TEXTURE0, QGPU_CO_COLOR) |
+                  QGPU_COMBINE_SRC_A(0, QGPU_CS_TEXTURE0, QGPU_CA_ALPHA),
+          0, 1, 0, 0xFF0000, "unité 1 ← texture de l'unité 0 (en arrière)" },
+    };
+    unsigned i;
+
+    printf("-- v12 : sources croisées de GL_COMBINE --\n");
+    e.base = v.base = shmem;
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 14);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 14);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 22); emit(&e, W); emit(&e, H); emit(&e, QGPU_FMT_XRGB8888);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 22);
+    qgpu_st32(shmem + TEX_OFF, 0xFFFF0000);
+    qgpu_st32(shmem + TEX_OFF + 4, 0xFF99FFFF);
+    tex1x1(&e, 390, 0x1908, TEX_OFF);
+    tex1x1(&e, 391, 0x1908, TEX_OFF + 4);
+    state(&e, QGPU_SK_TEXTURE, 1); state(&e, QGPU_SK_TEX_BIND, 390);
+    state(&e, QGPU_SK_TEXTURE1, 1); state(&e, QGPU_SK_TEX1_BIND, 391);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "v12 : contexte, deux unités (st %u)", st);
+    for (i = 0; i < sizeof(xc) / sizeof(xc[0]); i++) {
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_TEX_ENV_MODE, xc[i].env0);
+        state(&e, QGPU_SK_COMBINE0, xc[i].cb0);
+        state(&e, QGPU_SK_COMBINE_SRC0, xc[i].src0);
+        state(&e, QGPU_SK_TEX1_ENV_MODE, xc[i].env1);
+        state(&e, QGPU_SK_COMBINE0 + 1, QGPU_COMBINE(QGPU_CB_REPLACE, QGPU_CB_REPLACE, 0, 0));
+        state(&e, QGPU_SK_COMBINE_SRC0 + 1, xc[i].src1);
+        st = xbar_draw(c, &e, &v, xc[i].pr, xc[i].pg, xc[i].pb);
+        p = px(shmem, 32, 32);
+        CHECK(st == QGPU_ST_OK && near_argb(p, xc[i].want, 1),
+              "(%c) %s : %06x (attendu %06x, st %u)", 'a' + i, xc[i].what, p, xc[i].want, st);
+    }
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_COMBINE0, QGPU_COMBINE_DEFAULT);
+    state(&e, QGPU_SK_COMBINE_SRC0, QGPU_COMBINE_SRC_DEFAULT);
+    state(&e, QGPU_SK_COMBINE0 + 1, QGPU_COMBINE_DEFAULT);
+    state(&e, QGPU_SK_COMBINE_SRC0 + 1, QGPU_COMBINE_SRC_DEFAULT);
+    state(&e, QGPU_SK_TEX_ENV_MODE, 0x2100); state(&e, QGPU_SK_TEX1_ENV_MODE, 0x2100);
+    state(&e, QGPU_SK_TEXTURE, 0); state(&e, QGPU_SK_TEXTURE1, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_DESTROY, QGPU_LEN_CTX)); emit(&e, 14);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_DESTROY, QGPU_LEN_SURF)); emit(&e, 22);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "v12 : contexte et surface rendus (st %u)", st);
+}
+
 typedef struct { QgpuCore *c; uint8_t *shmem; } BackendRun;
 
 /* Tout ce qui suit l'initialisation, sur le thread « de rendu ». */
@@ -4171,6 +4431,8 @@ static void *run_backend_body(void *arg)
     run_zs(c, shmem);
     run_v9(c, shmem);
     run_v10(c, shmem);
+    run_v11(c, shmem);
+    run_v12(c, shmem);
 
     qgpu_core_reset(c);
     e.off = e.start = CMD_OFF;

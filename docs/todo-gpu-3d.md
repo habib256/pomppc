@@ -10,6 +10,41 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 
 ## État (19/09/2026)
 
+- **OpenGL 1.5 ANNONCÉ et tenu (lot 5, 19/09/2026) — l'objectif de cette feuille de route** :
+  `GL_VERSION = « 1.5 POMPPC-1.0 »`, **55 extensions**, device v12. Ce que 1.5 ajoute à 1.4 était
+  déjà là ou presque : objets tampon (GLEngine ; `glMapBuffer`/`glGetBufferSubData` vérifiés),
+  requêtes d'occlusion (v8), et les huit fonctions d'ombre (hôte v10, `EXT_shadow_funcs`
+  annoncée). Scène `gl15` 18/18 par les deux chemins ; `gltest` 40/40.
+
+- **OpenGL 1.4 ANNONCÉ et tenu (lot 5, 19/09/2026)** : `GL_VERSION = « 1.4 POMPPC-1.0 »`,
+  **54 extensions**, avec un device **v12** (crossbar, `docs/protocole-v12-crossbar.md`). Fait dans
+  le plugin, vérifié au pixel par les deux chemins (`tex14` 33/33, `docs/re/opengl-1.4.md`) :
+  biais de LOD de texture et d'unité (`GL_MAX_TEXTURE_LOD_BIAS` = 16), textures de profondeur et
+  comparaison d'ombre, couleur secondaire (code 4 du descripteur au chemin brut), paramètres de
+  point (l'hôte au chemin brut, le plugin au chemin hérité), crossbar ; stencil à enveloppement
+  annoncé après vérification. Au passage, **la perte de géométrie du chemin brut sous 3D et cube
+  est élucidée** : une coordonnée r ou q donnée entre `glBegin` et `glEnd` faisait basculer
+  GLEngine vers un autre renderer tant que `cfg+0x7a` valait 0 ; posé à 1, la 3D et les cubes
+  passent par le chemin brut. `gltest` 39/39, hôte `run-all` 58 OK, mode bureau juste.
+
+- **OpenGL 1.3 ANNONCÉ et tenu (lot 5, 19/09/2026)** : `GL_VERSION = « 1.3 POMPPC-1.0 »`,
+  **48 extensions**, avec un device v11 — sans rien changer à l'hôte (tout était en v10). Fait
+  dans le plugin et vérifié dans l'invité : **cartes de cube** (`cube` 12/12 par les deux
+  chemins, `docs/re/cartes-de-cube.md`), **`CLAMP_TO_BORDER` et couleur de bordure**,
+  **`MIRRORED_REPEAT`** (1.4), **niveaux S3TC relayés tels quels** (`tex13` 34/34 par les deux
+  chemins, `docs/re/bordure-et-compression.md`). `gltest` 37/37, `v15` : tous les cas 1.2 et 1.3
+  TENUS. Réserves : GLEngine ne sert pas les requêtes `GL_TEXTURE_COMPRESSED`/`_IMAGE_SIZE`
+  (hors de portée du pilote) ; `GL_EXT_texture_compression_s3tc` non annoncée, parce que le
+  rendu d'Apple **plante** sur une texture S3TC à mipmaps et qu'un repli reste possible.
+
+- **OpenGL 1.2 ANNONCÉ et tenu (lot 5, 19/09/2026)** : `GL_VERSION = « 1.2 POMPPC-1.0 »`,
+  **44 extensions**, avec un device v11. Ce qui manquait, fait dans le plugin et vérifié dans
+  l'invité : textures 3D (`tex3d` 9/9 — jamais sous Apple), niveaux et bornes de LOD (`texlod`
+  8/8 — Apple 3/8), spéculaire séparée par les deux chemins (`sepspec` — Apple : non), cette
+  dernière grâce au protocole **v11** (`docs/protocole-v11-couleur-secondaire.md`). `gltest`
+  35/35. Relevés : `docs/re/textures-3d.md`. Limite assumée : une texture 3D **hors** du domaine
+  accéléré sort fausse (le rendu d'Apple n'a pas de 3D, il n'y a pas de repli).
+
 - **Lot 4, côté hôte (19/09/2026) : protocole v10, ce qui manquait à 1.2–1.4.** Cibles 1D,
   3D, cube et rectangle (`TEX_CREATE3`), données **au format de l'application converties par
   l'hôte** (18 couples format/type, profondeur, S3TC décompressé par le cœur, `TEX_IMAGE3`),
@@ -90,7 +125,7 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 | 3.1 | **Stencil** (protocole v6) : tampon hôte combiné profondeur+stencil, 9 clés d'état, transferts, backend de référence, offsets GLEngine (`docs/re/stencil.md`), plugin. Scène `stencil` identique au rendu d'Apple à l'octet près. | ✅ fait |
 | 3.2 | Modes de polygone (ligne, point), pointillés de ligne et de polygone, lissage. | ✅ **fait le 18/09/2026** sauf le **lissage** (hors périmètre v8). Offsets relevés par la sonde `v8probe` (`docs/re/etat-v8.md`) : motif de ligne `GS+0x2e26`/`0x2e28`, motif de polygone **128 octets en `GS+0x30e8`**, dans l'ordre de `glPolygonStipple`. Modes de polygone **réservés au chemin brut** (le chemin hérité reçoit des triangles déjà décomposés : le contour est perdu avant l'hôte) et **la fusion des dessins est coupée** quand le mode n'est pas `GL_FILL`. Le motif de polygone demande un **décalage d'une ligne** (le protocole indexe par `hauteur − ys`, OpenGL par `hauteur − 1 − ys`). Scènes `polymode` et `stipple` : **0/255 sur l'image entière** par les deux chemins. |
 | 3.3 | Opérations logiques ; mélange à couleur constante, équations minimum et maximum. | ✅ **fait le 18/09/2026**. Couleur de mélange en `GS+0x2d70`, opération logique en `GS+0x2e30` ; les facteurs `0x8001`-`0x8004` et les équations `GL_MIN`/`GL_MAX` passent par les clés existantes. Clés v8 envoyées pour **les deux chemins**. Scènes `blendc` et `logicop` : témoins exacts au bit près, **0/255**. Le motif de refus « stencil/logicop/stipple » ne couvre plus que le lissage de polygone. |
-| 3.4 | Textures 3D, cube, rectangle ; bordures ; compressées (S3TC passé tel quel à l'hôte). | **hôte fait (v10, 19/09/2026)** : 3D, cube, rectangle, 1D, `CLAMP_TO_BORDER` et couleur de bordure, `MIRRORED_REPEAT`, S3TC (DXT1/3/5, décompressé par le cœur pour que les backends voient les mêmes texels). Les **texels de bordure** (`border = 1` de `glTexImage`) ne sont pas portés : l'invité doit les refuser. Reste le plugin : `cfg+0xbe`, `cfg+0xc2`, relevé des niveaux 3D et des faces de cube dans GLEngine (`docs/protocole-v10-textures.md` §7) |
+| 3.4 | Textures 3D, cube, rectangle ; bordures ; compressées (S3TC passé tel quel à l'hôte). | **hôte fait (v10)** ; **plugin : textures 3D faites le 19/09/2026** (`docs/re/textures-3d.md`) — `GL_MAX_3D_TEXTURE_SIZE` = 256 annoncé si le device les tient, profondeur lue dans l'objet texture de GLEngine, `WRAP_R` relayé. Scène `tex3d` : 9 cas sur 9, et le cas « 1.2 texture 3D » de `v15` est **TENU** (jamais sous Apple). Par le chemin hérité seulement : GLEngine jette la géométrie brute quand une texture 3D est active (non relevé pourquoi). **Cubes, bordure et compression faits le 19/09/2026** (`docs/re/cartes-de-cube.md`, `docs/re/bordure-et-compression.md`) ; reste le rectangle |
 | 3.5 | Lignes et points texturés ; sprites de points ; couleur secondaire. | **hôte fait pour la couleur secondaire et les paramètres de point (v10, 19/09/2026)** : `QGPU_SK_COLOR_SUM` (trois valeurs, la règle v7–v9 par défaut), atténuation, bornes et seuil de fondu, calculés par le cœur. Restent : lignes et points texturés, sprites de points, et tout le plugin (octet de `GL_COLOR_SUM` à relever ; attention au `POINT_SIZE_MAX` initial de GLEngine, `docs/protocole-v10-textures.md` §7) |
 | 3.6 | Textures de profondeur et comparaison d'ombre ; génération automatique de mipmaps (`GenerateTexMipmaps` repérée). | **hôte fait (v10, 19/09/2026)** : `GL_DEPTH_COMPONENT` en `FLOAT`, `UNSIGNED_INT`, `UNSIGNED_SHORT`, comparaison texel par texel avant filtrage, `DEPTH_TEXTURE_MODE` ; niveaux de base et max, bornes et biais de LOD ; mipmaps générés par le cœur à chaque image du niveau de base. Reste le plugin |
 | 3.7 | **Requêtes d'occlusion** (`CreateQuery`, `GetQueryInfo`). (OpenGL 1.5.) | ✅ **fait le 18/09/2026**. Interface relevée par lecture et vérifiée dans l'invité (`docs/re/etat-v8.md` §4) : `gldCreateQuery` (n° 45), `gldDestroyQuery` (46), `gldGetQueryInfo` (47) et **les procédures `+0x68` / `+0x6c`** = `glBeginQuery` / `glEndQuery`. Le `GLDriver` d'Apple ne tient **rien** (bouchons, et rien d'installé en `+0x68`/`+0x6c`) : sous lui, `glGetQueryObjectuiv` n'écrit même pas dans la variable de sortie. Le plugin tient la fonction entièrement ; un repli logiciel pendant une requête **majore** le compte (seule direction sans danger). Scène `occl` : 4 096 / 2 048 / 0 échantillons exacts. |
@@ -173,6 +208,21 @@ Après correction, sur cet hôte : `qgpu_core_test` 0 échec (logiciel + GL), `q
 n'existent que sur l'hôte macOS.
 
 ## Points ouverts
+
+- **Après 1.5** (19/09/2026) : l'exactitude est atteinte ; restent la vitesse (axes 1 et 2 :
+  objets tampon côté hôte, moins de recopies), les applications réelles (Marble Blast, jeux) avec
+  l'annonce 1.5, et les réserves ci-dessous.
+- **`glMaterial` entre `glBegin` et `glEnd`, chemin brut** : la primitive est perdue et la
+  suivante garde l'ancien matériau (scène `matbegin`) — GLEngine bascule vers un autre renderer
+  quel que soit `cfg+0x7a` (`docs/re/opengl-1.4.md` §3.3). Défaut antérieur ; piste : matériau
+  par sommet (codes 32..39 du descripteur) porté par `DRAW_RAW`.
+- **S3TC en extension** : le relais est exact (`tex13`), mais le rendu d'Apple plante (Bus error)
+  sur une texture à mipmaps chargée par `glCompressedTexImage2D`. Pour annoncer le bit 43, il
+  faut rendre le repli sûr : décoder dans l'invité pour le rendu d'Apple, ou ne jamais replier
+  un dessin qui l'emploie.
+- **Requêtes de niveau compressé** (`GL_TEXTURE_COMPRESSED`, `_IMAGE_SIZE`) : GLEngine ne les sert
+  pas. Seule voie concevable : surcharger l'entrée `glGetTexLevelParameteriv` de la table de
+  dispatch (`gldInitDispatch`) — à relever.
 
 - **`qgpu_smoke.py`, contrôle « dernier doorbell refusé (file pleine) »** : il dépend de la course
   entre la rafale envoyée par la console d'Open Firmware et le thread de rendu. Sur un hôte chargé
