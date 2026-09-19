@@ -197,10 +197,30 @@ sudo sh /Volumes/POMPPCSRC/guest/net/proxy.sh on    # CD présent avec GPU=1 ou 
 ```
 
 (ou Préférences Système → Réseau → Proxys → Proxy web (HTTP) : `10.0.2.2`, port `8080`),
-puis taper les adresses en `http://` dans Safari. Vérifié : Google, Apple, GitHub,
-Wikipédia s'affichent ; la mise en page des sites récents reste celle que Safari 2 sait
-rendre (préférer les versions légères, p. ex. `http://fr.m.wikipedia.org`,
-`http://lite.duckduckgo.com`). `WEBPROXY=0` ne lance pas le relais, `NET=0` coupe le réseau.
+puis taper les adresses en `http://` dans Safari. **Page d'accueil : `http://pomppc/`**
+(recherche Google, sites légers, réglages). `WEBPROXY=0` ne lance pas le relais, `NET=0`
+coupe le réseau.
+
+Le relais ne s'arrête pas au TLS : Safari 2 ne comprend ni le JavaScript moderne, ni WebP,
+AVIF ou SVG. Selon le **mode** du site, réglable par la barre jaune en tête de chaque page :
+
+| mode | ce que reçoit le vieux navigateur |
+|---|---|
+| **auto** (défaut) | *sans JS*, et *rendu* si la page sort vide ou demande JavaScript (appris par site) |
+| sans JS | la page sans ses scripts, `<noscript>` déplié — plus légère de moitié |
+| rendu | Chrome, sans affichage, exécute la page sur l'hôte ; l'invité reçoit le document obtenu |
+| brut | la page telle quelle |
+
+Dans tous les modes : images WebP, AVIF et SVG converties, grandes images réduites à 1024 px,
+bannières de cookies et éléments que Safari 2 afficherait à tort retirés. Des **adaptateurs**
+servent les sites fermés à tout autre qu'un navigateur récent : **recherche Google** (rendue
+par Chrome, résultats en HTML simple), **Reddit** (lu par ses flux), **Stack Overflow** et
+Stack Exchange (par leur API). Dépendances facultatives, détectées au démarrage :
+BeautifulSoup + lxml, Pillow, ImageMagick, Google Chrome.
+
+Mesure : `tools/web/banc.py` passe 22 sites par une instance du relais en se présentant comme
+Safari 2 — **21 lisibles** contre 15 avec le simple relais TLS, 131 images décodables sur 133,
+plus aucun script envoyé (19/09/2026) ; archive.org reste fermé.
 
 ## GPU 3D paravirtuel qgpu (plugin OpenGL de Tiger → GPU de l'hôte)
 
