@@ -77,6 +77,11 @@ les données, au format de l'application.
 
 ## 4. Le chemin brut ne transmet pas la géométrie 3D
 
+> **Élucidé le 19/09/2026** (`docs/re/opengl-1.4.md` §3) : la cible n'y est pour rien. C'est
+> la coordonnée r donnée entre `glBegin` et `glEnd` qui fait basculer GLEngine vers un autre
+> renderer tant que `cfg+0x7a` vaut 0. Le plugin le pose à 1, et la 3D passe par le chemin
+> brut. Le texte ci-dessous est le constat d'origine.
+
 Avec une texture 3D active et le verrou de géométrie posé (bit 0 du dispatch, descripteur
 publié en `cfg+0x11c`, 4 composantes par unité de texture), **GLEngine n'appelle jamais
 `BeginPrimitiveBuffer`** : la géométrie disparaît (0 `DRAW_RAW`, image noire). Pourquoi : non

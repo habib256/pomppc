@@ -10,6 +10,17 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 
 ## État (19/09/2026)
 
+- **OpenGL 1.4 ANNONCÉ et tenu (lot 5, 19/09/2026)** : `GL_VERSION = « 1.4 POMPPC-1.0 »`,
+  **54 extensions**, avec un device **v12** (crossbar, `docs/protocole-v12-crossbar.md`). Fait dans
+  le plugin, vérifié au pixel par les deux chemins (`tex14` 33/33, `docs/re/opengl-1.4.md`) :
+  biais de LOD de texture et d'unité (`GL_MAX_TEXTURE_LOD_BIAS` = 16), textures de profondeur et
+  comparaison d'ombre, couleur secondaire (code 4 du descripteur au chemin brut), paramètres de
+  point (l'hôte au chemin brut, le plugin au chemin hérité), crossbar ; stencil à enveloppement
+  annoncé après vérification. Au passage, **la perte de géométrie du chemin brut sous 3D et cube
+  est élucidée** : une coordonnée r ou q donnée entre `glBegin` et `glEnd` faisait basculer
+  GLEngine vers un autre renderer tant que `cfg+0x7a` valait 0 ; posé à 1, la 3D et les cubes
+  passent par le chemin brut. `gltest` 39/39, hôte `run-all` 58 OK, mode bureau juste.
+
 - **OpenGL 1.3 ANNONCÉ et tenu (lot 5, 19/09/2026)** : `GL_VERSION = « 1.3 POMPPC-1.0 »`,
   **48 extensions**, avec un device v11 — sans rien changer à l'hôte (tout était en v10). Fait
   dans le plugin et vérifié dans l'invité : **cartes de cube** (`cube` 12/12 par les deux
@@ -192,13 +203,13 @@ n'existent que sur l'hôte macOS.
 
 ## Points ouverts
 
-- **Après 1.3** (19/09/2026) : pour **1.4**, la couleur secondaire par le chemin brut (`v15`
-  « 1.4 couleur secondaire » NON TENU : `glSecondaryColor` + `GL_COLOR_SUM` n'ajoute rien, la
-  valeur courante n'est pas relayée), les textures de profondeur et la comparaison d'ombre (l'hôte
-  les tient depuis la v10 ; bits 12 et 13 à relever côté GLEngine), `GL_EXT_stencil_wrap` à
-  vérifier au pixel ; `MIRRORED_REPEAT` et les paramètres de point sont déjà TENUS. Le chemin brut
-  sous texture 3D ou cube à coordonnée r explicite reste à comprendre (GLEngine y jette la
-  géométrie).
+- **Après 1.4** (19/09/2026) : pour **1.5**, il reste les fonctions de comparaison d'ombre
+  (`EXT_shadow_funcs` : les huit fonctions, l'hôte les accepte toutes, à vérifier au pixel),
+  `glMapBuffer` et `glGetBufferSubData` (points d'entrée présents, non vérifiés), puis l'annonce.
+- **`glMaterial` entre `glBegin` et `glEnd`, chemin brut** : la primitive est perdue et la
+  suivante garde l'ancien matériau (scène `matbegin`) — GLEngine bascule vers un autre renderer
+  quel que soit `cfg+0x7a` (`docs/re/opengl-1.4.md` §3.3). Défaut antérieur ; piste : matériau
+  par sommet (codes 32..39 du descripteur) porté par `DRAW_RAW`.
 - **S3TC en extension** : le relais est exact (`tex13`), mais le rendu d'Apple plante (Bus error)
   sur une texture à mipmaps chargée par `glCompressedTexImage2D`. Pour annoncer le bit 43, il
   faut rendre le repli sûr : décoder dans l'invité pour le rendu d'Apple, ou ne jamais replier

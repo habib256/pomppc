@@ -11,6 +11,7 @@ for s in ${SCENES:-sepspec}; do
     case $mode in
       brut) e="" ;; herite) e="POMPPC_GL_GEOM=0" ;; apple) e="POMPPC_GL_DISABLE=1" ;;
     esac
+    case $s in stencil|tex14) e="$e GLTEST_STENCIL=1" ;; esac
     echo "== $s / $mode"
     env GLTEST_NOWS=1 POMPPC_GL_STATS=/dev/null $e ./gltest $s 256 256 o.ppm 2>&1 |
       grep -E "ok  |FAIL|OK \(|ÉCHEC|refus"

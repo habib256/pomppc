@@ -9,7 +9,7 @@
 | `guest/POMPPCAgent/` | StartupItem qui lance l'agent au démarrage du bureau. |
 | `guest/POMPPCGuiRunner.app` | Élément d'ouverture de session : exécute les jobs graphiques dans la session de l'utilisateur (un processus racine ne peut ouvrir ni fenêtre ni contexte CGL). |
 | `guest/guilib.sh` | `gui_run 'commande'` pour les `job.sh`, livré automatiquement avec chaque job. |
-| `guest/jobs/` | Jobs réutilisables : `xcode` (Xcode Tools du DVD dans la VM de dev), `gpu` (chaîne complète et `gltest`), `texup` (débit de téléversement), `glwin` (mode bureau), `diag`, `scene` (une ou plusieurs scènes `gltest` par les deux chemins et sous Apple), et les sondes de relevé `t3dprobe`, `cubeprobe`, `wrapprobe` (`docs/re/textures-3d.md`, `cartes-de-cube.md`, `bordure-et-compression.md`). `stage.sh NOM DOSSIER` y joint les sources invité du dépôt. |
+| `guest/jobs/` | Jobs réutilisables : `xcode` (Xcode Tools du DVD dans la VM de dev), `gpu` (chaîne complète et `gltest`), `texup` (débit de téléversement), `glwin` (mode bureau), `diag`, `scene` (une ou plusieurs scènes `gltest` par les deux chemins et sous Apple), et les sondes de relevé `t3dprobe`, `cubeprobe`, `wrapprobe`, `v14probe` (`docs/re/textures-3d.md`, `cartes-de-cube.md`, `bordure-et-compression.md`, `opengl-1.4.md`). `stage.sh NOM DOSSIER` y joint les sources invité du dépôt. |
 
 Détails et pièges : `docs/gpu-3d-tiger.md` §4 (rétro-ingénierie) et §5.1 (boucle de
 développement).

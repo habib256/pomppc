@@ -49,6 +49,10 @@ sort faux, comme une texture 3D. C'est pourquoi `cfg+0xc2` n'est posé que si l'
 
 ## 5. Le chemin brut et la coordonnée r
 
+> **Élucidé le 19/09/2026** (`docs/re/opengl-1.4.md` §3) : `cfg+0x7a` à 1 garde GLEngine sur
+> nous, et les cubes passent désormais par le chemin brut (`cube` 12/12, aucun refus). Le texte
+> ci-dessous est le constat d'origine.
+
 Même constat que pour la 3D (`docs/re/textures-3d.md` §4) : avec une carte de cube active et des
 coordonnées **explicites** `glTexCoord3f`, GLEngine n'appelle pas `BeginPrimitiveBuffer` et la
 géométrie disparaît du chemin brut ; la génération `GL_NORMAL_MAP` passe, elle. Le plugin sort

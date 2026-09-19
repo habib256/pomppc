@@ -81,6 +81,7 @@ c'est ce qui est annoncé (§3).
 
 | Fonction | Statut | Preuve |
 |---|---|---|
+| **Bilan 1.4 (19/09/2026)** | **(i) sous le plugin, device v12** | tout ce qui suit est tenu par les deux chemins (scène `tex14` 33/33, `docs/re/opengl-1.4.md`) ; sous Apple seul, 15 échecs. Annoncé : « 1.4 POMPPC-1.0 » |
 | Mélange à couleur constante | (i) **nouveau (v8)** | scène `blendc`, témoins exacts, **0/255 sur toute l'image** par les deux chemins |
 | Équations `GL_MIN` / `GL_MAX` | (i) **nouveau (v8)** | idem ; les facteurs sont bien ignorés |
 | Mélange à facteurs séparés | (i) | `v15` TENU ; les quatre facteurs partent depuis la v2 |
@@ -89,14 +90,18 @@ c'est ce qui est annoncé (§3).
 | Mipmaps automatiques (`GL_GENERATE_MIPMAP`) | (ii) | `v15` TENU : un damier 16×16 très minifié rend bien le gris moyen `7f7f7f` ; `GL_SGIS_generate_mipmap` déjà annoncée |
 | `glWindowPos` | (ii) | `v15` « glWindowPos + glDrawPixels » TENU ; `GL_ARB_window_pos` déjà annoncée |
 | `glMultiDrawArrays` | (ii) | `GL_EXT_multi_draw_arrays` déjà annoncée ; appel sans erreur |
-| Enveloppement du stencil (`INCR_WRAP`) | (i) | `QGPU_SOP_INCR_WRAP` (v6), `stencil_op_ok` — mais **Apple n'annonce pas** `GL_EXT_stencil_wrap` et nous ne l'avons pas vérifié au pixel : non annoncé **[H]** |
-| Biais de LOD de texture | **[H]** | annoncé par Apple, mais `GL_MAX_TEXTURE_LOD_BIAS = 0` : sans effet |
-| **Couleur secondaire** | **(iii)** | `v15` : `glEnable(GL_COLOR_SUM)` + `glSecondaryColor3f(0,5, 0, 0)` sur une couleur primaire `(0, 0,5, 0)` rend `008000` — la couleur secondaire n'est **pas** ajoutée. (Le chemin brut ne la porte pas non plus : elle passe en valeur courante.) |
-| Paramètres de point | **(iii) partiel** | les appels passent ; mais l'atténuation par la distance n'est pas portée par le protocole (une seule `QGPU_SK_POINT_SIZE` pour toute la primitive). Le plugin la **refuse** désormais sur les deux chemins ; le comportement exact de GLEngine n'a pas été vérifié au pixel **[H]** |
-| Textures de profondeur, comparaison d'ombre | **(iii)** | bits absents du tableau d'Apple ; le protocole n'a pas de format de profondeur pour les textures |
+| Enveloppement du stencil (`INCR_WRAP`) | (i) *(19/09/2026 : vérifié au pixel, `tex14`, deux chemins et Apple ; `GL_EXT_stencil_wrap` annoncée)* | `QGPU_SOP_INCR_WRAP` (v6), `stencil_op_ok` |
+| Biais de LOD de texture | **(i) sous le plugin v10** *(19/09/2026)* ; (iii) sous Apple | `GL_MAX_TEXTURE_LOD_BIAS` = 16 (`cfg+0xb0`, 0 chez Apple) ; biais de texture et d'unité relayés, `tex14` 6/6 ; Apple ne fait que celui d'unité |
+| **Couleur secondaire** | **(i) sous le plugin v10/v11** *(19/09/2026)* ; (iii) sous Apple | `v15` TENU ; `tex14` : valeur courante, tableau, après la texture, coupée, ignorée sous éclairage, par les deux chemins (code 4 du descripteur au chemin brut, `DRAW_TRIANGLES_SEC` au chemin hérité). Ancien relevé : `v15` rendait `008000`, la secondaire n'était **pas** ajoutée |
+| Paramètres de point | **(i) sous le plugin v10** *(19/09/2026)* ; (iii) sous Apple | l'hôte dérive la taille au chemin brut, le plugin au chemin hérité (coordonnées œil du sommet) ; `tex14` : atténuation, `MAX`, `MIN`. Le cas `v15` « TENU » était trop faible : Apple ignore ces paramètres |
+| Textures de profondeur, comparaison d'ombre | **(i) sous le plugin v10** *(19/09/2026)* ; (iii) sous Apple | `tex14` : luminance, trois comparaisons, modes `ALPHA` et `INTENSITY` ; Apple rend `D` en luminance quoi qu'il arrive |
+| Sources croisées (crossbar) | **(i) sous le plugin v12** *(19/09/2026)* ; (iii) sous Apple | `docs/protocole-v12-crossbar.md` ; Apple se trompe dès qu'une source croisée entre dans une opération |
+| Mélange au carré, `glMultiDrawArrays` | (ii) | `tex14`, deux chemins et Apple |
 | `GL_MIRRORED_REPEAT` | **(i) sous le plugin v10** *(19/09/2026 : `v15` TENU, `tex13` 3/3)* ; (iii) sous Apple | `v15` sous Apple : `s = 1,25` rend le texel 0 (rouge) au lieu du texel 1 (bleu) — c'est un `GL_REPEAT` |
 
-→ **1.4 n'est pas tenu.**
+→ **1.4 n'était pas tenu au 18/09/2026. Il l'est depuis le 19/09/2026** sous le plugin avec un
+device v12 : c'est ce qui est annoncé (§3). Reste ouvert, antérieur et hors 1.4 : `glMaterial`
+entre `glBegin` et `glEnd` au chemin brut (`docs/re/opengl-1.4.md` §3.3).
 
 ### OpenGL 1.5
 
@@ -112,7 +117,16 @@ c'est ce qui est annoncé (§3).
 
 ## 3. Ce qui est annoncé, et pourquoi
 
-### `GL_VERSION` = « 1.3 POMPPC-1.0 » (depuis le 19/09/2026, device v11)
+### `GL_VERSION` = « 1.4 POMPPC-1.0 » (depuis le 19/09/2026, device v12)
+
+Biais de LOD, textures de profondeur et ombre, couleur secondaire, paramètres de point
+(`G.tex14`) et crossbar (`G.xbar`, protocole v12) : tout 1.4 est tenu par les deux chemins.
+Six extensions s'ajoutent : `GL_ARB_point_parameters` (bit 1), `GL_ARB_texture_env_crossbar`
+(2), `GL_ARB_shadow` (12), `GL_ARB_depth_texture` (13), `GL_EXT_stencil_wrap` (33),
+`GL_EXT_secondary_color` (38) — soit **54** ; `GL_MAX_TEXTURE_LOD_BIAS` passe à 16. Détail :
+`docs/re/opengl-1.4.md`.
+
+### (19/09/2026) `GL_VERSION` = « 1.3 POMPPC-1.0 » (device v11)
 
 Cartes de cube, `CLAMP_TO_BORDER` et compression tenues par le plugin (`G.cube`, `G.tex13` : v10
 et `QGPU_CAP_GL14`) ; le reste de 1.3 l'était déjà ; le multiéchantillonnage est à

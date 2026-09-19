@@ -46,7 +46,7 @@
 #define QGPU_IOPCI_PRIMARY_MATCH 0x0fb21234
 
 #define QGPU_MAGIC              0x71677031  /* 'qgp1' */
-#define QGPU_PROTO_VERSION      11  /* v2 : profondeur, état GL ; v3 : textures ;
+#define QGPU_PROTO_VERSION      12  /* v2 : profondeur, état GL ; v3 : textures ;
                                        v4 : brouillard, 2e unité, lignes, points ;
                                        v5 : 4 unités, GL_COMBINE ;
                                        v6 : stencil ;
@@ -66,7 +66,9 @@
                                             couleur secondaire, paramètres de
                                             point ;
                                        v11 : couleur secondaire sur le chemin
-                                            hérité (DRAW_TRIANGLES_SEC) */
+                                            hérité (DRAW_TRIANGLES_SEC) ;
+                                       v12 : sources croisées de GL_COMBINE
+                                            (QGPU_CS_TEXTURE0 + n) */
 
 /* ── BAR0 : fenêtre partagée (RAM) ───────────────────────────────────────── */
 #define QGPU_SHMEM_DEFAULT_MB   64
@@ -505,6 +507,7 @@
 #define QGPU_CS_CONSTANT        1
 #define QGPU_CS_PRIMARY         2
 #define QGPU_CS_PREVIOUS        3
+#define QGPU_CS_TEXTURE0        4   /* v12 : + n, la texture de l'unité n (crossbar) */
 #define QGPU_CO_COLOR           0   /* opérandes RGB */
 #define QGPU_CO_ONE_MINUS_COLOR 1
 #define QGPU_CO_ALPHA           2
@@ -1174,6 +1177,20 @@
  *   est TOUJOURS faite pour ce dessin : l'invité n'emploie cet opcode que quand
  *   OpenGL la ferait. Aucune clé d'état nouvelle ; rien ne change pour les
  *   opcodes v1–v10.
+ */
+
+/* ── v12 : sources croisées de GL_COMBINE (ARB_texture_env_crossbar) ─────────
+ *
+ *   OpenGL 1.4 permet à l'environnement d'une unité de prendre comme source la
+ *   texture d'une AUTRE unité (GL_TEXTUREn dans GL_SOURCEi_RGB/_ALPHA). Le
+ *   champ de source de QGPU_SK_COMBINE_SRC<u> a 3 bits et n'employait que 0..3 :
+ *   les valeurs 4..7 désignent maintenant la texture de l'unité 0..3
+ *   (QGPU_CS_TEXTURE0 + n), vue comme la voit GL_TEXTURE dans sa propre unité
+ *   (format de base, mode de profondeur). QGPU_CS_TEXTURE0 + u dans l'unité u
+ *   vaut QGPU_CS_TEXTURE. Une unité désignée sans texture, ou dont la texture
+ *   est incomplète : résultat INDÉFINI (règle d'OpenGL). Le backend doit tenir
+ *   OpenGL 1.4 (QGPU_CAP_GL14) ; avant la v12, ces valeurs se lisaient modulo 4.
+ *   Aucun opcode ni clé nouveaux.
  */
 
 /* ── Interface du kext POMPPCGPU (IOUserClient) ──────────────────────────────
