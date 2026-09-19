@@ -1610,7 +1610,13 @@ int main(int argc, char **argv)
                 d3[i2 * 3 + 0] = 255; d3[i2 * 3 + 1] = 128; d3[i2 * 3 + 2] = 0;
             }
             glBindTexture(0x806F /* GL_TEXTURE_3D */, tid[0]);
+            /* d3 est SERRÉ (lignes de 6 octets) : avec l'alignement de 4 par
+               défaut, OpenGL lit des lignes de 8 et le texel (1,1,1) tombe
+               après le tableau — le noir était alors la bonne réponse (vu en
+               vrai une fois les textures 3D tenues, 19/09/2026). */
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
             if (t3) t3(0x806F, 0, GL_RGB, 2, 2, 2, 0, GL_RGB, GL_UNSIGNED_BYTE, d3);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
             glTexParameteri(0x806F, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
             glTexParameteri(0x806F, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
             glEnable(0x806F);
@@ -1630,8 +1636,10 @@ int main(int argc, char **argv)
                 f6[i2 * 3 + 0] = 0; f6[i2 * 3 + 1] = 255; f6[i2 * 3 + 2] = 128;
             }
             glBindTexture(0x8513 /* GL_TEXTURE_CUBE_MAP */, tid[1]);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);       /* f6 est serré, cf. 3D */
             for (f = 0; f < 6; f++)
                 glTexImage2D(0x8515 + f, 0, GL_RGB, 2, 2, 0, GL_RGB, GL_UNSIGNED_BYTE, f6);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
             glTexParameteri(0x8513, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
             glTexParameteri(0x8513, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
             glEnable(0x8513);
@@ -3409,6 +3417,271 @@ int main(int argc, char **argv)
         }
         printf("fill : %d images %dx%d, 40 grands triangles : %.2f img/s\n",
                frames, W, H, frames / (now() - t0));
+    } else if (!strcmp(scene, "sepspec")) {
+        /* Couleur spéculaire séparée (OpenGL 1.2) : lumière directionnelle à
+           diffuse noire et spéculaire blanche, matériau à spéculaire blanche
+           (brillance 0 : le terme vaut 1 face à la lumière), texture 1×1 NOIRE
+           en MODULATE. Couleur unique : (diffuse + spéculaire) × texture = noir.
+           Séparée : diffuse × texture + spéculaire = blanc. */
+        static const GLfloat zero[4] = { 0, 0, 0, 1 }, one[4] = { 1, 1, 1, 1 };
+        static const GLfloat dir[4] = { 0, 0, 1, 0 };
+        static const unsigned char black[4] = { 0, 0, 0, 255 };
+        GLuint id;
+        int k;
+        glGenTextures(1, &id);
+        glBindTexture(GL_TEXTURE_2D, id);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, black);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        glEnable(GL_LIGHTING);
+        glEnable(GL_LIGHT0);
+        glLightfv(GL_LIGHT0, GL_POSITION, dir);
+        glLightfv(GL_LIGHT0, GL_AMBIENT, zero);
+        glLightfv(GL_LIGHT0, GL_DIFFUSE, zero);
+        glLightfv(GL_LIGHT0, GL_SPECULAR, one);
+        glLightModelfv(GL_LIGHT_MODEL_AMBIENT, zero);
+        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, zero);
+        glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, zero);
+        glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, zero);
+        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, one);
+        glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 0.0f);
+        glClearColor(0.2f, 0.2f, 0.2f, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        for (k = 0; k < 2; k++) {
+            float x0 = k ? (float)W / 2 : 0;
+            glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL,
+                          k ? GL_SEPARATE_SPECULAR_COLOR : GL_SINGLE_COLOR);
+            glBegin(GL_QUADS);
+            glNormal3f(0, 0, 1);
+            glTexCoord2f(0, 0); glVertex2f(x0, 0);
+            glTexCoord2f(1, 0); glVertex2f(x0 + W / 2, 0);
+            glTexCoord2f(1, 1); glVertex2f(x0 + W / 2, H);
+            glTexCoord2f(0, 1); glVertex2f(x0, H);
+            glEnd();
+        }
+        glFinish();
+        check("couleur unique : noir", W / 4, H / 2, 0x000000);
+        check("spéculaire séparée : blanc", 3 * W / 4, H / 2, 0xffffff);
+        glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, GL_SINGLE_COLOR);
+        glDisable(GL_LIGHTING);
+        glDisable(GL_LIGHT0);
+        glDisable(GL_TEXTURE_2D);
+    } else if (!strcmp(scene, "texlod")) {
+        /* Niveaux et bornes de LOD (OpenGL 1.2) sur une texture 2D, que le rendu
+           d'Apple tient aussi : chaque cas se compare à lui (job gpu) ET à la
+           valeur attendue. Chaîne 4×4 rouge, 2×2 verte, 1×1 bleue ;
+           NEAREST_MIPMAP_NEAREST. Un quad de 64 px grossit (λ < 0), un quad de
+           2 px donne λ = 1, un quad de 1 px λ = 2. */
+        static unsigned char red[16 * 4], green[4 * 4], blue[4];
+        GLuint id[2];
+        int i;
+        for (i = 0; i < 16; i++) { red[i * 4] = 255; red[i * 4 + 3] = 255; }
+        for (i = 0; i < 4; i++) { green[i * 4 + 1] = 255; green[i * 4 + 3] = 255; }
+        blue[2] = 255; blue[3] = 255;
+        glGenTextures(2, id);
+        glBindTexture(GL_TEXTURE_2D, id[0]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, red);
+        glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, green);
+        glTexImage2D(GL_TEXTURE_2D, 2, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, blue);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+#define LQ(x0, y0, sz) do { glBegin(GL_QUADS); \
+            glTexCoord2f(0, 0); glVertex2f(x0, y0); glTexCoord2f(1, 0); glVertex2f((x0) + (sz), y0); \
+            glTexCoord2f(1, 1); glVertex2f((x0) + (sz), (y0) + (sz)); \
+            glTexCoord2f(0, 1); glVertex2f(x0, (y0) + (sz)); glEnd(); } while (0)
+        LQ(0, 0, 64);                                   /* grossi : niveau 0 */
+        LQ(70, 0, 2);                                   /* λ = 1 : niveau 1 */
+        LQ(80, 0, 1);                                   /* λ = 2 : niveau 2 */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
+        LQ(0, 70, 64);                                  /* grossi : niveau de base 1 */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1);
+        LQ(90, 0, 1);                                   /* λ = 2, borné au niveau 1 */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1000);
+        glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, 2.0f);
+        LQ(70, 70, 64);                                 /* λ < 0 porté à 2 : niveau 2 */
+        glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, -1000.0f);
+        glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, 0.4f);
+        LQ(100, 0, 1);                                  /* λ = 2 borné à 0,4 : niveau 0 */
+        glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, 1000.0f);
+        /* chaîne PARTIELLE (niveaux 0 et 1) : complète seulement avec MAX_LEVEL 1 */
+        glBindTexture(GL_TEXTURE_2D, id[1]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, red);
+        glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, green);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1);
+        LQ(110, 0, 2);                                  /* λ = 1 : niveau 1 */
+#undef LQ
+        glFinish();
+        check("grossi : niveau 0", 32, 32, 0xff0000);
+        check("λ=1 : niveau 1", 70, 0, 0x00ff00);
+        check("λ=2 : niveau 2", 80, 0, 0x0000ff);
+        check("BASE_LEVEL 1, grossi", 32, 100, 0x00ff00);
+        check("MAX_LEVEL 1 à λ=2", 90, 0, 0x00ff00);
+        check("MIN_LOD 2, grossi", 100, 100, 0x0000ff);
+        check("MAX_LOD 0,4 à λ=2", 100, 0, 0xff0000);
+        check("chaîne partielle + MAX_LEVEL 1", 110, 0, 0x00ff00);
+        glDisable(GL_TEXTURE_2D);
+    } else if (!strcmp(scene, "tex3d")) {
+        /* Textures 3D (OpenGL 1.2, protocole v10). Le rendu d'Apple ne les
+           échantillonne pas : les valeurs attendues sont calculées depuis les
+           texels, R = 30·x, G = 100·y, B = 60·z + 30 (niveau 0, 8×2×4), et la
+           chaîne de mipmaps est complète (4×1×2, 2×1×1, 1×1×1). À jouer avec
+           et sans POMPPC_GL_GEOM=0 : les deux chemins de géométrie. */
+        static unsigned char l0[4][2][8][4], l1[2][1][4][4], l2[1][1][2][4], l3[4];
+        int x, yy, z;
+        GLuint id;
+        for (z = 0; z < 4; z++)
+            for (yy = 0; yy < 2; yy++)
+                for (x = 0; x < 8; x++) {
+                    l0[z][yy][x][0] = (unsigned char)(30 * x);
+                    l0[z][yy][x][1] = (unsigned char)(100 * yy);
+                    l0[z][yy][x][2] = (unsigned char)(60 * z + 30);
+                    l0[z][yy][x][3] = 255;
+                }
+        for (z = 0; z < 2; z++)
+            for (x = 0; x < 4; x++) {
+                l1[z][0][x][0] = (unsigned char)(200 - 40 * x);
+                l1[z][0][x][1] = (unsigned char)(10 + 100 * z);
+                l1[z][0][x][2] = 20; l1[z][0][x][3] = 255;
+            }
+        memset(l2, 0x40, sizeof(l2)); memset(l3, 0x80, sizeof(l3));
+        glGenTextures(1, &id);
+        glBindTexture(GL_TEXTURE_3D, id);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 8, 2, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, l0);
+        glTexImage3D(GL_TEXTURE_3D, 1, GL_RGBA, 4, 1, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, l1);
+        glTexImage3D(GL_TEXTURE_3D, 2, GL_RGBA, 2, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, l2);
+        glTexImage3D(GL_TEXTURE_3D, 3, GL_RGBA, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, l3);
+        {
+            GLint mx = 0;
+            GLenum err = glGetError();
+            glGetIntegerv(GL_MAX_3D_TEXTURE_SIZE, &mx);
+            printf("GL_MAX_3D_TEXTURE_SIZE = %d ; glTexImage3D : erreur GL 0x%x\n", mx, err);
+            if (err || mx < 8)
+                failures++;
+        }
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glEnable(GL_TEXTURE_3D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+#define QUAD3(r0) do { glBegin(GL_QUADS); \
+            glTexCoord3f(0, 0, r0); glVertex2f(0, 0); glTexCoord3f(1, 0, r0); glVertex2f(W, 0); \
+            glTexCoord3f(1, 1, r0); glVertex2f(W, H); glTexCoord3f(0, 1, r0); glVertex2f(0, H); \
+            glEnd(); glFinish(); } while (0)
+        /* centre du texel (x, y) de la tranche : pixel (W·(x+½)/8, H·(y+½)/2) */
+#define TX(xx) ((int)(W * ((xx) + 0.5f) / 8))
+#define TY(yv) ((int)(H * ((yv) + 0.5f) / 2))
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        QUAD3(0.3f);                            /* tranche 1 : B = 90 */
+        check("r=0,3 texel (3,0,1)", TX(3), TY(0), 0x5a005a);
+        check("r=0,3 texel (5,1,1)", TX(5), TY(1), 0x96645a);
+        QUAD3(0.9f);                            /* tranche 3 : B = 210 */
+        check("r=0,9 texel (0,1,3)", TX(0), TY(1), 0x0064d2);
+        check("r=0,9 texel (7,0,3)", TX(7), TY(0), 0xd200d2);
+        QUAD3(1.3f);                            /* REPEAT : 5,2 → tranche 1 */
+        check("REPEAT r=1,3 → tranche 1", TX(2), TY(0), 0x3c005a);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+        QUAD3(1.3f);                            /* CLAMP_TO_EDGE : tranche 3 */
+        check("CLAMP_TO_EDGE r=1,3 → tranche 3", TX(2), TY(0), 0x3c00d2);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        QUAD3(0.5f);                            /* entre les tranches 1 et 2 : B = 120 */
+        {
+            unsigned long c = px(TX(4), TY(0));
+            int b = (int)(c & 255), r = (int)(c >> 16);
+            printf("  %s %-28s (%3d,%3d) = %06lx\n",
+                   (b >= 118 && b <= 122 && r >= 116 && r <= 124) ? "ok  " : "FAIL",
+                   "linéaire entre tranches 1-2", TX(4), TY(0), c);
+            if (!(b >= 118 && b <= 122 && r >= 116 && r <= 124))
+                failures++;
+        }
+        /* mipmaps : un quad de 4×1 pixels couvrant la texture → λ = 1, niveau 1
+           (4×1×2), r = 0,3 → tranche 0 : texel x → (200 − 40x, 10, 20) */
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBegin(GL_QUADS);
+        glTexCoord3f(0, 0, 0.3f); glVertex2f(0, 0); glTexCoord3f(1, 0, 0.3f); glVertex2f(4, 0);
+        glTexCoord3f(1, 1, 0.3f); glVertex2f(4, 1); glTexCoord3f(0, 1, 0.3f); glVertex2f(0, 1);
+        glEnd();
+        glFinish();
+        check("mipmap niveau 1, texel 0", 0, 0, 0xc80a14);
+        check("mipmap niveau 1, texel 2", 2, 0, 0x780a14);
+#undef QUAD3
+#undef TX
+#undef TY
+        glDisable(GL_TEXTURE_3D);
+    } else if (!strcmp(scene, "t3dprobe")) {
+        /* Sonde (relevé seulement) : une texture 3D 8×2×4 dont chaque texel
+           code ses coordonnées (R = 30·x, G = 100·y, B = 60·z + 30), plus un
+           niveau 1 de 4×1×2 — toutes les dimensions distinctes, pour qu'aucun
+           champ relevé ne soit ambigu —, et trois modes de répétition DIFFÉRENTS (S REPEAT,
+           T CLAMP, R CLAMP_TO_EDGE) pour que chaque paramètre se retrouve sans
+           ambiguïté dans les vidages du plugin (POMPPC_GL_T3DDUMP). Il faut
+           POMPPC_GL_TRY3D : sans lui, GLEngine refuse glTexImage3D. Tailles en
+           puissances de 2 : OpenGL 1.2 rend GL_INVALID_VALUE sinon (vu). */
+        unsigned char img[4][2][8][4], lv1[2][1][4][4];
+        int x, yy, z;
+        GLuint id;
+        for (z = 0; z < 4; z++)
+            for (yy = 0; yy < 2; yy++)
+                for (x = 0; x < 8; x++) {
+                    img[z][yy][x][0] = (unsigned char)(30 * x);
+                    img[z][yy][x][1] = (unsigned char)(100 * yy);
+                    img[z][yy][x][2] = (unsigned char)(60 * z + 30);
+                    img[z][yy][x][3] = 255;
+                }
+        for (z = 0; z < 2; z++)
+            for (x = 0; x < 4; x++) {
+                lv1[z][0][x][0] = (unsigned char)(200 - 40 * x);
+                lv1[z][0][x][1] = (unsigned char)(10 + 100 * z);
+                lv1[z][0][x][2] = 20;
+                lv1[z][0][x][3] = 255;
+            }
+        glGenTextures(1, &id);
+        glBindTexture(GL_TEXTURE_3D, id);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 8, 2, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+        glTexImage3D(GL_TEXTURE_3D, 1, GL_RGBA, 4, 1, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, lv1);
+        printf("glTexImage3D : erreur GL 0x%x\n", glGetError());
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+        if (getenv("T3D_LOD")) {
+            /* relevé des paramètres de LOD (OpenGL 1.2 et 1.4), valeurs
+               distinctives, à comparer au vidage sans T3D_LOD */
+            glTexParameterf(GL_TEXTURE_3D, GL_TEXTURE_MIN_LOD, 1.5f);
+            glTexParameterf(GL_TEXTURE_3D, GL_TEXTURE_MAX_LOD, 2.5f);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_BASE_LEVEL, 1);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAX_LEVEL, 3);
+            glTexParameterf(GL_TEXTURE_3D, GL_TEXTURE_PRIORITY, 0.25f);
+            glTexParameterf(GL_TEXTURE_3D, 0x8501 /* GL_TEXTURE_LOD_BIAS */, 0.75f);
+            printf("paramètres de LOD : erreur GL 0x%x\n", glGetError());
+        }
+        glEnable(GL_TEXTURE_3D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBegin(GL_QUADS);
+        glTexCoord3f(0, 0, 0.3f); glVertex2f(0, 0);
+        glTexCoord3f(1, 0, 0.3f); glVertex2f(W, 0);
+        glTexCoord3f(1, 1, 0.3f); glVertex2f(W, H);
+        glTexCoord3f(0, 1, 0.3f); glVertex2f(0, H);
+        glEnd();
+        glFinish();
+        /* r = 0,3 → tranche z = 1 : texel (3, 0) → 5a005a, texel (5, 1) → 96645a */
+        printf("  texel (1,0,1) en (%d,%d) = %06lx ; texel (2,1,1) en (%d,%d) = %06lx\n",
+               3 * W / 8, H / 4, px(3 * W / 8, H / 4), 5 * W / 8, 3 * H / 4,
+               px(5 * W / 8, 3 * H / 4));
+        glDisable(GL_TEXTURE_3D);
     } else if (!strcmp(scene, "texup")) {
         /* Débit de téléversement de textures (tâche 2.5, protocole v10) : une
            texture de TEXUP_SIZE² texels (256 par défaut), modifiée et renvoyée

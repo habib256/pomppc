@@ -47,14 +47,14 @@ identique sur 28 scènes de `gltest`. Il n'y a donc rien à démontrer ici.
 
 | Fonction | Statut | Preuve |
 |---|---|---|
-| Textures 3D | **(iii)** | `GL_MAX_3D_TEXTURE_SIZE = 0` ; `glTexImage3D` → `GL_INVALID_VALUE`. En forçant `cfg+0xbe = 256` (`POMPPC_GL_TRY3D=256`), l'appel **passe** mais rien n'est échantillonné : le quadrilatère sort blanc. Le protocole qgpu ne porte pas non plus les textures 3D (`TEX_IMAGE` est 2D). |
+| Textures 3D | **(i) sous le plugin v10** *(19/09/2026 : scène `tex3d` 9/9, `v15` TENU ; par le chemin hérité seulement, cf. `docs/re/textures-3d.md`)* ; **(iii) sous Apple** — ancien relevé : | `GL_MAX_3D_TEXTURE_SIZE = 0` ; `glTexImage3D` → `GL_INVALID_VALUE`. En forçant `cfg+0xbe = 256` (`POMPPC_GL_TRY3D=256`), l'appel **passe** mais rien n'est échantillonné : le quadrilatère sort blanc. Le protocole qgpu ne porte pas non plus les textures 3D (`TEX_IMAGE` est 2D). |
 | BGRA (`GL_EXT_bgra`) | (i) | annoncée par Apple ; `convert_level` traduit BGRA et BGR ; scène `texfmt` |
 | Pixels compactés | (i) | `GL_APPLE_packed_pixels` (liste fixe de GLEngine) ; 8888, 8888_REV, 1555_REV, 565, 4444 accélérés ; scène `texpack` |
 | `GL_CLAMP_TO_EDGE` | (i) | `v15` « GL_CLAMP_TO_EDGE » TENU sous Apple **et** sous le plugin ; transmis en `QGPU_TP_WRAP_*` |
 | `glDrawRangeElements` | (ii) | `v15` TENU ; `GL_EXT_draw_range_elements` déjà annoncée |
 | Rescale normal | (i) | `GL_EXT_rescale_normal` déjà annoncée ; clé `QGPU_SK_RESCALE_NORMAL` (v7) |
-| Couleur spéculaire séparée | **non vérifié [H]** | `GS_COLOR_CONTROL` est relevé et envoyé (`QGPU_SK_COLOR_CONTROL`), mais aucune scène ne l'isole |
-| Niveaux et LOD de texture (`BASE_LEVEL`, `MIN_LOD`…) | **non vérifié [H]** | — |
+| Couleur spéculaire séparée | **(i) par le chemin brut, (iii) sinon** *(19/09/2026)* | scène `sepspec` : blanc attendu, rendu par le chemin brut (l'hôte éclaire) ; noir par le chemin hérité ET sous le rendu d'Apple seul, qui ignore la spéculaire que GLEngine range en `+0x50` du sommet (`docs/re/textures-3d.md` §5) |
+| Niveaux et LOD de texture (`BASE_LEVEL`, `MIN_LOD`…) | **(i) en v10 ; (iii) sous Apple** *(19/09/2026)* | scène `texlod` : 8/8 sous le plugin, 3/8 sous le rendu d'Apple seul, qui ignore les quatre paramètres (`docs/re/textures-3d.md` §3) |
 | Sous-ensemble *imaging* | (ii) revendiqué par Apple (bit 0) | non vérifié de notre côté **[H]** |
 
 → **1.2 n'est pas tenu.**

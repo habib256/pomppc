@@ -81,11 +81,29 @@
 #define LV_FORMAT 0x08            /* u16 */
 #define LV_TYPE 0x0a              /* u16 */
 #define LV_DATA 0x10              /* données dans le format de l'application */
-/* Paramètres de GLEngine (DT_PARAMS) : */
+/* Paramètres de GLEngine (DT_PARAMS) : c'est l'objet texture de GLEngine
+   lui-même (docs/re/textures-3d.md). */
+#define TP_TARGET 0x01            /* u8 : cible, par emplacement de CTX_TEXUNITS
+                                     (1 3D, 3 2D, 4 1D) */
 #define TP_WRAP_S 0x10
 #define TP_WRAP_T 0x12
+#define TP_WRAP_R 0x14            /* relevé le 19/09/2026 (sonde t3dprobe) */
 #define TP_MIN    0x16
 #define TP_MAG    0x18
+/* Niveaux et LOD (OpenGL 1.2), relevés le 19/09/2026 (sonde t3dprobe, T3D_LOD) */
+#define TP_MIN_LOD    0x30        /* f32, initial −1000 */
+#define TP_MAX_LOD    0x34        /* f32, initial 1000 */
+#define TP_LOD_BIAS   0x38        /* f32 : NON relayé — GLEngine annonce
+                                     GL_MAX_TEXTURE_LOD_BIAS = 0, donc sans effet */
+#define TP_BASE_LEVEL 0x3c        /* u16, initial 0 */
+#define TP_MAX_LEVEL  0x3e        /* u16, initial 1000 */
+/* Tableau des niveaux de l'objet texture de GLEngine (pas 0x18). La structure
+   de niveau du GLDriver (LV_*) est remplie par le rendu d'Apple, qui ne connaît
+   pas la 3D : la PROFONDEUR et la hauteur de tranche ne sont qu'ici. */
+#define TP_LEVEL0        0xa4
+#define TP_LEVEL_SIZE    0x18
+#define PL_D     0x04             /* u16 : profondeur */
+#define PL_IMGH  0x0a             /* u16 : lignes par tranche des données */
 /* État GL de GLEngine : */
 #define GS_ALPHA_REF     0x2d60   /* float */
 #define GS_ALPHA_FUNC    0x2d64   /* u16 */
@@ -359,7 +377,9 @@ typedef struct PTex {                   /* texture du GLDriver suivie par le plu
     void          *drvtex;
     long           qtex;                /* identifiant hôte, -1 si aucun */
     int            dirty;               /* niveaux à (re)téléverser */
-    unsigned long  prm[4];              /* paramètres envoyés : min, mag, wrap s, wrap t */
+    unsigned long  prm[9];              /* paramètres envoyés : min, mag, wrap s, wrap t,
+                                           wrap r (3D), puis (v10) min et max LOD en
+                                           bits IEEE, niveau de base, niveau max */
     int            prm_valid;
 } PTex;
 
@@ -447,6 +467,8 @@ static struct {
     int             v8;                 /* device v8 : pipeline fixe complet */
     int             v10;                /* device v10 : niveaux au format de
                                            l'application, convertis par l'hôte */
+    int             tex3d;              /* textures 3D annoncées et tenues (v10 +
+                                           QGPU_CAP_GL14) */
     unsigned long   query_base;         /* premier identifiant de requête du client */
     double          t_submit, t_copy, t_upload;   /* secondes cumulées */
     /* ── bilan du mode asynchrone ── */
@@ -473,7 +495,9 @@ enum {
     /* sorties du domaine propres au chemin brut (v7) */
     NO_G_RASTER, NO_G_POINT, NO_G_PROGRAM, NO_G_STRIDE, NO_G_LATE,
     /* v8 : ce qui reste hors domaine une fois les fonctions v8 branchées */
-    NO_Q_FALLBACK, NO_TEX_PARAM, NO_COUNT
+    NO_Q_FALLBACK, NO_TEX_PARAM,
+    /* v10 */
+    NO_G_TEX3D, NO_COUNT
 };
 static const char *const no_name[NO_COUNT] = {
     "tampon", "logicop/stipple/lissage", "brouillard", "polygonmode", "profondeur",
@@ -483,6 +507,7 @@ static const char *const no_name[NO_COUNT] = {
     "brut:lissage", "taille-de-point-attenuee", "brut:programme",
     "brut:pas-de-sommet", "brut:etat-tardif",
     "requete:repli-logiciel", "param-texture",
+    "brut:texture-3d",
 };
 static unsigned long no_count[NO_COUNT];
 static char no_detail[NO_COUNT][64];
@@ -741,6 +766,12 @@ void pomppc_backend_init(void)
                revient à la conversion par l'invité, pour comparer. */
             G.v10 = G.q.version >= 10 &&
                     !(getenv("POMPPC_GL_TEX3") && getenv("POMPPC_GL_TEX3")[0] == '0');
+            /* Textures 3D (OpenGL 1.2) : il n'y a PAS de repli, le rendu d'Apple
+               ne sait pas les échantillonner. On ne les annonce donc que si
+               l'hôte les tient (docs/re/textures-3d.md). POMPPC_GL_TEX3D=0 les
+               coupe. */
+            G.tex3d = G.v10 && (G.q.caps & QGPU_CAP_GL14) &&
+                      !(getenv("POMPPC_GL_TEX3D") && getenv("POMPPC_GL_TEX3D")[0] == '0');
             G.query_base = G.q.index * QGPU_CLIENT_QUERY_IDS;
             atexit(on_exit_stats);
         } else {
@@ -1495,10 +1526,105 @@ static int tex_wrap_ok(unsigned long w)
     return w == 0x2900 || w == 0x2901 || w == 0x812F;
 }
 
+/* Niveaux et bornes de LOD (OpenGL 1.2). Avant la v10 l'hôte ne les connaît
+ * pas : il faut alors qu'ils soient à leurs valeurs initiales, sinon le rendu
+ * d'Apple reprend la main — jusqu'ici ils étaient IGNORÉS en silence. En v10 ils
+ * partent à l'hôte, dans les bornes que le cœur accepte. */
+static int tex_lod_ok(const unsigned char *gp)
+{
+    float mn = GLD_F32(gp, TP_MIN_LOD), mx = GLD_F32(gp, TP_MAX_LOD);
+    unsigned long b = U16(gp, TP_BASE_LEVEL), m = U16(gp, TP_MAX_LEVEL);
+    if (!G.v10 || !(G.q.caps & QGPU_CAP_GL14))
+        return mn == -1000.0f && mx == 1000.0f && b == 0 && m == 1000;
+    return mn == mn && mx == mx && mn >= -1e6f && mn <= 1e6f && mx >= -1e6f && mx <= 1e6f &&
+           b < DT_LEVELS && m <= 1000;
+}
+
 static int tex_params_ok(const unsigned char *gp)
 {
     return tex_filter_ok(U16(gp, TP_MIN)) && tex_filter_ok(U16(gp, TP_MAG)) &&
-           tex_wrap_ok(U16(gp, TP_WRAP_S)) && tex_wrap_ok(U16(gp, TP_WRAP_T));
+           tex_wrap_ok(U16(gp, TP_WRAP_S)) && tex_wrap_ok(U16(gp, TP_WRAP_T)) &&
+           (GLD_U8(gp, TP_TARGET) != 1 || tex_wrap_ok(U16(gp, TP_WRAP_R))) &&
+           tex_lod_ok(gp);
+}
+
+/* Structure de niveau (LV_*) du NIVEAU DE BASE : c'est lui que la complétude
+   regarde d'abord (OpenGL 1.2), pas le niveau 0. */
+static const unsigned char *tex_base_lv(const void *drvtex)
+{
+    const unsigned char *gp = (const unsigned char *)GLD_U32(drvtex, DT_PARAMS);
+    unsigned long b = gp ? U16(gp, TP_BASE_LEVEL) : 0;
+    if (b >= DT_LEVELS)
+        b = 0;
+    return (const unsigned char *)drvtex + DT_LEVEL0 + b * DT_LEVEL_SIZE;
+}
+
+/* Complétude d'OpenGL 1.2 : niveau de base, puis, si le filtre de réduction
+ * emploie les mipmaps, les niveaux b+1..q avec q = min(b + log2(max(w, h, d)),
+ * MAX_LEVEL), chacun de la moitié du précédent. C'est la règle que le cœur de
+ * l'hôte applique ; le verdict d'Apple (CTX_TEXTURING) ignore niveau de base
+ * et niveau max, et ne connaît pas la 3D (vu en vrai, scène texlod). */
+static int tex_complete(const void *drvtex)
+{
+    const unsigned char *gp = (const unsigned char *)GLD_U32(drvtex, DT_PARAMS);
+    const unsigned char *lv;
+    unsigned long b, q, w, h, d = 1, m, n, minf;
+    int t3;
+
+    if (!gp)
+        return 0;
+    b = U16(gp, TP_BASE_LEVEL);
+    if (b >= DT_LEVELS)
+        return 0;
+    lv = (const unsigned char *)drvtex + DT_LEVEL0 + b * DT_LEVEL_SIZE;
+    w = S16(lv, LV_W); h = S16(lv, LV_H);
+    if (!w || !h || !GLD_U32(lv, LV_DATA))
+        return 0;
+    t3 = GLD_U8(gp, TP_TARGET) == 1;
+    if (t3) {
+        d = U16(gp + TP_LEVEL0 + b * TP_LEVEL_SIZE, PL_D);
+        if (!d)
+            return 0;
+    }
+    minf = U16(gp, TP_MIN);
+    if (minf == 0x2600 || minf == 0x2601)
+        return 1;
+    m = w > h ? w : h;
+    if (d > m)
+        m = d;
+    for (q = b; m > 1; m >>= 1)
+        q++;
+    if (U16(gp, TP_MAX_LEVEL) < q)
+        q = U16(gp, TP_MAX_LEVEL);
+    if (q < b)
+        return 0;
+    for (n = b + 1; n <= q; n++) {
+        w = w > 1 ? w / 2 : 1; h = h > 1 ? h / 2 : 1; d = d > 1 ? d / 2 : 1;
+        if (n >= DT_LEVELS)
+            return 0;
+        lv = (const unsigned char *)drvtex + DT_LEVEL0 + n * DT_LEVEL_SIZE;
+        if ((unsigned long)S16(lv, LV_W) != w || (unsigned long)S16(lv, LV_H) != h ||
+            !GLD_U32(lv, LV_DATA) ||
+            (t3 && U16(gp + TP_LEVEL0 + n * TP_LEVEL_SIZE, PL_D) != d))
+            return 0;
+    }
+    return 1;
+}
+
+/* v10 : la texture est-elle une texture 3D (cible de l'objet de GLEngine) ? */
+static int tex_is_3d(const PTex *t)
+{
+    const unsigned char *gp = (const unsigned char *)GLD_U32(t->drvtex, DT_PARAMS);
+    return gp && GLD_U8(gp, TP_TARGET) == 1;
+}
+
+/* Profondeur et hauteur de tranche du niveau l, dans l'objet de GLEngine. */
+static void tex_level_depth(const PTex *t, int l, unsigned long *d, unsigned long *imgh)
+{
+    const unsigned char *gp = (const unsigned char *)GLD_U32(t->drvtex, DT_PARAMS);
+    const unsigned char *pl = gp + TP_LEVEL0 + l * TP_LEVEL_SIZE;
+    *d = U16(pl, PL_D);
+    *imgh = U16(pl, PL_IMGH);
 }
 
 static int tex_id_available(void)
@@ -1528,6 +1654,8 @@ static int texture_uploadable(PTex *t)
         return 1;
     if (t->qtex < 0 && !tex_id_available())
         return no(NO_TEX_ID, 0, 0);
+    if (tex_is_3d(t) && !G.tex3d)
+        return no(NO_TEX_TARGET, 2, 0);
     for (l = 0; l < DT_LEVELS; l++) {
         unsigned char *lv = dt + DT_LEVEL0 + l * DT_LEVEL_SIZE;
         unsigned long w = S16(lv, LV_W), h = S16(lv, LV_H);
@@ -1535,6 +1663,13 @@ static int texture_uploadable(PTex *t)
             continue;
         if (S16(lv, LV_BORDER) || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM)
             return no(NO_TEX_SIZE, w, h);
+        if (tex_is_3d(t)) {
+            unsigned long d, imgh;
+            tex_level_depth(t, l, &d, &imgh);
+            if (d == 0 || w > QGPU_MAX_TEX_3D_DIM || h > QGPU_MAX_TEX_3D_DIM ||
+                d > QGPU_MAX_TEX_3D_DIM || imgh < h)
+                return no(NO_TEX_SIZE, w, (h << 16) | d);
+        }
         if (!GLD_U32(lv, LV_DATA) ||
             (G.v10 ? S16(lv, LV_ROWPIX) < (short)w : S16(lv, LV_ROWPIX) != (short)w) ||
             !level_convertible(U16(lv, LV_FORMAT), U16(lv, LV_TYPE)))
@@ -1549,8 +1684,12 @@ static int upload_texture(PCtx *p, PTex *t)
 {
     unsigned char *dt = t->drvtex;
     unsigned char *gp = (unsigned char *)GLD_U32(dt, DT_PARAMS);
-    unsigned long base = GLD_U32(dt, DT_BASE_FORMAT), prm[4], off, *c;
-    int l, k;
+    unsigned long base = GLD_U32(dt, DT_BASE_FORMAT), prm[9], off, *c;
+    static const unsigned long keys[9] = {
+        QGPU_TP_MIN_FILTER, QGPU_TP_MAG_FILTER, QGPU_TP_WRAP_S, QGPU_TP_WRAP_T,
+        QGPU_TP_WRAP_R, QGPU_TP_MIN_LOD, QGPU_TP_MAX_LOD, QGPU_TP_BASE_LEVEL,
+        QGPU_TP_MAX_LEVEL };
+    int l, k, t3 = tex_is_3d(t);
 
     if (gp && base_format_ok(base) && !tex_params_ok(gp))
         return no(NO_TEX_PARAM, U16(gp, TP_WRAP_S), U16(gp, TP_MIN));
@@ -1571,9 +1710,15 @@ static int upload_texture(PCtx *p, PTex *t)
         t->qtex = alloc_tex_id();
         if (t->qtex < 0)
             return no(NO_TEX_ID, 0, 0);
-        c = reserve(p, QGPU_LEN_TEX);
-        c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX);
-        c[1] = t->qtex;
+        if (t3) {
+            c = reserve(p, QGPU_LEN_TEX_CREATE3);
+            c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3);
+            c[1] = t->qtex; c[2] = QGPU_TT_3D;
+        } else {
+            c = reserve(p, QGPU_LEN_TEX);
+            c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX);
+            c[1] = t->qtex;
+        }
         t->dirty = 1;
         t->prm_valid = 0;
     }
@@ -1591,18 +1736,23 @@ static int upload_texture(PCtx *p, PTex *t)
                 unsigned int fmt = U16(lv, LV_FORMAT), type = U16(lv, LV_TYPE);
                 unsigned long bpp = host_texel_bytes(fmt, type);
                 unsigned long row = (unsigned long)S16(lv, LV_ROWPIX) * bpp;
+                unsigned long dep = 1, imgh = h, img, size;
                 const unsigned char *d = (const unsigned char *)GLD_U32(lv, LV_DATA);
-                if (!bpp || !d || S16(lv, LV_ROWPIX) < (short)w)
+                if (t3)                 /* 3D : profondeur dans l'objet de GLEngine */
+                    tex_level_depth(t, l, &dep, &imgh);
+                img = row * imgh;
+                size = img * (dep - 1) + row * (h - 1) + w * bpp;
+                if (!bpp || !d || S16(lv, LV_ROWPIX) < (short)w || !dep || imgh < h)
                     return no(NO_TEX_FORMAT, (fmt << 16) | type,
                               ((unsigned long)S16(lv, LV_ROWPIX) << 16) | w);
-                if (!arena_alloc(row * (h - 1) + w * bpp, &off))
+                if (!arena_alloc(size, &off))
                     return no(NO_TEX_SIZE, w, h);
-                memcpy(G.q.win + off, d, row * (h - 1) + w * bpp);
+                memcpy(G.q.win + off, d, size);
                 c = reserve(p, QGPU_LEN_TEX_IMAGE3);
                 c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3);
-                c[1] = t->qtex; c[2] = QGPU_TT_2D; c[3] = l; c[4] = w; c[5] = h;
-                c[6] = 1; c[7] = base; c[8] = fmt; c[9] = type;
-                c[10] = G.q.base + off; c[11] = row; c[12] = 0;
+                c[1] = t->qtex; c[2] = t3 ? QGPU_TT_3D : QGPU_TT_2D; c[3] = l;
+                c[4] = w; c[5] = h; c[6] = dep; c[7] = base; c[8] = fmt; c[9] = type;
+                c[10] = G.q.base + off; c[11] = row; c[12] = t3 ? img : 0;
                 G.n_texuploads++;
                 continue;
             }
@@ -1623,12 +1773,21 @@ static int upload_texture(PCtx *p, PTex *t)
     prm[1] = U16(gp, TP_MAG);
     prm[2] = U16(gp, TP_WRAP_S);
     prm[3] = U16(gp, TP_WRAP_T);
-    for (k = 0; k < 4; k++) {
+    prm[4] = U16(gp, TP_WRAP_R);
+    prm[5] = GLD_U32(gp, TP_MIN_LOD);                 /* bits IEEE, tels quels */
+    prm[6] = GLD_U32(gp, TP_MAX_LOD);
+    prm[7] = U16(gp, TP_BASE_LEVEL);
+    prm[8] = U16(gp, TP_MAX_LEVEL);
+    for (k = 0; k < 9; k++) {
+        /* wrap r : 3D seulement ; LOD et niveaux : v10 seulement (avant, ils
+           sont forcés aux valeurs initiales par tex_lod_ok) */
+        if ((k == 4 && !t3) || (k >= 5 && !G.v10))
+            continue;
         if (t->prm_valid && t->prm[k] == prm[k])
             continue;
         c = reserve(p, QGPU_LEN_TEX_PARAM);
         c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_PARAM, QGPU_LEN_TEX_PARAM);
-        c[1] = t->qtex; c[2] = QGPU_TP_MIN_FILTER + k; c[3] = prm[k];
+        c[1] = t->qtex; c[2] = keys[k]; c[3] = prm[k];
         t->prm[k] = prm[k];
     }
     t->prm_valid = 1;
@@ -1706,17 +1865,95 @@ static int combine_ok(const unsigned char *us, int unit, TexUnit *tu)
     return 1;
 }
 
+/* Sonde (relevé seulement, POMPPC_GL_T3DDUMP=1 avec POMPPC_GLTRACE) : quand
+   une unité a une cible cube, 3D ou rectangle active, vide la table des
+   textures liées de l'unité, son bloc d'état, et pour chaque emplacement non
+   nul l'objet texture du GLDriver, ses paramètres et le début des données des
+   deux premiers niveaux. C'est ce qui établit, sans rien deviner, où GLEngine
+   range une texture 3D et sa profondeur (docs/re/textures-3d.md). */
+static void target_probe(PCtx *p, int u, unsigned long mask, unsigned long units)
+{
+    static int shots;
+    char tag[32];
+    int k, l;
+    if (!getenv("POMPPC_GL_T3DDUMP") || shots++ >= 2 || !units)
+        return;
+    pomppc_log("SONDE cible : unité %d masque %02lx table %08lx\n", u, mask, units);
+    for (k = 0; k < 5; k++)
+        pomppc_log("  emplacement %d : %08lx\n", k, GLD_U32(units, u * 0x14 + k * 4));
+    pomppc_dump("cible-unite", gls(p) + GS_TEXUNIT0 + u * GS_TEXUNIT_SIZE, GS_TEXUNIT_SIZE);
+    for (k = 0; k < 5; k++) {
+        unsigned char *dt = (unsigned char *)GLD_U32(units, u * 0x14 + k * 4);
+        if (!dt)
+            continue;
+        sprintf(tag, "cible-dt%d", k);
+        pomppc_dump(tag, dt, 0x600);
+        if (GLD_U32(dt, DT_PARAMS)) {
+            sprintf(tag, "cible-prm%d", k);
+            pomppc_dump(tag, (void *)GLD_U32(dt, DT_PARAMS), 0x100);
+        }
+        for (l = 0; l < 2; l++) {
+            unsigned char *lv = dt + DT_LEVEL0 + l * DT_LEVEL_SIZE;
+            if (!GLD_U32(lv, LV_DATA))
+                continue;
+            sprintf(tag, "cible-dt%d-niv%d", k, l);
+            pomppc_dump(tag, (void *)GLD_U32(lv, LV_DATA), 0x100);
+        }
+    }
+}
+
 /* Objet texture du GLDriver lié à l'unité u pour la cible active, ou 0.
  * `*mask` reçoit les cibles activées (bits TU_ENABLE). */
+/* Emplacement de CTX_TEXUNITS de la cible EFFECTIVE d'une unité, selon la
+ * priorité d'OpenGL (cube > 3D > rectangle > 2D > 1D) : le bit 1<<k de
+ * TU_ENABLE correspond à l'emplacement k (relevé, docs/re/textures-3d.md).
+ * -1 : la cible effective n'est pas tenue (cube, rectangle ; 3D sans l'hôte). */
+static int unit_slot(unsigned long m)
+{
+    if (m & 1)
+        return -1;                                  /* carte de cube */
+    if (m & 2)
+        return G.tex3d ? 1 : -1;                    /* 3D (v10) */
+    if (m & 4)
+        return -1;                                  /* rectangle */
+    return (m & 8) ? 3 : 4;                         /* 2D, 1D */
+}
+
 static void *unit_drvtex(PCtx *p, int u, unsigned long *mask)
 {
     unsigned char *us = gls(p) + GS_TEXUNIT0 + u * GS_TEXUNIT_SIZE;
     unsigned long m = GLD_U32(us, TU_ENABLE) & 0x1f;
     unsigned long units = GLD_U32(p->ctx, CTX_TEXUNITS);
     *mask = m;
-    if (!m || (m & 0x7) || !units)
+    if (m & 0x7)
+        target_probe(p, u, m, units);
+    if (!m || unit_slot(m) < 0 || !units)
         return 0;
-    return (void *)GLD_U32(units, u * 0x14 + ((m & 8) ? 3 * 4 : 4 * 4));
+    return (void *)GLD_U32(units, u * 0x14 + unit_slot(m) * 4);
+}
+
+/* Texturage effectif. CTX_TEXTURING est calculé par le rendu d'Apple, qui ne
+ * connaît pas la 3D : une unité dont la seule texture est 3D l'y laisse à 0
+ * (vu en vrai, sonde t3dprobe). On le complète donc nous-mêmes. */
+static int texturing_on(PCtx *p)
+{
+    unsigned char *g = gls(p);
+    unsigned long units = GLD_U32(p->ctx, CTX_TEXUNITS);
+    int u;
+    for (u = 0; u < GL_MAX_TEXUNITS; u++) {
+        unsigned long m = GLD_U32(g, GS_TEXUNIT0 + u * GS_TEXUNIT_SIZE + TU_ENABLE) & 0x1f;
+        void *dt;
+        if (!m)
+            continue;
+        /* cible que nous ne tenons pas : laisser texture_ok / geom_texture_ok
+           la refuser (repli sur Apple), jamais la dessiner sans texture */
+        if (unit_slot(m) < 0 || !units)
+            return 1;
+        dt = (void *)GLD_U32(units, u * 0x14 + unit_slot(m) * 4);
+        if (dt && tex_complete(dt))
+            return 1;
+    }
+    return 0;
 }
 
 /* Unité u : texture et environnement ; 0 = hors domaine (logiciel). */
@@ -1733,8 +1970,10 @@ static int texture_unit_ok(PCtx *p, int u, TexUnit *tu)
     tu->t = 0;
     if (!mask)
         return 1;                                   /* unité coupée */
-    if ((mask & 0x7) || !units)                      /* cube, 3D, rectangle */
+    if (unit_slot(mask) < 0 || !units) {             /* cube, rectangle (3D sans v10) */
+        target_probe(p, u, mask, units);
         return no(NO_TEX_TARGET, mask, units);
+    }
     if (env != 0x2100 && env != 0x2101 && env != 0x0BE2 && env != 0x1E01 &&
         env != 0x0104 && env != 0x8570)
         return no(NO_TEX_ENV, env, u);
@@ -1742,15 +1981,14 @@ static int texture_unit_ok(PCtx *p, int u, TexUnit *tu)
     tu->combine_src = QGPU_COMBINE_SRC_DEFAULT;
     if (env == 0x8570 && !combine_ok(us, u, tu))
         return 0;
-    dt = (void *)GLD_U32(units, u * 0x14 + ((mask & 8) ? 3 * 4 : 4 * 4));
+    dt = (void *)GLD_U32(units, u * 0x14 + unit_slot(mask) * 4);
     tu->t = dt ? find_tex(dt) : 0;
     if (!tu->t)
         return no(NO_TEX_UNKNOWN, (unsigned long)dt, mask);
     /* Texture sans image (jamais définie) : OpenGL la dit incomplète et coupe
        le texturage de CETTE unité, sans toucher aux autres. Marble Blast
        laisse ainsi des unités actives sans texture. */
-    if (!S16((unsigned char *)tu->t->drvtex + DT_LEVEL0, LV_W) ||
-        !GLD_U32((unsigned char *)tu->t->drvtex + DT_LEVEL0, LV_DATA)) {
+    if (!tex_complete(tu->t->drvtex)) {
         tu->t = 0;
         G.n_tex_incomplete++;
         return 1;
@@ -1771,7 +2009,7 @@ static int texture_ok(PCtx *p, TexInfo *ti)
 
     for (i = 0; i < QGPU_MAX_UNITS; i++)
         ti->u[i].t = 0;
-    if (!GLD_U8(p->ctx, CTX_TEXTURING))
+    if (!texturing_on(p))
         return 1;                                   /* pas de texture : dessin simple */
     for (i = QGPU_MAX_UNITS; i < GL_MAX_TEXUNITS; i++)
         if (GLD_U32(g, GS_TEXUNIT0 + i * GS_TEXUNIT_SIZE + TU_ENABLE) & 0x1f)
@@ -2669,14 +2907,14 @@ static int unit_textured(PCtx *p, int u)
     PTex *t;
     unsigned char *lv;
 
-    if (!GLD_U8(p->ctx, CTX_TEXTURING))
+    if (!texturing_on(p))
         return 0;
     dt = unit_drvtex(p, u, &mask);
     t = dt ? find_tex(dt) : 0;
     if (!t)
         return 0;
-    lv = (unsigned char *)t->drvtex + DT_LEVEL0;
-    return S16(lv, LV_W) != 0 && GLD_U32(lv, LV_DATA) != 0;
+    (void)lv;
+    return tex_complete(t->drvtex);
 }
 
 /* Le texturage courant tiendra-t-il sur l'hôte ? Prédicat pur (aucune commande,
@@ -2687,7 +2925,7 @@ static int geom_texture_ok(PCtx *p)
     unsigned char *g = gls(p);
     int u, i;
 
-    if (!GLD_U8(p->ctx, CTX_TEXTURING))
+    if (!texturing_on(p))
         return 1;
     for (i = QGPU_MAX_UNITS; i < GL_MAX_TEXUNITS; i++)
         if (GLD_U32(g, GS_TEXUNIT0 + i * GS_TEXUNIT_SIZE + TU_ENABLE) & 0x1f)
@@ -2701,8 +2939,14 @@ static int geom_texture_ok(PCtx *p)
         unsigned char *lv;
         if (!mask)
             continue;
-        if (mask & 0x7)
+        if (unit_slot(mask) < 0)
             return no(NO_TEX_TARGET, mask, GLD_U32(p->ctx, CTX_TEXUNITS));
+        /* Texture 3D : GLEngine JETTE la géométrie brute qu'on lui demande
+           (bit 0 posé, descripteur publié, et jamais un BeginPrimitiveBuffer ;
+           vu en vrai, scène tex3d). La 3D passe donc par le chemin hérité, où
+           GLEngine transforme et nous donne s, t, r, q : exact (docs/re/textures-3d.md). */
+        if (unit_slot(mask) == 1)
+            return no(NO_G_TEX3D, u, 0);
         if (env != 0x2100 && env != 0x2101 && env != 0x0BE2 && env != 0x1E01 &&
             env != 0x0104 && env != 0x8570)
             return no(NO_TEX_ENV, env, u);
@@ -2711,8 +2955,8 @@ static int geom_texture_ok(PCtx *p)
         t = dt ? find_tex(dt) : 0;
         if (!t)
             return no(NO_TEX_UNKNOWN, (unsigned long)dt, mask);
-        lv = (unsigned char *)t->drvtex + DT_LEVEL0;
-        if (!S16(lv, LV_W) || !GLD_U32(lv, LV_DATA))
+        (void)lv;
+        if (!tex_complete(t->drvtex))
             continue;                   /* incomplète : l'unité est coupée, comme en GL */
         if (!texture_uploadable(t))
             return 0;
@@ -3653,7 +3897,7 @@ static int begin_lp(PCtx *p, Batch *b, int lines)
 {
     unsigned char *g;
     const float *att;
-    if (!accel_ok(p) || GLD_U8(p->ctx, CTX_TEXTURING) || !ensure_surface(p))
+    if (!accel_ok(p) || texturing_on(p) || !ensure_surface(p))
         return 0;
     g = gls(p);
     if (lines ? (GLD_U8(g, GS_LINE_STIPPLE) || GLD_U8(g, GS_LINE_SMOOTH) || GLD_U8(g, GS_POLY_OFS_LINE))
@@ -4877,6 +5121,11 @@ static void caps_probe(unsigned char *cfg)
 static void caps_extensions(unsigned char *cfg)
 {
     unsigned long w0 = 0, w1 = 0;
+    /* Textures 3D (OpenGL 1.2, protocole v10) : sans repli possible, donc
+       seulement si l'hôte les tient (G.tex3d). cfg+0xc0, voisine et encore
+       non identifiée, n'est PAS touchée. */
+    if (G.tex3d)
+        GLD_U16(cfg, 0xbe) = QGPU_MAX_TEX_3D_DIM;
     if (G.v8)
         w0 |= 1UL << 17;                /* GL_ARB_occlusion_query */
     w0 |= 1UL << 20;                    /* GL_ARB_vertex_buffer_object */

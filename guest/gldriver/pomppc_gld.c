@@ -251,6 +251,31 @@ static void trace_proc(int id, unsigned long *a)
             pomppc_dump("swap-depth", (void *)GLD_U32(ctx, 0x88), w * h * 4);
         if (GLD_U32(ctx, 0x74))
             pomppc_dump("swap-color", (void *)GLD_U32(ctx, 0x74), w * h * 4);
+        if (getenv("POMPPC_GL_T3DDUMP")) {
+            /* Sonde des cibles de texture (docs/re/textures-3d.md) : état GL
+               entier, table des textures liées de l'unité 0 (5 cibles), et
+               chaque objet texture lié avec ses paramètres et ses données. */
+            const unsigned char *units = (const unsigned char *)GLD_U32(ctx, 0x10);
+            int k, l;
+            pomppc_dump("swap-glstate", (void *)GLD_U32(ctx, 0x0c), 0x5400);
+            for (k = 0; units && k < 5; k++) {
+                unsigned char *dt = (unsigned char *)GLD_U32(units, k * 4);
+                char tag[32];
+                pomppc_log("  unité 0, emplacement %d : %08lx\n", k, (unsigned long)dt);
+                if (!dt)
+                    continue;
+                sprintf(tag, "swap-dt%d", k);
+                pomppc_dump(tag, dt, 0x600);
+                if (GLD_U32(dt, 0))
+                    { sprintf(tag, "swap-prm%d", k); pomppc_dump(tag, (void *)GLD_U32(dt, 0), 0x800); }
+                for (l = 0; l < 2; l++) {
+                    const unsigned char *lv = dt + 0x78 + l * 0x74;
+                    if (GLD_U32(lv, 0x10))
+                        { sprintf(tag, "swap-dt%d-niv%d", k, l);
+                          pomppc_dump(tag, (void *)GLD_U32(lv, 0x10), 0x100); }
+                }
+            }
+        }
         break;
     }
     default:
@@ -447,7 +472,12 @@ long gldInitDispatch(long a, long b, long c, long d, long e, long f, long g, lon
        chaque changement d'état (_gleUpdateDispatchCodeChange, GLEngine 0xc8d20).
        Hors domaine, on rend le retour d'Apple tel quel et il reprend tout le
        travail — c'est le repli, vérifié exact. */
-    return r | pomppc_geom_dispatch((void *)a);
+    {
+        long bits = pomppc_geom_dispatch((void *)a);
+        if (bits)
+            pomppc_log("  géométrie brute : +%ld\n", bits);
+        return r | bits;
+    }
 }
 
 long gldUpdateDispatch(long a, long b, long c, long d, long e, long f, long g, long h)
@@ -462,7 +492,12 @@ long gldUpdateDispatch(long a, long b, long c, long d, long e, long f, long g, l
     if (buf)
         pomppc_after_draw_buffer_change((void *)a);
     pomppc_hook_procs((void *)a, (void **)b);
-    return r | pomppc_geom_dispatch((void *)a);
+    {
+        long bits = pomppc_geom_dispatch((void *)a);
+        if (bits)
+            pomppc_log("  géométrie brute : +%ld\n", bits);
+        return r | bits;
+    }
 }
 
 long gldFlush(long a, long b, long c, long d, long e, long f, long g, long h)
@@ -497,7 +532,23 @@ long gldDeleteTexture(long a, long b, long c, long d, long e, long f, long g, lo
 
 long gldCreateTextureLevel(long a, long b, long c, long d, long e, long f, long g, long h)
 {
-    long r = FWD8(GLD_CreateTextureLevel);
+    long r;
+    if (getenv("POMPPC_GL_T3DDUMP")) {
+        /* Sonde (docs/re/textures-3d.md) : arguments bruts, et 0x80 octets
+           derrière chacun qui ressemble à un pointeur. */
+        long v[8] = { a, b, c, d, e, f, g, h };
+        int k;
+        char tag[32];
+        pomppc_log("gldCreateTextureLevel(%08lx %08lx %08lx %08lx %08lx %08lx %08lx %08lx)\n",
+                   a, b, c, d, e, f, g, h);
+        for (k = 0; k < 8; k++)
+            if ((unsigned long)v[k] > 0x10000UL && (unsigned long)v[k] < 0x80000000UL &&
+                !((unsigned long)v[k] & 3)) {
+                sprintf(tag, "ctl-arg%d", k);
+                pomppc_dump(tag, (void *)v[k], 0x80);
+            }
+    }
+    r = FWD8(GLD_CreateTextureLevel);
     pomppc_texture_changed((void *)b, 1);
     return r;
 }
