@@ -153,6 +153,7 @@ scripts/profile-boot.sh              # perf record sur un boot complet
 SNAPSHOT=1 ./run_tiger.sh   # disque jetable (writes annulés → pas de fsck) : à utiliser en debug
 QFB=1 ./run_tiger.sh        # + écran paravirtuel QFB en second moniteur
 GPU=1 ./run_tiger.sh        # + GPU paravirtuel qgpu, et CD des sources du plugin GL
+FASTFP=1 ./run_tiger.sh     # + flottant rapide : le FPU de l'hôte pour le flottant PowerPC (docs/flottant-rapide.md)
 NET=0 ./run_tiger.sh        # sans réseau (actif par défaut, avec le relais web)
 ./run_os9.sh                # Mac OS 9 : boote le disque installé, sinon le CD en live
 ./run_os9.sh install        # force le boot CD pour (ré)installer

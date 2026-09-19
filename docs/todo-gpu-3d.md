@@ -327,10 +327,22 @@ n'existent que sur l'hôte macOS.
      chaque instruction flottante fait `reset_fpstatus` + l'opération + `float_check_status`.
      Même cause sur le Mac, dont le cœur est ~30 % plus rapide (rendu logiciel d'Apple dans
      `glwin` : 81 contre 57 img/s).
-   - Piste : un mode « flottant rapide » pour la cible PPC (hardfloat quand FPSCR[XE] = 0,
-     FI approché), mesuré sur un banc flottant dans l'invité. Et la variante de compilation
-     (`-march=native`, LTO, sans `qom-cast-debug`) dont l'A/B de boot reste à faire, hôte au
-     repos : binaire prêt dans `~/src/qemu/build-opt`.
+   - ✅ **Mode « flottant rapide » fait et prouvé (19/09/2026, `docs/flottant-rapide.md`)** :
+     propriété de CPU `x-fast-fp` (`FASTFP=1 ./run_tiger.sh`, opt-in), patches
+     `patches/fastfp/`. Le FPU de l'hôte ne sert que si FPSCR[XX] = 1, XE = OE = UE = 0 et
+     arrondi au plus proche ; chemins rapides exacts pour la simple précision. **Résultats
+     identiques au bit près, FPSCR identique hors FI/FR/FX** — prouvé dans l'invité par
+     `guest/fpbench/fpcheck` (120 sections, 2,4 M d'opérations, mono-cœur et SMP=2, AltiVec
+     compris) ; mode exact = QEMU non patché à la ligne près. **Mesures** (`fpbench`, job
+     `fpgames`) : ×2,1 à ×2,9 sur les noyaux `float` (MDCT, FFT, fmadd, div), ×1,4 à ×2,5 en
+     double, ×2,1 en AltiVec, témoin entier ×1,00 ; **Zenerchi : menu en 55 s au lieu de 68
+     (−12 s)** ; **Marble Blast : +20 % d'images/s** (médiane de 72 fenêtres appariées, 2 cœurs),
+     physique identique.
+   - Restent : la variante de compilation (`-march=native`, LTO, sans `qom-cast-debug`) dont
+     l'A/B de boot est à faire, hôte au repos (binaire dans `~/src/qemu/build-opt`) ; le coût
+     restant d'une instruction flottante n'est PAS dans les appels de helper (le 0002 ne
+     rapporte que 2-4 %) — pistes : FPRF paresseux, `lfs`/`stfs` en ligne ; et les tampons
+     16 bits du plugin.
 2. **Vers Quartz Extreme (4.4)** : plus de 4 clients, mémoire vidéo annoncée, client de surface
    sur `POMPPCAccelerator`, puis `AccelCaps` (`docs/re/accelerateur-iokit.md` §9).
 3. Vitesse côté hôte et invité : **2.1** (objets tampon), **2.3** (zero-copy).
