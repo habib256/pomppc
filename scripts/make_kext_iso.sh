@@ -3,7 +3,8 @@
 # programme de test invité (guest/qgpu-test) sur un CD ISO, à monter dans
 # l'invité Tiger pour les y compiler (l'hôte n'a pas de toolchain
 # ppc-apple-darwin8). Arborescence du CD : kext/{POMPPCQFB,POMPPCGPU},
-# guest/{qgpu-test,gldriver,gltest,net}.
+# guest/{qgpu-test,gldriver,gltest,net}, et prebuilt/ (kext, plugin, gltest,
+# glwin déjà compilés) si disks/prebuilt existe.
 #
 #   ./scripts/make_kext_iso.sh
 #   GPU=1 ./run_tiger.sh     # (re)grave l'ISO si besoin et l'insère lui-même
@@ -19,9 +20,25 @@ mkdir -p "$STAGE/kext" "$STAGE/guest"
 cp -R "$ROOT/kext/POMPPCQFB" "$ROOT/kext/POMPPCGPU" "$STAGE/kext/"
 cp -R "$ROOT/guest/qgpu-test" "$ROOT/guest/gldriver" "$ROOT/guest/gltest" \
       "$ROOT/guest/net" "$STAGE/guest/"
+# Binaires déjà compilés (job tools/guest/jobs/prebuilt, rangés dans
+# disks/prebuilt, hors git) : install.sh s'en sert quand l'invité n'a pas les
+# Xcode Tools. Signalés s'ils sont plus vieux que les sources.
+if [ -d "$ROOT/disks/prebuilt" ]; then
+  cp -R "$ROOT/disks/prebuilt" "$STAGE/prebuilt"
+  if [ -n "$(find "$ROOT/kext/POMPPCGPU" "$ROOT/guest/gldriver" "$ROOT/guest/gltest" -type f \
+             \( -name '*.[chs]' -o -name '*.cpp' -o -name Makefile -o -name '*.plist' \) \
+             -newer "$ROOT/disks/prebuilt/VERSION" 2>/dev/null | head -1)" ]; then
+    echo "⚠  disks/prebuilt est plus ancien que les sources du kext ou du plugin :" >&2
+    echo "   relancer le job tools/guest/jobs/prebuilt" >&2
+  fi
+fi
 
 if command -v xorriso >/dev/null; then
-  xorriso -as mkisofs -quiet -R -J -V POMPPCSRC -o "$OUT" "$STAGE"
+  # -r et non -R : Rock Ridge « rationalisé » (propriétaire root, tout lisible
+  # par tous, bits d'exécution gardés). Avec -R, la racine gardait le mode 700
+  # de mktemp et l'uid de l'hôte : Tiger affichait le CD comme un dossier
+  # interdit (vu le 19/09/2026, hôte Linux).
+  xorriso -as mkisofs -quiet -r -J -V POMPPCSRC -o "$OUT" "$STAGE"
 elif command -v hdiutil >/dev/null; then
   # macOS : pas de xorriso, hdiutil sait produire un ISO 9660/Joliet.
   rm -f "$OUT"

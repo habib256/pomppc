@@ -8,6 +8,7 @@ disks/*.dsk
 disks/*.toast
 disks/*.cdr
 disks/cdr/
+disks/prebuilt/
 images/
 work/
 *.hfs

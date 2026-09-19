@@ -8,6 +8,10 @@
 # scripts/make_kext_iso.sh, ou /pomppc) : ../../kext/POMPPCGPU doit exister,
 # ou KEXTSRC=<dossier des sources du kext>.
 #
+# Sans Xcode Tools (pas de gcc-4.0), les binaires déjà compilés du CD
+# (../../prebuilt, job tools/guest/jobs/prebuilt) sont installés à la place ;
+# PREBUILT=1 les impose même avec gcc.
+#
 #   kext   → /System/Library/Extensions/POMPPCGPU.kext (chargé au démarrage)
 #   plugin → /System/Library/Frameworks/OpenGL.framework/Versions/A/Resources/
 #            GLDriver-POMPPC.bundle, que GLEngine charge pour toute application
@@ -27,12 +31,22 @@ if [ "$1" = "--remove" ]; then
   exit 0
 fi
 
-[ -x /usr/bin/gcc-4.0 ] || { echo "gcc-4.0 absent : installer les Xcode Tools du DVD"; exit 1; }
+PRE=$HERE/../../prebuilt
+if [ -z "$PREBUILT" ] && [ -x /usr/bin/gcc-4.0 ]; then
+  KEXT="$KEXTSRC/POMPPCGPU.kext"; BUNDLE="$HERE/GLDriver-POMPPC.bundle"
+  echo "▶ kext"
+  ( cd "$KEXTSRC" && make clean >/dev/null && make )
+elif [ -d "$PRE/POMPPCGPU.kext" ] && [ -d "$PRE/GLDriver-POMPPC.bundle" ]; then
+  KEXT="$PRE/POMPPCGPU.kext"; BUNDLE="$PRE/GLDriver-POMPPC.bundle"
+  echo "▶ pas de gcc-4.0 : binaires déjà compilés ($(cat "$PRE/VERSION" 2>/dev/null | head -1))"
+else
+  echo "gcc-4.0 absent et pas de binaires déjà compilés : installer les Xcode Tools du DVD"
+  exit 1
+fi
 
-echo "▶ kext"
-( cd "$KEXTSRC" && make clean >/dev/null && make )
+kextunload -b net.pomppc.POMPPCGPU 2>/dev/null || true
 rm -rf "$EXT/POMPPCGPU.kext"
-cp -R "$KEXTSRC/POMPPCGPU.kext" "$EXT/"
+cp -R "$KEXT" "$EXT/"
 chown -R root:wheel "$EXT/POMPPCGPU.kext"
 chmod -R 755 "$EXT/POMPPCGPU.kext"
 rm -f /System/Library/Extensions.mkext /System/Library/Extensions.kextcache
@@ -40,10 +54,12 @@ touch "$EXT"
 kextload "$EXT/POMPPCGPU.kext" 2>/dev/null || true
 
 echo "▶ plugin OpenGL"
-cp "$KEXTSRC/qgpu_proto.h" "$HERE/qgpu_proto.h"
-( cd "$HERE" && make clean >/dev/null && make )
+if [ "$BUNDLE" = "$HERE/GLDriver-POMPPC.bundle" ]; then
+  cp "$KEXTSRC/qgpu_proto.h" "$HERE/qgpu_proto.h"
+  ( cd "$HERE" && make clean >/dev/null && make )
+fi
 rm -rf "$RES/GLDriver-POMPPC.bundle" "$RES/GLDriverPOMPPC.bundle"
-cp -R "$HERE/GLDriver-POMPPC.bundle" "$RES/"
+cp -R "$BUNDLE" "$RES/"
 chown -R root:wheel "$RES/GLDriver-POMPPC.bundle"
 chmod -R 755 "$RES/GLDriver-POMPPC.bundle"
 
