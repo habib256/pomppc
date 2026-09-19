@@ -1,0 +1,547 @@
+Mode « flottant rapide » pour PowerPC (propriété de CPU x-fast-fp)
+=================================================================
+
+Ce patch s'applique PAR-DESSUS les autres patches du dépôt, sur QEMU 9.2.0
+(voir scripts/build_qemu_qfb.sh). Conception et preuves : docs/flottant-rapide.md.
+
+Ce qu'il fait, en quatre morceaux :
+
+1. fpu/softfloat.c — hardfloat n'est plus désactivé à la compilation pour
+   TARGET_PPC. Le veto devient une donnée de float_status (no_hardfloat), ce
+   qui permet de l'armer ou non à l'exécution, par contexte flottant.
+   can_use_fpu() refuse aussi les modes rebias_overflow / rebias_underflow,
+   que le FPU hôte ne sait pas reproduire (PPC les arme quand FPSCR[OE]/[UE]
+   sont mis).
+
+2. fpu/softfloat.c — chemins rapides EXACTS pour float64r32_{add,sub,mul,div,
+   sqrt,muladd}, c'est-à-dire les instructions simple précision de PowerPC
+   (fadds, fmuls, fdivs, fsqrts, fmadds…), qui n'en avaient aucun. Quand les
+   opérandes sont exactement des float32 « zéro ou normal », l'opération EST
+   une opération float32 unique : le FPU hôte la fait, l'élargissement du
+   résultat est exact, et le résultat est au bit près celui du logiciel.
+
+3. target/ppc — propriété de CPU booléenne x-fast-fp (défaut : off). Éteinte,
+   env->fp_status et env->vec_status portent no_hardfloat = 1 : tout passe par
+   le logiciel, exactement comme avant. Allumée, AltiVec profite de hardfloat
+   (VSCR n'a aucun drapeau flottant) et la FPU scalaire s'amorce (point 4).
+
+4. target/ppc/fpu_helper.c — amorçage : helper_reset_fpstatus() pose
+   float_flag_inexact au lieu de 0 dès que FPSCR[XX] (collant) est à 1 et
+   qu'aucune exception modélisée par le logiciel n'est armée (XE, OE, UE).
+   Tant que XX = 0, tout reste logiciel : XX est donc posé exactement, au
+   premier résultat inexact. Une fois amorcé, do_float_check_status() ne
+   rappelle plus float_inexact_excp() (XX est déjà à 1 ; et le matériel réel
+   ne pose FX que sur une transition 0→1). FPSCR[FI] vaut alors 1 en
+   permanence : c'est la seule déviation architecturale, avec la nuance FX.
+   FPSCR[FR] n'est de toute façon pas modélisé par QEMU.
+
+Tout le reste — résultats, FPRF, OX, UX, VX*, ZX — est identique au bit près
+dans les deux modes.
+
+--- a/fpu/softfloat.c
++++ b/fpu/softfloat.c
+@@ -219,12 +219,16 @@
+  * Some targets clear the FP flags before most FP operations. This prevents
+  * the use of hardfloat, since hardfloat relies on the inexact flag being
+  * already set.
++ *
++ * Such a target can still opt in at run time, per float_status, by keeping
++ * float_flag_inexact set across operations and leaving ->no_hardfloat clear;
++ * see target/ppc and its "x-fast-fp" CPU property.  A target that never does
++ * so simply keeps ->no_hardfloat set and is unaffected by this file being
++ * compiled with the hardfloat paths present.
+  */
+-#if defined(TARGET_PPC) || defined(__FAST_MATH__)
+-# if defined(__FAST_MATH__)
+-#  warning disabling hardfloat due to -ffast-math: hardfloat requires an exact \
++#if defined(__FAST_MATH__)
++# warning disabling hardfloat due to -ffast-math: hardfloat requires an exact \
+     IEEE implementation
+-# endif
+ # define QEMU_NO_HARDFLOAT 1
+ # define QEMU_SOFTFLOAT_ATTR QEMU_FLATTEN
+ #else
+@@ -237,8 +241,15 @@
+     if (QEMU_NO_HARDFLOAT) {
+         return false;
+     }
+-    return likely(s->float_exception_flags & float_flag_inexact &&
+-                  s->float_rounding_mode == float_round_nearest_even);
++    /*
++     * ->rebias_overflow / ->rebias_underflow make soft-fp return a scaled
++     * result instead of an infinity or a denormal; the host FPU cannot do
++     * that, so those two modes always stay on the soft path.
++     */
++    return likely(!s->no_hardfloat &&
++                  s->float_exception_flags & float_flag_inexact &&
++                  s->float_rounding_mode == float_round_nearest_even &&
++                  !s->rebias_overflow && !s->rebias_underflow);
+ }
+ 
+ /*
+@@ -339,6 +350,92 @@
+     return float64_is_infinity(a.s);
+ }
+ 
++/*
++ * float64r32: the operands are float64, the result is rounded to float32
++ * precision and then stored back as a float64 (PowerPC single precision).
++ *
++ * Whenever every operand happens to be *exactly* a float32 that is zero or
++ * normal, the whole operation is a plain float32 operation: a single
++ * correctly rounded result, which the host FPU produces natively.  Widening
++ * that float32 result back to float64 is exact, so the answer is bit for bit
++ * the one the soft path computes.  Anything else (float64 values with no
++ * float32 equivalent, denormals, infinities, NaNs) is left to soft-fp.
++ */
++static inline bool f64_is_f32_zon(union_float64 a)
++{
++    uint64_t frac = a.s & MAKE_64BIT_MASK(0, 52);
++    int exp = extract64(a.s, 52, 11);
++
++    if (exp == 0) {
++        /* Zero is fine; a float64 denormal is never a float32 normal. */
++        return frac == 0;
++    }
++    /*
++     * The significand must fit in the 23 bits of a float32, and the exponent
++     * must lie in the float32 *normal* range: 0x381 == 1023 - 126 and
++     * 0x47e == 1023 + 127.  This rejects Inf/NaN (exp == 0x7ff) and every
++     * value that would be a float32 denormal.
++     */
++    return (frac & MAKE_64BIT_MASK(0, 29)) == 0 &&
++           exp >= 0x381 && exp <= 0x47e;
++}
++
++/* Both conversions below are exact for the values f64_is_f32_zon() accepts. */
++static inline union_float32 f64_to_f32_exact(union_float64 a)
++{
++    union_float32 r;
++
++    r.h = a.h;
++    return r;
++}
++
++static inline float64 f32_to_f64_exact(union_float32 a)
++{
++    union_float64 r;
++
++    r.h = a.h;
++    return r.s;
++}
++
++typedef float64 (*soft_f64r32_op2_fn)(float64 a, float64 b, float_status *s);
++
++static inline float64
++float64r32_gen2(float64 xa, float64 xb, float_status *s,
++                hard_f32_op2_fn hard, soft_f64r32_op2_fn soft,
++                f32_check_fn pre, f32_check_fn post)
++{
++    union_float64 ua, ub;
++    union_float32 fa, fb, fr;
++
++    ua.s = xa;
++    ub.s = xb;
++
++    if (unlikely(!can_use_fpu(s))) {
++        goto soft;
++    }
++
++    float64_input_flush2(&ua.s, &ub.s, s);
++    if (unlikely(!f64_is_f32_zon(ua) || !f64_is_f32_zon(ub))) {
++        goto soft;
++    }
++    fa = f64_to_f32_exact(ua);
++    fb = f64_to_f32_exact(ub);
++    if (unlikely(!pre(fa, fb))) {
++        goto soft;
++    }
++
++    fr.h = hard(fa.h, fb.h);
++    if (unlikely(f32_is_inf(fr))) {
++        float_raise(float_flag_overflow, s);
++    } else if (unlikely(fabsf(fr.h) <= FLT_MIN) && post(fa, fb)) {
++        goto soft;
++    }
++    return f32_to_f64_exact(fr);
++
++ soft:
++    return soft(ua.s, ub.s, s);
++}
++
+ static inline float32
+ float32_gen2(float32 xa, float32 xb, float_status *s,
+              hard_f32_op2_fn hard, soft_f32_op2_fn soft,
+@@ -2018,16 +2115,32 @@
+     return float64r32_round_pack_canonical(pr, status);
+ }
+ 
+-float64 float64r32_add(float64 a, float64 b, float_status *status)
++static float64 QEMU_SOFTFLOAT_ATTR
++soft_f64r32_add(float64 a, float64 b, float_status *status)
+ {
+     return float64r32_addsub(a, b, status, false);
+ }
+ 
+-float64 float64r32_sub(float64 a, float64 b, float_status *status)
++static float64 QEMU_SOFTFLOAT_ATTR
++soft_f64r32_sub(float64 a, float64 b, float_status *status)
+ {
+     return float64r32_addsub(a, b, status, true);
+ }
+ 
++float64 QEMU_FLATTEN
++float64r32_add(float64 a, float64 b, float_status *status)
++{
++    return float64r32_gen2(a, b, status, hard_f32_add, soft_f64r32_add,
++                           f32_is_zon2, f32_addsubmul_post);
++}
++
++float64 QEMU_FLATTEN
++float64r32_sub(float64 a, float64 b, float_status *status)
++{
++    return float64r32_gen2(a, b, status, hard_f32_sub, soft_f64r32_sub,
++                           f32_is_zon2, f32_addsubmul_post);
++}
++
+ static bfloat16 QEMU_FLATTEN
+ bfloat16_addsub(bfloat16 a, bfloat16 b, float_status *status, bool subtract)
+ {
+@@ -2159,7 +2272,8 @@
+                         f64_is_zon2, f64_addsubmul_post);
+ }
+ 
+-float64 float64r32_mul(float64 a, float64 b, float_status *status)
++static float64 QEMU_SOFTFLOAT_ATTR
++soft_f64r32_mul(float64 a, float64 b, float_status *status)
+ {
+     FloatParts64 pa, pb, *pr;
+ 
+@@ -2170,6 +2284,13 @@
+     return float64r32_round_pack_canonical(pr, status);
+ }
+ 
++float64 QEMU_FLATTEN
++float64r32_mul(float64 a, float64 b, float_status *status)
++{
++    return float64r32_gen2(a, b, status, hard_f32_mul, soft_f64r32_mul,
++                           f32_is_zon2, f32_addsubmul_post);
++}
++
+ bfloat16 QEMU_FLATTEN
+ bfloat16_mul(bfloat16 a, bfloat16 b, float_status *status)
+ {
+@@ -2397,8 +2518,9 @@
+     return soft_f64_muladd(ua.s, ub.s, uc.s, flags, s);
+ }
+ 
+-float64 float64r32_muladd(float64 a, float64 b, float64 c,
+-                          int flags, float_status *status)
++static float64 QEMU_SOFTFLOAT_ATTR
++soft_f64r32_muladd(float64 a, float64 b, float64 c,
++                   int flags, float_status *status)
+ {
+     FloatParts64 pa, pb, pc, *pr;
+ 
+@@ -2410,6 +2532,85 @@
+     return float64r32_round_pack_canonical(pr, status);
+ }
+ 
++float64 QEMU_FLATTEN
++float64r32_muladd(float64 xa, float64 xb, float64 xc, int flags,
++                  float_status *s)
++{
++    union_float64 ua, ub, uc;
++    union_float32 fa, fb, fc, fr;
++
++    ua.s = xa;
++    ub.s = xb;
++    uc.s = xc;
++
++    if (unlikely(!can_use_fpu(s))) {
++        goto soft;
++    }
++    if (unlikely(flags & float_muladd_halve_result)) {
++        goto soft;
++    }
++
++    float64_input_flush3(&ua.s, &ub.s, &uc.s, s);
++    if (unlikely(!f64_is_f32_zon(ua) ||
++                 !f64_is_f32_zon(ub) ||
++                 !f64_is_f32_zon(uc))) {
++        goto soft;
++    }
++    if (unlikely(force_soft_fma)) {
++        goto soft;
++    }
++
++    /*
++     * The three operands are exact float32 values, so a*b + c rounded once
++     * to float32 is exactly what fmaf() computes.  ua/ub/uc are left
++     * untouched: the negations below apply to the float32 copies only, so
++     * the soft path can still be taken afterwards.
++     */
++    fa = f64_to_f32_exact(ua);
++    fb = f64_to_f32_exact(ub);
++    fc = f64_to_f32_exact(uc);
++
++    /*
++     * When (a || b) == 0, there's no need to check for under/over flow,
++     * since we know the addend is (normal || 0) and the product is 0.
++     */
++    if (float32_is_zero(fa.s) || float32_is_zero(fb.s)) {
++        union_float32 up;
++        bool prod_sign;
++
++        prod_sign = float32_is_neg(fa.s) ^ float32_is_neg(fb.s);
++        prod_sign ^= !!(flags & float_muladd_negate_product);
++        up.s = float32_set_sign(float32_zero, prod_sign);
++
++        if (flags & float_muladd_negate_c) {
++            fc.h = -fc.h;
++        }
++        fr.h = up.h + fc.h;
++    } else {
++        if (flags & float_muladd_negate_product) {
++            fa.h = -fa.h;
++        }
++        if (flags & float_muladd_negate_c) {
++            fc.h = -fc.h;
++        }
++
++        fr.h = fmaf(fa.h, fb.h, fc.h);
++
++        if (unlikely(f32_is_inf(fr))) {
++            float_raise(float_flag_overflow, s);
++        } else if (unlikely(fabsf(fr.h) <= FLT_MIN)) {
++            goto soft;
++        }
++    }
++    if (flags & float_muladd_negate_result) {
++        fr.s = float32_chs(fr.s);
++    }
++    return f32_to_f64_exact(fr);
++
++ soft:
++    return soft_f64r32_muladd(ua.s, ub.s, uc.s, flags, s);
++}
++
+ bfloat16 QEMU_FLATTEN bfloat16_muladd(bfloat16 a, bfloat16 b, bfloat16 c,
+                                       int flags, float_status *status)
+ {
+@@ -2533,7 +2734,8 @@
+                         f64_div_pre, f64_div_post);
+ }
+ 
+-float64 float64r32_div(float64 a, float64 b, float_status *status)
++static float64 QEMU_SOFTFLOAT_ATTR
++soft_f64r32_div(float64 a, float64 b, float_status *status)
+ {
+     FloatParts64 pa, pb, *pr;
+ 
+@@ -2544,6 +2746,13 @@
+     return float64r32_round_pack_canonical(pr, status);
+ }
+ 
++float64 QEMU_FLATTEN
++float64r32_div(float64 a, float64 b, float_status *status)
++{
++    return float64r32_gen2(a, b, status, hard_f32_div, soft_f64r32_div,
++                           f32_div_pre, f32_div_post);
++}
++
+ bfloat16 QEMU_FLATTEN
+ bfloat16_div(bfloat16 a, bfloat16 b, float_status *status)
+ {
+@@ -4669,7 +4878,8 @@
+     return soft_f64_sqrt(ua.s, s);
+ }
+ 
+-float64 float64r32_sqrt(float64 a, float_status *status)
++static float64 QEMU_SOFTFLOAT_ATTR
++soft_f64r32_sqrt(float64 a, float_status *status)
+ {
+     FloatParts64 p;
+ 
+@@ -4678,6 +4888,32 @@
+     return float64r32_round_pack_canonical(&p, status);
+ }
+ 
++float64 QEMU_FLATTEN float64r32_sqrt(float64 xa, float_status *s)
++{
++    union_float64 ua;
++    union_float32 fa, fr;
++
++    ua.s = xa;
++    if (unlikely(!can_use_fpu(s))) {
++        goto soft;
++    }
++
++    float64_input_flush1(&ua.s, s);
++    if (unlikely(!f64_is_f32_zon(ua) || float64_is_neg(ua.s))) {
++        goto soft;
++    }
++    fa = f64_to_f32_exact(ua);
++    /*
++     * The square root of a float32 normal is a float32 normal: no overflow,
++     * no denormal result, hence no post-condition to check.
++     */
++    fr.h = sqrtf(fa.h);
++    return f32_to_f64_exact(fr);
++
++ soft:
++    return soft_f64r32_sqrt(ua.s, s);
++}
++
+ bfloat16 QEMU_FLATTEN bfloat16_sqrt(bfloat16 a, float_status *status)
+ {
+     FloatParts64 p;
+--- a/include/fpu/softfloat-types.h
++++ b/include/fpu/softfloat-types.h
+@@ -237,6 +237,13 @@
+     bool rebias_overflow;
+     /* should underflowed results add re_bias to its exponent? */
+     bool rebias_underflow;
++    /*
++     * Veto the hardfloat fast paths of fpu/softfloat.c for this context, even
++     * when float_flag_inexact happens to be set.  Zero (hardfloat allowed)
++     * keeps the historical behaviour; a target that is not ready to let the
++     * host FPU compute its results sets it once, at reset.
++     */
++    bool no_hardfloat;
+ } float_status;
+ 
+ #endif /* SOFTFLOAT_TYPES_H */
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1302,6 +1302,14 @@
+     float_status vec_status;
+     float_status fp_status; /* Floating point execution context */
+     target_ulong fpscr;     /* Floating point status and control register */
++    /*
++     * "Fast floating point" mode, off by default, turned on by the x-fast-fp
++     * CPU property.  When on, helper_reset_fpstatus() primes fp_status with
++     * float_flag_inexact once the sticky FPSCR[XX] is set (and no exception
++     * soft-fp itself models is enabled), which is what lets the hardfloat
++     * paths of fpu/softfloat.c run.  See ppc_fp_primed() in fpu_helper.c.
++     */
++    bool fast_fp;
+ 
+     /* Internal devices resources */
+     ppc_tb_t *tb_env;      /* Time base and decrementer */
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7271,6 +7271,21 @@
+     set_float_2nan_prop_rule(float_2nan_prop_ab, &env->fp_status);
+     set_float_2nan_prop_rule(float_2nan_prop_ab, &env->vec_status);
+ 
++    /*
++     * Unless the x-fast-fp property is on, veto the hardfloat paths of
++     * fpu/softfloat.c outright: PowerPC results and FPSCR bits are then
++     * produced by soft-fp only, exactly as they were before hardfloat was
++     * compiled in for this target.
++     *
++     * With x-fast-fp on, fp_status is additionally primed with
++     * float_flag_inexact by helper_reset_fpstatus(); vec_status needs no
++     * priming because nothing ever clears its flags (AltiVec has no
++     * architected floating point exception bits), so the inexact flag
++     * accumulates by itself on the first inexact vector operation.
++     */
++    env->fp_status.no_hardfloat = !env->fast_fp;
++    env->vec_status.no_hardfloat = !env->fast_fp;
++
+     for (i = 0; i < ARRAY_SIZE(env->spr_cb); i++) {
+         ppc_spr_t *spr = &env->spr_cb[i];
+ 
+@@ -7396,7 +7411,14 @@
+ }
+ 
+ static Property ppc_cpu_properties[] = {
+-    /* add default property here */
++    /*
++     * Let soft-fp use the host FPU for the most common floating point
++     * operations.  Results, FPRF and every FPSCR exception bit but FI (and
++     * the FX transition rule for XX) stay bit-exact; FI becomes a constant 1
++     * while the fast path is armed.  Experimental, hence the x- prefix, and
++     * off by default.
++     */
++    DEFINE_PROP_BOOL("x-fast-fp", PowerPCCPU, env.fast_fp, false),
+     DEFINE_PROP_END_OF_LIST(),
+ };
+ 
+--- a/target/ppc/fpu_helper.c
++++ b/target/ppc/fpu_helper.c
+@@ -441,6 +441,38 @@
+     do_fpscr_check_status(env, GETPC());
+ }
+ 
++/*
++ * "Fast floating point" mode (the x-fast-fp CPU property).
++ *
++ * The hardfloat paths of fpu/softfloat.c only run when float_flag_inexact is
++ * already set in float_status: that is how they get away with never reading
++ * the host FPU exception flags.  PowerPC normally defeats this, because
++ * FPSCR[FI] is not sticky and helper_reset_fpstatus() therefore clears the
++ * soft-fp flags before every floating point instruction.
++ *
++ * In fast mode we *prime* fp_status with float_flag_inexact instead of
++ * clearing it, but only once:
++ *
++ *   - FPSCR[XX] (which IS sticky) is already set, so no 0 -> 1 transition of
++ *     XX can be missed -- until then everything runs on soft-fp and XX is
++ *     set exactly, at the first genuinely inexact result;
++ *   - FPSCR[XE] is clear, so no inexact trap can be owed;
++ *   - FPSCR[OE] and FPSCR[UE] are clear, because they make soft-fp re-bias
++ *     overflowed/underflowed results, which the host FPU cannot reproduce
++ *     (can_use_fpu() double-checks this).
++ *
++ * The predicate only reads FPSCR bits that a floating point instruction
++ * never changes between its reset_fpstatus and its float_check_status, so
++ * evaluating it again in do_float_check_status() yields the same answer as
++ * at reset time.
++ */
++static inline bool ppc_fp_primed(CPUPPCState *env)
++{
++    return env->fast_fp &&
++           (env->fpscr & FP_XX) &&
++           !(env->fpscr & (FP_XE | FP_OE | FP_UE));
++}
++
+ static void do_float_check_status(CPUPPCState *env, bool change_fi,
+                                   uintptr_t raddr)
+ {
+@@ -452,7 +484,16 @@
+     } else if (status & float_flag_underflow) {
+         float_underflow_excp(env);
+     }
+-    if (status & float_flag_inexact) {
++    /*
++     * When the operation was primed, the inexact flag means nothing: it was
++     * set before the operation ran.  XX is already 1 and XE is 0, so there is
++     * nothing left to do -- and in particular FX must NOT be touched here,
++     * since real hardware only sets it on a 0 -> 1 transition of XX.
++     * FPSCR[FI] below then becomes a constant 1 (documented deviation),
++     * except for the instructions that explicitly clear the inexact flag
++     * because they must not report it (fri*, xsrqpi...), which keep working.
++     */
++    if ((status & float_flag_inexact) && !ppc_fp_primed(env)) {
+         float_inexact_excp(env);
+     }
+     if (change_fi) {
+@@ -477,7 +518,15 @@
+ 
+ void helper_reset_fpstatus(CPUPPCState *env)
+ {
+-    set_float_exception_flags(0, &env->fp_status);
++    /*
++     * In the default (exact) mode this is the historical "clear everything".
++     * In fast mode, see ppc_fp_primed() above: arming float_flag_inexact is
++     * what hands the operation to the host FPU.  FPSCR[FR] is not modelled
++     * by QEMU at all (nothing ever sets it outside the explicit clears in
++     * the invalid-operation paths), so priming does not change it either.
++     */
++    set_float_exception_flags(ppc_fp_primed(env) ? float_flag_inexact : 0,
++                              &env->fp_status);
+ }
+ 
+ static void float_invalid_op_addsub(CPUPPCState *env, int flags,

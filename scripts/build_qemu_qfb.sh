@@ -98,6 +98,56 @@ if ! grep -q "qgpu-pci.c" hw/display/meson.build; then
   patch -p1 < "$ROOT/patches/qgpu/0003-wire-qgpu-pci-build.patch"
 fi
 
+# --- 4 ter. Flottant rapide PowerPC (propriété de CPU x-fast-fp) ---
+# Le garde teste ppc_fp_primed() dans target/ppc/fpu_helper.c, et pas le
+# premier fichier venu. Deux raisons : c'est le DERNIER fichier du patch (si le
+# marqueur y est, les quatre précédents ont été posés, patch s'arrêtant au
+# premier échec), et c'est surtout le seul dont l'absence serait totalement
+# SILENCIEUSE — la propriété existerait, `-cpu g4,x-fast-fp=on` serait accepté,
+# et le mode rapide ne ferait rien du tout. Un A/B aurait conclu « aucun gain »
+# au lieu de « patch à moitié appliqué ». Même leçon que le câblage du Screamer.
+if ! grep -q "ppc_fp_primed" target/ppc/fpu_helper.c; then
+  echo "▶ patch flottant rapide (x-fast-fp)"
+  patch -p1 --forward < "$ROOT/patches/fastfp/0001-ppc-fast-fp.patch" || true
+  rm -f fpu/softfloat.c.orig include/fpu/softfloat-types.h.orig \
+        target/ppc/cpu.h.orig target/ppc/cpu_init.c.orig target/ppc/fpu_helper.c.orig
+fi
+# Les cinq morceaux, vérifiés un par un : un patch appliqué à moitié compile.
+while read -r f m; do
+  [ -z "$f" ] && continue
+  grep -q "$m" "$f" || {
+    echo "⚠ patch fastfp incomplet : '$m' absent de $f" >&2
+    echo "  (voir patches/fastfp/ et d'éventuels .rej)" >&2; exit 1; }
+done <<'FASTFP_MARKERS'
+fpu/softfloat.c float64r32_gen2
+include/fpu/softfloat-types.h no_hardfloat
+target/ppc/cpu.h fast_fp
+target/ppc/cpu_init.c x-fast-fp
+target/ppc/fpu_helper.c ppc_fp_primed
+FASTFP_MARKERS
+
+# --- 4 quater. Moins d'appels de helper par instruction flottante ---
+# Patch séparé du précédent EXPRÈS : il ne change aucun comportement (vérifié
+# octet pour octet contre un QEMU non patché), il ne fait que réduire le coût.
+# Les garder séparables permet d'attribuer les gains en A/B — et de reverter
+# celui-ci seul si jamais il régressait :  NO_FASTFP2=1 ./scripts/build_qemu_qfb.sh
+# sur un arbre PROPRE (sur un arbre déjà patché, il est déjà là).
+if [ -z "${NO_FASTFP2:-}" ]; then
+  if ! grep -q "fp_prime_mask" target/ppc/cpu.h; then
+    echo "▶ patch flottant rapide — réduction des appels de helper"
+    patch -p1 --forward < "$ROOT/patches/fastfp/0002-ppc-fewer-fp-helpers.patch" || true
+    rm -f target/ppc/cpu.h.orig target/ppc/cpu_init.c.orig \
+          target/ppc/fpu_helper.c.orig target/ppc/helper.h.orig \
+          target/ppc/translate/fp-impl.c.inc.orig
+  fi
+  # Même logique que ci-dessus : le marqueur le plus silencieux est celui du
+  # traducteur. Sans lui le code généré appellerait toujours les helpers, et la
+  # seule trace serait une mesure A/B décevante.
+  grep -q "fprf_check_float64" target/ppc/translate/fp-impl.c.inc || {
+    echo "⚠ patch fastfp 0002 incomplet : le traducteur n'est pas modifié." >&2
+    exit 1; }
+fi
+
 # --- 5. Build ---
 mkdir -p build && cd build
 if [ ! -f build.ninja ] || [ -n "${RECONFIGURE:-}" ]; then
@@ -150,6 +200,11 @@ case "$(uname -s)" in
   *)      check audio-pa        qemu_has_audiodev "$BIN" pa ;;
 esac
 check smp-mac99  has_smp
+# Flottant rapide : sondé sur LES DEUX binaires. Le lanceur emploie
+# qemu-system-ppc64 dès SMP >= 2, et rien ne garantit a priori que la propriété
+# soit visible des deux côtés (le type de CPU n'a pas le même nom).
+check x-fast-fp        qemu_cpu_has_fastfp "$BIN"        "mac99,via=pmu" g4
+check x-fast-fp-ppc64  qemu_cpu_has_fastfp "${BIN}64"    "mac99,via=pmu" g4
 echo
 echo "→ $CAPS"
 

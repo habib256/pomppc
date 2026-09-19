@@ -84,8 +84,73 @@ if [ -x "$QEMU_BIN" ] || command -v "$QEMU_BIN" >/dev/null 2>&1; then
     Darwin) cap "backend audio coreaudio"    qemu_has_audiodev "$QEMU_BIN" coreaudio ;;
     *)      cap "backend audio pa"           qemu_has_audiodev "$QEMU_BIN" pa ;;
   esac
+  # Flottant rapide : la propriété de CPU x-fast-fp (patches/fastfp/). Son
+  # absence n'est PAS un échec — elle veut dire que le binaire de référence n'a
+  # pas encore été reconstruit depuis que le patch existe, et run_tiger.sh le
+  # sait (FASTFP=1 prévient et repart en flottant exact). Ce qui serait un bug,
+  # c'est que le lanceur l'annonce sans que le binaire l'ait : c'est justement
+  # ce que qemu_cpu_has_fastfp interdit, ici comme là-bas.
+  qemu_cpu_has_fastfp "$QEMU_BIN" "$MACHINE" "$CPU"; ffp_rc=$?
+  case $ffp_rc in
+    0) ok   "propriété CPU x-fast-fp (FASTFP=1 utilisable)" ;;
+    2) noop "x-fast-fp — sondage impossible" ;;
+    *) noop "x-fast-fp absent du binaire de référence (./scripts/build_qemu_qfb.sh)" ;;
+  esac
 else
   noop "QEMU introuvable ($QEMU_BIN)"
+fi
+
+echo
+echo "=== 4 bis. flottant rapide : test différentiel hôte (softfloat) ==="
+# tests/fastfp-diff.c compare, pour des millions d'opérandes, le MODE EXACT et
+# le MODE RAPIDE de l'objet softfloat que le binaire embarque réellement. Il se
+# lie à fpu_softfloat.c.o de l'arbre QEMU : sans cet arbre (ou sans le patch),
+# il n'y a rien à tester, et c'est « ignoré », pas un échec.
+FFP_SRC="${QEMU_SRC:-$(dirname "$(dirname "$QEMU_BIN")")}"
+FFP_OBJ="$FFP_SRC/build/libqemu-ppc-softmmu.a.p/fpu_softfloat.c.o"
+if ! grep -qs "no_hardfloat" "$FFP_SRC/include/fpu/softfloat-types.h"; then
+  noop "arbre QEMU sans le patch fastfp ($FFP_SRC)"
+elif [ ! -f "$FFP_OBJ" ] || [ ! -f "$FFP_SRC/build/compile_commands.json" ]; then
+  noop "objet softfloat non construit ($FFP_OBJ)"
+elif ! command -v cc >/dev/null 2>&1 || ! command -v pkg-config >/dev/null 2>&1; then
+  noop "pas de compilateur C ou de pkg-config"
+else
+  # Les -I/-D de l'objet softfloat, repris tels quels : les en-têtes de QEMU ne
+  # se compilent qu'avec eux, et la disposition de float_status doit être LA
+  # MÊME des deux côtés du lien.
+  FFP_FLAGS="$(python3 - "$FFP_SRC/build/compile_commands.json" <<'PY'
+import json, shlex, sys
+for e in json.load(open(sys.argv[1])):
+    if e['output'].endswith('libqemu-ppc-softmmu.a.p/fpu_softfloat.c.o'):
+        t = shlex.split(e['command']); out = []; i = 0
+        while i < len(t):
+            if t[i].startswith(('-I', '-iquote', '-isystem', '-D', '-include')):
+                out.append(t[i])
+                if t[i] in ('-iquote', '-isystem', '-include', '-I', '-D'):
+                    i += 1; out.append(t[i])
+            i += 1
+        print(' '.join(shlex.quote(x) for x in out)); break
+PY
+)"
+  FFP_BIN="${TMPDIR:-/tmp}/fastfp-diff.$$"
+  # Compilé DEPUIS le répertoire de build : plusieurs -I/-iquote de QEMU sont
+  # relatifs (« -I. », « -I.. », « -iquote . »), et ailleurs ils ne désignent
+  # plus rien — le lien passe quand même, mais les en-têtes ne se trouvent pas.
+  if [ -z "$FFP_FLAGS" ]; then
+    noop "fpu_softfloat.c.o absent de compile_commands.json"
+  elif ( cd "$FFP_SRC/build" &&
+         eval cc -O2 -Wall -fno-strict-aliasing "$FFP_FLAGS" \
+              "$ROOT/tests/fastfp-diff.c" \
+              "$FFP_OBJ" -lm "$(pkg-config --libs glib-2.0)" -o "$FFP_BIN" ) 2>/dev/null; then
+    if FFP_OUT="$("$FFP_BIN" 60000 2>&1)"; then
+      ok "fastfp-diff — $(echo "$FFP_OUT" | sed -n 's/^ *\([0-9]* cas comparés.*\)$/\1/p')"
+    else
+      ko "fastfp-diff : $(echo "$FFP_OUT" | grep '✘' | head -1)"
+    fi
+  else
+    ko "tests/fastfp-diff.c ne compile pas contre $FFP_SRC"
+  fi
+  rm -f "$FFP_BIN"
 fi
 
 echo

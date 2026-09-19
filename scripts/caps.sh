@@ -13,10 +13,11 @@
 # le Screamer exige < 1 Go ». 256 Mo perdus pour un device absent.
 #
 # API :
-#   qemu_has_device   <bin> <nom>            # le TYPE QOM est-il enregistré ?
-#   qemu_machine_has  <bin> <machine> <nom>  # le device est-il INSTANCIÉ ?
-#   qemu_has_netdev   <bin> <nom>            # -netdev help    (user = slirp)
-#   qemu_has_audiodev <bin> <nom>            # -audiodev help  (pa, alsa…)
+#   qemu_has_device     <bin> <nom>            # le TYPE QOM est-il enregistré ?
+#   qemu_machine_has    <bin> <machine> <nom>  # le device est-il INSTANCIÉ ?
+#   qemu_has_netdev     <bin> <nom>            # -netdev help    (user = slirp)
+#   qemu_has_audiodev   <bin> <nom>            # -audiodev help  (pa, alsa…)
+#   qemu_cpu_has_fastfp <bin> <machine> <cpu>  # propriété de CPU x-fast-fp ?
 #
 # ⚠ « type enregistré » ≠ « device présent dans la machine ». Pour un enfant
 # interne comme le Screamer, c'est le câblage macio qui compte, et il peut
@@ -110,4 +111,49 @@ qemu_machine_has() {
     _MACH_KEY=""; return 2
   fi
   grep -q "($name)" <<< "$_MACH_TREE"
+}
+
+# La propriété de CPU « x-fast-fp » (mode flottant rapide, patches/fastfp/) :
+# le binaire l'a-t-il ?
+#
+# Ici le sondage ne peut pas passer par qom-list-types : x-fast-fp n'est pas un
+# type, c'est une PROPRIÉTÉ d'un type de CPU, et le nom de ce type dépend de la
+# version choisie derrière l'alias (« g4 » -> « 7400_v2.9-powerpc-cpu » côté
+# ppc, « ...-powerpc64-cpu » côté ppc64). On démarre donc la machine figée avec
+# la ligne de commande EXACTE du lanceur et on relit la propriété par qom-get :
+# deux choses vérifiées d'un coup, la propriété existe et la syntaxe passe.
+#
+# ⚠ Une propriété absente n'est pas un warning : QEMU s'arrête (« can't apply
+# global ...: Property not found »), APRÈS avoir imprimé le salut QMP mais sans
+# jamais répondre à qmp_capabilities. C'est ce qui distingue les deux cas, et
+# c'est pourquoi le lanceur ne doit jamais poser -cpu ...,x-fast-fp=on à
+# l'aveugle : il ne dégraderait pas, il ne démarrerait pas.
+#
+# Codes : 0 = présente, 1 = absente, 2 = sondage impossible. Le 2 demande un
+# témoin (la même machine SANS la propriété) : sans lui, un hôte saturé se
+# lirait « absente » — le faux rouge que ce fichier existe pour éviter.
+_FFP_KEY=""; _FFP_RC=2
+_ffp_run() { # <bin> <machine> <spec-cpu>
+  printf '%s\n' \
+      '{"execute":"qmp_capabilities"}' \
+      '{"execute":"qom-get","arguments":{"path":"/machine/unattached/device[0]","property":"x-fast-fp"}}' \
+      '{"execute":"quit"}' \
+    | "$1" -M "$2" -cpu "$3" -S -display none -qmp stdio 2>/dev/null || true
+}
+qemu_cpu_has_fastfp() { # <bin> <machine> <cpu>
+  local bin="$1" machine="$2" cpu="$3" key="$1|$2|$3" outp ctl
+  [ "$key" = "$_FFP_KEY" ] && return $_FFP_RC
+  _FFP_KEY="$key"
+  outp="$(_ffp_run "$bin" "$machine" "$cpu,x-fast-fp=on")"
+  if grep -q '"return": true' <<< "$outp"; then
+    _FFP_RC=0; return 0
+  fi
+  ctl="$(_ffp_run "$bin" "$machine" "$cpu")"
+  if grep -q '"return"' <<< "$ctl"; then
+    _FFP_RC=1                      # QEMU démarre sans : la propriété manque.
+  else
+    echo "caps: sondage x-fast-fp de '$bin' échoué" >&2
+    _FFP_KEY=""; _FFP_RC=2         # même sans la propriété, rien ne démarre.
+  fi
+  return $_FFP_RC
 }

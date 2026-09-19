@@ -1,0 +1,186 @@
+Moins d'appels de helper par instruction flottante PowerPC
+==========================================================
+
+S'applique PAR-DESSUS patches/fastfp/0001-ppc-fast-fp.patch.
+
+Purement une optimisation : ce patch ne change RIEN au comportement, dans
+AUCUN des deux modes. Il est séparé du 0001 exprès, pour qu'un A/B puisse
+attribuer les gains.
+
+Chaque instruction flottante « classique » de PowerPC coûtait QUATRE appels de
+helper : reset_fpstatus, l'opération, compute_fprf, float_check_status. Il en
+reste deux :
+
+1. reset_fpstatus est émis EN LIGNE. La valeur à écrire dans
+   fp_status.float_exception_flags est exactement celle que calcule
+   helper_reset_fpstatus :
+
+       (fpscr & (XX|XE|OE|UE)) == XX  ?  env->fp_prime_mask  :  0
+
+   env->fp_prime_mask (nouveau champ) vaut float_flag_inexact quand x-fast-fp
+   est allumé, 0 sinon ; il est posé au reset et ne bouge plus jamais — donc
+   aucun cache à invalider. En mode exact la séquence écrit toujours 0, ce qui
+   est exactement le comportement historique. ppc_fp_primed() est réécrit avec
+   la même expression, pour que les deux côtés soient visiblement les mêmes.
+
+2. compute_fprf + float_check_status deviennent UN helper,
+   helper_fprf_check_float64(), qui fait les deux choses dans le même ordre.
+   GETPC() y désigne toujours la même instruction invité, donc une exception
+   différée est levée avec la bonne adresse de retour.
+
+Vérification : 189 920 enregistrements (résultat + FPSCR + CR, sur les
+instructions arithmétiques, fcmpu/fcmpo, mffs/mcrfs/mtfsb0/mtfsb1/mtfsfi),
+produits par un binaire PowerPC autonome sous qemu-ppc — sortie IDENTIQUE
+OCTET POUR OCTET à celle d'un QEMU non patché du tout, et identique à celle du
+0001 seul, dans les deux modes.
+
+Gain mesuré sur une boucle flottante dense (24 M d'instructions simple
+précision) : environ 2 à 4 %, également réparti entre les deux points. C'est
+peu : l'expérience de contrôle (supprimer carrément l'appel fprf+check, ce qui
+est faux) ne fait gagner que 22 %, donc le coût d'une instruction flottante
+émulée n'est pas dominé par les appels de helper.
+
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1310,6 +1310,13 @@
+      * paths of fpu/softfloat.c run.  See ppc_fp_primed() in fpu_helper.c.
+      */
+     bool fast_fp;
++    /*
++     * float_flag_inexact when fast_fp is on, 0 otherwise.  Set once, at
++     * reset, and never touched again: it lets the *generated* code build the
++     * value that primes fp_status without calling a helper, and without
++     * needing to know about fast_fp.  See gen_reset_fpstatus().
++     */
++    uint16_t fp_prime_mask;
+ 
+     /* Internal devices resources */
+     ppc_tb_t *tb_env;      /* Time base and decrementer */
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7285,6 +7285,7 @@
+      */
+     env->fp_status.no_hardfloat = !env->fast_fp;
+     env->vec_status.no_hardfloat = !env->fast_fp;
++    env->fp_prime_mask = env->fast_fp ? float_flag_inexact : 0;
+ 
+     for (i = 0; i < ARRAY_SIZE(env->spr_cb); i++) {
+         ppc_spr_t *spr = &env->spr_cb[i];
+--- a/target/ppc/fpu_helper.c
++++ b/target/ppc/fpu_helper.c
+@@ -465,12 +465,15 @@
+  * never changes between its reset_fpstatus and its float_check_status, so
+  * evaluating it again in do_float_check_status() yields the same answer as
+  * at reset time.
++ *
++ * It is written against env->fp_prime_mask rather than env->fast_fp so that
++ * it is literally the same expression the generated code evaluates -- see
++ * gen_reset_fpstatus() in translate/fp-impl.c.inc.
+  */
+ static inline bool ppc_fp_primed(CPUPPCState *env)
+ {
+-    return env->fast_fp &&
+-           (env->fpscr & FP_XX) &&
+-           !(env->fpscr & (FP_XE | FP_OE | FP_UE));
++    return env->fp_prime_mask &&
++           (env->fpscr & (FP_XX | FP_XE | FP_OE | FP_UE)) == FP_XX;
+ }
+ 
+ static void do_float_check_status(CPUPPCState *env, bool change_fi,
+@@ -516,6 +519,19 @@
+     do_float_check_status(env, true, GETPC());
+ }
+ 
++/*
++ * The compute_fprf + float_check_status pair that every arithmetic floating
++ * point instruction emits, merged into a single helper call.  Strictly the
++ * same effects, in the same order; GETPC() still designates the same guest
++ * instruction, so a deferred exception is still raised with the right return
++ * address.
++ */
++void helper_fprf_check_float64(CPUPPCState *env, float64 arg)
++{
++    helper_compute_fprf_float64(env, arg);
++    do_float_check_status(env, true, GETPC());
++}
++
+ void helper_reset_fpstatus(CPUPPCState *env)
+ {
+     /*
+--- a/target/ppc/helper.h
++++ b/target/ppc/helper.h
+@@ -86,6 +86,8 @@
+ DEF_HELPER_1(fpscr_check_status, void, env)
+ DEF_HELPER_1(reset_fpstatus, void, env)
+ DEF_HELPER_2(compute_fprf_float64, void, env, i64)
++/* compute_fprf_float64 + float_check_status, in one call */
++DEF_HELPER_2(fprf_check_float64, void, env, i64)
+ DEF_HELPER_3(store_fpscr, void, env, i64, i32)
+ DEF_HELPER_2(fpscr_clrbit, void, env, i32)
+ DEF_HELPER_2(fpscr_setbit, void, env, i32)
+--- a/target/ppc/translate/fp-impl.c.inc
++++ b/target/ppc/translate/fp-impl.c.inc
+@@ -4,15 +4,45 @@
+  * Standard FPU translation
+  */
+ 
++/*
++ * Clearing (or priming) the soft-fp exception flags happens before *every*
++ * floating point instruction, so it is emitted inline rather than paid as a
++ * helper call -- which would also force TCG to spill every global first.
++ *
++ * The value to store is the same one helper_reset_fpstatus() computes:
++ *
++ *   (fpscr & (XX|XE|OE|UE)) == XX  ?  env->fp_prime_mask  :  0
++ *
++ * env->fp_prime_mask is float_flag_inexact when the x-fast-fp property is on
++ * and 0 otherwise (it is fixed at reset), so in the default mode this always
++ * stores 0 -- exactly the historical behaviour.  See ppc_fp_primed() in
++ * fpu_helper.c, which is the same expression, evaluated in C.
++ */
+ static inline void gen_reset_fpstatus(void)
+ {
+-    gen_helper_reset_fpstatus(tcg_env);
+-}
+-
++    TCGv t = tcg_temp_new();
++    TCGv_i32 v = tcg_temp_new_i32();
++    TCGv_i32 m = tcg_temp_new_i32();
++
++    tcg_gen_andi_tl(t, cpu_fpscr, FP_XX | FP_XE | FP_OE | FP_UE);
++    tcg_gen_setcondi_tl(TCG_COND_EQ, t, t, FP_XX);
++    tcg_gen_trunc_tl_i32(v, t);
++    tcg_gen_neg_i32(v, v);                     /* 0 -> 0, 1 -> all ones */
++    tcg_gen_ld16u_i32(m, tcg_env,
++                      offsetof(CPUPPCState, fp_prime_mask));
++    tcg_gen_and_i32(v, v, m);
++    tcg_gen_st16_i32(v, tcg_env,
++                     offsetof(CPUPPCState, fp_status.float_exception_flags));
++}
++
++/*
++ * compute_fprf then float_check_status: one helper call instead of two.
++ * helper_fprf_check_float64() does exactly the same two things, in the same
++ * order.
++ */
+ static inline void gen_compute_fprf_float64(TCGv_i64 arg)
+ {
+-    gen_helper_compute_fprf_float64(tcg_env, arg);
+-    gen_helper_float_check_status(tcg_env);
++    gen_helper_fprf_check_float64(tcg_env, arg);
+ }
+ 
+ #if defined(TARGET_PPC64)
+@@ -114,9 +144,10 @@
+     gen_helper_f##name(t1, tcg_env, t0);                                      \
+     set_fpr(rD(ctx->opcode), t1);                                             \
+     if (set_fprf) {                                                           \
+-        gen_helper_compute_fprf_float64(tcg_env, t1);                         \
++        gen_compute_fprf_float64(t1);                                         \
++    } else {                                                                  \
++        gen_helper_float_check_status(tcg_env);                               \
+     }                                                                         \
+-    gen_helper_float_check_status(tcg_env);                                   \
+     if (unlikely(Rc(ctx->opcode) != 0)) {                                     \
+         gen_set_cr1_from_fpscr(ctx);                                          \
+     }                                                                         \

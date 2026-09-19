@@ -15,6 +15,8 @@ liste, essais revertés, binaires supplantés) gardé pour pouvoir refaire le ra
 | `qgpu/0003-wire-qgpu-pci-build.patch` | Câblage meson/Kconfig de `qgpu-pci` ; lie `OpenGL.framework` (macOS) ou EGL+GL (Linux) si présents, sinon le backend GL est un stub. |
 | `screamer/screamer.c` + `screamer/screamer.h` | Le device audio **Screamer** (AWACS PowerMac), copiés dans `hw/audio/` et `include/hw/audio/`. |
 | `screamer/0001-wire-screamer-build.patch` | Câblage du Screamer : `hw/audio/Kconfig`, `hw/audio/meson.build`, `hw/ppc/Kconfig`, et surtout l'instanciation + les IRQ/DBDMA dans `hw/misc/macio/macio.c`. |
+| `fastfp/0001-ppc-fast-fp.patch` | **Flottant rapide** : propriété de CPU `x-fast-fp` (défaut *off*) qui laisse softfloat confier les opérations flottantes au FPU de l'hôte. Touche `fpu/softfloat.c`, `include/fpu/softfloat-types.h`, `target/ppc/{cpu.h,cpu_init.c,fpu_helper.c}`. Voir plus bas et `docs/flottant-rapide.md`. |
+| `fastfp/0002-ppc-fewer-fp-helpers.patch` | 4 appels de helper par instruction flottante → 2 (`reset_fpstatus` émis en ligne, `compute_fprf` + `float_check_status` fusionnés). **Aucun effet observable**, dans aucun des deux modes. S'applique par-dessus le 0001 ; `NO_FASTFP2=1` sur un arbre propre applique le 0001 seul. |
 
 Le patch SMP suppose les constantes `IN_DATA` / `OUT_ENABLE`, absentes de `gpio.c` en 9.2.0 :
 le script les réinjecte lui-même (mêmes valeurs que l'enum de `balaton2`, voir plus bas)
@@ -42,6 +44,41 @@ présence il faut interroger QOM — c'est ce que fait `scripts/caps.sh`, utilis
 les lanceurs et par la vérification de capacités de `scripts/build_qemu_qfb.sh`. Un premier
 jet de ce sondage s'est fait piéger par `-device help` et a conclu à tort à un binaire
 incomplet.
+
+## Le flottant rapide (`fastfp/`)
+
+Ces deux patches-là sont les seuls du dépôt qui touchent à la **performance**,
+et pas à une fonctionnalité — d'où la précaution : ils ajoutent un mode, ils ne
+changent rien par défaut. `-cpu g4` sans option donne exactement le binaire
+d'avant (vérifié octet pour octet, § `docs/flottant-rapide.md` 5.3) ; il faut
+`-cpu g4,x-fast-fp=on` (c'est-à-dire `FASTFP=1 ./run_tiger.sh`) pour l'allumer.
+
+Les deux « optimisations TCG tentées puis revertées » du tableau plus bas ont
+laissé une règle dans ce dépôt : *le binaire utilisé n'est patché que pour des
+fonctionnalités, jamais pour la performance du JIT.* Le flottant rapide ne la
+viole pas — il n'accélère rien tant qu'on ne le demande pas — mais il mérite la
+même exigence de preuve, d'où le volume de vérification documenté.
+
+Ce qu'il fait, en deux lignes : QEMU sait utiliser le FPU de la machine hôte
+(mécanisme *hardfloat* de `fpu/softfloat.c`), mais l'interdit à PowerPC, parce
+que hardfloat exige que le drapeau « inexact » soit déjà posé et que PowerPC
+remet les drapeaux à zéro avant chaque instruction (FPSCR[FI] n'est pas
+collant). Le patch ajoute un amorçage conditionnel qui ne s'arme qu'une fois
+FPSCR[XX] (collant, lui) réellement posé, plus des chemins rapides **exacts**
+pour les opérations simple précision (`float64r32_*`), qui n'en avaient aucun.
+
+Résultats, FPRF et tous les bits d'exception de FPSCR restent identiques au bit
+près ; seuls FPSCR[FI] (constant à 1 une fois amorcé) et la règle de transition
+de FX dévient. Conception complète, invariants et **preuves mesurées** :
+`docs/flottant-rapide.md`. Test différentiel hôte : `tests/fastfp-diff.c`,
+exécuté par `tests/run-all.sh`.
+
+⚠ Le garde d'idempotence de `scripts/build_qemu_qfb.sh` teste
+`ppc_fp_primed` dans `target/ppc/fpu_helper.c` — c'est le **dernier** fichier
+du patch, et surtout le seul dont l'absence serait complètement silencieuse :
+la propriété existerait, `-cpu g4,x-fast-fp=on` serait accepté, et le mode
+rapide ne ferait rien. Un A/B aurait conclu « aucun gain » au lieu de « patch à
+moitié appliqué ». Les cinq marqueurs sont vérifiés un par un après coup.
 
 ## Firmware pré-buildé
 
