@@ -268,7 +268,9 @@ n'ouvre aucune porte que la chaîne ne tiendrait pas.
 
 Pour **1.2**, dans l'ordre de difficulté :
 
-1. **Textures 3D** — c'est le seul vrai verrou. Il faut les ajouter au protocole (`TEX_IMAGE_3D`,
+1. **Textures 3D** — c'est le seul vrai verrou. *(Protocole fait le 19/09/2026 : v10,
+   `TEX_CREATE3` / `TEX_IMAGE3`, cf. `docs/protocole-v10-textures.md` ; reste le plugin.)*
+   Il faut les ajouter au protocole (`TEX_IMAGE_3D`,
    coordonnée `r` déjà présente dans le format de sommet), puis poser `cfg+0xbe` : GLEngine
    accepte alors `glTexImage3D` (vérifié par la sonde `POMPPC_GL_TRY3D`) et nous remet les niveaux
    par `gldCreateTextureLevel`. Il n'y a **aucun repli possible** : le rendu d'Apple ne sait pas

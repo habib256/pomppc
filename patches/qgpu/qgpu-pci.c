@@ -19,9 +19,14 @@
  *     sont à jour : un invité v1–v8 ne voit aucune différence.
  *
  * Pourquoi tout passer par le thread, y compris le synchrone, plutôt que de
- * garder l'exécution en place quand la file est vide : un contexte CGL peut
- * être rendu courant sur des threads différents à des moments différents (ce
- * que fait déjà qgpu-gl.c), mais JAMAIS sur deux threads à la fois. Exécuter
+ * garder l'exécution en place quand la file est vide : un contexte GL peut
+ * être rendu courant sur des threads différents à des moments différents,
+ * mais JAMAIS sur deux threads à la fois — et EGL exige en plus qu'un thread
+ * l'ait RELÂCHÉ avant qu'un autre le prenne. Le reset du cœur et la libération
+ * du backend passent donc eux aussi par le thread (q_reset, q_fini) : faits
+ * sur le vCPU, ils laissaient le contexte courant sur ce vCPU, et le thread de
+ * rendu ne pouvait plus le prendre (vu sur NVIDIA : toutes les soumissions
+ * après un reset répondaient QGPU_ST_BACKEND). Exécuter
  * parfois sur le vCPU et parfois sur le thread de rendu obligerait à prouver
  * cette exclusion à chaque chemin, pour économiser deux réveils de condition
  * (quelques microsecondes) sur une opération qui en coûte des centaines. Un
@@ -102,6 +107,8 @@ struct QgpuPCIState {
     bool       q_running;          /* queue[q_head] est entre les mains du thread */
     uint32_t   q_submitted;        /* copie interne de FENCE_SUBMITTED */
     bool       q_stop;             /* demande d'arrêt du thread */
+    bool       q_fini;             /* … en libérant d'abord le backend */
+    bool       q_reset;            /* demande de reset du cœur, par le thread */
     bool       thread_ok;
     QEMUBH    *irq_bh;
     Notifier   exit_notifier;
@@ -163,16 +170,27 @@ static void qgpu_run_job(QgpuPCIState *s, const QgpuJob *job)
 static void *qgpu_render_thread(void *opaque)
 {
     QgpuPCIState *s = opaque;
+    bool fini;
 
     qemu_mutex_lock(&s->lock);
     for (;;) {
         QgpuJob job;
 
-        while (!s->q_stop && s->q_count == 0) {
+        while (!s->q_stop && !s->q_reset && s->q_count == 0) {
             qemu_cond_wait(&s->cond_work, &s->lock);
         }
         if (s->q_stop) {
             break;
+        }
+        if (s->q_reset) {
+            /* Demandé file vide (qgpu_soft_reset draine d'abord) : aucune
+               soumission ne peut s'intercaler. */
+            qemu_mutex_unlock(&s->lock);
+            qgpu_core_reset(&s->core);
+            qemu_mutex_lock(&s->lock);
+            s->q_reset = false;
+            qemu_cond_broadcast(&s->cond_done);
+            continue;
         }
         /* La soumission reste DANS la file pendant son exécution : c'est ce qui
            fait que QGPU_REG_DOORBELL lu vaut « en attente + en cours ». */
@@ -188,7 +206,15 @@ static void *qgpu_render_thread(void *opaque)
         s->q_running = false;
         qemu_cond_broadcast(&s->cond_done);
     }
+    fini = s->q_fini;
     qemu_mutex_unlock(&s->lock);
+    /* Retrait du device : le backend est libéré par le thread qui le possède.
+       Pas à la sortie de QEMU (q_fini faux) : les bibliothèques GL ont pu être
+       démontées avant les notificateurs de sortie, et la v8 n'y touchait pas. */
+    if (fini && s->core_ok) {
+        qgpu_core_fini(&s->core);
+        s->core_ok = false;
+    }
     return NULL;
 }
 
@@ -277,14 +303,25 @@ static void qgpu_soft_reset(QgpuPCIState *s)
     memset(s->regs, 0, sizeof(s->regs));
     s->regs[QGPU_REG_MAGIC >> 2] = QGPU_MAGIC;
     s->regs[QGPU_REG_VERSION >> 2] = QGPU_PROTO_VERSION;
-    s->regs[QGPU_REG_CAPS >> 2] = s->core_ok ? s->core.be->cap : 0;
+    /* core.caps et non be->cap : ce que init() a résolu à chaud (v8 : requêtes
+       d'occlusion ; v10 : textures) doit atteindre l'invité. */
+    s->regs[QGPU_REG_CAPS >> 2] = s->core_ok ? s->core.caps : 0;
     if (s->thread_ok) {
         s->regs[QGPU_REG_CAPS >> 2] |= QGPU_CAP_ASYNC;
     }
     s->regs[QGPU_REG_SHMEM_SIZE >> 2] = s->shmem_mb * MiB;
     s->regs[QGPU_REG_BACKEND_NAME >> 2] = qgpu_core_backend_tag(&s->core);
     s->regs[QGPU_REG_QUEUE_DEPTH >> 2] = QGPU_QUEUE_DEPTH;
-    if (s->core_ok) {
+    if (s->core_ok && s->thread_ok) {
+        /* Par le thread de rendu, qui possède le contexte (cf. en tête). */
+        qemu_mutex_lock(&s->lock);
+        s->q_reset = true;
+        qemu_cond_signal(&s->cond_work);
+        while (s->q_reset) {
+            qemu_cond_wait(&s->cond_done, &s->lock);
+        }
+        qemu_mutex_unlock(&s->lock);
+    } else if (s->core_ok) {
         qgpu_core_reset(&s->core);
     }
     qemu_irq_lower(s->irq);
@@ -388,7 +425,7 @@ static void qgpu_pci_set_irq(void *opaque, int n, int level)
 
 /* Arrête le thread de rendu après avoir laissé finir ce qui est en cours.
    Idempotent : appelé à la sortie de QEMU ET à la destruction du device. */
-static void qgpu_stop_thread(QgpuPCIState *s)
+static void qgpu_stop_thread(QgpuPCIState *s, bool fini)
 {
     if (!s->thread_ok) {
         return;
@@ -396,6 +433,7 @@ static void qgpu_stop_thread(QgpuPCIState *s)
     qemu_mutex_lock(&s->lock);
     qgpu_drain_locked(s, true);
     s->q_stop = true;
+    s->q_fini = fini;
     qemu_cond_signal(&s->cond_work);
     qemu_mutex_unlock(&s->lock);
     qemu_thread_join(&s->render_thread);
@@ -404,7 +442,7 @@ static void qgpu_stop_thread(QgpuPCIState *s)
 
 static void qgpu_exit_notify(Notifier *n, void *data)
 {
-    qgpu_stop_thread(container_of(n, QgpuPCIState, exit_notifier));
+    qgpu_stop_thread(container_of(n, QgpuPCIState, exit_notifier), false);
 }
 
 static void qgpu_pci_realize(PCIDevice *dev, Error **errp)
@@ -466,7 +504,7 @@ static void qgpu_pci_exit(PCIDevice *dev)
 
     if (s->thread_ok) {
         qemu_remove_exit_notifier(&s->exit_notifier);
-        qgpu_stop_thread(s);
+        qgpu_stop_thread(s, true);
         qemu_cond_destroy(&s->cond_done);
         qemu_cond_destroy(&s->cond_work);
         qemu_mutex_destroy(&s->lock);
@@ -475,7 +513,8 @@ static void qgpu_pci_exit(PCIDevice *dev)
         qemu_bh_delete(s->irq_bh);
         s->irq_bh = NULL;
     }
-    /* Le backend n'est libéré qu'une fois le thread joint : lui seul y touchait. */
+    /* Normalement déjà libéré par le thread (q_fini). Reste le cas d'un
+       thread jamais créé, ou déjà arrêté à la sortie de QEMU sans libération. */
     if (s->core_ok) {
         qgpu_core_fini(&s->core);
         s->core_ok = false;

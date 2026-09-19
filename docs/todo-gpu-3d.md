@@ -8,7 +8,20 @@ Ce fichier est le tableau de bord ; il est tenu à jour à chaque lot. Le contex
 `docs/roadmap-opengl15.md`, la conception et les offsets relevés dans `docs/gpu-3d-tiger.md`,
 les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 
-## État (18/09/2026)
+## État (19/09/2026)
+
+- **Lot 4, côté hôte (19/09/2026) : protocole v10, ce qui manquait à 1.2–1.4.** Cibles 1D,
+  3D, cube et rectangle (`TEX_CREATE3`), données **au format de l'application converties par
+  l'hôte** (18 couples format/type, profondeur, S3TC décompressé par le cœur, `TEX_IMAGE3`),
+  sous-images (`TEX_SUBIMAGE`), `GL_MIRRORED_REPEAT`, `GL_CLAMP_TO_BORDER` et couleur de
+  bordure, niveaux de base et max, bornes et biais de LOD (texture et unité), textures de
+  profondeur et comparaison d'ombre, mipmaps automatiques calculés par le cœur ; couleur
+  secondaire (`QGPU_SK_COLOR_SUM`) et paramètres de point. `run_v10` :
+  **0 échec sur le backend logiciel et sur le GPU hôte** (RTX 4060 Ti), cube compris — son
+  orientation est vérifiée contre le pilote. `QGPU_REG_CAPS` publie enfin les bits résolus à
+  chaud (occlusion, et le nouveau `QGPU_CAP_GL14`). **Rien n'est encore visible des
+  applications** : le plugin doit suivre, et cela demande la VM de développement.
+  `docs/protocole-v10-textures.md`.
 
 - Protocole **v6** : rastérisation sur l'hôte, 4 unités de texture, GL_COMBINE, brouillard,
   lignes, points, **stencil**. Sous-ensemble d'OpenGL 1.3.
@@ -67,7 +80,7 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 | 2.2 | ✅ **Fait le 18/09/2026**, de bout en bout. **Hôte** : protocole **v9** — file de 16 soumissions, thread de rendu, `QGPU_DOORBELL_ASYNC`, `FENCE_SUBMITTED`, `SUBMIT_ST`, `QUEUE_FREE`, `ERRORS`, `QUEUE_DEPTH`, IRQ `DONE` posée par un *bottom half* (`docs/protocole-v9-asynchrone.md`). **Kext** : le drapeau voyage dans les bits hauts de `len` de `QGPU_UC_SUBMIT` — l'ABI de Darwin 8 compare le *nombre* d'arguments scalaires au bit près, donc ajouter un scalaire aurait cassé tous les appelants existants ; `QGPU_UC_WAIT_FENCE` ne scrute plus, il dort sur la command gate et `irqAction` le réveille, avec un `IOTimerEventSource` comme base de temps du délai maximal (Tiger n'a pas `commandSleep(event, deadline, …)`, arrivé en 10.5) ; `destroyClientObjects` draine la file avant de rendre la tranche. **Plugin** : `POMPPC_GL_ASYNC` (défaut **activé**), tranche coupée en **deux moitiés** alternées à chaque soumission, relectures **différées** jusqu'au moment où l'invité en a besoin, présentation directe de l'image *n−1* au début de l'échange suivant (**une image de latence, jamais plus**). **Mesures Marble Blast** : temps de soumission **1,6 → 0,06 ms/image** (÷26), attente restante **0,1 ms/image**, **79,4 → 88,1 img/s (+11 %)** sur les fenêtres de jeu. Sur `gltest` (hors écran, relecture à chaque image) : **aucun gain**, c'est attendu. | ✅ **fait** |
 | 2.3 | **Zero-copy à la présentation** : le device écrit lui-même dans la VRAM (plage déclarée par le kext) ; plus de relecture ni de recopie par l'invité. | à faire |
 | 2.4 | **Présentation en fenêtre sans attendre le WindowServer** : écriture directe dans le rectangle de la surface à l'écran, tant que rien ne la recouvre et que le curseur n'y bouge pas ; un échange normal toutes les 90 images rafraîchit la fenêtre. Marble Blast : +70 %. | ✅ fait |
-| 2.5 | Téléversement de textures sans conversion invité quand le format est connu de l'hôte (BGRA, 565, 1555…) : la conversion passe sur l'hôte. | à faire |
+| 2.5 | Téléversement de textures sans conversion invité quand le format est connu de l'hôte (BGRA, 565, 1555…) : la conversion passe sur l'hôte. | ✅ **fait le 19/09/2026** : hôte (v10, `TEX_IMAGE3`) et plugin. Avec un device v10, le plugin recopie le niveau tel quel (pas de ligne compris : les niveaux alignés ne sont plus refusés) et l'hôte convertit ; `POMPPC_GL_TEX3=0` rend l'ancien chemin. Image identique au pixel près sur les 8 scènes texturées de `gltest`. **Gain mesuré modeste** (scène `texup`, 256×256 renvoyée à chaque image) : RGBA 362 → 388 img/s, RGB 410 → 445 (+7 à +9 %) ; 565 et BGRA inchangés — le temps y est dans GLEngine, pas dans la conversion |
 | 2.6 | Opérations de pixels sur l'hôte (`DrawPixels`, `CopyPixels`, `Bitmap`, `ReadPixels`, `CopyTexSubImage`) : chacune force aujourd'hui une relecture complète. | à faire |
 
 ## Axe 3 — Compléter le pipeline fixe jusqu'à 1.5 (condition pour annoncer 1.5)
@@ -77,9 +90,9 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 | 3.1 | **Stencil** (protocole v6) : tampon hôte combiné profondeur+stencil, 9 clés d'état, transferts, backend de référence, offsets GLEngine (`docs/re/stencil.md`), plugin. Scène `stencil` identique au rendu d'Apple à l'octet près. | ✅ fait |
 | 3.2 | Modes de polygone (ligne, point), pointillés de ligne et de polygone, lissage. | ✅ **fait le 18/09/2026** sauf le **lissage** (hors périmètre v8). Offsets relevés par la sonde `v8probe` (`docs/re/etat-v8.md`) : motif de ligne `GS+0x2e26`/`0x2e28`, motif de polygone **128 octets en `GS+0x30e8`**, dans l'ordre de `glPolygonStipple`. Modes de polygone **réservés au chemin brut** (le chemin hérité reçoit des triangles déjà décomposés : le contour est perdu avant l'hôte) et **la fusion des dessins est coupée** quand le mode n'est pas `GL_FILL`. Le motif de polygone demande un **décalage d'une ligne** (le protocole indexe par `hauteur − ys`, OpenGL par `hauteur − 1 − ys`). Scènes `polymode` et `stipple` : **0/255 sur l'image entière** par les deux chemins. |
 | 3.3 | Opérations logiques ; mélange à couleur constante, équations minimum et maximum. | ✅ **fait le 18/09/2026**. Couleur de mélange en `GS+0x2d70`, opération logique en `GS+0x2e30` ; les facteurs `0x8001`-`0x8004` et les équations `GL_MIN`/`GL_MAX` passent par les clés existantes. Clés v8 envoyées pour **les deux chemins**. Scènes `blendc` et `logicop` : témoins exacts au bit près, **0/255**. Le motif de refus « stencil/logicop/stipple » ne couvre plus que le lissage de polygone. |
-| 3.4 | Textures 3D, cube, rectangle ; bordures ; compressées (S3TC passé tel quel à l'hôte). | à faire |
-| 3.5 | Lignes et points texturés ; sprites de points ; couleur secondaire. | à faire |
-| 3.6 | Textures de profondeur et comparaison d'ombre ; génération automatique de mipmaps (`GenerateTexMipmaps` repérée). | à faire |
+| 3.4 | Textures 3D, cube, rectangle ; bordures ; compressées (S3TC passé tel quel à l'hôte). | **hôte fait (v10, 19/09/2026)** : 3D, cube, rectangle, 1D, `CLAMP_TO_BORDER` et couleur de bordure, `MIRRORED_REPEAT`, S3TC (DXT1/3/5, décompressé par le cœur pour que les backends voient les mêmes texels). Les **texels de bordure** (`border = 1` de `glTexImage`) ne sont pas portés : l'invité doit les refuser. Reste le plugin : `cfg+0xbe`, `cfg+0xc2`, relevé des niveaux 3D et des faces de cube dans GLEngine (`docs/protocole-v10-textures.md` §7) |
+| 3.5 | Lignes et points texturés ; sprites de points ; couleur secondaire. | **hôte fait pour la couleur secondaire et les paramètres de point (v10, 19/09/2026)** : `QGPU_SK_COLOR_SUM` (trois valeurs, la règle v7–v9 par défaut), atténuation, bornes et seuil de fondu, calculés par le cœur. Restent : lignes et points texturés, sprites de points, et tout le plugin (octet de `GL_COLOR_SUM` à relever ; attention au `POINT_SIZE_MAX` initial de GLEngine, `docs/protocole-v10-textures.md` §7) |
+| 3.6 | Textures de profondeur et comparaison d'ombre ; génération automatique de mipmaps (`GenerateTexMipmaps` repérée). | **hôte fait (v10, 19/09/2026)** : `GL_DEPTH_COMPONENT` en `FLOAT`, `UNSIGNED_INT`, `UNSIGNED_SHORT`, comparaison texel par texel avant filtrage, `DEPTH_TEXTURE_MODE` ; niveaux de base et max, bornes et biais de LOD ; mipmaps générés par le cœur à chaque image du niveau de base. Reste le plugin |
 | 3.7 | **Requêtes d'occlusion** (`CreateQuery`, `GetQueryInfo`). (OpenGL 1.5.) | ✅ **fait le 18/09/2026**. Interface relevée par lecture et vérifiée dans l'invité (`docs/re/etat-v8.md` §4) : `gldCreateQuery` (n° 45), `gldDestroyQuery` (46), `gldGetQueryInfo` (47) et **les procédures `+0x68` / `+0x6c`** = `glBeginQuery` / `glEndQuery`. Le `GLDriver` d'Apple ne tient **rien** (bouchons, et rien d'installé en `+0x68`/`+0x6c`) : sous lui, `glGetQueryObjectuiv` n'écrit même pas dans la variable de sortie. Le plugin tient la fonction entièrement ; un repli logiciel pendant une requête **majore** le compte (seule direction sans danger). Scène `occl` : 4 096 / 2 048 / 0 échantillons exacts. |
 | 3.8 | Multiéchantillonnage. | à faire |
 | 3.9 | Brouillard par fragment (`GL_NICEST`) ; niveau de détail des mipmaps par fragment dans le backend de référence. | à faire |
@@ -135,7 +148,37 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
   commande qui désignera l'arène, sinon `reserve()` pouvait vider le flux entre les deux et
   envoyer la commande dans une **autre moitié** que la mémoire qu'elle désigne.
 
+### Premier passage sur l'hôte Linux + RTX 4060 Ti (18/09/2026)
+
+Les lots 1 à 3 ont été développés et mesurés sur un hôte macOS (CGL, Apple Silicon). Le
+premier passage sur l'hôte Linux (EGL, pilote NVIDIA) a trouvé deux bogues, **tous deux
+invisibles sous CGL** et tous deux côté hôte :
+
+- **Le device v9 ne rendait plus rien** : `qgpu_smoke.py` en backend GL, 12 échecs, statut
+  `QGPU_ST_BACKEND` dès la première scène. `gl_init` laissait le contexte EGL courant sur le
+  thread qui réalise le device, et EGL refuse de le rendre courant sur le thread de rendu tant
+  qu'un autre thread le tient (`EGL_BAD_ACCESS`). CGL ne l'interdit pas. Corrigé : le contexte
+  naît libre, et le **reset du cœur** et la **libération du backend** passent eux aussi par le
+  thread de rendu (le reset fait sur le vCPU y laissait le contexte). `tests/qgpu_core_test.c`
+  initialise désormais sur un thread et exécute sur un autre, comme le device : il reproduit le
+  bogue sans QEMU (177 échecs avant la correction).
+- **Profondeur relue différente selon la présence d'un stencil** : un cran de 24 bits d'écart
+  entre surface combinée (téléversée par `glDrawPixels`) et surface à profondeur seule (par
+  `glTexSubImage2D`) — le pilote n'arrondit pas pareil dans les deux chemins. Les deux passent
+  maintenant par `glDrawPixels`.
+
+Après correction, sur cet hôte : `qgpu_core_test` 0 échec (logiciel + GL), `qgpu_smoke.py` 0 échec
+(GL et logiciel), `run-all.sh` 47 OK. **Non refait ici** : tout ce qui demande l'invité
+(`gltest`, jeux) — la VM de développement et `devloop.py prepare` (qui passe par `hdiutil`)
+n'existent que sur l'hôte macOS.
+
 ## Points ouverts
+
+- **`qgpu_smoke.py`, contrôle « dernier doorbell refusé (file pleine) »** : il dépend de la course
+  entre la rafale envoyée par la console d'Open Firmware et le thread de rendu. Sur un hôte chargé
+  (charge moyenne 25 à 44 pendant une compilation LTO, 19/09/2026), il a échoué 1 fois sur 6, et
+  les relectures console ont rendu `None` ou décalé d'un mot 2 fois sur 6. Ce n'est pas une
+  régression : relancer à vide avant de conclure.
 
 - **Zenerchi, fin de partie** : ralentissement quand les cristaux brillent, non diagnostiqué
   (il faut jouer une partie jusqu'au bout ; mis de côté au profit de Marble Blast). Le bilan
@@ -198,6 +241,20 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 | Kext et plugin asynchrones (2.2) : `QGPU_UC_SUBMIT` avec drapeau, attente de barrière sur la command gate, double tampon de la tranche, relectures différées, présentation de l'image *n−1* ; `guest/qgpu-test` étendu ; mesures sur Marble Blast | agent Opus, **seul sur la VM** | `kext/POMPPCGPU`, `guest/` | ✅ **fait** (18/09/2026) |
 
 ## Ordre d'attaque
+
+**Au 19/09/2026**, ce qui débloque le plus est côté invité, sur la moitié hôte que la v10 vient de
+poser (`docs/protocole-v10-textures.md` §7) :
+
+1. **Formats convertis par l'hôte** dans le plugin (2.5) : pure vitesse, aucun relevé nouveau.
+2. **Textures 3D** dans le plugin (`cfg+0xbe`, niveaux 3D de `gldCreateTextureLevel`) : avec les
+   vérifications [H] de `docs/re/version-extensions.md`, c'est l'annonce de **1.2**.
+3. **Compression** : fermer d'abord le cas « silencieusement faux » (`version-extensions.md` §2),
+   puis l'annoncer avec les cartes de cube.
+4. Côté hôte seul : **2.1** (objets tampon) et **2.3** (zero-copy) demandent aussi le kext et le
+   plugin ; la couleur secondaire et les paramètres de point (3.5) ont chacun une moitié hôte
+   possible sans VM.
+
+Historique :
 
 1. ✅ **Vérifié dans l'invité** le 18/09/2026 (`docs/re/verification-tcl.md`). Prochaine étape de
    l'axe : relever les **codes d'entrée du descripteur `cfg+0x11c`** (§6.4 de ce relevé), pour

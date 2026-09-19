@@ -445,6 +445,8 @@ static struct {
     unsigned long   n_rawverts, n_rawdraws, n_geomcmds, n_geomdrop, n_rawmerged;
     int             v7;                 /* device v7 ET chemin brut autorisé */
     int             v8;                 /* device v8 : pipeline fixe complet */
+    int             v10;                /* device v10 : niveaux au format de
+                                           l'application, convertis par l'hôte */
     unsigned long   query_base;         /* premier identifiant de requête du client */
     double          t_submit, t_copy, t_upload;   /* secondes cumulées */
     /* ── bilan du mode asynchrone ── */
@@ -735,6 +737,10 @@ void pomppc_backend_init(void)
                pointillés, requêtes) vaut pour les DEUX chemins de dessin : elle
                ne dépend donc pas de POMPPC_GL_GEOM, seulement du device. */
             G.v8 = G.q.version >= 8;
+            /* v10 : l'hôte convertit les texels (TEX_IMAGE3). POMPPC_GL_TEX3=0
+               revient à la conversion par l'invité, pour comparer. */
+            G.v10 = G.q.version >= 10 &&
+                    !(getenv("POMPPC_GL_TEX3") && getenv("POMPPC_GL_TEX3")[0] == '0');
             G.query_base = G.q.index * QGPU_CLIENT_QUERY_IDS;
             atexit(on_exit_stats);
         } else {
@@ -742,9 +748,10 @@ void pomppc_backend_init(void)
         }
         if (G.state > 0)
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
-                       " chemin brut %s, pipeline fixe v8 %s, soumission %s%s%s)\n",
+                       " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
                        G.v7 ? "actif" : "coupé", G.v8 ? "actif" : "coupé",
+                       G.v10 ? "converties par l'hôte" : "converties ici",
                        G.async ? "asynchrone (2 moitiés)" : "synchrone",
                        G.async ? "" : " : ", G.async ? "" : G.async_why);
         else
@@ -1318,8 +1325,35 @@ void pomppc_texture_changed(void *drvtex, int levels)
 /* Couples (format, type) que convert_level sait traduire. Le chemin brut doit
  * le savoir SANS convertir : le domaine est décidé à chaque changement d'état,
  * bien avant le dessin. Toute entrée ajoutée ici doit avoir son cas ci-dessous. */
+/* v10 : octets par texel des couples que le cœur convertit lui-même (liste de
+   qgpu_proto.h, section v10) ; 0 = couple inconnu de l'hôte. */
+static unsigned long host_texel_bytes(unsigned int fmt, unsigned int type)
+{
+    switch (type) {
+    case 0x1401:                                         /* octets */
+        switch (fmt) {
+        case 0x1908: case 0x80E1: return 4;
+        case 0x1907: case 0x80E0: return 3;
+        case 0x190A: return 2;
+        case 0x1909: case 0x1906: case 0x1903: return 1;
+        }
+        return 0;
+    case 0x8035: case 0x8367:
+        return (fmt == 0x1908 || fmt == 0x80E1) ? 4 : 0;
+    case 0x8363: case 0x8364:
+        return fmt == 0x1907 ? 2 : 0;
+    case 0x8033: case 0x8034:
+        return fmt == 0x1908 ? 2 : 0;
+    case 0x8365: case 0x8366:
+        return fmt == 0x80E1 ? 2 : 0;
+    }
+    return 0;
+}
+
 static int level_convertible(unsigned int fmt, unsigned int type)
 {
+    if (G.v10)
+        return host_texel_bytes(fmt, type) != 0;
     switch ((fmt << 16) | type) {
     case (0x1908 << 16) | 0x1401: case (0x1907 << 16) | 0x1401:
     case (0x80E1 << 16) | 0x1401: case (0x80E0 << 16) | 0x1401:
@@ -1501,7 +1535,8 @@ static int texture_uploadable(PTex *t)
             continue;
         if (S16(lv, LV_BORDER) || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM)
             return no(NO_TEX_SIZE, w, h);
-        if (!GLD_U32(lv, LV_DATA) || S16(lv, LV_ROWPIX) != (short)w ||
+        if (!GLD_U32(lv, LV_DATA) ||
+            (G.v10 ? S16(lv, LV_ROWPIX) < (short)w : S16(lv, LV_ROWPIX) != (short)w) ||
             !level_convertible(U16(lv, LV_FORMAT), U16(lv, LV_TYPE)))
             return no(NO_TEX_FORMAT, (U16(lv, LV_FORMAT) << 16) | U16(lv, LV_TYPE),
                       ((unsigned long)S16(lv, LV_ROWPIX) << 16) | w);
@@ -1548,8 +1583,30 @@ static int upload_texture(PCtx *p, PTex *t)
             unsigned long w = S16(lv, LV_W), h = S16(lv, LV_H);
             if (w == 0 || h == 0)
                 continue;
-            if (S16(lv, LV_BORDER) || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM ||
-                !arena_alloc(w * h * 4, &off))
+            if (S16(lv, LV_BORDER) || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM)
+                return no(NO_TEX_SIZE, w, h);
+            if (G.v10) {
+                /* v10 : les données telles quelles, pas de ligne compris ; le
+                   cœur de l'hôte convertit (TEX_IMAGE3, 2D). */
+                unsigned int fmt = U16(lv, LV_FORMAT), type = U16(lv, LV_TYPE);
+                unsigned long bpp = host_texel_bytes(fmt, type);
+                unsigned long row = (unsigned long)S16(lv, LV_ROWPIX) * bpp;
+                const unsigned char *d = (const unsigned char *)GLD_U32(lv, LV_DATA);
+                if (!bpp || !d || S16(lv, LV_ROWPIX) < (short)w)
+                    return no(NO_TEX_FORMAT, (fmt << 16) | type,
+                              ((unsigned long)S16(lv, LV_ROWPIX) << 16) | w);
+                if (!arena_alloc(row * (h - 1) + w * bpp, &off))
+                    return no(NO_TEX_SIZE, w, h);
+                memcpy(G.q.win + off, d, row * (h - 1) + w * bpp);
+                c = reserve(p, QGPU_LEN_TEX_IMAGE3);
+                c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3);
+                c[1] = t->qtex; c[2] = QGPU_TT_2D; c[3] = l; c[4] = w; c[5] = h;
+                c[6] = 1; c[7] = base; c[8] = fmt; c[9] = type;
+                c[10] = G.q.base + off; c[11] = row; c[12] = 0;
+                G.n_texuploads++;
+                continue;
+            }
+            if (!arena_alloc(w * h * 4, &off))
                 return no(NO_TEX_SIZE, w, h);
             if (!convert_level(lv, (unsigned long *)(G.q.win + off)))
                 return no(NO_TEX_FORMAT, (U16(lv, LV_FORMAT) << 16) | U16(lv, LV_TYPE),

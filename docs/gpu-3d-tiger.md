@@ -649,6 +649,8 @@ liste telle qu'une application la lit, qui l'a montré.
 | transport dans Tiger | `guest/qgpu-test` | OK, y compris pendant 4 applications GL |
 | plugin hors écran | `gltest` × 28 scènes | pixels témoins OK avec `POMPPC_GL_GEOM=0` **et** `=1` ; image entière comparée au rendu d'Apple, écart max **hors arêtes** de 0 à 3/255 (voir §4.7) |
 | pipeline fixe v8 | `gltest blendc logicop polymode stipple occl` | mélange constant, min/max, opérations logiques, modes de polygone, pointillés, requêtes d'occlusion — **0/255 sur l'image entière**, comptes d'occlusion exacts (§4.8) |
+| textures v10 (hôte seul, 19/09/2026) | `tests/qgpu_core_test.c`, `run_v10` | 3D, cube (orientation vérifiée contre le pilote), rectangle, 1D, miroir, bordure, profondeur et comparaison, LOD, mipmaps générés, 18 formats, S3TC, sous-images, 18 refus — **0 échec**, backend logiciel et RTX 4060 Ti (EGL, NVIDIA). Côté invité : rien encore (`docs/protocole-v10-textures.md` §7) |
+| hôte Linux + NVIDIA (19/09/2026) | `qgpu_core_test`, `qgpu_smoke.py`, `run-all.sh` | verts après deux corrections (contexte EGL partagé entre threads, profondeur selon la présence d'un stencil) ; `qgpu_smoke.py` publie désormais `caps = 0x1e` |
 | version et extensions | `gltest caps entry v15` | ce qui est annoncé est tenu, fonction par fonction (`docs/re/version-extensions.md`) |
 | géométrie sur l'hôte | `gltest lit texgen clip fogz bigstrip dlist mixte` | éclairage, texgen, découpe, brouillard, longues primitives, listes d'affichage, alternance domaine / hors domaine |
 | application réelle | Zenerchi (§4.6) | menus et partie corrects, 42 img/s en partie, présentation directe |
@@ -690,6 +692,44 @@ Pièges rencontrés, tous corrigés et commentés dans le code :
 | `ld: unknown flag: -nostdlib`, `can't locate file for: -lcc_kext`, « doesn't contain kernel extension code », « relocation overflow » | chaîne kext PPC : voir `kext/POMPPCGPU/README.md` |
 | `non-relocatable subtraction expression` | l'as d'Apple refuse une référence PIC vers un symbole non défini dans le fichier : les trampolines reçoivent leur cible du crochet C |
 | un kext qui panique fige la VM, et `-prom-env boot-args=-x` n'est pas disponible par `devloop` | on **compile puis `kextload`** le kext depuis son dossier de sources, `/System/Library/Extensions` gardant l'ancien : un panic au chargement se répare par `devloop stop/start`. L'installation ne vient qu'après un `qgpu_test` vert |
+
+#### Sous Linux (hôte sans `hdiutil`), depuis le 19/09/2026
+
+Linux ne sait pas écrire dans le HFS+ journalisé de Tiger sans être root : **c'est l'invité qui
+se prépare**. `devloop.py prepare` grave un CD (agent, StartupItem, relais de session,
+`loginwindow.plist` complété sur l'hôte après lecture de l'image par `7z`, et un `setup.sh`),
+démarre en single-user, frappe les commandes, retrouve les boîtes aux lettres dans l'image par
+leur nonce et fait écrire `agent.conf`. Puis :
+
+```sh
+qemu-img convert -O raw disks/tiger.qcow2 disks/tiger-dev.raw   # copie : le disque de tous les jours ne bouge pas
+export DEVDISK=disks/tiger-dev.raw
+python3 tools/guest/devloop.py prepare
+CDROM=work/Mac_OS_X.hfs python3 tools/guest/devloop.py start    # le DVD de Tiger en lecteur
+python3 tools/guest/devloop.py run tools/guest/jobs/xcode       # gcc 4.0, cctools, SDK 10.4u : 2 min 30
+tools/guest/jobs/stage.sh gpu /tmp/j && python3 tools/guest/devloop.py run /tmp/j
+```
+
+`tools/guest/jobs/` garde les jobs réutilisables : `xcode` (chaîne de compilation), `gpu` (kext
+chargé, `qgpu_test`, plugin installé, `gltest` sous le plugin et sous Apple, conversion des
+textures par l'hôte contre par l'invité), `texup` (débit de téléversement), `glwin` (mode
+bureau), `diag`. `stage.sh`
+leur joint les sources invité du dépôt.
+
+| Symptôme | Cause |
+|---|---|
+| `mount_cd9660: Invalid argument` | le CD d'un lecteur IDE de `mac99` se monte par sa tranche de session, `/dev/diskNs0` |
+| boîte aux lettres « fragmentée (secteur 12319) » | HFS+ découpe un fichier écrit au fil de l'eau ; l'agent lit en secteurs consécutifs. `setup.sh` préalloue chaque boîte d'un seul tenant (`fcntl(F_PREALLOCATE)`, `F_ALLOCATECONTIG`), et `prepare` vérifie la contiguïté |
+| `installer -pkg` ne rend jamais la main, sans un octet écrit | en single-user, `installer` attend un service qui ne tourne pas : le job `xcode` dépaquette les `Archive.pax.gz` à la racine et refait `gcc_select 4.0` |
+| l'agent relancé rejoue un job d'avant (et s'y bloque) | l'agent ignore désormais, au démarrage, le job déjà présent dans la boîte |
+| `CGLChoosePixelFormat` → 10015 (`kCGLBadCodeModule`) avec `GL_RESOURCES` | `GL_RESOURCES` ne marche pas sur ce 10.4.6, **même** avec une copie complète des bundles du système : le job `gpu` installe le plugin dans `OpenGL.framework/Versions/A/Resources`, `POMPPC_GL_DISABLE=1` donnant la référence d'Apple |
+
+Résultat du premier passage (RTX 4060 Ti, device v10) : `qgpu_test` 0 échec ; **`gltest`
+32 scènes sur 32**, écart au rendu d'Apple hors arêtes de 0 à 3/255 ; textures converties par
+l'hôte **identiques au pixel près** à la conversion par l'invité sur les 8 scènes texturées. En
+mode bureau (`start --gui`, job `glwin`) : StartupItem et relais de session installés par la
+préparation Linux fonctionnent, `glwin` 320×240 rend ses pixels témoins exacts, **64,6 img/s**
+sous le plugin contre 56,8 sous le rendu d'Apple (un cœur).
 
 ---
 
