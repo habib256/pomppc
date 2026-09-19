@@ -14,7 +14,7 @@ SRC=$PWD/src; OUT=$PWD/out
 SDK=/Developer/SDKs/MacOSX10.4u.sdk
 SCENES=${SCENES:-"tri gouraud depth fill prims tex texfmt texpack texpersp comb mix state
   stencil depthrt varray game lit texgen clip fogz bigstrip dlist mixte fusion blendc logicop
-  polymode stipple occl caps entry v15 tex3d texlod sepspec cube tex13 tex14 tcprobe"}
+  polymode stipple occl caps entry v15 tex3d texlod sepspec cube tex13 tex14 tcprobe gl15"}
 
 echo "== kext"
 cd $SRC/kext/POMPPCGPU && make clean >/dev/null 2>&1

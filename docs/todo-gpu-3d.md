@@ -10,6 +10,12 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`.
 
 ## État (19/09/2026)
 
+- **OpenGL 1.5 ANNONCÉ et tenu (lot 5, 19/09/2026) — l'objectif de cette feuille de route** :
+  `GL_VERSION = « 1.5 POMPPC-1.0 »`, **55 extensions**, device v12. Ce que 1.5 ajoute à 1.4 était
+  déjà là ou presque : objets tampon (GLEngine ; `glMapBuffer`/`glGetBufferSubData` vérifiés),
+  requêtes d'occlusion (v8), et les huit fonctions d'ombre (hôte v10, `EXT_shadow_funcs`
+  annoncée). Scène `gl15` 18/18 par les deux chemins ; `gltest` 40/40.
+
 - **OpenGL 1.4 ANNONCÉ et tenu (lot 5, 19/09/2026)** : `GL_VERSION = « 1.4 POMPPC-1.0 »`,
   **54 extensions**, avec un device **v12** (crossbar, `docs/protocole-v12-crossbar.md`). Fait dans
   le plugin, vérifié au pixel par les deux chemins (`tex14` 33/33, `docs/re/opengl-1.4.md`) :
@@ -203,9 +209,9 @@ n'existent que sur l'hôte macOS.
 
 ## Points ouverts
 
-- **Après 1.4** (19/09/2026) : pour **1.5**, il reste les fonctions de comparaison d'ombre
-  (`EXT_shadow_funcs` : les huit fonctions, l'hôte les accepte toutes, à vérifier au pixel),
-  `glMapBuffer` et `glGetBufferSubData` (points d'entrée présents, non vérifiés), puis l'annonce.
+- **Après 1.5** (19/09/2026) : l'exactitude est atteinte ; restent la vitesse (axes 1 et 2 :
+  objets tampon côté hôte, moins de recopies), les applications réelles (Marble Blast, jeux) avec
+  l'annonce 1.5, et les réserves ci-dessous.
 - **`glMaterial` entre `glBegin` et `glEnd`, chemin brut** : la primitive est perdue et la
   suivante garde l'ancien matériau (scène `matbegin`) — GLEngine bascule vers un autre renderer
   quel que soit `cfg+0x7a` (`docs/re/opengl-1.4.md` §3.3). Défaut antérieur ; piste : matériau

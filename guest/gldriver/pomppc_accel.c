@@ -5599,6 +5599,8 @@ static void caps_extensions(unsigned char *cfg)
     if (G.tex14) {
         GLD_F32(cfg, 0xb0) = QGPU_MAX_LOD_BIAS;   /* GL_MAX_TEXTURE_LOD_BIAS (Apple : 0) */
         w0 |= (1UL << 12) | (1UL << 13);          /* GL_ARB_shadow, GL_ARB_depth_texture */
+        w1 |= 1UL << (40 - 32);         /* GL_EXT_shadow_funcs : les huit fonctions
+                                           (scène gl15), par l'hôte */
         w0 |= 1UL << 1;                 /* GL_ARB_point_parameters : l'hôte dérive la
                                            taille au chemin brut (le rendu d'Apple
                                            ignore l'atténuation) */
@@ -5644,6 +5646,9 @@ const char *pomppc_override_string(long name, const char *apple)
            strcpy — et donc une promesse que rien ne vérifie. On y met la plus
            haute version dont TOUTES les fonctions sont tenues. Le suffixe dit
            qui rend. Détail fonction par fonction : docs/re/version-extensions.md.
+             1.5 : objets tampon (GLEngine, vérifiés jusqu'à glMapBuffer et
+                   glGetBufferSubData), requêtes d'occlusion (v8, par nous),
+                   les huit fonctions d'ombre (hôte v10) — scène gl15 ;
              1.4 : biais de LOD, textures de profondeur et ombre, couleur
                    secondaire, paramètres de point (G.tex14), crossbar
                    (G.xbar, device v12) — MIRRORED_REPEAT, stencil wrap,
@@ -5665,7 +5670,9 @@ const char *pomppc_override_string(long name, const char *apple)
             return "1.1 POMPPC-1.0";
         if (!G.cube || !G.tex13)
             return "1.2 POMPPC-1.0";
-        return (G.tex14 && G.xbar) ? "1.4 POMPPC-1.0" : "1.3 POMPPC-1.0";
+        if (!G.tex14 || !G.xbar)
+            return "1.3 POMPPC-1.0";
+        return G.v8 ? "1.5 POMPPC-1.0" : "1.4 POMPPC-1.0";
     default:
         return apple;
     }

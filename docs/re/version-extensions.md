@@ -109,15 +109,26 @@ entre `glBegin` et `glEnd` au chemin brut (`docs/re/opengl-1.4.md` §3.3).
 |---|---|---|
 | Objets tampon (VBO) | (ii) | `v15` « VBO » TENU sous Apple **et** sous le plugin, par les deux chemins : GLEngine les réalise lui-même et la géométrie arrive normalement dans `Begin`/`EndPrimitiveBuffer`. |
 | **Requêtes d'occlusion** | (i) **nouveau (v8), tenu par NOUS** | scène `occl` : 4 096 / 2 048 / 0 échantillons exacts ; sous Apple seul, **0 partout** (bouchons). Détail : `docs/re/etat-v8.md` §4 |
-| `glMapBuffer`, `glGetBufferSubData` | **non vérifié [H]** | le point d'entrée existe |
+| `glMapBuffer`, `glGetBufferSubData` | (ii) *(19/09/2026)* | scène `gl15` : `glMapBuffer` en écriture puis en lecture, `glBufferSubData`, `glGetBufferSubData`, `GL_BUFFER_SIZE`, tampon d'indices et décalages dans le tampon — exacts par les deux chemins et sous Apple |
+| **Fonctions d'ombre** (`EXT_shadow_funcs`) | **(i) sous le plugin v10** *(19/09/2026)* ; (iii) sous Apple | scène `gl15` : les huit fonctions, D = 0,25 et 0,75 contre r = 0,5, 16/16 par les deux chemins ; Apple rend `D` brut |
 
-→ **1.5 n'est pas tenu** — il hérite de tout ce qui manque en 1.2, 1.3 et 1.4.
+→ **1.5 n'était pas tenu au 18/09/2026. Il l'est depuis le 19/09/2026** sous le plugin avec un
+device v12 : c'est ce qui est annoncé (§3).
 
 ---
 
 ## 3. Ce qui est annoncé, et pourquoi
 
-### `GL_VERSION` = « 1.4 POMPPC-1.0 » (depuis le 19/09/2026, device v12)
+### `GL_VERSION` = « 1.5 POMPPC-1.0 » (depuis le 19/09/2026, device v12)
+
+Tout 1.4, plus ce que 1.5 ajoute : objets tampon (GLEngine, vérifiés jusqu'à `glMapBuffer` et
+`glGetBufferSubData`), requêtes d'occlusion (v8, tenues par nous), les huit fonctions d'ombre
+(hôte v10). Une extension de plus : `GL_EXT_shadow_funcs` (bit 40) — soit **55**. C'est la
+version visée par la feuille de route (`docs/todo-gpu-3d.md`) ; réserves : `docs/re/opengl-1.4.md`
+§3.3 (`glMaterial` entre `glBegin` et `glEnd`, chemin brut) et
+`docs/re/bordure-et-compression.md` §2.4 (requêtes de niveau compressé, côté GLEngine).
+
+### (19/09/2026) `GL_VERSION` = « 1.4 POMPPC-1.0 » (device v12)
 
 Biais de LOD, textures de profondeur et ombre, couleur secondaire, paramètres de point
 (`G.tex14`) et crossbar (`G.xbar`, protocole v12) : tout 1.4 est tenu par les deux chemins.

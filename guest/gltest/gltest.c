@@ -4215,6 +4215,128 @@ int main(int argc, char **argv)
         check("mélange DST_COLOR (destination²)", 188, 168, 0xa3a3a3);
         check("glMultiDrawArrays : 1er", 208, 168, 0xff00ff);
         check("glMultiDrawArrays : 2e", 228, 168, 0xff00ff);
+    } else if (!strcmp(scene, "gl15")) {
+        /* OpenGL 1.5 au pixel : les huit fonctions de comparaison d'ombre
+           (EXT_shadow_funcs), et les objets tampon au-delà du simple dessin
+           (glMapBuffer en écriture et en lecture, glBufferSubData,
+           glGetBufferSubData, tampon d'indices, décalages dans le tampon).
+           Les requêtes d'occlusion ont leur scène (« occl »). */
+        typedef void (*gb_f)(GLsizei, GLuint *);
+        typedef void (*bb_f)(GLenum, GLuint);
+        typedef void (*bd_f)(GLenum, GLsizeiptr, const GLvoid *, GLenum);
+        typedef void (*bsd_f)(GLenum, GLintptr, GLsizeiptr, const GLvoid *);
+        typedef void *(*mb_f)(GLenum, GLenum);
+        typedef GLboolean (*ub_f)(GLenum);
+        typedef void (*gbp_f)(GLenum, GLenum, GLint *);
+        gb_f gen = (gb_f)gl_sym("glGenBuffers", "glGenBuffersARB");
+        gb_f del = (gb_f)gl_sym("glDeleteBuffers", "glDeleteBuffersARB");
+        bb_f bind = (bb_f)gl_sym("glBindBuffer", "glBindBufferARB");
+        bd_f data = (bd_f)gl_sym("glBufferData", "glBufferDataARB");
+        bsd_f sub = (bsd_f)gl_sym("glBufferSubData", "glBufferSubDataARB");
+        bsd_f getsub = (bsd_f)gl_sym("glGetBufferSubData", "glGetBufferSubDataARB");
+        mb_f map = (mb_f)gl_sym("glMapBuffer", "glMapBufferARB");
+        ub_f unmap = (ub_f)gl_sym("glUnmapBuffer", "glUnmapBufferARB");
+        gbp_f gbp = (gbp_f)gl_sym("glGetBufferParameteriv", "glGetBufferParameterivARB");
+        static const GLfloat dz[4] = { 0.25f, 0.75f, 0.25f, 0.75f };
+        static const GLenum fn[8] = { GL_NEVER, GL_ALWAYS, GL_LESS, GL_LEQUAL,
+                                      GL_GREATER, GL_GEQUAL, GL_EQUAL, GL_NOTEQUAL };
+        /* r = 0,5 contre D = 0,25 (colonne 0) : NEVER, ALWAYS, <, <=, >, >=, ==, != */
+        static const unsigned long w25[8] = { 0, 0xffffff, 0, 0, 0xffffff, 0xffffff, 0, 0xffffff };
+        static const unsigned long w75[8] = { 0, 0xffffff, 0xffffff, 0xffffff, 0, 0, 0, 0xffffff };
+        static const GLushort idx[6] = { 0, 1, 2, 0, 2, 3 };
+        GLfloat quad[4 * 5], back[4 * 5];
+        GLuint tid, bo[2];
+        GLint sz = -1;
+        int i, k, okget = 1;
+        char nm[64];
+        if (!gen || !bind || !data || !sub || !getsub || !map || !unmap || !gbp || !del) {
+            printf("  points d'entrée des objets tampon absents\n");
+            return 1;
+        }
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        /* ── rangée 0 et 1 : les huit fonctions, D = 0,25 puis 0,75 ── */
+        glGenTextures(1, &tid);
+        glBindTexture(GL_TEXTURE_2D, tid);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, 2, 2, 0, GL_DEPTH_COMPONENT,
+                     GL_FLOAT, dz);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, 0x884C, 0x884E);     /* COMPARE_R_TO_TEXTURE */
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glEnable(GL_TEXTURE_2D);
+        for (k = 0; k < 2; k++)
+            for (i = 0; i < 8; i++) {
+                float x0 = 20 * i, y0 = 40 * k, s = k ? 0.75f : 0.25f;
+                glTexParameteri(GL_TEXTURE_2D, 0x884D, fn[i]);
+                glBegin(GL_QUADS);
+                glTexCoord3f(s, 0.25f, 0.5f);
+                glVertex2f(x0, y0); glVertex2f(x0 + 16, y0);
+                glVertex2f(x0 + 16, y0 + 16); glVertex2f(x0, y0 + 16);
+                glEnd();
+            }
+        glDisable(GL_TEXTURE_2D);
+        /* ── rangée 2 : objets tampon ── */
+        gen(2, bo);
+        bind(0x8892 /* ARRAY_BUFFER */, bo[0]);
+        data(0x8892, sizeof(quad), 0, 0x88E4 /* STATIC_DRAW */);
+        gbp(0x8892, 0x8764 /* BUFFER_SIZE */, &sz);
+        {   /* écriture par glMapBuffer : x, y, r, g, b par sommet */
+            GLfloat *m = (GLfloat *)map(0x8892, 0x88B9 /* WRITE_ONLY */);
+            static const float xy[4][2] = { { 0, 80 }, { 16, 80 }, { 16, 96 }, { 0, 96 } };
+            for (i = 0; i < 4; i++) {
+                quad[i * 5] = xy[i][0]; quad[i * 5 + 1] = xy[i][1];
+                quad[i * 5 + 2] = 1; quad[i * 5 + 3] = 0.6f; quad[i * 5 + 4] = 0.2f;
+            }
+            if (m)
+                memcpy(m, quad, sizeof(quad));
+            printf("  glMapBuffer(WRITE_ONLY) : %s, glUnmapBuffer : %d\n", m ? "ok" : "nul",
+                   (int)unmap(0x8892));
+        }
+        bind(0x8893 /* ELEMENT_ARRAY_BUFFER */, bo[1]);
+        data(0x8893, sizeof(idx), idx, 0x88E4);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glEnableClientState(GL_COLOR_ARRAY);
+        glVertexPointer(2, GL_FLOAT, 20, (const GLvoid *)0);
+        glColorPointer(3, GL_FLOAT, 20, (const GLvoid *)8);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (const GLvoid *)0);   /* ffff99→33 */
+        /* glBufferSubData : décale le carré de 20 en x et le passe en bleu */
+        for (i = 0; i < 4; i++) {
+            quad[i * 5] += 20;
+            quad[i * 5 + 2] = 0; quad[i * 5 + 3] = 0.2f; quad[i * 5 + 4] = 1;
+        }
+        sub(0x8892, 0, sizeof(quad), quad);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (const GLvoid *)0);
+        glDisableClientState(GL_COLOR_ARRAY);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        /* relecture : glGetBufferSubData, puis glMapBuffer(READ_ONLY) */
+        memset(back, 0, sizeof(back));
+        getsub(0x8892, 0, sizeof(back), back);
+        for (i = 0; i < 20; i++)
+            if (back[i] != quad[i]) okget = 0;
+        {
+            GLfloat *m = (GLfloat *)map(0x8892, 0x88B8 /* READ_ONLY */);
+            int okmap = m && !memcmp(m, quad, sizeof(quad));
+            unmap(0x8892);
+            printf("  BUFFER_SIZE %d, glGetBufferSubData %s, glMapBuffer(READ_ONLY) %s, "
+                   "erreur GL 0x%x\n", sz, okget ? "exact" : "FAUX", okmap ? "exact" : "FAUX",
+                   glGetError());
+            if (sz != (GLint)sizeof(quad) || !okget || !okmap) {
+                printf("  FAIL relecture des objets tampon\n");
+                failures++;
+            }
+        }
+        bind(0x8892, 0);
+        bind(0x8893, 0);
+        del(2, bo);
+        glFinish();
+        for (k = 0; k < 2; k++)
+            for (i = 0; i < 8; i++) {
+                snprintf(nm, sizeof(nm), "ombre fonction %d, D = %s", i, k ? "0,75" : "0,25");
+                check(nm, 20 * i + 8, 40 * k + 8, k ? w75[i] : w25[i]);
+            }
+        check("VBO : glMapBuffer + indices", 8, 88, 0xff9933);
+        check("VBO : glBufferSubData", 28, 88, 0x0033ff);
     } else if (!strcmp(scene, "tcprobe")) {
         /* Sonde : quelles façons de donner les coordonnées de texture font
            jeter la géométrie brute par GLEngine ? Texture 2D blanche en
