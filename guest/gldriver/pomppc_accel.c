@@ -33,18 +33,21 @@
  *   POMPPC_GL_DISABLE=1   ne jamais accélérer (le plugin reste un mandataire)
  *   POMPPC_GL_STATS=1     bilan sur stderr à la fin du processus
  *   POMPPC_GL_DIRECT=0    pas de présentation directe (voir present_direct)
+ *   POMPPC_GL_PRESENT=0   pas de SURF_PRESENT (relecture + copie G4, pour A/B)
  *   POMPPC_GL_STATS=fichier  bilan ajouté au fichier toutes les 5 s (images/s,
  *                         relectures, replis, temps passé à soumettre et à copier)
  *   POMPPC_GL_GEOM=0/1/2  chemin brut : 0 coupé, 1 activé (défaut), 2 activé
  *                         avec un format de sommet fixe et large (mesure)
  *   POMPPC_GL_ARRAY=0/1/2 tableaux de sommets (RenderVertexArray / Buffer) :
- *                         0 coupé — GLEngine déroule encore via Begin/End ;
- *                         1 auto (défaut) : si GL_VERTEX_ARRAY est actif, on
- *                         retire cfg+0x11c et on lit les tableaux nous-mêmes
- *                         (indices conservés, plus de déroulement) ;
- *                         2 forcé, même sans tableau activé
+ *                         0 coupé (défaut) — GLEngine déroule via Begin/End ;
+ *                         1 mixte : GL_VERTEX_ARRAY actif pose cfg+0x78,
+ *                         DrawArrays/DrawElements quittent Begin/End ; le
+ *                         descripteur cfg+0x11c reste pour glBegin ;
+ *                         2 forcé GeForce3 : cfg+0x11c retiré (glBegin jeté
+ *                         tant qu'il n'a pas forcé le repli mixte)
  *   POMPPC_GL_ASYNC=0/1   doorbell asynchrone (défaut : activé si le device et
  *                         le kext le tiennent ; voir « soumission » plus bas)
+ *   POMPPC_GL_VBO=0       pas de tampons hôte v14 (DRAW_RAW retraverse BAR0)
  *   POMPPC_GLTRACE=dir    trace (voir pomppc_gld.c)
  */
 #include <stdio.h>
@@ -61,9 +64,18 @@
 #include "pomppc_gld.h"
 #include "pomppc_qgpu.h"
 
+#define POMPPC_PLUGIN_REV "20260920-vbo"
+static void gl_note(const char *fmt, ...);
+
 /* ───────────────────── dispositions relevées (Tiger 10.4.6) ─────────────────────
  * Contexte du GLDriver (argument r3 de toutes les procédures) : */
 #define CTX_GLSTATE      0x0c     /* état GL de GLEngine */
+/* glPixelStorei_Exec : UNPACK_* vivent sur gctx, pas dans gls(). */
+#define CTX_UNPACK_ROW_LENGTH  0x31cc
+#define CTX_UNPACK_SKIP_ROWS   0x31d4
+#define CTX_UNPACK_SKIP_PIXELS 0x31d8
+#define CTX_UNPACK_ALIGNMENT   0x31e0
+#define CTX_UNPACK_LSB_FIRST   0x31e5
 #define CTX_DEPTH_SCALE  0x14     /* float : valeur de profondeur 1.0 */
 #define CTX_WIDTH        0x1c     /* drawable */
 #define CTX_HEIGHT       0x20
@@ -395,6 +407,8 @@ typedef struct PCtx {
     int            desc_dirty;          /* republié : demander le bit 1 du dispatch */
     int            geom_on;             /* dernier verdict du domaine */
     int            geom_lost;           /* une primitive a été perdue : plus jamais de brut */
+    int            array_mix;           /* glBegin vu alors que cfg+0x11c était nul :
+                                           le descripteur est remis, plus de canal forcé */
     /* État géométrique déjà posé sur le device. On garde une copie des OCTETS
        SOURCES du bloc GLEngine, pas des arguments envoyés : comparer la source
        coûte un memcmp, fabriquer les arguments pour les comparer coûtait 7 % du
@@ -426,6 +440,7 @@ typedef struct PTex {                   /* texture du GLDriver suivie par le plu
     void          *drvtex;
     long           qtex;                /* identifiant hôte, -1 si aucun */
     int            dirty;               /* niveaux à (re)téléverser */
+    unsigned long  lv0_sig;             /* empreinte du niveau 0 déjà téléversé */
     unsigned long  prm[14];             /* paramètres envoyés : min, mag, wrap s, wrap t,
                                            wrap r (3D), puis (v10) min et max LOD en
                                            bits IEEE, niveau de base, niveau max,
@@ -462,6 +477,8 @@ typedef struct Half {
     Post           post[MAX_POST];      /* relectures à recopier après la barrière */
     int            npost;
 } Half;
+
+typedef struct PBuf PBuf;
 
 static struct {
     pthread_mutex_t mu;
@@ -532,6 +549,19 @@ static struct {
                                            de profondeur et ombre, GL_COLOR_SUM */
     int             xbar;               /* sources croisées de GL_COMBINE (v12 +
                                            QGPU_CAP_GL14) */
+    int             scanout;            /* v13 : SURF_PRESENT dans la VRAM qfb */
+    int             pixops;             /* v13 : COPY_TEX / ReadPixels / DrawPixels hôte */
+    long            pixtex;             /* texture 2D jetable pour Draw/CopyPixels */
+    unsigned long   pixtex_w, pixtex_h;
+    unsigned long   n_present;          /* présentations hôte, sans copie G4 */
+    unsigned long   n_copytex;          /* CopyTexSubImage sans relecture G4 */
+    unsigned long   n_pixread;          /* ReadPixels d'un rectangle, pas du FB */
+    unsigned long   n_pixdraw;          /* DrawPixels / CopyPixels / Bitmap sans repli Apple */
+    int             hostbuf;            /* v14 : DRAW_RAW_BUF, maillages hors BAR0 */
+    unsigned long   buf_used[(QGPU_CLIENT_BUF_IDS + 31) / 32];
+    unsigned long   buf_base;
+    PBuf           *bufs;
+    unsigned long   n_vbohits, n_vbomiss;
     unsigned long   query_base;         /* premier identifiant de requête du client */
     double          t_submit, t_copy, t_upload;   /* secondes cumulées */
     /* ── bilan du mode asynchrone ── */
@@ -563,14 +593,14 @@ enum {
     NO_G_TEX3D, NO_COUNT
 };
 static const char *const no_name[NO_COUNT] = {
-    "tampon", "logicop/stipple/lissage", "brouillard", "polygonmode", "profondeur",
-    "melange", "alphatest", "surface", "unites>2", "cible-texture", "texenv",
-    "texture-inconnue", "format-base", "taille-texture", "format-texels", "id-texture",
+    "buffer", "logicop/stipple/smooth", "fog", "polygonmode", "depth",
+    "blend", "alphatest", "surface", "units>2", "tex-target", "texenv",
+    "unknown-texture", "base-format", "tex-size", "texel-format", "tex-id",
     "combine", "stencil",
-    "brut:lissage", "taille-de-point-attenuee", "brut:programme",
-    "brut:pas-de-sommet", "brut:etat-tardif", "brut:tableaux",
-    "requete:repli-logiciel", "param-texture",
-    "brut:texture-3d-ou-cube",
+    "raw:smooth", "attenuated-point-size", "raw:program",
+    "raw:no-vertex", "raw:late-state", "raw:arrays",
+    "query:sw-fallback", "tex-param",
+    "raw:tex-3d-or-cube",
 };
 static unsigned long no_count[NO_COUNT];
 static char no_detail[NO_COUNT][64];
@@ -578,8 +608,10 @@ static unsigned long fb_count[PROC_COUNT];      /* replis par procédure */
 
 static int no(int why, unsigned long a, unsigned long b)
 {
-    if (!no_count[why]++)
+    if (!no_count[why]++) {
         snprintf(no_detail[why], sizeof(no_detail[why]), "%lx/%lx", a, b);
+        gl_note("fallback %s %lx/%lx\n", no_name[why], a, b);
+    }
     return 0;
 }
 
@@ -632,7 +664,7 @@ static void stats_frame(void *ctx)
     static const char *path;
     static int init;
     static double t0;
-    static unsigned long f0, tr0, rb0, up0, fb0, sub0, tu0, di0;
+    static unsigned long f0, tr0, rb0, pr0, up0, fb0, sub0, tu0, di0;
     static unsigned long rv0, rd0, gc0, rm0, w0, qf0, av0, ad0;
     static double ts0, tc0, tu_0, tw0;
     double t;
@@ -662,12 +694,12 @@ static void stats_frame(void *ctx)
         FILE *f = fopen(path, "a");
         if (f) {
             double dt = t - t0;
-            fprintf(f, "%.1f img/s | tri %lu/img | relect %lu | televers %lu (tex %lu) | "
-                    "replis %lu | soumissions %lu | submit %.2f ms/img | copie %.2f ms/img | "
-                    "prep televers %.2f ms/img | directes %lu\n",
+            fprintf(f, "%.1f fps | tri %lu/frame | readback %lu | present %lu | upload %lu (tex %lu) | "
+                    "fallback %lu | submit %lu | submit %.2f ms/frame | copy %.2f ms/frame | "
+                    "upload-prep %.2f ms/frame | direct %lu\n",
                     (G.n_frames - f0) / dt,
                     (G.n_tris - tr0) / (G.n_frames - f0 ? G.n_frames - f0 : 1),
-                    G.n_readbacks - rb0, G.n_uploads - up0, G.n_texuploads - tu0,
+                    G.n_readbacks - rb0, G.n_present - pr0, G.n_uploads - up0, G.n_texuploads - tu0,
                     G.n_fallback - fb0, G.n_submits - sub0,
                     (G.t_submit - ts0) * 1000 / (G.n_frames - f0),
                     (G.t_copy - tc0) * 1000 / (G.n_frames - f0),
@@ -675,10 +707,10 @@ static void stats_frame(void *ctx)
                     G.n_direct - di0);
             {   /* v9 : ce que coûte (ou ne coûte plus) l'attente de l'hôte. */
                 unsigned long fr = G.n_frames - f0 ? G.n_frames - f0 : 1;
-                fprintf(f, "    soumission %s : %lu barrière(s) attendue(s)/img, "
-                        "%.2f ms d'attente/img, file %.2f en vol, %lu QUEUE_FULL, "
-                        "%lu repli(s) synchrone(s)\n",
-                        G.async ? "asynchrone" : "synchrone",
+                fprintf(f, "    submit %s: %lu fence wait(s)/frame, "
+                        "%.2f ms wait/frame, queue %.2f in flight, %lu QUEUE_FULL, "
+                        "%lu sync fallback(s)\n",
+                        G.async ? "async" : "sync",
                         (G.n_waits - w0) / fr, (G.t_wait - tw0) * 1000 / fr,
                         G.n_qsamples ? (double)G.n_qsum / G.n_qsamples : 0.0,
                         G.n_qfull - qf0, G.n_syncfall);
@@ -688,35 +720,35 @@ static void stats_frame(void *ctx)
                 unsigned long fr = G.n_frames - f0 ? G.n_frames - f0 : 1;
                 if (G.n_rawverts != rv0 || G.n_rawdraws != rd0) {
                     unsigned long nd = G.n_rawdraws - rd0;
-                    fprintf(f, "    brut : %lu sommets/img, %lu DRAW_RAW/img, "
-                            "%lu commandes d'état/img, %lu fusionnés/img, "
-                            "%lu sommets/dessin, tableaux %lu sommets/img "
-                            "%lu dessins/img%s\n",
+                    fprintf(f, "    raw: %lu verts/frame, %lu DRAW_RAW/frame, "
+                            "%lu state cmds/frame, %lu merged/frame, "
+                            "%lu verts/draw, arrays %lu verts/frame "
+                            "%lu draws/frame%s\n",
                             (G.n_rawverts - rv0) / fr, nd / fr,
                             (G.n_geomcmds - gc0) / fr, (G.n_rawmerged - rm0) / fr,
                             nd ? (G.n_rawverts - rv0) / nd : 0,
                             (G.n_arrayverts - av0) / fr,
                             (G.n_arraydraws - ad0) / fr,
-                            G.n_geomdrop ? " ⚠ PRIMITIVES PERDUES" : "");
+                            G.n_geomdrop ? " ! DROPPED PRIMS" : "");
                 }
             }
             {
                 int k;
                 for (k = 0; k < NO_COUNT; k++)
                     if (no_count[k])
-                        fprintf(f, "    refus %s : %lu (premier : %s)\n",
+                        fprintf(f, "    reject %s: %lu (first: %s)\n",
                                 no_name[k], no_count[k], no_detail[k]);
                 if (direct_why()[0])
-                    fprintf(f, "    présentation directe coupée : %s\n", direct_why());
+                    fprintf(f, "    direct present off: %s\n", direct_why());
                 for (k = 0; k < PROC_COUNT; k++)
                     if (fb_count[k])
-                        fprintf(f, "    repli %s : %lu\n", pomppc_proc_name(k), fb_count[k]);
+                        fprintf(f, "    fallback %s: %lu\n", pomppc_proc_name(k), fb_count[k]);
                 memset(no_count, 0, sizeof(no_count));
                 memset(fb_count, 0, sizeof(fb_count));
             }
             fclose(f);
         }
-        t0 = t; f0 = G.n_frames; tr0 = G.n_tris; rb0 = G.n_readbacks; up0 = G.n_uploads;
+        t0 = t; f0 = G.n_frames; tr0 = G.n_tris; rb0 = G.n_readbacks; pr0 = G.n_present; up0 = G.n_uploads;
         fb0 = G.n_fallback; sub0 = G.n_submits; tu0 = G.n_texuploads; di0 = G.n_direct;
         ts0 = G.t_submit; tc0 = G.t_copy; tu_0 = G.t_upload;
         rv0 = G.n_rawverts; rd0 = G.n_rawdraws; gc0 = G.n_geomcmds;
@@ -764,6 +796,12 @@ static int raw_fix_nan(void)
     for (i = 0; i < nv; i++) {
         unsigned char b = 0;
         unsigned long *v = w + i * words;
+        /* w ≈ 0 : après projection, clip infini → triangles géants (ciel
+           Colin McRae). On jette le sommet, comme un NaN, plutôt que de
+           forcer w=1 (ça collerait le ciel à la caméra). */
+        if (QGPU_VF_POS_COUNT(G.raw_fmt) == 4 &&
+            (v[3] & 0x7fffffffUL) < 0x358637bdUL)        /* |w| < 1e-6 */
+            b = 1;
         for (j = 0; j < words; j++) {
             if (u_insane(v[j])) {
                 v[j] = 0;
@@ -856,24 +894,28 @@ static void on_exit_stats(void)
 {
     if (getenv("POMPPC_GL_STATS")) {
         int k;
-        fprintf(stderr, "POMPPC GL : cache textures : %lu evictions\n", G.n_texevictions);
+        fprintf(stderr, "POMPPC GL: texture cache: %lu evictions\n", G.n_texevictions);
         for (k = 0; k < NO_COUNT; k++)
             if (no_count[k])
-                fprintf(stderr, "POMPPC GL : refus %s : %lu (premier : %s)\n",
+                fprintf(stderr, "POMPPC GL: reject %s: %lu (first: %s)\n",
                         no_name[k], no_count[k], no_detail[k]);
     }
     if (getenv("POMPPC_GL_STATS"))
-        fprintf(stderr, "POMPPC GL : %lu triangles (%lu texturés), %lu segments, %lu points "
-                "et %lu effacements sur l'hôte, %lu soumissions, %lu téléversements, "
-                "%lu niveaux de texture, %lu relectures, %lu appels logiciels synchronisés ; "
-                "brut : %lu sommets en %lu DRAW_RAW (%lu / %lu par tableaux), "
-                "%lu primitives perdues ; "
-                "soumission %s : %lu barrières attendues (%.0f ms), %lu QUEUE_FULL, "
-                "%lu repli(s) synchrone(s)\n",
+        fprintf(stderr, "POMPPC GL: %lu triangles (%lu textured), %lu lines, %lu points "
+                "and %lu clears on host, %lu submits, %lu uploads, "
+                "%lu tex levels, %lu readbacks, %lu host presents, "
+                "%lu host CopyTex, %lu rect ReadPixels, %lu host Draw/CopyPixels/Bitmap, "
+                "%lu synced software calls; "
+                "raw: %lu verts in %lu DRAW_RAW (%lu / %lu from arrays), "
+                "%lu host VBO hits / %lu packs, %lu dropped prims; "
+                "submit %s: %lu fences waited (%.0f ms), %lu QUEUE_FULL, "
+                "%lu sync fallback(s)\n",
                 G.n_tris, G.n_textris, G.n_lines, G.n_points, G.n_clears, G.n_submits,
-                G.n_uploads, G.n_texuploads, G.n_readbacks, G.n_fallback,
-                G.n_rawverts, G.n_rawdraws, G.n_arrayverts, G.n_arraydraws, G.n_geomdrop,
-                G.async ? "asynchrone" : "synchrone", G.n_waits, G.t_wait * 1000,
+                G.n_uploads, G.n_texuploads, G.n_readbacks, G.n_present,
+                G.n_copytex, G.n_pixread, G.n_pixdraw, G.n_fallback,
+                G.n_rawverts, G.n_rawdraws, G.n_arrayverts, G.n_arraydraws,
+                G.n_vbohits, G.n_vbomiss, G.n_geomdrop,
+                G.async ? "async" : "sync", G.n_waits, G.t_wait * 1000,
                 G.n_qfull, G.n_syncfall);
 }
 
@@ -921,21 +963,21 @@ static void async_switch(void)
         return;
     }
     if (G.q.version < 9) {
-        G.async_why = "device antérieur à la v9";
+        G.async_why = "device older than v9";
         return;
     }
     if (!(G.q.caps & QGPU_CAP_ASYNC)) {
-        G.async_why = "le device n'annonce pas QGPU_CAP_ASYNC";
+        G.async_why = "device does not advertise QGPU_CAP_ASYNC";
         return;
     }
     /* Une moitié doit porter le flux, les sommets, les indices et une arène
        digne de ce nom (deux transferts plein écran). Sinon, une seule moitié. */
     if (half < ARENA_OFF + 0x100000) {
-        G.async_why = "tranche trop petite pour deux moitiés";
+        G.async_why = "slot too small for two halves";
         return;
     }
     if (!qgpu_async_ok(&G.q)) {
-        G.async_why = "le kext installé ne connaît pas le doorbell asynchrone";
+        G.async_why = "installed kext has no async doorbell";
         return;
     }
     G.half  = half;
@@ -999,6 +1041,18 @@ void pomppc_backend_init(void)
                dès qu'une source croisée entre dans une opération (scène tex14). */
             G.xbar = G.q.version >= 12 && (G.q.caps & QGPU_CAP_GL14) &&
                      !(getenv("POMPPC_GL_XBAR") && getenv("POMPPC_GL_XBAR")[0] == '0');
+            G.scanout = G.q.version >= 13 && (G.q.caps & QGPU_CAP_SCANOUT) &&
+                        !(getenv("POMPPC_GL_PRESENT") &&
+                          getenv("POMPPC_GL_PRESENT")[0] == '0');
+            G.pixops = G.q.version >= 13 &&
+                       !(getenv("POMPPC_GL_PIXEL") &&
+                         getenv("POMPPC_GL_PIXEL")[0] == '0');
+            G.hostbuf = G.q.version >= 14 &&
+                        !(getenv("POMPPC_GL_VBO") &&
+                          getenv("POMPPC_GL_VBO")[0] == '0');
+            G.pixtex = -1;
+            G.pixtex_w = G.pixtex_h = 0;
+            G.buf_base = G.q.index * QGPU_CLIENT_BUF_IDS;
             G.query_base = G.q.index * QGPU_CLIENT_QUERY_IDS;
             /* Seulement si le bilan est demandé : un atexit pointe dans NOTRE
                code, et GLEngine peut décharger le plugin (NSUnLinkModule) avant
@@ -1009,15 +1063,20 @@ void pomppc_backend_init(void)
         } else {
             G.state = -1;
         }
-        if (G.state > 0)
+        if (G.state > 0) {
+            gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d\n",
+                    G.q.version, G.q.caps, G.v10);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
-                       " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s)\n",
+                       " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
                        G.v7 ? "actif" : "coupé", G.v8 ? "actif" : "coupé",
                        G.v10 ? "converties par l'hôte" : "converties ici",
                        G.async ? "asynchrone (2 moitiés)" : "synchrone",
-                       G.async ? "" : " : ", G.async ? "" : G.async_why);
-        else
+                       G.async ? "" : " : ", G.async ? "" : G.async_why,
+                       G.scanout ? ", présentation hôte" : "",
+                       G.pixops ? ", pixels hôte" : "",
+                       G.hostbuf ? ", VBO hôte" : "");
+        } else
             pomppc_log("POMPPC: accélération désactivée : %s\n", why);
     }
     pthread_mutex_unlock(&G.mu);
@@ -1108,7 +1167,7 @@ static unsigned long *reserve(PCtx *p, unsigned long words)
     unsigned long *c;
     close_run();
     close_raw();
-    if (G.ncmd + words + 4 + QGPU_LEN_DRAW_N + QGPU_LEN_DRAW_RAW > CMD_WORDS)
+    if (G.ncmd + words + 4 + QGPU_LEN_DRAW_N + QGPU_LEN_DRAW_RAW_BUF > CMD_WORDS)
         flush();
     if (G.bound != p) {
         c = G.cmd + G.ncmd;
@@ -1153,11 +1212,13 @@ static void broken_all(const char *why, long st, unsigned long pc)
        a laissé indéfini (NaN, infini, coordonnée démesurée) : GLEngine les
        découpait avant de nous les donner, plus maintenant. Couper le chemin
        brut suffit — l'accélération de la rastérisation, elle, reste bonne. */
-    if (pc < CMD_WORDS && QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_RAW) {
+    if (pc < CMD_WORDS &&
+        (QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_RAW ||
+         QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_RAW_BUF)) {
         pomppc_log("POMPPC: DRAW_RAW refusé (statut %ld, commande %lu) : "
                    "chemin brut coupé\n", st, pc);
-        fprintf(stderr, "POMPPC GL : géométrie brute refusée par l'hôte "
-                "(statut %ld), repli sur la rastérisation\n", st);
+        fprintf(stderr, "POMPPC GL: host rejected raw geometry "
+                "(status %ld), falling back to rasterization\n", st);
         for (p = G.list; p; p = p->next)
             p->geom_lost = 1;
         G.v7 = 0;
@@ -1199,18 +1260,18 @@ static void broken_all(const char *why, long st, unsigned long pc)
             pomppc_log("POMPPC: soumission %s refusée (BAD_ARG, pc %lu, op 0x%lx) : "
                        "lot ignoré, accélération gardée\n", why, pc, op);
             if (n_badarg < 8)
-                fprintf(stderr, "POMPPC GL : lot refusé (BAD_ARG, pc %lu, op 0x%lx)%s, "
-                        "accélération gardée\n", pc, op, buf);
+                fprintf(stderr, "POMPPC GL: batch rejected (BAD_ARG, pc %lu, op 0x%lx)%s, "
+                        "acceleration kept\n", pc, op, buf);
             else if (n_badarg == 8)
-                fprintf(stderr, "POMPPC GL : lots BAD_ARG suivants omis\n");
+                fprintf(stderr, "POMPPC GL: further BAD_ARG batches omitted\n");
             n_badarg++;
             return;
         }
     }
     pomppc_log("POMPPC: soumission refusée (%s, statut %ld, commande %lu) : "
                "accélération coupée\n", why, st, pc);
-    fprintf(stderr, "POMPPC GL : soumission refusée (statut %ld, commande %lu), "
-            "retour au rendu logiciel\n", st, pc);
+    fprintf(stderr, "POMPPC GL: submit rejected (status %ld, command %lu), "
+            "falling back to software\n", st, pc);
     for (p = G.list; p; p = p->next)
         p->broken = 1;
 }
@@ -1312,8 +1373,8 @@ static void wait_half(int i)
             PCtx *p;
             pomppc_log("POMPPC: barrière %lu jamais atteinte (%d ms) : "
                        "accélération coupée\n", h->fence, WAIT_MS);
-            fprintf(stderr, "POMPPC GL : l'hôte n'a pas terminé une soumission "
-                    "en %d ms, retour au rendu logiciel\n", WAIT_MS);
+            fprintf(stderr, "POMPPC GL: host did not finish a submit "
+                    "in %d ms, falling back to software\n", WAIT_MS);
             G.async = 0;
             G.async_avail = 0;
             for (p = G.list; p; p = p->next)
@@ -1571,22 +1632,37 @@ static PTex *find_tex(void *drvtex)
     return 0;
 }
 
-void pomppc_texture_created(void *drvtex)
+/* Verrou déjà tenu. WC3 (et d'autres) peuvent TexImage avant que
+ * gldCreateTexture ait été vu, ou passer un objet que CreateTextureLevel
+ * est le premier à nommer : sans ça, le premier lot de glyphes tombe en
+ * NO_TEX_UNKNOWN, geom_lost, et le texte n'apparaît qu'au redraw logiciel. */
+static PTex *intern_tex(void *drvtex)
 {
     PTex *t;
-    if (G.state <= 0 || !drvtex)
-        return;
+    if (!drvtex)
+        return 0;
+    t = find_tex(drvtex);
+    if (t)
+        return t;
     t = calloc(1, sizeof(*t));
     if (!t)
-        return;
+        return 0;
     t->drvtex = drvtex;
     t->qtex = -1;
     t->dirty = 1;
-    pthread_mutex_lock(&G.mu);
     t->next = G.textures;
     G.textures = t;
     t->hnext = tex_hash[tex_bucket(drvtex)];
     tex_hash[tex_bucket(drvtex)] = t;
+    return t;
+}
+
+void pomppc_texture_created(void *drvtex)
+{
+    if (G.state <= 0 || !drvtex)
+        return;
+    pthread_mutex_lock(&G.mu);
+    intern_tex(drvtex);
     pthread_mutex_unlock(&G.mu);
 }
 
@@ -1631,10 +1707,10 @@ void pomppc_texture_deleted(void *drvtex)
 void pomppc_texture_changed(void *drvtex, int levels)
 {
     PTex *t;
-    if (G.state <= 0)
+    if (G.state <= 0 || !drvtex)
         return;
     pthread_mutex_lock(&G.mu);
-    t = find_tex(drvtex);
+    t = intern_tex(drvtex);
     if (t && levels)
         t->dirty = 1;
     pthread_mutex_unlock(&G.mu);
@@ -1654,6 +1730,7 @@ static unsigned long host_texel_bytes(unsigned int fmt, unsigned int type)
         case 0x1907: case 0x80E0: return 3;
         case 0x190A: return 2;
         case 0x1909: case 0x1906: case 0x1903: return 1;
+        case 0x1900: case 0x80E5: case 0x8049: return 1; /* COLOR_INDEX, INDEX8, INTENSITY */
         }
         return 0;
     case 0x8035: case 0x8367:
@@ -1661,9 +1738,9 @@ static unsigned long host_texel_bytes(unsigned int fmt, unsigned int type)
     case 0x8363: case 0x8364:
         return fmt == 0x1907 ? 2 : 0;
     case 0x8033: case 0x8034:
-        return fmt == 0x1908 ? 2 : 0;
+        return (fmt == 0x1908 || fmt == 0x80E1) ? 2 : 0;
     case 0x8365: case 0x8366:
-        return fmt == 0x80E1 ? 2 : 0;
+        return (fmt == 0x80E1 || fmt == 0x1908) ? 2 : 0;
     case 0x1406: case 0x1405:                            /* profondeur (G.tex14) */
         return (fmt == 0x1902 && G.tex14) ? 4 : 0;
     case 0x1403:
@@ -1679,6 +1756,27 @@ static unsigned long host_texel_bytes(unsigned int fmt, unsigned int type)
 static int depth_pair_ok(unsigned long base, unsigned int fmt)
 {
     return (fmt == 0x1902) == (base == 0x1902);
+}
+
+/* GL_ALPHA (polices WC3) : le spec MODULATE garde Cv=Cf. L'hôte GL, saisi en
+ * BGRA avec R=G=B=0, promeut souvent en RGBA et noircit les glyphes — texte
+ * invisible sur les boutons. On envoie du blanc + A, en RGBA. */
+static int pack_alpha_as_rgba(const unsigned char *src, unsigned long srow,
+                              unsigned long w, unsigned long h,
+                              unsigned char *dst)
+{
+    unsigned long y, x;
+    for (y = 0; y < h; y++) {
+        const unsigned char *s = src + y * srow;
+        unsigned char *o = dst + y * w * 4;
+        for (x = 0; x < w; x++) {
+            o[x * 4 + 0] = 255;
+            o[x * 4 + 1] = 255;
+            o[x * 4 + 2] = 255;
+            o[x * 4 + 3] = s[x];
+        }
+    }
+    return 1;
 }
 
 /* S3TC : GLEngine range les blocs tels quels (format 0x83F0..0x83F3, type 0),
@@ -1727,7 +1825,8 @@ static int level_convertible(unsigned int fmt, unsigned int type)
     case (0x80E1 << 16) | 0x8366: case (0x1907 << 16) | 0x8363:
     case (0x1908 << 16) | 0x8033: case (0x1909 << 16) | 0x1401:
     case (0x190A << 16) | 0x1401: case (0x1906 << 16) | 0x1401:
-    case (0x1903 << 16) | 0x1401:
+    case (0x1903 << 16) | 0x1401: case (0x1900 << 16) | 0x1401:
+    case (0x80E5 << 16) | 0x1401: case (0x8049 << 16) | 0x1401:
         return 1;
     default:
         return 0;
@@ -1815,6 +1914,9 @@ static int convert_level(const unsigned char *lv, unsigned long *out)
         return 1;
     }
     case (0x1909 << 16) | 0x1401:                        /* LUMINANCE */
+    case (0x8049 << 16) | 0x1401:                        /* INTENSITY (octet) */
+    case (0x1900 << 16) | 0x1401:                        /* COLOR_INDEX */
+    case (0x80E5 << 16) | 0x1401:                        /* COLOR_INDEX8_EXT */
         for (i = 0; i < n; i++)
             out[i] = 0xFF000000UL | (d[i] * 0x010101UL);
         return 1;
@@ -1823,8 +1925,9 @@ static int convert_level(const unsigned char *lv, unsigned long *out)
             out[i] = ((unsigned long)d[1] << 24) | (d[0] * 0x010101UL);
         return 1;
     case (0x1906 << 16) | 0x1401:                        /* ALPHA */
+        /* Blanc + A, pas (0,0,0,A) : voir pack_alpha_as_rgba. */
         for (i = 0; i < n; i++)
-            out[i] = (unsigned long)d[i] << 24;
+            out[i] = ((unsigned long)d[i] << 24) | 0x00FFFFFFUL;
         return 1;
     case (0x1903 << 16) | 0x1401:                        /* RED */
         for (i = 0; i < n; i++)
@@ -1837,6 +1940,11 @@ static int convert_level(const unsigned char *lv, unsigned long *out)
 
 static int base_format_ok(unsigned long f)
 {
+    /* COLOR_INDEX / INDEX8 : sans la table de couleurs, les envoyer en
+       luminance donnait le monde blanc/bruité de Colin McRae (comme les
+       quads blancs d'UT2004). On refuse : GLEngine reprend, palette comprise. */
+    if (f == 0x1900 || f == 0x80E5)
+        return 0;
     f = host_base(f);
     return (f >= 0x1906 && f <= 0x190A) || f == 0x8049 || (f == 0x1902 && G.tex14);
 }
@@ -2068,6 +2176,29 @@ static void tex_level_depth(const PTex *t, int l, unsigned long *d, unsigned lon
     *imgh = U16(pl, PL_IMGH);
 }
 
+/* Empreinte du niveau 0 : pointeur, taille, format, et un échantillon des
+ * texels. WC3 remplit l'atlas de polices EN PLACE (même pointeur, mêmes
+ * dimensions) : sans les octets, on ne reremplissait jamais et le texte
+ * n'apparaissait qu'après un autre dirty (souvent des secondes plus tard). */
+static unsigned long tex_lv0_sig(const PTex *t)
+{
+    const unsigned char *lv = (const unsigned char *)t->drvtex + DT_LEVEL0;
+    const unsigned char *d = (const unsigned char *)GLD_U32(lv, LV_DATA);
+    unsigned long w = (unsigned short)S16(lv, LV_W);
+    unsigned long h = (unsigned short)S16(lv, LV_H);
+    unsigned long sig = GLD_U32(lv, LV_DATA) ^ (w << 16) ^ h ^
+                        ((unsigned long)U16(lv, LV_FORMAT) << 8) ^ U16(lv, LV_TYPE);
+    if (d && w && h) {
+        unsigned long n = w * h;
+        sig ^= GLD_U32(d, 0);
+        if (n > 8)
+            sig ^= GLD_U32(d, 8);
+        if (n > 32)
+            sig ^= d[n / 2] | ((unsigned long)d[n - 1] << 16);
+    }
+    return sig;
+}
+
 /* upload_texture réussira-t-il ? Prédicat PUR (aucune commande, aucune
  * conversion) : le chemin brut doit trancher au changement d'état, où il ne
  * peut plus se dédire. Une texture déjà téléversée et propre est connue bonne. */
@@ -2082,8 +2213,12 @@ static int texture_uploadable(PTex *t)
     if (!tex_params_ok((const unsigned char *)GLD_U32(dt, DT_PARAMS)))
         return no(NO_TEX_PARAM, U16((unsigned char *)GLD_U32(dt, DT_PARAMS), TP_WRAP_S),
                   U16((unsigned char *)GLD_U32(dt, DT_PARAMS), TP_MIN));
-    if (t->qtex >= 0 && !t->dirty)
-        return 1;
+    if (t->qtex >= 0 && !t->dirty) {
+        if (tex_lv0_sig(t) != t->lv0_sig)
+            t->dirty = 1;
+        else
+            return 1;
+    }
     /* Residency is a cache, not a domain restriction: at most four textures
      * are protected for a draw, out of 128 host slots. */
     if (tex_is_3d(t) && !G.tex3d)
@@ -2186,6 +2321,16 @@ static int upload_texture(PCtx *p, PTex *t)
         t->prm_valid = 0;
     }
     t->last_use = ++G.tex_clock;
+    if (t->dirty) {
+        static unsigned texlog;
+        const unsigned char *lv0 = dt + DT_LEVEL0;
+        if (texlog < 16) {
+            gl_note("tex#%u %dx%d base=%lx fmt=%04x type=%04x\n",
+                    texlog, (int)S16(lv0, LV_W), (int)S16(lv0, LV_H),
+                    base, U16(lv0, LV_FORMAT), U16(lv0, LV_TYPE));
+            texlog++;
+        }
+    }
     if (t->dirty && tex_is_cube(t)) {
         /* carte de cube : les six faces, niveaux lus dans l'objet de GLEngine */
         int f;
@@ -2218,6 +2363,7 @@ static int upload_texture(PCtx *p, PTex *t)
                 G.n_texuploads++;
             }
         t->dirty = 0;
+        t->lv0_sig = tex_lv0_sig(t);
     }
     if (t->dirty) {
         for (l = 0; l < DT_LEVELS; l++) {
@@ -2247,6 +2393,26 @@ static int upload_texture(PCtx *p, PTex *t)
                            !depth_pair_ok(host_base(base), fmt) || (fmt == 0x1902 && t3))
                     return no(NO_TEX_FORMAT, (fmt << 16) | type,
                               ((unsigned long)S16(lv, LV_ROWPIX) << 16) | w);
+                if (fmt == 0x1906 && type == 0x1401 && !t3) {
+                    unsigned long hbase = 0x1908;
+                    size = w * h * 4;
+                    row = w * 4;
+                    if (!arena_alloc(size, &off))
+                        return no(NO_TEX_SIZE, w, h);
+                    pack_alpha_as_rgba(d, (unsigned long)S16(lv, LV_ROWPIX), w, h,
+                                       G.q.win + off);
+                    fmt = 0x1908;
+                    c = reserve(p, QGPU_LEN_TEX_IMAGE3);
+                    c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3);
+                    c[1] = t->qtex; c[2] = t3 ? QGPU_TT_3D : QGPU_TT_2D; c[3] = l;
+                    c[4] = w; c[5] = h; c[6] = dep; c[7] = hbase; c[8] = fmt; c[9] = type;
+                    c[10] = G.q.base + off; c[11] = row; c[12] = t3 ? img : 0;
+                    G.n_texuploads++;
+                    continue;
+                }
+                if ((fmt == 0x1900 || fmt == 0x80E5 || fmt == 0x8049) && type == 0x1401) {
+                    fmt = 0x1909;
+                }
                 if (!arena_alloc(size, &off))
                     return no(NO_TEX_SIZE, w, h);
                 memcpy(G.q.win + off, d, size);
@@ -2265,11 +2431,14 @@ static int upload_texture(PCtx *p, PTex *t)
                           ((unsigned long)S16(lv, LV_ROWPIX) << 16) | w);
             c = reserve(p, QGPU_LEN_TEX_IMAGE);
             c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE, QGPU_LEN_TEX_IMAGE);
-            c[1] = t->qtex; c[2] = l; c[3] = w; c[4] = h; c[5] = base;
+            c[1] = t->qtex; c[2] = l; c[3] = w; c[4] = h;
+            c[5] = (base == 0x1906 || U16(lv, LV_FORMAT) == 0x1906) ? 0x1908UL
+                 : host_base(base);
             c[6] = G.q.base + off;
             G.n_texuploads++;
         }
         t->dirty = 0;
+        t->lv0_sig = tex_lv0_sig(t);
     }
     prm[0] = U16(gp, TP_MIN);
     /* Filtre mipmap sans la chaîne : l'hôte refuserait la soumission
@@ -2504,7 +2673,7 @@ static int texture_unit_ok(PCtx *p, int u, TexUnit *tu)
     if (env == 0x8570 && !combine_ok(us, u, tu))
         return 0;
     dt = (void *)GLD_U32(units, u * 0x14 + unit_slot(mask) * 4);
-    tu->t = dt ? find_tex(dt) : 0;
+    tu->t = dt ? intern_tex(dt) : 0;
     if (!tu->t)
         return no(NO_TEX_UNKNOWN, (unsigned long)dt, mask);
     /* Texture sans image (jamais définie) : OpenGL la dit incomplète et coupe
@@ -2692,6 +2861,24 @@ static void queue_readback_to(PCtx *p, int depth, unsigned char *dst, unsigned l
         hf->npost++;
     }
     G.n_readbacks++;
+}
+
+static void queue_present(PCtx *p, unsigned long dest_off, unsigned long stride,
+                          unsigned long fmt)
+{
+    unsigned long *c;
+    unsigned long w = p->sw, h = p->sh;
+    c = reserve(p, QGPU_LEN_SURF_PRESENT);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_PRESENT, QGPU_LEN_SURF_PRESENT);
+    c[1] = p->surf;
+    c[2] = dest_off;
+    c[3] = stride;
+    c[4] = 0;
+    c[5] = 0;
+    c[6] = w;
+    c[7] = h;
+    c[8] = fmt;
+    G.n_present++;
 }
 
 static void queue_readback(PCtx *p, int depth, unsigned char *dst)
@@ -3398,6 +3585,162 @@ static void *geom_alloc_vb(void *ctx, unsigned long id, unsigned long *n);
 static void  geom_complete_vb(void *ctx, void *buf, unsigned long used);
 static void  geom_free_vb(void *ctx, void *buf);
 
+/* ── 2.1 : objets tampon à la GeForce3 (docs/re/tableaux-de-sommets.md §3) ──
+ * Poignée non nulle + FlushBuffer qui acquitte les bits 0-1. BufferSubData
+ * reste à 0 : GLEngine fait le memcpy puis FlushBuffer. En v14 le paquet
+ * DRAW_RAW packed est copié une fois dans un tampon hôte ; les dessins
+ * suivants du même intervalle émettent DRAW_RAW_BUF sans retraverser BAR0. */
+struct PBuf {
+    PBuf           *next;
+    void          **data;               /* vbo+0x30 */
+    unsigned long  *flags;              /* drapeaux par rendu, vbo+0x48+4i */
+    unsigned long   last_len;
+    long            qid;                /* identifiant hôte, -1 tant qu'inutile */
+    unsigned long   qsize;
+    unsigned long   pack_fmt, pack_vmin, pack_nverts;
+    int             dirty;
+};
+
+static PBuf *buf_from_vbo(unsigned long vbo)
+{
+    PBuf *b;
+    void **key;
+    if (!vbo)
+        return 0;
+    key = (void **)(vbo + 0x30);
+    for (b = G.bufs; b; b = b->next)
+        if (b->data == key)
+            return b;
+    return 0;
+}
+
+static long buf_alloc_id(void)
+{
+    unsigned long i;
+    for (i = 0; i < QGPU_CLIENT_BUF_IDS; i++) {
+        unsigned long w = i / 32, bit = 1UL << (i % 32);
+        if (!(G.buf_used[w] & bit)) {
+            G.buf_used[w] |= bit;
+            return (long)(G.buf_base + i);
+        }
+    }
+    return -1;
+}
+
+static void buf_free_id(long id)
+{
+    unsigned long i;
+    if (id < (long)G.buf_base)
+        return;
+    i = (unsigned long)id - G.buf_base;
+    if (i >= QGPU_CLIENT_BUF_IDS)
+        return;
+    G.buf_used[i / 32] &= ~(1UL << (i % 32));
+}
+
+static void buf_host_destroy(PCtx *p, PBuf *b)
+{
+    unsigned long *c;
+    if (!b || b->qid < 0)
+        return;
+    if (p && p->qctx >= 0 && !p->broken && G.state > 0) {
+        c = reserve(p, QGPU_LEN_BUF);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_BUF_DESTROY, QGPU_LEN_BUF);
+        c[1] = (unsigned long)b->qid;
+    }
+    buf_free_id(b->qid);
+    b->qid = -1;
+    b->qsize = 0;
+}
+
+static int buf_host_ensure(PCtx *p, PBuf *b, unsigned long bytes)
+{
+    unsigned long *c;
+    long id;
+    if (!p || p->qctx < 0 || p->broken || bytes == 0 || bytes > QGPU_MAX_BUF_SIZE)
+        return 0;
+    if (b->qid >= 0 && b->qsize >= bytes)
+        return 1;
+    buf_host_destroy(p, b);
+    id = buf_alloc_id();
+    if (id < 0)
+        return 0;
+    c = reserve(p, QGPU_LEN_BUF_CREATE);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE);
+    c[1] = (unsigned long)id;
+    c[2] = bytes;
+    b->qid = id;
+    b->qsize = bytes;
+    return 1;
+}
+
+static long buf_create(void *ctx, unsigned long *handle, void **data,
+                       unsigned long *flags)
+{
+    PBuf *b;
+    (void)ctx;
+    if (!handle)
+        return 0;
+    b = calloc(1, sizeof(*b));
+    if (!b) {
+        *handle = 0;
+        return 0;
+    }
+    b->data = data;
+    b->flags = flags;
+    b->qid = -1;
+    b->dirty = 1;
+    pthread_mutex_lock(&G.mu);
+    b->next = G.bufs;
+    G.bufs = b;
+    pthread_mutex_unlock(&G.mu);
+    *handle = (unsigned long)b;
+    return 0;
+}
+
+static long buf_destroy(void *ctx, unsigned long handle)
+{
+    PBuf *b = (PBuf *)handle, **pp, *pctx_b;
+    PCtx *p;
+    pthread_mutex_lock(&G.mu);
+    p = find_ctx(ctx);
+    if (b) {
+        buf_host_destroy(p, b);
+        for (pp = &G.bufs; (pctx_b = *pp); pp = &pctx_b->next) {
+            if (pctx_b == b) {
+                *pp = b->next;
+                break;
+            }
+        }
+        free(b);
+    }
+    pthread_mutex_unlock(&G.mu);
+    return 0;
+}
+
+static long buf_flush(void *ctx, unsigned long handle, void *ptr, unsigned long len)
+{
+    PBuf *b = (PBuf *)handle;
+    (void)ctx;
+    (void)ptr;
+    pthread_mutex_lock(&G.mu);
+    if (b) {
+        b->last_len = len;
+        b->dirty = 1;
+        if (b->flags)
+            *b->flags &= ~3UL;          /* GeForce3 : rlwinm bits 0-1 */
+    }
+    pthread_mutex_unlock(&G.mu);
+    return 0;
+}
+
+static long buf_reclaim(void *ctx, unsigned long handle)
+{
+    (void)ctx;
+    (void)handle;
+    return 0;
+}
+
 /* Entrées gld que le plugin réalise lui-même, au lieu de les transmettre au
  * rendu d'Apple. Le crochet pomppc_pre rend l'adresse à appeler : il suffit d'y
  * rendre la nôtre, le trampoline saute dedans avec les arguments d'origine.
@@ -3406,6 +3749,12 @@ void *pomppc_gld_override(int id)
 {
     if (G.state <= 0)
         return 0;
+    switch (id) {
+    case GLD_CreateBuffer:  return (void *)buf_create;
+    case GLD_DestroyBuffer: return (void *)buf_destroy;
+    case GLD_FlushBuffer:   return (void *)buf_flush;
+    case GLD_ReclaimBuffer: return (void *)buf_reclaim;
+    }
     if (G.v7) {
         switch (id) {
         case GLD_AllocVertexBuffer:    return (void *)geom_alloc_vb;
@@ -3450,11 +3799,13 @@ void *pomppc_gld_override(int id)
  *     compteur DOIT rester à zéro ; c'est la garantie d'exactitude.
  *
  *   — TABLEAUX DE SOMMETS (l'autre canal). Si GL_VERTEX_ARRAY est actif,
- *     on retire cfg+0x11c : GLEngine n'écrit plus dans BeginPrimitiveBuffer
- *     (où il déroule les indices) et appelle RenderVertexArray (+0x70, VAR)
- *     ou AllocVertexBuffer / RenderVertexBuffer (+0x4c). Le plugin lit alors
- *     les attributs dans l'objet tableau de sommets (GS_VAO) et émet un
- *     DRAW_RAW indexé — les sommets uniques ne sont copiés qu'une fois.
+ *     on pose cfg+0x78 : _gleDrawArraysOrElements_Exec quitte Begin/End et
+ *     appelle RenderVertexArray (+0x70, VAR) ou AllocVertexBuffer /
+ *     RenderVertexBuffer (+0x4c). Le descripteur cfg+0x11c RESTE : glBegin
+ *     continue d'écrire les attributs bruts. ARRAY=2 retire le descripteur
+ *     (canal GeForce3 strict) ; un glBegin dans cet état pose array_mix et
+ *     le dispatch suivant republie. Le plugin lit GS_VAO et émet un DRAW_RAW
+ *     indexé — les sommets uniques ne sont copiés qu'une fois.
  *
  * Tout ce qui peut échouer (téléversement de texture, place dans le flux, dans
  * la zone des sommets) est fait à Begin, AVANT que GLEngine écrive quoi que ce
@@ -3513,14 +3864,16 @@ static int geom_switch(void)
     return v;
 }
 
-/* POMPPC_GL_ARRAY : 0 coupé, 1 auto si un tableau de positions est actif
- * (défaut), 2 forcé. */
+/* POMPPC_GL_ARRAY : 0 coupé (défaut), 1 mixte : cfg+0x78 sans retirer
+ * cfg+0x11c, 2 forcé GeForce3 (descripteur nul). Le mixte n'est pas le
+ * défaut : un DrawElements mal packé ressemble à de la géométrie cassée
+ * (Colin McRae, comme le début d'UT2004). */
 static int array_switch(void)
 {
     static int v = -1;
     if (v < 0) {
         const char *e = getenv("POMPPC_GL_ARRAY");
-        v = (e && *e) ? atoi(e) : 1;
+        v = (e && *e) ? atoi(e) : 0;
         if (v < 0)
             v = 0;
     }
@@ -3537,8 +3890,9 @@ static int va_enabled(const unsigned char *V, int a)
     return (int)((GLD_U32(V, VA_EN_HI) >> (a - 16)) & 1);
 }
 
-/* Un tableau de positions est-il actif ? C'est le critère pour retirer
- * cfg+0x11c et prendre le canal RenderVertexArray / RenderVertexBuffer. */
+/* Un tableau de positions est-il actif ? Critère pour poser cfg+0x78
+ * (DrawArrays/DrawElements quittent Begin/End). ARRAY=2 force ce canal
+ * et retire aussi le descripteur. */
 static int geom_va_on(PCtx *p)
 {
     unsigned char *g, *V;
@@ -3587,7 +3941,7 @@ static int unit_textured(PCtx *p, int u)
     if (!texturing_on(p))
         return 0;
     dt = unit_drvtex(p, u, &mask);
-    t = dt ? find_tex(dt) : 0;
+    t = dt ? intern_tex(dt) : 0;
     if (!t)
         return 0;
     (void)lv;
@@ -3631,7 +3985,7 @@ static int geom_texture_ok(PCtx *p)
             return no(NO_TEX_ENV, env, u);
         if (env == 0x8570 && !combine_ok(us, u, &tu))
             return 0;
-        t = dt ? find_tex(dt) : 0;
+        t = dt ? intern_tex(dt) : 0;
         if (!t)
             return no(NO_TEX_UNKNOWN, (unsigned long)dt, mask);
         (void)lv;
@@ -3711,10 +4065,9 @@ static unsigned long geom_format(PCtx *p)
     unsigned long fmt = QGPU_VF_POS(4);
     int u, lighting = GLD_U8(g, GS_LIGHTING) != 0, normal = lighting;
 
-    /* La couleur ne sert que si elle atteint la sortie : éclairage éteint, ou
-       allumé avec GL_COLOR_MATERIAL. Quatre mots de moins par sommet sinon. */
-    if (!lighting || GLD_U8(g, GS_COLOR_MATERIAL))
-        fmt |= QGPU_VF_COLOR;
+    /* Toujours la couleur : les glyphes WC3 sont des quads colorés. Sans ça,
+       éclairage allumé et COLOR_MATERIAL éteint → matériau (souvent noir). */
+    fmt |= QGPU_VF_COLOR;
     /* La coordonnée de brouillard n'est portée QUE si c'est bien elle la source :
        la présence du bit dit à l'hôte de poser GL_FOG_COORDINATE. */
     if (GLD_U8(g, GS_FOG) && U16(g, GS_FOG_COORD_SRC) == 0x8451)
@@ -4121,13 +4474,25 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
     G.pend = 0;
     G.pend_drop = 1;
     p = find_ctx(ctx);
-    if (!p || !geom_ok(p) || !ensure_surface(p) || !texture_ok(p, &ti)) {
+    if (!p || !geom_ok(p) || !ensure_surface(p)) {
         if (p) {
             no(NO_G_LATE, (unsigned long)(unsigned short)mode, p->geom_on);
             p->geom_lost = 1;           /* exact à partir du prochain dispatch */
             G.n_geomdrop++;
         }
         goto refuse;
+    }
+    /* Texture pas encore téléversable (atlas de police WC3 : TexImage après
+       le dispatch, ou premier lot avant intern). Un flush libère l'arène ;
+       si ça échoue encore, on jette CE lot sans tuer le T&L — le suivant
+       (menu animé, HUD) reprendra le chemin brut avec la texture prête. */
+    if (!texture_ok(p, &ti)) {
+        flush();
+        if (!texture_ok(p, &ti)) {
+            no(NO_G_LATE, (unsigned long)(unsigned short)mode, p->geom_on);
+            G.n_geomdrop++;
+            goto refuse;
+        }
     }
     /* Ce que GLEngine a VRAIMENT retenu : si le pas ou le descripteur ne sont
        pas les nôtres, c'est son sommet interne (déjà transformé) qui arrive —
@@ -4136,11 +4501,15 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
     words = p->geom_words;
     if (!gc || !words || GLD_U16(gc, GC_VTX_STRIDE) != words * 4 ||
         GLD_U32(gc, GC_VTX_DESC) != (unsigned long)p->desc) {
-        /* Canal tableaux : cfg+0x11c est nul, Begin/End n'est plus le chemin.
-           Un glBegin pendant que les tableaux sont actifs est jeté, sans
-           quitter le domaine (sinon le premier mixte tuerait UT2004). */
-        if (geom_va_on(p) || (p->cfg && GLD_U32(p->cfg, 0x11c) == 0))
+        /* Canal GeForce3 strict (ARRAY=2) : cfg+0x11c est nul, le sommet
+           interne n'est pas le nôtre. Un glBegin ici pose array_mix : le
+           prochain dispatch republie le descripteur. ARRAY=1 garde 0x11c,
+           donc glBegin continue. */
+        if (p->cfg && GLD_U32(p->cfg, 0x11c) == 0) {
+            p->array_mix = 1;
+            p->desc_dirty = 1;
             goto refuse;
+        }
         no(NO_G_STRIDE, gc ? GLD_U16(gc, GC_VTX_STRIDE) : 0, words * 4);
         p->geom_lost = 1;
         G.n_geomdrop++;
@@ -4505,9 +4874,10 @@ static void geom_end(void *ctx, long flag, short mode, long n)
 
 /* ─────────────────── tableaux de sommets (canal GeForce3) ───────────────────
  *
- * GLEngine, avec cfg+0x11c, déroule glDrawElements dans Begin/End : chaque
- * indice devient un sommet recopié. Ici on lit l'objet tableau (GS_VAO), on
- * packe les attributs au format DRAW_RAW, et on envoie les indices tels quels.
+ * ARRAY=1 pose cfg+0x78 : DrawArrays/DrawElements quittent le déroulement
+ * Begin/End et appellent ici, descripteur toujours publié pour glBegin.
+ * ARRAY=2 retire cfg+0x11c (GeForce3 strict). On lit GS_VAO, on packe au
+ * format DRAW_RAW, et on envoie les indices tels quels.
  * Docs : tableaux-de-sommets.md §2 et §6.
  */
 
@@ -4775,6 +5145,110 @@ static void va_count_prims(unsigned long m, unsigned long n)
     }
 }
 
+/* 0 = pas de cache hôte (tableau client). 1 = réutilisable si le paquet match.
+ * 2 = VBO, mais il faut re-emballer (FlushBuffer ou premier dessin). */
+static int va_host_ready(const unsigned char *V, unsigned long fmt, PBuf **out)
+{
+    static const unsigned long bit[8] = {
+        QGPU_VF_NORMAL, QGPU_VF_COLOR, QGPU_VF_SEC_COLOR, QGPU_VF_FOG,
+        QGPU_VF_TEX(0), QGPU_VF_TEX(1), QGPU_VF_TEX(2), QGPU_VF_TEX(3)
+    };
+    static const int slot[8] = { 1, 2, 4, 3, 8, 9, 10, 11 };
+    PBuf *pos, *b;
+    unsigned long vbo;
+    int i, dirty = 0;
+
+    *out = 0;
+    if (!G.hostbuf || !V)
+        return 0;
+    vbo = GLD_U32(V, VA_VBO(V, 0));
+    pos = buf_from_vbo(vbo);
+    if (!pos)
+        return 0;
+    if (pos->dirty)
+        dirty = 1;
+    for (i = 0; i < 8; i++) {
+        if (!(fmt & bit[i]) || !va_enabled(V, slot[i]))
+            continue;
+        vbo = GLD_U32(V, VA_VBO(V, slot[i]));
+        if (!vbo)
+            return 0;
+        b = buf_from_vbo(vbo);
+        if (!b)
+            return 0;
+        if (b->dirty)
+            dirty = 1;
+    }
+    *out = pos;
+    return dirty ? 2 : 1;
+}
+
+static void va_host_clean(const unsigned char *V, unsigned long fmt, PBuf *pos)
+{
+    static const unsigned long bit[8] = {
+        QGPU_VF_NORMAL, QGPU_VF_COLOR, QGPU_VF_SEC_COLOR, QGPU_VF_FOG,
+        QGPU_VF_TEX(0), QGPU_VF_TEX(1), QGPU_VF_TEX(2), QGPU_VF_TEX(3)
+    };
+    static const int slot[8] = { 1, 2, 4, 3, 8, 9, 10, 11 };
+    PBuf *b;
+    int i;
+    if (pos)
+        pos->dirty = 0;
+    if (!V)
+        return;
+    for (i = 0; i < 8; i++) {
+        if (!(fmt & bit[i]) || !va_enabled(V, slot[i]))
+            continue;
+        b = buf_from_vbo(GLD_U32(V, VA_VBO(V, slot[i])));
+        if (b)
+            b->dirty = 0;
+    }
+}
+
+static void emit_draw_client(PCtx *p, unsigned long mode, unsigned long nidx,
+                             unsigned long nverts, unsigned long fmt,
+                             unsigned long vtx_off, unsigned long ioff,
+                             unsigned long itype_h, PBuf *hb)
+{
+    unsigned long *c;
+    close_raw();
+    if (G.bound != p) {
+        c = G.cmd + G.ncmd;
+        c[0] = QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX);
+        c[1] = p->qctx;
+        G.ncmd += QGPU_LEN_CTX;
+        G.bound = p;
+    }
+    c = G.cmd + G.ncmd;
+    if (hb && hb->qid >= 0) {
+        c[0] = QGPU_CMD_HDR(QGPU_OP_DRAW_RAW_BUF, QGPU_LEN_DRAW_RAW_BUF);
+        c[1] = mode;
+        c[2] = nidx ? nidx : nverts;
+        c[3] = (unsigned long)hb->qid;
+        c[4] = 0;
+        c[5] = 0;
+        c[6] = fmt;
+        c[7] = QGPU_BUF_SHMEM;
+        c[8] = nidx ? G.base + ioff : 0;
+        c[9] = itype_h;
+        c[10] = 0;
+        c[11] = nverts;
+        G.ncmd += QGPU_LEN_DRAW_RAW_BUF;
+    } else {
+        c[0] = QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW);
+        c[1] = mode;
+        c[2] = nidx ? nidx : nverts;
+        c[3] = G.base + VTX_OFF + vtx_off;
+        c[4] = 0;
+        c[5] = fmt;
+        c[6] = nidx ? G.base + ioff : 0;
+        c[7] = itype_h;
+        c[8] = 0;
+        c[9] = nverts;
+        G.ncmd += QGPU_LEN_DRAW_RAW;
+    }
+}
+
 /* Cœur du canal tableaux. Verrou déjà tenu. 1 = traité (même si n=0). */
 static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
                             long first, long count, unsigned long itype,
@@ -4783,8 +5257,10 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
     unsigned char *V, *g;
     TexInfo ti;
     unsigned long fmt, words, vmin, vmax, nverts, nidx, ioff, itype_h;
-    unsigned long vtx_off, *c;
+    unsigned long vtx_off, packed, *c;
     float *dst;
+    PBuf *hb;
+    int host, reuse;
     long i;
 
     if (count <= 0)
@@ -4821,18 +5297,57 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
     sync_to_host(p, 1, GLD_U8(g, GS_DEPTH_TEST) || stencil_active(p));
     send_state(p, &ti, 1);
     geom_send_all(p, fmt);
-    if (G.ncmd + QGPU_LEN_DRAW_RAW + 4 > CMD_WORDS ||
-        G.vtx + nverts * words * 4 > VTX_LIMIT ||
+    packed = nverts * words * 4;
+    host = va_host_ready(V, fmt, &hb);
+    reuse = host == 1 && hb && hb->qid >= 0 && hb->qsize >= packed &&
+            hb->pack_fmt == fmt && hb->pack_vmin == vmin &&
+            hb->pack_nverts == nverts;
+    if (G.ncmd + QGPU_LEN_DRAW_RAW_BUF + QGPU_LEN_BUF_SUBDATA +
+            QGPU_LEN_BUF_CREATE + 8 > CMD_WORDS ||
+        (!reuse && G.vtx + packed > VTX_LIMIT) ||
         (nidx && G.idx + nidx * 4 + 4 > IDX_SIZE))
         flush();
-    if (G.vtx + nverts * words * 4 > VTX_LIMIT ||
+    if ((!reuse && G.vtx + packed > VTX_LIMIT) ||
         (nidx && G.idx + nidx * 4 + 4 > IDX_SIZE))
         return no(NO_G_ARRAY, nverts, nidx);
-    vtx_off = G.vtx;
-    dst = (float *)(G.win + VTX_OFF + vtx_off);
-    for (i = 0; (unsigned long)i < nverts; i++)
-        va_pack_vertex(dst + (unsigned long)i * words, p, V, fmt, vmin + (unsigned long)i);
-    G.vtx += nverts * words * 4;
+    vtx_off = 0;
+    if (!reuse) {
+        if (host && hb && !buf_host_ensure(p, hb, packed))
+            hb = 0;
+        vtx_off = G.vtx;
+        dst = (float *)(G.win + VTX_OFF + vtx_off);
+        for (i = 0; (unsigned long)i < nverts; i++)
+            va_pack_vertex(dst + (unsigned long)i * words, p, V, fmt,
+                           vmin + (unsigned long)i);
+        G.vtx += packed;
+        if (hb && hb->qid >= 0 &&
+            G.ncmd + QGPU_LEN_BUF_SUBDATA + QGPU_LEN_DRAW_RAW_BUF + 4 <= CMD_WORDS) {
+            close_raw();
+            if (G.bound != p) {
+                c = G.cmd + G.ncmd;
+                c[0] = QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX);
+                c[1] = p->qctx;
+                G.ncmd += QGPU_LEN_CTX;
+                G.bound = p;
+            }
+            c = G.cmd + G.ncmd;
+            c[0] = QGPU_CMD_HDR(QGPU_OP_BUF_SUBDATA, QGPU_LEN_BUF_SUBDATA);
+            c[1] = (unsigned long)hb->qid;
+            c[2] = 0;
+            c[3] = G.base + VTX_OFF + vtx_off;
+            c[4] = packed;
+            G.ncmd += QGPU_LEN_BUF_SUBDATA;
+            hb->pack_fmt = fmt;
+            hb->pack_vmin = vmin;
+            hb->pack_nverts = nverts;
+            va_host_clean(V, fmt, hb);
+            G.n_vbomiss++;
+        } else {
+            hb = 0;
+        }
+    } else {
+        G.n_vbohits++;
+    }
     ioff = 0;
     itype_h = QGPU_IDX_NONE;
     if (nidx) {
@@ -4854,26 +5369,7 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
         }
         G.idx += need;
     }
-    close_raw();
-    if (G.bound != p) {
-        c = G.cmd + G.ncmd;
-        c[0] = QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX);
-        c[1] = p->qctx;
-        G.ncmd += QGPU_LEN_CTX;
-        G.bound = p;
-    }
-    c = G.cmd + G.ncmd;
-    c[0] = QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW);
-    c[1] = mode;
-    c[2] = nidx ? nidx : nverts;
-    c[3] = G.base + VTX_OFF + vtx_off;
-    c[4] = 0;
-    c[5] = fmt;
-    c[6] = nidx ? G.base + ioff : 0;
-    c[7] = itype_h;
-    c[8] = 0;
-    c[9] = nverts;
-    G.ncmd += QGPU_LEN_DRAW_RAW;
+    emit_draw_client(p, mode, nidx, nverts, fmt, vtx_off, ioff, itype_h, hb);
     G.n_rawdraws++;
     G.n_rawverts += nverts;
     G.n_arraydraws++;
@@ -5002,25 +5498,44 @@ long pomppc_geom_dispatch(void *ctx)
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
     if (p && geom_ok(p)) {
-        int arrays = geom_va_on(p);
-        if (arrays) {
-            /* Canal tableaux : sans descripteur, GLEngine n'écrit plus dans
-               Begin/End (où il déroule les indices) et appelle RenderVertexArray
-               / RenderVertexBuffer. Bit 1 si on vient de retirer le descripteur. */
-            if (GLD_U32(p->cfg, 0x11c) != 0) {
+        TexInfo ti;
+        int arrays, force;
+        /* Téléverser maintenant : si une police n'est pas encore prête, on
+           laisse GLEngine transformer (bit 0 = 0) plutôt que de jeter le
+           premier lot de glyphes sous T&L. Le dispatch suivant réessaiera. */
+        if (!texture_ok(p, &ti)) {
+            flush();
+            if (!texture_ok(p, &ti)) {
+                p->geom_on = 0;
+                pthread_mutex_unlock(&G.mu);
+                return 0;
+            }
+        }
+        arrays = geom_va_on(p);
+        /* Mixte : 0x78 détourne DrawArrays/DrawElements vers RenderVertexArray
+           sans retirer le descripteur (glBegin reste le chemin T&L). ARRAY=2
+           retire 0x11c, sauf si un glBegin a déjà forcé le repli mixte. */
+        force = arrays && array_switch() >= 2 && !p->array_mix;
+        if (p->cfg) {
+            unsigned char want78 = (arrays && !p->array_mix) ? 1 : 0;
+            if (GLD_U8(p->cfg, 0x78) != want78) {
+                GLD_U8(p->cfg, 0x78) = want78;
+                p->desc_dirty = 1;
+            }
+        }
+        if (force) {
+            if (p->cfg && GLD_U32(p->cfg, 0x11c) != 0) {
                 GLD_U32(p->cfg, 0x11c) = 0;
                 p->desc_dirty = 1;
             }
             p->geom_fmt = geom_format(p);
             p->geom_words = QGPU_VF_WORDS(p->geom_fmt);
-            bits = p->desc_dirty ? 3 : 1;
-            p->desc_dirty = 0;
         } else {
             if (geom_publish(p))
                 p->desc_dirty = 1;
-            bits = p->desc_dirty ? 3 : 1;
-            p->desc_dirty = 0;
         }
+        bits = p->desc_dirty ? 3 : 1;
+        p->desc_dirty = 0;
         p->geom_on = 1;
     } else if (p) {
         p->geom_on = 0;
@@ -5044,10 +5559,10 @@ void pomppc_geom_context(void *ctx, void *cfg)
         p->cfg = (unsigned char *)cfg;
         p->desc_dirty = 1;
         GLD_U8(p->cfg, 0x79) = 1;
-        /* Comme le GeForce3 : +0x78 est lu par _gleDrawArraysOrElements_Exec.
-           Sans lui, les tableaux restent sur Begin/End même une fois le
-           descripteur retiré. */
-        GLD_U8(p->cfg, 0x78) = 1;
+        /* +0x78 : seulement si le canal tableaux est demandé. Posé trop tôt,
+           _gleDrawArraysOrElements_Exec quitte Begin/End alors que le
+           descripteur est encore là — ou que les jeux n'utilisent que glBegin
+           avec GL_VERTEX_ARRAY allumé. */
         /* Identifiants de format de sommet (pas imposés par GLEngine :
            0x10, 0x18, 0x20, 0x14, 0x20|0x24, 0x2c|0x34). Valeurs du GeForce3. */
         {
@@ -5067,6 +5582,10 @@ void pomppc_geom_context(void *ctx, void *cfg)
            porte s, t, r, q. Relevé : docs/re/opengl-1.4.md §3. */
         if (!(getenv("POMPPC_GL_RDIRTY") && getenv("POMPPC_GL_RDIRTY")[0] == '0'))
             GLD_U8(p->cfg, 0x7a) = 1;
+        /* GeForce3 : +0x7b lu seulement par _glDrawPixels_Exec. À 0, le
+           DrawPixels/Bitmap sous T&L ne pose pas la position de rastérisation
+           dans le logiciel — polices bitmap muettes. */
+        GLD_U8(p->cfg, 0x7b) = 1;
         GLD_U32(p->cfg, 0x11c) = 0;     /* publié au premier dispatch dans le domaine */
     }
     pthread_mutex_unlock(&G.mu);
@@ -5192,11 +5711,20 @@ static void prim(Batch *b, int n, const unsigned char **v, const unsigned char *
     unsigned long vw = rk_words[b->kind];
     int i;
     /* UT2004 laisse des NaN (positions, texcoords) : un seul ferait rejeter
-       tout le DRAW_TRIANGLES_TEX. On saute la primitive, le reste part. */
-    for (i = 0; i < n; i++) {
-        float x = GLD_F32(v[i], V_X), y = GLD_F32(v[i], V_Y);
-        if (!(x > -1e9f && x < 1e9f && y > -1e9f && y < 1e9f))
-            return;
+       tout le DRAW_TRIANGLES_TEX. On saute la primitive, le reste part.
+       Colin McRae (menu 3D, ciel) envoie aussi des sommets fenêtre hors de
+       tout écran — Apple n'a pas découpé w=0. Un seul hors bande de garde
+       (4× le drawable) peint un triangle géant sur le HUD. */
+    {
+        float xmax = (float)((int)GLD_U32(b->p->ctx, CTX_WIDTH)  * 4);
+        float ymax = (float)((int)GLD_U32(b->p->ctx, CTX_HEIGHT) * 4);
+        if (!(xmax > 0.0f)) xmax = 4096.0f;
+        if (!(ymax > 0.0f)) ymax = 4096.0f;
+        for (i = 0; i < n; i++) {
+            float x = GLD_F32(v[i], V_X), y = GLD_F32(v[i], V_Y);
+            if (!(x > -xmax && x < xmax && y > -ymax && y < ymax))
+                return;
+        }
     }
     /* VTX_LIMIT, pas VTX_END : le haut de la zone porte les indices de la
        fusion, et les deux chemins cohabitent dans la même image (scène mixte). */
@@ -5832,7 +6360,7 @@ static int direct_window_ok(PCtx *p)
 
 #define WHY(...) (snprintf(D.why, sizeof(D.why), __VA_ARGS__), 0)
     if (!D.windowed || !gd)
-        return WHY("fenêtre : SPI absentes ou pas de drawable");
+        return WHY("window: SPI missing or no drawable");
     cid = GLD_U32(gd, GD_CID); wid = GLD_U32(gd, GD_WID); sid = GLD_U32(gd, GD_SID);
     {
         long e1 = D.window_bounds(cid, wid, &wr), e2 = D.surface_bounds(cid, wid, sid, &sr);
@@ -5846,23 +6374,23 @@ static int direct_window_ok(PCtx *p)
                         (unsigned long)sr.w == p->sw && (unsigned long)sr.h == p->sh)
                         e2 = 0;
             if (e2)
-                return WHY("surface introuvable : %ld surfaces, 1re %lx (wid %lx sid %lx)",
+                return WHY("surface not found: %ld surfaces, first %lx (wid %lx sid %lx)",
                            sn, sn > 0 ? sl[0] : 0, wid, sid);
         }
         if (e1 || e2)
-            return WHY("bornes refusées : fenêtre %ld, surface %ld (cid %lx wid %lx sid %lx)",
+            return WHY("bounds refused: window %ld, surface %ld (cid %lx wid %lx sid %lx)",
                        e1, e2, cid, wid, sid);
     }
     if ((unsigned long)sr.w != p->sw || (unsigned long)sr.h != p->sh)
-        return WHY("surface %gx%g en %g,%g ≠ drawable %lux%lu", sr.w, sr.h, sr.x, sr.y,
+        return WHY("surface %gx%g at %g,%g != drawable %lux%lu", sr.w, sr.h, sr.x, sr.y,
                    p->sw, p->sh);
     D.x = (long)(wr.x + sr.x);
     D.y = (long)(wr.y + sr.y);
     if (D.x < 0 || D.y < 0 || D.x + p->sw > D.w || D.y + p->sh > D.h)
-        return WHY("dépasse de l'écran (%ld,%ld)", D.x, D.y);
+        return WHY("off-screen (%ld,%ld)", D.x, D.y);
     /* fenêtres à l'écran, de l'avant vers l'arrière : rien au-dessus ne doit toucher */
     if (D.onscreen_list(cid, 0, 96, list, &n) != 0 || n <= 0 || n > 96)
-        return WHY("liste des fenêtres refusée (n %ld)", n);
+        return WHY("window list refused (n %ld)", n);
     for (i = 0; i < n && list[i] != wid; i++)
         if (D.window_bounds(cid, list[i], &o) == 0 &&
             /* Une fenêtre qui couvre tout l'écran devant une application au
@@ -5874,10 +6402,10 @@ static int direct_window_ok(PCtx *p)
                le coin 0,0 de l'écran, au niveau du Dock (vu en vrai : 13 fenêtres). */
             !(o.x == 0 && o.y == 0 && o.w <= 128 && o.h <= 128) &&
             rects_touch(D.x, D.y, p->sw, p->sh, &o) && !window_invisible(cid, list[i]))
-            return WHY("recouverte par la fenêtre %lx (%g,%g %gx%g), rang %ld/%ld, alpha %g",
+            return WHY("covered by window %lx (%g,%g %gx%g), rank %ld/%ld, alpha %g",
                        list[i], o.x, o.y, o.w, o.h, i, n, window_alpha(cid, list[i]));
     if (i == n)
-        return WHY("fenêtre %lx absente de la liste (%ld fenêtres)", wid, n);
+        return WHY("window %lx missing from list (%ld windows)", wid, n);
     /* Curseur visible dans la surface : écrire par-dessus l'efface jusqu'à son
        prochain mouvement. Tant qu'il BOUGE (menus, interface), chemin normal ;
        immobile d'une vérification à l'autre (jeu qui le ramène au centre à
@@ -5887,7 +6415,7 @@ static int direct_window_ok(PCtx *p)
         D.cur_x = cur.x; D.cur_y = cur.y;
         o.x = cur.x - 32; o.y = cur.y - 32; o.w = 64; o.h = 64;
         if (!still && rects_touch(D.x, D.y, p->sw, p->sh, &o))
-            return WHY("curseur en mouvement dans la surface (%g,%g)", cur.x, cur.y);
+            return WHY("cursor moving in surface (%g,%g)", cur.x, cur.y);
     }
     D.why[0] = 0;
     return 1;
@@ -5911,19 +6439,12 @@ static unsigned char *direct_target(PCtx *p, unsigned long *rowbytes)
         D.base = D.base_address(did);
         D.rowbytes = D.bytes_per_row(did);
         D.bpp = D.bits_per_pixel(did);
-        if (D.bpp == 16 && display_switch_32(did)) {
-            D.w = D.pixels_wide(did);
-            D.h = D.pixels_high(did);
-            D.base = D.base_address(did);
-            D.rowbytes = D.bytes_per_row(did);
-            D.bpp = D.bits_per_pixel(did);
-        }
         ok = D.base && (D.bpp == 32 || D.bpp == 16) &&
-             D.rowbytes >= D.w * (D.bpp <= 16 ? 2 : 4) &&
+             D.rowbytes >= D.w * (D.bpp == 16 ? 2 : 4) &&
              D.front_process(&front) == 0 && D.current_process(&me) == 0 &&
              D.same_process(&front, &me, &same) == 0 && same;
         if (!ok)
-            snprintf(D.why, sizeof(D.why), "pas au premier plan, ou écran %lu bits", D.bpp);
+            snprintf(D.why, sizeof(D.why), "not frontmost, or display %lu-bit", D.bpp);
         full = ok && p->sw == D.w && p->sh == D.h &&
                (!D.menubar_visible || !D.menubar_visible() || p->fullscreen_buf);
         if (full) {
@@ -5949,7 +6470,7 @@ static unsigned char *direct_target(PCtx *p, unsigned long *rowbytes)
     if (D.ok == 2 && G.n_frames % DIRECT_REFRESH == 0)
         return 0;
     *rowbytes = D.rowbytes;
-    return D.base + D.y * D.rowbytes + D.x * (D.bpp <= 16 ? 2 : 4);
+    return D.base + D.y * D.rowbytes + D.x * (D.bpp == 16 ? 2 : 4);
 }
 
 /* xRGB8888 (mot PowerPC 00RRGGBB) → xRGB1555 big-endian, format QFB
@@ -6033,10 +6554,11 @@ static unsigned char *ensure_present_stage(unsigned long w, unsigned long h)
  * l'hôte a eu toute la construction d'une image pour finir la précédente : la
  * barrière est en général déjà atteinte quand on arrive ici.
  *
- * Contrepartie assumée : une application qui CESSE de dessiner laisse sa
- * dernière image en vol jusqu'au prochain point de synchronisation (un
- * glReadPixels, un chemin logiciel, la fermeture du contexte), qui la
- * présente. */
+ * v13 — SURF_PRESENT : l'hôte écrit lui-même dans la VRAM QFB. L'attente
+ * de l'image n−1 reste (barrière de la soumission précédente), mais le G4
+ * ne recopie plus un pixel. Sans device v13, l'ancien chemin (relecture +
+ * memcpy, pack 1555 ici) est inchangé.
+ */
 static int present_direct(PCtx *p)
 {
     unsigned char *vram;
@@ -6050,6 +6572,20 @@ static int present_direct(PCtx *p)
         return 0;
     w = p->sw;
     h = p->sh;
+    if (G.scanout && D.bpp == 16) {
+        queue_present(p, (unsigned long)(vram - D.base), rowbytes, QGPU_PF_RGB1555);
+        flush();
+        G.n_direct++;
+        p->direct_at = G.n_frames;
+        return 1;
+    }
+    if (G.scanout && (D.bpp == 32 || D.bpp == 24)) {
+        queue_present(p, (unsigned long)(vram - D.base), rowbytes, QGPU_PF_XRGB8888);
+        flush();
+        G.n_direct++;
+        p->direct_at = G.n_frames;
+        return 1;
+    }
     if (D.bpp == 16) {
         unsigned char *st = ensure_present_stage(w, h);
         if (!st)
@@ -6158,6 +6694,674 @@ static int proc_standalone(int slot)
            slot == PROC_RenderVertexArray || slot == PROC_RenderVertexBuffer;
 }
 
+/* CopyTexSubImage2D (ctx, tex, target, level, xoff, yoff, x, y, w, h) :
+ * w,h viennent de la pile (9e et 10e, a[8] a[9] via le trampoline).
+ * Origine GL en bas à gauche → origine hôte en haut à gauche. */
+static int try_copy_tex(PCtx *p, unsigned long *a)
+{
+    void *drvtex = (void *)a[1];
+    unsigned long target = a[2], level = a[3];
+    unsigned long xoff = a[4], yoff = a[5];
+    long sx = (long)a[6], sy = (long)a[7];
+    unsigned long w = a[8], h = a[9];
+    unsigned long hy, *c;
+    PTex *t;
+
+    if (!G.pixops || target != 0x0DE1)
+        return 0;
+    if (w == 0 || h == 0)
+        return 1;
+    if (p->color == SW_NEWER || !accel_ok(p) || !ensure_surface(p) || p->surf < 0)
+        return 0;
+    if (sx < 0 || sy < 0 ||
+        (unsigned long)sx + w > p->sw || (unsigned long)sy + h > p->sh)
+        return 0;
+    t = intern_tex(drvtex);
+    if (!t || !texture_uploadable(t) || !upload_texture(p, t) || t->qtex < 0)
+        return 0;
+    hy = p->sh - (unsigned long)sy - h;
+    c = reserve(p, QGPU_LEN_COPY_TEX);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX);
+    c[1] = t->qtex;
+    c[2] = QGPU_TT_2D;
+    c[3] = level;
+    c[4] = xoff;
+    c[5] = yoff;
+    c[6] = 0;
+    c[7] = (unsigned long)sx;
+    c[8] = hy;
+    c[9] = w;
+    c[10] = h;
+    t->dirty = 0;
+    G.n_copytex++;
+    return 1;
+}
+
+/* ReadPixels (ctx, x, y, w, h, format, type, pixels) : 8 arguments, tous
+ * dans r3–r10. Rectangle : RGBA/RGB octet, profondeur FLOAT, stencil octet. */
+static int try_read_pixels(PCtx *p, unsigned long *a)
+{
+    long x = (long)a[1], y = (long)a[2], w = (long)a[3], h = (long)a[4];
+    unsigned long fmt = a[5], type = a[6];
+    unsigned char *pixels = (unsigned char *)a[7];
+    unsigned long hy, off, *c, row, col, bpp, rowb, pix;
+    const unsigned long *src;
+
+    if (!G.pixops || !pixels)
+        return 0;
+    if (!accel_ok(p) || p->surf < 0)
+        return 0;
+    if (w <= 0 || h <= 0)
+        return 1;
+    if (x < 0 || y < 0 ||
+        (unsigned long)x + (unsigned long)w > p->sw ||
+        (unsigned long)y + (unsigned long)h > p->sh)
+        return 0;
+    hy = p->sh - (unsigned long)y - (unsigned long)h;
+    if (type == 0x1406 && fmt == 0x1902) {       /* GL_DEPTH_COMPONENT / FLOAT */
+        const float *s;
+        float *dst;
+        if (p->depth == SW_NEWER)
+            return 0;
+        rowb = ((unsigned long)w * 4UL + 3UL) & ~3UL;
+        if (!arena_alloc((unsigned long)w * (unsigned long)h * 4, &off))
+            return 0;
+        c = reserve(p, QGPU_LEN_SURF_XFER);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_DEPTH_READBACK, QGPU_LEN_SURF_XFER);
+        c[1] = p->surf; c[2] = G.q.base + off; c[3] = (unsigned long)w * 4;
+        c[4] = (unsigned long)x; c[5] = hy;
+        c[6] = (unsigned long)w; c[7] = (unsigned long)h;
+        G.n_readbacks++;
+        G.n_pixread++;
+        flush();
+        drain_all();
+        for (row = 0; row < (unsigned long)h; row++) {
+            s = (const float *)(G.q.win + off +
+                                ((unsigned long)h - 1 - row) * (unsigned long)w * 4);
+            dst = (float *)(pixels + row * rowb);
+            memcpy(dst, s, (unsigned long)w * 4);
+        }
+        return 1;
+    }
+    if (type == 0x1401 && fmt == 0x1901) {       /* GL_STENCIL_INDEX / UBYTE */
+        const unsigned long *s;
+        unsigned char *d;
+        if (!p->stencil || p->depth == SW_NEWER)
+            return 0;
+        if (!arena_alloc((unsigned long)w * (unsigned long)h * 4, &off))
+            return 0;
+        c = reserve(p, QGPU_LEN_SURF_XFER);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_STENCIL_READBACK, QGPU_LEN_SURF_XFER);
+        c[1] = p->surf; c[2] = G.q.base + off; c[3] = (unsigned long)w * 4;
+        c[4] = (unsigned long)x; c[5] = hy;
+        c[6] = (unsigned long)w; c[7] = (unsigned long)h;
+        G.n_readbacks++;
+        G.n_pixread++;
+        flush();
+        drain_all();
+        for (row = 0; row < (unsigned long)h; row++) {
+            s = (const unsigned long *)(G.q.win + off +
+                                        ((unsigned long)h - 1 - row) * (unsigned long)w * 4);
+            d = pixels + row * (unsigned long)w;
+            for (col = 0; col < (unsigned long)w; col++)
+                d[col] = (unsigned char)s[col];
+        }
+        return 1;
+    }
+    if (p->color == SW_NEWER)
+        return 0;
+    if (type != 0x1401 || (fmt != 0x1908 && fmt != 0x1907))
+        return 0;
+    bpp = (fmt == 0x1907) ? 3UL : 4UL;
+    rowb = ((unsigned long)w * bpp + 3UL) & ~3UL;
+    if (!arena_alloc((unsigned long)w * (unsigned long)h * 4, &off))
+        return 0;
+    c = reserve(p, QGPU_LEN_SURF_XFER);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER);
+    c[1] = p->surf;
+    c[2] = G.q.base + off;
+    c[3] = (unsigned long)w * 4;
+    c[4] = (unsigned long)x;
+    c[5] = hy;
+    c[6] = (unsigned long)w;
+    c[7] = (unsigned long)h;
+    G.n_readbacks++;
+    G.n_pixread++;
+    flush();
+    drain_all();
+    src = (const unsigned long *)(G.q.win + off);
+    for (row = 0; row < (unsigned long)h; row++) {
+        const unsigned long *s = src + ((unsigned long)h - 1 - row) * (unsigned long)w;
+        unsigned char *d = pixels + row * rowb;
+        for (col = 0; col < (unsigned long)w; col++) {
+            pix = s[col];
+            d[0] = (unsigned char)(pix >> 16);
+            d[1] = (unsigned char)(pix >> 8);
+            d[2] = (unsigned char)pix;
+            if (bpp == 4)
+                d[3] = (unsigned char)(pix >> 24);
+            d += bpp;
+        }
+    }
+    return 1;
+}
+
+/* Texture 2D jetable (NEAREST, CLAMP_TO_EDGE) pour coller un rectangle
+ * de pixels sur l'hôte. Identifiant hors de la table intern_tex : alloc_tex_id
+ * n'évince que les PTex, le bit tex_used nous protège. */
+static int pix_scratch(PCtx *p, unsigned long w, unsigned long h)
+{
+    unsigned long *c;
+    if (w == 0 || h == 0 || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM)
+        return 0;
+    if (G.pixtex < 0) {
+        G.pixtex = alloc_tex_id(p);
+        if (G.pixtex < 0)
+            return 0;
+        c = reserve(p, QGPU_LEN_TEX_CREATE3 + 4 * QGPU_LEN_TEX_PARAM);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3);
+        c[1] = G.pixtex;
+        c[2] = QGPU_TT_2D;
+        c += QGPU_LEN_TEX_CREATE3;
+        c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_PARAM, QGPU_LEN_TEX_PARAM);
+        c[1] = G.pixtex; c[2] = QGPU_TP_MIN_FILTER; c[3] = 0x2600; /* GL_NEAREST */
+        c += QGPU_LEN_TEX_PARAM;
+        c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_PARAM, QGPU_LEN_TEX_PARAM);
+        c[1] = G.pixtex; c[2] = QGPU_TP_MAG_FILTER; c[3] = 0x2600;
+        c += QGPU_LEN_TEX_PARAM;
+        c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_PARAM, QGPU_LEN_TEX_PARAM);
+        c[1] = G.pixtex; c[2] = QGPU_TP_WRAP_S; c[3] = 0x812F; /* CLAMP_TO_EDGE */
+        c += QGPU_LEN_TEX_PARAM;
+        c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_PARAM, QGPU_LEN_TEX_PARAM);
+        c[1] = G.pixtex; c[2] = QGPU_TP_WRAP_T; c[3] = 0x812F;
+        G.pixtex_w = G.pixtex_h = 0;
+    }
+    return 1;
+}
+
+/* Doubles f1..f6 saved by the trampoline at a[12] (FBASE). Bitmap
+ * receives xorig/yorig there; integer args stay in r3–r10. */
+static float tramp_f(const unsigned long *a, int n)
+{
+    union { unsigned long w[2]; double d; } u;
+    u.w[0] = a[12 + 2 * n];
+    u.w[1] = a[13 + 2 * n];
+    return (float)u.d;
+}
+
+/* Unset bitmap bits must not write. Force GL_GREATER 0 for this draw;
+ * the next send_state restores the application's alpha test. */
+static void pix_punch_zero(PCtx *p)
+{
+    unsigned long *c = reserve(p, 3 * QGPU_LEN_SET_STATE);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
+    c[1] = QGPU_SK_ALPHA_TEST;
+    c[2] = 1;
+    p->st[QGPU_SK_ALPHA_TEST] = 1;
+    c += QGPU_LEN_SET_STATE;
+    c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
+    c[1] = QGPU_SK_ALPHA_FUNC;
+    c[2] = 0x0204;                      /* GL_GREATER */
+    p->st[QGPU_SK_ALPHA_FUNC] = 0x0204;
+    c += QGPU_LEN_SET_STATE;
+    c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
+    c[1] = QGPU_SK_ALPHA_REF;
+    c[2] = 0;
+    p->st[QGPU_SK_ALPHA_REF] = 0;
+}
+
+/* Quad fenêtre : a[1] est le sommet interne déjà transformé (V_X/V_Y pixels,
+ * origine en bas). GLEngine le remplit dans _glDrawPixels_Exec (gctx+0x2e0
+ * × viewport → r26). REPLACE, pas le texenv de l'appli.
+ * punch : test alpha GREATER 0 (bits à 0 de glBitmap). */
+static int pix_quad(PCtx *p, const unsigned char *vtx, unsigned long w, unsigned long h,
+                    int punch)
+{
+    TexInfo ti;
+    PTex fake;
+    Batch b;
+    unsigned char v[4][GLD_VERTEX_SIZE];
+    const unsigned char *pv[3];
+    float x, y, z;
+    int i;
+
+    if (!vtx || !accel_ok(p) || !ensure_surface(p) || G.pixtex < 0)
+        return 0;
+    x = GLD_F32(vtx, V_X);
+    y = GLD_F32(vtx, V_Y);
+    z = GLD_F32(vtx, V_Z);
+    if (!(x > -1e6f && x < 1e6f && y > -1e6f && y < 1e6f))
+        return 0;
+    memset(&ti, 0, sizeof(ti));
+    memset(&fake, 0, sizeof(fake));
+    fake.qtex = G.pixtex;
+    ti.u[0].t = &fake;
+    ti.u[0].env_mode = 0x1E01;          /* GL_REPLACE */
+    ti.u[0].combine = QGPU_COMBINE_DEFAULT;
+    ti.u[0].combine_src = QGPU_COMBINE_SRC_DEFAULT;
+    begin_common(p, &b, &ti);
+    if (punch)
+        pix_punch_zero(p);
+    b.kind = RK_TRI_TEX;
+    b.ptatt = 0;
+    memset(v, 0, sizeof(v));
+    for (i = 0; i < 4; i++) {
+        float s = (i == 1 || i == 2) ? 1.0f : 0.0f;
+        float t = (i == 0 || i == 1) ? 1.0f : 0.0f; /* bas d'écran = 1re ligne GL */
+        GLD_F32(v[i], V_X) = x + (s ? (float)w : 0.0f);
+        GLD_F32(v[i], V_Y) = y + ((i >= 2) ? (float)h : 0.0f);
+        GLD_F32(v[i], V_Z) = z;
+        GLD_F32(v[i], V_COLOR) = 1.0f;
+        GLD_F32(v[i], V_COLOR + 4) = 1.0f;
+        GLD_F32(v[i], V_COLOR + 8) = 1.0f;
+        GLD_F32(v[i], V_COLOR + 12) = 1.0f;
+        GLD_F32(v[i], V_FOG) = 1.0f;
+        GLD_F32(v[i], V_TEX0) = s;
+        GLD_F32(v[i], V_TEX0 + 4) = t;
+        GLD_F32(v[i], V_TEX0 + 12) = 1.0f;
+    }
+    pv[0] = v[0]; pv[1] = v[1]; pv[2] = v[2];
+    prim(&b, 3, pv, v[0]);
+    pv[0] = v[0]; pv[1] = v[2]; pv[2] = v[3];
+    prim(&b, 3, pv, v[0]);
+    close_run();
+    p->color = HOST_NEWER;
+    if (writes_depth(p))
+        p->depth = HOST_NEWER;
+    return 1;
+}
+
+/* Raster pos → pixel rectangle fully on the surface (and inside the scissor). */
+static int pix_dest(PCtx *p, const unsigned char *vtx, unsigned long w, unsigned long h,
+                    unsigned long *dx, unsigned long *dy)
+{
+    float fx, fy;
+    long x, y;
+    unsigned char *g;
+
+    if (!vtx)
+        return 0;
+    fx = GLD_F32(vtx, V_X);
+    fy = GLD_F32(vtx, V_Y);
+    if (!(fx > -1e6f && fx < 1e6f && fy > -1e6f && fy < 1e6f))
+        return 0;
+    x = (long)fx;
+    y = (long)fy;
+    if (x < 0 || y < 0)
+        return 0;
+    if ((unsigned long)x + w > p->sw || (unsigned long)y + h > p->sh)
+        return 0;
+    g = gls(p);
+    if (GLD_U8(g, GS_SCISSOR)) {
+        long sx = I32(g, GS_SCISSOR_RECT), sy = I32(g, GS_SCISSOR_RECT + 4);
+        long sw = I32(g, GS_SCISSOR_RECT + 8), sh = I32(g, GS_SCISSOR_RECT + 12);
+        if (x < sx || y < sy || x + (long)w > sx + sw || y + (long)h > sy + sh)
+            return 0;
+    }
+    *dx = (unsigned long)x;
+    *dy = (unsigned long)y;
+    return 1;
+}
+
+/* Host blit of depth or stencil. Readback then upload in one stream so
+ * overlapping source/dest stay correct. Protocol y is top-left. */
+static int copy_ds_rect(PCtx *p, unsigned long sx, unsigned long sy,
+                        unsigned long dx, unsigned long dy,
+                        unsigned long w, unsigned long h, int sten)
+{
+    unsigned long off, *c;
+    unsigned long shy = p->sh - sy - h, dhy = p->sh - dy - h;
+
+    if (!arena_alloc(w * h * 4, &off))
+        return 0;
+    c = reserve(p, QGPU_LEN_SURF_XFER);
+    c[0] = QGPU_CMD_HDR(sten ? QGPU_OP_STENCIL_READBACK : QGPU_OP_DEPTH_READBACK,
+                        QGPU_LEN_SURF_XFER);
+    c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
+    c[4] = sx; c[5] = shy; c[6] = w; c[7] = h;
+    c = reserve(p, QGPU_LEN_SURF_XFER);
+    c[0] = QGPU_CMD_HDR(sten ? QGPU_OP_STENCIL_UPLOAD : QGPU_OP_DEPTH_UPLOAD,
+                        QGPU_LEN_SURF_XFER);
+    c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
+    c[4] = dx; c[5] = dhy; c[6] = w; c[7] = h;
+    G.n_readbacks++;
+    G.n_uploads++;
+    return 1;
+}
+
+/* DrawPixels DEPTH_COMPONENT FLOAT or STENCIL_INDEX UNSIGNED_BYTE.
+ * DEPTH_UPLOAD writes with GL_ALWAYS: only when the app's depth test is
+ * off or ALWAYS, otherwise Apple. Same idea for stencil. */
+static int try_draw_ds(PCtx *p, unsigned long *a)
+{
+    const unsigned char *vtx = (const unsigned char *)a[1];
+    unsigned long w = a[2], h = a[3], fmt = a[4], type = a[5];
+    const unsigned char *pixels = (const unsigned char *)a[6];
+    unsigned long dx, dy, dhy, off, *c, x, y, align, row_px, skip_rows, skip_px, rowb;
+    unsigned char *g;
+
+    if (fmt != 0x1902 && fmt != 0x1901)
+        return 0;
+    if (fmt == 0x1902 && type != 0x1406)
+        return 0;
+    if (fmt == 0x1901 && type != 0x1401)
+        return 0;
+    if (!G.pixops || !G.v10)
+        return 0;
+    if (w == 0 || h == 0)
+        return 1;
+    if (!pixels || !vtx)
+        return 0;
+    if (!accel_ok(p) || !ensure_surface(p) || p->surf < 0)
+        return 0;
+    g = gls(p);
+    if (fmt == 0x1902) {
+        if (!GLD_U8(g, GS_DEPTH_MASK))
+            return 1;
+        if (GLD_U8(g, GS_DEPTH_TEST) && U16(g, GS_DEPTH_FUNC) != 0x0207)
+            return 0;
+        if (p->depth == SW_NEWER)
+            sync_to_host(p, 0, 1);
+    } else {
+        unsigned long wmask;
+        if (!p->stencil)
+            return 0;
+        wmask = GLD_U32(g, GS_STENCIL_WMASK) & 0xFF;
+        if (wmask == 0)
+            return 1;
+        if (wmask != 0xFF)
+            return 0;
+        if (stencil_active(p) && U16(g, GS_STENCIL_FUNC) != 0x0207)
+            return 0;
+        if (p->depth == SW_NEWER)
+            sync_to_host(p, 0, 1);
+    }
+    if (!pix_dest(p, vtx, w, h, &dx, &dy))
+        return 0;
+    align = GLD_U32(p->ctx, CTX_UNPACK_ALIGNMENT);
+    if (align != 1 && align != 2 && align != 4 && align != 8)
+        align = 4;
+    row_px = GLD_U32(p->ctx, CTX_UNPACK_ROW_LENGTH);
+    if (row_px == 0)
+        row_px = w;
+    skip_rows = GLD_U32(p->ctx, CTX_UNPACK_SKIP_ROWS);
+    skip_px = GLD_U32(p->ctx, CTX_UNPACK_SKIP_PIXELS);
+    if (fmt == 0x1902)
+        rowb = (row_px * 4UL + align - 1UL) & ~(align - 1UL);
+    else
+        rowb = (row_px + align - 1UL) & ~(align - 1UL);
+    if (rowb == 0)
+        return 0;
+    if (!arena_alloc(w * h * 4, &off))
+        return 0;
+    dhy = p->sh - dy - h;
+    if (fmt == 0x1902) {
+        for (y = 0; y < h; y++) {
+            const float *s = (const float *)(pixels + (skip_rows + (h - 1 - y)) * rowb) + skip_px;
+            memcpy(G.q.win + off + y * w * 4, s, w * 4);
+        }
+        c = reserve(p, QGPU_LEN_SURF_XFER);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_DEPTH_UPLOAD, QGPU_LEN_SURF_XFER);
+        c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
+        c[4] = dx; c[5] = dhy; c[6] = w; c[7] = h;
+        G.n_uploads++;
+        p->depth = HOST_NEWER;
+    } else {
+        for (y = 0; y < h; y++) {
+            const unsigned char *s = pixels + (skip_rows + (h - 1 - y)) * rowb + skip_px;
+            unsigned long *d = (unsigned long *)(G.q.win + off + y * w * 4);
+            for (x = 0; x < w; x++)
+                d[x] = s[x];
+        }
+        c = reserve(p, QGPU_LEN_SURF_XFER);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_STENCIL_UPLOAD, QGPU_LEN_SURF_XFER);
+        c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
+        c[4] = dx; c[5] = dhy; c[6] = w; c[7] = h;
+        G.n_uploads++;
+        p->sten_used = 1;
+        p->depth = HOST_NEWER;
+    }
+    G.n_pixdraw++;
+    return 1;
+}
+
+/* DrawPixels (ctx, sommet-fenêtre, w, h, format, type, pixels, 0).
+ * Le sommet est r4 : _glDrawPixels_Exec y écrit x/y/z fenêtre avant l'appel. */
+static int try_draw_pixels(PCtx *p, unsigned long *a)
+{
+    const unsigned char *vtx = (const unsigned char *)a[1];
+    unsigned long w = a[2], h = a[3], fmt = a[4], type = a[5];
+    const unsigned char *pixels = (const unsigned char *)a[6];
+    unsigned long bpp, rowb, off, *c, y;
+    unsigned char *dst;
+
+    if (try_draw_ds(p, a))
+        return 1;
+    if (!G.pixops || !G.v10)
+        return 0;
+    if (w == 0 || h == 0)
+        return 1;
+    if (!pixels || !vtx)
+        return 0;
+    if (type != 0x1401 || (fmt != 0x1908 && fmt != 0x1907))
+        return 0;
+    if (p->color == SW_NEWER || !accel_ok(p) || !ensure_surface(p))
+        return 0;
+    if (!pix_scratch(p, w, h))
+        return 0;
+    bpp = (fmt == 0x1907) ? 3UL : 4UL;
+    rowb = (w * bpp + 3UL) & ~3UL;
+    if (!arena_alloc(h * rowb, &off))
+        return 0;
+    dst = G.q.win + off;
+    /* Première ligne GL = bas de l'image → haut de la texture hôte. */
+    for (y = 0; y < h; y++) {
+        const unsigned char *s = pixels + (h - 1 - y) * rowb;
+        memcpy(dst + y * rowb, s, w * bpp);
+    }
+    c = reserve(p, QGPU_LEN_TEX_IMAGE3);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3);
+    c[1] = G.pixtex; c[2] = QGPU_TT_2D; c[3] = 0;
+    c[4] = w; c[5] = h; c[6] = 1;
+    c[7] = fmt; c[8] = fmt; c[9] = type;
+    c[10] = G.q.base + off; c[11] = rowb; c[12] = 0;
+    G.n_texuploads++;
+    G.pixtex_w = w;
+    G.pixtex_h = h;
+    if (!pix_quad(p, vtx, w, h, 0))
+        return 0;
+    G.n_pixdraw++;
+    return 1;
+}
+
+/* CopyPixels (ctx, sommet-fenêtre, x, y, w, h, type). COLOR, DEPTH, STENCIL. */
+static int try_copy_pixels(PCtx *p, unsigned long *a)
+{
+    const unsigned char *vtx = (const unsigned char *)a[1];
+    long sx = (long)a[2], sy = (long)a[3];
+    unsigned long w = a[4], h = a[5], kind = a[6];
+    unsigned long hy, off, *c, dx, dy;
+    unsigned char *g;
+
+    if (!G.pixops || !G.v10)
+        return 0;
+    if (w == 0 || h == 0)
+        return 1;
+    if (!vtx)
+        return 0;
+    if (kind == 0x1801 || kind == 0x1802) {     /* GL_DEPTH / GL_STENCIL */
+        int sten = (kind == 0x1802);
+        if (!accel_ok(p) || !ensure_surface(p) || p->surf < 0)
+            return 0;
+        if (sx < 0 || sy < 0 ||
+            (unsigned long)sx + w > p->sw || (unsigned long)sy + h > p->sh)
+            return 0;
+        if (p->depth == SW_NEWER)
+            return 0;
+        g = gls(p);
+        if (sten) {
+            unsigned long wmask;
+            if (!p->stencil)
+                return 0;
+            wmask = GLD_U32(g, GS_STENCIL_WMASK) & 0xFF;
+            if (wmask == 0)
+                return 1;
+            if (wmask != 0xFF)
+                return 0;
+            if (stencil_active(p) && U16(g, GS_STENCIL_FUNC) != 0x0207)
+                return 0;
+        } else {
+            if (!GLD_U8(g, GS_DEPTH_MASK))
+                return 1;
+            if (GLD_U8(g, GS_DEPTH_TEST) && U16(g, GS_DEPTH_FUNC) != 0x0207)
+                return 0;
+        }
+        if (!pix_dest(p, vtx, w, h, &dx, &dy))
+            return 0;
+        if (!copy_ds_rect(p, (unsigned long)sx, (unsigned long)sy, dx, dy, w, h, sten))
+            return 0;
+        p->depth = HOST_NEWER;
+        if (sten)
+            p->sten_used = 1;
+        G.n_pixdraw++;
+        return 1;
+    }
+    if (kind != 0x1800)                 /* GL_COLOR */
+        return 0;
+    if (p->color == SW_NEWER || !accel_ok(p) || !ensure_surface(p) || p->surf < 0)
+        return 0;
+    if (sx < 0 || sy < 0 ||
+        (unsigned long)sx + w > p->sw || (unsigned long)sy + h > p->sh)
+        return 0;
+    if (!pix_scratch(p, w, h))
+        return 0;
+    /* Niveau existant : une image noire suffit, COPY_TEX l'écrase. */
+    if (G.pixtex_w != w || G.pixtex_h != h) {
+        if (!arena_alloc(w * h * 4, &off))
+            return 0;
+        memset(G.q.win + off, 0, w * h * 4);
+        c = reserve(p, QGPU_LEN_TEX_IMAGE3);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3);
+        c[1] = G.pixtex; c[2] = QGPU_TT_2D; c[3] = 0;
+        c[4] = w; c[5] = h; c[6] = 1;
+        c[7] = 0x1908; c[8] = 0x1908; c[9] = 0x1401;
+        c[10] = G.q.base + off; c[11] = w * 4; c[12] = 0;
+        G.n_texuploads++;
+        G.pixtex_w = w;
+        G.pixtex_h = h;
+    }
+    hy = p->sh - (unsigned long)sy - h;
+    c = reserve(p, QGPU_LEN_COPY_TEX);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX);
+    c[1] = G.pixtex;
+    c[2] = QGPU_TT_2D;
+    c[3] = 0;
+    c[4] = 0;
+    c[5] = 0;
+    c[6] = 0;
+    c[7] = (unsigned long)sx;
+    c[8] = hy;
+    c[9] = w;
+    c[10] = h;
+    G.n_copytex++;
+    if (!pix_quad(p, vtx, w, h, 0))
+        return 0;
+    G.n_pixdraw++;
+    return 1;
+}
+
+/* RenderBitmap (ctx, sommet-fenêtre, w, h, bits) + f1/f2 = xorig/yorig.
+ * _glBitmap_Exec remplit le sommet comme DrawPixels, passe xorig/yorig
+ * en flottants, et ajoute xmove/ymove à gctx+0x2e0 APRÈS le retour :
+ * consommer l'appel n'empêche pas l'avance de la position raster.
+ * Bits à 1 → fragment de la couleur raster ; bits à 0 → rien. */
+static int try_bitmap(PCtx *p, unsigned long *a)
+{
+    const unsigned char *vtx = (const unsigned char *)a[1];
+    unsigned long w = a[2], h = a[3];
+    const unsigned char *bits = (const unsigned char *)a[6];
+    unsigned char vtx2[GLD_VERTEX_SIZE];
+    unsigned long align, row_px, skip_rows, skip_px, rowb, off, x, y, *c;
+    unsigned char *dst, lsb, cr, cg, cb, ca;
+    float xorig, yorig;
+
+    if (!G.pixops || !G.v10)
+        return 0;
+    if (w == 0 || h == 0)
+        return 1;
+    if (!vtx)
+        return 0;
+    if (!bits)
+        return 1;
+    if (p->color == SW_NEWER || !accel_ok(p) || !ensure_surface(p))
+        return 0;
+    if (!pix_scratch(p, w, h))
+        return 0;
+
+    align = GLD_U32(p->ctx, CTX_UNPACK_ALIGNMENT);
+    if (align != 1 && align != 2 && align != 4 && align != 8)
+        align = 4;
+    row_px = GLD_U32(p->ctx, CTX_UNPACK_ROW_LENGTH);
+    if (row_px == 0)
+        row_px = w;
+    skip_rows = GLD_U32(p->ctx, CTX_UNPACK_SKIP_ROWS);
+    skip_px = GLD_U32(p->ctx, CTX_UNPACK_SKIP_PIXELS);
+    lsb = GLD_U8(p->ctx, CTX_UNPACK_LSB_FIRST);
+    rowb = ((row_px + 7UL) / 8UL + align - 1UL) & ~(align - 1UL);
+    if (rowb == 0)
+        return 0;
+
+    xorig = tramp_f(a, 0);
+    yorig = tramp_f(a, 1);
+    memcpy(vtx2, vtx, GLD_VERTEX_SIZE);
+    GLD_F32(vtx2, V_X) = GLD_F32(vtx, V_X) - xorig;
+    GLD_F32(vtx2, V_Y) = GLD_F32(vtx, V_Y) - yorig;
+    /* Color is captured at RasterPos into the vertex at gctx+0x4858−0x200,
+     * not into the Bitmap scratch at 0x4854. Current glColor is gctx+0x2a0. */
+    {
+        unsigned long rp = GLD_U32(p->ctx, 0x4858);
+        const float *rgba = (rp >= 0x200)
+            ? (const float *)((const unsigned char *)(rp - 0x200) + V_COLOR)
+            : (const float *)((const unsigned char *)p->ctx + 0x2a0);
+        cr = (unsigned char)to_u8(rgba[0]);
+        cg = (unsigned char)to_u8(rgba[1]);
+        cb = (unsigned char)to_u8(rgba[2]);
+        ca = (unsigned char)to_u8(rgba[3]);
+    }
+
+    if (!arena_alloc(w * h * 4, &off))
+        return 0;
+    dst = G.q.win + off;
+    /* First GL row = bottom of bitmap → top of host texture. */
+    for (y = 0; y < h; y++) {
+        const unsigned char *src = bits + (skip_rows + (h - 1 - y)) * rowb;
+        unsigned char *row = dst + y * w * 4;
+        for (x = 0; x < w; x++) {
+            unsigned long bi = skip_px + x;
+            unsigned char byte = src[bi / 8];
+            unsigned long bp = lsb ? (bi & 7) : (7 - (bi & 7));
+            int on = (byte >> bp) & 1;
+            row[x * 4 + 0] = cr;
+            row[x * 4 + 1] = cg;
+            row[x * 4 + 2] = cb;
+            row[x * 4 + 3] = on ? ca : 0;
+        }
+    }
+    c = reserve(p, QGPU_LEN_TEX_IMAGE3);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3);
+    c[1] = G.pixtex; c[2] = QGPU_TT_2D; c[3] = 0;
+    c[4] = w; c[5] = h; c[6] = 1;
+    c[7] = 0x1908; c[8] = 0x1908; c[9] = 0x1401;
+    c[10] = G.q.base + off; c[11] = w * 4; c[12] = 0;
+    G.n_texuploads++;
+    G.pixtex_w = w;
+    G.pixtex_h = h;
+    if (!pix_quad(p, vtx2, w, h, 1))
+        return 0;
+    G.n_pixdraw++;
+    return 1;
+}
+
 /* Appelé par les trampolines de procédures : synchronise puis rend la cible. */
 void *pomppc_proc_pre(int slot, unsigned long *a)
 {
@@ -6213,6 +7417,26 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
         pthread_mutex_unlock(&G.mu);
         return direct_noop;
     }
+    if (slot == PROC_CopyTexSubImage && try_copy_tex(p, a)) {
+        pthread_mutex_unlock(&G.mu);
+        return direct_noop;
+    }
+    if (slot == PROC_ReadPixels && try_read_pixels(p, a)) {
+        pthread_mutex_unlock(&G.mu);
+        return direct_noop;
+    }
+    if (slot == PROC_DrawPixels && try_draw_pixels(p, a)) {
+        pthread_mutex_unlock(&G.mu);
+        return direct_noop;
+    }
+    if (slot == PROC_CopyPixels && try_copy_pixels(p, a)) {
+        pthread_mutex_unlock(&G.mu);
+        return direct_noop;
+    }
+    if (slot == PROC_RenderBitmap && try_bitmap(p, a)) {
+        pthread_mutex_unlock(&G.mu);
+        return direct_noop;
+    }
     kind &= 0xff;
     if (kind != K_NONE)
         fallback(p, slot, (kind & K_WRITE) != 0, (kind & K_DEPTH) != 0);
@@ -6223,6 +7447,7 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
         if (t) {
             t->dirty = 1;
         } else {
+            intern_tex((void *)a[1]);
             for (t = G.textures; t; t = t->next)
                 t->dirty = 1;
         }

@@ -3122,7 +3122,8 @@ static void run_v9(QgpuCore *c, uint8_t *shmem)
     }
     CHECK(bad == 0, "carte des registres : %u offsets alignés et distincts "
           "sous 0x%x (%u fautes)", n, (unsigned)QGPU_CTRL_TOPADDR, bad);
-    CHECK(QGPU_PROTO_VERSION == 12, "version du protocole %d", QGPU_PROTO_VERSION);
+    CHECK(QGPU_PROTO_VERSION == 14, "version du protocole %d", QGPU_PROTO_VERSION);
+    CHECK(QGPU_PROTO_MIN == 12, "version minimale d'attache %d", QGPU_PROTO_MIN);
     CHECK(QGPU_QUEUE_DEPTH >= 2 && (QGPU_QUEUE_DEPTH & (QGPU_QUEUE_DEPTH - 1)) == 0,
           "profondeur de file %d (puissance de 2, >= 2)", QGPU_QUEUE_DEPTH);
     CHECK((QGPU_DOORBELL_GO & QGPU_DOORBELL_ASYNC) == 0 && QGPU_DOORBELL_GO == 1,
@@ -4345,6 +4346,297 @@ static void run_v12(QgpuCore *c, uint8_t *shmem)
     CHECK(st == QGPU_ST_OK, "v12 : contexte et surface rendus (st %u)", st);
 }
 
+static uint32_t g_present_dirty_n, g_present_dirty_off, g_present_dirty_len;
+
+static void test_present_dirty(void *opaque, uint32_t off, uint32_t len)
+{
+    (void)opaque;
+    g_present_dirty_n++;
+    g_present_dirty_off = off;
+    g_present_dirty_len = len;
+}
+
+static void run_v13(QgpuCore *c, uint8_t *shmem)
+{
+    enum { FB_W = 256u, FB_PITCH32 = FB_W * 4u, FB_PITCH16 = FB_W * 2u };
+    uint8_t *fb = calloc(1, (size_t)FB_W * FB_W * 4);
+    Emit e;
+    uint32_t st, p, want;
+    uint16_t pix;
+
+    printf("-- v13 : SURF_PRESENT --\n");
+    CHECK(fb != NULL, "tampon de scanout alloué");
+    CHECK(QGPU_OP_SURF_PRESENT == 0x0019 && QGPU_LEN_SURF_PRESENT == 9,
+          "opcode 0x%x longueur %d", QGPU_OP_SURF_PRESENT, QGPU_LEN_SURF_PRESENT);
+    CHECK(QGPU_OP_COPY_TEX == 0x001A && QGPU_LEN_COPY_TEX == 11,
+          "COPY_TEX opcode 0x%x longueur %d", QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX);
+    CHECK((QGPU_CAP_SCANOUT & (QGPU_CAP_GL14 | QGPU_CAP_ASYNC)) == 0,
+          "QGPU_CAP_SCANOUT=0x%x disjoint", QGPU_CAP_SCANOUT);
+
+    qgpu_core_reset(c);
+    e.base = shmem; e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 1); emit(&e, W); emit(&e, H); emit(&e, QGPU_FMT_XRGB8888);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 1);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF0000, 1.0f);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "v13 : surface rouge (st %u)", st);
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_PRESENT, QGPU_LEN_SURF_PRESENT));
+    emit(&e, 1); emit(&e, 0); emit(&e, FB_PITCH32);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_PF_XRGB8888);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "PRESENT sans scanout : st %u", st);
+
+    qgpu_core_set_scanout(c, fb, FB_W * FB_W * 4, test_present_dirty, NULL);
+    g_present_dirty_n = 0;
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_PRESENT, QGPU_LEN_SURF_PRESENT));
+    emit(&e, 1); emit(&e, 0); emit(&e, FB_PITCH32);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_PF_XRGB8888);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = qgpu_ld32(fb + 10 * 4 + 20 * FB_PITCH32) & 0xFFFFFF;
+    CHECK(st == QGPU_ST_OK && p == 0xFF0000,
+          "PRESENT xRGB : st %u pixel %06x", st, p);
+    CHECK(g_present_dirty_n == 1 && g_present_dirty_off == 0,
+          "PRESENT marque sale : n=%u off=%u len=%u",
+          g_present_dirty_n, g_present_dirty_off, g_present_dirty_len);
+
+    memset(fb, 0, (size_t)FB_W * FB_W * 4);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_PRESENT, QGPU_LEN_SURF_PRESENT));
+    emit(&e, 1); emit(&e, 0); emit(&e, FB_PITCH16);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_PF_RGB1555);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    pix = (uint16_t)(((uint16_t)fb[20 * FB_PITCH16 + 10 * 2] << 8) |
+                     fb[20 * FB_PITCH16 + 10 * 2 + 1]);
+    want = 0x7C00;
+    CHECK(st == QGPU_ST_OK && pix == want,
+          "PRESENT 1555 : st %u pixel %04x (attendu %04x)", st, pix, want);
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_PRESENT, QGPU_LEN_SURF_PRESENT));
+    emit(&e, 1); emit(&e, FB_W * FB_W * 4 - 4); emit(&e, FB_PITCH32);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_PF_XRGB8888);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OOB, "PRESENT hors VRAM : st %u", st);
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_PRESENT, QGPU_LEN_SURF_PRESENT));
+    emit(&e, 1); emit(&e, 0); emit(&e, FB_PITCH32);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, 99);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "PRESENT format inconnu : st %u", st);
+
+    /* COPY_TEX : surface rouge → texture noire, puis REPLACE. */
+    {
+        uint32_t i;
+        e.off = e.start = TEX_OFF;
+        for (i = 0; i < 64; i++)
+            emit(&e, 0);
+        e.off = e.start = CMD_OFF;
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX)); emit(&e, 40);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE, QGPU_LEN_TEX_IMAGE));
+        emit(&e, 40); emit(&e, 0); emit(&e, 8); emit(&e, 8); emit(&e, 0x1908);
+        emit(&e, TEX_OFF);
+        tparam(&e, 40, QGPU_TP_MIN_FILTER, 0x2600);
+        tparam(&e, 40, QGPU_TP_MAG_FILTER, 0x2600);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX));
+        emit(&e, 40); emit(&e, QGPU_TT_2D); emit(&e, 0);
+        emit(&e, 0); emit(&e, 0); emit(&e, 0);
+        emit(&e, 0); emit(&e, 0); emit(&e, 4); emit(&e, 4);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_OK, "COPY_TEX 4×4 : st %u", st);
+
+        e.off = e.start = VTX_OFF;
+        tex_quad(&e, 1, 1, 1, 1, 1, 1);
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_TEXTURE, 1);
+        state(&e, QGPU_SK_TEX_BIND, 40);
+        state(&e, QGPU_SK_TEX_ENV_MODE, 0x1E01);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_DRAW_TRIANGLES_TEX, QGPU_LEN_DRAW));
+        emit(&e, 6); emit(&e, VTX_OFF);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER));
+        emit(&e, 1); emit(&e, RB_OFF); emit(&e, STRIDE);
+        emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_OK && (px(shmem, 4, 4) & 0xFFFFFF) == 0xFF0000,
+              "COPY_TEX texe (0,0) rouge : st %u pixel %06x", st, px(shmem, 4, 4));
+        CHECK((px(shmem, 50, 50) & 0xFFFFFF) == 0,
+              "COPY_TEX reste noir : %06x", px(shmem, 50, 50));
+
+        e.off = e.start = CMD_OFF;
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX));
+        emit(&e, 40); emit(&e, QGPU_TT_2D); emit(&e, 0);
+        emit(&e, 0); emit(&e, 0); emit(&e, 0);
+        emit(&e, 0); emit(&e, 0); emit(&e, 0); emit(&e, 4);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_OK, "COPY_TEX w=0 : st %u", st);
+
+        e.off = e.start = CMD_OFF;
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX));
+        emit(&e, 40); emit(&e, QGPU_TT_2D); emit(&e, 0);
+        emit(&e, 6); emit(&e, 0); emit(&e, 0);
+        emit(&e, 0); emit(&e, 0); emit(&e, 4); emit(&e, 4);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BAD_ARG, "COPY_TEX hors niveau : st %u", st);
+
+        e.off = e.start = CMD_OFF;
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX));
+        emit(&e, 99); emit(&e, QGPU_TT_2D); emit(&e, 0);
+        emit(&e, 0); emit(&e, 0); emit(&e, 0);
+        emit(&e, 0); emit(&e, 0); emit(&e, 4); emit(&e, 4);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BAD_ARG, "COPY_TEX tex inconnue : st %u", st);
+    }
+
+    qgpu_core_reset(c);
+    CHECK(c->scanout == fb, "reset conserve la cible de scanout");
+    qgpu_core_set_scanout(c, NULL, 0, NULL, NULL);
+    free(fb);
+}
+
+static void draw_raw_buf(Emit *e, uint32_t mode, uint32_t count, uint32_t vbuf,
+                         uint32_t voff, uint32_t fmt, uint32_t ibuf, uint32_t ioff,
+                         uint32_t itype, uint32_t nverts)
+{
+    emit(e, QGPU_CMD_HDR(QGPU_OP_DRAW_RAW_BUF, QGPU_LEN_DRAW_RAW_BUF));
+    emit(e, mode); emit(e, count); emit(e, vbuf); emit(e, voff); emit(e, 0);
+    emit(e, fmt); emit(e, ibuf); emit(e, ioff); emit(e, itype); emit(e, 0);
+    emit(e, nverts);
+}
+
+static void run_v14(QgpuCore *c, uint8_t *shmem)
+{
+    Emit e, v;
+    float m[16], mv[16];
+    uint32_t st, packed;
+
+    printf("-- v14 : tampons hôte --\n");
+    CHECK(QGPU_OP_BUF_CREATE == 0x001B && QGPU_LEN_BUF_CREATE == 3,
+          "BUF_CREATE opcode 0x%x longueur %d", QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE);
+    CHECK(QGPU_OP_BUF_DESTROY == 0x001C && QGPU_LEN_BUF == 2,
+          "BUF_DESTROY opcode 0x%x longueur %d", QGPU_OP_BUF_DESTROY, QGPU_LEN_BUF);
+    CHECK(QGPU_OP_BUF_SUBDATA == 0x001D && QGPU_LEN_BUF_SUBDATA == 5,
+          "BUF_SUBDATA opcode 0x%x longueur %d", QGPU_OP_BUF_SUBDATA, QGPU_LEN_BUF_SUBDATA);
+    CHECK(QGPU_OP_DRAW_RAW_BUF == 0x0059 && QGPU_LEN_DRAW_RAW_BUF == 12,
+          "DRAW_RAW_BUF opcode 0x%x longueur %d", QGPU_OP_DRAW_RAW_BUF,
+          QGPU_LEN_DRAW_RAW_BUF);
+    CHECK(QGPU_BUF_SHMEM == 0xFFFFFFFFu, "sentinelle BAR0 0x%x", QGPU_BUF_SHMEM);
+
+    qgpu_core_reset(c);
+    e.base = shmem; v.base = shmem;
+    mat_ortho_px(m);
+    mat_identity(mv);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 1); emit(&e, W); emit(&e, H); emit(&e, QGPU_FMT_XRGB8888);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 1);
+    set_matrix(&e, QGPU_MTX_PROJECTION, m);
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "v14 : contexte (st %u)", st);
+
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 4, 4, 1, 0, 0, 1); rv2c(&v, 60, 4, 1, 0, 0, 1); rv2c(&v, 4, 20, 1, 0, 0, 1);
+    packed = v.off - v.start;
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE));
+    emit(&e, 10); emit(&e, packed);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_SUBDATA, QGPU_LEN_BUF_SUBDATA));
+    emit(&e, 10); emit(&e, 0); emit(&e, VTX_OFF); emit(&e, packed);
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF0000FF, 1.0f);
+    draw_raw_buf(&e, QGPU_PRIM_MODE_TRIANGLES, 3, 10, 0, VF_P2C,
+                 QGPU_BUF_SHMEM, 0, QGPU_IDX_NONE, 3);
+    readback_cmd(&e, 1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF0000 &&
+          px(shmem, 8, 30) == 0x0000FF,
+          "DRAW_RAW_BUF = DRAW_RAW : %06x %06x (st %u)",
+          px(shmem, 30, 8), px(shmem, 8, 30), st);
+
+    /* Réutiliser le tampon : plus aucun sommet dans BAR0. */
+    memset(shmem + VTX_OFF, 0, packed);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF0000FF, 1.0f);
+    draw_raw_buf(&e, QGPU_PRIM_MODE_TRIANGLES, 3, 10, 0, VF_P2C,
+                 QGPU_BUF_SHMEM, 0, QGPU_IDX_NONE, 3);
+    readback_cmd(&e, 1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF0000,
+          "DRAW_RAW_BUF sans BAR0 : %06x (st %u)", px(shmem, 30, 8), st);
+
+    /* Indices encore dans BAR0, sommets hôte. */
+    shmem[IDX_OFF] = 0; shmem[IDX_OFF + 1] = 0;
+    shmem[IDX_OFF + 2] = 0; shmem[IDX_OFF + 3] = 1;
+    shmem[IDX_OFF + 4] = 0; shmem[IDX_OFF + 5] = 2;
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF0000FF, 1.0f);
+    draw_raw_buf(&e, QGPU_PRIM_MODE_TRIANGLES, 3, 10, 0, VF_P2C,
+                 QGPU_BUF_SHMEM, IDX_OFF, QGPU_IDX_U16, 3);
+    readback_cmd(&e, 1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF0000,
+          "DRAW_RAW_BUF indices BAR0 : %06x (st %u)", px(shmem, 30, 8), st);
+
+    /* vbuf = SHMEM : même layout DRAW_RAW_BUF, offset dans BAR0. */
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 4, 4, 1, 0, 0, 1); rv2c(&v, 60, 4, 1, 0, 0, 1); rv2c(&v, 4, 20, 1, 0, 0, 1);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF0000FF, 1.0f);
+    draw_raw_buf(&e, QGPU_PRIM_MODE_TRIANGLES, 3, QGPU_BUF_SHMEM, VTX_OFF, VF_P2C,
+                 QGPU_BUF_SHMEM, 0, QGPU_IDX_NONE, 3);
+    readback_cmd(&e, 1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF0000,
+          "DRAW_RAW_BUF via BAR0 : %06x (st %u)", px(shmem, 30, 8), st);
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE));
+    emit(&e, 10); emit(&e, packed);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_LIMIT, "recréer un id : st %u", st);
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE));
+    emit(&e, 11); emit(&e, 0);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "size 0 : st %u", st);
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_SUBDATA, QGPU_LEN_BUF_SUBDATA));
+    emit(&e, 10); emit(&e, packed - 4); emit(&e, VTX_OFF); emit(&e, 8);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OOB, "SUBDATA débordant : st %u", st);
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_SUBDATA, QGPU_LEN_BUF_SUBDATA));
+    emit(&e, 10); emit(&e, 0); emit(&e, VTX_OFF); emit(&e, 0);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "SUBDATA len=0 : st %u", st);
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_DESTROY, QGPU_LEN_BUF)); emit(&e, 10);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "BUF_DESTROY : st %u", st);
+
+    e.off = e.start = CMD_OFF;
+    draw_raw_buf(&e, QGPU_PRIM_MODE_TRIANGLES, 3, 10, 0, VF_P2C,
+                 QGPU_BUF_SHMEM, 0, QGPU_IDX_NONE, 3);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "DRAW après DESTROY : st %u", st);
+
+    qgpu_core_reset(c);
+    CHECK(!c->buf[10].used && c->buf[10].data == NULL,
+          "reset libère les tampons");
+}
+
 typedef struct { QgpuCore *c; uint8_t *shmem; } BackendRun;
 
 /* Tout ce qui suit l'initialisation, sur le thread « de rendu ». */
@@ -4433,6 +4725,8 @@ static void *run_backend_body(void *arg)
     run_v10(c, shmem);
     run_v11(c, shmem);
     run_v12(c, shmem);
+    run_v13(c, shmem);
+    run_v14(c, shmem);
 
     qgpu_core_reset(c);
     e.off = e.start = CMD_OFF;

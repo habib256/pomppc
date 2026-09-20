@@ -287,12 +287,26 @@ struct QgpuCore {
     uint32_t ncmds;                /* commandes exécutées en tout (stats) */
     bool     trace;                /* journalise chaque commande sur stderr */
 
+    /* v13 : cible de SURF_PRESENT (VRAM qfb côté QEMU, tampon de test en
+       natif). N'appartient pas au cœur : reset ne la touche pas. */
+    uint8_t *scanout;
+    uint32_t scanout_size;
+    void   (*scanout_dirty)(void *opaque, uint32_t off, uint32_t len);
+    void    *scanout_opaque;
+
     /* tampons de travail, agrandis à la demande */
     float    *vbuf; uint32_t vbuf_cap;   /* en floats */
     uint32_t *pbuf; uint32_t pbuf_cap;   /* en pixels */
     float    *dbuf; uint32_t dbuf_cap;   /* en pixels (profondeur) */
     uint8_t  *sbuf; uint32_t sbuf_cap;   /* en pixels (stencil, v6) */
     uint32_t *ibuf; uint32_t ibuf_cap;   /* en indices (v7, DRAW_RAW) */
+
+    /* v14 : tampons persistants hors BAR0 */
+    struct {
+        bool     used;
+        uint8_t *data;
+        uint32_t size;
+    } buf[QGPU_MAX_BUF];
 };
 
 /* Accès big-endian, sans dépendre des helpers QEMU. */
@@ -320,6 +334,13 @@ bool     qgpu_core_init(QgpuCore *c, const char *backend,
                         uint8_t *shmem, uint32_t shmem_size);
 void     qgpu_core_fini(QgpuCore *c);
 void     qgpu_core_reset(QgpuCore *c);       /* détruit tous les objets */
+
+/* v13 : pose (ou retire, ram == NULL) la cible de SURF_PRESENT. Le pointeur
+ * n'est pas copié : l'appelant en reste propriétaire. */
+void     qgpu_core_set_scanout(QgpuCore *c, uint8_t *ram, uint32_t size,
+                               void (*dirty)(void *opaque, uint32_t off,
+                                             uint32_t len),
+                               void *opaque);
 
 /* Exécute un flux ; renvoie le statut (aussi dans c->status / status_pc).
  * off/len en octets dans la fenêtre partagée. */

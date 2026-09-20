@@ -13,13 +13,15 @@
  * ── Architecture ────────────────────────────────────────────────────────────
  *
  *   Le device est un COPROCESSEUR DE COMMANDES, pas un écran : il n'a pas de
- *   scanout. L'invité écrit un flux de commandes dans la fenêtre partagée
+ *   scanout à lui. L'invité écrit un flux de commandes dans la fenêtre partagée
  *   (BAR0, de la RAM côté QEMU), déclare (offset, longueur) dans les registres
  *   (BAR1), frappe le doorbell ; l'hôte exécute le flux sur son backend de
  *   rendu (logiciel de référence, ou OpenGL — cf. QGPU_CAP_*), met à jour le
  *   compteur FENCE et le STATUS, et lève l'interruption DONE si elle est
  *   démasquée. Les surfaces vivent côté hôte ; l'invité les lit avec
  *   SURF_READBACK (hôte → BAR0) et les remplit avec SURF_UPLOAD (BAR0 → hôte).
+ *   Depuis la v13, SURF_PRESENT écrit la surface liée dans la VRAM de l'écran
+ *   (qfb-pci), sans que le pixel traverse l'invité (QGPU_CAP_SCANOUT).
  *
  *   Depuis la v9 le doorbell a DEUX modes : synchrone (valeur 1, celui de
  *   v1–v8, inchangé au bit près) et asynchrone (valeur 3, la soumission est
@@ -46,7 +48,11 @@
 #define QGPU_IOPCI_PRIMARY_MATCH 0x0fb21234
 
 #define QGPU_MAGIC              0x71677031  /* 'qgp1' */
-#define QGPU_PROTO_VERSION      12  /* v2 : profondeur, état GL ; v3 : textures ;
+#define QGPU_PROTO_MIN          12  /* plus ancienne version de device à laquelle
+                                       un kext / plugin compilé contre CE fichier
+                                       s'attache encore : les opcodes v13/v14 sont
+                                       optionnels (QGPU_CAP_SCANOUT, BUF_*). */
+#define QGPU_PROTO_VERSION      14  /* v2 : profondeur, état GL ; v3 : textures ;
                                        v4 : brouillard, 2e unité, lignes, points ;
                                        v5 : 4 unités, GL_COMBINE ;
                                        v6 : stencil ;
@@ -68,7 +74,11 @@
                                        v11 : couleur secondaire sur le chemin
                                             hérité (DRAW_TRIANGLES_SEC) ;
                                        v12 : sources croisées de GL_COMBINE
-                                            (QGPU_CS_TEXTURE0 + n) */
+                                            (QGPU_CS_TEXTURE0 + n) ;
+                                       v13 : SURF_PRESENT (hôte → VRAM qfb),
+                                             COPY_TEX (CopyTexSubImage sur l'hôte) ;
+                                       v14 : tampons hôte (BUF_CREATE / DESTROY /
+                                             SUBDATA) et DRAW_RAW_BUF */
 
 /* ── BAR0 : fenêtre partagée (RAM) ───────────────────────────────────────── */
 #define QGPU_SHMEM_DEFAULT_MB   64
@@ -143,6 +153,10 @@
  * format, la décompression S3TC, TEX_SUBIMAGE et la génération des mipmaps
  * sont faites par le CŒUR : elles ne dépendent pas de ce bit. */
 #define QGPU_CAP_GL14           0x00000010
+/* v13 : le device a une cible de scanout (VRAM qfb) et tient SURF_PRESENT.
+   Sans ce bit, l'opcode répond QGPU_ST_BAD_ARG : l'invité se replie sur
+   SURF_READBACK + copie, il ne plante pas. */
+#define QGPU_CAP_SCANOUT        0x00000020
 
 #define QGPU_IRQ_DONE           0x00000001
 
@@ -185,6 +199,9 @@
    puisse lire ni écraser la requête d'un autre. 16 requêtes en vol par client
    est très au-delà de ce que GLEngine demande (une à la fois par contexte). */
 #define QGPU_MAX_QUERIES        64
+#define QGPU_MAX_BUF            256         /* v14 : tampons hôte */
+#define QGPU_MAX_BUF_SIZE       (16u * 1024u * 1024u)
+#define QGPU_BUF_SHMEM          0xFFFFFFFFu /* DRAW_RAW_BUF : cet offset est BAR0 */
 /* v7 : les commandes de géométrie sont longues (SET_LIGHT en fait 26), et la v8
    ajoute SET_POLYGON_STIPPLE, qui en fait 32. Le cœur recopie les arguments
    dans un tableau de cette taille : la borne est NOMMÉE ici pour que l'hôte et
@@ -216,6 +233,14 @@
 #define QGPU_OP_DEPTH_UPLOAD    0x0016  /* v2, idem, BAR0 → hôte */
 #define QGPU_OP_STENCIL_READBACK 0x0017 /* v6, idem, valeurs de stencil, cf. ci-dessous */
 #define QGPU_OP_STENCIL_UPLOAD  0x0018  /* v6, idem, BAR0 → hôte */
+#define QGPU_OP_SURF_PRESENT    0x0019  /* v13, [surf, off, stride, x, y, w, h, format]
+                                           hôte → VRAM de scanout, cf. section v13 */
+#define QGPU_OP_COPY_TEX        0x001A  /* v13, [tex, cible, niveau, x, y, z,
+                                           sx, sy, w, h]  surface liée → texture */
+#define QGPU_OP_BUF_CREATE      0x001B  /* v14, [id, size] */
+#define QGPU_OP_BUF_DESTROY     0x001C  /* v14, [id] */
+#define QGPU_OP_BUF_SUBDATA     0x001D  /* v14, [id, dst_off, src_off, len]
+                                           BAR0 → tampon hôte */
 
 #define QGPU_OP_CLEAR           0x0020  /* [mask, color 0xxxRRGGBB, depth f32] */
 #define QGPU_OP_VIEWPORT        0x0021  /* [x, y, w, h]  (réservé : accepté, sans effet) */
@@ -254,6 +279,8 @@
 #define QGPU_OP_SET_CURRENT     0x0057  /* [quoi QGPU_CUR_*, x, y, z, w] */
 #define QGPU_OP_DRAW_RAW        0x0058  /* [mode, n, voff, pas, format, ioff, itype,
                                            premier, nverts] */
+#define QGPU_OP_DRAW_RAW_BUF    0x0059  /* v14, [mode, n, vbuf, voff, pas, format,
+                                           ibuf, ioff, itype, premier, nverts] */
 
 /* v8 : fin du pipeline fixe. Détail du contrat plus bas, section « v8 ». */
 #define QGPU_OP_SET_POLYGON_STIPPLE 0x0060 /* [32 mots de 32 bits, cf. ci-dessous] */
@@ -267,6 +294,11 @@
 #define QGPU_LEN_SURF_CREATE    5
 #define QGPU_LEN_SURF           2
 #define QGPU_LEN_SURF_XFER      8
+#define QGPU_LEN_SURF_PRESENT   9           /* v13 */
+#define QGPU_LEN_COPY_TEX       11          /* v13 */
+#define QGPU_LEN_BUF_CREATE     3           /* v14 */
+#define QGPU_LEN_BUF            2           /* v14 DESTROY */
+#define QGPU_LEN_BUF_SUBDATA    5           /* v14 */
 #define QGPU_LEN_CLEAR          4
 #define QGPU_LEN_VIEWPORT       5
 #define QGPU_LEN_DRAW           3
@@ -287,6 +319,7 @@
 #define QGPU_LEN_SET_CLIP_PLANE 7
 #define QGPU_LEN_SET_CURRENT    6
 #define QGPU_LEN_DRAW_RAW       10
+#define QGPU_LEN_DRAW_RAW_BUF   12          /* v14 */
 #define QGPU_LEN_SET_POLYGON_STIPPLE 33     /* v8 : la plus longue commande */
 #define QGPU_LEN_QUERY          2
 #define QGPU_LEN_QUERY_RESULT   3
@@ -303,6 +336,11 @@
  * partout (EXT_packed_depth_stencil, GL 3.0), et le seul qui rende un FBO
  * complet sur tous les pilotes testés. */
 #define QGPU_FMT_FLAG_STENCIL   0x200
+
+/* v13 : format de pixel de SURF_PRESENT (la VRAM de destination, pas la
+ * surface hôte — celle-ci reste QGPU_FMT_XRGB8888). */
+#define QGPU_PF_XRGB8888        0   /* 32 bpp, mêmes octets que SURF_READBACK */
+#define QGPU_PF_RGB1555         1   /* 16 bpp big-endian, « milliers » QFB */
 
 /* CLEAR : masque. Comme glClear, l'effacement respecte les ciseaux, le
  * masque de couleur et le masque de profondeur du contexte courant. */
@@ -1193,6 +1231,58 @@
  *   Aucun opcode ni clé nouveaux.
  */
 
+/* ── v13 : présentation dans la VRAM (zero-copy) ─────────────────────────────
+ *
+ *   SURF_PRESENT — QGPU_OP_SURF_PRESENT
+ *     [surf, off, stride, x, y, w, h, format]
+ *
+ *   Relit le rectangle [x, x+w) × [y, y+h) de la surface `surf` (comme
+ *   SURF_READBACK) et l'écrit dans la cible de scanout du device, à l'octet
+ *   `off`, `stride` octets par ligne. `format` est QGPU_PF_XRGB8888 (32 bpp,
+ *   mêmes octets big-endian que SURF_READBACK) ou QGPU_PF_RGB1555 (16 bpp
+ *   big-endian, « milliers de couleurs » QFB). `off` est relatif à l'origine
+ *   de la VRAM qfb (BAR0), pas à la fenêtre partagée qgpu.
+ *
+ *   Sans QGPU_CAP_SCANOUT, l'opcode rend QGPU_ST_BAD_ARG. Un rectangle qui
+ *   déborde de la VRAM rend QGPU_ST_OOB. Un flux v12 ignore cet opcode
+ *   (BAD_OPCODE) : l'invité ne l'émet que si version >= 13 et le bit est là.
+ *
+ *   La conversion 32 → 1555 est faite par l'HÔTE. L'invité n'écrit plus un
+ *   pixel à la présentation : plus de SURF_READBACK, plus de memcpy, plus de
+ *   pack 1555 sur le G4.
+ *
+ *   COPY_TEX — QGPU_OP_COPY_TEX
+ *     [tex, cible d'image, niveau, x, y, z, sx, sy, w, h]
+ *
+ *   Relit le rectangle [sx, sx+w) × [sy, sy+h) de la surface LIÉE (origine
+ *   haut-gauche, comme SURF_READBACK) et l'écrit dans le niveau `niveau` de
+ *   la texture `tex`, à (x, y, z). `cible` est une cible d'IMAGE (même
+ *   convention que TEX_SUBIMAGE). Le niveau doit déjà exister. w = 0 ou
+ *   h = 0 : sans effet, comme OpenGL. Un rectangle qui déborde de la
+ *   surface ou du niveau rend QGPU_ST_BAD_ARG. Un flux v12 ignore cet
+ *   opcode (BAD_OPCODE) : l'invité ne l'émet que si version >= 13.
+ *
+ *   Aucun texel ne traverse la fenêtre partagée : c'est le pendant, pour
+ *   glCopyTexSubImage, de SURF_PRESENT à l'échange.
+ */
+
+/* ── v14 : tampons hôte (maillages statiques hors de BAR0) ───────────────────
+ *
+ *   BUF_CREATE  [id, size]     alloue `size` octets sur l'hôte (zéro).
+ *   BUF_DESTROY [id]
+ *   BUF_SUBDATA [id, dst_off, src_off, len]
+ *     copie `len` octets de BAR0 (`src_off`) dans le tampon `id` à `dst_off`.
+ *     len = 0 : sans effet. Un débordement du tampon ou de BAR0 = OOB.
+ *     Recréer un id déjà pris = LIMIT. size = 0 ou size > QGPU_MAX_BUF_SIZE
+ *     = BAD_ARG.
+ *
+ *   DRAW_RAW_BUF — mêmes règles que DRAW_RAW, mais voff / ioff sont relatifs
+ *   au tampon hôte `vbuf` / `ibuf`. `QGPU_BUF_SHMEM` à la place d'un
+ *   identifiant veut dire « offset dans BAR0 », pour mixer sommets hôte et
+ *   indices encore dans la fenêtre. Un flux v13 ignore ces opcodes
+ *   (BAD_OPCODE) : l'invité ne les émet que si version >= 14.
+ */
+
 /* ── Interface du kext POMPPCGPU (IOUserClient) ──────────────────────────────
  *
  *   Sélecteurs de IOConnectMethodScalarIScalarO, et types de
@@ -1215,6 +1305,7 @@
 #define QGPU_CLIENT_SURF_IDS    (QGPU_MAX_SURF / QGPU_MAX_CLIENTS)   /* 16 */
 #define QGPU_CLIENT_TEX_IDS     (QGPU_MAX_TEX / QGPU_MAX_CLIENTS)    /* 128 */
 #define QGPU_CLIENT_QUERY_IDS   (QGPU_MAX_QUERIES / QGPU_MAX_CLIENTS) /* 16, v8 */
+#define QGPU_CLIENT_BUF_IDS     (QGPU_MAX_BUF / QGPU_MAX_CLIENTS)     /* 64, v14 */
 
 #define QGPU_UC_GET_INFO        0   /* in : —              out : version, caps, taille de tranche, fence */
 #define QGPU_UC_SUBMIT          1   /* in : off, len       out : fence, status, status_pc (off relatif à la tranche) */

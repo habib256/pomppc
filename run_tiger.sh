@@ -1,27 +1,32 @@
 #!/usr/bin/env bash
 # run_tiger.sh — lance Mac OS X 10.4 (Tiger) dans une fenêtre.
 #
-#   ./run_tiger.sh            # SMP 2 cœurs (MTTCG) + SON, fenêtre GTK, disque persistant
+#   ./run_tiger.sh            # SMP 2 cœurs (MTTCG) + SON + FLOTTANT RAPIDE + GPU qgpu
 #   SMP=1 ./run_tiger.sh      # mono-cœur + SON (chemin stable d'origine)
 #   NOSOUND=1 ./run_tiger.sh  # coupe l'audio (rend la RAM pleine : 1024 au lieu de 768)
 #   WIDE=1 ./run_tiger.sh     # 16:9 plein écran 1920x1080 (sinon RES=WxHxD au choix)
 #   SNAPSHOT=1 ./run_tiger.sh # disque jetable (writes annulés -> boot toujours propre, pas de fsck)
 #   NET=0 ./run_tiger.sh      # coupe le réseau (actif par défaut si QEMU a slirp :
 #                             # NAT, DHCP 10.0.2.15, passerelle 10.0.2.2, DNS 10.0.2.3)
+#   SSH_FWD=0                 # coupe la redirection SSH localhost:2222 → invité:22
+#                             # (10.0.2.15 n'est pas joignable depuis l'hôte)
 #   WEBPROXY=0                # ne lance pas le relais web HTTPS→HTTP (10.0.2.2:8080)
 #   HEADLESS=1 ./run_tiger.sh # sans fenêtre (moniteur seul, pour scripting)
 #   POMPPC_DISPLAY=sdl        # autre affichage (défaut : cocoa sous macOS, gtk sous Linux)
 #   QFB=1 ./run_tiger.sh      # + écran paravirtuel qfb-pci (kext POMPPCQFB)
 #   QFB_RES=1280x800          # mode par défaut proposé par l'écran QFB (avec QFB=1)
-#   GPU=1 ./run_tiger.sh      # + GPU paravirtuel qgpu-pci (kext POMPPCGPU, rendu hôte OpenGL)
-#   GPU_BACKEND=soft|gl|auto  # backend de rendu hôte du qgpu (défaut : auto)
-#   FASTFP=1 ./run_tiger.sh   # flottant rapide (le FPU de l'hôte au lieu du
-#                             # logiciel) — opt-in, éteint par défaut tant que
-#                             # ce n'est pas mesuré ; docs/flottant-rapide.md
+#   GPU=0 ./run_tiger.sh      # sans GPU paravirtuel qgpu-pci (allumé par défaut)
+#   GPU_BACKEND=soft|gl|auto  # backend de rendu hôte du qgpu (défaut : gl)
+#   FASTFP=0 ./run_tiger.sh   # flottant exact ; le rapide (FPU hôte) est le défaut
+#                             # docs/flottant-rapide.md
 #   NOPAD=1 ./run_tiger.sh    # coupe le passthrough de la manette USB
+#   TABLET=1 ./run_tiger.sh   # + usb-tablet (souris absolue). À ÉVITER sur Tiger :
+#                             # via=pmu fournit déjà usb-mouse ; les deux ensemble
+#                             # font un curseur qui dérive / saccade (la tablette
+#                             # est vue comme un stick analogique par HID 10.4).
 #   NOCD=1 ./run_tiger.sh     # omet le lecteur CD amovible vide 'gamecd'
-#   GLISO=1 ./run_tiger.sh    # insère l'ISO des sources du plugin GL (disks/pomppc-src.iso)
-#                             # dans 'gamecd' ; implicite avec GPU=1 (GLISO=0 pour l'éviter)
+#   GLISO=0 ./run_tiger.sh    # omet l'ISO des sources du plugin GL (disks/pomppc-src.iso)
+#                             # dans 'gamecd' ; implicite avec le GPU (GLISO=1 pour forcer)
 #   EXTRA_ARGS="-device ..."  # arguments QEMU supplémentaires
 #
 # Piloté par le frontend ImGui : DBUS_DISPLAY=1 (sortie -display dbus,p2p=on) et
@@ -112,21 +117,21 @@ fi
 # Laisse softfloat confier les opérations flottantes courantes au FPU de l'hôte.
 # Résultats identiques au bit près ; seuls FPSCR[FI] (constant à 1) et la règle
 # de transition de FX dévient. Voir docs/flottant-rapide.md.
-# OPT-IN : éteint par défaut tant que le gain n'est pas mesuré sur la VM.
+# Allumé par défaut (jeux : Vorbis, physique). FASTFP=0 pour le flottant exact.
 #
 # SONDÉ, jamais supposé — et pour une raison plus dure que d'habitude : une
 # propriété absente dans -cpu ne produit pas un warning, elle fait QUITTER QEMU.
 # Poser ,x-fast-fp=on à l'aveugle sur un binaire non patché ne dégraderait pas
 # le lanceur, il l'empêcherait de démarrer.
 CPU_SPEC="$CPU"
-if [ "${FASTFP:-0}" != 0 ]; then
+if [ "${FASTFP:-1}" != 0 ]; then
   if qemu_cpu_has_fastfp "$BIN" "$MACHINE" "$CPU"; then
     CPU_SPEC="$CPU,x-fast-fp=on"
     MODE="$MODE + FLOTTANT RAPIDE"
   else
-    echo "⚠  FASTFP=1 demandé mais ce QEMU n'a pas la propriété 'x-fast-fp'." >&2
+    echo "⚠  flottant rapide demandé mais ce QEMU n'a pas la propriété 'x-fast-fp'." >&2
     echo "   Reconstruis le binaire de référence : ./scripts/build_qemu_qfb.sh" >&2
-    echo "   (lancement en flottant exact, comme d'habitude.)" >&2
+    echo "   (lancement en flottant exact.)" >&2
   fi
 fi
 
@@ -150,6 +155,11 @@ NET=""
 NET_ARGS=(-nic none)
 if [ "$NET_WANT" != 0 ]; then
   if qemu_has_netdev "$BIN" user; then
+    # 10.0.2.15 n'est pas joignable depuis l'hôte (NAT slirp). On ouvre
+    # localhost:2222 → sshd de l'invité (Session à distance). SSH_FWD=0 pour couper.
+    if [ "${SSH_FWD:-2222}" != 0 ]; then
+      NETDEV="$NETDEV,hostfwd=tcp:127.0.0.1:${SSH_FWD:-2222}-:22"
+    fi
     NET_ARGS=(-netdev "$NETDEV" -device "$NETNIC")
     NET=1
   elif [ "$NET_WANT" = 1 ]; then
@@ -194,23 +204,25 @@ if [ -n "${QFB:-}" ]; then
 fi
 
 # --- GPU paravirtuel qgpu (device qgpu-pci + kext POMPPCGPU) ---
-#     GPU=1 ajoute le coprocesseur de commandes 3D : l'invité y soumet des
-#     flux de commandes, l'hôte les rend en OpenGL (docs/gpu-3d-tiger.md).
-#     GPU_BACKEND choisit le backend hôte ; GPU_TRACE=1 journalise chaque
-#     commande sur stderr (verbeux).
+#     Allumé par défaut : l'invité y soumet des flux de commandes, l'hôte les
+#     rend en OpenGL (docs/gpu-3d-tiger.md). GPU=0 pour l'omettre.
+#     GPU_BACKEND choisit le backend hôte (défaut gl) ; GPU_TRACE=1 journalise
+#     chaque commande sur stderr (verbeux).
 GPU_ARGS=()
-if [ -n "${GPU:-}" ]; then
+GPU_ON=""
+if [ "${GPU:-1}" != 0 ]; then
   if qemu_has_device "$BIN" qgpu-pci; then
     # Pas de $([ … ] && echo …) ici : sous set -e, l'affectation prend le code
     # de la substitution (1 sans GPU_TRACE) et le lanceur s'arrêtait en silence.
-    GPU_OPTS="backend=${GPU_BACKEND:-auto}"
+    GPU_OPTS="backend=${GPU_BACKEND:-gl}"
     [ -n "${GPU_TRACE:-}" ] && GPU_OPTS="$GPU_OPTS,trace=on"
     GPU_ARGS=(-device "qgpu-pci,id=gpu0,$GPU_OPTS")
-    echo "  🎨 GPU paravirtuel qgpu (backend ${GPU_BACKEND:-auto})"
+    GPU_ON=1
+    echo "  🎨 GPU paravirtuel qgpu (backend ${GPU_BACKEND:-gl})"
   else
-    echo "⚠  GPU=1 demandé mais ce QEMU n'a pas le device qgpu-pci." >&2
+    echo "⚠  GPU allumé par défaut mais ce QEMU n'a pas le device qgpu-pci." >&2
     echo "   Reconstruis-le : ./scripts/build_qemu_qfb.sh" >&2
-    exit 1
+    echo "   (lancement sans accélération 3D.)" >&2
   fi
 fi
 
@@ -219,7 +231,7 @@ fi
 #     avant). Régénéré si absent ou plus vieux qu'une source : le CD monté
 #     correspond toujours au dépôt. Dans l'invité, il apparaît comme POMPPCSRC.
 GLISO_WANT="${GLISO:-}"
-[ -z "$GLISO_WANT" ] && [ -n "${GPU:-}" ] && GLISO_WANT=1
+[ -z "$GLISO_WANT" ] && [ -n "$GPU_ON" ] && GLISO_WANT=1
 if [ "$GLISO_WANT" = 1 ]; then
   GL_ISO="$ROOT/disks/pomppc-src.iso"
   GL_SRCS=("$ROOT/kext/POMPPCGPU" "$ROOT/kext/POMPPCQFB" "$ROOT/guest/gldriver"
@@ -246,6 +258,7 @@ réseau=$([ -n "${NET:-}" ] && echo on || echo off) \
 disque=$([ -n "${SNAPSHOT:-}" ] && echo jetable || echo persistant)"
 echo "  moniteur QEMU : $MON"
 [ -n "$WEBPROXY_ON" ] && echo "  🌐 relais web : 10.0.2.2:$WEBPROXY_PORT (proxy HTTP de Tiger ; journal .run/web-proxy.log)"
+[ -n "$NET" ] && [ "${SSH_FWD:-2222}" != 0 ] && echo "  🔑 SSH : ssh -p ${SSH_FWD:-2222} tiger@127.0.0.1  (invité 10.0.2.15:22)"
 [ "$SMP_N" -ge 2 ] && echo "  (1er boot en persistant = fsck possible ~1min ; ensuite rapide)"
 
 # --- Manette USB : auto-passthrough (idem run_os9.sh) ; NOPAD=1 pour couper ---
@@ -261,11 +274,19 @@ if [ -z "${NOPAD:-}" ] && [ -e /dev/input/js0 ] \
   fi
 fi
 
+# via=pmu crée déjà usb-kbd + usb-mouse. usb-tablet en plus = deux pointeurs HID
+# dans Tiger : le curseur dérive (tablette vue comme un stick) et saccade.
+TABLET_ARGS=()
+if [ -n "${TABLET:-}" ]; then
+  TABLET_ARGS=(-device usb-tablet)
+  echo "  ⚠  usb-tablet en plus de usb-mouse : curseur souvent faux sous Tiger"
+fi
+
 exec "$BIN" -M "$MACHINE" -cpu "$CPU_SPEC" -m "$RAM" -smp "$SMP_N" \
   -display "$DISP" -g "$RES" \
   -drive "file=$DISK,format=qcow2,media=disk" ${SNAP_ARGS[@]+"${SNAP_ARGS[@]}"} ${CD_ARGS[@]+"${CD_ARGS[@]}"} \
   ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${EXTRA[@]+"${EXTRA[@]}"} ${AUDIO[@]+"${AUDIO[@]}"} \
-  -device usb-tablet ${PAD_ARGS[@]+"${PAD_ARGS[@]}"} ${QFB_ARGS[@]+"${QFB_ARGS[@]}"} ${GPU_ARGS[@]+"${GPU_ARGS[@]}"} ${USER_EXTRA[@]+"${USER_EXTRA[@]}"} \
+  ${TABLET_ARGS[@]+"${TABLET_ARGS[@]}"} ${PAD_ARGS[@]+"${PAD_ARGS[@]}"} ${QFB_ARGS[@]+"${QFB_ARGS[@]}"} ${GPU_ARGS[@]+"${GPU_ARGS[@]}"} ${USER_EXTRA[@]+"${USER_EXTRA[@]}"} \
   -prom-env 'auto-boot?=true' \
   -prom-env "boot-device=$BOOTDEV" \
   -prom-env 'boot-args=-v' \

@@ -9,7 +9,8 @@ Deux couches se superposent dans ce dépôt, et il faut les distinguer pour ne p
 - une **couche baseline/métrologie** (`scripts/`, `config.env`), volontairement minimale,
   qui sert à mesurer et à profiler un boot Tiger ;
 - une **couche usage quotidien** (`run_tiger.sh`, `run_os9.sh`, `frontend/`, `mount`), qui
-  ajoute le SMP, le son, la manette, le dossier partagé et l'écran paravirtuel QFB.
+  ajoute le SMP, le son, le flottant rapide, le GPU qgpu, la manette, le dossier partagé
+  et l'écran paravirtuel QFB.
 
 Les deux partagent `config.env` mais **pas** les mêmes défauts (SMP, réseau, affichage) :
 voir « Lanceurs » ci-dessous.
@@ -105,6 +106,7 @@ s'étonner d'un écart :
 | `SMP=1` | 2 cœurs MTTCG (`SMP=1` pour revenir en mono) | 1 (SMP OS 9 buggé) |
 | `RAM_MB=1024` | 768 **si et seulement si** le son est réellement actif (le Screamer exige < 1 Go) | 512 |
 | réseau selon `NONET` | actif si slirp (`NET=0` pour couper) | coupé |
+| — | flottant rapide (`FASTFP=0` pour l'exact) + GPU qgpu backend gl (`GPU=0` pour l'ôter) | — |
 
 **Les lanceurs sondent le binaire, ils ne supposent rien.** Règle du dépôt : *un lanceur
 n'annonce jamais une capacité que le binaire n'a pas* (`scripts/caps.sh`). Elle vient d'un
@@ -149,11 +151,11 @@ scripts/profile-boot.sh              # perf record sur un boot complet
 **Usage quotidien** (SMP, son, manette, partage — nécessite le build source) :
 
 ```bash
-./run_tiger.sh              # Tiger : 2 cœurs MTTCG + son, fenêtre GTK, disque persistant
+./run_tiger.sh              # Tiger : 2 cœurs MTTCG + son + flottant rapide + GPU qgpu
 SNAPSHOT=1 ./run_tiger.sh   # disque jetable (writes annulés → pas de fsck) : à utiliser en debug
 QFB=1 ./run_tiger.sh        # + écran paravirtuel QFB en second moniteur
-GPU=1 ./run_tiger.sh        # + GPU paravirtuel qgpu, et CD des sources du plugin GL
-FASTFP=1 ./run_tiger.sh     # + flottant rapide : le FPU de l'hôte pour le flottant PowerPC (docs/flottant-rapide.md)
+GPU=0 ./run_tiger.sh        # sans GPU paravirtuel qgpu (allumé par défaut, CD POMPPCSRC inclus)
+FASTFP=0 ./run_tiger.sh     # flottant exact (le FPU hôte est le défaut ; docs/flottant-rapide.md)
 NET=0 ./run_tiger.sh        # sans réseau (actif par défaut, avec le relais web)
 ./run_os9.sh                # Mac OS 9 : boote le disque installé, sinon le CD en live
 ./run_os9.sh install        # force le boot CD pour (ré)installer
@@ -162,7 +164,7 @@ NET=0 ./run_tiger.sh        # sans réseau (actif par défaut, avec le relais we
 ./add-pad                   # enregistre la manette branchée dans la règle udev
 ```
 
-Chaque lanceur documente ses variables d'environnement dans son en-tête (`head -20 run_tiger.sh`).
+Chaque lanceur documente ses variables d'environnement dans son en-tête (`head -25 run_tiger.sh`).
 Le socket moniteur QEMU est dans `.run/mon.sock` (Tiger) ou `.run/os9-mon.sock` (OS 9) ;
 `scripts/moncmd.py <socket> "<commande HMP>"` l'interroge (screendump, sendkey, info block, quit…).
 
@@ -240,9 +242,9 @@ reste exact.
 ```bash
 ./scripts/build_qemu_qfb.sh          # QEMU + qfb-pci + qgpu-pci
 ./tests/run-all.sh --slow            # dont les tests qgpu (natif soft/GL, bout en bout)
-GPU=1 ./run_tiger.sh                 # Tiger + qgpu-pci + CD « POMPPCSRC » (sources du plugin,
-                                     # regravé si besoin ; GLISO=0 pour l'omettre). Une fois,
-                                     # dans Tiger : cp -R /Volumes/POMPPCSRC /tmp/src &&
+./run_tiger.sh                       # qgpu-pci + CD « POMPPCSRC » (regravé si besoin ;
+                                     # GLISO=0 pour l'omettre). Une fois, dans Tiger :
+                                     #   cp -R /Volumes/POMPPCSRC /tmp/src &&
                                      #   sudo sh /tmp/src/guest/gldriver/install.sh
 ```
 

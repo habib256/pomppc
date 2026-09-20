@@ -35,8 +35,8 @@ bool POMPPCGPU::start(IOService * provider)
     fShmemRange = fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
     fRegsRange  = fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress1);
     if (!fShmemRange || !fRegsRange) {
-        GPULog("BAR0 (fenêtre partagée) ou BAR1 (registres) absent — Open "
-               "Firmware n'a pas assigné les ressources PCI ?\n");
+        GPULog("BAR0 (shared window) or BAR1 (registers) missing - Open "
+               "Firmware did not assign PCI resources?\n");
         return false;
     }
     fShmemRange->retain();
@@ -44,7 +44,7 @@ bool POMPPCGPU::start(IOService * provider)
 
     fRegsMap = fRegsRange->map();
     if (!fRegsMap) {
-        GPULog("impossible de mapper les registres\n");
+        GPULog("cannot map registers\n");
         return false;
     }
     fRegs = (volatile UInt32 *) fRegsMap->getVirtualAddress();
@@ -52,7 +52,7 @@ bool POMPPCGPU::start(IOService * provider)
     fPCI->setMemoryEnable(true);
 
     if (regRead(QGPU_REG_MAGIC) != QGPU_MAGIC) {
-        GPULog("signature invalide (0x%08lx au lieu de 'qgp1')\n",
+        GPULog("invalid signature (0x%08lx, expected 'qgp1')\n",
                (unsigned long) regRead(QGPU_REG_MAGIC));
         fPCI->setMemoryEnable(false);
         return false;
@@ -62,9 +62,9 @@ bool POMPPCGPU::start(IOService * provider)
     fShmemSize = regRead(QGPU_REG_SHMEM_SIZE);
     /* Un device plus récent comprend les flux des versions précédentes
        (chaque version ne fait qu'ajouter des opcodes et des clés). */
-    if (fVersion < QGPU_PROTO_VERSION) {
-        GPULog("protocole v%lu, ce kext exige au moins v%d : refus\n",
-               (unsigned long) fVersion, QGPU_PROTO_VERSION);
+    if (fVersion < QGPU_PROTO_MIN) {
+        GPULog("protocol v%lu, this kext needs at least v%d: refusing\n",
+               (unsigned long) fVersion, QGPU_PROTO_MIN);
         fPCI->setMemoryEnable(false);
         return false;
     }
@@ -80,7 +80,7 @@ bool POMPPCGPU::start(IOService * provider)
     fGate = fWorkLoop ? IOCommandGate::commandGate(this) : 0;
     if (!fWorkLoop || !fGate ||
         fWorkLoop->addEventSource(fGate) != kIOReturnSuccess) {
-        GPULog("work loop / command gate : échec\n");
+        GPULog("work loop / command gate failed\n");
         return false;
     }
 
@@ -98,7 +98,7 @@ bool POMPPCGPU::start(IOService * provider)
         regWrite(QGPU_REG_IRQ, QGPU_IRQ_DONE);        /* acquitte un reliquat */
         regWrite(QGPU_REG_IRQ_MASK, QGPU_IRQ_DONE);
     } else {
-        GPULog("pas de source d'interruption : fonctionnement en scrutation\n");
+        GPULog("no interrupt source: polling\n");
     }
 
     /* Chien de garde des attentes de barrière (v9). Sans lui, pas de sommeil
@@ -130,13 +130,20 @@ bool POMPPCGPU::start(IOService * provider)
         char   name[5];
         name[0] = tag >> 24; name[1] = tag >> 16; name[2] = tag >> 8;
         name[3] = tag; name[4] = 0;
+        /* IOLog goes to the Darwin console (MacRoman): ASCII English only.
+           Backend name is a 4-byte tag ('gl' plus padding): trim it. */
+        {
+            int i = 3;
+            while (i >= 0 && (unsigned char)name[i] <= ' ')
+                name[i--] = 0;
+        }
         setProperty("QGPUBackend", name);
-        GPULog("démarré : protocole v%lu, backend hôte '%s', caps 0x%lx, "
-               "fenêtre %lu Mio, %d clients × %lu Mio, soumission %s\n",
+        GPULog("started: protocol v%lu, host backend '%s', caps 0x%lx, "
+               "window %lu MiB, %d clients x %lu MiB, %s\n",
                (unsigned long) fVersion, name,
                (unsigned long) fCaps, (unsigned long) (fShmemSize >> 20),
                QGPU_MAX_CLIENTS, (unsigned long) (fSlotSize >> 20),
-               fAsync ? "asynchrone disponible" : "synchrone seulement");
+               fAsync ? "async submit ready" : "sync submit only");
     }
 
     registerService();
@@ -203,19 +210,19 @@ void POMPPCGPU::publishAccelerator(void)
     fAccel = new POMPPCAccelerator;
     if (!fAccel || !fAccel->init()) {
         if (fAccel) { fAccel->release(); fAccel = 0; }
-        GPULog("accélérateur : allocation impossible\n");
+        GPULog("accelerator: allocation failed\n");
         return;
     }
     fAccel->setProperty("IOGLBundleName", POMPPC_GL_BUNDLE_NAME);
     if (!fAccel->attach(this)) {
         fAccel->release();
         fAccel = 0;
-        GPULog("accélérateur : attach impossible\n");
+        GPULog("accelerator: attach failed\n");
         return;
     }
     if (!fAccel->getPath(path, &len, gIOServicePlane) ||
         !(fAccelPath = OSString::withCString(path))) {
-        GPULog("accélérateur : chemin introuvable, framebuffers non liés\n");
+        GPULog("accelerator: path not found, framebuffers not bound\n");
         fAccel->registerService();
         return;
     }
@@ -224,7 +231,7 @@ void POMPPCGPU::publishAccelerator(void)
     fFBLock    = IOLockAlloc();
     fLinkedFBs = OSArray::withCapacity(2);
     if (!fFBLock || !fLinkedFBs) {
-        GPULog("accélérateur : framebuffers non liés (mémoire)\n");
+        GPULog("accelerator: framebuffers not bound (memory)\n");
         return;
     }
     /* Appelé aussi, tout de suite, pour les framebuffers déjà publiés : le kext
@@ -233,7 +240,7 @@ void POMPPCGPU::publishAccelerator(void)
     fFBNotifier = addNotification(gIOPublishNotification,
                                   serviceMatching("IOFramebuffer"),
                                   &POMPPCGPU::framebufferPublished, this, 0);
-    GPULog("accélérateur publié : %s (%s)\n", path, POMPPC_GL_BUNDLE_NAME);
+    GPULog("accelerator published: %s (%s)\n", path, POMPPC_GL_BUNDLE_NAME);
 }
 
 bool POMPPCGPU::framebufferPublished(void * target, void * ref, IOService * fb)
@@ -258,7 +265,7 @@ void POMPPCGPU::linkFramebuffer(IOService * fb)
     cur = OSDynamicCast(OSString, fb->getProperty(kIOAccelTypesKey));
     if (cur && !cur->isEqualTo(fAccelPath)) {
         IOLockUnlock(fFBLock);
-        GPULog("%s désigne déjà %s : laissé tel quel\n", fb->getName(),
+        GPULog("%s already names %s: left unchanged\n", fb->getName(),
                cur->getCStringNoCopy());
         return;
     }
@@ -271,7 +278,7 @@ void POMPPCGPU::linkFramebuffer(IOService * fb)
     }
     fLinkedFBs->setObject(fb);
     IOLockUnlock(fFBLock);
-    GPULog("framebuffer %s lié à l'accélérateur (index %lu)\n", fb->getName(),
+    GPULog("framebuffer %s bound to accelerator (index %lu)\n", fb->getName(),
            (unsigned long) n);
 }
 
@@ -628,13 +635,14 @@ void POMPPCGPU::destroyClientObjects(int slot)
     int i;
 
     if (w) {
-        static const struct { UInt32 op, per_client; } kinds[3] = {
+        static const struct { UInt32 op, per_client; } kinds[4] = {
             { QGPU_OP_SURF_DESTROY, QGPU_CLIENT_SURF_IDS },
             { QGPU_OP_TEX_DESTROY,  QGPU_CLIENT_TEX_IDS },
+            { QGPU_OP_BUF_DESTROY,  QGPU_CLIENT_BUF_IDS },
             { QGPU_OP_CTX_DESTROY,  QGPU_CLIENT_CTX_IDS },
         };
         int k;
-        for (k = 0; k < 3; k++) {
+        for (k = 0; k < 4; k++) {
             for (i = 0; i < (int) kinds[k].per_client; i++) {
                 w[0] = QGPU_CMD_HDR(kinds[k].op, 2);
                 w[1] = (UInt32) slot * kinds[k].per_client + i;
@@ -703,7 +711,7 @@ bool POMPPCGPUUserClient::start(IOService * provider)
     /* Une tranche de fenêtre et une plage d'identifiants par client. */
     fSlot = fOwner->allocSlot(this);
     if (fSlot < 0) {
-        GPULog("déjà %d clients : ouverture refusée\n", QGPU_MAX_CLIENTS);
+        GPULog("already %d clients: open refused\n", QGPU_MAX_CLIENTS);
         return false;
     }
     return true;

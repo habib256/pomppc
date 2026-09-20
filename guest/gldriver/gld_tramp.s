@@ -8,7 +8,7 @@
 _gldCreateShared:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -17,12 +17,20 @@ _gldCreateShared:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,4
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -35,13 +43,13 @@ _gldCreateShared:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -52,7 +60,7 @@ _gldCreateShared:
 _gldDestroyShared:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -61,12 +69,20 @@ _gldDestroyShared:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,5
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -79,13 +95,13 @@ _gldDestroyShared:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -96,7 +112,7 @@ _gldDestroyShared:
 _gldReclaimContext:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -105,12 +121,20 @@ _gldReclaimContext:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,8
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -123,13 +147,13 @@ _gldReclaimContext:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -140,7 +164,7 @@ _gldReclaimContext:
 _gldSetInteger:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -149,12 +173,20 @@ _gldSetInteger:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,11
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -167,13 +199,13 @@ _gldSetInteger:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -184,7 +216,7 @@ _gldSetInteger:
 _gldGetTextureLevelInfo:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -193,12 +225,20 @@ _gldGetTextureLevelInfo:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,18
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -211,13 +251,13 @@ _gldGetTextureLevelInfo:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -228,7 +268,7 @@ _gldGetTextureLevelInfo:
 _gldGetTextureLevel:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -237,12 +277,20 @@ _gldGetTextureLevel:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,19
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -255,13 +303,13 @@ _gldGetTextureLevel:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -272,7 +320,7 @@ _gldGetTextureLevel:
 _gldIsTextureResident:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -281,12 +329,20 @@ _gldIsTextureResident:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,22
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -299,13 +355,13 @@ _gldIsTextureResident:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -316,7 +372,7 @@ _gldIsTextureResident:
 _gldReclaimTexture:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -325,12 +381,20 @@ _gldReclaimTexture:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,23
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -343,13 +407,13 @@ _gldReclaimTexture:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -360,7 +424,7 @@ _gldReclaimTexture:
 _gldGetError:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -369,12 +433,20 @@ _gldGetError:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,27
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -387,13 +459,13 @@ _gldGetError:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -404,7 +476,7 @@ _gldGetError:
 _gldAllocVertexBuffer:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -413,12 +485,20 @@ _gldAllocVertexBuffer:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,28
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -431,13 +511,13 @@ _gldAllocVertexBuffer:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -448,7 +528,7 @@ _gldAllocVertexBuffer:
 _gldCompleteVertexBuffer:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -457,12 +537,20 @@ _gldCompleteVertexBuffer:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,29
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -475,13 +563,13 @@ _gldCompleteVertexBuffer:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -492,7 +580,7 @@ _gldCompleteVertexBuffer:
 _gldFreeVertexBuffer:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -501,12 +589,20 @@ _gldFreeVertexBuffer:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,30
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -519,13 +615,13 @@ _gldFreeVertexBuffer:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -536,7 +632,7 @@ _gldFreeVertexBuffer:
 _gldCreatePipelineProgram:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -545,12 +641,20 @@ _gldCreatePipelineProgram:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,31
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -563,13 +667,13 @@ _gldCreatePipelineProgram:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -580,7 +684,7 @@ _gldCreatePipelineProgram:
 _gldModifyPipelineProgram:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -589,12 +693,20 @@ _gldModifyPipelineProgram:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,32
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -607,13 +719,13 @@ _gldModifyPipelineProgram:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -624,7 +736,7 @@ _gldModifyPipelineProgram:
 _gldRelatePipelineProgram:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -633,12 +745,20 @@ _gldRelatePipelineProgram:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,33
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -651,13 +771,13 @@ _gldRelatePipelineProgram:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -668,7 +788,7 @@ _gldRelatePipelineProgram:
 _gldGetPipelineProgramInfo:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -677,12 +797,20 @@ _gldGetPipelineProgramInfo:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,34
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -695,13 +823,13 @@ _gldGetPipelineProgramInfo:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -712,7 +840,7 @@ _gldGetPipelineProgramInfo:
 _gldDestroyPipelineProgram:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -721,12 +849,20 @@ _gldDestroyPipelineProgram:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,35
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -739,13 +875,13 @@ _gldDestroyPipelineProgram:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -756,7 +892,7 @@ _gldDestroyPipelineProgram:
 _gldCreateVertexArray:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -765,12 +901,20 @@ _gldCreateVertexArray:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,36
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -783,13 +927,13 @@ _gldCreateVertexArray:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -800,7 +944,7 @@ _gldCreateVertexArray:
 _gldModifyVertexArray:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -809,12 +953,20 @@ _gldModifyVertexArray:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,37
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -827,13 +979,13 @@ _gldModifyVertexArray:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -844,7 +996,7 @@ _gldModifyVertexArray:
 _gldFlushVertexArray:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -853,12 +1005,20 @@ _gldFlushVertexArray:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,38
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -871,13 +1031,13 @@ _gldFlushVertexArray:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -888,7 +1048,7 @@ _gldFlushVertexArray:
 _gldDestroyVertexArray:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -897,12 +1057,20 @@ _gldDestroyVertexArray:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,39
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -915,13 +1083,13 @@ _gldDestroyVertexArray:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -932,7 +1100,7 @@ _gldDestroyVertexArray:
 _gldReclaimVertexArray:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -941,12 +1109,20 @@ _gldReclaimVertexArray:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,40
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -959,13 +1135,13 @@ _gldReclaimVertexArray:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -976,7 +1152,7 @@ _gldReclaimVertexArray:
 _gldCreateFence:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -985,12 +1161,20 @@ _gldCreateFence:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,41
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1003,13 +1187,13 @@ _gldCreateFence:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1020,7 +1204,7 @@ _gldCreateFence:
 _gldDestroyFence:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1029,12 +1213,20 @@ _gldDestroyFence:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,42
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1047,13 +1239,13 @@ _gldDestroyFence:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1064,7 +1256,7 @@ _gldDestroyFence:
 _gldTestObject:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1073,12 +1265,20 @@ _gldTestObject:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,43
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1091,13 +1291,13 @@ _gldTestObject:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1108,7 +1308,7 @@ _gldTestObject:
 _gldFinishObject:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1117,12 +1317,20 @@ _gldFinishObject:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,44
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1135,13 +1343,13 @@ _gldFinishObject:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1152,7 +1360,7 @@ _gldFinishObject:
 _gldCreateQuery:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1161,12 +1369,20 @@ _gldCreateQuery:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,45
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1179,13 +1395,13 @@ _gldCreateQuery:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1196,7 +1412,7 @@ _gldCreateQuery:
 _gldDestroyQuery:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1205,12 +1421,20 @@ _gldDestroyQuery:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,46
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1223,13 +1447,13 @@ _gldDestroyQuery:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1240,7 +1464,7 @@ _gldDestroyQuery:
 _gldGetQueryInfo:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1249,12 +1473,20 @@ _gldGetQueryInfo:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,47
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1267,13 +1499,13 @@ _gldGetQueryInfo:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1284,7 +1516,7 @@ _gldGetQueryInfo:
 _gldCreateBuffer:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1293,12 +1525,20 @@ _gldCreateBuffer:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,48
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1311,13 +1551,13 @@ _gldCreateBuffer:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1328,7 +1568,7 @@ _gldCreateBuffer:
 _gldDestroyBuffer:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1337,12 +1577,20 @@ _gldDestroyBuffer:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,49
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1355,13 +1603,13 @@ _gldDestroyBuffer:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1372,7 +1620,7 @@ _gldDestroyBuffer:
 _gldFlushBuffer:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1381,12 +1629,20 @@ _gldFlushBuffer:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,50
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1399,13 +1655,13 @@ _gldFlushBuffer:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1416,7 +1672,7 @@ _gldFlushBuffer:
 _gldReclaimBuffer:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1425,12 +1681,20 @@ _gldReclaimBuffer:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,51
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1443,13 +1707,13 @@ _gldReclaimBuffer:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1460,7 +1724,7 @@ _gldReclaimBuffer:
 _gldPageoffBuffer:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1469,12 +1733,20 @@ _gldPageoffBuffer:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,52
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1487,13 +1759,13 @@ _gldPageoffBuffer:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1504,7 +1776,7 @@ _gldPageoffBuffer:
 _gldGetMemoryPluginData:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1513,12 +1785,20 @@ _gldGetMemoryPluginData:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,53
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1531,13 +1811,13 @@ _gldGetMemoryPluginData:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1548,7 +1828,7 @@ _gldGetMemoryPluginData:
 _gldSetMemoryPluginData:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1557,12 +1837,20 @@ _gldSetMemoryPluginData:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,54
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1575,13 +1863,13 @@ _gldSetMemoryPluginData:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1592,7 +1880,7 @@ _gldSetMemoryPluginData:
 _gldFinishMemoryPluginData:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1601,12 +1889,20 @@ _gldFinishMemoryPluginData:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,55
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1619,13 +1915,13 @@ _gldFinishMemoryPluginData:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1636,7 +1932,7 @@ _gldFinishMemoryPluginData:
 _gldTestMemoryPluginData:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1645,12 +1941,20 @@ _gldTestMemoryPluginData:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,56
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1663,13 +1967,13 @@ _gldTestMemoryPluginData:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1680,7 +1984,7 @@ _gldTestMemoryPluginData:
 _gldDestroyMemoryPluginData:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1689,12 +1993,20 @@ _gldDestroyMemoryPluginData:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,57
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1707,13 +2019,13 @@ _gldDestroyMemoryPluginData:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1724,7 +2036,7 @@ _gldDestroyMemoryPluginData:
 _gldCreateFramebuffer:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1733,12 +2045,20 @@ _gldCreateFramebuffer:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,58
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1751,13 +2071,13 @@ _gldCreateFramebuffer:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1768,7 +2088,7 @@ _gldCreateFramebuffer:
 _gldReclaimFramebuffer:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1777,12 +2097,20 @@ _gldReclaimFramebuffer:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,59
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1795,13 +2123,13 @@ _gldReclaimFramebuffer:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1812,7 +2140,7 @@ _gldReclaimFramebuffer:
 _gldDestroyFramebuffer:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1821,12 +2149,20 @@ _gldDestroyFramebuffer:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,60
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1839,13 +2175,13 @@ _gldDestroyFramebuffer:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1856,7 +2192,7 @@ _gldDestroyFramebuffer:
 _pomppc_proc_0:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1865,12 +2201,20 @@ _pomppc_proc_0:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1000
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1883,13 +2227,13 @@ _pomppc_proc_0:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1900,7 +2244,7 @@ _pomppc_proc_0:
 _pomppc_proc_1:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1909,12 +2253,20 @@ _pomppc_proc_1:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1001
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1927,13 +2279,13 @@ _pomppc_proc_1:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1944,7 +2296,7 @@ _pomppc_proc_1:
 _pomppc_proc_2:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1953,12 +2305,20 @@ _pomppc_proc_2:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1002
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -1971,13 +2331,13 @@ _pomppc_proc_2:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -1988,7 +2348,7 @@ _pomppc_proc_2:
 _pomppc_proc_3:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -1997,12 +2357,20 @@ _pomppc_proc_3:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1003
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2015,13 +2383,13 @@ _pomppc_proc_3:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2032,7 +2400,7 @@ _pomppc_proc_3:
 _pomppc_proc_4:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2041,12 +2409,20 @@ _pomppc_proc_4:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1004
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2059,13 +2435,13 @@ _pomppc_proc_4:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2076,7 +2452,7 @@ _pomppc_proc_4:
 _pomppc_proc_5:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2085,12 +2461,20 @@ _pomppc_proc_5:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1005
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2103,13 +2487,13 @@ _pomppc_proc_5:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2120,7 +2504,7 @@ _pomppc_proc_5:
 _pomppc_proc_6:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2129,12 +2513,20 @@ _pomppc_proc_6:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1006
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2147,13 +2539,13 @@ _pomppc_proc_6:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2164,7 +2556,7 @@ _pomppc_proc_6:
 _pomppc_proc_7:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2173,12 +2565,20 @@ _pomppc_proc_7:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1007
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2191,13 +2591,13 @@ _pomppc_proc_7:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2208,7 +2608,7 @@ _pomppc_proc_7:
 _pomppc_proc_8:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2217,12 +2617,20 @@ _pomppc_proc_8:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1008
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2235,13 +2643,13 @@ _pomppc_proc_8:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2252,7 +2660,7 @@ _pomppc_proc_8:
 _pomppc_proc_9:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2261,12 +2669,20 @@ _pomppc_proc_9:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1009
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2279,13 +2695,13 @@ _pomppc_proc_9:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2296,7 +2712,7 @@ _pomppc_proc_9:
 _pomppc_proc_10:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2305,12 +2721,20 @@ _pomppc_proc_10:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1010
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2323,13 +2747,13 @@ _pomppc_proc_10:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2340,7 +2764,7 @@ _pomppc_proc_10:
 _pomppc_proc_11:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2349,12 +2773,20 @@ _pomppc_proc_11:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1011
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2367,13 +2799,13 @@ _pomppc_proc_11:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2384,7 +2816,7 @@ _pomppc_proc_11:
 _pomppc_proc_12:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2393,12 +2825,20 @@ _pomppc_proc_12:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1012
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2411,13 +2851,13 @@ _pomppc_proc_12:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2428,7 +2868,7 @@ _pomppc_proc_12:
 _pomppc_proc_13:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2437,12 +2877,20 @@ _pomppc_proc_13:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1013
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2455,13 +2903,13 @@ _pomppc_proc_13:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2472,7 +2920,7 @@ _pomppc_proc_13:
 _pomppc_proc_14:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2481,12 +2929,20 @@ _pomppc_proc_14:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1014
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2499,13 +2955,13 @@ _pomppc_proc_14:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2516,7 +2972,7 @@ _pomppc_proc_14:
 _pomppc_proc_15:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2525,12 +2981,20 @@ _pomppc_proc_15:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1015
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2543,13 +3007,13 @@ _pomppc_proc_15:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2560,7 +3024,7 @@ _pomppc_proc_15:
 _pomppc_proc_16:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2569,12 +3033,20 @@ _pomppc_proc_16:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1016
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2587,13 +3059,13 @@ _pomppc_proc_16:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2604,7 +3076,7 @@ _pomppc_proc_16:
 _pomppc_proc_17:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2613,12 +3085,20 @@ _pomppc_proc_17:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1017
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2631,13 +3111,13 @@ _pomppc_proc_17:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2648,7 +3128,7 @@ _pomppc_proc_17:
 _pomppc_proc_18:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2657,12 +3137,20 @@ _pomppc_proc_18:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1018
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2675,13 +3163,13 @@ _pomppc_proc_18:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2692,7 +3180,7 @@ _pomppc_proc_18:
 _pomppc_proc_19:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2701,12 +3189,20 @@ _pomppc_proc_19:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1019
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2719,13 +3215,13 @@ _pomppc_proc_19:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2736,7 +3232,7 @@ _pomppc_proc_19:
 _pomppc_proc_20:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2745,12 +3241,20 @@ _pomppc_proc_20:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1020
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2763,13 +3267,13 @@ _pomppc_proc_20:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2780,7 +3284,7 @@ _pomppc_proc_20:
 _pomppc_proc_21:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2789,12 +3293,20 @@ _pomppc_proc_21:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1021
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2807,13 +3319,13 @@ _pomppc_proc_21:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2824,7 +3336,7 @@ _pomppc_proc_21:
 _pomppc_proc_22:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2833,12 +3345,20 @@ _pomppc_proc_22:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1022
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2851,13 +3371,13 @@ _pomppc_proc_22:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2868,7 +3388,7 @@ _pomppc_proc_22:
 _pomppc_proc_23:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2877,12 +3397,20 @@ _pomppc_proc_23:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1023
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2895,13 +3423,13 @@ _pomppc_proc_23:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2912,7 +3440,7 @@ _pomppc_proc_23:
 _pomppc_proc_24:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2921,12 +3449,20 @@ _pomppc_proc_24:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1024
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2939,13 +3475,13 @@ _pomppc_proc_24:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -2956,7 +3492,7 @@ _pomppc_proc_24:
 _pomppc_proc_25:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -2965,12 +3501,20 @@ _pomppc_proc_25:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1025
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -2983,13 +3527,13 @@ _pomppc_proc_25:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -3000,7 +3544,7 @@ _pomppc_proc_25:
 _pomppc_proc_26:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -3009,12 +3553,20 @@ _pomppc_proc_26:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1026
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -3027,13 +3579,13 @@ _pomppc_proc_26:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -3044,7 +3596,7 @@ _pomppc_proc_26:
 _pomppc_proc_27:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -3053,12 +3605,20 @@ _pomppc_proc_27:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1027
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -3071,13 +3631,13 @@ _pomppc_proc_27:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -3088,7 +3648,7 @@ _pomppc_proc_27:
 _pomppc_proc_28:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -3097,12 +3657,20 @@ _pomppc_proc_28:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1028
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -3115,13 +3683,13 @@ _pomppc_proc_28:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -3132,7 +3700,7 @@ _pomppc_proc_28:
 _pomppc_proc_29:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -3141,12 +3709,20 @@ _pomppc_proc_29:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1029
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -3159,13 +3735,13 @@ _pomppc_proc_29:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -3176,7 +3752,7 @@ _pomppc_proc_29:
 _pomppc_proc_30:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -3185,12 +3761,20 @@ _pomppc_proc_30:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1030
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -3203,13 +3787,13 @@ _pomppc_proc_30:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -3220,7 +3804,7 @@ _pomppc_proc_30:
 _pomppc_proc_31:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -3229,12 +3813,20 @@ _pomppc_proc_31:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1031
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -3247,13 +3839,13 @@ _pomppc_proc_31:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -3264,7 +3856,7 @@ _pomppc_proc_31:
 _pomppc_proc_32:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -3273,12 +3865,20 @@ _pomppc_proc_32:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1032
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -3291,13 +3891,13 @@ _pomppc_proc_32:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -3308,7 +3908,7 @@ _pomppc_proc_32:
 _pomppc_proc_33:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -3317,12 +3917,20 @@ _pomppc_proc_33:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1033
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -3335,13 +3943,13 @@ _pomppc_proc_33:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -3352,7 +3960,7 @@ _pomppc_proc_33:
 _pomppc_proc_34:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -3361,12 +3969,20 @@ _pomppc_proc_34:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1034
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -3379,13 +3995,13 @@ _pomppc_proc_34:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12
@@ -3396,7 +4012,7 @@ _pomppc_proc_34:
 _pomppc_proc_35:
 	mflr r0
 	stw r0,8(r1)
-	stwu r1,-144(r1)
+	stwu r1,-160(r1)
 	stw r3,56(r1)
 	stw r4,60(r1)
 	stw r5,64(r1)
@@ -3405,12 +4021,20 @@ _pomppc_proc_35:
 	stw r8,76(r1)
 	stw r9,80(r1)
 	stw r10,84(r1)
-	stfd f1,88(r1)
-	stfd f2,96(r1)
-	stfd f3,104(r1)
-	stfd f4,112(r1)
-	stfd f5,120(r1)
-	stfd f6,128(r1)
+	lwz r0,216(r1)
+	stw r0,88(r1)
+	lwz r0,220(r1)
+	stw r0,92(r1)
+	lwz r0,224(r1)
+	stw r0,96(r1)
+	lwz r0,228(r1)
+	stw r0,100(r1)
+	stfd f1,104(r1)
+	stfd f2,112(r1)
+	stfd f3,120(r1)
+	stfd f4,128(r1)
+	stfd f5,136(r1)
+	stfd f6,144(r1)
 	li r3,1035
 	addi r4,r1,56
 	bl _pomppc_pre
@@ -3423,13 +4047,13 @@ _pomppc_proc_35:
 	lwz r8,76(r1)
 	lwz r9,80(r1)
 	lwz r10,84(r1)
-	lfd f1,88(r1)
-	lfd f2,96(r1)
-	lfd f3,104(r1)
-	lfd f4,112(r1)
-	lfd f5,120(r1)
-	lfd f6,128(r1)
-	addi r1,r1,144
+	lfd f1,104(r1)
+	lfd f2,112(r1)
+	lfd f3,120(r1)
+	lfd f4,128(r1)
+	lfd f5,136(r1)
+	lfd f6,144(r1)
+	addi r1,r1,160
 	lwz r0,8(r1)
 	mtlr r0
 	mtctr r12

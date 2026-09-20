@@ -783,30 +783,70 @@ static void gl_tex_destroy(QgpuCore *c, QgpuTexture *t)
 /* Envoie un niveau d'une face. Les texels sont déjà des mots ARGB hôte-natifs
    (ou des flottants de profondeur) : le cœur a fait conversions et
    décompression. internalformat = format de base : L et I viennent du rouge,
-   et les fonctions d'environnement suivent la table d'OpenGL. */
+   et les fonctions d'environnement suivent la table d'OpenGL.
+   ALPHA est déjà déplié en blanc+A par le cœur : on l'envoie en RGBA/BGRA,
+   jamais en GL_ALPHA (un pilote hôte qui promeut ALPHA en RGBA garderait
+   R=G=B=0 et MODULATE noircirait les polices). L/I/LA/RED restent 1 canal. */
 static void gl_tex_level(const GlState *g, const QgpuTexture *t, GLenum target,
                          uint32_t face, uint32_t l)
 {
     const QgpuTexLevel *lv = &t->level[face][l];
     bool depth = lv->fmt == 0x1902;
-    GLint ifmt = depth ? GL_DEPTH_COMPONENT24 : (GLint)lv->fmt;
-    GLenum fmt = depth ? GL_DEPTH_COMPONENT : GL_BGRA;
-    GLenum type = depth ? GL_FLOAT : GL_UNSIGNED_INT_8_8_8_8_REV;
+    GLint ifmt;
+    GLenum fmt, type;
+    const void *px = lv->px;
+    uint8_t *tmp = NULL;
+    uint32_t n, i;
+
+    if (depth) {
+        ifmt = GL_DEPTH_COMPONENT24;
+        fmt = GL_DEPTH_COMPONENT;
+        type = GL_FLOAT;
+    } else if (lv->fmt == 0x1909 || lv->fmt == 0x8049 ||
+               lv->fmt == 0x190A || lv->fmt == 0x1903) {
+        n = lv->w * lv->h * (lv->d ? lv->d : 1);
+        tmp = malloc(n * (lv->fmt == 0x190A ? 2 : 1));
+        if (tmp && lv->px) {
+            const uint32_t *s = lv->px;
+            if (lv->fmt == 0x190A) {
+                for (i = 0; i < n; i++) {
+                    tmp[i * 2] = (uint8_t)(s[i] >> 16);
+                    tmp[i * 2 + 1] = (uint8_t)(s[i] >> 24);
+                }
+            } else {
+                for (i = 0; i < n; i++)
+                    tmp[i] = (uint8_t)(s[i] >> 16);
+            }
+            px = tmp;
+        }
+        ifmt = (GLint)lv->fmt;
+        fmt = (GLenum)lv->fmt;
+        type = GL_UNSIGNED_BYTE;
+        if (lv->fmt == 0x8049 || lv->fmt == 0x1903) {
+            ifmt = lv->fmt == 0x8049 ? GL_INTENSITY : GL_LUMINANCE;
+            fmt = GL_LUMINANCE;
+        }
+    } else {
+        ifmt = (lv->fmt == 0x1906) ? 0x1908 : (GLint)lv->fmt; /* ALPHA → RGBA */
+        fmt = GL_BGRA;
+        type = GL_UNSIGNED_INT_8_8_8_8_REV;
+    }
 
     switch (target) {
     case GL_TEXTURE_1D:
-        glTexImage1D(target, l, ifmt, lv->w, 0, fmt, type, lv->px);
+        glTexImage1D(target, l, ifmt, lv->w, 0, fmt, type, px);
         break;
     case GL_TEXTURE_3D:
-        g->TexImage3D(target, l, ifmt, lv->w, lv->h, lv->d, 0, fmt, type, lv->px);
+        g->TexImage3D(target, l, ifmt, lv->w, lv->h, lv->d, 0, fmt, type, px);
         break;
     case GL_TEXTURE_CUBE_MAP:
         glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, l, ifmt, lv->w, lv->h, 0,
-                     fmt, type, lv->px);
+                     fmt, type, px);
         break;
     default:                                              /* 2D, RECTANGLE */
-        glTexImage2D(target, l, ifmt, lv->w, lv->h, 0, fmt, type, lv->px);
+        glTexImage2D(target, l, ifmt, lv->w, lv->h, 0, fmt, type, px);
     }
+    free(tmp);
 }
 
 static bool gl_tex_sync(QgpuCore *c, QgpuTexture *t)

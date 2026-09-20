@@ -43,7 +43,11 @@ C_OVERRIDES = {"GetVersion", "ChoosePixelFormat", "DestroyPixelFormat", "GetRend
                "ModifyTextureLevel", "DeleteTextureLevel", "ModifyTexture"}
 
 NPROCS = 36          # emplacements de la table de procédures (0x00..0x8c)
-FRAME = 144          # 24 liaison + 32 paramètres + 8×4 + 6×8 flottants, aligné 16
+# 24 liaison + 8 GPRs + 4 args pile + 6 doubles, aligné 16.
+# CopyTexSubImage a 10 arguments : w et h sont à SP+56 / SP+60 chez l'appelant.
+FRAME = 160
+STACK_ARGS = 4       # 9e..12e argument, recopiés pour pomppc_pre (a[8]..)
+FBASE = 88 + 4 * STACK_ARGS   # 104
 
 
 def tramp(label, hookid):
@@ -56,8 +60,11 @@ def tramp(label, hookid):
     s.append("\tstwu r1,-%d(r1)" % FRAME)
     for i, r in enumerate(range(3, 11)):
         s.append("\tstw r%d,%d(r1)" % (r, 56 + 4 * i))
+    for i in range(STACK_ARGS):
+        s.append("\tlwz r0,%d(r1)" % (FRAME + 56 + 4 * i))
+        s.append("\tstw r0,%d(r1)" % (88 + 4 * i))
     for i, f in enumerate(range(1, 7)):
-        s.append("\tstfd f%d,%d(r1)" % (f, 88 + 8 * i))
+        s.append("\tstfd f%d,%d(r1)" % (f, FBASE + 8 * i))
     s.append("\tli r3,%d" % hookid)
     s.append("\taddi r4,r1,56")
     s.append("\tbl _pomppc_pre")
@@ -65,7 +72,7 @@ def tramp(label, hookid):
     for i, r in enumerate(range(3, 11)):
         s.append("\tlwz r%d,%d(r1)" % (r, 56 + 4 * i))
     for i, f in enumerate(range(1, 7)):
-        s.append("\tlfd f%d,%d(r1)" % (f, 88 + 8 * i))
+        s.append("\tlfd f%d,%d(r1)" % (f, FBASE + 8 * i))
     s.append("\taddi r1,r1,%d" % FRAME)
     s.append("\tlwz r0,8(r1)")
     s.append("\tmtlr r0")

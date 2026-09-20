@@ -756,3 +756,26 @@ static void qfb_pci_register_types(void)
 }
 
 type_init(qfb_pci_register_types)
+
+/* Cible de SURF_PRESENT (qgpu-pci, v13) : VRAM QFB entière, offset 0 = BAR0.
+   Appelé sous BQL, après realize des devices (notifier machine-done). */
+int qfb_scanout_info(uint8_t **ram, uint32_t *size, MemoryRegion **mr)
+{
+    Object *obj;
+    QfbPCIState *s;
+    QfbState *qfb;
+
+    obj = object_resolve_path_type("", TYPE_QFB_PCI, NULL);
+    if (!obj || !ram || !size || !mr) {
+        return 0;
+    }
+    s = QFB_PCI(obj);
+    qfb = &s->qfb;
+    if (!qfb->vram) {
+        return 0;
+    }
+    *ram = qfb->vram;
+    *size = QFB_VRAM_SIZE;
+    *mr = &qfb->mem_vram;
+    return 1;
+}

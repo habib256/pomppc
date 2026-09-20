@@ -1,6 +1,6 @@
 # Flottant rapide — confier le FPU PowerPC au FPU de l'hôte
 
-`FASTFP=1 ./run_tiger.sh` — **éteint par défaut.**
+`./run_tiger.sh` — **allumé par défaut.** `FASTFP=0` pour le flottant exact.
 
 Les jeux (Marble Blast, Zenerchi) passent l'essentiel de leur temps dans du
 flottant : décodage Ogg Vorbis, physique. Or dans QEMU 9.2 la cible PowerPC
@@ -214,7 +214,8 @@ fait gagner que 22 %. Le coût d'une instruction flottante émulée n'est donc
 ## 4. Comment l'activer
 
 ```sh
-FASTFP=1 ./run_tiger.sh          # mono ou SMP, au choix
+./run_tiger.sh               # flottant rapide allumé (défaut)
+FASTFP=0 ./run_tiger.sh      # flottant exact (softfloat bit-à-bit)
 ```
 
 Le lanceur **sonde** le binaire (`qemu_cpu_has_fastfp` dans `scripts/caps.sh`)
@@ -222,7 +223,7 @@ avant de poser `-cpu g4,x-fast-fp=on`. La raison est plus dure que d'habitude :
 une propriété absente dans `-cpu` ne produit pas un avertissement, elle fait
 **quitter** QEMU. Poser l'option à l'aveugle sur un binaire non patché ne
 dégraderait pas le lanceur, il l'empêcherait de démarrer. Sans la propriété,
-`FASTFP=1` prévient et repart en flottant exact.
+le lanceur prévient et repart en flottant exact. `FASTFP=0` force ce mode.
 
 Le sondage lui-même démarre la machine figée avec la ligne de commande exacte
 du lanceur et relit la propriété par `qom-get` : la propriété existe *et* la

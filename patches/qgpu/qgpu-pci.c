@@ -68,6 +68,9 @@
 
 #include "qgpu-core.h"
 
+/* Câblé par qfb-pci.c : VRAM QFB comme cible de SURF_PRESENT (v13). */
+int qfb_scanout_info(uint8_t **ram, uint32_t *size, MemoryRegion **mr);
+
 #define TYPE_QGPU_PCI "qgpu-pci"
 OBJECT_DECLARE_SIMPLE_TYPE(QgpuPCIState, QGPU_PCI)
 
@@ -112,6 +115,7 @@ struct QgpuPCIState {
     bool       thread_ok;
     QEMUBH    *irq_bh;
     Notifier   exit_notifier;
+    Notifier   machine_done;       /* v13 : lier qfb une fois tous les devices nés */
 };
 
 static void qgpu_update_irq(QgpuPCIState *s)
@@ -423,6 +427,42 @@ static void qgpu_pci_set_irq(void *opaque, int n, int level)
     pci_set_irq(PCI_DEVICE(opaque), level);
 }
 
+static void qgpu_qfb_dirty(void *opaque, uint32_t off, uint32_t len)
+{
+    MemoryRegion *mr = opaque;
+
+    if (mr && len) {
+        memory_region_set_dirty(mr, off, len);
+    }
+}
+
+static void qgpu_bind_qfb(QgpuPCIState *s)
+{
+    uint8_t *ram = NULL;
+    uint32_t size = 0;
+    MemoryRegion *mr = NULL;
+
+    if (s->core.scanout) {
+        return;
+    }
+    if (!qfb_scanout_info(&ram, &size, &mr) || !ram) {
+        return;
+    }
+    qgpu_core_set_scanout(&s->core, ram, size, qgpu_qfb_dirty, mr);
+    s->core.caps |= QGPU_CAP_SCANOUT;
+    if (s->core_ok) {
+        s->regs[QGPU_REG_CAPS >> 2] = s->core.caps |
+            (s->thread_ok ? QGPU_CAP_ASYNC : 0);
+    }
+}
+
+static void qgpu_machine_done(Notifier *n, void *unused)
+{
+    QgpuPCIState *s = container_of(n, QgpuPCIState, machine_done);
+
+    qgpu_bind_qfb(s);
+}
+
 /* Arrête le thread de rendu après avoir laissé finir ce qui est en cours.
    Idempotent : appelé à la sortie de QEMU ET à la destruction du device. */
 static void qgpu_stop_thread(QgpuPCIState *s, bool fini)
@@ -494,8 +534,11 @@ static void qgpu_pci_realize(PCIDevice *dev, Error **errp)
                        QEMU_THREAD_JOINABLE);
     s->exit_notifier.notify = qgpu_exit_notify;
     qemu_add_exit_notifier(&s->exit_notifier);
+    s->machine_done.notify = qgpu_machine_done;
+    qemu_add_machine_init_done_notifier(&s->machine_done);
 
     qgpu_soft_reset(s);
+    qgpu_bind_qfb(s);
 }
 
 static void qgpu_pci_exit(PCIDevice *dev)
@@ -504,6 +547,7 @@ static void qgpu_pci_exit(PCIDevice *dev)
 
     if (s->thread_ok) {
         qemu_remove_exit_notifier(&s->exit_notifier);
+        qemu_remove_machine_init_done_notifier(&s->machine_done);
         qgpu_stop_thread(s, true);
         qemu_cond_destroy(&s->cond_done);
         qemu_cond_destroy(&s->cond_work);
@@ -516,6 +560,7 @@ static void qgpu_pci_exit(PCIDevice *dev)
     /* Normalement déjà libéré par le thread (q_fini). Reste le cas d'un
        thread jamais créé, ou déjà arrêté à la sortie de QEMU sans libération. */
     if (s->core_ok) {
+        qgpu_core_set_scanout(&s->core, NULL, 0, NULL, NULL);
         qgpu_core_fini(&s->core);
         s->core_ok = false;
     }

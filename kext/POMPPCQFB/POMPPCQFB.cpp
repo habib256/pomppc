@@ -67,8 +67,8 @@ bool POMPPCQFB::start(IOService * provider)
     fVRAMRange = fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
     fRegsRange = fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress1);
     if (!fVRAMRange || !fRegsRange) {
-        QFBLog("BAR0 (VRAM) ou BAR1 (registres) absent — Open Firmware n'a pas "
-               "assigné les ressources PCI ?\n");
+        QFBLog("BAR0 (VRAM) or BAR1 (registers) missing - Open Firmware did not "
+               "assign PCI resources?\n");
         return false;
     }
     fVRAMRange->retain();
@@ -76,7 +76,7 @@ bool POMPPCQFB::start(IOService * provider)
 
     fRegsMap = fRegsRange->map();
     if (!fRegsMap) {
-        QFBLog("impossible de mapper les registres\n");
+        QFBLog("cannot map registers\n");
         return false;
     }
     fRegs = (volatile UInt32 *) fRegsMap->getVirtualAddress();
@@ -84,7 +84,7 @@ bool POMPPCQFB::start(IOService * provider)
     fPCI->setMemoryEnable(true);
 
     if (regRead(QFB_VERSION) != QFB_MAGIC) {
-        QFBLog("signature invalide (0x%08lx au lieu de 'qfb1')\n",
+        QFBLog("invalid signature (0x%08lx, expected 'qfb1')\n",
                (unsigned long) regRead(QFB_VERSION));
         fPCI->setMemoryEnable(false);   /* ne pas laisser le device armé */
         return false;
@@ -99,7 +99,7 @@ bool POMPPCQFB::start(IOService * provider)
     fVBLEnabled   = false;
 
     if (!super::start(provider)) {
-        QFBLog("IOFramebuffer::start a échoué\n");
+        QFBLog("IOFramebuffer::start failed\n");
         return false;
     }
 
@@ -122,7 +122,7 @@ bool POMPPCQFB::start(IOService * provider)
         }
     }
 
-    QFBLog("démarré (VRAM %lu Mio, mode demandé %lux%lux%lu)\n",
+    QFBLog("started (VRAM %lu MiB, requested mode %lux%lux%lu)\n",
            (unsigned long) (QFB_VRAM_SIZE >> 20),
            (unsigned long) regRead(QFB_CUSTOM_WIDTH),
            (unsigned long) regRead(QFB_CUSTOM_HEIGHT),
@@ -173,7 +173,7 @@ IOReturn POMPPCQFB::enableController(void)
     }
     programMode();
 
-    QFBLog("%lu modes publiés, défaut %lux%lu\n",
+    QFBLog("%lu modes published, default %lux%lu\n",
            (unsigned long) fModeCount,
            (unsigned long) fModes[fDefaultMode].width,
            (unsigned long) fModes[fDefaultMode].height);
