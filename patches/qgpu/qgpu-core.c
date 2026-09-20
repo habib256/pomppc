@@ -1135,8 +1135,10 @@ static QgpuSurface *bound_surface(QgpuCore *c, uint32_t *st)
     return &c->surf[c->ctx[c->cur_ctx].surf];
 }
 
-/* Valide un transfert surface ↔ BAR0 : [surf, off, stride, x, y, w, h]. */
-static uint32_t check_xfer(QgpuCore *c, const uint32_t *a, QgpuSurface **sp)
+/* Valide un transfert surface ↔ BAR0 : [surf, off, stride, x, y, w, h].
+   bpp = 4 (xRGB / float32 / stencil) ou 2 (1555 / UNORM16). */
+static uint32_t check_xfer(QgpuCore *c, const uint32_t *a, QgpuSurface **sp,
+                           uint32_t bpp)
 {
     QgpuSurface *s = surf_lookup(c, a[0]);
     uint32_t off = a[1], stride = a[2], x = a[3], y = a[4], w = a[5], h = a[6];
@@ -1148,14 +1150,52 @@ static uint32_t check_xfer(QgpuCore *c, const uint32_t *a, QgpuSurface **sp)
         w > s->width - x || h > s->height - y) {
         return QGPU_ST_BAD_ARG;
     }
-    if ((stride & 3) || stride < (uint64_t)w * 4) {
+    if (bpp != 2 && bpp != 4) {
         return QGPU_ST_BAD_ARG;
     }
-    if (!in_shmem(c, off, (uint64_t)(h - 1) * stride + (uint64_t)w * 4)) {
+    if ((bpp == 4 && (stride & 3)) || (bpp == 2 && (stride & 1)) ||
+        stride < (uint64_t)w * bpp) {
+        return QGPU_ST_BAD_ARG;
+    }
+    if (!in_shmem(c, off, (uint64_t)(h - 1) * stride + (uint64_t)w * bpp)) {
         return QGPU_ST_OOB;
     }
     *sp = s;
     return QGPU_ST_OK;
+}
+
+static uint16_t pack_rgb1555(uint32_t p)
+{
+    return (uint16_t)(((p >> 9) & 0x7c00u) |
+                      ((p >> 6) & 0x03e0u) |
+                      ((p >> 3) & 0x001fu));
+}
+
+static uint32_t unpack_rgb1555(uint16_t pix)
+{
+    uint32_t r = (pix >> 10) & 31u;
+    uint32_t g = (pix >> 5) & 31u;
+    uint32_t b = pix & 31u;
+    r = (r << 3) | (r >> 2);
+    g = (g << 3) | (g >> 2);
+    b = (b << 3) | (b >> 2);
+    return (r << 16) | (g << 8) | b;
+}
+
+static uint16_t pack_unorm16(float d)
+{
+    if (!(d > 0.0f)) {
+        return 0;
+    }
+    if (d >= 1.0f) {
+        return 65535u;
+    }
+    return (uint16_t)(d * 65535.0f + 0.5f);
+}
+
+static float unpack_unorm16(uint16_t z)
+{
+    return (float)z / 65535.0f;
 }
 
 /* Texture de l'unité u si le texturage y est actif et la texture complète. */
@@ -1497,9 +1537,17 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
 
     case QGPU_OP_SURF_READBACK:
     case QGPU_OP_SURF_UPLOAD: {
-        uint32_t off, stride, x, y, w, h, row;
-        WANT(QGPU_LEN_SURF_XFER);
-        st = check_xfer(c, a, &s);
+        uint32_t off, stride, x, y, w, h, row, fmt, bpp;
+        if (nargs != QGPU_LEN_SURF_XFER - 1 &&
+            nargs != QGPU_LEN_SURF_XFER_PF - 1) {
+            return QGPU_ST_BAD_ARG;
+        }
+        fmt = (nargs == QGPU_LEN_SURF_XFER_PF - 1) ? a[7] : QGPU_PF_XRGB8888;
+        if (fmt != QGPU_PF_XRGB8888 && fmt != QGPU_PF_RGB1555) {
+            return QGPU_ST_BAD_ARG;
+        }
+        bpp = (fmt == QGPU_PF_RGB1555) ? 2u : 4u;
+        st = check_xfer(c, a, &s, bpp);
         if (st != QGPU_ST_OK) {
             return st;
         }
@@ -1515,8 +1563,14 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
                 uint8_t *dst = c->shmem + off + (size_t)row * stride;
                 const uint32_t *src = c->pbuf + (size_t)row * w;
                 uint32_t i;
-                for (i = 0; i < w; i++) {
-                    qgpu_st32(dst + i * 4, src[i]);
+                if (fmt == QGPU_PF_RGB1555) {
+                    for (i = 0; i < w; i++) {
+                        qgpu_st16(dst + i * 2, pack_rgb1555(src[i]));
+                    }
+                } else {
+                    for (i = 0; i < w; i++) {
+                        qgpu_st32(dst + i * 4, src[i]);
+                    }
                 }
             }
         } else {
@@ -1524,8 +1578,14 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
                 const uint8_t *src = c->shmem + off + (size_t)row * stride;
                 uint32_t *dst = c->pbuf + (size_t)row * w;
                 uint32_t i;
-                for (i = 0; i < w; i++) {
-                    dst[i] = qgpu_ld32(src + i * 4);
+                if (fmt == QGPU_PF_RGB1555) {
+                    for (i = 0; i < w; i++) {
+                        dst[i] = unpack_rgb1555(qgpu_ld16(src + i * 2));
+                    }
+                } else {
+                    for (i = 0; i < w; i++) {
+                        dst[i] = qgpu_ld32(src + i * 4);
+                    }
                 }
             }
             if (!c->be->upload(c, s, x, y, w, h, c->pbuf)) {
@@ -1583,12 +1643,8 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
                 }
             } else {
                 for (i = 0; i < w; i++) {
-                    uint32_t p = src[i];
-                    uint16_t pix = (uint16_t)(((p >> 9) & 0x7c00u) |
-                                              ((p >> 6) & 0x03e0u) |
-                                              ((p >> 3) & 0x001fu));
-                    dst[i * 2]     = (uint8_t)(pix >> 8);
-                    dst[i * 2 + 1] = (uint8_t)pix;
+                    uint16_t pix = pack_rgb1555(src[i]);
+                    qgpu_st16(dst + i * 2, pix);
                 }
             }
         }
@@ -1600,9 +1656,17 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
 
     case QGPU_OP_DEPTH_READBACK:
     case QGPU_OP_DEPTH_UPLOAD: {
-        uint32_t off, stride, x, y, w, h, row, i;
-        WANT(QGPU_LEN_SURF_XFER);
-        st = check_xfer(c, a, &s);
+        uint32_t off, stride, x, y, w, h, row, i, df, bpp;
+        if (nargs != QGPU_LEN_SURF_XFER - 1 &&
+            nargs != QGPU_LEN_SURF_XFER_PF - 1) {
+            return QGPU_ST_BAD_ARG;
+        }
+        df = (nargs == QGPU_LEN_SURF_XFER_PF - 1) ? a[7] : QGPU_DF_FLOAT32;
+        if (df != QGPU_DF_FLOAT32 && df != QGPU_DF_UNORM16) {
+            return QGPU_ST_BAD_ARG;
+        }
+        bpp = (df == QGPU_DF_UNORM16) ? 2u : 4u;
+        st = check_xfer(c, a, &s, bpp);
         if (st != QGPU_ST_OK) {
             return st;
         }
@@ -1620,14 +1684,24 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             for (row = 0; row < h; row++) {
                 uint8_t *dst = c->shmem + off + (size_t)row * stride;
                 for (i = 0; i < w; i++) {
-                    qgpu_st32(dst + i * 4, qgpu_f2u(c->dbuf[(size_t)row * w + i]));
+                    float d = c->dbuf[(size_t)row * w + i];
+                    if (df == QGPU_DF_UNORM16) {
+                        qgpu_st16(dst + i * 2, pack_unorm16(d));
+                    } else {
+                        qgpu_st32(dst + i * 4, qgpu_f2u(d));
+                    }
                 }
             }
         } else {
             for (row = 0; row < h; row++) {
                 const uint8_t *src = c->shmem + off + (size_t)row * stride;
                 for (i = 0; i < w; i++) {
-                    float d = qgpu_u2f(qgpu_ld32(src + i * 4));
+                    float d;
+                    if (df == QGPU_DF_UNORM16) {
+                        d = unpack_unorm16(qgpu_ld16(src + i * 2));
+                    } else {
+                        d = qgpu_u2f(qgpu_ld32(src + i * 4));
+                    }
                     /* bornage : une profondeur hors [0,1] ou NaN n'a pas de sens */
                     c->dbuf[(size_t)row * w + i] = !(d > 0.0f) ? 0.0f : d > 1.0f ? 1.0f : d;
                 }
@@ -1643,7 +1717,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
     case QGPU_OP_STENCIL_UPLOAD: {
         uint32_t off, stride, x, y, w, h, row, i;
         WANT(QGPU_LEN_SURF_XFER);
-        st = check_xfer(c, a, &s);
+        st = check_xfer(c, a, &s, 4);
         if (st != QGPU_ST_OK) {
             return st;
         }

@@ -319,6 +319,14 @@ static inline void qgpu_st32(uint8_t *p, uint32_t v)
 {
     p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v;
 }
+static inline uint16_t qgpu_ld16(const uint8_t *p)
+{
+    return ((uint16_t)p[0] << 8) | (uint16_t)p[1];
+}
+static inline void qgpu_st16(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v;
+}
 static inline float qgpu_u2f(uint32_t u)
 {
     union { uint32_t u; float f; } x; x.u = u; return x.f;

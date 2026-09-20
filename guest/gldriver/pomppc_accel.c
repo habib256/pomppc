@@ -48,6 +48,8 @@
  *   POMPPC_GL_ASYNC=0/1   doorbell asynchrone (défaut : activé si le device et
  *                         le kext le tiennent ; voir « soumission » plus bas)
  *   POMPPC_GL_VBO=0       pas de tampons hôte v14 (DRAW_RAW retraverse BAR0)
+ *   POMPPC_GL_XFER16=0    pas de transfert 16 bits hôte (v15) : fenêtre 16 bits
+ *                         et Z 16 restent sans aller-retour
  *   POMPPC_GLTRACE=dir    trace (voir pomppc_gld.c)
  */
 #include <stdio.h>
@@ -64,7 +66,7 @@
 #include "pomppc_gld.h"
 #include "pomppc_qgpu.h"
 
-#define POMPPC_PLUGIN_REV "20260920-vbo"
+#define POMPPC_PLUGIN_REV "20260920-16"
 static void gl_note(const char *fmt, ...);
 
 /* ───────────────────── dispositions relevées (Tiger 10.4.6) ─────────────────────
@@ -467,6 +469,7 @@ typedef struct Post {                   /* copie à faire APRÈS la barrière */
     unsigned long  off;                 /* dans l'arène, ABSOLU dans la tranche */
     unsigned char *dst;
     unsigned long  w, h, rowbytes;
+    unsigned long  pixbytes;            /* 4 (xRGB/float32) ou 2 (1555/UNORM16) */
     float          scale;
 } Post;
 
@@ -558,6 +561,7 @@ static struct {
     unsigned long   n_pixread;          /* ReadPixels d'un rectangle, pas du FB */
     unsigned long   n_pixdraw;          /* DrawPixels / CopyPixels / Bitmap sans repli Apple */
     int             hostbuf;            /* v14 : DRAW_RAW_BUF, maillages hors BAR0 */
+    int             v15;                /* v15 : SURF/DEPTH xfer 16 bits par l'hôte */
     unsigned long   buf_used[(QGPU_CLIENT_BUF_IDS + 31) / 32];
     unsigned long   buf_base;
     PBuf           *bufs;
@@ -881,6 +885,31 @@ static unsigned long sw_rowbytes(PCtx *p)
            (GLD_U32(p->ctx, CTX_COLOR_BITS) <= 16 ? 2 : 4);
 }
 
+static int color16(PCtx *p)
+{
+    return !p->fullscreen_buf && GLD_U32(p->ctx, CTX_COLOR_BITS) <= 16;
+}
+
+static int depth16(PCtx *p)
+{
+    return GLD_U32(p->ctx, CTX_DEPTH_BITS) == 16;
+}
+
+static unsigned long color_bpp(PCtx *p)
+{
+    return color16(p) ? 2 : 4;
+}
+
+static unsigned long depth_bpp(PCtx *p)
+{
+    return depth16(p) ? 2 : 4;
+}
+
+static unsigned long depth_rowbytes(PCtx *p)
+{
+    return GLD_U32(p->ctx, CTX_ROWPIX) * depth_bpp(p);
+}
+
 static PCtx *find_ctx(void *ctx)
 {
     PCtx *p;
@@ -1050,6 +1079,9 @@ void pomppc_backend_init(void)
             G.hostbuf = G.q.version >= 14 &&
                         !(getenv("POMPPC_GL_VBO") &&
                           getenv("POMPPC_GL_VBO")[0] == '0');
+            G.v15 = G.q.version >= 15 &&
+                    !(getenv("POMPPC_GL_XFER16") &&
+                      getenv("POMPPC_GL_XFER16")[0] == '0');
             G.pixtex = -1;
             G.pixtex_w = G.pixtex_h = 0;
             G.buf_base = G.q.index * QGPU_CLIENT_BUF_IDS;
@@ -1067,7 +1099,7 @@ void pomppc_backend_init(void)
             gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d\n",
                     G.q.version, G.q.caps, G.v10);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
-                       " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s)\n",
+                       " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
                        G.v7 ? "actif" : "coupé", G.v8 ? "actif" : "coupé",
                        G.v10 ? "converties par l'hôte" : "converties ici",
@@ -1075,7 +1107,8 @@ void pomppc_backend_init(void)
                        G.async ? "" : " : ", G.async ? "" : G.async_why,
                        G.scanout ? ", présentation hôte" : "",
                        G.pixops ? ", pixels hôte" : "",
-                       G.hostbuf ? ", VBO hôte" : "");
+                       G.hostbuf ? ", VBO hôte" : "",
+                       G.v15 ? ", host 16-bit xfer" : "");
         } else
             pomppc_log("POMPPC: accélération désactivée : %s\n", why);
     }
@@ -1320,27 +1353,29 @@ static void run_posts(Half *h)
         Post *po = &h->post[i];
         /* arène = offset ABSOLU dans la tranche : la moitié courante a pu
            changer depuis que la relecture a été demandée. */
-        unsigned long *src = (unsigned long *)(G.q.win + po->off);
+        unsigned char *srcb = G.q.win + po->off;
+        unsigned long bpp = po->pixbytes ? po->pixbytes : 4;
         unsigned long y, x;
         for (y = 0; y < po->h; y++) {
-            unsigned long *s = src + y * po->w;
+            unsigned char *s = srcb + y * po->w * bpp;
             unsigned char *d = po->dst + y * po->rowbytes;
-            if (!po->depth) {
-                memcpy(d, s, po->w * 4);
+            if (!po->depth || bpp == 2) {
+                memcpy(d, s, po->w * bpp);
             } else {
+                unsigned long *ss = (unsigned long *)s;
                 unsigned long *dd = (unsigned long *)d;
                 if (po->depth == 2) {           /* stencil : 8 bits bas du mot */
                     for (x = 0; x < po->w; x++)
-                        dd[x] = (dd[x] & 0xFFFFFF00UL) | (s[x] & 0xFF);
+                        dd[x] = (dd[x] & 0xFFFFFF00UL) | (ss[x] & 0xFF);
                 } else if (po->packed) {        /* profondeur : 24 bits hauts */
                     for (x = 0; x < po->w; x++) {
-                        float f = *(float *)(s + x);
+                        float f = *(float *)(ss + x);
                         unsigned long z = (unsigned long)(clamp01(f) * po->scale + 0.5f);
                         dd[x] = (z & 0xFFFFFF00UL) | (dd[x] & 0xFF);
                     }
                 } else {
                     for (x = 0; x < po->w; x++) {
-                        float f = *(float *)(s + x);
+                        float f = *(float *)(ss + x);
                         dd[x] = (unsigned long)(clamp01(f) * po->scale + 0.5f);
                     }
                 }
@@ -2774,38 +2809,63 @@ static void sync_to_host(PCtx *p, int color, int depth)
     double t0 = now_s();
     if (color && p->color == SW_NEWER) {
         unsigned char *src = sw_color(p);
-        int ok32 = p->fullscreen_buf || GLD_U32(p->ctx, CTX_COLOR_BITS) == 32;
-        if (ok32 && src && arena_alloc(w * h * 4, &off)) {
+        unsigned long bpp = color_bpp(p);
+        unsigned long row = sw_rowbytes(p);
+        int can = src && (bpp == 4 || G.v15);
+        if (can && arena_alloc(w * h * bpp, &off)) {
             for (y = 0; y < h; y++)
-                memcpy(G.q.win + off + y * w * 4, src + y * sw_rowbytes(p), w * 4);
-            c = reserve(p, QGPU_LEN_SURF_XFER);
-            c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_UPLOAD, QGPU_LEN_SURF_XFER);
-            c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
-            c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
+                memcpy(G.q.win + off + y * w * bpp, src + y * row, w * bpp);
+            if (bpp == 2) {
+                c = reserve(p, QGPU_LEN_SURF_XFER_PF);
+                c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_UPLOAD, QGPU_LEN_SURF_XFER_PF);
+                c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 2;
+                c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
+                c[8] = QGPU_PF_RGB1555;
+            } else {
+                c = reserve(p, QGPU_LEN_SURF_XFER);
+                c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_UPLOAD, QGPU_LEN_SURF_XFER);
+                c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
+                c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
+            }
             G.n_uploads++;
         }
         p->color = SYNCED;
     }
     if (depth && p->depth == SW_NEWER) {
         unsigned char *src = sw_depth(p);
-        float inv = 1.0f / GLD_F32(p->ctx, CTX_DEPTH_SCALE);
-        if (src && arena_alloc(w * h * 4, &off)) {
-            for (y = 0; y < h; y++) {
-                unsigned long *s = (unsigned long *)(src + y * sw_rowbytes(p));
-                float *d = (float *)(G.q.win + off + y * w * 4);
-                if (p->stencil) {
-                    for (x = 0; x < w; x++)
-                        d[x] = clamp01((s[x] & 0xFFFFFF00UL) * inv);
-                } else {
-                    for (x = 0; x < w; x++)
-                        d[x] = clamp01(s[x] * inv);
-                }
+        unsigned long dbpp = depth_bpp(p);
+        unsigned long drow = depth_rowbytes(p);
+        if (dbpp == 2) {
+            if (G.v15 && src && arena_alloc(w * h * 2, &off)) {
+                for (y = 0; y < h; y++)
+                    memcpy(G.q.win + off + y * w * 2, src + y * drow, w * 2);
+                c = reserve(p, QGPU_LEN_SURF_XFER_PF);
+                c[0] = QGPU_CMD_HDR(QGPU_OP_DEPTH_UPLOAD, QGPU_LEN_SURF_XFER_PF);
+                c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 2;
+                c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
+                c[8] = QGPU_DF_UNORM16;
+                G.n_uploads++;
             }
-            c = reserve(p, QGPU_LEN_SURF_XFER);
-            c[0] = QGPU_CMD_HDR(QGPU_OP_DEPTH_UPLOAD, QGPU_LEN_SURF_XFER);
-            c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
-            c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
-            G.n_uploads++;
+        } else {
+            float inv = 1.0f / GLD_F32(p->ctx, CTX_DEPTH_SCALE);
+            if (src && arena_alloc(w * h * 4, &off)) {
+                for (y = 0; y < h; y++) {
+                    unsigned long *s = (unsigned long *)(src + y * drow);
+                    float *d = (float *)(G.q.win + off + y * w * 4);
+                    if (p->stencil) {
+                        for (x = 0; x < w; x++)
+                            d[x] = clamp01((s[x] & 0xFFFFFF00UL) * inv);
+                    } else {
+                        for (x = 0; x < w; x++)
+                            d[x] = clamp01(s[x] * inv);
+                    }
+                }
+                c = reserve(p, QGPU_LEN_SURF_XFER);
+                c[0] = QGPU_CMD_HDR(QGPU_OP_DEPTH_UPLOAD, QGPU_LEN_SURF_XFER);
+                c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
+                c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
+                G.n_uploads++;
+            }
         }
         /* Le stencil de l'invité vit dans les 8 bits bas des mêmes mots. On ne
            le téléverse QUE si le contexte s'en sert vraiment : sur une surface
@@ -2815,9 +2875,10 @@ static void sync_to_host(PCtx *p, int color, int depth)
            de sauter ce téléversement rend l'image exacte). Beaucoup
            d'applications — GLUT, Marble Blast — demandent un stencil sans
            jamais s'en servir : elles ne paient plus ni le bogue ni le transfert. */
-        if (src && p->stencil && p->sten_used && arena_alloc(w * h * 4, &off)) {
+        if (src && p->stencil && p->sten_used && dbpp == 4 &&
+            arena_alloc(w * h * 4, &off)) {
             for (y = 0; y < h; y++) {
-                unsigned long *s = (unsigned long *)(src + y * sw_rowbytes(p));
+                unsigned long *s = (unsigned long *)(src + y * drow);
                 unsigned long *d = (unsigned long *)(G.q.win + off + y * w * 4);
                 for (x = 0; x < w; x++)
                     d[x] = s[x] & 0xFF;
@@ -2835,16 +2896,33 @@ static void sync_to_host(PCtx *p, int color, int depth)
 
 static void queue_readback_to(PCtx *p, int depth, unsigned char *dst, unsigned long rowbytes)
 {
-    unsigned long off, *c;
+    unsigned long off, *c, bpp, fmt, len, op;
     unsigned long w = p->sw, h = p->sh;
-    if (!arena_alloc(w * h * 4, &off))
+    if (depth == 2) {
+        bpp = 4; fmt = 0; len = QGPU_LEN_SURF_XFER; op = QGPU_OP_STENCIL_READBACK;
+    } else if (depth) {
+        bpp = depth_bpp(p);
+        fmt = (bpp == 2) ? QGPU_DF_UNORM16 : QGPU_DF_FLOAT32;
+        len = (bpp == 2) ? QGPU_LEN_SURF_XFER_PF : QGPU_LEN_SURF_XFER;
+        op = QGPU_OP_DEPTH_READBACK;
+        if (bpp == 2 && !G.v15)
+            return;
+    } else {
+        bpp = color_bpp(p);
+        fmt = (bpp == 2) ? QGPU_PF_RGB1555 : QGPU_PF_XRGB8888;
+        len = (bpp == 2) ? QGPU_LEN_SURF_XFER_PF : QGPU_LEN_SURF_XFER;
+        op = QGPU_OP_SURF_READBACK;
+        if (bpp == 2 && !G.v15)
+            return;
+    }
+    if (!arena_alloc(w * h * bpp, &off))
         return;
-    c = reserve(p, QGPU_LEN_SURF_XFER);
-    c[0] = QGPU_CMD_HDR(depth == 2 ? QGPU_OP_STENCIL_READBACK :
-                        depth ? QGPU_OP_DEPTH_READBACK : QGPU_OP_SURF_READBACK,
-                        QGPU_LEN_SURF_XFER);
-    c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
+    c = reserve(p, len);
+    c[0] = QGPU_CMD_HDR(op, len);
+    c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * bpp;
     c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
+    if (len == QGPU_LEN_SURF_XFER_PF)
+        c[8] = fmt;
     {   /* La copie appartient à la MOITIÉ qui porte la soumission : elle ne se
            fera qu'une fois sa barrière atteinte (contrat mémoire, point 2 —
            avant, le contenu de l'arène est indéterminé). */
@@ -2857,6 +2935,7 @@ static void queue_readback_to(PCtx *p, int depth, unsigned char *dst, unsigned l
         po->w = w;
         po->h = h;
         po->rowbytes = rowbytes;
+        po->pixbytes = bpp;
         po->scale = GLD_F32(p->ctx, CTX_DEPTH_SCALE);
         hf->npost++;
     }
@@ -2883,7 +2962,8 @@ static void queue_present(PCtx *p, unsigned long dest_off, unsigned long stride,
 
 static void queue_readback(PCtx *p, int depth, unsigned char *dst)
 {
-    queue_readback_to(p, depth, dst, sw_rowbytes(p));
+    queue_readback_to(p, depth, dst,
+                      depth ? depth_rowbytes(p) : sw_rowbytes(p));
 }
 
 /* Recopie dans le tampon invité ce que l'hôte a dessiné (verrou tenu).
@@ -2896,8 +2976,9 @@ static void sync_to_sw_locked(PCtx *p, int want_depth)
         return;
     if (p->color == HOST_NEWER) {
         unsigned char *dst = p->draw_seen;
-        /* Ne pas déverser du xRGB 32 bits dans un tampon invité 16 bits. */
-        if (dst && (p->fullscreen_buf || GLD_U32(p->ctx, CTX_COLOR_BITS) == 32)) {
+        /* Ne pas déverser du xRGB 32 bits dans un tampon invité 16 bits
+           tant que l'hôte ne sait pas packer (v15). */
+        if (dst && (color_bpp(p) == 4 || G.v15)) {
             queue_readback(p, 0, dst);
             any = 1;
             p->color = SYNCED;
@@ -2905,7 +2986,7 @@ static void sync_to_sw_locked(PCtx *p, int want_depth)
     }
     if (want_depth && p->depth == HOST_NEWER) {
         unsigned char *dst = sw_depth(p);
-        if (dst && GLD_U32(p->ctx, CTX_DEPTH_BITS) == 32) {
+        if (dst && (depth_bpp(p) == 4 || G.v15)) {
             queue_readback(p, 1, dst);
             if (p->stencil && p->sten_used)
                 queue_readback(p, 2, dst);
@@ -3030,8 +3111,8 @@ static int accel_ok_for(PCtx *p, int raw)
         return 0;
     g = gls(p);
     /* 16 bits : Warcraft III et Colin McRae demandent « milliers de couleurs ».
-       aglSetFullScreen commute alors l'écran QFB en 1555 ; le tampon hôte et le
-       drawable mémoire restent xRGB 32 bits, convertis à la présentation. */
+       En plein écran le drawable mémoire reste xRGB 32 bits, convertis à la
+       présentation. En fenêtre, v15 téléverse/relit le 1555 tel quel. */
     {
         unsigned long cbits = GLD_U32(p->ctx, CTX_COLOR_BITS);
         if (!g || !sw_color(p) ||
@@ -3074,14 +3155,16 @@ static int accel_ok_for(PCtx *p, int raw)
             !poly_mode_ok(U16(g, GS_POLY_MODE + 2)))
             return no(NO_POLYMODE, U16(g, GS_POLY_MODE), U16(g, GS_POLY_MODE + 2));
     }
-    /* Profondeur 16 : l'hôte a toujours un tampon float 32 bits. On n'échange
-       pas avec le tampon invité 16 bits (sync déjà bornée à DEPTH_BITS==32). */
+    /* Profondeur 16 : l'hôte a toujours un tampon float 32 bits. v15 échange
+       UNORM16 sans conversion G4 ; avant v15 on refuse (repli Apple). */
     {
         unsigned long dbits = GLD_U32(p->ctx, CTX_DEPTH_BITS);
         if (GLD_U8(g, GS_DEPTH_TEST) &&
             ((dbits != 32 && dbits != 16) || U16(g, GS_DEPTH_FUNC) < 0x200 ||
              U16(g, GS_DEPTH_FUNC) > 0x207))
             return no(NO_DEPTH, dbits, U16(g, GS_DEPTH_FUNC));
+        if (GLD_U8(g, GS_DEPTH_TEST) && dbits == 16 && !G.v15)
+            return no(NO_DEPTH, dbits, 0);
     }
     if (GLD_U8(g, GS_BLEND) &&
         (!blend_factor_ok(U16(g, GS_BLEND_SRC_RGB)) || !blend_factor_ok(U16(g, GS_BLEND_DST_RGB)) ||

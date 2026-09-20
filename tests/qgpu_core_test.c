@@ -3122,7 +3122,7 @@ static void run_v9(QgpuCore *c, uint8_t *shmem)
     }
     CHECK(bad == 0, "carte des registres : %u offsets alignés et distincts "
           "sous 0x%x (%u fautes)", n, (unsigned)QGPU_CTRL_TOPADDR, bad);
-    CHECK(QGPU_PROTO_VERSION == 14, "version du protocole %d", QGPU_PROTO_VERSION);
+    CHECK(QGPU_PROTO_VERSION == 15, "version du protocole %d", QGPU_PROTO_VERSION);
     CHECK(QGPU_PROTO_MIN == 12, "version minimale d'attache %d", QGPU_PROTO_MIN);
     CHECK(QGPU_QUEUE_DEPTH >= 2 && (QGPU_QUEUE_DEPTH & (QGPU_QUEUE_DEPTH - 1)) == 0,
           "profondeur de file %d (puissance de 2, >= 2)", QGPU_QUEUE_DEPTH);
@@ -4637,6 +4637,105 @@ static void run_v14(QgpuCore *c, uint8_t *shmem)
           "reset libère les tampons");
 }
 
+static void run_v15(QgpuCore *c, uint8_t *shmem)
+{
+    enum { PITCH16 = W * 2u };
+    Emit e;
+    uint32_t st, i, p;
+    uint16_t pix;
+    float d;
+
+    printf("-- v15 : SURF/DEPTH xfer 16 bits --\n");
+    CHECK(QGPU_LEN_SURF_XFER_PF == 9, "LEN_SURF_XFER_PF %d", QGPU_LEN_SURF_XFER_PF);
+    CHECK(QGPU_DF_UNORM16 == 1 && QGPU_PF_RGB1555 == 1,
+          "formats 16 bits couleur=%d profondeur=%d",
+          QGPU_PF_RGB1555, QGPU_DF_UNORM16);
+
+    qgpu_core_reset(c);
+    e.base = shmem; e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 1); emit(&e, W); emit(&e, H);
+    emit(&e, QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 1);
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF0000, 1.0f);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "v15 : surface rouge (st %u)", st);
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER));
+    emit(&e, 1); emit(&e, RB_OFF); emit(&e, STRIDE);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 10, 20) == 0xFF0000,
+          "READBACK LEN 8 encore 8888 : %06x (st %u)", px(shmem, 10, 20), st);
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER_PF));
+    emit(&e, 1); emit(&e, RB_OFF); emit(&e, PITCH16);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_PF_RGB1555);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    pix = qgpu_ld16(shmem + RB_OFF + 20 * PITCH16 + 10 * 2);
+    CHECK(st == QGPU_ST_OK && pix == 0x7C00,
+          "READBACK 1555 : st %u pixel %04x", st, pix);
+
+    for (i = 0; i < W * H; i++) {
+        qgpu_st16(shmem + RB_OFF + i * 2, 0x03E0);
+    }
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_UPLOAD, QGPU_LEN_SURF_XFER_PF));
+    emit(&e, 1); emit(&e, RB_OFF); emit(&e, PITCH16);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_PF_RGB1555);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER));
+    emit(&e, 1); emit(&e, RB_OFF + 0x8000); emit(&e, STRIDE);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = qgpu_ld32(shmem + RB_OFF + 0x8000 + 8 * STRIDE + 8 * 4) & 0xFFFFFF;
+    CHECK(st == QGPU_ST_OK && p == 0x00FF00,
+          "UPLOAD 1555 → READBACK 8888 : %06x (st %u)", p, st);
+
+    for (i = 0; i < W * H; i++) {
+        qgpu_st16(shmem + RB_OFF + i * 2, 0x8000);
+    }
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DEPTH_UPLOAD, QGPU_LEN_SURF_XFER_PF));
+    emit(&e, 1); emit(&e, RB_OFF); emit(&e, PITCH16);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_DF_UNORM16);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DEPTH_READBACK, QGPU_LEN_SURF_XFER));
+    emit(&e, 1); emit(&e, RB_OFF + 0x8000); emit(&e, STRIDE);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    d = qgpu_u2f(qgpu_ld32(shmem + RB_OFF + 0x8000 + 8 * STRIDE + 8 * 4));
+    CHECK(st == QGPU_ST_OK && d > 0.49f && d < 0.51f,
+          "UPLOAD UNORM16 → float : %g (st %u)", d, st);
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DEPTH_READBACK, QGPU_LEN_SURF_XFER_PF));
+    emit(&e, 1); emit(&e, RB_OFF); emit(&e, PITCH16);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_DF_UNORM16);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    pix = qgpu_ld16(shmem + RB_OFF + 8 * PITCH16 + 8 * 2);
+    CHECK(st == QGPU_ST_OK && pix == 0x8000,
+          "READBACK UNORM16 : %04x (st %u)", pix, st);
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER_PF));
+    emit(&e, 1); emit(&e, RB_OFF); emit(&e, STRIDE);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, 99);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "format couleur inconnu : st %u", st);
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER_PF));
+    emit(&e, 1); emit(&e, RB_OFF); emit(&e, 1);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_PF_RGB1555);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "stride 1555 trop petit : st %u", st);
+
+    qgpu_core_reset(c);
+}
+
 typedef struct { QgpuCore *c; uint8_t *shmem; } BackendRun;
 
 /* Tout ce qui suit l'initialisation, sur le thread « de rendu ». */
@@ -4727,6 +4826,7 @@ static void *run_backend_body(void *arg)
     run_v12(c, shmem);
     run_v13(c, shmem);
     run_v14(c, shmem);
+    run_v15(c, shmem);
 
     qgpu_core_reset(c);
     e.off = e.start = CMD_OFF;

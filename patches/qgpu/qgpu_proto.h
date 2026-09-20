@@ -51,8 +51,8 @@
 #define QGPU_PROTO_MIN          12  /* plus ancienne version de device à laquelle
                                        un kext / plugin compilé contre CE fichier
                                        s'attache encore : les opcodes v13/v14 sont
-                                       optionnels (QGPU_CAP_SCANOUT, BUF_*). */
-#define QGPU_PROTO_VERSION      14  /* v2 : profondeur, état GL ; v3 : textures ;
+                                       optionnels (QGPU_CAP_SCANOUT, BUF_*, xfer 16). */
+#define QGPU_PROTO_VERSION      15  /* v2 : profondeur, état GL ; v3 : textures ;
                                        v4 : brouillard, 2e unité, lignes, points ;
                                        v5 : 4 unités, GL_COMBINE ;
                                        v6 : stencil ;
@@ -78,7 +78,9 @@
                                        v13 : SURF_PRESENT (hôte → VRAM qfb),
                                              COPY_TEX (CopyTexSubImage sur l'hôte) ;
                                        v14 : tampons hôte (BUF_CREATE / DESTROY /
-                                             SUBDATA) et DRAW_RAW_BUF */
+                                             SUBDATA) et DRAW_RAW_BUF ;
+                                       v15 : SURF/DEPTH_UPLOAD/READBACK 16 bits
+                                             (conversion 1555 / UNORM16 par l'hôte) */
 
 /* ── BAR0 : fenêtre partagée (RAM) ───────────────────────────────────────── */
 #define QGPU_SHMEM_DEFAULT_MB   64
@@ -227,9 +229,9 @@
 #define QGPU_OP_SURF_CREATE     0x0010  /* [surf, width, height, format] */
 #define QGPU_OP_SURF_DESTROY    0x0011  /* [surf] */
 #define QGPU_OP_SURF_BIND       0x0012  /* [surf]  cible de rendu du contexte courant */
-#define QGPU_OP_SURF_READBACK   0x0013  /* [surf, off, stride, x, y, w, h]  hôte → BAR0 */
-#define QGPU_OP_SURF_UPLOAD     0x0014  /* [surf, off, stride, x, y, w, h]  BAR0 → hôte */
-#define QGPU_OP_DEPTH_READBACK  0x0015  /* v2, idem, valeurs de profondeur f32 BE dans [0,1] */
+#define QGPU_OP_SURF_READBACK   0x0013  /* [surf, off, stride, x, y, w, h (, fmt)] */
+#define QGPU_OP_SURF_UPLOAD     0x0014  /* [surf, off, stride, x, y, w, h (, fmt)] */
+#define QGPU_OP_DEPTH_READBACK  0x0015  /* v2, [surf, off, stride, x, y, w, h (, df)] */
 #define QGPU_OP_DEPTH_UPLOAD    0x0016  /* v2, idem, BAR0 → hôte */
 #define QGPU_OP_STENCIL_READBACK 0x0017 /* v6, idem, valeurs de stencil, cf. ci-dessous */
 #define QGPU_OP_STENCIL_UPLOAD  0x0018  /* v6, idem, BAR0 → hôte */
@@ -294,6 +296,7 @@
 #define QGPU_LEN_SURF_CREATE    5
 #define QGPU_LEN_SURF           2
 #define QGPU_LEN_SURF_XFER      8
+#define QGPU_LEN_SURF_XFER_PF   9           /* v15 : + format (QGPU_PF_* / QGPU_DF_*) */
 #define QGPU_LEN_SURF_PRESENT   9           /* v13 */
 #define QGPU_LEN_COPY_TEX       11          /* v13 */
 #define QGPU_LEN_BUF_CREATE     3           /* v14 */
@@ -341,6 +344,8 @@
  * surface hôte — celle-ci reste QGPU_FMT_XRGB8888). */
 #define QGPU_PF_XRGB8888        0   /* 32 bpp, mêmes octets que SURF_READBACK */
 #define QGPU_PF_RGB1555         1   /* 16 bpp big-endian, « milliers » QFB */
+#define QGPU_DF_FLOAT32         0   /* DEPTH_* : float IEEE, comme avant */
+#define QGPU_DF_UNORM16         1   /* v15 : u16 BE 0..65535 ↔ [0,1] */
 
 /* CLEAR : masque. Comme glClear, l'effacement respecte les ciseaux, le
  * masque de couleur et le masque de profondeur du contexte courant. */
@@ -1281,6 +1286,17 @@
  *   identifiant veut dire « offset dans BAR0 », pour mixer sommets hôte et
  *   indices encore dans la fenêtre. Un flux v13 ignore ces opcodes
  *   (BAD_OPCODE) : l'invité ne les émet que si version >= 14.
+ */
+
+/* ── v15 : transfert 16 bits (conversion par l'hôte, pas par le G4) ──────────
+ *
+ *   SURF_READBACK / SURF_UPLOAD et DEPTH_READBACK / DEPTH_UPLOAD acceptent
+ *   encore la longueur 8 (xRGB8888 / float32, inchangé au bit près).
+ *   Longueur 9 : le 8e argument est le format :
+ *     couleur  QGPU_PF_XRGB8888 (0) ou QGPU_PF_RGB1555 (1, u16 BE)
+ *     profondeur  QGPU_DF_FLOAT32 (0) ou QGPU_DF_UNORM16 (1, u16 BE 0..65535)
+ *   L'hôte convertit. Un flux v14 refuse LEN 9 (WANT exacte → BAD_ARG) :
+ *   l'invité n'émet LEN 9 que si version >= 15. STENCIL_* reste en mots 32.
  */
 
 /* ── Interface du kext POMPPCGPU (IOUserClient) ──────────────────────────────

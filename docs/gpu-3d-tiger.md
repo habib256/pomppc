@@ -329,8 +329,8 @@ rectangle, **textures compressées**, modes de répétition autres que REPEAT/CL
 filtres inconnus, lissage (`GL_*_SMOOTH`), **taille de point atténuée par la distance**, mode de
 polygone non plein **par le chemin hérité**, pointillé de ligne par le chemin hérité, brouillard en
 `GL_NICEST` hors chemin brut, lignes et points texturés ou décalés, opérations de pixels
-(`glDrawPixels`, `glBitmap`, `glCopyPixels`, accumulation), programmes ARB de sommets ou de
-fragments, tampons autres que 32 bits.
+hors du domaine 2.6 (zoom, test de profondeur autre que `ALWAYS`), programmes ARB de sommets ou de
+fragments. Tampons 16 bits (RGB1555, Z UNORM16) : convertis par l'hôte depuis la v15.
 
 Le bilan `POMPPC_GL_STATS` nomme chaque sortie du domaine et son premier cas : depuis le lot 3,
 les motifs `logicop/stipple/lissage` et `polygonmode` ne comptent plus que ce qui reste vraiment

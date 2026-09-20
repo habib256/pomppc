@@ -14,7 +14,8 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`. Les amorces de rech
 ## État (20/09/2026)
 
 - **Phase A** : `SURF_PRESENT` + `COPY_TEX` (v13), pixels 2.6, tampons hôte
-  v14 (`BUF_*` + `DRAW_RAW_BUF`). Plugin `20260920-vbo`. Device v14 en service.
+  v14 (`BUF_*` + `DRAW_RAW_BUF`), **xfer 16 bits v15** (RGB1555 / Z UNORM16
+  convertis par l'hôte). Plugin `20260920-16`. Device v15 en service.
 
 - **Plan pixels hors G4** : d'abord hisser dans le miroir GL (`SURF_PRESENT`
   v13, puis 2.6 / 2.1), et seulement ensuite casser le protocole. Détail sous
@@ -153,7 +154,7 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`. Les amorces de rech
 |---|---|---|
 | 2.1 | **Objets tampon** (`CreateBuffer`, `FlushBuffer`, `BufferSubData`) sur tampons hôte : les maillages statiques ne retraversent plus la fenêtre partagée. (OpenGL 1.5.) | **v14 20/09/2026** : `BUF_CREATE` / `DESTROY` / `SUBDATA` + `DRAW_RAW_BUF`. `FlushBuffer` salit ; le premier `DrawArrays`/`DrawElements` emballe au format `DRAW_RAW` et téléverse ; les suivants du même intervalle sautent BAR0 (`QGPU_BUF_SHMEM` pour les indices). `POMPPC_GL_VBO=0` reprend `DRAW_RAW`. Mode immédiat inchangé. Preuve native `run_v14`. |
 | 2.2 | ✅ **Fait le 18/09/2026**, de bout en bout. **Hôte** : protocole **v9** — file de 16 soumissions, thread de rendu, `QGPU_DOORBELL_ASYNC`, `FENCE_SUBMITTED`, `SUBMIT_ST`, `QUEUE_FREE`, `ERRORS`, `QUEUE_DEPTH`, IRQ `DONE` posée par un *bottom half* (`docs/protocole-v9-asynchrone.md`). **Kext** : le drapeau voyage dans les bits hauts de `len` de `QGPU_UC_SUBMIT` — l'ABI de Darwin 8 compare le *nombre* d'arguments scalaires au bit près, donc ajouter un scalaire aurait cassé tous les appelants existants ; `QGPU_UC_WAIT_FENCE` ne scrute plus, il dort sur la command gate et `irqAction` le réveille, avec un `IOTimerEventSource` comme base de temps du délai maximal (Tiger n'a pas `commandSleep(event, deadline, …)`, arrivé en 10.5) ; `destroyClientObjects` draine la file avant de rendre la tranche. **Plugin** : `POMPPC_GL_ASYNC` (défaut **activé**), tranche coupée en **deux moitiés** alternées à chaque soumission, relectures **différées** jusqu'au moment où l'invité en a besoin, présentation directe de l'image *n−1* au début de l'échange suivant (**une image de latence, jamais plus**). **Mesures Marble Blast** : temps de soumission **1,6 → 0,06 ms/image** (÷26), attente restante **0,1 ms/image**, **79,4 → 88,1 img/s (+11 %)** sur les fenêtres de jeu. Sur `gltest` (hors écran, relecture à chaque image) : **aucun gain**, c'est attendu. | ✅ **fait** |
-| 2.3 | **Zero-copy à la présentation** : le device écrit lui-même dans la VRAM QFB (`SURF_PRESENT`, v13) ; plus de relecture ni de recopie par l'invité. Conversion 1555 sur l'hôte. `docs/protocole-v13-present.md`. | **hôte + plugin 20/09/2026** — preuve native `run_v13`. Device v14 en service. |
+| 2.3 | **Zero-copy à la présentation** : le device écrit lui-même dans la VRAM QFB (`SURF_PRESENT`, v13) ; plus de relecture ni de recopie par l'invité. Conversion 1555 sur l'hôte. `docs/protocole-v13-present.md`. | **hôte + plugin 20/09/2026** — preuve native `run_v13`. Device v15 en service. |
 | 2.4 | **Présentation en fenêtre sans attendre le WindowServer** : écriture directe dans le rectangle de la surface à l'écran, tant que rien ne la recouvre et que le curseur n'y bouge pas ; un échange normal toutes les 90 images rafraîchit la fenêtre. Marble Blast : +70 %. | ✅ fait |
 | 2.5 | Téléversement de textures sans conversion invité quand le format est connu de l'hôte (BGRA, 565, 1555…) : la conversion passe sur l'hôte. | ✅ **fait le 19/09/2026** : hôte (v10, `TEX_IMAGE3`) et plugin. Avec un device v10, le plugin recopie le niveau tel quel (pas de ligne compris : les niveaux alignés ne sont plus refusés) et l'hôte convertit ; `POMPPC_GL_TEX3=0` rend l'ancien chemin. Image identique au pixel près sur les 8 scènes texturées de `gltest`. **Gain mesuré modeste** (scène `texup`, 256×256 renvoyée à chaque image) : RGBA 362 → 388 img/s, RGB 410 → 445 (+7 à +9 %) ; 565 et BGRA inchangés — le temps y est dans GLEngine, pas dans la conversion |
 | 2.6 | Opérations de pixels sur l'hôte (`DrawPixels`, `CopyPixels`, `Bitmap`, `ReadPixels`, `CopyTexSubImage`) : chacune force aujourd'hui une relecture complète. | **20/09/2026** : `COPY_TEX` + rectangle couleur. **Bitmap**. **DEPTH/STENCIL** : `ReadPixels` FLOAT/octet, `DrawPixels` / `CopyPixels` via `DEPTH_*` / `STENCIL_*` (test `ALWAYS` ou coupé, masque d'écriture plein). Zoom / transfer maps / test LESS → Apple. `POMPPC_GL_PIXEL=0` reprend Apple. |
@@ -446,7 +447,10 @@ Le miroir GL 1.x reste le contrat. On hisse, dans cet ordre :
 3. **Tampons (2.1)** — v14 `BUF_*` + `DRAW_RAW_BUF`. Les maillages VBO
    statiques ne retraversent plus BAR0 après le premier dessin.
 4. **Repli Apple** — le GLDriver logiciel reste le trou : dès qu'on y
-   retombe, le G4 rastérise. Réduire le domaine de repli, pas l'élargir.
+   retombe, le G4 rastérise. **16 bits (v15)** : RGB1555 et Z UNORM16
+   convertis par l'hôte ; le G4 ne fait plus que `memcpy` des octets déjà
+   16 bits. Restent hors domaine : lissage de polygone, brouillard
+   `GL_NICEST` hors chemin brut, lignes texturées.
 
 Critère de fin de phase A : sur le chemin accéléré, **aucun texel n'est
 fabriqué ni recopié par l'invité**. `POMPPC_GL_STATS` : `relect = 0` et
@@ -470,7 +474,7 @@ commandes de GPU (et, plus tard, Metal). Ce n'est **pas** le lot en cours.
    de marcher (`QGPU_PROTO_MIN`).
 2. Géométrie Colin McRae (clip `w≈0`, plugin `20260920-clip`) et texte WC3
    (hash de texels) : suivis, pas le goulot architectural.
-3. Ensuite 2.6 (pixels, ✅) et 2.1 (VBO, v14). Repli Apple ensuite.
+3. Ensuite 2.6 (pixels, ✅) et 2.1 (VBO, v14). Repli Apple 16 bits : v15.
 
 **Au 20/09/2026** (démo UT lancée, image juste, injouable) — `docs/re/ut2004-demo.md` §4 :
 1. bilan `POMPPC_GL_STATS` en fenêtre (DRAW_RAW vivant ou rastérisation) ;
@@ -492,10 +496,10 @@ stats n'a pas encore été pris.)*
    le PC (i7-10700F, RTX 4060 Ti) que sur l'hôte Apple Silicon, la musique saccade, et Marble
    Blast en 16 bits « ralentit à mort ». **Diagnostic du 19/09/2026 soir** (job
    `tools/guest/jobs/games`, bilan `POMPPC_GL_STATS`, `top` et `sample` dans l'invité) :
-   - **16 bits** : hors domaine du plugin (`CTX_COLOR_BITS != 32` → `NO_BUFFER`, profondeur 16
-     → `NO_DEPTH`) ; tout part au rendu logiciel d'Apple. Limite connue (§4.5 de
-     `gpu-3d-tiger.md`). Tâche : tampons 16 bits (RGB555, profondeur 16) avec conversion par
-     l'hôte à la relecture et au téléversement.
+   - **16 bits** : ✅ v15 — `SURF`/`DEPTH` LEN 9, conversion RGB1555 et
+     UNORM16 par l'hôte (`docs/protocole-v15-xfer16.md`). Avant : hors
+     domaine (`CTX_COLOR_BITS != 32` → `NO_BUFFER`, profondeur 16 →
+     `NO_DEPTH`) ; tout partait au rendu logiciel d'Apple.
    - **Le rendu n'est pas en cause** : `gltest game` 686 img/s ici (684-854 sur le Mac), aucun
      refus, plugin < 5 ms par image. Dans l'invité, le WindowServer est à < 1 % et le jeu à 91 %.
    - **Zenerchi** : 100 % des échantillons dans `TLoopMusicManager::LoadMusics → ov_read →
@@ -521,8 +525,8 @@ stats n'a pas encore été pris.)*
    - Restent : la variante de compilation (`-march=native`, LTO, sans `qom-cast-debug`) dont
      l'A/B de boot est à faire, hôte au repos (binaire dans `~/src/qemu/build-opt`) ; le coût
      restant d'une instruction flottante n'est PAS dans les appels de helper (le 0002 ne
-     rapporte que 2-4 %) — pistes : FPRF paresseux, `lfs`/`stfs` en ligne ; et les tampons
-     16 bits du plugin.
+     rapporte que 2-4 %) — pistes : FPRF paresseux, `lfs`/`stfs` en ligne. Tampons 16 bits
+     du plugin : v15.
 2. **Ce qu'UT2004 va exiger** (à confirmer par le bilan, pas à implémenter à l'aveugle) :
    **2.1** (VBO) et le chemin `AllocVertexBuffer` / `APPLE_vertex_array_range` déjà relevé ;
    tampons **16 bits** ; mémoire vidéo annoncée (le jeu lit `kCGLRPVideoMemory` et `VARSize`) ;

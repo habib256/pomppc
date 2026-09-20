@@ -155,6 +155,7 @@ dans `Resources` d'OpenGL.framework : `install.sh` l'en retire.
 | `POMPPC_GL_PRESENT=0` | pas de `SURF_PRESENT` (relecture + copie G4, pour A/B) ; défaut : hôte → VRAM si device v13 |
 | `POMPPC_GL_PIXEL=0` | pas de `COPY_TEX` / `ReadPixels` hôte (relecture complète + Apple, pour A/B) ; défaut : device v13 |
 | `POMPPC_GL_VBO=0` | pas de tampons hôte v14 (`DRAW_RAW` retraverse BAR0 à chaque dessin, pour A/B) ; défaut : device v14 |
+| `POMPPC_GL_XFER16=0` | pas de transfert 16 bits hôte (v15) ; défaut : device v15 copie RGB1555 / Z16 tels quels, conversion par l'hôte |
 | `POMPPC_GL_GEOM=0` | coupe le **chemin brut** : GLEngine transforme et éclaire de nouveau lui-même, comportement d'avant le lot 2. `=1` (défaut) l'active ; `=2` l'active avec un format de sommet fixe et large, pour mesurer |
 | `POMPPC_GL_ARRAY=1` | **canal mixte** : `cfg+0x78` si `GL_VERTEX_ARRAY` actif, descripteur `cfg+0x11c` **gardé** pour `glBegin`. `=2` retire le descripteur (GeForce3 strict). **`=0` (défaut)** coupe : Begin/End seulement |
 | `POMPPC_GL_MERGE=0` | coupe la **fusion** des `DRAW_RAW` consécutifs en triangles indexés (repli et comparaison). `=1` (défaut) l'active. Sans elle, seuls les lots `TRIANGLES`, `QUADS`, `LINES` et `POINTS` de même mode se recollent bout à bout, comme avant |
@@ -175,7 +176,9 @@ dans `Resources` d'OpenGL.framework : `install.sh` l'en retire.
   passent par l'hôte dès la v13 (`POMPPC_GL_PIXEL=0` les rend à Apple).
   DEPTH/STENCIL : seulement si le test est coupé ou `ALWAYS` et le masque
   d'écriture est plein. Les polices `GL_ALPHA` (Warcraft III) partent en RGBA blanc+A
-  pour que le `MODULATE` hôte garde la couleur du sommet.
+  pour que le `MODULATE` hôte garde la couleur du sommet. Drawables 16 bits
+  (RGB1555) et Z 16 : memcpy G4 + conversion hôte dès la v15
+  (`POMPPC_GL_XFER16=0` les laisse sans aller-retour).
 - **Hors du domaine du chemin brut** (le rendu d'Apple reprend tout le pipeline
   de sommets, image exacte) : lissage (`GL_*_SMOOTH`), atténuation de la taille des points par la
   distance, programmes ARB de sommets ou de fragments, et tout ce qui sort déjà du domaine
