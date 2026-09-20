@@ -36,6 +36,14 @@ Conception, rétro-ingénierie et mesures : `docs/gpu-3d-tiger.md`.
   changent. Hors domaine, on rend le retour d'Apple tel quel et GLEngine reprend
   tout le travail : le repli se fait **par lot d'état** et l'image reste exacte.
   `POMPPC_GL_GEOM=0` coupe ce chemin.
+- **Tableaux de sommets (canal GeForce3).** Quand `GL_VERTEX_ARRAY` est actif,
+  le plugin retire `cfg+0x11c` : GLEngine n'écrit plus dans `BeginPrimitiveBuffer`
+  (où il **déroulait** `glDrawElements`) et appelle `RenderVertexArray` (+0x70,
+  VAR) ou `AllocVertexBuffer` / `RenderVertexBuffer` (+0x4c). Le plugin lit
+  l'objet tableau (`GS_VAO`), packe les attributs au format `DRAW_RAW` et envoie
+  les **indices tels quels** — un sommet unique n'est copié qu'une fois. Le mode
+  immédiat (`glBegin`) garde le descripteur tant qu'aucun tableau n'est actif.
+  `POMPPC_GL_ARRAY=0` coupe ce canal (tout reste en Begin/End) ; `=2` le force.
 - **Fusion des dessins.** GLEngine remet la géométrie par `glBegin`/`glEnd`, et
   les jeux en font des rubans et des éventails **courts** : Marble Blast en
   envoyait ~1 065 par image pour 8 200 sommets, soit 7,7 sommets par dessin, et
@@ -103,6 +111,8 @@ Conception, rétro-ingénierie et mesures : `docs/gpu-3d-tiger.md`.
   convient, et le nôtre est aussi le seul à répondre à `kCGLPFAAccelerated`,
   `kCGLPFAFullScreen` et `kCGLPFANoRecovery` (retirés de la copie envoyée au
   GLDriver d'Apple ; drapeaux `0x100` / `0x2` / `0x2000` posés sur nos formats).
+  `kCGLRPVideoMemory` / `kCGLRPTextureMemory` annoncent **64 Mio** (le logiciel
+  d'Apple y laisse 0, ce qui fait refuser OpenGL à Warcraft III).
   Un second exemplaire du plugin dans le même processus (une copie restée dans
   `Resources`) est rejeté par GLEngine après son `gldInitializeLibrary` : il
   reste inactif (marque `POMPPC_GLD_OWNER`), et `gldTerminateLibrary` rend la
@@ -142,6 +152,7 @@ dans `Resources` d'OpenGL.framework : `install.sh` l'en retire.
 | `POMPPC_GL_STATS=/chemin` | bilan ajouté au fichier toutes les 5 s : images/s, relectures, replis logiciels, temps de soumission, sommets bruts / `DRAW_RAW` / commandes d'état / **dessins fusionnés** / **sommets par dessin** par image, **barrières attendues et temps d'attente par image, profondeur de file, `QUEUE_FULL`, replis synchrones**, et motifs de refus de l'accélération avec le premier cas |
 | `POMPPC_GL_DIRECT=0` | pas de présentation directe (voir ci-dessous) ; `=f` : plein écran seulement ; `=c` : même avec un curseur en mouvement dans la surface |
 | `POMPPC_GL_GEOM=0` | coupe le **chemin brut** : GLEngine transforme et éclaire de nouveau lui-même, comportement d'avant le lot 2. `=1` (défaut) l'active ; `=2` l'active avec un format de sommet fixe et large, pour mesurer |
+| `POMPPC_GL_ARRAY=0` | coupe le **canal tableaux** (GeForce3) : `glDrawArrays` / `glDrawElements` restent en Begin/End, où GLEngine déroule les indices. `=1` (défaut) : le canal s'allume si `GL_VERTEX_ARRAY` est actif (retrait de `cfg+0x11c`, `RenderVertexArray` / `RenderVertexBuffer`) ; `=2` le force |
 | `POMPPC_GL_MERGE=0` | coupe la **fusion** des `DRAW_RAW` consécutifs en triangles indexés (repli et comparaison). `=1` (défaut) l'active. Sans elle, seuls les lots `TRIANGLES`, `QUADS`, `LINES` et `POINTS` de même mode se recollent bout à bout, comme avant |
 | `POMPPC_GL_ASYNC=0` | coupe le **doorbell asynchrone** : chaque soumission attend la fin du rendu hôte, comme avant la v9 (repli et comparaison). `=1` (défaut) l'active, à condition que le device soit v9, qu'il annonce `QGPU_CAP_ASYNC`, que le kext installé connaisse le drapeau et que la tranche tienne deux moitiés — sinon le mode synchrone est gardé et la raison est dite dans le journal |
 | `POMPPC_GL_GEOM_SLOTS=n` | plafonne le nombre de sommets offerts à un `BeginPrimitiveBuffer` (mesure : c'est ainsi qu'on a établi comment GLEngine coupe une longue primitive) |
@@ -160,6 +171,10 @@ dans `Resources` d'OpenGL.framework : `install.sh` l'en retire.
   de sommets, image exacte) : lissage (`GL_*_SMOOTH`), atténuation de la taille des points par la
   distance, programmes ARB de sommets ou de fragments, et tout ce qui sort déjà du domaine
   de la rastérisation.
+- **Canal tableaux** : un `glBegin` pendant que `GL_VERTEX_ARRAY` est actif est jeté (sans
+  quitter le domaine). Le chemin `AllocVertexBuffer` ignore le tampon packé par GLEngine et
+  relit les tableaux clients — les indices sont conservés, la recopie vers le tampon de 2048
+  sommets est perdue. `POMPPC_GL_ARRAY=0` rétablit l'ancien déroulement par Begin/End.
 - **Modes de polygone et pointillé de ligne : chemin brut seulement** (voir plus haut) ; par le
   chemin hérité, le rendu d'Apple les fait, exactement.
 - Le chemin brut ne porte pas la **couleur secondaire par sommet** ; elle passe en valeur courante
@@ -189,8 +204,9 @@ dans `Resources` d'OpenGL.framework : `install.sh` l'en retire.
   — le temps que l'erreur, si elle est la nôtre, revienne avec son statut et son
   `pc` exacts — puis reprend l'asynchrone. Vu en vrai : un repli par application
   GL qui se ferme à côté, suivi d'une reprise.
-- Tampons 32 bits seulement (couleur « Millions », profondeur 32 bits du rendu
-  d'Apple) ; sinon, logiciel.
+- Tampons de dessin 32 bits. Une demande 16 bits (Warcraft III / Colin McRae
+  « milliers de couleurs ») est élevée en 32 côté hôte ; `aglSetFullScreen`
+  peut commuter l'écran QFB en 1555, et le swap convertit xRGB → 1555.
 - Les pixels exactement sur une arête peuvent différer du rendu d'Apple (règle
   de remplissage du GPU hôte).
 

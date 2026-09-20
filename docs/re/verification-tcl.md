@@ -438,9 +438,10 @@ Pour recevoir la géométrie brute et l'envoyer à l'hôte, le plugin doit :
 
 Restes à établir avant 1.3/1.4 : ~~les codes du descripteur (§6.4)~~ **fait le
 18/09/2026** ; le chemin `RenderVertexArray`/`RenderVertexBuffer` « à la
-GeForce3 », jamais atteint ici (le GeForce3 et le Radeon **annoncent bien la
-T&L matérielle** — `cfg+0x78..0x7b = 1`, retour de dispatch 7 — mais laissent
-`cfg+0x11c = 0` et n'installent pas `Begin`/`EndPrimitiveBuffer`) ; le
+GeForce3 », **implémenté dans le plugin le 20/09/2026** (`POMPPC_GL_ARRAY`,
+`docs/gpu-3d-tiger.md` §4.7) — le GeForce3 et le Radeon **annoncent bien la
+T&L matérielle** (`cfg+0x78..0x7b = 1`, retour de dispatch 7) mais laissent
+`cfg+0x11c = 0` et n'installent pas `Begin`/`EndPrimitiveBuffer` ; le
 comportement de `cfg+0x7a = 0` sur un changement d'état en cours de primitive.
 
 ---

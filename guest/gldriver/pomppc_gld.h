@@ -172,7 +172,7 @@ void *pomppc_gld_override(int id);
    tableau de bits d'extensions, pour n'annoncer QUE ce que la chaîne tient. */
 void pomppc_patch_caps(void *cfg);
 /* chemin brut (v7) : la géométrie non transformée part sur le GPU de l'hôte */
-void *pomppc_geom_proc(int slot);       /* Begin/EndPrimitiveBuffer, ou 0 */
+void *pomppc_geom_proc(int slot);       /* Begin/End, RenderVertexArray/Buffer */
 long pomppc_geom_dispatch(void *ctx);   /* bits à ajouter au retour du dispatch */
 void pomppc_geom_context(void *ctx, void *cfg);
 

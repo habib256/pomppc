@@ -388,6 +388,32 @@ Quand il doit couper, **GLEngine répète les sommets qu'il faut** : mesuré sur
 puis 16 sommets donne 1952, 1954, 1969, 2005 puis 2197 sommets transmis en 4, 5, 13, 33 puis 139
 `DRAW_RAW` — et **exactement la même image** à chaque fois.
 
+#### Tableaux de sommets — le canal GeForce3 (20/09/2026)
+
+Avec le descripteur `cfg+0x11c`, `glDrawArrays` / `glDrawElements` passent par
+`Begin`/`EndPrimitiveBuffer` : GLEngine **déroule** les indices (`__memcpy`,
+15,8 % du profil Marble Blast). Le GeForce3, lui, laisse `cfg+0x11c = 0` et
+prend `RenderVertexArray` (+0x70) ou `AllocVertexBuffer` / `RenderVertexBuffer`
+(+0x4c).
+
+Le plugin fait les deux. Tant qu'aucun tableau de positions n'est actif, le
+descripteur reste publié : `glBegin`/`glEnd` est inchangé. Quand
+`GL_VERTEX_ARRAY` l'est, le dispatch **retire** `cfg+0x11c` (bit 1 pour que
+GLEngine relise) : les dessins indexés arrivent avec leurs indices, le plugin
+lit l'objet tableau (`GS_VAO` `0x4700`, masque bit `16+a`, emplacements
+`0x18` octets) et packe la plage `[min, max]` au format `DRAW_RAW`. Un sommet
+unique n'est copié qu'une fois.
+
+`cfg+0x78 = 1` (lu par `_gleDrawArraysOrElements_Exec`) et les six identifiants
+de format `cfg+0x7c..0x87` `{3, 2, 1, 6, 5, 4}` sont posés à la création, comme
+le GeForce3. `AllocVertexBuffer` plafonne à 2048 et rend un tampon de secours :
+le format packé n'est pas le nôtre, `RenderVertexBuffer` relit les tableaux
+clients. `POMPPC_GL_ARRAY=0` coupe ce canal ; `=2` le force. Un `glBegin` pendant
+que les tableaux sont actifs est jeté, sans quitter le domaine.
+
+À vérifier dans l'invité : `gltest varray` et `varrayvbo` contre le rendu
+d'Apple, et `POMPPC_GL_ARRAY=0` en témoin A/B.
+
 #### Fusion des dessins : un `DRAW_RAW` par lot d'état (18/09/2026)
 
 Le chemin brut a déplacé le goulot d'étranglement : sur une scène lourde de
@@ -673,6 +699,7 @@ liste telle qu'une application la lit, qui l'a montré.
 | hôte Linux + NVIDIA (19/09/2026) | `qgpu_core_test`, `qgpu_smoke.py`, `run-all.sh` | verts après deux corrections (contexte EGL partagé entre threads, profondeur selon la présence d'un stencil) ; `qgpu_smoke.py` publie désormais `caps = 0x1e` |
 | version et extensions | `gltest caps entry v15` | ce qui est annoncé est tenu, fonction par fonction (`docs/re/version-extensions.md`) |
 | géométrie sur l'hôte | `gltest lit texgen clip fogz bigstrip dlist mixte` | éclairage, texgen, découpe, brouillard, longues primitives, listes d'affichage, alternance domaine / hors domaine |
+| tableaux de sommets (canal GeForce3) | `gltest varray varrayvbo` | **à vérifier dans l'invité** : `glDrawArrays` / `glDrawElements` via `RenderVertexArray`, indices conservés ; `varrayvbo` relit les VBO clients ; `POMPPC_GL_ARRAY=0` = ancien déroulement |
 | application réelle | Zenerchi (§4.6) | menus et partie corrects, 42 img/s en partie, présentation directe |
 | plugin en fenêtre, dans le bureau | `glwin` (GLUT) | OK ; image témoin visible dans la fenêtre à l'écran |
 | multi-processus | 5 × `gltest game` + `qgpu_test` | 4 accélérés, le 5e en logiciel, tous corrects |

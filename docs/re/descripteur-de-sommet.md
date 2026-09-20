@@ -163,7 +163,7 @@ Toutes ces réponses viennent de la scène `tclprobe` (modèle-vue =
 | avant ou après la matrice de texture ? | **avant** : `glTranslatef(100,200,0)` sur `GL_TEXTURE` ne change rien. |
 | découpage fait par GLEngine ? | **non** : un triangle `(-5,-1,0) (5,-1,0) (0,5,0)` en projection identité (donc largement hors du volume de vue) arrive **tel quel, 3 sommets**. Même le triangle entièrement hors champ des autres essais est transmis. |
 | élimination de face ? | **non** : `glEnable(GL_CULL_FACE)` avec un triangle orienté à l'envers donne les **3 sommets**, dans l'ordre de soumission. |
-| `glDrawArrays` / `glDrawElements` ? | **toujours** `Begin`/`EndPrimitiveBuffer`. `RenderVertexBuffer` (+0x4c) et `RenderVertexArray` (+0x70) ne sont **jamais** appelées. `glDrawElements` est **déroulé** par GLEngine (3 sommets à plat). |
+| `glDrawArrays` / `glDrawElements` ? | **avec le descripteur** : toujours `Begin`/`EndPrimitiveBuffer`. `RenderVertexBuffer` (+0x4c) et `RenderVertexArray` (+0x70) ne sont **jamais** appelées. `glDrawElements` est **déroulé** par GLEngine (3 sommets à plat). **Sans descripteur** (`POMPPC_GL_ARRAY=1`, 20/09/2026) : le plugin prend le canal GeForce3 — `RenderVertexArray` / `RenderVertexBuffer`, indices conservés (`docs/gpu-3d-tiger.md` §4.7). |
 | listes d'affichage ? | **toujours** `Begin`/`EndPrimitiveBuffer`, une paire par `glCallList`, contenu identique à l'immédiat. |
 | modes de primitive ? | transmis **tels quels** : `mode = 4` `GL_TRIANGLES`, `5` `GL_TRIANGLE_STRIP`, `6` `GL_TRIANGLE_FAN`, `7` `GL_QUADS`. GLEngine ne décompose pas les rubans ni les éventails. |
 | groupement ? | un seul `Begin`/`End` par primitive : scène `game`, `mode=7`, **192 sommets** d'un coup. |

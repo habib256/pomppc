@@ -37,12 +37,19 @@
  *                         relectures, replis, temps passé à soumettre et à copier)
  *   POMPPC_GL_GEOM=0/1/2  chemin brut : 0 coupé, 1 activé (défaut), 2 activé
  *                         avec un format de sommet fixe et large (mesure)
+ *   POMPPC_GL_ARRAY=0/1/2 tableaux de sommets (RenderVertexArray / Buffer) :
+ *                         0 coupé — GLEngine déroule encore via Begin/End ;
+ *                         1 auto (défaut) : si GL_VERTEX_ARRAY est actif, on
+ *                         retire cfg+0x11c et on lit les tableaux nous-mêmes
+ *                         (indices conservés, plus de déroulement) ;
+ *                         2 forcé, même sans tableau activé
  *   POMPPC_GL_ASYNC=0/1   doorbell asynchrone (défaut : activé si le device et
  *                         le kext le tiennent ; voir « soumission » plus bas)
  *   POMPPC_GLTRACE=dir    trace (voir pomppc_gld.c)
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <pthread.h>
 #include <sys/time.h>
@@ -276,6 +283,13 @@
 #define GS_CUR_NORMAL     (-0x0b0)                  /* float ×3 */
 #define GS_CUR_SECCOLOR   (-0x0a0)                  /* float ×3 */
 #define GS_CUR_FOGCOORD   (-0x094)                  /* float */
+/* Objet « tableau de sommets » courant (V), docs/re/tableaux-de-sommets.md §2. */
+#define GS_VAO            0x4700
+#define VA_SLOT(V, a)     ((unsigned char *)(V) + 0x30 + (a) * 0x18)
+#define VA_EN_HI          0x330   /* mot haut du masque 64 bits, bit 16+a */
+#define VA_EN_LO          0x334
+#define VA_VBO(V, a)      (0x360 + 4 * (a))         /* objet tampon de l'attribut */
+#define GC_VA_PTRS        0x48f8  /* gctx : 32 pointeurs résolus */
 
 #define GL_COLOR_BUFFER_BIT 0x4000
 #define GL_DEPTH_BUFFER_BIT 0x0100
@@ -504,6 +518,7 @@ static struct {
     unsigned long   n_textris, n_texuploads, n_lines, n_points;
     unsigned long   n_frames, n_direct, n_tex_incomplete;
     unsigned long   n_rawverts, n_rawdraws, n_geomcmds, n_geomdrop, n_rawmerged;
+    unsigned long   n_arrayverts, n_arraydraws; /* chemin tableaux, inclus dans brut */
     int             v7;                 /* device v7 ET chemin brut autorisé */
     int             v8;                 /* device v8 : pipeline fixe complet */
     int             v10;                /* device v10 : niveaux au format de
@@ -541,7 +556,7 @@ enum {
     NO_SURFACE, NO_TEX_UNITS, NO_TEX_TARGET, NO_TEX_ENV, NO_TEX_UNKNOWN,
     NO_TEX_BASE, NO_TEX_SIZE, NO_TEX_FORMAT, NO_TEX_ID, NO_TEX_COMBINE, NO_STENCIL,
     /* sorties du domaine propres au chemin brut (v7) */
-    NO_G_RASTER, NO_G_POINT, NO_G_PROGRAM, NO_G_STRIDE, NO_G_LATE,
+    NO_G_RASTER, NO_G_POINT, NO_G_PROGRAM, NO_G_STRIDE, NO_G_LATE, NO_G_ARRAY,
     /* v8 : ce qui reste hors domaine une fois les fonctions v8 branchées */
     NO_Q_FALLBACK, NO_TEX_PARAM,
     /* v10 */
@@ -553,7 +568,7 @@ static const char *const no_name[NO_COUNT] = {
     "texture-inconnue", "format-base", "taille-texture", "format-texels", "id-texture",
     "combine", "stencil",
     "brut:lissage", "taille-de-point-attenuee", "brut:programme",
-    "brut:pas-de-sommet", "brut:etat-tardif",
+    "brut:pas-de-sommet", "brut:etat-tardif", "brut:tableaux",
     "requete:repli-logiciel", "param-texture",
     "brut:texture-3d-ou-cube",
 };
@@ -618,7 +633,7 @@ static void stats_frame(void *ctx)
     static int init;
     static double t0;
     static unsigned long f0, tr0, rb0, up0, fb0, sub0, tu0, di0;
-    static unsigned long rv0, rd0, gc0, rm0, w0, qf0;
+    static unsigned long rv0, rd0, gc0, rm0, w0, qf0, av0, ad0;
     static double ts0, tc0, tu_0, tw0;
     double t;
 
@@ -675,10 +690,13 @@ static void stats_frame(void *ctx)
                     unsigned long nd = G.n_rawdraws - rd0;
                     fprintf(f, "    brut : %lu sommets/img, %lu DRAW_RAW/img, "
                             "%lu commandes d'état/img, %lu fusionnés/img, "
-                            "%lu sommets/dessin%s\n",
+                            "%lu sommets/dessin, tableaux %lu sommets/img "
+                            "%lu dessins/img%s\n",
                             (G.n_rawverts - rv0) / fr, nd / fr,
                             (G.n_geomcmds - gc0) / fr, (G.n_rawmerged - rm0) / fr,
                             nd ? (G.n_rawverts - rv0) / nd : 0,
+                            (G.n_arrayverts - av0) / fr,
+                            (G.n_arraydraws - ad0) / fr,
                             G.n_geomdrop ? " ⚠ PRIMITIVES PERDUES" : "");
                 }
             }
@@ -703,6 +721,7 @@ static void stats_frame(void *ctx)
         ts0 = G.t_submit; tc0 = G.t_copy; tu_0 = G.t_upload;
         rv0 = G.n_rawverts; rd0 = G.n_rawdraws; gc0 = G.n_geomcmds;
         rm0 = G.n_rawmerged; w0 = G.n_waits; qf0 = G.n_qfull; tw0 = G.t_wait;
+        av0 = G.n_arrayverts; ad0 = G.n_arraydraws;
     }
 }
 
@@ -816,7 +835,12 @@ static unsigned char *sw_depth(PCtx *p)
 
 static unsigned long sw_rowbytes(PCtx *p)
 {
-    return GLD_U32(p->ctx, CTX_ROWPIX) * 4;
+    /* Drawable mémoire plein écran : toujours 4 octets/pixel, même si le
+       pixel format (et l'écran QFB) sont en 16 bits. */
+    if (p->fullscreen_buf)
+        return GLD_U32(p->ctx, CTX_ROWPIX) * 4;
+    return GLD_U32(p->ctx, CTX_ROWPIX) *
+           (GLD_U32(p->ctx, CTX_COLOR_BITS) <= 16 ? 2 : 4);
 }
 
 static PCtx *find_ctx(void *ctx)
@@ -842,12 +866,13 @@ static void on_exit_stats(void)
         fprintf(stderr, "POMPPC GL : %lu triangles (%lu texturés), %lu segments, %lu points "
                 "et %lu effacements sur l'hôte, %lu soumissions, %lu téléversements, "
                 "%lu niveaux de texture, %lu relectures, %lu appels logiciels synchronisés ; "
-                "brut : %lu sommets en %lu DRAW_RAW, %lu primitives perdues ; "
+                "brut : %lu sommets en %lu DRAW_RAW (%lu / %lu par tableaux), "
+                "%lu primitives perdues ; "
                 "soumission %s : %lu barrières attendues (%.0f ms), %lu QUEUE_FULL, "
                 "%lu repli(s) synchrone(s)\n",
                 G.n_tris, G.n_textris, G.n_lines, G.n_points, G.n_clears, G.n_submits,
                 G.n_uploads, G.n_texuploads, G.n_readbacks, G.n_fallback,
-                G.n_rawverts, G.n_rawdraws, G.n_geomdrop,
+                G.n_rawverts, G.n_rawdraws, G.n_arrayverts, G.n_arraydraws, G.n_geomdrop,
                 G.async ? "asynchrone" : "synchrone", G.n_waits, G.t_wait * 1000,
                 G.n_qfull, G.n_syncfall);
 }
@@ -2580,7 +2605,8 @@ static void sync_to_host(PCtx *p, int color, int depth)
     double t0 = now_s();
     if (color && p->color == SW_NEWER) {
         unsigned char *src = sw_color(p);
-        if (src && arena_alloc(w * h * 4, &off)) {
+        int ok32 = p->fullscreen_buf || GLD_U32(p->ctx, CTX_COLOR_BITS) == 32;
+        if (ok32 && src && arena_alloc(w * h * 4, &off)) {
             for (y = 0; y < h; y++)
                 memcpy(G.q.win + off + y * w * 4, src + y * sw_rowbytes(p), w * 4);
             c = reserve(p, QGPU_LEN_SURF_XFER);
@@ -2683,11 +2709,12 @@ static void sync_to_sw_locked(PCtx *p, int want_depth)
         return;
     if (p->color == HOST_NEWER) {
         unsigned char *dst = p->draw_seen;
-        if (dst) {
+        /* Ne pas déverser du xRGB 32 bits dans un tampon invité 16 bits. */
+        if (dst && (p->fullscreen_buf || GLD_U32(p->ctx, CTX_COLOR_BITS) == 32)) {
             queue_readback(p, 0, dst);
             any = 1;
+            p->color = SYNCED;
         }
-        p->color = SYNCED;
     }
     if (want_depth && p->depth == HOST_NEWER) {
         unsigned char *dst = sw_depth(p);
@@ -2728,6 +2755,15 @@ static void sync_to_sw(void *ctx, int want_depth)
         return;
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
+    /* gldFlush / gldFinish : en plein écran l'image part à l'échange, pas
+       dans le tampon invité. Relire à chaque vidage (Colin McRae) tuait le
+       débit, et le scanout 16 bits n'est pas le drawable 32 bits. */
+    if (p && !want_depth && p->fullscreen_buf && p->color == HOST_NEWER) {
+        if (G.ncmd)
+            flush();
+        pthread_mutex_unlock(&G.mu);
+        return;
+    }
     if (p)
         sync_to_sw_locked(p, want_depth);
     pthread_mutex_unlock(&G.mu);
@@ -2806,9 +2842,16 @@ static int accel_ok_for(PCtx *p, int raw)
     if (G.state <= 0 || p->broken || p->qctx < 0)
         return 0;
     g = gls(p);
-    if (!g || !sw_color(p) || GLD_U32(p->ctx, CTX_COLOR_BITS) != 32 ||
-        GLD_U32(p->ctx, CTX_ROWPIX) < GLD_U32(p->ctx, CTX_WIDTH))
-        return no(NO_BUFFER, GLD_U32(p->ctx, CTX_COLOR_BITS), GLD_U32(p->ctx, CTX_ROWPIX));
+    /* 16 bits : Warcraft III et Colin McRae demandent « milliers de couleurs ».
+       aglSetFullScreen commute alors l'écran QFB en 1555 ; le tampon hôte et le
+       drawable mémoire restent xRGB 32 bits, convertis à la présentation. */
+    {
+        unsigned long cbits = GLD_U32(p->ctx, CTX_COLOR_BITS);
+        if (!g || !sw_color(p) ||
+            (cbits != 32 && cbits != 16) ||
+            GLD_U32(p->ctx, CTX_ROWPIX) < GLD_U32(p->ctx, CTX_WIDTH))
+            return no(NO_BUFFER, cbits, GLD_U32(p->ctx, CTX_ROWPIX));
+    }
     /* v8 : l'opération logique et le pointillé de polygone sont des étages de
        FRAGMENT — ils agissent après l'endroit où les deux chemins de dessin se
        rejoignent, donc ils valent pour le chemin brut comme pour l'ancien. Le
@@ -2844,10 +2887,15 @@ static int accel_ok_for(PCtx *p, int raw)
             !poly_mode_ok(U16(g, GS_POLY_MODE + 2)))
             return no(NO_POLYMODE, U16(g, GS_POLY_MODE), U16(g, GS_POLY_MODE + 2));
     }
-    if (GLD_U8(g, GS_DEPTH_TEST) &&
-        (GLD_U32(p->ctx, CTX_DEPTH_BITS) != 32 || U16(g, GS_DEPTH_FUNC) < 0x200 ||
-         U16(g, GS_DEPTH_FUNC) > 0x207))
-        return no(NO_DEPTH, GLD_U32(p->ctx, CTX_DEPTH_BITS), U16(g, GS_DEPTH_FUNC));
+    /* Profondeur 16 : l'hôte a toujours un tampon float 32 bits. On n'échange
+       pas avec le tampon invité 16 bits (sync déjà bornée à DEPTH_BITS==32). */
+    {
+        unsigned long dbits = GLD_U32(p->ctx, CTX_DEPTH_BITS);
+        if (GLD_U8(g, GS_DEPTH_TEST) &&
+            ((dbits != 32 && dbits != 16) || U16(g, GS_DEPTH_FUNC) < 0x200 ||
+             U16(g, GS_DEPTH_FUNC) > 0x207))
+            return no(NO_DEPTH, dbits, U16(g, GS_DEPTH_FUNC));
+    }
     if (GLD_U8(g, GS_BLEND) &&
         (!blend_factor_ok(U16(g, GS_BLEND_SRC_RGB)) || !blend_factor_ok(U16(g, GS_BLEND_DST_RGB)) ||
          !blend_factor_ok(U16(g, GS_BLEND_SRC_A)) || !blend_factor_ok(U16(g, GS_BLEND_DST_A)) ||
@@ -3346,13 +3394,26 @@ static long q_info(void *ctx, unsigned long h, unsigned long pname, unsigned lon
     return 0;
 }
 
+static void *geom_alloc_vb(void *ctx, unsigned long id, unsigned long *n);
+static void  geom_complete_vb(void *ctx, void *buf, unsigned long used);
+static void  geom_free_vb(void *ctx, void *buf);
+
 /* Entrées gld que le plugin réalise lui-même, au lieu de les transmettre au
  * rendu d'Apple. Le crochet pomppc_pre rend l'adresse à appeler : il suffit d'y
  * rendre la nôtre, le trampoline saute dedans avec les arguments d'origine.
  * (C'est aussi ce qui évite de toucher à gld_tramp.s, qui est engendré.) */
 void *pomppc_gld_override(int id)
 {
-    if (G.state <= 0 || !G.v8 || qry_off)
+    if (G.state <= 0)
+        return 0;
+    if (G.v7) {
+        switch (id) {
+        case GLD_AllocVertexBuffer:    return (void *)geom_alloc_vb;
+        case GLD_CompleteVertexBuffer: return (void *)geom_complete_vb;
+        case GLD_FreeVertexBuffer:     return (void *)geom_free_vb;
+        }
+    }
+    if (!G.v8 || qry_off)
         return 0;
     switch (id) {
     case GLD_CreateQuery:  return (void *)q_create;
@@ -3387,6 +3448,13 @@ void *pomppc_gld_override(int id)
  *     c'est que l'état a bougé sans passer par gldUpdateDispatch : on compte le
  *     cas (« brut:etat-tardif ») et on quitte le domaine pour de bon. Ce
  *     compteur DOIT rester à zéro ; c'est la garantie d'exactitude.
+ *
+ *   — TABLEAUX DE SOMMETS (l'autre canal). Si GL_VERTEX_ARRAY est actif,
+ *     on retire cfg+0x11c : GLEngine n'écrit plus dans BeginPrimitiveBuffer
+ *     (où il déroule les indices) et appelle RenderVertexArray (+0x70, VAR)
+ *     ou AllocVertexBuffer / RenderVertexBuffer (+0x4c). Le plugin lit alors
+ *     les attributs dans l'objet tableau de sommets (GS_VAO) et émet un
+ *     DRAW_RAW indexé — les sommets uniques ne sont copiés qu'une fois.
  *
  * Tout ce qui peut échouer (téléversement de texture, place dans le flux, dans
  * la zone des sommets) est fait à Begin, AVANT que GLEngine écrive quoi que ce
@@ -3443,6 +3511,45 @@ static int geom_switch(void)
             v = 0;
     }
     return v;
+}
+
+/* POMPPC_GL_ARRAY : 0 coupé, 1 auto si un tableau de positions est actif
+ * (défaut), 2 forcé. */
+static int array_switch(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("POMPPC_GL_ARRAY");
+        v = (e && *e) ? atoi(e) : 1;
+        if (v < 0)
+            v = 0;
+    }
+    return v;
+}
+
+/* Bit 16+a du masque 64 bits (haut en VA_EN_HI, bas en VA_EN_LO). */
+static int va_enabled(const unsigned char *V, int a)
+{
+    if (!V || a < 0 || a > 31)
+        return 0;
+    if (a < 16)
+        return (int)((GLD_U32(V, VA_EN_LO) >> (16 + a)) & 1);
+    return (int)((GLD_U32(V, VA_EN_HI) >> (a - 16)) & 1);
+}
+
+/* Un tableau de positions est-il actif ? C'est le critère pour retirer
+ * cfg+0x11c et prendre le canal RenderVertexArray / RenderVertexBuffer. */
+static int geom_va_on(PCtx *p)
+{
+    unsigned char *g, *V;
+    int sw = array_switch();
+    if (!sw || !p)
+        return 0;
+    if (sw >= 2)
+        return 1;
+    g = gls(p);
+    V = g ? (unsigned char *)GLD_U32(g, GS_VAO) : 0;
+    return va_enabled(V, 0);
 }
 
 /* Le bloc source a-t-il bougé depuis le dernier envoi ? C'est le test chaud :
@@ -4029,6 +4136,11 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
     words = p->geom_words;
     if (!gc || !words || GLD_U16(gc, GC_VTX_STRIDE) != words * 4 ||
         GLD_U32(gc, GC_VTX_DESC) != (unsigned long)p->desc) {
+        /* Canal tableaux : cfg+0x11c est nul, Begin/End n'est plus le chemin.
+           Un glBegin pendant que les tableaux sont actifs est jeté, sans
+           quitter le domaine (sinon le premier mixte tuerait UT2004). */
+        if (geom_va_on(p) || (p->cfg && GLD_U32(p->cfg, 0x11c) == 0))
+            goto refuse;
         no(NO_G_STRIDE, gc ? GLD_U16(gc, GC_VTX_STRIDE) : 0, words * 4);
         p->geom_lost = 1;
         G.n_geomdrop++;
@@ -4391,6 +4503,475 @@ static void geom_end(void *ctx, long flag, short mode, long n)
     pthread_mutex_unlock(&G.mu);
 }
 
+/* ─────────────────── tableaux de sommets (canal GeForce3) ───────────────────
+ *
+ * GLEngine, avec cfg+0x11c, déroule glDrawElements dans Begin/End : chaque
+ * indice devient un sommet recopié. Ici on lit l'objet tableau (GS_VAO), on
+ * packe les attributs au format DRAW_RAW, et on envoie les indices tels quels.
+ * Docs : tableaux-de-sommets.md §2 et §6.
+ */
+
+#define VA_GL_BYTE     0x1400
+#define VA_GL_UBYTE    0x1401
+#define VA_GL_SHORT    0x1402
+#define VA_GL_USHORT   0x1403
+#define VA_GL_INT      0x1404
+#define VA_GL_UINT     0x1405
+#define VA_GL_FLOAT    0x1406
+#define VA_GL_DOUBLE   0x140A
+#define VA_ITYPE_NONE  0x14FF
+#define VA_ALLOC_CAP   2048
+
+static unsigned char vb_scratch[VA_ALLOC_CAP * 0x34];
+
+static int va_bpc(unsigned type, int stored)
+{
+    if (stored > 0)
+        return stored;
+    switch (type) {
+    case VA_GL_BYTE: case VA_GL_UBYTE:     return 1;
+    case VA_GL_SHORT: case VA_GL_USHORT:   return 2;
+    case VA_GL_INT: case VA_GL_UINT:
+    case VA_GL_FLOAT:                      return 4;
+    case VA_GL_DOUBLE:                     return 8;
+    default:                               return 4;
+    }
+}
+
+static float va_comp(const unsigned char *p, unsigned type, int norm)
+{
+    switch (type) {
+    case VA_GL_FLOAT:
+        return *(const float *)p;
+    case VA_GL_DOUBLE: {
+        double d = *(const double *)p;
+        return (float)d;
+    }
+    case VA_GL_BYTE: {
+        int v = *(const signed char *)p;
+        return norm ? (v <= -128 ? -1.0f : v / 127.0f) : (float)v;
+    }
+    case VA_GL_UBYTE: {
+        unsigned v = *p;
+        return norm ? v / 255.0f : (float)v;
+    }
+    case VA_GL_SHORT: {
+        int v = *(const short *)p;
+        return norm ? (v == -32768 ? -1.0f : v / 32767.0f) : (float)v;
+    }
+    case VA_GL_USHORT: {
+        unsigned v = *(const unsigned short *)p;
+        return norm ? v / 65535.0f : (float)v;
+    }
+    case VA_GL_INT: {
+        long v = *(const long *)p;
+        return norm ? (v == (long)0x80000000 ? -1.0f : v / 2147483647.0f)
+                    : (float)v;
+    }
+    case VA_GL_UINT: {
+        unsigned long v = *(const unsigned long *)p;
+        return norm ? v / 4294967295.0f : (float)v;
+    }
+    default:
+        return 0.0f;
+    }
+}
+
+static const unsigned char *va_src(PCtx *p, const unsigned char *V, int a)
+{
+    unsigned char *gc = gctx_of(p);
+    unsigned long cached, raw, vbo, base;
+    if (gc) {
+        cached = GLD_U32(gc, GC_VA_PTRS + 4 * a);
+        if (cached)
+            return (const unsigned char *)cached;
+    }
+    raw = GLD_U32(VA_SLOT(V, a), 0);
+    vbo = GLD_U32(V, VA_VBO(V, a));
+    if (vbo) {
+        base = GLD_U32((void *)vbo, 0x30);
+        return (const unsigned char *)(base + raw);
+    }
+    return (const unsigned char *)raw;
+}
+
+static const float *va_current(unsigned char *g, int slot)
+{
+    switch (slot) {
+    case 1:  return (const float *)(g + GS_CUR_NORMAL);
+    case 2:  return (const float *)(g + GS_CUR_COLOR);
+    case 3:  return (const float *)(g + GS_CUR_FOGCOORD);
+    case 4:  return (const float *)(g + GS_CUR_SECCOLOR);
+    default:
+        if (slot >= 8 && slot < 12)
+            return (const float *)(g + GS_CUR_TEXCOORD(slot - 8));
+        return 0;
+    }
+}
+
+/* Écrit dst_n flottants pour l'attribut `slot` du sommet i. last_def est la
+ * valeur de bourrage de la dernière composante (1 pour position et texcoord). */
+static void va_fetch(float *dst, PCtx *p, const unsigned char *V, int slot,
+                     unsigned long i, int dst_n, float last_def)
+{
+    unsigned char *g = gls(p);
+    const unsigned char *ent, *src;
+    const float *cur;
+    unsigned type;
+    int k, src_n, bpc, stride, norm;
+
+    if (!V || !va_enabled(V, slot)) {
+        cur = va_current(g, slot);
+        for (k = 0; k < dst_n; k++)
+            dst[k] = cur && k < 4 ? cur[k] : (k == dst_n - 1 ? last_def : 0.0f);
+        return;
+    }
+    ent = VA_SLOT(V, slot);
+    type = U16(ent, 8);
+    src_n = U16(ent, 0xa);
+    bpc = va_bpc(type, ent[0xc]);
+    stride = (int)GLD_U32(ent, 4);
+    norm = ent[0xd];
+    if ((slot == 1 || slot == 2) && type != VA_GL_FLOAT && type != VA_GL_DOUBLE)
+        norm = 1;
+    src = va_src(p, V, slot);
+    if (!src || stride <= 0 || bpc <= 0) {
+        cur = va_current(g, slot);
+        for (k = 0; k < dst_n; k++)
+            dst[k] = cur && k < 4 ? cur[k] : (k == dst_n - 1 ? last_def : 0.0f);
+        return;
+    }
+    src += i * (unsigned)stride;
+    for (k = 0; k < dst_n; k++) {
+        float v;
+        if (k < src_n) {
+            v = va_comp(src + k * bpc, type, norm);
+            if (!(v > -1e9f && v < 1e9f))
+                v = (v > 0.0f) ? 1e9f : (v < 0.0f) ? -1e9f : 0.0f;
+        } else {
+            v = (k == dst_n - 1) ? last_def : 0.0f;
+        }
+        dst[k] = v;
+    }
+}
+
+static void va_pack_vertex(float *dst, PCtx *p, const unsigned char *V,
+                           unsigned long fmt, unsigned long i)
+{
+    int n, u;
+    n = QGPU_VF_POS_COUNT(fmt);
+    va_fetch(dst, p, V, 0, i, n, 1.0f);
+    dst += n;
+    if (fmt & QGPU_VF_NORMAL) {
+        va_fetch(dst, p, V, 1, i, 3, 0.0f);
+        dst += 3;
+    }
+    if (fmt & QGPU_VF_COLOR) {
+        va_fetch(dst, p, V, 2, i, 4, 1.0f);
+        dst += 4;
+    }
+    if (fmt & QGPU_VF_SEC_COLOR) {
+        va_fetch(dst, p, V, 4, i, 3, 0.0f);
+        dst += 3;
+    }
+    if (fmt & QGPU_VF_FOG) {
+        va_fetch(dst, p, V, 3, i, 1, 0.0f);
+        dst += 1;
+    }
+    for (u = 0; u < QGPU_MAX_UNITS; u++)
+        if (fmt & QGPU_VF_TEX(u)) {
+            va_fetch(dst, p, V, 8 + u, i, 4, 1.0f);
+            dst += 4;
+        }
+}
+
+static int va_scan_idx(const void *idx, unsigned long itype, long count,
+                       unsigned long *minv, unsigned long *maxv)
+{
+    unsigned long mn = ~0UL, mx = 0;
+    long i;
+    if (count <= 0 || !idx)
+        return 0;
+    if (itype == VA_GL_UBYTE) {
+        const unsigned char *p = idx;
+        for (i = 0; i < count; i++) {
+            unsigned long v = p[i];
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+        }
+    } else if (itype == VA_GL_USHORT) {
+        const unsigned short *p = idx;
+        for (i = 0; i < count; i++) {
+            unsigned long v = p[i];
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+        }
+    } else if (itype == VA_GL_UINT) {
+        const unsigned long *p = idx;
+        for (i = 0; i < count; i++) {
+            unsigned long v = p[i];
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+        }
+    } else {
+        return 0;
+    }
+    *minv = mn;
+    *maxv = mx;
+    return 1;
+}
+
+static void va_copy_idx16(unsigned short *dst, const void *idx,
+                          unsigned long itype, long count, unsigned long base)
+{
+    long i;
+    if (itype == VA_GL_UBYTE) {
+        const unsigned char *p = idx;
+        for (i = 0; i < count; i++)
+            dst[i] = (unsigned short)(p[i] - base);
+    } else if (itype == VA_GL_USHORT) {
+        const unsigned short *p = idx;
+        for (i = 0; i < count; i++)
+            dst[i] = (unsigned short)(p[i] - base);
+    } else {
+        const unsigned long *p = idx;
+        for (i = 0; i < count; i++)
+            dst[i] = (unsigned short)(p[i] - base);
+    }
+}
+
+static void va_copy_idx32(unsigned long *dst, const void *idx,
+                          unsigned long itype, long count, unsigned long base)
+{
+    long i;
+    if (itype == VA_GL_UBYTE) {
+        const unsigned char *p = idx;
+        for (i = 0; i < count; i++)
+            dst[i] = p[i] - base;
+    } else if (itype == VA_GL_USHORT) {
+        const unsigned short *p = idx;
+        for (i = 0; i < count; i++)
+            dst[i] = p[i] - base;
+    } else {
+        const unsigned long *p = idx;
+        for (i = 0; i < count; i++)
+            dst[i] = p[i] - base;
+    }
+}
+
+static void va_count_prims(unsigned long m, unsigned long n)
+{
+    switch (m) {
+    case QGPU_PRIM_MODE_TRIANGLES:      G.n_tris += n / 3; break;
+    case QGPU_PRIM_MODE_TRIANGLE_STRIP:
+    case QGPU_PRIM_MODE_TRIANGLE_FAN:
+    case QGPU_PRIM_MODE_POLYGON:        G.n_tris += n > 2 ? n - 2 : 0; break;
+    case QGPU_PRIM_MODE_QUADS:          G.n_tris += (n / 4) * 2; break;
+    case QGPU_PRIM_MODE_QUAD_STRIP:     G.n_tris += n > 3 ? (n / 2 - 1) * 2 : 0; break;
+    case QGPU_PRIM_MODE_LINES:          G.n_lines += n / 2; break;
+    case QGPU_PRIM_MODE_LINE_STRIP:     G.n_lines += n > 1 ? n - 1 : 0; break;
+    case QGPU_PRIM_MODE_LINE_LOOP:      G.n_lines += n; break;
+    default:                            G.n_points += n; break;
+    }
+}
+
+/* Cœur du canal tableaux. Verrou déjà tenu. 1 = traité (même si n=0). */
+static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
+                            long first, long count, unsigned long itype,
+                            const void *indices)
+{
+    unsigned char *V, *g;
+    TexInfo ti;
+    unsigned long fmt, words, vmin, vmax, nverts, nidx, ioff, itype_h;
+    unsigned long vtx_off, *c;
+    float *dst;
+    long i;
+
+    if (count <= 0)
+        return 1;
+    if (!p || mode > QGPU_PRIM_MODE_POLYGON)
+        return 0;
+    g = gls(p);
+    V = g ? (unsigned char *)GLD_U32(g, GS_VAO) : 0;
+    if (!V || !va_enabled(V, 0))
+        return no(NO_G_ARRAY, 0, (unsigned long)count);
+    if (!geom_ok(p) || !ensure_surface(p) || !texture_ok(p, &ti))
+        return 0;
+    fmt = geom_format(p);
+    words = QGPU_VF_WORDS(fmt);
+    if (!words)
+        return 0;
+    if (indexed && itype != VA_ITYPE_NONE && indices) {
+        if (!va_scan_idx(indices, itype, count, &vmin, &vmax))
+            return no(NO_G_ARRAY, itype, (unsigned long)count);
+        nverts = vmax - vmin + 1;
+        nidx = (unsigned long)count;
+    } else {
+        if (first < 0)
+            first = 0;
+        vmin = (unsigned long)first;
+        nverts = (unsigned long)count;
+        vmax = vmin + nverts - 1;
+        nidx = 0;
+        indices = 0;
+    }
+    if (nverts == 0 || nverts > QGPU_MAX_VERTS || nidx > QGPU_MAX_VERTS)
+        return no(NO_G_ARRAY, nverts, nidx);
+    check_draw_buffer(p);
+    sync_to_host(p, 1, GLD_U8(g, GS_DEPTH_TEST) || stencil_active(p));
+    send_state(p, &ti, 1);
+    geom_send_all(p, fmt);
+    if (G.ncmd + QGPU_LEN_DRAW_RAW + 4 > CMD_WORDS ||
+        G.vtx + nverts * words * 4 > VTX_LIMIT ||
+        (nidx && G.idx + nidx * 4 + 4 > IDX_SIZE))
+        flush();
+    if (G.vtx + nverts * words * 4 > VTX_LIMIT ||
+        (nidx && G.idx + nidx * 4 + 4 > IDX_SIZE))
+        return no(NO_G_ARRAY, nverts, nidx);
+    vtx_off = G.vtx;
+    dst = (float *)(G.win + VTX_OFF + vtx_off);
+    for (i = 0; (unsigned long)i < nverts; i++)
+        va_pack_vertex(dst + (unsigned long)i * words, p, V, fmt, vmin + (unsigned long)i);
+    G.vtx += nverts * words * 4;
+    ioff = 0;
+    itype_h = QGPU_IDX_NONE;
+    if (nidx) {
+        unsigned long need;
+        int use32 = (nverts > 65536) || (vmax - vmin > 65535);
+        G.idx = (G.idx + 3) & ~3UL;
+        need = nidx * (use32 ? 4UL : 2UL);
+        if (G.idx + need > IDX_SIZE)
+            return no(NO_G_ARRAY, nidx, G.idx);
+        ioff = IDX_OFF + G.idx;
+        if (use32) {
+            va_copy_idx32((unsigned long *)(G.win + ioff), indices, itype,
+                          (long)nidx, vmin);
+            itype_h = QGPU_IDX_U32;
+        } else {
+            va_copy_idx16((unsigned short *)(G.win + ioff), indices, itype,
+                          (long)nidx, vmin);
+            itype_h = QGPU_IDX_U16;
+        }
+        G.idx += need;
+    }
+    close_raw();
+    if (G.bound != p) {
+        c = G.cmd + G.ncmd;
+        c[0] = QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX);
+        c[1] = p->qctx;
+        G.ncmd += QGPU_LEN_CTX;
+        G.bound = p;
+    }
+    c = G.cmd + G.ncmd;
+    c[0] = QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW);
+    c[1] = mode;
+    c[2] = nidx ? nidx : nverts;
+    c[3] = G.base + VTX_OFF + vtx_off;
+    c[4] = 0;
+    c[5] = fmt;
+    c[6] = nidx ? G.base + ioff : 0;
+    c[7] = itype_h;
+    c[8] = 0;
+    c[9] = nverts;
+    G.ncmd += QGPU_LEN_DRAW_RAW;
+    G.n_rawdraws++;
+    G.n_rawverts += nverts;
+    G.n_arraydraws++;
+    G.n_arrayverts += nverts;
+    va_count_prims(mode, nidx ? nidx : nverts);
+    p->color = HOST_NEWER;
+    if (writes_depth(p))
+        p->depth = HOST_NEWER;
+    return 1;
+}
+
+/* +0x70 RenderVertexArray : VAR et, sans descripteur, glDrawArrays/Elements.
+ * 0 = non pris en charge (GLEngine reprend le logiciel — seulement hors T&L). */
+static long geom_render_array(void *ctx, long indexed, unsigned long mode,
+                              long first, long count, unsigned long itype,
+                              const void *indices, void *vtxbuf, void *curr)
+{
+    PCtx *p;
+    long r;
+    (void)vtxbuf;
+    (void)curr;
+    if (pomppc_tracing())
+        pomppc_log("  géométrie : Array(idx %ld mode %lu first %ld n %ld type %lx)\n",
+                   indexed, mode, first, count, itype);
+    pthread_mutex_lock(&G.mu);
+    G.pend = 0;
+    p = find_ctx(ctx);
+    r = geom_draw_client(p, indexed, mode, first, count,
+                         indexed ? itype : VA_ITYPE_NONE,
+                         indexed ? indices : 0) ? 1 : 0;
+    if (!r && p) {
+        G.n_geomdrop++;
+        /* Un dessin trop grand ou un tableau incomplet : on jette CE lot.
+           Quitter le domaine pour de bon (geom_lost) seulement si l'état a
+           bougé hors du prédicat — sinon le premier maillage sparse tuerait
+           tout le T&L, y compris le mode immédiat. */
+        if (!geom_ok(p)) {
+            no(NO_G_LATE, mode, (unsigned long)count);
+            p->geom_lost = 1;
+        }
+    }
+    pthread_mutex_unlock(&G.mu);
+    return r;
+}
+
+/* +0x4c RenderVertexBuffer : GLEngine a recopié les sommets dans `buf` selon
+ * un format matériel. On ignore ce tampon et on relit les tableaux clients —
+ * le format GeForce3 n'est pas le nôtre, et relire évite de le deviner.
+ * `bias` sert au tampon packé ; les indices reçus sont ceux de l'application. */
+static void geom_render_vb(void *ctx, void *buf, unsigned long mode, long bias,
+                           long count, unsigned long itype, const void *indices)
+{
+    PCtx *p;
+    (void)buf;
+    (void)bias;
+    if (pomppc_tracing())
+        pomppc_log("  géométrie : VBuf(mode %lu n %ld type %lx bias %ld)\n",
+                   mode, count, itype, bias);
+    pthread_mutex_lock(&G.mu);
+    G.pend = 0;
+    p = find_ctx(ctx);
+    if (!geom_draw_client(p, itype != VA_ITYPE_NONE && indices != 0, mode,
+                          0, count, itype, indices) && p) {
+        G.n_geomdrop++;
+        if (!geom_ok(p)) {
+            no(NO_G_LATE, mode, (unsigned long)count);
+            p->geom_lost = 1;
+        }
+    }
+    pthread_mutex_unlock(&G.mu);
+}
+
+static void *geom_alloc_vb(void *ctx, unsigned long id, unsigned long *n)
+{
+    (void)ctx;
+    (void)id;
+    if (n) {
+        if (*n == 0)
+            return 0;
+        if (*n > VA_ALLOC_CAP)
+            *n = VA_ALLOC_CAP;
+    }
+    return vb_scratch;
+}
+
+static void geom_complete_vb(void *ctx, void *buf, unsigned long used)
+{
+    (void)ctx;
+    (void)buf;
+    (void)used;
+}
+
+static void geom_free_vb(void *ctx, void *buf)
+{
+    (void)ctx;
+    (void)buf;
+}
+
 /* Procédure à installer dans la table de GLEngine, ou 0. */
 void *pomppc_geom_proc(int slot)
 {
@@ -4399,6 +4980,8 @@ void *pomppc_geom_proc(int slot)
     switch (slot) {
     case PROC_BeginPrimitiveBuffer: return (void *)geom_begin;
     case PROC_EndPrimitiveBuffer:   return (void *)geom_end;
+    case PROC_RenderVertexArray:    return (void *)geom_render_array;
+    case PROC_RenderVertexBuffer:   return (void *)geom_render_vb;
     default:                        return 0;
     }
 }
@@ -4419,10 +5002,25 @@ long pomppc_geom_dispatch(void *ctx)
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
     if (p && geom_ok(p)) {
-        if (geom_publish(p))
-            p->desc_dirty = 1;
-        bits = p->desc_dirty ? 3 : 1;
-        p->desc_dirty = 0;
+        int arrays = geom_va_on(p);
+        if (arrays) {
+            /* Canal tableaux : sans descripteur, GLEngine n'écrit plus dans
+               Begin/End (où il déroule les indices) et appelle RenderVertexArray
+               / RenderVertexBuffer. Bit 1 si on vient de retirer le descripteur. */
+            if (GLD_U32(p->cfg, 0x11c) != 0) {
+                GLD_U32(p->cfg, 0x11c) = 0;
+                p->desc_dirty = 1;
+            }
+            p->geom_fmt = geom_format(p);
+            p->geom_words = QGPU_VF_WORDS(p->geom_fmt);
+            bits = p->desc_dirty ? 3 : 1;
+            p->desc_dirty = 0;
+        } else {
+            if (geom_publish(p))
+                p->desc_dirty = 1;
+            bits = p->desc_dirty ? 3 : 1;
+            p->desc_dirty = 0;
+        }
         p->geom_on = 1;
     } else if (p) {
         p->geom_on = 0;
@@ -4446,6 +5044,18 @@ void pomppc_geom_context(void *ctx, void *cfg)
         p->cfg = (unsigned char *)cfg;
         p->desc_dirty = 1;
         GLD_U8(p->cfg, 0x79) = 1;
+        /* Comme le GeForce3 : +0x78 est lu par _gleDrawArraysOrElements_Exec.
+           Sans lui, les tableaux restent sur Begin/End même une fois le
+           descripteur retiré. */
+        GLD_U8(p->cfg, 0x78) = 1;
+        /* Identifiants de format de sommet (pas imposés par GLEngine :
+           0x10, 0x18, 0x20, 0x14, 0x20|0x24, 0x2c|0x34). Valeurs du GeForce3. */
+        {
+            static const unsigned short ids[6] = { 3, 2, 1, 6, 5, 4 };
+            int i;
+            for (i = 0; i < 6; i++)
+                *(unsigned short *)(p->cfg + 0x7c + i * 2) = ids[i];
+        }
         /* Second verrou (docs/re/capacites-glengine.md §5.3). À 0, une
            coordonnée de texture r ou q donnée ENTRE glBegin et glEnd
            (glTexCoord3f/4f, glMultiTexCoord3f… : gctx+0x486c bit 0) fait
@@ -5015,7 +5625,7 @@ static struct {
     char           why[96];             /* pourquoi la voie directe est coupée */
     unsigned long  checked_at;
     unsigned char *base;
-    unsigned long  rowbytes, w, h;
+    unsigned long  rowbytes, w, h, bpp;
     long           x, y;                /* position de la surface à l'écran */
     float          cur_x, cur_y;        /* curseur à la dernière vérification */
     unsigned long (*main_display)(void);
@@ -5036,7 +5646,22 @@ static struct {
     long          (*cursor_visible)(void);
     long          (*surface_list)(long cid, long wid, long max, long *list, long *count);
     long          (*window_alpha)(long cid, long wid, float *alpha);
+    void         *(*best_mode)(unsigned long, unsigned long, unsigned long, unsigned long, int *);
+    int           (*switch_mode)(unsigned long, void *);
 } D;
+
+static void gl_note(const char *fmt, ...)
+{
+    FILE *f;
+    va_list ap;
+    f = fopen("/tmp/pomppc-gl.log", "a");
+    if (!f)
+        return;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fclose(f);
+}
 
 static void direct_noop(void)
 {
@@ -5071,6 +5696,8 @@ static void direct_init(void)
     D.cursor_visible  = dlsym(RTLD_DEFAULT, "CGCursorIsVisible");
     D.surface_list    = dlsym(RTLD_DEFAULT, "CGSGetSurfaceList");
     D.window_alpha    = dlsym(RTLD_DEFAULT, "CGSGetWindowAlpha");
+    D.best_mode       = dlsym(RTLD_DEFAULT, "CGDisplayBestModeForParameters");
+    D.switch_mode     = dlsym(RTLD_DEFAULT, "CGDisplaySwitchToMode");
     if (!D.main_display || !D.base_address || !D.bytes_per_row || !D.bits_per_pixel ||
         !D.pixels_wide || !D.pixels_high || !D.menubar_visible || !D.front_process ||
         !D.current_process || !D.same_process) {
@@ -5083,6 +5710,26 @@ static void direct_init(void)
         D.windowed = 0;
 }
 
+/* aglSetFullScreen commute QFB en 1555. On préfère rester en 32 bits : la
+ * présentation directe et le tampon hôte sont nativement xRGB. */
+static int display_switch_32(unsigned long did)
+{
+    int exact = 0;
+    void *mode;
+    unsigned long w, h;
+    if (!D.bits_per_pixel || D.bits_per_pixel(did) == 32)
+        return 1;
+    if (!D.best_mode || !D.switch_mode || !D.pixels_wide || !D.pixels_high)
+        return 0;
+    w = D.pixels_wide(did);
+    h = D.pixels_high(did);
+    mode = D.best_mode(did, 32, w, h, &exact);
+    if (!mode)
+        return 0;
+    D.switch_mode(did, mode);
+    return D.bits_per_pixel(did) == 32;
+}
+
 /* Tiger's glsAssignDrawable rejects kind 54 unconditionally. Its kind 53
  * takes {width, height, rowbytes, address} and retains the address, not the
  * descriptor. Use an owned back buffer so software fallbacks never draw into
@@ -5092,7 +5739,7 @@ static void direct_init(void)
 long pomppc_attach_fullscreen(void *ctx)
 {
     PCtx *p;
-    unsigned long did, w, h, desc[4];
+    unsigned long did, w, h, bits, desc[4];
     unsigned char *buf, double_buffer;
     long result;
     if (!D.init)
@@ -5101,11 +5748,20 @@ long pomppc_attach_fullscreen(void *ctx)
         !D.bits_per_pixel || !D.base_address || !D.bytes_per_row)
         return 10005;
     did = D.main_display();
+    display_switch_32(did);
     w = D.pixels_wide(did); h = D.pixels_high(did);
-    if (!w || !h || w > 16384 || h > 16384 ||
-        D.bits_per_pixel(did) != 32 || !D.base_address(did) ||
-        GLD_U32(ctx, CTX_COLOR_BITS) != 32)
-        return 10005;
+    /* aglSetFullScreen choisit la profondeur d'écran d'après le pixel format.
+       Si le 32 bits a été refusé, on attache quand même en 16 (1555). */
+    bits = GLD_U32(ctx, CTX_COLOR_BITS);
+    {
+        unsigned long dbpp = D.bits_per_pixel(did);
+        if (!w || !h || w > 16384 || h > 16384 ||
+            (dbpp != 32 && dbpp != 16) || !D.base_address(did) ||
+            bits < 16 || bits > 32)
+            return 10005;
+        gl_note("fullscreen attach %lux%lu display %lu ctx-bits %lu\n",
+                w, h, dbpp, bits);
+    }
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
     buf = p ? calloc(h, w * 4) : NULL;
@@ -5127,9 +5783,16 @@ long pomppc_attach_fullscreen(void *ctx)
         p->fullscreen_buf = buf;
         p->fullscreen_w = w; p->fullscreen_h = h;
         D.checked_at = 0;
+        /* Le descripteur type 53 est 32 bits ; Apple peut laisser 16 d'après
+           le pixel format. Aligner le contexte sur le tampon réel. */
+        if (GLD_U32(ctx, CTX_COLOR_BITS) == 16)
+            GLD_U32(ctx, CTX_COLOR_BITS) = 32;
         pomppc_log("POMPPC: fullscreen drawable %lux%lu, software back buffer\n", w, h);
+        gl_note("fullscreen attach ok %lux%lu ctx-bits now %lu\n",
+                w, h, GLD_U32(ctx, CTX_COLOR_BITS));
     } else {
         free(buf);
+        gl_note("fullscreen attach FAIL %ld\n", result);
     }
     pthread_mutex_unlock(&G.mu);
     return result;
@@ -5247,12 +5910,22 @@ static unsigned char *direct_target(PCtx *p, unsigned long *rowbytes)
         D.h = D.pixels_high(did);
         D.base = D.base_address(did);
         D.rowbytes = D.bytes_per_row(did);
-        ok = D.base && D.bits_per_pixel(did) == 32 && D.rowbytes >= D.w * 4 &&
+        D.bpp = D.bits_per_pixel(did);
+        if (D.bpp == 16 && display_switch_32(did)) {
+            D.w = D.pixels_wide(did);
+            D.h = D.pixels_high(did);
+            D.base = D.base_address(did);
+            D.rowbytes = D.bytes_per_row(did);
+            D.bpp = D.bits_per_pixel(did);
+        }
+        ok = D.base && (D.bpp == 32 || D.bpp == 16) &&
+             D.rowbytes >= D.w * (D.bpp <= 16 ? 2 : 4) &&
              D.front_process(&front) == 0 && D.current_process(&me) == 0 &&
              D.same_process(&front, &me, &same) == 0 && same;
         if (!ok)
-            snprintf(D.why, sizeof(D.why), "pas au premier plan, ou écran non 32 bits");
-        full = ok && p->sw == D.w && p->sh == D.h && !D.menubar_visible();
+            snprintf(D.why, sizeof(D.why), "pas au premier plan, ou écran %lu bits", D.bpp);
+        full = ok && p->sw == D.w && p->sh == D.h &&
+               (!D.menubar_visible || !D.menubar_visible() || p->fullscreen_buf);
         if (full) {
             D.x = D.y = 0;
             ok = 1;
@@ -5276,7 +5949,76 @@ static unsigned char *direct_target(PCtx *p, unsigned long *rowbytes)
     if (D.ok == 2 && G.n_frames % DIRECT_REFRESH == 0)
         return 0;
     *rowbytes = D.rowbytes;
-    return D.base + D.y * D.rowbytes + D.x * 4;
+    return D.base + D.y * D.rowbytes + D.x * (D.bpp <= 16 ? 2 : 4);
+}
+
+/* xRGB8888 (mot PowerPC 00RRGGBB) → xRGB1555 big-endian, format QFB
+ * « milliers de couleurs ». */
+static void pack_xrgb32_to_555(unsigned char *dst, unsigned long dpitch,
+                               const unsigned char *src, unsigned long spitch,
+                               unsigned long w, unsigned long h)
+{
+    unsigned long y, x;
+    for (y = 0; y < h; y++) {
+        const unsigned long *s = (const unsigned long *)(src + y * spitch);
+        unsigned short *d = (unsigned short *)(dst + y * dpitch);
+        for (x = 0; x < w; x++) {
+            unsigned long p = s[x];
+            d[x] = (unsigned short)(((p >> 9) & 0x7c00u) |
+                                    ((p >> 6) & 0x03e0u) |
+                                    ((p >> 3) & 0x001fu));
+        }
+    }
+}
+
+/* Tampon arrière 32 bits → scanout (32 bits ou 1555). Verrou tenu. */
+static void present_sw_fullscreen(PCtx *p)
+{
+    unsigned long did, y, pitch, bpp, w, h, spitch, dw, dh, cw, ch;
+    unsigned char *dst, *src;
+    if (!p->fullscreen_buf || !D.main_display || !D.base_address ||
+        !D.bytes_per_row || !D.bits_per_pixel || !D.pixels_wide || !D.pixels_high)
+        return;
+    did = D.main_display();
+    w = p->fullscreen_w;
+    h = p->fullscreen_h;
+    dst = D.base_address(did);
+    pitch = D.bytes_per_row(did);
+    bpp = D.bits_per_pixel(did);
+    dw = D.pixels_wide(did);
+    dh = D.pixels_high(did);
+    sync_to_sw_locked(p, 0);
+    drain_all();
+    src = sw_color(p);
+    if (!src)
+        src = p->fullscreen_buf;
+    spitch = sw_rowbytes(p);
+    cw = w < dw ? w : dw;
+    ch = h < dh ? h : dh;
+    if (!dst || !src || !cw || !ch)
+        return;
+    if (bpp == 32 && pitch >= cw * 4 && spitch >= cw * 4) {
+        for (y = 0; y < ch; ++y)
+            memcpy(dst + y * pitch, src + y * spitch, cw * 4);
+    } else if (bpp == 16 && pitch >= cw * 2 && spitch >= cw * 4) {
+        pack_xrgb32_to_555(dst, pitch, src, spitch, cw, ch);
+    }
+}
+
+static unsigned char *present_stage;
+static unsigned long  present_stage_w, present_stage_h;
+static int            present_stage_ready;
+
+static unsigned char *ensure_present_stage(unsigned long w, unsigned long h)
+{
+    if (present_stage && present_stage_w == w && present_stage_h == h)
+        return present_stage;
+    free(present_stage);
+    present_stage = calloc(h, w * 4);
+    present_stage_w = w;
+    present_stage_h = h;
+    present_stage_ready = 0;
+    return present_stage;
 }
 
 /* Échange (procédure 0x60) : présente directement si possible. Verrou tenu.
@@ -5298,7 +6040,7 @@ static unsigned char *direct_target(PCtx *p, unsigned long *rowbytes)
 static int present_direct(PCtx *p)
 {
     unsigned char *vram;
-    unsigned long rowbytes;
+    unsigned long rowbytes, w, h;
     if (G.state <= 0 || p->broken || p->surf < 0 || p->color == SW_NEWER)
         return 0;
     /* L'image PRÉCÉDENTE part maintenant en mémoire vidéo. */
@@ -5306,7 +6048,19 @@ static int present_direct(PCtx *p)
     vram = direct_target(p, &rowbytes);
     if (!vram)
         return 0;
-    queue_readback_to(p, 0, vram, rowbytes);
+    w = p->sw;
+    h = p->sh;
+    if (D.bpp == 16) {
+        unsigned char *st = ensure_present_stage(w, h);
+        if (!st)
+            return 0;
+        if (present_stage_ready)
+            pack_xrgb32_to_555(vram, rowbytes, st, w * 4, w, h);
+        queue_readback_to(p, 0, st, w * 4);
+        present_stage_ready = 1;
+    } else {
+        queue_readback_to(p, 0, vram, rowbytes);
+    }
     flush();
     G.n_direct++;
     p->direct_at = G.n_frames;
@@ -5400,7 +6154,8 @@ static void *accel_proc(int slot)
  * procédures de requête sont dans ce cas (sa table les laisse nulles). */
 static int proc_standalone(int slot)
 {
-    return slot == PROC_Proc68 || slot == PROC_Proc6c;
+    return slot == PROC_Proc68 || slot == PROC_Proc6c ||
+           slot == PROC_RenderVertexArray || slot == PROC_RenderVertexBuffer;
 }
 
 /* Appelé par les trampolines de procédures : synchronise puis rend la cible. */
@@ -5442,25 +6197,17 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
         return direct_noop;
     }
     if (slot == PROC_Swap60 && p->fullscreen_buf) {
-        unsigned long did = D.main_display(), y, pitch = D.bytes_per_row(did);
-        unsigned char *dst = D.base_address(did);
-        sync_to_sw_locked(p, 0);
-        drain_all();
-        if (dst && D.bits_per_pixel(did) == 32 &&
-            D.pixels_wide(did) == p->fullscreen_w &&
-            D.pixels_high(did) == p->fullscreen_h && pitch >= p->fullscreen_w * 4)
-            for (y = 0; y < p->fullscreen_h; ++y)
-                memcpy(dst + y * pitch, p->fullscreen_buf + y * p->fullscreen_w * 4,
-                       p->fullscreen_w * 4);
+        present_sw_fullscreen(p);
         pthread_mutex_unlock(&G.mu);
         return direct_noop;
     }
     /* glFlush / glFinish d'un contexte qui présente directement : l'application
        attend la fin du dessin, pas une copie dans le tampon invité (l'image
        part en mémoire vidéo à l'échange). Marble Blast fait un glFinish par
-       image : sans ceci, chaque image était relue deux fois (vu en vrai). */
-    if ((slot == PROC_Swap58 || slot == PROC_Swap5c) && p->direct_at &&
-        G.n_frames - p->direct_at <= 1 && p->color == HOST_NEWER) {
+       image : sans ceci, chaque image était relue deux fois (vu en vrai).
+       Plein écran 16 bits : present_direct est coupée, même règle. */
+    if ((slot == PROC_Swap58 || slot == PROC_Swap5c) && p->color == HOST_NEWER &&
+        (p->fullscreen_buf || (p->direct_at && G.n_frames - p->direct_at <= 1))) {
         if (G.ncmd)
             flush();
         pthread_mutex_unlock(&G.mu);
@@ -5669,6 +6416,9 @@ void pomppc_after_draw_buffer_change(void *ctx)
 void pomppc_drawable_attached(void *ctx, long kind, long result)
 {
     PCtx *p;
+    gl_note("attach kind %ld -> %ld ctx %lux%lu bits %lu\n", kind, result,
+            ctx ? GLD_U32(ctx, CTX_WIDTH) : 0, ctx ? GLD_U32(ctx, CTX_HEIGHT) : 0,
+            ctx ? GLD_U32(ctx, CTX_COLOR_BITS) : 0);
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
     if (p && kind != 54 && result >= 0 && result <= 3) {
@@ -5722,10 +6472,13 @@ void pomppc_drawable_attached(void *ctx, long kind, long result)
  */
 #define RI_ID          0x04
 #define RI_FLAGS       0x08
+#define RI_VRAM        0x30     /* kCGLRPVideoMemory, octets */
+#define RI_TEXMEM      0x34     /* kCGLRPTextureMemory */
 #define RI_FULLSCREEN  0x2
 #define RI_ACCELERATED 0x100
 #define RI_WINDOW      0x2000
 #define RI_OURS        (RI_ACCELERATED | RI_FULLSCREEN | RI_WINDOW)
+#define RI_VRAM_BYTES  (64UL * 1024UL * 1024UL)
 #define PF_NEXT        0x00
 #define PF_ID          0x04
 #define PF_FLAGS       0x08
@@ -5733,24 +6486,55 @@ void pomppc_drawable_attached(void *ctx, long kind, long result)
 #define CGL_NORECOVERY_ATTR  72
 #define CGL_RENDERER_ID_ATTR 70
 #define CGL_ACCELERATED_ATTR 73
-/* attributs CGL suivis d'une valeur (CGLTypes.h / NSOpenGL.h de 10.4) */
+/* Attributs CGL/AGL suivis d'une valeur (CGLTypes.h et agl.h de 10.4).
+ * AGL_PIXEL_SIZE (50), AGL_GREEN/BLUE_SIZE (9/10) et AGL_BUFFER_SIZE (2)
+ * manquaient : une liste Warcraft III se décalait, ChoosePixelFormat
+ * recevait n'importe quoi et rendait « unable to initialize OpenGL ». */
 static int attr_has_value(long a)
 {
     switch (a) {
+    case 2:  /* AGL_BUFFER_SIZE */
+    case 3:  /* AGL_LEVEL */
     case 7:  /* kCGLPFAAuxBuffers */
-    case 8:  /* kCGLPFAColorSize */
+    case 8:  /* kCGLPFAColorSize / AGL_RED_SIZE */
+    case 9:  /* AGL_GREEN_SIZE */
+    case 10: /* AGL_BLUE_SIZE */
     case 11: /* kCGLPFAAlphaSize */
     case 12: /* kCGLPFADepthSize */
     case 13: /* kCGLPFAStencilSize */
-    case 14: /* kCGLPFAAccumSize */
+    case 14: /* kCGLPFAAccumSize / AGL_ACCUM_RED_SIZE */
+    case 15: /* AGL_ACCUM_GREEN_SIZE */
+    case 16: /* AGL_ACCUM_BLUE_SIZE */
+    case 17: /* AGL_ACCUM_ALPHA_SIZE */
+    case 50: /* AGL_PIXEL_SIZE */
     case 55: /* kCGLPFASampleBuffers */
     case 56: /* kCGLPFASamples */
     case 70: /* kCGLPFARendererID */
+    case 82: /* AGL_VIRTUAL_SCREEN */
     case 84: /* kCGLPFADisplayMask / NSOpenGLPFAScreenMask */
         return 1;
     default:
         return 0;
     }
+}
+
+/* L'hôte et le framebuffer QEMU sont 32 bits xRGB. Un contexte 16 bits
+ * (Warcraft III « milliers de couleurs ») passait ChoosePixelFormat puis
+ * dessinait dans un tampon 32 bits : hors domaine, écran noir, son OK.
+ * On élève la demande : 16 ≥ 16 est toujours vrai pour l'application. */
+static long promote_pf_value(long attr, long v)
+{
+    if (v <= 0)
+        return v;
+    if ((attr == 50 || attr == 2) && v < 32)    /* AGL_PIXEL_SIZE, BUFFER_SIZE */
+        return 32;
+    if (attr == 8 && v == 16)                   /* kCGLPFAColorSize 16, pas RED 5/8 */
+        return 32;
+    if ((attr == 8 || attr == 9 || attr == 10) && v < 8)  /* 555 → 888 */
+        return 8;
+    if (attr == 12 && v < 24)                   /* DEPTH_SIZE 16 → 32 */
+        return 32;
+    return v;
 }
 
 static unsigned long to_ours(unsigned long id)
@@ -5766,8 +6550,16 @@ static unsigned long to_apple(unsigned long id)
 void pomppc_patch_renderer_info(unsigned char *info)
 {
     GLD_U32(info, RI_ID) = to_ours(GLD_U32(info, RI_ID));
-    if (pomppc_accel_enabled())
+    if (pomppc_accel_enabled()) {
         GLD_U32(info, RI_FLAGS) |= RI_OURS;
+        /* Le GLDriver logiciel laisse 0 : CGLDescribeRenderer rend alors
+           kCGLRPVideoMemory = 0, et Warcraft III (comme d'autres jeux 2002)
+           refuse d'initialiser OpenGL. GeForce3 y copie la VRAM IOAccelerator. */
+        if (GLD_U32(info, RI_VRAM) == 0)
+            GLD_U32(info, RI_VRAM) = RI_VRAM_BYTES;
+        if (GLD_U32(info, RI_TEXMEM) == 0)
+            GLD_U32(info, RI_TEXMEM) = RI_VRAM_BYTES;
+    }
 }
 
 /* Copie traduite pour le GLDriver d'Apple ; 0 si la liste est trop longue. */
@@ -5787,8 +6579,11 @@ int pomppc_translate_attribs(const long *a, long *out, int max)
             continue;
         }
         out[n++] = a[i];
-        if (attr_has_value(a[i]))
-            out[n++] = a[++i];
+        if (attr_has_value(a[i])) {
+            long attr = a[i];
+            out[n++] = promote_pf_value(attr, a[i + 1]);
+            i++;
+        }
     }
     out[n] = 0;
     return 1;

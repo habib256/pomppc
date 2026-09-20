@@ -13,6 +13,12 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`. Les amorces de rech
 
 ## État (20/09/2026)
 
+- **Canal tableaux GeForce3 (plugin)** : `RenderVertexArray` / `RenderVertexBuffer`
+  lisent `GS_VAO` et émettent `DRAW_RAW` **indexé** — GLEngine ne déroule plus
+  `glDrawElements` dans Begin/End. Interrupteur `POMPPC_GL_ARRAY` (défaut : auto
+  si `GL_VERTEX_ARRAY` est actif). À vérifier dans l'invité (`gltest varray` /
+  `varrayvbo`). Voir `docs/gpu-3d-tiger.md` §4.7.
+
 - **UT2004 Demo, premier passage réel** (`docs/re/ut2004-demo.md`) : en
   fenêtre l'image est juste (textures, polices, HUD, DM-Rankin). **Inutilisable** :
   trop lent, même avec le T&L hôte. Portes levées : pixel format (drapeaux
@@ -333,12 +339,17 @@ Dans `pomppc_accel.c`, pour le refus seulement : `GS_LINE_SMOOTH 0x2e2d`,
 
 ### RenderVertexArray « à la GeForce3 »
 
-Jamais atteint ici. Le GeForce3 et le Radeon annoncent la T&L (`cfg+0x79 = 1`, dispatch 7)
-mais laissent `cfg+0x11c = 0` et passent par `RenderVertexArray` `+0x70` /
-`RenderVertexBuffer` `+0x4c` ; le format vient des six identifiants `cfg+0x7c..0x87`
-(pas imposés par GLEngine : `0x10 0x18 0x20 0x14 0x20|0x24 0x2c|0x34`). **[H]** : le
-descripteur `cfg+0x11c` est le canal des cartes à programmes de sommets
-(`docs/re/descripteur-de-sommet.md` §7, `verification-tcl.md` §8).
+✅ **Fait le 20/09/2026.** Quand `GL_VERTEX_ARRAY` est actif, le plugin retire `cfg+0x11c`
+(`POMPPC_GL_ARRAY=1`, défaut) : GLEngine n'écrit plus dans Begin/End (où il déroulait
+`glDrawElements`) et appelle `RenderVertexArray` `+0x70` (VAR) ou `AllocVertexBuffer` /
+`RenderVertexBuffer` `+0x4c`. Le plugin lit `GS_VAO`, packe les attributs au format
+`DRAW_RAW` et envoie les **indices tels quels**. Le mode immédiat garde le descripteur
+tant qu'aucun tableau n'est actif. `cfg+0x78 = 1` et les six identifiants
+`cfg+0x7c..0x87` `{3,2,1,6,5,4}` (comme le GeForce3). Le tampon packé de
+`AllocVertexBuffer` (plafond 2048) est ignoré : on relit les tableaux clients, le
+format matériel n'est pas le nôtre. `POMPPC_GL_ARRAY=0` rétablit Begin/End.
+À vérifier dans l'invité : `gltest varray` / `varrayvbo` contre Apple, et
+`POMPPC_GL_ARRAY=0` en témoin A/B.
 
 ### Restes d'état, bas priorité
 
