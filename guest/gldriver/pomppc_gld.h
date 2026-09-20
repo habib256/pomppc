@@ -152,6 +152,7 @@ void pomppc_unpatch_pixel_format(void *pf);
 void pomppc_context_created(void *ctx);
 void pomppc_context_destroyed(void *ctx);
 void pomppc_drawable_attached(void *ctx, long kind, long result);
+long pomppc_attach_fullscreen(void *ctx);
 void pomppc_before_buffers_change(void *ctx);
 void pomppc_after_draw_buffer_change(void *ctx);
 void pomppc_texture_created(void *drvtex);

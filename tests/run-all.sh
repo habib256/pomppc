@@ -50,6 +50,8 @@ echo "=== 3. syntaxe Python ==="
 for f in $(git ls-files '*.py'); do
   if python3 -m py_compile "$f" 2>/dev/null; then ok "py_compile $f"; else ko "py_compile $f"; fi
 done
+if python3 tests/frame_report_test.py; then ok "frame-time report"; else ko "frame-time report"; fi
+if python3 tests/flyby_report_test.py; then ok "fixed-step flyby report"; else ko "fixed-step flyby report"; fi
 rm -rf tests/__pycache__ scripts/__pycache__ 2>/dev/null
 
 echo

@@ -13,8 +13,8 @@
 #   SCENES="tri tex" : restreindre ; KEEP=1 : garder les PPM dans out/
 . ./lib.sh          # SRC, OUT, SDK, RES, EXT, plugin_layout
 SCENES=${SCENES:-"tri gouraud depth fill prims tex texfmt texpack texpersp comb mix state
-  stencil depthrt varray game lit texgen clip fogz bigstrip dlist mixte fusion blendc logicop
-  polymode stipple occl caps entry v15 tex3d texlod sepspec cube tex13 tex14 tcprobe gl15"}
+  stencil depthrt varray varrayvbo game lit texgen clip fogz bigstrip dlist mixte fusion blendc logicop
+  polymode stipple occl caps entry v15 tex3d texlod sepspec cube tex13 tex14 tcprobe gl15 texcache"}
 
 echo "== kext"
 cd $SRC/kext/POMPPCGPU && make clean >/dev/null 2>&1

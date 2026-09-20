@@ -482,7 +482,7 @@ long gldAttachDrawable(long a, long b, long c, long d, long e, long f, long g, l
 {
     long r;
     pomppc_before_buffers_change((void *)a);
-    r = FWD8(GLD_AttachDrawable);
+    r = b == 54 ? pomppc_attach_fullscreen((void *)a) : FWD8(GLD_AttachDrawable);
     pomppc_log("gldAttachDrawable(%08lx %08lx %08lx %08lx) -> %ld\n", a, b, c, d, r);
     pomppc_drawable_attached((void *)a, b, r);
     return r;

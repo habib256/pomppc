@@ -1,5 +1,9 @@
 # UT2004 Demo sur Tiger quotidien — relevé du 20/09/2026
 
+> Mise à jour : le [correctif plein écran](ut2004-fullscreen.md) prend désormais
+> en charge 800×600 et 1024×768 dans la VM de développement. Les refus décrits
+> ci-dessous sont le constat antérieur au correctif.
+
 Premier passage réel d’**Unreal Tournament 2004 Demo Mac PPC** sous Tiger 10.4.6
 (QEMU mac99 G4, qgpu-pci). Vérifié dans l’invité, VM quotidienne
 `disks/tiger.qcow2`. Ce fichier sert à **reprendre** : ce qui marche, ce qui

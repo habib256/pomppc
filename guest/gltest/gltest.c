@@ -979,7 +979,7 @@ int main(int argc, char **argv)
         glEnd();
         glClear(GL_DEPTH_BUFFER_BIT);                                           /* 9 */
         glFinish();
-    } else if (!strcmp(scene, "varray")) {
+    } else if (!strcmp(scene, "varray") || !strcmp(scene, "varrayvbo")) {
         /* Sonde des tableaux de sommets (axe 1) : glDrawArrays puis
            glDrawElements, avec une projection en PERSPECTIVE et une modèle-vue
            non triviale. Les coordonnées d'objet sont choisies pour être
@@ -1000,7 +1000,21 @@ int main(int argc, char **argv)
         };
         static const float cb[4 * 3] = { 0, 1, 0,  0, 1, 0,  0, 1, 0,  0, 1, 0 };
         static const GLushort ib[6] = { 0, 1, 2, 0, 2, 3 };
+        typedef void (*GenBuffersFn)(GLsizei, GLuint *);
+        typedef void (*BindBufferFn)(GLenum, GLuint);
+        typedef void (*BufferDataFn)(GLenum, long, const GLvoid *, GLenum);
+        typedef void (*DeleteBuffersFn)(GLsizei, const GLuint *);
+        GenBuffersFn gen_buffers = (GenBuffersFn)gl_sym("glGenBuffers", "glGenBuffersARB");
+        BindBufferFn bind_buffer = (BindBufferFn)gl_sym("glBindBuffer", "glBindBufferARB");
+        BufferDataFn buffer_data = (BufferDataFn)gl_sym("glBufferData", "glBufferDataARB");
+        DeleteBuffersFn delete_buffers = (DeleteBuffersFn)gl_sym("glDeleteBuffers", "glDeleteBuffersARB");
+        GLuint buffers[5];
+        int use_vbo = !strcmp(scene, "varrayvbo");
         float sx = W / 64.0f, sy = H / 64.0f;
+        if (use_vbo && (!gen_buffers || !bind_buffer || !buffer_data || !delete_buffers)) {
+            fprintf(stderr, "VBO entry points unavailable\n");
+            return 4;
+        }
 
         glMatrixMode(GL_PROJECTION); glLoadIdentity();
         glFrustum(-1, 1, -1, 1, 1, 10);
@@ -1011,14 +1025,40 @@ int main(int argc, char **argv)
 
         glEnableClientState(GL_VERTEX_ARRAY);
         glEnableClientState(GL_COLOR_ARRAY);
-        glVertexPointer(3, GL_FLOAT, 0, qa);
-        glColorPointer(3, GL_FLOAT, 0, ca);
+        if (use_vbo) {
+            gen_buffers(5, buffers);
+            bind_buffer(0x8892, buffers[0]);
+            buffer_data(0x8892, sizeof(qa), qa, 0x88E4);
+        }
+        glVertexPointer(3, GL_FLOAT, 0, use_vbo ? 0 : qa);
+        if (use_vbo) {
+            bind_buffer(0x8892, buffers[1]);
+            buffer_data(0x8892, sizeof(ca), ca, 0x88E4);
+        }
+        glColorPointer(3, GL_FLOAT, 0, use_vbo ? 0 : ca);
         glDrawArrays(GL_TRIANGLES, 0, 6);
-        glVertexPointer(3, GL_FLOAT, 0, qb);
-        glColorPointer(3, GL_FLOAT, 0, cb);
-        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, ib);
+        if (use_vbo) {
+            bind_buffer(0x8892, buffers[2]);
+            buffer_data(0x8892, sizeof(qb), qb, 0x88E4);
+        }
+        glVertexPointer(3, GL_FLOAT, 0, use_vbo ? 0 : qb);
+        if (use_vbo) {
+            bind_buffer(0x8892, buffers[3]);
+            buffer_data(0x8892, sizeof(cb), cb, 0x88E4);
+        }
+        glColorPointer(3, GL_FLOAT, 0, use_vbo ? 0 : cb);
+        if (use_vbo) {
+            bind_buffer(0x8893, buffers[4]);
+            buffer_data(0x8893, sizeof(ib), ib, 0x88E4);
+        }
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, use_vbo ? 0 : ib);
         glDisableClientState(GL_COLOR_ARRAY);
         glDisableClientState(GL_VERTEX_ARRAY);
+        if (use_vbo) {
+            bind_buffer(0x8892, 0);
+            bind_buffer(0x8893, 0);
+            delete_buffers(5, buffers);
+        }
         glFinish();
 
         /* y est compté depuis le HAUT ; y_œil = +1 tombe à la ligne 16 sur 64. */
@@ -4761,6 +4801,84 @@ int main(int argc, char **argv)
                3 * W / 8, H / 4, px(3 * W / 8, H / 4), 5 * W / 8, 3 * H / 4,
                px(5 * W / 8, 3 * H / 4));
         glDisable(GL_TEXTURE_3D);
+    } else if (!strcmp(scene, "texcache")) {
+        /* 257 live objects, three traversals with queued draws. Unit 1 stays
+         * bound throughout: allocating unit 0 must never evict it. */
+        GLuint ids[257];
+        CGLContextObj other = NULL;
+        CGLPixelFormatObj shared_pix;
+        unsigned char colors[256][4], pin[4] = {255, 0, 255, 255};
+        int pass, i, j;
+        glGenTextures(257, ids);
+        glActiveTextureARB(GL_TEXTURE0_ARB);
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        for (i = 0; i < 257; i++) {
+            if (i < 256) {
+                colors[i][0] = i; colors[i][1] = 255-i;
+                colors[i][2] = (i*73) & 255; colors[i][3] = 255;
+            }
+            glBindTexture(GL_TEXTURE_2D, ids[i]);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, i < 256 ? colors[i] : pin);
+        }
+        glActiveTextureARB(GL_TEXTURE1_ARB);
+        glBindTexture(GL_TEXTURE_2D, ids[256]);
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        glMultiTexCoord2fARB(GL_TEXTURE1_ARB, 0.5f, 0.5f);
+        glActiveTextureARB(GL_TEXTURE0_ARB);
+        /* A second shared context displaces the first context's resident
+         * textures. Returning to the first must restore its host state. */
+        if (CGLChoosePixelFormat(attrs, &shared_pix, &npix) != kCGLNoError ||
+            CGLCreateContext(shared_pix, ctx, &other) != kCGLNoError) {
+            printf("FAIL shared texture-cache context\n"); return 3;
+        }
+        CGLDestroyPixelFormat(shared_pix);
+        CGLSetOffScreen(other, W, H, ROWB, buf);
+        CGLSetCurrentContext(other);
+        glViewport(0, 0, W, H);
+        glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, W, H, 0, -1, 1);
+        glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glActiveTextureARB(GL_TEXTURE1_ARB);
+        glBindTexture(GL_TEXTURE_2D, ids[256]); glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        glMultiTexCoord2fARB(GL_TEXTURE1_ARB, 0.5f, 0.5f);
+        glActiveTextureARB(GL_TEXTURE0_ARB);
+        for (pass = 0; pass < 3; pass++) {
+            CGLSetCurrentContext(pass == 1 ? other : ctx);
+            if (pass == 1) {
+                /* Modify an object evicted in the first traversal. */
+                colors[3][0] = 7; colors[3][1] = 99; colors[3][2] = 211;
+                glBindTexture(GL_TEXTURE_2D, ids[3]);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1,
+                                GL_RGBA, GL_UNSIGNED_BYTE, colors[3]);
+            }
+            for (j = 0; j < 256; j++) {
+                int x, y;
+                i = pass == 0 ? j : pass == 1 ? 255-j : (j*73) & 255;
+                x = (i%16)*W/16; y = (i/16)*H/16;
+                glBindTexture(GL_TEXTURE_2D, ids[i]);
+                glBegin(GL_QUADS);
+                glTexCoord2f(0, 0); glVertex2i(x, y);
+                glTexCoord2f(1, 0); glVertex2i(x+W/16, y);
+                glTexCoord2f(1, 1); glVertex2i(x+W/16, y+H/16);
+                glTexCoord2f(0, 1); glVertex2i(x, y+H/16);
+                glEnd();
+            }
+            glFinish();
+            for (i = 0; i < 256; i++)
+                check("texture cache + pinned unit", (i%16)*W/16+W/32,
+                      (i/16)*H/16+H/32, ((unsigned long)colors[i][0]<<16) | colors[i][2]);
+        }
+        glActiveTextureARB(GL_TEXTURE1_ARB); glDisable(GL_TEXTURE_2D);
+        glActiveTextureARB(GL_TEXTURE0_ARB); glDisable(GL_TEXTURE_2D);
+        glDeleteTextures(257, ids);
+        CGLDestroyContext(other);
     } else if (!strcmp(scene, "texup")) {
         /* Débit de téléversement de textures (tâche 2.5, protocole v10) : une
            texture de TEXUP_SIZE² texels (256 par défaut), modifiée et renvoyée

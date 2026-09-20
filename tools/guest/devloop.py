@@ -29,6 +29,8 @@ Variables d'environnement :
     CPU_OPTS   options ajoutées au modèle de CPU. `-cpu g4` devient
                `-cpu g4,$CPU_OPTS` — p. ex. CPU_OPTS=x-fast-fp=on pour le mode
                « flottant rapide ». Vide (défaut) = `-cpu g4` inchangé.
+    POMPPC_DISPLAY  affichage QEMU (défaut none ; cocoa pour une fenêtre macOS).
+                   --gui choisit le bureau Tiger, indépendamment de cet affichage.
     DEVDISK, CDROM, SMP, SND, RES, NET, GPU_BACKEND, GPU_TRACE, GUI_USER
 
 Rejouer un banc avec un autre binaire et un autre mode de CPU :
@@ -265,7 +267,7 @@ def vm_args(gui, cdroms=()):
         cpu += "," + os.environ["CPU_OPTS"].lstrip(",")
     return [qemu, "-M", "mac99,via=pmu", "-cpu", cpu, "-m", ram, "-smp", str(smp),
             *extra,
-            "-display", "none", "-bios", BIOS,
+            "-display", os.environ.get("POMPPC_DISPLAY", "none"), "-bios", BIOS,
             "-g", os.environ.get("RES", "1024x768x32"),
             "-drive", "file=%s,format=raw,media=disk" % DISK,
             "-device", "usb-tablet",
@@ -482,7 +484,11 @@ def start(gui=False):
     if gui:
         # bureau : l'agent part tout seul (StartupItem) ; on attend le bureau
         # stable puis on vérifie que l'agent répond par un job vide.
-        wait_stable(q, first=60, still=20)
+        try:
+            wait_stable(q, first=60, still=20)
+        except (BrokenPipeError, ConnectionError):
+            raise SystemExit("QEMU a fermé la connexion pendant le démarrage "
+                             "(code %s) ; voir %s/qemu.log" % (p.poll(), STATE))
         print("bureau stable (pid %d) ; capture %s/boot.png" % (p.pid, STATE))
         return
     wait_stable(q)
@@ -558,11 +564,14 @@ def wait_gone(pid, halt_timeout, how):
     while pid and time.time() - t0 < halt_timeout:
         try:
             os.kill(pid, 0)
-        except OSError:
+        except ProcessLookupError:
             if os.path.exists(pidf):
                 os.remove(pidf)
             print("VM arrêtée par %s en %d s (volume démonté proprement)" % (how, time.time() - t0))
             return True
+        except PermissionError:
+            raise SystemExit("arrêt de QEMU non vérifiable : accès au processus refusé ; "
+                             "relancer la vérification avec les permissions nécessaires")
         time.sleep(2)
     print("%s n'a pas éteint la VM en %d s : extinction forcée" % (how, halt_timeout))
     stop()

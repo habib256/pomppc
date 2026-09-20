@@ -20,6 +20,12 @@ Conception, rétro-ingénierie et mesures : `docs/gpu-3d-tiger.md`.
   groupées et soumises au kext. Les textures sont suivies (création, niveaux,
   modifications) et recopiées sur l'hôte à la première utilisation après
   changement.
+- **Cache de textures.** Les 128 identifiants hôte sont réutilisés par éviction
+  de la texture la moins récemment utilisée. Les textures actives du dessin
+  courant sont protégées ; les commandes précédentes sont terminées avant
+  réutilisation. Les niveaux et paramètres restent chez GLEngine et sont
+  rechargés à la prochaine utilisation. La scène `gltest texcache` vérifie
+  257 textures, les modifications après éviction et deux contextes partagés.
 - **Géométrie sur l'hôte (chemin « brut », protocole v7).** Quand l'état courant
   est dans le domaine, `gldInitDispatch`/`gldUpdateDispatch` rendent le bit 0 :
   GLEngine cesse de transformer, d'éclairer, de découper et d'éliminer les faces,
@@ -131,6 +137,8 @@ dans `Resources` d'OpenGL.framework : `install.sh` l'en retire.
 |---|---|
 | `POMPPC_GL_DISABLE=1` | aucune accélération : le plugin n'est qu'un mandataire |
 | `POMPPC_GL_STATS=1` | bilan sur stderr en fin de processus (triangles, soumissions, relectures…) |
+| `POMPPC_GL_ARRAY_STUB_SYNC=1` | témoin A/B : rétablit les synchronisations couleur/profondeur avant le refus vide de `RenderVertexArray` d'Apple. Par défaut, le plugin évite ces transferts seulement si les instructions de la fonction sont exactement `li r3,0; blr`. Toute valeur définie active ce témoin ; retirer la variable pour le chemin corrigé. |
+| `POMPPC_GL_FRAMES=/chemin.csv` | trace optionnelle par échange : contexte, temps monotone en ms depuis le premier échange, compteurs cumulés de géométrie/replis/relectures et temps cumulés de soumission/attente/copie. Fichier remplacé au lancement, écrit avec tampon, vidé au moins toutes les 5 s pendant le rendu ; un arrêt brutal peut perdre la fin. Mesure les appels d'échange, pas la fin GPU. Analyse : `python3 tools/guest/frame_report.py trace.csv --start 30 --duration 60` (fenêtre à choisir après vérification du chargement et de la scène). |
 | `POMPPC_GL_STATS=/chemin` | bilan ajouté au fichier toutes les 5 s : images/s, relectures, replis logiciels, temps de soumission, sommets bruts / `DRAW_RAW` / commandes d'état / **dessins fusionnés** / **sommets par dessin** par image, **barrières attendues et temps d'attente par image, profondeur de file, `QUEUE_FULL`, replis synchrones**, et motifs de refus de l'accélération avec le premier cas |
 | `POMPPC_GL_DIRECT=0` | pas de présentation directe (voir ci-dessous) ; `=f` : plein écran seulement ; `=c` : même avec un curseur en mouvement dans la surface |
 | `POMPPC_GL_GEOM=0` | coupe le **chemin brut** : GLEngine transforme et éclaire de nouveau lui-même, comportement d'avant le lot 2. `=1` (défaut) l'active ; `=2` l'active avec un format de sommet fixe et large, pour mesurer |
@@ -185,3 +193,10 @@ dans `Resources` d'OpenGL.framework : `install.sh` l'en retire.
   d'Apple) ; sinon, logiciel.
 - Les pixels exactement sur une arête peuvent différer du rendu d'Apple (règle
   de remplissage du GPU hôte).
+
+### Plein écran CGL (Tiger)
+
+Les demandes `CGLSetFullScreen` sont raccordées à un tampon arrière mémoire
+à la taille de l’écran principal 32 bits. Le swap présente aussi les replis
+logiciels Apple. Validation UT2004 en 800×600 et 1024×768 :
+[notes et reproduction](../../docs/re/ut2004-fullscreen.md).

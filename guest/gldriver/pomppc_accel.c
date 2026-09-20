@@ -48,6 +48,7 @@
 #include <sys/time.h>
 #include <dlfcn.h>
 #include <math.h>
+#include <mach/mach_time.h>
 
 #include "qgpu_proto.h"
 #include "pomppc_gld.h"
@@ -366,6 +367,8 @@ typedef struct PCtx {
     int            st_valid;
     unsigned char *draw_seen;           /* tampon de dessin connu */
     unsigned long  direct_at;           /* n° de la dernière image présentée directement */
+    unsigned char *fullscreen_buf;      /* owned software back buffer for CGL fullscreen */
+    unsigned long  fullscreen_w, fullscreen_h;
     int            stencil;             /* la surface hôte a un stencil ; sa fraîcheur est
                                            celle de la profondeur (même mot côté invité) */
     int            sten_used;           /* le contexte s'est VRAIMENT servi du stencil */
@@ -416,6 +419,7 @@ typedef struct PTex {                   /* texture du GLDriver suivie par le plu
                                            (G.tex14) biais de LOD, mode, fonction
                                            de comparaison, mode de profondeur */
     int            prm_valid;
+    uint64_t       last_use;            /* resident texture LRU, under G.mu */
 } PTex;
 
 typedef struct TexUnit {
@@ -493,6 +497,8 @@ static struct {
     unsigned long   tex_used[(QGPU_CLIENT_TEX_IDS + 31) / 32];
     PCtx           *list;
     PTex           *textures;
+    uint64_t        tex_clock;
+    unsigned long   n_texevictions;
     /* statistiques */
     unsigned long   n_tris, n_clears, n_submits, n_uploads, n_readbacks, n_fallback;
     unsigned long   n_textris, n_texuploads, n_lines, n_points;
@@ -571,8 +577,42 @@ static unsigned long fbits(float f);
    qui les réalise). */
 static int qry_off;
 
+/* Optional per-swap trace. Monotonic guest clock, buffered writes, no extra
+ * device query. These are application swap intervals, not GPU completion
+ * times; filter by context when a process has several drawables. */
+static FILE *frame_file;
+static void trace_frame(void *ctx)
+{
+    static int init;
+    static mach_timebase_info_data_t tb;
+    static uint64_t start, flushed;
+    static char buffer[65536];
+    uint64_t tick;
+    if (!init) {
+        const char *path = getenv("POMPPC_GL_FRAMES");
+        init = 1;
+        if (!path || path[0] != '/') return;
+        if (mach_timebase_info(&tb) != KERN_SUCCESS || !tb.denom) return;
+        frame_file = fopen(path, "w");
+        if (!frame_file) return;
+        setvbuf(frame_file, buffer, _IOFBF, sizeof(buffer));
+        start = flushed = mach_absolute_time();
+        fprintf(frame_file, "frame,context,elapsed_ms,raw_vertices,raw_draws,fallbacks,readbacks,submit_ms,wait_ms,copy_ms\n");
+    }
+    if (!frame_file) return;
+    tick = mach_absolute_time();
+    fprintf(frame_file, "%lu,%p,%.3f,%lu,%lu,%lu,%lu,%.3f,%.3f,%.3f\n",
+            G.n_frames, ctx, (double)(tick - start) * tb.numer / tb.denom / 1e6,
+            G.n_rawverts, G.n_rawdraws, G.n_fallback, G.n_readbacks,
+            G.t_submit * 1000, G.t_wait * 1000, G.t_copy * 1000);
+    if ((double)(tick - flushed) * tb.numer / tb.denom >= 5e9) {
+        fflush(frame_file);
+        flushed = tick;
+    }
+}
+
 /* Bilan périodique (POMPPC_GL_STATS=<fichier>), appelé à chaque échange. */
-static void stats_frame(void)
+static void stats_frame(void *ctx)
 {
     static const char *path;
     static int init;
@@ -589,6 +629,7 @@ static void stats_frame(void)
         t0 = now_s();
     }
     G.n_frames++;
+    trace_frame(ctx);
     async_rearm();
     if (!path)
         return;
@@ -791,6 +832,7 @@ static void on_exit_stats(void)
 {
     if (getenv("POMPPC_GL_STATS")) {
         int k;
+        fprintf(stderr, "POMPPC GL : cache textures : %lu evictions\n", G.n_texevictions);
         for (k = 0; k < NO_COUNT; k++)
             if (no_count[k])
                 fprintf(stderr, "POMPPC GL : refus %s : %lu (premier : %s)\n",
@@ -818,6 +860,10 @@ static void on_exit_stats(void)
 void pomppc_backend_fini(void)
 {
     pthread_mutex_lock(&G.mu);
+    if (frame_file) {
+        fclose(frame_file);
+        frame_file = NULL;
+    }
     if (G.state > 0) {
         if (getenv("POMPPC_GL_STATS"))
             on_exit_stats();
@@ -1429,16 +1475,54 @@ static long alloc_id(unsigned long *used, unsigned long base, unsigned long n)
     return -1;
 }
 
-static long alloc_tex_id(void)
+static void *unit_drvtex(PCtx *p, int u, unsigned long *mask);
+
+static long alloc_tex_id(PCtx *p)
 {
     unsigned long i;
+    PTex *t, *victim = NULL;
+    PCtx *ctx;
+    void *protected[QGPU_MAX_UNITS];
+    unsigned long mask, *c;
+    long id;
+    int u;
     for (i = 0; i < QGPU_CLIENT_TEX_IDS; i++) {
         if (!(G.tex_used[i / 32] & (1UL << (i % 32)))) {
             G.tex_used[i / 32] |= 1UL << (i % 32);
             return G.q.tex_base + i;
         }
     }
-    return -1;
+    /* Protect every effective unit, including units not uploaded yet. A
+     * texture bound by another context may be evicted: that context will
+     * reload it when drawn again. Guest storage remains owned by GLEngine. */
+    for (u = 0; u < QGPU_MAX_UNITS; u++)
+        protected[u] = unit_drvtex(p, u, &mask);
+    for (t = G.textures; t; t = t->next) {
+        if (t->qtex < 0 || (victim && t->last_use >= victim->last_use))
+            continue;
+        for (u = 0; u < QGPU_MAX_UNITS; u++)
+            if (protected[u] == t->drvtex)
+                break;
+        if (u == QGPU_MAX_UNITS)
+            victim = t;
+    }
+    if (!victim)
+        return -1;
+    /* Close pending RAW/legacy draws and finish both asynchronous halves
+     * before recycling their ID. DESTROY precedes CREATE in the new stream. */
+    flush();
+    drain_all();
+    id = victim->qtex;
+    c = reserve(p, QGPU_LEN_TEX);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_DESTROY, QGPU_LEN_TEX);
+    c[1] = id;
+    victim->qtex = -1;
+    victim->dirty = 1;
+    victim->prm_valid = 0;
+    for (ctx = G.list; ctx; ctx = ctx->next)
+        ctx->st_valid = 0;
+    G.n_texevictions++;
+    return id;                          /* bitmap bit stays allocated */
 }
 
 /* Textures par adresse d'objet du GLDriver. Une recherche par unité de
@@ -1959,15 +2043,6 @@ static void tex_level_depth(const PTex *t, int l, unsigned long *d, unsigned lon
     *imgh = U16(pl, PL_IMGH);
 }
 
-static int tex_id_available(void)
-{
-    unsigned long i;
-    for (i = 0; i < QGPU_CLIENT_TEX_IDS; i++)
-        if (!(G.tex_used[i / 32] & (1UL << (i % 32))))
-            return 1;
-    return 0;
-}
-
 /* upload_texture réussira-t-il ? Prédicat PUR (aucune commande, aucune
  * conversion) : le chemin brut doit trancher au changement d'état, où il ne
  * peut plus se dédire. Une texture déjà téléversée et propre est connue bonne. */
@@ -1984,8 +2059,8 @@ static int texture_uploadable(PTex *t)
                   U16((unsigned char *)GLD_U32(dt, DT_PARAMS), TP_MIN));
     if (t->qtex >= 0 && !t->dirty)
         return 1;
-    if (t->qtex < 0 && !tex_id_available())
-        return no(NO_TEX_ID, 0, 0);
+    /* Residency is a cache, not a domain restriction: at most four textures
+     * are protected for a draw, out of 128 host slots. */
     if (tex_is_3d(t) && !G.tex3d)
         return no(NO_TEX_TARGET, 2, 0);
     if (tex_is_cube(t)) {
@@ -2070,7 +2145,7 @@ static int upload_texture(PCtx *p, PTex *t)
                   (unsigned short)S16(lv0, LV_H));
     }
     if (t->qtex < 0) {
-        t->qtex = alloc_tex_id();
+        t->qtex = alloc_tex_id(p);
         if (t->qtex < 0)
             return no(NO_TEX_ID, 0, 0);
         if (t3 || tex_is_cube(t)) {
@@ -2085,6 +2160,7 @@ static int upload_texture(PCtx *p, PTex *t)
         t->dirty = 1;
         t->prm_valid = 0;
     }
+    t->last_use = ++G.tex_clock;
     if (t->dirty && tex_is_cube(t)) {
         /* carte de cube : les six faces, niveaux lus dans l'objet de GLEngine */
         int f;
@@ -5007,6 +5083,58 @@ static void direct_init(void)
         D.windowed = 0;
 }
 
+/* Tiger's glsAssignDrawable rejects kind 54 unconditionally. Its kind 53
+ * takes {width, height, rowbytes, address} and retains the address, not the
+ * descriptor. Use an owned back buffer so software fallbacks never draw into
+ * scanout. Apple still owns depth/stencil and all its drawable bookkeeping.
+ * ctx+e1 is the double-buffer flag: temporarily clear its offscreen veto;
+ * the public pixel format and context keep their double-buffer semantics. */
+long pomppc_attach_fullscreen(void *ctx)
+{
+    PCtx *p;
+    unsigned long did, w, h, desc[4];
+    unsigned char *buf, double_buffer;
+    long result;
+    if (!D.init)
+        direct_init();
+    if (!D.main_display || !D.pixels_wide || !D.pixels_high ||
+        !D.bits_per_pixel || !D.base_address || !D.bytes_per_row)
+        return 10005;
+    did = D.main_display();
+    w = D.pixels_wide(did); h = D.pixels_high(did);
+    if (!w || !h || w > 16384 || h > 16384 ||
+        D.bits_per_pixel(did) != 32 || !D.base_address(did) ||
+        GLD_U32(ctx, CTX_COLOR_BITS) != 32)
+        return 10005;
+    pthread_mutex_lock(&G.mu);
+    p = find_ctx(ctx);
+    buf = p ? calloc(h, w * 4) : NULL;
+    if (!buf) {
+        pthread_mutex_unlock(&G.mu);
+        return 10016; /* kCGLBadAlloc */
+    }
+    drain_all();
+    desc[0] = w; desc[1] = h; desc[2] = w * 4; desc[3] = (unsigned long)buf;
+    double_buffer = GLD_U8(ctx, 0xe1);
+    GLD_U8(ctx, 0xe1) = 0;
+    result = pomppc_call_real(GLD_AttachDrawable, (long)ctx, 53, (long)desc, 0, 0, 0, 0, 0);
+    GLD_U8(ctx, 0xe1) = double_buffer;
+    /* glsAssignDrawable releases the previous drawable even on failure. */
+    free(p->fullscreen_buf);
+    p->fullscreen_buf = NULL;
+    D.checked_at = 0;
+    if (result >= 0 && result <= 3) {
+        p->fullscreen_buf = buf;
+        p->fullscreen_w = w; p->fullscreen_h = h;
+        D.checked_at = 0;
+        pomppc_log("POMPPC: fullscreen drawable %lux%lu, software back buffer\n", w, h);
+    } else {
+        free(buf);
+    }
+    pthread_mutex_unlock(&G.mu);
+    return result;
+}
+
 static float window_alpha(long cid, long wid)
 {
     float a = 1.0f;
@@ -5291,12 +5419,39 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
         abort();                        /* ne jamais sauter à une adresse nulle */
     }
     target = p->real[slot];
+    /* Apple's RenderVertexArray can be only `li r3,0; blr`: a refusal,
+       not a software draw. Synchronizing color/depth for that probe makes
+       every indexed draw read back the surface, then upload it again in
+       geom_begin. Check the actual PPC instructions rather than assume all
+       OS revisions have the same implementation. Keep an A/B override. */
+    if (slot == PROC_RenderVertexArray && target) {
+        const unsigned long *code = (const unsigned long *)target;
+        static int force_sync = -1;
+        if (force_sync < 0)
+            force_sync = getenv("POMPPC_GL_ARRAY_STUB_SYNC") != NULL;
+        if (!force_sync && code[0] == 0x38600000UL && code[1] == 0x4e800020UL)
+            kind = K_NONE;
+    }
     /* Une image = un échange (0x60). Les vidages 0x58/0x5c (glFlush, glFinish)
        n'en sont pas : Marble Blast en fait un par image, et les compter doublait
        le débit affiché (vu en vrai). */
     if (slot == PROC_Swap60)
-        stats_frame();
+        stats_frame(p->ctx);
     if (slot == PROC_Swap60 && present_direct(p)) {
+        pthread_mutex_unlock(&G.mu);
+        return direct_noop;
+    }
+    if (slot == PROC_Swap60 && p->fullscreen_buf) {
+        unsigned long did = D.main_display(), y, pitch = D.bytes_per_row(did);
+        unsigned char *dst = D.base_address(did);
+        sync_to_sw_locked(p, 0);
+        drain_all();
+        if (dst && D.bits_per_pixel(did) == 32 &&
+            D.pixels_wide(did) == p->fullscreen_w &&
+            D.pixels_high(did) == p->fullscreen_h && pitch >= p->fullscreen_w * 4)
+            for (y = 0; y < p->fullscreen_h; ++y)
+                memcpy(dst + y * pitch, p->fullscreen_buf + y * p->fullscreen_w * 4,
+                       p->fullscreen_w * 4);
         pthread_mutex_unlock(&G.mu);
         return direct_noop;
     }
@@ -5462,6 +5617,7 @@ void pomppc_context_destroyed(void *ctx)
         }
         if (G.run_ctx == p)
             G.run_ctx = 0;
+        free(p->fullscreen_buf);
         free(p);
         break;
     }
@@ -5515,6 +5671,12 @@ void pomppc_drawable_attached(void *ctx, long kind, long result)
     PCtx *p;
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
+    if (p && kind != 54 && result >= 0 && result <= 3) {
+        drain_all();
+        free(p->fullscreen_buf);
+        p->fullscreen_buf = NULL;
+        D.checked_at = 0;
+    }
     if (p && p->surf >= 0) {
         check_draw_buffer(p);
         p->color = SW_NEWER;
