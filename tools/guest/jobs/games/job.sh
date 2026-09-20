@@ -8,8 +8,10 @@
 # premier cas (docs/gpu-3d-tiger.md §4.5). Une capture d'écran est prise au
 # milieu. Suppose le kext et le plugin installés (job install).
 #
-#   GAMES="zen mb mb16" : zen = Zenerchi (plein écran), mb = Marble Blast Gold
-#   tel que réglé, mb16 = Marble Blast forcé en « 800 600 16 » (prefs.cs)
+#   GAMES="zen mb mb16 ut" : zen = Zenerchi (plein écran), mb = Marble Blast Gold
+#   tel que réglé, mb16 = Marble Blast forcé en « 800 600 16 » (prefs.cs),
+#   ut = Unreal Tournament 2004 Demo (bureau). ut n'est pas dans le défaut :
+#   le job historique n'a pas la démo.
 #   DUR=60
 . ./lib.sh
 . ./guilib.sh
@@ -18,6 +20,7 @@ DUR=${DUR:-80}
 DESK=/Users/tiger/Desktop
 MB="$DESK/MarbleBlast Gold.app"
 ZEN="$DESK/Zenerchi.app"
+UTDEMO="$DESK/Unreal Tournament 2004 Demo.app"
 step() { sync; echo "games: $*" > /dev/console; echo "== $*"; }
 
 step "jeux"
@@ -27,7 +30,14 @@ for app in "MarbleBlast Gold.app" Zenerchi.app; do
   fi
   [ -d "$DESK/$app" ] || { echo "absent : $app"; exit 1; }
 done
+if echo " $GAMES " | grep -q " ut "; then
+  if [ ! -d "$UTDEMO" ] && [ -d "/Volumes/GAMES/Unreal Tournament 2004 Demo.app" ]; then
+    cp -R "/Volumes/GAMES/Unreal Tournament 2004 Demo.app" "$DESK/" && echo "copié depuis le CD : UT2004 Demo"
+  fi
+  [ -d "$UTDEMO" ] || { echo "absent : Unreal Tournament 2004 Demo.app"; exit 1; }
+fi
 chown -R tiger "$MB" "$ZEN"; chmod -R u+w "$MB" "$ZEN"
+[ -d "$UTDEMO" ] && { chown -R tiger "$UTDEMO"; chmod -R u+w "$UTDEMO"; }
 kextstat | grep -i pomppc | awk '{print "kext :", $6, $7}'
 plugin_layout      # mode bureau : pas de seconde copie dans Resources
 ls -d $EXT/GLDriver-POMPPC.bundle $RES/GLDriver-POMPPC.bundle 2>&1
@@ -57,6 +67,9 @@ kill \$p; sleep 3; kill -9 \$p 2>/dev/null; echo fini" $((DUR + 120))
 }
 
 PREFS="$MB/marble/client/prefs.cs"
+ut_bin() {
+  ls -1 "$UTDEMO/Contents/MacOS/"* 2>/dev/null | head -1
+}
 for g in $GAMES; do
   case $g in
     zen)  play zen "$ZEN/Contents/MacOS/Zenerchi" ;;
@@ -68,5 +81,6 @@ for g in $GAMES; do
           grep -E 'Video::(resolution|fullScreen)' "$PREFS"
           play mb16 "$MB/Contents/MacOS/MarbleBlast Gold"
           cp $W/prefs.cs.orig "$PREFS" ;;
+    ut)   play ut "$(ut_bin)" ;;
   esac
 done

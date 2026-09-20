@@ -105,13 +105,37 @@ static void probe_renderers(void)
         return;
     }
     for (i = 0; i < nr; i++) {
-        long id = 0, acc = 0, mask = 0, vram = 0;
+        long id = 0, acc = 0, mask = 0, vram = 0, fs = 0, win = 0, off = 0;
+        CGLPixelFormatAttribute attrs[12];
+        CGLPixelFormatObj pix = NULL;
+        long npix = 0;
+        int k = 0;
+        CGLError pe;
+
         CGLDescribeRenderer(info, i, kCGLRPRendererID, &id);
         CGLDescribeRenderer(info, i, kCGLRPAccelerated, &acc);
+        CGLDescribeRenderer(info, i, kCGLRPFullScreen, &fs);
+        CGLDescribeRenderer(info, i, kCGLRPWindow, &win);
+        CGLDescribeRenderer(info, i, kCGLRPOffScreen, &off);
         CGLDescribeRenderer(info, i, kCGLRPDisplayMask, &mask);
         CGLDescribeRenderer(info, i, kCGLRPVideoMemory, &vram);
-        printf("renderer %ld : id 0x%08lx accéléré %ld masque d'écrans 0x%lx"
-               " mémoire %ld\n", i, id, acc, mask, vram);
+        printf("renderer %ld : id 0x%08lx accéléré %ld plein écran %ld fenêtre %ld"
+               " hors écran %ld masque d'écrans 0x%lx mémoire %ld\n",
+               i, id, acc, fs, win, off, mask, vram);
+
+        /* Liste de SDL 1.2 Quartz (UT2004) : FullScreen + ColorSize + DepthSize
+           + DoubleBuffer + ScreenMask. */
+        attrs[k++] = kCGLPFAFullScreen;
+        attrs[k++] = kCGLPFAColorSize; attrs[k++] = 32;
+        attrs[k++] = kCGLPFADepthSize; attrs[k++] = 16;
+        attrs[k++] = kCGLPFADoubleBuffer;
+        attrs[k++] = kCGLPFADisplayMask; attrs[k++] = (CGLPixelFormatAttribute) mask;
+        attrs[k] = 0;
+        pe = CGLChoosePixelFormat(attrs, &pix, &npix);
+        printf("  pixel format UT (plein écran 32/16) : err=%d (%s) pix=%p n=%ld\n",
+               pe, CGLErrorString(pe), (void *) pix, npix);
+        if (pix)
+            CGLDestroyPixelFormat(pix);
     }
     CGLDestroyRendererInfo(info);
 }

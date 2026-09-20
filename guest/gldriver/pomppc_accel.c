@@ -672,6 +672,85 @@ static float clamp01(float v)
     return !(v > 0.0f) ? 0.0f : v > 1.0f ? 1.0f : v;
 }
 
+/* Le cœur refuse NaN, infini et |v| ≥ 1e9 (toute la soumission saute). */
+static float sane_f(float v)
+{
+    return (v > -1e9f && v < 1e9f) ? v : 0.0f;
+}
+
+/* |f| ≥ 1e9, NaN ou Inf, par les bits IEEE — pas de FPU (FASTFP éteint). */
+static int u_insane(unsigned long u)
+{
+    return (u & 0x7fffffffUL) >= 0x4e6e6b28UL;      /* 1e9 = 0x4e6e6b28 */
+}
+
+/* UT2004 laisse des NaN dans DRAW_RAW. Les remettre à 0 dessinait un triangle
+   jusqu'à l'origine : fillrate, jeu figé, image « plus belle » (T&L) mais
+   rampante. On jette la primitive, on pose 0 sur le mot pour que l'hôte
+   accepte le reste. Comparaisons entières. 0 = ne pas soumettre. */
+static int raw_fix_nan(void)
+{
+    unsigned long nv, i, j, words, nbad = 0;
+    unsigned long *w;
+    static unsigned char bad[16384];                /* = GEOM_MAX_MERGE */
+
+    words = G.raw_words;
+    if (!words)
+        return 0;
+    nv = (G.raw_vend - G.raw_start) / (words * 4);
+    if (nv == 0 || nv > 16384)
+        return 0;
+    w = (unsigned long *)(G.win + VTX_OFF + G.raw_start);
+    for (i = 0; i < nv; i++) {
+        unsigned char b = 0;
+        unsigned long *v = w + i * words;
+        for (j = 0; j < words; j++) {
+            if (u_insane(v[j])) {
+                v[j] = 0;
+                b = 1;
+            }
+        }
+        bad[i] = b;
+        nbad += b;
+    }
+    if (!nbad)
+        return 1;
+
+    if (G.raw_idx && G.raw_mode == QGPU_PRIM_MODE_TRIANGLES) {
+        unsigned short *idx = (unsigned short *)(G.win + G.raw_idx);
+        unsigned long n = G.raw_count, o = 0, a, b0, c;
+        for (i = 0; i + 2 < n; i += 3) {
+            a = idx[i];
+            b0 = idx[i + 1];
+            c = idx[i + 2];
+            if (a < nv && b0 < nv && c < nv && !bad[a] && !bad[b0] && !bad[c]) {
+                idx[o] = (unsigned short)a;
+                idx[o + 1] = (unsigned short)b0;
+                idx[o + 2] = (unsigned short)c;
+                o += 3;
+            }
+        }
+        G.raw_count = o;
+        G.raw_nidx = o;
+        return o > 0;
+    }
+    if (!G.raw_idx && G.raw_mode == QGPU_PRIM_MODE_TRIANGLES) {
+        unsigned long o = 0;
+        for (i = 0; i + 2 < nv; i += 3) {
+            if (!bad[i] && !bad[i + 1] && !bad[i + 2]) {
+                if (o != i)
+                    memcpy(w + o * words, w + i * words, words * 12);
+                o += 3;
+            }
+        }
+        G.raw_count = o;
+        G.raw_vend = G.raw_start + o * words * 4;
+        return o > 0;
+    }
+    /* ruban / éventail / quads : un sommet fou gâche la série */
+    return 0;
+}
+
 static unsigned long to_u8(float v)
 {
     v = clamp01(v);
@@ -908,7 +987,7 @@ static void close_run(void)
  * garantie par la marge de reserve(). */
 static void close_raw(void)
 {
-    if (G.raw_ctx && G.raw_count) {
+    if (G.raw_ctx && G.raw_count && raw_fix_nan()) {
         unsigned long *c;
         /* Un vidage a pu survenir entre l'ouverture de la série et ici :
            geom_begin vide le flux APRÈS avoir envoyé l'état, quand la place des
@@ -1028,10 +1107,11 @@ static void broken_all(const char *why, long st, unsigned long pc)
     }
     {   /* Dire QUELLE commande, avec ses arguments : sans cela un refus coûte
            un aller-retour dans l'invité pour deviner. */
-        unsigned long k, n = 0;
+        unsigned long k, n = 0, op = 0;
         char buf[160];
         int at = 0;
         if (pc < CMD_WORDS) {
+            op = QGPU_CMD_OP(G.cmd[pc]);
             n = QGPU_CMD_LEN(G.cmd[pc]);
             if (n == 0 || n > 16 || pc + n > CMD_WORDS)
                 n = 1;
@@ -1039,8 +1119,22 @@ static void broken_all(const char *why, long st, unsigned long pc)
         for (k = 0; k < n && at < (int)sizeof(buf) - 10; k++)
             at += snprintf(buf + at, sizeof(buf) - at, " %lx", G.cmd[pc + k]);
         buf[at] = 0;
-        pomppc_log("POMPPC: commande fautive (op %lx) :%s\n",
-                   pc < CMD_WORDS ? (unsigned long)QGPU_CMD_OP(G.cmd[pc]) : 0UL, buf);
+        pomppc_log("POMPPC: commande fautive (op %lx) :%s\n", op, buf);
+        /* UT2004 : un BAD_ARG (filtre mipmap, sommet, etc.) tuait toute
+           l'accélération → menu en quads blancs/jaunes, logiciel PPC.
+           On jette CE lot et on continue : le texte peut encore partir. */
+        if (st == QGPU_ST_BAD_ARG) {
+            static unsigned n_badarg;
+            pomppc_log("POMPPC: soumission %s refusée (BAD_ARG, pc %lu, op 0x%lx) : "
+                       "lot ignoré, accélération gardée\n", why, pc, op);
+            if (n_badarg < 8)
+                fprintf(stderr, "POMPPC GL : lot refusé (BAD_ARG, pc %lu, op 0x%lx)%s, "
+                        "accélération gardée\n", pc, op, buf);
+            else if (n_badarg == 8)
+                fprintf(stderr, "POMPPC GL : lots BAD_ARG suivants omis\n");
+            n_badarg++;
+            return;
+        }
     }
     pomppc_log("POMPPC: soumission refusée (%s, statut %ld, commande %lu) : "
                "accélération coupée\n", why, st, pc);
@@ -1824,6 +1918,31 @@ static int tex_complete(const void *drvtex)
     return 1;
 }
 
+/* Niveau de base défini, même si la chaîne de mipmaps est incomplète.
+ * Le MIN_FILTER par défaut d'OpenGL est NEAREST_MIPMAP_LINEAR : une texture
+ * à un seul niveau (polices et curseur d'UT2004) est alors « incomplète ».
+ * Couper le texturage dessinait des quads de la couleur du sommet — blancs.
+ * On garde le niveau de base ; upload_texture rabat le filtre vers LINEAR
+ * ou NEAREST, que l'hôte accepte sans mipmaps. */
+static int tex_base_ok(const void *drvtex)
+{
+    const unsigned char *gp = (const unsigned char *)GLD_U32(drvtex, DT_PARAMS);
+    const unsigned char *lv;
+    unsigned long b;
+
+    if (!gp)
+        return 0;
+    b = U16(gp, TP_BASE_LEVEL);
+    if (b >= DT_LEVELS)
+        return 0;
+    if (GLD_U8(gp, TP_TARGET) == 0) {
+        const unsigned char *e0 = cube_level(drvtex, 0, b);
+        return U16(e0, PL_W) && U16(e0, PL_H) == U16(e0, PL_W) && GLD_U32(e0, PL_DATA);
+    }
+    lv = (const unsigned char *)drvtex + DT_LEVEL0 + b * DT_LEVEL_SIZE;
+    return S16(lv, LV_W) > 0 && S16(lv, LV_H) > 0 && GLD_U32(lv, LV_DATA);
+}
+
 /* v10 : la texture est-elle une texture 3D (cible de l'objet de GLEngine) ? */
 static int tex_is_3d(const PTex *t)
 {
@@ -2052,6 +2171,10 @@ static int upload_texture(PCtx *p, PTex *t)
         t->dirty = 0;
     }
     prm[0] = U16(gp, TP_MIN);
+    /* Filtre mipmap sans la chaîne : l'hôte refuserait la soumission
+       (qgpu_texture_levels = 0) et UT2004 n'aurait plus que des quads blancs. */
+    if (!tex_complete(dt) && prm[0] != 0x2600 && prm[0] != 0x2601)
+        prm[0] = (U16(gp, TP_MAG) == 0x2600) ? 0x2600 : 0x2601;
     prm[1] = U16(gp, TP_MAG);
     prm[2] = U16(gp, TP_WRAP_S);
     prm[3] = U16(gp, TP_WRAP_T);
@@ -2248,7 +2371,7 @@ static int texturing_on(PCtx *p)
         if (unit_slot(m) < 0 || !units)
             return 1;
         dt = (void *)GLD_U32(units, u * 0x14 + unit_slot(m) * 4);
-        if (dt && tex_complete(dt))
+        if (dt && (tex_complete(dt) || tex_base_ok(dt)))
             return 1;
     }
     return 0;
@@ -2285,11 +2408,15 @@ static int texture_unit_ok(PCtx *p, int u, TexUnit *tu)
         return no(NO_TEX_UNKNOWN, (unsigned long)dt, mask);
     /* Texture sans image (jamais définie) : OpenGL la dit incomplète et coupe
        le texturage de CETTE unité, sans toucher aux autres. Marble Blast
-       laisse ainsi des unités actives sans texture. */
+       laisse ainsi des unités actives sans texture. S'il y a un niveau de
+       base, on s'en sert (filtre mipmap rabattu) au lieu de dessiner blanc. */
     if (!tex_complete(tu->t->drvtex)) {
-        tu->t = 0;
+        if (!tex_base_ok(tu->t->drvtex)) {
+            tu->t = 0;
+            G.n_tex_incomplete++;
+            return 1;
+        }
         G.n_tex_incomplete++;
-        return 1;
     }
     if (!upload_texture(p, tu->t))
         return 0;
@@ -3281,7 +3408,7 @@ static int unit_textured(PCtx *p, int u)
     if (!t)
         return 0;
     (void)lv;
-    return tex_complete(t->drvtex);
+    return tex_complete(t->drvtex) || tex_base_ok(t->drvtex);
 }
 
 /* Le texturage courant tiendra-t-il sur l'hôte ? Prédicat pur (aucune commande,
@@ -3325,8 +3452,8 @@ static int geom_texture_ok(PCtx *p)
         if (!t)
             return no(NO_TEX_UNKNOWN, (unsigned long)dt, mask);
         (void)lv;
-        if (!tex_complete(t->drvtex))
-            continue;                   /* incomplète : l'unité est coupée, comme en GL */
+        if (!tex_complete(t->drvtex) && !tex_base_ok(t->drvtex))
+            continue;                   /* jamais définie : l'unité est coupée, comme en GL */
         if (!texture_uploadable(t))
             return 0;
     }
@@ -4347,11 +4474,14 @@ static int begin_tris(PCtx *p, Batch *b)
 static void put_vertex(const Batch *b, float *o, const unsigned char *v, const unsigned char *col)
 {
     const float *c = (const float *)(col + V_COLOR);
-    int u, nu = rk_units[b->kind];
-    for (u = 0; u < nu; u++)
-        memcpy(o + 8 + 4 * u, v + V_TEX(u), 4 * sizeof(float));
-    o[0] = GLD_F32(v, V_X);
-    o[1] = b->h - GLD_F32(v, V_Y);
+    int u, k, nu = rk_units[b->kind];
+    for (u = 0; u < nu; u++) {
+        const float *t = (const float *)(v + V_TEX(u));
+        for (k = 0; k < 4; k++)
+            o[8 + 4 * u + k] = sane_f(t[k]);
+    }
+    o[0] = sane_f(GLD_F32(v, V_X));
+    o[1] = sane_f(b->h - GLD_F32(v, V_Y));
     o[2] = clamp01(GLD_F32(v, V_Z) * b->zinv);
     o[3] = b->fog ? clamp01(GLD_F32(v, V_FOG)) : 1.0f;
     o[4] = clamp01(c[0]);
@@ -4375,6 +4505,13 @@ static void prim(Batch *b, int n, const unsigned char **v, const unsigned char *
     float *o;
     unsigned long vw = rk_words[b->kind];
     int i;
+    /* UT2004 laisse des NaN (positions, texcoords) : un seul ferait rejeter
+       tout le DRAW_TRIANGLES_TEX. On saute la primitive, le reste part. */
+    for (i = 0; i < n; i++) {
+        float x = GLD_F32(v[i], V_X), y = GLD_F32(v[i], V_Y);
+        if (!(x > -1e9f && x < 1e9f && y > -1e9f && y < 1e9f))
+            return;
+    }
     /* VTX_LIMIT, pas VTX_END : le haut de la zone porte les indices de la
        fusion, et les deux chemins cohabitent dans la même image (scène mixte). */
     if (VTX_OFF + G.vtx + n * vw * 4 > VTX_LIMIT)
@@ -5401,27 +5538,53 @@ void pomppc_drawable_attached(void *ctx, long kind, long result)
  * Le GLDriver d'Apple, lui, attend ses propres identifiants 0x02xx : on
  * réécrit à la sortie, on restaure avant de lui rendre la main.
  *
- *   RendererInfo : +0x04 identifiant, +0x08 drapeaux (0x100 = accéléré)
+ *   RendererInfo : +0x04 identifiant, +0x08 drapeaux
  *   pixel format : +0x00 suivant, +0x04 identifiant, +0x08 drapeaux (même codage)
  *
- * La demande kCGLPFAAccelerated (73) atteint gldChoosePixelFormat : le
- * GLDriver d'Apple, logiciel, n'y rend alors aucun format (vu en vrai). Elle
- * est retirée de la copie qu'il reçoit, et nos formats portent le drapeau.
+ * Drapeaux +0x08 (relevé GLDriver 0x65D / Rage128 0x2513 / GeForce3 0xA513,
+ * docs/re/capacites-glengine.md §6) :
+ *   0x0002 plein écran   — présent sur les vrais GPU, absent du logiciel
+ *   0x0004 hors écran    — le logiciel l'a, on le garde
+ *   0x0100 accéléré
+ *   0x2000 fenêtre       — présent sur les vrais GPU, absent du logiciel
+ *
+ * Le GLDriver d'Apple, logiciel, refuse kCGLPFAAccelerated (73),
+ * kCGLPFAFullScreen (54) et kCGLPFANoRecovery (72). On les retire de la
+ * copie qu'il reçoit, et on pose les drapeaux correspondants sur nos
+ * formats. Sans le bit plein écran, CGL n'appelle même pas
+ * gldChoosePixelFormat pour une demande NSOpenGLPFAFullScreen : c'est le
+ * « Failed creating OpenGL pixel format » d'UT2004 (SDL 1.2 Quartz).
+ *
+ * kCGLPFADoubleBuffer (5) est un booléen. Le traiter comme une valeur
+ * mangeait l'attribut suivant — ScreenMask (84) dans la liste de SDL.
  */
 #define RI_ID          0x04
 #define RI_FLAGS       0x08
+#define RI_FULLSCREEN  0x2
 #define RI_ACCELERATED 0x100
+#define RI_WINDOW      0x2000
+#define RI_OURS        (RI_ACCELERATED | RI_FULLSCREEN | RI_WINDOW)
 #define PF_NEXT        0x00
 #define PF_ID          0x04
 #define PF_FLAGS       0x08
+#define CGL_FULLSCREEN_ATTR  54
+#define CGL_NORECOVERY_ATTR  72
 #define CGL_RENDERER_ID_ATTR 70
 #define CGL_ACCELERATED_ATTR 73
-/* attributs CGL suivis d'une valeur (CGLTypes.h de 10.4) */
+/* attributs CGL suivis d'une valeur (CGLTypes.h / NSOpenGL.h de 10.4) */
 static int attr_has_value(long a)
 {
     switch (a) {
-    case 5: case 8: case 11: case 12: case 13: case 14: case 55: case 56:
-    case 70: case 84: case 96:
+    case 7:  /* kCGLPFAAuxBuffers */
+    case 8:  /* kCGLPFAColorSize */
+    case 11: /* kCGLPFAAlphaSize */
+    case 12: /* kCGLPFADepthSize */
+    case 13: /* kCGLPFAStencilSize */
+    case 14: /* kCGLPFAAccumSize */
+    case 55: /* kCGLPFASampleBuffers */
+    case 56: /* kCGLPFASamples */
+    case 70: /* kCGLPFARendererID */
+    case 84: /* kCGLPFADisplayMask / NSOpenGLPFAScreenMask */
         return 1;
     default:
         return 0;
@@ -5442,7 +5605,7 @@ void pomppc_patch_renderer_info(unsigned char *info)
 {
     GLD_U32(info, RI_ID) = to_ours(GLD_U32(info, RI_ID));
     if (pomppc_accel_enabled())
-        GLD_U32(info, RI_FLAGS) |= RI_ACCELERATED;
+        GLD_U32(info, RI_FLAGS) |= RI_OURS;
 }
 
 /* Copie traduite pour le GLDriver d'Apple ; 0 si la liste est trop longue. */
@@ -5452,7 +5615,9 @@ int pomppc_translate_attribs(const long *a, long *out, int max)
     for (i = 0; a[i]; i++) {
         if (n + 3 > max)
             return 0;
-        if (a[i] == CGL_ACCELERATED_ATTR)
+        if (a[i] == CGL_ACCELERATED_ATTR ||
+            a[i] == CGL_FULLSCREEN_ATTR ||
+            a[i] == CGL_NORECOVERY_ATTR)
             continue;
         if (a[i] == CGL_RENDERER_ID_ATTR) {
             out[n++] = a[i++];
@@ -5472,7 +5637,7 @@ void pomppc_patch_pixel_format(void *pf)
     if (pf) {
         GLD_U32(pf, PF_ID) = to_ours(GLD_U32(pf, PF_ID));
         if (pomppc_accel_enabled())
-            GLD_U32(pf, PF_FLAGS) |= RI_ACCELERATED;
+            GLD_U32(pf, PF_FLAGS) |= RI_OURS;
     }
 }
 
@@ -5480,7 +5645,7 @@ void pomppc_unpatch_pixel_format(void *pf)
 {
     if (pf) {
         GLD_U32(pf, PF_ID) = to_apple(GLD_U32(pf, PF_ID));
-        GLD_U32(pf, PF_FLAGS) &= ~RI_ACCELERATED;
+        GLD_U32(pf, PF_FLAGS) &= ~RI_OURS;
     }
 }
 

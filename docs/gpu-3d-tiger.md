@@ -141,9 +141,15 @@ Rien de ce qui suit n'est documenté par Apple. Tout a été lu dans l'image Tig
 - CGL retient **le premier renderer qui convient** : le bundle s'appelle `GLDriver-POMPPC` pour
   trier avant `GLDriver.bundle` (« - » < « . »). Il est aussi le seul à répondre à
   `kCGLPFAAccelerated` (l'attribut 73 est retiré de la copie passée au GLDriver d'Apple, et le
-  bit `0x100` posé dans nos formats).
-- `RendererInfo` : `+0x04` identifiant, `+0x08` drapeaux (`0x100` accéléré, `0x4` hors écran),
-  `+0x10`/`+0x18` modes couleur/profondeur, `+0x30` mémoire vidéo.
+  bit `0x100` posé dans nos formats). `kCGLPFAFullScreen` (54) et `kCGLPFANoRecovery` (72)
+  sont retirés de la même façon ; les drapeaux `0x2` (plein écran) et `0x2000` (fenêtre),
+  lus sur Rage128/GeForce3 et absents du logiciel `0x65D`, sont posés avec `0x100`.
+  Sans `0x2`, UT2004 (SDL 1.2 Quartz) échoue à `NSOpenGLPixelFormat` (« Failed creating
+  OpenGL pixel format ») avant tout dessin.
+  Premier passage réel de la démo : `docs/re/ut2004-demo.md`.
+- `RendererInfo` : `+0x04` identifiant, `+0x08` drapeaux (`0x100` accéléré, `0x2` plein écran,
+  `0x4` hors écran, `0x2000` fenêtre), `+0x10`/`+0x18` modes couleur/profondeur, `+0x30`
+  mémoire vidéo.
 - Sans WindowServer (single-user), CGL compte zéro écran et échoue, **sauf** si les attributs
   contiennent `kCGLPFARemotePBuffer` (91), qui interdit la connexion au WindowServer.
 

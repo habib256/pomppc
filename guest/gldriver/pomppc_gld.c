@@ -408,8 +408,9 @@ long gldChoosePixelFormat(long a, long b, long c, long d, long e, long f, long g
             pomppc_log(" %ld", at[i]);
         pomppc_log("\n");
     }
-    /* Le GLDriver d'Apple ne connaît ni nos identifiants ni la demande
-       « accéléré » : il reçoit une copie traduite, jamais le tableau de GLEngine. */
+    /* Le GLDriver d'Apple ne connaît ni nos identifiants ni les demandes
+       accéléré / plein écran / no-recovery : copie traduite, jamais le tableau
+       de GLEngine. */
     {
         long copy[256];
         if (b && pomppc_translate_attribs((const long *)b, copy, 256))

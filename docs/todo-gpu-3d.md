@@ -11,6 +11,19 @@ Ce fichier est le tableau de bord ; il est tenu à jour à chaque lot. Le contex
 les relevés de rétro-ingénierie nouveaux dans `docs/re/`. Les amorces de recherche déjà
 écrites, à ne pas refaire, sont en *Recherches amorcées*.
 
+## État (20/09/2026)
+
+- **UT2004 Demo, premier passage réel** (`docs/re/ut2004-demo.md`) : en
+  fenêtre l'image est juste (textures, polices, HUD, DM-Rankin). **Inutilisable** :
+  trop lent, même avec le T&L hôte. Portes levées : pixel format (drapeaux
+  plein écran / fenêtre / accéléré), textures UI à un niveau (filtre mipmap
+  rabattu), `BAD_ARG` non fatal, NaN de `DRAW_TRIANGLES_TEX` (0x31) et de
+  `DRAW_RAW` (primitive jetée, plus de triangle à l'origine). Reste :
+  **FASTFP éteint** sur le QEMU quotidien (levier déjà prouvé), NaN à traiter
+  **côté hôte**, plein écran (`CGLSetFullScreen` → `invalid drawable`),
+  `malloc` double-free à la sortie. Contrôle de la VM quotidienne (AZERTY,
+  CD, QMP) dans le même relevé.
+
 ## État (19/09/2026)
 
 - **Accélérateur IOKit publié (tâche 4.2, 19/09/2026)** : le kext publie un nub
@@ -394,11 +407,19 @@ descripteur `cfg+0x11c` est le canal des cartes à programmes de sommets
 
 ## Ordre d'attaque
 
+**Au 20/09/2026** (démo UT lancée, image juste, injouable) — `docs/re/ut2004-demo.md` §4 :
+1. bilan `POMPPC_GL_STATS` en fenêtre (DRAW_RAW vivant ou rastérisation) ;
+2. **FASTFP=1** sur la quotidienne (arrêt propre) ;
+3. NaN dans `do_draw` / `do_draw_raw` côté hôte, retirer le scan G4 du plugin ;
+4. `CGLSetFullScreen` / `gldAttachDrawable` ;
+5. double-free à la sortie. Ne pas re-splitter `tiger.qcow2` tant que la VM tourne.
+
 **Critère** (19/09/2026, soir) : dès que le DVD MacSoft PPC est dans l'invité, **premier
 lancement d'UT2004** avec `POMPPC_GL_STATS` — le bilan dicte l'ordre, pas cette liste.
 Attendu sans avoir joué : VRAM lue à 0, 16 bits hors domaine, 4 unités hôte contre
 `maxtextureunits=8`, géométrie hors du chemin `AllocVertexBuffer` / VAR. Démo Mac
-acceptable pour un premier passage.
+acceptable pour un premier passage. *(La démo a été lancée le 20/09 ; le bilan
+stats n'a pas encore été pris.)*
 
 **Au 19/09/2026, soir** (1.5 annoncé, accélérateur publié) :
 

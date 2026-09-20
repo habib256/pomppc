@@ -17,4 +17,5 @@ hors dépôt (disque USB : `pomppc/re/`).
 | `stencil.md` | l'état de stencil, et où le rendu d'Apple range le tampon |
 | `etat-v8.md` | mélange constant, opération logique, pointillés, modes de polygone ; et comment les **requêtes d'occlusion** atteignent le pilote |
 | `accelerateur-iokit.md` | comment CGL et GLEngine trouvent le pilote d'une carte (`IOAccelTypes` sur le framebuffer, `IOGLBundleName` sur l'accélérateur), et quand le WindowServer tente Quartz Extreme — tâche 4.2 |
+| `ut2004-demo.md` | premier passage UT2004 Demo (20/09/2026) : portes GPU levées, lenteur restante, **contrôle de la VM quotidienne** (AZERTY, QMP, CD) |
 | `version-extensions.md` | ce que la chaîne **tient** vraiment, fonction par fonction — d'où la version et les extensions annoncées ; table bit → extension corrigée par l'expérience |

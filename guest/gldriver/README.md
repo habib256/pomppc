@@ -94,7 +94,9 @@ Conception, rétro-ingénierie et mesures : `docs/gpu-3d-tiger.md`.
   `GLDriver-POMPPC` (tâche 4.2) : GLEngine charge le plugin depuis
   `/System/Library/Extensions/GLDriver-POMPPC.bundle`, **avant** le GLDriver
   d'Apple, comme le pilote d'une carte. CGL retient le premier renderer qui
-  convient, et le nôtre est aussi le seul à répondre à `kCGLPFAAccelerated`.
+  convient, et le nôtre est aussi le seul à répondre à `kCGLPFAAccelerated`,
+  `kCGLPFAFullScreen` et `kCGLPFANoRecovery` (retirés de la copie envoyée au
+  GLDriver d'Apple ; drapeaux `0x100` / `0x2` / `0x2000` posés sur nos formats).
   Un second exemplaire du plugin dans le même processus (une copie restée dans
   `Resources`) est rejeté par GLEngine après son `gldInitializeLibrary` : il
   reste inactif (marque `POMPPC_GLD_OWNER`), et `gldTerminateLibrary` rend la
