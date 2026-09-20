@@ -1,8 +1,9 @@
 # Feuille de route — d'un sous-ensemble d'OpenGL 1.3 à OpenGL 1.5 accéléré, et à QE/CI
 
 Objectif : que Tiger sous QEMU utilise le GPU de l'hôte **partout où le système et les
-applications s'en serviraient sur un vrai Power Mac** — jeux OpenGL, mais aussi composition des
-fenêtres (Quartz Extreme) et Core Image.
+applications s'en serviraient sur un vrai Power Mac** — jeux OpenGL, composition des
+fenêtres (Quartz Extreme) et Core Image. Le critère de jeu est **Unreal Tournament 2004
+Mac PPC** ; Marble Blast et Zenerchi restent les témoins.
 
 Ce document donne l'ordre de travail, ce qu'il faut relever dans `OpenGL.framework` avant chaque
 étape, et comment chaque étape se prouve. L'état courant et la liste courte sont dans
@@ -138,7 +139,7 @@ C'est la condition de Core Image, et de beaucoup de jeux de 2004-2006.
 | protocole et backends | `tests/qgpu_core_test.c` | le backend GL doit donner les mêmes pixels que le rasteriseur logiciel de référence |
 | device | `tests/qgpu_smoke.py` | flux complet à travers QEMU |
 | plugin, hors écran et en fenêtre | `guest/gltest`, `glwin` | chaque fonction nouvelle a sa scène, comparée au rendu d'Apple (`POMPPC_GL_DISABLE=1`) |
-| applications réelles | Zenerchi, Marble Blast Gold | images correctes **et** mesure avant/après (`POMPPC_GL_STATS=<fichier>`) |
+| applications réelles | Zenerchi, Marble Blast Gold, **UT2004 Mac PPC** | images correctes **et** mesure avant/après (`POMPPC_GL_STATS=<fichier>`) |
 | système | Informations Système, Quartz Debug | QE/CI, et le coût du WindowServer mesuré à l'`ioreg`/`top` |
 
 Toute fonction nouvelle garde son repli : hors domaine, le rendu d'Apple reprend la main, et le

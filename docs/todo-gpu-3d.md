@@ -1,8 +1,10 @@
-# TODO — Tiger en OpenGL 1.5, le plus vite possible, avec le maximum de travail sur le GPU hôte
+# TODO — Tiger à fond : bureau, et Unreal Tournament 2004
 
-**Objectif unique** : que Mac OS X Tiger sous QEMU annonce et tienne OpenGL 1.5, et que tout ce
-qui peut s'exécuter sur le GPU de l'hôte s'y exécute. Chaque tâche ci-dessous est jugée à cette
-aune : *combien de travail quitte le PowerPC émulé ?*
+**Objectif** : que Mac OS X Tiger sous QEMU tienne le bureau (Quartz Extreme) et les jeux
+OpenGL, avec **Unreal Tournament 2004 Mac PPC** comme critère final. OpenGL 1.5 annoncé et
+tenu n'est plus le but : c'est le plancher. Chaque tâche est jugée à cette aune : *est-ce
+qu'UT2004 ou le WindowServer quitte le PowerPC émulé ?* Marble Blast et Zenerchi restent les
+témoins de non-régression.
 
 Ce fichier est le tableau de bord ; il est tenu à jour à chaque lot. Le contexte long est dans
 `docs/roadmap-opengl15.md`, la conception et les offsets relevés dans `docs/gpu-3d-tiger.md`,
@@ -221,9 +223,10 @@ n'existent que sur l'hôte macOS.
 
 ## Points ouverts
 
-- **Après 1.5** (19/09/2026) : l'exactitude est atteinte ; restent la vitesse (axes 1 et 2 :
-  objets tampon côté hôte, moins de recopies), les applications réelles (Marble Blast, jeux) avec
-  l'annonce 1.5, et les réserves ci-dessous.
+- **Après 1.5** (19/09/2026) : l'exactitude du pipeline fixe est atteinte. Le critère n'est
+  plus « annoncer 1.5 » : c'est **UT2004 Mac PPC jouable**, et le bureau sous Quartz Extreme.
+  Marble Blast et Zenerchi restent les témoins. Restent la vitesse (axes 1 et 2), le 16 bits,
+  la VRAM annoncée, les programmes ARB, et les réserves ci-dessous.
 - **`glMaterial` entre `glBegin` et `glEnd`, chemin brut** : la primitive est perdue et la
   suivante garde l'ancien matériau (scène `matbegin`) — GLEngine bascule vers un autre renderer
   quel que soit `cfg+0x7a` (`docs/re/opengl-1.4.md` §3.3). Défaut antérieur ; piste : matériau
@@ -391,6 +394,12 @@ descripteur `cfg+0x11c` est le canal des cartes à programmes de sommets
 
 ## Ordre d'attaque
 
+**Critère** (19/09/2026, soir) : dès que le DVD MacSoft PPC est dans l'invité, **premier
+lancement d'UT2004** avec `POMPPC_GL_STATS` — le bilan dicte l'ordre, pas cette liste.
+Attendu sans avoir joué : VRAM lue à 0, 16 bits hors domaine, 4 unités hôte contre
+`maxtextureunits=8`, géométrie hors du chemin `AllocVertexBuffer` / VAR. Démo Mac
+acceptable pour un premier passage.
+
 **Au 19/09/2026, soir** (1.5 annoncé, accélérateur publié) :
 
 1. **Vitesse sur l'hôte Linux** : l'utilisateur trouve Marble Blast et Zenerchi plus lents sur
@@ -428,10 +437,15 @@ descripteur `cfg+0x11c` est le canal des cartes à programmes de sommets
      restant d'une instruction flottante n'est PAS dans les appels de helper (le 0002 ne
      rapporte que 2-4 %) — pistes : FPRF paresseux, `lfs`/`stfs` en ligne ; et les tampons
      16 bits du plugin.
-2. **Vers Quartz Extreme (4.4)** : plus de 4 clients, mémoire vidéo annoncée, client de surface
-   sur `POMPPCAccelerator`, puis `AccelCaps` (`docs/re/accelerateur-iokit.md` §9).
-3. Vitesse côté hôte et invité : **2.1** (objets tampon), **2.3** (zero-copy).
-4. **4.3** (programmes ARB) : condition de Core Image et de nombreux jeux de 2004-2006.
+2. **Ce qu'UT2004 va exiger** (à confirmer par le bilan, pas à implémenter à l'aveugle) :
+   **2.1** (VBO) et le chemin `AllocVertexBuffer` / `APPLE_vertex_array_range` déjà relevé ;
+   tampons **16 bits** ; mémoire vidéo annoncée (le jeu lit `kCGLRPVideoMemory` et `VARSize`) ;
+   plus de 4 unités de texture si le bilan le montre. **4.3** (programmes ARB) pour le joli
+   chemin d'Unreal Engine 2, et pour Core Image.
+3. **Vers Quartz Extreme (4.4)** : plus de 4 clients, mémoire vidéo, client de surface sur
+   `POMPPCAccelerator`, puis `AccelCaps` (`docs/re/accelerateur-iokit.md` §9). Ça ne fait pas
+   gagner une image en UT plein écran ; ça fait que Tiger *entre les matchs* ne rampe pas.
+4. **2.3** (zero-copy), une fois le goulot d'UT2004 nommé.
 
 Au 19/09/2026, matin (fait depuis : 2.5, textures 3D, compression — 1.2 à 1.5 annoncés) :
 
