@@ -469,14 +469,24 @@ fabriqué ni recopié par l'invité**. `POMPPC_GL_STATS` : `relect = 0` et
 graphique, par SSH ; `POMPPC_GL_STATS` doit être un **chemin absolu**, car
 avec `=1` le bilan n'est écrit qu'à la sortie et un `kill` l'en empêche) :
 
-* **En fenêtre, `present` reste à 0** — `glwin` : 122 relectures et 0
-  présentation hôte pour 121 images ; Marble Blast fenêtré : 178 à 775
-  relectures par tranche de 5 s, `present 0`, `direct` jusqu'à 767. Le
-  zéro-copie de la v13 écrit dans la VRAM QFB : il ne vaut que pour le
-  **plein écran**. En fenêtre, l'invité relit puis recopie dans la surface
-  de la fenêtre. Le coût est mesuré et modeste — `copie 0,30 ms` par image
-  — mais c'est bien ce qui tient `relect` loin de 0, et c'est le mode dans
-  lequel l'utilisateur joue.
+* **`present` est à 0 partout, et la cause n'est pas le mode fenêtré** :
+  le device n'annonce pas `QGPU_CAP_SCANOUT`. `QGPUCaps = 0x1e`, le bit
+  0x20 manque, parce que `SURF_PRESENT` cible la VRAM de **`qfb-pci`** et
+  que la quotidienne tourne sans ce device — l'écran est le framebuffer
+  natif de mac99 (`-g 1024x768x32`), `qfb_scanout_info` ne résout aucun
+  objet, `qgpu_bind_qfb` sort sans poser le bit, `G.scanout` reste faux.
+  **La v13 est donc inerte dans la configuration réellement utilisée**,
+  en plein écran comme en fenêtre, malgré `run_v13` vert sur l'hôte. Le
+  code du plugin, lui, est prêt pour les deux (`direct_target` rend 2 « en
+  fenêtre », et `present_direct` émet `SURF_PRESENT` dès que `G.scanout`).
+* **Ce que le scanout rapporterait : environ 2 %.** L'invité relit puis
+  recopie dans la surface de l'écran, et cette copie est mesurée à
+  **0,30 ms par image** — soit 2 % d'une image à 76 img/s. Le chiffre est
+  crédible : un `memcpy` de 800×600×4 dans l'invité prend 0,164 ms, soit
+  **11 Go/s**, parce que TCG traduit le déplacement d'octets du G4 en
+  déplacement d'octets sur l'hôte. Conclusion : rendre `SURF_PRESENT`
+  actif est un travail de **propreté architecturale** (c'est le dernier
+  verrou de `relect = 0`), pas un levier de vitesse.
 * **Le rendu n'est plus le goulot en jeu** : Marble Blast fenêtré en
   800×600 tient 47 à 155 img/s selon la scène (36 dans les menus, où 362
   replis par tranche subsistent), `submit 0,07 ms`, attente de barrière
