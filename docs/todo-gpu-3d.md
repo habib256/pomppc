@@ -449,8 +449,17 @@ Le miroir GL 1.x reste le contrat. On hisse, dans cet ordre :
 4. **Repli Apple** — le GLDriver logiciel reste le trou : dès qu'on y
    retombe, le G4 rastérise. **16 bits (v15)** : RGB1555 et Z UNORM16
    convertis par l'hôte ; le G4 ne fait plus que `memcpy` des octets déjà
-   16 bits. Restent hors domaine : lissage de polygone, brouillard
-   `GL_NICEST` hors chemin brut, lignes texturées.
+   16 bits. **Mesuré dans l'invité le 21/09/2026** (`gltest` avec
+   `GLTEST_COLOR16=1`, drawable RGB1555 de 256×256) : 13 scènes sur 13
+   dans le domaine, témoins bons des deux côtés, écart à Apple de 8 à 9
+   sur 255 sur les dégradés — soit le pas de quantification 1555 (1/31) —
+   et zéro sur les couleurs pures. A/B sur `game` : **5760 triangles sur
+   l'hôte et 1177 img/s avec la v15, contre 0 triangle et 48 img/s avec
+   `POMPPC_GL_XFER16=0`**, où le drawable de 16 bits repart entier chez
+   Apple. Le 16 bits coûte 17 % de plus que le 32 bits (1177 contre 1421
+   img/s) : la conversion sur l'hôte, pas le G4. Restent hors domaine :
+   lissage de polygone, brouillard `GL_NICEST` hors chemin brut, lignes
+   texturées.
 
 Critère de fin de phase A : sur le chemin accéléré, **aucun texel n'est
 fabriqué ni recopié par l'invité**. `POMPPC_GL_STATS` : `relect = 0` et
@@ -499,7 +508,9 @@ stats n'a pas encore été pris.)*
    - **16 bits** : ✅ v15 — `SURF`/`DEPTH` LEN 9, conversion RGB1555 et
      UNORM16 par l'hôte (`docs/protocole-v15-xfer16.md`). Avant : hors
      domaine (`CTX_COLOR_BITS != 32` → `NO_BUFFER`, profondeur 16 →
-     `NO_DEPTH`) ; tout partait au rendu logiciel d'Apple.
+     `NO_DEPTH`) ; tout partait au rendu logiciel d'Apple. Le A/B du
+     21/09/2026 chiffre ce qui était perdu : ×24 sur `gltest game` en
+     drawable de 16 bits (phase A, point 4).
    - **Le rendu n'est pas en cause** : `gltest game` 686 img/s ici (684-854 sur le Mac), aucun
      refus, plugin < 5 ms par image. Dans l'invité, le WindowServer est à < 1 % et le jeu à 91 %.
    - **Zenerchi** : 100 % des échantillons dans `TLoopMusicManager::LoadMusics → ov_read →

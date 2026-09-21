@@ -11,6 +11,7 @@
 # (10015) à tout choix de pixel format (vu en vrai, job diag du 19/09/2026).
 #
 #   SCENES="tri tex" : restreindre ; KEEP=1 : garder les PPM dans out/
+#   SCENES16="tri game" : restreindre le lot 16 bits (drawable RGB1555, v15)
 . ./lib.sh          # SRC, OUT, SDK, RES, EXT, plugin_layout
 SCENES=${SCENES:-"tri gouraud depth fill prims tex texfmt texpack texpersp comb mix state
   stencil depthrt varray varrayvbo game lit texgen clip fogz bigstrip dlist mixte fusion blendc logicop
@@ -69,3 +70,28 @@ for s in ${TEXSCENES:-tex texfmt texpack texpersp comb mix game texgen}; do
   d=$(./gltest diff p-$s.ppm g-$s.ppm 2>&1 | sed -n 's/.*écart max \([0-9]*\)\/255.*/\1/p' | tr '\n' '/')
   printf "TEX3 %-9s conversion invité rc=%d  écart hôte/invité %s\n" $s $rg "$d"
 done
+
+# v15 : un drawable de 16 bits (GLTEST_COLOR16=1 : RGB1555, Z de 16 bits) doit
+# rester dans le domaine, l'hôte convertissant les transferts. L'écart à Apple
+# en 16 bits se juge au pas de quantification : 1/31 vaut 8/255, donc quelques
+# unités sur les dégradés et zéro sur les couleurs pures.
+for s in ${SCENES16:-tri gouraud depth fill stencil depthrt occl fogz clip game lit texpersp varray}; do
+  case " $SCENES " in *" $s "*) ;; *) continue ;; esac
+  env GLTEST_NOWS=1 $(scene_env $s) GLTEST_COLOR16=1 ./gltest $s 256 256 q-$s.ppm \
+    > $OUT/$s-c16.txt 2>&1; rq=$?
+  env GLTEST_NOWS=1 $(scene_env $s) GLTEST_COLOR16=1 POMPPC_GL_DISABLE=1 ./gltest $s 256 256 b-$s.ppm \
+    > $OUT/$s-c16-apple.txt 2>&1; rb=$?
+  d=$(./gltest diff q-$s.ppm b-$s.ppm 2>&1 | sed -n 's/.*écart max \([0-9]*\)\/255.*/\1/p' | tr '\n' '/')
+  printf "C16 %-10s plugin rc=%d  apple rc=%d  écart hors arêtes/total %s\n" $s $rq $rb "$d"
+  [ -n "$KEEP" ] && cp q-$s.ppm b-$s.ppm $OUT/
+done
+# et la preuve que c'est bien la v15 qui tient le 16 bits : sans elle, le même
+# drawable sort du domaine et l'hôte ne dessine plus rien.
+tri_host() { sed -n 's/.*GL: \([0-9]*\) triangles.*/\1/p' "$1" | tail -1; }
+env GLTEST_NOWS=1 GLTEST_COLOR16=1 POMPPC_GL_STATS=1 ./gltest game 256 256 q16.ppm \
+  > $OUT/c16-on.txt 2>&1
+env GLTEST_NOWS=1 GLTEST_COLOR16=1 POMPPC_GL_STATS=1 POMPPC_GL_XFER16=0 ./gltest game 256 256 q16off.ppm \
+  > $OUT/c16-off.txt 2>&1
+printf "C16 game 16 bits : %s triangles sur l'hôte avec la v15, %s sans (XFER16=0)\n" \
+  "$(tri_host $OUT/c16-on.txt)" "$(tri_host $OUT/c16-off.txt)"
+grep -h 'img/s' $OUT/c16-on.txt $OUT/c16-off.txt | sed 's/^/C16 /'

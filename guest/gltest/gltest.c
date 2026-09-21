@@ -8,7 +8,12 @@
  * Sans WindowServer (single-user), CGL compte zéro écran et refuse tout pixel
  * format, SAUF si la liste contient kCGLPFARemotePBuffer (91) : ce drapeau
  * interdit la connexion au WindowServer (lu dans cglConvertAttribs de 10.4.6).
- * Le programme l'ajoute quand GLTEST_NOWS est défini.
+ * Le programme l'ajoute quand GLTEST_NOWS est défini. À l'inverse, dans une
+ * session graphique ouverte (SSH sur la VM de tous les jours), ce drapeau fait
+ * rendre kCGLBadDisplay : il ne faut alors PAS définir GLTEST_NOWS.
+ *
+ * GLTEST_COLOR16=1 demande un drawable de 16 bits (RGB1555) au lieu de 32 :
+ * c'est le chemin que la v15 du protocole fait convertir par l'hôte.
  *
  * Affiche le renderer choisi (GL_RENDERER) et la liste des renderers connus
  * de CGL : c'est ce qui prouve quel plugin GL a réellement rendu. Écrit l'image
@@ -96,13 +101,24 @@ static void pstep(const char *what)
 }
 
 static int W = 64, H = 64;
-static int ROWB;                        /* octets par ligne (GLTEST_ROWPAD en plus de 4·W) */
+static int ROWB;                        /* octets par ligne (GLTEST_ROWPAD en plus de BPP·W) */
+static int BPP = 4;                     /* 2 avec GLTEST_COLOR16 : drawable RGB1555 */
 static unsigned char *buf;
 
-static unsigned long px(int x, int y)   /* 0x00RRGGBB, y depuis le HAUT */
+/* 0x00RRGGBB, y depuis le HAUT. En 16 bits le drawable est du RGB1555 gros
+   boutiste ; les 5 bits sont étendus à 8 comme le fait la v15 sur l'hôte, si
+   bien qu'une couleur pure reste exacte (31 → 255) et que les témoins des
+   scènes valent pour les deux profondeurs. */
+static unsigned long px(int x, int y)
 {
-    unsigned char *p = buf + y * ROWB + x * 4;
-    return ((unsigned long)p[1] << 16) | ((unsigned long)p[2] << 8) | p[3];
+    unsigned char *p = buf + y * ROWB + x * BPP;
+    unsigned v, r, g, b;
+    if (BPP == 4)
+        return ((unsigned long)p[1] << 16) | ((unsigned long)p[2] << 8) | p[3];
+    v = ((unsigned)p[0] << 8) | p[1];
+    r = (v >> 10) & 31; g = (v >> 5) & 31; b = v & 31;
+    return ((unsigned long)(r << 3 | r >> 2) << 16) |
+           ((unsigned long)(g << 3 | g >> 2) << 8) | (b << 3 | b >> 2);
 }
 
 static int failures;
@@ -257,7 +273,8 @@ int main(int argc, char **argv)
     if (getenv("GLTEST_ACCEL"))
         attrs[k++] = kCGLPFAAccelerated;
     attrs[k++] = kCGLPFAOffScreen;
-    attrs[k++] = kCGLPFAColorSize; attrs[k++] = 32;
+    if (getenv("GLTEST_COLOR16")) BPP = 2;    /* couleur 16 bits : chemin v15 */
+    attrs[k++] = kCGLPFAColorSize; attrs[k++] = BPP == 2 ? 16 : 32;
     attrs[k++] = kCGLPFADepthSize; attrs[k++] = 16;
     if (getenv("GLTEST_STENCIL")) {         /* tampon de stencil de 8 bits */
         attrs[k++] = kCGLPFAStencilSize; attrs[k++] = 8;
@@ -276,7 +293,7 @@ int main(int argc, char **argv)
     printf("CGLCreateContext: err=%d ctx=%p\n", e, (void *)ctx);
     CGLDestroyPixelFormat(pix);
     if (e || !ctx) return 3;
-    ROWB = W * 4 + (getenv("GLTEST_ROWPAD") ? atoi(getenv("GLTEST_ROWPAD")) : 0);
+    ROWB = W * BPP + (getenv("GLTEST_ROWPAD") ? atoi(getenv("GLTEST_ROWPAD")) : 0);
     buf = calloc(ROWB * H, 1);
     e = CGLSetOffScreen(ctx, W, H, ROWB, buf);
     printf("CGLSetOffScreen: err=%d\n", e);
@@ -4967,8 +4984,14 @@ int main(int argc, char **argv)
         fprintf(fp, "P6\n%d %d\n255\n", W, H);
         int x;
         for (y = 0; y < H; y++)
-            for (x = 0; x < W; x++)
-                fwrite(buf + y * ROWB + x * 4 + 1, 1, 3, fp);
+            for (x = 0; x < W; x++) {
+                unsigned long c = px(x, y);
+                unsigned char rgb[3];
+                rgb[0] = (unsigned char)(c >> 16);
+                rgb[1] = (unsigned char)(c >> 8);
+                rgb[2] = (unsigned char)c;
+                fwrite(rgb, 1, 3, fp);
+            }
         fclose(fp);
     }
     CGLSetCurrentContext(0);
