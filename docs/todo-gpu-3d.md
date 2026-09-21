@@ -8,7 +8,9 @@ témoins de non-régression.
 
 Ce fichier est le tableau de bord ; il est tenu à jour à chaque lot. Le contexte long est dans
 `docs/roadmap-opengl15.md`, la conception et les offsets relevés dans `docs/gpu-3d-tiger.md`,
-les relevés de rétro-ingénierie nouveaux dans `docs/re/`. Les amorces de recherche déjà
+les relevés de rétro-ingénierie nouveaux dans `docs/re/`. Les documents externes
+(kext Tiger, IOGraphics, virtio-gpu, device QEMU) sont dans
+`docs/references-ingenierie.md`. Les amorces de recherche déjà
 écrites, à ne pas refaire, sont en *Recherches amorcées*.
 
 ## État (20/09/2026)
@@ -518,6 +520,28 @@ commandes de GPU (et, plus tard, Metal). Ce n'est **pas** le lot en cours.
 ---
 
 ## Ordre d'attaque
+
+**Au 21/09/2026** — rendement, d'après `docs/references-ingenierie.md`.
+Ne pas agrandir le kext : Tiger veut un user client `IOExternalMethod` et un
+`IOAccelerator` vide, et c'est déjà `POMPPCGPU` plus `POMPPCAccelerator`.
+Quartz Extreme est le plus gros chantier de la doc Apple et le plus mauvais
+pari : `mac99` n'a pas d'AGP, et sans `AccelCaps` le WindowServer ne s'y
+engage pas. Ça ne rend pas UT2004 jouable.
+
+Le rendement est de laisser les jeux sur le chemin géométrie hôte, avec les
+texels chez l'hôte (virtio-gpu : la ressource vit sur l'hôte, l'invité ne la
+relit plus). Marble Blast est déjà sorti de ce goulot (présentation en
+fenêtre). Dans l'ordre :
+
+1. **Tutoriel et texte WC3** restent sur l'hôte. Le panneau du tutoriel est
+   une image du terrain teintée par le matériau du gazon (vert fluo sur
+   blanc) ; les lettres du menu sortent du chemin brut. Plugin installé le
+   21/09 au soir : un sommet sans couleur reste blanc, et la conversion en
+   quads ne s'applique plus à ce plan. À revoir après un relancement de
+   Warcraft III — le processus déjà ouvert garde l'ancien plugin.
+2. **Ne renvoyer une texture que lorsque `gldModifyTextureLevel` le dit**,
+   au lieu de recomparer les texels. C'est le passage à 3 img/s des crédits.
+3. **Laisser Quartz Extreme** tant que ce chemin tient en jeu.
 
 **Au 20/09/2026, soir** — pixels hors du G4, première coupe :
 

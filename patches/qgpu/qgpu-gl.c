@@ -1228,6 +1228,140 @@ static void gl_set_clip(const QgpuGeom *gm)
     }
 }
 
+/* ───────── QGPU_RAW_TRACE=<file> : what the raw path really draws ─────────
+ *
+ * Warcraft III menu labels and grass blades reach this function with sane
+ * vertices yet never show up. The probe reports, for small textured strips,
+ * the state in force, the matrices OpenGL will actually use, where each vertex
+ * lands in window pixels, and what the bound texture holds on the host. */
+static FILE *raw_trace_file(void)
+{
+    static FILE *f;
+    static int init;
+    if (!init) {
+        const char *path = getenv("QGPU_RAW_TRACE");
+        init = 1;
+        if (path && path[0] == '/' && (f = fopen(path, "w")) != NULL) {
+            setvbuf(f, NULL, _IOLBF, 0);
+        }
+    }
+    return f;
+}
+
+/* Object space to window pixels, the way OpenGL will do it. Column major. */
+static void raw_trace_xform(const GLfloat *mv, const GLfloat *pr, const GLint *vp,
+                            const float *v, int nc, float *win)
+{
+    float o[4], eye[4], clip[4];
+    int i, j;
+    for (i = 0; i < 4; i++) {
+        o[i] = i < nc ? v[i] : (i == 3 ? 1.0f : 0.0f);
+    }
+    for (i = 0; i < 4; i++) {
+        eye[i] = 0.0f;
+        for (j = 0; j < 4; j++) {
+            eye[i] += mv[j * 4 + i] * o[j];
+        }
+    }
+    for (i = 0; i < 4; i++) {
+        clip[i] = 0.0f;
+        for (j = 0; j < 4; j++) {
+            clip[i] += pr[j * 4 + i] * eye[j];
+        }
+    }
+    win[3] = clip[3];
+    if (clip[3] == 0.0f) {
+        win[0] = win[1] = win[2] = 0.0f;
+        return;
+    }
+    win[0] = vp[0] + (clip[0] / clip[3] + 1.0f) * 0.5f * vp[2];
+    win[1] = vp[1] + (clip[1] / clip[3] + 1.0f) * 0.5f * vp[3];
+    win[2] = clip[2] / clip[3];
+}
+
+static void raw_trace(QgpuCore *c, const QgpuState *st, const QgpuGeom *gm,
+                      QgpuTexture *const *tex, uint32_t mode, uint32_t fmt,
+                      const float *verts, uint32_t words, uint32_t count)
+{
+    static int left = 400;
+    static long skip = -1;
+    FILE *f = raw_trace_file();
+    GLfloat mv[16], pr[16];
+    GLint vp[4], sc[4], bound = 0, tw = 0, th = 0;
+    int off_c = qgpu_vf_offset(fmt, QGPU_VF_COLOR);
+    int off_t = qgpu_vf_offset(fmt, (uint32_t)QGPU_VF_TEX(0));
+    uint32_t i;
+
+    if (!f || left <= 0 || mode != GL_TRIANGLE_STRIP || count > 6 || !tex[0]) {
+        return;
+    }
+    if (skip < 0) {                     /* skip the loading screen */
+        const char *e = getenv("QGPU_RAW_TRACE_SKIP");
+        skip = (e && *e) ? atol(e) : 0;
+    }
+    if (skip > 0) {
+        skip--;
+        return;
+    }
+    left--;
+    glGetFloatv(GL_MODELVIEW_MATRIX, mv);
+    glGetFloatv(GL_PROJECTION_MATRIX, pr);
+    glGetIntegerv(GL_VIEWPORT, vp);
+    glGetIntegerv(GL_SCISSOR_BOX, sc);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &th);
+    fprintf(f, "strip count %u fmt %08x words %u | lighting %u colormat %u"
+            " cull %u/%04x front %04x | blend %u alpha %u/%04x/%g depth %u/%04x"
+            " | scissor %u [%d %d %d %d] stencil %u | vp %d %d %d %d\n",
+            count, fmt, words, st->v[QGPU_SK_LIGHTING], st->v[QGPU_SK_COLOR_MATERIAL],
+            st->v[QGPU_SK_CULL_FACE], st->v[QGPU_SK_CULL_MODE], st->v[QGPU_SK_FRONT_FACE],
+            st->v[QGPU_SK_BLEND], st->v[QGPU_SK_ALPHA_TEST], st->v[QGPU_SK_ALPHA_FUNC],
+            qgpu_u2f(st->v[QGPU_SK_ALPHA_REF]), st->v[QGPU_SK_DEPTH_TEST],
+            st->v[QGPU_SK_DEPTH_FUNC], st->v[QGPU_SK_SCISSOR],
+            sc[0], sc[1], sc[2], sc[3], st->v[QGPU_SK_STENCIL_TEST],
+            vp[0], vp[1], vp[2], vp[3]);
+    fprintf(f, "  mat emi %g %g %g %g dif %g %g %g %g | tex id %d %dx%d env %04x\n",
+            gm->mat[0].emission[0], gm->mat[0].emission[1], gm->mat[0].emission[2],
+            gm->mat[0].emission[3], gm->mat[0].diffuse[0], gm->mat[0].diffuse[1],
+            gm->mat[0].diffuse[2], gm->mat[0].diffuse[3], bound, tw, th,
+            st->v[QGPU_SK_UNIT(0) + QGPU_SK_U_ENV_MODE]);
+    for (i = 0; i < count; i++) {
+        const float *v = verts + (size_t)i * words;
+        float win[4];
+        raw_trace_xform(mv, pr, vp, v, (int)QGPU_VF_POS_COUNT(fmt), win);
+        fprintf(f, "  v%u obj %g %g %g %g -> win %.1f %.1f z %.4f w %g",
+                i, v[0], v[1], v[2], QGPU_VF_POS_COUNT(fmt) == 4 ? v[3] : 1.0f,
+                win[0], win[1], win[2], win[3]);
+        if (off_c >= 0) {
+            fprintf(f, " | rgba %g %g %g %g", v[off_c], v[off_c + 1],
+                    v[off_c + 2], v[off_c + 3]);
+        }
+        if (off_t >= 0) {
+            fprintf(f, " | st %g %g", v[off_t], v[off_t + 1]);
+        }
+        fprintf(f, "\n");
+    }
+    /* Is the atlas actually there on the host side? Sample its alpha. */
+    if (tw > 0 && th > 0 && tw * th <= 1 << 20) {
+        unsigned char *px = malloc((size_t)tw * th * 4);
+        if (px) {
+            unsigned amin = 255, amax = 0, nz = 0;
+            long n = (long)tw * th, k;
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            for (k = 0; k < n; k++) {
+                unsigned a = px[k * 4 + 3];
+                if (a < amin) amin = a;
+                if (a > amax) amax = a;
+                if (px[k * 4] | px[k * 4 + 1] | px[k * 4 + 2] | a) nz++;
+            }
+            fprintf(f, "  atlas alpha %u..%u nonzero %u/%ld\n", amin, amax, nz, n);
+            free(px);
+        }
+    }
+    fprintf(f, "  gl error before draw %04x\n", glGetError());
+}
+
 static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
                         const QgpuGeom *gm, QgpuTexture *const *tex,
                         uint32_t mode, uint32_t fmt, const float *verts,
@@ -1387,6 +1521,7 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
     }
     if (ok) {
         g->ClientActiveTexture(GL_TEXTURE0);
+        raw_trace(c, st, gm, tex, mode, fmt, verts, words, count);
         if (idx) {
             glDrawElements(mode, (GLsizei)count, GL_UNSIGNED_INT, idx);
         } else {

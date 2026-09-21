@@ -66,7 +66,7 @@
 #include "pomppc_gld.h"
 #include "pomppc_qgpu.h"
 
-#define POMPPC_PLUGIN_REV "20260920-16"
+#define POMPPC_PLUGIN_REV "20260921-quad"
 static void gl_note(const char *fmt, ...);
 
 /* ───────────────────── dispositions relevées (Tiger 10.4.6) ─────────────────────
@@ -2249,7 +2249,15 @@ static int texture_uploadable(PTex *t)
         return no(NO_TEX_PARAM, U16((unsigned char *)GLD_U32(dt, DT_PARAMS), TP_WRAP_S),
                   U16((unsigned char *)GLD_U32(dt, DT_PARAMS), TP_MIN));
     if (t->qtex >= 0 && !t->dirty) {
-        if (tex_lv0_sig(t) != t->lv0_sig)
+        /* Sonde POMPPC_GL_TEXALWAYS : l'empreinte à quatre points peut manquer
+           un remplissage en place (atlas de polices). Tout retéléverser est
+           lent mais dit si c'est bien la détection qui laisse l'hôte périmé. */
+        static long always = -1;
+        if (always < 0) {
+            const char *e = getenv("POMPPC_GL_TEXALWAYS");
+            always = (e && *e && *e != '0') ? 1 : 0;
+        }
+        if (always || tex_lv0_sig(t) != t->lv0_sig)
             t->dirty = 1;
         else
             return 1;
@@ -4149,7 +4157,9 @@ static unsigned long geom_format(PCtx *p)
     int u, lighting = GLD_U8(g, GS_LIGHTING) != 0, normal = lighting;
 
     /* Toujours la couleur : les glyphes WC3 sont des quads colorés. Sans ça,
-       éclairage allumé et COLOR_MATERIAL éteint → matériau (souvent noir). */
+       éclairage allumé et COLOR_MATERIAL éteint → l'hôte n'éclairerait que le
+       matériau (souvent alpha 0 : gazon invisible). compute_geom_state pose
+       alors COLOR_MATERIAL sur l'hôte pour que cette couleur serve. */
     fmt |= QGPU_VF_COLOR;
     /* La coordonnée de brouillard n'est portée QUE si c'est bien elle la source :
        la présence du bit dit à l'hôte de poser GL_FOG_COORDINATE. */
@@ -4235,6 +4245,31 @@ static void compute_geom_state(PCtx *p, unsigned long *v)
     v[QGPU_SK_CULL_FACE] = GLD_U8(g, GS_CULL_FACE) != 0;
     v[QGPU_SK_CULL_MODE] = (cull == 0x0404 || cull == 0x0405 || cull == 0x0408) ? cull : 0x0405;
     v[QGPU_SK_FRONT_FACE] = U16(g, GS_FRONT_FACE) == 0x0900 ? 0x0900 : 0x0901;
+    /* Sondes : POMPPC_GL_NOCULL coupe l'élimination, POMPPC_GL_FLIPFACE
+       retourne le sens des faces. */
+    if (getenv("POMPPC_GL_NOCULL"))
+        v[QGPU_SK_CULL_FACE] = 0;
+    if (getenv("POMPPC_GL_FLIPFACE"))
+        v[QGPU_SK_FRONT_FACE] = v[QGPU_SK_FRONT_FACE] == 0x0900 ? 0x0901 : 0x0900;
+    /* POMPPC_GL_GLYPHTEST : rendre inratables les lots faits comme le texte des
+       menus (mélange + test alpha + éclairage). S'ils atteignent l'écran, on
+       verra des rectangles opaques à la place des lettres. La valeur 2 ne coupe
+       que le test de stencil, dont le tampon hôte peut ne pas valoir le nôtre. */
+    {
+        const char *gt = getenv("POMPPC_GL_GLYPHTEST");
+        if (gt && *gt == '2') {
+            v[QGPU_SK_STENCIL_TEST] = 0;
+            v[QGPU_SK_STENCIL_FUNC] = 0x0207;
+            v[QGPU_SK_STENCIL_VALUE_MASK] = 0xFF;
+        } else if (gt && GLD_U8(g, GS_ALPHA_TEST) && GLD_U8(g, GS_BLEND) &&
+                   GLD_U8(g, GS_LIGHTING)) {
+            v[QGPU_SK_ALPHA_TEST] = 0;
+            v[QGPU_SK_ALPHA_FUNC] = 0x0207;
+            v[QGPU_SK_ALPHA_REF] = 0;
+            v[QGPU_SK_BLEND] = 0;
+            v[QGPU_SK_LIGHTING] = 0;
+        }
+    }
     v[QGPU_SK_COLOR_MATERIAL] = GLD_U8(g, GS_COLOR_MATERIAL) != 0;
     v[QGPU_SK_COLOR_MAT_FACE] = (cf == 0x0404 || cf == 0x0405 || cf == 0x0408) ? cf : 0x0408;
     v[QGPU_SK_COLOR_MAT_MODE] =
@@ -4851,6 +4886,135 @@ static int merge_batch(unsigned long m, unsigned long n, unsigned long words)
     return 1;
 }
 
+/* ─────────── sonde POMPPC_GL_GEOMDUMP=<fichier> : un lot de géométrie brute ───────────
+ *
+ * Le texte des menus et les brins d'herbe de Warcraft III sortent justes par le
+ * chemin rastérisé et disparaissent par le chemin brut. La sonde ne retient que
+ * les lots susceptibles d'être eux — une unité porte une texture GL_ALPHA (les
+ * polices) ou le test alpha est armé (les brins) — et écrit l'état qui décide de
+ * leur aspect, puis les premiers sommets tels que GLEngine les a rangés. */
+static FILE *geom_dump_file(void)
+{
+    static FILE *f;
+    static int init;
+    if (!init) {
+        const char *path = getenv("POMPPC_GL_GEOMDUMP");
+        init = 1;
+        if (path && path[0] == '/' && (f = fopen(path, "w")) != 0)
+            setvbuf(f, (char *)0, _IOLBF, 0);
+    }
+    return f;
+}
+
+static void geom_probe(PCtx *p, const char *via, unsigned long m, unsigned long n,
+                       unsigned long fmt, unsigned long words, const float *v)
+{
+    static unsigned long left = 400;
+    static long from = -1;
+    FILE *f = geom_dump_file();
+    unsigned char *g;
+    const float *mt;
+    int u, i, alpha_tex = 0, nv;
+
+    if (!f || !left || !p || !v)
+        return;
+    if (from < 0) {                     /* image à partir de laquelle on retient */
+        const char *e = getenv("POMPPC_GL_GEOMDUMP_AT");
+        from = (e && *e) ? atol(e) : 0;
+    }
+    if ((long)G.n_frames < from)
+        return;
+    g = gls(p);
+    if (!g)
+        return;
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        unsigned long mask;
+        void *dt = unit_drvtex(p, u, &mask);
+        if (dt && GLD_U32(dt, DT_BASE_FORMAT) == 0x1906)
+            alpha_tex = 1;
+    }
+    /* Les glyphes : mélange sans éclairage. Les brins : test alpha. */
+    if (!alpha_tex && !GLD_U8(g, GS_ALPHA_TEST) &&
+        !(GLD_U8(g, GS_BLEND) && !GLD_U8(g, GS_LIGHTING)))
+        return;
+    left--;
+    fprintf(f, "%s mode %lu n %lu fmt %08lx words %lu | alphatex %d test %d func %x ref %g"
+            " | blend %d %x/%x | lighting %d\n",
+            via, m, n, fmt, words, alpha_tex, GLD_U8(g, GS_ALPHA_TEST),
+            U16(g, GS_ALPHA_FUNC), GLD_F32(g, GS_ALPHA_REF),
+            GLD_U8(g, GS_BLEND), U16(g, GS_BLEND_SRC_RGB), U16(g, GS_BLEND_DST_RGB),
+            GLD_U8(g, GS_LIGHTING));
+    {   /* ce qui décide où le lot atterrit et s'il survit aux tests */
+        const long *vp = (const long *)(g + GS_VIEWPORT);
+        const float *mv = (const float *)(g + GS_MAT_MODELVIEW);
+        const float *pr = (const float *)(g + GS_MAT_PROJ);
+        fprintf(f, "   depth %d func %x mask %d | cull %d %x | colormat %d mode %x"
+                " | vp %ld %ld %ld %ld | envoye %d\n",
+                GLD_U8(g, GS_DEPTH_TEST), U16(g, GS_DEPTH_FUNC), GLD_U8(g, GS_DEPTH_MASK),
+                GLD_U8(g, GS_CULL_FACE), U16(g, GS_CULL_MODE),
+                GLD_U8(g, GS_COLOR_MATERIAL), U16(g, GS_COLORMAT_MODE),
+                vp[0], vp[1], vp[2], vp[3], p->g_sent);
+        fprintf(f, "   mv %g %g %g %g / %g %g %g %g / %g %g %g %g / %g %g %g %g\n",
+                mv[0], mv[1], mv[2], mv[3], mv[4], mv[5], mv[6], mv[7],
+                mv[8], mv[9], mv[10], mv[11], mv[12], mv[13], mv[14], mv[15]);
+        fprintf(f, "   pr %g %g %g %g / %g %g %g %g / %g %g %g %g / %g %g %g %g\n",
+                pr[0], pr[1], pr[2], pr[3], pr[4], pr[5], pr[6], pr[7],
+                pr[8], pr[9], pr[10], pr[11], pr[12], pr[13], pr[14], pr[15]);
+    }
+    {   /* éclairage allumé + COLOR_MATERIAL éteint : couleur ET alpha du
+           fragment viennent du matériau, pas du sommet. */
+        const unsigned char *mt = g + GS_MATERIAL_FRONT;
+        const float *am = (const float *)(mt + MT_AMBIENT);
+        const float *di = (const float *)(mt + MT_DIFFUSE);
+        const float *em = (const float *)(mt + MT_EMISSION);
+        fprintf(f, "   mat amb %g %g %g %g dif %g %g %g %g emi %g %g %g %g"
+                " | lumieres %08lx ambiance %g %g %g %g\n",
+                am[0], am[1], am[2], am[3], di[0], di[1], di[2], di[3],
+                em[0], em[1], em[2], em[3], GLD_U32(g, GS_LIGHT_MASK),
+                GLD_F32(g, GS_SCENE_AMBIENT), GLD_F32(g, GS_SCENE_AMBIENT + 4),
+                GLD_F32(g, GS_SCENE_AMBIENT + 8), GLD_F32(g, GS_SCENE_AMBIENT + 12));
+    }
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        unsigned long mask;
+        void *dt = unit_drvtex(p, u, &mask);
+        unsigned char *lv;
+        if (!dt)
+            continue;
+        lv = (unsigned char *)dt + DT_LEVEL0;
+        mt = (const float *)(g + GS_MAT_TEXTURE(u));
+        fprintf(f, "   unite %d mask %lx base %lx niv0 %dx%d fmt %x/%x env %x"
+                " | texmtx %g %g %g %g / %g %g %g %g\n",
+                u, mask, GLD_U32(dt, DT_BASE_FORMAT), (int)S16(lv, LV_W), (int)S16(lv, LV_H),
+                U16(lv, LV_FORMAT), U16(lv, LV_TYPE),
+                U16(g + GS_TEXUNIT0 + u * GS_TEXUNIT_SIZE, TU_ENV_MODE),
+                mt[0], mt[5], mt[10], mt[15], mt[12], mt[13], mt[14], mt[3]);
+    }
+    {
+        const float *cur = (const float *)(g + GS_CUR_COLOR);
+        unsigned char *V = (unsigned char *)GLD_U32(g, GS_VAO);
+        fprintf(f, "   cur %g %g %g %g", cur[0], cur[1], cur[2], cur[3]);
+        if (V) {
+            const unsigned char *ent = VA_SLOT(V, 2);
+            fprintf(f, " | coul tableau %d type %x n %u pas %lu src %08lx",
+                    va_enabled(V, 2), U16(ent, 8), U16(ent, 0xa),
+                    GLD_U32(ent, 4), GLD_U32(ent, 0));
+        }
+        fprintf(f, "\n");
+    }
+    nv = n < 4 ? (int)n : 4;
+    for (i = 0; i < nv; i++) {
+        const float *s = v + (unsigned long)i * words;
+        unsigned long j;
+        fprintf(f, "   s%d", i);
+        for (j = 0; j < words && j < 16; j++)
+            fprintf(f, " %g", s[j]);
+        fprintf(f, " |");
+        for (j = 0; j < words && j < 16; j++)
+            fprintf(f, " %08lx", ((const unsigned long *)s)[j]);
+        fprintf(f, "\n");
+    }
+}
+
 /* +0x54 EndPrimitiveBuffer(ctx, drapeau, mode, n) : GLEngine a écrit n sommets
  * dans le tampon rendu par +0x50. Il n'y a plus rien qui puisse échouer ici. */
 static void geom_end(void *ctx, long flag, short mode, long n)
@@ -4907,6 +5071,8 @@ static void geom_end(void *ctx, long flag, short mode, long n)
     }
     words = G.pend_words;
     G.vtx = G.pend_off + (unsigned long)n * words * 4;
+    geom_probe(p, "End", m, (unsigned long)n, G.pend_fmt, words,
+               (const float *)(G.win + VTX_OFF + G.pend_off));
     /* Les trois conditions de TOUTE fusion : même contexte, même format de
        sommet, sommets CONTIGUS dans la zone partagée. Il n'y a rien à vérifier
        de l'état : tout changement d'état passe par send_cmd → reserve →
@@ -5048,6 +5214,34 @@ static const unsigned char *va_src(PCtx *p, const unsigned char *V, int a)
     return (const unsigned char *)raw;
 }
 
+/* Couleur hors tableau. Un sommet sans couleur (0,0,0,0) ne doit pas hériter
+ * du matériau : en jeu c'est le vert du terrain, et le panneau du tutoriel
+ * — une image du décor — sortait alors vert fluo sur blanc. (1,1,1,1) laisse
+ * passer les texels (l'or des menus comme la carte du tutoriel). Une vraie
+ * glColor, elle, est conservée. */
+static int color_dead(const float *c, int n)
+{
+    int k;
+    for (k = 0; k < n; k++)
+        if (c[k] != 0.0f)
+            return 0;
+    return 1;
+}
+
+static void fill_current_color(PCtx *p, float *dst)
+{
+    const float *cur = (const float *)(gls(p) + GS_CUR_COLOR);
+    int k;
+
+    for (k = 0; k < 4; k++)
+        dst[k] = cur[k];
+    if (color_dead(dst, 4)) {
+        dst[0] = dst[1] = dst[2] = dst[3] = 1.0f;
+    } else if (dst[3] == 0.0f) {
+        dst[3] = 1.0f;
+    }
+}
+
 static const float *va_current(unsigned char *g, int slot)
 {
     switch (slot) {
@@ -5073,6 +5267,10 @@ static void va_fetch(float *dst, PCtx *p, const unsigned char *V, int slot,
     unsigned type;
     int k, src_n, bpc, stride, norm;
 
+    if (slot == 2 && (!V || !va_enabled(V, slot))) {
+        fill_current_color(p, dst);
+        return;
+    }
     if (!V || !va_enabled(V, slot)) {
         cur = va_current(g, slot);
         for (k = 0; k < dst_n; k++)
@@ -5089,6 +5287,10 @@ static void va_fetch(float *dst, PCtx *p, const unsigned char *V, int slot,
         norm = 1;
     src = va_src(p, V, slot);
     if (!src || stride <= 0 || bpc <= 0) {
+        if (slot == 2) {
+            fill_current_color(p, dst);
+            return;
+        }
         cur = va_current(g, slot);
         for (k = 0; k < dst_n; k++)
             dst[k] = cur && k < 4 ? cur[k] : (k == dst_n - 1 ? last_def : 0.0f);
@@ -5106,6 +5308,12 @@ static void va_fetch(float *dst, PCtx *p, const unsigned char *V, int slot,
         }
         dst[k] = v;
     }
+    /* Tableau de couleurs tout à zéro : WC3 en laisse parfois un, inerte, et
+       pose la vraie teinte par glColor / ColorMat. Sans ça, MODULATE × alpha 0
+       efface les glyphes. */
+    if (slot == 2 && dst_n >= 4 &&
+        dst[0] == 0.0f && dst[1] == 0.0f && dst[2] == 0.0f && dst[3] == 0.0f)
+        fill_current_color(p, dst);
 }
 
 static void va_pack_vertex(float *dst, PCtx *p, const unsigned char *V,
@@ -5332,6 +5540,29 @@ static void emit_draw_client(PCtx *p, unsigned long mode, unsigned long nidx,
     }
 }
 
+static int quads_axis_aligned(const float *v, unsigned long n, unsigned long words)
+{
+    unsigned long i;
+    if (!v || n < 4 || (n % 4) != 0 || words < 2)
+        return 0;
+    for (i = 0; i < n; i += 4) {
+        const float *a = v + (i + 0) * words;
+        const float *b = v + (i + 1) * words;
+        const float *c = v + (i + 2) * words;
+        const float *d = v + (i + 3) * words;
+        float dx1 = b[0] - a[0], dy1 = b[1] - a[1];
+        float dx2 = c[0] - b[0], dy2 = c[1] - b[1];
+        float dy3 = d[1] - c[1];
+        float dx4 = a[0] - d[0];
+        if (!(dy1 > -1e-3f && dy1 < 1e-3f && dx2 > -1e-3f && dx2 < 1e-3f &&
+              dy3 > -1e-3f && dy3 < 1e-3f && dx4 > -1e-3f && dx4 < 1e-3f))
+            return 0;
+        if ((dx1 > -1e-3f && dx1 < 1e-3f) || (dy2 > -1e-3f && dy2 < 1e-3f))
+            return 0;
+    }
+    return 1;
+}
+
 /* Cœur du canal tableaux. Verrou déjà tenu. 1 = traité (même si n=0). */
 static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
                             long first, long count, unsigned long itype,
@@ -5452,6 +5683,17 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
         }
         G.idx += need;
     }
+    /* Glyphes du menu : quelques rectangles courts, annoncés en TRIANGLES.
+       Le 4e sommet recoud la lettre suivante et balaie l'atlas. On ne convertit
+       pas un maillage entier : le plan du tutoriel est lui aussi en rectangles,
+       et le passer en quads en faisait une nappe verte. */
+    if (!nidx && mode == QGPU_PRIM_MODE_TRIANGLES && !reuse &&
+        nverts <= 96 && !GLD_U8(g, GS_LIGHTING) &&
+        quads_axis_aligned((const float *)(G.win + VTX_OFF + vtx_off), nverts, words))
+        mode = QGPU_PRIM_MODE_QUADS;
+    if (!reuse)
+        geom_probe(p, "Array", mode, nverts, fmt, words,
+                   (const float *)(G.win + VTX_OFF + vtx_off));
     emit_draw_client(p, mode, nidx, nverts, fmt, vtx_off, ioff, itype_h, hb);
     G.n_rawdraws++;
     G.n_rawverts += nverts;
