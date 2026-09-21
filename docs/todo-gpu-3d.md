@@ -465,6 +465,30 @@ Critère de fin de phase A : sur le chemin accéléré, **aucun texel n'est
 fabriqué ni recopié par l'invité**. `POMPPC_GL_STATS` : `relect = 0` et
 `present > 0` à chaque image, `copie ≈ 0 ms`.
 
+**Où en est ce critère, mesuré le 21/09/2026 dans la quotidienne** (session
+graphique, par SSH ; `POMPPC_GL_STATS` doit être un **chemin absolu**, car
+avec `=1` le bilan n'est écrit qu'à la sortie et un `kill` l'en empêche) :
+
+* **En fenêtre, `present` reste à 0** — `glwin` : 122 relectures et 0
+  présentation hôte pour 121 images ; Marble Blast fenêtré : 178 à 775
+  relectures par tranche de 5 s, `present 0`, `direct` jusqu'à 767. Le
+  zéro-copie de la v13 écrit dans la VRAM QFB : il ne vaut que pour le
+  **plein écran**. En fenêtre, l'invité relit puis recopie dans la surface
+  de la fenêtre. Le coût est mesuré et modeste — `copie 0,30 ms` par image
+  — mais c'est bien ce qui tient `relect` loin de 0, et c'est le mode dans
+  lequel l'utilisateur joue.
+* **Le rendu n'est plus le goulot en jeu** : Marble Blast fenêtré en
+  800×600 tient 47 à 155 img/s selon la scène (36 dans les menus, où 362
+  replis par tranche subsistent), `submit 0,07 ms`, attente de barrière
+  0,08 à 0,11 ms par image, 0 `QUEUE_FULL`.
+* **Le 16 bits en jeu n'est pas encore prouvé** : `prefs.cs` en
+  « 800 600 16 » donne des chiffres identiques au 32 bits (35,7 contre
+  36,2 puis 154,3 contre 154,8 img/s), et le bilan dit `display 32-bit` —
+  le jeu ignore `fullScreen = 1` et garde une fenêtre sur un bureau de 32
+  bits, si bien que les deux mesures portent probablement sur le même
+  drawable. Pour trancher : bureau en 16 bits (`RES=…x16` au lancement)
+  ou un jeu qui prend vraiment le plein écran.
+
 ### Phase B — qgpu n'est plus du GL
 
 Quand A est tenu : casser le miroir. Le protocole devient un tampon de
