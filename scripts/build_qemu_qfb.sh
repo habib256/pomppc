@@ -194,6 +194,8 @@ echo "=== capacités du binaire produit ==="
 check screamer   qemu_machine_has  "$BIN" "mac99,via=pmu" screamer
 check qfb-pci    qemu_has_device   "$BIN" qfb-pci
 check qgpu-pci   qemu_has_device   "$BIN" qgpu-pci
+# Pas seulement « le device existe » : a-t-il un écran où présenter ?
+check qgpu-scanout qemu_qgpu_has_scanout "$BIN" "mac99,via=pmu"
 check slirp      qemu_has_netdev   "$BIN" user
 case "$(uname -s)" in
   Darwin) check audio-coreaudio qemu_has_audiodev "$BIN" coreaudio ;;

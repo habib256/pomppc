@@ -154,7 +154,7 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`. Les amorces de rech
 |---|---|---|
 | 2.1 | **Objets tampon** (`CreateBuffer`, `FlushBuffer`, `BufferSubData`) sur tampons hôte : les maillages statiques ne retraversent plus la fenêtre partagée. (OpenGL 1.5.) | **v14 20/09/2026** : `BUF_CREATE` / `DESTROY` / `SUBDATA` + `DRAW_RAW_BUF`. `FlushBuffer` salit ; le premier `DrawArrays`/`DrawElements` emballe au format `DRAW_RAW` et téléverse ; les suivants du même intervalle sautent BAR0 (`QGPU_BUF_SHMEM` pour les indices). `POMPPC_GL_VBO=0` reprend `DRAW_RAW`. Mode immédiat inchangé. Preuve native `run_v14`. |
 | 2.2 | ✅ **Fait le 18/09/2026**, de bout en bout. **Hôte** : protocole **v9** — file de 16 soumissions, thread de rendu, `QGPU_DOORBELL_ASYNC`, `FENCE_SUBMITTED`, `SUBMIT_ST`, `QUEUE_FREE`, `ERRORS`, `QUEUE_DEPTH`, IRQ `DONE` posée par un *bottom half* (`docs/protocole-v9-asynchrone.md`). **Kext** : le drapeau voyage dans les bits hauts de `len` de `QGPU_UC_SUBMIT` — l'ABI de Darwin 8 compare le *nombre* d'arguments scalaires au bit près, donc ajouter un scalaire aurait cassé tous les appelants existants ; `QGPU_UC_WAIT_FENCE` ne scrute plus, il dort sur la command gate et `irqAction` le réveille, avec un `IOTimerEventSource` comme base de temps du délai maximal (Tiger n'a pas `commandSleep(event, deadline, …)`, arrivé en 10.5) ; `destroyClientObjects` draine la file avant de rendre la tranche. **Plugin** : `POMPPC_GL_ASYNC` (défaut **activé**), tranche coupée en **deux moitiés** alternées à chaque soumission, relectures **différées** jusqu'au moment où l'invité en a besoin, présentation directe de l'image *n−1* au début de l'échange suivant (**une image de latence, jamais plus**). **Mesures Marble Blast** : temps de soumission **1,6 → 0,06 ms/image** (÷26), attente restante **0,1 ms/image**, **79,4 → 88,1 img/s (+11 %)** sur les fenêtres de jeu. Sur `gltest` (hors écran, relecture à chaque image) : **aucun gain**, c'est attendu. | ✅ **fait** |
-| 2.3 | **Zero-copy à la présentation** : le device écrit lui-même dans la VRAM QFB (`SURF_PRESENT`, v13) ; plus de relecture ni de recopie par l'invité. Conversion 1555 sur l'hôte. `docs/protocole-v13-present.md`. | **hôte + plugin 20/09/2026** — preuve native `run_v13`. Device v15 en service. |
+| 2.3 | **Zero-copy à la présentation** : le device écrit lui-même dans la VRAM de l'écran (`SURF_PRESENT`, v13) ; plus de relecture ni de recopie par l'invité. Conversion 1555 sur l'hôte. `docs/protocole-v13-present.md`. | **hôte + plugin 20/09/2026** — preuve native `run_v13`. **Mais inerte jusqu'au 21/09/2026** : la cible n'existait que pour `qfb-pci`, absent de la quotidienne, donc `QGPU_CAP_SCANOUT` jamais posé et `present = 0` partout. Depuis, `qgpu_bind_scanout` se rabat sur la VRAM du **VGA** de mac99 (QOM « vga.vram[0] »), sondée par `caps.sh`. Mesuré en jeu : `readback` 775 → 2-8, `copie` 0,30 → 0,00 ms, **+10 % d'images/s**. |
 | 2.4 | **Présentation en fenêtre sans attendre le WindowServer** : écriture directe dans le rectangle de la surface à l'écran, tant que rien ne la recouvre et que le curseur n'y bouge pas ; un échange normal toutes les 90 images rafraîchit la fenêtre. Marble Blast : +70 %. | ✅ fait |
 | 2.5 | Téléversement de textures sans conversion invité quand le format est connu de l'hôte (BGRA, 565, 1555…) : la conversion passe sur l'hôte. | ✅ **fait le 19/09/2026** : hôte (v10, `TEX_IMAGE3`) et plugin. Avec un device v10, le plugin recopie le niveau tel quel (pas de ligne compris : les niveaux alignés ne sont plus refusés) et l'hôte convertit ; `POMPPC_GL_TEX3=0` rend l'ancien chemin. Image identique au pixel près sur les 8 scènes texturées de `gltest`. **Gain mesuré modeste** (scène `texup`, 256×256 renvoyée à chaque image) : RGBA 362 → 388 img/s, RGB 410 → 445 (+7 à +9 %) ; 565 et BGRA inchangés — le temps y est dans GLEngine, pas dans la conversion |
 | 2.6 | Opérations de pixels sur l'hôte (`DrawPixels`, `CopyPixels`, `Bitmap`, `ReadPixels`, `CopyTexSubImage`) : chacune force aujourd'hui une relecture complète. | **20/09/2026** : `COPY_TEX` + rectangle couleur. **Bitmap**. **DEPTH/STENCIL** : `ReadPixels` FLOAT/octet, `DrawPixels` / `CopyPixels` via `DEPTH_*` / `STENCIL_*` (test `ALWAYS` ou coupé, masque d'écriture plein). Zoom / transfer maps / test LESS → Apple. `POMPPC_GL_PIXEL=0` reprend Apple. |
@@ -469,24 +469,34 @@ fabriqué ni recopié par l'invité**. `POMPPC_GL_STATS` : `relect = 0` et
 graphique, par SSH ; `POMPPC_GL_STATS` doit être un **chemin absolu**, car
 avec `=1` le bilan n'est écrit qu'à la sortie et un `kill` l'en empêche) :
 
-* **`present` est à 0 partout, et la cause n'est pas le mode fenêtré** :
-  le device n'annonce pas `QGPU_CAP_SCANOUT`. `QGPUCaps = 0x1e`, le bit
-  0x20 manque, parce que `SURF_PRESENT` cible la VRAM de **`qfb-pci`** et
+* **Le critère est TENU en fenêtre depuis le 21/09/2026** — Marble Blast
+  fenêtré en 800×600, par tranche de 5 s : `present` 229 à 766,
+  `readback` **2 à 8** (contre 234 à 775 avant), `copie 0,00 ms` (contre
+  0,30). Les seules relectures qui restent sont celles que le plugin fait
+  exprès pour rafraîchir la surface du WindowServer (`DIRECT_REFRESH`) et
+  le `ReadPixels` des menus.
+* **La cause du `present = 0` n'était pas le mode fenêtré** : le device
+  n'annonçait pas `QGPU_CAP_SCANOUT` (`QGPUCaps = 0x1e`, bit 0x20 absent),
+  parce que `SURF_PRESENT` ne connaissait que la VRAM de **`qfb-pci`** et
   que la quotidienne tourne sans ce device — l'écran est le framebuffer
-  natif de mac99 (`-g 1024x768x32`), `qfb_scanout_info` ne résout aucun
-  objet, `qgpu_bind_qfb` sort sans poser le bit, `G.scanout` reste faux.
-  **La v13 est donc inerte dans la configuration réellement utilisée**,
-  en plein écran comme en fenêtre, malgré `run_v13` vert sur l'hôte. Le
-  code du plugin, lui, est prêt pour les deux (`direct_target` rend 2 « en
-  fenêtre », et `present_direct` émet `SURF_PRESENT` dès que `G.scanout`).
-* **Ce que le scanout rapporterait : environ 2 %.** L'invité relit puis
-  recopie dans la surface de l'écran, et cette copie est mesurée à
-  **0,30 ms par image** — soit 2 % d'une image à 76 img/s. Le chiffre est
-  crédible : un `memcpy` de 800×600×4 dans l'invité prend 0,164 ms, soit
-  **11 Go/s**, parce que TCG traduit le déplacement d'octets du G4 en
-  déplacement d'octets sur l'hôte. Conclusion : rendre `SURF_PRESENT`
-  actif est un travail de **propreté architecturale** (c'est le dernier
-  verrou de `relect = 0`), pas un levier de vitesse.
+  VGA de mac99. La v13 était donc **inerte dans la configuration
+  réellement utilisée**, en plein écran comme en fenêtre, malgré `run_v13`
+  vert sur l'hôte et un plugin prêt pour les deux cas (`direct_target`
+  rend 2 « en fenêtre »). Corrigé : `qgpu_bind_scanout` se rabat sur la
+  VRAM du VGA, atteinte par QOM (« vga.vram[0] », enfant du device
+  « VGA ») sans rien changer au code amont de QEMU. `QGPUCaps` vaut
+  maintenant **0x3e**, et `scripts/caps.sh` sonde la capacité
+  (`qemu_qgpu_has_scanout`) pour qu'un binaire sans cible ne passe plus
+  inaperçu.
+* **Ce que ça rapporte : environ 10 %**, à nombre de triangles par image
+  comparable : 76,3 → 83,5, 46,7 → 51,8, 59,4 → 64,5, 73,6 → 81,1 img/s.
+  *La prévision faite avant la mesure — 2 %, déduite du `copie 0,30 ms` et
+  d'un `memcpy` invité à 11 Go/s — était fausse d'un facteur cinq : la
+  relecture ne coûtait pas que sa copie finale, mais aussi le
+  `glReadPixels` de l'hôte, la traversée de BAR0 et la synchronisation
+  qu'ils imposent.* À retenir pour les prochains arbitrages : sur ce
+  système, ce n'est pas le déplacement d'octets par le G4 qui coûte, c'est
+  l'aller-retour avec l'hôte.
 * **Le rendu n'est plus le goulot en jeu** : Marble Blast fenêtré en
   800×600 tient 47 à 155 img/s selon la scène (36 dans les menus, où 362
   replis par tranche subsistent), `submit 0,07 ms`, attente de barrière

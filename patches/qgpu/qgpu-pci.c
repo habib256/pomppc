@@ -63,6 +63,7 @@
 #include "hw/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
+#include "qemu/error-report.h"
 #include "qom/object.h"
 #include "sysemu/sysemu.h"
 
@@ -70,6 +71,33 @@
 
 /* Câblé par qfb-pci.c : VRAM QFB comme cible de SURF_PRESENT (v13). */
 int qfb_scanout_info(uint8_t **ram, uint32_t *size, MemoryRegion **mr);
+
+/* À défaut de qfb-pci, le framebuffer VGA standard : sur mac99 c'est l'écran
+ * réellement utilisé (pci_vga_init, piloté dans Tiger par qemu_vga.ndrv), et
+ * sans lui SURF_PRESENT n'avait aucune cible — la v13 restait inerte dans la
+ * configuration de tous les jours, sans que rien ne le dise.
+ *
+ * Sa VRAM s'atteint sans toucher au code amont : toute MemoryRegion nommée est
+ * un enfant QOM de son propriétaire (memory_region_do_init), donc « vga.vram »
+ * devient l'enfant « vga.vram[0] » du device « VGA ». Les pixels y sont gros
+ * boutistes sur PowerPC, ce que SURF_PRESENT écrit déjà. */
+static bool qgpu_vga_scanout_info(uint8_t **ram, uint32_t *size,
+                                  MemoryRegion **mr)
+{
+    Object *dev = object_resolve_path_type("", "VGA", NULL);
+    Object *child = dev ? object_resolve_path_component(dev, "vga.vram[0]")
+                        : NULL;
+    MemoryRegion *m = child ? MEMORY_REGION(object_dynamic_cast(child,
+                                            TYPE_MEMORY_REGION)) : NULL;
+
+    if (!m || !memory_region_is_ram(m)) {
+        return false;
+    }
+    *ram = memory_region_get_ram_ptr(m);
+    *size = (uint32_t)memory_region_size(m);
+    *mr = m;
+    return *ram != NULL;
+}
 
 #define TYPE_QGPU_PCI "qgpu-pci"
 OBJECT_DECLARE_SIMPLE_TYPE(QgpuPCIState, QGPU_PCI)
@@ -436,16 +464,28 @@ static void qgpu_qfb_dirty(void *opaque, uint32_t off, uint32_t len)
     }
 }
 
-static void qgpu_bind_qfb(QgpuPCIState *s)
+/* `complain` : seulement depuis le notifier machine-done. Au realize, les autres
+   devices peuvent ne pas être nés — ne rien trouver n'y veut encore rien dire. */
+static void qgpu_bind_scanout(QgpuPCIState *s, bool complain)
 {
     uint8_t *ram = NULL;
     uint32_t size = 0;
     MemoryRegion *mr = NULL;
+    const char *which;
 
     if (s->core.scanout) {
         return;
     }
-    if (!qfb_scanout_info(&ram, &size, &mr) || !ram) {
+    if (qfb_scanout_info(&ram, &size, &mr) && ram) {
+        which = "qfb-pci";
+    } else if (qgpu_vga_scanout_info(&ram, &size, &mr)) {
+        which = "VGA";
+    } else {
+        if (complain) {
+            warn_report("qgpu-pci: aucun écran à présenter (ni qfb-pci ni VGA) :"
+                        " SURF_PRESENT sera refusé et l'invité relira ses"
+                        " images");
+        }
         return;
     }
     qgpu_core_set_scanout(&s->core, ram, size, qgpu_qfb_dirty, mr);
@@ -454,13 +494,17 @@ static void qgpu_bind_qfb(QgpuPCIState *s)
         s->regs[QGPU_REG_CAPS >> 2] = s->core.caps |
             (s->thread_ok ? QGPU_CAP_ASYNC : 0);
     }
+    if (s->trace) {
+        fprintf(stderr, "qgpu-pci: scanout sur %s, %u Mio\n", which,
+                size / (unsigned)MiB);
+    }
 }
 
 static void qgpu_machine_done(Notifier *n, void *unused)
 {
     QgpuPCIState *s = container_of(n, QgpuPCIState, machine_done);
 
-    qgpu_bind_qfb(s);
+    qgpu_bind_scanout(s, true);
 }
 
 /* Arrête le thread de rendu après avoir laissé finir ce qui est en cours.
@@ -538,7 +582,7 @@ static void qgpu_pci_realize(PCIDevice *dev, Error **errp)
     qemu_add_machine_init_done_notifier(&s->machine_done);
 
     qgpu_soft_reset(s);
-    qgpu_bind_qfb(s);
+    qgpu_bind_scanout(s, false);
 }
 
 static void qgpu_pci_exit(PCIDevice *dev)

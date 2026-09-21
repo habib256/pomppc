@@ -113,6 +113,20 @@ qemu_machine_has() {
   grep -q "($name)" <<< "$_MACH_TREE"
 }
 
+# Le GPU paravirtuel a-t-il une CIBLE DE PRÉSENTATION ? Le device ne tient
+# SURF_PRESENT (v13) que s'il a trouvé un écran où écrire : qfb-pci, sinon le
+# framebuffer VGA de la machine. Sans cible, QGPU_CAP_SCANOUT manque et l'invité
+# relit chaque image pour la recopier lui-même — soit 10 % de débit en moins sur
+# un jeu. Le device était présent, la version bonne, les tests natifs verts, et
+# ça n'a été découvert qu'en lisant QGPUCaps dans l'invité : d'où ce sondage.
+# La trace du device dit à sa naissance quelle cible il a prise.
+qemu_qgpu_has_scanout() { # <bin> <machine>
+  local out
+  out="$(printf 'quit\n' | "$1" -M "$2" -S -display none \
+         -device qgpu-pci,trace=on -monitor stdio 2>&1 || true)"
+  grep -q 'scanout sur' <<< "$out"
+}
+
 # La propriété de CPU « x-fast-fp » (mode flottant rapide, patches/fastfp/) :
 # le binaire l'a-t-il ?
 #

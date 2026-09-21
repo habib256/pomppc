@@ -1,6 +1,6 @@
 # Protocole qgpu v13 — présentation dans la VRAM
 
-Le device écrit lui-même l'image dans la VRAM de `qfb-pci`. L'invité n'y
+Le device écrit lui-même l'image dans la VRAM de l'écran. L'invité n'y
 recopie plus un pixel : plus de `SURF_READBACK` à l'échange, plus de `memcpy`,
 plus de conversion 1555 sur le G4.
 
@@ -39,9 +39,23 @@ v13 s'attache encore à un device v12 (`QGPU_PROTO_MIN`).
 
 ## Côté QEMU
 
-`qgpu-pci` résout `qfb-pci` une fois la machine née, pose le pointeur de VRAM
-sur le cœur, et marque la plage VGA sale après chaque présentation (le thread
-de rendu n'a pas le BQL : `memory_region_set_dirty` suffit).
+`qgpu_bind_scanout` cherche une cible une fois la machine née, pose le pointeur
+de VRAM sur le cœur, et marque la plage sale après chaque présentation (le
+thread de rendu n'a pas le BQL : `memory_region_set_dirty` suffit).
+
+Deux cibles, dans cet ordre : `qfb-pci` s'il est là, **sinon le framebuffer
+VGA** de la machine — sur mac99 c'est l'écran réellement utilisé, que Tiger
+pilote par `qemu_vga.ndrv`. Sa VRAM s'atteint sans toucher au code amont : une
+MemoryRegion nommée est un enfant QOM de son propriétaire, donc « vga.vram »
+est l'enfant « vga.vram[0] » du device « VGA ». Le framebuffer y commence à
+l'offset 0, ce que l'image confirme (rien n'est décalé).
+
+Ce repli manquait jusqu'au 21/09/2026, et son absence était **silencieuse** :
+la quotidienne tourne sans `qfb-pci`, donc `QGPU_CAP_SCANOUT` n'était jamais
+posé, l'opcode répondait `BAD_ARG` et l'invité relisait chaque image sans que
+rien ne le signale — pendant que `run_v13` restait vert. D'où, désormais, un
+avertissement quand aucune cible n'est trouvée, et un sondage de la capacité
+dans `scripts/caps.sh` (`qemu_qgpu_has_scanout`), vérifié à chaque build.
 
 ## Ce que le plugin en fait
 
