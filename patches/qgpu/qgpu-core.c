@@ -496,10 +496,17 @@ static inline uint32_t x6(uint32_t v) { return (v << 2) | (v >> 4); }
 static inline uint32_t ld16(const uint8_t *p) { return ((uint32_t)p[0] << 8) | p[1]; }
 
 /* Un texel des données de l'application → mot ARGB hôte-natif (ou flottant de
-   profondeur rangé bit à bit). Règles d'OpenGL : L donne R = G = B, ALPHA est
-   promu en blanc + A (un vrai GL_ALPHA a R=G=B=0 et noircit les polices dès
-   qu'un pilote hôte le promeut en RGBA), RED donne (R, 0, 0, 1) ; les types
-   compactés sont des mots big-endian, comme tout le fil. */
+   profondeur rangé bit à bit). Règles d'OpenGL (table 3.19) : L donne
+   R = G = B, ALPHA donne (0, 0, 0, A), RED donne (R, 0, 0, 1) ; les types
+   compactés sont des mots big-endian, comme tout le fil.
+
+   H1 : le texel ALPHA a été blanchi un temps en (255, 255, 255, A) pour qu'un
+   backend qui promeut GL_ALPHA en RGBA rende quand même du blanc modulé.
+   C'était neutre en MODULATE et faux partout ailleurs — REPLACE, ADD, BLEND
+   et COMBINE rendaient du BLANC au lieu de la couleur primaire (polices et
+   HUD blancs) — et ça rendait mort le traitement correct du backend logiciel.
+   Le texel reprend donc la valeur de la spécification ; c'est au backend de
+   ne retenir que l'alpha (format interne GL_ALPHA côté GL). */
 static uint32_t unpack_texel(const TexSrc *s, const uint8_t *p)
 {
     uint32_t v;
@@ -513,7 +520,7 @@ static uint32_t unpack_texel(const TexSrc *s, const uint8_t *p)
         case 0x80E0: return argb(255, p[2], p[1], p[0]);
         case 0x190A: return argb(p[1], p[0], p[0], p[0]);
         case 0x1909: return argb(255, p[0], p[0], p[0]);
-        case 0x1906: return argb(p[0], 255, 255, 255);   /* ALPHA → blanc + A */
+        case 0x1906: return argb(p[0], 0, 0, 0);         /* ALPHA : (0, 0, 0, A) */
         case 0x8049: return argb(p[0], p[0], p[0], p[0]); /* INTENSITY */
         case 0x1900: case 0x80E5:                        /* COLOR_INDEX, sans palette */
             return argb(255, p[0], p[0], p[0]);
@@ -535,18 +542,31 @@ static uint32_t unpack_texel(const TexSrc *s, const uint8_t *p)
     case 0x8364:
         v = ld16(p);
         return argb(255, x5(v & 31), x6((v >> 5) & 63), x5(v >> 11));
-    case 0x8033:
+    /* H2 : depuis la v14 tex_src accepte GL_RGBA *et* GL_BGRA pour les quatre
+       types 16 bits compactés. Le premier composant du mot est donc R ou B
+       selon s->fmt, exactement comme pour 0x8035/0x8367 — sans ce test,
+       BGRA+4444, RGBA+4444_REV, BGRA+5551 et RGBA+1555_REV sortaient R et B
+       échangés (textures 16 bits bleues au lieu de rouges). */
+    case 0x8033:                                            /* 4_4_4_4 */
         v = ld16(p);
-        return argb((v & 15) * 17, (v >> 12) * 17, ((v >> 8) & 15) * 17, ((v >> 4) & 15) * 17);
-    case 0x8365:
+        return s->fmt == 0x1908
+               ? argb((v & 15) * 17, (v >> 12) * 17, ((v >> 8) & 15) * 17, ((v >> 4) & 15) * 17)
+               : argb((v & 15) * 17, ((v >> 4) & 15) * 17, ((v >> 8) & 15) * 17, (v >> 12) * 17);
+    case 0x8365:                                            /* 4_4_4_4_REV */
         v = ld16(p);
-        return argb((v >> 12) * 17, ((v >> 8) & 15) * 17, ((v >> 4) & 15) * 17, (v & 15) * 17);
-    case 0x8034:
+        return s->fmt == 0x80E1
+               ? argb((v >> 12) * 17, ((v >> 8) & 15) * 17, ((v >> 4) & 15) * 17, (v & 15) * 17)
+               : argb((v >> 12) * 17, (v & 15) * 17, ((v >> 4) & 15) * 17, ((v >> 8) & 15) * 17);
+    case 0x8034:                                            /* 5_5_5_1 */
         v = ld16(p);
-        return argb((v & 1) * 255, x5(v >> 11), x5((v >> 6) & 31), x5((v >> 1) & 31));
-    case 0x8366:
+        return s->fmt == 0x1908
+               ? argb((v & 1) * 255, x5(v >> 11), x5((v >> 6) & 31), x5((v >> 1) & 31))
+               : argb((v & 1) * 255, x5((v >> 1) & 31), x5((v >> 6) & 31), x5(v >> 11));
+    case 0x8366:                                            /* 1_5_5_5_REV */
         v = ld16(p);
-        return argb((v >> 15) * 255, x5((v >> 10) & 31), x5((v >> 5) & 31), x5(v & 31));
+        return s->fmt == 0x80E1
+               ? argb((v >> 15) * 255, x5((v >> 10) & 31), x5((v >> 5) & 31), x5(v & 31))
+               : argb((v >> 15) * 255, x5(v & 31), x5((v >> 5) & 31), x5((v >> 10) & 31));
     case 0x1406: {
         float f = qgpu_u2f(qgpu_ld32(p));
         f = (f == f) ? (f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f) : 0.0f;
@@ -904,8 +924,11 @@ static bool valid_state(uint32_t key, uint32_t val)
     case QGPU_SK_STENCIL_OP_ZPASS:
         return valid_stencil_op(val);
     case QGPU_SK_POLY_FACTOR: case QGPU_SK_POLY_UNITS: {
+        /* borne INCLUSIVE : le plugin sature à ±POLY_OFFSET_MAX < 1e6, et un
+           « < 1e6 » strict face à un plugin qui saturait à 1e6 refusait le
+           SET_STATE (soumission perdue, image noire — scène `offset`, 22/09). */
         float f = qgpu_u2f(val);
-        return f == f && f > -1e6f && f < 1e6f;
+        return f == f && f >= -1e6f && f <= 1e6f;
     }
     /* v7 */
     case QGPU_SK_LIGHTING: case QGPU_SK_NORMALIZE: case QGPU_SK_RESCALE_NORMAL:
@@ -1032,6 +1055,22 @@ void qgpu_core_set_scanout(QgpuCore *c, uint8_t *ram, uint32_t size,
     c->scanout_size = ram ? size : 0;
     c->scanout_dirty = ram ? dirty : NULL;
     c->scanout_opaque = ram ? opaque : NULL;
+    /* la géométrie va avec la cible : une nouvelle cible sans géométrie ne
+       doit pas hériter du pas de l'ancienne */
+    c->scanout_stride = c->scanout_width = 0;
+    c->scanout_height = c->scanout_depth = 0;
+}
+
+void qgpu_core_set_scanout_geom(QgpuCore *c, uint32_t stride, uint32_t width,
+                                uint32_t height, uint32_t depth)
+{
+    if (!c->scanout) {
+        stride = width = height = depth = 0;
+    }
+    c->scanout_stride = stride;
+    c->scanout_width  = width;
+    c->scanout_height = height;
+    c->scanout_depth  = depth;
 }
 
 void qgpu_core_reset(QgpuCore *c)
@@ -1171,6 +1210,11 @@ static uint16_t pack_rgb1555(uint32_t p)
                       ((p >> 3) & 0x001fu));
 }
 
+/* H3 : le bit 15 de RGB1555 n'est PAS un alpha de transfert (pack_rgb1555 le
+   jette), et la surface est en XRGB8888 : un pixel envoyé en « milliers de
+   couleurs » doit arriver OPAQUE. Sans ce 0xFF, toute la surface devenait
+   transparente — DST_ALPHA/ONE_MINUS_DST_ALPHA inversés, COPY_TEX invisible,
+   relecture en 00RRGGBB. */
 static uint32_t unpack_rgb1555(uint16_t pix)
 {
     uint32_t r = (pix >> 10) & 31u;
@@ -1179,7 +1223,7 @@ static uint32_t unpack_rgb1555(uint16_t pix)
     r = (r << 3) | (r >> 2);
     g = (g << 3) | (g >> 2);
     b = (b << 3) | (b >> 2);
-    return (r << 16) | (g << 8) | b;
+    return 0xFF000000u | (r << 16) | (g << 8) | b;
 }
 
 static uint16_t pack_unorm16(float d)
@@ -1196,6 +1240,38 @@ static uint16_t pack_unorm16(float d)
 static float unpack_unorm16(uint16_t z)
 {
     return (float)z / 65535.0f;
+}
+
+/* ── H4 : sommets malsains — assainir, plus jamais refuser ──────────────────
+ *
+ * Un flux invité contient des NaN, des infinis et des valeurs démesurées dès
+ * qu'un tampon de sommets est plus grand que ce que l'application remplit
+ * (queue jamais écrite d'un VBO), ou qu'un calcul du jeu a divisé par zéro.
+ * Le cœur répondait alors QGPU_ST_BAD_ARG, et la boucle d'exécution
+ * ABANDONNAIT la fin de la soumission : le CLEAR, le SURF_PRESENT et tout
+ * l'état qui suivaient étaient perdus. Ce n'était donc pas « un triangle
+ * manquant » mais une image entière figée ou déchirée.
+ *
+ * On assainit maintenant chaque mot : NaN → 0, et SATURATION à ±QGPU_COORD_MAX
+ * au lieu d'un rejet. La borne ne juge pas le flux — elle protège seulement
+ * les conversions en entier du rasteriseur logiciel (bornes de boîte
+ * englobante, index de texel) ; une coordonnée de texture au-delà n'est pas
+ * une faute, et la ramener sur la borne ne change rien de visible là où
+ * REPEAT a déjà tout replié. */
+#define QGPU_COORD_MAX  1e9f
+
+static inline float sane_coord(float v)
+{
+    if (v != v) {                                /* NaN */
+        return 0.0f;
+    }
+    if (v > QGPU_COORD_MAX) {                    /* +inf compris */
+        return QGPU_COORD_MAX;
+    }
+    if (v < -QGPU_COORD_MAX) {
+        return -QGPU_COORD_MAX;
+    }
+    return v;
 }
 
 /* Texture de l'unité u si le texturage y est actif et la texture complète. */
@@ -1245,13 +1321,10 @@ static uint32_t do_draw(QgpuCore *c, const uint32_t *a, uint32_t prim,
         return QGPU_ST_BACKEND;
     }
     for (i = 0; i < nverts * words; i++) {
-        float v = qgpu_u2f(qgpu_ld32(c->shmem + off + i * 4));
-        /* NaN/infini : le rasteriseur logiciel ne doit jamais les voir
-           (bornes de boucles), et GL les traite de façon indéfinie. */
-        if (v != v || v > 1e9f || v < -1e9f) {
-            return QGPU_ST_BAD_ARG;
-        }
-        c->vbuf[i] = v;
+        /* Ces opcodes donnent déjà des coordonnées FENÊTRE : pas de division
+           perspective par la position, donc rien d'autre à garder que la
+           finitude (cf. sane_coord). */
+        c->vbuf[i] = sane_coord(qgpu_u2f(qgpu_ld32(c->shmem + off + i * 4)));
     }
     cs = cur_state(c);
     for (u = 0; u < QGPU_MAX_UNITS; u++) {
@@ -1311,11 +1384,38 @@ static const uint8_t *src_bytes(QgpuCore *c, uint32_t buf, uint32_t off,
     return c->buf[buf].data + off;
 }
 
+/* Un sommet du chemin brut : mots big-endian → flottants hôte assainis. */
+static void conv_raw_vertex(QgpuCore *c, const uint8_t *vbase, uint32_t stride,
+                            uint32_t words, uint32_t i)
+{
+    const uint8_t *p = vbase + (size_t)i * stride * 4;
+    float *d = c->vbuf + (size_t)i * words;
+    uint32_t j;
+
+    for (j = 0; j < words; j++) {
+        d[j] = sane_coord(qgpu_u2f(qgpu_ld32(p + j * 4)));
+    }
+}
+
+/* Position utilisable ? w ≈ 0 ne l'est pas : l'étage géométrique divise par w,
+   et un w sous-normal donne un triangle géant (le ciel de Colin McRae) puis,
+   après (int)ceilf(inf), un comportement indéfini qui ne rend pas la même
+   image d'un hôte à l'autre. Le plugin jette déjà ces sommets sur le G4 ;
+   l'hôte doit le faire aussi, car les sommets d'un VBO v14 ne passent jamais
+   par lui. */
+static bool raw_pos_usable(const QgpuCore *c, uint32_t words, uint32_t fmt, uint32_t i)
+{
+    const float *d = c->vbuf + (size_t)i * words;
+
+    return QGPU_VF_POS_COUNT(fmt) != 4 || d[3] > 1e-6f || d[3] < -1e-6f;
+}
+
 static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint32_t ibuf, int raw_buf)
 {
     QgpuTexture *tex[QGPU_MAX_UNITS];
     uint32_t mode = a[0], count = a[1], voff, stride, fmt, ioff, itype, first, nverts;
-    uint32_t words, i, j, st;
+    uint32_t words, i, j, st, lo, hi;
+    bool dense;
     QgpuSurface *s = bound_surface(c, &st);
     QgpuState *cs;
     const uint8_t *vbase, *ibase;
@@ -1375,33 +1475,71 @@ static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint3
     if (!grow_vbuf(c, nverts * words)) {
         return QGPU_ST_BACKEND;
     }
-    for (i = 0; i < nverts; i++) {
-        const uint8_t *p = vbase + (size_t)i * stride * 4;
-        for (j = 0; j < words; j++) {
-            float v = qgpu_u2f(qgpu_ld32(p + j * 4));
-            if (v != v || v > 1e9f || v < -1e9f) {
-                return QGPU_ST_BAD_ARG;
-            }
-            c->vbuf[(size_t)i * words + j] = v;
-        }
-    }
+    /* H4 : les INDICES d'abord — ce sont eux qui disent quels sommets sont
+       réellement lus. Un VBO surdimensionné (queue jamais écrite par
+       l'application) ne doit plus ni coûter une conversion ni, autrefois,
+       tuer l'image entière parce qu'un mot jamais lu contenait un NaN. */
+    lo = first;
+    hi = first + count - 1;
     if (itype != QGPU_IDX_NONE) {
         if (!grow_ibuf(c, count)) {
             return QGPU_ST_BACKEND;
         }
+        lo = ~0u;
+        hi = 0;
         for (i = 0; i < count; i++) {
-            const uint8_t *p = ibase;
             uint32_t idx;
             if (itype == QGPU_IDX_U16) {
-                idx = ((uint32_t)p[i * 2] << 8) | p[i * 2 + 1];
+                idx = ((uint32_t)ibase[i * 2] << 8) | ibase[i * 2 + 1];
             } else {
-                idx = qgpu_ld32(p + i * 4);
+                idx = qgpu_ld32(ibase + i * 4);
             }
             if (idx >= nverts) {
                 return QGPU_ST_BAD_ARG;
             }
             c->ibuf[i] = idx;
+            if (idx < lo) lo = idx;
+            if (idx > hi) hi = idx;
         }
+    }
+    /* Un maillage indexé cite presque toujours un bloc compact : le convertir
+       d'un trait ne touche chaque sommet qu'une fois, là où suivre les indices
+       reconvertirait les sommets partagés. On ne le fait que si le bloc n'est
+       pas plus large que la liste d'indices — sinon (indices épars sur un gros
+       tampon) on suit les indices. Dans les deux cas, la queue jamais citée du
+       tampon n'est plus lue. */
+    dense = (itype == QGPU_IDX_NONE) || ((uint64_t)hi - lo + 1 <= count);
+    /* Le backend reçoit le tableau ENTIER (il indexe dedans) : ce qu'on ne
+       convertit pas doit être mis à zéro, jamais laissé au hasard de realloc. */
+    if (!dense || lo != 0 || hi + 1 != nverts) {
+        memset(c->vbuf, 0, (size_t)nverts * words * sizeof(float));
+    }
+    if (dense) {
+        for (i = lo; i <= hi; i++) {
+            conv_raw_vertex(c, vbase, stride, words, i);
+        }
+    } else {
+        for (i = 0; i < count; i++) {
+            conv_raw_vertex(c, vbase, stride, words, c->ibuf[i]);
+        }
+    }
+    j = 0;                                       /* sommet inutilisable vu ? */
+    if (itype != QGPU_IDX_NONE) {
+        for (i = 0; i < count; i++) {
+            j |= !raw_pos_usable(c, words, fmt, c->ibuf[i]);
+        }
+    } else {
+        for (i = lo; i <= hi; i++) {
+            j |= !raw_pos_usable(c, words, fmt, i);
+        }
+    }
+    if (j) {
+        /* Jeter la PRIMITIVE fautive demanderait de reconstruire la topologie
+           des dix modes ; on jette ce dessin-là, et surtout on rend OK pour
+           que la suite de la soumission — état, effacement, présentation —
+           s'exécute. C'est tout ce que H4 coûtait vraiment. */
+        TRACE(c, "  dessin brut jeté : position à w ≈ 0");
+        return QGPU_ST_OK;
     }
     cs = cur_state(c);
     for (u = 0; u < QGPU_MAX_UNITS; u++) {
@@ -1497,11 +1635,16 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (c->surf[a[0]].used) {
             return QGPU_ST_LIMIT;
         }
+        /* La case doit être renseignée AVANT l'appel — le backend y lit les
+           dimensions — mais elle ne doit rien garder si celui-ci échoue :
+           sans ce nettoyage, la case porte des dimensions et un `priv` à
+           demi construits qu'un SURF_CREATE ultérieur relirait. */
         s = &c->surf[a[0]];
         s->width = a[1]; s->height = a[2]; s->format = a[3]; s->priv = NULL;
         s->has_depth = (a[3] & QGPU_FMT_FLAG_DEPTH) != 0;
         s->has_stencil = (a[3] & QGPU_FMT_FLAG_STENCIL) != 0;
         if (!c->be->surf_create(c, s)) {
+            memset(s, 0, sizeof(*s));
             return QGPU_ST_BACKEND;
         }
         s->used = true;
@@ -1622,6 +1765,23 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if ((fmt == QGPU_PF_XRGB8888 && (stride & 3)) ||
             (fmt == QGPU_PF_RGB1555 && (stride & 1))) {
             return QGPU_ST_BAD_ARG;
+        }
+        /* Q3 : quand le device connaît la géométrie de l'écran, un pas ou une
+           profondeur qui ne sont pas les siens sont refusés — c'est exactement
+           le symptôme de Q1 (image écrite au pas d'un autre écran, en diagonale
+           ou figée, avec statut OK). Le plugin, sur BAD_ARG d'un SURF_PRESENT,
+           coupe la présentation directe et rend la main à Apple (Q2). */
+        if (c->scanout_stride != 0) {
+            uint32_t sbpp = (c->scanout_depth == 15 || c->scanout_depth == 16)
+                            ? 2u
+                            : (c->scanout_depth == 24 || c->scanout_depth == 32)
+                              ? 4u : 0u;
+            if (stride != c->scanout_stride || (sbpp && sbpp != bpp)) {
+                TRACE(c, "SURF_PRESENT pas %u/bpp %u, écran pas %u/prof %u : "
+                      "refusé", stride, bpp, c->scanout_stride,
+                      c->scanout_depth);
+                return QGPU_ST_BAD_ARG;
+            }
         }
         rowbytes = (uint64_t)w * bpp;
         total = (uint64_t)(h - 1) * stride + rowbytes;
@@ -2034,10 +2194,13 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             return QGPU_ST_BACKEND;
         }
         c->query[a[0]].samples = 0;
-        c->query[a[0]].used = true;
         if (!c->be->query_begin(c, &c->query[a[0]])) {
             return QGPU_ST_BACKEND;
         }
+        /* `used` seulement après l'accord du backend : sinon un BEGIN refusé
+           laisse la requête « lancée » et QUERY_RESULT rend 0 au lieu de
+           QGPU_ST_BAD_ARG. */
+        c->query[a[0]].used = true;
         c->query[a[0]].active = true;
         cx->query = (int32_t)a[0];
         return QGPU_ST_OK;
@@ -2245,8 +2408,8 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             itarget = QGPU_TT_2D; lvl = a[1]; w = a[2]; h = a[3]; d = 1;
             bfmt = a[4]; off = a[5]; row = img = 0;
             tex_src(0x80E1, 0x8367, &src);
-            if (bfmt == 0x1906)
-                bfmt = 0x1908;
+            /* H1 : GL_ALPHA reste GL_ALPHA jusqu'au backend (cf. unpack_texel).
+               COLOR_INDEX, lui, n'a pas de palette ici : il est lu en luminance. */
             if (bfmt == 0x1900 || bfmt == 0x80E5)
                 bfmt = 0x1909;
             if (!valid_base_format(bfmt)) {
@@ -2259,8 +2422,6 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             if (!tex_src(a[7], a[8], &src)) {
                 return QGPU_ST_BAD_ARG;
             }
-            if (bfmt == 0x1906)
-                bfmt = 0x1908;
             if (bfmt == 0x1900 || bfmt == 0x80E5)
                 bfmt = 0x1909;
             if (src.depth ? bfmt != 0x1902
@@ -2505,9 +2666,20 @@ static bool known_op(uint32_t op)
     }
 }
 
+/* Les opcodes de DESSIN : 0x0030–0x0036 sont contigus, plus les deux chemins
+   bruts. Seuls ceux-là ont droit à un BAD_ARG non fatal (cf. ci-dessous). */
+static bool draw_op(uint32_t op)
+{
+    return (op >= QGPU_OP_DRAW_TRIANGLES && op <= QGPU_OP_DRAW_TRIANGLES_SEC) ||
+           op == QGPU_OP_DRAW_RAW || op == QGPU_OP_DRAW_RAW_BUF;
+}
+
 uint32_t qgpu_core_execute(QgpuCore *c, uint32_t off, uint32_t len)
 {
     uint32_t nwords, pc = 0, st = QGPU_ST_OK;
+    /* H4 : première faute retenue d'un opcode de dessin — le flux continue,
+       mais le device en est informé à la fin de la soumission. */
+    uint32_t held = QGPU_ST_OK, held_pc = 0;
     /* v8 : la plus longue commande est SET_POLYGON_STIPPLE (32 arguments) */
     uint32_t args[QGPU_MAX_CMD_ARGS];
 
@@ -2541,12 +2713,30 @@ uint32_t qgpu_core_execute(QgpuCore *c, uint32_t off, uint32_t len)
         st = exec_one(c, op, args, clen - 1);
         if (st != QGPU_ST_OK) {
             TRACE(c, "  -> statut %u", st);
-            break;
+            /* Un DESSIN mal formé ne coûte que lui-même : les SET_STATE, le
+               CLEAR et le SURF_PRESENT qui suivent doivent s'exécuter, sans
+               quoi une seule primitive douteuse fige l'écran (H4). Tout le
+               reste garde l'arrêt immédiat : une faute d'objet, de bornes ou
+               d'en-tête met en doute la suite du flux. */
+            if (st != QGPU_ST_BAD_ARG || !draw_op(op)) {
+                break;
+            }
+            if (held == QGPU_ST_OK) {
+                held = st;
+                held_pc = pc;
+            }
+        } else {
+            c->ncmds++;
         }
-        c->ncmds++;
         pc += clen;
     }
 
+    /* La PREMIÈRE faute est celle qui décrit le flux : un dessin refusé au
+       début compte plus qu'un arrêt provoqué plus loin. */
+    if (held != QGPU_ST_OK) {
+        st = held;
+        pc = held_pc;
+    }
     c->status = st;
     c->status_pc = (st == QGPU_ST_OK) ? 0 : pc;
     return st;

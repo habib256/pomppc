@@ -117,7 +117,10 @@
                                               l'écriture du doorbell */
 #define QGPU_REG_SUBMIT_ST      0x40  /* r  : QGPU_ST_OK ou QGPU_ST_QUEUE_FULL —
                                               suite donnée à la DERNIÈRE écriture
-                                              du doorbell (acceptation, pas rendu) */
+                                              du doorbell (acceptation, pas rendu).
+                                              v16 : un doorbell SYNCHRONE dont
+                                              l'attente hôte expire (2 s, D2) rend
+                                              QGPU_ST_BACKEND ici et dans STATUS */
 #define QGPU_REG_ERRORS         0x44  /* r  : nombre de soumissions TERMINÉES avec un
                                               statut ≠ QGPU_ST_OK depuis le reset */
 #define QGPU_REG_QUEUE_DEPTH    0x48  /* r  : profondeur de la file de CE device */
@@ -1246,10 +1249,17 @@
  *   `off`, `stride` octets par ligne. `format` est QGPU_PF_XRGB8888 (32 bpp,
  *   mêmes octets big-endian que SURF_READBACK) ou QGPU_PF_RGB1555 (16 bpp
  *   big-endian, « milliers de couleurs » QFB). `off` est relatif à l'origine
- *   de la VRAM qfb (BAR0), pas à la fenêtre partagée qgpu.
+ *   de la FENÊTRE VISIBLE de l'écran lié (base du mode courant, ce que le
+ *   plugin calcule par `vram − D.base`), pas à la fenêtre partagée qgpu ni à
+ *   l'octet 0 de la VRAM — le texte v13 disait « origine de la VRAM qfb (BAR0) »,
+ *   ce qui ne valait que tant que la base du mode était 0 (corrigé v16, Q3).
  *
  *   Sans QGPU_CAP_SCANOUT, l'opcode rend QGPU_ST_BAD_ARG. Un rectangle qui
- *   déborde de la VRAM rend QGPU_ST_OOB. Un flux v12 ignore cet opcode
+ *   déborde de la fenêtre visible rend QGPU_ST_OOB. v16 (Q3) : quand le
+ *   device connaît la géométrie de l'écran, un `stride` ou une profondeur qui
+ *   ne sont pas les siens rendent QGPU_ST_BAD_ARG — c'est le symptôme de Q1
+ *   (image présentée au pas d'un autre écran) rendu visible ; l'invité coupe
+ *   alors la présentation directe et laisse l'échange à Apple (Q2). Un flux v12 ignore cet opcode
  *   (BAD_OPCODE) : l'invité ne l'émet que si version >= 13 et le bit est là.
  *
  *   La conversion 32 → 1555 est faite par l'HÔTE. L'invité n'écrit plus un

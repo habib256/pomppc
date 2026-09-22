@@ -1095,6 +1095,15 @@ static void rv3c(Emit *v, float x, float y, float z,
     emitf(v, r); emitf(v, g); emitf(v, b); emitf(v, a);
 }
 
+/* POS4 : la seule forme où le sommet porte un w, donc la seule qui peut
+   demander une division perspective par ~0 (H4). */
+static void rv4c(Emit *v, float x, float y, float z, float w,
+                 float r, float g, float b, float a)
+{
+    emitf(v, x); emitf(v, y); emitf(v, z); emitf(v, w);
+    emitf(v, r); emitf(v, g); emitf(v, b); emitf(v, a);
+}
+
 /* POS3 + normale : l'ordre du format est position, normale, couleur… */
 static void rv3n(Emit *v, float x, float y, float z, float nx, float ny, float nz)
 {
@@ -1116,8 +1125,10 @@ static int same_snap(const uint8_t *shmem)
 
 #define VF_P2   ((uint32_t)QGPU_VF_POS(2))
 #define VF_P3   ((uint32_t)QGPU_VF_POS(3))
+#define VF_P4   ((uint32_t)QGPU_VF_POS(4))
 #define VF_P2C  (VF_P2 | QGPU_VF_COLOR)
 #define VF_P3C  (VF_P3 | QGPU_VF_COLOR)
+#define VF_P4C  (VF_P4 | QGPU_VF_COLOR)
 
 static void run_v7(QgpuCore *c, uint8_t *shmem)
 {
@@ -2107,6 +2118,125 @@ static void run_v7(QgpuCore *c, uint8_t *shmem)
     st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
     CHECK(st == QGPU_ST_BAD_ARG, "(m) angle de coupure 120° : st %u", st);
 
+    /* (m bis) H4 — UN SOMMET MALSAIN NE COÛTE PLUS L'IMAGE. Le cœur refusait
+       le dessin (BAD_ARG) et la boucle d'exécution abandonnait le reste de la
+       soumission : l'effacement, la présentation et l'état qui suivaient
+       étaient perdus. Trois cas, tous mesurés par le bug hunt. */
+    mat_ortho_px(m);
+    mat_identity(mv);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 2);
+    state(&e, QGPU_SK_DEPTH_TEST, 0);
+    state(&e, QGPU_SK_STENCIL_TEST, 0);
+    set_matrix(&e, QGPU_MTX_PROJECTION, m);
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "(m bis) surface 2 et projection en pixels (st %u)", st);
+
+    /* 1. Quatre sommets déclarés, trois cités : le quatrième est un NaN de
+       bout en bout (queue jamais écrite d'un tampon surdimensionné). Il n'est
+       plus SCANNÉ du tout, et le triangle sort entier. */
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 4, 4, 1, 0, 0, 1); rv2c(&v, 60, 4, 1, 0, 0, 1); rv2c(&v, 4, 20, 1, 0, 0, 1);
+    for (i = 0; i < 6; i++) {
+        emit(&v, 0x7FC00000u);
+    }
+    for (i = 0; i < 3; i++) {
+        qgpu_st16(shmem + IDX_OFF + i * 2, (uint16_t)i);
+    }
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF0000FF, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2C, 4, QGPU_IDX_U16, IDX_OFF);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF0000 && px(shmem, 8, 30) == 0x0000FF,
+          "(m bis) sommet NaN jamais cité par les indices : %06x %06x (st %u)",
+          px(shmem, 30, 8), px(shmem, 8, 30), st);
+
+    /* 1 bis. Indices ÉPARS sur un gros tampon : trois sommets cités aux rangs
+       0, 150 et 299, tout le reste rempli de NaN. Ni la conversion ni la garde
+       ne doivent regarder les 297 autres. */
+    for (i = 0; i < 300 * 6; i++) {
+        qgpu_st32(shmem + VTX_OFF + i * 4, 0x7FC00000u);
+    }
+    v.off = v.start = VTX_OFF; rv2c(&v, 4, 4, 1, 0, 0, 1);
+    v.off = v.start = VTX_OFF + 150 * 6 * 4; rv2c(&v, 60, 4, 1, 0, 0, 1);
+    v.off = v.start = VTX_OFF + 299 * 6 * 4; rv2c(&v, 4, 20, 1, 0, 0, 1);
+    qgpu_st16(shmem + IDX_OFF, 0);
+    qgpu_st16(shmem + IDX_OFF + 2, 150);
+    qgpu_st16(shmem + IDX_OFF + 4, 299);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF0000FF, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2C, 300, QGPU_IDX_U16, IDX_OFF);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF0000 && px(shmem, 8, 30) == 0x0000FF,
+          "(m bis) indices épars dans un tampon de 300 sommets NaN : %06x %06x (st %u)",
+          px(shmem, 30, 8), px(shmem, 8, 30), st);
+
+    /* 1 ter. `premier` non nul (glDrawArrays) : deux sommets NaN avant le
+       triangle, jamais lus. */
+    for (i = 0; i < 5 * 6; i++) {
+        qgpu_st32(shmem + VTX_OFF + i * 4, 0x7FC00000u);
+    }
+    v.off = v.start = VTX_OFF + 2 * 6 * 4;
+    rv2c(&v, 4, 4, 1, 0, 0, 1); rv2c(&v, 60, 4, 1, 0, 0, 1); rv2c(&v, 4, 20, 1, 0, 0, 1);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF0000FF, 1.0f);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW));
+    emit(&e, QGPU_PRIM_MODE_TRIANGLES); emit(&e, 3); emit(&e, VTX_OFF);
+    emit(&e, 0); emit(&e, VF_P2C); emit(&e, 0); emit(&e, QGPU_IDX_NONE);
+    emit(&e, 2); emit(&e, 5);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF0000 && px(shmem, 8, 30) == 0x0000FF,
+          "(m bis) `premier` = 2, les sommets 0 et 1 sont NaN et ignorés : %06x %06x (st %u)",
+          px(shmem, 30, 8), px(shmem, 8, 30), st);
+
+    /* 2. Le NaN est cette fois dans un sommet CITÉ : il est assaini, et
+       surtout le CLEAR puis le READBACK qui SUIVENT le dessin s'exécutent. */
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 4, 4, 1, 0, 0, 1); rv2c(&v, 60, 4, 1, 0, 0, 1); rv2c(&v, 4, 20, 1, 0, 0, 1);
+    qgpu_st32(shmem + VTX_OFF + 4, 0x7FC00000u);         /* y du premier sommet */
+    qgpu_st32(shmem + VTX_OFF + 24, 0x7F800000u);        /* x du deuxième : +inf */
+    e.off = e.start = CMD_OFF;
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2C, 3, QGPU_IDX_NONE, 0);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF204060, 1.0f);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 30) == 0x204060 && px(shmem, 2, 2) == 0x204060,
+          "(m bis) NaN/infini dans un sommet cité : CLEAR et READBACK suivants exécutés :"
+          " %06x %06x (st %u)", px(shmem, 30, 30), px(shmem, 2, 2), st);
+
+    /* 3. Position à quatre composantes avec w = 0 : la division perspective en
+       ferait un triangle infini (le « ciel » de Colin McRae). Le dessin est
+       jeté, la soumission continue — le READBACK le prouve en remplaçant le
+       fond 204060 précédent par du noir. */
+    v.off = v.start = VTX_OFF;
+    rv4c(&v, 4, 4, 0, 1, 1, 1, 0, 1); rv4c(&v, 60, 4, 0, 1, 1, 1, 0, 1);
+    rv4c(&v, 4, 20, 0, 0.0f, 1, 1, 0, 1);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P4C, 3, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0x000000 && px(shmem, 2, 2) == 0x000000,
+          "(m bis) position à w ≈ 0 : primitive jetée, flux poursuivi : %06x %06x (st %u)",
+          px(shmem, 30, 8), px(shmem, 2, 2), st);
+
+    /* 4. Le même dessin avec w = 1 sort bien : la garde ne mange pas les
+       formats POS4 légitimes. */
+    v.off = v.start = VTX_OFF;
+    rv4c(&v, 4, 4, 0, 1, 1, 1, 0, 1); rv4c(&v, 60, 4, 0, 1, 1, 1, 0, 1);
+    rv4c(&v, 4, 20, 0, 1, 1, 1, 0, 1);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P4C, 3, QGPU_IDX_NONE, 0);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFFFF00,
+          "(m bis) POS4 avec w = 1 : dessiné : %06x (st %u)", px(shmem, 30, 8), st);
+
     /* état rendu au repos et contexte 0 repris pour la suite */
     e.off = e.start = CMD_OFF;
     emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_DESTROY, QGPU_LEN_CTX)); emit(&e, 1);
@@ -2791,12 +2921,48 @@ static void run_v2(QgpuCore *c, uint8_t *shmem)
     emit(&e, 1); emit(&e, RB_OFF); emit(&e, STRIDE); emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H);
     st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
     CHECK(st == QGPU_ST_BAD_ARG, "relecture de profondeur sans tampon refusée : st %u", st);
+    /* H4 : un sommet malsain est ASSAINI, plus refusé — et surtout la fin de
+       la soumission n'est plus perdue. Avant, le BAD_ARG faisait `break` :
+       le CLEAR et le READBACK ci-dessous ne s'exécutaient jamais (en VM,
+       c'était le SURF_PRESENT, donc l'écran figé). */
     v.off = v.start = VTX_OFF;
-    vertexz(&v, 0, 0, 0.0f, 1, 1, 1, 1); emitf(&v, 0.0f / 0.0f);
+    vertexz(&v, 0, 0, 0.0f, 1, 1, 1, 1);
+    vertexz(&v, 64, 0, 0.0f, 1, 1, 1, 1);
+    vertexz(&v, 0, 64, 0.0f, 1, 1, 1, 1);
+    qgpu_st32(shmem + VTX_OFF + 4, 0x7FC00000u);         /* y du premier sommet : NaN */
+    qgpu_st32(shmem + VTX_OFF + 8 * 4, 0x7F800000u);     /* x du deuxième : +inf */
     e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_DEPTH_TEST, 0);
     draw_cmd(&e, 3);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF204060, 1.0f);
+    readback_cmd(&e, 2);
     st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
-    CHECK(st == QGPU_ST_BAD_ARG, "sommet NaN refusé : st %u", st);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 30) == 0x204060 && px(shmem, 2, 62) == 0x204060,
+          "H4 : sommet NaN assaini, CLEAR et READBACK suivants exécutés : %06x %06x (st %u pc %u)",
+          px(shmem, 30, 30), px(shmem, 2, 62), st, c->status_pc);
+
+    /* Un BAD_ARG de dessin qui n'a rien à voir avec les valeurs (nombre impair
+       de sommets de ligne) : il est RETENU — rendu à la fin, avec son pc —
+       mais il ne fait plus perdre le CLEAR qui suit. */
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DRAW_LINES, QGPU_LEN_DRAW)); emit(&e, 3); emit(&e, VTX_OFF);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF00FF00, 1.0f);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG && c->status_pc == 0 && px(shmem, 30, 30) == 0x00FF00,
+          "H4 : BAD_ARG de dessin non fatal, la suite s'exécute : st %u pc %u %06x",
+          st, c->status_pc, px(shmem, 30, 30));
+
+    /* … mais HORS dessin, une faute arrête toujours le flux : le CLEAR bleu
+       ci-dessous ne doit PAS passer (le tampon de relecture garde le vert). */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_DEPTH_FUNC, 0x1234);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF0000FF, 1.0f);
+    readback_cmd(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG && px(shmem, 30, 30) == 0x00FF00,
+          "H4 : hors dessin, la faute arrête toujours la soumission : st %u %06x",
+          st, px(shmem, 30, 30));
 }
 
 /* Le scénario de référence : rouge sur fond bleu, puis relecture. */
@@ -3702,6 +3868,15 @@ static void run_v10(QgpuCore *c, uint8_t *shmem)
             { 0x80E1, 0x8365, { 0x41, 0x23, 0xFF, 0x00 }, { 0x44112233, 0xFFFF0000 }, "BGRA 4444_REV" },
             { 0x1908, 0x8034, { 0xFC, 0x03, 0xF8, 0x00 }, { 0xFFFF8408, 0x00FF0000 }, "RGBA 5551" },
             { 0x80E1, 0x8366, { 0xFE, 0x01, 0x7C, 0x00 }, { 0xFFFF8408, 0x00FF0000 }, "BGRA 1555_REV" },
+            /* H2 : les quatre couples CROISÉS, acceptés par tex_src depuis la
+               v14 et émis par le plugin, que les `case` 16 bits décodaient
+               sans regarder le format — R et B échangés. Chacun est le MIROIR
+               exact de la ligne droite ci-dessus : mêmes texels attendus, mots
+               réordonnés. Le second texel est un rouge pur, qui sortait bleu. */
+            { 0x80E1, 0x8033, { 0x32, 0x14, 0x00, 0xFF }, { 0x44112233, 0xFFFF0000 }, "BGRA 4444" },
+            { 0x1908, 0x8365, { 0x43, 0x21, 0xF0, 0x0F }, { 0x44112233, 0xFFFF0000 }, "RGBA 4444_REV" },
+            { 0x80E1, 0x8034, { 0x0C, 0x3F, 0x00, 0x3E }, { 0xFFFF8408, 0x00FF0000 }, "BGRA 5551" },
+            { 0x1908, 0x8366, { 0x86, 0x1F, 0x00, 0x1F }, { 0xFFFF8408, 0x00FF0000 }, "RGBA 1555_REV" },
         };
         for (i = 0; i < sizeof(fc) / sizeof(fc[0]); i++) {
             memcpy(shmem + TEX_OFF, fc[i].b, 8);
@@ -3719,19 +3894,41 @@ static void run_v10(QgpuCore *c, uint8_t *shmem)
                   "(n) %-15s : %08x %08x (attendu %08x %08x, st %u)", fc[i].name,
                   pxa(shmem, 16, 32), pxa(shmem, 48, 32), fc[i].want[0], fc[i].want[1], st);
         }
+        /* H1 : GL_ALPHA en FORMAT DE BASE. Le cœur le promouvait en RGBA, si
+           bien que le texel blanchi passait en couleur : REPLACE rendait du
+           blanc au lieu de la couleur primaire (polices et HUD blancs). La
+           table 3.22 dit Cv = Cf et Av = At : la couleur du sommet survit,
+           seul l'alpha vient de la texture. */
+        {
+            uint32_t want = 0x80FF8000u;
+            shmem[TEX_OFF] = 0x80;
+            e.off = e.start = CMD_OFF;
+            tcreate3(&e, T + 45, QGPU_TT_2D);
+            timage3(&e, T + 45, QGPU_TT_2D, 0, 1, 1, 1, 0x1906, 0x1906, 0x1401,
+                    TEX_OFF, 0, 0);
+            tparam(&e, T + 45, QGPU_TP_MIN_FILTER, 0x2600);
+            tparam(&e, T + 45, QGPU_TP_MAG_FILTER, 0x2600);
+            v.off = v.start = VTX_OFF;
+            quad_str(&v, 0, 0, (float)W, (float)H, 0, 0, 1, 1, 0, 0xFF8000);
+            st = v10_draw(c, &e, T + 45, 6);
+            CHECK(st == QGPU_ST_OK && pxa(shmem, 32, 32) == want,
+                  "(n) ALPHA en format de base, REPLACE : %08x (attendu %08x, st %u)",
+                  pxa(shmem, 32, 32), want, st);
+        }
+
         /* pas de ligne (alignement) et pas de tranche (3D) */
         {
             static const uint8_t rows[16] = { 10, 20, 30, 50, 60, 70, 0xEE, 0xEE,
                                               90, 100, 110, 130, 140, 150, 0xEE, 0xEE };
             memcpy(shmem + TEX_OFF, rows, 16);
             e.off = e.start = CMD_OFF;
-            tcreate3(&e, T + 40, QGPU_TT_2D);
-            timage3(&e, T + 40, QGPU_TT_2D, 0, 2, 2, 1, 0x1907, 0x1907, 0x1401, TEX_OFF, 8, 0);
-            tparam(&e, T + 40, QGPU_TP_MIN_FILTER, 0x2600);
-            tparam(&e, T + 40, QGPU_TP_MAG_FILTER, 0x2600);
+            tcreate3(&e, T + 43, QGPU_TT_2D);
+            timage3(&e, T + 43, QGPU_TT_2D, 0, 2, 2, 1, 0x1907, 0x1907, 0x1401, TEX_OFF, 8, 0);
+            tparam(&e, T + 43, QGPU_TP_MIN_FILTER, 0x2600);
+            tparam(&e, T + 43, QGPU_TP_MAG_FILTER, 0x2600);
             v.off = v.start = VTX_OFF;
             quad_str(&v, 0, 0, (float)W, (float)H, 0, 0, 1, 1, 0, 0xFFFFFF);
-            st = v10_draw(c, &e, T + 40, 6);
+            st = v10_draw(c, &e, T + 43, 6);
             CHECK(st == QGPU_ST_OK && px(shmem, 16, 16) == 0x0A141E && px(shmem, 48, 16) == 0x323C46 &&
                   px(shmem, 16, 48) == 0x5A646E && px(shmem, 48, 48) == 0x828C96,
                   "(n) RGB avec 8 octets par ligne : %06x %06x / %06x %06x (st %u)",
@@ -3740,14 +3937,14 @@ static void run_v10(QgpuCore *c, uint8_t *shmem)
             qgpu_st32(shmem + TEX_OFF + 4, 0xEEEEEEEE);
             qgpu_st32(shmem + TEX_OFF + 8, 0xFF00FF00);
             e.off = e.start = CMD_OFF;
-            tcreate3(&e, T + 41, QGPU_TT_3D);
-            timage3(&e, T + 41, QGPU_TT_3D, 0, 1, 1, 2, 0x1908, 0x80E1, 0x8367, TEX_OFF, 0, 8);
-            tparam(&e, T + 41, QGPU_TP_MIN_FILTER, 0x2600);
-            tparam(&e, T + 41, QGPU_TP_MAG_FILTER, 0x2600);
+            tcreate3(&e, T + 44, QGPU_TT_3D);
+            timage3(&e, T + 44, QGPU_TT_3D, 0, 1, 1, 2, 0x1908, 0x80E1, 0x8367, TEX_OFF, 0, 8);
+            tparam(&e, T + 44, QGPU_TP_MIN_FILTER, 0x2600);
+            tparam(&e, T + 44, QGPU_TP_MAG_FILTER, 0x2600);
             v.off = v.start = VTX_OFF;
             quad_str(&v, 0, 0, (float)W, 32, 0, 0, 1, 1, 0.25f, 0xFFFFFF);
             quad_str(&v, 0, 32, (float)W, (float)H, 0, 0, 1, 1, 0.75f, 0xFFFFFF);
-            st = v10_draw(c, &e, T + 41, 12);
+            st = v10_draw(c, &e, T + 44, 12);
             CHECK(st == QGPU_ST_OK && px(shmem, 32, 16) == 0xFF0000 && px(shmem, 32, 48) == 0x00FF00,
                   "(n) 3D avec 8 octets par tranche : %06x %06x (st %u)",
                   px(shmem, 32, 16), px(shmem, 32, 48), st);
@@ -4431,6 +4628,34 @@ static void run_v13(QgpuCore *c, uint8_t *shmem)
     st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
     CHECK(st == QGPU_ST_BAD_ARG, "PRESENT format inconnu : st %u", st);
 
+    /* v16 (Q3) : quand le device a publié la géométrie de l'écran, un pas ou
+       une profondeur qui ne sont pas les siens sont refusés (c'est le symptôme
+       de Q1 : image écrite au pas d'un autre écran, statut OK). Sans
+       géométrie (stride 0), rien n'est comparé — le cas des tests ci-dessus. */
+    qgpu_core_set_scanout_geom(c, FB_PITCH32, FB_W, FB_W, 32);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_PRESENT, QGPU_LEN_SURF_PRESENT));
+    emit(&e, 1); emit(&e, 0); emit(&e, FB_PITCH32 + 4);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_PF_XRGB8888);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "PRESENT au pas d'un autre écran : st %u", st);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_PRESENT, QGPU_LEN_SURF_PRESENT));
+    emit(&e, 1); emit(&e, 0); emit(&e, FB_PITCH32);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_PF_RGB1555);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "PRESENT 1555 sur un écran 32 bits : st %u", st);
+    memset(fb, 0, (size_t)FB_W * FB_W * 4);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_PRESENT, QGPU_LEN_SURF_PRESENT));
+    emit(&e, 1); emit(&e, 0); emit(&e, FB_PITCH32);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_PF_XRGB8888);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    p = qgpu_ld32(fb + 10 * 4 + 20 * FB_PITCH32) & 0xFFFFFF;
+    CHECK(st == QGPU_ST_OK && p == 0xFF0000,
+          "PRESENT au bon pas avec géométrie : st %u pixel %06x", st, p);
+    qgpu_core_set_scanout_geom(c, 0, 0, 0, 0);
+
     /* COPY_TEX : surface rouge → texture noire, puis REPLACE. */
     {
         uint32_t i;
@@ -4513,7 +4738,7 @@ static void run_v14(QgpuCore *c, uint8_t *shmem)
 {
     Emit e, v;
     float m[16], mv[16];
-    uint32_t st, packed;
+    uint32_t st, packed, i;
 
     printf("-- v14 : tampons hôte --\n");
     CHECK(QGPU_OP_BUF_CREATE == 0x001B && QGPU_LEN_BUF_CREATE == 3,
@@ -4596,6 +4821,51 @@ static void run_v14(QgpuCore *c, uint8_t *shmem)
     st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
     CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF0000,
           "DRAW_RAW_BUF via BAR0 : %06x (st %u)", px(shmem, 30, 8), st);
+
+    /* H4 par le chemin VBO : les sommets vivent sur l'HÔTE, le raw_fix_nan du
+       plugin ne peut pas les atteindre — c'est l'exposition réelle que la
+       contre-expertise a retenue. Un quatrième sommet entièrement NaN, jamais
+       cité par les indices, ne doit plus rien coûter. */
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 4, 4, 1, 0, 0, 1); rv2c(&v, 60, 4, 1, 0, 0, 1); rv2c(&v, 4, 20, 1, 0, 0, 1);
+    for (i = 0; i < 6; i++) {
+        emit(&v, 0x7FC00000u);
+    }
+    for (i = 0; i < 3; i++) {
+        qgpu_st16(shmem + IDX_OFF + i * 2, (uint16_t)i);
+    }
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE));
+    emit(&e, 12); emit(&e, packed + 24);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_SUBDATA, QGPU_LEN_BUF_SUBDATA));
+    emit(&e, 12); emit(&e, 0); emit(&e, VTX_OFF); emit(&e, packed + 24);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF0000FF, 1.0f);
+    draw_raw_buf(&e, QGPU_PRIM_MODE_TRIANGLES, 3, 12, 0, VF_P2C,
+                 QGPU_BUF_SHMEM, IDX_OFF, QGPU_IDX_U16, 4);
+    readback_cmd(&e, 1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF0000 && px(shmem, 8, 30) == 0x0000FF,
+          "H4/VBO : queue de sommets NaN jamais citée : %06x %06x (st %u)",
+          px(shmem, 30, 8), px(shmem, 8, 30), st);
+
+    /* Le NaN est maintenant dans un sommet CITÉ du tampon hôte : assaini, et
+       le CLEAR puis le READBACK qui suivent s'exécutent. */
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_SUBDATA, QGPU_LEN_BUF_SUBDATA));
+    emit(&e, 12); emit(&e, 4); emit(&e, VTX_OFF + 18 * 4); emit(&e, 4);
+    draw_raw_buf(&e, QGPU_PRIM_MODE_TRIANGLES, 3, 12, 0, VF_P2C,
+                 QGPU_BUF_SHMEM, IDX_OFF, QGPU_IDX_U16, 4);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF204060, 1.0f);
+    readback_cmd(&e, 1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 30) == 0x204060 && px(shmem, 2, 2) == 0x204060,
+          "H4/VBO : NaN dans un sommet cité, le flux continue : %06x %06x (st %u)",
+          px(shmem, 30, 30), px(shmem, 2, 2), st);
+
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_DESTROY, QGPU_LEN_BUF)); emit(&e, 12);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "H4/VBO : tampon libéré (st %u)", st);
 
     e.off = e.start = CMD_OFF;
     emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE));
@@ -4691,9 +4961,14 @@ static void run_v15(QgpuCore *c, uint8_t *shmem)
     emit(&e, 1); emit(&e, RB_OFF + 0x8000); emit(&e, STRIDE);
     emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H);
     st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
-    p = qgpu_ld32(shmem + RB_OFF + 0x8000 + 8 * STRIDE + 8 * 4) & 0xFFFFFF;
-    CHECK(st == QGPU_ST_OK && p == 0x00FF00,
-          "UPLOAD 1555 → READBACK 8888 : %06x (st %u)", p, st);
+    /* H3 : le bit 15 de RGB1555 n'est pas un alpha (pack_rgb1555 le jette) et
+       la surface est en XRGB8888 : un transfert en milliers de couleurs doit
+       arriver OPAQUE. Le test v15 masquait l'alpha, ce qui cachait une
+       surface entièrement transparente — DST_ALPHA inversé, COPY_TEX
+       invisible. On lit donc le mot ENTIER. */
+    p = qgpu_ld32(shmem + RB_OFF + 0x8000 + 8 * STRIDE + 8 * 4);
+    CHECK(st == QGPU_ST_OK && p == 0xFF00FF00u,
+          "UPLOAD 1555 → READBACK 8888, alpha compris : %08x (st %u)", p, st);
 
     for (i = 0; i < W * H; i++) {
         qgpu_st16(shmem + RB_OFF + i * 2, 0x8000);

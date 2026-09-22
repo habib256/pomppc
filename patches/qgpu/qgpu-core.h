@@ -293,6 +293,9 @@ struct QgpuCore {
     uint32_t scanout_size;
     void   (*scanout_dirty)(void *opaque, uint32_t off, uint32_t len);
     void    *scanout_opaque;
+    /* v16 (Q3) : géométrie de la fenêtre de scanout, posée par le device.
+       stride == 0 = « inconnue, ne compare rien ». */
+    uint32_t scanout_stride, scanout_width, scanout_height, scanout_depth;
 
     /* tampons de travail, agrandis à la demande */
     float    *vbuf; uint32_t vbuf_cap;   /* en floats */
@@ -349,6 +352,17 @@ void     qgpu_core_set_scanout(QgpuCore *c, uint8_t *ram, uint32_t size,
                                void (*dirty)(void *opaque, uint32_t off,
                                              uint32_t len),
                                void *opaque);
+
+/* v16 (Q3) : géométrie de la fenêtre de scanout liée par le device. Sert à
+ * REFUSER un SURF_PRESENT dont le pas n'est pas celui de l'écran — le symptôme
+ * de Q1 (image écrite au pas d'un autre écran : figée ou en diagonale, statut
+ * OK). stride == 0 veut dire « géométrie inconnue, ne compare rien » (repli VGA
+ * quand la surface de la console est une copie). Appelé juste après
+ * qgpu_core_set_scanout, sous BQL, file drainée ; qgpu_core_set_scanout(NULL)
+ * l'efface. */
+void     qgpu_core_set_scanout_geom(QgpuCore *c, uint32_t stride, uint32_t width,
+                                    uint32_t height, uint32_t depth);
+#define QGPU_CORE_HAS_SCANOUT_GEOM 1
 
 /* Exécute un flux ; renvoie le statut (aussi dans c->status / status_pc).
  * off/len en octets dans la fenêtre partagée. */
