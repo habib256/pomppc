@@ -33,7 +33,7 @@ for s in ${SCENES:-sepspec}; do
       if [ $mode = apple ]; then echo "   ⚠ échec sous Apple (référence)"
       else ko=$((ko + 1)); echo "   ÉCHEC : $s / $mode rc=$rc"; fi
     fi
-    if grep -q 'NON TENU' o-$s-$mode.txt && [ $mode != apple ]; then
+    if grep -q ': NON TENU$' o-$s-$mode.txt && [ $mode != apple ]; then
       ko=$((ko + 1)); echo "   ÉCHEC : $s / $mode annonce une capacité NON TENUE"
     fi
     cp o-$s-$mode.txt $OUT/ 2>/dev/null || true

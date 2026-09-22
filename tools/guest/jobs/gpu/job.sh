@@ -87,7 +87,10 @@ cd $SRC/guest/gltest
 scene_env() { case $1 in stencil|tex14) SENV=GLTEST_STENCIL=1 ;; *) SENV=GLTEST_NOWS=1 ;; esac; }
 # Un relevé qui dit « NON TENU » est un échec : c'est une capacité annoncée et
 # pas tenue (bug hunt T19 — personne ne greppait cette chaîne).
-non_tenu() { n=$(grep -c 'NON TENU' "$1" 2>/dev/null) || n=0; [ -n "$n" ] || n=0; echo $n; }
+# Seules les lignes de relevé (« … : NON TENU ») comptent : la ligne de bilan
+# « 0 capacité(s) annoncée(s) NON TENUE(S) » contenait la sous-chaîne et faisait
+# un faux rouge sur un v15 pourtant 17/17 (vu le 22/09).
+non_tenu() { n=$(grep -c ': NON TENU$' "$1" 2>/dev/null) || n=0; [ -n "$n" ] || n=0; echo $n; }
 ok=0
 for s in $SCENES; do
   scene_env $s

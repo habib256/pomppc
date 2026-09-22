@@ -8158,6 +8158,17 @@ static int try_draw_ds(PCtx *p, unsigned long *a)
     }
     if (!pix_dest(p, vtx, w, h, &dx, &dy))
         return 0;
+    /* MESURÉ en VM le 22/09/2026 (scène drawpack, sonde gl_note) : l'application
+       pose GL_UNPACK_ALIGNMENT = 1 et ce mot vaut encore 4 — les offsets
+       CTX_UNPACK_* ne sont pas (ou plus) ceux que _glPixelStorei_Exec écrit pour
+       DrawPixels, et lire 40 octets par ligne de 39 brouille l'image (38/0/0/24/1
+       pixels par couleur). Tant qu'ils ne sont pas relevés (diffstate sur un
+       glPixelStorei, comme pour CTX_PACK_*), le chemin hôte ne prend que les
+       images dont la ligne SERRÉE est déjà multiple de 4 : quel que soit
+       l'alignement réel (1, 2, 4 ou 8), le pas est alors le même. Les autres
+       (GL_RGB de largeur non multiple de 4) partent en logiciel : exact. */
+    if ((w * bpp) & 3UL)
+        return 0;
     align = GLD_U32(p->ctx, CTX_UNPACK_ALIGNMENT);
     if (align != 1 && align != 2 && align != 4 && align != 8)
         align = 4;

@@ -4312,12 +4312,48 @@ static void run_v10(QgpuCore *c, uint8_t *shmem)
               px(shmem, 32, 32), st);
     }
 
+    /* (o) glDrawPixels tel que le plugin l'émet : RGB octets, largeur IMPAIRE
+       (13), lignes de 40 octets (39 utiles, arrondi à 4), quad de 13×5 pixels
+       au pixel près, NEAREST. Vu en VM (scène drawpack, 22/09) : lignes
+       brouillées (38/0/0/24/1 pixels par couleur au lieu de 13 chacune). Chaque
+       ligne de l'image doit ressortir avec SA couleur, sur les deux backends. */
+    {
+        static const uint8_t rowc[5][3] = {
+            { 255, 0, 0 }, { 0, 255, 0 }, { 0, 0, 255 }, { 255, 255, 0 }, { 0, 255, 255 } };
+        uint32_t x, y, bad = 0, first = 0;
+        memset(shmem + TEX_OFF, 0xA5, 40 * 5);
+        for (y = 0; y < 5; y++)
+            for (x = 0; x < 13; x++)
+                memcpy(shmem + TEX_OFF + y * 40 + x * 3, rowc[y], 3);
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, T + 91, QGPU_TT_2D);
+        timage3(&e, T + 91, QGPU_TT_2D, 0, 13, 5, 1, 0x1907, 0x1907, 0x1401, TEX_OFF, 40, 0);
+        tparam(&e, T + 91, QGPU_TP_MIN_FILTER, 0x2600);
+        tparam(&e, T + 91, QGPU_TP_MAG_FILTER, 0x2600);
+        tparam(&e, T + 91, QGPU_TP_WRAP_S, 0x812F);
+        tparam(&e, T + 91, QGPU_TP_WRAP_T, 0x812F);
+        v.off = v.start = VTX_OFF;
+        quad_str(&v, 10, 20, 23, 25, 0, 0, 1, 1, 0, 0xFFFFFF);
+        st = v10_draw(c, &e, T + 91, 6);
+        for (y = 0; y < 5; y++)
+            for (x = 0; x < 13; x++) {
+                uint32_t want = ((uint32_t)rowc[y][0] << 16) | ((uint32_t)rowc[y][1] << 8) | rowc[y][2];
+                uint32_t got = px(shmem, 10 + x, 20 + y);
+                if (got != want) { if (!bad) first = (y << 16) | (x << 8) | 0; bad++; if (!((bad - 1) & 0xFFFF)) first = got | (y << 24); }
+            }
+        CHECK(st == QGPU_ST_OK && bad == 0,
+              "(o) DrawPixels RGB 13×5, 40 octets/ligne : %u pixel(s) faux (premier %08x, st %u pc %u)",
+              bad, first, st, c->status_pc);
+    }
+
     e.off = e.start = CMD_OFF;
     state(&e, QGPU_SK_TEXTURE, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_DESTROY, QGPU_LEN_TEX)); emit(&e, T + 91);
     emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_DESTROY, QGPU_LEN_CTX)); emit(&e, V10_CTX);
     emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_DESTROY, QGPU_LEN_SURF)); emit(&e, V10_SURF);
     st = v10_exec(c, &e);
     CHECK(st == QGPU_ST_OK, "v10 : surface et contexte rendus (st %u)", st);
+
 }
 
 /* ══════ v11 : couleur secondaire sur le chemin hérité ══════ */
