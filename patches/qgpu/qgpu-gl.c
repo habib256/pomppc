@@ -93,6 +93,17 @@ typedef struct GlState {
     void (*PointParameterf)(GLenum, GLfloat);
     void (*PointParameterfv)(GLenum, const GLfloat *);
     bool has_tex;
+    /* G2 : ARB_texture_rectangle est une EXTENSION, pas un morceau d'OpenGL
+       1.4 : `has_tex` ne dit rien d'elle. Sans elle, glDisable(RECTANGLE)
+       rend GL_INVALID_ENUM à chaque unité et à chaque commande. */
+    bool has_rect;
+    /* G3 : vrai si les points d'entrée FBO résolus sont ceux d'EXT. */
+    bool fbo_ext;
+    /* Facultatifs, résolus pour les mineurs du rapport : liste d'extensions
+       d'un contexte 3.0+, bornage des couleurs, compte d'occlusion 64 bits. */
+    const GLubyte *(*GetStringi)(GLenum, GLuint);
+    void (*ClampColor)(GLenum, GLenum);
+    void (*GetQueryObjectui64v)(GLuint, GLenum, uint64_t *);
     const char *renderer;
 } GlState;
 
@@ -239,6 +250,56 @@ typedef struct GlSurface {
 #define GL_QUERY_RESULT         0x8866
 #define GL_QUERY_RESULT_AVAILABLE 0x8867
 #endif
+#ifndef GL_CLAMP_TO_BORDER
+#define GL_CLAMP_TO_BORDER      0x812D
+#endif
+#ifndef GL_NUM_EXTENSIONS
+#define GL_NUM_EXTENSIONS       0x821D
+#endif
+#ifndef GL_MAX_TEXTURE_UNITS
+#define GL_MAX_TEXTURE_UNITS    0x84E2
+#endif
+/* Bornage des couleurs (GL 2.0 / ARB_color_buffer_float) : hors profil de
+   compatibilité classique, une implémentation peut laisser passer les
+   composantes > 1 jusqu'au tampon, là où le backend de référence borne. */
+#ifndef GL_CLAMP_VERTEX_COLOR
+#define GL_CLAMP_VERTEX_COLOR   0x891A
+#define GL_CLAMP_FRAGMENT_COLOR 0x891B
+#define GL_CLAMP_READ_COLOR     0x891C
+#define GL_FIXED_ONLY           0x891D
+#endif
+
+/* ─────────────────────── G1 : la file d'erreurs d'OpenGL ───────────────────
+ *
+ * OpenGL garde UN DRAPEAU PAR CODE d'erreur, et glGetError en rend (et en
+ * efface) un seul par appel. Un « return glGetError() == GL_NO_ERROR » laisse
+ * donc derrière lui les autres drapeaux, et une erreur née d'une commande
+ * empoisonne la SUIVANTE, qui rend QGPU_ST_BACKEND alors qu'elle est saine.
+ * Deux règles, désormais tenues partout :
+ *   - gl_err_flush() à l'ENTRÉE (dans gl_make_current, la seule porte), pour
+ *     ne juger que ce que cette commande-ci a fait ;
+ *   - gl_err_ok() en SORTIE, qui VIDE la file et dit si elle était vide.
+ * La borne de boucle est une ceinture : une implémentation qui rendrait
+ * toujours la même erreur ne doit pas figer le thread de rendu. */
+#define GL_ERR_DRAIN 64
+
+static void gl_err_flush(void)
+{
+    int n = GL_ERR_DRAIN;
+    while (n-- > 0 && glGetError() != GL_NO_ERROR) {
+    }
+}
+
+static bool gl_err_ok(void)
+{
+    bool ok = true;
+    int n = GL_ERR_DRAIN;
+
+    while (n-- > 0 && glGetError() != GL_NO_ERROR) {
+        ok = false;
+    }
+    return ok;
+}
 
 static void *gl_proc(const char *name)
 {
@@ -259,27 +320,85 @@ static void *gl_proc(const char *name)
 static bool gl_make_current(GlState *g)
 {
 #ifdef QGPU_GL_CGL
-    return CGLSetCurrentContext(g->ctx) == kCGLNoError;
+    if (CGLSetCurrentContext(g->ctx) != kCGLNoError) {
+        return false;
+    }
 #else
-    return eglMakeCurrent(g->dpy, g->surf, g->surf, g->ctx) == EGL_TRUE;
+    if (eglMakeCurrent(g->dpy, g->surf, g->surf, g->ctx) != EGL_TRUE) {
+        return false;
+    }
 #endif
+    /* G1 : PORTE D'ENTRÉE UNIQUE de toute opération du backend (gl_target,
+       création/destruction de surface, requêtes d'occlusion). La purge est
+       ici, donc aucune opération ne peut hériter de l'erreur d'une autre. */
+    gl_err_flush();
+    return true;
+}
+
+/* G2 : une extension est-elle là ? glGetString(GL_EXTENSIONS) est la forme
+   1.x (et celle du profil de compatibilité) ; un contexte 3.0+ peut ne
+   répondre que par glGetStringi. On accepte les deux, et on compare des MOTS
+   ENTIERS (« GL_ARB_texture_rectangle » ne doit pas matcher un préfixe). */
+static bool gl_has_ext(const GlState *g, const char *name)
+{
+    const char *s = (const char *)glGetString(GL_EXTENSIONS);
+    size_t len = strlen(name);
+
+    if (s) {
+        const char *p = s;
+        while ((p = strstr(p, name)) != NULL) {
+            if ((p == s || p[-1] == ' ') && (p[len] == ' ' || p[len] == '\0')) {
+                return true;
+            }
+            p += len;
+        }
+    } else if (g->GetStringi) {
+        GLint n = 0, i;
+        glGetIntegerv(GL_NUM_EXTENSIONS, &n);
+        for (i = 0; i < n; i++) {
+            const GLubyte *e = g->GetStringi(GL_EXTENSIONS, (GLuint)i);
+            if (e && !strcmp((const char *)e, name)) {
+                return true;
+            }
+        }
+    }
+    gl_err_flush();       /* un contexte cœur rend INVALID_ENUM sur EXTENSIONS */
+    return false;
+}
+
+/* G3 : les deux jeux d'entrées FBO, au choix. `ext` demande la variante
+ * EXT_framebuffer_object, sinon les noms cœur (ARB_framebuffer_object / GL 3.0).
+ *
+ * POURQUOI LE CHOIX. Sur macOS, OpenGL.framework exporte glGenFramebuffers
+ * même dans un contexte hérité 2.1 (le symbole existe pour le profil cœur) :
+ * dlsym réussit TOUJOURS et la bascule EXT ne jouait jamais. Si le contexte
+ * n'a qu'EXT_framebuffer_object, la création de FBO échouerait — plus aucune
+ * surface, donc zéro 3D. On prend donc l'EXT d'abord sur Apple, et gl_init
+ * tranche pour de bon avec un FBO 1×1 : si le jeu choisi ne sait pas en faire
+ * un, on rebascule sur l'autre et on re-sonde. */
+static bool gl_resolve_fbo(GlState *g, bool ext)
+{
+    g->fbo_ext = ext;
+    g->GenFramebuffers = gl_proc(ext ? "glGenFramebuffersEXT" : "glGenFramebuffers");
+    g->DeleteFramebuffers = gl_proc(ext ? "glDeleteFramebuffersEXT" : "glDeleteFramebuffers");
+    g->BindFramebuffer = gl_proc(ext ? "glBindFramebufferEXT" : "glBindFramebuffer");
+    g->FramebufferTexture2D = gl_proc(ext ? "glFramebufferTexture2DEXT"
+                                          : "glFramebufferTexture2D");
+    g->CheckFramebufferStatus = gl_proc(ext ? "glCheckFramebufferStatusEXT"
+                                            : "glCheckFramebufferStatus");
+    return g->GenFramebuffers && g->DeleteFramebuffers && g->BindFramebuffer &&
+           g->FramebufferTexture2D && g->CheckFramebufferStatus;
 }
 
 static bool gl_resolve(GlState *g)
 {
-    /* D'abord les noms cœur (GL 3.0+ / macOS legacy les exporte aussi),
-       sinon la variante EXT (GL_EXT_framebuffer_object). */
-    g->GenFramebuffers = gl_proc("glGenFramebuffers");
-    g->DeleteFramebuffers = gl_proc("glDeleteFramebuffers");
-    g->BindFramebuffer = gl_proc("glBindFramebuffer");
-    g->FramebufferTexture2D = gl_proc("glFramebufferTexture2D");
-    g->CheckFramebufferStatus = gl_proc("glCheckFramebufferStatus");
-    if (!g->GenFramebuffers || !g->BindFramebuffer) {
-        g->GenFramebuffers = gl_proc("glGenFramebuffersEXT");
-        g->DeleteFramebuffers = gl_proc("glDeleteFramebuffersEXT");
-        g->BindFramebuffer = gl_proc("glBindFramebufferEXT");
-        g->FramebufferTexture2D = gl_proc("glFramebufferTexture2DEXT");
-        g->CheckFramebufferStatus = gl_proc("glCheckFramebufferStatusEXT");
+#ifdef QGPU_GL_CGL
+    const bool fbo_first_ext = true;              /* cf. gl_resolve_fbo */
+#else
+    const bool fbo_first_ext = false;
+#endif
+    if (!gl_resolve_fbo(g, fbo_first_ext)) {
+        gl_resolve_fbo(g, !fbo_first_ext);
     }
     g->BlendFuncSeparate = gl_proc("glBlendFuncSeparate");
     g->BlendEquationSeparate = gl_proc("glBlendEquationSeparate");
@@ -323,6 +442,17 @@ static bool gl_resolve(GlState *g)
         g->PointParameterf = gl_proc("glPointParameterfARB");
         g->PointParameterfv = gl_proc("glPointParameterfvARB");
     }
+    /* FACULTATIFS : liste d'extensions d'un contexte 3.0+ (G2), bornage des
+       couleurs, compte d'occlusion 64 bits. Leur absence n'interdit rien. */
+    g->GetStringi = gl_proc("glGetStringi");
+    g->ClampColor = gl_proc("glClampColor");
+    if (!g->ClampColor) {
+        g->ClampColor = gl_proc("glClampColorARB");
+    }
+    g->GetQueryObjectui64v = gl_proc("glGetQueryObjectui64v");
+    if (!g->GetQueryObjectui64v) {
+        g->GetQueryObjectui64v = gl_proc("glGetQueryObjectui64vEXT");
+    }
     return g->GenFramebuffers && g->DeleteFramebuffers && g->BindFramebuffer &&
            g->FramebufferTexture2D && g->CheckFramebufferStatus &&
            g->BlendFuncSeparate && g->BlendEquationSeparate &&
@@ -331,8 +461,182 @@ static bool gl_resolve(GlState *g)
            g->MultiTexCoord4fv && g->FogCoordf && g->BlendColor;
 }
 
+/* Déclaré ici : l'auto-test de l'init (G6) emprunte EXACTEMENT le chemin de
+   production du téléversement profondeur/stencil, plutôt qu'une imitation. */
+static bool gl_packed_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
+                             uint32_t w, uint32_t h,
+                             const float *depth, const uint8_t *sten);
+
+/* Un FBO 1×1 (couleur, plus profondeur+stencil si `zs`) lié et prêt. */
+static bool gl_probe_make(GlState *g, bool zs, GLuint *fbo, GLuint *tex, GLuint *zt)
+{
+    *fbo = *tex = *zt = 0;
+    glGenTextures(1, tex);
+    glBindTexture(GL_TEXTURE_2D, *tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0,
+                 GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, NULL);
+    if (zs) {
+        glGenTextures(1, zt);
+        glBindTexture(GL_TEXTURE_2D, *zt);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, 1, 1, 0,
+                     GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL);
+    }
+    g->GenFramebuffers(1, fbo);
+    g->BindFramebuffer(GL_FRAMEBUFFER, *fbo);
+    g->FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, *tex, 0);
+    if (zs) {
+        g->FramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, *zt, 0);
+        g->FramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, *zt, 0);
+    }
+    return g->CheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+}
+
+static void gl_probe_free(GlState *g, GLuint fbo, GLuint tex, GLuint zt)
+{
+    g->BindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (fbo) {
+        g->DeleteFramebuffers(1, &fbo);
+    }
+    if (tex) {
+        glDeleteTextures(1, &tex);
+    }
+    if (zt) {
+        glDeleteTextures(1, &zt);
+    }
+    gl_err_flush();
+}
+
+/* G3 : un FBO couleur 1×1 se crée-t-il, et rend-il ce qu'on y efface ? C'est
+   ce qui tranche entre les deux jeux d'entrées FBO, sans rien supposer de ce
+   que dlsym a bien voulu trouver. */
+static bool gl_probe_fbo(GlState *g)
+{
+    GLuint fbo, tex, zt;
+    uint32_t px = 0;
+    bool ok;
+
+    gl_err_flush();
+    ok = gl_probe_make(g, false, &fbo, &tex, &zt);
+    if (ok) {
+        glDisable(GL_SCISSOR_TEST);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glViewport(0, 0, 1, 1);
+        glClearColor(0x34 / 255.0f, 0x56 / 255.0f, 0x78 / 255.0f, 0x12 / 255.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glPixelStorei(GL_PACK_ALIGNMENT, 4);
+        glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+        glReadPixels(0, 0, 1, 1, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, &px);
+        ok = px == 0x12345678u && gl_err_ok();
+    }
+    gl_probe_free(g, fbo, tex, zt);
+    return ok;
+}
+
+/* G4 + G6 : ce que le backend EXIGE de l'hôte, vérifié une fois, à l'init.
+ *
+ * POURQUOI. Résoudre les symboles ne prouve rien : un contexte CŒUR les
+ * résout tous et rend ensuite GL_INVALID_OPERATION sur tout le pipeline fixe
+ * — le backend s'annoncerait (QGPU_CAP_GL) et l'invité verrait du noir. On
+ * dessine donc VRAIMENT un triangle par les tableaux de sommets du pipeline
+ * fixe, et on relit le pixel. Même chose pour l'aller-retour
+ * profondeur/stencil par glDrawPixels (G6), le chemin le moins fréquenté des
+ * pilotes modernes : s'il ment, la profondeur téléversée est fausse et
+ * l'image l'est en silence. Tout échec ici rend gl_init false, donc repli sur
+ * le backend logiciel — un rendu lent et juste vaut mieux qu'un rendu rapide
+ * et faux. QGPU_GL_FORCE=1 lève le verdict (sans lever la trace) pour un hôte
+ * dont on sait que seule la sonde est en tort. */
+static bool gl_selftest(GlState *g, const char **why)
+{
+    static const float tri[3][6] = {              /* x y r g b a, espace de découpe */
+        { -1.0f, -1.0f, 1.0f, 0.0f, 1.0f, 1.0f },
+        {  3.0f, -1.0f, 1.0f, 0.0f, 1.0f, 1.0f },
+        { -1.0f,  3.0f, 1.0f, 0.0f, 1.0f, 1.0f },
+    };
+    GLuint fbo, tex, zt;
+    GLint units = 0;
+    uint32_t px = 0;
+    float d = 1.0f, d2 = -1.0f, d3 = -1.0f;
+    uint8_t sv = 0;
+    bool ok;
+
+    *why = NULL;
+    gl_err_flush();
+    glGetIntegerv(GL_MAX_TEXTURE_UNITS, &units);
+    if (!gl_err_ok() || units < QGPU_MAX_UNITS) {
+        /* la requête elle-même n'existe plus en profil cœur */
+        *why = "unités de texture du pipeline fixe";
+        return false;
+    }
+    if (!gl_probe_make(g, true, &fbo, &tex, &zt)) {
+        *why = "FBO 1×1 profondeur+stencil";
+        gl_probe_free(g, fbo, tex, zt);
+        return false;
+    }
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDepthMask(GL_TRUE);
+    glStencilMask(0xFF);
+    glViewport(0, 0, 1, 1);
+    glDepthRange(0.0, 1.0);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClearDepth(1.0);
+    glClearStencil(0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    glVertexPointer(2, GL_FLOAT, (GLsizei)sizeof(tri[0]), &tri[0][0]);
+    glColorPointer(4, GL_FLOAT, (GLsizei)sizeof(tri[0]), &tri[0][2]);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glReadPixels(0, 0, 1, 1, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, &px);
+    ok = gl_err_ok() && px == 0xFFFF00FFu;
+    if (!ok) {
+        *why = "pipeline fixe (tableaux de sommets, clear, relecture)";
+    }
+    /* G6 : aller-retour profondeur puis stencil, par le chemin de production.
+       Le cas qui compte est 1,0 — celui que tout effacement pose au fond, et
+       celui que l'ancien chemin 24_8 ramenait à 0,0 (mur collé à l'œil). */
+    if (ok) {
+        ok = gl_packed_upload(NULL, NULL, 0, 0, 1, 1, &d, NULL);
+        glReadPixels(0, 0, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &d2);
+        ok = ok && gl_err_ok() && d2 == d;
+        if (ok) {
+            sv = 0xA5;
+            ok = gl_packed_upload(NULL, NULL, 0, 0, 1, 1, NULL, &sv);
+            sv = 0;
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(0, 0, 1, 1, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, &sv);
+            glReadPixels(0, 0, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &d3);
+            /* le stencil ne doit pas avoir bougé la profondeur : c'est TOUT
+               l'intérêt de glDrawPixels plutôt que d'une lecture-écriture */
+            ok = ok && gl_err_ok() && sv == 0xA5 && d3 == d2;
+        }
+        if (!ok) {
+            *why = "aller-retour glDrawPixels profondeur/stencil";
+        }
+    }
+    gl_probe_free(g, fbo, tex, zt);
+    return ok;
+}
+
 static bool gl_init(QgpuCore *c)
 {
+    const char *why = NULL;
     GlState *g = calloc(1, sizeof(*g));
     if (!g) {
         return false;
@@ -369,6 +673,19 @@ static bool gl_init(QgpuCore *c)
             EGL_ALPHA_SIZE, 8, EGL_DEPTH_SIZE, 16, EGL_NONE
         };
         static const EGLint pb_attr[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
+        /* G4 : tout ce backend est du pipeline FIXE. On demande donc
+           explicitement un profil de COMPATIBILITÉ (EGL 1.5 / KHR_create_context) ;
+           sans attributs, le pilote choisit, et un contexte cœur résoudrait
+           tous les symboles pour ne rien savoir dessiner. Si la demande est
+           refusée, on retombe sur le choix du pilote — et c'est alors
+           l'auto-test qui tranche. */
+        static const EGLint ctx_compat[] = {
+            0x3098 /* EGL_CONTEXT_MAJOR_VERSION */, 3,
+            0x30FB /* EGL_CONTEXT_MINOR_VERSION */, 2,
+            0x30FD /* EGL_CONTEXT_OPENGL_PROFILE_MASK */,
+            0x00000002 /* ..._COMPATIBILITY_PROFILE_BIT */,
+            EGL_NONE
+        };
         EGLConfig cfg;
         EGLint n = 0;
 
@@ -381,7 +698,10 @@ static bool gl_init(QgpuCore *c)
             goto fail;
         }
         g->surf = eglCreatePbufferSurface(g->dpy, cfg, pb_attr);
-        g->ctx = eglCreateContext(g->dpy, cfg, EGL_NO_CONTEXT, NULL);
+        g->ctx = eglCreateContext(g->dpy, cfg, EGL_NO_CONTEXT, ctx_compat);
+        if (g->ctx == EGL_NO_CONTEXT) {
+            g->ctx = eglCreateContext(g->dpy, cfg, EGL_NO_CONTEXT, NULL);
+        }
         if (g->surf == EGL_NO_SURFACE || g->ctx == EGL_NO_CONTEXT) {
             goto fail;
         }
@@ -405,11 +725,45 @@ static bool gl_init(QgpuCore *c)
             g->has_tex = true;
             c->caps |= QGPU_CAP_GL14;
         }
+        /* G2 : la cible RECTANGLE ne s'allume et ne s'éteint que si l'hôte
+           l'a. Cœur depuis 3.1, extension avant. */
+        g->has_rect = (maj > 3 || (maj == 3 && min >= 1)) ||
+                      gl_has_ext(g, "GL_ARB_texture_rectangle") ||
+                      gl_has_ext(g, "GL_EXT_texture_rectangle") ||
+                      gl_has_ext(g, "GL_NV_texture_rectangle");
+    }
+    /* Mineur : le backend de référence borne toutes ses couleurs à [0,1] ;
+       un contexte dont le bornage a été éteint (ARB_color_buffer_float)
+       laisserait passer les composantes > 1 jusqu'au tampon. On pose la
+       valeur qu'attend un rendu 1.x, une fois. */
+    if (g->ClampColor) {
+        g->ClampColor(GL_CLAMP_VERTEX_COLOR, GL_TRUE);
+        g->ClampColor(GL_CLAMP_FRAGMENT_COLOR, GL_TRUE);
+        g->ClampColor(GL_CLAMP_READ_COLOR, GL_FIXED_ONLY);
+        gl_err_flush();          /* facultatif : son refus n'est pas une panne */
+    }
+    /* G3 : le FBO tranche entre les deux jeux d'entrées. */
+    if (!gl_probe_fbo(g)) {
+        if (!gl_resolve_fbo(g, !g->fbo_ext) || !gl_probe_fbo(g)) {
+            fprintf(stderr, "qgpu: backend gl refusé : pas de FBO utilisable "
+                    "(%s)\n", g->renderer ? g->renderer : "?");
+            goto fail;
+        }
+    }
+    /* G4/G6 : ce qu'on annonce, on le tient — ou on laisse la place au soft. */
+    if (!gl_selftest(g, &why)) {
+        fprintf(stderr, "qgpu: backend gl refusé par l'auto-test : %s (%s)%s\n",
+                why ? why : "?", g->renderer ? g->renderer : "?",
+                getenv("QGPU_GL_FORCE") ? " — passé outre (QGPU_GL_FORCE)" : "");
+        if (!getenv("QGPU_GL_FORCE")) {
+            goto fail;
+        }
     }
     if (c->trace) {
-        fprintf(stderr, "qgpu: backend gl : %s / %s\n",
+        fprintf(stderr, "qgpu: backend gl : %s / %s (fbo %s, rectangle %s)\n",
                 g->renderer ? g->renderer : "?",
-                (const char *)glGetString(GL_VERSION));
+                (const char *)glGetString(GL_VERSION),
+                g->fbo_ext ? "EXT" : "core", g->has_rect ? "oui" : "non");
     }
     /* Le contexte NAÎT LIBRE. L'initialisation se fait sur le thread qui
        réalise le device, l'exécution sur le thread de rendu (v9) : un contexte
@@ -468,6 +822,10 @@ static void gl_disable_targets(const GlState *g)
     if (g->has_tex) {
         glDisable(GL_TEXTURE_3D);
         glDisable(GL_TEXTURE_CUBE_MAP);
+    }
+    /* G2 : RECTANGLE est une extension à part — sans elle, ce glDisable rend
+       GL_INVALID_ENUM quatre fois par commande, et TOUT finit en BACKEND. */
+    if (g->has_rect) {
         glDisable(GL_TEXTURE_RECTANGLE);
     }
 }
@@ -519,14 +877,7 @@ static bool gl_surf_create(QgpuCore *c, QgpuSurface *s)
         }
     }
     if (g->CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        g->BindFramebuffer(GL_FRAMEBUFFER, 0);
-        g->DeleteFramebuffers(1, &gs->fbo);
-        glDeleteTextures(1, &gs->tex);
-        if (gs->depth) {
-            glDeleteTextures(1, &gs->depth);
-        }
-        free(gs);
-        return false;
+        goto fail;
     }
     /* Contenu initial défini (couleur 0, profondeur 1, stencil 0), comme le
        backend logiciel. */
@@ -540,8 +891,27 @@ static bool gl_surf_create(QgpuCore *c, QgpuSurface *s)
     glClear(GL_COLOR_BUFFER_BIT | (gs->depth ? GL_DEPTH_BUFFER_BIT : 0) |
             (gs->packed ? GL_STENCIL_BUFFER_BIT : 0));
     g->BindFramebuffer(GL_FRAMEBUFFER, 0);
+    /* G1 : une surface qui n'a pas pu naître (GL_OUT_OF_MEMORY sur un 4096²,
+       format refusé…) doit le DIRE. Sans ce test, elle était comptée comme
+       créée et c'est la commande suivante, saine, qui héritait de l'erreur. */
+    if (!gl_err_ok()) {
+        goto fail;
+    }
     s->priv = gs;
     return true;
+
+fail:
+    g->BindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (gs->fbo) {
+        g->DeleteFramebuffers(1, &gs->fbo);
+    }
+    glDeleteTextures(1, &gs->tex);
+    if (gs->depth) {
+        glDeleteTextures(1, &gs->depth);
+    }
+    gl_err_flush();
+    free(gs);
+    return false;
 }
 
 static void gl_surf_destroy(QgpuCore *c, QgpuSurface *s)
@@ -611,7 +981,7 @@ static bool gl_target(QgpuCore *c, QgpuSurface *s, const QgpuState *st)
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDepthMask(GL_TRUE);
         glStencilMask(0xFF);
-        return true;
+        return gl_err_ok();
     }
     if (st->v[QGPU_SK_DEPTH_TEST] && gs->depth) {
         glEnable(GL_DEPTH_TEST);
@@ -728,7 +1098,9 @@ static bool gl_target(QgpuCore *c, QgpuSurface *s, const QgpuState *st)
     } else {
         glDisable(GL_SCISSOR_TEST);
     }
-    return true;
+    /* G1 : l'état est posé ICI pour TOUTE commande ; s'il n'a pas pu l'être,
+       le dessin qui suit rendrait une image fausse en silence. */
+    return gl_err_ok();
 }
 
 static bool gl_clear(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
@@ -759,7 +1131,7 @@ static bool gl_clear(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
     if (bits) {
         glClear(bits);
     }
-    return glGetError() == GL_NO_ERROR;
+    return gl_err_ok();
 }
 
 /* ───────────── textures (v3) : objets GL tenus à jour paresseusement ───────────── */
@@ -768,6 +1140,17 @@ typedef struct GlTexture {
     GLuint id;
     GLenum target;                 /* v10 : cible GL de l'objet */
 } GlTexture;
+
+/* G5 : GL_CLAMP (0x2900) est le pincement vers la BORDURE d'OpenGL 1.x — pas
+   vers le dernier texel. Le backend de référence l'implémente ainsi
+   (wrap_index rend la couleur de bordure hors du niveau), et le mode a
+   disparu du profil cœur comme de Metal, où il est au mieux rabattu sur
+   CLAMP_TO_EDGE. On l'écrit donc explicitement, pour que les deux backends
+   ne puissent pas diverger sur le bord d'une texture. */
+static GLint gl_wrap(uint32_t w)
+{
+    return (GLint)(w == 0x2900 ? (uint32_t)GL_CLAMP_TO_BORDER : w);
+}
 
 static void gl_tex_destroy(QgpuCore *c, QgpuTexture *t)
 {
@@ -784,9 +1167,14 @@ static void gl_tex_destroy(QgpuCore *c, QgpuTexture *t)
    (ou des flottants de profondeur) : le cœur a fait conversions et
    décompression. internalformat = format de base : L et I viennent du rouge,
    et les fonctions d'environnement suivent la table d'OpenGL.
-   ALPHA est déjà déplié en blanc+A par le cœur : on l'envoie en RGBA/BGRA,
-   jamais en GL_ALPHA (un pilote hôte qui promeut ALPHA en RGBA garderait
-   R=G=B=0 et MODULATE noircirait les polices). L/I/LA/RED restent 1 canal. */
+
+   H1 : un niveau de base GL_ALPHA part en GL_ALPHA, comme l'invité l'a
+   demandé. Le cœur le dépaquette en argb(a, 0, 0, 0) et ne le promeut plus en
+   RGBA ; le format INTERNE doit suivre, sans quoi REPLACE rendrait le texel
+   (noir) au lieu de « couleur primaire, alpha de la texture » — la table 3.22
+   d'OpenGL, et ce que fait déjà le backend de référence. GL_ALPHA est un
+   format interne valide du profil de compatibilité ; les données, elles,
+   restent BGRA (le pilote n'en garde que l'alpha). */
 static void gl_tex_level(const GlState *g, const QgpuTexture *t, GLenum target,
                          uint32_t face, uint32_t l)
 {
@@ -827,7 +1215,7 @@ static void gl_tex_level(const GlState *g, const QgpuTexture *t, GLenum target,
             fmt = GL_LUMINANCE;
         }
     } else {
-        ifmt = (lv->fmt == 0x1906) ? 0x1908 : (GLint)lv->fmt; /* ALPHA → RGBA */
+        ifmt = (GLint)lv->fmt;          /* ALPHA, RGB, RGBA : tels quels (H1) */
         fmt = GL_BGRA;
         type = GL_UNSIGNED_INT_8_8_8_8_REV;
     }
@@ -873,18 +1261,20 @@ static bool gl_tex_sync(QgpuCore *c, QgpuTexture *t)
         GLenum tg = gt->target;
         glTexParameteri(tg, GL_TEXTURE_MIN_FILTER, t->min_filter);
         glTexParameteri(tg, GL_TEXTURE_MAG_FILTER, t->mag_filter);
-        glTexParameteri(tg, GL_TEXTURE_WRAP_S, t->wrap_s);
-        glTexParameteri(tg, GL_TEXTURE_WRAP_T, t->wrap_t);
+        glTexParameteri(tg, GL_TEXTURE_WRAP_S, gl_wrap(t->wrap_s));
+        glTexParameteri(tg, GL_TEXTURE_WRAP_T, gl_wrap(t->wrap_t));
         if (g->has_tex) {
             uint32_t bc = t->border;
             GLfloat border[4] = { ((bc >> 16) & 255) / 255.0f, ((bc >> 8) & 255) / 255.0f,
                                   (bc & 255) / 255.0f, ((bc >> 24) & 255) / 255.0f };
             glTexParameterfv(tg, GL_TEXTURE_BORDER_COLOR, border);
-            glTexParameteri(tg, GL_TEXTURE_WRAP_R, t->wrap_r);
-            glTexParameterf(tg, GL_TEXTURE_LOD_BIAS, t->lod_bias);
+            glTexParameteri(tg, GL_TEXTURE_WRAP_R, gl_wrap(t->wrap_r));
             if (tg != GL_TEXTURE_RECTANGLE) {
                 /* refusés sur un rectangle (GL_INVALID_OPERATION chez NVIDIA),
-                   et le cœur ne les accepte pas pour cette cible */
+                   et le cœur ne les accepte pas pour cette cible. Le biais de
+                   LOD en fait partie : un rectangle n'a pas de chaîne de
+                   niveaux, donc pas de λ à biaiser. */
+                glTexParameterf(tg, GL_TEXTURE_LOD_BIAS, t->lod_bias);
                 glTexParameterf(tg, GL_TEXTURE_MIN_LOD, t->min_lod);
                 glTexParameterf(tg, GL_TEXTURE_MAX_LOD, t->max_lod);
                 glTexParameteri(tg, GL_TEXTURE_BASE_LEVEL, t->base_level);
@@ -915,7 +1305,7 @@ static bool gl_tex_sync(QgpuCore *c, QgpuTexture *t)
         }
         t->dirty[f] = 0;
     }
-    return glGetError() == GL_NO_ERROR;
+    return gl_err_ok();
 }
 
 /* GL_COMBINE (v5) : état empaqueté → paramètres d'environnement natifs. */
@@ -1068,7 +1458,7 @@ static bool gl_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t p
     }
     g->ActiveTexture(GL_TEXTURE0);
     g->ClientActiveTexture(GL_TEXTURE0);
-    return ok && glGetError() == GL_NO_ERROR;
+    return ok && gl_err_ok();
 }
 
 /* ═══════════════ v7 : la géométrie sur le GPU hôte ═════════════════════════
@@ -1094,8 +1484,10 @@ static bool gl_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t p
  */
 
 /* Coupe tout ce que le chemin brut a pu allumer : les opcodes v1–v6 qui
-   suivront ne doivent rien voir de l'étage géométrique. */
-static void gl_reset_raw(QgpuCore *c)
+   suivront ne doivent rien voir de l'étage géométrique.
+   G1 : rend false si la remise à plat a échoué — sinon l'état resté allumé
+   serait DÉJÀ faux pour la commande suivante, qui n'y pourrait rien. */
+static bool gl_reset_raw(QgpuCore *c)
 {
     GlState *g = c->be_priv;
     int i;
@@ -1140,6 +1532,7 @@ static void gl_reset_raw(QgpuCore *c)
     glDisableClientState(GL_FOG_COORDINATE_ARRAY);
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
+    return gl_err_ok();
 }
 
 /* Lumières, matériaux, plans de découpe et plans œil du texgen sont posés
@@ -1279,7 +1672,11 @@ static void raw_trace_xform(const GLfloat *mv, const GLfloat *pr, const GLint *v
     win[2] = clip[2] / clip[3];
 }
 
-static void raw_trace(QgpuCore *c, const QgpuState *st, const QgpuGeom *gm,
+/* Rend false si le sondage a vu une erreur ANTÉRIEURE au dessin : il
+   CONSOMME la file d'erreurs (glGetError, glGetTexImage…), donc il doit la
+   rendre à l'appelant — sans quoi le verdict d'une commande ne serait pas le
+   même avec et sans QGPU_RAW_TRACE. */
+static bool raw_trace(QgpuCore *c, const QgpuState *st, const QgpuGeom *gm,
                       QgpuTexture *const *tex, uint32_t mode, uint32_t fmt,
                       const float *verts, uint32_t words, uint32_t count)
 {
@@ -1290,10 +1687,11 @@ static void raw_trace(QgpuCore *c, const QgpuState *st, const QgpuGeom *gm,
     GLint vp[4], sc[4], bound = 0, tw = 0, th = 0;
     int off_c = qgpu_vf_offset(fmt, QGPU_VF_COLOR);
     int off_t = qgpu_vf_offset(fmt, (uint32_t)QGPU_VF_TEX(0));
+    GLenum err;
     uint32_t i;
 
     if (!f || left <= 0 || mode != GL_TRIANGLE_STRIP || count > 6 || !tex[0]) {
-        return;
+        return true;
     }
     if (skip < 0) {                     /* skip the loading screen */
         const char *e = getenv("QGPU_RAW_TRACE_SKIP");
@@ -1301,7 +1699,7 @@ static void raw_trace(QgpuCore *c, const QgpuState *st, const QgpuGeom *gm,
     }
     if (skip > 0) {
         skip--;
-        return;
+        return true;
     }
     left--;
     glGetFloatv(GL_MODELVIEW_MATRIX, mv);
@@ -1359,7 +1757,9 @@ static void raw_trace(QgpuCore *c, const QgpuState *st, const QgpuGeom *gm,
             free(px);
         }
     }
-    fprintf(f, "  gl error before draw %04x\n", glGetError());
+    err = glGetError();
+    fprintf(f, "  gl error before draw %04x\n", err);
+    return err == GL_NO_ERROR;
 }
 
 static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
@@ -1521,17 +1921,22 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
     }
     if (ok) {
         g->ClientActiveTexture(GL_TEXTURE0);
-        raw_trace(c, st, gm, tex, mode, fmt, verts, words, count);
+        ok = raw_trace(c, st, gm, tex, mode, fmt, verts, words, count);
         if (idx) {
             glDrawElements(mode, (GLsizei)count, GL_UNSIGNED_INT, idx);
         } else {
             glDrawArrays(mode, (GLint)first, (GLsizei)count);
         }
+        /* G1 : le verdict du DESSIN se prend ici, avant la remise à plat —
+           les deux ont leurs propres raisons d'échouer. */
+        ok = gl_err_ok() && ok;
     }
-    gl_reset_raw(c);
+    if (!gl_reset_raw(c)) {
+        ok = false;
+    }
     g->ActiveTexture(GL_TEXTURE0);
     g->ClientActiveTexture(GL_TEXTURE0);
-    return ok && glGetError() == GL_NO_ERROR;
+    return ok;
 }
 
 static bool gl_readback(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
@@ -1543,7 +1948,7 @@ static bool gl_readback(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glPixelStorei(GL_PACK_ROW_LENGTH, 0);
     glReadPixels(x, y, w, h, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, dst);
-    return glGetError() == GL_NO_ERROR;
+    return gl_err_ok();
 }
 
 static bool gl_depth_readback(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
@@ -1554,7 +1959,7 @@ static bool gl_depth_readback(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t 
     }
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glReadPixels(x, y, w, h, GL_DEPTH_COMPONENT, GL_FLOAT, dst);
-    return glGetError() == GL_NO_ERROR;
+    return gl_err_ok();
 }
 
 /* Tampon combiné (v6) : on n'écrit QUE la composante demandée, et on ne
@@ -1633,7 +2038,7 @@ static bool gl_packed_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y
         glDepthMask(GL_TRUE);
     }
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    return glGetError() == GL_NO_ERROR;
+    return gl_err_ok();
 }
 
 static bool gl_depth_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
@@ -1667,7 +2072,7 @@ static bool gl_stencil_readback(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glPixelStorei(GL_PACK_ROW_LENGTH, 0);
     glReadPixels(x, y, w, h, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, dst);
-    return glGetError() == GL_NO_ERROR;
+    return gl_err_ok();
 }
 
 static bool gl_stencil_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
@@ -1691,7 +2096,7 @@ static bool gl_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h,
                     GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, src);
-    return glGetError() == GL_NO_ERROR;
+    return gl_err_ok();
 }
 
 /* ═══════════════ v8 : requêtes d'occlusion sur le GPU hôte ═════════════════
@@ -1723,7 +2128,7 @@ static bool gl_query_begin(QgpuCore *c, QgpuQuery *q)
         q->priv = gq;
     }
     g->BeginQuery(GL_SAMPLES_PASSED, gq->id);
-    return glGetError() == GL_NO_ERROR;
+    return gl_err_ok();
 }
 
 static bool gl_query_end(QgpuCore *c, QgpuQuery *q)
@@ -1734,7 +2139,7 @@ static bool gl_query_end(QgpuCore *c, QgpuQuery *q)
         return false;
     }
     g->EndQuery(GL_SAMPLES_PASSED);
-    return glGetError() == GL_NO_ERROR;
+    return gl_err_ok();
 }
 
 static bool gl_query_result(QgpuCore *c, QgpuQuery *q)
@@ -1746,9 +2151,19 @@ static bool gl_query_result(QgpuCore *c, QgpuQuery *q)
     if (!g->has_query || !gq || !gl_make_current(g)) {
         return false;
     }
-    g->GetQueryObjectuiv(gq->id, GL_QUERY_RESULT, &n);
-    q->samples = n;
-    return glGetError() == GL_NO_ERROR;
+    /* Mineur : un compte d'échantillons déborde 32 bits dès 4 milliards de
+       fragments (quelques secondes sur un GPU moderne), et `samples` est un
+       64 bits. On prend l'entrée 64 bits quand l'hôte l'a (GL 3.3 /
+       EXT_timer_query), la 32 bits sinon. */
+    if (g->GetQueryObjectui64v) {
+        uint64_t n64 = 0;
+        g->GetQueryObjectui64v(gq->id, GL_QUERY_RESULT, &n64);
+        q->samples = n64;
+    } else {
+        g->GetQueryObjectuiv(gq->id, GL_QUERY_RESULT, &n);
+        q->samples = n;
+    }
+    return gl_err_ok();
 }
 
 static void gl_query_destroy(QgpuCore *c, QgpuQuery *q)

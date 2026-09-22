@@ -32,19 +32,38 @@ typedef struct SoftSurface {
     uint8_t  *stencil;             /* width*height, ou NULL (v6) */
 } SoftSurface;
 
+/* Mineur : le chemin brut allouait son tampon de sommets (nverts × GVert, soit
+   156 octets par sommet) à CHAQUE dessin, pour le libérer aussitôt. Il est
+   maintenant tenu par le backend, et ne grandit que lorsqu'il le faut : le
+   device n'a qu'un thread de rendu, et le tampon meurt avec le backend. */
+typedef struct SoftState {
+    void  *gv;                     /* tampon de l'étage sommet (GVert) */
+    size_t gv_sz;                  /* sa taille, en octets */
+} SoftState;
+
 static bool soft_init(QgpuCore *c)
 {
+    SoftState *ss = calloc(1, sizeof(*ss));
+    if (!ss) {
+        return false;
+    }
     /* v8 : le backend de référence compte toujours les échantillons — c'est
        lui la vérité terrain des tests de requête d'occlusion. */
     c->caps |= QGPU_CAP_OCCLUSION;
     /* v10 : il tient aussi toutes les cibles et tous les paramètres de texture. */
     c->caps |= QGPU_CAP_GL14;
+    c->be_priv = ss;
     return true;
 }
 
 static void soft_fini(QgpuCore *c)
 {
-    (void)c;
+    SoftState *ss = c->be_priv;
+    if (ss) {
+        free(ss->gv);
+        free(ss);
+    }
+    c->be_priv = NULL;
 }
 
 static bool soft_surf_create(QgpuCore *c, QgpuSurface *s)
@@ -107,6 +126,10 @@ static void clip_rect(const QgpuSurface *s, const QgpuState *st,
         if (sx1 < *x1) *x1 = sx1;
         if (sy1 < *y1) *y1 = sy1;
     }
+    /* Un ciseau entièrement hors de la surface donne un rectangle VIDE, pas un
+       rectangle à l'envers : les bornes servent telles quelles à ftoi_*(). */
+    if (*x1 < *x0) *x1 = *x0;
+    if (*y1 < *y0) *y1 = *y0;
 }
 
 static inline uint32_t to_u8(float v)
@@ -124,6 +147,59 @@ static inline float clamp01(float v)
 {
     return !(v > 0.0f) ? 0.0f : v > 1.0f ? 1.0f : v;
 }
+
+/* ─────────── S3 : flottant → entier, BORNÉ, et jamais indéfini ────────────
+ *
+ * « (int)ceilf(v) » est un COMPORTEMENT INDÉFINI dès que v ne tient pas dans
+ * un int — et v peut valoir l'infini, parce qu'un w sous-normal rend 1/w
+ * infini (vu : w = 1e-40). Le résultat n'est pas seulement faux, il DIFFÈRE
+ * SELON L'HÔTE : INT_MIN sur x86-64 (le triangle disparaît), saturation sur
+ * aarch64 (il couvre tout le ciseau). Même flux, deux images.
+ *
+ * Ces deux conversions bornent AVANT de convertir, et attrapent le NaN au
+ * passage (toute comparaison avec NaN étant fausse, c'est `lo` qui sort).
+ * `lo` doit être ≤ `hi`. */
+static inline int ftoi_floor(float v, int lo, int hi)
+{
+    v = floorf(v);
+    if (!(v > (float)lo)) {
+        return lo;
+    }
+    return v < (float)hi ? (int)v : hi;
+}
+
+static inline int ftoi_ceil(float v, int lo, int hi)
+{
+    v = ceilf(v);
+    if (!(v > (float)lo)) {
+        return lo;
+    }
+    return v < (float)hi ? (int)v : hi;
+}
+
+/* S3 : la division perspective se fait PAR w, et le résultat est GARDÉ.
+ *
+ * Le pipeline calculait 1/w une fois, puis multipliait. Sur un w sous-normal
+ * — et il en vient du vrai trafic : w = 1e-40 — « 1/w » DÉBORDE (l'infini en
+ * binary32) alors que la division, elle, se passe très bien : 0,9e-40 / 1e-40
+ * fait 0,9 tout rond. Multiplier par l'infini donnait un sommet infini, puis
+ * une boîte englobante indéfinie : triangle disparu sur x86-64, triangle
+ * couvrant tout le ciseau sur aarch64.
+ *
+ * Le seuil n'est donc pas sur w mais sur le RÉSULTAT : on ne renonce que
+ * lorsqu'il n'est pas un nombre utilisable (w nul → 0/0). Après la découpe
+ * par les six plans du volume de vue — toujours active — on a w ≥ |x|, |y|,
+ * |z| : le quotient est dans [−1, 1] et ce cas ne peut venir que d'un w
+ * exactement nul. Le sommet va alors au centre du viewport, faute de mieux. */
+static inline float div_w(float v, float w)
+{
+    float r = v / w;
+    return isfinite(r) ? r : 0.0f;
+}
+
+/* Borne des indices de texel : au-delà, la coordonnée n'a plus de sens (et
+   2^24 est encore exact en binary32, donc le bornage ne déplace rien). */
+#define SOFT_TEXEL_MAX 16777216
 
 /* Écrit un pixel en respectant le masque de couleur (bit0 R … bit3 A). */
 static inline uint32_t masked(uint32_t dst, uint32_t src, uint32_t mask)
@@ -448,7 +524,11 @@ static float texel_coord(float s, uint32_t n, uint32_t wrap, bool rect)
    u = taille ; les autres modes passent par wrap_index (bordure, miroir). */
 static int nearest_index(float u, uint32_t n, uint32_t wrap)
 {
-    int i = (int)floorf(u);
+    /* S3 : u vient d'une division par q et peut être infini ou NaN ; le
+       bornage est LARGE, pour ne rien changer aux coordonnées réelles
+       (REPEAT et MIRROR ont besoin de l'indice exact) et tout de même
+       interdire une conversion indéfinie. */
+    int i = ftoi_floor(u, -SOFT_TEXEL_MAX, SOFT_TEXEL_MAX);
     if ((wrap == 0x2900 || wrap == 0x812F) && i >= (int)n) {
         i = n - 1;
     }
@@ -473,8 +553,11 @@ static Rgba sample_level(const Samp *S, const QgpuTexLevel *lv, float s, float t
                      is3d ? nearest_index(w, lv->d, t->wrap_r) : 0);
     }
     u -= 0.5f; v -= 0.5f; w -= 0.5f;
-    i0 = (int)floorf(u); j0 = (int)floorf(v); k0 = is3d ? (int)floorf(w) : 0;
+    i0 = ftoi_floor(u, -SOFT_TEXEL_MAX, SOFT_TEXEL_MAX);      /* S3 */
+    j0 = ftoi_floor(v, -SOFT_TEXEL_MAX, SOFT_TEXEL_MAX);
+    k0 = is3d ? ftoi_floor(w, -SOFT_TEXEL_MAX, SOFT_TEXEL_MAX) : 0;
     fu = u - i0; fv = v - j0; fw = is3d ? w - k0 : 0.0f;
+    fu = clamp01(fu); fv = clamp01(fv); fw = clamp01(fw);
 #define BILERP(k) lerp_rgba(lerp_rgba(fetch(S, lv, i0, j0, (k)), fetch(S, lv, i0 + 1, j0, (k)), fu), \
                             lerp_rgba(fetch(S, lv, i0, j0 + 1, (k)), fetch(S, lv, i0 + 1, j0 + 1, (k)), fu), fv)
     lo = BILERP(k0);
@@ -528,6 +611,9 @@ static Rgba sample(const Samp *S, uint32_t nlevels, float s, float tt, float r, 
     float maxd = (float)(nlevels - 1);
     int d, face = 0;
 
+    if (lod != lod) {
+        lod = 0.0f;              /* S3 : un λ NaN vaut le niveau de base */
+    }
     if (t->target == QGPU_TT_CUBE_MAP) {
         float sc, tc, ma;
         face = cube_face(s, tt, r);
@@ -547,17 +633,15 @@ static Rgba sample(const Samp *S, uint32_t nlevels, float s, float tt, float r, 
     case 0x2600: return sample_level(S, &L[0], s, tt, r, false);
     case 0x2601: return sample_level(S, &L[0], s, tt, r, true);
     case 0x2700: case 0x2701:                           /* *_MIPMAP_NEAREST */
-        d = (int)ceilf(lod + 0.5f) - 1;
-        if (d < 0) d = 0;
-        if (d > (int)maxd) d = (int)maxd;
+        d = ftoi_ceil(lod + 0.5f, 1, (int)maxd + 1) - 1;
         return sample_level(S, &L[d], s, tt, r, minf == 0x2701);
     default: {                                          /* *_MIPMAP_LINEAR */
         float f;
         if (lod >= maxd) {
             return sample_level(S, &L[(int)maxd], s, tt, r, minf == 0x2703);
         }
-        d = (int)floorf(lod);
-        f = lod - d;
+        d = ftoi_floor(lod, 0, (int)maxd - 1);
+        f = clamp01(lod - d);
         return lerp_rgba(sample_level(S, &L[d], s, tt, r, minf == 0x2703),
                          sample_level(S, &L[d + 1], s, tt, r, minf == 0x2703), f);
     }
@@ -580,8 +664,8 @@ static float tri_lod(const QgpuState *st, int u, const QgpuTexture *t,
 
     for (i = 0; i < 3; i++) {
         float q = vv[i][k + 3];
-        s[i] = vv[i][k] / q;
-        tt[i] = vv[i][k + 1] / q;
+        s[i] = div_w(vv[i][k], q);            /* S3 : q nul ou sous-normal */
+        tt[i] = div_w(vv[i][k + 1], q);
     }
     if (t->target == QGPU_TT_CUBE_MAP) {
         /* les trois sommets rapportés à la face du centre du triangle */
@@ -589,13 +673,14 @@ static float tri_lod(const QgpuState *st, int u, const QgpuTexture *t,
         int face;
         for (i = 0; i < 3; i++) {
             float q = vv[i][k + 3];
-            cx += vv[i][k] / q; cy += vv[i][k + 1] / q; cz += vv[i][k + 2] / q;
+            cx += div_w(vv[i][k], q); cy += div_w(vv[i][k + 1], q);
+            cz += div_w(vv[i][k + 2], q);
         }
         face = cube_face(cx, cy, cz);
         for (i = 0; i < 3; i++) {
             float q = vv[i][k + 3];
-            cube_on_face(face, vv[i][k] / q, vv[i][k + 1] / q, vv[i][k + 2] / q,
-                         &sc, &tc, &ma);
+            cube_on_face(face, div_w(vv[i][k], q), div_w(vv[i][k + 1], q),
+                         div_w(vv[i][k + 2], q), &sc, &tc, &ma);
             if (!(ma > 0.0f)) {
                 s[0] = s[1] = s[2] = tt[0] = tt[1] = tt[2] = 0.0f;   /* à cheval : λb = −∞ */
                 break;
@@ -783,8 +868,6 @@ static void tex_env(const QgpuState *st, int unit, uint32_t fmt, Rgba tc,
     *r = clamp01(fr); *g = clamp01(fg); *b = clamp01(fb); *a = clamp01(fa);
 }
 
-static QgpuTexture *const no_tex[QGPU_MAX_UNITS];
-
 /* ── v8 : ce que le rasteriseur doit savoir en plus de QgpuState ─────────────
  *
  * Trois choses qui ne tiennent pas dans l'état GL parce qu'elles ne sont pas
@@ -796,6 +879,11 @@ static QgpuTexture *const no_tex[QGPU_MAX_UNITS];
 typedef struct SoftAux {
     const QgpuStipple *stip;    /* motif de polygone, jamais NULL */
     uint64_t          *nsamp;   /* échantillons passés, ou NULL */
+    /* Mineur : qgpu_texture_levels() parcourt toute la chaîne de niveaux pour
+       en juger la complétude ; il ne dépend que de la texture, pas du
+       triangle. Résolu UNE FOIS par dessin, il était refait par triangle. */
+    bool      levels_set;
+    uint32_t  nlevels[QGPU_MAX_UNITS];
     /* Pointillé de ligne, renseigné seulement quand on rastérise un segment.
        Le compteur d'un fragment vaut base + dir × (indice de pixel sur l'axe
        majeur − start) : c'est la règle d'OpenGL, écrite en une ligne. */
@@ -825,6 +913,32 @@ static float poly_zoff(const QgpuState *st, const float *v0, const float *v1,
     m = fabsf(dzdx) > fabsf(dzdy) ? fabsf(dzdx) : fabsf(dzdy);
     return qgpu_u2f(st->v[QGPU_SK_POLY_FACTOR]) * m +
            qgpu_u2f(st->v[QGPU_SK_POLY_UNITS]) / 16777216.0f;
+}
+
+/* ─────────────── S1 : règle du haut-gauche (« top-left ») ──────────────────
+ *
+ * Un pixel dont le CENTRE tombe exactement sur une arête vérifie w == 0 pour
+ * cette arête. Avec « w >= 0 = dedans », les DEUX triangles qui se partagent
+ * l'arête le rastérisent : la diagonale d'un quad mélangé en ONE/ONE ressort à
+ * 0x80 au lieu de 0x40, chaque ligne et chaque point (tracés en deux
+ * triangles, cf. soft_line/soft_point) portent une diagonale surbrillante, et
+ * les requêtes d'occlusion surcomptent. OpenGL exige l'inverse : « exactement
+ * une fois ».
+ *
+ * La règle : sur w == 0, le fragment n'appartient qu'à l'arête HAUTE ou
+ * GAUCHE. Avec edge(a, b, p) = (bx−ax)(py−ay) − (by−ay)(px−ax) et l'intérieur
+ * à w > 0, dans un repère dont l'axe y descend :
+ *   - arête horizontale (dy == 0) : l'intérieur est en dessous si dx > 0,
+ *     c'est donc l'arête du HAUT ;
+ *   - sinon l'intérieur est à droite si dy < 0 (l'arête monte), c'est donc
+ *     l'arête de GAUCHE.
+ * `sign` (−1 pour un triangle de lacet négatif) inverse le sens de parcours,
+ * donc les deux écarts : deux triangles adjacents ont des arêtes opposées, et
+ * exactement l'un des deux garde le pixel. */
+static inline bool edge_top_left(float ax, float ay, float bx, float by, float sign)
+{
+    float dx = sign * (bx - ax), dy = sign * (by - ay);
+    return dy == 0.0f ? dx > 0.0f : dy < 0.0f;
 }
 
 /* Triangle générique : `words` mots par sommet, 0 à 4 unités de texture. */
@@ -860,6 +974,7 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *te
     uint32_t lop_mode = st->v[QGPU_SK_LOGIC_OP_MODE];
     /* v8 : le pointillé de polygone ne vaut que pour un polygone REMPLI. */
     bool pstip = st->v[QGPU_SK_POLYGON_STIPPLE] && prim == QGPU_PRIM_TRIANGLES;
+    bool tl0, tl1, tl2;                 /* S1 : arêtes hautes ou gauches */
     uint32_t stip_row = 0;
 
     if (area == 0.0f || area != area) {   /* dégénéré ou NaN */
@@ -870,7 +985,9 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *te
         area = -area;
     }
     for (u = 0; u < QGPU_MAX_UNITS; u++) {
-        nlevels[u] = tex[u] ? qgpu_texture_levels(tex[u]) : 0;
+        nlevels[u] = !tex[u] ? 0
+                   : aux->levels_set ? aux->nlevels[u]
+                   : qgpu_texture_levels(tex[u]);
         lod[u] = 0.0f;
         if (tex[u]) {
             samp_init(&samp[u], tex[u]);
@@ -887,10 +1004,16 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *te
     maxx = fmaxf(v0[0], fmaxf(v1[0], v2[0]));
     miny = fminf(v0[1], fminf(v1[1], v2[1]));
     maxy = fmaxf(v0[1], fmaxf(v1[1], v2[1]));
-    x0 = (int)floorf(minx); if (x0 < cx0) x0 = cx0;
-    y0 = (int)floorf(miny); if (y0 < cy0) y0 = cy0;
-    x1 = (int)ceilf(maxx);  if (x1 > cx1) x1 = cx1;
-    y1 = (int)ceilf(maxy);  if (y1 > cy1) y1 = cy1;
+    /* S3 : bornage AVANT la conversion — un sommet infini ne doit pas rendre
+       une boîte englobante indéfinie (cf. ftoi_floor). */
+    x0 = ftoi_floor(minx, cx0, cx1);
+    y0 = ftoi_floor(miny, cy0, cy1);
+    x1 = ftoi_ceil(maxx, cx0, cx1);
+    y1 = ftoi_ceil(maxy, cy0, cy1);
+    /* S1 : à quelle arête appartient un pixel posé exactement dessus. */
+    tl0 = edge_top_left(v1[0], v1[1], v2[0], v2[1], sign);
+    tl1 = edge_top_left(v2[0], v2[1], v0[0], v0[1], sign);
+    tl2 = edge_top_left(v0[0], v0[1], v1[0], v1[1], sign);
 
     for (y = y0; y < y1; y++) {
         float py = (float)y + 0.5f;
@@ -909,7 +1032,11 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *te
             UnitTexels ut;
             size_t idx;
 
-            if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) {
+            /* S1 : dedans si w > 0 ; sur l'arête (w == 0), seulement si elle
+               est haute ou gauche — donc jamais deux fois. */
+            if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f ||
+                (w0 == 0.0f && !tl0) || (w1 == 0.0f && !tl1) ||
+                (w2 == 0.0f && !tl2)) {
                 continue;
             }
             /* v8 : les pointillés tuent le fragment AVANT tout test — ils font
@@ -950,8 +1077,14 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *te
                 tr = w0 * v0[k + 2] + w1 * v1[k + 2] + w2 * v2[k + 2];
                 tq = w0 * v0[k + 3] + w1 * v1[k + 3] + w2 * v2[k + 3];
                 if (tq != 0.0f) {
-                    samp[u].ref = clamp01(tr / tq);   /* v10 : référence de profondeur */
-                    ut.tc[u] = sample(&samp[u], nlevels[u], ts / tq, tt / tq, tr / tq, lod[u]);
+                    /* S3 : même piège que la division perspective — un q
+                       SOUS-NORMAL rend s/q infini, et l'infini finissait en
+                       (int)floorf() dans nearest_index. div_w garde le
+                       résultat, ftoi_floor borne l'indice : deux ceintures,
+                       parce qu'ici la coordonnée vient de l'invité. */
+                    float qs = div_w(ts, tq), qt = div_w(tt, tq), qr = div_w(tr, tq);
+                    samp[u].ref = clamp01(qr);        /* v10 : référence de profondeur */
+                    ut.tc[u] = sample(&samp[u], nlevels[u], qs, qt, qr, lod[u]);
                     ut.fmt[u] = qgpu_texture_env_format(tex[u]);
                     ut.ok[u] = true;
                 }
@@ -1026,14 +1159,22 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *te
 
 #define MAXW SOFT_RAW_WORDS
 
+/* S2 : lignes et points sont TEXTURÉS, comme tout le reste. Ils l'étaient
+   restés à `no_tex` alors que le backend OpenGL, lui, lie les unités quelle
+   que soit la primitive (gl_draw, gl_draw_raw) : les sprites de particules du
+   chemin brut v7 sortaient unis en repli logiciel. Les quatre sommets du
+   parallélogramme (ligne) ou du carré (point) recopient les attributs de
+   l'extrémité, coordonnées de texture comprises — la texture d'un point est
+   donc constante, comme en OpenGL sans GL_POINT_SPRITE. */
+
 /* Segment épais : le parallélogramme d'OpenGL (sans anticrénelage), étiré
    perpendiculairement à l'axe majeur, en deux triangles.
    v8 : `counter`, s'il n'est pas NULL, porte le compteur de pointillé de
    ligne — lu à l'entrée, avancé du nombre de fragments du segment à la sortie.
    C'est ce qui rend le pointillé CONTINU le long d'un ruban et remis à zéro
    d'un segment à l'autre de GL_LINES (l'appelant passe alors NULL). */
-static void soft_line(QgpuSurface *s, const QgpuState *st, const float *a,
-                      const float *b, uint32_t words, int sec_off,
+static void soft_line(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *tex,
+                      const float *a, const float *b, uint32_t words, int sec_off,
                       const SoftAux *aux, uint32_t *counter)
 {
     float q[4][MAXW];
@@ -1071,15 +1212,16 @@ static void soft_line(QgpuSurface *s, const QgpuState *st, const float *a,
             *counter += (uint32_t)(n + 0.5f);
         }
     }
-    soft_tri(s, st, no_tex, q[0], q[1], q[2], QGPU_PRIM_LINES, sec_off, &la);
-    soft_tri(s, st, no_tex, q[0], q[2], q[3], QGPU_PRIM_LINES, sec_off, &la);
+    soft_tri(s, st, tex, q[0], q[1], q[2], QGPU_PRIM_LINES, sec_off, &la);
+    soft_tri(s, st, tex, q[0], q[2], q[3], QGPU_PRIM_LINES, sec_off, &la);
 }
 
 /* Point : carré de côté QGPU_SK_POINT_SIZE centré sur le sommet. */
 /* Point carré de `size` pixels centré sur le sommet (v10 : la taille est
    dérivée par l'appelant — celle de l'état pour les anciens opcodes, celle des
    paramètres de point pour le chemin brut). */
-static void soft_point(QgpuSurface *s, const QgpuState *st, const float *v, uint32_t words,
+static void soft_point(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *tex,
+                       const float *v, uint32_t words,
                        float size, int sec_off, const SoftAux *aux)
 {
     float q[4][MAXW];
@@ -1093,8 +1235,8 @@ static void soft_point(QgpuSurface *s, const QgpuState *st, const float *v, uint
         q[k][0] += dx[k] * h;
         q[k][1] += dy[k] * h;
     }
-    soft_tri(s, st, no_tex, q[0], q[1], q[2], QGPU_PRIM_POINTS, sec_off, &pa);
-    soft_tri(s, st, no_tex, q[0], q[2], q[3], QGPU_PRIM_POINTS, sec_off, &pa);
+    soft_tri(s, st, tex, q[0], q[1], q[2], QGPU_PRIM_POINTS, sec_off, &pa);
+    soft_tri(s, st, tex, q[0], q[2], q[3], QGPU_PRIM_POINTS, sec_off, &pa);
 }
 
 /* v8 : l'état v8 du contexte courant, tel que le cœur vient de le poser. */
@@ -1111,6 +1253,16 @@ static void soft_aux(const QgpuCore *c, SoftAux *aux)
     memset(aux, 0, sizeof(*aux));
     aux->stip = c->cur_stip ? c->cur_stip : &all_ones;
     aux->nsamp = c->cur_query ? &c->cur_query->samples : NULL;
+}
+
+/* Les niveaux utilisables de chaque unité, une fois pour tout le dessin. */
+static void soft_aux_levels(SoftAux *aux, QgpuTexture *const *tex)
+{
+    int u;
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        aux->nlevels[u] = tex[u] ? qgpu_texture_levels(tex[u]) : 0;
+    }
+    aux->levels_set = true;
 }
 
 /* v8 : mode de polygone de la face d'un triangle. Le sens des faces est établi
@@ -1160,9 +1312,10 @@ static void soft_legacy_tri(QgpuSurface *s, const QgpuState *st,
     }
     for (i = 0; i < 3; i++) {
         if (mode == QGPU_POLY_LINE) {
-            soft_line(s, st, q[i], q[(i + 1) % 3], words, sec, aux, NULL);
+            soft_line(s, st, tex, q[i], q[(i + 1) % 3], words, sec, aux, NULL);
         } else {
-            soft_point(s, st, q[i], words, qgpu_u2f(st->v[QGPU_SK_POINT_SIZE]), sec, aux);
+            soft_point(s, st, tex, q[i], words, qgpu_u2f(st->v[QGPU_SK_POINT_SIZE]),
+                       sec, aux);
         }
     }
 }
@@ -1175,6 +1328,7 @@ static bool soft_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t
     uint32_t i;
 
     soft_aux(c, &aux);
+    soft_aux_levels(&aux, tex);
     switch (prim) {
     case QGPU_PRIM_TRIANGLES:
         for (i = 0; i + 2 < nverts; i += 3) {
@@ -1185,14 +1339,14 @@ static bool soft_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t
     case QGPU_PRIM_LINES:
         for (i = 0; i + 1 < nverts; i += 2) {
             /* GL_LINES : le compteur de pointillé repart de 0 à chaque segment */
-            soft_line(s, st, verts + i * words, verts + (i + 1) * words, words, -1,
+            soft_line(s, st, tex, verts + i * words, verts + (i + 1) * words, words, -1,
                       &aux, NULL);
         }
         break;
     default:
         for (i = 0; i < nverts; i++) {
-            soft_point(s, st, verts + i * words, words, qgpu_u2f(st->v[QGPU_SK_POINT_SIZE]),
-                       -1, &aux);
+            soft_point(s, st, tex, verts + i * words, words,
+                       qgpu_u2f(st->v[QGPU_SK_POINT_SIZE]), -1, &aux);
         }
         break;
     }
@@ -1231,6 +1385,27 @@ enum {
     GV_N    = GV_TC + 4 * QGPU_MAX_UNITS
 };
 typedef struct GVert { float v[GV_N]; } GVert;
+
+/* Tampon de l'étage sommet, tenu par le backend : il grandit au besoin et ne
+   rétrécit jamais, au lieu d'un malloc/free par dessin (cf. SoftState). */
+static GVert *soft_gverts(QgpuCore *c, uint32_t n)
+{
+    SoftState *ss = c->be_priv;
+    size_t need = (size_t)n * sizeof(GVert);
+
+    if (!ss) {
+        return NULL;
+    }
+    if (ss->gv_sz < need) {
+        void *p = realloc(ss->gv, need);
+        if (!p) {
+            return NULL;
+        }
+        ss->gv = p;
+        ss->gv_sz = need;
+    }
+    return ss->gv;
+}
 
 /* 3 sommets + au plus un par plan de découpe (6 + 6) : 16 suffit, 32 rassure. */
 #define GV_MAXPOLY 32
@@ -1629,9 +1804,9 @@ static int clip_poly(const Geo *G, GVert *poly, unsigned char *ef, int n)
 static void project(const Geo *G, const GVert *g, bool back, float *out)
 {
     float w = g->v[GV_CLIP + 3];
-    float iw = (w != 0.0f) ? 1.0f / w : 0.0f;
-    float xd = g->v[GV_CLIP] * iw, yd = g->v[GV_CLIP + 1] * iw;
-    float zd = g->v[GV_CLIP + 2] * iw;
+    float xd = div_w(g->v[GV_CLIP], w);           /* S3 : division gardée */
+    float yd = div_w(g->v[GV_CLIP + 1], w);
+    float zd = div_w(g->v[GV_CLIP + 2], w);
     const float *col = g->v + (back ? GV_BCOL : GV_COL);
     const float *sec = g->v + (back ? GV_BSEC : GV_SEC);
     int u, k;
@@ -1647,7 +1822,7 @@ static void project(const Geo *G, const GVert *g, bool back, float *out)
     for (u = 0; u < QGPU_MAX_UNITS; u++) {
         for (k = 0; k < 4; k++) {
             /* le rasteriseur attend s/w, t/w, r/w, q/w (cf. DRAW_TRIANGLES_TEX) */
-            out[8 + 4 * u + k] = g->v[GV_TC + 4 * u + k] * iw;
+            out[8 + 4 * u + k] = div_w(g->v[GV_TC + 4 * u + k], w);
         }
     }
     for (k = 0; k < 3; k++) {
@@ -1737,11 +1912,11 @@ static void raw_tri(const Geo *G, const GVert *a, const GVert *b, const GVert *c
         if (mode == QGPU_POLY_LINE) {
             /* GL remet le compteur de pointillé à zéro pour chaque arête de
                polygone : d'où le NULL. */
-            soft_line(G->s, G->st, sv[i], sv[(i + 1) % n], SOFT_RAW_WORDS,
+            soft_line(G->s, G->st, G->tex, sv[i], sv[(i + 1) % n], SOFT_RAW_WORDS,
                       G->sec_off, &G->aux, NULL);
         } else {
-            soft_point(G->s, G->st, sv[i], SOFT_RAW_WORDS, raw_point_size(G, &poly[i]),
-                       G->sec_off, &G->aux);
+            soft_point(G->s, G->st, G->tex, sv[i], SOFT_RAW_WORDS,
+                       raw_point_size(G, &poly[i]), G->sec_off, &G->aux);
         }
     }
 }
@@ -1772,7 +1947,7 @@ static void raw_line(const Geo *G, const GVert *a, const GVert *b, uint32_t *cou
     }
     project(G, &p, false, sa);
     project(G, &q, false, sb);
-    soft_line(G->s, G->st, sa, sb, SOFT_RAW_WORDS, G->sec_off, &G->aux, counter);
+    soft_line(G->s, G->st, G->tex, sa, sb, SOFT_RAW_WORDS, G->sec_off, &G->aux, counter);
 }
 
 static void raw_point(const Geo *G, const GVert *a)
@@ -1786,7 +1961,8 @@ static void raw_point(const Geo *G, const GVert *a)
         }
     }
     project(G, a, false, sa);
-    soft_point(G->s, G->st, sa, SOFT_RAW_WORDS, raw_point_size(G, a), G->sec_off, &G->aux);
+    soft_point(G->s, G->st, G->tex, sa, SOFT_RAW_WORDS, raw_point_size(G, a),
+               G->sec_off, &G->aux);
 }
 
 /* Ombrage plat : la primitive entière prend les couleurs du sommet dit
@@ -1932,6 +2108,7 @@ static bool soft_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
 
     memset(&G, 0, sizeof(G));
     soft_aux(c, &G.aux);
+    soft_aux_levels(&G.aux, tex);
     G.st = st; G.gm = gm; G.s = s; G.tex = tex;
     G.pos_n = QGPU_VF_POS_COUNT(fmt);
     G.off_n = qgpu_vf_offset(fmt, QGPU_VF_NORMAL);
@@ -1981,7 +2158,7 @@ static bool soft_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
     G.dn = gm->depth_near;
     G.df = gm->depth_far;
 
-    gv = malloc((size_t)nverts * sizeof(GVert));
+    gv = soft_gverts(c, nverts);
     if (!gv) {
         return false;
     }
@@ -1989,7 +2166,6 @@ static bool soft_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
         vstage(&G, verts + (size_t)i * words, &gv[i]);
     }
     assemble(&G, gv, idx, first, count, mode);
-    free(gv);
     return true;
 }
 
