@@ -81,6 +81,14 @@ if [ -x "$QEMU_BIN" ] || command -v "$QEMU_BIN" >/dev/null 2>&1; then
   cap "device qfb-pci"                   qemu_has_device   "$QEMU_BIN" qfb-pci
   cap "device qgpu-pci"                  qemu_has_device   "$QEMU_BIN" qgpu-pci
   cap "slirp"                            qemu_has_netdev   "$QEMU_BIN" user
+  # SMP : sondé sur le binaire 64 bits, celui que run_tiger.sh lance dès
+  # SMP >= 2 — et sur la machine du lanceur, car -smp 2 exige via=pmu. C'était
+  # la seule capacité annoncée par le README que rien ne vérifiait.
+  if [ -x "${QEMU_BIN}64" ]; then
+    cap "-smp 2 sur ${MACHINE} (ppc64)"  qemu_machine_smp_ok "${QEMU_BIN}64" "$MACHINE" 2
+  else
+    noop "-smp 2 — ${QEMU_BIN}64 absent"
+  fi
   # PulseAudio est le backend de référence sur Linux ; sur macOS c'est coreaudio.
   case "$(uname -s)" in
     Darwin) cap "backend audio coreaudio"    qemu_has_audiodev "$QEMU_BIN" coreaudio ;;
@@ -177,6 +185,93 @@ print("   %d registres comparés" % len(common))
 sys.exit(1 if bad else 0)
 PY
 
+# Les offsets ne sont que la moitié du contrat. La GÉOMÉTRIE — taille de VRAM,
+# résolution maximale, et surtout le PAS DE LIGNE — est l'autre moitié, et
+# c'est la seule dont un désaccord donne le fameux « bureau strié » : le kext
+# calcule rowBytes avec sa macro, le device parcourt la VRAM avec sa fonction,
+# et un octet d'écart décale chaque ligne. Côté hôte c'est une fonction C,
+# côté invité une macro : on ne peut pas les comparer texte à texte, on les
+# compile toutes les deux et on les évalue sur des largeurs représentatives
+# (dont les impaires et les non multiples de 4, où l'arrondi se joue).
+python3 - <<'PY' && ok "géométrie qfb alignée (VRAM, max, pas de ligne)" || ko "géométrie qfb DÉSALIGNÉE"
+import os, re, shutil, subprocess, sys, tempfile
+
+host = open('patches/qfb/qfb-pci.c').read()
+guest = open('kext/POMPPCQFB/qfb_regs.h').read()
+bad = 0
+
+# --- constantes : mêmes valeurs, écritures différentes (32 * MiB vs 32UL*1024UL*1024UL)
+ENV = {'MiB': 1 << 20, 'KiB': 1 << 10, 'GiB': 1 << 30}
+def const(txt, name):
+    m = re.search(r'#define\s+%s\s+([^\n]+)' % name, txt)
+    if not m:
+        return None
+    e = m.group(1).split('/*')[0].split('//')[0].strip()
+    e = re.sub(r'\b(\d+)[uUlL]+', r'\1', e)          # 32UL -> 32
+    try:
+        return int(eval(e, {'__builtins__': {}}, ENV))
+    except Exception:
+        return None
+
+for name in ('QFB_VRAM_SIZE', 'QFB_MAX_WIDTH', 'QFB_MAX_HEIGHT'):
+    h, g = const(host, name), const(guest, name)
+    if h is None or g is None:
+        print("   %-16s hôte=%s invité=%s — introuvable ou non évaluable"
+              % (name, h, g)); bad += 1
+    elif h != g:
+        print("   %-16s hôte=%d  invité=%d" % (name, h, g)); bad += 1
+
+# --- pas de ligne : fonction (hôte) contre macro (invité)
+fn = re.search(r'^static uint32_t qfb_calculate_stride\(.*?^\}', host, re.S | re.M)
+mac = re.search(r'^#define\s+QFB_STRIDE\([^)]*\)[^\n]*$', guest, re.M)
+if not fn or not mac:
+    print("   qfb_calculate_stride / QFB_STRIDE introuvable — parsing cassé")
+    sys.exit(1)
+cc = os.environ.get('CC') or shutil.which('cc')
+if not cc:
+    print("   (pas de compilateur C : pas de ligne non comparé)")
+    sys.exit(1 if bad else 0)
+src = """#include <stdio.h>
+#include <stdint.h>
+@HOST@
+@GUEST@
+int main(void) {
+    static const unsigned W[] = {1, 3, 7, 13, 17, 21, 33, 100, 512, 640, 800,
+                                 1023, 1024, 1152, 1280, 1281, 1366, 1440,
+                                 1600, 1920, 3840};
+    static const unsigned D[] = {8, 16, 24, 32};
+    unsigned i, j, bad = 0;
+    for (i = 0; i < sizeof(W) / sizeof(W[0]); i++)
+        for (j = 0; j < sizeof(D) / sizeof(D[0]); j++) {
+            unsigned long long h = qfb_calculate_stride(W[i], D[j]);
+            unsigned long long g = QFB_STRIDE(W[i], D[j]);
+            if (h != g) {
+                printf("   stride %ux%u bpp : hote=%llu invite=%llu\\n",
+                       W[i], D[j], h, g);
+                bad++;
+            }
+        }
+    printf("   %u largeurs x %u profondeurs comparees\\n",
+           (unsigned)(sizeof(W) / sizeof(W[0])), (unsigned)(sizeof(D) / sizeof(D[0])));
+    return bad ? 1 : 0;
+}
+""".replace('@HOST@', fn.group(0)).replace('@GUEST@', mac.group(0))
+sys.stdout.flush()          # le binaire écrit sur le même stdout : garder l'ordre
+d = tempfile.mkdtemp()
+try:
+    c, b = os.path.join(d, 's.c'), os.path.join(d, 's')
+    open(c, 'w').write(src)
+    if subprocess.call([cc, '-O1', '-o', b, c],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL):
+        print("   les deux définitions du pas de ligne ne compilent pas ensemble")
+        bad += 1
+    elif subprocess.call([b]):
+        bad += 1
+finally:
+    shutil.rmtree(d, ignore_errors=True)
+sys.exit(1 if bad else 0)
+PY
+
 echo
 echo "=== 5 bis. contrat qgpu : une seule source de vérité, copiée à l'identique ==="
 # Le protocole du GPU paravirtuel n'est PAS relu par regex : le même fichier
@@ -206,6 +301,21 @@ if command -v cc >/dev/null 2>&1; then
     ko "qgpu_core_test ne compile pas"
   fi
   rm -f "$QGPU_BIN"
+  # Banc d'essai des BACKENDS (soft vs gl sur le même flux), s'il existe :
+  # mêmes drapeaux que qgpu_core_test, et rien à signaler tant qu'il n'est pas
+  # écrit — un test absent ne doit ni rougir ni faire croire qu'il est passé.
+  if [ -f tests/qgpu_backend_test.c ]; then
+    QGPU_BE_BIN="${TMPDIR:-/tmp}/qgpu_backend_test.$$"
+    if cc -std=gnu11 -O1 -pthread -I patches/qgpu tests/qgpu_backend_test.c \
+          patches/qgpu/qgpu-core.c patches/qgpu/qgpu-soft.c patches/qgpu/qgpu-gl.c \
+          ${QGPU_LIBS[@]+"${QGPU_LIBS[@]}"} -lm -o "$QGPU_BE_BIN" 2>/dev/null; then
+      if "$QGPU_BE_BIN" >/dev/null 2>&1; then ok "qgpu_backend_test"
+      else ko "qgpu_backend_test ($("$QGPU_BE_BIN" 2>&1 | grep -i 'fail\|✘' | head -1))"; fi
+    else
+      ko "qgpu_backend_test ne compile pas"
+    fi
+    rm -f "$QGPU_BE_BIN"
+  fi
 else
   noop "pas de compilateur C"
 fi

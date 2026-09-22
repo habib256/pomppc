@@ -21,6 +21,7 @@
 set -uo pipefail   # pas de -e: les comparaisons arithmétiques fausses ne doivent pas tuer le script
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/config.env"
+source "$ROOT/scripts/caps.sh"
 TIMEOUT="${1:-360}"
 MAXLOAD="${MAXLOAD:-1.0}"
 
@@ -39,8 +40,40 @@ for tool in convert bc python3; do
     echo "        sudo apt-get install -y imagemagick bc python3" >&2
     exit 2; }
 done
-[ -x "$QEMU_BIN" ] || command -v "$QEMU_BIN" >/dev/null 2>&1 || {
-  echo "ERREUR: QEMU introuvable ($QEMU_BIN)." >&2; exit 2; }
+
+# --- binaire et firmware : les mêmes que ce que run_tiger.sh lance ---
+# La variante SMP/MTTCG mesurait $QEMU_BIN (32 bits, sans TARGET_SUPPORTS_MTTCG)
+# et SANS le -bios de l'OpenBIOS unifié : un seul nœud CPU dans le device tree,
+# l'invité bootait mono-cœur — une mesure « SMP » fausse mais parfaitement
+# plausible, le pire mode de panne de cet instrument. run_tiger.sh bascule sur
+# qemu-system-ppc64 et pose -bios dès SMP >= 2 ; on fait pareil, et on SONDE.
+SMP_N="${SMP_N:-$SMP}"
+BIN="$QEMU_BIN"
+BIOS_ARGS=()
+UNI_OBIOS="$ROOT/patches/smp-mac99/openbios-smp-screamer.elf"
+if [ "$SMP_N" -ge 2 ]; then
+  BIN="${QEMU_BIN}64"
+  [ -x "$BIN" ] || { echo "ERREUR: SMP_N=$SMP_N demande $BIN, introuvable." >&2; exit 2; }
+  [ -f "$UNI_OBIOS" ] || {
+    echo "ERREUR: OpenBIOS unifié introuvable ($UNI_OBIOS) : sans lui le device" >&2
+    echo "        tree n'a qu'un nœud CPU et la mesure SMP est fausse." >&2; exit 2; }
+  BIOS_ARGS=(-bios "$UNI_OBIOS")
+  qemu_machine_smp_ok "$BIN" "$MACHINE" "$SMP_N"
+  case $? in
+    0) ;;
+    2) echo "⚠ sondage SMP impossible : la mesure part quand même." >&2 ;;
+    *) echo "ERREUR: $BIN refuse -smp $SMP_N sur $MACHINE (bring-up SMP mac99" >&2
+       echo "        absent) : la mesure serait faite mono-cœur et étiquetée SMP." >&2
+       echo "        ./scripts/build_qemu_qfb.sh" >&2; exit 2 ;;
+  esac
+  case " ${EXTRA_ARGS:-} " in
+    *thread=multi*) ;;
+    *) echo "⚠ SMP_N=$SMP_N sans '-accel tcg,thread=multi' : les 2 cœurs seront" >&2
+       echo "  émulés par un seul thread (pas de MTTCG)." >&2 ;;
+  esac
+fi
+[ -x "$BIN" ] || command -v "$BIN" >/dev/null 2>&1 || {
+  echo "ERREUR: QEMU introuvable ($BIN)." >&2; exit 2; }
 
 # --- pré-vol : hôte au repos ? ---
 preflight() {
@@ -92,9 +125,9 @@ trap cleanup EXIT INT TERM
 
 # Overrides pour expérimenter (SMP, MTTCG, tb-size…). Ex:
 #   SMP_N=2 EXTRA_ARGS="-accel tcg,thread=multi,tb-size=256" scripts/measure-boot.sh
-SMP_N="${SMP_N:-$SMP}"
+# (SMP_N est déjà résolu plus haut : il décide du binaire et du firmware.)
 read -r -a EXTRA <<< "${EXTRA_ARGS:-}"
-echo "### config: SMP=$SMP_N  extra='${EXTRA_ARGS:-}'  charge=$(cut -d' ' -f1 /proc/loadavg)"
+echo "### config: SMP=$SMP_N  binaire=$(basename "$BIN")  extra='${EXTRA_ARGS:-}'  charge=$(cut -d' ' -f1 /proc/loadavg)"
 
 qmon(){ python3 "$ROOT/scripts/moncmd.py" "$MON" "$1" 2>/dev/null; }
 meancolor(){ # -> "R G B" moyen d'un ppm
@@ -102,9 +135,10 @@ meancolor(){ # -> "R G B" moyen d'un ppm
 }
 
 START=$(date +%s.%N)
-setsid "$QEMU_BIN" -M "$MACHINE" -cpu "$CPU" -m "$RAM_MB" -smp "$SMP_N" \
+setsid "$BIN" -M "$MACHINE" -cpu "$CPU" -m "$RAM_MB" -smp "$SMP_N" \
   -display none -g "$RES" \
   -drive "file=$DISK,format=qcow2,media=disk" \
+  ${BIOS_ARGS[@]+"${BIOS_ARGS[@]}"} \
   ${NET_ARGS[@]+"${NET_ARGS[@]}"} \
   -prom-env 'auto-boot?=true' -prom-env "boot-device=$BOOTDEV" -prom-env 'boot-args=-v' \
   -serial "file:$ROOT/bench/measure.log" -name "POMPPC-measure" \

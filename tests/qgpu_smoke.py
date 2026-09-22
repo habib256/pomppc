@@ -39,6 +39,15 @@ STRIDE = W * 4
 # opcodes / longueurs : miroir de patches/qgpu/qgpu_proto.h
 OP_CTX_CREATE, OP_CTX_BIND = 0x0001, 0x0003
 OP_SURF_CREATE, OP_SURF_BIND, OP_SURF_READBACK = 0x0010, 0x0012, 0x0013
+
+# La version attendue est lue dans le contrat lui-même : un « 12 » codé en dur
+# rougissait ce test à chaque bump du protocole (v13, v14, v15) sans rien dire
+# du device — c'est le contrat, pas le test, qui fait foi.
+def _proto_version():
+    import re
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = open(os.path.join(here, "..", "patches", "qgpu", "qgpu_proto.h")).read()
+    return int(re.search(r"#define\s+QGPU_PROTO_VERSION\s+(\d+)", src).group(1))
 OP_CLEAR, OP_DRAW = 0x0020, 0x0030
 REG_MAGIC, REG_VERSION, REG_CAPS = 0x00, 0x04, 0x08
 REG_SHMEM_SIZE, REG_SUBMIT_OFF, REG_SUBMIT_LEN = 0x0C, 0x10, 0x14
@@ -218,6 +227,7 @@ def main():
     # Un binaire QEMU antérieur à la v9 n'a pas ces registres : le dire
     # franchement plutôt que de laisser une avalanche d'échecs obscurs.
     version = read_val(regs + REG_VERSION)
+    PROTO_VERSION = _proto_version()
     if (version or 0) < 9:
         print("\nÉCHEC : le device annonce le protocole v%s, la v9 est attendue."
               % version)
@@ -326,7 +336,7 @@ def main():
         ("device asynchrone (caps)", ((caps or 0) & CAP_ASYNC) != 0, True),
         # v10 : les bits que init() du backend résout à chaud atteignent
         # QGPU_REG_CAPS (jusqu'à la v9 le device publiait be->cap, sans eux)
-        ("version du protocole", version, 12),
+        ("version du protocole", version, PROTO_VERSION),
         ("requêtes d'occlusion publiées (caps)", ((caps or 0) & CAP_OCCLUSION) != 0, True),
         ("v10 / OpenGL 1.4 publié (caps)", ((caps or 0) & CAP_GL14) != 0, True),
         ("profondeur de file annoncée", (depth or 0) > 0, True),

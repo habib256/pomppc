@@ -26,6 +26,12 @@
  */
 #include "qemu/osdep.h"
 #include "fpu/softfloat.h"
+/*
+ * fenv.h : la PREUVE que le chemin rapide est emprunté se lit dans les
+ * drapeaux du FPU de l'hôte (pass_fastpath). Le chemin logiciel de softfloat
+ * est entièrement entier et ne peut pas les poser.
+ */
+#include <fenv.h>
 
 static int failures;
 static unsigned long long fast_eligible, total_cases;
@@ -503,11 +509,122 @@ static void pass_ties(unsigned long iterations)
 }
 
 /*
- * Petit chronométrage : il ne prouve pas l'exactitude, il prouve que le
- * chemin rapide est RÉELLEMENT emprunté (sans quoi tout ce qui précède
- * comparerait le logiciel à lui-même).
+ * Preuve FONCTIONNELLE que le chemin rapide est réellement emprunté.
+ *
+ * Tout ce qui précède compare le mode exact au mode amorcé. Si hardfloat était
+ * absent du binaire (hunk « #if defined(TARGET_PPC) » de fpu/softfloat.c
+ * rejeté, -ffast-math, patch à moitié posé) ou refusé à l'exécution, les deux
+ * modes seraient le MÊME code : le test comparerait le logiciel à lui-même,
+ * resterait vert, et ne dirait plus rien.
+ *
+ * Ce rôle était tenu par un chronométrage SANS MARGE (« rapide >= exact =>
+ * rouge ») : sur un hôte chargé, un ordonnanceur qui vole la seconde boucle
+ * suffisait à faire rougir le test sans qu'un seul bit ait bougé. On regarde
+ * donc une trace fonctionnelle, pas une durée : le FPU DE L'HÔTE.
+ *
+ * Le chemin logiciel de softfloat est entièrement entier — il ne peut pas
+ * poser d'exception sur le FPU hôte. Le chemin rapide, lui, fait faire la
+ * multiplication au FPU hôte, qui pose FE_INEXACT dès que le résultat est
+ * arrondi. Deux témoins, donc, et un compteur :
+ *
+ *   • un cas déterministe dont le produit est arrondi à coup sûr ;
+ *   • N produits aléatoires : combien ont traversé le FPU hôte (mode rapide)
+ *     et combien l'ont fait en mode exact (doit être zéro, sinon le détecteur
+ *     lui-même est faux).
  */
-static bool pass_timing(void)
+static bool pass_fastpath(void)
+{
+    enum { NP = 4096 };
+    /*
+     * 1 + 2^-23 : exactement un float32 (donc éligible au chemin rapide), et
+     * son carré vaut 1 + 2^-22 + 2^-46 — 47 bits de mantisse. L'arrondi en
+     * float32 est GARANTI, donc l'inexact hôte aussi.
+     */
+    const float64 one_ulp = 0x3FF0000020000000ULL;
+    float_status se = mkstatus(false, float_round_nearest_even, false);
+    float_status sf = mkstatus(true,  float_round_nearest_even, false);
+    unsigned hits_fast = 0, hits_exact = 0, diverged = 0;
+    float64 re, rf;
+    int fe_one;
+    int i;
+
+    if (!is_f32_zon(one_ulp)) {              /* garde-fou du test lui-même */
+        printf("  ✘ preuve du chemin rapide : l'opérande témoin n'est pas "
+               "éligible\n");
+        return false;
+    }
+
+    feclearexcept(FE_ALL_EXCEPT);
+    re = float64r32_mul(one_ulp, one_ulp, &se);
+    if (fetestexcept(FE_ALL_EXCEPT)) {
+        printf("  ✘ le mode EXACT touche le FPU de l'hôte : la preuve qui suit "
+               "ne vaudrait rien\n");
+        return false;
+    }
+    feclearexcept(FE_ALL_EXCEPT);
+    rf = float64r32_mul(one_ulp, one_ulp, &sf);
+    fe_one = fetestexcept(FE_ALL_EXCEPT);
+    if (re != rf) {
+        report("float64r32_mul(témoin)", "1+2^-23 au carré", re, rf, 0, 0);
+        return false;
+    }
+
+    for (i = 0; i < NP; i++) {
+        float64 a = gen_f32_normal();
+        float64 b = gen_f32_normal();
+
+        feclearexcept(FE_ALL_EXCEPT);
+        re = float64r32_mul(a, b, &se);
+        if (fetestexcept(FE_ALL_EXCEPT)) {
+            hits_exact++;
+        }
+        feclearexcept(FE_ALL_EXCEPT);
+        rf = float64r32_mul(a, b, &sf);
+        if (fetestexcept(FE_ALL_EXCEPT)) {
+            hits_fast++;
+        }
+        if (re != rf) {
+            diverged++;
+        }
+    }
+    feclearexcept(FE_ALL_EXCEPT);
+
+    printf("  chemin rapide : %u/%d produits passés par le FPU de l'hôte "
+           "(mode exact : %u)\n", hits_fast, NP, hits_exact);
+
+    if (diverged) {
+        printf("  ✘ %u produits diffèrent entre les deux modes\n", diverged);
+        return false;
+    }
+    if (hits_exact) {
+        printf("  ✘ le mode EXACT emprunte le FPU de l'hôte : no_hardfloat "
+               "n'est pas respecté\n");
+        return false;
+    }
+    /*
+     * Le produit de deux float32 normaux tirés au hasard est arrondi dans la
+     * quasi-totalité des cas ; la moitié est un seuil volontairement lâche,
+     * qui distingue « jamais » de « presque toujours » sans dépendre du tirage.
+     */
+    if (!(fe_one & FE_INEXACT) || hits_fast < NP / 2) {
+        printf("  ✘ le chemin rapide n'est PAS emprunté : le FPU de l'hôte n'a "
+               "rien vu.\n"
+               "     hardfloat est compilé hors du binaire (hunk "
+               "« #if defined(TARGET_PPC) »\n"
+               "     de fpu/softfloat.c rejeté ? -ffast-math ?) ou refusé à "
+               "l'exécution :\n"
+               "     tout ce qui précède a comparé le logiciel à lui-même.\n");
+        return false;
+    }
+    return true;
+}
+
+/*
+ * Chronométrage, INFORMATIF seulement (cf. pass_fastpath pour la preuve) :
+ * il dit ce que le mode rapide fait gagner sur cet hôte-ci, à cet instant-ci.
+ * Un hôte chargé peut le rendre trompeur, jamais rouge.
+ */
+static void show_timing(void)
 {
     /* Jeu de valeurs petit (résident en cache) : on chronomètre le calcul. */
     enum { NV = 4096, N = 8000000 };
@@ -519,7 +636,7 @@ static bool pass_timing(void)
     int i;
 
     if (!va) {
-        return true;
+        return;
     }
     for (i = 0; i < NV; i++) {
         va[i] = gen_f32_normal();
@@ -547,17 +664,17 @@ static bool pass_timing(void)
     printf("  float64r32_mul : logiciel %.3f s, rapide %.3f s (x%.2f) "
            "sur %d appels\n", d_exact, d_fast, d_exact / d_fast, N);
     if (d_fast >= d_exact) {
-        printf("  ✘ le chemin rapide n'est pas plus rapide : il n'est "
-               "probablement pas emprunté\n");
-        return false;
+        /* Pas un échec : la preuve du chemin rapide est fonctionnelle
+           (pass_fastpath). Un hôte chargé fait mentir un chronomètre, pas le
+           FPU. */
+        printf("  (note : pas plus rapide sur cet hôte — machine chargée ?)\n");
     }
-    return true;
 }
 
 int main(int argc, char **argv)
 {
     unsigned long iterations = (argc > 1) ? strtoul(argv[1], NULL, 0) : 300000;
-    bool timing_ok;
+    bool fastpath_ok;
 
     if (argc > 2) {
         rng_state = strtoull(argv[2], NULL, 0);
@@ -567,7 +684,8 @@ int main(int argc, char **argv)
     pass_catalog();
     pass_random(iterations);
     pass_ties(iterations);
-    timing_ok = pass_timing();
+    fastpath_ok = pass_fastpath();
+    show_timing();
 
     printf("  %llu cas comparés, dont %llu éligibles au chemin rapide "
            "(%.1f %%)\n", total_cases, fast_eligible,
@@ -576,7 +694,7 @@ int main(int argc, char **argv)
         printf("  ✘ %d divergence(s)\n", failures);
         return 1;
     }
-    if (!timing_ok) {
+    if (!fastpath_ok) {
         return 1;
     }
     printf("  ✔ aucune divergence\n");

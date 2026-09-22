@@ -16,7 +16,10 @@
 #   QFB=1 ./run_tiger.sh      # + écran paravirtuel qfb-pci (kext POMPPCQFB)
 #   QFB_RES=1280x800          # mode par défaut proposé par l'écran QFB (avec QFB=1)
 #   GPU=0 ./run_tiger.sh      # sans GPU paravirtuel qgpu-pci (allumé par défaut)
-#   GPU_BACKEND=soft|gl|auto  # backend de rendu hôte du qgpu (défaut : gl)
+#   GPU_BACKEND=soft|gl|auto  # backend de rendu hôte du qgpu (défaut : auto ;
+#                             # le backend RÉELLEMENT pris est sondé et annoncé)
+#   GPU_SCANOUT=auto|qfb|vga|none  # cible de présentation de SURF_PRESENT
+#                             # (vide par défaut : rien n'est passé au device)
 #   FASTFP=0 ./run_tiger.sh   # flottant exact ; le rapide (FPU hôte) est le défaut
 #                             # docs/flottant-rapide.md
 #   NOPAD=1 ./run_tiger.sh    # coupe le passthrough de la manette USB
@@ -84,12 +87,54 @@ EXTRA=(); AUDIO=(); RAM="$RAM_MB"
 [ -f "$UNI_OBIOS" ] || { echo "⚠  OpenBIOS unifié introuvable ($UNI_OBIOS)." >&2; exit 1; }
 EXTRA+=(-bios "$UNI_OBIOS")
 
+# --- Choix du binaire AVANT tout sondage ---
+# L'ordre compte : dès SMP >= 2 la VM tourne sur qemu-system-ppc64, et sonder
+# les capacités sur $QEMU_BIN (32 bits) revenait à interroger un binaire que
+# personne ne lance. Le Screamer en particulier : une réponse « oui » venue du
+# 32 bits rabotait la RAM de 1024 à 768 Mo sur un 64 bits peut-être muet.
+# Tout ce qui suit sonde donc $BIN, le binaire réellement exécuté.
+#
+# SMP est sondé, plus seulement « le fichier existe » : un qemu-system-ppc64 de
+# distribution est bien exécutable et n'a pas le bring-up SMP mac99
+# (patches/smp-mac99/) — QEMU mourait alors à l'exec final sur « Invalid SMP
+# CPUs 2 ». ⚠ -smp >= 2 exige aussi via=pmu (sans PMU, pas de device 'gpio',
+# donc pas de ligne de reset du CPU1) : la garde est explicite.
+SMP_TAG=""
+if [ "$SMP_N" -ge 2 ]; then
+  [ -x "$QEMU_BIN64" ] || { echo "⚠  SMP demandé mais $QEMU_BIN64 introuvable." >&2; exit 1; }
+  case "$MACHINE" in
+    *via=pmu*) ;;
+    *) echo "⚠  -smp $SMP_N exige '$MACHINE,via=pmu' (le reset du CPU1 passe par" >&2
+       echo "   le GPIO 4 de KeyLargo, qui n'existe qu'avec le PMU) — mono-cœur." >&2
+       SMP_N=1; SMP_TAG=" (via=pmu absent)" ;;
+  esac
+fi
+if [ "$SMP_N" -ge 2 ]; then
+  smp_rc=0; qemu_machine_smp_ok "$QEMU_BIN64" "$MACHINE" "$SMP_N" || smp_rc=$?
+  case "$smp_rc" in
+    0) ;;
+    1) echo "⚠  SMP demandé mais ce QEMU refuse -smp $SMP_N sur $MACHINE" >&2
+       echo "   (bring-up SMP mac99 absent). Reconstruis le binaire de référence :" >&2
+       echo "   ./scripts/build_qemu_qfb.sh   (lancement mono-cœur.)" >&2
+       SMP_N=1; SMP_TAG=" (SMP indisponible)" ;;
+    *) echo "⚠  sondage SMP impossible sur $QEMU_BIN64 : on tente quand même." >&2 ;;
+  esac
+fi
+if [ "$SMP_N" -ge 2 ]; then
+  BIN="$QEMU_BIN64"
+  EXTRA+=(-accel tcg,thread=multi)
+  MODE="SMP ${SMP_N} cœurs (MTTCG, ppc64)"
+else
+  BIN="$QEMU_BIN"
+  MODE="mono-cœur${SMP_TAG}"
+fi
+
 # Son ON par défaut ; NOSOUND=1 pour couper. On SONDE le binaire : sans la
 # classe 'screamer' QEMU se contente d'un warning sur le -global, et on se
 # retrouvait avec 768 Mo de RAM et zéro son sans le savoir.
 SND_ON=0
 if [ -z "${NOSOUND:-}" ]; then
-  if qemu_machine_has "$QEMU_BIN" "$MACHINE" screamer; then
+  if qemu_machine_has "$BIN" "$MACHINE" screamer; then
     AUDIO=(-audiodev "$HOST_AUDIODEV,id=snd0" -global screamer.audiodev=snd0)
     host_audio_env
     [ "$RAM" -gt 768 ] && RAM=768        # le Screamer exige < 1 Go
@@ -101,17 +146,7 @@ if [ -z "${NOSOUND:-}" ]; then
   fi
 fi
 
-SND_TAG=""; [ "$SND_ON" = 1 ] && SND_TAG=" + SON"   # reflète le sondage, pas l'intention
-
-if [ "$SMP_N" -ge 2 ]; then
-  [ -x "$QEMU_BIN64" ] || { echo "⚠  SMP demandé mais $QEMU_BIN64 introuvable." >&2; exit 1; }
-  BIN="$QEMU_BIN64"
-  EXTRA+=(-accel tcg,thread=multi)
-  MODE="SMP ${SMP_N} cœurs (MTTCG, ppc64)${SND_TAG}"
-else
-  BIN="$QEMU_BIN"
-  MODE="mono-cœur${SND_TAG}"
-fi
+[ "$SND_ON" = 1 ] && MODE="$MODE + SON"   # reflète le sondage, pas l'intention
 
 # --- Flottant rapide (propriété de CPU x-fast-fp, patches/fastfp/) ---
 # Laisse softfloat confier les opérations flottantes courantes au FPU de l'hôte.
@@ -125,14 +160,20 @@ fi
 # le lanceur, il l'empêcherait de démarrer.
 CPU_SPEC="$CPU"
 if [ "${FASTFP:-1}" != 0 ]; then
-  if qemu_cpu_has_fastfp "$BIN" "$MACHINE" "$CPU"; then
-    CPU_SPEC="$CPU,x-fast-fp=on"
-    MODE="$MODE + FLOTTANT RAPIDE"
-  else
-    echo "⚠  flottant rapide demandé mais ce QEMU n'a pas la propriété 'x-fast-fp'." >&2
-    echo "   Reconstruis le binaire de référence : ./scripts/build_qemu_qfb.sh" >&2
-    echo "   (lancement en flottant exact.)" >&2
-  fi
+  ffp_rc=0; qemu_cpu_has_fastfp "$BIN" "$MACHINE" "$CPU" || ffp_rc=$?
+  case "$ffp_rc" in
+    0) CPU_SPEC="$CPU,x-fast-fp=on"
+       MODE="$MODE + FLOTTANT RAPIDE" ;;
+    # La bannière DIT l'écart entre l'intention et le binaire : sans ça, la
+    # seule trace d'un flottant exact était un warning noyé dans le défilement,
+    # et une mesure A/B « sans gain » restait inexplicable.
+    1) echo "⚠  flottant rapide demandé mais ce QEMU n'a pas la propriété 'x-fast-fp'." >&2
+       echo "   Reconstruis le binaire de référence : ./scripts/build_qemu_qfb.sh" >&2
+       echo "   (lancement en flottant exact.)" >&2
+       MODE="$MODE + flottant rapide DEMANDÉ MAIS INDISPONIBLE" ;;
+    *) echo "⚠  sondage x-fast-fp impossible : lancement en flottant exact." >&2
+       MODE="$MODE + flottant rapide DEMANDÉ, SONDAGE IMPOSSIBLE" ;;
+  esac
 fi
 
 # --- Affichage ---
@@ -206,19 +247,61 @@ fi
 # --- GPU paravirtuel qgpu (device qgpu-pci + kext POMPPCGPU) ---
 #     Allumé par défaut : l'invité y soumet des flux de commandes, l'hôte les
 #     rend en OpenGL (docs/gpu-3d-tiger.md). GPU=0 pour l'omettre.
-#     GPU_BACKEND choisit le backend hôte (défaut gl) ; GPU_TRACE=1 journalise
-#     chaque commande sur stderr (verbeux).
+#     GPU_BACKEND choisit le backend hôte (défaut auto) ; GPU_SCANOUT choisit la
+#     cible de présentation ; GPU_TRACE=1 journalise chaque commande sur stderr.
+#
+#     Défaut 'auto' et PAS 'gl' : le cas 'gl' du cœur n'a aucun repli, et
+#     realize() fait error_setg si EGL manque — le lanceur imposait donc un
+#     backend que personne n'avait sondé, et QEMU refusait de démarrer sur un
+#     hôte sans EGL (binaire sans les en-têtes, session sans DRI, conteneur).
+#     'auto' essaie 'gl' puis retombe sur 'soft'. Comme les deux se ressemblent
+#     sur la ligne de commande et pas du tout à l'écran, on SONDE quel backend
+#     le device prend réellement et c'est CELUI-LÀ qui est annoncé.
 GPU_ARGS=()
 GPU_ON=""
 if [ "${GPU:-1}" != 0 ]; then
   if qemu_has_device "$BIN" qgpu-pci; then
+    GPU_BE_WANT="${GPU_BACKEND:-auto}"
+    GPU_BE=""                       # backend réellement pris (sondé), si connu
+    gpu_rc=0
+    GPU_BE="$(qemu_qgpu_backend_taken "$BIN" "$MACHINE" "$GPU_BE_WANT")" || gpu_rc=$?
+    if [ "$gpu_rc" = 1 ] && [ "$GPU_BE_WANT" != auto ]; then
+      echo "⚠  backend qgpu '$GPU_BE_WANT' refusé par ce QEMU (pas d'EGL/GL sur cet" >&2
+      echo "   hôte ?) — repli sur 'auto'." >&2
+      GPU_BE_WANT="auto"; gpu_rc=0
+      GPU_BE="$(qemu_qgpu_backend_taken "$BIN" "$MACHINE" auto)" || gpu_rc=$?
+    fi
     # Pas de $([ … ] && echo …) ici : sous set -e, l'affectation prend le code
     # de la substitution (1 sans GPU_TRACE) et le lanceur s'arrêtait en silence.
-    GPU_OPTS="backend=${GPU_BACKEND:-gl}"
+    GPU_OPTS="backend=$GPU_BE_WANT"
+    # GPU_SCANOUT (scanout=auto|qfb|vga|none) : quelle cible SURF_PRESENT écrit.
+    # Vide par défaut = on ne passe rien, le device décide. Demandée
+    # explicitement, la propriété est sondée : l'ignorer en silence sur un
+    # binaire qui ne l'a pas ferait présenter dans le mauvais écran, et c'est
+    # précisément le bug qu'elle existe pour trancher.
+    if [ -n "${GPU_SCANOUT:-}" ]; then
+      scan_rc=0
+      qemu_qgpu_device_ok "$BIN" "$MACHINE" "scanout=$GPU_SCANOUT" || scan_rc=$?
+      case "$scan_rc" in
+        0) GPU_OPTS="$GPU_OPTS,scanout=$GPU_SCANOUT" ;;
+        1) echo "⚠  GPU_SCANOUT=$GPU_SCANOUT refusé : ce qgpu-pci n'a pas la propriété" >&2
+           echo "   'scanout' (ou pas cette valeur là)." >&2
+           echo "   Reconstruis-le : ./scripts/build_qemu_qfb.sh" >&2
+           exit 1 ;;
+        # Sondage impossible n'est pas « absente » : on passe l'option demandée.
+        *) echo "⚠  GPU_SCANOUT=$GPU_SCANOUT : sondage impossible, passé tel quel." >&2
+           GPU_OPTS="$GPU_OPTS,scanout=$GPU_SCANOUT" ;;
+      esac
+    fi
     [ -n "${GPU_TRACE:-}" ] && GPU_OPTS="$GPU_OPTS,trace=on"
     GPU_ARGS=(-device "qgpu-pci,id=gpu0,$GPU_OPTS")
     GPU_ON=1
-    echo "  🎨 GPU paravirtuel qgpu (backend ${GPU_BACKEND:-gl})"
+    if [ -n "$GPU_BE" ]; then
+      echo "  🎨 GPU paravirtuel qgpu (backend $GPU_BE, demandé : $GPU_BE_WANT)"
+    else
+      echo "  🎨 GPU paravirtuel qgpu (backend demandé : $GPU_BE_WANT ; backend pris" \
+           "non sondable sur ce binaire)"
+    fi
   else
     echo "⚠  GPU allumé par défaut mais ce QEMU n'a pas le device qgpu-pci." >&2
     echo "   Reconstruis-le : ./scripts/build_qemu_qfb.sh" >&2

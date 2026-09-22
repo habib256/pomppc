@@ -15,6 +15,11 @@
 # Exemple (le cas qui a motivé ce script) : vérifier qu'ajouter le device
 # Screamer au macio ne coûte rien au boot.
 #   ./scripts/ab-measure.sh /tmp/qemu-no-screamer /tmp/qemu-with-screamer 4
+#
+# ⚠ A/B en SMP : measure-boot.sh bascule sur « <binaire>64 » dès SMP_N >= 2
+# (seul qemu-system-ppc64 est MTTCG-safe). Les deux binaires comparés doivent
+# donc avoir leur jumeau 64 bits à côté, sous le même nom suffixé — sinon le
+# run s'arrête net, ce qui vaut mieux qu'une mesure « SMP » faite mono-cœur.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 

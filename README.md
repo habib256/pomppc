@@ -56,12 +56,20 @@ Tiger sur **2 cœurs MTTCG** par défaut ; OS 9 reste mono-cœur (SMP buggé cô
    un binaire précis. En revanche `run_tiger.sh` / `run_os9.sh` **exigent le build source** :
    son (Screamer), OpenBIOS unifié et `qfb-pci` n'existent pas dans le paquet distro.
 
-   ✅ **`scripts/build_qemu_qfb.sh` reproduit intégralement le binaire de référence** :
-   device audio Screamer (`patches/screamer/`, vendu dans le dépôt), `qfb-pci`, SMP mac99,
-   slirp et PulseAudio — tout est demandé explicitement à `configure`, jamais laissé à
-   l'autodétection. Le script se termine par une **vérification de capacités** et écrit le
-   verdict dans `bench/build-capabilities.txt` ; il sort en erreur si une capacité manque.
+   ✅ **`scripts/build_qemu_qfb.sh` reproduit le binaire QEMU de référence** : device audio
+   Screamer (`patches/screamer/`, vendu dans le dépôt), `qfb-pci`, `qgpu-pci`, SMP mac99,
+   flottant rapide, slirp et PulseAudio — tout est demandé explicitement à `configure`,
+   jamais laissé à l'autodétection. Le script se termine par une **vérification de
+   capacités**, sondées sur le binaire produit, et écrit le verdict dans
+   `bench/build-capabilities.txt` ; il sort en erreur si une capacité manque.
    Aucun fork tiers n'est récupéré au build : seul l'amont `qemu-project` est cloné.
+
+   ⚠️ **Le firmware, lui, n'est pas reproductible.** `patches/smp-mac99/openbios-smp-screamer.elf`
+   (OpenBIOS unifié : bring-up SMP + nœud audio Screamer) est livré en **binaire**, sans
+   source ni recette de build dans le dépôt, et il **diverge** d'`openbios.patch` qui est
+   à côté. Un `build_qemu_qfb.sh` sur une machine neuve refait donc QEMU à l'identique,
+   mais réemploie ce firmware tel quel : la moitié firmware du SMP n'est pas rejouable
+   aujourd'hui (voir `docs/bug-hunt-2026-09-22.md` §8.4).
 2. **Une image d'installation Tiger PPC que tu possèdes** → à déposer dans `images/`
    (dossier à créer, gitignoré), nom ajusté dans `config.env` (`INSTALL_MEDIA`). Elle est
    passée à QEMU en `format=raw` : un ISO convient tel quel, un **DMG compressé (UDIF) doit
@@ -103,10 +111,10 @@ s'étonner d'un écart :
 
 | `config.env` | `run_tiger.sh` | `run_os9.sh` |
 | --- | --- | --- |
-| `SMP=1` | 2 cœurs MTTCG (`SMP=1` pour revenir en mono) | 1 (SMP OS 9 buggé) |
+| `SMP=1` | 2 cœurs MTTCG si le binaire accepte `-smp 2` (sondé ; `SMP=1` pour revenir en mono) | 1 (SMP OS 9 buggé) |
 | `RAM_MB=1024` | 768 **si et seulement si** le son est réellement actif (le Screamer exige < 1 Go) | 512 |
 | réseau selon `NONET` | actif si slirp (`NET=0` pour couper) | coupé |
-| — | flottant rapide (`FASTFP=0` pour l'exact) + GPU qgpu backend gl (`GPU=0` pour l'ôter) | — |
+| — | flottant rapide (`FASTFP=0` pour l'exact) + GPU qgpu en `backend=auto` — gl si l'hôte l'a, sinon soft ; le backend **pris** est sondé et annoncé (`GPU_BACKEND=` pour forcer, `GPU=0` pour l'ôter) | — |
 
 **Les lanceurs sondent le binaire, ils ne supposent rien.** Règle du dépôt : *un lanceur
 n'annonce jamais une capacité que le binaire n'a pas* (`scripts/caps.sh`). Elle vient d'un
@@ -317,6 +325,12 @@ SMP_N=2 EXTRA_ARGS="-snapshot -accel tcg,thread=multi" \
   scripts/measure-boot.sh                                    # variante SMP/MTTCG
 scripts/ab-measure.sh <binA> <binB> 4                        # A/B interleavé, médiane
 ```
+
+- **variante SMP** : `SMP_N >= 2` fait basculer `measure-boot.sh` sur **`qemu-system-ppc64`**
+  (le seul à annoncer `TARGET_SUPPORTS_MTTCG`) et lui passe le **`-bios` de l'OpenBIOS unifié**,
+  exactement comme `run_tiger.sh`. Sans ces deux-là, le device tree n'a qu'un nœud CPU et
+  l'invité boote mono-cœur : la mesure « SMP » est alors fausse mais parfaitement plausible.
+  Le script sonde `-smp N` sur le binaire et **refuse de mesurer** s'il est rejeté.
 
 `scripts/ab-measure.sh` applique le protocole complet (interleave A/B/A/B, `-snapshot` forcé,
 médiane sur n paires) et s'arrête de lui-même si le pré-vol refuse un run.
