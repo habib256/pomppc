@@ -142,6 +142,7 @@ long pomppc_call_real(int idx, long a, long b, long c, long d, long e, long f, l
 
 /* pomppc_accel.c */
 void pomppc_backend_init(void);
+int  pomppc_backend_units(void);       /* unités de texture tenues par l'hôte */
 void pomppc_backend_fini(void);
 /* P8 — handlers de pthread_atfork, posés par pomppc_gld.c. `prepare` prend
    G.mu dans le fil qui appelle fork(), `parent` le rend, et `forget` (côté

@@ -1159,6 +1159,18 @@ void pomppc_backend_parent_fork(void)
     pthread_mutex_unlock(&G.mu);
 }
 
+/* Nombre d'unités de texture que l'hôte tient (QGPU_MAX_UNITS) : c'est ce que
+   gldCreateContext annonce à GLEngine à la place des 8 du GLDriver d'Apple.
+   Mesuré en VM le 22/09/2026 (UT2004, DM-Rankin) : avec 8 annoncées, le jeu
+   allume l'unité 4 sur certains matériaux et 1 184 lots partaient en rendu
+   logiciel (« units>2 »), 1 088 synchronisations hôte ↔ logiciel — un défaut
+   de géométrie visible et du temps perdu. Le GeForce3 de référence en
+   annonçait 4. */
+int pomppc_backend_units(void)
+{
+    return QGPU_MAX_UNITS;
+}
+
 int pomppc_accel_enabled(void)
 {
     return G.state > 0;

@@ -518,6 +518,18 @@ long gldCreateContext(long a, long b, long c, long d, long e, long f, long g, lo
        GLEngine l'a mis à zéro, le GLDriver d'Apple vient d'y poser les limites,
        les 79 bits d'extensions et les quatre octets de capacités +0x78..+0x7b.
        On le vide APRÈS l'appel, sinon on ne lirait que des zéros. */
+    /* Limites annoncées : GL_MAX_TEXTURE_UNITS / _IMAGE_UNITS / _COORDS
+       (+0xb4, +0xb6, +0xba, docs/re/capacites-glengine.md §4) sont celles du
+       GLDriver d'Apple (8) ; l'hôte n'en tient que QGPU_MAX_UNITS. Les abaisser
+       ICI, avant que GLEngine les lise, évite que l'application allume une
+       5ᵉ unité que nous ne pouvons que rendre en logiciel (UT2004, 22/09). */
+    if (r == 0 && e && pomppc_accel_enabled()) {
+        unsigned char *cfg = (unsigned char *)e;
+        unsigned short u = (unsigned short)pomppc_backend_units();
+        if (GLD_U16(cfg, 0xb4) > u) GLD_U16(cfg, 0xb4) = u;
+        if (GLD_U16(cfg, 0xb6) > u) GLD_U16(cfg, 0xb6) = u;
+        if (GLD_U16(cfg, 0xba) > u) GLD_U16(cfg, 0xba) = u;
+    }
     if (r == 0 && e && pomppc_tracing()) {
         const unsigned char *cfg = (const unsigned char *)e;
         pomppc_dump("cfg", cfg, 0x200);
