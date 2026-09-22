@@ -181,8 +181,11 @@ Points d'implémentation qui font gagner ou perdre une semaine :
    `CUSTOM_*` s'il n'y figure pas déjà. `IODisplayModeID` = index+1 (jamais 0). Renseigner
    `IODisplayModeInformation.flags` avec `kDisplayModeValidFlag | kDisplayModeSafeFlag`
    (+ `kDisplayModeDefaultFlag` sur un seul).
-3. **`getPixelInformation`** : `bytesPerRow` = `QFB_MODE_STRIDE` relu **après** application du
-   mode, `bitsPerPixel` 32, `componentCount` 3, masques `0xFF0000/0x00FF00/0x0000FF`,
+3. **`getPixelInformation`** : `bytesPerRow` **recalculé localement** par le kext
+   (`strideForMode`, même formule que `qfb_calculate_stride` côté device — la cohérence des
+   deux est vérifiée par `tests/run-all.sh`), et non relu du registre `QFB_MODE_STRIDE` : le
+   kext répond ainsi avant même que le mode soit appliqué, et ne dépend pas d'une relecture MMIO
+   (mis à jour le 22/09/2026, la doc disait « relu après application du mode »). `bitsPerPixel` 32, `componentCount` 3, masques `0xFF0000/0x00FF00/0x0000FF`,
    `pixelType = kIORGBDirectPixels`, `pixelFormat = IO32BitDirectPixels`. Toute incohérence
    ici = bureau strié ou panic du WindowServer.
 4. **Ordre PPC 32 bpp** : l'invité est big-endian, la mémoire contient `xRGB` ; côté QEMU

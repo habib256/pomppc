@@ -20,8 +20,13 @@ dans **`docs/bug-hunt-2026-09-22.md`** : ~90 findings classés, dont une contre-
 révise trois correctifs de la première vague (**H1 en quatre endroits ou rien ; D2 sans
 `bql_unlock` ; K3 sans CAS**). **Aucun code n'a été modifié.** Le harnais hôte est rouge sur HEAD
 depuis `f3c4280` : `./tests/run-all.sh` → 71 OK, 1 échec (`qgpu_core_test`, cas `(n) ALPHA` = H1).
-Ce qui suit est le plan de reprise, **écrit pour une session neuve** qui ne sait rien de
-celle-ci : lire d'abord `docs/bug-hunt-2026-09-22.md` §0, §9 et §10, puis dérouler les lots dans
+**Reprise faite le 22/09/2026 (après-midi)** : les correctifs de tous les lots sont appliqués
+(rapport §11 : verdict en face de chaque finding). Harnais hôte **82 OK, 0 échec** ; binaire de
+référence reconstruit, dix capacités vertes (`x-fast-fp`, `smp-mac99`, `qgpu-scanout`,
+`qgpu-backend-gl` compris) ; `qfb_smoke`/`qgpu_smoke` verts. Les cases cochées ci-dessous sont
+les correctifs ; les « Preuve » et « Mesure » restent à produire en VM (job `gpu` lancé sur
+`tiger-dev.raw` le soir même, voir le rapport §11 pour l'ordre). Ce qui suit est le plan de reprise,
+**écrit pour une session neuve** qui ne sait rien de celle-ci : lire d'abord `docs/bug-hunt-2026-09-22.md` §0, §9 et §10, puis dérouler les lots dans
 l'ordre. Chaque lot = correctif + **preuve** (test natif, scène `gltest`, ou sonde invité) +
 mesure quand c'est de la vitesse, et un commit par lot, en notant dans le rapport « corrigé le … »
 en face du finding.
@@ -38,53 +43,53 @@ est dans le rapport.
 
 ### Lot 0 — préalables (avant tout correctif)
 
-- [ ] `./tests/run-all.sh` : confirmer 71 OK / 1 échec (`ALPHA`). **Ne pas « réparer » le test** :
+- [x] `./tests/run-all.sh` : confirmer 71 OK / 1 échec (`ALPHA`). **Ne pas « réparer » le test** :
       c'est H1, qui se corrige en quatre endroits ou pas du tout (rapport §9).
-- [ ] Appliquer **L2** dans `scripts/build_qemu_qfb.sh` (chercher les `.rej` après `patch`,
+- [x] Appliquer **L2** dans `scripts/build_qemu_qfb.sh` (chercher les `.rej` après `patch`,
       retirer `|| true`, grep négatif sur `#if defined(TARGET_PPC)` dans `fpu/softfloat.c`),
       puis reconstruire : `./scripts/build_qemu_qfb.sh`. Vérifier que `caps.sh` voit `x-fast-fp`
       et que la bannière de `run_tiger.sh` dit « + FLOTTANT RAPIDE ».
-- [ ] Appliquer **L1** (`run_tiger.sh:217` : `backend=${GPU_BACKEND:-auto}` + afficher le backend
+- [x] Appliquer **L1** (`run_tiger.sh:217` : `backend=${GPU_BACKEND:-auto}` + afficher le backend
       réellement pris, ou sondage `backend=gl` dans `caps.sh`), et **S-M4** (sonder `-smp 2` sur
       le binaire ppc64 au lieu de `[ -x ]`), et le sondage Screamer sur le **bon** binaire
       (`run_tiger.sh:92` sonde `$QEMU_BIN` alors que la VM tourne sur `$QEMU_BIN64`).
-- [ ] Booter la VM de dev, `devloop.py prepare`, vérifier que l'agent répond (`run` d'un job trivial).
+- [x] Booter la VM de dev, `devloop.py prepare`, vérifier que l'agent répond (`run` d'un job trivial).
 - [ ] **Le cœur 1 vit-il ?** Dans l'invité : `sysctl -n hw.ncpu hw.activecpu` ; sur l'hôte,
       `info cpus` deux fois à 5 s (le `pc` du CPU 1 doit bouger). **Archiver la réponse ici.**
       Si `activecpu = 1` : lot 8 avant tout A/B SMP.
 
 ### Lot 1 — la chaîne de verdict (rapport §8.2 ; sans cela rien ne peut être prouvé)
 
-- [ ] `tools/guest/agent.sh` : en-tête `OUT <id> <m> <rc>` ; `devloop.py run` rend ce `rc`
+- [x] `tools/guest/agent.sh` : en-tête `OUT <id> <m> <rc>` ; `devloop.py run` rend ce `rc`
       (compatible 3 ou 4 champs). — T3
-- [ ] `tools/guest/guilib.sh` : `gui_run` rend le `rc=` écrit dans `gui-log.txt`, 124 sur timeout. — T4
-- [ ] `set -e` + `ko` accumulé + `exit $ko` dans `jobs/{scene,gpu,texup,accel,diag,glwin}/job.sh` ;
+- [x] `tools/guest/guilib.sh` : `gui_run` rend le `rc=` écrit dans `gui-log.txt`, 124 sur timeout. — T4
+- [x] `set -e` + `ko` accumulé + `exit $ko` dans `jobs/{scene,gpu,texup,accel,diag,glwin}/job.sh` ;
       `kextload` sans `| tail` masquant. — T6
-- [ ] `gltest` : `GLTEST_REQUIRE=POMPPC` (assertion de `GL_RENDERER`, code 6) posé par `gpu`,
+- [x] `gltest` : `GLTEST_REQUIRE=POMPPC` (assertion de `GL_RENDERER`, code 6) posé par `gpu`,
       `scene`, `accel`, `texup` ; `else` final « scène inconnue » (code 5) ; `ppm_diff` rend 2 au-delà
       d'un seuil hors arêtes (`GLTEST_DIFF_MAX`), et `gpu/job.sh` le compte. — T5, T2, T1
-- [ ] `flyby_report.py` : exiger `len(frames.csv) == len(clock.csv)` ; `frame_report.py` :
+- [x] `flyby_report.py` : exiger `len(frames.csv) == len(clock.csv)` ; `frame_report.py` :
       fenêtre relative au premier échange du contexte, refus des NaN ; deux tests unitaires. — T7–T9
-- [ ] `guest/gldriver/Makefile` : `-fno-strict-aliasing -g`. — T13
-- [ ] `devloop.shot()` : lever sur `"error"` QMP, `os.remove` avant, `raise` si absent ;
+- [x] `guest/gldriver/Makefile` : `-fno-strict-aliasing -g`. — T13
+- [x] `devloop.shot()` : lever sur `"error"` QMP, `os.remove` avant, `raise` si absent ;
       `screendump` avec `device=` explicite, journalisé une fois. — T10, T11
-- [ ] `trap` de nettoyage dans `jobs/diag/job.sh` ; garde de taille outbox dans `agent.sh` ;
+- [x] `trap` de nettoyage dans `jobs/diag/job.sh` ; garde de taille outbox dans `agent.sh` ;
       `qgpu_test` : `CHECK(!(caps & ASYNC) || async)`. — T21, T15, T18
-- [ ] **Preuve du lot** : une scène volontairement fausse doit faire rougir `gpu/job.sh` et
+- [x] **Preuve du lot** (22/09 soir : le job `gpu` rend un vrai verdict et a trouvé deux bugs, rapport §11.1 ; reste `devloop.py prepare` pour le rc de l'agent, T3) : une scène volontairement fausse doit faire rougir `gpu/job.sh` et
       `devloop.py run` doit rendre ≠ 0. Puis relancer `gpu` complet : le « N OK » devient le vrai.
 
 ### Lot 2 — kext `POMPPCGPU` (rapport §1 + §9, panics prouvés sur xnu-792)
 
-- [ ] **K4** : `fStopping` + `commandWakeup` dans `stop()`, testé en tête et dans la boucle de
+- [x] **K4** : `fStopping` + `commandWakeup` dans `stop()`, testé en tête et dans la boucle de
       `waitGated` (`kIOReturnNotReady`).
-- [ ] **K1** : `POMPPCGPUUserClient::stop()` fait du bookkeeping **silencieux** (`fClients[fSlot]=0`,
+- [x] **K1** : `POMPPCGPUUserClient::stop()` fait du bookkeeping **silencieux** (`fClients[fSlot]=0`,
       `fSlot=-1`, `fOwner=0`), pas `freeSlot()` (1 s d'`IODelay` + 212 MMIO depuis le fil de terminaison).
-- [ ] **K3/K7** : `freeSlot(slot, owner)` ; `slotGated` exige `fClients[slot] == client` ;
+- [x] **K3/K7** : `freeSlot(slot, owner)` ; `slotGated` exige `fClients[slot] == client` ;
       `clientClose` capture et efface `fSlot` **avant** l'appel ; `ucReset` garde son index.
-- [ ] **K6** (une ligne : `caps()` masque `ASYNC` si `!fAsync`) ; **K2** (initialiser `SubmitArgs`,
+- [x] **K6** (une ligne : `caps()` masque `ASYNC` si `!fAsync`) ; **K2** (initialiser `SubmitArgs`,
       tester le retour de `runAction`, hygiène) ; **K9/K10** (retours de `runAction`, plafond du repli
       `IOSleep`).
-- [ ] **K5** : `destroyClientObjects` en asynchrone par paquets de `QGPU_QUEUE_DEPTH` + une seule
+- [x] **K5** : `destroyClientObjects` en asynchrone par paquets de `QGPU_QUEUE_DEPTH` + une seule
       barrière, hors gate ; flux de destruction dans une page de service hors tranches (**K8**).
 - [ ] **Preuve** : `qgpu-test` ouvert, `kextunload`, un `SUBMIT` → erreur propre, pas de panic
       (noter si `kextunload` rend `kIOReturnBusy`) ; sortie brutale d'UT2004 → pas de gel du bureau ;
@@ -92,23 +97,23 @@ est dans le rapport.
 
 ### Lot 3 — plugin, corruptions mémoire et coûts cachés (rapport §1, §3, §8.1)
 
-- [ ] **P3** : `ns = sizeof(geom_scratch) / GLD_VERTEX_SIZE` sans condition. Sonde :
+- [x] **P3** : `ns = sizeof(geom_scratch) / GLD_VERTEX_SIZE` sans condition. Sonde :
       `POMPPC_GL_ARRAY=2` + `POMPPC_GL_STATS`, lire `no_detail[NO_G_STRIDE]`.
-- [ ] **P4** : `tex_lv0_sig` en **octets** (`dxt_bytes` / `LV_ROWPIX × h × host_texel_bytes`) ; ne
+- [x] **P4** : `tex_lv0_sig` en **octets** (`dxt_bytes` / `LV_ROWPIX × h × host_texel_bytes`) ; ne
       concerne que DXT1/DXT1A (`0x83F0/0x83F1`). Sonde : `POMPPC_GL_TEXALWAYS=1`, `fmt=` dans le log.
-- [ ] **P1/P2** : relever les offsets `CTX_PACK_*` (voisins des `CTX_UNPACK_*` en `0x31cc..0x31e5`,
+- [x] **P1/P2** : relever les offsets `CTX_PACK_*` (voisins des `CTX_UNPACK_*` en `0x31cc..0x31e5`,
       à sonder par `glPixelStorei` + diff de vidage, `tools/re/diffstate.py`) ; en attendant,
       refuser tout format où `w·bpp % 4 ≠ 0` **y compris le stencil** ; `try_draw_pixels` couleur
       lit `UNPACK_*` comme `try_draw_ds`. Scènes `readpack`, `drawpack`.
-- [ ] **P6** `ent[10]` ; **P10** `reserve()` dans `pomppc_texture_deleted` (scène `texdelmid`) ;
+- [x] **P6** `ent[10]` ; **P10** `reserve()` dans `pomppc_texture_deleted` (scène `texdelmid`) ;
       **P14** ne rendre l'id qu'après `BUF_DESTROY` ; **P15** `host_only` exclu de l'éviction LRU ;
       **P16** ne poser `SYNCED` que sur succès ; **P7** restaurer `procs[]` avant de libérer, plus
       d'`abort()` ; **P8** `pthread_atfork` (scène `forkdraw`) ; **P13** clé de cache VBO complète
       (scène `vbocolor`) ; **P11** recomparer `geom_format(p)` dans `geom_begin`.
-- [ ] **P5** `gl_note` derrière `POMPPC_GL_NOTE=<chemin>`, ouvert une fois, `O_EXCL|O_NOFOLLOW` ;
+- [x] **P5** `gl_note` derrière `POMPPC_GL_NOTE=<chemin>`, ouvert une fois, `O_EXCL|O_NOFOLLOW` ;
       **P17** + **F10** : `getenv`/`gettimeofday` par lot derrière un `static` ; **F3** : marqueur
       `POMPPC_GLD_OWNER` sans `setenv` par renderer.
-- [ ] **F1/F2** : `pend*` par `PCtx` ; `prim()` refuse le lot si la place manque après `flush()` ;
+- [x] **F1/F2** : `pend*` par `PCtx` ; `prim()` refuse le lot si la place manque après `flush()` ;
       jamais `G.pend = 0` depuis un `geom_end` étranger. **F4/F9** : relâcher `G.mu` autour de
       `GLD_AttachDrawable` et des `qgpu_wait`. **F5/F7** : `direct_init` sous verrou, `D.init` en
       dernier ; `D.ok/x/y/checked_at` par contexte. **F6** : `pomppc_gld_override` figé par objet.
@@ -119,24 +124,24 @@ est dans le rapport.
 
 ### Lot 4 — présentation QFB/VGA (rapport §8.3)
 
-- [ ] **Q1** : propriété `scanout=auto|qfb|vga|none` sur `qgpu-pci`, VGA préféré en `auto`,
+- [x] **Q1** : propriété `scanout=auto|qfb|vga|none` sur `qgpu-pci`, VGA préféré en `auto`,
       `warn_report` de la cible ; puis `QGPU_REG_SCANOUT_TAG` comparé côté plugin.
-- [ ] **Q2** : dans `broken_all`, si l'opcode fautif est `SURF_PRESENT` → `G.scanout = 0`, `return`.
-- [ ] **Q6** : relire `D.base/rowbytes/bpp` à chaque image. **Q3/Q5** : `qfb_scanout_info` enrichi
+- [x] **Q2** : dans `broken_all`, si l'opcode fautif est `SURF_PRESENT` → `G.scanout = 0`, `return`.
+- [x] **Q6** : relire `D.base/rowbytes/bpp` à chaque image. **Q3/Q5** : `qfb_scanout_info` enrichi
       (base, stride, w, h, depth) + validation du stride dans le cœur ; `run-all.sh` compare
       `QFB_STRIDE` ↔ `qfb_calculate_stride`. **Q9** : `hotpluggable = false`.
 - [ ] **Preuve** : `QFB=1` avec Marble Blast — la fenêtre bouge ; `screendump` sur les deux écrans.
 
 ### Lot 5 — cœur qgpu (rapport §2 + §9)
 
-- [ ] **H4** : `BAD_ARG` d'un opcode de dessin ne fait plus `break` (assainir NaN→0 ou jeter la
+- [x] **H4** : `BAD_ARG` d'un opcode de dessin ne fait plus `break` (assainir NaN→0 ou jeter la
       primitive, continuer) ; scanner les seuls sommets référencés quand il y a des indices.
       Débloque P12 (chemin tableaux) et le chemin VBO v14 (`raw_fix_nan` ne peut pas atteindre
       les sommets hôte). Scène `offset` (témoin magenta après un `glPolygonOffset` extrême).
-- [ ] **H2** : les quatre `case` 16 bits consultent `s->fmt` ; ajouter au harnais natif les 4
+- [x] **H2** : les quatre `case` 16 bits consultent `s->fmt` ; ajouter au harnais natif les 4
       couples croisés (`BGRA+4444`, `RGBA+4444_REV`, `BGRA+5551`, `RGBA+1555_REV`, texel rouge →
       `FF0000`). Scène `texcross`. **H3** : `unpack_rgb1555` avec alpha `0xFF` + test en `pxa()`.
-- [ ] **H1, en quatre endroits ou rien** : `core:516` → `argb(a,0,0,0)` ; `core:2248/2262` retirer
+- [x] **H1, en quatre endroits ou rien** : `core:516` → `argb(a,0,0,0)` ; `core:2248/2262` retirer
       la promotion ; `gl:830` `GL_ALPHA` en format interne ; plugin retirer `pack_alpha_as_rgba`,
       le `case 0x1906` de `convert_level`, l'override `:2478`. Scène `alpharep`. Le test `ALPHA`
       redevient vert par le premier point seul, mais **sans effet en VM** sans les trois autres.
@@ -144,10 +149,10 @@ est dans le rapport.
 
 ### Lot 6 — device `qgpu-pci` et attente synchrone (rapport §1, §9, §8.4)
 
-- [ ] **D2** : `qemu_cond_timedwait` + échéance, BQL conservé ; sur expiration `QGPU_ST_BACKEND`.
+- [ ] **D2** : `qemu_cond_timedwait` + échéance, BQL conservé ; sur expiration `QGPU_ST_BACKEND`. *(partiel : `timedwait` 2 s fait ; doorbell synchrone invité à supprimer)*
       **Pas de `bql_unlock`** (garde de réentrance de 9.2). Puis supprimer le doorbell synchrone
       côté invité (asynchrone + barrière), une fois K6 et K5 faits.
-- [ ] **D1** (`rcu_register_thread`), **D3** (`migrate_add_blocker`), Kconfig `select QFB_PCI`,
+- [x] **D1** (`rcu_register_thread`), **D3** (`migrate_add_blocker`), Kconfig `select QFB_PCI`,
       `scanout` VGA avec `memory_region_ref` + `set_log`.
 - [ ] **Mesure** (S-M6) : `GPU_TRACE=1`, BQL tenu par image ; seuil 2 ms cumulées = un tick de
       décrémenteur perdu par image sur le second cœur.
@@ -156,7 +161,7 @@ est dans le rapport.
 
 - [ ] Trace `-d trace:macio_gpio_write,trace:macio_set_gpio` au boot : aucune écriture → S-C1
       (PIR) ; `addr ≠ 4` → S-M3 (`case 3: case 4:`) ; `addr == 4` sans progrès → S-C3.
-- [ ] **S-C2 + S-C3 + S-M1** d'un geste : `async_run_on_cpu(cpu_kick_work)` avec `excp_prefix = 0`
+- [x] **S-C2 + S-C3 + S-M1** d'un geste : `async_run_on_cpu(cpu_kick_work)` avec `excp_prefix = 0`
       **après** `cpu_reset()`. **S-C1** : `spr_cb[SPR_PIR].default_value = cpu_index`. **S-M2** :
       stocker `gpio_regs[4]`. **S-M5** : `measure-boot.sh` avec `QEMU_BIN` et `-bios` de l'OpenBIOS SMP.
 - [ ] **A/B** 1 vs 2 cœurs, Marble Blast 800×600, fenêtres appariées, 4 paires interleavées :
@@ -164,7 +169,7 @@ est dans le rapport.
 
 ### Lot 8 — backend GL, débit (rapport §2, §3)
 
-- [ ] **G1** purge d'erreurs dans `gl_target` + boucle en sortie ; **G2** `has_rect` ; **G4**
+- [x] **G1** purge d'erreurs dans `gl_target` + boucle en sortie ; **G2** `has_rect` ; **G4**
       auto-test à l'init (FBO 1×1, clear + readback, pipeline fixe, `MAX_TEXTURE_UNITS ≥ 4`), sinon
       repli soft ; **G5** `GL_CLAMP → CLAMP_TO_BORDER` ; **G6** aller-retour `glDrawPixels`
       DEPTH/STENCIL à l'init (Apple Silicon).
@@ -172,22 +177,55 @@ est dans le rapport.
       **G8** `tex_copy` backend par `glCopyTexSubImage2D`, PBO en rotation pour `SURF_PRESENT` ;
       **G9** cache d'état diff dans `gl_target`/`gl_reset_raw` ; **Q4** partage de tampon 32 bpp
       dans `qfb-pci`.
-- [ ] **Soft** (référence du test) : **S1** règle top-left, **S3** division par `w` gardée +
+- [x] **Soft** (référence du test) : **S1** règle top-left, **S3** division par `w` gardée +
       `ftoi_floor` borné, **S2** lignes/points texturés en chemin brut (scène `rawprim`).
 - [ ] **Mesure** : `gltest spin`/`game`, Marble Blast, UT2004 flyby, A/B avant/après chaque item.
 
 ### Lot 9 — documentation à corriger (contradictions relevées)
 
-- [ ] Ce fichier, entrée 20/09 : `CGLSetFullScreen → invalid drawable` est **périmé** (le
+- [x] Ce fichier, entrée 20/09 : `CGLSetFullScreen → invalid drawable` est **périmé** (le
       détournement du type 54 est en place, `docs/re/ut2004-fullscreen.md`) ; « FASTFP éteint »
       décrit un binaire non reconstruit, pas un réglage ; ligne « `FASTFP=1`, opt-in » plus bas :
       c'est **allumé par défaut** dans `run_tiger.sh`, inopérant tant que le binaire n'est pas rebâti.
-- [ ] `README.md:56` « reproduit intégralement le binaire de référence » : faux pour la moitié
+- [x] `README.md:56` « reproduit intégralement le binaire de référence » : faux pour la moitié
       firmware du SMP (`openbios-smp-screamer.elf` sans source, divergent d'`openbios.patch`).
-- [ ] `docs/re/tableaux-de-sommets.md` §2.2 (adresses des attributs 8..31 contredisent la formule
+- [x] `docs/re/tableaux-de-sommets.md` §2.2 (adresses des attributs 8..31 contredisent la formule
       uniforme `V+0x30+0x18·a`, qui est la bonne) ; `docs/gpu-tiger-4060ti.md:184` (`bytesPerRow`
       recalculé localement par le kext, pas relu du registre — c'est mieux, la doc est périmée).
-- [ ] À la fin de chaque lot : « corrigé le … » en face du finding dans `docs/bug-hunt-2026-09-22.md`.
+- [x] À la fin de chaque lot : « corrigé le … » en face du finding dans `docs/bug-hunt-2026-09-22.md`.
+
+### Lot 10 — un seul disque, deux hôtes (demande du 22/09/2026, à préparer avant le passage sur le M4)
+
+Le travail alterne régulièrement entre **le PC x86** (Linux, RTX 4060 Ti, EGL) et **le Mac M4**
+(CGL). Aujourd'hui chaque hôte a deux VM : une « de dev » (`tiger-dev.raw`, chaîne gcc 4.0 +
+agent `devloop`, sans jeux) et une « utilisateur » (`tiger.qcow2`, jeux installés, mais sans
+outils). Cela oblige à tout configurer deux fois, et la VM de dev du PC n'a **ni UT2004, ni
+Colin McRae, ni Zenerchi, ni Warcraft III** — précisément ce qu'il faut pour les preuves des
+lots 3, 5 et 8. La VM utilisateur du M4 est, elle, complètement configurée : c'est **elle** qui
+devient le disque unique, et le disque USB de test sert au transport.
+
+- [ ] **Un seul disque, format brut** : `devloop` lit les boîtes aux lettres par secteurs dans
+      l'image (raw obligatoire), `run_tiger.sh` accepte `format=raw` (`DISK=… ` + détection par
+      l'extension). Sur le M4 : `qemu-img convert -O raw tiger.qcow2 tiger.raw` une seule fois,
+      puis `devloop.py prepare` **sur ce disque** (agent, StartupItem, relais `POMPPCGuiRunner`,
+      chaîne gcc 4.0 par le job `xcode` depuis le DVD). `tiger.qcow2` ne sert plus ; on le garde
+      en sauvegarde.
+- [ ] **ssh partout** : « Session à distance » activée dans l'invité (fait le 22/09 sur
+      `tiger-dev.raw`, mot de passe du compte `tiger` connu de l'utilisateur), clé RSA de chaque
+      hôte dans `~tiger/.ssh/authorized_keys` (OpenSSH 3.8 : pas d'ed25519 ; algorithmes anciens
+      dans la config cliente), `hostfwd` 2222 → 22 posé par `devloop` (`NET=1`, `SSH_PORT`) et par
+      `run_tiger.sh` (à faire, même variable). Une config `ssh` commune versionnée dans
+      `tools/guest/ssh_config.example`, la clé privée hors dépôt.
+- [ ] **Transport** : `tiger.raw` sur le disque USB de test ; sur chaque hôte, `config.env` pointe
+      `DISK`/`DEVDISK` vers le même chemin de montage (variable `POMPPC_DISK_DIR`). Jamais deux
+      hôtes en écriture sur le même fichier : le `flock` de `devloop` (T17) ne traverse pas l'USB.
+      Règle : on éteint proprement (`devloop.py shutdown --gui` ou extinction Tiger) avant de
+      débrancher — HFS+ non démonté = `fsck -fy` au boot suivant.
+- [ ] **Les jobs ne supposent plus le single-user** : `gpu` tourne aussi en mode bureau (kext
+      rechargé depuis `/tmp`, `gltest` par `gui_run` puisque `GLTEST_NOWS=1` échoue en session
+      graphique, erreur 10006), pour que le disque unique reste au bureau avec les jeux.
+- [ ] **Sur le M4 d'abord** : préparer le disque unique là-bas (VM utilisateur déjà configurée),
+      vérifier `devloop.py prepare` sous macOS (`hdiutil`), puis rapporter le disque sur le PC.
 
 ## État (20/09/2026)
 
@@ -211,9 +249,12 @@ est dans le rapport.
   plein écran / fenêtre / accéléré), textures UI à un niveau (filtre mipmap
   rabattu), `BAD_ARG` non fatal, NaN de `DRAW_TRIANGLES_TEX` (0x31) et de
   `DRAW_RAW` (primitive jetée, plus de triangle à l'origine). Reste :
-  **FASTFP éteint** sur le QEMU quotidien (levier déjà prouvé), NaN à traiter
-  **côté hôte**, plein écran (`CGLSetFullScreen` → `invalid drawable`),
-  `malloc` double-free à la sortie. Contrôle de la VM quotidienne (AZERTY,
+  **FASTFP demandé mais inopérant** sur le QEMU quotidien (allumé par défaut dans
+  `run_tiger.sh`, mais le binaire quotidien n'a pas été reconstruit depuis le patch : ce n'est
+  pas un réglage, c'est `./scripts/build_qemu_qfb.sh` à relancer), NaN à traiter
+  **côté hôte**, `malloc` double-free à la sortie. *(Périmé le 22/09 : le plein écran
+  `CGLSetFullScreen → invalid drawable` est réglé par le détournement du type 54,
+  `docs/re/ut2004-fullscreen.md`.)* Contrôle de la VM quotidienne (AZERTY,
   CD, QMP) dans le même relevé.
 
 ## État (19/09/2026)
@@ -731,7 +772,7 @@ fenêtre). Dans l'ordre :
 
 **Au 20/09/2026** (démo UT lancée, image juste, injouable) — `docs/re/ut2004-demo.md` §4 :
 1. bilan `POMPPC_GL_STATS` en fenêtre (DRAW_RAW vivant ou rastérisation) ;
-2. **FASTFP=1** sur la quotidienne (arrêt propre) ;
+2. reconstruire le binaire quotidien pour que **FASTFP** (déjà allumé par défaut) opère ;
 3. NaN dans `do_draw` / `do_draw_raw` côté hôte, retirer le scan G4 du plugin ;
 4. `CGLSetFullScreen` / `gldAttachDrawable` ;
 5. double-free à la sortie. Ne pas re-splitter `tiger.qcow2` tant que la VM tourne.
@@ -767,7 +808,8 @@ stats n'a pas encore été pris.)*
      Même cause sur le Mac, dont le cœur est ~30 % plus rapide (rendu logiciel d'Apple dans
      `glwin` : 81 contre 57 img/s).
    - ✅ **Mode « flottant rapide » fait et prouvé (19/09/2026, `docs/flottant-rapide.md`)** :
-     propriété de CPU `x-fast-fp` (`FASTFP=1 ./run_tiger.sh`, opt-in), patches
+     propriété de CPU `x-fast-fp` (`FASTFP=1`, **allumé par défaut** dans `run_tiger.sh`, `FASTFP=0`
+     pour l'éteindre ; inopérant tant que le binaire n'est pas reconstruit), patches
      `patches/fastfp/`. Le FPU de l'hôte ne sert que si FPSCR[XX] = 1, XE = OE = UE = 0 et
      arrondi au plus proche ; chemins rapides exacts pour la simple précision. **Résultats
      identiques au bit près, FPSCR identique hors FI/FR/FX** — prouvé dans l'invité par

@@ -207,8 +207,14 @@ Vérification croisée : `_glArrayElement_Exec 0x6090–0x60b0` part du bit 15 d
 | 5 | poids (`GL_WEIGHT_ARRAY_ARB`) | 1, `GL_FLOAT` | `V+0xa8` | `0x86ad` | `_gleSetClientEnableFlag 0x44bec/0x44c54` **[L]** |
 | 6 | drapeau d'arête | 1, `GL_UNSIGNED_BYTE` | `V+0xc0` | `0x8079` | `_glEdgeFlagPointer_Exec 0xa44e8` ; défaut `0x64fc/0x6530` **[L]** |
 | 7 | **indices** (`GL_ELEMENT_ARRAY_APPLE`) | 1, `GL_UNSIGNED_INT` | `V+0xd8` | `0x8a0c` | `_gleSetClientEnableFlag 0x44bfc/0x44c9c` ; défaut `0x6508/0x651c` **[L]** |
-| 8..15 | coordonnées de texture, unité `u = a-8` | 4, `GL_FLOAT` | `V+0x150+0x18u` | `0x8078` | `_glTexCoordPointer_Exec 0x4d1e0 addi r22, r10, 8` **[L]** |
-| 16..31 | attribut générique ARB `i = a-16` | 4, `GL_FLOAT` | `V+0x270+0x18i` | — | `_glVertexAttribPointerARB_Exec 0xa4728 addi r20, r4, 0x10` **[L]** |
+| 8..15 | coordonnées de texture, unité `u = a-8` | 4, `GL_FLOAT` | `V+0xf0+0x18u` (= `V+0x30+0x18·a`) | `0x8078` | `_glTexCoordPointer_Exec 0x4d1e0 addi r22, r10, 8` **[L]** |
+| 16..31 | attribut générique ARB `i = a-16` | 4, `GL_FLOAT` | `V+0x1b0+0x18i` (= `V+0x30+0x18·a`) | — | `_glVertexAttribPointerARB_Exec 0xa4728 addi r20, r4, 0x10` **[L]** |
+
+> Corrigé le 22/09/2026 : une version antérieure de ce tableau donnait `V+0x150+0x18u` et
+> `V+0x270+0x18i` pour les attributs 8..31, ce qui contredisait la formule uniforme
+> `V+0x30+0x18·a` (32 emplacements de `0x18` octets à partir de `V+0x30`, §2.1 et §2.3, et
+> c'est elle que le plugin applique). La formule uniforme est la bonne : attribut 8 en
+> `V+0xf0`, attribut 16 en `V+0x1b0`, attribut 31 en `V+0x308`.
 
 Le tableau d'indices de couleur (`glIndexPointer`, `GL_INDEX_ARRAY` `0x8077`) **n'est pas** un
 attribut de ce tableau : il ne pose qu'un drapeau `gctx+0x48ea` (`_gleSetClientEnableFlag 0x44c68`) **[L]**.
