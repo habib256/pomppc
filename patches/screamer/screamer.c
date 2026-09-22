@@ -103,10 +103,28 @@ static void pmac_screamer_tx(DBDMA_io *io)
                      " len: %x\n", io->addr, io->len);
 
     memcpy(&s->io, io, sizeof(DBDMA_io));
-    //if (s->wpos + (s->io.len >> s->shift) > s->samples) {
-    //    return;
-    //}
 
+    /*
+     * L'amont avait ici une garde de débordement, commentée :
+     *
+     *     if (s->wpos + (s->io.len >> s->shift) > s->samples) {
+     *         return;
+     *     }
+     *
+     * Elle n'est pas restaurée, et ce n'est pas un oubli. D'une part elle ne
+     * protège de rien : le débordement de mixbuf est déjà empêché par le
+     * MIN(io->len >> shift, s->samples - s->wpos) de
+     * pmac_screamer_tx_transfer(), qui transfère ce qui tient et laisse le
+     * reste en attente. D'autre part elle introduit un blocage : sur une
+     * requête DBDMA plus grosse que mixbuf alors que wpos vaut 0, elle sort
+     * sans rien transférer, donc wpos - rpos reste nul, donc
+     * screamerspk_callback() repart immédiatement (« if (s->wpos - s->rpos ==
+     * 0) return; ») et ne reprend jamais le transfert reporté : 0 octet
+     * transféré, io->dma_end() jamais appelé, le canal DBDMA reste en l'air.
+     *
+     * Le reliquat est repris par le callback audio, branche « Continue
+     * deferred transfer ».
+     */
     pmac_screamer_tx_transfer(s);
 }
 

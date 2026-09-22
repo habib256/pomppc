@@ -1,32 +1,61 @@
 diff --git a/hw/intc/openpic.c b/hw/intc/openpic.c
-index 78a82d0d30..2f479c23dd 100644
+index 2ead4b9ba0..4b2964021e 100644
 --- a/hw/intc/openpic.c
 +++ b/hw/intc/openpic.c
-@@ -1580,12 +1580,12 @@ static void openpic_realize(DeviceState *dev, Error **errp)
+@@ -1580,9 +1580,14 @@ static void openpic_realize(DeviceState *dev, Error **errp)
          opp->irq_tim0 = KEYLARGO_TMR_IRQ;
          opp->brr1 = -1;
          opp->mpic_mode_mask = GCR_MODE_MIXED;
 -
-+#if 0
-         if (opp->nb_cpus != 1) {
-             error_setg(errp, "Only UP supported today");
+-        if (opp->nb_cpus != 1) {
+-            error_setg(errp, "Only UP supported today");
++        /*
++         * SMP est supporté depuis que mac99 sait relâcher son cœur secondaire.
++         * Le garde-fou reste, mais sur la vraie limite du modèle KeyLargo :
++         * ses fenêtres de registres par CPU et ses IPI (IRQ 64..67).
++         */
++        if (opp->nb_cpus > KEYLARGO_MAX_CPU) {
++            error_setg(errp, "KeyLargo OpenPIC supports at most %d CPUs",
++                       KEYLARGO_MAX_CPU);
              return;
          }
--
-+#endif
-         map_list(opp, list_le, &list_count);
-         break;
-     }
+ 
 diff --git a/hw/misc/macio/gpio.c b/hw/misc/macio/gpio.c
-index 06be5a4f98..abdba3ec84 100644
+index 7cad62819a..85325238cf 100644
 --- a/hw/misc/macio/gpio.c
 +++ b/hw/misc/macio/gpio.c
-@@ -79,6 +79,17 @@ void macio_set_gpio(MacIOGPIOState *s, uint32_t gpio, bool state)
-         }
-         break;
+@@ -34,6 +34,58 @@
+ #include "qemu/module.h"
+ #include "trace.h"
  
++/* GPIO register bits (names from BALATON Zoltan's SMP series) */
++#define OUT_DATA    0x01
++#define IN_DATA     0x02
++#define OUT_ENABLE  0x04
++
++/*
++ * Effet d'un niveau de GPIO sur sa ligne d'interruption externe.
++ *
++ * Séparé de macio_set_gpio() parce que les deux sens existent : une entrée
++ * pilotée depuis l'extérieur (macio_set_gpio) et une sortie pilotée par le CPU
++ * via le registre (macio_gpio_write). Le second cas doit garder le registre
++ * relisible, ce que macio_set_gpio() ne sait pas faire.
++ */
++static void macio_gpio_set_extirq(MacIOGPIOState *s, uint32_t gpio, bool state)
++{
++    switch (gpio) {
++    case 1:
++    case 3:
 +    case 4:
-+        /* Active low, CPU1 reset */
++        /*
++         * Level low. GPIO 1 : ligne d'extension du PMU (amont).
++         * GPIO 3 et 4 : Active low, CPU1 reset. Tiger n'a pas de propriété
++         * « soft-reset » dans le firmware livré et retombe sur son offset
++         * codé en dur, 0x5B ou 0x5C selon les versions : soit GPIO 3, soit
++         * GPIO 4 (la fenêtre GPIO est mappée à 0x50 dans le BAR du macio, et
++         * ses huit premiers octets sont les registres de niveau). Les deux
++         * sont donc câblés, sinon 0x5B tombe dans LOG_UNIMP en silence.
++         */
 +        if (!state) {
 +            trace_macio_gpio_irq_assert(gpio);
 +            qemu_irq_raise(s->gpio_extirqs[gpio]);
@@ -36,35 +65,113 @@ index 06be5a4f98..abdba3ec84 100644
 +        }
 +        break;
 +
-     case 9:
-         /* Edge, triggered by NMI below */
-         if (state) {
-@@ -118,7 +129,14 @@ static void macio_gpio_write(void *opaque, hwaddr addr, uint64_t value,
-             ibit = s->gpio_regs[addr] & IN_DATA;
++    case 9:
++        /* Edge, triggered by NMI below */
++        if (state) {
++            trace_macio_gpio_irq_assert(gpio);
++            qemu_irq_raise(s->gpio_extirqs[gpio]);
++        } else {
++            trace_macio_gpio_irq_deassert(gpio);
++            qemu_irq_lower(s->gpio_extirqs[gpio]);
++        }
++        break;
++
++    default:
++        qemu_log_mask(LOG_UNIMP, "GPIO: setting unimplemented GPIO %d", gpio);
++    }
++}
+ 
+ void macio_set_gpio(MacIOGPIOState *s, uint32_t gpio, bool state)
+ {
+@@ -64,39 +116,14 @@ void macio_set_gpio(MacIOGPIOState *s, uint32_t gpio, bool state)
+      * For now, we hard wire known GPIOs
+      */
+ 
+-    switch (gpio) {
+-    case 1:
+-        /* Level low */
+-        if (!state) {
+-            trace_macio_gpio_irq_assert(gpio);
+-            qemu_irq_raise(s->gpio_extirqs[gpio]);
+-        } else {
+-            trace_macio_gpio_irq_deassert(gpio);
+-            qemu_irq_lower(s->gpio_extirqs[gpio]);
+-        }
+-        break;
+-
+-    case 9:
+-        /* Edge, triggered by NMI below */
+-        if (state) {
+-            trace_macio_gpio_irq_assert(gpio);
+-            qemu_irq_raise(s->gpio_extirqs[gpio]);
+-        } else {
+-            trace_macio_gpio_irq_deassert(gpio);
+-            qemu_irq_lower(s->gpio_extirqs[gpio]);
+-        }
+-        break;
+-
+-    default:
+-        qemu_log_mask(LOG_UNIMP, "GPIO: setting unimplemented GPIO %d", gpio);
+-    }
++    macio_gpio_set_extirq(s, gpio, state);
+ }
+ 
+ static void macio_gpio_write(void *opaque, hwaddr addr, uint64_t value,
+                              unsigned size)
+ {
+     MacIOGPIOState *s = opaque;
+-    uint8_t ibit;
++    uint8_t ibit, old;
+ 
+     trace_macio_gpio_write(addr, value);
+ 
+@@ -109,13 +136,31 @@ static void macio_gpio_write(void *opaque, hwaddr addr, uint64_t value,
+     if (addr < 36) {
+         value &= ~2;
+ 
+-        if (value & 4) {
+-            ibit = (value & 1) << 1;
++        if (value & OUT_ENABLE) {
++            ibit = (value & OUT_DATA) << 1;
+         } else {
+-            ibit = s->gpio_regs[addr] & 2;
++            ibit = s->gpio_regs[addr] & IN_DATA;
          }
  
--        s->gpio_regs[addr] = value | ibit;
-+        if (addr == 4) {
-+            if (!(value & OUT_ENABLE)) {
-+                ibit = 1; /* high unless driven low */
++        /*
++         * Le registre est TOUJOURS stocké, y compris pour la ligne de reset du
++         * CPU 1 : OUT_ENABLE et OUT_DATA doivent rester relisibles, sinon un
++         * pilote qui fait lecture-modification-écriture repart de zéro.
++         * Seul le NIVEAU de la ligne est dérivé pour l'interruption externe.
++         */
++        old = s->gpio_regs[addr];
+         s->gpio_regs[addr] = value | ibit;
++
++        if (addr == 3 || addr == 4) {
++            /* Sortie inactive : la ligne est tirée haut (reset relâché). */
++            bool level = (value & OUT_ENABLE) ? !!(ibit & IN_DATA) : true;
++            bool prev = (old & OUT_ENABLE) ? !!(old & IN_DATA) : true;
++
++            trace_macio_set_gpio(addr, level);
++            if (level != prev) {
++                macio_gpio_set_extirq(s, addr, level);
 +            }
-+            macio_set_gpio(s, addr, ibit);
-+        } else {
-+            s->gpio_regs[addr] = value | ibit;
 +        }
      }
  }
  
-@@ -184,6 +202,7 @@ static void macio_gpio_reset(DeviceState *dev)
+@@ -181,6 +226,9 @@ static void macio_gpio_reset(DeviceState *dev)
  
      /* GPIO 1 is up by default */
      macio_set_gpio(s, 1, true);
++    /* Idem pour les deux lignes candidates du reset du CPU 1 (actives bas) */
++    macio_set_gpio(s, 3, true);
 +    macio_set_gpio(s, 4, true);
  }
  
  static void macio_gpio_nmi(NMIState *n, int cpu_index, Error **errp)
 diff --git a/hw/ppc/mac_newworld.c b/hw/ppc/mac_newworld.c
-index cb3dc3ab48..57d83f989c 100644
+index 9d249a506c..57072f11d1 100644
 --- a/hw/ppc/mac_newworld.c
 +++ b/hw/ppc/mac_newworld.c
 @@ -73,6 +73,7 @@
@@ -75,19 +182,45 @@ index cb3dc3ab48..57d83f989c 100644
  #include "trace.h"
  
  #define MAX_IDE_BUS 2
-@@ -128,12 +129,25 @@ static void ppc_core99_reset(void *opaque)
+@@ -128,12 +129,50 @@ static void ppc_core99_reset(void *opaque)
      cpu->env.nip = PROM_BASE + 0x100;
  }
  
++/*
++ * Relâche le cœur secondaire. Exécuté SUR LE THREAD DU vCPU VISÉ (via
++ * async_run_on_cpu), jamais sur celui du cœur qui écrit le GPIO : réécrire
++ * MSR/NIP/SPR/TLB d'un vCPU qui tourne corrompt son état. Même motif que
++ * hw/ppc/ppce500_spin.c et target/arm/arm-powerctl.c.
++ */
++static void cpu_kick_work(CPUState *cs, run_on_cpu_data data)
++{
++    PowerPCCPU *cpu = POWERPC_CPU(cs);
++
++    cpu_reset(cs);
++
++    /*
++     * APRÈS cpu_reset() : celui-ci repose MSR[EP], donc excp_prefix à
++     * 0xFFF00000 (hreg_store_msr ne recalcule excp_prefix que si MSR[EP]
++     * change). Le poser avant ne marcherait qu'au tout premier kick ; dès que
++     * le cœur 1 a tourné sous Darwin (EP = 0), le kick suivant le renverrait
++     * dans la ROM OpenBIOS à 0xFFF00100 au lieu du vecteur en RAM.
++     */
++    cpu->env.excp_prefix = 0;
++
++    /* Pose cs->halted = 0 puis délivre POWERPC_EXCP_RESET (vecteur 0x100). */
++    ppc_cpu_do_system_reset(cs);
++}
++
 +static void cpu_kick(void *opaque, int n, int level)
 +{
-+    PowerPCCPU *cpu = opaque;
-+    CPUState *cs = CPU(cpu);
-+
 +    if (level) {
-+        cpu->env.excp_prefix = 0;
-+        cpu_reset(cs);
-+        ppc_cpu_do_system_reset(cs);
++        /*
++         * async_run_on_cpu() met le travail en file PUIS appelle
++         * qemu_cpu_kick(), qui diffuse sur halt_cond : c'est ce qui sort le
++         * thread du cœur secondaire de son qemu_cond_wait(). Sans cela il
++         * dormirait jusqu'au prochain événement fortuit.
++         */
++        async_run_on_cpu(CPU(opaque), cpu_kick_work, RUN_ON_CPU_NULL);
 +    }
 +}
 +
@@ -97,14 +230,27 @@ index cb3dc3ab48..57d83f989c 100644
      Core99MachineState *core99_machine = CORE99_MACHINE(machine);
      MachineClass *mc = MACHINE_GET_CLASS(machine);
 -    PowerPCCPU *cpu = NULL;
-+    qemu_irq kick;
 +    PowerPCCPU **cpus = NULL;
      CPUPPCState *env = NULL;
      char *filename;
      IrqLines *openpic_irqs;
-@@ -157,14 +171,17 @@ static void ppc_core99_init(MachineState *machine)
+@@ -156,15 +195,40 @@ static void ppc_core99_init(MachineState *machine)
+     hwaddr nvram_addr = 0xFFF04000;
      uint64_t tbfreq = kvm_enabled() ? kvmppc_get_tbfreq() : TBFREQ;
  
++    /*
++     * La ligne de reset du cœur secondaire est un GPIO du MacIO, et le device
++     * gpio n'existe que dans la variante PMU (macio.c le détruit avec CUDA).
++     * Sans ce garde, on arriverait plus bas à un sysbus_connect_irq(NULL, ...).
++     */
++    if (machine->smp.cpus > 1 &&
++        core99_machine->via_config == CORE99_VIA_CONFIG_CUDA) {
++        error_report("mac99: SMP requires the PMU variant "
++                     "(-M mac99,via=pmu): the CPU 1 reset line is a MacIO "
++                     "GPIO, which does not exist with CUDA");
++        exit(1);
++    }
++
      /* init CPUs */
 +    cpus = g_new0(PowerPCCPU *, machine->smp.cpus);
      for (i = 0; i < machine->smp.cpus; i++) {
@@ -115,6 +261,15 @@ index cb3dc3ab48..57d83f989c 100644
 +        /* Secondary CPUs start halted */
 +        object_property_set_bool(OBJECT(cpus[i]), "start-powered-off", i != 0,
 +                                 &error_abort);
++        /*
++         * PIR = numéro du cœur. Par défaut register_74xx_sprs() l'enregistre à
++         * 0 : les deux cœurs se croiraient cœur d'amorçage, et le client
++         * IOKit de Tiger (MacRISC2CPU) n'appellerait jamais startCPU().
++         * cpu_create() a déjà realize le CPU, donc spr_cb[] est rempli ; la
++         * valeur par défaut est recopiée dans env->spr[] par le reset qui
++         * suit — même endroit et même moment que hw/ppc/spapr_cpu_core.c.
++         */
++        cpus[i]->env.spr_cb[SPR_PIR].default_value = CPU(cpus[i])->cpu_index;
          /* Set time-base frequency to 100 Mhz */
 -        cpu_ppc_tb_init(env, TBFREQ);
 -        qemu_register_reset(ppc_core99_reset, cpu);
@@ -125,7 +280,7 @@ index cb3dc3ab48..57d83f989c 100644
  
      /* allocate RAM */
      if (machine->ram_size > 2 * GiB) {
-@@ -256,8 +274,8 @@ static void ppc_core99_init(MachineState *machine)
+@@ -255,8 +319,8 @@ static void ppc_core99_init(MachineState *machine)
      }
  
      openpic_irqs = g_new0(IrqLines, machine->smp.cpus);
@@ -135,7 +290,7 @@ index cb3dc3ab48..57d83f989c 100644
          /* Mac99 IRQ connection between OpenPIC outputs pins
           * and PowerPC input pins
           */
-@@ -369,9 +387,17 @@ static void ppc_core99_init(MachineState *machine)
+@@ -368,9 +432,24 @@ static void ppc_core99_init(MachineState *machine)
      qdev_prop_set_chr(dev, "chrA", serial_hd(0));
      qdev_prop_set_chr(dev, "chrB", serial_hd(1));
  
@@ -145,20 +300,32 @@ index cb3dc3ab48..57d83f989c 100644
      pci_realize_and_unref(PCI_DEVICE(macio), pci_bus, &error_fatal);
  
 -    pic_dev = DEVICE(object_resolve_path_component(macio, "pic"));
-+    s = SYS_BUS_DEVICE(object_resolve_path_component(macio, "gpio"));
-+    for (i = 1; i < machine->smp.cpus; i++) {
-+        kick = qemu_allocate_irq(cpu_kick, cpus[i], i);
-+        sysbus_connect_irq(s, 4, kick);
++    if (machine->smp.cpus > 1) {
++        /*
++         * Un seul cœur secondaire : le MacIO ne porte qu'UNE ligne de reset,
++         * et boucler dessus écraserait le lien précédent au-delà de deux CPU
++         * (d'où mc->max_cpus = 2). GPIO 3 et GPIO 4 sont tous deux câblés :
++         * Tiger choisit l'un ou l'autre selon l'offset de repli qu'il utilise.
++         */
++        s = SYS_BUS_DEVICE(object_resolve_path_component(macio, "gpio"));
++        assert(s != NULL);
++        sysbus_connect_irq(s, 3, qemu_allocate_irq(cpu_kick, cpus[1], 3));
++        sysbus_connect_irq(s, 4, qemu_allocate_irq(cpu_kick, cpus[1], 4));
 +    }
 +
      for (i = 0; i < 4; i++) {
          qdev_connect_gpio_out(uninorth_pci_dev, i,
                                qdev_get_gpio_in(pic_dev, 0x1b + i));
-@@ -576,7 +602,7 @@ static void core99_machine_class_init(ObjectClass *oc, void *data)
+@@ -574,8 +653,11 @@ static void core99_machine_class_init(ObjectClass *oc, void *data)
+     mc->desc = "Mac99 based PowerMac";
      mc->init = ppc_core99_init;
      mc->block_default_type = IF_IDE;
-     /* SMP is not supported currently */
+-    /* SMP is not supported currently */
 -    mc->max_cpus = 1;
++    /*
++     * Deux cœurs au plus : le MacIO ne porte qu'une ligne de reset pour le
++     * cœur secondaire (GPIO 3 / GPIO 4), et le firmware n'en relâche qu'un.
++     */
 +    mc->max_cpus = 2;
      mc->default_boot_order = "cd";
      mc->default_display = "std";

@@ -8,7 +8,7 @@ liste, essais revertés, binaires supplantés) gardé pour pouvoir refaire le ra
 
 | Fichier | Rôle |
 | --- | --- |
-| `smp-mac99/qemu-mac99-cpus-v2.patch` | SMP mac99. Neutralise le garde-fou `« Only UP supported today »` d'`hw/intc/openpic.c`, ajoute le GPIO 4 de KeyLargo (ligne de reset du CPU1) dans `hw/misc/macio/gpio.c`, et le `cpu_kick()` qui relâche le cœur secondaire dans `hw/ppc/mac_newworld.c`. Appliqué avec `--fuzz=3` sur QEMU 9.2.0. |
+| `smp-mac99/qemu-mac99-cpus-v2.patch` | SMP mac99. Remplace le garde-fou `« Only UP supported today »` d'`hw/intc/openpic.c` par la vraie limite du modèle (`nb_cpus > KEYLARGO_MAX_CPU`), ajoute les GPIO 3 **et** 4 de KeyLargo (lignes de reset du CPU 1) dans `hw/misc/macio/gpio.c`, et dans `hw/ppc/mac_newworld.c` le `PIR = cpu_index` plus le `cpu_kick()` qui relâche le cœur secondaire par `async_run_on_cpu()`. S'applique **sans fuzz ni décalage** sur QEMU 9.2.0 pristine (le build l'applique quand même avec `--fuzz=3`). |
 | `qfb/qfb-pci.c` | Le device paravirtuel `qfb-pci`, copié dans `hw/display/`. Protocole « qfb1 » de Solra Bizna porté du NuBus vers PCI. |
 | `qfb/0002-wire-qfb-pci-build.patch` | Câblage meson/Kconfig du device ci-dessus. |
 | `qgpu/qgpu-pci.c`, `qgpu-core.[ch]`, `qgpu-soft.c`, `qgpu-gl.c`, `qgpu_proto.h` | Le GPU paravirtuel `qgpu-pci` (protocole v4) : device (transport), cœur d'exécution du flux de commandes (contextes, surfaces, textures, état GL), backend logiciel de référence, **backend OpenGL** (CGL/EGL, rendu sur le GPU hôte), et le contrat hôte/invité. Copiés dans `hw/display/`. |
@@ -18,9 +18,45 @@ liste, essais revertés, binaires supplantés) gardé pour pouvoir refaire le ra
 | `fastfp/0001-ppc-fast-fp.patch` | **Flottant rapide** : propriété de CPU `x-fast-fp` (défaut *off*) qui laisse softfloat confier les opérations flottantes au FPU de l'hôte. Touche `fpu/softfloat.c`, `include/fpu/softfloat-types.h`, `target/ppc/{cpu.h,cpu_init.c,fpu_helper.c}`. Voir plus bas et `docs/flottant-rapide.md`. |
 | `fastfp/0002-ppc-fewer-fp-helpers.patch` | 4 appels de helper par instruction flottante → 2 (`reset_fpstatus` émis en ligne, `compute_fprf` + `float_check_status` fusionnés). **Aucun effet observable**, dans aucun des deux modes. S'applique par-dessus le 0001 ; `NO_FASTFP2=1` sur un arbre propre applique le 0001 seul. |
 
-Le patch SMP suppose les constantes `IN_DATA` / `OUT_ENABLE`, absentes de `gpio.c` en 9.2.0 :
-le script les réinjecte lui-même (mêmes valeurs que l'enum de `balaton2`, voir plus bas)
-plutôt que d'appliquer un second patch amont.
+Les constantes `OUT_DATA` / `IN_DATA` / `OUT_ENABLE` sont absentes de `gpio.c` en 9.2.0 :
+le patch les **porte désormais lui-même** (mêmes valeurs que l'enum de `balaton2`, voir plus
+bas), de sorte qu'il compile seul sur un arbre pristine. L'étape 2 de
+`scripts/build_qemu_qfb.sh`, qui les réinjectait par un script Python, devient de ce fait un
+no-op : son garde (`grep -q "define OUT_ENABLE"`) les trouve déjà. Elle est laissée en place,
+elle ne coûte rien.
+
+### Ce que le patch corrige par rapport à la version d'août 2025
+
+Findings S-C1, S-C2, S-C3, S-M1, S-M2, S-M3 et mineurs de
+`docs/bug-hunt-2026-09-22.md` §8.4 :
+
+- **`cpu_kick()` passe par `async_run_on_cpu()`** (S-C2) : le travail tourne sur le thread du
+  vCPU visé, plus sur celui du cœur qui écrit le GPIO. C'est aussi ce qui **réveille** le cœur
+  secondaire (S-C3) : `async_run_on_cpu()` appelle `qemu_cpu_kick()`, seul moyen de sortir le
+  thread de son `qemu_cond_wait(halt_cond)`. Motif de `hw/ppc/ppce500_spin.c` et
+  `target/arm/arm-powerctl.c`.
+- **`excp_prefix = 0` après `cpu_reset()`** (S-M1) : `cpu_reset()` repose `MSR[EP]` et donc
+  `excp_prefix = 0xFFF00000`. Posé avant, il ne marchait qu'au premier kick.
+- **`spr_cb[SPR_PIR].default_value = cpu_index`** (S-C1) : sans cela `register_74xx_sprs()`
+  laisse PIR à 0 sur les deux cœurs, et `MacRISC2CPU` prend les deux nœuds `/cpus` pour le
+  cœur d'amorçage — un seul processeur, sans message. Même endroit que
+  `hw/ppc/spapr_cpu_core.c` : après `realize`, avant le reset.
+- **`gpio_regs[addr]` toujours stocké** (S-M2) : `OUT_ENABLE`/`OUT_DATA` restent relisibles ;
+  seul le niveau est dérivé pour la ligne de reset.
+- **GPIO 3 en plus du GPIO 4** (S-M3) : le firmware livré ne publie pas de propriété
+  `soft-reset` et Tiger retombe sur son offset codé en dur, 0x5B ou 0x5C selon les versions,
+  soit GPIO 3 soit GPIO 4. Le GPIO 3 tombait dans `LOG_UNIMP`, en silence.
+- Mineurs : garde-fou openpic réel au lieu d'`#if 0` ; plus de boucle qui écrase le lien d'IRQ
+  au-delà de deux CPU ; `-smp 2` sans `via=pmu` sort par un `error_report` au lieu d'un
+  `sysbus_connect_irq(NULL, …)`.
+
+Pour trancher en VM, les traces amont suffisent :
+`-d trace:macio_gpio_write,trace:macio_set_gpio,trace:macio_gpio_irq_assert,trace:macio_gpio_irq_deassert`.
+
+Reste **côté firmware**, hors de portée de ce patch : `openbios-smp-screamer.elf` n'a pas de
+source dans le dépôt, ne publie pas de propriété `soft-reset`, et c'est lui qui décide de ce
+que vaut `reg` dans les nœuds `/cpus` (il doit y mettre le PIR pour que le correctif S-C1
+serve).
 
 ## Le device audio Screamer
 
@@ -31,9 +67,17 @@ branche `screamer-v9.1.0` du fork de Mark Cave-Ayland
 récupérer au build est délibéré : **le dépôt doit pouvoir reconstruire son binaire de
 référence sans dépendre d'un fork tiers**, qui peut disparaître ou se réécrire.
 
-Une seule modification par rapport à l'amont, signalée en tête de `screamer.c` : `dc->reset`
-a disparu entre QEMU 9.1 et 9.2, remplacé par `device_class_set_legacy_reset()` (même
-sémantique — `hw/display/qfb-pci.c` utilise déjà la forme 9.2).
+Une seule modification fonctionnelle par rapport à l'amont, signalée en tête de
+`screamer.c` : `dc->reset` a disparu entre QEMU 9.1 et 9.2, remplacé par
+`device_class_set_legacy_reset()` (même sémantique — `hw/display/qfb-pci.c` utilise déjà la
+forme 9.2).
+
+La garde de débordement commentée de `pmac_screamer_tx()` a été **remplacée par l'explication
+de pourquoi elle ne doit pas être restaurée** (commentaire, aucun changement de code) : le
+débordement est déjà empêché par le `MIN()` de `pmac_screamer_tx_transfer()`, et restaurer la
+garde bloquerait le son sur toute requête DBDMA plus grosse que `mixbuf` — 0 octet transféré,
+`wpos - rpos` nul, `screamerspk_callback()` qui ressort aussitôt, transfert reporté
+indéfiniment.
 
 Le son a besoin des **deux moitiés** : ce device côté QEMU, et le nœud audio publié côté
 firmware par l'OpenBIOS unifié (`openbios-smp-screamer.elf`, plus bas).
