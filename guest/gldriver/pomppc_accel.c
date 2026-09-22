@@ -50,6 +50,9 @@
  *   POMPPC_GL_VBO=0       pas de tampons hôte v14 (DRAW_RAW retraverse BAR0)
  *   POMPPC_GL_XFER16=0    pas de transfert 16 bits hôte (v15) : fenêtre 16 bits
  *                         et Z 16 restent sans aller-retour
+ *   POMPPC_GL_NOTE=chemin journal d'appoint (gl_note). SANS elle, rien n'est
+ *                         écrit : le plugin tourne aussi dans le WindowServer,
+ *                         en root. Ouvert une fois, O_EXCL|O_NOFOLLOW.
  *   POMPPC_GLTRACE=dir    trace (voir pomppc_gld.c)
  */
 #include <stdio.h>
@@ -60,14 +63,18 @@
 #include <sys/time.h>
 #include <dlfcn.h>
 #include <math.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <mach/mach_time.h>
 
 #include "qgpu_proto.h"
 #include "pomppc_gld.h"
 #include "pomppc_qgpu.h"
 
-#define POMPPC_PLUGIN_REV "20260921-quad"
+#define POMPPC_PLUGIN_REV "20260922-bughunt"
 static void gl_note(const char *fmt, ...);
+static void flush(void);
+static void drain_all(void);
 
 /* ───────────────────── dispositions relevées (Tiger 10.4.6) ─────────────────────
  * Contexte du GLDriver (argument r3 de toutes les procédures) : */
@@ -434,6 +441,26 @@ typedef struct PCtx {
     unsigned long  q_extra;             /* fragments dessinés par le LOGICIEL pendant
                                            la requête : comptés en trop, jamais en
                                            moins (voir q_end) */
+    /* ── F2 : BeginPrimitiveBuffer ouvert, PAR CONTEXTE ──
+       La case était globale et à une seule place : le geom_begin d'un contexte
+       B (autre fil) effaçait le `pend` de A, le geom_end de A effaçait celui de
+       B, et la zone de sommets réservée n'était jamais rendue. G.npend compte
+       ceux qui sont ouverts — c'est lui qui interdit à flush() de changer de
+       moitié et à submit_cur() de soumettre en asynchrone. */
+    int            pend_open;
+    unsigned long  pend_half;           /* moitié où GLEngine écrit en ce moment */
+    unsigned long  pend_off, pend_words, pend_fmt, pend_slots;
+    int            pend_drop;
+    int            pend_flat;           /* ombrage plat : change l'ordre des indices */
+    int            pend_wire;           /* mode de polygone ≠ GL_FILL : pas de fusion
+                                           en triangles, elle perdrait le contour */
+    /* ── F7 : présentation directe, décidée PAR CONTEXTE ──
+       `D` est un singleton (l'écran) mais le rectangle et le verdict, eux,
+       appartiennent au contexte : partagés, l'image de B partait dans le
+       rectangle de A. */
+    int            d_ok;                /* 0 non, 1 plein écran, 2 en fenêtre */
+    long           d_x, d_y;            /* rectangle de CE contexte à l'écran */
+    unsigned long  d_checked_at;        /* image de la dernière réévaluation */
 } PCtx;
 
 typedef struct PTex {                   /* texture du GLDriver suivie par le plugin */
@@ -442,6 +469,11 @@ typedef struct PTex {                   /* texture du GLDriver suivie par le plu
     void          *drvtex;
     long           qtex;                /* identifiant hôte, -1 si aucun */
     int            dirty;               /* niveaux à (re)téléverser */
+    int            host_only;           /* P15 : le contenu hôte est le SEUL à jour
+                                           (CopyTexSubImage fait sur l'hôte, jamais
+                                           redescendu dans l'invité) — l'évincer le
+                                           perdrait, et le rechargement depuis
+                                           l'invité remettrait l'ancien contenu */
     unsigned long  lv0_sig;             /* empreinte du niveau 0 déjà téléversé */
     unsigned long  prm[14];             /* paramètres envoyés : min, mag, wrap s, wrap t,
                                            wrap r (3D), puis (v10) min et max LOD en
@@ -477,6 +509,9 @@ typedef struct Post {                   /* copie à faire APRÈS la barrière */
 typedef struct Half {
     unsigned long  fence;               /* barrière de la soumission en vol */
     int            busy;                /* elle n'est pas encore terminée */
+    int            waiting;             /* F9 : un fil attend CETTE barrière, G.mu
+                                           relâché — personne d'autre ne doit la
+                                           réattendre ni la réécrire */
     Post           post[MAX_POST];      /* relectures à recopier après la barrière */
     int            npost;
 } Half;
@@ -519,14 +554,18 @@ static struct {
     unsigned long   raw_nidx;           /* indices déjà écrits pour cette série */
     unsigned long   raw_lots;           /* lots recollés dans cette série */
     unsigned long   idx;                /* octets d'indices pris depuis IDX_OFF */
-    /* tampon rendu par BeginPrimitiveBuffer, en attente de EndPrimitiveBuffer */
-    PCtx           *pend;
-    unsigned long   pend_half;          /* moitié où GLEngine écrit en ce moment */
-    unsigned long   pend_off, pend_words, pend_fmt, pend_slots;
-    int             pend_drop;
-    int             pend_flat;          /* ombrage plat : change l'ordre des indices */
-    int             pend_wire;          /* mode de polygone ≠ GL_FILL : pas de fusion
-                                           en triangles, elle perdrait le contour */
+    /* F2 : tampons rendus par BeginPrimitiveBuffer et pas encore refermés. Le
+       DÉTAIL est dans la PCtx (pend_*) ; ici on ne garde que le COMPTE, parce
+       que c'est la seule chose dont le flux ait besoin : tant qu'il n'est pas
+       nul, flush() ne change pas de moitié et submit_cur() soumet en
+       synchrone — GLEngine écrit en ce moment dans la moitié courante, à une
+       adresse qu'on lui a déjà donnée. */
+    int             npend;
+    /* F9 : une (ou plusieurs) attente de barrière est en cours, G.mu relâché.
+       Tant que ce n'est pas nul, RIEN ne doit toucher au flux, aux sommets, aux
+       indices ni à l'arène : stream_ready() endort les écrivains. */
+    int             halt;
+    int             wait_miss;          /* F8 : dépassements de barrière CONSÉCUTIFS */
     unsigned long   ctx_used, surf_used;
     unsigned long   tex_used[(QGPU_CLIENT_TEX_IDS + 31) / 32];
     PCtx           *list;
@@ -581,6 +620,65 @@ static double now_s(void)
     struct timeval tv;
     gettimeofday(&tv, 0);
     return tv.tv_sec + tv.tv_usec * 1e-6;
+}
+
+/* F10 : les mesures de temps ne servent qu'au bilan. Deux gettimeofday par LOT
+ * dans sync_to_host, sans même que le bilan soit demandé, coûtaient deux appels
+ * système par changement d'état. Un static, comme toutes les autres sondes. */
+static int stats_timing(void)
+{
+    static int timing = -1;
+    if (timing < 0)
+        timing = getenv("POMPPC_GL_STATS") != 0;
+    return timing;
+}
+
+/* ── F9 : réveil des fils tenus à l'écart pendant une attente de barrière ──
+ *
+ * `qgpu_wait` dort jusqu'à WAIT_MS dans le kext, en THREAD_UNINT. Le faire
+ * sous G.mu bloquait TOUS les fils GL du processus, et avec un kext qui ne se
+ * réveille pas (K4) c'était le processus entier. wait_half relâche donc G.mu
+ * autour de l'attente ; pendant cette fenêtre :
+ *
+ *   — G.halt tient à l'écart tout ce qui ÉCRIT dans la tranche (flux, sommets,
+ *     indices, arène) : la moitié attendue est peut-être la courante
+ *     (switch_half l'a déjà désignée) et celle qu'on vient de soumettre est
+ *     encore en vol. C'est stream_ready() qui les endort ;
+ *   — `waiting` par moitié empêche deux fils d'attendre la même barrière, et
+ *     surtout empêche le second de repartir en croyant la moitié libre.
+ *
+ * Tout le reste — recherche de contexte, comptabilité des textures, traces,
+ * destruction d'objets — passe, ce qui est exactement ce qu'on cherche.
+ *
+ * La variable de condition vit hors de G pour lui garder son initialiseur
+ * statique (PTHREAD_MUTEX_INITIALIZER sur le premier membre).
+ */
+static pthread_cond_t half_cv = PTHREAD_COND_INITIALIZER;
+
+/* À appeler, VERROU TENU, avant toute écriture dans la moitié courante.
+   Au retour, plus aucune attente n'est en cours : tout ce que l'appelant a pu
+   lire avant doit être RELU (G.cur, G.win, G.cmd, G.ncmd, G.vtx…). */
+static void stream_ready(void)
+{
+    while (G.halt > 0)
+        pthread_cond_wait(&half_cv, &G.mu);
+}
+
+/* F2 — referme la case `pend` du contexte p (verrou tenu). `reclaim` rend la
+ * place de sommets que geom_begin avait réservée, mais SEULEMENT si personne
+ * n'a alloué par-dessus : avec deux contextes sur deux fils, rendre la place
+ * sans regarder écraserait les sommets du voisin. */
+static void pend_close(PCtx *p, int reclaim)
+{
+    if (!p || !p->pend_open)
+        return;
+    if (reclaim &&
+        G.vtx == p->pend_off + p->pend_slots * p->pend_words * 4)
+        G.vtx = p->pend_off;
+    p->pend_open = 0;
+    p->pend_drop = 1;
+    if (G.npend > 0)
+        G.npend--;
 }
 
 /* Motifs de refus de l'accélération : compteurs et détail du premier cas,
@@ -780,30 +878,47 @@ static int u_insane(unsigned long u)
     return (u & 0x7fffffffUL) >= 0x4e6e6b28UL;      /* 1e9 = 0x4e6e6b28 */
 }
 
+/* glPolygonOffset : bits IEEE de l'application, bornés à ±POLY_OFFSET_MAX
+ * (au-delà le décalage n'a plus de sens). NaN → 0. La borne est STRICTEMENT
+ * à l'intérieur de celle du cœur (valid_state : |f| ≤ 1e6) : borner à 1e6
+ * exactement quand le cœur exigeait « < 1e6 » faisait refuser le SET_STATE,
+ * donc perdre toute la soumission ET ses relectures — image noire, vu en VM le
+ * 22/09/2026 (scène `offset`). Le plugin est le côté conservateur. */
+#define POLY_OFFSET_MAX 999999.0f
+static unsigned long safe_offset(unsigned long bits)
+{
+    float f = *(float *)&bits;
+    if (!(f > -POLY_OFFSET_MAX && f < POLY_OFFSET_MAX))
+        f = (f > 0.0f) ? POLY_OFFSET_MAX : (f < 0.0f) ? -POLY_OFFSET_MAX : 0.0f;
+    return *(unsigned long *)&f;
+}
+
 /* UT2004 laisse des NaN dans DRAW_RAW. Les remettre à 0 dessinait un triangle
    jusqu'à l'origine : fillrate, jeu figé, image « plus belle » (T&L) mais
    rampante. On jette la primitive, on pose 0 sur le mot pour que l'hôte
    accepte le reste. Comparaisons entières. 0 = ne pas soumettre. */
-static int raw_fix_nan(void)
-{
-    unsigned long nv, i, j, words, nbad = 0;
-    unsigned long *w;
-    static unsigned char bad[16384];                /* = GEOM_MAX_MERGE */
+/* Borne du marquage : le plus grand nombre de sommets qu'un DRAW_RAW puisse
+   porter (le cœur refuse au-delà). Le chemin TABLEAUX va jusque-là, celui de
+   Begin/End s'arrête bien avant (GEOM_MAX_MERGE). */
+#define RAW_NAN_MAX QGPU_MAX_VERTS
+static unsigned char raw_bad[RAW_NAN_MAX];
 
-    words = G.raw_words;
-    if (!words)
-        return 0;
-    nv = (G.raw_vend - G.raw_start) / (words * 4);
-    if (nv == 0 || nv > 16384)
-        return 0;
-    w = (unsigned long *)(G.win + VTX_OFF + G.raw_start);
+/* Cœur commun aux deux chemins bruts (P12) : assainit nv sommets de `words`
+ * mots à partir de `w`, marque dans raw_bad[] ceux qu'il faut jeter (mot fou
+ * remis à 0, ou w ≈ 0) et rend leur nombre. Aucun accès aux globales : le
+ * chemin TABLEAUX s'en sert aussi, lui qui ne passe pas par G.raw_*. */
+static unsigned long raw_scan_nan(unsigned long *w, unsigned long nv,
+                                  unsigned long words, unsigned long fmt)
+{
+    unsigned long i, j, nbad = 0;
+
     for (i = 0; i < nv; i++) {
         unsigned char b = 0;
         unsigned long *v = w + i * words;
         /* w ≈ 0 : après projection, clip infini → triangles géants (ciel
            Colin McRae). On jette le sommet, comme un NaN, plutôt que de
            forcer w=1 (ça collerait le ciel à la caméra). */
-        if (QGPU_VF_POS_COUNT(G.raw_fmt) == 4 &&
+        if (QGPU_VF_POS_COUNT(fmt) == 4 &&
             (v[3] & 0x7fffffffUL) < 0x358637bdUL)        /* |w| < 1e-6 */
             b = 1;
         for (j = 0; j < words; j++) {
@@ -812,9 +927,26 @@ static int raw_fix_nan(void)
                 b = 1;
             }
         }
-        bad[i] = b;
+        raw_bad[i] = b;
         nbad += b;
     }
+    return nbad;
+}
+
+static int raw_fix_nan(void)
+{
+    unsigned long nv, i, words, nbad;
+    unsigned long *w;
+    unsigned char *bad = raw_bad;
+
+    words = G.raw_words;
+    if (!words)
+        return 0;
+    nv = (G.raw_vend - G.raw_start) / (words * 4);
+    if (nv == 0 || nv > RAW_NAN_MAX)
+        return 0;
+    w = (unsigned long *)(G.win + VTX_OFF + G.raw_start);
+    nbad = raw_scan_nan(w, nv, words, G.raw_fmt);
     if (!nbad)
         return 1;
 
@@ -921,6 +1053,13 @@ static PCtx *find_ctx(void *ctx)
 
 static void on_exit_stats(void)
 {
+    /* Mineur §8.1 : le bilan sortait DEUX fois quand le plugin était déchargé
+       avant la fin du processus — une fois par pomppc_backend_fini, une fois
+       par l'atexit. Le premier qui passe gagne. */
+    static int done;
+    if (done)
+        return;
+    done = 1;
     if (getenv("POMPPC_GL_STATS")) {
         int k;
         fprintf(stderr, "POMPPC GL: texture cache: %lu evictions\n", G.n_texevictions);
@@ -961,12 +1100,62 @@ void pomppc_backend_fini(void)
         frame_file = NULL;
     }
     if (G.state > 0) {
+        /* Mineur §8.1 : rien ne doit rester en vol quand la tranche est
+           rendue. Les copies différées visent des tampons de l'invité (et une
+           mémoire vidéo) ; qgpu_close démappe la fenêtre sous elles, et le
+           kext détruit les objets du client.
+           G.state passe à -1 AVANT le vidage : drain_all peut relâcher G.mu
+           (F9), et tous les points d'entrée qui testent G.state doivent alors
+           déjà se retirer plutôt que d'écrire dans une tranche qu'on est en
+           train de rendre. */
+        G.state = -1;
+        flush();
+        drain_all();
         if (getenv("POMPPC_GL_STATS"))
             on_exit_stats();
         qgpu_close(&G.q);
         pomppc_log("POMPPC: plugin déchargé, tranche %lu rendue\n", G.q.index);
     }
     G.state = -1;
+    pthread_mutex_unlock(&G.mu);
+}
+
+/* P8 — fork() SANS exec (Safari/WebKit lancent leurs aides ainsi). L'enfant
+ * hérite de la tranche MAPPÉE (mémoire du device, partagée, pas copiée), du
+ * port Mach du kext et de G tout entier : il écrirait dans le MÊME flux que le
+ * père, et sa première soumission ferait exécuter deux fois la trame du père.
+ * Le handler enfant n'a le droit de rien libérer (malloc et les verrous ne
+ * sont pas sûrs après fork, et fermer le user client détruirait les objets du
+ * PÈRE) : il OUBLIE. G.mu est relâché ici parce que le handler « prepare » l'a
+ * pris dans le fil qui appelle fork(), et que c'est ce fil-là qui continue. */
+void pomppc_backend_forget(void)
+{
+    G.state = -1;
+    G.async = 0;
+    G.async_avail = 0;
+    G.ncmd = 0;
+    G.npend = 0;
+    G.halt = 0;
+    G.list = 0;
+    G.textures = 0;
+    G.bufs = 0;
+    G.cmd = 0;
+    G.win = 0;
+    G.bound = 0;
+    G.run_ctx = 0;
+    G.raw_ctx = 0;
+    frame_file = NULL;                  /* le FILE* du père : ne pas s'en servir */
+    qgpu_forget(&G.q);
+    pthread_mutex_unlock(&G.mu);
+}
+
+void pomppc_backend_prepare_fork(void)
+{
+    pthread_mutex_lock(&G.mu);
+}
+
+void pomppc_backend_parent_fork(void)
+{
     pthread_mutex_unlock(&G.mu);
 }
 
@@ -1198,6 +1387,7 @@ static void close_raw(void)
 static unsigned long *reserve(PCtx *p, unsigned long words)
 {
     unsigned long *c;
+    stream_ready();                     /* F9 : G.cmd/G.ncmd relus après */
     close_run();
     close_raw();
     if (G.ncmd + words + 4 + QGPU_LEN_DRAW_N + QGPU_LEN_DRAW_RAW_BUF > CMD_WORDS)
@@ -1222,8 +1412,19 @@ static unsigned long *reserve(PCtx *p, unsigned long words)
  * deux, la commande partirait dans une soumission — depuis la v9, dans une
  * MOITIÉ — différente de la mémoire qu'elle désigne. L'hôte lirait alors une
  * arène qu'on est déjà en train de réécrire. */
+/* L'arène pourrait-elle contenir n octets, même VIDE ? Non = ce n'est pas un
+ * manque de place passager mais la limite de la moitié (6 Mio : au-delà de
+ * 1280×1024 en 32 bits). La distinction compte pour P16 : sur un refus
+ * PASSAGER il faut réessayer — et surtout ne pas se déclarer synchronisé —,
+ * mais sur une limite DÉFINITIVE réessayer coûterait un vidage par dessin. */
+static int arena_fits(unsigned long n)
+{
+    return ARENA_OFF + ((n + 3) & ~3UL) <= G.half;
+}
+
 static long arena_alloc(unsigned long n, unsigned long *off)
 {
+    stream_ready();                     /* F9 : G.arena/G.hb relus après */
     n = (n + 3) & ~3UL;
     if (ARENA_OFF + G.arena + n > G.half || G.h[G.cur].npost >= MAX_POST ||
         G.ncmd + ARENA_CMD_ROOM > CMD_WORDS) {
@@ -1238,9 +1439,63 @@ static long arena_alloc(unsigned long n, unsigned long *off)
     return 1;
 }
 
+/* P9 — L'HÔTE FAIT `break` SUR LE PREMIER REFUS (H4) : tout ce qui SUIT la
+ * commande fautive dans la soumission est perdu — SET_STATE, SET_MATRIX,
+ * TEX_IMAGE3, CTX_BIND, tout. Nos miroirs (« ce que l'hôte a déjà ») décrivent
+ * alors un état que l'hôte n'a jamais reçu, et l'image reste fausse
+ * DURABLEMENT : c'est le `TEX_DESTROY BAD_ARG` de la sortie d'UT2004
+ * (docs/re/ut2004-demo.md). On les invalide donc TOUS, dans les trois branches
+ * qui gardent l'accélération. Coût : une image entière d'état renvoyé. */
+static void invalidate_mirrors(void)
+{
+    PCtx *p;
+    PTex *t;
+
+    for (p = G.list; p; p = p->next) {
+        p->st_valid = 0;
+        p->g_sent = 0;
+        p->c_pstip_valid = 0;
+        p->c_lmask = 0;
+        memset(p->c_mtx, 0, sizeof(p->c_mtx));
+        memset(p->c_vp, 0, sizeof(p->c_vp));
+        memset(p->c_dr, 0, sizeof(p->c_dr));
+        memset(p->c_light, 0, sizeof(p->c_light));
+        memset(p->c_mat, 0, sizeof(p->c_mat));
+        memset(p->c_lm, 0, sizeof(p->c_lm));
+        memset(p->c_tg, 0, sizeof(p->c_tg));
+        memset(p->c_tg_on, 0, sizeof(p->c_tg_on));
+        memset(p->c_clip, 0, sizeof(p->c_clip));
+        memset(p->c_cur, 0, sizeof(p->c_cur));
+        memset(p->c_pstip, 0, sizeof(p->c_pstip));
+    }
+    for (t = G.textures; t; t = t->next) {
+        t->prm_valid = 0;
+        t->dirty = 1;                   /* le TEX_IMAGE3 perdu doit repartir */
+        t->lv0_sig = 0;
+        t->host_only = 0;
+    }
+    G.bound = 0;                        /* le CTX_BIND perdu doit repartir */
+}
+
 static void broken_all(const char *why, long st, unsigned long pc)
 {
     PCtx *p;
+    /* Q2 — un SURF_PRESENT refusé tombait dans « lot ignoré, accélération
+       gardée » (BAD_ARG) ou coupait toute la 3D du processus (autre statut) ;
+       dans les deux cas present_direct continuait de rendre 1 et Apple
+       n'échangeait rien : ÉCRAN FIGÉ POUR TOUJOURS, statut OK, zéro message
+       (c'est le symptôme de QFB=1, §8.3 Q1). On coupe la présentation hôte, et
+       elle seule : le chemin normal (relecture + échange d'Apple) reprend à
+       l'image suivante, et la 3D continue. */
+    if (pc < CMD_WORDS && QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_SURF_PRESENT) {
+        pomppc_log("POMPPC: SURF_PRESENT refusé (statut %ld, commande %lu) : "
+                   "présentation hôte coupée\n", st, pc);
+        fprintf(stderr, "POMPPC GL: host present rejected (status %ld), "
+                "falling back to the normal swap\n", st);
+        G.scanout = 0;
+        invalidate_mirrors();
+        return;
+    }
     /* Un DRAW_RAW refusé vient presque toujours d'un sommet que l'application
        a laissé indéfini (NaN, infini, coordonnée démesurée) : GLEngine les
        découpait avant de nous les donner, plus maintenant. Couper le chemin
@@ -1255,6 +1510,7 @@ static void broken_all(const char *why, long st, unsigned long pc)
         for (p = G.list; p; p = p->next)
             p->geom_lost = 1;
         G.v7 = 0;
+        invalidate_mirrors();
         return;
     }
     /* Un opcode de requête refusé veut dire que l'hôte ne tient pas
@@ -1268,6 +1524,7 @@ static void broken_all(const char *why, long st, unsigned long pc)
         qry_off = 1;
         for (p = G.list; p; p = p->next)
             p->q_open = -1;
+        invalidate_mirrors();
         return;
     }
     {   /* Dire QUELLE commande, avec ses arguments : sans cela un refus coûte
@@ -1298,6 +1555,7 @@ static void broken_all(const char *why, long st, unsigned long pc)
             else if (n_badarg == 8)
                 fprintf(stderr, "POMPPC GL: further BAD_ARG batches omitted\n");
             n_badarg++;
+            invalidate_mirrors();
             return;
         }
     }
@@ -1388,39 +1646,100 @@ static void run_posts(Half *h)
 
 /* Attend la barrière de la moitié i (si elle est en vol), puis fait ses copies
    différées. Après quoi la moitié est libre : on peut la réécrire. */
-static void wait_half(int i)
+/* F8 : dépassements CONSÉCUTIFS avant de couper toute l'accélération. Un seul
+ * suffisait, et il suffit qu'une AUTRE application 3D se ferme pour le
+ * provoquer (212 doorbells synchrones côté kext, BQL tenu côté device : K5 +
+ * D2) sans que rien ne soit cassé chez nous. */
+#define WAIT_GIVEUP   3
+
+/* `unlock` : le seul cas où l'on ne relâche PAS G.mu est l'attente de
+ * submit_cur sur QUEUE_FULL — la moitié courante y est en cours de
+ * soumission, son flux ne doit ni grandir ni repartir dans une autre
+ * soumission. Voir stream_ready(). */
+static void wait_half_ex(int i, int unlock)
 {
     Half *h = &G.h[i];
+    unsigned long fence;
+    int ok;
 
+    /* INVARIANT F9 : dès l'entrée et jusqu'à la sortie, G.halt est levé. Toute
+       sortie de G.mu depuis cette fonction — le pthread_cond_wait ci-dessous
+       comme l'attente elle-même — se fait donc FLUX GELÉ : stream_ready()
+       endort quiconque voudrait écrire dans la tranche, y compris dans la
+       moitié qu'on attend (switch_half l'a déjà désignée courante) et dans
+       celle qu'on vient de soumettre. Tout le reste passe. */
+    G.halt++;
+    /* Un autre fil attend peut-être déjà CETTE barrière, verrou relâché. On
+       dort sur la condition plutôt que d'attendre en double — et surtout
+       plutôt que de repartir en croyant la moitié libre. */
+    while (h->waiting)
+        pthread_cond_wait(&half_cv, &G.mu);
     if (!h->busy) {
         run_posts(h);                   /* mode synchrone : rien à attendre */
-        return;
+        goto done;
     }
     {
         double t = now_s();
-        int ok = qgpu_wait(&G.q, h->fence, WAIT_MS) == 0;
+        fence = h->fence;
+        if (unlock) {
+            h->waiting = 1;
+            pthread_mutex_unlock(&G.mu);
+            ok = qgpu_wait(&G.q, fence, WAIT_MS) == 0;
+            pthread_mutex_lock(&G.mu);
+            h->waiting = 0;
+            pthread_cond_broadcast(&half_cv);
+        } else {
+            /* submit_cur sur QUEUE_FULL : la moitié COURANTE est en cours de
+               soumission. On garde G.mu, sinon un autre fil pourrait allonger
+               son flux — ou le soumettre une seconde fois. */
+            ok = qgpu_wait(&G.q, fence, WAIT_MS) == 0;
+        }
+        /* Rien de ce qu'on avait lu n'a pu bouger : G.halt interdisait d'écrire
+           dans cette moitié, de la désigner courante et d'y ajouter une
+           relecture ; `waiting` interdisait de l'attendre en double. h->busy et
+           h->post sont donc encore ceux de NOTRE soumission. */
         G.t_wait += now_s() - t;
         G.n_waits++;
         if (!ok) {
-            /* L'hôte ne répond plus. On ne peut pas réécrire une moitié encore
-               en vol : on coupe l'accélération pour tout le processus plutôt
-               que de dessiner sur ce que l'hôte est en train de lire. */
-            PCtx *p;
-            pomppc_log("POMPPC: barrière %lu jamais atteinte (%d ms) : "
-                       "accélération coupée\n", h->fence, WAIT_MS);
-            fprintf(stderr, "POMPPC GL: host did not finish a submit "
-                    "in %d ms, falling back to software\n", WAIT_MS);
+            /* On ne peut pas réécrire une moitié encore en vol sans risquer une
+               image fausse. Mais couper DÉFINITIVEMENT toute l'accélération du
+               processus au premier dépassement était pire : on coupe d'abord
+               l'asynchrone (le synchrone, lui, attend sa place sans jamais
+               dépasser), et il faut WAIT_GIVEUP dépassements consécutifs pour
+               déclarer l'hôte mort. */
+            pomppc_log("POMPPC: barrière %lu jamais atteinte (%d ms), "
+                       "dépassement %d/%d\n", fence, WAIT_MS,
+                       G.wait_miss + 1, WAIT_GIVEUP);
             G.async = 0;
             G.async_avail = 0;
-            for (p = G.list; p; p = p->next)
-                p->broken = 1;
+            G.async_why = "barrière dépassée";
+            if (++G.wait_miss >= WAIT_GIVEUP) {
+                PCtx *p;
+                fprintf(stderr, "POMPPC GL: host did not finish a submit "
+                        "in %d ms (%d times), falling back to software\n",
+                        WAIT_MS, G.wait_miss);
+                for (p = G.list; p; p = p->next)
+                    p->broken = 1;
+            } else {
+                fprintf(stderr, "POMPPC GL: host submit took more than %d ms, "
+                        "asynchronous doorbell disabled\n", WAIT_MS);
+            }
             h->npost = 0;
             h->busy = 0;
-            return;
+            goto done;
         }
+        G.wait_miss = 0;
     }
     h->busy = 0;
     run_posts(h);
+done:
+    G.halt--;
+    pthread_cond_broadcast(&half_cv);
+}
+
+static void wait_half(int i)
+{
+    wait_half_ex(i, 1);
 }
 
 /* ── détection d'erreur en asynchrone ────────────────────────────────────────
@@ -1498,25 +1817,43 @@ static void submit_cur(void)
        geom_begin fait la place avant d'ouvrir — et c'est la seule façon
        d'être exact (vu en vrai : un téléversement de texture au milieu d'une
        primitive vide le flux). */
-    int async = G.async && !G.pend;
+    int async = G.async && !G.npend;
 
     if (async) {
         st = qgpu_submit_async(&G.q, G.hb, G.ncmd * 4, &fence, &errors);
         if (st == QGPU_ST_QUEUE_FULL) {
             /* Rien n'a été mis en file, et SUBMIT_OFF/SUBMIT_LEN se réécrivent
                sans danger : on attend notre plus ancienne barrière (il n'y en a
-               qu'une : l'autre moitié) et on réessaie. */
+               qu'une : l'autre moitié) et on réessaie.
+               G.mu reste TENU pendant cette attente (F9) : le flux de la moitié
+               courante est en cours de soumission, personne ne doit y écrire ni
+               le soumettre une seconde fois. */
             G.n_qfull++;
-            wait_half(G.cur ^ 1);
+            wait_half_ex(G.cur ^ 1, 0);
             st = qgpu_submit_async(&G.q, G.hb, G.ncmd * 4, &fence, &errors);
         }
-        if (st != QGPU_ST_OK) {
-            /* File toujours pleine (un autre client l'occupe) ou appel refusé :
-               le doorbell SYNCHRONE, lui, n'est jamais refusé — il attend sa
-               place. C'est le repli le plus simple et le plus sûr. */
-            if (st == QGPU_ST_QUEUE_FULL)
-                G.n_qfull++;
+        if (st == QGPU_ST_QUEUE_FULL) {
+            /* File toujours pleine (un autre client l'occupe) : le doorbell
+               SYNCHRONE, lui, n'est jamais refusé — il attend sa place. */
+            G.n_qfull++;
             async = 0;
+        } else if (st != QGPU_ST_OK) {
+            /* F12 — on ne resoumet QUE sur QUEUE_FULL. Sur tout autre statut
+               (kext qui annonce l'asynchrone sans le tenir, K6), la trame a pu
+               être PRISE puis refusée : la rejouer en synchrone l'exécuterait
+               DEUX fois. On l'abandonne et on repasse en synchrone pour que la
+               prochaine se nomme elle-même, exactement comme sur un mouvement
+               d'ERRORS. */
+            pomppc_log("POMPPC: doorbell asynchrone refusé (statut %ld) : trame "
+                       "abandonnée, synchrone pendant %d images\n", st, ASYNC_RETRY);
+            G.async = 0;
+            G.n_syncfall++;
+            G.async_retry_at = G.n_frames + ASYNC_RETRY;
+            G.t_submit += now_s() - t;
+            G.n_submits++;
+            h->busy = 0;
+            h->npost = 0;
+            return;
         }
     }
     if (async) {
@@ -1556,6 +1893,7 @@ static void switch_half(void)
 
 static void flush(void)
 {
+    stream_ready();                     /* F9 : tout est relu après */
     close_run();
     close_raw();
     if (G.ncmd)
@@ -1566,7 +1904,7 @@ static void flush(void)
     /* Un BeginPrimitiveBuffer ouvert occupe déjà la zone des sommets : GLEngine
        y écrit pendant ce temps, on ne peut ni la rendre ni changer de moitié
        (submit_cur a soumis en synchrone pour cette raison). */
-    if (G.pend)
+    if (G.npend)
         return;
     G.vtx = 0;
     G.idx = 0;
@@ -1613,13 +1951,25 @@ static long alloc_tex_id(PCtx *p)
             return G.q.tex_base + i;
         }
     }
+    /* Close pending RAW/legacy draws and finish both asynchronous halves
+     * before recycling an ID. DESTROY precedes CREATE in the new stream.
+     * F9 : ces deux appels PEUVENT relâcher G.mu — la victime est donc
+     * choisie APRÈS, sur l'état courant, et marquée morte avant tout ce qui
+     * pourrait relâcher à nouveau. Sinon deux fils évinçaient la même. */
+    flush();
+    drain_all();
     /* Protect every effective unit, including units not uploaded yet. A
      * texture bound by another context may be evicted: that context will
      * reload it when drawn again. Guest storage remains owned by GLEngine. */
     for (u = 0; u < QGPU_MAX_UNITS; u++)
         protected[u] = unit_drvtex(p, u, &mask);
     for (t = G.textures; t; t = t->next) {
-        if (t->qtex < 0 || (victim && t->last_use >= victim->last_use))
+        /* P15 : une texture remplie par COPY_TEX n'existe QUE sur l'hôte — le
+           niveau de l'invité n'a jamais été mis à jour. L'évincer perdrait son
+           contenu, et le rechargement depuis l'invité remettrait l'ANCIEN
+           (reflets et ombres périmés). Elle n'est jamais une victime. */
+        if (t->qtex < 0 || t->host_only ||
+            (victim && t->last_use >= victim->last_use))
             continue;
         for (u = 0; u < QGPU_MAX_UNITS; u++)
             if (protected[u] == t->drvtex)
@@ -1629,17 +1979,15 @@ static long alloc_tex_id(PCtx *p)
     }
     if (!victim)
         return -1;
-    /* Close pending RAW/legacy draws and finish both asynchronous halves
-     * before recycling their ID. DESTROY precedes CREATE in the new stream. */
-    flush();
-    drain_all();
     id = victim->qtex;
+    victim->qtex = -1;                  /* morte AVANT reserve() : plus personne
+                                           ne peut la choisir comme victime */
+    victim->dirty = 1;
+    victim->prm_valid = 0;
+    victim->host_only = 0;
     c = reserve(p, QGPU_LEN_TEX);
     c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_DESTROY, QGPU_LEN_TEX);
     c[1] = id;
-    victim->qtex = -1;
-    victim->dirty = 1;
-    victim->prm_valid = 0;
     for (ctx = G.list; ctx; ctx = ctx->next)
         ctx->st_valid = 0;
     G.n_texevictions++;
@@ -1723,15 +2071,23 @@ void pomppc_texture_deleted(void *drvtex)
         }
         if (t->qtex >= 0) {
             unsigned long i = t->qtex - G.q.tex_base;
-            close_run();
-            if (G.ncmd + QGPU_LEN_TEX > CMD_WORDS)
+            /* P10 : close_run() seul fermait la série de triangles mais PAS la
+               série DRAW_RAW — c'est flush() qui l'écrivait, donc APRÈS le
+               TEX_DESTROY de la texture qu'elle emploie. reserve() ferme les
+               deux, garantit la place, et relie le contexte (une soumission
+               qui commencerait par TEX_DESTROY aurait QGPU_ST_NO_CTX).
+               L'identifiant n'est rendu que si la commande est bien écrite —
+               même règle que P14. */
+            PCtx *bp = (G.bound && G.bound->qctx >= 0) ? G.bound : G.list;
+            while (bp && bp->qctx < 0)
+                bp = bp->next;
+            if (bp) {
+                c = reserve(bp, QGPU_LEN_TEX);
+                c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_DESTROY, QGPU_LEN_TEX);
+                c[1] = t->qtex;
                 flush();
-            c = G.cmd + G.ncmd;
-            c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_DESTROY, QGPU_LEN_TEX);
-            c[1] = t->qtex;
-            G.ncmd += QGPU_LEN_TEX;
-            flush();
-            G.tex_used[i / 32] &= ~(1UL << (i % 32));
+                G.tex_used[i / 32] &= ~(1UL << (i % 32));
+            }
         }
         free(t);
         break;
@@ -1793,26 +2149,23 @@ static int depth_pair_ok(unsigned long base, unsigned int fmt)
     return (fmt == 0x1902) == (base == 0x1902);
 }
 
-/* GL_ALPHA (polices WC3) : le spec MODULATE garde Cv=Cf. L'hôte GL, saisi en
- * BGRA avec R=G=B=0, promeut souvent en RGBA et noircit les glyphes — texte
- * invisible sur les boutons. On envoie du blanc + A, en RGBA. */
-static int pack_alpha_as_rgba(const unsigned char *src, unsigned long srow,
-                              unsigned long w, unsigned long h,
-                              unsigned char *dst)
-{
-    unsigned long y, x;
-    for (y = 0; y < h; y++) {
-        const unsigned char *s = src + y * srow;
-        unsigned char *o = dst + y * w * 4;
-        for (x = 0; x < w; x++) {
-            o[x * 4 + 0] = 255;
-            o[x * 4 + 1] = 255;
-            o[x * 4 + 2] = 255;
-            o[x * 4 + 3] = s[x];
-        }
-    }
-    return 1;
-}
+/* H1 — GL_ALPHA part désormais TEL QUEL vers le cœur.
+ *
+ * Le plugin blanchissait lui-même les niveaux GL_ALPHA (« blanc + A », en
+ * RGBA) pour contourner un hôte GL qui promeut le BGRA R=G=B=0 et noircit les
+ * glyphes. Conséquence : le cœur ne voyait JAMAIS 0x1906, son propre bogue
+ * (GL_ALPHA décodé en « blanc + A », donc REPLACE/ADD/BLEND rendus blancs)
+ * restait invisible en VM, et le test natif restait rouge. Le correctif est en
+ * QUATRE endroits ou rien (§9, ligne H1) : cœur:516 → argb(a,0,0,0),
+ * cœur:2248/2262 sans promotion RGBA, backend GL avec GL_ALPHA en format
+ * interne, et ICI : plus de pack_alpha_as_rgba, plus de cas 0x1906 dans
+ * convert_level, plus d'override de format à l'envoi. Ne retirer qu'une part
+ * des quatre rendrait les polices noires.
+ *
+ * Sans device v10 (TEX_IMAGE hérité, qui ne transporte que du xRGB8888), il
+ * n'y a aucun moyen de faire voir 0x1906 au cœur : base_format_ok refuse
+ * alors GL_ALPHA et c'est le rendu d'Apple — exact — qui s'en charge.
+ */
 
 /* S3TC : GLEngine range les blocs tels quels (format 0x83F0..0x83F3, type 0),
  * qu'ils viennent de glCompressedTexImage2D ou de sa propre compression d'un
@@ -1859,7 +2212,7 @@ static int level_convertible(unsigned int fmt, unsigned int type)
     case (0x80E1 << 16) | 0x8035: case (0x1908 << 16) | 0x8367:
     case (0x80E1 << 16) | 0x8366: case (0x1907 << 16) | 0x8363:
     case (0x1908 << 16) | 0x8033: case (0x1909 << 16) | 0x1401:
-    case (0x190A << 16) | 0x1401: case (0x1906 << 16) | 0x1401:
+    case (0x190A << 16) | 0x1401:       /* H1 : plus de 0x1906 ici — voir plus haut */
     case (0x1903 << 16) | 0x1401: case (0x1900 << 16) | 0x1401:
     case (0x80E5 << 16) | 0x1401: case (0x8049 << 16) | 0x1401:
         return 1;
@@ -1959,11 +2312,10 @@ static int convert_level(const unsigned char *lv, unsigned long *out)
         for (i = 0; i < n; i++, d += 2)
             out[i] = ((unsigned long)d[1] << 24) | (d[0] * 0x010101UL);
         return 1;
-    case (0x1906 << 16) | 0x1401:                        /* ALPHA */
-        /* Blanc + A, pas (0,0,0,A) : voir pack_alpha_as_rgba. */
-        for (i = 0; i < n; i++)
-            out[i] = ((unsigned long)d[i] << 24) | 0x00FFFFFFUL;
-        return 1;
+    /* H1 : GL_ALPHA n'a plus de cas ici. Le TEX_IMAGE hérité ne transporte que
+       du xRGB8888 : blanchir (ou noircir) le niveau serait décider à la place
+       du cœur. base_format_ok refuse GL_ALPHA sans la v10 et le rendu d'Apple
+       s'en charge. */
     case (0x1903 << 16) | 0x1401:                        /* RED */
         for (i = 0; i < n; i++)
             out[i] = 0xFF000000UL | ((unsigned long)d[i] << 16);
@@ -1981,6 +2333,11 @@ static int base_format_ok(unsigned long f)
     if (f == 0x1900 || f == 0x80E5)
         return 0;
     f = host_base(f);
+    /* H1 : sans la v10, TEX_IMAGE ne transporte que du xRGB8888 — le cœur ne
+       pourrait pas recevoir 0x1906 tel quel, et convertir ici reviendrait à
+       inventer une couleur. Le rendu d'Apple, lui, est exact. */
+    if (f == 0x1906 && !G.v10)
+        return 0;
     return (f >= 0x1906 && f <= 0x190A) || f == 0x8049 || (f == 0x1902 && G.tex14);
 }
 
@@ -2081,16 +2438,6 @@ static const unsigned char *cube_level(const void *drvtex, int f, int l)
     return gp + TP_LEVEL0 + f * TP_FACE_SIZE + l * TP_LEVEL_SIZE;
 }
 
-/* Structure de niveau (LV_*) du NIVEAU DE BASE : c'est lui que la complétude
-   regarde d'abord (OpenGL 1.2), pas le niveau 0. */
-static const unsigned char *tex_base_lv(const void *drvtex)
-{
-    const unsigned char *gp = (const unsigned char *)GLD_U32(drvtex, DT_PARAMS);
-    unsigned long b = gp ? U16(gp, TP_BASE_LEVEL) : 0;
-    if (b >= DT_LEVELS)
-        b = 0;
-    return (const unsigned char *)drvtex + DT_LEVEL0 + b * DT_LEVEL_SIZE;
-}
 
 /* Complétude d'OpenGL 1.2 : niveau de base, puis, si le filtre de réduction
  * emploie les mipmaps, les niveaux b+1..q avec q = min(b + log2(max(w, h, d)),
@@ -2221,12 +2568,31 @@ static unsigned long tex_lv0_sig(const PTex *t)
     const unsigned char *d = (const unsigned char *)GLD_U32(lv, LV_DATA);
     unsigned long w = (unsigned short)S16(lv, LV_W);
     unsigned long h = (unsigned short)S16(lv, LV_H);
+    unsigned int fmt = U16(lv, LV_FORMAT), type = U16(lv, LV_TYPE);
     unsigned long sig = GLD_U32(lv, LV_DATA) ^ (w << 16) ^ h ^
-                        ((unsigned long)U16(lv, LV_FORMAT) << 8) ^ U16(lv, LV_TYPE);
+                        ((unsigned long)fmt << 8) ^ type;
     if (d && w && h) {
-        unsigned long n = w * h;
-        sig ^= GLD_U32(d, 0);
-        if (n > 8)
+        /* P4 — `n` est un index d'OCTET, pas un compte de TEXELS. Un niveau
+           DXT1 fait 0,5 octet par texel : lire d[w·h−1] lisait à DEUX FOIS la
+           taille du niveau — 512 Kio au-delà sur 1024², et à CHAQUE dessin
+           (texture_uploadable appelle ceci). Bus error sur UT2004 (S3TC).
+           Taille réelle : blocs serrés pour S3TC, LV_ROWPIX × h × octets par
+           texel sinon. */
+        unsigned long n;
+        if (dxt_format(fmt, type)) {
+            n = dxt_bytes(fmt, w, h);
+        } else {
+            unsigned long rp = (unsigned short)S16(lv, LV_ROWPIX);
+            unsigned long tb = host_texel_bytes(fmt, type);
+            if (rp < w)
+                rp = w;
+            if (!tb)
+                tb = 1;                 /* couple inconnu : la borne la plus basse */
+            n = rp * h * tb;
+        }
+        if (n >= 4)
+            sig ^= GLD_U32(d, 0);
+        if (n >= 12)
             sig ^= GLD_U32(d, 8);
         if (n > 32)
             sig ^= d[n / 2] | ((unsigned long)d[n - 1] << 16);
@@ -2406,6 +2772,9 @@ static int upload_texture(PCtx *p, PTex *t)
                 G.n_texuploads++;
             }
         t->dirty = 0;
+        /* P15 : l'invité vient de redonner le contenu — il n'est plus
+           « hôte seulement », la texture redevient évinçable. */
+        t->host_only = 0;
         t->lv0_sig = tex_lv0_sig(t);
     }
     if (t->dirty) {
@@ -2436,23 +2805,9 @@ static int upload_texture(PCtx *p, PTex *t)
                            !depth_pair_ok(host_base(base), fmt) || (fmt == 0x1902 && t3))
                     return no(NO_TEX_FORMAT, (fmt << 16) | type,
                               ((unsigned long)S16(lv, LV_ROWPIX) << 16) | w);
-                if (fmt == 0x1906 && type == 0x1401 && !t3) {
-                    unsigned long hbase = 0x1908;
-                    size = w * h * 4;
-                    row = w * 4;
-                    if (!arena_alloc(size, &off))
-                        return no(NO_TEX_SIZE, w, h);
-                    pack_alpha_as_rgba(d, (unsigned long)S16(lv, LV_ROWPIX), w, h,
-                                       G.q.win + off);
-                    fmt = 0x1908;
-                    c = reserve(p, QGPU_LEN_TEX_IMAGE3);
-                    c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3);
-                    c[1] = t->qtex; c[2] = t3 ? QGPU_TT_3D : QGPU_TT_2D; c[3] = l;
-                    c[4] = w; c[5] = h; c[6] = dep; c[7] = hbase; c[8] = fmt; c[9] = type;
-                    c[10] = G.q.base + off; c[11] = row; c[12] = t3 ? img : 0;
-                    G.n_texuploads++;
-                    continue;
-                }
+                /* H1 : GL_ALPHA part tel quel (plus de « blanc + A » ici) —
+                   c'est le cœur qui décide de son décodage, et le backend GL
+                   qui le prend en format interne GL_ALPHA. */
                 if ((fmt == 0x1900 || fmt == 0x80E5 || fmt == 0x8049) && type == 0x1401) {
                     fmt = 0x1909;
                 }
@@ -2475,12 +2830,17 @@ static int upload_texture(PCtx *p, PTex *t)
             c = reserve(p, QGPU_LEN_TEX_IMAGE);
             c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE, QGPU_LEN_TEX_IMAGE);
             c[1] = t->qtex; c[2] = l; c[3] = w; c[4] = h;
-            c[5] = (base == 0x1906 || U16(lv, LV_FORMAT) == 0x1906) ? 0x1908UL
-                 : host_base(base);
+            /* H1 : plus d'override en 0x1908. GL_ALPHA n'arrive plus jusqu'ici
+               (base_format_ok le refuse sans la v10, convert_level ne le sait
+               plus convertir) : le format de base part tel quel. */
+            c[5] = host_base(base);
             c[6] = G.q.base + off;
             G.n_texuploads++;
         }
         t->dirty = 0;
+        /* P15 : l'invité vient de redonner le contenu — il n'est plus
+           « hôte seulement », la texture redevient évinçable. */
+        t->host_only = 0;
         t->lv0_sig = tex_lv0_sig(t);
     }
     prm[0] = U16(gp, TP_MIN);
@@ -2813,13 +3173,17 @@ static void sync_to_host(PCtx *p, int color, int depth)
 {
     unsigned long off, y, x, *c;
     unsigned long w = p->sw, h = p->sh;
+    int tm = stats_timing();            /* F10 : plus de gettimeofday par lot */
+    double t0 = tm ? now_s() : 0.0;
 
-    double t0 = now_s();
     if (color && p->color == SW_NEWER) {
         unsigned char *src = sw_color(p);
         unsigned long bpp = color_bpp(p);
         unsigned long row = sw_rowbytes(p);
-        int can = src && (bpp == 4 || G.v15);
+        /* arena_fits : une image trop grande pour la moitié ne passera jamais
+           — inutile de réessayer (et de vider le flux) à chaque dessin. */
+        int can = src && (bpp == 4 || G.v15) && arena_fits(w * h * bpp);
+        int done = !can;                /* rien à téléverser : c'est « fait » */
         if (can && arena_alloc(w * h * bpp, &off)) {
             for (y = 0; y < h; y++)
                 memcpy(G.q.win + off + y * w * bpp, src + y * row, w * bpp);
@@ -2836,15 +3200,25 @@ static void sync_to_host(PCtx *p, int color, int depth)
                 c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
             }
             G.n_uploads++;
+            done = 1;
         }
-        p->color = SYNCED;
+        /* P16 : SYNCED voulait dire « les deux copies sont identiques ». Le
+           poser alors qu'arena_alloc a refusé (w·h·4 > 6 Mio : 1600×1200)
+           mentait, et l'hôte dessinait sur un contenu périmé — image figée ou
+           aléatoire en haute résolution. On laisse SW_NEWER : le prochain
+           dessin réessaiera. */
+        if (done)
+            p->color = SYNCED;
     }
     if (depth && p->depth == SW_NEWER) {
         unsigned char *src = sw_depth(p);
         unsigned long dbpp = depth_bpp(p);
         unsigned long drow = depth_rowbytes(p);
+        int done = 0;
         if (dbpp == 2) {
-            if (G.v15 && src && arena_alloc(w * h * 2, &off)) {
+            if (!G.v15 || !src || !arena_fits(w * h * 2))
+                done = 1;               /* jamais téléversable : ne pas boucler */
+            else if (arena_alloc(w * h * 2, &off)) {
                 for (y = 0; y < h; y++)
                     memcpy(G.q.win + off + y * w * 2, src + y * drow, w * 2);
                 c = reserve(p, QGPU_LEN_SURF_XFER_PF);
@@ -2853,10 +3227,13 @@ static void sync_to_host(PCtx *p, int color, int depth)
                 c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
                 c[8] = QGPU_DF_UNORM16;
                 G.n_uploads++;
+                done = 1;
             }
         } else {
             float inv = 1.0f / GLD_F32(p->ctx, CTX_DEPTH_SCALE);
-            if (src && arena_alloc(w * h * 4, &off)) {
+            if (!src || !arena_fits(w * h * 4))
+                done = 1;               /* pas de tampon invité : rien à porter */
+            else if (arena_alloc(w * h * 4, &off)) {
                 for (y = 0; y < h; y++) {
                     unsigned long *s = (unsigned long *)(src + y * drow);
                     float *d = (float *)(G.q.win + off + y * w * 4);
@@ -2873,6 +3250,7 @@ static void sync_to_host(PCtx *p, int color, int depth)
                 c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
                 c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
                 G.n_uploads++;
+                done = 1;
             }
         }
         /* Le stencil de l'invité vit dans les 8 bits bas des mêmes mots. On ne
@@ -2883,26 +3261,35 @@ static void sync_to_host(PCtx *p, int color, int depth)
            de sauter ce téléversement rend l'image exacte). Beaucoup
            d'applications — GLUT, Marble Blast — demandent un stencil sans
            jamais s'en servir : elles ne paient plus ni le bogue ni le transfert. */
-        if (src && p->stencil && p->sten_used && dbpp == 4 &&
-            arena_alloc(w * h * 4, &off)) {
-            for (y = 0; y < h; y++) {
-                unsigned long *s = (unsigned long *)(src + y * drow);
-                unsigned long *d = (unsigned long *)(G.q.win + off + y * w * 4);
-                for (x = 0; x < w; x++)
-                    d[x] = s[x] & 0xFF;
+        if (src && p->stencil && p->sten_used && dbpp == 4 && arena_fits(w * h * 4)) {
+            if (arena_alloc(w * h * 4, &off)) {
+                for (y = 0; y < h; y++) {
+                    unsigned long *s = (unsigned long *)(src + y * drow);
+                    unsigned long *d = (unsigned long *)(G.q.win + off + y * w * 4);
+                    for (x = 0; x < w; x++)
+                        d[x] = s[x] & 0xFF;
+                }
+                c = reserve(p, QGPU_LEN_SURF_XFER);
+                c[0] = QGPU_CMD_HDR(QGPU_OP_STENCIL_UPLOAD, QGPU_LEN_SURF_XFER);
+                c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
+                c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
+                G.n_uploads++;
+            } else {
+                done = 0;               /* P16 : stencil non porté = pas synchronisé */
             }
-            c = reserve(p, QGPU_LEN_SURF_XFER);
-            c[0] = QGPU_CMD_HDR(QGPU_OP_STENCIL_UPLOAD, QGPU_LEN_SURF_XFER);
-            c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
-            c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
-            G.n_uploads++;
         }
-        p->depth = SYNCED;
+        /* P16 : voir la couleur — SYNCED ment dès qu'un transfert a été refusé. */
+        if (done)
+            p->depth = SYNCED;
     }
-    G.t_upload += now_s() - t0;
+    if (tm)
+        G.t_upload += now_s() - t0;
 }
 
-static void queue_readback_to(PCtx *p, int depth, unsigned char *dst, unsigned long rowbytes)
+/* P16 : rend 1 si la relecture est bien en file, 0 si elle n'a PAS pu l'être
+ * (arène pleine, format que l'hôte ne sait pas rendre). L'appelant ne doit
+ * alors surtout pas se déclarer synchronisé — ni se dire qu'il a présenté. */
+static int queue_readback_to(PCtx *p, int depth, unsigned char *dst, unsigned long rowbytes)
 {
     unsigned long off, *c, bpp, fmt, len, op;
     unsigned long w = p->sw, h = p->sh;
@@ -2914,17 +3301,17 @@ static void queue_readback_to(PCtx *p, int depth, unsigned char *dst, unsigned l
         len = (bpp == 2) ? QGPU_LEN_SURF_XFER_PF : QGPU_LEN_SURF_XFER;
         op = QGPU_OP_DEPTH_READBACK;
         if (bpp == 2 && !G.v15)
-            return;
+            return 0;
     } else {
         bpp = color_bpp(p);
         fmt = (bpp == 2) ? QGPU_PF_RGB1555 : QGPU_PF_XRGB8888;
         len = (bpp == 2) ? QGPU_LEN_SURF_XFER_PF : QGPU_LEN_SURF_XFER;
         op = QGPU_OP_SURF_READBACK;
         if (bpp == 2 && !G.v15)
-            return;
+            return 0;
     }
     if (!arena_alloc(w * h * bpp, &off))
-        return;
+        return 0;
     c = reserve(p, len);
     c[0] = QGPU_CMD_HDR(op, len);
     c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * bpp;
@@ -2948,6 +3335,7 @@ static void queue_readback_to(PCtx *p, int depth, unsigned char *dst, unsigned l
         hf->npost++;
     }
     G.n_readbacks++;
+    return 1;
 }
 
 static void queue_present(PCtx *p, unsigned long dest_off, unsigned long stride,
@@ -2968,10 +3356,10 @@ static void queue_present(PCtx *p, unsigned long dest_off, unsigned long stride,
     G.n_present++;
 }
 
-static void queue_readback(PCtx *p, int depth, unsigned char *dst)
+static int queue_readback(PCtx *p, int depth, unsigned char *dst)
 {
-    queue_readback_to(p, depth, dst,
-                      depth ? depth_rowbytes(p) : sw_rowbytes(p));
+    return queue_readback_to(p, depth, dst,
+                             depth ? depth_rowbytes(p) : sw_rowbytes(p));
 }
 
 /* Recopie dans le tampon invité ce que l'hôte a dessiné (verrou tenu).
@@ -2986,20 +3374,30 @@ static void sync_to_sw_locked(PCtx *p, int want_depth)
         unsigned char *dst = p->draw_seen;
         /* Ne pas déverser du xRGB 32 bits dans un tampon invité 16 bits
            tant que l'hôte ne sait pas packer (v15). */
+        /* P16 : SYNCED seulement si la relecture est vraiment partie — sauf
+           quand l'arène ne pourra JAMAIS la porter (limite connue de la
+           moitié), auquel cas réessayer à chaque appel coûterait un vidage
+           pour rien. */
         if (dst && (color_bpp(p) == 4 || G.v15)) {
-            queue_readback(p, 0, dst);
-            any = 1;
-            p->color = SYNCED;
+            if (queue_readback(p, 0, dst)) {
+                any = 1;
+                p->color = SYNCED;
+            } else if (!arena_fits(p->sw * p->sh * color_bpp(p))) {
+                p->color = SYNCED;
+            }
         }
     }
     if (want_depth && p->depth == HOST_NEWER) {
         unsigned char *dst = sw_depth(p);
         if (dst && (depth_bpp(p) == 4 || G.v15)) {
-            queue_readback(p, 1, dst);
-            if (p->stencil && p->sten_used)
-                queue_readback(p, 2, dst);
-            any = 1;
-            p->depth = SYNCED;
+            if (queue_readback(p, 1, dst)) {
+                if (p->stencil && p->sten_used)
+                    queue_readback(p, 2, dst);
+                any = 1;
+                p->depth = SYNCED;
+            } else if (!arena_fits(p->sw * p->sh * depth_bpp(p))) {
+                p->depth = SYNCED;
+            }
         }
         /* Pas (encore) de tampon de profondeur invité : le rendu d'Apple ne
            l'alloue qu'à son premier usage, et plus tard encore quand il porte
@@ -3380,8 +3778,11 @@ static void compute_state(PCtx *p, const TexInfo *ti, unsigned long *v, int raw)
     }
     v[QGPU_SK_POLY_OFFSET] = GLD_U8(g, GS_POLY_OFFSET) != 0;
     if (v[QGPU_SK_POLY_OFFSET]) {
-        v[QGPU_SK_POLY_FACTOR] = GLD_U32(g, GS_POLY_FACTOR);
-        v[QGPU_SK_POLY_UNITS] = GLD_U32(g, GS_POLY_UNITS);
+        /* Mineur §2 : le facteur et les unités partaient BRUTS. Un NaN ou un
+           ±1e6 (scène « offset ») fait refuser toute la soumission par le cœur
+           (|v| ≥ 1e9 interdit), et avec H4 tout le reste du flux est perdu. */
+        v[QGPU_SK_POLY_FACTOR] = safe_offset(GLD_U32(g, GS_POLY_FACTOR));
+        v[QGPU_SK_POLY_UNITS] = safe_offset(GLD_U32(g, GS_POLY_UNITS));
     } else {
         v[QGPU_SK_POLY_FACTOR] = p->st_valid ? p->st[QGPU_SK_POLY_FACTOR] : 0;
         v[QGPU_SK_POLY_UNITS] = p->st_valid ? p->st[QGPU_SK_POLY_UNITS] : 0;
@@ -3689,6 +4090,10 @@ struct PBuf {
     long            qid;                /* identifiant hôte, -1 tant qu'inutile */
     unsigned long   qsize;
     unsigned long   pack_fmt, pack_vmin, pack_nverts;
+    unsigned long   pack_key;           /* P13 : récapitulatif de TOUT ce que
+                                           va_pack_vertex a lu (pointeurs, pas,
+                                           types, et valeurs COURANTES des
+                                           attributs inactifs) */
     int             dirty;
 };
 
@@ -3734,14 +4139,21 @@ static void buf_host_destroy(PCtx *p, PBuf *b)
     unsigned long *c;
     if (!b || b->qid < 0)
         return;
+    /* P14 : l'identifiant ne se rend QUE si le BUF_DESTROY est bien parti.
+       Sinon un BUF_CREATE le réutiliserait sur un tampon encore vivant côté
+       hôte → QGPU_ST_LIMIT → broken_all coupe l'accélération du processus
+       entier. Un identifiant perdu, lui, ne coûte qu'un emplacement. */
     if (p && p->qctx >= 0 && !p->broken && G.state > 0) {
         c = reserve(p, QGPU_LEN_BUF);
         c[0] = QGPU_CMD_HDR(QGPU_OP_BUF_DESTROY, QGPU_LEN_BUF);
         c[1] = (unsigned long)b->qid;
+        buf_free_id(b->qid);
     }
-    buf_free_id(b->qid);
     b->qid = -1;
     b->qsize = 0;
+    b->pack_fmt = 0;
+    b->pack_nverts = 0;
+    b->pack_key = 0;
 }
 
 static int buf_host_ensure(PCtx *p, PBuf *b, unsigned long bytes)
@@ -3838,22 +4250,36 @@ static long buf_reclaim(void *ctx, unsigned long handle)
  * (C'est aussi ce qui évite de toucher à gld_tramp.s, qui est engendré.) */
 void *pomppc_gld_override(int id)
 {
+    /* F6 — la décision se prenait À CHAQUE APPEL, sur des drapeaux qui
+       basculent en vol : broken_all coupe G.v7 (chemin brut refusé) ou pose
+       qry_off (requêtes non tenues). Un tampon de sommets NÉ chez nous se
+       faisait alors libérer par le code d'Apple, qui recevait notre
+       vb_scratch ; un DestroyQuery jamais rendu perdait les 16 identifiants du
+       client. La table est donc FIGÉE à la première consultation utile :
+       l'objet qui naît chez nous meurt chez nous. */
+    static int frozen, use_vb, use_qry;
+
     if (G.state <= 0)
         return 0;
+    if (!frozen) {
+        use_vb  = G.v7 != 0;
+        use_qry = G.v8 && !qry_off;
+        frozen  = 1;
+    }
     switch (id) {
     case GLD_CreateBuffer:  return (void *)buf_create;
     case GLD_DestroyBuffer: return (void *)buf_destroy;
     case GLD_FlushBuffer:   return (void *)buf_flush;
     case GLD_ReclaimBuffer: return (void *)buf_reclaim;
     }
-    if (G.v7) {
+    if (use_vb) {
         switch (id) {
         case GLD_AllocVertexBuffer:    return (void *)geom_alloc_vb;
         case GLD_CompleteVertexBuffer: return (void *)geom_complete_vb;
         case GLD_FreeVertexBuffer:     return (void *)geom_free_vb;
         }
     }
-    if (!G.v8 || qry_off)
+    if (!use_qry)
         return 0;
     switch (id) {
     case GLD_CreateQuery:  return (void *)q_create;
@@ -4196,7 +4622,12 @@ static unsigned long geom_format(PCtx *p)
 static int geom_publish(PCtx *p)
 {
     unsigned long fmt = geom_format(p);
-    unsigned short ent[8];
+    /* P6 : NEUF entrées sont possibles (position, normale, couleur,
+       secondaire, brouillard, tex0–3) et le tableau en tenait huit — deux
+       octets de pile écrasés, juste sur `off`, `n` et `u`, qui servent après.
+       Atteignable avec COLOR_SUM + coordonnée de brouillard + texgen sans
+       éclairage + 4 unités, ou POMPPC_GL_GEOM=2. */
+    unsigned short ent[10];
     unsigned long off = 0;
     int n = 0, u;
 
@@ -4245,23 +4676,36 @@ static void compute_geom_state(PCtx *p, unsigned long *v)
     v[QGPU_SK_CULL_FACE] = GLD_U8(g, GS_CULL_FACE) != 0;
     v[QGPU_SK_CULL_MODE] = (cull == 0x0404 || cull == 0x0405 || cull == 0x0408) ? cull : 0x0405;
     v[QGPU_SK_FRONT_FACE] = U16(g, GS_FRONT_FACE) == 0x0900 ? 0x0900 : 0x0901;
-    /* Sondes : POMPPC_GL_NOCULL coupe l'élimination, POMPPC_GL_FLIPFACE
-       retourne le sens des faces. */
-    if (getenv("POMPPC_GL_NOCULL"))
-        v[QGPU_SK_CULL_FACE] = 0;
-    if (getenv("POMPPC_GL_FLIPFACE"))
-        v[QGPU_SK_FRONT_FACE] = v[QGPU_SK_FRONT_FACE] == 0x0900 ? 0x0901 : 0x0900;
+    /* P17 — ces trois sondes étaient relues par getenv à CHAQUE LOT DE DESSIN.
+       Le getenv de Darwin 8 balaie `environ` avec strncmp : ≈ 250 000 strncmp
+       par image sur le G4 émulé, pour trois sondes éteintes. Toutes les autres
+       sondes du fichier sont derrière un static ; celles-ci le sont désormais
+       aussi. (C'est aussi la moitié de F3 : plus de getenv par lot, donc plus
+       de lecture d'`environ` pendant qu'un autre fil le réalloue.) */
+    {
+        static int probes = -1;         /* bit 0 NOCULL, bit 1 FLIPFACE */
+        static int glyph;               /* 0 aucun, 1 armé, 2 stencil seul */
+        if (probes < 0) {
+            const char *gt = getenv("POMPPC_GL_GLYPHTEST");
+            glyph = gt ? ((*gt == '2') ? 2 : 1) : 0;
+            probes = (getenv("POMPPC_GL_NOCULL") ? 1 : 0) |
+                     (getenv("POMPPC_GL_FLIPFACE") ? 2 : 0);
+        }
+        /* Sondes : POMPPC_GL_NOCULL coupe l'élimination, POMPPC_GL_FLIPFACE
+           retourne le sens des faces. */
+        if (probes & 1)
+            v[QGPU_SK_CULL_FACE] = 0;
+        if (probes & 2)
+            v[QGPU_SK_FRONT_FACE] = v[QGPU_SK_FRONT_FACE] == 0x0900 ? 0x0901 : 0x0900;
     /* POMPPC_GL_GLYPHTEST : rendre inratables les lots faits comme le texte des
        menus (mélange + test alpha + éclairage). S'ils atteignent l'écran, on
        verra des rectangles opaques à la place des lettres. La valeur 2 ne coupe
        que le test de stencil, dont le tampon hôte peut ne pas valoir le nôtre. */
-    {
-        const char *gt = getenv("POMPPC_GL_GLYPHTEST");
-        if (gt && *gt == '2') {
+        if (glyph == 2) {
             v[QGPU_SK_STENCIL_TEST] = 0;
             v[QGPU_SK_STENCIL_FUNC] = 0x0207;
             v[QGPU_SK_STENCIL_VALUE_MASK] = 0xFF;
-        } else if (gt && GLD_U8(g, GS_ALPHA_TEST) && GLD_U8(g, GS_BLEND) &&
+        } else if (glyph == 1 && GLD_U8(g, GS_ALPHA_TEST) && GLD_U8(g, GS_BLEND) &&
                    GLD_U8(g, GS_LIGHTING)) {
             v[QGPU_SK_ALPHA_TEST] = 0;
             v[QGPU_SK_ALPHA_FUNC] = 0x0207;
@@ -4589,9 +5033,12 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
     if (pomppc_tracing())
         pomppc_log("  géométrie : Begin(mode %d, n %lu)\n", mode, n ? *n : 0);
     pthread_mutex_lock(&G.mu);
-    G.pend = 0;
-    G.pend_drop = 1;
+    stream_ready();                     /* F9 : G.vtx, G.hb, G.win relus après */
     p = find_ctx(ctx);
+    /* F2 : on ne referme que NOTRE `pend`. Le poser à 0 globalement écrasait
+       celui d'un autre contexte (autre fil), dont la place réservée n'était
+       alors jamais rendue et dont le geom_end ne reconnaissait plus rien. */
+    pend_close(p, 1);
     if (!p || !geom_ok(p) || !ensure_surface(p)) {
         if (p) {
             no(NO_G_LATE, (unsigned long)(unsigned short)mode, p->geom_on);
@@ -4633,6 +5080,26 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
         G.n_geomdrop++;
         goto refuse;
     }
+    /* P11 — le FORMAT de sommet a été publié au DISPATCH ; les UNITÉS de
+       texture, elles, viennent d'être décidées ici (texture_ok). Une texture
+       qui n'est devenue complète qu'APRÈS le dispatch (atlas de polices WC3 :
+       glTexImage entre deux glBegin) allume l'unité alors que le descripteur
+       que GLEngine vient d'employer ne porte PAS ses coordonnées : l'hôte
+       échantillonnait le texel (0,0) sur toute la primitive, et
+       geom_send_current n'envoie jamais CUR_TEXCOORD. On arrive ici en
+       sachant que GLEngine s'est bien servi de NOTRE descripteur (test
+       ci-dessus) : si le format a bougé depuis, on refuse CE lot — le rendu
+       d'Apple est exact — et on demande la republication au prochain
+       dispatch. Cause probable du texte disparu par le chemin brut. */
+    {
+        unsigned long now_fmt = geom_format(p);
+        if (now_fmt != p->geom_fmt) {
+            no(NO_G_LATE, now_fmt, p->geom_fmt);
+            p->desc_dirty = 1;
+            G.n_geomdrop++;
+            goto refuse;
+        }
+    }
     check_draw_buffer(p);
     sync_to_host(p, 1, GLD_U8(gls(p), GS_DEPTH_TEST) || stencil_active(p));
     send_state(p, &ti, 1);
@@ -4644,40 +5111,41 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
     slots = geom_slots(words);
     if (slots < 4)
         goto refuse;                    /* ne devrait pas arriver : 4 Mio de sommets */
-    G.pend = p;
-    G.pend_half = G.hb;                 /* la moitié ne doit plus changer d'ici End */
-    G.pend_off = G.vtx;
-    G.pend_words = words;
-    G.pend_fmt = p->geom_fmt;
-    G.pend_slots = slots;
-    G.pend_drop = 0;
+    p->pend_open = 1;
+    G.npend++;
+    p->pend_half = G.hb;                /* la moitié ne doit plus changer d'ici End */
+    p->pend_off = G.vtx;
+    p->pend_words = words;
+    p->pend_fmt = p->geom_fmt;
+    p->pend_slots = slots;
+    p->pend_drop = 0;
     /* L'ombrage décide de l'ordre des indices d'un quadrilatère ; il ne peut
        plus changer entre ici et EndPrimitiveBuffer. */
-    G.pend_flat = GLD_U32(gls(p), GS_SHADE_MODEL) == GL_FLAT;
+    p->pend_flat = GLD_U32(gls(p), GS_SHADE_MODEL) == GL_FLAT;
     /* Fil de fer ou points : la fusion recollerait les quadrilatères et les
        polygones en TRIANGLES indexés, et l'hôte tracerait alors les diagonales
        de la décomposition — c'est exactement l'information de contour que la v8
        tient pour DRAW_RAW. On garde donc les primitives telles quelles.
        Vu en vrai (scène « polymode ») : sans ceci, la diagonale du
        quadrilatère en fil de fer est tracée, et 3 % de l'image diffère. */
-    G.pend_wire = U16(gls(p), GS_POLY_MODE) != GL_FILL ||
-                  U16(gls(p), GS_POLY_MODE + 2) != GL_FILL;
+    p->pend_wire = U16(gls(p), GS_POLY_MODE) != GL_FILL ||
+                   U16(gls(p), GS_POLY_MODE + 2) != GL_FILL;
     /* la zone est prise tout de suite : un autre fil ne doit pas la réutiliser */
     G.vtx += slots * words * 4;
     if (n)
         *n = slots;
     pthread_mutex_unlock(&G.mu);
-    return G.win + VTX_OFF + G.pend_off;
+    return G.win + VTX_OFF + p->pend_off;
 
 refuse:
-    {
-        unsigned long st = (p && p->geom_words) ? p->geom_words * 4 : GLD_VERTEX_SIZE;
-        unsigned long ns = sizeof(geom_scratch) / st;
-        if (ns > 1024)
-            ns = 1024;
-        if (n)
-            *n = ns;
-    }
+    /* P3 — on rend le tampon de SECOURS, et on est précisément dans le cas où
+       le pas de GLEngine n'est PAS le nôtre (gctx+0x4880 = 0x100 sur le canal
+       GeForce3) : dimensionner le compte de sommets avec NOTRE pas lui faisait
+       écrire 1024 × 256 = 256 Kio dans un tampon de 64 Kio — Bus error.
+       geom_scratch se compte donc au pas MAXIMUM, celui de GLEngine
+       (GLD_VERTEX_SIZE), sans condition. */
+    if (n)
+        *n = sizeof(geom_scratch) / GLD_VERTEX_SIZE;
     pthread_mutex_unlock(&G.mu);
     return geom_scratch;
 }
@@ -4837,7 +5305,7 @@ static unsigned short *idx_room(unsigned long k)
 
 /* Convertit la série NON indexée déjà ouverte en TRIANGLES indexés. 0 si la
  * place manque — l'appelant ferme alors la série et en ouvre une neuve. */
-static int raw_promote(void)
+static int raw_promote(int flat)
 {
     unsigned long n = (G.raw_vend - G.raw_start) / (G.raw_words * 4);
     unsigned long need = tris_nidx(G.raw_mode, n);
@@ -4852,25 +5320,27 @@ static int raw_promote(void)
     if (!o)
         return 0;
     G.raw_idx = IDX_OFF + G.idx;
-    G.raw_nidx = tris_emit(o, G.raw_mode, 0, n, G.pend_flat);
+    G.raw_nidx = tris_emit(o, G.raw_mode, 0, n, flat);
     G.idx += G.raw_nidx * 2;
     G.raw_mode = QGPU_PRIM_MODE_TRIANGLES;
     G.raw_count = G.raw_nidx;
     return 1;
 }
 
-/* Ajoute le lot qui vient d'être écrit (mode m, n sommets en G.pend_off) à la
- * série ouverte, en TRIANGLES indexés. 0 = impossible : l'appelant ferme la
- * série et en ouvre une neuve, ce qui est toujours exact. */
-static int merge_batch(unsigned long m, unsigned long n, unsigned long words)
+/* Ajoute le lot qui vient d'être écrit (mode m, n sommets à l'offset `off` de
+ * la zone des sommets) à la série ouverte, en TRIANGLES indexés. 0 =
+ * impossible : l'appelant ferme la série et en ouvre une neuve, ce qui est
+ * toujours exact. `off` et `flat` viennent du `pend` du CONTEXTE (F2). */
+static int merge_batch(unsigned long m, unsigned long n, unsigned long words,
+                       unsigned long off, int flat)
 {
-    unsigned long base = (G.pend_off - G.raw_start) / (words * 4);
+    unsigned long base = (off - G.raw_start) / (words * 4);
     unsigned long need = tris_nidx(m, n);
     unsigned short *o;
 
     if (base + n > 65536)               /* les indices sont des u16 */
         return 0;
-    if (!G.raw_idx && !raw_promote())
+    if (!G.raw_idx && !raw_promote(flat))
         return 0;
     /* `n` de DRAW_RAW, c'est le nombre d'INDICES quand la série est indexée :
        il est borné par QGPU_MAX_VERTS dans le cœur. */
@@ -4879,7 +5349,7 @@ static int merge_batch(unsigned long m, unsigned long n, unsigned long words)
     o = idx_room(need);
     if (!o)
         return 0;
-    G.idx += tris_emit(o, m, base, n, G.pend_flat) * 2;
+    G.idx += tris_emit(o, m, base, n, flat) * 2;
     G.raw_nidx += need;
     G.raw_count = G.raw_nidx;
     G.raw_lots++;
@@ -5026,13 +5496,14 @@ static void geom_end(void *ctx, long flag, short mode, long n)
 
     (void)flag;
     pthread_mutex_lock(&G.mu);
+    stream_ready();                     /* F9 : G.hb, G.vtx, G.idx relus après */
     p = find_ctx(ctx);
-    if (pomppc_tracing()) {
-        unsigned char *gc = p ? gctx_of(p) : 0;
+    if (pomppc_tracing() && p && p->pend_open) {
+        unsigned char *gc = gctx_of(p);
         pomppc_log("  géométrie : End(mode %d, n %ld) ouvert %08lx", mode, n,
-                   G.pend ? (unsigned long)(G.q.win + G.pend_off) : 0);
+                   (unsigned long)(G.win + VTX_OFF + p->pend_off));
         if (gc) {
-            const float *f = (const float *)(G.q.win + G.pend_off);
+            const float *f = (const float *)(G.win + VTX_OFF + p->pend_off);
             pomppc_log(" gctx 4854=%08lx 4858=%08lx 485c=%08lx 487c=%04x 4880=%04x 4882=%04x"
                        " | s0 %g %g %g %g %g %g %g %g", GLD_U32(gc, 0x4854),
                        GLD_U32(gc, 0x4858), GLD_U32(gc, 0x485c), U16(gc, 0x487c),
@@ -5041,66 +5512,73 @@ static void geom_end(void *ctx, long flag, short mode, long n)
         }
         pomppc_log("\n");
     }
-    if (!G.pend || G.pend != p || G.pend_drop) {
-        G.pend = 0;
+    /* F2 : on ne reconnaît que NOTRE tampon. Poser G.pend = 0 ici écrasait
+       celui d'un AUTRE contexte, dont la place restait perdue jusqu'au vidage
+       suivant et dont le geom_end était ensuite jeté. */
+    if (!p || !p->pend_open || p->pend_drop) {
+        pend_close(p, 1);
         pthread_mutex_unlock(&G.mu);
         return;
     }
     /* La moitié a changé sous les pieds de GLEngine : impossible par
-       construction (flush() n'alterne pas tant que G.pend est ouvert, et
+       construction (flush() n'alterne pas tant qu'un `pend` est ouvert, et
        submit_cur soumet alors en synchrone), mais si cela arrivait, les sommets
        écrits ne sont plus ceux que DRAW_RAW désignerait. On jette. */
-    if (G.hb != G.pend_half) {
-        no(NO_G_LATE, G.pend_half, G.hb);
+    if (G.hb != p->pend_half) {
+        no(NO_G_LATE, p->pend_half, G.hb);
         G.n_geomdrop++;
         p->geom_lost = 1;
-        G.pend = 0;
+        pend_close(p, 0);
         pthread_mutex_unlock(&G.mu);
         return;
     }
-    if (n <= 0 || (unsigned long)n > G.pend_slots || m > QGPU_PRIM_MODE_POLYGON) {
+    if (n <= 0 || (unsigned long)n > p->pend_slots || m > QGPU_PRIM_MODE_POLYGON) {
         if (n > 0) {                    /* GLEngine a écrit hors de ce qu'on offrait */
             no(NO_G_LATE, m, (unsigned long)n);
             G.n_geomdrop++;
             p->geom_lost = 1;
         }
-        G.vtx = G.pend_off;             /* la place réservée est rendue */
-        G.pend = 0;
+        pend_close(p, 1);               /* la place réservée est rendue */
         pthread_mutex_unlock(&G.mu);
         return;
     }
-    words = G.pend_words;
-    G.vtx = G.pend_off + (unsigned long)n * words * 4;
-    geom_probe(p, "End", m, (unsigned long)n, G.pend_fmt, words,
-               (const float *)(G.win + VTX_OFF + G.pend_off));
+    words = p->pend_words;
+    /* On ne rend la queue inutilisée QUE si personne n'a alloué par-dessus
+       (autre contexte, autre fil) : sinon on écraserait ses sommets. */
+    if (G.vtx == p->pend_off + p->pend_slots * words * 4)
+        G.vtx = p->pend_off + (unsigned long)n * words * 4;
+    geom_probe(p, "End", m, (unsigned long)n, p->pend_fmt, words,
+               (const float *)(G.win + VTX_OFF + p->pend_off));
     /* Les trois conditions de TOUTE fusion : même contexte, même format de
        sommet, sommets CONTIGUS dans la zone partagée. Il n'y a rien à vérifier
        de l'état : tout changement d'état passe par send_cmd → reserve →
        close_raw, donc la série est déjà fermée quand on arrive ici. Et on ne
        fusionne que des lots CONSÉCUTIFS : jamais de réordonnancement, sans quoi
        le mélange et l'égalité de profondeur changeraient l'image. */
-    same = (G.raw_ctx == p && G.raw_fmt == G.pend_fmt && G.raw_words == words &&
-            G.raw_vend == G.pend_off &&
+    same = (G.raw_ctx == p && G.raw_fmt == p->pend_fmt && G.raw_words == words &&
+            G.raw_vend == p->pend_off &&
             (G.raw_vend - G.raw_start) / (words * 4) + (unsigned long)n
                 <= GEOM_MAX_MERGE);
     if (same && !G.raw_idx && G.raw_mode == m && mode_mergeable(m)) {
         G.raw_count += n;               /* bout à bout, sans un seul indice */
         G.raw_lots++;
-    } else if (same && merge_switch() && !G.pend_wire && mode_tris(m) &&
+    } else if (same && merge_switch() && !p->pend_wire && mode_tris(m) &&
                (G.raw_idx || mode_tris(G.raw_mode)) &&
-               merge_batch(m, (unsigned long)n, words)) {
+               merge_batch(m, (unsigned long)n, words, p->pend_off, p->pend_flat)) {
         /* recollé en TRIANGLES indexés : les sommets n'ont pas bougé */
     } else {
         close_raw();
         G.raw_ctx = p;
-        G.raw_start = G.pend_off;
+        G.raw_start = p->pend_off;
         G.raw_count = n;
-        G.raw_fmt = G.pend_fmt;
+        G.raw_fmt = p->pend_fmt;
         G.raw_words = words;
         G.raw_mode = m;
         G.raw_lots = 1;
     }
-    G.raw_vend = G.vtx;
+    /* Fin EXACTE de NOS sommets, pas G.vtx : un autre contexte a pu allouer
+       par-dessus, et close_raw() en déduit le `nverts` que le cœur relit. */
+    G.raw_vend = p->pend_off + (unsigned long)n * words * 4;
     G.n_rawverts += n;
     switch (m) {                        /* triangles équivalents, pour le bilan */
     case QGPU_PRIM_MODE_TRIANGLES:      G.n_tris += n / 3; break;
@@ -5117,7 +5595,7 @@ static void geom_end(void *ctx, long flag, short mode, long n)
     p->color = HOST_NEWER;
     if (writes_depth(p))
         p->depth = HOST_NEWER;
-    G.pend = 0;
+    pend_close(p, 0);                   /* la place est PRISE : ne rien rendre */
     pthread_mutex_unlock(&G.mu);
 }
 
@@ -5436,6 +5914,57 @@ static void va_count_prims(unsigned long m, unsigned long n)
     }
 }
 
+/* Attributs lus par va_pack_vertex, dans l'ordre du format : position, puis
+ * normale, couleur, secondaire, brouillard, et les quatre unités. */
+static const int va_key_slot[9] = { 0, 1, 2, 4, 3, 8, 9, 10, 11 };
+static const int va_key_ncomp[9] = { 4, 3, 4, 3, 1, 4, 4, 4, 4 };
+
+/* P13 — CLÉ DE RÉUTILISATION D'UN TAMPON HÔTE (v14).
+ *
+ * Elle ne tenait compte que de (fmt, vmin, nverts). Or QGPU_VF_COLOR est
+ * TOUJOURS posé, et la couleur vient de glColor quand le tableau de couleurs
+ * est inactif : le même VBO redessiné après un glColor ressortait avec la
+ * couleur du PREMIER passage. De même, deux maillages rangés dans le même VBO
+ * à des pointeurs ou des pas différents, de même compte et de même format, se
+ * mélangeaient. On récapitule donc tout ce que va_pack_vertex lit : par
+ * attribut, le pointeur résolu, le pas, le type, le nombre de composantes et
+ * la normalisation quand le tableau est actif ; les bits IEEE de la valeur
+ * COURANTE quand il ne l'est pas.
+ *
+ * C'est une empreinte 32 bits, pas une égalité : une collision redessinerait
+ * un maillage avec l'emballage du précédent. POMPPC_GL_VBO=0 coupe le cache. */
+static unsigned long va_pack_key(PCtx *p, const unsigned char *V, unsigned long fmt)
+{
+    static const unsigned long bit_of[9] = {
+        0, QGPU_VF_NORMAL, QGPU_VF_COLOR, QGPU_VF_SEC_COLOR, QGPU_VF_FOG,
+        QGPU_VF_TEX(0), QGPU_VF_TEX(1), QGPU_VF_TEX(2), QGPU_VF_TEX(3)
+    };
+    unsigned char *g = gls(p);
+    unsigned long k = fmt ^ 0x9e3779b9UL;
+    int i, j;
+
+    for (i = 0; i < 9; i++) {
+        int slot = va_key_slot[i];
+        if (i && !(fmt & bit_of[i]))
+            continue;
+        k = k * 33UL + (unsigned long)slot;
+        if (V && va_enabled(V, slot)) {
+            const unsigned char *ent = VA_SLOT(V, slot);
+            k = k * 33UL + (unsigned long)va_src(p, V, slot);
+            k = k * 33UL + GLD_U32(ent, 4);         /* pas */
+            k = k * 33UL + U16(ent, 8);             /* type */
+            k = k * 33UL + U16(ent, 0xa);           /* composantes */
+            k = k * 33UL + ent[0xc];                /* taille (BGRA/packé) */
+            k = k * 33UL + ent[0xd];                /* normalisé */
+        } else {
+            const float *cur = va_current(g, slot);
+            for (j = 0; j < va_key_ncomp[i]; j++)
+                k = k * 33UL + (cur ? ((const unsigned long *)cur)[j] : 0UL);
+        }
+    }
+    return k;
+}
+
 /* 0 = pas de cache hôte (tableau client). 1 = réutilisable si le paquet match.
  * 2 = VBO, mais il faut re-emballer (FlushBuffer ou premier dessin). */
 static int va_host_ready(const unsigned char *V, unsigned long fmt, PBuf **out)
@@ -5496,13 +6025,22 @@ static void va_host_clean(const unsigned char *V, unsigned long fmt, PBuf *pos)
     }
 }
 
-static void emit_draw_client(PCtx *p, unsigned long mode, unsigned long nidx,
-                             unsigned long nverts, unsigned long fmt,
-                             unsigned long vtx_off, unsigned long ioff,
-                             unsigned long itype_h, PBuf *hb)
+/* 0 = la commande n'a PAS été écrite (place manquante) : le dessin est perdu,
+ * mais rien n'est corrompu. On ne peut pas vider le flux ici — `vtx_off` et
+ * `ioff` désignent la moitié COURANTE, un vidage les ferait pointer ailleurs. */
+static int emit_draw_client(PCtx *p, unsigned long mode, unsigned long nidx,
+                            unsigned long nverts, unsigned long fmt,
+                            unsigned long vtx_off, unsigned long ioff,
+                            unsigned long itype_h, PBuf *hb)
 {
     unsigned long *c;
+    unsigned long need = (hb && hb->qid >= 0) ? QGPU_LEN_DRAW_RAW_BUF
+                                              : QGPU_LEN_DRAW_RAW;
     close_raw();
+    /* Mineur §2 : on écrivait sans vérifier, sur la seule marge résiduelle de
+       reserve() — un mot au pire une fois close_raw() passé. */
+    if (G.ncmd + need + QGPU_LEN_CTX > CMD_WORDS)
+        return 0;
     if (G.bound != p) {
         c = G.cmd + G.ncmd;
         c[0] = QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX);
@@ -5538,6 +6076,7 @@ static void emit_draw_client(PCtx *p, unsigned long mode, unsigned long nidx,
         c[9] = nverts;
         G.ncmd += QGPU_LEN_DRAW_RAW;
     }
+    return 1;
 }
 
 static int quads_axis_aligned(const float *v, unsigned long n, unsigned long words)
@@ -5571,7 +6110,7 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
     unsigned char *V, *g;
     TexInfo ti;
     unsigned long fmt, words, vmin, vmax, nverts, nidx, ioff, itype_h;
-    unsigned long vtx_off, packed, *c;
+    unsigned long vtx_off, packed, *c, key;
     float *dst;
     PBuf *hb;
     int host, reuse;
@@ -5613,9 +6152,10 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
     geom_send_all(p, fmt);
     packed = nverts * words * 4;
     host = va_host_ready(V, fmt, &hb);
+    key = va_pack_key(p, V, fmt);       /* P13 : clé COMPLÈTE */
     reuse = host == 1 && hb && hb->qid >= 0 && hb->qsize >= packed &&
             hb->pack_fmt == fmt && hb->pack_vmin == vmin &&
-            hb->pack_nverts == nverts;
+            hb->pack_nverts == nverts && hb->pack_key == key;
     if (G.ncmd + QGPU_LEN_DRAW_RAW_BUF + QGPU_LEN_BUF_SUBDATA +
             QGPU_LEN_BUF_CREATE + 8 > CMD_WORDS ||
         (!reuse && G.vtx + packed > VTX_LIMIT) ||
@@ -5633,6 +6173,36 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
         for (i = 0; (unsigned long)i < nverts; i++)
             va_pack_vertex(dst + (unsigned long)i * words, p, V, fmt,
                            vmin + (unsigned long)i);
+        /* P12 — le chemin TABLEAUX n'assainissait pas les sommets. Le cœur
+           refuse NaN, Inf et |v| ≥ 1e9, et sur BAD_ARG il fait `break` : TOUT
+           le reste du flux est perdu (H4), SURF_PRESENT compris. Le chemin
+           Begin/End passe par raw_fix_nan depuis toujours ; celui-ci le fait
+           maintenant aussi, w ≈ 0 compris (triangle géant jusqu'à l'origine,
+           ciel de Colin McRae). Fait AVANT le BUF_SUBDATA : ce qui monte dans
+           le tampon hôte est déjà propre. */
+        if (nverts > RAW_NAN_MAX)
+            return no(NO_G_ARRAY, nverts, 0);
+        if (raw_scan_nan((unsigned long *)dst, nverts, words, fmt)) {
+            if (!nidx && mode == QGPU_PRIM_MODE_TRIANGLES) {
+                unsigned long o = 0, k;
+                for (k = 0; k + 2 < nverts; k += 3)
+                    if (!raw_bad[k] && !raw_bad[k + 1] && !raw_bad[k + 2]) {
+                        if (o != k)
+                            memcpy((unsigned long *)dst + o * words,
+                                   (unsigned long *)dst + k * words, words * 12);
+                        o += 3;
+                    }
+                if (o == 0)
+                    return 1;           /* rien à dessiner : lot consommé */
+                nverts = o;
+                packed = nverts * words * 4;
+            } else {
+                /* Ruban, éventail, quads, ou maillage indexé : un sommet fou
+                   gâche des primitives qu'on ne sait pas isoler ici. On jette
+                   CE lot, l'accélération reste. */
+                return no(NO_G_ARRAY, nverts, nidx);
+            }
+        }
         G.vtx += packed;
         if (hb && hb->qid >= 0 &&
             G.ncmd + QGPU_LEN_BUF_SUBDATA + QGPU_LEN_DRAW_RAW_BUF + 4 <= CMD_WORDS) {
@@ -5654,6 +6224,7 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
             hb->pack_fmt = fmt;
             hb->pack_vmin = vmin;
             hb->pack_nverts = nverts;
+            hb->pack_key = key;
             va_host_clean(V, fmt, hb);
             G.n_vbomiss++;
         } else {
@@ -5694,7 +6265,8 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
     if (!reuse)
         geom_probe(p, "Array", mode, nverts, fmt, words,
                    (const float *)(G.win + VTX_OFF + vtx_off));
-    emit_draw_client(p, mode, nidx, nverts, fmt, vtx_off, ioff, itype_h, hb);
+    if (!emit_draw_client(p, mode, nidx, nverts, fmt, vtx_off, ioff, itype_h, hb))
+        return no(NO_G_ARRAY, G.ncmd, nverts);
     G.n_rawdraws++;
     G.n_rawverts += nverts;
     G.n_arraydraws++;
@@ -5720,8 +6292,13 @@ static long geom_render_array(void *ctx, long indexed, unsigned long mode,
         pomppc_log("  géométrie : Array(idx %ld mode %lu first %ld n %ld type %lx)\n",
                    indexed, mode, first, count, itype);
     pthread_mutex_lock(&G.mu);
-    G.pend = 0;
+    stream_ready();                     /* F9 */
     p = find_ctx(ctx);
+    /* F1/F2 : une rastérisation (ou un dessin par tableaux) qui arrive alors
+       qu'un BeginPrimitiveBuffer est ouvert veut dire que GLEngine a basculé
+       en logiciel (_gleForceToSoftwareTCL) : l'EndPrimitiveBuffer ne viendra
+       jamais. On referme NOTRE `pend` et on rend sa place. */
+    pend_close(p, 1);
     r = geom_draw_client(p, indexed, mode, first, count,
                          indexed ? itype : VA_ITYPE_NONE,
                          indexed ? indices : 0) ? 1 : 0;
@@ -5754,8 +6331,9 @@ static void geom_render_vb(void *ctx, void *buf, unsigned long mode, long bias,
         pomppc_log("  géométrie : VBuf(mode %lu n %ld type %lx bias %ld)\n",
                    mode, count, itype, bias);
     pthread_mutex_lock(&G.mu);
-    G.pend = 0;
+    stream_ready();                     /* F9 */
     p = find_ctx(ctx);
+    pend_close(p, 1);                   /* F1/F2 : voir geom_render_array */
     if (!geom_draw_client(p, itype != VA_ITYPE_NONE && indices != 0, mode,
                           0, count, itype, indices) && p) {
         G.n_geomdrop++;
@@ -5907,10 +6485,21 @@ void pomppc_geom_context(void *ctx, void *cfg)
            porte s, t, r, q. Relevé : docs/re/opengl-1.4.md §3. */
         if (!(getenv("POMPPC_GL_RDIRTY") && getenv("POMPPC_GL_RDIRTY")[0] == '0'))
             GLD_U8(p->cfg, 0x7a) = 1;
-        /* GeForce3 : +0x7b lu seulement par _glDrawPixels_Exec. À 0, le
-           DrawPixels/Bitmap sous T&L ne pose pas la position de rastérisation
-           dans le logiciel — polices bitmap muettes. */
-        GLD_U8(p->cfg, 0x7b) = 1;
+        /* GeForce3 : +0x7b lu seulement par _glDrawPixels_Exec. Sémantique
+           ÉTABLIE en VM le 22/09/2026 (bissect f3c4280, scènes drawpack, mixte,
+           v15) : à 1, GLEngine émule glDrawPixels par un quad à TEXTURE
+           RECTANGLE envoyé à RenderQuads — jamais par la procédure DrawPixels
+           du pilote, même installée — ; ce plugin refuse les cibles rectangle,
+           le repli vers le RenderQuads logiciel d'Apple ne dessine RIEN, et
+           tout glDrawPixels disparaît (v15 « glWindowPos + glDrawPixels » NON
+           TENU, mixte 230/255 d'écart, drawpack 0 pixel). À 0, GLEngine fait le
+           DrawPixels lui-même en logiciel, synchronisé par le repli : exact
+           (v15 17/17). Le 1 avait été posé pour « polices bitmap muettes sous
+           T&L » (jamais prouvé) : POMPPC_GL_DP7B=1 le remet pour l'essayer.
+           Le jour où les textures rectangle seront portées sur l'hôte, 1
+           deviendra le bon réglage (DrawPixels sur le GPU). */
+        GLD_U8(p->cfg, 0x7b) = (getenv("POMPPC_GL_DP7B") &&
+                                getenv("POMPPC_GL_DP7B")[0] == '1') ? 1 : 0;
         GLD_U32(p->cfg, 0x11c) = 0;     /* publié au premier dispatch dans le domaine */
     }
     pthread_mutex_unlock(&G.mu);
@@ -5930,6 +6519,13 @@ typedef struct Batch {
 /* Prépare un lot de triangles ; 0 = passer par le logiciel. Verrou tenu. */
 static void begin_common(PCtx *p, Batch *b, const TexInfo *ti)
 {
+    /* F1 — TOUTE rastérisation qui arrive referme le BeginPrimitiveBuffer
+       resté ouvert de ce contexte : GLEngine a basculé en logiciel
+       (_gleForceToSoftwareTCL) et EndPrimitiveBuffer ne viendra plus. Sans
+       cela, G.npend restait posé pour toujours — flush() ne rendait plus
+       jamais la zone des sommets, submit_cur restait synchrone, et prim()
+       finissait par écrire hors de la tranche. */
+    pend_close(p, 1);
     check_draw_buffer(p);
     sync_to_host(p, 1, GLD_U8(gls(p), GS_DEPTH_TEST) || stencil_active(p));
     send_state(p, ti, 0);
@@ -6035,6 +6631,7 @@ static void prim(Batch *b, int n, const unsigned char **v, const unsigned char *
     float *o;
     unsigned long vw = rk_words[b->kind];
     int i;
+    stream_ready();                     /* F9 : G.vtx / G.win relus après */
     /* UT2004 laisse des NaN (positions, texcoords) : un seul ferait rejeter
        tout le DRAW_TRIANGLES_TEX. On saute la primitive, le reste part.
        Colin McRae (menu 3D, ciel) envoie aussi des sommets fenêtre hors de
@@ -6053,8 +6650,22 @@ static void prim(Batch *b, int n, const unsigned char **v, const unsigned char *
     }
     /* VTX_LIMIT, pas VTX_END : le haut de la zone porte les indices de la
        fusion, et les deux chemins cohabitent dans la même image (scène mixte). */
-    if (VTX_OFF + G.vtx + n * vw * 4 > VTX_LIMIT)
+    if (VTX_OFF + G.vtx + (unsigned long)n * vw * 4 > VTX_LIMIT) {
         flush();                        /* l'état GL reste sur le device, par contexte */
+        /* F1 — flush() NE REND la zone des sommets que si aucun
+           BeginPrimitiveBuffer n'est ouvert (G.npend). Le cas arrive vraiment :
+           GLEngine ouvre un tampon puis bascule en logiciel
+           (_gleForceToSoftwareTCL) et rastérise sans jamais appeler
+           EndPrimitiveBuffer. On écrivait alors au-delà de VTX_LIMIT, puis
+           dans les indices, puis dans l'arène, puis hors de la tranche —
+           Bus error. On jette le lot : le rendu reste exact à la primitive
+           près, et la suivante repartira après le prochain vidage. */
+        if (VTX_OFF + G.vtx + (unsigned long)n * vw * 4 > VTX_LIMIT) {
+            no(NO_BUFFER, G.vtx, (unsigned long)n * vw * 4);
+            G.n_geomdrop++;
+            return;
+        }
+    }
     if (G.run_ctx != b->p || G.bound != b->p || G.run_kind != b->kind) {
         reserve(b->p, 0);               /* ferme la série précédente, lie le contexte */
         G.run_ctx = b->p;
@@ -6473,13 +7084,14 @@ typedef struct { float x, y; } CgPoint;
 #define GD_SID   0x90             /* surface de la fenêtre */
 #define DIRECT_RECHECK   10       /* images entre deux réévaluations */
 #define DIRECT_REFRESH   90       /* en fenêtre : un échange normal de temps en temps */
+/* F7 : `ok`, le rectangle (x, y) et la date de la dernière vérification sont
+   passés dans la PCtx ; ne restent ici que les propriétés de l'ÉCRAN, qui sont
+   bien partagées — et relues à chaque image (Q6). */
 static struct {
-    int            init, enabled, ok, windowed, over_cursor;
+    int            init, enabled, windowed, over_cursor;
     char           why[96];             /* pourquoi la voie directe est coupée */
-    unsigned long  checked_at;
     unsigned char *base;
     unsigned long  rowbytes, w, h, bpp;
-    long           x, y;                /* position de la surface à l'écran */
     float          cur_x, cur_y;        /* curseur à la dernière vérification */
     unsigned long (*main_display)(void);
     void         *(*base_address)(unsigned long);
@@ -6503,21 +7115,59 @@ static struct {
     int           (*switch_mode)(unsigned long, void *);
 } D;
 
+/* P5 — LE JOURNAL D'APPOINT, DERRIÈRE UNE VARIABLE D'ENVIRONNEMENT.
+ *
+ * gl_note écrivait /tmp/pomppc-gl.log SANS interrupteur, depuis le
+ * WindowServer et loginwindow — donc en root, et dans un répertoire 1777 :
+ * n'importe quel utilisateur y plaçait un lien symbolique et nous lui
+ * écrivions le fichier de son choix. Et chaque appel refaisait
+ * fopen/fclose, à chaque gldAttachDrawable.
+ *
+ * Maintenant : rien n'est écrit sans POMPPC_GL_NOTE=<chemin>, le fichier est
+ * ouvert UNE fois (pthread_once), et il est CRÉÉ par nous — O_EXCL refuse un
+ * fichier existant, O_NOFOLLOW refuse un lien symbolique. Un chemin déjà pris
+ * est donc un refus, pas une écriture ailleurs.
+ */
+static FILE *note_fp;
+static pthread_once_t note_once = PTHREAD_ONCE_INIT;
+
+static void note_open(void)
+{
+    const char *path = getenv("POMPPC_GL_NOTE");
+    int fd;
+    if (!path || !*path)
+        return;
+    fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (fd < 0)
+        return;
+    note_fp = fdopen(fd, "w");
+    if (!note_fp) {
+        close(fd);
+        return;
+    }
+    setvbuf(note_fp, 0, _IOLBF, 0);
+}
+
 static void gl_note(const char *fmt, ...)
 {
-    FILE *f;
     va_list ap;
-    f = fopen("/tmp/pomppc-gl.log", "a");
-    if (!f)
+    pthread_once(&note_once, note_open);
+    if (!note_fp)
         return;
     va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
+    vfprintf(note_fp, fmt, ap);
     va_end(ap);
-    fclose(f);
 }
 
 static void direct_noop(void)
 {
+}
+
+/* P7 : cible de secours d'un trampoline dont le contexte a disparu. Rend 0,
+ * la seule valeur sûre pour les procédures qui rendent quelque chose. */
+static long proc_dead(void)
+{
+    return 0;
 }
 
 static const char *direct_why(void)
@@ -6525,10 +7175,22 @@ static const char *direct_why(void)
     return D.why;
 }
 
+/* F5 — direct_init posait D.init = 1 AVANT ses dix-huit dlsym, hors verrou :
+ * un autre fil voyait D « initialisé » et appelait D.main_display() encore
+ * nul. Elle ne tourne plus qu'une fois (pthread_once, qui garantit aussi que
+ * tout est visible au retour), et D.init n'est posé qu'EN DERNIER. */
+static pthread_once_t direct_once = PTHREAD_ONCE_INIT;
+static void direct_init(void);
+static void direct_invalidate(void);    /* verrou tenu */
+
+static void direct_init_once(void)
+{
+    pthread_once(&direct_once, direct_init);
+}
+
 static void direct_init(void)
 {
     const char *e = getenv("POMPPC_GL_DIRECT");
-    D.init = 1;
     D.enabled = !(e && e[0] == '0');
     D.windowed = !(e && e[0] == 'f');   /* POMPPC_GL_DIRECT=f : plein écran seulement */
     D.over_cursor = e && e[0] == 'c';   /* =c : même avec un curseur en mouvement */
@@ -6561,6 +7223,7 @@ static void direct_init(void)
     if (!D.window_bounds || !D.surface_bounds || !D.onscreen_list || !D.cursor_location ||
         !D.cursor_visible)
         D.windowed = 0;
+    D.init = 1;                         /* F5 : EN DERNIER, et rien après */
 }
 
 /* aglSetFullScreen commute QFB en 1555. On préfère rester en 32 bits : la
@@ -6595,8 +7258,7 @@ long pomppc_attach_fullscreen(void *ctx)
     unsigned long did, w, h, bits, desc[4];
     unsigned char *buf, double_buffer;
     long result;
-    if (!D.init)
-        direct_init();
+    direct_init_once();                 /* F5 : hors G.mu, mais une seule fois */
     if (!D.main_display || !D.pixels_wide || !D.pixels_high ||
         !D.bits_per_pixel || !D.base_address || !D.bytes_per_row)
         return 10005;
@@ -6626,16 +7288,32 @@ long pomppc_attach_fullscreen(void *ctx)
     desc[0] = w; desc[1] = h; desc[2] = w * 4; desc[3] = (unsigned long)buf;
     double_buffer = GLD_U8(ctx, 0xe1);
     GLD_U8(ctx, 0xe1) = 0;
+    /* F4 — SEUL appel au code d'Apple qui se faisait verrou tenu. glsAssignDrawable
+       fait des allers-retours Mach avec le WindowServer (des dizaines de
+       millisecondes, parfois bien plus) : tous les fils GL du processus y
+       restaient bloqués, et une réentrance par gldUpdateDispatch donnait un
+       blocage franc (G.mu n'est pas récursif). On relâche donc autour.
+       Ce qui est protégé pendant la fenêtre : `p` ne peut pas disparaître
+       (détruire un contexte pendant qu'on lui attache un drawable est déjà
+       interdit par CGL), mais tout ce qu'on a lu de G est RELU après, et on
+       revalide `p` par find_ctx. */
+    pthread_mutex_unlock(&G.mu);
     result = pomppc_call_real(GLD_AttachDrawable, (long)ctx, 53, (long)desc, 0, 0, 0, 0, 0);
+    pthread_mutex_lock(&G.mu);
     GLD_U8(ctx, 0xe1) = double_buffer;
+    p = find_ctx(ctx);                  /* revalidation après le relâchement */
+    if (!p) {
+        free(buf);
+        pthread_mutex_unlock(&G.mu);
+        return result;
+    }
     /* glsAssignDrawable releases the previous drawable even on failure. */
     free(p->fullscreen_buf);
     p->fullscreen_buf = NULL;
-    D.checked_at = 0;
+    direct_invalidate();
     if (result >= 0 && result <= 3) {
         p->fullscreen_buf = buf;
         p->fullscreen_w = w; p->fullscreen_h = h;
-        D.checked_at = 0;
         /* Le descripteur type 53 est 32 bits ; Apple peut laisser 16 d'après
            le pixel format. Aligner le contexte sur le tampon réel. */
         if (GLD_U32(ctx, CTX_COLOR_BITS) == 16)
@@ -6675,7 +7353,7 @@ static int rects_touch(long ax, long ay, long aw, long ah, const CgRect *r)
  * rien au-dessus d'elle (autre fenêtre, Dock, barre des menus) ni curseur
  * dessiné dedans ? (Le curseur de la VGA de QEMU est composé en logiciel par
  * le WindowServer dans la mémoire vidéo : écrire par-dessus l'effacerait.)
- * Remplit D.x / D.y. */
+ * Remplit p->d_x / p->d_y (F7). */
 static int direct_window_ok(PCtx *p)
 {
     unsigned char *gd = (unsigned char *)GLD_U32(p->ctx, 4);
@@ -6709,10 +7387,10 @@ static int direct_window_ok(PCtx *p)
     if ((unsigned long)sr.w != p->sw || (unsigned long)sr.h != p->sh)
         return WHY("surface %gx%g at %g,%g != drawable %lux%lu", sr.w, sr.h, sr.x, sr.y,
                    p->sw, p->sh);
-    D.x = (long)(wr.x + sr.x);
-    D.y = (long)(wr.y + sr.y);
-    if (D.x < 0 || D.y < 0 || D.x + p->sw > D.w || D.y + p->sh > D.h)
-        return WHY("off-screen (%ld,%ld)", D.x, D.y);
+    p->d_x = (long)(wr.x + sr.x);       /* F7 : le rectangle est CELUI DE p */
+    p->d_y = (long)(wr.y + sr.y);
+    if (p->d_x < 0 || p->d_y < 0 || p->d_x + p->sw > D.w || p->d_y + p->sh > D.h)
+        return WHY("off-screen (%ld,%ld)", p->d_x, p->d_y);
     /* fenêtres à l'écran, de l'avant vers l'arrière : rien au-dessus ne doit toucher */
     if (D.onscreen_list(cid, 0, 96, list, &n) != 0 || n <= 0 || n > 96)
         return WHY("window list refused (n %ld)", n);
@@ -6726,7 +7404,7 @@ static int direct_window_ok(PCtx *p)
             /* Le Dock gare ses tuiles de travail (128x128 au plus, vides) dans
                le coin 0,0 de l'écran, au niveau du Dock (vu en vrai : 13 fenêtres). */
             !(o.x == 0 && o.y == 0 && o.w <= 128 && o.h <= 128) &&
-            rects_touch(D.x, D.y, p->sw, p->sh, &o) && !window_invisible(cid, list[i]))
+            rects_touch(p->d_x, p->d_y, p->sw, p->sh, &o) && !window_invisible(cid, list[i]))
             return WHY("covered by window %lx (%g,%g %gx%g), rank %ld/%ld, alpha %g",
                        list[i], o.x, o.y, o.w, o.h, i, n, window_alpha(cid, list[i]));
     if (i == n)
@@ -6739,7 +7417,7 @@ static int direct_window_ok(PCtx *p)
         int still = cur.x == D.cur_x && cur.y == D.cur_y;
         D.cur_x = cur.x; D.cur_y = cur.y;
         o.x = cur.x - 32; o.y = cur.y - 32; o.w = 64; o.h = 64;
-        if (!still && rects_touch(D.x, D.y, p->sw, p->sh, &o))
+        if (!still && rects_touch(p->d_x, p->d_y, p->sw, p->sh, &o))
             return WHY("cursor moving in surface (%g,%g)", cur.x, cur.y);
     }
     D.why[0] = 0;
@@ -6748,54 +7426,96 @@ static int direct_window_ok(PCtx *p)
 }
 
 /* Mémoire vidéo où présenter p, ou 0 (échange normal). Verrou tenu. */
+/* Le mode d'écran (ou l'attachement) a changé : plus aucune décision de
+   présentation directe n'est valable, pour aucun contexte. Verrou tenu. */
+static void direct_invalidate(void)
+{
+    PCtx *q;
+    for (q = G.list; q; q = q->next) {
+        q->d_ok = 0;
+        q->d_checked_at = 0;
+    }
+}
+
 static unsigned char *direct_target(PCtx *p, unsigned long *rowbytes)
 {
-    if (!D.init)
-        direct_init();
+    unsigned long did, rb, bpp, dw, dh;
+    unsigned char *base;
+
+    direct_init_once();                 /* F5 */
     if (!D.enabled)
         return 0;
-    if (!D.checked_at || G.n_frames - D.checked_at >= DIRECT_RECHECK) {
-        unsigned long did = D.main_display();
+    if (!D.main_display || !D.base_address || !D.bytes_per_row ||
+        !D.bits_per_pixel || !D.pixels_wide || !D.pixels_high)
+        return 0;
+    /* Q6 — BASE, PAS ET PROFONDEUR SONT RELUS À CHAQUE IMAGE. Les garder
+       DIRECT_RECHECK images faisait écrire dans l'ANCIENNE mémoire vidéo
+       après un changement de mode (aglSetFullScreen, changement de
+       résolution, Exposé) : jusqu'à neuf images d'écriture sauvage, hors de
+       toute VRAM valide. Les six appels CoreGraphics sont des lectures d'une
+       structure déjà en mémoire ; ce sont les vérifications COÛTEUSES (liste
+       des fenêtres, processus au premier plan) qui restent à la cadence de
+       DIRECT_RECHECK. */
+    did = D.main_display();
+    base = D.base_address(did);
+    rb   = D.bytes_per_row(did);
+    bpp  = D.bits_per_pixel(did);
+    dw   = D.pixels_wide(did);
+    dh   = D.pixels_high(did);
+    if (!base || !dw || !dh || (bpp != 32 && bpp != 16) ||
+        rb < dw * (bpp == 16 ? 2 : 4)) {
+        snprintf(D.why, sizeof(D.why), "display %lu-bit, %lux%lu pitch %lu", bpp, dw, dh, rb);
+        direct_invalidate();
+        return 0;
+    }
+    if (base != D.base || rb != D.rowbytes || bpp != D.bpp ||
+        dw != D.w || dh != D.h) {
+        D.base = base; D.rowbytes = rb; D.bpp = bpp; D.w = dw; D.h = dh;
+        direct_invalidate();            /* le mode a changé : tout revérifier */
+    }
+    /* F7 : le verdict et le rectangle sont PAR CONTEXTE — partagés, l'image de
+       B partait dans le rectangle de A. */
+    if (!p->d_checked_at || G.n_frames - p->d_checked_at >= DIRECT_RECHECK) {
         Psn front, me;
         unsigned char same = 0;
         int ok, full;
-        D.w = D.pixels_wide(did);
-        D.h = D.pixels_high(did);
-        D.base = D.base_address(did);
-        D.rowbytes = D.bytes_per_row(did);
-        D.bpp = D.bits_per_pixel(did);
-        ok = D.base && (D.bpp == 32 || D.bpp == 16) &&
-             D.rowbytes >= D.w * (D.bpp == 16 ? 2 : 4) &&
-             D.front_process(&front) == 0 && D.current_process(&me) == 0 &&
+        ok = D.front_process(&front) == 0 && D.current_process(&me) == 0 &&
              D.same_process(&front, &me, &same) == 0 && same;
         if (!ok)
-            snprintf(D.why, sizeof(D.why), "not frontmost, or display %lu-bit", D.bpp);
+            snprintf(D.why, sizeof(D.why), "not frontmost");
         full = ok && p->sw == D.w && p->sh == D.h &&
                (!D.menubar_visible || !D.menubar_visible() || p->fullscreen_buf);
         if (full) {
-            D.x = D.y = 0;
+            p->d_x = p->d_y = 0;
             ok = 1;
         } else {
             ok = ok && direct_window_ok(p);
             if (ok)
                 ok = 2;                 /* en fenêtre */
         }
-        if (ok != D.ok)
+        if (ok != p->d_ok)
             pomppc_log("POMPPC: présentation directe %s (%lux%lu en %ld,%ld ; écran %lux%lu)\n",
                        ok == 1 ? "plein écran" : ok ? "en fenêtre" : "coupée",
-                       p->sw, p->sh, D.x, D.y, D.w, D.h);
-        D.ok = ok;
-        D.checked_at = G.n_frames ? G.n_frames : 1;
+                       p->sw, p->sh, p->d_x, p->d_y, D.w, D.h);
+        p->d_ok = ok;
+        p->d_checked_at = G.n_frames ? G.n_frames : 1;
     }
-    if (!D.ok)
+    if (!p->d_ok)
         return 0;
+    /* Le rectangle a été validé contre l'écran COURANT (juste au-dessus si le
+       mode a bougé) : on le revérifie tout de même, c'est une multiplication. */
+    if (p->d_x < 0 || p->d_y < 0 ||
+        (unsigned long)p->d_x + p->sw > D.w || (unsigned long)p->d_y + p->sh > D.h) {
+        p->d_ok = 0;
+        return 0;
+    }
     /* En fenêtre, la mémoire de la fenêtre côté WindowServer n'est plus à jour :
        un échange normal de temps en temps la rafraîchit (déplacement, Exposé,
        capture d'écran). */
-    if (D.ok == 2 && G.n_frames % DIRECT_REFRESH == 0)
+    if (p->d_ok == 2 && G.n_frames % DIRECT_REFRESH == 0)
         return 0;
     *rowbytes = D.rowbytes;
-    return D.base + D.y * D.rowbytes + D.x * (D.bpp == 16 ? 2 : 4);
+    return D.base + p->d_y * D.rowbytes + p->d_x * (D.bpp == 16 ? 2 : 4);
 }
 
 /* xRGB8888 (mot PowerPC 00RRGGBB) → xRGB1555 big-endian, format QFB
@@ -6917,10 +7637,14 @@ static int present_direct(PCtx *p)
             return 0;
         if (present_stage_ready)
             pack_xrgb32_to_555(vram, rowbytes, st, w * 4, w, h);
-        queue_readback_to(p, 0, st, w * 4);
+        /* P16 : si la relecture n'a pas pu être mise en file (arène pleine),
+           on n'a rien présenté — il faut rendre 0 pour qu'Apple échange. */
+        if (!queue_readback_to(p, 0, st, w * 4))
+            return 0;
         present_stage_ready = 1;
     } else {
-        queue_readback_to(p, 0, vram, rowbytes);
+        if (!queue_readback_to(p, 0, vram, rowbytes))
+            return 0;
     }
     flush();
     G.n_direct++;
@@ -7058,12 +7782,39 @@ static int try_copy_tex(PCtx *p, unsigned long *a)
     c[9] = w;
     c[10] = h;
     t->dirty = 0;
+    /* P15 : le niveau de l'INVITÉ n'a pas été mis à jour — le contenu à jour
+       n'existe que sur l'hôte. Sans ce drapeau, l'éviction LRU (128
+       emplacements) détruisait la texture, et le rechargement la remplissait
+       avec l'ANCIEN contenu de l'invité : reflets et ombres périmés. */
+    t->host_only = 1;
     G.n_copytex++;
     return 1;
 }
 
 /* ReadPixels (ctx, x, y, w, h, format, type, pixels) : 8 arguments, tous
- * dans r3–r10. Rectangle : RGBA/RGB octet, profondeur FLOAT, stencil octet. */
+ * dans r3–r10. Rectangle : RGBA/RGB octet, profondeur FLOAT, stencil octet.
+ *
+ * P1 — GARDE INTÉRIMAIRE SUR L'EMPAQUETAGE.
+ *
+ * On fabrique ici le pas de destination alors que c'est l'APPLICATION qui le
+ * fixe, par GL_PACK_ALIGNMENT / GL_PACK_ROW_LENGTH / GL_PACK_SKIP_*. Les
+ * offsets CTX_PACK_* ne sont PAS relevés (seuls les CTX_UNPACK_* le sont,
+ * :76-80) : tant qu'ils ne le seront pas, on ne peut pas les lire, et il est
+ * hors de question de les deviner.
+ *
+ * En attendant, on n'accepte que les cas où NOTRE pas est le PLUS PETIT
+ * possible, c'est-à-dire le pas serré : w·bpp multiple de 4. Le pas réel de
+ * l'application est alors ≥ au nôtre quel que soit son alignement (1, 2, 4
+ * ou 8), donc on n'écrit JAMAIS au-delà de son tampon. C'était le bogue :
+ * GL_RGB avec align 1 (SDL, captures d'écran) débordait de 3·(h−1) octets,
+ * et le stencil, écrit serré alors que le défaut d'OpenGL est align 4,
+ * décalait l'image sans que l'application ait rien réglé.
+ *
+ * CE QUI RESTE EXPOSÉ, et qui demande les offsets CTX_PACK_* : une image
+ * OBLIQUE (pas fausse en mémoire, mais décalée) si l'application a posé
+ * PACK_ALIGNMENT = 8 avec une largeur impaire en RGBA, ou un PACK_ROW_LENGTH
+ * plus petit que w. Aucun de ces cas ne sort du tampon.
+ */
 static int try_read_pixels(PCtx *p, unsigned long *a)
 {
     long x = (long)a[1], y = (long)a[2], w = (long)a[3], h = (long)a[4];
@@ -7113,6 +7864,8 @@ static int try_read_pixels(PCtx *p, unsigned long *a)
         unsigned char *d;
         if (!p->stencil || p->depth == SW_NEWER)
             return 0;
+        if ((unsigned long)w % 4UL)              /* P1 : bpp = 1 */
+            return 0;
         if (!arena_alloc((unsigned long)w * (unsigned long)h * 4, &off))
             return 0;
         c = reserve(p, QGPU_LEN_SURF_XFER);
@@ -7138,7 +7891,9 @@ static int try_read_pixels(PCtx *p, unsigned long *a)
     if (type != 0x1401 || (fmt != 0x1908 && fmt != 0x1907))
         return 0;
     bpp = (fmt == 0x1907) ? 3UL : 4UL;
-    rowb = ((unsigned long)w * bpp + 3UL) & ~3UL;
+    if (((unsigned long)w * bpp) % 4UL)          /* P1 : GL_RGB, align 1 */
+        return 0;
+    rowb = (unsigned long)w * bpp;               /* = le pas serré, par la garde */
     if (!arena_alloc((unsigned long)w * (unsigned long)h * 4, &off))
         return 0;
     c = reserve(p, QGPU_LEN_SURF_XFER);
@@ -7409,6 +8164,8 @@ static int try_draw_ds(PCtx *p, unsigned long *a)
     row_px = GLD_U32(p->ctx, CTX_UNPACK_ROW_LENGTH);
     if (row_px == 0)
         row_px = w;
+    if (row_px < w)                     /* l'appli décrit moins large que le rectangle */
+        return 0;
     skip_rows = GLD_U32(p->ctx, CTX_UNPACK_SKIP_ROWS);
     skip_px = GLD_U32(p->ctx, CTX_UNPACK_SKIP_PIXELS);
     if (fmt == 0x1902)
@@ -7457,7 +8214,7 @@ static int try_draw_pixels(PCtx *p, unsigned long *a)
     const unsigned char *vtx = (const unsigned char *)a[1];
     unsigned long w = a[2], h = a[3], fmt = a[4], type = a[5];
     const unsigned char *pixels = (const unsigned char *)a[6];
-    unsigned long bpp, rowb, off, *c, y;
+    unsigned long bpp, rowb, srcrow, align, row_px, skip_rows, skip_px, off, *c, y;
     unsigned char *dst;
 
     if (try_draw_ds(p, a))
@@ -7475,13 +8232,34 @@ static int try_draw_pixels(PCtx *p, unsigned long *a)
     if (!pix_scratch(p, w, h))
         return 0;
     bpp = (fmt == 0x1907) ? 3UL : 4UL;
-    rowb = (w * bpp + 3UL) & ~3UL;
+    /* P2 — LA SOURCE A LE PAS DE L'APPLICATION, PAS LE NÔTRE. On lisait le
+       tampon de l'application avec un pas aligné sur 4 codé en dur, alors que
+       GL_UNPACK_ALIGNMENT / ROW_LENGTH / SKIP_* le fixent — try_draw_ds et
+       try_bitmap les lisent depuis toujours, pas ce chemin-ci. Résultat :
+       image oblique, et lecture au-delà du tampon source dès que l'application
+       pose align 1 en GL_RGB (le cas de SDL). Le pas de DESTINATION, lui, est
+       à nous : c'est l'arène. */
+    align = GLD_U32(p->ctx, CTX_UNPACK_ALIGNMENT);
+    if (align != 1 && align != 2 && align != 4 && align != 8)
+        align = 4;
+    row_px = GLD_U32(p->ctx, CTX_UNPACK_ROW_LENGTH);
+    if (row_px == 0)
+        row_px = w;
+    if (row_px < w)
+        return 0;
+    skip_rows = GLD_U32(p->ctx, CTX_UNPACK_SKIP_ROWS);
+    skip_px = GLD_U32(p->ctx, CTX_UNPACK_SKIP_PIXELS);
+    srcrow = (row_px * bpp + align - 1UL) & ~(align - 1UL);
+    if (srcrow == 0)
+        return 0;
+    rowb = (w * bpp + 3UL) & ~3UL;      /* destination : l'arène */
     if (!arena_alloc(h * rowb, &off))
         return 0;
     dst = G.q.win + off;
     /* Première ligne GL = bas de l'image → haut de la texture hôte. */
     for (y = 0; y < h; y++) {
-        const unsigned char *s = pixels + (h - 1 - y) * rowb;
+        const unsigned char *s = pixels + (skip_rows + (h - 1 - y)) * srcrow
+                                 + skip_px * bpp;
         memcpy(dst + y * rowb, s, w * bpp);
     }
     c = reserve(p, QGPU_LEN_TEX_IMAGE3);
@@ -7697,10 +8475,21 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
     pthread_mutex_lock(&G.mu);
     p = find_ctx((void *)a[0]);
     if (!p) {
+        /* P7 — il y avait ici un abort(). Un pilote graphique ne tue JAMAIS le
+           processus de son application : le cas se produisait vraiment, parce
+           que pomppc_context_destroyed libérait la PCtx sans désinstaller les
+           trampolines (c'est corrigé plus bas, mais le filet reste). On rend
+           une cible inerte : le trampoline y saute, elle rend 0 — ce qui
+           convient aux deux formes de procédure, celles qui ne rendent rien et
+           celles où 0 veut dire « non pris en charge ». */
+        static unsigned n_lost;
         pthread_mutex_unlock(&G.mu);
-        pomppc_log("POMPPC: procédure %s pour un contexte inconnu %08lx\n",
+        if (n_lost++ < 4)
+            fprintf(stderr, "POMPPC GL: proc %s for an unknown context %08lx, "
+                    "call dropped\n", pomppc_proc_name(slot), a[0]);
+        pomppc_log("POMPPC: procédure %s pour un contexte inconnu %08lx : appel jeté\n",
                    pomppc_proc_name(slot), a[0]);
-        abort();                        /* ne jamais sauter à une adresse nulle */
+        return (void *)proc_dead;
     }
     target = p->real[slot];
     /* Apple's RenderVertexArray can be only `li r3,0; blr`: a refusal,
@@ -7889,13 +8678,27 @@ void pomppc_context_destroyed(void *ctx)
             continue;
         p = *pp;
         *pp = p->next;
+        /* P7 — LES TRAMPOLINES D'ABORD. gldDestroyContext nous appelle AVANT le
+           destructeur d'Apple, et seul gldUpdateDispatch désinstallait nos
+           procédures : la table de GLEngine pointait encore sur elles alors
+           que la PCtx venait d'être libérée. Tout rappel de rastérisation
+           tombait sur pomppc_proc_pre, find_ctx échouait, abort(). */
+        if (p->procs) {
+            int k;
+            for (k = 0; k < PROC_COUNT; k++)
+                if (p->mine[k] && p->procs[k] == p->mine[k])
+                    p->procs[k] = p->real[k];
+            p->procs = 0;
+        }
         if (p->cfg)
             GLD_U32(p->cfg, 0x11c) = 0;     /* le descripteur meurt avec le contexte */
-        if (G.pend == p)
-            G.pend = 0;
-        if (G.raw_ctx == p) {
-            G.raw_ctx = 0;
-            G.raw_count = 0;
+        pend_close(p, 1);                   /* F2 */
+        /* Mineur §8.1 : la série DRAW_RAW ouverte appartient peut-être à CE
+           contexte. L'abandonner (raw_ctx = 0) perdait sa dernière primitive ;
+           la FERMER l'émet tant que le contexte hôte existe encore. */
+        if (G.raw_ctx == p || G.run_ctx == p) {
+            close_run();
+            close_raw();
         }
         if (G.state > 0 && p->qctx >= 0) {
             destroy_surface(p);
@@ -7912,8 +8715,15 @@ void pomppc_context_destroyed(void *ctx)
             drain_all();
             G.ctx_used &= ~(1UL << (p->qctx - G.q.ctx_base));
         }
+        /* P7 : plus une seule référence à la PCtx qu'on libère. */
         if (G.run_ctx == p)
             G.run_ctx = 0;
+        if (G.raw_ctx == p) {
+            G.raw_ctx = 0;
+            G.raw_count = 0;
+        }
+        if (G.bound == p)
+            G.bound = 0;
         free(p->fullscreen_buf);
         free(p);
         break;
@@ -7947,7 +8757,7 @@ void pomppc_after_draw_buffer_change(void *ctx)
         if (cur != p->draw_seen) {
             int any = p->color == HOST_NEWER && p->draw_seen;
             if (any)
-                queue_readback(p, 0, p->draw_seen);
+                any = queue_readback(p, 0, p->draw_seen);   /* P16 */
             if (any || G.ncmd) {
                 /* L'ancien tampon repart au rendu d'Apple : il doit contenir ce
                    que l'hôte a dessiné AVANT qu'on rende la main (v9). */
@@ -7975,7 +8785,7 @@ void pomppc_drawable_attached(void *ctx, long kind, long result)
         drain_all();
         free(p->fullscreen_buf);
         p->fullscreen_buf = NULL;
-        D.checked_at = 0;
+        direct_invalidate();            /* F7/Q6 : plus aucun verdict n'est valable */
     }
     if (p && p->surf >= 0) {
         check_draw_buffer(p);

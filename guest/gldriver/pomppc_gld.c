@@ -346,6 +346,77 @@ long pomppc_call_real(int idx, long a, long b, long c, long d, long e, long f, l
 #define OWNER_ENV "POMPPC_GLD_OWNER"
 static int second_copy;
 
+/* F3 — LE MARQUEUR NE SE RÉÉCRIT PLUS À CHAQUE CHARGEMENT DE RENDERER.
+ *
+ * gldInitializeLibrary est appelée une fois PAR ÉCRAN, et chaque appel faisait
+ * un setenv ; gldTerminateLibrary faisait un unsetenv. Or setenv/unsetenv
+ * RÉALLOUENT `environ` : un autre fil en plein getenv (et, avant P17, il y en
+ * avait un par lot de dessin) lisait de la mémoire libérée.
+ *
+ * Deux exemplaires du plugin dans le même processus sont deux IMAGES
+ * distinctes : un static ne les relie pas, seul l'environnement le peut. On
+ * garde donc le marqueur, mais :
+ *   — `owner_once` : le setenv n'a lieu qu'UNE fois par image, à l'entrée en
+ *     vie de la bibliothèque, quand GLEngine est encore mono-fil ;
+ *   — `gld_live` : les chargements de renderer suivants de la MÊME image ne
+ *     touchent plus à l'environnement du tout ;
+ *   — plus d'unsetenv : il tombait à la fin, quand des fils GL tournent encore.
+ *     Il ne servait qu'au cas « plugin déchargé puis rechargé dans le même
+ *     processus » ; `gld_owner_mine` le couvre — une image qui a posé le
+ *     marqueur se reconnaît elle-même et se rouvre. Un processus fils n'a pas
+ *     le même pid, donc la marque héritée ne l'inhibe pas : règle d'origine.
+ */
+static pthread_once_t owner_once = PTHREAD_ONCE_INIT;
+static pthread_once_t atfork_once = PTHREAD_ONCE_INIT;
+static int gld_live;                    /* CETTE image a le backend ouvert */
+static int gld_owner_mine;              /* CETTE image a posé le marqueur */
+
+static void owner_mark(void)
+{
+    char pid[16];
+    snprintf(pid, sizeof(pid), "%d", (int)getpid());
+    gld_owner_mine = 1;
+    setenv(OWNER_ENV, pid, 1);
+}
+
+/* P8 — fork() SANS exec (Safari et WebKit lancent leurs aides ainsi).
+ *
+ * L'enfant hérite de la tranche MAPPÉE — de la mémoire de device, partagée et
+ * non copiée —, du port Mach du kext et de tout l'état du plugin : il écrirait
+ * dans le MÊME flux que son père, et sa première soumission ferait exécuter
+ * deux fois la trame du père.
+ *
+ * `prepare` prend les deux verrous dans l'ORDRE DU FICHIER (G.mu → trace_mu),
+ * sans quoi l'enfant les hériterait peut-être pris par un fil qui n'existe
+ * plus. Le handler enfant ne libère RIEN (ni malloc, ni IOServiceClose : le
+ * user client est celui du père) : il oublie, puis rend les deux verrous. */
+static void atfork_prepare(void)
+{
+    pomppc_backend_prepare_fork();      /* G.mu */
+    pthread_mutex_lock(&trace_mu);
+}
+
+static void atfork_parent(void)
+{
+    pthread_mutex_unlock(&trace_mu);
+    pomppc_backend_parent_fork();       /* G.mu */
+}
+
+static void atfork_child(void)
+{
+    /* Le fichier de trace est celui du père : ne pas s'y ajouter. */
+    trace_on = 0;
+    trace_fp = 0;
+    pthread_mutex_unlock(&trace_mu);
+    pomppc_backend_forget();            /* coupe l'accélération, rend G.mu */
+}
+
+/* On pose les handlers une seule fois, à la première entrée en vie. */
+static void atfork_install(void)
+{
+    pthread_atfork(atfork_prepare, atfork_parent, atfork_child);
+}
+
 long gldInitializeLibrary(long a, long b, long c, long d, long e, long f, long g, long h)
 {
     long r;
@@ -353,13 +424,16 @@ long gldInitializeLibrary(long a, long b, long c, long d, long e, long f, long g
     const char *owner = getenv(OWNER_ENV);
 
     snprintf(pid, sizeof(pid), "%d", (int)getpid());
-    second_copy = owner && strcmp(owner, pid) == 0;
+    second_copy = gld_live ||
+                  (owner && strcmp(owner, pid) == 0 && !gld_owner_mine);
     pomppc_log("gldInitializeLibrary(%08lx %08lx %08lx %08lx %08lx) pid %d%s\n",
                a, b, c, d, e, (int)getpid(),
                second_copy ? " : second exemplaire du plugin, inactif" : "");
     r = FWD8(GLD_InitializeLibrary);
     if (!second_copy) {
-        setenv(OWNER_ENV, pid, 1);
+        gld_live = 1;
+        pthread_once(&owner_once, owner_mark);
+        pthread_once(&atfork_once, atfork_install);
         pomppc_backend_init();
     }
     return r;
@@ -370,7 +444,9 @@ long gldTerminateLibrary(long a, long b, long c, long d, long e, long f, long g,
     pomppc_log("gldTerminateLibrary()%s\n", second_copy ? " (second exemplaire)" : "");
     if (!second_copy) {
         pomppc_backend_fini();
-        unsetenv(OWNER_ENV);
+        gld_live = 0;
+        /* F3 : plus d'unsetenv ici. La marque reste, et c'est sans
+           conséquence : elle ne porte que notre pid. */
     }
     return FWD8(GLD_TerminateLibrary);
 }

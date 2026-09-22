@@ -81,6 +81,25 @@ void qgpu_close(QgpuClient *q)
     q->conn = 0;
 }
 
+/* P8 : voir pomppc_qgpu.h. Rien d'autre qu'un oubli — pas d'IOServiceClose, pas
+   d'IOConnectUnmapMemory, pas de free : après fork() l'enfant n'a le droit
+   d'appeler ni malloc, ni les verrous, et surtout pas le user client du père.
+   La tâche enfant sera nettoyée par le noyau quand elle se terminera ou
+   exec()era. */
+void qgpu_forget(QgpuClient *q)
+{
+    q->conn = 0;
+    q->win = 0;
+    q->size = 0;
+    q->base = 0;
+    q->ctx_base = 0;
+    q->surf_base = 0;
+    q->tex_base = 0;
+    q->index = 0;
+    q->version = 0;
+    q->caps = 0;
+}
+
 long qgpu_submit(QgpuClient *q, unsigned long off, unsigned long len, unsigned long *pc)
 {
     unsigned int fence, status, spc;

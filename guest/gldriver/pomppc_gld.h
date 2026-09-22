@@ -143,6 +143,14 @@ long pomppc_call_real(int idx, long a, long b, long c, long d, long e, long f, l
 /* pomppc_accel.c */
 void pomppc_backend_init(void);
 void pomppc_backend_fini(void);
+/* P8 — handlers de pthread_atfork, posés par pomppc_gld.c. `prepare` prend
+   G.mu dans le fil qui appelle fork(), `parent` le rend, et `forget` (côté
+   ENFANT) coupe l'accélération, oublie port Mach et tranche mappée, puis rend
+   le verrou. Sans cela l'enfant d'un fork() sans exec (Safari/WebKit) écrit
+   dans le MÊME flux que son père. */
+void pomppc_backend_prepare_fork(void);
+void pomppc_backend_parent_fork(void);
+void pomppc_backend_forget(void);
 void pomppc_patch_renderer_info(unsigned char *info);
 int  pomppc_translate_attribs(const long *attribs, long *out, int max);
 void pomppc_patch_pixel_list(void *head);

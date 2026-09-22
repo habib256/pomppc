@@ -3,7 +3,15 @@
 # tools/gld/gen_tramp.py et livré tel quel.
 SDK     = /Developer/SDKs/MacOSX10.4u.sdk
 CC      = /usr/bin/gcc-4.0
-CFLAGS  = -arch ppc -isysroot $(SDK) -O2 -Wall -Wno-unused-parameter -fno-common
+# T13 : -fno-strict-aliasing est OBLIGATOIRE, pas une précaution. Le plugin lit
+# les structures de GLEngine et du GLDriver par des macros de type punning
+# (GLD_U32/GLD_F32/U16/S16 sur un unsigned char*), et convertit des flottants en
+# bits par *(unsigned long *)&f : -O2 seul autorise gcc à supposer que ces accès
+# ne se recouvrent pas, et à réordonner ou supprimer les lectures. -g ne coûte
+# rien à l'exécution et rend un plantage lisible dans gdb ou un rapport de
+# CrashReporter.
+CFLAGS  = -arch ppc -isysroot $(SDK) -O2 -Wall -Wno-unused-parameter -fno-common \
+          -fno-strict-aliasing -g
 LDFLAGS = -arch ppc -isysroot $(SDK) -bundle
 LIBS    = -framework IOKit -framework CoreFoundation
 

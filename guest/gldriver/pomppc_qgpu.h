@@ -44,6 +44,12 @@ typedef struct QgpuClient {
 /* 0 si le device est utilisable ; sinon un message dans *why. */
 int  qgpu_open(QgpuClient *q, const char **why);
 void qgpu_close(QgpuClient *q);
+/* Après fork() SANS exec, dans l'ENFANT seulement : oublier le port Mach et la
+   tranche mappée SANS un seul appel au noyau. Fermer le user client ici
+   détruirait les objets du PÈRE (c'est le même user client), et écrire dans la
+   tranche — qui est de la mémoire de device, partagée et non copiée — ferait
+   exécuter deux fois la trame du père. Voir pomppc_backend_forget (P8). */
+void qgpu_forget(QgpuClient *q);
 /* Soumet [off, off+len) de la tranche. Renvoie le statut QGPU_ST_* (ou -1
    si l'appel au kext lui-même a échoué) ; *pc = commande fautive. */
 long qgpu_submit(QgpuClient *q, unsigned long off, unsigned long len, unsigned long *pc);
