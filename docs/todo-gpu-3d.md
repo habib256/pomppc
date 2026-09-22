@@ -54,7 +54,7 @@ est dans le rapport.
       le binaire ppc64 au lieu de `[ -x ]`), et le sondage Screamer sur le **bon** binaire
       (`run_tiger.sh:92` sonde `$QEMU_BIN` alors que la VM tourne sur `$QEMU_BIN64`).
 - [x] Booter la VM de dev, `devloop.py prepare`, vérifier que l'agent répond (`run` d'un job trivial).
-- [ ] **Le cœur 1 vit-il ?** Dans l'invité : `sysctl -n hw.ncpu hw.activecpu` ; sur l'hôte,
+- [x] **Le cœur 1 vit-il ?** **Oui (22/09/2026, 20:40, `run_tiger.sh` SMP=2 sur le binaire reconstruit, patch SMP corrigé) : `info registers -a` au moniteur — CPU#1 passe du vecteur de reset `0xfff00100` (OpenBIOS) à `0x000af6b4` (noyau Darwin, boucle d'inactivité, même adresse que CPU#0 au repos).** Confirmé dans l'invité par ssh à 20:50 : `hw.ncpu 2`, `hw.activecpu 2`. Dans l'invité : `sysctl -n hw.ncpu hw.activecpu` ; sur l'hôte,
       `info cpus` deux fois à 5 s (le `pc` du CPU 1 doit bouger). **Archiver la réponse ici.**
       Si `activecpu = 1` : lot 8 avant tout A/B SMP.
 
