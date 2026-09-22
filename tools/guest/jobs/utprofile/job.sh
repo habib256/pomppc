@@ -85,7 +85,11 @@ trap - EXIT
 echo complete > "$W/complete"
 GUI
 chmod -R 777 "$W"
-gui_run "sh '$W/run.sh' '$W'" $((LOAD_TIMEOUT + DUR + 90))
+# gui_run rend maintenant le code de sortie de la session (bug hunt T4) :
+# on le garde pour le verdict, mais SANS sauter le rapatriement ci-dessous —
+# c'est justement quand ça échoue que les journaux comptent.
+if gui_run "sh '$W/run.sh' '$W'" $((LOAD_TIMEOUT + DUR + 90)); then grc=0; else grc=$?; fi
+echo "run.sh dans la session : rc=$grc (124 = timeout du relais)"
 if [ ! -f "$W/complete" ] && [ -f "$W/pid" ]; then
     kill "$(cat "$W/pid")" 2>/dev/null || true
     sleep 3
@@ -96,3 +100,4 @@ printf 'tag=%s\nscene=DM-Rankin stationary pre-match, no input, no bots\nresolut
 sysctl -n hw.ncpu >> out/manifest.txt
 tail -12 out/stats.txt
 [ -f "$W/complete" ] || { echo 'INCOMPLETE RUN'; exit 1; }
+[ "$grc" = 0 ] || { echo "run.sh a échoué (rc=$grc)"; exit "$grc"; }

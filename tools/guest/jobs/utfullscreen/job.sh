@@ -34,8 +34,12 @@ osascript -e "tell application \"System Events\" to set frontmost of (first proc
 sleep 20
 kill -0 "$p"
 GUI
-gui_run 'sh ./launch.sh' 60
+# gui_run rend le code de sortie de la session (bug hunt T4) : on rapatrie
+# quand même les journaux avant de rendre le verdict.
+if gui_run 'sh ./launch.sh' 60; then grc=0; else grc=$?; fi
+echo "launch.sh dans la session : rc=$grc (124 = timeout du relais)"
 W=/tmp/ut-fullscreen-$RES
-cp "$W"/* out/
+cp "$W"/* out/ 2>/dev/null || true
+[ "$grc" = 0 ] || { echo "launch.sh a échoué (rc=$grc)"; exit "$grc"; }
 kill -0 "$(cat "$W/pid")"
 echo "UT2004 running: fullscreen $RES"

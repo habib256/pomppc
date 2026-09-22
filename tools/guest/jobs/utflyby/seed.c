@@ -42,6 +42,40 @@ __attribute__((constructor)) static void install_tick(void)
     _exit(78);
 }
 static void fixed_srand(unsigned int ignored) { srand(0); }
+/* A signature of 64 spread-out scanout pixels: cheap, and enough to tell one
+ * presented frame from another. */
+static unsigned long scanout_sig(const unsigned char *src, unsigned long w,
+                                 unsigned long h, unsigned long stride)
+{
+    unsigned long sig = 0, i, x, y;
+    for (i = 0; i < 64; ++i) {
+        x = (w * ((i * 7) % 63 + 1)) / 65;
+        y = (h * ((i * 11) % 63 + 1)) / 65;
+        sig = sig * 131 + *(volatile unsigned long *)(src + y * stride + x * 4);
+    }
+    return sig;
+}
+/* Presentation is ASYNCHRONOUS: when SwapBuffers returns, the scanout may
+ * still hold the previous frame, and the capture would be of that one (bug
+ * hunt T12). Drain the pipeline, then wait for the scanout to stop changing —
+ * at most a second, so a frozen screen never hangs the run. */
+static void wait_presented(const unsigned char *src, unsigned long w,
+                           unsigned long h, unsigned long stride)
+{
+    void (*finish)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "glFinish");
+    unsigned long prev, cur;
+    int i, same = 0;
+    if (finish) finish();
+    prev = scanout_sig(src, w, h, stride);
+    for (i = 0; i < 50 && same < 2; ++i) {
+        usleep(20000);
+        cur = scanout_sig(src, w, h, stride);
+        same = (cur == prev) ? same + 1 : 0;
+        prev = cur;
+    }
+    fprintf(stderr, "utflyby: scanout settled after %d ms (%s)\n",
+            i * 20, same >= 2 ? "stable" : "still changing");
+}
 /* Quartz screencapture sees WindowServer's stale black buffer while this
  * driver presents directly. Save the actual 32-bit scanout, after measurement. */
 static void capture_scanout(const char *path)
@@ -59,6 +93,7 @@ static void capture_scanout(const char *path)
     display = main_display(); w = width(display); h = height(display);
     stride = pitch(display); src = base(display);
     if (!src || bpp(display) != 32 || !w || !h || w > 16384 || stride < w*4) return;
+    wait_presented(src, w, h, stride);
     row = malloc(w*3);
     if (!row) return;
     file = fopen(path, "wb");

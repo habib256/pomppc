@@ -17,12 +17,49 @@
  *
  * Affiche le renderer choisi (GL_RENDERER) et la liste des renderers connus
  * de CGL : c'est ce qui prouve quel plugin GL a réellement rendu. Écrit l'image
- * dans un PPM. Code de sortie 0 si les pixels témoins sont bons.
+ * dans un PPM.
+ *
+ * CODES DE SORTIE (la chaîne de verdict : gltest → job.sh → agent.sh →
+ * devloop.py run ; bug hunt §8.2) :
+ *     0  tous les pixels témoins sont bons
+ *     1  au moins un témoin faux
+ *     2  CGLChoosePixelFormat a refusé — ou, pour « diff », deux images
+ *        incomparables (fichier illisible, tailles différentes)
+ *     3  CGLCreateContext a échoué
+ *     4  une entrée GL indispensable à la scène manque
+ *     5  SCÈNE INCONNUE (un nom mal tapé rendait 0 et une image noire : T2)
+ *     6  GLTEST_REQUIRE n'est pas dans GL_RENDERER (T5)
+ *     2  pour « diff » : écart hors arêtes au-delà de GLTEST_DIFF_MAX (T1)
+ *
+ * Variables d'environnement : GLTEST_NOWS, GLTEST_ACCEL, GLTEST_COLOR16,
+ * GLTEST_STENCIL, GLTEST_RENDERER, GLTEST_ROWPAD ;
+ *   GLTEST_REQUIRE=<texte>   exige ce texte dans GL_RENDERER (« POMPPC »
+ *                            pour prouver que c'est NOTRE plugin qui rend,
+ *                            et pas le rendu logiciel d'Apple) ;
+ *   GLTEST_DIFF_MAX=<n>      seuil de « gltest diff » hors arêtes (défaut 2).
+ *
+ * 71 SCÈNES (par ordre alphabétique ; « diff » n'en est pas une, c'est le
+ * comparateur d'images). Les neuf dernières arrivées sont celles de la chaîne
+ * de verdict, une par trou du bug hunt : alpharep (H1), texcross (H2),
+ * readpack (P1), drawpack (P2), texdelmid (P10), vbocolor (P13), rawprim (S2),
+ * offset (H4), forkdraw (P8).
+ *
+ * alpharep bigstrip blendc caps clip comb combprobe cube cubeprobe depth
+ * depthrt dlist drawpack entry fill fogz forkdraw fusion game gl15
+ * gouraud lightprobe lit logicop matbegin matprobe mix mixte mtxprobe
+ * occl offset polymode prims probe2 ptprobe qprobe rawprim readpack
+ * sepspec spin state stencil stencilprobe stipple t3dprobe tclprobe
+ * tcprobe tex tex13 tex14 tex3d texcache texcross texdelmid texfmt
+ * texgen texlod texpack texpersp texprobe texup tgprobe tri v14probe v15
+ * v8probe varray varrayvbo vbocolor wrapprobe xformprobe
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <signal.h>
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
 #include <OpenGL/glu.h>
@@ -131,13 +168,92 @@ static void check(const char *what, int x, int y, unsigned long want)
     if (!ok) failures++;
 }
 
+/* Témoin à TOLÉRANCE, par composante. Pour les valeurs dont l'arrondi de
+   l'implémentation peut différer d'une unité (produits de GL_MODULATE,
+   couleur d'effacement) : l'échec qu'on cherche est franc (une bande noire,
+   une couleur primaire ignorée), pas un demi-quantum. En drawable 16 bits la
+   tolérance inclut le pas de quantification (1/31 = 8/255). */
+static void check_near(const char *what, int x, int y, unsigned long want, int tol)
+{
+    unsigned long got = px(x, y);
+    int k, ok = 1;
+    if (BPP == 2) tol += 8;
+    for (k = 0; k < 3; k++) {
+        int d = (int)((got >> (k * 8)) & 255) - (int)((want >> (k * 8)) & 255);
+        if (d < 0) d = -d;
+        if (d > tol) ok = 0;
+    }
+    printf("  %s %-28s (%3d,%3d) = %06lx (attendu %06lx ±%d)\n",
+           ok ? "ok  " : "FAIL", what, x, y, got, want, tol);
+    if (!ok) failures++;
+}
+
+/* Témoin logique : une condition déjà calculée par la scène (un compte, un
+   retour d'appel). Sert aux scènes qui ne regardaient AUCUN pixel et ne
+   pouvaient donc pas échouer (bug hunt T19). */
+static void check_cond(const char *what, int ok)
+{
+    printf("  %s %s\n", ok ? "ok  " : "FAIL", what);
+    if (!ok) failures++;
+}
+
+/* Nombre de couleurs DISTINCTES de l'image, plafonné à `cap` (au plus 64).
+   Une image « perdue » — flux jeté par l'hôte, rendu vide, effacement seul —
+   est uniforme ; une scène réellement dessinée ne l'est jamais. C'est le
+   témoin de dernier recours des scènes de débit (fill, game), qui ne
+   vérifiaient rien. */
+static int distinct_colors(int cap)
+{
+    unsigned long seen[64];
+    int n = 0, x, y, i;
+    if (cap > 64) cap = 64;
+    for (y = 0; y < H; y++)
+        for (x = 0; x < W; x++) {
+            unsigned long c = px(x, y);
+            for (i = 0; i < n; i++)
+                if (seen[i] == c) break;
+            if (i == n) {
+                seen[n++] = c;
+                if (n >= cap) return n;
+            }
+        }
+    return n;
+}
+
+/* Pixels d'un segment (n pas de (dx,dy) depuis (x,y)) qui DIFFÈRENT de `c`. */
+static int seg_count_ne(int x, int y, int dx, int dy, int n, unsigned long c)
+{
+    int i, k = 0;
+    for (i = 0; i < n; i++, x += dx, y += dy)
+        if (x >= 0 && y >= 0 && x < W && y < H && px(x, y) != c) k++;
+    return k;
+}
+
+/* Pixels de toute l'image égaux à `c`. */
+static long count_color(unsigned long c)
+{
+    long k = 0;
+    int x, y;
+    for (y = 0; y < H; y++)
+        for (x = 0; x < W; x++)
+            if (px(x, y) == c) k++;
+    return k;
+}
+
 /* Comparaison de deux PPM : écart maximal par composante, et où. C'est la
    preuve « image entière » demandée à côté des pixels témoins ; elle se fait
-   DANS l'invité, sur les deux PPM produits par le même programme. */
+   DANS l'invité, sur les deux PPM produits par le même programme.
+   REND 2 si l'écart HORS ARÊTES dépasse GLTEST_DIFF_MAX (2 par défaut) : la
+   fonction calculait cet écart, l'imprimait… et rendait toujours 0, si bien
+   qu'aucun job ne pouvait rougir sur une image fausse (bug hunt T1). Le seuil
+   se relève pour les comparaisons où la quantification est attendue (drawable
+   16 bits : 1/31 = 8/255). */
 static int ppm_diff(const char *fa, const char *fb)
 {
     FILE *a = fopen(fa, "rb"), *b = fopen(fb, "rb");
-    int wa, ha, wb, hb, ma = 0, mb2 = 0, n2 = 0, n8 = 0, i, worst = -1;
+    int wa, ha, wb, hb, ma = 0, mb2 = 0, n2 = 0, n8 = 0, i, worst = -1, rc = 0;
+    const char *lim = getenv("GLTEST_DIFF_MAX");
+    int dmax = lim ? atoi(lim) : 2;
     unsigned char *pa, *pb;
     long np;
     if (!a || !b) { printf("diff : fichier illisible\n"); return 2; }
@@ -184,6 +300,11 @@ static int ppm_diff(const char *fa, const char *fb)
         }
         printf("     hors arêtes (voisinage 3x3 uniforme) : écart max %d/255 "
                "(en %d,%d), %d composantes > 2\n", mf, fx, fy, nf);
+        if (mf > dmax) {
+            printf("     ÉCART HORS ARÊTES %d/255 > seuil %d (GLTEST_DIFF_MAX)\n",
+                   mf, dmax);
+            rc = 2;
+        }
     }
     printf("diff %s vs %s : %dx%d, écart max %d/255 (en %d,%d), "
            "%d composantes > 2 (%.3f %%), %d > 8 (%.3f %%)\n",
@@ -213,7 +334,7 @@ static int ppm_diff(const char *fa, const char *fb)
         }
     }
     free(pa); free(pb);
-    return 0;
+    return rc;
 }
 
 static void list_renderers(void)
@@ -301,6 +422,23 @@ int main(int argc, char **argv)
     printf("GL_VENDOR   = %s\n", glGetString(GL_VENDOR));
     printf("GL_RENDERER = %s\n", glGetString(GL_RENDERER));
     printf("GL_VERSION  = %s\n", glGetString(GL_VERSION));
+    {
+        /* GLTEST_REQUIRE : QUI a rendu. Sans cette assertion, un plugin non
+           chargé (kext absent, bundle mal installé, GLEngine qui l'ignore)
+           fait tout rendre par le logiciel d'Apple — et TOUTES les scènes
+           passent au vert, y compris celles qui sont censées prouver notre
+           chaîne (bug hunt T5). Le job pose GLTEST_REQUIRE=POMPPC sur les
+           exécutions accélérées, et rien sur les exécutions de référence. */
+        const char *req = getenv("GLTEST_REQUIRE");
+        const char *rnd = (const char *)glGetString(GL_RENDERER);
+        if (req && *req && (!rnd || !strstr(rnd, req))) {
+            printf("GLTEST_REQUIRE : GL_RENDERER « %s » ne contient pas « %s »\n",
+                   rnd ? rnd : "(nul)", req);
+            CGLSetCurrentContext(0);
+            CGLDestroyContext(ctx);
+            return 6;
+        }
+    }
     {
         /* Sonde V1 de docs/re/capacites-glengine.md §9 : _gliGetInteger rend
            ctx+0x7580 pour 310 (kCGLCPGPUVertexProcessing) et ctx+0x7581 pour
@@ -733,6 +871,12 @@ int main(int argc, char **argv)
         if (frames > 1)
             printf("game : %d images %dx%d, couloir multitexture + brouillard : %.2f img/s\n",
                    frames, W, H, frames / (now() - tstart));
+        /* T19 : ces deux scènes ne regardaient aucun pixel. Le couloir
+           texturé et brouillardé donne des dizaines de teintes ; un flux jeté
+           (H4) ou une géométrie perdue laisse l'effacement seul, donc UNE
+           couleur. La couleur du brouillard n'est pas comparée directement :
+           son arrondi dépend de l'implémentation. */
+        check_cond("couloir dessiné (image non uniforme)", distinct_colors(24) >= 24);
     } else if (!strcmp(scene, "comb")) {
         /* GL_COMBINE et quatre unités (Marble Blast, moteur Torque) : une
            bande par montage, textures 1×1 pour que le résultat soit exact.
@@ -741,6 +885,7 @@ int main(int argc, char **argv)
         static const unsigned char tb[4] = { 128, 255, 0, 255 };
         static const float envc[4] = { 0.25f, 0, 0, 1 };
         GLuint id[2];
+        unsigned long band[4];
         int f, u;
         glGenTextures(2, id);
         for (f = 0; f < 2; f++) {
@@ -804,8 +949,21 @@ int main(int argc, char **argv)
             glVertex2f(0, y0 + H / 4.0f);
             glEnd();
             glFinish();
-            printf("  bande %d (%d unités) = %06lx\n", f, nunits,
-                   px(W / 2, (int)(y0 + H / 8.0f)));
+            band[f] = px(W / 2, (int)(y0 + H / 8.0f));
+            printf("  bande %d (%d unités) = %06lx\n", f, nunits, band[f]);
+        }
+        /* T19 : la scène imprimait quatre couleurs que personne ne comparait.
+           La bande 0 est un simple GL_MODULATE, exact au bit près :
+           texel (128,64,255) × couleur primaire (1, 0.5, 0.25) = (128,32,64).
+           Les trois autres dépendent de l'arrondi de chaque étage de
+           combinaison ; ce qu'on exige d'elles, c'est de ne pas être noires
+           (étage perdu, texture absente) ni identiques à la bande 0 (unités
+           supplémentaires ignorées). */
+        check_near("comb bande 0 = MODULATE", W / 2, H / 8, 0x802040, 2);
+        for (f = 1; f < 4; f++) {
+            char lbl[48];
+            sprintf(lbl, "comb bande %d non noire et ≠ bande 0", f);
+            check_cond(lbl, band[f] != 0x000000 && band[f] != band[0]);
         }
         for (u = 3; u >= 0; u--) {
             glActiveTextureARB(GL_TEXTURE0_ARB + u);
@@ -1629,6 +1787,30 @@ int main(int argc, char **argv)
         glDisable(GL_TEXTURE_3D); glEnable(GL_TEXTURE_CUBE_MAP);
         glClear(GL_COLOR_BUFFER_BIT);                                   /* 27 */
         glFinish();
+        /* T19 : la sonde ne servait qu'à faire tracer le plugin ; elle ne
+           pouvait pas échouer. On relit maintenant l'état par GL lui-même —
+           c'est aussi ce que le pilote doit avoir transmis — et on exige zéro
+           erreur GL sur la séquence : un `glEnable` refusé (GL_INVALID_ENUM
+           sur un GL sans ARB_texture_rectangle, cf. G2) empoisonnerait la
+           commande SUIVANTE, saine. */
+        {
+            GLint df = 0;
+            GLfloat cc[4];
+            GLenum e2 = glGetError();
+            glGetIntegerv(GL_DEPTH_FUNC, &df);
+            glGetFloatv(GL_COLOR_CLEAR_VALUE, cc);
+            check_cond("state : aucune erreur GL sur les 27 réglages",
+                       e2 == GL_NO_ERROR);
+            check_cond("state : GL_DEPTH_FUNC relu = GL_GEQUAL", df == GL_GEQUAL);
+            check_cond("state : GL_BLEND actif", glIsEnabled(GL_BLEND) != 0);
+            check_cond("state : GL_SCISSOR_TEST actif",
+                       glIsEnabled(GL_SCISSOR_TEST) != 0);
+            check_cond("state : couleur d'effacement relue (0.125)",
+                       cc[0] > 0.12f && cc[0] < 0.13f);
+            /* R et B seuls écrits (glColorMask 1,0,1,0), vert gardé du
+               nettoyage précédent : (32, 64, 96) à l'arrondi près. */
+            check_near("state : pixel effacé", W / 2, H / 2, 0x204060, 1);
+        }
     } else if (!strcmp(scene, "v15")) {
         /* Relevé, fonction par fonction, de ce que la chaîne TIENT vraiment —
            c'est la matière de docs/re/version-extensions.md et la condition de
@@ -1636,12 +1818,13 @@ int main(int argc, char **argv)
            test fait l'appel, note l'erreur GL, dessine une case de 24×24 et
            compare le pixel du centre à ce qu'OpenGL exige. Le verdict est
            imprimé ; la scène ne compte AUCUN échec, c'est un relevé. */
-        int cell = 0;
+        int cell = 0, v15nt = 0;
         GLuint tid[4];
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glGenTextures(4, tid);
 #define V15_BEGIN(nm) do { const char *v15n = nm; GLenum v15e; unsigned long v15g; \
+                           int v15ok; \
                            int v15x = (cell % 5) * 25 + 4, v15y = (cell / 5) * 25 + 4; \
                            cell++; while (glGetError() != GL_NO_ERROR) { }
 #define V15_QUAD() do { glBegin(GL_QUADS); \
@@ -1649,12 +1832,17 @@ int main(int argc, char **argv)
               glVertex2f((float)v15x + 20, (float)v15y); \
               glVertex2f((float)v15x + 20, (float)v15y + 20); \
               glVertex2f((float)v15x, (float)v15y + 20); glEnd(); } while (0)
+/* T19 : le relevé comptait ses « NON TENU » pour l'œil seulement, et la scène
+   rendait 0 quoi qu'il arrive. Chaque NON TENU est désormais un échec : c'est
+   la définition même de la tâche 4.1, « rien n'est annoncé qui ne soit tenu ».
+   Les jobs greppent en plus la chaîne, pour la nommer dans leur verdict. */
 #define V15_END(want) glFinish(); v15e = glGetError(); \
                       v15g = px(v15x + 10, v15y + 10); \
+                      v15ok = (v15e == GL_NO_ERROR && v15g == (unsigned long)(want)); \
                       printf("  %-28s err 0x%-4x pixel %06lx attendu %06lx : %s\n", \
                              v15n, (unsigned)v15e, v15g, (unsigned long)(want), \
-                             (v15e == GL_NO_ERROR && v15g == (unsigned long)(want)) \
-                             ? "TENU" : "NON TENU"); } while (0)
+                             v15ok ? "TENU" : "NON TENU"); \
+                      if (!v15ok) { v15nt++; failures++; } } while (0)
 
         /* ── 1.2 : textures 3D ── */
         V15_BEGIN("1.2 texture 3D")
@@ -2034,6 +2222,7 @@ int main(int argc, char **argv)
 #undef V15_BEGIN
 #undef V15_QUAD
 #undef V15_END
+        printf("v15 : %d capacité(s) annoncée(s) NON TENUE(S) sur %d\n", v15nt, cell);
         glDeleteTextures(4, tid);
         glFinish();
     } else if (!strcmp(scene, "blendc")) {
@@ -2224,6 +2413,34 @@ int main(int argc, char **argv)
         glEnd();
         glDisable(GL_LINE_STIPPLE);
         glFinish();
+        /* T19 : la scène était un relevé pour l'œil. Ce qu'on peut exiger
+           sans dépendre du sens de balayage : dans le quadrilatère de
+           gauche, la colonne alterne (motif en LIGNES) et la ligne, non ;
+           à droite, c'est l'inverse (motif en COLONNES). Un pointillé
+           ignoré remplit tout, un flux perdu ne remplit rien : les deux
+           donnent zéro alternance. Le fond est relu plutôt que supposé
+           (drawable 16 bits). */
+        {
+            unsigned long bg = px(1, H - 1);
+            int qh = H * 3 / 4 - 4, n;
+            n = seg_count_ne(W / 4, 2, 0, 1, qh, bg);
+            check_cond("stipple gauche : la colonne alterne (motif en lignes)",
+                       n > 0 && n < qh);
+            n = seg_count_ne(2, H / 4, 1, 0, W / 2 - 6, bg);
+            check_cond("stipple gauche : la ligne est pleine ou vide, pas rayée",
+                       n == 0 || n == W / 2 - 6);
+            n = seg_count_ne(W / 2 + 4, H / 4, 1, 0, W / 2 - 8, bg);
+            check_cond("stipple droite : la ligne alterne (motif en colonnes)",
+                       n > 0 && n < W / 2 - 8);
+            {   /* bande de quelques lignes : la position exacte du segment
+                   dépend de l'arrondi du rastériseur, pas son existence */
+                int yy, hit = 0;
+                for (yy = H - 14; yy <= H - 10; yy++)
+                    hit += seg_count_ne(4, yy, 1, 0, W - 8, bg);
+                check_cond("stipple : les segments pointillés du bas ont marqué",
+                           hit > 0);
+            }
+        }
     } else if (!strcmp(scene, "occl")) {
         /* Requêtes d'occlusion (v8 / OpenGL 1.5). Le compte est vérifié EXACT :
            un rectangle dont l'aire est connue, puis le même coupé de moitié par
@@ -2455,7 +2672,9 @@ int main(int argc, char **argv)
             { 0x86A2, "GL_NUM_COMPRESSED_TEXTURE_FORMATS", 1 },
         };
         const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+        float lim[32];
         int i, nl = 0;
+        for (i = 0; i < 32; i++) lim[i] = 0;
         printf("== VERSION == %s\n", (const char *)glGetString(GL_VERSION));
         printf("== VENDOR   == %s\n", (const char *)glGetString(GL_VENDOR));
         printf("== RENDERER == %s\n", (const char *)glGetString(GL_RENDERER));
@@ -2478,12 +2697,35 @@ int main(int argc, char **argv)
             glGetFloatv(gi[i].e, f);
             if (glGetError() != GL_NO_ERROR)
                 printf("  %-34s : (refuse)\n", gi[i].n);
-            else if (gi[i].nv == 2)
-                printf("  %-34s : %g %g\n", gi[i].n, f[0], f[1]);
-            else
-                printf("  %-34s : %g\n", gi[i].n, f[0]);
+            else {
+                lim[i] = f[0];
+                if (gi[i].nv == 2)
+                    printf("  %-34s : %g %g\n", gi[i].n, f[0], f[1]);
+                else
+                    printf("  %-34s : %g\n", gi[i].n, f[0]);
+            }
         }
         glFinish();
+        /* T19 : le relevé n'était qu'un relevé. Ce qui doit être vrai de
+           TOUTE chaîne qui se dit OpenGL 1.5 avec quatre unités de texture —
+           la tâche 4.1 : « rien n'est annoncé qui ne soit tenu ». Un nombre
+           nul ici veut dire que glGet a refusé la limite. */
+        {
+            const char *ver = (const char *)glGetString(GL_VERSION);
+            int maj = ver ? atoi(ver) : 0;
+            int min = (ver && strchr(ver, '.')) ? atoi(strchr(ver, '.') + 1) : 0;
+            check_cond("caps : GL_VERSION >= 1.2", maj > 1 || (maj == 1 && min >= 2));
+            check_cond("caps : au moins 8 extensions annoncées", nl >= 8);
+            check_cond("caps : GL_MAX_TEXTURE_SIZE >= 256", lim[0] >= 256);
+            check_cond("caps : GL_MAX_TEXTURE_UNITS >= 2", lim[1] >= 2);
+            check_cond("caps : GL_MAX_LIGHTS >= 8", lim[7] >= 8);
+            check_cond("caps : GL_MAX_CLIP_PLANES >= 6", lim[8] >= 6);
+            /* La spec dit ≥ 4, mais GLEngine annonce 3 pour tout renderer
+               (mesuré : plugin 3, Generic d'Apple < 4) : ce n'est pas notre
+               chaîne qui est en cause, on exige seulement une valeur relevée. */
+            check_cond("caps : GL_SUBPIXEL_BITS >= 1", lim[11] >= 1);
+            check_cond("caps : GL_DEPTH_BITS > 0", lim[12] > 0);
+        }
     } else if (!strcmp(scene, "entry")) {
         /* Un appel par fonction de chaque version annoncée, résolu par la
            liaison normale du processus : la question n'est pas « la chaîne
@@ -2579,6 +2821,27 @@ int main(int argc, char **argv)
             CALLED("glDrawRangeElements", glEnableClientState(GL_VERTEX_ARRAY); glVertexPointer(3, GL_FLOAT, 0, vp); ((void (*)(GLenum, GLuint, GLuint, GLsizei, GLenum, const GLvoid *))fp_)(GL_TRIANGLES, 0, 2, 3, GL_UNSIGNED_INT, ix); glDisableClientState(GL_VERTEX_ARRAY));
             CALLED("glTexImage3D", ((void (*)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const GLvoid *))fp_)(0x806F /* GL_TEXTURE_3D */, 0, GL_RGBA, 2, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, t3));
 #undef CALLED
+            glFinish();
+            /* T19 : la scène dessinait un carré vert ou rouge par appel et
+               ne regardait aucun des deux. On les relit : vert = point
+               d'entrée présent ET appel sans erreur GL. Les cases font 16
+               pixels, huit par ligne — il faut donc au moins 128 de large. */
+            if (W >= 128 && H >= ((col + 7) / 8) * 16) {
+                int c2, nvert = 0, nrouge = 0;
+                for (c2 = 0; c2 < col; c2++) {
+                    unsigned long p2 = px((c2 % 8) * 16 + 8, (c2 / 8) * 16 + 8);
+                    if (p2 == 0x00FF00) nvert++;
+                    else if (p2 == 0xFF0000) nrouge++;
+                }
+                printf("entry : %d carré(s) vert(s), %d rouge(s) sur %d\n",
+                       nvert, nrouge, col);
+                check_cond("entry : aucun point d'entrée absent", miss == 0);
+                check_cond("entry : tous les appels passent, et sont rendus en vert",
+                           nvert == col);
+            } else {
+                printf("entry : image trop petite (%dx%d) pour relire les cases\n", W, H);
+                check_cond("entry : aucun point d'entrée absent", miss == 0);
+            }
         }
         glFinish();
     } else if (!strcmp(scene, "depthrt")) {
@@ -3475,6 +3738,14 @@ int main(int argc, char **argv)
         }
         printf("fill : %d images %dx%d, 40 grands triangles : %.2f img/s\n",
                frames, W, H, frames / (now() - t0));
+        /* T19 : la scène ne mesurait qu'un débit — un pilote qui jette tout
+           le flux affichait le meilleur débit du dépôt et rendait 0. Les 40
+           triangles mélangés laissent forcément une image riche ; le gris
+           d'effacement seul (0.2, 0.2, 0.2) ne donne qu'une couleur. */
+        check_cond("fill : image non uniforme (les triangles ont été dessinés)",
+                   distinct_colors(8) >= 8);
+        check_cond("fill : le centre n'est pas le gris d'effacement",
+                   px(W / 2, H / 2) != 0x333333);
     } else if (!strcmp(scene, "sepspec")) {
         /* Couleur spéculaire séparée (OpenGL 1.2) : lumière directionnelle à
            diffuse noire et spéculaire blanche, matériau à spéculaire blanche
@@ -4951,6 +5222,381 @@ int main(int argc, char **argv)
             check("dernière image téléversée", W / 2, H / 2, c);
         }
         free(pix);
+    } else if (!strcmp(scene, "alpharep")) {
+        /* H1 — texture de base GL_ALPHA. Table 3.22 d'OpenGL 1.5 : en
+           GL_REPLACE comme en GL_MODULATE, la couleur du fragment reste la
+           couleur PRIMAIRE, seul l'alpha vient du texel. Le cœur qgpu
+           dépaquetait GL_ALPHA en « blanc + A » : le quadrilatère devient
+           blanc, et les polices et HUD des jeux avec lui. Témoins : rouge à
+           gauche (REPLACE), vert à droite (MODULATE) — jamais du blanc. */
+        static const GLubyte a4[4] = { 64, 128, 192, 255 };
+        GLuint id;
+        glClearColor(0, 0, 1, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glGenTextures(1, &id);
+        glBindTexture(GL_TEXTURE_2D, id);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);      /* lignes de 2 octets */
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, 2, 2, 0, GL_ALPHA, GL_UNSIGNED_BYTE, a4);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glColor3ub(255, 0, 0);
+        glTexCoord2f(0.25f, 0.25f);
+        glBegin(GL_QUADS);
+        glVertex2f(0, 0); glVertex2f((float)W / 2, 0);
+        glVertex2f((float)W / 2, (float)H); glVertex2f(0, (float)H);
+        glEnd();
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        glColor3ub(0, 255, 0);
+        glBegin(GL_QUADS);
+        glVertex2f((float)W / 2, 0); glVertex2f((float)W, 0);
+        glVertex2f((float)W, (float)H); glVertex2f((float)W / 2, (float)H);
+        glEnd();
+        glFinish();
+        glDisable(GL_TEXTURE_2D);
+        check("alpharep REPLACE = primaire", W / 4, H / 2, 0xFF0000);
+        check("alpharep MODULATE = primaire", 3 * W / 4, H / 2, 0x00FF00);
+        glDeleteTextures(1, &id);
+    } else if (!strcmp(scene, "texcross")) {
+        /* H2 — les huit couples (format, type) 16 bits acceptés depuis la
+           v14. Les quatre « croisés » (BGRA+4444, RGBA+4444_REV, BGRA+5551,
+           RGBA+1555_REV) n'étaient pas distingués par le cœur, qui ne
+           consultait pas le format : R et B échangés, texel rouge rendu BLEU.
+           Chaque couple téléverse le MÊME texel — rouge opaque — encodé selon
+           sa propre convention, en GL_REPLACE : le témoin est FF0000. */
+        static const struct { const char *n; GLenum fmt; GLenum type; unsigned short w; }
+        cs[8] = {
+            { "RGBA 4444",     GL_RGBA, 0x8033, 0xF00F },
+            { "BGRA 4444",     0x80E1,  0x8033, 0x00FF },
+            { "RGBA 4444_REV", GL_RGBA, 0x8365, 0xF00F },
+            { "BGRA 4444_REV", 0x80E1,  0x8365, 0xFF00 },
+            { "RGBA 5551",     GL_RGBA, 0x8034, 0xF801 },
+            { "BGRA 5551",     0x80E1,  0x8034, 0x003F },
+            { "RGBA 1555_REV", GL_RGBA, 0x8366, 0x801F },
+            { "BGRA 1555_REV", 0x80E1,  0x8366, 0xFC00 }
+        };
+        GLuint tid[8];
+        int i2, nok = 0;
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glGenTextures(8, tid);
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glColor3ub(255, 255, 255);
+        for (i2 = 0; i2 < 8; i2++) {
+            unsigned short t2[4];
+            int cx = (i2 % 4) * (W / 4), cy = (i2 / 4) * (H / 2);
+            GLenum e2;
+            t2[0] = t2[1] = t2[2] = t2[3] = cs[i2].w;
+            glBindTexture(GL_TEXTURE_2D, tid[i2]);
+            while (glGetError() != GL_NO_ERROR) { }
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, cs[i2].fmt, cs[i2].type, t2);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            e2 = glGetError();
+            glTexCoord2f(0.25f, 0.25f);
+            glBegin(GL_QUADS);
+            glVertex2f((float)cx + 2, (float)cy + 2);
+            glVertex2f((float)(cx + W / 4 - 2), (float)cy + 2);
+            glVertex2f((float)(cx + W / 4 - 2), (float)(cy + H / 2 - 2));
+            glVertex2f((float)cx + 2, (float)(cy + H / 2 - 2));
+            glEnd();
+            glFinish();
+            if (e2 != GL_NO_ERROR) {
+                printf("  --   %-14s refusé par GL (err 0x%x)\n", cs[i2].n, (unsigned)e2);
+            } else {
+                char lbl[64];
+                nok++;
+                sprintf(lbl, "texcross %s = rouge", cs[i2].n);
+                check_near(lbl, cx + W / 8, cy + H / 4, 0xFF0000, 2);
+            }
+        }
+        glDisable(GL_TEXTURE_2D);
+        check_cond("texcross : au moins 4 couples 16 bits acceptés", nok >= 4);
+        glDeleteTextures(8, tid);
+    } else if (!strcmp(scene, "readpack")) {
+        /* P1 — glReadPixels en GL_RGB, GL_PACK_ALIGNMENT = 1, largeur IMPAIRE
+           (13 × 3 = 39 octets par ligne). Le plugin fabriquait son propre pas
+           et ignorait les GL_PACK_* : il écrivait des lignes alignées sur 4,
+           donc jusqu'à 3·(h−1) octets APRÈS le tampon de l'application (le
+           « double free à la sortie » de SDL et des captures). Seize octets
+           de garde à 0xA5 derrière la zone utile le disent sans ambiguïté. */
+        int rw = 13, rh = 5, guardn = 16;
+        unsigned char rp[13 * 5 * 3 + 16];
+        int i2, badpx = 0, badguard = 0, tol = (BPP == 2) ? 8 : 0;
+        glClearColor(32 / 255.0f, 160 / 255.0f, 192 / 255.0f, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glFinish();
+        memset(rp, 0xA5, sizeof(rp));
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(4, 4, rw, rh, GL_RGB, GL_UNSIGNED_BYTE, rp);
+        glPixelStorei(GL_PACK_ALIGNMENT, 4);
+        for (i2 = 0; i2 < rw * rh; i2++) {
+            int dr = (int)rp[i2 * 3] - 32, dg = (int)rp[i2 * 3 + 1] - 160,
+                db = (int)rp[i2 * 3 + 2] - 192;
+            if (dr < 0) dr = -dr;
+            if (dg < 0) dg = -dg;
+            if (db < 0) db = -db;
+            if (dr > tol || dg > tol || db > tol) badpx++;
+        }
+        for (i2 = rw * rh * 3; i2 < rw * rh * 3 + guardn; i2++)
+            if (rp[i2] != 0xA5) badguard++;
+        printf("readpack : %d pixel(s) faux sur %d, %d octet(s) de garde écrasé(s)\n",
+               badpx, rw * rh, badguard);
+        check_cond("readpack : garde de 16 octets intacte", badguard == 0);
+        check_cond("readpack : 13x5 pixels relus = couleur d'effacement", badpx == 0);
+    } else if (!strcmp(scene, "drawpack")) {
+        /* P2 — glDrawPixels d'une image GL_RGB de largeur IMPAIRE avec
+           GL_UNPACK_ALIGNMENT = 1 (39 octets par ligne) ; le plugin codait
+           l'alignement 4 en dur et lisait 40 octets par ligne : image oblique
+           et lecture hors du tampon source. Cinq lignes d'une couleur unie
+           chacune : chaque couleur doit se retrouver EXACTEMENT 13 fois. */
+        static const unsigned char rowc[5][3] = {
+            { 255, 0, 0 }, { 0, 255, 0 }, { 0, 0, 255 },
+            { 255, 255, 0 }, { 0, 255, 255 }
+        };
+        unsigned char img2[13 * 5 * 3];
+        int x2, y2, i2;
+        for (y2 = 0; y2 < 5; y2++)
+            for (x2 = 0; x2 < 13; x2++) {
+                img2[(y2 * 13 + x2) * 3 + 0] = rowc[y2][0];
+                img2[(y2 * 13 + x2) * 3 + 1] = rowc[y2][1];
+                img2[(y2 * 13 + x2) * 3 + 2] = rowc[y2][2];
+            }
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glRasterPos2f((float)(W / 4), (float)(H / 2));
+        glDrawPixels(13, 5, GL_RGB, GL_UNSIGNED_BYTE, img2);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glFinish();
+        for (i2 = 0; i2 < 5; i2++) {
+            char lbl[64];
+            unsigned long c = ((unsigned long)rowc[i2][0] << 16) |
+                              ((unsigned long)rowc[i2][1] << 8) | rowc[i2][2];
+            long n2 = count_color(c);
+            sprintf(lbl, "drawpack ligne %d : 13 pixels (%ld)", i2, n2);
+            check_cond(lbl, n2 == 13);
+        }
+    } else if (!strcmp(scene, "texdelmid")) {
+        /* P10 — glDeleteTextures ENTRE deux primitives. Le plugin fermait la
+           série de dessins bruts APRÈS avoir écrit TEX_DESTROY : l'hôte
+           exécutait le dessin qui utilise la texture une fois celle-ci
+           détruite. La moitié gauche doit rester rouge. */
+        static const GLubyte one_r[3] = { 255, 0, 0 };
+        static const GLubyte one_g[3] = { 0, 255, 0 };
+        GLuint id[2];
+        int i2;
+        glClearColor(0, 0, 1, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glGenTextures(2, id);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        for (i2 = 0; i2 < 2; i2++) {
+            glBindTexture(GL_TEXTURE_2D, id[i2]);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 1, 1, 0, GL_RGB, GL_UNSIGNED_BYTE,
+                         i2 ? one_g : one_r);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glColor3ub(255, 255, 255);
+        glTexCoord2f(0.5f, 0.5f);
+        glBindTexture(GL_TEXTURE_2D, id[0]);
+        glBegin(GL_QUADS);
+        glVertex2f(0, 0); glVertex2f((float)W / 2, 0);
+        glVertex2f((float)W / 2, (float)H); glVertex2f(0, (float)H);
+        glEnd();
+        /* ICI : aucun glFinish, aucun vidage — la suppression tombe entre les
+           deux primitives, comme dans un jeu qui libère un atlas. */
+        glDeleteTextures(1, &id[0]);
+        glBindTexture(GL_TEXTURE_2D, id[1]);
+        glBegin(GL_QUADS);
+        glVertex2f((float)W / 2, 0); glVertex2f((float)W, 0);
+        glVertex2f((float)W, (float)H); glVertex2f((float)W / 2, (float)H);
+        glEnd();
+        glFinish();
+        glDisable(GL_TEXTURE_2D);
+        check("texdelmid avant la suppression", W / 4, H / 2, 0xFF0000);
+        check("texdelmid après la suppression", 3 * W / 4, H / 2, 0x00FF00);
+        glDeleteTextures(1, &id[1]);
+    } else if (!strcmp(scene, "vbocolor")) {
+        /* P13 — le MÊME tampon de sommets dessiné trois fois avec trois
+           glColor différents. La clé du cache de tampons hôte de la v14 ne
+           retenait que (format, vmin, nverts), et QGPU_VF_COLOR était toujours
+           posé : les deuxième et troisième passages reprenaient la couleur du
+           premier. Trois carrés : rouge, vert, bleu.
+           (POMPPC_GL_VBO=0 contourne le cache : la scène doit alors passer.) */
+        typedef void (*GenBuffersFn)(GLsizei, GLuint *);
+        typedef void (*BindBufferFn)(GLenum, GLuint);
+        typedef void (*BufferDataFn)(GLenum, long, const GLvoid *, GLenum);
+        typedef void (*DeleteBuffersFn)(GLsizei, const GLuint *);
+        GenBuffersFn gen_buffers = (GenBuffersFn)gl_sym("glGenBuffers", "glGenBuffersARB");
+        BindBufferFn bind_buffer = (BindBufferFn)gl_sym("glBindBuffer", "glBindBufferARB");
+        BufferDataFn buffer_data = (BufferDataFn)gl_sym("glBufferData", "glBufferDataARB");
+        DeleteBuffersFn delete_buffers =
+            (DeleteBuffersFn)gl_sym("glDeleteBuffers", "glDeleteBuffersARB");
+        float cellw = W / 8.0f, q[8];
+        GLuint vbuf;
+        int i2;
+        if (!gen_buffers || !bind_buffer || !buffer_data || !delete_buffers) {
+            fprintf(stderr, "VBO entry points unavailable\n");
+            return 4;
+        }
+        q[0] = 0;     q[1] = 0;
+        q[2] = cellw; q[3] = 0;
+        q[4] = cellw; q[5] = cellw;
+        q[6] = 0;     q[7] = cellw;
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        gen_buffers(1, &vbuf);
+        bind_buffer(0x8892, vbuf);
+        buffer_data(0x8892, sizeof(q), q, 0x88E4);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glVertexPointer(2, GL_FLOAT, 0, 0);
+        for (i2 = 0; i2 < 3; i2++) {
+            glPushMatrix();
+            glTranslatef(i2 * 2 * cellw + cellw / 2, H / 2.0f - cellw / 2, 0);
+            glColor3ub((GLubyte)(i2 == 0 ? 255 : 0), (GLubyte)(i2 == 1 ? 255 : 0),
+                       (GLubyte)(i2 == 2 ? 255 : 0));
+            glDrawArrays(GL_QUADS, 0, 4);
+            glPopMatrix();
+        }
+        glDisableClientState(GL_VERTEX_ARRAY);
+        bind_buffer(0x8892, 0);
+        delete_buffers(1, &vbuf);
+        glFinish();
+        check("vbocolor passage 1 rouge", (int)(cellw), H / 2, 0xFF0000);
+        check("vbocolor passage 2 vert", (int)(3 * cellw), H / 2, 0x00FF00);
+        check("vbocolor passage 3 bleu", (int)(5 * cellw), H / 2, 0x0000FF);
+    } else if (!strcmp(scene, "rawprim")) {
+        /* S2 — points et lignes TEXTURÉS par glDrawArrays (chemin brut v7).
+           Le repli logiciel les dessinait avec le chemin « sans texture » :
+           sprites de particules unis. Texture rouge unie, couleur primaire
+           VERTE, étage en GL_REPLACE : tout ce qui est dessiné est ROUGE, et
+           du vert quelque part signe le chemin non texturé. */
+        static const GLubyte one_r[3] = { 255, 0, 0 };
+        GLfloat vp2[8], tc2[8];
+        GLuint id;
+        int px1 = W / 4, px2 = W / 2, py = H / 4, ly = H / 2, i2;
+        glClearColor(0, 0, 0.25f, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glGenTextures(1, &id);
+        glBindTexture(GL_TEXTURE_2D, id);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 1, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, one_r);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glColor3ub(0, 255, 0);
+        vp2[0] = px1 + 0.5f; vp2[1] = py + 0.5f;        /* deux points */
+        vp2[2] = px2 + 0.5f; vp2[3] = py + 0.5f;
+        vp2[4] = 8.5f;       vp2[5] = ly + 0.5f;        /* un segment */
+        vp2[6] = W - 8.5f;   vp2[7] = ly + 0.5f;
+        for (i2 = 0; i2 < 4; i2++) { tc2[i2 * 2] = 0.5f; tc2[i2 * 2 + 1] = 0.5f; }
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+        glVertexPointer(2, GL_FLOAT, 0, vp2);
+        glTexCoordPointer(2, GL_FLOAT, 0, tc2);
+        glPointSize(1.0f);
+        glDrawArrays(GL_POINTS, 0, 2);
+        glDrawArrays(GL_LINES, 2, 2);
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        glFinish();
+        glDisable(GL_TEXTURE_2D);
+        check("rawprim point 1 texturé", px1, py, 0xFF0000);
+        check("rawprim point 2 texturé", px2, py, 0xFF0000);
+        check("rawprim ligne texturée", W / 2, ly, 0xFF0000);
+        check_cond("rawprim : aucun pixel vert (chemin non texturé)",
+                   count_color(0x00FF00) == 0);
+        glDeleteTextures(1, &id);
+    } else if (!strcmp(scene, "offset")) {
+        /* H4 — un argument hors bornes fait répondre BAD_ARG au cœur, qui
+           abandonne TOUT LE RESTE du flux, SURF_PRESENT compris : ce qui est
+           dessiné APRÈS disparaît. Ici, un glPolygonOffset extrême puis un
+           glPolygonOffset NaN, chacun suivi d'un témoin. Le test de
+           profondeur est éteint : l'offset ne peut pas changer l'image, seule
+           la survie du flux est en jeu. */
+        union { unsigned int u; float f; } nanv;
+        float band = H / 4.0f;
+        nanv.u = 0x7FC00000u;                    /* NaN silencieux */
+        glClearColor(0, 0, 1, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(1.0e6f, 1.0e6f);
+        glColor3ub(255, 128, 0);                 /* bande 0 : peut disparaître */
+        glRectf(0, 0, (float)W, band);
+        glColor3ub(255, 0, 255);                 /* bande 1 : TÉMOIN */
+        glRectf(0, band, (float)W, 2 * band);
+        glPolygonOffset(nanv.f, nanv.f);
+        glColor3ub(0, 255, 255);                 /* bande 2 : peut disparaître */
+        glRectf(0, 2 * band, (float)W, 3 * band);
+        glPolygonOffset(0, 0);
+        glDisable(GL_POLYGON_OFFSET_FILL);
+        glColor3ub(255, 255, 0);                 /* bande 3 : TÉMOIN */
+        glRectf(0, 3 * band, (float)W, (float)H);
+        glFinish();
+        printf("  bandes : %06lx %06lx %06lx %06lx\n",
+               px(W / 2, (int)(band / 2)), px(W / 2, (int)(band * 1.5f)),
+               px(W / 2, (int)(band * 2.5f)), px(W / 2, (int)(band * 3.5f)));
+        check("offset : témoin après un offset extrême", W / 2, (int)(band * 1.5f), 0xFF00FF);
+        check("offset : témoin après un offset NaN", W / 2, (int)(band * 3.5f), 0xFFFF00);
+    } else if (!strcmp(scene, "forkdraw")) {
+        /* P8 — un fork() SANS exec (Safari et WebKit le font) : l'enfant
+           hérite la tranche, le port Mach et tout l'état du plugin, et écrit
+           dans LE MÊME flux que le père. Sans pthread_atfork, le père voit
+           son flux mélangé à celui de l'enfant. L'enfant efface en blanc et
+           dessine, puis _exit ; le père redessine ensuite SON image et la
+           vérifie.
+           ATTENTION : si l'enfant hérite un verrou déjà pris, il peut se
+           bloquer — l'attente est donc bornée (10 s) et suivie d'un kill.
+           Cette scène est la dernière de la liste des jobs pour cette
+           raison. */
+        pid_t pid;
+        int st = 0, i2 = 0;
+        glClearColor(0, 0, 1, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glColor3ub(255, 0, 0);
+        glRectf(0, 0, (float)W / 2, (float)H);
+        glFinish();
+        fflush(stdout);
+        pid = fork();
+        if (pid == 0) {
+            glClearColor(1, 1, 1, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glColor3ub(0, 0, 0);
+            glRectf(0, 0, (float)W, (float)H);
+            glFinish();
+            _exit(0);                /* jamais exit() : pas d'atexit hérité */
+        }
+        if (pid < 0) {
+            printf("forkdraw : fork impossible\n");
+            failures++;
+        } else {
+            for (i2 = 0; i2 < 100; i2++) {
+                if (waitpid(pid, &st, WNOHANG) == pid) break;
+                usleep(100000);
+            }
+            if (i2 >= 100) {
+                printf("forkdraw : l'enfant ne rend pas la main (10 s), tué\n");
+                kill(pid, SIGKILL);
+                waitpid(pid, &st, 0);
+                failures++;
+            }
+            glClearColor(0, 0, 1, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glColor3ub(0, 255, 0);
+            glRectf(0, 0, (float)W / 2, (float)H);
+            glFinish();
+            check("forkdraw : image du père après le fork", W / 4, H / 2, 0x00FF00);
+            check("forkdraw : fond du père intact", 3 * W / 4, H / 2, 0x0000FF);
+        }
     } else if (!strcmp(scene, "spin")) {
         int frames = 60, f, i;
         double t0;
@@ -4977,6 +5623,13 @@ int main(int argc, char **argv)
         }
         printf("spin : %d images %dx%d, 400 triangles chacune : %.2f img/s\n",
                frames, W, H, frames / (now() - t0));
+    } else {
+        /* Scène inconnue : un nom mal tapé dans la liste d'un job rendait 0,
+           « OK (0 échec) » et un PPM noir — un faux vert parfait (T2). */
+        printf("scène inconnue : « %s »\n", scene);
+        CGLSetCurrentContext(0);
+        CGLDestroyContext(ctx);
+        return 5;
     }
 
     {

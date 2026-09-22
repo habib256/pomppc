@@ -13,7 +13,10 @@ cp run.sh "$W/"
 MACOSX_DEPLOYMENT_TARGET=10.4 /usr/bin/gcc-4.0 -arch ppc -dynamiclib -undefined dynamic_lookup -O2 seed.c -o "$W/seed.dylib" > out/build.txt 2>&1 || { cat out/build.txt; exit 1; }
 printf '%s\n' "$RES" > "$W/resolution.txt"
 chmod -R 777 "$W"
-gui_run "sh '$W/run.sh' '$W'" 600
+# gui_run rend le code de sortie de la session (bug hunt T4) ; le garder
+# sans sauter le nettoyage ni le rapatriement des journaux.
+if gui_run "sh '$W/run.sh' '$W'" 600; then grc=0; else grc=$?; fi
+echo "run.sh dans la session : rc=$grc (124 = timeout du relais)"
 if [ ! -f "$W/complete" ] && [ -f "$W/runner.pid" ]; then
     kill "$(cat "$W/runner.pid")" 2>/dev/null || true
     n=0
@@ -24,4 +27,5 @@ if [ ! -f "$W/complete" ] && [ -f "$W/runner.pid" ]; then
 fi
 cp "$W"/* out/
 [ -f "$W/complete" ] || { echo "INCOMPLETE: see game.log/run.log"; exit 1; }
+[ "$grc" = 0 ] || { echo "run.sh a échoué (rc=$grc)"; exit "$grc"; }
 cat "$W/manifest.txt"

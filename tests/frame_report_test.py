@@ -38,6 +38,26 @@ class FrameReportTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 report.summarize(rows)
 
+    def test_window_starts_at_the_first_swap_of_the_selected_context(self):
+        # UT2004 renders its menu in one context and the level in another:
+        # --start counted from absolute trace time would skip past the very
+        # frames it was meant to keep (bug hunt T8).
+        menu = [{"context": "menu", "elapsed_ms": str(t)} for t in (0, 5000, 10000)]
+        level = [{"context": "a", "elapsed_ms": str(10000 + t)}
+                 for t in (0, 20, 40, 60, 260)]
+        result = report.summarize(menu + level, start=.02, duration=.04, context="a")
+        self.assertEqual(result["intervals"], 2)
+        self.assertEqual(result["fps"], 50)
+        self.assertEqual(result["window_origin_ms"], 10000)
+
+    def test_rejects_non_finite_timestamps(self):
+        # A NaN silently dropped its interval instead of being reported:
+        # every window comparison against a NaN is false (bug hunt T9).
+        for bad in ("nan", "inf", "-inf"):
+            rows = self.rows + [{"context": "a", "elapsed_ms": bad}]
+            with self.assertRaisesRegex(ValueError, "non-finite"):
+                report.summarize(rows)
+
 
 if __name__ == "__main__":
     unittest.main()

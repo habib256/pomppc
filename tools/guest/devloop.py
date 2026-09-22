@@ -31,7 +31,16 @@ Variables d'environnement :
                « flottant rapide ». Vide (défaut) = `-cpu g4` inchangé.
     POMPPC_DISPLAY  affichage QEMU (défaut none ; cocoa pour une fenêtre macOS).
                    --gui choisit le bureau Tiger, indépendamment de cet affichage.
+    POMPPC_VGA_ID  identifiant qdev donné à l'écran VGA (défaut vga0) : c'est
+                   lui que `screendump device=` désigne, pour ne jamais capturer
+                   l'écran d'un AUTRE device (QFB) par hasard. Vide = écran de
+                   la machine, sans identifiant, et capture de l'écran primaire.
     DEVDISK, CDROM, SMP, SND, RES, NET, GPU_BACKEND, GPU_TRACE, GUI_USER
+
+`run` REND LE CODE DE SORTIE DU JOB (en-tête « OUT <id> <m> <rc> » écrit par
+l'agent), 124 sur timeout : c'est la fin de la chaîne de verdict
+gltest → job.sh → agent.sh → devloop.py. Un agent d'avant ce changement écrit
+un en-tête à trois champs, lu comme rc = 0 (et signalé).
 
 Rejouer un banc avec un autre binaire et un autre mode de CPU :
 
@@ -56,7 +65,7 @@ Réparation après un arrêt brutal : démarrer en
 single-user et, AVANT `mount -uw /`, `/sbin/fsck -fy`, `reboot`, puis `fsck` de
 nouveau jusqu'à « appears to be OK ».
 """
-import json, os, shutil, socket, struct, subprocess, sys, tarfile, tempfile, io, time
+import fcntl, json, os, shutil, socket, struct, subprocess, sys, tarfile, tempfile, io, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 QEMU = os.environ.get("QEMU_BIN", os.path.expanduser("~/src/qemu/build/qemu-system-ppc"))
@@ -66,11 +75,44 @@ QMP = os.path.join(STATE, "qmp.sock")
 BIOS = os.path.join(ROOT, "patches", "smp-mac99", "openbios-smp-screamer.elf")
 MBX_SECTORS = 65536            # 32 Mio par boîte
 MAGIC = b"PMBX"
+# Identifiant qdev de l'écran capturé (voir shot()). Vide = pas de device=.
+VGA_ID = os.environ.get("POMPPC_VGA_ID", "vga0")
+_DISK_LOCK = None              # descripteur du verrou d'image, tenu tant qu'on vit
 
 
 def need_disk():
     if not DISK or not os.path.exists(DISK):
         sys.exit("DEVDISK=<image raw Tiger> requis")
+
+
+def lock_disk(what):
+    """Verrou EXCLUSIF sur l'image, partagé avec scripts/verify-kext-in-guest.py.
+
+    Deux outils qui pilotent la même image en même temps (une VM allumée et un
+    `--inject`, deux `run` concurrents) la corrompent en silence : le HFS+ de
+    l'invité ne survit pas à une écriture hôte sous ses pieds. Le verrou est un
+    `flock` non bloquant sur <image>.lock ; il est tenu par le processus, donc
+    relâché à sa mort, même brutale."""
+    global _DISK_LOCK
+    if _DISK_LOCK is not None or not DISK:
+        return
+    path = DISK + ".lock"
+    try:
+        f = open(path, "a+")
+    except OSError as exc:          # dossier en lecture seule : on prévient
+        print("⚠ verrou %s impossible (%s) : pas de garde contre un second outil"
+              % (path, exc))
+        return
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.seek(0)
+        sys.exit("image %s déjà prise par un autre outil (%s : %s) ; "
+                 "attendre la fin, ou retirer le verrou s'il est orphelin"
+                 % (DISK, path, f.read().strip() or "?"))
+    f.seek(0); f.truncate()
+    f.write("pid %d %s\n" % (os.getpid(), what)); f.flush()
+    _DISK_LOCK = f
 
 
 def find_mailbox(tag):
@@ -177,6 +219,7 @@ def write_conf(boxes):
 def prepare():
     """VM arrêtée : monte l'image (macOS), écrit agent + boîtes, démonte, localise."""
     need_disk()
+    lock_disk("prepare")
     if not shutil.which("hdiutil"):
         return prepare_guest()
     os.makedirs(STATE, exist_ok=True)
@@ -261,17 +304,28 @@ def vm_args(gui, cdroms=()):
     for cd in cdroms:
         extra += ["-drive", "file=%s,format=raw,media=cdrom,readonly=on" % cd]
     backend = os.environ.get("GPU_BACKEND", "auto")
+    # NET=1 : réseau user-mode, et ssh de l'hôte vers l'invité par
+    # `ssh -p $SSH_PORT user@127.0.0.1` (défaut 2222 ; SSH_PORT=0 pour ne rien
+    # rediriger). Tiger : Préférences Système → Partage → Session à distance.
+    ssh_port = os.environ.get("SSH_PORT", "2222")
+    SSH_FWD = ",hostfwd=tcp:127.0.0.1:%s-:22" % ssh_port if ssh_port not in ("", "0") else ""
     # CPU_OPTS s'ajoute au modèle : CPU_OPTS=x-fast-fp=on → -cpu g4,x-fast-fp=on
     cpu = "g4"
     if os.environ.get("CPU_OPTS"):
         cpu += "," + os.environ["CPU_OPTS"].lstrip(",")
+    # Écran : la machine en crée un sans identifiant, que `screendump device=`
+    # ne peut donc pas nommer (QEMU cherche par id qdev). On le crée nous-mêmes
+    # sur le bus uninorth principal — celui-là même que `pci_vga_init()` prend,
+    # « this must be last to make it the default » dans mac_newworld.c.
+    if VGA_ID:
+        extra += ["-vga", "none", "-device", "VGA,id=%s" % VGA_ID]
     return [qemu, "-M", "mac99,via=pmu", "-cpu", cpu, "-m", ram, "-smp", str(smp),
             *extra,
             "-display", os.environ.get("POMPPC_DISPLAY", "none"), "-bios", BIOS,
             "-g", os.environ.get("RES", "1024x768x32"),
             "-drive", "file=%s,format=raw,media=disk" % DISK,
             "-device", "usb-tablet",
-            *(["-netdev", "user,id=net0", "-device", "sungem,netdev=net0"]
+            *(["-netdev", "user,id=net0" + SSH_FWD, "-device", "sungem,netdev=net0"]
               if os.environ.get("NET") == "1" else ["-nic", "none"]),
             "-device", "qgpu-pci,id=gpu0,backend=%s%s" % (
                 backend, ",trace=on" if os.environ.get("GPU_TRACE") else ""),
@@ -458,10 +512,42 @@ def type_text(q, text):
         time.sleep(0.06)
 
 
+_shot_dev = [VGA_ID]           # vidé si QEMU ne connaît pas l'identifiant
+_shot_said = [False]
+
+
 def shot(q, path):
-    q("screendump", filename=os.path.abspath(path), format="png")
-    time.sleep(0.6)
-    return open(path, "rb").read() if os.path.exists(path) else b""
+    """Capture d'écran, VÉRIFIÉE (bug hunt T10/T11).
+
+    Trois pièges, tous vus en vrai : QMP répond `error` et on ne regardait pas ;
+    le PNG d'une capture PRÉCÉDENTE traînait, on le relisait et `wait_stable`
+    concluait « écran stable » sur une image morte ; `screendump` sans `device=`
+    prend l'écran d'index 0, c'est-à-dire QFB ou VGA selon l'ordre de création.
+    On efface donc d'abord, on nomme l'écran, et toute anomalie lève."""
+    path = os.path.abspath(path)
+    if os.path.exists(path):
+        os.remove(path)
+    args = {"filename": path, "format": "png"}
+    if _shot_dev[0]:
+        args["device"] = _shot_dev[0]
+    r = q("screendump", **args)
+    if "error" in r and _shot_dev[0] and r["error"].get("class") == "DeviceNotFound":
+        # VM lancée autrement (sans POMPPC_VGA_ID) : on retombe sur l'écran
+        # primaire, mais on le DIT — c'est le silence qui était le bug.
+        print("⚠ screendump : pas de device « %s » ; capture de l'écran primaire"
+              % _shot_dev[0])
+        _shot_dev[0] = ""
+        r = q("screendump", filename=path, format="png")
+    if "error" in r:
+        raise SystemExit("screendump a échoué : %s" % r["error"].get("desc", r["error"]))
+    if not _shot_said[0]:
+        print("capture d'écran : device=%s" % (_shot_dev[0] or "(écran primaire)"))
+        _shot_said[0] = True
+    for _ in range(20):                 # l'écriture du PNG est asynchrone
+        if os.path.exists(path) and os.path.getsize(path):
+            return open(path, "rb").read()
+        time.sleep(0.2)
+    raise SystemExit("screendump n'a pas écrit %s" % path)
 
 
 def click(q, x, y, screen=(1024, 768)):
@@ -478,6 +564,7 @@ def click(q, x, y, screen=(1024, 768)):
 
 def start(gui=False):
     need_disk()
+    lock_disk("start%s" % (" --gui" if gui else ""))
     boxes = find_mailbox(b"IN"), find_mailbox(b"OU")
     cds = [c for c in os.environ.get("CDROM", "").split(":") if c]
     p, q = boot_vm(gui, cds)
@@ -501,6 +588,7 @@ def start(gui=False):
 
 def run(folder, timeout):
     need_disk()
+    lock_disk("run %s" % os.path.basename(os.path.abspath(folder)))
     inbox, outbox = find_mailbox(b"IN"), find_mailbox(b"OU")
     # Le bash 2.05 de Tiger déclare « binaire » un script dont la PREMIÈRE ligne
     # contient un octet non ASCII (vu en vrai : « cannot execute binary file »).
@@ -535,8 +623,12 @@ def run(folder, timeout):
         with open(DISK, "rb") as f:
             f.seek(outbox * 512)
             hdr = f.read(512).split(b"\0")[0].decode("latin-1").split()
-            if len(hdr) == 3 and hdr[0] == "OUT" and hdr[1] == jid:
+            if len(hdr) in (3, 4) and hdr[0] == "OUT" and hdr[1] == jid:
                 m = int(hdr[2])
+                # 4e champ = code de sortie du job (T3). Un agent d'avant ce
+                # changement n'en écrit pas : on le dit, plutôt que de rendre
+                # un vert qui n'a été prouvé par personne.
+                rc = int(hdr[3]) if len(hdr) == 4 else 0
                 f.seek((outbox + 1) * 512)
                 tar = f.read(m * 512)
                 dest = os.path.join(STATE, "jobs", jid)
@@ -550,11 +642,22 @@ def run(folder, timeout):
                 log = os.path.join(dest, "out", "log.txt")
                 print(open(log, errors="replace").read() if os.path.exists(log) else "(pas de log)")
                 print("→ %s/out" % dest)
-                return 0
-    q = Qmp()
-    shot(q, os.path.join(STATE, "timeout.png"))
-    print("TIMEOUT après %d s ; capture %s/timeout.png" % (timeout, STATE))
-    return 1
+                if len(hdr) == 3:
+                    print("⚠ agent sans code de sortie (en-tête à 3 champs) : "
+                          "rc supposé 0, relancer `devloop.py prepare`")
+                print("job %s : rc=%d" % (jid, rc))
+                return rc
+    # TIMEOUT. Le job, lui, continue DANS l'invité : l'agent ne relit l'inbox
+    # qu'entre deux jobs (voir agent.sh, T14). Il n'y a rien à tuer d'ici ;
+    # la VM est à redémarrer si le job est bloqué.
+    try:
+        shot(Qmp(), os.path.join(STATE, "timeout.png"))
+        print("TIMEOUT après %d s ; capture %s/timeout.png" % (timeout, STATE))
+    except (OSError, SystemExit) as exc:
+        print("TIMEOUT après %d s (capture impossible : %s)" % (timeout, exc))
+    print("⚠ le job tourne toujours dans l'invité : l'agent ne sait pas "
+          "l'interrompre (T14)")
+    return 124
 
 
 def wait_gone(pid, halt_timeout, how):
@@ -622,6 +725,7 @@ def shutdown(wait=8, halt_timeout=120):
 
     La capture bench/devloop/shutdown.png montre le déroulé.
     """
+    lock_disk("shutdown")
     pidf = os.path.join(STATE, "qemu.pid")
     pid = int(open(pidf).read()) if os.path.exists(pidf) else None
     q = Qmp()

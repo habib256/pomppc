@@ -42,3 +42,4 @@ __pycache__/
 # --- frontend (ImGui + QEMU dbus) ---
 frontend/imgui/
 frontend/build/
+disks/*.lock

@@ -5,13 +5,22 @@ EXT=/System/Library/Extensions
 
 # kext compilé puis chargé depuis /tmp (jamais installé : un kext qui panique
 # se répare par un redémarrage de la VM). Déchargé d'abord s'il l'était.
+# Rend le code de sortie de kextload : `| tail -1` le masquait, et un kext
+# jamais chargé laissait le job continuer comme si de rien n'était — tout était
+# alors rendu par Apple, et tout était vert (bug hunt T5/T6).
 kext_load() {
-  ( cd $SRC/kext/POMPPCGPU && make clean >/dev/null 2>&1; make > $OUT/kext-build.txt 2>&1 ) ||
+  ( cd $SRC/kext/POMPPCGPU || exit 1
+    make clean >/dev/null 2>&1 || true
+    make > $OUT/kext-build.txt 2>&1 ) ||
     { tail -15 $OUT/kext-build.txt; return 1; }
-  kextstat | grep -q net.pomppc.POMPPCGPU && kextunload -b net.pomppc.POMPPCGPU 2>&1
+  if kextstat | grep -q net.pomppc.POMPPCGPU; then
+    kextunload -b net.pomppc.POMPPCGPU 2>&1 || true
+  fi
   rm -rf /tmp/POMPPCGPU.kext && cp -R $SRC/kext/POMPPCGPU/POMPPCGPU.kext /tmp/
   chown -R root:wheel /tmp/POMPPCGPU.kext && chmod -R 755 /tmp/POMPPCGPU.kext
-  kextload -t /tmp/POMPPCGPU.kext 2>&1 | tail -1
+  kextload -t /tmp/POMPPCGPU.kext > $OUT/kextload.txt 2>&1 ||
+    { echo "kextload : ÉCHEC"; cat $OUT/kextload.txt; return 1; }
+  tail -1 $OUT/kextload.txt
 }
 
 # plugin compilé et installé dans /System/Library/Extensions : GLEngine l'y

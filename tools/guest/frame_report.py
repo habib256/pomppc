@@ -21,10 +21,24 @@ def summarize(rows, start=0.0, duration=None, context=None):
             raise ValueError("multiple contexts: select --context from " + str(dict(contexts)))
         context = next(iter(contexts))
     selected = [r for r in rows if r["context"] == context]
+    if not selected:
+        raise ValueError("no swap in context " + str(context))
+    # A NaN timestamp silently lost its interval: every comparison below is
+    # false, so the frame simply vanished from the measurement instead of
+    # being reported. Refuse the trace instead (bug hunt T9).
+    for row in selected:
+        if not math.isfinite(float(row["elapsed_ms"])):
+            raise ValueError("non-finite timestamp in context %s: %r"
+                             % (context, row["elapsed_ms"]))
+    # The window is relative to the FIRST SWAP OF THE SELECTED CONTEXT, not to
+    # absolute trace time: a game that renders a menu in one context and the
+    # level in another (UT2004) would otherwise get a window offset by the
+    # whole menu (bug hunt T8).
+    origin = float(selected[0]["elapsed_ms"])
     stop = math.inf if duration is None else start + duration
     intervals = []
     for before, after in zip(selected, selected[1:]):
-        a, b = float(before["elapsed_ms"]), float(after["elapsed_ms"])
+        a, b = float(before["elapsed_ms"]) - origin, float(after["elapsed_ms"]) - origin
         if b <= a:
             raise ValueError("timestamps must increase within each context")
         # Keep only complete intervals in the requested window.
@@ -45,7 +59,9 @@ def summarize(rows, start=0.0, duration=None, context=None):
         "over_33_33_ms": sum(t > 1000 / 30 for t in intervals),
         "over_100_ms": sum(t > 100 for t in intervals),
         "over_250_ms": sum(t > 250 for t in intervals),
-        "note": "Application swap intervals; exclude loading explicitly with --start. "
+        "window_origin_ms": origin,
+        "note": "Application swap intervals; exclude loading explicitly with --start "
+                "(counted from the first swap of the selected context). "
                 "This does not prove GPU completion, scene identity or input latency.",
     }
 
@@ -53,7 +69,8 @@ def summarize(rows, start=0.0, duration=None, context=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("trace")
-    parser.add_argument("--start", type=float, default=0, help="seconds since first swap")
+    parser.add_argument("--start", type=float, default=0,
+                        help="seconds since the first swap OF THE SELECTED CONTEXT")
     parser.add_argument("--duration", type=float)
     parser.add_argument("--context")
     args = parser.parse_args()

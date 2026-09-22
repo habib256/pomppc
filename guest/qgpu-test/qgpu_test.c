@@ -8,6 +8,10 @@
  *   make            (gcc 4.0, SDK 10.4u)
  *   ./qgpu_test     → code 0 si tout passe
  *
+ * Une capacité ANNONCÉE et non tenue est un échec, pas un test sauté : si
+ * QGPU_CAP_ASYNC est dans `caps`, le kext doit répondre à la sonde v9
+ * (bug hunt T18 — c'est K6 rendu visible).
+ *
  * C'est le squelette de ce que fera le plugin OpenGL (GLDriver) : mêmes
  * appels IOKit, même fenêtre, même flux.
  */
@@ -170,6 +174,13 @@ int main(void)
         async = (kr == KERN_SUCCESS) && (caps & QGPU_CAP_ASYNC);
         CHECK(kr == KERN_SUCCESS || kr == kIOReturnBadArgument,
               "sonde du kext (peek) : kr 0x%x", kr);
+        /* Ce qui est ANNONCÉ doit être TENU (bug hunt T18). Sauter les tests
+           v9 « parce que le kext n'a pas répondu » alors que le bit ASYNC est
+           posé dans caps, et rendre 0, c'est ce qui rendait K6 invisible : le
+           plugin, lui, croit l'annonce, passe en asynchrone contre un kext
+           synchrone, confond statut et PC, et resoumet la trame. */
+        CHECK(!(caps & QGPU_CAP_ASYNC) || async,
+              "ASYNC annoncé (caps 0x%x) et tenu par le kext", caps);
         if (!async) {
             printf("  --   doorbell asynchrone non disponible (kext ou device) : "
                    "tests v9 sautés\n");

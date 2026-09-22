@@ -8,6 +8,26 @@ from pathlib import Path
 from frame_report import summarize
 
 
+def check_capture(pixels, width, height):
+    """Reject a capture that is not a rendered frame.
+
+    'Not entirely black' accepted a single stray pixel, a flat desktop grey or
+    a solid clear colour as proof that the game drew the scene (bug hunt T12).
+    A real AS-Convoy frame has hundreds of distinct colours over most of the
+    image; require a variety of colours AND that they cover the frame, so that
+    a mostly-black capture with one bright corner still fails."""
+    step = max(1, (width * height) // 20000)          # sample ~20k pixels
+    sample = [pixels[i*3:i*3+3] for i in range(0, width * height, step)]
+    colours = set(sample)
+    lit = sum(1 for p in sample if p != b'\0\0\0')
+    if len(colours) < 64 or lit < len(sample) // 2:
+        raise ValueError('scanout capture does not look like a rendered frame: '
+                         '%d distinct colours, %d/%d non-black samples'
+                         % (len(colours), lit, len(sample)))
+    return {'capture_colours': len(colours),
+            'capture_lit_fraction': round(lit / len(sample), 4)}
+
+
 def report(folder):
     folder = Path(folder)
     if not (folder / 'complete').is_file():
@@ -20,16 +40,26 @@ def report(folder):
     width, height = map(int, manifest['resolution'].split('x'))
     if (len(capture) != 4 or capture[0] != b'P6' or capture[2] != b'255' or
             capture[1] != ('%d %d' % (width, height)).encode() or
-            len(capture[3]) != width*height*3 or not any(capture[3])):
-        raise ValueError('missing, black, truncated or wrong-resolution scanout capture')
+            len(capture[3]) != width*height*3):
+        raise ValueError('missing, truncated or wrong-resolution scanout capture')
+    capture_stats = check_capture(capture[3], width, height)
     first, last = int(manifest['first_frame']), int(manifest['last_frame'])
     if first < 2 or last <= first:
         raise ValueError('invalid frame window')
     expected = list(range(first, last + 1))
     with (folder / 'frames.csv').open(newline='') as stream:
-        rows = [r for r in csv.DictReader(stream) if first <= int(r['frame']) <= last]
+        all_rows = list(csv.DictReader(stream))
     with (folder / 'clock.csv').open(newline='') as stream:
-        clock = [r for r in csv.DictReader(stream) if first <= int(r['frame']) <= last]
+        all_clock = list(csv.DictReader(stream))
+    # One render trace line per engine tick, over the WHOLE run and not just
+    # the measured window: a driver that counts a frame twice (the Marble
+    # Blast doubling) keeps the window consistent and still doubles the rate
+    # (bug hunt T7).
+    if len(all_rows) != len(all_clock):
+        raise ValueError('render trace and engine clock disagree on frame count: '
+                         '%d vs %d' % (len(all_rows), len(all_clock)))
+    rows = [r for r in all_rows if first <= int(r['frame']) <= last]
+    clock = [r for r in all_clock if first <= int(r['frame']) <= last]
     if [int(r['frame']) for r in rows] != expected:
         raise ValueError('missing, duplicate or unordered render frames')
     if [int(r['frame']) for r in clock] != expected:
@@ -51,7 +81,8 @@ def report(folder):
     result = summarize(rows)
     result.update(scene=manifest['scene'], resolution=manifest['resolution'],
                   first_frame=first, last_frame=last,
-                  simulation_step_seconds=step, simulated_seconds=(last-first)*step)
+                  simulation_step_seconds=step, simulated_seconds=(last-first)*step,
+                  **capture_stats)
     for key in ('raw_vertices', 'raw_draws', 'fallbacks', 'readbacks'):
         delta = int(rows[-1][key]) - int(rows[0][key])
         if delta < 0:
