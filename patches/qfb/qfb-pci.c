@@ -31,7 +31,38 @@
 #include "qapi/error.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
+#include "ui/qemu-pixman.h"
+#include "qemu/error-report.h"
+#include "qemu/log.h"
 #include "qom/object.h"
+
+/* ── Cible de SURF_PRESENT pour qgpu-pci (v13) ───────────────────────────────
+ *
+ * Ce que qgpu-pci.c doit savoir pour écrire lui-même dans la VRAM. Ce n'est
+ * plus « (ram, 32 Mio) » comme en v13 : sans `base`, `stride`, `width` et
+ * `height`, le cœur borne SURF_PRESENT sur toute la VRAM au lieu de la fenêtre
+ * réellement affichée, et ne peut donc pas s'apercevoir qu'il présente sur le
+ * mauvais écran, à un autre pas (rapport du 22/09/2026, §8.3, Q1 et Q3).
+ *
+ * ATTENTION : cette déclaration est DUPLIQUÉE à l'identique dans qgpu-pci.c.
+ * scripts/build_qemu_qfb.sh ne recopie que des .c dans hw/display/ — il n'y a
+ * pas d'en-tête partagé où la mettre. Toute modification se fait des deux
+ * côtés, dans le même commit.
+ */
+typedef struct QfbScanoutInfo {
+    uint8_t      *ram;        /* origine de la VRAM (BAR0 du device) */
+    uint32_t      vram_size;  /* taille totale de la VRAM, en octets */
+    uint32_t      base;       /* offset de la première ligne VISIBLE */
+    uint32_t      stride;     /* octets par ligne */
+    uint32_t      width;      /* pixels */
+    uint32_t      height;     /* lignes réellement contenues dans la VRAM */
+    uint32_t      depth;      /* bits par pixel programmés (1, 2, 4, 8, 16, 24) */
+    MemoryRegion *mr;         /* les offsets de memory_region_set_dirty sont
+                                 relatifs à CETTE région, donc à `ram` */
+} QfbScanoutInfo;
+
+int qfb_scanout_info(QfbScanoutInfo *info);
+void qfb_scanout_set_notifier(void (*cb)(void *opaque), void *opaque);
 
 #define QFB_VRAM_SIZE       (32 * MiB) /* enough for 3840x2160 at 32-bit */
 #define QFB_CTRL_BAR_SIZE   4096       /* one page, registers live in the first 0x40 */
@@ -92,6 +123,9 @@ typedef struct QfbState {
        whole CLUT one register at a time (256 entries), and each write used to
        mark all 32 MiB dirty. Coalesced into one invalidation per frame. */
     bool pal_dirty;
+    /* Les trois rampes gamma sont l'identité : recalculé au plus une fois par
+       image (quand pal_dirty), car c'est la condition du partage de tampon. */
+    bool gamma_identity;
 
     QEMUTimer *vbl_timer;
     qemu_irq irq;
@@ -271,6 +305,41 @@ static uint32_t qfb_visible_lines(QfbState *s)
     return lines < s->height ? lines : s->height;
 }
 
+/* ── Q3 : prévenir qgpu-pci quand la géométrie change ────────────────────────
+ *
+ * qgpu-pci borne SURF_PRESENT sur la fenêtre VISIBLE (base, stride × height).
+ * Cette fenêtre bouge à chaque changement de mode et à chaque écriture de
+ * QFB_MODE_BASE : sans rappel, le cœur continuerait de présenter à l'ancien
+ * pas, donc sur des pixels décalés, sans que rien ne le dise — exactement le
+ * silence reproché à Q1. Un seul abonné (il n'y a qu'un qgpu-pci), et la
+ * dépendance reste à sens unique : qgpu connaît qfb, jamais l'inverse.
+ * Appelé sous BQL, comme tout ce qui touche aux registres.
+ */
+static void (*qfb_scanout_cb)(void *opaque);
+static void *qfb_scanout_cb_opaque;
+
+void qfb_scanout_set_notifier(void (*cb)(void *opaque), void *opaque)
+{
+    qfb_scanout_cb = cb;
+    qfb_scanout_cb_opaque = opaque;
+}
+
+/* Les trois rampes sont-elles l'identité ? C'est la condition pour donner la
+   VRAM telle quelle au backend d'affichage (Q4) : le seul travail que fait
+   alors qfb_draw_line24 est d'appliquer le gamma. */
+static bool qfb_gamma_is_identity(QfbState *s)
+{
+    int i;
+
+    for (i = 0; i < 256; i++) {
+        if (s->gamma_red[i] != i || s->gamma_green[i] != i ||
+            s->gamma_blue[i] != i) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void qfb_invalidate_display(void *opaque)
 {
     QfbState *s = opaque;
@@ -285,7 +354,41 @@ static void qfb_invalidate_display(void *opaque)
     }
 }
 
-static void qfb_draw_graphic(QfbState *s)
+/* Format pixman de la VRAM en profondeur 24 : 4 octets par pixel, xRGB GROS
+   BOUTISTE (c'est ce que QuickDraw écrit sur PowerPC, et ce que
+   qfb_draw_line24 relit octet par octet). PIXMAN_BE_* choisit le code pixman
+   correspondant selon le boutisme de l'HÔTE. */
+#define QFB_SHARE_FORMAT    PIXMAN_BE_x8r8g8b8
+
+/*
+ * Q4 — peut-on donner la VRAM directement au backend d'affichage ?
+ *
+ * En 32 bits sans rampe gamma (100 % du temps de jeu, et le bureau de Tiger
+ * par défaut), qfb_draw_line24 ne fait que recopier les pixels en changeant
+ * leur ordre d'octets, tout l'écran, à chaque rafraîchissement, BQL tenu :
+ * 3 Mio par image en 1024x768. Une surface partagée supprime la copie ; le
+ * suivi des lignes sales, lui, reste (c'est ce qui dit à l'interface ce qui a
+ * changé). Tous les autres cas — 1/2/4/8/16 bits, palette, gamma — gardent la
+ * conversion, qui est le seul endroit où ils sont interprétés.
+ *
+ * On n'ose le partage que si la fenêtre ENTIÈRE tient dans la VRAM : le
+ * backend lit `height × stride` octets sans savoir qu'ils s'arrêtent.
+ */
+static bool qfb_can_share(QfbState *s)
+{
+    if (s->depth != 24 || s->width == 0 || s->height == 0) {
+        return false;
+    }
+    if (!s->gamma_identity) {
+        return false;
+    }
+    if (qfb_visible_lines(s) != s->height) {
+        return false;
+    }
+    return dpy_gfx_check_format(s->con, QFB_SHARE_FORMAT);
+}
+
+static void qfb_draw_graphic(QfbState *s, bool share)
 {
     DisplaySurface *surface = qemu_console_surface(s->con);
     DirtyBitmapSnapshot *snap = NULL;
@@ -337,10 +440,13 @@ static void qfb_draw_graphic(QfbState *s)
     for (y = 0; y < lines; y++, page += qfb_stride) {
         if (memory_region_snapshot_get_dirty(&s->mem_vram, snap, page,
                                              qfb_stride)) {
-            uint8_t *data_display;
-
-            data_display = surface_data(surface) + y * surface_stride(surface);
-            qfb_draw_line(s, data_display, page, s->width);
+            /* En partage, la « conversion » serait une copie de la VRAM sur
+               elle-même : seul le rectangle sale est encore à annoncer. */
+            if (!share) {
+                uint8_t *data_display = surface_data(surface)
+                                      + y * surface_stride(surface);
+                qfb_draw_line(s, data_display, page, s->width);
+            }
 
             if (ymin < 0) {
                 ymin = y;
@@ -378,12 +484,16 @@ static void qfb_update_mode(QfbState *s)
         = qfb_calculate_stride(s->width, s->depth);
     s->regs[QFB_MODE_DEPTH >> 2] = s->depth;
     qfb_invalidate_display(s);
+    if (qfb_scanout_cb) {
+        qfb_scanout_cb(qfb_scanout_cb_opaque);
+    }
 }
 
 static void qfb_update_display(void *opaque)
 {
     QfbState *s = opaque;
     DisplaySurface *surface = qemu_console_surface(s->con);
+    bool share;
 
     qemu_flush_coalesced_mmio_buffer();
 
@@ -391,18 +501,41 @@ static void qfb_update_display(void *opaque)
         return;
     }
 
-    if (s->width != surface_width(surface) ||
-        s->height != surface_height(surface)) {
+    if (s->pal_dirty) {
+        /* Avant qfb_can_share : le gamma vient peut-être de changer. */
+        s->pal_dirty = false;
+        s->gamma_identity = qfb_gamma_is_identity(s);
+        qfb_invalidate_display(s);
+    }
+
+    share = qfb_can_share(s);
+    if (share) {
+        uint8_t *data = s->vram + s->regs[QFB_MODE_BASE >> 2];
+
+        /* surface_is_allocated() distingue une surface à nous (conversion)
+           d'une surface posée sur la VRAM. Le test sur surface_data attrape
+           le changement de QFB_MODE_BASE — le « page flip » de QuickDraw. */
+        if (surface_is_allocated(surface) ||
+            surface_width(surface) != (int)s->width ||
+            surface_height(surface) != (int)s->height ||
+            surface_stride(surface) != (int)s->stride ||
+            surface_data(surface) != data) {
+            surface = qemu_create_displaysurface_from(s->width, s->height,
+                                                      QFB_SHARE_FORMAT,
+                                                      s->stride, data);
+            dpy_gfx_replace_surface(s->con, surface);
+            qfb_invalidate_display(s);
+        }
+    } else if (!surface_is_allocated(surface) ||
+               surface_width(surface) != (int)s->width ||
+               surface_height(surface) != (int)s->height) {
+        /* Repli sur la conversion : il faut une surface À NOUS, y compris
+           quand la taille n'a pas changé (on quittait peut-être le partage). */
         qemu_console_resize(s->con, s->width, s->height);
         qfb_invalidate_display(s);
     }
 
-    if (s->pal_dirty) {
-        s->pal_dirty = false;
-        qfb_invalidate_display(s);
-    }
-
-    qfb_draw_graphic(s);
+    qfb_draw_graphic(s, share);
 }
 
 static void qfb_update_irq(QfbState *s)
@@ -452,6 +585,7 @@ static void qfb_reset(QfbState *s)
         s->gamma_green[i] = i;
         s->gamma_blue[i] = i;
     }
+    s->gamma_identity = true;       /* les rampes viennent d'être remises à i */
     memset(s->vram, 0, QFB_VRAM_SIZE);
     s->width = s->regs[QFB_CUSTOM_WIDTH >> 2];
     s->height = s->regs[QFB_CUSTOM_HEIGHT >> 2];
@@ -528,6 +662,16 @@ static void qfb_ctrl_write(void *opaque, hwaddr addr, uint64_t val,
         qfb_update_mode(s);
         break;
     case QFB_MODE_BASE:
+        /* Q11 : le repliement modulo la VRAM est muet. Un pilote qui programme
+           une base hors des 32 Mio obtient alors un écran qui « marche » à un
+           autre endroit de la VRAM, et le symptôme (bureau décalé, moitié
+           noire) ne désigne plus sa cause. */
+        if (val >= QFB_VRAM_SIZE) {
+            qemu_log_mask(LOG_GUEST_ERROR, "qfb-pci: QFB_MODE_BASE 0x%" PRIx64
+                          " hors de la VRAM (%u octets), replié sur 0x%x\n",
+                          val, (unsigned)QFB_VRAM_SIZE,
+                          (unsigned)(val % QFB_VRAM_SIZE) & ~(unsigned)3);
+        }
         s->regs[addr >> 2] = (val % QFB_VRAM_SIZE) & ~(uint32_t)3;
         qfb_update_mode(s);
         break;
@@ -585,11 +729,23 @@ static const MemoryRegionOps qfb_ctrl_ops = {
     .endianness = DEVICE_BIG_ENDIAN,
     .impl.min_access_size = 4,
     .impl.max_access_size = 4,
+    /* Q10 : sans .valid, QEMU « élargit » un accès plus étroit en un accès de
+       4 octets sur le mot contenant l'adresse. Un simple `stb` n'importe où
+       dans les octets 0..3 arrivait donc ici en écriture de QFB_VERSION, et
+       remettait tout le device à zéro (qfb_reset) — écran noir, palette
+       perdue, timer VBL arrêté. Les registres sont des mots alignés : un
+       accès qui n'en est pas un est refusé, pas deviné. */
+    .valid.min_access_size = 4,
+    .valid.max_access_size = 4,
+    .valid.unaligned = false,
 };
 
 static int qfb_post_load(void *opaque, int version_id)
 {
-    qfb_update_mode(opaque);
+    QfbState *s = opaque;
+
+    s->gamma_identity = qfb_gamma_is_identity(s);
+    qfb_update_mode(s);
     return 0;
 }
 
@@ -684,6 +840,10 @@ static void qfb_pci_realize(PCIDevice *dev, Error **errp)
     qfb->irq = qemu_allocate_irq(qfb_pci_set_irq, s, 0);
 
     qfb->vbl_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, qfb_vbl_timer, qfb);
+    /* Les rampes sont encore à zéro (qfb_reset les remplit au reset machine) :
+       surtout pas « identité » par défaut, sinon le premier rafraîchissement
+       partagerait la VRAM en ignorant un gamma tout noir. */
+    qfb->gamma_identity = qfb_gamma_is_identity(qfb);
     qfb_update_mode(qfb);
 }
 
@@ -692,6 +852,15 @@ static void qfb_pci_exit(PCIDevice *dev)
     QfbPCIState *s = QFB_PCI(dev);
     QfbState *qfb = &s->qfb;
 
+    /* Q9 : la console garde un pointeur sur la VRAM (surface partagée de Q4,
+       et de toute façon le rappel gfx_update). Sans cette fermeture, elle
+       continue d'appeler qfb_update_display sur un device disparu. Le
+       notificateur de géométrie doit partir en même temps : qgpu-pci le
+       rebranche à la naissance du prochain qfb, s'il y en a un. */
+    if (qfb_scanout_cb) {
+        qfb_scanout_set_notifier(NULL, NULL);
+    }
+    graphic_console_close(qfb->con);
     timer_free(qfb->vbl_timer);
     qemu_free_irq(qfb->irq);
 }
@@ -733,6 +902,12 @@ static void qfb_pci_class_init(ObjectClass *klass, void *data)
     k->class_id = PCI_CLASS_DISPLAY_OTHER;
 
     dc->desc = "PCI \"Qemu FrameBuffer\" (qfb1) for Macintosh";
+    /* Q9 : qgpu-pci garde l'adresse de la VRAM comme cible de SURF_PRESENT, et
+       le thread de rendu y écrit sans BQL. Un `device_del` libérerait la
+       région sous ses pieds. Tant que le retrait n'est pas séquencé avec le
+       thread de rendu, il n'est pas permis — et de toute façon personne ne
+       débranche son écran d'une mac99 en marche. */
+    dc->hotpluggable = false;
     dc->vmsd = &vmstate_qfb_pci;
     device_class_set_legacy_reset(dc, qfb_pci_reset_handler);
     device_class_set_props(dc, qfb_pci_properties);
@@ -757,25 +932,46 @@ static void qfb_pci_register_types(void)
 
 type_init(qfb_pci_register_types)
 
-/* Cible de SURF_PRESENT (qgpu-pci, v13) : VRAM QFB entière, offset 0 = BAR0.
-   Appelé sous BQL, après realize des devices (notifier machine-done). */
-int qfb_scanout_info(uint8_t **ram, uint32_t *size, MemoryRegion **mr)
+/* Cible de SURF_PRESENT (qgpu-pci) : la FENÊTRE VISIBLE, pas les 32 Mio.
+   Appelé sous BQL, après realize des devices (notifier machine-done) et à
+   chaque changement de géométrie (qfb_scanout_set_notifier). */
+int qfb_scanout_info(QfbScanoutInfo *info)
 {
     Object *obj;
     QfbPCIState *s;
     QfbState *qfb;
+    bool ambiguous = false;
 
-    obj = object_resolve_path_type("", TYPE_QFB_PCI, NULL);
-    if (!obj || !ram || !size || !mr) {
+    if (!info) {
+        return 0;
+    }
+    obj = object_resolve_path_type("", TYPE_QFB_PCI, &ambiguous);
+    if (ambiguous) {
+        /* Q13 : deux qfb-pci, et la résolution rend NULL. Sans ce message,
+           qgpu se repliait sur VGA en silence et SURF_PRESENT partait sur le
+           mauvais écran — le symptôme exact de Q1, avec une cause de plus. */
+        warn_report_once("qfb-pci: plusieurs instances : qgpu-pci ne peut pas"
+                         " désigner l'écran à présenter, il se repliera sur"
+                         " VGA");
+        return 0;
+    }
+    if (!obj) {
         return 0;
     }
     s = QFB_PCI(obj);
     qfb = &s->qfb;
-    if (!qfb->vram) {
+    if (!qfb->vram || qfb->stride == 0) {
         return 0;
     }
-    *ram = qfb->vram;
-    *size = QFB_VRAM_SIZE;
-    *mr = &qfb->mem_vram;
-    return 1;
+    info->ram       = qfb->vram;
+    info->vram_size = QFB_VRAM_SIZE;
+    info->base      = qfb->regs[QFB_MODE_BASE >> 2];
+    info->stride    = qfb->stride;
+    info->width     = qfb->width;
+    /* Les lignes qui tiennent RÉELLEMENT sous la base : c'est déjà la borne
+       que respecte tout ce qui parcourt le scanout ici. */
+    info->height    = qfb_visible_lines(qfb);
+    info->depth     = qfb->depth;
+    info->mr        = &qfb->mem_vram;
+    return info->height != 0;
 }

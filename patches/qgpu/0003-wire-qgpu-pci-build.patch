@@ -2,7 +2,7 @@ diff --git a/hw/display/Kconfig b/hw/display/Kconfig
 index 1b02fa0..3c1a2e4 100644
 --- a/hw/display/Kconfig
 +++ b/hw/display/Kconfig
-@@ -145,3 +145,8 @@ config QFB_PCI
+@@ -145,3 +145,12 @@ config QFB_PCI
      bool
      default y if PCI_DEVICES
      depends on PCI
@@ -11,6 +11,10 @@ index 1b02fa0..3c1a2e4 100644
 +    bool
 +    default y if PCI_DEVICES
 +    depends on PCI
++    # qgpu-pci.c appelle qfb_scanout_info() et qfb_scanout_set_notifier(),
++    # definies dans qfb-pci.c : sans ce select, une configuration qui garde
++    # QGPU_PCI sans QFB_PCI compile mais ne se lie pas.
++    select QFB_PCI
 diff --git a/hw/display/meson.build b/hw/display/meson.build
 index 7235958..8b1f0c2 100644
 --- a/hw/display/meson.build
