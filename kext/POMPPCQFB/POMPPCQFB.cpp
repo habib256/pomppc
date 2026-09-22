@@ -130,9 +130,21 @@ bool POMPPCQFB::start(IOService * provider)
     return true;
 }
 
+/* Q18 — MÊME MOTIF QUE K1 DANS POMPPCGPU : ce que start() a armé doit être
+   désarmé ICI, et dans cet ordre. Le rappel VBL d'IOGraphics est effacé AVANT
+   qu'on retire la source : une interruption servie entre les deux appellerait
+   un proc dont le propriétaire est peut-être déjà parti. Le masque est remis à
+   zéro dans tous les cas (même sans source d'événement), et le device est
+   désarmé comme sur les chemins d'erreur de start(). */
 void POMPPCQFB::stop(IOService * provider)
 {
     enableVBL(false);
+    fVBLProc   = 0;
+    fVBLTarget = 0;
+    fVBLRef    = 0;
+    if (fRegs) {
+        regWrite(QFB_IRQ_MASK, 0);
+    }
 
     if (fVBLSource) {
         IOWorkLoop * wl = getWorkLoop();
@@ -141,6 +153,9 @@ void POMPPCQFB::stop(IOService * provider)
         }
         fVBLSource->release();
         fVBLSource = 0;
+    }
+    if (fPCI) {
+        fPCI->setMemoryEnable(false);
     }
 
     super::stop(provider);
@@ -541,12 +556,27 @@ bool POMPPCQFB::vblFilter(OSObject * owner, IOFilterInterruptEventSource * /*src
     return true;
 }
 
+/* Q17 : lire les trois champs UNE SEULE FOIS, dans des locales. unregisterInterrupt
+   et stop() tournent sur un autre fil que le work loop : le membre relu entre le
+   test et l'appel pouvait valoir 0 (appel d'un pointeur nul), ou pire, la cible
+   pouvait changer entre proc et ref. Ce n'est pas la gate — la vraie fermeture de
+   la course demanderait de passer register/unregister par le work loop — mais
+   cela supprime la seule déréférence nulle possible. */
 void POMPPCQFB::vblAction(OSObject * owner, IOInterruptEventSource * /*src*/, int /*count*/)
 {
-    POMPPCQFB * self = OSDynamicCast(POMPPCQFB, owner);
+    POMPPCQFB *       self = OSDynamicCast(POMPPCQFB, owner);
+    IOFBInterruptProc proc;
+    OSObject *        target;
+    void *            ref;
 
-    if (self && self->fVBLProc) {
-        self->fVBLProc(self->fVBLTarget, self->fVBLRef);
+    if (!self) {
+        return;
+    }
+    proc   = self->fVBLProc;
+    target = self->fVBLTarget;
+    ref    = self->fVBLRef;
+    if (proc) {
+        proc(target, ref);
     }
 }
 

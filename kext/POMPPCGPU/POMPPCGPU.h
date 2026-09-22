@@ -116,10 +116,22 @@ public:
     /* services rendus au user client */
     UInt32   slotSize(void)   { return fSlotSize; }
     UInt32   version(void)    { return fVersion; }
-    UInt32   caps(void)       { return fCaps; }
-    UInt32   fence(void)      { return regRead(QGPU_REG_FENCE); }
+    /* K6 : ne JAMAIS annoncer QGPU_CAP_ASYNC si le kext n'a pas de quoi le
+       tenir (timer du chien de garde absent). Le client passerait en
+       asynchrone contre un kext synchrone : il lirait un statut de rendu là
+       où il attend une acceptation, et sur st != OK il resoumettrait le même
+       flux — trame exécutée deux fois — pendant que check_errors reboucle. */
+    UInt32   caps(void)       { return fAsync ? fCaps : (fCaps & ~(UInt32) QGPU_CAP_ASYNC); }
+    UInt32   fence(void)      { return fRegs ? regRead(QGPU_REG_FENCE) : 0; }
     int      allocSlot(POMPPCGPUUserClient * client);        /* -1 si complet */
-    void     freeSlot(int slot);                             /* détruit ses objets */
+    /* K3/K7 : le propriétaire est exigé — une tranche déjà rendue puis
+       réattribuée ne doit pas être détruite par son ancien client. */
+    IOReturn freeSlot(int slot, POMPPCGPUUserClient * client);   /* détruit ses objets, rend la tranche */
+    IOReturn resetSlot(int slot, POMPPCGPUUserClient * client);  /* détruit ses objets, GARDE la tranche */
+    /* K1 : comptabilité SILENCIEUSE, sans gate ni MMIO — pour le fil de
+       terminaison, qui n'a plus le droit d'entrer dans la gate (elle a pu
+       être retirée du work loop) ni de parler à un device peut-être disparu. */
+    void     forgetSlot(int slot, POMPPCGPUUserClient * client);
     IODeviceMemory * slotRange(int slot);                    /* retenu par l'appelant */
     /* `len` porte les drapeaux POMPPC_SUB_* dans ses bits hauts (voir plus haut). */
     IOReturn submit(int slot, UInt32 off, UInt32 len,
@@ -141,6 +153,8 @@ private:
                               void * a2, void * a3);
     static IOReturn slotGated(OSObject * owner, void * a0, void * a1,
                               void * a2, void * a3);
+    /* Contexte gated : dort jusqu'à ce que FENCE atteigne `target`. */
+    IOReturn sleepForFence(UInt32 target, UInt32 timeoutMs, UInt32 * current);
     void     destroyClientObjects(int slot);
     void     drainQueue(void);
     static bool     irqFilter(OSObject * owner, IOFilterInterruptEventSource * src);
@@ -150,7 +164,9 @@ private:
     void            publishAccelerator(void);
     void            unpublishAccelerator(void);
     static bool     framebufferPublished(void * target, void * ref, IOService * fb);
+    static bool     framebufferTerminated(void * target, void * ref, IOService * fb);
     void            linkFramebuffer(IOService * fb);
+    void            unlinkFramebuffer(IOService * fb);
 
     IOPCIDevice *     fPCI;
     IODeviceMemory *  fShmemRange;
@@ -160,10 +176,24 @@ private:
 
     UInt32   fShmemSize;
     UInt32   fSlotSize;
+    /* K8 : offset, dans BAR0, de la page de service — hors de toute tranche.
+       C'est là qu'est écrit le flux de destruction des objets d'un client :
+       sa tranche à lui peut être encore mappée et vivante (clientDied pendant
+       un dessin, QGPU_UC_RESET). Elle n'est touchée que dans la gate. */
+    UInt32   fServiceOff;
+    UInt32   fQueueDepth;         /* profondeur de file annoncée par le device */
     UInt32   fVersion;
     UInt32   fCaps;
     UInt32   fAsync;              /* le device tient QGPU_CAP_ASYNC (v9) */
+    /* K4 : posé par stop() avant de retirer les sources d'événements. Tout
+       dormeur le relit à chaque réveil et rend la main (kIOReturnNotReady) ;
+       sans lui, free() libère la gate sous un dormeur THREAD_UNINT. */
+    UInt32   fStopping;
     POMPPCGPUUserClient * fClients[QGPU_MAX_CLIENTS];
+    /* K5 : destruction des objets d'une tranche EN COURS (elle dort dans la
+       gate entre deux paquets). Interdit une seconde destruction concurrente
+       (clientClose ⊥ clientDied) et toute réattribution de la tranche. */
+    UInt32   fSlotBusy[QGPU_MAX_CLIENTS];
 
     IOWorkLoop *                   fWorkLoop;
     IOCommandGate *                fGate;
@@ -181,8 +211,10 @@ private:
     POMPPCAccelerator *            fAccel;
     OSString *                     fAccelPath;    /* valeur d'IOAccelTypes */
     IONotifier *                   fFBNotifier;
+    IONotifier *                   fFBTermNotifier; /* framebuffers qui s'en vont */
     IOLock *                       fFBLock;       /* protège fLinkedFBs */
     OSArray *                      fLinkedFBs;    /* framebuffers désignant fAccel */
+    UInt32                         fNextFBIndex;  /* repli d'IOAccelIndex (Q16) */
 };
 
 class POMPPCGPUUserClient : public IOUserClient

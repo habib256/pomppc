@@ -14,7 +14,8 @@ Pilote IOKit (Mac OS X 10.4, PowerPC, gcc 4.0) du device QEMU `qgpu-pci`
 - expose un `IOUserClient`, jusqu'à 4 clients simultanés (une application
   OpenGL = un client), chacun avec sa tranche de fenêtre et sa plage
   d'identifiants d'objets (`qgpu_proto.h`, « Interface du kext ») :
-  - `IOConnectMapMemory(type 0)` → la tranche du client (16 Mio sur 64) ;
+  - `IOConnectMapMemory(type 0)` → la tranche du client (un quart de la fenêtre,
+    moins la page de service : ≈ 16 Mio sur 64, à lire dans `QGPU_UC_GET_INFO`) ;
   - `QGPU_UC_GET_INFO` → version, caps, taille de tranche, fence ;
   - `QGPU_UC_GET_SLOT` → index, base de la tranche dans BAR0, premiers ids ;
   - `QGPU_UC_SUBMIT(off, len)` (relatif à la tranche) → fence, statut, index fautif ;
@@ -87,11 +88,26 @@ qu'il y a des dormeurs, ce qui donne la base de temps du délai maximal **et** u
 réveil de secours si une interruption se perd. Dormir sans réveil garanti dans
 un kext, c'est figer la VM, et `-x` n'est pas disponible pour la dépanner.
 
-**Fermeture d'un client.** `destroyClientObjects` **draine d'abord la file**
-(`QGPU_REG_DOORBELL` à 0) : le client a pu mourir en laissant des soumissions en
-vol qui lisent sa tranche, rendue juste après. Les destructions elles-mêmes
-restent **synchrones** — un doorbell synchrone passe après tout ce qui est en
-file et ne rend la main qu'une fois exécuté.
+**Fermeture d'un client.** `destroyClientObjects` soumet les destructions par
+**paquets asynchrones** (profondeur de la file du device), séparés par une
+barrière qui **dort sur la command gate** : le verrou du work loop est relâché
+pendant l'attente, les autres clients continuent, et le BQL de QEMU n'est plus
+tenu 212 fois de suite (le bureau se figeait à chaque sortie d'application 3D).
+La barrière finale remplace le drainage actif d'avant : la file est FIFO, donc
+attendre la dernière destruction, c'est attendre aussi toutes les soumissions
+en vol qui lisaient la tranche du client — rendue juste après. Sur un device
+sans `QGPU_CAP_ASYNC`, on garde le drainage puis le doorbell synchrone.
+
+Le flux de destruction est écrit dans une **page de service** rognée sur la
+fenêtre partagée, hors de toute tranche (chaque tranche y a son quart) : la
+tranche du client, elle, peut être encore mappée et vivante (`clientDied`
+pendant un dessin, `QGPU_UC_RESET`).
+
+Une tranche n'est rendue que **par son propriétaire** (`fClients[slot] ==
+client`, vérifié dans la gate), et `stop()` du user client se contente d'une
+comptabilité silencieuse : entrer dans la gate depuis le fil de terminaison,
+c'est une panic (la gate a pu être retirée du work loop, et `runAction` la
+ferme avant tout test).
 
 Le kext ne connaît des opcodes que ceux de destruction (nettoyage d'un client) : le flux
 est produit en userland (`guest/gldriver`, le plugin OpenGL ; `guest/qgpu-test`) et
