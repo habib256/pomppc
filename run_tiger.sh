@@ -198,8 +198,27 @@ if [ "$NET_WANT" != 0 ]; then
   if qemu_has_netdev "$BIN" user; then
     # 10.0.2.15 n'est pas joignable depuis l'hôte (NAT slirp). On ouvre
     # localhost:2222 → sshd de l'invité (Session à distance). SSH_FWD=0 pour couper.
-    if [ "${SSH_FWD:-2222}" != 0 ]; then
-      NETDEV="$NETDEV,hostfwd=tcp:127.0.0.1:${SSH_FWD:-2222}-:22"
+    # Un port déjà pris (une autre VM, une VM de dev restée debout) faisait
+    # ÉCHOUER tout QEMU (« Could not set up host forwarding rule ») : on cherche
+    # donc le premier port libre à partir de celui demandé, et si aucun ne l'est
+    # on démarre SANS redirection ssh plutôt que de refuser de booter.
+    SSH_PORT="${SSH_FWD:-2222}"
+    if [ "$SSH_PORT" != 0 ]; then
+      ssh_port=""
+      for p in $(seq "$SSH_PORT" $((SSH_PORT + 9))); do
+        if ! (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
+          ssh_port="$p"; break
+        fi
+        exec 3>&- 2>/dev/null || true
+      done
+      if [ -n "$ssh_port" ]; then
+        NETDEV="$NETDEV,hostfwd=tcp:127.0.0.1:${ssh_port}-:22"
+        SSH_PORT="$ssh_port"
+      else
+        echo "⚠  ports ${SSH_FWD:-2222}..$((${SSH_FWD:-2222}+9)) tous occupés : démarrage SANS redirection ssh" >&2
+        echo "   (une autre VM tourne ? \`pkill -f qemu-system-ppc\` ou SSH_FWD=<port> ./run_tiger.sh)" >&2
+        SSH_PORT=0
+      fi
     fi
     NET_ARGS=(-netdev "$NETDEV" -device "$NETNIC")
     NET=1
@@ -341,7 +360,7 @@ réseau=$([ -n "${NET:-}" ] && echo on || echo off) \
 disque=$([ -n "${SNAPSHOT:-}" ] && echo jetable || echo persistant)"
 echo "  moniteur QEMU : $MON"
 [ -n "$WEBPROXY_ON" ] && echo "  🌐 relais web : 10.0.2.2:$WEBPROXY_PORT (proxy HTTP de Tiger ; journal .run/web-proxy.log)"
-[ -n "$NET" ] && [ "${SSH_FWD:-2222}" != 0 ] && echo "  🔑 SSH : ssh -p ${SSH_FWD:-2222} tiger@127.0.0.1  (invité 10.0.2.15:22)"
+[ -n "$NET" ] && [ "${SSH_PORT:-0}" != 0 ] && echo "  🔑 SSH : ssh -p ${SSH_PORT} tiger@127.0.0.1  (invité 10.0.2.15:22)"
 [ "$SMP_N" -ge 2 ] && echo "  (1er boot en persistant = fsck possible ~1min ; ensuite rapide)"
 
 # --- Manette USB : auto-passthrough (idem run_os9.sh) ; NOPAD=1 pour couper ---
