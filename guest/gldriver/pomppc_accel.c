@@ -1859,8 +1859,32 @@ static void dump_submit(void)
         }
         maxf = (m && *m) ? (unsigned long)atol(m) : 400;
     }
-    if (!on || G.n_frames > maxf || !G.ncmd)
+    if (!on || !G.ncmd)
         return;
+    {   /* POMPPC_GL_DUMP_TRIGGER=<fichier> : ne vider qu'à partir du moment où
+           ce fichier existe (posé par ssh quand la scène voulue est à
+           l'écran), pendant POMPPC_GL_DUMP_FRAMES images. Sans déclencheur :
+           depuis le début, jusqu'à POMPPC_GL_DUMP_FRAMES. */
+        static const char *trig = (const char *)-1;
+        static unsigned long from = ~0UL;
+        if (trig == (const char *)-1)
+            trig = getenv("POMPPC_GL_DUMP_TRIGGER");
+        if (trig && *trig) {
+            if (from == ~0UL) {
+                if (access(trig, F_OK) != 0)
+                    return;
+                from = G.n_frames;
+                /* Vidage AUTONOME : réémettre tout l'état et retéléverser
+                   toutes les textures, pour que le rejeu natif n'ait besoin de
+                   rien d'antérieur (même geste que broken_all, P9). */
+                invalidate_mirrors();
+            }
+            if (G.n_frames > from + maxf)
+                return;
+        } else if (G.n_frames > maxf) {
+            return;
+        }
+    }
     snprintf(path, sizeof(path), "%s/%06lu.bin", dir, seq++);
     f = fopen(path, "wb");
     if (!f)
