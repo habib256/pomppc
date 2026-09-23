@@ -227,6 +227,19 @@ devient le disque unique, et le disque USB de test sert au transport.
 - [ ] **Sur le M4 d'abord** : préparer le disque unique là-bas (VM utilisateur déjà configurée),
       vérifier `devloop.py prepare` sous macOS (`hdiutil`), puis rapporter le disque sur le PC.
 
+### Lot 11 — UT2004 : l'arme en main sans texture (23/09/2026, enquête en cours)
+
+Enquête et preuves dans `docs/re/ut2004-arme-noire.md`. Acquis : l'arme est le trio de dessins
+à trois unités (cube 120 + peau 79 en alpha seul + blanc 1×1 × éclairage) ; le rejeu natif
+reproduit le noir brillant à l'identique, donc l'état miroité par le plugin n'est pas celui
+qu'a voulu le jeu. Rien n'est refusé, pas de seconde passe perdue.
+
+- [ ] Sonde plugin : au premier dessin « cube sur l'unité 0 + trois unités », vider dans note.txt
+      les blocs d'unité bruts (4 × 0x7c) et la table CTX_TEXUNITS ; comparer aux clés envoyées.
+- [ ] Trancher entre « sources du combineur mal lues » et « textures 79/120 échangées entre les
+      unités 0 et 1 » (coordonnées de texture 2D vs vecteurs de réflexion dans le vidage).
+- [ ] Corriger, rejouer (`QGPU_REPLAY_SKIPDRAW`, `QGPU_REPLAY_LIST`), faire vérifier en jeu.
+
 ## État (20/09/2026)
 
 - **Phase A** : `SURF_PRESENT` + `COPY_TEX` (v13), pixels 2.6, tampons hôte

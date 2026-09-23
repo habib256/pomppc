@@ -43,3 +43,4 @@ __pycache__/
 frontend/imgui/
 frontend/build/
 disks/*.lock
+TEST/
