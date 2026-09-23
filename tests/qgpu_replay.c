@@ -58,6 +58,7 @@ int main(int argc, char **argv)
     const char *backend = argc > 3 ? argv[3] : "soft";
     uint32_t fmin = argc > 4 ? (uint32_t)atoi(argv[4]) : 0, fmax = argc > 5 ? (uint32_t)atoi(argv[5]) : ~0u;
     uint8_t *shmem = calloc(SHMEM, 1), *vram = calloc(VRAM, 1);
+    static uint8_t tex_img_seen[QGPU_MAX_TEX];
     QgpuCore c;
     DIR *d;
     struct dirent *e;
@@ -285,6 +286,26 @@ int main(int argc, char **argv)
                 uint32_t val = qgpu_ld32(shmem + h.base + (k + 2) * 4);
                 if (key < 128) sk[key] = val;
             }
+            if (op == QGPU_OP_TEX_CREATE3 || op == QGPU_OP_TEX_IMAGE3) {
+                uint32_t id = qgpu_ld32(shmem + h.base + (k + 1) * 4);
+                if (id < QGPU_MAX_TEX) tex_img_seen[id] |= (op == QGPU_OP_TEX_IMAGE3) ? 2 : 1;
+            }
+            if (op == QGPU_OP_DRAW_RAW || op == QGPU_OP_DRAW_RAW_BUF ||
+                op == QGPU_OP_DRAW_TRIANGLES_TEXN || op == QGPU_OP_DRAW_TRIANGLES_SEC ||
+                op == QGPU_OP_DRAW_TRIANGLES_TEX || op == QGPU_OP_DRAW_TRIANGLES_TEX2) {
+                /* lot 11 : une texture liée dont aucune image n'est dans le
+                   vidage rend le rejeu infidèle — le dire, une fois par texture */
+                static const uint32_t en[4] = { QGPU_SK_TEXTURE, QGPU_SK_TEXTURE1, QGPU_SK_TEXTURE2, QGPU_SK_TEXTURE3 };
+                static const uint32_t bk[4] = { QGPU_SK_TEX_BIND, QGPU_SK_TEX1_BIND, QGPU_SK_TEX2_BIND, QGPU_SK_TEX3_BIND };
+                uint32_t u;
+                for (u = 0; u < 4; u++) {
+                    uint32_t id = sk[bk[u]];
+                    if (sk[en[u]] && id < QGPU_MAX_TEX && !(tex_img_seen[id] & 2) && !(tex_img_seen[id] & 4)) {
+                        tex_img_seen[id] |= 4;
+                        fprintf(stderr, "image %u : texture %u liée à l'unité %u sans image dans le vidage\n", h.frame, id, u);
+                    }
+                }
+            }
             if (getenv("QGPU_REPLAY_LIST") && h.frame == (uint32_t)atoi(getenv("QGPU_REPLAY_LIST"))) {
                 for (j = 0; j < len && j <= QGPU_MAX_CMD_ARGS; j++) a[j] = qgpu_ld32(shmem + h.base + (k + j) * 4);
                 if (op == QGPU_OP_SET_LIGHT && len == QGPU_LEN_SET_LIGHT) {
@@ -317,6 +338,63 @@ int main(int argc, char **argv)
                         for (i = 0; i < 3; i++) { uint32_t v = (cs >> (15 + 4 * i)) & 0xf; fprintf(stderr, "%s%s.%s", i ? "," : "", sn[v & 7], on[(v >> 3) & 1 ? 3 : 2]); }
                         fprintf(stderr, ")x%u  const %08x\n", 1u << ((cb >> 10) & 3),
                                 sk[u == 0 ? QGPU_SK_TEX_ENV_COLOR : u == 1 ? QGPU_SK_TEX1_ENV_COLOR : u == 2 ? QGPU_SK_TEX2_ENV_COLOR : QGPU_SK_TEX3_ENV_COLOR]);
+                    }
+                }
+                if ((op == QGPU_OP_DRAW_TRIANGLES_TEXN || op == QGPU_OP_DRAW_TRIANGLES_SEC) && len >= 4) {
+                    /* chemin hérité : [nverts, off, nunits] ; sommets de 8 + 4n mots
+                       (x y z f r g b a, puis s t r q par unité) — étendues (lot 11) */
+                    uint32_t nv = a[1], off = a[2], nu = a[3], words = 8 + 4 * nu + (op == QGPU_OP_DRAW_TRIANGLES_SEC ? 3 : 0);
+                    float mn[24], mx[24]; uint32_t v, w;
+                    for (w = 0; w < 24; w++) { mn[w] = 1e30f; mx[w] = -1e30f; }
+                    if (nv > 200000) nv = 200000;
+                    for (v = 0; v < nv; v++) {
+                        const uint8_t *vp = shmem + off + (size_t)v * words * 4;
+                        if (off + ((size_t)v + 1) * words * 4 > SHMEM) break;
+                        for (w = 0; w < words && w < 24; w++) {
+                            float f = qgpu_u2f(qgpu_ld32(vp + w * 4));
+                            if (f < mn[w]) mn[w] = f;
+                            if (f > mx[w]) mx[w] = f;
+                        }
+                    }
+                    fprintf(stderr, "LIST image %u %s : nverts %u nunits %u | x [%g,%g] y [%g,%g] z [%g,%g] | rgba [%g,%g] [%g,%g] [%g,%g] [%g,%g]",
+                            h.frame, op == QGPU_OP_DRAW_TRIANGLES_TEXN ? "TEXN" : "SEC", a[1], nu,
+                            mn[0], mx[0], mn[1], mx[1], mn[2], mx[2], mn[4], mx[4], mn[5], mx[5], mn[6], mx[6], mn[7], mx[7]);
+                    for (w = 0; w < nu && w < 4; w++)
+                        fprintf(stderr, " | u%u s [%g,%g] t [%g,%g] r [%g,%g] q [%g,%g]", w,
+                                mn[8 + 4 * w], mx[8 + 4 * w], mn[9 + 4 * w], mx[9 + 4 * w], mn[10 + 4 * w], mx[10 + 4 * w], mn[11 + 4 * w], mx[11 + 4 * w]);
+                    fprintf(stderr, " | tex %u/%u %u/%u %u/%u %u/%u light %u blend %u %x/%x\n",
+                            sk[QGPU_SK_TEXTURE], sk[QGPU_SK_TEX_BIND], sk[QGPU_SK_TEXTURE1], sk[QGPU_SK_TEX1_BIND],
+                            sk[QGPU_SK_TEXTURE2], sk[QGPU_SK_TEX2_BIND], sk[QGPU_SK_TEXTURE3], sk[QGPU_SK_TEX3_BIND],
+                            sk[QGPU_SK_LIGHTING], sk[QGPU_SK_BLEND], sk[QGPU_SK_BLEND_SRC_RGB], sk[QGPU_SK_BLEND_DST_RGB]);
+                }
+                if (op == QGPU_OP_SET_TEXGEN && len == QGPU_LEN_SET_TEXGEN)
+                    fprintf(stderr, "LIST image %u SET_TEXGEN u%u coord %u actif %u mode %x\n",
+                            h.frame, a[1], a[2], a[3], a[4]);
+                if (op == QGPU_OP_DRAW_RAW && len == QGPU_LEN_DRAW_RAW) {
+                    /* étendue des coordonnées de texture de chaque unité portée
+                       par le format : 2D en [0,1] ou vecteurs 3D (lot 11) */
+                    uint32_t fmt = a[5], nv = a[9], words = QGPU_VF_WORDS(fmt), pas = a[4] ? a[4] : words;
+                    uint32_t base = QGPU_VF_POS_COUNT(fmt) + ((fmt & QGPU_VF_NORMAL) ? 3 : 0) +
+                                    ((fmt & QGPU_VF_COLOR) ? 4 : 0) + ((fmt & QGPU_VF_SEC_COLOR) ? 3 : 0) +
+                                    ((fmt & QGPU_VF_FOG) ? 1 : 0);
+                    uint32_t u, off = base;
+                    if (nv > 200000) nv = 200000;
+                    for (u = 0; u < 4; u++) {
+                        float mn[4] = { 1e30f, 1e30f, 1e30f, 1e30f }, mx[4] = { -1e30f, -1e30f, -1e30f, -1e30f };
+                        uint32_t v, c;
+                        if (!(fmt & QGPU_VF_TEX(u))) continue;
+                        for (v = 0; v < nv; v++) {
+                            const uint8_t *vp = shmem + a[3] + ((size_t)v * pas + off) * 4;
+                            if (a[3] + ((size_t)v * pas + off + 4) * 4 > SHMEM) break;
+                            for (c = 0; c < 4; c++) {
+                                float f = qgpu_u2f(qgpu_ld32(vp + c * 4));
+                                if (f < mn[c]) mn[c] = f;
+                                if (f > mx[c]) mx[c] = f;
+                            }
+                        }
+                        fprintf(stderr, "   tc u%u : s [%g, %g] t [%g, %g] r [%g, %g] q [%g, %g]\n",
+                                u, mn[0], mx[0], mn[1], mx[1], mn[2], mx[2], mn[3], mx[3]);
+                        off += 4;
                     }
                 }
                 if (op == QGPU_OP_DRAW_RAW || op == QGPU_OP_DRAW_RAW_BUF)

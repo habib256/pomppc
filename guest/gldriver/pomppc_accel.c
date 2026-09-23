@@ -71,7 +71,7 @@
 #include "pomppc_gld.h"
 #include "pomppc_qgpu.h"
 
-#define POMPPC_PLUGIN_REV "20260922-bughunt"
+#define POMPPC_PLUGIN_REV "20260923-vtxlimit"
 static void gl_note(const char *fmt, ...);
 static void flush(void);
 static void drain_all(void);
@@ -494,6 +494,9 @@ typedef struct TexUnit {
 typedef struct TexInfo {                /* textures à appliquer pour le dessin en cours */
     TexUnit        u[QGPU_MAX_UNITS];
 } TexInfo;
+static void cube_probe(PCtx *p, const TexInfo *ti, const char *where);
+static void draw_probe(PCtx *p, const TexInfo *ti);
+static void dump_one(const char *path);
 
 typedef struct Post {                   /* copie à faire APRÈS la barrière */
     int            depth;               /* 0 couleur, 1 profondeur, 2 stencil */
@@ -1495,8 +1498,22 @@ static void invalidate_mirrors(void)
 
 static void broken_all(const char *why, long st, unsigned long pc)
 {
-    gl_note("broken_all %s : statut %ld commande %lu, image %lu\n", why, st, pc, G.n_frames);
     PCtx *p;
+    gl_note("broken_all %s : statut %ld commande %lu, image %lu\n", why, st, pc, G.n_frames);
+    {   /* lot 11 : la commande fautive et la tête du lot, quelle que soit la branche */
+        char hb2[260]; int a2 = 0; unsigned long k2, n2 = 0;
+        if (pc < CMD_WORDS) {
+            n2 = QGPU_CMD_LEN(G.cmd[pc]);
+            if (n2 == 0 || n2 > 16 || pc + n2 > CMD_WORDS) n2 = 1;
+            for (k2 = 0; k2 < n2 && a2 < (int)sizeof(hb2) - 12; k2++)
+                a2 += snprintf(hb2 + a2, sizeof(hb2) - a2, " %lx", G.cmd[pc + k2]);
+        }
+        a2 += snprintf(hb2 + a2, sizeof(hb2) - a2, " | tete :");
+        for (k2 = 0; k2 < 12 && k2 < G.ncmd && a2 < (int)sizeof(hb2) - 12; k2++)
+            a2 += snprintf(hb2 + a2, sizeof(hb2) - a2, " %lx", G.cmd[k2]);
+        hb2[a2] = 0;
+        gl_note("FAUTIVE pc %lu (%lu mots) :%s\n", pc, G.ncmd, hb2);
+    }
     /* Q2 — un SURF_PRESENT refusé tombait dans « lot ignoré, accélération
        gardée » (BAD_ARG) ou coupait toute la 3D du processus (autre statut) ;
        dans les deux cas present_direct continuait de rendre 1 et Apple
@@ -1520,6 +1537,18 @@ static void broken_all(const char *why, long st, unsigned long pc)
     if (pc < CMD_WORDS &&
         (QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_RAW ||
          QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_RAW_BUF)) {
+        {   /* lot 11 : vidage de la soumission fautive, une fois */
+            static int done;
+            const char *fd = getenv("POMPPC_GL_DUMPFAIL");
+            if (fd && *fd && !done) {
+                char fp[300];
+                done = 1;
+                snprintf(fp, sizeof(fp), "%s/fail-%06lu.bin", fd, G.n_frames);
+                dump_one(fp);
+                gl_note("DUMPFAIL %s : op %lx pc %lu statut %ld ncmd %lu\n",
+                        fp, (unsigned long)QGPU_CMD_OP(G.cmd[pc]), pc, st, G.ncmd);
+            }
+        }
         pomppc_log("POMPPC: DRAW_RAW refusé (statut %ld, commande %lu) : "
                    "chemin brut coupé\n", st, pc);
         fprintf(stderr, "POMPPC GL: host rejected raw geometry "
@@ -1559,6 +1588,14 @@ static void broken_all(const char *why, long st, unsigned long pc)
             at += snprintf(buf + at, sizeof(buf) - at, " %lx", G.cmd[pc + k]);
         buf[at] = 0;
         pomppc_log("POMPPC: commande fautive (op %lx) :%s\n", op, buf);
+        {   /* lot 11 : tête du lot fautif, pour voir ce qui précède */
+            char hb2[200]; int a2 = 0; unsigned long k2;
+            for (k2 = 0; k2 < 20 && k2 < G.ncmd && a2 < (int)sizeof(hb2) - 12; k2++)
+                a2 += snprintf(hb2 + a2, sizeof(hb2) - a2, " %lx", G.cmd[k2]);
+            hb2[a2] = 0;
+            gl_note("REJET statut %ld pc %lu op %lx :%s | tete du lot (%lu mots) :%s\n",
+                    st, pc, op, buf, G.ncmd, hb2);
+        }
         /* UT2004 : un BAD_ARG (filtre mipmap, sommet, etc.) tuait toute
            l'accélération → menu en quads blancs/jaunes, logiciel PPC.
            On jette CE lot et on continue : le texte peut encore partir. */
@@ -1876,10 +1913,14 @@ static void dump_submit(void)
                 from = G.n_frames;
                 /* Vidage AUTONOME : réémettre tout l'état et retéléverser
                    toutes les textures, pour que le rejeu natif n'ait besoin de
-                   rien d'antérieur (même geste que broken_all, P9). */
+                   rien d'antérieur (même geste que broken_all, P9). La
+                   soumission EN COURS a été bâtie avec les anciens miroirs
+                   (textures déjà à l'hôte, jamais réémises) : on ne vide qu'à
+                   partir de l'image SUIVANTE, complète (lot 11 : le rejeu du
+                   premier vidage M4 liait 12 textures sans image). */
                 invalidate_mirrors();
             }
-            if (G.n_frames > from + maxf)
+            if (G.n_frames <= from || G.n_frames > from + maxf)
                 return;
         } else if (G.n_frames > maxf) {
             return;
@@ -1887,6 +1928,29 @@ static void dump_submit(void)
     }
     snprintf(path, sizeof(path), "%s/%06lu.bin", dir, seq++);
     f = fopen(path, "wb");
+    if (!f)
+        return;
+    memset(&h, 0, sizeof(h));
+    h.magic = 0x50514431UL; h.frame = G.n_frames; h.base = G.base;
+    h.ncmd_bytes = G.ncmd * 4;
+    h.vtx_off = VTX_OFF; h.vtx_len = G.vtx;
+    h.idx_off = IDX_OFF; h.idx_len = G.idx;
+    h.arena_off = ARENA_OFF; h.arena_len = G.arena;
+    fwrite(&h, sizeof(h), 1, f);
+    fwrite(G.win, 1, h.ncmd_bytes, f);
+    fwrite(G.win + VTX_OFF, 1, h.vtx_len, f);
+    fwrite(G.win + IDX_OFF, 1, h.idx_len, f);
+    fwrite(G.win + ARENA_OFF, 1, h.arena_len, f);
+    fclose(f);
+}
+
+/* Lot 11 : vider LA soumission courante (autonome pour un DRAW_RAW : sommets et
+   indices sont dans la fenêtre) quand elle vient d'être refusée, pour la
+   rejouer en natif. Même format que dump_submit. */
+static void dump_one(const char *path)
+{
+    struct dump_hdr h;
+    FILE *f = fopen(path, "wb");
     if (!f)
         return;
     memset(&h, 0, sizeof(h));
@@ -3213,6 +3277,8 @@ static int texture_ok(PCtx *p, TexInfo *ti)
     for (i = 0; i < QGPU_MAX_UNITS; i++)
         if (!texture_unit_ok(p, i, &ti->u[i]))
             return 0;
+    cube_probe(p, ti, "texture_ok");
+    draw_probe(p, ti);
     return 1;
 }
 
@@ -5121,6 +5187,143 @@ static unsigned long geom_slots(unsigned long words)
 /* +0x50 BeginPrimitiveBuffer(ctx, mode, &n) -> tampon où écrire les sommets.
  * Rendre 0 est INTERDIT (GLEngine écrirait à l'adresse nulle) : quand on doit
  * refuser, on rend un tampon de secours et on jette la primitive. */
+/* Lot 11 (23/09/2026) — sonde « arme noire » d'UT2004 : aux trois premiers
+   dessins dont l'unité 0 porte une carte de cube avec au moins trois unités
+   actives, vider dans note.txt les blocs d'unité BRUTS de GLEngine (0x7c
+   octets chacun), la table des textures liées du contexte (cible et niveau 0
+   de chaque objet, identifiant hôte), le bloc texgen de chaque unité, et ce
+   que le plugin en a résolu. C'est ce qui départage « sources du combineur
+   mal lues » et « textures échangées entre unités » (docs/re/ut2004-arme-
+   noire.md §3). POMPPC_GL_CUBEPROBE=0 coupe la sonde. */
+static void note_hex(const char *tag, const unsigned char *b, unsigned long n)
+{
+    unsigned long i;
+    char line[3 * 16 + 1];
+    for (i = 0; i < n; i += 16) {
+        unsigned long j, m = n - i < 16 ? n - i : 16;
+        for (j = 0; j < m; j++)
+            sprintf(line + 3 * j, "%02x ", b[i + j]);
+        line[3 * m] = 0;
+        gl_note("   %s+%03lx: %s\n", tag, i, line);
+    }
+}
+static void cube_probe(PCtx *p, const TexInfo *ti, const char *where)
+{
+    static int shots = 0, on = -1;
+    unsigned char *g = gls(p);
+    unsigned long units;
+    int u, k, n = 0;
+    if (on < 0) {
+        const char *e = getenv("POMPPC_GL_CUBEPROBE");
+        on = !(e && *e == '0');
+    }
+    if (!on || shots >= 3 || !g || !p->ctx)
+        return;
+    {   /* armée par le même fichier que le vidage déclenché : la scène voulue
+           (arme en main) est à l'écran quand il apparaît */
+        static int armed;
+        const char *trig = getenv("POMPPC_GL_DUMP_TRIGGER");
+        if (!armed) {
+            if (trig && *trig && access(trig, F_OK) != 0)
+                return;
+            armed = 1;
+        }
+    }
+    {
+        int cube = 0;
+        for (u = 0; u < GL_MAX_TEXUNITS; u++) {
+            unsigned long m = GLD_U32(g, GS_TEXUNIT0 + u * GS_TEXUNIT_SIZE + TU_ENABLE) & 0x1f;
+            if (m)
+                n++;
+            if (m & 1)
+                cube = 1;
+        }
+        if (!cube || n < 2)
+            return;
+    }
+    shots++;
+    units = GLD_U32(p->ctx, CTX_TEXUNITS);
+    gl_note("SONDE-CUBE (%s) image %lu : %d unites actives, table %08lx, cube %d xbar %d\n",
+            where, G.n_frames, n, units, G.cube, G.xbar);
+    for (u = 0; u < 4; u++) {
+        unsigned char *us = g + GS_TEXUNIT0 + u * GS_TEXUNIT_SIZE;
+        char tag[16];
+        gl_note(" unite %d : enable %02lx env %04lx comb rgb %04lx a %04lx | src rgb %04lx %04lx %04lx"
+                " a %04lx %04lx %04lx | op rgb %04lx %04lx %04lx a %04lx %04lx %04lx | scale %g %g\n",
+                u, GLD_U32(us, TU_ENABLE), (unsigned long)U16(us, TU_ENV_MODE),
+                (unsigned long)U16(us, TU_COMBINE_RGB), (unsigned long)U16(us, TU_COMBINE_A),
+                (unsigned long)U16(us, TU_SRC0_RGB), (unsigned long)U16(us, TU_SRC0_RGB + 2),
+                (unsigned long)U16(us, TU_SRC0_RGB + 4),
+                (unsigned long)U16(us, TU_SRC0_A), (unsigned long)U16(us, TU_SRC0_A + 2),
+                (unsigned long)U16(us, TU_SRC0_A + 4),
+                (unsigned long)U16(us, TU_OP0_RGB), (unsigned long)U16(us, TU_OP0_RGB + 2),
+                (unsigned long)U16(us, TU_OP0_RGB + 4),
+                (unsigned long)U16(us, TU_OP0_A), (unsigned long)U16(us, TU_OP0_A + 2),
+                (unsigned long)U16(us, TU_OP0_A + 4),
+                (double)GLD_F32(us, TU_RGB_SCALE), (double)GLD_F32(us, TU_ALPHA_SCALE));
+        sprintf(tag, "u%d", u);
+        note_hex(tag, us, GS_TEXUNIT_SIZE);
+        for (k = 0; k < 5 && units; k++) {
+            unsigned char *dt = (unsigned char *)GLD_U32(units, u * 0x14 + k * 4);
+            unsigned char *prm, *lv;
+            PTex *t;
+            if (!dt)
+                continue;
+            prm = (unsigned char *)GLD_U32(dt, DT_PARAMS);
+            lv = dt + DT_LEVEL0;
+            t = find_tex(dt);
+            gl_note("   empl %d : dt %08lx cible %d niv0 %dx%d fmt %04lx type %04lx base %04lx qtex %ld\n",
+                    k, (unsigned long)dt, prm ? GLD_U8(prm, TP_TARGET) : -1,
+                    (int)(short)U16(lv, LV_W), (int)(short)U16(lv, LV_H),
+                    (unsigned long)U16(lv, LV_FORMAT), (unsigned long)U16(lv, LV_TYPE),
+                    GLD_U32(dt, DT_BASE_FORMAT), t ? t->qtex : -2L);
+        }
+        sprintf(tag, "tg%d", u);
+        note_hex(tag, g + GS_TEXGEN(u), 0x94);
+        if (ti)
+            gl_note("   resolu : qtex %ld env %04lx combine %08lx src %08lx\n",
+                    ti->u[u].t ? ti->u[u].t->qtex : -1L, ti->u[u].env_mode,
+                    ti->u[u].combine, ti->u[u].combine_src);
+    }
+}
+
+/* Lot 11 : après le déclencheur du vidage, une ligne par décision de
+   texturage (≤ 200) — unités, textures hôte et tailles, environnement,
+   combineur, mélange, éclairage — pour retrouver les dessins de l'arme. */
+static void draw_probe(PCtx *p, const TexInfo *ti)
+{
+    static int armed, lines;
+    unsigned char *g = gls(p);
+    const char *trig = getenv("POMPPC_GL_DUMP_TRIGGER");
+    char buf[400];
+    int at = 0, u;
+    if (!armed) {
+        if (!trig || !*trig || access(trig, F_OK) != 0)
+            return;
+        armed = 1;
+    }
+    if (lines >= 200 || !g)
+        return;
+    lines++;
+    at += snprintf(buf + at, sizeof(buf) - at, "DESSIN image %lu light %d blend %d %04x/%04x alpha %d :",
+                   G.n_frames, GLD_U8(g, GS_LIGHTING) != 0, GLD_U8(g, GS_BLEND) != 0,
+                   (unsigned)U16(g, GS_BLEND_SRC_RGB), (unsigned)U16(g, GS_BLEND_DST_RGB),
+                   GLD_U8(g, GS_ALPHA_TEST) != 0);
+    for (u = 0; u < QGPU_MAX_UNITS && at < (int)sizeof(buf) - 80; u++) {
+        unsigned char *us = g + GS_TEXUNIT0 + u * GS_TEXUNIT_SIZE;
+        unsigned long m = GLD_U32(us, TU_ENABLE) & 0x1f;
+        const PTex *t = ti->u[u].t;
+        if (!m)
+            continue;
+        at += snprintf(buf + at, sizeof(buf) - at, " u%d[m%02lx tex %ld %dx%d env %04lx cb %08lx src %08lx]",
+                       u, m, t ? t->qtex : -1L,
+                       t ? (int)(short)U16((unsigned char *)t->drvtex + DT_LEVEL0, LV_W) : 0,
+                       t ? (int)(short)U16((unsigned char *)t->drvtex + DT_LEVEL0, LV_H) : 0,
+                       ti->u[u].env_mode, ti->u[u].combine, ti->u[u].combine_src);
+    }
+    gl_note("%s\n", buf);
+}
+
 static void *geom_begin(void *ctx, short mode, unsigned long *n)
 {
     PCtx *p;
@@ -6350,12 +6553,19 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
     reuse = host == 1 && hb && hb->qid >= 0 && hb->qsize >= packed &&
             hb->pack_fmt == fmt && hb->pack_vmin == vmin &&
             hb->pack_nverts == nverts && hb->pack_key == key;
+    /* VTX_LIMIT est un offset ABSOLU dans la fenêtre (= IDX_OFF) ; G.vtx est
+       RELATIF à VTX_OFF. Sans le terme VTX_OFF, ce test laissait les sommets
+       déborder de 0x40000 octets dans la zone des indices et les écraser :
+       les indices lus devenaient des morceaux de flottants (≥ nverts), le cœur
+       refusait le DRAW_RAW (BAD_ARG) et tout le chemin brut tombait en
+       rastérisation pour la session (UT2004, toute la géométrie « from arrays »
+       ; Marble Blast passe par Begin/End, dont le test était juste). */
     if (G.ncmd + QGPU_LEN_DRAW_RAW_BUF + QGPU_LEN_BUF_SUBDATA +
             QGPU_LEN_BUF_CREATE + 8 > CMD_WORDS ||
-        (!reuse && G.vtx + packed > VTX_LIMIT) ||
+        (!reuse && VTX_OFF + G.vtx + packed > VTX_LIMIT) ||
         (nidx && G.idx + nidx * 4 + 4 > IDX_SIZE))
         flush();
-    if ((!reuse && G.vtx + packed > VTX_LIMIT) ||
+    if ((!reuse && VTX_OFF + G.vtx + packed > VTX_LIMIT) ||
         (nidx && G.idx + nidx * 4 + 4 > IDX_SIZE))
         return no(NO_G_ARRAY, nverts, nidx);
     vtx_off = 0;
