@@ -695,7 +695,10 @@ enum {
     /* v8 : ce qui reste hors domaine une fois les fonctions v8 branchées */
     NO_Q_FALLBACK, NO_TEX_PARAM,
     /* v10 */
-    NO_G_TEX3D, NO_COUNT
+    NO_G_TEX3D,
+    /* 23/09/2026 : source de tableau nulle (Colin McRae) ; sommet NaN retenu
+       avant le repli Apple */
+    NO_G_SRC, NO_APPLE_NAN, NO_G_GENERIC, NO_COUNT
 };
 static const char *const no_name[NO_COUNT] = {
     "buffer", "logicop/stipple/smooth", "fog", "polygonmode", "depth",
@@ -706,6 +709,7 @@ static const char *const no_name[NO_COUNT] = {
     "raw:no-vertex", "raw:late-state", "raw:arrays",
     "query:sw-fallback", "tex-param",
     "raw:tex-3d-or-cube",
+    "raw:null-array", "apple:nan-vertex", "raw:generic-attribs",
 };
 static unsigned long no_count[NO_COUNT];
 static char no_detail[NO_COUNT][64];
@@ -1354,6 +1358,8 @@ static void close_run(void)
  * garantie par la marge de reserve(). */
 static void geom_check(const char *where, PCtx *p, unsigned long mode, unsigned long n,
                        unsigned long words, unsigned long off, unsigned long extra);
+static void va_probe(PCtx *p, const unsigned char *V, unsigned long fmt,
+                     const char *tag, int bad);
 static void close_raw(void)
 {
     if (G.raw_ctx && G.raw_count && raw_fix_nan()) {
@@ -1374,6 +1380,30 @@ static void close_raw(void)
         c = G.cmd + G.ncmd;
         geom_check("Send", G.raw_ctx, G.raw_mode, (G.raw_vend - G.raw_start) / (G.raw_words * 4),
                    G.raw_words, G.raw_start, (G.raw_lots << 16) | (G.raw_fmt & 0xffff));
+        {   /* 23/09/2026 : savoir de quel chemin viennent les DRAW_RAW d'un
+               vidage (Begin/End ici, tableaux dans emit_draw_client) */
+            static unsigned long said, said_big;
+            unsigned long nv = (G.raw_vend - G.raw_start) / (G.raw_words * 4);
+            if (said < 3 || (nv >= 200 && said_big < 6)) {
+                const float *v0 = (const float *)(G.win + VTX_OFF + G.raw_start);
+                unsigned char *g = gls(G.raw_ctx);
+                const unsigned char *V = g ? (const unsigned char *)GLD_U32(g, GS_VAO) : 0;
+                said++;
+                if (nv >= 200)
+                    said_big++;
+                gl_note("DRAW_RAW Begin/End #%lu image %lu : mode %lu n %lu fmt %lx mots %lu v0 %g %g %g %g v1 %g %g %g %g\n",
+                        said, G.n_frames, G.raw_mode, G.raw_count, G.raw_fmt, G.raw_words,
+                        v0[0], v0[1], v0[2], v0[3],
+                        nv > 1 ? v0[G.raw_words] : 0.0f, nv > 1 ? v0[G.raw_words + 1] : 0.0f,
+                        nv > 1 ? v0[G.raw_words + 2] : 0.0f, nv > 1 ? v0[G.raw_words + 3] : 0.0f);
+                /* le descripteur de tableaux de GLEngine à cet instant : ce sont
+                   ces tableaux qu'il déroule dans notre tampon */
+                if (V)
+                    va_probe(G.raw_ctx, V, G.raw_fmt, nv >= 200 ? "Begin/End grand lot" : "Begin/End", -1);
+                else
+                    gl_note("  (pas de descripteur VAO)\n");
+            }
+        }
         c[0] = QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW);
         c[1] = G.raw_mode;
         c[2] = G.raw_count;             /* sommets, ou INDICES si la série est indexée */
@@ -4408,6 +4438,61 @@ static long buf_reclaim(void *ctx, unsigned long handle)
     return 0;
 }
 
+/* ─────────── sonde : programmes de pipeline (ARB vp/fp) — 23/09/2026 ───────────
+ * Colin McRae (IndirectX/ZonicLib) emploie des programmes ARB et des attributs
+ * génériques : le protocole doit les apprendre (étape D). On journalise ce que
+ * GLEngine dépose (docs/re/tableaux-de-sommets.md §4 : le descripteur reçu est
+ * ppobj+0x4c8, cible u16 à +0 ; texte ASCII à ppobj+0x14, longueur +0x18), puis
+ * on transmet à Apple tel quel. */
+typedef long (*pp_create_fn)(void *, unsigned long *, void *);
+typedef long (*pp_modify_fn)(void *, unsigned long, unsigned long);
+static void pp_log(const char *what, void *desc, unsigned long mask)
+{
+    static unsigned long n_text, n_param;
+    unsigned char *obj = desc ? (unsigned char *)desc - 0x4c8 : 0;
+    unsigned long target = desc ? U16(desc, 0) : 0;
+    if (!obj)
+        return;
+    if (mask & 2)
+        n_param++;
+    if (mask & 1 || !mask) {
+        const char *text = (const char *)GLD_U32(obj, 0x14);
+        unsigned long len = GLD_U32(obj, 0x18);
+        gl_note("PIPELINE %s cible %04lx type %u masque %lx texte %p len %lu (params vus %lu)\n",
+                what, target, U16(desc, 2), mask, (void *)text, len, n_param);
+        if (text && len && len < 65536 && n_text < 12) {
+            char line[200]; unsigned long i, k = 0;
+            n_text++;
+            for (i = 0; i < len; i++) {
+                char ch = text[i];
+                if (ch == '\n' || k >= sizeof(line) - 2) {
+                    line[k] = 0; gl_note("  | %s\n", line); k = 0;
+                    if (ch != '\n') line[k++] = ch;
+                } else if (ch != '\r')
+                    line[k++] = ch;
+            }
+            if (k) { line[k] = 0; gl_note("  | %s\n", line); }
+        }
+    }
+}
+static long pp_create(void *ctx, unsigned long *handle, void *desc)
+{
+    long r = ((pp_create_fn)pomppc_real[GLD_CreatePipelineProgram])(ctx, handle, desc);
+    pp_log("create", desc, 0);
+    gl_note("  -> poignée %lx retour %ld\n", handle ? *handle : 0UL, r);
+    return r;
+}
+static long pp_modify(void *ctx, unsigned long handle, unsigned long mask)
+{
+    /* la poignée est celle qu'Apple a rendue : on ne sait pas retrouver
+       l'objet ; on retient le dernier descripteur vu à la création */
+    static void *last_desc[64]; static unsigned long last_h[64]; static int nh;
+    long r = ((pp_modify_fn)pomppc_real[GLD_ModifyPipelineProgram])(ctx, handle, mask);
+    (void)last_desc; (void)last_h; (void)nh;
+    gl_note("PIPELINE modify poignée %lx masque %lx\n", handle, mask);
+    return r;
+}
+
 /* Entrées gld que le plugin réalise lui-même, au lieu de les transmettre au
  * rendu d'Apple. Le crochet pomppc_pre rend l'adresse à appeler : il suffit d'y
  * rendre la nôtre, le trampoline saute dedans avec les arguments d'origine.
@@ -4431,6 +4516,8 @@ void *pomppc_gld_override(int id)
         frozen  = 1;
     }
     switch (id) {
+    case GLD_CreatePipelineProgram: return (void *)pp_create;
+    case GLD_ModifyPipelineProgram: return (void *)pp_modify;
     case GLD_CreateBuffer:  return (void *)buf_create;
     case GLD_DestroyBuffer: return (void *)buf_destroy;
     case GLD_FlushBuffer:   return (void *)buf_flush;
@@ -4714,6 +4801,32 @@ static int geom_ok(PCtx *p)
         unsigned char *gc = gctx_of(p);
         if (!gc || GLD_U32(gc, 0x4e1c) != 0x1c00)
             return no(NO_G_PROGRAM, gc ? GLD_U32(gc, 0x4e1c) : 0, 0);
+    }
+    /* Colin McRae en course (23/09/2026, sonde) : seuls les attributs
+       GÉNÉRIQUES 0, 1, 2 (glVertexAttribPointerARB, emplacements 16-18 du
+       descripteur, bits du mot haut V+0x330) sont actifs — l'attribut 0 tient
+       lieu de position (docs/re/descripteur-de-sommet.md). Notre format ne
+       porte que les attributs conventionnels : GLEngine déroulait alors les
+       tableaux dans notre tampon avec les VALEURS COURANTES (position 0,0,0,1,
+       couleur blanche) — maillages effondrés, « géométrie éclatée ». Tant que
+       le chemin brut ne sait pas lire ces emplacements, on laisse GLEngine
+       transformer lui-même (image juste, comme POMPPC_GL_GEOM=0). */
+    {
+        unsigned char *g = gls(p);
+        unsigned char *V = g ? (unsigned char *)GLD_U32(g, GS_VAO) : 0;
+        if (V && GLD_U32(V, VA_EN_HI) != 0) {
+            /* Pour de bon sur ce contexte : dessin par dessin, le va-et-vient
+               T&L matériel / logiciel faisait sortir le jeu sur une assertion
+               (COpenGLFragmentProgram : erreur GL) ; tout logiciel comme
+               POMPPC_GL_GEOM=0, il joue. */
+            static int probed;
+            if (!probed) {
+                probed = 1;
+                va_probe(p, V, 0, "attributs génériques (refus)", -1);
+            }
+            p->geom_lost = 1;
+            return no(NO_G_GENERIC, GLD_U32(V, VA_EN_HI), GLD_U32(V, VA_EN_LO));
+        }
     }
     if (!geom_texture_ok(p))
         return 0;
@@ -6191,6 +6304,87 @@ static void va_fetch(float *dst, PCtx *p, const unsigned char *V, int slot,
         fill_current_color(p, dst);
 }
 
+/* Colin McRae (23/09/2026, vidage rejoué) : des maillages ENTIERS arrivaient
+ * à l'hôte avec tous leurs sommets égaux aux valeurs courantes — position
+ * (0,0,0,1), couleur blanche, texcoord (0,0,0,1) —, parce que va_fetch
+ * substitue la valeur courante quand la source d'un tableau ACTIF est nulle
+ * ou son pas invalide (VBO dont la copie cliente à +0x30 est nulle, tableau
+ * paginé par le memory plugin…). Un maillage effondré en un point n'est jamais
+ * ce que l'application demande : on REFUSE le dessin, GLEngine le transforme
+ * lui-même (image juste, comme POMPPC_GL_GEOM=0), et on consigne UNE FOIS le
+ * descripteur complet pour retrouver d'où la source aurait dû venir. */
+static const unsigned long va_fmt_bit[9] = {
+    0, QGPU_VF_NORMAL, QGPU_VF_COLOR, QGPU_VF_SEC_COLOR, QGPU_VF_FOG,
+    QGPU_VF_TEX(0), QGPU_VF_TEX(1), QGPU_VF_TEX(2), QGPU_VF_TEX(3)
+};
+static const int va_fmt_slot[9] = { 0, 1, 2, 4, 3, 8, 9, 10, 11 };
+
+static void va_probe(PCtx *p, const unsigned char *V, unsigned long fmt,
+                     const char *tag, int bad)
+{
+    unsigned char *gc = gctx_of(p);
+    int i, k;
+    gl_note("SONDE tableaux (%s) : V %p en_hi %08lx en_lo %08lx fmt %lx fautif %d image %lu\n",
+            tag, (void *)V, GLD_U32(V, VA_EN_HI), GLD_U32(V, VA_EN_LO), fmt, bad, G.n_frames);
+    for (i = 0; i < 9; i++) {
+        int s = va_fmt_slot[i];
+        const unsigned char *ent = VA_SLOT(V, s);
+        unsigned long vbo = GLD_U32(V, VA_VBO(V, s));
+        PBuf *b = buf_from_vbo(vbo);
+        gl_note("  slot %2d en %d ptr %08lx pas %ld type %04x n %u bpc %u norm %u vbo %08lx base %08lx cache %08lx pbuf qid %ld dirty %d\n",
+                s, va_enabled(V, s), GLD_U32(ent, 0), (long)GLD_U32(ent, 4),
+                U16(ent, 8), U16(ent, 0xa), ent[0xc], ent[0xd], vbo,
+                vbo ? GLD_U32((void *)vbo, 0x30) : 0UL,
+                gc ? GLD_U32(gc, GC_VA_PTRS + 4 * s) : 0UL,
+                b ? b->qid : -2L, b ? b->dirty : -1);
+        if (vbo && (s == 0 || s == bad)) {
+            char hb[200]; int a = 0;
+            for (k = 0; k < 20 && a < (int)sizeof(hb) - 12; k++)
+                a += snprintf(hb + a, sizeof(hb) - a, " %lx", GLD_U32((void *)vbo, 4 * k));
+            gl_note("  vbo %08lx :%s\n", vbo, hb);
+        }
+    }
+    /* attributs génériques 0..7 (emplacements 16..23) : Colin McRae en course */
+    for (i = 16; i < 24; i++) {
+        const unsigned char *ent = VA_SLOT(V, i);
+        if (!va_enabled(V, i) && !GLD_U32(ent, 0))
+            continue;
+        gl_note("  générique %d (slot %d) en %d ptr %08lx pas %ld type %04x n %u bpc %u norm %u sig %08lx vbo %08lx\n",
+                i - 16, i, va_enabled(V, i), GLD_U32(ent, 0), (long)GLD_U32(ent, 4),
+                U16(ent, 8), U16(ent, 0xa), ent[0xc], ent[0xd], GLD_U32(ent, 0x14),
+                GLD_U32(V, VA_VBO(V, i)));
+    }
+}
+
+static int va_sources_ok(PCtx *p, const unsigned char *V, unsigned long fmt)
+{
+    static int probed_first, probed_bad;
+    int i, bad = -1;
+    for (i = 0; i < 9; i++) {
+        int s = va_fmt_slot[i];
+        const unsigned char *ent;
+        if ((i && !(fmt & va_fmt_bit[i])) || !va_enabled(V, s))
+            continue;
+        ent = VA_SLOT(V, s);
+        if (!va_src(p, V, s) || (int)GLD_U32(ent, 4) <= 0 ||
+            va_bpc(U16(ent, 8), ent[0xc]) <= 0) {
+            bad = s;
+            break;
+        }
+    }
+    if (!probed_first) {
+        probed_first = 1;
+        va_probe(p, V, fmt, "premier dessin", bad);
+    }
+    if (bad < 0)
+        return 1;
+    if (!probed_bad) {
+        probed_bad = 1;
+        va_probe(p, V, fmt, "source nulle", bad);
+    }
+    return 0;
+}
+
 static void va_pack_vertex(float *dst, PCtx *p, const unsigned char *V,
                            unsigned long fmt, unsigned long i)
 {
@@ -6461,6 +6655,15 @@ static int emit_draw_client(PCtx *p, unsigned long mode, unsigned long nidx,
         c[11] = nverts;
         G.ncmd += QGPU_LEN_DRAW_RAW_BUF;
     } else {
+        {   /* 23/09/2026 : voir la note jumelle dans close_raw */
+            static unsigned long said;
+            if (said < 3) {
+                const float *v0 = (const float *)(G.win + VTX_OFF + vtx_off);
+                said++;
+                gl_note("DRAW_RAW tableaux #%lu image %lu : mode %lu n %lu fmt %lx v0 %g %g %g %g\n",
+                        said, G.n_frames, mode, nverts, fmt, v0[0], v0[1], v0[2], v0[3]);
+            }
+        }
         c[0] = QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW);
         c[1] = mode;
         c[2] = nidx ? nidx : nverts;
@@ -6527,6 +6730,8 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
     words = QGPU_VF_WORDS(fmt);
     if (!words)
         return 0;
+    if (!va_sources_ok(p, V, fmt))
+        return no(NO_G_SRC, (unsigned long)V, (unsigned long)count);
     if (indexed && itype != VA_ITYPE_NONE && indices) {
         if (!va_scan_idx(indices, itype, count, &vmin, &vmax))
             return no(NO_G_ARRAY, itype, (unsigned long)count);
@@ -7199,6 +7404,131 @@ typedef long (*proc8)(void *, long, long, long, long, long, long, long);
 
 #define VTX(base, i) ((const unsigned char *)(base) + (i) * GLD_VERTEX_SIZE)
 
+/* ───────── repli Apple : jamais de sommet fenêtre NaN ou démesuré ─────────
+ * Le rastériseur logiciel d'Apple, à qui les a_* rendent ce que l'hôte ne
+ * prend pas, boucle SANS FIN sur un sommet fenêtre NaN ou démesuré : Colin
+ * McRae, 23/09/2026 (VM figée et lue par le moniteur), ligne de balayage de
+ * y = -1,5e9 à 600 sur un polygone dont trois sommets valaient NaN et le
+ * quatrième w = 5e-11 — le clipper de GLEngine ne découpe pas w ≈ 0. Le
+ * chemin hôte jette ces sommets (prim(), bande de garde) ; on fait pareil
+ * avant de donner quoi que ce soit à Apple : les primitives sont recomposées
+ * en triangles, segments ou points indépendants, seules les saines partent. */
+static int apple_vtx_ok(PCtx *p, const unsigned char *v)
+{
+    float x = GLD_F32(v, V_X), y = GLD_F32(v, V_Y), z = GLD_F32(v, V_Z);
+    float xmax = (float)((int)GLD_U32(p->ctx, CTX_WIDTH)  * 4);
+    float ymax = (float)((int)GLD_U32(p->ctx, CTX_HEIGHT) * 4);
+    if (!(xmax > 0.0f)) xmax = 4096.0f;
+    if (!(ymax > 0.0f)) ymax = 4096.0f;
+    /* un NaN échoue à toute comparaison : il est retenu ici */
+    return x > -xmax && x < xmax && y > -ymax && y < ymax && z > -1e9f && z < 1e9f;
+}
+
+#define APPLE_V(base, ptrs, i) ((ptrs) ? (ptrs)[i] : VTX(base, i))
+
+static int apple_batch_ok(PCtx *p, const void *base, const unsigned char **ptrs, long n)
+{
+    long i;
+    for (i = 0; i < n; i++)
+        if (!apple_vtx_ok(p, APPLE_V(base, ptrs, i)))
+            return 0;
+    return 1;
+}
+
+enum { AK_TRIS, AK_STRIP, AK_FAN, AK_QUADS, AK_QUADSTRIP, AK_POLY,
+       AK_LINES, AK_LINESTRIP, AK_LINELOOP, AK_POINTS };
+
+/* Recompose le lot en primitives indépendantes de `per` sommets, retire
+ * celles qui portent un sommet malsain, et rend le reste à Apple par la
+ * procédure indépendante (Triangles, Lines, Points). Verrou tenu à l'appel ;
+ * lâché ici, avant le rendu d'Apple. Rend ce que rendent les a_*. */
+static long apple_guard(PCtx *p, void *ctx, long flags, int kind,
+                        const void *base, const unsigned char **ptrs,
+                        const unsigned char *hub, long n)
+{
+    const unsigned char **v = 0;
+    unsigned char *buf = 0;
+    long i, np = 0, good = 0, cap;
+    int per = (kind >= AK_LINES && kind <= AK_LINELOOP) ? 2 : kind == AK_POINTS ? 1 : 3;
+    int slot = per == 3 ? PROC_RenderTriangles : per == 2 ? PROC_RenderLines : PROC_RenderPoints;
+    proc4 real;
+
+    cap = (n > 0 ? n * 2 + 2 : 0) * per;
+    v = cap ? (const unsigned char **)malloc((size_t)cap * sizeof(*v)) : 0;
+    if (v) {
+#define ADD3(a, b, c) do { v[np * 3] = (a); v[np * 3 + 1] = (b); v[np * 3 + 2] = (c); np++; } while (0)
+#define ADD2(a, b)    do { v[np * 2] = (a); v[np * 2 + 1] = (b); np++; } while (0)
+#define VV(i)         APPLE_V(base, ptrs, i)
+        switch (kind) {
+        case AK_TRIS:
+            for (i = 0; i + 2 < n; i += 3) ADD3(VV(i), VV(i + 1), VV(i + 2));
+            break;
+        case AK_STRIP:
+            for (i = 0; i + 2 < n; i++)
+                if (i & 1) ADD3(VV(i + 1), VV(i), VV(i + 2));
+                else       ADD3(VV(i), VV(i + 1), VV(i + 2));
+            break;
+        case AK_FAN:
+            for (i = 0; i + 1 < n; i++) ADD3(hub, VV(i), VV(i + 1));
+            break;
+        case AK_QUADS:
+            for (i = 0; i + 3 < n; i += 4) {
+                ADD3(VV(i), VV(i + 1), VV(i + 2));
+                ADD3(VV(i), VV(i + 2), VV(i + 3));
+            }
+            break;
+        case AK_QUADSTRIP:
+            for (i = 0; i + 3 < n; i += 2) {
+                ADD3(VV(i), VV(i + 1), VV(i + 3));
+                ADD3(VV(i), VV(i + 3), VV(i + 2));
+            }
+            break;
+        case AK_POLY:
+            for (i = 1; i + 1 < n; i++) ADD3(VV(0), VV(i), VV(i + 1));
+            break;
+        case AK_LINES:
+            for (i = 0; i + 1 < n; i += 2) ADD2(VV(i), VV(i + 1));
+            break;
+        case AK_LINESTRIP:
+        case AK_LINELOOP:
+            for (i = 0; i + 1 < n; i++) ADD2(VV(i), VV(i + 1));
+            if (kind == AK_LINELOOP && n > 1) ADD2(VV(n - 1), VV(0));
+            break;
+        case AK_POINTS:
+            for (i = 0; i < n; i++) { v[np] = VV(i); np++; }
+            break;
+        }
+#undef ADD3
+#undef ADD2
+#undef VV
+        for (i = 0; i < np; i++) {
+            int k, ok = 1;
+            for (k = 0; k < per; k++)
+                if (!apple_vtx_ok(p, v[i * per + k]))
+                    ok = 0;
+            if (ok) {
+                if (i != good)
+                    memcpy(&v[good * per], &v[i * per], (size_t)per * sizeof(*v));
+                good++;
+            }
+        }
+    }
+    no(NO_APPLE_NAN, (unsigned long)(np - good), (unsigned long)kind);
+    G.n_geomdrop += np - good;
+    real = (proc4)fallback(p, slot, 1, 1);
+    if (good && real)
+        buf = (unsigned char *)malloc((size_t)good * per * GLD_VERTEX_SIZE);
+    if (buf)
+        for (i = 0; i < good * per; i++)
+            memcpy(buf + i * GLD_VERTEX_SIZE, v[i], GLD_VERTEX_SIZE);
+    pthread_mutex_unlock(&G.mu);
+    if (buf)
+        real(ctx, buf, good * per, flags);
+    free(buf);
+    free(v);
+    return 0;
+}
+
 static long a_triangles(void *ctx, void *verts, long n, long flags)
 {
     PCtx *p;
@@ -7214,6 +7544,8 @@ static long a_triangles(void *ctx, void *verts, long n, long flags)
         pthread_mutex_unlock(&G.mu);
         return 0;
     }
+    if (p && !apple_batch_ok(p, verts, 0, n))
+        return apple_guard(p, ctx, flags, AK_TRIS, verts, 0, 0, n);
     real = p ? (proc4)fallback(p, PROC_RenderTriangles, 1, 1) : 0;
     pthread_mutex_unlock(&G.mu);
     return real ? real(ctx, verts, n, flags) : 0;
@@ -7234,6 +7566,8 @@ static long a_strip(void *ctx, void *verts, long n, long flags)
         pthread_mutex_unlock(&G.mu);
         return 0;
     }
+    if (p && !apple_batch_ok(p, verts, 0, n))
+        return apple_guard(p, ctx, flags, AK_STRIP, verts, 0, 0, n);
     real = p ? (proc4)fallback(p, PROC_RenderTriangleStrip, 1, 1) : 0;
     pthread_mutex_unlock(&G.mu);
     return real ? real(ctx, verts, n, flags) : 0;
@@ -7255,6 +7589,8 @@ static long a_fan(void *ctx, void *hub, void *verts, long n, long flags)
         pthread_mutex_unlock(&G.mu);
         return 0;
     }
+    if (p && (!apple_vtx_ok(p, (const unsigned char *)hub) || !apple_batch_ok(p, verts, 0, n)))
+        return apple_guard(p, ctx, flags, AK_FAN, verts, 0, (const unsigned char *)hub, n);
     real = p ? (proc5)fallback(p, PROC_RenderTriangleFan, 1, 1) : 0;
     pthread_mutex_unlock(&G.mu);
     return real ? real(ctx, hub, verts, n, flags) : 0;
@@ -7277,6 +7613,8 @@ static long a_quads(void *ctx, void *verts, long n, long flags)
         pthread_mutex_unlock(&G.mu);
         return 0;
     }
+    if (p && !apple_batch_ok(p, verts, 0, n))
+        return apple_guard(p, ctx, flags, AK_QUADS, verts, 0, 0, n);
     real = p ? (proc4)fallback(p, PROC_RenderQuads, 1, 1) : 0;
     pthread_mutex_unlock(&G.mu);
     return real ? real(ctx, verts, n, flags) : 0;
@@ -7299,6 +7637,8 @@ static long a_quadstrip(void *ctx, void *verts, long n, long flags)
         pthread_mutex_unlock(&G.mu);
         return 0;
     }
+    if (p && !apple_batch_ok(p, verts, 0, n))
+        return apple_guard(p, ctx, flags, AK_QUADSTRIP, verts, 0, 0, n);
     real = p ? (proc4)fallback(p, PROC_RenderQuadStrip, 1, 1) : 0;
     pthread_mutex_unlock(&G.mu);
     return real ? real(ctx, verts, n, flags) : 0;
@@ -7320,6 +7660,8 @@ static long a_polygon(void *ctx, void *verts, long n, long flags)
         pthread_mutex_unlock(&G.mu);
         return 0;
     }
+    if (p && !apple_batch_ok(p, verts, 0, n))
+        return apple_guard(p, ctx, flags, AK_POLY, verts, 0, 0, n);
     real = p ? (proc4)fallback(p, PROC_RenderPolygon, 1, 1) : 0;
     pthread_mutex_unlock(&G.mu);
     return real ? real(ctx, verts, n, flags) : 0;
@@ -7341,6 +7683,8 @@ static long a_polygon_ptr(void *ctx, void *vptrs, long n, long flags)
         pthread_mutex_unlock(&G.mu);
         return 0;
     }
+    if (p && !apple_batch_ok(p, 0, pp, n))
+        return apple_guard(p, ctx, flags, AK_POLY, 0, pp, 0, n);
     real = p ? (proc4)fallback(p, PROC_RenderPolygonPtr, 1, 1) : 0;
     pthread_mutex_unlock(&G.mu);
     return real ? real(ctx, vptrs, n, flags) : 0;
@@ -7351,7 +7695,7 @@ static long a_polygon_ptr(void *ctx, void *vptrs, long n, long flags)
 typedef long (*lp_fn)(void *, void *, long, long);
 
 /* Enveloppe commune : `body` émet les primitives si le lot a pu s'ouvrir. */
-#define LP_PROC(name, slot, lines, body)                                        \
+#define LP_PROC(name, slot, lines, kind, ptrs, body)                            \
 static long name(void *ctx, void *verts, long n, long flags)                     \
 {                                                                               \
     PCtx *p;                                                                    \
@@ -7368,6 +7712,10 @@ static long name(void *ctx, void *verts, long n, long flags)                    
         pthread_mutex_unlock(&G.mu);                                            \
         return 0;                                                               \
     }                                                                           \
+    if (p && !apple_batch_ok(p, (ptrs) ? 0 : verts,                             \
+                             (ptrs) ? (const unsigned char **)verts : 0, n))    \
+        return apple_guard(p, ctx, flags, kind, (ptrs) ? 0 : verts,             \
+                           (ptrs) ? (const unsigned char **)verts : 0, 0, n);   \
     real = p ? (lp_fn)fallback(p, slot, 1, 1) : 0;                              \
     pthread_mutex_unlock(&G.mu);                                                \
     return real ? real(ctx, verts, n, flags) : 0;                               \
@@ -7376,26 +7724,26 @@ static long name(void *ctx, void *verts, long n, long flags)                    
 #define PP(i) (((const unsigned char **)verts)[i])
 
 /* segments indépendants : la couleur plate est celle du second sommet */
-LP_PROC(a_lines, PROC_RenderLines, 1,
+LP_PROC(a_lines, PROC_RenderLines, 1, AK_LINES, 0,
     for (i = 0; i + 1 < n; i += 2)
         seg(&b, VTX(verts, i), VTX(verts, i + 1), VTX(verts, i + 1));)
-LP_PROC(a_linestrip, PROC_RenderLineStrip, 1,
+LP_PROC(a_linestrip, PROC_RenderLineStrip, 1, AK_LINESTRIP, 0,
     for (i = 0; i + 1 < n; i++)
         seg(&b, VTX(verts, i), VTX(verts, i + 1), VTX(verts, i + 1));)
 /* boucle : le segment de fermeture prend la couleur du premier sommet */
-LP_PROC(a_lineloop, PROC_RenderLineLoop, 1,
+LP_PROC(a_lineloop, PROC_RenderLineLoop, 1, AK_LINELOOP, 0,
     for (i = 0; i + 1 < n; i++)
         seg(&b, VTX(verts, i), VTX(verts, i + 1), VTX(verts, i + 1));
     if (n > 1)
         seg(&b, VTX(verts, n - 1), VTX(verts, 0), VTX(verts, 0));)
 /* (ctx, pointeurs, n, mode) : paires de pointeurs */
-LP_PROC(a_lines_ptr, PROC_RenderLinesPtr, 1,
+LP_PROC(a_lines_ptr, PROC_RenderLinesPtr, 1, AK_LINES, 1,
     for (i = 0; i + 1 < n; i += 2)
         seg(&b, PP(i), PP(i + 1), PP(i + 1));)
-LP_PROC(a_points, PROC_RenderPoints, 0,
+LP_PROC(a_points, PROC_RenderPoints, 0, AK_POINTS, 0,
     for (i = 0; i < n; i++)
         pt(&b, VTX(verts, i));)
-LP_PROC(a_points_ptr, PROC_RenderPointsPtr, 0,
+LP_PROC(a_points_ptr, PROC_RenderPointsPtr, 0, AK_POINTS, 1,
     for (i = 0; i < n; i++)
         pt(&b, PP(i));)
 
@@ -7580,6 +7928,9 @@ static void gl_note(const char *fmt, ...)
     va_start(ap, fmt);
     vfprintf(note_fp, fmt, ap);
     va_end(ap);
+    /* Les notes sont rares et précieuses : un jeu tué (kill, bus error) sans
+       vidage perdait tout ce qui suivait le dernier bloc (23/09/2026). */
+    fflush(note_fp);
 }
 
 static void direct_noop(void)
