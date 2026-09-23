@@ -1,7 +1,9 @@
-/* exitwatch.c — mouchard sur exit()/_exit()/abort() pour Tiger PPC.
+/* exitwatch.c — mouchard sur exit()/abort() pour Tiger PPC.
  *
- * Injecté par DYLD_INSERT_LIBRARIES=libexitwatch.dylib DYLD_FORCE_FLAT_NAMESPACE=1
- * (le lanceur « UT2004 trace.app » le fait) : quand le processus décide de
+ * Injecté par DYLD_INSERT_LIBRARIES=libexitwatch.dylib (le lanceur « UT2004
+ * trace.app » le fait). INTERPOSITION dyld (section __DATA,__interpose) et non
+ * espace de noms plat : DYLD_FORCE_FLAT_NAMESPACE faisait planter Carbon au
+ * lancement (SetSystemUIMode, 22/09 20:46). Quand le processus décide de
  * sortir, on remonte la chaîne des cadres PowerPC (0(r1) = cadre précédent,
  * 8(r1) = LR sauvegardé) et on journalise les adresses de retour avec la table
  * des images chargées (Tiger n'a pas d'ASLR : une adresse se lit ensuite avec
@@ -14,7 +16,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <dlfcn.h>
 #include <mach-o/dyld.h>
 
 static void dump(const char *who, int code)
@@ -43,20 +44,29 @@ static void dump(const char *who, int code)
     fclose(f);
 }
 
-void exit(int code)
+static void my_exit(int code)
 {
-    void (*real)(int) = (void (*)(int))dlsym(RTLD_NEXT, "exit");
     dump("exit", code);
-    if (real)
-        real(code);
+    exit(code);                         /* l'original, par l'interposition */
+}
+
+static void my_abort(void)
+{
+    dump("abort", 0);
+    abort();
+}
+
+static void my__exit(int code)
+{
+    dump("_exit", code);
     _exit(code);
 }
 
-void abort(void)
-{
-    void (*real)(void) = (void (*)(void))dlsym(RTLD_NEXT, "abort");
-    dump("abort", 0);
-    if (real)
-        real();
-    _exit(134);
-}
+/* Table d'interposition dyld : { remplaçant, original }. */
+typedef struct { const void *replacement, *replacee; } interpose_t;
+__attribute__((used)) static const interpose_t interposers[]
+    __attribute__((section("__DATA,__interpose"))) = {
+    { (const void *)my_exit,  (const void *)exit  },
+    { (const void *)my_abort, (const void *)abort },
+    { (const void *)my__exit, (const void *)_exit },
+};

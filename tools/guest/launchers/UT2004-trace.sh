@@ -5,10 +5,10 @@ mkdir -p $T/gltrace
 POMPPC_GL_STATS=1; export POMPPC_GL_STATS
 POMPPC_GL_NOTE=$T/note.txt; export POMPPC_GL_NOTE
 POMPPC_GL_FRAMES=$T/frames.csv; export POMPPC_GL_FRAMES
-POMPPC_GLTRACE=$T/gltrace; export POMPPC_GLTRACE
-# mouchard sur exit()/abort() : pile PPC + images chargées dans exitwatch.txt
+# trace intégrale des appels coupée pour l'A/B synchrone (trop lente) : POMPPC_GLTRACE=$T/gltrace
+# mouchard exit()/abort()/_exit() par INTERPOSITION dyld (pas d'espace plat) → exitwatch.txt
 POMPPC_EXITWATCH=$T/exitwatch.txt; export POMPPC_EXITWATCH
 DYLD_INSERT_LIBRARIES=/Users/tiger/libexitwatch.dylib; export DYLD_INSERT_LIBRARIES
-DYLD_FORCE_FLAT_NAMESPACE=1; export DYLD_FORCE_FLAT_NAMESPACE
+# chemin brut ACTIF (défaut) ; sonde des sommets aberrants (traînées) → note.txt
 cd "/Users/tiger/Desktop/Unreal Tournament 2004 Demo.app/Contents/MacOS"
 exec "./Unreal Tournament 2004 Demo" > $T/stdout.txt 2>&1

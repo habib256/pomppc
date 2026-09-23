@@ -1349,6 +1349,8 @@ static void close_run(void)
 /* Ferme la série DRAW_RAW en cours (chemin brut) : la commande n'est écrite
  * qu'ici, pour pouvoir fusionner les EndPrimitiveBuffer contigus. La place est
  * garantie par la marge de reserve(). */
+static void geom_check(const char *where, PCtx *p, unsigned long mode, unsigned long n,
+                       unsigned long words, unsigned long off, unsigned long extra);
 static void close_raw(void)
 {
     if (G.raw_ctx && G.raw_count && raw_fix_nan()) {
@@ -1367,6 +1369,8 @@ static void close_raw(void)
             G.bound = G.raw_ctx;
         }
         c = G.cmd + G.ncmd;
+        geom_check("Send", G.raw_ctx, G.raw_mode, (G.raw_vend - G.raw_start) / (G.raw_words * 4),
+                   G.raw_words, G.raw_start, (G.raw_lots << 16) | (G.raw_fmt & 0xffff));
         c[0] = QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW);
         c[1] = G.raw_mode;
         c[2] = G.raw_count;             /* sommets, ou INDICES si la série est indexée */
@@ -1491,6 +1495,7 @@ static void invalidate_mirrors(void)
 
 static void broken_all(const char *why, long st, unsigned long pc)
 {
+    gl_note("broken_all %s : statut %ld commande %lu, image %lu\n", why, st, pc, G.n_frames);
     PCtx *p;
     /* Q2 — un SURF_PRESENT refusé tombait dans « lot ignoré, accélération
        gardée » (BAD_ARG) ou coupait toute la 3D du processus (autre statut) ;
@@ -1792,8 +1797,12 @@ static void check_errors(unsigned long errors)
     if (errors == G.errors)
         return;
     pomppc_log("POMPPC: QGPU_REG_ERRORS %lu → %lu", G.errors, errors);
-    G.errors = errors;
     qgpu_peek(&G.q, &e2, &status, &pc);
+    /* Note (POMPPC_GL_NOTE) : une soumission asynchrone terminée en erreur
+       est une série de dessins PERDUE (mur qui disparaît une image) — 22/09. */
+    gl_note("ERRORS %lu -> %lu : statut %lu commande %lu, image %lu\n",
+            G.errors, errors, status, pc, G.n_frames);
+    G.errors = errors;
     pomppc_log(" (dernier statut %lu, commande %lu) : synchrone pendant %d images "
                "pour retrouver la fautive\n", status, pc, ASYNC_RETRY);
     G.async = 0;
@@ -1817,6 +1826,58 @@ static void async_rearm(void)
 
 /* Soumet la moitié courante. Pose sa barrière (asynchrone) ou fait ses copies
    tout de suite (synchrone). */
+
+/* POMPPC_GL_DUMP=<dossier> — vidage de chaque soumission (traînées d'UT2004,
+   22/09/2026) pour la REJOUER en natif sur l'hôte (tests/qgpu_replay.c) :
+   en-tête, puis les zones utilisées de la moitié courante (flux de commandes,
+   sommets, indices, arène) avec leurs offsets ABSOLUS dans BAR0, tels que le
+   flux les désigne. POMPPC_GL_DUMP_FRAMES=n borne le nombre d'images (400). */
+struct dump_hdr {
+    unsigned long magic;                /* 'PQD1' */
+    unsigned long frame;
+    unsigned long base;                 /* G.base : offset absolu de la moitié */
+    unsigned long ncmd_bytes;
+    unsigned long vtx_off, vtx_len;     /* relatifs à la moitié */
+    unsigned long idx_off, idx_len;
+    unsigned long arena_off, arena_len;
+    unsigned long reserved[6];
+};
+static void dump_submit(void)
+{
+    static int on = -1;
+    static char dir[300];
+    static unsigned long seq, maxf;
+    struct dump_hdr h;
+    char path[400];
+    FILE *f;
+    if (on < 0) {
+        const char *e = getenv("POMPPC_GL_DUMP"), *m = getenv("POMPPC_GL_DUMP_FRAMES");
+        on = 0;
+        if (e && *e == '/') {
+            snprintf(dir, sizeof(dir), "%s", e);
+            on = 1;
+        }
+        maxf = (m && *m) ? (unsigned long)atol(m) : 400;
+    }
+    if (!on || G.n_frames > maxf || !G.ncmd)
+        return;
+    snprintf(path, sizeof(path), "%s/%06lu.bin", dir, seq++);
+    f = fopen(path, "wb");
+    if (!f)
+        return;
+    memset(&h, 0, sizeof(h));
+    h.magic = 0x50514431UL; h.frame = G.n_frames; h.base = G.base;
+    h.ncmd_bytes = G.ncmd * 4;
+    h.vtx_off = VTX_OFF; h.vtx_len = G.vtx;
+    h.idx_off = IDX_OFF; h.idx_len = G.idx;
+    h.arena_off = ARENA_OFF; h.arena_len = G.arena;
+    fwrite(&h, sizeof(h), 1, f);
+    fwrite(G.win, 1, h.ncmd_bytes, f);
+    fwrite(G.win + VTX_OFF, 1, h.vtx_len, f);
+    fwrite(G.win + IDX_OFF, 1, h.idx_len, f);
+    fwrite(G.win + ARENA_OFF, 1, h.arena_len, f);
+    fclose(f);
+}
 static void submit_cur(void)
 {
     Half *h = &G.h[G.cur];
@@ -1831,6 +1892,7 @@ static void submit_cur(void)
        primitive vide le flux). */
     int async = G.async && !G.npend;
 
+    dump_submit();
     if (async) {
         st = qgpu_submit_async(&G.q, G.hb, G.ncmd * 4, &fence, &errors);
         if (st == QGPU_ST_QUEUE_FULL) {
@@ -5121,6 +5183,23 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
     if (G.ncmd + QGPU_LEN_DRAW_RAW + 4 > CMD_WORDS || geom_slots(words) < GEOM_MIN_SLOTS)
         flush();
     slots = geom_slots(words);
+    /* TAMPON = NOMBRE ENTIER DE PRIMITIVES. GLEngine remplit le tampon offert
+       jusqu'au bout et, pour GL_TRIANGLES/QUADS/LINES, coupe une primitive à
+       cheval sur deux tampons : le suivant commence par la fin du triangle
+       précédent. Avec 8 192 places (≢ 0 mod 3), chaque gros maillage arrivait
+       ainsi en lots dont les triangles se chevauchent d'un ou deux sommets, et
+       tout ce qui suivait la coupure reliait des sommets de triangles voisins
+       (échardes dans le texte du logo d'UT2004 — prouvé par rejeu natif le
+       22/09/2026, phase 1 dès le premier sommet du second tampon). Les rubans
+       et éventails, eux, sont recoupés par GLEngine avec répétition des
+       sommets (POMPPC_GL_GEOM_SLOTS l'a établi) : pas d'arrondi nécessaire. */
+    {
+        unsigned long pm = (unsigned long)(unsigned short)mode;
+        unsigned long unit = (pm == QGPU_PRIM_MODE_TRIANGLES) ? 3 :
+                             (pm == QGPU_PRIM_MODE_QUADS) ? 4 :
+                             (pm == QGPU_PRIM_MODE_LINES) ? 2 : 1;
+        slots -= slots % unit;
+    }
     if (slots < 4)
         goto refuse;                    /* ne devrait pas arriver : 4 Mio de sommets */
     p->pend_open = 1;
@@ -5499,11 +5578,51 @@ static void geom_probe(PCtx *p, const char *via, unsigned long m, unsigned long 
 
 /* +0x54 EndPrimitiveBuffer(ctx, drapeau, mode, n) : GLEngine a écrit n sommets
  * dans le tampon rendu par +0x50. Il n'y a plus rien qui puisse échouer ici. */
+
+/* POMPPC_GL_GEOMCHECK=1 — sonde des sommets aberrants du chemin brut (traînées
+   d'UT2004, 22/09/2026) : positions non finies ou > 1e5 (UT2004 ne dépasse pas
+   32 768 unités). Appelée à la fin du lot (ce que GLEngine vient d'écrire) et
+   au moment de l'envoi de la série (ce que l'hôte va lire) : si l'anomalie
+   n'apparaît qu'au second point, quelque chose a écrasé les sommets entre les
+   deux. Journal par gl_note (POMPPC_GL_NOTE), 120 lignes au plus. */
+static void geom_check(const char *where, PCtx *p, unsigned long mode, unsigned long n,
+                       unsigned long words, unsigned long off, unsigned long extra)
+{
+    static int on = -1;
+    static unsigned long left = 120;
+    const unsigned char *gc;
+    unsigned long i, bad = 0, first = 0;
+    float fx = 0, fy = 0, fz = 0;
+    if (on < 0) {
+        const char *e = getenv("POMPPC_GL_GEOMCHECK");
+        on = (e && *e && *e != '0') ? 1 : 0;
+    }
+    if (!on || !left || !words || !n)
+        return;
+    for (i = 0; i < n; i++) {
+        const float *v = (const float *)(G.win + VTX_OFF + off + i * words * 4);
+        float x = v[0], y = v[1], z = v[2];
+        float w = (QGPU_VF_POS_COUNT(extra & 0xffff) == 4) ? v[3] : 1.0f;
+        if (!(x == x && y == y && z == z) || x > 1e5f || x < -1e5f ||
+            y > 1e5f || y < -1e5f || z > 1e5f || z < -1e5f ||
+            !(w > 0.9f && w < 1.1f)) {
+            if (!bad) { first = i; fx = x; fy = y; fz = w; }   /* fz porte w */
+            bad++;
+        }
+    }
+    if (!bad)
+        return;
+    left--;
+    gc = p ? gctx_of(p) : 0;
+    gl_note("GEOMCHECK %s : %lu/%lu sommets aberrants (x y w), 1er #%lu = %g %g %g | mode %lu words %lu "
+            "off %lx pas GLEngine %u extra %lx image %lu\n", where, bad, n, first, fx, fy, fz,
+            mode, words, off, gc ? (unsigned)U16(gc, 0x4880) : 0u, extra, G.n_frames);
+}
 static void geom_end(void *ctx, long flag, short mode, long n)
 {
     PCtx *p;
     unsigned long m = (unsigned long)(unsigned short)mode;
-    unsigned long words;
+    unsigned long words, full;
     int same;
 
     (void)flag;
@@ -5528,6 +5647,13 @@ static void geom_end(void *ctx, long flag, short mode, long n)
        celui d'un AUTRE contexte, dont la place restait perdue jusqu'au vidage
        suivant et dont le geom_end était ensuite jeté. */
     if (!p || !p->pend_open || p->pend_drop) {
+        {   /* GEOMCHECK : End sans pend ouvert = lot PERDU (refermé avant) */
+            static int gc_on = -1; static unsigned long seen;
+            if (gc_on < 0) { const char *e = getenv("POMPPC_GL_GEOMCHECK"); gc_on = (e && *e && *e != '0') ? 1 : 0; }
+            if (gc_on && p && n > 0 && seen++ < 60)
+                gl_note("GEOMCHECK End orphelin : mode %lu n %ld (pend_open %d drop %d) image %lu\n",
+                        m, n, p->pend_open, p->pend_drop, G.n_frames);
+        }
         pend_close(p, 1);
         pthread_mutex_unlock(&G.mu);
         return;
@@ -5555,6 +5681,21 @@ static void geom_end(void *ctx, long flag, short mode, long n)
         return;
     }
     words = p->pend_words;
+    geom_check("End", p, m, (unsigned long)n, words, p->pend_off, p->pend_fmt);
+    {   /* GEOMCHECK : le pas de GLEngine a-t-il changé entre Begin et End ?
+           (un attribut apparu en cours de lot réarrangerait le sommet) */
+        static int gc_on = -1; static unsigned long seen;
+        unsigned char *gc = gctx_of(p);
+        if (gc_on < 0) { const char *e = getenv("POMPPC_GL_GEOMCHECK"); gc_on = (e && *e && *e != '0') ? 1 : 0; }
+        if (gc_on && gc && seen < 60 &&
+            (U16(gc, 0x4880) != words * 4 || U16(gc, 0x487c) != U16(gc, 0x4880) ||
+             (unsigned long)n > p->pend_slots)) {
+            seen++;
+            gl_note("GEOMCHECK pas : End mode %lu n %ld/%lu slots, words %lu (=%lu o), GLEngine 487c=%u 4880=%u 4882=%u, fmt %lx, image %lu\n",
+                    m, n, p->pend_slots, words, words * 4, (unsigned)U16(gc, 0x487c),
+                    (unsigned)U16(gc, 0x4880), (unsigned)U16(gc, 0x4882), p->pend_fmt, G.n_frames);
+        }
+    }
     /* On ne rend la queue inutilisée QUE si personne n'a alloué par-dessus
        (autre contexte, autre fil) : sinon on écraserait ses sommets. */
     if (G.vtx == p->pend_off + p->pend_slots * words * 4)
@@ -5567,12 +5708,28 @@ static void geom_end(void *ctx, long flag, short mode, long n)
        close_raw, donc la série est déjà fermée quand on arrive ici. Et on ne
        fusionne que des lots CONSÉCUTIFS : jamais de réordonnancement, sans quoi
        le mélange et l'égalité de profondeur changeraient l'image. */
+    /* PRIMITIVES COMPLÈTES SEULEMENT. GLEngine livre parfois un lot
+       GL_TRIANGLES dont n n'est pas multiple de 3 (triangle incomplet en fin
+       de lot, lot d'un seul sommet) : mis bout à bout tel quel, le reste
+       décalait d'un ou deux sommets TOUS les triangles des lots suivants —
+       chaque triangle reliait alors les sommets de ses voisins, en échardes
+       à travers le texte du logo d'UT2004. Prouvé le 22/09/2026 par rejeu
+       natif d'un vidage (DRAW_RAW de 14 509 sommets, phase 1 dès le sommet 0,
+       tests/qgpu_replay.c). Le recollage indexé (tris_emit) ignorait déjà le
+       reste ; ici on ne compte que les primitives entières, et la série
+       s'arrête après un lot incomplet (G.raw_vend ≠ pend_off suivant). */
+    {
+        unsigned long unit = (m == QGPU_PRIM_MODE_TRIANGLES) ? 3 :
+                             (m == QGPU_PRIM_MODE_QUADS) ? 4 :
+                             (m == QGPU_PRIM_MODE_LINES) ? 2 : 1;
+        full = (unsigned long)n - (unsigned long)n % unit;
+    }
     same = (G.raw_ctx == p && G.raw_fmt == p->pend_fmt && G.raw_words == words &&
             G.raw_vend == p->pend_off &&
-            (G.raw_vend - G.raw_start) / (words * 4) + (unsigned long)n
+            (G.raw_vend - G.raw_start) / (words * 4) + full
                 <= GEOM_MAX_MERGE);
     if (same && !G.raw_idx && G.raw_mode == m && mode_mergeable(m)) {
-        G.raw_count += n;               /* bout à bout, sans un seul indice */
+        G.raw_count += full;            /* bout à bout, sans un seul indice */
         G.raw_lots++;
     } else if (same && merge_switch() && !p->pend_wire && mode_tris(m) &&
                (G.raw_idx || mode_tris(G.raw_mode)) &&
@@ -5582,16 +5739,17 @@ static void geom_end(void *ctx, long flag, short mode, long n)
         close_raw();
         G.raw_ctx = p;
         G.raw_start = p->pend_off;
-        G.raw_count = n;
+        G.raw_count = full;
         G.raw_fmt = p->pend_fmt;
         G.raw_words = words;
         G.raw_mode = m;
         G.raw_lots = 1;
     }
-    /* Fin EXACTE de NOS sommets, pas G.vtx : un autre contexte a pu allouer
-       par-dessus, et close_raw() en déduit le `nverts` que le cœur relit. */
-    G.raw_vend = p->pend_off + (unsigned long)n * words * 4;
-    G.n_rawverts += n;
+    /* Fin EXACTE de NOS sommets (primitives entières), pas G.vtx : un autre
+       contexte a pu allouer par-dessus, et close_raw() en déduit le `nverts`
+       que le cœur relit. */
+    G.raw_vend = p->pend_off + full * words * 4;
+    G.n_rawverts += full;
     switch (m) {                        /* triangles équivalents, pour le bilan */
     case QGPU_PRIM_MODE_TRIANGLES:      G.n_tris += n / 3; break;
     case QGPU_PRIM_MODE_TRIANGLE_STRIP:
@@ -6537,7 +6695,26 @@ static void begin_common(PCtx *p, Batch *b, const TexInfo *ti)
        cela, G.npend restait posé pour toujours — flush() ne rendait plus
        jamais la zone des sommets, submit_cur restait synchrone, et prim()
        finissait par écrire hors de la tranche. */
-    pend_close(p, 1);
+    {   /* POMPPC_GL_PENDCLOSE=0 : A/B des traînées d'UT2004 (22/09) — ne pas
+           refermer, comportement d'avant F1 (prim() refuse alors si la place
+           manque). POMPPC_GL_GEOMCHECK=1 compte ces fermetures. */
+        static int pendclose = -1, gc_on = -1;
+        static unsigned long seen;
+        if (pendclose < 0) {
+            const char *e = getenv("POMPPC_GL_PENDCLOSE");
+            pendclose = (e && *e == '0') ? 0 : 1;
+            e = getenv("POMPPC_GL_GEOMCHECK");
+            gc_on = (e && *e && *e != '0') ? 1 : 0;
+        }
+        if (p && p->pend_open) {
+            if (gc_on && seen++ < 60)
+                gl_note("GEOMCHECK pend %s par rastérisation : %lu slots à %lx, image %lu\n",
+                        pendclose ? "FERMÉ" : "laissé ouvert", p->pend_slots, p->pend_off,
+                        G.n_frames);
+            if (pendclose)
+                pend_close(p, 1);
+        }
+    }
     check_draw_buffer(p);
     sync_to_host(p, 1, GLD_U8(gls(p), GS_DEPTH_TEST) || stencil_active(p));
     send_state(p, ti, 0);

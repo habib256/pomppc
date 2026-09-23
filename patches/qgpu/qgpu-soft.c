@@ -14,6 +14,7 @@
  */
 #include <math.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "qgpu-core.h"
@@ -942,6 +943,36 @@ static inline bool edge_top_left(float ax, float ay, float bx, float by, float s
 }
 
 /* Triangle générique : `words` mots par sommet, 0 à 4 unités de texture. */
+
+/* QGPU_SOFT_SPIKES=1 : journalise (stderr) les triangles anormalement étirés
+   (boîte englobante > 900 px en x ou 700 en y) avec le dessin qui les porte —
+   « traînées » d'UT2004, 22/09/2026, rejeu natif (tests/qgpu_replay.c). */
+static char spike_tag[160];
+static int spike_on = -1;
+static void spike_check(const float *v0, const float *v1, const float *v2,
+                        float minx, float maxx, float miny, float maxy)
+{
+    static unsigned long seen;
+    if (spike_on < 0) {
+        const char *e = getenv("QGPU_SOFT_SPIKES");
+        spike_on = (e && *e && *e != '0') ? 1 : 0;
+    }
+    if (!spike_on || seen >= 200)
+        return;
+    {   /* écharde : boîte englobante large mais aire minuscule (triangle
+           long et fin), ou triangle simplement démesuré */
+        float bw = maxx - minx, bh = maxy - miny;
+        float area = fabsf((v1[0] - v0[0]) * (v2[1] - v0[1]) - (v2[0] - v0[0]) * (v1[1] - v0[1])) * 0.5f;
+        float diag = bw > bh ? bw : bh;
+        if (!((diag > 60.0f && area < 0.02f * bw * bh) || bw > 900.0f || bh > 700.0f))
+            return;
+    }
+    {
+        seen++;
+        fprintf(stderr, "SPIKE %s : (%g %g %g) (%g %g %g) (%g %g %g)\n", spike_tag,
+                v0[0], v0[1], v0[2], v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+    }
+}
 static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *tex,
                      const float *v0, const float *v1, const float *v2, uint32_t prim,
                      int sec_off, const SoftAux *aux)
@@ -1004,6 +1035,7 @@ static void soft_tri(QgpuSurface *s, const QgpuState *st, QgpuTexture *const *te
     maxx = fmaxf(v0[0], fmaxf(v1[0], v2[0]));
     miny = fminf(v0[1], fminf(v1[1], v2[1]));
     maxy = fmaxf(v0[1], fmaxf(v1[1], v2[1]));
+    spike_check(v0, v1, v2, minx, maxx, miny, maxy);
     /* S3 : bornage AVANT la conversion — un sommet infini ne doit pas rendre
        une boîte englobante indéfinie (cf. ftoi_floor). */
     x0 = ftoi_floor(minx, cx0, cx1);
@@ -2102,6 +2134,9 @@ static bool soft_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
                           const uint32_t *idx, uint32_t count, uint32_t first)
 {
     Geo G;
+    if (spike_on != 0)
+        snprintf(spike_tag, sizeof(spike_tag), "cmd %u mode %u fmt %x nverts %u words %u %s%u first %u",
+                 c->ncmds, mode, fmt, nverts, words, idx ? "idx " : "n ", count, first);
     GVert *gv;
     uint32_t i;
     int u;
