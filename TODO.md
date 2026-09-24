@@ -39,6 +39,11 @@ une matrice de jeux verte comme preuve. Un jeu est « vert » quand il a ses tro
 2. **zéro repli par image** (`fb=0` dans `frames.csv`) ;
 3. **mesure** — ms/image à une scène fixe, avec un plancher par jeu.
 
+Les trois preuves valent **en fenêtre ET en plein écran** (demande de l'utilisateur, 24/09 soir) :
+c'est en plein écran qu'on joue, et le chemin diffère (`CGLSetFullScreen` → drawable mémoire par
+`pomppc_attach_fullscreen`, présentation par copie en VRAM, `docs/re/ut2004-fullscreen.md`). DOOM 3
+et Prey n'ont encore été joués qu'en fenêtre (`r_fullscreen 0` dans les lanceurs).
+
 | Jeu | Famille | Image | Replis | Vitesse (24/09) | Manque |
 |---|---|---|---|---|---|
 | Marble Blast Gold | pipeline fixe | juste | 0 | ~88 img/s | rien (témoin de non-régression) |
@@ -136,8 +141,8 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
       mêmes `frames.csv`.
 - [ ] **A3 — Matrice de jeux automatisée** (§1, étape 4). C'est le harnais qui autorise A2 et A4
       sans peur. Livrable : un script par jeu (lancement, `POMPPC_GL_DUMP_TRIGGER` à une image
-      fixe, rejeu natif, comparaison avec tolérance, ms/image), et un tableau vert/rouge produit à
-      chaque commit.
+      fixe, rejeu natif, comparaison avec tolérance, ms/image), **en fenêtre et en plein écran**,
+      et un tableau vert/rouge produit à chaque commit.
 - [ ] **A4 — Continuer à déplacer le travail vers l'hôte.** Après DRAW_NATIVE : bloc d'état
       partagé en mémoire invité que le device lit et diffère lui-même (le PowerPC ne compare plus
       les clés une à une), textures lues par DMA sur plages sales. Épreuve : `send_state` et
@@ -154,6 +159,14 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
 ---
 
 ## 5. Points ouverts (bugs, dettes, mesures à faire)
+
+- [ ] **DOOM 3 et Prey en plein écran** (`+set r_fullscreen 1`, et `r_mode` de l'écran) : jamais
+      joués ; à vérifier image et ms/image après le lot 2, puis à chaque lot (lanceurs
+      `~/doom3-fs.command`, `~/prey-fs.command` à créer sur le modèle des existants). Le chemin
+      plein écran du plugin (`pomppc_attach_fullscreen`, drawable 54 → mémoire 32 bits de l'écran
+      principal, `docs/re/ut2004-fullscreen.md`) n'a été validé que sur UT2004 et, en 16 bits,
+      Warcraft III. Changement de mode par le jeu (`CGDisplaySwitchToMode`) et `SURF_PRESENT` sur
+      l'écran redimensionné à surveiller.
 
 - [x] **Scènes `gltest` cassées, antérieures à A1** (24/09 soir, réglé) : `tex3d`, `tex14`,
       `gl15`, `texlod` — **c18c5f5** mémorisait `upload_texture` une fois par image sans
