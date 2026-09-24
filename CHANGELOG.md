@@ -9,6 +9,13 @@ et dans `docs/`.
 ## Non publié
 
 - En cours : verdict unique dans le plugin (`TODO.md` §2), lots 0 à 5.
+- Lot 1 du verdict unique, parasites (plugin `20260924-parasites` ; DOOM 3 Mars City, scène
+  fixe, images 3000-3300 : 99,5 → 95,5 ms/image ; `sample` : `__pthread_self` 4 → 1,
+  `getenv` 7 → 0, `tex_complete` 26 → 1 ; 18 scènes `gltest` identiques à l'octet) :
+  `self_thr()` garde le fil lu par `pthread_self()` avec l'adresse de pile où il l'a été (même
+  fil tant que la pile est à moins de 32 Kio) pour les gardes P3 ; `getenv` de `target_probe`,
+  `draw_probe` et `cube_probe` lus une fois ; complétude des textures (`tex_complete`,
+  `tex_base_ok`) mémorisée par texture et par image (`tex_cp`), effacée par les crochets.
 - **Prey, dialogue d'Apple au démarrage** (plugin seul ; vérifié : Prey démarre sans dialogue,
   `Prey.crash.log` inchangé) : les gestionnaires SIGBUS/SIGSEGV sont relus à chaque armement de garde tant
   qu'aucune image n'est présentée (`crash_hook_fresh`) ; `tex_lv0_sig` ne lit plus les texels

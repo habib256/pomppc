@@ -72,10 +72,20 @@ variable d'environnement tant que la mesure en jeu n'est pas faite.
       2 est justifié (jamais un verdict différent au dessin) ; le lot 3 ne peut pas partir de la
       liste blanche « env de programmes seulement » (0 occurrence) — il faut le relevé R4 sur les
       motifs 1 à 3 de DOOM 3.
-- [ ] **Lot 1 — parasites** : `pthread_self` une fois par entrée ; `getenv` de `target_probe` et
-      `draw_probe` en statique ; `tex_complete` mémorisé par image. Épreuve : `gltest texup
-      texcache texdelmid cube tex3d arbvp arbfp varrayvbo` inchangés ; `sample` : `__pthread_self`
-      et `getenv` < 3 échantillons.
+- [x] **Lot 1 — parasites** : **fait le 24/09/2026** (plugin `20260924-parasites`).
+      `pthread_self` : plutôt qu'« une fois par entrée » (qui en laissait un par dessin),
+      `self_thr()` le garde avec l'adresse de pile où il a été lu — même fil tant que la pile est
+      à moins de 32 Kio, les piles de deux fils étant disjointes — le gestionnaire de signal relit
+      toujours `pthread_self()` ; `getenv` de `target_probe`, `draw_probe`, `cube_probe` lus une
+      fois ; `tex_complete`/`tex_base_ok` mémorisés par texture et par image (`tex_cp`, effacé
+      par `pomppc_texture_changed`, les procédures qui salissent et le vidage d'état).
+      Épreuves : 18 scènes `gltest` (texup texcache texdelmid cube tex3d arbvp arbfp varrayvbo
+      game vbocolor arbvp0vbo tri, et en 256² tex13 tex14 gl15 texlod mixte dlist) **identiques à
+      l'octet** (verdicts et empreinte de l'image) ; DOOM 3 Mars City, début sans bouger, images
+      3000-3300 : **99,5 → 95,5 ms/image** ; `sample` (fil principal, ~850 éch.) :
+      `__pthread_self` 4 → 1, `getenv` 7 → 0, `tex_complete` 26 → 1 (le profil de référence
+      `sample-nat.txt` en avait 26, 9 et 31 ; le mémo `ok_frame` avait déjà pris les
+      `pthread_self` de `tex_lv0_sig`).
 - [ ] **Lot 2 — verdict unique** : le dispatch range `ok`, `TexInfo`, `fmt`, `gs` et une clé
       (image, époque des textures, VAO, `VA_EN`, programmes, `G.state`) dans le `PCtx` ; le dessin
       reprend si la clé est identique. `POMPPC_GL_VERDICTCHECK=1` recalcule et note les écarts.

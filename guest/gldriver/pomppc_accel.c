@@ -117,7 +117,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260924-count"
+#define POMPPC_PLUGIN_REV "20260924-parasites"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -150,6 +150,30 @@ static volatile unsigned long proc_fault_n;
 /* P3 (relecture du 24/09) : le crochet est global au processus ; chaque garde
    note le fil qui l'arme, et seul ce fil-là y revient par siglongjmp. */
 static volatile pthread_t pack_thr, sig_thr, proc_thr;
+/* Lot 1 du verdict unique (24/09) : pthread_self() est, sur Darwin 8 PPC, un
+   appel système rapide (`sc`) — cher sous QEMU (26 échantillons sur 818 dans
+   sample-nat.txt). Les gardes P3 le relisaient à chaque armement (un par
+   dessin, un par empreinte de niveau). self_thr() le garde en mémoire avec
+   l'adresse de pile où il a été lu : deux lectures du même fil se font à
+   quelques Kio de profondeur l'une de l'autre, et les piles de deux fils sont
+   des régions disjointes (pile principale de 8 Mio en 0xbf800000-0xc0000000,
+   piles secondaires de 512 Kio ailleurs, pages de garde entre elles) — une
+   adresse de pile à moins de THR_WIN de la précédente est donc le même fil.
+   Hors fenêtre (autre fil, autre profondeur) : pthread_self() et on retient.
+   VERROU TENU (toutes les gardes s'arment sous G.mu) ; le gestionnaire de
+   signal, lui, relit toujours pthread_self(). */
+#define THR_WIN 0x8000UL
+static pthread_t thr_last;
+static unsigned long thr_sp;            /* 0 : rien de retenu */
+static pthread_t self_thr(void)
+{
+    unsigned long sp = (unsigned long)&sp;
+    if (thr_sp && sp <= thr_sp + THR_WIN && sp + THR_WIN >= thr_sp)
+        return thr_last;
+    thr_last = pthread_self();
+    thr_sp = sp;
+    return thr_last;
+}
 static volatile unsigned long sig_fault_n;
 static int upload_blank;                /* COPY_TEX : niveaux noirs, sans lire l'invité */
 static volatile unsigned long pack_fault_addr, pack_fault_n;
@@ -668,6 +692,8 @@ typedef struct PTex {                   /* texture du GLDriver suivie par le plu
                                            de comparaison, mode de profondeur */
     int            prm_valid;
     uint64_t       last_use;            /* resident texture LRU, under G.mu */
+    unsigned long  cp_frame;            /* lot 1 : `cp` vaut pour l'image cp_frame−1 */
+    unsigned int   cp;                  /*   CP_COMPLETE | CP_BASE (tex_cp) */
 } PTex;
 
 typedef struct TexUnit {
@@ -2174,6 +2200,7 @@ static void invalidate_mirrors(void)
     for (t = G.textures; t; t = t->next) {
         t->prm_valid = 0;
         t->dirty = 1;                   /* le TEX_IMAGE3 perdu doit repartir */
+        t->cp_frame = 0;                /* lot 1 */
         t->lv0_sig = 0;
         t->host_only = 0;
     }
@@ -2966,6 +2993,8 @@ void pomppc_texture_changed(void *drvtex, int levels)
         return;
     pthread_mutex_lock(&G.mu);
     t = intern_tex(drvtex);
+    if (t)
+        t->cp_frame = 0;                /* lot 1 : complétude à relire */
     if (t && levels)
         t->dirty = 1;
     pthread_mutex_unlock(&G.mu);
@@ -3406,6 +3435,27 @@ static int tex_base_ok(const void *drvtex)
     return S16(lv, LV_W) > 0 && S16(lv, LV_H) > 0 && GLD_U32(lv, LV_DATA);
 }
 
+/* Lot 1 du verdict unique (24/09) : complétude mémorisée par texture et par
+ * image. tex_complete relit toute la chaîne de niveaux dans la mémoire de
+ * GLEngine, et texturing_on (appelée par unit_textured pour CHAQUE unité),
+ * geom_texture_ok et texture_unit_ok la redemandaient plusieurs fois par
+ * unité, au dispatch puis au dessin : 26-31 échantillons propres. La réponse
+ * ne change qu'avec l'objet de GLEngine, et tout ce qui le touche passe par un
+ * crochet qui efface la mémoire (pomppc_texture_changed — niveaux créés,
+ * modifiés, détruits, et paramètres —, procédures qui salissent une texture,
+ * vidage de l'état hôte). */
+#define CP_COMPLETE 1U
+#define CP_BASE     2U
+static unsigned int tex_cp(PTex *t)
+{
+    if (t->cp_frame != G.n_frames + 1) {
+        t->cp = (tex_complete(t->drvtex) ? CP_COMPLETE : 0) |
+                (tex_base_ok(t->drvtex) ? CP_BASE : 0);
+        t->cp_frame = G.n_frames + 1;
+    }
+    return t->cp;
+}
+
 /* v10 : la texture est-elle une texture 3D (cible de l'objet de GLEngine) ? */
 static int tex_is_3d(const PTex *t)
 {
@@ -3463,7 +3513,7 @@ static unsigned long tex_lv0_sig(const PTex *t)
             sig_jmp_on = 0;             /* niveau illisible (24/09, DOOM 3) */
             return vsig ^ 0x5a5a5a5aUL;
         }
-        sig_thr = pthread_self();       /* P3 (relecture du 24/09) */
+        sig_thr = self_thr();           /* P3 (relecture du 24/09) ; lot 1 */
         sig_jmp_on = 1;
         /* P4 — `n` est un index d'OCTET, pas un compte de TEXELS. Un niveau
            DXT1 fait 0,5 octet par texel : lire d[w·h−1] lisait à DEUX FOIS la
@@ -3739,7 +3789,7 @@ static int upload_texture(PCtx *p, PTex *t)
                 if (upload_blank) {
                     memset(G.q.win + off, 0, size);     /* COPY_TEX écrasera */
                 } else if (sigsetjmp(sig_jmp, 0) == 0) {
-                    sig_thr = pthread_self();   /* P3 (relecture du 24/09) */
+                    sig_thr = self_thr();       /* P3 (relecture du 24/09) ; lot 1 */
                     sig_jmp_on = 1;
                     memcpy(G.q.win + off, d, size);
                     sig_jmp_on = 0;
@@ -3796,7 +3846,7 @@ static int upload_texture(PCtx *p, PTex *t)
     prm[0] = U16(gp, TP_MIN);
     /* Filtre mipmap sans la chaîne : l'hôte refuserait la soumission
        (qgpu_texture_levels = 0) et UT2004 n'aurait plus que des quads blancs. */
-    if (!tex_complete(dt) && prm[0] != 0x2600 && prm[0] != 0x2601)
+    if (!(tex_cp(t) & CP_COMPLETE) && prm[0] != 0x2600 && prm[0] != 0x2601)
         prm[0] = (U16(gp, TP_MAG) == 0x2600) ? 0x2600 : 0x2601;
     prm[1] = U16(gp, TP_MAG);
     prm[2] = U16(gp, TP_WRAP_S);
@@ -3919,10 +3969,12 @@ static int combine_ok(const unsigned char *us, int unit, TexUnit *tu)
    range une texture 3D et sa profondeur (docs/re/textures-3d.md). */
 static void target_probe(PCtx *p, int u, unsigned long mask, unsigned long units)
 {
-    static int shots;
+    static int shots, on = -1;          /* lot 1 : getenv une fois, pas par unité */
     char tag[32];
     int k, l;
-    if (!getenv("POMPPC_GL_T3DDUMP") || shots++ >= 2 || !units)
+    if (on < 0)
+        on = getenv("POMPPC_GL_T3DDUMP") != 0;
+    if (!on || shots++ >= 2 || !units)
         return;
     pomppc_log("SONDE cible : unité %d masque %02lx table %08lx\n", u, mask, units);
     for (k = 0; k < 5; k++)
@@ -4005,8 +4057,11 @@ static int texturing_on(PCtx *p)
         if (unit_slot(m) < 0 || !units)
             return 1;
         dt = (void *)GLD_U32(units, u * 0x14 + unit_slot(m) * 4);
-        if (dt && (tex_complete(dt) || tex_base_ok(dt)))
-            return 1;
+        if (dt) {
+            PTex *t = find_tex(dt);     /* lot 1 : mémoire par image */
+            if (t ? tex_cp(t) != 0 : (tex_complete(dt) || tex_base_ok(dt)))
+                return 1;
+        }
     }
     return 0;
 }
@@ -4049,8 +4104,8 @@ static int texture_unit_ok(PCtx *p, int u, TexUnit *tu)
        le texturage de CETTE unité, sans toucher aux autres. Marble Blast
        laisse ainsi des unités actives sans texture. S'il y a un niveau de
        base, on s'en sert (filtre mipmap rabattu) au lieu de dessiner blanc. */
-    if (!tex_complete(tu->t->drvtex)) {
-        if (!tex_base_ok(tu->t->drvtex)) {
+    if (!(tex_cp(tu->t) & CP_COMPLETE)) {
+        if (!(tex_cp(tu->t) & CP_BASE)) {
             tu->t = 0;
             G.n_tex_incomplete++;
             return 1;
@@ -6490,7 +6545,7 @@ static int unit_textured(PCtx *p, int u)
     if (!t)
         return 0;
     (void)lv;
-    return tex_complete(t->drvtex) || tex_base_ok(t->drvtex);
+    return tex_cp(t) != 0;
 }
 
 /* Le texturage courant tiendra-t-il sur l'hôte ? Prédicat pur (aucune commande,
@@ -6534,7 +6589,7 @@ static int geom_texture_ok(PCtx *p)
         if (!t)
             return no(NO_TEX_UNKNOWN, (unsigned long)dt, mask);
         (void)lv;
-        if (!tex_complete(t->drvtex) && !tex_base_ok(t->drvtex))
+        if (!tex_cp(t))
             continue;                   /* jamais définie : l'unité est coupée, comme en GL */
         if (!texture_uploadable(t))
             return 0;
@@ -7198,8 +7253,12 @@ static void cube_probe(PCtx *p, const TexInfo *ti, const char *where)
         return;
     {   /* armée par le même fichier que le vidage déclenché : la scène voulue
            (arme en main) est à l'écran quand il apparaît */
-        static int armed;
-        const char *trig = getenv("POMPPC_GL_DUMP_TRIGGER");
+        static int armed, trig_read;
+        static const char *trig;        /* lot 1 : getenv une fois */
+        if (!trig_read) {
+            trig = getenv("POMPPC_GL_DUMP_TRIGGER");
+            trig_read = 1;
+        }
         if (!armed) {
             if (trig && *trig && access(trig, F_OK) != 0)
                 return;
@@ -7269,11 +7328,15 @@ static void cube_probe(PCtx *p, const TexInfo *ti, const char *where)
    combineur, mélange, éclairage — pour retrouver les dessins de l'arme. */
 static void draw_probe(PCtx *p, const TexInfo *ti)
 {
-    static int armed, lines;
+    static int armed, lines, trig_read;
+    static const char *trig;            /* lot 1 : getenv une fois, pas par dessin */
     unsigned char *g = gls(p);
-    const char *trig = getenv("POMPPC_GL_DUMP_TRIGGER");
     char buf[400];
     int at = 0, u;
+    if (!trig_read) {
+        trig = getenv("POMPPC_GL_DUMP_TRIGGER");
+        trig_read = 1;
+    }
     if (!armed) {
         if (!trig || !*trig || access(trig, F_OK) != 0)
             return;
@@ -9204,7 +9267,7 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
         return 1;
     }
     crash_hook_fresh();                 /* Prey : gestionnaires avant la 1re image */
-    pack_thr = pthread_self();          /* P3 (relecture du 24/09) */
+    pack_thr = self_thr();              /* P3 (relecture du 24/09) ; lot 1 */
     pack_jmp_on = 1;
     r = geom_draw_client_unsafe(p, indexed, mode, first, count, itype, indices);
     pack_jmp_on = 0;
@@ -10297,7 +10360,7 @@ static long a_polygon(void *ctx, void *verts, long n, long flags)
  * real(...) — une faute là reste la leur. Désarmée avant tout unlock.
  * P3 : le fil qui arme est noté (proc_thr). crash_hook_fresh : voir sa
  * définition (gestionnaires relus avant la première image). */
-#define PROC_GUARD_ARM()    do { crash_hook_fresh(); proc_thr = pthread_self(); \
+#define PROC_GUARD_ARM()    do { crash_hook_fresh(); proc_thr = self_thr(); \
                                  proc_jmp_on = 1; } while (0)
 #define PROC_GUARD_DISARM() do { proc_jmp_on = 0; } while (0)
 
@@ -12274,10 +12337,13 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
         PTex *t = find_tex((void *)a[1]);
         if (t) {
             t->dirty = 1;
+            t->cp_frame = 0;            /* lot 1 */
         } else {
             intern_tex((void *)a[1]);
-            for (t = G.textures; t; t = t->next)
+            for (t = G.textures; t; t = t->next) {
                 t->dirty = 1;
+                t->cp_frame = 0;
+            }
         }
     }
     pthread_mutex_unlock(&G.mu);
