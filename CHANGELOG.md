@@ -9,6 +9,19 @@ et dans `docs/`.
 ## Non publié
 
 - En cours : verdict unique dans le plugin (`TODO.md` §2), lots 0 à 5.
+- Lot 3 du verdict unique, liste blanche du bloc de changements (plugin `20260924-liste`,
+  défaut `POMPPC_GL_WHITELIST=1`) : relevé R4 — quel bit du bloc `gctx+0x310` pose chaque
+  appel GL (`docs/re/bloc-changements-r4.md`, scène `gltest r4`, sonde
+  `POMPPC_GL_BLOCKDUMP=a[:n]`, bits comptés sous `POMPPC_GL_COUNT=1`) ; `pomppc_geom_dispatch`
+  reprend le verdict gardé quand le bloc ne porte que des bits neutres (`wl_mask`), bits de
+  rastérisation admis si `geom_raster_ok` tient, tableaux salis : `va_gen_sizes` seul refait.
+  `POMPPC_GL_VERDICTCHECK=1` contrôle aussi le dispatch (`VERDICT écart dispatch`). Épreuves :
+  0 écart, DOOM 3 `demo_mars_city1` 54 % des dispatches court-circuités (1 396 099 sur
+  2 571 457), Prey 49 % (666 569 sur 1 369 003) ; `gltest` identique à l'octet ; même binaire,
+  `WHITELIST=0` contre défaut : `pomppc_geom_dispatch` 98 / 105 → 80 / 77 échantillons,
+  DOOM 3 T+50..T+280 89,8 / 86,5 → 86,8 / 85,2 ms/image. Objectif « divisé par deux » non
+  atteint : les dispatches qui restent recalculés sont ceux qui lient des textures, les plus
+  chers.
 - Lot 2 du verdict unique (plugin `20260924-verdict` ; même binaire, `POMPPC_GL_VERDICT=0`
   contre défaut : DOOM 3 Mars City, début sans bouger, 100,0 → 87,8 ms/image ; Prey, sauvegarde
   « Fuite à toute vitesse », 100 s après le chargement : 99,5 → 89,4 ms/image ;

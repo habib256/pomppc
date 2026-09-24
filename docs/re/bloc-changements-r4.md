@@ -162,3 +162,23 @@ dessin : ils restent recalculés, et **aucun** dispatch « non neutre par les se
 retrouvé la table des unités telle qu'au rangement (0 sur 206 407 dans une tranche de
 500 images) — DOOM 3 ne relie jamais la même texture ; une piste « unités inchangées » ne
 rapporterait rien.
+
+## 5. Résultats (plugin `20260924-liste`, 24/09/2026)
+
+| épreuve | défaut (`WHITELIST=1`) | `WHITELIST=0` |
+|---|---|---|
+| `gltest` : 18 scènes du lot 1 + `r4` | identiques à l'octet (et sous `VERDICTCHECK=1`), 223 dispatches court-circuités, 0 écart | identiques à l'octet |
+| DOOM 3 `demo_mars_city1`, `VERDICTCHECK=1` | **1 396 099 court-circuités sur 2 571 457 dispatches (54 %)**, 0 écart ; cinématique 73/162 par image, jeu 737/1 294 | — |
+| Prey « Fuite à toute vitesse », `VERDICTCHECK=1` | **666 569 sur 1 369 003 (49 %)**, 0 écart | — |
+| `sample` DOOM 3, `pomppc_geom_dispatch` (fil principal ~815 éch.) | 80, 77 | 98, 105 |
+| ms/image DOOM 3, T+50..T+280 | 86,8, 85,2 | 89,8, 86,5 |
+| ms/image DOOM 3, T+300..T+900 | 90,4, 89,3 | 93,1, 90,3 |
+
+Même binaire, deux parties par mode, T = fin de la cinématique (`meas2.sh` du lot 2, jeu remis
+au premier plan depuis l'hôte). La moitié des dispatches ne recalcule plus rien, mais ce sont
+les **moins chers** (volumes d'ombre, surfaces sans texture neuve) : `pomppc_geom_dispatch` ne
+perd qu'un quart de ses échantillons (−23 %), l'image 2 à 3 % — de l'ordre de l'écart entre
+deux parties du même mode. Dans les dispatches qui restent, `geom_ok` → `geom_texture_ok`
+(`texture_uploadable`, `intern_tex`/`find_tex`, `tex_params_ok`) et `texture_ok` refont, pour
+les mêmes textures, le même travail par unité : c'est là qu'est la suite (mémoire par texture et
+par époque).
