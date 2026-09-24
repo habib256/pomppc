@@ -151,6 +151,18 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
       remplie au chargement (plus de `getenv` dans le chemin chaud), documentée, avec purge des
       drapeaux `POMPPC_GL_*` dont le repli est mort. `.run/cmr/tssh.sh`, `cycle.sh`, `killgame.py`
       passent dans `tools/guest/` (la clé ssh reste hors dépôt).
+- [ ] **F1 — Frontend Dear ImGui : QEMU encadré, ancré, plein écran hôte** (demande de
+      l'utilisateur, 24/09 soir). L'écran QEMU (`frontend/`, affichage embarqué par D-Bus,
+      `ImGui::Image` avec zoom 50-200 %) doit être **entouré de l'interface POMPPC en mode
+      ancré** (docking : la vue de l'invité est une fenêtre ImGui ancrée au centre, menus,
+      ludothèque et bilans autour) et **basculer en plein écran de l'hôte** à la taille maximale
+      **en conservant le ratio** de l'invité (bandes noires, pas de déformation ; raccourci et
+      entrée de menu `Vue`, retour à la fenêtre). Prérequis : ImGui branche `docking`
+      (`setup.sh` prend l'ImGui des autres Pommes — vérifier la branche), GLFW
+      `glfwSetWindowMonitor` pour le plein écran. Épreuve : Tiger en 1024×768 dans un écran
+      16:9 → image intacte au centre, ratio 4:3 exact ; la souris absolue reste juste après
+      bascule (`Mouse.SetAbsPosition` mis à l'échelle sur la zone dessinée, pas sur la fenêtre).
+      Se teste avec `run_os9.sh` pendant que la VM Tiger est occupée.
 - [ ] **A6 — `docs/architecture.md` avec les invariants** : qui possède quoi, quel côté peut
       refuser, ce qu'un client mort laisse derrière lui, cycle de vie d'un contexte. Les plantages
       non résolus (`kCGLBadDisplay`, créneaux perdus) sont des questions de cycle de vie et
