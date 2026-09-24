@@ -636,6 +636,11 @@ typedef struct PTex {                   /* texture du GLDriver suivie par le plu
                                            perdrait, et le rechargement depuis
                                            l'invité remettrait l'ancien contenu */
     unsigned long  lv0_sig;             /* empreinte du niveau 0 déjà téléversé */
+    unsigned long  ok_frame;            /* 24/09 : texture_uploadable a dit oui (propre,
+                                           téléversée) à l'image ok_frame−1 : DOOM 3 lie la
+                                           même texture des dizaines de fois par image, et
+                                           l'empreinte relisait des texels à chaque fois */
+    unsigned long  up_frame;            /* idem pour upload_texture (paramètres comparés) */
     unsigned long  prm[14];             /* paramètres envoyés : min, mag, wrap s, wrap t,
                                            wrap r (3D), puis (v10) min et max LOD en
                                            bits IEEE, niveau de base, niveau max,
@@ -3192,6 +3197,8 @@ static int texture_uploadable(PTex *t)
     if (!tex_params_ok((const unsigned char *)GLD_U32(dt, DT_PARAMS)))
         return no(NO_TEX_PARAM, U16((unsigned char *)GLD_U32(dt, DT_PARAMS), TP_WRAP_S),
                   U16((unsigned char *)GLD_U32(dt, DT_PARAMS), TP_MIN));
+    if (t->qtex >= 0 && !t->dirty && t->ok_frame == G.n_frames + 1)
+        return 1;                       /* déjà vérifiée à cette image */
     if (t->qtex >= 0 && !t->dirty) {
         /* Sonde POMPPC_GL_TEXALWAYS : l'empreinte à quatre points peut manquer
            un remplissage en place (atlas de polices). Tout retéléverser est
@@ -3201,10 +3208,12 @@ static int texture_uploadable(PTex *t)
             const char *e = getenv("POMPPC_GL_TEXALWAYS");
             always = (e && *e && *e != '0') ? 1 : 0;
         }
-        if (always || tex_lv0_sig(t) != t->lv0_sig)
+        if (always || tex_lv0_sig(t) != t->lv0_sig) {
             t->dirty = 1;
-        else
+        } else {
+            t->ok_frame = G.n_frames + 1;
             return 1;
+        }
     }
     /* Residency is a cache, not a domain restriction: at most four textures
      * are protected for a draw, out of 128 host slots. */
@@ -3277,6 +3286,8 @@ static int upload_texture(PCtx *p, PTex *t)
         QGPU_TP_COMPARE_FUNC, QGPU_TP_DEPTH_MODE };
     int l, k, t3 = tex_is_3d(t);
 
+    if (t->qtex >= 0 && !t->dirty && t->prm_valid && t->up_frame == G.n_frames + 1)
+        return 1;                       /* déjà synchronisée à cette image (24/09) */
     if (gp && base_format_ok(base) && !tex_params_ok(gp))
         return no(NO_TEX_PARAM, U16(gp, TP_WRAP_S), U16(gp, TP_MIN));
     if (!gp || !base_format_ok(base)) {
@@ -3487,6 +3498,7 @@ static int upload_texture(PCtx *p, PTex *t)
         t->prm[k] = prm[k];
     }
     t->prm_valid = 1;
+    t->up_frame = G.n_frames + 1;
     return 1;
 }
 
