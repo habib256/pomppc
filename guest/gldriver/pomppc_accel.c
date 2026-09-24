@@ -104,9 +104,23 @@
 #define QGPU_NATTR_NORMALIZED   0x100
 #endif
 
+/* Noms provisoires de l'agent plugin → noms du contrat v18 (qgpu_proto.h) */
+#ifndef QGPU_NATTR_WORDS
+#define QGPU_NATTR_WORDS        QGPU_NATIVE_DESC_WORDS
+#define QGPU_NATTR_MAX          QGPU_NATIVE_MAX_ATTRS
+#define QGPU_NATTR_POSITION     QGPU_NA_POSITION
+#define QGPU_NATTR_NORMAL       QGPU_NA_NORMAL
+#define QGPU_NATTR_COLOR        QGPU_NA_COLOR
+#define QGPU_NATTR_SEC_COLOR    QGPU_NA_SEC_COLOR
+#define QGPU_NATTR_FOG          QGPU_NA_FOG
+#define QGPU_NATTR_TEX(u)       QGPU_NA_TEX(u)
+#define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
+#define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
+#endif
 #define POMPPC_PLUGIN_REV "20260924-native"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
+static void crash_hook_check(void);
 /* 24/09/2026 — garde de lecture des tableaux de l'application. Les copies
    clientes des VBO d'idTech4 (cache de sommets, memory plugin d'Apple) sont
    paginées : la plage [vmin, vmax] d'un glDrawElements peut déborder sur une
@@ -962,6 +976,7 @@ static void trace_frame(void *ctx)
 /* Bilan périodique (POMPPC_GL_STATS=<fichier>), appelé à chaque échange. */
 static void stats_frame(void *ctx)
 {
+    crash_hook_check();             /* le jeu a pu remplacer nos gestionnaires */
     static const char *path;
     static int init;
     static double t0;
@@ -10386,6 +10401,27 @@ static void crash_hook_install(void)
     sa.sa_flags = SA_SIGINFO | SA_NODEFER;
     sigaction(SIGBUS, &sa, &crash_prev[0]);
     sigaction(SIGSEGV, &sa, &crash_prev[1]);
+}
+
+/* Prey (24/09, 16h34) : le jeu pose SES gestionnaires APRÈS l'ouverture du
+   device et remplace les nôtres ; une faute sous garde allait alors chez lui
+   (Quit → double faute → rapport CrashReporter). Relu à chaque image : si un
+   autre gestionnaire est en place, il devient le « précédent » et le nôtre
+   revient devant. Deux appels système par image, négligeable. */
+static void crash_hook_check(void)
+{
+    struct sigaction cur, sa;
+    int k;
+    for (k = 0; k < 2; k++) {
+        int sig = k == 0 ? SIGBUS : SIGSEGV;
+        if (sigaction(sig, 0, &cur) != 0 || cur.sa_sigaction == crash_handler)
+            continue;
+        crash_prev[k] = cur;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_sigaction = crash_handler;
+        sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+        sigaction(sig, &sa, 0);
+    }
 }
 
 static void gl_note(const char *fmt, ...)
