@@ -1174,10 +1174,109 @@ bool qgpu_core_init(QgpuCore *c, const char *backend,
         if (c->be->draw_raw) {
             c->caps |= QGPU_CAP_NATIVE;
         }
+        /* v19 : la disposition des clients et leur destruction sont l'affaire
+           du cœur, quel que soit le backend. */
+        c->caps |= QGPU_CAP_CLIENTS;
     } else {
         c->caps = 0;
     }
     return c->be != NULL;
+}
+
+/* ── v19 : tranches de clients ──────────────────────────────────────────────
+ *
+ * Le device publie ces nombres dans la table QGPU_REG_LAYOUT ; le plugin les
+ * lit et les compare aux siens (QGPU_CLIENT_*_IDS). Une classe que ce cœur
+ * ne connaît pas vaut 0. */
+uint32_t qgpu_core_client_ids(uint32_t cls)
+{
+    switch (cls) {
+    case QGPU_CLASS_CTX:   return QGPU_CLIENT_CTX_IDS;
+    case QGPU_CLASS_SURF:  return QGPU_CLIENT_SURF_IDS;
+    case QGPU_CLASS_TEX:   return QGPU_CLIENT_TEX_IDS;
+    case QGPU_CLASS_QUERY: return QGPU_CLIENT_QUERY_IDS;
+    case QGPU_CLASS_BUF:   return QGPU_CLIENT_BUF_IDS;
+    default:               return 0;
+    }
+}
+
+/* Détruit TOUT ce que possède la tranche `slot` : ce que faisait le kext
+ * jusqu'à la v18 avec un flux de destruction, un doorbell par identifiant —
+ * et seulement pour les classes qu'il connaissait (jamais les requêtes). Même
+ * effet que CTX_DESTROY / SURF_DESTROY / TEX_DESTROY / BUF_DESTROY sur chaque
+ * identifiant de la plage, requêtes comprises ; un identifiant inutilisé est
+ * simplement sauté (pas d'erreur, pas de STATUS_PC). Les objets des autres
+ * tranches ne sont pas touchés ; une surface détruite est déliée de tout
+ * contexte qui la liait, y compris hors de la tranche. Appelé par le thread
+ * de rendu, comme une soumission. */
+uint32_t qgpu_core_client_reset(QgpuCore *c, uint32_t slot)
+{
+    uint32_t i, lo, hi;
+
+    if (slot >= QGPU_MAX_CLIENTS) {
+        return QGPU_ST_BAD_ARG;
+    }
+    /* contextes : requête ouverte, programmes, puis l'objet */
+    lo = slot * QGPU_CLIENT_CTX_IDS; hi = lo + QGPU_CLIENT_CTX_IDS;
+    for (i = lo; i < hi; i++) {
+        QgpuContext *x = &c->ctx[i];
+        if (!x->used) {
+            continue;
+        }
+        if (x->query >= 0) {
+            QgpuQuery *q = &c->query[x->query];
+            if (c->be->query_end) {
+                c->be->query_end(c, q);
+            }
+            q->active = false;
+            x->query = -1;
+        }
+        prog_set_free(c, &x->prg);
+        x->used = false;
+        x->surf = -1;
+        if (c->cur_ctx == (int32_t)i) {
+            c->cur_ctx = -1;
+        }
+    }
+    /* surfaces : déliées de tout contexte */
+    lo = slot * QGPU_CLIENT_SURF_IDS; hi = lo + QGPU_CLIENT_SURF_IDS;
+    for (i = lo; i < hi; i++) {
+        uint32_t k;
+        if (!c->surf[i].used) {
+            continue;
+        }
+        c->be->surf_destroy(c, &c->surf[i]);
+        memset(&c->surf[i], 0, sizeof(c->surf[i]));
+        for (k = 0; k < QGPU_MAX_CTX; k++) {
+            if (c->ctx[k].surf == (int32_t)i) {
+                c->ctx[k].surf = -1;
+            }
+        }
+    }
+    lo = slot * QGPU_CLIENT_TEX_IDS; hi = lo + QGPU_CLIENT_TEX_IDS;
+    for (i = lo; i < hi; i++) {
+        if (c->tex[i].used) {
+            tex_free(c, &c->tex[i]);
+        }
+    }
+    lo = slot * QGPU_CLIENT_QUERY_IDS; hi = lo + QGPU_CLIENT_QUERY_IDS;
+    for (i = lo; i < hi; i++) {
+        if (!c->query[i].used) {
+            continue;
+        }
+        if (c->be->query_destroy) {
+            c->be->query_destroy(c, &c->query[i]);
+        }
+        memset(&c->query[i], 0, sizeof(c->query[i]));
+    }
+    lo = slot * QGPU_CLIENT_BUF_IDS; hi = lo + QGPU_CLIENT_BUF_IDS;
+    for (i = lo; i < hi; i++) {
+        free(c->buf[i].data);
+        memset(&c->buf[i], 0, sizeof(c->buf[i]));
+    }
+    c->status = QGPU_ST_OK;
+    c->status_pc = 0;
+    return QGPU_ST_OK;
 }
 
 void qgpu_core_set_scanout(QgpuCore *c, uint8_t *ram, uint32_t size,

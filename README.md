@@ -41,14 +41,18 @@ maintenant les tampons de sommets sont lus et convertis par l'hôte.
   vérifie chaque capacité sur le binaire produit) : SMP mac99, Screamer, `qfb-pci`,
   `qgpu-pci`, flottant rapide `x-fast-fp`. Le firmware OpenBIOS SMP est livré en binaire
   (`patches/smp-mac99/openbios-smp-screamer.elf`), non reproductible aujourd'hui.
-- **GPU 3D en trois couches**, contrat `patches/qgpu/qgpu_proto.h` (copie identique dans le
-  kext, vérifiée par le harnais) :
+- **GPU 3D en trois couches**, contrat en deux en-têtes (`patches/qgpu/`) : `qgpu_abi.h`, le
+  **transport** (registres, doorbell, tranches de clients — la seule chose que le kext connaît,
+  copie identique vérifiée par le harnais) et `qgpu_proto.h`, la **sémantique** (opcodes, clés,
+  formats — device et plugin seulement) :
   1. **plugin `GLDriver-POMPPC`** (`guest/gldriver/`) : chargé par `OpenGL.framework` comme le
      pilote d'une carte ; il lit l'état de GLEngine (offsets relevés par rétro-ingénierie,
      `docs/re/`) et émet des commandes qgpu ; hors domaine, il rend la main au rendu d'Apple
      qu'il enveloppe ;
   2. **kext `POMPPCGPU`** (`kext/POMPPCGPU/`) : accélérateur IOKit, fenêtre partagée découpée
-     en 4 clients, doorbell asynchrone, nettoyage des objets d'un client mort ;
+     en autant de clients que le device en publie, doorbell asynchrone ; à la mort d'un client
+     il demande au device de détruire ses objets (`QGPU_REG_CLIENT_RESET`) et laisse le plugin
+     lire les registres (`QGPU_UC_READ_REG`) — il ne compile aucun opcode ;
   3. **device `qgpu-pci`** (`patches/qgpu/`) : cœur qui valide et décode tout (`qgpu-core.c`),
      backend OpenGL hôte (CGL sur macOS, EGL sur Linux) et rastériseur logiciel de référence
      (`qgpu-soft.c`) qui rend le protocole testable sans VM.
@@ -99,8 +103,10 @@ Tiger (gcc 4.0 des Xcode Tools requis) :
 cp -R /Volumes/POMPPCSRC /tmp/src && sudo sh /tmp/src/guest/gldriver/install.sh
 ```
 
-puis redémarrer. **Toute modification de `qgpu_proto.h` exige de refaire les trois** : QEMU,
-kext (`install.sh` + redémarrage) et plugin ; le plugin refuse un kext d'un autre en-tête.
+puis redémarrer. **Une modification de `qgpu_proto.h` ne demande que QEMU et le plugin**
+(`.run/cmr/cycle.sh NORUN=1`, sans redémarrer) ; seule une modification de `qgpu_abi.h` demande
+aussi le kext (`install.sh` + redémarrage). Le plugin refuse un kext d'avant la v19 et un QEMU
+d'un autre `qgpu_proto.h` (`docs/protocole-v19-transport.md`).
 
 ### Lancer
 
@@ -149,7 +155,8 @@ réellement actif (le Screamer exige moins de 1 Go), réseau actif si slirp.
 ```
 
 Le harnais interroge le **binaire** QEMU (Screamer, qfb-pci, qgpu-pci, slirp, SMP, audio,
-`x-fast-fp`) au lieu de comparer la doc au dépôt, vérifie `qgpu_proto.h` identique hôte/invité,
+`x-fast-fp`) au lieu de comparer la doc au dépôt, vérifie `qgpu_abi.h` identique hôte/kext et
+le kext vierge de toute sémantique,
 compile et exécute `qgpu_core_test` (soft + gl), et contrôle l'alignement des registres QFB.
 Le plugin lui-même se teste dans l'invité (`docs/gpu-3d-tiger.md` §5).
 

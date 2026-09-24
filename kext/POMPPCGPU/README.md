@@ -2,25 +2,36 @@
 
 Pilote IOKit (Mac OS X 10.4, PowerPC, gcc 4.0) du device QEMU `qgpu-pci`
 (`patches/qgpu/qgpu-pci.c`). Conception complète, état et plan :
-`docs/gpu-3d-tiger.md`. Contrat hôte/invité : `qgpu_proto.h` (copie identique de
-`patches/qgpu/qgpu_proto.h`, vérifiée par `tests/run-all.sh`).
+`docs/gpu-3d-tiger.md`. Contrat : `qgpu_abi.h`, **l'ABI de transport seule** (copie identique
+de `patches/qgpu/qgpu_abi.h`, vérifiée par `tests/run-all.sh`, qui vérifie aussi que le kext
+ne nomme aucun symbole de `qgpu_proto.h`). Depuis la v19 (`docs/protocole-v19-transport.md`),
+**modifier `qgpu_proto.h` ne demande pas de reconstruire le kext**.
 
 ## Ce que fait le kext (et rien d'autre)
 
 - matche le device PCI `1234:0fb2` (classe coprocesseur : aucun pilote graphique
   d'Apple ne le revendique) ;
-- vérifie la signature `'qgp1'` et la version du protocole, publie dans `ioreg`
-  `QGPUVersion`, `QGPUCaps`, `QGPUShmemSize`, `QGPUBackend` ;
-- expose un `IOUserClient`, jusqu'à 4 clients simultanés (une application
-  OpenGL = un client), chacun avec sa tranche de fenêtre et sa plage
-  d'identifiants d'objets (`qgpu_proto.h`, « Interface du kext ») :
-  - `IOConnectMapMemory(type 0)` → la tranche du client (un quart de la fenêtre,
-    moins la page de service : ≈ 16 Mio sur 64, à lire dans `QGPU_UC_GET_INFO`) ;
+- vérifie la signature `'qgp1'` et exige `QGPU_CAP_CLIENTS` (device v19 : il
+  publie ses tranches et détruit lui-même) ; publie dans `ioreg` `QGPUVersion`,
+  `QGPUCaps`, `QGPUShmemSize`, `QGPUBackend`, `QGPUClients` ;
+- lit le nombre de tranches dans `QGPU_REG_CLIENTS` (4 ; capacité compilée du
+  kext : 8) et expose un `IOUserClient` par client (une application OpenGL = un
+  client), chacun avec sa tranche de fenêtre ; les plages d'identifiants sont
+  celles que le **device** publie (`QGPU_REG_LAYOUT`), le kext ne les connaît
+  pas (`qgpu_abi.h`, « Interface du kext ») :
+  - `IOConnectMapMemory(type 0)` → la tranche du client (un quart de la fenêtre :
+    16 Mio sur 64, à lire dans `QGPU_UC_GET_INFO`) ;
   - `QGPU_UC_GET_INFO` → version, caps, taille de tranche, fence ;
-  - `QGPU_UC_GET_SLOT` → index, base de la tranche dans BAR0, premiers ids ;
+  - `QGPU_UC_GET_SLOT` → index, base de la tranche dans BAR0, `ctx_base` et
+    `surf_base` recopiés de la table du device ;
   - `QGPU_UC_SUBMIT(off, len)` (relatif à la tranche) → fence, statut, index fautif ;
   - `QGPU_UC_WAIT_FENCE(fence, ms)` ; `QGPU_UC_RESET` (objets du client) ;
-- détruit les objets d'un client qui se ferme ou meurt ;
+  - `QGPU_UC_READ_REG(offset)` (v19) → valeur du registre de BAR1, borné sur le
+    BAR ; sans effet de bord par contrat. C'est par là que le plugin lit la
+    table des plages, et c'est la sonde « kext v19 » ;
+- à la fermeture ou à la mort d'un client, écrit l'index de sa tranche dans
+  `QGPU_REG_CLIENT_RESET` et dort sur la barrière : le device détruit tout ce que
+  possède la tranche, en file derrière ce qui est en vol ;
 - sert l'interruption `DONE` (filtre + acquittement), et s'en sert pour dormir
   pendant une attente de barrière.
 
@@ -54,18 +65,18 @@ Le device exécute désormais les soumissions sur un **thread de rendu** et les 
 en **file** (`docs/protocole-v9-asynchrone.md`). Le kext sait poser les deux
 doorbells, **par soumission**.
 
-**Le drapeau voyage dans les bits hauts de `len`.** `qgpu_proto.h` fige
-`QGPU_UC_METHOD_COUNT` et les sélecteurs : pas de méthode nouvelle. Et pas
-d'argument nouveau non plus — l'ABI de Darwin 8 compare le **nombre**
-d'arguments scalaires au bit près (`is_io_connect_method_scalarI_scalarO`
-refuse dès que `inputCount ≠ IOExternalMethod::count0`), donc passer `count0`
-de 2 à 3 ferait rendre `kIOReturnBadArgument` à **tous** les appelants
-existants. `len` est un multiple de 4 borné par la tranche : ses trois bits
-hauts sont libres, et un appelant qui ne les connaît pas les laisse à zéro,
-c'est-à-dire le comportement v8 exact. **Les deux formes d'appel sont donc le
-même appel** — `guest/qgpu-test` le vérifie en mêlant les deux dans la même
-session. Les macros sont dans `POMPPCGPU.h`, copie identique dans
-`guest/gldriver/pomppc_qgpu.h` :
+**Le drapeau voyage dans les bits hauts de `len`.** Pas d'argument nouveau à
+un sélecteur existant — l'ABI de Darwin 8 compare le **nombre** d'arguments
+scalaires au bit près (`is_io_connect_method_scalarI_scalarO` refuse dès que
+`inputCount ≠ IOExternalMethod::count0`), donc passer `count0` de 2 à 3 ferait
+rendre `kIOReturnBadArgument` à **tous** les appelants existants. `len` est un
+multiple de 4 borné par la tranche : ses trois bits hauts sont libres, et un
+appelant qui ne les connaît pas les laisse à zéro, c'est-à-dire le comportement
+v8 exact. **Les deux formes d'appel sont donc le même appel** —
+`guest/qgpu-test` le vérifie en mêlant les deux dans la même session. (Un
+sélecteur **nouveau**, lui, est possible : un kext ancien le refuse proprement
+— c'est ce que fait `QGPU_UC_READ_REG` en v19.) Les macros sont dans
+`qgpu_abi.h`, une seule copie pour le kext et le userland :
 
 | drapeau dans `len` | effet | sorties |
 |---|---|---|
@@ -88,20 +99,18 @@ qu'il y a des dormeurs, ce qui donne la base de temps du délai maximal **et** u
 réveil de secours si une interruption se perd. Dormir sans réveil garanti dans
 un kext, c'est figer la VM, et `-x` n'est pas disponible pour la dépanner.
 
-**Fermeture d'un client.** `destroyClientObjects` soumet les destructions par
-**paquets asynchrones** (profondeur de la file du device), séparés par une
-barrière qui **dort sur la command gate** : le verrou du work loop est relâché
-pendant l'attente, les autres clients continuent, et le BQL de QEMU n'est plus
-tenu 212 fois de suite (le bureau se figeait à chaque sortie d'application 3D).
-La barrière finale remplace le drainage actif d'avant : la file est FIFO, donc
-attendre la dernière destruction, c'est attendre aussi toutes les soumissions
-en vol qui lisaient la tranche du client — rendue juste après. Sur un device
-sans `QGPU_CAP_ASYNC`, on garde le drainage puis le doorbell synchrone.
-
-Le flux de destruction est écrit dans une **page de service** rognée sur la
-fenêtre partagée, hors de toute tranche (chaque tranche y a son quart) : la
-tranche du client, elle, peut être encore mappée et vivante (`clientDied`
-pendant un dessin, `QGPU_UC_RESET`).
+**Fermeture d'un client (v19).** `destroyClientObjects` écrit l'index de la
+tranche dans `QGPU_REG_CLIENT_RESET` : le device met la destruction **en file**
+derrière tout ce qui est en vol et le kext **dort sur la command gate** jusqu'à
+la barrière (le verrou du work loop est relâché, les autres clients continuent).
+La file est FIFO, donc attendre cette destruction, c'est attendre aussi toutes
+les soumissions en vol qui lisaient la tranche du client — rendue juste après.
+Sur `QUEUE_FULL`, le kext attend `FENCE_SUBMITTED` puis réécrit (8 essais au
+plus). Sans chien de garde, il scrute `FENCE`, borné à 2 s. Jusqu'à la v18 le
+kext fabriquait lui-même un flux de destruction dans une page de service de
+BAR0, un doorbell par identifiant (1 108 par client) avec des tailles de plages
+**compilées** — la cause des objets laissés vivants du 23/09/2026. Il n'écrit
+plus rien dans BAR0.
 
 Une tranche n'est rendue que **par son propriétaire** (`fClients[slot] ==
 client`, vérifié dans la gate), et `stop()` du user client se contente d'une
@@ -109,9 +118,8 @@ comptabilité silencieuse : entrer dans la gate depuis le fil de terminaison,
 c'est une panic (la gate a pu être retirée du work loop, et `runAction` la
 ferme avant tout test).
 
-Le kext ne connaît des opcodes que ceux de destruction (nettoyage d'un client) : le flux
-est produit en userland (`guest/gldriver`, le plugin OpenGL ; `guest/qgpu-test`) et
-exécuté par l'hôte.
+Le kext ne connaît **aucun** opcode : le flux est produit en userland (`guest/gldriver`,
+le plugin OpenGL ; `guest/qgpu-test`) et exécuté par l'hôte.
 
 ## Compiler et charger (dans l'invité)
 
@@ -143,6 +151,11 @@ tout avec un verdict dans `/pomppc/result.txt` (piloté depuis l'hôte par
   kernel extension code ») ; **`-mlong-branch`** (sinon « relocation overflow »).
 
 ## État
+
+**v19 (24/09/2026)** : kext reconstruit contre `qgpu_abi.h` seul, chargé au démarrage
+(« protocol v19, 4 clients x 16384 KiB »), `qgpu_test` 44/44 (dont `READ_REG`, bit de `len`
+inconnu refusé, `QGPU_UC_RESET` → objets recréables), `gltest` `tri cube arbvp varrayvbo caps
+texcache…` inchangés.
 
 Vérifié dans Tiger 10.4.6 (protocole v9) : chargé au démarrage depuis
 `/System/Library/Extensions`, `qgpu_test` vert (y compris la section v9 :

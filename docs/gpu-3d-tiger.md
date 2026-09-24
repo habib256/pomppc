@@ -59,8 +59,10 @@ hôte) ; aucun écart sur les scènes sans arête diagonale.
 
 Principes fixés une fois pour toutes :
 
-- **Un seul contrat, un seul fichier** : `qgpu_proto.h` (macros uniquement), copié à l'identique
-  côté hôte et côté invité ; `tests/run-all.sh` refuse toute divergence.
+- **Un seul contrat, en deux moitiés** (v19) : `qgpu_abi.h`, le transport, copié à l'identique
+  dans le kext (`tests/run-all.sh` refuse toute divergence, et tout symbole sémantique dans le
+  kext) ; `qgpu_proto.h`, la sémantique, que seuls le device et le plugin compilent — le kext
+  lit la disposition des clients dans les registres (`docs/protocole-v19-transport.md`).
 - **Zéro échange d'octets dans l'invité** : registres `DEVICE_BIG_ENDIAN`, flux en mots
   big-endian, flottants IEEE big-endian, pixels ARGB big-endian (le format du WindowServer).
 - **Toute la validation est côté hôte**, dans `qgpu-core.c`, avant le backend : bornes, identifiants,
@@ -74,12 +76,13 @@ Principes fixés une fois pour toutes :
 
 | Fichier | Rôle |
 |---|---|
-| `patches/qgpu/qgpu_proto.h` | **le contrat** v6 : registres, opcodes, clés d'état, tranches des clients |
+| `patches/qgpu/qgpu_abi.h` | **le transport** : registres, doorbell, barrières, tranches de clients, user client (v19 : le kext ne voit que lui) |
+| `patches/qgpu/qgpu_proto.h` | **la sémantique** : opcodes, clés d'état, formats, limites, classes d'objets (device et plugin) |
 | `patches/qgpu/qgpu-core.[ch]` | analyse et validation du flux, contextes, surfaces, textures ; indépendant de QEMU |
 | `patches/qgpu/qgpu-soft.c` | backend logiciel de référence : pipeline OpenGL 1.x par fragment |
 | `patches/qgpu/qgpu-gl.c` | **backend OpenGL** : CGL (macOS) / EGL (Linux), FBO + profondeur par surface |
 | `patches/qgpu/qgpu-pci.c` | device QEMU ; `backend=auto\|soft\|gl`, `shmem_mb`, `trace=on` |
-| `kext/POMPPCGPU/` | le kext : 4 clients, une tranche de 16 Mio et une plage d'identifiants chacun |
+| `kext/POMPPCGPU/` | le kext : autant de clients que le device en publie (4), une tranche de 16 Mio chacun ; les plages d'identifiants sont celles du device, qui détruit lui-même les objets d'un client mort |
 | `guest/gldriver/` | **le plugin OpenGL** (`pomppc_gld.c` points d'entrée, `pomppc_accel.c` accélération, `pomppc_qgpu.c` client du kext, `gld_tramp.s` trampolines générés), `install.sh` |
 | `guest/gltest/` | `gltest` (hors écran, 12 scènes avec pixels témoins) et `glwin` (fenêtre GLUT) |
 | `guest/qgpu-test/` | test du transport seul |

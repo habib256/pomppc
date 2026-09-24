@@ -177,7 +177,8 @@ fi
 echo "▶ installation de hw/display/qgpu-*.c"
 cp "$ROOT"/patches/qgpu/qgpu-pci.c "$ROOT"/patches/qgpu/qgpu-core.c \
    "$ROOT"/patches/qgpu/qgpu-core.h "$ROOT"/patches/qgpu/qgpu-soft.c \
-   "$ROOT"/patches/qgpu/qgpu-gl.c "$ROOT"/patches/qgpu/qgpu_proto.h hw/display/
+   "$ROOT"/patches/qgpu/qgpu-gl.c "$ROOT"/patches/qgpu/qgpu_proto.h \
+   "$ROOT"/patches/qgpu/qgpu_abi.h hw/display/
 if ! grep -q "qgpu-pci.c" hw/display/meson.build; then
   echo "▶ câblage meson/Kconfig qgpu"
   patch_strict "$ROOT/patches/qgpu/0003-wire-qgpu-pci-build.patch"

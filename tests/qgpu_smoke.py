@@ -56,6 +56,9 @@ REG_IRQ_MASK, REG_IRQ = 0x28, 0x2C
 # v9
 REG_QUEUE_FREE, REG_FENCE_SUBMITTED = 0x38, 0x3C
 REG_SUBMIT_ST, REG_ERRORS, REG_QUEUE_DEPTH = 0x40, 0x44, 0x48
+# v19 : tranches de clients possédées par le device
+REG_CLIENTS, REG_CLIENT_RESET, REG_LAYOUT = 0x80, 0x84, 0x88
+CAP_CLIENTS = 0x200
 DOORBELL_GO, DOORBELL_ASYNC = 1, 2
 ST_OK, ST_BAD_OPCODE, ST_QUEUE_FULL = 0, 3, 10
 CAP_OCCLUSION = 0x4
@@ -318,6 +321,32 @@ def main():
     db3 = read_val(regs + REG_DOORBELL)
     status5 = read_val(regs + REG_STATUS)
 
+    # ── v19 : le device publie ses tranches et détruit lui-même les objets
+    # d'une tranche (ce que faisait le kext, un doorbell par identifiant). Le
+    # contexte 0 et la surface 1 de SCENE sont dans la tranche 0 : après
+    # CLIENT_RESET 0, rejouer SCENE (qui les CRÉE) passe ; avant, elle
+    # échouait sur CTX_CREATE (LIMIT). Un index hors table ne met rien en file.
+    nclients = read_val(regs + REG_CLIENTS)
+    layout_ctx = read_val(regs + REG_LAYOUT)
+    layout_last = read_val(regs + REG_LAYOUT + 4 * 15)
+    send("%x %x l!" % (CMD_OFF, regs + REG_SUBMIT_OFF))
+    send("%x %x l!" % (len(SCENE) * 4, regs + REG_SUBMIT_LEN))
+    poke_words(shmem + CMD_OFF, SCENE)
+    send("%x %x l!" % (DOORBELL_GO, regs + REG_DOORBELL), 1.0)
+    status_before = read_val(regs + REG_STATUS)
+    send("%x %x l!" % (99, regs + REG_CLIENT_RESET), 0.5)
+    subst_bad = read_val(regs + REG_SUBMIT_ST)
+    sub4 = read_val(regs + REG_FENCE_SUBMITTED)
+    send("0 %x l!" % (regs + REG_CLIENT_RESET), 0.5)
+    subst_reset = read_val(regs + REG_SUBMIT_ST)
+    sub5 = read_val(regs + REG_FENCE_SUBMITTED)
+    drained3 = drain()
+    fence6 = read_val(regs + REG_FENCE)
+    status6 = read_val(regs + REG_STATUS)
+    send("%x %x l!" % (DOORBELL_GO, regs + REG_DOORBELL), 1.0)
+    status_after = read_val(regs + REG_STATUS)
+    p_after = px(8, 8)
+
     qemu.kill()
 
     checks = [
@@ -365,6 +394,21 @@ def main():
         ("synchrone : terminée au retour du stw", fence5, sub3),
         ("synchrone : plus rien en vol", db3, 0),
         ("synchrone : statut lisible tout de suite", status5, ST_OK),
+        # v19
+        ("device v19 : QGPU_CAP_CLIENTS", ((caps or 0) & CAP_CLIENTS) != 0, True),
+        ("tranches publiées", nclients, 4),
+        ("table LAYOUT : contextes par client", layout_ctx, 4),
+        ("table LAYOUT : classe inconnue = 0", layout_last, 0),
+        ("rejouer SCENE avant CLIENT_RESET : LIMIT", status_before, 8),
+        ("CLIENT_RESET hors table : BAD_ARG", subst_bad, 4),
+        ("CLIENT_RESET hors table : rien en file", sub4, sub3 + 1 if sub3 is not None else None),
+        ("CLIENT_RESET 0 accepté", subst_reset, ST_OK),
+        ("CLIENT_RESET 0 compte comme une soumission", sub5, sub4 + 1 if sub4 is not None else None),
+        ("CLIENT_RESET 0 : file drainée", drained3, True),
+        ("CLIENT_RESET 0 : barrière atteinte", fence6, sub5),
+        ("CLIENT_RESET 0 : statut OK", status6, ST_OK),
+        ("rejouer SCENE après CLIENT_RESET : OK", status_after, ST_OK),
+        ("scène rejouée : triangle rouge", p_after, 0xFF0000),
     ]
     failed = 0
     for name, got, want in checks:

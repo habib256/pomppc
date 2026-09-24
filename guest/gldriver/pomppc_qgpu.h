@@ -6,52 +6,35 @@
 
 #include <IOKit/IOKitLib.h>
 
-/* ── v9 : drapeaux passés DANS `len` à QGPU_UC_SUBMIT ────────────────────────
- *
- *   COPIE IDENTIQUE dans kext/POMPPCGPU/POMPPCGPU.h. Les deux doivent rester
- *   au bit près, comme les deux copies de qgpu_proto.h.
- *
- *   POURQUOI DANS `len` ET PAS UN SCALAIRE DE PLUS. qgpu_proto.h fige
- *   QGPU_UC_METHOD_COUNT et les sélecteurs : on ne peut pas ajouter de
- *   méthode. Et on ne peut pas non plus ajouter un argument à QGPU_UC_SUBMIT :
- *   l'ABI de Darwin 8 compare le NOMBRE d'arguments scalaires au bit près
- *   (is_io_connect_method_scalarI_scalarO refuse l'appel dès que inputCount ≠
- *   IOExternalMethod::count0), donc passer count0 de 2 à 3 ferait rendre
- *   kIOReturnBadArgument à TOUS les appelants existants. `len` est un multiple
- *   de 4 borné par la tranche (16 Mio sur une fenêtre de 64) : ses bits hauts
- *   sont libres, et un appelant qui ne les connaît pas les laisse à zéro —
- *   c'est-à-dire exactement le comportement v8. LES DEUX FORMES D'APPEL
- *   RESTENT DONC LE MÊME APPEL.
- */
-#define POMPPC_SUB_ASYNC        0x80000000UL
-#define POMPPC_SUB_PEEK         0x40000000UL
-#define POMPPC_SUB_QUEUE        0x20000000UL
-/* 24/09/2026 : LAYOUT — le kext répond, SANS rien soumettre, avec les constantes
-   de tranches qu'il a compilées : fence = QGPU_CLIENT_TEX_IDS | BUF_IDS << 16,
-   status = QGPU_CLIENT_SURF_IDS | CTX_IDS << 16, pc = QGPU_MAX_TEX. Un kext qui
-   ignore ce bit le laisse dans `len`, qui déborde alors la tranche : appel
-   refusé — c'est le signal « kext d'un autre en-tête ». Le 23/09, un kext à
-   128 textures par client sous un plugin à 1024 a coûté deux plantages et des
-   créneaux de clients perdus. */
-#define POMPPC_SUB_LAYOUT       0x10000000UL
-#define POMPPC_SUB_FLAGS        (POMPPC_SUB_ASYNC | POMPPC_SUB_PEEK | POMPPC_SUB_QUEUE | \
-                                 POMPPC_SUB_LAYOUT)
+/* Les drapeaux POMPPC_SUB_* passés dans `len` de QGPU_UC_SUBMIT, les
+   sélecteurs QGPU_UC_* et les registres sont dans qgpu_abi.h (inclus par
+   qgpu_proto.h) : une seule copie, la même que celle du kext. */
 
 typedef struct QgpuClient {
     io_connect_t   conn;
     unsigned char *win;          /* notre tranche de BAR0, mappée */
     unsigned long  size;         /* taille de la tranche */
     unsigned long  base;         /* début de la tranche dans BAR0 (offsets du flux) */
-    unsigned long  ctx_base;     /* premiers identifiants de notre plage */
+    unsigned long  ctx_base;     /* premiers identifiants de nos plages, calculés
+                                    depuis la table QGPU_REG_LAYOUT du device (v19) */
     unsigned long  surf_base;
     unsigned long  tex_base;
+    unsigned long  query_base;
+    unsigned long  buf_base;
     unsigned long  index;
+    unsigned long  nclients;     /* QGPU_REG_CLIENTS */
     unsigned long  version;
     unsigned long  caps;
 } QgpuClient;
 
-/* 0 si le device est utilisable ; sinon un message dans *why. */
+/* 0 si le device est utilisable ; sinon un message dans *why. Vérifie, dans
+   cet ordre : kext v19 (QGPU_UC_READ_REG répond), device v19
+   (QGPU_CAP_CLIENTS), et disposition des identifiants du device identique à
+   celle de ce qgpu_proto.h (sinon : QEMU d'un autre en-tête). */
 int  qgpu_open(QgpuClient *q, const char **why);
+/* v19 : lecture d'un registre de BAR1 par le kext (sans effet de bord).
+   -1 si le kext ne sait pas (d'avant la v19) ou refuse l'offset. */
+int  qgpu_read_reg(QgpuClient *q, unsigned long offset, unsigned long *value);
 void qgpu_close(QgpuClient *q);
 /* Après fork() SANS exec, dans l'ENFANT seulement : oublier le port Mach et la
    tranche mappée SANS un seul appel au noyau. Fermer le user client ici

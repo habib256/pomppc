@@ -44,3 +44,7 @@ frontend/imgui/
 frontend/build/
 disks/*.lock
 TEST/
+
+# copies du contrat faites par les Makefiles invités (source : patches/qgpu/)
+guest/gldriver/qgpu_proto.h
+guest/gldriver/qgpu_abi.h

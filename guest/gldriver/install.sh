@@ -5,8 +5,9 @@
 #   sudo sh install.sh --remove   # retire les deux
 #
 # À lancer depuis une copie de l'arborescence du dépôt (le CD de
-# scripts/make_kext_iso.sh, ou /pomppc) : ../../kext/POMPPCGPU doit exister,
-# ou KEXTSRC=<dossier des sources du kext>.
+# scripts/make_kext_iso.sh, ou /pomppc) : ../../kext/POMPPCGPU et
+# ../../patches/qgpu (qgpu_proto.h, qgpu_abi.h) doivent exister, ou
+# KEXTSRC=<dossier des sources du kext> et PROTOSRC=<dossier du contrat>.
 #
 # Sans Xcode Tools (pas de gcc-4.0), les binaires déjà compilés du CD
 # (../../prebuilt, job tools/guest/jobs/prebuilt) sont installés à la place ;
@@ -61,7 +62,10 @@ kextload "$EXT/POMPPCGPU.kext" 2>/dev/null || true
 
 echo "▶ plugin OpenGL"
 if [ "$BUNDLE" = "$HERE/GLDriver-POMPPC.bundle" ]; then
-  cp "$KEXTSRC/qgpu_proto.h" "$HERE/qgpu_proto.h"
+  # v19 : le contrat du plugin (qgpu_proto.h + qgpu_abi.h) vient de patches/qgpu/ ;
+  # le kext, lui, n'a que qgpu_abi.h. PROTOSRC=<dossier> pour une autre source.
+  PROTOSRC=${PROTOSRC:-$HERE/../../patches/qgpu}
+  cp "$PROTOSRC/qgpu_proto.h" "$PROTOSRC/qgpu_abi.h" "$HERE/"
   ( cd "$HERE" && make clean >/dev/null && make )
 fi
 if [ ! -f "$BUNDLE/Contents/MacOS/GLDriver-POMPPC" ]; then

@@ -223,9 +223,13 @@ enum {
     QGPU_SCANOUT_NONE,
 };
 
-/* Une soumission en attente : ce que le doorbell a lu dans les registres. */
+/* Une soumission en attente : ce que le doorbell a lu dans les registres.
+   v19 : ou une destruction de tranche (QGPU_REG_CLIENT_RESET), qui prend la
+   même file et la même barrière — `off` porte alors l'index de la tranche. */
+enum { QGPU_JOB_STREAM = 0, QGPU_JOB_CLIENT_RESET = 1 };
 typedef struct QgpuJob {
     uint32_t off, len;
+    uint32_t kind;
 } QgpuJob;
 
 struct QgpuPCIState {
@@ -314,7 +318,10 @@ static void qgpu_run_job(QgpuPCIState *s, const QgpuJob *job)
 {
     uint32_t st, pc;
 
-    if (s->core_ok) {
+    if (s->core_ok && job->kind == QGPU_JOB_CLIENT_RESET) {
+        st = qgpu_core_client_reset(&s->core, job->off);
+        pc = 0;
+    } else if (s->core_ok) {
         st = qgpu_core_execute(&s->core, job->off, job->len);
         pc = s->core.status_pc;
     } else {
@@ -342,7 +349,11 @@ static void qgpu_run_job(QgpuPCIState *s, const QgpuJob *job)
        tête de ce thread (D1) : il finit dans ram_list.dirty_memory, lu sous
        RCU. */
     memory_region_set_dirty(&s->mem_shmem, 0, (uint64_t)s->shmem_mb * MiB);
-    if (s->trace) {
+    if (s->trace && job->kind == QGPU_JOB_CLIENT_RESET) {
+        fprintf(stderr, "qgpu-pci: destruction de la tranche %u -> statut %u, "
+                "fence %u\n", job->off, st,
+                qatomic_read(&s->regs[QGPU_REG_FENCE >> 2]));
+    } else if (s->trace) {
         fprintf(stderr, "qgpu-pci: soumission off=0x%x len=%u -> statut %u "
                 "(pc %u), fence %u\n", job->off, job->len, st, pc,
                 qatomic_read(&s->regs[QGPU_REG_FENCE >> 2]));
@@ -489,6 +500,7 @@ static void qgpu_doorbell(QgpuPCIState *s, bool async)
 
     job.off = s->regs[QGPU_REG_SUBMIT_OFF >> 2];
     job.len = s->regs[QGPU_REG_SUBMIT_LEN >> 2];
+    job.kind = QGPU_JOB_STREAM;
 
     if (!s->thread_ok) {
         /* Pas de thread (realize incomplet) : v8 à l'identique. */
@@ -577,6 +589,49 @@ static void qgpu_doorbell(QgpuPCIState *s, bool async)
     s->regs[QGPU_REG_SUBMIT_ST >> 2] = QGPU_ST_OK;
 }
 
+/* v19 — écriture de QGPU_REG_CLIENT_RESET : détruire les objets d'une
+ * tranche. Toujours EN FILE (jamais d'attente BQL pris : un kext qui ferme un
+ * client dort ensuite sur la barrière, il n'a pas besoin que l'écriture
+ * bloque), FIFO derrière tout ce qui est en vol — y compris les dernières
+ * soumissions du client mort, qui lisaient encore sa tranche. Mêmes registres
+ * de réponse qu'un doorbell asynchrone : SUBMIT_ST (OK, QUEUE_FULL, ou
+ * BAD_ARG pour un index hors table — rien n'est alors mis en file) et
+ * FENCE_SUBMITTED. Sans thread, exécuté sur place, comme un doorbell v8. */
+static void qgpu_client_reset(QgpuPCIState *s, uint32_t slot)
+{
+    QgpuJob job;
+    uint32_t target;
+
+    if (slot >= s->regs[QGPU_REG_CLIENTS >> 2]) {
+        s->regs[QGPU_REG_SUBMIT_ST >> 2] = QGPU_ST_BAD_ARG;
+        return;
+    }
+    job.off = slot;
+    job.len = 0;
+    job.kind = QGPU_JOB_CLIENT_RESET;
+    if (!s->thread_ok) {
+        s->regs[QGPU_REG_FENCE_SUBMITTED >> 2]++;
+        qgpu_run_job(s, &job);
+        s->regs[QGPU_REG_IRQ >> 2] |= QGPU_IRQ_DONE;
+        qgpu_update_irq(s);
+        s->regs[QGPU_REG_SUBMIT_ST >> 2] = QGPU_ST_OK;
+        return;
+    }
+    qemu_mutex_lock(&s->lock);
+    if (s->q_count == QGPU_QUEUE_DEPTH) {
+        qemu_mutex_unlock(&s->lock);
+        s->regs[QGPU_REG_SUBMIT_ST >> 2] = QGPU_ST_QUEUE_FULL;
+        return;
+    }
+    s->queue[(s->q_head + s->q_count) % QGPU_QUEUE_DEPTH] = job;
+    s->q_count++;
+    target = ++s->q_submitted;
+    qemu_cond_signal(&s->cond_work);
+    qemu_mutex_unlock(&s->lock);
+    s->regs[QGPU_REG_FENCE_SUBMITTED >> 2] = target;
+    s->regs[QGPU_REG_SUBMIT_ST >> 2] = QGPU_ST_OK;
+}
+
 static void qgpu_soft_reset(QgpuPCIState *s)
 {
     if (s->thread_ok) {
@@ -603,6 +658,16 @@ static void qgpu_soft_reset(QgpuPCIState *s)
     s->regs[QGPU_REG_SHMEM_SIZE >> 2] = s->shmem_mb * MiB;
     s->regs[QGPU_REG_BACKEND_NAME >> 2] = qgpu_core_backend_tag(&s->core);
     s->regs[QGPU_REG_QUEUE_DEPTH >> 2] = QGPU_QUEUE_DEPTH;
+    /* v19 : la disposition des clients, lue par le kext (CLIENTS) et par le
+       plugin (LAYOUT). Un cœur absent ne publie rien : le kext refuse alors
+       de démarrer, ce qui vaut mieux qu'un transport vers le vide. */
+    if (s->core_ok) {
+        uint32_t k;
+        s->regs[QGPU_REG_CLIENTS >> 2] = QGPU_MAX_CLIENTS;
+        for (k = 0; k < QGPU_REG_LAYOUT_CLASSES; k++) {
+            s->regs[QGPU_REG_LAYOUT_CLASS(k) >> 2] = qgpu_core_client_ids(k);
+        }
+    }
     if (s->core_ok && s->thread_ok) {
         /* Par le thread de rendu, qui possède le contexte (cf. en tête). */
         qemu_mutex_lock(&s->lock);
@@ -681,6 +746,9 @@ static void qgpu_ctrl_write(void *opaque, hwaddr addr, uint64_t val,
         if (v & QGPU_DOORBELL_GO) {
             qgpu_doorbell(s, (v & QGPU_DOORBELL_ASYNC) != 0);
         }
+        break;
+    case QGPU_REG_CLIENT_RESET:
+        qgpu_client_reset(s, v);        /* v19 */
         break;
     case QGPU_REG_IRQ_MASK:
         s->regs[addr >> 2] = v & QGPU_IRQ_DONE;

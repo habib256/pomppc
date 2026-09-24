@@ -1582,8 +1582,8 @@ void pomppc_backend_init(void)
                                getenv("POMPPC_GL_NATIVE_RANGE")[0] == '0');
             G.pixtex = -1;
             G.pixtex_w = G.pixtex_h = 0;
-            G.buf_base = G.q.index * QGPU_CLIENT_BUF_IDS;
-            G.query_base = G.q.index * QGPU_CLIENT_QUERY_IDS;
+            G.buf_base = G.q.buf_base;       /* v19 : plages lues dans le device */
+            G.query_base = G.q.query_base;
             /* Seulement si le bilan est demandé : un atexit pointe dans NOTRE
                code, et GLEngine peut décharger le plugin (NSUnLinkModule) avant
                la fin du processus — le bilan est alors écrit par

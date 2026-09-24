@@ -24,14 +24,11 @@
 #define QGPU_POLL_MAX_MS        2000
 
 /* K5 : délai maximal d'une barrière de destruction. Au-delà, l'hôte ne répond
-   plus ; on le dit et on rend la tranche quand même (les soumissions encore en
-   vol ne lisent que la page de service, hors des tranches — K8). */
+   plus ; on le dit et on rend la tranche quand même. */
 #define DESTROY_WAIT_MS         2000
-
-/* K8 : la page de service est partagée par les quatre tranches — deux
-   destructions peuvent courir (l'une dort entre deux paquets, gate relâchée,
-   pendant que l'autre commence). Chacune n'écrit donc que dans SA fenêtre. */
-#define DESTROY_WINDOW          (PAGE_SIZE / QGPU_MAX_CLIENTS)
+/* v19 : nombre de fois où l'on réessaie QGPU_REG_CLIENT_RESET sur file pleine
+   (chaque essai attend d'abord que tout ce qui est accepté soit terminé). */
+#define DESTROY_RETRIES         8
 
 #define super IOService
 OSDefineMetaClassAndStructors(POMPPCGPU, IOService)
@@ -76,11 +73,21 @@ bool POMPPCGPU::start(IOService * provider)
     fVersion   = regRead(QGPU_REG_VERSION);
     fCaps      = regRead(QGPU_REG_CAPS);
     fShmemSize = regRead(QGPU_REG_SHMEM_SIZE);
-    /* Un device plus récent comprend les flux des versions précédentes
-       (chaque version ne fait qu'ajouter des opcodes et des clés). */
-    if (fVersion < QGPU_PROTO_MIN) {
-        GPULog("protocol v%lu, this kext needs at least v%d: refusing\n",
-               (unsigned long) fVersion, QGPU_PROTO_MIN);
+    /* v19 : ce kext ne sait plus détruire les objets d'un client lui-même ; il
+       lui faut un device qui publie ses tranches et tient CLIENT_RESET. La
+       version du protocole (QGPU_REG_VERSION) ne le regarde plus : elle est
+       publiée dans ioreg et rendue par GET_INFO, c'est le plugin qui en juge. */
+    if (!(fCaps & QGPU_CAP_CLIENTS)) {
+        GPULog("protocol v%lu without QGPU_CAP_CLIENTS: this kext (v19 transport) "
+               "needs a device that owns the client layout - refusing\n",
+               (unsigned long) fVersion);
+        fPCI->setMemoryEnable(false);
+        return false;
+    }
+    fClientCount = regRead(QGPU_REG_CLIENTS);
+    if (fClientCount == 0 || fClientCount > POMPPC_KEXT_MAX_CLIENTS) {
+        GPULog("device offers %lu client slots, this kext holds 1..%d: refusing\n",
+               (unsigned long) fClientCount, POMPPC_KEXT_MAX_CLIENTS);
         fPCI->setMemoryEnable(false);
         return false;
     }
@@ -88,19 +95,12 @@ bool POMPPCGPU::start(IOService * provider)
         /* le device et le BAR doivent dire la même chose */
         fShmemSize = fShmemRange->getLength();
     }
-    /* K8 — UNE PAGE DE SERVICE, HORS DES TRANCHES. Le flux de destruction des
-       objets d'un client était écrit dans la PREMIÈRE PAGE DE SA TRANCHE, au
-       motif qu'il ne s'en sert plus : c'est faux dès que la tranche est encore
-       vivante (clientDied pendant que le processus dessine, QGPU_UC_RESET, et
-       le cas K3 où la tranche a déjà été rendue à un autre). On rogne donc une
-       page sur la fenêtre AVANT de la découper : les tranches restent
-       contiguës depuis 0 et alignées sur une page, la page de service est
-       juste derrière la dernière. Le device ne connaît pas les tranches (il ne
-       borne que sur BAR0) : ce découpage est celui du kext seul. */
-    fSlotSize   = (fShmemSize > PAGE_SIZE)
-                      ? (((fShmemSize - PAGE_SIZE) / QGPU_MAX_CLIENTS) & ~(UInt32) 0xFFF)
-                      : 0;
-    fServiceOff = (UInt32) QGPU_MAX_CLIENTS * fSlotSize;
+    /* Les tranches sont contiguës depuis 0 et alignées sur une page. Le device
+       ne connaît pas les tranches de BAR0 (il ne borne que sur la fenêtre) :
+       ce découpage-là est celui du kext seul ; le découpage des IDENTIFIANTS,
+       lui, est celui du device (QGPU_REG_LAYOUT), et le kext n'en sait rien.
+       Plus de page de service (K8) : le kext n'écrit plus rien dans BAR0. */
+    fSlotSize   = (fShmemSize / fClientCount) & ~(UInt32) 0xFFF;
     if (fSlotSize == 0) {
         GPULog("shared window too small (%lu bytes)\n", (unsigned long) fShmemSize);
         fPCI->setMemoryEnable(false);
@@ -148,13 +148,11 @@ bool POMPPCGPU::start(IOService * provider)
        par le device — correct, mais le kext rendrait alors une « barrière »
        déjà atteinte et un statut de rendu là où le client attend une
        acceptation. On préfère le dire une fois pour toutes ici. */
-    fAsync = (fVersion >= 9 && (fCaps & QGPU_CAP_ASYNC) && fTimer) ? 1 : 0;
+    fAsync = ((fCaps & QGPU_CAP_ASYNC) && fTimer) ? 1 : 0;
 
     /* Profondeur de la file de CE device (le protocole dit de lire le registre
-       plutôt que de croire QGPU_QUEUE_DEPTH) : taille des paquets de
-       destruction (K5). Bornée plus bas par ce que tient la fenêtre d'une
-       tranche dans la page de service. */
-    fQueueDepth = (fVersion >= 9) ? regRead(QGPU_REG_QUEUE_DEPTH) : 0;
+       plutôt que de croire QGPU_QUEUE_DEPTH) : publiée dans ioreg. */
+    fQueueDepth = regRead(QGPU_REG_QUEUE_DEPTH);
     if (fQueueDepth == 0) {
         fQueueDepth = QGPU_QUEUE_DEPTH;
     }
@@ -169,9 +167,9 @@ bool POMPPCGPU::start(IOService * provider)
        n'ait pas à deviner. */
     setProperty("QGPUCapsClient", (unsigned long long) caps(), 32);
     setProperty("QGPUShmemSize", (unsigned long long) fShmemSize, 32);
-    setProperty("QGPUQueueDepth",
-                (unsigned long long) (fVersion >= 9 ? regRead(QGPU_REG_QUEUE_DEPTH) : 0), 32);
+    setProperty("QGPUQueueDepth", (unsigned long long) fQueueDepth, 32);
     setProperty("QGPUSlotSize",  (unsigned long long) fSlotSize, 32);
+    setProperty("QGPUClients",   (unsigned long long) fClientCount, 32);   /* v19 */
     setProperty("QGPUAsync",     (unsigned long long) fAsync, 32);
     {
         UInt32 tag = regRead(QGPU_REG_BACKEND_NAME);
@@ -186,13 +184,11 @@ bool POMPPCGPU::start(IOService * provider)
                 name[i--] = 0;
         }
         setProperty("QGPUBackend", name);
-        /* La tranche n'est plus un multiple rond de mébioctet depuis qu'une
-           page de service est rognée sur la fenêtre (K8) : dire des kibioctets. */
         GPULog("started: protocol v%lu, host backend '%s', caps 0x%lx, "
-               "window %lu MiB, %d clients x %lu KiB, %s\n",
+               "window %lu MiB, %lu clients x %lu KiB, %s\n",
                (unsigned long) fVersion, name,
                (unsigned long) fCaps, (unsigned long) (fShmemSize >> 20),
-               QGPU_MAX_CLIENTS, (unsigned long) (fSlotSize >> 10),
+               (unsigned long) fClientCount, (unsigned long) (fSlotSize >> 10),
                fAsync ? "async submit ready" : "sync submit only");
     }
 
@@ -588,15 +584,11 @@ IOReturn POMPPCGPU::submit(int slot, UInt32 off, UInt32 len,
     a.result = kIOReturnNotReady;
     a.flags = len & POMPPC_SUB_FLAGS;
     len    &= ~POMPPC_SUB_FLAGS;
-    if (slot < 0 || slot >= QGPU_MAX_CLIENTS) {
+    if (slot < 0 || (UInt32) slot >= fClientCount) {
         return kIOReturnBadArgument;
     }
-    if (a.flags & POMPPC_SUB_LAYOUT) {  /* constantes de tranches de CE kext */
-        *fence    = (UInt32) QGPU_CLIENT_TEX_IDS | ((UInt32) QGPU_CLIENT_BUF_IDS << 16);
-        *status   = (UInt32) QGPU_CLIENT_SURF_IDS | ((UInt32) QGPU_CLIENT_CTX_IDS << 16);
-        *statusPC = (UInt32) QGPU_MAX_TEX;
-        return kIOReturnSuccess;
-    }
+    /* Un bit de `len` que ce kext ne connaît pas (tel le LAYOUT du 24/09/2026,
+       retiré en v19) reste dans `len` et déborde la tranche : refusé plus bas. */
     /* K1/K4 : plus rien ne part une fois stop() commencé — la gate a pu être
        retirée du work loop, et runAction ferme la gate AVANT tout test. */
     if (!fGate || fStopping) {
@@ -768,23 +760,6 @@ IOReturn POMPPCGPU::waitFence(UInt32 target, UInt32 timeoutMs, UInt32 * current)
     }
 }
 
-/* Attend que la file du device soit VIDE (contexte gated). Sert avant de
-   détruire les objets d'un client : une soumission encore en vol peut s'en
-   servir. Borné, et sans effet sur un device v8 (DOORBELL y est toujours 0 au
-   retour du doorbell). */
-void POMPPCGPU::drainQueue(void)
-{
-    UInt32 spins = 0;
-
-    if (fVersion < 9) {
-        return;
-    }
-    while (regRead(QGPU_REG_DOORBELL) != 0 && spins < 5000) {
-        IODelay(200);
-        spins++;
-    }
-}
-
 /* ─────────────────────────── tranches des clients ─────────────────────────── */
 
 /* K3/K7 — LA TRANCHE APPARTIENT À UN CLIENT, ET LUI SEUL PEUT LA RENDRE.
@@ -819,7 +794,7 @@ IOReturn POMPPCGPU::slotGated(OSObject * owner, void * a0, void *, void *, void 
     a->result = kIOReturnSuccess;
     if (a->op == SLOT_OP_ALLOC) {
         a->slot = -1;
-        for (i = 0; i < QGPU_MAX_CLIENTS; i++) {
+        for (i = 0; i < (int) self->fClientCount; i++) {
             /* fSlotBusy : une tranche dont les objets sont encore en cours de
                destruction n'est pas libre, même si son client est parti. */
             if (!self->fClients[i] && !self->fSlotBusy[i]) {
@@ -834,7 +809,7 @@ IOReturn POMPPCGPU::slotGated(OSObject * owner, void * a0, void *, void *, void 
         return kIOReturnSuccess;
     }
 
-    if (a->slot < 0 || a->slot >= QGPU_MAX_CLIENTS) {
+    if (a->slot < 0 || (UInt32) a->slot >= self->fClientCount) {
         a->result = kIOReturnBadArgument;
         return kIOReturnSuccess;
     }
@@ -882,7 +857,7 @@ IOReturn POMPPCGPU::freeSlot(int slot, POMPPCGPUUserClient * client)
 
     a.op = SLOT_OP_FREE; a.client = client; a.slot = slot;
     a.result = kIOReturnNotReady;
-    if (slot < 0 || slot >= QGPU_MAX_CLIENTS) {
+    if (slot < 0 || (UInt32) slot >= fClientCount) {
         return kIOReturnBadArgument;
     }
     /* K9 — une tranche non rendue est perdue POUR TOUJOURS (« 5e client
@@ -908,7 +883,7 @@ IOReturn POMPPCGPU::resetSlot(int slot, POMPPCGPUUserClient * client)
 
     a.op = SLOT_OP_RESET; a.client = client; a.slot = slot;
     a.result = kIOReturnNotReady;
-    if (slot < 0 || slot >= QGPU_MAX_CLIENTS) {
+    if (slot < 0 || (UInt32) slot >= fClientCount) {
         return kIOReturnBadArgument;
     }
     if (!fGate || fStopping) {
@@ -927,7 +902,7 @@ IOReturn POMPPCGPU::resetSlot(int slot, POMPPCGPUUserClient * client)
    instant plus tôt, ce qui est précisément ce qu'on veut. */
 void POMPPCGPU::forgetSlot(int slot, POMPPCGPUUserClient * client)
 {
-    if (slot < 0 || slot >= QGPU_MAX_CLIENTS) {
+    if (slot < 0 || (UInt32) slot >= fClientCount) {
         return;
     }
     if (fClients[slot] == client) {
@@ -937,135 +912,105 @@ void POMPPCGPU::forgetSlot(int slot, POMPPCGPUUserClient * client)
 
 IODeviceMemory * POMPPCGPU::slotRange(int slot)
 {
-    if (slot < 0 || slot >= QGPU_MAX_CLIENTS) {
+    if (slot < 0 || (UInt32) slot >= fClientCount) {
         return 0;
     }
     return IODeviceMemory::withSubRange(fShmemRange, (IOPhysicalAddress) slot * fSlotSize,
                                         fSlotSize);
 }
 
-/* Contexte gated. Détruit les objets de la plage du client, UNE SOUMISSION PAR
-   OBJET : un identifiant inutilisé fait échouer SA commande (et arrêterait un
-   flux groupé, cf. « un BAD_ARG perd le reste du flux »), ce qui est ici
-   attendu et sans conséquence — c'est le compte d'erreurs que le plugin voit
-   monter d'environ 148 par application qui se ferme.
+/* Contexte gated. Détruit les objets de la tranche `slot` — PAR LE DEVICE.
  *
- * K8 — OÙ EST ÉCRIT LE FLUX. Plus dans la première page de la tranche du
- * client (elle peut être vivante et mappée : clientDied pendant un dessin,
- * QGPU_UC_RESET), mais dans la PAGE DE SERVICE, hors de toute tranche. Une
- * fenêtre glissante de `fQueueDepth` commandes y suffit : la barrière de fin
- * de paquet garantit que plus personne ne lit les emplacements réécrits.
+ * v19 (chantier A1). Jusqu'ici le kext écrivait lui-même un flux de
+ * destruction dans une page de service de BAR0 : un doorbell par identifiant,
+ * pour les classes d'objets et les tailles de plages qu'il avait COMPILÉES
+ * (1 108 doorbells par client ; jamais les requêtes). Un kext d'un autre
+ * en-tête laissait des objets vivants derrière lui, et le plugin suivant
+ * recréait des identifiants encore pris (23/09/2026 : BAD_ARG en cascade,
+ * créneaux perdus). Le device connaît ses plages mieux que personne : on lui
+ * écrit l'index de la tranche dans QGPU_REG_CLIENT_RESET, il met la
+ * destruction EN FILE derrière tout ce qui est en vol (FIFO — donc aussi
+ * derrière les dernières soumissions du client mort, qui lisaient encore sa
+ * tranche), et on dort sur la barrière comme pour n'importe quelle soumission.
+ * Le kext n'écrit plus un mot dans BAR0 et ne connaît aucun opcode.
  *
- * K5 — CE QUE COÛTAIT LA VERSION SYNCHRONE. drainQueue à l'IODelay (jusqu'à
- * une seconde de spin actif) puis 212 doorbells SYNCHRONES, chacun tenant le
- * BQL de QEMU le temps d'un rendu : les autres clients et tout MMIO d'un autre
- * vCPU attendaient, et le bureau se figeait à chaque sortie d'application 3D.
- * Ici : des paquets de `fQueueDepth` doorbells ASYNCHRONES (l'écriture rend la
- * main tout de suite) séparés par une barrière qui DORT sur la gate — le
- * verrou du work loop est relâché pendant l'attente, les autres clients
- * soumettent et l'interruption est servie.
+ * File pleine : rien n'a été mis en file ; on attend que tout ce qui est
+ * accepté soit terminé, puis on réécrit (borné par DESTROY_RETRIES).
  *
- * La barrière finale remplace aussi drainQueue : la file est FIFO, donc
- * attendre la dernière destruction, c'est attendre TOUT ce qui était en vol
- * avant elle — y compris les soumissions du client mort qui lisaient sa
- * tranche. Au retour, plus rien ne la touche.
- *
- * Sans QGPU_CAP_ASYNC (device v8, ou timer absent), on reste à l'identique :
- * drainQueue puis doorbell synchrone, seule la page écrite change. */
+ * La barrière : au retour, la tranche du client n'est plus lue par personne
+ * et peut être redonnée. Sans chien de garde (fAsync = 0), on scrute FENCE
+ * comme avant la v9, borné par DESTROY_WAIT_MS. */
+IOReturn POMPPCGPU::waitDestroy(UInt32 target, int async)
+{
+    UInt32 spins = 0;
+
+    if (async) {
+        return sleepForFence(target, DESTROY_WAIT_MS, 0);
+    }
+    while ((SInt32) (regRead(QGPU_REG_FENCE) - target) < 0) {
+        if (fStopping) {
+            return kIOReturnNotReady;
+        }
+        if (++spins > (UInt32) DESTROY_WAIT_MS * 5) {   /* 200 µs par tour */
+            return kIOReturnTimeout;
+        }
+        IODelay(200);
+    }
+    return kIOReturnSuccess;
+}
+
 void POMPPCGPU::destroyClientObjects(int slot)
 {
-    static const struct { UInt32 op, per_client; } kinds[4] = {
-        { QGPU_OP_SURF_DESTROY, QGPU_CLIENT_SURF_IDS },
-        { QGPU_OP_TEX_DESTROY,  QGPU_CLIENT_TEX_IDS },
-        { QGPU_OP_BUF_DESTROY,  QGPU_CLIENT_BUF_IDS },
-        { QGPU_OP_CTX_DESTROY,  QGPU_CLIENT_CTX_IDS },
-    };
-    IODeviceMemory * page;
-    IOMemoryMap *    map;
-    UInt32 *         w;
-    UInt32           depth, slotIdx = 0, want = 0, retries = 0;
-    UInt32           baseOff;
-    int              k, i;
-    int              async;
-    int              failed = 0;
+    UInt32 want = 0, tries = 0;
+    int    async;
 
-    if (fStopping || !fRegs || !fShmemRange) {
+    if (fStopping || !fRegs) {
         return;                     /* plus personne à qui parler */
     }
     async = (fAsync && fTimer && fGate) ? 1 : 0;
 
-    page = IODeviceMemory::withSubRange(fShmemRange,
-                                (IOPhysicalAddress) fServiceOff, PAGE_SIZE);
-    map = page ? page->map() : 0;
-    w   = map ? (UInt32 *) map->getVirtualAddress() : 0;
-    if (!w) {
-        GPULog("cannot map service page: objects of slot %d left behind\n", slot);
-        if (map)  { map->release(); }
-        if (page) { page->release(); }
-        return;
-    }
+    for (;;) {
+        UInt32 st;
 
-    /* Fenêtre de CETTE tranche dans la page de service, et paquet qui y tient. */
-    baseOff = fServiceOff + (UInt32) slot * DESTROY_WINDOW;
-    w      += (UInt32) slot * (DESTROY_WINDOW / sizeof(UInt32));
-    depth   = async ? fQueueDepth : 1;
-    if (depth < 1) {
-        depth = 1;
-    }
-    if (depth > (UInt32) (DESTROY_WINDOW / 8)) {
-        depth = (UInt32) (DESTROY_WINDOW / 8);
-    }
-    if (!async) {
-        drainQueue();
-    }
-
-    for (k = 0; k < 4 && !failed; k++) {
-        for (i = 0; i < (int) kinds[k].per_client && !failed; i++) {
-            w[2 * slotIdx]     = QGPU_CMD_HDR(kinds[k].op, 2);
-            w[2 * slotIdx + 1] = (UInt32) slot * kinds[k].per_client + i;
-            regWrite(QGPU_REG_SUBMIT_OFF, baseOff + 8 * slotIdx);
-            regWrite(QGPU_REG_SUBMIT_LEN, 8);
-            if (!async) {
-                regWrite(QGPU_REG_DOORBELL, QGPU_DOORBELL_GO);
-                continue;
-            }
-            regWrite(QGPU_REG_DOORBELL, QGPU_DOORBELL_GO | QGPU_DOORBELL_ASYNC);
-            if (regRead(QGPU_REG_SUBMIT_ST) == QGPU_ST_QUEUE_FULL) {
-                /* Rien n'a été mis en file : attendre que TOUT ce qui est
-                   accepté (nous et les autres clients) soit terminé, puis
-                   rejouer CETTE commande — la fenêtre de la page est libre. */
-                UInt32 all = regRead(QGPU_REG_FENCE_SUBMITTED);
-                slotIdx = 0;
-                if (++retries > 2 * (QGPU_CLIENT_SURF_IDS + QGPU_CLIENT_TEX_IDS +
-                                     QGPU_CLIENT_BUF_IDS + QGPU_CLIENT_CTX_IDS) ||
-                    sleepForFence(all, DESTROY_WAIT_MS, 0) != kIOReturnSuccess) {
-                    failed = 1;
-                } else {
-                    i--;                        /* le i++ de la boucle annule */
-                }
-                continue;
-            }
+        regWrite(QGPU_REG_CLIENT_RESET, (UInt32) slot);
+        st = regRead(QGPU_REG_SUBMIT_ST);
+        if (st == QGPU_ST_OK) {
             want = regRead(QGPU_REG_FENCE_SUBMITTED);
-            if (++slotIdx >= depth) {
-                slotIdx = 0;
-                if (sleepForFence(want, DESTROY_WAIT_MS, 0) != kIOReturnSuccess) {
-                    failed = 1;
-                }
-            }
+            break;
+        }
+        if (st != QGPU_ST_QUEUE_FULL || ++tries > DESTROY_RETRIES) {
+            GPULog("slot %d: device refused CLIENT_RESET (status %lu, try %lu): "
+                   "objects left behind\n", slot, (unsigned long) st,
+                   (unsigned long) tries);
+            return;
+        }
+        if (waitDestroy(regRead(QGPU_REG_FENCE_SUBMITTED), async) != kIOReturnSuccess) {
+            GPULog("slot %d: host did not drain in %d ms before CLIENT_RESET\n",
+                   slot, DESTROY_WAIT_MS);
+            return;
         }
     }
-    /* LA barrière : au retour, la tranche du client n'est plus lue par
-       personne et peut être redonnée. */
-    if (async && want && !failed) {
-        failed = (sleepForFence(want, DESTROY_WAIT_MS, 0) != kIOReturnSuccess);
-    }
-    if (failed) {
-        GPULog("slot %d: host did not drain in %d ms while destroying objects\n",
+    if (waitDestroy(want, async) != kIOReturnSuccess) {
+        GPULog("slot %d: host did not finish CLIENT_RESET in %d ms\n",
                slot, DESTROY_WAIT_MS);
     }
+}
 
-    map->release();
-    page->release();
+/* v19 : lecture d'un registre pour le userland. Bornée sur le BAR, pas sur
+   QGPU_CTRL_TOPADDR : un device qui publie un registre de plus n'a pas besoin
+   d'un kext de plus (au-delà de ce qu'il tient, il rend 0xFFFFFFFF). Sans
+   effet de bord, par contrat de qgpu_abi.h. */
+IOReturn POMPPCGPU::readReg(UInt32 offset, UInt32 * value)
+{
+    *value = 0;
+    if (!fRegs || !fRegsRange || fStopping) {
+        return kIOReturnNotReady;
+    }
+    if ((offset & 3) || offset + 4 > fRegsRange->getLength()) {
+        return kIOReturnBadArgument;
+    }
+    *value = regRead(offset);
+    return kIOReturnSuccess;
 }
 
 /* ─────────────────────────────── user client ────────────────────────────── */
@@ -1130,7 +1075,7 @@ bool POMPPCGPUUserClient::start(IOService * provider)
     /* Une tranche de fenêtre et une plage d'identifiants par client. */
     fSlot = fOwner->allocSlot(this);
     if (fSlot < 0) {
-        GPULog("already %d clients: open refused\n", QGPU_MAX_CLIENTS);
+        GPULog("already %lu clients: open refused\n", (unsigned long) fOwner->clients());
         /* Mineur : un start() qui échoue APRÈS super::start doit défaire ce
            que super::start a fait — IOService ne rappellera pas stop() pour
            un démarrage refusé. */
@@ -1223,6 +1168,7 @@ IOExternalMethod * POMPPCGPUUserClient::getTargetAndMethodForIndex(IOService ** 
         { 0, (IOMethod) &POMPPCGPUUserClient::ucWaitFence, kIOUCScalarIScalarO, 2, 1 },
         { 0, (IOMethod) &POMPPCGPUUserClient::ucReset,     kIOUCScalarIScalarO, 0, 0 },
         { 0, (IOMethod) &POMPPCGPUUserClient::ucGetSlot,   kIOUCScalarIScalarO, 0, 4 },
+        { 0, (IOMethod) &POMPPCGPUUserClient::ucReadReg,   kIOUCScalarIScalarO, 1, 1 },  /* v19 */
     };
 
     if (index >= QGPU_UC_METHOD_COUNT) {
@@ -1303,9 +1249,28 @@ IOReturn POMPPCGPUUserClient::ucGetSlot(UInt32 * index, UInt32 * base, UInt32 * 
     }
     *index    = slot;
     *base     = (UInt32) slot * owner->slotSize();
-    *ctxBase  = (UInt32) slot * QGPU_CLIENT_CTX_IDS;
-    *surfBase = (UInt32) slot * QGPU_CLIENT_SURF_IDS;
+    /* v19 : recopiés de la table du device (classes 0 et 1 par convention
+       d'ABI), plus compilés. Les autres plages : QGPU_UC_READ_REG. */
+    {
+        UInt32 n = 0;
+        owner->readReg(QGPU_REG_LAYOUT_CLASS(0), &n);
+        *ctxBase  = (UInt32) slot * n;
+        owner->readReg(QGPU_REG_LAYOUT_CLASS(1), &n);
+        *surfBase = (UInt32) slot * n;
+    }
     return kIOReturnSuccess;
+}
+
+IOReturn POMPPCGPUUserClient::ucReadReg(UInt32 offset, UInt32 * value,
+                                        void *, void *, void *, void *)
+{
+    POMPPCGPU * owner = fOwner;
+
+    *value = 0;
+    if (!owner) {
+        return kIOReturnNotAttached;
+    }
+    return owner->readReg(offset, value);
 }
 
 /* ───────────────────── nub IOAccelerator (tâche 4.2) ───────────────────── */

@@ -44,7 +44,7 @@ LDLIBS   = -lkmodc++ -lkmod $(CC_KEXT)
 
 all: $(KEXT)
 
-%.o: %.cpp POMPPCGPU.h qgpu_proto.h
+%.o: %.cpp POMPPCGPU.h qgpu_abi.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 %_info.o: %_info.c

@@ -16,8 +16,10 @@ OUT="${1:-$ROOT/disks/pomppc-src.iso}"
 
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 # Même disposition que le dépôt : le plugin retrouve le kext en ../../kext.
-mkdir -p "$STAGE/kext" "$STAGE/guest"
+mkdir -p "$STAGE/kext" "$STAGE/guest" "$STAGE/patches/qgpu"
 cp -R "$ROOT/kext/POMPPCQFB" "$ROOT/kext/POMPPCGPU" "$STAGE/kext/"
+# v19 : le contrat du plugin et de qgpu_test (le kext n'a que qgpu_abi.h)
+cp "$ROOT/patches/qgpu/qgpu_proto.h" "$ROOT/patches/qgpu/qgpu_abi.h" "$STAGE/patches/qgpu/"
 cp -R "$ROOT/guest/qgpu-test" "$ROOT/guest/gldriver" "$ROOT/guest/gltest" \
       "$ROOT/guest/net" "$STAGE/guest/"
 # Binaires déjà compilés (job tools/guest/jobs/prebuilt, rangés dans

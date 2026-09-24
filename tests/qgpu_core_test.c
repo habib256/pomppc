@@ -3270,6 +3270,9 @@ static void run_v9(QgpuCore *c, uint8_t *shmem)
         QGPU_REG_IRQ_MASK, QGPU_REG_IRQ, QGPU_REG_DEBUG, QGPU_REG_BACKEND_NAME,
         QGPU_REG_QUEUE_FREE, QGPU_REG_FENCE_SUBMITTED, QGPU_REG_SUBMIT_ST,
         QGPU_REG_ERRORS, QGPU_REG_QUEUE_DEPTH,
+        /* v19 */
+        QGPU_REG_CLIENTS, QGPU_REG_CLIENT_RESET, QGPU_REG_LAYOUT_CLASS(0),
+        QGPU_REG_LAYOUT_CLASS(QGPU_REG_LAYOUT_CLASSES - 1),
     };
     const unsigned n = sizeof(regs) / sizeof(regs[0]);
     unsigned i, j, bad = 0;
@@ -3288,7 +3291,7 @@ static void run_v9(QgpuCore *c, uint8_t *shmem)
     }
     CHECK(bad == 0, "carte des registres : %u offsets alignés et distincts "
           "sous 0x%x (%u fautes)", n, (unsigned)QGPU_CTRL_TOPADDR, bad);
-    CHECK(QGPU_PROTO_VERSION == 18, "version du protocole %d", QGPU_PROTO_VERSION);
+    CHECK(QGPU_PROTO_VERSION == 19, "version du protocole %d", QGPU_PROTO_VERSION);
     CHECK(QGPU_PROTO_MIN == 12, "version minimale d'attache %d", QGPU_PROTO_MIN);
     CHECK(QGPU_QUEUE_DEPTH >= 2 && (QGPU_QUEUE_DEPTH & (QGPU_QUEUE_DEPTH - 1)) == 0,
           "profondeur de file %d (puissance de 2, >= 2)", QGPU_QUEUE_DEPTH);
@@ -5853,6 +5856,7 @@ static void nat_ref_fixed(Emit *v, int q)
     emitf(v, nat_st[q][0]); emitf(v, nat_st[q][1]); emitf(v, 0.0f); emitf(v, 1.0f);
 }
 
+static void run_v19(QgpuCore *c, uint8_t *shmem);
 static void run_native(QgpuCore *c, uint8_t *shmem)
 {
     static const char vp_nat[] =
@@ -5888,7 +5892,7 @@ static void run_native(QgpuCore *c, uint8_t *shmem)
            (c->caps & QGPU_CAP_NATIVE) ? "QGPU_CAP_NATIVE annoncé" : "non annoncé");
     /* (1) constantes */
     CHECK(QGPU_OP_DRAW_NATIVE == 0x005A && QGPU_LEN_DRAW_NATIVE == 9 &&
-          QGPU_CAP_NATIVE == 0x100 && QGPU_PROTO_VERSION == 18 &&
+          QGPU_CAP_NATIVE == 0x100 && QGPU_PROTO_VERSION >= 18 &&
           (QGPU_CAP_NATIVE & (QGPU_CAP_SOFT | QGPU_CAP_GL | QGPU_CAP_OCCLUSION |
                               QGPU_CAP_ASYNC | QGPU_CAP_GL14 | QGPU_CAP_SCANOUT |
                               QGPU_CAP_PROGRAMS | QGPU_CAP_GEN_SIZES)) == 0,
@@ -6530,6 +6534,7 @@ static void *run_backend_body(void *arg)
     run_v17(c, shmem);
     run_gensizes(c, shmem);
     run_native(c, shmem);
+    run_v19(c, shmem);
 
     qgpu_core_reset(c);
     e.off = e.start = CMD_OFF;
@@ -6539,6 +6544,133 @@ static void *run_backend_body(void *arg)
 
     qgpu_core_fini(c);
     return NULL;
+}
+
+/* ── v19 : transport séparé — le device possède la disposition des clients ──
+ *
+ * Le kext ne compile plus qgpu_proto.h : il lit QGPU_REG_CLIENTS, laisse le
+ * plugin lire la table QGPU_REG_LAYOUT, et écrit QGPU_REG_CLIENT_RESET quand
+ * un client s'en va. Le device (qgpu-pci.c) transmet au cœur ; ce que le cœur
+ * promet se teste ici : la table, et une destruction qui ne touche QUE la
+ * tranche visée, toutes classes comprises, en déliant les surfaces des
+ * contextes des autres tranches. */
+static void run_v19(QgpuCore *c, uint8_t *shmem)
+{
+    Emit e; uint32_t st, k, bad = 0;
+    const uint32_t c1 = QGPU_CLIENT_CTX_IDS;          /* premier contexte de la tranche 1 */
+    const uint32_t s1 = QGPU_CLIENT_SURF_IDS;
+    const uint32_t t1 = QGPU_CLIENT_TEX_IDS;
+    const uint32_t b1 = QGPU_CLIENT_BUF_IDS;
+    const uint32_t q1 = QGPU_CLIENT_QUERY_IDS;
+    static const uint32_t want[QGPU_CLASS_COUNT] = {
+        QGPU_CLIENT_CTX_IDS, QGPU_CLIENT_SURF_IDS, QGPU_CLIENT_TEX_IDS,
+        QGPU_CLIENT_QUERY_IDS, QGPU_CLIENT_BUF_IDS
+    };
+
+    printf("-- v19 : tranches de clients possédées par le device --\n");
+    CHECK(QGPU_CAP_CLIENTS == 0x200 && QGPU_REG_CLIENTS == 0x80 &&
+          QGPU_REG_CLIENT_RESET == 0x84 && QGPU_REG_LAYOUT == 0x88 &&
+          QGPU_REG_LAYOUT_CLASS(QGPU_REG_LAYOUT_CLASSES - 1) < QGPU_CTRL_TOPADDR &&
+          QGPU_CTRL_TOPADDR <= QGPU_CTRL_BAR_SIZE,
+          "registres v19 : CLIENTS 0x%x CLIENT_RESET 0x%x LAYOUT 0x%x..0x%x sous 0x%x",
+          QGPU_REG_CLIENTS, QGPU_REG_CLIENT_RESET, QGPU_REG_LAYOUT,
+          QGPU_REG_LAYOUT_CLASS(QGPU_REG_LAYOUT_CLASSES - 1), QGPU_CTRL_TOPADDR);
+    CHECK(QGPU_CLASS_COUNT <= QGPU_REG_LAYOUT_CLASSES && QGPU_CLASS_CTX == 0 &&
+          QGPU_CLASS_SURF == 1, "classes : %d ≤ %d entrées, ctx = 0, surf = 1",
+          QGPU_CLASS_COUNT, QGPU_REG_LAYOUT_CLASSES);
+    CHECK((c->caps & QGPU_CAP_CLIENTS) != 0, "QGPU_CAP_CLIENTS annoncé par le cœur (0x%x)", c->caps);
+    for (k = 0; k < QGPU_CLASS_COUNT; k++) {
+        if (qgpu_core_client_ids(k) != want[k]) {
+            bad++;
+        }
+    }
+    CHECK(bad == 0 && qgpu_core_client_ids(QGPU_CLASS_COUNT) == 0 &&
+          qgpu_core_client_ids(QGPU_REG_LAYOUT_CLASSES) == 0,
+          "table : ctx %u surf %u tex %u query %u buf %u, classe inconnue = 0",
+          qgpu_core_client_ids(0), qgpu_core_client_ids(1), qgpu_core_client_ids(2),
+          qgpu_core_client_ids(3), qgpu_core_client_ids(4));
+    CHECK(QGPU_MAX_CLIENTS * QGPU_CLIENT_CTX_IDS <= QGPU_MAX_CTX &&
+          QGPU_MAX_CLIENTS * QGPU_CLIENT_SURF_IDS <= QGPU_MAX_SURF &&
+          QGPU_MAX_CLIENTS * QGPU_CLIENT_TEX_IDS <= QGPU_MAX_TEX &&
+          QGPU_MAX_CLIENTS * QGPU_CLIENT_QUERY_IDS <= QGPU_MAX_QUERIES &&
+          QGPU_MAX_CLIENTS * QGPU_CLIENT_BUF_IDS <= QGPU_MAX_BUF,
+          "les plages de %d clients tiennent dans les limites", QGPU_MAX_CLIENTS);
+
+    /* Deux tranches peuplées : 0 (ctx 0, surf 0, tex 0, buf 0, requête 0) et
+       1 (ctx c1, surf s1, tex t1, buf b1). Le contexte c1 lie la surface 0 de
+       l'AUTRE tranche ; le contexte 0 est le contexte courant. */
+    qgpu_core_reset(c);
+    e.base = shmem; e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, c1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_FMT_XRGB8888);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, s1); emit(&e, W); emit(&e, H); emit(&e, QGPU_FMT_XRGB8888);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX)); emit(&e, t1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE)); emit(&e, 0); emit(&e, 64);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE)); emit(&e, b1); emit(&e, 64);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, c1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, s1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "deux tranches peuplées : st %u (pc %u)", st, c->status_pc);
+    if (c->caps & QGPU_CAP_OCCLUSION) {
+        e.off = e.start = CMD_OFF;
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_QUERY_BEGIN, QGPU_LEN_QUERY)); emit(&e, 0);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_OK && c->query[0].used && c->query[0].active,
+              "requête 0 ouverte sur le contexte 0 : st %u", st);
+    }
+
+    CHECK(qgpu_core_client_reset(c, QGPU_MAX_CLIENTS) == QGPU_ST_BAD_ARG,
+          "tranche %d : BAD_ARG, rien détruit (ctx 0 %s)", QGPU_MAX_CLIENTS,
+          c->ctx[0].used ? "vivant" : "MORT");
+
+    st = qgpu_core_client_reset(c, 0);
+    CHECK(st == QGPU_ST_OK && c->status == QGPU_ST_OK, "destruction de la tranche 0 : st %u", st);
+    CHECK(!c->ctx[0].used && !c->surf[0].used && !c->tex[0].used && !c->buf[0].used &&
+          !c->query[0].used,
+          "tranche 0 vide : ctx %d surf %d tex %d buf %d requête %d",
+          c->ctx[0].used, c->surf[0].used, c->tex[0].used, c->buf[0].used, c->query[0].used);
+    CHECK(c->ctx[c1].used && c->surf[s1].used && c->tex[t1].used && c->buf[b1].used,
+          "tranche 1 intacte : ctx %u surf %u tex %u buf %u", c1, s1, t1, b1);
+    CHECK(c->ctx[c1].surf == -1, "la surface 0 détruite est déliée du contexte %u (%d)",
+          c1, c->ctx[c1].surf);
+    CHECK(c->cur_ctx == -1, "plus de contexte courant (%d)", c->cur_ctx);
+
+    /* Recréer les identifiants de la tranche 0 : libres. Ceux de la 1 : pris. */
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_FMT_XRGB8888);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE)); emit(&e, 0); emit(&e, 64);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, c1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_LIMIT && c->status_pc == 12,
+          "tranche 0 recréée, contexte %u de la tranche 1 toujours pris : st %u pc %u",
+          c1, st, c->status_pc);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, c1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CLEAR, QGPU_LEN_CLEAR));
+    emit(&e, QGPU_CLEAR_COLOR); emit(&e, 0); emitf(&e, 1.0f);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_NO_SURF, "le contexte %u n'a plus de surface : st %u", c1, st);
+
+    /* La dernière tranche, puis le reste : plus rien. */
+    for (k = 0; k < QGPU_MAX_CLIENTS; k++) {
+        qgpu_core_client_reset(c, k);
+    }
+    bad = 0;
+    for (k = 0; k < QGPU_MAX_CTX; k++)     bad += c->ctx[k].used;
+    for (k = 0; k < QGPU_MAX_SURF; k++)    bad += c->surf[k].used;
+    for (k = 0; k < QGPU_MAX_TEX; k++)     bad += c->tex[k].used;
+    for (k = 0; k < QGPU_MAX_BUF; k++)     bad += c->buf[k].used;
+    for (k = 0; k < QGPU_MAX_QUERIES; k++) bad += c->query[k].used;
+    CHECK(bad == 0 && q1 > 0, "toutes les tranches détruites : %u objet(s) restant(s)", bad);
 }
 
 static void run_backend(const char *name)

@@ -6,10 +6,12 @@
  * Rôle du kext : le TRANSPORT, rien d'autre. Il mappe les registres (BAR1),
  * publie à chaque processus client SA tranche de la fenêtre partagée (BAR0)
  * via un IOUserClient, frappe le doorbell et lit fence/statut. Il ne connaît
- * les opcodes que pour détruire les objets d'un client qui s'en va : le flux
- * est produit en userland (guest/qgpu-test, le plugin OpenGL
- * guest/gldriver) et exécuté côté hôte. Partage entre clients : voir
- * qgpu_proto.h, « Interface du kext ».
+ * AUCUN opcode (v19, chantier A1) : le flux est produit en userland
+ * (guest/qgpu-test, le plugin OpenGL guest/gldriver) et exécuté côté hôte, et
+ * les objets d'un client qui s'en va sont détruits par le device lui-même
+ * (QGPU_REG_CLIENT_RESET). Le nombre de tranches et la disposition des
+ * identifiants sont LUS DANS LES REGISTRES au démarrage, jamais compilés :
+ * ce kext n'inclut que qgpu_abi.h (l'ABI de transport), pas qgpu_proto.h.
  *
  * Note ABI Darwin 8 : les méthodes du IOUserClient passent par la table
  * IOExternalMethod / getTargetAndMethodForIndex (l'externalMethod() moderne
@@ -31,7 +33,7 @@
 #include <IOKit/graphics/IOGraphicsInterfaceTypes.h>   /* kIOAccelTypesKey… */
 #include <IOKit/pci/IOPCIDevice.h>
 
-#include "qgpu_proto.h"
+#include "qgpu_abi.h"
 
 /* ── L'accélérateur publié (tâche 4.2) ───────────────────────────────────────
  *
@@ -66,48 +68,13 @@ public:
                                    UInt32 type, IOUserClient ** handler);
 };
 
-/* ── v9 : drapeaux passés DANS `len` à QGPU_UC_SUBMIT ────────────────────────
- *
- *   COPIE IDENTIQUE dans guest/gldriver/pomppc_qgpu.h (userland). Les deux
- *   doivent rester au bit près, comme les deux copies de qgpu_proto.h.
- *
- *   POURQUOI DANS `len` ET PAS UN SCALAIRE DE PLUS. Le protocole fige
- *   QGPU_UC_METHOD_COUNT et les sélecteurs QGPU_UC_* : on ne peut ni ajouter
- *   une méthode, ni (c'est le point à retenir) ajouter un argument à
- *   QGPU_UC_SUBMIT. L'ABI de Darwin 8 compare le NOMBRE d'arguments au bit
- *   près — is_io_connect_method_scalarI_scalarO refuse l'appel dès que
- *   inputCount ≠ IOExternalMethod::count0 — donc passer count0 de 2 à 3
- *   ferait rendre kIOReturnBadArgument à TOUS les appelants existants
- *   (qgpu-test compilé avant, un plugin plus ancien encore installé…).
- *   `len` est un multiple de 4 borné par la tranche (16 Mio sur une fenêtre de
- *   64) : ses trois bits hauts sont libres, et un appelant qui ne les connaît
- *   pas les laisse à zéro — c'est-à-dire exactement le comportement v8.
- *
- *   ASYNC : doorbell asynchrone. Rend alors, au lieu de (fence, statut, pc) :
- *     out0 = QGPU_REG_FENCE_SUBMITTED  barrière de CETTE soumission ;
- *     out1 = QGPU_REG_SUBMIT_ST        acceptation (OK ou QGPU_ST_QUEUE_FULL) ;
- *     out2 = QGPU_REG_ERRORS           compteur d'erreurs — status_pc n'a pas
- *                                      de sens à la soumission, et c'est
- *                                      ERRORS qui fait foi quand plusieurs
- *                                      soumissions sont en vol.
- *   PEEK  : ne soumet RIEN ; rend (ERRORS, STATUS, STATUS_PC) — de quoi
- *           nommer la dernière soumission terminée en erreur.
- *   QUEUE : ne soumet RIEN ; rend (DOORBELL, QUEUE_FREE, QUEUE_DEPTH) — pour
- *           le bilan du plugin (profondeur de file moyenne).
- */
-#define POMPPC_SUB_ASYNC        0x80000000UL
-#define POMPPC_SUB_PEEK         0x40000000UL
-#define POMPPC_SUB_QUEUE        0x20000000UL
-/* 24/09/2026 : LAYOUT — le kext répond, SANS rien soumettre, avec les constantes
-   de tranches qu'il a compilées : fence = QGPU_CLIENT_TEX_IDS | BUF_IDS << 16,
-   status = QGPU_CLIENT_SURF_IDS | CTX_IDS << 16, pc = QGPU_MAX_TEX. Un kext qui
-   ignore ce bit le laisse dans `len`, qui déborde alors la tranche : appel
-   refusé — c'est le signal « kext d'un autre en-tête ». Le 23/09, un kext à
-   128 textures par client sous un plugin à 1024 a coûté deux plantages et des
-   créneaux de clients perdus. */
-#define POMPPC_SUB_LAYOUT       0x10000000UL
-#define POMPPC_SUB_FLAGS        (POMPPC_SUB_ASYNC | POMPPC_SUB_PEEK | POMPPC_SUB_QUEUE | \
-                                 POMPPC_SUB_LAYOUT)
+/* Les drapeaux POMPPC_SUB_* passés dans `len` de QGPU_UC_SUBMIT sont définis
+   dans qgpu_abi.h (une seule copie, partagée avec le userland). */
+
+/* Capacité du kext en tranches : le nombre RÉEL est lu dans QGPU_REG_CLIENTS
+   au démarrage et borné par ceci. Ce n'est pas une constante du protocole,
+   c'est la taille des tableaux ci-dessous. */
+#define POMPPC_KEXT_MAX_CLIENTS 8
 
 class POMPPCGPUUserClient;
 
@@ -132,6 +99,10 @@ public:
        flux — trame exécutée deux fois — pendant que check_errors reboucle. */
     UInt32   caps(void)       { return fAsync ? fCaps : (fCaps & ~(UInt32) QGPU_CAP_ASYNC); }
     UInt32   fence(void)      { return fRegs ? regRead(QGPU_REG_FENCE) : 0; }
+    UInt32   clients(void)    { return fClientCount; }
+    /* v19 : lecture d'un registre de BAR1 pour le userland (QGPU_UC_READ_REG).
+       Sans effet de bord par contrat (qgpu_abi.h) ; bornée sur le BAR. */
+    IOReturn readReg(UInt32 offset, UInt32 * value);
     int      allocSlot(POMPPCGPUUserClient * client);        /* -1 si complet */
     /* K3/K7 : le propriétaire est exigé — une tranche déjà rendue puis
        réattribuée ne doit pas être détruite par son ancien client. */
@@ -165,7 +136,7 @@ private:
     /* Contexte gated : dort jusqu'à ce que FENCE atteigne `target`. */
     IOReturn sleepForFence(UInt32 target, UInt32 timeoutMs, UInt32 * current);
     void     destroyClientObjects(int slot);
-    void     drainQueue(void);
+    IOReturn waitDestroy(UInt32 target, int async);
     static bool     irqFilter(OSObject * owner, IOFilterInterruptEventSource * src);
     static void     irqAction(OSObject * owner, IOInterruptEventSource * src, int count);
     static void     timerAction(OSObject * owner, IOTimerEventSource * src);
@@ -185,11 +156,7 @@ private:
 
     UInt32   fShmemSize;
     UInt32   fSlotSize;
-    /* K8 : offset, dans BAR0, de la page de service — hors de toute tranche.
-       C'est là qu'est écrit le flux de destruction des objets d'un client :
-       sa tranche à lui peut être encore mappée et vivante (clientDied pendant
-       un dessin, QGPU_UC_RESET). Elle n'est touchée que dans la gate. */
-    UInt32   fServiceOff;
+    UInt32   fClientCount;        /* v19 : QGPU_REG_CLIENTS, ≤ POMPPC_KEXT_MAX_CLIENTS */
     UInt32   fQueueDepth;         /* profondeur de file annoncée par le device */
     UInt32   fVersion;
     UInt32   fCaps;
@@ -198,11 +165,11 @@ private:
        dormeur le relit à chaque réveil et rend la main (kIOReturnNotReady) ;
        sans lui, free() libère la gate sous un dormeur THREAD_UNINT. */
     UInt32   fStopping;
-    POMPPCGPUUserClient * fClients[QGPU_MAX_CLIENTS];
+    POMPPCGPUUserClient * fClients[POMPPC_KEXT_MAX_CLIENTS];
     /* K5 : destruction des objets d'une tranche EN COURS (elle dort dans la
        gate entre deux paquets). Interdit une seconde destruction concurrente
        (clientClose ⊥ clientDied) et toute réattribution de la tranche. */
-    UInt32   fSlotBusy[QGPU_MAX_CLIENTS];
+    UInt32   fSlotBusy[POMPPC_KEXT_MAX_CLIENTS];
 
     IOWorkLoop *                   fWorkLoop;
     IOCommandGate *                fGate;
@@ -251,6 +218,7 @@ public:
     IOReturn ucReset(void *, void *, void *, void *, void *, void *);
     IOReturn ucGetSlot(UInt32 * index, UInt32 * base, UInt32 * ctxBase,
                        UInt32 * surfBase, void *, void *);
+    IOReturn ucReadReg(UInt32 offset, UInt32 * value, void *, void *, void *, void *);
 
 private:
     POMPPCGPU * fOwner;

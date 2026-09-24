@@ -10,6 +10,33 @@ et dans `docs/`.
 
 - En cours : verdict unique dans le plugin (`TODO.md` §2), lots 0 à 5.
 
+## 2026-09-24 (soir) — v19 : transport séparé, chantier A1
+
+Hôte Apple Silicon.
+
+- **Protocole v19** (`docs/protocole-v19-transport.md`) : le contrat est coupé en deux.
+  `qgpu_abi.h` (transport : registres, doorbell, barrières, tranches, user client, drapeaux
+  `POMPPC_SUB_*`) est le **seul** en-tête du kext ; `qgpu_proto.h` (sémantique) l'inclut et n'est
+  plus copié sous `kext/`. Le device publie ses tranches (`QGPU_REG_CLIENTS`, table
+  `QGPU_REG_LAYOUT` par classe d'objets) et détruit lui-même les objets d'une tranche
+  (`QGPU_REG_CLIENT_RESET`, mis en file comme une soumission, requêtes comprises) ;
+  `QGPU_CAP_CLIENTS` ; `QGPU_CTRL_TOPADDR` 0x50 → 0x100.
+- **Kext** : lit `CLIENTS` dans les registres, exige `QGPU_CAP_CLIENTS`, ne connaît plus aucun
+  opcode ni aucune plage (plus de page de service, plus de `QGPU_PROTO_MIN`) ; nouveau sélecteur
+  `QGPU_UC_READ_REG` ; `POMPPC_SUB_LAYOUT` retiré. **Modifier `qgpu_proto.h` ne demande plus de
+  reconstruire le kext** : la règle la plus coûteuse du projet tombe.
+- **Plugin** : à l'ouverture, vérifie le kext (`READ_REG`), le device (`CAP_CLIENTS`) et la
+  disposition (table = `QGPU_CLIENT_*_IDS`), dans cet ordre ; bases lues dans la table.
+- **Épreuves** : harnais §5 bis (copies identiques, kext sans symbole sémantique hors
+  commentaires) ; `run_v19` natif (913 OK soft + GL) ; `qgpu_smoke.py` (CLIENT_RESET depuis Open
+  Firmware, OK) ; dans Tiger, kext v19 chargé (« 4 clients x 16384 KiB »), `qgpu_test` 44/44,
+  `gltest tri cube arbvp varrayvbo caps texcache texup texdelmid varray blendc logicop polymode
+  stipple occl sepspec spin game` OK.
+- **Trouvé en passant** (pas A1, `TODO.md` §5) : `gltest tex3d` cassé par c18c5f5 ; `tex13`,
+  `tex14`, `gl15`, `texlod` échouent puis plantent (SIGSEGV) avant comme après c18c5f5.
+- Scripts : `install.sh`, `make_kext_iso.sh`, `build_qemu_qfb.sh` et les Makefiles invités
+  transportent `qgpu_proto.h` + `qgpu_abi.h` depuis `patches/qgpu/`.
+
 ## 2026-09-24 — v18 `DRAW_NATIVE` ; DOOM 3 parfait ; étude GLEngine
 
 Hôte Apple Silicon. 23 commits.

@@ -276,13 +276,41 @@ echo
 echo "=== 5 bis. contrat qgpu : une seule source de vérité, copiée à l'identique ==="
 # Le protocole du GPU paravirtuel n'est PAS relu par regex : le même fichier
 # est copié tel quel côté hôte et côté invité, et doit le rester au bit près.
-if cmp -s patches/qgpu/qgpu_proto.h kext/POMPPCGPU/qgpu_proto.h; then
-  ok "qgpu_proto.h identique hôte/invité"
+# v19 (chantier A1) : le kext ne reçoit que l'ABI de transport (qgpu_abi.h) ;
+# la sémantique (qgpu_proto.h) reste dans patches/qgpu/, partagée par le
+# device, ses tests et le plugin, qui la copient à la construction.
+if cmp -s patches/qgpu/qgpu_abi.h kext/POMPPCGPU/qgpu_abi.h; then
+  ok "qgpu_abi.h identique hôte/kext"
 else
-  ko "qgpu_proto.h DIVERGE entre patches/qgpu/ et kext/POMPPCGPU/ (cp l'un sur l'autre)"
+  ko "qgpu_abi.h DIVERGE entre patches/qgpu/ et kext/POMPPCGPU/ (cp l'un sur l'autre)"
+fi
+# Le kext ne doit connaître AUCUN symbole de la sémantique : ni opcode, ni
+# limite d'objets, ni plage d'identifiants, ni version du protocole. C'est la
+# preuve mécanique que changer qgpu_proto.h ne demande pas de reconstruire le
+# kext (le 23/09/2026, un kext d'un autre en-tête a coûté deux plantages).
+if [ -e kext/POMPPCGPU/qgpu_proto.h ]; then
+  ko "kext/POMPPCGPU/qgpu_proto.h existe : le kext ne doit voir que qgpu_abi.h"
+else
+  ok "le kext n'a pas de copie de qgpu_proto.h"
+fi
+# (Les commentaires ont le droit d'en parler : on les retire avant de chercher.)
+LEAK=$(python3 - <<'PY'
+import re, sys
+strip = lambda t: re.sub(r'/\*.*?\*/', '', t, flags=re.S)
+sym = re.compile(r'QGPU_(OP|SK|MAX|CLIENT|CLASS|PROTO|LEN|FMT|VF)_|QGPU_CMD_HDR|qgpu_proto\.h')
+for f in ('kext/POMPPCGPU/POMPPCGPU.cpp', 'kext/POMPPCGPU/POMPPCGPU.h', 'kext/POMPPCGPU/qgpu_abi.h'):
+    for line in strip(open(f).read()).splitlines():
+        line = line.split('//')[0]
+        if sym.search(line):
+            print("%s : %s" % (f, line.strip()[:70])); sys.exit(0)
+PY
+)
+if [ -z "$LEAK" ]; then
+  ok "le kext ne nomme aucun symbole de qgpu_proto.h (hors commentaires)"
+else
+  ko "le kext nomme la sémantique : $LEAK"
 fi
 
-echo
 echo "=== 5 ter. cœur qgpu + backends, en natif sur l'hôte ==="
 # Compile et exécute tests/qgpu_core_test.c : même flux que qgpu_smoke.py et
 # que le programme invité, sans QEMU. Le backend GL est testé s'il démarre ici.

@@ -27,15 +27,17 @@ OBJS    = pomppc_gld.o pomppc_accel.o pomppc_qgpu.o gld_tramp.o
 
 all: $(BIN) $(NAME).bundle/Contents/Info.plist
 
-# qgpu_proto.h : copie du contrat hôte/invité (kext/POMPPCGPU/qgpu_proto.h)
-%.o: %.c pomppc_gld.h pomppc_qgpu.h qgpu_proto.h
+# qgpu_proto.h + qgpu_abi.h : le contrat hôte/invité (patches/qgpu/). Dans
+# l'arborescence du dépôt, on les reprend de là ; ailleurs (CD, job de
+# développement), ils doivent déjà être présents à côté des sources.
+%.o: %.c pomppc_gld.h pomppc_qgpu.h qgpu_proto.h qgpu_abi.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Dans l'arborescence du dépôt, on la reprend du kext ; ailleurs (CD, job de
-# développement), elle doit déjà être présente à côté des sources.
-PROTO_SRC = $(wildcard ../../kext/POMPPCGPU/qgpu_proto.h)
-ifneq ($(PROTO_SRC),)
-qgpu_proto.h: $(PROTO_SRC)
+PROTO_DIR = $(wildcard ../../patches/qgpu)
+ifneq ($(PROTO_DIR),)
+qgpu_proto.h: $(PROTO_DIR)/qgpu_proto.h
+	cp $< $@
+qgpu_abi.h: $(PROTO_DIR)/qgpu_abi.h
 	cp $< $@
 endif
 

@@ -438,6 +438,14 @@ uint32_t qgpu_core_execute(QgpuCore *c, uint32_t off, uint32_t len);
 /* Nom du backend actif, empaqueté pour QGPU_REG_BACKEND_NAME. */
 uint32_t qgpu_core_backend_tag(const QgpuCore *c);
 
+/* v19 : identifiants par client de la classe `cls` (QGPU_CLASS_*), 0 si la
+ * classe est inconnue — ce que le device publie dans QGPU_REG_LAYOUT. */
+uint32_t qgpu_core_client_ids(uint32_t cls);
+/* v19 : détruit tous les objets de la tranche `slot` (QGPU_REG_CLIENT_RESET).
+ * QGPU_ST_OK, ou QGPU_ST_BAD_ARG si slot >= QGPU_MAX_CLIENTS. Par le thread
+ * de rendu, comme qgpu_core_execute. */
+uint32_t qgpu_core_client_reset(QgpuCore *c, uint32_t slot);
+
 extern const QgpuBackend qgpu_backend_soft;
 extern const QgpuBackend qgpu_backend_gl;    /* stub si non compilé avec GL */
 

@@ -10,21 +10,22 @@ amorcées) : `docs/archive/todo-gpu-3d-2026-09-24.md`.
 
 ---
 
-## 0. Reprise — état au 24/09/2026, 17 h
+## 0. Reprise — état au 24/09/2026, 18 h
 
 | Quoi | État |
 |---|---|
-| Dépôt | `main` poussé, rien de non commité, worktrees d'agents supprimés |
-| Protocole | **v18** (`DRAW_NATIVE`), `qgpu_proto.h` identique dans `patches/qgpu/`, `kext/POMPPCGPU/` et `~/src/qemu/hw/display/` ; 883 tests natifs |
-| QEMU hôte | reconstruit 24/09 16h30 (`~/src/qemu/build/qemu-system-ppc64`, celui que `run_tiger.sh` lance) |
-| Invité quotidien (`tiger.qcow2`) | kext v18 installé ; plugin rev `20260924-native` ; lanceurs `~/doom3*.command`, `~/prey*.command`, `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
+| Dépôt | `main`, chantier A1 commité (v19) |
+| Protocole | **v19** (transport séparé : `qgpu_abi.h` pour le kext, `qgpu_proto.h` pour device + plugin) ; copies à jour dans `~/src/qemu/hw/display/` ; 913 tests natifs |
+| QEMU hôte | reconstruit 24/09 17h40 (`~/src/qemu/build/qemu-system-ppc64`, celui que `run_tiger.sh` lance) |
+| Invité quotidien (`tiger.qcow2`) | kext **v19** installé (`ioreg` : `QGPUClients = 4`, `QGPUVersion = 19`) ; plugin v19 (= `pomppc_accel.c` de c18c5f5 + transport v19) ; `~/pomppc-build/patches/qgpu/` contient les deux en-têtes ; lanceurs `~/doom3*.command`, `~/prey*.command`, `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
 | Vérifié en jeu | DOOM 3 : image parfaite, ~22 img/s, creux à 6-8 (vitres, portes, combats). Prey : image juste, 117 ms/image, **pas retesté** depuis le plugin courant |
 | Profils de référence | `.run/d3/sample-nat.txt` (DOOM 3 sous DRAW_NATIVE), `.run/prey/sample.txt` |
 | VM | redémarrages libres autorisés par l'utilisateur |
 
 **Premier geste à la reprise** : `pgrep -fl qemu-system` puis `.run/cmr/tssh.sh uptime` ; relancer
-Prey avec le plugin courant (le dialogue de plantage d'Apple au démarrage doit avoir disparu) ;
-puis le lot 0 de la section 2.
+DOOM 3 et Prey avec le plugin v19 (pas encore fait en jeu depuis A1 : seules `qgpu_test` et
+`gltest` l'ont exercé) ; puis le lot 0 de la section 2, ou la bissection des scènes `gltest`
+cassées (§5).
 
 ---
 
@@ -92,7 +93,7 @@ chantier d'architecture (§4) qu'elles ouvrent :
 |---|---|---|---|
 | 1 | Vitres de DOOM 3 par vidage rejoué ; v18 DRAW_NATIVE | **fait** 24/09 | — |
 | 2 | Vitesse du plugin : verdict unique (§2) | en cours | A2 |
-| 3 | Un seul `docs/protocole.md` pour v18 (capacités, clés, formats, tailles) à la place des notes v7…v18 | à faire | A1 |
+| 3 | Un seul `docs/protocole.md` pour v19 (capacités, clés, formats, tailles) à la place des notes v7…v19 | à faire | — (A1 fait) |
 | 4 | Matrice de jeux automatisée (§1) : lancement, vidage à image fixe, rejeu, comparaison d'image, plancher | à faire | A3 |
 | 5 | Empaquetage minimal sous contrat figé ; bloc d'état partagé lu par l'hôte ; textures par DMA sur plages sales | après 4 | A4 |
 | 6 | Robustesse de session : `kCGLBadDisplay` après `killall`, créneaux perdus, kext sans constante compilée | après 4 | A1, A6 |
@@ -108,12 +109,16 @@ chantier d'architecture (§4) qu'elles ouvrent :
 
 Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livrable et une épreuve.
 
-- [ ] **A1 — Séparer l'ABI de transport de la sémantique GL.** Le kext ne connaît que les
-      anneaux, les soumissions et les tranches, **lues dans les registres du device** au démarrage
-      (aujourd'hui compilées : un kext ancien laisse des objets vivants → BAD_ARG en cascade,
-      `docs/bilan-2026-09-23-jeux-tiger.md` P5). Opcodes et clés d'état négociés par capacités
-      entre plugin et device. Livrable : plus jamais de rebuild de kext pour une clé de plus.
-      Épreuve : ajouter une clé fictive, ne reconstruire que QEMU et le plugin, `gltest` vert.
+- [x] **A1 — Séparer l'ABI de transport de la sémantique GL.** **Fait le 24/09/2026, v19**
+      (`docs/protocole-v19-transport.md`). `qgpu_abi.h` (transport) est le seul en-tête du kext ;
+      `qgpu_proto.h` (sémantique) n'est plus copié sous `kext/`. Le device publie ses tranches
+      (`QGPU_REG_CLIENTS`, table `QGPU_REG_LAYOUT`) et détruit lui-même les objets d'un client
+      (`QGPU_REG_CLIENT_RESET`, en file) ; le kext lit tout dans les registres et laisse le
+      plugin lire les registres (`QGPU_UC_READ_REG`). Épreuves : harnais §5 bis (kext sans aucun
+      symbole sémantique, par construction : il n'inclut pas le fichier), `run_v19` natif (913
+      OK), `qgpu_smoke.py` (CLIENT_RESET de bout en bout), `qgpu_test` 44/44 dans Tiger, `gltest`
+      inchangé. Reste : la « clé fictive » n'a pas été jouée en jeu — la première clé réelle de
+      la suite (lot 2 ou 3 de §2) le fera, sans toucher au kext.
 - [ ] **A2 — Découper le plugin en modules à frontières écrites.** `pomppc_accel.c` (12 000
       lignes) mélange lecture d'état GLEngine, empaquetage, textures, programmes, gardes, vidage
       et drapeaux. Modules : lecteur d'état (une seule table d'offsets `gctx+…`, vérifiée au
@@ -141,6 +146,16 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
 ---
 
 ## 5. Points ouverts (bugs, dettes, mesures à faire)
+
+- [ ] **Scènes `gltest` cassées, antérieures à A1** (vu le 24/09 en jouant l'épreuve d'A1, plugin
+      courant) : `tex3d` 4 échecs (**cassé par c18c5f5**, « paramètres mémorisés une fois par
+      image » : avec le `pomppc_accel.c` d'avant ce commit sur le transport v19, 9/9) ;
+      `tex13`, `tex14`, `gl15`, `texlod` : échecs puis **SIGSEGV** (rc 139), avant et après
+      c18c5f5 (7, 7, 12, 1 ok avant ; 7, 4, 8, 1 après) — à bissecter sur les commits du 24/09
+      (`git show <rev>:guest/gldriver/pomppc_accel.c` + transport v19, `cycle.sh NORUN=1`, une
+      scène par lancement : `gltest <scène>`, les arguments suivants sont la taille). Les autres
+      scènes (`tri texup texcache texdelmid cube arbvp arbfp varray varrayvbo caps blendc logicop
+      polymode stipple occl sepspec spin game`) passent.
 
 - [ ] **`kCGLBadDisplay` après un `killall` de DOOM 3** : tout lancement suivant échoue jusqu'au
       redémarrage de l'invité ; Prey et `gltest` démarrent. Cause non trouvée (état de
@@ -178,9 +193,10 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
 
 - **Pas de repli : étendre le protocole.** Sous programme ARB, tout repli vers le rendu d'Apple
   finit dans `gleBuildInterpolateFunc` → `exit(1)` (`docs/re/glengine-exit-interpolateur.md`).
-- **Toute modification de `qgpu_proto.h` ⇒ QEMU + kext (`install.sh` dans l'invité, redémarrage)
-  + plugin.** Le plugin refuse un kext d'un autre en-tête (`POMPPC_SUB_LAYOUT`). Tant qu'A1
-  n'est pas fait, c'est la règle la plus coûteuse à oublier.
+- **`qgpu_proto.h` ⇒ QEMU + plugin** (`cycle.sh NORUN=1`, sans redémarrer) ; **`qgpu_abi.h` ⇒
+  QEMU + kext (`install.sh` dans l'invité, redémarrage) + plugin**, et c'est rare. Le plugin
+  refuse un kext d'avant la v19 et un QEMU d'un autre `qgpu_proto.h` ; le kext refuse un device
+  sans `QGPU_CAP_CLIENTS`. (A1, 24/09/2026.)
 - **Mesurer avant d'optimiser** : `sample <pid> 10` dans Tiger, `frames.csv` à scène égale ; le
   self % localise, il ne valide pas (`docs/metrologie-boot.md`).
 - **Un lot = un changement + une épreuve + un commit**, et une ligne ici.
@@ -197,7 +213,7 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
 |---|---|
 | Historique des lots, versions du protocole | `CHANGELOG.md` |
 | Architecture, rétro-ingénierie, offsets, boucle de dev | `docs/gpu-3d-tiger.md`, `docs/re/README.md` |
-| Protocole (v7 → v18, un fichier par version, à fusionner à l'étape 3) | `docs/protocole-v*.md` |
+| Protocole (v7 → v19, un fichier par version, à fusionner à l'étape 3) | `docs/protocole-v*.md` |
 | Bilan raisonné du 23/09 (jeu par jeu) | `docs/bilan-2026-09-23-jeux-tiger.md` |
 | Étude « court-circuiter GLEngine ? » | `docs/re/etude-court-circuit-glengine.md` |
 | Bug hunt du 22/09 (90 findings, verdicts) | `docs/bug-hunt-2026-09-22.md` |

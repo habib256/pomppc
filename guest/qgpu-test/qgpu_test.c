@@ -21,11 +21,7 @@
 #include <mach/mach.h>
 #include <IOKit/IOKitLib.h>
 
-#include "../../kext/POMPPCGPU/qgpu_proto.h"
-/* v9 : drapeaux POMPPC_SUB_* passés dans `len` à QGPU_UC_SUBMIT. Ils vivent
-   dans l'en-tête du client userland du kext (copie identique dans
-   kext/POMPPCGPU/POMPPCGPU.h) ; on n'en prend ici que les macros. */
-#include "../gldriver/pomppc_qgpu.h"
+#include "qgpu_proto.h"      /* -I../../patches/qgpu ; inclut qgpu_abi.h (POMPPC_SUB_*, QGPU_UC_*) */
 
 #define CMD_OFF   0x1000
 #define VTX_OFF   0x4000
@@ -95,12 +91,60 @@ int main(void)
     CHECK(kr == KERN_SUCCESS, "GET_INFO : version %u caps 0x%x tranche %u Mio fence %u",
           version, caps, shmem >> 20, fence);
 
+    /* ── v19 : le kext ne compile plus la disposition, il la LIT dans le
+       device et la laisse lire (QGPU_UC_READ_REG). Un kext d'avant la v19
+       refuse le sélecteur : c'est un ÉCHEC ici, pas un test sauté — ce
+       programme est compilé contre le contrat v19. */
     {
-        unsigned int idx, cb, sb;
+        unsigned int idx, cb, sb, nclients = 0, magic = 0, v = 0, k;
+        static const unsigned int want[QGPU_CLASS_COUNT] = {
+            QGPU_CLIENT_CTX_IDS, QGPU_CLIENT_SURF_IDS, QGPU_CLIENT_TEX_IDS,
+            QGPU_CLIENT_QUERY_IDS, QGPU_CLIENT_BUF_IDS
+        };
+        unsigned int got[QGPU_CLASS_COUNT];
+        int bad = 0;
+
+        kr = IOConnectMethodScalarIScalarO(conn, QGPU_UC_READ_REG, 1, 1,
+                                           (unsigned int)QGPU_REG_MAGIC, &magic);
+        CHECK(kr == KERN_SUCCESS && magic == QGPU_MAGIC,
+              "READ_REG(MAGIC) : kr 0x%x, 0x%08x", kr, magic);
+        kr = IOConnectMethodScalarIScalarO(conn, QGPU_UC_READ_REG, 1, 1,
+                                           (unsigned int)QGPU_REG_VERSION, &v);
+        CHECK(kr == KERN_SUCCESS && v == version,
+              "READ_REG(VERSION) = %u = GET_INFO", v);
+        CHECK((caps & QGPU_CAP_CLIENTS) != 0, "device v19 : QGPU_CAP_CLIENTS (caps 0x%x)", caps);
+        kr = IOConnectMethodScalarIScalarO(conn, QGPU_UC_READ_REG, 1, 1,
+                                           (unsigned int)QGPU_REG_CLIENTS, &nclients);
+        CHECK(kr == KERN_SUCCESS && nclients == QGPU_MAX_CLIENTS,
+              "READ_REG(CLIENTS) = %u tranches", nclients);
+        for (k = 0; k < QGPU_CLASS_COUNT; k++) {
+            got[k] = 0;
+            kr = IOConnectMethodScalarIScalarO(conn, QGPU_UC_READ_REG, 1, 1,
+                                               (unsigned int)QGPU_REG_LAYOUT_CLASS(k), &got[k]);
+            if (kr != KERN_SUCCESS || got[k] != want[k])
+                bad++;
+        }
+        CHECK(bad == 0, "table LAYOUT = ce contrat : ctx %u surf %u tex %u query %u buf %u",
+              got[0], got[1], got[2], got[3], got[4]);
+        kr = IOConnectMethodScalarIScalarO(conn, QGPU_UC_READ_REG, 1, 1,
+                                           (unsigned int)QGPU_REG_LAYOUT_CLASS(QGPU_REG_LAYOUT_CLASSES - 1), &v);
+        CHECK(kr == KERN_SUCCESS && v == 0, "classe inconnue : 0 (%u)", v);
+        kr = IOConnectMethodScalarIScalarO(conn, QGPU_UC_READ_REG, 1, 1, 2u, &v);
+        CHECK(kr == kIOReturnBadArgument, "READ_REG non aligné refusé : 0x%x", kr);
+        kr = IOConnectMethodScalarIScalarO(conn, QGPU_UC_READ_REG, 1, 1,
+                                           (unsigned int)QGPU_CTRL_BAR_SIZE, &v);
+        CHECK(kr == kIOReturnBadArgument, "READ_REG hors du BAR refusé : 0x%x", kr);
+        kr = IOConnectMethodScalarIScalarO(conn, QGPU_UC_READ_REG, 1, 1,
+                                           (unsigned int)QGPU_CTRL_TOPADDR, &v);
+        CHECK(kr == KERN_SUCCESS && v == 0xFFFFFFFFu,
+              "READ_REG au-delà de TOPADDR : 0xFFFFFFFF (0x%08x)", v);
+
         kr = IOConnectMethodScalarIScalarO(conn, QGPU_UC_GET_SLOT, 0, 4,
                                            &idx, &base, &cb, &sb);
         CHECK(kr == KERN_SUCCESS, "GET_SLOT : tranche %u à 0x%x, ids ctx %u surf %u",
               idx, base, cb, sb);
+        CHECK(cb == idx * got[QGPU_CLASS_CTX] && sb == idx * got[QGPU_CLASS_SURF],
+              "GET_SLOT recopie la table du device (ctx %u surf %u)", cb, sb);
         ctx_id = cb; surf_id = sb;
     }
 
@@ -155,6 +199,12 @@ int main(void)
     kr = IOConnectMethodScalarIScalarO(conn, QGPU_UC_WAIT_FENCE, 2, 1,
                                        fence, 1000, &spc);
     CHECK(kr == KERN_SUCCESS && spc >= fence, "WAIT_FENCE : kr 0x%x, fence %u", kr, spc);
+
+    /* Un bit de `len` inconnu du kext (le LAYOUT du 24/09/2026, retiré en
+       v19) déborde la tranche : refusé, sans rien soumettre. */
+    kr = IOConnectMethodScalarIScalarO(conn, QGPU_UC_SUBMIT, 2, 3,
+                                       0u, 0x10000000u, &fence, &status, &spc);
+    CHECK(kr == kIOReturnBadArgument, "bit de len inconnu refusé par le kext : 0x%x", kr);
 
     /* ─────────────────────────── v9 : doorbell asynchrone ───────────────────
      *
@@ -352,6 +402,41 @@ int main(void)
                 }
             fclose(f);
         }
+    }
+
+    /* ── v19 : la destruction des objets d'un client est faite par le DEVICE
+       (QGPU_UC_RESET → QGPU_REG_CLIENT_RESET). Avant : recréer notre contexte
+       vaut LIMIT (il existe). Après : OK (il a été détruit), et la surface
+       aussi (recréée, puis relue : bleu). En dernier, après out.ppm : la
+       sonde « peek » de la section v9 lit le statut de la DERNIÈRE soumission
+       terminée, et ceci en ferait une autre. */
+    {
+        unsigned int f2, st2, pc2;
+        pc = CMD_OFF / 4;
+        emit(QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(ctx_id);
+        kr = IOConnectMethodScalarIScalarO(conn, QGPU_UC_SUBMIT, 2, 3,
+                                           CMD_OFF, 8, &f2, &st2, &pc2);
+        CHECK(kr == KERN_SUCCESS && st2 == QGPU_ST_LIMIT,
+              "avant RESET : recréer le contexte %u = LIMIT (%u)", ctx_id, st2);
+        kr = IOConnectMethodScalarIScalarO(conn, QGPU_UC_RESET, 0, 0);
+        CHECK(kr == KERN_SUCCESS, "QGPU_UC_RESET : kr 0x%x", kr);
+        pc = CMD_OFF / 4;
+        emit(QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(ctx_id);
+        emit(QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(ctx_id);
+        emit(QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+        emit(surf_id); emit(W); emit(H); emit(QGPU_FMT_XRGB8888);
+        emit(QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(surf_id);
+        emit(QGPU_CMD_HDR(QGPU_OP_CLEAR, QGPU_LEN_CLEAR));
+        emit(QGPU_CLEAR_COLOR); emit(0x0000FF); emitf(1.0f);
+        emit(QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER));
+        emit(surf_id); emit(base + RB_OFF); emit(STRIDE); emit(0); emit(0); emit(W); emit(H);
+        len = pc * 4 - CMD_OFF;
+        kr = IOConnectMethodScalarIScalarO(conn, QGPU_UC_SUBMIT, 2, 3,
+                                           CMD_OFF, len, &f2, &st2, &pc2);
+        CHECK(kr == KERN_SUCCESS && st2 == QGPU_ST_OK,
+              "après RESET : contexte et surface recréés par le device (statut %u pc %u)",
+              st2, pc2);
+        CHECK(px(8, 8) == 0x0000FF, "surface recréée relue : %06x", px(8, 8));
     }
 
     IOConnectUnmapMemory(conn, QGPU_UC_MEM_SHMEM, mach_task_self(), addr);

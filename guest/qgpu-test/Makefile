@@ -4,10 +4,9 @@ CC      = /usr/bin/gcc-4.0
 CFLAGS  = -arch ppc -O1 -Wall
 LDLIBS  = -framework IOKit -framework CoreFoundation
 
-# pomppc_qgpu.h : uniquement pour les macros POMPPC_SUB_* (drapeaux v9 posés
-# dans `len` de QGPU_UC_SUBMIT), copie identique de celles de POMPPCGPU.h.
-qgpu_test: qgpu_test.c ../../kext/POMPPCGPU/qgpu_proto.h ../gldriver/pomppc_qgpu.h
-	$(CC) $(CFLAGS) -o $@ qgpu_test.c $(LDLIBS)
+# Le contrat (qgpu_proto.h, qui inclut l'ABI qgpu_abi.h) vient de patches/qgpu/.
+qgpu_test: qgpu_test.c ../../patches/qgpu/qgpu_proto.h ../../patches/qgpu/qgpu_abi.h
+	$(CC) $(CFLAGS) -I../../patches/qgpu -o $@ qgpu_test.c $(LDLIBS)
 
 clean:
 	rm -f qgpu_test out.ppm

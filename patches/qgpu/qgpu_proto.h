@@ -1,14 +1,20 @@
 /*
  * qgpu_proto.h — contrat hôte ↔ invité du GPU paravirtuel « qgpu » (POMPPC).
  *
- * UNE SEULE SOURCE DE VÉRITÉ, copiée à l'identique à deux endroits :
- *   patches/qgpu/qgpu_proto.h     (hôte : device QEMU + backends + tests)
- *   kext/POMPPCGPU/qgpu_proto.h   (invité : kext + programmes userland Tiger)
- * tests/run-all.sh vérifie que les deux copies sont identiques au bit près.
+ * DEUX FICHIERS, DEUX MOITIÉS (v19, chantier A1) :
+ *   qgpu_abi.h    — le TRANSPORT : registres, doorbell, barrières, tranches de
+ *                   clients, interface du user client. C'est tout ce que le
+ *                   kext POMPPCGPU connaît (copie identique dans
+ *                   kext/POMPPCGPU/, vérifiée par tests/run-all.sh).
+ *   qgpu_proto.h  — la SÉMANTIQUE (ce fichier) : opcodes, clés d'état,
+ *                   formats, limites d'objets. Partagé par le device QEMU, ses
+ *                   tests et le plugin OpenGL de l'invité ; le kext ne
+ *                   l'inclut PAS. Le modifier ne demande de reconstruire que
+ *                   QEMU et le plugin.
  *
  * Ce fichier ne contient QUE des macros : il doit se compiler tel quel dans
- * le noyau Tiger (gcc 4.0, C++, -nostdinc), dans QEMU (C11) et dans un
- * programme Tiger userland (gcc 4.0, C89). Aucun include, aucun typedef.
+ * QEMU (C11) et dans un programme Tiger userland (gcc 4.0, C89). Aucun
+ * typedef ; un seul include, celui de l'ABI.
  *
  * ── Architecture ────────────────────────────────────────────────────────────
  *
@@ -41,18 +47,13 @@
 #ifndef QGPU_PROTO_H
 #define QGPU_PROTO_H
 
-/* ── Identité PCI ────────────────────────────────────────────────────────── */
-#define QGPU_PCI_VENDOR_ID      0x1234      /* vendor QEMU */
-#define QGPU_PCI_DEVICE_ID      0x0fb2      /* local, à côté de qfb-pci (0x0fb1) */
-/* IOPCIPrimaryMatch attend 0xDDDDVVVV : device en poids fort. */
-#define QGPU_IOPCI_PRIMARY_MATCH 0x0fb21234
+#include "qgpu_abi.h"   /* identité PCI, registres, doorbell, statuts, user client */
 
-#define QGPU_MAGIC              0x71677031  /* 'qgp1' */
 #define QGPU_PROTO_MIN          12  /* plus ancienne version de device à laquelle
                                        un kext / plugin compilé contre CE fichier
                                        s'attache encore : les opcodes v13/v14 sont
                                        optionnels (QGPU_CAP_SCANOUT, BUF_*, xfer 16). */
-#define QGPU_PROTO_VERSION      18  /* v2 : profondeur, état GL ; v3 : textures ;
+#define QGPU_PROTO_VERSION      19  /* v2 : profondeur, état GL ; v3 : textures ;
                                        v4 : brouillard, 2e unité, lignes, points ;
                                        v5 : 4 unités, GL_COMBINE ;
                                        v6 : stencil ;
@@ -101,60 +102,20 @@
                                              l'application les a remplis :
                                              types GL, pas, décalages),
                                              QGPU_CAP_NATIVE, cf. section
-                                             « v18 : DRAW_NATIVE » */
+                                             « v18 : DRAW_NATIVE » ;
+                                       v19 : transport séparé (qgpu_abi.h) :
+                                             le device publie la disposition
+                                             des clients (QGPU_REG_CLIENTS,
+                                             QGPU_REG_LAYOUT) et détruit
+                                             lui-même les objets d'un client
+                                             (QGPU_REG_CLIENT_RESET),
+                                             QGPU_CAP_CLIENTS ; le kext ne
+                                             compile plus rien de ce fichier.
+                                             docs/protocole-v19-transport.md */
 
-/* ── BAR0 : fenêtre partagée (RAM) ───────────────────────────────────────── */
-#define QGPU_SHMEM_DEFAULT_MB   64
-#define QGPU_SHMEM_MIN_MB       16
-#define QGPU_SHMEM_MAX_MB       256
-
-/* ── BAR1 : registres (4 Kio, accès 32 bits, big-endian) ─────────────────── */
-#define QGPU_CTRL_BAR_SIZE      4096
-/* v9 : la fenêtre de registres passe de 0x40 à 0x50 octets. Au-delà, la
- * lecture rend 0xFFFFFFFF et l'écriture est ignorée, comme avant. */
-#define QGPU_CTRL_TOPADDR       0x50
-
-#define QGPU_REG_MAGIC          0x00  /* r  : QGPU_MAGIC ; w : reset complet */
-#define QGPU_REG_VERSION        0x04  /* r  : QGPU_PROTO_VERSION */
-#define QGPU_REG_CAPS           0x08  /* r  : QGPU_CAP_* du backend actif */
-#define QGPU_REG_SHMEM_SIZE     0x0C  /* r  : taille de BAR0 en octets */
-#define QGPU_REG_SUBMIT_OFF     0x10  /* rw : offset du flux dans BAR0 (mult. de 4) */
-#define QGPU_REG_SUBMIT_LEN     0x14  /* rw : longueur du flux en octets (mult. de 4) */
-#define QGPU_REG_DOORBELL       0x18  /* w  : QGPU_DOORBELL_* ; r : soumissions en
-                                              attente ou en cours (0 = tout est fini) */
-#define QGPU_REG_FENCE          0x1C  /* r  : nombre de soumissions TERMINÉES */
-#define QGPU_REG_STATUS         0x20  /* r  : QGPU_ST_* de la dernière TERMINÉE */
-#define QGPU_REG_STATUS_PC      0x24  /* r  : index (en mots) de la commande fautive */
-#define QGPU_REG_IRQ_MASK       0x28  /* rw : QGPU_IRQ_* démasquées */
-#define QGPU_REG_IRQ            0x2C  /* r  : en attente ; w : acquitte les bits écrits */
-#define QGPU_REG_DEBUG          0x30  /* w  : un octet vers stderr de QEMU (trace invité) */
-#define QGPU_REG_BACKEND_NAME   0x34  /* r  : 4 premiers caractères du backend ('soft'/'gl  ') */
-/* v9 — file de soumissions. Détail et contrat mémoire : section « v9 ». */
-#define QGPU_REG_QUEUE_FREE     0x38  /* r  : places libres dans la file
-                                              (QGPU_QUEUE_DEPTH − DOORBELL) */
-#define QGPU_REG_FENCE_SUBMITTED 0x3C /* r  : nombre de soumissions ACCEPTÉES ; la
-                                              barrière de celle qu'on vient de
-                                              soumettre est sa valeur juste après
-                                              l'écriture du doorbell */
-#define QGPU_REG_SUBMIT_ST      0x40  /* r  : QGPU_ST_OK ou QGPU_ST_QUEUE_FULL —
-                                              suite donnée à la DERNIÈRE écriture
-                                              du doorbell (acceptation, pas rendu).
-                                              v16 : un doorbell SYNCHRONE dont
-                                              l'attente hôte expire (2 s, D2) rend
-                                              QGPU_ST_BACKEND ici et dans STATUS */
-#define QGPU_REG_ERRORS         0x44  /* r  : nombre de soumissions TERMINÉES avec un
-                                              statut ≠ QGPU_ST_OK depuis le reset */
-#define QGPU_REG_QUEUE_DEPTH    0x48  /* r  : profondeur de la file de CE device */
-
-/* v9 : valeurs écrites dans QGPU_REG_DOORBELL. */
-#define QGPU_DOORBELL_GO        0x00000001  /* v1 : exécuter, synchrone */
-#define QGPU_DOORBELL_ASYNC     0x00000002  /* v9 : … mais en file (écrire GO|ASYNC = 3) */
-
-/* v9 : profondeur de la file du device de référence. Le device publie la
- * sienne dans QGPU_REG_QUEUE_DEPTH — un invité prudent lit le registre
- * plutôt que cette macro. */
-#define QGPU_QUEUE_DEPTH        16
-
+/* ── Capacités (QGPU_REG_CAPS) ────────────────────────────────────────────────
+ * Les bits DE TRANSPORT (QGPU_CAP_ASYNC, QGPU_CAP_CLIENTS) sont définis dans
+ * qgpu_abi.h ; ceux-ci ne regardent que le plugin et le device. */
 #define QGPU_CAP_SOFT           0x00000001  /* backend logiciel de référence */
 #define QGPU_CAP_GL             0x00000002  /* backend OpenGL (rendu sur le GPU hôte) */
 /* v8 : le backend actif sait compter les échantillons (QUERY_*). Le backend de
@@ -163,11 +124,7 @@
  * ARB_occlusion_query). Sans ce bit, les opcodes QUERY_* répondent
  * QGPU_ST_BACKEND : l'invité se replie, il ne plante pas. */
 #define QGPU_CAP_OCCLUSION      0x00000004
-/* v9 : le device sait mettre les soumissions en file et les exécuter sur un
- * thread de rendu. Sans ce bit, QGPU_DOORBELL_ASYNC est traité comme
- * QGPU_DOORBELL_GO (exécution synchrone) : un invité v9 reste correct sur un
- * device qui n'a pas le thread, il est seulement aussi lent qu'en v8. */
-#define QGPU_CAP_ASYNC          0x00000008
+/* (0x00000008 : QGPU_CAP_ASYNC, transport — qgpu_abi.h.) */
 /* v10 : le backend actif tient ce que la v10 demande au GPU : cibles et
  * paramètres de texture (1D, 3D, cube, rectangle, profondeur et comparaison,
  * MIRRORED_REPEAT, CLAMP_TO_BORDER, LOD) et paramètres de point. Le backend de
@@ -209,28 +166,11 @@
    soumission). Détail : section « v18 : DRAW_NATIVE »,
    docs/protocole-v18-natif.md. */
 #define QGPU_CAP_NATIVE         0x00000100
+/* (0x00000200 : QGPU_CAP_CLIENTS, transport — qgpu_abi.h. Annoncé par le CŒUR :
+   la disposition des clients et QGPU_REG_CLIENT_RESET ne dépendent d'aucun
+   backend.) */
 
-#define QGPU_IRQ_DONE           0x00000001
-
-/* ── Statuts ─────────────────────────────────────────────────────────────── */
-#define QGPU_ST_OK              0
-#define QGPU_ST_BAD_SUBMIT      1   /* offset/longueur hors de BAR0 ou non alignés */
-#define QGPU_ST_BAD_HEADER      2   /* longueur de commande nulle ou dépassant le flux */
-#define QGPU_ST_BAD_OPCODE      3
-#define QGPU_ST_BAD_ARG         4   /* argument hors bornes (id, dimensions, format…) */
-#define QGPU_ST_OOB             5   /* accès BAR0 hors de la fenêtre partagée */
-#define QGPU_ST_NO_CTX          6   /* aucun contexte lié */
-#define QGPU_ST_NO_SURF         7   /* surface inexistante ou aucune surface liée */
-#define QGPU_ST_LIMIT           8   /* trop d'objets (QGPU_MAX_*) */
-#define QGPU_ST_BACKEND         9   /* erreur du backend hôte */
-/* v9 : file pleine. Ce statut ne décrit PAS un flux : il dit qu'une écriture
- * de QGPU_DOORBELL_ASYNC a été REFUSÉE. Rien n'a été mis en file, rien ne sera
- * exécuté, ni FENCE ni QGPU_REG_FENCE_SUBMITTED n'avancent, et QGPU_REG_ERRORS
- * ne bouge pas non plus (aucune soumission n'a fini en erreur). Il n'apparaît
- * que dans QGPU_REG_SUBMIT_ST, jamais dans QGPU_REG_STATUS. Le doorbell
- * SYNCHRONE ne le rend jamais : il attend une place. */
-#define QGPU_ST_QUEUE_FULL      10
-
+/* ── Statuts : QGPU_ST_* dans qgpu_abi.h ─────────────────────────────────── */
 /* ── Limites ─────────────────────────────────────────────────────────────── */
 #define QGPU_MAX_CTX            16
 #define QGPU_MAX_SURF           64
@@ -1656,46 +1596,37 @@
 #define QGPU_NT_FLOAT           0x1406
 #define QGPU_NT_DOUBLE          0x140A
 
-/* ── Interface du kext POMPPCGPU (IOUserClient) ──────────────────────────────
- *
- *   Sélecteurs de IOConnectMethodScalarIScalarO, et types de
- *   IOConnectMapMemory. Partagés entre le kext et les programmes invités.
+/* ── Tranches de clients : la DISPOSITION que le device publie ──────────────
  *
  *   Plusieurs processus (une application OpenGL = un client) partagent le
- *   device. Le kext découpe BAR0 en QGPU_MAX_CLIENTS tranches égales et donne
- *   à chaque client une tranche et une plage d'identifiants d'objets :
- *     contextes  [ctx_base,  ctx_base  + QGPU_CLIENT_CTX_IDS)
- *     surfaces   [surf_base, surf_base + QGPU_CLIENT_SURF_IDS)
- *   Le mapping (IOConnectMapMemory) ne couvre QUE la tranche du client, et les
- *   (off, len) de SUBMIT sont relatifs à la tranche. En revanche, les offsets
- *   écrits DANS le flux sont absolus dans BAR0 : le client y ajoute slot_base.
- *   À la fermeture d'un client, le kext détruit les objets de sa plage.
- *   Le device reste mono-contexte courant : chaque soumission doit commencer
- *   par un CTX_BIND (un autre client a pu en changer entre-temps).
+ *   device. Le kext découpe BAR0 en QGPU_REG_CLIENTS tranches égales (ABI,
+ *   qgpu_abi.h) ; le DEVICE découpe ses identifiants d'objets en autant de
+ *   plages, une par classe d'objets, et publie le nombre d'identifiants par
+ *   client de chaque classe dans la table QGPU_REG_LAYOUT (registre
+ *   QGPU_REG_LAYOUT_CLASS(k)) : le client de la tranche i possède
+ *   [i·n, (i+1)·n). Les macros ci-dessous sont ce que le device de CE fichier
+ *   publie ; le plugin les compare aux registres à l'ouverture et refuse un
+ *   device qui dit autre chose (QEMU d'un autre en-tête). Le kext, lui, ne les
+ *   connaît pas : à la fermeture d'un client il écrit l'index de la tranche
+ *   dans QGPU_REG_CLIENT_RESET, et c'est le device qui détruit les objets des
+ *   plages (contextes avec leurs programmes et leur requête ouverte, surfaces,
+ *   textures, requêtes, tampons).
+ *
+ *   Les classes 0 et 1 sont, par convention d'ABI, les contextes et les
+ *   surfaces (sorties ctx_base / surf_base de QGPU_UC_GET_SLOT).
  */
+#define QGPU_CLASS_CTX          0
+#define QGPU_CLASS_SURF         1
+#define QGPU_CLASS_TEX          2
+#define QGPU_CLASS_QUERY        3
+#define QGPU_CLASS_BUF          4
+#define QGPU_CLASS_COUNT        5   /* ≤ QGPU_REG_LAYOUT_CLASSES */
+
 #define QGPU_MAX_CLIENTS        4
 #define QGPU_CLIENT_CTX_IDS     (QGPU_MAX_CTX / QGPU_MAX_CLIENTS)    /* 4 */
 #define QGPU_CLIENT_SURF_IDS    (QGPU_MAX_SURF / QGPU_MAX_CLIENTS)   /* 16 */
-#define QGPU_CLIENT_TEX_IDS     (QGPU_MAX_TEX / QGPU_MAX_CLIENTS)    /* 128 */
+#define QGPU_CLIENT_TEX_IDS     (QGPU_MAX_TEX / QGPU_MAX_CLIENTS)    /* 1024 */
 #define QGPU_CLIENT_QUERY_IDS   (QGPU_MAX_QUERIES / QGPU_MAX_CLIENTS) /* 16, v8 */
 #define QGPU_CLIENT_BUF_IDS     (QGPU_MAX_BUF / QGPU_MAX_CLIENTS)     /* 64, v14 */
-
-#define QGPU_UC_GET_INFO        0   /* in : —              out : version, caps, taille de tranche, fence */
-#define QGPU_UC_SUBMIT          1   /* in : off, len       out : fence, status, status_pc (off relatif à la tranche) */
-#define QGPU_UC_WAIT_FENCE      2   /* in : fence, ms      out : fence courante */
-/* v9 : l'ABI du user client ne change pas, sa SÉMANTIQUE peut changer quand le
- * kext posera le doorbell asynchrone (QGPU_CAP_ASYNC) : QGPU_UC_SUBMIT rendra
- * alors la BARRIÈRE DE LA SOUMISSION (QGPU_REG_FENCE_SUBMITTED) au lieu de la
- * fence déjà atteinte, et `status` dira l'acceptation (QGPU_ST_OK ou
- * QGPU_ST_QUEUE_FULL) et non le résultat du rendu — le résultat se lit après
- * QGPU_UC_WAIT_FENCE, qui dormira sur l'interruption DONE au lieu de scruter.
- * Détail et plan de bascule : docs/protocole-v9-asynchrone.md. */
-#define QGPU_UC_RESET           3   /* in : —              out : — (détruit les objets du client) */
-#define QGPU_UC_GET_SLOT        4   /* in : —              out : index, slot_base, ctx_base, surf_base
-                                       (tex_base   = index × QGPU_CLIENT_TEX_IDS,
-                                        query_base = index × QGPU_CLIENT_QUERY_IDS) */
-#define QGPU_UC_METHOD_COUNT    5
-
-#define QGPU_UC_MEM_SHMEM       0   /* IOConnectMapMemory : la tranche du client */
 
 #endif /* QGPU_PROTO_H */
