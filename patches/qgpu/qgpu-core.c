@@ -219,8 +219,10 @@ void qgpu_geom_init(QgpuGeom *gm)
     gm->depth_far = 1.0f;
 }
 
-/* v7 : offset d'un attribut dans un sommet, dans l'ordre fixe du protocole. */
-int qgpu_vf_offset(uint32_t fmt, uint32_t bit)
+/* v7 : offset d'un attribut dans un sommet, dans l'ordre fixe du protocole.
+   QGPU_CAP_GEN_SIZES : `gs` = valeur de QGPU_SK_GEN_SIZES (0 = 4 composantes
+   par générique, la forme d'origine). */
+int qgpu_vf_offset_gs(uint32_t fmt, uint32_t gs, uint32_t bit)
 {
     static const uint32_t order[6] = {
         QGPU_VF_NORMAL, QGPU_VF_COLOR, QGPU_VF_SEC_COLOR, QGPU_VF_FOG,
@@ -255,10 +257,15 @@ int qgpu_vf_offset(uint32_t fmt, uint32_t bit)
             return (fmt & bit) ? off : -1;
         }
         if (fmt & (uint32_t)QGPU_VF_GEN(i)) {
-            off += 4;
+            off += QGPU_GS_COUNT(gs, i);
         }
     }
     return -1;
+}
+
+int qgpu_vf_offset(uint32_t fmt, uint32_t bit)
+{
+    return qgpu_vf_offset_gs(fmt, 0, bit);
 }
 
 /* ── v16 : programmes ARB ─────────────────────────────────────────────────── */
@@ -1099,6 +1106,8 @@ static bool valid_state(uint32_t key, uint32_t val)
         return finite_f(val, 1e9f) && qgpu_u2f(val) >= 0.0f;
     case QGPU_SK_VERTEX_PROGRAM: case QGPU_SK_FRAGMENT_PROGRAM:     /* v16 */
         return val <= 1;
+    case QGPU_SK_GEN_SIZES:          /* QGPU_CAP_GEN_SIZES : 16 × 2 bits, tous valides */
+        return true;
     default:
         return false;
     }
@@ -1154,6 +1163,12 @@ bool qgpu_core_init(QgpuCore *c, const char *backend,
         /* init() a pu ajouter des bits à chaud (v8 : QGPU_CAP_OCCLUSION) ;
            ceux du backend sont acquis d'office. */
         c->caps |= c->be->cap;
+        /* Génériques à taille déclarée : c'est le cœur qui complète les
+           composantes (conv_raw_vertex_gs), tout backend à programmes les
+           tient donc. */
+        if (c->caps & QGPU_CAP_PROGRAMS) {
+            c->caps |= QGPU_CAP_GEN_SIZES;
+        }
     } else {
         c->caps = 0;
     }
@@ -1522,6 +1537,37 @@ static void conv_raw_vertex(QgpuCore *c, const uint8_t *vbase, uint32_t stride,
     }
 }
 
+/* QGPU_CAP_GEN_SIZES : le même sommet quand des génériques sont déclarés plus
+   courts que 4. `pre` mots avant les génériques sont recopiés tels quels,
+   puis chaque générique présent (gn[g] composantes sur le fil) est complété
+   à 4 comme OpenGL : y = 0, z = 0, w = 1. Le backend reçoit ainsi exactement
+   la forme serrée QGPU_VF_WORDS(fmt) d'avant la clé. */
+static void conv_raw_vertex_gs(QgpuCore *c, const uint8_t *vbase, uint32_t stride,
+                               uint32_t words, uint32_t i, uint32_t pre,
+                               const uint8_t *gn, uint32_t ng)
+{
+    const uint8_t *p = vbase + (size_t)i * stride * 4;
+    float *d = c->vbuf + (size_t)i * words;
+    uint32_t j, g;
+
+    for (j = 0; j < pre; j++) {
+        d[j] = sane_coord(qgpu_u2f(qgpu_ld32(p + j * 4)));
+    }
+    p += (size_t)pre * 4;
+    d += pre;
+    for (g = 0; g < ng; g++) {
+        uint32_t n = gn[g];
+        for (j = 0; j < n; j++) {
+            d[j] = sane_coord(qgpu_u2f(qgpu_ld32(p + j * 4)));
+        }
+        for (; j < 4; j++) {
+            d[j] = j == 3 ? 1.0f : 0.0f;
+        }
+        p += (size_t)n * 4;
+        d += 4;
+    }
+}
+
 /* Position utilisable ? w ≈ 0 ne l'est pas : l'étage géométrique divise par w,
    et un w sous-normal donne un triangle géant (le ciel de Colin McRae) puis,
    après (int)ceilf(inf), un comportement indéfini qui ne rend pas la même
@@ -1539,7 +1585,8 @@ static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint3
 {
     QgpuTexture *tex[QGPU_MAX_UNITS];
     uint32_t mode = a[0], count = a[1], voff, stride, fmt, ioff, itype, first, nverts;
-    uint32_t words, i, j, st, lo, hi;
+    uint32_t words, swords, gs, pre = 0, ng = 0, i, j, st, lo, hi;
+    uint8_t gn[QGPU_VF_GEN_MAX];
     bool dense, vp_on = false, fp_on = false;
     QgpuSurface *s = bound_surface(c, &st);
     QgpuState *cs;
@@ -1570,10 +1617,36 @@ static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint3
         return QGPU_ST_BAD_ARG;
     }
     words = (uint32_t)QGPU_VF_WORDS(fmt);
-    if (stride == 0) {
-        stride = words;
+    /* QGPU_CAP_GEN_SIZES : `words` est la forme remise au backend (4 flottants
+       par générique), `swords` celle du fil. Seuls les codes des génériques
+       PRÉSENTS comptent ; clé à 0 (tout flux qui ne la pose pas) : swords =
+       words, chemin d'avant. */
+    gs = cur_state(c)->v[QGPU_SK_GEN_SIZES];
+    if (fmt & QGPU_VF_GEN_MASK) {
+        uint32_t k, used = 0;
+        for (k = 0; k < QGPU_VF_GEN_MAX; k++) {
+            if (fmt & (uint32_t)QGPU_VF_GEN(k)) {
+                used |= (uint32_t)QGPU_GS_FIELD(k);
+            }
+        }
+        gs &= used;
+    } else {
+        gs = 0;
     }
-    if (stride < words || stride > 4096) {          /* pas démesuré = flux douteux */
+    swords = (uint32_t)QGPU_VF_WORDS_GS(fmt, gs);
+    if (gs) {
+        uint32_t k;
+        pre = (uint32_t)QGPU_VF_WORDS(fmt & ~(uint32_t)QGPU_VF_GEN_MASK);
+        for (k = 0; k < QGPU_VF_GEN_MAX; k++) {
+            if (fmt & (uint32_t)QGPU_VF_GEN(k)) {
+                gn[ng++] = (uint8_t)QGPU_GS_COUNT(gs, k);
+            }
+        }
+    }
+    if (stride == 0) {
+        stride = swords;
+    }
+    if (stride < swords || stride > 4096) {         /* pas démesuré = flux douteux */
         return QGPU_ST_BAD_ARG;
     }
     if (count == 0 || count > QGPU_MAX_VERTS ||
@@ -1590,7 +1663,7 @@ static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint3
         return QGPU_ST_BAD_ARG;
     }
     vbase = src_bytes(c, vbuf, voff,
-                      (uint64_t)(nverts - 1) * stride * 4 + (uint64_t)words * 4, &st);
+                      (uint64_t)(nverts - 1) * stride * 4 + (uint64_t)swords * 4, &st);
     if (!vbase) {
         return st;
     }
@@ -1644,7 +1717,17 @@ static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint3
     if (!dense || lo != 0 || hi + 1 != nverts) {
         memset(c->vbuf, 0, (size_t)nverts * words * sizeof(float));
     }
-    if (dense) {
+    if (gs) {
+        if (dense) {
+            for (i = lo; i <= hi; i++) {
+                conv_raw_vertex_gs(c, vbase, stride, words, i, pre, gn, ng);
+            }
+        } else {
+            for (i = 0; i < count; i++) {
+                conv_raw_vertex_gs(c, vbase, stride, words, c->ibuf[i], pre, gn, ng);
+            }
+        }
+    } else if (dense) {
         for (i = lo; i <= hi; i++) {
             conv_raw_vertex(c, vbase, stride, words, i);
         }
@@ -2090,6 +2173,11 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
            sans rien écrire — même règle que les paramètres de point. */
         if ((a[0] == QGPU_SK_VERTEX_PROGRAM || a[0] == QGPU_SK_FRAGMENT_PROGRAM) &&
             a[1] && !(c->caps & QGPU_CAP_PROGRAMS)) {
+            return QGPU_ST_BACKEND;
+        }
+        /* Génériques à taille déclarée : même règle. Poser 0 reste permis
+           (c'est la valeur initiale, neutre). */
+        if (a[0] == QGPU_SK_GEN_SIZES && a[1] && !(c->caps & QGPU_CAP_GEN_SIZES)) {
             return QGPU_ST_BACKEND;
         }
         cur_state(c)->v[a[0]] = a[1];

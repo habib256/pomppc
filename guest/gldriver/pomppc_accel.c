@@ -498,6 +498,8 @@ typedef struct PCtx {
     PProg         *cur_vp, *cur_fp;     /* ce que l'hôte a lié (PROG_BIND) */
     unsigned char  prog_used[QGPU_MAX_PROG];   /* identifiants qgpu pris */
     unsigned long  c_env[2][QGPU_MAX_PROG_PARAMS][4];  /* miroir des program.env */
+    unsigned long  c_gs;                /* QGPU_SK_GEN_SIZES posé sur le device */
+    int            c_gs_valid;          /*   … et connu (0 : à renvoyer) */
     unsigned long  c_env_n[2];          /* entrées 0..n-1 du miroir à jour ; au-delà,
                                            jamais envoyées (Prey, 23/09 : un « valide »
                                            global posé par un programme à 5 env laissait
@@ -691,6 +693,9 @@ static struct {
     int             pixops;             /* v13 : COPY_TEX / ReadPixels / DrawPixels hôte */
     int             prog;               /* v16 : programmes ARB tenus par l'hôte
                                            (QGPU_CAP_PROGRAMS) ; POMPPC_GL_PROG=0 les coupe */
+    int             gensizes;           /* génériques à taille déclarée sur le chemin
+                                           tableaux (QGPU_CAP_GEN_SIZES) ;
+                                           POMPPC_GL_GENSIZES=0 revient à 4 flottants */
     long            pixtex;             /* texture 2D jetable pour Draw/CopyPixels */
     unsigned long   pixtex_w, pixtex_h;
     unsigned long   n_present;          /* présentations hôte, sans copie G4 */
@@ -1410,6 +1415,14 @@ void pomppc_backend_init(void)
                l'émulation par GLEngine (repli sur Apple pour ces dessins). */
             G.prog = G.v7 && G.q.version >= 16 && (G.q.caps & QGPU_CAP_PROGRAMS) &&
                      !(getenv("POMPPC_GL_PROG") && getenv("POMPPC_GL_PROG")[0] == '0');
+            /* Génériques à taille déclarée (clé QGPU_SK_GEN_SIZES) : le chemin
+               tableaux envoie chaque générique à la taille de son tableau
+               (DOOM 3 / Prey : génériques en 11 mots au lieu de 16). Seulement si
+               le device l'annonce — un device qui ne le sait pas refuserait
+               la clé. POMPPC_GL_GENSIZES=0 revient aux 4 flottants. */
+            G.gensizes = G.prog && (G.q.caps & QGPU_CAP_GEN_SIZES) &&
+                         !(getenv("POMPPC_GL_GENSIZES") &&
+                           getenv("POMPPC_GL_GENSIZES")[0] == '0');
             G.pixtex = -1;
             G.pixtex_w = G.pixtex_h = 0;
             G.buf_base = G.q.index * QGPU_CLIENT_BUF_IDS;
@@ -1427,7 +1440,7 @@ void pomppc_backend_init(void)
             gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d\n",
                     G.q.version, G.q.caps, G.v10);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
-                       " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s)\n",
+                       " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
                        G.v7 ? "actif" : "coupé", G.v8 ? "actif" : "coupé",
                        G.v10 ? "converties par l'hôte" : "converties ici",
@@ -1436,7 +1449,8 @@ void pomppc_backend_init(void)
                        G.scanout ? ", présentation hôte" : "",
                        G.pixops ? ", pixels hôte" : "",
                        G.hostbuf ? ", VBO hôte" : "",
-                       G.v15 ? ", host 16-bit xfer" : "");
+                       G.v15 ? ", host 16-bit xfer" : "",
+                       G.gensizes ? ", génériques à taille déclarée" : "");
         } else
             pomppc_log("POMPPC: accélération désactivée : %s\n", why);
     }
@@ -1683,6 +1697,7 @@ static void invalidate_mirrors(void)
            supposés créés (comme les textures) */
         p->cur_vp = p->cur_fp = 0;
         p->c_env_n[0] = p->c_env_n[1] = 0;
+        p->c_gs_valid = 0;              /* tailles des génériques : à renvoyer */
     }
     {
         int k;
@@ -4321,6 +4336,44 @@ static void send_state(PCtx *p, const TexInfo *ti, int raw)
         send_polygon_stipple(p);
 }
 
+/* ── Génériques à taille déclarée (QGPU_CAP_GEN_SIZES) ──
+ * La clé QGPU_SK_GEN_SIZES est un état du contexte qui s'applique à TOUS les
+ * DRAW_RAW / DRAW_RAW_BUF qui suivent. Le chemin tableaux déclare la taille
+ * des tableaux (va_gen_sizes) ; Begin/End (descripteur de GLEngine) écrit
+ * toujours 4 flottants par générique. Seuls les champs des génériques
+ * PRÉSENTS dans le format comptent pour le device : on ne renvoie la clé que
+ * si ceux-là diffèrent de ce qu'il a. Sans G.gensizes, la clé n'est jamais
+ * posée et reste à 0 sur le device. */
+static unsigned long gs_fields(unsigned long fmt)
+{
+    unsigned long m = 0;
+    int k;
+    for (k = 0; k < QGPU_VF_GEN_MAX; k++)
+        if (fmt & QGPU_VF_GEN(k))
+            m |= QGPU_GS_FIELD(k);
+    return m;
+}
+
+/* 1 si le device ne lirait pas les génériques de `fmt` à la taille `gs`
+   (gs ne porte que des champs de gs_fields(fmt)). */
+static int gs_stale(PCtx *p, unsigned long fmt, unsigned long gs)
+{
+    if (!G.gensizes || !(fmt & QGPU_VF_GEN_MASK))
+        return 0;
+    return !p->c_gs_valid || (p->c_gs & gs_fields(fmt)) != gs;
+}
+
+/* Écrit SET_STATE(QGPU_SK_GEN_SIZES, gs) dans les 3 mots `c` (place déjà
+   prise, contexte déjà lié). */
+static void gs_put(unsigned long *c, PCtx *p, unsigned long gs)
+{
+    c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
+    c[1] = QGPU_SK_GEN_SIZES;
+    c[2] = gs;
+    p->c_gs = gs;
+    p->c_gs_valid = 1;
+}
+
 /* Le dessin qui suit écrira-t-il la profondeur ? (GL : seulement si le test est actif) */
 static int writes_depth(PCtx *p)
 {
@@ -4517,6 +4570,8 @@ struct PBuf {
     long            qid;                /* identifiant hôte, -1 tant qu'inutile */
     unsigned long   qsize;
     unsigned long   pack_fmt, pack_vmin, pack_nverts;
+    unsigned long   pack_gs;            /* QGPU_SK_GEN_SIZES de l'emballage : le
+                                           pas des sommets du tampon en dépend */
     unsigned long   pack_key;           /* P13 : récapitulatif de TOUT ce que
                                            va_pack_vertex a lu (pointeurs, pas,
                                            types, et valeurs COURANTES des
@@ -4579,6 +4634,7 @@ static void buf_host_destroy(PCtx *p, PBuf *b)
     b->qid = -1;
     b->qsize = 0;
     b->pack_fmt = 0;
+    b->pack_gs = 0;
     b->pack_nverts = 0;
     b->pack_key = 0;
 }
@@ -6403,6 +6459,9 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
     check_draw_buffer(p);
     sync_to_host(p, 1, GLD_U8(gls(p), GS_DEPTH_TEST) || stencil_active(p));
     send_state(p, &ti, 1);
+    /* génériques de GLEngine : 4 flottants chacun (descripteur, DESC_ENT) */
+    if (gs_stale(p, p->geom_fmt, 0))
+        gs_put(reserve(p, QGPU_LEN_SET_STATE), p, 0);
     geom_send_all(p, p->geom_fmt);
     /* Plus aucun vidage entre ici et EndPrimitiveBuffer : GLEngine écrit dans
        la fenêtre partagée pendant ce temps. On fait donc la place maintenant. */
@@ -7358,7 +7417,34 @@ constant:
         at->cur[k] = cur && k < 4 ? cur[k] : (k == dst_n - 1 ? last_def : 0.0f);
 }
 
-static void va_plan_build(VaPlan *pl, PCtx *p, const unsigned char *V, unsigned long fmt)
+/* Génériques à taille déclarée : pour chaque générique k >= 1 du format dont
+ * le tableau est actif et lisible, sa taille quand elle vaut 1..3 (4 est le
+ * code 0). Mêmes conditions que va_plan_attr : un tableau que le plan
+ * remplacerait par la valeur courante reste à 4 composantes. 0 sans
+ * G.gensizes (tout à 4, le fil d'avant). */
+static unsigned long va_gen_sizes(PCtx *p, const unsigned char *V, unsigned long fmt)
+{
+    unsigned long gs = 0, n;
+    const unsigned char *ent;
+    int k;
+
+    if (!G.gensizes || !V || !(fmt & QGPU_VF_GEN_MASK))
+        return 0;
+    for (k = 1; k < QGPU_VF_GEN_MAX; k++) {
+        if (!(fmt & QGPU_VF_GEN(k)) || !va_enabled(V, 16 + k))
+            continue;
+        ent = VA_SLOT(V, 16 + k);
+        n = U16(ent, 0xa);
+        if (n < 1 || n > 3 || (long)GLD_U32(ent, 4) <= 0 ||
+            va_bpc(U16(ent, 8) & 0x7fff, ent[0xc]) <= 0 || !va_src(p, V, 16 + k))
+            continue;
+        gs |= QGPU_GS(k, n);
+    }
+    return gs;
+}
+
+static void va_plan_build(VaPlan *pl, PCtx *p, const unsigned char *V, unsigned long fmt,
+                          unsigned long gs)
 {
     int n = QGPU_VF_POS_COUNT(fmt), u;
     pl->n = 0;
@@ -7373,9 +7459,11 @@ static void va_plan_build(VaPlan *pl, PCtx *p, const unsigned char *V, unsigned 
     for (u = 0; u < QGPU_MAX_UNITS; u++)
         if (fmt & QGPU_VF_TEX(u))
             va_plan_attr(&pl->a[pl->n++], p, V, 8 + u, 4, 1.0f);
+    /* génériques : à la taille déclarée (gs = 0 : 4 flottants) — le device
+       complète y = 0, z = 0, w = 1 comme OpenGL */
     for (u = 1; u < QGPU_VF_GEN_MAX; u++)
         if (fmt & QGPU_VF_GEN(u))
-            va_plan_attr(&pl->a[pl->n++], p, V, 16 + u, 4, 1.0f);
+            va_plan_attr(&pl->a[pl->n++], p, V, 16 + u, QGPU_GS_COUNT(gs, u), 1.0f);
 }
 
 static void va_pack_planned(float *dst, const VaPlan *pl, unsigned long i)
@@ -7704,14 +7792,20 @@ static void va_host_clean(const unsigned char *V, unsigned long fmt, PBuf *pos)
  * mais rien n'est corrompu. On ne peut pas vider le flux ici — `vtx_off` et
  * `ioff` désignent la moitié COURANTE, un vidage les ferait pointer ailleurs. */
 static int emit_draw_client(PCtx *p, unsigned long mode, unsigned long nidx,
-                            unsigned long nverts, unsigned long fmt,
+                            unsigned long nverts, unsigned long fmt, unsigned long gs,
                             unsigned long vtx_off, unsigned long ioff,
                             unsigned long itype_h, PBuf *hb)
 {
     unsigned long *c;
     unsigned long need = (hb && hb->qid >= 0) ? QGPU_LEN_DRAW_RAW_BUF
                                               : QGPU_LEN_DRAW_RAW;
+    int put_gs;
     close_raw();
+    /* tailles des génériques : juste avant le dessin (close_raw a écrit la
+       série Begin/End en attente, qui les lisait à 4) */
+    put_gs = gs_stale(p, fmt, gs);
+    if (put_gs)
+        need += QGPU_LEN_SET_STATE;
     /* Mineur §2 : on écrivait sans vérifier, sur la seule marge résiduelle de
        reserve() — un mot au pire une fois close_raw() passé. */
     if (G.ncmd + need + QGPU_LEN_CTX > CMD_WORDS)
@@ -7722,6 +7816,10 @@ static int emit_draw_client(PCtx *p, unsigned long mode, unsigned long nidx,
         c[1] = p->qctx;
         G.ncmd += QGPU_LEN_CTX;
         G.bound = p;
+    }
+    if (put_gs) {
+        gs_put(G.cmd + G.ncmd, p, gs);
+        G.ncmd += QGPU_LEN_SET_STATE;
     }
     c = G.cmd + G.ncmd;
     if (hb && hb->qid >= 0) {
@@ -7833,7 +7931,7 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
     unsigned char *V, *g;
     TexInfo ti;
     unsigned long fmt, words, vmin, vmax, nverts, nidx, ioff, itype_h;
-    unsigned long vtx_off, packed, *c, key;
+    unsigned long vtx_off, packed, *c, key, gs;
     float *dst;
     PBuf *hb;
     int host, reuse, filter_bad = 0;
@@ -7853,7 +7951,10 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
     if (!prog_sync(p))                  /* v16 : programme refusé par l'hôte */
         return 0;
     fmt = geom_format(p);
-    words = QGPU_VF_WORDS(fmt);
+    /* génériques à la taille de leurs tableaux (QGPU_CAP_GEN_SIZES) : DOOM 3
+       st 2f, normale et tangentes 3f — 11 mots au lieu de 16 */
+    gs = va_gen_sizes(p, V, fmt);
+    words = QGPU_VF_WORDS_GS(fmt, gs);
     if (!words)
         return 0;
     if (!va_sources_ok(p, V, fmt))
@@ -7882,7 +7983,7 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
     host = va_host_ready(V, fmt, &hb);
     key = va_pack_key(p, V, fmt);       /* P13 : clé COMPLÈTE */
     reuse = host == 1 && hb && hb->qid >= 0 && hb->qsize >= packed &&
-            hb->pack_fmt == fmt && hb->pack_vmin == vmin &&
+            hb->pack_fmt == fmt && hb->pack_gs == gs && hb->pack_vmin == vmin &&
             hb->pack_nverts == nverts && hb->pack_key == key;
     /* VTX_LIMIT est un offset ABSOLU dans la fenêtre (= IDX_OFF) ; G.vtx est
        RELATIF à VTX_OFF. Sans le terme VTX_OFF, ce test laissait les sommets
@@ -7892,7 +7993,7 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
        rastérisation pour la session (UT2004, toute la géométrie « from arrays »
        ; Marble Blast passe par Begin/End, dont le test était juste). */
     if (G.ncmd + QGPU_LEN_DRAW_RAW_BUF + QGPU_LEN_BUF_SUBDATA +
-            QGPU_LEN_BUF_CREATE + 8 > CMD_WORDS ||
+            QGPU_LEN_BUF_CREATE + QGPU_LEN_SET_STATE + 8 > CMD_WORDS ||
         (!reuse && VTX_OFF + G.vtx + packed > VTX_LIMIT) ||
         (nidx && G.idx + nidx * 4 + 4 > IDX_SIZE))
         flush();
@@ -7915,7 +8016,7 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
         dst = (float *)(G.win + VTX_OFF + vtx_off);
         {
             static VaPlan plan;         /* verrou tenu : une seule à la fois */
-            va_plan_build(&plan, p, V, fmt);
+            va_plan_build(&plan, p, V, fmt, gs);
             dbg_plan = &plan; dbg_vtx_n = nverts; dbg_vmin = vmin;
             dbg_words = words; dbg_fmt = fmt; dbg_vao = V;
             for (i = 0; (unsigned long)i < nverts; i++) {
@@ -7981,6 +8082,7 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
             c[4] = packed;
             G.ncmd += QGPU_LEN_BUF_SUBDATA;
             hb->pack_fmt = fmt;
+            hb->pack_gs = gs;
             hb->pack_vmin = vmin;
             hb->pack_nverts = nverts;
             hb->pack_key = key;
@@ -8044,7 +8146,7 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
     if (!reuse)
         geom_probe(p, "Array", mode, nverts, fmt, words,
                    (const float *)(G.win + VTX_OFF + vtx_off));
-    if (!emit_draw_client(p, mode, nidx, nverts, fmt, vtx_off, ioff, itype_h, hb))
+    if (!emit_draw_client(p, mode, nidx, nverts, fmt, gs, vtx_off, ioff, itype_h, hb))
         return no(NO_G_ARRAY, G.ncmd, nverts);
     G.n_rawdraws++;
     G.n_rawverts += nverts;
