@@ -99,10 +99,14 @@ static volatile int sig_jmp_on;
    GLEngine appelle après SON T&L (RenderPolygonPtr, LinesPtr, PointsPtr).
    Prey (24/09, chargement du Roadhouse) : SIGSEGV dans a_polygon_ptr, un
    des n pointeurs ne menait nulle part. Sur faute : verrou rendu, primitive
-   jetée. Tampon à part : les deux autres gardes sont imbriquées dedans. */
+   jetée. Tampon à part. Depuis P2 (relecture du 24/09), armée verrou tenu
+   autour des seules lectures de l'application (voir PROC_GUARD_ARM). */
 static sigjmp_buf proc_jmp;
 static volatile int proc_jmp_on;
 static volatile unsigned long proc_fault_n;
+/* P3 (relecture du 24/09) : le crochet est global au processus ; chaque garde
+   note le fil qui l'arme, et seul ce fil-là y revient par siglongjmp. */
+static volatile pthread_t pack_thr, sig_thr, proc_thr;
 static volatile unsigned long sig_fault_n;
 static int upload_blank;                /* COPY_TEX : niveaux noirs, sans lire l'invité */
 static volatile unsigned long pack_fault_addr, pack_fault_n;
@@ -688,6 +692,9 @@ static struct {
     unsigned long   n_textris, n_texuploads, n_lines, n_points;
     unsigned long   n_frames, n_direct, n_tex_incomplete;
     unsigned long   n_rawverts, n_rawdraws, n_geomcmds, n_geomdrop, n_rawmerged;
+    /* I9 (relecture du 24/09) : niveaux illisibles envoyés noirs ; lots ou
+       primitives jetés sur faute de lecture (gardes pack et proc) */
+    unsigned long   n_texblack, n_dropped_fault;
     unsigned long   n_arrayverts, n_arraydraws; /* chemin tableaux, inclus dans brut */
     int             v7;                 /* device v7 ET chemin brut autorisé */
     int             v8;                 /* device v8 : pipeline fixe complet */
@@ -1091,7 +1098,10 @@ static int raw_fix_nan(void)
     if (nv == 0 || nv > RAW_NAN_MAX)
         return 0;
     w = (unsigned long *)(G.win + VTX_OFF + G.raw_start);
-    nbad = raw_scan_nan(w, nv, words, G.raw_fmt, 0);
+    /* S3 (relecture du 24/09) : sous programme, w = 0 est gardé ici aussi
+       (volumes d'ombre dessinés par Begin/End ou le déroulage de GLEngine) */
+    nbad = raw_scan_nan(w, nv, words, G.raw_fmt,
+                        G.raw_ctx && G.prog && G.raw_ctx->vp_on);
     if (!nbad)
         return 1;
 
@@ -1220,7 +1230,8 @@ static void on_exit_stats(void)
                 "%lu host CopyTex, %lu rect ReadPixels, %lu host Draw/CopyPixels/Bitmap, "
                 "%lu synced software calls; "
                 "raw: %lu verts in %lu DRAW_RAW (%lu / %lu from arrays), "
-                "%lu host VBO hits / %lu packs, %lu dropped prims; "
+                "%lu host VBO hits / %lu packs, %lu dropped prims "
+                "(%lu on read fault), %lu tex levels sent black; "
                 "submit %s: %lu fences waited (%.0f ms), %lu QUEUE_FULL, "
                 "%lu sync fallback(s)\n",
                 G.n_tris, G.n_textris, G.n_lines, G.n_points, G.n_clears, G.n_submits,
@@ -1228,6 +1239,7 @@ static void on_exit_stats(void)
                 G.n_copytex, G.n_pixread, G.n_pixdraw, G.n_fallback,
                 G.n_rawverts, G.n_rawdraws, G.n_arrayverts, G.n_arraydraws,
                 G.n_vbohits, G.n_vbomiss, G.n_geomdrop,
+                G.n_dropped_fault, G.n_texblack,     /* I9 (relecture du 24/09) */
                 G.async ? "async" : "sync", G.n_waits, G.t_wait * 1000,
                 G.n_qfull, G.n_syncfall);
 }
@@ -2993,13 +3005,19 @@ static unsigned long tex_lv0_sig(const PTex *t)
     unsigned int fmt = U16(lv, LV_FORMAT), type = U16(lv, LV_TYPE);
     unsigned long sig = GLD_U32(lv, LV_DATA) ^ (w << 16) ^ h ^
                         ((unsigned long)fmt << 8) ^ type;
+    /* S1 (relecture du 24/09) : sigsetjmp hors d'un &&, et l'empreinte de
+       base gardée dans un volatile (un local modifié après sigsetjmp est
+       indéterminé au retour de siglongjmp). */
+    volatile unsigned long vsig = sig;
+    unsigned long n;
     if (upload_blank)
         return sig;
-    if (d && w && h && sigsetjmp(sig_jmp, 0) != 0) {
-        sig_jmp_on = 0;                 /* niveau illisible (24/09, DOOM 3) */
-        return sig ^ 0x5a5a5a5aUL;
-    }
     if (d && w && h) {
+        if (sigsetjmp(sig_jmp, 0) != 0) {
+            sig_jmp_on = 0;             /* niveau illisible (24/09, DOOM 3) */
+            return vsig ^ 0x5a5a5a5aUL;
+        }
+        sig_thr = pthread_self();       /* P3 (relecture du 24/09) */
         sig_jmp_on = 1;
         /* P4 — `n` est un index d'OCTET, pas un compte de TEXELS. Un niveau
            DXT1 fait 0,5 octet par texel : lire d[w·h−1] lisait à DEUX FOIS la
@@ -3007,7 +3025,6 @@ static unsigned long tex_lv0_sig(const PTex *t)
            (texture_uploadable appelle ceci). Bus error sur UT2004 (S3TC).
            Taille réelle : blocs serrés pour S3TC, LV_ROWPIX × h × octets par
            texel sinon. */
-        unsigned long n;
         if (dxt_format(fmt, type)) {
             n = dxt_bytes(fmt, w, h);
         } else {
@@ -3250,6 +3267,7 @@ static int upload_texture(PCtx *p, PTex *t)
                 if (upload_blank) {
                     memset(G.q.win + off, 0, size);     /* COPY_TEX écrasera */
                 } else if (sigsetjmp(sig_jmp, 0) == 0) {
+                    sig_thr = pthread_self();   /* P3 (relecture du 24/09) */
                     sig_jmp_on = 1;
                     memcpy(G.q.win + off, d, size);
                     sig_jmp_on = 0;
@@ -3268,6 +3286,7 @@ static int upload_texture(PCtx *p, PTex *t)
                         continue;       /* l'espace d'arène réservé est perdu, c'est rare */
                     }
                     memset(G.q.win + off, 0, size);
+                    G.n_texblack++;     /* I9 (relecture du 24/09) : compté au bilan */
                     if (told < 3) {
                         told++;
                         gl_note("TEXTURE niveau %lu illisible (%lux%lu) : envoye noir\n", l, w, h);
@@ -4696,6 +4715,11 @@ static int buf_host_ensure(PCtx *p, PBuf *b, unsigned long bytes)
     c[2] = bytes;
     b->qid = id;
     b->qsize = bytes;
+    /* I6 (relecture du 24/09) : tampon neuf, contenu indéfini — aucune clé
+       d'emballage ne le décrit (buf_host_destroy le fait déjà quand qid ≥ 0 ;
+       ici pour tous les chemins). */
+    b->pack_nverts = 0;
+    b->pack_key = 0;
     return 1;
 }
 
@@ -5229,7 +5253,27 @@ static void text_fp_units(PProg *r, const char *s, unsigned long n)
  * empaquetait ce tableau fantôme (lecture hors page → SIGSEGV) pour rien.
  * Sous programme, un attribut n'est porté que si le TEXTE le lit. Alias ARB :
  * attrib[0] = position, [2] = normale, [3] = couleur, [4] = secondaire,
- * [5] = brouillard, [8 + u] = texcoord u. */
+ * [5] = brouillard, [8 + u] = texcoord u.
+ *
+ * I7 (relecture du 24/09) — ce que fait l'hôte (qgpu-gl.c, préparation des
+ * tableaux) : GEN(0) seul est aliasé (donné par glVertexPointer) ; normale,
+ * couleurs, brouillard et TEX(u) passent par les tableaux conventionnels,
+ * GEN(1..15) par glVertexAttribPointerARB(k), sans lien entre les deux. Le
+ * masque ne fait donc que NE PAS RETIRER l'autre moitié d'un alias quand son
+ * tableau est actif (geom_format ne porte GEN(k) que si le tableau générique
+ * est activé, et l'attribut conventionnel que si le sien l'est) :
+ *   vertex.normal → NORMAL + GEN(2), vertex.color → COLOR + GEN(3),
+ *   vertex.color.secondary → SEC + GEN(4), vertex.fogcoord → FOG + GEN(5),
+ *   vertex.texcoord[u] → TEX(u) + GEN(8+u) (données en
+ *   glVertexAttribPointerARB(8+u) : le générique reste porté) ;
+ *   vertex.attrib[2..5] → générique + conventionnel ;
+ *   vertex.attrib[8+u] → GEN(8+u) SEUL : le tableau conventionnel de texcoord
+ *   u est justement celui que DOOM 3 laisse périmé.
+ * Pas aliasé : un programme hôte qui lit vertex.attrib[3] alors que seul le
+ * tableau de couleurs est actif reçoit la valeur courante du générique 3 (il
+ * faudrait empaqueter le tableau conventionnel dans GEN(3) ; non fait). Blancs
+ * tolérés entre le nom et `[`, et après `[` ; un indice non littéral fait tout
+ * garder. */
 #define VPN_NORMAL   0x1UL
 #define VPN_COLOR    0x2UL
 #define VPN_SEC      0x4UL
@@ -5245,28 +5289,46 @@ static unsigned long text_vp_inputs(const char *s, unsigned long n)
         int any = 0;
         if (memcmp(s + i, "vertex.", 7) != 0)
             continue;
+        /* I7 : « tmpvertex.x » (suffixe d'un identificateur) n'est pas une entrée */
+        if (i > 0 && ((s[i - 1] >= 'a' && s[i - 1] <= 'z') || (s[i - 1] >= 'A' && s[i - 1] <= 'Z') ||
+                      (s[i - 1] >= '0' && s[i - 1] <= '9') || s[i - 1] == '_'))
+            continue;
         j = i + 7;
-        if (j + 6 <= n && !memcmp(s + j, "normal", 6)) { need |= VPN_NORMAL; continue; }
-        if (j + 5 <= n && !memcmp(s + j, "color", 5)) {
-            /* vertex.color.secondary : la couleur secondaire */
-            if (j + 15 <= n && !memcmp(s + j + 5, ".secondary", 10)) need |= VPN_SEC;
-            else need |= VPN_COLOR;
+        if (j + 8 <= n && !memcmp(s + j, "position", 8)) continue;
+        if (j + 6 <= n && !memcmp(s + j, "normal", 6)) {
+            need |= VPN_NORMAL | VPN_GEN(2);    /* I7 : alias gardé */
             continue;
         }
-        if (j + 8 <= n && !memcmp(s + j, "fogcoord", 8)) { need |= VPN_FOG; continue; }
+        if (j + 5 <= n && !memcmp(s + j, "color", 5)) {
+            /* vertex.color.secondary : la couleur secondaire */
+            if (j + 15 <= n && !memcmp(s + j + 5, ".secondary", 10)) need |= VPN_SEC | VPN_GEN(4);
+            else need |= VPN_COLOR | VPN_GEN(3);
+            continue;
+        }
+        if (j + 8 <= n && !memcmp(s + j, "fogcoord", 8)) {
+            need |= VPN_FOG | VPN_GEN(5);
+            continue;
+        }
         if (j + 8 <= n && !memcmp(s + j, "texcoord", 8)) {
             j += 8;
             while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
             if (j < n && s[j] == '[') {
                 j++;
+                while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
                 while (j < n && s[j] >= '0' && s[j] <= '9') { v = v * 10 + (unsigned long)(s[j] - '0'); any = 1; j++; }
                 if (!any) return need | 0x0FFFFFFF;     /* indice non littéral : tout */
             }
-            if (v < QGPU_MAX_UNITS) need |= VPN_TEX(v);
+            /* I7 : données en glVertexAttribPointerARB(8+u) — ne pas masquer le générique */
+            if (v < QGPU_MAX_UNITS) need |= VPN_TEX(v) | VPN_GEN(8 + v);
             continue;
         }
-        if (j + 7 <= n && !memcmp(s + j, "attrib[", 7)) {
-            j += 7;
+        if (j + 6 <= n && !memcmp(s + j, "attrib", 6)) {
+            j += 6;
+            /* I7 (relecture du 24/09) : « attrib [8] » est du ARB valide */
+            while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+            if (j >= n || s[j] != '[')
+                return need | 0x0FFFFFFF;       /* forme inconnue : tout */
+            j++;
             while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
             while (j < n && s[j] >= '0' && s[j] <= '9') { v = v * 10 + (unsigned long)(s[j] - '0'); any = 1; j++; }
             if (!any) return need | 0x0FFFFFFF;
@@ -5763,6 +5825,11 @@ static unsigned long geom_format(PCtx *p)
         unsigned long hi = V ? GLD_U32(V, VA_EN_HI) : 0;
         unsigned long lo = V ? GLD_U32(V, VA_EN_LO) : 0;
         int k;
+        static long vpneed = -1;        /* R1 (relecture du 24/09) : lu une fois */
+        if (vpneed < 0) {
+            const char *e = getenv("POMPPC_GL_VPNEED");
+            vpneed = (e && e[0] == '0') ? 0 : 1;
+        }
         for (k = 1; k < QGPU_VF_GEN_MAX; k++)
             if (hi & (1UL << k))
                 fmt |= QGPU_VF_GEN(k);
@@ -5784,8 +5851,7 @@ static unsigned long geom_format(PCtx *p)
         }
         /* 24/09 : et seulement ce que le TEXTE du programme lit (DOOM 3 :
            tableau de texcoord 0 actif mais périmé pendant les interactions) */
-        if (p->vp_rec && (p->vp_rec->vp_need & VPN_VALID) &&
-            !(getenv("POMPPC_GL_VPNEED") && getenv("POMPPC_GL_VPNEED")[0] == '0')) {
+        if (p->vp_rec && (p->vp_rec->vp_need & VPN_VALID) && vpneed) {
             unsigned long need = p->vp_rec->vp_need;
             if (!(need & VPN_COLOR))  fmt &= ~(unsigned long)QGPU_VF_COLOR;
             if (!(need & VPN_NORMAL)) fmt &= ~(unsigned long)QGPU_VF_NORMAL;
@@ -7409,6 +7475,8 @@ typedef struct VaAttr {
     int            is_color;    /* emplacement 2 : couleur morte → courante */
     float          cur[4];      /* valeur constante (dst_n flottants) */
     float          last_def;
+    int            slot;        /* I5 : emplacement lu (clé, propreté des VBO) ;
+                                   en DERNIER : le crochet lit les champs 0..6 */
 } VaAttr;
 typedef struct VaPlan {
     VaAttr a[QGPU_VF_GEN_MAX + QGPU_MAX_UNITS + 5];
@@ -7424,6 +7492,7 @@ static void va_plan_attr(VaAttr *at, PCtx *p, const unsigned char *V, int slot,
     int k;
 
     memset(at, 0, sizeof(*at));
+    at->slot = slot;
     at->dst_n = dst_n;
     at->last_def = last_def;
     at->is_color = (slot == 2);
@@ -7718,11 +7787,6 @@ static void va_count_prims(unsigned long m, unsigned long n)
     }
 }
 
-/* Attributs lus par va_pack_vertex, dans l'ordre du format : position, puis
- * normale, couleur, secondaire, brouillard, et les quatre unités. */
-static const int va_key_slot[9] = { 0, 1, 2, 4, 3, 8, 9, 10, 11 };
-static const int va_key_ncomp[9] = { 4, 3, 4, 3, 1, 4, 4, 4, 4 };
-
 /* P13 — CLÉ DE RÉUTILISATION D'UN TAMPON HÔTE (v14).
  *
  * Elle ne tenait compte que de (fmt, vmin, nverts). Or QGPU_VF_COLOR est
@@ -7736,65 +7800,61 @@ static const int va_key_ncomp[9] = { 4, 3, 4, 3, 1, 4, 4, 4, 4 };
  * COURANTE quand il ne l'est pas.
  *
  * C'est une empreinte 32 bits, pas une égalité : une collision redessinerait
- * un maillage avec l'emballage du précédent. POMPPC_GL_VBO=0 coupe le cache. */
-static unsigned long va_pack_key(PCtx *p, const unsigned char *V, unsigned long fmt)
+ * un maillage avec l'emballage du précédent. POMPPC_GL_VBO=0 coupe le cache.
+ *
+ * I5 (relecture du 24/09) : la clé se dérive du PLAN d'empaquetage
+ * (va_plan_build), donc de tout ce qui est réellement empaqueté — générique 0
+ * quand il tient lieu de position, texcoords 4..7, génériques 1..15 du
+ * format — et non plus d'une liste fixe d'emplacements conventionnels. */
+static unsigned long va_pack_key(const VaPlan *pl, unsigned long fmt)
 {
-    static const unsigned long bit_of[9] = {
-        0, QGPU_VF_NORMAL, QGPU_VF_COLOR, QGPU_VF_SEC_COLOR, QGPU_VF_FOG,
-        QGPU_VF_TEX(0), QGPU_VF_TEX(1), QGPU_VF_TEX(2), QGPU_VF_TEX(3)
-    };
-    unsigned char *g = gls(p);
     unsigned long k = fmt ^ 0x9e3779b9UL;
-    int i, j;
+    int j, c;
 
-    for (i = 0; i < 9; i++) {
-        int slot = va_key_slot[i];
-        if (i && !(fmt & bit_of[i]))
-            continue;
-        k = k * 33UL + (unsigned long)slot;
-        if (V && va_enabled(V, slot)) {
-            const unsigned char *ent = VA_SLOT(V, slot);
-            k = k * 33UL + (unsigned long)va_src(p, V, slot);
-            k = k * 33UL + GLD_U32(ent, 4);         /* pas */
-            k = k * 33UL + U16(ent, 8);             /* type */
-            k = k * 33UL + U16(ent, 0xa);           /* composantes */
-            k = k * 33UL + ent[0xc];                /* taille (BGRA/packé) */
-            k = k * 33UL + ent[0xd];                /* normalisé */
-        } else {
-            const float *cur = va_current(g, slot);
-            for (j = 0; j < va_key_ncomp[i]; j++)
-                k = k * 33UL + (cur ? ((const unsigned long *)cur)[j] : 0UL);
+    for (j = 0; j < pl->n; j++) {
+        const VaAttr *at = &pl->a[j];
+        k = k * 33UL + (unsigned long)at->slot;
+        k = k * 33UL + (unsigned long)at->dst_n;
+        if (at->src) {
+            k = k * 33UL + (unsigned long)at->src;
+            k = k * 33UL + (unsigned long)at->stride;
+            k = k * 33UL + at->type;
+            k = k * 33UL + (unsigned long)at->src_n;
+            k = k * 33UL + (unsigned long)at->bpc;
+            k = k * 33UL + (unsigned long)at->norm;
         }
+        /* valeur constante, ou courante de la couleur morte (is_color) ;
+           des zéros pour un tableau ordinaire */
+        for (c = 0; c < at->dst_n && c < 4; c++)
+            k = k * 33UL + fbits(at->cur[c]);
     }
     return k;
 }
 
 /* 0 = pas de cache hôte (tableau client). 1 = réutilisable si le paquet match.
- * 2 = VBO, mais il faut re-emballer (FlushBuffer ou premier dessin). */
-static int va_host_ready(const unsigned char *V, unsigned long fmt, PBuf **out)
+ * 2 = VBO, mais il faut re-emballer (FlushBuffer ou premier dessin).
+ * I5 (relecture du 24/09) : position = l'emplacement que le plan a
+ * réellement lu (16 si le générique 0 la remplace), puis tout attribut du
+ * plan lu dans un tableau — génériques et unités 4..7 compris. */
+static int va_host_ready(const unsigned char *V, const VaPlan *pl, PBuf **out)
 {
-    static const unsigned long bit[8] = {
-        QGPU_VF_NORMAL, QGPU_VF_COLOR, QGPU_VF_SEC_COLOR, QGPU_VF_FOG,
-        QGPU_VF_TEX(0), QGPU_VF_TEX(1), QGPU_VF_TEX(2), QGPU_VF_TEX(3)
-    };
-    static const int slot[8] = { 1, 2, 4, 3, 8, 9, 10, 11 };
     PBuf *pos, *b;
     unsigned long vbo;
-    int i, dirty = 0;
+    int j, dirty = 0;
 
     *out = 0;
-    if (!G.hostbuf || !V)
+    if (!G.hostbuf || !V || pl->n < 1)
         return 0;
-    vbo = GLD_U32(V, VA_VBO(V, 0));
+    vbo = GLD_U32(V, VA_VBO(V, pl->a[0].slot));
     pos = buf_from_vbo(vbo);
     if (!pos)
         return 0;
     if (pos->dirty)
         dirty = 1;
-    for (i = 0; i < 8; i++) {
-        if (!(fmt & bit[i]) || !va_enabled(V, slot[i]))
-            continue;
-        vbo = GLD_U32(V, VA_VBO(V, slot[i]));
+    for (j = 1; j < pl->n; j++) {
+        if (!pl->a[j].src)
+            continue;                   /* constante : aucun tableau lu */
+        vbo = GLD_U32(V, VA_VBO(V, pl->a[j].slot));
         if (!vbo)
             return 0;
         b = buf_from_vbo(vbo);
@@ -7807,23 +7867,18 @@ static int va_host_ready(const unsigned char *V, unsigned long fmt, PBuf **out)
     return dirty ? 2 : 1;
 }
 
-static void va_host_clean(const unsigned char *V, unsigned long fmt, PBuf *pos)
+static void va_host_clean(const unsigned char *V, const VaPlan *pl, PBuf *pos)
 {
-    static const unsigned long bit[8] = {
-        QGPU_VF_NORMAL, QGPU_VF_COLOR, QGPU_VF_SEC_COLOR, QGPU_VF_FOG,
-        QGPU_VF_TEX(0), QGPU_VF_TEX(1), QGPU_VF_TEX(2), QGPU_VF_TEX(3)
-    };
-    static const int slot[8] = { 1, 2, 4, 3, 8, 9, 10, 11 };
     PBuf *b;
-    int i;
+    int j;
     if (pos)
         pos->dirty = 0;
     if (!V)
         return;
-    for (i = 0; i < 8; i++) {
-        if (!(fmt & bit[i]) || !va_enabled(V, slot[i]))
+    for (j = 1; j < pl->n; j++) {
+        if (!pl->a[j].src)
             continue;
-        b = buf_from_vbo(GLD_U32(V, VA_VBO(V, slot[i])));
+        b = buf_from_vbo(GLD_U32(V, VA_VBO(V, pl->a[j].slot)));
         if (b)
             b->dirty = 0;
     }
@@ -7957,12 +8012,25 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
            qu'on ne peut pas lire est presque toujours un lot fou. */
         dbg_plan = 0;
         G.n_geomdrop++;
+        G.n_dropped_fault++;            /* I9 (relecture du 24/09) */
         return 1;
     }
+    pack_thr = pthread_self();          /* P3 (relecture du 24/09) */
     pack_jmp_on = 1;
     r = geom_draw_client_unsafe(p, indexed, mode, first, count, itype, indices);
     pack_jmp_on = 0;
     return r;
+}
+
+/* R1 (relecture du 24/09) : POMPPC_GL_TRIFILTER lu une fois, pas à chaque lot. */
+static int trifilter_on(void)
+{
+    static long on = -1;
+    if (on < 0) {
+        const char *e = getenv("POMPPC_GL_TRIFILTER");
+        on = (e && e[0] == '0') ? 0 : 1;
+    }
+    return (int)on;
 }
 
 static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
@@ -7977,6 +8045,7 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
     PBuf *hb;
     int host, reuse, filter_bad = 0;
     long i;
+    static VaPlan plan;                 /* verrou tenu : une seule à la fois */
 
     if (count <= 0)
         return 1;
@@ -8021,8 +8090,11 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
     send_state(p, &ti, 1);
     geom_send_all(p, fmt);
     packed = nverts * words * 4;
-    host = va_host_ready(V, fmt, &hb);
-    key = va_pack_key(p, V, fmt);       /* P13 : clé COMPLÈTE */
+    /* I5 (relecture du 24/09) : le plan d'abord — la clé et la propreté des
+       VBO en dérivent (générique 0 en position, génériques, unités 4..7) */
+    va_plan_build(&plan, p, V, fmt, gs);
+    host = va_host_ready(V, &plan, &hb);
+    key = va_pack_key(&plan, fmt);      /* P13 : clé COMPLÈTE */
     reuse = host == 1 && hb && hb->qid >= 0 && hb->qsize >= packed &&
             hb->pack_fmt == fmt && hb->pack_gs == gs && hb->pack_vmin == vmin &&
             hb->pack_nverts == nverts && hb->pack_key == key;
@@ -8061,8 +8133,6 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
         vtx_off = G.vtx;
         dst = (float *)(G.win + VTX_OFF + vtx_off);
         {
-            static VaPlan plan;         /* verrou tenu : une seule à la fois */
-            va_plan_build(&plan, p, V, fmt, gs);
             dbg_plan = &plan; dbg_vtx_n = nverts; dbg_vmin = vmin;
             dbg_words = words; dbg_fmt = fmt; dbg_vao = V;
             for (i = 0; (unsigned long)i < nverts; i++) {
@@ -8096,8 +8166,7 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
                     return 1;           /* rien à dessiner : lot consommé */
                 nverts = o;
                 packed = nverts * words * 4;
-            } else if (nidx && mode == QGPU_PRIM_MODE_TRIANGLES &&
-                       !(getenv("POMPPC_GL_TRIFILTER") && getenv("POMPPC_GL_TRIFILTER")[0] == '0')) {
+            } else if (nidx && mode == QGPU_PRIM_MODE_TRIANGLES && trifilter_on()) {
                 /* maillage indexé de triangles : les triangles qui touchent
                    un sommet fou sont retirés à la copie des indices, les
                    sommets fous (mots remis à 0) restent — inertes */
@@ -8135,7 +8204,7 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
                entiers) */
             hb->pack_nverts = filter_bad ? 0 : nverts;
             hb->pack_key = key;
-            va_host_clean(V, fmt, hb);
+            va_host_clean(V, &plan, hb);
             G.n_vbomiss++;
         } else {
             hb = 0;
@@ -8997,49 +9066,86 @@ static long a_polygon(void *ctx, void *verts, long n, long flags)
     return real ? real(ctx, verts, n, flags) : 0;
 }
 
-static long a_polygon_ptr_unsafe(void *ctx, void *vptrs, long n, long flags);
+/* Garde de faute des procédures à tableau de pointeurs (voir proc_jmp).
+ * P2 (relecture du 24/09) : armée VERROU TENU (sigsetjmp après le lock), et
+ * seulement autour des lectures de la mémoire de l'application (calcul des
+ * primitives, apple_batch_ok, apple_ptrs_touch) ; jamais autour de
+ * begin_*, fallback(), apple_guard() (malloc/free) ni du rendu d'Apple
+ * real(...) — une faute là reste la leur. Désarmée avant tout unlock.
+ * P3 : le fil qui arme est noté (proc_thr). */
+#define PROC_GUARD_ARM()    do { proc_thr = pthread_self(); proc_jmp_on = 1; } while (0)
+#define PROC_GUARD_DISARM() do { proc_jmp_on = 0; } while (0)
 
-/* Garde de faute des procédures à tableau de pointeurs (voir proc_jmp). */
-#define PTR_PROC_GUARD(name, inner)                                             \
-static long name(void *ctx, void *verts, long n, long flags)                    \
-{                                                                               \
-    long r;                                                                     \
-    if (sigsetjmp(proc_jmp, 0) != 0) {                                          \
-        static unsigned long told;                                              \
-        proc_jmp_on = 0;                                                        \
-        pthread_mutex_unlock(&G.mu);    /* tenu entre lock et unlock du corps */ \
-        if (told < 5) {                                                         \
-            told++;                                                             \
-            gl_note("PROC " #inner " : faute de lecture (n %ld) : primitive jetee\n", n); \
-        }                                                                       \
-        G.n_geomdrop++;                                                         \
-        return 0;                                                               \
-    }                                                                           \
-    proc_jmp_on = 1;                                                            \
-    r = inner(ctx, verts, n, flags);                                            \
-    proc_jmp_on = 0;                                                            \
-    return r;                                                                   \
+/* Lit chaque pointeur et les deux bouts de chaque sommet, sous garde, avant
+ * apple_guard : apple_batch_ok s'arrête au premier sommet malsain, et
+ * apple_guard (hors garde) relit tout le lot. */
+static void apple_ptrs_touch(const unsigned char **ptrs, long n)
+{
+    volatile unsigned char sink = 0;
+    long i;
+    for (i = 0; i < n; i++) {
+        const unsigned char *v = ptrs[i];
+        sink = v[0];
+        sink = v[GLD_VERTEX_SIZE - 1];
+    }
+    (void)sink;
 }
-PTR_PROC_GUARD(a_polygon_ptr, a_polygon_ptr_unsafe)
 
-static long a_polygon_ptr_unsafe(void *ctx, void *vptrs, long n, long flags)
+/* Retour de faute d'une procédure à pointeurs : verrou tenu, garde déjà
+ * désarmée par le crochet. Primitive jetée, verrou rendu. I8 (relecture du
+ * 24/09) : si le lot hôte était ouvert (`opened`), des primitives ont pu
+ * partir avant la faute — l'hôte devient la référence, comme dans end_tris. */
+static long proc_fault(PCtx *p, int opened, const char *name, long n)
+{
+    static unsigned long told;
+    proc_jmp_on = 0;
+    if (p && opened) {
+        p->color = HOST_NEWER;
+        if (writes_depth(p))
+            p->depth = HOST_NEWER;
+    }
+    if (told < 5) {
+        told++;
+        gl_note("PROC %s : faute de lecture (n %ld) : primitive jetee\n", name, n);
+    }
+    G.n_geomdrop++;
+    G.n_dropped_fault++;
+    pthread_mutex_unlock(&G.mu);
+    return 0;
+}
+
+static long a_polygon_ptr(void *ctx, void *vptrs, long n, long flags)
 {
     PCtx *p;
     Batch b;
     long i;
+    int ok;
     proc4 real;
     const unsigned char **pp = (const unsigned char **)vptrs;
+    volatile int opened = 0;
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
+    if (sigsetjmp(proc_jmp, 0) != 0)
+        return proc_fault(p, opened, "a_polygon_ptr", n);
     if (p && begin_tris(p, &b)) {
+        opened = 1;
+        PROC_GUARD_ARM();
         for (i = 1; i + 1 < n; i++)
             tri(&b, pp[0], pp[i], pp[i + 1], pp[0]);
+        PROC_GUARD_DISARM();
         end_tris(&b);
         pthread_mutex_unlock(&G.mu);
         return 0;
     }
-    if (p && !apple_batch_ok(p, 0, pp, n))
-        return apple_guard(p, ctx, flags, AK_POLY, 0, pp, 0, n);
+    if (p) {
+        PROC_GUARD_ARM();
+        ok = apple_batch_ok(p, 0, pp, n);
+        if (!ok)
+            apple_ptrs_touch(pp, n);
+        PROC_GUARD_DISARM();
+        if (!ok)
+            return apple_guard(p, ctx, flags, AK_POLY, 0, pp, 0, n);
+    }
     real = p ? (proc4)fallback(p, PROC_RenderPolygonPtr, 1, 1) : 0;
     pthread_mutex_unlock(&G.mu);
     return real ? real(ctx, vptrs, n, flags) : 0;
@@ -9049,28 +9155,51 @@ static long a_polygon_ptr_unsafe(void *ctx, void *vptrs, long n, long flags)
 
 typedef long (*lp_fn)(void *, void *, long, long);
 
-/* Enveloppe commune : `body` émet les primitives si le lot a pu s'ouvrir. */
+/* Enveloppe commune : `body` émet les primitives si le lot a pu s'ouvrir.
+   `ptrs` (constante) : tableau de pointeurs, lectures sous la garde proc_jmp
+   (P2, relecture du 24/09 : armée verrou tenu, hors fallback/apple_guard/real). */
 #define LP_PROC(name, slot, lines, kind, ptrs, body)                            \
 static long name(void *ctx, void *verts, long n, long flags)                     \
 {                                                                               \
     PCtx *p;                                                                    \
     Batch b;                                                                    \
     long i;                                                                     \
+    int ok;                                                                     \
     lp_fn real;                                                                 \
+    volatile int opened = 0;                                                    \
     pthread_mutex_lock(&G.mu);                                                  \
     p = find_ctx(ctx);                                                          \
+    if (ptrs) {                                                                 \
+        if (sigsetjmp(proc_jmp, 0) != 0)                                        \
+            return proc_fault(p, opened, #name, n);                             \
+    }                                                                           \
     if (p && begin_lp(p, &b, lines)) {                                          \
+        opened = 1;                                                             \
+        if (ptrs)                                                               \
+            PROC_GUARD_ARM();                                                   \
         body                                                                    \
+        if (ptrs)                                                               \
+            PROC_GUARD_DISARM();                                                \
         p->color = HOST_NEWER;                                                  \
         if (writes_depth(p))                                                    \
             p->depth = HOST_NEWER;                                              \
         pthread_mutex_unlock(&G.mu);                                            \
         return 0;                                                               \
     }                                                                           \
-    if (p && !apple_batch_ok(p, (ptrs) ? 0 : verts,                             \
-                             (ptrs) ? (const unsigned char **)verts : 0, n))    \
-        return apple_guard(p, ctx, flags, kind, (ptrs) ? 0 : verts,             \
-                           (ptrs) ? (const unsigned char **)verts : 0, 0, n);   \
+    if (p) {                                                                    \
+        if (ptrs)                                                               \
+            PROC_GUARD_ARM();                                                   \
+        ok = apple_batch_ok(p, (ptrs) ? 0 : verts,                              \
+                            (ptrs) ? (const unsigned char **)verts : 0, n);     \
+        if (ptrs) {                                                             \
+            if (!ok)                                                            \
+                apple_ptrs_touch((const unsigned char **)verts, n);             \
+            PROC_GUARD_DISARM();                                                \
+        }                                                                       \
+        if (!ok)                                                                \
+            return apple_guard(p, ctx, flags, kind, (ptrs) ? 0 : verts,         \
+                               (ptrs) ? (const unsigned char **)verts : 0, 0, n); \
+    }                                                                           \
     real = p ? (lp_fn)fallback(p, slot, 1, 1) : 0;                              \
     pthread_mutex_unlock(&G.mu);                                                \
     return real ? real(ctx, verts, n, flags) : 0;                               \
@@ -9092,17 +9221,15 @@ LP_PROC(a_lineloop, PROC_RenderLineLoop, 1, AK_LINELOOP, 0,
     if (n > 1)
         seg(&b, VTX(verts, n - 1), VTX(verts, 0), VTX(verts, 0));)
 /* (ctx, pointeurs, n, mode) : paires de pointeurs */
-LP_PROC(a_lines_ptr_unsafe, PROC_RenderLinesPtr, 1, AK_LINES, 1,
+LP_PROC(a_lines_ptr, PROC_RenderLinesPtr, 1, AK_LINES, 1,
     for (i = 0; i + 1 < n; i += 2)
         seg(&b, PP(i), PP(i + 1), PP(i + 1));)
 LP_PROC(a_points, PROC_RenderPoints, 0, AK_POINTS, 0,
     for (i = 0; i < n; i++)
         pt(&b, VTX(verts, i));)
-LP_PROC(a_points_ptr_unsafe, PROC_RenderPointsPtr, 0, AK_POINTS, 1,
+LP_PROC(a_points_ptr, PROC_RenderPointsPtr, 0, AK_POINTS, 1,
     for (i = 0; i < n; i++)
         pt(&b, PP(i));)
-PTR_PROC_GUARD(a_lines_ptr, a_lines_ptr_unsafe)
-PTR_PROC_GUARD(a_points_ptr, a_points_ptr_unsafe)
 
 /* ───────────────────────────── effacement ───────────────────────────── */
 
@@ -9293,53 +9420,57 @@ static void crash_hex(char *d, unsigned long v)
     for (i = 7; i >= 0; i--) { d[i] = h[v & 15]; v >>= 4; }
     d[8] = 0;
 }
+/* P4 (relecture du 24/09) : base du plugin et chemin du .crash calculés à
+   l'installation (ni dyld ni getenv dans le gestionnaire) ; in_crash coupe
+   la récursion (SA_NODEFER : une faute DANS le gestionnaire le relance). */
+static volatile int in_crash;
+static unsigned long crash_base;
+static char crash_path[480];
 static void crash_handler(int sig, siginfo_t *si, void *ucv)
 {
     ucontext_t *uc = (ucontext_t *)ucv;
-    if (sig_jmp_on) {
+    char line[480], hx[9];
+    unsigned long pc = 0, lr = 0, sp = 0, dar = 0, base = crash_base, i, nsp;
+    int fd;
+    /* P3 (relecture du 24/09) : ne revenir dans une garde que sur le fil qui
+       l'a armée ; la faute d'un autre fil suit l'enregistrement normal. */
+    if (sig_jmp_on && pthread_equal(pthread_self(), sig_thr)) {
         sig_jmp_on = 0;
         sig_fault_n++;
         siglongjmp(sig_jmp, 1);
     }
-    if (proc_jmp_on) {
+    if (proc_jmp_on && pthread_equal(pthread_self(), proc_thr)) {
         proc_jmp_on = 0;
         proc_fault_n++;
         siglongjmp(proc_jmp, 1);
     }
-    if (pack_jmp_on) {
+    if (pack_jmp_on && pthread_equal(pthread_self(), pack_thr)) {
         pack_jmp_on = 0;
         pack_fault_addr = (unsigned long)(si ? si->si_addr : 0);
         pack_fault_n++;
         siglongjmp(pack_jmp, 1);
     }
-    const char *path = getenv("POMPPC_GL_NOTE");
-    char line[480], hx[9];
-    unsigned long pc = 0, lr = 0, sp = 0, dar = 0, base = 0, i, n;
-    int fd;
+    /* P4 : réentrance — rendre la main au gestionnaire précédent D'ABORD ;
+       la faute se reproduit au retour et c'est lui qui la prend. */
+    if (in_crash) {
+        sigaction(sig, &crash_prev[sig == SIGBUS ? 0 : 1], 0);
+        return;
+    }
+    in_crash = 1;
+    sigaction(sig, &crash_prev[sig == SIGBUS ? 0 : 1], 0);   /* le jeu reprendra */
     if (uc && uc->uc_mcontext) {
         pc  = uc->uc_mcontext->ss.srr0;
         lr  = uc->uc_mcontext->ss.lr;
         sp  = uc->uc_mcontext->ss.r1;
         dar = uc->uc_mcontext->es.dar;
     }
-    n = _dyld_image_count();
-    for (i = 0; i < n; i++) {
-        const char *nm = _dyld_get_image_name(i);
-        if (nm && strstr(nm, "GLDriver-POMPPC")) {
-            base = (unsigned long)_dyld_get_image_header(i);
-            break;
-        }
-    }
     /* Fichier À PART (<note>.crash) : gl_note tient le journal par un FILE*
        en écriture simple, et son tampon, vidé à la sortie du jeu, ÉCRASAIT
        le début de l'enregistrement écrit ici (Prey, 24/09 : « CRASH signal »
        et la pile disparus sous les lignes « attach » de l'arrêt). */
     fd = -1;
-    if (path && strlen(path) < sizeof(line) - 8) {
-        strcpy(line, path);
-        strcat(line, ".crash");
-        fd = open(line, O_WRONLY | O_APPEND | O_CREAT, 0644);
-    }
+    if (crash_path[0])
+        fd = open(crash_path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0600);
     if (fd >= 0) {
         strcpy(line, "CRASH signal ");
         line[13] = '0' + (sig % 10); line[14] = ' '; line[15] = 0;
@@ -9351,15 +9482,19 @@ static void crash_handler(int sig, siginfo_t *si, void *ucv)
         strcat(line, " off "); crash_hex(hx, pc - base); strcat(line, hx);
         strcat(line, "\n");
         write(fd, line, strlen(line));
-        /* pile brute : 16 retours */
+        /* pile brute : 16 retours. P4 : r1 aligné à 16 et strictement
+           croissant, sinon arrêt (une pile corrompue ne fait plus fauter). */
         strcpy(line, "CRASH pile :");
-        for (i = 0; i < 16 && sp && sp > 0x1000 && sp < 0xc0000000UL; i++) {
+        for (i = 0; i < 16 && sp > 0x1000 && sp < 0xc0000000UL && (sp & 15) == 0; i++) {
             unsigned long ret = *(unsigned long *)(sp + 8);
             strcat(line, " "); crash_hex(hx, ret); strcat(line, hx);
             if (ret >= base && base && ret < base + 0x100000) {
                 strcat(line, "(+"); crash_hex(hx, ret - base); strcat(line, hx); strcat(line, ")");
             }
-            sp = *(unsigned long *)sp;
+            nsp = *(unsigned long *)sp;
+            if (nsp <= sp)
+                break;
+            sp = nsp;
             if (strlen(line) > 440) break;
         }
         strcat(line, "\n");
@@ -9388,11 +9523,28 @@ static void crash_handler(int sig, siginfo_t *si, void *ucv)
         }
         close(fd);
     }
-    sigaction(sig, &crash_prev[sig == SIGBUS ? 0 : 1], 0);   /* le jeu reprend */
+    in_crash = 0;           /* gestionnaire précédent déjà remis pour `sig` */
 }
 static void crash_hook_install(void)
 {
     struct sigaction sa;
+    const char *path = getenv("POMPPC_GL_NOTE");
+    unsigned long i, n;
+    /* P4 (relecture du 24/09) : tout ce qui touche dyld ou l'environnement se
+       fait ici, pas dans le gestionnaire. */
+    n = _dyld_image_count();
+    for (i = 0; i < n; i++) {
+        const char *nm = _dyld_get_image_name(i);
+        if (nm && strstr(nm, "GLDriver-POMPPC")) {
+            crash_base = (unsigned long)_dyld_get_image_header(i);
+            break;
+        }
+    }
+    crash_path[0] = 0;
+    if (path && strlen(path) < sizeof(crash_path) - 8) {
+        strcpy(crash_path, path);
+        strcat(crash_path, ".crash");
+    }
     /* P1 (relecture du 24/09) : les gardes de faute valent même sans journal ;
        seul l'enregistrement dépend de POMPPC_GL_NOTE. */
     memset(&sa, 0, sizeof(sa));
