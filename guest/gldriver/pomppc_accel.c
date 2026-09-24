@@ -730,6 +730,7 @@ static void cube_probe(PCtx *p, const TexInfo *ti, const char *where);
 static void draw_probe(PCtx *p, const TexInfo *ti);
 static void dump_one(const char *path);
 static void vd_frame(void);                     /* lot 2, plus bas */
+static int bd_in(void);                         /* relevé R4, plus bas */
 
 typedef struct Post {                   /* copie à faire APRÈS la barrière */
     int            depth;               /* 0 couleur, 1 profondeur, 2 stencil */
@@ -895,6 +896,8 @@ static struct {
     int             count;              /* POMPPC_GL_COUNT, lu une fois à l'init */
     int             verdict;            /* lot 2 : POMPPC_GL_VERDICT (défaut 1) */
     int             vcheck;             /* lot 2 : POMPPC_GL_VERDICTCHECK (défaut 0) */
+    unsigned long   bd_a, bd_n;         /* R4 : POMPPC_GL_BLOCKDUMP=a[:n], images [a, a+n) */
+    int             bd_on;
 } G = { PTHREAD_MUTEX_INITIALIZER };
 
 /* Appelée juste avant d'armer une garde de faute (sig_jmp, pack_jmp,
@@ -1111,6 +1114,7 @@ static struct {
     unsigned long f_disp, f_draw;       /* image en cours */
     unsigned long f0, nat0;             /* G.n_frames, G.n_native_draws au bilan */
     unsigned long told;                 /* écarts notés en détail (toute la vie) */
+    unsigned long bits[CNT_BLOCK][32];  /* lot 3 : dispatches par bit du bloc */
 } CNT;
 
 /* Appelé par pomppc_geom_dispatch, verrou tenu. `c` : bloc de changements
@@ -1133,6 +1137,14 @@ static void cnt_dispatch(PCtx *p, const unsigned long *c)
     }
     for (k = CNT_WORDS; k < CNT_BLOCK; k++)
         hi |= c[k];
+    for (k = 0; k < CNT_BLOCK; k++) {   /* lot 3 : quels bits, combien de fois */
+        unsigned long w = c[k];
+        while (w) {
+            int b = 31 - __builtin_clz(w);
+            CNT.bits[k][b]++;
+            w &= ~(1UL << b);
+        }
+    }
     if (hi)
         CNT.hi_words++;
     else if (!c[0] && !c[1] && !c[2] && !c[4] && c[3] && !(c[3] & ~CNT_ENV_BITS))
@@ -1305,6 +1317,15 @@ static void cnt_frame(void)
                 G.n_frames, k + 1, CNT.pat[best].w[0], CNT.pat[best].w[1],
                 CNT.pat[best].w[2], CNT.pat[best].w[3], CNT.pat[best].w[4],
                 CNT.pat[best].n);
+    }
+    for (k = 0; k < CNT_BLOCK; k++) {   /* lot 3 : bits posés, par mot */
+        char line[512];
+        int n = 0, b;
+        for (b = 31; b >= 0; b--)
+            if (CNT.bits[k][b] && n < (int)sizeof(line) - 32)
+                n += sprintf(line + n, " %08lx x %lu", 1UL << b, CNT.bits[k][b]);
+        if (n)
+            gl_note("COUNT image %lu bits +0x%02x :%s\n", G.n_frames, k * 4, line);
     }
     told = CNT.told;
     memset(&CNT, 0, sizeof(CNT));
@@ -1922,6 +1943,16 @@ void pomppc_backend_init(void)
                 G.verdict = !(e && e[0] == '0');
                 e = getenv("POMPPC_GL_VERDICTCHECK");
                 G.vcheck = e && e[0] && e[0] != '0';
+                /* Relevé R4 : POMPPC_GL_BLOCKDUMP=a[:n] écrit sur stderr le
+                   bloc de chaque dispatch (mots non nuls) et chaque dessin
+                   des images [a, a+n) (n = 1 par défaut). */
+                e = getenv("POMPPC_GL_BLOCKDUMP");
+                if (e && *e) {
+                    char *end;
+                    G.bd_on = 1;
+                    G.bd_a = strtoul(e, &end, 0);
+                    G.bd_n = *end == ':' ? strtoul(end + 1, 0, 0) : 1;
+                }
             }
             /* Génériques à taille déclarée (clé QGPU_SK_GEN_SIZES) : le chemin
                tableaux envoie chaque générique à la taille de son tableau
@@ -9441,6 +9472,10 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
     int r;
     if (G.count)                        /* lot 0 : un dessin par tableaux */
         cnt_draw(p, 0);
+    if (G.bd_on && bd_in()) {           /* relevé R4 */
+        fprintf(stderr, "BLOC dessin %s %ld\n", indexed ? "indexé" : "tableaux", count);
+        fflush(stderr);
+    }
     if (sigsetjmp(pack_jmp, 0) != 0) {     /* 0 : pas de sigprocmask par dessin (5 % du fil !) ;
                                                SA_NODEFER dans le crochet rend le retour sûr */
         static unsigned long told;
@@ -9900,6 +9935,31 @@ void *pomppc_geom_proc(int slot)
     }
 }
 
+/* Relevé R4 (docs/re/bloc-changements-r4.md) : POMPPC_GL_BLOCKDUMP, sur
+   stderr (gltest l'entrelace avec ses propres lignes, dans l'ordre des
+   appels). */
+static int bd_in(void)
+{
+    return G.bd_on && G.n_frames >= G.bd_a && G.n_frames - G.bd_a < G.bd_n;
+}
+
+static void bd_dispatch(const unsigned long *c, const char *what)
+{
+    char line[400];
+    int n = 0, k;
+    static unsigned long seq;
+    if (!c) {
+        fprintf(stderr, "BLOC dispatch %lu image %lu : sans bloc (%s)\n", ++seq, G.n_frames, what);
+        return;
+    }
+    for (k = 0; k < CNT_BLOCK; k++)
+        if (c[k])
+            n += sprintf(line + n, " +%02x=%08lx", k * 4, c[k]);
+    fprintf(stderr, "BLOC dispatch %lu image %lu :%s (%s)\n", ++seq, G.n_frames,
+            n ? line : " vide", what);
+    fflush(stderr);
+}
+
 /* Bits à ajouter au retour de gldInitDispatch / gldUpdateDispatch :
  *   bit 0 : « le pilote fait la transformation et l'éclairage » ;
  *   bit 1 : « refais le chemin » — sans lui, GLEngine compare (retour & 3) à
@@ -9917,6 +9977,8 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
     p = find_ctx(ctx);
     if (G.count)                        /* lot 0 : compter seulement */
         cnt_dispatch(p, chg);
+    if (G.bd_on && bd_in())             /* relevé R4 */
+        bd_dispatch(chg, "recalculé");
     if (p && geom_ok(p)) {
         TexInfo ti;
         unsigned long fmt;
