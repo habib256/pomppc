@@ -9,6 +9,11 @@ et dans `docs/`.
 ## Non publié
 
 - En cours : verdict unique dans le plugin (`TODO.md` §2), lots 0 à 5.
+- Plugin : la mémoire « paramètres synchronisés une fois par image » de c18c5f5 est invalidée
+  par une empreinte du bloc de paramètres de GLEngine (`tex_prm_sig`, 15 mots, sans lire de
+  texel) : un `glTexParameter` entre deux dessins d’une image ne repartait pas (`gltest tex3d`
+  4 échecs, `tex14` 10, `gl15` 8, `texlod` 2). Les SIGSEGV de `tex13 tex14 gl15 texlod` étaient
+  ceux de `gltest` lui-même (`px` hors du tampon) : ces scènes se jouent en `256 256`.
 
 ## 2026-09-24 (soir) — v19 : transport séparé, chantier A1
 

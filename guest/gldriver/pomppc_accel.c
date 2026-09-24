@@ -641,6 +641,12 @@ typedef struct PTex {                   /* texture du GLDriver suivie par le plu
                                            même texture des dizaines de fois par image, et
                                            l'empreinte relisait des texels à chaque fois */
     unsigned long  up_frame;            /* idem pour upload_texture (paramètres comparés) */
+    unsigned long  up_psig;             /* empreinte du bloc de paramètres de GLEngine à
+                                           up_frame : un glTexParameter dans l'image
+                                           (gldModifyTexture 0x80, qui ne salit pas les
+                                           niveaux) doit repartir — gltest tex3d, tex14,
+                                           gl15, texlod changent filtre, LOD, biais ou
+                                           comparaison entre deux dessins d'une image */
     unsigned long  prm[14];             /* paramètres envoyés : min, mag, wrap s, wrap t,
                                            wrap r (3D), puis (v10) min et max LOD en
                                            bits IEEE, niveau de base, niveau max,
@@ -3183,6 +3189,20 @@ static unsigned long tex_lv0_sig(const PTex *t)
     return sig;
 }
 
+/* Empreinte des paramètres de GLEngine que upload_texture relaie : les mots de
+ * TP_WRAP_S (0x10) à TP_DEPTH_MODE (0x48) compris — répétition, filtres,
+ * bordure, LOD, biais, niveaux de base et max, comparaison, mode de profondeur.
+ * Quinze lectures, sans toucher aux texels : c'est ce qui invalide la mémoire
+ * « une fois par image » quand un paramètre change entre deux dessins. */
+static unsigned long tex_prm_sig(const unsigned char *gp)
+{
+    unsigned long s = 0x9e3779b9UL;
+    int o;
+    for (o = TP_WRAP_S; o <= TP_DEPTH_MODE; o += 4)
+        s = ((s << 5) | (s >> 27)) ^ GLD_U32(gp, o);
+    return s;
+}
+
 /* upload_texture réussira-t-il ? Prédicat PUR (aucune commande, aucune
  * conversion) : le chemin brut doit trancher au changement d'état, où il ne
  * peut plus se dédire. Une texture déjà téléversée et propre est connue bonne. */
@@ -3286,8 +3306,10 @@ static int upload_texture(PCtx *p, PTex *t)
         QGPU_TP_COMPARE_FUNC, QGPU_TP_DEPTH_MODE };
     int l, k, t3 = tex_is_3d(t);
 
-    if (t->qtex >= 0 && !t->dirty && t->prm_valid && t->up_frame == G.n_frames + 1)
-        return 1;                       /* déjà synchronisée à cette image (24/09) */
+    if (t->qtex >= 0 && !t->dirty && t->prm_valid && t->up_frame == G.n_frames + 1 &&
+        gp && t->up_psig == tex_prm_sig(gp))
+        return 1;                       /* déjà synchronisée à cette image (24/09),
+                                           paramètres inchangés depuis */
     if (gp && base_format_ok(base) && !tex_params_ok(gp))
         return no(NO_TEX_PARAM, U16(gp, TP_WRAP_S), U16(gp, TP_MIN));
     if (!gp || !base_format_ok(base)) {
@@ -3499,6 +3521,7 @@ static int upload_texture(PCtx *p, PTex *t)
     }
     t->prm_valid = 1;
     t->up_frame = G.n_frames + 1;
+    t->up_psig = tex_prm_sig(gp);
     return 1;
 }
 
