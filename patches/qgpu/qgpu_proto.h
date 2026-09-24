@@ -90,7 +90,12 @@
                                              clés QGPU_SK_TEXTURE4.., bits
                                              QGPU_VF_TEX(4..7), matrices et
                                              valeurs courantes 4..7 ; 4096
-                                             textures (1024 par client) */
+                                             textures (1024 par client) ;
+                                             puis, SANS changer de version,
+                                             QGPU_CAP_GEN_SIZES : génériques à
+                                             taille déclarée (clé
+                                             QGPU_SK_GEN_SIZES, cf. section
+                                             « génériques à taille déclarée ») */
 
 /* ── BAR0 : fenêtre partagée (RAM) ───────────────────────────────────────── */
 #define QGPU_SHMEM_DEFAULT_MB   64
@@ -182,6 +187,14 @@
    QGPU_ST_BAD_ARG (dessin jeté, non fatal). L'invité n'émet rien de v16 sans
    version >= 16 ET ce bit. */
 #define QGPU_CAP_PROGRAMS       0x00000040
+/* v17+ : génériques à TAILLE DÉCLARÉE (clé QGPU_SK_GEN_SIZES). Annoncé par le
+   CŒUR dès que QGPU_CAP_PROGRAMS l'est : c'est lui qui complète les
+   composantes absentes, les backends reçoivent toujours 4 flottants par
+   générique. Ajouté sans changer QGPU_PROTO_VERSION : un device qui ne
+   l'annonce pas refuse la clé (BAD_ARG, clé inconnue), et l'invité ne
+   l'émet jamais sans ce bit. Détail : section « génériques à taille
+   déclarée », docs/protocole-v17-generiques-tailles.md. */
+#define QGPU_CAP_GEN_SIZES      0x00000080
 
 #define QGPU_IRQ_DONE           0x00000001
 
@@ -567,7 +580,14 @@
 #define QGPU_SK_COMBINE4        117 /* v17, unités 4..7 : 117..120 */
 #define QGPU_SK_COMBINE_SRC4    121 /* v17, unités 4..7 : 121..124 */
 #define QGPU_SK_TEX_LOD_BIAS4   125 /* v17, unités 4..7 : 125..128 */
-#define QGPU_SK_COUNT           129
+/* QGPU_CAP_GEN_SIZES : nombre de composantes de chaque générique dans les
+ * sommets des DRAW_RAW / DRAW_RAW_BUF qui suivent, 2 bits par générique k
+ * (bits 2k..2k+1) : 0 = 4 composantes (initial, = la v16/v17), 1..3 = 1..3.
+ * Toutes les valeurs sur 32 bits sont valides ; poser une valeur non nulle
+ * sans QGPU_CAP_GEN_SIZES vaut QGPU_ST_BACKEND (rien n'est écrit), comme
+ * l'activation d'un programme sans QGPU_CAP_PROGRAMS. Cf. QGPU_GS_*. */
+#define QGPU_SK_GEN_SIZES       129
+#define QGPU_SK_COUNT           130
 
 /* Valeurs d'énumération d'OpenGL utilisées par les clés v7, nommées pour que
  * l'invité n'ait pas à les recopier à la main. */
@@ -845,8 +865,10 @@
  *              d'OpenGL recopiées telles quelles).
  *   n        : nombre de sommets dessinés (itype = AUCUN) ou d'indices lus.
  *   voff     : offset des sommets dans BAR0 (multiple de 4).
- *   pas      : pas d'un sommet EN MOTS ; 0 = serré (= QGPU_VF_WORDS(format)).
- *              Un pas inférieur au format est refusé.
+ *   pas      : pas d'un sommet EN MOTS ; 0 = serré (= QGPU_VF_WORDS(format),
+ *              ou QGPU_VF_WORDS_GS(format, clé QGPU_SK_GEN_SIZES) quand la clé
+ *              déclare des génériques courts). Un pas inférieur au format est
+ *              refusé.
  *   format   : masque QGPU_VF_* ; dit quels attributs sont présents.
  *   ioff     : offset des indices dans BAR0 (ignoré si itype = AUCUN).
  *   itype    : QGPU_IDX_NONE, QGPU_IDX_U16 ou QGPU_IDX_U32, big-endian.
@@ -936,6 +958,41 @@
      (((m) & QGPU_VF_TEX(6))    ? 4 : 0) + \
      (((m) & QGPU_VF_TEX(7))    ? 4 : 0) + \
      QGPU_VF_GEN_WORDS(m))
+/* ── Génériques à taille déclarée (QGPU_CAP_GEN_SIZES) ──────────────────────
+ *
+ *   La clé QGPU_SK_GEN_SIZES (état du contexte, initial 0) porte 2 bits par
+ *   générique : code 0 = 4 composantes, 1..3 = 1..3 composantes. Elle ne
+ *   change QUE la place qu'un générique PRÉSENT dans le format (QGPU_VF_GEN(k))
+ *   occupe dans le sommet d'un DRAW_RAW / DRAW_RAW_BUF : QGPU_GS_COUNT(gs, k)
+ *   flottants au lieu de 4, toujours à sa place dans l'ordre fixe. Les codes
+ *   des génériques absents du format sont ignorés. Le cœur complète comme
+ *   OpenGL (y = 0, z = 0, w = 1) avant de remettre le sommet au backend :
+ *   pour lui, et pour le programme, rien ne change. Le pas (0 = serré) et
+ *   les bornes de BAR0 / du tampon hôte se comptent en mots DÉCLARÉS :
+ *   QGPU_VF_WORDS_GS(format, gs). Avec gs = 0, c'est QGPU_VF_WORDS : un flux
+ *   qui ne pose jamais la clé est lu bit pour bit comme avant.
+ *
+ *   Les autres opcodes de dessin (hérités) ne lisent pas la clé. */
+#define QGPU_GS_CODE(gs, k)     ((int)(((gs) >> (2 * (k))) & 3))
+#define QGPU_GS_COUNT(gs, k)    (QGPU_GS_CODE(gs, k) ? QGPU_GS_CODE(gs, k) : 4)
+/* champ du générique k pour n composantes (1..4 ; 4 → code 0) */
+#define QGPU_GS(k, n)           ((unsigned long)((n) & 3) << (2 * (k)))
+#define QGPU_GS_FIELD(k)        ((unsigned long)3 << (2 * (k)))
+/* mots économisés par le générique k s'il est présent : (4 − code) mod 4 */
+#define QGPU_GS_SAVED_K(m, gs, k) \
+    (((m) & QGPU_VF_GEN(k)) ? ((4 - QGPU_GS_CODE(gs, k)) & 3) : 0)
+#define QGPU_VF_GEN_SAVED(m, gs) \
+    (QGPU_GS_SAVED_K(m, gs, 0) + QGPU_GS_SAVED_K(m, gs, 1) + \
+     QGPU_GS_SAVED_K(m, gs, 2) + QGPU_GS_SAVED_K(m, gs, 3) + \
+     QGPU_GS_SAVED_K(m, gs, 4) + QGPU_GS_SAVED_K(m, gs, 5) + \
+     QGPU_GS_SAVED_K(m, gs, 6) + QGPU_GS_SAVED_K(m, gs, 7) + \
+     QGPU_GS_SAVED_K(m, gs, 8) + QGPU_GS_SAVED_K(m, gs, 9) + \
+     QGPU_GS_SAVED_K(m, gs, 10) + QGPU_GS_SAVED_K(m, gs, 11) + \
+     QGPU_GS_SAVED_K(m, gs, 12) + QGPU_GS_SAVED_K(m, gs, 13) + \
+     QGPU_GS_SAVED_K(m, gs, 14) + QGPU_GS_SAVED_K(m, gs, 15))
+/* taille d'un sommet sur le fil, en mots, sous la clé gs */
+#define QGPU_VF_WORDS_GS(m, gs) (QGPU_VF_WORDS(m) - QGPU_VF_GEN_SAVED(m, gs))
+
 /* Sommet le plus gros : 4 + 3 + 4 + 3 + 1 + 8×4 (= 31 jusqu'à la v15 avec
    4 unités, 95 en v16) + 16×4 génériques. Écrit en clair, parce que
    QGPU_VF_WORDS(QGPU_VF_ALL) lirait un champ de position invalide (3). */

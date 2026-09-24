@@ -243,6 +243,10 @@ static inline bool qgpu_stipple_bit(uint32_t row, int x)
 /* v7 : offset (en mots) de l'attribut `bit` (QGPU_VF_*) dans un sommet de
  * format `fmt`, ou -1 s'il est absent. La position est à l'offset 0. */
 int qgpu_vf_offset(uint32_t fmt, uint32_t bit);
+/* QGPU_CAP_GEN_SIZES : la même chose sur le FIL, génériques comptés selon la
+ * clé QGPU_SK_GEN_SIZES `gs`. qgpu_vf_offset(f, b) = qgpu_vf_offset_gs(f, 0, b).
+ * Les backends n'en ont pas besoin : ils reçoivent la forme à 4 composantes. */
+int qgpu_vf_offset_gs(uint32_t fmt, uint32_t gs, uint32_t bit);
 
 /*
  * Contrat d'un backend. Les pixels échangés avec le cœur sont des uint32_t
@@ -272,7 +276,9 @@ typedef struct QgpuBackend {
                  const float *verts, uint32_t nverts, uint32_t words);
     /* Dessin de sommets BRUTS (v7). Le cœur a tout validé et tout remis à plat :
        `verts` tient `nverts` sommets SERRÉS de `words` = QGPU_VF_WORDS(fmt)
-       flottants hôte-natifs, dans l'ordre fixe du format ; `idx` tient `count`
+       flottants hôte-natifs, dans l'ordre fixe du format (génériques
+       TOUJOURS à 4 flottants : le cœur a complété ceux que QGPU_SK_GEN_SIZES
+       déclarait plus courts) ; `idx` tient `count`
        indices hôte-natifs déjà bornés à nverts, ou vaut NULL et le dessin est
        séquentiel de `first` à `first + count - 1`. `gm` porte matrices,
        lumières, matériaux, texgen et plans de découpe ; `mode` est le mode GL.

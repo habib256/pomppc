@@ -65,7 +65,7 @@ int main(int argc, char **argv)
     char **names = NULL;
     size_t nn = 0, i;
     unsigned npresent = 0, nerr = 0;
-    static uint32_t sk[128];             /* dernier SET_STATE vu par clé (suivi grossier) */
+    static uint32_t sk[QGPU_SK_COUNT];             /* dernier SET_STATE vu par clé (suivi grossier) */
 
     if (!shmem || !vram || !qgpu_core_init(&c, backend, shmem, SHMEM)) {
         fprintf(stderr, "init impossible (backend %s)\n", backend);
@@ -316,7 +316,7 @@ int main(int argc, char **argv)
             if (op == QGPU_OP_SET_STATE && len == 3) {
                 uint32_t key = qgpu_ld32(shmem + h.base + (k + 1) * 4);
                 uint32_t val = qgpu_ld32(shmem + h.base + (k + 2) * 4);
-                if (key < 128) sk[key] = val;
+                if (key < QGPU_SK_COUNT) sk[key] = val;
             }
             if (op == QGPU_OP_TEX_CREATE3 || op == QGPU_OP_TEX_IMAGE3) {
                 uint32_t id = qgpu_ld32(shmem + h.base + (k + 1) * 4);
@@ -426,13 +426,17 @@ int main(int argc, char **argv)
                 if (op == QGPU_OP_DRAW_RAW && len == QGPU_LEN_DRAW_RAW) {
                     /* étendue des coordonnées de texture de chaque unité portée
                        par le format : 2D en [0,1] ou vecteurs 3D (lot 11) */
-                    uint32_t fmt = a[5], nv = a[9], words = QGPU_VF_WORDS(fmt), pas = a[4] ? a[4] : words;
+                    /* QGPU_CAP_GEN_SIZES : génériques à la taille déclarée par
+                       la dernière clé QGPU_SK_GEN_SIZES vue (suivi grossier,
+                       tous contextes confondus, comme sk[]) */
+                    uint32_t gs = sk[QGPU_SK_GEN_SIZES];
+                    uint32_t fmt = a[5], nv = a[9], words = QGPU_VF_WORDS_GS(fmt, gs), pas = a[4] ? a[4] : words;
                     uint32_t base = QGPU_VF_POS_COUNT(fmt) + ((fmt & QGPU_VF_NORMAL) ? 3 : 0) +
                                     ((fmt & QGPU_VF_COLOR) ? 4 : 0) + ((fmt & QGPU_VF_SEC_COLOR) ? 3 : 0) +
                                     ((fmt & QGPU_VF_FOG) ? 1 : 0);
                     uint32_t u, off = base;
                     if (nv > 200000) nv = 200000;
-                    for (u = 0; u < 4; u++) {
+                    for (u = 0; u < QGPU_MAX_UNITS; u++) {       /* v17 : 8 unités */
                         float mn[4] = { 1e30f, 1e30f, 1e30f, 1e30f }, mx[4] = { -1e30f, -1e30f, -1e30f, -1e30f };
                         uint32_t v, c;
                         if (!(fmt & QGPU_VF_TEX(u))) continue;
@@ -454,7 +458,7 @@ int main(int argc, char **argv)
                         uint32_t k, o2 = 0, nc = QGPU_VF_POS_COUNT(fmt);
                         for (k = 0; k < 1 + QGPU_VF_GEN_MAX; k++) {
                             float mn[4] = { 1e30f, 1e30f, 1e30f, 1e30f }, mx[4] = { -1e30f, -1e30f, -1e30f, -1e30f };
-                            uint32_t v, c, n4 = k ? 4 : nc, at = k ? off : o2;
+                            uint32_t v, c, n4 = k ? (uint32_t)QGPU_GS_COUNT(gs, k - 1) : nc, at = k ? off : o2;
                             if (k && !(fmt & QGPU_VF_GEN(k - 1))) continue;
                             for (v = 0; v < nv; v++) {
                                 const uint8_t *vp = shmem + a[3] + ((size_t)v * pas + at) * 4;
@@ -465,8 +469,8 @@ int main(int argc, char **argv)
                                     if (f > mx[c]) mx[c] = f;
                                 }
                             }
-                            if (k) { fprintf(stderr, "   gen %u : [%g, %g] [%g, %g] [%g, %g] [%g, %g]\n", k - 1,
-                                             mn[0], mx[0], mn[1], mx[1], mn[2], mx[2], mn[3], mx[3]); off += 4; }
+                            if (k) { fprintf(stderr, "   gen %u (%u) : [%g, %g] [%g, %g] [%g, %g] [%g, %g]\n", k - 1,
+                                             n4, mn[0], mx[0], mn[1], mx[1], mn[2], mx[2], mn[3], mx[3]); off += n4; }
                             else fprintf(stderr, "   pos (%u) : x [%g, %g] y [%g, %g] z [%g, %g] w [%g, %g]\n", nc,
                                          mn[0], mx[0], mn[1], mx[1], mn[2], mx[2], mn[3], mx[3]);
                         }

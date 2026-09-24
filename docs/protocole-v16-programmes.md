@@ -218,3 +218,11 @@ arbfp` : juste sur l'hôte ; le rendu d'Apple n'annonce pas
 `GL_ARB_fragment_program` et **ignore** `glEnable(GL_FRAGMENT_PROGRAM_ARB)`
 sans erreur — sous Apple, les huit programmes de fragments de Colin McRae ne
 jouaient donc pas. Colin McRae : voir `docs/todo-gpu-3d.md` (état du jour).
+
+## 6. Génériques à taille déclarée (24/09/2026)
+
+Sans changer de version : capacité `QGPU_CAP_GEN_SIZES` (0x80) et clé
+`QGPU_SK_GEN_SIZES` (129), 2 bits par générique (0 = 4 composantes, 1..3),
+le cœur complète (0, 0, 1) avant le backend. DOOM 3 / Prey : 11 mots de
+génériques par sommet au lieu de 16. Contrat, plugin et épreuves :
+`docs/protocole-v17-generiques-tailles.md`.
