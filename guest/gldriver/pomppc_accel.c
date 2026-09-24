@@ -88,6 +88,15 @@ static void crash_hook_install(void);
    utilisateur sous garde de faute. */
 static sigjmp_buf pack_jmp;
 static volatile int pack_jmp_on;
+/* Même garde pour les LECTURES DE NIVEAUX de texture (empreinte, copie vers
+   l'arène) : DOOM 3 crée _currentRender par glTexImage2D(NULL) et GLEngine
+   n'engage pas les pages du niveau — lire ses texels faute (SIGSEGV page
+   alignée dans tex_lv0_sig). Tampon SÉPARÉ : tex_lv0_sig est appelée depuis
+   la région gardée par pack_jmp. */
+static sigjmp_buf sig_jmp;
+static volatile int sig_jmp_on;
+static volatile unsigned long sig_fault_n;
+static int upload_blank;                /* COPY_TEX : niveaux noirs, sans lire l'invité */
 static volatile unsigned long pack_fault_addr, pack_fault_n;
 /* état du dernier empaquetage de tableaux, pour le crochet de plantage (24/09) */
 static volatile unsigned long dbg_vtx_i, dbg_vtx_n, dbg_vmin, dbg_words, dbg_fmt;
@@ -2928,7 +2937,14 @@ static unsigned long tex_lv0_sig(const PTex *t)
     unsigned int fmt = U16(lv, LV_FORMAT), type = U16(lv, LV_TYPE);
     unsigned long sig = GLD_U32(lv, LV_DATA) ^ (w << 16) ^ h ^
                         ((unsigned long)fmt << 8) ^ type;
+    if (upload_blank)
+        return sig;
+    if (d && w && h && sigsetjmp(sig_jmp, 0) != 0) {
+        sig_jmp_on = 0;                 /* niveau illisible (24/09, DOOM 3) */
+        return sig ^ 0x5a5a5a5aUL;
+    }
     if (d && w && h) {
+        sig_jmp_on = 1;
         /* P4 — `n` est un index d'OCTET, pas un compte de TEXELS. Un niveau
            DXT1 fait 0,5 octet par texel : lire d[w·h−1] lisait à DEUX FOIS la
            taille du niveau — 512 Kio au-delà sur 1024², et à CHAQUE dessin
@@ -2953,6 +2969,7 @@ static unsigned long tex_lv0_sig(const PTex *t)
             sig ^= GLD_U32(d, 8);
         if (n > 32)
             sig ^= d[n / 2] | ((unsigned long)d[n - 1] << 16);
+        sig_jmp_on = 0;
     }
     return sig;
 }
@@ -3158,7 +3175,7 @@ static int upload_texture(PCtx *p, PTex *t)
                     /* S3TC : les blocs serrés, tels quels */
                     row = 0;
                     size = dxt_bytes(fmt, w, h);
-                } else if (!bpp || !d || S16(lv, LV_ROWPIX) < (short)w || !dep || imgh < h ||
+                } else if (!bpp || (!d && !upload_blank) || S16(lv, LV_ROWPIX) < (short)w || !dep || imgh < h ||
                            !depth_pair_ok(host_base(base), fmt) || (fmt == 0x1902 && t3))
                     return no(NO_TEX_FORMAT, (fmt << 16) | type,
                               ((unsigned long)S16(lv, LV_ROWPIX) << 16) | w);
@@ -3170,7 +3187,16 @@ static int upload_texture(PCtx *p, PTex *t)
                 }
                 if (!arena_alloc(size, &off))
                     return no(NO_TEX_SIZE, w, h);
-                memcpy(G.q.win + off, d, size);
+                if (upload_blank) {
+                    memset(G.q.win + off, 0, size);     /* COPY_TEX écrasera */
+                } else if (sigsetjmp(sig_jmp, 0) == 0) {
+                    sig_jmp_on = 1;
+                    memcpy(G.q.win + off, d, size);
+                    sig_jmp_on = 0;
+                } else {
+                    sig_jmp_on = 0;     /* niveau illisible (pages non engagées) */
+                    return no(NO_TEX_SIZE, w, h | 0x80000000UL);
+                }
                 c = reserve(p, QGPU_LEN_TEX_IMAGE3);
                 c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3);
                 c[1] = t->qtex; c[2] = t3 ? QGPU_TT_3D : QGPU_TT_2D; c[3] = l;
@@ -7748,7 +7774,8 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
                             const void *indices)
 {
     int r;
-    if (sigsetjmp(pack_jmp, 1) != 0) {
+    if (sigsetjmp(pack_jmp, 0) != 0) {     /* 0 : pas de sigprocmask par dessin (5 % du fil !) ;
+                                               SA_NODEFER dans le crochet rend le retour sûr */
         static unsigned long told;
         pack_jmp_on = 0;
         if (told < 5) {
@@ -9058,6 +9085,11 @@ static void crash_hex(char *d, unsigned long v)
 static void crash_handler(int sig, siginfo_t *si, void *ucv)
 {
     ucontext_t *uc = (ucontext_t *)ucv;
+    if (sig_jmp_on) {
+        sig_jmp_on = 0;
+        sig_fault_n++;
+        siglongjmp(sig_jmp, 1);
+    }
     if (pack_jmp_on) {
         pack_jmp_on = 0;
         pack_fault_addr = (unsigned long)(si ? si->si_addr : 0);
@@ -9140,7 +9172,7 @@ static void crash_hook_install(void)
         return;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = crash_handler;
-    sa.sa_flags = SA_SIGINFO;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
     sigaction(SIGBUS, &sa, &crash_prev[0]);
     sigaction(SIGSEGV, &sa, &crash_prev[1]);
 }
@@ -9756,18 +9788,50 @@ static int try_copy_tex(PCtx *p, unsigned long *a)
     unsigned long hy, *c;
     PTex *t;
 
+    /* 24/09/2026, DOOM 3 (_currentRender, 5 copies par image, chacune un
+       repli avec relecture) : GLEngine appelle ici avec a[2] = 0 et une
+       disposition d'un mot plus longue — (ctx, tex, 0, niveau, xoff, yoff,
+       zoff, x, y, w, h) : relevé sur les copies de bord (xoff 640, x 639,
+       w 1, h 480). Avec a[2] = GL_TEXTURE_2D c'est la disposition d'origine
+       (UT2004, 20/09). */
+    if (target == 0) {
+        target = 0x0DE1;
+        sx = (long)a[7]; sy = (long)a[8]; w = a[9]; h = a[10];
+    }
+
+    static unsigned long told, told_args;
+    if (told_args < 4) {
+        told_args++;
+        gl_note("COPY_TEX args : %08lx %08lx %08lx %08lx %08lx %08lx %08lx %08lx %08lx %08lx %08lx %08lx\n",
+                a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11]);
+    }
+#define COPYTEX_NO(why) do { if (told < 6) { told++; gl_note("COPY_TEX refuse (%s) : tex %p cible %lx niv %lu " \
+        "dst %lu,%lu src %ld,%ld %lux%lu surf %lux%lu couleur %d\n", why, drvtex, target, level, xoff, yoff, \
+        sx, sy, w, h, p->sw, p->sh, p->color); } return 0; } while (0)
     if (!G.pixops || target != 0x0DE1)
-        return 0;
+        COPYTEX_NO("pixops/cible");
     if (w == 0 || h == 0)
         return 1;
-    if (p->color == SW_NEWER || !accel_ok(p) || !ensure_surface(p) || p->surf < 0)
-        return 0;
+    if (p->color == SW_NEWER)
+        COPYTEX_NO("couleur logicielle plus recente");
+    if (!accel_ok(p) || !ensure_surface(p) || p->surf < 0)
+        COPYTEX_NO("pas de surface hote");
     if (sx < 0 || sy < 0 ||
         (unsigned long)sx + w > p->sw || (unsigned long)sy + h > p->sh)
-        return 0;
+        COPYTEX_NO("hors surface");
     t = intern_tex(drvtex);
-    if (!t || !texture_uploadable(t) || !upload_texture(p, t) || t->qtex < 0)
-        return 0;
+    if (!t)
+        COPYTEX_NO("texture inconnue");
+    /* Destination d'une copie d'écran (_currentRender de DOOM 3, reflets
+       d'UT2004) : ses niveaux invité ne sont jamais à jour, et souvent pas
+       même lisibles (glTexImage2D(NULL)) — on crée des niveaux noirs sur
+       l'hôte, la copie les écrase. */
+    upload_blank = 1;
+    if (!texture_uploadable(t) || !upload_texture(p, t) || t->qtex < 0) {
+        upload_blank = 0;
+        COPYTEX_NO("texture non televersable");
+    }
+    upload_blank = 0;
     hy = p->sh - (unsigned long)sy - h;
     c = reserve(p, QGPU_LEN_COPY_TEX);
     c[0] = QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX);
