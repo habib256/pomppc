@@ -14,6 +14,11 @@ et dans `docs/`.
   qu'aucune image n'est présentée (`crash_hook_fresh`) ; `tex_lv0_sig` ne lit plus les texels
   d'un niveau envoyé noir ni d'une texture « hôte seulement » (`host_only` posé avant
   l'empreinte dans `try_copy_tex`), et sa borne s'arrête au dernier texel de la dernière ligne.
+- Lot 0 (plugin `20260924-count`, écrit, ni compilé ni joué) : `POMPPC_GL_COUNT=1` note toutes
+  les 500 images des lignes `COUNT` — dispatches et dessins par image, dessins sans dispatch,
+  dispatches sans dessin, verdict du dispatch comparé à celui du dessin (identique / différent),
+  motifs des 5 premiers mots du bloc `gctx+0x310` et part « env seulement ».
+  `pomppc_geom_dispatch` reçoit le bloc de changements (2ᵉ argument, 0 depuis `gldInitDispatch`).
 
 ## 2026-09-24 (soir) — v19 : transport séparé, chantier A1
 

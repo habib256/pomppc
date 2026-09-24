@@ -117,7 +117,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260924-native"
+#define POMPPC_PLUGIN_REV "20260924-count"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -615,6 +615,19 @@ typedef struct PCtx {
     unsigned long  lazy_m[LAZY_WORDS];
     int            lazy_pending;
     long           lazy_ret;            /* dernier retour d'Apple (4) */
+    /* ── lot 0 du verdict unique (POMPPC_GL_COUNT=1) : compter, rien changer.
+       cnt_disp : un dispatch est passé depuis le dernier dessin de ce
+       contexte ; cnt_after : le dessin en cours est le premier après un
+       dispatch ; cnt_v_* : le verdict que le dernier dispatch a laissé (ok,
+       format, signature des unités de texture), comparé à celui que le
+       dessin recalcule. ── */
+    int            cnt_disp;
+    int            cnt_after;
+    int            cnt_v_valid;
+    int            cnt_v_ok;
+    unsigned long  cnt_v_fmt;
+    unsigned long  cnt_v_frame;         /* G.n_frames au dispatch */
+    unsigned long  cnt_v_ti[QGPU_MAX_UNITS][5];
 } PCtx;
 
 /* v16 : définies avec la synchronisation des programmes, plus bas ; texture_ok
@@ -824,6 +837,8 @@ static struct {
     unsigned long   n_lazy_defer;       /* gldUpdateDispatch gardés pour plus tard */
     unsigned long   n_lazy_eager;       /* transmis tout de suite (tampon de dessin) */
     unsigned long   n_lazy_sync;        /* transmis juste avant une procédure d'Apple */
+    /* ── lot 0 du verdict unique (compteurs dans CNT, plus bas) ── */
+    int             count;              /* POMPPC_GL_COUNT, lu une fois à l'init */
 } G = { PTHREAD_MUTEX_INITIALIZER };
 
 /* Appelée juste avant d'armer une garde de faute (sig_jmp, pack_jmp,
@@ -993,6 +1008,253 @@ static void trace_frame(void *ctx)
     }
 }
 
+/* ─────────── lot 0 du verdict unique : compter avant d'optimiser ───────────
+ * POMPPC_GL_COUNT=1 (TODO.md §2, docs/re/etude-court-circuit-glengine.md §4).
+ * Rien ici ne change le comportement : des incréments sous G.mu et, toutes les
+ * CNT_PERIOD images, des lignes « COUNT image N … » dans la note :
+ *   - dispatches (pomppc_geom_dispatch) et dessins (geom_draw_client, c.-à-d.
+ *     RenderVertexArray et RenderVertexBuffer, DRAW_NATIVE compris ;
+ *     geom_begin, Begin/End par tampon de primitives, compté à part), par
+ *     image et au plus sur une image ; dessins sans dispatch depuis le dessin
+ *     précédent du même contexte ; dispatches suivis d'un autre dispatch sans
+ *     dessin entre les deux ;
+ *   - le verdict (geom_ok + texture_ok + geom_format) laissé par le dernier
+ *     dispatch du contexte, comparé à celui que geom_draw_client_unsafe
+ *     recalcule dans la même image : identique ou différent (lot 2) ;
+ *   - les motifs des 5 premiers mots du bloc de changements gctx+0x310, BRUTS
+ *     (tels que GLEngine les passe à gldUpdateDispatch, sans ses masques), et
+ *     la part « env seulement » : +0x0c non nul et contenu dans
+ *     0x00800000|0x02000000, les 18 autres mots du bloc nuls (lot 3).
+ * Compteurs globaux (tous contextes) ; appariement dispatch/dessin et verdict
+ * gardé par contexte (PCtx.cnt_*). */
+#define CNT_PERIOD   500                /* le rythme des lignes LAZYAPPLE */
+#define CNT_PAT      32                 /* motifs distincts tenus par période */
+#define CNT_TOP      8                  /* motifs notés par période */
+#define CNT_WORDS    5                  /* mots du bloc qui font le motif */
+#define CNT_BLOCK    19                 /* mots du bloc (GLEngine 0xa7d40) */
+#define CNT_ENV_BITS 0x02800000UL       /* +0x0c : env de sommets | de fragments */
+#define CNT_TOLD     8                  /* écarts de verdict notés en détail */
+
+typedef struct CntPat {
+    unsigned long w[CNT_WORDS];
+    unsigned long n;
+} CntPat;
+
+static struct {
+    /* sur la période (remis à zéro à chaque bilan, sauf told) */
+    unsigned long disp, disp_noblk, draw, imm;
+    unsigned long draw_nodisp, disp_nodraw;
+    unsigned long max_disp, max_draw;
+    unsigned long v_same, v_same1, v_diff, v_diff1, v_none, v_stale;
+    unsigned long d_ok, d_fmt, d_ti;
+    unsigned long env_only, hi_words, pat_other;
+    int           npat, last;
+    CntPat        pat[CNT_PAT];
+    unsigned long f_disp, f_draw;       /* image en cours */
+    unsigned long f0, nat0;             /* G.n_frames, G.n_native_draws au bilan */
+    unsigned long told;                 /* écarts notés en détail (toute la vie) */
+} CNT;
+
+/* Appelé par pomppc_geom_dispatch, verrou tenu. `c` : bloc de changements
+   (19 mots), 0 pour gldInitDispatch. */
+static void cnt_dispatch(PCtx *p, const unsigned long *c)
+{
+    unsigned long hi = 0;
+    int i, k;
+
+    CNT.disp++;
+    CNT.f_disp++;
+    if (p) {
+        if (p->cnt_disp)
+            CNT.disp_nodraw++;
+        p->cnt_disp = 1;
+    }
+    if (!c) {
+        CNT.disp_noblk++;
+        return;
+    }
+    for (k = CNT_WORDS; k < CNT_BLOCK; k++)
+        hi |= c[k];
+    if (hi)
+        CNT.hi_words++;
+    else if (!c[0] && !c[1] && !c[2] && !c[4] && c[3] && !(c[3] & ~CNT_ENV_BITS))
+        CNT.env_only++;
+    /* le motif précédent d'abord : il se répète d'un dessin à l'autre */
+    i = CNT.last;
+    if (i >= CNT.npat || memcmp(CNT.pat[i].w, c, sizeof(CNT.pat[i].w)) != 0) {
+        for (i = 0; i < CNT.npat; i++)
+            if (memcmp(CNT.pat[i].w, c, sizeof(CNT.pat[i].w)) == 0)
+                break;
+        if (i == CNT.npat) {
+            if (CNT.npat == CNT_PAT) {
+                CNT.pat_other++;
+                return;
+            }
+            memcpy(CNT.pat[i].w, c, sizeof(CNT.pat[i].w));
+            CNT.pat[i].n = 0;
+            CNT.npat++;
+        }
+        CNT.last = i;
+    }
+    CNT.pat[i].n++;
+}
+
+/* Appelé à l'entrée d'un dessin, verrou tenu. imm : Begin/End (geom_begin). */
+static void cnt_draw(PCtx *p, int imm)
+{
+    if (imm) {
+        CNT.imm++;
+    } else {
+        CNT.draw++;
+        CNT.f_draw++;
+    }
+    if (!p)
+        return;
+    if (!p->cnt_disp)
+        CNT.draw_nodisp++;
+    p->cnt_after = p->cnt_disp;
+    p->cnt_disp = 0;
+}
+
+/* Signature d'un TexInfo : seulement les champs posés pour une unité active
+   (ceux d'une unité inactive ne sont pas initialisés par texture_unit_ok). */
+static void cnt_ti_sig(const TexInfo *ti, unsigned long s[QGPU_MAX_UNITS][5])
+{
+    int u;
+
+    memset(s, 0, sizeof(unsigned long) * QGPU_MAX_UNITS * 5);
+    if (!ti)
+        return;
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        const TexUnit *tu = &ti->u[u];
+        if (!tu->t)
+            continue;
+        s[u][0] = (unsigned long)tu->t;
+        s[u][1] = tu->env_mode;
+        s[u][2] = tu->env_color;
+        s[u][3] = tu->combine;
+        s[u][4] = tu->combine_src;
+    }
+}
+
+/* Le dispatch range son verdict (ok = geom_ok && texture_ok). */
+static void cnt_keep(PCtx *p, int ok, const TexInfo *ti, unsigned long fmt)
+{
+    p->cnt_v_valid = 1;
+    p->cnt_v_ok = ok ? 1 : 0;
+    p->cnt_v_fmt = ok ? fmt : 0;
+    p->cnt_v_frame = G.n_frames;
+    cnt_ti_sig(ok ? ti : 0, p->cnt_v_ti);
+}
+
+/* Le dessin compare le sien au verdict gardé (même image seulement : la clé
+   du lot 2 contient G.n_frames). Ne change rien au dessin. */
+static void cnt_check(PCtx *p, int ok, const TexInfo *ti, unsigned long fmt)
+{
+    unsigned long s[QGPU_MAX_UNITS][5];
+    unsigned long du = 0;
+    int u, dok, dfmt;
+
+    if (!p->cnt_v_valid) {
+        CNT.v_none++;
+        return;
+    }
+    if (p->cnt_v_frame != G.n_frames) {
+        CNT.v_stale++;
+        return;
+    }
+    ok = ok ? 1 : 0;
+    dok = ok != p->cnt_v_ok;
+    dfmt = !dok && ok && fmt != p->cnt_v_fmt;
+    if (!dok && ok) {
+        cnt_ti_sig(ti, s);
+        for (u = 0; u < QGPU_MAX_UNITS; u++)
+            if (memcmp(s[u], p->cnt_v_ti[u], sizeof(s[u])) != 0)
+                du |= 1UL << u;
+    }
+    if (!dok && !dfmt && !du) {
+        CNT.v_same++;
+        if (p->cnt_after)
+            CNT.v_same1++;
+        return;
+    }
+    CNT.v_diff++;
+    if (p->cnt_after)
+        CNT.v_diff1++;
+    if (dok)
+        CNT.d_ok++;
+    if (dfmt)
+        CNT.d_fmt++;
+    if (du)
+        CNT.d_ti++;
+    if (CNT.told < CNT_TOLD) {
+        CNT.told++;
+        gl_note("COUNT verdict différent, image %lu (%s dessin après le dispatch) : "
+                "ok %d -> %d, format %08lx -> %08lx, unités différentes 0x%02lx\n",
+                G.n_frames, p->cnt_after ? "1er" : "autre", p->cnt_v_ok, ok,
+                p->cnt_v_fmt, ok ? fmt : 0UL, du);
+    }
+}
+
+/* À chaque échange (stats_frame, verrou tenu) ; bilan toutes les CNT_PERIOD
+   images. */
+static void cnt_frame(void)
+{
+    unsigned long fr, nat, seen, rest, told;
+    unsigned char taken[CNT_PAT];
+    int i, k, best;
+
+    if (CNT.f_disp > CNT.max_disp)
+        CNT.max_disp = CNT.f_disp;
+    if (CNT.f_draw > CNT.max_draw)
+        CNT.max_draw = CNT.f_draw;
+    CNT.f_disp = 0;
+    CNT.f_draw = 0;
+    if (G.n_frames % CNT_PERIOD != 0)
+        return;
+    fr = G.n_frames - CNT.f0;
+    if (!fr)
+        fr = 1;
+    nat = G.n_native_draws - CNT.nat0;
+    seen = CNT.v_same + CNT.v_diff + CNT.v_none + CNT.v_stale;
+    rest = CNT.draw > seen ? CNT.draw - seen : 0;
+    gl_note("COUNT image %lu (%lu images) : %lu dispatch (%lu/image, max %lu ; %lu sans bloc), "
+            "%lu dessins tableaux (%lu/image, max %lu ; %lu DRAW_NATIVE), %lu Begin/End ; "
+            "%lu dessins sans dispatch, %lu dispatch sans dessin\n",
+            G.n_frames, fr, CNT.disp, CNT.disp / fr, CNT.max_disp, CNT.disp_noblk,
+            CNT.draw, CNT.draw / fr, CNT.max_draw, nat, CNT.imm,
+            CNT.draw_nodisp, CNT.disp_nodraw);
+    gl_note("COUNT image %lu verdict : %lu identiques (%lu au 1er dessin après un dispatch), "
+            "%lu différents (%lu au 1er dessin ; ok %lu, format %lu, textures %lu), "
+            "%lu sans verdict, %lu verdict d'une image antérieure, %lu non comparés\n",
+            G.n_frames, CNT.v_same, CNT.v_same1, CNT.v_diff, CNT.v_diff1,
+            CNT.d_ok, CNT.d_fmt, CNT.d_ti, CNT.v_none, CNT.v_stale, rest);
+    gl_note("COUNT image %lu bloc : %lu dispatch avec bloc, %lu env seulement "
+            "(+0x0c dans 02800000, reste nul), %lu avec un mot +0x14..+0x48 non nul ; "
+            "%d motifs distincts, %lu hors table\n",
+            G.n_frames, CNT.disp - CNT.disp_noblk, CNT.env_only, CNT.hi_words,
+            CNT.npat, CNT.pat_other);
+    memset(taken, 0, sizeof(taken));
+    for (k = 0; k < CNT_TOP; k++) {
+        best = -1;
+        for (i = 0; i < CNT.npat; i++)
+            if (!taken[i] && (best < 0 || CNT.pat[i].n > CNT.pat[best].n))
+                best = i;
+        if (best < 0)
+            break;
+        taken[best] = 1;
+        gl_note("COUNT image %lu motif %d : %08lx %08lx %08lx %08lx %08lx x %lu\n",
+                G.n_frames, k + 1, CNT.pat[best].w[0], CNT.pat[best].w[1],
+                CNT.pat[best].w[2], CNT.pat[best].w[3], CNT.pat[best].w[4],
+                CNT.pat[best].n);
+    }
+    told = CNT.told;
+    memset(&CNT, 0, sizeof(CNT));
+    CNT.told = told;
+    CNT.f0 = G.n_frames;
+    CNT.nat0 = G.n_native_draws;
+}
+
 /* Bilan périodique (POMPPC_GL_STATS=<fichier>), appelé à chaque échange. */
 static void stats_frame(void *ctx)
 {
@@ -1022,6 +1284,8 @@ static void stats_frame(void *ctx)
         gl_note("LAZYAPPLE image %lu : %lu dispatch gardés, %lu transmis au tampon de dessin, "
                 "%lu transmis avant une procédure d'Apple\n",
                 G.n_frames, G.n_lazy_defer, G.n_lazy_eager, G.n_lazy_sync);
+    if (G.count)
+        cnt_frame();
     if (!path)
         return;
     /* Profondeur de la file du device, une fois par image et SEULEMENT quand
@@ -1581,6 +1845,14 @@ void pomppc_backend_init(void)
                 const char *lz = getenv("POMPPC_GL_LAZYAPPLE");
                 G.lazy = lz && lz[0] ? lz[0] != '0' : LAZY_DEFAULT;
             }
+            /* Lot 0 du verdict unique (TODO.md §2) : compteurs de dispatch et
+               de dessin, motifs du bloc de changements, verdicts comparés,
+               notés toutes les 500 images (lignes COUNT). Éteint, il ne coûte
+               qu'un test d'entier par dispatch et par dessin. */
+            {
+                const char *cn = getenv("POMPPC_GL_COUNT");
+                G.count = cn && cn[0] && cn[0] != '0';
+            }
             /* Génériques à taille déclarée (clé QGPU_SK_GEN_SIZES) : le chemin
                tableaux envoie chaque générique à la taille de son tableau
                (DOOM 3 / Prey : génériques en 11 mots au lieu de 16). Seulement si
@@ -1613,8 +1885,9 @@ void pomppc_backend_init(void)
         }
         if (G.state > 0) {
             gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d lazyapple=%d "
-                    "native=%d (plages %d)\n",
-                    G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range);
+                    "native=%d (plages %d) count=%d\n",
+                    G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range,
+                    G.count);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
                        " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
@@ -7017,6 +7290,8 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
     pthread_mutex_lock(&G.mu);
     stream_ready();                     /* F9 : G.vtx, G.hb, G.win relus après */
     p = find_ctx(ctx);
+    if (G.count)                        /* lot 0 : un dessin Begin/End */
+        cnt_draw(p, 1);
     /* F2 : on ne referme que NOTRE `pend`. Le poser à 0 globalement écrasait
        celui d'un autre contexte (autre fil), dont la place réservée n'était
        alors jamais rendue et dont le geom_end ne reconnaissait plus rien. */
@@ -8878,6 +9153,8 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
                             const void *indices)
 {
     int r;
+    if (G.count)                        /* lot 0 : un dessin par tableaux */
+        cnt_draw(p, 0);
     if (sigsetjmp(pack_jmp, 0) != 0) {     /* 0 : pas de sigprocmask par dessin (5 % du fil !) ;
                                                SA_NODEFER dans le crochet rend le retour sûr */
         static unsigned long told;
@@ -8945,11 +9222,26 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
     /* v16 : sous programme, le générique 0 tient lieu de position */
     if (!V || !(va_enabled(V, 0) || (G.prog && p->vp_on && va_enabled(V, 16))))
         return no(NO_G_ARRAY, 0, (unsigned long)count);
-    if (!geom_ok(p) || !ensure_surface(p) || !texture_ok(p, &ti))
+    /* Même ordre et même court-circuit qu'avant (geom_ok, ensure_surface,
+       texture_ok) ; les branches ne font en plus que prévenir les compteurs
+       du lot 0 (un refus de surface n'est pas un verdict : non compté). */
+    if (!geom_ok(p)) {
+        if (G.count)
+            cnt_check(p, 0, 0, 0);
         return 0;
+    }
+    if (!ensure_surface(p))
+        return 0;
+    if (!texture_ok(p, &ti)) {
+        if (G.count)
+            cnt_check(p, 0, 0, 0);
+        return 0;
+    }
     if (!prog_sync(p))                  /* v16 : programme refusé par l'hôte */
         return 0;
     fmt = geom_format(p);
+    if (G.count)                        /* lot 0 : le verdict du dispatch tenait-il ? */
+        cnt_check(p, 1, &ti, fmt);
     /* génériques à la taille de leurs tableaux (QGPU_CAP_GEN_SIZES) : DOOM 3
        st 2f, normale et tangentes 3f — 11 mots au lieu de 16 */
     gs = va_gen_sizes(p, V, fmt);
@@ -9287,7 +9579,7 @@ void *pomppc_geom_proc(int slot)
  *           gctx+0x7580, trouve égal et saute tout le bloc, dont la relecture
  *           de cfg+0x11c. Il n'est donc nécessaire que si le descripteur a
  *           changé SANS que le verrou change. */
-long pomppc_geom_dispatch(void *ctx)
+long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
 {
     PCtx *p;
     long bits = 0;
@@ -9296,6 +9588,8 @@ long pomppc_geom_dispatch(void *ctx)
         return 0;
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
+    if (G.count)                        /* lot 0 : compter seulement */
+        cnt_dispatch(p, chg);
     if (p && geom_ok(p)) {
         TexInfo ti;
         int arrays, force;
@@ -9306,10 +9600,17 @@ long pomppc_geom_dispatch(void *ctx)
             flush();
             if (!texture_ok(p, &ti)) {
                 p->geom_on = 0;
+                if (G.count)
+                    cnt_keep(p, 0, 0, 0);
                 pthread_mutex_unlock(&G.mu);
                 return 0;
             }
         }
+        /* lot 0 : le verdict tel que le dessin le recalculera. geom_format
+           est sans effet de bord ; sous ARRAY=2 il est calculé plus bas de
+           toute façon (p->geom_fmt), le recalculer ici donne la même valeur. */
+        if (G.count)
+            cnt_keep(p, 1, &ti, geom_format(p));
         arrays = geom_va_on(p);
         /* Mixte : 0x78 détourne DrawArrays/DrawElements vers RenderVertexArray
            sans retirer le descripteur (glBegin reste le chemin T&L). ARRAY=2
@@ -9338,6 +9639,8 @@ long pomppc_geom_dispatch(void *ctx)
         p->geom_on = 1;
     } else if (p) {
         p->geom_on = 0;
+        if (G.count)
+            cnt_keep(p, 0, 0, 0);
     }
     pthread_mutex_unlock(&G.mu);
     return bits;

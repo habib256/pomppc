@@ -63,7 +63,12 @@ variable d'environnement tant que la mesure en jeu n'est pas faite.
 
 - [ ] **Lot 0 — compter** : dispatches et dessins par image, dessins sans dispatch, histogramme
       des motifs du bloc de changements `gctx+0x310` (5 premiers mots). Épreuve : notes de DOOM 3
-      (`demo_mars_city1`) et de Prey.
+      (`demo_mars_city1`) et de Prey. **Code écrit (plugin `20260924-count`, non compilé), épreuve
+      à jouer** : `POMPPC_GL_COUNT=1 ~/doom3.command` puis `grep COUNT ~/d3-dump/note.txt` ; idem
+      `~/prey.command`, `~/prey-dump/note.txt`. Lecture : ligne `verdict` — `différents` = 0
+      justifie le lot 2 (sinon la clé du lot 2 doit couvrir ce qui change) ; ligne `bloc` — part
+      `env seulement` / `dispatch avec bloc` = ce que le lot 3 peut sauter, et les lignes `motif`
+      disent quels bits ajouter à la liste blanche (R4).
 - [ ] **Lot 1 — parasites** : `pthread_self` une fois par entrée ; `getenv` de `target_probe` et
       `draw_probe` en statique ; `tex_complete` mémorisé par image. Épreuve : `gltest texup
       texcache texdelmid cube tex3d arbvp arbfp varrayvbo` inchangés ; `sample` : `__pthread_self`
