@@ -138,3 +138,19 @@ après : DOOM 3 avant/après à scène égale, image juste ; Prey ; un jeu à re
    recharge (GLEngine pose les bits de texture au changement de liaison).
 5. `fallback()` compte l'échange comme un repli (1/image en jeu) : il est exclu
    du rattrapage exprès ; un repli réel, lui, rattrape.
+
+
+## Mesure du 24/09/2026 (après-midi), DOOM 3, cinématique d'intro, images 560-800
+
+Plugin relu (a0935b2), génériques à taille déclarée actifs (caps 0xfe), scène à 165 dessins par image :
+
+| Configuration | ms par image | relectures par image |
+|---|---|---|
+| A. défaut (LAZYAPPLE=0) | 22,6 | 0,01 |
+| B. LAZYAPPLE=1 | 22,1 (« 665 205 dispatch gardés, 2 499 transmis au tampon de dessin, 0 avant une procédure d'Apple » à l'image 2 500) | 0,01 |
+| C. plein écran (r_fullscreen 1) | 22,0 | 0,00 |
+
+Le matin, à la même scène, le même plugin sans génériques compacts ni clés de réutilisation
+dérivées du plan faisait 43-55 ms. La transmission paresseuse ne rapporte que ~2 % ici (la scène
+change peu d'état de texture) ; à remesurer dans le hangar (1 280 dessins) avant de changer le
+défaut. Elle reste ÉTEINTE par défaut.

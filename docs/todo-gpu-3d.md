@@ -72,6 +72,17 @@ diffère du projet ; `docs/re/programmes-arb.md` est le relevé GLEngine (activa
       bruit en bord droit (à regarder : copie de bord 639/1 ?).
 - [x] 24/09, 10h30 (4754dd4) : Prey 7 min en jeu sans plantage, 117 ms/image, fb=0, rb=1 (gardes
       `proc_jmp` sur les procédures à pointeurs, niveaux illisibles envoyés noirs, `<note>.crash`).
+- [x] 24/09, après-midi (4f76761 → a0935b2) : **vitres de DOOM 3 justes** (« plus aucun bug
+      graphique », dixit l'utilisateur) ; relecture adversariale `docs/re/relecture-2026-09-24.md`
+      entièrement appliquée (gardes armées verrou tenu et par fil, crochet réentrant-sûr, clés de
+      réutilisation dérivées du plan, alias des entrées, compteurs) ; **génériques à taille
+      déclarée** (`docs/protocole-v17-generiques-tailles.md`, capacité 0x80, clé 129, 835 tests) ;
+      **transmission paresseuse à Apple** écrite (`docs/re/dispatch-paresseux.md`,
+      POMPPC_GL_LAZYAPPLE=1, éteinte par défaut). **Mesure (images 560-800, 165 dessins) :
+      22,6 ms/image par défaut, 22,1 avec LAZYAPPLE, 22,0 en plein écran** — contre 43-55 ms le
+      matin à la même scène : les génériques compacts et les clés de réutilisation dérivées du
+      plan ont doublé la vitesse de la cinématique. LAZYAPPLE reste éteinte (2 %), à remesurer
+      dans le hangar.
 - [ ] Prochain poste (profil) : conversions de niveaux par le GLDriver d'Apple à chaque
       `gldUpdateDispatch` transmis (glgProcessPixels, S3TC décompressé : ~12 %) → transmission
       paresseuse à Apple (cumuler les masques, ne transmettre qu'avant un repli) ; empaquetage
