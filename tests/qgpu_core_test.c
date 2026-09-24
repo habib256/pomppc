@@ -5279,6 +5279,44 @@ static void run_v16(QgpuCore *c, uint8_t *shmem)
     CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0x00FFFF,
           "(d) fp : env[0] remis, cyan : %06x (st %u)", px(shmem, 30, 8), st);
 
+    /* (d bis) fragment.position sous programme de fragments (vitres de DOOM 3,
+       24/09) : y est retourné pour suivre la convention de l'invité (ligne 0
+       en haut = y de fenêtre GL le plus grand). Gris = y / 64 : clair en
+       haut, sombre en bas. */
+    if (has) {
+        static const char fp_fpos[] =
+            "!!ARBfp1.0\n"
+            "# commentaire avant l'instruction\n"
+            "MUL result.color, fragment.position.y, {0.015625, 0.015625, 0.015625, 1.0};\n"
+            "END\n";
+        uint32_t top, bot;
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 3, QGPU_PT_FRAGMENT);
+        prog_string(&e, shmem, &arena, 3, fp_fpos);
+        prog_bind(&e, QGPU_PT_FRAGMENT, 3);
+        v.off = v.start = VTX_OFF;
+        rv2cg(&v, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1);
+        rv2cg(&v, 128, 0, 1, 1, 1, 1, 0, 0, 0, 1);
+        rv2cg(&v, 0, 128, 1, 1, 1, 1, 0, 0, 0, 1);
+        clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF0000FF, 1.0f);
+        draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2CG1, 3, QGPU_IDX_NONE, 0);
+        readback_cmd(&e, 1);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        top = px(shmem, 8, 4) & 0xFF; bot = px(shmem, 8, 60) & 0xFF;
+        CHECK(st == QGPU_ST_OK && top > 0xC0 && bot < 0x30,
+              "(d bis) fragment.position.y retourné : haut %02x bas %02x (st %u)", top, bot, st);
+        /* remettre l'état des épreuves suivantes : programme 2 lié, objet 3
+           détruit, sommets d'origine (vert, générique 1 rouge) */
+        e.off = e.start = CMD_OFF;
+        prog_bind(&e, QGPU_PT_FRAGMENT, 2);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_PROG_DESTROY, QGPU_LEN_PROG)); emit(&e, 3);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        v.off = v.start = VTX_OFF;
+        rv2cg(&v, 4, 4, 0, 1, 0, 1, 1, 0, 0, 1);
+        rv2cg(&v, 60, 4, 0, 1, 0, 1, 1, 0, 0, 1);
+        rv2cg(&v, 4, 20, 0, 1, 0, 1, 1, 0, 0, 1);
+    }
+
     /* (e) les deux ensemble : vp (couleur attrib × local, ignorée) + fp (env) */
     e.off = e.start = CMD_OFF;
     state(&e, QGPU_SK_VERTEX_PROGRAM, 1);

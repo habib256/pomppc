@@ -131,6 +131,8 @@ typedef struct GlProgram {
     GLuint id;
     bool   pos_invariant;          /* OPTION ARB_position_invariant : la position
                                       suit le pipeline fixe (et son retournement) */
+    bool   uses_fpos;              /* fragments : lit fragment.position, réécrit en
+                                      qgpu_fpos_ = (x, H − y) ; H dans program.env[fpos_env] */
 } GlProgram;
 
 typedef struct GlSurface {
@@ -782,6 +784,73 @@ static char *gl_prog_flip(const char *src, size_t len)
     return out;
 }
 
+/* v17 (24/09/2026, vitres de DOOM 3) — LE RETOURNEMENT, côté fragments.
+   fragment.position.y est en coordonnées de fenêtre de l'hôte, où l'image est
+   dessinée à l'envers ; un programme qui s'en sert pour relire une copie
+   d'écran (_currentRender de DOOM 3 et Prey, heatHaze, vitres) échantillonnait
+   la ligne miroir — hors de la zone copiée, donc du noir. On réécrit le
+   texte : fragment.position devient qgpu_fpos_ = (x, H − y, z, w), avec H la
+   hauteur de la surface, passée dans program.env[env_idx] (le dernier index
+   que l'hôte tient ; le jeu n'y va pas). Insertion après les OPTION (la
+   grammaire ARB les veut en tête). NULL si impossible. */
+static char *gl_prog_flip_fp(const char *src, size_t len, int env_idx)
+{
+    static const char key[] = "fragment.position";
+    static const char tmp[] = "qgpu_fpos_";
+    const size_t klen = sizeof(key) - 1, tlen = sizeof(tmp) - 1;
+    const char *hdr_end = memchr(src, '\n', len);
+    char decl[200];
+    size_t i, o = 0, ins, dlen;
+    char *out;
+
+    if (!hdr_end) {
+        return NULL;
+    }
+    snprintf(decl, sizeof(decl),
+             "PARAM qgpu_fh_ = program.env[%d];\nTEMP qgpu_fpos_;\n"
+             "MOV qgpu_fpos_, fragment.position;\n"
+             "ADD qgpu_fpos_.y, qgpu_fh_.y, -fragment.position.y;\n", env_idx);
+    dlen = strlen(decl);
+    /* point d'insertion : après l'en-tête et les lignes OPTION / vides / commentaires */
+    ins = (size_t)(hdr_end - src) + 1;
+    for (;;) {
+        size_t j = ins;
+        while (j < len && (src[j] == ' ' || src[j] == '\t')) j++;
+        if (j < len && (src[j] == '\n' || src[j] == '\r' || src[j] == '#' ||
+                        (len - j >= 6 && memcmp(src + j, "OPTION", 6) == 0))) {
+            const char *nl = memchr(src + j, '\n', len - j);
+            if (!nl) {
+                return NULL;
+            }
+            ins = (size_t)(nl - src) + 1;
+            continue;
+        }
+        break;
+    }
+    out = malloc(len + dlen + 8);
+    if (!out) {
+        return NULL;
+    }
+    i = 0;
+    while (i < len) {
+        if (i == ins) {
+            memcpy(out + o, decl, dlen);
+            o += dlen;
+        }
+        if (i >= ins && len - i >= klen && memcmp(src + i, key, klen) == 0 &&
+            (i == 0 || !ident_char(src[i - 1])) &&
+            (i + klen >= len || !ident_char(src[i + klen]))) {
+            memcpy(out + o, tmp, tlen);
+            o += tlen;
+            i += klen;
+            continue;
+        }
+        out[o++] = src[i++];
+    }
+    out[o] = '\0';
+    return out;
+}
+
 /* Compile `text` dans l'objet lié ; rend false et explique sur stderr si le
    compilateur de l'hôte refuse. */
 static bool gl_prog_compile(GlState *g, GLenum target, const char *text, size_t len,
@@ -823,7 +892,18 @@ static bool gl_prog_string(QgpuCore *c, QgpuProgram *p)
     g->BindProgramARB(target, gp->id);
     gp->pos_invariant = (target == GL_FRAGMENT_PROGRAM_ARB) ||
                         strstr(p->text, "ARB_position_invariant") != NULL;
-    if (gp->pos_invariant) {
+    gp->uses_fpos = false;
+    if (target == GL_FRAGMENT_PROGRAM_ARB && memmem(p->text, p->len, "fragment.position", 17)) {
+        flipped = gl_prog_flip_fp(p->text, p->len, g->max_env[QGPU_PROG_FP] - 1);
+        ok = flipped && gl_prog_compile(g, target, flipped, strlen(flipped),
+                                        "de fragments (fragment.position retourné)");
+        if (!ok && c->trace && flipped) {
+            fprintf(stderr, "qgpu: texte réécrit :\n%s\n", flipped);
+        }
+        free(flipped);
+        flipped = NULL;
+        gp->uses_fpos = ok;
+    } else if (gp->pos_invariant) {
         ok = gl_prog_compile(g, target, p->text, p->len,
                              target == GL_VERTEX_PROGRAM_ARB ? "de sommets" : "de fragments");
     } else {
@@ -916,7 +996,7 @@ static bool gl_prog_probe(GlState *g)
 
 /* Au dessin : lie le programme de la cible et pousse ses paramètres. `w` est
    l'indice QGPU_PROG_*, `pg` le jeu du contexte invité courant. */
-static void gl_prog_use(GlState *g, QgpuProgSet *pg, int w, QgpuProgram *p)
+static void gl_prog_use(GlState *g, QgpuProgSet *pg, int w, QgpuProgram *p, float surf_h)
 {
     GLenum target = w == QGPU_PROG_VP ? GL_VERTEX_PROGRAM_ARB : GL_FRAGMENT_PROGRAM_ARB;
     GlProgram *gp = p->priv;
@@ -924,6 +1004,11 @@ static void gl_prog_use(GlState *g, QgpuProgSet *pg, int w, QgpuProgram *p)
 
     g->BindProgramARB(target, gp->id);
     glEnable(target);
+    if (w == QGPU_PROG_FP && gp->uses_fpos) {
+        GLfloat fh[4];
+        fh[0] = 0.0f; fh[1] = surf_h; fh[2] = 0.0f; fh[3] = 0.0f;
+        g->ProgramEnvParameter4fvARB(target, (GLuint)(g->max_env[QGPU_PROG_FP] - 1), fh);
+    }
     if (pg->env_dirty[w] || g->env_owner[w] != pg) {
         /* Tout ce que ce contexte a posé — et, si l'hôte porte encore les
            valeurs d'un autre contexte, assez de zéros pour les recouvrir. */
@@ -2294,10 +2379,10 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
             }
         }
         if (vp) {
-            gl_prog_use(g, c->cur_prg, QGPU_PROG_VP, vp);
+            gl_prog_use(g, c->cur_prg, QGPU_PROG_VP, vp, (float)s->height);
         }
         if (fp) {
-            gl_prog_use(g, c->cur_prg, QGPU_PROG_FP, fp);
+            gl_prog_use(g, c->cur_prg, QGPU_PROG_FP, fp, (float)s->height);
         }
         ok = gl_err_ok();
     }

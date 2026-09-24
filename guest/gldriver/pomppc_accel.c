@@ -470,7 +470,7 @@ static PProg pprog[PPROG_MAX];
    (lus par le GLDriver d'Apple et par glrSetFunctions) ; +0x08, +0x0c
    cumulés aussi, par prudence. */
 #define LAZY_WORDS 5
-#define LAZY_DEFAULT 0          /* sans POMPPC_GL_LAZYAPPLE */
+#define LAZY_DEFAULT 1          /* sans POMPPC_GL_LAZYAPPLE */
 
 typedef struct PCtx {
     struct PCtx   *next;
