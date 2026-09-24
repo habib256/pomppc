@@ -70,6 +70,8 @@ diffère du projet ; `docs/re/programmes-arb.md` est le relevé GLEngine (activa
       pas lisibles : glTexImage2D(NULL)) ; gardes `sig_jmp` sur `tex_lv0_sig` et la copie des
       niveaux. Scène lourde (1 280 dessins) : 295 → 210 ms/image, fb=0, rb=1. Reste une tache de
       bruit en bord droit (à regarder : copie de bord 639/1 ?).
+- [x] 24/09, 10h30 (4754dd4) : Prey 7 min en jeu sans plantage, 117 ms/image, fb=0, rb=1 (gardes
+      `proc_jmp` sur les procédures à pointeurs, niveaux illisibles envoyés noirs, `<note>.crash`).
 - [ ] Prochain poste (profil) : conversions de niveaux par le GLDriver d'Apple à chaque
       `gldUpdateDispatch` transmis (glgProcessPixels, S3TC décompressé : ~12 %) → transmission
       paresseuse à Apple (cumuler les masques, ne transmettre qu'avant un repli) ; empaquetage
