@@ -3010,8 +3010,11 @@ static unsigned long tex_lv0_sig(const PTex *t)
        indéterminé au retour de siglongjmp). */
     volatile unsigned long vsig = sig;
     unsigned long n;
-    if (upload_blank)
-        return sig;
+    /* (24/09, vitres) : pas de sortie anticipée sous upload_blank — l'empreinte
+       doit être la MÊME qu'au dessin suivant, sinon la texture paraît modifiée
+       à chaque copie et repart en noir avant chaque COPY_TEX de bord, qui
+       n'écrit qu'une colonne : la copie 640×480 était effacée. La garde
+       sig_jmp couvre la lecture d'un niveau non engagé. */
     if (d && w && h) {
         if (sigsetjmp(sig_jmp, 0) != 0) {
             sig_jmp_on = 0;             /* niveau illisible (24/09, DOOM 3) */
@@ -10205,12 +10208,14 @@ static int try_copy_tex(PCtx *p, unsigned long *a)
        d'UT2004) : ses niveaux invité ne sont jamais à jour, et souvent pas
        même lisibles (glTexImage2D(NULL)) — on crée des niveaux noirs sur
        l'hôte, la copie les écrase. */
-    upload_blank = 1;
-    if (!texture_uploadable(t) || !upload_texture(p, t) || t->qtex < 0) {
+    if (t->qtex < 0 || t->dirty) {
+        upload_blank = 1;
+        if (!texture_uploadable(t) || !upload_texture(p, t) || t->qtex < 0) {
+            upload_blank = 0;
+            COPYTEX_NO("texture non televersable");
+        }
         upload_blank = 0;
-        COPYTEX_NO("texture non televersable");
     }
-    upload_blank = 0;
     /* I1 (relecture du 24/09) : l'empreinte calculée sous upload_blank ne
        porte pas les texels ; au dessin suivant elle différait et le niveau
        invité (noir) repartait par-dessus la copie hôte — les vitres de

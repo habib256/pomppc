@@ -13,6 +13,38 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`. Les documents exter
 `docs/references-ingenierie.md`. Les amorces de recherche déjà
 écrites, à ne pas refaire, sont en *Recherches amorcées*.
 
+## Ordre de travail retenu le 24/09/2026 (« C : le contrat d'abord »)
+
+Choisi par l'utilisateur parmi quatre organisations (robustesse d'abord, valeur visible d'abord,
+contrat d'abord, un jeu à la fois). Logique : arrêter de changer le protocole tous les soirs,
+chaque changement coûtant QEMU + kext + plugin + redémarrage ; figer le contrat, en faire le
+harnais, puis optimiser et élargir dessous. Les dix étapes viennent du texte d'orientation de
+l'utilisateur (24/09, après-midi), réordonnées.
+
+1. **Vitres de DOOM 3** par vidage rejoué — en cours (cause trouvée le 24/09 à 16h : l'empreinte de
+   niveau différait à chaque copie, la texture repartait en noir avant chaque copie de bord).
+2. **Sens de la copie d'écran et protocole figé v18, d'un bloc** : `COPY_TEX` doit produire une
+   texture orientée comme en OpenGL réel (aujourd'hui en orientation hôte, donc `fragment.position`
+   retourné et les coordonnées calculées par les programmes se contredisent) ; puis un seul
+   `docs/protocole.md` (capacités, clés, formats, tailles de génériques) à la place des notes
+   v16/v17, et `QGPU_PROTO_VERSION` 18 — une seule reconstruction de tout.
+3. **Matrice de jeux avec preuve** : pour Zenerchi, Marble Blast, UT2004, WC3, Colin McRae, DOOM 3,
+   Prey, RTCW — image identique au rejeu, `fb=0`, plancher d'images par seconde ; un script lance,
+   mesure, capture. Elle devient le harnais du contrat.
+4. **Empaquetage minimal** sous contrat figé : position en 3 mots, texcoords à taille déclarée,
+   tampons hôte réutilisés pour la géométrie statique.
+5. **Robustesse de session** : `kCGLBadDisplay` après `killall`, créneaux de clients perdus,
+   vérification kext ↔ plugin généralisée à toute constante partagée.
+6. **Gardes de faute ramenées à la cause** : chaque `faute de lecture` et chaque niveau envoyé noir
+   est un compteur observé à zéro sur la matrice.
+7. **Colin McRae, Warcraft III, UT2004 (arme noire)** : les restes du chemin tableaux.
+8. **Mesure honnête de la transmission paresseuse** (hangar de DOOM 3, jeu à replis), décision du
+   défaut.
+9. **Quartz Extreme et Core Image** sur `tiger-dev.raw` : surfaces hôte pour le WindowServer, plus de
+   quatre clients, présentation directe généralisée.
+10. **1.0 = installation reproductible** : CD ou paquet, `install.sh` qui reconstruit kext et plugin,
+    disque quotidien recréable depuis l'ISO, matrice verte relancée à chaque commit.
+
 ## État (23/09/2026, nuit) — protocole v16 : programmes ARB sur l'hôte
 
 **Fait, non commité.** `docs/protocole-v16-programmes.md` §5 dit ce qui est réalisé et ce qui

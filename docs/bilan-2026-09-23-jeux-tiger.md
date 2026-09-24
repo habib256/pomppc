@@ -146,7 +146,7 @@ tableaux et VBO (UT2004, WC3), programmes ARB (Colin McRae, DOOM 3, Prey). Quand
 est verte sur son représentant, les autres jeux de la même famille tombent pour peu de frais ;
 c'est pour cela que P1 et P2 passent avant tout ajout de fonction.
 
-## 4. Ordre proposé pour la prochaine session
+## 4. Ordre proposé pour la prochaine session (remplacé le 24/09 par l'ordre « C », voir docs/todo-gpu-3d.md)
 
 1. P5 (vérification kext ↔ plugin, commit des lots de ce soir) — une heure, évite de reperdre
    la soirée.
