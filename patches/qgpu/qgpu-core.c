@@ -2812,9 +2812,16 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (!c->be->readback(c, s, sx, sy, w, h, c->pbuf)) {
             return QGPU_ST_BACKEND;
         }
+        /* v17 (24/09/2026, vitres de DOOM 3) : la relecture rend les lignes de
+           HAUT en bas (convention de l'invité) ; en OpenGL, la ligne 0 d'une
+           texture est le BAS de la fenêtre. La copie est donc retournée :
+           un programme qui relit la copie par fragment.position (retourné
+           lui aussi dans qgpu-gl.c) ou par des coordonnées calculées de la
+           position de clip voit l'image à l'endroit, comme sur une vraie
+           carte. Avant : le reflet des vitres était à l'envers. */
         for (row = 0; row < h; row++) {
             memcpy(lv->px + ((size_t)z * lv->h + y + row) * lv->w + x,
-                   c->pbuf + (size_t)row * w, (size_t)w * 4);
+                   c->pbuf + (size_t)(h - 1 - row) * w, (size_t)w * 4);
         }
         t->dirty[face] |= 1u << lvl;
         if (t->gen_mipmap && lvl == t->base_level && !tex_gen_mipmaps(t, face)) {

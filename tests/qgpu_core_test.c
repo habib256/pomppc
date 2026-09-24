@@ -4712,6 +4712,36 @@ static void run_v13(QgpuCore *c, uint8_t *shmem)
         st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
         CHECK(st == QGPU_ST_OK, "COPY_TEX 4×4 : st %u", st);
 
+        /* orientation OpenGL (24/09) : les deux lignes du HAUT de la surface
+           passent en bleu (ciseau, origine en haut à gauche), copie 4×4 en
+           (0,0) : la ligne 3 du niveau (haut de la fenêtre) est bleue, la
+           ligne 0 (bas) rouge. */
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_SCISSOR, 1);
+        state(&e, QGPU_SK_SCISSOR_X, 0); state(&e, QGPU_SK_SCISSOR_Y, 0);
+        state(&e, QGPU_SK_SCISSOR_W, W); state(&e, QGPU_SK_SCISSOR_H, 2);
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF0000FF, 1.0f);
+        state(&e, QGPU_SK_SCISSOR, 0);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX));
+        emit(&e, 40); emit(&e, QGPU_TT_2D); emit(&e, 0);
+        emit(&e, 0); emit(&e, 0); emit(&e, 0);
+        emit(&e, 0); emit(&e, 0); emit(&e, 4); emit(&e, 4);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        {
+            const uint32_t *lv0 = c->tex[40].level[0][0].px;
+            uint32_t bas = lv0 ? lv0[0] & 0xFFFFFF : 0, haut = lv0 ? lv0[3 * 8] & 0xFFFFFF : 0;
+            CHECK(st == QGPU_ST_OK && bas == 0xFF0000 && haut == 0x0000FF,
+                  "COPY_TEX orientation OpenGL : ligne 0 %06x (rouge), ligne 3 %06x (bleu), st %u",
+                  bas, haut, st);
+        }
+        e.off = e.start = CMD_OFF;
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFFFF0000, 1.0f);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX));
+        emit(&e, 40); emit(&e, QGPU_TT_2D); emit(&e, 0);
+        emit(&e, 0); emit(&e, 0); emit(&e, 0);
+        emit(&e, 0); emit(&e, 0); emit(&e, 4); emit(&e, 4);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+
         e.off = e.start = VTX_OFF;
         tex_quad(&e, 1, 1, 1, 1, 1, 1);
         e.off = e.start = CMD_OFF;
