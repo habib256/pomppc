@@ -74,6 +74,11 @@ add_executable(pomppc
     src/QemuBridge.cpp
     ${IMGUI_SOURCES})
 target_include_directories(pomppc PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends src)
+if(APPLE)
+    target_compile_definitions(pomppc PRIVATE GL_SILENCE_DEPRECATION)
+    # objc runtime: main.cpp unbinds Cocoa's Ctrl+Cmd+F "Enter Full Screen".
+    target_link_libraries(pomppc PRIVATE objc)
+endif()
 target_link_libraries(pomppc PRIVATE
     dbus_display1
     PkgConfig::GIO
