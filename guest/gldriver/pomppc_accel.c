@@ -75,7 +75,7 @@
 #include "pomppc_gld.h"
 #include "pomppc_qgpu.h"
 
-#define POMPPC_PLUGIN_REV "20260923-vtxlimit"
+#define POMPPC_PLUGIN_REV "20260924-lazyapple"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 /* 24/09/2026 — garde de lecture des tableaux de l'application. Les copies
@@ -461,6 +461,13 @@ typedef struct PProg {
 } PProg;
 static PProg pprog[PPROG_MAX];
 
+/* Mots du bloc de changements que GLEngine passe à gldUpdateDispatch (3e
+   argument) : +0x00 masque principal, +0x04 et +0x10 unités de texture
+   (lus par le GLDriver d'Apple et par glrSetFunctions) ; +0x08, +0x0c
+   cumulés aussi, par prudence. */
+#define LAZY_WORDS 5
+#define LAZY_DEFAULT 0          /* sans POMPPC_GL_LAZYAPPLE */
+
 typedef struct PCtx {
     struct PCtx   *next;
     void          *ctx;                 /* contexte du GLDriver d'Apple */
@@ -547,6 +554,12 @@ typedef struct PCtx {
     int            d_ok;                /* 0 non, 1 plein écran, 2 en fenêtre */
     long           d_x, d_y;            /* rectangle de CE contexte à l'écran */
     unsigned long  d_checked_at;        /* image de la dernière réévaluation */
+    /* ── transmission paresseuse au GLDriver d'Apple (POMPPC_GL_LAZYAPPLE,
+       docs/re/dispatch-paresseux.md) : masques de changement de GLEngine
+       cumulés depuis le dernier gldUpdateDispatch transmis ── */
+    unsigned long  lazy_m[LAZY_WORDS];
+    int            lazy_pending;
+    long           lazy_ret;            /* dernier retour d'Apple (4) */
 } PCtx;
 
 /* v16 : définies avec la synchronisation des programmes, plus bas ; texture_ok
@@ -713,6 +726,11 @@ static struct {
     unsigned long   n_syncfall;         /* retours en synchrone sur ERRORS */
     unsigned long   n_qsamples, n_qsum; /* profondeur de file échantillonnée */
     double          t_wait;             /* secondes passées à attendre une barrière */
+    /* ── transmission paresseuse au GLDriver d'Apple ── */
+    int             lazy;               /* POMPPC_GL_LAZYAPPLE */
+    unsigned long   n_lazy_defer;       /* gldUpdateDispatch gardés pour plus tard */
+    unsigned long   n_lazy_eager;       /* transmis tout de suite (tampon de dessin) */
+    unsigned long   n_lazy_sync;        /* transmis juste avant une procédure d'Apple */
 } G = { PTHREAD_MUTEX_INITIALIZER };
 
 static double now_s(void)
@@ -887,6 +905,10 @@ static void stats_frame(void *ctx)
     G.n_frames++;
     trace_frame(ctx);
     async_rearm();
+    if (G.lazy && G.n_frames % 500 == 0)
+        gl_note("LAZYAPPLE image %lu : %lu dispatch gardés, %lu transmis au tampon de dessin, "
+                "%lu transmis avant une procédure d'Apple\n",
+                G.n_frames, G.n_lazy_defer, G.n_lazy_eager, G.n_lazy_sync);
     if (!path)
         return;
     /* Profondeur de la file du device, une fois par image et SEULEMENT quand
@@ -949,6 +971,10 @@ static void stats_frame(void *ctx)
                                 no_name[k], no_count[k], no_detail[k]);
                 if (direct_why()[0])
                     fprintf(f, "    direct present off: %s\n", direct_why());
+                if (G.lazy)
+                    fprintf(f, "    lazy apple: %lu dispatch kept, %lu sent at draw buffer, "
+                            "%lu sent before an Apple proc (cumulative)\n",
+                            G.n_lazy_defer, G.n_lazy_eager, G.n_lazy_sync);
                 for (k = 0; k < PROC_COUNT; k++)
                     if (fb_count[k])
                         fprintf(f, "    fallback %s: %lu\n", pomppc_proc_name(k), fb_count[k]);
@@ -1410,6 +1436,13 @@ void pomppc_backend_init(void)
                l'émulation par GLEngine (repli sur Apple pour ces dessins). */
             G.prog = G.v7 && G.q.version >= 16 && (G.q.caps & QGPU_CAP_PROGRAMS) &&
                      !(getenv("POMPPC_GL_PROG") && getenv("POMPPC_GL_PROG")[0] == '0');
+            /* Transmission paresseuse des gldUpdateDispatch au GLDriver
+               d'Apple (docs/re/dispatch-paresseux.md) : POMPPC_GL_LAZYAPPLE=1
+               l'allume, =0 l'éteint ; sans la variable, LAZY_DEFAULT. */
+            {
+                const char *lz = getenv("POMPPC_GL_LAZYAPPLE");
+                G.lazy = lz && lz[0] ? lz[0] != '0' : LAZY_DEFAULT;
+            }
             G.pixtex = -1;
             G.pixtex_w = G.pixtex_h = 0;
             G.buf_base = G.q.index * QGPU_CLIENT_BUF_IDS;
@@ -1424,8 +1457,8 @@ void pomppc_backend_init(void)
             G.state = -1;
         }
         if (G.state > 0) {
-            gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d\n",
-                    G.q.version, G.q.caps, G.v10);
+            gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d lazyapple=%d\n",
+                    G.q.version, G.q.caps, G.v10, G.lazy);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
                        " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
@@ -3213,6 +3246,12 @@ static int upload_texture(PCtx *p, PTex *t)
                        rendu d'Apple). */
                     static unsigned long told;
                     sig_jmp_on = 0;
+                    if (t->host_only) {
+                        /* cible de copie d'écran : le contenu à jour est sur
+                           l'hôte (COPY_TEX) — ne pas l'écraser de noir
+                           (vitres de DOOM 3, 24/09) */
+                        continue;       /* l'espace d'arène réservé est perdu, c'est rare */
+                    }
                     memset(G.q.win + off, 0, size);
                     if (told < 3) {
                         told++;
@@ -7084,7 +7123,9 @@ static const unsigned char *va_src(PCtx *p, const unsigned char *V, int a)
        mappée au 10e sommet → SIGSEGV. Les génériques (16..) l'ignoraient déjà. */
     if (vbo) {
         base = GLD_U32((void *)vbo, 0x30);
-        return (const unsigned char *)(base + raw);
+        /* P5 : copie cliente nulle (Colin McRae, va_probe) → source nulle,
+           pas « 0 + décalage » qui passerait va_sources_ok */
+        return base ? (const unsigned char *)(base + raw) : 0;
     }
     if (gc && a < 16) {
         cached = GLD_U32(gc, GC_VA_PTRS + 4 * a);
@@ -7911,6 +7952,11 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
     if (!reuse) {
         if (host && hb && !buf_host_ensure(p, hb, packed))
             hb = 0;
+        /* I3 (relecture du 24/09) : close_raw() rappelle raw_fix_nan, qui
+           réécrit raw_bad[] avec le lot Begin/End en attente — il doit donc
+           passer AVANT le marquage de ce lot-ci, pas entre le marquage et le
+           filtre des triangles. */
+        close_raw();
         vtx_off = G.vtx;
         dst = (float *)(G.win + VTX_OFF + vtx_off);
         {
@@ -7982,7 +8028,10 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
             G.ncmd += QGPU_LEN_BUF_SUBDATA;
             hb->pack_fmt = fmt;
             hb->pack_vmin = vmin;
-            hb->pack_nverts = nverts;
+            /* I4 : un lot dont des triangles seront retirés ne doit pas être
+               réutilisé tel quel au prochain dessin (les indices repartiraient
+               entiers) */
+            hb->pack_nverts = filter_bad ? 0 : nverts;
             hb->pack_key = key;
             va_host_clean(V, fmt, hb);
             G.n_vbomiss++;
@@ -8542,10 +8591,19 @@ static void end_tris(Batch *b)
         b->p->depth = HOST_NEWER;
 }
 
+static void lazy_sync(PCtx *p);
+
 /* Repli : synchronise l'invité et marque ce que le logiciel va écrire.
  * `touches_depth` : la procédure lit ou écrit la profondeur. */
 static void *fallback(PCtx *p, int slot, int writes_color, int touches_depth)
 {
+    /* Le rendu d'Apple va travailler : il doit d'abord connaître tous les
+       changements d'état que la transmission paresseuse lui a tus. AVANT la
+       relecture, parce que c'est ce dispatch qui alloue au besoin son tampon
+       de profondeur. Les échanges n'en ont pas besoin (gldSwapBuffers ne lit
+       que le tampon de dessin, tenu à jour par le bit 0x80). */
+    if (slot != PROC_Swap58 && slot != PROC_Swap5c && slot != PROC_Swap60)
+        lazy_sync(p);
     if (G.state > 0 && p->surf >= 0) {
         sync_to_sw_locked(p, touches_depth);
         check_draw_buffer(p);
@@ -9009,6 +9067,8 @@ static long a_clear(void *ctx, long mask, long c, long d, long e, long f, long g
         if (ds_written)
             p->depth = HOST_NEWER;
         G.n_clears++;
+        if (rest)
+            lazy_sync(p);               /* le Clear d'Apple va servir */
         pthread_mutex_unlock(&G.mu);
         /* accumulation (et stencil d'un format non suivi) : par le logiciel */
         return rest ? real(ctx, rest, c, d, e, f, g8, h) : 0;
@@ -9231,8 +9291,8 @@ static void crash_handler(int sig, siginfo_t *si, void *ucv)
 static void crash_hook_install(void)
 {
     struct sigaction sa;
-    if (!getenv("POMPPC_GL_NOTE"))
-        return;
+    /* P1 (relecture du 24/09) : les gardes de faute valent même sans journal ;
+       seul l'enregistrement dépend de POMPPC_GL_NOTE. */
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = crash_handler;
     sa.sa_flags = SA_SIGINFO | SA_NODEFER;
@@ -9860,6 +9920,8 @@ static int try_copy_tex(PCtx *p, unsigned long *a)
     if (target == 0) {
         target = 0x0DE1;
         sx = (long)a[7]; sy = (long)a[8]; w = a[9]; h = a[10];
+        if (a[6] != 0)
+            return 0;                   /* zoff : face de cube ou 3D, à Apple */
     }
 
     static unsigned long told, told_args;
@@ -9895,6 +9957,11 @@ static int try_copy_tex(PCtx *p, unsigned long *a)
         COPYTEX_NO("texture non televersable");
     }
     upload_blank = 0;
+    /* I1 (relecture du 24/09) : l'empreinte calculée sous upload_blank ne
+       porte pas les texels ; au dessin suivant elle différait et le niveau
+       invité (noir) repartait par-dessus la copie hôte — les vitres de
+       DOOM 3 (_currentRender) montraient du noir. */
+    t->lv0_sig = tex_lv0_sig(t);
     hy = p->sh - (unsigned long)sy - h;
     c = reserve(p, QGPU_LEN_COPY_TEX);
     c[0] = QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX);
@@ -10736,38 +10803,164 @@ static void *install_for(int k)
  * de la table, c'est-à-dire à chaque changement d'état GL : elles doivent
  * rester en temps constant par case (vu en vrai : 15 % du temps de Zenerchi
  * avec une recherche linéaire par case). */
+static void hook_locked(PCtx *p, void **procs)
+{
+    int k;
+    p->procs = procs;
+    for (k = 0; k < PROC_COUNT; k++) {
+        void *mine = install_for(k);
+        if (!mine || procs[k] == mine)
+            continue;
+        if (!procs[k] && !proc_standalone(k))
+            continue;                   /* rien à quoi se replier : on s'abstient */
+        p->real[k] = procs[k];
+        p->mine[k] = mine;
+        procs[k] = mine;
+    }
+}
+
+static void unhook_locked(PCtx *p, void **procs)
+{
+    int k;
+    for (k = 0; k < PROC_COUNT; k++)
+        if (p->mine[k] && procs[k] == p->mine[k])
+            procs[k] = p->real[k];
+}
+
 void pomppc_hook_procs(void *ctx, void **procs)
 {
     PCtx *p;
-    int k;
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
-    if (p) {
-        p->procs = procs;
-        for (k = 0; k < PROC_COUNT; k++) {
-            void *mine = install_for(k);
-            if (!mine || procs[k] == mine)
-                continue;
-            if (!procs[k] && !proc_standalone(k))
-                continue;               /* rien à quoi se replier : on s'abstient */
-            p->real[k] = procs[k];
-            p->mine[k] = mine;
-            procs[k] = mine;
-        }
-    }
+    if (p)
+        hook_locked(p, procs);
     pthread_mutex_unlock(&G.mu);
 }
 
 void pomppc_unhook_procs(void *ctx, void **procs)
 {
     PCtx *p;
-    int k;
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
     if (p)
-        for (k = 0; k < PROC_COUNT; k++)
-            if (p->mine[k] && procs[k] == p->mine[k])
-                procs[k] = p->real[k];
+        unhook_locked(p, procs);
+    pthread_mutex_unlock(&G.mu);
+}
+
+/* ─────────── transmission paresseuse des dispatches au GLDriver d'Apple ───────────
+ *
+ * docs/re/dispatch-paresseux.md. gldUpdateDispatch (Apple, 10.4.6) ne fait
+ * QUE préparer son propre rendu logiciel : recharger et convertir les
+ * textures liées (gldLoadCurrentTexture → glgProcessPixels, S3TC décompressé),
+ * recalculer ses données de rastérisation (ctx+0x22c..0x2a8, 0x6b4..0x6fc,
+ * glrSetFunctions du module GLRaster) et, sous le bit 0x80, les pointeurs du
+ * tampon de dessin et les trois procédures d'échange. Il ne lit que les mots
+ * +0x00, +0x04 et +0x10 du bloc de changements, n'y écrit rien, et rend 4
+ * (0x2720 si une allocation de tampon échoue). Rien de ce qu'il calcule n'est
+ * lu hors de ses procédures de rastérisation — ni par GLEngine, ni par ses
+ * autres points d'entrée gld*, ni par le plugin.
+ *
+ * Tant que le plugin dessine tout sur l'hôte, ce travail est perdu. On cumule
+ * donc les masques (OU bit à bit, mot par mot) et on ne transmet que :
+ *   — tout de suite, si le bit 0x80 (tampon de dessin) est là : le plugin lit
+ *     ctx+0x94 aussitôt après (pomppc_after_draw_buffer_change), et check_
+ *     draw_buffer à chaque dessin hôte ;
+ *   — juste avant qu'une procédure d'Apple ne travaille : fallback(), le
+ *     Clear partiel de a_clear. Tous les chemins vers une procédure d'Apple
+ *     qui lit l'état passent par là (les emplacements que le plugin ne
+ *     crochète pas ne portent chez Apple que des bouchons : Noop,
+ *     BufferSubData, Begin/EndPrimitiveBuffer, RenderVertexBuffer/Array,
+ *     ModifyTexSubImage, GenerateTexMipmaps, CopyTexSubImage) ;
+ *   — avant gldInitDispatch et gldAttachDrawable (pomppc_lazy_flush).
+ * Le verrou de géométrie (bit 0 du retour) ne dépend pas d'Apple :
+ * pomppc_geom_dispatch tourne à chaque dispatch, transmis ou non.
+ *
+ * Tout se fait sous G.mu, dans le fil qui appelle pour CE contexte : jamais
+ * de transmission pour le compte d'un autre contexte (GLEngine ne sérialise
+ * qu'au sein d'un contexte). */
+static long lazy_call(PCtx *p, const unsigned long *m)
+{
+    long r;
+    void **procs = p->procs;
+    /* Sous 0x80, Apple réécrit les cases d'échange 0x58/0x5c/0x60 : on lui
+       rend sa table, puis on recrochète, comme gldUpdateDispatch. */
+    if (procs)
+        unhook_locked(p, procs);
+    r = pomppc_call_real(GLD_UpdateDispatch, (long)p->ctx, (long)procs, (long)m, 0, 0, 0, 0, 0);
+    if (procs)
+        hook_locked(p, procs);
+    if (r == 4) {
+        p->lazy_ret = r;
+    } else {
+        static int told;
+        if (told < 4) {
+            told++;
+            gl_note("LAZYAPPLE: gldUpdateDispatch d'Apple rend 0x%lx (masque %08lx)\n",
+                    (unsigned long)r, m[0]);
+        }
+    }
+    return r;
+}
+
+/* G.mu tenu. Rattrape Apple : un seul dispatch, masques cumulés. */
+static void lazy_sync(PCtx *p)
+{
+    unsigned long m[LAZY_WORDS];
+    if (!p->lazy_pending)
+        return;
+    memcpy(m, p->lazy_m, sizeof(m));
+    memset(p->lazy_m, 0, sizeof(p->lazy_m));
+    p->lazy_pending = 0;
+    G.n_lazy_sync++;
+    lazy_call(p, m);
+}
+
+/* gldUpdateDispatch. Rend 0 si la transmission paresseuse n'est pas en jeu
+ * (l'appelant fait comme avant), 1 sinon, avec dans *ret ce qu'Apple a rendu
+ * — ou ce qu'il rendrait : 4, constant hors échec d'allocation. L'appelant
+ * garde pomppc_after_draw_buffer_change, le crochetage et le verdict. */
+int pomppc_lazy_update(void *ctx, void **procs, unsigned long *chg, long *ret)
+{
+    PCtx *p;
+    int k;
+    if (!G.lazy || G.state <= 0 || !chg || !procs)
+        return 0;
+    pthread_mutex_lock(&G.mu);
+    p = find_ctx(ctx);
+    if (!p || !p->procs) {
+        /* pas encore de gldInitDispatch vu pour ce contexte : comme avant */
+        pthread_mutex_unlock(&G.mu);
+        return 0;
+    }
+    for (k = 0; k < LAZY_WORDS; k++)
+        p->lazy_m[k] |= chg[k];
+    p->lazy_pending = 1;
+    p->procs = procs;
+    if (chg[0] & 0x80) {
+        unsigned long m[LAZY_WORDS];
+        memcpy(m, p->lazy_m, sizeof(m));
+        memset(p->lazy_m, 0, sizeof(p->lazy_m));
+        p->lazy_pending = 0;
+        G.n_lazy_eager++;
+        *ret = lazy_call(p, m);
+    } else {
+        G.n_lazy_defer++;
+        *ret = p->lazy_ret;
+    }
+    pthread_mutex_unlock(&G.mu);
+    return 1;
+}
+
+/* Avant gldInitDispatch, gldAttachDrawable : Apple rattrape ce qu'on lui a tu. */
+void pomppc_lazy_flush(void *ctx)
+{
+    PCtx *p;
+    if (!G.lazy || G.state <= 0)
+        return;
+    pthread_mutex_lock(&G.mu);
+    p = find_ctx(ctx);
+    if (p && p->procs)
+        lazy_sync(p);
     pthread_mutex_unlock(&G.mu);
 }
 
@@ -10784,6 +10977,7 @@ void pomppc_context_created(void *ctx)
     p->surf = -1;
     p->q_open = -1;
     p->color = p->depth = SW_NEWER;
+    p->lazy_ret = 4;                    /* ce que rend le gldInitDispatch d'Apple */
     pthread_mutex_lock(&G.mu);
     if (G.state > 0) {
         p->qctx = alloc_id(&G.ctx_used, G.q.ctx_base, QGPU_CLIENT_CTX_IDS);

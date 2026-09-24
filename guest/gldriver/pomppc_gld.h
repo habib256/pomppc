@@ -173,6 +173,10 @@ void *pomppc_proc_pre(int slot, unsigned long *args);
 const char *pomppc_proc_name(int slot);
 void pomppc_unhook_procs(void *ctx, void **procs);
 void pomppc_sync_to_sw(void *ctx);
+/* Transmission paresseuse des gldUpdateDispatch au GLDriver d'Apple
+   (POMPPC_GL_LAZYAPPLE, docs/re/dispatch-paresseux.md). */
+int  pomppc_lazy_update(void *ctx, void **procs, unsigned long *chg, long *ret);
+void pomppc_lazy_flush(void *ctx);
 const char *pomppc_override_string(long name, const char *apple);
 /* Entrée gld que le plugin réalise lui-même (requêtes d'occlusion v8), ou 0 :
    pomppc_pre la rend au trampoline à la place de celle du rendu d'Apple. */

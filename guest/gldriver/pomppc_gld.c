@@ -569,6 +569,7 @@ long gldDestroyContext(long a, long b, long c, long d, long e, long f, long g, l
 long gldAttachDrawable(long a, long b, long c, long d, long e, long f, long g, long h)
 {
     long r;
+    pomppc_lazy_flush((void *)a);       /* avant que les tampons changent */
     pomppc_before_buffers_change((void *)a);
     r = b == 54 ? pomppc_attach_fullscreen((void *)a) : FWD8(GLD_AttachDrawable);
     pomppc_log("gldAttachDrawable(%08lx %08lx %08lx %08lx) -> %ld\n", a, b, c, d, r);
@@ -578,7 +579,9 @@ long gldAttachDrawable(long a, long b, long c, long d, long e, long f, long g, l
 
 long gldInitDispatch(long a, long b, long c, long d, long e, long f, long g, long h)
 {
-    long r = FWD8(GLD_InitDispatch);
+    long r;
+    pomppc_lazy_flush((void *)a);       /* Apple rattrape d'abord ce qu'on lui a tu */
+    r = FWD8(GLD_InitDispatch);
     pomppc_log("gldInitDispatch(%08lx %08lx %08lx) -> %ld\n", a, b, c, r);
     pomppc_hook_procs((void *)a, (void **)b);
     /* LE VERROU de la géométrie : GLEngine relit le bit 0 de cette valeur à
@@ -598,10 +601,18 @@ long gldUpdateDispatch(long a, long b, long c, long d, long e, long f, long g, l
     long r;
     /* 0x80 : le tampon de dessin change (gldSetDrawBufferPtrs chez Apple) */
     int buf = c && (*(unsigned long *)c & 0x80);
-    pomppc_unhook_procs((void *)a, (void **)b);
-    r = FWD8(GLD_UpdateDispatch);
-    pomppc_log("gldUpdateDispatch(%08lx %08lx changes %08lx) -> %ld\n", a, b,
-               c ? *(unsigned long *)c : 0, r);
+    if (pomppc_lazy_update((void *)a, (void **)b, (unsigned long *)c, &r)) {
+        /* Transmission paresseuse : Apple n'est appelé que sous 0x80 ; sinon
+           les changements sont cumulés et lui seront transmis juste avant
+           qu'une de ses procédures travaille (docs/re/dispatch-paresseux.md). */
+        pomppc_log("gldUpdateDispatch(%08lx %08lx changes %08lx) -> %ld%s\n", a, b,
+                   c ? *(unsigned long *)c : 0, r, buf ? "" : " (gardé)");
+    } else {
+        pomppc_unhook_procs((void *)a, (void **)b);
+        r = FWD8(GLD_UpdateDispatch);
+        pomppc_log("gldUpdateDispatch(%08lx %08lx changes %08lx) -> %ld\n", a, b,
+                   c ? *(unsigned long *)c : 0, r);
+    }
     if (buf)
         pomppc_after_draw_buffer_change((void *)a);
     pomppc_hook_procs((void *)a, (void **)b);
