@@ -185,7 +185,8 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
       crochet n'est réarmé qu'à `PROC_Swap60` (`crash_hook_check`, ligne 984) et ce premier
       `EndFrame` de `InitGame` précède la première image — Prey a déjà remplacé nos gestionnaires,
       la faute va chez lui. **Corrigé et vérifié le 24/09 soir** : Prey démarre sans dialogue,
-      `Prey.crash.log` inchangé (216 482 octets), `gltest` inchangé.
+      `Prey.crash.log` inchangé (216 482 octets), `gltest` inchangé ; DOOM 3 relancé après :
+      cinématique d'arrivée à Mars City juste à l'écran (hublots, écrans, halos).
       (1) `crash_hook_fresh()` relit les gestionnaires à chaque armement de garde (`sig_jmp`,
       `pack_jmp`, `PROC_GUARD_ARM`) tant que `G.n_frames == 0`, coût nul ensuite ; le réarmement
       par image (`stats_frame`) valait déjà sans `POMPPC_GL_STATS`. (2) Aucun champ de taille en
