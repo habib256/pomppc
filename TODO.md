@@ -42,7 +42,7 @@ une matrice de jeux verte comme preuve. Un jeu est « vert » quand il a ses tro
 Les trois preuves valent **en fenêtre ET en plein écran** (demande de l'utilisateur, 24/09 soir) :
 c'est en plein écran qu'on joue, et le chemin diffère (`CGLSetFullScreen` → drawable mémoire par
 `pomppc_attach_fullscreen`, présentation par copie en VRAM, `docs/re/ut2004-fullscreen.md`). DOOM 3
-et Prey n'ont encore été joués qu'en fenêtre (`r_fullscreen 0` dans les lanceurs).
+et Prey passent en plein écran 1024×768 (24/09 soir, §5) ; le changement de mode reste à jouer.
 
 | Jeu | Famille | Image | Replis | Vitesse (24/09) | Manque |
 |---|---|---|---|---|---|
@@ -204,9 +204,12 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
 
 ## 5. Points ouverts (bugs, dettes, mesures à faire)
 
-- [ ] **DOOM 3 et Prey en plein écran** (`+set r_fullscreen 1`, et `r_mode` de l'écran) : jamais
-      joués ; à vérifier image et ms/image après le lot 2, puis à chaque lot (lanceurs
-      `~/doom3-fs.command`, `~/prey-fs.command` à créer sur le modèle des existants). Le chemin
+- [ ] **DOOM 3 et Prey en plein écran** (`+set r_fullscreen 1 +set r_mode 5`, 1024×768 = l'écran) :
+      **joués le 24/09 soir avec le plugin `verdict`** (lanceurs `~/doom3-fs.command`,
+      `~/prey-fs.command`) : attache plein écran OK (`fullscreen attach ok 1024x768`), images
+      justes à l'écran (Prey : scène du miroir, 23 img/s ; DOOM 3 : cinématique, 17,6 ms/image),
+      zéro repli, pas de plantage. Reste : le changement de mode par le jeu (`r_mode 3` = 640×480,
+      `CGDisplaySwitchToMode`) et la mesure en combat en plein écran. Le chemin
       plein écran du plugin (`pomppc_attach_fullscreen`, drawable 54 → mémoire 32 bits de l'écran
       principal, `docs/re/ut2004-fullscreen.md`) n'a été validé que sur UT2004 et, en 16 bits,
       Warcraft III. Changement de mode par le jeu (`CGDisplaySwitchToMode`) et `SURF_PRESENT` sur
