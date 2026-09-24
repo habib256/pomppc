@@ -38,7 +38,7 @@
  *                            et pas le rendu logiciel d'Apple) ;
  *   GLTEST_DIFF_MAX=<n>      seuil de « gltest diff » hors arêtes (défaut 2).
  *
- * 73 SCÈNES (par ordre alphabétique ; « diff » n'en est pas une, c'est le
+ * 74 SCÈNES (par ordre alphabétique ; « diff » n'en est pas une, c'est le
  * comparateur d'images). Neuf sont celles de la chaîne de verdict, une par
  * trou du bug hunt : alpharep (H1), texcross (H2), readpack (P1), drawpack
  * (P2), texdelmid (P10), vbocolor (P13), rawprim (S2), offset (H4), forkdraw
@@ -48,7 +48,7 @@
  * alpharep arbfp arbvp bigstrip blendc caps clip comb combprobe cube cubeprobe depth
  * depthrt dlist drawpack entry fill fogz forkdraw fusion game gl15
  * gouraud lightprobe lit logicop matbegin matprobe mix mixte mtxprobe
- * occl offset polymode prims probe2 ptprobe qprobe rawprim readpack
+ * occl offset polymode prims probe2 ptprobe qprobe r4 rawprim readpack
  * sepspec spin state stencil stencilprobe stipple t3dprobe tclprobe
  * tcprobe tex tex13 tex14 tex3d texcache texcross texdelmid texfmt
  * texgen texlod texpack texpersp texprobe texup tgprobe tri v14probe v15
@@ -1242,6 +1242,350 @@ int main(int argc, char **argv)
         check("quad B (glDrawElements) vert", (int)(48 * sx), (int)(32 * sy), 0x00FF00);
         check("entre les deux quads : fond", (int)(32 * sx), (int)(32 * sy), 0x0000FF);
         check("au-dessus des quads : fond", (int)(32 * sx), (int)(8 * sy), 0x0000FF);
+    } else if (!strcmp(scene, "r4")) {
+        /* Relevé R4 du lot 3 du verdict unique (docs/re/bloc-changements-r4.md) :
+           quel bit du bloc de changements gctx+0x310 pose chaque appel GL.
+           Chaque étape fait UN seul changement puis un glDrawArrays par VBO ;
+           le plugin, sous POMPPC_GL_BLOCKDUMP=0:1000000, écrit sur stderr le
+           bloc de chaque gldUpdateDispatch (« BLOC dispatch … ») et chaque
+           dessin (« BLOC dessin … ») : lancé avec 2>&1, la ligne « R4 <appel> »
+           précède le bloc que cet appel a fait poser. Pas de témoin : c'est
+           une sonde (code 0 si toutes les entrées existent). */
+        typedef void (*gp_f)(GLsizei, GLuint *);
+        typedef void (*bp_f)(GLenum, GLuint);
+        typedef void (*ps_f)(GLenum, GLenum, GLsizei, const GLvoid *);
+        typedef void (*pe_f)(GLenum, GLuint, const GLfloat *);
+        typedef void (*va_f)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid *);
+        typedef void (*ea_f)(GLuint);
+        typedef void (*bd_f)(GLenum, long, const GLvoid *, GLenum);
+        typedef void (*bs_f)(GLenum, long, long, const GLvoid *);
+        typedef void (*at_f)(GLenum);
+        typedef void (*db_f)(GLclampd, GLclampd);
+        gp_f genp = (gp_f)gl_sym("glGenProgramsARB", "glGenProgramsARB");
+        bp_f bindp = (bp_f)gl_sym("glBindProgramARB", "glBindProgramARB");
+        ps_f strp = (ps_f)gl_sym("glProgramStringARB", "glProgramStringARB");
+        pe_f env = (pe_f)gl_sym("glProgramEnvParameter4fvARB", "glProgramEnvParameter4fvARB");
+        pe_f loc = (pe_f)gl_sym("glProgramLocalParameter4fvARB", "glProgramLocalParameter4fvARB");
+        va_f vap = (va_f)gl_sym("glVertexAttribPointerARB", "glVertexAttribPointerARB");
+        ea_f eva = (ea_f)gl_sym("glEnableVertexAttribArrayARB", "glEnableVertexAttribArrayARB");
+        ea_f dva = (ea_f)gl_sym("glDisableVertexAttribArrayARB", "glDisableVertexAttribArrayARB");
+        gp_f genb = (gp_f)gl_sym("glGenBuffersARB", "glGenBuffers");
+        bp_f bindb = (bp_f)gl_sym("glBindBufferARB", "glBindBuffer");
+        bd_f datab = (bd_f)gl_sym("glBufferDataARB", "glBufferData");
+        bs_f subb = (bs_f)gl_sym("glBufferSubDataARB", "glBufferSubData");
+        at_f actt = (at_f)gl_sym("glActiveTextureARB", "glActiveTexture");
+        at_f cactt = (at_f)gl_sym("glClientActiveTextureARB", "glClientActiveTexture");
+        at_f asf = (at_f)gl_sym("glActiveStencilFaceEXT", "glActiveStencilFaceEXT");
+        db_f dbounds = (db_f)gl_sym("glDepthBoundsEXT", "glDepthBoundsEXT");
+        at_f beq = (at_f)gl_sym("glBlendEquation", "glBlendEquationEXT");
+        pp_fv ppv = (pp_fv)gl_sym("glPointParameterfvARB", "glPointParameterfv");
+        static const GLubyte stip[128] = { 0x55 };
+        GLfloat att[3] = { 1.0f, 0.5f, 0.0f };
+        static const char vp_a[] =
+            "!!ARBvp1.0\n"
+            "DP4 result.position.x, state.matrix.mvp.row[0], vertex.position;\n"
+            "DP4 result.position.y, state.matrix.mvp.row[1], vertex.position;\n"
+            "DP4 result.position.z, state.matrix.mvp.row[2], vertex.position;\n"
+            "DP4 result.position.w, state.matrix.mvp.row[3], vertex.position;\n"
+            "MUL result.color, vertex.attrib[1], program.env[0];\n"
+            "MOV result.texcoord[0], vertex.texcoord[0];\n"
+            "END\n";
+        static const char vp_b[] =
+            "!!ARBvp1.0\n"
+            "DP4 result.position.x, state.matrix.mvp.row[0], vertex.position;\n"
+            "DP4 result.position.y, state.matrix.mvp.row[1], vertex.position;\n"
+            "DP4 result.position.z, state.matrix.mvp.row[2], vertex.position;\n"
+            "DP4 result.position.w, state.matrix.mvp.row[3], vertex.position;\n"
+            "MOV result.color, program.local[0];\n"
+            "MOV result.texcoord[0], vertex.texcoord[0];\n"
+            "END\n";
+        static const char fp_a[] =
+            "!!ARBfp1.0\nTEMP t;\nTEX t, fragment.texcoord[0], texture[0], 2D;\n"
+            "MUL result.color, t, program.env[0];\nEND\n";
+        static const char fp_b[] =
+            "!!ARBfp1.0\nTEMP t;\nTEX t, fragment.texcoord[0], texture[4], 2D;\n"
+            "MUL result.color, t, program.local[0];\nEND\n";
+        static const GLfloat pos[3 * 2] = { 4, 4, 60, 4, 4, 60 };
+        static const GLfloat tc[3 * 2] = { 0, 0, 1, 0, 0, 1 };
+        static const GLfloat col[3 * 4] = { 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1 };
+        static const GLubyte texel[2][16] = {
+            { 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255 },
+            { 0, 255, 255, 255, 255, 0, 255, 255, 255, 255, 0, 255, 0, 0, 0, 255 } };
+        static const GLubyte one_texel[4] = { 128, 128, 128, 255 };
+        GLfloat v4[4] = { 0.5f, 0.25f, 1.0f, 1.0f }, m[16];
+        GLuint tex[4], buf[5], prog[4];
+        int k;
+#define R4_TEX2D   0x0DE1
+#define R4_CUBE    0x8513
+#define R4_VP      0x8620
+#define R4_FP      0x8804
+#define R4_ASCII   0x8875
+#define R4_ARRAY   0x8892
+#define R4_ELEMS   0x8893
+#define R4_TEX(u)  (0x84C0 + (u))
+#define R4_D()     glDrawArrays(GL_TRIANGLES, 0, 3)
+#define R4(name, stmt) do { printf("R4 %s\n", name); stmt; R4_D(); } while (0)
+        if (!genp || !bindp || !strp || !env || !loc || !vap || !eva || !dva || !genb ||
+            !bindb || !datab || !subb || !actt || !cactt) {
+            printf("FAIL entrées ARB absentes\n");
+            failures++;
+            return 4;
+        }
+        for (k = 0; k < 16; k++)
+            m[k] = (k % 5 == 0) ? 1.0f : 0.0f;
+        glClearColor(0, 0, 1, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glGenTextures(4, tex);
+        for (k = 0; k < 2; k++) {
+            glBindTexture(R4_TEX2D, tex[k]);
+            glTexImage2D(R4_TEX2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, texel[k]);
+            glTexParameteri(R4_TEX2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(R4_TEX2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+        glBindTexture(R4_CUBE, tex[2]);
+        for (k = 0; k < 6; k++)
+            glTexImage2D(0x8515 + k, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, one_texel);
+        glTexParameteri(R4_CUBE, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(R4_CUBE, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glBindTexture(R4_CUBE, 0);
+        genb(5, buf);
+        bindb(R4_ARRAY, buf[0]); datab(R4_ARRAY, sizeof(pos), pos, 0x88E4);
+        bindb(R4_ARRAY, buf[1]); datab(R4_ARRAY, sizeof(tc), tc, 0x88E4);
+        bindb(R4_ARRAY, buf[2]); datab(R4_ARRAY, sizeof(col), col, 0x88E4);
+        bindb(R4_ARRAY, buf[3]); datab(R4_ARRAY, sizeof(pos), pos, 0x88E4);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+        bindb(R4_ARRAY, buf[0]); glVertexPointer(2, GL_FLOAT, 0, 0);
+        bindb(R4_ARRAY, buf[1]); glTexCoordPointer(2, GL_FLOAT, 0, 0);
+        glBindTexture(R4_TEX2D, tex[0]);
+        glEnable(R4_TEX2D);
+        glDisable(GL_DEPTH_TEST);
+        printf("R4 départ\n");
+        R4_D(); R4_D();
+
+        /* ── pipeline fixe ── */
+        R4("rien (témoin : aucun changement)", (void)0);
+        R4("glBindTexture 2D unité 0 (autre texture)", glBindTexture(R4_TEX2D, tex[1]));
+        R4("glBindTexture 2D unité 0 (la même)", glBindTexture(R4_TEX2D, tex[1]));
+        R4("glBindTexture 2D unité 0 (retour)", glBindTexture(R4_TEX2D, tex[0]));
+        R4("glActiveTexture unité 1", actt(R4_TEX(1)));
+        R4("glBindTexture 2D unité 1 (unité éteinte)", glBindTexture(R4_TEX2D, tex[1]));
+        R4("glEnable TEXTURE_2D unité 1", glEnable(R4_TEX2D));
+        R4("glBindTexture 2D unité 1 (unité allumée)", glBindTexture(R4_TEX2D, tex[0]));
+        R4("glDisable TEXTURE_2D unité 1", glDisable(R4_TEX2D));
+        R4("glBindTexture CUBE unité 1", glBindTexture(R4_CUBE, tex[2]));
+        R4("glEnable TEXTURE_CUBE_MAP unité 1", glEnable(R4_CUBE));
+        R4("glDisable TEXTURE_CUBE_MAP unité 1", glDisable(R4_CUBE));
+        R4("glActiveTexture unité 4", actt(R4_TEX(4)));
+        R4("glBindTexture 2D unité 4", glBindTexture(R4_TEX2D, tex[1]));
+        R4("glActiveTexture unité 5", actt(R4_TEX(5)));
+        R4("glBindTexture 2D unité 5", glBindTexture(R4_TEX2D, tex[1]));
+        R4("glActiveTexture unité 0", actt(R4_TEX(0)));
+        R4("glClientActiveTexture unité 1", cactt(R4_TEX(1)));
+        R4("glClientActiveTexture unité 0", cactt(R4_TEX(0)));
+        R4("glDisable TEXTURE_2D unité 0", glDisable(R4_TEX2D));
+        R4("glEnable TEXTURE_2D unité 0", glEnable(R4_TEX2D));
+        R4("glTexEnvi MODE REPLACE", glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE));
+        R4("glTexEnvi MODE MODULATE", glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE));
+        R4("glTexEnvfv COLOR", glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, v4));
+        R4("glTexParameteri MIN_FILTER LINEAR", glTexParameteri(R4_TEX2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+        R4("glTexParameteri WRAP_S CLAMP", glTexParameteri(R4_TEX2D, GL_TEXTURE_WRAP_S, GL_CLAMP));
+        R4("glTexSubImage2D (texture liée)", glTexSubImage2D(R4_TEX2D, 0, 0, 0, 2, 2, GL_RGBA, GL_UNSIGNED_BYTE, texel[1]));
+        R4("glTexImage2D (texture liée)", glTexImage2D(R4_TEX2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, texel[0]));
+        R4("glEnable BLEND", glEnable(GL_BLEND));
+        R4("glBlendFunc", glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+        R4("glDisable BLEND", glDisable(GL_BLEND));
+        R4("glEnable DEPTH_TEST", glEnable(GL_DEPTH_TEST));
+        R4("glDepthFunc LEQUAL", glDepthFunc(GL_LEQUAL));
+        R4("glDepthMask FALSE", glDepthMask(GL_FALSE));
+        R4("glDepthMask TRUE", glDepthMask(GL_TRUE));
+        R4("glDisable DEPTH_TEST", glDisable(GL_DEPTH_TEST));
+        R4("glDepthRange", glDepthRange(0.0, 0.5));
+        R4("glEnable STENCIL_TEST", glEnable(GL_STENCIL_TEST));
+        R4("glStencilFunc", glStencilFunc(GL_ALWAYS, 1, 255));
+        R4("glStencilOp", glStencilOp(GL_KEEP, GL_INCR, GL_KEEP));
+        R4("glStencilMask", glStencilMask(15));
+        if (asf) {
+            R4("glEnable STENCIL_TEST_TWO_SIDE_EXT", glEnable(0x8910));
+            R4("glActiveStencilFaceEXT BACK", asf(GL_BACK));
+            R4("glStencilOp (face arrière)", glStencilOp(GL_KEEP, GL_DECR, GL_KEEP));
+            R4("glActiveStencilFaceEXT FRONT", asf(GL_FRONT));
+            R4("glDisable STENCIL_TEST_TWO_SIDE_EXT", glDisable(0x8910));
+        } else {
+            printf("R4 glActiveStencilFaceEXT absent\n");
+        }
+        R4("glDisable STENCIL_TEST", glDisable(GL_STENCIL_TEST));
+        if (dbounds) {
+            R4("glDepthBoundsEXT", dbounds(0.0, 0.9));
+        } else {
+            printf("R4 glDepthBoundsEXT absent\n");
+        }
+        R4("glEnable ALPHA_TEST", glEnable(GL_ALPHA_TEST));
+        R4("glAlphaFunc", glAlphaFunc(GL_GREATER, 0.5f));
+        R4("glDisable ALPHA_TEST", glDisable(GL_ALPHA_TEST));
+        R4("glEnable CULL_FACE", glEnable(GL_CULL_FACE));
+        R4("glCullFace FRONT", glCullFace(GL_FRONT));
+        R4("glFrontFace CW", glFrontFace(GL_CW));
+        R4("glDisable CULL_FACE", glDisable(GL_CULL_FACE));
+        R4("glEnable SCISSOR_TEST", glEnable(GL_SCISSOR_TEST));
+        R4("glScissor", glScissor(0, 0, 32, 32));
+        R4("glDisable SCISSOR_TEST", glDisable(GL_SCISSOR_TEST));
+        R4("glViewport", glViewport(0, 0, W - 1, H - 1));
+        R4("glEnable POLYGON_OFFSET_FILL", glEnable(GL_POLYGON_OFFSET_FILL));
+        R4("glPolygonOffset", glPolygonOffset(1.0f, 2.0f));
+        R4("glDisable POLYGON_OFFSET_FILL", glDisable(GL_POLYGON_OFFSET_FILL));
+        R4("glColorMask", glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_FALSE));
+        R4("glColorMask (retour)", glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE));
+        R4("glColor4f", glColor4f(0.5f, 0.5f, 1.0f, 1.0f));
+        R4("glColor4f (autre)", glColor4f(1.0f, 0.5f, 1.0f, 1.0f));
+        R4("glMatrixMode PROJECTION", glMatrixMode(GL_PROJECTION));
+        R4("glLoadMatrixf PROJECTION", glLoadMatrixf(m));
+        R4("glMatrixMode MODELVIEW", glMatrixMode(GL_MODELVIEW));
+        R4("glLoadMatrixf MODELVIEW", glLoadMatrixf(m));
+        R4("glLoadIdentity MODELVIEW", glLoadIdentity());
+        R4("glMatrixMode TEXTURE", glMatrixMode(GL_TEXTURE));
+        R4("glLoadMatrixf TEXTURE", glLoadMatrixf(m));
+        R4("glMatrixMode MODELVIEW (retour)", glMatrixMode(GL_MODELVIEW));
+        R4("glShadeModel FLAT", glShadeModel(GL_FLAT));
+        R4("glShadeModel SMOOTH", glShadeModel(GL_SMOOTH));
+        R4("glEnable LIGHTING", glEnable(GL_LIGHTING));
+        R4("glLightfv", glLightfv(GL_LIGHT0, GL_DIFFUSE, v4));
+        R4("glDisable LIGHTING", glDisable(GL_LIGHTING));
+        R4("glEnable FOG", glEnable(GL_FOG));
+        R4("glFogf", glFogf(GL_FOG_DENSITY, 0.5f));
+        R4("glDisable FOG", glDisable(GL_FOG));
+        R4("glEnable TEXTURE_GEN_S", glEnable(GL_TEXTURE_GEN_S));
+        R4("glDisable TEXTURE_GEN_S", glDisable(GL_TEXTURE_GEN_S));
+        R4("glEnable COLOR_LOGIC_OP", glEnable(GL_COLOR_LOGIC_OP));
+        R4("glDisable COLOR_LOGIC_OP", glDisable(GL_COLOR_LOGIC_OP));
+        R4("glPolygonMode LINE", glPolygonMode(GL_FRONT_AND_BACK, GL_LINE));
+        R4("glPolygonMode FILL", glPolygonMode(GL_FRONT_AND_BACK, GL_FILL));
+        R4("glLineWidth", glLineWidth(2.0f));
+        R4("glPointSize", glPointSize(2.0f));
+        R4("glClearColor", glClearColor(1, 0, 0, 1));
+        R4("glPixelStorei", glPixelStorei(GL_UNPACK_ALIGNMENT, 1));
+        R4("glHint", glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_NICEST));
+        R4("glHint FOG_HINT", glHint(GL_FOG_HINT, GL_NICEST));
+        /* ce que geom_ok, accel_ok_for et geom_format lisent encore */
+        R4("glEnable COLOR_SUM", glEnable(0x8458));
+        R4("glDisable COLOR_SUM", glDisable(0x8458));
+        R4("glFogi FOG_COORDINATE_SOURCE", glFogi(0x8450, 0x8451));
+        R4("glFogi FOG_COORDINATE_SOURCE (retour)", glFogi(0x8450, 0x8452));
+        R4("glFogi FOG_MODE", glFogi(GL_FOG_MODE, GL_LINEAR));
+        R4("glEnable LINE_SMOOTH", glEnable(GL_LINE_SMOOTH));
+        R4("glDisable LINE_SMOOTH", glDisable(GL_LINE_SMOOTH));
+        R4("glEnable LINE_STIPPLE", glEnable(GL_LINE_STIPPLE));
+        R4("glLineStipple", glLineStipple(1, 0x0f0f));
+        R4("glDisable LINE_STIPPLE", glDisable(GL_LINE_STIPPLE));
+        R4("glEnable POINT_SMOOTH", glEnable(GL_POINT_SMOOTH));
+        R4("glDisable POINT_SMOOTH", glDisable(GL_POINT_SMOOTH));
+        if (ppv) {
+            R4("glPointParameterfv DISTANCE_ATTENUATION", ppv(0x8129, att));
+            att[1] = 0.0f;
+            R4("glPointParameterfv DISTANCE_ATTENUATION (retour)", ppv(0x8129, att));
+        } else {
+            printf("R4 glPointParameterfv absent\n");
+        }
+        R4("glEnable POLYGON_SMOOTH", glEnable(GL_POLYGON_SMOOTH));
+        R4("glDisable POLYGON_SMOOTH", glDisable(GL_POLYGON_SMOOTH));
+        R4("glEnable POLYGON_STIPPLE", glEnable(GL_POLYGON_STIPPLE));
+        R4("glPolygonStipple", glPolygonStipple(stip));
+        R4("glDisable POLYGON_STIPPLE", glDisable(GL_POLYGON_STIPPLE));
+        R4("glLogicOp", glLogicOp(GL_XOR));
+        if (beq) {
+            R4("glBlendEquation", beq(0x8007));
+            R4("glBlendEquation (retour)", beq(0x8006));
+        } else {
+            printf("R4 glBlendEquation absent\n");
+        }
+        R4("glTexEnvi MODE COMBINE", glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, 0x8570));
+        R4("glTexEnvi COMBINE_RGB", glTexEnvi(GL_TEXTURE_ENV, 0x8571, GL_ADD));
+        R4("glTexEnvi MODE MODULATE (retour)", glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE));
+        R4("glEnable NORMALIZE", glEnable(GL_NORMALIZE));
+        R4("glDisable NORMALIZE", glDisable(GL_NORMALIZE));
+        R4("glEnable COLOR_MATERIAL", glEnable(GL_COLOR_MATERIAL));
+        R4("glDisable COLOR_MATERIAL", glDisable(GL_COLOR_MATERIAL));
+        R4("glMaterialfv", glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, v4));
+        R4("glLightModeli", glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, 1));
+        R4("glEnable LIGHT0", glEnable(GL_LIGHT0));
+        R4("glDisable LIGHT0", glDisable(GL_LIGHT0));
+        R4("glTexGeni S", glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_SPHERE_MAP));
+        R4("glEnable CLIP_PLANE0", glEnable(GL_CLIP_PLANE0));
+        R4("glDisable CLIP_PLANE0", glDisable(GL_CLIP_PLANE0));
+        R4("glDrawBuffer BACK", glDrawBuffer(GL_BACK));
+        R4("glDrawBuffer FRONT", glDrawBuffer(GL_FRONT));
+        R4("glReadBuffer", glReadBuffer(GL_BACK));
+        /* tableaux et VBO */
+        R4("glEnableClientState COLOR_ARRAY", (bindb(R4_ARRAY, buf[2]), glColorPointer(4, GL_FLOAT, 0, 0), glEnableClientState(GL_COLOR_ARRAY)));
+        R4("glDisableClientState COLOR_ARRAY", glDisableClientState(GL_COLOR_ARRAY));
+        R4("glBindBufferARB ARRAY seul", bindb(R4_ARRAY, buf[3]));
+        R4("glVertexPointer (autre VBO)", glVertexPointer(2, GL_FLOAT, 0, 0));
+        R4("glVertexPointer (même VBO, même décalage)", glVertexPointer(2, GL_FLOAT, 0, 0));
+        R4("glBindBufferARB + glVertexPointer (retour)", (bindb(R4_ARRAY, buf[0]), glVertexPointer(2, GL_FLOAT, 0, 0)));
+        R4("glTexCoordPointer (décalage 0, autre VBO)", (bindb(R4_ARRAY, buf[1]), glTexCoordPointer(2, GL_FLOAT, 0, 0)));
+        R4("glTexCoordPointer (3 composantes)", glTexCoordPointer(3, GL_FLOAT, 0, 0));
+        R4("glTexCoordPointer (2 composantes)", glTexCoordPointer(2, GL_FLOAT, 0, 0));
+        R4("glBufferSubDataARB (VBO lié en positions)", (bindb(R4_ARRAY, buf[0]), subb(R4_ARRAY, 0, sizeof(pos), pos)));
+        R4("glBufferDataARB (VBO lié en positions)", datab(R4_ARRAY, sizeof(pos), pos, 0x88E4));
+        R4("glBindBufferARB ELEMENT_ARRAY", bindb(R4_ELEMS, buf[4]));
+        R4("glBindBufferARB ELEMENT_ARRAY 0", bindb(R4_ELEMS, 0));
+
+        /* ── programmes ARB ── */
+        genp(4, prog);
+        bindp(R4_VP, prog[0]); strp(R4_VP, R4_ASCII, (GLsizei)strlen(vp_a), vp_a);
+        bindp(R4_VP, prog[1]); strp(R4_VP, R4_ASCII, (GLsizei)strlen(vp_b), vp_b);
+        bindp(R4_FP, prog[2]); strp(R4_FP, R4_ASCII, (GLsizei)strlen(fp_a), fp_a);
+        bindp(R4_FP, prog[3]); strp(R4_FP, R4_ASCII, (GLsizei)strlen(fp_b), fp_b);
+        printf("R4 programmes : erreur GL 0x%x\n", (unsigned)glGetError());
+        bindp(R4_VP, prog[0]);
+        bindp(R4_FP, prog[2]);
+        env(R4_VP, 0, v4);
+        env(R4_FP, 0, v4);
+        bindb(R4_ARRAY, buf[2]);
+        vap(1, 4, GL_FLOAT, GL_FALSE, 0, 0);
+        eva(1);
+        R4("glEnable VERTEX_PROGRAM_ARB", glEnable(R4_VP));
+        R4("glEnable FRAGMENT_PROGRAM_ARB", glEnable(R4_FP));
+        R4("rien sous programmes (témoin)", (void)0);
+        R4("glProgramEnvParameter4fvARB VP", env(R4_VP, 0, v4));
+        R4("glProgramEnvParameter4fvARB VP (autre indice)", env(R4_VP, 5, v4));
+        R4("glProgramEnvParameter4fvARB FP", env(R4_FP, 0, v4));
+        R4("glProgramLocalParameter4fvARB VP (programme lié)", loc(R4_VP, 0, v4));
+        R4("glProgramLocalParameter4fvARB FP (programme lié)", loc(R4_FP, 0, v4));
+        R4("glBindProgramARB VP (autre)", bindp(R4_VP, prog[1]));
+        R4("glBindProgramARB VP (le même)", bindp(R4_VP, prog[1]));
+        R4("glProgramLocalParameter4fvARB VP (autre programme lié)", loc(R4_VP, 0, v4));
+        R4("glBindProgramARB FP (autre)", bindp(R4_FP, prog[3]));
+        R4("glBindProgramARB VP (retour)", bindp(R4_VP, prog[0]));
+        R4("glBindProgramARB FP (retour)", bindp(R4_FP, prog[2]));
+        R4("glVertexAttribPointerARB 1 (même VBO)", vap(1, 4, GL_FLOAT, GL_FALSE, 0, 0));
+        R4("glVertexAttribPointerARB 1 (autre décalage)", vap(1, 4, GL_FLOAT, GL_FALSE, 0, (const GLvoid *)16));
+        R4("glVertexAttribPointerARB 1 (3 composantes)", vap(1, 3, GL_FLOAT, GL_FALSE, 0, 0));
+        R4("glVertexAttribPointerARB 1 (retour)", vap(1, 4, GL_FLOAT, GL_FALSE, 0, 0));
+        R4("glEnableVertexAttribArrayARB 2", (vap(2, 4, GL_FLOAT, GL_FALSE, 0, 0), eva(2)));
+        R4("glDisableVertexAttribArrayARB 2", dva(2));
+        R4("glActiveTexture unité 4 (sous programme)", actt(R4_TEX(4)));
+        R4("glBindTexture 2D unité 4 (sous programme)", glBindTexture(R4_TEX2D, tex[0]));
+        R4("glActiveTexture unité 0 (sous programme)", actt(R4_TEX(0)));
+        R4("glBindTexture 2D unité 0 (sous programme)", glBindTexture(R4_TEX2D, tex[1]));
+        R4("glEnable BLEND (sous programme)", glEnable(GL_BLEND));
+        R4("glDisable BLEND (sous programme)", glDisable(GL_BLEND));
+        R4("glEnable STENCIL_TEST (sous programme)", glEnable(GL_STENCIL_TEST));
+        R4("glStencilFunc (sous programme)", glStencilFunc(GL_EQUAL, 0, 255));
+        R4("glDisable STENCIL_TEST (sous programme)", glDisable(GL_STENCIL_TEST));
+        R4("glDepthFunc (sous programme)", glDepthFunc(GL_LESS));
+        R4("glLoadMatrixf MODELVIEW (sous programme)", glLoadMatrixf(m));
+        R4("glColor4f (sous programme)", glColor4f(1, 1, 1, 1));
+        R4("glDisable FRAGMENT_PROGRAM_ARB", glDisable(R4_FP));
+        R4("glDisable VERTEX_PROGRAM_ARB", glDisable(R4_VP));
+        dva(1);
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        bindb(R4_ARRAY, 0);
+        glFinish();
+        printf("R4 fin : erreur GL 0x%x\n", (unsigned)glGetError());
+#undef R4
+#undef R4_D
     } else if (!strcmp(scene, "tclprobe")) {
         /* Sonde des codes du descripteur de sortie de sommet (docs/re/
            descripteur-de-sommet.md). UN triangle, tous les attributs

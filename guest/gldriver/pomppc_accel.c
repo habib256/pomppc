@@ -117,7 +117,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260924-verdict"
+#define POMPPC_PLUGIN_REV "20260924-liste"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -547,6 +547,7 @@ static PProg pprog[PPROG_MAX];
    cumulés aussi, par prudence. */
 #define LAZY_WORDS 5
 #define LAZY_DEFAULT 1          /* sans POMPPC_GL_LAZYAPPLE */
+#define WL_DEFAULT   1          /* lot 3 : sans POMPPC_GL_WHITELIST */
 
 typedef struct PTex {                   /* texture du GLDriver suivie par le plugin */
     struct PTex   *next;
@@ -717,6 +718,8 @@ typedef struct PCtx {
     TexInfo        vd_ti;
     unsigned long  vd_fmt, vd_gs;
     unsigned long  vd_key[VKEY_WORDS];
+    unsigned long  vd_units[40];        /* lot 3, sous COUNT : table des unités
+                                           (8 × 5 cibles) au rangement */
 } PCtx;
 
 /* v16 : définies avec la synchronisation des programmes, plus bas ; texture_ok
@@ -730,6 +733,9 @@ static void cube_probe(PCtx *p, const TexInfo *ti, const char *where);
 static void draw_probe(PCtx *p, const TexInfo *ti);
 static void dump_one(const char *path);
 static void vd_frame(void);                     /* lot 2, plus bas */
+static void vd_check_at(PCtx *p, const char *where, int disp, int ok, const TexInfo *ti,
+                        unsigned long fmt, unsigned long gs, int bumped);
+static int bd_in(void);                         /* lot 3, relevé R4 */
 
 typedef struct Post {                   /* copie à faire APRÈS la barrière */
     int            depth;               /* 0 couleur, 1 profondeur, 2 stencil */
@@ -895,6 +901,9 @@ static struct {
     int             count;              /* POMPPC_GL_COUNT, lu une fois à l'init */
     int             verdict;            /* lot 2 : POMPPC_GL_VERDICT (défaut 1) */
     int             vcheck;             /* lot 2 : POMPPC_GL_VERDICTCHECK (défaut 0) */
+    int             wl;                 /* lot 3 : POMPPC_GL_WHITELIST */
+    unsigned long   bd_a, bd_n;         /* R4 : POMPPC_GL_BLOCKDUMP=a[:n], images [a, a+n) */
+    int             bd_on;
 } G = { PTHREAD_MUTEX_INITIALIZER };
 
 /* Appelée juste avant d'armer une garde de faute (sig_jmp, pack_jmp,
@@ -1111,6 +1120,7 @@ static struct {
     unsigned long f_disp, f_draw;       /* image en cours */
     unsigned long f0, nat0;             /* G.n_frames, G.n_native_draws au bilan */
     unsigned long told;                 /* écarts notés en détail (toute la vie) */
+    unsigned long bits[CNT_BLOCK][32];  /* lot 3 : dispatches par bit du bloc */
 } CNT;
 
 /* Appelé par pomppc_geom_dispatch, verrou tenu. `c` : bloc de changements
@@ -1133,6 +1143,14 @@ static void cnt_dispatch(PCtx *p, const unsigned long *c)
     }
     for (k = CNT_WORDS; k < CNT_BLOCK; k++)
         hi |= c[k];
+    for (k = 0; k < CNT_BLOCK; k++) {   /* lot 3 : quels bits, combien de fois */
+        unsigned long w = c[k];
+        while (w) {
+            int b = 31 - __builtin_clz(w);
+            CNT.bits[k][b]++;
+            w &= ~(1UL << b);
+        }
+    }
     if (hi)
         CNT.hi_words++;
     else if (!c[0] && !c[1] && !c[2] && !c[4] && c[3] && !(c[3] & ~CNT_ENV_BITS))
@@ -1305,6 +1323,15 @@ static void cnt_frame(void)
                 G.n_frames, k + 1, CNT.pat[best].w[0], CNT.pat[best].w[1],
                 CNT.pat[best].w[2], CNT.pat[best].w[3], CNT.pat[best].w[4],
                 CNT.pat[best].n);
+    }
+    for (k = 0; k < CNT_BLOCK; k++) {   /* lot 3 : bits posés, par mot */
+        char line[512];
+        int n = 0, b;
+        for (b = 31; b >= 0; b--)
+            if (CNT.bits[k][b] && n < (int)sizeof(line) - 32)
+                n += sprintf(line + n, " %08lx x %lu", 1UL << b, CNT.bits[k][b]);
+        if (n)
+            gl_note("COUNT image %lu bits +0x%02x :%s\n", G.n_frames, k * 4, line);
     }
     told = CNT.told;
     memset(&CNT, 0, sizeof(CNT));
@@ -1922,6 +1949,22 @@ void pomppc_backend_init(void)
                 G.verdict = !(e && e[0] == '0');
                 e = getenv("POMPPC_GL_VERDICTCHECK");
                 G.vcheck = e && e[0] && e[0] != '0';
+                /* Lot 3 : le dispatch rend le verdict gardé sans le recalculer
+                   quand le bloc de changements ne porte que des bits neutres
+                   (wl_neutral, relevé R4 : docs/re/bloc-changements-r4.md).
+                   POMPPC_GL_WHITELIST=0 recalcule à chaque dispatch. */
+                e = getenv("POMPPC_GL_WHITELIST");
+                G.wl = G.verdict && (e && e[0] ? e[0] != '0' : WL_DEFAULT);
+                /* Relevé R4 : POMPPC_GL_BLOCKDUMP=a[:n] écrit sur stderr le
+                   bloc de chaque dispatch (mots non nuls) et chaque dessin
+                   des images [a, a+n) (n = 1 par défaut). */
+                e = getenv("POMPPC_GL_BLOCKDUMP");
+                if (e && *e) {
+                    char *end;
+                    G.bd_on = 1;
+                    G.bd_a = strtoul(e, &end, 0);
+                    G.bd_n = *end == ':' ? strtoul(end + 1, 0, 0) : 1;
+                }
             }
             /* Génériques à taille déclarée (clé QGPU_SK_GEN_SIZES) : le chemin
                tableaux envoie chaque générique à la taille de son tableau
@@ -1955,9 +1998,9 @@ void pomppc_backend_init(void)
         }
         if (G.state > 0) {
             gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d lazyapple=%d "
-                    "native=%d (plages %d) count=%d verdict=%d verdictcheck=%d\n",
+                    "native=%d (plages %d) count=%d verdict=%d verdictcheck=%d whitelist=%d\n",
                     G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range,
-                    G.count, G.verdict, G.vcheck);
+                    G.count, G.verdict, G.vcheck, G.wl);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
                        " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
@@ -6642,14 +6685,16 @@ static int geom_texture_ok(PCtx *p)
     return 1;
 }
 
-/* L'état courant peut-il partir en géométrie brute ? */
-static int geom_ok(PCtx *p)
+/* La partie « rastérisation » de geom_ok : accel_ok_for (pochoir,
+ * profondeur, mélange, test alpha, opération logique, modes, lissage et
+ * pointillé de polygone) et les lignes et points. Lot 3 : le dispatch la
+ * rejoue seule quand le bloc ne porte, en plus des bits neutres, que des bits
+ * de cet état-là (WL_R0). */
+static int geom_raster_ok(PCtx *p)
 {
     unsigned char *g;
     const float *att;
 
-    if (!G.v7 || G.state <= 0 || p->broken || p->geom_lost || p->qctx < 0 || !p->cfg)
-        return 0;
     if (!accel_ok_for(p, 1))
         return 0;
     g = gls(p);
@@ -6668,6 +6713,16 @@ static int geom_ok(PCtx *p)
     if ((att[0] != 1.0f || att[1] != 0.0f || att[2] != 0.0f) &&
         !(G.tex14 && point_params_ok(g)))
         return no(NO_G_POINT, fbits(att[1]), fbits(att[2]));
+    return 1;
+}
+
+/* L'état courant peut-il partir en géométrie brute ? */
+static int geom_ok(PCtx *p)
+{
+    if (!G.v7 || G.state <= 0 || p->broken || p->geom_lost || p->qctx < 0 || !p->cfg)
+        return 0;
+    if (!geom_raster_ok(p))
+        return 0;
     /* Le mot gctx+0x4e1c dit quel étage de sommets GLEngine emploie : c'est la
        condition que _gleBuildVertexFuncNO (0x1d318) teste lui-même avant de
        lire notre descripteur. Autre chose que 0x1c00 (pipeline fixe) — un
@@ -9291,6 +9346,14 @@ fall:
 static struct {
     unsigned long reuse, recalc;        /* sur la période */
     unsigned long chk_same, chk_diff;
+    /* lot 3 (dispatch), sur la période : court-circuités (sous VERDICTCHECK :
+       qui l'auraient été, et ont été recalculés pour contrôle), recalculés
+       (bloc non neutre, clé changée, pas de verdict ok gardé), écarts */
+    unsigned long wl_skip, wl_blk, wl_key, wl_none, wl_same, wl_diff;
+    unsigned long wl_skip_all, wl_diff_all;
+    unsigned long wl_uonly, wl_usame;   /* sous COUNT : non neutres par les
+                                           seules unités (+0x04), dont table des
+                                           unités identique (piste, pas admis) */
     unsigned long told;                 /* écarts notés en détail (toute la vie) */
     unsigned long diff_all;             /* écarts (toute la vie) */
     unsigned long reuse_all, recalc_all, same_all;  /* toute la vie */
@@ -9356,6 +9419,13 @@ static void vd_store(PCtx *p, int ok, const TexInfo *ti, unsigned long fmt, unsi
     }
     vd_key_of(p, p->vd_key);
     p->vd_valid = 1;
+    if (G.count) {                      /* lot 3 : piste des unités */
+        unsigned long units = p->ctx ? GLD_U32(p->ctx, CTX_TEXUNITS) : 0;
+        if (units)
+            memcpy(p->vd_units, (const void *)units, sizeof(p->vd_units));
+        else
+            memset(p->vd_units, 0, sizeof(p->vd_units));
+    }
 }
 
 /* VERDICTCHECK : le verdict recalculé (ok, ti, fmt, gs ; `bumped` : le
@@ -9363,6 +9433,14 @@ static void vd_store(PCtx *p, int ok, const TexInfo *ti, unsigned long fmt, unsi
    reprise aurait sauté) comparé au verdict gardé. */
 static void vd_check(PCtx *p, int fresh, int ok, const TexInfo *ti, unsigned long fmt,
                      unsigned long gs, int bumped)
+{
+    vd_check_at(p, fresh ? "1er dessin après le dispatch" : "dessin sans dispatch", 0,
+                ok, ti, fmt, gs, bumped);
+}
+
+/* Lot 3 : même comparaison, au dispatch (disp = 1) ou au dessin. */
+static void vd_check_at(PCtx *p, const char *where, int disp, int ok, const TexInfo *ti,
+                        unsigned long fmt, unsigned long gs, int bumped)
 {
     unsigned long s0[QGPU_MAX_UNITS][5], s1[QGPU_MAX_UNITS][5], du = 0;
     int u, dok, dfmt, dgs;
@@ -9379,18 +9457,26 @@ static void vd_check(PCtx *p, int fresh, int ok, const TexInfo *ti, unsigned lon
                 du |= 1UL << u;
     }
     if (!dok && !dfmt && !dgs && !du && !bumped) {
-        VD.chk_same++;
+        if (disp)
+            VD.wl_same++;
+        else
+            VD.chk_same++;
         return;
     }
-    VD.chk_diff++;
+    if (disp) {
+        VD.wl_diff++;
+        VD.wl_diff_all++;
+    } else {
+        VD.chk_diff++;
+    }
     VD.diff_all++;
     if (VD.told < VD_TOLD) {
         VD.told++;
-        gl_note("VERDICT écart, image %lu (%s) : ok %d -> %d, format %08lx -> %08lx, "
+        gl_note("VERDICT écart%s, image %lu (%s) : ok %d -> %d, format %08lx -> %08lx, "
                 "génériques %08lx -> %08lx, unités différentes 0x%02lx%s ; époque %lu, "
                 "VAO %08lx en %08lx/%08lx, vp %d fp %d\n",
-                G.n_frames, fresh ? "1er dessin après le dispatch" : "dessin sans dispatch",
-                p->vd_ok, ok, p->vd_fmt, ok ? fmt : 0UL, p->vd_gs, ok ? gs : 0UL, du,
+                disp ? " dispatch" : "", G.n_frames, where, p->vd_ok, ok,
+                p->vd_fmt, ok ? fmt : 0UL, p->vd_gs, ok ? gs : 0UL, du,
                 bumped ? ", le recalcul a touché une texture" : "",
                 vd_epoch, p->vd_key[7], p->vd_key[8], p->vd_key[9], p->vp_on, p->fp_on);
         for (u = 0; u < QGPU_MAX_UNITS; u++)
@@ -9407,14 +9493,28 @@ static void vd_frame(void)
 {
     if (G.n_frames % CNT_PERIOD != 0)
         return;
-    if (G.vcheck || G.count)
+    if (G.vcheck || G.count) {
         gl_note("VERDICT image %lu : %lu repris, %lu recalculés (clé changée ou sans "
                 "verdict) ; contrôle : %lu identiques, %lu écarts (%lu depuis le début)\n",
                 G.n_frames, VD.reuse, VD.recalc, VD.chk_same, VD.chk_diff, VD.diff_all);
+        gl_note("VERDICT image %lu dispatch (liste blanche %s) : %lu court-circuités, "
+                "%lu recalculés (bloc non neutre %lu, clé changée %lu, sans verdict ok %lu) ; "
+                "contrôle : %lu identiques, %lu écarts (%lu depuis le début)\n",
+                G.n_frames, G.wl ? "allumée" : "éteinte", VD.wl_skip,
+                VD.wl_blk + VD.wl_key + VD.wl_none, VD.wl_blk, VD.wl_key, VD.wl_none,
+                VD.wl_same, VD.wl_diff, VD.wl_diff_all);
+        if (G.count)
+            gl_note("VERDICT image %lu dispatch : %lu non neutres par les seules unités "
+                    "(+0x04), dont %lu à table des unités identique\n",
+                    G.n_frames, VD.wl_uonly, VD.wl_usame);
+    }
     VD.reuse_all += VD.reuse;
     VD.recalc_all += VD.recalc;
     VD.same_all += VD.chk_same;
+    VD.wl_skip_all += VD.wl_skip;
     VD.reuse = VD.recalc = VD.chk_same = VD.chk_diff = 0;
+    VD.wl_skip = VD.wl_blk = VD.wl_key = VD.wl_none = VD.wl_same = VD.wl_diff = 0;
+    VD.wl_uonly = VD.wl_usame = 0;
 }
 
 /* Bilan de toute la vie du processus (VERDICTCHECK), à la destruction d'un
@@ -9424,9 +9524,10 @@ static void vd_total(const char *why)
     if (!G.vcheck)
         return;
     gl_note("VERDICT total (%s, image %lu) : %lu repris, %lu recalculés ; contrôle : "
-            "%lu identiques, %lu écarts\n", why, G.n_frames,
-            VD.reuse_all + VD.reuse, VD.recalc_all + VD.recalc,
-            VD.same_all + VD.chk_same, VD.diff_all);
+            "%lu identiques, %lu écarts ; dispatch : %lu court-circuités, %lu écarts\n",
+            why, G.n_frames, VD.reuse_all + VD.reuse, VD.recalc_all + VD.recalc,
+            VD.same_all + VD.chk_same, VD.diff_all, VD.wl_skip_all + VD.wl_skip,
+            VD.wl_diff_all);
 }
 
 /* Cœur du canal tableaux. Verrou déjà tenu. 1 = traité (même si n=0). */
@@ -9441,6 +9542,10 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
     int r;
     if (G.count)                        /* lot 0 : un dessin par tableaux */
         cnt_draw(p, 0);
+    if (G.bd_on && bd_in()) {           /* relevé R4 */
+        fprintf(stderr, "BLOC dessin %s %ld\n", indexed ? "indexé" : "tableaux", count);
+        fflush(stderr);
+    }
     if (sigsetjmp(pack_jmp, 0) != 0) {     /* 0 : pas de sigprocmask par dessin (5 % du fil !) ;
                                                SA_NODEFER dans le crochet rend le retour sûr */
         static unsigned long told;
@@ -9900,6 +10005,163 @@ void *pomppc_geom_proc(int slot)
     }
 }
 
+/* ─────────── lot 3 du verdict unique : liste blanche du bloc ───────────
+ * Le bloc de changements (gctx+0x310, 19 mots) dit ce qui a bougé depuis le
+ * dernier dispatch. Relevé R4 (docs/re/bloc-changements-r4.md, scène gltest
+ * « r4 ») : quel bit pose chaque appel GL. wl_mask[k] tient, pour le mot k,
+ * les bits PROUVÉS NEUTRES pour le verdict (ok, TexInfo, format, tailles des
+ * génériques) : l'état qu'ils signalent n'est lu ni par geom_ok, ni par
+ * texture_ok, ni par geom_format, ni par va_gen_sizes. Un bit qui touche les
+ * textures liées ou allumées, l'environnement de texture, les programmes
+ * liés ou allumés, l'éclairage, le brouillard, les tableaux ou l'état que
+ * geom_ok / accel_ok_for lisent (pochoir, profondeur, opération logique,
+ * modes de polygone, lissage) n'y est pas. WL_GS : bits admis à condition de
+ * refaire va_gen_sizes (pointeurs de tableaux : la taille d'un générique et
+ * sa source lisible en dépendent ; le format, lui, ne lit que VA_EN). Dans le
+ * doute, un bit n'est pas neutre : le dispatch recalcule, comme avant. */
+/* +0x00 — neutres : couleur d'effacement 0x8, masque de couleur 0x40000, de
+   profondeur 0x80000, de pochoir 0x100000, découpe 0x4000000 (glScissor et
+   son allumage), modèle d'ombrage 0x8000000. */
+#define WL_N0 0x0c1c0008UL
+/* +0x00 — rastérisation (WL_R0), admis si geom_raster_ok tient encore : test
+   alpha 0x1, mélange (allumage, facteurs, équation) 0x2, profondeur 0x200,
+   indications 0x2000, largeur et lissage de ligne 0x4000, pointillé de ligne
+   0x8000 | 0x10000, opération logique 0x20000, taille, lissage et atténuation
+   des points 0x400000, faces, décalage, modes et lissage de polygone (aussi
+   posé par l'allumage des programmes et glLightModel, avec des bits non
+   neutres) 0x800000, pointillé de polygone 0x1000000 | 0x2000000, pochoir
+   0x10000000 (allumage, fonction, opérations, deux faces). */
+#define WL_R0 0x13c3e203UL
+static const unsigned long wl_mask[CNT_BLOCK] = {
+    WL_N0 | WL_R0,
+    0,              /* +0x04 : unités (liaison, paramètres, images), texgen */
+    0x00000019UL,   /* +0x08 : 0x1 fenêtre, découpe, plage de profondeur,
+                       bornes ; 0x8 projection ; 0x10 modèle-vue */
+    0x02900000UL,   /* +0x0c : env de sommets 0x800000, de fragments
+                       0x2000000 ; tableaux 0x100000 (WL_GS) */
+    0,              /* +0x10 : environnement de texture par unité */
+    /* +0x14..+0x48 : ce qui est sale parmi les VALEURS de paramètres —
+       program.env et program.local (un bit par indice : DOOM 3 pose 7fff en
+       +0x14 et 24 en +0x38 avec ses env de sommets et de fragments),
+       matrices suivies par les programmes, lumières, matériaux, brouillard,
+       points, couleur d'environnement, plage de profondeur ; +0x48 bit 0 :
+       « des paramètres ont changé ». Le verdict ne lit aucune de ces
+       valeurs, et au relevé R4 aucun appel ne pose ces mots SEULS : chacun
+       arrive avec un bit des mots +0x00..+0x10, qui décide (liaison et
+       allumage des programmes : +0x0c 0x400000 / 0x1000000, non neutres). */
+    0xffffffffUL, 0xffffffffUL, 0xffffffffUL, 0xffffffffUL, 0xffffffffUL,
+    0xffffffffUL, 0xffffffffUL, 0xffffffffUL, 0xffffffffUL, 0xffffffffUL,
+    0xffffffffUL, 0xffffffffUL, 0xffffffffUL, 0xffffffffUL
+};
+#define WL_GS_WORD 3
+#define WL_GS      0x00100000UL
+
+static int wl_neutral(const unsigned long *c)
+{
+    int k;
+    for (k = 0; k < CNT_BLOCK; k++)
+        if (c[k] & ~wl_mask[k])
+            return 0;
+    return 1;
+}
+
+/* R4 : POMPPC_GL_BLOCKDUMP, sur stderr (gltest l'entrelace avec ses propres
+   lignes, dans l'ordre des appels). */
+static int bd_in(void)
+{
+    return G.bd_on && G.n_frames >= G.bd_a && G.n_frames - G.bd_a < G.bd_n;
+}
+
+static void bd_dispatch(const unsigned long *c, const char *what)
+{
+    char line[400];
+    int n = 0, k;
+    static unsigned long seq;
+    if (!c) {
+        fprintf(stderr, "BLOC dispatch %lu image %lu : sans bloc (%s)\n", ++seq, G.n_frames, what);
+        return;
+    }
+    for (k = 0; k < CNT_BLOCK; k++)
+        if (c[k])
+            n += sprintf(line + n, " +%02x=%08lx", k * 4, c[k]);
+    fprintf(stderr, "BLOC dispatch %lu image %lu :%s (%s)\n", ++seq, G.n_frames,
+            n ? line : " vide", what);
+    fflush(stderr);
+}
+
+/* Publication du verdict (fmt) vers GLEngine : cfg+0x78, descripteur,
+   bits du retour. Verrou tenu. */
+static long geom_dispatch_publish(PCtx *p, unsigned long fmt)
+{
+    long bits;
+    int arrays = geom_va_on(p), force;
+    /* Mixte : 0x78 détourne DrawArrays/DrawElements vers RenderVertexArray
+       sans retirer le descripteur (glBegin reste le chemin T&L). ARRAY=2
+       retire 0x11c, sauf si un glBegin a déjà forcé le repli mixte. */
+    force = arrays && array_switch() >= 2 && !p->array_mix;
+    if (p->cfg) {
+        unsigned char want78 = (arrays && !p->array_mix) ? 1 : 0;
+        if (GLD_U8(p->cfg, 0x78) != want78) {
+            GLD_U8(p->cfg, 0x78) = want78;
+            p->desc_dirty = 1;
+        }
+    }
+    if (force) {
+        if (p->cfg && GLD_U32(p->cfg, 0x11c) != 0) {
+            GLD_U32(p->cfg, 0x11c) = 0;
+            p->desc_dirty = 1;
+        }
+        p->geom_fmt = fmt;
+        p->geom_words = QGPU_VF_WORDS(p->geom_fmt);
+    } else {
+        if (geom_publish(p, fmt))
+            p->desc_dirty = 1;
+    }
+    bits = p->desc_dirty ? 3 : 1;
+    p->desc_dirty = 0;
+    p->geom_on = 1;
+    return bits;
+}
+
+/* Lot 3 : le verdict gardé vaut-il pour ce dispatch ? 1 = oui (bloc neutre,
+   verdict ok gardé, clé identique). Compte la raison du refus. */
+static int wl_take(PCtx *p, const unsigned long *chg)
+{
+    unsigned long vk[VKEY_WORDS];
+    if (!G.wl || !chg)
+        return 0;
+    if (!p->vd_valid || !p->vd_ok) {
+        VD.wl_none++;
+        return 0;
+    }
+    if (!wl_neutral(chg)) {
+        VD.wl_blk++;
+        if (G.count) {                  /* piste : les unités seules ? */
+            int k, only = (chg[1] & ~wl_mask[1]) != 0 && !(chg[1] & ~0xffUL);
+            for (k = 0; k < CNT_BLOCK && only; k++)
+                if (k != 1 && (chg[k] & ~wl_mask[k]))
+                    only = 0;
+            if (only) {
+                unsigned long units = p->ctx ? GLD_U32(p->ctx, CTX_TEXUNITS) : 0;
+                VD.wl_uonly++;
+                if (units && !memcmp(p->vd_units, (const void *)units, sizeof(p->vd_units)))
+                    VD.wl_usame++;
+            }
+        }
+        return 0;
+    }
+    vd_key_of(p, vk);
+    if (memcmp(vk, p->vd_key, sizeof(vk)) != 0) {
+        VD.wl_key++;
+        return 0;
+    }
+    if ((chg[0] & WL_R0) && !geom_raster_ok(p)) {
+        VD.wl_blk++;                    /* rastérisation hors domaine : recalcul */
+        return 0;
+    }
+    return 1;
+}
+
 /* Bits à ajouter au retour de gldInitDispatch / gldUpdateDispatch :
  *   bit 0 : « le pilote fait la transformation et l'éclairage » ;
  *   bit 1 : « refais le chemin » — sans lui, GLEngine compare (retour & 3) à
@@ -9910,6 +10172,7 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
 {
     PCtx *p;
     long bits = 0;
+    int wl = 0;
 
     if (!G.v7)
         return 0;
@@ -9917,10 +10180,31 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
     p = find_ctx(ctx);
     if (G.count)                        /* lot 0 : compter seulement */
         cnt_dispatch(p, chg);
+    if (p)
+        wl = wl_take(p, chg);
+    if (G.bd_on && bd_in())
+        bd_dispatch(chg, wl ? "neutre, verdict gardé" : "recalculé");
+    if (wl && (chg[WL_GS_WORD] & WL_GS)) {
+        /* tableaux salis : seules les tailles des génériques sont à refaire
+           (sous VERDICTCHECK aussi : c'est ce que le court-circuit rendrait) */
+        unsigned char *g = gls(p);
+        unsigned char *V = g ? (unsigned char *)GLD_U32(g, GS_VAO) : 0;
+        p->vd_gs = va_gen_sizes(p, V, p->vd_fmt);
+    }
+    if (wl && !G.vcheck) {
+        /* Lot 3 : verdict gardé, sans geom_ok, texture_ok ni geom_format. */
+        unsigned long fmt = p->vd_fmt;
+        VD.wl_skip++;
+        if (G.count)
+            cnt_keep(p, 1, &p->vd_ti, fmt);
+        p->vd_fresh = 1;
+        bits = geom_dispatch_publish(p, fmt);
+        pthread_mutex_unlock(&G.mu);
+        return bits;
+    }
     if (p && geom_ok(p)) {
         TexInfo ti;
-        unsigned long fmt;
-        int arrays, force;
+        unsigned long fmt, gs, ep0 = vd_epoch;
         /* Téléverser maintenant : si une police n'est pas encore prête, on
            laisse GLEngine transformer (bit 0 = 0) plutôt que de jeter le
            premier lot de glyphes sous T&L. Le dispatch suivant réessaiera. */
@@ -9930,6 +10214,10 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
                 p->geom_on = 0;
                 if (G.count)
                     cnt_keep(p, 0, 0, 0);
+                if (wl) {               /* lot 3, contrôle */
+                    VD.wl_skip++;
+                    vd_check_at(p, "dispatch", 1, 0, 0, 0, 0, vd_epoch != ep0);
+                }
                 if (G.verdict) {        /* lot 2 */
                     vd_store(p, 0, 0, 0, 0);
                     p->vd_fresh = 1;
@@ -9948,39 +10236,23 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
         if (G.verdict) {
             unsigned char *g = gls(p);
             unsigned char *V = g ? (unsigned char *)GLD_U32(g, GS_VAO) : 0;
-            vd_store(p, 1, &ti, fmt, va_gen_sizes(p, V, fmt));
+            gs = va_gen_sizes(p, V, fmt);
+            if (wl) {                   /* lot 3, contrôle */
+                VD.wl_skip++;
+                vd_check_at(p, "dispatch", 1, 1, &ti, fmt, gs, vd_epoch != ep0);
+            }
+            vd_store(p, 1, &ti, fmt, gs);
             p->vd_fresh = 1;
         }
-        arrays = geom_va_on(p);
-        /* Mixte : 0x78 détourne DrawArrays/DrawElements vers RenderVertexArray
-           sans retirer le descripteur (glBegin reste le chemin T&L). ARRAY=2
-           retire 0x11c, sauf si un glBegin a déjà forcé le repli mixte. */
-        force = arrays && array_switch() >= 2 && !p->array_mix;
-        if (p->cfg) {
-            unsigned char want78 = (arrays && !p->array_mix) ? 1 : 0;
-            if (GLD_U8(p->cfg, 0x78) != want78) {
-                GLD_U8(p->cfg, 0x78) = want78;
-                p->desc_dirty = 1;
-            }
-        }
-        if (force) {
-            if (p->cfg && GLD_U32(p->cfg, 0x11c) != 0) {
-                GLD_U32(p->cfg, 0x11c) = 0;
-                p->desc_dirty = 1;
-            }
-            p->geom_fmt = fmt;
-            p->geom_words = QGPU_VF_WORDS(p->geom_fmt);
-        } else {
-            if (geom_publish(p, fmt))
-                p->desc_dirty = 1;
-        }
-        bits = p->desc_dirty ? 3 : 1;
-        p->desc_dirty = 0;
-        p->geom_on = 1;
+        bits = geom_dispatch_publish(p, fmt);
     } else if (p) {
         p->geom_on = 0;
         if (G.count)
             cnt_keep(p, 0, 0, 0);
+        if (wl) {                       /* lot 3, contrôle */
+            VD.wl_skip++;
+            vd_check_at(p, "dispatch", 1, 0, 0, 0, 0, 0);
+        }
         if (G.verdict) {                /* lot 2 */
             vd_store(p, 0, 0, 0, 0);
             p->vd_fresh = 1;
@@ -10337,6 +10609,9 @@ static void *fallback(PCtx *p, int slot, int writes_color, int touches_depth)
         }
         G.n_fallback++;
         fb_count[slot]++;
+        if (fb_count[slot] <= 3 || fb_count[slot] == 100 || fb_count[slot] == 1000)
+            gl_note("REPLI %s n° %lu, image %lu\n", pomppc_proc_name(slot), fb_count[slot],
+                    G.n_frames);
     }
     return p->real[slot];
 }

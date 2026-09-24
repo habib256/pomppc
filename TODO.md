@@ -10,22 +10,23 @@ amorcées) : `docs/archive/todo-gpu-3d-2026-09-24.md`.
 
 ---
 
-## 0. Reprise — état au 24/09/2026, 18 h
+## 0. Reprise — état au 24/09/2026, 21 h 30
 
 | Quoi | État |
 |---|---|
 | Dépôt | `main`, chantier A1 commité (v19) |
 | Protocole | **v19** (transport séparé : `qgpu_abi.h` pour le kext, `qgpu_proto.h` pour device + plugin) ; copies à jour dans `~/src/qemu/hw/display/` ; 913 tests natifs |
 | QEMU hôte | reconstruit 24/09 17h40 (`~/src/qemu/build/qemu-system-ppc64`, celui que `run_tiger.sh` lance) |
-| Invité quotidien (`tiger.qcow2`) | kext **v19** installé (`ioreg` : `QGPUClients = 4`, `QGPUVersion = 19`) ; plugin v19 (= `pomppc_accel.c` de c18c5f5 + transport v19) ; `~/pomppc-build/patches/qgpu/` contient les deux en-têtes ; lanceurs `~/doom3*.command`, `~/prey*.command`, `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
+| Invité quotidien (`tiger.qcow2`) | kext **v19** installé (`ioreg` : `QGPUClients = 4`, `QGPUVersion = 19`) ; **plugin `20260924-liste`** (lot 3 du verdict unique, branche du lot 3 : liste blanche allumée par défaut) ; `~/pomppc-build/patches/qgpu/` contient les deux en-têtes ; lanceurs `~/doom3*.command`, `~/prey*.command`, `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
 | Vérifié en jeu | DOOM 3 (plugin v19, 24/09 soir, l'utilisateur) : image parfaite, 22 img/s et plus dans les scènes, 6-12 en combat, « ça devient jouable ». Prey (idem) : **image parfaite, 10-22 img/s** ; dialogue de plantage d'Apple au démarrage, puis tout va bien (§5) |
 | Profils de référence | `.run/d3/sample-nat.txt` (DOOM 3 sous DRAW_NATIVE), `.run/prey/sample.txt` |
 | VM | redémarrages libres autorisés par l'utilisateur |
 
 **Premier geste à la reprise** : `pgrep -fl qemu-system` puis `.run/cmr/tssh.sh uptime` ; DOOM 3 et
-Prey ont été rejoués avec le plugin v19 (24/09 soir, l'utilisateur : parfaits) ; enchaîner sur le
-lot 0 de la section 2, le dialogue d'Apple de Prey (§5) ou la bissection des scènes `gltest`
-cassées (§5).
+Prey ont été rejoués avec le plugin v19 (24/09 soir, l'utilisateur : parfaits) ; lots 0 à 3 du
+verdict unique faits (§2) ; enchaîner sur ce que le lot 3 laisse (mémoire par texture et par
+époque dans `geom_texture_ok`/`texture_ok`), le lot 4 (relevé R5) ou le lot 5 (bilan). Mesurer un
+jeu **au premier plan** (sinon repli `Swap60` à chaque image).
 
 ---
 
@@ -118,10 +119,40 @@ variable d'environnement tant que la mesure en jeu n'est pas faite.
       image de DOOM 3 et de Prey justes à l'écran. Reste à voir : Warcraft III, UT2004, Colin
       McRae (dessins sans dispatch possibles) sous `VERDICTCHECK=1`. Piste : `geom_format`
       appelle `texturing_on` par unité (N², 22 éch. au dispatch).
-- [ ] **Lot 3 — liste blanche du bloc de changements** (après relevé R4 : quel bit pose chaque
-      appel GL) : verdict gardé si seuls des bits neutres sont posés (env de programmes
-      `0x00800000|0x02000000` en `+0x0c`). Épreuve : `VERDICTCHECK` étendu au dispatch, zéro
-      écart ; `pomppc_geom_dispatch` divisé par deux.
+- [x] **Lot 3 — liste blanche du bloc de changements** : **fait le 24/09/2026** (plugin
+      `20260924-liste`, **défaut `POMPPC_GL_WHITELIST=1`**, `=0` recalcule à chaque dispatch
+      comme au lot 2). **Relevé R4** (`docs/re/bloc-changements-r4.md`) : scène `gltest r4`
+      (~170 appels, un changement par dessin) et sonde `POMPPC_GL_BLOCKDUMP=a[:n]` (bloc de
+      chaque dispatch sur stderr) ; `POMPPC_GL_COUNT=1` compte en plus chaque bit posé. Le bloc
+      se lit : `+00` fragment et rastérisation (pochoir `10000000`, faces/décalage/modes de
+      polygone `00800000`, profondeur `200`, mélange `2`…), `+04` bit *u* = **toute liaison,
+      paramètre ou image de texture sur l'unité *u***, `+08` fenêtre `1`, projection `8`,
+      modèle-vue `10`, cibles et matrices de texture, `+0c` éclairage, tableaux salis
+      `00100000`, env de programmes `00800000`/`02000000`, liaison et `local` `00400000`/
+      `01000000`, `+10` environnement de texture, `+0x14..+0x48` valeurs de paramètres (jamais
+      seules). Sans dispatch : `glActiveTexture`, `glColor4f`, `glMatrixMode`, `glBindBufferARB`
+      seul. `pomppc_geom_dispatch` reprend le verdict gardé si le bloc n'a que des bits
+      **neutres** (`wl_mask`), si le verdict gardé est ok et si la clé du lot 2 est la même ;
+      bits de rastérisation (`WL_R0`) admis si `geom_raster_ok` (extrait de `geom_ok`) tient ;
+      tableaux salis : `va_gen_sizes` seul refait. `VERDICTCHECK=1` recalcule quand même au
+      dispatch (`VERDICT écart dispatch …`) ; ligne `VERDICT image N dispatch` : court-circuités,
+      recalculés (bloc, clé, sans verdict ok), écarts. Épreuves : **0 écart** — DOOM 3
+      `demo_mars_city1` (cinématique + jeu) **1 396 099 dispatches court-circuités sur
+      2 571 457 (54 %)**, 73/162 par image en cinématique, 737/1 294 en jeu ; Prey « Fuite »
+      **666 569 sur 1 369 003 (49 %)** ; 19 scènes `gltest` (les 18 du lot 1 + `r4`)
+      identiques à l'octet en défaut, `VERDICTCHECK=1` et `WHITELIST=0`, 223 dispatches
+      court-circuités, 0 écart. Ce qui reste recalculé : les dispatches qui **lient des
+      textures** (interactions : unités 1, 4, 5 ; unité 0) — DOOM 3 ne relie jamais la même
+      texture (0 table des unités inchangée sur 206 407). Or ce sont eux qui coûtent : **objectif
+      « divisé par deux » non atteint** — `sample` (fil principal ~815 éch.), même binaire :
+      `pomppc_geom_dispatch` 98 / 105 (`WHITELIST=0`) → 80 / 77 (défaut), soit −23 % ; ms/image
+      T+50..T+280, même méthode que le lot 2 : 89,8 / 86,5 → 86,8 / 85,2 (−2,5 % en moyenne, de l'ordre de l'écart entre deux parties du même mode).
+      Restent dans le dispatch : `geom_ok` → `geom_texture_ok` (`texture_uploadable`,
+      `intern_tex`/`find_tex`, `tex_params_ok`) et `texture_ok` (piste : mémoire par texture et
+      par époque, commune à ces deux passes). Piège noté : un jeu qui n'est pas au premier plan
+      perd la présentation directe (« not frontmost ») et fait un repli `Swap60` + une relecture
+      par image — les parties mesurées sont remises au premier plan depuis l'hôte (un processus
+      détaché de la session ssh n'atteint plus le WindowServer).
 - [ ] **Lot 4 — `compute_state` sauté**, seulement si R5 prouve que tout ce qu'il lit pose un bit
       du bloc (matrices en particulier). Sinon abandonner. Épreuve : `POMPPC_GL_STATECHECK=1`.
 - [ ] **Lot 5 — bilan** : nouveau `sample` de DOOM 3 à la scène de `sample-nat.txt` ; l'option A
