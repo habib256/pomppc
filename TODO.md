@@ -61,14 +61,17 @@ sous `glDrawElements` ; le plugin calcule **deux fois** le même verdict (`geom_
 plus des parasites. Gain estimé : 20-25 %. Chaque lot = un changement, une épreuve, un repli par
 variable d'environnement tant que la mesure en jeu n'est pas faite.
 
-- [ ] **Lot 0 — compter** : dispatches et dessins par image, dessins sans dispatch, histogramme
-      des motifs du bloc de changements `gctx+0x310` (5 premiers mots). Épreuve : notes de DOOM 3
-      (`demo_mars_city1`) et de Prey. **Code écrit (plugin `20260924-count`, non compilé), épreuve
-      à jouer** : `POMPPC_GL_COUNT=1 ~/doom3.command` puis `grep COUNT ~/d3-dump/note.txt` ; idem
-      `~/prey.command`, `~/prey-dump/note.txt`. Lecture : ligne `verdict` — `différents` = 0
-      justifie le lot 2 (sinon la clé du lot 2 doit couvrir ce qui change) ; ligne `bloc` — part
-      `env seulement` / `dispatch avec bloc` = ce que le lot 3 peut sauter, et les lignes `motif`
-      disent quels bits ajouter à la liste blanche (R4).
+- [x] **Lot 0 — compter** : **fait le 24/09/2026** (plugin `20260924-count`, `POMPPC_GL_COUNT=1`,
+      lignes `COUNT` toutes les 500 images dans la note). Résultats : **DOOM 3 Mars City** (images
+      500-1000) : 168 dispatch/image (max 188), 160 dessins/image, tous `DRAW_NATIVE`, 0 dessin sans
+      dispatch, 4 000 dispatch sans dessin (8/image) ; **verdict : 80 312 identiques, 0 différent**.
+      Bloc : 0 « env seulement », 50 626/84 312 avec un mot `+0x14..+0x48` non nul, 32 motifs + 1 500
+      hors table ; motif 1 `00000000 00000001 00000010 00900000 00000000` × 15 388, motif 2 `10800000
+      0 0 0 0` × 13 500, motif 3 `0 00000032 0 02900000 0` × 9 500. **Prey menu** : 9 dispatch/image,
+      6 dessins, 3 209 identiques, 0 différent, 16 motifs, 0 « env seulement ». Conclusion : le lot
+      2 est justifié (jamais un verdict différent au dessin) ; le lot 3 ne peut pas partir de la
+      liste blanche « env de programmes seulement » (0 occurrence) — il faut le relevé R4 sur les
+      motifs 1 à 3 de DOOM 3.
 - [ ] **Lot 1 — parasites** : `pthread_self` une fois par entrée ; `getenv` de `target_probe` et
       `draw_probe` en statique ; `tex_complete` mémorisé par image. Épreuve : `gltest texup
       texcache texdelmid cube tex3d arbvp arbfp varrayvbo` inchangés ; `sample` : `__pthread_self`
@@ -181,7 +184,8 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
       `RB_STD_DrawView` ← `idCommonLocal::InitGame` : la garde `sig_jmp` est armée, mais le
       crochet n'est réarmé qu'à `PROC_Swap60` (`crash_hook_check`, ligne 984) et ce premier
       `EndFrame` de `InitGame` précède la première image — Prey a déjà remplacé nos gestionnaires,
-      la faute va chez lui. **État : code écrit, à compiler et jouer dans l'invité.**
+      la faute va chez lui. **Corrigé et vérifié le 24/09 soir** : Prey démarre sans dialogue,
+      `Prey.crash.log` inchangé (216 482 octets), `gltest` inchangé.
       (1) `crash_hook_fresh()` relit les gestionnaires à chaque armement de garde (`sig_jmp`,
       `pack_jmp`, `PROC_GUARD_ARM`) tant que `G.n_frames == 0`, coût nul ensuite ; le réarmement
       par image (`stats_frame`) valait déjà sans `POMPPC_GL_STATS`. (2) Aucun champ de taille en
