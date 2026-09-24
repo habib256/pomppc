@@ -18,13 +18,13 @@ amorcées) : `docs/archive/todo-gpu-3d-2026-09-24.md`.
 | Protocole | **v19** (transport séparé : `qgpu_abi.h` pour le kext, `qgpu_proto.h` pour device + plugin) ; copies à jour dans `~/src/qemu/hw/display/` ; 913 tests natifs |
 | QEMU hôte | reconstruit 24/09 17h40 (`~/src/qemu/build/qemu-system-ppc64`, celui que `run_tiger.sh` lance) |
 | Invité quotidien (`tiger.qcow2`) | kext **v19** installé (`ioreg` : `QGPUClients = 4`, `QGPUVersion = 19`) ; plugin v19 (= `pomppc_accel.c` de c18c5f5 + transport v19) ; `~/pomppc-build/patches/qgpu/` contient les deux en-têtes ; lanceurs `~/doom3*.command`, `~/prey*.command`, `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
-| Vérifié en jeu | DOOM 3 : image parfaite, ~22 img/s, creux à 6-8 (vitres, portes, combats). Prey : image juste, 117 ms/image, **pas retesté** depuis le plugin courant |
+| Vérifié en jeu | DOOM 3 (plugin v19, 24/09 soir, l'utilisateur) : image parfaite, 22 img/s et plus dans les scènes, 6-12 en combat, « ça devient jouable ». Prey (idem) : **image parfaite, 10-22 img/s** ; dialogue de plantage d'Apple au démarrage, puis tout va bien (§5) |
 | Profils de référence | `.run/d3/sample-nat.txt` (DOOM 3 sous DRAW_NATIVE), `.run/prey/sample.txt` |
 | VM | redémarrages libres autorisés par l'utilisateur |
 
-**Premier geste à la reprise** : `pgrep -fl qemu-system` puis `.run/cmr/tssh.sh uptime` ; relancer
-DOOM 3 et Prey avec le plugin v19 (pas encore fait en jeu depuis A1 : seules `qgpu_test` et
-`gltest` l'ont exercé) ; puis le lot 0 de la section 2, ou la bissection des scènes `gltest`
+**Premier geste à la reprise** : `pgrep -fl qemu-system` puis `.run/cmr/tssh.sh uptime` ; DOOM 3 et
+Prey ont été rejoués avec le plugin v19 (24/09 soir, l'utilisateur : parfaits) ; enchaîner sur le
+lot 0 de la section 2, le dialogue d'Apple de Prey (§5) ou la bissection des scènes `gltest`
 cassées (§5).
 
 ---
@@ -43,8 +43,8 @@ une matrice de jeux verte comme preuve. Un jeu est « vert » quand il a ses tro
 |---|---|---|---|---|---|
 | Marble Blast Gold | pipeline fixe | juste | 0 | ~88 img/s | rien (témoin de non-régression) |
 | Zenerchi | pipeline fixe (AGL) | juste | 0 | ~50 img/s | rien (témoin) |
-| DOOM 3 Demo | ARB2, VBO, 7 unités, DXT | **parfaite** | 0 | ~22 img/s, creux 6-8 | vitesse (§2) |
-| Prey Demo | ARB2, VBO, DXT5 | juste | 0 | 117 ms/image | vitesse (§2), retest plugin courant |
+| DOOM 3 Demo | ARB2, VBO, 7 unités, DXT | **parfaite** | 0 | 22 img/s et plus en scène, 6-12 en combat (v19) | vitesse (§2) |
+| Prey Demo | ARB2, VBO, DXT5 | **parfaite** | 0 | 10-22 img/s | vitesse (§2) ; dialogue d'Apple au démarrage (§5) |
 | UT2004 Demo | tableaux, VBO, S3TC | arme en main noire | 0 | ~20 img/s | `docs/re/ut2004-arme-noire.md` |
 | Warcraft III | tableaux | texte des menus | ? | jouable | chemin tableaux (texte) |
 | Colin McRae | ARB via IndirectX | géométrie éclatée en course | 0 | — | tableaux libérés avant `Begin` (`docs/re/programmes-arb.md` §3 ter) |
@@ -162,8 +162,17 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
       l'accélérateur ou du WindowServer). Étape 6.
 - [ ] **RTCW** quitte après 8 s (`~/rtcw.command`, LaunchCFMApp) sans rien dessiner ; stdout dans
       `~/rtcw-dump`. À lancer à la main d'abord.
-- [ ] **Prey** : retest avec le plugin courant ; dialogue de plantage d'Apple au démarrage ; profil
-      (`.run/prey/sample.txt`) à comparer à DOOM 3 après le lot 5.
+- [ ] **Prey : dialogue de plantage d'Apple au démarrage, puis le jeu tourne** (revu le 24/09 soir
+      avec le plugin v19 : image parfaite, 10-22 img/s). Cause lue dans `Prey.crash.log` (17h49) :
+      `EXC_BAD_ACCESS` à `tex_lv0_sig` (`pomppc_accel.c:3176`, lecture de `d[n-1]` au-delà du
+      niveau, adresse en bord de page) sous `glCopyTexSubImage2D` ← `idImage::CopyFramebuffer` ←
+      `RB_STD_DrawView` ← `idCommonLocal::InitGame` : la garde `sig_jmp` est armée, mais le
+      crochet n'est réarmé qu'à `PROC_Swap60` (`crash_hook_check`, ligne 984) et ce premier
+      `EndFrame` de `InitGame` précède la première image — Prey a déjà remplacé nos gestionnaires,
+      la faute va chez lui. Correctif à faire : réarmer aussi avant chaque lecture gardée (ou dans
+      `pomppc_pre` tant qu'aucune image n'a été présentée), et borner `n` sur la taille réellement
+      allouée du niveau (le bord de page dit que la borne S3TC/`ROWPIX` est trop large ici).
+      Profil (`.run/prey/sample.txt`) à comparer à DOOM 3 après le lot 5.
 - [ ] **UT2004, arme noire** (`docs/re/ut2004-arme-noire.md`) : trancher entre sources du
       combineur mal lues et textures 79/120 échangées entre les unités 0 et 1.
 - [ ] **Colin McRae** : GLEngine déroule des tableaux déjà libérés par IndirectX ; onze
