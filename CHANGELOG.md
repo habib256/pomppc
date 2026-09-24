@@ -26,6 +26,15 @@ et dans `docs/`.
   fil tant que la pile est à moins de 32 Kio) pour les gardes P3 ; `getenv` de `target_probe`,
   `draw_probe` et `cube_probe` lus une fois ; complétude des textures (`tex_complete`,
   `tex_base_ok`) mémorisée par texture et par image (`tex_cp`), effacée par les crochets.
+- **Frontend F1** (`frontend/`, ImGui `v1.92.9b-docking`) : l'écran de l'invité est ancré au
+  centre d'un DockSpace (Ludothèque, Journal, Bilan autour, `.run/imgui.ini`), toujours au
+  ratio de l'invité avec bandes noires ; **Vue ▸ Plein écran** (Ctrl+Cmd+F, F11, Échap pour
+  sortir) sur le moniteur à sa taille native ; souris mise à l'échelle sur le rectangle dessiné.
+  Corrigés en chemin : contexte GL 3.0 refusé par macOS (la fenêtre ne s'ouvrait pas sur l'hôte
+  Mac), `Mouse.IsAbsolute` lu une seule fois (OS 9 restait en souris relative) et souris HID
+  qui reprend la main sur la tablette (`mouse_set`, **Machine ▸ Souris absolue**). Joué sur
+  OS 9 : plein écran 1440×1080 entre deux bandes de 240 px sur 1920×1080, double-clics justes
+  en plein écran et après retour en fenêtre.
 - **Prey, dialogue d'Apple au démarrage** (plugin seul ; vérifié : Prey démarre sans dialogue,
   `Prey.crash.log` inchangé) : les gestionnaires SIGBUS/SIGSEGV sont relus à chaque armement de garde tant
   qu'aucune image n'est présentée (`crash_hook_fresh`) ; `tex_lv0_sig` ne lit plus les texels

@@ -23,11 +23,16 @@ framebuffer under a mutex.
 ## Build
 
 ```sh
-./setup.sh                                  # fetch Dear ImGui into ./imgui
+./setup.sh                                  # fetch Dear ImGui (docking) into ./imgui
 cmake -S . -B build && cmake --build build -j
 ```
 
 Requires `gio-unix-2.0`, `glfw3`, OpenGL, and `gdbus-codegen` (glib dev tools).
+Dear ImGui must be the **docking** branch (`IMGUI_HAS_DOCK`; the build stops
+otherwise): `setup.sh` clones the pinned tag **`v1.92.9b-docking`** (override with
+`IMGUI_TAG=…`), replaces an older non-docking `./imgui`, and offline falls back to
+a sibling Pomme's checkout only if it is a docking build too. On macOS the window
+asks for a GL 3.2 core forward-compatible context (a 3.0 request fails there).
 The `org.qemu.Display1` bindings are generated at build time from the vendored,
 preprocessed `dbus/dbus-display1.xml` (copied from our QEMU 9.2 tree).
 
@@ -47,6 +52,45 @@ runtime (each switch relaunches QEMU).
 
 The keyboard is routed to the guest from the start — toggle it with
 **Machine ▸ Clavier → invité** when you need to type into an ImGui field.
+
+### Layout, ratio, plein écran (F1)
+
+- The guest screen (**Écran**) is docked in the centre of a full-frame DockSpace, with
+  **Ludothèque** on the right and **Journal** / **Bilan** below; every panel can be
+  re-docked, the layout is saved in `<repo>/.run/imgui.ini` and **Vue ▸ Disposition par
+  défaut** rebuilds it.
+- The guest is always drawn at the largest rectangle with **its own aspect ratio**, centred,
+  black bands around it — never stretched (**Vue ▸ Ajuster à la fenêtre**, the default).
+  **Vue ▸ 50/100/150/200 %** still fixes the size in window mode (scrollbars if larger).
+- **Vue ▸ Plein écran**, **Ctrl+Cmd+F** or **F11**: the host window goes to its monitor at
+  native size (`glfwSetWindowMonitor`), menus and panels hidden, guest only, 4:3 guest on a
+  16:9 screen = 1440×1080 between two 240-px bands on 1920×1080. **Same shortcut or Échap**
+  goes back to the window at its previous size and position. These keys are not sent to the
+  guest (Échap only while in full screen). On macOS, GLFW's own *Window ▸ Enter Full Screen*
+  (which owns Ctrl+Cmd+F and opens a Spaces full screen) is unbound, and the window's native
+  full-screen behaviour is disabled — the green button zooms instead.
+- The pointer is mapped on the **rectangle actually drawn** (`SetAbsPosition` in guest pixels,
+  relative motion scaled by the same factor, remainders carried); the bands send nothing.
+- **Machine ▸ Souris absolue (tablette)** (on by default): mac99 has both a tablet
+  (virtio-tablet from `run_os9.sh`, usb-tablet with `TABLET=1`) and a USB HID mouse; the HID
+  mouse becomes QEMU's *current* pointer as soon as the guest polls it, which made OS 9's
+  pointer relative (clicks landed wherever the accelerated guest cursor was). The frontend
+  follows `Mouse.IsAbsolute` changes and makes the tablet current again (`query-mice` +
+  `mouse_set`); untick it for games that want relative motion.
+- **Bilan** shows the guest size, the drawn rectangle and scale, the window size and the
+  pointer mode; **Journal** logs launches, CDs, scanout changes, switches and left clicks
+  (host point → guest pixel).
+
+`POMPPC_FE_SCRIPT` plays a test script through ImGui's input queue (same path as the real
+mouse and keyboard, no macOS Accessibility permission needed) and takes captures, e.g.:
+
+```sh
+POMPPC_FE_SCRIPT="wait 75; fs; wait 3; shot /tmp/fs.png; click 1568 262; click 1568 262; \
+esc; wait 2; shot /tmp/win.png; quit" ./build/pomppc ../run_os9.sh
+```
+
+Steps: `wait <s>`, `move|click <x> <y>` (window points), `fs` (Ctrl+Cmd+F), `f11`, `esc`,
+`type <a-z 0-9 space .>`, `enter`, `shot <png>`, `quit`.
 
 The headless probe defaults to the *other* guest, and always runs `-snapshot`:
 
@@ -88,3 +132,9 @@ The headless probe defaults to the *other* guest, and always runs `-snapshot`:
     and the currently-mounted title. `games.iso` (the auto-mounted master) is
     excluded.
   - Remaining: OS profiles.
+- **F1 (docked shell, ratio, host full screen)** ✅ — see *Layout, ratio, plein écran*
+  above. Proven on the Mac host (1920×1080) with Mac OS 9 (`run_os9.sh`, `SNAPSHOT=1`,
+  guest 640×480) and OpenBIOS (1024×768): window view 932×699 (4:3), full screen 1440×1080
+  between 240-px bands (measured on `screencapture`), double-clicks on the *Shared* (full
+  screen) and *Trash* (window, after coming back) desktop icons open them, keyboard typed
+  into OpenBIOS in full screen with no stray key from the shortcut.

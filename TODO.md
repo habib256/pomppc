@@ -183,7 +183,7 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
       remplie au chargement (plus de `getenv` dans le chemin chaud), documentée, avec purge des
       drapeaux `POMPPC_GL_*` dont le repli est mort. `.run/cmr/tssh.sh`, `cycle.sh`, `killgame.py`
       passent dans `tools/guest/` (la clé ssh reste hors dépôt).
-- [ ] **F1 — Frontend Dear ImGui : QEMU encadré, ancré, plein écran hôte** (demande de
+- [x] **F1 — Frontend Dear ImGui : QEMU encadré, ancré, plein écran hôte** (demande de
       l'utilisateur, 24/09 soir). L'écran QEMU (`frontend/`, affichage embarqué par D-Bus,
       `ImGui::Image` avec zoom 50-200 %) doit être **entouré de l'interface POMPPC en mode
       ancré** (docking : la vue de l'invité est une fenêtre ImGui ancrée au centre, menus,
@@ -195,6 +195,20 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
       16:9 → image intacte au centre, ratio 4:3 exact ; la souris absolue reste juste après
       bascule (`Mouse.SetAbsPosition` mis à l'échelle sur la zone dessinée, pas sur la fenêtre).
       Se teste avec `run_os9.sh` pendant que la VM Tiger est occupée.
+      **Fait (24/09 soir)**, ImGui `v1.92.9b-docking` (`setup.sh` épingle le tag). Épreuve
+      jouée sur l'hôte Mac (écran 1920×1080) avec `run_os9.sh` (`SNAPSHOT=1`, invité
+      640×480), scriptée par `POMPPC_FE_SCRIPT` (entrées injectées dans la file d'ImGui : les
+      clics synthétiques macOS exigent l'Accessibilité, refusée ici) : fenêtre ancrée 932×699
+      (4:3) ; plein écran 1440×1080 entre deux bandes de 240 px, mesurées au pixel sur
+      `screencapture` ; double-clic sur *Shared* en plein écran et sur *Trash* après retour en
+      fenêtre → les deux s'ouvrent, curseur invité sur l'icône ; clavier en plein écran tapé
+      dans OpenBIOS (`4 .` → `4 ok`, pas de `f` parasite du raccourci) ; retour à la même
+      taille et position. Trois défauts trouvés en chemin et corrigés : contexte GL 3.0 refusé
+      par macOS (la fenêtre ne s'ouvrait pas), `Mouse.IsAbsolute` lu une seule fois, souris
+      HID de mac99 qui reprend la main sur la virtio-tablet (**Machine ▸ Souris absolue**,
+      `mouse_set`). Non joué : Tiger 1024×768 (VM occupée), la vraie touche Ctrl+Cmd+F au
+      clavier (le raccourci Cocoa « Enter Full Screen » est retiré du menu, à confirmer à la
+      main), écran Retina, plusieurs moniteurs.
 - [ ] **A6 — `docs/architecture.md` avec les invariants** : qui possède quoi, quel côté peut
       refuser, ce qu'un client mort laisse derrière lui, cycle de vie d'un contexte. Les plantages
       non résolus (`kCGLBadDisplay`, créneaux perdus) sont des questions de cycle de vie et

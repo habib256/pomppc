@@ -87,7 +87,14 @@ public:
     bool setPaused(bool paused);          // stop / cont
     bool changeCd(const std::string& path, const std::string& id = "gamecd");
     bool ejectCd(const std::string& id = "gamecd");
-    bool qmpCommand(const std::string& json);   // raw QMP line, waits for reply
+    // Raw QMP line, waits for reply (the reply line is copied to *reply).
+    bool qmpCommand(const std::string& json, std::string* reply = nullptr);
+    // Make an absolute (tablet) or relative pointer QEMU's current mouse.
+    // mac99 has both a virtio/USB tablet and a USB HID mouse; the HID mouse
+    // grabs "current" as soon as the guest polls it, which turned OS 9's
+    // absolute tablet back into relative motion. Returns the mouse index
+    // selected, 0 if the current one already matches, -1 if none/failed.
+    int selectMouse(bool absolute);
 
     // Called from the D-Bus thread by the C trampolines. Public so the
     // generated-code callbacks can reach them; not part of the app API.
@@ -99,6 +106,9 @@ public:
     void mapScanout(int fd, uint32_t offset, uint32_t w, uint32_t h,
                     uint32_t stride, uint32_t pixmanFormat);
     void mapUpdate(int x, int y, int w, int h);
+    // Mouse.IsAbsolute changed (e.g. OS 9's virtio-tablet driver came up
+    // after OpenBIOS): switch SetAbsPosition ↔ RelMotion accordingly.
+    void noteMouseMode(bool absolute);
 
     struct Impl;   // GLib/GDBus state kept out of this header
     Impl* impl();

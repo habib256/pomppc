@@ -107,7 +107,8 @@ bool qmpWaitReturn(int fd, std::string& buf) {
 // `*fatal` is set when the channel can no longer be trusted (EOF or a read
 // timeout leaving a partial line in `buf`): the caller closes it rather than
 // reading desynchronised data forever after.
-bool qmpWaitId(int fd, std::string& buf, const std::string& idTag, bool* fatal) {
+bool qmpWaitId(int fd, std::string& buf, const std::string& idTag, bool* fatal,
+               std::string* reply = nullptr) {
     std::string line;
     *fatal = false;
     while (qmpReadLine(fd, buf, line)) {
@@ -116,6 +117,7 @@ bool qmpWaitId(int fd, std::string& buf, const std::string& idTag, bool* fatal) 
             std::fprintf(stderr, "QMP error: %s\n", line.c_str());
             return false;
         }
+        if (reply) *reply = line;
         return line.find("\"return\"") != std::string::npos;
     }
     *fatal = true;   // EOF or timeout: `buf` may hold half a line
@@ -547,6 +549,18 @@ void QemuBridge::runGlibThread() {
     if (d->mouse) {
         d->mouseIsAbs = qemu_dbus_display1_mouse_get_is_absolute(d->mouse);
         mouseAbs_.store(d->mouseIsAbs, std::memory_order_relaxed);
+        // IsAbsolute was read once, here — while OpenBIOS still runs, before
+        // OS 9 / Tiger bring their tablet driver up — so the frontend stayed
+        // on relative motion for the whole session and a click landed where
+        // the guest's accelerated cursor was, not where the user clicked.
+        // QEMU publishes the change as PropertiesChanged: follow it.
+        g_signal_connect(d->mouse, "notify::is-absolute",
+                         G_CALLBACK(+[](GObject* obj, GParamSpec*, gpointer self) {
+                             static_cast<QemuBridge*>(self)->noteMouseMode(
+                                 qemu_dbus_display1_mouse_get_is_absolute(
+                                     QEMU_DBUS_DISPLAY1_MOUSE(obj)));
+                         }),
+                         this);
     }
 
     // ── Clipboard peer (both sides implement it on the main connection) ──
@@ -870,7 +884,7 @@ std::string jsonEsc(const std::string& s) {
 }
 }  // namespace
 
-bool QemuBridge::qmpCommand(const std::string& json) {
+bool QemuBridge::qmpCommand(const std::string& json, std::string* reply) {
     if (qmpFd_ < 0) return false;
     std::lock_guard<std::mutex> lk(qmpMtx_);
     if (json.size() < 2 || json.back() != '}') return false;
@@ -888,7 +902,7 @@ bool QemuBridge::qmpCommand(const std::string& json) {
     // QEMU echoes the id back as {"return": {}, "id": "pom-1"}; be tolerant of
     // spacing by matching on the id value alone.
     std::string needle = std::string("\"") + idbuf + "\"";
-    bool ok = qmpWaitId(qmpFd_, qmpBuf_, needle, &fatal);
+    bool ok = qmpWaitId(qmpFd_, qmpBuf_, needle, &fatal, reply);
     if (fatal) {
         // A read timeout leaves half a line in qmpBuf_; every later command
         // would then parse garbage. Drop the channel instead of limping on.
@@ -898,6 +912,36 @@ bool QemuBridge::qmpCommand(const std::string& json) {
         qmpBuf_.clear();
     }
     return ok;
+}
+// query-mice → [{"name":…,"index":N,"current":bool,"absolute":bool}, …].
+// If the current pointer is not of the wanted kind, make the first one that
+// is current (HMP mouse_set: there is no QMP twin). Flat objects, so a scan
+// per '{' is enough — no JSON library in the frontend.
+int QemuBridge::selectMouse(bool absolute) {
+    std::string r;
+    if (!qmpCommand("{\"execute\":\"query-mice\"}", &r)) return -1;
+    int pick = -1;
+    size_t p = 0;
+    while ((p = r.find('{', p + 1)) != std::string::npos) {
+        size_t e = r.find('}', p);
+        if (e == std::string::npos) break;
+        std::string o = r.substr(p, e - p);
+        size_t ip = o.find("\"index\":");
+        if (ip == std::string::npos) continue;
+        int idx = std::atoi(o.c_str() + ip + 8);
+        bool abs = o.find("\"absolute\": true") != std::string::npos ||
+                   o.find("\"absolute\":true") != std::string::npos;
+        bool cur = o.find("\"current\": true") != std::string::npos ||
+                   o.find("\"current\":true") != std::string::npos;
+        if (cur && abs == absolute) return 0;      // already the right kind
+        if (abs == absolute && pick < 0) pick = idx;
+    }
+    if (pick < 0) return -1;                       // no such pointer
+    char cmd[128];
+    std::snprintf(cmd, sizeof cmd,
+                  "{\"execute\":\"human-monitor-command\",\"arguments\":"
+                  "{\"command-line\":\"mouse_set %d\"}}", pick);
+    return qmpCommand(cmd) ? pick : -1;
 }
 bool QemuBridge::reset() { return qmpCommand("{\"execute\":\"system_reset\"}"); }
 bool QemuBridge::setPaused(bool p) {
@@ -986,4 +1030,12 @@ void QemuBridge::mouseRel(int dx, int dy) {
 }
 bool QemuBridge::mouseIsAbsolute() const {
     return mouseAbs_.load(std::memory_order_relaxed);
+}
+
+// D-Bus thread (proxy notify): d->mouseIsAbs is only read on that thread.
+void QemuBridge::noteMouseMode(bool absolute) {
+    if (impl_) impl_->mouseIsAbs = absolute;
+    if (mouseAbs_.exchange(absolute, std::memory_order_relaxed) != absolute)
+        std::fprintf(stderr, "QemuBridge: pointer is now %s\n",
+                     absolute ? "absolute (SetAbsPosition)" : "relative (RelMotion)");
 }
