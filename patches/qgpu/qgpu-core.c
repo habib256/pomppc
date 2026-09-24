@@ -1169,6 +1169,11 @@ bool qgpu_core_init(QgpuCore *c, const char *backend,
         if (c->caps & QGPU_CAP_PROGRAMS) {
             c->caps |= QGPU_CAP_GEN_SIZES;
         }
+        /* v18 : DRAW_NATIVE est converti par le cœur vers la forme de
+           DRAW_RAW ; tout backend qui dessine en brut le tient. */
+        if (c->be->draw_raw) {
+            c->caps |= QGPU_CAP_NATIVE;
+        }
     } else {
         c->caps = 0;
     }
@@ -1581,17 +1586,84 @@ static bool raw_pos_usable(const QgpuCore *c, uint32_t words, uint32_t fmt, uint
     return QGPU_VF_POS_COUNT(fmt) != 4 || d[3] > 1e-6f || d[3] < -1e-6f;
 }
 
-static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint32_t ibuf, int raw_buf)
+/* Fin commune de DRAW_RAW, DRAW_RAW_BUF et (v18) DRAW_NATIVE : c->vbuf porte
+   nverts sommets à plat (`words` flottants hôte assainis, forme QGPU_VF_WORDS
+   de `fmt`), c->ibuf les `count` indices (< nverts) quand itype ≠ AUCUN ;
+   [lo, hi] est la plage des sommets dessinés sans indices. Programmes
+   cassés, test w ≈ 0, textures, backend : rien ici ne dépend de la façon
+   dont les sommets sont arrivés. */
+static uint32_t raw_finish(QgpuCore *c, QgpuSurface *s, uint32_t mode, uint32_t fmt,
+                           uint32_t words, uint32_t nverts, uint32_t itype,
+                           uint32_t count, uint32_t first, uint32_t lo, uint32_t hi)
 {
     QgpuTexture *tex[QGPU_MAX_UNITS];
-    uint32_t mode = a[0], count = a[1], voff, stride, fmt, ioff, itype, first, nverts;
-    uint32_t words, swords, gs, pre = 0, ng = 0, i, j, st, lo, hi;
-    uint8_t gn[QGPU_VF_GEN_MAX];
-    bool dense, vp_on = false, fp_on = false;
-    QgpuSurface *s = bound_surface(c, &st);
     QgpuState *cs;
-    const uint8_t *vbase, *ibase;
+    bool vp_on, fp_on;
+    uint32_t i, j;
     int u;
+
+    cs = cur_state(c);
+    /* v16 : un programme lié, actif et CASSÉ (texte refusé par l'hôte) jette
+       le dessin — BAD_ARG non fatal, comme un dessin mal formé. */
+    {
+        QgpuProgSet *pg = &c->ctx[c->cur_ctx].prg;
+        int w;
+        for (w = 0; w < 2; w++) {
+            uint32_t key = w == QGPU_PROG_VP ? QGPU_SK_VERTEX_PROGRAM
+                                             : QGPU_SK_FRAGMENT_PROGRAM;
+            if (cs->v[key] && pg->bound[w] >= 0 && pg->prog[pg->bound[w]].broken) {
+                TRACE(c, "  dessin brut jeté : programme %d cassé", pg->bound[w]);
+                return QGPU_ST_BAD_ARG;
+            }
+        }
+        vp_on = qgpu_prog_active(cs, pg, QGPU_PROG_VP) != NULL;
+        fp_on = qgpu_prog_active(cs, pg, QGPU_PROG_FP) != NULL;
+    }
+    j = 0;                                       /* sommet inutilisable vu ? */
+    /* Sous un programme de sommets, la position du sommet n'est pas la position
+       de découpe : le test w ≈ 0 (H4) n'a pas de sens, le programme décide. */
+    if (vp_on) {
+        /* rien */
+    } else if (itype != QGPU_IDX_NONE) {
+        for (i = 0; i < count; i++) {
+            j |= !raw_pos_usable(c, words, fmt, c->ibuf[i]);
+        }
+    } else {
+        for (i = lo; i <= hi; i++) {
+            j |= !raw_pos_usable(c, words, fmt, i);
+        }
+    }
+    if (j) {
+        /* Jeter la PRIMITIVE fautive demanderait de reconstruire la topologie
+           des dix modes ; on jette ce dessin-là, et surtout on rend OK pour
+           que la suite de la soumission — état, effacement, présentation —
+           s'exécute. C'est tout ce que H4 coûtait vraiment. */
+        TRACE(c, "  dessin brut jeté : position à w ≈ 0");
+        return QGPU_ST_OK;
+    }
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        tex[u] = fp_on ? unit_texture_bound(c, cs, u) : unit_texture(c, cs, u);
+    }
+    if (!c->be->draw_raw) {
+        return QGPU_ST_BACKEND;
+    }
+    arm_draw(c);
+    if (!c->be->draw_raw(c, s, cs, cur_geom(c), tex, mode, fmt, c->vbuf, nverts,
+                         words, itype == QGPU_IDX_NONE ? NULL : c->ibuf,
+                         count, first)) {
+        return QGPU_ST_BACKEND;
+    }
+    return QGPU_ST_OK;
+}
+
+static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint32_t ibuf, int raw_buf)
+{
+    uint32_t mode = a[0], count = a[1], voff, stride, fmt, ioff, itype, first, nverts;
+    uint32_t words, swords, gs, pre = 0, ng = 0, i, st, lo, hi;
+    uint8_t gn[QGPU_VF_GEN_MAX];
+    bool dense;
+    QgpuSurface *s = bound_surface(c, &st);
+    const uint8_t *vbase, *ibase;
 
     if (raw_buf) {
         /* DRAW_RAW_BUF : [mode, n, vbuf, voff, pas, format, ibuf, ioff, itype, premier, nverts] */
@@ -1736,58 +1808,309 @@ static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint3
             conv_raw_vertex(c, vbase, stride, words, c->ibuf[i]);
         }
     }
-    cs = cur_state(c);
-    /* v16 : un programme lié, actif et CASSÉ (texte refusé par l'hôte) jette
-       le dessin — BAD_ARG non fatal, comme un dessin mal formé. */
-    {
-        QgpuProgSet *pg = &c->ctx[c->cur_ctx].prg;
-        int w;
-        for (w = 0; w < 2; w++) {
-            uint32_t key = w == QGPU_PROG_VP ? QGPU_SK_VERTEX_PROGRAM
-                                             : QGPU_SK_FRAGMENT_PROGRAM;
-            if (cs->v[key] && pg->bound[w] >= 0 && pg->prog[pg->bound[w]].broken) {
-                TRACE(c, "  dessin brut jeté : programme %d cassé", pg->bound[w]);
+    return raw_finish(c, s, mode, fmt, words, nverts, itype, count, first, lo, hi);
+}
+
+/* ── v18 : DRAW_NATIVE ────────────────────────────────────────────────────────
+   Les sommets restent dans les tampons hôte au format de l'application (types
+   d'OpenGL, pas et décalages quelconques, grand-boutistes) ; le cœur les
+   convertit vers la forme de DRAW_RAW puis prend raw_finish. Le tableau de
+   travail est c->vbuf (agrandi à la demande, jamais rendu) : aucune allocation
+   par dessin une fois le régime atteint. */
+typedef struct {
+    const uint8_t *data;     /* le tampon hôte */
+    uint32_t size;           /* ses octets */
+    uint32_t off, stride;    /* octets ; stride déjà résolu (0 → serré) */
+    uint32_t type, tb;       /* QGPU_NT_*, octets par composante */
+    uint32_t n;              /* composantes sur le fil (1..4) */
+    uint32_t rn, dn;         /* composantes lues, composantes de la forme */
+    uint32_t code, dst;      /* QGPU_NA_*, mot de l'attribut dans le sommet */
+    bool norm;
+} NatAttr;
+
+static uint32_t nat_type_bytes(uint32_t t)
+{
+    switch (t) {
+    case QGPU_NT_BYTE: case QGPU_NT_UBYTE:
+        return 1;
+    case QGPU_NT_SHORT: case QGPU_NT_USHORT:
+        return 2;
+    case QGPU_NT_INT: case QGPU_NT_UINT: case QGPU_NT_FLOAT:
+        return 4;
+    case QGPU_NT_DOUBLE:
+        return 8;
+    default:
+        return 0;
+    }
+}
+
+/* Une composante. Entiers normalisés selon OpenGL 2.1 (celui de l'hôte) :
+   non signé c / (2^b − 1), signé (2c + 1) / (2^b − 1). Flottants et doubles
+   sont assainis comme DRAW_RAW (sane_coord). */
+static inline float nat_comp(const uint8_t *p, uint32_t type, bool norm)
+{
+    switch (type) {
+    case QGPU_NT_FLOAT:
+        return sane_coord(qgpu_u2f(qgpu_ld32(p)));
+    case QGPU_NT_UBYTE:
+        return norm ? (float)p[0] / 255.0f : (float)p[0];
+    case QGPU_NT_BYTE: {
+        float v = (float)(int8_t)p[0];
+        return norm ? (2.0f * v + 1.0f) / 255.0f : v;
+    }
+    case QGPU_NT_USHORT:
+        return norm ? (float)qgpu_ld16(p) / 65535.0f : (float)qgpu_ld16(p);
+    case QGPU_NT_SHORT: {
+        float v = (float)(int16_t)qgpu_ld16(p);
+        return norm ? (2.0f * v + 1.0f) / 65535.0f : v;
+    }
+    case QGPU_NT_UINT:
+        return norm ? (float)((double)qgpu_ld32(p) / 4294967295.0)
+                    : (float)qgpu_ld32(p);
+    case QGPU_NT_INT: {
+        double v = (double)(int32_t)qgpu_ld32(p);
+        return norm ? (float)((2.0 * v + 1.0) / 4294967295.0) : (float)v;
+    }
+    case QGPU_NT_DOUBLE: {
+        uint64_t u = ((uint64_t)qgpu_ld32(p) << 32) | qgpu_ld32(p + 4);
+        double d;
+        memcpy(&d, &u, sizeof(d));
+        if (d != d) {
+            return 0.0f;
+        }
+        /* saturer AVANT de convertir : un double hors des flottants donnerait
+           un comportement indéfini */
+        return d > QGPU_COORD_MAX ? QGPU_COORD_MAX :
+               d < -QGPU_COORD_MAX ? -QGPU_COORD_MAX : (float)d;
+    }
+    default:
+        return 0.0f;
+    }
+}
+
+/* Un attribut, pour les sommets lo..hi (list = NULL) ou pour ceux que citent
+   list[0..nl-1] (indices déjà rebasés sur lo). Boucle PAR ATTRIBUT : le type
+   est tranché une fois ; les formes d'idDrawVert — flottants × 2 et × 3,
+   octets × 4 normalisés — ont leur boucle sans aiguillage. */
+static void nat_conv_attr(QgpuCore *c, const NatAttr *at, uint32_t words,
+                          uint32_t lo, uint32_t hi, const uint32_t *list, uint32_t nl)
+{
+    static const float dflt[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    const uint8_t *base = at->data + at->off + (size_t)lo * at->stride;
+    float *out = c->vbuf + at->dst;
+    uint32_t i, j, n = list ? nl : hi - lo + 1;
+
+#define NAT_EACH(body) \
+    for (i = 0; i < n; i++) { \
+        uint32_t r = list ? list[i] : i; \
+        const uint8_t *p = base + (size_t)r * at->stride; \
+        float *d = out + (size_t)r * words; \
+        body \
+    }
+    if (at->type == QGPU_NT_FLOAT && at->rn == 3) {
+        bool w1 = at->dn == 4;
+        NAT_EACH(
+            d[0] = sane_coord(qgpu_u2f(qgpu_ld32(p)));
+            d[1] = sane_coord(qgpu_u2f(qgpu_ld32(p + 4)));
+            d[2] = sane_coord(qgpu_u2f(qgpu_ld32(p + 8)));
+            if (w1) {
+                d[3] = 1.0f;
+            }
+        )
+    } else if (at->type == QGPU_NT_FLOAT && at->rn == 2 && at->dn == 4) {
+        NAT_EACH(
+            d[0] = sane_coord(qgpu_u2f(qgpu_ld32(p)));
+            d[1] = sane_coord(qgpu_u2f(qgpu_ld32(p + 4)));
+            d[2] = 0.0f;
+            d[3] = 1.0f;
+        )
+    } else if (at->type == QGPU_NT_UBYTE && at->norm && at->rn == 4) {
+        NAT_EACH(
+            d[0] = (float)p[0] / 255.0f;
+            d[1] = (float)p[1] / 255.0f;
+            d[2] = (float)p[2] / 255.0f;
+            d[3] = (float)p[3] / 255.0f;
+        )
+    } else {
+        NAT_EACH(
+            for (j = 0; j < at->rn; j++) {
+                d[j] = nat_comp(p + j * at->tb, at->type, at->norm);
+            }
+            for (; j < at->dn; j++) {
+                d[j] = dflt[j];
+            }
+        )
+    }
+#undef NAT_EACH
+}
+
+/* DRAW_NATIVE [mode, n, ibuf, ioff, itype, premier, nattr, aoff]. Tout refus
+   est BAD_ARG, non fatal (draw_op) : cf. qgpu_proto.h, section v18. */
+static uint32_t do_draw_native(QgpuCore *c, const uint32_t *a)
+{
+    uint32_t mode = a[0], count = a[1], ibuf = a[2], ioff = a[3], itype = a[4];
+    uint32_t first = a[5], nattr = a[6], aoff = a[7];
+    NatAttr at[QGPU_NATIVE_MAX_ATTRS];
+    uint32_t seen = 0, fmt = 0, possz = 2, words, st, i, k, lo, hi, range;
+    bool dense;
+    QgpuSurface *s = bound_surface(c, &st);
+    const uint8_t *tab;
+
+    if (!s) {
+        return st;
+    }
+    if (mode > QGPU_PRIM_MODE_POLYGON || itype > QGPU_IDX_U32 ||
+        count == 0 || count > QGPU_MAX_VERTS ||
+        nattr == 0 || nattr > QGPU_NATIVE_MAX_ATTRS ||
+        !in_shmem(c, aoff, (uint64_t)nattr * QGPU_NATIVE_DESC_WORDS * 4)) {
+        return QGPU_ST_BAD_ARG;
+    }
+    if (itype == QGPU_IDX_NONE ? (uint64_t)first + count - 1 > 0xFFFFFFFFu
+                               : first != 0) {
+        return QGPU_ST_BAD_ARG;
+    }
+
+    /* 1. la table : codes, tampons, types, tailles ; le format en découle */
+    tab = c->shmem + aoff;
+    for (k = 0; k < nattr; k++) {
+        const uint8_t *d = tab + (size_t)k * QGPU_NATIVE_DESC_WORDS * 4;
+        NatAttr *t = &at[k];
+        uint32_t code = qgpu_ld32(d), buf = qgpu_ld32(d + 4);
+        uint32_t szf = qgpu_ld32(d + 20);
+
+        t->code = code;
+        t->off = qgpu_ld32(d + 8);
+        t->stride = qgpu_ld32(d + 12);
+        t->type = qgpu_ld32(d + 16);
+        t->tb = nat_type_bytes(t->type);
+        t->n = szf & QGPU_NA_SIZE_MASK;
+        t->norm = (szf & QGPU_NA_NORMALIZED) != 0;
+        if (code > QGPU_NA_CODE_MAX ||
+            (code > QGPU_NA_FOG && code < QGPU_NA_TEX(0)) ||
+            ((seen >> code) & 1) ||
+            buf >= QGPU_MAX_BUF || !c->buf[buf].used || !c->buf[buf].data ||
+            t->tb == 0 || t->n == 0 || t->n > 4 ||
+            (szf & ~(uint32_t)(QGPU_NA_SIZE_MASK | QGPU_NA_NORMALIZED))) {
+            return QGPU_ST_BAD_ARG;
+        }
+        seen |= 1u << code;
+        t->data = c->buf[buf].data;
+        t->size = c->buf[buf].size;
+        if (t->stride == 0) {
+            t->stride = t->n * t->tb;
+        }
+        switch (code) {
+        case QGPU_NA_POSITION:
+            if (t->n < 2) {
                 return QGPU_ST_BAD_ARG;
             }
+            possz = t->n;
+            t->dn = t->n;
+            break;
+        case QGPU_NA_NORMAL:    fmt |= QGPU_VF_NORMAL;    t->dn = 3; break;
+        case QGPU_NA_COLOR:     fmt |= QGPU_VF_COLOR;     t->dn = 4; break;
+        case QGPU_NA_SEC_COLOR: fmt |= QGPU_VF_SEC_COLOR; t->dn = 3; break;
+        case QGPU_NA_FOG:       fmt |= QGPU_VF_FOG;       t->dn = 1; break;
+        default:
+            if (code < QGPU_NA_GEN(0)) {
+                fmt |= (uint32_t)QGPU_VF_TEX(code - QGPU_NA_TEX(0));
+            } else {
+                /* comme QGPU_VF_GEN(k) sous DRAW_RAW */
+                if (!(c->caps & QGPU_CAP_PROGRAMS)) {
+                    return QGPU_ST_BAD_ARG;
+                }
+                fmt |= (uint32_t)QGPU_VF_GEN(code - QGPU_NA_GEN(0));
+            }
+            t->dn = 4;
+            break;
         }
-        vp_on = qgpu_prog_active(cs, pg, QGPU_PROG_VP) != NULL;
-        fp_on = qgpu_prog_active(cs, pg, QGPU_PROG_FP) != NULL;
+        t->rn = t->n < t->dn ? t->n : t->dn;
     }
-    j = 0;                                       /* sommet inutilisable vu ? */
-    /* Sous un programme de sommets, la position du sommet n'est pas la position
-       de découpe : le test w ≈ 0 (H4) n'a pas de sens, le programme décide. */
-    if (vp_on) {
-        /* rien */
-    } else if (itype != QGPU_IDX_NONE) {
-        for (i = 0; i < count; i++) {
-            j |= !raw_pos_usable(c, words, fmt, c->ibuf[i]);
+    /* sans position, le générique 0 l'est (aliasing ARB) ; le champ de
+       position (2 mots) est alors mis à zéro et ignoré */
+    if (!(seen & (1u << QGPU_NA_POSITION)) && !(seen & (1u << QGPU_NA_GEN(0)))) {
+        return QGPU_ST_BAD_ARG;
+    }
+    fmt |= (uint32_t)QGPU_VF_POS(possz);
+    words = (uint32_t)QGPU_VF_WORDS(fmt);
+    for (k = 0; k < nattr; k++) {
+        uint32_t bit;
+        switch (at[k].code) {
+        case QGPU_NA_POSITION:  bit = 0; break;
+        case QGPU_NA_NORMAL:    bit = QGPU_VF_NORMAL; break;
+        case QGPU_NA_COLOR:     bit = QGPU_VF_COLOR; break;
+        case QGPU_NA_SEC_COLOR: bit = QGPU_VF_SEC_COLOR; break;
+        case QGPU_NA_FOG:       bit = QGPU_VF_FOG; break;
+        default:
+            bit = at[k].code < QGPU_NA_GEN(0)
+                ? (uint32_t)QGPU_VF_TEX(at[k].code - QGPU_NA_TEX(0))
+                : (uint32_t)QGPU_VF_GEN(at[k].code - QGPU_NA_GEN(0));
+            break;
         }
+        at[k].dst = bit ? (uint32_t)qgpu_vf_offset(fmt, bit) : 0;
+    }
+
+    /* 2. les indices : ils disent quels sommets sont lus */
+    if (itype == QGPU_IDX_NONE) {
+        lo = first;
+        hi = first + count - 1;
     } else {
-        for (i = lo; i <= hi; i++) {
-            j |= !raw_pos_usable(c, words, fmt, i);
+        const uint8_t *ib = src_bytes(c, ibuf, ioff,
+                                      (uint64_t)count * (itype == QGPU_IDX_U16 ? 2 : 4), &st);
+        if (!ib || !grow_ibuf(c, count)) {
+            return ib ? QGPU_ST_BACKEND : QGPU_ST_BAD_ARG;
+        }
+        lo = ~0u;
+        hi = 0;
+        if (itype == QGPU_IDX_U16) {
+            for (i = 0; i < count; i++) {
+                uint32_t x = qgpu_ld16(ib + i * 2);
+                c->ibuf[i] = x;
+                lo = x < lo ? x : lo;
+                hi = x > hi ? x : hi;
+            }
+        } else {
+            for (i = 0; i < count; i++) {
+                uint32_t x = qgpu_ld32(ib + i * 4);
+                c->ibuf[i] = x;
+                lo = x < lo ? x : lo;
+                hi = x > hi ? x : hi;
+            }
         }
     }
-    if (j) {
-        /* Jeter la PRIMITIVE fautive demanderait de reconstruire la topologie
-           des dix modes ; on jette ce dessin-là, et surtout on rend OK pour
-           que la suite de la soumission — état, effacement, présentation —
-           s'exécute. C'est tout ce que H4 coûtait vraiment. */
-        TRACE(c, "  dessin brut jeté : position à w ≈ 0");
-        return QGPU_ST_OK;
+    range = hi - lo + 1;                       /* hi >= lo ; 0 si 2^32 */
+    if (range == 0 || range > QGPU_MAX_VERTS) {
+        return QGPU_ST_BAD_ARG;
     }
-    for (u = 0; u < QGPU_MAX_UNITS; u++) {
-        tex[u] = fp_on ? unit_texture_bound(c, cs, u) : unit_texture(c, cs, u);
+
+    /* 3. chaque attribut reste dans son tampon jusqu'au sommet hi */
+    for (k = 0; k < nattr; k++) {
+        if ((uint64_t)at[k].off + (uint64_t)at[k].stride * hi +
+            (uint64_t)at[k].n * at[k].tb > at[k].size) {
+            return QGPU_ST_BAD_ARG;
+        }
     }
-    if (!c->be->draw_raw) {
+
+    /* 4. conversion : bloc lo..hi s'il n'est pas plus large que la liste
+       d'indices, sinon seulement les sommets cités (le reste à zéro : le
+       backend reçoit le tableau entier) */
+    if (!grow_vbuf(c, range * words)) {
         return QGPU_ST_BACKEND;
     }
-    arm_draw(c);
-    if (!c->be->draw_raw(c, s, cs, cur_geom(c), tex, mode, fmt, c->vbuf, nverts,
-                         words, itype == QGPU_IDX_NONE ? NULL : c->ibuf,
-                         count, first)) {
-        return QGPU_ST_BACKEND;
+    dense = itype == QGPU_IDX_NONE || range <= count;
+    if (itype != QGPU_IDX_NONE && lo) {
+        for (i = 0; i < count; i++) {
+            c->ibuf[i] -= lo;
+        }
     }
-    return QGPU_ST_OK;
+    if (!dense || !(seen & (1u << QGPU_NA_POSITION))) {
+        memset(c->vbuf, 0, (size_t)range * words * sizeof(float));
+    }
+    for (k = 0; k < nattr; k++) {
+        nat_conv_attr(c, &at[k], words, lo, hi,
+                      dense ? NULL : c->ibuf, dense ? 0 : count);
+    }
+    return raw_finish(c, s, mode, fmt, words, range, itype, count, 0, 0, range - 1);
 }
 
 /* Exécute une commande déjà découpée ; renvoie QGPU_ST_*. */
@@ -2406,6 +2729,10 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
     case QGPU_OP_DRAW_RAW_BUF:
         WANT(QGPU_LEN_DRAW_RAW_BUF);
         return do_draw_raw(c, a, a[2], a[6], 1);
+
+    case QGPU_OP_DRAW_NATIVE:                        /* v18 */
+        WANT(QGPU_LEN_DRAW_NATIVE);
+        return do_draw_native(c, a);
 
     /* ── v8 : pointillé de polygone et requêtes d'occlusion ─────────────── */
     case QGPU_OP_SET_POLYGON_STIPPLE: {
@@ -3086,6 +3413,7 @@ static bool known_op(uint32_t op)
     case QGPU_OP_SET_MATERIAL: case QGPU_OP_SET_LIGHT_MODEL:
     case QGPU_OP_SET_TEXGEN: case QGPU_OP_SET_CLIP_PLANE:
     case QGPU_OP_SET_CURRENT: case QGPU_OP_DRAW_RAW: case QGPU_OP_DRAW_RAW_BUF:
+    case QGPU_OP_DRAW_NATIVE:                        /* v18 */
     /* v8 */
     case QGPU_OP_SET_POLYGON_STIPPLE: case QGPU_OP_QUERY_BEGIN:
     case QGPU_OP_QUERY_END: case QGPU_OP_QUERY_RESULT:
@@ -3098,15 +3426,15 @@ static bool known_op(uint32_t op)
     }
 }
 
-/* Les opcodes de DESSIN : 0x0030–0x0036 sont contigus, plus les deux chemins
-   bruts. Seuls ceux-là — et, v16, PROG_STRING, dont le refus par le
+/* Les opcodes de DESSIN : 0x0030–0x0036 sont contigus, plus les trois chemins
+   bruts (v18 : DRAW_NATIVE, dont TOUS les refus sont des BAD_ARG). Seuls ceux-là — et, v16, PROG_STRING, dont le refus par le
    compilateur de l'hôte ne met pas la suite du flux en doute — ont droit à un
    BAD_ARG non fatal (cf. ci-dessous). */
 static bool draw_op(uint32_t op)
 {
     return (op >= QGPU_OP_DRAW_TRIANGLES && op <= QGPU_OP_DRAW_TRIANGLES_SEC) ||
            op == QGPU_OP_DRAW_RAW || op == QGPU_OP_DRAW_RAW_BUF ||
-           op == QGPU_OP_PROG_STRING;
+           op == QGPU_OP_DRAW_NATIVE || op == QGPU_OP_PROG_STRING;
 }
 
 uint32_t qgpu_core_execute(QgpuCore *c, uint32_t off, uint32_t len)
