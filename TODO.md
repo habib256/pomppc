@@ -152,16 +152,23 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
 
 ## 5. Points ouverts (bugs, dettes, mesures à faire)
 
-- [ ] **Scènes `gltest` cassées, antérieures à A1** (vu le 24/09 en jouant l'épreuve d'A1, plugin
-      courant) : `tex3d` 4 échecs (**cassé par c18c5f5**, « paramètres mémorisés une fois par
-      image » : avec le `pomppc_accel.c` d'avant ce commit sur le transport v19, 9/9) ;
-      `tex13`, `tex14`, `gl15`, `texlod` : échecs puis **SIGSEGV** (rc 139), avant et après
-      c18c5f5 (7, 7, 12, 1 ok avant ; 7, 4, 8, 1 après) — à bissecter sur les commits du 24/09
-      (`git show <rev>:guest/gldriver/pomppc_accel.c` + transport v19, `cycle.sh NORUN=1`, une
-      scène par lancement : `gltest <scène>`, les arguments suivants sont la taille). Les autres
-      scènes (`tri texup texcache texdelmid cube arbvp arbfp varray varrayvbo caps blendc logicop
-      polymode stipple occl sepspec spin game`) passent.
-
+- [x] **Scènes `gltest` cassées, antérieures à A1** (24/09 soir, réglé) : `tex3d`, `tex14`,
+      `gl15`, `texlod` — **c18c5f5** mémorisait `upload_texture` une fois par image sans
+      regarder les paramètres ; un `glTexParameter` (filtre, LOD, biais, comparaison, répétition)
+      entre deux dessins d'une image ne partait plus. Correctif : empreinte du bloc de paramètres
+      (`tex_prm_sig`, `up_psig`) exigée en plus de l'image. Les **SIGSEGV** n'étaient pas le
+      plugin : `px()` de `gltest` lisait hors du tampon 64×64 par défaut (ces scènes dessinent
+      jusqu'à x = 250) — **jouer `tex13 tex14 gl15 texlod` en `256 256`**. Épreuve : tex3d 9/9,
+      tex13 34/34, gl15 18/18, texlod 8/8, tex14 30/31 ; texcache cube arbvp arbfp varrayvbo game
+      tri texup texdelmid varray verts.
+- [ ] **`gltest tex14` « λ=2 sans biais (témoin) » : défaut du GL de l'hôte macOS**, pas du
+      plugin. Le flux est juste (vidage : `SET_STATE TEX_LOD_BIAS0 = 0` avant le dernier
+      `DRAW_RAW`) ; rejoué en natif (`tests/qgpu_replay.c`), le backend logiciel donne bleu
+      (juste), le backend GL rouge : le biais d'unité −2 du dessin précédent reste appliqué.
+      Poser une autre valeur puis `glFlush()` avant le vrai `glTexEnvf(GL_TEXTURE_FILTER_CONTROL,
+      GL_TEXTURE_LOD_BIAS)` dans `gl_unit_env` (`qgpu-gl.c`) le corrige (sans `glFlush`, non) —
+      à décider côté QEMU (coût d'un flush par dessin : non ; ne réappliquer que sur changement,
+      ou passer le biais d'unité dans le biais de texture/l'échantillonneur).
 - [ ] **`kCGLBadDisplay` après un `killall` de DOOM 3** : tout lancement suivant échoue jusqu'au
       redémarrage de l'invité ; Prey et `gltest` démarrent. Cause non trouvée (état de
       l'accélérateur ou du WindowServer). Étape 6.
