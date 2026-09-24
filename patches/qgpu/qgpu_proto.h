@@ -52,7 +52,7 @@
                                        un kext / plugin compilé contre CE fichier
                                        s'attache encore : les opcodes v13/v14 sont
                                        optionnels (QGPU_CAP_SCANOUT, BUF_*, xfer 16). */
-#define QGPU_PROTO_VERSION      17  /* v2 : profondeur, état GL ; v3 : textures ;
+#define QGPU_PROTO_VERSION      18  /* v2 : profondeur, état GL ; v3 : textures ;
                                        v4 : brouillard, 2e unité, lignes, points ;
                                        v5 : 4 unités, GL_COMBINE ;
                                        v6 : stencil ;
@@ -95,7 +95,13 @@
                                              QGPU_CAP_GEN_SIZES : génériques à
                                              taille déclarée (clé
                                              QGPU_SK_GEN_SIZES, cf. section
-                                             « génériques à taille déclarée ») */
+                                             « génériques à taille déclarée ») ;
+                                       v18 : DRAW_NATIVE (l'hôte lit les
+                                             tampons de sommets tels que
+                                             l'application les a remplis :
+                                             types GL, pas, décalages),
+                                             QGPU_CAP_NATIVE, cf. section
+                                             « v18 : DRAW_NATIVE » */
 
 /* ── BAR0 : fenêtre partagée (RAM) ───────────────────────────────────────── */
 #define QGPU_SHMEM_DEFAULT_MB   64
@@ -195,6 +201,14 @@
    l'émet jamais sans ce bit. Détail : section « génériques à taille
    déclarée », docs/protocole-v17-generiques-tailles.md. */
 #define QGPU_CAP_GEN_SIZES      0x00000080
+/* v18 : le device tient QGPU_OP_DRAW_NATIVE (sommets lus tels quels dans les
+   tampons hôte, dans leurs types d'origine). Annoncé par le CŒUR pour tout
+   backend qui sait DRAW_RAW : la conversion vers la forme DRAW_RAW est faite
+   par lui, les backends n'en voient rien. L'invité n'émet DRAW_NATIVE que si
+   version >= 18 ET ce bit (un device v17 répond BAD_OPCODE, qui ARRÊTE la
+   soumission). Détail : section « v18 : DRAW_NATIVE »,
+   docs/protocole-v18-natif.md. */
+#define QGPU_CAP_NATIVE         0x00000100
 
 #define QGPU_IRQ_DONE           0x00000001
 
@@ -334,6 +348,8 @@
                                            premier, nverts] */
 #define QGPU_OP_DRAW_RAW_BUF    0x0059  /* v14, [mode, n, vbuf, voff, pas, format,
                                            ibuf, ioff, itype, premier, nverts] */
+#define QGPU_OP_DRAW_NATIVE     0x005A  /* v18, [mode, n, ibuf, ioff, itype, premier,
+                                           nattr, aoff], cf. section v18 */
 
 /* v8 : fin du pipeline fixe. Détail du contrat plus bas, section « v8 ». */
 #define QGPU_OP_SET_POLYGON_STIPPLE 0x0060 /* [32 mots de 32 bits, cf. ci-dessous] */
@@ -381,6 +397,7 @@
 #define QGPU_LEN_SET_CURRENT    6
 #define QGPU_LEN_DRAW_RAW       10
 #define QGPU_LEN_DRAW_RAW_BUF   12          /* v14 */
+#define QGPU_LEN_DRAW_NATIVE    9           /* v18 */
 #define QGPU_LEN_SET_POLYGON_STIPPLE 33     /* v8 : la plus longue commande */
 #define QGPU_LEN_QUERY          2
 #define QGPU_LEN_QUERY_RESULT   3
@@ -1531,6 +1548,113 @@
  */
 #define QGPU_PT_VERTEX          0x8620  /* GL_VERTEX_PROGRAM_ARB */
 #define QGPU_PT_FRAGMENT        0x8804  /* GL_FRAGMENT_PROGRAM_ARB */
+
+/* ── v18 : DRAW_NATIVE — sommets lus dans leur format d'origine ──────────────
+ *
+ *   Pourquoi. DOOM 3 (idTech4) donne ses sommets par des VBO entrelacés
+ *   (idDrawVert, 60 octets : xyz 3f @0, st 2f @12, normale 3f @20, tangentes
+ *   3f @32 et @44, couleur 4ub @56). Avec DRAW_RAW(_BUF), le plugin devait
+ *   REPACKER chaque sommet en flottants qgpu sur le PowerPC émulé (79 000
+ *   sommets et ~7 Mo par image) : premier poste de temps. Avec DRAW_NATIVE,
+ *   l'invité recopie le VBO tel quel dans un tampon hôte (BUF_SUBDATA, une
+ *   fois tant qu'il ne change pas) et décrit sa disposition ; c'est l'hôte
+ *   qui convertit.
+ *
+ *   QGPU_OP_DRAW_NATIVE [mode, n, ibuf, ioff, itype, premier, nattr, aoff]
+ *
+ *   mode    : QGPU_PRIM_MODE_*, comme DRAW_RAW.
+ *   n       : nombre d'indices lus (indexé) ou de sommets dessinés.
+ *             1..QGPU_MAX_VERTS.
+ *   ibuf    : tampon hôte des indices, ou QGPU_BUF_SHMEM : `ioff` est alors
+ *             un offset dans BAR0 (multiple de 4, comme DRAW_RAW). Ignoré
+ *             quand itype = QGPU_IDX_NONE.
+ *   ioff    : offset des indices en octets dans ce tampon.
+ *   itype   : QGPU_IDX_NONE / _U16 / _U32 ; indices GRAND-BOUTISTES (écrits
+ *             par l'invité, jamais permutés par l'hôte).
+ *   premier : non indexé : premier sommet dessiné (glDrawArrays) ; indexé :
+ *             doit valoir 0 (réservé, BAD_ARG sinon).
+ *   nattr   : nombre de descripteurs, 1..QGPU_NATIVE_MAX_ATTRS.
+ *   aoff    : offset dans BAR0 (multiple de 4) d'une table de nattr
+ *             descripteurs de QGPU_NATIVE_DESC_WORDS mots big-endian :
+ *
+ *     [code, buf, offset, pas, type, taille | drapeaux]
+ *
+ *     code   : attribut qgpu — QGPU_NA_POSITION (0), _NORMAL (1), _COLOR (2),
+ *              _SEC_COLOR (3), _FOG (4), QGPU_NA_TEX(u) = 8 + u (u 0..7),
+ *              QGPU_NA_GEN(k) = 16 + k (k 0..15). Au plus une fois chacun.
+ *     buf    : tampon hôte (BUF_CREATE) ; JAMAIS QGPU_BUF_SHMEM : des
+ *              sommets encore dans BAR0 passent par DRAW_RAW.
+ *     offset : octet du premier sommet (sommet d'indice 0) dans le tampon.
+ *     pas    : octets d'un sommet au suivant ; 0 = serré (taille × octets du
+ *              type), comme OpenGL. Aucun alignement exigé.
+ *     type   : énumération d'OpenGL — QGPU_NT_BYTE 0x1400, _UBYTE 0x1401,
+ *              _SHORT 0x1402, _USHORT 0x1403, _INT 0x1404, _UINT 0x1405,
+ *              _FLOAT 0x1406, _DOUBLE 0x140A. Données GRAND-BOUTISTES.
+ *     taille : 8 bits bas = nombre de composantes 1..4 ; bit 8
+ *              (QGPU_NA_NORMALIZED) = entier normalisé : non signé → c/(2^b−1)
+ *              dans [0,1], signé → (2c+1)/(2^b−1) dans [−1,1] (règle
+ *              d'OpenGL 2.1, celle de l'hôte). Sans le bit, un entier vaut sa
+ *              valeur. Le bit est sans effet sur FLOAT et DOUBLE. Les autres
+ *              bits sont réservés (non nuls = BAD_ARG). Attention : OpenGL
+ *              normalise TOUJOURS glColorPointer, glSecondaryColorPointer et
+ *              glNormalPointer entiers ; c'est à l'invité de poser le bit.
+ *
+ *   SÉMANTIQUE. Le cœur calcule la plage [lo, hi] des sommets lus (indexé :
+ *   min et max des indices ; sinon premier .. premier + n − 1), vérifie que
+ *   chaque attribut y reste dans son tampon (offset + pas × hi + taille ×
+ *   octets <= taille du tampon), convertit CES sommets — et, si les indices
+ *   sont épars (hi − lo + 1 > n), seulement ceux qu'ils citent — vers la forme
+ *   DRAW_RAW (flottants, ordre fixe du protocole), rebase les indices sur lo,
+ *   puis prend exactement le chemin de DRAW_RAW : même programme, mêmes
+ *   valeurs courantes pour les attributs absents, même assainissement (NaN →
+ *   0, saturation, cf. sane_coord), même test w ≈ 0 sur les sommets cités,
+ *   mêmes backends. Formes remises au backend :
+ *     position  : `taille` composantes (2, 3 ou 4 ; 1 = BAD_ARG) ;
+ *     normale 3, couleur 4, secondaire 3, brouillard 1, texcoord 4,
+ *     générique 4 : les composantes manquantes sont complétées comme OpenGL,
+ *     (0, 0, 0, 1) ; une taille supérieure à la forme (normale à 4…) ne lit
+ *     que les premières composantes.
+ *   Sans code 0, la position est le générique 0 (QGPU_NA_GEN(0), aliasing
+ *   ARB) ; sans l'un ni l'autre = BAD_ARG. Un générique exige
+ *   QGPU_CAP_PROGRAMS (sinon BAD_ARG), comme QGPU_VF_GEN(k). La clé
+ *   QGPU_SK_GEN_SIZES n'est PAS lue : la taille vient du descripteur.
+ *
+ *   REFUS. Tout refus de DRAW_NATIVE vaut QGPU_ST_BAD_ARG NON FATAL (dessin
+ *   jeté, la soumission continue, comme un dessin mal formé) — y compris les
+ *   bornes (aoff ou indices hors de BAR0, plage hors d'un tampon), qui valent
+ *   OOB pour DRAW_RAW : un VBO mal dimensionné par le jeu ne doit coûter que
+ *   son dessin. Liste : mode, itype, n = 0 ou > QGPU_MAX_VERTS, premier ≠ 0
+ *   indexé, premier + n débordant 32 bits, nattr hors de 1..24, aoff hors de
+ *   BAR0 ou non aligné, code inconnu (5..7, > 31) ou en double, buf inexistant
+ *   ou QGPU_BUF_SHMEM, type inconnu, taille 0 ou > 4, drapeaux réservés,
+ *   position à 1 composante, ni position ni générique 0, générique sans
+ *   QGPU_CAP_PROGRAMS, indices hors de leur tampon, plage d'un attribut hors
+ *   de son tampon, hi − lo + 1 > QGPU_MAX_VERTS. Un index n'a pas d'autre
+ *   borne que celle de chaque tampon.
+ *
+ *   Un device v17 répond QGPU_ST_BAD_OPCODE (FATAL : la soumission s'arrête) :
+ *   l'invité ne l'émet que si version >= 18 et QGPU_CAP_NATIVE.
+ */
+#define QGPU_NATIVE_MAX_ATTRS   24
+#define QGPU_NATIVE_DESC_WORDS  6
+#define QGPU_NA_POSITION        0
+#define QGPU_NA_NORMAL          1
+#define QGPU_NA_COLOR           2
+#define QGPU_NA_SEC_COLOR       3
+#define QGPU_NA_FOG             4
+#define QGPU_NA_TEX(u)          (8 + (u))       /* u 0..QGPU_MAX_UNITS-1 */
+#define QGPU_NA_GEN(k)          (16 + (k))      /* k 0..QGPU_VF_GEN_MAX-1 */
+#define QGPU_NA_CODE_MAX        31
+#define QGPU_NA_SIZE_MASK       0xFF
+#define QGPU_NA_NORMALIZED      0x100
+#define QGPU_NT_BYTE            0x1400
+#define QGPU_NT_UBYTE           0x1401
+#define QGPU_NT_SHORT           0x1402
+#define QGPU_NT_USHORT          0x1403
+#define QGPU_NT_INT             0x1404
+#define QGPU_NT_UINT            0x1405
+#define QGPU_NT_FLOAT           0x1406
+#define QGPU_NT_DOUBLE          0x140A
 
 /* ── Interface du kext POMPPCGPU (IOUserClient) ──────────────────────────────
  *

@@ -160,6 +160,28 @@ int main(int argc, char **argv)
                         buf_seen[bid] = 1;
                     }
                 }
+                /* v18 : DRAW_NATIVE cite son tampon d'indices et un tampon par
+                   attribut (table à aoff, absolu dans BAR0) : même prologue */
+                if (o == QGPU_OP_DRAW_NATIVE && l == QGPU_LEN_DRAW_NATIVE) {
+                    uint32_t ib = qgpu_ld32(shmem + h.base + (q + 3) * 4);
+                    uint32_t it = qgpu_ld32(shmem + h.base + (q + 5) * 4);
+                    uint32_t na = qgpu_ld32(shmem + h.base + (q + 7) * 4);
+                    uint32_t ao = qgpu_ld32(shmem + h.base + (q + 8) * 4), kk;
+                    uint32_t bids[QGPU_NATIVE_MAX_ATTRS + 1], nbid = 0;
+                    if (it != QGPU_IDX_NONE) bids[nbid++] = ib;
+                    if (na <= QGPU_NATIVE_MAX_ATTRS &&
+                        (uint64_t)ao + na * QGPU_NATIVE_DESC_WORDS * 4 <= SHMEM)
+                        for (kk = 0; kk < na; kk++)
+                            bids[nbid++] = qgpu_ld32(shmem + ao + (kk * QGPU_NATIVE_DESC_WORDS + 1) * 4);
+                    for (kk = 0; kk < nbid; kk++) {
+                        uint32_t bid = bids[kk];
+                        if (bid < QGPU_MAX_BUF && !buf_seen[bid] && np + 3 <= 4090) {
+                            pre[np++] = QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE);
+                            pre[np++] = bid; pre[np++] = QGPU_MAX_BUF_SIZE;
+                            buf_seen[bid] = 1;
+                        }
+                    }
+                }
                 /* texture créée avant le vidage : la créer ici, avec la cible
                    déduite de TEX_IMAGE3 (face de cube → cube), 2D sinon */
                 if ((o == QGPU_OP_TEX_IMAGE3 || o == QGPU_OP_TEX_PARAM) && id < QGPU_MAX_TEX &&
@@ -291,7 +313,8 @@ int main(int argc, char **argv)
                     uint32_t hd = qgpu_ld32(shmem + h.base + q * 4);
                     uint32_t o = QGPU_CMD_OP(hd), l = QGPU_CMD_LEN(hd);
                     if (!l || q + l > h.ncmd_bytes / 4) break;
-                    if (o == QGPU_OP_DRAW_RAW || o == QGPU_OP_DRAW_RAW_BUF) {
+                    if (o == QGPU_OP_DRAW_RAW || o == QGPU_OP_DRAW_RAW_BUF ||
+                        o == QGPU_OP_DRAW_NATIVE) {
                         if (ndraw_frame >= si && ndraw_frame <= sj) {
                             if (q > seg) st = qgpu_core_execute(&c, h.base + seg * 4, (q - seg) * 4);
                             seg = q + l;
@@ -323,7 +346,7 @@ int main(int argc, char **argv)
                 if (id < QGPU_MAX_TEX) tex_img_seen[id] |= (op == QGPU_OP_TEX_IMAGE3) ? 2 : 1;
             }
             if (op == QGPU_OP_DRAW_RAW || op == QGPU_OP_DRAW_RAW_BUF ||
-                op == QGPU_OP_DRAW_TRIANGLES_TEXN || op == QGPU_OP_DRAW_TRIANGLES_SEC ||
+                op == QGPU_OP_DRAW_NATIVE || op == QGPU_OP_DRAW_TRIANGLES_TEXN || op == QGPU_OP_DRAW_TRIANGLES_SEC ||
                 op == QGPU_OP_DRAW_TRIANGLES_TEX || op == QGPU_OP_DRAW_TRIANGLES_TEX2) {
                 /* lot 11 : une texture liée dont aucune image n'est dans le
                    vidage rend le rejeu infidèle — le dire, une fois par texture */
@@ -359,6 +382,23 @@ int main(int argc, char **argv)
                 if (op == QGPU_OP_TEX_IMAGE3)
                     fprintf(stderr, "LIST image %u TEX_IMAGE3 : tex %u cible %x niveau %u %ux%ux%u base %x fmt %x type %x\n",
                             h.frame, a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9]);
+                if (op == QGPU_OP_DRAW_NATIVE && len == QGPU_LEN_DRAW_NATIVE) {
+                    /* v18 : [mode, n, ibuf, ioff, itype, premier, nattr, aoff],
+                       puis un descripteur par ligne */
+                    uint32_t kk, na = a[7], ao = a[8];
+                    fprintf(stderr, "LIST image %u DRAW_NATIVE : mode %u count %u ibuf %d ioff %u itype %u premier %u nattr %u aoff %x\n",
+                            h.frame, a[1], a[2], (int)a[3], a[4], a[5], a[6], na, ao);
+                    if (na <= QGPU_NATIVE_MAX_ATTRS &&
+                        (uint64_t)ao + na * QGPU_NATIVE_DESC_WORDS * 4 <= SHMEM)
+                        for (kk = 0; kk < na; kk++) {
+                            const uint8_t *d = shmem + ao + kk * QGPU_NATIVE_DESC_WORDS * 4;
+                            uint32_t sz = qgpu_ld32(d + 20);
+                            fprintf(stderr, "   attr code %u buf %u off %u pas %u type %x taille %u%s\n",
+                                    qgpu_ld32(d), qgpu_ld32(d + 4), qgpu_ld32(d + 8), qgpu_ld32(d + 12),
+                                    qgpu_ld32(d + 16), sz & QGPU_NA_SIZE_MASK,
+                                    (sz & QGPU_NA_NORMALIZED) ? " normalisé" : "");
+                        }
+                }
                 if (op == QGPU_OP_DRAW_RAW || op == QGPU_OP_DRAW_RAW_BUF) {
                     static const char *fn[8] = { "REPLACE", "MODULATE", "ADD", "ADD_SIGNED", "INTERPOLATE", "SUBTRACT", "DOT3_RGB", "DOT3_RGBA" };
                     static const char *sn[8] = { "TEX", "CONST", "PRIM", "PREV", "TEX0", "TEX1", "TEX2", "TEX3" };
