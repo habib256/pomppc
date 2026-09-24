@@ -589,7 +589,7 @@ long gldInitDispatch(long a, long b, long c, long d, long e, long f, long g, lon
        Hors domaine, on rend le retour d'Apple tel quel et il reprend tout le
        travail — c'est le repli, vérifié exact. */
     {
-        long bits = pomppc_geom_dispatch((void *)a);
+        long bits = pomppc_geom_dispatch((void *)a, 0);
         if (bits)
             pomppc_log("  géométrie brute : +%ld\n", bits);
         return r | bits;
@@ -617,7 +617,7 @@ long gldUpdateDispatch(long a, long b, long c, long d, long e, long f, long g, l
         pomppc_after_draw_buffer_change((void *)a);
     pomppc_hook_procs((void *)a, (void **)b);
     {
-        long bits = pomppc_geom_dispatch((void *)a);
+        long bits = pomppc_geom_dispatch((void *)a, (const unsigned long *)c);
         if (bits)
             pomppc_log("  géométrie brute : +%ld\n", bits);
         return r | bits;

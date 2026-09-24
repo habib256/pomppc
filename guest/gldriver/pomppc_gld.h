@@ -186,7 +186,10 @@ void *pomppc_gld_override(int id);
 void pomppc_patch_caps(void *cfg);
 /* chemin brut (v7) : la géométrie non transformée part sur le GPU de l'hôte */
 void *pomppc_geom_proc(int slot);       /* Begin/End, RenderVertexArray/Buffer */
-long pomppc_geom_dispatch(void *ctx);   /* bits à ajouter au retour du dispatch */
+/* bits à ajouter au retour du dispatch ; `chg` = bloc de changements de
+   GLEngine (gctx+0x310, 19 mots) passé à gldUpdateDispatch, 0 pour
+   gldInitDispatch. Lu seulement par les compteurs (POMPPC_GL_COUNT). */
+long pomppc_geom_dispatch(void *ctx, const unsigned long *chg);
 void pomppc_geom_context(void *ctx, void *cfg);
 
 #endif

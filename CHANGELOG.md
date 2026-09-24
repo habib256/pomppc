@@ -9,6 +9,11 @@ et dans `docs/`.
 ## Non publié
 
 - En cours : verdict unique dans le plugin (`TODO.md` §2), lots 0 à 5.
+- Lot 0 (plugin `20260924-count`, écrit, ni compilé ni joué) : `POMPPC_GL_COUNT=1` note toutes
+  les 500 images des lignes `COUNT` — dispatches et dessins par image, dessins sans dispatch,
+  dispatches sans dessin, verdict du dispatch comparé à celui du dessin (identique / différent),
+  motifs des 5 premiers mots du bloc `gctx+0x310` et part « env seulement ».
+  `pomppc_geom_dispatch` reçoit le bloc de changements (2ᵉ argument, 0 depuis `gldInitDispatch`).
 
 ## 2026-09-24 (soir) — v19 : transport séparé, chantier A1
 
