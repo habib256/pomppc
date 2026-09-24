@@ -826,6 +826,21 @@ static struct {
     unsigned long   n_lazy_sync;        /* transmis juste avant une procédure d'Apple */
 } G = { PTHREAD_MUTEX_INITIALIZER };
 
+/* Appelée juste avant d'armer une garde de faute (sig_jmp, pack_jmp,
+   proc_jmp). Prey (24/09, 17h49) : le premier EndFrame d'InitGame fait un
+   glCopyTexSubImage2D AVANT la première image présentée ; ses gestionnaires,
+   posés après l'ouverture du device, étaient devant le nôtre (le réarmement
+   par image n'avait pas encore eu lieu) et la faute gardée de tex_lv0_sig
+   allait chez lui : dialogue de CrashReporter. Tant qu'aucune image n'est
+   passée, on relit donc les gestionnaires à chaque armement (deux sigaction :
+   c'est le chargement, pas le rendu) ; ensuite, le coût est nul et
+   stats_frame réarme à chaque échange. */
+static void crash_hook_fresh(void)
+{
+    if (!G.n_frames)
+        crash_hook_check();
+}
+
 static double now_s(void)
 {
     struct timeval tv;
@@ -981,7 +996,6 @@ static void trace_frame(void *ctx)
 /* Bilan périodique (POMPPC_GL_STATS=<fichier>), appelé à chaque échange. */
 static void stats_frame(void *ctx)
 {
-    crash_hook_check();             /* le jeu a pu remplacer nos gestionnaires */
     static const char *path;
     static int init;
     static double t0;
@@ -991,6 +1005,10 @@ static void stats_frame(void *ctx)
     static double ts0, tc0, tu_0, tw0;
     double t;
 
+    /* Le jeu a pu remplacer nos gestionnaires. En tête, avant le test de
+       POMPPC_GL_STATS : le réarmement vaut sans bilan (P1), et stats_frame
+       est appelée à chaque échange, bilan demandé ou non. */
+    crash_hook_check();
     if (!init) {
         const char *e = getenv("POMPPC_GL_STATS");
         init = 1;
@@ -3143,12 +3161,25 @@ static unsigned long tex_lv0_sig(const PTex *t)
        indéterminé au retour de siglongjmp). */
     volatile unsigned long vsig = sig;
     unsigned long n;
-    /* (24/09, vitres) : pas de sortie anticipée sous upload_blank — l'empreinte
-       doit être la MÊME qu'au dessin suivant, sinon la texture paraît modifiée
-       à chaque copie et repart en noir avant chaque COPY_TEX de bord, qui
-       n'écrit qu'une colonne : la copie 640×480 était effacée. La garde
-       sig_jmp couvre la lecture d'un niveau non engagé. */
-    if (d && w && h) {
+    /* (24/09, vitres) : l'empreinte doit être la MÊME au COPY_TEX et au
+       dessin suivant, sinon la texture paraît modifiée à chaque copie et
+       repart en noir avant chaque COPY_TEX de bord, qui n'écrit qu'une
+       colonne : la copie 640×480 était effacée.
+       Prey (24/09, 17h49) : sur la cible d'une copie d'écran (_currentRender,
+       glTexImage2D(NULL)), la borne calculée dépasse ce que GLEngine a
+       réellement alloué (faute en bord de page), et la structure de niveau
+       n'a pas de taille en octets connue (docs/re/textures-3d.md) pour la
+       borner. Ces texels ne disent de toute façon rien : le contenu à jour
+       est sur l'hôte. On ne les lit donc pas quand le niveau part noir
+       (upload_blank) ni tant que la texture est « hôte seulement ». Les deux
+       côtés restent cohérents (I1) : try_copy_tex pose host_only AVANT de
+       recalculer l'empreinte, et host_only ne retombe à 0 qu'avec un dirty
+       ou un recalcul (upload_texture, éviction). Une vraie respécification
+       (glTexImage2D, glTexSubImage2D) passe par les crochets, qui posent
+       dirty : on ne perd que le remplissage en place d'une mémoire cliente,
+       sans objet pour une cible de copie. */
+    if (d && w && h && !upload_blank && !t->host_only) {
+        crash_hook_fresh();             /* Prey : gestionnaires avant la 1re image */
         if (sigsetjmp(sig_jmp, 0) != 0) {
             sig_jmp_on = 0;             /* niveau illisible (24/09, DOOM 3) */
             return vsig ^ 0x5a5a5a5aUL;
@@ -3159,8 +3190,10 @@ static unsigned long tex_lv0_sig(const PTex *t)
            DXT1 fait 0,5 octet par texel : lire d[w·h−1] lisait à DEUX FOIS la
            taille du niveau — 512 Kio au-delà sur 1024², et à CHAQUE dessin
            (texture_uploadable appelle ceci). Bus error sur UT2004 (S3TC).
-           Taille réelle : blocs serrés pour S3TC, LV_ROWPIX × h × octets par
-           texel sinon. */
+           Taille réelle : blocs serrés pour S3TC ; sinon (Prey, 24/09)
+           jusqu'au dernier texel de la dernière ligne, LV_ROWPIX × (h − 1) + w
+           texels, comme la copie d'upload_texture : le bourrage de fin de la
+           dernière ligne n'a pas à être alloué. */
         if (dxt_format(fmt, type)) {
             n = dxt_bytes(fmt, w, h);
         } else {
@@ -3170,7 +3203,7 @@ static unsigned long tex_lv0_sig(const PTex *t)
                 rp = w;
             if (!tb)
                 tb = 1;                 /* couple inconnu : la borne la plus basse */
-            n = rp * h * tb;
+            n = (rp * (h - 1) + w) * tb;
         }
         if (n >= 4)
             sig ^= GLD_U32(d, 0);
@@ -3406,6 +3439,8 @@ static int upload_texture(PCtx *p, PTex *t)
                 }
                 if (!arena_alloc(size, &off))
                     return no(NO_TEX_SIZE, w, h);
+                if (!upload_blank)
+                    crash_hook_fresh();     /* garde sig_jmp ci-dessous */
                 if (upload_blank) {
                     memset(G.q.win + off, 0, size);     /* COPY_TEX écrasera */
                 } else if (sigsetjmp(sig_jmp, 0) == 0) {
@@ -8868,6 +8903,7 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
         G.n_dropped_fault++;            /* I9 (relecture du 24/09) */
         return 1;
     }
+    crash_hook_fresh();                 /* Prey : gestionnaires avant la 1re image */
     pack_thr = pthread_self();          /* P3 (relecture du 24/09) */
     pack_jmp_on = 1;
     r = geom_draw_client_unsafe(p, indexed, mode, first, count, itype, indices);
@@ -9933,8 +9969,10 @@ static long a_polygon(void *ctx, void *verts, long n, long flags)
  * primitives, apple_batch_ok, apple_ptrs_touch) ; jamais autour de
  * begin_*, fallback(), apple_guard() (malloc/free) ni du rendu d'Apple
  * real(...) — une faute là reste la leur. Désarmée avant tout unlock.
- * P3 : le fil qui arme est noté (proc_thr). */
-#define PROC_GUARD_ARM()    do { proc_thr = pthread_self(); proc_jmp_on = 1; } while (0)
+ * P3 : le fil qui arme est noté (proc_thr). crash_hook_fresh : voir sa
+ * définition (gestionnaires relus avant la première image). */
+#define PROC_GUARD_ARM()    do { crash_hook_fresh(); proc_thr = pthread_self(); \
+                                 proc_jmp_on = 1; } while (0)
 #define PROC_GUARD_DISARM() do { proc_jmp_on = 0; } while (0)
 
 /* Lit chaque pointeur et les deux bouts de chaque sommet, sous garde, avant
@@ -11098,7 +11136,19 @@ static int try_copy_tex(PCtx *p, unsigned long *a)
     /* I1 (relecture du 24/09) : l'empreinte calculée sous upload_blank ne
        porte pas les texels ; au dessin suivant elle différait et le niveau
        invité (noir) repartait par-dessus la copie hôte — les vitres de
-       DOOM 3 (_currentRender) montraient du noir. */
+       DOOM 3 (_currentRender) montraient du noir.
+       P15 : le niveau de l'INVITÉ n'est pas mis à jour — le contenu à jour
+       n'existe que sur l'hôte. Sans ce drapeau, l'éviction LRU (128
+       emplacements) détruisait la texture, et le rechargement la remplissait
+       avec l'ANCIEN contenu de l'invité : reflets et ombres périmés.
+       Posé AVANT l'empreinte (Prey, 24/09) : tex_lv0_sig ne lit pas les
+       texels d'une texture hôte seulement — ce niveau peut n'être même pas
+       alloué jusqu'au bout — et le dessin suivant, qui voit le même
+       drapeau, calcule donc la même empreinte. Si le reserve ci-dessous vide
+       le flux et que la soumission est perdue, le vidage remet host_only à 0 :
+       l'empreinte diffère au dessin suivant et la texture repart de
+       l'invité, ce qui est juste (la texture hôte est perdue). */
+    t->host_only = 1;
     t->lv0_sig = tex_lv0_sig(t);
     hy = p->sh - (unsigned long)sy - h;
     c = reserve(p, QGPU_LEN_COPY_TEX);
@@ -11114,11 +11164,6 @@ static int try_copy_tex(PCtx *p, unsigned long *a)
     c[9] = w;
     c[10] = h;
     t->dirty = 0;
-    /* P15 : le niveau de l'INVITÉ n'a pas été mis à jour — le contenu à jour
-       n'existe que sur l'hôte. Sans ce drapeau, l'éviction LRU (128
-       emplacements) détruisait la texture, et le rechargement la remplissait
-       avec l'ANCIEN contenu de l'invité : reflets et ombres périmés. */
-    t->host_only = 1;
     G.n_copytex++;
     return 1;
 }

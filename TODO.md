@@ -169,9 +169,16 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
       `RB_STD_DrawView` ← `idCommonLocal::InitGame` : la garde `sig_jmp` est armée, mais le
       crochet n'est réarmé qu'à `PROC_Swap60` (`crash_hook_check`, ligne 984) et ce premier
       `EndFrame` de `InitGame` précède la première image — Prey a déjà remplacé nos gestionnaires,
-      la faute va chez lui. Correctif à faire : réarmer aussi avant chaque lecture gardée (ou dans
-      `pomppc_pre` tant qu'aucune image n'a été présentée), et borner `n` sur la taille réellement
-      allouée du niveau (le bord de page dit que la borne S3TC/`ROWPIX` est trop large ici).
+      la faute va chez lui. **État : code écrit, à compiler et jouer dans l'invité.**
+      (1) `crash_hook_fresh()` relit les gestionnaires à chaque armement de garde (`sig_jmp`,
+      `pack_jmp`, `PROC_GUARD_ARM`) tant que `G.n_frames == 0`, coût nul ensuite ; le réarmement
+      par image (`stats_frame`) valait déjà sans `POMPPC_GL_STATS`. (2) Aucun champ de taille en
+      octets connu dans la structure de niveau : `tex_lv0_sig` ne lit plus les texels sous
+      `upload_blank` ni d'une texture `host_only`, et `try_copy_tex` pose `host_only` **avant**
+      l'empreinte (cohérence I1 entre COPY_TEX et dessin) ; borne resserrée à
+      `(ROWPIX·(h−1)+w)·octets`, comme la copie d'`upload_texture`. Épreuve : `~/prey.command` →
+      plus de dialogue d'Apple, `~/Library/Logs/CrashReporter/Prey.crash.log` ne grossit pas,
+      `gltest tri cube arbvp texcache` inchangés ; DOOM 3 : vitres et effets de chaleur justes.
       Profil (`.run/prey/sample.txt`) à comparer à DOOM 3 après le lot 5.
 - [ ] **UT2004, arme noire** (`docs/re/ut2004-arme-noire.md`) : trancher entre sources du
       combineur mal lues et textures 79/120 échangées entre les unités 0 et 1.

@@ -9,6 +9,11 @@ et dans `docs/`.
 ## Non publié
 
 - En cours : verdict unique dans le plugin (`TODO.md` §2), lots 0 à 5.
+- **Prey, dialogue d'Apple au démarrage** (plugin seul, code écrit, à compiler et jouer dans
+  l'invité) : les gestionnaires SIGBUS/SIGSEGV sont relus à chaque armement de garde tant
+  qu'aucune image n'est présentée (`crash_hook_fresh`) ; `tex_lv0_sig` ne lit plus les texels
+  d'un niveau envoyé noir ni d'une texture « hôte seulement » (`host_only` posé avant
+  l'empreinte dans `try_copy_tex`), et sa borne s'arrête au dernier texel de la dernière ligne.
 
 ## 2026-09-24 (soir) — v19 : transport séparé, chantier A1
 
