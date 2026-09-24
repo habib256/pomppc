@@ -26,7 +26,16 @@
 #define POMPPC_SUB_ASYNC        0x80000000UL
 #define POMPPC_SUB_PEEK         0x40000000UL
 #define POMPPC_SUB_QUEUE        0x20000000UL
-#define POMPPC_SUB_FLAGS        (POMPPC_SUB_ASYNC | POMPPC_SUB_PEEK | POMPPC_SUB_QUEUE)
+/* 24/09/2026 : LAYOUT — le kext répond, SANS rien soumettre, avec les constantes
+   de tranches qu'il a compilées : fence = QGPU_CLIENT_TEX_IDS | BUF_IDS << 16,
+   status = QGPU_CLIENT_SURF_IDS | CTX_IDS << 16, pc = QGPU_MAX_TEX. Un kext qui
+   ignore ce bit le laisse dans `len`, qui déborde alors la tranche : appel
+   refusé — c'est le signal « kext d'un autre en-tête ». Le 23/09, un kext à
+   128 textures par client sous un plugin à 1024 a coûté deux plantages et des
+   créneaux de clients perdus. */
+#define POMPPC_SUB_LAYOUT       0x10000000UL
+#define POMPPC_SUB_FLAGS        (POMPPC_SUB_ASYNC | POMPPC_SUB_PEEK | POMPPC_SUB_QUEUE | \
+                                 POMPPC_SUB_LAYOUT)
 
 typedef struct QgpuClient {
     io_connect_t   conn;

@@ -591,6 +591,12 @@ IOReturn POMPPCGPU::submit(int slot, UInt32 off, UInt32 len,
     if (slot < 0 || slot >= QGPU_MAX_CLIENTS) {
         return kIOReturnBadArgument;
     }
+    if (a.flags & POMPPC_SUB_LAYOUT) {  /* constantes de tranches de CE kext */
+        *fence    = (UInt32) QGPU_CLIENT_TEX_IDS | ((UInt32) QGPU_CLIENT_BUF_IDS << 16);
+        *status   = (UInt32) QGPU_CLIENT_SURF_IDS | ((UInt32) QGPU_CLIENT_CTX_IDS << 16);
+        *statusPC = (UInt32) QGPU_MAX_TEX;
+        return kIOReturnSuccess;
+    }
     /* K1/K4 : plus rien ne part une fois stop() commencé — la gate a pu être
        retirée du work loop, et runAction ferme la gate AVANT tout test. */
     if (!fGate || fStopping) {

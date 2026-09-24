@@ -66,6 +66,10 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <mach/mach_time.h>
+#include <signal.h>
+#include <setjmp.h>
+#include <sys/ucontext.h>
+#include <mach-o/dyld.h>
 
 #include "qgpu_proto.h"
 #include "pomppc_gld.h"
@@ -73,6 +77,22 @@
 
 #define POMPPC_PLUGIN_REV "20260923-vtxlimit"
 static void gl_note(const char *fmt, ...);
+static void crash_hook_install(void);
+/* 24/09/2026 — garde de lecture des tableaux de l'application. Les copies
+   clientes des VBO d'idTech4 (cache de sommets, memory plugin d'Apple) sont
+   paginées : la plage [vmin, vmax] d'un glDrawElements peut déborder sur une
+   page non mappée (DOOM 3 : SIGSEGV à page+0x34 dans le chemin flottant de
+   l'empaqueteur, 2 à 4 min de jeu). Le crochet SIGSEGV/SIGBUS revient ici par
+   siglongjmp quand pack_jmp_on est posé, et le lot est refusé (GLEngine le
+   dessine lui-même), comme le fait un vrai pilote qui copie de la mémoire
+   utilisateur sous garde de faute. */
+static sigjmp_buf pack_jmp;
+static volatile int pack_jmp_on;
+static volatile unsigned long pack_fault_addr, pack_fault_n;
+/* état du dernier empaquetage de tableaux, pour le crochet de plantage (24/09) */
+static volatile unsigned long dbg_vtx_i, dbg_vtx_n, dbg_vmin, dbg_words, dbg_fmt;
+static const void *volatile dbg_plan;
+static const unsigned char *volatile dbg_vao;
 static void flush(void);
 static void drain_all(void);
 
@@ -419,6 +439,8 @@ typedef struct PProg {
     unsigned char  fp_unit[QGPU_MAX_UNITS];  /* fragments : masque TU_ENABLE de la
                                                 cible échantillonnée par unité */
     int            fp_units_bad;        /* fragments : texture[u >= 4] ou cible inconnue */
+    unsigned long  vp_need;             /* sommets : entrées vertex.* lues par le texte
+                                           (VPN_*) ; 0 = pas encore relu */
 } PProg;
 static PProg pprog[PPROG_MAX];
 
@@ -976,7 +998,8 @@ static unsigned char raw_bad[RAW_NAN_MAX];
  * remis à 0, ou w ≈ 0) et rend leur nombre. Aucun accès aux globales : le
  * chemin TABLEAUX s'en sert aussi, lui qui ne passe pas par G.raw_*. */
 static unsigned long raw_scan_nan(unsigned long *w, unsigned long nv,
-                                  unsigned long words, unsigned long fmt)
+                                  unsigned long words, unsigned long fmt,
+                                  int keep_w0)
 {
     unsigned long i, j, nbad = 0;
 
@@ -985,8 +1008,14 @@ static unsigned long raw_scan_nan(unsigned long *w, unsigned long nv,
         unsigned long *v = w + i * words;
         /* w ≈ 0 : après projection, clip infini → triangles géants (ciel
            Colin McRae). On jette le sommet, comme un NaN, plutôt que de
-           forcer w=1 (ça collerait le ciel à la caméra). */
-        if (QGPU_VF_POS_COUNT(fmt) == 4 &&
+           forcer w=1 (ça collerait le ciel à la caméra). SAUF sous un
+           programme de sommets (keep_w0) : les volumes d'ombre de DOOM 3 et
+           Prey (shadow.vp) sont des paires (x,y,z,1)/(x,y,z,0), le w=0 est
+           le sommet projeté à l'infini par la matrice de projection infinie —
+           l'hôte les découpe en homogène comme une vraie carte. Les jeter
+           supprimait toutes les ombres ; les refuser envoyait chaque volume
+           chez Apple (5 replis et relectures par image, 24/09/2026). */
+        if (!keep_w0 && QGPU_VF_POS_COUNT(fmt) == 4 &&
             (v[3] & 0x7fffffffUL) < 0x358637bdUL)        /* |w| < 1e-6 */
             b = 1;
         for (j = 0; j < words; j++) {
@@ -1014,7 +1043,7 @@ static int raw_fix_nan(void)
     if (nv == 0 || nv > RAW_NAN_MAX)
         return 0;
     w = (unsigned long *)(G.win + VTX_OFF + G.raw_start);
-    nbad = raw_scan_nan(w, nv, words, G.raw_fmt);
+    nbad = raw_scan_nan(w, nv, words, G.raw_fmt, 0);
     if (!nbad)
         return 1;
 
@@ -1296,6 +1325,7 @@ void pomppc_backend_init(void)
             why = "POMPPC_GL_DISABLE";
         } else if (qgpu_open(&G.q, &why) == 0) {
             G.state = 1;
+            crash_hook_install();       /* 24/09 : journal du plantage avant Quit() */
             /* Une seule moitié par défaut : le mode synchrone garde alors
                exactement la disposition et le comportement d'avant la v9. */
             G.nhalf = 1;
@@ -5049,6 +5079,67 @@ static void text_fp_units(PProg *r, const char *s, unsigned long n)
    change — et dès le dispatch, parce que le format de sommet et les unités de
    texture en dépendent AVANT que le lot ne le compile (vu en vrai : la scène
    arbfp perdait sa texture, l'unité n'étant décidée qu'au lot). */
+/* 24/09/2026 — quelles entrées vertex.* un programme de sommets lit-il ?
+ * DOOM 3 laisse le tableau conventionnel de texcoord 0 ACTIF (menus) avec un
+ * pointeur périmé pendant les passes d'interaction, où le programme ne lit
+ * que vertex.attrib[8..11], vertex.position et vertex.color : le plugin
+ * empaquetait ce tableau fantôme (lecture hors page → SIGSEGV) pour rien.
+ * Sous programme, un attribut n'est porté que si le TEXTE le lit. Alias ARB :
+ * attrib[0] = position, [2] = normale, [3] = couleur, [4] = secondaire,
+ * [5] = brouillard, [8 + u] = texcoord u. */
+#define VPN_NORMAL   0x1UL
+#define VPN_COLOR    0x2UL
+#define VPN_SEC      0x4UL
+#define VPN_FOG      0x8UL
+#define VPN_TEX(u)   (0x10UL << (u))            /* unités 0..7 : bits 4..11 */
+#define VPN_GEN(k)   (0x1000UL << (k))          /* génériques 0..15 : bits 12..27 */
+#define VPN_VALID    0x80000000UL
+static unsigned long text_vp_inputs(const char *s, unsigned long n)
+{
+    unsigned long i, need = VPN_VALID;
+    for (i = 0; i + 7 < n; i++) {
+        unsigned long j, v = 0;
+        int any = 0;
+        if (memcmp(s + i, "vertex.", 7) != 0)
+            continue;
+        j = i + 7;
+        if (j + 6 <= n && !memcmp(s + j, "normal", 6)) { need |= VPN_NORMAL; continue; }
+        if (j + 5 <= n && !memcmp(s + j, "color", 5)) {
+            /* vertex.color.secondary : la couleur secondaire */
+            if (j + 15 <= n && !memcmp(s + j + 5, ".secondary", 10)) need |= VPN_SEC;
+            else need |= VPN_COLOR;
+            continue;
+        }
+        if (j + 8 <= n && !memcmp(s + j, "fogcoord", 8)) { need |= VPN_FOG; continue; }
+        if (j + 8 <= n && !memcmp(s + j, "texcoord", 8)) {
+            j += 8;
+            while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+            if (j < n && s[j] == '[') {
+                j++;
+                while (j < n && s[j] >= '0' && s[j] <= '9') { v = v * 10 + (unsigned long)(s[j] - '0'); any = 1; j++; }
+                if (!any) return need | 0x0FFFFFFF;     /* indice non littéral : tout */
+            }
+            if (v < QGPU_MAX_UNITS) need |= VPN_TEX(v);
+            continue;
+        }
+        if (j + 7 <= n && !memcmp(s + j, "attrib[", 7)) {
+            j += 7;
+            while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+            while (j < n && s[j] >= '0' && s[j] <= '9') { v = v * 10 + (unsigned long)(s[j] - '0'); any = 1; j++; }
+            if (!any) return need | 0x0FFFFFFF;
+            if (v == 2) need |= VPN_NORMAL;
+            else if (v == 3) need |= VPN_COLOR;
+            else if (v == 4) need |= VPN_SEC;
+            else if (v == 5) need |= VPN_FOG;
+            /* attrib[8+u] : le générique porte la donnée, pas le tableau
+               conventionnel de texcoord u (c'est lui qui est périmé) */
+            if (v < QGPU_VF_GEN_MAX) need |= VPN_GEN(v);
+            continue;
+        }
+    }
+    return need;
+}
+
 static void prog_parse(PProg *r)
 {
     const char *text;
@@ -5074,6 +5165,8 @@ static void prog_parse(PProg *r)
     if (r->local_n > PP_PARAMS(t)) r->local_n = PP_PARAMS(t);
     if (t)
         text_fp_units(r, text, len);
+    else
+        r->vp_need = text_vp_inputs(text, len);
     r->parsed_text = text;
     r->parsed_len = len;
 }
@@ -5545,6 +5638,22 @@ static unsigned long geom_format(PCtx *p)
             for (u = 0; u < QGPU_MAX_UNITS; u++)
                 if (!(lo & (1UL << (24 + u))))
                     fmt &= ~(unsigned long)QGPU_VF_TEX(u);
+        }
+        /* 24/09 : et seulement ce que le TEXTE du programme lit (DOOM 3 :
+           tableau de texcoord 0 actif mais périmé pendant les interactions) */
+        if (p->vp_rec && (p->vp_rec->vp_need & VPN_VALID) &&
+            !(getenv("POMPPC_GL_VPNEED") && getenv("POMPPC_GL_VPNEED")[0] == '0')) {
+            unsigned long need = p->vp_rec->vp_need;
+            if (!(need & VPN_COLOR))  fmt &= ~(unsigned long)QGPU_VF_COLOR;
+            if (!(need & VPN_NORMAL)) fmt &= ~(unsigned long)QGPU_VF_NORMAL;
+            if (!(need & VPN_SEC))    fmt &= ~(unsigned long)QGPU_VF_SEC_COLOR;
+            if (!(need & VPN_FOG))    fmt &= ~(unsigned long)QGPU_VF_FOG;
+            for (u = 0; u < QGPU_MAX_UNITS; u++)
+                if (!(need & VPN_TEX(u)))
+                    fmt &= ~(unsigned long)QGPU_VF_TEX(u);
+            for (k = 1; k < QGPU_VF_GEN_MAX; k++)
+                if (!(need & VPN_GEN(k)))
+                    fmt &= ~(unsigned long)QGPU_VF_GEN(k);
         }
     }
     if (geom_switch() >= 2) {           /* format fixe et large : mesure */
@@ -6917,18 +7026,22 @@ static const unsigned char *va_src(PCtx *p, const unsigned char *V, int a)
 {
     unsigned char *gc = gctx_of(p);
     unsigned long cached, raw, vbo, base;
-    /* v16 : les génériques (16..) se lisent dans l'emplacement lui-même — le
-       cache des pointeurs résolus de GLEngine (H1) n'est pas fiable */
+    raw = GLD_U32(VA_SLOT(V, a), 0);
+    vbo = GLD_U32(V, VA_VBO(V, a));
+    /* Tableau adossé à un VBO : base de la copie cliente + décalage, TOUJOURS.
+       Le cache des pointeurs résolus de GLEngine (H1, gctx+0x48f8) est
+       périmé aussi pour un tableau ACTIF : DOOM 3 (24/09/2026, crochet de
+       plantage) — position, couleur et génériques 8..11 lus en
+       0x190ec000+…, mais texcoord 0 en 0x1b01400c, une autre région, non
+       mappée au 10e sommet → SIGSEGV. Les génériques (16..) l'ignoraient déjà. */
+    if (vbo) {
+        base = GLD_U32((void *)vbo, 0x30);
+        return (const unsigned char *)(base + raw);
+    }
     if (gc && a < 16) {
         cached = GLD_U32(gc, GC_VA_PTRS + 4 * a);
         if (cached)
             return (const unsigned char *)cached;
-    }
-    raw = GLD_U32(VA_SLOT(V, a), 0);
-    vbo = GLD_U32(V, VA_VBO(V, a));
-    if (vbo) {
-        base = GLD_U32((void *)vbo, 0x30);
-        return (const unsigned char *)(base + raw);
     }
     return (const unsigned char *)raw;
 }
@@ -7134,7 +7247,131 @@ static int va_sources_ok(PCtx *p, const unsigned char *V, unsigned long fmt)
     return 0;
 }
 
-static void va_pack_vertex(float *dst, PCtx *p, const unsigned char *V,
+/* 24/09/2026 — empaqueteur PLANIFIÉ. Profil `sample` de DOOM 3 en jeu :
+ * va_fetch = 23 % du fil principal (relecture du descripteur, de la source
+ * VBO et des valeurs courantes à CHAQUE sommet et CHAQUE attribut). Le plan
+ * prend ces décisions une fois par dessin (mêmes règles que va_fetch, y
+ * compris la couleur morte de WC3), la boucle par sommet ne fait plus que
+ * copier et convertir, avec un chemin direct pour les flottants. */
+typedef struct VaAttr {
+    const unsigned char *src;   /* base du tableau (sommet 0) ; 0 = constante */
+    long           stride;
+    int            bpc, src_n, dst_n, norm;
+    unsigned       type;
+    int            is_color;    /* emplacement 2 : couleur morte → courante */
+    float          cur[4];      /* valeur constante (dst_n flottants) */
+    float          last_def;
+} VaAttr;
+typedef struct VaPlan {
+    VaAttr a[QGPU_VF_GEN_MAX + QGPU_MAX_UNITS + 5];
+    int    n;
+} VaPlan;
+
+static void va_plan_attr(VaAttr *at, PCtx *p, const unsigned char *V, int slot,
+                         int dst_n, float last_def)
+{
+    unsigned char *g = gls(p);
+    const unsigned char *ent, *src;
+    const float *cur;
+    int k;
+
+    memset(at, 0, sizeof(*at));
+    at->dst_n = dst_n;
+    at->last_def = last_def;
+    at->is_color = (slot == 2);
+    if (!V || !va_enabled(V, slot))
+        goto constant;
+    ent = VA_SLOT(V, slot);
+    at->type = U16(ent, 8);
+    at->src_n = U16(ent, 0xa);
+    at->norm = ent[0xd] || (at->type & 0x8000);
+    at->type &= 0x7fff;
+    at->bpc = va_bpc(at->type, ent[0xc]);
+    at->stride = (long)GLD_U32(ent, 4);
+    if ((slot == 1 || slot == 2) && at->type != VA_GL_FLOAT && at->type != VA_GL_DOUBLE)
+        at->norm = 1;
+    src = va_src(p, V, slot);
+    if (!src || at->stride <= 0 || at->bpc <= 0)
+        goto constant;
+    at->src = src;
+    if (at->src_n > dst_n)
+        at->src_n = dst_n;
+    if (at->is_color)
+        fill_current_color(p, at->cur);             /* pour la couleur morte */
+    return;
+constant:
+    at->src = 0;
+    if (slot == 2) {
+        fill_current_color(p, at->cur);
+        return;
+    }
+    cur = va_current(g, slot);
+    for (k = 0; k < dst_n; k++)
+        at->cur[k] = cur && k < 4 ? cur[k] : (k == dst_n - 1 ? last_def : 0.0f);
+}
+
+static void va_plan_build(VaPlan *pl, PCtx *p, const unsigned char *V, unsigned long fmt)
+{
+    int n = QGPU_VF_POS_COUNT(fmt), u;
+    pl->n = 0;
+    if (G.prog && p->vp_on && !va_enabled(V, 0) && va_enabled(V, 16))
+        va_plan_attr(&pl->a[pl->n++], p, V, 16, n, 1.0f);
+    else
+        va_plan_attr(&pl->a[pl->n++], p, V, 0, n, 1.0f);
+    if (fmt & QGPU_VF_NORMAL)    va_plan_attr(&pl->a[pl->n++], p, V, 1, 3, 0.0f);
+    if (fmt & QGPU_VF_COLOR)     va_plan_attr(&pl->a[pl->n++], p, V, 2, 4, 1.0f);
+    if (fmt & QGPU_VF_SEC_COLOR) va_plan_attr(&pl->a[pl->n++], p, V, 4, 3, 0.0f);
+    if (fmt & QGPU_VF_FOG)       va_plan_attr(&pl->a[pl->n++], p, V, 3, 1, 0.0f);
+    for (u = 0; u < QGPU_MAX_UNITS; u++)
+        if (fmt & QGPU_VF_TEX(u))
+            va_plan_attr(&pl->a[pl->n++], p, V, 8 + u, 4, 1.0f);
+    for (u = 1; u < QGPU_VF_GEN_MAX; u++)
+        if (fmt & QGPU_VF_GEN(u))
+            va_plan_attr(&pl->a[pl->n++], p, V, 16 + u, 4, 1.0f);
+}
+
+static void va_pack_planned(float *dst, const VaPlan *pl, unsigned long i)
+{
+    int j, k;
+    for (j = 0; j < pl->n; j++) {
+        const VaAttr *at = &pl->a[j];
+        int dn = at->dst_n;
+        if (!at->src) {
+            for (k = 0; k < dn; k++)
+                dst[k] = at->cur[k];
+            dst += dn;
+            continue;
+        }
+        {
+            const unsigned char *src = at->src + (long)i * at->stride;
+            if (at->type == VA_GL_FLOAT) {
+                const float *f = (const float *)src;
+                for (k = 0; k < at->src_n; k++) {
+                    float v = f[k];
+                    if (!(v > -1e9f && v < 1e9f))
+                        v = (v > 0.0f) ? 1e9f : (v < 0.0f) ? -1e9f : 0.0f;
+                    dst[k] = v;
+                }
+            } else {
+                for (k = 0; k < at->src_n; k++) {
+                    float v = va_comp(src + k * at->bpc, at->type, at->norm);
+                    if (!(v > -1e9f && v < 1e9f))
+                        v = (v > 0.0f) ? 1e9f : (v < 0.0f) ? -1e9f : 0.0f;
+                    dst[k] = v;
+                }
+            }
+            for (k = at->src_n; k < dn; k++)
+                dst[k] = (k == dn - 1) ? at->last_def : 0.0f;
+            if (at->is_color && dn >= 4 &&
+                dst[0] == 0.0f && dst[1] == 0.0f && dst[2] == 0.0f && dst[3] == 0.0f)
+                for (k = 0; k < 4; k++)
+                    dst[k] = at->cur[k];
+        }
+        dst += dn;
+    }
+}
+
+static void __attribute__((unused)) va_pack_vertex(float *dst, PCtx *p, const unsigned char *V,
                            unsigned long fmt, unsigned long i)
 {
     int n, u;
@@ -7208,6 +7445,46 @@ static int va_scan_idx(const void *idx, unsigned long itype, long count,
     *minv = mn;
     *maxv = mx;
     return 1;
+}
+
+static unsigned long va_idx_at(const void *idx, unsigned long itype, long i)
+{
+    if (itype == VA_GL_UBYTE)
+        return ((const unsigned char *)idx)[i];
+    if (itype == VA_GL_USHORT)
+        return ((const unsigned short *)idx)[i];
+    return ((const unsigned long *)idx)[i];
+}
+
+/* 24/09/2026 — DOOM 3 et Prey : un lot indexé de triangles dont la plage
+ * [vmin, vmax] contient des sommets fous (cache de sommets d'idTech4 : les
+ * trous entre les sommets référencés sont de la mémoire quelconque) partait
+ * ENTIER chez Apple (« raw:arrays 30/48 », 5 fois par image, chaque fois une
+ * relecture et un retéléversement de l'écran). Un sommet non référencé ne
+ * dessine rien ; un sommet fou référencé gâche son triangle seulement : on
+ * copie les indices en sautant les triangles qui touchent un sommet marqué.
+ * Rend le nombre d'indices écrits. */
+static long va_copy_idx_tri(void *dst, int use32, const void *idx, unsigned long itype,
+                            long count, unsigned long base, const unsigned char *bad)
+{
+    long i, o = 0;
+    for (i = 0; i + 2 < count; i += 3) {
+        unsigned long a = va_idx_at(idx, itype, i) - base;
+        unsigned long b = va_idx_at(idx, itype, i + 1) - base;
+        unsigned long c = va_idx_at(idx, itype, i + 2) - base;
+        if (bad[a] || bad[b] || bad[c])
+            continue;
+        if (use32) {
+            ((unsigned long *)dst)[o] = a; ((unsigned long *)dst)[o + 1] = b;
+            ((unsigned long *)dst)[o + 2] = c;
+        } else {
+            ((unsigned short *)dst)[o] = (unsigned short)a;
+            ((unsigned short *)dst)[o + 1] = (unsigned short)b;
+            ((unsigned short *)dst)[o + 2] = (unsigned short)c;
+        }
+        o += 3;
+    }
+    return o;
 }
 
 static void va_copy_idx16(unsigned short *dst, const void *idx,
@@ -7462,9 +7739,47 @@ static int quads_axis_aligned(const float *v, unsigned long n, unsigned long wor
 }
 
 /* Cœur du canal tableaux. Verrou déjà tenu. 1 = traité (même si n=0). */
+static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
+                                   long first, long count, unsigned long itype,
+                                   const void *indices);
+
 static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
                             long first, long count, unsigned long itype,
                             const void *indices)
+{
+    int r;
+    if (sigsetjmp(pack_jmp, 1) != 0) {
+        static unsigned long told;
+        pack_jmp_on = 0;
+        if (told < 5) {
+            const VaPlan *pl = (const VaPlan *)dbg_plan;
+            int j;
+            told++;
+            gl_note("ARRAYS faute de lecture en %08lx (lot %ld sommets, mode %lu, indexe %ld, "
+                    "premier %ld, i %lu/%lu vmin %lu fmt %lx) : lot JETE\n",
+                    pack_fault_addr, count, mode, indexed, first,
+                    dbg_vtx_i, dbg_vtx_n, dbg_vmin, dbg_fmt);
+            for (j = 0; pl && j < pl->n; j++)
+                gl_note("   attr %d : src %08lx pas %ld bpc %d n %d/%d type %x\n", j,
+                        (unsigned long)pl->a[j].src, pl->a[j].stride, pl->a[j].bpc,
+                        pl->a[j].src_n, pl->a[j].dst_n, pl->a[j].type);
+        }
+        /* Refuser enverrait le lot au rendu d'Apple, qui meurt (Bus error) sur
+           une texture DXT à mipmaps (S3TC annoncé) : le lot est JETÉ. Un lot
+           qu'on ne peut pas lire est presque toujours un lot fou. */
+        dbg_plan = 0;
+        G.n_geomdrop++;
+        return 1;
+    }
+    pack_jmp_on = 1;
+    r = geom_draw_client_unsafe(p, indexed, mode, first, count, itype, indices);
+    pack_jmp_on = 0;
+    return r;
+}
+
+static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
+                                   long first, long count, unsigned long itype,
+                                   const void *indices)
 {
     unsigned char *V, *g;
     TexInfo ti;
@@ -7472,7 +7787,7 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
     unsigned long vtx_off, packed, *c, key;
     float *dst;
     PBuf *hb;
-    int host, reuse;
+    int host, reuse, filter_bad = 0;
     long i;
 
     if (count <= 0)
@@ -7533,17 +7848,34 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
         (nidx && G.idx + nidx * 4 + 4 > IDX_SIZE))
         flush();
     if ((!reuse && VTX_OFF + G.vtx + packed > VTX_LIMIT) ||
-        (nidx && G.idx + nidx * 4 + 4 > IDX_SIZE))
+        (nidx && G.idx + nidx * 4 + 4 > IDX_SIZE)) {
+        static int told;                /* 24/09 : DOOM 3 et Prey, « raw:arrays 30/48 » */
+        if (!told) {
+            told = 1;
+            gl_note("ARRAYS refus apres flush : nverts %lu nidx %lu packed %lu words %lu "
+                    "vtx %lu idx %lu reuse %d host %d ncmd %lu\n",
+                    nverts, nidx, packed, words, G.vtx, G.idx, reuse, host, G.ncmd);
+        }
         return no(NO_G_ARRAY, nverts, nidx);
+    }
     vtx_off = 0;
     if (!reuse) {
         if (host && hb && !buf_host_ensure(p, hb, packed))
             hb = 0;
         vtx_off = G.vtx;
         dst = (float *)(G.win + VTX_OFF + vtx_off);
-        for (i = 0; (unsigned long)i < nverts; i++)
-            va_pack_vertex(dst + (unsigned long)i * words, p, V, fmt,
-                           vmin + (unsigned long)i);
+        {
+            static VaPlan plan;         /* verrou tenu : une seule à la fois */
+            va_plan_build(&plan, p, V, fmt);
+            dbg_plan = &plan; dbg_vtx_n = nverts; dbg_vmin = vmin;
+            dbg_words = words; dbg_fmt = fmt; dbg_vao = V;
+            for (i = 0; (unsigned long)i < nverts; i++) {
+                dbg_vtx_i = (unsigned long)i;
+                va_pack_planned(dst + (unsigned long)i * words, &plan,
+                                vmin + (unsigned long)i);
+            }
+            dbg_plan = 0;
+        }
         /* P12 — le chemin TABLEAUX n'assainissait pas les sommets. Le cœur
            refuse NaN, Inf et |v| ≥ 1e9, et sur BAD_ARG il fait `break` : TOUT
            le reste du flux est perdu (H4), SURF_PRESENT compris. Le chemin
@@ -7553,7 +7885,8 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
            le tampon hôte est déjà propre. */
         if (nverts > RAW_NAN_MAX)
             return no(NO_G_ARRAY, nverts, 0);
-        if (raw_scan_nan((unsigned long *)dst, nverts, words, fmt)) {
+        if (raw_scan_nan((unsigned long *)dst, nverts, words, fmt,
+                         G.prog && p->vp_on)) {
             if (!nidx && mode == QGPU_PRIM_MODE_TRIANGLES) {
                 unsigned long o = 0, k;
                 for (k = 0; k + 2 < nverts; k += 3)
@@ -7567,10 +7900,16 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
                     return 1;           /* rien à dessiner : lot consommé */
                 nverts = o;
                 packed = nverts * words * 4;
+            } else if (nidx && mode == QGPU_PRIM_MODE_TRIANGLES &&
+                       !(getenv("POMPPC_GL_TRIFILTER") && getenv("POMPPC_GL_TRIFILTER")[0] == '0')) {
+                /* maillage indexé de triangles : les triangles qui touchent
+                   un sommet fou sont retirés à la copie des indices, les
+                   sommets fous (mots remis à 0) restent — inertes */
+                filter_bad = 1;
             } else {
-                /* Ruban, éventail, quads, ou maillage indexé : un sommet fou
-                   gâche des primitives qu'on ne sait pas isoler ici. On jette
-                   CE lot, l'accélération reste. */
+                /* Ruban, éventail, quads : un sommet fou gâche des primitives
+                   qu'on ne sait pas isoler ici. On jette CE lot,
+                   l'accélération reste. */
                 return no(NO_G_ARRAY, nverts, nidx);
             }
         }
@@ -7614,15 +7953,35 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
         if (G.idx + need > IDX_SIZE)
             return no(NO_G_ARRAY, nidx, G.idx);
         ioff = IDX_OFF + G.idx;
-        if (use32) {
+        if (filter_bad) {
+            long kept = va_copy_idx_tri(G.win + ioff, use32, indices, itype,
+                                        (long)nidx, vmin, raw_bad);
+            static unsigned long told;
+            if (told < 3) {
+                unsigned long q, nb = 0;
+                const unsigned long *w0 = (const unsigned long *)dst;
+                told++;
+                for (q = 0; q < nverts; q++)
+                    nb += raw_bad[q];
+                gl_note("ARRAYS triangles fous retires : %lu/%lu indices gardes (nverts %lu, "
+                        "fous %lu, fmt %lx, words %lu, itype %lx, vmin %lu) v0 = %08lx %08lx %08lx %08lx "
+                        "%08lx %08lx %08lx %08lx\n",
+                        (unsigned long)kept, nidx, nverts, nb, fmt, words, itype, vmin,
+                        w0[0], w0[1], w0[2], w0[3], w0[4], w0[5], w0[6], w0[7]);
+            }
+            G.n_geomdrop += (nidx - (unsigned long)kept) / 3;
+            nidx = (unsigned long)kept;
+            if (!nidx)
+                return 1;               /* rien à dessiner : lot consommé */
+            need = nidx * (use32 ? 4UL : 2UL);
+        } else if (use32) {
             va_copy_idx32((unsigned long *)(G.win + ioff), indices, itype,
                           (long)nidx, vmin);
-            itype_h = QGPU_IDX_U32;
         } else {
             va_copy_idx16((unsigned short *)(G.win + ioff), indices, itype,
                           (long)nidx, vmin);
-            itype_h = QGPU_IDX_U16;
         }
+        itype_h = use32 ? QGPU_IDX_U32 : QGPU_IDX_U16;
         G.idx += need;
     }
     /* Glyphes du menu : quelques rectangles courts, annoncés en TRIANGLES.
@@ -8679,6 +9038,111 @@ static void note_open(void)
         return;
     }
     setvbuf(note_fp, 0, _IOLBF, 0);
+}
+
+/* 24/09/2026 — crochet de plantage. DOOM 3 attrape SIGBUS/SIGSEGV lui-même,
+ * appelle Quit() → notre gldDeleteTexture → verrou déjà tenu par le fil
+ * fautif : le processus se fige, sans rapport CrashReporter. Ce crochet
+ * écrit d'abord dans le journal (POMPPC_GL_NOTE) le signal, l'adresse
+ * fautive, le PC, LR, la base du plugin et une pile brute (chaîne r1 / LR
+ * sauvegardé à +8), puis remet le gestionnaire précédent : le jeu reprend
+ * la main comme avant. Fonctions sûres en signal seulement (write). */
+static struct sigaction crash_prev[2];
+static void crash_hex(char *d, unsigned long v)
+{
+    static const char h[] = "0123456789abcdef";
+    int i;
+    for (i = 7; i >= 0; i--) { d[i] = h[v & 15]; v >>= 4; }
+    d[8] = 0;
+}
+static void crash_handler(int sig, siginfo_t *si, void *ucv)
+{
+    ucontext_t *uc = (ucontext_t *)ucv;
+    if (pack_jmp_on) {
+        pack_jmp_on = 0;
+        pack_fault_addr = (unsigned long)(si ? si->si_addr : 0);
+        pack_fault_n++;
+        siglongjmp(pack_jmp, 1);
+    }
+    const char *path = getenv("POMPPC_GL_NOTE");
+    char line[200], hx[9];
+    unsigned long pc = 0, lr = 0, sp = 0, dar = 0, base = 0, i, n;
+    int fd;
+    if (uc && uc->uc_mcontext) {
+        pc  = uc->uc_mcontext->ss.srr0;
+        lr  = uc->uc_mcontext->ss.lr;
+        sp  = uc->uc_mcontext->ss.r1;
+        dar = uc->uc_mcontext->es.dar;
+    }
+    n = _dyld_image_count();
+    for (i = 0; i < n; i++) {
+        const char *nm = _dyld_get_image_name(i);
+        if (nm && strstr(nm, "GLDriver-POMPPC")) {
+            base = (unsigned long)_dyld_get_image_header(i);
+            break;
+        }
+    }
+    fd = path ? open(path, O_WRONLY | O_APPEND | O_CREAT, 0644) : -1;
+    if (fd >= 0) {
+        strcpy(line, "CRASH signal ");
+        line[13] = '0' + (sig % 10); line[14] = ' '; line[15] = 0;
+        strcat(line, "pc "); crash_hex(hx, pc); strcat(line, hx);
+        strcat(line, " lr "); crash_hex(hx, lr); strcat(line, hx);
+        strcat(line, " dar "); crash_hex(hx, dar); strcat(line, hx);
+        strcat(line, " addr "); crash_hex(hx, (unsigned long)(si ? si->si_addr : 0)); strcat(line, hx);
+        strcat(line, " base "); crash_hex(hx, base); strcat(line, hx);
+        strcat(line, " off "); crash_hex(hx, pc - base); strcat(line, hx);
+        strcat(line, "\n");
+        write(fd, line, strlen(line));
+        /* pile brute : 16 retours */
+        strcpy(line, "CRASH pile :");
+        for (i = 0; i < 16 && sp && sp > 0x1000 && sp < 0xc0000000UL; i++) {
+            unsigned long ret = *(unsigned long *)(sp + 8);
+            strcat(line, " "); crash_hex(hx, ret); strcat(line, hx);
+            if (ret >= base && base && ret < base + 0x100000) {
+                strcat(line, "(+"); crash_hex(hx, ret - base); strcat(line, hx); strcat(line, ")");
+            }
+            sp = *(unsigned long *)sp;
+            if (strlen(line) > 160) { strcat(line, "\n"); write(fd, line, strlen(line)); strcpy(line, "CRASH pile :"); }
+        }
+        strcat(line, "\n");
+        write(fd, line, strlen(line));
+        /* dernier empaquetage de tableaux : où en était-on ? */
+        strcpy(line, "CRASH pack i "); crash_hex(hx, dbg_vtx_i); strcat(line, hx);
+        strcat(line, " n "); crash_hex(hx, dbg_vtx_n); strcat(line, hx);
+        strcat(line, " vmin "); crash_hex(hx, dbg_vmin); strcat(line, hx);
+        strcat(line, " words "); crash_hex(hx, dbg_words); strcat(line, hx);
+        strcat(line, " fmt "); crash_hex(hx, dbg_fmt); strcat(line, hx);
+        strcat(line, " vao "); crash_hex(hx, (unsigned long)dbg_vao); strcat(line, hx);
+        strcat(line, "\n"); write(fd, line, strlen(line));
+        if (dbg_plan) {
+            const unsigned long *pl = (const unsigned long *)dbg_plan;   /* VaAttr[] brut */
+            unsigned long na = pl[(sizeof(VaAttr) / 4) * (QGPU_VF_GEN_MAX + QGPU_MAX_UNITS + 5)];
+            for (i = 0; i < na && i < 32; i++) {
+                const unsigned long *at = pl + i * (sizeof(VaAttr) / 4);
+                strcpy(line, "CRASH attr src "); crash_hex(hx, at[0]); strcat(line, hx);
+                strcat(line, " stride "); crash_hex(hx, at[1]); strcat(line, hx);
+                strcat(line, " bpc "); crash_hex(hx, at[2]); strcat(line, hx);
+                strcat(line, " src_n "); crash_hex(hx, at[3]); strcat(line, hx);
+                strcat(line, " dst_n "); crash_hex(hx, at[4]); strcat(line, hx);
+                strcat(line, " type "); crash_hex(hx, at[6]); strcat(line, hx);
+                strcat(line, "\n"); write(fd, line, strlen(line));
+            }
+        }
+        close(fd);
+    }
+    sigaction(sig, &crash_prev[sig == SIGBUS ? 0 : 1], 0);   /* le jeu reprend */
+}
+static void crash_hook_install(void)
+{
+    struct sigaction sa;
+    if (!getenv("POMPPC_GL_NOTE"))
+        return;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = crash_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGBUS, &sa, &crash_prev[0]);
+    sigaction(SIGSEGV, &sa, &crash_prev[1]);
 }
 
 static void gl_note(const char *fmt, ...)

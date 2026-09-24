@@ -47,6 +47,23 @@ int qgpu_open(QgpuClient *q, const char **why)
         *why = "GET_SLOT";
         goto fail;
     }
+    /* Le kext découpe les identifiants par client avec SES constantes ; les
+       nôtres doivent être les mêmes, sinon il ne nettoie pas ce que nous
+       créons (24/09/2026, POMPPC_SUB_LAYOUT). Un kext d'avant ce drapeau
+       refuse l'appel : même verdict. */
+    {
+        unsigned int l0 = 0, l1 = 0, l2 = 0;
+        kr = IOConnectMethodScalarIScalarO(q->conn, QGPU_UC_SUBMIT, 2, 3,
+                                           (unsigned int)0, (unsigned int)POMPPC_SUB_LAYOUT, &l0, &l1, &l2);
+        if (kr != KERN_SUCCESS ||
+            l0 != ((unsigned int)QGPU_CLIENT_TEX_IDS | ((unsigned int)QGPU_CLIENT_BUF_IDS << 16)) ||
+            l1 != ((unsigned int)QGPU_CLIENT_SURF_IDS | ((unsigned int)QGPU_CLIENT_CTX_IDS << 16)) ||
+            l2 != (unsigned int)QGPU_MAX_TEX) {
+            *why = "kext POMPPCGPU d'un autre qgpu_proto.h (tranches d'identifiants) : "
+                   "reconstruire et réinstaller le kext (install.sh), redémarrer";
+            goto fail;
+        }
+    }
     kr = IOConnectMapMemory(q->conn, QGPU_UC_MEM_SHMEM, mach_task_self(),
                             &addr, &len, kIOMapAnywhere);
     if (kr != KERN_SUCCESS || !addr || len < size) {

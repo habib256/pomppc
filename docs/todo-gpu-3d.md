@@ -50,6 +50,24 @@ diffère du projet ; `docs/re/programmes-arb.md` est le relevé GLEngine (activa
       des programmes et tient le miroir `program.env` par compte d'entrées (`c_env_n`), le vidage
       ne saute que la soumission en cours. Le rejeu reproduit la VM à l'identique ; expériences par
       réécriture du texte du programme dans le vidage (`.run/prey/dump5-*`).
+- [x] 24/09 matin (« attaque la suite ») : commit 68a2d6c (v16+v17) ; **vérification kext ↔ plugin**
+      (`POMPPC_SUB_LAYOUT` : le kext rend ses constantes de tranches, le plugin refuse un autre
+      en-tête) ; profil `sample` de DOOM 3 → **empaqueteur planifié** (`VaPlan`), **volumes d'ombre
+      w=0 gardés sous programme** (c'était le repli `raw:arrays 30/48`, 5 par image), **triangles
+      fous retirés** au lieu du lot entier (`va_copy_idx_tri`), **crochet SIGBUS/SIGSEGV** (journal
+      `CRASH …` dans POMPPC_GL_NOTE : pc/lr/dar, pile, état d'empaquetage ; `scratchpad/sym.py`
+      + capstone pour les symboles), **garde `sigsetjmp`** autour du chemin tableaux, et la cause
+      du plantage : le cache de pointeurs résolus de GLEngine (`gctx+0x48f8`) est périmé aussi
+      pour un tableau ACTIF adossé à un VBO (texcoord 0 de DOOM 3 lu dans une autre région) →
+      `va_src` prend base du VBO + décalage dès qu'un VBO est lié. DOOM 3 : 43 ms/image, fb=0,
+      rb=1 (contre 200 ms, 5 replis, 6 relectures).
+- [ ] Piège VM : après un `killall` de DOOM 3, tout lancement suivant meurt sur
+      `CGLQueryRendererInfo -> 10006` (kCGLBadDisplay) jusqu'au redémarrage de l'invité (Prey et
+      gltest démarrent). Cause à trouver (accélérateur/WindowServer). Économiseur d'écran coupé.
+- [ ] Prochain poste (profil) : conversions de niveaux par le GLDriver d'Apple à chaque
+      `gldUpdateDispatch` transmis (glgProcessPixels, S3TC décompressé : ~12 %) → transmission
+      paresseuse à Apple (cumuler les masques, ne transmettre qu'avant un repli) ; puis
+      `glCopyTexSubImage2D` par COPY_TEX hôte (refusé aujourd'hui quand `p->color == SW_NEWER`).
 - [ ] **Règle apprise à la dure** : toute modification de `qgpu_proto.h` ⇒ QEMU **et kext**
       (`install.sh` dans l'invité, redémarrage) **et** plugin. Un kext ancien ne nettoie qu'une
       partie des objets d'un client mort → BAD_ARG au client suivant → `broken_all` → Bus error,
