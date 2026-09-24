@@ -95,6 +95,14 @@ static volatile int pack_jmp_on;
    la région gardée par pack_jmp. */
 static sigjmp_buf sig_jmp;
 static volatile int sig_jmp_on;
+/* Troisième garde : les procédures de rendu à TABLEAU DE POINTEURS que
+   GLEngine appelle après SON T&L (RenderPolygonPtr, LinesPtr, PointsPtr).
+   Prey (24/09, chargement du Roadhouse) : SIGSEGV dans a_polygon_ptr, un
+   des n pointeurs ne menait nulle part. Sur faute : verrou rendu, primitive
+   jetée. Tampon à part : les deux autres gardes sont imbriquées dedans. */
+static sigjmp_buf proc_jmp;
+static volatile int proc_jmp_on;
+static volatile unsigned long proc_fault_n;
 static volatile unsigned long sig_fault_n;
 static int upload_blank;                /* COPY_TEX : niveaux noirs, sans lire l'invité */
 static volatile unsigned long pack_fault_addr, pack_fault_n;
@@ -3048,8 +3056,9 @@ static int texture_uploadable(PTex *t)
                 d > QGPU_MAX_TEX_3D_DIM || imgh < h)
                 return no(NO_TEX_SIZE, w, (h << 16) | d);
         }
-        if (!GLD_U32(lv, LV_DATA) ||
-            (G.v10 ? S16(lv, LV_ROWPIX) < (short)w : S16(lv, LV_ROWPIX) != (short)w) ||
+        if ((!GLD_U32(lv, LV_DATA) && !upload_blank) ||
+            (!upload_blank &&
+             (G.v10 ? S16(lv, LV_ROWPIX) < (short)w : S16(lv, LV_ROWPIX) != (short)w)) ||
             !level_convertible(U16(lv, LV_FORMAT), U16(lv, LV_TYPE)) ||
             !depth_pair_ok(host_base(base), U16(lv, LV_FORMAT)) ||
             (U16(lv, LV_FORMAT) == 0x1902 && tex_is_3d(t)))
@@ -3167,6 +3176,8 @@ static int upload_texture(PCtx *p, PTex *t)
                 unsigned long row = (unsigned long)S16(lv, LV_ROWPIX) * bpp;
                 unsigned long dep = 1, imgh = h, img, size;
                 const unsigned char *d = (const unsigned char *)GLD_U32(lv, LV_DATA);
+                if (upload_blank && (unsigned long)S16(lv, LV_ROWPIX) < w)
+                    row = w * bpp;          /* niveau sans données : notre pas */
                 if (t3)                 /* 3D : profondeur dans l'objet de GLEngine */
                     tex_level_depth(t, l, &dep, &imgh);
                 img = row * imgh;
@@ -3175,7 +3186,8 @@ static int upload_texture(PCtx *p, PTex *t)
                     /* S3TC : les blocs serrés, tels quels */
                     row = 0;
                     size = dxt_bytes(fmt, w, h);
-                } else if (!bpp || (!d && !upload_blank) || S16(lv, LV_ROWPIX) < (short)w || !dep || imgh < h ||
+                } else if (!bpp || (!d && !upload_blank) ||
+                           (!upload_blank && S16(lv, LV_ROWPIX) < (short)w) || !dep || imgh < h ||
                            !depth_pair_ok(host_base(base), fmt) || (fmt == 0x1902 && t3))
                     return no(NO_TEX_FORMAT, (fmt << 16) | type,
                               ((unsigned long)S16(lv, LV_ROWPIX) << 16) | w);
@@ -3194,8 +3206,18 @@ static int upload_texture(PCtx *p, PTex *t)
                     memcpy(G.q.win + off, d, size);
                     sig_jmp_on = 0;
                 } else {
-                    sig_jmp_on = 0;     /* niveau illisible (pages non engagées) */
-                    return no(NO_TEX_SIZE, w, h | 0x80000000UL);
+                    /* niveau illisible (pages non engagées : cible de copie
+                       d'écran dont la copie hôte a été refusée) : NOIR plutôt
+                       qu'un refus — refusé, le dessin partait chez Apple, qui
+                       lit la même page (Prey, 24/09 : SIGSEGV dans a_quads →
+                       rendu d'Apple). */
+                    static unsigned long told;
+                    sig_jmp_on = 0;
+                    memset(G.q.win + off, 0, size);
+                    if (told < 3) {
+                        told++;
+                        gl_note("TEXTURE niveau %lu illisible (%lux%lu) : envoye noir\n", l, w, h);
+                    }
                 }
                 c = reserve(p, QGPU_LEN_TEX_IMAGE3);
                 c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3);
@@ -8815,7 +8837,32 @@ static long a_polygon(void *ctx, void *verts, long n, long flags)
     return real ? real(ctx, verts, n, flags) : 0;
 }
 
-static long a_polygon_ptr(void *ctx, void *vptrs, long n, long flags)
+static long a_polygon_ptr_unsafe(void *ctx, void *vptrs, long n, long flags);
+
+/* Garde de faute des procédures à tableau de pointeurs (voir proc_jmp). */
+#define PTR_PROC_GUARD(name, inner)                                             \
+static long name(void *ctx, void *verts, long n, long flags)                    \
+{                                                                               \
+    long r;                                                                     \
+    if (sigsetjmp(proc_jmp, 0) != 0) {                                          \
+        static unsigned long told;                                              \
+        proc_jmp_on = 0;                                                        \
+        pthread_mutex_unlock(&G.mu);    /* tenu entre lock et unlock du corps */ \
+        if (told < 5) {                                                         \
+            told++;                                                             \
+            gl_note("PROC " #inner " : faute de lecture (n %ld) : primitive jetee\n", n); \
+        }                                                                       \
+        G.n_geomdrop++;                                                         \
+        return 0;                                                               \
+    }                                                                           \
+    proc_jmp_on = 1;                                                            \
+    r = inner(ctx, verts, n, flags);                                            \
+    proc_jmp_on = 0;                                                            \
+    return r;                                                                   \
+}
+PTR_PROC_GUARD(a_polygon_ptr, a_polygon_ptr_unsafe)
+
+static long a_polygon_ptr_unsafe(void *ctx, void *vptrs, long n, long flags)
 {
     PCtx *p;
     Batch b;
@@ -8885,15 +8932,17 @@ LP_PROC(a_lineloop, PROC_RenderLineLoop, 1, AK_LINELOOP, 0,
     if (n > 1)
         seg(&b, VTX(verts, n - 1), VTX(verts, 0), VTX(verts, 0));)
 /* (ctx, pointeurs, n, mode) : paires de pointeurs */
-LP_PROC(a_lines_ptr, PROC_RenderLinesPtr, 1, AK_LINES, 1,
+LP_PROC(a_lines_ptr_unsafe, PROC_RenderLinesPtr, 1, AK_LINES, 1,
     for (i = 0; i + 1 < n; i += 2)
         seg(&b, PP(i), PP(i + 1), PP(i + 1));)
 LP_PROC(a_points, PROC_RenderPoints, 0, AK_POINTS, 0,
     for (i = 0; i < n; i++)
         pt(&b, VTX(verts, i));)
-LP_PROC(a_points_ptr, PROC_RenderPointsPtr, 0, AK_POINTS, 1,
+LP_PROC(a_points_ptr_unsafe, PROC_RenderPointsPtr, 0, AK_POINTS, 1,
     for (i = 0; i < n; i++)
         pt(&b, PP(i));)
+PTR_PROC_GUARD(a_lines_ptr, a_lines_ptr_unsafe)
+PTR_PROC_GUARD(a_points_ptr, a_points_ptr_unsafe)
 
 /* ───────────────────────────── effacement ───────────────────────────── */
 
@@ -9090,6 +9139,11 @@ static void crash_handler(int sig, siginfo_t *si, void *ucv)
         sig_fault_n++;
         siglongjmp(sig_jmp, 1);
     }
+    if (proc_jmp_on) {
+        proc_jmp_on = 0;
+        proc_fault_n++;
+        siglongjmp(proc_jmp, 1);
+    }
     if (pack_jmp_on) {
         pack_jmp_on = 0;
         pack_fault_addr = (unsigned long)(si ? si->si_addr : 0);
@@ -9097,7 +9151,7 @@ static void crash_handler(int sig, siginfo_t *si, void *ucv)
         siglongjmp(pack_jmp, 1);
     }
     const char *path = getenv("POMPPC_GL_NOTE");
-    char line[200], hx[9];
+    char line[480], hx[9];
     unsigned long pc = 0, lr = 0, sp = 0, dar = 0, base = 0, i, n;
     int fd;
     if (uc && uc->uc_mcontext) {
@@ -9114,7 +9168,16 @@ static void crash_handler(int sig, siginfo_t *si, void *ucv)
             break;
         }
     }
-    fd = path ? open(path, O_WRONLY | O_APPEND | O_CREAT, 0644) : -1;
+    /* Fichier À PART (<note>.crash) : gl_note tient le journal par un FILE*
+       en écriture simple, et son tampon, vidé à la sortie du jeu, ÉCRASAIT
+       le début de l'enregistrement écrit ici (Prey, 24/09 : « CRASH signal »
+       et la pile disparus sous les lignes « attach » de l'arrêt). */
+    fd = -1;
+    if (path && strlen(path) < sizeof(line) - 8) {
+        strcpy(line, path);
+        strcat(line, ".crash");
+        fd = open(line, O_WRONLY | O_APPEND | O_CREAT, 0644);
+    }
     if (fd >= 0) {
         strcpy(line, "CRASH signal ");
         line[13] = '0' + (sig % 10); line[14] = ' '; line[15] = 0;
@@ -9135,7 +9198,7 @@ static void crash_handler(int sig, siginfo_t *si, void *ucv)
                 strcat(line, "(+"); crash_hex(hx, ret - base); strcat(line, hx); strcat(line, ")");
             }
             sp = *(unsigned long *)sp;
-            if (strlen(line) > 160) { strcat(line, "\n"); write(fd, line, strlen(line)); strcpy(line, "CRASH pile :"); }
+            if (strlen(line) > 440) break;
         }
         strcat(line, "\n");
         write(fd, line, strlen(line));

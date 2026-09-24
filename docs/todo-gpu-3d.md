@@ -64,10 +64,19 @@ diffère du projet ; `docs/re/programmes-arb.md` est le relevé GLEngine (activa
 - [ ] Piège VM : après un `killall` de DOOM 3, tout lancement suivant meurt sur
       `CGLQueryRendererInfo -> 10006` (kCGLBadDisplay) jusqu'au redémarrage de l'invité (Prey et
       gltest démarrent). Cause à trouver (accélérateur/WindowServer). Économiseur d'écran coupé.
+- [x] 24/09, 10h (bc7ed62) : `glCopyTexSubImage2D` par COPY_TEX hôte — GLEngine appelle
+      CopyTexSubImage avec a[2]=0 et un mot de plus (ctx, tex, 0, niveau, xoff, yoff, zoff, x, y,
+      w, h) ; la destination reçoit des niveaux NOIRS (`upload_blank`, ses niveaux invité ne sont
+      pas lisibles : glTexImage2D(NULL)) ; gardes `sig_jmp` sur `tex_lv0_sig` et la copie des
+      niveaux. Scène lourde (1 280 dessins) : 295 → 210 ms/image, fb=0, rb=1. Reste une tache de
+      bruit en bord droit (à regarder : copie de bord 639/1 ?).
 - [ ] Prochain poste (profil) : conversions de niveaux par le GLDriver d'Apple à chaque
       `gldUpdateDispatch` transmis (glgProcessPixels, S3TC décompressé : ~12 %) → transmission
-      paresseuse à Apple (cumuler les masques, ne transmettre qu'avant un repli) ; puis
-      `glCopyTexSubImage2D` par COPY_TEX hôte (refusé aujourd'hui quand `p->color == SW_NEWER`).
+      paresseuse à Apple (cumuler les masques, ne transmettre qu'avant un repli) ; empaquetage
+      (~20 %, inhérent : 28 mots par sommet) → formats de génériques compacts (2/3 flottants).
+- [ ] Piège VM : la mise en veille de l'AFFICHAGE (5 min) rend un screendump noir — coupée
+      (`pmset -a displaysleep 0 sleep 0`) ; un redémarrage sur dix panique au boot (AppleUSBOHCI,
+      cpu 1) → `moncmd system_reset`.
 - [ ] **Règle apprise à la dure** : toute modification de `qgpu_proto.h` ⇒ QEMU **et kext**
       (`install.sh` dans l'invité, redémarrage) **et** plugin. Un kext ancien ne nettoie qu'une
       partie des objets d'un client mort → BAD_ARG au client suivant → `broken_all` → Bus error,
