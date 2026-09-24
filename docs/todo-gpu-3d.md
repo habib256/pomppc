@@ -28,7 +28,14 @@ l'utilisateur (24/09, après-midi), réordonnées.
    OpenGL. Utilisateur : « le reflet de derrière est parfait et ça a réglé le problème des
    réacteurs ». Reste 2 : figer v18 — engagée le 24/09 (17h) avec **DRAW_NATIVE** (l'hôte lit les
    VBO tels quels, plus d'empaquetage par sommet côté PowerPC : 79 000 sommets/image dans le poste
-   de sécurité), deux agents Opus (cœur + plugin).
+   de sécurité), deux agents Opus (cœur + plugin). **FAIT le 24/09 à 16h45 (a6f3ee1 → c18c5f5)** :
+   protocole v18, `QGPU_CAP_NATIVE`, cœur (883 tests) + plugin (miroir brut des VBO dans des
+   réserves hôte de 16 Mio, plages sales de gldFlushBuffer = base + offset, confirmé en VM).
+   DOOM 3 : 17,5 ms/image en cinématique (22 avant), image identique ; utilisateur : « 22 img/s
+   en moyenne, creux à 6-8 ». Profil sous DRAW_NATIVE (818 échantillons) : jeu ≈ 40 %
+   (R_AddModelSurfaces, RunFrame), GLEngine ≈ 12 %, plugin ≈ 28 % dont vérifications de
+   textures ≈ 14 % → mémorisées par image (c18c5f5). Restent : send_state/compute_state,
+   geom_format, le scan des indices, puis GLEngine lui-même (crocheter glDrawElements en amont).
 2. **Sens de la copie d'écran et protocole figé v18, d'un bloc** : `COPY_TEX` doit produire une
    texture orientée comme en OpenGL réel (aujourd'hui en orientation hôte, donc `fragment.position`
    retourné et les coordonnées calculées par les programmes se contredisent) ; puis un seul
