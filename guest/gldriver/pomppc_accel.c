@@ -47,7 +47,13 @@
  *                         tant qu'il n'a pas forcé le repli mixte)
  *   POMPPC_GL_ASYNC=0/1   doorbell asynchrone (défaut : activé si le device et
  *                         le kext le tiennent ; voir « soumission » plus bas)
- *   POMPPC_GL_VBO=0       pas de tampons hôte v14 (DRAW_RAW retraverse BAR0)
+ *   POMPPC_GL_VBO=0       pas de tampons hôte v14 (DRAW_RAW retraverse BAR0) ;
+ *                         coupe aussi DRAW_NATIVE, qui en dépend
+ *   POMPPC_GL_NATIVE=0    pas de DRAW_NATIVE (v18, QGPU_CAP_NATIVE) : les
+ *                         tableaux adossés à des VBO sont de nouveau empaquetés
+ *   POMPPC_GL_NATIVE_RANGE=0  ne pas croire la plage (ptr, longueur) de
+ *                         gldFlushBuffer : tout le VBO devient sale (seul ce
+ *                         que les dessins lisent est recopié, cf. raw_sync)
  *   POMPPC_GL_XFER16=0    pas de transfert 16 bits hôte (v15) : fenêtre 16 bits
  *                         et Z 16 restent sans aller-retour
  *   POMPPC_GL_NOTE=chemin journal d'appoint (gl_note). SANS elle, rien n'est
@@ -75,7 +81,30 @@
 #include "pomppc_gld.h"
 #include "pomppc_qgpu.h"
 
-#define POMPPC_PLUGIN_REV "20260924-lazyapple"
+/* v18 — DRAW_NATIVE : dessin depuis des tampons hôte BRUTS (copies telles
+   quelles des VBO de l'application), sans empaquetage par l'invité. Contrat
+   partagé avec le cœur ; ces définitions provisoires cèdent la place au vrai
+   qgpu_proto.h dès qu'il les porte (fusion à faire).
+     QGPU_OP_DRAW_NATIVE [mode, count, ibuf, ioff, itype, first, nattr, aoff]
+     descripteur (6 mots, nattr à aoff dans BAR0) :
+       [code, buf, offset, stride, type GL, taille | QGPU_NATTR_NORMALIZED] */
+#ifndef QGPU_OP_DRAW_NATIVE
+#define QGPU_OP_DRAW_NATIVE     0x005A
+#define QGPU_LEN_DRAW_NATIVE    9
+#define QGPU_CAP_NATIVE         0x00000100
+#define QGPU_NATTR_WORDS        6
+#define QGPU_NATTR_MAX          24
+#define QGPU_NATTR_POSITION     0
+#define QGPU_NATTR_NORMAL       1
+#define QGPU_NATTR_COLOR        2
+#define QGPU_NATTR_SEC_COLOR    3
+#define QGPU_NATTR_FOG          4
+#define QGPU_NATTR_TEX(u)       (8 + (u))
+#define QGPU_NATTR_GEN(k)       (16 + (k))
+#define QGPU_NATTR_NORMALIZED   0x100
+#endif
+
+#define POMPPC_PLUGIN_REV "20260924-native"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 /* 24/09/2026 — garde de lecture des tableaux de l'application. Les copies
@@ -116,6 +145,7 @@ static const void *volatile dbg_plan;
 static const unsigned char *volatile dbg_vao;
 static void flush(void);
 static void drain_all(void);
+static void buf_raw_invalidate_all(void);
 
 /* ───────────────────── dispositions relevées (Tiger 10.4.6) ─────────────────────
  * Contexte du GLDriver (argument r3 de toutes les procédures) : */
@@ -533,6 +563,11 @@ typedef struct PCtx {
     unsigned char  c_tg_on[QGPU_MAX_UNITS];          /* du texgen est-il posé sur le device ? */
     unsigned long  c_clip[25];                       /* masque + 6 plans, contigus */
     unsigned long  c_cur[4][4];                      /* couleur, normale, secondaire, brouillard */
+    /* v18 : valeurs courantes posées par DRAW_NATIVE pour un attribut du
+       format sans tableau (ce que l'empaqueteur aurait recopié : couleur
+       morte → blanche, etc.) ; bit QGPU_CUR_* = nat_cur est ce que l'hôte a */
+    unsigned long  nat_cur_ok;
+    unsigned long  nat_cur[QGPU_CUR_COUNT][4];
     /* ── v8 ── */
     unsigned long  c_pstip[32];         /* motif de pointillé posé sur le device */
     int            c_pstip_valid;
@@ -633,6 +668,22 @@ typedef struct Half {
 
 typedef struct PBuf PBuf;
 
+/* v18 — réserves de miroirs BRUTS (DRAW_NATIVE). Un client n'a que
+   QGPU_CLIENT_BUF_IDS (64) identifiants de tampon hôte, et idTech4 crée un VBO
+   par bloc de son cache de sommets (des centaines) : chaque VBO reçoit donc
+   une TRANCHE d'un grand tampon hôte (16 Mio), allouée au premier besoin
+   (first-fit, fusion des voisins à la libération). */
+#define RAWPOOL_MAX     8                       /* 128 Mio hôte au plus */
+#define RAWPOOL_BYTES   QGPU_MAX_BUF_SIZE
+#define RAW_ALIGN       256UL
+#define RAW_CHUNK       0x100000UL              /* BUF_SUBDATA d'au plus 1 Mio */
+#define BUF_HASH        1024                    /* vbo+0x30 → PBuf */
+#define RD_MAX          16                      /* plages sales suivies par VBO */
+typedef struct RawExt {
+    struct RawExt  *next;
+    unsigned long   off, len;
+} RawExt;
+
 static struct {
     pthread_mutex_t mu;
     int             state;              /* 0 inconnu, 1 actif, -1 désactivé */
@@ -730,6 +781,17 @@ static struct {
     unsigned long   buf_base;
     PBuf           *bufs;
     unsigned long   n_vbohits, n_vbomiss;
+    /* ── v18 : DRAW_NATIVE, miroirs bruts des VBO ── */
+    int             native;             /* QGPU_CAP_NATIVE ; POMPPC_GL_NATIVE=0 le coupe */
+    int             native_range;       /* plage de gldFlushBuffer crue (défaut) */
+    PBuf           *buf_hash[BUF_HASH]; /* recherche O(1) de buf_from_vbo */
+    long            rp_qid[RAWPOOL_MAX];
+    RawExt         *rp_free[RAWPOOL_MAX];   /* trié par offset */
+    int             rp_n;
+    unsigned long   rp_gen;             /* +1 à chaque libération : réessayer */
+    unsigned long   n_native_draws, n_native_verts;
+    unsigned long   n_native_bytes, n_native_subdata;   /* recopie brute */
+    unsigned long   n_native_fall;      /* VBO présents mais repli sur l'empaquetage */
     unsigned long   query_base;         /* premier identifiant de requête du client */
     double          t_submit, t_copy, t_upload;   /* secondes cumulées */
     /* ── bilan du mode asynchrone ── */
@@ -905,6 +967,7 @@ static void stats_frame(void *ctx)
     static double t0;
     static unsigned long f0, tr0, rb0, pr0, up0, fb0, sub0, tu0, di0;
     static unsigned long rv0, rd0, gc0, rm0, w0, qf0, av0, ad0;
+    static unsigned long nd0, nv0, nb0, nf0;    /* v18 : DRAW_NATIVE */
     static double ts0, tc0, tu_0, tw0;
     double t;
 
@@ -974,6 +1037,12 @@ static void stats_frame(void *ctx)
                             (G.n_arraydraws - ad0) / fr,
                             G.n_geomdrop ? " ! DROPPED PRIMS" : "");
                 }
+                if (G.n_native_draws != nd0 || G.n_native_fall != nf0)
+                    fprintf(f, "    native: %lu draws/frame, %lu verts/frame, "
+                            "%lu KiB raw VBO copied/frame, %lu VBO draws packed/frame\n",
+                            (G.n_native_draws - nd0) / fr, (G.n_native_verts - nv0) / fr,
+                            ((G.n_native_bytes - nb0) >> 10) / fr,
+                            (G.n_native_fall - nf0) / fr);
             }
             {
                 int k;
@@ -1001,6 +1070,8 @@ static void stats_frame(void *ctx)
         rv0 = G.n_rawverts; rd0 = G.n_rawdraws; gc0 = G.n_geomcmds;
         rm0 = G.n_rawmerged; w0 = G.n_waits; qf0 = G.n_qfull; tw0 = G.t_wait;
         av0 = G.n_arrayverts; ad0 = G.n_arraydraws;
+        nd0 = G.n_native_draws; nv0 = G.n_native_verts;
+        nb0 = G.n_native_bytes; nf0 = G.n_native_fall;
     }
 }
 
@@ -1242,6 +1313,13 @@ static void on_exit_stats(void)
                 G.n_dropped_fault, G.n_texblack,     /* I9 (relecture du 24/09) */
                 G.async ? "async" : "sync", G.n_waits, G.t_wait * 1000,
                 G.n_qfull, G.n_syncfall);
+    if (getenv("POMPPC_GL_STATS"))      /* v18 */
+        fprintf(stderr, "POMPPC GL: %lu native draws (%lu verts, DRAW_NATIVE %s), "
+                "%lu KiB of raw VBO copied in %lu BUF_SUBDATA, %d host pool(s), "
+                "%lu VBO draws packed anyway\n",
+                G.n_native_draws, G.n_native_verts,
+                G.native ? "on" : ((G.q.caps & QGPU_CAP_NATIVE) ? "cut" : "not offered"),
+                G.n_native_bytes >> 10, G.n_native_subdata, G.rp_n, G.n_native_fall);
 }
 
 /* gldTerminateLibrary : GLEngine décharge le plugin (NSUnLinkModule suit).
@@ -1296,6 +1374,11 @@ void pomppc_backend_forget(void)
     G.list = 0;
     G.textures = 0;
     G.bufs = 0;
+    /* v18 : oublier aussi les miroirs bruts (sans rien libérer, cf. plus haut) */
+    memset(G.buf_hash, 0, sizeof(G.buf_hash));
+    memset(G.rp_free, 0, sizeof(G.rp_free));
+    G.rp_n = 0;
+    G.native = 0;
     G.cmd = 0;
     G.win = 0;
     G.bound = 0;
@@ -1468,6 +1551,15 @@ void pomppc_backend_init(void)
             G.gensizes = G.prog && (G.q.caps & QGPU_CAP_GEN_SIZES) &&
                          !(getenv("POMPPC_GL_GENSIZES") &&
                            getenv("POMPPC_GL_GENSIZES")[0] == '0');
+            /* v18 : DRAW_NATIVE — les tableaux adossés à des VBO partent tels
+               quels (miroirs bruts sur l'hôte), sans empaquetage. Il lui faut
+               les tampons hôte v14 et le chemin brut. POMPPC_GL_NATIVE=0
+               revient à l'empaquetage. */
+            G.native = G.hostbuf && G.v7 && (G.q.caps & QGPU_CAP_NATIVE) &&
+                       !(getenv("POMPPC_GL_NATIVE") &&
+                         getenv("POMPPC_GL_NATIVE")[0] == '0');
+            G.native_range = !(getenv("POMPPC_GL_NATIVE_RANGE") &&
+                               getenv("POMPPC_GL_NATIVE_RANGE")[0] == '0');
             G.pixtex = -1;
             G.pixtex_w = G.pixtex_h = 0;
             G.buf_base = G.q.index * QGPU_CLIENT_BUF_IDS;
@@ -1482,10 +1574,11 @@ void pomppc_backend_init(void)
             G.state = -1;
         }
         if (G.state > 0) {
-            gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d lazyapple=%d\n",
-                    G.q.version, G.q.caps, G.v10, G.lazy);
+            gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d lazyapple=%d "
+                    "native=%d (plages %d)\n",
+                    G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
-                       " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s%s)\n",
+                       " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
                        G.v7 ? "actif" : "coupé", G.v8 ? "actif" : "coupé",
                        G.v10 ? "converties par l'hôte" : "converties ici",
@@ -1495,7 +1588,8 @@ void pomppc_backend_init(void)
                        G.pixops ? ", pixels hôte" : "",
                        G.hostbuf ? ", VBO hôte" : "",
                        G.v15 ? ", host 16-bit xfer" : "",
-                       G.gensizes ? ", génériques à taille déclarée" : "");
+                       G.gensizes ? ", génériques à taille déclarée" : "",
+                       G.native ? ", VBO bruts (DRAW_NATIVE)" : "");
         } else
             pomppc_log("POMPPC: accélération désactivée : %s\n", why);
     }
@@ -1743,7 +1837,11 @@ static void invalidate_mirrors(void)
         p->cur_vp = p->cur_fp = 0;
         p->c_env_n[0] = p->c_env_n[1] = 0;
         p->c_gs_valid = 0;              /* tailles des génériques : à renvoyer */
+        p->nat_cur_ok = 0;              /* v18 : valeurs courantes de DRAW_NATIVE */
     }
+    /* v18 : un BUF_SUBDATA perdu laisserait un miroir brut faux pour de bon
+       (on ne recopie que ce qui change) : tout est à recopier */
+    buf_raw_invalidate_all();
     {
         int k;
         for (k = 0; k < PPROG_MAX; k++)
@@ -1796,6 +1894,21 @@ static void broken_all(const char *why, long st, unsigned long pc)
         fprintf(stderr, "POMPPC GL: host present rejected (status %ld), "
                 "falling back to the normal swap\n", st);
         G.scanout = 0;
+        invalidate_mirrors();
+        return;
+    }
+    /* v18 : un DRAW_NATIVE refusé (ou la recopie d'un miroir brut) ne coupe
+       QUE DRAW_NATIVE : les tableaux adossés à des VBO repartent par
+       l'empaquetage, qui a fait ses preuves. */
+    if (pc < CMD_WORDS && G.native &&
+        (QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_NATIVE ||
+         QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_BUF_SUBDATA)) {
+        pomppc_log("POMPPC: %s refusé (statut %ld, commande %lu) : DRAW_NATIVE coupé\n",
+                   QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_NATIVE ? "DRAW_NATIVE" : "BUF_SUBDATA",
+                   st, pc);
+        fprintf(stderr, "POMPPC GL: host rejected native draw (status %ld), "
+                "back to vertex packing\n", st);
+        G.native = 0;
         invalidate_mirrors();
         return;
     }
@@ -4638,19 +4751,341 @@ struct PBuf {
                                            types, et valeurs COURANTES des
                                            attributs inactifs) */
     int             dirty;
+    /* ── v18 : miroir BRUT pour DRAW_NATIVE ──
+       Tranche [rp_off, rp_off + rp_cap) de la réserve rp (-1 : aucune) ; elle
+       contient la copie octet pour octet de la copie cliente du VBO (vbo+0x30,
+       longueur logique vbo+0x38), aux plages sales près. */
+    PBuf           *hnext;              /* chaîne de G.buf_hash */
+    int             rp;
+    unsigned long   rp_off, rp_cap;
+    int             rp_failed;          /* plus de place : ne réessayer qu'après */
+    unsigned long   rp_fail_gen;        /*   une libération (G.rp_gen) */
+    unsigned long   raw_base;           /* vbo+0x30 au dernier ajustement */
+    int             rd_n;               /* plages SALES, triées, disjointes, */
+    unsigned long   rd_lo[RD_MAX], rd_hi[RD_MAX];   /* non contiguës ; hi borné
+                                           à la taille logique à l'usage */
 };
 
+/* L'objet tampon de GLEngine (docs/re/tableaux-de-sommets.md §3.2) : */
+#define VBO_DATA   0x30                 /* ptr : copie cliente (vm_allocate) */
+#define VBO_SIZE   0x38                 /* u32 : taille logique (GL_BUFFER_SIZE) */
+#define VA_EBO     0x35c                /* V : GL_ELEMENT_ARRAY_BUFFER lié (A+0x34c) */
+
+static unsigned long buf_hash_of(const void *key)
+{
+    unsigned long k = (unsigned long)key;
+    return ((k >> 4) ^ (k >> 14)) & (BUF_HASH - 1);
+}
+
+/* v18 : table de hachage — buf_from_vbo tourne par attribut et par dessin, et
+   idTech4 a des centaines de VBO (la liste coûtait un parcours chaque fois). */
 static PBuf *buf_from_vbo(unsigned long vbo)
 {
     PBuf *b;
     void **key;
     if (!vbo)
         return 0;
-    key = (void **)(vbo + 0x30);
-    for (b = G.bufs; b; b = b->next)
+    key = (void **)(vbo + VBO_DATA);
+    for (b = G.buf_hash[buf_hash_of(key)]; b; b = b->hnext)
         if (b->data == key)
             return b;
     return 0;
+}
+
+/* ── v18 : plages sales d'un miroir brut ── */
+static void rd_all(PBuf *b)
+{
+    b->rd_n = 1;
+    b->rd_lo[0] = 0;
+    b->rd_hi[0] = 0xFFFFFFFFUL;         /* borné à la taille logique à l'usage */
+}
+
+static void rd_remove(PBuf *b, int i)
+{
+    for (; i + 1 < b->rd_n; i++) {
+        b->rd_lo[i] = b->rd_lo[i + 1];
+        b->rd_hi[i] = b->rd_hi[i + 1];
+    }
+    b->rd_n--;
+}
+
+/* Plus de place : les deux plages voisines les plus proches fusionnent (on
+   recopiera l'écart entre elles — de trop, jamais de moins). */
+static void rd_merge_closest(PBuf *b)
+{
+    int j, best = -1;
+    unsigned long gap, bg = 0;
+    for (j = 0; j + 1 < b->rd_n; j++) {
+        gap = b->rd_lo[j + 1] - b->rd_hi[j];
+        if (best < 0 || gap < bg) {
+            best = j;
+            bg = gap;
+        }
+    }
+    if (best >= 0) {
+        b->rd_hi[best] = b->rd_hi[best + 1];
+        rd_remove(b, best + 1);
+    }
+}
+
+/* Ajoute [lo, hi) : fusion avec les voisines qui la touchent. */
+static void rd_add(PBuf *b, unsigned long lo, unsigned long hi)
+{
+    int i, j;
+    if (lo >= hi)
+        return;
+    if (b->rd_n == RD_MAX)
+        rd_merge_closest(b);
+    for (i = 0; i < b->rd_n && b->rd_lo[i] < lo; i++)
+        ;
+    for (j = b->rd_n; j > i; j--) {
+        b->rd_lo[j] = b->rd_lo[j - 1];
+        b->rd_hi[j] = b->rd_hi[j - 1];
+    }
+    b->rd_lo[i] = lo;
+    b->rd_hi[i] = hi;
+    b->rd_n++;
+    /* recoudre : chevauchements et contacts */
+    for (j = 0; j + 1 < b->rd_n; ) {
+        if (b->rd_lo[j + 1] <= b->rd_hi[j]) {
+            if (b->rd_hi[j + 1] > b->rd_hi[j])
+                b->rd_hi[j] = b->rd_hi[j + 1];
+            rd_remove(b, j + 1);
+        } else {
+            j++;
+        }
+    }
+}
+
+static void buf_raw_invalidate_all(void)
+{
+    PBuf *b;
+    for (b = G.bufs; b; b = b->next)
+        if (b->rp >= 0)
+            rd_all(b);
+}
+
+/* ── v18 : réserves (tampons hôte de RAWPOOL_BYTES découpés en tranches) ── */
+static void rp_release(int pool, unsigned long off, unsigned long len)
+{
+    RawExt **pp, *e, *n;
+    if (pool < 0 || pool >= G.rp_n || !len)
+        return;
+    for (pp = &G.rp_free[pool]; *pp && (*pp)->off < off; pp = &(*pp)->next)
+        ;
+    n = (RawExt *)malloc(sizeof(*n));
+    if (!n)
+        return;                         /* tranche perdue : seulement de la place */
+    n->off = off;
+    n->len = len;
+    n->next = *pp;
+    *pp = n;
+    /* fusion avec la suivante, puis avec la précédente */
+    if (n->next && n->off + n->len == n->next->off) {
+        e = n->next;
+        n->len += e->len;
+        n->next = e->next;
+        free(e);
+    }
+    for (e = G.rp_free[pool]; e && e->next != n; e = e->next)
+        ;
+    if (e && e->off + e->len == n->off) {
+        e->len += n->len;
+        e->next = n->next;
+        free(n);
+    }
+    G.rp_gen++;
+}
+
+static int rp_take(int pool, unsigned long len, unsigned long *off)
+{
+    RawExt **pp, *e;
+    for (pp = &G.rp_free[pool]; (e = *pp); pp = &e->next) {
+        if (e->len < len)
+            continue;
+        *off = e->off;
+        e->off += len;
+        e->len -= len;
+        if (!e->len) {
+            *pp = e->next;
+            free(e);
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* Une nouvelle réserve : BUF_CREATE dans une soumission SYNCHRONE à part
+   (comme prog_ensure) — un BUF_CREATE perdu dans un lot refusé laisserait des
+   BUF_SUBDATA vers un identifiant inconnu (BAD_ARG à chaque lot) ; confirmée,
+   la réserve existe pour de bon. */
+static long submit_probe(void);
+static long buf_alloc_id(void);
+static int rp_create(PCtx *p)
+{
+    unsigned long *c;
+    RawExt *e;
+    long id, st;
+    if (G.rp_n >= RAWPOOL_MAX || !p || p->qctx < 0 || p->broken || G.state <= 0)
+        return -1;
+    e = (RawExt *)malloc(sizeof(*e));
+    if (!e)
+        return -1;
+    id = buf_alloc_id();
+    if (id < 0) {
+        free(e);
+        return -1;
+    }
+    flush();                            /* tout ce qui précède part d'abord */
+    c = reserve(p, QGPU_LEN_BUF_CREATE);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE);
+    c[1] = (unsigned long)id;
+    c[2] = RAWPOOL_BYTES;
+    st = submit_probe();
+    if (st != QGPU_ST_OK) {
+        /* l'identifiant n'est pas rendu : on ne sait pas s'il a été pris */
+        free(e);
+        gl_note("NATIVE : BUF_CREATE de la réserve %d refusé (statut %ld) : "
+                "DRAW_NATIVE coupé\n", G.rp_n, st);
+        G.native = 0;
+        return -1;
+    }
+    e->off = 0;
+    e->len = RAWPOOL_BYTES;
+    e->next = 0;
+    G.rp_qid[G.rp_n] = id;
+    G.rp_free[G.rp_n] = e;
+    gl_note("NATIVE : réserve %d = tampon hôte %ld (%lu Mio)\n", G.rp_n, id,
+            (unsigned long)(RAWPOOL_BYTES >> 20));
+    return G.rp_n++;
+}
+
+/* Le miroir de b tient-il `size` octets ? Sinon une tranche neuve (contenu à
+   recopier en entier). 0 = pas de place : repli sur l'empaquetage. */
+static int raw_ensure(PCtx *p, PBuf *b, unsigned long size, unsigned long base)
+{
+    unsigned long cap, off;
+    int k;
+    if (b->rp >= 0 && b->rp_cap >= size) {
+        if (b->raw_base != base) {      /* réallouée par glBufferData */
+            b->raw_base = base;
+            rd_all(b);
+        }
+        return 1;
+    }
+    if (b->rp_failed && b->rp_fail_gen == G.rp_gen)
+        return 0;
+    if (b->rp >= 0) {
+        rp_release(b->rp, b->rp_off, b->rp_cap);
+        b->rp = -1;
+    }
+    cap = (size + RAW_ALIGN - 1) & ~(RAW_ALIGN - 1);
+    if (cap > RAWPOOL_BYTES)
+        return 0;
+    for (k = 0; k < G.rp_n; k++)
+        if (rp_take(k, cap, &off))
+            break;
+    if (k == G.rp_n) {
+        k = rp_create(p);
+        if (k < 0 || !rp_take(k, cap, &off)) {
+            b->rp_failed = 1;
+            b->rp_fail_gen = G.rp_gen;
+            return 0;
+        }
+    }
+    b->rp_failed = 0;
+    b->rp = k;
+    b->rp_off = off;
+    b->rp_cap = cap;
+    b->raw_base = base;
+    rd_all(b);
+    return 1;
+}
+
+/* Recopie [lo, hi) de la copie cliente dans le miroir : memcpy vers l'arène
+   (LECTURE de la mémoire de l'application : sous la garde pack_jmp de
+   l'appelant), puis BUF_SUBDATA. Le memcpy passe AVANT reserve : une faute
+   ne laisse aucune commande à moitié écrite. */
+static int raw_upload(PCtx *p, PBuf *b, unsigned long base,
+                      unsigned long lo, unsigned long hi)
+{
+    unsigned long n, off, *c;
+    while (lo < hi) {
+        n = hi - lo;
+        if (n > RAW_CHUNK)
+            n = RAW_CHUNK;
+        if (!arena_alloc(n, &off))
+            return 0;
+        memcpy(G.q.win + off, (const unsigned char *)base + lo, n);
+        c = reserve(p, QGPU_LEN_BUF_SUBDATA);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_BUF_SUBDATA, QGPU_LEN_BUF_SUBDATA);
+        c[1] = (unsigned long)G.rp_qid[b->rp];
+        c[2] = b->rp_off + lo;
+        c[3] = G.q.base + off;
+        c[4] = n;
+        G.n_native_bytes += n;
+        G.n_native_subdata++;
+        lo += n;
+    }
+    return 1;
+}
+
+/* Rend propre dans le miroir tout ce qui, de [lo, hi), est sale. Le reste
+   des plages sales attend un dessin qui le lise (le cache d'idTech4 écrit
+   tout son tampon temporaire, puis chaque dessin n'en lit qu'un morceau). */
+static int raw_sync(PCtx *p, PBuf *b, unsigned long base, unsigned long size,
+                    unsigned long lo, unsigned long hi)
+{
+    int i = 0;
+    unsigned long a, z, ul, uh;
+    if (hi > size)
+        hi = size;
+    while (i < b->rd_n) {
+        a = b->rd_lo[i];
+        z = b->rd_hi[i] < size ? b->rd_hi[i] : size;
+        if (a >= z) {                   /* au-delà de la taille : sans objet */
+            rd_remove(b, i);
+            continue;
+        }
+        if (z <= lo || a >= hi) {
+            i++;
+            continue;
+        }
+        ul = a > lo ? a : lo;
+        uh = z < hi ? z : hi;
+        if (ul != a && uh != z && b->rd_n == RD_MAX) {
+            /* pas de place pour couper en deux : fusionner ailleurs et
+               reprendre (on ne lit jamais plus que ce que le dessin lit —
+               la copie cliente peut avoir des pages non mappées) */
+            rd_merge_closest(b);
+            i = 0;
+            continue;
+        }
+        if (!raw_upload(p, b, base, ul, uh))
+            return 0;
+        if (ul == a && uh == z) {
+            rd_remove(b, i);
+        } else if (ul == a) {
+            b->rd_lo[i] = uh;
+            b->rd_hi[i] = z;
+            i++;
+        } else if (uh == z) {
+            b->rd_hi[i] = ul;
+            i++;
+        } else {
+            int j;
+            for (j = b->rd_n; j > i + 1; j--) {
+                b->rd_lo[j] = b->rd_lo[j - 1];
+                b->rd_hi[j] = b->rd_hi[j - 1];
+            }
+            b->rd_hi[i] = ul;
+            b->rd_lo[i + 1] = uh;
+            b->rd_hi[i + 1] = z;
+            b->rd_n++;
+            i += 2;
+        }
+    }
+    return 1;
 }
 
 static long buf_alloc_id(void)
@@ -4742,9 +5177,16 @@ static long buf_create(void *ctx, unsigned long *handle, void **data,
     b->flags = flags;
     b->qid = -1;
     b->dirty = 1;
+    b->rp = -1;                         /* v18 : pas encore de miroir brut */
+    rd_all(b);
     pthread_mutex_lock(&G.mu);
     b->next = G.bufs;
     G.bufs = b;
+    {
+        unsigned long h = buf_hash_of(data);
+        b->hnext = G.buf_hash[h];
+        G.buf_hash[h] = b;
+    }
     pthread_mutex_unlock(&G.mu);
     *handle = (unsigned long)b;
     return 0;
@@ -4764,21 +5206,70 @@ static long buf_destroy(void *ctx, unsigned long handle)
                 break;
             }
         }
+        for (pp = &G.buf_hash[buf_hash_of(b->data)]; (pctx_b = *pp); pp = &pctx_b->hnext) {
+            if (pctx_b == b) {
+                *pp = b->hnext;
+                break;
+            }
+        }
+        /* v18 : la tranche du miroir brut revient à sa réserve. Aucun
+           BUF_* : les dessins déjà émis qui la lisent précèdent, dans le
+           flux, toute recopie future dans la même tranche. */
+        if (b->rp >= 0)
+            rp_release(b->rp, b->rp_off, b->rp_cap);
         free(b);
     }
     pthread_mutex_unlock(&G.mu);
     return 0;
 }
 
+/* gldFlushBuffer(ctx, poignée, ptr, longueur) — appelé par GLEngine après
+ * glBufferData, glBufferSubData (memcpy du moteur : notre BufferSubData rend 0)
+ * et glUnmapBuffer (docs/re/tableaux-de-sommets.md §3.0-3.1). C'est LA
+ * notification « la copie cliente a changé » : le moteur pose les bits 0-1 de
+ * vbo+0x48+4i après une écriture CPU, le pilote les efface ici.
+ *
+ * v18 : (ptr, longueur) sert de PLAGE SALE du miroir brut quand elle tombe
+ * dans [base, base + taille logique) ; sinon (ou POMPPC_GL_NATIVE_RANGE=0)
+ * tout le tampon est sale. Hypothèse à confirmer (sonde ci-dessous, note.txt) :
+ * ptr = vbo+0x30 + offset et longueur = taille de glBufferSubData — ce que
+ * fait le memcpy du moteur juste avant. Une plage PLUS LARGE que l'écriture
+ * reste juste (recopie de trop) ; seule une plage fausse ET incluse dans le
+ * tampon tromperait le miroir. */
 static long buf_flush(void *ctx, unsigned long handle, void *ptr, unsigned long len)
 {
     PBuf *b = (PBuf *)handle;
     (void)ctx;
-    (void)ptr;
     pthread_mutex_lock(&G.mu);
     if (b) {
+        unsigned long base = b->data ? (unsigned long)*b->data : 0;
+        unsigned long size = b->data ? GLD_U32((unsigned char *)b->data - VBO_DATA, VBO_SIZE) : 0;
+        unsigned long p0 = (unsigned long)ptr;
+        static unsigned long told;
+        static int proven;              /* un ptr ≠ base a été vu : ptr porte bien
+                                           l'offset (sinon « base, longueur de la
+                                           sous-écriture » serait indiscernable) */
+        int ranged;
         b->last_len = len;
         b->dirty = 1;
+        ranged = G.native_range && base && len && p0 >= base && p0 - base <= size &&
+                 len <= size - (p0 - base);
+        if (ranged && p0 != base)
+            proven = 1;
+        if (ranged && p0 == base && len < size && !proven)
+            ranged = 0;                 /* ambigu tant que rien n'est prouvé */
+        if (ranged)
+            rd_add(b, p0 - base, p0 - base + len);
+        else
+            rd_all(b);                  /* raw_sync ne recopiera que ce que les
+                                           dessins lisent */
+        if (told < 12) {
+            told++;
+            gl_note("FlushBuffer #%lu : vbo %08lx base %08lx taille %lu ptr %08lx "
+                    "(base%+ld) longueur %lu -> %s\n", told,
+                    (unsigned long)b->data - VBO_DATA, base, size, p0,
+                    (long)(p0 - base), len, ranged ? "plage" : "tout");
+        }
         if (b->flags)
             *b->flags &= ~3UL;          /* GeForce3 : rlwinm bits 0-1 */
     }
@@ -6212,11 +6703,13 @@ static void geom_send_current(PCtx *p, unsigned long fmt)
     memset(a, 0, sizeof(a));
     if (!(fmt & QGPU_VF_COLOR) && changed(p, g + GS_CUR_COLOR, p->c_cur[0], 16)) {
         a[0] = QGPU_CUR_COLOR;
+        p->nat_cur_ok &= ~(1UL << QGPU_CUR_COLOR);      /* v18 */
         put_f(a + 1, (const float *)(g + GS_CUR_COLOR), 4);
         send_cmd(p, QGPU_OP_SET_CURRENT, QGPU_LEN_SET_CURRENT, a);
     }
     if (!(fmt & QGPU_VF_NORMAL) && changed(p, g + GS_CUR_NORMAL, p->c_cur[1], 12)) {
         a[0] = QGPU_CUR_NORMAL;
+        p->nat_cur_ok &= ~(1UL << QGPU_CUR_NORMAL);
         put_f(a + 1, (const float *)(g + GS_CUR_NORMAL), 3);
         a[4] = 0;
         send_cmd(p, QGPU_OP_SET_CURRENT, QGPU_LEN_SET_CURRENT, a);
@@ -6226,12 +6719,14 @@ static void geom_send_current(PCtx *p, unsigned long fmt)
        pas. Elle passe donc toujours en valeur courante. */
     if (changed(p, g + GS_CUR_SECCOLOR, p->c_cur[2], 12)) {
         a[0] = QGPU_CUR_SEC_COLOR;
+        p->nat_cur_ok &= ~(1UL << QGPU_CUR_SEC_COLOR);
         put_f(a + 1, (const float *)(g + GS_CUR_SECCOLOR), 3);
         a[4] = 0;
         send_cmd(p, QGPU_OP_SET_CURRENT, QGPU_LEN_SET_CURRENT, a);
     }
     if (!(fmt & QGPU_VF_FOG) && changed(p, g + GS_CUR_FOGCOORD, p->c_cur[3], 4)) {
         a[0] = QGPU_CUR_FOG;
+        p->nat_cur_ok &= ~(1UL << QGPU_CUR_FOG);
         put_f(a + 1, (const float *)(g + GS_CUR_FOGCOORD), 1);
         a[2] = a[3] = a[4] = 0;
         send_cmd(p, QGPU_OP_SET_CURRENT, QGPU_LEN_SET_CURRENT, a);
@@ -7983,6 +8478,334 @@ static int quads_axis_aligned(const float *v, unsigned long n, unsigned long wor
     return 1;
 }
 
+/* ── v18 : DRAW_NATIVE — tableaux adossés à des VBO, sans empaquetage ──────
+ *
+ * DOOM 3 / Prey : 79 000 sommets idDrawVert (60 octets, entrelacés) par image
+ * passaient par va_pack_planned (conversion en flottants qgpu, un sommet à la
+ * fois, sur un G4 émulé), puis par BUF_SUBDATA. Ici, chaque VBO lu a sur
+ * l'hôte un MIROIR BRUT (tranche d'une réserve, cf. raw_ensure), tenu à jour
+ * par recopie memcpy des seules plages que gldFlushBuffer a salies ET que le
+ * dessin lit ; le dessin ne transporte que des descripteurs (code, tampon,
+ * offset, pas, type, taille|normalisé), l'hôte convertit.
+ *
+ * Mêmes attributs que l'empaqueteur : le PLAN (va_plan_build) — donc, sous
+ * programme, seulement ce que le texte lit, et la position lue au générique 0
+ * quand c'est lui qui la porte (décrite en code 0). Un attribut du plan SANS
+ * tableau (valeur constante) n'est pas décrit : sa valeur, celle que
+ * l'empaqueteur aurait recopiée (couleur morte → blanche…), part en
+ * SET_CURRENT. Seules la normale, la couleur et les coordonnées de texture
+ * s'y prêtent ; une position, un brouillard, une secondaire ou un générique
+ * constants → empaquetage (l'hôte déduit de leur PRÉSENCE l'état GL :
+ * GL_FOG_COORDINATE, GL_COLOR_SUM).
+ *
+ * Écarts assumés avec l'empaquetage, à la charge de l'hôte ou sans objet :
+ *   — pas de filtre des sommets fous (raw_scan_nan / va_copy_idx_tri) : les
+ *     trous du cache d'idTech4 dans [vmin, vmax] arrivent tels quels, l'hôte
+ *     ASSAINIT à la conversion (NaN, infini, |v| ≥ 1e9) au lieu de refuser ;
+ *   — pas de « couleur morte » par sommet (0,0,0,0 → couleur courante) : un
+ *     rustine de WC3, dont les tableaux sont clients (jamais natifs) ;
+ *   — pas de glyphes TRIANGLES → QUADS (WC3 encore, tableaux clients) ;
+ *   — la clé QGPU_SK_GEN_SIZES n'est ni posée ni lue : la taille de chaque
+ *     générique est dans son descripteur (la clé reste ce qu'elle était pour
+ *     DRAW_RAW / DRAW_RAW_BUF, gs_stale la tient à jour là-bas).
+ *
+ * Rend -1 : pas pour ce chemin (l'appelant empaquette), 1 : dessiné. Tout ce
+ * qui lit la mémoire de l'application (recopie, indices) tourne sous la garde
+ * pack_jmp de geom_draw_client. */
+typedef struct NatBuf {
+    PBuf           *b;
+    unsigned long   base, size, lo, hi; /* plage que le dessin lit */
+} NatBuf;
+
+static int nat_buf_add(NatBuf *nb, int *n, PBuf *b, unsigned long base,
+                       unsigned long size, unsigned long lo, unsigned long hi)
+{
+    int i;
+    for (i = 0; i < *n; i++)
+        if (nb[i].b == b) {
+            if (lo < nb[i].lo) nb[i].lo = lo;
+            if (hi > nb[i].hi) nb[i].hi = hi;
+            return i;
+        }
+    if (*n >= QGPU_NATTR_MAX + 1)
+        return -1;
+    nb[*n].b = b;
+    nb[*n].base = base;
+    nb[*n].size = size;
+    nb[*n].lo = lo;
+    nb[*n].hi = hi;
+    return (*n)++;
+}
+
+static int nat_type_ok(unsigned type, int bpc)
+{
+    switch (type) {
+    case VA_GL_BYTE: case VA_GL_UBYTE:     return bpc == 1;
+    case VA_GL_SHORT: case VA_GL_USHORT:   return bpc == 2;
+    case VA_GL_INT: case VA_GL_UINT:
+    case VA_GL_FLOAT:                      return bpc == 4;
+    case VA_GL_DOUBLE:                     return bpc == 8;
+    default:                               return 0;
+    }
+}
+
+/* Code de descripteur de l'entrée j du plan (emplacement GLEngine `slot`). */
+static int nat_code(int j, int slot)
+{
+    if (j == 0)
+        return QGPU_NATTR_POSITION;     /* emplacement 0, ou générique 0 (alias) */
+    switch (slot) {
+    case 1: return QGPU_NATTR_NORMAL;
+    case 2: return QGPU_NATTR_COLOR;
+    case 3: return QGPU_NATTR_FOG;
+    case 4: return QGPU_NATTR_SEC_COLOR;
+    default: break;
+    }
+    if (slot >= 8 && slot < 8 + QGPU_MAX_UNITS)
+        return QGPU_NATTR_TEX(slot - 8);
+    if (slot > 16 && slot < 16 + QGPU_VF_GEN_MAX)
+        return QGPU_NATTR_GEN(slot - 16);
+    return -1;
+}
+
+/* Valeur courante (QGPU_CUR_*) qui remplace un attribut constant, ou -1. */
+static int nat_cur_of(int slot, int *n)
+{
+    if (slot == 1) {
+        *n = 3;
+        return QGPU_CUR_NORMAL;
+    }
+    if (slot == 2) {
+        *n = 4;
+        return QGPU_CUR_COLOR;
+    }
+    if (slot >= 8 && slot < 8 + QGPU_MAX_UNITS) {
+        *n = 4;
+        return QGPU_CUR_TEXCOORD0 + (slot - 8);
+    }
+    return -1;
+}
+
+static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
+                            unsigned long mode, long first, long count,
+                            unsigned long itype, const void *indices,
+                            unsigned long vmin, unsigned long vmax, unsigned long nidx)
+{
+    NatBuf nb[QGPU_NATTR_MAX + 1];
+    unsigned long d[QGPU_NATTR_MAX][QGPU_NATTR_WORDS];
+    int dbuf[QGPU_NATTR_MAX];
+    int nd = 0, nn = 0, j, k, ib = -1, seen_vbo = 0, cn, w;
+    unsigned long isz = 0, ioff_b = 0, itype_h = QGPU_IDX_NONE, ibuf = QGPU_BUF_SHMEM;
+    unsigned long ioff = 0, aoff, dbytes, ibytes, nverts, *c, *dst;
+    unsigned long a[QGPU_LEN_SET_CURRENT - 1];
+
+    if (!G.native || !V || !pl || pl->n < 1 || pl->n > QGPU_NATTR_MAX)
+        return -1;
+    nverts = vmax - vmin + 1;
+
+    /* 1. Descripteurs : chaque attribut lu vient d'un VBO, dans ses bornes */
+    for (j = 0; j < pl->n; j++) {
+        const VaAttr *at = &pl->a[j];
+        unsigned long vbo, base, size, off, stride, end;
+        PBuf *b;
+        int code;
+        if (!at->src) {
+            if (j == 0 || nat_cur_of(at->slot, &cn) < 0)
+                goto fall;
+            continue;
+        }
+        vbo = GLD_U32(V, VA_VBO(V, at->slot));
+        if (!vbo)
+            goto fall;                  /* tableau client : l'empaquetage */
+        seen_vbo = 1;
+        code = nat_code(j, at->slot);
+        b = buf_from_vbo(vbo);
+        if (code < 0 || !b)
+            goto fall;
+        base = GLD_U32((unsigned char *)vbo, VBO_DATA);
+        size = GLD_U32((unsigned char *)vbo, VBO_SIZE);
+        if (!base || !size || size > RAWPOOL_BYTES || (unsigned long)at->src < base)
+            goto fall;
+        off = (unsigned long)at->src - base;
+        stride = (unsigned long)at->stride;
+        if (!nat_type_ok(at->type, at->bpc) || at->src_n < 1 || at->src_n > 4 ||
+            at->stride <= 0 || off >= size)
+            goto fall;
+        /* off + vmax·pas + taille ≤ taille logique, sans débordement 32 bits */
+        if (vmax && vmax > (size - off) / stride)
+            goto fall;
+        end = off + vmax * stride + (unsigned long)(at->src_n * at->bpc);
+        if (end > size)
+            goto fall;
+        k = nat_buf_add(nb, &nn, b, base, size, off + vmin * stride, end);
+        if (k < 0)
+            goto fall;
+        dbuf[nd] = k;
+        d[nd][0] = (unsigned long)code;
+        d[nd][1] = 0;                   /* tampon hôte : après raw_ensure */
+        d[nd][2] = off;                 /* + rp_off : après raw_ensure */
+        d[nd][3] = stride;
+        d[nd][4] = at->type;
+        d[nd][5] = (unsigned long)at->src_n | (at->norm ? QGPU_NATTR_NORMALIZED : 0);
+        nd++;
+    }
+    if (!seen_vbo)
+        return -1;
+
+    /* 2. Indices : dans un VBO d'éléments lié (décrit tel quel), sinon
+          recopiés dans la zone des indices (u8 → u16) */
+    if (nidx) {
+        unsigned long ev, base, size, p0;
+        isz = itype == VA_GL_UINT ? 4 : itype == VA_GL_USHORT ? 2 :
+              itype == VA_GL_UBYTE ? 1 : 0;
+        if (!isz || !indices)
+            goto fall;
+        ev = GLD_U32(V, VA_EBO);
+        if (ev && isz > 1) {
+            PBuf *e = buf_from_vbo(ev);
+            base = GLD_U32((unsigned char *)ev, VBO_DATA);
+            size = GLD_U32((unsigned char *)ev, VBO_SIZE);
+            p0 = (unsigned long)indices;
+            if (e && base && size && size <= RAWPOOL_BYTES && p0 >= base &&
+                p0 - base < size && !((p0 - base) & (isz - 1)) &&
+                nidx <= (size - (p0 - base)) / isz) {
+                ioff_b = p0 - base;
+                ib = nat_buf_add(nb, &nn, e, base, size, ioff_b, ioff_b + nidx * isz);
+                if (ib < 0)
+                    goto fall;
+            }
+        }
+        itype_h = isz == 4 ? QGPU_IDX_U32 : QGPU_IDX_U16;
+    }
+
+    /* 3. Miroirs : tranche, puis recopie de ce qui est sale ET lu. Peut vider
+          le flux (arène, nouvelle réserve) : rien n'est encore écrit pour CE
+          dessin. Un échec laisse des recopies justes et rend la main. */
+    for (k = 0; k < nn; k++)
+        if (!raw_ensure(p, nb[k].b, nb[k].size, nb[k].base) || !G.native ||
+            !raw_sync(p, nb[k].b, nb[k].base, nb[k].size, nb[k].lo, nb[k].hi))
+            goto fall;
+
+    /* 4. Attributs constants du plan : leur valeur en SET_CURRENT (peut
+          vider le flux, lui aussi) */
+    for (j = 1; j < pl->n; j++) {
+        const VaAttr *at = &pl->a[j];
+        if (at->src)
+            continue;
+        w = nat_cur_of(at->slot, &cn);
+        memset(a, 0, sizeof(a));
+        a[0] = (unsigned long)w;
+        put_f(a + 1, at->cur, cn);
+        if ((p->nat_cur_ok & (1UL << w)) && !memcmp(p->nat_cur[w], a + 1, 4 * sizeof(a[0])))
+            continue;
+        send_cmd(p, QGPU_OP_SET_CURRENT, QGPU_LEN_SET_CURRENT, a);
+        memcpy(p->nat_cur[w], a + 1, 4 * sizeof(a[0]));
+        p->nat_cur_ok |= 1UL << w;
+        /* geom_send_current croit l'hôte à la valeur GL brute : la faire
+           renvoyer la prochaine fois qu'elle servira */
+        if (w == QGPU_CUR_COLOR)
+            memset(p->c_cur[0], 0xff, sizeof(p->c_cur[0]));
+        else if (w == QGPU_CUR_NORMAL)
+            memset(p->c_cur[1], 0xff, sizeof(p->c_cur[1]));
+    }
+
+    /* 5. Place : descripteurs dans la zone des sommets de la moitié courante,
+          indices dans la sienne, commande — AUCUN vidage entre les trois (pas
+          d'arène ici : arena_alloc peut vider, et les indices écrits avant
+          partiraient dans l'autre moitié que la commande). */
+    dbytes = (unsigned long)nd * QGPU_NATTR_WORDS * 4;
+    ibytes = (nidx && ib < 0) ? nidx * (isz == 4 ? 4UL : 2UL) : 0;
+    if (G.ncmd + QGPU_LEN_DRAW_NATIVE + QGPU_LEN_DRAW_RAW + 2 * QGPU_LEN_CTX + 8 > CMD_WORDS ||
+        VTX_OFF + G.vtx + dbytes > VTX_LIMIT ||
+        (ibytes && ((G.idx + 3) & ~3UL) + ibytes > IDX_SIZE))
+        flush();
+    if (G.ncmd + QGPU_LEN_DRAW_NATIVE + QGPU_LEN_DRAW_RAW + 2 * QGPU_LEN_CTX + 8 > CMD_WORDS ||
+        VTX_OFF + G.vtx + dbytes > VTX_LIMIT ||
+        (ibytes && ((G.idx + 3) & ~3UL) + ibytes > IDX_SIZE))
+        goto fall;
+    /* un vidage ci-dessus a pu rendre un refus de l'hôte (broken_all) :
+       DRAW_NATIVE coupé, ou le contexte perdu */
+    if (!G.native || p->broken || p->qctx < 0)
+        goto fall;
+    close_raw();                        /* la série Begin/End en attente d'abord */
+    dst = (unsigned long *)(G.win + VTX_OFF + G.vtx);
+    for (j = 0; j < nd; j++) {
+        const PBuf *b = nb[dbuf[j]].b;
+        dst[0] = d[j][0];
+        dst[1] = (unsigned long)G.rp_qid[b->rp];
+        dst[2] = b->rp_off + d[j][2];
+        dst[3] = d[j][3];
+        dst[4] = d[j][4];
+        dst[5] = d[j][5];
+        dst += QGPU_NATTR_WORDS;
+    }
+    aoff = G.base + VTX_OFF + G.vtx;
+    G.vtx += dbytes;
+    if (nidx && ib >= 0) {
+        ibuf = (unsigned long)G.rp_qid[nb[ib].b->rp];
+        ioff = nb[ib].b->rp_off + ioff_b;
+    } else if (nidx) {
+        unsigned char *di;
+        G.idx = (G.idx + 3) & ~3UL;
+        di = G.win + IDX_OFF + G.idx;
+        if (isz == 1) {                 /* le contrat ne connaît pas u8 */
+            const unsigned char *s8 = (const unsigned char *)indices;
+            unsigned short *d16 = (unsigned short *)di;
+            unsigned long q;
+            for (q = 0; q < nidx; q++)
+                d16[q] = s8[q];
+        } else {
+            memcpy(di, indices, ibytes);    /* grand-boutiste tel quel */
+        }
+        ibuf = QGPU_BUF_SHMEM;
+        ioff = G.base + IDX_OFF + G.idx;
+        G.idx += ibytes;
+    }
+    if (G.bound != p) {
+        c = G.cmd + G.ncmd;
+        c[0] = QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX);
+        c[1] = p->qctx;
+        G.ncmd += QGPU_LEN_CTX;
+        G.bound = p;
+    }
+    c = G.cmd + G.ncmd;
+    c[0] = QGPU_CMD_HDR(QGPU_OP_DRAW_NATIVE, QGPU_LEN_DRAW_NATIVE);
+    c[1] = mode;
+    c[2] = nidx ? nidx : (unsigned long)count;
+    c[3] = ibuf;
+    c[4] = ioff;
+    c[5] = itype_h;
+    c[6] = nidx ? 0 : (unsigned long)first;
+    c[7] = (unsigned long)nd;
+    c[8] = aoff;
+    G.ncmd += QGPU_LEN_DRAW_NATIVE;
+    {
+        static unsigned long said;
+        if (said < 3) {
+            const unsigned long *t = (const unsigned long *)(G.win + (aoff - G.base));
+            said++;
+            gl_note("DRAW_NATIVE #%lu image %lu : mode %lu n %lu ibuf %lx ioff %lx itype %lu "
+                    "premier %lu, %d attributs, sommets %lu..%lu\n", said, G.n_frames,
+                    c[1], c[2], c[3], c[4], c[5], c[6], nd, vmin, vmax);
+            for (j = 0; j < nd; j++, t += QGPU_NATTR_WORDS)
+                gl_note("   code %2lu tampon %lu offset %lu pas %lu type %04lx taille %lx\n",
+                        t[0], t[1], t[2], t[3], t[4], t[5]);
+        }
+    }
+    G.n_native_draws++;
+    G.n_native_verts += nverts;
+    va_count_prims(mode, nidx ? nidx : (unsigned long)count);
+    p->color = HOST_NEWER;
+    if (writes_depth(p))
+        p->depth = HOST_NEWER;
+    return 1;
+
+fall:
+    if (seen_vbo)
+        G.n_native_fall++;
+    return -1;
+}
+
 /* Cœur du canal tableaux. Verrou déjà tenu. 1 = traité (même si n=0). */
 static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
                                    long first, long count, unsigned long itype,
@@ -8096,6 +8919,14 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
     /* I5 (relecture du 24/09) : le plan d'abord — la clé et la propreté des
        VBO en dérivent (générique 0 en position, génériques, unités 4..7) */
     va_plan_build(&plan, p, V, fmt, gs);
+    /* v18 : tout le plan dans des VBO → DRAW_NATIVE, sans empaquetage */
+    if (G.native) {
+        int nr = geom_draw_native(p, V, &plan, mode, first, count,
+                                  nidx ? itype : VA_ITYPE_NONE, indices,
+                                  vmin, vmax, nidx);
+        if (nr >= 0)
+            return nr;
+    }
     host = va_host_ready(V, &plan, &hb);
     key = va_pack_key(&plan, fmt);      /* P13 : clé COMPLÈTE */
     reuse = host == 1 && hb && hb->qid >= 0 && hb->qsize >= packed &&
