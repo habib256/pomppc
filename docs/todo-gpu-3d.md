@@ -34,8 +34,17 @@ l'utilisateur (24/09, après-midi), réordonnées.
    DOOM 3 : 17,5 ms/image en cinématique (22 avant), image identique ; utilisateur : « 22 img/s
    en moyenne, creux à 6-8 ». Profil sous DRAW_NATIVE (818 échantillons) : jeu ≈ 40 %
    (R_AddModelSurfaces, RunFrame), GLEngine ≈ 12 %, plugin ≈ 28 % dont vérifications de
-   textures ≈ 14 % → mémorisées par image (c18c5f5). Restent : send_state/compute_state,
-   geom_format, le scan des indices, puis GLEngine lui-même (crocheter glDrawElements en amont).
+   textures ≈ 14 % → mémorisées par image (c18c5f5). **Étude « court-circuiter GLEngine ? »**
+   (`docs/re/etude-court-circuit-glengine.md`, bfe83b1) : non — GLEngine ne pèse que 1,6 % du fil
+   principal sous glDrawElements ; c'est le plugin qui calcule **deux fois le même verdict**
+   (geom_ok + texture_ok + geom_format au `gldUpdateDispatch`, puis au dessin ; 207 échantillons
+   sur 818), plus des parasites (pthread_self à chaque tex_lv0_sig, getenv dans target_probe /
+   draw_probe). **Prochain chantier choisi par l'utilisateur (24/09, 17h) : les lots 0 à 5 de
+   l'étude** (compteurs → parasites → verdict unique gardé dans le PCtx avec clé et mode
+   `POMPPC_GL_VERDICTCHECK` → liste blanche du bloc de changements après le relevé R4 →
+   compute_state sauté seulement si R5 le prouve → nouveau profil). Gain estimé 20-25 %.
+   Creux à 6-8 img/s de DOOM 3 selon l'utilisateur : vitres et reflets, ouvertures de portes
+   (arrivée de textures), combats à plusieurs lumières.
 2. **Sens de la copie d'écran et protocole figé v18, d'un bloc** : `COPY_TEX` doit produire une
    texture orientée comme en OpenGL réel (aujourd'hui en orientation hôte, donc `fragment.position`
    retourné et les coordonnées calculées par les programmes se contredisent) ; puis un seul
@@ -57,6 +66,30 @@ l'utilisateur (24/09, après-midi), réordonnées.
    quatre clients, présentation directe généralisée.
 10. **1.0 = installation reproductible** : CD ou paquet, `install.sh` qui reconstruit kext et plugin,
     disque quotidien recréable depuis l'ISO, matrice verte relancée à chaque commit.
+
+## Reprise après la session du 23-24/09/2026 (état au 24/09, 17h)
+
+- **Dépôt** : `main` = bfe83b1 poussé sur origin ; rien de non commité. Tous les worktrees
+  d'agents fusionnés et supprimés. Protocole **v18** : `patches/qgpu/qgpu_proto.h` ==
+  `kext/POMPPCGPU/qgpu_proto.h`, sources copiées à l'identique dans `~/src/qemu/hw/display/`,
+  QEMU reconstruit (`~/src/qemu/build`, 24/09 16h30). Tests natifs : 883 OK.
+- **Invité (tiger.qcow2 quotidien)** : kext v18 installé (`install.sh`, redémarré), plugin rev
+  `20260924-native` = c18c5f5 installé (`.run/cmr/cycle.sh NORUN=1` ; l'étude n'a rien changé au
+  code). Lanceurs sur le bureau de tiger : `doom3.command` (+ `-dump`, `-lazy`, `-nolazy`, `-fs`,
+  `-trace`, `-nos3tc`), `prey.command` (+ `-dump`, `-lazy`, `-nolazy`, `-trace`), `rtcw.command`,
+  `cmr.command`. Journaux : `~/d3-dump/note.txt` et `frames.csv`, `~/prey-dump/`, `~/rtcw-dump/`.
+- **Vérifié** : DOOM 3 image nickel (vitres, reflets, réacteurs), ~22 img/s ; Prey image juste
+  mais lent (117 ms/image), **pas retesté** depuis le plugin `20260924-native` (crochet de
+  plantage réarmé, textures mémorisées) : à refaire d'abord (dialogue Apple au démarrage ?).
+  RTCW : quitte après 8 s par script, non expliqué.
+- **Outils** : `tools/re/dumpdec.py` (décodage de vidage), `tools/re/sym.py` (CRASH pc → symbole),
+  `tools/re/frames.py` (ms/image par tranche), profils dans `.run/d3/sample-nat.txt` (DOOM 3 sous
+  DRAW_NATIVE, référence pour le lot 5) et `.run/prey/sample.txt`.
+- **Prochain pas** : lots 0 à 5 de `docs/re/etude-court-circuit-glengine.md` (voir l'étape 1
+  ci-dessus). Puis étape 2 (un seul `docs/protocole.md` pour v18), étape 3 (matrice des jeux).
+- **VM** : l'utilisateur autorise les redémarrages libres (reboot, `system_reset` après la panique
+  AppleUSBOHCI). Pièges : `docs/re/` et la mémoire de session (BadDisplay après kill de DOOM 3,
+  `tiger.lock`, `chown` de `~/pomppc-build`).
 
 ## État (23/09/2026, nuit) — protocole v16 : programmes ARB sur l'hôte
 
