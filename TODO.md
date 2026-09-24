@@ -77,15 +77,47 @@ variable d'environnement tant que la mesure en jeu n'est pas faite.
       2 est justifié (jamais un verdict différent au dessin) ; le lot 3 ne peut pas partir de la
       liste blanche « env de programmes seulement » (0 occurrence) — il faut le relevé R4 sur les
       motifs 1 à 3 de DOOM 3.
-- [ ] **Lot 1 — parasites** : `pthread_self` une fois par entrée ; `getenv` de `target_probe` et
-      `draw_probe` en statique ; `tex_complete` mémorisé par image. Épreuve : `gltest texup
-      texcache texdelmid cube tex3d arbvp arbfp varrayvbo` inchangés ; `sample` : `__pthread_self`
-      et `getenv` < 3 échantillons.
-- [ ] **Lot 2 — verdict unique** : le dispatch range `ok`, `TexInfo`, `fmt`, `gs` et une clé
-      (image, époque des textures, VAO, `VA_EN`, programmes, `G.state`) dans le `PCtx` ; le dessin
-      reprend si la clé est identique. `POMPPC_GL_VERDICTCHECK=1` recalcule et note les écarts.
-      Épreuve : zéro écart sur DOOM 3 et Prey ; `geom_ok`+`texture_ok`+`geom_format` sous
-      `geom_draw_client` < 10 échantillons.
+- [x] **Lot 1 — parasites** : **fait le 24/09/2026** (plugin `20260924-parasites`).
+      `pthread_self` : plutôt qu'« une fois par entrée » (qui en laissait un par dessin),
+      `self_thr()` le garde avec l'adresse de pile où il a été lu — même fil tant que la pile est
+      à moins de 32 Kio, les piles de deux fils étant disjointes — le gestionnaire de signal relit
+      toujours `pthread_self()` ; `getenv` de `target_probe`, `draw_probe`, `cube_probe` lus une
+      fois ; `tex_complete`/`tex_base_ok` mémorisés par texture et par image (`tex_cp`, effacé
+      par `pomppc_texture_changed`, les procédures qui salissent et le vidage d'état).
+      Épreuves : 18 scènes `gltest` (texup texcache texdelmid cube tex3d arbvp arbfp varrayvbo
+      game vbocolor arbvp0vbo tri, et en 256² tex13 tex14 gl15 texlod mixte dlist) **identiques à
+      l'octet** (verdicts et empreinte de l'image) ; DOOM 3 Mars City, début sans bouger, images
+      3000-3300 : **99,5 → 95,5 ms/image** ; `sample` (fil principal, ~850 éch.) :
+      `__pthread_self` 4 → 1, `getenv` 7 → 0, `tex_complete` 26 → 1 (le profil de référence
+      `sample-nat.txt` en avait 26, 9 et 31 ; le mémo `ok_frame` avait déjà pris les
+      `pthread_self` de `tex_lv0_sig`).
+- [x] **Lot 2 — verdict unique** : **fait le 24/09/2026** (plugin `20260924-verdict`,
+      **défaut `POMPPC_GL_VERDICT=1`** ; `=0` recalcule à chaque dessin comme avant — repli à
+      garder jusqu'à la mesure en jeu de l'utilisateur). Le dispatch range `ok`, `TexInfo`,
+      `fmt`, `gs` et une clé (`vd_key_of`, 32 mots : `G.n_frames`, époque des textures `vd_epoch`
+      — création, destruction, modification de niveaux ou de paramètres, salissure,
+      téléversement, éviction, COPY_TEX, état hôte perdu —, `G.state`, `broken`/`geom_lost`,
+      `qctx`, `cfg`, bloc d'état, VAO et `VA_EN_HI/LO`, table des unités, taille et tampon du
+      drawable, `gctx+0x4e1c`, GLSL, objets de programme courants et actifs, et ce que le plugin
+      en sait : refus, texte compilé, texte relu) ; le dessin la recalcule (≈ 30 lectures) et
+      reprend si elle est identique. `geom_format` n'est plus fait qu'une fois par dispatch
+      (`geom_publish(p, fmt)`). `POMPPC_GL_VERDICTCHECK=1` recalcule quand même, compare `ok`,
+      `fmt`, `gs`, les unités de `TexInfo` et l'époque (un recalcul qui téléverse est un écart),
+      et note chaque écart (`VERDICT écart …`) ; ligne `VERDICT image N : repris, recalculés,
+      écarts` toutes les 500 images. Épreuves : **0 écart** — DOOM 3 `demo_mars_city1`
+      (cinématique + début du jeu) 2 421 790 dessins sur deux parties, Prey `roadhouse`
+      6 530 653 dessins (14 000 images) ; **0 recalculé** : chaque dessin de ces deux jeux suit
+      son dispatch, le chemin « dessin sans dispatch » (clé seule) n'y est pas exercé.
+      `sample` (fil principal, ~810 éch.) : `geom_ok`+`texture_ok`+`geom_format` sous
+      `geom_draw_client` **54 → 0** ; `geom_draw_client` 153 → 137 inclusif, `pomppc_geom_dispatch`
+      95 → 88. ms/image, même binaire, `VERDICT=0` contre défaut, début du jeu (T+50..T+280 /
+      T+450..T+900, T = fin de la cinématique) : **DOOM 3 100,0/99,1 → 87,8/88,1** ; Prey,
+      sauvegarde « Fuite à toute vitesse » (`~/prey-fuite.command`, `+loadGame`), 100 s après
+      le chargement : **99,5 → 89,4** (0-40 s : 73,5 / 74,3 ; 40-100 s : 130,2 → 103,3), une
+      partie chacun. 18 scènes `gltest` identiques à l'octet (défaut et `VERDICTCHECK=1`) ;
+      image de DOOM 3 et de Prey justes à l'écran. Reste à voir : Warcraft III, UT2004, Colin
+      McRae (dessins sans dispatch possibles) sous `VERDICTCHECK=1`. Piste : `geom_format`
+      appelle `texturing_on` par unité (N², 22 éch. au dispatch).
 - [ ] **Lot 3 — liste blanche du bloc de changements** (après relevé R4 : quel bit pose chaque
       appel GL) : verdict gardé si seuls des bits neutres sont posés (env de programmes
       `0x00800000|0x02000000` en `+0x0c`). Épreuve : `VERDICTCHECK` étendu au dispatch, zéro

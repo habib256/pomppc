@@ -117,7 +117,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260924-count"
+#define POMPPC_PLUGIN_REV "20260924-verdict"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -150,6 +150,38 @@ static volatile unsigned long proc_fault_n;
 /* P3 (relecture du 24/09) : le crochet est global au processus ; chaque garde
    note le fil qui l'arme, et seul ce fil-là y revient par siglongjmp. */
 static volatile pthread_t pack_thr, sig_thr, proc_thr;
+/* Lot 1 du verdict unique (24/09) : pthread_self() est, sur Darwin 8 PPC, un
+   appel système rapide (`sc`) — cher sous QEMU (26 échantillons sur 818 dans
+   sample-nat.txt). Les gardes P3 le relisaient à chaque armement (un par
+   dessin, un par empreinte de niveau). self_thr() le garde en mémoire avec
+   l'adresse de pile où il a été lu : deux lectures du même fil se font à
+   quelques Kio de profondeur l'une de l'autre, et les piles de deux fils sont
+   des régions disjointes (pile principale de 8 Mio en 0xbf800000-0xc0000000,
+   piles secondaires de 512 Kio ailleurs, pages de garde entre elles) — une
+   adresse de pile à moins de THR_WIN de la précédente est donc le même fil.
+   Hors fenêtre (autre fil, autre profondeur) : pthread_self() et on retient.
+   VERROU TENU (toutes les gardes s'arment sous G.mu) ; le gestionnaire de
+   signal, lui, relit toujours pthread_self(). */
+/* Lot 2 du verdict unique : époque des textures et des objets qu'elles
+   désignent. Incrémentée par tout ce qui peut changer ce que texture_ok ou
+   geom_ok répondraient sans que GLEngine appelle gldUpdateDispatch : texture
+   créée, détruite, modifiée (niveaux ou paramètres), salie, téléversée,
+   évincée, remplie par COPY_TEX, état hôte perdu. Elle entre dans la clé du
+   verdict (vd_key_of) ; verrou tenu. */
+static unsigned long vd_epoch;
+#define VD_BUMP() (vd_epoch++)
+#define THR_WIN 0x8000UL
+static pthread_t thr_last;
+static unsigned long thr_sp;            /* 0 : rien de retenu */
+static pthread_t self_thr(void)
+{
+    unsigned long sp = (unsigned long)&sp;
+    if (thr_sp && sp <= thr_sp + THR_WIN && sp + THR_WIN >= thr_sp)
+        return thr_last;
+    thr_last = pthread_self();
+    thr_sp = sp;
+    return thr_last;
+}
 static volatile unsigned long sig_fault_n;
 static int upload_blank;                /* COPY_TEX : niveaux noirs, sans lire l'invité */
 static volatile unsigned long pack_fault_addr, pack_fault_n;
@@ -516,6 +548,52 @@ static PProg pprog[PPROG_MAX];
 #define LAZY_WORDS 5
 #define LAZY_DEFAULT 1          /* sans POMPPC_GL_LAZYAPPLE */
 
+typedef struct PTex {                   /* texture du GLDriver suivie par le plugin */
+    struct PTex   *next;
+    struct PTex   *hnext;               /* chaînage de la table de hachage */
+    void          *drvtex;
+    long           qtex;                /* identifiant hôte, -1 si aucun */
+    int            dirty;               /* niveaux à (re)téléverser */
+    int            host_only;           /* P15 : le contenu hôte est le SEUL à jour
+                                           (CopyTexSubImage fait sur l'hôte, jamais
+                                           redescendu dans l'invité) — l'évincer le
+                                           perdrait, et le rechargement depuis
+                                           l'invité remettrait l'ancien contenu */
+    unsigned long  lv0_sig;             /* empreinte du niveau 0 déjà téléversé */
+    unsigned long  ok_frame;            /* 24/09 : texture_uploadable a dit oui (propre,
+                                           téléversée) à l'image ok_frame−1 : DOOM 3 lie la
+                                           même texture des dizaines de fois par image, et
+                                           l'empreinte relisait des texels à chaque fois */
+    unsigned long  up_frame;            /* idem pour upload_texture (paramètres comparés) */
+    unsigned long  up_psig;             /* empreinte du bloc de paramètres de GLEngine à
+                                           up_frame : un glTexParameter dans l'image
+                                           (gldModifyTexture 0x80, qui ne salit pas les
+                                           niveaux) doit repartir — gltest tex3d, tex14,
+                                           gl15, texlod changent filtre, LOD, biais ou
+                                           comparaison entre deux dessins d'une image */
+    unsigned long  prm[14];             /* paramètres envoyés : min, mag, wrap s, wrap t,
+                                           wrap r (3D), puis (v10) min et max LOD en
+                                           bits IEEE, niveau de base, niveau max,
+                                           couleur de bordure 0xAARRGGBB, puis
+                                           (G.tex14) biais de LOD, mode, fonction
+                                           de comparaison, mode de profondeur */
+    int            prm_valid;
+    uint64_t       last_use;            /* resident texture LRU, under G.mu */
+    unsigned long  cp_frame;            /* lot 1 : `cp` vaut pour l'image cp_frame−1 */
+    unsigned int   cp;                  /*   CP_COMPLETE | CP_BASE (tex_cp) */
+} PTex;
+
+typedef struct TexUnit {
+    PTex          *t;                   /* 0 : unité inactive */
+    unsigned long  env_mode, env_color;
+    unsigned long  combine, combine_src; /* GL_COMBINE empaqueté (v5) */
+} TexUnit;
+
+typedef struct TexInfo {                /* textures à appliquer pour le dessin en cours */
+    TexUnit        u[QGPU_MAX_UNITS];
+} TexInfo;
+
+#define VKEY_WORDS 32                   /* lot 2 : mots de la clé du verdict */
 typedef struct PCtx {
     struct PCtx   *next;
     void          *ctx;                 /* contexte du GLDriver d'Apple */
@@ -628,6 +706,17 @@ typedef struct PCtx {
     unsigned long  cnt_v_fmt;
     unsigned long  cnt_v_frame;         /* G.n_frames au dispatch */
     unsigned long  cnt_v_ti[QGPU_MAX_UNITS][5];
+    /* ── lot 2 du verdict unique (POMPPC_GL_VERDICT, défaut 1) : le verdict
+       du dernier dispatch (geom_ok + texture_ok + geom_format + tailles des
+       génériques) et la clé de ce qu'il a lu ; le dessin le reprend si la
+       clé est la même (vd_take). ── */
+    int            vd_valid;
+    int            vd_fresh;            /* un dispatch a rangé le verdict depuis le
+                                           dernier dessin de ce contexte */
+    int            vd_ok;
+    TexInfo        vd_ti;
+    unsigned long  vd_fmt, vd_gs;
+    unsigned long  vd_key[VKEY_WORDS];
 } PCtx;
 
 /* v16 : définies avec la synchronisation des programmes, plus bas ; texture_ok
@@ -637,51 +726,10 @@ static int prog_domain_ok(PCtx *p);
 static int prog_sync(PCtx *p);
 static unsigned char *gctx_of(PCtx *p);          /* sonde v16 dans close_raw */
 
-typedef struct PTex {                   /* texture du GLDriver suivie par le plugin */
-    struct PTex   *next;
-    struct PTex   *hnext;               /* chaînage de la table de hachage */
-    void          *drvtex;
-    long           qtex;                /* identifiant hôte, -1 si aucun */
-    int            dirty;               /* niveaux à (re)téléverser */
-    int            host_only;           /* P15 : le contenu hôte est le SEUL à jour
-                                           (CopyTexSubImage fait sur l'hôte, jamais
-                                           redescendu dans l'invité) — l'évincer le
-                                           perdrait, et le rechargement depuis
-                                           l'invité remettrait l'ancien contenu */
-    unsigned long  lv0_sig;             /* empreinte du niveau 0 déjà téléversé */
-    unsigned long  ok_frame;            /* 24/09 : texture_uploadable a dit oui (propre,
-                                           téléversée) à l'image ok_frame−1 : DOOM 3 lie la
-                                           même texture des dizaines de fois par image, et
-                                           l'empreinte relisait des texels à chaque fois */
-    unsigned long  up_frame;            /* idem pour upload_texture (paramètres comparés) */
-    unsigned long  up_psig;             /* empreinte du bloc de paramètres de GLEngine à
-                                           up_frame : un glTexParameter dans l'image
-                                           (gldModifyTexture 0x80, qui ne salit pas les
-                                           niveaux) doit repartir — gltest tex3d, tex14,
-                                           gl15, texlod changent filtre, LOD, biais ou
-                                           comparaison entre deux dessins d'une image */
-    unsigned long  prm[14];             /* paramètres envoyés : min, mag, wrap s, wrap t,
-                                           wrap r (3D), puis (v10) min et max LOD en
-                                           bits IEEE, niveau de base, niveau max,
-                                           couleur de bordure 0xAARRGGBB, puis
-                                           (G.tex14) biais de LOD, mode, fonction
-                                           de comparaison, mode de profondeur */
-    int            prm_valid;
-    uint64_t       last_use;            /* resident texture LRU, under G.mu */
-} PTex;
-
-typedef struct TexUnit {
-    PTex          *t;                   /* 0 : unité inactive */
-    unsigned long  env_mode, env_color;
-    unsigned long  combine, combine_src; /* GL_COMBINE empaqueté (v5) */
-} TexUnit;
-
-typedef struct TexInfo {                /* textures à appliquer pour le dessin en cours */
-    TexUnit        u[QGPU_MAX_UNITS];
-} TexInfo;
 static void cube_probe(PCtx *p, const TexInfo *ti, const char *where);
 static void draw_probe(PCtx *p, const TexInfo *ti);
 static void dump_one(const char *path);
+static void vd_frame(void);                     /* lot 2, plus bas */
 
 typedef struct Post {                   /* copie à faire APRÈS la barrière */
     int            depth;               /* 0 couleur, 1 profondeur, 2 stencil */
@@ -845,6 +893,8 @@ static struct {
     unsigned long   n_lazy_sync;        /* transmis juste avant une procédure d'Apple */
     /* ── lot 0 du verdict unique (compteurs dans CNT, plus bas) ── */
     int             count;              /* POMPPC_GL_COUNT, lu une fois à l'init */
+    int             verdict;            /* lot 2 : POMPPC_GL_VERDICT (défaut 1) */
+    int             vcheck;             /* lot 2 : POMPPC_GL_VERDICTCHECK (défaut 0) */
 } G = { PTHREAD_MUTEX_INITIALIZER };
 
 /* Appelée juste avant d'armer une garde de faute (sig_jmp, pack_jmp,
@@ -1026,7 +1076,9 @@ static void trace_frame(void *ctx)
  *     dessin entre les deux ;
  *   - le verdict (geom_ok + texture_ok + geom_format) laissé par le dernier
  *     dispatch du contexte, comparé à celui que geom_draw_client_unsafe
- *     recalcule dans la même image : identique ou différent (lot 2) ;
+ *     recalcule dans la même image : identique ou différent (lot 2 ; depuis
+ *     le lot 2, seulement quand le dessin recalcule — un verdict repris est
+ *     compté dans la ligne VERDICT, « repris » contre « recalculés ») ;
  *   - les motifs des 5 premiers mots du bloc de changements gctx+0x310, BRUTS
  *     (tels que GLEngine les passe à gldUpdateDispatch, sans ses masques), et
  *     la part « env seulement » : +0x0c non nul et contenu dans
@@ -1292,6 +1344,8 @@ static void stats_frame(void *ctx)
                 G.n_frames, G.n_lazy_defer, G.n_lazy_eager, G.n_lazy_sync);
     if (G.count)
         cnt_frame();
+    if (G.verdict)
+        vd_frame();
     if (!path)
         return;
     /* Profondeur de la file du device, une fois par image et SEULEMENT quand
@@ -1859,6 +1913,16 @@ void pomppc_backend_init(void)
                 const char *cn = getenv("POMPPC_GL_COUNT");
                 G.count = cn && cn[0] && cn[0] != '0';
             }
+            /* Lot 2 du verdict unique : le dessin reprend le verdict du
+               dispatch si la clé (vd_key_of) n'a pas bougé. POMPPC_GL_VERDICT=0
+               le recalcule à chaque dessin, comme avant ; VERDICTCHECK=1 le
+               recalcule quand même et note chaque écart (lignes VERDICT). */
+            {
+                const char *e = getenv("POMPPC_GL_VERDICT");
+                G.verdict = !(e && e[0] == '0');
+                e = getenv("POMPPC_GL_VERDICTCHECK");
+                G.vcheck = e && e[0] && e[0] != '0';
+            }
             /* Génériques à taille déclarée (clé QGPU_SK_GEN_SIZES) : le chemin
                tableaux envoie chaque générique à la taille de son tableau
                (DOOM 3 / Prey : génériques en 11 mots au lieu de 16). Seulement si
@@ -1891,9 +1955,9 @@ void pomppc_backend_init(void)
         }
         if (G.state > 0) {
             gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d lazyapple=%d "
-                    "native=%d (plages %d) count=%d\n",
+                    "native=%d (plages %d) count=%d verdict=%d verdictcheck=%d\n",
                     G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range,
-                    G.count);
+                    G.count, G.verdict, G.vcheck);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
                        " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
@@ -2174,6 +2238,8 @@ static void invalidate_mirrors(void)
     for (t = G.textures; t; t = t->next) {
         t->prm_valid = 0;
         t->dirty = 1;                   /* le TEX_IMAGE3 perdu doit repartir */
+        t->cp_frame = 0;                /* lot 1 */
+        VD_BUMP();                      /* lot 2 */
         t->lv0_sig = 0;
         t->host_only = 0;
     }
@@ -2848,6 +2914,7 @@ static long alloc_tex_id(PCtx *p)
                                            ne peut la choisir comme victime */
     victim->dirty = 1;
     victim->prm_valid = 0;
+    VD_BUMP();                          /* lot 2 */
     victim->host_only = 0;
     c = reserve(p, QGPU_LEN_TEX);
     c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_DESTROY, QGPU_LEN_TEX);
@@ -2897,6 +2964,7 @@ static PTex *intern_tex(void *drvtex)
     t->drvtex = drvtex;
     t->qtex = -1;
     t->dirty = 1;
+    VD_BUMP();                          /* lot 2 */
     t->next = G.textures;
     G.textures = t;
     t->hnext = tex_hash[tex_bucket(drvtex)];
@@ -2921,6 +2989,7 @@ void pomppc_texture_deleted(void *drvtex)
     if (G.state <= 0)
         return;
     pthread_mutex_lock(&G.mu);
+    VD_BUMP();                          /* lot 2 */
     for (pp = &G.textures; *pp; pp = &(*pp)->next) {
         if ((*pp)->drvtex != drvtex)
             continue;
@@ -2966,6 +3035,9 @@ void pomppc_texture_changed(void *drvtex, int levels)
         return;
     pthread_mutex_lock(&G.mu);
     t = intern_tex(drvtex);
+    VD_BUMP();                          /* lot 2 : niveaux ou paramètres */
+    if (t)
+        t->cp_frame = 0;                /* lot 1 : complétude à relire */
     if (t && levels)
         t->dirty = 1;
     pthread_mutex_unlock(&G.mu);
@@ -3406,6 +3478,27 @@ static int tex_base_ok(const void *drvtex)
     return S16(lv, LV_W) > 0 && S16(lv, LV_H) > 0 && GLD_U32(lv, LV_DATA);
 }
 
+/* Lot 1 du verdict unique (24/09) : complétude mémorisée par texture et par
+ * image. tex_complete relit toute la chaîne de niveaux dans la mémoire de
+ * GLEngine, et texturing_on (appelée par unit_textured pour CHAQUE unité),
+ * geom_texture_ok et texture_unit_ok la redemandaient plusieurs fois par
+ * unité, au dispatch puis au dessin : 26-31 échantillons propres. La réponse
+ * ne change qu'avec l'objet de GLEngine, et tout ce qui le touche passe par un
+ * crochet qui efface la mémoire (pomppc_texture_changed — niveaux créés,
+ * modifiés, détruits, et paramètres —, procédures qui salissent une texture,
+ * vidage de l'état hôte). */
+#define CP_COMPLETE 1U
+#define CP_BASE     2U
+static unsigned int tex_cp(PTex *t)
+{
+    if (t->cp_frame != G.n_frames + 1) {
+        t->cp = (tex_complete(t->drvtex) ? CP_COMPLETE : 0) |
+                (tex_base_ok(t->drvtex) ? CP_BASE : 0);
+        t->cp_frame = G.n_frames + 1;
+    }
+    return t->cp;
+}
+
 /* v10 : la texture est-elle une texture 3D (cible de l'objet de GLEngine) ? */
 static int tex_is_3d(const PTex *t)
 {
@@ -3463,7 +3556,7 @@ static unsigned long tex_lv0_sig(const PTex *t)
             sig_jmp_on = 0;             /* niveau illisible (24/09, DOOM 3) */
             return vsig ^ 0x5a5a5a5aUL;
         }
-        sig_thr = pthread_self();       /* P3 (relecture du 24/09) */
+        sig_thr = self_thr();           /* P3 (relecture du 24/09) ; lot 1 */
         sig_jmp_on = 1;
         /* P4 — `n` est un index d'OCTET, pas un compte de TEXELS. Un niveau
            DXT1 fait 0,5 octet par texel : lire d[w·h−1] lisait à DEUX FOIS la
@@ -3536,6 +3629,7 @@ static int texture_uploadable(PTex *t)
         }
         if (always || tex_lv0_sig(t) != t->lv0_sig) {
             t->dirty = 1;
+            VD_BUMP();                  /* lot 2 */
         } else {
             t->ok_frame = G.n_frames + 1;
             return 1;
@@ -3616,6 +3710,7 @@ static int upload_texture(PCtx *p, PTex *t)
         gp && t->up_psig == tex_prm_sig(gp))
         return 1;                       /* déjà synchronisée à cette image (24/09),
                                            paramètres inchangés depuis */
+    VD_BUMP();                          /* lot 2 : qtex, niveaux, paramètres peuvent bouger */
     if (gp && base_format_ok(base) && !tex_params_ok(gp))
         return no(NO_TEX_PARAM, U16(gp, TP_WRAP_S), U16(gp, TP_MIN));
     if (!gp || !base_format_ok(base)) {
@@ -3739,7 +3834,7 @@ static int upload_texture(PCtx *p, PTex *t)
                 if (upload_blank) {
                     memset(G.q.win + off, 0, size);     /* COPY_TEX écrasera */
                 } else if (sigsetjmp(sig_jmp, 0) == 0) {
-                    sig_thr = pthread_self();   /* P3 (relecture du 24/09) */
+                    sig_thr = self_thr();       /* P3 (relecture du 24/09) ; lot 1 */
                     sig_jmp_on = 1;
                     memcpy(G.q.win + off, d, size);
                     sig_jmp_on = 0;
@@ -3796,7 +3891,7 @@ static int upload_texture(PCtx *p, PTex *t)
     prm[0] = U16(gp, TP_MIN);
     /* Filtre mipmap sans la chaîne : l'hôte refuserait la soumission
        (qgpu_texture_levels = 0) et UT2004 n'aurait plus que des quads blancs. */
-    if (!tex_complete(dt) && prm[0] != 0x2600 && prm[0] != 0x2601)
+    if (!(tex_cp(t) & CP_COMPLETE) && prm[0] != 0x2600 && prm[0] != 0x2601)
         prm[0] = (U16(gp, TP_MAG) == 0x2600) ? 0x2600 : 0x2601;
     prm[1] = U16(gp, TP_MAG);
     prm[2] = U16(gp, TP_WRAP_S);
@@ -3919,10 +4014,12 @@ static int combine_ok(const unsigned char *us, int unit, TexUnit *tu)
    range une texture 3D et sa profondeur (docs/re/textures-3d.md). */
 static void target_probe(PCtx *p, int u, unsigned long mask, unsigned long units)
 {
-    static int shots;
+    static int shots, on = -1;          /* lot 1 : getenv une fois, pas par unité */
     char tag[32];
     int k, l;
-    if (!getenv("POMPPC_GL_T3DDUMP") || shots++ >= 2 || !units)
+    if (on < 0)
+        on = getenv("POMPPC_GL_T3DDUMP") != 0;
+    if (!on || shots++ >= 2 || !units)
         return;
     pomppc_log("SONDE cible : unité %d masque %02lx table %08lx\n", u, mask, units);
     for (k = 0; k < 5; k++)
@@ -4005,8 +4102,11 @@ static int texturing_on(PCtx *p)
         if (unit_slot(m) < 0 || !units)
             return 1;
         dt = (void *)GLD_U32(units, u * 0x14 + unit_slot(m) * 4);
-        if (dt && (tex_complete(dt) || tex_base_ok(dt)))
-            return 1;
+        if (dt) {
+            PTex *t = find_tex(dt);     /* lot 1 : mémoire par image */
+            if (t ? tex_cp(t) != 0 : (tex_complete(dt) || tex_base_ok(dt)))
+                return 1;
+        }
     }
     return 0;
 }
@@ -4049,8 +4149,8 @@ static int texture_unit_ok(PCtx *p, int u, TexUnit *tu)
        le texturage de CETTE unité, sans toucher aux autres. Marble Blast
        laisse ainsi des unités actives sans texture. S'il y a un niveau de
        base, on s'en sert (filtre mipmap rabattu) au lieu de dessiner blanc. */
-    if (!tex_complete(tu->t->drvtex)) {
-        if (!tex_base_ok(tu->t->drvtex)) {
+    if (!(tex_cp(tu->t) & CP_COMPLETE)) {
+        if (!(tex_cp(tu->t) & CP_BASE)) {
             tu->t = 0;
             G.n_tex_incomplete++;
             return 1;
@@ -6490,7 +6590,7 @@ static int unit_textured(PCtx *p, int u)
     if (!t)
         return 0;
     (void)lv;
-    return tex_complete(t->drvtex) || tex_base_ok(t->drvtex);
+    return tex_cp(t) != 0;
 }
 
 /* Le texturage courant tiendra-t-il sur l'hôte ? Prédicat pur (aucune commande,
@@ -6534,7 +6634,7 @@ static int geom_texture_ok(PCtx *p)
         if (!t)
             return no(NO_TEX_UNKNOWN, (unsigned long)dt, mask);
         (void)lv;
-        if (!tex_complete(t->drvtex) && !tex_base_ok(t->drvtex))
+        if (!tex_cp(t))
             continue;                   /* jamais définie : l'unité est coupée, comme en GL */
         if (!texture_uploadable(t))
             return 0;
@@ -6733,9 +6833,9 @@ static unsigned long geom_format(PCtx *p)
     ((unsigned short)(((code) << 10) | (((nc) - 1) << 8) | ((off) & 0xff)))
 
 /* (Re)construit le descripteur pour l'état courant ; 1 s'il a changé. */
-static int geom_publish(PCtx *p)
+static int geom_publish(PCtx *p, unsigned long fmt)
 {
-    unsigned long fmt = geom_format(p);
+    /* lot 2 : fmt = geom_format(p), calculé une fois par le dispatch */
     /* P6 : NEUF entrées sont possibles (position, normale, couleur,
        secondaire, brouillard, tex0–3) et le tableau en tenait huit — deux
        octets de pile écrasés, juste sur `off`, `n` et `u`, qui servent après.
@@ -7198,8 +7298,12 @@ static void cube_probe(PCtx *p, const TexInfo *ti, const char *where)
         return;
     {   /* armée par le même fichier que le vidage déclenché : la scène voulue
            (arme en main) est à l'écran quand il apparaît */
-        static int armed;
-        const char *trig = getenv("POMPPC_GL_DUMP_TRIGGER");
+        static int armed, trig_read;
+        static const char *trig;        /* lot 1 : getenv une fois */
+        if (!trig_read) {
+            trig = getenv("POMPPC_GL_DUMP_TRIGGER");
+            trig_read = 1;
+        }
         if (!armed) {
             if (trig && *trig && access(trig, F_OK) != 0)
                 return;
@@ -7269,11 +7373,15 @@ static void cube_probe(PCtx *p, const TexInfo *ti, const char *where)
    combineur, mélange, éclairage — pour retrouver les dessins de l'arme. */
 static void draw_probe(PCtx *p, const TexInfo *ti)
 {
-    static int armed, lines;
+    static int armed, lines, trig_read;
+    static const char *trig;            /* lot 1 : getenv une fois, pas par dessin */
     unsigned char *g = gls(p);
-    const char *trig = getenv("POMPPC_GL_DUMP_TRIGGER");
     char buf[400];
     int at = 0, u;
+    if (!trig_read) {
+        trig = getenv("POMPPC_GL_DUMP_TRIGGER");
+        trig_read = 1;
+    }
     if (!armed) {
         if (!trig || !*trig || access(trig, F_OK) != 0)
             return;
@@ -9166,6 +9274,161 @@ fall:
     return -1;
 }
 
+/* ─────────── lot 2 du verdict unique (TODO.md §2) ───────────
+ * pomppc_geom_dispatch calcule le verdict (geom_ok, texture_ok, geom_format,
+ * va_gen_sizes) et le range dans le PCtx avec la clé de ce qu'il a lu ;
+ * geom_draw_client_unsafe le reprend si la clé n'a pas bougé au lieu de le
+ * recalculer (207 des 818 échantillons de sample-nat.txt étaient ce double
+ * calcul). La clé ne recopie pas l'état GL que GLEngine signale lui-même par
+ * un gldUpdateDispatch (mélange, pochoir, environnements, liaisons…) : elle
+ * porte ce qui peut bouger SANS dispatch — l'image (les mémoires « une fois
+ * par image » de texture_uploadable et upload_texture), l'époque des textures
+ * (vd_epoch), l'état du plugin et du contexte, le VAO et ses masques, le
+ * drawable, l'étage de sommets de GLEngine, les programmes (objets courants
+ * et ce que le plugin en sait : refus, texte compilé, texte relu).
+ * POMPPC_GL_VERDICTCHECK=1 recalcule quand même à chaque reprise et note
+ * chaque écart (lignes VERDICT) ; POMPPC_GL_VERDICT=0 recalcule toujours. */
+static struct {
+    unsigned long reuse, recalc;        /* sur la période */
+    unsigned long chk_same, chk_diff;
+    unsigned long told;                 /* écarts notés en détail (toute la vie) */
+    unsigned long diff_all;             /* écarts (toute la vie) */
+    unsigned long reuse_all, recalc_all, same_all;  /* toute la vie */
+} VD;
+#define VD_TOLD 24
+
+static void vd_key_of(PCtx *p, unsigned long *k)
+{
+    unsigned char *g = gls(p), *gc = gctx_of(p), *V;
+    int i = 0, t;
+
+    memset(k, 0, sizeof(unsigned long) * VKEY_WORDS);
+    k[i++] = G.n_frames;
+    k[i++] = vd_epoch;
+    k[i++] = (unsigned long)G.state;
+    k[i++] = (p->broken ? 1UL : 0) | (p->geom_lost ? 2UL : 0);
+    k[i++] = (unsigned long)p->qctx;
+    k[i++] = (unsigned long)p->cfg;
+    k[i++] = (unsigned long)g;
+    V = g ? (unsigned char *)GLD_U32(g, GS_VAO) : 0;
+    k[i++] = (unsigned long)V;
+    k[i++] = V ? GLD_U32(V, VA_EN_HI) : 0;
+    k[i++] = V ? GLD_U32(V, VA_EN_LO) : 0;
+    if (p->ctx) {
+        k[i++] = GLD_U32(p->ctx, CTX_TEXUNITS);
+        k[i++] = GLD_U32(p->ctx, CTX_WIDTH) ^ (GLD_U32(p->ctx, CTX_HEIGHT) << 16);
+        k[i++] = GLD_U32(p->ctx, CTX_ROWPIX);
+        k[i++] = (unsigned long)sw_color(p);
+    }
+    k[i++] = (unsigned long)gc;
+    if (gc) {
+        k[i++] = GLD_U32(gc, 0x4e1c);
+        k[i++] = GLD_U32(gc, GC_GLSL_ACTIVE);
+        k[i++] = GLD_U32(gc, GC_PROG_CUR(0));
+        k[i++] = GLD_U32(gc, GC_PROG_CUR(1));
+        k[i++] = (unsigned long)GC_PROG_ON(gc, 0) | ((unsigned long)GC_PROG_ON(gc, 1) << 8);
+    }
+    prog_state(p);                      /* ce que geom_ok et texture_ok liraient */
+    for (t = 0; t < 2; t++) {
+        const PProg *r = t ? p->fp_rec : p->vp_rec;
+        k[i++] = (unsigned long)r | (unsigned long)(t ? p->fp_on : p->vp_on);
+        if (!r)
+            continue;
+        k[i++] = (unsigned long)r->refused | ((unsigned long)r->fp_units_bad << 1) |
+                 ((unsigned long)r->text_dirty << 2) | ((unsigned long)(r->id & 0xffff) << 16);
+        k[i++] = (unsigned long)r->text_sent ^ (r->len_sent << 20);
+        k[i++] = (unsigned long)r->parsed_text ^ (r->parsed_len << 20);
+    }
+}
+
+/* Range le verdict (dispatch, ou dessin qui a recalculé). La clé est prise
+   APRÈS le calcul : texture_ok a pu téléverser (et faire avancer l'époque). */
+static void vd_store(PCtx *p, int ok, const TexInfo *ti, unsigned long fmt, unsigned long gs)
+{
+    p->vd_ok = ok ? 1 : 0;
+    if (ok) {
+        p->vd_ti = *ti;
+        p->vd_fmt = fmt;
+        p->vd_gs = gs;
+    } else {
+        memset(&p->vd_ti, 0, sizeof(p->vd_ti));
+        p->vd_fmt = p->vd_gs = 0;
+    }
+    vd_key_of(p, p->vd_key);
+    p->vd_valid = 1;
+}
+
+/* VERDICTCHECK : le verdict recalculé (ok, ti, fmt, gs ; `bumped` : le
+   recalcul a fait avancer l'époque, donc fait un travail de texture que la
+   reprise aurait sauté) comparé au verdict gardé. */
+static void vd_check(PCtx *p, int fresh, int ok, const TexInfo *ti, unsigned long fmt,
+                     unsigned long gs, int bumped)
+{
+    unsigned long s0[QGPU_MAX_UNITS][5], s1[QGPU_MAX_UNITS][5], du = 0;
+    int u, dok, dfmt, dgs;
+
+    ok = ok ? 1 : 0;
+    dok = ok != p->vd_ok;
+    dfmt = !dok && ok && fmt != p->vd_fmt;
+    dgs = !dok && ok && gs != p->vd_gs;
+    if (!dok && ok) {
+        cnt_ti_sig(ti, s1);
+        cnt_ti_sig(&p->vd_ti, s0);
+        for (u = 0; u < QGPU_MAX_UNITS; u++)
+            if (memcmp(s0[u], s1[u], sizeof(s0[u])) != 0)
+                du |= 1UL << u;
+    }
+    if (!dok && !dfmt && !dgs && !du && !bumped) {
+        VD.chk_same++;
+        return;
+    }
+    VD.chk_diff++;
+    VD.diff_all++;
+    if (VD.told < VD_TOLD) {
+        VD.told++;
+        gl_note("VERDICT écart, image %lu (%s) : ok %d -> %d, format %08lx -> %08lx, "
+                "génériques %08lx -> %08lx, unités différentes 0x%02lx%s ; époque %lu, "
+                "VAO %08lx en %08lx/%08lx, vp %d fp %d\n",
+                G.n_frames, fresh ? "1er dessin après le dispatch" : "dessin sans dispatch",
+                p->vd_ok, ok, p->vd_fmt, ok ? fmt : 0UL, p->vd_gs, ok ? gs : 0UL, du,
+                bumped ? ", le recalcul a touché une texture" : "",
+                vd_epoch, p->vd_key[7], p->vd_key[8], p->vd_key[9], p->vp_on, p->fp_on);
+        for (u = 0; u < QGPU_MAX_UNITS; u++)
+            if (du & (1UL << u))
+                gl_note("   unité %d : gardé tex %08lx env %04lx %08lx cb %08lx %08lx, "
+                        "recalculé tex %08lx env %04lx %08lx cb %08lx %08lx\n", u,
+                        s0[u][0], s0[u][1], s0[u][2], s0[u][3], s0[u][4],
+                        s1[u][0], s1[u][1], s1[u][2], s1[u][3], s1[u][4]);
+    }
+}
+
+/* À chaque échange (stats_frame, verrou tenu). */
+static void vd_frame(void)
+{
+    if (G.n_frames % CNT_PERIOD != 0)
+        return;
+    if (G.vcheck || G.count)
+        gl_note("VERDICT image %lu : %lu repris, %lu recalculés (clé changée ou sans "
+                "verdict) ; contrôle : %lu identiques, %lu écarts (%lu depuis le début)\n",
+                G.n_frames, VD.reuse, VD.recalc, VD.chk_same, VD.chk_diff, VD.diff_all);
+    VD.reuse_all += VD.reuse;
+    VD.recalc_all += VD.recalc;
+    VD.same_all += VD.chk_same;
+    VD.reuse = VD.recalc = VD.chk_same = VD.chk_diff = 0;
+}
+
+/* Bilan de toute la vie du processus (VERDICTCHECK), à la destruction d'un
+   contexte : gltest ne fait pas 500 images. */
+static void vd_total(const char *why)
+{
+    if (!G.vcheck)
+        return;
+    gl_note("VERDICT total (%s, image %lu) : %lu repris, %lu recalculés ; contrôle : "
+            "%lu identiques, %lu écarts\n", why, G.n_frames,
+            VD.reuse_all + VD.reuse, VD.recalc_all + VD.recalc,
+            VD.same_all + VD.chk_same, VD.diff_all);
+}
+
 /* Cœur du canal tableaux. Verrou déjà tenu. 1 = traité (même si n=0). */
 static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
                                    long first, long count, unsigned long itype,
@@ -9204,7 +9467,7 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
         return 1;
     }
     crash_hook_fresh();                 /* Prey : gestionnaires avant la 1re image */
-    pack_thr = pthread_self();          /* P3 (relecture du 24/09) */
+    pack_thr = self_thr();              /* P3 (relecture du 24/09) ; lot 1 */
     pack_jmp_on = 1;
     r = geom_draw_client_unsafe(p, indexed, mode, first, count, itype, indices);
     pack_jmp_on = 0;
@@ -9230,9 +9493,10 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
     TexInfo ti;
     unsigned long fmt, words, vmin, vmax, nverts, nidx, ioff, itype_h;
     unsigned long vtx_off, packed, *c, key, gs;
+    unsigned long vk[VKEY_WORDS];
     float *dst;
     PBuf *hb;
-    int host, reuse, filter_bad = 0;
+    int host, reuse, filter_bad = 0, vd_same = 0, fresh;
     long i;
     static VaPlan plan;                 /* verrou tenu : une seule à la fois */
 
@@ -9245,29 +9509,69 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
     /* v16 : sous programme, le générique 0 tient lieu de position */
     if (!V || !(va_enabled(V, 0) || (G.prog && p->vp_on && va_enabled(V, 16))))
         return no(NO_G_ARRAY, 0, (unsigned long)count);
-    /* Même ordre et même court-circuit qu'avant (geom_ok, ensure_surface,
-       texture_ok) ; les branches ne font en plus que prévenir les compteurs
-       du lot 0 (un refus de surface n'est pas un verdict : non compté). */
-    if (!geom_ok(p)) {
-        if (G.count)
-            cnt_check(p, 0, 0, 0);
-        return 0;
+    /* Lot 2 : le verdict du dispatch vaut-il encore ? */
+    fresh = p->vd_fresh;
+    p->vd_fresh = 0;
+    if (G.verdict && p->vd_valid) {
+        vd_key_of(p, vk);
+        vd_same = memcmp(vk, p->vd_key, sizeof(vk)) == 0;
     }
-    if (!ensure_surface(p))
-        return 0;
-    if (!texture_ok(p, &ti)) {
-        if (G.count)
-            cnt_check(p, 0, 0, 0);
-        return 0;
+    if (vd_same && !G.vcheck) {
+        /* repris : ni geom_ok, ni texture_ok, ni geom_format, ni va_gen_sizes */
+        VD.reuse++;
+        if (!p->vd_ok)
+            return 0;
+        if (!ensure_surface(p))
+            return 0;
+        ti = p->vd_ti;
+        if (!prog_sync(p))              /* v16 : programme refusé par l'hôte */
+            return 0;
+        fmt = p->vd_fmt;
+        gs = p->vd_gs;
+    } else {
+        /* recalculé (clé changée, pas de verdict, VERDICT=0 ou contrôle).
+           Même ordre et même court-circuit qu'avant (geom_ok, ensure_surface,
+           texture_ok) ; les branches ne font en plus que prévenir les
+           compteurs du lot 0 (un refus de surface n'est pas un verdict : non
+           compté) et le contrôle du lot 2. */
+        unsigned long ep0 = vd_epoch;
+        if (vd_same)
+            VD.reuse++;                 /* contrôle : compté comme repris */
+        else
+            VD.recalc++;
+        if (!geom_ok(p)) {
+            if (G.count && !vd_same)
+                cnt_check(p, 0, 0, 0);
+            if (vd_same)
+                vd_check(p, fresh, 0, 0, 0, 0, vd_epoch != ep0);
+            else if (G.verdict)
+                vd_store(p, 0, 0, 0, 0);
+            return 0;
+        }
+        if (!ensure_surface(p))
+            return 0;
+        if (!texture_ok(p, &ti)) {
+            if (G.count && !vd_same)
+                cnt_check(p, 0, 0, 0);
+            if (vd_same)
+                vd_check(p, fresh, 0, 0, 0, 0, vd_epoch != ep0);
+            else if (G.verdict)
+                vd_store(p, 0, 0, 0, 0);
+            return 0;
+        }
+        if (!prog_sync(p))              /* v16 : programme refusé par l'hôte */
+            return 0;
+        fmt = geom_format(p);
+        if (G.count && !vd_same)        /* lot 0 : le verdict du dispatch tenait-il ? */
+            cnt_check(p, 1, &ti, fmt);
+        /* génériques à la taille de leurs tableaux (QGPU_CAP_GEN_SIZES) : DOOM 3
+           st 2f, normale et tangentes 3f — 11 mots au lieu de 16 */
+        gs = va_gen_sizes(p, V, fmt);
+        if (vd_same)
+            vd_check(p, fresh, 1, &ti, fmt, gs, vd_epoch != ep0);
+        else if (G.verdict)
+            vd_store(p, 1, &ti, fmt, gs);
     }
-    if (!prog_sync(p))                  /* v16 : programme refusé par l'hôte */
-        return 0;
-    fmt = geom_format(p);
-    if (G.count)                        /* lot 0 : le verdict du dispatch tenait-il ? */
-        cnt_check(p, 1, &ti, fmt);
-    /* génériques à la taille de leurs tableaux (QGPU_CAP_GEN_SIZES) : DOOM 3
-       st 2f, normale et tangentes 3f — 11 mots au lieu de 16 */
-    gs = va_gen_sizes(p, V, fmt);
     words = QGPU_VF_WORDS_GS(fmt, gs);
     if (!words)
         return 0;
@@ -9615,6 +9919,7 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
         cnt_dispatch(p, chg);
     if (p && geom_ok(p)) {
         TexInfo ti;
+        unsigned long fmt;
         int arrays, force;
         /* Téléverser maintenant : si une police n'est pas encore prête, on
            laisse GLEngine transformer (bit 0 = 0) plutôt que de jeter le
@@ -9625,15 +9930,27 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
                 p->geom_on = 0;
                 if (G.count)
                     cnt_keep(p, 0, 0, 0);
+                if (G.verdict) {        /* lot 2 */
+                    vd_store(p, 0, 0, 0, 0);
+                    p->vd_fresh = 1;
+                }
                 pthread_mutex_unlock(&G.mu);
                 return 0;
             }
         }
         /* lot 0 : le verdict tel que le dessin le recalculera. geom_format
-           est sans effet de bord ; sous ARRAY=2 il est calculé plus bas de
-           toute façon (p->geom_fmt), le recalculer ici donne la même valeur. */
+           est sans effet de bord ; sous ARRAY=2 il sert aussi plus bas
+           (p->geom_fmt) : calculé une fois. Lot 2 : le verdict est rangé
+           pour le dessin (vd_store), tailles des génériques comprises. */
+        fmt = geom_format(p);
         if (G.count)
-            cnt_keep(p, 1, &ti, geom_format(p));
+            cnt_keep(p, 1, &ti, fmt);
+        if (G.verdict) {
+            unsigned char *g = gls(p);
+            unsigned char *V = g ? (unsigned char *)GLD_U32(g, GS_VAO) : 0;
+            vd_store(p, 1, &ti, fmt, va_gen_sizes(p, V, fmt));
+            p->vd_fresh = 1;
+        }
         arrays = geom_va_on(p);
         /* Mixte : 0x78 détourne DrawArrays/DrawElements vers RenderVertexArray
            sans retirer le descripteur (glBegin reste le chemin T&L). ARRAY=2
@@ -9651,10 +9968,10 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
                 GLD_U32(p->cfg, 0x11c) = 0;
                 p->desc_dirty = 1;
             }
-            p->geom_fmt = geom_format(p);
+            p->geom_fmt = fmt;
             p->geom_words = QGPU_VF_WORDS(p->geom_fmt);
         } else {
-            if (geom_publish(p))
+            if (geom_publish(p, fmt))
                 p->desc_dirty = 1;
         }
         bits = p->desc_dirty ? 3 : 1;
@@ -9664,6 +9981,10 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
         p->geom_on = 0;
         if (G.count)
             cnt_keep(p, 0, 0, 0);
+        if (G.verdict) {                /* lot 2 */
+            vd_store(p, 0, 0, 0, 0);
+            p->vd_fresh = 1;
+        }
     }
     pthread_mutex_unlock(&G.mu);
     return bits;
@@ -10297,7 +10618,7 @@ static long a_polygon(void *ctx, void *verts, long n, long flags)
  * real(...) — une faute là reste la leur. Désarmée avant tout unlock.
  * P3 : le fil qui arme est noté (proc_thr). crash_hook_fresh : voir sa
  * définition (gestionnaires relus avant la première image). */
-#define PROC_GUARD_ARM()    do { crash_hook_fresh(); proc_thr = pthread_self(); \
+#define PROC_GUARD_ARM()    do { crash_hook_fresh(); proc_thr = self_thr(); \
                                  proc_jmp_on = 1; } while (0)
 #define PROC_GUARD_DISARM() do { proc_jmp_on = 0; } while (0)
 
@@ -11475,6 +11796,7 @@ static int try_copy_tex(PCtx *p, unsigned long *a)
        l'empreinte diffère au dessin suivant et la texture repart de
        l'invité, ce qui est juste (la texture hôte est perdue). */
     t->host_only = 1;
+    VD_BUMP();                          /* lot 2 */
     t->lv0_sig = tex_lv0_sig(t);
     hy = p->sh - (unsigned long)sy - h;
     c = reserve(p, QGPU_LEN_COPY_TEX);
@@ -12272,12 +12594,16 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
     if (slot == PROC_ModifyTexSubImage || slot == PROC_CopyTexSubImage ||
         slot == PROC_GenerateTexMipmaps) {
         PTex *t = find_tex((void *)a[1]);
+        VD_BUMP();                      /* lot 2 */
         if (t) {
             t->dirty = 1;
+            t->cp_frame = 0;            /* lot 1 */
         } else {
             intern_tex((void *)a[1]);
-            for (t = G.textures; t; t = t->next)
+            for (t = G.textures; t; t = t->next) {
                 t->dirty = 1;
+                t->cp_frame = 0;
+            }
         }
     }
     pthread_mutex_unlock(&G.mu);
@@ -12514,6 +12840,7 @@ void pomppc_context_destroyed(void *ctx)
     PCtx **pp, *p;
     unsigned long *c;
     pthread_mutex_lock(&G.mu);
+    vd_total("contexte détruit");       /* lot 2 */
     for (pp = &G.list; *pp; pp = &(*pp)->next) {
         if ((*pp)->ctx != ctx)
             continue;

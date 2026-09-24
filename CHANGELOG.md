@@ -9,6 +9,23 @@ et dans `docs/`.
 ## Non publié
 
 - En cours : verdict unique dans le plugin (`TODO.md` §2), lots 0 à 5.
+- Lot 2 du verdict unique (plugin `20260924-verdict` ; même binaire, `POMPPC_GL_VERDICT=0`
+  contre défaut : DOOM 3 Mars City, début sans bouger, 100,0 → 87,8 ms/image ; Prey, sauvegarde
+  « Fuite à toute vitesse », 100 s après le chargement : 99,5 → 89,4 ms/image ;
+  `POMPPC_GL_VERDICTCHECK=1` : 0 écart sur 2 421 790 dessins de DOOM 3 et 6 530 653 de Prey ;
+  `gltest` identique à l'octet) : `pomppc_geom_dispatch` range le verdict (`geom_ok`,
+  `texture_ok`, `geom_format`, `va_gen_sizes`) et une clé (`vd_key_of` : image, époque des
+  textures `vd_epoch`, état du plugin, VAO et masques, drawable, étage de sommets, programmes)
+  dans le `PCtx` ; `geom_draw_client_unsafe` le reprend si la clé est la même. `geom_format`
+  n'est plus calculé qu'une fois par dispatch (`geom_publish` le reçoit). Lignes `VERDICT` dans
+  la note (repris / recalculés / écarts). `POMPPC_GL_VERDICT=0` : recalcul à chaque dessin.
+- Lot 1 du verdict unique, parasites (plugin `20260924-parasites` ; DOOM 3 Mars City, scène
+  fixe, images 3000-3300 : 99,5 → 95,5 ms/image ; `sample` : `__pthread_self` 4 → 1,
+  `getenv` 7 → 0, `tex_complete` 26 → 1 ; 18 scènes `gltest` identiques à l'octet) :
+  `self_thr()` garde le fil lu par `pthread_self()` avec l'adresse de pile où il l'a été (même
+  fil tant que la pile est à moins de 32 Kio) pour les gardes P3 ; `getenv` de `target_probe`,
+  `draw_probe` et `cube_probe` lus une fois ; complétude des textures (`tex_complete`,
+  `tex_base_ok`) mémorisée par texture et par image (`tex_cp`), effacée par les crochets.
 - **Prey, dialogue d'Apple au démarrage** (plugin seul ; vérifié : Prey démarre sans dialogue,
   `Prey.crash.log` inchangé) : les gestionnaires SIGBUS/SIGSEGV sont relus à chaque armement de garde tant
   qu'aucune image n'est présentée (`crash_hook_fresh`) ; `tex_lv0_sig` ne lit plus les texels
