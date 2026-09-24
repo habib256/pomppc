@@ -21,8 +21,14 @@ chaque changement coûtant QEMU + kext + plugin + redémarrage ; figer le contra
 harnais, puis optimiser et élargir dessous. Les dix étapes viennent du texte d'orientation de
 l'utilisateur (24/09, après-midi), réordonnées.
 
-1. **Vitres de DOOM 3** par vidage rejoué — en cours (cause trouvée le 24/09 à 16h : l'empreinte de
-   niveau différait à chaque copie, la texture repartait en noir avant chaque copie de bord).
+1. ~~**Vitres de DOOM 3** par vidage rejoué~~ — FAIT le 24/09 à 16h30 (de427b0) : trois causes
+   empilées — empreinte de niveau différente à chaque copie (la texture repartait en noir avant
+   chaque copie de bord), `fragment.position.y` en miroir dans les programmes de fragments, et la
+   copie d'écran en orientation hôte. `COPY_TEX` produit maintenant une texture orientée comme en
+   OpenGL. Utilisateur : « le reflet de derrière est parfait et ça a réglé le problème des
+   réacteurs ». Reste 2 : figer v18 — engagée le 24/09 (17h) avec **DRAW_NATIVE** (l'hôte lit les
+   VBO tels quels, plus d'empaquetage par sommet côté PowerPC : 79 000 sommets/image dans le poste
+   de sécurité), deux agents Opus (cœur + plugin).
 2. **Sens de la copie d'écran et protocole figé v18, d'un bloc** : `COPY_TEX` doit produire une
    texture orientée comme en OpenGL réel (aujourd'hui en orientation hôte, donc `fragment.position`
    retourné et les coordonnées calculées par les programmes se contredisent) ; puis un seul
