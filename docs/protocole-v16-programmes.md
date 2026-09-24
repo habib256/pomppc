@@ -116,3 +116,105 @@ pourtant aucune erreur retournée par `glGetError` interposé — l'assertion li
 sans doute l'erreur par un autre point d'entrée (`glGetError` de la table
 CGL). À reprendre après C : si GLEngine délègue les programmes, la question
 change de nature.
+
+## 5. Réalisé (23/09/2026, soir) — ce qui diffère du projet
+
+**A. Device, cœur, backend GL** — `patches/qgpu/` (copiés dans `~/src/qemu`,
+QEMU reconstruit), `tests/qgpu_core_test.c` (jeu v16, 28 épreuves : soft = refus
+propres, gl = pixels), `tests/qgpu_replay.c` (prologue `PROG_CREATE` déduit du
+texte, `LIST` des opcodes v16). `tests/run-all.sh` : 83 OK.
+
+- Sans `QGPU_CAP_PROGRAMS`, les opcodes `PROG_*` et l'activation (clé à 1)
+  répondent **`QGPU_ST_BACKEND`** (la convention des requêtes v8 et de la v10),
+  pas `BAD_ARG` ; seul un format à `QGPU_VF_GEN(k)` vaut `BAD_ARG` (dessin
+  jeté, non fatal).
+- `PROG_STRING` refusé par le compilateur de l'hôte : `BAD_ARG` **non fatal**
+  (`draw_op` l'admet), programme marqué cassé ; un dessin qui le trouve lié et
+  actif vaut `BAD_ARG` non fatal (jeté). `PROG_BIND` délie par
+  `QGPU_PROG_NONE` (0xFFFFFFFF), pas par 0 : 0 est un identifiant valide.
+- Objets **par contexte** : rien à découper entre clients dans le kext.
+- Paramètres : `PROG_ENV` / `PROG_LOCAL` tout ou rien (validés avant d'écrire),
+  `QGPU_MAX_PROG_PARAMS` 256 pour les deux cibles.
+- **L'axe y.** Le backend réécrit le texte des programmes de sommets :
+  `result.position` → temporaire `qgpu_pos_`, `OUTPUT x = result.position` →
+  `ALIAS`, puis `MUL result.position, qgpu_pos_, {1,-1,1,1}` avant `END`. La
+  projection n'est alors plus retournée (elle l'est sous
+  `OPTION ARB_position_invariant`, qui garde le pipeline fixe). Un programme
+  de fragments n'est pas réécrit (`fragment.position` n'est pas retourné).
+- `QGPU_VF_GEN(0)` est donné à l'hôte par `glVertexPointer` (4 composantes) :
+  sur Apple, `glVertexAttribPointerARB(0)` ne remplace pas le tableau de
+  sommets posé avant lui (épreuve (h)). Le plugin ne l'émet jamais : GLEngine
+  écrit lui-même le générique 0 dans le champ de position (alias 16).
+- Sous programme de fragments, `texture[u]` est la texture **liée** à l'unité,
+  allumée ou non (`unit_texture_bound`) ; sous programme de sommets, le test
+  `w ≈ 0` du cœur ne s'applique pas.
+
+**B. Relevé GLEngine** — `docs/re/programmes-arb.md`. L'essentiel : le texte ne
+va jamais au pilote (masque 1 = « l'ancien texte est mort »), il se lit dans
+l'objet ; `program.env` en `*(gctx+0x4668)` / `*(gctx+0x4670)` ; l'activation
+ARB en `gctx+0x4664` / `+0x466c` (u8) — **pas** `gctx+0x5434/0x5438`, qui
+sont les drapeaux GLSL (`_updateShaderState`) ; les limites `cfg+0xec..` ne
+servent qu'à `glGetProgramivARB` (un bloc de 16 octets par cible).
+
+**C. Plugin** — `guest/gldriver/pomppc_accel.c` : `PProg` (poignées
+`0x505000xx`, celle d'Apple gardée pour le repli), crochets Create / Modify /
+Destroy / GetInfo, `prog_state` (dispatch), `prog_parse` (indices `env`/`local`
+lus dans le texte — ZonicLib écrit `program.env  [0..95]`, avec des blancs —,
+unités `texture[u], 2D` d'un programme de fragments), `prog_ensure`
+(`PROG_CREATE` + `PROG_STRING` dans une **soumission sonde synchrone** : le
+verdict du compilateur de l'hôte est connu tout de suite, un refus renvoie ce
+programme à Apple sans rien casser), `prog_sync` au lot (`PROG_BIND`, `env`
+par plages changées contre un miroir, `local` au masque 2), clés
+`QGPU_SK_VERTEX_PROGRAM` / `_FRAGMENT_PROGRAM` (`compute_geom_state`, 4ᵉ plage
+de `send_state`), `QGPU_VF_GEN(1..7)` dans le format et codes 17.. dans le
+descripteur (`geom_publish`, 16 entrées), `unit_mask` (sous programme de
+fragments l'unité est celle que le texte lit : Direct3D n'allume jamais
+`GL_TEXTURE_2D`), limites `cfg+0xec..` et bit 15 (`GL_ARB_fragment_program`)
+dans `caps_extensions`. **Sous programme, la position est demandée par le code
+16** (générique 0) et un attribut conventionnel n'est porté que si son
+tableau est actif : GLEngine déroule sinon depuis ses pointeurs résolus
+périmés (`gctx+0x48f8`, `docs/re/programmes-arb.md` §3 bis) — c'était la
+géométrie éclatée de la course, que `gltest` ne reproduisait pas (ses
+pointeurs conventionnels n'avaient jamais été posés). Le chemin **tableaux** (`RenderVertexArray`) refuse
+encore les génériques (il packe lui-même) ; Colin McRae ne le prend pas.
+`POMPPC_GL_PROG=0` revient à l'émulation par GLEngine.
+
+**Seize génériques (nuit du 23/09).** DOOM 3 Demo (chemin ARB2, choisi
+parce que `GL_ARB_fragment_program` est maintenant annoncé) met ses tangentes
+dans les attributs génériques **8 à 11** : `QGPU_VF_GEN(k)` va donc de 0 à 15
+(bits 10..25, `QGPU_VF_ALL` 0x3FFFFFF, `QGPU_VF_MAX_WORDS` 95). Avec 8, le
+plugin refusait ces dessins (`raw:generic-attribs f00/8`), GLEngine les
+émulait en logiciel et mourait sur son propre `exit(1)` de
+`gleBuildInterpolateFunc` (`docs/re/glengine-exit-interpolateur.md`) — DOOM 3
+« plantait ». Sous programme, tout repli vers Apple expose à ce bogue.
+
+**Huit unités de texture — protocole v17 (23/09, nuit).** Avec seize
+génériques, DOOM 3 charge sa carte puis meurt de la même façon (segfault dans
+les destructeurs statiques de `gameppc.dylib` pendant l'`exit(1)` de
+`gleBuildInterpolateFunc`, appelé sous `gleDrawArraysOrElements_VBO_Exec` ←
+`RB_ARB2_CreateDrawInteractions`). Cause : `glprogs/interaction.vfp` lit
+**`texture[0..6]`** (cube de normalisation, normale, projection et chute de
+lumière, diffuse, spéculaire, table spéculaire), le protocole n'en tenait que
+quatre (`QGPU_MAX_UNITS`), `text_fp_units` marquait le programme « unités hors
+bornes » (`fallback prog:units`) et GLEngine émulait → `exit(1)`. Le protocole
+apprend donc les unités 4..7 sans casser un flux v16 : clés
+`QGPU_SK_TEXTURE4..` (101..116), `QGPU_SK_COMBINE4` (117..120),
+`QGPU_SK_COMBINE_SRC4` (121..124), `QGPU_SK_TEX_LOD_BIAS4` (125..128),
+`QGPU_SK_COUNT` 129, adressées par `QGPU_SK_UNIT(u)`, `QGPU_SK_COMBINE(u)`,
+`QGPU_SK_COMBINE_SRC(u)`, `QGPU_SK_TEX_LOD_BIAS(u)` ; bits de format
+`QGPU_VF_TEX(4..7)` = 26..29 (`QGPU_VF_TEX4`, APRÈS les génériques, ordre sur
+le fil : position, normale, couleur, secondaire, brouillard, unités 0..7,
+génériques 0..15 ; `QGPU_VF_ALL` 0x3FFFFFFF, `QGPU_VF_MAX_WORDS` 111) ;
+`QGPU_MTX_COUNT` 10 et `QGPU_CUR_COUNT` 12 suivent. Les sources croisées de
+GL_COMBINE restent aux unités 0..3 (champ source de 3 bits). Le plugin lit le
+nombre d'unités du device (`G.units` : 8 en v17, 4 avant) et n'annonce plus
+que 4 à GLEngine que sur un device ancien. Épreuves : `run_v17` dans
+`tests/qgpu_core_test.c` (constantes, offsets, unité 5 seule, unités 0+6 en
+GL_COMBINE, refus de la clé 129 et du bit 30), soft et gl.
+
+**D. Épreuves** — `gltest arbvp` : identique au rendu d'Apple (référence) et
+juste sur l'hôte v16 (format `0x80a`, générique 1, env, local, clé). `gltest
+arbfp` : juste sur l'hôte ; le rendu d'Apple n'annonce pas
+`GL_ARB_fragment_program` et **ignore** `glEnable(GL_FRAGMENT_PROGRAM_ARB)`
+sans erreur — sous Apple, les huit programmes de fragments de Colin McRae ne
+jouaient donc pas. Colin McRae : voir `docs/todo-gpu-3d.md` (état du jour).

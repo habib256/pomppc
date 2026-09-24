@@ -13,6 +13,53 @@ les relevés de rétro-ingénierie nouveaux dans `docs/re/`. Les documents exter
 `docs/references-ingenierie.md`. Les amorces de recherche déjà
 écrites, à ne pas refaire, sont en *Recherches amorcées*.
 
+## État (23/09/2026, nuit) — protocole v16 : programmes ARB sur l'hôte
+
+**Fait, non commité.** `docs/protocole-v16-programmes.md` §5 dit ce qui est réalisé et ce qui
+diffère du projet ; `docs/re/programmes-arb.md` est le relevé GLEngine (activation ARB en
+`gctx+0x4664/+0x466c`, `program.env` en `*(gctx+0x4668/+0x4670)`, texte lu dans l'objet).
+- [x] Device + cœur + backend GL : opcodes `PROG_*`, clés 99/100, `QGPU_VF_GEN(k)`,
+      `QGPU_CAP_PROGRAMS`, retournement y par réécriture du texte — `tests/qgpu_core_test.c`
+      (v16, 28 épreuves), `tests/qgpu_replay.c` ; harnais 83 OK ; QEMU reconstruit.
+- [x] Plugin : `PProg`, `prog_state` / `prog_parse` / `prog_ensure` (soumission sonde synchrone)
+      / `prog_sync`, `unit_mask` sous programme de fragments, génériques 1..7 dans le format et le
+      descripteur, limites `cfg+0xec..`, `GL_ARB_fragment_program` annoncé. `POMPPC_GL_PROG=0` coupe.
+- [x] Preuve : `gltest arbvp` (= rendu d'Apple) et `gltest arbfp` justes sur l'hôte v16 dans la
+      VM quotidienne (QEMU v16, plugin réinstallé par `.run/cmr/cycle.sh NORUN=1`).
+- [ ] Colin McRae en course : les 25 programmes compilent, mais GLEngine déroule des tableaux
+      **déjà libérés** par IndirectX (zéros / pointeurs de liste libre au `Begin`) : géométrie
+      éclatée. Onze reproductions dans `gltest arbvp0cmr` n'y arrivent pas. Piste : qui recycle
+      le bloc entre le `free` du jeu et notre `Begin` (`docs/re/programmes-arb.md` §3 ter).
+- [ ] DOOM 3 Demo (chemin ARB2 grâce à `GL_ARB_fragment_program`) : génériques 8..11 → protocole
+      porté à 16 génériques (`QGPU_VF_ALL` 0x3FFFFFF) ; puis `interaction.vfp` lit `texture[0..6]`
+      → **protocole v17, 8 unités de texture** (clés 101..128, `QGPU_VF_TEX(4..7)` bits 26..29,
+      `docs/protocole-v16-programmes.md` §5). Avant chaque étape, le repli logiciel de GLEngine
+      mourait sur `gleBuildInterpolateFunc` (`exit(1)`, segfault dans les destructeurs de
+      `gameppc.dylib`). Lanceur `~/doom3.command` dans l'invité (stdin sur /dev/null :
+      `Posix_ConsoleInput` bloque sinon), carte `game/demo_mars_city1`. **Vérifié en jeu avec la
+      v17 (23/09, 22h37) : tourne, éclairage par pixel, 3-5 img/s** (profil : 6 ms hôte, 20 ms
+      relectures, ~175 ms CPU invité). Restent `raw:arrays 30/48` (5 replis/image) et
+      « quelques bugs graphiques » à caractériser par vidage + rejeu.
+- [x] Prey Demo (23/09, 23h21) : **tourne, image juste** (salle de bain du Roadhouse, miroir).
+      Deux causes du « tout est sombre » : (1) `GL_EXT_texture_compression_s3tc` non annoncée →
+      pas de `.dds` → images par défaut 16×16 RGB565 → normales fausses (annoncée maintenant,
+      `POMPPC_GL_S3TC=0` pour l'ancienne annonce) ; (2) 128 textures/client → milliers
+      d'évictions/image → `QGPU_MAX_TEX` 4096. Lanceurs `~/prey.command`, `~/prey-dump.command`
+      (vidage déclenché par `/tmp/prey-go`), carte dans `~/prey-map.txt` (`game/roadhouse`).
+- [x] Vidage autonome (Prey) : le rejoueur recrée les tampons hôte, le plugin renvoie les textes
+      des programmes et tient le miroir `program.env` par compte d'entrées (`c_env_n`), le vidage
+      ne saute que la soumission en cours. Le rejeu reproduit la VM à l'identique ; expériences par
+      réécriture du texte du programme dans le vidage (`.run/prey/dump5-*`).
+- [ ] **Règle apprise à la dure** : toute modification de `qgpu_proto.h` ⇒ QEMU **et kext**
+      (`install.sh` dans l'invité, redémarrage) **et** plugin. Un kext ancien ne nettoie qu'une
+      partie des objets d'un client mort → BAD_ARG au client suivant → `broken_all` → Bus error,
+      puis créneaux de clients perdus. À rendre impossible : le plugin doit vérifier les tranches
+      du kext au démarrage. Bilan et ordre de travail : `docs/bilan-2026-09-23-jeux-tiger.md`.
+- [ ] Chemin tableaux (`RenderVertexArray`) : packer les génériques 16.. du VAO (refusé pour
+      l'instant, `NO_G_GENERIC`) ; `fragment.position` sous programme de fragments (non retourné).
+- [ ] `QGPU_REG_ERRORS` est global au device : un autre processus (économiseur d'écran ?) fait
+      passer le plugin en synchrone (`check_errors`) sans faute de sa part — à distinguer.
+
 ## État (22/09/2026) — bug hunt fait, reprise sur la machine x86
 
 **Ce qui s'est passé.** Deux vagues de relecture statique (12 relecteurs, aucune VM) consolidées

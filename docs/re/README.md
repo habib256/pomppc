@@ -13,6 +13,7 @@ hors dépôt (disque USB : `pomppc/re/`).
 | `verification-tcl.md` | le même, vérifié dans l'invité : le vrai verrou est le bit 0 du retour de `gldInitDispatch` |
 | `tableaux-de-sommets.md` | relevé par lecture des tableaux de sommets et de l'état T&L |
 | `descripteur-de-sommet.md` | le descripteur de sortie de sommet publié en `cfg+0x11c` |
+| `programmes-arb.md` | programmes ARB (v16) : le texte reste dans l'objet, `program.env` en `gctx+0x4668/+0x4670`, activation `gctx+0x5434/+0x5438`, limites `cfg+0xec..` (un bloc de 16 octets par cible), ce que Colin McRae demande |
 | `etat-tcl.md` | l'état T&L de GLEngine, offset par offset, établi par sondes |
 | `stencil.md` | l'état de stencil, et où le rendu d'Apple range le tampon |
 | `etat-v8.md` | mélange constant, opération logique, pointillés, modes de polygone ; et comment les **requêtes d'occlusion** atteignent le pilote |

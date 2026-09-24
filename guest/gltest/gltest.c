@@ -38,13 +38,14 @@
  *                            et pas le rendu logiciel d'Apple) ;
  *   GLTEST_DIFF_MAX=<n>      seuil de « gltest diff » hors arêtes (défaut 2).
  *
- * 71 SCÈNES (par ordre alphabétique ; « diff » n'en est pas une, c'est le
- * comparateur d'images). Les neuf dernières arrivées sont celles de la chaîne
- * de verdict, une par trou du bug hunt : alpharep (H1), texcross (H2),
- * readpack (P1), drawpack (P2), texdelmid (P10), vbocolor (P13), rawprim (S2),
- * offset (H4), forkdraw (P8).
+ * 73 SCÈNES (par ordre alphabétique ; « diff » n'en est pas une, c'est le
+ * comparateur d'images). Neuf sont celles de la chaîne de verdict, une par
+ * trou du bug hunt : alpharep (H1), texcross (H2), readpack (P1), drawpack
+ * (P2), texdelmid (P10), vbocolor (P13), rawprim (S2), offset (H4), forkdraw
+ * (P8). Les deux dernières (arbfp, arbvp) sont celles du protocole v16 :
+ * programmes ARB et attributs génériques (Colin McRae).
  *
- * alpharep bigstrip blendc caps clip comb combprobe cube cubeprobe depth
+ * alpharep arbfp arbvp bigstrip blendc caps clip comb combprobe cube cubeprobe depth
  * depthrt dlist drawpack entry fill fogz forkdraw fusion game gl15
  * gouraud lightprobe lit logicop matbegin matprobe mix mixte mtxprobe
  * occl offset polymode prims probe2 ptprobe qprobe rawprim readpack
@@ -2224,6 +2225,756 @@ int main(int argc, char **argv)
 #undef V15_END
         printf("v15 : %d capacité(s) annoncée(s) NON TENUE(S) sur %d\n", v15nt, cell);
         glDeleteTextures(4, tid);
+        glFinish();
+    } else if (!strcmp(scene, "arbvp") || !strcmp(scene, "arbfp")) {
+        /* v16 : programmes ARB de sommets (arbvp) et de fragments (arbfp),
+           ce que Colin McRae emploie pour toute sa course. Triangle (4,4)
+           (60,4) (4,60) en coordonnées GL sur fond bleu ; témoins : dedans
+           (16, 47 depuis le haut), dehors (48, 47). Le rendu d'Apple
+           (POMPPC_GL_DISABLE=1) émule les programmes de SOMMETS et sert de
+           référence pour arbvp ; il n'annonce pas GL_ARB_fragment_program
+           et IGNORE glEnable(GL_FRAGMENT_PROGRAM_ARB) sans erreur (vu en
+           vrai, 23/09/2026) : arbfp n'a de référence que sur l'hôte.
+             arbvp : MVP par program.env[0..3] (lignes d'un glOrtho), couleur
+                     = vertex.attrib[1] (générique, ROUGE ; la couleur
+                     conventionnelle est VERTE et doit être ignorée) ×
+                     program.local[0] ; puis local (0,0,1) → noir ; puis clé
+                     à 0 → pipeline fixe, vert.
+             arbfp : couleur = program.env[0] (jaune) sans texture ; puis un
+                     TEX d'une texture LIÉE MAIS NON ALLUMÉE (rouge) ; puis
+                     vp + fp ensemble (fragment.color = attrib[1], rouge). */
+        typedef void (*gp_f)(GLsizei, GLuint *);
+        typedef void (*bp_f)(GLenum, GLuint);
+        typedef void (*ps_f)(GLenum, GLenum, GLsizei, const GLvoid *);
+        typedef void (*pe_f)(GLenum, GLuint, const GLfloat *);
+        typedef void (*va_f)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid *);
+        typedef void (*ea_f)(GLuint);
+        gp_f gen = (gp_f)gl_sym("glGenProgramsARB", "glGenProgramsARB");
+        bp_f bind = (bp_f)gl_sym("glBindProgramARB", "glBindProgramARB");
+        ps_f str = (ps_f)gl_sym("glProgramStringARB", "glProgramStringARB");
+        pe_f env = (pe_f)gl_sym("glProgramEnvParameter4fvARB", "glProgramEnvParameter4fvARB");
+        pe_f loc = (pe_f)gl_sym("glProgramLocalParameter4fvARB", "glProgramLocalParameter4fvARB");
+        va_f vap = (va_f)gl_sym("glVertexAttribPointerARB", "glVertexAttribPointerARB");
+        ea_f eva = (ea_f)gl_sym("glEnableVertexAttribArrayARB", "glEnableVertexAttribArrayARB");
+        ea_f dva = (ea_f)gl_sym("glDisableVertexAttribArrayARB", "glDisableVertexAttribArrayARB");
+        static const char vp_text[] =
+            "!!ARBvp1.0\n"
+            "PARAM mvp[4] = { program.env[0..3] };\n"
+            "OUTPUT oPos = result.position;\n"
+            "DP4 oPos.x, mvp[0], vertex.position;\n"
+            "DP4 oPos.y, mvp[1], vertex.position;\n"
+            "DP4 oPos.z, mvp[2], vertex.position;\n"
+            "DP4 oPos.w, mvp[3], vertex.position;\n"
+            "MUL result.color, vertex.attrib[1], program.local[0];\n"
+            "END\n";
+        static const char fp_env_text[] = "!!ARBfp1.0\nMOV result.color, program.env[0];\nEND\n";
+        static const char fp_tex_text[] =
+            "!!ARBfp1.0\nTEX result.color, fragment.texcoord[0], texture[0], 2D;\nEND\n";
+        static const char fp_col_text[] = "!!ARBfp1.0\nMOV result.color, fragment.color;\nEND\n";
+        static const GLfloat pos[3][2] = { { 4, 4 }, { 60, 4 }, { 4, 60 } };
+        static const GLfloat red[3][4] = { { 1, 0, 0, 1 }, { 1, 0, 0, 1 }, { 1, 0, 0, 1 } };
+        static const GLfloat green[3][4] = { { 0, 1, 0, 1 }, { 0, 1, 0, 1 }, { 0, 1, 0, 1 } };
+        static const GLubyte texel[4 * 4] = { 255, 0, 0, 255, 0, 255, 0, 255,
+                                              0, 0, 255, 255, 255, 255, 255, 255 };
+        GLfloat rows[4][4], one[4] = { 1, 1, 1, 1 }, blue[4] = { 0, 0, 1, 1 };
+        GLfloat yellow[4] = { 1, 1, 0, 1 };
+        GLuint prog[4], tex1;
+        int vp = !strcmp(scene, "arbvp"), r, k;
+        const int IX = 16, IY = 47, OX = 48, OY = 47;   /* témoins, y depuis le haut */
+#define ARB_VP 0x8620
+#define ARB_FP 0x8804
+#define ARB_ASCII 0x8875
+        if (!gen || !bind || !str || !env || !loc || !vap || !eva || !dva) {
+            printf("FAIL entrées ARB_vertex_program/fragment_program absentes\n");
+            failures++;
+            return 4;
+        }
+        /* glOrtho(0, W, 0, H, -1, 1) en lignes : ce que le programme lit */
+        memset(rows, 0, sizeof(rows));
+        rows[0][0] = 2.0f / W; rows[0][3] = -1.0f;
+        rows[1][1] = 2.0f / H; rows[1][3] = -1.0f;
+        rows[2][2] = -1.0f;
+        rows[3][3] = 1.0f;
+        glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, W, 0, H, -1, 1);
+        glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+        glDisable(GL_DEPTH_TEST);
+        glClearColor(0, 0, 1, 1);
+        while (glGetError() != GL_NO_ERROR) { }
+        gen(4, prog);
+        bind(ARB_VP, prog[0]);
+        str(ARB_VP, ARB_ASCII, (GLsizei)strlen(vp_text), vp_text);
+        printf("  vp : erreur GL après ProgramString = 0x%x\n", (unsigned)glGetError());
+        for (k = 0; k < 4; k++)
+            env(ARB_VP, (GLuint)k, rows[k]);
+        loc(ARB_VP, 0, one);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glVertexPointer(2, GL_FLOAT, 0, pos);
+        glEnableClientState(GL_COLOR_ARRAY);
+        glColorPointer(4, GL_FLOAT, 0, green);
+        vap(1, 4, GL_FLOAT, GL_FALSE, 0, red);
+        eva(1);
+        if (vp) {
+            glEnable(ARB_VP);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glFinish();
+            check("(a) vp : attrib[1] rouge, env = MVP", IX, IY, 0xFF0000);
+            check("(a) dehors : fond", OX, OY, 0x0000FF);
+            loc(ARB_VP, 0, blue);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glFinish();
+            check("(b) local (0,0,1) : rouge × bleu = noir", IX, IY, 0x000000);
+            glDisable(ARB_VP);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glFinish();
+            check("(c) clé à 0 : pipeline fixe, couleur verte", IX, IY, 0x00FF00);
+            check("(c) dehors : fond", OX, OY, 0x0000FF);
+            loc(ARB_VP, 0, one);
+        } else {
+            glDisable(ARB_VP);
+            bind(ARB_FP, prog[1]);
+            str(ARB_FP, ARB_ASCII, (GLsizei)strlen(fp_env_text), fp_env_text);
+            printf("  fp : erreur GL après ProgramString = 0x%x\n", (unsigned)glGetError());
+            env(ARB_FP, 0, yellow);
+            glEnable(ARB_FP);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glFinish();
+            check("(d) fp : program.env[0] jaune", IX, IY, 0xFFFF00);
+            check("(d) dehors : fond", OX, OY, 0x0000FF);
+            /* texture liée, JAMAIS allumée : sous programme, glEnable ne compte pas */
+            glGenTextures(1, &tex1);
+            glBindTexture(GL_TEXTURE_2D, tex1);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, texel);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glDisable(GL_TEXTURE_2D);
+            glTexCoord2f(0.25f, 0.25f);                  /* texel (0,0) : rouge */
+            bind(ARB_FP, prog[2]);
+            str(ARB_FP, ARB_ASCII, (GLsizei)strlen(fp_tex_text), fp_tex_text);
+            printf("  fp tex : erreur GL après ProgramString = 0x%x\n", (unsigned)glGetError());
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glFinish();
+            check("(e) fp : TEX d'une texture liée non allumée", IX, IY, 0xFF0000);
+            /* vp + fp */
+            bind(ARB_FP, prog[3]);
+            str(ARB_FP, ARB_ASCII, (GLsizei)strlen(fp_col_text), fp_col_text);
+            glEnable(ARB_VP);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glFinish();
+            check("(f) vp + fp : fragment.color = attrib[1] rouge", IX, IY, 0xFF0000);
+            check("(f) dehors : fond", OX, OY, 0x0000FF);
+            glDisable(ARB_VP);
+            glDisable(ARB_FP);
+            glDeleteTextures(1, &tex1);
+        }
+        dva(1);
+        glDisableClientState(GL_COLOR_ARRAY);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        r = (int)glGetError();
+        printf("  erreur GL finale = 0x%x\n", (unsigned)r);
+        glFinish();
+    } else if (!strcmp(scene, "arbvp0cmr")) {
+        /* v16 : le lot de Colin McRae EN COURSE, tel que la sonde le relève
+           (docs/re/programmes-arb.md §5) : génériques 0 (pos 3f), 1 (3f),
+           2 (4ub normalisé), 3 (2f), pas 36, mémoire cliente ; unités 0 et 2
+           texturées (MODULATE, texels blancs), GL_COLOR_SUM allumé sans
+           éclairage — format 0x3b5a côté plugin. Le programme lit les quatre
+           attributs. Témoins comme arbvp0. */
+        typedef void (*gp_f)(GLsizei, GLuint *);
+        typedef void (*bp_f)(GLenum, GLuint);
+        typedef void (*ps_f)(GLenum, GLenum, GLsizei, const GLvoid *);
+        typedef void (*pe_f)(GLenum, GLuint, const GLfloat *);
+        typedef void (*va_f)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid *);
+        typedef void (*ea_f)(GLuint);
+        typedef void (*at_f)(GLenum);
+        gp_f gen = (gp_f)gl_sym("glGenProgramsARB", "glGenProgramsARB");
+        bp_f bind = (bp_f)gl_sym("glBindProgramARB", "glBindProgramARB");
+        ps_f str = (ps_f)gl_sym("glProgramStringARB", "glProgramStringARB");
+        pe_f env = (pe_f)gl_sym("glProgramEnvParameter4fvARB", "glProgramEnvParameter4fvARB");
+        va_f vap = (va_f)gl_sym("glVertexAttribPointerARB", "glVertexAttribPointerARB");
+        ea_f eva = (ea_f)gl_sym("glEnableVertexAttribArrayARB", "glEnableVertexAttribArrayARB");
+        ea_f dva = (ea_f)gl_sym("glDisableVertexAttribArrayARB", "glDisableVertexAttribArrayARB");
+        at_f act = (at_f)gl_sym("glActiveTexture", "glActiveTextureARB");
+        static const char vp_text[] =
+            "!!ARBvp1.0\n"
+            "ATTRIB v0 = vertex.attrib[0];\n"
+            "ATTRIB v1 = vertex.attrib[1];\n"
+            "ATTRIB v2 = vertex.attrib[2];\n"
+            "ATTRIB v3 = vertex.attrib[3];\n"
+            "PARAM c[] = { program.env  [0..3] };\n"
+            "OUTPUT oPos = result.position;\n"
+            "OUTPUT oD0 = result.color.primary;\n"
+            "OUTPUT oT0 = result.texcoord[0];\n"
+            "OUTPUT oT2 = result.texcoord[2];\n"
+            "TEMP t;\n"
+            "DP4 oPos.x, c[0], v0;\n"
+            "DP4 oPos.y, c[1], v0;\n"
+            "DP4 oPos.z, c[2], v0;\n"
+            "DP4 oPos.w, c[3], v0;\n"
+            "MUL t, v2, v1.x;\n"          /* v1.x = 1 : la couleur passe telle quelle */
+            "MOV oD0, t;\n"
+            "MOV oT0, v3;\n"
+            "MOV oT2, v3;\n"
+            "END\n";
+        static unsigned char vb[4 * 36];
+        static GLushort big[2048];
+        static const float xy[4][2] = { { 4, 4 }, { 60, 4 }, { 4, 60 }, { 60, 60 } };
+        static const GLubyte white[4 * 4] = { 255, 255, 255, 255, 255, 255, 255, 255,
+                                              255, 255, 255, 255, 255, 255, 255, 255 };
+        GLfloat rows[4][4];
+        GLuint prog[1], tid[2];
+        int k, n;
+        const int IX = 16, IY = 47, OX = 48, OY = 47;
+        if (!gen || !bind || !str || !env || !vap || !eva || !dva || !act) {
+            printf("FAIL entrées ARB absentes\n");
+            failures++;
+            return 4;
+        }
+        for (k = 0; k < 4; k++) {
+            float *f = (float *)(vb + k * 36);
+            f[0] = xy[k][0]; f[1] = xy[k][1]; f[2] = 0.0f;
+            f[3] = 1.0f; f[4] = 0.0f; f[5] = 0.0f;                   /* attrib 1 : (1,0,0) */
+            vb[k * 36 + 24] = 128; vb[k * 36 + 25] = 0; vb[k * 36 + 26] = 0; vb[k * 36 + 27] = 255;
+            f[7] = 0.5f; f[8] = 0.5f;                                /* attrib 3 : (0.5, 0.5) */
+        }
+        for (k = 0; k < 2048; k++) big[k] = (GLushort)(k % 3);
+        memset(rows, 0, sizeof(rows));
+        rows[0][0] = 2.0f / W; rows[0][3] = -1.0f;
+        rows[1][1] = 2.0f / H; rows[1][3] = -1.0f;
+        rows[2][2] = -1.0f;
+        rows[3][3] = 1.0f;
+        glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, W, 0, H, -1, 1);
+        glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_LIGHTING);
+        glEnable(0x8458 /* GL_COLOR_SUM */);
+        glGenTextures(2, tid);
+        for (k = 0; k < 2; k++) {
+            act(GL_TEXTURE0 + (k ? 2 : 0));
+            glBindTexture(GL_TEXTURE_2D, tid[k]);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+            glEnable(GL_TEXTURE_2D);
+        }
+        act(GL_TEXTURE0);
+        glClearColor(0, 0, 1, 1);
+        while (glGetError() != GL_NO_ERROR) { }
+        gen(1, prog);
+        bind(ARB_VP, prog[0]);
+        str(ARB_VP, ARB_ASCII, (GLsizei)strlen(vp_text), vp_text);
+        printf("  vp : erreur GL après ProgramString = 0x%x\n", (unsigned)glGetError());
+        for (k = 0; k < 4; k++)
+            env(ARB_VP, (GLuint)k, rows[k]);
+        vap(0, 3, GL_FLOAT, GL_FALSE, 36, vb);
+        vap(1, 3, GL_FLOAT, GL_FALSE, 36, vb + 12);
+        vap(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, 36, vb + 24);
+        vap(3, 2, GL_FLOAT, GL_FALSE, 36, vb + 28);
+        eva(0); eva(1); eva(2); eva(3);
+        glEnable(ARB_VP);
+        for (n = 3; n <= 1500; n = (n == 3) ? 1500 : 9999) {
+            char what[64];
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawElements(GL_TRIANGLE_STRIP, n, GL_UNSIGNED_SHORT, big);
+            glFinish();
+            snprintf(what, sizeof(what), "ruban de %d : dedans (128,0,0)", n);
+            check(what, IX, IY, 0x800000);
+            snprintf(what, sizeof(what), "ruban de %d : dehors", n);
+            check(what, OX, OY, 0x0000FF);
+        }
+        /* (d) comme le jeu : programme coupé puis rallumé entre deux lots (le
+           HUD passe en pipeline fixe), et deux programmes différents liés
+           tour à tour — le descripteur et la fonction de sommet de GLEngine
+           changent à chaque lot. */
+        {
+            GLuint prog2[1];
+            gen(1, prog2);
+            bind(ARB_VP, prog2[0]);
+            str(ARB_VP, ARB_ASCII, (GLsizei)strlen(vp_text), vp_text);
+            for (k = 0; k < 3; k++) {
+                char what[64];
+                glDisable(ARB_VP);
+                glClear(GL_COLOR_BUFFER_BIT);
+                glColor3ub(0, 255, 0);
+                glBegin(GL_QUADS);
+                glVertex2f(40, 40); glVertex2f(60, 40); glVertex2f(60, 60); glVertex2f(40, 60);
+                glEnd();
+                bind(ARB_VP, (k & 1) ? prog2[0] : prog[0]);
+                glEnable(ARB_VP);
+                glDrawElements(GL_TRIANGLE_STRIP, 300, GL_UNSIGNED_SHORT, big);
+                glFinish();
+                snprintf(what, sizeof(what), "(d) tour %d : dedans (128,0,0)", k);
+                check(what, IX, IY, 0x800000);
+                snprintf(what, sizeof(what), "(d) tour %d : quad fixe vert", k);
+                check(what, 50, 14, 0x00FF00);
+            }
+        }
+        /* (e) comme le jeu EN COURSE (trace gltrap, nuit du 23/09) : à chaque
+           dessin, programme coupé, NOUVEAUX pointeurs d'attributs (autre
+           adresse, mêmes données), glEnableVertexAttribArrayARB re-posés,
+           locaux re-posés, programme rallumé, glDrawElements. Puis (f) : la
+           même chose sans couper le programme. */
+        {
+            static unsigned char vb2[3][4 * 36];
+            int pass;
+            for (pass = 0; pass < 2; pass++)
+            for (k = 0; k < 3; k++) {
+                char what[64];
+                unsigned char *b = vb2[k];
+                int q;
+                memcpy(b, vb, sizeof(vb2[k]));
+                /* données DIFFÉRENTES par tour : couleur 128 sur le canal k —
+                   un pointeur périmé montrerait la couleur du tour précédent */
+                for (q = 0; q < 4; q++) {
+                    b[q * 36 + 24] = k == 0 ? 128 : 0;
+                    b[q * 36 + 25] = k == 1 ? 128 : 0;
+                    b[q * 36 + 26] = k == 2 ? 128 : 0;
+                }
+                glClear(GL_COLOR_BUFFER_BIT);           /* AVANT, comme le jeu : rien entre glEnable et le dessin */
+                if (pass == 0) glDisable(ARB_VP);
+                glDisable(0x8458);
+                vap(0, 3, GL_FLOAT, GL_FALSE, 36, b);      eva(0);
+                vap(1, 3, GL_FLOAT, GL_FALSE, 36, b + 12); eva(1);
+                vap(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, 36, b + 24); eva(2);
+                vap(3, 2, GL_FLOAT, GL_FALSE, 36, b + 28); eva(3);
+                glEnable(ARB_VP);
+                glDrawElements(GL_TRIANGLE_STRIP, 300, GL_UNSIGNED_SHORT, big);
+                glFinish();
+                snprintf(what, sizeof(what), "(%c) tour %d, pointeurs neufs : dedans", pass ? 'f' : 'e', k);
+                check(what, IX, IY, 0x800000UL >> (8 * k));
+                snprintf(what, sizeof(what), "(%c) tour %d : dehors", pass ? 'f' : 'e', k);
+                check(what, OX, OY, 0x0000FF);
+            }
+        }
+        /* (j) comme IndirectX : un tampon malloc PAR DESSIN, libéré juste
+           après glDrawElements (le suivant en prend un autre) — si GLEngine
+           lisait les tableaux après coup, il verrait la mémoire rendue. */
+        for (k = 0; k < 3; k++) {
+            char what[64];
+            unsigned char *b = malloc(4 * 36), *junk;
+            int q;
+            memcpy(b, vb, 4 * 36);
+            for (q = 0; q < 4; q++) {
+                b[q * 36 + 24] = k == 0 ? 128 : 0; b[q * 36 + 25] = k == 1 ? 128 : 0; b[q * 36 + 26] = k == 2 ? 128 : 0;
+            }
+            glDisable(ARB_VP);
+            vap(0, 3, GL_FLOAT, GL_FALSE, 36, b);      eva(0);
+            vap(1, 3, GL_FLOAT, GL_FALSE, 36, b + 12); eva(1);
+            vap(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, 36, b + 24); eva(2);
+            vap(3, 2, GL_FLOAT, GL_FALSE, 36, b + 28); eva(3);
+            glEnable(ARB_VP);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawElements(GL_TRIANGLE_STRIP, 300, GL_UNSIGNED_SHORT, big);
+            memset(b, 0, 4 * 36);                   /* le jeu réécrit / libère */
+            free(b);
+            junk = malloc(4 * 36); memset(junk, 0, 4 * 36);
+            glFinish();
+            snprintf(what, sizeof(what), "(j) tour %d, tampon libéré après le dessin : dedans", k);
+            check(what, IX, IY, 0x800000UL >> (8 * k));
+            free(junk);
+        }
+        /* (k) un lot SOUS PROGRAMME rendu par Apple (texture rectangle : hors
+           domaine du plugin, GLEngine émule le programme), PUIS des lots sous
+           programme sur l'hôte — ce que fait le jeu au chargement. */
+        {
+            GLuint rt2;
+            glGenTextures(1, &rt2);
+            act(GL_TEXTURE0);
+            glBindTexture(0x84F5, rt2);
+            glTexImage2D(0x84F5, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+            glTexParameteri(0x84F5, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(0x84F5, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            for (k = 0; k < 3; k++) {
+                char what[64];
+                unsigned char *b = malloc(4 * 36);
+                int q;
+                memcpy(b, vb, 4 * 36);
+                for (q = 0; q < 4; q++) {
+                    b[q * 36 + 24] = k == 0 ? 128 : 0; b[q * 36 + 25] = k == 1 ? 128 : 0; b[q * 36 + 26] = k == 2 ? 128 : 0;
+                }
+                glDisable(ARB_VP);
+                vap(0, 3, GL_FLOAT, GL_FALSE, 36, b);      eva(0);
+                vap(1, 3, GL_FLOAT, GL_FALSE, 36, b + 12); eva(1);
+                vap(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, 36, b + 24); eva(2);
+                vap(3, 2, GL_FLOAT, GL_FALSE, 36, b + 28); eva(3);
+                if (k == 0) glEnable(0x84F5);           /* 1er tour : Apple émule le programme */
+                glEnable(ARB_VP);
+                glClear(GL_COLOR_BUFFER_BIT);
+                glDrawElements(GL_TRIANGLE_STRIP, 300, GL_UNSIGNED_SHORT, big);
+                if (k == 0) glDisable(0x84F5);
+                glFinish();
+                snprintf(what, sizeof(what), "(k) tour %d%s : dedans", k, k ? " (hôte)" : " (Apple, rectangle)");
+                check(what, IX, IY, 0x800000UL >> (8 * k));
+                free(b);
+            }
+            glDeleteTextures(1, &rt2);
+        }
+        /* (l) indices dans un tampon GL_ELEMENT_ARRAY_BUFFER (IndirectX : les
+           index buffers Direct3D), sommets en mémoire cliente. */
+        {
+            typedef void (*bb_f)(GLenum, GLuint);
+            typedef void (*gb_f)(GLsizei, GLuint *);
+            typedef void (*bd_f)(GLenum, long, const GLvoid *, GLenum);
+            bb_f bindbuf = (bb_f)gl_sym("glBindBufferARB", "glBindBuffer");
+            gb_f genbuf = (gb_f)gl_sym("glGenBuffersARB", "glGenBuffers");
+            bd_f bufdata = (bd_f)gl_sym("glBufferDataARB", "glBufferData");
+            GLuint ib = 0;
+            if (bindbuf && genbuf && bufdata) {
+                genbuf(1, &ib);
+                bindbuf(0x8893 /* GL_ELEMENT_ARRAY_BUFFER */, ib);
+                bufdata(0x8893, (long)sizeof(big), big, 0x88E4);
+                for (k = 0; k < 2; k++) {
+                    char what[64];
+                    glDisable(ARB_VP);
+                    vap(0, 3, GL_FLOAT, GL_FALSE, 36, vb);      eva(0);
+                    vap(1, 3, GL_FLOAT, GL_FALSE, 36, vb + 12); eva(1);
+                    vap(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, 36, vb + 24); eva(2);
+                    vap(3, 2, GL_FLOAT, GL_FALSE, 36, vb + 28); eva(3);
+                    glEnable(ARB_VP);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    glDrawElements(GL_TRIANGLE_STRIP, 300, GL_UNSIGNED_SHORT, (const GLvoid *)0);
+                    glFinish();
+                    snprintf(what, sizeof(what), "(l) tour %d, indices dans un VBO : dedans", k);
+                    check(what, IX, IY, 0x800000);
+                    snprintf(what, sizeof(what), "(l) tour %d : dehors", k);
+                    check(what, OX, OY, 0x0000FF);
+                }
+                bindbuf(0x8893, 0);
+            }
+        }
+        /* (m) TROIS glDrawElements consécutifs SANS changement d'état, chacun
+           sur un tampon malloc libéré (et réutilisé, zéros) aussitôt après son
+           appel — si GLEngine fusionne les dessins dans un lot et ne déroule
+           qu'à sa fermeture, les deux premiers triangles manquent. Triangles
+           à x = 4, 24, 44 (largeur 16), couleur par tour. */
+        {
+            static GLushort tri3[3] = { 0, 1, 2 };
+            char what[64];
+            unsigned char *bufs[3];
+            glDisable(ARB_VP);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glEnable(ARB_VP);
+            for (k = 0; k < 3; k++) {
+                unsigned char *b = malloc(4 * 36), *junk;
+                int q;
+                memcpy(b, vb, 4 * 36);
+                for (q = 0; q < 3; q++) {
+                    float *f = (float *)(b + q * 36);
+                    f[0] = 4.0f + 20.0f * k + (q == 1 ? 16.0f : 0.0f);
+                    f[1] = (q == 2) ? 20.0f : 4.0f;
+                    b[q * 36 + 24] = k == 0 ? 128 : 0; b[q * 36 + 25] = k == 1 ? 128 : 0; b[q * 36 + 26] = k == 2 ? 128 : 0;
+                }
+                vap(0, 3, GL_FLOAT, GL_FALSE, 36, b);      eva(0);
+                vap(1, 3, GL_FLOAT, GL_FALSE, 36, b + 12); eva(1);
+                vap(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, 36, b + 24); eva(2);
+                vap(3, 2, GL_FLOAT, GL_FALSE, 36, b + 28); eva(3);
+                glDrawElements(GL_TRIANGLE_STRIP, 3, GL_UNSIGNED_SHORT, tri3);
+                memset(b, 0, 4 * 36);
+                free(b);
+                junk = malloc(4 * 36); memset(junk, 0, 4 * 36);
+                bufs[k] = junk;
+            }
+            glFinish();
+            for (k = 0; k < 3; k++) {
+                snprintf(what, sizeof(what), "(m) triangle %d (tampon libéré avant le suivant)", k);
+                check(what, 8 + 20 * k, 64 - 1 - 7, 0x800000UL >> (8 * k));
+                free(bufs[k]);
+            }
+        }
+        /* (g) entre deux lots sous programme, un lot HORS DOMAINE du plugin
+           (texture RECTANGLE, que le protocole ne porte pas : rendu par Apple,
+           verrou T&L relâché puis repris) — c'est ce que fait la course de
+           Colin McRae à chaque image (« fallback tex-target »). */
+        {
+            GLuint rt;
+            glGenTextures(1, &rt);
+            for (k = 0; k < 3; k++) {
+                char what[64];
+                glDisable(ARB_VP);
+                act(GL_TEXTURE0);
+                glBindTexture(0x84F5 /* GL_TEXTURE_RECTANGLE_EXT */, rt);
+                glTexImage2D(0x84F5, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+                glTexParameteri(0x84F5, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(0x84F5, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glEnable(0x84F5);
+                glClear(GL_COLOR_BUFFER_BIT);
+                glColor3ub(0, 255, 0);
+                glBegin(GL_QUADS);
+                glTexCoord2f(0.5f, 0.5f);
+                glVertex2f(40, 40); glVertex2f(60, 40); glVertex2f(60, 60); glVertex2f(40, 60);
+                glEnd();
+                glDisable(0x84F5);
+                glEnable(GL_TEXTURE_2D);
+                glEnable(ARB_VP);
+                glDrawElements(GL_TRIANGLE_STRIP, 300, GL_UNSIGNED_SHORT, big);
+                glFinish();
+                snprintf(what, sizeof(what), "(g) tour %d, après un lot rectangle : dedans", k);
+                check(what, IX, IY, 0x800000);
+                snprintf(what, sizeof(what), "(g) tour %d : quad rectangle vert", k);
+                check(what, 50, 14, 0x00FF00);
+            }
+            glDeleteTextures(1, &rt);
+        }
+        /* (h) l'HISTORIQUE du jeu : le HUD est dessiné en pipeline fixe avec
+           des tableaux CONVENTIONNELS (glVertexPointer 4f, glColorPointer 4ub,
+           glTexCoordPointer 2f, pas 28, glDrawElements), puis ces tableaux
+           sont désactivés (leurs pointeurs résolus restent dans GLEngine,
+           gctx+0x48f8) et le lot sous programme suit. */
+        {
+            static unsigned char hud[4 * 28];
+            static const GLushort hidx[4] = { 0, 1, 2, 3 };
+            for (k = 0; k < 4; k++) {
+                float *f = (float *)(hud + k * 28);
+                f[0] = (k & 1) ? 60.0f : 40.0f; f[1] = (k & 2) ? 60.0f : 40.0f; f[2] = 0.0f; f[3] = 1.0f;
+                hud[k * 28 + 16] = 0; hud[k * 28 + 17] = 255; hud[k * 28 + 18] = 0; hud[k * 28 + 19] = 255;
+                f[5] = 0.5f; f[6] = 0.5f;
+            }
+            for (k = 0; k < 3; k++) {
+                char what[64];
+                glDisable(ARB_VP);
+                dva(0); dva(1); dva(2); dva(3);
+                glVertexPointer(4, GL_FLOAT, 28, hud);
+                glColorPointer(4, GL_UNSIGNED_BYTE, 28, hud + 16);
+                glTexCoordPointer(2, GL_FLOAT, 28, hud + 20);
+                glEnableClientState(GL_VERTEX_ARRAY);
+                glEnableClientState(GL_COLOR_ARRAY);
+                glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+                glClear(GL_COLOR_BUFFER_BIT);
+                glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_SHORT, hidx);
+                glDisableClientState(GL_VERTEX_ARRAY);
+                glDisableClientState(GL_COLOR_ARRAY);
+                glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+                vap(0, 3, GL_FLOAT, GL_FALSE, 36, vb);      eva(0);
+                vap(1, 3, GL_FLOAT, GL_FALSE, 36, vb + 12); eva(1);
+                vap(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, 36, vb + 24); eva(2);
+                vap(3, 2, GL_FLOAT, GL_FALSE, 36, vb + 28); eva(3);
+                glEnable(ARB_VP);
+                glDrawElements(GL_TRIANGLE_STRIP, 300, GL_UNSIGNED_SHORT, big);
+                glFinish();
+                snprintf(what, sizeof(what), "(h) tour %d, après le HUD en tableaux : dedans", k);
+                check(what, IX, IY, 0x800000);
+                snprintf(what, sizeof(what), "(h) tour %d : HUD vert", k);
+                check(what, 50, 14, 0x00FF00);
+            }
+        }
+        /* (i) DEUX objets VAO (GL_APPLE_vertex_array_object) : le HUD dans
+           l'un (tableaux conventionnels), le lot sous programme dans l'autre
+           (génériques) — ce que fait Colin McRae (V 0x30e3800 / 0x30dd400
+           dans les sondes). */
+        {
+            typedef void (*gva_f)(GLsizei, GLuint *);
+            typedef void (*bva_f)(GLuint);
+            gva_f genva = (gva_f)gl_sym("glGenVertexArraysAPPLE", "glGenVertexArraysAPPLE");
+            bva_f bindva = (bva_f)gl_sym("glBindVertexArrayAPPLE", "glBindVertexArrayAPPLE");
+            static unsigned char hud[4 * 28];
+            static const GLushort hidx[4] = { 0, 1, 2, 3 };
+            GLuint va[2];
+            if (genva && bindva) {
+                for (k = 0; k < 4; k++) {
+                    float *f = (float *)(hud + k * 28);
+                    f[0] = (k & 1) ? 60.0f : 40.0f; f[1] = (k & 2) ? 60.0f : 40.0f; f[2] = 0.0f; f[3] = 1.0f;
+                    hud[k * 28 + 16] = 0; hud[k * 28 + 17] = 255; hud[k * 28 + 18] = 0; hud[k * 28 + 19] = 255;
+                    f[5] = 0.5f; f[6] = 0.5f;
+                }
+                genva(2, va);
+                bindva(va[0]);                      /* VAO du HUD */
+                glVertexPointer(4, GL_FLOAT, 28, hud);
+                glColorPointer(4, GL_UNSIGNED_BYTE, 28, hud + 16);
+                glTexCoordPointer(2, GL_FLOAT, 28, hud + 20);
+                glEnableClientState(GL_VERTEX_ARRAY);
+                glEnableClientState(GL_COLOR_ARRAY);
+                glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+                bindva(va[1]);                      /* VAO de la course */
+                vap(0, 3, GL_FLOAT, GL_FALSE, 36, vb);      eva(0);
+                vap(1, 3, GL_FLOAT, GL_FALSE, 36, vb + 12); eva(1);
+                vap(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, 36, vb + 24); eva(2);
+                vap(3, 2, GL_FLOAT, GL_FALSE, 36, vb + 28); eva(3);
+                for (k = 0; k < 3; k++) {
+                    char what[64];
+                    glDisable(ARB_VP);
+                    bindva(va[0]);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_SHORT, hidx);
+                    bindva(va[1]);
+                    glEnable(ARB_VP);
+                    glDrawElements(GL_TRIANGLE_STRIP, 300, GL_UNSIGNED_SHORT, big);
+                    glFinish();
+                    snprintf(what, sizeof(what), "(i) tour %d, deux VAO : dedans", k);
+                    check(what, IX, IY, 0x800000);
+                    snprintf(what, sizeof(what), "(i) tour %d : HUD vert", k);
+                    check(what, 50, 14, 0x00FF00);
+                }
+                glDisable(ARB_VP);
+                bindva(0);
+            } else {
+                printf("  (i) GL_APPLE_vertex_array_object absent\n");
+            }
+        }
+        glDisable(ARB_VP);
+        dva(0); dva(1); dva(2); dva(3);
+        for (k = 0; k < 2; k++) { act(GL_TEXTURE0 + (k ? 2 : 0)); glDisable(GL_TEXTURE_2D); }
+        act(GL_TEXTURE0);
+        glDisable(0x8458);
+        glDeleteTextures(2, tid);
+        printf("  erreur GL finale = 0x%x\n", (unsigned)glGetError());
+        glFinish();
+    } else if (!strcmp(scene, "arbvp0") || !strcmp(scene, "arbvp0vbo")) {
+        /* arbvp0vbo : mêmes tableaux, mais dans un objet tampon (VBO) et des
+           indices en mémoire cliente — Colin McRae dessine par des tampons
+           de sommets (DrawIndexedPrimitiveVB). */
+        int use_vbo = !strcmp(scene, "arbvp0vbo");
+        typedef void (*bb_f)(GLenum, GLuint);
+        typedef void (*gb_f)(GLsizei, GLuint *);
+        typedef void (*bd_f)(GLenum, long, const GLvoid *, GLenum);
+        bb_f bindbuf = (bb_f)gl_sym("glBindBufferARB", "glBindBuffer");
+        gb_f genbuf = (gb_f)gl_sym("glGenBuffersARB", "glGenBuffers");
+        bd_f bufdata = (bd_f)gl_sym("glBufferDataARB", "glBufferData");
+        GLuint vbo = 0;
+        /* v16, le cas Colin McRae : position par l'attribut GÉNÉRIQUE 0 (aucun
+           glVertexPointer), couleur par l'attribut 1 en 4 octets NORMALISÉS,
+           coordonnée de texture par l'attribut 2 (2 flottants), pas de 24
+           octets, glDrawElements(GL_TRIANGLE_STRIP, GL_UNSIGNED_SHORT). Le
+           programme lit vertex.attrib[0..2] et program.env[0..3] (MVP). Sous
+           Apple : référence. Témoins comme arbvp : dedans (16,47) rouge à
+           demi (couleur 128,0,0), dehors (48,47) fond bleu. */
+        typedef void (*gp_f)(GLsizei, GLuint *);
+        typedef void (*bp_f)(GLenum, GLuint);
+        typedef void (*ps_f)(GLenum, GLenum, GLsizei, const GLvoid *);
+        typedef void (*pe_f)(GLenum, GLuint, const GLfloat *);
+        typedef void (*va_f)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid *);
+        typedef void (*ea_f)(GLuint);
+        gp_f gen = (gp_f)gl_sym("glGenProgramsARB", "glGenProgramsARB");
+        bp_f bind = (bp_f)gl_sym("glBindProgramARB", "glBindProgramARB");
+        ps_f str = (ps_f)gl_sym("glProgramStringARB", "glProgramStringARB");
+        pe_f env = (pe_f)gl_sym("glProgramEnvParameter4fvARB", "glProgramEnvParameter4fvARB");
+        va_f vap = (va_f)gl_sym("glVertexAttribPointerARB", "glVertexAttribPointerARB");
+        ea_f eva = (ea_f)gl_sym("glEnableVertexAttribArrayARB", "glEnableVertexAttribArrayARB");
+        ea_f dva = (ea_f)gl_sym("glDisableVertexAttribArrayARB", "glDisableVertexAttribArrayARB");
+        static const char vp_text[] =
+            "!!ARBvp1.0\n"
+            "ATTRIB v0 = vertex.attrib[0];\n"
+            "ATTRIB v1 = vertex.attrib[1];\n"
+            "ATTRIB v2 = vertex.attrib[2];\n"
+            "PARAM c[] = { program.env  [0..3] };\n"
+            "OUTPUT oPos = result.position;\n"
+            "OUTPUT oD0 = result.color.primary;\n"
+            "OUTPUT oT0 = result.texcoord[0];\n"
+            "DP4 oPos.x, c[0], v0;\n"
+            "DP4 oPos.y, c[1], v0;\n"
+            "DP4 oPos.z, c[2], v0;\n"
+            "DP4 oPos.w, c[3], v0;\n"
+            "MOV oD0, v1;\n"
+            "MOV oT0, v2;\n"
+            "END\n";
+        /* sommet : x y z (3f) | r g b a (4ub) | s t (2f) = 24 octets */
+        static unsigned char vb[4 * 24];
+        static const GLushort idx[4] = { 0, 1, 2, 3 };
+        static const float xy[4][2] = { { 4, 4 }, { 60, 4 }, { 4, 60 }, { 60, 60 } };
+        GLfloat rows[4][4];
+        GLuint prog[1];
+        int k;
+        const int IX = 16, IY = 47, OX = 48, OY = 47;
+        if (!gen || !bind || !str || !env || !vap || !eva || !dva) {
+            printf("FAIL entrées ARB_vertex_program absentes\n");
+            failures++;
+            return 4;
+        }
+        for (k = 0; k < 4; k++) {
+            float *f = (float *)(vb + k * 24);
+            f[0] = xy[k][0]; f[1] = xy[k][1]; f[2] = 0.0f;
+            vb[k * 24 + 12] = 128; vb[k * 24 + 13] = 0; vb[k * 24 + 14] = 0; vb[k * 24 + 15] = 255;
+            f[4] = 0.5f; f[5] = 0.5f;
+        }
+        memset(rows, 0, sizeof(rows));
+        rows[0][0] = 2.0f / W; rows[0][3] = -1.0f;
+        rows[1][1] = 2.0f / H; rows[1][3] = -1.0f;
+        rows[2][2] = -1.0f;
+        rows[3][3] = 1.0f;
+        glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, W, 0, H, -1, 1);
+        glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+        glDisable(GL_DEPTH_TEST);
+        glClearColor(0, 0, 1, 1);
+        while (glGetError() != GL_NO_ERROR) { }
+        gen(1, prog);
+        bind(ARB_VP, prog[0]);
+        /* GLTEST_VP=<fichier> : le texte d'un VRAI programme du jeu (Colin
+           McRae, PreLit_fog : MVP dans c[2..5], couleur = v1, texcoord = v2 ×
+           program.local[0]) à la place du nôtre. */
+        if (getenv("GLTEST_VP")) {
+            static char ft[16384];
+            FILE *pf = fopen(getenv("GLTEST_VP"), "rb");
+            size_t fl = pf ? fread(ft, 1, sizeof(ft) - 1, pf) : 0;
+            typedef void (*pl_f)(GLenum, GLuint, GLfloat, GLfloat, GLfloat, GLfloat);
+            pl_f loc4 = (pl_f)gl_sym("glProgramLocalParameter4fARB", "glProgramLocalParameter4fARB");
+            if (pf) fclose(pf);
+            ft[fl] = 0;
+            printf("  programme lu dans %s : %lu octets\n", getenv("GLTEST_VP"), (unsigned long)fl);
+            str(ARB_VP, ARB_ASCII, (GLsizei)fl, ft);
+            printf("  vp : erreur GL après ProgramString = 0x%x\n", (unsigned)glGetError());
+            for (k = 0; k < 4; k++)
+                env(ARB_VP, (GLuint)(2 + k), rows[k]);
+            if (loc4) loc4(ARB_VP, 0, 1.0f, 1.0f, 0.0f, 0.0f);
+        } else {
+            str(ARB_VP, ARB_ASCII, (GLsizei)strlen(vp_text), vp_text);
+            printf("  vp : erreur GL après ProgramString = 0x%x\n", (unsigned)glGetError());
+            for (k = 0; k < 4; k++)
+                env(ARB_VP, (GLuint)k, rows[k]);
+        }
+        if (use_vbo && genbuf && bindbuf && bufdata) {
+            genbuf(1, &vbo);
+            bindbuf(0x8892 /* GL_ARRAY_BUFFER */, vbo);
+            bufdata(0x8892, (long)sizeof(vb), vb, 0x88E4 /* GL_STATIC_DRAW */);
+            vap(0, 3, GL_FLOAT, GL_FALSE, 24, (const GLvoid *)0);
+            vap(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, 24, (const GLvoid *)12);
+            vap(2, 2, GL_FLOAT, GL_FALSE, 24, (const GLvoid *)16);
+            printf("  tableaux dans le VBO %u\n", (unsigned)vbo);
+        } else {
+            vap(0, 3, GL_FLOAT, GL_FALSE, 24, vb);
+            vap(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, 24, vb + 12);
+            vap(2, 2, GL_FLOAT, GL_FALSE, 24, vb + 16);
+        }
+        eva(0); eva(1); eva(2);
+        glEnable(ARB_VP);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawElements(GL_TRIANGLE_STRIP, 3, GL_UNSIGNED_SHORT, idx);
+        glFinish();
+        check("(a) attrib 0 = position, attrib 1 = 4ub normalisé (128,0,0)", IX, IY, 0x800000);
+        check("(a) dehors : fond", OX, OY, 0x0000FF);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_SHORT, idx);
+        glFinish();
+        check("(b) ruban de 4 : le 2e triangle couvre (48,47)", OX, OY, 0x800000);
+        /* (c) GRANDS lots : Colin McRae en course déroule 600 à 2000 sommets
+           par glDrawElements, et c'est là que les génériques manquent. Les
+           indices reprennent en boucle les 3 sommets du triangle (les
+           triangles d'un ruban 0,1,2,0,1,2… sont tous le même, ou
+           dégénérés) : l'image doit rester celle de (a). */
+        if (!use_vbo) {
+            static GLushort big[2048];
+            int n;
+            for (k = 0; k < 2048; k++) big[k] = (GLushort)(k % 3);
+            for (n = 300; n <= 1500; n += 1200) {
+                char what[64];
+                glClear(GL_COLOR_BUFFER_BIT);
+                glDrawElements(GL_TRIANGLE_STRIP, n, GL_UNSIGNED_SHORT, big);
+                glFinish();
+                snprintf(what, sizeof(what), "(c) ruban de %d : dedans", n);
+                check(what, IX, IY, 0x800000);
+                snprintf(what, sizeof(what), "(c) ruban de %d : dehors", n);
+                check(what, OX, OY, 0x0000FF);
+            }
+        }
+        glDisable(ARB_VP);
+        dva(0); dva(1); dva(2);
+        if (vbo && bindbuf)
+            bindbuf(0x8892, 0);
+        printf("  erreur GL finale = 0x%x\n", (unsigned)glGetError());
         glFinish();
     } else if (!strcmp(scene, "blendc")) {
         /* Mélange à couleur constante et équations minimum/maximum (v8).

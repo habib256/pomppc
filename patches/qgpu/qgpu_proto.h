@@ -52,7 +52,7 @@
                                        un kext / plugin compilé contre CE fichier
                                        s'attache encore : les opcodes v13/v14 sont
                                        optionnels (QGPU_CAP_SCANOUT, BUF_*, xfer 16). */
-#define QGPU_PROTO_VERSION      15  /* v2 : profondeur, état GL ; v3 : textures ;
+#define QGPU_PROTO_VERSION      17  /* v2 : profondeur, état GL ; v3 : textures ;
                                        v4 : brouillard, 2e unité, lignes, points ;
                                        v5 : 4 unités, GL_COMBINE ;
                                        v6 : stencil ;
@@ -80,7 +80,17 @@
                                        v14 : tampons hôte (BUF_CREATE / DESTROY /
                                              SUBDATA) et DRAW_RAW_BUF ;
                                        v15 : SURF/DEPTH_UPLOAD/READBACK 16 bits
-                                             (conversion 1555 / UNORM16 par l'hôte) */
+                                             (conversion 1555 / UNORM16 par l'hôte) ;
+                                       v16 : programmes ARB de sommets et de
+                                             fragments (PROG_*), attributs
+                                             génériques QGPU_VF_GEN(k),
+                                             QGPU_CAP_PROGRAMS ;
+                                       v17 : 8 unités de texture (DOOM 3 :
+                                             interaction.vfp lit texture[0..6]) :
+                                             clés QGPU_SK_TEXTURE4.., bits
+                                             QGPU_VF_TEX(4..7), matrices et
+                                             valeurs courantes 4..7 ; 4096
+                                             textures (1024 par client) */
 
 /* ── BAR0 : fenêtre partagée (RAM) ───────────────────────────────────────── */
 #define QGPU_SHMEM_DEFAULT_MB   64
@@ -162,6 +172,16 @@
    Sans ce bit, l'opcode répond QGPU_ST_BAD_ARG : l'invité se replie sur
    SURF_READBACK + copie, il ne plante pas. */
 #define QGPU_CAP_SCANOUT        0x00000020
+/* v16 : le backend actif compile et exécute les programmes ARB (PROG_*, clés
+   QGPU_SK_VERTEX_PROGRAM / _FRAGMENT_PROGRAM, attributs génériques
+   QGPU_VF_GEN(k)). Le backend de référence ne le sait pas ; le backend OpenGL
+   ne l'annonce que si l'hôte expose GL_ARB_vertex_program ET
+   GL_ARB_fragment_program et qu'un programme d'essai compile à l'init. Sans ce
+   bit : les opcodes PROG_* et l'activation d'un programme (clé à 1) répondent
+   QGPU_ST_BACKEND, un format de sommet portant un QGPU_VF_GEN(k) vaut
+   QGPU_ST_BAD_ARG (dessin jeté, non fatal). L'invité n'émet rien de v16 sans
+   version >= 16 ET ce bit. */
+#define QGPU_CAP_PROGRAMS       0x00000040
 
 #define QGPU_IRQ_DONE           0x00000001
 
@@ -190,12 +210,20 @@
 #define QGPU_MAX_SURF_DIM       4096
 #define QGPU_MAX_CMD_WORDS      (1 << 20)   /* 4 Mio par soumission */
 #define QGPU_MAX_VERTS          (1 << 16)
-#define QGPU_MAX_TEX            512         /* v3 */
+#define QGPU_MAX_TEX            4096        /* v3 : 512 ; v17 : 4096 (1024 par client).
+                                               Prey et DOOM 3 lient plusieurs centaines
+                                               de textures par image : à 128 par client,
+                                               milliers d'évictions et de retéléversements
+                                               par image (2-4 img/s, 23/09/2026). */
 #define QGPU_MAX_TEX_DIM        2048
 #define QGPU_MAX_TEX_LEVELS     12
 #define QGPU_MAX_TEX_3D_DIM     256         /* v10 : largeur, hauteur et profondeur */
 #define QGPU_MAX_LOD_BIAS       16          /* v10 : |biais de texture + biais d'unité| */
-#define QGPU_MAX_UNITS          4           /* v5 : unités de texture */
+#define QGPU_MAX_UNITS          8           /* v5 : 4 unités de texture ; v17 : 8.
+                                               Un device < 17 n'en tient que 4 :
+                                               les clés, bits de format, matrices
+                                               et valeurs courantes des unités
+                                               4..7 lui sont inconnus (BAD_ARG). */
 #define QGPU_MAX_LIGHTS         8           /* v7 : GL_LIGHT0..GL_LIGHT7 */
 #define QGPU_MAX_CLIP_PLANES    6           /* v7 : GL_CLIP_PLANE0..5 */
 /* v8 : requêtes d'occlusion. Le découpage est celui des textures : l'espace
@@ -207,6 +235,13 @@
 #define QGPU_MAX_BUF            256         /* v14 : tampons hôte */
 #define QGPU_MAX_BUF_SIZE       (16u * 1024u * 1024u)
 #define QGPU_BUF_SHMEM          0xFFFFFFFFu /* DRAW_RAW_BUF : cet offset est BAR0 */
+/* v16 : programmes ARB, PAR CONTEXTE (un identifiant ne vaut que dans le
+   contexte qui l'a créé : rien à découper entre clients). */
+#define QGPU_MAX_PROG           64          /* identifiants 0..63 par contexte */
+#define QGPU_PROG_NONE          0xFFFFFFFFu /* PROG_BIND : aucun programme */
+#define QGPU_MAX_PROG_LEN       65536       /* octets de texte, en-tête compris */
+#define QGPU_MAX_PROG_PARAMS    256         /* program.env et program.local, par
+                                               cible (l'hôte en a au moins 96) */
 /* v7 : les commandes de géométrie sont longues (SET_LIGHT en fait 26), et la v8
    ajoute SET_POLYGON_STIPPLE, qui en fait 32. Le cœur recopie les arguments
    dans un tableau de cette taille : la borne est NOMMÉE ici pour que l'hôte et
@@ -292,6 +327,13 @@
 #define QGPU_OP_QUERY_BEGIN     0x0061  /* [id] */
 #define QGPU_OP_QUERY_END       0x0062  /* [id] */
 #define QGPU_OP_QUERY_RESULT    0x0063  /* [id, off] : 2 mots BE écrits à `off` */
+/* v16 : programmes ARB (cf. la section v16 ci-dessous) */
+#define QGPU_OP_PROG_CREATE     0x0070  /* [id, cible QGPU_PT_*] */
+#define QGPU_OP_PROG_STRING     0x0071  /* [id, len, off] texte ASCII dans BAR0 */
+#define QGPU_OP_PROG_DESTROY    0x0072  /* [id] */
+#define QGPU_OP_PROG_BIND       0x0073  /* [cible, id | QGPU_PROG_NONE] */
+#define QGPU_OP_PROG_ENV        0x0074  /* [cible, premier, n, off] n × 4 flottants */
+#define QGPU_OP_PROG_LOCAL      0x0075  /* [id, premier, n, off] n × 4 flottants */
 
 /* Longueurs (en mots, en-tête compris) attendues par opcode. */
 #define QGPU_LEN_NOP            1
@@ -329,6 +371,11 @@
 #define QGPU_LEN_SET_POLYGON_STIPPLE 33     /* v8 : la plus longue commande */
 #define QGPU_LEN_QUERY          2
 #define QGPU_LEN_QUERY_RESULT   3
+#define QGPU_LEN_PROG_CREATE    3           /* v16 */
+#define QGPU_LEN_PROG_STRING    4
+#define QGPU_LEN_PROG           2           /* DESTROY */
+#define QGPU_LEN_PROG_BIND      3
+#define QGPU_LEN_PROG_PARAMS    5           /* ENV et LOCAL */
 
 /* Formats de surface. Le mot de pixel échangé est 0xAARRGGBB big-endian :
  * l'octet « x » du framebuffer Tiger EST l'alpha (v2 ; v1 l'ignorait). */
@@ -408,8 +455,10 @@
 #define QGPU_SK_TEX3_BIND       40
 #define QGPU_SK_TEX3_ENV_MODE   41
 #define QGPU_SK_TEX3_ENV_COLOR  42
-#define QGPU_SK_COMBINE0        43  /* v5, unités 0..3 : fonctions et échelles, QGPU_COMBINE() */
-#define QGPU_SK_COMBINE_SRC0    47  /* v5, unités 0..3 : sources et opérandes, QGPU_COMBINE_SRC_*() */
+#define QGPU_SK_COMBINE0        43  /* v5, unités 0..3 : fonctions et échelles, QGPU_COMBINE() ;
+                                       4..7 : QGPU_SK_COMBINE4 (v17) */
+#define QGPU_SK_COMBINE_SRC0    47  /* v5, unités 0..3 : sources et opérandes, QGPU_COMBINE_SRC_*() ;
+                                       4..7 : QGPU_SK_COMBINE_SRC4 (v17) */
 /* v6 : stencil. Sans tampon de stencil sur la surface, le test est inopérant
  * (le fragment passe) et rien n'est écrit, comme en OpenGL. REF, les deux
  * masques et la valeur d'effacement sont bornés à 0..255 (stencil de 8 bits) ;
@@ -490,7 +539,7 @@
 /* v10 : biais de LOD de l'UNITÉ u (GL_TEXTURE_FILTER_CONTROL /
  * GL_TEXTURE_LOD_BIAS de glTexEnv, OpenGL 1.4), flottant (bits IEEE), initial
  * 0. Il s'ajoute au biais de la texture (QGPU_TP_LOD_BIAS), cf. section v10. */
-#define QGPU_SK_TEX_LOD_BIAS0      88  /* unités 0..3 : + u */
+#define QGPU_SK_TEX_LOD_BIAS0      88  /* unités 0..3 : + u ; 4..7 : QGPU_SK_TEX_LOD_BIAS4 (v17) */
 /* v10 : couleur secondaire et paramètres de point (OpenGL 1.4). Comme les clés
  * v7, elles ne servent QU'À DRAW_RAW : les sommets des anciens opcodes n'ont pas
  * de couleur secondaire, et leur taille de point est déjà calculée. */
@@ -504,7 +553,21 @@
                                           GL_POINT_DISTANCE_ATTENUATION ; */
 #define QGPU_SK_POINT_ATT_LINEAR   97  /* initial 1, 0, 0 */
 #define QGPU_SK_POINT_ATT_QUAD     98
-#define QGPU_SK_COUNT           99
+/* v16 : programmes ARB (booléens, initial 0 = glEnable(GL_VERTEX_PROGRAM_ARB)
+ * / GL_FRAGMENT_PROGRAM_ARB). Ne jouent que sur DRAW_RAW et DRAW_RAW_BUF, et
+ * seulement si un programme est lié à la cible (PROG_BIND) ; cf. section v16.
+ * Poser 1 sans QGPU_CAP_PROGRAMS vaut QGPU_ST_BACKEND (rien n'est écrit). */
+#define QGPU_SK_VERTEX_PROGRAM     99
+#define QGPU_SK_FRAGMENT_PROGRAM   100
+/* v17 : unités 4..7, à la suite de tout ce qui précède (un flux v16 ne les
+ * touche jamais). Même groupe de quatre clés que QGPU_SK_TEXTURE2, puis les
+ * GL_COMBINE et biais de LOD : on adresse une unité par QGPU_SK_UNIT(u),
+ * QGPU_SK_COMBINE(u), QGPU_SK_COMBINE_SRC(u), QGPU_SK_TEX_LOD_BIAS(u). */
+#define QGPU_SK_TEXTURE4        101 /* v17, unités 4..7 : 4 clés chacune, 101..116 */
+#define QGPU_SK_COMBINE4        117 /* v17, unités 4..7 : 117..120 */
+#define QGPU_SK_COMBINE_SRC4    121 /* v17, unités 4..7 : 121..124 */
+#define QGPU_SK_TEX_LOD_BIAS4   125 /* v17, unités 4..7 : 125..128 */
+#define QGPU_SK_COUNT           129
 
 /* Valeurs d'énumération d'OpenGL utilisées par les clés v7, nommées pour que
  * l'invité n'ait pas à les recopier à la main. */
@@ -523,10 +586,15 @@
 #define QGPU_SOP_INCR_WRAP      0x8507  /* v6, GL 1.4 / EXT_stencil_wrap */
 #define QGPU_SOP_DECR_WRAP      0x8508
 
-/* Groupe de quatre clés de l'unité u (0..3) : +0 texturage, +1 texture,
+/* Groupe de quatre clés de l'unité u (0..7) : +0 texturage, +1 texture,
  * +2 mode d'environnement, +3 couleur d'environnement. */
 #define QGPU_SK_UNIT(u)         ((u) == 0 ? QGPU_SK_TEXTURE : (u) == 1 ? QGPU_SK_TEXTURE1 : \
-                                 QGPU_SK_TEXTURE2 + 4 * ((u) - 2))
+                                 (u) < 4 ? QGPU_SK_TEXTURE2 + 4 * ((u) - 2) : \
+                                 QGPU_SK_TEXTURE4 + 4 * ((u) - 4))
+/* v17 : GL_COMBINE et biais de LOD de l'unité u (0..7) */
+#define QGPU_SK_COMBINE(u)      ((u) < 4 ? QGPU_SK_COMBINE0 + (u) : QGPU_SK_COMBINE4 + ((u) - 4))
+#define QGPU_SK_COMBINE_SRC(u)  ((u) < 4 ? QGPU_SK_COMBINE_SRC0 + (u) : QGPU_SK_COMBINE_SRC4 + ((u) - 4))
+#define QGPU_SK_TEX_LOD_BIAS(u) ((u) < 4 ? QGPU_SK_TEX_LOD_BIAS0 + (u) : QGPU_SK_TEX_LOD_BIAS4 + ((u) - 4))
 #define QGPU_SK_U_ENABLE        0
 #define QGPU_SK_U_BIND          1
 #define QGPU_SK_U_ENV_MODE      2
@@ -553,7 +621,9 @@
 #define QGPU_CS_CONSTANT        1
 #define QGPU_CS_PRIMARY         2
 #define QGPU_CS_PREVIOUS        3
-#define QGPU_CS_TEXTURE0        4   /* v12 : + n, la texture de l'unité n (crossbar) */
+#define QGPU_CS_TEXTURE0        4   /* v12 : + n, la texture de l'unité n (crossbar) ;
+                                       n < 4 seulement : le champ source fait 3 bits,
+                                       les unités 4..7 de la v17 n'y tiennent pas */
 #define QGPU_CO_COLOR           0   /* opérandes RGB */
 #define QGPU_CO_ONE_MINUS_COLOR 1
 #define QGPU_CO_ALPHA           2
@@ -633,9 +703,9 @@
 #define QGPU_VERTEX_TEX2_BYTES  (QGPU_VERTEX_TEX2_WORDS * 4)
 
 /* DRAW_TRIANGLES_TEXN (v5) : les 8 mots de base, puis s, t, r, q de chaque
- * unité 0..nunits-1 (1 ≤ nunits ≤ QGPU_MAX_UNITS). Une unité dont le
- * texturage est coupé garde ses quatre mots, ignorés. Les unités
- * s'appliquent dans l'ordre, comme GL_TEXTURE0..3. */
+ * unité 0..nunits-1 (1 ≤ nunits ≤ QGPU_MAX_UNITS : 4 avant la v17, 8 depuis).
+ * Une unité dont le texturage est coupé garde ses quatre mots, ignorés. Les
+ * unités s'appliquent dans l'ordre, comme GL_TEXTURE0..7. */
 #define QGPU_VERTEX_TEXN_WORDS(n) (8 + 4 * (n))
 #define QGPU_VERTEX_MAX_WORDS   QGPU_VERTEX_TEXN_WORDS(QGPU_MAX_UNITS)
 
@@ -710,7 +780,7 @@
  */
 #define QGPU_MTX_MODELVIEW      0
 #define QGPU_MTX_PROJECTION     1
-#define QGPU_MTX_TEXTURE0       2   /* unités 0..3 : QGPU_MTX_TEXTURE0 + u */
+#define QGPU_MTX_TEXTURE0       2   /* unités 0..7 (0..3 avant la v17) : QGPU_MTX_TEXTURE0 + u */
 #define QGPU_MTX_COUNT          (QGPU_MTX_TEXTURE0 + QGPU_MAX_UNITS)
 
 /* LUMIÈRES — QGPU_OP_SET_LIGHT
@@ -764,7 +834,7 @@
 #define QGPU_CUR_COLOR          1   /* r, g, b, a ; initial (1, 1, 1, 1) */
 #define QGPU_CUR_SEC_COLOR      2   /* r, g, b ; initial (0, 0, 0) */
 #define QGPU_CUR_FOG            3   /* x ; initial 1.0 (pas de brouillard) */
-#define QGPU_CUR_TEXCOORD0      4   /* s, t, r, q ; unités 0..3 : +u ; initial (0,0,0,1) */
+#define QGPU_CUR_TEXCOORD0      4   /* s, t, r, q ; unités 0..7 (0..3 avant la v17) : +u ; initial (0,0,0,1) */
 #define QGPU_CUR_COUNT          (QGPU_CUR_TEXCOORD0 + QGPU_MAX_UNITS)
 
 /* DESSIN BRUT — QGPU_OP_DRAW_RAW
@@ -821,11 +891,36 @@
 #define QGPU_VF_COLOR           0x0008
 #define QGPU_VF_SEC_COLOR       0x0010
 #define QGPU_VF_FOG             0x0020
-#define QGPU_VF_TEX0            0x0040      /* unités 0..3 : QGPU_VF_TEX(u) */
-#define QGPU_VF_TEX(u)          (QGPU_VF_TEX0 << (u))
-#define QGPU_VF_ALL             0x03FF      /* tout bit hors de là = QGPU_ST_BAD_ARG */
+#define QGPU_VF_TEX0            0x0040      /* unités 0..3 : bits 6..9 */
+#define QGPU_VF_TEX4            0x4000000   /* v17, unités 4..7 : bits 26..29, APRÈS les
+                                               génériques (un flux v16 ne les pose jamais) */
+#define QGPU_VF_TEX(u)          ((u) < 4 ? (QGPU_VF_TEX0 << (u)) : (QGPU_VF_TEX4 << ((u) - 4)))
+#define QGPU_VF_TEX_MASK        0x3C0003C0
+/* v16 : attributs génériques 0..7 (vertex.attrib[k] des programmes ARB), 4
+   flottants chacun, APRÈS les coordonnées de texture. Ils n'ont de sens que
+   sous QGPU_CAP_PROGRAMS (sinon BAD_ARG) ; sans programme de sommets lié et
+   actif, ils sont lus et ignorés. L'attribut 0 et la position conventionnelle
+   sont le MÊME état d'OpenGL (aliasing ARB) : si QGPU_VF_GEN(0) est présent,
+   c'est LUI la position et le champ de position du sommet est ignoré. */
+#define QGPU_VF_GEN0            0x0400      /* génériques 0..15 : QGPU_VF_GEN(k) (bits 10..25 ;
+                                               DOOM 3 met ses tangentes en 8..11) */
+#define QGPU_VF_GEN(k)          (QGPU_VF_GEN0 << (k))
+#define QGPU_VF_GEN_MAX         16
+#define QGPU_VF_GEN_MASK        0x3FFFC00
+#define QGPU_VF_ALL             0x3FFFFFFF  /* tout bit hors de là = QGPU_ST_BAD_ARG
+                                               (v16 : 0x3FFFFFF, sans les unités 4..7) */
 
-/* Taille d'un sommet, en mots, dans l'ordre fixe ci-dessus. */
+/* Taille d'un sommet, en mots, dans l'ordre fixe : position, normale, couleur,
+   couleur secondaire, brouillard, unités de texture 0..7, génériques 0..15. */
+#define QGPU_VF_GEN_WORDS(m) \
+    ((((m) & QGPU_VF_GEN(0)) ? 4 : 0) + (((m) & QGPU_VF_GEN(1)) ? 4 : 0) + \
+     (((m) & QGPU_VF_GEN(2)) ? 4 : 0) + (((m) & QGPU_VF_GEN(3)) ? 4 : 0) + \
+     (((m) & QGPU_VF_GEN(4)) ? 4 : 0) + (((m) & QGPU_VF_GEN(5)) ? 4 : 0) + \
+     (((m) & QGPU_VF_GEN(6)) ? 4 : 0) + (((m) & QGPU_VF_GEN(7)) ? 4 : 0) + \
+     (((m) & QGPU_VF_GEN(8)) ? 4 : 0) + (((m) & QGPU_VF_GEN(9)) ? 4 : 0) + \
+     (((m) & QGPU_VF_GEN(10)) ? 4 : 0) + (((m) & QGPU_VF_GEN(11)) ? 4 : 0) + \
+     (((m) & QGPU_VF_GEN(12)) ? 4 : 0) + (((m) & QGPU_VF_GEN(13)) ? 4 : 0) + \
+     (((m) & QGPU_VF_GEN(14)) ? 4 : 0) + (((m) & QGPU_VF_GEN(15)) ? 4 : 0))
 #define QGPU_VF_WORDS(m) \
     (QGPU_VF_POS_COUNT(m) + \
      (((m) & QGPU_VF_NORMAL)    ? 3 : 0) + \
@@ -835,10 +930,16 @@
      (((m) & QGPU_VF_TEX(0))    ? 4 : 0) + \
      (((m) & QGPU_VF_TEX(1))    ? 4 : 0) + \
      (((m) & QGPU_VF_TEX(2))    ? 4 : 0) + \
-     (((m) & QGPU_VF_TEX(3))    ? 4 : 0))
-/* Sommet le plus gros : 4 + 3 + 4 + 3 + 1 + 4×4. Écrit en clair, parce que
+     (((m) & QGPU_VF_TEX(3))    ? 4 : 0) + \
+     (((m) & QGPU_VF_TEX(4))    ? 4 : 0) + \
+     (((m) & QGPU_VF_TEX(5))    ? 4 : 0) + \
+     (((m) & QGPU_VF_TEX(6))    ? 4 : 0) + \
+     (((m) & QGPU_VF_TEX(7))    ? 4 : 0) + \
+     QGPU_VF_GEN_WORDS(m))
+/* Sommet le plus gros : 4 + 3 + 4 + 3 + 1 + 8×4 (= 31 jusqu'à la v15 avec
+   4 unités, 95 en v16) + 16×4 génériques. Écrit en clair, parce que
    QGPU_VF_WORDS(QGPU_VF_ALL) lirait un champ de position invalide (3). */
-#define QGPU_VF_MAX_WORDS       31
+#define QGPU_VF_MAX_WORDS       111
 
 /* ── v8 : ce qui manquait au pipeline fixe ───────────────────────────────────
  *
@@ -1308,6 +1409,71 @@
  *   L'hôte convertit. Un flux v14 refuse LEN 9 (WANT exacte → BAD_ARG) :
  *   l'invité n'émet LEN 9 que si version >= 15. STENCIL_* reste en mots 32.
  */
+
+/* ── v16 : programmes ARB de sommets et de fragments ─────────────────────────
+ *
+ *   Pourquoi. Un port Direct3D (Colin McRae Rally, Feral/IndirectX) ne dessine
+ *   qu'avec des programmes ARB (!!ARBvp1.0 / !!ARBfp1.0) et des attributs
+ *   génériques ; GLEngine 10.4.6 les émule en logiciel si le pilote ne les
+ *   annonce pas. L'hôte, lui, les compile tels quels : le texte traverse le
+ *   fil sans traduction.
+ *
+ *   OBJETS — par contexte, identifiants 0..QGPU_MAX_PROG-1.
+ *
+ *   PROG_CREATE  [id, cible]   cible QGPU_PT_VERTEX (0x8620) ou
+ *                              QGPU_PT_FRAGMENT (0x8804). Id déjà pris = LIMIT.
+ *   PROG_STRING  [id, len, off]
+ *       `len` octets de texte ASCII (1..QGPU_MAX_PROG_LEN, sans NUL) à `off`
+ *       dans BAR0. Le texte doit commencer par l'en-tête de sa cible
+ *       (« !!ARBvp1.0 » / « !!ARBfp1.0 ») ; tout autre octet que ASCII
+ *       imprimable, tabulation ou fin de ligne vaut BAD_ARG. L'hôte compile.
+ *       Un refus du compilateur de l'hôte vaut QGPU_ST_BAD_ARG **non fatal**
+ *       (comme un dessin mal formé : la soumission continue, le statut final
+ *       le rapporte, status_pc désigne la commande) et le programme est
+ *       marqué CASSÉ : tout dessin qui le trouve lié ET actif vaut BAD_ARG
+ *       (non fatal, dessin jeté). Un nouveau PROG_STRING le remplace.
+ *   PROG_DESTROY [id]          un programme lié est délié.
+ *   PROG_BIND    [cible, id]   id = QGPU_PROG_NONE délie. Le programme doit
+ *                              être de cette cible.
+ *   PROG_ENV     [cible, premier, n, off]
+ *       n × 4 flottants big-endian à `off` → program.env[premier ..
+ *       premier+n-1] de la cible, état DU CONTEXTE (pas du programme).
+ *       premier + n <= QGPU_MAX_PROG_PARAMS. n = 0 : sans effet. NaN/inf =
+ *       BAD_ARG.
+ *   PROG_LOCAL   [id, premier, n, off]   idem, program.local du programme.
+ *
+ *   ACTIVATION — clés QGPU_SK_VERTEX_PROGRAM / QGPU_SK_FRAGMENT_PROGRAM
+ *   (booléens, initial 0). Un programme n'agit que lié ET clé à 1, et
+ *   seulement sur DRAW_RAW / DRAW_RAW_BUF : les opcodes hérités
+ *   (DRAW_TRIANGLES…) ne passent jamais par un programme.
+ *
+ *   SÉMANTIQUE — celle d'OpenGL :
+ *     - programme de sommets actif : l'hôte n'applique ni matrices, ni
+ *       éclairage, ni texgen, ni plans de découpe (sauf OPTION
+ *       ARB_position_invariant, qui garde la transformation fixe de la
+ *       position) ; le programme lit state.matrix.*, program.env/local,
+ *       vertex.attrib[k] (QGPU_VF_GEN(k)) et les attributs conventionnels du
+ *       format. Le test « w ≈ 0 » du cœur (H4) ne s'applique pas : la
+ *       position du sommet n'est pas la position de découpe.
+ *     - programme de fragments actif : l'environnement de texture
+ *       (QGPU_SK_*_ENV_MODE, COMBINE) est ignoré ; texture[u] est la texture
+ *       LIÉE à l'unité u (QGPU_SK_TEXu_BIND), complète, que l'unité soit
+ *       « allumée » ou non (QGPU_SK_TEXTUREu n'est pas consulté : Direct3D
+ *       n'allume rien). Le mélange, l'alpha, la profondeur, le stencil, le
+ *       brouillard restent ceux des clés.
+ *     - l'axe y : le cœur rend la ligne 0 EN HAUT ; le backend réécrit
+ *       result.position (y ← −y) dans le texte qu'il compile pour qu'un
+ *       programme écrit pour OpenGL rende comme le pipeline fixe. Invisible
+ *       sur le fil. fragment.position n'est PAS retourné (non tenu).
+ *
+ *   FORMAT DE SOMMET — QGPU_VF_GEN(k), cf. ci-dessus.
+ *
+ *   Un flux v15 ignore les opcodes (BAD_OPCODE), refuse les clés (BAD_ARG) et
+ *   les bits de format (BAD_ARG) : l'invité n'émet rien de v16 sans
+ *   version >= 16 et QGPU_CAP_PROGRAMS.
+ */
+#define QGPU_PT_VERTEX          0x8620  /* GL_VERTEX_PROGRAM_ARB */
+#define QGPU_PT_FRAGMENT        0x8804  /* GL_FRAGMENT_PROGRAM_ARB */
 
 /* ── Interface du kext POMPPCGPU (IOUserClient) ──────────────────────────────
  *

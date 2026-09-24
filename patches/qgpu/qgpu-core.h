@@ -159,6 +159,38 @@ typedef struct QgpuGeom {
     float   depth_near, depth_far;
 } QgpuGeom;
 
+/* ── v16 : programmes ARB, par contexte ──────────────────────────────────────
+ *
+ * Le cœur tient le texte (validé : ASCII, en-tête de la cible), les
+ * paramètres locaux et l'état lié/actif ; le backend compile (prog_string) et
+ * garde son objet dans `priv`. Les paramètres d'environnement sont ceux du
+ * CONTEXTE (un jeu par cible). Les drapeaux `dirty` sont posés par le cœur et
+ * effacés par le backend quand il a poussé les valeurs, comme pour les
+ * textures. Les indices : 0 = sommets, 1 = fragments (QGPU_PROG_VP / _FP). */
+enum { QGPU_PROG_VP = 0, QGPU_PROG_FP = 1 };
+
+typedef struct QgpuProgram {
+    bool      used;
+    uint32_t  target;              /* QGPU_PT_VERTEX / QGPU_PT_FRAGMENT */
+    char     *text;                /* NUL-terminé, NULL tant que PROG_STRING n'a
+                                      pas été reçu */
+    uint32_t  len;
+    bool      compiled;            /* le backend a accepté `text` */
+    bool      broken;              /* le backend a REFUSÉ `text` : dessin jeté */
+    float   (*local)[4];           /* QGPU_MAX_PROG_PARAMS × 4, alloué à la création */
+    uint32_t  local_hi;            /* 1 + plus grand indice jamais posé */
+    bool      local_dirty;
+    void     *priv;                /* propriété du backend */
+} QgpuProgram;
+
+typedef struct QgpuProgSet {
+    QgpuProgram prog[QGPU_MAX_PROG];
+    int32_t     bound[2];          /* [VP, FP] : id lié, -1 si aucun */
+    float       env[2][QGPU_MAX_PROG_PARAMS][4];
+    uint32_t    env_hi[2];         /* 1 + plus grand indice jamais posé */
+    bool        env_dirty[2];
+} QgpuProgSet;
+
 typedef struct QgpuContext {
     bool        used;
     int32_t     surf;              /* surface liée, -1 si aucune */
@@ -166,7 +198,25 @@ typedef struct QgpuContext {
     QgpuGeom    gm;                /* v7 */
     QgpuStipple stip;              /* v8 : pointillé de polygone */
     int32_t     query;             /* v8 : requête ouverte, -1 si aucune */
+    QgpuProgSet prg;               /* v16 : programmes ARB */
 } QgpuContext;
+
+/* v16 : le programme qui AGIT sur la cible `which` (QGPU_PROG_VP / _FP) : lié,
+   clé d'activation à 1, texte accepté. NULL sinon. Un programme lié, actif et
+   CASSÉ rend aussi NULL : c'est le cœur qui jette le dessin avant d'appeler le
+   backend (qgpu_prog_blocked). */
+static inline QgpuProgram *qgpu_prog_active(const QgpuState *st, QgpuProgSet *pg,
+                                            int which)
+{
+    uint32_t key = which == QGPU_PROG_VP ? QGPU_SK_VERTEX_PROGRAM
+                                         : QGPU_SK_FRAGMENT_PROGRAM;
+    QgpuProgram *p;
+    if (!pg || !st->v[key] || pg->bound[which] < 0) {
+        return NULL;
+    }
+    p = &pg->prog[pg->bound[which]];
+    return (p->used && p->compiled && !p->broken) ? p : NULL;
+}
 
 void qgpu_state_init(QgpuState *st);
 /* v10 : paramètres de point (chemin brut). */
@@ -257,6 +307,15 @@ typedef struct QgpuBackend {
     bool (*query_end)(QgpuCore *c, QgpuQuery *q);
     bool (*query_result)(QgpuCore *c, QgpuQuery *q);
     void (*query_destroy)(QgpuCore *c, QgpuQuery *q);    /* libère q->priv */
+    /* v16 : programmes ARB. prog_string compile p->text (déjà validé par le
+       cœur : ASCII, en-tête de la cible) et rend false si le compilateur de
+       l'hôte le refuse — le cœur marque alors le programme cassé, ce n'est pas
+       une panne. prog_destroy libère p->priv. Absents, ou init() n'ayant pas
+       annoncé QGPU_CAP_PROGRAMS : les opcodes PROG_* répondent
+       QGPU_ST_BACKEND. Les paramètres (env du contexte, local du programme)
+       sont poussés par le backend au dessin, d'après les drapeaux dirty. */
+    bool (*prog_string)(QgpuCore *c, QgpuProgram *p);
+    void (*prog_destroy)(QgpuCore *c, QgpuProgram *p);
 } QgpuBackend;
 
 struct QgpuCore {
@@ -281,6 +340,8 @@ struct QgpuCore {
     QgpuQuery         *cur_query;  /* requête ouverte, ou NULL */
     int32_t            cur_sec;    /* v11 : mot de la couleur secondaire dans les
                                       sommets du dessin hérité en cours, ou -1 */
+    QgpuProgSet       *cur_prg;    /* v16 : programmes du contexte courant ; ne
+                                      jouent que pour draw_raw */
 
     uint32_t status;               /* QGPU_ST_* de la dernière exécution */
     uint32_t status_pc;            /* index (mots) de la commande fautive */

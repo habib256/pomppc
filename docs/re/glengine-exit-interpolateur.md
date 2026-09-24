@@ -48,6 +48,13 @@ d'UT2004 avec plusieurs unités, couleur, couleur secondaire et brouillard dépa
 les 160 mots. Le GeForce3 réel n'y tombait pas parce que sa T&L matérielle découpe
 elle-même ; nous, nous laissons GLEngine découper ce que nous ne prenons pas en brut.
 
+**Vu aussi avec DOOM 3 (23/09/2026)** : chaque notion que le plugin refuse sous programme
+ARB (génériques 8..11 avant les seize génériques, `texture[4..6]` avant la v17 à huit
+unités) renvoie le lot à `gleDrawArraysOrElements_VBO_Exec` → `gleVPRenderTriangles` →
+`gleClipPoly` → `gleSetClipInterpFunc` → `gleBuildInterpolateFunc` → `exit(1)`, et le
+jeu meurt en segfault dans les destructeurs statiques de `gameppc.dylib` pendant cet
+`exit` (rapport CrashReporter : `idDynamicBlockAlloc::Free` sous `__cxa_finalize`).
+
 **Expérience en cours** : `POMPPC_GL_RDIRTY=0` (`cfg+0x7a = 0`) avec le chemin brut coupé.
 Si la sortie disparaît, le compromis est à revoir : soit `cfg+0x7a = 0` et gérer le
 repli `_gleForceToSoftwareTCL` (F1 sait maintenant refermer un `pend` orphelin), soit

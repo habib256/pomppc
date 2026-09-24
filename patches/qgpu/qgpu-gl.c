@@ -105,7 +105,33 @@ typedef struct GlState {
     void (*ClampColor)(GLenum, GLenum);
     void (*GetQueryObjectui64v)(GLuint, GLenum, uint64_t *);
     const char *renderer;
+    /* v16 : programmes ARB (ARB_vertex_program + ARB_fragment_program).
+       Facultatifs : `has_prog` = QGPU_CAP_PROGRAMS annoncé. */
+    void (*GenProgramsARB)(GLsizei, GLuint *);
+    void (*DeleteProgramsARB)(GLsizei, const GLuint *);
+    void (*BindProgramARB)(GLenum, GLuint);
+    void (*ProgramStringARB)(GLenum, GLenum, GLsizei, const GLvoid *);
+    void (*ProgramEnvParameter4fvARB)(GLenum, GLuint, const GLfloat *);
+    void (*ProgramLocalParameter4fvARB)(GLenum, GLuint, const GLfloat *);
+    void (*VertexAttribPointerARB)(GLuint, GLint, GLenum, GLboolean, GLsizei,
+                                   const GLvoid *);
+    void (*EnableVertexAttribArrayARB)(GLuint);
+    void (*DisableVertexAttribArrayARB)(GLuint);
+    void (*GetProgramivARB)(GLenum, GLenum, GLint *);
+    bool has_prog;
+    GLint max_env[2], max_local[2];   /* limites de l'hôte, [VP, FP] */
+    /* program.env est un état du contexte GL HÔTE, unique, que se partagent
+       tous les contextes invités : on note à qui appartient ce qui y est. */
+    const void *env_owner[2];
+    uint32_t    env_high[2];       /* entrées de program.env possiblement non nulles */
 } GlState;
+
+/* v16 : objet programme côté hôte. */
+typedef struct GlProgram {
+    GLuint id;
+    bool   pos_invariant;          /* OPTION ARB_position_invariant : la position
+                                      suit le pipeline fixe (et son retournement) */
+} GlProgram;
 
 typedef struct GlSurface {
     GLuint fbo, tex, depth;        /* depth : texture DEPTH_COMPONENT, ou 0 */
@@ -453,6 +479,18 @@ static bool gl_resolve(GlState *g)
     if (!g->GetQueryObjectui64v) {
         g->GetQueryObjectui64v = gl_proc("glGetQueryObjectui64vEXT");
     }
+    /* v16 : programmes ARB — FACULTATIFS (QGPU_CAP_PROGRAMS). Les noms ARB
+       sont les seuls : ces extensions n'ont jamais été promues au cœur. */
+    g->GenProgramsARB = gl_proc("glGenProgramsARB");
+    g->DeleteProgramsARB = gl_proc("glDeleteProgramsARB");
+    g->BindProgramARB = gl_proc("glBindProgramARB");
+    g->ProgramStringARB = gl_proc("glProgramStringARB");
+    g->ProgramEnvParameter4fvARB = gl_proc("glProgramEnvParameter4fvARB");
+    g->ProgramLocalParameter4fvARB = gl_proc("glProgramLocalParameter4fvARB");
+    g->VertexAttribPointerARB = gl_proc("glVertexAttribPointerARB");
+    g->EnableVertexAttribArrayARB = gl_proc("glEnableVertexAttribArrayARB");
+    g->DisableVertexAttribArrayARB = gl_proc("glDisableVertexAttribArrayARB");
+    g->GetProgramivARB = gl_proc("glGetProgramivARB");
     return g->GenFramebuffers && g->DeleteFramebuffers && g->BindFramebuffer &&
            g->FramebufferTexture2D && g->CheckFramebufferStatus &&
            g->BlendFuncSeparate && g->BlendEquationSeparate &&
@@ -634,6 +672,284 @@ static bool gl_selftest(GlState *g, const char **why)
     return ok;
 }
 
+/* ── v16 : programmes ARB ────────────────────────────────────────────────────
+ *
+ * LE RETOURNEMENT, encore. Le cœur rend la ligne 0 en haut ; le chemin brut
+ * l'obtient en glissant un glScalef(1, −1, 1) dans la projection. Un programme
+ * de sommets calcule result.position LUI-MÊME, le plus souvent avec des
+ * matrices passées en program.env (Direct3D) que notre projection ne touche
+ * pas. On réécrit donc le TEXTE : result.position devient un temporaire, et un
+ * MUL final par {1, −1, 1, 1} le retourne. Un programme sous OPTION
+ * ARB_position_invariant garde la transformation fixe — et son glScalef. */
+#ifndef GL_VERTEX_PROGRAM_ARB
+#define GL_VERTEX_PROGRAM_ARB              0x8620
+#endif
+#ifndef GL_FRAGMENT_PROGRAM_ARB
+#define GL_FRAGMENT_PROGRAM_ARB            0x8804
+#endif
+#ifndef GL_PROGRAM_FORMAT_ASCII_ARB
+#define GL_PROGRAM_FORMAT_ASCII_ARB        0x8875
+#endif
+#ifndef GL_PROGRAM_ERROR_POSITION_ARB
+#define GL_PROGRAM_ERROR_POSITION_ARB      0x864B
+#endif
+#ifndef GL_PROGRAM_ERROR_STRING_ARB
+#define GL_PROGRAM_ERROR_STRING_ARB        0x8874
+#endif
+#ifndef GL_MAX_PROGRAM_ENV_PARAMETERS_ARB
+#define GL_MAX_PROGRAM_ENV_PARAMETERS_ARB  0x88B5
+#endif
+#ifndef GL_MAX_PROGRAM_LOCAL_PARAMETERS_ARB
+#define GL_MAX_PROGRAM_LOCAL_PARAMETERS_ARB 0x88B4
+#endif
+
+static bool ident_char(char ch)
+{
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+           (ch >= '0' && ch <= '9') || ch == '_' || ch == '$';
+}
+
+/* Réécrit un programme de sommets pour retourner y (cf. ci-dessus). Rend un
+   texte alloué, ou NULL si la réécriture est impossible (pas d'en-tête, pas
+   de END). Les occurrences de result.position deviennent qgpu_pos_ ; une
+   déclaration « OUTPUT nom = qgpu_pos_; » devient un ALIAS, ce que la
+   grammaire ARB permet pour un temporaire. */
+static char *gl_prog_flip(const char *src, size_t len)
+{
+    static const char key[] = "result.position";
+    static const char tmp[] = "qgpu_pos_";
+    static const char decl[] = "TEMP qgpu_pos_;\n";
+    static const char fin[] = "MUL result.position, qgpu_pos_, {1.0, -1.0, 1.0, 1.0};\n";
+    const size_t klen = sizeof(key) - 1, tlen = sizeof(tmp) - 1;
+    const char *hdr_end = memchr(src, '\n', len);
+    const char *end_kw = NULL, *p;
+    size_t i, o = 0;
+    char *out;
+
+    if (!hdr_end) {
+        return NULL;
+    }
+    /* le dernier END à une frontière de mot */
+    for (p = src; (p = memmem(p, (size_t)(src + len - p), "END", 3)) != NULL; p += 3) {
+        bool left = (p == src) || !ident_char(p[-1]);
+        bool right = (p + 3 >= src + len) || !ident_char(p[3]);
+        if (left && right) {
+            end_kw = p;
+        }
+    }
+    if (!end_kw) {
+        return NULL;
+    }
+    out = malloc(len + sizeof(decl) + sizeof(fin) + 8);
+    if (!out) {
+        return NULL;
+    }
+    /* en-tête, puis la déclaration du temporaire */
+    i = (size_t)(hdr_end - src) + 1;
+    memcpy(out, src, i);
+    o = i;
+    memcpy(out + o, decl, sizeof(decl) - 1);
+    o += sizeof(decl) - 1;
+    while (i < len) {
+        if (src + i == end_kw) {
+            memcpy(out + o, fin, sizeof(fin) - 1);
+            o += sizeof(fin) - 1;
+        }
+        if (len - i >= klen && memcmp(src + i, key, klen) == 0 &&
+            (i == 0 || !ident_char(src[i - 1])) &&
+            (i + klen >= len || !ident_char(src[i + klen]))) {
+            /* OUTPUT nom = result.position → ALIAS nom = qgpu_pos_ */
+            size_t b = o;
+            while (b > 0 && (out[b - 1] == ' ' || out[b - 1] == '\t')) b--;
+            if (b > 0 && out[b - 1] == '=') {
+                size_t q = b - 1;
+                while (q > 0 && (out[q - 1] == ' ' || out[q - 1] == '\t')) q--;
+                while (q > 0 && ident_char(out[q - 1])) q--;
+                while (q > 0 && (out[q - 1] == ' ' || out[q - 1] == '\t')) q--;
+                if (q >= 6 && memcmp(out + q - 6, "OUTPUT", 6) == 0 &&
+                    (q == 6 || !ident_char(out[q - 7]))) {
+                    memcpy(out + q - 6, "ALIAS ", 6);
+                }
+            }
+            memcpy(out + o, tmp, tlen);
+            o += tlen;
+            i += klen;
+            continue;
+        }
+        out[o++] = src[i++];
+    }
+    out[o] = '\0';
+    return out;
+}
+
+/* Compile `text` dans l'objet lié ; rend false et explique sur stderr si le
+   compilateur de l'hôte refuse. */
+static bool gl_prog_compile(GlState *g, GLenum target, const char *text, size_t len,
+                            const char *what)
+{
+    GLint pos = -1;
+    gl_err_flush();
+    g->ProgramStringARB(target, GL_PROGRAM_FORMAT_ASCII_ARB, (GLsizei)len, text);
+    if (glGetError() == GL_NO_ERROR) {
+        return true;
+    }
+    glGetIntegerv(GL_PROGRAM_ERROR_POSITION_ARB, &pos);
+    fprintf(stderr, "qgpu: programme %s refusé par l'hôte à l'octet %d : %s\n",
+            what, (int)pos, (const char *)glGetString(GL_PROGRAM_ERROR_STRING_ARB));
+    gl_err_flush();
+    return false;
+}
+
+static bool gl_prog_string(QgpuCore *c, QgpuProgram *p)
+{
+    GlState *g = c->be_priv;
+    GlProgram *gp = p->priv;
+    GLenum target = p->target == QGPU_PT_VERTEX ? GL_VERTEX_PROGRAM_ARB
+                                                : GL_FRAGMENT_PROGRAM_ARB;
+    char *flipped = NULL;
+    bool ok;
+
+    if (!g->has_prog || !gl_make_current(g)) {
+        return false;
+    }
+    if (!gp) {
+        gp = calloc(1, sizeof(*gp));
+        if (!gp) {
+            return false;
+        }
+        g->GenProgramsARB(1, &gp->id);
+        p->priv = gp;
+    }
+    g->BindProgramARB(target, gp->id);
+    gp->pos_invariant = (target == GL_FRAGMENT_PROGRAM_ARB) ||
+                        strstr(p->text, "ARB_position_invariant") != NULL;
+    if (gp->pos_invariant) {
+        ok = gl_prog_compile(g, target, p->text, p->len,
+                             target == GL_VERTEX_PROGRAM_ARB ? "de sommets" : "de fragments");
+    } else {
+        flipped = gl_prog_flip(p->text, p->len);
+        ok = flipped && gl_prog_compile(g, target, flipped, strlen(flipped),
+                                        "de sommets (retourné)");
+        if (!ok && c->trace && flipped) {
+            fprintf(stderr, "qgpu: texte réécrit :\n%s\n", flipped);
+        }
+        free(flipped);
+    }
+    g->BindProgramARB(target, 0);
+    return ok;
+}
+
+static void gl_prog_destroy(QgpuCore *c, QgpuProgram *p)
+{
+    GlState *g = c->be_priv;
+    GlProgram *gp = p->priv;
+    if (gp) {
+        if (g && g->has_prog && gl_make_current(g)) {
+            g->DeleteProgramsARB(1, &gp->id);
+        }
+        free(gp);
+        p->priv = NULL;
+    }
+}
+
+/* À l'init : les deux extensions, tous les points d'entrée, et un programme
+   d'essai de chaque cible — passé par la réécriture, comme en production. */
+static bool gl_prog_probe(GlState *g)
+{
+    static const char vp[] =
+        "!!ARBvp1.0\n"
+        "OUTPUT oPos = result.position;\n"
+        "DP4 oPos.x, state.matrix.mvp.row[0], vertex.position;\n"
+        "DP4 oPos.y, state.matrix.mvp.row[1], vertex.position;\n"
+        "DP4 oPos.z, state.matrix.mvp.row[2], vertex.position;\n"
+        "DP4 oPos.w, state.matrix.mvp.row[3], vertex.position;\n"
+        "MOV result.color, vertex.attrib[1];\n"
+        "END\n";
+    static const char fp[] =
+        "!!ARBfp1.0\n"
+        "TEMP t;\n"
+        "TEX t, fragment.texcoord[0], texture[0], 2D;\n"
+        "MUL result.color, t, fragment.color.primary;\n"
+        "END\n";
+    GLuint ids[2];
+    char *flipped;
+    bool ok;
+
+    if (!g->GenProgramsARB || !g->DeleteProgramsARB || !g->BindProgramARB ||
+        !g->ProgramStringARB || !g->ProgramEnvParameter4fvARB ||
+        !g->ProgramLocalParameter4fvARB || !g->VertexAttribPointerARB ||
+        !g->EnableVertexAttribArrayARB || !g->DisableVertexAttribArrayARB ||
+        !g->GetProgramivARB) {
+        return false;
+    }
+    if (!gl_has_ext(g, "GL_ARB_vertex_program") ||
+        !gl_has_ext(g, "GL_ARB_fragment_program")) {
+        return false;
+    }
+    g->GenProgramsARB(2, ids);
+    g->BindProgramARB(GL_VERTEX_PROGRAM_ARB, ids[0]);
+    flipped = gl_prog_flip(vp, sizeof(vp) - 1);
+    ok = flipped && gl_prog_compile(g, GL_VERTEX_PROGRAM_ARB, flipped, strlen(flipped),
+                                    "d'essai (sommets)");
+    free(flipped);
+    if (ok) {
+        g->GetProgramivARB(GL_VERTEX_PROGRAM_ARB, GL_MAX_PROGRAM_ENV_PARAMETERS_ARB,
+                           &g->max_env[QGPU_PROG_VP]);
+        g->GetProgramivARB(GL_VERTEX_PROGRAM_ARB, GL_MAX_PROGRAM_LOCAL_PARAMETERS_ARB,
+                           &g->max_local[QGPU_PROG_VP]);
+        g->BindProgramARB(GL_FRAGMENT_PROGRAM_ARB, ids[1]);
+        ok = gl_prog_compile(g, GL_FRAGMENT_PROGRAM_ARB, fp, sizeof(fp) - 1,
+                             "d'essai (fragments)");
+        g->GetProgramivARB(GL_FRAGMENT_PROGRAM_ARB, GL_MAX_PROGRAM_ENV_PARAMETERS_ARB,
+                           &g->max_env[QGPU_PROG_FP]);
+        g->GetProgramivARB(GL_FRAGMENT_PROGRAM_ARB, GL_MAX_PROGRAM_LOCAL_PARAMETERS_ARB,
+                           &g->max_local[QGPU_PROG_FP]);
+        g->BindProgramARB(GL_FRAGMENT_PROGRAM_ARB, 0);
+    }
+    g->BindProgramARB(GL_VERTEX_PROGRAM_ARB, 0);
+    g->DeleteProgramsARB(2, ids);
+    gl_err_flush();
+    /* Colin McRae emploie program.env[0..95] : en deçà, on n'annonce rien. */
+    return ok && g->max_env[QGPU_PROG_VP] >= 96 && g->max_env[QGPU_PROG_FP] >= 24 &&
+           g->max_local[QGPU_PROG_VP] >= 96 && g->max_local[QGPU_PROG_FP] >= 24;
+}
+
+/* Au dessin : lie le programme de la cible et pousse ses paramètres. `w` est
+   l'indice QGPU_PROG_*, `pg` le jeu du contexte invité courant. */
+static void gl_prog_use(GlState *g, QgpuProgSet *pg, int w, QgpuProgram *p)
+{
+    GLenum target = w == QGPU_PROG_VP ? GL_VERTEX_PROGRAM_ARB : GL_FRAGMENT_PROGRAM_ARB;
+    GlProgram *gp = p->priv;
+    uint32_t i, n;
+
+    g->BindProgramARB(target, gp->id);
+    glEnable(target);
+    if (pg->env_dirty[w] || g->env_owner[w] != pg) {
+        /* Tout ce que ce contexte a posé — et, si l'hôte porte encore les
+           valeurs d'un autre contexte, assez de zéros pour les recouvrir. */
+        n = pg->env_hi[w] > g->env_high[w] ? pg->env_hi[w] : g->env_high[w];
+        if (n > (uint32_t)g->max_env[w]) {
+            n = (uint32_t)g->max_env[w];
+        }
+        for (i = 0; i < n; i++) {
+            g->ProgramEnvParameter4fvARB(target, i, pg->env[w][i]);
+        }
+        g->env_high[w] = n;
+        pg->env_dirty[w] = false;
+        g->env_owner[w] = pg;
+    }
+    if (p->local_dirty) {
+        n = p->local_hi;
+        if (n > (uint32_t)g->max_local[w]) {
+            n = (uint32_t)g->max_local[w];
+        }
+        for (i = 0; i < n; i++) {
+            g->ProgramLocalParameter4fvARB(target, i, p->local[i]);
+        }
+        p->local_dirty = false;
+    }
+}
+
 static bool gl_init(QgpuCore *c)
 {
     const char *why = NULL;
@@ -731,6 +1047,11 @@ static bool gl_init(QgpuCore *c)
                       gl_has_ext(g, "GL_ARB_texture_rectangle") ||
                       gl_has_ext(g, "GL_EXT_texture_rectangle") ||
                       gl_has_ext(g, "GL_NV_texture_rectangle");
+        /* v16 : programmes ARB, annoncés seulement si un essai compile. */
+        g->has_prog = gl_prog_probe(g);
+        if (g->has_prog) {
+            c->caps |= QGPU_CAP_PROGRAMS;
+        }
     }
     /* Mineur : le backend de référence borne toutes ses couleurs à [0,1] ;
        un contexte dont le bornage a été éteint (ARB_color_buffer_float)
@@ -970,6 +1291,12 @@ static bool gl_target(QgpuCore *c, QgpuSurface *s, const QgpuState *st)
     glDisable(GL_POLYGON_OFFSET_LINE);
     glDisable(GL_POLYGON_OFFSET_POINT);
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    /* v16 : un programme ne survit pas à une commande — seul gl_draw_raw en
+       allume, juste avant son dessin. */
+    if (g->has_prog) {
+        glDisable(GL_VERTEX_PROGRAM_ARB);
+        glDisable(GL_FRAGMENT_PROGRAM_ARB);
+    }
     if (!st) {
         glDisable(GL_FOG);
         glDisable(GL_POLYGON_OFFSET_FILL);
@@ -1316,7 +1643,8 @@ static void gl_combine(QgpuCore *c, const QgpuState *st, int u)
         GL_SUBTRACT, GL_DOT3_RGB, GL_DOT3_RGBA,
     };
     const GlState *gs = c->be_priv;
-    /* v12 : 4..7 = GL_TEXTURE0 + n (crossbar, OpenGL 1.4 : gs->has_tex) */
+    /* v12 : 4..7 = GL_TEXTURE0 + n (crossbar, OpenGL 1.4 : gs->has_tex). Le
+       champ source fait 3 bits : les unités 4..7 de la v17 n'y tiennent pas. */
     const GLenum srcs[8] = { GL_TEXTURE, GL_CONSTANT, GL_PRIMARY_COLOR, GL_PREVIOUS,
                              gs->has_tex ? GL_TEXTURE0 : GL_TEXTURE,
                              gs->has_tex ? GL_TEXTURE0 + 1 : GL_TEXTURE,
@@ -1326,8 +1654,8 @@ static void gl_combine(QgpuCore *c, const QgpuState *st, int u)
         GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
     };
     static const GLenum ops_a[2] = { GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA };
-    uint32_t cb = st->v[QGPU_SK_COMBINE0 + u];
-    uint32_t src = st->v[QGPU_SK_COMBINE_SRC0 + u];
+    uint32_t cb = st->v[QGPU_SK_COMBINE(u)];
+    uint32_t src = st->v[QGPU_SK_COMBINE_SRC(u)];
     int i;
 
     glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, fn[cb & 7]);
@@ -1363,7 +1691,7 @@ static bool gl_unit_env(QgpuCore *c, const QgpuState *st, int u, QgpuTexture *te
     if (g->has_tex) {
         /* v10 : biais de LOD de l'unité (OpenGL 1.4) */
         glTexEnvf(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS,
-                  qgpu_u2f(st->v[QGPU_SK_TEX_LOD_BIAS0 + u]));
+                  qgpu_u2f(st->v[QGPU_SK_TEX_LOD_BIAS(u)]));
     }
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, mode);
     if (mode == GL_COMBINE) {
@@ -1530,6 +1858,16 @@ static bool gl_reset_raw(QgpuCore *c)
     glDisableClientState(GL_NORMAL_ARRAY);
     glDisableClientState(GL_SECONDARY_COLOR_ARRAY);
     glDisableClientState(GL_FOG_COORDINATE_ARRAY);
+    if (g->has_prog) {                              /* v16 */
+        glDisable(GL_VERTEX_PROGRAM_ARB);
+        glDisable(GL_FRAGMENT_PROGRAM_ARB);
+        g->BindProgramARB(GL_VERTEX_PROGRAM_ARB, 0);
+        g->BindProgramARB(GL_FRAGMENT_PROGRAM_ARB, 0);
+        /* l'attribut 0 EST le tableau de sommets, déjà coupé */
+        for (i = 1; i < QGPU_VF_GEN_MAX; i++) {
+            g->DisableVertexAttribArrayARB((GLuint)i);
+        }
+    }
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
     return gl_err_ok();
@@ -1777,8 +2115,18 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
     int vx, vy, vw, vh;
     bool ok = true;
     int u;
+    /* v16 : programmes qui agissent sur CE dessin (le cœur a déjà écarté un
+       programme cassé) ; `flip_in_proj` = le retournement y reste dans la
+       projection (pipeline fixe, ou position invariante). */
+    QgpuProgram *vp = qgpu_prog_active(st, c->cur_prg, QGPU_PROG_VP);
+    QgpuProgram *fp = qgpu_prog_active(st, c->cur_prg, QGPU_PROG_FP);
+    bool flip_in_proj = !vp || ((GlProgram *)vp->priv)->pos_invariant;
 
     (void)nverts;
+    if (!g->has_prog) {
+        vp = fp = NULL;
+        flip_in_proj = true;
+    }
     if (!gl_target(c, s, st)) {
         return false;
     }
@@ -1791,7 +2139,9 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
     glDepthRange(gm->depth_near, gm->depth_far);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    glScalef(1.0f, -1.0f, 1.0f);                  /* cf. LE RETOURNEMENT */
+    if (flip_in_proj) {
+        glScalef(1.0f, -1.0f, 1.0f);              /* cf. LE RETOURNEMENT */
+    }
     glMultMatrixf(gm->mtx[QGPU_MTX_PROJECTION]);
 
     /* modèle-vue identité pendant qu'on pose ce qu'OpenGL transformerait */
@@ -1852,7 +2202,17 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
 
     /* Tableaux de sommets : un attribut absent devient une valeur courante. */
     glEnableClientState(GL_VERTEX_ARRAY);
-    glVertexPointer(QGPU_VF_POS_COUNT(fmt), GL_FLOAT, stride, verts);
+    {
+        /* v16 : QGPU_VF_GEN(0) EST la position (aliasing ARB). On la donne
+           par glVertexPointer plutôt que par glVertexAttribPointerARB(0) :
+           l'hôte Apple ne fait pas gagner le dernier posé des deux. */
+        int off_g0 = qgpu_vf_offset(fmt, (uint32_t)QGPU_VF_GEN(0));
+        if (off_g0 >= 0 && g->has_prog) {
+            glVertexPointer(4, GL_FLOAT, stride, verts + off_g0);
+        } else {
+            glVertexPointer(QGPU_VF_POS_COUNT(fmt), GL_FLOAT, stride, verts);
+        }
+    }
     if (off_n >= 0) {
         glEnableClientState(GL_NORMAL_ARRAY);
         glNormalPointer(GL_FLOAT, stride, verts + off_n);
@@ -1918,6 +2278,28 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
             glDisableClientState(GL_TEXTURE_COORD_ARRAY);
             g->MultiTexCoord4fv(GL_TEXTURE0 + u, gm->cur_tex[u]);
         }
+    }
+    /* v16 : attributs génériques, puis les programmes — en dernier, pour que
+       l'état posé au-dessus (unités, matrices) soit celui qu'ils voient. */
+    if (ok && g->has_prog) {
+        int k;
+        for (k = 1; k < QGPU_VF_GEN_MAX; k++) {      /* 0 : glVertexPointer, ci-dessus */
+            int off_g = qgpu_vf_offset(fmt, (uint32_t)QGPU_VF_GEN(k));
+            if (off_g >= 0) {
+                g->EnableVertexAttribArrayARB((GLuint)k);
+                g->VertexAttribPointerARB((GLuint)k, 4, GL_FLOAT, GL_FALSE, stride,
+                                          verts + off_g);
+            } else {
+                g->DisableVertexAttribArrayARB((GLuint)k);
+            }
+        }
+        if (vp) {
+            gl_prog_use(g, c->cur_prg, QGPU_PROG_VP, vp);
+        }
+        if (fp) {
+            gl_prog_use(g, c->cur_prg, QGPU_PROG_FP, fp);
+        }
+        ok = gl_err_ok();
     }
     if (ok) {
         g->ClientActiveTexture(GL_TEXTURE0);
@@ -2199,6 +2581,8 @@ const QgpuBackend qgpu_backend_gl = {
     .query_end      = gl_query_end,
     .query_result   = gl_query_result,
     .query_destroy  = gl_query_destroy,
+    .prog_string    = gl_prog_string,      /* v16 */
+    .prog_destroy   = gl_prog_destroy,
 };
 
 #else /* ni CGL ni EGL : stub */

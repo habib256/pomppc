@@ -122,6 +122,8 @@ int main(int argc, char **argv)
            flux synthétique exécuté avant la soumission. */
         {
             static uint8_t ctx_seen[256], surf_seen[256], ctx_has_surf[256], tex_seen[QGPU_MAX_TEX];
+            static uint8_t prog_seen[256][QGPU_MAX_PROG];        /* v16, par contexte */
+            static uint8_t buf_seen[QGPU_MAX_BUF];               /* v14 */
             static uint32_t last_present_surf = 1;
             uint32_t pre[4096], np = 0, q, bound_ctx = 256;
             /* la surface présentée dans CETTE soumission, si on la voit */
@@ -144,6 +146,20 @@ int main(int argc, char **argv)
                     pre[np++] = QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX); pre[np++] = id; ctx_seen[id] = 1;
                 }
                 if (o == QGPU_OP_TEX_CREATE3 && id < QGPU_MAX_TEX) tex_seen[id] = 1;
+                /* v14 : tampon hôte créé avant le vidage (Prey, 23/09) : on le
+                   crée à la taille maximale, sans quoi BUF_SUBDATA puis tout
+                   le reste de la soumission sont jetés (BAD_ARG en cascade). */
+                if (o == QGPU_OP_BUF_CREATE && id < QGPU_MAX_BUF) buf_seen[id] = 1;
+                {
+                    uint32_t bid = 0xffffffffu;
+                    if (o == QGPU_OP_BUF_SUBDATA) bid = id;
+                    if (o == QGPU_OP_DRAW_RAW_BUF) bid = qgpu_ld32(shmem + h.base + (q + 3) * 4);
+                    if (bid < QGPU_MAX_BUF && !buf_seen[bid] && np + 3 <= 4090) {
+                        pre[np++] = QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE);
+                        pre[np++] = bid; pre[np++] = QGPU_MAX_BUF_SIZE;
+                        buf_seen[bid] = 1;
+                    }
+                }
                 /* texture créée avant le vidage : la créer ici, avec la cible
                    déduite de TEX_IMAGE3 (face de cube → cube), 2D sinon */
                 if ((o == QGPU_OP_TEX_IMAGE3 || o == QGPU_OP_TEX_PARAM) && id < QGPU_MAX_TEX &&
@@ -155,6 +171,22 @@ int main(int argc, char **argv)
                     }
                     pre[np++] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3); pre[np++] = id; pre[np++] = tgt;
                     tex_seen[id] = 1;
+                }
+                /* v16 : programme créé avant le vidage — son texte n'est connu
+                   que par un PROG_STRING ; on le crée alors, avec la cible lue
+                   dans l'en-tête du texte. Un BIND/LOCAL sans texte reste
+                   BAD_ARG : le rejeu ne peut pas inventer un programme. */
+                if (o == QGPU_OP_PROG_CREATE && id < QGPU_MAX_PROG && bound_ctx < 256)
+                    prog_seen[bound_ctx][id] = 1;
+                if (o == QGPU_OP_PROG_STRING && l == QGPU_LEN_PROG_STRING && id < QGPU_MAX_PROG &&
+                    bound_ctx < 256 && !prog_seen[bound_ctx][id] && np + 5 <= 4090) {
+                    uint32_t off = qgpu_ld32(shmem + h.base + (q + 3) * 4);
+                    uint32_t tgt = (off + 10 <= SHMEM && !memcmp(shmem + off, "!!ARBfp1.0", 10))
+                                   ? QGPU_PT_FRAGMENT : QGPU_PT_VERTEX;
+                    pre[np++] = QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX); pre[np++] = bound_ctx;
+                    pre[np++] = QGPU_CMD_HDR(QGPU_OP_PROG_CREATE, QGPU_LEN_PROG_CREATE);
+                    pre[np++] = id; pre[np++] = tgt;
+                    prog_seen[bound_ctx][id] = 1;
                 }
                 if (o == QGPU_OP_CTX_BIND && id < 256) bound_ctx = id;
                 if (o == QGPU_OP_SURF_BIND && bound_ctx < 256) ctx_has_surf[bound_ctx] = 1;
@@ -295,10 +327,12 @@ int main(int argc, char **argv)
                 op == QGPU_OP_DRAW_TRIANGLES_TEX || op == QGPU_OP_DRAW_TRIANGLES_TEX2) {
                 /* lot 11 : une texture liée dont aucune image n'est dans le
                    vidage rend le rejeu infidèle — le dire, une fois par texture */
-                static const uint32_t en[4] = { QGPU_SK_TEXTURE, QGPU_SK_TEXTURE1, QGPU_SK_TEXTURE2, QGPU_SK_TEXTURE3 };
-                static const uint32_t bk[4] = { QGPU_SK_TEX_BIND, QGPU_SK_TEX1_BIND, QGPU_SK_TEX2_BIND, QGPU_SK_TEX3_BIND };
-                uint32_t u;
-                for (u = 0; u < 4; u++) {
+                uint32_t en[QGPU_MAX_UNITS], bk[QGPU_MAX_UNITS], u;
+                for (u = 0; u < QGPU_MAX_UNITS; u++) {
+                    en[u] = QGPU_SK_UNIT(u) + QGPU_SK_U_ENABLE;
+                    bk[u] = QGPU_SK_UNIT(u) + QGPU_SK_U_BIND;
+                }
+                for (u = 0; u < QGPU_MAX_UNITS; u++) {
                     uint32_t id = sk[bk[u]];
                     if (sk[en[u]] && id < QGPU_MAX_TEX && !(tex_img_seen[id] & 2) && !(tex_img_seen[id] & 4)) {
                         tex_img_seen[id] |= 4;
@@ -330,8 +364,10 @@ int main(int argc, char **argv)
                     static const char *sn[8] = { "TEX", "CONST", "PRIM", "PREV", "TEX0", "TEX1", "TEX2", "TEX3" };
                     static const char *on[4] = { "c", "1-c", "a", "1-a" };
                     uint32_t u;
-                    for (u = 0; u < 4; u++) {
-                        uint32_t cb = sk[QGPU_SK_COMBINE0 + u], cs = sk[QGPU_SK_COMBINE_SRC0 + u], i;
+                    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+                        uint32_t cb = sk[QGPU_SK_COMBINE(u)], cs = sk[QGPU_SK_COMBINE_SRC(u)], i;
+                        if (u >= 4 && !sk[QGPU_SK_UNIT(u) + QGPU_SK_U_ENABLE])
+                            continue;
                         fprintf(stderr, "   u%u: %s(", u, fn[cb & 7]);
                         for (i = 0; i < 3; i++) { uint32_t v = (cs >> (5 * i)) & 0x1f; fprintf(stderr, "%s%s.%s", i ? "," : "", sn[v & 7], on[(v >> 3) & 3]); }
                         fprintf(stderr, ")x%u  A:%s(", 1u << ((cb >> 8) & 3), fn[(cb >> 4) & 7]);
@@ -370,6 +406,23 @@ int main(int argc, char **argv)
                 if (op == QGPU_OP_SET_TEXGEN && len == QGPU_LEN_SET_TEXGEN)
                     fprintf(stderr, "LIST image %u SET_TEXGEN u%u coord %u actif %u mode %x\n",
                             h.frame, a[1], a[2], a[3], a[4]);
+                /* v16 : programmes ARB */
+                if (op == QGPU_OP_PROG_CREATE && len == QGPU_LEN_PROG_CREATE)
+                    fprintf(stderr, "LIST image %u PROG_CREATE %u cible %x\n", h.frame, a[1], a[2]);
+                if (op == QGPU_OP_PROG_STRING && len == QGPU_LEN_PROG_STRING) {
+                    uint32_t n = a[2] < 40 ? a[2] : 40;
+                    fprintf(stderr, "LIST image %u PROG_STRING %u len %u : %.*s%s\n", h.frame, a[1], a[2],
+                            (int)n, a[3] + n <= SHMEM ? (const char *)shmem + a[3] : "", a[2] > 40 ? "…" : "");
+                }
+                if (op == QGPU_OP_PROG_BIND && len == QGPU_LEN_PROG_BIND)
+                    fprintf(stderr, "LIST image %u PROG_BIND cible %x id %u\n", h.frame, a[1], a[2]);
+                if ((op == QGPU_OP_PROG_ENV || op == QGPU_OP_PROG_LOCAL) && len == QGPU_LEN_PROG_PARAMS)
+                    fprintf(stderr, "LIST image %u %s %x [%u..%u]\n", h.frame,
+                            op == QGPU_OP_PROG_ENV ? "PROG_ENV cible" : "PROG_LOCAL id", a[1], a[2], a[2] + a[3]);
+                if (op == QGPU_OP_SET_STATE && len == 3 &&
+                    (a[1] == QGPU_SK_VERTEX_PROGRAM || a[1] == QGPU_SK_FRAGMENT_PROGRAM))
+                    fprintf(stderr, "LIST image %u SET_STATE %s = %u\n", h.frame,
+                            a[1] == QGPU_SK_VERTEX_PROGRAM ? "VERTEX_PROGRAM" : "FRAGMENT_PROGRAM", a[2]);
                 if (op == QGPU_OP_DRAW_RAW && len == QGPU_LEN_DRAW_RAW) {
                     /* étendue des coordonnées de texture de chaque unité portée
                        par le format : 2D en [0,1] ou vecteurs 3D (lot 11) */
@@ -395,6 +448,41 @@ int main(int argc, char **argv)
                         fprintf(stderr, "   tc u%u : s [%g, %g] t [%g, %g] r [%g, %g] q [%g, %g]\n",
                                 u, mn[0], mx[0], mn[1], mx[1], mn[2], mx[2], mn[3], mx[3]);
                         off += 4;
+                    }
+                    /* v16 : position (mots 0..) et attributs génériques, après les unités */
+                    {
+                        uint32_t k, o2 = 0, nc = QGPU_VF_POS_COUNT(fmt);
+                        for (k = 0; k < 1 + QGPU_VF_GEN_MAX; k++) {
+                            float mn[4] = { 1e30f, 1e30f, 1e30f, 1e30f }, mx[4] = { -1e30f, -1e30f, -1e30f, -1e30f };
+                            uint32_t v, c, n4 = k ? 4 : nc, at = k ? off : o2;
+                            if (k && !(fmt & QGPU_VF_GEN(k - 1))) continue;
+                            for (v = 0; v < nv; v++) {
+                                const uint8_t *vp = shmem + a[3] + ((size_t)v * pas + at) * 4;
+                                if (a[3] + ((size_t)v * pas + at + n4) * 4 > SHMEM) break;
+                                for (c = 0; c < n4; c++) {
+                                    float f = qgpu_u2f(qgpu_ld32(vp + c * 4));
+                                    if (f < mn[c]) mn[c] = f;
+                                    if (f > mx[c]) mx[c] = f;
+                                }
+                            }
+                            if (k) { fprintf(stderr, "   gen %u : [%g, %g] [%g, %g] [%g, %g] [%g, %g]\n", k - 1,
+                                             mn[0], mx[0], mn[1], mx[1], mn[2], mx[2], mn[3], mx[3]); off += 4; }
+                            else fprintf(stderr, "   pos (%u) : x [%g, %g] y [%g, %g] z [%g, %g] w [%g, %g]\n", nc,
+                                         mn[0], mx[0], mn[1], mx[1], mn[2], mx[2], mn[3], mx[3]);
+                        }
+                        /* QGPU_REPLAY_VERTS=n : les n premiers sommets, mot à mot (hexa et flottant) */
+                        if (getenv("QGPU_REPLAY_VERTS")) {
+                            uint32_t v, w, nvv = (uint32_t)atoi(getenv("QGPU_REPLAY_VERTS"));
+                            for (v = 0; v < nvv && v < nv; v++) {
+                                const uint8_t *vp = shmem + a[3] + (size_t)v * pas * 4;
+                                fprintf(stderr, "   sommet %u :", v);
+                                for (w = 0; w < words && w < 32; w++) {
+                                    uint32_t u = qgpu_ld32(vp + w * 4);
+                                    fprintf(stderr, " %08x(%g)", u, qgpu_u2f(u));
+                                }
+                                fprintf(stderr, "\n");
+                            }
+                        }
                     }
                 }
                 if (op == QGPU_OP_DRAW_RAW || op == QGPU_OP_DRAW_RAW_BUF)

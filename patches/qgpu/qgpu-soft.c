@@ -703,7 +703,7 @@ static float tri_lod(const QgpuState *st, int u, const QgpuTexture *t,
         }
         lod = (ta > 0.0f) ? 0.5f * log2f(ta / area) : -1000.0f;
     }
-    bias = t->lod_bias + qgpu_u2f(st->v[QGPU_SK_TEX_LOD_BIAS0 + u]);
+    bias = t->lod_bias + qgpu_u2f(st->v[QGPU_SK_TEX_LOD_BIAS(u)]);
     if (bias > QGPU_MAX_LOD_BIAS) bias = QGPU_MAX_LOD_BIAS;
     if (bias < -QGPU_MAX_LOD_BIAS) bias = -QGPU_MAX_LOD_BIAS;
     lod += bias;
@@ -751,8 +751,8 @@ typedef struct {
 static void tex_combine(const QgpuState *st, int unit, uint32_t fmt, Rgba tc,
                         const Rgba *prim, Rgba *cur, const UnitTexels *ut)
 {
-    uint32_t cb = st->v[QGPU_SK_COMBINE0 + unit];
-    uint32_t src = st->v[QGPU_SK_COMBINE_SRC0 + unit];
+    uint32_t cb = st->v[QGPU_SK_COMBINE(unit)];
+    uint32_t src = st->v[QGPU_SK_COMBINE_SRC(unit)];
     uint32_t ec = st->v[QGPU_SK_UNIT(unit) + QGPU_SK_U_ENV_COLOR];
     Rgba k = { ((ec >> 16) & 255) / 255.0f, ((ec >> 8) & 255) / 255.0f,
                (ec & 255) / 255.0f, ((ec >> 24) & 255) / 255.0f };
@@ -776,6 +776,7 @@ static void tex_combine(const QgpuState *st, int unit, uint32_t fmt, Rgba tc,
     for (i = 0; i < 3; i++) {
         uint32_t f = (src >> (5 * i)) & 31, g = (src >> (15 + 4 * i)) & 15;
         const Rgba *sr, *sa;
+        /* sources croisées : unités 0..3 seulement (champ de 3 bits) */
         const Rgba *pick[8] = { &t, &k, prim, cur, &x[0], &x[1], &x[2], &x[3] };
         sr = pick[f & 7];
         sa = pick[g & 7];

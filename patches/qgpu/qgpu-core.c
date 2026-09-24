@@ -90,8 +90,8 @@ void qgpu_state_init(QgpuState *st)
         int u;
         for (u = 0; u < QGPU_MAX_UNITS; u++) {
             st->v[QGPU_SK_UNIT(u) + QGPU_SK_U_ENV_MODE] = 0x2100;   /* GL_MODULATE */
-            st->v[QGPU_SK_COMBINE0 + u] = QGPU_COMBINE_DEFAULT;
-            st->v[QGPU_SK_COMBINE_SRC0 + u] = QGPU_COMBINE_SRC_DEFAULT;
+            st->v[QGPU_SK_COMBINE(u)] = QGPU_COMBINE_DEFAULT;
+            st->v[QGPU_SK_COMBINE_SRC(u)] = QGPU_COMBINE_SRC_DEFAULT;
         }
     }
     st->v[QGPU_SK_LINE_WIDTH]    = 0x3F800000;     /* 1.0 */
@@ -240,7 +240,7 @@ int qgpu_vf_offset(uint32_t fmt, uint32_t bit)
             off += size[i];
         }
     }
-    /* unités 2 et 3, à la suite de l'unité 1 */
+    /* unités 2 à 7, à la suite de l'unité 1 */
     for (i = 2; i < QGPU_MAX_UNITS; i++) {
         if (bit == (uint32_t)QGPU_VF_TEX(i)) {
             return (fmt & bit) ? off : -1;
@@ -249,7 +249,105 @@ int qgpu_vf_offset(uint32_t fmt, uint32_t bit)
             off += 4;
         }
     }
+    /* v16 : attributs génériques 0..7, après les coordonnées de texture */
+    for (i = 0; i < QGPU_VF_GEN_MAX; i++) {
+        if (bit == (uint32_t)QGPU_VF_GEN(i)) {
+            return (fmt & bit) ? off : -1;
+        }
+        if (fmt & (uint32_t)QGPU_VF_GEN(i)) {
+            off += 4;
+        }
+    }
     return -1;
+}
+
+/* ── v16 : programmes ARB ─────────────────────────────────────────────────── */
+
+static void prog_set_init(QgpuProgSet *pg)
+{
+    memset(pg, 0, sizeof(*pg));
+    pg->bound[QGPU_PROG_VP] = -1;
+    pg->bound[QGPU_PROG_FP] = -1;
+}
+
+static void prog_free(QgpuCore *c, QgpuProgram *p)
+{
+    if (p->priv && c->be && c->be->prog_destroy) {
+        c->be->prog_destroy(c, p);
+    }
+    free(p->text);
+    free(p->local);
+    memset(p, 0, sizeof(*p));
+}
+
+/* Détruit les programmes d'un contexte (destruction, reset). */
+static void prog_set_free(QgpuCore *c, QgpuProgSet *pg)
+{
+    int i;
+    for (i = 0; i < QGPU_MAX_PROG; i++) {
+        if (pg->prog[i].used) {
+            prog_free(c, &pg->prog[i]);
+        }
+    }
+    prog_set_init(pg);
+}
+
+/* Cible ARB → indice [VP, FP], ou -1. */
+static int prog_which(uint32_t target)
+{
+    return target == QGPU_PT_VERTEX ? QGPU_PROG_VP :
+           target == QGPU_PT_FRAGMENT ? QGPU_PROG_FP : -1;
+}
+
+/* Le texte d'un programme est-il recevable ? ASCII imprimable, tabulation et
+   fins de ligne seulement, et l'en-tête de SA cible en tête : c'est ce que
+   tout compilateur ARB exige, dit ici pour que le refus ait un statut et un
+   pc plutôt qu'une erreur GL muette. */
+static bool prog_text_ok(const uint8_t *s, uint32_t len, uint32_t target)
+{
+    static const char hv[] = "!!ARBvp1.0", hf[] = "!!ARBfp1.0";
+    const char *h = target == QGPU_PT_VERTEX ? hv : hf;
+    uint32_t i;
+
+    if (len < 10 || memcmp(s, h, 10) != 0) {
+        return false;
+    }
+    for (i = 0; i < len; i++) {
+        uint8_t ch = s[i];
+        if (!((ch >= 0x20 && ch <= 0x7e) || ch == '\t' || ch == '\n' || ch == '\r')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool in_shmem(const QgpuCore *c, uint64_t off, uint64_t len);
+
+/* n × 4 flottants big-endian de BAR0, assainis comme read_f. */
+static uint32_t read_f4_shmem(QgpuCore *c, uint32_t off, uint32_t n, float (*dst)[4])
+{
+    float tmp[QGPU_MAX_PROG_PARAMS][4];        /* tout ou rien : validé avant d'écrire */
+    uint32_t i, j;
+    const uint8_t *p;
+
+    if (n > QGPU_MAX_PROG_PARAMS) {
+        return QGPU_ST_BAD_ARG;
+    }
+    if (!in_shmem(c, off, (uint64_t)n * 16)) {
+        return QGPU_ST_OOB;
+    }
+    p = c->shmem + off;
+    for (i = 0; i < n; i++) {
+        for (j = 0; j < 4; j++) {
+            float v = qgpu_u2f(qgpu_ld32(p + (i * 4 + j) * 4));
+            if (v != v || v > 1e9f || v < -1e9f) {
+                return QGPU_ST_BAD_ARG;
+            }
+            tmp[i][j] = v;
+        }
+    }
+    memcpy(dst, tmp, (size_t)n * sizeof(tmp[0]));
+    return QGPU_ST_OK;
 }
 
 static bool valid_base_format(uint32_t f)
@@ -893,21 +991,32 @@ static bool valid_state(uint32_t key, uint32_t val)
         return val <= QGPU_MAX_SURF_DIM;
     case QGPU_SK_TEXTURE: case QGPU_SK_TEXTURE1: case QGPU_SK_TEXTURE2:
     case QGPU_SK_TEXTURE3: case QGPU_SK_FOG: case QGPU_SK_POLY_OFFSET:
+    case QGPU_SK_UNIT(4): case QGPU_SK_UNIT(5): case QGPU_SK_UNIT(6): case QGPU_SK_UNIT(7):
         return val <= 1;
     case QGPU_SK_TEX_BIND: case QGPU_SK_TEX1_BIND: case QGPU_SK_TEX2_BIND:
     case QGPU_SK_TEX3_BIND:
+    case QGPU_SK_UNIT(4) + QGPU_SK_U_BIND: case QGPU_SK_UNIT(5) + QGPU_SK_U_BIND:
+    case QGPU_SK_UNIT(6) + QGPU_SK_U_BIND: case QGPU_SK_UNIT(7) + QGPU_SK_U_BIND:
         return val < QGPU_MAX_TEX;
     case QGPU_SK_TEX_ENV_MODE: case QGPU_SK_TEX1_ENV_MODE: case QGPU_SK_TEX2_ENV_MODE:
     case QGPU_SK_TEX3_ENV_MODE:
+    case QGPU_SK_UNIT(4) + QGPU_SK_U_ENV_MODE: case QGPU_SK_UNIT(5) + QGPU_SK_U_ENV_MODE:
+    case QGPU_SK_UNIT(6) + QGPU_SK_U_ENV_MODE: case QGPU_SK_UNIT(7) + QGPU_SK_U_ENV_MODE:
         return valid_env_mode(val);
     case QGPU_SK_TEX_ENV_COLOR: case QGPU_SK_TEX1_ENV_COLOR: case QGPU_SK_TEX2_ENV_COLOR:
     case QGPU_SK_TEX3_ENV_COLOR: case QGPU_SK_FOG_COLOR:
+    case QGPU_SK_UNIT(4) + QGPU_SK_U_ENV_COLOR: case QGPU_SK_UNIT(5) + QGPU_SK_U_ENV_COLOR:
+    case QGPU_SK_UNIT(6) + QGPU_SK_U_ENV_COLOR: case QGPU_SK_UNIT(7) + QGPU_SK_U_ENV_COLOR:
         return true;
     case QGPU_SK_COMBINE0: case QGPU_SK_COMBINE0 + 1:
     case QGPU_SK_COMBINE0 + 2: case QGPU_SK_COMBINE0 + 3:
+    case QGPU_SK_COMBINE4: case QGPU_SK_COMBINE4 + 1:
+    case QGPU_SK_COMBINE4 + 2: case QGPU_SK_COMBINE4 + 3:
         return valid_combine(val);
     case QGPU_SK_COMBINE_SRC0: case QGPU_SK_COMBINE_SRC0 + 1:
     case QGPU_SK_COMBINE_SRC0 + 2: case QGPU_SK_COMBINE_SRC0 + 3:
+    case QGPU_SK_COMBINE_SRC4: case QGPU_SK_COMBINE_SRC4 + 1:
+    case QGPU_SK_COMBINE_SRC4 + 2: case QGPU_SK_COMBINE_SRC4 + 3:
         return valid_combine_src(val);
     case QGPU_SK_LINE_WIDTH: case QGPU_SK_POINT_SIZE: {
         float f = qgpu_u2f(val);
@@ -975,6 +1084,8 @@ static bool valid_state(uint32_t key, uint32_t val)
     /* v10 : biais de LOD d'unité (initial 0.0, donc neutre pour un flux v9) */
     case QGPU_SK_TEX_LOD_BIAS0: case QGPU_SK_TEX_LOD_BIAS0 + 1:
     case QGPU_SK_TEX_LOD_BIAS0 + 2: case QGPU_SK_TEX_LOD_BIAS0 + 3:
+    case QGPU_SK_TEX_LOD_BIAS4: case QGPU_SK_TEX_LOD_BIAS4 + 1:
+    case QGPU_SK_TEX_LOD_BIAS4 + 2: case QGPU_SK_TEX_LOD_BIAS4 + 3:
         return finite_f(val, QGPU_MAX_LOD_BIAS);
     case QGPU_SK_COLOR_SUM:
         return val <= QGPU_CSUM_FORMAT;
@@ -986,6 +1097,8 @@ static bool valid_state(uint32_t key, uint32_t val)
     case QGPU_SK_POINT_ATT_CONST: case QGPU_SK_POINT_ATT_LINEAR:
     case QGPU_SK_POINT_ATT_QUAD:
         return finite_f(val, 1e9f) && qgpu_u2f(val) >= 0.0f;
+    case QGPU_SK_VERTEX_PROGRAM: case QGPU_SK_FRAGMENT_PROGRAM:     /* v16 */
+        return val <= 1;
     default:
         return false;
     }
@@ -1019,6 +1132,7 @@ bool qgpu_core_init(QgpuCore *c, const char *backend,
         qgpu_state_init(&c->ctx[i].st);
         qgpu_geom_init(&c->ctx[i].gm);
         qgpu_stipple_init(&c->ctx[i].stip);
+        prog_set_init(&c->ctx[i].prg);
     }
 
     if (!backend || !strcmp(backend, "auto")) {
@@ -1084,12 +1198,14 @@ void qgpu_core_reset(QgpuCore *c)
         }
     }
     for (i = 0; i < QGPU_MAX_CTX; i++) {
+        prog_set_free(c, &c->ctx[i].prg);          /* v16 : avant le memset */
         memset(&c->ctx[i], 0, sizeof(c->ctx[i]));
         c->ctx[i].surf = -1;
         c->ctx[i].query = -1;
         qgpu_state_init(&c->ctx[i].st);
         qgpu_geom_init(&c->ctx[i].gm);
         qgpu_stipple_init(&c->ctx[i].stip);
+        prog_set_init(&c->ctx[i].prg);
     }
     for (i = 0; i < QGPU_MAX_TEX; i++) {
         if (c->tex[i].used) {
@@ -1285,6 +1401,14 @@ static QgpuTexture *unit_texture(QgpuCore *c, const QgpuState *st, int u)
     return qgpu_texture_levels(t) ? t : NULL;
 }
 
+/* v16 : sous un programme de fragments, texture[u] est la texture LIÉE à
+   l'unité, que l'unité soit allumée ou non (Direct3D n'allume rien). */
+static QgpuTexture *unit_texture_bound(QgpuCore *c, const QgpuState *st, int u)
+{
+    QgpuTexture *t = &c->tex[st->v[QGPU_SK_UNIT(u) + QGPU_SK_U_BIND]];
+    return qgpu_texture_levels(t) ? t : NULL;
+}
+
 /* v8 : ce qu'un dessin doit voir du contexte courant en plus de l'état GL —
    le motif de pointillé, et la requête d'occlusion ouverte s'il y en a une.
    Posé ici pour qu'un backend n'ait jamais à remonter au contexte. */
@@ -1294,6 +1418,7 @@ static void arm_draw(QgpuCore *c)
     c->cur_stip = &cx->stip;
     c->cur_query = (cx->query >= 0) ? &c->query[cx->query] : NULL;
     c->cur_sec = -1;
+    c->cur_prg = &cx->prg;                           /* v16 */
 }
 
 /* Commun aux opcodes de dessin : a = [nverts, off] ; ntex unités texturées
@@ -1415,7 +1540,7 @@ static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint3
     QgpuTexture *tex[QGPU_MAX_UNITS];
     uint32_t mode = a[0], count = a[1], voff, stride, fmt, ioff, itype, first, nverts;
     uint32_t words, i, j, st, lo, hi;
-    bool dense;
+    bool dense, vp_on = false, fp_on = false;
     QgpuSurface *s = bound_surface(c, &st);
     QgpuState *cs;
     const uint8_t *vbase, *ibase;
@@ -1437,6 +1562,11 @@ static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint3
         return QGPU_ST_BAD_ARG;
     }
     if ((fmt & ~(uint32_t)QGPU_VF_ALL) || (fmt & QGPU_VF_POS_MASK) == 3) {
+        return QGPU_ST_BAD_ARG;
+    }
+    /* v16 : des attributs génériques sans backend capable — un flux v16 sur
+       un backend logiciel — sont un dessin refusé, pas une panne. */
+    if ((fmt & QGPU_VF_GEN_MASK) && !(c->caps & QGPU_CAP_PROGRAMS)) {
         return QGPU_ST_BAD_ARG;
     }
     words = (uint32_t)QGPU_VF_WORDS(fmt);
@@ -1523,8 +1653,29 @@ static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint3
             conv_raw_vertex(c, vbase, stride, words, c->ibuf[i]);
         }
     }
+    cs = cur_state(c);
+    /* v16 : un programme lié, actif et CASSÉ (texte refusé par l'hôte) jette
+       le dessin — BAD_ARG non fatal, comme un dessin mal formé. */
+    {
+        QgpuProgSet *pg = &c->ctx[c->cur_ctx].prg;
+        int w;
+        for (w = 0; w < 2; w++) {
+            uint32_t key = w == QGPU_PROG_VP ? QGPU_SK_VERTEX_PROGRAM
+                                             : QGPU_SK_FRAGMENT_PROGRAM;
+            if (cs->v[key] && pg->bound[w] >= 0 && pg->prog[pg->bound[w]].broken) {
+                TRACE(c, "  dessin brut jeté : programme %d cassé", pg->bound[w]);
+                return QGPU_ST_BAD_ARG;
+            }
+        }
+        vp_on = qgpu_prog_active(cs, pg, QGPU_PROG_VP) != NULL;
+        fp_on = qgpu_prog_active(cs, pg, QGPU_PROG_FP) != NULL;
+    }
     j = 0;                                       /* sommet inutilisable vu ? */
-    if (itype != QGPU_IDX_NONE) {
+    /* Sous un programme de sommets, la position du sommet n'est pas la position
+       de découpe : le test w ≈ 0 (H4) n'a pas de sens, le programme décide. */
+    if (vp_on) {
+        /* rien */
+    } else if (itype != QGPU_IDX_NONE) {
         for (i = 0; i < count; i++) {
             j |= !raw_pos_usable(c, words, fmt, c->ibuf[i]);
         }
@@ -1541,9 +1692,8 @@ static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint3
         TRACE(c, "  dessin brut jeté : position à w ≈ 0");
         return QGPU_ST_OK;
     }
-    cs = cur_state(c);
     for (u = 0; u < QGPU_MAX_UNITS; u++) {
-        tex[u] = unit_texture(c, cs, u);
+        tex[u] = fp_on ? unit_texture_bound(c, cs, u) : unit_texture(c, cs, u);
     }
     if (!c->be->draw_raw) {
         return QGPU_ST_BACKEND;
@@ -1585,6 +1735,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         qgpu_state_init(&c->ctx[a[0]].st);
         qgpu_geom_init(&c->ctx[a[0]].gm);
         qgpu_stipple_init(&c->ctx[a[0]].stip);
+        prog_set_init(&c->ctx[a[0]].prg);         /* v16 */
         return QGPU_ST_OK;
 
     case QGPU_OP_CTX_DESTROY:
@@ -1602,6 +1753,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             q->active = false;
             c->ctx[a[0]].query = -1;
         }
+        prog_set_free(c, &c->ctx[a[0]].prg);      /* v16 */
         c->ctx[a[0]].used = false;
         c->ctx[a[0]].surf = -1;
         if (c->cur_ctx == (int32_t)a[0]) {
@@ -1933,6 +2085,12 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             if (!qgpu_points_plain(&tmp)) {
                 return QGPU_ST_BACKEND;
             }
+        }
+        /* v16 : activer un programme sans backend capable est refusé ici,
+           sans rien écrire — même règle que les paramètres de point. */
+        if ((a[0] == QGPU_SK_VERTEX_PROGRAM || a[0] == QGPU_SK_FRAGMENT_PROGRAM) &&
+            a[1] && !(c->caps & QGPU_CAP_PROGRAMS)) {
+            return QGPU_ST_BACKEND;
         }
         cur_state(c)->v[a[0]] = a[1];
         return QGPU_ST_OK;
@@ -2627,6 +2785,182 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         return QGPU_ST_OK;
     }
 
+    /* ── v16 : programmes ARB ───────────────────────────────────────────── */
+    case QGPU_OP_PROG_CREATE: {
+        QgpuProgram *p;
+        WANT(QGPU_LEN_PROG_CREATE);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (!(c->caps & QGPU_CAP_PROGRAMS) || !c->be->prog_string) {
+            return QGPU_ST_BACKEND;
+        }
+        if (a[0] >= QGPU_MAX_PROG || prog_which(a[1]) < 0) {
+            return QGPU_ST_BAD_ARG;
+        }
+        p = &c->ctx[c->cur_ctx].prg.prog[a[0]];
+        if (p->used) {
+            return QGPU_ST_LIMIT;
+        }
+        p->local = calloc(QGPU_MAX_PROG_PARAMS, sizeof(*p->local));
+        if (!p->local) {
+            return QGPU_ST_BACKEND;
+        }
+        p->used = true;
+        p->target = a[1];
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_PROG_STRING: {
+        QgpuProgram *p;
+        uint32_t len = a[1], off = a[2];
+        char *text;
+        WANT(QGPU_LEN_PROG_STRING);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (!(c->caps & QGPU_CAP_PROGRAMS) || !c->be->prog_string) {
+            return QGPU_ST_BACKEND;
+        }
+        if (a[0] >= QGPU_MAX_PROG || !c->ctx[c->cur_ctx].prg.prog[a[0]].used ||
+            len == 0 || len > QGPU_MAX_PROG_LEN) {
+            return QGPU_ST_BAD_ARG;
+        }
+        /* le texte n'a pas à être aligné : on ne vérifie que la fenêtre */
+        if ((uint64_t)off + len > c->shmem_size) {
+            return QGPU_ST_OOB;
+        }
+        p = &c->ctx[c->cur_ctx].prg.prog[a[0]];
+        if (!prog_text_ok(c->shmem + off, len, p->target)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        text = malloc(len + 1);
+        if (!text) {
+            return QGPU_ST_BACKEND;
+        }
+        memcpy(text, c->shmem + off, len);
+        text[len] = '\0';
+        free(p->text);
+        p->text = text;
+        p->len = len;
+        p->compiled = false;
+        p->local_dirty = true;             /* un nouvel objet hôte repart de zéro */
+        if (!c->be->prog_string(c, p)) {
+            /* Refus du compilateur de l'hôte : BAD_ARG NON FATAL (cf.
+               soft_fail_op) et programme cassé jusqu'au prochain texte. */
+            p->broken = true;
+            TRACE(c, "  programme %u refusé par l'hôte", a[0]);
+            return QGPU_ST_BAD_ARG;
+        }
+        p->compiled = true;
+        p->broken = false;
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_PROG_DESTROY: {
+        QgpuProgSet *pg;
+        WANT(QGPU_LEN_PROG);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (!(c->caps & QGPU_CAP_PROGRAMS)) {
+            return QGPU_ST_BACKEND;
+        }
+        pg = &c->ctx[c->cur_ctx].prg;
+        if (a[0] >= QGPU_MAX_PROG || !pg->prog[a[0]].used) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (pg->bound[QGPU_PROG_VP] == (int32_t)a[0]) {
+            pg->bound[QGPU_PROG_VP] = -1;
+        }
+        if (pg->bound[QGPU_PROG_FP] == (int32_t)a[0]) {
+            pg->bound[QGPU_PROG_FP] = -1;
+        }
+        prog_free(c, &pg->prog[a[0]]);
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_PROG_BIND: {
+        QgpuProgSet *pg;
+        int w = prog_which(a[0]);
+        WANT(QGPU_LEN_PROG_BIND);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (!(c->caps & QGPU_CAP_PROGRAMS)) {
+            return QGPU_ST_BACKEND;
+        }
+        pg = &c->ctx[c->cur_ctx].prg;
+        if (w < 0) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (a[1] == QGPU_PROG_NONE) {
+            pg->bound[w] = -1;
+            return QGPU_ST_OK;
+        }
+        if (a[1] >= QGPU_MAX_PROG || !pg->prog[a[1]].used ||
+            pg->prog[a[1]].target != a[0]) {
+            return QGPU_ST_BAD_ARG;
+        }
+        pg->bound[w] = (int32_t)a[1];
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_PROG_ENV:
+    case QGPU_OP_PROG_LOCAL: {
+        QgpuProgSet *pg;
+        uint32_t first = a[1], n = a[2], off = a[3];
+        float (*dst)[4];
+        WANT(QGPU_LEN_PROG_PARAMS);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (!(c->caps & QGPU_CAP_PROGRAMS)) {
+            return QGPU_ST_BACKEND;
+        }
+        pg = &c->ctx[c->cur_ctx].prg;
+        if ((uint64_t)first + n > QGPU_MAX_PROG_PARAMS) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (op == QGPU_OP_PROG_ENV) {
+            int w = prog_which(a[0]);
+            if (w < 0) {
+                return QGPU_ST_BAD_ARG;
+            }
+            if (n == 0) {
+                return QGPU_ST_OK;
+            }
+            dst = pg->env[w] + first;
+            st = read_f4_shmem(c, off, n, dst);
+            if (st != QGPU_ST_OK) {
+                return st;
+            }
+            if (first + n > pg->env_hi[w]) {
+                pg->env_hi[w] = first + n;
+            }
+            pg->env_dirty[w] = true;
+        } else {
+            QgpuProgram *p;
+            if (a[0] >= QGPU_MAX_PROG || !pg->prog[a[0]].used) {
+                return QGPU_ST_BAD_ARG;
+            }
+            if (n == 0) {
+                return QGPU_ST_OK;
+            }
+            p = &pg->prog[a[0]];
+            dst = p->local + first;
+            st = read_f4_shmem(c, off, n, dst);
+            if (st != QGPU_ST_OK) {
+                return st;
+            }
+            if (first + n > p->local_hi) {
+                p->local_hi = first + n;
+            }
+            p->local_dirty = true;
+        }
+        return QGPU_ST_OK;
+    }
+
     default:
         return QGPU_ST_BAD_OPCODE;
     }
@@ -2660,6 +2994,9 @@ static bool known_op(uint32_t op)
     /* v8 */
     case QGPU_OP_SET_POLYGON_STIPPLE: case QGPU_OP_QUERY_BEGIN:
     case QGPU_OP_QUERY_END: case QGPU_OP_QUERY_RESULT:
+    /* v16 */
+    case QGPU_OP_PROG_CREATE: case QGPU_OP_PROG_STRING: case QGPU_OP_PROG_DESTROY:
+    case QGPU_OP_PROG_BIND: case QGPU_OP_PROG_ENV: case QGPU_OP_PROG_LOCAL:
         return true;
     default:
         return false;
@@ -2667,11 +3004,14 @@ static bool known_op(uint32_t op)
 }
 
 /* Les opcodes de DESSIN : 0x0030–0x0036 sont contigus, plus les deux chemins
-   bruts. Seuls ceux-là ont droit à un BAD_ARG non fatal (cf. ci-dessous). */
+   bruts. Seuls ceux-là — et, v16, PROG_STRING, dont le refus par le
+   compilateur de l'hôte ne met pas la suite du flux en doute — ont droit à un
+   BAD_ARG non fatal (cf. ci-dessous). */
 static bool draw_op(uint32_t op)
 {
     return (op >= QGPU_OP_DRAW_TRIANGLES && op <= QGPU_OP_DRAW_TRIANGLES_SEC) ||
-           op == QGPU_OP_DRAW_RAW || op == QGPU_OP_DRAW_RAW_BUF;
+           op == QGPU_OP_DRAW_RAW || op == QGPU_OP_DRAW_RAW_BUF ||
+           op == QGPU_OP_PROG_STRING;
 }
 
 uint32_t qgpu_core_execute(QgpuCore *c, uint32_t off, uint32_t len)
