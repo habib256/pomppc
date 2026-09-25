@@ -332,9 +332,15 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
       `x-sr-tlb-verify` : SMP=1, 936 658 825 entrées retraduites, 0 divergence ; A/B Marble
       Blast SMP=2 **+9,8 %** (109 paires, manches +9,6 / +10,0 %), SMP=1 +9,5 % en moyenne mais
       non reproductible (−0,6 / +20,5 %). Essai `tcg/essais/0002` (`lmw`/`stmw` en ligne) :
-      exact, −1,3 % sur un banc dédié, **non appliqué**. **Attend la VM quotidienne** (accès
-      refusé par le classifieur de permissions le 25/09) : A/B DOOM 3 cœurs et `x-sr-tlb`,
-      profil `ppcmix` de DOOM 3 (AltiVec de `idSIMD`), puis décision du défaut. Pistes
+      exact, −1,3 % sur un banc dédié, **non appliqué**. **DOOM 3 joué le 25/09** (binaire
+      `qsr64`, `demo_mars_city1` T+50..T+280, `docs/tcg-g4.md` §6 bis) : SMP=2, 6 parties par
+      mode entrelacées, `x-sr-tlb` **médiane 80,1 contre 89,0 ms/image (−10 %)**, moyenne 83,8
+      contre 89,4 (−6 %) ; deux régimes par partie (~80 et ~93 ms) quel que soit le mode, le
+      patch en déplace les deux. SMP=1 : une partie par mode, non concluant. Profil `ppcmix`
+      en jeu : AltiVec 5,3 % (helper 2,8 % : `vperm`, `vmaddfp`, `vmrghw/lw`), `lfs`/`stfs`
+      en helper 8,0 %, `mtsrin` 50 000/s (4× moins que Marble Blast). `timedemo` impossible
+      avec la démo (fichiers hors archives officielles refusés). Reste : décision du défaut,
+      A/B SMP=1 sur DOOM 3. Pistes
       suivantes : BQL à chaque `mtmsr`/`rfi` (9-10 % + attente), `helper_lookup_tb_ptr`
       (18-21 %), étiquettes multiples par mode. Épreuve de fermeture : DOOM 3 T+50..T+280,
       deux parties par mode, `x-sr-tlb` ≥ +5 % sans régression d'image.

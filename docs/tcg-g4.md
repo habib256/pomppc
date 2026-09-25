@@ -419,6 +419,38 @@ ligne, §1.1) ; (3) `sample` hôte.
 
 ---
 
+## 6 bis. DOOM 3 joué (25/09/2026)
+
+Binaire `~/src/qemu-tcg19/build/qsr64`, plugin `20260924-liste`, `tools/tcg/d3run.sh`,
+fenêtre T+50..T+280 après la cinématique, parties entrelacées ; journaux dans
+`bench/tcg/d3/` (non versionné).
+
+| SMP=2 | parties (ms/image) | médiane | moyenne |
+|---|---|---|---|
+| `x-sr-tlb` éteint | 93,5 84,5 83,1 95,7 95,8 84,0 | 89,0 | 89,4 |
+| `x-sr-tlb` allumé | 80,0 92,3 78,4 79,6 80,1 92,3 | 80,1 | 83,8 |
+
+Chaque partie tombe dans un régime rapide ou lent, uniforme sur toute la fenêtre (médiane =
+moyenne dans la partie), sans lien avec le mode : éteint ~84 / ~95, allumé ~79 / ~92. Le
+patch déplace les deux régimes (−6 % et −3 %) ; le tirage des régimes fait l'écart de
+médiane (−10 %). Cause des régimes non trouvée (placement des fils vCPU sur les cœurs de
+l'hôte ?). Les compteurs `info jit` montrent 3× moins de vidages et de remplissages du TLB.
+
+SMP=1, une partie par mode : 74,6 (éteint), 103,2 (allumé) — non concluant, à rejouer.
+
+Profil d'instructions (`ppcmix`, SMP=2, `x-sr-tlb`, 50 s de jeu, 598 M instr./s) :
+inline 79,9 %, helper 12,6 %, flottant 5,5 %, sorties 2,0 %. AltiVec **5,3 %** (helper
+2,8 % : `vperm` 1,0, `vmaddfp` 0,5, `vmrghw` 0,4, `vmrglw` 0,3, `vaddfp` 0,2 ; en ligne :
+`lvx` 1,4, `stvx` 0,7). Premier helper : **`lfs` 5,5 % et `stfs` 2,5 %** (+ `lfsx`/`stfsx`
+0,8 %), avant AltiVec. `mtsrin` 50 000/s contre 213 000 sur Marble Blast.
+
+`timedemo` : la démo de DOOM 3 (mode restreint) refuse une démo hors de ses archives
+(`couldn't open demos/ab.demo`) et une archive ajoutée (`Sys_Error: Corrupted zz_ab.pk4`) :
+pas de rejeu déterministe possible, d'où les parties réelles.
+
+Suites dans l'ordre du profil : `lfs`/`stfs` en ops TCG (cas normal en ligne), puis
+`vperm`/`vmrg*` en gvec et `NO_RWG` sur les helpers flottants AltiVec.
+
 ## 7. Suites
 
 - **`x-sr-tlb` par défaut** (`SRTLB=1` dans `run_tiger.sh`) après la mesure DOOM 3 et une
