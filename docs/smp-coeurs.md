@@ -262,3 +262,23 @@ depuis le worktree de cette branche :
 Attendu si le §2 vaut pour DOOM 3 : les deux modes à ~74 ms/image, écart < 2 % ; chaque
 `info.txt` dit « même fenêtre ». Écarter une partie dont la cinématique est lente (témoin du
 troisième facteur, §14.7) et la rejouer. Si SMP=1 ≤ SMP=2 : lanceurs de jeux en SMP=1.
+
+### 4.2 DOOM 3 joué (26/09/2026, 1 h) — deux cœurs gagnent
+
+Binaire de référence (`tcg/0001-0004`, `0006`, placement « même fenêtre » vérifié sur les six
+parties), `demo_mars_city1` T+50..T+280, trois paires entrelacées ; `bench/tcg/d3/smp*`.
+
+| vCPU | parties (ms/image) | moyenne |
+|---|---|---|
+| 1 | 81,9 79,2 81,3 | 80,8 |
+| 2 | 74,1 74,6 74,3 | **74,3** |
+
+**Deux cœurs sont 8 % plus rapides sur DOOM 3**, à l'inverse de Marble Blast (égalité). Les
+parties à un cœur ont une cinématique normale mais un jeu **en à-coups** (tranches de 50 images
+à 88 ms/image entre des tranches à 75) : sur un seul vCPU, les autres fils de Tiger (son,
+WindowServer, fil asynchrone de DOOM 3 qui se réveille, pilotes) prennent le processeur au fil
+du jeu ; sur deux, ils vont sur le second. Le coût MTTCG sur un fil seul (12-17 %, §2) est
+plus que compensé.
+
+**Décision : SMP=2 reste le défaut, jeux compris.** La recommandation du §4 (lanceurs de jeux
+en SMP=1) est retirée.

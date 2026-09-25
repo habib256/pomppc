@@ -8,6 +8,8 @@ et dans `docs/`.
 
 ## Non publié
 
+- **DOOM 3, un cœur contre deux** (26/09) : SMP=2 74,3 ms/image, SMP=1 80,8 (trois parties
+  chacun) : SMP=2 reste le défaut, jeux compris (`docs/smp-coeurs.md` §4.2).
 - **Combien de cœurs ? — pourquoi deux, et pourquoi plus ne rapporte rien aux jeux**
   (`docs/smp-coeurs.md`, 26/09/2026). La limite de 2 vient de notre patch QEMU (une seule
   ligne de reset câblée) : ni xnu-792.6.70 (`MAX_CPUS` 256) ni `AppleMacRISC2PE` ne bloquent ;

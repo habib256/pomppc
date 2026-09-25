@@ -155,12 +155,12 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
       FSUBS`, `fcmpu`, `do_float_check_status` 4,5 %, `compute_fprf` 2,5 %) : premier poste
       hors `lookup_tb_ptr` ; piste FPRF/contrôle calculés en ligne quand FPSCR n'a aucune
       trappe armée.
-- [ ] **SMP : 1 ou 2 par défaut** (`docs/smp-coeurs.md`, 26/09) : Marble Blast à placement
-      forcé, 1/2/3/4 vCPU **à égalité** (73,4 / 72,3 / 73,0 / 72,1 img/s, trois démarrages
-      entrelacés par mode) ; la somme des vCPU reste ≈ 1 cœur hôte (le jeu est un seul fil).
-      Reste DOOM 3 SMP=1 contre SMP=2, trois parties par mode (protocole §4.1, VM quotidienne),
-      puis décision de l'utilisateur (proposé : lanceurs de jeux en SMP=1, bureau en 2 ;
-      contre SMP=2 : panique AppleUSBOHCI au boot ~1/10).
+- [ ] **Cœurs invités** (`docs/smp-coeurs.md`) : **tranché le 26/09 — SMP=2 reste le défaut** :
+      DOOM 3 deux cœurs 74,3 contre un cœur 80,8 ms/image (−8 %, à-coups des autres fils de
+      Tiger sur un seul vCPU) ; Marble Blast à égalité de 1 à 4 cœurs. 3-4 cœurs possibles
+      (essai `patches/smp-mac99/essais/qemu-mac99-4cpus.patch`, 1-2 jours pour un mode
+      propre) mais sans gain pour les jeux, monofils. Reste : panique AppleUSBOHCI au boot
+      ~1/10 en SMP=2.
 - [ ] **3-4 vCPU** : Tiger démarre sur 3 et 4 (`hw.ncpu 4`) avec
       `patches/smp-mac99/essais/qemu-mac99-4cpus.patch` (GPIO 15/16 de KeyLargo) ; 0 gain sur
       les jeux, ~linéaire sur du travail parallèle dans l'invité jusqu'aux 4 cœurs P de l'hôte.
