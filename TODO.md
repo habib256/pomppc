@@ -323,6 +323,21 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
       trancher par l'utilisateur ; DOOM 3 à mesurer (`tools/tcg/d3run.sh`). Contre SMP=2 : la
       panique AppleUSBOHCI au boot environ une fois sur dix (aléa MTTCG, `moncmd system_reset`)
       et un défaut latent de QEMU : `tlbie` n'atteint pas l'autre vCPU (§ TCG ci-dessous).
+- [ ] **TCG / G4 émulé** (`docs/tcg-g4.md`, 25/09/2026) : relevé fait — sur Marble Blast,
+      AltiVec = 3,1 % des instructions dont 0,1 % en helper, helpers 4,7 %, flottant 2 % ; le
+      premier poste hôte est le **vidage complet du TLB à chaque changement de registre de
+      segment** (~23 000/s, 213 000 `mtsrin`/s) avec ses remplissages et le cache de sauts
+      vidé (30-55 % du temps vCPU). **Patch `tcg/0001` (`x-sr-tlb`, éteint par défaut,
+      `SRTLB=1`)** : TLB gardé par jeu de segments, `tlbie` global en SMP ; preuve
+      `x-sr-tlb-verify` : SMP=1, 936 658 825 entrées retraduites, 0 divergence ; A/B Marble
+      Blast SMP=2 **+9,8 %** (109 paires, manches +9,6 / +10,0 %), SMP=1 +9,5 % en moyenne mais
+      non reproductible (−0,6 / +20,5 %). Essai `tcg/essais/0002` (`lmw`/`stmw` en ligne) :
+      exact, −1,3 % sur un banc dédié, **non appliqué**. **Attend la VM quotidienne** (accès
+      refusé par le classifieur de permissions le 25/09) : A/B DOOM 3 cœurs et `x-sr-tlb`,
+      profil `ppcmix` de DOOM 3 (AltiVec de `idSIMD`), puis décision du défaut. Pistes
+      suivantes : BQL à chaque `mtmsr`/`rfi` (9-10 % + attente), `helper_lookup_tb_ptr`
+      (18-21 %), étiquettes multiples par mode. Épreuve de fermeture : DOOM 3 T+50..T+280,
+      deux parties par mode, `x-sr-tlb` ≥ +5 % sans régression d'image.
 - [ ] **Un seul disque, deux hôtes** (archive, lot 10) : `tiger.raw` brut partagé par USB entre
       le Mac et le PC, `devloop` et jeux sur le même disque.
 - [ ] **Métrologie boot** (`docs/metrologie-boot.md`) : la baseline de 23,32 s est à refaire

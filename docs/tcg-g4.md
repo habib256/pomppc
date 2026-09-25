@@ -385,3 +385,58 @@ coût est celui des accès. Sur Marble Blast, où ces instructions pèsent 7-13 
 gain attendu est de l'ordre du pour-cent, sous le bruit de mesure (quartiles ±3 %) :
 **piste fermée, patch non appliqué** (gardé dans `patches/tcg/essais/`, il s'applique
 par-dessus 0001).
+
+---
+
+## 6. Ce qui attend la VM quotidienne (DOOM 3)
+
+Tout est prêt ; il faut l'accord de l'utilisateur pour arrêter/relancer `tiger.qcow2`.
+
+    # une partie : arrêt propre, relance avec le binaire v19 de la copie, mesure T+50..T+280
+    bash tools/tcg/d3run.sh d3-s2off 2 0 1     # SMP=2, x-sr-tlb éteint, sample hôte à T+300
+    bash tools/tcg/d3run.sh d3-s2on  2 1 1     # SMP=2, x-sr-tlb allumé
+    bash tools/tcg/d3run.sh d3-s1off 1 0
+    bash tools/tcg/d3run.sh d3-s1on  1 1
+    # … deux parties par mode au moins, entrelacées ; profil d'instructions :
+    EXTRA_ARGS="-plugin $PWD/tools/tcg/libppcmix.dylib,out=$PWD/bench/tcg/d3-mix.txt,interval=10" \
+        bash tools/tcg/d3run.sh d3-mix 2 1
+    python3 tools/tcg/ppcmix.py bench/tcg/d3-mix.txt <début> <fin>   # instantanés de la fenêtre
+    # puis rendre la VM :
+    bash tools/tcg/d3run.sh --restore          # binaire de référence, SMP=2, FASTFP défaut
+
+Le binaire `~/src/qemu-tcg19/build/qsr` porte le `qgpu` v19 **exact** du binaire de
+référence (fichiers copiés de `~/src/qemu/hw/display/`, `qgpu_proto.h` identique à celui de
+`main`) : le plugin `20260924-liste` l'accepte. `target/ppc` y est identique octet pour
+octet à celui de `~/src/qemu-tcg` (0001, et l'essai 0002 éteint).
+
+`meas-tcg.sh` (invité) reprend `meas3.sh` du lot 3 avec une détection de T qui ne dépend
+plus d'un seuil absolu de 85 ms/image (qui cesserait de marcher si l'émulateur accélérait) ;
+`d3win.py` affine T au saut lui-même et imprime aussi le T de la règle du lot 3 : sur les
+journaux du lot 3, les deux coïncident à une image près et redonnent 86,5 et 85,2 ms/image.
+Reste à faire sur DOOM 3 : (1) l'A/B cœurs et `x-sr-tlb` ; (2) le profil `ppcmix` (part
+d'AltiVec dans `idSIMD_AltiVec`, et donc l'intérêt de `NO_RWG` et de `vsldoi`/`vmrg` en
+ligne, §1.1) ; (3) `sample` hôte.
+
+---
+
+## 7. Suites
+
+- **`x-sr-tlb` par défaut** (`SRTLB=1` dans `run_tiger.sh`) après la mesure DOOM 3 et une
+  semaine de jeu ; le vérificateur peut tourner en fond (`CPU_OPTS=x-sr-tlb-verify=1024`).
+- **Le défaut `tlbie` en SMP stock** (§3.3) est indépendant du patch : à signaler en amont,
+  et à corriger chez nous même sans `x-sr-tlb` (poser le global dans `ppc_tlb_invalidate_one`
+  pour `POWERPC_MMU_32B` quand `-smp > 1`). Candidat pour la panique AppleUSBOHCI ~1/10.
+- Étiquettes multiples par mode (§3.4) si le compteur montre que le superviseur alterne.
+- **BQL à chaque `mtmsr`/`rfi`** : `ppc_maybe_interrupt` et `cpu_interrupt_exittb` prennent
+  le verrou global — 208 000 `mtmsr` et 56 000 `rfi` par seconde sur Marble Blast ; 9-10 %
+  du temps vCPU dans `bql_lock_impl` plus ~8 % d'attente de mutex. Piste : un chemin sans
+  verrou quand `CPU_INTERRUPT_HARD` est déjà dans l'état voulu (à faire avec soin : l'état
+  des interruptions est partagé avec le fil d'E/S).
+- `helper_lookup_tb_ptr` : chaque `blr` passe par un helper (18-21 %) ; une pile de retours
+  prédits est un chantier TCG générique, plus lourd.
+- `lfs`/`stfs` (2,7 % des instructions) passent par `helper_todouble`/`tosingle` : une
+  conversion simple ↔ double en ops TCG entières (cas normal en ligne, dénormaux/NaN au
+  helper) est possible, mais le profil hôte ne leur donne que 0,3-2 %.
+- Le flottant et AltiVec ne sont pas le plafond sur Marble Blast ; **DOOM 3 peut dire
+  autre chose** (`idSIMD_AltiVec`) : `ppcmix` sur `demo_mars_city1` en premier, avant
+  tout patch AltiVec (`NO_RWG` sur les helpers flottants, `vsldoi`/`vmrg*` en ligne).
