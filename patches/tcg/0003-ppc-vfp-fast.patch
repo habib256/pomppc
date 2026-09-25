@@ -1,0 +1,213 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index 1cf200525..19142815a 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1303,6 +1303,12 @@ struct CPUArchState {
+      * translator only.
+      */
+     bool lfs_inline;
++    /*
++     * x-vfp-fast: vaddfp/vsubfp/vmaddfp/vnmsubfp compute their four lanes
++     * on the host FPU in one go when softfloat's own hardfloat path would
++     * take every lane; same results and flags (int_helper.c, vfp_*4).
++     */
++    bool vfp_fast;
+     bool sr_snap_ok[2];
+     uint32_t sr_gen;
+     uint32_t sr_snap_gen[2];
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index d6ff38d29..30209bd1a 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7443,6 +7443,12 @@ static Property ppc_cpu_properties[] = {
+      * every input.  Off by default.
+      */
+     DEFINE_PROP_BOOL("x-lfs-inline", PowerPCCPU, env.lfs_inline, false),
++    /*
++     * AltiVec vaddfp/vsubfp/vmaddfp/vnmsubfp: the four lanes at once on the
++     * host FPU when softfloat's hardfloat path would take each of them
++     * (needs x-fast-fp to ever apply).  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-vfp-fast", PowerPCCPU, env.vfp_fast, false),
+     /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
+     DEFINE_PROP_UINT32("x-sr-tlb-verify", PowerPCCPU, env.sr_verify, 0),
+     DEFINE_PROP_END_OF_LIST(),
+diff --git a/target/ppc/int_helper.c b/target/ppc/int_helper.c
+index ef4b2e75d..0a95443f9 100644
+--- a/target/ppc/int_helper.c
++++ b/target/ppc/int_helper.c
+@@ -32,6 +32,8 @@
+ #include "tcg/tcg-gvec-desc.h"
+ 
+ #include "helper_regs.h"
++#include <float.h>
++#include <math.h>
+ /*****************************************************************************/
+ /* Fixed point operations helpers */
+ 
+@@ -504,27 +506,160 @@ void helper_VPRTYBQ(ppc_avr_t *r, ppc_avr_t *b, uint32_t v)
+     r->VsrD(0) = 0;
+ }
+ 
+-#define VARITHFP(suffix, func)                                          \
++/* vfp-fast: début (extrait tel quel par POMPPC tools/tcg/vfpproof.sh) */
++/*
++ * x-vfp-fast: the four lanes of vaddfp/vsubfp/vmaddfp/vnmsubfp on the host
++ * FPU in one go.  softfloat's float32_add/sub/muladd already compute each
++ * lane on the host FPU (hardfloat) under x-fast-fp; what costs is the call
++ * and the checks, four times.  These functions make exactly the per-lane
++ * decision of float32_gen2() / float32_muladd() (fpu/softfloat.c), for the
++ * four lanes, and succeed only if every lane would have taken the hardfloat
++ * path; then the results are the host's, and the only flag hardfloat can
++ * raise (overflow, on an infinite result) is raised the same way.  If any
++ * lane would have gone soft, they return false having changed nothing, and
++ * the caller runs the original per-lane loop: same results, same flags, in
++ * every case.
++ *
++ *   can_use_fpu(s):  !no_hardfloat, inexact already set, round to nearest
++ *                    even, no rebias (constant over the four lanes: a lane
++ *                    can set flags, never clear them)
++ *   input:           every operand zero or normal (a denormal input goes
++ *                    soft here, where softfloat would first flush it under
++ *                    NJ: the soft loop does exactly that)
++ *   add/sub result:  infinite -> overflow; |r| <= FLT_MIN unless both inputs
++ *                    are zero -> soft (f32_addsubmul_post)
++ *   muladd result:   a or c zero -> kept (the product is an exact zero,
++ *                    softfloat adds it on the host too); infinite ->
++ *                    overflow; |r| <= FLT_MIN -> soft
++ */
++static inline bool vfp_can_use_fpu(const float_status *s)
++{
++#if defined(__FAST_MATH__)
++    return false;
++#else
++    return !s->no_hardfloat &&
++           (s->float_exception_flags & float_flag_inexact) &&
++           s->float_rounding_mode == float_round_nearest_even &&
++           !s->rebias_overflow && !s->rebias_underflow;
++#endif
++}
++
++static inline int vfp_zon(uint32_t x)
++{
++    uint32_t e = (x >> 23) & 0xff;
++    return (e != 0 && e != 0xff) || !(x & 0x7fffffff);
++}
++
++static inline float vfp_f(uint32_t x)
++{
++    float f;
++    memcpy(&f, &x, 4);
++    return f;
++}
++
++static inline uint32_t vfp_u(float f)
++{
++    uint32_t x;
++    memcpy(&x, &f, 4);
++    return x;
++}
++
++static bool vfp_add4(float_status *s, uint32_t *r, const uint32_t *a,
++                     const uint32_t *b, bool sub)
++{
++    uint32_t res[4];
++    bool ok = vfp_can_use_fpu(s), inf = false;
++    int i;
++
++    for (i = 0; i < 4; i++) {
++        float fa = vfp_f(a[i]), fb = vfp_f(b[i]);
++        float fr = sub ? fa - fb : fa + fb;
++        uint32_t ur = vfp_u(fr);
++        bool is_inf = (ur & 0x7fffffff) == 0x7f800000;
++        bool both_zero = !(a[i] & 0x7fffffff) && !(b[i] & 0x7fffffff);
++
++        ok &= vfp_zon(a[i]) & vfp_zon(b[i]);
++        ok &= is_inf || !(fabsf(fr) <= FLT_MIN) || both_zero;
++        inf |= is_inf;
++        res[i] = ur;
++    }
++    if (!ok) {
++        return false;
++    }
++    if (inf) {
++        float_raise(float_flag_overflow, s);
++    }
++    memcpy(r, res, sizeof(res));
++    return true;
++}
++
++/* r = a * c + b, flags: 0 (vmaddfp) or negate_result | negate_c (vnmsubfp) */
++static bool vfp_fma4(float_status *s, uint32_t *r, const uint32_t *a,
++                     const uint32_t *b, const uint32_t *c, int flags)
++{
++    uint32_t res[4];
++    uint32_t nres = flags & float_muladd_negate_result ? 0x80000000 : 0;
++    uint32_t nc = flags & float_muladd_negate_c ? 0x80000000 : 0;
++    bool ok = vfp_can_use_fpu(s), inf = false;
++    int i;
++
++#if defined(__x86_64__) || defined(__i386__)
++    ok = false;     /* softfloat may force soft FMA there (force_soft_fma) */
++#endif
++    for (i = 0; i < 4; i++) {
++        float fr = fmaf(vfp_f(a[i]), vfp_f(c[i]), vfp_f(b[i] ^ nc));
++        uint32_t ur = vfp_u(fr);
++        bool is_inf = (ur & 0x7fffffff) == 0x7f800000;
++        bool prod_zero = !(a[i] & 0x7fffffff) || !(c[i] & 0x7fffffff);
++
++        ok &= vfp_zon(a[i]) & vfp_zon(b[i]) & vfp_zon(c[i]);
++        ok &= prod_zero || is_inf || !(fabsf(fr) <= FLT_MIN);
++        inf |= is_inf && !prod_zero;
++        res[i] = ur ^ nres;
++    }
++    if (!ok) {
++        return false;
++    }
++    if (inf) {
++        float_raise(float_flag_overflow, s);
++    }
++    memcpy(r, res, sizeof(res));
++    return true;
++}
++/* vfp-fast: fin */
++
++#define VARITHFP(suffix, func, fast)                                    \
+     void helper_v##suffix(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a, \
+                           ppc_avr_t *b)                                 \
+     {                                                                   \
+         int i;                                                          \
+                                                                         \
++        fast;                                                           \
+         for (i = 0; i < ARRAY_SIZE(r->f32); i++) {                      \
+             r->f32[i] = func(a->f32[i], b->f32[i], &env->vec_status);   \
+         }                                                               \
+     }
+-VARITHFP(addfp, float32_add)
+-VARITHFP(subfp, float32_sub)
+-VARITHFP(minfp, float32_min)
+-VARITHFP(maxfp, float32_max)
++#define VFP_FAST_ADD(sub)                                               \
++    if (env->vfp_fast &&                                                \
++        vfp_add4(&env->vec_status, r->u32, a->u32, b->u32, sub)) {      \
++        return;                                                         \
++    }
++VARITHFP(addfp, float32_add, VFP_FAST_ADD(false))
++VARITHFP(subfp, float32_sub, VFP_FAST_ADD(true))
++VARITHFP(minfp, float32_min, )
++VARITHFP(maxfp, float32_max, )
+ #undef VARITHFP
++#undef VFP_FAST_ADD
+ 
+ #define VARITHFPFMA(suffix, type)                                       \
+     void helper_v##suffix(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a, \
+                            ppc_avr_t *b, ppc_avr_t *c)                  \
+     {                                                                   \
+         int i;                                                          \
++        if (env->vfp_fast && vfp_fma4(&env->vec_status, r->u32, a->u32, \
++                                      b->u32, c->u32, type)) {          \
++            return;                                                     \
++        }                                                               \
+         for (i = 0; i < ARRAY_SIZE(r->f32); i++) {                      \
+             r->f32[i] = float32_muladd(a->f32[i], c->f32[i], b->f32[i], \
+                                        type, &env->vec_status);         \

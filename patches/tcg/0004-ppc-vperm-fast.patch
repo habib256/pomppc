@@ -1,0 +1,141 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index 19142815a..77a0fc3e6 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1309,6 +1309,8 @@ struct CPUArchState {
+      * take every lane; same results and flags (int_helper.c, vfp_*4).
+      */
+     bool vfp_fast;
++    /* x-vperm-fast: vperm through helper_VPERM_FAST (translator only) */
++    bool vperm_fast;
+     bool sr_snap_ok[2];
+     uint32_t sr_gen;
+     uint32_t sr_snap_gen[2];
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index 30209bd1a..6c17c48da 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7449,6 +7449,11 @@ static Property ppc_cpu_properties[] = {
+      * (needs x-fast-fp to ever apply).  Off by default.
+      */
+     DEFINE_PROP_BOOL("x-vfp-fast", PowerPCCPU, env.vfp_fast, false),
++    /*
++     * vperm through a table-lookup helper (one NEON tbl on an arm64 host)
++     * instead of the byte loop; same bytes.  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-vperm-fast", PowerPCCPU, env.vperm_fast, false),
+     /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
+     DEFINE_PROP_UINT32("x-sr-tlb-verify", PowerPCCPU, env.sr_verify, 0),
+     DEFINE_PROP_END_OF_LIST(),
+diff --git a/target/ppc/helper.h b/target/ppc/helper.h
+index dadd06abf..0a853ff3a 100644
+--- a/target/ppc/helper.h
++++ b/target/ppc/helper.h
+@@ -249,6 +249,7 @@ DEF_HELPER_FLAGS_2(vupklsw, TCG_CALL_NO_RWG, void, avr, avr)
+ DEF_HELPER_FLAGS_4(VMSUMUBM, TCG_CALL_NO_RWG, void, avr, avr, avr, avr)
+ DEF_HELPER_FLAGS_4(VMSUMMBM, TCG_CALL_NO_RWG, void, avr, avr, avr, avr)
+ DEF_HELPER_FLAGS_4(VPERM, TCG_CALL_NO_RWG, void, avr, avr, avr, avr)
++DEF_HELPER_FLAGS_4(VPERM_FAST, TCG_CALL_NO_RWG, void, avr, avr, avr, avr)
+ DEF_HELPER_FLAGS_4(VPERMR, TCG_CALL_NO_RWG, void, avr, avr, avr, avr)
+ DEF_HELPER_4(vpkshss, void, env, avr, avr, avr)
+ DEF_HELPER_4(vpkshus, void, env, avr, avr, avr)
+diff --git a/target/ppc/int_helper.c b/target/ppc/int_helper.c
+index 0a95443f9..86a253e2b 100644
+--- a/target/ppc/int_helper.c
++++ b/target/ppc/int_helper.c
+@@ -34,6 +34,9 @@
+ #include "helper_regs.h"
+ #include <float.h>
+ #include <math.h>
++#if defined(__aarch64__)
++#include <arm_neon.h>
++#endif
+ /*****************************************************************************/
+ /* Fixed point operations helpers */
+ 
+@@ -1387,6 +1390,46 @@ void helper_VPERM(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
+     *r = result;
+ }
+ 
++/* vperm-fast: début (extrait tel quel par POMPPC tools/tcg/vpermproof.sh) */
++/*
++ * x-vperm-fast: helper_VPERM as one 32-byte table lookup.
++ * result.VsrB(i) = (s & 0x10 ? b : a).VsrB(s & 0xf), s = c.VsrB(i) & 0x1f.
++ * On a little-endian host VsrB(i) is u8[15 - i]; with T = b.u8[0..15] then
++ * a.u8[0..15], result.u8[j] = T[31 - (c.u8[j] & 31)] = T[~c.u8[j] & 31]
++ * (s < 16: T[31 - s] = a.u8[15 - s]; s >= 16: T[31 - s] = b.u8[31 - s]).
++ * On a big-endian host VsrB(i) is u8[i]: T = a.u8 then b.u8, index s.
++ * An arm64 host does the lookup with a single tbl on two registers.
++ * All three operands are read before r is written (r may alias them).
++ */
++void helper_VPERM_FAST(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
++{
++#if defined(__aarch64__) && !HOST_BIG_ENDIAN
++    uint8x16x2_t t = { { vld1q_u8(b->u8), vld1q_u8(a->u8) } };
++    uint8x16_t idx = vandq_u8(vmvnq_u8(vld1q_u8(c->u8)), vdupq_n_u8(31));
++
++    vst1q_u8(r->u8, vqtbl2q_u8(t, idx));
++#else
++    uint8_t t[32], res[16];
++    int j;
++
++#if HOST_BIG_ENDIAN
++    memcpy(t, a->u8, 16);
++    memcpy(t + 16, b->u8, 16);
++    for (j = 0; j < 16; j++) {
++        res[j] = t[c->u8[j] & 31];
++    }
++#else
++    memcpy(t, b->u8, 16);
++    memcpy(t + 16, a->u8, 16);
++    for (j = 0; j < 16; j++) {
++        res[j] = t[~c->u8[j] & 31];
++    }
++#endif
++    memcpy(r->u8, res, 16);
++#endif
++}
++/* vperm-fast: fin */
++
+ void helper_VPERMR(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
+ {
+     ppc_avr_t result;
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+index ccebf6002..3df55b2f1 100644
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -173,6 +173,7 @@ struct DisasContext {
+     bool pr, hv, dr, le_mode;
+     bool lazy_tlb_flush;
+     bool lfs_inline;
++    bool vperm_fast;
+     bool need_access_type;
+     int mem_idx;
+     int access_type;
+@@ -6498,6 +6499,7 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+     ctx->has_bhrb = !!(env->flags & POWERPC_FLAG_BHRB);
+ #endif
+     ctx->lfs_inline = env->lfs_inline;
++    ctx->vperm_fast = env->vperm_fast;
+     ctx->lazy_tlb_flush = env->mmu_model == POWERPC_MMU_32B
+         || env->mmu_model & POWERPC_MMU_64;
+ 
+diff --git a/target/ppc/translate/vmx-impl.c.inc b/target/ppc/translate/vmx-impl.c.inc
+index 70d0ad2e7..40090a7f2 100644
+--- a/target/ppc/translate/vmx-impl.c.inc
++++ b/target/ppc/translate/vmx-impl.c.inc
+@@ -2304,7 +2304,13 @@ TRANS_FLAGS2(ALTIVEC_207, VADDEUQM, do_va_helper, gen_helper_VADDEUQM)
+ TRANS_FLAGS2(ALTIVEC_207, VSUBEUQM, do_va_helper, gen_helper_VSUBEUQM)
+ TRANS_FLAGS2(ALTIVEC_207, VSUBECUQ, do_va_helper, gen_helper_VSUBECUQ)
+ 
+-TRANS_FLAGS(ALTIVEC, VPERM, do_va_helper, gen_helper_VPERM)
++/* x-vperm-fast: the same bytes through helper_VPERM_FAST (int_helper.c) */
++static bool trans_VPERM(DisasContext *ctx, arg_VPERM *a)
++{
++    REQUIRE_INSNS_FLAGS(ctx, ALTIVEC);
++    return do_va_helper(ctx, a, ctx->vperm_fast ? gen_helper_VPERM_FAST
++                                                : gen_helper_VPERM);
++}
+ TRANS_FLAGS2(ISA300, VPERMR, do_va_helper, gen_helper_VPERMR)
+ 
+ static void gen_vmladduhm_vec(unsigned vece, TCGv_vec t, TCGv_vec a, TCGv_vec b,
