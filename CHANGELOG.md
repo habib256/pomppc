@@ -8,6 +8,18 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Les deux régimes de vitesse : cause trouvée** (25/09 au soir, `docs/tcg-g4.md` §14). macOS
+  pose le tampon du JIT (1 Gio) hors de la fenêtre de 4 Gio du texte de QEMU un lancement sur
+  deux environ (`0x300000000`) ; l'Apple M4 prédit alors plus lentement chaque appel de helper
+  (+0,4 à 1,5 ns dès 8 sites, `tools/tcg/farcall.c`). Marble Blast : le placement prédit le
+  régime sur 14 démarrages sur 14, le redémarrage de l'invité dans le même processus ne le
+  change jamais, forcer le placement force le régime (73,3 contre 69,3 img/s, 4 sur 4 de
+  chaque côté, écart intra-mode 1-2 % ; SMP=1 : 73,7 contre 68,1). Correctif `patches/tcg/0006` : propriétés de
+  l'accélérateur `x-jit-near` / `x-jit-addr`, éteintes (`JITNEAR=1 ./run_tiger.sh`), et une
+  ligne `tcg: tampon JIT … même/AUTRE fenêtre` au lancement. Outils `tools/tcg/regab.sh`,
+  `regidx.py`, `regreport.py`, `jitwhere.sh`, job `regime`. Parties DOOM 3 de confirmation à
+  jouer (§14.6).
+
 - **`tcg/0002-0004` allumés par défaut** (25/09 au soir, demande de l'utilisateur) : `lfs`/`stfs`
   sans helper, flottant AltiVec à 4 voies, `vperm` par table ; QEMU de référence reconstruit.
   DOOM 3, six paires entrelacées : médiane 80,8 → 79,7, moyenne 84,7 → 78,0 ms/image, aucune

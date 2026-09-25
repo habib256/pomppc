@@ -9,6 +9,7 @@
 #   • le TLB gardé par jeu de segments (x-sr-tlb)     — patches/tcg/0001
 #   • lfs/stfs sans helper (x-lfs-inline)             — patches/tcg/0002
 #   • AltiVec : vfp à 4 voies, vperm par table       — patches/tcg/0003, 0004
+#   • tampon du JIT près du texte (x-jit-near)        — patches/tcg/0006
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
 #   ./scripts/build_qemu_qfb.sh              # build dans ~/src/qemu
@@ -356,6 +357,30 @@ target/ppc/cpu_init.c x-vperm-fast
 target/ppc/int_helper.c helper_VPERM_FAST
 target/ppc/translate/vmx-impl.c.inc gen_helper_VPERM_FAST
 TCG34_MARKERS
+  # --- 4 octies. Placement du tampon du JIT (x-jit-near, x-jit-addr) ---
+  # patches/tcg/0006, docs/tcg-g4.md §14 : propriétés de l'ACCÉLÉRATEUR (-accel
+  # tcg,x-jit-near=on), éteintes par défaut (JITNEAR=1 ./run_tiger.sh). Sur Apple
+  # M4, un tampon posé hors de la fenêtre de 4 Gio du texte de QEMU (un
+  # lancement sur deux environ) ralentit tout le processus de ~10 % : c'étaient
+  # « les deux régimes ». Le patch imprime aussi, toujours, où le tampon est posé.
+  if ! grep -q "tcg_jit_near" tcg/region.c; then
+    echo "▶ patch TCG : placement du tampon du JIT (x-jit-near)"
+    patch_forward "$ROOT/patches/tcg/0006-tcg-jit-near.patch" \
+      accel/tcg/tcg-all.c   x-jit-near \
+      include/tcg/startup.h tcg_jit_near \
+      tcg/region.c          tcg_jit_near
+    rm -f accel/tcg/tcg-all.c.orig include/tcg/startup.h.orig tcg/region.c.orig
+  fi
+  while read -r f m; do
+    [ -z "$f" ] && continue
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0006 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG6_MARKERS'
+accel/tcg/tcg-all.c x-jit-near
+include/tcg/startup.h tcg_jit_near
+tcg/region.c tcg_jit_near
+tcg/region.c tb_size = region.total_size
+TCG6_MARKERS
 fi
 
 # --- 5. Build ---
@@ -443,6 +468,7 @@ check_opt x-sr-tlb       qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-s
 check_opt x-lfs-inline   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-lfs-inline=on
 check_opt x-vfp-fast     qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-vfp-fast=on
 check_opt x-vperm-fast   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-vperm-fast=on
+check_opt x-jit-near     qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jit-near=on
 echo
 echo "→ $CAPS"
 

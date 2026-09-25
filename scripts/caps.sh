@@ -182,6 +182,13 @@ qemu_cpu_has_prop() {
   _caps_boot "$1" -M "$2" -cpu "$3,$4"
 }
 
+# qemu_tcg_has_prop <bin> <machine> <prop=val> : l'accélérateur TCG accepte-t-il
+# -accel tcg,<prop=val> ? (x-jit-near, patches/tcg/0006 ; une propriété inconnue
+# fait quitter QEMU, d'où le sondage)
+qemu_tcg_has_prop() {
+  _caps_boot "$1" -M "$2" -accel "tcg,$3"
+}
+
 qemu_cpu_has_fastfp() { # <bin> <machine> <cpu>
   local key="$1|$2|$3"
   [ "$key" = "$_FFP_KEY" ] && return $_FFP_RC

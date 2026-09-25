@@ -68,6 +68,13 @@ for essai in 1 2; do
 done
 PID=$(pgrep -f "tiger.qcow2" | head -1)
 echo "QEMU $PID : $(grep '▶ Tiger' "$OUT/run_tiger.log")" | tee "$OUT/info.txt"
+# placement du tampon du JIT (docs/tcg-g4.md §14 : hors de la fenêtre de 4 Gio
+# du texte = régime lent) : ligne du patch tcg/0006 si le binaire l'a, et vmmap
+grep -h 'tampon JIT' "$OUT/run_tiger.log" | tee -a "$OUT/info.txt"
+vmmap -interleaved "$PID" 2>/dev/null | awk -v b="$(basename "$QB")" '
+  /rwx\/rwx SM=ZER/ && !j {split($2,a,"-"); j=a[1]}
+  $1=="__TEXT" && $NF ~ b && !t {split($2,a,"-"); t=a[1]}
+  END {print "jit 0x" j " text 0x" t}' | tee -a "$OUT/info.txt"
 sleep 40                                      # bureau au repos
 $TS "cat > ~/meas-tcg.sh" < "$WT/tools/tcg/guest/meas-tcg.sh"
 $TS "nohup sh ~/meas-tcg.sh $L > /dev/null 2>&1 &"

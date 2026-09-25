@@ -26,6 +26,9 @@
 #   LFSINLINE=0 VFPFAST=0 VPERMFAST=0 ./run_tiger.sh  # coupe lfs/stfs sans helper, flottant AltiVec
 #                             # à 4 voies, vperm par table (tcg/0002-0004, allumés par défaut)
 #                             # docs/flottant-rapide.md
+#   JITNEAR=1 ./run_tiger.sh  # tampon du JIT dans la fenêtre de 4 Gio du texte de QEMU
+#                             # (x-jit-near, tcg/0006 : supprime le régime lent, docs/tcg-g4.md §14) ;
+#                             # TCG_OPTS=… propriétés brutes de l'accélérateur
 #   NOPAD=1 ./run_tiger.sh    # coupe le passthrough de la manette USB
 #   TABLET=1 ./run_tiger.sh   # + usb-tablet (souris absolue). À ÉVITER sur Tiger :
 #                             # via=pmu fournit déjà usb-mouse ; les deux ensemble
@@ -126,7 +129,7 @@ if [ "$SMP_N" -ge 2 ]; then
 fi
 if [ "$SMP_N" -ge 2 ]; then
   BIN="$QEMU_BIN64"
-  EXTRA+=(-accel tcg,thread=multi)
+  TCG_ACCEL="tcg,thread=multi"
   MODE="SMP ${SMP_N} cœurs (MTTCG, ppc64)"
 else
   BIN="$QEMU_BIN"
@@ -225,6 +228,22 @@ for _p in "VFPFAST x-vfp-fast VFP-4-VOIES" "VPERMFAST x-vperm-fast VPERM-TABLE";
   fi
 done
 [ -n "${CPU_OPTS:-}" ] && CPU_SPEC="$CPU_SPEC,${CPU_OPTS#,}"
+# --- Tampon du JIT dans la fenêtre de 4 Gio du texte de QEMU (x-jit-near,
+# patches/tcg/0006) --- propriété de l'ACCÉLÉRATEUR. Sur Apple M4, le noyau pose
+# le tampon hors de cette fenêtre un lancement sur deux environ, et tout le
+# processus tourne alors ~10 % moins vite (« les deux régimes », docs/tcg-g4.md
+# §14). Éteint par défaut en attendant DOOM 3 : JITNEAR=1 l'allume. Sondé.
+if [ "${JITNEAR:-0}" != 0 ]; then
+  if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-jit-near=on"; then
+    TCG_ACCEL="${TCG_ACCEL:-tcg},x-jit-near=on"
+    MODE="$MODE + JIT PRÈS DU TEXTE"
+  else
+    echo "⚠  JITNEAR=1 demandé mais ce QEMU n'a pas la propriété 'x-jit-near' (patches/tcg/0006)." >&2
+    MODE="$MODE + JIT près du texte DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+[ -n "${TCG_OPTS:-}" ] && TCG_ACCEL="${TCG_ACCEL:-tcg},${TCG_OPTS#,}"
+[ -n "${TCG_ACCEL:-}" ] && EXTRA+=(-accel "$TCG_ACCEL")
 
 # --- Affichage ---
 # DBUS_DISPLAY=1 : sortie via -display dbus,p2p=on pour le frontend ImGui
