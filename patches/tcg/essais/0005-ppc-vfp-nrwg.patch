@@ -1,0 +1,160 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index 77a0fc3e6..1be9a6fa4 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1311,6 +1311,8 @@ struct CPUArchState {
+     bool vfp_fast;
+     /* x-vperm-fast: vperm through helper_VPERM_FAST (translator only) */
+     bool vperm_fast;
++    /* x-vfp-nrwg: vaddfp/vsubfp/vmaddfp/vnmsubfp as NO_RWG calls (translator) */
++    bool vfp_nrwg;
+     bool sr_snap_ok[2];
+     uint32_t sr_gen;
+     uint32_t sr_snap_gen[2];
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index 6c17c48da..b1edb8751 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7454,6 +7454,12 @@ static Property ppc_cpu_properties[] = {
+      * instead of the byte loop; same bytes.  Off by default.
+      */
+     DEFINE_PROP_BOOL("x-vperm-fast", PowerPCCPU, env.vperm_fast, false),
++    /*
++     * vaddfp/vsubfp/vmaddfp/vnmsubfp called as TCG_CALL_NO_RWG helpers (they
++     * touch no TCG global: only the AVRs and vec_status, which live in env
++     * outside the globals, and they raise no exception).  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-vfp-nrwg", PowerPCCPU, env.vfp_nrwg, false),
+     /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
+     DEFINE_PROP_UINT32("x-sr-tlb-verify", PowerPCCPU, env.sr_verify, 0),
+     DEFINE_PROP_END_OF_LIST(),
+diff --git a/target/ppc/helper.h b/target/ppc/helper.h
+index 0a853ff3a..85249caf3 100644
+--- a/target/ppc/helper.h
++++ b/target/ppc/helper.h
+@@ -302,6 +302,11 @@ DEF_HELPER_FLAGS_4(VRLDNM, TCG_CALL_NO_RWG, void, avr, avr, avr, i32)
+ DEF_HELPER_FLAGS_4(VRLWNM, TCG_CALL_NO_RWG, void, avr, avr, avr, i32)
+ DEF_HELPER_5(vmaddfp, void, env, avr, avr, avr, avr)
+ DEF_HELPER_5(vnmsubfp, void, env, avr, avr, avr, avr)
++/* x-vfp-nrwg: the same four helpers, declared NO_RWG */
++DEF_HELPER_FLAGS_4(vaddfp_nrwg, TCG_CALL_NO_RWG, void, env, avr, avr, avr)
++DEF_HELPER_FLAGS_4(vsubfp_nrwg, TCG_CALL_NO_RWG, void, env, avr, avr, avr)
++DEF_HELPER_FLAGS_5(vmaddfp_nrwg, TCG_CALL_NO_RWG, void, env, avr, avr, avr, avr)
++DEF_HELPER_FLAGS_5(vnmsubfp_nrwg, TCG_CALL_NO_RWG, void, env, avr, avr, avr, avr)
+ DEF_HELPER_3(vexptefp, void, env, avr, avr)
+ DEF_HELPER_3(vlogefp, void, env, avr, avr)
+ DEF_HELPER_3(vrfim, void, env, avr, avr)
+diff --git a/target/ppc/int_helper.c b/target/ppc/int_helper.c
+index 86a253e2b..e9cefd0f2 100644
+--- a/target/ppc/int_helper.c
++++ b/target/ppc/int_helper.c
+@@ -672,6 +672,32 @@ VARITHFPFMA(maddfp, 0);
+ VARITHFPFMA(nmsubfp, float_muladd_negate_result | float_muladd_negate_c);
+ #undef VARITHFPFMA
+ 
++/*
++ * x-vfp-nrwg: the same helpers under TCG_CALL_NO_RWG.  Legal: they read and
++ * write only the AVRs (env->vsr) and env->vec_status, neither of which is a
++ * TCG global, and raise no guest exception (AltiVec has no FP traps).
++ */
++void helper_vaddfp_nrwg(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
++                        ppc_avr_t *b)
++{
++    helper_vaddfp(env, r, a, b);
++}
++void helper_vsubfp_nrwg(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
++                        ppc_avr_t *b)
++{
++    helper_vsubfp(env, r, a, b);
++}
++void helper_vmaddfp_nrwg(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
++                         ppc_avr_t *b, ppc_avr_t *c)
++{
++    helper_vmaddfp(env, r, a, b, c);
++}
++void helper_vnmsubfp_nrwg(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
++                          ppc_avr_t *b, ppc_avr_t *c)
++{
++    helper_vnmsubfp(env, r, a, b, c);
++}
++
+ #define VARITHSAT_CASE(type, op, cvt, element)                          \
+     {                                                                   \
+         type result = (type)a->element[i] op (type)b->element[i];       \
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+index 3df55b2f1..8308bccfa 100644
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -174,6 +174,7 @@ struct DisasContext {
+     bool lazy_tlb_flush;
+     bool lfs_inline;
+     bool vperm_fast;
++    bool vfp_nrwg;
+     bool need_access_type;
+     int mem_idx;
+     int access_type;
+@@ -6500,6 +6501,7 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+ #endif
+     ctx->lfs_inline = env->lfs_inline;
+     ctx->vperm_fast = env->vperm_fast;
++    ctx->vfp_nrwg = env->vfp_nrwg;
+     ctx->lazy_tlb_flush = env->mmu_model == POWERPC_MMU_32B
+         || env->mmu_model & POWERPC_MMU_64;
+ 
+diff --git a/target/ppc/translate/vmx-impl.c.inc b/target/ppc/translate/vmx-impl.c.inc
+index 40090a7f2..cb904c717 100644
+--- a/target/ppc/translate/vmx-impl.c.inc
++++ b/target/ppc/translate/vmx-impl.c.inc
+@@ -1075,8 +1075,26 @@ GEN_VXFORM_ENV(vsum4sbs, 4, 28);
+ GEN_VXFORM_ENV(vsum4shs, 4, 25);
+ GEN_VXFORM_ENV(vsum2sws, 4, 26);
+ GEN_VXFORM_ENV(vsumsws, 4, 30);
+-GEN_VXFORM_ENV(vaddfp, 5, 0);
+-GEN_VXFORM_ENV(vsubfp, 5, 1);
++/* x-vfp-nrwg: vaddfp/vsubfp through their NO_RWG twins */
++#define GEN_VXFORM_ENV_NRWG(name, opc2, opc3)                           \
++static void glue(gen_, name)(DisasContext *ctx)                         \
++{                                                                       \
++    TCGv_ptr ra, rb, rd;                                                \
++    if (unlikely(!ctx->altivec_enabled)) {                              \
++        gen_exception(ctx, POWERPC_EXCP_VPU);                           \
++        return;                                                         \
++    }                                                                   \
++    ra = gen_avr_ptr(rA(ctx->opcode));                                  \
++    rb = gen_avr_ptr(rB(ctx->opcode));                                  \
++    rd = gen_avr_ptr(rD(ctx->opcode));                                  \
++    if (ctx->vfp_nrwg) {                                                \
++        gen_helper_##name##_nrwg(tcg_env, rd, ra, rb);                  \
++    } else {                                                            \
++        gen_helper_##name(tcg_env, rd, ra, rb);                         \
++    }                                                                   \
++}
++GEN_VXFORM_ENV_NRWG(vaddfp, 5, 0);
++GEN_VXFORM_ENV_NRWG(vsubfp, 5, 1);
+ GEN_VXFORM_ENV(vmaxfp, 5, 16);
+ GEN_VXFORM_ENV(vminfp, 5, 17);
+ GEN_VXFORM_HETRO(vextublx, 6, 24)
+@@ -2276,12 +2294,21 @@ static void glue(gen_, name0##_##name1)(DisasContext *ctx)              \
+         rc = gen_avr_ptr(rC(ctx->opcode));                              \
+         rd = gen_avr_ptr(rD(ctx->opcode));                              \
+         if (Rc(ctx->opcode)) {                                          \
+-            gen_helper_##name1(tcg_env, rd, ra, rb, rc);                \
++            if (ctx->vfp_nrwg) {                                        \
++                gen_helper_##name1##_nrwg(tcg_env, rd, ra, rb, rc);     \
++            } else {                                                    \
++                gen_helper_##name1(tcg_env, rd, ra, rb, rc);            \
++            }                                                           \
+         } else {                                                        \
+-            gen_helper_##name0(tcg_env, rd, ra, rb, rc);                \
++            if (ctx->vfp_nrwg) {                                        \
++                gen_helper_##name0##_nrwg(tcg_env, rd, ra, rb, rc);     \
++            } else {                                                    \
++                gen_helper_##name0(tcg_env, rd, ra, rb, rc);            \
++            }                                                           \
+         }                                                               \
+     }
+ 
++/* x-vfp-nrwg: vmaddfp/vnmsubfp through their NO_RWG twins */
+ GEN_VAFORM_PAIRED(vmaddfp, vnmsubfp, 23)
+ 
+ static bool do_va_helper(DisasContext *ctx, arg_VA *a,
