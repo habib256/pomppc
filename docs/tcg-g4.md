@@ -724,3 +724,29 @@ lancement par macOS (`SIGKILL (Code Signature Invalid)`, rapport dans
 `~/Library/Logs/DiagnosticReports/`, `qemu.log` vide) : `rm` puis `cp`. Les binaires de la
 copie : `qsr`/`qsr64` (`qgpu` v19, VM quotidienne) et `qsr15`/`qsr1564` (`qgpu` v15, disque
 de dev), même `target/ppc`.
+
+## 13. DOOM 3 joué avec `tcg/0002-0004` (25/09/2026, soir)
+
+Binaire `~/src/qemu-tcg19/build/qsr64`, SMP=2, `x-sr-tlb` des deux côtés, six paires
+entrelacées (ordre alterné), `demo_mars_city1` T+50..T+280 ; journaux `bench/tcg/d3/fp-*`.
+
+| Mode | parties (ms/image) | médiane | moyenne |
+|---|---|---|---|
+| référence | 80,9 80,1 92,9 93,1 80,4 80,7 | 80,8 | 84,7 |
+| `x-lfs-inline,x-vfp-fast,x-vperm-fast` | 80,4 80,2 79,7 73,9 79,6 74,4 | 79,7 | 78,0 |
+
+- **Régime rapide contre régime rapide** (4 référence, 4 patches) : 80,5 contre 80,0 de
+  moyenne, **−0,7 %**, dans le sens attendu mais sous le bruit.
+- **Répartition des régimes** : la référence a 4 parties à ~80 et 2 à ~93 ; les patches ont 4
+  à ~80 et **2 à ~74**, un niveau jamais vu sur les 30 parties jouées depuis le 25/09 matin, et
+  aucune à ~93. Hypothèse : le régime lent et le niveau à 74 sont le même « tirage » de
+  l'hôte, que les patches font passer de 93 à 74 (−20 %) — ce qui voudrait dire que le régime
+  lent est plus sensible au flottant. Non prouvé : 2 parties sur 6 de chaque côté, écart dans
+  les deux sens possible par hasard.
+- `submit`/`wait` du plugin identiques d'un mode à l'autre : le gain, s'il existe, est côté
+  processeur.
+
+Conclusion : **aucune régression** (preuves exhaustives, images justes, zéro repli en plus),
+gain **entre 0,7 % et 8 %** selon qu'on lit la médiane ou la moyenne. Le trancher exige de
+comprendre les régimes (TODO §4) ; un test direct : forcer le régime (fils vCPU épinglés,
+`taskpolicy`) et rejouer six paires dans chaque régime.

@@ -16,7 +16,8 @@ réorganisation par domaine est dans l'historique git (commit précédant celui 
 
 | Chantier | Domaine | État | Preuve qui le fermera |
 |---|---|---|---|
-| `lfs`/`stfs` en ligne, flottant AltiVec à 4 voies, `vperm` par table | TCG (§4) | **patches 0002-0004 prouvés, binaire prêt** (`~/src/qemu-tcg19/build/qsr64`) ; Marble Blast non mesurable (régimes) | A/B DOOM 3 sur la VM quotidienne, six parties par mode (`docs/tcg-g4.md` §12) |
+| `lfs`/`stfs` en ligne, flottant AltiVec à 4 voies, `vperm` par table | TCG (§4) | **prouvés, DOOM 3 joué** : médiane −1,4 %, moyenne −8 %, aucune régression | décision du défaut par l'utilisateur |
+| Deux régimes de vitesse par démarrage | TCG (§4) | à faire : **bloque la mesure de tout gain < 10 %** | cause trouvée, régime forcé, écart entre parties < 2 % |
 | Lots 4 et 5 du verdict unique | Plugin (§2) | à faire | R5 puis `STATECHECK=1` à zéro ; `sample` DOOM 3 comparé à `sample-nat.txt` |
 | Matrice de jeux automatisée (A3) | Outils (§7) | à faire, **prochain chantier de fond** | tableau vert/rouge produit par un script, fenêtre et plein écran |
 
@@ -136,12 +137,12 @@ Relevés et mesures : `docs/tcg-g4.md`. Fait : `x-sr-tlb` (TLB gardé par jeu de
 
 **En cours**
 
-- [ ] **A/B DOOM 3 de `tcg/0002-0004`** (`x-lfs-inline`, `x-vfp-fast`, `x-vperm-fast`,
-      éteints par défaut ; `LFSINLINE=1 VFPFAST=1 VPERMFAST=1`) : preuves faites (2³² `lfs`,
-      2³⁵ `stfs`, 648 M vecteurs AltiVec contre le vrai softfloat, tests invités identiques à
-      l'octet ; bancs −45 %, −17 %, −33 %). Marble Blast : non mesurable, deux régimes par
-      démarrage. Attendu DOOM 3 : −4 à −7 % de ms/image les trois ensemble. Épreuve : six
-      parties par mode entrelacées (`docs/tcg-g4.md` §12), puis décision du défaut.
+- [ ] **Défaut de `tcg/0002-0004`** (`x-lfs-inline`, `x-vfp-fast`, `x-vperm-fast`, éteints ;
+      `LFSINLINE=1 VFPFAST=1 VPERMFAST=1`) : preuves exhaustives faites ; **DOOM 3 joué le
+      25/09 soir** (six paires, `docs/tcg-g4.md` §13) : médiane 80,8 → 79,7, moyenne 84,7 →
+      78,0 ms/image ; aucune partie lente avec les patches (deux à ~74, jamais vu), deux sur six
+      sans. Aucune régression. **Décision de l'utilisateur** : allumer par défaut (reconstruire
+      le QEMU de référence) ou attendre que les régimes soient compris.
 
 **Ensuite**
 
