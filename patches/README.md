@@ -17,6 +17,7 @@ liste, essais revertés, binaires supplantés) gardé pour pouvoir refaire le ra
 | `screamer/0001-wire-screamer-build.patch` | Câblage du Screamer : `hw/audio/Kconfig`, `hw/audio/meson.build`, `hw/ppc/Kconfig`, et surtout l'instanciation + les IRQ/DBDMA dans `hw/misc/macio/macio.c`. |
 | `fastfp/0001-ppc-fast-fp.patch` | **Flottant rapide** : propriété de CPU `x-fast-fp` (défaut *off*) qui laisse softfloat confier les opérations flottantes au FPU de l'hôte. Touche `fpu/softfloat.c`, `include/fpu/softfloat-types.h`, `target/ppc/{cpu.h,cpu_init.c,fpu_helper.c}`. Voir plus bas et `docs/flottant-rapide.md`. |
 | `fastfp/0002-ppc-fewer-fp-helpers.patch` | 4 appels de helper par instruction flottante → 2 (`reset_fpstatus` émis en ligne, `compute_fprf` + `float_check_status` fusionnés). **Aucun effet observable**, dans aucun des deux modes. S'applique par-dessus le 0001 ; `NO_FASTFP2=1` sur un arbre propre applique le 0001 seul. |
+| `tcg/0001-ppc-sr-tlb.patch` | **TLB gardé d'un jeu de segments à l'autre** : propriété de CPU `x-sr-tlb` (défaut *off*, `SRTLB=1 ./run_tiger.sh`). Un changement de registre de segment ne vide plus tout le TLB de QEMU (~23 000 fois par seconde sous Tiger) : chaque `mmu_idx` traduit retient le jeu de segments de ses entrées et n'est vidé que s'il sert sous un autre ; `tlbie` devient global en SMP. Mode preuve `x-sr-tlb-verify=N`. Touche `target/ppc/{cpu.h,cpu_init.c,helper_regs.[ch],mmu_helper.c}`. Marble Blast SMP=2 : **+9,8 %** img/s. Voir `docs/tcg-g4.md`. `NO_TCG=1` le saute. |
 
 Les constantes `OUT_DATA` / `IN_DATA` / `OUT_ENABLE` sont absentes de `gpio.c` en 9.2.0 :
 le patch les **porte désormais lui-même** (mêmes valeurs que l'enum de `balaton2`, voir plus
@@ -101,7 +102,9 @@ Les deux « optimisations TCG tentées puis revertées » du tableau plus bas on
 laissé une règle dans ce dépôt : *le binaire utilisé n'est patché que pour des
 fonctionnalités, jamais pour la performance du JIT.* Le flottant rapide ne la
 viole pas — il n'accélère rien tant qu'on ne le demande pas — mais il mérite la
-même exigence de preuve, d'où le volume de vérification documenté.
+même exigence de preuve, d'où le volume de vérification documenté. Même règle
+pour `tcg/0001` (`x-sr-tlb`, `docs/tcg-g4.md`) : éteint par défaut, prouvé par un
+mode vérificateur intégré.
 
 Ce qu'il fait, en deux lignes : QEMU sait utiliser le FPU de la machine hôte
 (mécanisme *hardfloat* de `fpu/softfloat.c`), mais l'interdit à PowerPC, parce
@@ -150,9 +153,9 @@ OpenBIOS et la chaîne croisée PowerPC).
 | `01-timebase-and-vclock.patch` | **Neutre** (23,32 s = stock). Reverté : zéro gain, et l'approximation par réciproque touche le timing. |
 | `02-jmpcache-generation.patch` | **Régression de ~23 %** (28,63 s). Reverté. |
 
-Détail du protocole de mesure et des conclusions : section « Optimisations » du `README.md`
-racine. Aucun de ces deux patches n'est appliqué par le build — le binaire utilisé n'est
-patché que pour des **fonctionnalités**, jamais pour la performance du JIT.
+Détail du protocole de mesure et des conclusions : `docs/metrologie-boot.md` (01, 02). Aucun de ces patches n'est appliqué par le build. Les deux
+patches de performance appliqués (`fastfp/`, `tcg/0001`) ajoutent chacun une propriété de
+CPU éteinte par défaut : sans elle, le binaire se comporte comme avant.
 
 ## Licences
 

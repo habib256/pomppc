@@ -8,6 +8,22 @@ et dans `docs/`.
 
 ## Non publié
 
+- **TCG / G4 émulé** (`docs/tcg-g4.md`, 25/09/2026, Marble Blast sur copie du disque de dev) :
+  relevé statique des helpers de `target/ppc` (AltiVec flottant, `vperm`, `vsldoi`, `vmrg*`,
+  `lmw`/`stmw`, `sraw`, `lfs`/`stfs` en helper ; rien de changé en amont jusqu'à 11.1.1) ;
+  greffon TCG `tools/tcg/ppcmix` (instructions exécutées par opcode : AltiVec 3,1 % dont
+  0,1 % en helper, 213 000 `mtsrin`/s) ; `info jit` et `sample` hôte (`tools/tcg/`). **Patch
+  `patches/tcg/0001-ppc-sr-tlb.patch`**, propriété de CPU `x-sr-tlb` (éteinte par défaut,
+  `SRTLB=1 ./run_tiger.sh`) : un changement de registre de segment ne vide plus tout le TLB
+  (~23 000 vidages complets/s → ~1 600), chaque `mmu_idx` traduit est vidé s'il sert sous un
+  autre jeu de segments ; `tlbie` devient global en SMP (défaut latent de QEMU, masqué en
+  stock par ces vidages) ; mode preuve `x-sr-tlb-verify=N` (SMP=1 : 936 658 825 entrées
+  retraduites, 0 divergence). A/B entrelacé, même binaire : **SMP=2 +9,8 % d'img/s** (109
+  paires). A/B cœurs : SMP=2 → SMP=1 −6,7 % (sous le seuil de +15 %). Essai
+  `patches/tcg/essais/0002` (`lmw`/`stmw` en ligne, test invité `lmwtest` identique à
+  l'octet) : −1,3 %, non appliqué. `run_tiger.sh` : `SRTLB=1`, `CPU_OPTS=…` ;
+  `devloop.py` : `QEMU_EXTRA=…`. DOOM 3 en attente de la VM quotidienne
+  (`tools/tcg/d3run.sh`).
 - En cours : verdict unique dans le plugin (`TODO.md` §2), lots 0 à 5.
 - Lot 3 du verdict unique, liste blanche du bloc de changements (plugin `20260924-liste`,
   défaut `POMPPC_GL_WHITELIST=1`) : relevé R4 — quel bit du bloc `gctx+0x310` pose chaque

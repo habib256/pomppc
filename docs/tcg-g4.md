@@ -213,6 +213,114 @@ Lecture :
 
 ---
 
+## 3. Le patch 0001 : TLB gardé d'un jeu de segments à l'autre (`x-sr-tlb`)
+
+### 3.1 Le défaut
+
+Tiger (xnu PPC 32 bits) donne au noyau son propre espace d'adressage : il **recharge les
+registres de segment** (`mtsr`/`mtsrin`) à l'entrée et à la sortie du noyau et à chaque
+changement de tâche, et monte/démonte des fenêtres (segments de copie `copyin`/`copyout`).
+Dans QEMU 9.2 (`target/ppc/mmu_helper.c`, `helper_store_sr`), toute écriture qui change un
+registre de segment pose `TLB_NEED_LOCAL_FLUSH`, et le prochain point de synchronisation
+(`isync`, `sync`, `rfi`, exception) **vide le TLB logiciel entier** — les 16 `mmu_idx` — et
+**tout le cache de sauts** du vCPU. Ensuite chaque page touchée repasse par
+`ppc_cpu_tlb_fill` → `ppc_hash32_xlate` (BAT, segment, recherche dans la table de hachage),
+et chaque bloc par `tb_htable_lookup`. Un commentaire de l'amont l'assume (« invalidating
+256 MB of virtual memory in 4 kB pages is way longer than flushing the whole TLB ») ;
+mais le noyau ne fait qu'**alterner** entre quelques jeux de segments, et le TLB de
+l'utilisateur est vidé pour revenir exactement au même jeu.
+
+### 3.2 La conception
+
+Sur un G4, seuls deux `mmu_idx` traduisent par segments : **0** (MSR[PR]=1, utilisateur)
+et **1** (superviseur) ; 2 et 3 sont le mode réel, où les segments ne jouent aucun rôle.
+Chaque `mmu_idx` traduit retient **le jeu de segments sous lequel ses entrées ont été
+remplies** (`sr_snap[i][0..15]`), et n'est vidé que **quand il va servir sous un autre
+jeu**.
+
+Invariant (dans `cpu.h`) :
+
+> `sr_snap_ok[i]` ⇒ toutes les entrées du TLB de `mmu_idx` *i* ont été remplies alors
+> que `env->sr[0..15] == sr_snap[i][0..15]`.
+
+| Événement | Stock | `x-sr-tlb` |
+|---|---|---|
+| `mtsr`/`mtsrin` change une valeur | `TLB_NEED_LOCAL_FLUSH` | `sr_gen++`, `TLB_NEED_SR_CHECK` (pas de vidage) |
+| remplissage d'une entrée de *i* ∈ {0,1} | — | si `env->sr` ≠ `sr_snap[i]` : `sr_snap_ok[i] = false` (entrées mélangées) |
+| point de synchronisation avec `SR_CHECK` | vidage complet | **contrôle** des `mmu_idx` courants (instruction et donnée) |
+| changement de MSR (`hreg_compute_hflags` : exception, `rfi`, `mtmsr`) | — | **contrôle** des `mmu_idx` qui deviennent courants |
+| contrôle de *i* | — | si `!sr_snap_ok[i]` ou `sr_snap[i]` ≠ `env->sr` : `tlb_flush_by_mmuidx(1 << i)` (vide aussi le cache de sauts), puis `sr_snap[i] = env->sr`, `ok` |
+| vidage local complet (`tlbie`, SDR1…) | vidage | vidage, puis tous les `sr_snap` recalés (TLB vide) |
+| `tlbie` | local | **local + global à la prochaine `sync`** (§3.3) |
+
+`sr_gen` évite la comparaison de 16 mots dans le cas courant (`sr_snap_gen[i] == sr_gen` :
+rien n'a changé depuis la dernière vérification). Le `mmu_idx` qui n'est pas courant garde
+ses entrées : il n'est contrôlé qu'au moment où le CPU y revient, ce qui passe
+nécessairement par un changement de MSR (seul moyen de changer de `mmu_idx` sur un G4 ;
+aucune instruction 32 bits n'accède à la mémoire avec un autre `mmu_idx` que le courant).
+
+**Pourquoi c'est juste.** (1) Entre l'écriture d'un registre de segment et la
+synchronisation, les deux modes laissent servir les anciennes traductions — c'est
+l'architecture (effet garanti seulement après `isync`/`rfi`/exception), et le code stock
+fait exactement pareil. (2) À chaque point où le stock aurait vidé *i* et où le patch le
+garde, `sr_snap[i] == env->sr` et toutes les entrées ont été remplies sous ce jeu : elles
+sont celles que le remplissage recalculerait (les PTE n'ont pas changé, sinon il y aurait
+eu `tlbie`, qui vide tout ; les BAT non plus, leurs écritures vident). (3) Le cache de
+sauts n'est pas vérifié contre la page physique (`tb_lookup`) : il est vidé avec chaque
+`mmu_idx` vidé, et une entrée de cache d'un autre `mmu_idx` porte d'autres `flags` (le
+`mmu_idx` est dans les hflags), elle ne peut pas être prise. (4) Les `mmu_idx` 2/3 (mode
+réel) ne dépendent pas des segments : ne plus les vider au changement de segment est exact.
+
+### 3.3 SMP : `tlbie` devient global (un défaut latent de QEMU)
+
+Premier passage du vérificateur (§4) en SMP=2 : une divergence, une entrée utilisateur
+gardée dont la traduction avait disparu. Cause : dans QEMU 9.2, `tlbie` sur le MMU 32 bits
+ne pose que `TLB_NEED_LOCAL_FLUSH` — **l'autre vCPU n'est jamais prévenu**, alors qu'un
+7400 SMP diffuse `tlbie` (et `tlbsync` + `sync` attendent les autres processeurs). En stock,
+le défaut est **masqué** : l'autre vCPU vide tout son TLB plusieurs milliers de fois par
+seconde à son prochain changement de segment. Avec `x-sr-tlb`, ces vidages disparaissent :
+le patch pose donc aussi `TLB_NEED_GLOBAL_FLUSH` sur `tlbie`, que la `sync` suivante
+(`check_tlb_flush(env, true)`) transforme en `tlb_flush_all_cpus_synced`. Hors `x-sr-tlb`,
+rien ne change (et le défaut latent reste — voir §7).
+
+### 3.4 Ce qui n'a pas été fait
+
+Le noyau alterne aussi, **en mode superviseur**, entre jeux de segments (fenêtres de copie,
+tâche courante) : ~10 000 vidages d'un seul `mmu_idx` par seconde subsistent. Une seconde
+étape donnerait **plusieurs étiquettes par mode** (les `mmu_idx` 4 à 7 sont libres sur un
+G4 : le bit HV n'existe pas) : `mmu_idx` = mode + emplacement choisi par jeu de segments,
+éviction du moins récent. Plus de code, plus de hflags ; à mesurer d'abord par un compteur
+par `mmu_idx`.
+
+---
+
+## 4. La preuve de 0001 : `x-sr-tlb-verify`
+
+Un changement de TLB ne se prouve pas par un test natif de fonctions : la preuve est un
+**mode vérificateur** dans le binaire lui-même. `x-sr-tlb-verify=N` : une fois sur N, là
+où le patch **garde** un `mmu_idx` que le stock aurait vidé, chaque entrée valide (table
+principale et table des victimes) est **retraduite** par `ppc_xlate()` depuis la table des
+pages, et la page physique comparée à celle que l'entrée garde. Pas de vérification tant
+qu'un vidage local/global est en attente sur ce CPU (les entrées périmées y sont
+légitimes, et le vidage est imminent). Une divergence imprime le CPU, le `mmu_idx`,
+l'adresse, les deux pages et ce que les **autres** CPU ont en attente.
+
+| Passe (SMP=2, `x-sr-tlb=on,x-sr-tlb-verify=64`) | contrôles gardés vérifiés | entrées retraduites | divergences |
+|---|---|---|---|
+| démarrage jusqu'au bureau (avant §3.3) | — | — | 1 |
+| démarrage jusqu'au bureau (après §3.3) | 319 488 | 56 523 129 | **0** |
+| démarrage + Marble Blast 110 + 240 s | 3 717 120 | 822 373 599 | 1 (cpu 1, `mmu_idx` 0) |
+
+| démarrage + Marble Blast, **SMP=1** (patch final) | **3 453 952** | **936 658 825** | **0** |
+
+La divergence restante en SMP est du type « l'autre CPU vient d'invalider la PTE et n'a pas
+encore exécuté son `tlbie`/`sync` » : pendant cette fenêtre, l'architecture autorise
+l'usage de l'entrée périmée (sur le matériel comme dans le stock). `x-sr-tlb-verify` ne
+modifie rien à l'exécution, sauf le bit R des PTE retraduites que `ppc_hash32_xlate` pose
+(comme le remplissage qui aurait suivi le vidage) : mode preuve seulement.
+
+---
+
 ## 5. A/B
 
 ### 5.1 Protocole
@@ -238,3 +346,16 @@ monofil ; le second vCPU prend le WindowServer, le noyau et le fil de son. Penda
 chaque fil vCPU est occupé ~55 % du temps (échantillons hors `qemu_wait_io_event`), la
 somme ≈ 1,1 cœur hôte. Le coût connu de SMP=2 est la panique AppleUSBOHCI au démarrage
 (~1/10) et, désormais, le défaut `tlbie` du §3.3 (sans `x-sr-tlb`, masqué).
+
+### 5.3 `x-sr-tlb`
+
+| | manche 1 | manche 2 | **ensemble** (4 passes/côté) |
+|---|---|---|---|
+| SMP=2 : off → on | +9,6 % | +10,0 % | **+9,8 %** (109 paires ; médiane +8,4 %, quartiles +5,6 / +12,8 %) |
+| SMP=1 : off → on | −0,6 % | +20,5 % | +9,5 % (110 paires ; quartiles −0,7 / +20,1 %) |
+
+En SMP=2 la mesure est reproductible (deux manches à 0,4 point). En SMP=1 elle ne l'est
+pas : la même config varie de 10 % d'une manche à l'autre (off : −9,5 % de r1 à r2 ; on :
++11,4 %), le mode mono-cœur (TCG `thread=single`, `qemu-system-ppc`) est plus sensible à
+son démarrage. Le gain moyen y est le même, mais il faut plus de manches pour le
+conclure.

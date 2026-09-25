@@ -1,0 +1,343 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index f03c04e99..ec52bd6f2 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1281,6 +1281,33 @@ struct CPUArchState {
+     uint32_t tlb_need_flush; /* Delayed flush needed */
+ #define TLB_NEED_LOCAL_FLUSH   0x1
+ #define TLB_NEED_GLOBAL_FLUSH  0x2
++#define TLB_NEED_SR_CHECK      0x4  /* segment registers changed (x-sr-tlb) */
++    /*
++     * "Segment-tagged TLB" mode (x-sr-tlb property, 32-bit hash MMU only).
++     * A segment register write no longer flushes the whole softmmu TLB at
++     * the next context synchronisation: each translated mmu_idx (0 = user,
++     * 1 = supervisor) remembers the segment register set its entries were
++     * filled under (sr_snap), and is flushed only when it is about to be used
++     * under a different set.  Invariant, for i in {0, 1}:
++     *   sr_snap_ok[i]  =>  every TLB entry of mmu_idx i was filled while
++     *                      env->sr[0..15] == sr_snap[i][0..15].
++     * sr_gen counts segment register changes; sr_snap_gen[i] == sr_gen means
++     * sr_snap[i] was last seen equal to env->sr (no compare needed).
++     * See ppc_sr_tlb_fill() and ppc_sr_tlb_check() in mmu_helper.c.
++     */
++    bool sr_tlb;
++    bool sr_snap_ok[2];
++    uint32_t sr_gen;
++    uint32_t sr_snap_gen[2];
++    target_ulong sr_snap[2][16];
++    /*
++     * x-sr-tlb-verify=N (proof mode, N > 0): every Nth time a check keeps an
++     * mmu_idx instead of flushing it, re-translate each of its valid entries
++     * from the page table and compare the physical page (stderr summary).
++     */
++    uint32_t sr_verify;
++    uint32_t sr_verify_n;
++    uint64_t sr_verify_runs, sr_verify_entries, sr_verify_bad;
+ #endif
+ 
+     /* Other registers */
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index 59c7dd9da..31be9c287 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7287,6 +7287,16 @@ static void ppc_cpu_reset_hold(Object *obj, ResetType type)
+     env->vec_status.no_hardfloat = !env->fast_fp;
+     env->fp_prime_mask = env->fast_fp ? float_flag_inexact : 0;
+ 
++    /*
++     * x-sr-tlb is only meaningful for the 32-bit hash MMU (segment
++     * registers, mmu_idx 0/1 translated).  Tags start invalid: the first
++     * check flushes, then tags.
++     */
++    if (env->mmu_model != POWERPC_MMU_32B) {
++        env->sr_tlb = false;
++    }
++    env->sr_snap_ok[0] = env->sr_snap_ok[1] = false;
++
+     for (i = 0; i < ARRAY_SIZE(env->spr_cb); i++) {
+         ppc_spr_t *spr = &env->spr_cb[i];
+ 
+@@ -7420,6 +7430,15 @@ static Property ppc_cpu_properties[] = {
+      * off by default.
+      */
+     DEFINE_PROP_BOOL("x-fast-fp", PowerPCCPU, env.fast_fp, false),
++    /*
++     * 32-bit hash MMU: keep the softmmu TLB of each translated mmu_idx
++     * across segment register changes, and flush it only when it is used
++     * under a segment set other than the one it was filled under.  Off by
++     * default (experimental).  Only honoured on POWERPC_MMU_32B.
++     */
++    DEFINE_PROP_BOOL("x-sr-tlb", PowerPCCPU, env.sr_tlb, false),
++    /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
++    DEFINE_PROP_UINT32("x-sr-tlb-verify", PowerPCCPU, env.sr_verify, 0),
+     DEFINE_PROP_END_OF_LIST(),
+ };
+ 
+diff --git a/target/ppc/helper_regs.c b/target/ppc/helper_regs.c
+index 42c681ca4..eea197605 100644
+--- a/target/ppc/helper_regs.c
++++ b/target/ppc/helper_regs.c
+@@ -242,6 +242,15 @@ static uint32_t hreg_compute_hflags_value(CPUPPCState *env)
+ void hreg_compute_hflags(CPUPPCState *env)
+ {
+     env->hflags = hreg_compute_hflags_value(env);
++#ifndef CONFIG_USER_ONLY
++    /*
++     * x-sr-tlb: the translated mmu_idx about to be used may have been left
++     * behind under another segment register set (see ppc_sr_tlb_check).
++     */
++    if (env->sr_tlb) {
++        ppc_sr_tlb_check(env);
++    }
++#endif
+ }
+ 
+ /*
+@@ -378,8 +387,97 @@ void check_tlb_flush(CPUPPCState *env, bool global)
+ 
+     /* Then handle local ones */
+     if (env->tlb_need_flush & TLB_NEED_LOCAL_FLUSH) {
+-        env->tlb_need_flush &= ~TLB_NEED_LOCAL_FLUSH;
++        env->tlb_need_flush &= ~(TLB_NEED_LOCAL_FLUSH | TLB_NEED_SR_CHECK);
+         tlb_flush(cs);
++        if (env->sr_tlb) {
++            /* every mmu_idx is empty: any segment set describes it */
++            ppc_sr_tlb_rebase(env);
++        }
++        return;
++    }
++
++    /* x-sr-tlb: segment registers changed since the last sync point */
++    if (env->tlb_need_flush & TLB_NEED_SR_CHECK) {
++        env->tlb_need_flush &= ~TLB_NEED_SR_CHECK;
++        ppc_sr_tlb_check(env);
++    }
++}
++
++/*
++ * x-sr-tlb (32-bit hash MMU).  The two translated mmu_idx of a 32-bit
++ * Book S CPU are 0 (MSR[PR] = 1) and 1 (MSR[PR] = 0); 2 and 3 are real mode,
++ * where segment registers play no part.  See the invariant in cpu.h.
++ */
++static inline bool sr_snap_equal(CPUPPCState *env, int i)
++{
++    return env->sr_snap_gen[i] == env->sr_gen ||
++           !memcmp(env->sr_snap[i], env->sr, sizeof(env->sr_snap[i]));
++}
++
++/* Called with the TLB of every mmu_idx empty (synchronous local flush). */
++void ppc_sr_tlb_rebase(CPUPPCState *env)
++{
++    for (int i = 0; i < 2; i++) {
++        memcpy(env->sr_snap[i], env->sr, sizeof(env->sr_snap[i]));
++        env->sr_snap_gen[i] = env->sr_gen;
++        env->sr_snap_ok[i] = true;
++    }
++}
++
++/*
++ * A TLB entry of mmu_idx is about to be filled with the current segment
++ * registers.  If they differ from the set the mmu_idx is tagged with, its
++ * entries become mixed: the tag is dropped and the next check flushes it.
++ */
++void ppc_sr_tlb_fill(CPUPPCState *env, int mmu_idx)
++{
++    if (mmu_idx > 1 || !env->sr_snap_ok[mmu_idx]) {
++        return;
++    }
++    if (env->sr_snap_gen[mmu_idx] == env->sr_gen) {
++        return;
++    }
++    if (sr_snap_equal(env, mmu_idx)) {
++        env->sr_snap_gen[mmu_idx] = env->sr_gen;
++    } else {
++        env->sr_snap_ok[mmu_idx] = false;
++    }
++}
++
++/*
++ * Sync point, or MSR change: the translated mmu_idx the CPU is going to use
++ * (instruction and data side) must describe the current segment registers.
++ * Those that do not are flushed, then tagged with the current set.  The
++ * other one is left alone until it is used again: its entries only matter
++ * once the CPU switches back to it, which goes through here.
++ */
++void ppc_sr_tlb_check(CPUPPCState *env)
++{
++    uint16_t flush = 0;
++    int idx[2] = { ppc_env_mmu_index(env, true), ppc_env_mmu_index(env, false) };
++
++    for (int k = 0; k < 2; k++) {
++        int i = idx[k];
++        if (i > 1 || (flush & (1 << i))) {
++            continue;
++        }
++        if (env->sr_snap_ok[i] && sr_snap_equal(env, i)) {
++            env->sr_snap_gen[i] = env->sr_gen;
++            if (env->sr_verify && !(env->tlb_need_flush &
++                                    (TLB_NEED_LOCAL_FLUSH | TLB_NEED_GLOBAL_FLUSH)) &&
++                ++env->sr_verify_n >= env->sr_verify) {
++                env->sr_verify_n = 0;
++                ppc_sr_tlb_verify(env, i);
++            }
++            continue;
++        }
++        flush |= 1 << i;
++        memcpy(env->sr_snap[i], env->sr, sizeof(env->sr_snap[i]));
++        env->sr_snap_gen[i] = env->sr_gen;
++        env->sr_snap_ok[i] = true;
++    }
++    if (flush) {
++        tlb_flush_by_mmuidx(env_cpu(env), flush);
+     }
+ }
+ #endif /* !CONFIG_USER_ONLY */
+diff --git a/target/ppc/helper_regs.h b/target/ppc/helper_regs.h
+index 8196c1346..e62b1e5c8 100644
+--- a/target/ppc/helper_regs.h
++++ b/target/ppc/helper_regs.h
+@@ -28,8 +28,13 @@ int hreg_store_msr(CPUPPCState *env, target_ulong value, int alter_hv);
+ 
+ #ifdef CONFIG_USER_ONLY
+ static inline void check_tlb_flush(CPUPPCState *env, bool global) { }
++static inline void ppc_sr_tlb_check(CPUPPCState *env) { }
+ #else
+ void check_tlb_flush(CPUPPCState *env, bool global);
++void ppc_sr_tlb_check(CPUPPCState *env);
++void ppc_sr_tlb_rebase(CPUPPCState *env);
++void ppc_sr_tlb_fill(CPUPPCState *env, int mmu_idx);
++void ppc_sr_tlb_verify(CPUPPCState *env, int mmu_idx);
+ #endif
+ 
+ #endif /* HELPER_REGS_H */
+diff --git a/target/ppc/mmu_helper.c b/target/ppc/mmu_helper.c
+index b167b37e0..040bf5237 100644
+--- a/target/ppc/mmu_helper.c
++++ b/target/ppc/mmu_helper.c
+@@ -313,6 +313,18 @@ void ppc_tlb_invalidate_one(CPUPPCState *env, target_ulong addr)
+          * synchronizing event or sync instruction on 32-bit).
+          */
+         env->tlb_need_flush |= TLB_NEED_LOCAL_FLUSH;
++        if (env->sr_tlb && CPU_NEXT(first_cpu)) {
++            /*
++             * x-sr-tlb: tlbie is broadcast on a real SMP 7400 (tlbsync +
++             * sync wait for the other processors).  Without x-sr-tlb the
++             * other CPU drops its stale entries anyway at its next segment
++             * register switch, several thousand times a second; with it,
++             * those flushes are gone, so the invalidation must reach the
++             * other CPUs: flush them all, synchronously, at the next sync.
++             * A single CPU needs no broadcast (and no exclusive section).
++             */
++            env->tlb_need_flush |= TLB_NEED_GLOBAL_FLUSH;
++        }
+         break;
+     default:
+         /* Should never reach here with other MMU models */
+@@ -361,6 +373,16 @@ void helper_store_sr(CPUPPCState *env, target_ulong srnum, target_ulong value)
+ #endif
+     if (env->sr[srnum] != value) {
+         env->sr[srnum] = value;
++        if (env->sr_tlb) {
++            /*
++             * x-sr-tlb: no whole-TLB flush; the mmu_idx in use is checked
++             * against its segment set at the next context synchronisation
++             * (and each mmu_idx again when the CPU switches to it).
++             */
++            env->sr_gen++;
++            env->tlb_need_flush |= TLB_NEED_SR_CHECK;
++            return;
++        }
+         /*
+          * Invalidating 256MB of virtual memory in 4kB pages is way
+          * longer than flushing the whole TLB.
+@@ -1357,6 +1379,80 @@ void helper_check_tlb_flush_global(CPUPPCState *env)
+ }
+ 
+ 
++/*
++ * x-sr-tlb-verify: the entries an x-sr-tlb check keeps (where the stock code
++ * would have flushed them) must translate, now, to the physical page they
++ * hold.  Each valid entry of mmu_idx (main table and victim table) is
++ * re-translated by ppc_xlate(); a different page, or no translation, is a
++ * divergence.  ppc_xlate() may set the PTE's R bit, as the refill after a
++ * flush would: proof mode only.
++ */
++static void sr_verify_entry(CPUPPCState *env, int mmu_idx,
++                            CPUTLBEntry *e, CPUTLBEntryFull *full)
++{
++    PowerPCCPU *cpu = env_archcpu(env);
++    MMUAccessType t;
++    uint64_t a;
++    hwaddr raddr;
++    int psize, prot;
++
++    if (!(e->addr_read & TLB_INVALID_MASK)) {
++        a = e->addr_read; t = MMU_DATA_LOAD;
++    } else if (!(e->addr_code & TLB_INVALID_MASK)) {
++        a = e->addr_code; t = MMU_INST_FETCH;
++    } else if (!(e->addr_write & TLB_INVALID_MASK)) {
++        a = e->addr_write; t = MMU_DATA_STORE;
++    } else {
++        return;
++    }
++    a &= TARGET_PAGE_MASK;
++    env->sr_verify_entries++;
++    if (!ppc_xlate(cpu, a, t, &raddr, &psize, &prot, mmu_idx, false) ||
++        (raddr & TARGET_PAGE_MASK) != (full->phys_addr & TARGET_PAGE_MASK)) {
++        if (env->sr_verify_bad++ < 20) {
++            /*
++             * Another CPU that has just invalidated the PTE may not have
++             * reached its tlbie/sync yet: until it does, a stale entry is
++             * architecturally usable here.  Report what the others have
++             * pending, to tell that window from a real divergence.
++             */
++            CPUState *o;
++            uint32_t others = 0;
++            CPU_FOREACH(o) {
++                if (o != env_cpu(env)) {
++                    others |= cpu_env(o)->tlb_need_flush;
++                }
++            }
++            fprintf(stderr, "x-sr-tlb-verify: DIVERGENCE cpu %d idx %d ea 0x%"
++                    PRIx64 " tlb 0x%" HWADDR_PRIx " now 0x%" HWADDR_PRIx
++                    " (other CPUs pending flush 0x%x)\n",
++                    env_cpu(env)->cpu_index, mmu_idx, a, full->phys_addr,
++                    raddr, others);
++        }
++    }
++}
++
++void ppc_sr_tlb_verify(CPUPPCState *env, int mmu_idx)
++{
++    CPUState *cs = env_cpu(env);
++    CPUTLBDescFast *f = &cs->neg.tlb.f[mmu_idx];
++    CPUTLBDesc *d = &cs->neg.tlb.d[mmu_idx];
++    size_t n = (f->mask >> CPU_TLB_ENTRY_BITS) + 1;
++
++    for (size_t j = 0; j < n; j++) {
++        sr_verify_entry(env, mmu_idx, &f->table[j], &d->fulltlb[j]);
++    }
++    for (size_t j = 0; j < CPU_VTLB_SIZE; j++) {
++        sr_verify_entry(env, mmu_idx, &d->vtable[j], &d->vfulltlb[j]);
++    }
++    if ((++env->sr_verify_runs & 0x3ff) == 0) {
++        fprintf(stderr, "x-sr-tlb-verify: cpu %d, %" PRIu64 " checks kept, "
++                "%" PRIu64 " entries re-translated, %" PRIu64 " divergent\n",
++                cs->cpu_index, env->sr_verify_runs, env->sr_verify_entries,
++                env->sr_verify_bad);
++    }
++}
++
+ bool ppc_cpu_tlb_fill(CPUState *cs, vaddr eaddr, int size,
+                       MMUAccessType access_type, int mmu_idx,
+                       bool probe, uintptr_t retaddr)
+@@ -1367,6 +1463,9 @@ bool ppc_cpu_tlb_fill(CPUState *cs, vaddr eaddr, int size,
+ 
+     if (ppc_xlate(cpu, eaddr, access_type, &raddr,
+                   &page_size, &prot, mmu_idx, !probe)) {
++        if (cpu->env.sr_tlb) {
++            ppc_sr_tlb_fill(&cpu->env, mmu_idx);
++        }
+         tlb_set_page(cs, eaddr & TARGET_PAGE_MASK, raddr & TARGET_PAGE_MASK,
+                      prot, mmu_idx, 1UL << page_size);
+         return true;

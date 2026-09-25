@@ -5,6 +5,8 @@
 #   • le device paravirtuel « qfb-pci »              — patches/qfb/
 #   • le GPU paravirtuel « qgpu-pci » (+ backends)   — patches/qgpu/
 #   • le bring-up SMP mac99 de BALATON Zoltan        — patches/smp-mac99/
+#   • le flottant rapide (x-fast-fp)                  — patches/fastfp/
+#   • le TLB gardé par jeu de segments (x-sr-tlb)     — patches/tcg/
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
 #   ./scripts/build_qemu_qfb.sh              # build dans ~/src/qemu
@@ -256,6 +258,40 @@ if [ -z "${NO_FASTFP2:-}" ]; then
     exit 1; }
 fi
 
+# --- 4 quinquies. TCG : TLB gardé d'un jeu de segments à l'autre (x-sr-tlb) ---
+# patches/tcg/, docs/tcg-g4.md. Comme le flottant rapide : une propriété de CPU,
+# éteinte par défaut (SRTLB=1 ./run_tiger.sh l'allume), et sans elle le binaire
+# se comporte comme avant — hors un branchement par écriture de registre de
+# segment, par remplissage du TLB et par recalcul des hflags. NO_TCG=1 saute
+# l'étape sur un arbre propre. Le garde teste le marqueur du DERNIER fichier du
+# patch (mmu_helper.c) : un patch à moitié posé laisserait la propriété exister
+# sans que store_sr cesse de vider tout le TLB — un A/B conclurait « aucun gain ».
+if [ -z "${NO_TCG:-}" ]; then
+  if ! grep -q "ppc_sr_tlb_fill" target/ppc/mmu_helper.c; then
+    echo "▶ patch TCG : TLB gardé d'un jeu de segments à l'autre (x-sr-tlb)"
+    patch_forward "$ROOT/patches/tcg/0001-ppc-sr-tlb.patch" \
+      target/ppc/cpu.h          sr_snap_ok \
+      target/ppc/cpu_init.c     x-sr-tlb \
+      target/ppc/helper_regs.h  ppc_sr_tlb_fill \
+      target/ppc/helper_regs.c  ppc_sr_tlb_check \
+      target/ppc/mmu_helper.c   ppc_sr_tlb_fill
+    rm -f target/ppc/cpu.h.orig target/ppc/cpu_init.c.orig target/ppc/helper_regs.h.orig \
+          target/ppc/helper_regs.c.orig target/ppc/mmu_helper.c.orig
+  fi
+  while read -r f m; do
+    [ -z "$f" ] && continue
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0001 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG_MARKERS'
+target/ppc/cpu.h sr_snap_ok
+target/ppc/cpu_init.c x-sr-tlb
+target/ppc/helper_regs.h ppc_sr_tlb_fill
+target/ppc/helper_regs.c ppc_sr_tlb_check
+target/ppc/mmu_helper.c ppc_sr_tlb_fill
+target/ppc/mmu_helper.c TLB_NEED_SR_CHECK
+TCG_MARKERS
+fi
+
 # --- 5. Build ---
 mkdir -p build && cd build
 if [ ! -f build.ninja ] || [ -n "${RECONFIGURE:-}" ]; then
@@ -336,6 +372,8 @@ check smp-mac99  qemu_machine_smp_ok "${BIN}64" "mac99,via=pmu" 2
 # soit visible des deux côtés (le type de CPU n'a pas le même nom).
 check x-fast-fp        qemu_cpu_has_fastfp "$BIN"        "mac99,via=pmu" g4
 check x-fast-fp-ppc64  qemu_cpu_has_fastfp "${BIN}64"    "mac99,via=pmu" g4
+# TLB par jeu de segments (patches/tcg/) : optionnel (NO_TCG=1 le retire).
+check_opt x-sr-tlb       qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-sr-tlb=on
 echo
 echo "→ $CAPS"
 

@@ -176,6 +176,12 @@ _caps_boot() { # <bin> <args…>   -> 0 si QEMU a démarré
 # témoin (la même machine SANS la propriété) : sans lui, un hôte saturé se
 # lirait « absente » — le faux rouge que ce fichier existe pour éviter.
 _FFP_KEY=""; _FFP_RC=2
+# qemu_cpu_has_prop <bin> <machine> <cpu> <prop=val> : QEMU démarre-t-il avec
+# -cpu <cpu>,<prop=val> ? (non mémoïsé ; ~150 ms)
+qemu_cpu_has_prop() {
+  _caps_boot "$1" -M "$2" -cpu "$3,$4"
+}
+
 qemu_cpu_has_fastfp() { # <bin> <machine> <cpu>
   local key="$1|$2|$3"
   [ "$key" = "$_FFP_KEY" ] && return $_FFP_RC
