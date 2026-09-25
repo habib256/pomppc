@@ -1,373 +1,256 @@
 # TODO — tableau de bord de POMPPC
 
-Un seul fichier pour savoir **où on en est, ce qu'on fait maintenant, et dans quel ordre vient
-le reste**. Il est tenu à jour à chaque lot ; l'historique des lots va dans `CHANGELOG.md`, les
-raisonnements longs dans `docs/`. Règle d'écriture : une ligne par chantier, un état daté, et
-**la preuve qui le fermera** (test natif, scène `gltest`, mesure, ou mot de l'utilisateur).
+Un seul fichier pour savoir **ce qu'on fait maintenant et ce qui reste**, rangé **par domaine**.
+Chaque domaine a trois rubriques : *En cours*, *Ensuite* (dans l'ordre), *Plus tard*. Règle
+d'écriture : une ligne par chantier, un état daté, et **la preuve qui le fermera** (test natif,
+scène `gltest`, mesure, ou mot de l'utilisateur). **Ce qui est fini part dans `CHANGELOG.md`**,
+les raisonnements longs dans `docs/`. Un chantier nouveau va dans son domaine ; un domaine
+nouveau (autre hôte, autre invité) prend une section à lui.
 
-Anciens tableaux de bord (états datés du 17/09 au 24/09/2026, lots du bug hunt, recherches
-amorcées) : `docs/archive/todo-gpu-3d-2026-09-24.md`.
+Anciens tableaux de bord : `docs/archive/todo-gpu-3d-2026-09-24.md` ; le TODO d'avant la
+réorganisation par domaine est dans l'historique git (commit précédant celui du 25/09/2026).
 
 ---
 
-## 0. Reprise — état au 24/09/2026, 21 h 30
+## 0. Maintenant — état au 25/09/2026
 
-| Quoi | État |
+| Chantier | Domaine | État | Preuve qui le fermera |
+|---|---|---|---|
+| `lfs`/`stfs` en ligne, puis helpers AltiVec | TCG (§4) | agent Opus en cours, copie `~/src/qemu-tcg19` | équivalence exhaustive + A/B Marble Blast, puis A/B DOOM 3 (six parties par mode) |
+| Lots 4 et 5 du verdict unique | Plugin (§2) | à faire | R5 puis `STATECHECK=1` à zéro ; `sample` DOOM 3 comparé à `sample-nat.txt` |
+| Matrice de jeux automatisée (A3) | Outils (§7) | à faire, **prochain chantier de fond** | tableau vert/rouge produit par un script, fenêtre et plein écran |
+
+**Ordre de fond** (« C : le contrat d'abord », 24/09/2026) : figer le contrat (protocole
+unique, §3), en faire le harnais (A3, §7), puis optimiser et élargir dessous (A2, A4, TCG).
+
+| Installé | État |
 |---|---|
-| Dépôt | `main`, chantier A1 commité (v19) |
-| Protocole | **v19** (transport séparé : `qgpu_abi.h` pour le kext, `qgpu_proto.h` pour device + plugin) ; copies à jour dans `~/src/qemu/hw/display/` ; 913 tests natifs |
-| QEMU hôte | reconstruit 24/09 17h40 (`~/src/qemu/build/qemu-system-ppc64`, celui que `run_tiger.sh` lance) |
-| Invité quotidien (`tiger.qcow2`) | kext **v19** installé (`ioreg` : `QGPUClients = 4`, `QGPUVersion = 19`) ; **plugin `20260924-liste`** (lot 3 du verdict unique, branche du lot 3 : liste blanche allumée par défaut) ; `~/pomppc-build/patches/qgpu/` contient les deux en-têtes ; lanceurs `~/doom3*.command`, `~/prey*.command`, `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
-| Vérifié en jeu | DOOM 3 (plugin v19, 24/09 soir, l'utilisateur) : image parfaite, 22 img/s et plus dans les scènes, 6-12 en combat, « ça devient jouable ». Prey (idem) : **image parfaite, 10-22 img/s** ; dialogue de plantage d'Apple au démarrage, puis tout va bien (§5) |
-| Profils de référence | `.run/d3/sample-nat.txt` (DOOM 3 sous DRAW_NATIVE), `.run/prey/sample.txt` |
-| VM | redémarrages libres autorisés par l'utilisateur |
+| Protocole | **v19** (`qgpu_abi.h` kext, `qgpu_proto.h` device + plugin) ; 913 tests natifs |
+| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 25/09 avec `patches/tcg/0001` (**`x-sr-tlb` allumé par défaut**, `SRTLB=0` l'éteint) ; anciens binaires en `*.avant-srtlb` |
+| Invité quotidien (`tiger.qcow2`) | kext v19 ; plugin **`20260924-liste`** ; lanceurs `~/doom3*.command`, `~/prey*.command` (dont `-fs` plein écran, `-env` lisant `~/lot3.env`), `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
+| Profils de référence | `.run/d3/sample-nat.txt`, `.run/prey/sample.txt` ; TCG : `bench/tcg/` (non versionné) |
+| VM | redémarrages libres autorisés par l'utilisateur ; **un seul agent dessus à la fois** |
 
-**Premier geste à la reprise** : `pgrep -fl qemu-system` puis `.run/cmr/tssh.sh uptime` ; DOOM 3 et
-Prey ont été rejoués avec le plugin v19 (24/09 soir, l'utilisateur : parfaits) ; lots 0 à 3 du
-verdict unique faits (§2) ; enchaîner sur ce que le lot 3 laisse (mémoire par texture et par
-époque dans `geom_texture_ok`/`texture_ok`), le lot 4 (relevé R5) ou le lot 5 (bilan). Mesurer un
-jeu **au premier plan** (sinon repli `Swap60` à chaque image).
+**Premier geste à la reprise** : `pgrep -fl qemu-system`, `.run/cmr/tssh.sh uptime`. Mesurer un
+jeu **au premier plan** (sinon repli `Swap60` à chaque image) ; DOOM 3 se mesure en parties
+réelles, six par mode, médiane (deux régimes de vitesse d'une partie à l'autre, `timedemo`
+refusé par la démo).
 
 ---
 
-## 1. Objectif et critère
+## 1. Objectif et matrice de jeux
 
 **Que Mac OS X Tiger sous QEMU tienne le bureau et les jeux OpenGL sur le GPU de l'hôte**, avec
-une matrice de jeux verte comme preuve. Un jeu est « vert » quand il a ses trois preuves :
+une matrice de jeux verte comme preuve. Un jeu est « vert » quand il a ses trois preuves,
+**en fenêtre ET en plein écran** (demande de l'utilisateur, 24/09) :
 
 1. **image juste** — rejeu natif du vidage identique à la VM, et scène `gltest` de chaque notion
    nouvelle comparée au rendu d'Apple ;
 2. **zéro repli par image** (`fb=0` dans `frames.csv`) ;
 3. **mesure** — ms/image à une scène fixe, avec un plancher par jeu.
 
-Les trois preuves valent **en fenêtre ET en plein écran** (demande de l'utilisateur, 24/09 soir) :
-c'est en plein écran qu'on joue, et le chemin diffère (`CGLSetFullScreen` → drawable mémoire par
-`pomppc_attach_fullscreen`, présentation par copie en VRAM, `docs/re/ut2004-fullscreen.md`). DOOM 3
-et Prey passent en plein écran 1024×768 (24/09 soir, §5) ; le changement de mode reste à jouer.
-
-| Jeu | Famille | Image | Replis | Vitesse (24/09) | Manque |
+| Jeu | Famille | Image | Replis | Vitesse | Manque |
 |---|---|---|---|---|---|
 | Marble Blast Gold | pipeline fixe | juste | 0 | ~88 img/s | rien (témoin de non-régression) |
 | Zenerchi | pipeline fixe (AGL) | juste | 0 | ~50 img/s | rien (témoin) |
-| DOOM 3 Demo | ARB2, VBO, 7 unités, DXT | **parfaite** | 0 | 22 img/s et plus en scène, 6-12 en combat (v19) | vitesse (§2) |
-| Prey Demo | ARB2, VBO, DXT5 | **parfaite** | 0 | 10-22 img/s | vitesse (§2) ; dialogue d'Apple au démarrage (§5) |
-| UT2004 Demo | tableaux, VBO, S3TC | arme en main noire | 0 | ~20 img/s | `docs/re/ut2004-arme-noire.md` |
-| Warcraft III | tableaux | texte des menus | ? | jouable | chemin tableaux (texte) |
-| Colin McRae | ARB via IndirectX | géométrie éclatée en course | 0 | — | tableaux libérés avant `Begin` (`docs/re/programmes-arb.md` §3 ter) |
-| RTCW | idTech3, pipeline fixe | — | — | — | quitte après 8 s par script, cause inconnue |
-| Bureau (Quartz Extreme) | WindowServer | — | — | — | plus de 4 clients, surfaces hôte (§4, A6) |
+| DOOM 3 Demo | ARB2, VBO, 7 unités, DXT | **parfaite** (fenêtre et plein écran) | 0 | début du jeu ~80 ms/image (25/09, `x-sr-tlb`), 6-12 img/s en combat | vitesse (§2, §4) ; changement de mode (§6) |
+| Prey Demo | ARB2, VBO, DXT5 | **parfaite** (fenêtre et plein écran) | 0 | 10-22 img/s, « Fuite » ~89 ms/image | vitesse |
+| UT2004 Demo | tableaux, VBO, S3TC | arme en main noire | 0 | ~20 img/s | §6 |
+| Warcraft III | tableaux | texte des menus | ? | jouable | §6 |
+| Colin McRae | ARB via IndirectX | géométrie éclatée en course | 0 | — | §6 |
+| RTCW | idTech3, pipeline fixe | — | — | — | quitte après 8 s (§6) |
+| Bureau (Quartz Extreme) | WindowServer | — | — | — | §5 |
 
 ---
 
-## 2. En cours — verdict unique dans le plugin (décidé le 24/09/2026)
+## 2. Plugin GL de l'invité (`guest/gldriver/`)
 
-Étude : `docs/re/etude-court-circuit-glengine.md`. GLEngine ne pèse que 1,6 % du fil principal
-sous `glDrawElements` ; le plugin calcule **deux fois** le même verdict (`geom_ok` +
-`texture_ok` + `geom_format` au `gldUpdateDispatch`, puis au dessin : 207 des 818 échantillons),
-plus des parasites. Gain estimé : 20-25 %. Chaque lot = un changement, une épreuve, un repli par
-variable d'environnement tant que la mesure en jeu n'est pas faite.
+Le plugin lit l'état de GLEngine, décide du verdict (hôte ou repli), empaquette et envoie.
+Verdict unique : lots 0 à 3 faits (CHANGELOG, `docs/re/etude-court-circuit-glengine.md`,
+`docs/re/bloc-changements-r4.md`) ; DOOM 3 100 → ~86 ms/image par le plugin seul.
 
-- [x] **Lot 0 — compter** : **fait le 24/09/2026** (plugin `20260924-count`, `POMPPC_GL_COUNT=1`,
-      lignes `COUNT` toutes les 500 images dans la note). Résultats : **DOOM 3 Mars City** (images
-      500-1000) : 168 dispatch/image (max 188), 160 dessins/image, tous `DRAW_NATIVE`, 0 dessin sans
-      dispatch, 4 000 dispatch sans dessin (8/image) ; **verdict : 80 312 identiques, 0 différent**.
-      Bloc : 0 « env seulement », 50 626/84 312 avec un mot `+0x14..+0x48` non nul, 32 motifs + 1 500
-      hors table ; motif 1 `00000000 00000001 00000010 00900000 00000000` × 15 388, motif 2 `10800000
-      0 0 0 0` × 13 500, motif 3 `0 00000032 0 02900000 0` × 9 500. **Prey menu** : 9 dispatch/image,
-      6 dessins, 3 209 identiques, 0 différent, 16 motifs, 0 « env seulement ». Conclusion : le lot
-      2 est justifié (jamais un verdict différent au dessin) ; le lot 3 ne peut pas partir de la
-      liste blanche « env de programmes seulement » (0 occurrence) — il faut le relevé R4 sur les
-      motifs 1 à 3 de DOOM 3.
-- [x] **Lot 1 — parasites** : **fait le 24/09/2026** (plugin `20260924-parasites`).
-      `pthread_self` : plutôt qu'« une fois par entrée » (qui en laissait un par dessin),
-      `self_thr()` le garde avec l'adresse de pile où il a été lu — même fil tant que la pile est
-      à moins de 32 Kio, les piles de deux fils étant disjointes — le gestionnaire de signal relit
-      toujours `pthread_self()` ; `getenv` de `target_probe`, `draw_probe`, `cube_probe` lus une
-      fois ; `tex_complete`/`tex_base_ok` mémorisés par texture et par image (`tex_cp`, effacé
-      par `pomppc_texture_changed`, les procédures qui salissent et le vidage d'état).
-      Épreuves : 18 scènes `gltest` (texup texcache texdelmid cube tex3d arbvp arbfp varrayvbo
-      game vbocolor arbvp0vbo tri, et en 256² tex13 tex14 gl15 texlod mixte dlist) **identiques à
-      l'octet** (verdicts et empreinte de l'image) ; DOOM 3 Mars City, début sans bouger, images
-      3000-3300 : **99,5 → 95,5 ms/image** ; `sample` (fil principal, ~850 éch.) :
-      `__pthread_self` 4 → 1, `getenv` 7 → 0, `tex_complete` 26 → 1 (le profil de référence
-      `sample-nat.txt` en avait 26, 9 et 31 ; le mémo `ok_frame` avait déjà pris les
-      `pthread_self` de `tex_lv0_sig`).
-- [x] **Lot 2 — verdict unique** : **fait le 24/09/2026** (plugin `20260924-verdict`,
-      **défaut `POMPPC_GL_VERDICT=1`** ; `=0` recalcule à chaque dessin comme avant — repli à
-      garder jusqu'à la mesure en jeu de l'utilisateur). Le dispatch range `ok`, `TexInfo`,
-      `fmt`, `gs` et une clé (`vd_key_of`, 32 mots : `G.n_frames`, époque des textures `vd_epoch`
-      — création, destruction, modification de niveaux ou de paramètres, salissure,
-      téléversement, éviction, COPY_TEX, état hôte perdu —, `G.state`, `broken`/`geom_lost`,
-      `qctx`, `cfg`, bloc d'état, VAO et `VA_EN_HI/LO`, table des unités, taille et tampon du
-      drawable, `gctx+0x4e1c`, GLSL, objets de programme courants et actifs, et ce que le plugin
-      en sait : refus, texte compilé, texte relu) ; le dessin la recalcule (≈ 30 lectures) et
-      reprend si elle est identique. `geom_format` n'est plus fait qu'une fois par dispatch
-      (`geom_publish(p, fmt)`). `POMPPC_GL_VERDICTCHECK=1` recalcule quand même, compare `ok`,
-      `fmt`, `gs`, les unités de `TexInfo` et l'époque (un recalcul qui téléverse est un écart),
-      et note chaque écart (`VERDICT écart …`) ; ligne `VERDICT image N : repris, recalculés,
-      écarts` toutes les 500 images. Épreuves : **0 écart** — DOOM 3 `demo_mars_city1`
-      (cinématique + début du jeu) 2 421 790 dessins sur deux parties, Prey `roadhouse`
-      6 530 653 dessins (14 000 images) ; **0 recalculé** : chaque dessin de ces deux jeux suit
-      son dispatch, le chemin « dessin sans dispatch » (clé seule) n'y est pas exercé.
-      `sample` (fil principal, ~810 éch.) : `geom_ok`+`texture_ok`+`geom_format` sous
-      `geom_draw_client` **54 → 0** ; `geom_draw_client` 153 → 137 inclusif, `pomppc_geom_dispatch`
-      95 → 88. ms/image, même binaire, `VERDICT=0` contre défaut, début du jeu (T+50..T+280 /
-      T+450..T+900, T = fin de la cinématique) : **DOOM 3 100,0/99,1 → 87,8/88,1** ; Prey,
-      sauvegarde « Fuite à toute vitesse » (`~/prey-fuite.command`, `+loadGame`), 100 s après
-      le chargement : **99,5 → 89,4** (0-40 s : 73,5 / 74,3 ; 40-100 s : 130,2 → 103,3), une
-      partie chacun. 18 scènes `gltest` identiques à l'octet (défaut et `VERDICTCHECK=1`) ;
-      image de DOOM 3 et de Prey justes à l'écran. Reste à voir : Warcraft III, UT2004, Colin
-      McRae (dessins sans dispatch possibles) sous `VERDICTCHECK=1`. Piste : `geom_format`
-      appelle `texturing_on` par unité (N², 22 éch. au dispatch).
-- [x] **Lot 3 — liste blanche du bloc de changements** : **fait le 24/09/2026** (plugin
-      `20260924-liste`, **défaut `POMPPC_GL_WHITELIST=1`**, `=0` recalcule à chaque dispatch
-      comme au lot 2). **Relevé R4** (`docs/re/bloc-changements-r4.md`) : scène `gltest r4`
-      (~170 appels, un changement par dessin) et sonde `POMPPC_GL_BLOCKDUMP=a[:n]` (bloc de
-      chaque dispatch sur stderr) ; `POMPPC_GL_COUNT=1` compte en plus chaque bit posé. Le bloc
-      se lit : `+00` fragment et rastérisation (pochoir `10000000`, faces/décalage/modes de
-      polygone `00800000`, profondeur `200`, mélange `2`…), `+04` bit *u* = **toute liaison,
-      paramètre ou image de texture sur l'unité *u***, `+08` fenêtre `1`, projection `8`,
-      modèle-vue `10`, cibles et matrices de texture, `+0c` éclairage, tableaux salis
-      `00100000`, env de programmes `00800000`/`02000000`, liaison et `local` `00400000`/
-      `01000000`, `+10` environnement de texture, `+0x14..+0x48` valeurs de paramètres (jamais
-      seules). Sans dispatch : `glActiveTexture`, `glColor4f`, `glMatrixMode`, `glBindBufferARB`
-      seul. `pomppc_geom_dispatch` reprend le verdict gardé si le bloc n'a que des bits
-      **neutres** (`wl_mask`), si le verdict gardé est ok et si la clé du lot 2 est la même ;
-      bits de rastérisation (`WL_R0`) admis si `geom_raster_ok` (extrait de `geom_ok`) tient ;
-      tableaux salis : `va_gen_sizes` seul refait. `VERDICTCHECK=1` recalcule quand même au
-      dispatch (`VERDICT écart dispatch …`) ; ligne `VERDICT image N dispatch` : court-circuités,
-      recalculés (bloc, clé, sans verdict ok), écarts. Épreuves : **0 écart** — DOOM 3
-      `demo_mars_city1` (cinématique + jeu) **1 396 099 dispatches court-circuités sur
-      2 571 457 (54 %)**, 73/162 par image en cinématique, 737/1 294 en jeu ; Prey « Fuite »
-      **666 569 sur 1 369 003 (49 %)** ; 19 scènes `gltest` (les 18 du lot 1 + `r4`)
-      identiques à l'octet en défaut, `VERDICTCHECK=1` et `WHITELIST=0`, 223 dispatches
-      court-circuités, 0 écart. Ce qui reste recalculé : les dispatches qui **lient des
-      textures** (interactions : unités 1, 4, 5 ; unité 0) — DOOM 3 ne relie jamais la même
-      texture (0 table des unités inchangée sur 206 407). Or ce sont eux qui coûtent : **objectif
-      « divisé par deux » non atteint** — `sample` (fil principal ~815 éch.), même binaire :
-      `pomppc_geom_dispatch` 98 / 105 (`WHITELIST=0`) → 80 / 77 (défaut), soit −23 % ; ms/image
-      T+50..T+280, même méthode que le lot 2 : 89,8 / 86,5 → 86,8 / 85,2 (−2,5 % en moyenne, de l'ordre de l'écart entre deux parties du même mode).
-      Restent dans le dispatch : `geom_ok` → `geom_texture_ok` (`texture_uploadable`,
-      `intern_tex`/`find_tex`, `tex_params_ok`) et `texture_ok` (piste : mémoire par texture et
-      par époque, commune à ces deux passes). Piège noté : un jeu qui n'est pas au premier plan
-      perd la présentation directe (« not frontmost ») et fait un repli `Swap60` + une relecture
-      par image — les parties mesurées sont remises au premier plan depuis l'hôte (un processus
-      détaché de la session ssh n'atteint plus le WindowServer).
-- [ ] **Lot 4 — `compute_state` sauté**, seulement si R5 prouve que tout ce qu'il lit pose un bit
-      du bloc (matrices en particulier). Sinon abandonner. Épreuve : `POMPPC_GL_STATECHECK=1`.
+**En cours / ensuite**
+
+- [ ] **Mémoire par texture et par époque** pour `geom_texture_ok` (`texture_uploadable`,
+      `intern_tex`/`find_tex`, `tex_params_ok`) et `texture_ok`, qui refont le même travail :
+      c'est ce qui reste des dispatches recalculés (ceux qui lient des textures). Épreuve :
+      `VERDICTCHECK=1` à zéro écart, `sample` du dispatch en baisse. Piste voisine :
+      `geom_format` appelle `texturing_on` par unité (N², 22 éch.).
+- [ ] **Lot 4 — `compute_state` sauté**, seulement si le relevé R5 prouve que tout ce qu'il lit
+      pose un bit du bloc (matrices en particulier). Sinon abandonner. Épreuve :
+      `POMPPC_GL_STATECHECK=1` à zéro.
 - [ ] **Lot 5 — bilan** : nouveau `sample` de DOOM 3 à la scène de `sample-nat.txt` ; l'option A
       (crocheter la table de dispatch) est classée si GLEngine reste sous 5 %.
+- [ ] **`VERDICTCHECK=1` sur Warcraft III, UT2004, Colin McRae** (dessins sans dispatch
+      possibles, jamais exercés par DOOM 3 et Prey). Épreuve : zéro écart.
+- [ ] **Replis à retirer** une fois la mesure en jeu faite par l'utilisateur :
+      `POMPPC_GL_VERDICT=0`, `POMPPC_GL_WHITELIST=0`.
+
+**Plus tard**
+
+- [ ] **A2 — Découper le plugin en modules à frontières écrites** (`pomppc_accel.c`, 12 000
+      lignes) : lecteur d'état (une seule table d'offsets `gctx+…`, vérifiée au chargement par
+      une empreinte de GLEngine), textures, géométrie, programmes, transport, diagnostic. Après
+      A3. Épreuve : mêmes scènes `gltest` à l'octet, mêmes `frames.csv`.
+- [ ] **A5 (plugin) — Configuration lue une fois** : une structure remplie au chargement (plus
+      de `getenv` dans le chemin chaud), documentée, purge des drapeaux `POMPPC_GL_*` dont le
+      repli est mort.
+- [ ] **Gardes de faute ramenées à la cause** : chaque `faute de lecture` et niveau envoyé noir
+      devient un compteur observé à zéro sur la matrice. Après A3.
+- [ ] **Transmission paresseuse** : mesure honnête (hangar de DOOM 3, jeu à replis) et décision
+      du défaut (allumée depuis le 24/09 sur le ressenti). Quand la matrice existe.
 
 ---
 
-## 3. Ordre de travail retenu (« C : le contrat d'abord », 24/09/2026)
+## 3. Device QEMU et protocole qgpu (`patches/qgpu/`)
 
-Figer le contrat, en faire le harnais, puis optimiser et élargir dessous. Les étapes, avec le
-chantier d'architecture (§4) qu'elles ouvrent :
+**Ensuite**
 
-| # | Étape | État | Chantier |
-|---|---|---|---|
-| 1 | Vitres de DOOM 3 par vidage rejoué ; v18 DRAW_NATIVE | **fait** 24/09 | — |
-| 2 | Vitesse du plugin : verdict unique (§2) | en cours | A2 |
-| 3 | Un seul `docs/protocole.md` pour v19 (capacités, clés, formats, tailles) à la place des notes v7…v19 | à faire | — (A1 fait) |
-| 4 | Matrice de jeux automatisée (§1) : lancement, vidage à image fixe, rejeu, comparaison d'image, plancher | à faire | A3 |
-| 5 | Empaquetage minimal sous contrat figé ; bloc d'état partagé lu par l'hôte ; textures par DMA sur plages sales | après 4 | A4 |
-| 6 | Robustesse de session : `kCGLBadDisplay` après `killall`, créneaux perdus, kext sans constante compilée | après 4 | A1, A6 |
-| 7 | Gardes de faute ramenées à la cause : chaque `faute de lecture` et niveau envoyé noir est un compteur observé à zéro sur la matrice | après 4 | A2 |
-| 8 | Colin McRae, Warcraft III, UT2004 (arme noire) : restes du chemin tableaux | après 4 | — |
-| 9 | Mesure honnête de la transmission paresseuse (hangar de DOOM 3, jeu à replis), décision du défaut (allumée depuis le 24/09 sur le ressenti) | quand la matrice existe | — |
-| 10 | Quartz Extreme et Core Image sur `tiger-dev.raw` : surfaces hôte pour le WindowServer, plus de quatre clients | après 6 | A6 |
-| 11 | 1.0 = installation reproductible : CD ou paquet, `install.sh` qui reconstruit kext et plugin, disque quotidien recréable depuis l'ISO, matrice verte à chaque commit | fin | A5 |
+- [ ] **Un seul `docs/protocole.md` pour v19** (capacités, clés, formats, tailles) à la place
+      des notes `docs/protocole-v7…v19.md`. Figé, c'est le contrat que A3 éprouve.
+- [ ] **Doorbell asynchrone côté invité** (bug hunt D2) : asynchrone + barrière maintenant que
+      K5/K6 sont faits. Mesure : BQL tenu par image sous `GPU_TRACE=1`.
+- [ ] **`QGPU_REG_ERRORS` par client** : aujourd'hui global, un autre processus fait passer le
+      plugin en synchrone sans faute de sa part.
+- [ ] **`gltest tex14` « λ=2 sans biais »** : défaut du GL de l'hôte macOS (le biais d'unité
+      du dessin précédent reste appliqué ; un `glFlush` le corrige mais coûte). Décision :
+      ne réappliquer que sur changement, ou passer le biais d'unité dans l'échantillonneur.
 
----
+**Plus tard**
 
-## 4. Chantiers d'architecture (revue du 24/09/2026)
-
-Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livrable et une épreuve.
-
-- [x] **A1 — Séparer l'ABI de transport de la sémantique GL.** **Fait le 24/09/2026, v19**
-      (`docs/protocole-v19-transport.md`). `qgpu_abi.h` (transport) est le seul en-tête du kext ;
-      `qgpu_proto.h` (sémantique) n'est plus copié sous `kext/`. Le device publie ses tranches
-      (`QGPU_REG_CLIENTS`, table `QGPU_REG_LAYOUT`) et détruit lui-même les objets d'un client
-      (`QGPU_REG_CLIENT_RESET`, en file) ; le kext lit tout dans les registres et laisse le
-      plugin lire les registres (`QGPU_UC_READ_REG`). Épreuves : harnais §5 bis (kext sans aucun
-      symbole sémantique, par construction : il n'inclut pas le fichier), `run_v19` natif (913
-      OK), `qgpu_smoke.py` (CLIENT_RESET de bout en bout), `qgpu_test` 44/44 dans Tiger, `gltest`
-      inchangé. Reste : la « clé fictive » n'a pas été jouée en jeu — la première clé réelle de
-      la suite (lot 2 ou 3 de §2) le fera, sans toucher au kext.
-- [ ] **A2 — Découper le plugin en modules à frontières écrites.** `pomppc_accel.c` (12 000
-      lignes) mélange lecture d'état GLEngine, empaquetage, textures, programmes, gardes, vidage
-      et drapeaux. Modules : lecteur d'état (une seule table d'offsets `gctx+…`, vérifiée au
-      chargement par une empreinte du binaire GLEngine et une sonde), textures, géométrie,
-      programmes, transport, diagnostic. Le verdict unique (§2) est la première frontière :
-      *le dispatch produit, le dessin consomme*. Épreuve : mêmes scènes `gltest` à l'octet,
-      mêmes `frames.csv`.
-- [ ] **A3 — Matrice de jeux automatisée** (§1, étape 4). C'est le harnais qui autorise A2 et A4
-      sans peur. Livrable : un script par jeu (lancement, `POMPPC_GL_DUMP_TRIGGER` à une image
-      fixe, rejeu natif, comparaison avec tolérance, ms/image), **en fenêtre et en plein écran**,
-      et un tableau vert/rouge produit à chaque commit.
-- [ ] **A4 — Continuer à déplacer le travail vers l'hôte.** Après DRAW_NATIVE : bloc d'état
-      partagé en mémoire invité que le device lit et diffère lui-même (le PowerPC ne compare plus
-      les clés une à une), textures lues par DMA sur plages sales. Épreuve : `send_state` et
-      `compute_state` disparaissent du profil.
-- [ ] **A5 — Configuration lue une fois, scripts versionnés.** Une structure de configuration
-      remplie au chargement (plus de `getenv` dans le chemin chaud), documentée, avec purge des
-      drapeaux `POMPPC_GL_*` dont le repli est mort. `.run/cmr/tssh.sh`, `cycle.sh`, `killgame.py`
-      passent dans `tools/guest/` (la clé ssh reste hors dépôt).
-- [x] **F1 — Frontend Dear ImGui : QEMU encadré, ancré, plein écran hôte** (demande de
-      l'utilisateur, 24/09 soir). L'écran QEMU (`frontend/`, affichage embarqué par D-Bus,
-      `ImGui::Image` avec zoom 50-200 %) doit être **entouré de l'interface POMPPC en mode
-      ancré** (docking : la vue de l'invité est une fenêtre ImGui ancrée au centre, menus,
-      ludothèque et bilans autour) et **basculer en plein écran de l'hôte** à la taille maximale
-      **en conservant le ratio** de l'invité (bandes noires, pas de déformation ; raccourci et
-      entrée de menu `Vue`, retour à la fenêtre). Prérequis : ImGui branche `docking`
-      (`setup.sh` prend l'ImGui des autres Pommes — vérifier la branche), GLFW
-      `glfwSetWindowMonitor` pour le plein écran. Épreuve : Tiger en 1024×768 dans un écran
-      16:9 → image intacte au centre, ratio 4:3 exact ; la souris absolue reste juste après
-      bascule (`Mouse.SetAbsPosition` mis à l'échelle sur la zone dessinée, pas sur la fenêtre).
-      Se teste avec `run_os9.sh` pendant que la VM Tiger est occupée.
-      **Fait (24/09 soir)**, ImGui `v1.92.9b-docking` (`setup.sh` épingle le tag). Épreuve
-      jouée sur l'hôte Mac (écran 1920×1080) avec `run_os9.sh` (`SNAPSHOT=1`, invité
-      640×480), scriptée par `POMPPC_FE_SCRIPT` (entrées injectées dans la file d'ImGui : les
-      clics synthétiques macOS exigent l'Accessibilité, refusée ici) : fenêtre ancrée 932×699
-      (4:3) ; plein écran 1440×1080 entre deux bandes de 240 px, mesurées au pixel sur
-      `screencapture` ; double-clic sur *Shared* en plein écran et sur *Trash* après retour en
-      fenêtre → les deux s'ouvrent, curseur invité sur l'icône ; clavier en plein écran tapé
-      dans OpenBIOS (`4 .` → `4 ok`, pas de `f` parasite du raccourci) ; retour à la même
-      taille et position. Trois défauts trouvés en chemin et corrigés : contexte GL 3.0 refusé
-      par macOS (la fenêtre ne s'ouvrait pas), `Mouse.IsAbsolute` lu une seule fois, souris
-      HID de mac99 qui reprend la main sur la virtio-tablet (**Machine ▸ Souris absolue**,
-      `mouse_set`). Non joué : Tiger 1024×768 (VM occupée), la vraie touche Ctrl+Cmd+F au
-      clavier (le raccourci Cocoa « Enter Full Screen » est retiré du menu, à confirmer à la
-      main), écran Retina, plusieurs moniteurs.
-- [ ] **A6 — `docs/architecture.md` avec les invariants** : qui possède quoi, quel côté peut
-      refuser, ce qu'un client mort laisse derrière lui, cycle de vie d'un contexte. Les plantages
-      non résolus (`kCGLBadDisplay`, créneaux perdus) sont des questions de cycle de vie et
-      apparaîtront en l'écrivant.
-
----
-
-## 5. Points ouverts (bugs, dettes, mesures à faire)
-
-- [ ] **DOOM 3 et Prey en plein écran** (`+set r_fullscreen 1 +set r_mode 5`, 1024×768 = l'écran) :
-      **joués le 24/09 soir avec le plugin `verdict`** (lanceurs `~/doom3-fs.command`,
-      `~/prey-fs.command`) : attache plein écran OK (`fullscreen attach ok 1024x768`), images
-      justes à l'écran (Prey : scène du miroir, 23 img/s ; DOOM 3 : cinématique, 17,6 ms/image),
-      zéro repli, pas de plantage. Reste : le changement de mode par le jeu (`r_mode 3` = 640×480,
-      `CGDisplaySwitchToMode`) et la mesure en combat en plein écran. Le chemin
-      plein écran du plugin (`pomppc_attach_fullscreen`, drawable 54 → mémoire 32 bits de l'écran
-      principal, `docs/re/ut2004-fullscreen.md`) n'a été validé que sur UT2004 et, en 16 bits,
-      Warcraft III. Changement de mode par le jeu (`CGDisplaySwitchToMode`) et `SURF_PRESENT` sur
-      l'écran redimensionné à surveiller.
-
-- [x] **Scènes `gltest` cassées, antérieures à A1** (24/09 soir, réglé) : `tex3d`, `tex14`,
-      `gl15`, `texlod` — **c18c5f5** mémorisait `upload_texture` une fois par image sans
-      regarder les paramètres ; un `glTexParameter` (filtre, LOD, biais, comparaison, répétition)
-      entre deux dessins d'une image ne partait plus. Correctif : empreinte du bloc de paramètres
-      (`tex_prm_sig`, `up_psig`) exigée en plus de l'image. Les **SIGSEGV** n'étaient pas le
-      plugin : `px()` de `gltest` lisait hors du tampon 64×64 par défaut (ces scènes dessinent
-      jusqu'à x = 250) — **jouer `tex13 tex14 gl15 texlod` en `256 256`**. Épreuve : tex3d 9/9,
-      tex13 34/34, gl15 18/18, texlod 8/8, tex14 30/31 ; texcache cube arbvp arbfp varrayvbo game
-      tri texup texdelmid varray verts.
-- [ ] **`gltest tex14` « λ=2 sans biais (témoin) » : défaut du GL de l'hôte macOS**, pas du
-      plugin. Le flux est juste (vidage : `SET_STATE TEX_LOD_BIAS0 = 0` avant le dernier
-      `DRAW_RAW`) ; rejoué en natif (`tests/qgpu_replay.c`), le backend logiciel donne bleu
-      (juste), le backend GL rouge : le biais d'unité −2 du dessin précédent reste appliqué.
-      Poser une autre valeur puis `glFlush()` avant le vrai `glTexEnvf(GL_TEXTURE_FILTER_CONTROL,
-      GL_TEXTURE_LOD_BIAS)` dans `gl_unit_env` (`qgpu-gl.c`) le corrige (sans `glFlush`, non) —
-      à décider côté QEMU (coût d'un flush par dessin : non ; ne réappliquer que sur changement,
-      ou passer le biais d'unité dans le biais de texture/l'échantillonneur).
-- [ ] **`kCGLBadDisplay` après un `killall` de DOOM 3** : tout lancement suivant échoue jusqu'au
-      redémarrage de l'invité ; Prey et `gltest` démarrent. Cause non trouvée (état de
-      l'accélérateur ou du WindowServer). Étape 6.
-- [ ] **RTCW** quitte après 8 s (`~/rtcw.command`, LaunchCFMApp) sans rien dessiner ; stdout dans
-      `~/rtcw-dump`. À lancer à la main d'abord.
-- [ ] **Prey : dialogue de plantage d'Apple au démarrage, puis le jeu tourne** (revu le 24/09 soir
-      avec le plugin v19 : image parfaite, 10-22 img/s). Cause lue dans `Prey.crash.log` (17h49) :
-      `EXC_BAD_ACCESS` à `tex_lv0_sig` (`pomppc_accel.c:3176`, lecture de `d[n-1]` au-delà du
-      niveau, adresse en bord de page) sous `glCopyTexSubImage2D` ← `idImage::CopyFramebuffer` ←
-      `RB_STD_DrawView` ← `idCommonLocal::InitGame` : la garde `sig_jmp` est armée, mais le
-      crochet n'est réarmé qu'à `PROC_Swap60` (`crash_hook_check`, ligne 984) et ce premier
-      `EndFrame` de `InitGame` précède la première image — Prey a déjà remplacé nos gestionnaires,
-      la faute va chez lui. **Corrigé et vérifié le 24/09 soir** : Prey démarre sans dialogue,
-      `Prey.crash.log` inchangé (216 482 octets), `gltest` inchangé ; DOOM 3 relancé après :
-      cinématique d'arrivée à Mars City juste à l'écran (hublots, écrans, halos).
-      (1) `crash_hook_fresh()` relit les gestionnaires à chaque armement de garde (`sig_jmp`,
-      `pack_jmp`, `PROC_GUARD_ARM`) tant que `G.n_frames == 0`, coût nul ensuite ; le réarmement
-      par image (`stats_frame`) valait déjà sans `POMPPC_GL_STATS`. (2) Aucun champ de taille en
-      octets connu dans la structure de niveau : `tex_lv0_sig` ne lit plus les texels sous
-      `upload_blank` ni d'une texture `host_only`, et `try_copy_tex` pose `host_only` **avant**
-      l'empreinte (cohérence I1 entre COPY_TEX et dessin) ; borne resserrée à
-      `(ROWPIX·(h−1)+w)·octets`, comme la copie d'`upload_texture`. Épreuve : `~/prey.command` →
-      plus de dialogue d'Apple, `~/Library/Logs/CrashReporter/Prey.crash.log` ne grossit pas,
-      `gltest tri cube arbvp texcache` inchangés ; DOOM 3 : vitres et effets de chaleur justes.
-      Profil (`.run/prey/sample.txt`) à comparer à DOOM 3 après le lot 5.
-- [ ] **UT2004, arme noire** (`docs/re/ut2004-arme-noire.md`) : trancher entre sources du
-      combineur mal lues et textures 79/120 échangées entre les unités 0 et 1.
-- [ ] **Colin McRae** : GLEngine déroule des tableaux déjà libérés par IndirectX ; onze
-      reproductions `gltest arbvp0cmr` n'y arrivent pas.
-- [ ] **Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur reste blanc).
-- [ ] **`QGPU_REG_ERRORS` global au device** : un autre processus fait passer le plugin en
-      synchrone sans faute de sa part. À distinguer par client.
-- [ ] **Doorbell synchrone côté invité** (bug hunt D2) : à supprimer (asynchrone + barrière)
-      maintenant que K5/K6 sont faits. Mesure S-M6 : BQL tenu par image sous `GPU_TRACE=1`.
-- [ ] **Preuves du bug hunt non produites** (`docs/bug-hunt-2026-09-22.md` §11) : kext
-      `kextunload` + `SUBMIT` → erreur propre ; `QFB=1` avec Marble Blast ; `run-all.sh` par les
-      deux chemins.
+- [ ] **A4 — Déplacer le travail vers l'hôte** : bloc d'état partagé en mémoire invité que le
+      device lit et diffère lui-même, textures lues par DMA sur plages sales, empaquetage
+      minimal (position en trois mots, texcoords à taille déclarée, tampons hôte réutilisés).
+      Épreuve : `send_state` et `compute_state` sortent du profil.
 - [ ] **Backend GL** : G7 `glTexSubImage*` par rectangle sale, G8 `tex_copy` par
       `glCopyTexSubImage2D` et PBO en rotation pour `SURF_PRESENT`, G9 cache d'état dans
       `gl_target`.
-- [ ] **SMP** : **A/B fait le 25/09/2026 sur Marble Blast** (`docs/tcg-g4.md` §5.2, disque de
-      dev, 4 passes entrelacées par côté) : SMP=2 → SMP=1 = **−6,7 %** d'img/s (129 paires ;
-      −6,8 % avec `x-sr-tlb`) — deux cœurs rapportent ~7 %, **sous le seuil de +15 %**. À
-      trancher par l'utilisateur ; DOOM 3 à mesurer (`tools/tcg/d3run.sh`). Contre SMP=2 : la
-      panique AppleUSBOHCI au boot environ une fois sur dix (aléa MTTCG, `moncmd system_reset`)
-      et un défaut latent de QEMU : `tlbie` n'atteint pas l'autre vCPU (§ TCG ci-dessous).
-- [ ] **TCG / G4 émulé** (`docs/tcg-g4.md`, 25/09/2026) : relevé fait — sur Marble Blast,
-      AltiVec = 3,1 % des instructions dont 0,1 % en helper, helpers 4,7 %, flottant 2 % ; le
-      premier poste hôte est le **vidage complet du TLB à chaque changement de registre de
-      segment** (~23 000/s, 213 000 `mtsrin`/s) avec ses remplissages et le cache de sauts
-      vidé (30-55 % du temps vCPU). **Patch `tcg/0001` (`x-sr-tlb`, éteint par défaut,
-      `SRTLB=1`)** : TLB gardé par jeu de segments, `tlbie` global en SMP ; preuve
-      `x-sr-tlb-verify` : SMP=1, 936 658 825 entrées retraduites, 0 divergence ; A/B Marble
-      Blast SMP=2 **+9,8 %** (109 paires, manches +9,6 / +10,0 %), SMP=1 +9,5 % en moyenne mais
-      non reproductible (−0,6 / +20,5 %). Essai `tcg/essais/0002` (`lmw`/`stmw` en ligne) :
-      exact, −1,3 % sur un banc dédié, **non appliqué**. **DOOM 3 joué le 25/09** (binaire
-      `qsr64`, `demo_mars_city1` T+50..T+280, `docs/tcg-g4.md` §6 bis) : SMP=2, 6 parties par
-      mode entrelacées, `x-sr-tlb` **médiane 80,1 contre 89,0 ms/image (−10 %)**, moyenne 83,8
-      contre 89,4 (−6 %) ; deux régimes par partie (~80 et ~93 ms) quel que soit le mode, le
-      patch en déplace les deux. SMP=1 : une partie par mode, non concluant. Profil `ppcmix`
-      en jeu : AltiVec 5,3 % (helper 2,8 % : `vperm`, `vmaddfp`, `vmrghw/lw`), `lfs`/`stfs`
-      en helper 8,0 %, `mtsrin` 50 000/s (4× moins que Marble Blast). `timedemo` impossible
-      avec la démo (fichiers hors archives officielles refusés). Reste : décision du défaut,
-      A/B SMP=1 sur DOOM 3. Pistes
-      suivantes : BQL à chaque `mtmsr`/`rfi` (9-10 % + attente), `helper_lookup_tb_ptr`
-      (18-21 %), étiquettes multiples par mode. Épreuve de fermeture : DOOM 3 T+50..T+280,
-      deux parties par mode, `x-sr-tlb` ≥ +5 % sans régression d'image.
-- [ ] **Traducteur de second niveau** (`docs/plan-traducteur-rapide.md`, plan du 25/09/2026,
-      demande de l'utilisateur ; **mis de côté, à reprendre plus tard**) : régions chaudes recompilées par LLVM à partir des ops TCG,
-      dans un fil à part, avec vérificateur. Prochaine étape : **phase 0** (compteurs par TB,
-      part du temps vCPU dans les régions chaudes, plafond théorique) ; go si ≥ 70 % du temps
-      tient dans ≤ 1 000 régions et le plafond dépasse ×1,3 sur l'image.
-- [ ] **Un seul disque, deux hôtes** (archive, lot 10) : `tiger.raw` brut partagé par USB entre
-      le Mac et le PC, `devloop` et jeux sur le même disque.
-- [ ] **Métrologie boot** (`docs/metrologie-boot.md`) : la baseline de 23,32 s est à refaire
-      avec le harnais durci ; A/B du coût du Screamer jamais lancé ; le firmware
-      `openbios-smp-screamer.elf` n'est pas reproductible (livré en binaire).
 
 ---
 
-## 6. Règles de travail
+## 4. Processeur émulé — TCG PowerPC (`patches/tcg/`, `docs/tcg-g4.md`)
+
+Relevés et mesures : `docs/tcg-g4.md`. Fait : `x-sr-tlb` (TLB gardé par jeu de segments,
+`tlbie` global en SMP), **allumé par défaut le 25/09** (DOOM 3 médiane 89,0 → 80,1 ms/image) ;
+`lmw`/`stmw` en ligne essayé et classé (`patches/tcg/essais/`).
+
+**En cours**
+
+- [ ] **`lfs`/`stfs` en ligne** (8 % des instructions de DOOM 3, toutes en helper), puis
+      **helpers AltiVec** (`vperm`, `vmaddfp`, `vmrghw/lw` : 2,8 %) : agent Opus, une propriété
+      de CPU par patch, éteinte par défaut. Épreuve : équivalence exhaustive (2³² motifs pour
+      `lfs`), test invité identique à l'octet, A/B Marble Blast, puis A/B DOOM 3 sur la VM
+      quotidienne (six parties par mode entrelacées).
+
+**Ensuite**
+
+- [ ] **Retours prédits** : chaque `blr` passe par `helper_lookup_tb_ptr` (18-21 % du temps
+      vCPU sur Marble Blast). Épreuve : A/B, zéro divergence.
+- [ ] **Verrou global à chaque `mtmsr`/`rfi`** (`ppc_maybe_interrupt`, `cpu_interrupt_exittb` :
+      9-10 % + attente) : chemin sans verrou quand l'état d'interruption ne change pas.
+- [ ] **Deux régimes de vitesse de DOOM 3** (~80 et ~93 ms/image d'une partie à l'autre, quel
+      que soit le mode) : trouver la cause (placement des fils vCPU sur les cœurs de l'hôte ?).
+      Tant qu'elle court, toute mesure DOOM 3 exige six parties par mode.
+- [ ] **SMP** : deux cœurs rapportent ~7 % sur Marble Blast (seuil +15 %) ; DOOM 3 SMP=1 non
+      concluant (une partie par mode). À rejouer six par mode, puis décision de l'utilisateur.
+      Contre SMP=2 : panique AppleUSBOHCI au boot ~1/10.
+- [ ] **`tlbie` en SMP stock** : défaut de QEMU 9.2 (n'atteint pas l'autre vCPU), corrigé par
+      `x-sr-tlb` ; à signaler en amont.
+
+**Plus tard**
+
+- [ ] **Traducteur de second niveau** (`docs/plan-traducteur-rapide.md`, **mis de côté par
+      l'utilisateur, 25/09**) : régions chaudes recompilées par LLVM depuis les ops TCG.
+      6-10 mois de travail effectif. Première étape si repris : phase 0 (2-4 jours), go si
+      ≥ 70 % du temps vCPU tient dans ≤ 1 000 régions et le plafond dépasse ×1,3 sur l'image.
+
+---
+
+## 5. Système Tiger et cycle de vie (kext, WindowServer)
+
+**Ensuite**
+
+- [ ] **A6 — `docs/architecture.md` avec les invariants** : qui possède quoi, quel côté peut
+      refuser, ce qu'un client mort laisse derrière lui, cycle de vie d'un contexte.
+- [ ] **`kCGLBadDisplay` après un `killall` de DOOM 3** : tout lancement suivant échoue jusqu'au
+      redémarrage de l'invité ; Prey et `gltest` démarrent. Cause non trouvée. Avec A6.
+- [ ] **Créneaux perdus, kext sans constante compilée** (robustesse de session). Avec A6.
+
+**Plus tard**
+
+- [ ] **Quartz Extreme et Core Image** sur `tiger-dev.raw` : surfaces hôte pour le
+      WindowServer, **plus de quatre clients** (`docs/roadmap-opengl15.md`).
+
+---
+
+## 6. Jeux — défauts par jeu
+
+- [ ] **DOOM 3 et Prey en plein écran** : joués le 24/09 (images justes, zéro repli). Reste le
+      changement de mode par le jeu (`r_mode 3`, `CGDisplaySwitchToMode`, `SURF_PRESENT` sur
+      l'écran redimensionné) et la mesure en combat en plein écran.
+- [ ] **UT2004, arme noire** (`docs/re/ut2004-arme-noire.md`) : trancher entre sources du
+      combineur mal lues et textures 79/120 échangées entre les unités 0 et 1.
+- [ ] **Colin McRae** : GLEngine déroule des tableaux déjà libérés par IndirectX ; onze
+      reproductions `gltest arbvp0cmr` n'y arrivent pas (`docs/re/programmes-arb.md` §3 ter).
+- [ ] **Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur reste blanc).
+- [ ] **RTCW** quitte après 8 s (`~/rtcw.command`, LaunchCFMApp) sans rien dessiner ; stdout
+      dans `~/rtcw-dump`. À lancer à la main d'abord.
+
+---
+
+## 7. Outils, mesure, frontend
+
+**Ensuite**
+
+- [ ] **A3 — Matrice de jeux automatisée** : un script par jeu (lancement,
+      `POMPPC_GL_DUMP_TRIGGER` à une image fixe, rejeu natif, comparaison avec tolérance,
+      ms/image), **en fenêtre et en plein écran**, tableau vert/rouge à chaque commit. C'est le
+      harnais qui autorise A2 et A4 sans peur. Base existante : `tools/tcg/d3run.sh`
+      (parties DOOM 3, remise au premier plan, détection de fin de cinématique).
+- [ ] **A5 (scripts) — Scripts versionnés** : `.run/cmr/tssh.sh`, `cycle.sh`, `killgame.py`
+      passent dans `tools/guest/` (la clé ssh reste hors dépôt).
+- [ ] **Preuves du bug hunt non produites** (`docs/bug-hunt-2026-09-22.md` §11) : kext
+      `kextunload` + `SUBMIT` → erreur propre ; `QFB=1` avec Marble Blast ; `run-all.sh` par
+      les deux chemins.
+
+**Plus tard**
+
+- [ ] **Frontend F1, restes non joués** : Tiger 1024×768 dans le frontend, la vraie touche
+      Ctrl+Cmd+F au clavier, écran Retina, plusieurs moniteurs.
+- [ ] **Métrologie boot** (`docs/metrologie-boot.md`) : baseline de 23,32 s à refaire avec le
+      harnais durci ; A/B du coût du Screamer jamais lancé.
+
+---
+
+## 8. Distribution 1.0 et hôtes
+
+**Plus tard**
+
+- [ ] **1.0 = installation reproductible** : CD ou paquet, `install.sh` qui reconstruit kext et
+      plugin, disque quotidien recréable depuis l'ISO, matrice verte à chaque commit.
+- [ ] **Hôte PC x86** : construire et éprouver sur le PC (`x-fast-fp` et `x-sr-tlb` jamais
+      validés sur x86 ; moins de registres, FMA3 non garanti : `docs/plan-traducteur-rapide.md`
+      §1.3).
+- [ ] **Un seul disque, deux hôtes** : `tiger.raw` brut partagé par USB entre le Mac et le PC,
+      `devloop` et jeux sur le même disque.
+- [ ] **Firmware reproductible** : `openbios-smp-screamer.elf` est livré en binaire.
+
+---
+
+## 9. Règles de travail
 
 - **Pas de repli : étendre le protocole.** Sous programme ARB, tout repli vers le rendu d'Apple
   finit dans `gleBuildInterpolateFunc` → `exit(1)` (`docs/re/glengine-exit-interpolateur.md`).
 - **`qgpu_proto.h` ⇒ QEMU + plugin** (`cycle.sh NORUN=1`, sans redémarrer) ; **`qgpu_abi.h` ⇒
   QEMU + kext (`install.sh` dans l'invité, redémarrage) + plugin**, et c'est rare. Le plugin
   refuse un kext d'avant la v19 et un QEMU d'un autre `qgpu_proto.h` ; le kext refuse un device
-  sans `QGPU_CAP_CLIENTS`. (A1, 24/09/2026.)
+  sans `QGPU_CAP_CLIENTS`.
+- **Patch TCG** : une propriété de CPU, éteinte par défaut, une preuve d'équivalence, un A/B
+  entrelacé ; allumée par défaut seulement après DOOM 3 (six parties par mode).
 - **Mesurer avant d'optimiser** : `sample <pid> 10` dans Tiger, `frames.csv` à scène égale ; le
   self % localise, il ne valide pas (`docs/metrologie-boot.md`).
-- **Un lot = un changement + une épreuve + un commit**, et une ligne ici.
+- **Un lot = un changement + une épreuve + un commit**, une ligne ici tant qu'il est ouvert, une
+  entrée dans `CHANGELOG.md` quand il est fini.
 - **Un seul agent sur la VM à la fois** ; les autres travaillent en copie isolée, sur le cœur et
   les tests natifs.
 - **Après un `killall` de DOOM 3, redémarrer l'invité.** Avant `./run_tiger.sh` : `rm -f
@@ -375,13 +258,15 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
 
 ---
 
-## 7. Où lire la suite
+## 10. Où lire la suite
 
 | Sujet | Fichier |
 |---|---|
-| Historique des lots, versions du protocole | `CHANGELOG.md` |
+| Ce qui est fini (lots, versions du protocole, mesures) | `CHANGELOG.md` |
 | Architecture, rétro-ingénierie, offsets, boucle de dev | `docs/gpu-3d-tiger.md`, `docs/re/README.md` |
-| Protocole (v7 → v19, un fichier par version, à fusionner à l'étape 3) | `docs/protocole-v*.md` |
+| Protocole (v7 → v19, à fusionner, §3) | `docs/protocole-v*.md` |
+| Processeur émulé : relevés, patches, A/B | `docs/tcg-g4.md`, `docs/flottant-rapide.md` |
+| Traducteur de second niveau (plan mis de côté) | `docs/plan-traducteur-rapide.md` |
 | Bilan raisonné du 23/09 (jeu par jeu) | `docs/bilan-2026-09-23-jeux-tiger.md` |
 | Étude « court-circuiter GLEngine ? » | `docs/re/etude-court-circuit-glengine.md` |
 | Bug hunt du 22/09 (90 findings, verdicts) | `docs/bug-hunt-2026-09-22.md` |

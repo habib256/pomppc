@@ -8,6 +8,15 @@ et dans `docs/`.
 
 ## Non publié
 
+- **`x-sr-tlb` allumé par défaut** (25/09/2026, demande de l'utilisateur) : `run_tiger.sh`
+  `SRTLB` vaut 1 par défaut (`SRTLB=0` pour l'éteindre) ; QEMU de référence reconstruit avec
+  `patches/tcg/0001`. Preuve DOOM 3 (`docs/tcg-g4.md` §6 bis) : SMP=2, six parties par mode
+  entrelacées, `demo_mars_city1` T+50..T+280, médiane **89,0 → 80,1 ms/image**. Profil
+  `ppcmix` de DOOM 3 : AltiVec 5,3 % des instructions (2,8 % en helper), `lfs`/`stfs` 8,0 %
+  en helper. `timedemo` impossible avec la démo (mode restreint).
+- **Plan du traducteur de second niveau** (`docs/plan-traducteur-rapide.md`) : régions
+  chaudes recompilées par LLVM depuis les ops TCG ; phases 0 à 6 évaluées ; mis de côté.
+- **`TODO.md` réorganisé par domaine** ; les éléments finis ne vivent plus qu'ici.
 - **TCG / G4 émulé** (`docs/tcg-g4.md`, 25/09/2026, Marble Blast sur copie du disque de dev) :
   relevé statique des helpers de `target/ppc` (AltiVec flottant, `vperm`, `vsldoi`, `vmrg*`,
   `lmw`/`stmw`, `sraw`, `lfs`/`stfs` en helper ; rien de changé en amont jusqu'à 11.1.1) ;
