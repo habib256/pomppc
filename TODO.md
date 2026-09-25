@@ -344,6 +344,11 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
       suivantes : BQL à chaque `mtmsr`/`rfi` (9-10 % + attente), `helper_lookup_tb_ptr`
       (18-21 %), étiquettes multiples par mode. Épreuve de fermeture : DOOM 3 T+50..T+280,
       deux parties par mode, `x-sr-tlb` ≥ +5 % sans régression d'image.
+- [ ] **Traducteur de second niveau** (`docs/plan-traducteur-rapide.md`, plan du 25/09/2026,
+      demande de l'utilisateur) : régions chaudes recompilées par LLVM à partir des ops TCG,
+      dans un fil à part, avec vérificateur. Prochaine étape : **phase 0** (compteurs par TB,
+      part du temps vCPU dans les régions chaudes, plafond théorique) ; go si ≥ 70 % du temps
+      tient dans ≤ 1 000 régions et le plafond dépasse ×1,3 sur l'image.
 - [ ] **Un seul disque, deux hôtes** (archive, lot 10) : `tiger.raw` brut partagé par USB entre
       le Mac et le PC, `devloop` et jeux sur le même disque.
 - [ ] **Métrologie boot** (`docs/metrologie-boot.md`) : la baseline de 23,32 s est à refaire
