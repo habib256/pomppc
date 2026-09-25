@@ -359,3 +359,29 @@ pas : la même config varie de 10 % d'une manche à l'autre (off : −9,5 % de r
 +11,4 %), le mode mono-cœur (TCG `thread=single`, `qemu-system-ppc`) est plus sensible à
 son démarrage. Le gain moyen y est le même, mais il faut plus de manches pour le
 conclure.
+
+### 5.4 Le patch 0002 : `lmw`/`stmw` en ligne (`x-lmw-inline`)
+
+Le profil (§2.4) met `helper_lmw` + `helper_stmw` à 7-13 % du temps occupé : Apple GCC et
+CodeWarrior sauvent les registres non volatils par `stmw r13-r31` en prologue et les
+rechargent par `lmw` en épilogue. Essai : `x-lmw-inline` (`patches/tcg/essais/0002`) traduit
+`lmw`/`stmw` en `32 − r` accès mot en ligne **quand `[EA, EA + 4·(32 − r))` tient dans une
+page** — la même traduction et les mêmes droits pour chaque mot, donc soit le premier
+accès fautif et rien n'est fait, soit aucun : le tout-ou-rien du helper (qui sonde toute la
+plage avant d'écrire quoi que ce soit) est conservé ; à cheval sur deux pages, le helper.
+
+Preuve : `tools/guest/jobs/lmwtest` exécute les vraies instructions dans l'invité — `lmw`
+et `stmw` de r13…r31 à 16 décalages (alignés, non alignés, dans une page, à cheval), les
+registres relus un par un, la zone autour relue ; puis des fautes à cheval sur une page
+protégée (`PROT_READ` pour `stmw`, `PROT_NONE` pour `lmw`). **Sortie identique octet pour
+octet** entre `x-lmw-inline=off` et `=on` (empreinte FNV `2575eafce78adf66`, 608 cas + 14
+fautes ; « octets écrits avant la faute : 0 » dans les deux modes). Un `sample` pendant le
+banc confirme que le chemin en ligne est pris (plus aucun `helper_stmw`/`helper_lmw`).
+
+Gain : **banc de 20 millions de paires `stmw`/`lmw` de 19 registres : 1 564 et 1 582 ms →
+1 544 et 1 548 ms (−1,3 %)**. Le chemin rapide du helper (`probe_contiguous` puis une boucle
+de `ldl_be_p`) coûte autant que 19 accès TCG avec leur contrôle de TLB en ligne ; le
+coût est celui des accès. Sur Marble Blast, où ces instructions pèsent 7-13 % du temps, le
+gain attendu est de l'ordre du pour-cent, sous le bruit de mesure (quartiles ±3 %) :
+**piste fermée, patch non appliqué** (gardé dans `patches/tcg/essais/`, il s'applique
+par-dessus 0001).

@@ -150,10 +150,12 @@ OpenBIOS et la chaîne croisée PowerPC).
 
 | Fichier | Verdict mesuré |
 | --- | --- |
+| `tcg/essais/0002-ppc-lmw-inline.patch` | **Exact mais sans gain** (25/09/2026) : `lmw`/`stmw` en accès en ligne quand l'accès tient dans une page (helper sinon), propriété `x-lmw-inline`. Test invité `tools/guest/jobs/lmwtest` : sortie identique octet pour octet (608 cas, 14 fautes à cheval sur deux pages) ; banc de 20 M paires de 19 registres : 1 564/1 582 → 1 544/1 548 ms (−1,3 %) — le chemin rapide du helper (`probe_contiguous` + copie) coûte autant que 19 accès TCG. **Non appliqué.** S'applique par-dessus `tcg/0001`. |
 | `01-timebase-and-vclock.patch` | **Neutre** (23,32 s = stock). Reverté : zéro gain, et l'approximation par réciproque touche le timing. |
 | `02-jmpcache-generation.patch` | **Régression de ~23 %** (28,63 s). Reverté. |
 
-Détail du protocole de mesure et des conclusions : `docs/metrologie-boot.md` (01, 02). Aucun de ces patches n'est appliqué par le build. Les deux
+Détail du protocole de mesure et des conclusions : `docs/metrologie-boot.md` (01, 02) et
+`docs/tcg-g4.md` (essais/0002). Aucun de ces patches n'est appliqué par le build. Les deux
 patches de performance appliqués (`fastfp/`, `tcg/0001`) ajoutent chacun une propriété de
 CPU éteinte par défaut : sans elle, le binaire se comporte comme avant.
 
