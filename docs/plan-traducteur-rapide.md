@@ -197,6 +197,34 @@ Ordre de grandeur honnête : la phase 0 prend quelques jours ; les phases 1 à 3
 projet de plusieurs mois ; 4 à 6 s'étalent ensuite. La phase 1 seule peut déjà
 rapporter (`lookup_tb_ptr` pèse 18-21 %).
 
+### 5 bis. Évaluation du temps et de la difficulté (25/09/2026)
+
+Difficulté de 1 (routine) à 5 (le plus dur du projet). Durées en **travail effectif**
+pour une personne qui connaît QEMU ; avec des agents, l'écriture du code va plus vite,
+mais les épreuves dans Tiger restent en série (une seule VM de jeu) et le débogage
+des défauts rares domine.
+
+| # | Phase | Durée | Difficulté | Ce qui est dur |
+|---|---|---|---|---|
+| 0 | Mesurer le plafond | 2 à 4 jours | 2/5 | rien de neuf : greffon TCG (comme `ppcmix`) + `sample` ; le plus long est de jouer les scènes |
+| 1 | Infrastructure + superblocs + retours prédits | 3 à 6 semaines | 4/5 | toucher au cœur de l'exécutif (`cpu-exec.c`, `tb-maint.c`) : chaînage, invalidation, verrous MTTCG ; les retours prédits seuls : 1 à 2 semaines, 3/5 |
+| 2 | LLVM en mode utilisateur | 4 à 8 semaines | 4/5 | traduire ~150 ops TCG et les `gvec` en LLVM IR, appels de helpers, fil ORC ; monter `qemu-ppc` et une chaîne croisée PowerPC sur le Mac |
+| 3 | LLVM en mode système | 2 à 4 mois | **5/5** | exceptions précises, TLB logiciel, interruptions, code modifié, deux vCPU : les défauts n'apparaissent qu'après des minutes de Tiger, le vérificateur est indispensable |
+| 4 | Optimisations PowerPC | 3 à 6 semaines | 3/5 | chacune est locale, mais doit prouver qu'elle ne change rien (drapeaux morts, pages sorties des boucles) |
+| 5 | Intégration POMPPC | 1 à 2 semaines | 2/5 | LLVM comme dépendance de `build_qemu_qfb.sh`, lanceur, doc |
+| 6 | Hôte x86 (le PC) | 2 à 4 semaines | 3/5 | un autre backend LLVM (sans surprise), mais d'autres cas flottants et moins de registres ; dépend de l'accès au PC |
+
+**Total** : de l'ordre de **6 à 10 mois** de travail effectif ; en calendrier, avec
+des agents sur le code et l'utilisateur sur les parties jouées, plutôt **3 à 6
+mois**, sans garantie : la phase 3 peut à elle seule doubler si un défaut de
+cohérence mémoire en SMP résiste.
+
+**Points de décision** : après la phase 0 (quelques jours : on sait si le jeu en
+vaut la chandelle) ; après la phase 1 (quelques semaines : gain déjà encaissé, sans
+LLVM) ; après la phase 2 (on sait ce que LLVM apporte avant d'affronter le mode
+système). Le risque est concentré dans la phase 3, et on n'y entre qu'avec deux
+mesures favorables en main.
+
 ---
 
 ## 6. Risques
