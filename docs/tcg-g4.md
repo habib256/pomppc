@@ -1,12 +1,14 @@
 # TCG et le G4 émulé — relevé, A/B des cœurs, patches
 
-Chantier « le G4 émulé lui-même » (`TODO.md` §5, 25/09/2026). Au-delà des lots du plugin,
+Chantier « le G4 émulé lui-même » (`TODO.md` §4, 25/09/2026). Au-delà des lots du plugin,
 le plafond des jeux est la vitesse à laquelle TCG exécute le code PowerPC. Ce document
 relève **où part le temps du processeur émulé** (instructions exécutées, helpers, coût
-hôte), mesure **1 contre 2 cœurs**, et décrit **le patch qui en est sorti** :
-`patches/tcg/0001-ppc-sr-tlb.patch` (propriété de CPU `x-sr-tlb`) ; un second essai,
-`patches/tcg/essais/0002-ppc-lmw-inline.patch` (`x-lmw-inline`), exact mais sans gain, n'est
-pas appliqué.
+hôte), mesure **1 contre 2 cœurs**, et décrit **les patches qui en sont sortis** :
+`patches/tcg/0001-ppc-sr-tlb.patch` (propriété de CPU `x-sr-tlb`), puis, pour DOOM 3,
+`0002-ppc-lfs-inline` (`x-lfs-inline`, §8), `0003-ppc-vfp-fast` (`x-vfp-fast`, §9) et
+`0004-ppc-vperm-fast` (`x-vperm-fast`, §10) ; deux essais exacts mais sans gain,
+`patches/tcg/essais/0002-ppc-lmw-inline.patch` (`x-lmw-inline`) et
+`essais/0005-ppc-vfp-nrwg.patch` (`x-vfp-nrwg`, §11), ne sont pas appliqués.
 
 **En une phrase** : sur Marble Blast, ni AltiVec ni le flottant ne dominent ; ce qui coûte,
 c'est que QEMU **vide tout son TLB ~23 000 fois par seconde**, à chaque changement de
@@ -466,9 +468,259 @@ Suites dans l'ordre du profil : `lfs`/`stfs` en ops TCG (cas normal en ligne), p
   des interruptions est partagé avec le fil d'E/S).
 - `helper_lookup_tb_ptr` : chaque `blr` passe par un helper (18-21 %) ; une pile de retours
   prédits est un chantier TCG générique, plus lourd.
-- `lfs`/`stfs` (2,7 % des instructions) passent par `helper_todouble`/`tosingle` : une
-  conversion simple ↔ double en ops TCG entières (cas normal en ligne, dénormaux/NaN au
-  helper) est possible, mais le profil hôte ne leur donne que 0,3-2 %.
+- `lfs`/`stfs` (2,7 % des instructions sur Marble Blast, 8,8 % sur DOOM 3) : fait, §8
+  (`x-lfs-inline`, toutes les entrées en ligne, sans branchement).
 - Le flottant et AltiVec ne sont pas le plafond sur Marble Blast ; **DOOM 3 peut dire
   autre chose** (`idSIMD_AltiVec`) : `ppcmix` sur `demo_mars_city1` en premier, avant
   tout patch AltiVec (`NO_RWG` sur les helpers flottants, `vsldoi`/`vmrg*` en ligne).
+
+---
+
+## 8. Le patch 0002 : `lfs`/`stfs` sans helper (`x-lfs-inline`)
+
+### 8.1 Pourquoi
+
+Profil DOOM 3 (§6 bis) : `lfs` 5,5 % et `stfs` 2,5 % des instructions exécutées, plus
+`lfsx`/`stfsx`/`lfsu`/`stfsu` ~0,8 %, **toutes par un appel de helper** :
+`gen_qemu_ld32fs` charge le mot puis appelle `helper_todouble` (la fonction DOUBLE de
+l'ISA), `gen_qemu_st32fs` appelle `helper_tosingle` (SINGLE) puis range. Le `sample` hôte
+d'une partie (`bench/tcg/d3/d3-s2on-a/sample.txt`, `x-sr-tlb`) leur donne **5,1 % du temps
+occupé des vCPU en propre** (`helper_todouble` 3,4 %, `helper_tosingle` 1,7 %), sans compter
+l'appel lui-même dans le code généré. Les deux helpers ne sont que des manipulations de
+bits (`TCG_CALL_NO_RWG_SE`) : ils se traduisent en ops TCG entières.
+
+### 8.2 La traduction
+
+Une propriété de CPU, `x-lfs-inline` (défaut éteint, lue par le traducteur seulement :
+`ctx->lfs_inline`), change les deux fonctions communes à `lfs lfsu lfsx lfsux` et `stfs stfsu
+stfsx stfsux` (et aux `lxsspx`/`stxsspx` VSX, sans objet sur un G4). Le chargement et le
+rangement restent **les mêmes accès** (même memop `MO_UL` à l'endianité du contexte, même
+`mmu_idx`, même adresse) : une faute se produit au même endroit, avant ou après une
+conversion qui n'a aucun effet de bord. **Aucun branchement** dans le bloc : un saut vers
+le helper pour les cas rares aurait coûté, à chaque `lfs`, la fin de bloc de base de TCG
+(globales resynchronisées puis relues) ; les cas rares sont calculés en ligne eux aussi.
+
+`lfs` (DOUBLE), `u` = le mot chargé, étendu à 64 bits — 13 ops :
+
+| | |
+|---|---|
+| `abs = u & 0x7fffffff`, `sign = (u ^ abs) << 32` | |
+| `k = max(clz64(abs), 40)` | 40 pour un normal, un infini, un NaN ; 40 + s pour un dénormal (s = `clz32 − 8` du helper, 1..23) ; 64 pour 0 |
+| `m = abs << (k − 11)` | la fraction ; le bit de poids fort d'un dénormal arrive au bit 52 |
+| `e = (936 − k) << 52` | biais d'exposant 896 (1023 − 127) pour un normal, 896 − s pour un dénormal, dont le bit de tête ajoute le 1 implicite |
+| `e = 0x700 << 52` si `abs ≥ 0x7f800000` | infini/NaN : 0xff + 0x700 = 0x7ff, fraction gardée, sNaN non calmé (comme le helper) |
+| `e = 0` si `abs = 0` | zéro signé |
+| `ret = (m + e) \| sign` | |
+
+`stfs` (SINGLE : **pas d'arrondi**, la fraction est tronquée, comme le matériel) — 13 ops :
+
+| | |
+|---|---|
+| `exp = x[62:52]` | |
+| `hi = x[63:62] << 30 \| x[58:29]` | `exp > 896` : normaux simples et au-delà, infini, NaN, et les exposants hors plage que l'ISA laisse indéfinis, traités comme le helper |
+| `lo = x[63] << 31 \| ((1 << 52 \| x[51:0]) >> min(926 − exp, 63))` | `exp ≤ 896` : dénormal pour 874 ≤ exp, zéro signé en dessous (un décalage ≥ 53 laisse 0) |
+| `ret = exp > 896 ? hi : lo` | seuls les 32 bits bas sont rangés |
+
+Tous les décalages restent dans [0, 63] : aucun comportement « non spécifié » de TCG. Les
+ops choisies (`clz`, `umax`/`umin`, `movcond`, `extract`, `deposit`) ont toutes une
+instruction arm64 (`clz`, `csel`, `ubfx`, `bfi`).
+
+### 8.3 La preuve
+
+**Hôte, exhaustive** (`tools/tcg/lfsproof.sh [arbre]`) : `helper_todouble` et
+`helper_tosingle` sont **extraits tels quels** de `target/ppc/fpu_helper.c` de l'arbre, et
+comparés à un modèle C des ops (une ligne par op, même ordre, mêmes sémantiques de TCG) ; le
+script vérifie aussi que la suite des `tcg_gen_*` de l'arbre est celle du modèle.
+
+| | cas | divergences |
+|---|---|---|
+| `lfs` : tous les motifs de float32 | **4 294 967 296** (2^32) | **0** |
+| (contrôle : helper = conversion `float → double` du FPU hôte, hors NaN) | 4 278 190 082 | 0 |
+| `stfs` : tous les mots hauts d'un float64 (signe, exposant, 20 bits hauts de fraction) × 8 mots bas | **34 359 738 368** (2^35) | **0** |
+| `stfs` : chaque exposant × signe × fractions `1<<b`, `(1<<b)−1`, `~0>>b` | 651 264 | 0 |
+
+6 s sur le M4 (16 fils). Contre-épreuve : cinq mutations du modèle (seuil de dénormal, test
+d'infini, borne de `stfs`, `umax`, largeur du `deposit`) sont toutes détectées (2 à
+14 663 286 784 divergences chacune).
+
+**Invité** (`tools/guest/jobs/lfstest`) : les vraies instructions, dans Tiger, SMP=2,
+comparées à une référence entière (le code des helpers recompilé par le GCC de l'invité) et
+hachées : `lfs` + `stfd` sur les **2^32 motifs**, `lfd` + `stfs` sur 2^32 float64 (chaque mot
+haut, mot bas dérivé), les 651 264 cas limites, les six formes `x`/`u`/`ux` sur 2^22 motifs
+chacune (adresse de mise à jour relue), et les fautes (`lfs` d'une page `PROT_NONE`, `stfs`
+vers une page `PROT_READ` : signal, mémoire intacte).
+
+| `x-lfs-inline` | divergences avec la référence | empreinte |
+|---|---|---|
+| éteint | 0 (sur 8 590 586 624 conversions + formes) | `5bb38b919aa9a8b0` |
+| allumé | 0 | `5bb38b919aa9a8b0` |
+
+**Sortie identique octet pour octet** (hors ligne du banc). Banc (1 milliard de paires
+`lfs`/`stfs`, boucle C déroulée par 4) : **3 622 → 2 000 ms (−45 %)**, soit ~1,6 ns de moins
+par paire : le chemin en ligne est bien pris.
+
+### 8.4 Marble Blast : non mesurable
+
+Protocole du §5.1 (`tools/tcg/mbab.sh`, copie APFS du disque de dev, binaire `qsr15` =
+même `target/ppc` avec le `qgpu` v15 du disque de dev, SMP=2, `x-fast-fp` et `x-sr-tlb`
+des deux côtés, VM quotidienne au repos à 7 % d'un cœur), **5 démarrages par mode**,
+entrelacés `ref lfs lfs ref ref lfs` puis `lfs ref ref lfs` (démarrages 7-10 : même binaire
+plus 0003-0005, éteints), 2 passes de 240 s chacun ; journaux `bench/tcg/res/{r,q}*`.
+Moyenne des fenêtres de jeu de chaque passe (img/s) :
+
+| démarrage | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| mode | ref | lfs | lfs | ref | ref | lfs | lfs | ref | ref | lfs |
+| passes | 63,7 / 65,6 | 71,8 / 72,2 | 71,2 / 70,7 | 66,5 / 65,7 | 72,3 / 72,2 | 68,0 / 68,2 | 73,4 / 72,7 | 66,2 / 65,8 | 73,6 / 72,6 | 68,9 / 68,5 |
+
+**Chaque démarrage tombe dans un régime lent (~66 img/s) ou rapide (~72-73), uniforme sur
+ses deux passes, sans lien avec le mode** — le même phénomène que les deux régimes de
+DOOM 3 (§6 bis), vu ici pour la première fois sur Marble Blast. Toutes paires confondues :
++3,4 % (309 paires, médiane +2,2 %, quartiles −3,8 / +8,9 %), ce qui ne dit que le tirage
+des régimes. À régime égal : rapide ref 72,3 / 73,1 contre lfs 72,0 / 71,0 / 73,1 (≈ 0) ;
+lent ref 64,7 / 66,1 / 66,0 contre lfs 68,1 / 68,7 (+4 %). Marble Blast n'a que 2,7 %
+d'instructions `lfs`/`stfs` : l'attendu (~1 %) est sous la dispersion des régimes. **Le gain
+de 0002 sur Marble Blast n'est pas mesurable** avec ce protocole ; le banc (§8.3) l'établit
+à l'échelle de l'instruction, DOOM 3 (8,8 % de `lfs`/`stfs`) est le vrai juge.
+
+La cause des régimes devient la question de métrologie numéro un (TODO §4) : un
+démarrage entier est lent ou rapide, sur Marble Blast comme sur DOOM 3.
+
+### 8.5 DOOM 3
+
+À faire sur la VM quotidienne (§12). Attendu : les deux helpers pèsent 5,1 % du temps
+occupé des vCPU en propre ; le banc dit ~0,8 ns gagnées par instruction, soit, à ~50 M
+`lfs`/`stfs` par seconde, ~40 ms de vCPU par seconde : **−3 à −5 % de ms/image**.
+
+---
+
+## 9. Le patch 0003 : flottant AltiVec à 4 voies (`x-vfp-fast`)
+
+### 9.1 Pourquoi
+
+Même `sample` : `helper_vmaddfp` **5,1 %** du temps occupé (dont `float32_muladd` 5,0 % en
+propre), `helper_vaddfp` 0,9 %, pour 0,5 % et 0,2 % des instructions — environ **18 ns par
+`vmaddfp`**. Sous `x-fast-fp`, `float32_muladd` calcule déjà chaque voie sur le FPU hôte
+(hardfloat) ; ce qui coûte, c'est quatre appels, et dans chacun `can_use_fpu`, le contrôle
+des entrées, `fmaf`, le contrôle du résultat, un aller-retour entre registres entiers et
+flottants.
+
+### 9.2 La conception
+
+`x-vfp-fast` (défaut éteint, lu à l'exécution par le helper) : `vaddfp`, `vsubfp`,
+`vmaddfp`, `vnmsubfp` essaient d'abord `vfp_add4` / `vfp_fma4` (`int_helper.c`), qui
+prennent **exactement la décision par voie de `float32_gen2()` / `float32_muladd()`**
+(`fpu/softfloat.c`), pour les quatre voies d'un coup :
+
+| | condition (sinon : voie « logicielle ») |
+|---|---|
+| `can_use_fpu` | `!no_hardfloat`, inexact déjà posé, arrondi au plus proche, pas de re-biaisage — constant sur les 4 voies (une voie peut poser des drapeaux, jamais en effacer) |
+| entrées | toutes zéro ou normales (un dénormal part au logiciel ; sous NJ, softfloat l'aurait d'abord mis à zéro : la boucle d'origine le fait) |
+| résultat add/sub | infini → drapeau overflow ; `|r| ≤ FLT_MIN` sauf deux entrées nulles → logiciel |
+| résultat muladd | `a` ou `c` nul → gardé (produit nul exact, softfloat l'ajoute sur l'hôte aussi) ; infini → overflow ; `|r| ≤ FLT_MIN` → logiciel |
+
+Si **les quatre** voies passent, les résultats sont ceux de l'hôte et le seul drapeau que
+hardfloat pourrait poser (overflow) est posé pareil ; sinon la fonction rend faux sans rien
+avoir écrit, et le helper exécute sa boucle d'origine. Résultats **et drapeaux** sont donc
+ceux d'avant dans tous les cas, par construction. Sans `x-fast-fp`, `no_hardfloat` est posé :
+le chemin rapide n'est jamais pris. Hôte x86 : pas de `fmaf` rapide (softfloat peut y forcer
+la FMA logicielle, `force_soft_fma`), seulement add/sub.
+
+### 9.3 La preuve
+
+**Hôte** (`tools/tcg/vfpproof.sh [arbre] [N]`) : `vfp_*` **extraites telles quelles**
+d'`int_helper.c`, liées au **vrai** `fpu_softfloat.c.o` de l'arbre (avec les `-I/-D` de sa
+compilation) ; pour chaque vecteur, « helper patché » contre « boucle d'origine » sur deux
+`float_status` identiques au départ : 4 résultats au bit près **et** `float_status` entier
+(drapeaux) égaux. Les 8 états (`no_hardfloat` × amorcé × NJ), 4 opérations ; catalogue de 64
+valeurs limites croisé (64² pour add/sub, 64³ pour les FMA, plus l'annulation exacte
+`b = −a·c`), et des vecteurs aléatoires (une moitié à voies « douces » pour que le chemin
+rapide soit pris, l'autre avec extrêmes, zéros signés, dénormaux, infinis, NaN calmes et
+signalants, annulations).
+
+| N = 20 000 000 par (opération, état) | vecteurs | par le chemin rapide | divergences |
+|---|---|---|---|
+| vaddfp + vsubfp + vmaddfp + vnmsubfp | **648 454 144** (2 593 816 576 voies) | 97 486 278 | **0** |
+
+19 s sur le M4. Contre-épreuve : cinq mutations (condition « deux zéros », `<` au lieu de
+`≤ FLT_MIN`, drapeau overflow oublié, dénormaux admis, amorçage ignoré) sont toutes
+détectées (388 à 10 521 534 divergences).
+
+**Invité** (`tools/guest/jobs/vfptest`, `-faltivec`) : les vraies instructions, VSCR[NJ] à 0
+puis à 1, catalogue de 40 valeurs croisé sur une voie (40³) et 2^22 vecteurs aléatoires par
+valeur de NJ, 4 instructions chacun ; plus la partie `vperm` du §10. **Empreinte identique**
+(`f3a6de5986c49679`) avec `x-vfp-fast` et `x-vperm-fast` éteints, allumés, et allumés avec
+l'essai `x-vfp-nrwg` (§11).
+
+Banc (50 M × (2 `vmaddfp` + `vaddfp` + `vsubfp`), chaîne dépendante, valeurs normales) :
+**1 585 → 1 313 ms (−17 %)**, ~1,4 ns par instruction. Moins que les ~18 ns du profil ne le
+laissaient espérer : dans le banc tout est chaud ; le reste du coût est l'appel lui-même
+(helper sans drapeau : globales resynchronisées) et les accès aux AVR.
+
+### 9.4 Attendu sur DOOM 3
+
+`vmaddfp` + `vaddfp` : ~5 M/s ; à 1,4 ns (banc) ~0,7 %, jusqu'à ~2 % si le gain en jeu
+suit les 18 ns du profil. Marble Blast n'exécute presque pas d'AltiVec flottant (§2.2) : pas
+d'A/B sur lui.
+
+---
+
+## 10. Le patch 0004 : `vperm` par table (`x-vperm-fast`)
+
+`helper_VPERM` (`vperm` : 1,0 % des instructions de DOOM 3, 2,7 % du temps occupé) boucle
+sur 16 octets avec un choix `a`/`b` par octet. `x-vperm-fast` (lu par le traducteur :
+`ctx->vperm_fast`) fait appeler à la place `helper_VPERM_FAST` (même drapeau
+`TCG_CALL_NO_RWG`) : une consultation dans une table de 32 octets. Sur un hôte petit-boutiste,
+`VsrB(i)` est `u8[15 − i]` ; avec `T = b.u8[0..15]` puis `a.u8[0..15]`,
+`résultat.u8[j] = T[31 − (c.u8[j] & 31)] = T[~c.u8[j] & 31]` — sur arm64, **un seul `tbl`**
+sur deux registres (`vqtbl2q_u8`), plus un `mvn` et un `and`. Version C portable pour les
+autres hôtes (et grand-boutiste). Les trois opérandes sont lus avant l'écriture de `r`.
+
+Preuve hôte (`tools/tcg/vpermproof.sh`) : `helper_VPERM` et `helper_VPERM_FAST` extraits
+tels quels, comparés sur chaque valeur d'octet de contrôle (256) à chaque position (16) × 64
+couples aléatoires, 50 M vecteurs aléatoires et les recouvrements `r = a`, `r = b`,
+`r = c`, `a = b = c = r` : **50 662 144 cas, 0 divergence** ; deux mutations (masque 15,
+table inversée) détectées. Invité : partie `vperm` de `vfptest` (chaque octet de contrôle à
+chaque position, 2^22 × 2 vecteurs aléatoires dont `r = a = c`), empreinte identique.
+Banc (50 M × 4 `vperm` dépendants) : **707 → 474 ms (−33 %)**, ~1,2 ns par `vperm`.
+Attendu sur DOOM 3 : ~6 M `vperm`/s, **~0,7 %**.
+
+---
+
+## 11. Essai 0005 : les helpers flottants AltiVec en `NO_RWG` (`x-vfp-nrwg`)
+
+`vaddfp`/`vsubfp`/`vmaddfp`/`vnmsubfp` sont déclarés sans drapeau : TCG resynchronise toutes
+les globales avant l'appel et les relit après. Ils n'en touchent aucune (AVR et `vec_status`
+vivent dans `env` hors globales, aucune exception possible) : `TCG_CALL_NO_RWG` est licite.
+`patches/tcg/essais/0005-ppc-vfp-nrwg.patch` ajoute des jumeaux `*_nrwg` choisis au
+traduction sous `x-vfp-nrwg`. Même empreinte `vfptest` ; banc 1 313 → 1 346 ms (**aucun
+gain**, dans le bruit) : dans une boucle AltiVec il y a peu de globales vivantes à
+resynchroniser. **Non appliqué** (s'applique par-dessus 0004).
+
+---
+
+## 12. Ce qui attend la VM quotidienne (DOOM 3)
+
+Binaire : `~/src/qemu-tcg19/build/qsr64` (branche `fp-inline` de la copie : base, 0001,
+`qgpu` v19 **identique au binaire de référence**, 0002, 0003, 0004, essai 0005 — toutes les
+propriétés nouvelles éteintes par défaut). Le `d3run.sh` passe l'environnement à
+`run_tiger.sh`, donc `CPU_OPTS` suffit (il marche aussi avec le `run_tiger.sh` de `main`) :
+
+    # référence : x-sr-tlb seul (défaut de run_tiger.sh)
+    bash tools/tcg/d3run.sh d3-ref 2 1
+    # les trois ensemble d'abord
+    CPU_OPTS=x-lfs-inline=on,x-vfp-fast=on,x-vperm-fast=on bash tools/tcg/d3run.sh d3-all 2 1
+    # … 6 parties par mode, entrelacées (ref all all ref ref all …), médiane ;
+    # si le total gagne, 0002 seul pour l'attribuer :
+    CPU_OPTS=x-lfs-inline=on bash tools/tcg/d3run.sh d3-lfs 2 1
+    bash tools/tcg/d3run.sh --restore
+
+Attendu : 0002 −3 à −5 %, 0003 −0,7 à −2 %, 0004 ~−0,7 % ; **les trois : −4 à −7 % de
+ms/image**, à lire contre les deux régimes par partie du §6 bis (~6 % d'écart à eux seuls).
+
+Piège vu en construisant ces binaires : **recopier un binaire signé par-dessus un fichier
+existant** (`cp qemu-system-ppc64 qsr64` sur un `qsr64` déjà lancé une fois) le fait tuer au
+lancement par macOS (`SIGKILL (Code Signature Invalid)`, rapport dans
+`~/Library/Logs/DiagnosticReports/`, `qemu.log` vide) : `rm` puis `cp`. Les binaires de la
+copie : `qsr`/`qsr64` (`qgpu` v19, VM quotidienne) et `qsr15`/`qsr1564` (`qgpu` v15, disque
+de dev), même `target/ppc`.

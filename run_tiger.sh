@@ -23,6 +23,8 @@
 #   FASTFP=0 ./run_tiger.sh   # flottant exact ; le rapide (FPU hôte) est le défaut
 #   SRTLB=0 ./run_tiger.sh    # coupe le TLB gardé d'un jeu de segments à l'autre (x-sr-tlb, défaut allumé,
 #                             # patches/tcg/, docs/tcg-g4.md) ; CPU_OPTS=… propriétés brutes
+#   LFSINLINE=1 VFPFAST=1 VPERMFAST=1 ./run_tiger.sh  # lfs/stfs sans helper, flottant AltiVec
+#                             # à 4 voies, vperm par table (tcg/0002-0004, éteints par défaut)
 #                             # docs/flottant-rapide.md
 #   NOPAD=1 ./run_tiger.sh    # coupe le passthrough de la manette USB
 #   TABLET=1 ./run_tiger.sh   # + usb-tablet (souris absolue). À ÉVITER sur Tiger :
@@ -194,6 +196,34 @@ if [ "${SRTLB:-1}" != 0 ]; then
     MODE="$MODE + TLB par segments DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
+# --- lfs/stfs sans helper (x-lfs-inline, patches/tcg/0002) ---
+# Les conversions simple ↔ double de lfs/stfs en ops TCG entières au lieu d'un
+# appel de helper ; mêmes bits pour toutes les entrées (docs/tcg-g4.md §8).
+# ÉTEINT par défaut tant que l'A/B DOOM 3 n'est pas fait : LFSINLINE=1 l'allume.
+if [ "${LFSINLINE:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-lfs-inline=on"; then
+    CPU_SPEC="$CPU_SPEC,x-lfs-inline=on"
+    MODE="$MODE + LFS EN LIGNE"
+  else
+    echo "⚠  LFSINLINE=1 demandé mais ce QEMU n'a pas la propriété 'x-lfs-inline' (patches/tcg/0002)." >&2
+    MODE="$MODE + lfs en ligne DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+# --- AltiVec : flottant à 4 voies (x-vfp-fast, tcg/0003), vperm par table
+# (x-vperm-fast, tcg/0004) --- mêmes résultats au bit près (docs/tcg-g4.md §9-10).
+# ÉTEINTS par défaut tant que l'A/B DOOM 3 n'est pas fait : VFPFAST=1, VPERMFAST=1.
+for _p in "VFPFAST x-vfp-fast VFP-4-VOIES" "VPERMFAST x-vperm-fast VPERM-TABLE"; do
+  set -- $_p
+  if [ "${!1:-0}" != 0 ]; then
+    if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "$2=on"; then
+      CPU_SPEC="$CPU_SPEC,$2=on"
+      MODE="$MODE + $3"
+    else
+      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/)." >&2
+      MODE="$MODE + $3 DEMANDÉ MAIS INDISPONIBLE"
+    fi
+  fi
+done
 [ -n "${CPU_OPTS:-}" ] && CPU_SPEC="$CPU_SPEC,${CPU_OPTS#,}"
 
 # --- Affichage ---

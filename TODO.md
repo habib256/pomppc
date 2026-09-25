@@ -16,7 +16,7 @@ réorganisation par domaine est dans l'historique git (commit précédant celui 
 
 | Chantier | Domaine | État | Preuve qui le fermera |
 |---|---|---|---|
-| `lfs`/`stfs` en ligne, puis helpers AltiVec | TCG (§4) | agent Opus en cours, copie `~/src/qemu-tcg19` | équivalence exhaustive + A/B Marble Blast, puis A/B DOOM 3 (six parties par mode) |
+| `lfs`/`stfs` en ligne, flottant AltiVec à 4 voies, `vperm` par table | TCG (§4) | **patches 0002-0004 prouvés, binaire prêt** (`~/src/qemu-tcg19/build/qsr64`) ; Marble Blast non mesurable (régimes) | A/B DOOM 3 sur la VM quotidienne, six parties par mode (`docs/tcg-g4.md` §12) |
 | Lots 4 et 5 du verdict unique | Plugin (§2) | à faire | R5 puis `STATECHECK=1` à zéro ; `sample` DOOM 3 comparé à `sample-nat.txt` |
 | Matrice de jeux automatisée (A3) | Outils (§7) | à faire, **prochain chantier de fond** | tableau vert/rouge produit par un script, fenêtre et plein écran |
 
@@ -136,11 +136,12 @@ Relevés et mesures : `docs/tcg-g4.md`. Fait : `x-sr-tlb` (TLB gardé par jeu de
 
 **En cours**
 
-- [ ] **`lfs`/`stfs` en ligne** (8 % des instructions de DOOM 3, toutes en helper), puis
-      **helpers AltiVec** (`vperm`, `vmaddfp`, `vmrghw/lw` : 2,8 %) : agent Opus, une propriété
-      de CPU par patch, éteinte par défaut. Épreuve : équivalence exhaustive (2³² motifs pour
-      `lfs`), test invité identique à l'octet, A/B Marble Blast, puis A/B DOOM 3 sur la VM
-      quotidienne (six parties par mode entrelacées).
+- [ ] **A/B DOOM 3 de `tcg/0002-0004`** (`x-lfs-inline`, `x-vfp-fast`, `x-vperm-fast`,
+      éteints par défaut ; `LFSINLINE=1 VFPFAST=1 VPERMFAST=1`) : preuves faites (2³² `lfs`,
+      2³⁵ `stfs`, 648 M vecteurs AltiVec contre le vrai softfloat, tests invités identiques à
+      l'octet ; bancs −45 %, −17 %, −33 %). Marble Blast : non mesurable, deux régimes par
+      démarrage. Attendu DOOM 3 : −4 à −7 % de ms/image les trois ensemble. Épreuve : six
+      parties par mode entrelacées (`docs/tcg-g4.md` §12), puis décision du défaut.
 
 **Ensuite**
 
@@ -148,9 +149,15 @@ Relevés et mesures : `docs/tcg-g4.md`. Fait : `x-sr-tlb` (TLB gardé par jeu de
       vCPU sur Marble Blast). Épreuve : A/B, zéro divergence.
 - [ ] **Verrou global à chaque `mtmsr`/`rfi`** (`ppc_maybe_interrupt`, `cpu_interrupt_exittb` :
       9-10 % + attente) : chemin sans verrou quand l'état d'interruption ne change pas.
-- [ ] **Deux régimes de vitesse de DOOM 3** (~80 et ~93 ms/image d'une partie à l'autre, quel
-      que soit le mode) : trouver la cause (placement des fils vCPU sur les cœurs de l'hôte ?).
-      Tant qu'elle court, toute mesure DOOM 3 exige six parties par mode.
+- [ ] **Deux régimes de vitesse par démarrage** (DOOM 3 ~80 / ~93 ms/image ; **Marble Blast
+      aussi**, ~66 / ~73 img/s, 10 démarrages le 25/09, `docs/tcg-g4.md` §8.4), quel que soit
+      le mode : trouver la cause (placement des fils vCPU sur les cœurs P/E de l'hôte ?).
+      Tant qu'elle court, toute mesure exige beaucoup de démarrages par mode et bloque les
+      A/B de gains de 1-3 %.
+- [ ] **Flottant scalaire** (DOOM 3 : ~19 % du temps vCPU dans `helper_FMULS/FMADDS/FADDS/
+      FSUBS`, `fcmpu`, `do_float_check_status` 4,5 %, `compute_fprf` 2,5 %) : premier poste
+      hors `lookup_tb_ptr` ; piste FPRF/contrôle calculés en ligne quand FPSCR n'a aucune
+      trappe armée.
 - [ ] **SMP** : deux cœurs rapportent ~7 % sur Marble Blast (seuil +15 %) ; DOOM 3 SMP=1 non
       concluant (une partie par mode). À rejouer six par mode, puis décision de l'utilisateur.
       Contre SMP=2 : panique AppleUSBOHCI au boot ~1/10.
