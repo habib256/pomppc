@@ -16,7 +16,7 @@ réorganisation par domaine est dans l'historique git (commit précédant celui 
 
 | Chantier | Domaine | État | Preuve qui le fermera |
 |---|---|---|---|
-| Deux régimes de vitesse par démarrage | TCG (§4) | à faire : **bloque la mesure de tout gain < 10 %** | cause trouvée, régime forcé, écart entre parties < 2 % |
+| Deux régimes de vitesse par démarrage | TCG (§4) | **cause trouvée** (tampon du JIT hors de la fenêtre du texte, `tcg-g4.md` §14), correctif `tcg/0006` `JITNEAR=1` ; Marble Blast forcé : écart entre démarrages 1-2 % | parties DOOM 3 du §14.6, puis `JITNEAR` par défaut |
 | Lots 4 et 5 du verdict unique | Plugin (§2) | à faire | R5 puis `STATECHECK=1` à zéro ; `sample` DOOM 3 comparé à `sample-nat.txt` |
 | Matrice de jeux automatisée (A3) | Outils (§7) | à faire, **prochain chantier de fond** | tableau vert/rouge produit par un script, fenêtre et plein écran |
 
@@ -144,18 +144,23 @@ Relevés et mesures : `docs/tcg-g4.md`. Fait : `x-sr-tlb` (TLB gardé par jeu de
       vCPU sur Marble Blast). Épreuve : A/B, zéro divergence.
 - [ ] **Verrou global à chaque `mtmsr`/`rfi`** (`ppc_maybe_interrupt`, `cpu_interrupt_exittb` :
       9-10 % + attente) : chemin sans verrou quand l'état d'interruption ne change pas.
-- [ ] **Deux régimes de vitesse par démarrage** (DOOM 3 ~80 / ~93 ms/image ; **Marble Blast
-      aussi**, ~66 / ~73 img/s, 10 démarrages le 25/09, `docs/tcg-g4.md` §8.4), quel que soit
-      le mode : trouver la cause (placement des fils vCPU sur les cœurs P/E de l'hôte ?).
-      Tant qu'elle court, toute mesure exige beaucoup de démarrages par mode et bloque les
-      A/B de gains de 1-3 %.
+- [ ] **Deux régimes de vitesse par démarrage : cause trouvée** (`docs/tcg-g4.md` §14) —
+      macOS pose le tampon du JIT hors de la fenêtre de 4 Gio du texte de QEMU un lancement
+      sur deux environ, et l'Apple M4 prédit plus lentement les appels de helpers vers une
+      autre fenêtre (Marble Blast −6 %, 14 démarrages sur 14 prédits, forçage 4 sur 4 dans
+      les deux sens). Correctif `tcg/0006` (`x-jit-near`, `JITNEAR=1`, éteint). Reste :
+      **les parties DOOM 3 du §14.6** (binaire `qjit`), puis `JITNEAR` par défaut et
+      `tcg/0006` dans le binaire de référence ; relire alors le gain de `tcg/0002-0004`
+      (attendu −7,5 % à placement égal, §14.5). SMP=1 touché pareil (+8,2 % forcé près).
 - [ ] **Flottant scalaire** (DOOM 3 : ~19 % du temps vCPU dans `helper_FMULS/FMADDS/FADDS/
       FSUBS`, `fcmpu`, `do_float_check_status` 4,5 %, `compute_fprf` 2,5 %) : premier poste
       hors `lookup_tb_ptr` ; piste FPRF/contrôle calculés en ligne quand FPSCR n'a aucune
       trappe armée.
 - [ ] **SMP** : deux cœurs rapportent ~7 % sur Marble Blast (seuil +15 %) ; DOOM 3 SMP=1 non
       concluant (une partie par mode). À rejouer six par mode, puis décision de l'utilisateur.
-      Contre SMP=2 : panique AppleUSBOHCI au boot ~1/10.
+      Contre SMP=2 : panique AppleUSBOHCI au boot ~1/10. **À reprendre à placement du JIT
+      forcé** : Marble Blast `x-jit-near` donne SMP=1 73,7 contre SMP=2 73,3 img/s
+      (`docs/tcg-g4.md` §14.4) — le −7 % du §5.2 mêlait les régimes.
 - [ ] **`tlbie` en SMP stock** : défaut de QEMU 9.2 (n'atteint pas l'autre vCPU), corrigé par
       `x-sr-tlb` ; à signaler en amont.
 

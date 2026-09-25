@@ -749,4 +749,203 @@ entrelacées (ordre alterné), `demo_mars_city1` T+50..T+280 ; journaux `bench/t
 Conclusion : **aucune régression** (preuves exhaustives, images justes, zéro repli en plus),
 gain **entre 0,7 % et 8 %** selon qu'on lit la médiane ou la moyenne. Le trancher exige de
 comprendre les régimes (TODO §4) ; un test direct : forcer le régime (fils vCPU épinglés,
-`taskpolicy`) et rejouer six paires dans chaque régime.
+`taskpolicy`) et rejouer six paires dans chaque régime. **Cause trouvée au §14** : le
+placement du tampon du JIT ; le §14.5 relit ces chiffres.
+
+## 14. Les deux régimes (25/09/2026, nuit)
+
+**En une phrase** : à chaque lancement, macOS pose le tampon du JIT de QEMU (1 Gio, `MAP_JIT`)
+soit dans la **même fenêtre de 4 Gio** que le texte de QEMU (`0x1xxxxxxxx`), soit à
+**`0x300000000`** (un lancement sur deux à trois) ; dans le second cas, chaque appel de helper
+depuis le code généré et chaque retour est un saut indirect dont la cible n'a pas les mêmes
+bits 63..32 que le saut, et **l'Apple M4 prédit ces sauts-là plus lentement** (+0,4 à 1,5 ns
+par appel). Tout le processus perd **~6 % sur Marble Blast**, davantage sur DOOM 3. Le
+correctif `tcg/0006` (`x-jit-near`, `JITNEAR=1`) pose le tampon près du texte : le régime
+lent disparaît.
+
+Journaux : `bench/reg/` du worktree de l'agent (non versionné : `res/`, `camp1-bilan.txt`,
+`campagne{1,2}.log`). Outils : `tools/tcg/regab.sh` (un processus QEMU neuf par étiquette :
+bureau, `vmmap`, job `tools/guest/jobs/regime` = micro-banc `regbench` puis Marble Blast
+110 s de chauffe + 150 s de mesure, redémarrage **propre de l'invité dans le même
+processus**, second job, arrêt), `tools/tcg/regidx.py` (indice de régime : médiane des
+rapports img/s aux fenêtres de même triangles/image des cinq démarrages rapides du §8.4 ;
+1,00 = rapide), `tools/tcg/regreport.py`, `tools/tcg/jitwhere.sh`, `tools/tcg/farcall.c`.
+Disque : copie APFS de `tiger-dev.raw` ; toutes les propriétés de `run_tiger.sh` allumées
+(`x-fast-fp`, `x-sr-tlb`, `x-lfs-inline`, `x-vfp-fast`, `x-vperm-fast`) ; VM quotidienne au
+repos (7-8 % d'un cœur, `top` dans chaque `res/*-info.txt`).
+
+### 14.1 Le régime suit le processus hôte, pas l'invité
+
+Campagne 1 (SMP=2, binaire `qsr1564`, sans patch de placement) : 7 processus, 2 démarrages de
+l'invité chacun (`shutdown -r` entre les deux, même processus QEMU). Base du tampon du JIT
+relevée par `vmmap` au bureau.
+
+| processus | tampon du JIT | fenêtre du texte ? | indice démarrage 1 / 2 | img/s 1 / 2 |
+|---|---|---|---|---|
+| p00 | `0x300000000` | **autre** | 0,957 / 0,962 | 69,5 / 69,8 |
+| p01 | `0x300000000` | **autre** | 0,929¹ / 0,954 | 66,7 / 68,9 |
+| p02 | `0x128e04000` | même | 1,007 / 1,024 | 72,8 / 74,1 |
+| p03 | `0x300000000` | **autre** | 0,953 / 0,960 | 68,8 / 69,2 |
+| p04 | `0x127604000` | même | 1,003 / 1,003 | 72,2 / 72,9 |
+| p05 | `0x11e604000` | même | 1,011 / 1,022 | 73,0 / 74,4 |
+| p06 | `0x11e604000` | même | 1,002 / 1,008 | 72,4 / 73,0 |
+
+¹ `sample` hôte de 10 s pendant la passe (p01 à p06 : dans la passe du 1er démarrage).
+
+- **Le redémarrage de l'invité ne change jamais le régime** (7 sur 7, écart intra-processus
+  ≤ 2,5 %) : l'état pris par Tiger au démarrage (pages physiques, commpage, ordonnanceur,
+  vCPU au repos) est hors de cause — hypothèse 3 éliminée, sans avoir besoin de `savevm`.
+  Le régime est une propriété du **processus QEMU**.
+- **Le placement du tampon du JIT prédit le régime sans erreur** (14 démarrages sur 14) :
+  fenêtre autre ⇒ indice 0,93-0,96 (68,8 img/s de moyenne), même fenêtre ⇒ 1,00-1,02
+  (73,1) ; **+6,2 %**.
+- Le micro-banc `regbench` (appels `bl`/`blr`, lectures sur 64 Mo, `fmadds`, `getppid`,
+  ping-pong par tube, `memcpy`) est **identique dans les deux régimes** (`call` 616-643 ms,
+  `fp` 610-650, `sys` 1 870-2 040, `ctx` 3 850-4 110) : il ne sert pas d'indicateur. Le
+  §14.3 dit pourquoi : ses boucles n'ont que deux ou trois sites d'appel.
+- `sample` hôte (p01 lent contre p02 rapide, fil vCPU le plus chargé) : **mêmes
+  proportions** — code généré 55,8 / 56,5 %, `helper_lookup_tb_ptr` 14,6 / 14,1 %, helpers
+  28,4 / 27,1 %, verrous 3,2 / 3,1 %, occupation 61 / 62 %. Le profil ne change pas, tout est
+  plus lent : signature d'un coût matériel uniforme, pas d'un autre chemin logiciel.
+
+### 14.2 Où le noyau pose le tampon
+
+`tools/tcg/jitwhere.sh` lance QEMU arrêté (`-S`) et relit sa carte : sur 12 lancements, 8 dans
+la fenêtre du texte (`0x107…`-`0x128…`), **4 à `0x300000000`**. Un programme C de dix lignes
+(`mmap` de 1 Gio `MAP_JIT`) fait pareil (4 sur 12, puis 9 sur 16) : ce n'est pas QEMU, c'est
+la disposition aléatoire de l'espace d'adresses de macOS. Dans un tirage « loin », la plus
+grande place libre de la fenêtre `0x1xxxxxxxx` (entre les bibliothèques et les piles, sous le
+cache partagé à `0x18…`) ne fait que **768-960 Mio** : le noyau ignore alors toute indication
+d'adresse (même `0x110000000`, même sans `MAP_JIT`) et prend `0x300000000`. Proportion
+observée en jeu : 3 lents sur 7 (campagne 1), 5 sur 10 (§8.4), 11 sur 24 sur DOOM 3 (§6 bis,
+§13, en lisant les parties lentes comme « loin »). Le texte de QEMU est toujours à
+`0x100000000` plus un glissement de moins de 80 Mio.
+
+### 14.3 Le mécanisme : les sauts indirects hors fenêtre sur le M4
+
+`tools/tcg/farcall.c` reproduit ce que TCG émet — N blocs de code généré, chacun charge
+l'adresse d'un helper par `MOVZ/MOVK` ×4 (la même suite dans les deux cas), `BLR`, puis
+branche au bloc suivant — dans un tampon posé près du texte ou à `0x300000000` :
+
+| sites d'appel | 1 | 2 | 4 | **8** | 16 | 32 | 64 | 128 | 256 | 512 | 1024 | 2048 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| près (ns/appel) | 1,29 | 1,02 | 0,85 | 0,83 | 1,03 | 1,11 | 1,15 | 1,49 | 1,85 | 2,08 | 4,05 | 4,94 |
+| loin (ns/appel) | 1,29 | 0,99 | 0,87 | **1,54** | 1,86 | 1,97 | 1,91 | 1,97 | 2,31 | 2,43 | 5,53 | 6,35 |
+
+- Jusqu'à 4 sites, rien ; **dès 8 sites, +0,4 à 1,5 ns par appel** (≈ 2-6 cycles), y compris
+  quand le prédicteur ne rate pas (64 sites : +65 %). Le code généré de Tiger a des centaines
+  de milliers de sites (`helper_lookup_tb_ptr` à chaque `blr`, les helpers flottants, les
+  accès lents à la mémoire) ; une boucle de micro-banc n'en a que deux ou trois, d'où le
+  `regbench` plat.
+- **C'est la fenêtre, pas la distance** : helpers recopiés à `0x380004000`, appelants à
+  `0x300000000` (2 Gio plus bas, même fenêtre de 4 Gio) → 1,17 ns, rapide ; appelants à
+  `0x3f0000000` (0,25 Gio plus bas, **autre** fenêtre) → 1,86 ns, lent ; appelants à
+  `0x10xxxxxxx` (10 Gio) → 1,86 ns. Tout se passe comme si le prédicteur de sauts indirects
+  ne gardait que les 32 bits bas de la cible et prenait les bits hauts dans l'adresse du saut,
+  un chemin plus lent servant les autres cas (lecture, pas documentation d'Apple).
+- Ordre de grandeur : ~600 M instructions invitées par seconde sur DOOM 3, dont ~12 % en
+  helpers, plus un `lookup_tb_ptr` par `blr` : quelques dizaines de millions d'appels par
+  seconde et par vCPU, soit, à ~1 ns l'aller-retour, **5-10 % du temps vCPU** — l'écart vu.
+
+Hypothèses 1 et 4 (cœurs P/E, fréquence, MTTCG) : le placement explique à lui seul 14
+démarrages sur 14, et le forçage (§14.4) le prouve dans les deux sens ; le placement des fils
+n'a donc pas été mesuré plus loin (`powermetrics` exige `sudo`, refusé sur l'hôte : pas tenté
+autrement). Les « deux modes de boot » de 2026-08 sous Linux x86-64 (23,3 / 28,6 s,
+`docs/metrologie-boot.md`) sont d'une autre machine et d'un autre processeur : rien ne dit
+qu'ils aient la même cause.
+
+### 14.4 Le correctif : `tcg/0006` (`x-jit-near`), et l'A/B par forçage
+
+`patches/tcg/0006-tcg-jit-near.patch` (`tcg/region.c`, `accel/tcg/tcg-all.c`,
+`include/tcg/startup.h` ; s'applique au QEMU de référence, fichiers identiques) : deux
+propriétés de l'**accélérateur**, éteintes par défaut.
+
+- `-accel tcg,x-jit-near=on` : `mmap(NULL, taille)`, garder le tampon s'il est entièrement
+  dans la fenêtre de 4 Gio du texte, sinon le rendre et réessayer 64 Mio plus petit, jusqu'à
+  512 Mio (dans les tirages « loin », 832-960 Mio tiennent ; DOOM 3 et Marble Blast
+  génèrent ~500 Mio de code sans vidage). La taille retenue devient celle du tampon
+  (`tcg_region_init` repart de `region.total_size`). Sans place, repli sur le choix du
+  noyau, dit dans le journal. 10 lancements sur 10 dans la fenêtre (`JITOPT=x-jit-near=on
+  tools/tcg/jitwhere.sh 10 …`). Effet de bord : les appels de helpers passent de
+  `MOVZ/MOVK/MOVK/BLR` à `ADRP/ADD/BLR` (cible à moins de 4 Gio).
+- `-accel tcg,x-jit-addr=0x…` : adresse demandée (essais ; `0x300000000` force le lent).
+- Dans tous les cas QEMU imprime sur stderr `tcg: tampon JIT <début>-<fin> (<qui>), texte
+  <adresse> : même|AUTRE fenêtre de 4 Gio` — **le détecteur de régime**, lu dès le lancement.
+
+Lanceur : `JITNEAR=1 ./run_tiger.sh` (sondé ; `TCG_OPTS=…` pour des propriétés brutes de
+l'accélérateur) ; `TCG_OPTS=` aussi pour `devloop.py`. `build_qemu_qfb.sh` applique le patch
+(marqueurs) et sonde la propriété. Binaires de test : `~/src/qemu-tcg19/build/qjit`/`qjit64`
+(`qgpu` v19, VM quotidienne) et `qjit15`/`qjit1564` (`qgpu` v15, disque de dev), branches
+`regime` et `regime15` de la copie (0001-0005 + 0006 ; `regime15` revient au `qgpu` v15).
+
+Campagne 2 (SMP=2, `qjit1564`, un démarrage d'invité par processus, entrelacée
+`près loin loin près près loin loin près`) :
+
+| placement forcé | indices | img/s | moyenne |
+|---|---|---|---|
+| `x-jit-near=on` | 1,014 0,997 1,008 1,013 | 74,0 72,4 73,2 73,7 | **73,3** |
+| `x-jit-addr=0x300000000` | 0,958 0,955 0,952 0,960 | 69,5 69,2 68,8 69,7 | **69,3** |
+
+**Forcer le placement force le régime**, dans les deux sens, 4 sur 4 de chaque côté :
+**+5,8 %** pour « près », et l'écart entre démarrages d'un même mode tombe à **2,2 % (près)
+et 1,3 % (loin)**, contre ~11 % tous tirages mêlés au §8.4.
+
+SMP=1 (`qjit15`, `thread=single`, entrelacée `près loin loin près près loin`) :
+
+| placement forcé | indices | img/s | moyenne |
+|---|---|---|---|
+| `x-jit-near=on` | 1,011 1,025 1,009 | 73,2 74,5 73,5 | **73,7** |
+| `x-jit-addr=0x300000000` | 0,948 0,960 0,940 | 68,1 69,0 67,3 | **68,1** |
+
+Même effet en mono-cœur (**+8,2 %**) : le régime n'est pas une affaire de MTTCG ni du
+second vCPU (hypothèse 4 éliminée) ; les deux régimes de DOOM 3 en SMP=1 (74,6 / 103,2,
+§6 bis) en sont sans doute un tirage. En passant : **SMP=1 près (73,7) vaut SMP=2 près
+(73,3)** sur ce protocole (passe de 150 s), alors que le §5.2 donnait −7 % à SMP=1 avec des
+placements tirés au hasard — la question « un ou deux cœurs » (TODO §4) est à reprendre à
+placement forcé.
+
+### 14.5 Relecture de DOOM 3 (§6 bis, §13)
+
+Les parties de DOOM 3 ont trois niveaux : référence ~80 / ~93 ms/image, patches `0002-0004`
+~74 / ~80. Lecture proposée, **à confirmer par les parties du §14.6** : ~80 et ~93 sont la
+référence près et loin, ~74 et ~80 les patches près et loin. Alors :
+
+- le « −0,7 % rapide contre rapide » du §13 comparait la référence *près* (80,5) aux patches
+  *loin* (80,0) ; à placement égal les patches gagneraient **~−7,5 % près (80 → 74) et ~−14 %
+  loin (93 → 80)** — davantage loin parce qu'ils retirent des appels de helpers, justement ce
+  qui coûte hors de la fenêtre ;
+- l'écart de ~16 % entre les deux régimes de la référence dépasse celui de Marble Blast
+  (6 %) : DOOM 3 appelle davantage de helpers (flottant scalaire, `lfs`/`stfs` avant `0002`) ;
+- `x-sr-tlb` (§6 bis) : éteint ~84 / ~95, allumé ~79 / ~92 ; à placement égal −6 % et −3 %,
+  la lecture du §6 bis tient.
+
+### 14.6 Ce que ça change pour la mesure, et la partie DOOM 3 à jouer
+
+- **Détecter** : binaires avec `tcg/0006`, la ligne `tcg: tampon JIT … AUTRE fenêtre` ; tout
+  binaire : `vmmap <pid> | grep -m1 'rwx/rwx SM=ZER'`, une base à `0x3…` = régime lent
+  (`tools/tcg/d3run.sh` l'écrit désormais dans `info.txt`).
+- **Forcer** : `JITNEAR=1` (ou `TCG_OPTS=x-jit-near=on`) pour tous les A/B ; les mesures
+  déjà faites se trient par placement ou, à défaut, par niveau.
+- **Par défaut** : à allumer après la confirmation DOOM 3 (`JITNEAR` à 1 dans `run_tiger.sh`,
+  `tcg/0006` dans le binaire de référence) — un gain réel pour l'utilisateur un lancement
+  sur deux environ, sans rien changer à la traduction.
+
+Parties DOOM 3 à jouer (VM quotidienne, depuis le worktree de cette branche, binaire `qjit`
+de la copie ; `d3run.sh` passe l'environnement au `run_tiger.sh` du worktree) :
+
+    # référence et patches, placement forcé PRÈS, entrelacés, trois parties chacun
+    for i in 1 2 3; do
+      QEMU_BIN=~/src/qemu-tcg19/build/qjit JITNEAR=1 LFSINLINE=0 VFPFAST=0 VPERMFAST=0 \
+          bash tools/tcg/d3run.sh jn-ref-$i 2 1
+      QEMU_BIN=~/src/qemu-tcg19/build/qjit JITNEAR=1 bash tools/tcg/d3run.sh jn-all-$i 2 1
+    done
+    # contrôle : une partie de chaque, forcée LOIN
+    QEMU_BIN=~/src/qemu-tcg19/build/qjit TCG_OPTS=x-jit-addr=0x300000000 \
+        LFSINLINE=0 VFPFAST=0 VPERMFAST=0 bash tools/tcg/d3run.sh jf-ref-1 2 1
+    QEMU_BIN=~/src/qemu-tcg19/build/qjit TCG_OPTS=x-jit-addr=0x300000000 \
+        bash tools/tcg/d3run.sh jf-all-1 2 1
+    bash tools/tcg/d3run.sh --restore
+
+Attendu si le §14.5 est juste : `jn-ref` ~80, `jn-all` ~74, `jf-ref` ~93, `jf-all` ~80, moins
+de 2 % d'écart entre les parties d'un même mode ; chaque `info.txt` dit « même fenêtre »
+(« AUTRE » pour `jf-*`).
