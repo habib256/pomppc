@@ -8,6 +8,10 @@ et dans `docs/`.
 
 ## Non publié
 
+- **`tcg/0002-0004` allumés par défaut** (25/09 au soir, demande de l'utilisateur) : `lfs`/`stfs`
+  sans helper, flottant AltiVec à 4 voies, `vperm` par table ; QEMU de référence reconstruit.
+  DOOM 3, six paires entrelacées : médiane 80,8 → 79,7, moyenne 84,7 → 78,0 ms/image, aucune
+  régression (`docs/tcg-g4.md` §13).
 - **TCG : `lfs`/`stfs` et AltiVec sans le coût des helpers** (25/09/2026, `docs/tcg-g4.md`
   §8-12), trois patches, trois propriétés de CPU éteintes par défaut (`LFSINLINE=1`,
   `VFPFAST=1`, `VPERMFAST=1 ./run_tiger.sh`), appliqués par `build_qemu_qfb.sh`.

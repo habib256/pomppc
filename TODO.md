@@ -16,7 +16,6 @@ réorganisation par domaine est dans l'historique git (commit précédant celui 
 
 | Chantier | Domaine | État | Preuve qui le fermera |
 |---|---|---|---|
-| `lfs`/`stfs` en ligne, flottant AltiVec à 4 voies, `vperm` par table | TCG (§4) | **prouvés, DOOM 3 joué** : médiane −1,4 %, moyenne −8 %, aucune régression | décision du défaut par l'utilisateur |
 | Deux régimes de vitesse par démarrage | TCG (§4) | à faire : **bloque la mesure de tout gain < 10 %** | cause trouvée, régime forcé, écart entre parties < 2 % |
 | Lots 4 et 5 du verdict unique | Plugin (§2) | à faire | R5 puis `STATECHECK=1` à zéro ; `sample` DOOM 3 comparé à `sample-nat.txt` |
 | Matrice de jeux automatisée (A3) | Outils (§7) | à faire, **prochain chantier de fond** | tableau vert/rouge produit par un script, fenêtre et plein écran |
@@ -27,7 +26,7 @@ unique, §3), en faire le harnais (A3, §7), puis optimiser et élargir dessous 
 | Installé | État |
 |---|---|
 | Protocole | **v19** (`qgpu_abi.h` kext, `qgpu_proto.h` device + plugin) ; 913 tests natifs |
-| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 25/09 avec `patches/tcg/0001` (**`x-sr-tlb` allumé par défaut**, `SRTLB=0` l'éteint) ; anciens binaires en `*.avant-srtlb` |
+| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 25/09 au soir avec `patches/tcg/0001-0004` (**allumés par défaut** : `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0` les éteignent) ; anciens binaires en `*.avant-srtlb`, `*.avant-flottants` |
 | Invité quotidien (`tiger.qcow2`) | kext v19 ; plugin **`20260924-liste`** ; lanceurs `~/doom3*.command`, `~/prey*.command` (dont `-fs` plein écran, `-env` lisant `~/lot3.env`), `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
 | Profils de référence | `.run/d3/sample-nat.txt`, `.run/prey/sample.txt` ; TCG : `bench/tcg/` (non versionné) |
 | VM | redémarrages libres autorisés par l'utilisateur ; **un seul agent dessus à la fois** |
@@ -133,16 +132,11 @@ Verdict unique : lots 0 à 3 faits (CHANGELOG, `docs/re/etude-court-circuit-glen
 
 Relevés et mesures : `docs/tcg-g4.md`. Fait : `x-sr-tlb` (TLB gardé par jeu de segments,
 `tlbie` global en SMP), **allumé par défaut le 25/09** (DOOM 3 médiane 89,0 → 80,1 ms/image) ;
+`lfs`/`stfs` en ligne, flottant AltiVec à 4 voies, `vperm` par table (`tcg/0002-0004`),
+**allumés par défaut le 25/09 au soir** (DOOM 3 médiane 80,8 → 79,7, moyenne 84,7 → 78,0, §13) ;
 `lmw`/`stmw` en ligne essayé et classé (`patches/tcg/essais/`).
 
 **En cours**
-
-- [ ] **Défaut de `tcg/0002-0004`** (`x-lfs-inline`, `x-vfp-fast`, `x-vperm-fast`, éteints ;
-      `LFSINLINE=1 VFPFAST=1 VPERMFAST=1`) : preuves exhaustives faites ; **DOOM 3 joué le
-      25/09 soir** (six paires, `docs/tcg-g4.md` §13) : médiane 80,8 → 79,7, moyenne 84,7 →
-      78,0 ms/image ; aucune partie lente avec les patches (deux à ~74, jamais vu), deux sur six
-      sans. Aucune régression. **Décision de l'utilisateur** : allumer par défaut (reconstruire
-      le QEMU de référence) ou attendre que les régimes soient compris.
 
 **Ensuite**
 
