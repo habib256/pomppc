@@ -35,6 +35,7 @@ Variables d'environnement :
                    lui que `screendump device=` désigne, pour ne jamais capturer
                    l'écran d'un AUTRE device (QFB) par hasard. Vide = écran de
                    la machine, sans identifiant, et capture de l'écran primaire.
+    TCG_OPTS    propriétés de l'accélérateur TCG (p. ex. x-jit-near=on, docs/tcg-g4.md §14)
     QEMU_EXTRA  arguments ajoutés tels quels en fin de ligne de commande
                (p. ex. le greffon TCG : QEMU_EXTRA="-plugin tools/tcg/libppcmix.dylib,out=…")
     DEVDISK, CDROM, SMP, SND, RES, NET, GPU_BACKEND, GPU_TRACE, GUI_USER
@@ -296,7 +297,10 @@ def vm_args(gui, cdroms=()):
     """Ligne de commande QEMU de la VM de dev (single-user sauf `gui`)."""
     smp = int(os.environ.get("SMP", "1"))
     qemu = QEMU + "64" if smp > 1 else QEMU
-    extra = ["-accel", "tcg,thread=multi"] if smp > 1 else []
+    # TCG_OPTS : propriétés de l'accélérateur (p. ex. x-jit-near=on, docs/tcg-g4.md §14)
+    accel = ",".join(x for x in ("thread=multi" if smp > 1 else "",
+                                 os.environ.get("TCG_OPTS", "").strip(",")) if x)
+    extra = ["-accel", "tcg," + accel] if accel else []
     ram = "1024"
     snd = os.environ.get("SND", "")
     if snd in ("1", "none"):
