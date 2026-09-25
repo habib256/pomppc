@@ -1,0 +1,168 @@
+diff --git a/accel/tcg/tcg-all.c b/accel/tcg/tcg-all.c
+index 2090907db..1df2ef6c7 100644
+--- a/accel/tcg/tcg-all.c
++++ b/accel/tcg/tcg-all.c
+@@ -193,6 +193,34 @@ static void tcg_set_splitwx(Object *obj, bool value, Error **errp)
+     s->splitwx_enabled = value;
+ }
+ 
++static bool tcg_get_jit_near(Object *obj, Error **errp)
++{
++    return tcg_jit_near;
++}
++
++static void tcg_set_jit_near(Object *obj, bool value, Error **errp)
++{
++    tcg_jit_near = value;
++}
++
++static void tcg_get_jit_addr(Object *obj, Visitor *v, const char *name,
++                             void *opaque, Error **errp)
++{
++    uint64_t value = tcg_jit_addr;
++
++    visit_type_uint64(v, name, &value, errp);
++}
++
++static void tcg_set_jit_addr(Object *obj, Visitor *v, const char *name,
++                             void *opaque, Error **errp)
++{
++    uint64_t value;
++
++    if (visit_type_uint64(v, name, &value, errp)) {
++        tcg_jit_addr = value;
++    }
++}
++
+ static bool tcg_get_one_insn_per_tb(Object *obj, Error **errp)
+ {
+     TCGState *s = TCG_STATE(obj);
+@@ -247,6 +275,17 @@ static void tcg_accel_class_init(ObjectClass *oc, void *data)
+     object_class_property_set_description(oc, "split-wx",
+         "Map jit pages into separate RW and RX regions");
+ 
++    object_class_property_add_bool(oc, "x-jit-near",
++        tcg_get_jit_near, tcg_set_jit_near);
++    object_class_property_set_description(oc, "x-jit-near",
++        "Place the jit buffer in the same 4 GiB window as QEMU's text "
++        "(POMPPC, docs/tcg-g4.md 14)");
++
++    object_class_property_add(oc, "x-jit-addr", "uint64",
++        tcg_get_jit_addr, tcg_set_jit_addr, NULL, NULL);
++    object_class_property_set_description(oc, "x-jit-addr",
++        "Requested address of the jit buffer (hint; POMPPC tests)");
++
+     object_class_property_add_bool(oc, "one-insn-per-tb",
+                                    tcg_get_one_insn_per_tb,
+                                    tcg_set_one_insn_per_tb);
+diff --git a/include/tcg/startup.h b/include/tcg/startup.h
+index f71305765..12e4ed3d1 100644
+--- a/include/tcg/startup.h
++++ b/include/tcg/startup.h
+@@ -36,6 +36,16 @@
+  */
+ void tcg_init(size_t tb_size, int splitwx, unsigned max_cpus);
+ 
++/*
++ * POMPPC (docs/tcg-g4.md §14) : placement du tampon du JIT, posé par les
++ * propriétés x-jit-near / x-jit-addr de l'accélérateur avant tcg_init().
++ * tcg_jit_near : chercher une place dans la même fenêtre de 4 Gio (bits 63..32)
++ * que le texte de QEMU ; tcg_jit_addr : adresse demandée (indication), 0 = au
++ * choix du noyau.
++ */
++extern bool tcg_jit_near;
++extern uint64_t tcg_jit_addr;
++
+ /**
+  * tcg_register_thread: Register this thread with the TCG runtime
+  *
+diff --git a/tcg/region.c b/tcg/region.c
+index 478ec051c..6148252eb 100644
+--- a/tcg/region.c
++++ b/tcg/region.c
+@@ -34,6 +34,10 @@
+ #include "exec/translation-block.h"
+ #include "tcg-internal.h"
+ #include "host/cpuinfo.h"
++#include "tcg/startup.h"
++
++bool tcg_jit_near;
++uint64_t tcg_jit_addr;
+ 
+ 
+ /*
+@@ -554,9 +558,62 @@ static int alloc_code_gen_buffer(size_t size, int splitwx, Error **errp)
+ static int alloc_code_gen_buffer_anon(size_t size, int prot,
+                                       int flags, Error **errp)
+ {
+-    void *buf;
+-
+-    buf = mmap(NULL, size, prot, flags, -1, 0);
++    void *buf = MAP_FAILED;
++    /*
++     * POMPPC (docs/tcg-g4.md §14) : sur Apple M4 (au moins), un saut indirect
++     * prédit (BLR vers un helper, RET vers le code généré) dont la cible n'a
++     * pas les mêmes bits 63..32 que le saut coûte ~0,75 ns de plus. Le code
++     * généré appelle sans cesse des helpers du texte de QEMU : un tampon
++     * posé dans une autre fenêtre de 4 Gio que le texte (0x300000000 contre
++     * 0x1xxxxxxxx, au choix du noyau à chaque lancement) ralentit tout le
++     * processus de ~10 %. x-jit-near=on cherche une place dans la fenêtre du
++     * texte ; x-jit-addr=… demande une adresse (essais). La place prise est
++     * imprimée dans tous les cas.
++     */
++    uintptr_t text = (uintptr_t)&alloc_code_gen_buffer_anon;
++    uintptr_t win = text & ~(uintptr_t)0xffffffffu;
++    const char *how = "noyau";
++
++    if (tcg_jit_addr) {
++        buf = mmap((void *)(uintptr_t)tcg_jit_addr, size, prot, flags, -1, 0);
++        how = "x-jit-addr";
++    } else if (tcg_jit_near) {
++        /*
++         * Le noyau ignore l'indication quand la fenêtre n'a pas la place
++         * (un lancement sur trois environ, pour 1 Gio : la place libre y est
++         * tirée au hasard, 768-960 Mio alors) : on réduit le tampon de 64 Mio
++         * en 64 Mio jusqu'à ce qu'il tienne, sans descendre sous 512 Mio.
++         */
++        size_t floor = MIN(size, 512 * MiB);
++
++        for (size_t sz = size; sz >= floor; sz -= 64 * MiB) {
++            buf = mmap(NULL, sz, prot, flags, -1, 0);
++            if (buf != MAP_FAILED &&
++                ((uintptr_t)buf & ~(uintptr_t)0xffffffffu) == win &&
++                (((uintptr_t)buf + sz - 1) & ~(uintptr_t)0xffffffffu) == win) {
++                size = sz;
++                break;
++            }
++            if (buf != MAP_FAILED) {
++                munmap(buf, sz);
++            }
++            buf = MAP_FAILED;
++            if (sz < floor + 64 * MiB) {
++                break;
++            }
++        }
++        how = buf == MAP_FAILED ? "x-jit-near : pas de place, noyau" : "x-jit-near";
++    }
++    if (buf == MAP_FAILED) {
++        buf = mmap(NULL, size, prot, flags, -1, 0);
++    }
++    if (buf != MAP_FAILED) {
++        bool same = ((uintptr_t)buf >> 32) == (text >> 32) &&
++                    (((uintptr_t)buf + size - 1) >> 32) == (text >> 32);
++        fprintf(stderr, "tcg: tampon JIT %p-%p (%s), texte %p : %s fenêtre de 4 Gio\n",
++                buf, (char *)buf + size, how, (void *)text,
++                same ? "même" : "AUTRE");
++    }
+     if (buf == MAP_FAILED) {
+         error_setg_errno(errp, errno,
+                          "allocate %zu bytes for jit buffer", size);
+@@ -774,6 +831,8 @@ void tcg_region_init(size_t tb_size, int splitwx, unsigned max_cpus)
+ 
+     have_prot = alloc_code_gen_buffer(tb_size, splitwx, &error_fatal);
+     assert(have_prot >= 0);
++    /* x-jit-near peut avoir réduit le tampon pour le garder près du texte */
++    tb_size = region.total_size;
+ 
+     /* Request large pages for the buffer and the splitwx.  */
+     qemu_madvise(region.start_aligned, region.total_size, QEMU_MADV_HUGEPAGE);
