@@ -35,6 +35,8 @@ Variables d'environnement :
                    lui que `screendump device=` désigne, pour ne jamais capturer
                    l'écran d'un AUTRE device (QFB) par hasard. Vide = écran de
                    la machine, sans identifiant, et capture de l'écran primaire.
+    QEMU_EXTRA  arguments ajoutés tels quels en fin de ligne de commande
+               (p. ex. le greffon TCG : QEMU_EXTRA="-plugin tools/tcg/libppcmix.dylib,out=…")
     DEVDISK, CDROM, SMP, SND, RES, NET, GPU_BACKEND, GPU_TRACE, GUI_USER
 
 `run` REND LE CODE DE SORTIE DU JOB (en-tête « OUT <id> <m> <rc> » écrit par
@@ -65,7 +67,7 @@ Réparation après un arrêt brutal : démarrer en
 single-user et, AVANT `mount -uw /`, `/sbin/fsck -fy`, `reboot`, puis `fsck` de
 nouveau jusqu'à « appears to be OK ».
 """
-import fcntl, json, os, shutil, socket, struct, subprocess, sys, tarfile, tempfile, io, time
+import fcntl, json, os, shlex, shutil, socket, struct, subprocess, sys, tarfile, tempfile, io, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 QEMU = os.environ.get("QEMU_BIN", os.path.expanduser("~/src/qemu/build/qemu-system-ppc"))
@@ -332,7 +334,8 @@ def vm_args(gui, cdroms=()):
             "-prom-env", "auto-boot?=true",
             "-prom-env", "boot-device=hd:10,\\System\\Library\\CoreServices\\BootX",
             "-prom-env", "boot-args=%s" % ("-v" if gui else "-v -s"),
-            "-qmp", "unix:%s,server=on,wait=off" % QMP]
+            "-qmp", "unix:%s,server=on,wait=off" % QMP,
+            *shlex.split(os.environ.get("QEMU_EXTRA", ""))]
 
 
 def boot_vm(gui, cdroms=()):
