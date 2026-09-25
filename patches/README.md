@@ -18,6 +18,9 @@ liste, essais revertés, binaires supplantés) gardé pour pouvoir refaire le ra
 | `fastfp/0001-ppc-fast-fp.patch` | **Flottant rapide** : propriété de CPU `x-fast-fp` (défaut *off*) qui laisse softfloat confier les opérations flottantes au FPU de l'hôte. Touche `fpu/softfloat.c`, `include/fpu/softfloat-types.h`, `target/ppc/{cpu.h,cpu_init.c,fpu_helper.c}`. Voir plus bas et `docs/flottant-rapide.md`. |
 | `fastfp/0002-ppc-fewer-fp-helpers.patch` | 4 appels de helper par instruction flottante → 2 (`reset_fpstatus` émis en ligne, `compute_fprf` + `float_check_status` fusionnés). **Aucun effet observable**, dans aucun des deux modes. S'applique par-dessus le 0001 ; `NO_FASTFP2=1` sur un arbre propre applique le 0001 seul. |
 | `tcg/0001-ppc-sr-tlb.patch` | **TLB gardé d'un jeu de segments à l'autre** : propriété de CPU `x-sr-tlb` (défaut *off*, `SRTLB=1 ./run_tiger.sh`). Un changement de registre de segment ne vide plus tout le TLB de QEMU (~23 000 fois par seconde sous Tiger) : chaque `mmu_idx` traduit retient le jeu de segments de ses entrées et n'est vidé que s'il sert sous un autre ; `tlbie` devient global en SMP. Mode preuve `x-sr-tlb-verify=N`. Touche `target/ppc/{cpu.h,cpu_init.c,helper_regs.[ch],mmu_helper.c}`. Marble Blast SMP=2 : **+9,8 %** img/s. Voir `docs/tcg-g4.md`. `NO_TCG=1` le saute. |
+| `tcg/0002-ppc-lfs-inline.patch` | **`lfs`/`stfs` sans helper** : propriété de CPU `x-lfs-inline` (défaut *off*, `LFSINLINE=1 ./run_tiger.sh`). Les conversions simple ↔ double de `lfs`/`stfs` (et formes `x`/`u`/`ux`) en 13 ops TCG entières sans branchement au lieu de `helper_todouble`/`helper_tosingle` (5,1 % du temps vCPU sur DOOM 3). Preuve hôte exhaustive (`tools/tcg/lfsproof.sh` : 2^32 float32, 2^35 float64, 0 divergence) et invitée (`tools/guest/jobs/lfstest`, 2^32 + 2^32 cas, sortie identique à l'octet). Banc invité −45 %. Touche `target/ppc/{cpu.h,cpu_init.c,translate.c,translate/fp-impl.c.inc}`. S'applique par-dessus `tcg/0001` ; `NO_TCG=1` le saute aussi. Voir `docs/tcg-g4.md` §8. |
+| `tcg/0003-ppc-vfp-fast.patch` | **Flottant AltiVec à 4 voies** : propriété `x-vfp-fast` (défaut *off*, `VFPFAST=1`). `vaddfp`/`vsubfp`/`vmaddfp`/`vnmsubfp` font leurs 4 voies d'un coup sur le FPU hôte quand le hardfloat de softfloat les aurait toutes prises (même décision par voie, sinon la boucle d'origine) : résultats et drapeaux identiques par construction. Preuve contre le vrai `fpu_softfloat.c.o` (`tools/tcg/vfpproof.sh` : 648 M vecteurs, 8 états, 0 divergence ; 5 mutations détectées) ; `vfptest` invité identique à l'octet ; banc −17 %. Touche `target/ppc/{cpu.h,cpu_init.c,int_helper.c}`. §9. |
+| `tcg/0004-ppc-vperm-fast.patch` | **`vperm` par table** : propriété `x-vperm-fast` (défaut *off*, `VPERMFAST=1`), traduite vers `helper_VPERM_FAST` (un `tbl` NEON sur arm64, C portable ailleurs). Preuve `tools/tcg/vpermproof.sh` (50,7 M cas, recouvrements compris, 0 divergence) ; banc −33 %. Touche aussi `helper.h`, `translate.c`, `vmx-impl.c.inc`. §10. |
 
 Les constantes `OUT_DATA` / `IN_DATA` / `OUT_ENABLE` sont absentes de `gpio.c` en 9.2.0 :
 le patch les **porte désormais lui-même** (mêmes valeurs que l'enum de `balaton2`, voir plus
@@ -150,14 +153,16 @@ OpenBIOS et la chaîne croisée PowerPC).
 
 | Fichier | Verdict mesuré |
 | --- | --- |
+| `tcg/essais/0005-ppc-vfp-nrwg.patch` | **Exact mais sans gain** (25/09/2026) : les quatre helpers flottants AltiVec appelés en `TCG_CALL_NO_RWG` (jumeaux `*_nrwg`, propriété `x-vfp-nrwg`) ; licite (ni globale TCG ni exception), même empreinte `vfptest` ; banc 1 313 → 1 346 ms. **Non appliqué.** S'applique par-dessus `tcg/0004`. |
 | `tcg/essais/0002-ppc-lmw-inline.patch` | **Exact mais sans gain** (25/09/2026) : `lmw`/`stmw` en accès en ligne quand l'accès tient dans une page (helper sinon), propriété `x-lmw-inline`. Test invité `tools/guest/jobs/lmwtest` : sortie identique octet pour octet (608 cas, 14 fautes à cheval sur deux pages) ; banc de 20 M paires de 19 registres : 1 564/1 582 → 1 544/1 548 ms (−1,3 %) — le chemin rapide du helper (`probe_contiguous` + copie) coûte autant que 19 accès TCG. **Non appliqué.** S'applique par-dessus `tcg/0001`. |
 | `01-timebase-and-vclock.patch` | **Neutre** (23,32 s = stock). Reverté : zéro gain, et l'approximation par réciproque touche le timing. |
 | `02-jmpcache-generation.patch` | **Régression de ~23 %** (28,63 s). Reverté. |
 
 Détail du protocole de mesure et des conclusions : `docs/metrologie-boot.md` (01, 02) et
-`docs/tcg-g4.md` (essais/0002). Aucun de ces patches n'est appliqué par le build. Les deux
-patches de performance appliqués (`fastfp/`, `tcg/0001`) ajoutent chacun une propriété de
-CPU éteinte par défaut : sans elle, le binaire se comporte comme avant.
+`docs/tcg-g4.md` (essais/0002, essais/0005). Aucun de ces patches n'est appliqué par le
+build. Les patches de performance appliqués (`fastfp/`, `tcg/0001` à `0004`) ajoutent chacun
+une propriété de CPU éteinte par défaut (`x-sr-tlb` est depuis allumée par `run_tiger.sh`) :
+sans elle, le binaire se comporte comme avant.
 
 ## Licences
 

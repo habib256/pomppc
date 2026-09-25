@@ -8,6 +8,22 @@ et dans `docs/`.
 
 ## Non publié
 
+- **TCG : `lfs`/`stfs` et AltiVec sans le coût des helpers** (25/09/2026, `docs/tcg-g4.md`
+  §8-12), trois patches, trois propriétés de CPU éteintes par défaut (`LFSINLINE=1`,
+  `VFPFAST=1`, `VPERMFAST=1 ./run_tiger.sh`), appliqués par `build_qemu_qfb.sh`.
+  `tcg/0002` (`x-lfs-inline`) : DOUBLE/SINGLE de `lfs`/`stfs` en 13 ops TCG entières sans
+  branchement (5,1 % du temps vCPU de DOOM 3 dans les deux helpers) ; preuve exhaustive hôte
+  `tools/tcg/lfsproof.sh` (2³² float32, 2³⁵ float64, 0 divergence) et invitée
+  `tools/guest/jobs/lfstest` (2³² + 2³² cas, sortie identique à l'octet) ; banc −45 %.
+  `tcg/0003` (`x-vfp-fast`) : `vaddfp/vsubfp/vmaddfp/vnmsubfp` à 4 voies d'un coup sur le
+  FPU hôte quand le hardfloat les aurait toutes prises (`vmaddfp` 5,1 % du temps vCPU) ;
+  preuve contre le vrai softfloat `tools/tcg/vfpproof.sh` (648 M vecteurs, résultats et
+  drapeaux, 0 divergence) ; banc −17 %. `tcg/0004` (`x-vperm-fast`) : `vperm` par un `tbl`
+  NEON ; `tools/tcg/vpermproof.sh` (50,7 M cas, 0) ; banc −33 %. Test invité
+  `tools/guest/jobs/vfptest` identique à l'octet. Essai `tcg/essais/0005` (helpers flottants
+  AltiVec en `NO_RWG`) : sans gain, non appliqué. Marble Blast (10 démarrages) : gain de 0002
+  **non mesurable**, chaque démarrage tombe dans un régime lent (~66 img/s) ou rapide
+  (~73) quel que soit le mode. A/B DOOM 3 à faire (binaire `~/src/qemu-tcg19/build/qsr64`).
 - **`x-sr-tlb` allumé par défaut** (25/09/2026, demande de l'utilisateur) : `run_tiger.sh`
   `SRTLB` vaut 1 par défaut (`SRTLB=0` pour l'éteindre) ; QEMU de référence reconstruit avec
   `patches/tcg/0001`. Preuve DOOM 3 (`docs/tcg-g4.md` §6 bis) : SMP=2, six parties par mode
