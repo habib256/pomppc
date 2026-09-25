@@ -1,0 +1,183 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index ec52bd6f2..1cf200525 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1296,6 +1296,13 @@ struct CPUArchState {
+      * See ppc_sr_tlb_fill() and ppc_sr_tlb_check() in mmu_helper.c.
+      */
+     bool sr_tlb;
++    /*
++     * x-lfs-inline: the float32 <-> float64 conversions of lfs/stfs (and
++     * their x/u/ux forms) as inline integer ops instead of the todouble /
++     * tosingle helpers.  Same bits for every input.  Read by the
++     * translator only.
++     */
++    bool lfs_inline;
+     bool sr_snap_ok[2];
+     uint32_t sr_gen;
+     uint32_t sr_snap_gen[2];
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index 31be9c287..d6ff38d29 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7437,6 +7437,12 @@ static Property ppc_cpu_properties[] = {
+      * default (experimental).  Only honoured on POWERPC_MMU_32B.
+      */
+     DEFINE_PROP_BOOL("x-sr-tlb", PowerPCCPU, env.sr_tlb, false),
++    /*
++     * lfs/stfs conversions (DOUBLE / SINGLE of the ISA) as inline integer
++     * ops, branch-free, bit-exact with helper_todouble/helper_tosingle for
++     * every input.  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-lfs-inline", PowerPCCPU, env.lfs_inline, false),
+     /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
+     DEFINE_PROP_UINT32("x-sr-tlb-verify", PowerPCCPU, env.sr_verify, 0),
+     DEFINE_PROP_END_OF_LIST(),
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+index 47ca50a06..ccebf6002 100644
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -172,6 +172,7 @@ struct DisasContext {
+     /* Routine used to access memory */
+     bool pr, hv, dr, le_mode;
+     bool lazy_tlb_flush;
++    bool lfs_inline;
+     bool need_access_type;
+     int mem_idx;
+     int access_type;
+@@ -6496,6 +6497,7 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+     ctx->has_cfar = !!(env->flags & POWERPC_FLAG_CFAR);
+     ctx->has_bhrb = !!(env->flags & POWERPC_FLAG_BHRB);
+ #endif
++    ctx->lfs_inline = env->lfs_inline;
+     ctx->lazy_tlb_flush = env->mmu_model == POWERPC_MMU_32B
+         || env->mmu_model & POWERPC_MMU_64;
+ 
+diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c.inc
+index bb8bb4d70..b3edf3093 100644
+--- a/target/ppc/translate/fp-impl.c.inc
++++ b/target/ppc/translate/fp-impl.c.inc
+@@ -757,9 +757,105 @@ static void gen_mtfsfi(DisasContext *ctx)
+     gen_helper_fpscr_check_status(tcg_env);
+ }
+ 
++/*
++ * x-lfs-inline: helper_todouble() (the ISA's DOUBLE, fpu_helper.c) as
++ * branch-free integer ops.  u = the float32 bits, zero-extended.
++ *
++ *   abs = u & 0x7fffffff, sign = (u ^ abs) << 32
++ *   k   = max(clz64(abs), 40)        40 for normals, Inf and NaN;
++ *                                    40 + s for a denormal (the helper's
++ *                                    shift s = clz32 - 8, 1..23); 64 for 0
++ *   m   = abs << (k - 11)            fraction; a denormal's msb lands on
++ *                                    bit 52 (the helper's 29 + s)
++ *   e   = (936 - k) << 52            exponent bias: 896 for normals
++ *                                    (1023 - 127), 896 - s for a denormal,
++ *                                    whose msb then adds the implicit 1
++ *   e   = 0x700 << 52  if abs >= 0x7f800000   (Inf/NaN: 0xff + 0x700 =
++ *                                    0x7ff, fraction kept, sNaN not quieted)
++ *   e   = 0            if abs == 0   (m is 0 too: signed zero)
++ *   ret = (m + e) | sign
++ *
++ * All shift counts stay in [29, 53]: no out-of-range TCG shift.  Proof:
++ * POMPPC tools/tcg/lfsproof.c (all 2^32 inputs against the helper's code).
++ */
++static void gen_todouble_inline(TCGv_i64 dest, TCGv_i64 u)
++{
++    TCGv_i64 abs = tcg_temp_new_i64();
++    TCGv_i64 sign = tcg_temp_new_i64();
++    TCGv_i64 k = tcg_temp_new_i64();
++    TCGv_i64 m = tcg_temp_new_i64();
++    TCGv_i64 e = tcg_temp_new_i64();
++
++    tcg_gen_andi_i64(abs, u, 0x7fffffff);
++    tcg_gen_xor_i64(sign, u, abs);
++    tcg_gen_shli_i64(sign, sign, 32);
++    tcg_gen_clzi_i64(k, abs, 64);
++    tcg_gen_umax_i64(k, k, tcg_constant_i64(40));
++    tcg_gen_subi_i64(m, k, 11);
++    tcg_gen_shl_i64(m, abs, m);
++    tcg_gen_subfi_i64(e, 936, k);
++    tcg_gen_shli_i64(e, e, 52);
++    tcg_gen_movcond_i64(TCG_COND_GEU, e, abs, tcg_constant_i64(0x7f800000),
++                        tcg_constant_i64(0x700ull << 52), e);
++    tcg_gen_movcond_i64(TCG_COND_EQ, e, abs, tcg_constant_i64(0),
++                        tcg_constant_i64(0), e);
++    tcg_gen_add_i64(dest, m, e);
++    tcg_gen_or_i64(dest, dest, sign);
++}
++
++/*
++ * x-lfs-inline: helper_tosingle() (the ISA's SINGLE: no rounding, the
++ * fraction is truncated) as branch-free integer ops.  x = the float64 bits.
++ *
++ *   exp = x[62:52]
++ *   exp > 896 (single-precision normal range and above, Inf, NaN, and the
++ *              out-of-range exponents the ISA leaves undefined, done the
++ *              same way as the helper):
++ *     hi = x[63:62] << 30 | x[58:29]
++ *   else (denormal result for 874 <= exp <= 896, signed zero below):
++ *     lo = x[63] << 31 | ((1 << 52 | x[51:0]) >> min(926 - exp, 63))
++ *          926 - exp is 30..926 here; a shift of 53 or more leaves 0,
++ *          which is the helper's signed zero for exp < 874
++ *   ret = exp > 896 ? hi : lo        only the low 32 bits are stored
++ *
++ * Proof: POMPPC tools/tcg/lfsproof.c (every sign/exponent/top-20-fraction
++ * crossed with low words, plus edge cases, against the helper's code).
++ */
++static void gen_tosingle_inline(TCGv_i64 dest, TCGv_i64 x)
++{
++    TCGv_i64 exp = tcg_temp_new_i64();
++    TCGv_i64 hi = tcg_temp_new_i64();
++    TCGv_i64 t = tcg_temp_new_i64();
++    TCGv_i64 lo = tcg_temp_new_i64();
++    TCGv_i64 sh = tcg_temp_new_i64();
++
++    tcg_gen_extract_i64(exp, x, 52, 11);
++    tcg_gen_shri_i64(hi, x, 29);
++    tcg_gen_shri_i64(t, x, 62);
++    tcg_gen_deposit_i64(hi, hi, t, 30, 2);
++    tcg_gen_andi_i64(lo, x, (1ull << 52) - 1);
++    tcg_gen_ori_i64(lo, lo, 1ull << 52);
++    tcg_gen_subfi_i64(sh, 926, exp);
++    tcg_gen_umin_i64(sh, sh, tcg_constant_i64(63));
++    tcg_gen_shr_i64(lo, lo, sh);
++    tcg_gen_shri_i64(t, x, 32);
++    tcg_gen_andi_i64(t, t, 0x80000000);
++    tcg_gen_or_i64(lo, lo, t);
++    tcg_gen_movcond_i64(TCG_COND_GTU, dest, exp, tcg_constant_i64(896),
++                        hi, lo);
++}
++
+ static void gen_qemu_ld32fs(DisasContext *ctx, TCGv_i64 dest, TCGv addr)
+ {
+-    TCGv_i32 tmp = tcg_temp_new_i32();
++    TCGv_i32 tmp;
++
++    if (ctx->lfs_inline) {
++        TCGv_i64 u = tcg_temp_new_i64();
++        tcg_gen_qemu_ld_i64(u, addr, ctx->mem_idx, DEF_MEMOP(MO_UL));
++        gen_todouble_inline(dest, u);
++        return;
++    }
++    tmp = tcg_temp_new_i32();
+     tcg_gen_qemu_ld_i32(tmp, addr, ctx->mem_idx, DEF_MEMOP(MO_UL));
+     gen_helper_todouble(dest, tmp);
+ }
+@@ -902,7 +998,15 @@ static void glue(gen_, name##x)(DisasContext *ctx)                            \
+ 
+ static void gen_qemu_st32fs(DisasContext *ctx, TCGv_i64 src, TCGv addr)
+ {
+-    TCGv_i32 tmp = tcg_temp_new_i32();
++    TCGv_i32 tmp;
++
++    if (ctx->lfs_inline) {
++        TCGv_i64 v = tcg_temp_new_i64();
++        gen_tosingle_inline(v, src);
++        tcg_gen_qemu_st_i64(v, addr, ctx->mem_idx, DEF_MEMOP(MO_UL));
++        return;
++    }
++    tmp = tcg_temp_new_i32();
+     gen_helper_tosingle(tmp, src);
+     tcg_gen_qemu_st_i32(tmp, addr, ctx->mem_idx, DEF_MEMOP(MO_UL));
+ }
