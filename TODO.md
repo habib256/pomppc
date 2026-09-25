@@ -16,7 +16,7 @@ réorganisation par domaine est dans l'historique git (commit précédant celui 
 
 | Chantier | Domaine | État | Preuve qui le fermera |
 |---|---|---|---|
-| Deux régimes de vitesse par démarrage | TCG (§4) | **cause trouvée** (tampon du JIT hors de la fenêtre du texte, `tcg-g4.md` §14), correctif `tcg/0006` `JITNEAR=1` ; Marble Blast forcé : écart entre démarrages 1-2 % | parties DOOM 3 du §14.6, puis `JITNEAR` par défaut |
+| Flottant scalaire (`fmuls`, `fmadds`, drapeaux FPSCR) | TCG (§4) | à faire : ~19 % du temps vCPU de DOOM 3 | équivalence prouvée + A/B DOOM 3 (placement forcé, trois parties par mode) |
 | Lots 4 et 5 du verdict unique | Plugin (§2) | à faire | R5 puis `STATECHECK=1` à zéro ; `sample` DOOM 3 comparé à `sample-nat.txt` |
 | Matrice de jeux automatisée (A3) | Outils (§7) | à faire, **prochain chantier de fond** | tableau vert/rouge produit par un script, fenêtre et plein écran |
 
@@ -26,15 +26,15 @@ unique, §3), en faire le harnais (A3, §7), puis optimiser et élargir dessous 
 | Installé | État |
 |---|---|
 | Protocole | **v19** (`qgpu_abi.h` kext, `qgpu_proto.h` device + plugin) ; 913 tests natifs |
-| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 25/09 au soir avec `patches/tcg/0001-0004` (**allumés par défaut** : `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0` les éteignent) ; binaire précédent en `*.avant-flottants` |
+| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 25/09 à 23 h avec `patches/tcg/0001-0004` et `0006` (**allumés par défaut** : `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0` les éteignent) ; binaire précédent en `*.avant-jitnear` |
 | Invité quotidien (`tiger.qcow2`) | kext v19 ; plugin **`20260924-liste`** ; lanceurs `~/doom3*.command`, `~/prey*.command` (dont `-fs` plein écran, `-env` lisant `~/lot3.env`), `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
 | Profils de référence | `.run/d3/sample-nat.txt`, `.run/prey/sample.txt` ; TCG : `bench/tcg/` (non versionné) |
 | VM | redémarrages libres autorisés par l'utilisateur ; **un seul agent dessus à la fois** |
 
 **Premier geste à la reprise** : `pgrep -fl qemu-system`, `.run/cmr/tssh.sh uptime`. Mesurer un
 jeu **au premier plan** (sinon repli `Swap60` à chaque image) ; DOOM 3 se mesure en parties
-réelles, six par mode, médiane (deux régimes de vitesse d'une partie à l'autre, `timedemo`
-refusé par la démo).
+réelles (`timedemo` refusé par la démo) ; avec `x-jit-near` (défaut) trois parties par mode
+suffisent, en écartant une partie dont la cinématique est lente (§4, troisième facteur).
 
 ---
 
@@ -133,7 +133,9 @@ Verdict unique : lots 0 à 3 faits (CHANGELOG, `docs/re/etude-court-circuit-glen
 Relevés et mesures : `docs/tcg-g4.md`. Fait : `x-sr-tlb` (TLB gardé par jeu de segments,
 `tlbie` global en SMP), **allumé par défaut le 25/09** (DOOM 3 médiane 89,0 → 80,1 ms/image) ;
 `lfs`/`stfs` en ligne, flottant AltiVec à 4 voies, `vperm` par table (`tcg/0002-0004`),
-**allumés par défaut le 25/09 au soir** (DOOM 3 médiane 80,8 → 79,7, moyenne 84,7 → 78,0, §13) ;
+**allumés par défaut le 25/09 au soir** (DOOM 3 à placement égal : −7,5 %, §14.7) ; tampon du
+JIT gardé près du texte (`tcg/0006`, `x-jit-near`), **allumé par défaut le 25/09 à 23 h** :
+supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
 `lmw`/`stmw` en ligne essayé et classé (`patches/tcg/essais/`).
 
 **En cours**
@@ -144,14 +146,10 @@ Relevés et mesures : `docs/tcg-g4.md`. Fait : `x-sr-tlb` (TLB gardé par jeu de
       vCPU sur Marble Blast). Épreuve : A/B, zéro divergence.
 - [ ] **Verrou global à chaque `mtmsr`/`rfi`** (`ppc_maybe_interrupt`, `cpu_interrupt_exittb` :
       9-10 % + attente) : chemin sans verrou quand l'état d'interruption ne change pas.
-- [ ] **Deux régimes de vitesse par démarrage : cause trouvée** (`docs/tcg-g4.md` §14) —
-      macOS pose le tampon du JIT hors de la fenêtre de 4 Gio du texte de QEMU un lancement
-      sur deux environ, et l'Apple M4 prédit plus lentement les appels de helpers vers une
-      autre fenêtre (Marble Blast −6 %, 14 démarrages sur 14 prédits, forçage 4 sur 4 dans
-      les deux sens). Correctif `tcg/0006` (`x-jit-near`, `JITNEAR=1`, éteint). Reste :
-      **les parties DOOM 3 du §14.6** (binaire `qjit`), puis `JITNEAR` par défaut et
-      `tcg/0006` dans le binaire de référence ; relire alors le gain de `tcg/0002-0004`
-      (attendu −7,5 % à placement égal, §14.5). SMP=1 touché pareil (+8,2 % forcé près).
+- [ ] **Troisième facteur de lenteur** (`docs/tcg-g4.md` §14.7) : une partie DOOM 3 sur huit
+      lente de bout en bout (95,3 contre 73,9 ms/image) avec le tampon du JIT bien placé ;
+      cinématique aussi lente (témoin). Cause inconnue (cœurs P/E, autre processus,
+      thermique ?). Épreuve : cause trouvée ou fréquence < 1 sur 20.
 - [ ] **Flottant scalaire** (DOOM 3 : ~19 % du temps vCPU dans `helper_FMULS/FMADDS/FADDS/
       FSUBS`, `fcmpu`, `do_float_check_status` 4,5 %, `compute_fprf` 2,5 %) : premier poste
       hors `lookup_tb_ptr` ; piste FPRF/contrôle calculés en ligne quand FPSCR n'a aucune

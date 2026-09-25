@@ -26,8 +26,8 @@
 #   LFSINLINE=0 VFPFAST=0 VPERMFAST=0 ./run_tiger.sh  # coupe lfs/stfs sans helper, flottant AltiVec
 #                             # à 4 voies, vperm par table (tcg/0002-0004, allumés par défaut)
 #                             # docs/flottant-rapide.md
-#   JITNEAR=1 ./run_tiger.sh  # tampon du JIT dans la fenêtre de 4 Gio du texte de QEMU
-#                             # (x-jit-near, tcg/0006 : supprime le régime lent, docs/tcg-g4.md §14) ;
+#   JITNEAR=0 ./run_tiger.sh  # laisse macOS placer le tampon du JIT (défaut : dans la fenêtre de 4 Gio
+#                             # du texte de QEMU, x-jit-near, tcg/0006 : supprime le régime lent, docs/tcg-g4.md §14) ;
 #                             # TCG_OPTS=… propriétés brutes de l'accélérateur
 #   NOPAD=1 ./run_tiger.sh    # coupe le passthrough de la manette USB
 #   TABLET=1 ./run_tiger.sh   # + usb-tablet (souris absolue). À ÉVITER sur Tiger :
@@ -232,12 +232,13 @@ done
 # patches/tcg/0006) --- propriété de l'ACCÉLÉRATEUR. Sur Apple M4, le noyau pose
 # le tampon hors de cette fenêtre un lancement sur deux environ, et tout le
 # processus tourne alors ~10 % moins vite (« les deux régimes », docs/tcg-g4.md
-# §14). Éteint par défaut en attendant DOOM 3 : JITNEAR=1 l'allume. Sondé.
-if [ "${JITNEAR:-0}" != 0 ]; then
+# §14). Allumé par défaut depuis le 25/09/2026 (DOOM 3 confirmé, §14.7) : JITNEAR=0
+# l'éteint. Sondé.
+if [ "${JITNEAR:-1}" != 0 ]; then
   if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-jit-near=on"; then
     TCG_ACCEL="${TCG_ACCEL:-tcg},x-jit-near=on"
     MODE="$MODE + JIT PRÈS DU TEXTE"
-  else
+  elif [ -n "${JITNEAR:-}" ]; then
     echo "⚠  JITNEAR=1 demandé mais ce QEMU n'a pas la propriété 'x-jit-near' (patches/tcg/0006)." >&2
     MODE="$MODE + JIT près du texte DEMANDÉ MAIS INDISPONIBLE"
   fi

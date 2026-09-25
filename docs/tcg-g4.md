@@ -949,3 +949,30 @@ de la copie ; `d3run.sh` passe l'environnement au `run_tiger.sh` du worktree) :
 Attendu si le §14.5 est juste : `jn-ref` ~80, `jn-all` ~74, `jf-ref` ~93, `jf-all` ~80, moins
 de 2 % d'écart entre les parties d'un même mode ; chaque `info.txt` dit « même fenêtre »
 (« AUTRE » pour `jf-*`).
+
+### 14.7 DOOM 3 confirmé (25/09/2026, 22 h), `x-jit-near` allumé par défaut
+
+Binaire `~/src/qemu-tcg19/build/qjit`, VM quotidienne, SMP=2, `x-sr-tlb`, `demo_mars_city1`
+T+50..T+280 ; placement relevé dans chaque `info.txt` (`bench/tcg/d3/jn-*`, `jf-*`).
+
+| Placement | Patches `0002-0004` | parties (ms/image) |
+|---|---|---|
+| près (`x-jit-near`) | éteints | 79,9 79,8 80,9 |
+| près (`x-jit-near`) | allumés | **95,3** 73,9 73,9 |
+| loin (`x-jit-addr=0x300000000`) | éteints | 92,4 |
+| loin (`x-jit-addr=0x300000000`) | allumés | 79,3 |
+
+- **Le placement fait le régime** : loin reproduit ~93 et ~80, près ~80 et ~74, comme prévu
+  au §14.5. Écart entre parties d'un même mode : 1,4 % (référence), 0 % (patches, hors la
+  partie à 95,3).
+- **Patches `0002-0004` à placement égal : −7,5 % près** (80,2 → 73,9), **−14 % loin**
+  (92,4 → 79,3). Le « −0,7 % » du §13 était un artefact de placement.
+- **Placement + patches contre l'ancien pire cas** (loin, sans patches) : 92,4 → 73,9, −20 %.
+- **Une partie aberrante** (`jn-all-1`, 95,3) : tampon bien près, aucun vidage, même taille
+  de code, mais **lente de bout en bout**, cinématique comprise (~40 ms/image contre ~32).
+  Un autre facteur de l'hôte, non lié au JIT, 1 fois sur 8 ; non expliqué (cœurs P/E,
+  autre processus, thermique ?). Toute mesure garde donc une vérification : la cinématique
+  (T−400..T) sert de témoin de régime.
+
+Suite : `JITNEAR` allumé par défaut dans `run_tiger.sh`, `tcg/0006` dans le binaire de
+référence (reconstruit le 25/09 à 23 h ; binaire précédent en `*.avant-jitnear`).

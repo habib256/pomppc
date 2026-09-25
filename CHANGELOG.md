@@ -8,6 +8,13 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Les deux régimes de vitesse expliqués et supprimés** (`docs/tcg-g4.md` §14) : macOS pose
+  le tampon du JIT hors de la fenêtre de 4 Gio du texte de QEMU un lancement sur deux, et le
+  M4 prédit plus lentement les appels de helpers qui changent de fenêtre. Patch
+  `tcg/0006` (`x-jit-near`), **allumé par défaut** (`JITNEAR=0` l'éteint), QEMU de référence
+  reconstruit. DOOM 3 à placement forcé : référence 79,8-80,9 ms/image, avec `tcg/0002-0004`
+  73,9 (−7,5 %) ; loin : 92,4 et 79,3. Ancien pire cas → nouveau défaut : 92,4 → 73,9
+  (−20 %). Une partie sur huit reste lente de bout en bout pour une autre cause (§14.7).
 - **Les deux régimes de vitesse : cause trouvée** (25/09 au soir, `docs/tcg-g4.md` §14). macOS
   pose le tampon du JIT (1 Gio) hors de la fenêtre de 4 Gio du texte de QEMU un lancement sur
   deux environ (`0x300000000`) ; l'Apple M4 prédit alors plus lentement chaque appel de helper
