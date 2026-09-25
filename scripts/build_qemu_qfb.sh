@@ -6,7 +6,9 @@
 #   • le GPU paravirtuel « qgpu-pci » (+ backends)   — patches/qgpu/
 #   • le bring-up SMP mac99 de BALATON Zoltan        — patches/smp-mac99/
 #   • le flottant rapide (x-fast-fp)                  — patches/fastfp/
-#   • le TLB gardé par jeu de segments (x-sr-tlb)     — patches/tcg/
+#   • le TLB gardé par jeu de segments (x-sr-tlb)     — patches/tcg/0001
+#   • lfs/stfs sans helper (x-lfs-inline)             — patches/tcg/0002
+#   • AltiVec : vfp à 4 voies, vperm par table       — patches/tcg/0003, 0004
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
 #   ./scripts/build_qemu_qfb.sh              # build dans ~/src/qemu
@@ -290,6 +292,70 @@ target/ppc/helper_regs.c ppc_sr_tlb_check
 target/ppc/mmu_helper.c ppc_sr_tlb_fill
 target/ppc/mmu_helper.c TLB_NEED_SR_CHECK
 TCG_MARKERS
+  # --- 4 sexies. lfs/stfs sans helper (x-lfs-inline), par-dessus le 0001 ---
+  # patches/tcg/0002, docs/tcg-g4.md §8 : les conversions simple ↔ double de
+  # lfs/stfs en ops TCG entières, sans branchement, prouvées au bit près
+  # (tools/tcg/lfsproof.sh, tools/guest/jobs/lfstest). Propriété éteinte par
+  # défaut (LFSINLINE=1 ./run_tiger.sh). Le garde teste le marqueur du DERNIER
+  # fichier (fp-impl.c.inc) : sans lui la propriété existerait sans rien changer.
+  if ! grep -q "gen_todouble_inline" target/ppc/translate/fp-impl.c.inc; then
+    echo "▶ patch TCG : lfs/stfs sans helper (x-lfs-inline)"
+    patch_forward "$ROOT/patches/tcg/0002-ppc-lfs-inline.patch" \
+      target/ppc/cpu.h                   lfs_inline \
+      target/ppc/cpu_init.c              x-lfs-inline \
+      target/ppc/translate.c             "ctx->lfs_inline = env->lfs_inline" \
+      target/ppc/translate/fp-impl.c.inc gen_tosingle_inline
+    rm -f target/ppc/cpu.h.orig target/ppc/cpu_init.c.orig target/ppc/translate.c.orig \
+          target/ppc/translate/fp-impl.c.inc.orig
+  fi
+  while read -r f m; do
+    [ -z "$f" ] && continue
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0002 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG2_MARKERS'
+target/ppc/cpu.h lfs_inline
+target/ppc/cpu_init.c x-lfs-inline
+target/ppc/translate.c ctx->lfs_inline = env->lfs_inline
+target/ppc/translate/fp-impl.c.inc gen_todouble_inline
+target/ppc/translate/fp-impl.c.inc gen_tosingle_inline
+TCG2_MARKERS
+  # --- 4 septies. AltiVec : flottant à 4 voies d'un coup (x-vfp-fast), vperm
+  # par table (x-vperm-fast) — patches/tcg/0003 et 0004, docs/tcg-g4.md §9-10.
+  # Propriétés éteintes par défaut (VFPFAST=1, VPERMFAST=1 ./run_tiger.sh).
+  # Gardes : le marqueur du dernier fichier de chaque patch.
+  if ! grep -q "vfp_fma4" target/ppc/int_helper.c; then
+    echo "▶ patch TCG : flottant AltiVec à 4 voies (x-vfp-fast)"
+    patch_forward "$ROOT/patches/tcg/0003-ppc-vfp-fast.patch" \
+      target/ppc/cpu.h        "bool vfp_fast" \
+      target/ppc/cpu_init.c   x-vfp-fast \
+      target/ppc/int_helper.c vfp_fma4
+    rm -f target/ppc/cpu.h.orig target/ppc/cpu_init.c.orig target/ppc/int_helper.c.orig
+  fi
+  if ! grep -q "gen_helper_VPERM_FAST" target/ppc/translate/vmx-impl.c.inc; then
+    echo "▶ patch TCG : vperm par table (x-vperm-fast)"
+    patch_forward "$ROOT/patches/tcg/0004-ppc-vperm-fast.patch" \
+      target/ppc/cpu.h                   "bool vperm_fast" \
+      target/ppc/cpu_init.c              x-vperm-fast \
+      target/ppc/helper.h                VPERM_FAST \
+      target/ppc/int_helper.c            helper_VPERM_FAST \
+      target/ppc/translate.c             "ctx->vperm_fast = env->vperm_fast" \
+      target/ppc/translate/vmx-impl.c.inc gen_helper_VPERM_FAST
+    rm -f target/ppc/cpu.h.orig target/ppc/cpu_init.c.orig target/ppc/helper.h.orig \
+          target/ppc/int_helper.c.orig target/ppc/translate.c.orig \
+          target/ppc/translate/vmx-impl.c.inc.orig
+  fi
+  while read -r f m; do
+    [ -z "$f" ] && continue
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0003/0004 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG34_MARKERS'
+target/ppc/cpu_init.c x-vfp-fast
+target/ppc/int_helper.c vfp_add4
+target/ppc/int_helper.c vfp_fma4
+target/ppc/cpu_init.c x-vperm-fast
+target/ppc/int_helper.c helper_VPERM_FAST
+target/ppc/translate/vmx-impl.c.inc gen_helper_VPERM_FAST
+TCG34_MARKERS
 fi
 
 # --- 5. Build ---
@@ -374,6 +440,9 @@ check x-fast-fp        qemu_cpu_has_fastfp "$BIN"        "mac99,via=pmu" g4
 check x-fast-fp-ppc64  qemu_cpu_has_fastfp "${BIN}64"    "mac99,via=pmu" g4
 # TLB par jeu de segments (patches/tcg/) : optionnel (NO_TCG=1 le retire).
 check_opt x-sr-tlb       qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-sr-tlb=on
+check_opt x-lfs-inline   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-lfs-inline=on
+check_opt x-vfp-fast     qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-vfp-fast=on
+check_opt x-vperm-fast   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-vperm-fast=on
 echo
 echo "→ $CAPS"
 
