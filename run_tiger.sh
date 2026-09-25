@@ -21,7 +21,7 @@
 #   GPU_SCANOUT=auto|qfb|vga|none  # cible de présentation de SURF_PRESENT
 #                             # (vide par défaut : rien n'est passé au device)
 #   FASTFP=0 ./run_tiger.sh   # flottant exact ; le rapide (FPU hôte) est le défaut
-#   SRTLB=1 ./run_tiger.sh    # TLB gardé d'un jeu de segments à l'autre (x-sr-tlb,
+#   SRTLB=0 ./run_tiger.sh    # coupe le TLB gardé d'un jeu de segments à l'autre (x-sr-tlb, défaut allumé,
 #                             # patches/tcg/, docs/tcg-g4.md) ; CPU_OPTS=… propriétés brutes
 #                             # docs/flottant-rapide.md
 #   NOPAD=1 ./run_tiger.sh    # coupe le passthrough de la manette USB
@@ -181,14 +181,15 @@ fi
 # --- TLB gardé d'un jeu de segments à l'autre (x-sr-tlb, patches/tcg/) ---
 # Un changement de registre de segment ne vide plus tout le TLB de QEMU : chaque
 # mmu_idx traduit est vidé seulement s'il sert sous un autre jeu de segments.
-# Voir docs/tcg-g4.md. Éteint par défaut ; SRTLB=1 pour l'allumer. Sondé comme
-# x-fast-fp (une propriété absente fait quitter QEMU).
+# Voir docs/tcg-g4.md. Allumé par défaut depuis le 25/09/2026 (DOOM 3 SMP=2 : médiane
+# 89,0 → 80,1 ms/image) ; SRTLB=0 pour l'éteindre. Sondé comme x-fast-fp : un QEMU
+# sans la propriété tourne sans (avertissement seulement si SRTLB=1 est explicite).
 # CPU_OPTS=… ajoute des propriétés brutes au modèle (p. ex. x-sr-tlb-verify=64).
-if [ "${SRTLB:-0}" != 0 ]; then
+if [ "${SRTLB:-1}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-sr-tlb=on"; then
     CPU_SPEC="$CPU_SPEC,x-sr-tlb=on"
     MODE="$MODE + TLB PAR SEGMENTS"
-  else
+  elif [ -n "${SRTLB:-}" ]; then
     echo "⚠  SRTLB=1 demandé mais ce QEMU n'a pas la propriété 'x-sr-tlb' (patches/tcg/)." >&2
     MODE="$MODE + TLB par segments DEMANDÉ MAIS INDISPONIBLE"
   fi
