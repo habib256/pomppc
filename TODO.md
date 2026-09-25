@@ -317,8 +317,12 @@ Ce que la revue d'architecture a relevé, et ce qu'on en fait. Chacun a un livra
 - [ ] **Backend GL** : G7 `glTexSubImage*` par rectangle sale, G8 `tex_copy` par
       `glCopyTexSubImage2D` et PBO en rotation pour `SURF_PRESENT`, G9 cache d'état dans
       `gl_target`.
-- [ ] **SMP** : A/B 1 vs 2 cœurs sur Marble Blast (seuil +15 %) ; panique AppleUSBOHCI au boot
-      environ une fois sur dix (aléa MTTCG, `moncmd system_reset`).
+- [ ] **SMP** : **A/B fait le 25/09/2026 sur Marble Blast** (`docs/tcg-g4.md` §5.2, disque de
+      dev, 4 passes entrelacées par côté) : SMP=2 → SMP=1 = **−6,7 %** d'img/s (129 paires ;
+      −6,8 % avec `x-sr-tlb`) — deux cœurs rapportent ~7 %, **sous le seuil de +15 %**. À
+      trancher par l'utilisateur ; DOOM 3 à mesurer (`tools/tcg/d3run.sh`). Contre SMP=2 : la
+      panique AppleUSBOHCI au boot environ une fois sur dix (aléa MTTCG, `moncmd system_reset`)
+      et un défaut latent de QEMU : `tlbie` n'atteint pas l'autre vCPU (§ TCG ci-dessous).
 - [ ] **Un seul disque, deux hôtes** (archive, lot 10) : `tiger.raw` brut partagé par USB entre
       le Mac et le PC, `devloop` et jeux sur le même disque.
 - [ ] **Métrologie boot** (`docs/metrologie-boot.md`) : la baseline de 23,32 s est à refaire

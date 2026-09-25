@@ -210,3 +210,31 @@ Lecture :
   prévoir en SMP=2 sur le papier, et le temps libéré se retrouve en partie dans le BQL et
   l'entrée dans le code (`pthread_jit_write_protect_np` : la synchronisation globale de
   `tlbie`, §3.3, fait sortir les deux vCPU).
+
+---
+
+## 5. A/B
+
+### 5.1 Protocole
+
+`tools/tcg/mbab.sh` (disque de dev uniquement) : une config = un démarrage de la VM
+(bureau, `x-fast-fp=on`), un lancement de chauffe de Marble Blast (110 s), puis `NPASS`
+passes de 240 s (`tools/guest/jobs/tcgmb`, bilan `POMPPC_GL_STATS` toutes les 5 s),
+arrêt propre. Configs **entrelacées** : `s2off s2on s1off s1on s2on s2off s1on s1off`
+(deux manches, ordre inversé), 2 passes chacune — **4 passes, 188 fenêtres par config**.
+`tools/tcg/mbpair.py` apparie les fenêtres de jeu (≥ 1 000 triangles/image) dont les
+triangles/image diffèrent de moins de 2 % ; `tools/tcg/mbreport.sh` fait le bilan. Même
+binaire des deux côtés (`qsr`, la propriété seule change).
+
+### 5.2 1 contre 2 cœurs (TODO §5 « SMP », seuil +15 %)
+
+| | img/s, paires | rapport |
+|---|---|---|
+| stock : SMP=2 → SMP=1 | 66,0 → 61,6 | **−6,7 %** (médiane des paires −7,7 %, 129 paires) |
+| `x-sr-tlb` : SMP=2 → SMP=1 | 71,8 → 67,0 | −6,8 % (131 paires) |
+
+**Deux cœurs rapportent ~7 % sur Marble Blast, sous le seuil de +15 %.** Le jeu est
+monofil ; le second vCPU prend le WindowServer, le noyau et le fil de son. Pendant la démo,
+chaque fil vCPU est occupé ~55 % du temps (échantillons hors `qemu_wait_io_event`), la
+somme ≈ 1,1 cœur hôte. Le coût connu de SMP=2 est la panique AppleUSBOHCI au démarrage
+(~1/10) et, désormais, le défaut `tlbie` du §3.3 (sans `x-sr-tlb`, masqué).
