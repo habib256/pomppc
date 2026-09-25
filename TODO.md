@@ -26,7 +26,7 @@ unique, §3), en faire le harnais (A3, §7), puis optimiser et élargir dessous 
 | Installé | État |
 |---|---|
 | Protocole | **v19** (`qgpu_abi.h` kext, `qgpu_proto.h` device + plugin) ; 913 tests natifs |
-| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 25/09 au soir avec `patches/tcg/0001-0004` (**allumés par défaut** : `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0` les éteignent) ; anciens binaires en `*.avant-srtlb`, `*.avant-flottants` |
+| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 25/09 au soir avec `patches/tcg/0001-0004` (**allumés par défaut** : `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0` les éteignent) ; binaire précédent en `*.avant-flottants` |
 | Invité quotidien (`tiger.qcow2`) | kext v19 ; plugin **`20260924-liste`** ; lanceurs `~/doom3*.command`, `~/prey*.command` (dont `-fs` plein écran, `-env` lisant `~/lot3.env`), `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
 | Profils de référence | `.run/d3/sample-nat.txt`, `.run/prey/sample.txt` ; TCG : `bench/tcg/` (non versionné) |
 | VM | redémarrages libres autorisés par l'utilisateur ; **un seul agent dessus à la fois** |
