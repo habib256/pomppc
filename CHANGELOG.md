@@ -8,6 +8,17 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Combien de cœurs ? — pourquoi deux, et pourquoi plus ne rapporte rien aux jeux**
+  (`docs/smp-coeurs.md`, 26/09/2026). La limite de 2 vient de notre patch QEMU (une seule
+  ligne de reset câblée) : ni xnu-792.6.70 (`MAX_CPUS` 256) ni `AppleMacRISC2PE` ne bloquent ;
+  AppleMPIC plafonne à 4 (un canal IPI par CPU). Essai `patches/smp-mac99/essais/qemu-mac99-4cpus.patch`
+  (GPIO 15/16 de KeyLargo, offsets 0x67/0x68, firmware inchangé) : **Tiger démarre sur 3 et
+  4 processeurs** (`hw.ncpu 4`). Marble Blast à placement du JIT forcé, 1/2/3/4 vCPU, trois
+  démarrages entrelacés par mode : **73,4 / 72,3 / 73,0 / 72,1 img/s**, à égalité ; la somme
+  des fils vCPU reste ≈ 1 cœur hôte (0,93 → 1,03), le processus entier 1,15-1,30 cœur. Dans l'invité :
+  48 `gcc` en 10/7/6 s à 1/2/4 vCPU, mais un fil seul 12-17 % plus lent dès 2 vCPU (MTTCG). Leviers hôte
+  classés (TCG, déport vers l'hôte, rendu `qgpu` déjà sur son fil, traduction : 0,01 % du
+  vCPU). Outils `tools/tcg/smpab.sh`, `threadbusy.py`, `psmsum.py`.
 - **Les deux régimes de vitesse expliqués et supprimés** (`docs/tcg-g4.md` §14) : macOS pose
   le tampon du JIT hors de la fenêtre de 4 Gio du texte de QEMU un lancement sur deux, et le
   M4 prédit plus lentement les appels de helpers qui changent de fenêtre. Patch

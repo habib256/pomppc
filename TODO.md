@@ -109,7 +109,8 @@ Verdict unique : lots 0 à 3 faits (CHANGELOG, `docs/re/etude-court-circuit-glen
 - [ ] **Un seul `docs/protocole.md` pour v19** (capacités, clés, formats, tailles) à la place
       des notes `docs/protocole-v7…v19.md`. Figé, c'est le contrat que A3 éprouve.
 - [ ] **Doorbell asynchrone côté invité** (bug hunt D2) : asynchrone + barrière maintenant que
-      K5/K6 sont faits. Mesure : BQL tenu par image sous `GPU_TRACE=1`.
+      K5/K6 sont faits. Mesure : BQL tenu par image sous `GPU_TRACE=1`. (Le rendu est déjà sur
+      son fil `qgpu-render`, 7-9 % d'un cœur en jeu : `docs/smp-coeurs.md` §3, levier L4.)
 - [ ] **`QGPU_REG_ERRORS` par client** : aujourd'hui global, un autre processus fait passer le
       plugin en synchrone sans faute de sa part.
 - [ ] **`gltest tex14` « λ=2 sans biais »** : défaut du GL de l'hôte macOS (le biais d'unité
@@ -154,11 +155,16 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
       FSUBS`, `fcmpu`, `do_float_check_status` 4,5 %, `compute_fprf` 2,5 %) : premier poste
       hors `lookup_tb_ptr` ; piste FPRF/contrôle calculés en ligne quand FPSCR n'a aucune
       trappe armée.
-- [ ] **SMP** : deux cœurs rapportent ~7 % sur Marble Blast (seuil +15 %) ; DOOM 3 SMP=1 non
-      concluant (une partie par mode). À rejouer six par mode, puis décision de l'utilisateur.
-      Contre SMP=2 : panique AppleUSBOHCI au boot ~1/10. **À reprendre à placement du JIT
-      forcé** : Marble Blast `x-jit-near` donne SMP=1 73,7 contre SMP=2 73,3 img/s
-      (`docs/tcg-g4.md` §14.4) — le −7 % du §5.2 mêlait les régimes.
+- [ ] **SMP : 1 ou 2 par défaut** (`docs/smp-coeurs.md`, 26/09) : Marble Blast à placement
+      forcé, 1/2/3/4 vCPU **à égalité** (73,4 / 72,3 / 73,0 / 72,1 img/s, trois démarrages
+      entrelacés par mode) ; la somme des vCPU reste ≈ 1 cœur hôte (le jeu est un seul fil).
+      Reste DOOM 3 SMP=1 contre SMP=2, trois parties par mode (protocole §4.1, VM quotidienne),
+      puis décision de l'utilisateur (proposé : lanceurs de jeux en SMP=1, bureau en 2 ;
+      contre SMP=2 : panique AppleUSBOHCI au boot ~1/10).
+- [ ] **3-4 vCPU** : Tiger démarre sur 3 et 4 (`hw.ncpu 4`) avec
+      `patches/smp-mac99/essais/qemu-mac99-4cpus.patch` (GPIO 15/16 de KeyLargo) ; 0 gain sur
+      les jeux, ~linéaire sur du travail parallèle dans l'invité jusqu'aux 4 cœurs P de l'hôte.
+      Pas de chantier sans demande (1-2 jours pour en faire un mode ; au-delà de 4 : AppleMPIC).
 - [ ] **`tlbie` en SMP stock** : défaut de QEMU 9.2 (n'atteint pas l'autre vCPU), corrigé par
       `x-sr-tlb` ; à signaler en amont.
 

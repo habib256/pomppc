@@ -154,6 +154,7 @@ OpenBIOS et la chaîne croisée PowerPC).
 
 | Fichier | Verdict mesuré |
 | --- | --- |
+| `smp-mac99/essais/qemu-mac99-4cpus.patch` | **Essai 3-4 CPU** (26/09/2026), par-dessus `qemu-mac99-cpus-v2.patch` : `mc->max_cpus = 4`, GPIO 15 et 16 de KeyLargo (offsets 0x67/0x68, `KL_GPIO_RESET_CPU2/3` de Linux, ceux que Tiger 10.4.6 écrit) câblés sur le reset des CPU 2 et 3. Firmware livré inchangé. Tiger démarre sur 3 et 4 processeurs (`hw.ncpu 4`) ; aucun gain sur les jeux. **Non appliqué.** `docs/smp-coeurs.md`. |
 | `tcg/essais/0005-ppc-vfp-nrwg.patch` | **Exact mais sans gain** (25/09/2026) : les quatre helpers flottants AltiVec appelés en `TCG_CALL_NO_RWG` (jumeaux `*_nrwg`, propriété `x-vfp-nrwg`) ; licite (ni globale TCG ni exception), même empreinte `vfptest` ; banc 1 313 → 1 346 ms. **Non appliqué.** S'applique par-dessus `tcg/0004`. |
 | `tcg/essais/0002-ppc-lmw-inline.patch` | **Exact mais sans gain** (25/09/2026) : `lmw`/`stmw` en accès en ligne quand l'accès tient dans une page (helper sinon), propriété `x-lmw-inline`. Test invité `tools/guest/jobs/lmwtest` : sortie identique octet pour octet (608 cas, 14 fautes à cheval sur deux pages) ; banc de 20 M paires de 19 registres : 1 564/1 582 → 1 544/1 548 ms (−1,3 %) — le chemin rapide du helper (`probe_contiguous` + copie) coûte autant que 19 accès TCG. **Non appliqué.** S'applique par-dessus `tcg/0001`. |
 | `01-timebase-and-vclock.patch` | **Neutre** (23,32 s = stock). Reverté : zéro gain, et l'approximation par réciproque touche le timing. |
