@@ -8,6 +8,14 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Fin de cinématique de DOOM 3 à seuil relatif** (26/09) : avec `x-fp-inline` le jeu tourne
+  à ~63 ms/image et la règle à 65 ms/image fixe ne trouvait plus la scène (matrice
+  `20260926-1333` rouge). S = 0,8 × le niveau lu sur les 400 dernières images, tranches
+  stables à 15 % près ; en direct (matrice, `meas-tcg.sh`) seulement après l'image 5000.
+  `d3win.py` retrouve le T de ses 49 parties rangées à 15 images près ; l'A/B de
+  `x-fp-inline` recalculé donne 64,8 au lieu de 65,1. Matrice DOOM 3 + Prey sur le binaire
+  avec `x-fp-inline` : **4 cellules vertes** (DOOM 3 63,1 / 62,8 ms/image, Prey 72,5 / 72,1
+  bruités), images justes à 0,00 %.
 - **Flottant scalaire en ligne allumé par défaut** (26/09, mot de l'utilisateur) :
   `run_tiger.sh` passe `x-fp-inline=on` sauf `FPINLINE=0` ; QEMU de référence reconstruit
   avec `tcg/0007` (précédent en `*.avant-fpinline`). DOOM 3 74,4 → 65,1 ms/image.

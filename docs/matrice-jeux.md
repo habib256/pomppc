@@ -123,9 +123,15 @@ UT2004 est déterministe (pas de simulation fixé), les autres non.
 Détails par jeu dans l'en-tête de chaque module. Points durs :
 
 - **DOOM 3** : T = fin de la cinématique, règle de `meas-tcg.sh` / `d3win.py` **durcie** —
-  trois tranches de 200 images au-dessus de 65 ms/image au lieu de deux. La règle d'origine a
-  été trompée une fois par un passage lent de la cinématique ; la nouvelle retrouve le T des
-  41 parties rangées dans `bench/tcg/d3/` (40 à l'image près, la 41e trop courte).
+  trois tranches de 200 images stables (à 15 % près) au-dessus du seuil au lieu de deux. La
+  règle d'origine a été trompée une fois par un passage lent de la cinématique. **Seuil
+  relatif depuis le 26/09** : S = 0,8 × le niveau du jeu lu sur les 400 dernières images,
+  évalué seulement à partir de l'image 5000 et T accepté 1000 images derrière la dernière (la
+  règle tourne en direct). Le seuil fixe de 65 ms/image ne trouvait plus T avec
+  `x-fp-inline` (jeu à ~63 ms/image : tour `20260926-1333` rouge, « scène non atteinte »).
+  Le pic de la cinématique vaut ~0,5 × le niveau sur trois tranches, quelle que soit la
+  vitesse ; `d3win.py` (hors ligne) retrouve avec S relatif le T de ses 49 parties rangées
+  à 15 images près.
 - **Marble Blast** : la démo de l'écran-titre (15 à 120 ms/image selon le passage) n'est pas
   une scène fixe ; `-mission` l'est.
 - **Prey** : la sauvegarde « Fuite » ouvre sur une cinématique scriptée ; la scène avance

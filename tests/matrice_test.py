@@ -38,12 +38,18 @@ rows = matrice.lit_frames(serie([10, 20]) + "3,0x1,4")
 verifie(sorted(rows) == [1, 2] and rows[2][0] == 30.0 and rows[2][3] == 20, "lit_frames")
 
 # DOOM 3 : cinématique à 20 ms avec un passage lent de 400 images (la règle à
-# deux tranches s'y trompait), puis le jeu à 78 ms à partir de l'image 3001
+# deux tranches s'y trompait), puis le jeu à 78 ms à partir de l'image 3001 ;
+# la règle attend l'image 5000 (évaluée en direct, seuil relatif au niveau)
 cine = [20] * 2000 + [90] * 400 + [20] * 600
-jeu = [78] * 900
+jeu = [78] * 2100
 T = d3.fin_cinematique(matrice.lit_frames(serie(cine + jeu)))
-verifie(T is not None and 2995 <= T <= 3001, "fin_cinematique (T=%s, attendu ~3000)" % T)
+verifie(T is not None and 2990 <= T <= 3001, "fin_cinematique (T=%s, attendu ~3000)" % T)
 verifie(d3.fin_cinematique(matrice.lit_frames(serie(cine))) is None, "pas de T dans la cinématique seule")
+verifie(d3.JEU.fenetre(matrice.lit_frames(serie(cine + [78] * 1500))) is None,
+        "pas de fenêtre avant l'image 5000")
+# jeu plus rapide que l'ancien seuil fixe de 65 ms (x-fp-inline, 26/09 : ~63)
+T = d3.fin_cinematique(matrice.lit_frames(serie(cine + [63] * 2100)))
+verifie(T is not None and 2990 <= T <= 3001, "fin_cinematique à 63 ms (T=%s, attendu ~3000)" % T)
 
 # Prey : chargement (images de plusieurs secondes) puis 400 images calmes
 P = prey.fin_chargement(matrice.lit_frames(serie([300] * 100 + [3000, 5000, 1900, 1985] + [80] * 400)))

@@ -2,10 +2,10 @@
 
 Partie `game/demo_mars_city1` lancée par `+map`, sans toucher à rien : la
 cinématique d'arrivée (~20 ms/image) puis le joueur immobile au début du
-niveau (~75-80). T = fin de la cinématique, règle de meas-tcg.sh / d3win.py
-durcie (fin_cinematique : trois tranches de 200 images au-dessus de 65
-ms/image au lieu de deux) ; fenêtre de mesure T+50..T+280,
-celle des lots du verdict unique et des A/B TCG (~74-80 ms/image au 26/09).
+niveau (~63 ms/image depuis x-fp-inline). T = fin de la cinématique, règle
+de d3win.py durcie (fin_cinematique : trois tranches de 200 images au-dessus
+du seuil au lieu de deux) ; fenêtre de mesure T+50..T+280, celle des lots du
+verdict unique et des A/B TCG.
 
 Fenêtre : r_mode 3 (640×480) ; plein écran : r_mode 5 (1024×768, la taille du
 bureau, pas de changement de mode). Jamais de `+bind` (il s'enregistre dans
@@ -21,17 +21,29 @@ CFG = "/Users/tiger/Library/Application Support/Doom 3 Demo/demo/DoomConfig.cfg"
 
 def fin_cinematique(rows):
     """Première image a >= 1500 dont les TROIS tranches de 200 images suivantes
-    dépassent 65 ms/image avec au plus 8 replis (la règle de meas-tcg.sh n'en
-    demande que deux : le 26/09, une cinématique ralentie par le relevé ssh de
-    la matrice l'a trompée), puis affinée au saut (d3win.py)."""
+    dépassent S et sont stables (à 15 % près : un passage lent de la
+    cinématique n'est pas un palier) avec au plus 8 replis (d3win.py n'en demande que deux : le
+    26/09, une cinématique ralentie par le relevé ssh de la matrice l'a
+    trompée), puis affinée au saut (d3win.py). S = 0,8 × le niveau du jeu lu
+    sur les 400 dernières images (la partie tourne jusqu'au délai, joueur
+    immobile) ; S fixe à 65 ms/image ne trouvait plus T depuis x-fp-inline
+    (jeu à ~63). La matrice appelle cette règle EN DIRECT : les 400 dernières
+    images ne sont sûrement dans le niveau que loin de la cinématique, d'où
+    image >= 5000 et T accepté seulement 1000 images derrière la dernière
+    (T ~3500-4100 selon la vitesse, 26/09)."""
+    z = max(rows)
+    if z < 5000:
+        return None
+    a0 = min(x for x in rows if x >= z - 400)
+    s = 0.8 * (rows[z][0] - rows[a0][0]) / (z - a0)
     for f in sorted(rows):
         a = f - 600
         if a < 1500 or any(x not in rows for x in (a, a + 200, a + 400)):
             continue
-        if (all((rows[x + 200][0] - rows[x][0]) / 200 > 65 for x in (a, a + 200, a + 400))
-                and rows[f][1] - rows[a][1] <= 8):
+        sl = [(rows[x + 200][0] - rows[x][0]) / 200 for x in (a, a + 200, a + 400)]
+        if min(sl) > s and min(sl) > 0.85 * max(sl) and rows[f][1] - rows[a][1] <= 8:
             for x in range(a, a + 400):
-                if x + 25 in rows and (rows[x + 25][0] - rows[x][0]) / 25 > 65:
+                if x + 25 in rows and (rows[x + 25][0] - rows[x][0]) / 25 > s:
                     return x
             return a
     return None
@@ -57,7 +69,7 @@ class Doom3(Jeu):
 
     def fenetre(self, rows):
         t = fin_cinematique(rows)
-        if t is None:
+        if t is None or t + 1000 > max(rows):
             return None
         a, b = t + 50, t + 280
         return (a, b) if b in rows else None
