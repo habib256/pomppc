@@ -170,6 +170,7 @@ static volatile pthread_t pack_thr, sig_thr, proc_thr;
    verdict (vd_key_of) ; verrou tenu. */
 static unsigned long vd_epoch;
 #define VD_BUMP() (vd_epoch++)
+static unsigned long tex_del_epoch;     /* mémoire des unités : pomppc_texture_deleted */
 #define THR_WIN 0x8000UL
 static pthread_t thr_last;
 static unsigned long thr_sp;            /* 0 : rien de retenu */
@@ -548,6 +549,8 @@ static PProg pprog[PPROG_MAX];
 #define LAZY_WORDS 5
 #define LAZY_DEFAULT 1          /* sans POMPPC_GL_LAZYAPPLE */
 #define WL_DEFAULT   1          /* lot 3 : sans POMPPC_GL_WHITELIST */
+#define TEXMEMO_DEFAULT 0       /* mémoire des unités : sans POMPPC_GL_TEXMEMO */
+#define STSKIP_DEFAULT  0       /* lot 4 : sans POMPPC_GL_STSKIP */
 
 typedef struct PTex {                   /* texture du GLDriver suivie par le plugin */
     struct PTex   *next;
@@ -608,6 +611,11 @@ typedef struct PCtx {
     int            broken;              /* plus jamais d'accélération */
     unsigned long  st[QGPU_SK_COUNT];   /* état envoyé au device */
     int            st_valid;
+    /* lot 4 (26/09) : compute_state sauté quand aucun dispatch n'a porté, depuis
+       le dernier calcul, un bit d'état qu'il lit (st_dirty, relevé R5) et que
+       rien d'autre de ce qu'il lit n'a bougé (surface, stencil, chemin) */
+    int            st_known, st_dirty, st_raw, st_stencil;
+    unsigned long  st_sw, st_sh, st_sbits;
     unsigned char *draw_seen;           /* tampon de dessin connu */
     unsigned long  direct_at;           /* n° de la dernière image présentée directement */
     unsigned char *fullscreen_buf;      /* owned software back buffer for CGL fullscreen */
@@ -732,6 +740,7 @@ static unsigned char *gctx_of(PCtx *p);          /* sonde v16 dans close_raw */
 static void cube_probe(PCtx *p, const TexInfo *ti, const char *where);
 static void draw_probe(PCtx *p, const TexInfo *ti);
 static void dump_one(const char *path);
+static int dump_trigger(void);                  /* plus bas (vidage) */
 static void vd_frame(void);                     /* lot 2, plus bas */
 static void vd_check_at(PCtx *p, const char *where, int disp, int ok, const TexInfo *ti,
                         unsigned long fmt, unsigned long gs, int bumped);
@@ -902,6 +911,10 @@ static struct {
     int             verdict;            /* lot 2 : POMPPC_GL_VERDICT (défaut 1) */
     int             vcheck;             /* lot 2 : POMPPC_GL_VERDICTCHECK (défaut 0) */
     int             wl;                 /* lot 3 : POMPPC_GL_WHITELIST */
+    int             texmemo;            /* POMPPC_GL_TEXMEMO : relevé des unités
+                                           fait une fois par verdict (us_get) */
+    int             stskip;             /* lot 4 : POMPPC_GL_STSKIP */
+    int             stcheck;            /* lot 4 : POMPPC_GL_STATECHECK */
     unsigned long   bd_a, bd_n;         /* R4 : POMPPC_GL_BLOCKDUMP=a[:n], images [a, a+n) */
     int             bd_on;
 } G = { PTHREAD_MUTEX_INITIALIZER };
@@ -1067,7 +1080,10 @@ static void trace_frame(void *ctx)
             G.n_frames, ctx, (double)(tick - start) * tb.numer / tb.denom / 1e6,
             G.n_rawverts, G.n_rawdraws, G.n_fallback, G.n_readbacks,
             G.t_submit * 1000, G.t_wait * 1000, G.t_copy * 1000);
-    if ((double)(tick - flushed) * tb.numer / tb.denom >= 5e9) {
+    /* Vidé toutes les 5 s ; à CHAQUE image quand POMPPC_GL_DUMP_TRIGGER est
+       posé (26/09) : la matrice (A3) peut alors se servir de frames.csv comme
+       horloge de la preuve. Un fflush par image : ~70 octets, négligeable. */
+    if ((double)(tick - flushed) * tb.numer / tb.denom >= 5e9 || dump_trigger() >= 0) {
         fflush(frame_file);
         flushed = tick;
     }
@@ -1955,6 +1971,22 @@ void pomppc_backend_init(void)
                    POMPPC_GL_WHITELIST=0 recalcule à chaque dispatch. */
                 e = getenv("POMPPC_GL_WHITELIST");
                 G.wl = G.verdict && (e && e[0] ? e[0] != '0' : WL_DEFAULT);
+                /* Mémoire des unités (26/09) : texturing_on, geom_texture_ok,
+                   texture_unit_ok et geom_format lisent le relevé des unités
+                   fait une fois par verdict (us_get) au lieu de relire la
+                   table de GLEngine unité par unité, geom_format en N².
+                   POMPPC_GL_TEXMEMO=0 relit comme avant. */
+                e = getenv("POMPPC_GL_TEXMEMO");
+                G.texmemo = e && e[0] ? e[0] != '0' : TEXMEMO_DEFAULT;
+                /* Lot 4 : compute_state sauté quand le bloc de changements ne
+                   porte, depuis le dernier calcul, que des bits d'état qu'il
+                   ne lit pas (st_neutral, relevé R5 :
+                   docs/re/etude-court-circuit-glengine.md §6). STATECHECK=1
+                   calcule quand même et note les écarts (lignes STATE). */
+                e = getenv("POMPPC_GL_STSKIP");
+                G.stskip = e && e[0] ? e[0] != '0' : STSKIP_DEFAULT;
+                e = getenv("POMPPC_GL_STATECHECK");
+                G.stcheck = e && e[0] && e[0] != '0';
                 /* Relevé R4 : POMPPC_GL_BLOCKDUMP=a[:n] écrit sur stderr le
                    bloc de chaque dispatch (mots non nuls) et chaque dessin
                    des images [a, a+n) (n = 1 par défaut). */
@@ -1998,9 +2030,10 @@ void pomppc_backend_init(void)
         }
         if (G.state > 0) {
             gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d lazyapple=%d "
-                    "native=%d (plages %d) count=%d verdict=%d verdictcheck=%d whitelist=%d\n",
+                    "native=%d (plages %d) count=%d verdict=%d verdictcheck=%d whitelist=%d "
+                    "texmemo=%d stskip=%d statecheck=%d\n",
                     G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range,
-                    G.count, G.verdict, G.vcheck, G.wl);
+                    G.count, G.verdict, G.vcheck, G.wl, G.texmemo, G.stskip, G.stcheck);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
                        " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
@@ -3052,6 +3085,7 @@ void pomppc_texture_deleted(void *drvtex)
         return;
     pthread_mutex_lock(&G.mu);
     VD_BUMP();                          /* lot 2 */
+    tex_del_epoch++;                    /* mémoire des unités : PTex libéré */
     for (pp = &G.textures; *pp; pp = &(*pp)->next) {
         if ((*pp)->drvtex != drvtex)
             continue;
@@ -4147,13 +4181,144 @@ static void *unit_drvtex(PCtx *p, int u, unsigned long *mask)
     return (void *)GLD_U32(units, u * 0x14 + unit_slot(m) * 4);
 }
 
+/* ─── Mémoire des unités (POMPPC_GL_TEXMEMO, 26/09) ───
+ * Un verdict (pomppc_geom_dispatch, ou geom_draw_client_unsafe qui recalcule)
+ * relisait la table des unités de GLEngine une dizaine de fois : texturing_on
+ * dans geom_texture_ok, dans texture_ok, puis une fois PAR UNITÉ dans
+ * geom_format (unit_textured : N², 8 × 8 unit_mask, find_tex, tex_cp), et
+ * unit_drvtex / intern_tex / find_tex dans chaque boucle. Rien de tout cela ne
+ * bouge pendant un verdict (G.mu tenu, fil de l'application dans le plugin) :
+ * le relevé est fait une fois (us_fill) et relu. Il n'est valable qu'entre
+ * us_open et us_close, pour le même contexte, le même programme de fragments
+ * (unit_mask le lit, prog_sync peut le refuser), la même table d'unités, et
+ * tant qu'aucune texture n'a été détruite (tex_del_epoch : un PTex libéré).
+ * Hors verdict (autres appelants), tout se relit comme avant.
+ * VERDICTCHECK=1 refait le relevé à chaque reprise et compte les écarts
+ * (lignes TEXMEMO de la note). */
+typedef struct UScan {
+    PCtx          *p;
+    unsigned long  seq, del;            /* verdict, destructions au relevé */
+    const PProg   *fp_rec;              /* programme dont unit_mask a lu les unités */
+    unsigned long  units;               /* CTX_TEXUNITS */
+    int            on;                  /* texturing_on */
+    unsigned long  mask[GL_MAX_TEXUNITS];   /* unit_mask */
+    void          *dt[GL_MAX_TEXUNITS];     /* unit_drvtex */
+    PTex          *t[GL_MAX_TEXUNITS];      /* find_tex(dt) ; intern_tex à la demande */
+} UScan;
+static UScan US;
+static unsigned long us_seq;            /* un par verdict ouvert */
+static int us_now;                      /* un verdict est ouvert */
+/* tex_del_epoch : déclaré avec vd_epoch */
+static struct {
+    unsigned long fill, hit, same, diff, told, diff_all;
+} USC;
+#define US_TOLD 24
+
+static const PProg *us_fp(PCtx *p)
+{
+    return (G.prog && p->fp_on && p->fp_rec && !p->fp_rec->refused) ? p->fp_rec : 0;
+}
+
+static void us_fill(PCtx *p, UScan *s)
+{
+    unsigned long units = GLD_U32(p->ctx, CTX_TEXUNITS);
+    int u;
+    s->p = p;
+    s->seq = us_seq;
+    s->del = tex_del_epoch;
+    s->fp_rec = us_fp(p);
+    s->units = units;
+    s->on = 0;
+    for (u = 0; u < GL_MAX_TEXUNITS; u++) {
+        unsigned long m = unit_mask(p, u);
+        void *dt = 0;
+        PTex *t = 0;
+        if (m & 0x7)
+            target_probe(p, u, m, units);
+        if (m && unit_slot(m) >= 0 && units)
+            dt = (void *)GLD_U32(units, u * 0x14 + unit_slot(m) * 4);
+        if (dt)
+            t = find_tex(dt);
+        s->mask[u] = m;
+        s->dt[u] = dt;
+        s->t[u] = t;
+        /* texturing_on, sans s'arrêter à la première unité (même résultat) */
+        if (!s->on && m) {
+            if (unit_slot(m) < 0 || !units)
+                s->on = 1;
+            else if (dt && (t ? tex_cp(t) != 0 : (tex_complete(dt) || tex_base_ok(dt))))
+                s->on = 1;
+        }
+    }
+}
+
+static void us_open(void)
+{
+    us_seq++;
+    us_now = G.texmemo;
+}
+
+static void us_close(void)
+{
+    us_now = 0;
+}
+
+/* Le relevé du verdict en cours, ou 0 (mémoire éteinte, hors verdict). */
+static UScan *us_get(PCtx *p)
+{
+    if (!us_now)
+        return 0;
+    if (US.p != p || US.seq != us_seq || US.del != tex_del_epoch || US.fp_rec != us_fp(p) ||
+        US.units != GLD_U32(p->ctx, CTX_TEXUNITS)) {
+        us_fill(p, &US);
+        USC.fill++;
+        return &US;
+    }
+    USC.hit++;
+    if (G.vcheck) {                     /* contrôle : le relevé tient-il encore ? */
+        UScan f;
+        int u, d;
+        us_fill(p, &f);
+        d = f.on != US.on;
+        for (u = 0; u < GL_MAX_TEXUNITS; u++)
+            if (f.mask[u] != US.mask[u] || f.dt[u] != US.dt[u] ||
+                (f.t[u] && f.t[u] != US.t[u]))
+                d |= 2 << u;
+        if (!d) {
+            USC.same++;
+        } else {
+            USC.diff++;
+            USC.diff_all++;
+            if (USC.told < US_TOLD) {
+                USC.told++;
+                gl_note("TEXMEMO écart, image %lu : 0x%x (texturage %d -> %d)\n",
+                        G.n_frames, d, US.on, f.on);
+            }
+            US = f;                     /* on continue sur le relevé frais */
+        }
+    }
+    return &US;
+}
+
+/* PTex de l'unité u (intern_tex à la demande, comme les boucles d'origine). */
+static PTex *us_tex(UScan *s, int u)
+{
+    if (!s->t[u] && s->dt[u])
+        s->t[u] = intern_tex(s->dt[u]);
+    return s->t[u];
+}
+
 /* Texturage effectif. CTX_TEXTURING est calculé par le rendu d'Apple, qui ne
  * connaît pas la 3D : une unité dont la seule texture est 3D l'y laisse à 0
  * (vu en vrai, sonde t3dprobe). On le complète donc nous-mêmes. */
 static int texturing_on(PCtx *p)
 {
-    unsigned long units = GLD_U32(p->ctx, CTX_TEXUNITS);
+    unsigned long units;
     int u;
+    UScan *sc = us_get(p);
+    if (sc)
+        return sc->on;
+    units = GLD_U32(p->ctx, CTX_TEXUNITS);
     for (u = 0; u < GL_MAX_TEXUNITS; u++) {
         unsigned long m = unit_mask(p, u);
         void *dt;
@@ -4178,8 +4343,9 @@ static int texture_unit_ok(PCtx *p, int u, TexUnit *tu)
 {
     unsigned char *g = gls(p);
     unsigned char *us = g + GS_TEXUNIT0 + u * GS_TEXUNIT_SIZE;
-    unsigned long mask = unit_mask(p, u);
-    unsigned long units = GLD_U32(p->ctx, CTX_TEXUNITS);
+    UScan *sc = us_get(p);
+    unsigned long mask = sc ? sc->mask[u] : unit_mask(p, u);
+    unsigned long units = sc ? sc->units : GLD_U32(p->ctx, CTX_TEXUNITS);
     unsigned long env = U16(us, TU_ENV_MODE);
     /* v16 : sous un programme de fragments, l'environnement est ignoré par
        l'hôte — on ne le valide pas, il peut porter n'importe quoi */
@@ -4203,8 +4369,13 @@ static int texture_unit_ok(PCtx *p, int u, TexUnit *tu)
     tu->combine_src = QGPU_COMBINE_SRC_DEFAULT;
     if (env == 0x8570 && !combine_ok(us, u, tu))
         return 0;
-    dt = (void *)GLD_U32(units, u * 0x14 + unit_slot(mask) * 4);
-    tu->t = dt ? intern_tex(dt) : 0;
+    if (sc) {
+        dt = sc->dt[u];
+        tu->t = us_tex(sc, u);
+    } else {
+        dt = (void *)GLD_U32(units, u * 0x14 + unit_slot(mask) * 4);
+        tu->t = dt ? intern_tex(dt) : 0;
+    }
     if (!tu->t)
         return no(NO_TEX_UNKNOWN, (unsigned long)dt, mask);
     /* Texture sans image (jamais définie) : OpenGL la dit incomplète et coupe
@@ -4231,14 +4402,16 @@ static int texture_unit_ok(PCtx *p, int u, TexUnit *tu)
 static int texture_ok(PCtx *p, TexInfo *ti)
 {
     int i;
+    UScan *sc;
 
     for (i = 0; i < QGPU_MAX_UNITS; i++)
         ti->u[i].t = 0;
     prog_state(p);                                  /* v16 : unit_mask en dépend */
     if (!texturing_on(p))
         return 1;                                   /* pas de texture : dessin simple */
+    sc = us_get(p);
     for (i = G.units; i < GL_MAX_TEXUNITS; i++)
-        if (unit_mask(p, i))
+        if (sc ? sc->mask[i] : unit_mask(p, i))
             return no(NO_TEX_UNITS, i, 0);          /* au-delà du device : logiciel */
     for (i = 0; i < QGPU_MAX_UNITS; i++)
         if (!texture_unit_ok(p, i, &ti->u[i]))
@@ -4794,6 +4967,39 @@ static int point_att_default(const unsigned char *g)
     return att[0] == 1.0f && att[1] == 0.0f && att[2] == 0.0f;
 }
 
+/* Clés des unités de texture (liaison, environnement, combinaison), tirées du
+ * verdict `ti` : partie de compute_state que le lot 4 refait toujours. */
+static void state_units(PCtx *p, const TexInfo *ti, unsigned long *v)
+{
+    int u, kb;
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        const TexUnit *tu = ti ? &ti->u[u] : 0;
+        kb = QGPU_SK_UNIT(u);
+        v[kb + QGPU_SK_U_ENABLE] = tu && tu->t;
+        v[kb + QGPU_SK_U_BIND] = p->st_valid ? p->st[kb + QGPU_SK_U_BIND] : 0;
+        v[kb + QGPU_SK_U_ENV_MODE] = p->st_valid ? p->st[kb + QGPU_SK_U_ENV_MODE] : 0x2100;
+        v[kb + QGPU_SK_U_ENV_COLOR] = p->st_valid ? p->st[kb + QGPU_SK_U_ENV_COLOR] : 0;
+        v[QGPU_SK_COMBINE(u)] = p->st_valid ? p->st[QGPU_SK_COMBINE(u)]
+                                            : QGPU_COMBINE_DEFAULT;
+        v[QGPU_SK_COMBINE_SRC(u)] = p->st_valid ? p->st[QGPU_SK_COMBINE_SRC(u)]
+                                                : QGPU_COMBINE_SRC_DEFAULT;
+        if (tu && tu->t) {
+            v[kb + QGPU_SK_U_BIND] = tu->t->qtex;
+            v[kb + QGPU_SK_U_ENV_MODE] = tu->env_mode;
+            v[kb + QGPU_SK_U_ENV_COLOR] = tu->env_color;
+            v[QGPU_SK_COMBINE(u)] = tu->combine;
+            v[QGPU_SK_COMBINE_SRC(u)] = tu->combine_src;
+        }
+    }
+}
+
+/* Clés des programmes ARB (même règle que compute_geom_state). */
+static void state_progs(PCtx *p, unsigned long *v)
+{
+    v[QGPU_SK_VERTEX_PROGRAM] = (G.prog && p->vp_on && p->vp_rec && !p->vp_rec->refused) ? 1 : 0;
+    v[QGPU_SK_FRAGMENT_PROGRAM] = (G.prog && p->fp_on && p->fp_rec && !p->fp_rec->refused) ? 1 : 0;
+}
+
 static void compute_state(PCtx *p, const TexInfo *ti, unsigned long *v, int raw)
 {
     unsigned char *g = gls(p);
@@ -4841,28 +5047,7 @@ static void compute_state(PCtx *p, const TexInfo *ti, unsigned long *v, int raw)
         v[QGPU_SK_SCISSOR_H] = sh;
     }
     /* textures : liaison et environnement conservés quand l'unité est coupée */
-    {
-        int u, kb;
-        for (u = 0; u < QGPU_MAX_UNITS; u++) {
-            const TexUnit *tu = ti ? &ti->u[u] : 0;
-            kb = QGPU_SK_UNIT(u);
-            v[kb + QGPU_SK_U_ENABLE] = tu && tu->t;
-            v[kb + QGPU_SK_U_BIND] = p->st_valid ? p->st[kb + QGPU_SK_U_BIND] : 0;
-            v[kb + QGPU_SK_U_ENV_MODE] = p->st_valid ? p->st[kb + QGPU_SK_U_ENV_MODE] : 0x2100;
-            v[kb + QGPU_SK_U_ENV_COLOR] = p->st_valid ? p->st[kb + QGPU_SK_U_ENV_COLOR] : 0;
-            v[QGPU_SK_COMBINE(u)] = p->st_valid ? p->st[QGPU_SK_COMBINE(u)]
-                                                : QGPU_COMBINE_DEFAULT;
-            v[QGPU_SK_COMBINE_SRC(u)] = p->st_valid ? p->st[QGPU_SK_COMBINE_SRC(u)]
-                                                    : QGPU_COMBINE_SRC_DEFAULT;
-            if (tu && tu->t) {
-                v[kb + QGPU_SK_U_BIND] = tu->t->qtex;
-                v[kb + QGPU_SK_U_ENV_MODE] = tu->env_mode;
-                v[kb + QGPU_SK_U_ENV_COLOR] = tu->env_color;
-                v[QGPU_SK_COMBINE(u)] = tu->combine;
-                v[QGPU_SK_COMBINE_SRC(u)] = tu->combine_src;
-            }
-        }
-    }
+    state_units(p, ti, v);
     /* stencil (v6) : le device borne tout à 8 bits ; test coupé = valeurs neutres,
        mais masque d'écriture et valeur d'effacement réels (l'effacement s'en sert) */
     v[QGPU_SK_STENCIL_TEST] = p->stencil && stencil_active(p);
@@ -4981,12 +5166,44 @@ static void send_polygon_stipple(PCtx *p)
         c[1 + j] = p->c_pstip[(j + 31) & 31];
 }
 
+/* Lot 4 : compteurs (note, lignes STATE, toutes les CNT_PERIOD images). */
+static struct {
+    unsigned long skip, full, same, diff, diff_all, told;
+} STC;
+#define ST_TOLD 24
+
 static void send_state(PCtx *p, const TexInfo *ti, int raw)
 {
     unsigned long v[QGPU_SK_COUNT], *c;
-    int k, r, nr = 0;
+    int k, r, nr = 0, skip;
     struct { int lo, hi; } rg[5];       /* géométrie, v8, 1.4, programmes, unités 4..7 */
-    compute_state(p, ti, v, raw);
+    unsigned long sbits = GLD_U32(p->ctx, CTX_STENCIL_BITS);
+    /* Lot 4 : sauter compute_state ? Tout ce qu'il lit de l'état GL fait poser
+       à GLEngine un bit du bloc de changements (relevés R4 et R5) ; un bit
+       qu'il lit, reçu par pomppc_geom_dispatch depuis le dernier calcul, pose
+       st_dirty. Le reste de ce qu'il lit est ici : la surface (taille,
+       stencil), les bits de stencil du drawable, le chemin (raw), p->st
+       lui-même (st_valid), le verdict `ti` (unités, refaites à chaque fois)
+       et les programmes (refaits aussi). */
+    skip = G.stskip && raw && p->st_valid && p->st_known && !p->st_dirty &&
+           p->st_raw == raw && p->st_sw == p->sw && p->st_sh == p->sh &&
+           p->st_stencil == p->stencil && p->st_sbits == sbits;
+    if (skip) {
+        memcpy(v, p->st, sizeof(v));
+        state_units(p, ti, v);
+        state_progs(p, v);
+        STC.skip++;
+    } else {
+        compute_state(p, ti, v, raw);
+        p->st_known = 1;
+        p->st_dirty = 0;
+        p->st_raw = raw;
+        p->st_sw = p->sw;
+        p->st_sh = p->sh;
+        p->st_stencil = p->stencil;
+        p->st_sbits = sbits;
+        STC.full++;
+    }
     /* Sans le chemin brut, seulement les clés de rastérisation (v1–v6) : les
        clés de géométrie de la v7 gardent leur valeur initiale sur le device,
        et les envoyer à zéro serait invalide (vu en vrai au passage en v6, où
@@ -5013,6 +5230,30 @@ static void send_state(PCtx *p, const TexInfo *ti, int raw)
     /* v17 : les unités 4..7 (texturage, GL_COMBINE, biais de LOD), les deux
        chemins ; un device plus ancien refuserait ces clés */
     if (G.units > 4) { rg[nr].lo = QGPU_SK_TEXTURE4; rg[nr].hi = QGPU_SK_TEX_LOD_BIAS4 + 4; nr++; }
+    if (skip && G.stcheck) {            /* lot 4, contrôle : calcul complet comparé */
+        unsigned long w[QGPU_SK_COUNT];
+        int d = 0, first = -1;
+        compute_state(p, ti, w, raw);
+        for (r = 0; r < nr; r++)
+            for (k = rg[r].lo; k < rg[r].hi; k++)
+                if (w[k] != v[k]) {
+                    if (first < 0)
+                        first = k;
+                    d++;
+                }
+        if (!d) {
+            STC.same++;
+        } else {
+            STC.diff++;
+            STC.diff_all++;
+            if (STC.told < ST_TOLD) {
+                STC.told++;
+                gl_note("STATE écart, image %lu : %d clés, première %d : sautée %08lx, "
+                        "calculée %08lx\n", G.n_frames, d, first, v[first], w[first]);
+            }
+            memcpy(v, w, sizeof(v));    /* on envoie le vrai */
+        }
+    }
     for (r = 0; r < nr; r++)
         for (k = rg[r].lo; k < rg[r].hi; k++) {
             if (p->st_valid && p->st[k] == v[k])
@@ -6645,6 +6886,13 @@ static int unit_textured(PCtx *p, int u)
     PTex *t;
     unsigned char *lv;
 
+    UScan *sc = us_get(p);
+    if (sc) {                           /* mémoire des unités : plus de N² */
+        if (!sc->on)
+            return 0;
+        t = us_tex(sc, u);
+        return t ? tex_cp(t) != 0 : 0;
+    }
     if (!texturing_on(p))
         return 0;
     dt = unit_drvtex(p, u, &mask);
@@ -6662,17 +6910,25 @@ static int geom_texture_ok(PCtx *p)
 {
     unsigned char *g = gls(p);
     int u, i;
+    UScan *sc;
 
     if (!texturing_on(p))
         return 1;
+    sc = us_get(p);
     for (i = G.units; i < GL_MAX_TEXUNITS; i++)
-        if (unit_mask(p, i))
+        if (sc ? sc->mask[i] : unit_mask(p, i))
             return no(NO_TEX_UNITS, i, 0);
     for (u = 0; u < QGPU_MAX_UNITS; u++) {
         unsigned char *us = g + GS_TEXUNIT0 + u * GS_TEXUNIT_SIZE;
         unsigned long mask, env = U16(us, TU_ENV_MODE);
         TexUnit tu;
-        void *dt = unit_drvtex(p, u, &mask);
+        void *dt;
+        if (sc) {
+            mask = sc->mask[u];
+            dt = sc->dt[u];
+        } else {
+            dt = unit_drvtex(p, u, &mask);
+        }
         PTex *t;
         unsigned char *lv;
         if (!mask)
@@ -6692,7 +6948,7 @@ static int geom_texture_ok(PCtx *p)
             return no(NO_TEX_ENV, env, u);
         if (env == 0x8570 && !combine_ok(us, u, &tu))
             return 0;
-        t = dt ? intern_tex(dt) : 0;
+        t = sc ? us_tex(sc, u) : (dt ? intern_tex(dt) : 0);
         if (!t)
             return no(NO_TEX_UNKNOWN, (unsigned long)dt, mask);
         (void)lv;
@@ -6985,8 +7241,7 @@ static void compute_geom_state(PCtx *p, unsigned long *v)
     /* v16 : programmes ARB — la clé ne vaut 1 que si l'hôte a le programme
        (prog_state au dispatch, prog_sync au lot : un texte refusé sort du
        domaine avant d'arriver ici). */
-    v[QGPU_SK_VERTEX_PROGRAM] = (G.prog && p->vp_on && p->vp_rec && !p->vp_rec->refused) ? 1 : 0;
-    v[QGPU_SK_FRAGMENT_PROGRAM] = (G.prog && p->fp_on && p->fp_rec && !p->fp_rec->refused) ? 1 : 0;
+    state_progs(p, v);
     /* P17 — ces trois sondes étaient relues par getenv à CHAQUE LOT DE DESSIN.
        Le getenv de Darwin 8 balaie `environ` avec strncmp : ≈ 250 000 strncmp
        par image sur le G4 émulé, pour trois sondes éteintes. Toutes les autres
@@ -9495,7 +9750,7 @@ static void vd_frame(void)
 {
     if (G.n_frames % CNT_PERIOD != 0)
         return;
-    if (G.vcheck || G.count) {
+    if (G.vcheck || G.count || G.stcheck) {
         gl_note("VERDICT image %lu : %lu repris, %lu recalculés (clé changée ou sans "
                 "verdict) ; contrôle : %lu identiques, %lu écarts (%lu depuis le début)\n",
                 G.n_frames, VD.reuse, VD.recalc, VD.chk_same, VD.chk_diff, VD.diff_all);
@@ -9505,6 +9760,14 @@ static void vd_frame(void)
                 G.n_frames, G.wl ? "allumée" : "éteinte", VD.wl_skip,
                 VD.wl_blk + VD.wl_key + VD.wl_none, VD.wl_blk, VD.wl_key, VD.wl_none,
                 VD.wl_same, VD.wl_diff, VD.wl_diff_all);
+        if (G.stskip || G.stcheck)
+            gl_note("STATE image %lu : %lu sautés, %lu calculés ; contrôle : %lu identiques, "
+                    "%lu écarts (%lu depuis le début)\n", G.n_frames, STC.skip, STC.full,
+                    STC.same, STC.diff, STC.diff_all);
+        if (G.texmemo)
+            gl_note("TEXMEMO image %lu : %lu relevés, %lu repris ; contrôle : %lu identiques, "
+                    "%lu écarts (%lu depuis le début)\n", G.n_frames, USC.fill, USC.hit,
+                    USC.same, USC.diff, USC.diff_all);
         if (G.count)
             gl_note("VERDICT image %lu dispatch : %lu non neutres par les seules unités "
                     "(+0x04), dont %lu à table des unités identique\n",
@@ -9517,19 +9780,22 @@ static void vd_frame(void)
     VD.reuse = VD.recalc = VD.chk_same = VD.chk_diff = 0;
     VD.wl_skip = VD.wl_blk = VD.wl_key = VD.wl_none = VD.wl_same = VD.wl_diff = 0;
     VD.wl_uonly = VD.wl_usame = 0;
+    USC.fill = USC.hit = USC.same = USC.diff = 0;
+    STC.skip = STC.full = STC.same = STC.diff = 0;
 }
 
 /* Bilan de toute la vie du processus (VERDICTCHECK), à la destruction d'un
    contexte : gltest ne fait pas 500 images. */
 static void vd_total(const char *why)
 {
-    if (!G.vcheck)
+    if (!G.vcheck && !G.stcheck)
         return;
     gl_note("VERDICT total (%s, image %lu) : %lu repris, %lu recalculés ; contrôle : "
-            "%lu identiques, %lu écarts ; dispatch : %lu court-circuités, %lu écarts\n",
+            "%lu identiques, %lu écarts ; dispatch : %lu court-circuités, %lu écarts ; "
+            "texmemo %d : %lu écarts ; stskip %d : %lu écarts\n",
             why, G.n_frames, VD.reuse_all + VD.reuse, VD.recalc_all + VD.recalc,
             VD.same_all + VD.chk_same, VD.diff_all, VD.wl_skip_all + VD.wl_skip,
-            VD.wl_diff_all);
+            VD.wl_diff_all, G.texmemo, USC.diff_all, G.stskip, STC.diff_all);
 }
 
 /* Cœur du canal tableaux. Verrou déjà tenu. 1 = traité (même si n=0). */
@@ -9646,7 +9912,9 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
             VD.reuse++;                 /* contrôle : compté comme repris */
         else
             VD.recalc++;
+        us_open();                      /* mémoire des unités, le temps du verdict */
         if (!geom_ok(p)) {
+            us_close();
             if (G.count && !vd_same)
                 cnt_check(p, 0, 0, 0);
             if (vd_same)
@@ -9655,9 +9923,12 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
                 vd_store(p, 0, 0, 0, 0);
             return 0;
         }
-        if (!ensure_surface(p))
+        if (!ensure_surface(p)) {
+            us_close();
             return 0;
+        }
         if (!texture_ok(p, &ti)) {
+            us_close();
             if (G.count && !vd_same)
                 cnt_check(p, 0, 0, 0);
             if (vd_same)
@@ -9666,9 +9937,12 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
                 vd_store(p, 0, 0, 0, 0);
             return 0;
         }
-        if (!prog_sync(p))              /* v16 : programme refusé par l'hôte */
+        if (!prog_sync(p)) {            /* v16 : programme refusé par l'hôte */
+            us_close();
             return 0;
+        }
         fmt = geom_format(p);
+        us_close();
         if (G.count && !vd_same)        /* lot 0 : le verdict du dispatch tenait-il ? */
             cnt_check(p, 1, &ti, fmt);
         /* génériques à la taille de leurs tableaux (QGPU_CAP_GEN_SIZES) : DOOM 3
@@ -10058,6 +10332,36 @@ static const unsigned long wl_mask[CNT_BLOCK] = {
 #define WL_GS_WORD 3
 #define WL_GS      0x00100000UL
 
+/* Lot 4 : bits du bloc dont compute_state ne lit PAS l'état (relevés R4 et R5,
+ * docs/re/etude-court-circuit-glengine.md §6). Tout bit absent d'ici fait
+ * recalculer ; un bit inconnu aussi. */
+static const unsigned long st_mask[CNT_BLOCK] = {
+    0x00202018UL,   /* +0x00 : glClearColor 0x8, glClearDepth 0x10, glHint 0x2000,
+                       glPixelStorei 0x200000 */
+    0x000100ffUL,   /* +0x04 : liaisons et paramètres de texture par unité, texgen
+                       (les unités sont refaites depuis le verdict à chaque dessin) */
+    0x01ff0019UL,   /* +0x08 : fenêtre et plages 0x1 (glScissor pose aussi
+                       +00 04000000), projection 0x8, modèle-vue 0x10, matrices et
+                       cibles de texture 0x00ff0000, plan de coupe 0x01000000 */
+    0x03d0000cUL,   /* +0x0c : lumières 0x4 et 0x8, tableaux 0x100000, liaison et
+                       allumage des programmes 0x400000 / 0x1000000 (clés refaites
+                       à chaque dessin), env 0x800000 / 0x2000000 */
+    0x010001ffUL,   /* +0x10 : mode et couleur d'environnement, combinaison
+                       (unités, depuis le verdict) ; PAS 0x10000 (biais de LOD) */
+    0xffffffffUL, 0xffffffffUL, 0xffffffffUL, 0xffffffffUL, 0xffffffffUL,
+    0xffffffffUL, 0xffffffffUL, 0xffffffffUL, 0xffffffffUL, 0xffffffffUL,
+    0xffffffffUL, 0xffffffffUL, 0xffffffffUL, 0xffffffffUL
+};
+
+static int st_neutral(const unsigned long *c)
+{
+    int k;
+    for (k = 0; k < CNT_BLOCK; k++)
+        if (c[k] & ~st_mask[k])
+            return 0;
+    return 1;
+}
+
 static int wl_neutral(const unsigned long *c)
 {
     int k;
@@ -10180,6 +10484,8 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
         return 0;
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
+    if (p && (!chg || !st_neutral(chg)))
+        p->st_dirty = 1;                /* lot 4 : un bit que compute_state lit */
     if (G.count)                        /* lot 0 : compter seulement */
         cnt_dispatch(p, chg);
     if (p)
@@ -10204,6 +10510,7 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
         pthread_mutex_unlock(&G.mu);
         return bits;
     }
+    us_open();                          /* mémoire des unités, le temps du verdict */
     if (p && geom_ok(p)) {
         TexInfo ti;
         unsigned long fmt, gs, ep0 = vd_epoch;
@@ -10211,8 +10518,11 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
            laisse GLEngine transformer (bit 0 = 0) plutôt que de jeter le
            premier lot de glyphes sous T&L. Le dispatch suivant réessaiera. */
         if (!texture_ok(p, &ti)) {
-            flush();
+            flush();                    /* peut relâcher G.mu : relevé à refaire */
+            us_close();
+            us_open();
             if (!texture_ok(p, &ti)) {
+                us_close();
                 p->geom_on = 0;
                 if (G.count)
                     cnt_keep(p, 0, 0, 0);
@@ -10233,6 +10543,7 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
            (p->geom_fmt) : calculé une fois. Lot 2 : le verdict est rangé
            pour le dessin (vd_store), tailles des génériques comprises. */
         fmt = geom_format(p);
+        us_close();
         if (G.count)
             cnt_keep(p, 1, &ti, fmt);
         if (G.verdict) {
@@ -10248,6 +10559,7 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
         }
         bits = geom_dispatch_publish(p, fmt);
     } else if (p) {
+        us_close();
         p->geom_on = 0;
         if (G.count)
             cnt_keep(p, 0, 0, 0);
@@ -10260,6 +10572,7 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
             p->vd_fresh = 1;
         }
     }
+    us_close();                         /* (p nul) */
     pthread_mutex_unlock(&G.mu);
     return bits;
 }
@@ -10563,6 +10876,7 @@ static void pt_size(Batch *b, const unsigned char *v0)
     c[1] = QGPU_SK_POINT_SIZE;
     c[2] = bits;
     b->p->st[QGPU_SK_POINT_SIZE] = bits;
+    b->p->st_dirty = 1;                 /* lot 4 : p->st n'est plus le calcul */
 }
 
 static void pt(Batch *b, const unsigned char *v0)
@@ -12280,6 +12594,7 @@ static void pix_punch_zero(PCtx *p)
     c[1] = QGPU_SK_ALPHA_TEST;
     c[2] = 1;
     p->st[QGPU_SK_ALPHA_TEST] = 1;
+    p->st_dirty = 1;                    /* lot 4 : le prochain send_state recalcule */
     c += QGPU_LEN_SET_STATE;
     c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
     c[1] = QGPU_SK_ALPHA_FUNC;

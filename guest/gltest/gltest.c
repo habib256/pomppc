@@ -1515,6 +1515,77 @@ int main(int argc, char **argv)
         R4("glDrawBuffer BACK", glDrawBuffer(GL_BACK));
         R4("glDrawBuffer FRONT", glDrawBuffer(GL_FRONT));
         R4("glReadBuffer", glReadBuffer(GL_BACK));
+        /* Relevé R5 (lot 4, 26/09) : le reste de ce que compute_state lit —
+           pose-t-il un bit du bloc ? (docs/re/etude-court-circuit-glengine.md §5) */
+        {
+            typedef void (*bc_f)(GLclampf, GLclampf, GLclampf, GLclampf);
+            typedef void (*bfs_f)(GLenum, GLenum, GLenum, GLenum);
+            typedef void (*pf_f)(GLenum, GLfloat);
+            bc_f bcol = (bc_f)gl_sym("glBlendColor", "glBlendColorEXT");
+            bfs_f bfs = (bfs_f)gl_sym("glBlendFuncSeparate", "glBlendFuncSeparateEXT");
+            pf_f ppf = (pf_f)gl_sym("glPointParameterfARB", "glPointParameterf");
+            GLfloat fc[4] = { 0.25f, 0.5f, 0.75f, 1.0f };
+            R4("R5 glEnable BLEND", glEnable(GL_BLEND));
+            if (bcol) {
+                R4("R5 glBlendColor", bcol(0.25f, 0.5f, 0.75f, 1.0f));
+                R4("R5 glBlendColor (autre)", bcol(0.5f, 0.5f, 0.5f, 0.5f));
+            } else {
+                printf("R4 R5 glBlendColor absent\n");
+            }
+            if (bfs)
+                R4("R5 glBlendFuncSeparate", bfs(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO));
+            else
+                printf("R4 R5 glBlendFuncSeparate absent\n");
+            R4("R5 glBlendFunc", glBlendFunc(GL_ONE, GL_ZERO));
+            R4("R5 glDisable BLEND", glDisable(GL_BLEND));
+            R4("R5 glClearStencil", glClearStencil(3));
+            R4("R5 glClearStencil (autre)", glClearStencil(0));
+            R4("R5 glClearDepth", glClearDepth(0.5));
+            R4("R5 glStencilMask (autre)", glStencilMask(255));
+            R4("R5 glEnable STENCIL_TEST", glEnable(GL_STENCIL_TEST));
+            R4("R5 glStencilFunc (réf seule)", glStencilFunc(GL_ALWAYS, 2, 255));
+            R4("R5 glStencilFunc (masque seul)", glStencilFunc(GL_ALWAYS, 2, 15));
+            R4("R5 glDisable STENCIL_TEST", glDisable(GL_STENCIL_TEST));
+            R4("R5 glEnable ALPHA_TEST", glEnable(GL_ALPHA_TEST));
+            R4("R5 glAlphaFunc (réf seule)", glAlphaFunc(GL_GREATER, 0.25f));
+            R4("R5 glDisable ALPHA_TEST", glDisable(GL_ALPHA_TEST));
+            R4("R5 glEnable SCISSOR_TEST", glEnable(GL_SCISSOR_TEST));
+            R4("R5 glScissor (autre)", glScissor(1, 2, 30, 31));
+            R4("R5 glDisable SCISSOR_TEST", glDisable(GL_SCISSOR_TEST));
+            R4("R5 glScissor (test éteint)", glScissor(0, 0, W, H));
+            R4("R5 glColorMaterial", glColorMaterial(GL_FRONT, GL_AMBIENT));
+            R4("R5 glColorMaterial (retour)", glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE));
+            R4("R5 glEnable RESCALE_NORMAL", glEnable(0x803A));
+            R4("R5 glDisable RESCALE_NORMAL", glDisable(0x803A));
+            R4("R5 glLightModeli LOCAL_VIEWER", glLightModeli(0x0B51, 1));
+            R4("R5 glLightModeli COLOR_CONTROL", glLightModeli(0x81F8, 0x81FA));
+            R4("R5 glLightModeli COLOR_CONTROL (retour)", glLightModeli(0x81F8, 0x81F9));
+            R4("R5 glLightModeli TWO_SIDE (retour)", glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, 0));
+            R4("R5 glTexEnvf LOD_BIAS", glTexEnvf(0x8500, 0x8501, 1.0f));
+            R4("R5 glTexEnvf LOD_BIAS (retour)", glTexEnvf(0x8500, 0x8501, 0.0f));
+            R4("R5 glTexEnvfv ENV_COLOR", glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, fc));
+            R4("R5 glEnable POLYGON_OFFSET_LINE", glEnable(0x2A02));
+            R4("R5 glDisable POLYGON_OFFSET_LINE", glDisable(0x2A02));
+            R4("R5 glEnable POLYGON_OFFSET_POINT", glEnable(0x2A01));
+            R4("R5 glDisable POLYGON_OFFSET_POINT", glDisable(0x2A01));
+            R4("R5 glPolygonOffset (test éteint)", glPolygonOffset(3.0f, 4.0f));
+            if (ppf) {
+                R4("R5 glPointParameterf SIZE_MIN", ppf(0x8126, 2.0f));
+                R4("R5 glPointParameterf SIZE_MAX", ppf(0x8127, 8.0f));
+                R4("R5 glPointParameterf FADE", ppf(0x8128, 0.5f));
+            } else {
+                printf("R4 R5 glPointParameterf absent\n");
+            }
+            R4("R5 glFogfv FOG_COLOR", glFogfv(GL_FOG_COLOR, fc));
+            R4("R5 glFogf FOG_START", glFogf(GL_FOG_START, 2.0f));
+            R4("R5 glFogf FOG_END", glFogf(GL_FOG_END, 20.0f));
+            R4("R5 glLineStipple (motif seul)", glLineStipple(2, 0x00ff));
+            R4("R5 glDepthFunc", glDepthFunc(GL_LEQUAL));
+            R4("R5 glEnable DEPTH_TEST", glEnable(GL_DEPTH_TEST));
+            R4("R5 glDisable DEPTH_TEST", glDisable(GL_DEPTH_TEST));
+            R4("R5 glEnable DITHER", glEnable(GL_DITHER));
+            R4("R5 rien (témoin)", (void)0);
+        }
         /* tableaux et VBO */
         R4("glEnableClientState COLOR_ARRAY", (bindb(R4_ARRAY, buf[2]), glColorPointer(4, GL_FLOAT, 0, 0), glEnableClientState(GL_COLOR_ARRAY)));
         R4("glDisableClientState COLOR_ARRAY", glDisableClientState(GL_COLOR_ARRAY));

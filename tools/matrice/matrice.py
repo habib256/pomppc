@@ -311,6 +311,9 @@ def verifie_reference(cle, cel, p, dump, creer=True):
 
 # ------------------------------------------------------------ une cellule
 class Cellule:
+    env_extra = {}              # --env K=V (A/B d'un drapeau du plugin)
+    sample_s = 0                # --sample N : `sample` du jeu dans l'invité après la fenêtre
+
     def __init__(self, h, jeu, mode, tour, vidage=True):
         """vidage=False : lancement de MESURE (ni déclencheur ni vidage, rangé dans
         <cellule>/mesure/) ; vidage=True : lancement de PREUVE (<cellule>/invite/)."""
@@ -331,6 +334,7 @@ class Cellule:
             env.update({"POMPPC_GL_DUMP": self.gd + "/dump", "POMPPC_GL_DUMP_TRIGGER": TRIG,
                         "POMPPC_GL_DUMP_FRAMES": str(self.j.dump_images)})
         env.update(self.j.env)
+        env.update(self.env_extra)
         l = ["# écrit par tools/matrice/matrice.py (%s)" % self.cle, "D='%s'" % self.gd]
         for k, v in env.items():
             l.append("%s='%s'; export %s" % (k, v, k))
@@ -403,6 +407,13 @@ class Cellule:
                 if t > j.delai_scene:
                     raise Echec("scène non atteinte en %d s (image %s)" % (t, max(rows) if rows else "aucune"))
             journal("fenêtre de mesure %d..%d atteinte (%.0f s)" % (a, b, time.time() - lance))
+            if self.sample_s:
+                # profil APRÈS la fenêtre (sample ralentit le jeu) : même scène fixe
+                pids = h.processus(j.processus)
+                if pids:
+                    h.ssh("cd /tmp && sample %d %d -file %s/sample.txt >/dev/null 2>&1; true"
+                          % (pids[0], self.sample_s, self.gd), delai=120 + 4 * self.sample_s)
+                    journal("sample %d s pris" % self.sample_s)
             # vidage déclenché puis capture figée pendant le vidage
             if not self.vidage:
                 raise Fini()
@@ -638,7 +649,16 @@ def main():
                          "qui payait un access() par dessin texturé)")
     ap.add_argument("--sans-vidage", action="store_true",
                     help="ni vidage ni capture : vitesse et replis seuls")
+    ap.add_argument("--env", action="append", default=[], metavar="K=V",
+                    help="variable POMPPC_GL_* en plus pour chaque lancement (A/B d'un drapeau)")
+    ap.add_argument("--sample", type=int, default=0, metavar="S",
+                    help="`sample` du jeu dans l'invité pendant S s, la fenêtre de mesure passée "
+                         "(sample.txt dans le dossier de la cellule)")
     a = ap.parse_args()
+    for kv in a.env:
+        k, _, v = kv.partition("=")
+        Cellule.env_extra[k] = v
+    Cellule.sample_s = a.sample
     jeux = charge_jeux()
     ordre = [k for k in ORDRE if k in jeux] + sorted(k for k in jeux if k not in ORDRE)
     if a.liste:
@@ -738,6 +758,8 @@ def main():
     print(ecrit_tableau(tour, resultats, jeux))
     journal("tour complet en %d min : %s" % ((time.time() - t0) / 60, tour))
     lien = os.path.join(BENCH, "dernier")
+    if os.path.dirname(tour) != BENCH:
+        return
     if os.path.islink(lien):
         os.remove(lien)
     if not os.path.exists(lien):
