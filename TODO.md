@@ -16,7 +16,7 @@ réorganisation par domaine est dans l'historique git (commit précédant celui 
 
 | Chantier | Domaine | État | Preuve qui le fermera |
 |---|---|---|---|
-| Flottant scalaire (`fmuls`, `fmadds`, drapeaux FPSCR) | TCG (§4) | **patch `tcg/0007` (`x-fp-inline`, éteint) prouvé ; DOOM 3 74,4 → 65,1 ms/image (−12,5 %)** le 26/09 (`docs/tcg-g4.md` §15.9) | mot de l'utilisateur : allumer par défaut (`FPINLINE`, binaire de référence reconstruit avec `tcg/0007`) |
+| Flottant scalaire (`fmuls`, `fmadds`, drapeaux FPSCR) | TCG (§4) | **fait, allumé par défaut le 26/09** (`tcg/0007`, `x-fp-inline`) : DOOM 3 74,4 → 65,1 ms/image (−12,5 %), `docs/tcg-g4.md` §15.9 ; binaire de référence reconstruit | matrice DOOM 3 + Prey verte sur le nouveau binaire |
 | Lots 4 et 5 du verdict unique | Plugin (§2) | à faire | R5 puis `STATECHECK=1` à zéro ; `sample` DOOM 3 comparé à `sample-nat.txt` |
 | Matrice de jeux automatisée (A3) | Outils (§7) | **harnais fait** (26/09) : `tools/matrice/matrice.py`, 9 vertes sur 11 cellules automatisées, ~50 min le tour | suites : Colin McRae, Zenerchi plein écran, Warcraft III fenêtre ; déclencheur du vidage lu par image (§2) pour un tour en une passe |
 
@@ -26,7 +26,7 @@ unique, §3), en faire le harnais (A3, §7), puis optimiser et élargir dessous 
 | Installé | État |
 |---|---|
 | Protocole | **v19** (`qgpu_abi.h` kext, `qgpu_proto.h` device + plugin) ; 913 tests natifs |
-| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 25/09 à 23 h avec `patches/tcg/0001-0004` et `0006` (**allumés par défaut** : `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0` les éteignent) ; binaire précédent en `*.avant-jitnear` |
+| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 26/09 avec `patches/tcg/0001-0004`, `0006` et `0007` (**allumés par défaut** : `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0` les éteignent) ; binaire précédent en `*.avant-fpinline` |
 | Invité quotidien (`tiger.qcow2`) | kext v19 ; plugin **`20260924-liste`** ; lanceurs `~/doom3*.command`, `~/prey*.command` (dont `-fs` plein écran, `-env` lisant `~/lot3.env`), `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
 | Profils de référence | `.run/d3/sample-nat.txt`, `.run/prey/sample.txt` ; TCG : `bench/tcg/` (non versionné) |
 | VM | redémarrages libres autorisés par l'utilisateur ; **un seul agent dessus à la fois** |
@@ -171,7 +171,7 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
       thermique ?). Épreuve : cause trouvée ou fréquence < 1 sur 20.
 - [ ] **Flottant scalaire** (DOOM 3 : ~19 % du temps vCPU dans `helper_FMULS/FMADDS/FADDS/
       FSUBS`, `fcmpu`, `do_float_check_status` 4,5 %, `compute_fprf` 2,5 %) : **fait le
-      26/09, `patches/tcg/0007` (`x-fp-inline`, éteint par défaut, `FPINLINE=1`)**, docs/tcg-g4.md
+      26/09, `patches/tcg/0007` (`x-fp-inline`), allumé par défaut le 26/09 (`FPINLINE=0` l'éteint)**, docs/tcg-g4.md
       §15 : `fadds`…`fnmsubs` en un appel pur + FPRF en ligne, `fcmpu` tout en ligne, quand
       le FPSCR est amorcé sans trappe et les opérandes des simples normaux. Prouvé (hôte
       814 M vecteurs, 10 mutations détectées ; invité 30 M instructions, empreinte identique ;
@@ -179,8 +179,7 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
       Marble Blast +5 à +8 % (bruité). **DOOM 3 joué** (§15.9, trois parties par mode,
       placement « même fenêtre » partout) : **74,4 → 65,1 ms/image (−12,5 %)** ; partie
       vérifiée 4,56 milliards de passages, 0 divergence ; aucun gel au chargement (0/7).
-      **Reste** : décider du défaut (`FPINLINE` dans `run_tiger.sh`, `tcg/0007` dans le
-      binaire de référence). Ops aarch64 natives dans le
+      Défaut tranché par l'utilisateur le 26/09 : allumé. Ops aarch64 natives dans le
       code généré : bornées, non faites (§15.7).
 - [ ] **Cœurs invités** (`docs/smp-coeurs.md`) : **tranché le 26/09 — SMP=2 reste le défaut** :
       DOOM 3 deux cœurs 74,3 contre un cœur 80,8 ms/image (−8 %, à-coups des autres fils de

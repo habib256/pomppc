@@ -8,6 +8,9 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Flottant scalaire en ligne allumé par défaut** (26/09, mot de l'utilisateur) :
+  `run_tiger.sh` passe `x-fp-inline=on` sauf `FPINLINE=0` ; QEMU de référence reconstruit
+  avec `tcg/0007` (précédent en `*.avant-fpinline`). DOOM 3 74,4 → 65,1 ms/image.
 - **A3 — matrice de jeux automatisée** (26/09, `tools/matrice/`, `docs/matrice-jeux.md`) :
   `tools/matrice/matrice.py` joue chaque jeu en fenêtre et en plein écran sur la VM
   quotidienne, deux lancements par cellule (mesure sans déclencheur, puis preuve : vidage
