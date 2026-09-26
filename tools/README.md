@@ -8,6 +8,9 @@
 | `re/frames.py` | Résume `frames.csv` d'un vidage par fenêtre de N images : ms/image, dessins/image, replis. |
 | `gld/gen_tramp.py` | Génère `guest/gldriver/gld_tramp.s`, les trampolines du plugin OpenGL (l'invité n'a pas Python). `tests/run-all.sh` vérifie que le fichier livré est à jour. |
 | `guest/devloop.py` | Boucle de développement dans l'invité Tiger allumée : un job (dossier avec `job.sh`) part par une boîte aux lettres sur le disque brut et revient en quelques secondes. `prepare` (par `hdiutil` sur macOS, **dans l'invité** ailleurs), `start [--gui]`, `run DOSSIER`, `shot`, `type`, `stop`. Disque : `DEVDISK=` (image raw) ; `CDROM=` ajoute des lecteurs. |
+| `matrice/matrice.py` | **Matrice de jeux (A3)** : joue chaque jeu en fenêtre et en plein écran sur la VM quotidienne, vide, rejoue en natif, compare à la capture de la VM et à une référence rangée, mesure ms/image et replis ; tableau vert/rouge dans `bench/matrice/<tour>/`. Un module par jeu dans `matrice/jeux/`, lanceur invité `matrice/guest/lance.command`, comparateur d'images `matrice/ppmcmp.c`, empreintes des références `matrice/references.csv`. `docs/matrice-jeux.md`. |
+| `guest/tssh.sh` | ssh vers le Tiger quotidien (algorithmes anciens ; clé hors dépôt, `.run/cmr/id_rsa` du dépôt principal ou `TSSH_KEY`) ; `-p` par mot de passe (`tssh.exp`). |
+| `guest/cycle.sh`, `guest/killgame.py` | Recompiler et réinstaller le plugin dans l'invité (`NORUN=1`), cycle Colin McRae ; tuer Colin McRae par le stub GDB de QEMU. Déplacés de `.run/cmr/` (A5). |
 | `scripts/moncmd.py` | Commande HMP sur `.run/mon.sock` (quotidienne) ou `bench/devloop/` (dev). Contrôle AZERTY / CD / UT : `docs/re/ut2004-demo.md` §5. |
 | `guest/agent.sh` | L'agent invité de `devloop` (lecture brute de la boîte d'entrée, écriture de la sortie par son fichier). |
 | `guest/POMPPCAgent/` | StartupItem qui lance l'agent au démarrage du bureau. |

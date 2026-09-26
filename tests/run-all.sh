@@ -52,6 +52,7 @@ for f in $(git ls-files '*.py'); do
 done
 if python3 tests/frame_report_test.py; then ok "frame-time report"; else ko "frame-time report"; fi
 if python3 tests/flyby_report_test.py; then ok "fixed-step flyby report"; else ko "fixed-step flyby report"; fi
+if python3 tests/matrice_test.py >/dev/null; then ok "matrice de jeux : règles de scène, ppmcmp"; else ko "matrice de jeux (python3 tests/matrice_test.py)"; fi
 rm -rf tests/__pycache__ scripts/__pycache__ 2>/dev/null
 
 echo

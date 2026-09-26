@@ -1,0 +1,9 @@
+set timeout 60
+set opts [split $env(TSSH_OPTS) " "]
+spawn ssh {*}$opts -o PubkeyAuthentication=no tiger@127.0.0.1 $env(TSSH_CMD)
+expect {
+    -re "assword:" { send "tiger974\r"; exp_continue }
+    eof
+}
+catch wait r
+exit [lindex $r 3]
