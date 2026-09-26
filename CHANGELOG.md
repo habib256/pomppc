@@ -12,6 +12,10 @@ et dans `docs/`.
   `run_tiger.sh` passe `x-ret-inline=on,x-jc-idx=on` sauf `RETINLINE=0` / `JCIDX=0` ; QEMU de
   référence reconstruit avec `tcg/0008` (précédent en `*.avant-retinline`). DOOM 3 65,7 →
   61,2 ms/image à l'A/B.
+  Matrice complète sur ce binaire (`20260926-1956`, hôte calme, 22 min) : DOOM 3 60,1 / 60,3
+  ms/image, Prey 68,9 / 69,6, UT2004 26,0 / 25,5, Marble Blast plein écran 10,1, Zenerchi
+  4,4, Warcraft III 17,2 ; 8 vertes sur 10 ; rouges : Marble Blast fenêtre (connu), UT2004
+  plein écran (rejeu juste contre la référence, capture de la VM différente : à rejouer).
 - **Sorties indirectes des blocs sans helper sur le chemin courant** (`patches/tcg/0008`,
   `x-ret-inline` + `x-jc-idx`, **éteints par défaut**, `RETINLINE=1 JCIDX=1 ./run_tiger.sh` ;
   `docs/tcg-g4.md` §16, 26/09) : à chaque `blr`, `bctr`, `bclr`/`bcctr`, branchement vers une
