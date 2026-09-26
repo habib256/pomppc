@@ -1,0 +1,73 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index 8d029bd72..b719ddb2b 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1380,6 +1380,12 @@ struct CPUArchState {
+      * Read by the translator only.
+      */
+     bool ret_inline;
++    /*
++     * x-isync-chain (POMPPC tcg/0009): isync ends its TB with a lookup of
++     * the next TB (DISAS_CHAIN_UPDATE) instead of an exit to the main loop.
++     * Read by the translator only.
++     */
++    bool isync_chain;
+ 
+     /* Internal devices resources */
+     ppc_tb_t *tb_env;      /* Time base and decrementer */
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index 5fa219333..fbd8d68ac 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7462,6 +7462,12 @@ static Property ppc_cpu_properties[] = {
+     DEFINE_PROP_BOOL("x-ret-inline", PowerPCCPU, env.ret_inline, false),
+     DEFINE_PROP_BOOL("x-jc-idx", PowerPCCPU, parent_obj.jc_by_idx, false),
+     DEFINE_PROP_BOOL("x-ret-verify", PowerPCCPU, parent_obj.ret_verify, false),
++    /*
++     * POMPPC tcg/0009.  x-isync-chain: isync looks the next TB up instead
++     * of returning to the main loop (exit requests and interrupts are still
++     * taken at the start of the next TB).  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-isync-chain", PowerPCCPU, env.isync_chain, false),
+     /*
+      * AltiVec vaddfp/vsubfp/vmaddfp/vnmsubfp: the four lanes at once on the
+      * host FPU when softfloat's hardfloat path would take each of them
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+index 461645712..9077ce977 100644
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -189,6 +189,7 @@ struct DisasContext {
+     bool fpu_enabled;
+     bool fp_inline, fp_verify;  /* x-fp-inline, x-fp-verify (tcg/0007) */
+     bool ret_inline, ret_verify; /* x-ret-inline, x-ret-verify (tcg/0008) */
++    bool isync_chain;            /* x-isync-chain (tcg/0009) */
+     bool altivec_enabled;
+     bool vsx_enabled;
+     bool spe_enabled;
+@@ -2931,7 +2932,17 @@ static void gen_isync(DisasContext *ctx)
+         gen_check_tlb_flush(ctx, false);
+     }
+     tcg_gen_mb(TCG_MO_ALL | TCG_BAR_SC);
+-    ctx->base.is_jmp = DISAS_EXIT_UPDATE;
++    /*
++     * POMPPC tcg/0009 (x-isync-chain).  Nothing an isync synchronises needs
++     * the main loop: a TLB flush it performs above is synchronous, TBs are
++     * looked up again with the new translation (DISAS_CHAIN_UPDATE goes
++     * through helper_lookup_tb_ptr, never goto_tb), modified code has been
++     * invalidated by the store itself, and pending interrupts, exit
++     * requests and queued work are seen by the next TB's prologue
++     * (icount_decr).  Tiger executes ~10^6 isync per second (kernel entry
++     * and exit), each one a round trip through cpu_exec.
++     */
++    ctx->base.is_jmp = ctx->isync_chain ? DISAS_CHAIN_UPDATE : DISAS_EXIT_UPDATE;
+ }
+ 
+ static void gen_load_locked(DisasContext *ctx, MemOp memop)
+@@ -6533,6 +6544,7 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+     ctx->fp_verify = ctx->fp_inline && env->fp_verify;
+     ctx->ret_inline = env->ret_inline;
+     ctx->ret_verify = cs->ret_verify;
++    ctx->isync_chain = env->isync_chain;
+     ctx->spe_enabled = (hflags >> HFLAGS_SPE) & 1;
+     ctx->altivec_enabled = (hflags >> HFLAGS_VR) & 1;
+     ctx->vsx_enabled = (hflags >> HFLAGS_VSX) & 1;

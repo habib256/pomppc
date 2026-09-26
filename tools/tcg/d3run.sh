@@ -86,14 +86,17 @@ while :; do
   sleep 10
   out=$($TS "cat ~/meas-$L.txt 2>/dev/null; tail -21 ~/d3-dump/frames.csv 2>/dev/null | awk -F, '\$1 ~ /^[0-9]+\$/ {if (!a) a=\$6; b=\$6; n=\$1} END {print \"N\", n, b-a+0}'" 2>/dev/null)
   echo "$(( $(date +%s) - T0 )) $(echo "$out" | tr '\n' ' ')" >> "$OUT/watch.txt"
+  # PROFIL (T+300) avant FINI : à ~65 ms/image les deux arrivent dans le même
+  # relevé de 10 s ; le `sample` passe donc avant la sortie de boucle, et le jeu
+  # tourne encore pendant les 10 s (la partie ne se ferme qu'après FINI).
+  if [ "$SAMPLE" = 1 ] && [ $sampled = 0 ] && echo "$out" | grep -q PROFIL; then
+    sample "$PID" 10 -file "$OUT/sample.txt" >/dev/null 2>&1; sampled=1
+  fi
   case "$out" in *FINI*|*TIMEOUT*) break;; esac
   n=$(echo "$out" | awk '$1=="N"{print $2}'); r=$(echo "$out" | awk '$1=="N"{print $3}')
   if [ -n "$r" ] && [ "$r" -gt 10 ] && [ "${n:-0}" -gt 150 ]; then
     $TS "osascript -e 'tell application \"System Events\" to set frontmost of process \"Doom 3 Demo\" to true'" >/dev/null 2>&1
     echo "  premier plan ($n, $r replis)" >> "$OUT/watch.txt"
-  fi
-  if [ "$SAMPLE" = 1 ] && [ $sampled = 0 ] && echo "$out" | grep -q PROFIL; then
-    sample "$PID" 10 -file "$OUT/sample.txt" >/dev/null 2>&1; sampled=1
   fi
   [ $(( $(date +%s) - T0 )) -gt 2700 ] && { echo "délai dépassé" >> "$OUT/watch.txt"; break; }
 done
