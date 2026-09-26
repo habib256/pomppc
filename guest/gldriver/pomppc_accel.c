@@ -117,7 +117,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260926-memo"
+#define POMPPC_PLUGIN_REV "20260926-var"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -4879,6 +4879,18 @@ static int stencil_active(PCtx *p)
 /* L'état courant relève-t-il du domaine rendu par l'hôte ?
  * `raw` : on juge pour le chemin BRUT (v7), qui calcule le brouillard sur
  * l'hôte — GL_NICEST n'est donc plus une raison de refuser. */
+/* POMPPC_GL_CMRPROBE=n (26/09, Colin McRae) : sondes de diagnostic, éteintes
+   par défaut ; n borne le nombre de lignes par sonde. */
+static long cmr_probe(void)
+{
+    static long v = -1;
+    if (v < 0) {
+        const char *e = getenv("POMPPC_GL_CMRPROBE");
+        v = e ? atol(e) : 0;
+    }
+    return v;
+}
+
 static int accel_ok_for(PCtx *p, int raw)
 {
     unsigned char *g;
@@ -7936,7 +7948,23 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
         unsigned char *V = (unsigned char *)GLD_U32(gls(p), GS_VAO);
         /* la mémoire des tableaux génériques 0/1 AU DÉBUT du déroulage (lots
            de course : générique 3 présent), sommet 0 et sommet 8 */
-        if (V && (p->geom_fmt & QGPU_VF_GEN(3)) && gen3_probed < 8) {
+        /* POMPPC_GL_CMRPROBE=n (26/09, polygones éclatés) : n lots sondés au
+           lieu de 8, avec pour les génériques 0..3 le pointeur brut, le VBO,
+           le pointeur RÉSOLU de GLEngine (gctx+0x48f8+4·code) et ce qu'il y lit */
+        static long cmr_n;
+        long cmrprobe = cmr_probe();
+        if (V && cmrprobe && cmr_n++ < cmrprobe) {
+            int q;
+            gl_note("CMR lot n %lu desc %08lx pas %u :", n ? *n : 0UL, GLD_U32(gc, GC_VTX_DESC), GLD_U16(gc, GC_VTX_STRIDE));
+            for (q = 16; q < 20; q++) {
+                const unsigned long *r = (const unsigned long *)GLD_U32(gc, GC_VA_PTRS + 4 * q);
+                gl_note(" [%d] brut %08lx pas %lu vbo %08lx résolu %p=%08lx", q, GLD_U32(VA_SLOT(V, q), 0),
+                        GLD_U32(VA_SLOT(V, q), 4), GLD_U32(V, VA_VBO(V, q)), (const void *)r,
+                        (r && (unsigned long)r > 0x10000) ? r[0] : 0UL);
+            }
+            gl_note("\n");
+        }
+        if (V && (p->geom_fmt & QGPU_VF_GEN(3)) && gen3_probed < (cmrprobe ? cmrprobe : 8)) {
             const unsigned long *g0 = (const unsigned long *)GLD_U32(VA_SLOT(V, 16), 0);
             const unsigned long *g1 = (const unsigned long *)GLD_U32(VA_SLOT(V, 17), 0);
             unsigned long st0 = GLD_U32(VA_SLOT(V, 16), 4) / 4;
@@ -11223,6 +11251,13 @@ static long a_strip(void *ctx, void *verts, long n, long flags)
         pthread_mutex_unlock(&G.mu);
         return 0;
     }
+    if (p && cmr_probe()) {
+        static long k;
+        if (k++ < cmr_probe())
+            gl_note("REPLI a_strip ctx %p n %ld : état %d cassé %d qctx %ld %lux%lu bits %lu\n", ctx, n,
+                    (int)G.state, (int)p->broken, (long)p->qctx, GLD_U32(p->ctx, CTX_WIDTH),
+                    GLD_U32(p->ctx, CTX_HEIGHT), GLD_U32(p->ctx, CTX_COLOR_BITS));
+    }
     if (p && !apple_batch_ok(p, verts, 0, n))
         return apple_guard(p, ctx, flags, AK_STRIP, verts, 0, 0, n);
     real = p ? (proc4)fallback(p, PROC_RenderTriangleStrip, 1, 1) : 0;
@@ -13545,6 +13580,15 @@ void pomppc_context_created(void *ctx)
             pomppc_log("POMPPC: plus d'identifiant de contexte qgpu : contexte logiciel\n");
         }
     }
+    {
+        PCtx *q;
+        int live = 0;
+        for (q = G.list; q; q = q->next)
+            live += q->qctx >= 0;
+        if (p->qctx < 0 || cmr_probe())
+            gl_note("contexte créé %p : qctx %ld (%d contexte(s) hôte déjà vivants, %d par client)\n",
+                    ctx, (long)p->qctx, live, (int)QGPU_CLIENT_CTX_IDS);
+    }
     p->next = G.list;
     G.list = p;
     pthread_mutex_unlock(&G.mu);
@@ -14014,6 +14058,22 @@ static void caps_extensions(unsigned char *cfg)
     }
     if (G.xbar)
         w0 |= 1UL << 2;                 /* GL_ARB_texture_env_crossbar (v12) */
+    /* 26/09 : GL_APPLE_vertex_array_range (bit 47) et sa limite (cfg+0x8c,
+       0xFFFFF comme les pilotes matériels, 0 chez Apple). IndirectX (Colin
+       McRae) garde DEUX copies de chaque tampon de sommets D3D : celle que le
+       jeu verrouille (+0x38) et la copie « privée » (+0x3c) que lisent les
+       dessins sous programme de sommets. Seul l'Unlock du chemin VAR recopie
+       l'une dans l'autre ; sans l'extension, la copie privée reste le malloc
+       jamais écrit (zéros, ou pointeurs de liste libre) : c'était la
+       géométrie éclatée (docs/re/cmr-var.md). GLEngine prend alors
+       _gleDrawArraysOrElements_VAR_Exec → RenderVertexArray (+0x70), que le
+       plugin tient (geom_render_array) : lecture synchrone de la plage, donc
+       glFlushVertexArrayRangeAPPLE / glFinishObjectAPPLE n'ont rien à
+       attendre. POMPPC_GL_VAR=0 : ne pas l'annoncer (comparaison). */
+    if (!(getenv("POMPPC_GL_VAR") && getenv("POMPPC_GL_VAR")[0] == '0')) {
+        w1 |= 1UL << (47 - 32);
+        GLD_U32(cfg, 0x8c) = 0xFFFFF;   /* GL_MAX_VERTEX_ARRAY_RANGE_ELEMENT_APPLE */
+    }
     /* v16 : programmes ARB. GL_ARB_vertex_program est déjà annoncé par Apple ;
        GL_ARB_fragment_program (bit 15, docs/re/version-extensions.md §4) ne
        l'est que si l'hôte compile. Les LIMITES (cfg+0xec.., relevé
