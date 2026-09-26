@@ -13,6 +13,10 @@ et dans `docs/`.
   dessin texturé tant que le fichier manquait (DOOM 3 77 → 139 ms/image). DOOM 3 plein écran
   déclencheur armé 64,2 ms/image contre 62,8 sans, image juste : la matrice passe à **un
   lancement par cellule** par défaut (`--deux-passes` pour un plugin plus ancien).
+  Tour complet en une passe avec ce plugin (`20260926-1527`, 23 min) : **8 vertes sur 11**
+  (Marble Blast plein écran 9,9 ms/image, Zenerchi 4,1, DOOM 3 63,8 / 63,6, Prey plein
+  écran 72,7, UT2004 27,8 / 27,6, Warcraft III 17,3) ; rouges : Marble Blast fenêtre
+  (connu), Prey fenêtre (capture hors du vidage, vert aux deux reprises, TODO §7).
 - **Fin de cinématique de DOOM 3 à seuil relatif** (26/09) : avec `x-fp-inline` le jeu tourne
   à ~63 ms/image et la règle à 65 ms/image fixe ne trouvait plus la scène (matrice
   `20260926-1333` rouge). S = 0,8 × le niveau lu sur les 400 dernières images, tranches

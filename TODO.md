@@ -250,9 +250,13 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
 - [ ] **A3, suites** (harnais fait le 26/09 : `tools/matrice/`, `docs/matrice-jeux.md`) :
       porter Colin McRae (`tools/guest/cycle.sh` : touches jusqu'en course, arrêt par le stub
       GDB) ; Zenerchi en plein écran et Warcraft III en fenêtre (réglage à trouver, sinon
-      clic par System Events) ; ramener un tour à ~30 min (mesure et preuve dans le même
-      lancement une fois le déclencheur corrigé, §2). Épreuve : plus de cellule « non
-      automatisé » sauf RTCW absent.
+      clic par System Events). Tour en une passe fait (26/09, ~23 min). Épreuve : plus de
+      cellule « non automatisé » sauf RTCW absent.
+- [ ] **Prey en fenêtre : capture hors de l'intervalle vidé, 1 tour sur 3** (26/09, tour
+      `20260926-1527` rouge, `1551` et `1553` verts) : le rejeu (images 718-723) est juste
+      contre la référence, mais la capture montre un autre moment de la cinématique scriptée
+      (7 img/s affichés contre 10). À comprendre : présentation en fenêtre en retard sur le
+      vidage, ou attente `dump_attente` trop courte. Épreuve : dix tours Prey fenêtre verts.
 - [ ] **A5 (scripts) — reste** : `tssh.sh`, `cycle.sh`, `killgame.py` sont dans
       `tools/guest/` (26/09) ; `.run/cmr/` n'a plus que des données. Reste `d3run.sh` à
       appuyer sur `tools/guest/tssh.sh`.
