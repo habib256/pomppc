@@ -119,8 +119,8 @@ tombent hors du dessin (la lecture de `gltest` part du haut de l'image). `arbvp0
 
 Le rejeu natif (le flux envoyé à l'hôte) montre la spéciale juste ; la capture de la VM au même
 moment montre une image noire et blanche aux bonnes formes (`.run/cmr/r14/vm.png`). Chaque
-image, le jeu dessine dans des contextes hors écran (`attach kind 80`, 400×300, 400×300,
-200×150, rendus par Apple : `-> 0`) et échantillonne une texture **rectangle**
+image, le jeu rattache trois drawables hors écran (`attach kind 80 -> 0`, 400×300, 400×300,
+200×150 ; à confirmer : qui les rend) et échantillonne une texture **rectangle**
 (`fallback tex-target c/700d700` : masque 0xc = rectangle + 2D) — rendu vers texture d'IndirectX
 (`aglSurfaceTexture`, clé `RenderTargetMethod`). Ces lots et les échanges se replient chez Apple
 (~2 800 replis en deux minutes, `frames.csv`), qui ne sait pas les programmes de fragments :

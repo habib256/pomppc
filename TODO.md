@@ -236,8 +236,7 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
       combineur mal lues et textures 79/120 échangées entre les unités 0 et 1.
 - [ ] **Colin McRae, rendu vers texture** (26/09, `docs/re/cmr-var.md` §6) : la géométrie est
       juste (rejeu natif d'un vidage de course : spéciale, voiture, brouillard), mais à chaque
-      image le jeu dessine dans trois contextes hors écran (400×300, 400×300, 200×150, rendus
-      par Apple) et échantillonne une texture **rectangle** (`fallback tex-target c` : masque
+      image le jeu rattache trois drawables hors écran (400×300, 400×300, 200×150) et échantillonne une texture **rectangle** (`fallback tex-target c` : masque
       rectangle + 2D) — ~2 800 replis en deux minutes ; la VM présente l'image d'Apple (noire
       et blanche, sans programmes de fragments). Étendre le protocole : textures rectangle et
       surface hors écran comme texture (`aglSurfaceTexture`, clé IndirectX
