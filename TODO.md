@@ -17,7 +17,7 @@ réorganisation par domaine est dans l'historique git (commit précédant celui 
 | Chantier | Domaine | État | Preuve qui le fermera |
 |---|---|---|---|
 | Flottant scalaire (`fmuls`, `fmadds`, drapeaux FPSCR) | TCG (§4) | **fait, allumé par défaut le 26/09** (`tcg/0007`, `x-fp-inline`) : DOOM 3 74,4 → 65,1 ms/image (−12,5 %), `docs/tcg-g4.md` §15.9 ; binaire de référence reconstruit | **fermé** : matrice DOOM 3 + Prey verte sur le nouveau binaire (26/09, `20260926-1452`, `20260926-1333`) |
-| Lots 4 et 5 du verdict unique | Plugin (§2) | à faire | R5 puis `STATECHECK=1` à zéro ; `sample` DOOM 3 comparé à `sample-nat.txt` |
+| Verdict unique : mémoire des unités et des textures, lots 4 et 5 | Plugin (§2) | **fait le 26/09** (plugin `20260926-memo`, drapeaux allumés) : DOOM 3 −3,5 ms/image, Prey inchangé ; R5 : tout ce que lit `compute_state` pose un bit ; option A classée (GLEngine 1,1-2,6 %) | **fermé** : 0 écart `VERDICTCHECK`/`STATECHECK` sur six jeux, `docs/re/verdict-lots-4-5.md`, matrice |
 | Matrice de jeux automatisée (A3) | Outils (§7) | **harnais fait** (26/09) : `tools/matrice/matrice.py`, 9 vertes sur 11 cellules automatisées, un lancement par cellule depuis le déclencheur lu une fois par image (26/09) | suites : Colin McRae, Zenerchi plein écran, Warcraft III fenêtre |
 
 **Ordre de fond** (« C : le contrat d'abord », 24/09/2026) : figer le contrat (protocole
@@ -27,8 +27,8 @@ unique, §3), en faire le harnais (A3, §7), puis optimiser et élargir dessous 
 |---|---|
 | Protocole | **v19** (`qgpu_abi.h` kext, `qgpu_proto.h` device + plugin) ; 913 tests natifs |
 | QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 26/09 avec `patches/tcg/0001-0004`, `0006` et `0007` (**allumés par défaut** : `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0` les éteignent) ; binaire précédent en `*.avant-fpinline` |
-| Invité quotidien (`tiger.qcow2`) | kext v19 ; plugin **`20260924-liste`** ; lanceurs `~/doom3*.command`, `~/prey*.command` (dont `-fs` plein écran, `-env` lisant `~/lot3.env`), `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
-| Profils de référence | `.run/d3/sample-nat.txt`, `.run/prey/sample.txt` ; TCG : `bench/tcg/` (non versionné) |
+| Invité quotidien (`tiger.qcow2`) | kext v19 ; plugin **`20260926-memo`** ; lanceurs `~/doom3*.command`, `~/prey*.command` (dont `-fs` plein écran, `-env` lisant `~/lot3.env`), `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
+| Profils de référence | plugin : `bench/plugin/ab2-B*/{d3,prey}-fen/mesure/sample.txt` (26/09, plugin `20260926-memo`, `tools/re/sampleplug.py`) ; anciens `.run/d3/sample-nat.txt`, `.run/prey/sample.txt` ; TCG : `bench/tcg/` (non versionné) |
 | VM | redémarrages libres autorisés par l'utilisateur ; **un seul agent dessus à la fois** |
 
 **Avant et après un lot qui touche le plugin, le device ou le cœur** : `tools/matrice/matrice.py`
@@ -56,7 +56,7 @@ Les trois preuves sont produites par `tools/matrice/matrice.py` (`docs/matrice-j
 rejeu natif du vidage identique à la capture de la VM (0,00 % d'écart partout au 26/09) et
 rejeu de la référence validée à l'œil, replis de `frames.csv` (en fenêtre, 2 par 90 images
 admis : rafraîchissement voulu de la fenêtre), ms/image sans le déclencheur de vidage.
-Dernier tour : `bench/matrice/20260926-0923/tableau.md`.
+Dernier tour : `bench/matrice/20260926-1756/tableau.md` (plugin `20260926-memo`, 9 vertes sur 10 automatisées, hôte chargé).
 
 | Jeu | Famille | Fenêtre | Plein écran | Vitesse à scène fixe (26/09) | Manque |
 |---|---|---|---|---|---|
@@ -75,28 +75,23 @@ Dernier tour : `bench/matrice/20260926-0923/tableau.md`.
 ## 2. Plugin GL de l'invité (`guest/gldriver/`)
 
 Le plugin lit l'état de GLEngine, décide du verdict (hôte ou repli), empaquette et envoie.
-Verdict unique : lots 0 à 3 faits (CHANGELOG, `docs/re/etude-court-circuit-glengine.md`,
-`docs/re/bloc-changements-r4.md`) ; DOOM 3 100 → ~86 ms/image par le plugin seul.
+Verdict unique : lots 0 à 5 faits (CHANGELOG, `docs/re/etude-court-circuit-glengine.md`,
+`docs/re/bloc-changements-r4.md`, `docs/re/verdict-lots-4-5.md`) ; DOOM 3 100 → ~86 ms/image
+par le plugin seul (lots 1-3), puis −5 % (mémoire des unités, lot 4). Option A (crocheter la
+table de dispatch) classée : GLEngine < 3 % du fil principal. Ce qui reste du plugin sous
+`glDrawElements` (~32 % de DOOM 3) n'a plus de poste au-dessus de 4 % : la suite est A4
+(§3) et TCG (§4).
 
 **En cours / ensuite**
 
-- [ ] **Mémoire par texture et par époque** pour `geom_texture_ok` (`texture_uploadable`,
-      `intern_tex`/`find_tex`, `tex_params_ok`) et `texture_ok`, qui refont le même travail :
-      c'est ce qui reste des dispatches recalculés (ceux qui lient des textures). Épreuve :
-      `VERDICTCHECK=1` à zéro écart, `sample` du dispatch en baisse. Piste voisine :
-      `geom_format` appelle `texturing_on` par unité (N², 22 éch.).
-- [ ] **Lot 4 — `compute_state` sauté**, seulement si le relevé R5 prouve que tout ce qu'il lit
-      pose un bit du bloc (matrices en particulier). Sinon abandonner. Épreuve :
-      `POMPPC_GL_STATECHECK=1` à zéro.
-- [ ] **Lot 5 — bilan** : nouveau `sample` de DOOM 3 à la scène de `sample-nat.txt` ; l'option A
-      (crocheter la table de dispatch) est classée si GLEngine reste sous 5 %.
-- [ ] **`frames.csv` vidé toutes les 5 s** : la matrice ne peut pas s'en servir comme
-      horloge (elle lit les en-têtes du vidage). Un `fflush` à l'image quand
-      `POMPPC_GL_DUMP_TRIGGER` est posé suffirait. Petit, avec le précédent.
-- [ ] **`VERDICTCHECK=1` sur Warcraft III, UT2004, Colin McRae** (dessins sans dispatch
-      possibles, jamais exercés par DOOM 3 et Prey). Épreuve : zéro écart.
+- [ ] **`VERDICTCHECK=1` sur Colin McRae** (Warcraft III et UT2004 faits le 26/09 : 0 écart,
+      `docs/re/verdict-lots-4-5.md` §5). Épreuve : zéro écart.
+- [ ] **La matrice prend `frames.csv` pour horloge de la preuve** : le plugin `20260926-memo`
+      le vide à chaque image quand `POMPPC_GL_DUMP_TRIGGER` est posé ; `matrice.py` lit encore
+      les en-têtes du vidage (§7). Petit.
 - [ ] **Replis à retirer** une fois la mesure en jeu faite par l'utilisateur :
-      `POMPPC_GL_VERDICT=0`, `POMPPC_GL_WHITELIST=0`.
+      `POMPPC_GL_VERDICT=0`, `POMPPC_GL_WHITELIST=0`, `POMPPC_GL_TEXMEMO=0`,
+      `POMPPC_GL_STSKIP=0`.
 
 **Plus tard**
 

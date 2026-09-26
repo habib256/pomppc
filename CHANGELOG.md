@@ -8,6 +8,27 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Verdict unique : mémoire des unités et des textures, lot 4, lot 5** (plugin
+  `20260926-memo`, `docs/re/verdict-lots-4-5.md`). `POMPPC_GL_TEXMEMO` (défaut 1) : relevé
+  des unités de texture fait une fois par verdict (`texturing_on`, `geom_texture_ok`,
+  `texture_ok`, `geom_format` sans N²), `PTex` gardé par unité entre verdicts tant qu'aucune
+  texture n'est détruite, `texture_uploadable` gardée bonne par texture tant qu'aucun crochet
+  ne l'a touchée (`hook_gen`). Relevé R5 (`gltest r4`, 50 étapes `R5`) : tout ce que lit
+  `compute_state` pose un bit du bloc `gctx+0x310` (il ne lit aucune matrice) ;
+  `POMPPC_GL_STSKIP` (défaut 1) saute `compute_state` quand aucun dispatch n'a porté un bit
+  qu'il lit (`st_mask`), et n'envoie que les clés des unités et des programmes (44 % des
+  dessins de DOOM 3 et Prey). Contrôles `VERDICTCHECK=1` (lignes `TEXMEMO`) et
+  `POMPPC_GL_STATECHECK=1` (lignes `STATE`) : **0 écart** sur DOOM 3, Prey, Marble Blast,
+  Zenerchi, UT2004, Warcraft III ; 27 scènes `gltest` identiques. A/B entrelacé, deux
+  tours : **DOOM 3 −3,5 ms/image** (64,6 → 61,2 ; 70,2 → 66,7), Prey inchangé (bruit ±2).
+  Lot 5 : `pomppc_geom_dispatch` 16,5 % (`sample-nat.txt`) → 12,1 % (départ) → 10,4 % du fil
+  principal, GLEngine 1,1-2,6 % : **option A classée**. Au passage : `frames.csv` vidé à
+  chaque image sous `POMPPC_GL_DUMP_TRIGGER` ; `matrice.py --env K=V --sample S` ;
+  `charge_hote` compte toute machine `mac99` autre que la nôtre (il comptait un shell et
+  manquait la copie renommée de l'agent TCG) ; matrice complète `20260926-1756` : 9 vertes
+  sur 10 automatisées (Marble Blast fenêtre, connu), images à 0,00 % ;
+  `tools/re/sampleplug.py` (profil `sample` de l'invité résumé par postes du plugin),
+  `tools/guest/jobs/gt5.sh`.
 - **Déclencheur de vidage lu une fois par image** (plugin, 26/09) : `dump_trigger()` remplace
   les `access()` du vidage, de la sonde cube et de `draw_probe`, faits à chaque soumission ou
   dessin texturé tant que le fichier manquait (DOOM 3 77 → 139 ms/image). DOOM 3 plein écran
