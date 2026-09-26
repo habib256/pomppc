@@ -8,6 +8,10 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Sorties indirectes en ligne allumées par défaut** (26/09 au soir, mot de l'utilisateur) :
+  `run_tiger.sh` passe `x-ret-inline=on,x-jc-idx=on` sauf `RETINLINE=0` / `JCIDX=0` ; QEMU de
+  référence reconstruit avec `tcg/0008` (précédent en `*.avant-retinline`). DOOM 3 65,7 →
+  61,2 ms/image à l'A/B.
 - **Sorties indirectes des blocs sans helper sur le chemin courant** (`patches/tcg/0008`,
   `x-ret-inline` + `x-jc-idx`, **éteints par défaut**, `RETINLINE=1 JCIDX=1 ./run_tiger.sh` ;
   `docs/tcg-g4.md` §16, 26/09) : à chaque `blr`, `bctr`, `bclr`/`bcctr`, branchement vers une

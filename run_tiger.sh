@@ -29,9 +29,9 @@
 #   FPINLINE=0 ./run_tiger.sh # coupe le flottant scalaire simple (fmuls, fmadds, fcmpu…) sans ses
 #                             # deux helpers dans le cas courant (x-fp-inline, tcg/0007, allumé
 #                             # par défaut, docs/tcg-g4.md §15) ; FPVERIFY=1 : mode preuve
-#   RETINLINE=1 JCIDX=1 ./run_tiger.sh  # sorties indirectes (blr, bctr…) : bloc suivant cherché en
-#                             # ligne, cache de sauts vidé par mmu_idx (tcg/0008, éteints par défaut,
-#                             # docs/tcg-g4.md §16) ; RETVERIFY=1 : mode preuve
+#   RETINLINE=0 JCIDX=0 ./run_tiger.sh  # coupe les sorties indirectes (blr, bctr…) cherchées en
+#                             # ligne et le cache de sauts vidé par mmu_idx (tcg/0008, allumés par
+#                             # défaut, docs/tcg-g4.md §16) ; RETVERIFY=1 : mode preuve
 #   JITNEAR=0 ./run_tiger.sh  # laisse macOS placer le tampon du JIT (défaut : dans la fenêtre de 4 Gio
 #                             # du texte de QEMU, x-jit-near, tcg/0006 : supprime le régime lent, docs/tcg-g4.md §14) ;
 #                             # TCG_OPTS=… propriétés brutes de l'accélérateur
@@ -262,17 +262,19 @@ fi
 # --- Sorties indirectes des blocs (blr, bctr…) : recherche du bloc suivant en
 # ligne (x-ret-inline) et cache de sauts vidé par mmu_idx (x-jc-idx),
 # patches/tcg/0008, docs/tcg-g4.md §16 --- mêmes blocs choisis que
-# helper_lookup_tb_ptr. Éteints par défaut : RETINLINE=1, JCIDX=1 les allument ;
+# helper_lookup_tb_ptr. Allumés par défaut depuis le 26/09/2026 (DOOM 3 65,7 →
+# 61,2 ms/image, docs/tcg-g4.md §16) : RETINLINE=0, JCIDX=0 les éteignent ;
 # RETVERIFY=1 ajoute le mode preuve (x-ret-verify : chaque bloc pris dans le
 # cache de sauts comparé à une recherche physique complète, bilan sur stderr).
-for _p in "RETINLINE x-ret-inline SORTIES-EN-LIGNE" "JCIDX x-jc-idx CACHE-DE-SAUTS-PAR-MMU" \
-          "RETVERIFY x-ret-verify SORTIES-VÉRIFIÉES"; do
+for _p in "RETINLINE x-ret-inline SORTIES-EN-LIGNE 1" "JCIDX x-jc-idx CACHE-DE-SAUTS-PAR-MMU 1" \
+          "RETVERIFY x-ret-verify SORTIES-VÉRIFIÉES 0"; do
   set -- $_p
-  if [ "${!1:-0}" != 0 ]; then
+  _v="${!1:-$4}"
+  if [ "$_v" != 0 ]; then
     if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "$2=on"; then
       CPU_SPEC="$CPU_SPEC,$2=on"
       MODE="$MODE + $3"
-    else
+    elif [ -n "${!1:-}" ]; then
       echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0008)." >&2
       MODE="$MODE + $3 DEMANDÉ MAIS INDISPONIBLE"
     fi

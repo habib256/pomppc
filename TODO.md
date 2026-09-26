@@ -27,7 +27,7 @@ unique, §3), en faire le harnais (A3, §7), puis optimiser et élargir dessous 
 | Installé | État |
 |---|---|
 | Protocole | **v19** (`qgpu_abi.h` kext, `qgpu_proto.h` device + plugin) ; 913 tests natifs |
-| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 26/09 avec `patches/tcg/0001-0004`, `0006` et `0007` (**allumés par défaut** : `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0` les éteignent) ; binaire précédent en `*.avant-fpinline` |
+| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 26/09 au soir avec `patches/tcg/0001-0004`, `0006`, `0007` et `0008` (**allumés par défaut** : `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0`, `RETINLINE=0`, `JCIDX=0` les éteignent ; `tcg/0008` depuis le 26/09 au soir) ; binaire précédent en `*.avant-retinline` |
 | Invité quotidien (`tiger.qcow2`) | kext v19 ; plugin **`20260926-memo`** ; lanceurs `~/doom3*.command`, `~/prey*.command` (dont `-fs` plein écran, `-env` lisant `~/lot3.env`), `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
 | Profils de référence | plugin : `bench/plugin/ab2-B*/{d3,prey}-fen/mesure/sample.txt` (26/09, plugin `20260926-memo`, `tools/re/sampleplug.py`) ; anciens `.run/d3/sample-nat.txt`, `.run/prey/sample.txt` ; TCG : `bench/tcg/` (non versionné) |
 | VM | redémarrages libres autorisés par l'utilisateur ; **un seul agent dessus à la fois** |
