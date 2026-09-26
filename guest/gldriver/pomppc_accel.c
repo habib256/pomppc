@@ -13776,6 +13776,13 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
         return (void *)proc_dead;
     }
     target = p->real[slot];
+    /* Vidage autonome (outil, POMPPC_GL_DUMP_TRIGGER) : relecture des textures
+       et surfaces hôte dès la PREMIÈRE procédure après le déclenchement, pas
+       à l'échange suivant — DOOM 3 (27/09) copie dans sa texture 491 (COPY_TEX,
+       n'existe que sur l'hôte) avant l'échange : le rejeu ne l'avait pas
+       encore créée (BAD_ARG). */
+    if (G.dump_rb_pending && G.state > 0 && !p->broken && p->qctx >= 0)
+        dump_readback_textures(p);
     /* Apple's RenderVertexArray can be only `li r3,0; blr`: a refusal,
        not a software draw. Synchronizing color/depth for that probe makes
        every indexed draw read back the surface, then upload it again in
@@ -13796,9 +13803,6 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
         stats_frame(p->ctx);
     /* v20 : l'échange change le tampon avant — textures de surface ; un
        drawable caché s'arrête là (son image n'existe que sur l'hôte). */
-    if (slot == PROC_Swap60 && G.state > 0 && !p->broken && G.dump_rb_pending &&
-        p->qctx >= 0)
-        dump_readback_textures(p);      /* vidage autonome (outil) */
     if (slot == PROC_Swap60 && G.state > 0 && !p->broken)
         surftex_swapped(p);
     if (slot == PROC_Swap60 && G.state > 0 && !p->broken && p->surf >= 0 &&

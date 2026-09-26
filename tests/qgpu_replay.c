@@ -76,6 +76,7 @@ int main(int argc, char **argv)
     static uint32_t skc[256][QGPU_SK_COUNT];
     uint32_t *sk = skc[0];
     static uint8_t ctx_seen[256], surf_seen[256], ctx_has_surf[256];
+    int surf_txt = 0;       /* surfaces.txt lu : les liaisons contexte → surface sont connues */
     static uint32_t tex_hint[QGPU_MAX_TEX];         /* v20 : cible lue dans un SURF_TEX */
 
     if (!shmem || !vram || !qgpu_core_init(&c, backend, shmem, SHMEM)) {
@@ -198,6 +199,7 @@ int main(int argc, char **argv)
                         qc, sid, sw, sh, st0);
             }
             fclose(sf);
+            surf_txt = 1;
         }
     }
     uint32_t ndraw_frame = 0, ndraw_last_frame = 0xffffffffu;
@@ -365,8 +367,14 @@ int main(int argc, char **argv)
             /* contexte lié sans surface dans le vidage : la surface était liée
                avant. On la crée (id de la présentation) et on la lie NOUS-MÊMES
                dans le prologue, après un CTX_BIND du même contexte. */
+            /* Avec surfaces.txt, les liaisons sont connues : ne rien relier
+               d'après la surface présentée (27/09 : Marble Blast, Zenerchi —
+               last_present_surf vaut 1 avant la première présentation, le
+               contexte 0 était relié à une surface 1 inventée, et tout le
+               vidage y dessinait ; image unie). */
             if (bound_ctx < 256 && (!ctx_has_surf[bound_ctx] ||
-                                    (last_present_surf < 256 && !surf_seen[last_present_surf])) &&
+                                    (!surf_txt && last_present_surf < 256 &&
+                                     !surf_seen[last_present_surf])) &&
                 np + 9 <= 4090) {
                 uint32_t sid = last_present_surf < 256 ? last_present_surf : 1;
                 if (!surf_seen[sid]) {
