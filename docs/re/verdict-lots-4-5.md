@@ -131,7 +131,7 @@ clip fogz blendc stencil lit texgen` du lot 4, `r4` avec R5) : sortie et emprein
 de chaque image **identiques** drapeaux éteints, drapeaux allumés, et drapeaux
 allumés sous `VERDICTCHECK=1 STATECHECK=1` ; 0 écart `VERDICT`, `TEXMEMO`,
 `STATE`. (`clip` 1 échec, `stencil` 3, `tex14` 1 : les mêmes dans les trois
-modes, antérieurs à ce lot ; `lit` et `texgen` se jouent en `256 256` comme
+modes, donc drapeaux éteints aussi : pas de ce lot ; `lit` et `texgen` se jouent en `256 256` comme
 `tex13`.)
 
 **Jeux sous contrôle** (`TEXMEMO=1 STSKIP=1 VERDICTCHECK=1 STATECHECK=1`,
@@ -144,8 +144,13 @@ modes, antérieurs à ce lot ; `lit` et `texgen` se jouent en `256 256` comme
 | textures gardées bonnes (contrôlées) | 2 911 704 par 500 images | 1 440 295 |
 | `compute_state` sautés / calculés | 284 589 / 362 787 (44 %) | 112 261 / 142 735 (44 %) |
 
-`check-3` : les mêmes contrôles sur Marble Blast, Zenerchi, UT2004, Warcraft III
-(§7 plus bas).
+Mêmes contrôles sur les autres jeux automatisés (`bench/plugin/check-3`) : Marble
+Blast (fenêtre et plein écran), Zenerchi (fenêtre), UT2004 (fenêtre et plein
+écran), Warcraft III (plein écran) — **zéro écart** `VERDICT`, `TEXMEMO`,
+`STATE`. UT2004 : 5,7 millions de relevés repris et 98 600 `compute_state`
+sautés par 500 images ; Marble Blast (Begin/End) : 100 000 sautés sur 114 000 ;
+Warcraft III : 39 600 sur 87 600. C'est aussi le `VERDICTCHECK=1` que le TODO
+demandait sur Warcraft III et UT2004 (Colin McRae reste à faire).
 
 **A/B entrelacé**, même binaire, `TEXMEMO=0 STSKIP=0` (A) contre `=1` (B), fenêtre,
 deux tours (`bench/plugin/ab1-*`, `ab2-*` ; hôte chargé à 2-3 au second tour,
@@ -173,6 +178,19 @@ Profils agrégés (quatre `sample` de 10 s par mode, ~3 400 échantillons chacun
 | └ `send_state` | 4,1 % | 3,9 % | 2,2 % | 2,0 % |
 | └ `compute_state` | 3,0 % | 2,4 % | 1,7 % | 1,4 % |
 | GLEngine, propre sous `glDrawElements` | 1,4 % | 1,6 % | 1,3 % | 1,2 % |
+
+**Matrice complète** avec le plugin installé, drapeaux allumés par défaut
+(`bench/matrice/20260926-1756`, 24 min, un lancement par cellule) : **9 vertes sur
+10 automatisées** — Marble Blast plein écran, Zenerchi, DOOM 3 et Prey (fenêtre et
+plein écran), UT2004 (les deux), Warcraft III plein écran ; images justes à
+0,00 % partout (rejeu = VM et référence). Seule rouge : Marble Blast en fenêtre
+(défaut connu, deux replis par image, TODO §6). Vitesses de ce tour (DOOM 3 68,4 /
+66,5, Marble Blast 11,2, Zenerchi 5,6, contre 63,8 / 63,6, 9,9, 4,1 au tour
+`20260926-1527`) : hôte chargé toute la soirée (charge 2,1-3,9) et, à partir de
+18 h 17, la copie de QEMU de l'agent TCG (`qret1564`, 97 % d'un cœur) — que
+`charge_hote` ne voyait pas (corrigé : toute machine `mac99` autre que la nôtre
+compte). Marble Blast et Zenerchi, que ce lot ne touche pas, ralentissent autant :
+la vitesse se lit dans l'A/B entrelacé, pas dans ce tour.
 
 Le lot 4 ne rapporte que ce qu'il pouvait : `compute_state` n'est sauté que dans
 44 % des dessins (les volumes d'ombre et chaque nouvelle lumière changent pochoir,

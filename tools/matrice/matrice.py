@@ -21,6 +21,8 @@ et range, pour chaque cellule, les trois preuves du TODO §1 :
     tools/matrice/matrice.py --valider d3-fen   marque la référence comme validée
     tools/matrice/matrice.py --analyse DOSSIER  refait l'analyse d'un tour rangé
     tools/matrice/matrice.py --reprendre DOSSIER -j prey,ut -m pe   complète un tour
+    tools/matrice/matrice.py -j d3 -m fen --sans-vidage --env POMPPC_GL_X=0 --sample 10
+                                                A/B d'un drapeau, `sample` dans l'invité
 
 Sorties : bench/matrice/<horodatage>/ (tableau.md, resultats.csv, une
 cellule par dossier) dans le dépôt principal ; bench/ n'est pas versionné.

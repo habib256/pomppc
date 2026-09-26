@@ -189,11 +189,20 @@ class Hote:
         """Autres QEMU en marche sur l'hôte et charge moyenne : les mesures de
         vitesse sont bruitées quand une autre VM tourne (autre agent)."""
         try:
-            ps = subprocess.run(["pgrep", "-fl", "qemu-system"], capture_output=True, text=True).stdout
-            # seulement les exécutables qemu-system* : `pgrep -f` attrape aussi un
-            # shell dont la ligne de commande contient « qemu-system » (26/09)
-            autres = [l for l in ps.splitlines() if "tiger.qcow2" not in l and len(l.split()) > 1
-                      and os.path.basename(l.split()[1]).startswith("qemu-system")]
+            # toute machine mac99 (les copies de QEMU des autres agents s'appellent
+            # aussi qret…, qsr…), sauf la nôtre ; pas les shells dont la ligne de
+            # commande cite QEMU (26/09 : `pgrep -f qemu-system` comptait un zsh et
+            # manquait un QEMU renommé)
+            ps = subprocess.run(["ps", "-Ao", "pid=,comm=,args="], capture_output=True,
+                                text=True).stdout
+            autres = []
+            for l in ps.splitlines():
+                p = l.split(None, 2)
+                if len(p) < 3 or "tiger.qcow2" in p[2] or "mac99" not in p[2]:
+                    continue
+                if os.path.basename(p[1]) in ("zsh", "bash", "sh", "python3", "Python", "pgrep"):
+                    continue
+                autres.append(l)
             la = subprocess.run(["sysctl", "-n", "vm.loadavg"], capture_output=True, text=True).stdout
             la = la.strip("{} \n").split()[0]
         except OSError:

@@ -10,6 +10,10 @@ tools/matrice/matrice.py                     # tout : jeux automatisés, deux mo
 tools/matrice/matrice.py -j mb,zen -m fen    # un sous-ensemble (jeux, modes)
 tools/matrice/matrice.py --deux-passes       # mesure puis preuve séparées (plugin d'avant le 26/09 après midi)
 tools/matrice/matrice.py --sans-vidage       # vitesse et replis seuls
+tools/matrice/matrice.py -j d3 -m fen --sans-vidage --env POMPPC_GL_STSKIP=0 --sample 10
+                                             # A/B d'un drapeau du plugin, `sample` de 10 s dans
+                                             # l'invité après la fenêtre (sample.txt de la cellule ;
+                                             # tools/re/sampleplug.py le résume), --sortie DOSSIER
 tools/matrice/matrice.py --liste             # jeux et modes connus
 tools/matrice/matrice.py --valider d3-pe     # référence d'image vue et validée à l'œil
 tools/matrice/matrice.py --analyse bench/matrice/<tour>   # refaire l'analyse d'un tour rangé
@@ -215,7 +219,9 @@ ne jugent pas la vitesse absolue.
   Warcraft III 19 → 44. **Corrigé le 26/09** (`dump_trigger`, une fois par image) : un
   lancement par cellule.
 - **`frames.csv` n'est écrit que toutes les 5 s** (plugin) : inutilisable comme horloge
-  fine ; la matrice lit les en-têtes du vidage. TODO §2.
+  fine ; la matrice lit les en-têtes du vidage. **Plugin corrigé le 26/09**
+  (`20260926-memo` : vidé à chaque image quand `POMPPC_GL_DUMP_TRIGGER` est posé) ; la
+  matrice n'en profite pas encore. TODO §2.
 - **Marble Blast en fenêtre** : fenêtre de 1024×768 quelle que soit la résolution demandée,
   recouverte par la barre de menus, donc sans présentation directe : deux replis par image
   (Swap60, Swap58), ~38 ms/image au lieu de 12 en plein écran. TODO §6.
