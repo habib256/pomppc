@@ -123,6 +123,12 @@ chaque lot), `glEnable(VP)`, `glDrawElements(TRIANGLE_STRIP, n, UNSIGNED_SHORT)`
 
 ## 3 ter. Colin McRae en course : les tableaux sont libérés avant le déroulage
 
+> **Résolu le 26/09/2026 — l'hypothèse ci-dessous était fausse** (`cmr-var.md`). Les tableaux
+> sont déjà vides **avant** le `glDrawElements` du jeu (gltrap `POMPPC_GLTRAP_MEM`) : IndirectX
+> ne remplit la copie privée de ses tampons de sommets, seule lue sous programme de sommets, que
+> si le rendu annonce `GL_APPLE_vertex_array_range`. Le plugin `20260926-var` l'annonce (bit 47).
+> Le texte d'origine est gardé pour l'historique.
+
 Sondes `BEGIN gen0` (dans `geom_begin`, au début du déroulage de GLEngine) et
 `précédent relu` (le même tampon, au lot suivant), nuit du 23/09 : la mémoire
 que désigne l'emplacement générique 0 est **déjà nulle** (`0xc601000`,

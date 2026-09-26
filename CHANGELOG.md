@@ -8,6 +8,21 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Colin McRae : la géométrie éclatée résolue** (26/09 au soir, `docs/re/cmr-var.md`). Les
+  sommets étaient nuls **avant** le `glDrawElements` du jeu (gltrap `POMPPC_GLTRAP_MEM`), pas
+  relus après libération comme on le croyait : IndirectX garde deux copies de chaque tampon de
+  sommets et ne remplit la copie privée, seule lue sous programme de sommets, que si le rendu
+  annonce `GL_APPLE_vertex_array_range`. Plugin `20260926-var` : bit 47 et
+  `GL_MAX_VERTEX_ARRAY_RANGE_ELEMENT_APPLE` (`POMPPC_GL_VAR=0` pour comparer) ; GLEngine passe
+  par `RenderVertexArray`, que le plugin tient. Rejeu natif d'un vidage de course juste
+  (voiture, spéciale, brouillard) contre des éclats sans l'extension. Pour atteindre la course :
+  **32 contextes et 32 surfaces par client** (`qgpu_proto.h`, QEMU de référence reconstruit,
+  précédent `*.avant-cmr`) — la v19 n'en laissait que 4, le jeu en ouvre 12 et le 5e, rendu
+  par Apple, plantait au chargement. Scène `gltest arbvpvar` (7 échecs avant, 0 après), sondes
+  `POMPPC_GL_CMRPROBE`, gltrap (tampons, VAR, requêtes d'état, `free`). `VERDICTCHECK=1
+  STATECHECK=1` sur Colin McRae (menu, chargement, spéciale) : **0 écart** `VERDICT`, `TEXMEMO`,
+  `STATE`. Matrice `20260926-2216` : 9 vertes (Marble Blast fenêtre rouge, connu), vitesses
+  inchangées. Reste : l'image affichée est celle d'Apple (rendu vers texture rectangle, TODO §6).
 - **Sorties indirectes en ligne allumées par défaut** (26/09 au soir, mot de l'utilisateur) :
   `run_tiger.sh` passe `x-ret-inline=on,x-jc-idx=on` sauf `RETINLINE=0` / `JCIDX=0` ; QEMU de
   référence reconstruit avec `tcg/0008` (précédent en `*.avant-retinline`). DOOM 3 65,7 →

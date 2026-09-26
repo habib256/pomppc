@@ -19,6 +19,7 @@ réorganisation par domaine est dans l'historique git (commit précédant celui 
 | Flottant scalaire (`fmuls`, `fmadds`, drapeaux FPSCR) | TCG (§4) | **fait, allumé par défaut le 26/09** (`tcg/0007`, `x-fp-inline`) : DOOM 3 74,4 → 65,1 ms/image (−12,5 %), `docs/tcg-g4.md` §15.9 ; binaire de référence reconstruit | **fermé** : matrice DOOM 3 + Prey verte sur le nouveau binaire (26/09, `20260926-1452`, `20260926-1333`) |
 | Sorties indirectes (`blr`, `bctr` : `helper_lookup_tb_ptr`) | TCG (§4) | **fait, allumé par défaut le 26/09 au soir** (`tcg/0008`, `x-ret-inline` + `x-jc-idx`) : DOOM 3 65,7 → 61,2 ms/image (−6,8 %), Marble Blast +4 à +7 % (bruité) ; 34 milliards de blocs vérifiés, 0 divergence ; `docs/tcg-g4.md` §16 | matrice complète verte sur le binaire reconstruit |
 | Verdict unique : mémoire des unités et des textures, lots 4 et 5 | Plugin (§2) | **fait le 26/09** (plugin `20260926-memo`, drapeaux allumés) : DOOM 3 −3,5 ms/image, Prey inchangé ; R5 : tout ce que lit `compute_state` pose un bit ; option A classée (GLEngine 1,1-2,6 %) | **fermé** : 0 écart `VERDICTCHECK`/`STATECHECK` sur six jeux, `docs/re/verdict-lots-4-5.md`, matrice |
+| Colin McRae : géométrie éclatée | Jeux (§6) | **cause trouvée et corrigée le 26/09** (`docs/re/cmr-var.md`) : IndirectX ne remplit la copie privée de ses tampons de sommets que si `GL_APPLE_vertex_array_range` est annoncée ; plugin `20260926-var` l'annonce ; v19 à 32 contextes par client (le jeu en ouvre 12) ; rejeu de course juste | reste l'image affichée : rendu vers texture rectangle (§6) |
 | Matrice de jeux automatisée (A3) | Outils (§7) | **harnais fait** (26/09) : `tools/matrice/matrice.py`, 9 vertes sur 11 cellules automatisées, un lancement par cellule depuis le déclencheur lu une fois par image (26/09) | suites : Colin McRae, Zenerchi plein écran, Warcraft III fenêtre |
 
 **Ordre de fond** (« C : le contrat d'abord », 24/09/2026) : figer le contrat (protocole
@@ -27,8 +28,8 @@ unique, §3), en faire le harnais (A3, §7), puis optimiser et élargir dessous 
 | Installé | État |
 |---|---|
 | Protocole | **v19** (`qgpu_abi.h` kext, `qgpu_proto.h` device + plugin) ; 913 tests natifs |
-| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 26/09 au soir avec `patches/tcg/0001-0004`, `0006`, `0007` et `0008` (**allumés par défaut** : `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0`, `RETINLINE=0`, `JCIDX=0` les éteignent ; `tcg/0008` depuis le 26/09 au soir) ; binaire précédent en `*.avant-retinline` |
-| Invité quotidien (`tiger.qcow2`) | kext v19 ; plugin **`20260926-memo`** ; lanceurs `~/doom3*.command`, `~/prey*.command` (dont `-fs` plein écran, `-env` lisant `~/lot3.env`), `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
+| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 26/09 au soir avec `patches/tcg/0001-0004`, `0006`, `0007` et `0008`, puis vers 21 h avec `qgpu_proto.h` à 32 contextes et 32 surfaces par client (précédent : `*.avant-cmr`) (**allumés par défaut** : `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0`, `RETINLINE=0`, `JCIDX=0` les éteignent ; `tcg/0008` depuis le 26/09 au soir) ; binaire précédent en `*.avant-retinline` |
+| Invité quotidien (`tiger.qcow2`) | kext v19 ; plugin **`20260926-var`** (32 contextes par client : exige le QEMU reconstruit le 26/09 au soir) ; lanceurs `~/doom3*.command`, `~/prey*.command` (dont `-fs` plein écran, `-env` lisant `~/lot3.env`), `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
 | Profils de référence | plugin : `bench/plugin/ab2-B*/{d3,prey}-fen/mesure/sample.txt` (26/09, plugin `20260926-memo`, `tools/re/sampleplug.py`) ; anciens `.run/d3/sample-nat.txt`, `.run/prey/sample.txt` ; TCG : `bench/tcg/` (non versionné) |
 | VM | redémarrages libres autorisés par l'utilisateur ; **un seul agent dessus à la fois** |
 
@@ -67,7 +68,7 @@ Dernier tour : `bench/matrice/20260926-1756/tableau.md` (plugin `20260926-memo`,
 | Prey Demo | ARB2, VBO, DXT5 | **vert** | **vert** | 69,6 / 69,8 ms/image (« Fuite ») | vitesse |
 | UT2004 Demo | tableaux, VBO, S3TC | **vert** | **vert** | 29,5 / 29,0 ms/image (intro d'AS-Convoy) | arme en main noire, hors de la scène (§6) |
 | Warcraft III | tableaux | non automatisé | **vert** | 19,3 ms/image (menu) | fenêtre (§7) |
-| Colin McRae | ARB via IndirectX | non automatisé | non automatisé | — | géométrie éclatée en course (§6), portage (§7) |
+| Colin McRae | ARB via IndirectX | non automatisé | non automatisé | — | géométrie juste depuis le 26/09 (rejeu) ; l'image affichée reste celle d'Apple (rendu vers texture rectangle, §6), portage (§7) |
 | RTCW | idTech3, pipeline fixe | non automatisé | non automatisé | — | absent du disque quotidien ; quitte après 8 s (§6) |
 | Bureau (Quartz Extreme) | WindowServer | — | — | — | §5 |
 
@@ -85,8 +86,6 @@ table de dispatch) classée : GLEngine < 3 % du fil principal. Ce qui reste du p
 
 **En cours / ensuite**
 
-- [ ] **`VERDICTCHECK=1` sur Colin McRae** (Warcraft III et UT2004 faits le 26/09 : 0 écart,
-      `docs/re/verdict-lots-4-5.md` §5). Épreuve : zéro écart.
 - [ ] **La matrice prend `frames.csv` pour horloge de la preuve** : le plugin `20260926-memo`
       le vide à chaque image quand `POMPPC_GL_DUMP_TRIGGER` est posé ; `matrice.py` lit encore
       les en-têtes du vidage (§7). Petit.
@@ -235,8 +234,14 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
       l'écran redimensionné) et la mesure en combat en plein écran.
 - [ ] **UT2004, arme noire** (`docs/re/ut2004-arme-noire.md`) : trancher entre sources du
       combineur mal lues et textures 79/120 échangées entre les unités 0 et 1.
-- [ ] **Colin McRae** : GLEngine déroule des tableaux déjà libérés par IndirectX ; onze
-      reproductions `gltest arbvp0cmr` n'y arrivent pas (`docs/re/programmes-arb.md` §3 ter).
+- [ ] **Colin McRae, rendu vers texture** (26/09, `docs/re/cmr-var.md` §6) : la géométrie est
+      juste (rejeu natif d'un vidage de course : spéciale, voiture, brouillard), mais à chaque
+      image le jeu dessine dans trois contextes hors écran (400×300, 400×300, 200×150, rendus
+      par Apple) et échantillonne une texture **rectangle** (`fallback tex-target c` : masque
+      rectangle + 2D) — ~2 800 replis en deux minutes ; la VM présente l'image d'Apple (noire
+      et blanche, sans programmes de fragments). Étendre le protocole : textures rectangle et
+      surface hors écran comme texture (`aglSurfaceTexture`, clé IndirectX
+      `RenderTargetMethod`). Épreuve : capture de la VM = rejeu (0,00 %) en course.
 - [ ] **Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur reste blanc).
       Au 26/09 le menu principal est juste (référence de la matrice validée) : à revoir en
       partie avant de fermer.
@@ -256,8 +261,9 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
 **Ensuite**
 
 - [ ] **A3, suites** (harnais fait le 26/09 : `tools/matrice/`, `docs/matrice-jeux.md`) :
-      porter Colin McRae (`tools/guest/cycle.sh` : touches jusqu'en course, arrêt par le stub
-      GDB) ; Zenerchi en plein écran et Warcraft III en fenêtre (réglage à trouver, sinon
+      porter Colin McRae (`tools/guest/cycle.sh` : Jouer, Entrée au titre, Entrée au menu ;
+      `sudo kill -9` l'arrête, `killgame.py` ne suffit pas toujours ; bloqué tant que l'image
+      affichée est celle d'Apple, §6) ; Zenerchi en plein écran et Warcraft III en fenêtre (réglage à trouver, sinon
       clic par System Events). Tour en une passe fait (26/09, ~23 min). Épreuve : plus de
       cellule « non automatisé » sauf RTCW absent.
 - [ ] **Prey en fenêtre : capture hors de l'intervalle vidé, 1 tour sur 3** (26/09, tour
@@ -265,6 +271,10 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
       contre la référence, mais la capture montre un autre moment de la cinématique scriptée
       (7 img/s affichés contre 10). À comprendre : présentation en fenêtre en retard sur le
       vidage, ou attente `dump_attente` trop courte. Épreuve : dix tours Prey fenêtre verts.
+- [ ] **Rejeu : `SURF_READBACK` d'une surface jamais liée dans le vidage** → `NO_SURF` (une
+      soumission en erreur, DOOM 3 fenêtre, tour `20260926-2156`, image pourtant juste) : le
+      prologue de `tests/qgpu_replay.c` ne crée la surface qu'au `SURF_BIND`/présentation.
+      Petit.
 - [ ] **A5 (scripts) — reste** : `tssh.sh`, `cycle.sh`, `killgame.py` sont dans
       `tools/guest/` (26/09) ; `.run/cmr/` n'a plus que des données. Reste `d3run.sh` à
       appuyer sur `tools/guest/tssh.sh`.
