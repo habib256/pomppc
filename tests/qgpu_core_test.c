@@ -6676,7 +6676,7 @@ static void run_v19(QgpuCore *c, uint8_t *shmem)
 static void run_backend(const char *name)
 {
     uint8_t *shmem = calloc(1, SHMEM_SIZE);
-    QgpuCore c;
+    static QgpuCore c;                  /* ~10 Mio depuis les 32 contextes par client (26/09) : hors de la pile */
     BackendRun r = { &c, shmem };
     pthread_t th;
 

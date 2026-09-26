@@ -65,7 +65,7 @@ int main(int argc, char **argv)
     uint32_t fmin = argc > 4 ? (uint32_t)atoi(argv[4]) : 0, fmax = argc > 5 ? (uint32_t)atoi(argv[5]) : ~0u;
     uint8_t *shmem = calloc(SHMEM, 1), *vram = calloc(VRAM, 1);
     static uint8_t tex_img_seen[QGPU_MAX_TEX];
-    QgpuCore c;
+    static QgpuCore c;                  /* ~10 Mio (32 contextes par client, 26/09) : hors de la pile */
     DIR *d;
     struct dirent *e;
     char **names = NULL;

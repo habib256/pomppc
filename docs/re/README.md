@@ -14,6 +14,7 @@ hors dépôt (disque USB : `pomppc/re/`).
 | `tableaux-de-sommets.md` | relevé par lecture des tableaux de sommets et de l'état T&L |
 | `descripteur-de-sommet.md` | le descripteur de sortie de sommet publié en `cfg+0x11c` |
 | `programmes-arb.md` | programmes ARB (v16) : le texte reste dans l'objet, `program.env` en `gctx+0x4668/+0x4670`, activation `gctx+0x5434/+0x5438`, limites `cfg+0xec..` (un bloc de 16 octets par cible), ce que Colin McRae demande |
+| `cmr-var.md` | Colin McRae : la géométrie éclatée venait de `GL_APPLE_vertex_array_range` absent (les deux copies des tampons de sommets d'IndirectX), et des 4 contextes par client de la v19 ; ce qui reste (rendu vers texture rectangle) |
 | `etat-tcl.md` | l'état T&L de GLEngine, offset par offset, établi par sondes |
 | `stencil.md` | l'état de stencil, et où le rendu d'Apple range le tampon |
 | `etat-v8.md` | mélange constant, opération logique, pointillés, modes de polygone ; et comment les **requêtes d'occlusion** atteignent le pilote |

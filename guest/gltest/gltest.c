@@ -2793,6 +2793,182 @@ int main(int argc, char **argv)
         r = (int)glGetError();
         printf("  erreur GL finale = 0x%x\n", (unsigned)r);
         glFinish();
+    } else if (!strcmp(scene, "arbvpvar")) {
+        /* 26/09 : la géométrie éclatée de Colin McRae, reproduite hors du jeu
+           (docs/re/cmr-var.md). IndirectX (IdxDirect3DVertexBuffer9) garde
+           deux copies d'un tampon de sommets Direct3D : celle que le jeu
+           verrouille et une copie « privée », seule lue par les dessins sous
+           programme de sommets (ActivateVertexShader → LockPrivate). Seul
+           Unlock recopie l'une dans l'autre, et seulement si le rendu annonce
+           GL_APPLE_vertex_array_range (InitOpenGL → HaveExtension) : la copie
+           privée est alors la plage VAR (glVertexArrayRangeAPPLE, stockage
+           partagé), vidée par glFlushVertexArrayRangeAPPLE. Sans l'extension
+           la copie privée reste le malloc jamais écrit. La scène suit cette
+           logique à la lettre, dessine un ruban sous programme (génériques
+           0..3, pas 36) depuis la copie privée, change les couleurs à chaque
+           tour, puis réécrit la plage APRÈS le dessin (sans glFinishObject) :
+           le rendu doit avoir lu au moment du dessin. */
+        typedef void (*gp_f)(GLsizei, GLuint *);
+        typedef void (*bp_f)(GLenum, GLuint);
+        typedef void (*ps_f)(GLenum, GLenum, GLsizei, const GLvoid *);
+        typedef void (*pe_f)(GLenum, GLuint, const GLfloat *);
+        typedef void (*va_f)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid *);
+        typedef void (*ea_f)(GLuint);
+        typedef void (*gva_f)(GLsizei, GLuint *);
+        typedef void (*bva_f)(GLuint);
+        typedef void (*var_f)(GLsizei, GLvoid *);
+        typedef void (*vap_f)(GLenum, GLint);
+        typedef void (*fo_f)(GLenum, GLint);
+        gp_f gen = (gp_f)gl_sym("glGenProgramsARB", "glGenProgramsARB");
+        bp_f bind = (bp_f)gl_sym("glBindProgramARB", "glBindProgramARB");
+        ps_f str = (ps_f)gl_sym("glProgramStringARB", "glProgramStringARB");
+        pe_f env = (pe_f)gl_sym("glProgramEnvParameter4fvARB", "glProgramEnvParameter4fvARB");
+        va_f vap = (va_f)gl_sym("glVertexAttribPointerARB", "glVertexAttribPointerARB");
+        ea_f eva = (ea_f)gl_sym("glEnableVertexAttribArrayARB", "glEnableVertexAttribArrayARB");
+        ea_f dva = (ea_f)gl_sym("glDisableVertexAttribArrayARB", "glDisableVertexAttribArrayARB");
+        gva_f genva = (gva_f)gl_sym("glGenVertexArraysAPPLE", "glGenVertexArraysAPPLE");
+        bva_f bindva = (bva_f)gl_sym("glBindVertexArrayAPPLE", "glBindVertexArrayAPPLE");
+        var_f range = (var_f)gl_sym("glVertexArrayRangeAPPLE", "glVertexArrayRangeAPPLE");
+        var_f flushr = (var_f)gl_sym("glFlushVertexArrayRangeAPPLE", "glFlushVertexArrayRangeAPPLE");
+        vap_f vaparam = (vap_f)gl_sym("glVertexArrayParameteriAPPLE", "glVertexArrayParameteriAPPLE");
+        fo_f finobj = (fo_f)gl_sym("glFinishObjectAPPLE", "glFinishObjectAPPLE");
+        static const char vp_text[] =
+            "!!ARBvp1.0\n"
+            "ATTRIB v0 = vertex.attrib[0];\n"
+            "ATTRIB v1 = vertex.attrib[1];\n"
+            "ATTRIB v2 = vertex.attrib[2];\n"
+            "ATTRIB v3 = vertex.attrib[3];\n"
+            "PARAM c[] = { program.env[0..3] };\n"
+            "TEMP t;\n"
+            "DP4 result.position.x, c[0], v0;\n"
+            "DP4 result.position.y, c[1], v0;\n"
+            "DP4 result.position.z, c[2], v0;\n"
+            "DP4 result.position.w, c[3], v0;\n"
+            "MUL t, v2, v1.x;\n"
+            "MOV result.color, t;\n"
+            "MOV result.texcoord[0], v3;\n"
+            "END\n";
+        enum { NV = 4, ST = 36, VBSZ = 64 * 1024 };  /* un tampon D3D : 64 Kio, comme un vrai */
+        static const float xy[4][2] = { { 4, 4 }, { 60, 4 }, { 4, 60 }, { 60, 60 } };
+        static GLushort idx[4] = { 0, 1, 2, 3 };
+        const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+        int have_var = ext && strstr(ext, "GL_APPLE_vertex_array_range") != 0;
+        /* GLTEST_NOVAR=1 : recopie faite quand même, sans plage VAR (témoin
+           du chemin Begin/End de GLEngine, pour comparer) */
+        int novar = getenv("GLTEST_NOVAR") != 0;
+        unsigned char *lockb = malloc(VBSZ), *priv = malloc(VBSZ);
+        GLfloat rows[4][4];
+        GLuint prog[1], vao = 0;
+        int k, q;
+        /* taille par défaut (64×64, lecture ligne 0 en haut) : le carré
+           (4..60)² est plein, (62, 30) est dehors */
+        const int IX = 16, IY = 47, OX = 62, OY = 30;
+        if (!gen || !bind || !str || !env || !vap || !eva || !dva || !lockb || !priv) {
+            printf("FAIL entrées ARB absentes\n");
+            failures++;
+            return 4;
+        }
+        /* malloc jamais écrit : ce qu'IndirectX lisait (motif reconnaissable) */
+        memset(priv, 0, VBSZ);
+        printf("  GL_APPLE_vertex_array_range : %s\n", have_var ? "annoncée" : "ABSENTE");
+        check_cond("GL_APPLE_vertex_array_range annoncée (IndirectX : copie privée remplie)", have_var || novar);
+        if (novar)
+            have_var = 0;
+        if (have_var && (!genva || !bindva || !range || !flushr || !vaparam)) {
+            printf("FAIL entrées APPLE absentes\n");
+            failures++;
+            return 4;
+        }
+        memset(rows, 0, sizeof(rows));
+        rows[0][0] = 2.0f / W; rows[0][3] = -1.0f;
+        rows[1][1] = 2.0f / H; rows[1][3] = -1.0f;
+        rows[2][2] = -1.0f;
+        rows[3][3] = 1.0f;
+        glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, W, 0, H, -1, 1);
+        glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_LIGHTING);
+        glClearColor(0, 0, 1, 1);
+        while (glGetError() != GL_NO_ERROR) { }
+        gen(1, prog);
+        bind(ARB_VP, prog[0]);
+        str(ARB_VP, ARB_ASCII, (GLsizei)strlen(vp_text), vp_text);
+        for (k = 0; k < 4; k++)
+            env(ARB_VP, (GLuint)k, rows[k]);
+        /* le constructeur d'IdxDirect3DVertexBuffer9 */
+        if (have_var) {
+            genva(1, &vao);
+            bindva(vao);
+            vaparam(0x851F /* STORAGE_HINT */, 0x85BF /* SHARED */);
+            range(VBSZ, priv);
+            printf("  erreur GL après la plage = 0x%x\n", (unsigned)glGetError());
+        }
+        for (k = 0; k < 6; k++) {
+            char what[80];
+            unsigned long off = (unsigned long)(k % 3) * 4096;   /* Lock(off) */
+            unsigned char *b = lockb + off;
+            for (q = 0; q < NV; q++) {
+                float *f = (float *)(b + q * ST);
+                f[0] = xy[q][0]; f[1] = xy[q][1]; f[2] = 0.0f;
+                f[3] = 1.0f; f[4] = 0.0f; f[5] = 0.0f;
+                b[q * ST + 24] = (k % 3) == 0 ? 128 : 0;
+                b[q * ST + 25] = (k % 3) == 1 ? 128 : 0;
+                b[q * ST + 26] = (k % 3) == 2 ? 128 : 0;
+                b[q * ST + 27] = 255;
+                f[7] = 0.5f; f[8] = 0.5f;
+            }
+            /* Unlock : recopie vers la copie privée et vidage de la plage,
+               SEULEMENT sur le chemin VAR (IndirectX 0x19308) */
+            if (have_var) {
+                glEnableClientState(0x851D /* GL_VERTEX_ARRAY_RANGE_APPLE */);
+                bindva(vao);
+                memmove(priv + off, b, NV * ST);
+                flushr(NV * ST, priv + off);
+                glDisableClientState(0x851D);
+            } else if (novar) {
+                memmove(priv + off, b, NV * ST);
+            }
+            /* ActivateVertexShader : la plage allumée, génériques depuis la
+               copie privée (LockPrivate), programme, dessin */
+            if (have_var) {
+                bindva(vao);
+                glEnableClientState(0x851D);
+            }
+            glClear(GL_COLOR_BUFFER_BIT);
+            vap(0, 3, GL_FLOAT, GL_FALSE, ST, priv + off);      eva(0);
+            vap(1, 3, GL_FLOAT, GL_FALSE, ST, priv + off + 12); eva(1);
+            vap(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, ST, priv + off + 24); eva(2);
+            vap(3, 2, GL_FLOAT, GL_FALSE, ST, priv + off + 28); eva(3);
+            glEnable(ARB_VP);
+            glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_SHORT, idx);
+            if (k < 2)
+                printf("  tour %d : erreur GL après le dessin = 0x%x\n", k, (unsigned)glGetError());
+            /* le jeu réécrit la plage sans attendre (tour impair) : le rendu
+               a dû lire au dessin ; les tours pairs passent par la barrière */
+            if (k & 1)
+                memset(priv + off, 0, NV * ST);
+            else if (have_var && finobj) {
+                finobj(0x8074 /* GL_VERTEX_ARRAY */, (GLint)vao);
+                if (k < 2)
+                    printf("  tour %d : erreur GL après glFinishObjectAPPLE = 0x%x\n", k, (unsigned)glGetError());
+            }
+            glFinish();
+            glDisable(ARB_VP);
+            if (have_var)
+                glDisableClientState(0x851D);
+            snprintf(what, sizeof(what), "tour %d (Lock %lu, %s) : dedans", k, off,
+                     (k & 1) ? "plage réécrite après" : "glFinishObjectAPPLE");
+            check(what, IX, IY, 0x800000UL >> (8 * (k % 3)));
+            snprintf(what, sizeof(what), "tour %d : dehors", k);
+            check(what, OX, OY, 0x0000FF);
+        }
+        dva(0); dva(1); dva(2); dva(3);
+        if (have_var)
+            bindva(0);
+        printf("  erreur GL finale = 0x%x\n", (unsigned)glGetError());
+        free(lockb);
+        /* priv reste allouée : la plage VAR du VAO la désigne encore */
+        glFinish();
     } else if (!strcmp(scene, "arbvp0cmr")) {
         /* v16 : le lot de Colin McRae EN COURSE, tel que la sonde le relève
            (docs/re/programmes-arb.md §5) : génériques 0 (pos 3f), 1 (3f),

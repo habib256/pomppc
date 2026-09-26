@@ -172,8 +172,8 @@
 
 /* ── Statuts : QGPU_ST_* dans qgpu_abi.h ─────────────────────────────────── */
 /* ── Limites ─────────────────────────────────────────────────────────────── */
-#define QGPU_MAX_CTX            16
-#define QGPU_MAX_SURF           64
+#define QGPU_MAX_CTX            128 /* 26/09 : 32 par client (Colin McRae en crée 11 dès le menu) */
+#define QGPU_MAX_SURF           128 /* 26/09 : 32 par client, un par contexte au moins */
 #define QGPU_MAX_SURF_DIM       4096
 #define QGPU_MAX_CMD_WORDS      (1 << 20)   /* 4 Mio par soumission */
 #define QGPU_MAX_VERTS          (1 << 16)
@@ -1623,8 +1623,8 @@
 #define QGPU_CLASS_COUNT        5   /* ≤ QGPU_REG_LAYOUT_CLASSES */
 
 #define QGPU_MAX_CLIENTS        4
-#define QGPU_CLIENT_CTX_IDS     (QGPU_MAX_CTX / QGPU_MAX_CLIENTS)    /* 4 */
-#define QGPU_CLIENT_SURF_IDS    (QGPU_MAX_SURF / QGPU_MAX_CLIENTS)   /* 16 */
+#define QGPU_CLIENT_CTX_IDS     (QGPU_MAX_CTX / QGPU_MAX_CLIENTS)    /* 32 (4 jusqu au 26/09) */
+#define QGPU_CLIENT_SURF_IDS    (QGPU_MAX_SURF / QGPU_MAX_CLIENTS)   /* 32 (16 jusqu au 26/09) */
 #define QGPU_CLIENT_TEX_IDS     (QGPU_MAX_TEX / QGPU_MAX_CLIENTS)    /* 1024 */
 #define QGPU_CLIENT_QUERY_IDS   (QGPU_MAX_QUERIES / QGPU_MAX_CLIENTS) /* 16, v8 */
 #define QGPU_CLIENT_BUF_IDS     (QGPU_MAX_BUF / QGPU_MAX_CLIENTS)     /* 64, v14 */
