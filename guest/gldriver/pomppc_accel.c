@@ -117,7 +117,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260926-var"
+#define POMPPC_PLUGIN_REV "20260927-rtt"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -589,6 +589,14 @@ typedef struct PTex {                   /* texture du GLDriver suivie par le plu
                                            crochet qui touche l'objet (niveaux, paramètres,
                                            sous-images, vidage de l'état hôte) */
     unsigned long  ok_gen;              /*   hook_gen quand ok_frame a été posé */
+    /* v20 — texture de SURFACE (aglSurfaceTexture, docs/re/cmr-rendu-vers-texture.md) :
+       son image est le tampon avant du drawable d'un autre contexte, rendu par
+       l'hôte ; elle n'a aucun niveau côté invité. */
+    int            surf;                /* 1 : texture de surface (vu par tex_cp) */
+    unsigned long  surf_sid;            /*   surface CGS du drawable source */
+    unsigned long  surf_gen;            /*   swap_gen de la source à la dernière copie */
+    int            surf_copied;         /*   au moins un SURF_TEX émis depuis la création */
+    int            dump_rb;             /* vidage autonome : image hôte à relire (TEX_READBACK) */
 } PTex;
 
 typedef struct TexUnit {
@@ -705,6 +713,11 @@ typedef struct PCtx {
     int            d_ok;                /* 0 non, 1 plein écran, 2 en fenêtre */
     long           d_x, d_y;            /* rectangle de CE contexte à l'écran */
     unsigned long  d_checked_at;        /* image de la dernière réévaluation */
+    /* ── v20 : rendu vers texture ── */
+    unsigned long  swap_gen;            /* échanges vus (textures de surface) */
+    int            hid;                 /* drawable = fenêtre absente de l'écran */
+    unsigned long  hid_wid;             /*   fenêtre évaluée */
+    unsigned long  hid_checked_at;      /*   image de l'évaluation (0 : jamais) */
     /* ── transmission paresseuse au GLDriver d'Apple (POMPPC_GL_LAZYAPPLE,
        docs/re/dispatch-paresseux.md) : masques de changement de GLEngine
        cumulés depuis le dernier gldUpdateDispatch transmis ── */
@@ -887,6 +900,17 @@ static struct {
     int             v15;                /* v15 : SURF/DEPTH xfer 16 bits par l'hôte */
     int             units;              /* v17 : unités de texture que le device tient
                                            (8 ; 4 avant la v17). Au-delà : rendu d'Apple. */
+    /* ── v20 : rendu vers texture (Colin McRae, 27/09) ── */
+    int             rect;               /* textures rectangle (v10 + QGPU_CAP_GL14) ;
+                                           POMPPC_GL_RECT=0 les renvoie à Apple */
+    int             surftex;            /* SURF_TEX (v20 + QGPU_CAP_SURF_TEX) ;
+                                           POMPPC_GL_SURFTEX=0 le coupe */
+    int             hidden;             /* échange d'un drawable caché sans
+                                           présentation ni repli ; POMPPC_GL_HIDDEN=0 */
+    unsigned long   n_surftex;          /* SURF_TEX émis */
+    unsigned long   n_surftex_sw;       /* source plus récente côté invité : non copiée */
+    unsigned long   n_hidden_swaps;     /* échanges de drawables cachés gardés sur l'hôte */
+    int             dump_rb_pending;    /* vidage autonome : textures hôte à relire */
     unsigned long   buf_used[(QGPU_CLIENT_BUF_IDS + 31) / 32];
     unsigned long   buf_base;
     PBuf           *bufs;
@@ -1025,7 +1049,9 @@ enum {
        avant le repli Apple */
     NO_G_SRC, NO_APPLE_NAN, NO_G_GENERIC,
     /* v16 : programme refusé par l'hôte ; programme de fragments hors bornes */
-    NO_G_PROG_HOST, NO_G_PROG_UNITS, NO_COUNT
+    NO_G_PROG_HOST, NO_G_PROG_UNITS,
+    /* v20 : texture de surface dont la source n'est pas rendue par l'hôte */
+    NO_TEX_SURF, NO_COUNT
 };
 static const char *const no_name[NO_COUNT] = {
     "buffer", "logicop/stipple/smooth", "fog", "polygonmode", "depth",
@@ -1038,6 +1064,7 @@ static const char *const no_name[NO_COUNT] = {
     "raw:tex-3d-or-cube",
     "raw:null-array", "apple:nan-vertex", "raw:generic-attribs",
     "prog:host-refused", "prog:units",
+    "surface-texture",
 };
 static unsigned long no_count[NO_COUNT];
 static char no_detail[NO_COUNT][64];
@@ -1727,6 +1754,11 @@ static void on_exit_stats(void)
                 G.n_dropped_fault, G.n_texblack,     /* I9 (relecture du 24/09) */
                 G.async ? "async" : "sync", G.n_waits, G.t_wait * 1000,
                 G.n_qfull, G.n_syncfall);
+    if (getenv("POMPPC_GL_STATS"))      /* v20 */
+        fprintf(stderr, "POMPPC GL: render to texture: %lu SURF_TEX (%s), %lu skipped "
+                "(guest newer), %lu hidden-drawable swaps kept on host; rectangle %s\n",
+                G.n_surftex, G.surftex ? "on" : ((G.q.caps & QGPU_CAP_SURF_TEX) ? "cut" : "not offered"),
+                G.n_surftex_sw, G.n_hidden_swaps, G.rect ? "on" : "off");
     if (getenv("POMPPC_GL_STATS"))      /* v18 */
         fprintf(stderr, "POMPPC GL: %lu native draws (%lu verts, DRAW_NATIVE %s), "
                 "%lu KiB of raw VBO copied in %lu BUF_SUBDATA, %d host pool(s), "
@@ -1918,6 +1950,16 @@ void pomppc_backend_init(void)
             /* Cartes de cube (OpenGL 1.3) : pas de repli non plus. */
             G.cube = G.v10 && (G.q.caps & QGPU_CAP_GL14) &&
                      !(getenv("POMPPC_GL_CUBE") && getenv("POMPPC_GL_CUBE")[0] == '0');
+            /* Textures rectangle (ARB/EXT_texture_rectangle) : l'hôte v10 les
+               tient depuis toujours, le plugin les renvoyait à Apple — qui ne
+               sait pas les programmes de fragments (Colin McRae, 27/09). */
+            G.rect = G.v10 && (G.q.caps & QGPU_CAP_GL14) &&
+                     !(getenv("POMPPC_GL_RECT") && getenv("POMPPC_GL_RECT")[0] == '0');
+            /* v20 : textures de surface (aglSurfaceTexture) remplies par
+               l'hôte depuis la surface du drawable source. */
+            G.surftex = G.q.version >= 20 && (G.q.caps & QGPU_CAP_SURF_TEX) &&
+                        !(getenv("POMPPC_GL_SURFTEX") && getenv("POMPPC_GL_SURFTEX")[0] == '0');
+            G.hidden = !(getenv("POMPPC_GL_HIDDEN") && getenv("POMPPC_GL_HIDDEN")[0] == '0');
             /* Répétitions et couleur de bordure (1.3, 1.4), niveaux S3TC
                relayés tels quels : l'hôte v10 les tient. POMPPC_GL_TEX13=0
                revient au refus (repli sur Apple). */
@@ -2322,6 +2364,7 @@ static void invalidate_mirrors(void)
     }
     for (t = G.textures; t; t = t->next) {
         t->prm_valid = 0;
+        t->surf_copied = 0;             /* v20 : SURF_TEX à refaire (vidage autonome) */
         t->dirty = 1;                   /* le TEX_IMAGE3 perdu doit repartir */
         t->cp_frame = 0;                /* lot 1 */
         t->hook_gen++;
@@ -2790,7 +2833,42 @@ static void dump_submit(void)
                    (lot 11) : les textes des programmes (Prey, 23/09) et les
                    textures réutilisées avant la fin de cette image repartent
                    DANS cette image, et le rejeu ne les aurait jamais. */
-                invalidate_mirrors();
+                {
+                    /* 27/09 : une texture dont l'image n'existe que sur l'hôte
+                       (COPY_TEX, SURF_TEX) ne peut pas repartir de l'invité ;
+                       elle est relue (TEX_READBACK) au prochain échange et
+                       renvoyée DANS le vidage (dump_readback_textures). */
+                    PTex *t;
+                    for (t = G.textures; t; t = t->next)
+                        t->dump_rb = t->qtex >= 0 && (t->host_only || t->surf) &&
+                                     (G.q.caps & QGPU_CAP_TEX_READBACK) && G.q.version >= 20;
+                    invalidate_mirrors();
+                    for (t = G.textures; t; t = t->next)
+                        if (t->dump_rb) {
+                            t->host_only = 1;
+                            t->dirty = 0;
+                            t->surf_copied = 1;   /* l'image relue EST la copie */
+                            G.dump_rb_pending = 1;
+                        }
+                }
+                /* 27/09 : les surfaces hôte vivantes (taille, contexte) — le
+                   rejeu ne les voit jamais créer ; plusieurs contextes, des
+                   tailles autres que la présentée (cibles de rendu d'IndirectX,
+                   SURF_TEX) : tests/qgpu_replay.c les recrée d'après ceci. */
+                {
+                    char sp[400];
+                    FILE *sf;
+                    PCtx *q;
+                    snprintf(sp, sizeof(sp), "%s/surfaces.txt", dir);
+                    sf = fopen(sp, "w");
+                    if (sf) {
+                        for (q = G.list; q; q = q->next)
+                            if (q->qctx >= 0 && q->surf >= 0)
+                                fprintf(sf, "ctx %ld surf %ld %lu %lu %d\n", (long)q->qctx,
+                                        (long)q->surf, q->sw, q->sh, q->stencil);
+                        fclose(sf);
+                    }
+                }
                 return;
             }
             if (G.n_frames > from + maxf)
@@ -3475,6 +3553,32 @@ static int tex_is_cube(const PTex *t)
     return gp && GLD_U8(gp, TP_TARGET) == 0;
 }
 
+/* Texture rectangle (cible 2 de l'objet de GLEngine) ? */
+static int tex_is_rect(const PTex *t)
+{
+    const unsigned char *gp = (const unsigned char *)GLD_U32(t->drvtex, DT_PARAMS);
+    return gp && GLD_U8(gp, TP_TARGET) == 2;
+}
+
+/* v20 — texture de SURFACE (aglSurfaceTexture → CGLSetParameter 999 →
+ * gliSetInteger de GLEngine, docs/re/cmr-rendu-vers-texture.md) : le demi-mot
+ * de tête de l'objet de GLEngine porte la sorte en 0x3C00 (0x0400 = surface),
+ * le mot +0x08 l'identifiant de la surface CGS du drawable source. Ses niveaux
+ * n'ont pas de données : l'image est le tampon avant de ce drawable. */
+#define TP_KIND     0x00          /* u8 : bits 0x3c ; 0x04 = texture de surface */
+#define TP_SURF_SID 0x08          /* u32 : surface CGS du drawable source */
+static int tex_surface(const PTex *t, unsigned long *sid)
+{
+    const unsigned char *gp = (const unsigned char *)GLD_U32(t->drvtex, DT_PARAMS);
+    if (!G.surftex || !gp || (GLD_U8(gp, TP_KIND) & 0x3c) != 0x04)
+        return 0;
+    if (sid)
+        *sid = GLD_U32(gp, TP_SURF_SID);
+    return 1;
+}
+static PCtx *surf_source(unsigned long sid);
+static int upload_surftex(PCtx *p, PTex *t, unsigned long sid);
+
 /* Entrée du niveau l de la face f, dans l'objet de GLEngine. */
 static const unsigned char *cube_level(const void *drvtex, int f, int l)
 {
@@ -3600,8 +3704,24 @@ static int tex_base_ok(const void *drvtex)
 static unsigned int tex_cp(PTex *t)
 {
     if (t->cp_frame != G.n_frames + 1) {
-        t->cp = (tex_complete(t->drvtex) ? CP_COMPLETE : 0) |
-                (tex_base_ok(t->drvtex) ? CP_BASE : 0);
+        /* v20 : une texture de surface est complète par construction (un
+           niveau, sans mipmaps) ; son image vient de l'hôte (SURF_TEX). */
+        t->surf = tex_surface(t, &t->surf_sid);
+        if (t->surf)
+            t->cp = CP_COMPLETE | CP_BASE;
+        else
+            t->cp = (tex_complete(t->drvtex) ? CP_COMPLETE : 0) |
+                    (tex_base_ok(t->drvtex) ? CP_BASE : 0);
+        /* 27/09 (Colin McRae) : cible d'une copie d'écran (glCopyTexImage2D
+           d'un rectangle) — le niveau n'a pas de données côté invité, il
+           n'existe que sur l'hôte (COPY_TEX, host_only). Sans ceci l'unité était
+           coupée : le quad de réduction d'IndirectX partait sans coordonnées de
+           texture, et ses cibles 400×300 et 200×150 sortaient blanches. */
+        if (!t->surf && t->host_only && t->qtex >= 0 && !(t->cp & CP_BASE)) {
+            const unsigned char *gp = (const unsigned char *)GLD_U32(t->drvtex, DT_PARAMS);
+            unsigned long minf = gp ? U16(gp, TP_MIN) : 0x2601;
+            t->cp = CP_BASE | ((tex_is_rect(t) || minf == 0x2600 || minf == 0x2601) ? CP_COMPLETE : 0);
+        }
         t->cp_frame = G.n_frames + 1;
     }
     return t->cp;
@@ -3756,8 +3876,17 @@ static int texture_uploadable_full(PTex *t)
 {
     unsigned char *dt = t->drvtex;
     unsigned long base = GLD_U32(dt, DT_BASE_FORMAT);
+    unsigned long sid;
     int l;
 
+    /* v20 : texture de surface — ni niveaux ni format côté invité ; il faut
+       que le drawable source soit rendu par l'hôte. */
+    if (tex_surface(t, &sid)) {
+        PCtx *src = surf_source(sid);
+        if (!src || src->qctx < 0)
+            return no(NO_TEX_SURF, sid, src ? 1 : 0);
+        return 1;
+    }
     if (!GLD_U32(dt, DT_PARAMS) || !base_format_ok(base))
         return no(NO_TEX_BASE, base, 0);
     if (!tex_params_ok((const unsigned char *)GLD_U32(dt, DT_PARAMS)))
@@ -3808,16 +3937,21 @@ static int texture_uploadable_full(PTex *t)
             }
         return 1;
     }
+    if (tex_is_rect(t) && !G.rect)
+        return no(NO_TEX_TARGET, 4, 0);
     for (l = 0; l < DT_LEVELS; l++) {
         unsigned char *lv = dt + DT_LEVEL0 + l * DT_LEVEL_SIZE;
         unsigned long w = S16(lv, LV_W), h = S16(lv, LV_H);
         if (w == 0 || h == 0)
             continue;
+        if (l > 0 && tex_is_rect(t))
+            break;                      /* rectangle : un seul niveau */
         if (S16(lv, LV_BORDER) || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM)
             return no(NO_TEX_SIZE, w, h);
         if (G.v10 && dxt_format(U16(lv, LV_FORMAT), U16(lv, LV_TYPE))) {
             /* S3TC : 2D seulement, format de base assorti */
-            if (tex_is_3d(t) || !GLD_U32(lv, LV_DATA) || !dxt_ok(base, U16(lv, LV_FORMAT)))
+            if (tex_is_3d(t) || tex_is_rect(t) || !GLD_U32(lv, LV_DATA) ||
+                !dxt_ok(base, U16(lv, LV_FORMAT)))
                 return no(NO_TEX_FORMAT, (unsigned long)U16(lv, LV_FORMAT) << 16,
                           (host_base(base) << 16) | w);
             continue;
@@ -3852,8 +3986,11 @@ static int upload_texture(PCtx *p, PTex *t)
         QGPU_TP_WRAP_R, QGPU_TP_MIN_LOD, QGPU_TP_MAX_LOD, QGPU_TP_BASE_LEVEL,
         QGPU_TP_MAX_LEVEL, QGPU_TP_BORDER_COLOR, QGPU_TP_LOD_BIAS, QGPU_TP_COMPARE_MODE,
         QGPU_TP_COMPARE_FUNC, QGPU_TP_DEPTH_MODE };
-    int l, k, t3 = tex_is_3d(t);
+    int l, k, t3 = tex_is_3d(t), rect = tex_is_rect(t);
+    unsigned long sid;
 
+    if (tex_surface(t, &sid))
+        return upload_surftex(p, t, sid);   /* v20 */
     if (t->qtex >= 0 && !t->dirty && t->prm_valid && t->up_frame == G.n_frames + 1 &&
         gp && t->up_psig == tex_prm_sig(gp))
         return 1;                       /* déjà synchronisée à cette image (24/09),
@@ -3878,10 +4015,11 @@ static int upload_texture(PCtx *p, PTex *t)
         t->qtex = alloc_tex_id(p);
         if (t->qtex < 0)
             return no(NO_TEX_ID, 0, 0);
-        if (t3 || tex_is_cube(t)) {
+        if (t3 || tex_is_cube(t) || rect) {
             c = reserve(p, QGPU_LEN_TEX_CREATE3);
             c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3);
-            c[1] = t->qtex; c[2] = t3 ? QGPU_TT_3D : QGPU_TT_CUBE_MAP;
+            c[1] = t->qtex;
+            c[2] = t3 ? QGPU_TT_3D : rect ? QGPU_TT_RECTANGLE : QGPU_TT_CUBE_MAP;
         } else {
             c = reserve(p, QGPU_LEN_TEX);
             c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX);
@@ -3944,6 +4082,8 @@ static int upload_texture(PCtx *p, PTex *t)
             unsigned long w = S16(lv, LV_W), h = S16(lv, LV_H);
             if (w == 0 || h == 0)
                 continue;
+            if (l > 0 && rect)
+                break;                  /* rectangle : un seul niveau */
             if (S16(lv, LV_BORDER) || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM)
                 return no(NO_TEX_SIZE, w, h);
             if (G.v10) {
@@ -4009,7 +4149,8 @@ static int upload_texture(PCtx *p, PTex *t)
                 }
                 c = reserve(p, QGPU_LEN_TEX_IMAGE3);
                 c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3);
-                c[1] = t->qtex; c[2] = t3 ? QGPU_TT_3D : QGPU_TT_2D; c[3] = l;
+                c[1] = t->qtex; c[2] = t3 ? QGPU_TT_3D : rect ? QGPU_TT_RECTANGLE : QGPU_TT_2D;
+                c[3] = l;
                 c[4] = w; c[5] = h; c[6] = dep; c[7] = host_base(base); c[8] = fmt; c[9] = type;
                 c[10] = G.q.base + off; c[11] = row; c[12] = t3 ? img : 0;
                 G.n_texuploads++;
@@ -4054,6 +4195,16 @@ static int upload_texture(PCtx *p, PTex *t)
     prm[11] = U16(gp, TP_COMPARE_MODE);
     prm[12] = U16(gp, TP_COMPARE_FUNC);
     prm[13] = U16(gp, TP_DEPTH_MODE);
+    if (rect) {
+        /* Rectangle : pas de mipmaps, répétitions bornées seulement (le cœur
+           refuse le reste, et un refus arrêterait la soumission). */
+        if (prm[0] != 0x2600 && prm[0] != 0x2601)
+            prm[0] = (prm[0] == 0x2700 || prm[0] == 0x2702) ? 0x2600 : 0x2601;
+        if (prm[2] == 0x2901 || prm[2] == 0x8370)
+            prm[2] = 0x812F;
+        if (prm[3] == 0x2901 || prm[3] == 0x8370)
+            prm[3] = 0x812F;
+    }
     for (k = 0; k < 14; k++) {
         /* wrap r : 3D seulement ; LOD et niveaux : v10 seulement (avant, ils
            sont forcés aux valeurs initiales par tex_lod_ok) ; bordure : avec
@@ -4063,6 +4214,8 @@ static int upload_texture(PCtx *p, PTex *t)
         if ((k == 4 && !t3) || (k >= 5 && !G.v10) || (k == 9 && !G.tex13) ||
             (k >= 10 && !G.tex14))
             continue;
+        if (rect && (k == 5 || k == 6 || k == 7 || k == 10))
+            continue;                   /* LOD, niveau de base, biais : sans objet */
         if (t->prm_valid && t->prm[k] == prm[k])
             continue;
         c = reserve(p, QGPU_LEN_TEX_PARAM);
@@ -4206,7 +4359,7 @@ static int unit_slot(unsigned long m)
     if (m & 2)
         return G.tex3d ? 1 : -1;                    /* 3D (v10) */
     if (m & 4)
-        return -1;                                  /* rectangle */
+        return G.rect ? 2 : -1;                     /* rectangle (v20 côté plugin) */
     return (m & 8) ? 3 : 4;                         /* 2D, 1D */
 }
 
@@ -4451,6 +4604,27 @@ static int texture_unit_ok(PCtx *p, int u, TexUnit *tu)
        base, on s'en sert (filtre mipmap rabattu) au lieu de dessiner blanc. */
     if (!(tex_cp(tu->t) & CP_COMPLETE)) {
         if (!(tex_cp(tu->t) & CP_BASE)) {
+            static int probe = -1, nseen;
+            static void *seen[64];
+            int k;
+            if (probe < 0)
+                probe = getenv("POMPPC_GL_UNITPROBE") && getenv("POMPPC_GL_UNITPROBE")[0] == '1';
+            for (k = 0; k < nseen && seen[k] != tu->t->drvtex; k++)
+                ;
+            if (probe && k == nseen && nseen < 64) {
+                /* 27/09, sonde POMPPC_GL_UNITPROBE=1 : unité coupée faute de
+                   niveau — ce qu'est la texture, une fois par objet */
+                const unsigned char *gp0 = (const unsigned char *)GLD_U32(tu->t->drvtex, DT_PARAMS);
+                const unsigned char *lv0 = (const unsigned char *)tu->t->drvtex + DT_LEVEL0;
+                seen[nseen++] = tu->t->drvtex;
+                gl_note("UNITE coupée u%d masque %lx fp %d : dt %p cible %u sorte %02x niv0 %dx%d données %08lx "
+                        "(GLEngine %ux%u %08lx) qtex %ld host_only %d image %lu\n",
+                        u, mask, fp, tu->t->drvtex, gp0 ? GLD_U8(gp0, TP_TARGET) : 99,
+                        gp0 ? GLD_U8(gp0, TP_KIND) : 0, (int)S16(lv0, LV_W), (int)S16(lv0, LV_H),
+                        GLD_U32(lv0, LV_DATA), gp0 ? U16(gp0 + TP_LEVEL0, PL_W) : 0,
+                        gp0 ? U16(gp0 + TP_LEVEL0, PL_H) : 0, gp0 ? GLD_U32(gp0 + TP_LEVEL0, PL_DATA) : 0,
+                        (long)tu->t->qtex, tu->t->host_only, G.n_frames);
+            }
             tu->t = 0;
             G.n_tex_incomplete++;
             return 1;
@@ -4803,6 +4977,18 @@ static void sync_to_sw(void *ctx, int want_depth)
        dans le tampon invité. Relire à chaque vidage (Colin McRae) tuait le
        débit, et le scanout 16 bits n'est pas le drawable 32 bits. */
     if (p && !want_depth && p->fullscreen_buf && p->color == HOST_NEWER) {
+        if (G.ncmd)
+            flush();
+        pthread_mutex_unlock(&G.mu);
+        return;
+    }
+    /* v20 : drawable CACHÉ (cible de rendu d'IndirectX) — son image n'existe
+       que sur l'hôte, où les textures de surface la prennent ; personne ne
+       lit le tampon invité. Ni au glFlush, ni au rattachement (IndirectX
+       rattache la même fenêtre à chaque image : 400×300 couleur ET profondeur
+       relues pour rien). Une lecture réelle (glReadPixels, repli) passe par
+       son propre chemin, qui relit ce qu'il faut. */
+    if (p && p->hid && !p->fullscreen_buf && G.hidden && p->color != SW_NEWER) {
         if (G.ncmd)
             flush();
         pthread_mutex_unlock(&G.mu);
@@ -6610,10 +6796,15 @@ static void text_fp_units(PProg *r, const char *s, unsigned long n)
     for (i = 0; i + 9 < n; i++) {
         unsigned long j, u = 0;
         unsigned char m = 0;
-        if (memcmp(s + i, "texture[", 8) != 0)
+        if (memcmp(s + i, "texture", 7) != 0)
             continue;
-        j = i + 8;
-        if (!(s[j] >= '0' && s[j] <= '9')) { r->fp_units_bad = 1; continue; }
+        j = i + 7;
+        while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;   /* « texture [1] » : ARB valide */
+        if (j >= n || s[j] != '[')
+            continue;
+        j++;
+        while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+        if (j >= n || !(s[j] >= '0' && s[j] <= '9')) { r->fp_units_bad = 1; continue; }
         while (j < n && s[j] >= '0' && s[j] <= '9') { u = u * 10 + (unsigned long)(s[j] - '0'); j++; }
         while (j < n && (s[j] == ']' || s[j] == ' ' || s[j] == ','))
             j++;
@@ -8687,6 +8878,15 @@ static const unsigned char *va_src(PCtx *p, const unsigned char *V, int a)
     return (const unsigned char *)raw;
 }
 
+/* 27/09 (Colin McRae) : dessin arrivé par RenderVertexArray, c'est-à-dire
+ * par GL_APPLE_vertex_array_range (seul usage de la procédure tant que
+ * POMPPC_GL_ARRAY vaut 0, le défaut). La « couleur morte » (0,0,0,0 → couleur
+ * courante) y est une VRAIE couleur : le voile de fondu d'IndirectX est un
+ * quad 0x00000000 (noir transparent), et sa substitution par le blanc courant
+ * recouvrait tout le menu d'un aplat blanc. La rustine reste pour WC3, dont
+ * les tableaux sont clients hors VAR. */
+static int var_draw;
+
 /* Couleur hors tableau. Un sommet sans couleur (0,0,0,0) ne doit pas hériter
  * du matériau : en jeu c'est le vert du terrain, et le panneau du tutoriel
  * — une image du décor — sortait alors vert fluo sur blanc. (1,1,1,1) laisse
@@ -8785,7 +8985,7 @@ static void va_fetch(float *dst, PCtx *p, const unsigned char *V, int slot,
     /* Tableau de couleurs tout à zéro : WC3 en laisse parfois un, inerte, et
        pose la vraie teinte par glColor / ColorMat. Sans ça, MODULATE × alpha 0
        efface les glyphes. */
-    if (slot == 2 && dst_n >= 4 &&
+    if (slot == 2 && dst_n >= 4 && !var_draw &&
         dst[0] == 0.0f && dst[1] == 0.0f && dst[2] == 0.0f && dst[3] == 0.0f)
         fill_current_color(p, dst);
 }
@@ -9035,7 +9235,7 @@ static void va_pack_planned(float *dst, const VaPlan *pl, unsigned long i)
             }
             for (k = at->src_n; k < dn; k++)
                 dst[k] = (k == dn - 1) ? at->last_def : 0.0f;
-            if (at->is_color && dn >= 4 &&
+            if (at->is_color && dn >= 4 && !var_draw &&
                 dst[0] == 0.0f && dst[1] == 0.0f && dst[2] == 0.0f && dst[3] == 0.0f)
                 for (k = 0; k < 4; k++)
                     dst[k] = at->cur[k];
@@ -9235,7 +9435,7 @@ static void va_count_prims(unsigned long m, unsigned long n)
  * format — et non plus d'une liste fixe d'emplacements conventionnels. */
 static unsigned long va_pack_key(const VaPlan *pl, unsigned long fmt)
 {
-    unsigned long k = fmt ^ 0x9e3779b9UL;
+    unsigned long k = (fmt ^ 0x9e3779b9UL) * 33UL + (unsigned long)var_draw;  /* couleur morte (27/09) */
     int j, c;
 
     for (j = 0; j < pl->n; j++) {
@@ -10346,9 +10546,11 @@ static long geom_render_array(void *ctx, long indexed, unsigned long mode,
        en logiciel (_gleForceToSoftwareTCL) : l'EndPrimitiveBuffer ne viendra
        jamais. On referme NOTRE `pend` et on rend sa place. */
     pend_close(p, 1);
+    var_draw = 1;
     r = geom_draw_client(p, indexed, mode, first, count,
                          indexed ? itype : VA_ITYPE_NONE,
                          indexed ? indices : 0) ? 1 : 0;
+    var_draw = 0;
     if (!r && p) {
         G.n_geomdrop++;
         /* Un dessin trop grand ou un tableau incomplet : on jette CE lot.
@@ -11634,6 +11836,9 @@ typedef struct { float x, y; } CgPoint;
 #define GD_CID   0x80             /* connexion CGS */
 #define GD_WID   0x84             /* fenêtre */
 #define GD_SID   0x90             /* surface de la fenêtre */
+#define GD_TSID  0x88             /* 27/09 : identifiant de surface que CGLGetSurface rend,
+                                     et qu'aglSurfaceTexture range dans la texture
+                                     (TP_SURF_SID) — relevé scène rtt, ≠ GD_SID */
 #define DIRECT_RECHECK   10       /* images entre deux réévaluations */
 #define DIRECT_REFRESH   90       /* en fenêtre : un échange normal de temps en temps */
 /* F7 : `ok`, le rectangle (x, y) et la date de la dernière vérification sont
@@ -11666,6 +11871,285 @@ static struct {
     void         *(*best_mode)(unsigned long, unsigned long, unsigned long, unsigned long, int *);
     int           (*switch_mode)(unsigned long, void *);
 } D;
+
+/* ─────────────── v20 : rendu vers texture (Colin McRae, 27/09/2026) ───────────────
+ *
+ * IndirectX (RenderTargetMethod 1, docs/re/cmr-rendu-vers-texture.md) rend ses
+ * cibles de rendu Direct3D dans des FENÊTRES jamais montrées (CreateNewWindow
+ * sans ShowWindow), une par contexte AGL, et les échantillonne dans le
+ * contexte plein écran par aglSurfaceTexture : l'image de la texture est le
+ * tampon avant du drawable source, mis à jour à chaque aglSwapBuffers.
+ *
+ *   - La source est retrouvée par l'identifiant de surface CGS que GLEngine
+ *     range dans la texture (TP_SURF_SID) : celui du drawable du contexte
+ *     (GD_SID).
+ *   - À l'échange de la source, chaque texture qui la vise reçoit un SURF_TEX
+ *     (copie sur l'hôte de la surface vers la texture) ; à la première
+ *     utilisation, la texture est créée et remplie de même.
+ *   - L'échange d'un drawable CACHÉ (fenêtre absente de l'écran) ne présente
+ *     rien et ne rend pas la main à Apple : son image n'existe que sur l'hôte,
+ *     où les textures de surface la prennent. */
+
+static void direct_init_once(void);
+/* Contexte dont le drawable est la surface CGS `sid`, ou 0. Verrou tenu. */
+static PCtx *surf_source(unsigned long sid)
+{
+    PCtx *q;
+    if (!sid)
+        return 0;
+    for (q = G.list; q; q = q->next) {
+        unsigned char *gd = (unsigned char *)GLD_U32(q->ctx, 4);
+        if (gd && GLD_U32(gd, GD_TSID) == sid)
+            return q;
+    }
+    {
+        static int told;
+        if (told < 4) {
+            told++;
+            gl_note("SURFTEX : aucune source pour la surface %lx ; drawables :", sid);
+            for (q = G.list; q; q = q->next) {
+                unsigned char *gd = (unsigned char *)GLD_U32(q->ctx, 4);
+                gl_note(" [%p qctx %ld wid %lx sid %lx]", q->ctx, (long)q->qctx,
+                        gd ? GLD_U32(gd, GD_WID) : 0, gd ? GLD_U32(gd, GD_TSID) : 0);
+            }
+            gl_note("\n");
+        }
+    }
+    return 0;
+}
+
+/* SURF_TEX : la surface hôte de `src` devient le niveau 0 de t. Verrou tenu. */
+static void surftex_copy(PCtx *p, PTex *t, PCtx *src)
+{
+    unsigned long *c;
+    if (t->qtex < 0 || src->surf < 0)
+        return;
+    if (src->color == SW_NEWER) {
+        /* l'image la plus récente est dans l'invité (repli d'Apple) : la
+           copie hôte serait périmée — compté, pas copié */
+        G.n_surftex_sw++;
+        return;
+    }
+    c = reserve(p, QGPU_LEN_SURF_TEX);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX);
+    c[1] = t->qtex;
+    c[2] = tex_is_rect(t) ? QGPU_TT_RECTANGLE : QGPU_TT_2D;
+    c[3] = 0;
+    c[4] = src->surf;
+    t->surf_gen = src->swap_gen;
+    t->surf_copied = 1;
+    G.n_surftex++;
+}
+
+/* upload_texture d'une texture de surface : objet hôte, paramètres, image. */
+static int upload_surftex(PCtx *p, PTex *t, unsigned long sid)
+{
+    unsigned char *gp = (unsigned char *)GLD_U32(t->drvtex, DT_PARAMS);
+    static const unsigned long keys[4] = {
+        QGPU_TP_MIN_FILTER, QGPU_TP_MAG_FILTER, QGPU_TP_WRAP_S, QGPU_TP_WRAP_T };
+    unsigned long prm[4], *c;
+    int rect = tex_is_rect(t), k;
+    PCtx *src = surf_source(sid);
+
+    if (!src || src->qctx < 0)
+        return no(NO_TEX_SURF, sid, src ? 1 : 0);
+    if (t->qtex < 0) {
+        t->qtex = alloc_tex_id(p);
+        if (t->qtex < 0)
+            return no(NO_TEX_ID, 0, 0);
+        c = reserve(p, QGPU_LEN_TEX_CREATE3);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3);
+        c[1] = t->qtex;
+        c[2] = rect ? QGPU_TT_RECTANGLE : QGPU_TT_2D;
+        t->prm_valid = 0;
+        t->surf_copied = 0;
+        VD_BUMP();
+        {
+            static int told;
+            if (told < 8) {
+                told++;
+                gl_note("SURFTEX tex %p (%s) sid %lx -> source %p qctx %ld surf %ld %lux%lu, qtex %ld\n",
+                        t->drvtex, rect ? "rectangle" : "2D", sid, src->ctx, (long)src->qctx,
+                        (long)src->surf, src->sw, src->sh, (long)t->qtex);
+            }
+        }
+    }
+    /* son contenu n'existe que sur l'hôte : jamais évincée (P15) */
+    t->host_only = 1;
+    t->dirty = 0;
+    t->last_use = ++G.tex_clock;
+    prm[0] = gp ? U16(gp, TP_MIN) : 0x2601;
+    prm[1] = gp ? U16(gp, TP_MAG) : 0x2601;
+    prm[2] = gp ? U16(gp, TP_WRAP_S) : 0x812F;
+    prm[3] = gp ? U16(gp, TP_WRAP_T) : 0x812F;
+    /* un seul niveau : pas de filtre à mipmaps ; rectangle : répétitions bornées */
+    if (prm[0] != 0x2600 && prm[0] != 0x2601)
+        prm[0] = (prm[0] == 0x2700 || prm[0] == 0x2702) ? 0x2600 : 0x2601;
+    for (k = 2; k < 4 && rect; k++)
+        if (prm[k] == 0x2901 || prm[k] == 0x8370)
+            prm[k] = 0x812F;
+    for (k = 0; k < 4; k++) {
+        if (t->prm_valid && t->prm[k] == prm[k])
+            continue;
+        c = reserve(p, QGPU_LEN_TEX_PARAM);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_PARAM, QGPU_LEN_TEX_PARAM);
+        c[1] = t->qtex; c[2] = keys[k]; c[3] = prm[k];
+        t->prm[k] = prm[k];
+    }
+    for (k = 4; k < 14; k++)
+        t->prm[k] = ~0UL;               /* jamais envoyés : à renvoyer si la
+                                           texture redevient ordinaire */
+    t->prm_valid = 1;
+    if (!t->surf_copied || t->surf_gen != src->swap_gen)
+        surftex_copy(p, t, src);
+    return 1;
+}
+
+/* Échange de p : son tampon avant change, les textures qui le visent aussi. */
+static void surftex_swapped(PCtx *p)
+{
+    unsigned char *gd = (unsigned char *)GLD_U32(p->ctx, 4);
+    unsigned long sid = gd ? GLD_U32(gd, GD_TSID) : 0;
+    PTex *t;
+    p->swap_gen++;
+    if (!G.surftex || !sid)
+        return;
+    for (t = G.textures; t; t = t->next)
+        if (t->surf && t->surf_sid == sid && t->qtex >= 0)
+            surftex_copy(p, t, p);
+}
+
+
+/* Vidage autonome (POMPPC_GL_DUMP_TRIGGER) : les textures dont l'image
+ * n'existe que sur l'hôte sont relues (TEX_READBACK, synchrone) et renvoyées
+ * en TEX_IMAGE3 dans le flux — donc dans le vidage : le rejeu natif les a,
+ * et l'image qu'il produit est celle de la VM (carrosserie de Colin McRae,
+ * reflet rendu vers texture pendant le chargement). Outil seulement : jamais
+ * sans déclencheur. Verrou tenu. */
+static void dump_readback_textures(PCtx *p)
+{
+    PTex *t;
+    int n = 0;
+    G.dump_rb_pending = 0;
+    for (t = G.textures; t; t = t->next) {
+        unsigned long off, off2, *c, max, w, h, d, base, tgt;
+        unsigned char *copy;
+        if (!t->dump_rb)
+            continue;
+        t->dump_rb = 0;
+        if (t->qtex < 0 || tex_is_cube(t) || tex_is_3d(t))
+            continue;
+        tgt = tex_is_rect(t) ? QGPU_TT_RECTANGLE : QGPU_TT_2D;
+        max = 16 + (unsigned long)QGPU_MAX_TEX_DIM * 1024UL * 4UL;     /* 2048 × 1024 au plus */
+        if (!arena_fits(max))
+            max = G.half - ARENA_OFF - 64;
+        flush();
+        if (!arena_alloc(max, &off))
+            continue;
+        c = reserve(p, QGPU_LEN_TEX_READBACK);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_READBACK, QGPU_LEN_TEX_READBACK);
+        c[1] = t->qtex; c[2] = tgt; c[3] = 0; c[4] = G.q.base + off; c[5] = max;
+        flush();
+        drain_all();
+        w = GLD_U32(G.q.win + off, 0);
+        h = GLD_U32(G.q.win + off, 4);
+        d = GLD_U32(G.q.win + off, 8);
+        base = GLD_U32(G.q.win + off, 12);
+        if (!w || !h || d != 1 || 16 + w * h * 4 > max)
+            continue;
+        copy = malloc(w * h * 4);
+        if (!copy)
+            continue;
+        memcpy(copy, G.q.win + off + 16, w * h * 4);
+        if (arena_alloc(w * h * 4, &off2)) {
+            memcpy(G.q.win + off2, copy, w * h * 4);
+            c = reserve(p, QGPU_LEN_TEX_IMAGE3);
+            c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3);
+            c[1] = t->qtex; c[2] = tgt; c[3] = 0;
+            c[4] = w; c[5] = h; c[6] = 1; c[7] = base; c[8] = 0x80E1; c[9] = 0x8367;
+            c[10] = G.q.base + off2; c[11] = w * 4; c[12] = 0;
+            n++;
+        }
+        free(copy);
+    }
+    /* La COULEUR des surfaces aussi : une cible de rendu d'IndirectX n'efface
+       que sa profondeur à chaque image (CLEAR 2), ce qui n'est pas redessiné
+       garde l'image d'avant — le rejeu, parti d'une surface noire, ne l'a pas
+       (reflet de la carrosserie, lu dans la cible 800×600). Relue ici
+       (SURF_READBACK) et réécrite (SURF_UPLOAD) dans le vidage : sans effet
+       sur la VM, l'état exact pour le rejeu. */
+    {
+        PCtx *q;
+        int ns = 0;
+        for (q = G.list; q; q = q->next) {
+            unsigned long off, off2, *c, w = q->sw, h = q->sh, sz = q->sw * q->sh * 4;
+            unsigned char *copy;
+            if (q->qctx < 0 || q->surf < 0 || q->color == SW_NEWER || !w || !h ||
+                !arena_fits(sz))
+                continue;
+            flush();
+            if (!arena_alloc(sz, &off))
+                continue;
+            c = reserve(q, QGPU_LEN_SURF_XFER);
+            c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER);
+            c[1] = q->surf; c[2] = G.q.base + off; c[3] = w * 4;
+            c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
+            flush();
+            drain_all();
+            copy = malloc(sz);
+            if (!copy)
+                continue;
+            memcpy(copy, G.q.win + off, sz);
+            if (arena_alloc(sz, &off2)) {
+                memcpy(G.q.win + off2, copy, sz);
+                c = reserve(q, QGPU_LEN_SURF_XFER);
+                c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_UPLOAD, QGPU_LEN_SURF_XFER);
+                c[1] = q->surf; c[2] = G.q.base + off2; c[3] = w * 4;
+                c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
+                ns++;
+            }
+            free(copy);
+        }
+        flush();
+        gl_note("vidage : %d texture(s) hôte et %d surface(s) relue(s) et renvoyée(s), image %lu\n",
+                n, ns, G.n_frames);
+    }
+}
+
+/* Le drawable de p est-il une fenêtre absente de l'écran (jamais montrée,
+ * comme les cibles de rendu d'IndirectX) ? Réévalué toutes les
+ * DIRECT_RECHECK images, ou quand la fenêtre change. Verrou tenu. */
+static int drawable_hidden(PCtx *p)
+{
+    unsigned char *gd;
+    long cid, wid, list[96], n = 0, i;
+    if (!G.hidden || p->fullscreen_buf)
+        return 0;
+    gd = (unsigned char *)GLD_U32(p->ctx, 4);
+    if (!gd)
+        return 0;
+    cid = GLD_U32(gd, GD_CID);
+    wid = GLD_U32(gd, GD_WID);
+    if (!wid)
+        return 0;
+    if (p->hid_checked_at && (unsigned long)wid == p->hid_wid &&
+        G.n_frames - p->hid_checked_at < DIRECT_RECHECK)
+        return p->hid;
+    direct_init_once();
+    p->hid = 0;
+    if (D.onscreen_list && D.onscreen_list(cid, 0, 96, list, &n) == 0 && n > 0 && n <= 96) {
+        for (i = 0; i < n && list[i] != wid; i++)
+            ;
+        p->hid = i == n;
+    }
+    if (p->hid != 0 && !p->hid_checked_at)
+        gl_note("drawable caché : %p fenêtre %lx %lux%lu (%ld fenêtres à l'écran)\n",
+                p->ctx, (unsigned long)wid, GLD_U32(p->ctx, CTX_WIDTH),
+                GLD_U32(p->ctx, CTX_HEIGHT), n);
+    p->hid_wid = (unsigned long)wid;
+    p->hid_checked_at = G.n_frames ? G.n_frames : 1;
+    return p->hid;
+}
 
 /* P5 — LE JOURNAL D'APPOINT, DERRIÈRE UNE VARIABLE D'ENVIRONNEMENT.
  *
@@ -12480,19 +12964,30 @@ static int try_copy_tex(PCtx *p, unsigned long *a)
     unsigned long w = a[8], h = a[9];
     unsigned long hy, *c;
     PTex *t;
+    int own = 0;                        /* cible = celle de la texture (a[2] = 0) */
 
     /* 24/09/2026, DOOM 3 (_currentRender, 5 copies par image, chacune un
        repli avec relecture) : GLEngine appelle ici avec a[2] = 0 et une
        disposition d'un mot plus longue — (ctx, tex, 0, niveau, xoff, yoff,
        zoff, x, y, w, h) : relevé sur les copies de bord (xoff 640, x 639,
        w 1, h 480). Avec a[2] = GL_TEXTURE_2D c'est la disposition d'origine
-       (UT2004, 20/09). */
+       (UT2004, 20/09). 27/09 (Colin McRae) : la même disposition sert aux
+       textures RECTANGLE — la cible est alors celle de la texture. */
     if (target == 0) {
         target = 0x0DE1;
+        own = 1;
         sx = (long)a[7]; sy = (long)a[8]; w = a[9]; h = a[10];
         if (a[6] != 0)
             return 0;                   /* zoff : face de cube ou 3D, à Apple */
+        {
+            PTex *t0 = find_tex(drvtex);
+            if (t0 && tex_is_rect(t0) && G.rect)
+                target = 0x84F5;
+            else if (t0 && (tex_is_cube(t0) || tex_is_3d(t0)))
+                return 0;               /* face de cube, 3D : à Apple (COPY_TEX 2D serait refusé) */
+        }
     }
+    (void)own;
 
     static unsigned long told, told_args;
     if (told_args < 4) {
@@ -12503,7 +12998,7 @@ static int try_copy_tex(PCtx *p, unsigned long *a)
 #define COPYTEX_NO(why) do { if (told < 6) { told++; gl_note("COPY_TEX refuse (%s) : tex %p cible %lx niv %lu " \
         "dst %lu,%lu src %ld,%ld %lux%lu surf %lux%lu couleur %d\n", why, drvtex, target, level, xoff, yoff, \
         sx, sy, w, h, p->sw, p->sh, p->color); } return 0; } while (0)
-    if (!G.pixops || target != 0x0DE1)
+    if (!G.pixops || (target != 0x0DE1 && !(target == 0x84F5 && G.rect)))
         COPYTEX_NO("pixops/cible");
     if (w == 0 || h == 0)
         return 1;
@@ -12517,6 +13012,8 @@ static int try_copy_tex(PCtx *p, unsigned long *a)
     t = intern_tex(drvtex);
     if (!t)
         COPYTEX_NO("texture inconnue");
+    if (tex_is_rect(t) != (target == 0x84F5) || (target == 0x84F5 && level != 0))
+        COPYTEX_NO("cible de la texture");
     /* Destination d'une copie d'écran (_currentRender de DOOM 3, reflets
        d'UT2004) : ses niveaux invité ne sont jamais à jour, et souvent pas
        même lisibles (glTexImage2D(NULL)) — on crée des niveaux noirs sur
@@ -12545,13 +13042,14 @@ static int try_copy_tex(PCtx *p, unsigned long *a)
        l'empreinte diffère au dessin suivant et la texture repart de
        l'invité, ce qui est juste (la texture hôte est perdue). */
     t->host_only = 1;
+    t->cp_frame = 0;                    /* tex_cp : le niveau existe sur l'hôte (27/09) */
     VD_BUMP();                          /* lot 2 */
     t->lv0_sig = tex_lv0_sig(t);
     hy = p->sh - (unsigned long)sy - h;
     c = reserve(p, QGPU_LEN_COPY_TEX);
     c[0] = QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX);
     c[1] = t->qtex;
-    c[2] = QGPU_TT_2D;
+    c[2] = target == 0x84F5 ? QGPU_TT_RECTANGLE : QGPU_TT_2D;
     c[3] = level;
     c[4] = xoff;
     c[5] = yoff;
@@ -13296,6 +13794,21 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
        le débit affiché (vu en vrai). */
     if (slot == PROC_Swap60)
         stats_frame(p->ctx);
+    /* v20 : l'échange change le tampon avant — textures de surface ; un
+       drawable caché s'arrête là (son image n'existe que sur l'hôte). */
+    if (slot == PROC_Swap60 && G.state > 0 && !p->broken && G.dump_rb_pending &&
+        p->qctx >= 0)
+        dump_readback_textures(p);      /* vidage autonome (outil) */
+    if (slot == PROC_Swap60 && G.state > 0 && !p->broken)
+        surftex_swapped(p);
+    if (slot == PROC_Swap60 && G.state > 0 && !p->broken && p->surf >= 0 &&
+        p->color != SW_NEWER && drawable_hidden(p)) {
+        if (G.ncmd)
+            flush();
+        G.n_hidden_swaps++;
+        pthread_mutex_unlock(&G.mu);
+        return direct_noop;
+    }
     if (slot == PROC_Swap60 && present_direct(p)) {
         pthread_mutex_unlock(&G.mu);
         return direct_noop;
@@ -13311,7 +13824,8 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
        image : sans ceci, chaque image était relue deux fois (vu en vrai).
        Plein écran 16 bits : present_direct est coupée, même règle. */
     if ((slot == PROC_Swap58 || slot == PROC_Swap5c) && p->color == HOST_NEWER &&
-        (p->fullscreen_buf || (p->direct_at && G.n_frames - p->direct_at <= 1))) {
+        (p->fullscreen_buf || (p->direct_at && G.n_frames - p->direct_at <= 1) ||
+         (p->surf >= 0 && drawable_hidden(p)))) {
         if (G.ncmd)
             flush();
         pthread_mutex_unlock(&G.mu);
@@ -13718,6 +14232,25 @@ void pomppc_drawable_attached(void *ctx, long kind, long result)
             ctx ? GLD_U32(ctx, CTX_COLOR_BITS) : 0);
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
+    /* v20 : IndirectX rattache CHAQUE image la même fenêtre cachée à ses
+       contextes de rendu vers texture (aglSetDrawable). Même fenêtre, même
+       taille, drawable caché : l'image est sur l'hôte et y reste — pas de
+       vidange, pas de SW_NEWER (qui renvoyait le tampon invité, périmé, sur
+       l'hôte au dessin suivant : 400×300 couleur et profondeur par image). */
+    if (p && kind != 54 && result >= 0 && result <= 3 && p->surf >= 0 && p->hid &&
+        !p->fullscreen_buf && ctx && GLD_U32(ctx, CTX_WIDTH) == p->sw &&
+        GLD_U32(ctx, CTX_HEIGHT) == p->sh) {
+        unsigned char *gd = (unsigned char *)GLD_U32(ctx, 4);
+        if (gd && GLD_U32(gd, GD_WID) == p->hid_wid && p->hid_wid) {
+            p->draw_seen = sw_color(p);
+            if (p->color == SYNCED)
+                p->color = HOST_NEWER;
+            if (p->depth == SYNCED)
+                p->depth = HOST_NEWER;
+            pthread_mutex_unlock(&G.mu);
+            return;
+        }
+    }
     if (p && kind != 54 && result >= 0 && result <= 3) {
         drain_all();
         free(p->fullscreen_buf);
@@ -14058,6 +14591,17 @@ static void caps_extensions(unsigned char *cfg)
     }
     if (G.xbar)
         w0 |= 1UL << 2;                 /* GL_ARB_texture_env_crossbar (v12) */
+    /* 27/09 (Colin McRae) : GL_EXT_texture_rectangle + GL_ARB_texture_rectangle
+       (bit 25) et GL_MAX_RECTANGLE_TEXTURE_SIZE (cfg+0xc0, entre la 3D et le
+       cube ; 0 chez Apple). Sans le bit, GLEngine refuse la cible
+       (GL_INVALID_OPERATION à glTexImage2D / glCopyTexImage2D) — IndirectX
+       s'en sert pourtant pour ses réductions d'écran, et le rendu d'Apple ne
+       sait pas l'échantillonner sous programme. L'hôte la tient depuis la
+       v10 ; le plugin depuis le 27/09 (G.rect, scènes rect et rectfp). */
+    if (G.rect) {
+        w0 |= 1UL << 25;
+        GLD_U16(cfg, 0xc0) = QGPU_MAX_TEX_DIM;
+    }
     /* 26/09 : GL_APPLE_vertex_array_range (bit 47) et sa limite (cfg+0x8c,
        0xFFFFF comme les pilotes matériels, 0 chez Apple). IndirectX (Colin
        McRae) garde DEUX copies de chaque tampon de sommets D3D : celle que le
