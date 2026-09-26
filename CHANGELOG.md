@@ -19,7 +19,9 @@ et dans `docs/`.
   états du FPSCR, empreinte identique), mode preuve `x-fp-verify` (Marble Blast : 3,04
   milliards de passages vérifiés, 0 divergence, 99 % par le chemin court). Banc invité : chaîne
   −21 %, transformation de sommets −46 %, `fcmpu` −41 % ; Marble Blast +5 à +8 % (VM
-  quotidienne chargée pendant la mesure). A/B DOOM 3 préparé (§15.8), pas joué.
+  quotidienne chargée pendant la mesure). **DOOM 3** (§15.9, trois parties par mode,
+  placement forcé) : **74,4 → 65,1 ms/image (−12,5 %)**, 13,4 → 15,4 img/s ; partie vérifiée :
+  4,56 milliards de passages, 0 divergence. Défaut à trancher par l'utilisateur.
 - **DOOM 3, un cœur contre deux** (26/09) : SMP=2 74,3 ms/image, SMP=1 80,8 (trois parties
   chacun) : SMP=2 reste le défaut, jeux compris (`docs/smp-coeurs.md` §4.2).
 - **Combien de cœurs ? — pourquoi deux, et pourquoi plus ne rapporte rien aux jeux**
