@@ -1208,3 +1208,44 @@ de cette branche (son `run_tiger.sh` sait `FPINLINE`), placement du JIT forcé p
 
 Lire chaque `info.txt` (« même fenêtre ») et la cinématique comme témoin de régime (§14.7) ;
 écarter une partie lente de bout en bout. Attendu : `fpi-ref` ~74 ms/image, `fpi-on` 67-71.
+Joué : §15.9.
+
+### 15.9 DOOM 3 joué (26/09/2026, 11 h)
+
+VM quotidienne seule sur l'hôte (le QEMU du disque de dev était arrêté), binaire
+`~/src/qemu-fp/build/qfp64` (`fp-scalar19`), SMP=2, `x-fast-fp`, `x-sr-tlb`, `x-lfs-inline`,
+`x-vfp-fast`, `x-vperm-fast` des deux côtés, `x-jit-near`, `demo_mars_city1`, parties
+entrelacées `ref on ref on ref on`, puis une partie `FPVERIFY=1` à part ; journaux
+`bench/tcg/d3/fpi-*` (non versionné). Placement relevé dans chaque `info.txt` : **« même
+fenêtre » 7 fois sur 7**. Témoin de régime : la cinématique (T−400..T).
+
+| partie | `x-fp-inline` | T+50..T+280 | T+50..T+450 | cinématique |
+|---|---|---|---|---|
+| `fpi-ref-1` | éteint | 74,7 | 74,4 | 32,3 |
+| `fpi-on-1` | allumé | **65,1** | 65,0 | 29,0 |
+| `fpi-ref-2` | éteint | 74,1 | 74,1 | 32,5 |
+| `fpi-on-2` | allumé | **65,2** | 65,0 | 29,6 |
+| `fpi-ref-3` | éteint | 74,4 | 74,2 | 33,0 |
+| `fpi-on-3` | allumé | **64,8** | 64,8 | 33,5 |
+
+(ms/image.) **Médianes : 74,4 → 65,1 ms/image, −12,5 %** (T+50..T+450 : 74,2 → 65,0,
+−12,4 %). Écart entre parties d'un même mode : 0,8 % (référence), 0,6 % (allumé) ; aucune
+partie lente de bout en bout, cinématiques dans le régime normal (29-34 ms/image ; la
+partie aberrante du §14.7 en avait ~40). Le gain dépasse l'attendu (−4 à −10 %) : sur DOOM 3
+le flottant scalaire pesait ~19 % du vCPU, et le fil du jeu est bien la limite. En
+images/s : 13,4 → 15,4.
+
+Partie vérifiée (`FPINLINE=1 FPVERIFY=1`, bilan à la sortie de QEMU dans
+`fpi-verif/run_tiger.log`) : **4 558 916 143 passages vérifiés, 0 divergence**. Replis :
+31,3 M (0,7 %), surtout `fsubs` 17,4 M et `fcmpu` 13,2 M sur FPSCR non amorcé, `fmsubs` 0,66 M
+sur opérandes. (Sa mesure de vitesse n'a pas de sens : le vérificateur ralentit le jeu, la
+détection de T s'en trouve décalée.)
+
+**Gel au chargement** (vCPU 0 bouclant en 0x268b4, signalé ~1 lancement sur 12 par l'agent
+de la matrice A3) : **0 sur 7** lancements ici, dont 4 avec `x-fp-inline` ; rien ne dit
+qu'il soit plus fréquent avec le patch (trop peu de lancements pour dire qu'il l'est moins).
+
+**Verdict** : `x-fp-inline` est exact (preuves du §15.5, 4,6 milliards de passages vérifiés
+en jeu) et rapporte **−12,5 % de ms/image sur DOOM 3**. Proposition : l'allumer par défaut
+(`FPINLINE` à 1 dans `run_tiger.sh`, `tcg/0007` dans le binaire de référence) — décision de
+l'utilisateur. La VM quotidienne a été rendue sur le QEMU de référence `~/src/qemu`, sans jeu.
