@@ -127,21 +127,49 @@ class Hote:
         """Redémarre l'invité (après DOOM 3 : kCGLBadDisplay) ; panique
         AppleUSBOHCI au démarrage (~1/10) : system_reset et on réessaie."""
         journal("redémarrage de l'invité")
-        self.ssh("echo tiger974 | sudo -S shutdown -r now", delai=30)
-        t0 = time.time()
-        while time.time() - t0 < 120 and self.repond():
-            time.sleep(3)
+        if self.repond():
+            self.ssh("echo tiger974 | sudo -S shutdown -r now", delai=30)
+            t0 = time.time()
+            while time.time() - t0 < 120 and self.repond():
+                time.sleep(3)
+        else:                           # invité gelé (panique, blocage) : RESET d'emblée
+            journal("l'invité ne répond pas : system_reset")
+            self.hmp("system_reset")
         for essai in range(3):
             time.sleep(40)
             if self.attend_ssh(240):
                 time.sleep(30)          # bureau au repos (Finder, Dock, mds)
                 return True
-            journal("pas de ssh après le redémarrage (panique au démarrage ?) : system_reset")
             try:
-                self.hmp("system_reset")
+                if essai < 1:
+                    journal("pas de ssh après le redémarrage (panique au démarrage ?) : system_reset")
+                    self.hmp("system_reset")
+                else:
+                    # 26/09 : après un gel en jeu, deux system_reset de suite restent
+                    # bloqués au démarrage (« cluster IO buffer headers ») ; seul un
+                    # QEMU relancé repart
+                    self.relance_qemu()
             except OSError:
                 return False
         return False
+
+    def relance_qemu(self):
+        """quit au moniteur puis ./run_tiger.sh du dépôt principal, détaché."""
+        journal("QEMU arrêté et relancé (run_tiger.sh)")
+        try:
+            self.hmp("quit")
+        except OSError:
+            pass
+        for _ in range(30):
+            if subprocess.run(["pgrep", "-f", "tiger.qcow2"], capture_output=True).returncode:
+                break
+            time.sleep(1)
+        lock = os.path.join(MAIN, ".run", "tiger.lock")
+        if os.path.exists(lock):
+            os.remove(lock)
+        subprocess.Popen(["./run_tiger.sh"], cwd=MAIN, start_new_session=True,
+                         stdout=open(os.path.join(MAIN, ".run", "run_tiger-matrice.log"), "w"),
+                         stderr=subprocess.STDOUT)
 
     def processus(self, nom):
         """pids des processus dont le nom (ps -c) vaut `nom`."""

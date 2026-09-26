@@ -29,7 +29,7 @@ class UT2004(Jeu):
     titre = "UT2004 Demo"
     famille = "tableaux, VBO, S3TC"
     processus = "ut2004-bin"
-    plancher_ms = 130           # à fixer après le premier tour (~20 img/s en jeu au 23/09)
+    plancher_ms = 38            # 29-30 ms/image au 26/09 (intro d'AS-Convoy, sans déclencheur)
     delai_scene = 900
     dump_images = 60
 

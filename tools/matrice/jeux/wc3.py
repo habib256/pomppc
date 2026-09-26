@@ -4,7 +4,8 @@ Le jeu réclame son CD : l'image « Warcraft III.toast » du dossier du jeu est
 montée (hdiutil) avant le lancement et démontée après. Il s'ouvre en plein
 écran 800×600 (changement de mode de l'écran, contexte plein écran kind 54)
 et arrive seul au menu principal (fond 3D animé, pluie) : c'est la scène
-fixe, fenêtre de mesure aux images 1200..1700 (~48 ms/image au 26/09).
+fixe, fenêtre de mesure aux images 1200..1700 (19,3 ms/image au 26/09, 44 avec le
+déclencheur de vidage).
 
 Fenêtre non automatisée : pas de réglage connu (préférences vides,
 LaunchCFMApp ne passe pas d'arguments au jeu).
@@ -22,7 +23,7 @@ class Warcraft3(Jeu):
     famille = "tableaux"
     processus = "LaunchCFMApp"
     processus_ui = "Warcraft III"
-    plancher_ms = 65
+    plancher_ms = 25            # 19,3 ms/image au menu (26/09, sans déclencheur)
     delai_scene = 400
     dump_images = 20
     non_automatise = {"fen": "s'ouvre en plein écran ; aucun réglage de fenêtre connu "

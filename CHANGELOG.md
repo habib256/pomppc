@@ -8,6 +8,24 @@ et dans `docs/`.
 
 ## Non publié
 
+- **A3 — matrice de jeux automatisée** (26/09, `tools/matrice/`, `docs/matrice-jeux.md`) :
+  `tools/matrice/matrice.py` joue chaque jeu en fenêtre et en plein écran sur la VM
+  quotidienne, deux lancements par cellule (mesure sans déclencheur, puis preuve : vidage
+  déclenché, VM arrêtée pendant le vidage pour la capture, rejeu natif comparé à la capture
+  et rejeu de la référence rangée hors dépôt, empreinte et validation à l'œil dans
+  `tools/matrice/references.csv`), tableau vert/rouge Markdown + CSV. Premier tour
+  (`bench/matrice/20260926-0923`, ~50 min) : **9 cellules vertes sur 11 automatisées** —
+  Marble Blast plein écran 12,4 ms/image, Zenerchi fenêtre 5,2, DOOM 3 78,1 / 73,8, Prey
+  69,6 / 69,8, UT2004 29,5 / 29,0, Warcraft III plein écran 19,3 ; rejeu = VM à 0,00 %
+  partout ; rouge : Marble Blast en fenêtre (fenêtre 1024×768 sous la barre de menus, deux
+  replis par image) ; non automatisés : Zenerchi plein écran, Warcraft III fenêtre,
+  Colin McRae, RTCW (absent du disque). Défauts trouvés : le déclencheur de vidage coûte un
+  `access()` par dessin texturé (DOOM 3 77 → 139 ms/image), `frames.csv` n'est écrit que
+  toutes les 5 s, gel de l'invité au chargement de DOOM 3 suivi de démarrages bloqués
+  après `system_reset` (TODO §2, §5, §6). `tests/qgpu_replay.c` corrigé (surface à la
+  taille présentée, zone présentée, `TEX_CREATE` v3 et `TEX_DESTROY` au prologue) ;
+  `tssh.sh`, `cycle.sh`, `killgame.py` versionnés dans `tools/guest/` (A5, clé hors dépôt) ;
+  `tests/matrice_test.py` dans `run-all.sh`.
 - **DOOM 3, un cœur contre deux** (26/09) : SMP=2 74,3 ms/image, SMP=1 80,8 (trois parties
   chacun) : SMP=2 reste le défaut, jeux compris (`docs/smp-coeurs.md` §4.2).
 - **Combien de cœurs ? — pourquoi deux, et pourquoi plus ne rapporte rien aux jeux**

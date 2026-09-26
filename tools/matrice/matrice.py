@@ -316,6 +316,7 @@ class Cellule:
         <cellule>/mesure/) ; vidage=True : lancement de PREUVE (<cellule>/invite/)."""
         self.h, self.j, self.mode = h, jeu, mode
         self.vidage = vidage
+        self.gele = False
         self.cle = "%s-%s" % (jeu.cle, mode)
         self.dir = os.path.join(tour, self.cle)
         self.sous = "invite" if vidage else "mesure"
@@ -362,7 +363,7 @@ class Cellule:
             h.depose(self.cellule_sh(), G + "/cellule.sh")
             h.ssh("mkdir -p %s && open %s/lance.command" % (self.gd, G))
             lance = time.time()
-            premier = 0
+            premier = muet = 0
             brut, decal = "", 0
             while True:
                 time.sleep(10)
@@ -370,8 +371,15 @@ class Cellule:
                 # relevé INCRÉMENTAL de frames.csv (tail -c +N) : tout relire à
                 # chaque fois coûtait jusqu'à 35 % du processeur invité à sshd
                 # et faussait la mesure (DOOM 3, 26/09)
-                out = h.sortie("tail -c +%d %s/frames.csv 2>/dev/null; echo @@LOG; tail -3 %s/log.txt 2>/dev/null"
-                               % (decal + 1, self.gd, self.gd), delai=60)
+                code, out = h.ssh("tail -c +%d %s/frames.csv 2>/dev/null; echo @@LOG; tail -3 %s/log.txt 2>/dev/null"
+                                  % (decal + 1, self.gd, self.gd), delai=60)
+                if code in (124, 255) or "@@LOG" not in out:
+                    muet += 1
+                    if muet >= 4:       # ~5 min sans ssh : invité gelé (26/09, DOOM 3)
+                        self.gele = True
+                        raise Echec("l'invité ne répond plus (gelé ? image %s)" % (max(rows) if rows else "aucune"))
+                    continue
+                muet = 0
                 fr, _, log = out.partition("@@LOG")
                 fin = fr.rfind("\n") + 1           # on ne garde que des lignes entières
                 brut += fr[:fin]
@@ -427,6 +435,9 @@ class Cellule:
         except Echec as e:
             self.res["motifs"].append(str(e))
         finally:
+            if self.gele:
+                # rien ne passe par ssh : RESET, puis on rend les réglages
+                h.redemarre()
             try:
                 j.arreter(h)
             finally:
@@ -442,7 +453,7 @@ class Cellule:
             shutil.rmtree(os.path.join(self.dir, self.sous), ignore_errors=True)
             os.rename(os.path.join(self.dir, nom), os.path.join(self.dir, self.sous))
         h.ssh("rm -rf %s" % self.gd)               # le vidage pèse : on ne le laisse pas dans l'invité
-        if j.redemarrer_apres:
+        if j.redemarrer_apres and not self.gele:
             if not h.redemarre():
                 self.res["motifs"].append("l'invité ne redémarre pas")
         self.res["duree_s"] = int(time.time() - t0)
@@ -704,13 +715,19 @@ def main():
     for k in ordre:
         j = jeux[k]
         for mode in MODES:
+            if mode in j.non_automatise:     # toujours au tableau, avec sa raison
+                if (k in choisis and mode in modes) or not a.jeux:
+                    resultats.append({"jeu": j.titre, "mode": NOM_MODE[mode], "verdict": "non automatisé",
+                                      "motifs": [j.non_automatise[mode]], "dossier": ""})
+                    ecrit_tableau(tour, resultats, jeux)
+                elif a.reprendre:
+                    resultats.append(anciens.get((k, mode)) or {
+                        "jeu": j.titre, "mode": NOM_MODE[mode], "verdict": "non automatisé",
+                        "motifs": [j.non_automatise[mode]], "dossier": ""})
+                continue
             if k not in choisis or mode not in modes:
                 if (k, mode) in anciens:
                     resultats.append(anciens[(k, mode)])
-                continue
-            if mode in j.non_automatise:
-                resultats.append({"jeu": j.titre, "mode": NOM_MODE[mode], "verdict": "non automatisé",
-                                  "motifs": [j.non_automatise[mode]], "dossier": ""})
                 continue
             res = joue_cellule(h, j, mode, tour, a)
             c = Cellule(h, j, mode, tour)
