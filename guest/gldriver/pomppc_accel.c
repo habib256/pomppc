@@ -117,7 +117,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260924-liste"
+#define POMPPC_PLUGIN_REV "20260926-memo"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -549,8 +549,8 @@ static PProg pprog[PPROG_MAX];
 #define LAZY_WORDS 5
 #define LAZY_DEFAULT 1          /* sans POMPPC_GL_LAZYAPPLE */
 #define WL_DEFAULT   1          /* lot 3 : sans POMPPC_GL_WHITELIST */
-#define TEXMEMO_DEFAULT 0       /* mémoire des unités : sans POMPPC_GL_TEXMEMO */
-#define STSKIP_DEFAULT  0       /* lot 4 : sans POMPPC_GL_STSKIP */
+#define TEXMEMO_DEFAULT 1       /* mémoire des unités et des textures : sans POMPPC_GL_TEXMEMO */
+#define STSKIP_DEFAULT  1       /* lot 4 : sans POMPPC_GL_STSKIP */
 
 typedef struct PTex {                   /* texture du GLDriver suivie par le plugin */
     struct PTex   *next;
