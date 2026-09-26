@@ -190,7 +190,10 @@ class Hote:
         vitesse sont bruitées quand une autre VM tourne (autre agent)."""
         try:
             ps = subprocess.run(["pgrep", "-fl", "qemu-system"], capture_output=True, text=True).stdout
-            autres = [l for l in ps.splitlines() if "tiger.qcow2" not in l]
+            # seulement les exécutables qemu-system* : `pgrep -f` attrape aussi un
+            # shell dont la ligne de commande contient « qemu-system » (26/09)
+            autres = [l for l in ps.splitlines() if "tiger.qcow2" not in l and len(l.split()) > 1
+                      and os.path.basename(l.split()[1]).startswith("qemu-system")]
             la = subprocess.run(["sysctl", "-n", "vm.loadavg"], capture_output=True, text=True).stdout
             la = la.strip("{} \n").split()[0]
         except OSError:

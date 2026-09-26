@@ -585,6 +585,10 @@ typedef struct PTex {                   /* texture du GLDriver suivie par le plu
     uint64_t       last_use;            /* resident texture LRU, under G.mu */
     unsigned long  cp_frame;            /* lot 1 : `cp` vaut pour l'image cp_frame−1 */
     unsigned int   cp;                  /*   CP_COMPLETE | CP_BASE (tex_cp) */
+    unsigned long  hook_gen;            /* mémoire par texture (TEXMEMO) : avance à chaque
+                                           crochet qui touche l'objet (niveaux, paramètres,
+                                           sous-images, vidage de l'état hôte) */
+    unsigned long  ok_gen;              /*   hook_gen quand ok_frame a été posé */
 } PTex;
 
 typedef struct TexUnit {
@@ -618,6 +622,11 @@ typedef struct PCtx {
     unsigned long  st_sw, st_sh, st_sbits;
     unsigned char *draw_seen;           /* tampon de dessin connu */
     unsigned long  direct_at;           /* n° de la dernière image présentée directement */
+    /* mémoire des unités (TEXMEMO) : dernier objet de GLEngine vu à chaque
+       unité et son PTex, valables tant qu'aucun PTex n'a été libéré */
+    void          *us_dt[8];
+    struct PTex   *us_t[8];
+    unsigned long  us_del;
     unsigned char *fullscreen_buf;      /* owned software back buffer for CGL fullscreen */
     unsigned long  fullscreen_w, fullscreen_h;
     int            stencil;             /* la surface hôte a un stencil ; sa fraîcheur est
@@ -2315,6 +2324,7 @@ static void invalidate_mirrors(void)
         t->prm_valid = 0;
         t->dirty = 1;                   /* le TEX_IMAGE3 perdu doit repartir */
         t->cp_frame = 0;                /* lot 1 */
+        t->hook_gen++;
         VD_BUMP();                      /* lot 2 */
         t->lv0_sig = 0;
         t->host_only = 0;
@@ -3132,8 +3142,10 @@ void pomppc_texture_changed(void *drvtex, int levels)
     pthread_mutex_lock(&G.mu);
     t = intern_tex(drvtex);
     VD_BUMP();                          /* lot 2 : niveaux ou paramètres */
-    if (t)
+    if (t) {
         t->cp_frame = 0;                /* lot 1 : complétude à relire */
+        t->hook_gen++;                  /* mémoire par texture */
+    }
     if (t && levels)
         t->dirty = 1;
     pthread_mutex_unlock(&G.mu);
@@ -3701,7 +3713,46 @@ static unsigned long tex_prm_sig(const unsigned char *gp)
 /* upload_texture réussira-t-il ? Prédicat PUR (aucune commande, aucune
  * conversion) : le chemin brut doit trancher au changement d'état, où il ne
  * peut plus se dédire. Une texture déjà téléversée et propre est connue bonne. */
+static int texture_uploadable_full(PTex *t);
+#define US_TOLD 24                      /* écarts TEXMEMO notés en détail */
+static struct {
+    unsigned long fill, hit, same, diff, told, diff_all, tex_hit, tex_same, unit_hit;
+} USC;
 static int texture_uploadable(PTex *t)
+{
+    int memo = 0;
+
+    /* Mémoire par texture et par époque (TEXMEMO) : déjà dite bonne à cette
+       image, et aucun crochet (niveaux, paramètres, sous-images) ne l'a
+       touchée depuis — le format de base et les paramètres (tex_params_ok)
+       n'ont pas pu changer. VERDICTCHECK refait tout et compare. */
+    if (G.texmemo && t->qtex >= 0 && !t->dirty && t->ok_frame == G.n_frames + 1 &&
+        t->ok_gen == t->hook_gen) {
+        if (!G.vcheck) {
+            USC.tex_hit++;
+            return 1;
+        }
+        memo = 1;
+    }
+    if (memo) {
+        int r = texture_uploadable_full(t);
+        if (r == 1)
+            USC.tex_same++;
+        else {
+            USC.diff++;
+            USC.diff_all++;
+            if (USC.told < US_TOLD) {
+                USC.told++;
+                gl_note("TEXMEMO écart texture, image %lu : %08lx gardée bonne, recalcul %d\n",
+                        G.n_frames, (unsigned long)t->drvtex, r);
+            }
+        }
+        return r;
+    }
+    return texture_uploadable_full(t);
+}
+
+static int texture_uploadable_full(PTex *t)
 {
     unsigned char *dt = t->drvtex;
     unsigned long base = GLD_U32(dt, DT_BASE_FORMAT);
@@ -3728,6 +3779,7 @@ static int texture_uploadable(PTex *t)
             VD_BUMP();                  /* lot 2 */
         } else {
             t->ok_frame = G.n_frames + 1;
+            t->ok_gen = t->hook_gen;
             return 1;
         }
     }
@@ -4209,10 +4261,6 @@ static UScan US;
 static unsigned long us_seq;            /* un par verdict ouvert */
 static int us_now;                      /* un verdict est ouvert */
 /* tex_del_epoch : déclaré avec vd_epoch */
-static struct {
-    unsigned long fill, hit, same, diff, told, diff_all;
-} USC;
-#define US_TOLD 24
 
 static const PProg *us_fp(PCtx *p)
 {
@@ -4237,11 +4285,25 @@ static void us_fill(PCtx *p, UScan *s)
             target_probe(p, u, m, units);
         if (m && unit_slot(m) >= 0 && units)
             dt = (void *)GLD_U32(units, u * 0x14 + unit_slot(m) * 4);
-        if (dt)
-            t = find_tex(dt);
+        if (dt) {
+            /* même objet qu'au dernier relevé de cette unité, aucun PTex
+               libéré depuis : même PTex, sans passer par la table */
+            if (s != &US) {
+                t = find_tex(dt);       /* relevé de contrôle : tout relire */
+            } else if (p->us_dt[u] == dt && p->us_t[u] && p->us_del == tex_del_epoch) {
+                t = p->us_t[u];
+                USC.unit_hit++;
+            } else {
+                t = find_tex(dt);
+                p->us_dt[u] = dt;
+                p->us_t[u] = t;
+            }
+        }
         s->mask[u] = m;
         s->dt[u] = dt;
         s->t[u] = t;
+        if (s == &US)
+            p->us_del = tex_del_epoch;
         /* texturing_on, sans s'arrêter à la première unité (même résultat) */
         if (!s->on && m) {
             if (unit_slot(m) < 0 || !units)
@@ -4303,8 +4365,13 @@ static UScan *us_get(PCtx *p)
 /* PTex de l'unité u (intern_tex à la demande, comme les boucles d'origine). */
 static PTex *us_tex(UScan *s, int u)
 {
-    if (!s->t[u] && s->dt[u])
+    if (!s->t[u] && s->dt[u]) {
         s->t[u] = intern_tex(s->dt[u]);
+        if (s == &US && s->p) {
+            s->p->us_dt[u] = s->dt[u];
+            s->p->us_t[u] = s->t[u];
+        }
+    }
     return s->t[u];
 }
 
@@ -5189,8 +5256,7 @@ static void send_state(PCtx *p, const TexInfo *ti, int raw)
            p->st_raw == raw && p->st_sw == p->sw && p->st_sh == p->sh &&
            p->st_stencil == p->stencil && p->st_sbits == sbits;
     if (skip) {
-        memcpy(v, p->st, sizeof(v));
-        state_units(p, ti, v);
+        state_units(p, ti, v);          /* seules clés qui peuvent avoir bougé */
         state_progs(p, v);
         STC.skip++;
     } else {
@@ -5230,9 +5296,64 @@ static void send_state(PCtx *p, const TexInfo *ti, int raw)
     /* v17 : les unités 4..7 (texturage, GL_COMBINE, biais de LOD), les deux
        chemins ; un device plus ancien refuserait ces clés */
     if (G.units > 4) { rg[nr].lo = QGPU_SK_TEXTURE4; rg[nr].hi = QGPU_SK_TEX_LOD_BIAS4 + 4; nr++; }
-    if (skip && G.stcheck) {            /* lot 4, contrôle : calcul complet comparé */
-        unsigned long w[QGPU_SK_COUNT];
-        int d = 0, first = -1;
+    if (skip && !G.stcheck) {
+        /* Lot 4 : seules les clés des unités (verdict) et des programmes
+           peuvent différer de p->st ; on ne compare qu'elles, dans l'ordre des
+           plages (même flux qu'avec le calcul complet). Liste faite une fois :
+           les plages ne dépendent que des capacités du device. */
+        static int hot[QGPU_MAX_UNITS * 6 + 2], nhot = -1;
+        int i;
+        if (nhot < 0) {
+            static unsigned char is_hot[QGPU_SK_COUNT];
+            int u;
+            for (u = 0; u < QGPU_MAX_UNITS; u++) {
+                int kb = QGPU_SK_UNIT(u);
+                is_hot[kb + QGPU_SK_U_ENABLE] = is_hot[kb + QGPU_SK_U_BIND] = 1;
+                is_hot[kb + QGPU_SK_U_ENV_MODE] = is_hot[kb + QGPU_SK_U_ENV_COLOR] = 1;
+                is_hot[QGPU_SK_COMBINE(u)] = is_hot[QGPU_SK_COMBINE_SRC(u)] = 1;
+            }
+            is_hot[QGPU_SK_VERTEX_PROGRAM] = is_hot[QGPU_SK_FRAGMENT_PROGRAM] = 1;
+            nhot = 0;
+            for (r = 0; r < nr; r++)
+                for (k = rg[r].lo; k < rg[r].hi; k++)
+                    if (is_hot[k] && nhot < (int)(sizeof(hot) / sizeof(hot[0])))
+                        hot[nhot++] = k;
+        }
+        for (i = 0; i < nhot; i++) {
+            k = hot[i];
+            if (p->st[k] == v[k])
+                continue;
+            c = reserve(p, QGPU_LEN_SET_STATE);
+            c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
+            c[1] = k;
+            c[2] = v[k];
+            p->st[k] = v[k];
+        }
+        if (G.v8 && p->st[QGPU_SK_POLYGON_STIPPLE])
+            send_polygon_stipple(p);
+        return;
+    }
+    if (skip) {                         /* lot 4, contrôle : calcul complet comparé */
+        unsigned long w[QGPU_SK_COUNT], hv[QGPU_MAX_UNITS * 6 + 2];
+        int d = 0, first = -1, u, n = 0;
+        /* le vecteur sauté : p->st, plus les clés refaites */
+        for (u = 0; u < QGPU_MAX_UNITS; u++) {
+            int kb = QGPU_SK_UNIT(u);
+            hv[n++] = v[kb + QGPU_SK_U_ENABLE]; hv[n++] = v[kb + QGPU_SK_U_BIND];
+            hv[n++] = v[kb + QGPU_SK_U_ENV_MODE]; hv[n++] = v[kb + QGPU_SK_U_ENV_COLOR];
+            hv[n++] = v[QGPU_SK_COMBINE(u)]; hv[n++] = v[QGPU_SK_COMBINE_SRC(u)];
+        }
+        hv[n++] = v[QGPU_SK_VERTEX_PROGRAM];
+        hv[n++] = v[QGPU_SK_FRAGMENT_PROGRAM];
+        memcpy(v, p->st, sizeof(v));
+        for (u = 0, n = 0; u < QGPU_MAX_UNITS; u++) {
+            int kb = QGPU_SK_UNIT(u);
+            v[kb + QGPU_SK_U_ENABLE] = hv[n++]; v[kb + QGPU_SK_U_BIND] = hv[n++];
+            v[kb + QGPU_SK_U_ENV_MODE] = hv[n++]; v[kb + QGPU_SK_U_ENV_COLOR] = hv[n++];
+            v[QGPU_SK_COMBINE(u)] = hv[n++]; v[QGPU_SK_COMBINE_SRC(u)] = hv[n++];
+        }
+        v[QGPU_SK_VERTEX_PROGRAM] = hv[n++];
+        v[QGPU_SK_FRAGMENT_PROGRAM] = hv[n++];
         compute_state(p, ti, w, raw);
         for (r = 0; r < nr; r++)
             for (k = rg[r].lo; k < rg[r].hi; k++)
@@ -9765,9 +9886,10 @@ static void vd_frame(void)
                     "%lu écarts (%lu depuis le début)\n", G.n_frames, STC.skip, STC.full,
                     STC.same, STC.diff, STC.diff_all);
         if (G.texmemo)
-            gl_note("TEXMEMO image %lu : %lu relevés, %lu repris ; contrôle : %lu identiques, "
-                    "%lu écarts (%lu depuis le début)\n", G.n_frames, USC.fill, USC.hit,
-                    USC.same, USC.diff, USC.diff_all);
+            gl_note("TEXMEMO image %lu : %lu relevés (%lu unités sans table), %lu repris, "
+                    "%lu textures gardées ; contrôle : %lu identiques, %lu textures identiques, "
+                    "%lu écarts (%lu depuis le début)\n", G.n_frames, USC.fill, USC.unit_hit,
+                    USC.hit, USC.tex_hit, USC.same, USC.tex_same, USC.diff, USC.diff_all);
         if (G.count)
             gl_note("VERDICT image %lu dispatch : %lu non neutres par les seules unités "
                     "(+0x04), dont %lu à table des unités identique\n",
@@ -9781,6 +9903,7 @@ static void vd_frame(void)
     VD.wl_skip = VD.wl_blk = VD.wl_key = VD.wl_none = VD.wl_same = VD.wl_diff = 0;
     VD.wl_uonly = VD.wl_usame = 0;
     USC.fill = USC.hit = USC.same = USC.diff = 0;
+    USC.tex_hit = USC.tex_same = USC.unit_hit = 0;
     STC.skip = STC.full = STC.same = STC.diff = 0;
 }
 
@@ -13190,11 +13313,13 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
         if (t) {
             t->dirty = 1;
             t->cp_frame = 0;            /* lot 1 */
+            t->hook_gen++;
         } else {
             intern_tex((void *)a[1]);
             for (t = G.textures; t; t = t->next) {
                 t->dirty = 1;
                 t->cp_frame = 0;
+                t->hook_gen++;
             }
         }
     }
