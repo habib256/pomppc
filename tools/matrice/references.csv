@@ -2,6 +2,7 @@
 # (vidage + image PPM) sont hors dépôt dans bench/matrice/ref/<cellule>/ ;
 # ici l'empreinte et la validation à l'œil (validee=oui).
 cellule,image,sha256,fichiers,octets,date,validee,note
+cmr-pe,62516,23091da890c19fce7f23a36663becfc24adf0060c18e98e387ce8eab26255b1a,94,66173147,2026-09-27,oui,créée par le tour 20260927-0228 ; validée à l œil le 27/09 (agent rendu vers texture) : départ d ESP 1 Selardu, Mini, chrono 00:16.78, sans aplats blancs
 d3-fen,3141,368d17c262ac328b2aa18b571dde15f302764df219fd2a97832685d4d1905c84,35,23822360,2026-09-26,oui,"créée par le tour 20260926-0824 ; validée à l œil le 26/09 (agent A3) : hangar de Mars City, joueur immobile"
 d3-pe,3369,112d824dd2e727f9d7d97a19d00ed1b959d63ddef4df8271a1e5ae5c86c31cec,126,57498040,2026-09-26,oui,"créée par le tour 20260926-0746 ; validée à l œil le 26/09 (agent A3) : hangar de Mars City, joueur immobile"
 mb-pe,1864,e6ab6c5a6070edf041c18ea70085c65c1ff0acd72e897ef85474d73cc0d35786,105,17510196,2026-09-26,oui,"créée par le tour 20260926-0824 ; validée à l œil le 26/09 (agent A3) : gems.mis, bille au départ"

@@ -192,7 +192,7 @@ version supérieure à 1.1.
 |---|---|---|
 | `GL_MAX_TEXTURE_UNITS` (`cfg+0xb4`) | 8 | 4 accélérées, 5–8 par le repli — **vérifié** (`v15`) |
 | `GL_MAX_TEXTURE_SIZE` (`cfg+0xbc`) | 4096 | ≤ 2048 accéléré (`QGPU_MAX_TEX_DIM`), au-delà par le repli — **vérifié** (`v15`, texture de 4096 de large) |
-| `GL_MAX_3D_TEXTURE_SIZE`, `_CUBE_MAP_`, `_RECTANGLE_` | 0 (Apple) ; **256, 2048, 0** sous le plugin v10 depuis le 19/09/2026 (`cfg+0xbe`, `cfg+0xc2`) | exact : l'hôte tient la 3D jusqu'à `QGPU_MAX_TEX_3D_DIM` et les cubes jusqu'à `QGPU_MAX_TEX_DIM` ; le rectangle reste absent |
+| `GL_MAX_3D_TEXTURE_SIZE`, `_CUBE_MAP_`, `_RECTANGLE_` | 0 (Apple) ; **256, 2048, 0** sous le plugin v10 depuis le 19/09/2026 (`cfg+0xbe`, `cfg+0xc2`) ; rectangle **2048** (`cfg+0xc0`) et bit 25 annoncé depuis le 27/09/2026 (plugin `20260927-rtt`, `POMPPC_GL_RECT=0` pour l'éteindre, `docs/re/cmr-rendu-vers-texture.md`) | exact : l'hôte tient la 3D jusqu'à `QGPU_MAX_TEX_3D_DIM`, les cubes et les rectangles jusqu'à `QGPU_MAX_TEX_DIM` |
 | tailles de point et de ligne | 0,1–50 et 0,1–10 | le device va jusqu'à 64 ; le plugin borne et arrondit comme le fait OpenGL pour les points et lignes non lissés |
 | `GL_MAX_LIGHTS`, `GL_MAX_CLIP_PLANES` | 8, 6 | `QGPU_MAX_LIGHTS` = 8, `QGPU_MAX_CLIP_PLANES` = 6 : exactement ce que l'hôte tient |
 

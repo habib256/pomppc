@@ -1443,8 +1443,9 @@
  *   dessin supplémentaire pour retrouver cette orientation
  *   (docs/re/cmr-rendu-vers-texture.md).
  *
- *   Le plugin l'émet à l'ÉCHANGE du contexte source (aglSwapBuffers : son
- *   tampon avant change), pour chaque texture liée à son drawable.
+ *   Le plugin l'émet quand la texture sert (validation d'unité) : la première
+ *   fois, puis chaque fois que le contexte source a échangé depuis la copie
+ *   (aglSwapBuffers : son tampon avant change).
  *
  *   Refus : texture, surface ou niveau inconnus, cible d'image qui n'est pas
  *   celle de la texture, texture 3D ou cube, niveau ≠ 0 pour un rectangle,
