@@ -110,6 +110,7 @@ référence.
 | Replis par image en course | 0 en course, ~2 800 en démonstration (halo) | **0** |
 | ms par image du jeu au départ (voiture arrêtée) | 70,4 | 70,2 (≈ 14 img/s) |
 | `VERDICTCHECK=1 STATECHECK=1` | 0 écart | **0 écart** jusqu'à l'image 39 500 |
+| Matrice, cellule `cmr-pe` (`tools/matrice/jeux/cmr.py`) | non automatisée | **verte** : tours `20260927-0228` (référence validée) et `20260927-0307` (72,6 ms/image, 0 repli, 0,00 %) |
 | `gltest rect`, `rectfp` | 0x501 | justes |
 | `gltest/rtt 2d`, `rtt rect` (AGL, fenêtre cachée → texture) | Apple : blanc | justes (orientation, tampon avant, mise à jour après échange) |
 

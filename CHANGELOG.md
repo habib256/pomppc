@@ -8,6 +8,29 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Colin McRae : la VM affiche l'image de l'hôte — protocole v20, rendu vers texture** (27/09,
+  `docs/re/cmr-rendu-vers-texture.md`, `docs/protocole-v20-surface-texture.md`). IndirectX rend
+  dans des fenêtres Carbon cachées (800×600, 400×300, 200×150) puis les échantillonne par
+  `aglSurfaceTexture` (drapeau 0x400 de l'objet texture, sid du drawable à +0x88), souvent en
+  texture rectangle. **v20** : `QGPU_OP_SURF_TEX` (surface hôte → niveau de texture, ligne 0 =
+  haut, cap `0x400`) et `QGPU_OP_TEX_READBACK` (outil de vidage, cap `0x800`) ; le cœur lie la
+  texture 0 aux unités qu'un programme de fragments lit sans texture. `qgpu_abi.h` inchangé :
+  pas de kext. Plugin **`20260927-rtt`** : `GL_EXT/ARB_texture_rectangle` annoncés (bit 25),
+  textures de surface copiées dans l'hôte à chaque échange de la source, drawables cachés sans
+  présentation ni relecture (`POMPPC_GL_RECT`, `_SURFTEX`, `_HIDDEN` = 0 pour l'ancien
+  comportement). Les aplats blancs du rejeu du 26/09 (remarque de l'utilisateur) : cibles de
+  halo blanches (texture rectangle hôte jugée incomplète) et quad de fondu du menu repeint en
+  blanc (substitution « couleur morte » sautée sous `GL_APPLE_vertex_array_range`) ; pas le
+  brouillard. Vidage autonome : textures et surfaces hôte relues, `surfaces.txt` pour le rejeu.
+  En course : **0 repli**, capture de la VM = rejeu (0,00 %), 70 ms par image du jeu au départ
+  (3 échanges par image), `VERDICTCHECK`/`STATECHECK` 0 écart. `gltest rect`, `rectfp`,
+  programme `gltest/rtt` (Apple rend blanc). QEMU de référence reconstruit (précédent
+  `*.avant-rect`). **Matrice** : cellule Colin McRae plein écran portée (touches par le
+  moniteur, 3 échanges par image), tour `20260927-0307` **10 vertes sur 11** (Marble Blast
+  fenêtre rouge, connu), vitesses inchangées (DOOM 3 60,3 / 60,5, Prey 69,9 / 70,1, UT2004
+  25,8 / 26,3), Colin McRae 72,6 ms/image. Défauts du harnais trouvés en route : attente de la
+  capture rompue par `surfaces.txt`, rejeu relié à une surface devinée, relecture du vidage
+  trop tardive pour DOOM 3 et Prey.
 - **Colin McRae : la géométrie éclatée résolue** (26/09 au soir, `docs/re/cmr-var.md`). Les
   sommets étaient nuls **avant** le `glDrawElements` du jeu (gltrap `POMPPC_GLTRAP_MEM`), pas
   relus après libération comme on le croyait : IndirectX garde deux copies de chaque tampon de
