@@ -45,6 +45,9 @@
  * (P8). Les deux dernières (arbfp, arbvp) sont celles du protocole v16 :
  * programmes ARB et attributs génériques (Colin McRae).
  *
+ * rect rectfp : textures rectangle, pipeline fixe (et copie d'écran) et
+ * programme de fragments (27/09, Colin McRae).
+ *
  * alpharep arbfp arbvp bigstrip blendc caps clip comb combprobe cube cubeprobe depth
  * depthrt dlist drawpack entry fill fogz forkdraw fusion game gl15
  * gouraud lightprobe lit logicop matbegin matprobe mix mixte mtxprobe
@@ -2792,6 +2795,174 @@ int main(int argc, char **argv)
         glDisableClientState(GL_VERTEX_ARRAY);
         r = (int)glGetError();
         printf("  erreur GL finale = 0x%x\n", (unsigned)r);
+        glFinish();
+    } else if (!strcmp(scene, "rect") || !strcmp(scene, "rectfp")) {
+        /* 27/09 (Colin McRae, docs/re/cmr-rendu-vers-texture.md) : textures
+           RECTANGLE (GL_EXT_texture_rectangle), coordonnées en texels.
+             rect   : pipeline fixe, 2D ET rectangle allumés sur l'unité 0
+                      (masque 0xc d'IndirectX : le rectangle l'emporte) ;
+                      (a) texture 4×2 définie par glTexImage2D ; (b) copie de
+                      l'écran par glCopyTexImage2D puis glCopyTexSubImage2D
+                      (réduction d'IndirectX) et redessin, orientation OpenGL.
+             rectfp : programme de fragments « TEX …, texture[0], RECT »
+                      (c) coordonnées en texels ; (d) programme de sommets qui
+                      les met à l'échelle par program.local[0] (« pixel space
+                      UV » d'IndirectX, TLJF) ; texture liée, JAMAIS allumée.
+           Référence d'Apple : rect oui ; rectfp non (Apple n'annonce pas
+           GL_ARB_fragment_program) — les témoins suffisent. */
+#ifndef GL_TEXTURE_RECTANGLE_EXT
+#define GL_TEXTURE_RECTANGLE_EXT 0x84F5
+#endif
+        typedef void (*gp_f)(GLsizei, GLuint *);
+        typedef void (*bp_f)(GLenum, GLuint);
+        typedef void (*ps_f)(GLenum, GLenum, GLsizei, const GLvoid *);
+        typedef void (*pe_f)(GLenum, GLuint, const GLfloat *);
+        static const GLubyte tx[2][4][4] = {       /* rangée 0 = BAS (OpenGL) */
+            { { 255, 0, 0, 255 }, { 0, 255, 0, 255 }, { 0, 0, 255, 255 }, { 255, 255, 255, 255 } },
+            { { 255, 255, 0, 255 }, { 255, 0, 255, 255 }, { 0, 255, 255, 255 }, { 0, 0, 0, 255 } } };
+        static const unsigned long want[2][4] = {
+            { 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF },
+            { 0xFFFF00, 0xFF00FF, 0x00FFFF, 0x000000 } };
+        static const char fp_rect[] =
+            "!!ARBfp1.0\nTEX result.color, fragment.texcoord[0], texture[0], RECT;\nEND\n";
+        static const char vp_scale[] =
+            "!!ARBvp1.0\n"
+            "PARAM tf = program.local[0];\n"
+            "TEMP t;\n"
+            "DP4 result.position.x, state.matrix.mvp.row[0], vertex.position;\n"
+            "DP4 result.position.y, state.matrix.mvp.row[1], vertex.position;\n"
+            "DP4 result.position.z, state.matrix.mvp.row[2], vertex.position;\n"
+            "DP4 result.position.w, state.matrix.mvp.row[3], vertex.position;\n"
+            "MOV t, vertex.texcoord[0];\n"
+            "MUL t.x, tf.x, t.x;\n"
+            "MUL t.y, tf.y, t.y;\n"
+            "MOV result.texcoord[0], t;\n"
+            "MOV result.color, vertex.color;\n"
+            "END\n";
+        GLuint tex[2], prog[2];
+        int fp = !strcmp(scene, "rectfp"), i, j;
+        gp_f gen = (gp_f)gl_sym("glGenProgramsARB", "glGenProgramsARB");
+        bp_f bind = (bp_f)gl_sym("glBindProgramARB", "glBindProgramARB");
+        ps_f str = (ps_f)gl_sym("glProgramStringARB", "glProgramStringARB");
+        pe_f loc = (pe_f)gl_sym("glProgramLocalParameter4fvARB", "glProgramLocalParameter4fvARB");
+        const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+        /* GLEngine tient la cible même quand le rendu ne l'annonce pas (le
+           GLDriver d'Apple ne l'annonce pas ; IndirectX s'en sert quand même
+           pour ses copies d'écran) : on le dit, sans s'arrêter. */
+        printf("  GL_EXT_texture_rectangle %s\n",
+               ext && (strstr(ext, "GL_EXT_texture_rectangle") || strstr(ext, "GL_ARB_texture_rectangle"))
+               ? "annoncée" : "NON annoncée (cible tenue par GLEngine)");
+        if (fp && (!gen || !bind || !str || !loc)) {
+            printf("FAIL entrées ARB absentes\n");
+            failures++;
+            return 4;
+        }
+        glDisable(GL_DEPTH_TEST);
+        glClearColor(0, 0, 0, 1);
+        glGenTextures(2, tex);
+        glBindTexture(GL_TEXTURE_RECTANGLE_EXT, tex[0]);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_RECTANGLE_EXT, 0, GL_RGBA, 4, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, tx);
+        glTexParameteri(GL_TEXTURE_RECTANGLE_EXT, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_RECTANGLE_EXT, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        printf("  erreur GL après la définition = 0x%x\n", (unsigned)glGetError());
+        if (!fp) {
+            glEnable(GL_TEXTURE_2D);                /* masque 0xc, comme IndirectX */
+            glEnable(GL_TEXTURE_RECTANGLE_EXT);
+        } else {
+            gen(2, prog);
+            bind(0x8804, prog[0]);
+            str(0x8804, 0x8875, (GLsizei)strlen(fp_rect), fp_rect);
+            printf("  fp RECT : erreur GL après ProgramString = 0x%x\n", (unsigned)glGetError());
+            glEnable(0x8804);
+        }
+        /* (a)/(c) quad plein écran, t de 0 (bas) à 2 (haut) : projection y vers
+           le bas, donc le sommet du HAUT de l'écran porte t = 2 */
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBegin(GL_QUADS);
+        glTexCoord2f(0, 2); glVertex2f(0, 0);
+        glTexCoord2f(4, 2); glVertex2f((GLfloat)W, 0);
+        glTexCoord2f(4, 0); glVertex2f((GLfloat)W, (GLfloat)H);
+        glTexCoord2f(0, 0); glVertex2f(0, (GLfloat)H);
+        glEnd();
+        glFinish();
+        for (j = 0; j < 2; j++)
+            for (i = 0; i < 4; i++) {
+                char what[48];
+                snprintf(what, sizeof(what), "%s texel (%d,%d)", fp ? "(c) fp" : "(a) fixe", i, j);
+                check(what, W * i / 4 + W / 8, H - 1 - (H * j / 2 + H / 4), want[j][i]);
+            }
+        if (fp) {
+            /* (d) texcoords normalisés × program.local[0] = (4, 2) */
+            GLfloat tf[4] = { 4, 2, 0, 0 };
+            bind(0x8620, prog[1]);
+            str(0x8620, 0x8875, (GLsizei)strlen(vp_scale), vp_scale);
+            printf("  vp échelle : erreur GL après ProgramString = 0x%x\n", (unsigned)glGetError());
+            loc(0x8620, 0, tf);
+            glEnable(0x8620);
+            /* en TABLEAUX, comme IndirectX (sous programme de sommets, le
+               plugin ne porte un attribut conventionnel que si son tableau est
+               actif : glTexCoord entre glBegin et glEnd n'y arrive pas — limite
+               connue, TODO §2) */
+            {
+                GLfloat vq[4][2], tq[4][2] = { { 0, 1 }, { 1, 1 }, { 1, 0 }, { 0, 0 } };
+                vq[0][0] = 0; vq[0][1] = 0; vq[1][0] = (GLfloat)W; vq[1][1] = 0;
+                vq[2][0] = (GLfloat)W; vq[2][1] = (GLfloat)H; vq[3][0] = 0; vq[3][1] = (GLfloat)H;
+                glColor3f(1, 1, 1);
+                glEnableClientState(GL_VERTEX_ARRAY);
+                glVertexPointer(2, GL_FLOAT, 0, vq);
+                glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+                glTexCoordPointer(2, GL_FLOAT, 0, tq);
+                glClear(GL_COLOR_BUFFER_BIT);
+                glDrawArrays(GL_QUADS, 0, 4);
+                glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+                glDisableClientState(GL_VERTEX_ARRAY);
+            }
+            glFinish();
+            for (j = 0; j < 2; j++)
+                for (i = 0; i < 4; i++) {
+                    char what[48];
+                    snprintf(what, sizeof(what), "(d) vp×local texel (%d,%d)", i, j);
+                    check(what, W * i / 4 + W / 8, H - 1 - (H * j / 2 + H / 4), want[j][i]);
+                }
+            glDisable(0x8620);
+            glDisable(0x8804);
+        } else {
+            /* (b) copie de l'écran dans un rectangle, comme la réduction
+               d'IndirectX : haut rouge, bas vert à gauche, bleu à droite */
+            glDisable(GL_TEXTURE_RECTANGLE_EXT);
+            glDisable(GL_TEXTURE_2D);
+            glEnable(GL_SCISSOR_TEST);
+            glClearColor(0, 1, 0, 1); glScissor(0, 0, W / 2, H); glClear(GL_COLOR_BUFFER_BIT);
+            glClearColor(0, 0, 1, 1); glScissor(W / 2, 0, W - W / 2, H); glClear(GL_COLOR_BUFFER_BIT);
+            glClearColor(1, 0, 0, 1); glScissor(0, H - H / 4, W, H / 4); glClear(GL_COLOR_BUFFER_BIT);
+            glDisable(GL_SCISSOR_TEST);
+            glBindTexture(GL_TEXTURE_RECTANGLE_EXT, tex[1]);
+            glCopyTexImage2D(GL_TEXTURE_RECTANGLE_EXT, 0, GL_RGBA8, 0, 0, W, H, 0);
+            glTexParameteri(GL_TEXTURE_RECTANGLE_EXT, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_RECTANGLE_EXT, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glCopyTexSubImage2D(GL_TEXTURE_RECTANGLE_EXT, 0, 0, 0, 0, 0, W, H);
+            printf("  erreur GL après les copies = 0x%x\n", (unsigned)glGetError());
+            glClearColor(1, 1, 1, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glEnable(GL_TEXTURE_2D);
+            glEnable(GL_TEXTURE_RECTANGLE_EXT);
+            glBegin(GL_QUADS);
+            glTexCoord2f(0, (GLfloat)H); glVertex2f(0, 0);
+            glTexCoord2f((GLfloat)W, (GLfloat)H); glVertex2f((GLfloat)W, 0);
+            glTexCoord2f((GLfloat)W, 0); glVertex2f((GLfloat)W, (GLfloat)H);
+            glTexCoord2f(0, 0); glVertex2f(0, (GLfloat)H);
+            glEnd();
+            glFinish();
+            check("(b) copie : haut rouge", W / 4, H / 8, 0xFF0000);
+            check("(b) copie : bas gauche vert", W / 4, H - H / 8, 0x00FF00);
+            check("(b) copie : bas droite bleu", W - W / 4, H - H / 8, 0x0000FF);
+            glDisable(GL_TEXTURE_RECTANGLE_EXT);
+            glDisable(GL_TEXTURE_2D);
+        }
+        glDeleteTextures(2, tex);
+        printf("  erreur GL finale = 0x%x\n", (unsigned)glGetError());
         glFinish();
     } else if (!strcmp(scene, "arbvpvar")) {
         /* 26/09 : la géométrie éclatée de Colin McRae, reproduite hors du jeu
