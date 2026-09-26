@@ -1,0 +1,13 @@
+# Références d'image de la matrice (docs/matrice-jeux.md §3). Les fichiers
+# (vidage + image PPM) sont hors dépôt dans bench/matrice/ref/<cellule>/ ;
+# ici l'empreinte et la validation à l'œil (validee=oui).
+cellule,image,sha256,fichiers,octets,date,validee,note
+d3-fen,3141,368d17c262ac328b2aa18b571dde15f302764df219fd2a97832685d4d1905c84,35,23822360,2026-09-26,oui,"créée par le tour 20260926-0824 ; validée à l œil le 26/09 (agent A3) : hangar de Mars City, joueur immobile"
+d3-pe,3369,112d824dd2e727f9d7d97a19d00ed1b959d63ddef4df8271a1e5ae5c86c31cec,126,57498040,2026-09-26,oui,"créée par le tour 20260926-0746 ; validée à l œil le 26/09 (agent A3) : hangar de Mars City, joueur immobile"
+mb-pe,1864,e6ab6c5a6070edf041c18ea70085c65c1ff0acd72e897ef85474d73cc0d35786,105,17510196,2026-09-26,oui,"créée par le tour 20260926-0824 ; validée à l œil le 26/09 (agent A3) : gems.mis, bille au départ"
+prey-fen,838,7df0b18ca87ef29ea581b310561f4e6b0b1735b1331b2960771aa8e0d2af3f8b,127,47100856,2026-09-26,oui,créée par le tour 20260926-0746 ; validée à l œil le 26/09 (agent A3) : cinématique de la sauvegarde Fuite
+prey-pe,769,a2eaf2bfb69917b008589d94f762de380a130b7025f0ba4afcca07a845424a00,32,13428308,2026-09-26,oui,créée par le tour 20260926-0746 ; validée à l œil le 26/09 (agent A3) : cinématique de la sauvegarde Fuite
+ut-fen,140,39b61467c6943dfbd41fcb298e10ae68ed5befcb67694c186793e13007864417,5,19480384,2026-09-26,oui,"créée par le tour 20260926-0923 ; validée à l œil le 26/09 (agent A3) : intro d AS-Convoy, convoi texturé"
+ut-pe,369,c9ac8788778e7a841642c17aebcc74fb464cd3ed7ee6c9f30eb050ff6186405e,5,19730252,2026-09-26,oui,"créée par le tour 20260926-0923 ; validée à l œil le 26/09 (agent A3) : intro d AS-Convoy, convoi texturé"
+wc3-pe,1972,41fad2adae7e92dbcaa39d6f88576ca9fe783db216e9664b71f1bd3a999bbf92,26,36681516,2026-09-26,oui,"créée par le tour 20260926-0746 ; validée à l œil le 26/09 (agent A3) : menu principal, texte juste"
+zen-fen,3077,db45a01af266c80a2d6981ab71bac55689e31601e1b469942ba2650735c4d21a,29,18980592,2026-09-26,oui,créée par le tour 20260926-0729 ; validée à l œil le 26/09 (agent A3) : menu d accueil

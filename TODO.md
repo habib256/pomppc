@@ -12,13 +12,13 @@ réorganisation par domaine est dans l'historique git (commit précédant celui 
 
 ---
 
-## 0. Maintenant — état au 25/09/2026
+## 0. Maintenant — état au 26/09/2026
 
 | Chantier | Domaine | État | Preuve qui le fermera |
 |---|---|---|---|
 | Flottant scalaire (`fmuls`, `fmadds`, drapeaux FPSCR) | TCG (§4) | à faire : ~19 % du temps vCPU de DOOM 3 | équivalence prouvée + A/B DOOM 3 (placement forcé, trois parties par mode) |
 | Lots 4 et 5 du verdict unique | Plugin (§2) | à faire | R5 puis `STATECHECK=1` à zéro ; `sample` DOOM 3 comparé à `sample-nat.txt` |
-| Matrice de jeux automatisée (A3) | Outils (§7) | à faire, **prochain chantier de fond** | tableau vert/rouge produit par un script, fenêtre et plein écran |
+| Matrice de jeux automatisée (A3) | Outils (§7) | **harnais fait** (26/09) : `tools/matrice/matrice.py`, 9 vertes sur 11 cellules automatisées, ~50 min le tour | suites : Colin McRae, Zenerchi plein écran, Warcraft III fenêtre ; déclencheur du vidage lu par image (§2) pour un tour en une passe |
 
 **Ordre de fond** (« C : le contrat d'abord », 24/09/2026) : figer le contrat (protocole
 unique, §3), en faire le harnais (A3, §7), puis optimiser et élargir dessous (A2, A4, TCG).
@@ -31,7 +31,10 @@ unique, §3), en faire le harnais (A3, §7), puis optimiser et élargir dessous 
 | Profils de référence | `.run/d3/sample-nat.txt`, `.run/prey/sample.txt` ; TCG : `bench/tcg/` (non versionné) |
 | VM | redémarrages libres autorisés par l'utilisateur ; **un seul agent dessus à la fois** |
 
-**Premier geste à la reprise** : `pgrep -fl qemu-system`, `.run/cmr/tssh.sh uptime`. Mesurer un
+**Avant et après un lot qui touche le plugin, le device ou le cœur** : `tools/matrice/matrice.py`
+(ou `-j … -m …`), tableau dans `bench/matrice/dernier/tableau.md` (`docs/matrice-jeux.md`).
+
+**Premier geste à la reprise** : `pgrep -fl qemu-system`, `tools/guest/tssh.sh uptime`. Mesurer un
 jeu **au premier plan** (sinon repli `Swap60` à chaque image) ; DOOM 3 se mesure en parties
 réelles (`timedemo` refusé par la démo) ; avec `x-jit-near` (défaut) trois parties par mode
 suffisent, en écartant une partie dont la cinématique est lente (§4, troisième facteur).
@@ -49,16 +52,22 @@ une matrice de jeux verte comme preuve. Un jeu est « vert » quand il a ses tro
 2. **zéro repli par image** (`fb=0` dans `frames.csv`) ;
 3. **mesure** — ms/image à une scène fixe, avec un plancher par jeu.
 
-| Jeu | Famille | Image | Replis | Vitesse | Manque |
+Les trois preuves sont produites par `tools/matrice/matrice.py` (`docs/matrice-jeux.md`) :
+rejeu natif du vidage identique à la capture de la VM (0,00 % d'écart partout au 26/09) et
+rejeu de la référence validée à l'œil, replis de `frames.csv` (en fenêtre, 2 par 90 images
+admis : rafraîchissement voulu de la fenêtre), ms/image sans le déclencheur de vidage.
+Dernier tour : `bench/matrice/20260926-0923/tableau.md`.
+
+| Jeu | Famille | Fenêtre | Plein écran | Vitesse à scène fixe (26/09) | Manque |
 |---|---|---|---|---|---|
-| Marble Blast Gold | pipeline fixe | juste | 0 | ~88 img/s | rien (témoin de non-régression) |
-| Zenerchi | pipeline fixe (AGL) | juste | 0 | ~50 img/s | rien (témoin) |
-| DOOM 3 Demo | ARB2, VBO, 7 unités, DXT | **parfaite** (fenêtre et plein écran) | 0 | début du jeu ~80 ms/image (25/09, `x-sr-tlb`), 6-12 img/s en combat | vitesse (§2, §4) ; changement de mode (§6) |
-| Prey Demo | ARB2, VBO, DXT5 | **parfaite** (fenêtre et plein écran) | 0 | 10-22 img/s, « Fuite » ~89 ms/image | vitesse |
-| UT2004 Demo | tableaux, VBO, S3TC | arme en main noire | 0 | ~20 img/s | §6 |
-| Warcraft III | tableaux | texte des menus | ? | jouable | §6 |
-| Colin McRae | ARB via IndirectX | géométrie éclatée en course | 0 | — | §6 |
-| RTCW | idTech3, pipeline fixe | — | — | — | quitte après 8 s (§6) |
+| Marble Blast Gold | pipeline fixe | **rouge** : 2 replis par image (fenêtre 1024×768 sous la barre de menus) | **vert** | 12,4 ms/image (`gems.mis`, plein écran) | fenêtre (§6) |
+| Zenerchi | pipeline fixe (AGL) | **vert** | non automatisé | 5,2 ms/image (menu) | plein écran (§7) |
+| DOOM 3 Demo | ARB2, VBO, 7 unités, DXT | **vert** | **vert** | 78,1 / 73,8 ms/image (Mars City, joueur immobile) | vitesse (§2, §4) ; changement de mode (§6) |
+| Prey Demo | ARB2, VBO, DXT5 | **vert** | **vert** | 69,6 / 69,8 ms/image (« Fuite ») | vitesse |
+| UT2004 Demo | tableaux, VBO, S3TC | **vert** | **vert** | 29,5 / 29,0 ms/image (intro d'AS-Convoy) | arme en main noire, hors de la scène (§6) |
+| Warcraft III | tableaux | non automatisé | **vert** | 19,3 ms/image (menu) | fenêtre (§7) |
+| Colin McRae | ARB via IndirectX | non automatisé | non automatisé | — | géométrie éclatée en course (§6), portage (§7) |
+| RTCW | idTech3, pipeline fixe | non automatisé | non automatisé | — | absent du disque quotidien ; quitte après 8 s (§6) |
 | Bureau (Quartz Extreme) | WindowServer | — | — | — | §5 |
 
 ---
@@ -81,6 +90,15 @@ Verdict unique : lots 0 à 3 faits (CHANGELOG, `docs/re/etude-court-circuit-glen
       `POMPPC_GL_STATECHECK=1` à zéro.
 - [ ] **Lot 5 — bilan** : nouveau `sample` de DOOM 3 à la scène de `sample-nat.txt` ; l'option A
       (crocheter la table de dispatch) est classée si GLEngine reste sous 5 %.
+- [ ] **Déclencheur du vidage lu à chaque dessin** (vu par la matrice, 26/09) : tant que
+      `POMPPC_GL_DUMP_TRIGGER` n'existe pas, `draw_probe` et `cube_probe` font un `access()`
+      par dessin texturé (~40 µs dans l'invité) : DOOM 3 139 ms/image au lieu de 77, Marble
+      Blast 36 au lieu de 12. Le lire une fois par image (dans `dump_submit` ou à l'échange).
+      Épreuve : `tools/matrice/matrice.py --une-passe` donne la même vitesse que la mesure
+      sans déclencheur ; alors la matrice repasse à un lancement par cellule.
+- [ ] **`frames.csv` vidé toutes les 5 s** : la matrice ne peut pas s'en servir comme
+      horloge (elle lit les en-têtes du vidage). Un `fflush` à l'image quand
+      `POMPPC_GL_DUMP_TRIGGER` est posé suffirait. Petit, avec le précédent.
 - [ ] **`VERDICTCHECK=1` sur Warcraft III, UT2004, Colin McRae** (dessins sans dispatch
       possibles, jamais exercés par DOOM 3 et Prey). Épreuve : zéro écart.
 - [ ] **Replis à retirer** une fois la mesure en jeu faite par l'utilisateur :
@@ -186,6 +204,12 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
 - [ ] **`kCGLBadDisplay` après un `killall` de DOOM 3** : tout lancement suivant échoue jusqu'au
       redémarrage de l'invité ; Prey et `gltest` démarrent. Cause non trouvée. Avec A6.
 - [ ] **Créneaux perdus, kext sans constante compilée** (robustesse de session). Avec A6.
+- [ ] **Gel de l'invité au chargement de DOOM 3** (matrice, 26/09, 1 lancement sur ~12) :
+      plus de ssh, vCPU 0 bouclant en `0x268b4` (EE coupé), vCPU 1 en `0xaf6b4`, pas de
+      `panic.log` ; ensuite deux `system_reset` bloqués au démarrage (« using 1966 buffer
+      headers ») : seul un QEMU relancé repart (`tools/matrice/hote.py`, `relance_qemu`).
+      À symboliser (`mach_kernel`) au prochain cas ; relevé des registres dans
+      `docs/matrice-jeux.md` §5.
 
 **Plus tard**
 
@@ -204,8 +228,16 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
 - [ ] **Colin McRae** : GLEngine déroule des tableaux déjà libérés par IndirectX ; onze
       reproductions `gltest arbvp0cmr` n'y arrivent pas (`docs/re/programmes-arb.md` §3 ter).
 - [ ] **Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur reste blanc).
+      Au 26/09 le menu principal est juste (référence de la matrice validée) : à revoir en
+      partie avant de fermer.
+- [ ] **Marble Blast en fenêtre** (matrice, 26/09) : la fenêtre fait toujours 1024×768
+      (taille du bureau, quelle que soit `$pref::Video::resolution`), la barre de menus la
+      recouvre, la présentation directe est coupée : Swap60 et Swap58 repliés à chaque image,
+      ~38 ms/image contre 12 en plein écran. Accepter une fenêtre partiellement hors écran
+      (présentation du rectangle visible) ou trouver le réglage de taille du jeu.
 - [ ] **RTCW** quitte après 8 s (`~/rtcw.command`, LaunchCFMApp) sans rien dessiner ; stdout
-      dans `~/rtcw-dump`. À lancer à la main d'abord.
+      dans `~/rtcw-dump`. **Absent du disque quotidien au 26/09** (`~/Desktop/Wolfenstein`
+      manque) : le réinstaller d'abord.
 
 ---
 
@@ -213,13 +245,15 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
 
 **Ensuite**
 
-- [ ] **A3 — Matrice de jeux automatisée** : un script par jeu (lancement,
-      `POMPPC_GL_DUMP_TRIGGER` à une image fixe, rejeu natif, comparaison avec tolérance,
-      ms/image), **en fenêtre et en plein écran**, tableau vert/rouge à chaque commit. C'est le
-      harnais qui autorise A2 et A4 sans peur. Base existante : `tools/tcg/d3run.sh`
-      (parties DOOM 3, remise au premier plan, détection de fin de cinématique).
-- [ ] **A5 (scripts) — Scripts versionnés** : `.run/cmr/tssh.sh`, `cycle.sh`, `killgame.py`
-      passent dans `tools/guest/` (la clé ssh reste hors dépôt).
+- [ ] **A3, suites** (harnais fait le 26/09 : `tools/matrice/`, `docs/matrice-jeux.md`) :
+      porter Colin McRae (`tools/guest/cycle.sh` : touches jusqu'en course, arrêt par le stub
+      GDB) ; Zenerchi en plein écran et Warcraft III en fenêtre (réglage à trouver, sinon
+      clic par System Events) ; ramener un tour à ~30 min (mesure et preuve dans le même
+      lancement une fois le déclencheur corrigé, §2). Épreuve : plus de cellule « non
+      automatisé » sauf RTCW absent.
+- [ ] **A5 (scripts) — reste** : `tssh.sh`, `cycle.sh`, `killgame.py` sont dans
+      `tools/guest/` (26/09) ; `.run/cmr/` n'a plus que des données. Reste `d3run.sh` à
+      appuyer sur `tools/guest/tssh.sh`.
 - [ ] **Preuves du bug hunt non produites** (`docs/bug-hunt-2026-09-22.md` §11) : kext
       `kextunload` + `SUBMIT` → erreur propre ; `QFB=1` avec Marble Blast ; `run-all.sh` par
       les deux chemins.
@@ -274,6 +308,7 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
 | Sujet | Fichier |
 |---|---|
 | Ce qui est fini (lots, versions du protocole, mesures) | `CHANGELOG.md` |
+| Matrice de jeux (A3) : lancer, preuves, références, pièges | `docs/matrice-jeux.md` |
 | Architecture, rétro-ingénierie, offsets, boucle de dev | `docs/gpu-3d-tiger.md`, `docs/re/README.md` |
 | Protocole (v7 → v19, à fusionner, §3) | `docs/protocole-v*.md` |
 | Processeur émulé : relevés, patches, A/B | `docs/tcg-g4.md`, `docs/flottant-rapide.md` |

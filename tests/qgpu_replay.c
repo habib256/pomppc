@@ -25,6 +25,12 @@ struct dump_hdr {
 #define SHMEM (64u << 20)
 #define VRAM  (32u << 20)
 
+/* Taille des surfaces créées à la volée (surface liée avant le vidage) :
+   QGPU_REPLAY_SURF=LxH, sinon la plus grande zone présentée dans le vidage
+   (x+w, y+h des SURF_PRESENT : fenêtre 640×480, plein écran 1024×768),
+   sinon 800×600. */
+static uint32_t surf_w = 800, surf_h = 600;
+
 static int cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
 static void write_present(const uint8_t *vram, const uint32_t *a, const char *prefix,
@@ -83,6 +89,43 @@ int main(int argc, char **argv)
     }
     closedir(d);
     qsort(names, nn, sizeof(*names), cmp);
+    if (getenv("QGPU_REPLAY_SURF") &&
+        sscanf(getenv("QGPU_REPLAY_SURF"), "%ux%u", &surf_w, &surf_h) == 2) {
+        /* imposé */
+    } else {
+        uint32_t mw = 0, mh = 0;
+        for (i = 0; i < nn; i++) {
+            char path[512];
+            uint8_t raw[64], *cmd;
+            uint32_t ncb, q;
+            FILE *f;
+            snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+            f = fopen(path, "rb");
+            if (!f) continue;
+            if (fread(raw, 64, 1, f) != 1 || qgpu_ld32(raw) != 0x50514431u ||
+                (ncb = qgpu_ld32(raw + 12)) > SHMEM || !(cmd = malloc(ncb ? ncb : 1))) {
+                fclose(f); continue;
+            }
+            if (fread(cmd, 1, ncb, f) == ncb)
+                for (q = 0; q + 1 < ncb / 4; ) {
+                    uint32_t hd = qgpu_ld32(cmd + q * 4), o = QGPU_CMD_OP(hd), l = QGPU_CMD_LEN(hd);
+                    if (!l || q + l > ncb / 4) break;
+                    if (o == QGPU_OP_SURF_PRESENT && l == QGPU_LEN_SURF_PRESENT) {
+                        uint32_t x = qgpu_ld32(cmd + (q + 4) * 4), y = qgpu_ld32(cmd + (q + 5) * 4);
+                        uint32_t w = qgpu_ld32(cmd + (q + 6) * 4), hh = qgpu_ld32(cmd + (q + 7) * 4);
+                        if (x + w > mw && x + w <= 4096) mw = x + w;
+                        if (y + hh > mh && y + hh <= 4096) mh = y + hh;
+                    }
+                    q += l;
+                }
+            free(cmd);
+            fclose(f);
+        }
+        /* exactement la zone présentée : une surface plus haute décale tout
+           (origine en bas, relecture comptée d'en haut — DOOM 3 640×480, 26/09) */
+        if (mw && mh) { surf_w = mw; surf_h = mh; }
+    }
+    fprintf(stderr, "surfaces créées à la volée : %ux%u\n", surf_w, surf_h);
     uint32_t ndraw_frame = 0, ndraw_last_frame = 0xffffffffu;
     for (i = 0; i < nn; i++) {
         char path[512];
@@ -145,7 +188,21 @@ int main(int argc, char **argv)
                 if (o == QGPU_OP_CTX_BIND && id < 256 && !ctx_seen[id] && np + 2 <= 60) {
                     pre[np++] = QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX); pre[np++] = id; ctx_seen[id] = 1;
                 }
-                if (o == QGPU_OP_TEX_CREATE3 && id < QGPU_MAX_TEX) tex_seen[id] = 1;
+                /* TEX_CREATE (v3, sans cible) crée aussi : sans lui, un TEX_IMAGE3
+                   qui suit faisait créer la texture par le prologue et le
+                   TEX_CREATE du flux tombait en LIMIT (Marble Blast, 26/09) */
+                if ((o == QGPU_OP_TEX_CREATE3 || o == QGPU_OP_TEX_CREATE) && id < QGPU_MAX_TEX)
+                    tex_seen[id] = 1;
+                /* texture détruite sans avoir été vue : le vidage autonome
+                   (invalidate_mirrors) détruit ce que l'hôte avait ; on la crée
+                   pour que le TEX_DESTROY ne soit pas un BAD_ARG */
+                if (o == QGPU_OP_TEX_DESTROY && id < QGPU_MAX_TEX && np + 3 <= 4090) {
+                    if (!tex_seen[id]) {
+                        pre[np++] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3);
+                        pre[np++] = id; pre[np++] = QGPU_TT_2D;
+                    }
+                    tex_seen[id] = 0;
+                }
                 /* v14 : tampon hôte créé avant le vidage (Prey, 23/09) : on le
                    crée à la taille maximale, sans quoi BUF_SUBDATA puis tout
                    le reste de la soumission sont jetés (BAD_ARG en cascade). */
@@ -214,7 +271,7 @@ int main(int argc, char **argv)
                 if (o == QGPU_OP_SURF_BIND && bound_ctx < 256) ctx_has_surf[bound_ctx] = 1;
                 if (o == QGPU_OP_SURF_BIND && id < 256 && !surf_seen[id] && np + 5 <= 60) {
                     pre[np++] = QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE); pre[np++] = id;
-                    pre[np++] = 800; pre[np++] = 600;
+                    pre[np++] = surf_w; pre[np++] = surf_h;
                     pre[np++] = QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH | QGPU_FMT_FLAG_STENCIL;
                     surf_seen[id] = 1;
                 }
@@ -229,7 +286,7 @@ int main(int argc, char **argv)
                 uint32_t sid = last_present_surf < 256 ? last_present_surf : 1;
                 if (!surf_seen[sid]) {
                     pre[np++] = QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE); pre[np++] = sid;
-                    pre[np++] = 800; pre[np++] = 600;
+                    pre[np++] = surf_w; pre[np++] = surf_h;
                     pre[np++] = QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH | QGPU_FMT_FLAG_STENCIL;
                     surf_seen[sid] = 1;
                 }
@@ -543,13 +600,31 @@ int main(int argc, char **argv)
                 /* relecture de la surface par le cœur (SURF_READBACK dans une
                    zone de travail), puis PPM : ne dépend pas du scanout */
                 uint32_t rb[9], surf = qgpu_ld32(shmem + h.base + (k + 1) * 4);
-                uint32_t roff = SHMEM - 16384 - 800 * 600 * 4, pres[9];
+                uint32_t pdst = qgpu_ld32(shmem + h.base + (k + 2) * 4);
+                uint32_t pstr = qgpu_ld32(shmem + h.base + (k + 3) * 4);
+                uint32_t px = qgpu_ld32(shmem + h.base + (k + 4) * 4);
+                uint32_t py = qgpu_ld32(shmem + h.base + (k + 5) * 4);
+                uint32_t pw = qgpu_ld32(shmem + h.base + (k + 6) * 4);
+                uint32_t ph = qgpu_ld32(shmem + h.base + (k + 7) * 4);
+                uint32_t roff, pres[9];
+                if (!pw || !ph || pw > 4096 || ph > 4096) { pw = 800; ph = 600; px = py = 0; }
+                roff = SHMEM - 16384 - pw * ph * 4;
                 rb[0] = QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER);
-                rb[1] = surf; rb[2] = roff; rb[3] = 800 * 4; rb[4] = 0; rb[5] = 0; rb[6] = 800; rb[7] = 600;
+                rb[1] = surf; rb[2] = roff; rb[3] = pw * 4; rb[4] = px; rb[5] = py; rb[6] = pw; rb[7] = ph;
                 for (j = 0; j < 8; j++) qgpu_st32(shmem + SHMEM - 8192 + j * 4, rb[j]);
                 if (qgpu_core_execute(&c, SHMEM - 8192, 32) == QGPU_ST_OK) {
-                    pres[0] = surf; pres[1] = roff; pres[2] = 800 * 4; pres[3] = 0; pres[4] = 0;
-                    pres[5] = 800; pres[6] = 600; pres[7] = QGPU_PF_XRGB8888;
+                    /* QGPU_REPLAY_PRESENTS=<fichier> : une ligne par image écrite,
+                       « n image décalage_vram pas l h », pour situer l'image
+                       sur l'écran de la VM (tools/matrice/) */
+                    static FILE *pl;
+                    if (!pl && getenv("QGPU_REPLAY_PRESENTS"))
+                        pl = fopen(getenv("QGPU_REPLAY_PRESENTS"), "w");
+                    if (pl) {
+                        fprintf(pl, "%u %u %u %u %u %u\n", npresent, h.frame, pdst, pstr, pw, ph);
+                        fflush(pl);
+                    }
+                    pres[0] = surf; pres[1] = roff; pres[2] = pw * 4; pres[3] = 0; pres[4] = 0;
+                    pres[5] = pw; pres[6] = ph; pres[7] = QGPU_PF_XRGB8888;
                     write_present(shmem, pres, prefix, npresent++, h.frame);
                 } else {
                     fprintf(stderr, "relecture impossible (image %u, surface %u)\n", h.frame, surf);
