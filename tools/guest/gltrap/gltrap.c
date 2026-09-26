@@ -18,7 +18,8 @@
  * contient un pointeur d'attribut encore en service est journalisé avec la pile
  * de l'appelant (chaîne des cadres PowerPC).
  *
- *   /usr/bin/gcc-4.0 -arch ppc -isysroot /Developer/SDKs/MacOSX10.4u.sdk -O1 -dynamiclib -framework OpenGL -o libgltrap.dylib gltrap.c
+ *   /usr/bin/gcc-4.0 -arch ppc -isysroot /Developer/SDKs/MacOSX10.4u.sdk -O1 -dynamiclib -framework OpenGL \
+ *       -framework AGL -framework Carbon -o libgltrap.dylib gltrap.c
  *   DYLD_INSERT_LIBRARIES=libgltrap.dylib POMPPC_GLTRAP=/tmp/g.txt ./jeu
  */
 #include <stdio.h>
@@ -28,6 +29,7 @@
 #include <OpenGL/gl.h>
 #include <OpenGL/glext.h>
 #include <malloc/malloc.h>
+#include <unistd.h>
 
 static FILE *lf;
 static unsigned long n_calls;
@@ -45,7 +47,12 @@ static void lg(const char *fmt, ...)
     va_start(ap, fmt); vfprintf(lf, fmt, ap); va_end(ap);
 }
 /* dans la fenêtre ? (tout se journalise alors) */
-static unsigned long big_from;          /* "big<seuil>:n" : fenêtre au premier dessin d'au moins seuil sommets */
+static unsigned long big_from;
+/* 27/09 : POMPPC_GLTRAP_AGL=<fichier déclencheur> — dès que le fichier existe
+   (regardé à chaque aglSwapBuffers), TOUT est journalisé pendant
+   POMPPC_GLTRAP_SWAPS échanges (défaut 12) : rendu vers texture d'IndirectX
+   (aglSurfaceTexture, contextes, drawables, copies de texture). */
+static int agl_on;          /* "big<seuil>:n" : fenêtre au premier dessin d'au moins seuil sommets */
 static int win(void)
 {
     if (!win_init) {
@@ -55,7 +62,7 @@ static int win(void)
         if (w && sscanf(w, "big%lu:%lu", &s, &n) == 2) { big_from = s ? s : 500; win_n = n; }
         else if (w && sscanf(w, "%lu:%lu", &s, &n) == 2) { win_start = s; win_n = n; }
     }
-    return n_draws >= win_start && n_draws < win_start + win_n;
+    return agl_on || (n_draws >= win_start && n_draws < win_start + win_n);
 }
 static void draw_seen(unsigned long count)
 {
@@ -153,9 +160,11 @@ static GLenum my_glGetError(void)
     if (e != GL_NO_ERROR && n++ < 100) lg("glGetError -> %x (appel #%lu)\n", e, n_calls);
     return e;
 }
+static void col_dump(unsigned long first, unsigned long n);
 static void my_glDrawArrays(GLenum mode, GLint first, GLsizei count)
 {
     static unsigned long n; draw_seen((unsigned long)count); if (n++ < 40 || win()) lg("glDrawArrays(%x, %d, %d)\n", mode, (int)first, (int)count);
+    col_dump((unsigned long)first, (unsigned long)count);
     glDrawArrays(mode, first, count);
 }
 static void at_dump(const char *when, GLuint i, unsigned long idx);
@@ -171,6 +180,9 @@ static void my_glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLv
     if (w && mem() && !cur_ebuf && idx && count > 0)
         i0 = type == GL_UNSIGNED_SHORT ? ((const GLushort *)idx)[0] : type == GL_UNSIGNED_INT ? ((const GLuint *)idx)[0] : ((const GLubyte *)idx)[0];
     if (w && mem()) { at_dump("avant", 0, i0); at_dump("avant", 1, i0); }
+    if (w && idx && !cur_ebuf && count > 0)
+        col_dump(type == GL_UNSIGNED_SHORT ? ((const GLushort *)idx)[0] : type == GL_UNSIGNED_INT ?
+                 ((const GLuint *)idx)[0] : ((const GLubyte *)idx)[0], 1);
     glDrawElements(mode, count, type, idx);
     if (w && mem()) { at_dump("après", 0, i0); at_dump("après", 1, i0); }
 }
@@ -182,7 +194,9 @@ static void my_glDrawRangeElements(GLenum mode, GLuint a, GLuint b, GLsizei coun
 static void my_glTexImage2D(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum fmt, GLenum type, const GLvoid *px)
 {
     static unsigned long n;
-    if ((target >= 0x8515 && target <= 0x851a) && n++ < 30) lg("glTexImage2D(cube %x, niveau %d, %dx%d, ifmt %x)\n", target, (int)level, (int)w, (int)h, ifmt);
+    if (win() || target == 0x84f5)
+        lg("glTexImage2D(%x, niveau %d, %dx%d, ifmt %x, %x/%x, %p)\n", target, (int)level, (int)w, (int)h, ifmt, fmt, type, px);
+    else if ((target >= 0x8515 && target <= 0x851a) && n++ < 30) lg("glTexImage2D(cube %x, niveau %d, %dx%d, ifmt %x)\n", target, (int)level, (int)w, (int)h, ifmt);
     glTexImage2D(target, level, ifmt, w, h, border, fmt, type, px);
 }
 static const GLubyte *my_glGetString(GLenum name)
@@ -195,8 +209,42 @@ static const GLubyte *my_glGetString(GLenum name)
 /* ── fenêtre : tableaux, états client, tampons, verrous ── */
 static void my_glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *p)
 { if (win()) lg("glVertexPointer(%d, %x, %d, %p)\n", (int)size, type, (int)stride, p); glVertexPointer(size, type, stride, p); }
+static const unsigned char *col_ptr;
+static GLint col_size;
+static GLenum col_type;
+static GLsizei col_stride;
 static void my_glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *p)
-{ if (win()) lg("glColorPointer(%d, %x, %d, %p)\n", (int)size, type, (int)stride, p); glColorPointer(size, type, stride, p); }
+{
+    if (win()) lg("glColorPointer(%d, %x, %d, %p)\n", (int)size, type, (int)stride, p);
+    col_ptr = (const unsigned char *)p; col_size = size; col_type = type; col_stride = stride;
+    glColorPointer(size, type, stride, p);
+}
+/* 27/09 : couleurs réellement passées (tableau de couleurs actif) des premiers
+   sommets d'un dessin de la fenêtre — le voile blanc du menu de Colin McRae */
+static void col_dump(unsigned long first, unsigned long n)
+{
+    unsigned long k, st;
+    GLboolean on = 0;
+    GLfloat cur[4];
+    if (!win()) return;
+    glGetBooleanv(GL_COLOR_ARRAY, &on);
+    glGetFloatv(GL_CURRENT_COLOR, cur);
+    if (!on || !col_ptr || cur_abuf) {
+        lg("   couleur courante %g %g %g %g (tableau %s)\n", cur[0], cur[1], cur[2], cur[3],
+           on ? "actif" : "inactif");
+        return;
+    }
+    st = col_stride ? (unsigned long)col_stride : (unsigned long)col_size * (col_type == GL_FLOAT ? 4 : 1);
+    for (k = first; k < first + n && k < first + 4; k++) {
+        const unsigned char *c = col_ptr + k * st;
+        if (col_type == GL_FLOAT)
+            lg("   couleur[%lu] %g %g %g %g\n", k, ((const float *)c)[0], ((const float *)c)[1],
+               ((const float *)c)[2], col_size > 3 ? ((const float *)c)[3] : 1.0f);
+        else
+            lg("   couleur[%lu] octets %02x %02x %02x %02x (taille %d type %x)\n", k, c[0], c[1], c[2], c[3],
+               (int)col_size, col_type);
+    }
+}
 static void my_glNormalPointer(GLenum type, GLsizei stride, const GLvoid *p)
 { if (win()) lg("glNormalPointer(%x, %d, %p)\n", type, (int)stride, p); glNormalPointer(type, stride, p); }
 static void my_glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *p)
@@ -346,6 +394,83 @@ static void my_glGenVertexArraysAPPLE(GLsizei n, GLuint *a)
 { glGenVertexArraysAPPLE(n, a); lg("glGenVertexArraysAPPLE(%d) -> %u\n", (int)n, a ? (unsigned)a[0] : 0); }
 static void my_glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum t, GLvoid *px)
 { static unsigned long n; if (n++ < 50 || win()) lg("glReadPixels(%d,%d %dx%d %x %x %p)\n", (int)x, (int)y, (int)w, (int)h, f, t, px); glReadPixels(x, y, w, h, f, t, px); }
+
+/* ── 27/09 : AGL et rendu vers texture (POMPPC_GLTRAP_AGL) ── */
+#include <AGL/agl.h>
+#include <Carbon/Carbon.h>
+static unsigned long n_swaps, agl_left;
+static void agl_check(void)
+{
+    static const char *trig = (const char *)-1;
+    if (trig == (const char *)-1) trig = getenv("POMPPC_GLTRAP_AGL");
+    if (!trig || !*trig) return;
+    if (!agl_on && agl_left == 0 && access(trig, F_OK) == 0) {
+        const char *e = getenv("POMPPC_GLTRAP_SWAPS");
+        agl_left = e && *e ? strtoul(e, 0, 10) : 12;
+        agl_on = 1;
+        lg("=== FENÊTRE AGL : échange %lu, %lu échanges\n", n_swaps, agl_left);
+    }
+}
+static void my_aglSwapBuffers(AGLContext c)
+{
+    n_swaps++;
+    agl_check();
+    if (agl_on) lg("aglSwapBuffers(%p) #%lu (courant %p)\n", (void *)c, n_swaps, (void *)aglGetCurrentContext());
+    aglSwapBuffers(c);
+    if (agl_on && --agl_left == 0) { agl_on = 0; agl_left = ~0UL; lg("=== FIN FENÊTRE AGL\n"); }
+}
+static GLboolean my_aglSetCurrentContext(AGLContext c)
+{ static unsigned long n; if (n++ < 60 || agl_on) lg("aglSetCurrentContext(%p)\n", (void *)c); return aglSetCurrentContext(c); }
+static void my_aglSurfaceTexture(AGLContext c, GLenum target, GLenum ifmt, AGLContext s)
+{
+    GLint tex = 0;
+    aglSurfaceTexture(c, target, ifmt, s);
+    glGetIntegerv(target == 0x84f5 ? 0x84f6 : GL_TEXTURE_BINDING_2D, &tex);
+    lg("aglSurfaceTexture(%p, cible %x, ifmt %x, surface de %p) (erreur AGL %x) courant %p texture liée %d\n",
+       (void *)c, target, ifmt, (void *)s, (unsigned)aglGetError(), (void *)aglGetCurrentContext(), (int)tex);
+}
+static GLboolean my_aglSetDrawable(AGLContext c, AGLDrawable d)
+{ GLboolean r = aglSetDrawable(c, d); lg("aglSetDrawable(%p, %p) -> %d\n", (void *)c, (void *)d, (int)r); return r; }
+static AGLContext my_aglCreateContext(AGLPixelFormat pf, AGLContext sh)
+{ AGLContext r = aglCreateContext(pf, sh); lg("aglCreateContext(%p, partagé %p) -> %p\n", (void *)pf, (void *)sh, (void *)r); return r; }
+static GLboolean my_aglSetFullScreen(AGLContext c, GLsizei w, GLsizei h, GLsizei f, GLint dev)
+{ GLboolean r = aglSetFullScreen(c, w, h, f, dev); lg("aglSetFullScreen(%p, %dx%d) -> %d\n", (void *)c, (int)w, (int)h, (int)r); return r; }
+static GLboolean my_aglUpdateContext(AGLContext c)
+{ static unsigned long n; if (n++ < 60 || agl_on) lg("aglUpdateContext(%p)\n", (void *)c); return aglUpdateContext(c); }
+static OSStatus my_CreateNewWindow(WindowClass k, WindowAttributes a, const Rect *b, WindowRef *w)
+{
+    OSStatus r = CreateNewWindow(k, a, b, w);
+    lg("CreateNewWindow(classe %lu, attr %lx, %d,%d-%d,%d) -> %p (%ld)\n", (unsigned long)k, (unsigned long)a,
+       b ? b->left : 0, b ? b->top : 0, b ? b->right : 0, b ? b->bottom : 0, w ? (void *)*w : 0, (long)r);
+    return r;
+}
+static void my_ShowWindow(WindowRef w) { lg("ShowWindow(%p)\n", (void *)w); ShowWindow(w); }
+static void my_MoveWindow(WindowRef w, short h, short v, Boolean f) { lg("MoveWindow(%p, %d, %d)\n", (void *)w, h, v); MoveWindow(w, h, v, f); }
+static void my_SizeWindow(WindowRef w, short x, short y, Boolean f) { lg("SizeWindow(%p, %d, %d)\n", (void *)w, x, y); SizeWindow(w, x, y, f); }
+static void my_glCopyTexImage2D(GLenum t, GLint l, GLenum f, GLint x, GLint y, GLsizei w, GLsizei h, GLint b)
+{ lg("glCopyTexImage2D(%x, %d, %x, %d,%d %dx%d) courant %p\n", t, (int)l, f, (int)x, (int)y, (int)w, (int)h, (void *)aglGetCurrentContext()); glCopyTexImage2D(t, l, f, x, y, w, h, b); }
+static void my_glCopyTexSubImage2D(GLenum t, GLint l, GLint xo, GLint yo, GLint x, GLint y, GLsizei w, GLsizei h)
+{ static unsigned long n; if (n++ < 40 || agl_on) lg("glCopyTexSubImage2D(%x, %d, %d,%d <- %d,%d %dx%d)\n", t, (int)l, (int)xo, (int)yo, (int)x, (int)y, (int)w, (int)h); glCopyTexSubImage2D(t, l, xo, yo, x, y, w, h); }
+static void my_glTexParameteri(GLenum t, GLenum p, GLint v)
+{ if (win() || t == 0x84f5) lg("glTexParameteri(%x, %x, %x)\n", t, p, (unsigned)v); glTexParameteri(t, p, v); }
+static void my_glViewport(GLint x, GLint y, GLsizei w, GLsizei h)
+{ if (win()) lg("glViewport(%d,%d %dx%d)\n", (int)x, (int)y, (int)w, (int)h); glViewport(x, y, w, h); }
+static void my_glClear(GLbitfield m)
+{ if (win()) lg("glClear(%x) courant %p\n", (unsigned)m, (void *)aglGetCurrentContext()); glClear(m); }
+static void my_glReadBuffer(GLenum b)
+{ if (win()) lg("glReadBuffer(%x)\n", b); glReadBuffer(b); }
+static void my_glDrawBuffer(GLenum b)
+{ if (win()) lg("glDrawBuffer(%x)\n", b); glDrawBuffer(b); }
+static void my_glTexEnvi(GLenum t, GLenum p, GLint v)
+{ if (win()) lg("glTexEnvi(%x, %x, %x)\n", t, p, (unsigned)v); glTexEnvi(t, p, v); }
+static void my_glColor4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a)
+{ if (win()) lg("glColor4f(%g %g %g %g)\n", r, g, b, a); glColor4f(r, g, b, a); }
+static void my_glTexCoord2f(GLfloat s, GLfloat t)
+{ if (win()) lg("glTexCoord2f(%g %g)\n", s, t); glTexCoord2f(s, t); }
+static void my_glVertex2f(GLfloat x, GLfloat y)
+{ if (win()) lg("glVertex2f(%g %g)\n", x, y); glVertex2f(x, y); }
+static void my_glVertex3f(GLfloat x, GLfloat y, GLfloat z)
+{ if (win()) lg("glVertex3f(%g %g %g)\n", x, y, z); glVertex3f(x, y, z); }
 typedef struct { const void *replacement, *replacee; } interpose_t;
 __attribute__((used)) static const interpose_t interposers[]
     __attribute__((section("__DATA,__interpose"))) = {
@@ -411,4 +536,27 @@ __attribute__((used)) static const interpose_t interposers[]
     { (const void *)my_glDrawRangeElementArrayAPPLE, (const void *)glDrawRangeElementArrayAPPLE },
     { (const void *)my_glDrawElementArrayAPPLE, (const void *)glDrawElementArrayAPPLE },
     { (const void *)my_glMultiDrawElementsEXT, (const void *)glMultiDrawElementsEXT },
+    { (const void *)my_aglSwapBuffers, (const void *)aglSwapBuffers },
+    { (const void *)my_aglSetCurrentContext, (const void *)aglSetCurrentContext },
+    { (const void *)my_aglSurfaceTexture, (const void *)aglSurfaceTexture },
+    { (const void *)my_aglSetDrawable, (const void *)aglSetDrawable },
+    { (const void *)my_aglCreateContext, (const void *)aglCreateContext },
+    { (const void *)my_aglSetFullScreen, (const void *)aglSetFullScreen },
+    { (const void *)my_aglUpdateContext, (const void *)aglUpdateContext },
+    { (const void *)my_CreateNewWindow, (const void *)CreateNewWindow },
+    { (const void *)my_ShowWindow, (const void *)ShowWindow },
+    { (const void *)my_MoveWindow, (const void *)MoveWindow },
+    { (const void *)my_SizeWindow, (const void *)SizeWindow },
+    { (const void *)my_glCopyTexImage2D, (const void *)glCopyTexImage2D },
+    { (const void *)my_glCopyTexSubImage2D, (const void *)glCopyTexSubImage2D },
+    { (const void *)my_glTexParameteri, (const void *)glTexParameteri },
+    { (const void *)my_glViewport, (const void *)glViewport },
+    { (const void *)my_glClear, (const void *)glClear },
+    { (const void *)my_glReadBuffer, (const void *)glReadBuffer },
+    { (const void *)my_glDrawBuffer, (const void *)glDrawBuffer },
+    { (const void *)my_glTexEnvi, (const void *)glTexEnvi },
+    { (const void *)my_glColor4f, (const void *)glColor4f },
+    { (const void *)my_glTexCoord2f, (const void *)glTexCoord2f },
+    { (const void *)my_glVertex2f, (const void *)glVertex2f },
+    { (const void *)my_glVertex3f, (const void *)glVertex3f },
 };
