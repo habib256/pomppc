@@ -1,0 +1,726 @@
+diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+index 8163295f3..5d8b16610 100644
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -246,9 +246,141 @@ static TranslationBlock *tb_htable_lookup(CPUState *cpu, vaddr pc,
+ }
+ 
+ /* Might cause an exception, so have a longjmp destination ready */
++#ifndef CONFIG_USER_ONLY
++/*
++ * POMPPC tcg/0008, x-ret-verify.  Every TB taken from the jump cache (main
++ * loop, helper_lookup_tb_ptr, and the inline lookup of x-ret-inline) is
++ * compared with what a full physical lookup gives now -- what the stock
++ * code finds after the jump cache has been cleared.  The physical page is
++ * probed without raising a guest exception (a proof mode may fill the TLB,
++ * nothing else).  Divergent TBs are not run: the caller falls back to the
++ * stock lookup.  Summary on stderr, periodically and at exit.
++ */
++enum { RV_LOOP, RV_HELPER, RV_INLINE, RV_N };
++static const char *const rv_name[RV_N] = { "boucle", "helper", "en-ligne" };
++static uint64_t rv_hit[RV_N], rv_miss[RV_N], rv_bad[RV_N], rv_race[RV_N];
++static uint64_t rv_nophys[RV_N], rv_jc_drop, rv_jc_skip, rv_total;
++/* misses: entry dropped (same pc, no tb), other pc (conflict), same pc other flags/cflags */
++static uint64_t rv_m_drop, rv_m_other, rv_m_flags;
++static bool rv_atexit;
++
++static void rv_report(void)
++{
++    fprintf(stderr, "ret-verify:");
++    for (int i = 0; i < RV_N; i++) {
++        fprintf(stderr, " %s %" PRIu64 " vérifiés / %" PRIu64 " ratés,"
++                " %" PRIu64 " divergences, %" PRIu64 " courses, %" PRIu64
++                " sans traduction ;", rv_name[i],
++                qatomic_read(&rv_hit[i]), qatomic_read(&rv_miss[i]),
++                qatomic_read(&rv_bad[i]), qatomic_read(&rv_race[i]),
++                qatomic_read(&rv_nophys[i]));
++    }
++    fprintf(stderr, " vidages du cache de sauts : %" PRIu64 " faits, %" PRIu64
++            " évités ; ratés : %" PRIu64 " entrée vidée, %" PRIu64 " autre pc, %"
++            PRIu64 " autres drapeaux\n", qatomic_read(&rv_jc_drop),
++            qatomic_read(&rv_jc_skip), qatomic_read(&rv_m_drop),
++            qatomic_read(&rv_m_other), qatomic_read(&rv_m_flags));
++}
++
++static void rv_start(void)
++{
++    if (!qatomic_read(&rv_atexit)) {
++        qatomic_set(&rv_atexit, true);
++        atexit(rv_report);
++    }
++}
++
++void pomppc_jc_flush_stat(CPUState *cpu, bool dropped)
++{
++    if (unlikely(cpu->ret_verify)) {
++        rv_start();
++        qatomic_inc(dropped ? &rv_jc_drop : &rv_jc_skip);
++    }
++}
++
++static void rv_miss_stat(int src, TranslationBlock *tb, vaddr epc, vaddr pc)
++{
++    rv_start();
++    qatomic_inc(&rv_miss[src]);
++    qatomic_inc(epc != pc ? &rv_m_other : tb == NULL ? &rv_m_drop : &rv_m_flags);
++}
++
++/* tb_lookup_cmp() without guest exceptions (second page probed nofault) */
++static bool rv_lookup_cmp(const void *p, const void *d)
++{
++    const TranslationBlock *tb = p;
++    const struct tb_desc *desc = d;
++
++    if ((tb_cflags(tb) & CF_PCREL || tb->pc == desc->pc) &&
++        tb_page_addr0(tb) == desc->page_addr0 &&
++        tb->cs_base == desc->cs_base &&
++        tb->flags == desc->flags &&
++        tb_cflags(tb) == desc->cflags) {
++        tb_page_addr_t tb_phys_page1 = tb_page_addr1(tb);
++        if (tb_phys_page1 == -1) {
++            return true;
++        }
++        return tb_phys_page1 ==
++            pomppc_code_phys_nofault(desc->env, TARGET_PAGE_ALIGN(desc->pc));
++    }
++    return false;
++}
++
++static bool ret_verify_tb(CPUState *cpu, TranslationBlock *tb, vaddr pc,
++                          uint64_t cs_base, uint32_t flags, uint32_t cflags,
++                          int src)
++{
++    struct tb_desc desc;
++    TranslationBlock *ref = NULL;
++    tb_page_addr_t phys;
++    uint64_t n;
++
++    rv_start();
++    desc.env = cpu_env(cpu);
++    desc.cs_base = cs_base;
++    desc.flags = flags;
++    desc.cflags = cflags;
++    desc.pc = pc;
++    phys = pomppc_code_phys_nofault(desc.env, pc);
++    if (phys != -1 && phys != -2) {
++        desc.page_addr0 = phys;
++        ref = qht_lookup_custom(&tb_ctx.htable, &desc,
++                                tb_hash_func(phys, (cflags & CF_PCREL ? 0 : pc),
++                                             flags, cs_base, cflags),
++                                rv_lookup_cmp);
++    }
++    if (ref == tb && tb->pc == pc && tb->cs_base == cs_base &&
++        tb->flags == flags && tb_cflags(tb) == cflags) {
++        n = qatomic_fetch_inc(&rv_hit[src]);
++        if ((qatomic_fetch_inc(&rv_total) & ((1u << 26) - 1)) == 0 && n) {
++            rv_report();
++        }
++        return true;
++    }
++    if (tb_cflags(tb) & CF_INVALID) {
++        /* invalidated by another vCPU since it was read: stock race too */
++        qatomic_inc(&rv_race[src]);
++        return false;
++    }
++    if (phys == -2) {
++        qatomic_inc(&rv_nophys[src]);
++    }
++    if (qatomic_fetch_inc(&rv_bad[src]) < 50) {
++        fprintf(stderr, "ret-verify: DIVERGENCE %s cpu %d pc 0x%" VADDR_PRIx
++                " flags 0x%08x cflags 0x%08x : cache tb %p (pc 0x%" VADDR_PRIx
++                " flags 0x%08x cflags 0x%08x phys 0x%" PRIx64 "), complet %p"
++                " (phys 0x%" PRIx64 "), mmu_idx %d\n", rv_name[src],
++                cpu->cpu_index, pc, flags, cflags, tb, tb->pc, tb->flags,
++                tb_cflags(tb), (uint64_t)tb_page_addr0(tb), ref,
++                (uint64_t)phys, cpu_mmu_index(cpu, true));
++    }
++    return false;
++}
++#endif
++
+ static inline TranslationBlock *tb_lookup(CPUState *cpu, vaddr pc,
+                                           uint64_t cs_base, uint32_t flags,
+-                                          uint32_t cflags)
++                                          uint32_t cflags, int src)
+ {
+     TranslationBlock *tb;
+     CPUJumpCache *jc;
+@@ -266,8 +398,20 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, vaddr pc,
+                tb->cs_base == cs_base &&
+                tb->flags == flags &&
+                tb_cflags(tb) == cflags)) {
++#ifndef CONFIG_USER_ONLY
++        if (unlikely(cpu->ret_verify) &&
++            !ret_verify_tb(cpu, tb, pc, cs_base, flags, cflags, src)) {
++            goto miss;
++        }
++#endif
+         goto hit;
+     }
++#ifndef CONFIG_USER_ONLY
++    if (unlikely(cpu->ret_verify)) {
++        rv_miss_stat(src, tb, jc->array[hash].pc, pc);
++    }
++ miss:
++#endif
+ 
+     tb = tb_htable_lookup(cpu, pc, cs_base, flags, cflags);
+     if (tb == NULL) {
+@@ -275,6 +419,9 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, vaddr pc,
+     }
+ 
+     jc->array[hash].pc = pc;
++#ifndef CONFIG_USER_ONLY
++    tb_jmp_cache_set_idx(jc, hash, cpu_mmu_index(cpu, true)); /* tcg/0008 */
++#endif
+     qatomic_set(&jc->array[hash].tb, tb);
+ 
+ hit:
+@@ -421,7 +568,7 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
+         cpu_loop_exit(cpu);
+     }
+ 
+-    tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
++    tb = tb_lookup(cpu, pc, cs_base, flags, cflags, 1);
+     if (tb == NULL) {
+         return tcg_code_gen_epilogue;
+     }
+@@ -433,6 +580,31 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
+     return tb->tc.ptr;
+ }
+ 
++/*
++ * POMPPC tcg/0008, x-ret-inline + x-ret-verify: the inline jump-cache probe
++ * found @ptb; check it as helper_lookup_tb_ptr would have chosen, and run
++ * the stock helper instead when it disagrees.
++ */
++const void *HELPER(lookup_tb_ptr_check)(CPUArchState *env, void *ptb)
++{
++#ifndef CONFIG_USER_ONLY
++    CPUState *cpu = env_cpu(env);
++    TranslationBlock *tb = ptb;
++    vaddr pc;
++    uint64_t cs_base;
++    uint32_t flags, cflags;
++
++    cpu_get_tb_cpu_state(env, &pc, &cs_base, &flags);
++    cflags = curr_cflags(cpu);
++    if (QTAILQ_EMPTY(&cpu->breakpoints) &&
++        ret_verify_tb(cpu, tb, pc, cs_base, flags, cflags, RV_INLINE)) {
++        cpu->neg.can_do_io = true;
++        return tb->tc.ptr;
++    }
++#endif
++    return HELPER(lookup_tb_ptr)(env);
++}
++
+ /* Execute a TB, and fix up the CPU state afterwards if necessary */
+ /*
+  * Disable CFI checks.
+@@ -594,7 +766,7 @@ void cpu_exec_step_atomic(CPUState *cpu)
+          * Any breakpoint for this insn will have been recognized earlier.
+          */
+ 
+-        tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
++        tb = tb_lookup(cpu, pc, cs_base, flags, cflags, 0);
+         if (tb == NULL) {
+             mmap_lock();
+             tb = tb_gen_code(cpu, pc, cs_base, flags, cflags);
+@@ -984,7 +1156,7 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+                 break;
+             }
+ 
+-            tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
++            tb = tb_lookup(cpu, pc, cs_base, flags, cflags, 0);
+             if (tb == NULL) {
+                 CPUJumpCache *jc;
+                 uint32_t h;
+@@ -1000,6 +1172,9 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+                 h = tb_jmp_cache_hash_func(pc);
+                 jc = cpu->tb_jmp_cache;
+                 jc->array[h].pc = pc;
++#ifndef CONFIG_USER_ONLY
++                tb_jmp_cache_set_idx(jc, h, cpu_mmu_index(cpu, true));
++#endif
+                 qatomic_set(&jc->array[h].tb, tb);
+             }
+ 
+diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+index b76a4eac4..0af9e923e 100644
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -398,7 +398,21 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
+ 
+     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+ 
+-    tcg_flush_jmp_cache(cpu);
++    if (cpu->jc_by_idx) {
++        /*
++         * POMPPC tcg/0008 (x-jc-idx).  Invariant: an entry of mmu_idx i in
++         * the jump cache implies bit i of tlb.c.dirty (the entry was found
++         * through a code-TLB entry of i, filled after the last flush of i,
++         * and that flush dropped the older entries of i).  So when none of
++         * the asked mmu_idx is dirty there is nothing to drop.
++         */
++        if (to_clean) {
++            tcg_flush_jmp_cache_idx(cpu, asked);
++        }
++        pomppc_jc_flush_stat(cpu, to_clean != 0);
++    } else {
++        tcg_flush_jmp_cache(cpu);
++    }
+ 
+     if (to_clean == ALL_MMUIDX_BITS) {
+         qatomic_set(&cpu->neg.tlb.c.full_flush_count,
+@@ -1528,6 +1542,28 @@ void *tlb_vaddr_to_host(CPUArchState *env, abi_ptr addr,
+  * NOTE: This function will trigger an exception if the page is
+  * not executable.
+  */
++/*
++ * POMPPC tcg/0008 (x-ret-verify): get_page_addr_code() that never raises a
++ * guest exception.  -1: not RAM (as get_page_addr_code), -2: no translation.
++ */
++tb_page_addr_t pomppc_code_phys_nofault(CPUArchState *env, vaddr addr)
++{
++    CPUTLBEntryFull *full;
++    void *p;
++    int flags;
++
++    flags = probe_access_internal(env_cpu(env), addr, 1, MMU_INST_FETCH,
++                                  cpu_mmu_index(env_cpu(env), true), true,
++                                  &p, &full, 0, false);
++    if (flags & TLB_INVALID_MASK) {
++        return -2;
++    }
++    if (p == NULL || full->lg_page_size < TARGET_PAGE_BITS) {
++        return -1;
++    }
++    return qemu_ram_addr_from_host_nofail(p);
++}
++
+ tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, vaddr addr,
+                                         void **hostp)
+ {
+diff --git a/accel/tcg/tb-jmp-cache.h b/accel/tcg/tb-jmp-cache.h
+index c3a505e39..24bda0552 100644
+--- a/accel/tcg/tb-jmp-cache.h
++++ b/accel/tcg/tb-jmp-cache.h
+@@ -28,6 +28,36 @@ typedef struct CPUJumpCache {
+         TranslationBlock *tb;
+         vaddr pc;
+     } array[TB_JMP_CACHE_SIZE];
++    /*
++     * POMPPC tcg/0008 (x-jc-idx): instruction mmu_idx under which array[i]
++     * was looked up.  Written and read by the owning CPU only.
++     */
++    uint8_t idx[TB_JMP_CACHE_SIZE];
++    /*
++     * Slots filled under each mmu_idx since the last drop of that mmu_idx,
++     * so that tcg_flush_jmp_cache_idx visits only them (a few hundred,
++     * instead of the whole table: ~7000 drops per second under Tiger).
++     * log_n[i] > TB_JMP_IDX_LOG: overflowed, scan the whole table.
++     */
++#define TB_JMP_IDX_MAX 16
++#define TB_JMP_IDX_LOG 1024
++    uint16_t log_n[TB_JMP_IDX_MAX];
++    uint16_t log[TB_JMP_IDX_MAX][TB_JMP_IDX_LOG];
+ } CPUJumpCache;
+ 
++/* POMPPC tcg/0008: record the instruction mmu_idx of a slot being filled */
++static inline void tb_jmp_cache_set_idx(CPUJumpCache *jc, uint32_t h, int idx)
++{
++    unsigned n;
++
++    jc->idx[h] = idx;                /* idx < NB_MMU_MODES <= TB_JMP_IDX_MAX */
++    n = jc->log_n[idx];
++    if (n < TB_JMP_IDX_LOG) {
++        jc->log[idx][n] = h;
++    }
++    if (n <= TB_JMP_IDX_LOG) {
++        jc->log_n[idx] = n + 1;
++    }
++}
++
+ #endif /* ACCEL_TCG_TB_JMP_CACHE_H */
+diff --git a/accel/tcg/tcg-runtime.h b/accel/tcg/tcg-runtime.h
+index c23b5e66c..bda0b46be 100644
+--- a/accel/tcg/tcg-runtime.h
++++ b/accel/tcg/tcg-runtime.h
+@@ -25,6 +25,7 @@ DEF_HELPER_FLAGS_1(ctpop_i32, TCG_CALL_NO_RWG_SE, i32, i32)
+ DEF_HELPER_FLAGS_1(ctpop_i64, TCG_CALL_NO_RWG_SE, i64, i64)
+ 
+ DEF_HELPER_FLAGS_1(lookup_tb_ptr, TCG_CALL_NO_WG_SE, cptr, env)
++DEF_HELPER_FLAGS_2(lookup_tb_ptr_check, TCG_CALL_NO_WG_SE, cptr, env, ptr)
+ 
+ DEF_HELPER_FLAGS_1(exit_atomic, TCG_CALL_NO_WG, noreturn, env)
+ 
+diff --git a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
+index fdf6d8ac1..dd6d27887 100644
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -663,3 +663,44 @@ void tcg_flush_jmp_cache(CPUState *cpu)
+         qatomic_set(&jc->array[i].tb, NULL);
+     }
+ }
++
++/*
++ * POMPPC tcg/0008 (x-jc-idx).  An entry of the jump cache stands for "pc
++ * under these flags runs this TB", which was found through the code TLB
++ * of one mmu_idx (jc->idx[i], recorded at insertion by the owning CPU).
++ * Flushing the TLB of other mmu_idx cannot change that translation, so
++ * only the entries of the flushed mmu_idx are dropped.
++ */
++void tcg_flush_jmp_cache_idx(CPUState *cpu, uint16_t idxmap)
++{
++    CPUJumpCache *jc = cpu->tb_jmp_cache;
++
++    QEMU_BUILD_BUG_ON(NB_MMU_MODES > TB_JMP_IDX_MAX);
++    if (unlikely(jc == NULL)) {
++        return;
++    }
++    for (int k = 0; k < TB_JMP_IDX_MAX; k++) {
++        unsigned n;
++
++        if (!((idxmap >> k) & 1)) {
++            continue;
++        }
++        n = jc->log_n[k];
++        if (n > TB_JMP_IDX_LOG) {
++            for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
++                if (jc->idx[i] == k) {
++                    qatomic_set(&jc->array[i].tb, NULL);
++                }
++            }
++        } else {
++            for (unsigned j = 0; j < n; j++) {
++                unsigned h = jc->log[k][j];
++                /* the slot may have been refilled under another mmu_idx since */
++                if (jc->idx[h] == k) {
++                    qatomic_set(&jc->array[h].tb, NULL);
++                }
++            }
++        }
++        jc->log_n[k] = 0;
++    }
++}
+diff --git a/accel/tcg/translator.c b/accel/tcg/translator.c
+index cbad00a51..4298bd341 100644
+--- a/accel/tcg/translator.c
++++ b/accel/tcg/translator.c
+@@ -18,6 +18,9 @@
+ #include "tcg/tcg-op-common.h"
+ #include "internal-target.h"
+ #include "disas/disas.h"
++#include "exec/helper-gen-common.h"
++#include "tb-jmp-cache.h"
++#include "tb-hash.h"
+ 
+ static void set_can_do_io(DisasContextBase *db, bool val)
+ {
+@@ -472,3 +475,86 @@ void translator_fake_ld(DisasContextBase *db, const void *data, size_t len)
+     db->fake_insn = true;
+     record_save(db, db->pc_first, data, len);
+ }
++
++/*
++ * POMPPC tcg/0008 (x-ret-inline).  Every indirect exit of a TB (blr, bctr,
++ * cross-page branches...) went through helper_lookup_tb_ptr: a call, the
++ * state read back from env, curr_cflags, the breakpoint test, the jump-cache
++ * probe, a return, then goto_ptr.  Here the probe of tb_lookup() is emitted
++ * inline: same hash, same entry, same comparisons as the helper --
++ *   entry.tb != NULL, entry.pc == pc, tb->flags == flags,
++ *   tb->cflags == cpu->tcg_cflags (curr_cflags() outside of gdb single-step,
++ *   one-insn-per-tb and -d nochain, which set CF_NO_GOTO_TB or
++ *   CF_NO_GOTO_PTR in the TBs they generate and are not supported here),
++ *   no breakpoint on the CPU (check_for_breakpoints),
++ * and tb->cs_base is not compared: the caller guarantees it is always 0.
++ * An invalidated TB has CF_INVALID in cflags, hence never matches.  On a hit
++ * can_do_io is set as the helper does, and the TB is entered by goto_ptr;
++ * anything else calls the helper.  The entered TB checks exit requests and
++ * interrupts in its prologue as usual.
++ */
++bool translator_can_goto_ptr_inline(DisasContextBase *db)
++{
++    return !(tb_cflags(db->tb) & (CF_NO_GOTO_PTR | CF_NO_GOTO_TB | CF_PCREL |
++                                 CF_SINGLE_STEP | CF_COUNT_MASK)) &&
++           !db->plugin_enabled;
++}
++
++void translator_lookup_and_goto_ptr_inline(DisasContextBase *db, TCGv_i64 pc,
++                                           TCGv_i32 flags, bool verify)
++{
++    const int sh = TARGET_PAGE_BITS - TB_JMP_PAGE_BITS;
++    TCGLabel *slow = gen_new_label();
++    TCGv_i64 h = tcg_temp_new_i64();
++    TCGv_i64 t = tcg_temp_new_i64();
++    TCGv_ptr e = tcg_temp_new_ptr();
++    TCGv_ptr tb = tcg_temp_new_ptr();
++    TCGv_ptr p = tcg_temp_new_ptr();
++    TCGv_i32 a = tcg_temp_new_i32();
++    TCGv_i32 b = tcg_temp_new_i32();
++
++    QEMU_BUILD_BUG_ON(sizeof(((CPUJumpCache *)0)->array[0]) != 16);
++#ifndef CONFIG_USER_ONLY
++    /* hash = tb_jmp_cache_hash_func(pc), system-mode version */
++    tcg_gen_shri_i64(t, pc, sh);
++    tcg_gen_xor_i64(t, t, pc);
++    tcg_gen_shri_i64(h, t, sh);
++    tcg_gen_andi_i64(h, h, TB_JMP_PAGE_MASK);
++    tcg_gen_andi_i64(t, t, TB_JMP_ADDR_MASK);
++    tcg_gen_or_i64(h, h, t);
++#else
++#error "x-ret-inline: system mode only"
++#endif
++    tcg_gen_shli_i64(h, h, 4);
++    tcg_gen_trunc_i64_ptr(p, h);
++    tcg_gen_ld_ptr(e, tcg_env, offsetof(ArchCPU, parent_obj.tb_jmp_cache) -
++                               offsetof(ArchCPU, env));
++    tcg_gen_add_ptr(e, e, p);
++
++    /* tb = entry.tb (atomic in the helper: an aligned pointer load) */
++    tcg_gen_ld_ptr(tb, e, offsetof(CPUJumpCache, array[0].tb));
++    tcg_gen_brcondi_ptr(TCG_COND_EQ, tb, 0, slow);
++    tcg_gen_ld_i64(t, e, offsetof(CPUJumpCache, array[0].pc));
++    tcg_gen_brcond_i64(TCG_COND_NE, t, pc, slow);
++    tcg_gen_ld_i32(a, tb, offsetof(TranslationBlock, flags));
++    tcg_gen_brcond_i32(TCG_COND_NE, a, flags, slow);
++    tcg_gen_ld_i32(a, tb, offsetof(TranslationBlock, cflags));
++    tcg_gen_ld_i32(b, tcg_env, offsetof(ArchCPU, parent_obj.tcg_cflags) -
++                               offsetof(ArchCPU, env));
++    tcg_gen_brcond_i32(TCG_COND_NE, a, b, slow);
++    tcg_gen_ld_ptr(p, tcg_env, offsetof(ArchCPU, parent_obj.breakpoints.tqh_first) -
++                               offsetof(ArchCPU, env));
++    tcg_gen_brcondi_ptr(TCG_COND_NE, p, 0, slow);
++
++    if (verify) {
++        gen_helper_lookup_tb_ptr_check(p, tcg_env, tb);
++    } else {
++        set_can_do_io(db, true);
++        tcg_gen_ld_ptr(p, tb, offsetof(TranslationBlock, tc.ptr));
++    }
++    tcg_gen_goto_ptr(p);
++
++    gen_set_label(slow);
++    gen_helper_lookup_tb_ptr(p, tcg_env);
++    tcg_gen_goto_ptr(p);
++}
+diff --git a/include/exec/exec-all.h b/include/exec/exec-all.h
+index 2e4c4cc4b..ff231b6ef 100644
+--- a/include/exec/exec-all.h
++++ b/include/exec/exec-all.h
+@@ -502,6 +502,12 @@ struct MemoryRegionSection *iotlb_to_section(CPUState *cpu,
+ tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, vaddr addr,
+                                         void **hostp);
+ 
++#ifndef CONFIG_USER_ONLY
++/* POMPPC tcg/0008: see accel/tcg/cputlb.c and accel/tcg/cpu-exec.c */
++tb_page_addr_t pomppc_code_phys_nofault(CPUArchState *env, vaddr addr);
++void pomppc_jc_flush_stat(CPUState *cpu, bool dropped);
++#endif
++
+ /**
+  * get_page_addr_code()
+  * @env: CPUArchState
+diff --git a/include/exec/tb-flush.h b/include/exec/tb-flush.h
+index 142c240d9..b9d481895 100644
+--- a/include/exec/tb-flush.h
++++ b/include/exec/tb-flush.h
+@@ -24,5 +24,7 @@
+ void tb_flush(CPUState *cs);
+ 
+ void tcg_flush_jmp_cache(CPUState *cs);
++/* POMPPC tcg/0008: drop only the entries looked up under an mmu_idx of @idxmap */
++void tcg_flush_jmp_cache_idx(CPUState *cs, uint16_t idxmap);
+ 
+ #endif /* _TB_FLUSH_H_ */
+diff --git a/include/exec/translator.h b/include/exec/translator.h
+index d8dcb77b5..7cd0c7cdb 100644
+--- a/include/exec/translator.h
++++ b/include/exec/translator.h
+@@ -172,6 +172,26 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
+  */
+ bool translator_use_goto_tb(DisasContextBase *db, vaddr dest);
+ 
++/**
++ * translator_lookup_and_goto_ptr_inline (POMPPC tcg/0008, x-ret-inline)
++ * @db: Disassembly context
++ * @pc: the next pc, as cpu_get_tb_cpu_state() will return it (zero-extended)
++ * @flags: the flags cpu_get_tb_cpu_state() will return (loaded at run time)
++ * @verify: x-ret-verify, check every inline hit against the helper
++ *
++ * tcg_gen_lookup_and_goto_ptr() with the jump-cache probe of tb_lookup()
++ * done in the generated code; a miss calls helper_lookup_tb_ptr.  Only for
++ * targets whose TBs all have cs_base == 0, and not with CF_NO_GOTO_PTR,
++ * CF_PCREL or plugins (the caller checks translator_can_goto_ptr_inline).
++ */
++struct TCGv_i64_d;
++struct TCGv_i32_d;
++bool translator_can_goto_ptr_inline(DisasContextBase *db);
++void translator_lookup_and_goto_ptr_inline(DisasContextBase *db,
++                                           struct TCGv_i64_d *pc,
++                                           struct TCGv_i32_d *flags,
++                                           bool verify);
++
+ /**
+  * translator_io_start
+  * @db: Disassembly context
+diff --git a/include/hw/core/cpu.h b/include/hw/core/cpu.h
+index c3ca0babc..dc63f2944 100644
+--- a/include/hw/core/cpu.h
++++ b/include/hw/core/cpu.h
+@@ -507,6 +507,16 @@ struct CPUState {
+     MemoryRegion *memory;
+ 
+     struct CPUJumpCache *tb_jmp_cache;
++    /*
++     * POMPPC tcg/0008.  jc_by_idx (x-jc-idx): a TLB flush of some mmu_idx
++     * only drops the jump-cache entries looked up under those mmu_idx for
++     * instruction fetch (and none when none of them was dirty), instead of
++     * the whole cache.  ret_verify (x-ret-verify): proof mode, every TB
++     * taken from the jump cache (main loop, lookup helper, and the inline
++     * lookup of x-ret-inline) is checked against a full physical lookup.
++     */
++    bool jc_by_idx;
++    bool ret_verify;
+ 
+     GArray *gdb_regs;
+     int gdb_num_regs;
+diff --git a/include/tcg/tcg-op-common.h b/include/tcg/tcg-op-common.h
+index 009e2778c..001cae86e 100644
+--- a/include/tcg/tcg-op-common.h
++++ b/include/tcg/tcg-op-common.h
+@@ -74,6 +74,12 @@ void tcg_gen_goto_tb(unsigned idx);
+  */
+ void tcg_gen_lookup_and_goto_ptr(void);
+ 
++/*
++ * tcg_gen_goto_ptr() - jump to a code pointer the caller has looked up
++ * (POMPPC tcg/0008): a TB's tc.ptr or tcg_code_gen_epilogue.
++ */
++void tcg_gen_goto_ptr(TCGv_ptr ptr);
++
+ void tcg_gen_plugin_cb(unsigned from);
+ void tcg_gen_plugin_mem_cb(TCGv_i64 addr, unsigned meminfo);
+ 
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index 00149616a..8d029bd72 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1373,6 +1373,13 @@ struct CPUArchState {
+      */
+     bool fp_inline;
+     bool fp_verify;
++    /*
++     * x-ret-inline (POMPPC tcg/0008): the indirect exits of a TB (blr, bctr,
++     * bclr, bcctr, cross-page branches, DISAS_CHAIN) probe the jump cache in
++     * the generated code and only call helper_lookup_tb_ptr on a miss.
++     * Read by the translator only.
++     */
++    bool ret_inline;
+ 
+     /* Internal devices resources */
+     ppc_tb_t *tb_env;      /* Time base and decrementer */
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index 94c55458f..5fa219333 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7451,6 +7451,17 @@ static Property ppc_cpu_properties[] = {
+      */
+     DEFINE_PROP_BOOL("x-fp-inline", PowerPCCPU, env.fp_inline, false),
+     DEFINE_PROP_BOOL("x-fp-verify", PowerPCCPU, env.fp_verify, false),
++    /*
++     * POMPPC tcg/0008.  x-ret-inline: the jump-cache probe of
++     * helper_lookup_tb_ptr done in the generated code at every indirect
++     * exit (blr, bctr...).  x-jc-idx: a TLB flush only drops the
++     * jump-cache entries of the flushed mmu_idx.  x-ret-verify: proof mode
++     * for both (every TB taken from the jump cache checked against a full
++     * physical lookup).  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-ret-inline", PowerPCCPU, env.ret_inline, false),
++    DEFINE_PROP_BOOL("x-jc-idx", PowerPCCPU, parent_obj.jc_by_idx, false),
++    DEFINE_PROP_BOOL("x-ret-verify", PowerPCCPU, parent_obj.ret_verify, false),
+     /*
+      * AltiVec vaddfp/vsubfp/vmaddfp/vnmsubfp: the four lanes at once on the
+      * host FPU when softfloat's hardfloat path would take each of them
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+index c328f2e9b..461645712 100644
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -188,6 +188,7 @@ struct DisasContext {
+ #endif
+     bool fpu_enabled;
+     bool fp_inline, fp_verify;  /* x-fp-inline, x-fp-verify (tcg/0007) */
++    bool ret_inline, ret_verify; /* x-ret-inline, x-ret-verify (tcg/0008) */
+     bool altivec_enabled;
+     bool vsx_enabled;
+     bool spe_enabled;
+@@ -3614,6 +3615,27 @@ static inline bool use_goto_tb(DisasContext *ctx, target_ulong dest)
+     return translator_use_goto_tb(&ctx->base, dest);
+ }
+ 
++/*
++ * POMPPC tcg/0008 (x-ret-inline): tcg_gen_lookup_and_goto_ptr() with the
++ * jump-cache probe inline.  cpu_get_tb_cpu_state() gives pc = nip,
++ * cs_base = 0 (every ppc TB), flags = hflags: nip is the TCG global, synced
++ * at every basic-block end, and hflags is loaded at run time.
++ */
++static void gen_goto_ptr_exit(DisasContext *ctx)
++{
++    if (ctx->ret_inline && translator_can_goto_ptr_inline(&ctx->base)) {
++        TCGv_i64 pc = tcg_temp_new_i64();
++        TCGv_i32 fl = tcg_temp_new_i32();
++
++        tcg_gen_extu_tl_i64(pc, cpu_nip);
++        tcg_gen_ld_i32(fl, tcg_env, offsetof(CPUPPCState, hflags));
++        translator_lookup_and_goto_ptr_inline(&ctx->base, pc, fl,
++                                              ctx->ret_verify);
++    } else {
++        tcg_gen_lookup_and_goto_ptr();
++    }
++}
++
+ static void gen_lookup_and_goto_ptr(DisasContext *ctx)
+ {
+     if (unlikely(ctx->singlestep_enabled)) {
+@@ -3627,7 +3649,7 @@ static void gen_lookup_and_goto_ptr(DisasContext *ctx)
+             pmu_count_insns(ctx);
+         }
+ 
+-        tcg_gen_lookup_and_goto_ptr();
++        gen_goto_ptr_exit(ctx);
+     }
+ }
+ 
+@@ -6509,6 +6531,8 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+     ctx->fpu_enabled = (hflags >> HFLAGS_FP) & 1;
+     ctx->fp_inline = env->fp_inline && env->fp_prime_mask;
+     ctx->fp_verify = ctx->fp_inline && env->fp_verify;
++    ctx->ret_inline = env->ret_inline;
++    ctx->ret_verify = cs->ret_verify;
+     ctx->spe_enabled = (hflags >> HFLAGS_SPE) & 1;
+     ctx->altivec_enabled = (hflags >> HFLAGS_VR) & 1;
+     ctx->vsx_enabled = (hflags >> HFLAGS_VSX) & 1;
+@@ -6653,7 +6677,7 @@ static void ppc_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
+             pmu_count_insns(ctx);
+         }
+ 
+-        tcg_gen_lookup_and_goto_ptr();
++        gen_goto_ptr_exit(ctx);
+         break;
+ 
+     case DISAS_EXIT_UPDATE:
+diff --git a/tcg/tcg-op.c b/tcg/tcg-op.c
+index 4a7e70536..c60339a2b 100644
+--- a/tcg/tcg-op.c
++++ b/tcg/tcg-op.c
+@@ -3353,3 +3353,10 @@ void tcg_gen_lookup_and_goto_ptr(void)
+     tcg_gen_op1i(INDEX_op_goto_ptr, tcgv_ptr_arg(ptr));
+     tcg_temp_free_ptr(ptr);
+ }
++
++void tcg_gen_goto_ptr(TCGv_ptr ptr)
++{
++    tcg_debug_assert(!(tcg_ctx->gen_tb->cflags & CF_NO_GOTO_PTR));
++    plugin_gen_disable_mem_helpers();
++    tcg_gen_op1i(INDEX_op_goto_ptr, tcgv_ptr_arg(ptr));
++}

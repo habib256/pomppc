@@ -7,9 +7,11 @@ hôte), mesure **1 contre 2 cœurs**, et décrit **les patches qui en sont sorti
 `patches/tcg/0001-ppc-sr-tlb.patch` (propriété de CPU `x-sr-tlb`), puis, pour DOOM 3,
 `0002-ppc-lfs-inline` (`x-lfs-inline`, §8), `0003-ppc-vfp-fast` (`x-vfp-fast`, §9) et
 `0004-ppc-vperm-fast` (`x-vperm-fast`, §10), puis `0006-tcg-jit-near` (`x-jit-near`, §14) et
-`0007-ppc-fp-inline` (`x-fp-inline`, le flottant scalaire simple sans ses helpers, §15) ; deux essais exacts mais sans gain,
+`0007-ppc-fp-inline` (`x-fp-inline`, le flottant scalaire simple sans ses helpers, §15), puis
+`0008-tcg-ret-inline` (`x-ret-inline`, `x-jc-idx` : les sorties indirectes, §16) ; trois essais exacts mais sans gain,
 `patches/tcg/essais/0002-ppc-lmw-inline.patch` (`x-lmw-inline`) et
-`essais/0005-ppc-vfp-nrwg.patch` (`x-vfp-nrwg`, §11), ne sont pas appliqués.
+`essais/0005-ppc-vfp-nrwg.patch` (`x-vfp-nrwg`, §11) et `essais/0009-ppc-isync-chain.patch`
+(`x-isync-chain`, §16.8), ne sont pas appliqués.
 
 **En une phrase** : sur Marble Blast, ni AltiVec ni le flottant ne dominent ; ce qui coûte,
 c'est que QEMU **vide tout son TLB ~23 000 fois par seconde**, à chaque changement de
@@ -1249,3 +1251,294 @@ qu'il soit plus fréquent avec le patch (trop peu de lancements pour dire qu'il 
 en jeu) et rapporte **−12,5 % de ms/image sur DOOM 3**. Proposition : l'allumer par défaut
 (`FPINLINE` à 1 dans `run_tiger.sh`, `tcg/0007` dans le binaire de référence) — décision de
 l'utilisateur. La VM quotidienne a été rendue sur le QEMU de référence `~/src/qemu`, sans jeu.
+
+---
+
+## 16. Les sorties indirectes : `tcg/0008` (`x-ret-inline`, `x-jc-idx`) et l'essai `tcg/0009` (`x-isync-chain`)
+
+26/09/2026. Copie isolée `~/src/qemu-ret` (clone local de `~/src/qemu-fp`) : branche `ret15b`
+(= `fp-scalar` + 0008 + essai 0009, `qgpu` v15, disque de dev) et `ret19b` (= `fp-scalar19`
++ 0008, `qgpu` v19 identique au binaire de référence, VM quotidienne) ; toutes deux portent
+`tcg/0007` comme la référence. `~/src/qemu` n'a pas été touché. Binaires :
+`~/src/qemu-ret/build/qret15`/`qret1564` (dev), `qret19`/`qret1964` (quotidienne).
+
+### 16.1 Le poste
+
+Chaque `blr`, `bctr`, `bclr`/`bcctr` conditionnel, chaque branchement vers une autre page et
+chaque fin de bloc `DISAS_CHAIN` sort du code chaîné par `lookup_and_goto_ptr` :
+un appel de `helper_lookup_tb_ptr` (état relu dans `env`, `curr_cflags`, test des points
+d'arrêt, sonde du cache de sauts de 4 096 entrées, retour), puis un saut indirect. Sur un
+**raté** du cache de sauts, `tb_htable_lookup` : traduction de la page de code par le TLB
+(`get_page_addr_code`, remplissage au besoin) et recherche dans la table de hachage `qht`.
+
+Mesures de fréquence (compteurs du mode preuve, §16.4, Marble Blast seul, SMP=2) :
+
+| | stock | `x-jc-idx` |
+|---|---|---|
+| sorties indirectes servies par le cache de sauts | 1 104,6 M (**75,6 %**) | 1 099,8 M (77,6 %) |
+| ratés | 356,2 M | 317,3 M |
+| … entrée vidée (même pc, bloc retiré par un vidage du TLB ou une invalidation) | 257,6 M | 213,7 M |
+| … autre pc (conflit dans la table de 4 096) | 140,5 M | 135,9 M |
+| … même pc, autres drapeaux | 4,6 M | 6,2 M |
+
+(Ratés comptés sur les trois sources : boucle principale, helper, recherche en ligne.) **Un
+retour sur quatre rate le cache de sauts**, surtout parce qu'il est vidé en entier à chaque
+vidage du TLB — même d'un seul `mmu_idx`, même d'un `mmu_idx` qui n'avait aucune entrée
+(`tlb_flush_by_mmuidx_async_work` appelle `tcg_flush_jmp_cache` sans condition) : ~7 000
+vidages par seconde sur Marble Blast avec `x-sr-tlb`.
+
+Profil d'instructions (DOOM 3, `bench/tcg/d3/d3-mix.txt`, 478 M instr./s) : `bclr` 6,6 M/s,
+`bcctr` 1,5 M/s ; retours à la boucle principale : `isync` **0,54 M/s**, `mtmsr` 0,16,
+`rfi` 0,035, `sc` 0,023. Sur Marble Blast (§2.2) : `isync` **942 000/s**, `mtmsr` 208 000.
+
+### 16.2 La conception
+
+**`x-ret-inline`** (propriété de CPU, lue par le traducteur) : aux sorties indirectes, la
+sonde de `tb_lookup()` est émise dans le code généré (`translator_lookup_and_goto_ptr_inline`,
+`accel/tcg/translator.c`, appelée par `gen_goto_ptr_exit` de `target/ppc/translate.c`) :
+
+    h   = tb_jmp_cache_hash_func(nip)              5 ops, la même fonction
+    e   = &cpu->tb_jmp_cache->array[h]
+    tb  = e->tb ; si NULL → helper
+    si e->pc != nip                → helper
+    si tb->flags != env->hflags    → helper        (hflags relu à l'exécution)
+    si tb->cflags != cpu->tcg_cflags → helper      (CF_INVALID ne passe jamais)
+    si cpu->breakpoints non vide   → helper        (check_for_breakpoints)
+    can_do_io = 1 ; goto_ptr tb->tc.ptr
+    helper : helper_lookup_tb_ptr, goto_ptr        (inchangé)
+
+Exactement les comparaisons du helper ; `tb->cs_base` n'est pas comparé, il vaut 0 pour tout
+bloc PowerPC (`cpu_get_tb_cpu_state`). `curr_cflags()` n'ajoute rien à `tcg_cflags` hors pas
+à pas gdb, `one-insn-per-tb` et `-d nochain` : ces modes posent `CF_NO_GOTO_PTR`/`CF_NO_GOTO_TB`
+dans les blocs qu'ils produisent, et `translator_can_goto_ptr_inline` n'émet alors pas la
+sonde (le pas à pas gdb vide aussi tous les blocs) ; les basculer à chaud n'est pas pris en
+charge avec la propriété allumée. Pas de sonde non plus avec un greffon TCG. Le bloc atteint
+teste `icount_decr` dans son prologue comme d'habitude : interruptions, demandes de sortie et
+travail en file restent vus au même endroit.
+
+**`x-jc-idx`** (propriété de CPU, lue par `accel/tcg/cputlb.c`) : le cache de sauts retient,
+pour chaque entrée, le `mmu_idx` d'instruction sous lequel elle a été trouvée
+(`jc->idx[]`, écrit à l'insertion par le CPU propriétaire) ; un vidage du TLB de certains
+`mmu_idx` ne jette que les entrées de ceux-là (`tcg_flush_jmp_cache_idx`), et **rien** si
+aucun des `mmu_idx` demandés n'avait d'entrée (`to_clean == 0`). Pour ne pas parcourir la
+table entière à chaque vidage (~7 000 par seconde : un premier parcours octet par octet
+coûtait 3,5 % du temps vCPU, deux fois le `tcg_flush_jmp_cache` stock), chaque `mmu_idx`
+tient le journal des emplacements remplis depuis son dernier vidage (1 024 au plus, sinon
+parcours complet) : le vidage ne visite que ceux-là, en vérifiant que l'emplacement n'a pas
+été repris sous un autre `mmu_idx` entre-temps. Invariant : une entrée de
+`mmu_idx` *i* implique le bit *i* de `tlb.c.dirty` (elle a été trouvée par une entrée du TLB
+de code de *i* remplie depuis le dernier vidage de *i*, et ce vidage a jeté les entrées plus
+anciennes). Une entrée d'un autre `mmu_idx` que ceux vidés reste juste : sa traduction passe
+par un TLB qui n'a pas changé ; comme en stock, une entrée n'est pas revalidée si le TLB a
+simplement évincé puis rechargé la page (l'architecture autorise la traduction périmée
+jusqu'au `tlbie`, qui vide tout). Les hflags PowerPC contiennent le `mmu_idx` d'instruction :
+une entrée n'est prise que sous le même.
+
+**`x-isync-chain`** (essai `tcg/0009`) : `isync` finit son bloc par une recherche du bloc
+suivant (`DISAS_CHAIN_UPDATE`) au lieu d'un retour à `cpu_exec`. Rien de ce qu'`isync`
+synchronise n'a besoin de la boucle principale : le vidage local du TLB qu'il déclenche est
+synchrone, le bloc suivant est recherché avec la nouvelle traduction (jamais par `goto_tb`),
+le code modifié a été invalidé par l'écriture elle-même, et interruptions, demandes de
+sortie et travail en file sont vus par le prologue du bloc suivant.
+
+### 16.3 Le mode preuve `x-ret-verify`
+
+Chaque bloc pris dans le cache de sauts — par la boucle principale, par le helper, et par la
+sonde en ligne (qui appelle alors `helper_lookup_tb_ptr_check`) — est comparé à ce que donne
+**une recherche physique complète maintenant** (traduction de la page de code sans
+exception invitée, `pomppc_code_phys_nofault`, puis `qht`), c'est-à-dire ce que le code
+stock aurait trouvé après avoir vidé son cache ; pour la sonde en ligne, `pc`, `flags`,
+`cflags` sont recalculés comme le helper (`cpu_get_tb_cpu_state`, `curr_cflags`, points
+d'arrêt). Un bloc divergent n'est pas exécuté (repli sur le helper stock) et est imprimé ;
+un bloc invalidé par l'autre vCPU entre la lecture et la vérification est compté à part
+(« course », la même fenêtre existe en stock). Bilan sur stderr toutes les 2^26
+vérifications et à la sortie de QEMU ; le mode compte aussi les ratés par cause et les
+vidages du cache de sauts faits et évités.
+
+### 16.4 La preuve
+
+`tools/tcg/retproof.sh` (disque de dev, copie APFS ; propriétés de `run_tiger.sh` par
+défaut allumées partout, `x-jit-near`) : démarrage du bureau, `smctest` (ci-dessous), Marble
+Blast (110 s de chauffe + 240 s de démo), arrêt propre ; les VM de preuve tournaient en
+priorité de fond (`taskpolicy -b`, cœurs E) pendant que la matrice occupait la VM quotidienne.
+
+| config | SMP | blocs vérifiés (boucle / helper / en ligne) | divergences | courses |
+|---|---|---|---|---|
+| `x-ret-verify` seul (cache stock) | 2 | 122 M / 1 139 M / — | **0** | 43 |
+| `x-ret-inline` | 2 | 136 M / — / 1 190 M | **0** | 24 |
+| `x-ret-inline` + `x-jc-idx` (sans `smctest`) | 2 | 131 M / — / 2 634 M | **0** | 0 |
+| `x-ret-inline` + `x-jc-idx` | 2 | 142 M / — / 1 190 M | **0** | 15 |
+| `x-ret-inline` + `x-jc-idx` | **1** | 68 M / — / 1 148 M | **0** | 0 |
+| + `x-isync-chain` | 2 | 32 M / — / 1 314 M | **0** | 26 |
+| + `x-isync-chain` | **1** | 28 M / — / 1 212 M | **0** | 0 |
+| `x-ret-verify` seul, Marble Blast seul | 2 | 107 M / 1 105 M / — | **0** | 0 |
+| `x-ret-inline` + `x-jc-idx`, Marble Blast seul | 2 | 112 M / — / 1 100 M | **0** | 0 |
+| version finale (journal par `mmu_idx`), cœurs P | 2 | 448 M / — / 6 524 M | **0** | 115 |
+| version finale (journal par `mmu_idx`), cœurs P | **1** | 158 M / — / 6 674 M | **0** | 0 |
+| **DOOM 3**, VM quotidienne, version finale (`ret-verif`) | 2 | 259 M / — / 6 990 M | **0** | 0 |
+
+**34 milliards de blocs pris dans le cache de sauts vérifiés, 0 divergence**, en SMP=2 et
+SMP=1, sur Marble Blast et sur DOOM 3. Les « courses » n'apparaissent qu'avec `smctest` en SMP=2 (le code réécrit par
+l'autre vCPU) et existent déjà sans les patches. `x-isync-chain` fait tomber les recherches de
+la boucle principale de ~110 M à ~30 M par tour : les trois quarts des retours à `cpu_exec`
+étaient des `isync`.
+
+**Code modifié dans l'invité** (`tools/guest/jobs/smctest`, empreinte FNV par essai) :
+
+- A — JIT maison : `li r3,K ; blr` dans une page RWX, appelée à chaud, `K` réécrit
+  (`dcbst/sync/icbi/isync`), 400 000 appels ;
+- B — retour dans du code réécrit **pendant l'appel** : un talon appelle (`bctrl`) un
+  patcheur C qui réécrit l'instruction à l'adresse de retour du talon ; le `blr` du patcheur
+  doit trouver le nouveau code (2 000 fois, après 100 appels à chaud) ;
+- C — même adresse virtuelle, deux pages physiques (deux pages d'un fichier au code
+  différent, `mmap MAP_FIXED` tour à tour, 3 000 fois) ;
+- D — deux processus (`fork`), même adresse, code différent (copie sur écriture), qui
+  alternent par un tube 5 000 fois : chaque alternance change les registres de segment ;
+- E — deux fils : l'un appelle `f` en boucle, l'autre la réécrit 20 000 fois ;
+- F — une fonction C recopiée à 4 000 adresses successives d'un tampon, puis effacée.
+
+A, B, C, D, F : **0 erreur et empreintes identiques** dans toutes les configurations (stock,
+`x-ret-inline`, `+x-jc-idx`, `+x-isync-chain`, SMP=2 et SMP=1). E : 0 erreur en SMP=1 ; en
+SMP=2, **erreurs dans toutes les configurations, QEMU sans aucune propriété compris**
+(§16.7) — défaut de QEMU 9.2 indépendant de ces patches.
+
+
+### 16.5 Gains
+
+**DOOM 3** (VM quotidienne, rendue ensuite au binaire de référence sans jeu ; binaire
+`~/src/qemu-ret/build/qret19`, branche `ret19b` = `fp-scalar19` + 0008 ; plugin
+`20260926-memo` ; SMP=2, propriétés par défaut de `run_tiger.sh` des deux côtés, `x-jit-near`,
+**« même fenêtre » 8 fois sur 8** ; `tools/tcg/retd3.sh`, parties entrelacées ref / on ;
+hôte calme, VM de dev arrêtée ; journaux `bench/tcg/d3/ret-*`, non versionnés) :
+
+| partie | `x-ret-inline` + `x-jc-idx` | T+50..T+280 | T+50..T+450 |
+|---|---|---|---|
+| `ret-ref-1` | éteints | 65,3 | 65,6 |
+| `ret-on-1` | allumés | **61,2** | 61,3 |
+| `ret-ref-2` | éteints | 65,7 | 66,0 |
+| `ret-on-2` | allumés | **61,2** | 61,3 |
+| `ret-ref-3` | éteints | 65,9 | 66,1 |
+| `ret-on-3` | allumés | **61,5** | 61,5 |
+| `ret-prof-ref` (avec `sample`) | éteints | 65,7 | — |
+| `ret-prof-on` (avec `sample`) | allumés | 61,7 | — |
+
+(ms/image.) **Médianes des trois parties entrelacées : 65,7 → 61,2 ms/image, −6,8 %**
+(T+50..T+450 : 66,0 → 61,3, −7,1 %). Écart entre parties d'un même mode : 0,9 % et 0,5 %.
+Les deux parties de profil (un `sample` de 10 s après la fenêtre) disent la même chose. En
+images/s : 15,2 → 16,3.
+
+**Marble Blast** (disque de dev, `tools/tcg/mbab.sh`, binaire `qret15`, SMP=2, propriétés
+par défaut partout, `x-jit-near` ; deux manches entrelacées
+`off rj ri rji | rji ri rj off`, 2 passes de 240 s par démarrage ; journaux
+`bench/tcg/res/a*`). **Bruit fort** : la VM quotidienne tournait un jeu pendant 5 démarrages
+sur 8 (98 à 125 % d'un cœur, `load.txt`).
+
+| comparaison (paires de fenêtres ±2 % de triangles) | rapport des moyennes | médiane des rapports |
+|---|---|---|
+| référence → `x-ret-inline` | +4,4 % (122 paires) | +2,3 % |
+| référence → `x-ret-inline` + `x-jc-idx` | **+6,6 %** (126 paires) | +6,2 % |
+| `x-ret-inline` → `+ x-jc-idx` | +3,5 % | +3,5 % |
+| `x-ret-inline` + `x-jc-idx` → `+ x-isync-chain` | −4,3 % | −2,8 % |
+
+Par démarrage (img/s) : référence 60,7 / 69,8 ; `rj` 63,8 / 74,0 ; `ri` 66,9 / 67,6 ; `rji`
+64,8 / 64,9 (les deux `rji` à hôte calme). Le sens de `x-ret-inline` et `x-jc-idx` est le même
+que sur DOOM 3 ; l'ampleur est à reprendre hôte calme. `x-jc-idx` a été mesuré ici dans sa
+première version (parcours complet) ; le journal par `mmu_idx` retire le coût du parcours
+(3,5 % du temps vCPU, §16.6), il ne peut que l'améliorer.
+
+### 16.6 Profils à jour (`sample` du processus QEMU, fils vCPU, temps occupé)
+
+| poste (inclusif) | MB réf. | MB `rj` | D3 réf. | D3 on |
+|---|---|---|---|---|
+| code généré (self) | 43,6 % | 51,2 % | 49,0 % | 59,2 % |
+| `helper_lookup_tb_ptr` | **20,5 %** | 11,9 % | **15,9 %** | 5,7 % |
+| … dont `tb_htable_lookup` (raté du cache de sauts) | 10,2 % | 9,9 % | 4,5 % | 4,5 % |
+| `tcg_flush_jmp_cache` / `_idx` | 1,4 % | 3,4 % ¹ | — | — |
+| verrou global (`bql_lock_impl` + attente) | 5,1 % + 5,2 % | 4,0 % + 4,1 % | 3,5 % + 3,4 % | 3,0 % + 3,0 % |
+| TLB (`tlb_fill`, `probe_access`, `mmu_lookup`) | ~6-9 % | ~7 % | ~5 % | ~5 % |
+| `helper_lmw` + `helper_stmw` | 5,5 % | 5,9 % | 5,1 % | 5,0 % |
+| flottant scalaire restant (`helper_fp32_fast`) | 2,2 % | — | **8,2 %** | 8,4 % |
+| AltiVec (`vmaddfp`, `vfp_fma4`) | — | — | 4,3 % | 4,5 % |
+| horloge (`mftb`, `cpu_get_clock`) | 1,4 % | — | ~2 % | ~2-3 % |
+| `pthread_jit_write_protect_np` (retours à `cpu_exec`) | 1,6 % | 1,8 % | 1,0 % | 0,9 % |
+| `hreg_store_msr` / `ppc_maybe_interrupt` (`mtmsr`, `rfi`) | 2,9 % / 1,5 % | 3,2 % | < 1 % | < 1 % |
+
+¹ Première version de `x-jc-idx` (parcours complet de la table) ; supprimé par le journal.
+
+Lecture : la sonde en ligne fait disparaître la partie « réussite » de `helper_lookup_tb_ptr`
+(son coût passe dans le code généré, plus court) ; il reste **les ratés du cache de sauts**
+(`tb_htable_lookup` : 10 % sur Marble Blast, 4,5 % sur DOOM 3). Sur DOOM 3 ce sont surtout des
+**conflits** dans la table de 4 096 entrées (partie vérifiée : 494 M « autre pc » contre 225 M
+« entrée vidée », taux de réussite 91 %) ; sur Marble Blast surtout des **vidages** (le
+`mmu_idx` utilisateur est vidé à chaque changement de processus par `x-sr-tlb`, §3.4). Le
+verrou global (`mtmsr`/`rfi`) pèse 6-10 %, `lmw`/`stmw` 5 %, le flottant scalaire restant
+8 % sur DOOM 3.
+
+### 16.7 Découvert en route : le code réécrit par l'autre vCPU (`smctest` E)
+
+L'essai E de `smctest` (un fil réécrit `li r3,g ; blr` 20 000 fois avec
+`dcbst/sync/icbi/sync/isync`, publie `g` ; l'autre fil lit `g`, fait `isync` et appelle la
+fonction) **échoue en SMP=2 dans toutes les configurations, QEMU sans aucune propriété
+compris** (`BASEPROPS=""` : ni `x-sr-tlb` ni `x-jit-near`) : l'appelant exécute un bloc
+périmé **pendant des dizaines de réécritures** (« génération 9 vue après 64 (mémoire 64,
+rappel 9) » : la mémoire contient bien le nouveau code, un second appel rend encore l'ancien),
+et même après `pthread_join` (« E-fin : 19971 au lieu de 20000 »). En SMP=1 : 0 erreur.
+C'est donc un défaut de QEMU 9.2 en MTTCG : une écriture d'un vCPU dans une page dont l'autre
+vCPU a traduit du code peut ne plus invalider ce code. Deux courses de `accel/tcg/cputlb.c`
+ont été lues (le calcul de `TLB_NOTDIRTY` hors verrou dans `tlb_set_page_full`, et
+`tlb_set_dirty` qui retire `TLB_NOTDIRTY` après un test fait hors verrou dans
+`notdirty_write`) ; les refermer (essai `x-smc-fix`, test refait sous le verrou) **ne change
+rien** : la cause est ailleurs, non trouvée. Portée pour Tiger : un programme qui écrit du
+code sur un processeur et l'exécute sur l'autre (JIT multifil ; les jeux du dépôt n'en ont
+pas). À reprendre à part (TODO §4) ; `smctest` en est le test de non-régression. Un essai en
+`thread=single` (SMP=2 sans MTTCG) n'a pas conclu : l'invité a redémarré pendant le test.
+
+### 16.8 Essayé et classé
+
+- **`x-isync-chain`** (`patches/tcg/essais/0009`) : exact (0 divergence, §16.4), fait tomber
+  les retours à `cpu_exec` des trois quarts, mais Marble Blast n'est pas plus rapide (−4 %
+  contre `x-ret-inline` + `x-jc-idx`, les deux démarrages `rji` à hôte calme). La boucle
+  principale ne coûtait que ~3 % (`pthread_jit_write_protect_np` compris), et la recherche
+  qui suit un `isync` rate le cache de sauts aussi souvent que celle de la boucle (l'`isync`
+  suit un changement de registres de segment et un vidage). Non appliqué.
+- **Pile de retours prédits** (empiler l'adresse de retour et le bloc à chaque `bl`, les
+  comparer au `blr`) : pas faite. Le bloc de retour n'est pas connu au `bl` ; il faudrait un
+  emplacement par site d'appel et la même invalidation que le cache de sauts (vidages,
+  `tb_flush`, blocs invalidés), pour le même coût au `blr` (une comparaison, un saut
+  indirect). Le gain d'une vraie pile (retour prédit par le processeur hôte, `ret` au lieu de
+  `br`) demanderait que le code généré garde une pile d'appels hôte à travers les blocs :
+  hors de portée de TCG.
+- **Chaînage direct des `bctr` monomorphes** : non fait ; la sonde en ligne en prend déjà
+  l'essentiel (le saut indirect restant est bien prédit par le processeur hôte quand la cible
+  ne change pas).
+- **`x-smc-fix`** (§16.7) : sans effet sur le défaut, retiré.
+
+### 16.9 Suites
+
+- **Allumer `x-ret-inline` et `x-jc-idx` par défaut** (`RETINLINE`/`JCIDX` à 1 dans
+  `run_tiger.sh`, `tcg/0008` dans le binaire de référence) : décision de l'utilisateur ;
+  DOOM 3 −6,8 %, Marble Blast +4 à +7 % (bruité), 34 milliards de blocs vérifiés.
+- **Cache de sauts plus grand** : sur DOOM 3 les deux tiers des ratés restants sont des
+  conflits. Avec le journal par `mmu_idx`, le vidage par `mmu_idx` ne dépend plus de la
+  taille de la table : passer de 4 096 à 16 384 entrées (256 Kio par vCPU) ne coûterait que
+  les vidages complets (`tb_flush`, plages), rares. Épreuve : taux de réussite du mode preuve
+  et A/B DOOM 3.
+- **Étiquettes multiples par mode pour `x-sr-tlb`** (§3.4) : les ratés « entrée vidée » de
+  Marble Blast et les remplissages du TLB viennent du vidage du `mmu_idx` utilisateur à
+  chaque changement de processus.
+- **Verrou global à chaque `mtmsr`/`rfi`** : 6-10 % du temps vCPU (TODO §4).
+- **Le défaut du §16.7** (code réécrit par l'autre vCPU).
+
+Commande de l'A/B DOOM 3 (jouée ci-dessus ; pour la rejouer, depuis le worktree de cette
+branche, VM de dev arrêtée) :
+
+    QEMU_BIN=~/src/qemu-ret/build/qret19 tools/tcg/retd3.sh 3
+    # = pour i dans 1..3 : d3run.sh ret-ref-$i 2 1 1 ; RETINLINE=1 JCIDX=1 d3run.sh ret-on-$i 2 1 1
+    #   puis d3run.sh --restore (binaire de référence, SMP=2)
+    # partie vérifiée (bilan « ret-verify » dans bench/tcg/d3/ret-verif/run_tiger.log) :
+    QEMU_BIN=~/src/qemu-ret/build/qret19 RETINLINE=1 JCIDX=1 RETVERIFY=1 \
+        tools/tcg/d3run.sh ret-verif 2 1 0 && tools/tcg/d3run.sh --restore
+
+`tools/tcg/d3run.sh` prend désormais son `sample` avant de sortir sur `FINI` : avec la règle
+de fin de cinématique à seuil relatif, `PROFIL` et `FINI` arrivent dans le même relevé, et le
+`sample` n'était jamais pris.

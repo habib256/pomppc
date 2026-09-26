@@ -417,6 +417,50 @@ target/ppc/translate.c ctx->fp_inline = env->fp_inline
 target/ppc/translate/fp-impl.c.inc do_fp_inline
 target/ppc/translate/fp-impl.c.inc gen_fcmpu_inline
 TCG7_MARKERS
+  # --- 4 decies. Sorties indirectes : recherche en ligne, cache de sauts par
+  # mmu_idx (x-ret-inline, x-jc-idx) --- patches/tcg/0008, docs/tcg-g4.md §16 :
+  # blr, bctr… sondent le cache de sauts dans le code généré (helper sur un
+  # raté), et un vidage du TLB ne jette que les entrées des mmu_idx vidés.
+  # Mêmes blocs choisis que helper_lookup_tb_ptr (x-ret-verify, smctest).
+  # Propriétés éteintes par défaut (RETINLINE=1 JCIDX=1 ./run_tiger.sh).
+  # Garde : le marqueur du traducteur ppc (dernier fichier du patch).
+  if ! grep -q "gen_goto_ptr_exit" target/ppc/translate.c; then
+    echo "▶ patch TCG : sorties indirectes en ligne, cache de sauts par mmu_idx (x-ret-inline, x-jc-idx)"
+    patch_forward "$ROOT/patches/tcg/0008-tcg-ret-inline.patch" \
+      accel/tcg/cpu-exec.c        lookup_tb_ptr_check \
+      accel/tcg/cputlb.c          pomppc_code_phys_nofault \
+      accel/tcg/tb-jmp-cache.h    "uint8_t idx" \
+      accel/tcg/tcg-runtime.h     lookup_tb_ptr_check \
+      accel/tcg/translate-all.c   tcg_flush_jmp_cache_idx \
+      accel/tcg/translator.c      translator_lookup_and_goto_ptr_inline \
+      include/exec/exec-all.h     pomppc_jc_flush_stat \
+      include/exec/tb-flush.h     tcg_flush_jmp_cache_idx \
+      include/exec/translator.h   translator_can_goto_ptr_inline \
+      include/hw/core/cpu.h       jc_by_idx \
+      include/tcg/tcg-op-common.h tcg_gen_goto_ptr \
+      target/ppc/cpu.h            "bool ret_inline" \
+      target/ppc/cpu_init.c       x-ret-inline \
+      tcg/tcg-op.c                "void tcg_gen_goto_ptr" \
+      target/ppc/translate.c      gen_goto_ptr_exit
+    for f in accel/tcg/cpu-exec.c accel/tcg/cputlb.c accel/tcg/tb-jmp-cache.h \
+             accel/tcg/tcg-runtime.h accel/tcg/translate-all.c accel/tcg/translator.c \
+             include/exec/exec-all.h include/exec/tb-flush.h include/exec/translator.h \
+             include/hw/core/cpu.h include/tcg/tcg-op-common.h target/ppc/cpu.h \
+             target/ppc/cpu_init.c target/ppc/translate.c tcg/tcg-op.c; do
+      rm -f "$f.orig"
+    done
+  fi
+  while read -r f m; do
+    [ -z "$f" ] && continue
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0008 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG8_MARKERS'
+accel/tcg/cpu-exec.c lookup_tb_ptr_check
+accel/tcg/cputlb.c tcg_flush_jmp_cache_idx
+accel/tcg/translator.c translator_lookup_and_goto_ptr_inline
+target/ppc/cpu_init.c x-jc-idx
+target/ppc/translate.c gen_goto_ptr_exit
+TCG8_MARKERS
 fi
 
 # --- 5. Build ---
@@ -506,6 +550,8 @@ check_opt x-vfp-fast     qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-v
 check_opt x-vperm-fast   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-vperm-fast=on
 check_opt x-jit-near     qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jit-near=on
 check_opt x-fp-inline    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fp-inline=on
+check_opt x-ret-inline   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-ret-inline=on
+check_opt x-jc-idx       qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-jc-idx=on
 echo
 echo "→ $CAPS"
 
