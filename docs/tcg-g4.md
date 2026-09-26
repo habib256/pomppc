@@ -6,7 +6,8 @@ relève **où part le temps du processeur émulé** (instructions exécutées, h
 hôte), mesure **1 contre 2 cœurs**, et décrit **les patches qui en sont sortis** :
 `patches/tcg/0001-ppc-sr-tlb.patch` (propriété de CPU `x-sr-tlb`), puis, pour DOOM 3,
 `0002-ppc-lfs-inline` (`x-lfs-inline`, §8), `0003-ppc-vfp-fast` (`x-vfp-fast`, §9) et
-`0004-ppc-vperm-fast` (`x-vperm-fast`, §10) ; deux essais exacts mais sans gain,
+`0004-ppc-vperm-fast` (`x-vperm-fast`, §10), puis `0006-tcg-jit-near` (`x-jit-near`, §14) et
+`0007-ppc-fp-inline` (`x-fp-inline`, le flottant scalaire simple sans ses helpers, §15) ; deux essais exacts mais sans gain,
 `patches/tcg/essais/0002-ppc-lmw-inline.patch` (`x-lmw-inline`) et
 `essais/0005-ppc-vfp-nrwg.patch` (`x-vfp-nrwg`, §11), ne sont pas appliqués.
 
@@ -976,3 +977,234 @@ T+50..T+280 ; placement relevé dans chaque `info.txt` (`bench/tcg/d3/jn-*`, `jf
 
 Suite : `JITNEAR` allumé par défaut dans `run_tiger.sh`, `tcg/0006` dans le binaire de
 référence (reconstruit le 25/09 à 23 h ; binaire précédent en `*.avant-jitnear`).
+
+---
+
+## 15. Le patch 0007 : le flottant scalaire simple sans ses helpers (`x-fp-inline`)
+
+26/09/2026. Copie isolée `~/src/qemu-fp` (branche `fp-scalar` = `regime15` + 0007, `qgpu` v15
+pour le disque de dev ; branche `fp-scalar19` = `regime` + 0007, `qgpu` v19 identique au
+binaire de référence, pour la VM quotidienne). `~/src/qemu` n'a pas été touché.
+
+### 15.1 Pourquoi
+
+Sur DOOM 3, ~19 % du temps vCPU est dans le flottant scalaire (`helper_FMULS/FMADDS/FADDS/
+FSUBS`, `helper_fcmpu`, `do_float_check_status` 4,5 %, `compute_fprf` 2,5 %). Le profil
+d'instructions (`bench/tcg/d3/d3-mix.txt`, 50 s de jeu, §6 bis) dit lesquelles :
+
+| instruction | M/s | | instruction | M/s |
+|---|---|---|---|---|
+| `fmuls` | 8,8 | | `fmsubs` | 1,8 |
+| `fmadds` | 6,9 | | `frsp` | 0,7 |
+| `fcmpu` | 5,8 | | `fnmsubs` | 0,6 |
+| `fadds` | 5,8 | | `fnmadds` | 0,3 |
+| `fsubs` | 4,0 | | tout le double précision | < 1 |
+
+Les huit premières font ~97 % du flottant scalaire exécuté. Avec `x-fast-fp` (et le 0002 de
+`patches/fastfp`), chacune coûte encore **deux appels de helper sans drapeau** (toutes les
+globales TCG resynchronisées et relues deux fois) : l'opération (`helper_FMULS` →
+`float64r32_mul`, dont le chemin hardfloat est pris), puis `helper_fprf_check_float64`
+(FPRF, puis `do_float_check_status`) ; `fcmpu` : `helper_fcmpu` puis
+`helper_float_check_status`. ~6 ns par instruction.
+
+### 15.2 Ce que fait la séquence d'origine dans le cas courant
+
+Dans l'état où tourne un jeu sous Tiger, le FPSCR est **amorcé** au sens de `x-fast-fp`
+(`FPSCR[XX] = 1`, `XE = OE = UE = 0`, docs/flottant-rapide.md §2.3), arrondi au plus proche.
+Si en plus chaque opérande est exactement un float32 nul ou normal (ce que donne `lfs`), et
+que le résultat n'a ni débordé ni sous-débordé, alors `reset_fpstatus` → helper →
+`fprf_check_float64` ne fait que :
+
+1. rendre le float32 correctement arrondi (ce que calcule le FPU hôte : une seule opération
+   IEEE simple, `fmaf` pour `fmadds` & co. — PowerPC arrondit `a·c + b` une seule fois) ;
+2. laisser `fp_status.float_exception_flags = inexact` (l'amorce ; aucun autre drapeau) ;
+3. écrire FPRF depuis le résultat (float64 : ±zéro `0x02/0x12`, ±normal `0x04/0x08`) et
+   poser FI (`do_float_check_status` : pas de OX/UX, pas de `float_inexact_excp` puisque
+   amorcé, FI = 1).
+
+`fcmpu` sans NaN, FPSCR amorcé (il ne dépend pas de RN) : CR[bf] et FPCC = 8/4/2, FI = 1.
+
+### 15.3 La traduction
+
+`x-fp-inline` (propriété de CPU, défaut éteint, lue par le traducteur ; n'agit qu'avec
+`x-fast-fp`, `ctx->fp_inline = env->fp_inline && env->fp_prime_mask`) :
+
+    r = helper_fp32_fast(a, b, c, op)        appel PUR (TCG_CALL_NO_RWG_SE) : l'op float32
+                                             sur le FPU hôte, ou FPI_FAIL (un NaN)
+    si (fpscr & (XX|XE|OE|UE|RN)) != XX  ou  r == FPI_FAIL : aller à lent
+    frT = r ; FPSCR = (FPSCR & ~(FPRF|FI)) | FPRF(r) | FI ; drapeaux = inexact
+    aller à fin
+    lent :   la séquence d'origine, inchangée (reset_fpstatus, helper, fprf_check_float64)
+    fin :    (Rc=1) CR1 depuis le FPSCR
+
+**Un seul branchement** par instruction ; FPRF en 11 ops TCG. `helper_fp32_fast` ne lit ni
+n'écrit aucune globale TCG : son appel ne force aucune resynchronisation des globales. Il rend `FPI_FAIL` si
+un opérande n'est pas un float32 nul ou normal (même test que `f64_is_f32_zon` de
+softfloat : NaN, infini, dénormal simple, double sans équivalent simple → helpers), si le
+résultat est infini, ou si (`fmuls`, `fmadds`…) il est de module ≤ `FLT_MIN` alors que le
+produit n'est pas nul (sous-dépassement possible, zéro compris). `fadds`/`fsubs` gardent
+tout résultat fini : une somme de deux float32 qui tombe sous `FLT_MIN` est **exacte**
+(ni UX ni XX), et FPRF se lit sur son élargissement float64, qui est un normal — les
+helpers disent la même chose (vérifié : la mutation « rejeter les sommes minuscules » ne
+change rien, voir §15.5). `fnmadds`/`fnmsubs` : négation **après** l'arrondi, zéro compris.
+
+`fcmpu` est entièrement en ligne (aucun appel) : porte « amorcé » et « ni NaN »
+(`(x & ~signe) > 0x7ff0…`), puis comparaison entière sur la clé signe-grandeur → complément
+à deux (`x < 0 ? −(x & ~signe) : x`, qui confond −0 et +0), CR[bf] et FPCC écrits en ligne.
+
+### 15.4 Pourquoi c'est exact (et ce qui a été vérifié à la main)
+
+- **Porte = état amorcé + RN = 00** : c'est exactement `ppc_fp_primed()` plus l'arrondi. Le
+  mode d'arrondi de softfloat est toujours celui de `FPSCR[RN]` : rien dans le code généré
+  n'écrit `cpu_fpscr` directement, toutes les écritures passent par `ppc_store_fpscr`, qui
+  recale `fp_status` (arrondi, re-biaisage OE/UE). NI n'est pas modélisé par QEMU ; VE et
+  ZE ne ferment pas la porte (aucune opération invalide ni division possible sur le chemin
+  court), ce que la phase P5 de `fptest` vérifie.
+- **Exception différée périmée** : `do_float_check_status` lève une exception si
+  `exception_index` vaut déjà `PROGRAM|FP` et que `MSR[FE0|FE1]` ≠ 0. Cet état périmé ne
+  naît qu'avec une trappe armée (OE/UE/XE/VE) et MSR[FE] = 0 (le helper le pose sans
+  lever) ; il est consommé au prochain retour à la boucle principale, et MSR[FE] ne peut
+  passer à 1 que par `mtmsr`/`rfi`/exception, qui y retournent tous. Donc sur le chemin
+  court, soit il n'y a rien de périmé, soit MSR[FE] = 0 et la séquence d'origine ne lève
+  rien non plus. Le vérificateur compare en plus `exception_index` avant/après.
+- **FI, FX, FR** : le chemin court pose FI = 1 comme `x-fast-fp` amorcé, ne touche ni FX ni
+  XX (déjà à 1), ni FR (jamais modélisé). Bit pour bit le FPSCR de la séquence d'origine.
+- **Drapeaux softfloat** : le chemin court écrit `inexact` dans `fp_status` (valeur que la
+  séquence d'origine y laisse), pour qu'un lecteur ultérieur ne voie aucune différence.
+- **Double → simple** : les opérandes acceptés sont exactement représentables en float32, la
+  conversion en `float` est exacte ; le résultat float32 s'élargit exactement. `fmadds` par
+  `fmaf` (un arrondi), jamais `a*c+b` (build sans `-ffast-math`, sans contraction :
+  `fmaf` explicite).
+- **Sous-dépassement « avant arrondi »** (PowerPC détecte la petitesse avant l'arrondi) : un
+  résultat qui s'arrondit à `FLT_MIN` exactement peut avoir sous-dépassé ; d'où `≤ FLT_MIN`
+  et non `< FLT_MIN` (mutation détectée : 3 230 divergences).
+
+### 15.5 La preuve
+
+**Hôte** (`tools/tcg/fpproof.sh [arbre] [N] [graine]`) : `fpproof.c` est lié aux **vrais**
+objets de l'arbre construit — `target_ppc_fpu_helper.c.o` (les helpers d'origine *et*
+`helper_fp32_fast`), `target_ppc_cpu.c.o` (`ppc_store_fpscr`), `fpu_softfloat.c.o` — et
+le bloc « fp-inline » de `fpu_helper.c` (porte, FPRF, `fcmpu`) en est extrait tel quel.
+Pour chaque vecteur (opération, opérandes, FPSCR de départ rangé par `ppc_store_fpscr`,
+MSR[FE] au hasard) : si le chemin court est pris, résultat, FPSCR entier, drapeaux
+softfloat, exception levée et `exception_index` doivent être égaux à ceux de la séquence
+d'origine. Vecteurs : catalogue croisé de 106 valeurs (float32 : ±0, dénormaux, `FLT_MIN`
+et voisins, `FLT_MAX`, ±∞, NaN silencieux et signalants, 2^24±1… ; doubles : 0,1, 1/3,
+dénormaux doubles, `DBL_MIN`, exposants 0x380/0x47f juste hors plage simple, bits bas
+posés, NaN doubles), `fmadds` & co. en croisement complet a×b×c (1,2 M triplets), dans trois
+familles de FPSCR (porte ouverte avec le reste au hasard ; FPSCR au hasard ; porte fermée
+d'un seul bit : RN = 1, 2, 3, XE, OE, UE ou XX effacé) ; puis N vecteurs aléatoires par
+opération (float32 quelconques, près du débordement, près du dénormal, mantisses courtes
+pour les demi-ulp, float32 à un bit près, doubles quelconques, annulations exactes).
+
+| `fpproof.sh ~/src/qemu-fp N` | vecteurs | par le chemin court | divergences |
+|---|---|---|---|
+| N = 20 M, graine 0x5eed | 174 427 024 | 97 528 970 | **0** |
+| N = 100 M, graine 0x1234abcd | 814 427 024 | 485 606 552 | **0** |
+
+« modèle ≠ objet » (le `helper_fp32_fast` extrait et recompilé contre celui de l'objet) : 0.
+Contre-épreuve (`tools/tcg/fpproof-mut.sh`) : **10 mutations sur 10 détectées** (débordement
+d'une somme accepté 783 divergences ; `FLT_MIN` exact accepté 3 230 ; `fmadds` en deux
+arrondis 393 218 ; porte sans RN 260 257 ; clé de `fcmpu` sans −0 = +0 : 5 ; FPRF de −0
+faux 3 082 ; exposant dénormal simple admis 18 806 ; sNaN admis par `fcmpu` 15 919 ; tout
+zéro de `fmuls` accepté 28 909 ; débordement accepté 321 670). Deux mutations essayées en
+premier n'étaient pas des erreurs : rejeter moins de sommes minuscules (elles sont exactes :
+le code les accepte désormais) et ne tester que `c` pour le produit nul (plus de replis,
+jamais faux).
+
+**Invité** (`tools/guest/jobs/fptest`) : les vraies instructions dans Tiger (SMP=2, disque
+de dev), `fadds` … `fnmsubs`, `fcmpu`, opérandes chargés par `lfs` et `lfd` (catalogue de
+106 valeurs croisé, `fmadds` & co. en a×b×c complet en P1, puis 2^18 vecteurs aléatoires par
+opération et par état), dans onze états du FPSCR : P0 FPSCR = 0 à chaque instruction, P1 XX
+(le cas du chemin court), P2-P4 XX et RN = 1/2/3, P5 XX+VE+ZE, P6-P8 XX et XE/OE/UE armés,
+P9 FPSCR qui s'accumule, P10 FPSCR au hasard. Résultat, FPSCR (`mffs`) et CR hachés :
+
+| `x-fp-inline` | instructions | empreinte |
+|---|---|---|
+| éteint | 30 124 880 | `755efae4e391b7ea` |
+| allumé + `x-fp-verify` | 30 124 880 | `755efae4e391b7ea` |
+
+**Sortie identique octet pour octet.** Et le vérificateur (`x-fp-verify` : chaque passage par
+le chemin court refait par la séquence d'origine, résultat, FPSCR, drapeaux et
+`exception_index` comparés, plus le modèle C) pendant ce tour : **8 653 066 vérifiés, 0
+divergence**. Rejoué sur le binaire final (même code, champs de `DisasContext` déplacés pour
+que le patch s'applique au QEMU de référence) : même empreinte, 7 392 559 vérifiés, 0 divergence.
+
+**Tour réel** (même VM `x-fp-verify`, démarrage + bureau + Marble Blast 110 s de chauffe
+et 240 s de démo) : **3 039 670 933 passages vérifiés, 0 divergence**. Taux de chemin court
+en jeu : **99,0 %** — replis : `fcmpu` 24,7 M sur FPSCR non amorcé (processus sans aucun
+résultat inexact encore), `fsubs` 6,5 M sur opérandes/résultat (1,9 %), le reste < 0,01 %.
+
+### 15.6 Gains
+
+Banc invité (`BANC=10000000 ./fptest banc` : chaîne dépendante `fmadds fmuls fmsubs fadds` ;
+transformation 4×4 de 1 024 sommets comme un jeu, `lfs`/12 `fmadds`/4 `fmuls`/`stfs` ;
+min/max par `fcmpu` + branchement), même binaire, SMP=2, `x-jit-near`, trois tours chacun :
+
+| | éteint | allumé | |
+|---|---|---|---|
+| chaîne (40 M op.) | 261 / 259 / 251 ms | 202 / 201 / 204 ms | **−21 %** (6,4 → 5,1 ns/op) |
+| sommets (160 M op.) | 1 118 / 1 118 / 1 094 ms | 596 / 595 / 591 ms | **−46 %** (7,0 → 3,7 ns/op) |
+| `fcmpu` (20 M) | 175 / 173 / 174 ms | 100 / 105 / 102 ms | **−41 %** |
+
+Marble Blast (disque de dev, `tools/tcg/mbab.sh`, binaire `qfp15`, SMP=2, `x-jit-near`
+forcé et `x-sr-tlb`, `x-lfs-inline`, `x-vfp-fast`, `x-vperm-fast` des deux côtés ; deux
+manches entrelacées, `off on on off off on on off` puis `on off off on on off`, 7 démarrages
+par mode, 2 passes de 240 s chacun ; journaux `bench/tcg/res/{f,g}*`, non versionnés).
+**Bruit fort** : la VM quotidienne jouait en même temps (100 à 145 % d'un cœur hôte pendant
+13 démarrages sur 14, relevé `load.txt`).
+
+| démarrage (ordre) | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| mode | off | on | on | off | off | on | on | off | on | off | off | on | on | off |
+| img/s (moyenne des fenêtres de jeu) | 68,1 | 67,5 | 69,1 | 64,9 | 61,9 | 66,8 | 66,9 | 57,2 | 65,0 | 62,5 | 70,8 | 73,7 | 74,1 | 64,3 |
+
+Moyenne par démarrage : éteint 64,2 img/s (57,2 à 70,8), allumé 69,0 (65,0 à 74,1). Paires de
+fenêtres (440, triangles/image à ±2 %) : **+7,9 %** (rapport des moyennes), médiane des
+rapports **+6,6 %**, quartiles −2,3 / +18,7 %. Seul démarrage à hôte calme (le premier,
+éteint, 68,1) : aucun démarrage allumé n'a eu ces conditions. Le sens est net (les 7
+démarrages allumés tous au-dessus de la moyenne des éteints), l'ampleur ne l'est pas :
+**+5 à +8 %**, à confirmer hôte calme. Marble Blast exécute ~8 M instructions concernées
+par seconde (tour vérifié, §15.5), dont 99 % par le chemin court.
+
+**DOOM 3 attendu** : ~33 M instructions concernées par seconde ; −1,3 à −3,8 ns chacune
+(banc) ⇒ 45 à 125 ms de vCPU par seconde, soit **−4 à −10 % de ms/image** si le fil du jeu
+est la limite (74 ms/image aujourd'hui). À mesurer (§15.8).
+
+### 15.7 Essayé et classé
+
+- **Opérations directement en instructions flottantes aarch64 dans le code généré** (nouvelles
+  ops TCG dans le backend, sans appel). Borne mesurée avant d'écrire le backend : un binaire
+  d'expérience où `helper_fp32_fast` rend son premier opérande sans rien calculer (résultats
+  faux, chemin court toujours pris) fait chaîne 63 ms, sommets 325 ms, `fcmpu` 84 ms. Le
+  reste du coût (chaîne 202 → 63 ms) est la latence du calcul lui-même — `fmov` GPR→FP,
+  `fcvt` double→simple, `fmadd`, `fcvt` simple→double, `fmov` FP→GPR, ~19 cycles — qu'une op
+  en ligne paierait aussi, puisque les FPR vivent en mémoire comme des doubles. Le gain
+  possible se limite à l'appel et aux tests branchus (~0,5-1 ns/op), pour une modification
+  du cœur de TCG (op nouvelle, contraintes, registres flottants réservés dans le backend
+  arm64, repli sur les autres hôtes). **Pas fait** ; à reconsidérer seulement si les FPR
+  passent un jour dans des registres flottants de l'hôte.
+- **Le double précision** (`fmadd`, `fmul`, `fsub`… < 1 M/s sur DOOM 3), `frsp` (0,7 M/s),
+  `fdivs`, `fctiwz` : hors du patch, trop peu fréquents.
+- **FPSCR non amorcé** (XX = 0) : le chemin court exigerait de savoir si le résultat est
+  inexact (FI, XX, FX exacts) ; sous Tiger c'est ~1 % des cas (§15.5) : helpers.
+
+### 15.8 L'A/B DOOM 3 à jouer (VM quotidienne)
+
+Binaire `~/src/qemu-fp/build/qfp` (`qfp64` en SMP=2) : branche `fp-scalar19` de la copie
+(`regime` = base + 0001 + `qgpu` v19 **identique au binaire de référence** + 0002-0005 +
+0006, puis 0007 ; toutes les propriétés nouvelles éteintes par défaut). Depuis le worktree
+de cette branche (son `run_tiger.sh` sait `FPINLINE`), placement du JIT forcé près
+(`JITNEAR` est allumé par défaut), trois parties par mode, entrelacées :
+
+    for i in 1 2 3; do
+      QEMU_BIN=~/src/qemu-fp/build/qfp FPINLINE=0 bash tools/tcg/d3run.sh fpi-ref-$i 2 1
+      QEMU_BIN=~/src/qemu-fp/build/qfp FPINLINE=1 bash tools/tcg/d3run.sh fpi-on-$i 2 1
+    done
+    # facultatif, pas pour la vitesse : une partie vérifiée (bilan « fp-verify » dans
+    # bench/tcg/d3/fpi-verif/run_tiger.log, 0 divergence attendu)
+    QEMU_BIN=~/src/qemu-fp/build/qfp FPINLINE=1 FPVERIFY=1 bash tools/tcg/d3run.sh fpi-verif 2 1
+    bash tools/tcg/d3run.sh --restore
+
+Lire chaque `info.txt` (« même fenêtre ») et la cinématique comme témoin de régime (§14.7) ;
+écarter une partie lente de bout en bout. Attendu : `fpi-ref` ~74 ms/image, `fpi-on` 67-71.
