@@ -8,6 +8,18 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Flottant scalaire simple sans ses helpers** (`patches/tcg/0007`, `x-fp-inline`, **éteint
+  par défaut**, `FPINLINE=1 ./run_tiger.sh` ; `docs/tcg-g4.md` §15, 26/09) : `fadds fsubs
+  fmuls fmadds fmsubs fnmadds fnmsubs` passent de deux helpers sans drapeau à un appel pur
+  (l'op float32 sur le FPU hôte) + FPRF/FI en ligne, `fcmpu` entièrement en ligne, quand le
+  FPSCR est amorcé sans trappe, RN au plus proche, opérandes float32 nuls ou normaux ; les
+  helpers d'origine sinon. Résultats et FPSCR identiques au bit près : preuve hôte contre les
+  vrais objets de l'arbre (`tools/tcg/fpproof.sh`, 814 M vecteurs, 0 divergence ; 10
+  mutations sur 10 détectées), invitée (`tools/guest/jobs/fptest`, 30 M instructions dans 11
+  états du FPSCR, empreinte identique), mode preuve `x-fp-verify` (Marble Blast : 3,04
+  milliards de passages vérifiés, 0 divergence, 99 % par le chemin court). Banc invité : chaîne
+  −21 %, transformation de sommets −46 %, `fcmpu` −41 % ; Marble Blast +5 à +8 % (VM
+  quotidienne chargée pendant la mesure). A/B DOOM 3 préparé (§15.8), pas joué.
 - **DOOM 3, un cœur contre deux** (26/09) : SMP=2 74,3 ms/image, SMP=1 80,8 (trois parties
   chacun) : SMP=2 reste le défaut, jeux compris (`docs/smp-coeurs.md` §4.2).
 - **Combien de cœurs ? — pourquoi deux, et pourquoi plus ne rapporte rien aux jeux**

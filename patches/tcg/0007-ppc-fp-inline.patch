@@ -1,0 +1,735 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index 1be9a6fa4..00149616a 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1361,6 +1361,18 @@ struct CPUArchState {
+      * needing to know about fast_fp.  See gen_reset_fpstatus().
+      */
+     uint16_t fp_prime_mask;
++    /*
++     * x-fp-inline (POMPPC tcg/0007, needs x-fast-fp): fadds fsubs fmuls
++     * fmadds fmsubs fnmadds fnmsubs and fcmpu without their two helper
++     * calls when FPSCR is primed with no trap armed and round-to-nearest,
++     * and the operands are float32 zero-or-normal: the float op is one pure
++     * call (helper_fp32_fast), FPRF/FI/FPCC are updated inline; anything
++     * else takes the original helpers.  Read by the translator only.
++     * x-fp-verify: proof mode, every inline result and FPSCR is checked
++     * against the original helpers (stderr summary).
++     */
++    bool fp_inline;
++    bool fp_verify;
+ 
+     /* Internal devices resources */
+     ppc_tb_t *tb_env;      /* Time base and decrementer */
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index b1edb8751..94c55458f 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7443,6 +7443,14 @@ static Property ppc_cpu_properties[] = {
+      * every input.  Off by default.
+      */
+     DEFINE_PROP_BOOL("x-lfs-inline", PowerPCCPU, env.lfs_inline, false),
++    /*
++     * Scalar single-precision arithmetic and fcmpu without helper calls in
++     * the common case (primed FPSCR, no trap, RN = nearest, float32 zero or
++     * normal operands); bit-exact with the helpers.  Needs x-fast-fp.
++     * Off by default.  x-fp-verify: proof mode for it.
++     */
++    DEFINE_PROP_BOOL("x-fp-inline", PowerPCCPU, env.fp_inline, false),
++    DEFINE_PROP_BOOL("x-fp-verify", PowerPCCPU, env.fp_verify, false),
+     /*
+      * AltiVec vaddfp/vsubfp/vmaddfp/vnmsubfp: the four lanes at once on the
+      * host FPU when softfloat's hardfloat path would take each of them
+diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
+index 867c53484..5755d1ac4 100644
+--- a/target/ppc/fpu_helper.c
++++ b/target/ppc/fpu_helper.c
+@@ -22,6 +22,8 @@
+ #include "exec/exec-all.h"
+ #include "internal.h"
+ #include "fpu/softfloat.h"
++#include <float.h>
++#include <math.h>
+ 
+ static inline float128 float128_snan_to_qnan(float128 x)
+ {
+@@ -3724,3 +3726,331 @@ void helper_XVF64GERNN(CPUPPCState *env, ppc_vsr_t *a, ppc_vsr_t *b,
+     vsxger(env, a, b, at, mask, true, true, true, vsxger_mul64,
+            vsxger_muladd64, vsxger_zero64);
+ }
++
++/*
++ * x-fp-inline (POMPPC patches/tcg/0007, docs/tcg-g4.md section 15).
++ *
++ * The generated code of fadds fsubs fmuls fmadds fmsubs fnmadds fnmsubs
++ * (and fcmpu, fully inline) takes a short path when
++ *
++ *   fpi_gate(fpscr):  FPSCR[XX] = 1, XE = OE = UE = 0, RN = 00 -- exactly
++ *                     the "primed" state of x-fast-fp (ppc_fp_primed()),
++ *                     plus round-to-nearest-even;
++ *   helper_fp32_fast() does not return FPI_FAIL: every operand is exactly a
++ *                     float32 zero or normal, and the result can have
++ *                     neither overflowed nor underflowed (fadds/fsubs: any
++ *                     finite sum, tiny sums are exact; the others: a result
++ *                     above FLT_MIN, or the exact result of a zero product).
++ *
++ * In that state the original sequence (reset_fpstatus, helper_FxxxS,
++ * fprf_check_float64) only ever: returns the correctly rounded float32
++ * result (what the host computes), leaves fp_status.float_exception_flags =
++ * float_flag_inexact (primed, and no other flag can be raised), writes
++ * FPRF from the result and sets FI.  fpi_fpscr_arith() is that update; the
++ * translator emits the same thing as TCG ops.  Anything else -- NaN,
++ * infinity, denormal or float64-only operand, overflow, a tiny result,
++ * another rounding mode, an armed trap, XX clear -- runs the original
++ * helpers, unchanged.
++ *
++ * Proof: tools/tcg/fpproof.sh (this block extracted as is and compared with
++ * the real helpers of the built tree) and x-fp-verify (every inline result
++ * of a running guest re-computed by the original helpers).
++ */
++/* fp-inline: début (FPI_*: internal.h) */
++static inline bool fpi_gate(uint64_t fpscr)
++{
++    return (fpscr & FPI_GATE_MASK) == FP_XX;
++}
++
++/* Same test as f64_is_f32_zon() in fpu/softfloat.c. */
++static inline bool fpi_zon(uint64_t x)
++{
++    uint64_t frac = x & MAKE_64BIT_MASK(0, 52);
++    int exp = extract64(x, 52, 11);
++
++    if (exp == 0) {
++        return frac == 0;
++    }
++    return (frac & MAKE_64BIT_MASK(0, 29)) == 0 &&
++           exp >= 0x381 && exp <= 0x47e;
++}
++
++/* Both exact for the values fpi_zon() accepts, and for float32 results. */
++static inline float fpi_f32(uint64_t x)
++{
++    union { double d; uint64_t u; } v = { .u = x };
++    return (float)v.d;
++}
++
++static inline uint64_t fpi_f64(float f)
++{
++    union { double d; uint64_t u; } v;
++
++    v.d = f;
++    return v.u;
++}
++
++/*
++ * frT for a = frA, b = frB, c = frC (fmuls uses a and c, fadds/fsubs a and
++ * b), or FPI_FAIL.  One IEEE float32 operation, correctly rounded to
++ * nearest-even by the host: bit for bit what float64r32_* computes for
++ * these operands.  fmadds & co. use fmaf(): PowerPC rounds a*c+b once.
++ */
++uint64_t helper_fp32_fast(uint64_t a, uint64_t b, uint64_t c, uint32_t op)
++{
++    float fa, fb, fc, r;
++
++    switch (op) {
++    case FPI_ADD:
++    case FPI_SUB:
++        if (!fpi_zon(a) || !fpi_zon(b)) {
++            return FPI_FAIL;
++        }
++        fa = fpi_f32(a);
++        fb = fpi_f32(b);
++        r = op == FPI_ADD ? fa + fb : fa - fb;
++        /*
++         * Overflow goes back to the helpers.  A tiny sum (zero included) of
++         * two float32 is always exact: no underflow, no inexact, and the
++         * helpers class its float64 widening as they do here (FPRF looks at
++         * the float64: a float32 denormal is a float64 normal).
++         */
++        if (isinf(r)) {
++            return FPI_FAIL;
++        }
++        return fpi_f64(r);
++    case FPI_MUL:
++        if (!fpi_zon(a) || !fpi_zon(c)) {
++            return FPI_FAIL;
++        }
++        fa = fpi_f32(a);
++        fc = fpi_f32(c);
++        r = fa * fc;
++        if (fa != 0 && fc != 0 && (isinf(r) || fabsf(r) <= FLT_MIN)) {
++            return FPI_FAIL;
++        }
++        return fpi_f64(r);
++    case FPI_MADD:
++    case FPI_MSUB:
++    case FPI_NMADD:
++    case FPI_NMSUB:
++        if (!fpi_zon(a) || !fpi_zon(b) || !fpi_zon(c)) {
++            return FPI_FAIL;
++        }
++        fa = fpi_f32(a);
++        fb = fpi_f32(b);
++        fc = fpi_f32(c);
++        if (op == FPI_MSUB || op == FPI_NMSUB) {
++            fb = -fb;
++        }
++        r = fmaf(fa, fc, fb);
++        /*
++         * A zero product makes the sum exact (b is zero or normal); else
++         * overflow and tiny results, zero included (it may be an underflow),
++         * go back to the helpers.
++         */
++        if (fa != 0 && fc != 0 && (isinf(r) || fabsf(r) <= FLT_MIN)) {
++            return FPI_FAIL;
++        }
++        if (op == FPI_NMADD || op == FPI_NMSUB) {
++            r = -r;             /* after rounding, zero included */
++        }
++        return fpi_f64(r);
++    }
++    return FPI_FAIL;
++}
++
++/*
++ * FPSCR after the original sequence, for a short-path result r: FPRF is
++ * that of the float64 r, which is +-zero or a float64 normal (every float32,
++ * denormals included, widens to one).
++ */
++static inline uint64_t fpi_fpscr_arith(uint64_t fpscr, uint64_t r)
++{
++    uint64_t neg = r >> 63;
++    uint64_t fprf = (r << 1) == 0 ? (neg << 4) | 0x02    /* +-zero */
++                                  : 0x04ull << neg;      /* +-normal */
++
++    return (fpscr & ~(uint64_t)(FP_FPRF | FP_FI)) |
++           (fprf << FPSCR_FPRF) | FP_FI;
++}
++
++/*
++ * fcmpu: when neither operand is a NaN and the FPSCR is primed (fcmpu does
++ * not depend on RN), the original sequence sets FPCC and CR[bf] to
++ * 8 (<), 4 (>) or 2 (=), sets FI and leaves the primed flags.  The
++ * comparison is done on integers: sign-magnitude turned into two's
++ * complement (-0 and +0 both become 0).  Returns the CR field, or 0 when
++ * the helpers must run.
++ */
++static inline int64_t fpi_cmp_key(uint64_t x)
++{
++    return (int64_t)x < 0 ? -(int64_t)(x & INT64_MAX) : (int64_t)x;
++}
++
++static inline uint32_t fpi_fcmpu(uint64_t fpscr, uint64_t a, uint64_t b)
++{
++    int64_t ka, kb;
++
++    if ((fpscr & (FP_XX | FP_XE | FP_OE | FP_UE)) != FP_XX ||
++        (a & INT64_MAX) > 0x7ff0000000000000ull ||
++        (b & INT64_MAX) > 0x7ff0000000000000ull) {
++        return 0;
++    }
++    ka = fpi_cmp_key(a);
++    kb = fpi_cmp_key(b);
++    return ka < kb ? 8 : ka > kb ? 4 : 2;
++}
++
++static inline uint64_t fpi_fpscr_fcmpu(uint64_t fpscr, uint32_t crf)
++{
++    return (fpscr & ~(uint64_t)(FP_FPCC | FP_FI)) |
++           ((uint64_t)crf << FPSCR_FPCC) | FP_FI;
++}
++/* fp-inline: fin */
++
++/*
++ * x-fp-verify: every short-path result is recomputed here by the original
++ * sequence (reset_fpstatus, the helper, fprf_check_float64), and the
++ * result, the FPSCR, the soft-fp flags and the exception state compared.
++ * The generated code then stores its own values (so the guest runs exactly
++ * as with x-fp-verify off).  Counters are global, printed every 2^22
++ * checks and at exit.
++ */
++static const char *const fpi_names[FPI_NOPS] = {
++    "fadds", "fsubs", "fmuls", "fmadds", "fmsubs", "fnmadds", "fnmsubs",
++    "fcmpu",
++};
++static uint64_t fpv_ok[FPI_NOPS], fpv_bad[FPI_NOPS];
++static uint64_t fpv_slow_gate[FPI_NOPS], fpv_slow_opnd[FPI_NOPS];
++static uint64_t fpv_total;
++static bool fpv_atexit;
++
++static void fpv_report(void)
++{
++    uint64_t ok = 0, bad = 0;
++    int i;
++
++    for (i = 0; i < FPI_NOPS; i++) {
++        ok += qatomic_read(&fpv_ok[i]);
++        bad += qatomic_read(&fpv_bad[i]);
++    }
++    fprintf(stderr, "fp-verify: %" PRIu64 " vérifiés, %" PRIu64
++            " divergences ;", ok, bad);
++    for (i = 0; i < FPI_NOPS; i++) {
++        fprintf(stderr, " %s %" PRIu64 "/%" PRIu64 " (repli fpscr %" PRIu64
++                ", opérandes %" PRIu64 ")", fpi_names[i],
++                qatomic_read(&fpv_ok[i]), qatomic_read(&fpv_bad[i]),
++                qatomic_read(&fpv_slow_gate[i]),
++                qatomic_read(&fpv_slow_opnd[i]));
++    }
++    fprintf(stderr, "\n");
++}
++
++static void fpv_count(int op, bool good)
++{
++    if (!qatomic_read(&fpv_atexit)) {
++        qatomic_set(&fpv_atexit, true);
++        atexit(fpv_report);
++    }
++    qatomic_inc(good ? &fpv_ok[op] : &fpv_bad[op]);
++    if ((qatomic_fetch_inc(&fpv_total) & ((1u << 22) - 1)) == 0) {
++        fpv_report();
++    }
++}
++
++void helper_fpv_arith(CPUPPCState *env, uint32_t op, uint64_t a, uint64_t b,
++                      uint64_t c, uint64_t r, target_ulong fpscr_new)
++{
++    CPUState *cs = env_cpu(env);
++    target_ulong fpscr_old = env->fpscr;
++    int excp = cs->exception_index;
++    uint64_t ref;
++    int flags;
++    bool good;
++
++    helper_reset_fpstatus(env);
++    switch (op) {
++    case FPI_ADD:
++        ref = helper_FADDS(env, a, b);
++        break;
++    case FPI_SUB:
++        ref = helper_FSUBS(env, a, b);
++        break;
++    case FPI_MUL:
++        ref = helper_FMULS(env, a, c);
++        break;
++    case FPI_MADD:
++        ref = helper_FMADDS(env, a, c, b);
++        break;
++    case FPI_MSUB:
++        ref = helper_FMSUBS(env, a, c, b);
++        break;
++    case FPI_NMADD:
++        ref = helper_FNMADDS(env, a, c, b);
++        break;
++    default:
++        ref = helper_FNMSUBS(env, a, c, b);
++        break;
++    }
++    helper_compute_fprf_float64(env, ref);
++    do_float_check_status(env, true, GETPC());
++    flags = get_float_exception_flags(&env->fp_status);
++    /* helpers == generated code, and generated code == the C model */
++    good = ref == r && env->fpscr == fpscr_new &&
++           flags == float_flag_inexact && cs->exception_index == excp &&
++           fpi_fpscr_arith(fpscr_old, r) == fpscr_new;
++    if (!good) {
++        fprintf(stderr, "fp-verify: DIVERGENCE %s a=%016" PRIx64 " b=%016"
++                PRIx64 " c=%016" PRIx64 " fpscr=%08" PRIx64 " : inline %016"
++                PRIx64 " fpscr %08" PRIx64 ", helpers %016" PRIx64
++                " fpscr %08" PRIx64 " drapeaux %x excp %d->%d\n",
++                fpi_names[op], a, b, c, (uint64_t)fpscr_old, r,
++                (uint64_t)fpscr_new, ref, (uint64_t)env->fpscr, flags, excp,
++                cs->exception_index);
++    }
++    fpv_count(op, good);
++}
++
++void helper_fpv_fcmpu(CPUPPCState *env, uint32_t crf, uint64_t a, uint64_t b,
++                      uint32_t ret, target_ulong fpscr_new)
++{
++    CPUState *cs = env_cpu(env);
++    target_ulong fpscr_old = env->fpscr;
++    uint32_t crf_old = env->crf[crf];
++    int excp = cs->exception_index;
++    uint32_t ref;
++    int flags;
++    bool good;
++
++    helper_reset_fpstatus(env);
++    helper_fcmpu(env, a, b, crf);
++    do_float_check_status(env, true, GETPC());
++    ref = env->crf[crf];
++    flags = get_float_exception_flags(&env->fp_status);
++    good = ref == ret && env->fpscr == fpscr_new &&
++           flags == float_flag_inexact && cs->exception_index == excp &&
++           fpi_fcmpu(fpscr_old, a, b) == ret &&
++           fpi_fpscr_fcmpu(fpscr_old, ret) == fpscr_new;
++    if (!good) {
++        fprintf(stderr, "fp-verify: DIVERGENCE fcmpu a=%016" PRIx64 " b=%016"
++                PRIx64 " fpscr=%08" PRIx64 " : inline cr %x fpscr %08" PRIx64
++                ", helpers cr %x fpscr %08" PRIx64 " drapeaux %x\n",
++                a, b, (uint64_t)fpscr_old, ret, (uint64_t)fpscr_new, ref,
++                (uint64_t)env->fpscr, flags);
++    }
++    /* the generated code writes cpu_crf[crf] itself afterwards */
++    env->crf[crf] = crf_old;
++    fpv_count(FPI_CMPU, good);
++}
++
++/* x-fp-verify: why the helpers ran (fpscr state, or operands/result). */
++void helper_fpv_slow(CPUPPCState *env, uint32_t op, uint64_t a, uint64_t b,
++                     uint64_t c, target_ulong fpscr)
++{
++    bool gate = op == FPI_CMPU
++        ? (fpscr & (FP_XX | FP_XE | FP_OE | FP_UE)) == FP_XX
++        : fpi_gate(fpscr);
++
++    qatomic_inc(gate ? &fpv_slow_opnd[op] : &fpv_slow_gate[op]);
++}
+diff --git a/target/ppc/helper.h b/target/ppc/helper.h
+index 85249caf3..a81560031 100644
+--- a/target/ppc/helper.h
++++ b/target/ppc/helper.h
+@@ -88,6 +88,11 @@ DEF_HELPER_1(reset_fpstatus, void, env)
+ DEF_HELPER_2(compute_fprf_float64, void, env, i64)
+ /* compute_fprf_float64 + float_check_status, in one call */
+ DEF_HELPER_2(fprf_check_float64, void, env, i64)
++/* x-fp-inline (POMPPC tcg/0007): pure float32 op, verifier, fallback counter */
++DEF_HELPER_FLAGS_4(fp32_fast, TCG_CALL_NO_RWG_SE, i64, i64, i64, i64, i32)
++DEF_HELPER_7(fpv_arith, void, env, i32, i64, i64, i64, i64, tl)
++DEF_HELPER_6(fpv_fcmpu, void, env, i32, i64, i64, i32, tl)
++DEF_HELPER_FLAGS_6(fpv_slow, TCG_CALL_NO_RWG, void, env, i32, i64, i64, i64, tl)
+ DEF_HELPER_3(store_fpscr, void, env, i64, i32)
+ DEF_HELPER_2(fpscr_clrbit, void, env, i32)
+ DEF_HELPER_2(fpscr_setbit, void, env, i32)
+diff --git a/target/ppc/internal.h b/target/ppc/internal.h
+index 20fb2ec59..2ce8b190f 100644
+--- a/target/ppc/internal.h
++++ b/target/ppc/internal.h
+@@ -302,4 +302,17 @@ static inline int ger_pack_masks(int pmsk, int ymsk, int xmsk)
+     return msk;
+ }
+ 
++/*
++ * x-fp-inline (POMPPC tcg/0007): the operations with a short path, shared by
++ * the translator (translate/fp-impl.c.inc) and the helpers (fpu_helper.c).
++ */
++enum {
++    FPI_ADD, FPI_SUB, FPI_MUL, FPI_MADD, FPI_MSUB, FPI_NMADD, FPI_NMSUB,
++    FPI_CMPU, FPI_NOPS
++};
++/* helper_fp32_fast() "take the helpers" result: a NaN, never a result. */
++#define FPI_FAIL 0x7ff8000000000001ull
++/* the arithmetic short path needs (fpscr & FPI_GATE_MASK) == FP_XX */
++#define FPI_GATE_MASK (FP_XX | FP_XE | FP_OE | FP_UE | FP_RN)
++
+ #endif /* PPC_INTERNAL_H */
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+index 8308bccfa..c328f2e9b 100644
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -187,6 +187,7 @@ struct DisasContext {
+     bool has_bhrb;
+ #endif
+     bool fpu_enabled;
++    bool fp_inline, fp_verify;  /* x-fp-inline, x-fp-verify (tcg/0007) */
+     bool altivec_enabled;
+     bool vsx_enabled;
+     bool spe_enabled;
+@@ -6506,6 +6507,8 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+         || env->mmu_model & POWERPC_MMU_64;
+ 
+     ctx->fpu_enabled = (hflags >> HFLAGS_FP) & 1;
++    ctx->fp_inline = env->fp_inline && env->fp_prime_mask;
++    ctx->fp_verify = ctx->fp_inline && env->fp_verify;
+     ctx->spe_enabled = (hflags >> HFLAGS_SPE) & 1;
+     ctx->altivec_enabled = (hflags >> HFLAGS_VR) & 1;
+     ctx->vsx_enabled = (hflags >> HFLAGS_VSX) & 1;
+diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c.inc
+index b3edf3093..ba0952e41 100644
+--- a/target/ppc/translate/fp-impl.c.inc
++++ b/target/ppc/translate/fp-impl.c.inc
+@@ -128,6 +128,242 @@ static bool do_helper_ac(DisasContext *ctx, arg_A_tac *a,
+     return true;
+ }
+ 
++/*
++ * x-fp-inline (POMPPC tcg/0007): short path of the scalar single-precision
++ * arithmetic.  See the "fp-inline" block of fpu_helper.c for why it is
++ * exact.  One branch per instruction:
++ *
++ *   r = helper_fp32_fast(a, b, c, op)          pure call (NO_RWG_SE)
++ *   if ((fpscr & FPI_GATE_MASK) != XX || r == FPI_FAIL) goto slow
++ *   frT = r ; fpscr = fpi_fpscr_arith(fpscr, r) ; flags = inexact
++ *   goto done
++ * slow:
++ *   the original sequence (reset_fpstatus, helper, fprf_check_float64)
++ * done:
++ */
++static void gen_fpi_slow_call(int op, TCGv_i64 d, TCGv_i64 a, TCGv_i64 b,
++                              TCGv_i64 c)
++{
++    switch (op) {
++    case FPI_ADD:
++        gen_helper_FADDS(d, tcg_env, a, b);
++        break;
++    case FPI_SUB:
++        gen_helper_FSUBS(d, tcg_env, a, b);
++        break;
++    case FPI_MUL:
++        gen_helper_FMULS(d, tcg_env, a, c);
++        break;
++    case FPI_MADD:
++        gen_helper_FMADDS(d, tcg_env, a, c, b);
++        break;
++    case FPI_MSUB:
++        gen_helper_FMSUBS(d, tcg_env, a, c, b);
++        break;
++    case FPI_NMADD:
++        gen_helper_FNMADDS(d, tcg_env, a, c, b);
++        break;
++    default:
++        gen_helper_FNMSUBS(d, tcg_env, a, c, b);
++        break;
++    }
++}
++
++/* fpi_fpscr_arith() of fpu_helper.c */
++static void gen_fpi_fpscr_arith(TCGv dst, TCGv_i64 r)
++{
++    TCGv_i64 neg = tcg_temp_new_i64();
++    TCGv_i64 zer = tcg_temp_new_i64();
++    TCGv_i64 z = tcg_temp_new_i64();
++    TCGv_i64 n = tcg_temp_new_i64();
++    TCGv t = tcg_temp_new();
++
++    tcg_gen_shri_i64(neg, r, 63);
++    tcg_gen_shli_i64(zer, r, 1);                    /* 0 iff +-0 */
++    tcg_gen_shli_i64(z, neg, 4);
++    tcg_gen_ori_i64(z, z, 0x02);                    /* 0x02 / 0x12 */
++    tcg_gen_shl_i64(n, tcg_constant_i64(0x04), neg); /* 0x04 / 0x08 */
++    tcg_gen_movcond_i64(TCG_COND_EQ, n, zer, tcg_constant_i64(0), z, n);
++    tcg_gen_shli_i64(n, n, FPSCR_FPRF);
++    tcg_gen_trunc_i64_tl(t, n);
++    tcg_gen_andi_tl(dst, cpu_fpscr, ~(target_ulong)(FP_FPRF | FP_FI));
++    tcg_gen_or_tl(dst, dst, t);
++    tcg_gen_ori_tl(dst, dst, FP_FI);
++}
++
++static void gen_fpi_store_primed_flags(void)
++{
++    tcg_gen_st16_i32(tcg_constant_i32(float_flag_inexact), tcg_env,
++                     offsetof(CPUPPCState, fp_status.float_exception_flags));
++}
++
++static bool do_fp_inline(DisasContext *ctx, int op, int frt, int fra,
++                         int frb, int frc, bool rc)
++{
++    TCGLabel *l_slow = gen_new_label();
++    TCGLabel *l_done = gen_new_label();
++    TCGv_i64 a = tcg_temp_new_i64();
++    TCGv_i64 b = tcg_temp_new_i64();
++    TCGv_i64 c = tcg_temp_new_i64();
++    TCGv_i64 r = tcg_temp_new_i64();
++    TCGv_i64 bad = tcg_temp_new_i64();
++    TCGv_i64 f = tcg_temp_new_i64();
++    TCGv g = tcg_temp_new();
++    TCGv nf = tcg_temp_new();
++
++    REQUIRE_INSNS_FLAGS(ctx, FLOAT);
++    REQUIRE_FPU(ctx);
++
++    get_fpr(a, fra);
++    if (op == FPI_ADD || op == FPI_SUB || op >= FPI_MADD) {
++        get_fpr(b, frb);
++    } else {
++        tcg_gen_movi_i64(b, 0);
++    }
++    if (op >= FPI_MUL) {
++        get_fpr(c, frc);
++    } else {
++        tcg_gen_movi_i64(c, 0);
++    }
++    gen_helper_fp32_fast(r, a, b, c, tcg_constant_i32(op));
++    tcg_gen_andi_tl(g, cpu_fpscr, FPI_GATE_MASK);
++    tcg_gen_xori_tl(g, g, FP_XX);                   /* 0 iff gate open */
++    tcg_gen_extu_tl_i64(bad, g);
++    tcg_gen_setcondi_i64(TCG_COND_EQ, f, r, FPI_FAIL);
++    tcg_gen_or_i64(bad, bad, f);
++    tcg_gen_brcondi_i64(TCG_COND_NE, bad, 0, l_slow);
++
++    gen_fpi_fpscr_arith(nf, r);
++    if (ctx->fp_verify) {
++        gen_helper_fpv_arith(tcg_env, tcg_constant_i32(op), a, b, c, r, nf);
++    }
++    set_fpr(frt, r);
++    tcg_gen_mov_tl(cpu_fpscr, nf);
++    gen_fpi_store_primed_flags();
++    tcg_gen_br(l_done);
++
++    gen_set_label(l_slow);
++    if (ctx->fp_verify) {
++        gen_helper_fpv_slow(tcg_env, tcg_constant_i32(op), a, b, c, cpu_fpscr);
++    }
++    gen_reset_fpstatus();
++    gen_fpi_slow_call(op, r, a, b, c);
++    set_fpr(frt, r);
++    gen_compute_fprf_float64(r);
++
++    gen_set_label(l_done);
++    if (unlikely(rc)) {
++        gen_set_cr1_from_fpscr(ctx);
++    }
++    return true;
++}
++
++static bool do_fpi_ab(DisasContext *ctx, arg_A_tab *a,
++                      void (*helper)(TCGv_i64, TCGv_ptr, TCGv_i64, TCGv_i64),
++                      int op)
++{
++    if (ctx->fp_inline) {
++        return do_fp_inline(ctx, op, a->frt, a->fra, a->frb, 0, a->rc);
++    }
++    return do_helper_ab(ctx, a, helper);
++}
++
++static bool do_fpi_ac(DisasContext *ctx, arg_A_tac *a,
++                      void (*helper)(TCGv_i64, TCGv_ptr, TCGv_i64, TCGv_i64),
++                      int op)
++{
++    if (ctx->fp_inline) {
++        return do_fp_inline(ctx, op, a->frt, a->fra, 0, a->frc, a->rc);
++    }
++    return do_helper_ac(ctx, a, helper);
++}
++
++static bool do_fpi_acb(DisasContext *ctx, arg_A *a,
++                       void (*helper)(TCGv_i64, TCGv_ptr, TCGv_i64,
++                                      TCGv_i64, TCGv_i64),
++                       int op)
++{
++    if (ctx->fp_inline) {
++        return do_fp_inline(ctx, op, a->frt, a->fra, a->frb, a->frc, a->rc);
++    }
++    return do_helper_acb(ctx, a, helper);
++}
++
++/* sign-magnitude -> two's complement (fpi_cmp_key() of fpu_helper.c) */
++static void gen_fpi_cmp_key(TCGv_i64 k, TCGv_i64 x)
++{
++    TCGv_i64 m = tcg_temp_new_i64();
++
++    tcg_gen_andi_i64(m, x, INT64_MAX);
++    tcg_gen_neg_i64(m, m);
++    tcg_gen_movcond_i64(TCG_COND_LT, k, x, tcg_constant_i64(0), m, x);
++}
++
++/*
++ * x-fp-inline: fcmpu without its two helpers when neither operand is a NaN
++ * and the FPSCR is primed (fpi_fcmpu() of fpu_helper.c).
++ */
++static void gen_fcmpu_inline(DisasContext *ctx)
++{
++    int bf = crfD(ctx->opcode);
++    TCGLabel *l_slow = gen_new_label();
++    TCGLabel *l_done = gen_new_label();
++    TCGv_i64 a = tcg_temp_new_i64();
++    TCGv_i64 b = tcg_temp_new_i64();
++    TCGv_i64 bad = tcg_temp_new_i64();
++    TCGv_i64 t = tcg_temp_new_i64();
++    TCGv_i64 ka = tcg_temp_new_i64();
++    TCGv_i64 kb = tcg_temp_new_i64();
++    TCGv_i64 ret = tcg_temp_new_i64();
++    TCGv_i32 ret32 = tcg_temp_new_i32();
++    TCGv g = tcg_temp_new();
++    TCGv nf = tcg_temp_new();
++    TCGv rt = tcg_temp_new();
++
++    get_fpr(a, rA(ctx->opcode));
++    get_fpr(b, rB(ctx->opcode));
++    tcg_gen_andi_tl(g, cpu_fpscr, FP_XX | FP_XE | FP_OE | FP_UE);
++    tcg_gen_xori_tl(g, g, FP_XX);                   /* 0 iff primed */
++    tcg_gen_extu_tl_i64(bad, g);
++    tcg_gen_andi_i64(t, a, INT64_MAX);
++    tcg_gen_setcondi_i64(TCG_COND_GTU, t, t, 0x7ff0000000000000ull);
++    tcg_gen_or_i64(bad, bad, t);
++    tcg_gen_andi_i64(t, b, INT64_MAX);
++    tcg_gen_setcondi_i64(TCG_COND_GTU, t, t, 0x7ff0000000000000ull);
++    tcg_gen_or_i64(bad, bad, t);
++    tcg_gen_brcondi_i64(TCG_COND_NE, bad, 0, l_slow);
++
++    gen_fpi_cmp_key(ka, a);
++    gen_fpi_cmp_key(kb, b);
++    tcg_gen_movcond_i64(TCG_COND_GT, ret, ka, kb, tcg_constant_i64(4),
++                        tcg_constant_i64(2));
++    tcg_gen_movcond_i64(TCG_COND_LT, ret, ka, kb, tcg_constant_i64(8), ret);
++    tcg_gen_extrl_i64_i32(ret32, ret);
++    tcg_gen_trunc_i64_tl(rt, ret);
++    tcg_gen_shli_tl(rt, rt, FPSCR_FPCC);
++    tcg_gen_andi_tl(nf, cpu_fpscr, ~(target_ulong)(FP_FPCC | FP_FI));
++    tcg_gen_or_tl(nf, nf, rt);
++    tcg_gen_ori_tl(nf, nf, FP_FI);
++    if (ctx->fp_verify) {
++        gen_helper_fpv_fcmpu(tcg_env, tcg_constant_i32(bf), a, b, ret32, nf);
++    }
++    tcg_gen_mov_i32(cpu_crf[bf], ret32);
++    tcg_gen_mov_tl(cpu_fpscr, nf);
++    gen_fpi_store_primed_flags();
++    tcg_gen_br(l_done);
++
++    gen_set_label(l_slow);
++    if (ctx->fp_verify) {
++        gen_helper_fpv_slow(tcg_env, tcg_constant_i32(FPI_CMPU), a, b,
++                            tcg_constant_i64(0), cpu_fpscr);
++    }
++    gen_reset_fpstatus();
++    gen_helper_fcmpu(tcg_env, a, b, tcg_constant_i32(bf));
++    gen_helper_float_check_status(tcg_env);
++
++    gen_set_label(l_done);
++}
++
+ #define GEN_FLOAT_B(name, op2, op3, set_fprf, type)                           \
+ static void gen_f##name(DisasContext *ctx)                                    \
+ {                                                                             \
+@@ -217,23 +453,23 @@ static bool do_helper_fsqrt(DisasContext *ctx, arg_A_tb *a,
+ }
+ 
+ TRANS(FADD, do_helper_ab, gen_helper_FADD);
+-TRANS(FADDS, do_helper_ab, gen_helper_FADDS);
++TRANS(FADDS, do_fpi_ab, gen_helper_FADDS, FPI_ADD);
+ TRANS(FSUB, do_helper_ab, gen_helper_FSUB);
+-TRANS(FSUBS, do_helper_ab, gen_helper_FSUBS);
++TRANS(FSUBS, do_fpi_ab, gen_helper_FSUBS, FPI_SUB);
+ TRANS(FDIV, do_helper_ab, gen_helper_FDIV);
+ TRANS(FDIVS, do_helper_ab, gen_helper_FDIVS);
+ TRANS(FMUL, do_helper_ac, gen_helper_FMUL);
+-TRANS(FMULS, do_helper_ac, gen_helper_FMULS);
++TRANS(FMULS, do_fpi_ac, gen_helper_FMULS, FPI_MUL);
+ 
+ TRANS(FMADD, do_helper_acb, gen_helper_FMADD);
+-TRANS(FMADDS, do_helper_acb, gen_helper_FMADDS);
++TRANS(FMADDS, do_fpi_acb, gen_helper_FMADDS, FPI_MADD);
+ TRANS(FMSUB, do_helper_acb, gen_helper_FMSUB);
+-TRANS(FMSUBS, do_helper_acb, gen_helper_FMSUBS);
++TRANS(FMSUBS, do_fpi_acb, gen_helper_FMSUBS, FPI_MSUB);
+ 
+ TRANS(FNMADD, do_helper_acb, gen_helper_FNMADD);
+-TRANS(FNMADDS, do_helper_acb, gen_helper_FNMADDS);
++TRANS(FNMADDS, do_fpi_acb, gen_helper_FNMADDS, FPI_NMADD);
+ TRANS(FNMSUB, do_helper_acb, gen_helper_FNMSUB);
+-TRANS(FNMSUBS, do_helper_acb, gen_helper_FNMSUBS);
++TRANS(FNMSUBS, do_fpi_acb, gen_helper_FNMSUBS, FPI_NMSUB);
+ 
+ TRANS_FLAGS(FLOAT_EXT, FRE, do_helper_bs, gen_helper_FRE);
+ TRANS_FLAGS(FLOAT_FRES, FRES, do_helper_bs, gen_helper_FRES);
+@@ -336,6 +572,10 @@ static void gen_fcmpu(DisasContext *ctx)
+         gen_exception(ctx, POWERPC_EXCP_FPU);
+         return;
+     }
++    if (ctx->fp_inline) {
++        gen_fcmpu_inline(ctx);
++        return;
++    }
+     t0 = tcg_temp_new_i64();
+     t1 = tcg_temp_new_i64();
+     gen_reset_fpstatus();

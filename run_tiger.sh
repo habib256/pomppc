@@ -26,6 +26,9 @@
 #   LFSINLINE=0 VFPFAST=0 VPERMFAST=0 ./run_tiger.sh  # coupe lfs/stfs sans helper, flottant AltiVec
 #                             # à 4 voies, vperm par table (tcg/0002-0004, allumés par défaut)
 #                             # docs/flottant-rapide.md
+#   FPINLINE=1 ./run_tiger.sh # flottant scalaire simple (fmuls, fmadds, fcmpu…) sans ses deux
+#                             # helpers dans le cas courant (x-fp-inline, tcg/0007, ÉTEINT par
+#                             # défaut, docs/tcg-g4.md §15) ; FPVERIFY=1 : mode preuve
 #   JITNEAR=0 ./run_tiger.sh  # laisse macOS placer le tampon du JIT (défaut : dans la fenêtre de 4 Gio
 #                             # du texte de QEMU, x-jit-near, tcg/0006 : supprime le régime lent, docs/tcg-g4.md §14) ;
 #                             # TCG_OPTS=… propriétés brutes de l'accélérateur
@@ -227,6 +230,29 @@ for _p in "VFPFAST x-vfp-fast VFP-4-VOIES" "VPERMFAST x-vperm-fast VPERM-TABLE";
     fi
   fi
 done
+# --- Flottant scalaire sans helper (x-fp-inline, patches/tcg/0007) ---
+# fadds fsubs fmuls fmadds fmsubs fnmadds fnmsubs fcmpu : un chemin court (un
+# appel pur + FPRF/FI/FPCC en ligne) quand le FPSCR est amorcé sans trappe, en
+# arrondi au plus proche, et que les opérandes sont des simples normaux ; sinon
+# les helpers d'origine. Mêmes résultats, même FPSCR au bit près (docs/tcg-g4.md
+# §15). N'agit qu'avec x-fast-fp. ÉTEINT par défaut en attendant l'A/B DOOM 3 :
+# FPINLINE=1 l'allume ; FPVERIFY=1 ajoute le mode preuve (x-fp-verify : chaque
+# passage par le chemin court refait par les helpers, bilan sur stderr).
+if [ "${FPINLINE:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-fp-inline=on"; then
+    case "$CPU_SPEC" in
+      *x-fast-fp=on*) CPU_SPEC="$CPU_SPEC,x-fp-inline=on"; MODE="$MODE + FLOTTANT SCALAIRE EN LIGNE"
+                      if [ "${FPVERIFY:-0}" != 0 ]; then
+                        CPU_SPEC="$CPU_SPEC,x-fp-verify=on"; MODE="$MODE (VÉRIFIÉ)"
+                      fi ;;
+      *) echo "⚠  FPINLINE=1 sans flottant rapide : x-fp-inline n'agit qu'avec x-fast-fp (FASTFP=1)." >&2
+         MODE="$MODE + flottant scalaire en ligne SANS EFFET (flottant exact)" ;;
+    esac
+  else
+    echo "⚠  FPINLINE=1 demandé mais ce QEMU n'a pas la propriété 'x-fp-inline' (patches/tcg/0007)." >&2
+    MODE="$MODE + flottant scalaire en ligne DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
 [ -n "${CPU_OPTS:-}" ] && CPU_SPEC="$CPU_SPEC,${CPU_OPTS#,}"
 # --- Tampon du JIT dans la fenêtre de 4 Gio du texte de QEMU (x-jit-near,
 # patches/tcg/0006) --- propriété de l'ACCÉLÉRATEUR. Sur Apple M4, le noyau pose

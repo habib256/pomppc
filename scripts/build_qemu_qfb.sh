@@ -10,6 +10,7 @@
 #   • lfs/stfs sans helper (x-lfs-inline)             — patches/tcg/0002
 #   • AltiVec : vfp à 4 voies, vperm par table       — patches/tcg/0003, 0004
 #   • tampon du JIT près du texte (x-jit-near)        — patches/tcg/0006
+#   • flottant scalaire simple sans helper (x-fp-inline) — patches/tcg/0007
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
 #   ./scripts/build_qemu_qfb.sh              # build dans ~/src/qemu
@@ -381,6 +382,41 @@ include/tcg/startup.h tcg_jit_near
 tcg/region.c tcg_jit_near
 tcg/region.c tb_size = region.total_size
 TCG6_MARKERS
+  # --- 4 nonies. Flottant scalaire simple sans helper (x-fp-inline) ---
+  # patches/tcg/0007, docs/tcg-g4.md §15 : fadds fsubs fmuls fmadds fmsubs
+  # fnmadds fnmsubs fcmpu prennent un chemin court (un appel pur + FPRF/FI/FPCC
+  # en ligne) quand le FPSCR est amorcé sans trappe et les opérandes des simples
+  # normaux, les helpers d'origine sinon ; prouvé au bit près (tools/tcg/fpproof.sh,
+  # x-fp-verify, tools/guest/jobs/fptest). Par-dessus 0001-0004 (et le 0002 de
+  # patches/fastfp). Propriété éteinte par défaut (FPINLINE=1 ./run_tiger.sh).
+  # Garde : le marqueur du traducteur (dernier fichier), sans lequel la propriété
+  # existerait sans rien changer.
+  if ! grep -q "do_fp_inline" target/ppc/translate/fp-impl.c.inc; then
+    echo "▶ patch TCG : flottant scalaire simple sans helper (x-fp-inline)"
+    patch_forward "$ROOT/patches/tcg/0007-ppc-fp-inline.patch" \
+      target/ppc/cpu.h                   "bool fp_inline" \
+      target/ppc/cpu_init.c              x-fp-inline \
+      target/ppc/fpu_helper.c            helper_fp32_fast \
+      target/ppc/helper.h                fp32_fast \
+      target/ppc/internal.h              FPI_GATE_MASK \
+      target/ppc/translate.c             "ctx->fp_inline = env->fp_inline" \
+      target/ppc/translate/fp-impl.c.inc do_fp_inline
+    rm -f target/ppc/cpu.h.orig target/ppc/cpu_init.c.orig target/ppc/fpu_helper.c.orig \
+          target/ppc/helper.h.orig target/ppc/internal.h.orig target/ppc/translate.c.orig \
+          target/ppc/translate/fp-impl.c.inc.orig
+  fi
+  while read -r f m; do
+    [ -z "$f" ] && continue
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0007 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG7_MARKERS'
+target/ppc/cpu_init.c x-fp-inline
+target/ppc/fpu_helper.c helper_fp32_fast
+target/ppc/fpu_helper.c helper_fpv_arith
+target/ppc/translate.c ctx->fp_inline = env->fp_inline
+target/ppc/translate/fp-impl.c.inc do_fp_inline
+target/ppc/translate/fp-impl.c.inc gen_fcmpu_inline
+TCG7_MARKERS
 fi
 
 # --- 5. Build ---
@@ -469,6 +505,7 @@ check_opt x-lfs-inline   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-l
 check_opt x-vfp-fast     qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-vfp-fast=on
 check_opt x-vperm-fast   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-vperm-fast=on
 check_opt x-jit-near     qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jit-near=on
+check_opt x-fp-inline    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fp-inline=on
 echo
 echo "→ $CAPS"
 

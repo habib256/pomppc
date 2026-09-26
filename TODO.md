@@ -16,7 +16,7 @@ réorganisation par domaine est dans l'historique git (commit précédant celui 
 
 | Chantier | Domaine | État | Preuve qui le fermera |
 |---|---|---|---|
-| Flottant scalaire (`fmuls`, `fmadds`, drapeaux FPSCR) | TCG (§4) | à faire : ~19 % du temps vCPU de DOOM 3 | équivalence prouvée + A/B DOOM 3 (placement forcé, trois parties par mode) |
+| Flottant scalaire (`fmuls`, `fmadds`, drapeaux FPSCR) | TCG (§4) | **patch `tcg/0007` (`x-fp-inline`, éteint) prouvé** le 26/09 ; A/B DOOM 3 à jouer (`docs/tcg-g4.md` §15.8, binaire `~/src/qemu-fp/build/qfp`) | A/B DOOM 3 (placement forcé, trois parties par mode) ; l'utilisateur tranche le défaut |
 | Lots 4 et 5 du verdict unique | Plugin (§2) | à faire | R5 puis `STATECHECK=1` à zéro ; `sample` DOOM 3 comparé à `sample-nat.txt` |
 | Matrice de jeux automatisée (A3) | Outils (§7) | à faire, **prochain chantier de fond** | tableau vert/rouge produit par un script, fenêtre et plein écran |
 
@@ -152,9 +152,16 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
       cinématique aussi lente (témoin). Cause inconnue (cœurs P/E, autre processus,
       thermique ?). Épreuve : cause trouvée ou fréquence < 1 sur 20.
 - [ ] **Flottant scalaire** (DOOM 3 : ~19 % du temps vCPU dans `helper_FMULS/FMADDS/FADDS/
-      FSUBS`, `fcmpu`, `do_float_check_status` 4,5 %, `compute_fprf` 2,5 %) : premier poste
-      hors `lookup_tb_ptr` ; piste FPRF/contrôle calculés en ligne quand FPSCR n'a aucune
-      trappe armée.
+      FSUBS`, `fcmpu`, `do_float_check_status` 4,5 %, `compute_fprf` 2,5 %) : **fait le
+      26/09, `patches/tcg/0007` (`x-fp-inline`, éteint par défaut, `FPINLINE=1`)**, docs/tcg-g4.md
+      §15 : `fadds`…`fnmsubs` en un appel pur + FPRF en ligne, `fcmpu` tout en ligne, quand
+      le FPSCR est amorcé sans trappe et les opérandes des simples normaux. Prouvé (hôte
+      814 M vecteurs, 10 mutations détectées ; invité 30 M instructions, empreinte identique ;
+      Marble Blast vérifié 3,04 milliards de passages, 0 divergence). Banc −21 à −46 % ;
+      Marble Blast +5 à +8 % (bruité). **Reste** : l'A/B DOOM 3 (§15.8, trois parties par
+      mode, binaire `~/src/qemu-fp/build/qfp`), puis décider du défaut (`FPINLINE` dans
+      `run_tiger.sh`, `tcg/0007` dans le binaire de référence). Ops aarch64 natives dans le
+      code généré : bornées, non faites (§15.7).
 - [ ] **Cœurs invités** (`docs/smp-coeurs.md`) : **tranché le 26/09 — SMP=2 reste le défaut** :
       DOOM 3 deux cœurs 74,3 contre un cœur 80,8 ms/image (−8 %, à-coups des autres fils de
       Tiger sur un seul vCPU) ; Marble Blast à égalité de 1 à 4 cœurs. 3-4 cœurs possibles
