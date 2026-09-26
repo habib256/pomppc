@@ -574,22 +574,21 @@ def un_lancement(h, j, mode, tour, vidage):
 
 
 def joue_cellule(h, j, mode, tour, a):
-    """Deux lancements par défaut : MESURE sans déclencheur (vitesse, replis),
-    puis PREUVE avec déclencheur (vidage, capture figée, replis). Le
-    déclencheur coûte un access() par dessin texturé tant que le fichier
-    n'existe pas (pomppc_accel.c, draw_probe/cube_probe) : DOOM 3 139 contre
-    77 ms/image (26/09) ; la vitesse ne se mesure donc pas pendant la preuve.
-    --une-passe : un seul lancement (vitesse prise avec le déclencheur,
-    biaisée) ; --sans-vidage : la mesure seule."""
+    """Un lancement par défaut : mesure (vitesse, replis) puis, la fenêtre de
+    mesure passée, PREUVE dans le même lancement (vidage, capture figée).
+    Depuis le 26/09 (après midi) le plugin ne regarde le déclencheur qu'une
+    fois par image (dump_trigger, pomppc_accel.c) : DOOM 3 64,2 ms/image
+    déclencheur armé contre 62,8 sans. Avant, un access() par dessin texturé
+    coûtait DOOM 3 139 contre 77 : --deux-passes rejoue l'ancien déroulé
+    (MESURE sans déclencheur puis PREUVE) pour un plugin plus ancien.
+    --sans-vidage : la mesure seule."""
     if a.sans_vidage:
         r = un_lancement(h, j, mode, tour, False)
         r["motifs"].append("tour sans vidage (--sans-vidage) : vitesse et replis seulement")
         return r
-    if a.une_passe:
+    if not a.deux_passes:
         r = un_lancement(h, j, mode, tour, True)
         r["preuve"] = bool(r.get("fenetre"))
-        if r.get("ms_image"):
-            r["motifs"].append("vitesse prise avec le déclencheur de vidage (--une-passe) : biaisée")
         return r
     m = un_lancement(h, j, mode, tour, False)
     p = un_lancement(h, j, mode, tour, True)
@@ -634,11 +633,11 @@ def main():
     ap.add_argument("--sortie", help="dossier du tour (défaut bench/matrice/<horodatage>)")
     ap.add_argument("--reprendre", metavar="TOUR",
                     help="compléter un tour interrompu : garde ses cellules, rejoue la sélection")
-    ap.add_argument("--une-passe", action="store_true",
-                    help="un seul lancement par cellule (vitesse biaisée par le déclencheur)")
+    ap.add_argument("--deux-passes", action="store_true",
+                    help="mesure sans déclencheur puis preuve (plugin d'avant le 26/09 après midi, "
+                         "qui payait un access() par dessin texturé)")
     ap.add_argument("--sans-vidage", action="store_true",
-                    help="ni vidage ni capture : vitesse et replis seuls (le déclencheur du vidage "
-                         "coûte un access() par dessin texturé, docs/matrice-jeux.md §5)")
+                    help="ni vidage ni capture : vitesse et replis seuls")
     a = ap.parse_args()
     jeux = charge_jeux()
     ordre = [k for k in ORDRE if k in jeux] + sorted(k for k in jeux if k not in ORDRE)

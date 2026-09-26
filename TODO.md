@@ -18,7 +18,7 @@ réorganisation par domaine est dans l'historique git (commit précédant celui 
 |---|---|---|---|
 | Flottant scalaire (`fmuls`, `fmadds`, drapeaux FPSCR) | TCG (§4) | **fait, allumé par défaut le 26/09** (`tcg/0007`, `x-fp-inline`) : DOOM 3 74,4 → 65,1 ms/image (−12,5 %), `docs/tcg-g4.md` §15.9 ; binaire de référence reconstruit | **fermé** : matrice DOOM 3 + Prey verte sur le nouveau binaire (26/09, `20260926-1452`, `20260926-1333`) |
 | Lots 4 et 5 du verdict unique | Plugin (§2) | à faire | R5 puis `STATECHECK=1` à zéro ; `sample` DOOM 3 comparé à `sample-nat.txt` |
-| Matrice de jeux automatisée (A3) | Outils (§7) | **harnais fait** (26/09) : `tools/matrice/matrice.py`, 9 vertes sur 11 cellules automatisées, ~50 min le tour | suites : Colin McRae, Zenerchi plein écran, Warcraft III fenêtre ; déclencheur du vidage lu par image (§2) pour un tour en une passe |
+| Matrice de jeux automatisée (A3) | Outils (§7) | **harnais fait** (26/09) : `tools/matrice/matrice.py`, 9 vertes sur 11 cellules automatisées, un lancement par cellule depuis le déclencheur lu une fois par image (26/09) | suites : Colin McRae, Zenerchi plein écran, Warcraft III fenêtre |
 
 **Ordre de fond** (« C : le contrat d'abord », 24/09/2026) : figer le contrat (protocole
 unique, §3), en faire le harnais (A3, §7), puis optimiser et élargir dessous (A2, A4, TCG).
@@ -90,12 +90,6 @@ Verdict unique : lots 0 à 3 faits (CHANGELOG, `docs/re/etude-court-circuit-glen
       `POMPPC_GL_STATECHECK=1` à zéro.
 - [ ] **Lot 5 — bilan** : nouveau `sample` de DOOM 3 à la scène de `sample-nat.txt` ; l'option A
       (crocheter la table de dispatch) est classée si GLEngine reste sous 5 %.
-- [ ] **Déclencheur du vidage lu à chaque dessin** (vu par la matrice, 26/09) : tant que
-      `POMPPC_GL_DUMP_TRIGGER` n'existe pas, `draw_probe` et `cube_probe` font un `access()`
-      par dessin texturé (~40 µs dans l'invité) : DOOM 3 139 ms/image au lieu de 77, Marble
-      Blast 36 au lieu de 12. Le lire une fois par image (dans `dump_submit` ou à l'échange).
-      Épreuve : `tools/matrice/matrice.py --une-passe` donne la même vitesse que la mesure
-      sans déclencheur ; alors la matrice repasse à un lancement par cellule.
 - [ ] **`frames.csv` vidé toutes les 5 s** : la matrice ne peut pas s'en servir comme
       horloge (elle lit les en-têtes du vidage). Un `fflush` à l'image quand
       `POMPPC_GL_DUMP_TRIGGER` est posé suffirait. Petit, avec le précédent.

@@ -8,6 +8,11 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Déclencheur de vidage lu une fois par image** (plugin, 26/09) : `dump_trigger()` remplace
+  les `access()` du vidage, de la sonde cube et de `draw_probe`, faits à chaque soumission ou
+  dessin texturé tant que le fichier manquait (DOOM 3 77 → 139 ms/image). DOOM 3 plein écran
+  déclencheur armé 64,2 ms/image contre 62,8 sans, image juste : la matrice passe à **un
+  lancement par cellule** par défaut (`--deux-passes` pour un plugin plus ancien).
 - **Fin de cinématique de DOOM 3 à seuil relatif** (26/09) : avec `x-fp-inline` le jeu tourne
   à ~63 ms/image et la règle à 65 ms/image fixe ne trouvait plus la scène (matrice
   `20260926-1333` rouge). S = 0,8 × le niveau lu sur les 400 dernières images, tranches

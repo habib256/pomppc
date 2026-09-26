@@ -6,9 +6,9 @@ cellule, ses preuves rangées. C'est le harnais qui doit autoriser A2 (découpag
 A4 (travail déplacé vers l'hôte) sans peur : on le rejoue avant et après.
 
 ```sh
-tools/matrice/matrice.py                     # tout : jeux automatisés, deux modes (~50 min)
+tools/matrice/matrice.py                     # tout : jeux automatisés, deux modes (~30 min)
 tools/matrice/matrice.py -j mb,zen -m fen    # un sous-ensemble (jeux, modes)
-tools/matrice/matrice.py --une-passe         # un lancement par cellule (~30 min, vitesse biaisée)
+tools/matrice/matrice.py --deux-passes       # mesure puis preuve séparées (plugin d'avant le 26/09 après midi)
 tools/matrice/matrice.py --sans-vidage       # vitesse et replis seuls
 tools/matrice/matrice.py --liste             # jeux et modes connus
 tools/matrice/matrice.py --valider d3-pe     # référence d'image vue et validée à l'œil
@@ -52,16 +52,15 @@ Un jeu est **vert** dans un mode quand les trois preuves y sont (TODO §1) :
 
 ## 2. Déroulé d'une cellule
 
-Par défaut, **deux lancements** par cellule :
+Par défaut, **un lancement** par cellule : la fenêtre de mesure (vitesse, replis), puis dans
+le même lancement la preuve (déclencheur posé, vidage, capture figée, replis).
 
-- **mesure** (sans déclencheur ni vidage) : vitesse et replis ;
-- **preuve** (avec déclencheur) : replis, vidage, capture figée.
-
-Pourquoi deux : tant que le fichier déclencheur n'existe pas, le plugin fait un `access()` par
-dessin texturé (`draw_probe` et `cube_probe`, `pomppc_accel.c`), ~40 µs chacun dans l'invité.
-Mesuré le 26/09 : **DOOM 3 139 ms/image avec le déclencheur, 77 sans** (fenêtre, même scène).
-La vitesse prise pendant la preuve est notée à part (`ms_image_preuve` dans `resultats.csv`).
-Défaut du plugin noté au TODO (§2) : lire le déclencheur une fois par image, pas par dessin.
+Jusqu'au 26/09 après midi il en fallait deux (`--deux-passes` les rejoue : mesure sans
+déclencheur, puis preuve) : tant que le fichier déclencheur n'existait pas, le plugin faisait un
+`access()` par dessin texturé (`draw_probe`, `cube_probe`, le vidage), et DOOM 3 passait de 77 à
+139 ms/image. Le plugin ne regarde plus le fichier qu'une fois par image (`dump_trigger`,
+`pomppc_accel.c`) : DOOM 3 plein écran **64,2 ms/image déclencheur armé, contre 62,8 sans**
+(tour `20260926-1519` contre `20260926-1452`, VM de l'agent TCG allumée à côté).
 
 Un lancement (`Cellule.jouer`, `tools/matrice/matrice.py`) :
 
@@ -213,7 +212,8 @@ ne jugent pas la vitesse absolue.
 
 - **Le déclencheur de vidage ralentit les jeux** (plugin) : un `access()` par dessin texturé
   tant que le fichier n'existe pas ; DOOM 3 77 → 139 ms/image, Marble Blast 12 → 36,
-  Warcraft III 19 → 44. D'où les deux lancements par cellule. TODO §2.
+  Warcraft III 19 → 44. **Corrigé le 26/09** (`dump_trigger`, une fois par image) : un
+  lancement par cellule.
 - **`frames.csv` n'est écrit que toutes les 5 s** (plugin) : inutilisable comme horloge
   fine ; la matrice lit les en-têtes du vidage. TODO §2.
 - **Marble Blast en fenêtre** : fenêtre de 1024×768 quelle que soit la résolution demandée,

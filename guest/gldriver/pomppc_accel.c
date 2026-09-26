@@ -2687,6 +2687,27 @@ struct dump_hdr {
     unsigned long arena_off, arena_len;
     unsigned long reserved[6];
 };
+/* POMPPC_GL_DUMP_TRIGGER=<fichier> : 1 dès que le fichier existe (et pour
+   toujours), 0 tant qu'il n'existe pas, -1 sans déclencheur. Le fichier n'est
+   regardé qu'une fois par image : un access() par soumission et par dessin
+   texturé coûtait cher tant qu'il manquait (DOOM 3 77 → 139 ms/image, relevé
+   de la matrice A3, 26/09). Partagé par le vidage, la sonde cube et draw_probe. */
+static int dump_trigger(void)
+{
+    static const char *trig = (const char *)-1;
+    static unsigned long checked = ~0UL;
+    static int seen;
+    if (trig == (const char *)-1)
+        trig = getenv("POMPPC_GL_DUMP_TRIGGER");
+    if (!trig || !*trig)
+        return -1;
+    if (!seen && checked != G.n_frames) {
+        checked = G.n_frames;
+        seen = access(trig, F_OK) == 0;
+    }
+    return seen;
+}
+
 static void dump_submit(void)
 {
     static int on = -1;
@@ -2710,13 +2731,11 @@ static void dump_submit(void)
            ce fichier existe (posé par ssh quand la scène voulue est à
            l'écran), pendant POMPPC_GL_DUMP_FRAMES images. Sans déclencheur :
            depuis le début, jusqu'à POMPPC_GL_DUMP_FRAMES. */
-        static const char *trig = (const char *)-1;
         static unsigned long from = ~0UL;
-        if (trig == (const char *)-1)
-            trig = getenv("POMPPC_GL_DUMP_TRIGGER");
-        if (trig && *trig) {
+        int trig = dump_trigger();
+        if (trig >= 0) {
             if (from == ~0UL) {
-                if (access(trig, F_OK) != 0)
+                if (!trig)
                     return;
                 from = G.n_frames;
                 /* Vidage AUTONOME : réémettre tout l'état et retéléverser
@@ -7353,17 +7372,8 @@ static void cube_probe(PCtx *p, const TexInfo *ti, const char *where)
         return;
     {   /* armée par le même fichier que le vidage déclenché : la scène voulue
            (arme en main) est à l'écran quand il apparaît */
-        static int armed, trig_read;
-        static const char *trig;        /* lot 1 : getenv une fois */
-        if (!trig_read) {
-            trig = getenv("POMPPC_GL_DUMP_TRIGGER");
-            trig_read = 1;
-        }
-        if (!armed) {
-            if (trig && *trig && access(trig, F_OK) != 0)
-                return;
-            armed = 1;
-        }
+        if (dump_trigger() == 0)
+            return;
     }
     {
         int cube = 0;
@@ -7428,20 +7438,12 @@ static void cube_probe(PCtx *p, const TexInfo *ti, const char *where)
    combineur, mélange, éclairage — pour retrouver les dessins de l'arme. */
 static void draw_probe(PCtx *p, const TexInfo *ti)
 {
-    static int armed, lines, trig_read;
-    static const char *trig;            /* lot 1 : getenv une fois, pas par dessin */
+    static int lines;
     unsigned char *g = gls(p);
     char buf[400];
     int at = 0, u;
-    if (!trig_read) {
-        trig = getenv("POMPPC_GL_DUMP_TRIGGER");
-        trig_read = 1;
-    }
-    if (!armed) {
-        if (!trig || !*trig || access(trig, F_OK) != 0)
-            return;
-        armed = 1;
-    }
+    if (dump_trigger() != 1)
+        return;
     if (lines >= 200 || !g)
         return;
     lines++;
