@@ -296,7 +296,8 @@ def verifie_reference(cle, cel, p, dump, creer=True):
     n = octets = 0
     for f in sorted(os.listdir(dump)):
         im = entete_vidage(os.path.join(dump, f))
-        if im is not None and im <= p["image"]:
+        # surfaces.txt (contextes et surfaces vivants au déclenchement, 27/09) : gardé
+        if (im is not None and im <= p["image"]) or f == "surfaces.txt":
             shutil.copy2(os.path.join(dump, f), os.path.join(d, "dump", f))
             n += 1
             octets += os.path.getsize(os.path.join(dump, f))
@@ -424,9 +425,11 @@ class Cellule:
             # sert d'horloge. Chaque fichier porte dans son en-tête (mot 1,
             # grand-boutiste = ordre de l'invité, lu par od) l'image en cours ;
             # on attend que le dernier fichier soit à dump_attente images du
-            # premier, puis VM arrêtée tout de suite.
+            # premier, puis VM arrêtée tout de suite. Seulement les .bin : depuis
+            # le 27/09 le vidage porte aussi surfaces.txt, qui trié en dernier
+            # rompait l'attente tout de suite (capture d'avant le vidage).
             h.ssh("touch %s; V=%s/dump; i=0; while [ $i -lt 3000 ]; do "
-                  "set -- $(ls $V 2>/dev/null | sed -n '1p;$p'); "
+                  "set -- $(ls $V 2>/dev/null | grep '[.]bin$' | sed -n '1p;$p'); "
                   "if [ $# -ge 2 ]; then a=$(od -An -tu4 -j4 -N4 $V/$1); b=$(od -An -tu4 -j4 -N4 $V/$2); "
                   "[ $((b - a)) -ge %d ] && break; fi; sleep 0.2; i=$((i+1)); done"
                   % (TRIG, self.gd, j.dump_attente), delai=700)
@@ -479,7 +482,8 @@ class Cellule:
         if a is None or a not in rows or b not in rows:
             r["replis"] = r["ms_image"] = ""
             return
-        r["ms_image"] = "%.1f" % ((rows[b][0] - rows[a][0]) / (b - a))
+        # ms par image DU JEU : frames.csv compte les échanges (Colin McRae : 3 par image)
+        r["ms_image"] = "%.1f" % ((rows[b][0] - rows[a][0]) / (b - a) * self.j.echanges_par_image)
         fin = max(rows)
         r["replis"] = str(rows[fin][1] - rows[a][1])
         # en fenêtre, le plugin rend volontairement un échange sur

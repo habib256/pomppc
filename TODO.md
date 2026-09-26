@@ -12,24 +12,25 @@ réorganisation par domaine est dans l'historique git (commit précédant celui 
 
 ---
 
-## 0. Maintenant — état au 26/09/2026
+## 0. Maintenant — état au 27/09/2026
 
 | Chantier | Domaine | État | Preuve qui le fermera |
 |---|---|---|---|
 | Flottant scalaire (`fmuls`, `fmadds`, drapeaux FPSCR) | TCG (§4) | **fait, allumé par défaut le 26/09** (`tcg/0007`, `x-fp-inline`) : DOOM 3 74,4 → 65,1 ms/image (−12,5 %), `docs/tcg-g4.md` §15.9 ; binaire de référence reconstruit | **fermé** : matrice DOOM 3 + Prey verte sur le nouveau binaire (26/09, `20260926-1452`, `20260926-1333`) |
 | Sorties indirectes (`blr`, `bctr` : `helper_lookup_tb_ptr`) | TCG (§4) | **fait, allumé par défaut le 26/09 au soir** (`tcg/0008`, `x-ret-inline` + `x-jc-idx`) : DOOM 3 65,7 → 61,2 ms/image (−6,8 %), Marble Blast +4 à +7 % (bruité) ; 34 milliards de blocs vérifiés, 0 divergence ; `docs/tcg-g4.md` §16 | matrice `20260926-1956` : 8 vertes sur 10, DOOM 3 60,1 / 60,3 ; UT2004 plein écran rouge à rejouer (capture ≠ rejeu juste) |
 | Verdict unique : mémoire des unités et des textures, lots 4 et 5 | Plugin (§2) | **fait le 26/09** (plugin `20260926-memo`, drapeaux allumés) : DOOM 3 −3,5 ms/image, Prey inchangé ; R5 : tout ce que lit `compute_state` pose un bit ; option A classée (GLEngine 1,1-2,6 %) | **fermé** : 0 écart `VERDICTCHECK`/`STATECHECK` sur six jeux, `docs/re/verdict-lots-4-5.md`, matrice |
-| Colin McRae : géométrie éclatée | Jeux (§6) | **cause trouvée et corrigée le 26/09** (`docs/re/cmr-var.md`) : IndirectX ne remplit la copie privée de ses tampons de sommets que si `GL_APPLE_vertex_array_range` est annoncée ; plugin `20260926-var` l'annonce ; v19 à 32 contextes par client (le jeu en ouvre 12) ; rejeu de course juste | reste l'image affichée : rendu vers texture rectangle (§6) |
-| Matrice de jeux automatisée (A3) | Outils (§7) | **harnais fait** (26/09) : `tools/matrice/matrice.py`, 9 vertes sur 11 cellules automatisées, un lancement par cellule depuis le déclencheur lu une fois par image (26/09) | suites : Colin McRae, Zenerchi plein écran, Warcraft III fenêtre |
+| Colin McRae : géométrie éclatée | Jeux (§6) | **cause trouvée et corrigée le 26/09** (`docs/re/cmr-var.md`) : IndirectX ne remplit la copie privée de ses tampons de sommets que si `GL_APPLE_vertex_array_range` est annoncée ; plugin `20260926-var` l'annonce ; v19 à 32 contextes par client (le jeu en ouvre 12) ; rejeu de course juste | **fermé le 27/09** avec le rendu vers texture (ligne suivante) |
+| Colin McRae : rendu vers texture | Jeux (§6), protocole (§3) | **fait le 27/09** (`docs/re/cmr-rendu-vers-texture.md`) : protocole **v20** (`SURF_TEX`, `TEX_READBACK`), plugin `20260927-rtt` (textures rectangle, textures de surface `aglSurfaceTexture`, drawables cachés sans présentation ni relecture) ; aplats blancs du rejeu du 26/09 expliqués (cibles de halo blanches, fondu du menu) | **fermé** : capture VM = rejeu 0,00 % en course, 0 repli, cellule `cmr-pe` de la matrice verte (référence validée) |
+| Matrice de jeux automatisée (A3) | Outils (§7) | **harnais fait** (26/09) : `tools/matrice/matrice.py`, 10 vertes sur 11 cellules automatisées (27/09, Colin McRae compris), un lancement par cellule depuis le déclencheur lu une fois par image (26/09) | suites : Zenerchi plein écran, Warcraft III fenêtre (Colin McRae plein écran porté le 27/09) |
 
 **Ordre de fond** (« C : le contrat d'abord », 24/09/2026) : figer le contrat (protocole
 unique, §3), en faire le harnais (A3, §7), puis optimiser et élargir dessous (A2, A4, TCG).
 
 | Installé | État |
 |---|---|
-| Protocole | **v19** (`qgpu_abi.h` kext, `qgpu_proto.h` device + plugin) ; 913 tests natifs |
-| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 26/09 au soir avec `patches/tcg/0001-0004`, `0006`, `0007` et `0008`, puis vers 21 h avec `qgpu_proto.h` à 32 contextes et 32 surfaces par client (précédent : `*.avant-cmr`) (**allumés par défaut** : `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0`, `RETINLINE=0`, `JCIDX=0` les éteignent ; `tcg/0008` depuis le 26/09 au soir) ; binaire précédent en `*.avant-retinline` |
-| Invité quotidien (`tiger.qcow2`) | kext v19 ; plugin **`20260926-var`** (32 contextes par client : exige le QEMU reconstruit le 26/09 au soir) ; lanceurs `~/doom3*.command`, `~/prey*.command` (dont `-fs` plein écran, `-env` lisant `~/lot3.env`), `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
+| Protocole | **v20** (`qgpu_abi.h` kext, inchangé depuis v19 ; `qgpu_proto.h` device + plugin) ; `qgpu_core_test` 938 contrôles, `tests/run-all.sh` 140 OK |
+| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 26/09 au soir avec `patches/tcg/0001-0004`, `0006`, `0007` et `0008`, puis vers 21 h avec `qgpu_proto.h` à 32 contextes et 32 surfaces par client (précédent : `*.avant-cmr`), puis le 27/09 avec le protocole **v20** (`SURF_TEX`, `TEX_READBACK`, texture 0 sur les unités lues sans texture ; précédent : `*.avant-rect`) (**allumés par défaut** : `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0`, `RETINLINE=0`, `JCIDX=0` les éteignent ; `tcg/0008` depuis le 26/09 au soir) ; binaire précédent en `*.avant-retinline` |
+| Invité quotidien (`tiger.qcow2`) | kext v19 ; plugin **`20260927-rtt`** (v20 ; l'ancien `20260926-var` marche aussi sur le QEMU v20, sans rendu vers texture) ; lanceurs `~/doom3*.command`, `~/prey*.command` (dont `-fs` plein écran, `-env` lisant `~/lot3.env`), `~/rtcw.command`, `~/cmr.command` ; journaux `~/d3-dump/`, `~/prey-dump/` |
 | Profils de référence | plugin : `bench/plugin/ab2-B*/{d3,prey}-fen/mesure/sample.txt` (26/09, plugin `20260926-memo`, `tools/re/sampleplug.py`) ; anciens `.run/d3/sample-nat.txt`, `.run/prey/sample.txt` ; TCG : `bench/tcg/` (non versionné) |
 | VM | redémarrages libres autorisés par l'utilisateur ; **un seul agent dessus à la fois** |
 
@@ -58,7 +59,7 @@ Les trois preuves sont produites par `tools/matrice/matrice.py` (`docs/matrice-j
 rejeu natif du vidage identique à la capture de la VM (0,00 % d'écart partout au 26/09) et
 rejeu de la référence validée à l'œil, replis de `frames.csv` (en fenêtre, 2 par 90 images
 admis : rafraîchissement voulu de la fenêtre), ms/image sans le déclencheur de vidage.
-Dernier tour : `bench/matrice/20260926-1756/tableau.md` (plugin `20260926-memo`, 9 vertes sur 10 automatisées, hôte chargé).
+Dernier tour : `bench/matrice/20260927-0307/tableau.md` (plugin `20260927-rtt`, QEMU v20, 10 vertes sur 11 automatisées, Marble Blast fenêtre rouge connu).
 
 | Jeu | Famille | Fenêtre | Plein écran | Vitesse à scène fixe (26/09) | Manque |
 |---|---|---|---|---|---|
@@ -68,7 +69,7 @@ Dernier tour : `bench/matrice/20260926-1756/tableau.md` (plugin `20260926-memo`,
 | Prey Demo | ARB2, VBO, DXT5 | **vert** | **vert** | 69,6 / 69,8 ms/image (« Fuite ») | vitesse |
 | UT2004 Demo | tableaux, VBO, S3TC | **vert** | **vert** | 29,5 / 29,0 ms/image (intro d'AS-Convoy) | arme en main noire, hors de la scène (§6) |
 | Warcraft III | tableaux | non automatisé | **vert** | 19,3 ms/image (menu) | fenêtre (§7) |
-| Colin McRae | ARB via IndirectX | non automatisé | non automatisé | — | géométrie juste depuis le 26/09 (rejeu) ; l'image affichée reste celle d'Apple (rendu vers texture rectangle, §6), portage (§7) |
+| Colin McRae | ARB via IndirectX, rendu vers texture | non automatisé (pas de mode fenêtre) | **vert** (27/09) | 72,6 ms/image du jeu (départ d'ESP 1, 3 échanges par image ; 69,1 seul) | vitesse |
 | RTCW | idTech3, pipeline fixe | non automatisé | non automatisé | — | absent du disque quotidien ; quitte après 8 s (§6) |
 | Bureau (Quartz Extreme) | WindowServer | — | — | — | §5 |
 
@@ -120,6 +121,12 @@ table de dispatch) classée : GLEngine < 3 % du fil principal. Ce qui reste du p
       son fil `qgpu-render`, 7-9 % d'un cœur en jeu : `docs/smp-coeurs.md` §3, levier L4.)
 - [ ] **`QGPU_REG_ERRORS` par client** : aujourd'hui global, un autre processus fait passer le
       plugin en synchrone sans faute de sa part.
+- [ ] **`SURF_TEX` et `COPY_TEX` par le GPU** (27/09) : les deux relisent la surface côté CPU
+      (`be->readback`) puis téléversent ; une copie FBO → texture (`glCopyTexSubImage2D` sur le
+      FBO lié) l'éviterait. Colin McRae en fait plusieurs par image. Épreuve : ms/image au
+      départ d'ESP 1 (matrice `cmr-pe`).
+- [ ] **Coordonnées de texture en mode immédiat sous programme de sommets** : perdues (vu le
+      27/09 en écrivant `gltest rectfp` ; la scène passe par des tableaux). Scène à écrire.
 - [ ] **`gltest tex14` « λ=2 sans biais »** : défaut du GL de l'hôte macOS (le biais d'unité
       du dessin précédent reste appliqué ; un `glFlush` le corrige mais coûte). Décision :
       ne réappliquer que sur changement, ou passer le biais d'unité dans l'échantillonneur.
@@ -234,13 +241,10 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
       l'écran redimensionné) et la mesure en combat en plein écran.
 - [ ] **UT2004, arme noire** (`docs/re/ut2004-arme-noire.md`) : trancher entre sources du
       combineur mal lues et textures 79/120 échangées entre les unités 0 et 1.
-- [ ] **Colin McRae, rendu vers texture** (26/09, `docs/re/cmr-var.md` §6) : la géométrie est
-      juste (rejeu natif d'un vidage de course : spéciale, voiture, brouillard), mais à chaque
-      image le jeu rattache trois drawables hors écran (400×300, 400×300, 200×150) et échantillonne une texture **rectangle** (`fallback tex-target c` : masque
-      rectangle + 2D) — ~2 800 replis en deux minutes ; la VM présente l'image d'Apple (noire
-      et blanche, sans programmes de fragments). Étendre le protocole : textures rectangle et
-      surface hors écran comme texture (`aglSurfaceTexture`, clé IndirectX
-      `RenderTargetMethod`). Épreuve : capture de la VM = rejeu (0,00 %) en course.
+- [ ] **Colin McRae, suites** (rendu vers texture fait le 27/09,
+      `docs/re/cmr-rendu-vers-texture.md`) : en course la voiture roule-t-elle juste (seul le
+      départ, voiture arrêtée, est prouvé) ; `POMPPC_GL_RECT=0` fait planter le jeu chez Apple
+      (échantillonneur nul dans `glrPolyRGB000`) : ne pas s'en servir pour comparer.
 - [ ] **Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur reste blanc).
       Au 26/09 le menu principal est juste (référence de la matrice validée) : à revoir en
       partie avant de fermer.
@@ -260,9 +264,7 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
 **Ensuite**
 
 - [ ] **A3, suites** (harnais fait le 26/09 : `tools/matrice/`, `docs/matrice-jeux.md`) :
-      porter Colin McRae (`tools/guest/cycle.sh` : Jouer, Entrée au titre, Entrée au menu ;
-      `sudo kill -9` l'arrête, `killgame.py` ne suffit pas toujours ; bloqué tant que l'image
-      affichée est celle d'Apple, §6) ; Zenerchi en plein écran et Warcraft III en fenêtre (réglage à trouver, sinon
+      Colin McRae porté le 27/09 (plein écran ; le jeu n'a pas de mode fenêtre) ; Zenerchi en plein écran et Warcraft III en fenêtre (réglage à trouver, sinon
       clic par System Events). Tour en une passe fait (26/09, ~23 min). Épreuve : plus de
       cellule « non automatisé » sauf RTCW absent.
 - [ ] **Prey en fenêtre : capture hors de l'intervalle vidé, 1 tour sur 3** (26/09, tour

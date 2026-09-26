@@ -120,7 +120,7 @@ UT2004 est déterministe (pas de simulation fixé), les autres non.
 | Prey Demo | `r_mode 3` | `r_mode 5` | `+loadGame Auto___Fuite_____toute_vitesse` : L+300..L+600 après le chargement |
 | UT2004 Demo | `StartupFullscreen=False` | `-fullscreen`, 1024×768 | caméra d'intro d'AS-Convoy, pas fixé à 0,2 s (`seed.c`), images 13..73 |
 | Warcraft III | **non automatisé** | défaut (800×600, changement de mode) | menu principal, images 1200..1700 ; CD monté depuis `Warcraft III.toast` |
-| Colin McRae 2005 | **non automatisé** | **non automatisé** | — |
+| Colin McRae 2005 | **non automatisé** (pas de mode fenêtre) | défaut (800×600, changement de mode) | départ d'ESP 1 Selardu en contre la montre, voiture arrêtée : 600 échanges réguliers après la touche COURSE (3 échanges par image du jeu) |
 | RTCW | **non automatisé** | **non automatisé** | — |
 
 Détails par jeu dans l'en-tête de chaque module. Points durs :
@@ -144,9 +144,16 @@ Détails par jeu dans l'en-tête de chaque module. Points durs :
   plein écran : le chargement finit par des images de 1,9-2 s).
 - **Non automatisés** : Zenerchi en plein écran (case du menu Options, rangée dans
   `prefs.dat` chiffré ; ni Option+Entrée ni Cmd+F ne basculent) ; Warcraft III en fenêtre
-  (aucun réglage connu, `LaunchCFMApp` ne passe pas d'arguments) ; Colin McRae (course
-  atteinte au clavier, arrêt par le stub GDB de QEMU : `tools/guest/cycle.sh`,
-  `killgame.py`, pas encore porté) ; RTCW (absent du disque quotidien).
+  (aucun réglage connu, `LaunchCFMApp` ne passe pas d'arguments) ; Colin McRae en fenêtre
+  (le dialogue d'options n'offre que résolution, couleurs, FSAA) ; RTCW (absent du disque
+  quotidien).
+- **Colin McRae** (27/09) : « Jouer » du dialogue d'options par osascript, puis écran titre
+  attendu (capture à ≥ 50 teintes), puis **Entrées tenues par le moniteur** (`sendkey ret
+  300` : l'Entrée d'osascript ne passe pas les menus) jusqu'à COURSE ; une Entrée perdue dans
+  une transition est renvoyée (pas de pause de chargement 40 s après la dernière). ms/image
+  = ms par échange × `echanges_par_image` (3 : plein écran + deux échanges de la cible
+  cachée 800×600). La voiture change d'un tour à l'autre (tirage du jeu), pas le décor.
+  Arrêt `sudo killall -9`, invité redémarré après.
 
 Ajouter un jeu : un module `tools/matrice/jeux/<clé>.py` qui définit `JEU`, une instance de
 `jeu.Jeu` (commande par mode, `fenetre(rows)`, réglages à sauvegarder, plancher).
@@ -161,6 +168,9 @@ Ajouter un jeu : un module `tools/matrice/jeux/<clé>.py` qui définit `JEU`, un
   la VM est arrêtée dès que le vidage couvre deux images, ~0,5 s plus tard. Si elle sort quand
   même du vidage : « rejeu ≠ VM … capture hors du vidage ? ». C'est un échec de la preuve, pas
   forcément de l'image : relancer la cellule (`--reprendre <tour> -j <jeu> -m <mode>`).
+  L'attente ne lit que les `*.bin` du vidage : depuis le 27/09 il porte aussi `surfaces.txt`
+  (surfaces hôte vivantes, pour le rejeu), qui trié en dernier rompait l'attente tout de suite
+  (capture d'avant le vidage, 0,7 d'écart sur Colin McRae : le chrono en retard d'une image).
 - **Reprendre un tour** : `--reprendre bench/matrice/<tour> -j … -m …` rejoue la sélection et
   garde les autres cellules du tour. Un tour interrompu laisse au pire un jeu en marche et des
   réglages sauvegardés : le tour suivant arrête le jeu (redémarre l'invité si c'est DOOM 3),
@@ -182,6 +192,21 @@ Ajouter un jeu : un module `tools/matrice/jeux/<clé>.py` qui définit `JEU`, un
   de DOOM 3 en 640×480), relecture de la zone présentée (au lieu de 800×600 fixes),
   `TEX_CREATE` (v3) reconnu par le prologue et `TEX_DESTROY` d'une texture jamais vue
   (Marble Blast : 5 soumissions en erreur, texture blanche dans l'image).
+- **Vidage autonome et rendu vers texture** (27/09, plugin `20260927-rtt`) : le vidage relit
+  l'état qui n'existe que sur l'hôte (textures copiées, surfaces) et écrit `surfaces.txt`.
+  Deux défauts vus au premier tour (`20260927-0236`, 10 rouges sur 11) : le rejeu reliait
+  encore le contexte à une surface devinée malgré `surfaces.txt` (images unies) ; la
+  relecture attendait l'échange suivant alors que DOOM 3 et Prey copient avant dans une
+  texture hôte (`BAD_ARG`). Corrigés : tour `20260927-0307`, 10 vertes.
+
+## 6 bis. Le tour du 27/09/2026 (Colin McRae porté)
+
+Tour `bench/matrice/20260927-0307` (plugin `20260927-rtt`, QEMU v20, un lancement par
+cellule, aucun autre QEMU, 29 min) : **10 vertes sur 11 automatisées**, rouge Marble Blast
+en fenêtre (connu). ms/image : Marble Blast plein écran 10,2 ; Zenerchi 4,4 ; DOOM 3 60,3 /
+60,5 ; Prey 69,9 / 70,1 ; UT2004 25,8 / 26,3 ; Warcraft III 17,3 ; **Colin McRae 72,6**
+(plein écran, par image du jeu). Rejeu = VM et rejeu de la référence : 0,00 / 0,00 %
+partout.
 
 ## 6. Le tour du 26/09/2026
 
@@ -205,7 +230,8 @@ comprise ~50 min. Sorties : ~720 Mio par tour (vidages), références 263 Mio.
 | UT2004 Demo | plein écran | **vert** | 0,00 / 0,00 % ; 0,00 / 0,00 % | 0 | 29,0 (38) |
 | Warcraft III | fenêtre | non automatisé | pas de réglage de fenêtre | — | — |
 | Warcraft III | plein écran | **vert** | 0,00 / 0,00 % ; 0,00 / 0,00 % | 0 | 19,3 (25) |
-| Colin McRae 2005 | les deux | non automatisé | pas encore porté (§4) | — | — |
+| Colin McRae 2005 | fenêtre | non automatisé | pas de mode fenêtre | — | — |
+| Colin McRae 2005 | plein écran | **vert** (27/09, tour `20260927-0228` + validation) | 0,00 / 0,00 % | 0 | 69,1 (90) |
 | RTCW | les deux | non automatisé | absent du disque quotidien | — | — |
 
 **9 cellules vertes sur 11 automatisées**, 1 rouge (Marble Blast en fenêtre), 6 non

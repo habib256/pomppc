@@ -180,8 +180,18 @@ typedef struct QgpuProgram {
     float   (*local)[4];           /* QGPU_MAX_PROG_PARAMS × 4, alloué à la création */
     uint32_t  local_hi;            /* 1 + plus grand indice jamais posé */
     bool      local_dirty;
+    /* 27/09 : cibles que le texte de fragments ÉCHANTILLONNE, par unité
+       (« texture[u], 2D » : bits QGPU_FPS_*), lues au PROG_STRING. Une unité
+       échantillonnée sans texture liée doit rendre la texture 0 (noir), pas
+       ce qu'un dessin précédent y a laissé (carrosserie de Colin McRae). */
+    uint8_t   fp_samples[QGPU_MAX_UNITS];
     void     *priv;                /* propriété du backend */
 } QgpuProgram;
+#define QGPU_FPS_1D     0x01
+#define QGPU_FPS_2D     0x02
+#define QGPU_FPS_3D     0x04
+#define QGPU_FPS_CUBE   0x08
+#define QGPU_FPS_RECT   0x10
 
 typedef struct QgpuProgSet {
     QgpuProgram prog[QGPU_MAX_PROG];

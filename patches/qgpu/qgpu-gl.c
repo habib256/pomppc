@@ -2382,6 +2382,23 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
             gl_prog_use(g, c->cur_prg, QGPU_PROG_VP, vp, (float)s->height);
         }
         if (fp) {
+            /* 27/09 : une unité que le programme échantillonne mais qui n'a pas
+               de texture rend la texture 0 (incomplète : noir), comme sur une
+               vraie carte — et non la dernière liée par un autre dessin (le
+               reflet de la carrosserie de Colin McRae changeait d'un dessin à
+               l'autre, et le rejeu différait de la capture). */
+            for (u = 0; u < QGPU_MAX_UNITS; u++) {
+                uint8_t m = fp->fp_samples[u];
+                if (!m || tex[u]) {
+                    continue;
+                }
+                g->ActiveTexture(GL_TEXTURE0 + u);
+                if (m & QGPU_FPS_1D) glBindTexture(GL_TEXTURE_1D, 0);
+                if (m & QGPU_FPS_2D) glBindTexture(GL_TEXTURE_2D, 0);
+                if ((m & QGPU_FPS_3D) && g->has_tex) glBindTexture(GL_TEXTURE_3D, 0);
+                if ((m & QGPU_FPS_CUBE) && g->has_tex) glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+                if ((m & QGPU_FPS_RECT) && g->has_rect) glBindTexture(GL_TEXTURE_RECTANGLE, 0);
+            }
             gl_prog_use(g, c->cur_prg, QGPU_PROG_FP, fp, (float)s->height);
         }
         ok = gl_err_ok();

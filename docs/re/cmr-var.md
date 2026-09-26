@@ -115,14 +115,21 @@ La scène se lance **à la taille par défaut** : à 256×256 les témoins des s
 tombent hors du dessin (la lecture de `gltest` part du haut de l'image). `arbvp0cmr` garde ses
 3 échecs du cas (g) (lot rectangle émulé par Apple), identiques sur `main`.
 
-## 6. Ce qui reste : l'image affichée par la VM n'est pas encore celle de l'hôte
+## 6. Ce qui restait : l'image affichée par la VM n'était pas celle de l'hôte
 
-Le rejeu natif (le flux envoyé à l'hôte) montre la spéciale juste ; la capture de la VM au même
-moment montre une image noire et blanche aux bonnes formes (`.run/cmr/r14/vm.png`). Chaque
-image, le jeu rattache trois drawables hors écran (`attach kind 80 -> 0`, 400×300, 400×300,
-200×150 ; à confirmer : qui les rend) et échantillonne une texture **rectangle**
-(`fallback tex-target c/700d700` : masque 0xc = rectangle + 2D) — rendu vers texture d'IndirectX
-(`aglSurfaceTexture`, clé `RenderTargetMethod`). Ces lots et les échanges se replient chez Apple
-(~2 800 replis en deux minutes, `frames.csv`), qui ne sait pas les programmes de fragments :
-c'est son image, sans textures, que la VM présente. Prochain chantier : textures rectangle et
-surface-comme-texture dans le protocole (pas de repli : l'étendre).
+**Corrigé le 27/09 : `docs/re/cmr-rendu-vers-texture.md`** (protocole v20, plugin `20260927-rtt`).
+
+**Correction** : le rejeu `r14/rj-0005-f45417.png` cité au §5 comme « juste » ne l'était pas
+(remarque de l'utilisateur) : la géométrie y est bonne mais de grands aplats blancs couvrent la
+route, la paroi et le fond. Ils ne venaient pas du brouillard mais des cibles de halo
+(400×300, 200×150) rendues blanches faute de texture rectangle complète côté invité, et le menu
+blanc d'un quad de fondu noir remplacé par du blanc (substitution « couleur morte ») —
+`cmr-rendu-vers-texture.md` §3.
+
+Ce que ce paragraphe disait le 26/09 : la capture de la VM montrait une image noire et blanche aux
+bonnes formes (`.run/cmr/r14/vm.png`) ; chaque image, le jeu rattache ses drawables hors écran
+(fenêtres cachées : 800×600, 400×300, 200×150) et échantillonne une texture **rectangle**
+(`fallback tex-target c/700d700` : masque 0xc = rectangle + 2D) — rendu vers texture
+d'IndirectX (`aglSurfaceTexture`, clé `RenderTargetMethod`). Ces lots et les échanges se
+repliaient chez Apple (~2 800 replis en deux minutes en démonstration), qui ne sait ni les
+programmes de fragments ni les textures de surface.

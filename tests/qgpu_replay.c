@@ -71,7 +71,13 @@ int main(int argc, char **argv)
     char **names = NULL;
     size_t nn = 0, i;
     unsigned npresent = 0, nerr = 0;
-    static uint32_t sk[QGPU_SK_COUNT];             /* dernier SET_STATE vu par clé (suivi grossier) */
+    /* dernier SET_STATE vu par clé, PAR CONTEXTE (27/09 : Colin McRae mêle
+       quatre contextes dans une soumission ; suivi global = LIST trompeur) */
+    static uint32_t skc[256][QGPU_SK_COUNT];
+    uint32_t *sk = skc[0];
+    static uint8_t ctx_seen[256], surf_seen[256], ctx_has_surf[256];
+    int surf_txt = 0;       /* surfaces.txt lu : les liaisons contexte → surface sont connues */
+    static uint32_t tex_hint[QGPU_MAX_TEX];         /* v20 : cible lue dans un SURF_TEX */
 
     if (!shmem || !vram || !qgpu_core_init(&c, backend, shmem, SHMEM)) {
         fprintf(stderr, "init impossible (backend %s)\n", backend);
@@ -126,6 +132,76 @@ int main(int argc, char **argv)
         if (mw && mh) { surf_w = mw; surf_h = mh; }
     }
     fprintf(stderr, "surfaces créées à la volée : %ux%u\n", surf_w, surf_h);
+    /* v20 : cible des textures de surface créées avant le vidage, d'après le
+       premier SURF_TEX qui les nomme (leurs TEX_PARAM peuvent venir avant, dans
+       une autre soumission, et les feraient créer en 2D). */
+    for (i = 0; i < nn; i++) {
+        char path[512];
+        uint8_t raw[64], *cmd;
+        uint32_t ncb, q;
+        FILE *f;
+        snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+        f = fopen(path, "rb");
+        if (!f) continue;
+        if (fread(raw, 64, 1, f) != 1 || qgpu_ld32(raw) != 0x50514431u ||
+            (ncb = qgpu_ld32(raw + 12)) > SHMEM || !(cmd = malloc(ncb ? ncb : 1))) {
+            fclose(f); continue;
+        }
+        if (fread(cmd, 1, ncb, f) == ncb)
+            for (q = 0; q + 1 < ncb / 4; ) {
+                uint32_t hd = qgpu_ld32(cmd + q * 4), o = QGPU_CMD_OP(hd), l = QGPU_CMD_LEN(hd);
+                if (!l || q + l > ncb / 4) break;
+                if ((o == QGPU_OP_SURF_TEX && l == QGPU_LEN_SURF_TEX) ||
+                    (o == QGPU_OP_TEX_READBACK && l == QGPU_LEN_TEX_READBACK)) {
+                    uint32_t id = qgpu_ld32(cmd + (q + 1) * 4);
+                    if (id < QGPU_MAX_TEX && !tex_hint[id])
+                        tex_hint[id] = qgpu_ld32(cmd + (q + 2) * 4);
+                }
+                q += l;
+            }
+        free(cmd);
+        fclose(f);
+    }
+    /* 27/09 : surfaces.txt (écrit par le plugin au déclenchement du vidage) —
+       les surfaces hôte vivantes, leur taille et leur contexte : recréées
+       telles quelles (cibles de rendu d'IndirectX, textures de surface). */
+    {
+        char path[512];
+        FILE *sf;
+        unsigned qc, sid, sw, sh;
+        int stc;
+        snprintf(path, sizeof(path), "%s/surfaces.txt", dir);
+        sf = fopen(path, "r");
+        if (!sf) {
+            snprintf(path, sizeof(path), "%s/../surfaces.txt", dir);
+            sf = fopen(path, "r");
+        }
+        if (sf) {
+            uint32_t pre[64], np, q, poff = SHMEM - 16384, st0;
+            while (fscanf(sf, " ctx %u surf %u %u %u %d", &qc, &sid, &sw, &sh, &stc) == 5) {
+                if (qc >= 256 || sid >= 256 || !sw || !sh)
+                    continue;
+                np = 0;
+                if (!ctx_seen[qc]) {
+                    pre[np++] = QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX); pre[np++] = qc;
+                    ctx_seen[qc] = 1;
+                }
+                pre[np++] = QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX); pre[np++] = qc;
+                pre[np++] = QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE); pre[np++] = sid;
+                pre[np++] = sw; pre[np++] = sh;
+                pre[np++] = QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH | (stc ? QGPU_FMT_FLAG_STENCIL : 0);
+                pre[np++] = QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF); pre[np++] = sid;
+                for (q = 0; q < np; q++) qgpu_st32(shmem + poff + q * 4, pre[q]);
+                st0 = qgpu_core_execute(&c, poff, np * 4);
+                surf_seen[sid] = 1;
+                ctx_has_surf[qc] = 1;
+                fprintf(stderr, "surfaces.txt : contexte %u, surface %u %ux%u (statut %u)\n",
+                        qc, sid, sw, sh, st0);
+            }
+            fclose(sf);
+            surf_txt = 1;
+        }
+    }
     uint32_t ndraw_frame = 0, ndraw_last_frame = 0xffffffffu;
     for (i = 0; i < nn; i++) {
         char path[512];
@@ -164,7 +240,7 @@ int main(int argc, char **argv)
            inconnu (surface 800×600 xRGB + profondeur + stencil), dans un petit
            flux synthétique exécuté avant la soumission. */
         {
-            static uint8_t ctx_seen[256], surf_seen[256], ctx_has_surf[256], tex_seen[QGPU_MAX_TEX];
+            static uint8_t tex_seen[QGPU_MAX_TEX];
             static uint8_t prog_seen[256][QGPU_MAX_PROG];        /* v16, par contexte */
             static uint8_t buf_seen[QGPU_MAX_BUF];               /* v14 */
             static uint32_t last_present_surf = 1;
@@ -176,6 +252,16 @@ int main(int argc, char **argv)
                 if (!l || q + l > h.ncmd_bytes / 4) break;
                 if (o == QGPU_OP_SURF_PRESENT && l == QGPU_LEN_SURF_PRESENT)
                     last_present_surf = qgpu_ld32(shmem + h.base + (q + 1) * 4);
+                /* v20 : texture de surface créée avant le vidage — sa cible
+                   (2D ou rectangle) est dans SURF_TEX, pas dans ses TEX_PARAM */
+                if (o == QGPU_OP_SURF_TEX && l == QGPU_LEN_SURF_TEX && np + 3 <= 4090) {
+                    uint32_t id = qgpu_ld32(shmem + h.base + (q + 1) * 4);
+                    if (id < QGPU_MAX_TEX && !tex_seen[id]) {
+                        pre[np++] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3);
+                        pre[np++] = id; pre[np++] = qgpu_ld32(shmem + h.base + (q + 2) * 4);
+                        tex_seen[id] = 1;
+                    }
+                }
                 q += l;
             }
             for (q = 0; q + 1 < h.ncmd_bytes / 4; ) {
@@ -241,9 +327,10 @@ int main(int argc, char **argv)
                 }
                 /* texture créée avant le vidage : la créer ici, avec la cible
                    déduite de TEX_IMAGE3 (face de cube → cube), 2D sinon */
-                if ((o == QGPU_OP_TEX_IMAGE3 || o == QGPU_OP_TEX_PARAM) && id < QGPU_MAX_TEX &&
+                if ((o == QGPU_OP_TEX_IMAGE3 || o == QGPU_OP_TEX_PARAM || o == QGPU_OP_TEX_READBACK) &&
+                    id < QGPU_MAX_TEX &&
                     !tex_seen[id] && np + 3 <= 4090) {
-                    uint32_t tgt = QGPU_TT_2D;
+                    uint32_t tgt = tex_hint[id] ? tex_hint[id] : QGPU_TT_2D;
                     if (o == QGPU_OP_TEX_IMAGE3) {
                         uint32_t it = qgpu_ld32(shmem + h.base + (q + 2) * 4);
                         tgt = (it >= QGPU_TT_CUBE_FACE(0) && it <= QGPU_TT_CUBE_FACE(5)) ? QGPU_TT_CUBE_MAP : it;
@@ -280,8 +367,14 @@ int main(int argc, char **argv)
             /* contexte lié sans surface dans le vidage : la surface était liée
                avant. On la crée (id de la présentation) et on la lie NOUS-MÊMES
                dans le prologue, après un CTX_BIND du même contexte. */
+            /* Avec surfaces.txt, les liaisons sont connues : ne rien relier
+               d'après la surface présentée (27/09 : Marble Blast, Zenerchi —
+               last_present_surf vaut 1 avant la première présentation, le
+               contexte 0 était relié à une surface 1 inventée, et tout le
+               vidage y dessinait ; image unie). */
             if (bound_ctx < 256 && (!ctx_has_surf[bound_ctx] ||
-                                    (last_present_surf < 256 && !surf_seen[last_present_surf])) &&
+                                    (!surf_txt && last_present_surf < 256 &&
+                                     !surf_seen[last_present_surf])) &&
                 np + 9 <= 4090) {
                 uint32_t sid = last_present_surf < 256 ? last_present_surf : 1;
                 if (!surf_seen[sid]) {
@@ -393,6 +486,10 @@ int main(int argc, char **argv)
             uint32_t op = QGPU_CMD_OP(hdr), len = QGPU_CMD_LEN(hdr);
             uint32_t a[QGPU_MAX_CMD_ARGS + 1], j;
             if (!len || k + len > h.ncmd_bytes / 4) break;
+            if (op == QGPU_OP_CTX_BIND && len == QGPU_LEN_CTX) {
+                uint32_t cx = qgpu_ld32(shmem + h.base + (k + 1) * 4);
+                if (cx < 256) sk = skc[cx];
+            }
             if (op == QGPU_OP_SET_STATE && len == 3) {
                 uint32_t key = qgpu_ld32(shmem + h.base + (k + 1) * 4);
                 uint32_t val = qgpu_ld32(shmem + h.base + (k + 2) * 4);
@@ -420,8 +517,36 @@ int main(int argc, char **argv)
                     }
                 }
             }
-            if (getenv("QGPU_REPLAY_LIST") && h.frame == (uint32_t)atoi(getenv("QGPU_REPLAY_LIST"))) {
+            /* QGPU_REPLAY_PROGS=dossier : chaque texte de programme ARB du
+               vidage, en entier, dans dossier/prog-<id>-f<image>-<n>.txt */
+            if (op == QGPU_OP_PROG_STRING && len == QGPU_LEN_PROG_STRING && getenv("QGPU_REPLAY_PROGS")) {
+                static unsigned nprog;
+                uint32_t pid = qgpu_ld32(shmem + h.base + (k + 1) * 4);
+                uint32_t pl = qgpu_ld32(shmem + h.base + (k + 2) * 4);
+                uint32_t po = qgpu_ld32(shmem + h.base + (k + 3) * 4);
+                char path[512];
+                FILE *pf;
+                snprintf(path, sizeof(path), "%s/prog-%u-f%u-%u.txt", getenv("QGPU_REPLAY_PROGS"),
+                         pid, h.frame, nprog++);
+                if ((uint64_t)po + pl <= SHMEM && (pf = fopen(path, "w"))) {
+                    fwrite(shmem + po, 1, pl, pf);
+                    fclose(pf);
+                }
+            }
+            if (getenv("QGPU_REPLAY_LIST") &&
+                (!strcmp(getenv("QGPU_REPLAY_LIST"), "tout") ||
+                 h.frame == (uint32_t)atoi(getenv("QGPU_REPLAY_LIST")))) {  /* « tout » : toutes les images */
                 for (j = 0; j < len && j <= QGPU_MAX_CMD_ARGS; j++) a[j] = qgpu_ld32(shmem + h.base + (k + j) * 4);
+                if (op == QGPU_OP_CTX_BIND && len == QGPU_LEN_CTX)
+                    fprintf(stderr, "LIST image %u CTX_BIND %u\n", h.frame, a[1]);
+                if (op == QGPU_OP_SURF_TEX && len == QGPU_LEN_SURF_TEX)
+                    fprintf(stderr, "LIST image %u SURF_TEX tex %u cible %x niveau %u surface %u\n",
+                            h.frame, a[1], a[2], a[3], a[4]);
+                if (op == QGPU_OP_COPY_TEX && len == QGPU_LEN_COPY_TEX)
+                    fprintf(stderr, "LIST image %u COPY_TEX tex %u cible %x niveau %u -> %u,%u <- %u,%u %ux%u\n",
+                            h.frame, a[1], a[2], a[3], a[4], a[5], a[7], a[8], a[9], a[10]);
+                if (op == QGPU_OP_SURF_PRESENT && len == QGPU_LEN_SURF_PRESENT)
+                    fprintf(stderr, "LIST image %u SURF_PRESENT surface %u %ux%u\n", h.frame, a[1], a[6], a[7]);
                 if (op == QGPU_OP_SET_LIGHT && len == QGPU_LEN_SET_LIGHT) {
                     float f[26]; uint32_t q2;
                     for (q2 = 0; q2 < 25; q2++) f[q2] = qgpu_u2f(a[q2 + 2]);
@@ -634,6 +759,38 @@ int main(int argc, char **argv)
         }
     }
     fprintf(stderr, "%zu soumissions, %u présentations écrites, %u en erreur\n", nn, npresent, nerr);
+    /* QGPU_REPLAY_SURFS=1 : chaque surface vivante à la fin du rejeu, en PPM
+       (<préfixe>-surf<id>-<l>x<h>.ppm) — cibles de rendu, textures de surface */
+    if (getenv("QGPU_REPLAY_SURFS")) {
+        uint32_t sid;
+        for (sid = 0; sid < QGPU_MAX_SURF; sid++) {
+            QgpuSurface *s = &c.surf[sid];
+            uint32_t *px, y, x;
+            char path[512];
+            FILE *f;
+            if (!s->used || !s->width || !s->height)
+                continue;
+            px = malloc((size_t)s->width * s->height * 4);
+            if (!px || !c.be->readback(&c, s, 0, 0, s->width, s->height, px)) {
+                free(px);
+                continue;
+            }
+            snprintf(path, sizeof(path), "%s-surf%u-%ux%u.ppm", prefix, sid, s->width, s->height);
+            f = fopen(path, "wb");
+            if (f) {
+                fprintf(f, "P6\n%u %u\n255\n", s->width, s->height);
+                for (y = 0; y < s->height; y++)
+                    for (x = 0; x < s->width; x++) {
+                        uint32_t p = px[y * s->width + x];
+                        uint8_t rgb[3] = { (p >> 16) & 255, (p >> 8) & 255, p & 255 };
+                        fwrite(rgb, 1, 3, f);
+                    }
+                fclose(f);
+                fprintf(stderr, "surface %u (%ux%u) -> %s\n", sid, s->width, s->height, path);
+            }
+            free(px);
+        }
+    }
     qgpu_core_fini(&c);
     return 0;
 }

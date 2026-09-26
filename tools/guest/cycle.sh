@@ -30,7 +30,9 @@ step "menu"; $T "osascript -e 'tell application \"System Events\" to keystroke r
 [ "${DUMP:-}" = 1 ] && { step "GO"; $T "touch /tmp/cmr-go"; sleep 20; }
 step "capture"; python3 "$ROOT/scripts/moncmd.py" "${MAIN:-$ROOT}/.run/mon.sock" "screendump $S/cycle.ppm" >/dev/null; sips -s format png "$S/cycle.ppm" --out "$S/cycle.png" >/dev/null 2>&1
 step "capture avant kill"; python3 "$ROOT/scripts/moncmd.py" "${MAIN:-$ROOT}/.run/mon.sock" "screendump $S/cycle2.ppm" >/dev/null; sips -s format png "$S/cycle2.ppm" --out "$S/cycle2.png" >/dev/null 2>&1
-step "kill"; python3 "$ROOT/tools/guest/killgame.py"; sleep 15
+# sudo kill -9 : killgame.py (stub GDB) a échoué une fois (26/09) ; KILLGAME=1 pour l'ancien geste
+if [ "${KILLGAME:-}" = 1 ]; then step "kill"; python3 "$ROOT/tools/guest/killgame.py"
+else step "kill -9"; $T "echo tiger974 | sudo -S killall -9 'Colin McRae Rally Mac' 2>&1 | grep -v Password; true"; fi; sleep 15
 step "journal"; for i in 1 2 3 4 5 6; do $T "cat ~/cmr-dump2/note.txt" > "$R/dump2-note.txt" 2>/dev/null && break; sleep 15; done
 grep -n 'SONDE\|slot\|vbo \|DRAW_RAW\|fallback\|broken\|VAO' "$R/dump2-note.txt" | head -80; $T "cat ~/cmr-dump2/log.txt; ls ~/cmr-dump2/dump | wc -l; tail -1 ~/cmr-dump2/frames.csv"
 step "fin"
