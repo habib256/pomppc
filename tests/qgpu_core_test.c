@@ -3291,7 +3291,7 @@ static void run_v9(QgpuCore *c, uint8_t *shmem)
     }
     CHECK(bad == 0, "carte des registres : %u offsets alignés et distincts "
           "sous 0x%x (%u fautes)", n, (unsigned)QGPU_CTRL_TOPADDR, bad);
-    CHECK(QGPU_PROTO_VERSION == 19, "version du protocole %d", QGPU_PROTO_VERSION);
+    CHECK(QGPU_PROTO_VERSION == 20, "version du protocole %d", QGPU_PROTO_VERSION);
     CHECK(QGPU_PROTO_MIN == 12, "version minimale d'attache %d", QGPU_PROTO_MIN);
     CHECK(QGPU_QUEUE_DEPTH >= 2 && (QGPU_QUEUE_DEPTH & (QGPU_QUEUE_DEPTH - 1)) == 0,
           "profondeur de file %d (puissance de 2, >= 2)", QGPU_QUEUE_DEPTH);
@@ -5856,6 +5856,173 @@ static void nat_ref_fixed(Emit *v, int q)
     emitf(v, nat_st[q][0]); emitf(v, nat_st[q][1]); emitf(v, 0.0f); emitf(v, 1.0f);
 }
 
+/* ── v20 : SURF_TEX — surface hôte → niveau de texture (aglSurfaceTexture) ──
+ *
+ * Une surface 16×8 (celle d'un drawable hors écran) : deux lignes du HAUT en
+ * bleu, le reste rouge. SURF_TEX en fait le niveau 0 d'une texture 2D, puis
+ * d'une texture rectangle, sans la lier : la ligne 0 du niveau est la ligne du
+ * HAUT de la surface (orientation d'aglSurfaceTexture, l'inverse de COPY_TEX).
+ * Dessinée avec t = 0 en haut (y = 0 de l'invité), l'image est à l'endroit. */
+static void run_v20(QgpuCore *c, uint8_t *shmem)
+{
+    Emit e, v;
+    uint32_t st, s1, s2, s3, s4, s5;
+    const uint32_t *lv;
+
+    printf("-- v20 : SURF_TEX --\n");
+    CHECK(QGPU_OP_SURF_TEX == 0x001E && QGPU_LEN_SURF_TEX == 5,
+          "SURF_TEX opcode 0x%x longueur %d", QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX);
+    CHECK(QGPU_CAP_SURF_TEX == 0x400 && (QGPU_CAP_SURF_TEX & (QGPU_CAP_CLIENTS | QGPU_CAP_NATIVE)) == 0,
+          "QGPU_CAP_SURF_TEX=0x%x disjoint", QGPU_CAP_SURF_TEX);
+    CHECK((c->caps & QGPU_CAP_SURF_TEX) != 0, "SURF_TEX annoncé par le cœur (caps 0x%x)", c->caps);
+
+    qgpu_core_reset(c);
+    e.base = shmem; e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 1); emit(&e, W); emit(&e, H); emit(&e, QGPU_FMT_XRGB8888);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 5); emit(&e, 16); emit(&e, 8); emit(&e, QGPU_FMT_XRGB8888);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 5);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFFFF0000, 1.0f);
+    state(&e, QGPU_SK_SCISSOR, 1);
+    state(&e, QGPU_SK_SCISSOR_X, 0); state(&e, QGPU_SK_SCISSOR_Y, 0);
+    state(&e, QGPU_SK_SCISSOR_W, 16); state(&e, QGPU_SK_SCISSOR_H, 2);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF0000FF, 1.0f);
+    state(&e, QGPU_SK_SCISSOR, 0);
+    /* la surface source n'est PLUS liée : SURF_TEX ne le demande pas */
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX)); emit(&e, 50);
+    tparam(&e, 50, QGPU_TP_MIN_FILTER, 0x2600);
+    tparam(&e, 50, QGPU_TP_MAG_FILTER, 0x2600);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX));
+    emit(&e, 50); emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, 5);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    lv = c->tex[50].level[0][0].px;
+    CHECK(st == QGPU_ST_OK && lv && c->tex[50].level[0][0].w == 16 && c->tex[50].level[0][0].h == 8 &&
+          c->tex[50].level[0][0].fmt == 0x1908 &&
+          (lv[0] & 0xFFFFFF) == 0x0000FF && (lv[7 * 16] & 0xFFFFFF) == 0xFF0000,
+          "SURF_TEX 2D 16×8, ligne 0 = haut (bleu %06x), ligne 7 rouge (%06x), st %u",
+          lv ? lv[0] & 0xFFFFFF : 0, lv ? lv[7 * 16] & 0xFFFFFF : 0, st);
+
+    /* dessinée t = 0 en haut : bleu en haut de la surface 1, rouge en bas */
+    e.off = e.start = CMD_OFF;
+    v.base = shmem; v.off = v.start = VTX_OFF;
+    tex_quad(&v, 1, 1, 1, 1, 1, 1);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+    state(&e, QGPU_SK_TEXTURE, 1);
+    state(&e, QGPU_SK_TEX_BIND, 50);
+    state(&e, QGPU_SK_TEX_ENV_MODE, 0x1E01);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_DRAW_TRIANGLES_TEX, QGPU_LEN_DRAW));
+    emit(&e, 6); emit(&e, VTX_OFF);
+    readback_cmd(&e, 1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && px(shmem, 8, 4) == 0x0000FF && px(shmem, 8, 60) == 0xFF0000,
+          "SURF_TEX échantillonnée : haut %06x (bleu), bas %06x (rouge), st %u",
+          px(shmem, 8, 4), px(shmem, 8, 60), st);
+
+    /* la surface change, la texture non (copie), jusqu'au SURF_TEX suivant */
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 5);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF00FF00, 1.0f);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    lv = c->tex[50].level[0][0].px;
+    CHECK(st == QGPU_ST_OK && lv && (lv[0] & 0xFFFFFF) == 0x0000FF,
+          "SURF_TEX est une copie : texture inchangée après effacement de la surface (%06x)",
+          lv ? lv[0] & 0xFFFFFF : 0);
+
+    /* rectangle : niveau 0 seulement ; cibles et objets vérifiés */
+    e.off = e.start = CMD_OFF;
+    tcreate3(&e, 51, QGPU_TT_RECTANGLE);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX));
+    emit(&e, 51); emit(&e, QGPU_TT_RECTANGLE); emit(&e, 0); emit(&e, 5);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    lv = c->tex[51].level[0][0].px;
+    CHECK(st == QGPU_ST_OK && lv && (lv[3 * 16 + 5] & 0xFFFFFF) == 0x00FF00 &&
+          c->tex[51].level[0][0].w == 16,
+          "SURF_TEX rectangle : st %u texel %06x", st, lv ? lv[3 * 16 + 5] & 0xFFFFFF : 0);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX));
+    emit(&e, 51); emit(&e, QGPU_TT_RECTANGLE); emit(&e, 1); emit(&e, 5);
+    s1 = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX));
+    emit(&e, 51); emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, 5);
+    s2 = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX));
+    emit(&e, 50); emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, 77);
+    s3 = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX));
+    emit(&e, 99); emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, 5);
+    s4 = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    e.off = e.start = CMD_OFF;
+    tcreate3(&e, 52, QGPU_TT_3D);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX));
+    emit(&e, 52); emit(&e, QGPU_TT_3D); emit(&e, 0); emit(&e, 5);
+    s5 = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(s1 == QGPU_ST_BAD_ARG && s2 == QGPU_ST_BAD_ARG && s3 == QGPU_ST_BAD_ARG &&
+          s4 == QGPU_ST_BAD_ARG && (s5 == QGPU_ST_BAD_ARG || s5 == QGPU_ST_BACKEND),
+          "SURF_TEX refusés : niveau 1 d'un rectangle %u, cible ≠ %u, surface inconnue %u, "
+          "texture inconnue %u, 3D %u", s1, s2, s3, s4, s5);
+
+    /* TEX_READBACK (outil de vidage) : le niveau de la texture 2D 50 */
+    CHECK(QGPU_OP_TEX_READBACK == 0x001F && QGPU_LEN_TEX_READBACK == 6 &&
+          (c->caps & QGPU_CAP_TEX_READBACK),
+          "TEX_READBACK opcode 0x%x longueur %d, annoncé (caps 0x%x)",
+          QGPU_OP_TEX_READBACK, QGPU_LEN_TEX_READBACK, c->caps);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_READBACK, QGPU_LEN_TEX_READBACK));
+    emit(&e, 50); emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, RB_OFF); emit(&e, 16 + 16 * 8 * 4);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && qgpu_ld32(shmem + RB_OFF) == 16 && qgpu_ld32(shmem + RB_OFF + 4) == 8 &&
+          qgpu_ld32(shmem + RB_OFF + 8) == 1 && qgpu_ld32(shmem + RB_OFF + 12) == 0x1908 &&
+          (qgpu_ld32(shmem + RB_OFF + 16) & 0xFFFFFF) == 0x0000FF &&
+          (qgpu_ld32(shmem + RB_OFF + 16 + 7 * 16 * 4) & 0xFFFFFF) == 0xFF0000,
+          "TEX_READBACK 16×8 : en-tête %u×%u×%u fmt %x, texel 0 %06x, ligne 7 %06x (st %u)",
+          qgpu_ld32(shmem + RB_OFF), qgpu_ld32(shmem + RB_OFF + 4), qgpu_ld32(shmem + RB_OFF + 8),
+          qgpu_ld32(shmem + RB_OFF + 12), qgpu_ld32(shmem + RB_OFF + 16) & 0xFFFFFF,
+          qgpu_ld32(shmem + RB_OFF + 16 + 7 * 16 * 4) & 0xFFFFFF, st);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_READBACK, QGPU_LEN_TEX_READBACK));
+    emit(&e, 50); emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, RB_OFF); emit(&e, 64);
+    s1 = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_READBACK, QGPU_LEN_TEX_READBACK));
+    emit(&e, 50); emit(&e, QGPU_TT_2D); emit(&e, 3); emit(&e, RB_OFF); emit(&e, 64);
+    s2 = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(s1 == QGPU_ST_BAD_ARG && s2 == QGPU_ST_OK && qgpu_ld32(shmem + RB_OFF) == 0,
+          "TEX_READBACK : taille max trop petite refusée (%u), niveau absent 0×0 (%u)", s1, s2);
+
+    /* 27/09 : cibles échantillonnées par un programme de fragments, par unité
+       (une unité lue sans texture rend la texture 0, pas la dernière liée) */
+    if (c->caps & QGPU_CAP_PROGRAMS) {
+        static const char fp_rect[] =
+            "!!ARBfp1.0\n"
+            "TEMP a, b;\n"
+            "TEX a, fragment.texcoord[0], texture[1], 2D;\n"
+            "TEX b, fragment.texcoord[1], texture [3] , RECT;\n"
+            "ADD result.color, a, b;\n"
+            "END\n";
+        uint32_t arena = ARENA_OFF;
+        const QgpuProgram *pg;
+        e.off = e.start = CMD_OFF;
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 0);
+        prog_create(&e, 4, QGPU_PT_FRAGMENT);
+        prog_string(&e, shmem, &arena, 4, fp_rect);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        pg = &c->ctx[0].prg.prog[4];
+        CHECK(st == QGPU_ST_OK && pg->fp_samples[1] == QGPU_FPS_2D && pg->fp_samples[3] == QGPU_FPS_RECT &&
+              !pg->fp_samples[0] && !pg->fp_samples[2],
+              "fp : cibles échantillonnées par unité %02x %02x %02x %02x (st %u)",
+              pg->fp_samples[0], pg->fp_samples[1], pg->fp_samples[2], pg->fp_samples[3], st);
+    }
+    qgpu_core_reset(c);
+}
+
 static void run_v19(QgpuCore *c, uint8_t *shmem);
 static void run_native(QgpuCore *c, uint8_t *shmem)
 {
@@ -6535,6 +6702,7 @@ static void *run_backend_body(void *arg)
     run_gensizes(c, shmem);
     run_native(c, shmem);
     run_v19(c, shmem);
+    run_v20(c, shmem);
 
     qgpu_core_reset(c);
     e.off = e.start = CMD_OFF;

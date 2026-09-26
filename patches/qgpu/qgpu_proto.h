@@ -53,7 +53,7 @@
                                        un kext / plugin compilé contre CE fichier
                                        s'attache encore : les opcodes v13/v14 sont
                                        optionnels (QGPU_CAP_SCANOUT, BUF_*, xfer 16). */
-#define QGPU_PROTO_VERSION      19  /* v2 : profondeur, état GL ; v3 : textures ;
+#define QGPU_PROTO_VERSION      20  /* v2 : profondeur, état GL ; v3 : textures ;
                                        v4 : brouillard, 2e unité, lignes, points ;
                                        v5 : 4 unités, GL_COMBINE ;
                                        v6 : stencil ;
@@ -111,7 +111,14 @@
                                              (QGPU_REG_CLIENT_RESET),
                                              QGPU_CAP_CLIENTS ; le kext ne
                                              compile plus rien de ce fichier.
-                                             docs/protocole-v19-transport.md */
+                                             docs/protocole-v19-transport.md ;
+                                       v20 : SURF_TEX — la couleur d'une
+                                             surface rendue par l'hôte devient
+                                             le niveau d'une texture, sans
+                                             passer par l'invité
+                                             (aglSurfaceTexture de Colin
+                                             McRae), QGPU_CAP_SURF_TEX.
+                                             docs/protocole-v20-surface-texture.md */
 
 /* ── Capacités (QGPU_REG_CAPS) ────────────────────────────────────────────────
  * Les bits DE TRANSPORT (QGPU_CAP_ASYNC, QGPU_CAP_CLIENTS) sont définis dans
@@ -169,6 +176,18 @@
 /* (0x00000200 : QGPU_CAP_CLIENTS, transport — qgpu_abi.h. Annoncé par le CŒUR :
    la disposition des clients et QGPU_REG_CLIENT_RESET ne dépendent d'aucun
    backend.) */
+/* v20 : le device tient QGPU_OP_SURF_TEX (surface hôte → niveau de texture).
+   Annoncé par le CŒUR pour tout backend qui sait relire une surface : la copie
+   est faite par lui (ou par le backend s'il sait copier sur le GPU). L'invité
+   n'émet SURF_TEX que si version >= 20 ET ce bit (un device v19 répond
+   BAD_OPCODE, qui ARRÊTE la soumission). Détail : section « v20 ». */
+#define QGPU_CAP_SURF_TEX       0x00000400
+/* v20 : le device tient QGPU_OP_TEX_READBACK (niveau de texture → BAR0).
+   Annoncé par le CŒUR (il garde une copie de chaque niveau). C'est un OUTIL :
+   le vidage autonome du plugin (POMPPC_GL_DUMP) y relit, au déclenchement, les
+   textures dont l'image n'existe que sur l'hôte (COPY_TEX, SURF_TEX) pour que
+   le rejeu natif n'ait besoin de rien d'antérieur. */
+#define QGPU_CAP_TEX_READBACK   0x00000800
 
 /* ── Statuts : QGPU_ST_* dans qgpu_abi.h ─────────────────────────────────── */
 /* ── Limites ─────────────────────────────────────────────────────────────── */
@@ -245,6 +264,10 @@
 #define QGPU_OP_COPY_TEX        0x001A  /* v13, [tex, cible, niveau, x, y, z,
                                            sx, sy, w, h]  surface liée → texture */
 #define QGPU_OP_BUF_CREATE      0x001B  /* v14, [id, size] */
+#define QGPU_OP_SURF_TEX        0x001E  /* v20, [tex, cible d'image, niveau, surf]
+                                           surface (couleur) → niveau de texture */
+#define QGPU_OP_TEX_READBACK    0x001F  /* v20, [tex, cible d'image, niveau, off, taille max]
+                                           niveau de texture → BAR0 (outil de vidage) */
 #define QGPU_OP_BUF_DESTROY     0x001C  /* v14, [id] */
 #define QGPU_OP_BUF_SUBDATA     0x001D  /* v14, [id, dst_off, src_off, len]
                                            BAR0 → tampon hôte */
@@ -313,6 +336,8 @@
 #define QGPU_LEN_SURF_XFER_PF   9           /* v15 : + format (QGPU_PF_* / QGPU_DF_*) */
 #define QGPU_LEN_SURF_PRESENT   9           /* v13 */
 #define QGPU_LEN_COPY_TEX       11          /* v13 */
+#define QGPU_LEN_SURF_TEX       5           /* v20 */
+#define QGPU_LEN_TEX_READBACK   6           /* v20 */
 #define QGPU_LEN_BUF_CREATE     3           /* v14 */
 #define QGPU_LEN_BUF            2           /* v14 DESTROY */
 #define QGPU_LEN_BUF_SUBDATA    5           /* v14 */
@@ -1394,6 +1419,47 @@
  *
  *   Aucun texel ne traverse la fenêtre partagée : c'est le pendant, pour
  *   glCopyTexSubImage, de SURF_PRESENT à l'échange.
+ */
+
+/* ── v20 : surface rendue par l'hôte utilisée comme texture ─────────────────
+ *
+ *   SURF_TEX — QGPU_OP_SURF_TEX [tex, cible d'image, niveau, surf]
+ *
+ *   Le niveau `niveau` de la texture `tex` devient une COPIE de la couleur de
+ *   la surface `surf` telle qu'elle est à ce point du flux : il est (re)défini
+ *   à la taille de la surface (w × h × 1), format de base GL_RGBA, alpha
+ *   compris, comme par un glCopyTexImage2D — mais la surface n'a pas à être
+ *   liée, ni même à appartenir au contexte courant (les textures sont
+ *   partagées ; la surface est celle d'un AUTRE contexte, un drawable hors
+ *   écran). `cible` est une cible d'IMAGE : QGPU_TT_2D ou QGPU_TT_RECTANGLE,
+ *   celle de la texture. Aucun texel ne traverse la fenêtre partagée.
+ *
+ *   ORIENTATION : la ligne 0 de la texture est la ligne du HAUT de la
+ *   surface (sa ligne 0, origine haut-gauche comme SURF_READBACK). C'est
+ *   l'inverse de COPY_TEX, et c'est voulu : c'est ce que rend
+ *   aglSurfaceTexture (le rendu logiciel d'Apple échantillonne la mémoire de
+ *   la fenêtre, rangée de haut en bas), et ce qu'IndirectX attend — son
+ *   chemin sans aglSurfaceTexture (glCopyTexImage2D) retourne l'image par un
+ *   dessin supplémentaire pour retrouver cette orientation
+ *   (docs/re/cmr-rendu-vers-texture.md).
+ *
+ *   Le plugin l'émet à l'ÉCHANGE du contexte source (aglSwapBuffers : son
+ *   tampon avant change), pour chaque texture liée à son drawable.
+ *
+ *   Refus : texture, surface ou niveau inconnus, cible d'image qui n'est pas
+ *   celle de la texture, texture 3D ou cube, niveau ≠ 0 pour un rectangle,
+ *   surface plus grande que QGPU_MAX_TEX_DIM : QGPU_ST_BAD_ARG. Sans
+ *   QGPU_CAP_SURF_TEX : l'opcode est inconnu (BAD_OPCODE).
+ *
+ *   TEX_READBACK — QGPU_OP_TEX_READBACK [tex, cible d'image, niveau, off, max]
+ *
+ *   Écrit à `off` (BAR0, multiple de 4) : w, h, d et le format de base du
+ *   niveau (4 mots), puis ses w·h·d texels en mots ARGB big-endian (ligne 0
+ *   d'abord, comme TEX_IMAGE : GL_BGRA + GL_UNSIGNED_INT_8_8_8_8_REV). Un
+ *   niveau non défini rend w = h = d = 0. Plus de `max` octets, niveau de
+ *   profondeur : QGPU_ST_BAD_ARG ; hors de la fenêtre : QGPU_ST_OOB. Sert au
+ *   vidage autonome (outil), jamais au rendu. Sans QGPU_CAP_TEX_READBACK :
+ *   BAD_OPCODE.
  */
 
 /* ── v14 : tampons hôte (maillages statiques hors de BAR0) ───────────────────

@@ -310,6 +310,49 @@ static int prog_which(uint32_t target)
    fins de ligne seulement, et l'en-tête de SA cible en tête : c'est ce que
    tout compilateur ARB exige, dit ici pour que le refus ait un statut et un
    pc plutôt qu'une erreur GL muette. */
+/* Cibles échantillonnées par unité : « texture[u], 2D » (et 1D, 3D, CUBE,
+   RECT). Un indice non littéral ou hors bornes est ignoré (l'hôte refusera ce
+   qu'il ne sait pas compiler). */
+static void prog_fp_samples(const char *t, uint32_t len, uint8_t *out)
+{
+    uint32_t i;
+    memset(out, 0, QGPU_MAX_UNITS);
+    for (i = 0; i + 8 < len; i++) {
+        uint32_t j, u = 0;
+        int any = 0;
+        if (memcmp(t + i, "texture", 7) != 0) {
+            continue;
+        }
+        j = i + 7;
+        while (j < len && (t[j] == ' ' || t[j] == '\t')) {
+            j++;
+        }
+        if (j >= len || t[j] != '[') {
+            continue;
+        }
+        j++;
+        while (j < len && (t[j] == ' ' || t[j] == '\t')) {
+            j++;
+        }
+        while (j < len && t[j] >= '0' && t[j] <= '9') {
+            u = u * 10 + (uint32_t)(t[j] - '0');
+            any = 1;
+            j++;
+        }
+        while (j < len && (t[j] == ']' || t[j] == ' ' || t[j] == ',' || t[j] == '\t')) {
+            j++;
+        }
+        if (!any || u >= QGPU_MAX_UNITS) {
+            continue;
+        }
+        if (j + 2 <= len && !memcmp(t + j, "1D", 2)) out[u] |= QGPU_FPS_1D;
+        else if (j + 2 <= len && !memcmp(t + j, "2D", 2)) out[u] |= QGPU_FPS_2D;
+        else if (j + 2 <= len && !memcmp(t + j, "3D", 2)) out[u] |= QGPU_FPS_3D;
+        else if (j + 4 <= len && !memcmp(t + j, "CUBE", 4)) out[u] |= QGPU_FPS_CUBE;
+        else if (j + 4 <= len && !memcmp(t + j, "RECT", 4)) out[u] |= QGPU_FPS_RECT;
+    }
+}
+
 static bool prog_text_ok(const uint8_t *s, uint32_t len, uint32_t target)
 {
     static const char hv[] = "!!ARBvp1.0", hf[] = "!!ARBfp1.0";
@@ -1177,6 +1220,12 @@ bool qgpu_core_init(QgpuCore *c, const char *backend,
         /* v19 : la disposition des clients et leur destruction sont l'affaire
            du cœur, quel que soit le backend. */
         c->caps |= QGPU_CAP_CLIENTS;
+        /* v20 : SURF_TEX est une relecture de surface faite par le cœur ;
+           tout backend qui sait relire le tient. */
+        if (c->be->readback) {
+            c->caps |= QGPU_CAP_SURF_TEX;
+        }
+        c->caps |= QGPU_CAP_TEX_READBACK;   /* v20 : copie des niveaux dans le cœur */
     } else {
         c->caps = 0;
     }
@@ -3256,6 +3305,91 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         return QGPU_ST_OK;
     }
 
+    case QGPU_OP_SURF_TEX: {
+        /* v20 : couleur d'une surface → niveau de texture, ligne 0 = HAUT de
+           la surface (orientation d'aglSurfaceTexture, sans retournement,
+           contrairement à COPY_TEX). La surface n'a pas à être liée. */
+        QgpuTexture *t;
+        QgpuTexLevel *lv;
+        uint32_t lvl, w, h;
+
+        WANT(QGPU_LEN_SURF_TEX);
+        if (!(c->caps & QGPU_CAP_SURF_TEX)) {
+            return QGPU_ST_BAD_OPCODE;
+        }
+        if (a[0] >= QGPU_MAX_TEX || !c->tex[a[0]].used) {
+            return QGPU_ST_BAD_ARG;
+        }
+        t = &c->tex[a[0]];
+        lvl = a[2];
+        s = surf_lookup(c, a[3]);
+        if (!s || a[1] != t->target ||
+            (t->target != QGPU_TT_2D && t->target != QGPU_TT_RECTANGLE) ||
+            lvl >= QGPU_MAX_TEX_LEVELS || (t->target == QGPU_TT_RECTANGLE && lvl != 0)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        w = s->width;
+        h = s->height;
+        if (!w || !h || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM) {
+            return QGPU_ST_BAD_ARG;
+        }
+        lv = &t->level[0][lvl];
+        if (!tex_alloc_level(lv, w, h, 1, 0x1908, false)) {
+            return QGPU_ST_BACKEND;
+        }
+        if (!c->be->readback(c, s, 0, 0, w, h, lv->px)) {
+            return QGPU_ST_BACKEND;
+        }
+        t->dirty[0] |= 1u << lvl;
+        if (t->gen_mipmap && lvl == t->base_level && !tex_gen_mipmaps(t, 0)) {
+            return QGPU_ST_BACKEND;
+        }
+        tex_refresh_format(t);
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_TEX_READBACK: {
+        /* v20 (outil) : niveau de texture → BAR0, pour le vidage autonome */
+        QgpuTexture *t;
+        QgpuTexLevel *lv;
+        uint32_t lvl = a[2], off = a[3], max = a[4], n, i;
+        int face;
+        uint8_t *dst;
+
+        WANT(QGPU_LEN_TEX_READBACK);
+        if (!(c->caps & QGPU_CAP_TEX_READBACK)) {
+            return QGPU_ST_BAD_OPCODE;
+        }
+        if (a[0] >= QGPU_MAX_TEX || !c->tex[a[0]].used || lvl >= QGPU_MAX_TEX_LEVELS) {
+            return QGPU_ST_BAD_ARG;
+        }
+        t = &c->tex[a[0]];
+        face = tex_face(t, a[1]);
+        if (face < 0) {
+            return QGPU_ST_BAD_ARG;
+        }
+        lv = &t->level[face][lvl];
+        n = lv->px ? lv->w * lv->h * lv->d : 0;
+        if (lv->px && lv->fmt == 0x1902) {
+            return QGPU_ST_BAD_ARG;                  /* profondeur : pas de mots ARGB */
+        }
+        if ((off & 3) || (uint64_t)16 + (uint64_t)n * 4 > max) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (!in_shmem(c, off, (uint64_t)16 + (uint64_t)n * 4)) {
+            return QGPU_ST_OOB;
+        }
+        dst = c->shmem + off;
+        qgpu_st32(dst, n ? lv->w : 0);
+        qgpu_st32(dst + 4, n ? lv->h : 0);
+        qgpu_st32(dst + 8, n ? lv->d : 0);
+        qgpu_st32(dst + 12, n ? lv->fmt : 0);
+        for (i = 0; i < n; i++) {
+            qgpu_st32(dst + 16 + (size_t)i * 4, lv->px[i]);
+        }
+        return QGPU_ST_OK;
+    }
+
     case QGPU_OP_BUF_CREATE: {
         uint32_t id, size;
         uint8_t *p;
@@ -3364,6 +3498,11 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         free(p->text);
         p->text = text;
         p->len = len;
+        if (p->target == QGPU_PT_FRAGMENT) {
+            prog_fp_samples(text, len, p->fp_samples);
+        } else {
+            memset(p->fp_samples, 0, sizeof(p->fp_samples));
+        }
         p->compiled = false;
         p->local_dirty = true;             /* un nouvel objet hôte repart de zéro */
         if (!c->be->prog_string(c, p)) {
@@ -3495,6 +3634,7 @@ static bool known_op(uint32_t op)
     case QGPU_OP_CTX_BIND: case QGPU_OP_SURF_CREATE: case QGPU_OP_SURF_DESTROY:
     case QGPU_OP_SURF_BIND: case QGPU_OP_SURF_READBACK: case QGPU_OP_SURF_UPLOAD:
     case QGPU_OP_SURF_PRESENT: case QGPU_OP_COPY_TEX:
+    case QGPU_OP_SURF_TEX: case QGPU_OP_TEX_READBACK:   /* v20 */
     case QGPU_OP_BUF_CREATE: case QGPU_OP_BUF_DESTROY: case QGPU_OP_BUF_SUBDATA:
     case QGPU_OP_DEPTH_READBACK: case QGPU_OP_DEPTH_UPLOAD:
     case QGPU_OP_STENCIL_READBACK: case QGPU_OP_STENCIL_UPLOAD: case QGPU_OP_CLEAR:
