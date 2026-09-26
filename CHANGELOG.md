@@ -8,6 +8,21 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Sorties indirectes des blocs sans helper sur le chemin courant** (`patches/tcg/0008`,
+  `x-ret-inline` + `x-jc-idx`, **éteints par défaut**, `RETINLINE=1 JCIDX=1 ./run_tiger.sh` ;
+  `docs/tcg-g4.md` §16, 26/09) : à chaque `blr`, `bctr`, `bclr`/`bcctr`, branchement vers une
+  autre page, la sonde du cache de sauts de `helper_lookup_tb_ptr` est faite dans le code
+  généré (mêmes comparaisons), le helper seulement sur un raté ; un vidage du TLB ne jette que
+  les entrées du cache de sauts des `mmu_idx` vidés (journal des emplacements par `mmu_idx`).
+  Mode preuve `x-ret-verify` (`RETVERIFY=1`) : chaque bloc pris dans le cache comparé à une
+  recherche physique complète — 34 milliards de blocs, 0 divergence (Marble Blast SMP=2 et
+  SMP=1, DOOM 3) ; `tools/guest/jobs/smctest` (JIT maison, retour dans du code réécrit
+  pendant l'appel, remappage, `fork`, fonction recopiée) identique dans tous les modes.
+  **DOOM 3 65,7 → 61,2 ms/image (−6,8 %)**, trois parties entrelacées par mode ; Marble Blast
+  +6,6 % (bruité). Essai `essais/0009` (`x-isync-chain`) exact mais sans gain. Trouvé en
+  route : en SMP=2, du code réécrit par un vCPU peut rester périmé pour l'autre (QEMU 9.2 sans
+  aucun patch, §16.7). `tools/tcg/retproof.sh`, `tools/tcg/retd3.sh` ; `d3run.sh` prend son
+  `sample` avant `FINI`. Copie `~/src/qemu-ret` (`ret15b`, `ret19b`).
 - **Verdict unique : mémoire des unités et des textures, lot 4, lot 5** (plugin
   `20260926-memo`, `docs/re/verdict-lots-4-5.md`). `POMPPC_GL_TEXMEMO` (défaut 1) : relevé
   des unités de texture fait une fois par verdict (`texturing_on`, `geom_texture_ok`,

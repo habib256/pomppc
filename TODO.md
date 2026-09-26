@@ -17,6 +17,7 @@ réorganisation par domaine est dans l'historique git (commit précédant celui 
 | Chantier | Domaine | État | Preuve qui le fermera |
 |---|---|---|---|
 | Flottant scalaire (`fmuls`, `fmadds`, drapeaux FPSCR) | TCG (§4) | **fait, allumé par défaut le 26/09** (`tcg/0007`, `x-fp-inline`) : DOOM 3 74,4 → 65,1 ms/image (−12,5 %), `docs/tcg-g4.md` §15.9 ; binaire de référence reconstruit | **fermé** : matrice DOOM 3 + Prey verte sur le nouveau binaire (26/09, `20260926-1452`, `20260926-1333`) |
+| Sorties indirectes (`blr`, `bctr` : `helper_lookup_tb_ptr`) | TCG (§4) | **fait le 26/09, éteint par défaut** (`tcg/0008`, `x-ret-inline` + `x-jc-idx`) : DOOM 3 65,7 → 61,2 ms/image (−6,8 %), Marble Blast +4 à +7 % (bruité) ; 34 milliards de blocs vérifiés, 0 divergence ; `docs/tcg-g4.md` §16 | mot de l'utilisateur pour l'allumer (`RETINLINE`/`JCIDX` à 1, binaire de référence reconstruit) |
 | Verdict unique : mémoire des unités et des textures, lots 4 et 5 | Plugin (§2) | **fait le 26/09** (plugin `20260926-memo`, drapeaux allumés) : DOOM 3 −3,5 ms/image, Prey inchangé ; R5 : tout ce que lit `compute_state` pose un bit ; option A classée (GLEngine 1,1-2,6 %) | **fermé** : 0 écart `VERDICTCHECK`/`STATECHECK` sur six jeux, `docs/re/verdict-lots-4-5.md`, matrice |
 | Matrice de jeux automatisée (A3) | Outils (§7) | **harnais fait** (26/09) : `tools/matrice/matrice.py`, 9 vertes sur 11 cellules automatisées, un lancement par cellule depuis le déclencheur lu une fois par image (26/09) | suites : Colin McRae, Zenerchi plein écran, Warcraft III fenêtre |
 
@@ -150,10 +151,22 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
 
 **Ensuite**
 
-- [ ] **Retours prédits** : chaque `blr` passe par `helper_lookup_tb_ptr` (18-21 % du temps
-      vCPU sur Marble Blast). Épreuve : A/B, zéro divergence.
+- [ ] **Retours prédits / sorties indirectes** : **fait le 26/09, `patches/tcg/0008`
+      (`x-ret-inline`, `x-jc-idx`), éteint par défaut** (`RETINLINE=1 JCIDX=1`), docs/tcg-g4.md
+      §16 : sonde du cache de sauts en ligne aux `blr`/`bctr`…, cache de sauts vidé par
+      `mmu_idx` (journal des emplacements). Mode preuve `x-ret-verify` : 34 milliards de blocs,
+      0 divergence (Marble Blast SMP=2/1, DOOM 3) ; `smctest` (code modifié, remappé, `fork`)
+      identique. **DOOM 3 65,7 → 61,2 ms/image (−6,8 %)**, Marble Blast +6,6 % (bruité).
+      Reste : l'allumer par défaut (mot de l'utilisateur). Pile de retours prédits : classée
+      (§16.8) ; `isync` sans retour à `cpu_exec` : essai sans gain (`essais/0009`).
+- [ ] **Cache de sauts plus grand** (16 384 entrées) : sur DOOM 3 les ratés restants sont aux
+      deux tiers des conflits (§16.6). Épreuve : taux de réussite de `x-ret-verify`, A/B DOOM 3.
+- [ ] **Code réécrit par l'autre vCPU non vu** (défaut de QEMU 9.2 en MTTCG, présent sans aucun
+      patch, docs/tcg-g4.md §16.7) : `tools/guest/jobs/smctest` essai E échoue en SMP=2. Cause
+      non trouvée (deux courses de `cputlb.c` refermées sans effet). Épreuve : E à 0 erreur.
 - [ ] **Verrou global à chaque `mtmsr`/`rfi`** (`ppc_maybe_interrupt`, `cpu_interrupt_exittb` :
-      9-10 % + attente) : chemin sans verrou quand l'état d'interruption ne change pas.
+      9-10 % + attente ; au 26/09 : Marble Blast 5 % + 5 % d'attente, DOOM 3 3,5 + 3,4 %) : chemin
+      sans verrou quand l'état d'interruption ne change pas.
 - [ ] **Troisième facteur de lenteur** (`docs/tcg-g4.md` §14.7) : une partie DOOM 3 sur huit
       lente de bout en bout (95,3 contre 73,9 ms/image) avec le tampon du JIT bien placé ;
       cinématique aussi lente (témoin). Cause inconnue (cœurs P/E, autre processus,
