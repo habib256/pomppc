@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "qgpu-core.h"
+#include "../guest/gldriver/pomppc_glslpp.h"   /* v21 : ce que fait le plugin */
 
 #define SHMEM_SIZE   (1u << 20)
 #define CMD_OFF      0x1000u
@@ -7017,7 +7018,7 @@ static void run_v21_dp(QgpuCore *c, uint8_t *shmem)
 {
     const char *dir = getenv("QGPU_TEST_DP");
     char path[512], *body, *perms, *line, *save = NULL;
-    uint32_t n = 0, bad = 0, st, id = 0;
+    uint32_t n = 0, bad = 0, st, id = 0, npp_kept = 0;
     size_t blen;
 
     if (!dir || !*dir) {
@@ -7060,6 +7061,14 @@ static void run_v21_dp(QgpuCore *c, uint8_t *shmem)
         fs = malloc(pl + blen + 32);
         snprintf(vs, pl + blen + 32, "#define VERTEX_SHADER\n%s%s", pre, body);
         snprintf(fs, pl + blen + 32, "#define FRAGMENT_SHADER\n%s%s", pre, body);
+        /* le texte que GLEngine range : conditions faites par le plugin
+           (pomppc_glslpp.h, contournement du préprocesseur de Tiger) */
+        {
+            unsigned long nf;
+            char *v2 = glsl_pp_fix(vs, strlen(vs), &nf), *f2 = glsl_pp_fix(fs, strlen(fs), &nf);
+            if (v2) { free(vs); vs = v2; } else { npp_kept++; }
+            if (f2) { free(fs); fs = f2; } else { npp_kept++; }
+        }
         st = v21_setup(c, shmem);
         e.base = shmem;
         e.off = e.start = CMD_OFF;
@@ -7083,8 +7092,9 @@ static void run_v21_dp(QgpuCore *c, uint8_t *shmem)
         free(vs);
         free(fs);
     }
-    CHECK(n > 0 && bad == 0, "DarkPlaces : %u permutations compilées et liées par l'hôte "
-          "(%u refus)", n, bad);
+    CHECK(n > 0 && bad == 0 && npp_kept == 0,
+          "DarkPlaces : %u permutations, conditions faites comme le plugin (%u texte(s) gardé(s) "
+          "tel(s) quel(s)), compilées et liées par l'hôte (%u refus)", n, npp_kept, bad);
     free(body);
     free(perms);
 }

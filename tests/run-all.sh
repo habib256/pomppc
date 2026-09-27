@@ -341,6 +341,16 @@ if command -v cc >/dev/null 2>&1; then
     ko "qgpu_core_test ne compile pas"
   fi
   rm -f "$QGPU_BIN"
+  # v21 : conditions du préprocesseur GLSL faites par le plugin (Tiger se
+  # trompe sur les #if imbriqués) — guest/gldriver/pomppc_glslpp.h.
+  PP_BIN="${TMPDIR:-/tmp}/glsl_pp_test.$$"
+  if cc -std=gnu11 -O1 -I guest/gldriver tests/glsl_pp_test.c -o "$PP_BIN" 2>/dev/null; then
+    if "$PP_BIN" >/dev/null 2>&1; then ok "glsl_pp_test (préprocesseur GLSL du plugin)"
+    else ko "glsl_pp_test ($("$PP_BIN" 2>&1 | grep FAIL | head -1))"; fi
+  else
+    ko "glsl_pp_test ne compile pas"
+  fi
+  rm -f "$PP_BIN"
   # Banc d'essai des BACKENDS (soft vs gl sur le même flux), s'il existe :
   # mêmes drapeaux que qgpu_core_test, et rien à signaler tant qu'il n'est pas
   # écrit — un test absent ne doit ni rougir ni faire croire qu'il est passé.

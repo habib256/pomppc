@@ -693,6 +693,7 @@ typedef struct PCtx {
     struct GProg  *glsl_cur;            /* ce que l'hôte a lié (PROG_BIND GLSL) */
     struct GProg  *glsl_last;           /* dernière recherche objet → GProg */
     unsigned char *glsl_last_obj;
+    int            glsl_hooked;         /* glShaderSourceARB interposé (préprocesseur) */
     unsigned char  prog_used[QGPU_MAX_PROG];   /* identifiants qgpu pris */
     unsigned long  c_env[2][QGPU_MAX_PROG_PARAMS][4];  /* miroir des program.env */
     unsigned long  c_gs;                /* QGPU_SK_GEN_SIZES posé sur le device */
@@ -7861,6 +7862,109 @@ static int glsl_sync(PCtx *p)
     return 1;
 }
 
+
+/* ─────────── v21 : le préprocesseur GLSL de GLEngine 10.4.6 ───────────
+ *
+ * GLEngine compte mal les conditions imbriquées dans un groupe sauté (tout le
+ * texte de DarkPlaces : chaque permutation refusée, « #else after a #else »).
+ * Le plugin interpose glShaderSourceARB dans la table de dispatch du contexte
+ * (entrée +0x94c, gliDispatch.h ; tables gctx+0x4680 / +0x4684) et fait
+ * lui-même les conditions avant que GLEngine ne range le texte
+ * (pomppc_glslpp.h, épreuve tests/glsl_pp_test.c). POMPPC_GL_GLSLPP=0
+ * l'éteint. */
+#include "pomppc_glslpp.h"
+#define DISP_SHADER_SOURCE  (0x94c / 4)
+typedef void (*shsrc_fn)(void *, unsigned long, long, const char **, const long *);
+static shsrc_fn shsrc_real;
+static unsigned long n_shsrc, n_shsrc_fixed;
+
+static void glsl_source_hook(void *gc, unsigned long obj, long count, const char **str,
+                             const long *len)
+{
+    unsigned long total = 0, o = 0, nfix = 0;
+    long i;
+    char *buf, *fixed;
+    const char *one;
+    n_shsrc++;
+    if (count <= 0 || !str) {
+        shsrc_real(gc, obj, count, str, len);
+        return;
+    }
+    for (i = 0; i < count; i++)
+        total += str[i] ? (len && len[i] >= 0 ? (unsigned long)len[i] : strlen(str[i])) : 0;
+    buf = malloc(total + 1);
+    if (!buf) {
+        shsrc_real(gc, obj, count, str, len);
+        return;
+    }
+    for (i = 0; i < count; i++) {
+        unsigned long l;
+        if (!str[i])
+            continue;
+        l = len && len[i] >= 0 ? (unsigned long)len[i] : strlen(str[i]);
+        memcpy(buf + o, str[i], l);
+        o += l;
+    }
+    buf[o] = 0;
+    fixed = glsl_pp_fix(buf, o, &nfix);
+    if (fixed) {
+        n_shsrc_fixed++;
+        one = fixed;
+    } else {
+        one = buf;
+    }
+    if (n_shsrc <= 4 || (fixed && n_shsrc_fixed <= 4))
+        gl_note("GLSL : glShaderSourceARB n°%lu, %lu octets, %lu condition(s) faites%s\n",
+                n_shsrc, o, nfix, fixed ? "" : " (texte tel quel)");
+    shsrc_real(gc, obj, 1, &one, 0);
+    free(fixed);
+    free(buf);
+}
+
+/* Pose l'interposition dans les tables du contexte, une fois (les tables
+   sont remplies par _gliInitDispatchTable après gldCreateContext, et
+   glShaderSourceARB n'y est plus réécrit). Sous G.mu. */
+static void glsl_hook_ctx(PCtx *p)
+{
+    static int off = -1;
+    unsigned char *gc;
+    int t;
+    if (off < 0) {
+        const char *e = getenv("POMPPC_GL_GLSLPP");
+        off = e && e[0] == '0';
+    }
+    if (off || !p || p->glsl_hooked || G.state <= 0 || !G.glsl)
+        return;
+    gc = gctx_of(p);
+    for (t = 0; gc && t < 2; t++) {
+        void **tab = (void **)GLD_U32(gc, 0x4680 + 4 * t);
+        void *e;
+        if (!tab)
+            continue;
+        e = tab[DISP_SHADER_SOURCE];
+        if (!e || e == (void *)glsl_source_hook)
+            continue;
+        if (!shsrc_real) {
+            shsrc_real = (shsrc_fn)e;
+            gl_note("GLSL : glShaderSourceARB interposé (table %d, %p)\n", t, e);
+        }
+        if (e == (void *)shsrc_real) {
+            tab[DISP_SHADER_SOURCE] = (void *)glsl_source_hook;
+            p->glsl_hooked = 1;
+        }
+    }
+}
+
+/* gldGetString : l'application interroge les extensions avant de compiler. */
+void pomppc_glsl_hook(void *ctx)
+{
+    if (G.state <= 0 || !G.glsl || !ctx)
+        return;
+    pthread_mutex_lock(&G.mu);
+    glsl_hook_ctx(find_ctx(ctx));
+    pthread_mutex_unlock(&G.mu);
+}
+
 /* Hors GLSL : le programme GLSL lié sur l'hôte primerait sur tout le reste. */
 static void glsl_unbind(PCtx *p)
 {
@@ -11578,6 +11682,8 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
         return 0;
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
+    if (p && !p->glsl_hooked)
+        glsl_hook_ctx(p);               /* v21 : une fois par contexte */
     if (p && (!chg || !st_neutral(chg)))
         p->st_dirty = 1;                /* lot 4 : un bit que compute_state lit */
     if (G.count)                        /* lot 0 : compter seulement */

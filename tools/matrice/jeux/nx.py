@@ -60,10 +60,9 @@ class Nexuiz(Jeu):
         self.cle = "nx" if profil == "arb" else "nxg"
         self.titre = "Nexuiz 2.5.2" + ("" if profil == "arb" else " (GLSL)")
         self.args_profil, self.famille = PROFILS[profil]
-        if profil == "glsl":
-            raison = ("GLSL coupé par le jeu : le plugin n'annonce pas GL_ARB_fragment_shader "
-                      "(TODO §6 « Nexuiz / GLSL »)")
-            self.non_automatise = {"fen": raison, "pe": raison}
+        # glsl : automatisé depuis le protocole v21 (27/09, plugin 20260927-glsl,
+        # docs/protocole-v21-glsl.md) — GL_ARB_fragment_shader annoncée, programmes
+        # GLSL exécutés par l'hôte.
 
     def fichiers_reglages(self, mode):
         return [CFG]            # -benchmark n'enregistre rien, par précaution
