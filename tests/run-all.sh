@@ -53,6 +53,13 @@ done
 if python3 tests/frame_report_test.py; then ok "frame-time report"; else ko "frame-time report"; fi
 if python3 tests/flyby_report_test.py; then ok "fixed-step flyby report"; else ko "fixed-step flyby report"; fi
 if python3 tests/matrice_test.py >/dev/null; then ok "matrice de jeux : règles de scène, ppmcmp"; else ko "matrice de jeux (python3 tests/matrice_test.py)"; fi
+if python3 tests/tiger_launcher_test.py; then ok "lanceur Tiger ImGuiDock"; else ko "lanceur Tiger ImGuiDock"; fi
+if python3 tests/chime_extract_test.py; then ok "extraction carillon G4"; else ko "extraction carillon G4"; fi
+if [ -x frontend/build/chime_test ]; then
+  if frontend/build/chime_test; then ok "carillon : déclenchement et préférences"; else ko "carillon frontend"; fi
+else
+  noop "chime_test non construit (cmake --build frontend/build)"
+fi
 rm -rf tests/__pycache__ scripts/__pycache__ 2>/dev/null
 
 echo

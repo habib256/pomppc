@@ -1,4 +1,4 @@
-# Protocole qgpu — contrat courant v21
+# Protocole qgpu — contrat courant v22
 
 Référence consolidée au 27/09/2026 pour le plugin invité, le device QEMU et les
 tests natifs. Les notes `protocole-v7…v21-*.md` conservent l'historique et les
@@ -16,7 +16,7 @@ preuves des changements ; ce document décrit le contrat courant.
 Le kext ne compile **aucun opcode GL**. Modifier le protocole sémantique demande
 de reconstruire QEMU et le plugin ; modifier l'ABI demande aussi le kext et un
 redémarrage de Tiger. La copie de `qgpu_abi.h` dans `kext/POMPPCGPU/` doit
-rester identique. Le numéro publié par le device est **21** ; « kext v19 »
+rester identique. Le numéro publié par le device est **22** ; « kext v19 »
 désigne sa génération d'ABI, pas un second registre de version.
 
 Le plugin vérifie la version minimale, la lecture des registres par le kext,
@@ -38,11 +38,35 @@ Le plancher historique `QGPU_PROTO_MIN=12` ne dispense pas du transport v19.
 | Tranches de clients | v19, `QGPU_CAP_CLIENTS` |
 | Surface vers texture / lecture de texture | v20, `QGPU_CAP_SURF_TEX` / `QGPU_CAP_TEX_READBACK` |
 | Programmes GLSL et 16 unités d'image | v21, `QGPU_CAP_GLSL` |
+| Combineurs ATI et sources ZERO/ONE | v22, `QGPU_CAP_COMBINE3` |
 
 Le backend logiciel ne promet ni programmes ARB ni GLSL. L'annonce GLSL du backend
 GL dépend des points d'entrée 2.0, d'au moins 16 unités d'image et d'un programme
 d'essai lié à l'initialisation. Le plugin conserve l'annonce OpenGL **1.5** :
-le protocole v21 ne signifie pas une implémentation complète d'OpenGL 2.0.
+le protocole v22 ne signifie pas une implémentation complète d'OpenGL 2.0.
+
+### Combineurs ATI (v22)
+
+`ATI_texture_env_combine3` ajoute trois fonctions RGB et alpha : `MODULATE_ADD`
+(Arg0 × Arg2 + Arg1), `MODULATE_SIGNED_ADD` (idem − 0,5), `MODULATE_SUBTRACT`
+(Arg0 × Arg2 − Arg1). L'échelle 1/2/4 s'applique avant le bornage à [0,1].
+Voir la [spécification ATI](https://registry.khronos.org/OpenGL/extensions/ATI/ATI_texture_env_combine3.txt).
+
+Les codes 8/9/10 occupent les champs de quatre bits déjà réservés dans
+`QGPU_SK_COMBINE(u)`. Deux bits par argument ajoutent les sources littérales :
+RGB aux bits 12..17, alpha aux bits 18..23, dans l'ordre des arguments 0/1/2.
+Valeurs : 0 = source habituelle de `COMBINE_SRC`, 1 = ZERO, 2 = ONE, 3 = invalide.
+Une source littérale ignore les trois bits source de `COMBINE_SRC` mais conserve
+l'opérande (couleur, alpha, inverse). Les bits 24..31 restent nuls. Les anciens
+flux ne changent pas ; les sources croisées 0..3 conservent leur encodage.
+
+Le cœur refuse les fonctions inconnues, DOT3 en alpha, les échelles invalides et
+les champs réservés (`BAD_ARG`, sans mutation). Sans `QGPU_CAP_COMBINE3`, toute
+opération ATI ou source littérale est refusée (`BACKEND`, sans mutation).
+Le backend logiciel les calcule ; le backend GL n'annonce la capacité que si
+l'hôte annonce l'extension ATI. Le plugin exige version ≥22 **et** capacité,
+puis expose le bit 70 des extensions de GLEngine. `POMPPC_GL_COMBINE3=0`
+permet une comparaison sans annonce. Les huit unités fixes restent inchangées.
 
 ## Transport, mémoire et durée de vie
 
@@ -307,7 +331,7 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | Symbole | Valeur / expression |
 |---|---|
 | `QGPU_PROTO_MIN` | `12` |
-| `QGPU_PROTO_VERSION` | `21` |
+| `QGPU_PROTO_VERSION` | `22` |
 | `QGPU_CAP_SOFT` | `0x00000001` |
 | `QGPU_CAP_GL` | `0x00000002` |
 | `QGPU_CAP_OCCLUSION` | `0x00000004` |
@@ -319,6 +343,7 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_CAP_SURF_TEX` | `0x00000400` |
 | `QGPU_CAP_TEX_READBACK` | `0x00000800` |
 | `QGPU_CAP_GLSL` | `0x00001000` |
+| `QGPU_CAP_COMBINE3` | `0x00002000` |
 | `QGPU_MAX_CTX` | `128` |
 | `QGPU_MAX_SURF` | `128` |
 | `QGPU_MAX_SURF_DIM` | `4096` |
@@ -602,6 +627,13 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_CB_SUBTRACT` | `5` |
 | `QGPU_CB_DOT3_RGB` | `6` |
 | `QGPU_CB_DOT3_RGBA` | `7` |
+| `QGPU_CB_MODULATE_ADD` | `8` |
+| `QGPU_CB_MODULATE_SIGNED_ADD` | `9` |
+| `QGPU_CB_MODULATE_SUBTRACT` | `10` |
+| `QGPU_COMBINE_LITERAL_RGB(i, value)` | `((unsigned long)(value) << (12 + 2 * (i)))` |
+| `QGPU_COMBINE_LITERAL_A(i, value)` | `((unsigned long)(value) << (18 + 2 * (i)))` |
+| `QGPU_CL_ZERO` | `1` |
+| `QGPU_CL_ONE` | `2` |
 | `QGPU_CS_TEXTURE` | `0` |
 | `QGPU_CS_CONSTANT` | `1` |
 | `QGPU_CS_PRIMARY` | `2` |

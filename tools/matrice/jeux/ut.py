@@ -8,10 +8,11 @@ Fenêtre de mesure : images 13..73 (60 intervalles = 12 s simulées), vidage
 déclenché juste après.
 
 Réglages (UT2004.ini, sauvegardé puis rendu) : comme utflyby,
-MinDesiredFrameRate=0, UseVSync=False, MaxTextureUnits=4 ; fenêtre =
+MinDesiredFrameRate=0, UseVSync=False, MaxTextureUnits=8 ; fenêtre =
 StartupFullscreen=False (640×480, WindowedViewport) ; plein écran =
-StartupFullscreen=True en 1024×768. L'arme en main noire (TODO §6) n'est pas
-dans cette scène (pas d'arme pendant l'introduction).
+StartupFullscreen=True en 1024×768. Le défaut d'arme noire corrigé en v22
+(ATI_texture_env_combine3) exige un contrôle séparé en partie : cette scène
+d'introduction ne montre pas l'arme du joueur.
 """
 import os
 
@@ -47,7 +48,7 @@ class UT2004(Jeu):
               "-e 's/^StartupFullscreen=.*/StartupFullscreen=%s/' "
               "-e 's/^MinDesiredFrameRate=.*/MinDesiredFrameRate=0.000000/' "
               "-e 's/^UseVSync=.*/UseVSync=False/' "
-              "-e 's/^MaxTextureUnits=.*/MaxTextureUnits=4/' \"$f.matrice-sauve\" > \"$f\"" % (INI, fs))
+              "-e 's/^MaxTextureUnits=.*/MaxTextureUnits=8/' \"$f.matrice-sauve\" > \"$f\"" % (INI, fs))
 
     def commande(self, mode):
         return ('cd "%s/System" && DYLD_INSERT_LIBRARIES=%s UT_FLYBY_CLOCK="$D/clock.csv" '

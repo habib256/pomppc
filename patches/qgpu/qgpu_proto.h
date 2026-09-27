@@ -53,7 +53,8 @@
                                        un kext / plugin compilé contre CE fichier
                                        s'attache encore : les opcodes v13/v14 sont
                                        optionnels (QGPU_CAP_SCANOUT, BUF_*, xfer 16). */
-#define QGPU_PROTO_VERSION      21  /* v2 : profondeur, état GL ; v3 : textures ;
+#define QGPU_PROTO_VERSION      22  /* v22 : ATI_texture_env_combine3 (ABI transport inchangée).
+                                      v2 : profondeur, état GL ; v3 : textures ;
                                        v4 : brouillard, 2e unité, lignes, points ;
                                        v5 : 4 unités, GL_COMBINE ;
                                        v6 : stencil ;
@@ -205,6 +206,7 @@
    8..15 n'acceptent que 0 (BACKEND sinon). L'invité n'émet rien de v21 sans
    version >= 21 ET ce bit. docs/protocole-v21-glsl.md. */
 #define QGPU_CAP_GLSL           0x00001000
+#define QGPU_CAP_COMBINE3       0x00002000  /* v22 : opérations ATI et sources ZERO/ONE */
 
 /* ── Statuts : QGPU_ST_* dans qgpu_abi.h ─────────────────────────────────── */
 /* ── Limites ─────────────────────────────────────────────────────────────── */
@@ -674,6 +676,17 @@
 #define QGPU_CB_SUBTRACT        5
 #define QGPU_CB_DOT3_RGB        6   /* RGB seulement */
 #define QGPU_CB_DOT3_RGBA       7   /* RGB seulement ; l'alpha prend aussi le produit */
+#define QGPU_CB_MODULATE_ADD    8   /* v22 : Arg0 * Arg2 + Arg1 (RGB et alpha) */
+#define QGPU_CB_MODULATE_SIGNED_ADD 9 /* Arg0 * Arg2 + Arg1 - 0.5 */
+#define QGPU_CB_MODULATE_SUBTRACT 10 /* Arg0 * Arg2 - Arg1 */
+/* v22 : deux bits par argument dans COMBINE : 0 = source habituelle,
+ * 1 = ZERO, 2 = ONE, 3 = invalide. Une source littérale ignore les trois bits
+ * source de COMBINE_SRC mais conserve son opérande (couleur/alpha/inverse).
+ * RGB : bits 12..17 ; alpha : 18..23 ; bits 24..31 réservés, nuls. */
+#define QGPU_COMBINE_LITERAL_RGB(i, value) ((unsigned long)(value) << (12 + 2 * (i)))
+#define QGPU_COMBINE_LITERAL_A(i, value) ((unsigned long)(value) << (18 + 2 * (i)))
+#define QGPU_CL_ZERO            1
+#define QGPU_CL_ONE             2
 #define QGPU_CS_TEXTURE         0
 #define QGPU_CS_CONSTANT        1
 #define QGPU_CS_PRIMARY         2

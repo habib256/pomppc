@@ -57,7 +57,6 @@ class Nexuiz(Jeu):
     delai_scene = 600           # image 600 vers 80 s ; la démo finit vers 200 s
     dump_image = 870            # vidage déclenché à l'image fixe 870 (@870)
     dump_images = 24            # ~1,2 s de démo ; la capture tombe à 872 (17 Mio par image vidée)
-    dump_attente = 2
 
     def __init__(self, profil="arb"):
         self.profil = profil

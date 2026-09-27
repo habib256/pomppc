@@ -1713,6 +1713,9 @@ static bool gl_init(QgpuCore *c)
         goto fail;
     }
     g->renderer = (const char *)glGetString(GL_RENDERER);
+    if (gl_has_ext(g, "GL_ATI_texture_env_combine3")) {
+        c->caps |= QGPU_CAP_COMBINE3;
+    }
     if (g->has_query) {
         c->caps |= QGPU_CAP_OCCLUSION;         /* v8 : annoncé seulement si tenu */
     }
@@ -2347,9 +2350,10 @@ static bool gl_tex_sync(QgpuCore *c, QgpuTexture *t)
 /* GL_COMBINE (v5) : état empaqueté → paramètres d'environnement natifs. */
 static void gl_combine(QgpuCore *c, const QgpuState *st, int u)
 {
-    static const GLenum fn[8] = {
+    static const GLenum fn[11] = {
         GL_REPLACE, GL_MODULATE, GL_ADD, GL_ADD_SIGNED, GL_INTERPOLATE,
         GL_SUBTRACT, GL_DOT3_RGB, GL_DOT3_RGBA,
+        0x8744, 0x8745, 0x8746,       /* ATI_texture_env_combine3 */
     };
     const GlState *gs = c->be_priv;
     /* v12 : 4..7 = GL_TEXTURE0 + n (crossbar, OpenGL 1.4 : gs->has_tex). Le
@@ -2367,15 +2371,16 @@ static void gl_combine(QgpuCore *c, const QgpuState *st, int u)
     uint32_t src = st->v[QGPU_SK_COMBINE_SRC(u)];
     int i;
 
-    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, fn[cb & 7]);
-    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, fn[(cb >> 4) & 7]);
+    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, fn[cb & 15]);
+    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, fn[(cb >> 4) & 15]);
     glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, (GLfloat)(1u << ((cb >> 8) & 3)));
     glTexEnvf(GL_TEXTURE_ENV, GL_ALPHA_SCALE, (GLfloat)(1u << ((cb >> 10) & 3)));
     for (i = 0; i < 3; i++) {
         uint32_t f = (src >> (5 * i)) & 31, g = (src >> (15 + 4 * i)) & 15;
-        glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB + i, srcs[f & 7]);
+        unsigned lr = (cb >> (12 + 2 * i)) & 3, la = (cb >> (18 + 2 * i)) & 3;
+        glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB + i, lr ? (lr == QGPU_CL_ONE ? GL_ONE : GL_ZERO) : srcs[f & 7]);
         glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_RGB + i, ops_rgb[(f >> 3) & 3]);
-        glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_ALPHA + i, srcs[g & 7]);
+        glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_ALPHA + i, la ? (la == QGPU_CL_ONE ? GL_ONE : GL_ZERO) : srcs[g & 7]);
         glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_ALPHA + i, ops_a[(g >> 3) & 1]);
     }
 }

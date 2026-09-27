@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # run_tiger.sh — lance Mac OS X 10.4 (Tiger) dans une fenêtre.
 #
-#   ./run_tiger.sh            # SMP 2 cœurs (MTTCG) + SON + FLOTTANT RAPIDE + GPU qgpu
+#   ./run_tiger.sh            # ImGuiDock + SMP 2 + son + toutes les optimisations + GPU qgpu
+#   POMPPC_FRONTEND=native ./run_tiger.sh  # fenêtre QEMU native (diagnostic)
 #   SMP=1 ./run_tiger.sh      # mono-cœur + SON (chemin stable d'origine)
 #   NOSOUND=1 ./run_tiger.sh  # coupe l'audio (rend la RAM pleine : 1024 au lieu de 768)
 #   WIDE=1 ./run_tiger.sh     # 16:9 plein écran 1920x1080 (sinon RES=WxHxD au choix)
@@ -12,7 +13,7 @@
 #                             # (10.0.2.15 n'est pas joignable depuis l'hôte)
 #   WEBPROXY=0                # ne lance pas le relais web HTTPS→HTTP (10.0.2.2:8080)
 #   HEADLESS=1 ./run_tiger.sh # sans fenêtre (moniteur seul, pour scripting)
-#   POMPPC_DISPLAY=sdl        # autre affichage (défaut : cocoa sous macOS, gtk sous Linux)
+#   POMPPC_DISPLAY=sdl        # affichage QEMU explicite, sans ImGuiDock
 #   QFB=1 ./run_tiger.sh      # + écran paravirtuel qfb-pci (kext POMPPCQFB)
 #   QFB_RES=1280x800          # mode par défaut proposé par l'écran QFB (avec QFB=1)
 #   GPU=0 ./run_tiger.sh      # sans GPU paravirtuel qgpu-pci (allumé par défaut)
@@ -36,10 +37,10 @@
 #                             # du texte de QEMU, x-jit-near, tcg/0006 : supprime le régime lent, docs/tcg-g4.md §14) ;
 #                             # TCG_OPTS=… propriétés brutes de l'accélérateur
 #   NOPAD=1 ./run_tiger.sh    # coupe le passthrough de la manette USB
-#   TABLET=1 ./run_tiger.sh   # + usb-tablet (souris absolue). À ÉVITER sur Tiger :
-#                             # via=pmu fournit déjà usb-mouse ; les deux ensemble
-#                             # font un curseur qui dérive / saccade (la tablette
-#                             # est vue comme un stick analogique par HID 10.4).
+#   TABLET=1 ./run_tiger.sh   # + usb-tablet (défaut avec ImGuiDock).
+#                             # TABLET=0 garde seulement la souris relative.
+#                             # ImGuiDock sélectionne explicitement la tablette
+#                             # pour éviter le repli vers la souris relative.
 #   NOCD=1 ./run_tiger.sh     # omet le lecteur CD amovible vide 'gamecd'
 #   GLISO=0 ./run_tiger.sh    # omet l'ISO des sources du plugin GL (disks/pomppc-src.iso)
 #                             # dans 'gamecd' ; implicite avec le GPU (GLISO=1 pour forcer)
@@ -62,6 +63,25 @@ set -euo pipefail
 USER_SMP="${SMP:-}"                        # intention user AVANT que config.env n'impose SMP=1
 USER_RES="${RES:-}"                        # RES explicite de l'utilisateur, prioritaire
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Profil maximal des optimisations disponibles et éprouvées. Les sondes plus
+# bas restent obligatoires ; 0 explicite conserve sa valeur pour les A/B.
+# Les modes VERIFY ne sont pas des optimisations et restent éteints.
+for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX JITNEAR; do
+  export "$_opt=${!_opt:-1}"
+done
+export QGPU_GPU_COPY="${QGPU_GPU_COPY:-1}" QGPU_GLSL="${QGPU_GLSL:-1}"
+
+# Avant le verrou disque : ImGui relance CE script avec DBUS_DISPLAY=1.
+# Cette garde évite la récursion et laisse les outils sans fenêtre inchangés.
+case "${POMPPC_FRONTEND:-imgui}" in
+  imgui|native) ;;
+  *) echo "POMPPC_FRONTEND attendu : imgui ou native" >&2; exit 2 ;;
+esac
+if [ "${POMPPC_FRONTEND:-imgui}" = imgui ] && [ -z "${DBUS_DISPLAY:-}" ] &&
+   [ -z "${HEADLESS:-}" ] && [ -z "${POMPPC_DISPLAY:-}" ]; then
+  echo "▶ Tiger : ImGuiDock, profil optimisations maximales (réglages surchargeables)"
+  exec "$ROOT/run_frontend.sh" "$ROOT/run_tiger.sh"
+fi
 source "$ROOT/config.env"
 source "$ROOT/scripts/caps.sh"
 source "$ROOT/scripts/hostcompat.sh"
@@ -499,12 +519,15 @@ if [ -z "${NOPAD:-}" ] && [ -e /dev/input/js0 ] \
   fi
 fi
 
-# via=pmu crée déjà usb-kbd + usb-mouse. usb-tablet en plus = deux pointeurs HID
-# dans Tiger : le curseur dérive (tablette vue comme un stick) et saccade.
+# Le pointeur relatif via=pmu subit l'accélération de Tiger : il ne peut pas
+# rester aligné sur celui de l'hôte. ImGuiDock sélectionne la tablette absolue.
+# Le frontend natif conserve son ancien défaut ; TABLET=0/1 reste explicite.
 TABLET_ARGS=()
-if [ -n "${TABLET:-}" ]; then
-  TABLET_ARGS=(-device usb-tablet)
-  echo "  ⚠  usb-tablet en plus de usb-mouse : curseur souvent faux sous Tiger"
+TABLET_DEFAULT=0
+[ -n "${DBUS_DISPLAY:-}" ] && TABLET_DEFAULT=1
+if [ "${TABLET:-$TABLET_DEFAULT}" = 1 ]; then
+  TABLET_ARGS=(-device usb-tablet,id=pointer0)
+  echo "  Souris absolue : tablette USB (sélectionnée par ImGuiDock)"
 fi
 
 exec "$BIN" -M "$MACHINE" -cpu "$CPU_SPEC" -m "$RAM" -smp "$SMP_N" \

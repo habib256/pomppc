@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from unittest import mock
 
 R = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(R, "tools", "matrice"))
@@ -13,6 +14,7 @@ sys.path.insert(0, os.path.join(R, "tools", "matrice", "jeux"))
 import matrice  # noqa: E402
 import d3  # noqa: E402
 import prey  # noqa: E402
+import mb  # noqa: E402
 
 echecs = 0
 
@@ -36,6 +38,48 @@ def serie(durees, fb=0):
 # frames.csv : lignes incomplètes ignorées, compteurs lus
 rows = matrice.lit_frames(serie([10, 20]) + "3,0x1,4")
 verifie(sorted(rows) == [1, 2] and rows[2][0] == 30.0 and rows[2][3] == 20, "lit_frames")
+
+# Le rendez-vous ne vaut que pour une image complète consignée par le plugin.
+verifie(matrice.capture_frame("2\n@@FRAMES\n" + serie([10, 20])) == 2,
+        "capture confirmée par frames.csv")
+verifie(matrice.capture_frame("3\n@@FRAMES\n" + serie([10, 20])) is None,
+        "capture sans image correspondante refusée")
+verifie(matrice.capture_frame("2\n@@FRAMES\n" + serie([10, 20]).rstrip()) is None,
+        "ligne de capture incomplète refusée")
+verifie(matrice.capture_frame("@@FRAMES\n" + serie([10, 20])) is None,
+        "marqueur de capture absent refusé")
+
+prefs = '$pref::Video::resolution = "1024 768 32";\r\n$pref::Player::Name = "Test";\r\n'
+window = mb.preferences_video(prefs, "fen")
+verifie(window.count('$pref::Video::resolution') == 1 and '"800 600 32"' in window
+        and '$pref::Player::Name = "Test";' in window, "préférences vidéo sans perte des autres réglages")
+verifie(mb.preferences_video(window, "fen").count('$pref::Video::resolution') == 1,
+        "préférences vidéo sans doublons")
+
+# Une image voisine identique ne doit pas masquer un numéro présenté absent.
+with tempfile.TemporaryDirectory() as d:
+    os.makedirs(os.path.join(d, "invite", "dump"))
+    for name, contents in (("invite/dump/000000.bin", "dump"),
+                           ("capture.ppm", "capture"), ("capture-frame.txt", "9\n")):
+        with open(os.path.join(d, name), "w") as f:
+            f.write(contents)
+    presentations = [{"image": 8, "ppm": os.path.join(d, "rejeu", "r.ppm"),
+                      "x": 0, "y": 0, "w": 2, "h": 2}]
+    with mock.patch.object(matrice, "rejoue", return_value=(0, presentations, "")), \
+         mock.patch.object(matrice, "ppmcmp", return_value="match 0 0 0") as compare:
+        result = matrice.analyse_image(d, "test-fen")
+        verifie(not result["image_ok"] and "image capturée 9 absente du rejeu" in result["image_motif"],
+                "ne pas accepter l'image voisine d'une capture synchronisée")
+        verifie(not compare.called, "comparaison limitée au numéro présenté")
+
+with tempfile.TemporaryDirectory() as d:
+    path = os.path.join(d, "presents.txt")
+    with open(path, "w") as f:
+        f.write("0 392 86612 1600 640 480 1\n1 393 173224 3200 640 480 0\n2 394 173224 3200 640 480\n")
+    with mock.patch.object(matrice.subprocess, "run", return_value=mock.Mock(stderr="3 présentations écrites, 0 en erreur")):
+        nerr, pres, _ = matrice.rejoue("dump", "replay", path)
+    verifie(nerr == 0 and len(pres) == 3 and all(p["x"] == 106 and p["y"] == 54 for p in pres),
+            "coordonnées de capture 16/32 bits et ancien format")
 
 # DOOM 3 : cinématique à 20 ms avec un passage lent de 400 images (la règle à
 # deux tranches s'y trompait), puis le jeu à 78 ms à partir de l'image 3001 ;

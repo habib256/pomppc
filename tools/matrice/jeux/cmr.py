@@ -51,7 +51,7 @@ class ColinMcRae(Jeu):
     echanges_par_image = 3
     delai_scene = 900
     dump_images = 30            # 10 images du jeu
-    dump_attente = 12           # 4 images du jeu
+    capture_delay = 12          # 4 images du jeu
     redemarrer_apres = True
     non_automatise = {"fen": "toujours en plein écran : le dialogue d'options n'offre que "
                              "résolution, couleurs et FSAA (aucun réglage de fenêtre connu)"}

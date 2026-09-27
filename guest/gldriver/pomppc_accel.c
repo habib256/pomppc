@@ -117,7 +117,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260927-glsl"
+#define POMPPC_PLUGIN_REV "20260927-combine3-capture"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -926,6 +926,7 @@ static struct {
                                            couleur de bordure, niveaux S3TC */
     int             tex14;              /* idem, OpenGL 1.4 : biais de LOD, textures
                                            de profondeur et ombre, GL_COLOR_SUM */
+    int             combine3;           /* ATI_texture_env_combine3, v22 */
     int             xbar;               /* sources croisées de GL_COMBINE (v12 +
                                            QGPU_CAP_GL14) */
     int             scanout;            /* v13 : SURF_PRESENT dans la VRAM qfb */
@@ -2022,6 +2023,8 @@ void pomppc_backend_init(void)
                dès qu'une source croisée entre dans une opération (scène tex14). */
             G.xbar = G.q.version >= 12 && (G.q.caps & QGPU_CAP_GL14) &&
                      !(getenv("POMPPC_GL_XBAR") && getenv("POMPPC_GL_XBAR")[0] == '0');
+            G.combine3 = G.q.version >= 22 && (G.q.caps & QGPU_CAP_COMBINE3) &&
+                         !(getenv("POMPPC_GL_COMBINE3") && getenv("POMPPC_GL_COMBINE3")[0] == '0');
             G.scanout = G.q.version >= 13 && (G.q.caps & QGPU_CAP_SCANOUT) &&
                         !(getenv("POMPPC_GL_PRESENT") &&
                           getenv("POMPPC_GL_PRESENT")[0] == '0');
@@ -2865,6 +2868,8 @@ static int dump_trigger(void)
     return seen;
 }
 
+static unsigned long dump_first_frame = ~0UL, dump_last_frame = ~0UL;
+
 static void dump_submit(void)
 {
     static int on = -1;
@@ -2963,7 +2968,14 @@ static void dump_submit(void)
     fwrite(G.win + VTX_OFF, 1, h.vtx_len, f);
     fwrite(G.win + IDX_OFF, 1, h.idx_len, f);
     fwrite(G.win + ARENA_OFF, 1, h.arena_len, f);
-    fclose(f);
+    {
+        int ok = !ferror(f);
+        if (fclose(f) != 0) ok = 0;
+        if (ok) {
+            if (dump_first_frame == ~0UL) dump_first_frame = G.n_frames;
+            dump_last_frame = G.n_frames;
+        }
+    }
 }
 
 /* Lot 11 : vider LA soumission courante (autonome pour un DRAW_RAW : sommets et
@@ -4317,6 +4329,9 @@ static int combine_fn_code(unsigned long e, int rgb)
     case 0x84E7: return QGPU_CB_SUBTRACT;
     case 0x86AE: case 0x8740: return rgb ? QGPU_CB_DOT3_RGB : -1;
     case 0x86AF: case 0x8741: return rgb ? QGPU_CB_DOT3_RGBA : -1;
+    case 0x8744: return G.combine3 ? QGPU_CB_MODULATE_ADD : -1;
+    case 0x8745: return G.combine3 ? QGPU_CB_MODULATE_SIGNED_ADD : -1;
+    case 0x8746: return G.combine3 ? QGPU_CB_MODULATE_SUBTRACT : -1;
     default:     return -1;
     }
 }
@@ -4358,7 +4373,7 @@ static int combine_ok(const unsigned char *us, int unit, TexUnit *tu)
     int fa = combine_fn_code(U16(us, TU_COMBINE_A), 0);
     int rs = combine_scale_code(GLD_F32(us, TU_RGB_SCALE));
     int as = combine_scale_code(GLD_F32(us, TU_ALPHA_SCALE));
-    unsigned long src = 0;
+    unsigned long src = 0, literals = 0;
     int i;
 
     if (frgb < 0 || fa < 0 || rs < 0 || as < 0)
@@ -4366,6 +4381,14 @@ static int combine_ok(const unsigned char *us, int unit, TexUnit *tu)
     for (i = 0; i < 3; i++) {
         int sr = combine_src_code(U16(us, TU_SRC0_RGB + 2 * i), unit);
         int sa = combine_src_code(U16(us, TU_SRC0_A + 2 * i), unit);
+        if (G.combine3 && U16(us, TU_SRC0_RGB + 2 * i) <= 1) {
+            literals |= QGPU_COMBINE_LITERAL_RGB(i, U16(us, TU_SRC0_RGB + 2 * i) + 1);
+            sr = 0;
+        }
+        if (G.combine3 && U16(us, TU_SRC0_A + 2 * i) <= 1) {
+            literals |= QGPU_COMBINE_LITERAL_A(i, U16(us, TU_SRC0_A + 2 * i) + 1);
+            sa = 0;
+        }
         unsigned long orgb = U16(us, TU_OP0_RGB + 2 * i);
         unsigned long oa = U16(us, TU_OP0_A + 2 * i);
         if (sr < 0 || sa < 0 || orgb < 0x300 || orgb > 0x303 || (oa != 0x302 && oa != 0x303))
@@ -4373,7 +4396,7 @@ static int combine_ok(const unsigned char *us, int unit, TexUnit *tu)
         src |= QGPU_COMBINE_SRC_RGB(i, sr, orgb - 0x300);
         src |= QGPU_COMBINE_SRC_A(i, sa, oa == 0x303 ? QGPU_CA_ONE_MINUS_ALPHA : QGPU_CA_ALPHA);
     }
-    tu->combine = QGPU_COMBINE(frgb, fa, rs, as);
+    tu->combine = QGPU_COMBINE(frgb, fa, rs, as) | literals;
     tu->combine_src = src;
     return 1;
 }
@@ -13643,6 +13666,51 @@ static unsigned char *ensure_present_stage(unsigned long w, unsigned long h)
     return present_stage;
 }
 
+/* Capture de preuve uniquement : après une présentation vidée ET terminée,
+ * publier son numéro puis attendre l'acquittement de l'hôte, au plus 30 s.
+ * G.mu reste tenu : aucun autre contexte de ce processus ne peut dessiner.
+ * Le chemin normal ne fait ni attente ni accès fichier supplémentaire. */
+static void capture_presented(void)
+{
+    static int init, done;
+    static const char *path;
+    static unsigned long delay = 2;
+    char tmp[512], resume[512], expired[512];
+    FILE *f;
+    double until;
+    if (!init) {
+        const char *d = getenv("POMPPC_GL_CAPTURE_DELAY");
+        path = getenv("POMPPC_GL_CAPTURE");
+        if (d) {
+            unsigned long n = strtoul(d, 0, 10);
+            if (n >= 2 && n <= 1024) delay = n;
+        }
+        init = 1;
+    }
+    if (done || !path || path[0] != '/' || strlen(path) > 480 ||
+        !G.scanout || dump_first_frame == ~0UL ||
+        G.n_frames - dump_first_frame < delay || dump_last_frame != G.n_frames)
+        return;
+    done = 1;
+    wait_half_ex(0, 0);
+    wait_half_ex(1, 0);
+    if (G.wait_miss) return;
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    snprintf(resume, sizeof(resume), "%s.resume", path);
+    snprintf(expired, sizeof(expired), "%s.expired", path);
+    f = fopen(tmp, "w");
+    if (!f) return;
+    fprintf(f, "%lu\n", G.n_frames);
+    if (fclose(f) != 0 || rename(tmp, path) != 0) return;
+    until = now_s() + 30.0;
+    while (access(resume, F_OK) != 0 && now_s() < until)
+        usleep(10000);
+    if (access(resume, F_OK) != 0) {
+        f = fopen(expired, "w");
+        if (f) fclose(f);
+    }
+}
+
 /* Échange (procédure 0x60) : présente directement si possible. Verrou tenu.
  * Seulement si l'hôte a l'image la plus récente (sinon, chemin normal).
  *
@@ -14661,6 +14729,7 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
         return direct_noop;
     }
     if (slot == PROC_Swap60 && present_direct(p)) {
+        capture_presented();
         pthread_mutex_unlock(&G.mu);
         return direct_noop;
     }
@@ -15452,6 +15521,8 @@ static void caps_extensions(unsigned char *cfg)
     }
     if (G.xbar)
         w0 |= 1UL << 2;                 /* GL_ARB_texture_env_crossbar (v12) */
+    if (G.combine3)
+        GLD_U32(cfg, 0x12c) |= 1UL << (70 - 64); /* GL_ATI_texture_env_combine3 */
     /* 27/09 (Colin McRae) : GL_EXT_texture_rectangle + GL_ARB_texture_rectangle
        (bit 25) et GL_MAX_RECTANGLE_TEXTURE_SIZE (cfg+0xc0, entre la 3D et le
        cube ; 0 chez Apple). Sans le bit, GLEngine refuse la cible

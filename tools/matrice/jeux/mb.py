@@ -11,16 +11,31 @@ La démo jouée toute seule depuis l'écran-titre a été essayée et écartée 
 vitesse varie de 15 à 120 ms/image selon le passage (ce n'est pas une scène
 fixe).
 
-Constat du 26/09/2026 : en fenêtre, Marble Blast ouvre toujours une fenêtre de
-1024×768 (la taille du bureau, quelles que soient $pref::Video::resolution et
-windowedRes) ; recouverte par la barre de menus, elle n'a pas la présentation
-directe (« coupée ») : Swap60 et Swap58 repliés à chaque image, et le vidage
-n'a pas de SURF_PRESENT (rien à rejouer en image).
+Fenêtre : 800×600, en réglant les DEUX exports de préférences Torque
+(common/client et marble/client sous ~/Library/MarbleBlast). Ne modifier
+qu'un des deux laisse l'autre rétablir 1024×768 : la fenêtre dépasse alors
+du bureau et perd la présentation directe. Les préférences et leurs caches
+DSO sont sauvegardés puis rendus après chaque cellule.
 """
+import re
+
 from jeu import Jeu, fenetre_fixe
 
 APP = "/Users/tiger/Desktop/MarbleBlast Gold.app"
 MISSION = "marble/data/missions/beginner/gems.mis"
+PREFS = ["/Users/tiger/Library/MarbleBlast/%s/client/prefs.cs" % part
+         for part in ("common", "marble")]
+
+
+def preferences_video(txt, mode):
+    """Les deux exports Torque portent les mêmes clés ; régler les deux."""
+    values = {"resolution": "800 600 32" if mode == "fen" else "1024 768 32",
+              "windowedRes": "800 600", "fullScreen": "0" if mode == "fen" else "1"}
+    for key, value in values.items():
+        pattern = r'(?im)^\$pref::Video::%s\s*=.*?;\s*$' % key
+        txt = re.sub(pattern, "", txt)
+        txt += '\n$pref::Video::%s = "%s";\n' % (key, value)
+    return txt
 
 
 class MarbleBlast(Jeu):
@@ -31,6 +46,15 @@ class MarbleBlast(Jeu):
     plancher_ms = 16            # 12,3 ms/image au 26/09 (plein écran, sans déclencheur)
     delai_scene = 300
     dump_images = 60
+
+    def fichiers_reglages(self, mode):
+        return PREFS + [p + ".dso" for p in PREFS]
+
+    def preparer(self, h, mode):
+        for path in PREFS:
+            code, txt = h.ssh("cat '%s'" % path)
+            if code or not h.depose(preferences_video(txt, mode), path):
+                raise RuntimeError("préférences Marble Blast : " + path)
 
     def commande(self, mode):
         return 'cd "%s/Contents/MacOS" && "./MarbleBlast Gold" %s -mission %s' % (

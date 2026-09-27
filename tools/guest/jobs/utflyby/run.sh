@@ -34,7 +34,7 @@ sed -e "s/^FullscreenViewportX=.*/FullscreenViewportX=${RES%x*}/" \
     -e 's/^StartupFullscreen=.*/StartupFullscreen=True/' \
     -e 's/^MinDesiredFrameRate=.*/MinDesiredFrameRate=0.000000/' \
     -e 's/^UseVSync=.*/UseVSync=False/' \
-    -e 's/^MaxTextureUnits=.*/MaxTextureUnits=4/' "$P" > "$W/settings.ini"
+    -e 's/^MaxTextureUnits=.*/MaxTextureUnits=8/' "$P" > "$W/settings.ini"
 cat "$W/settings.ini" > "$P"
 cd "$UT/System"
 # QuickStart=False also enables QuickStart in this demo; omit it entirely.
@@ -72,7 +72,7 @@ awk -F, 'NR>1 && $1>=13 && $1<=73 {n++; if($3!=1 || $4!=0 || $5<0.19999 || $5>0.
 [ -s "$W/frame-74.ppm" ] || { echo 'missing fixed-frame capture'; exit 1; }
 # Diagnostic capture is after the measured interval.
 cp '/Users/tiger/Library/Application Support/Unreal Tournament 2004 Demo/System/UT2004.log' "$W/engine.log" || true
-printf 'scene=AS-Convoy intro cinematic\nresolution=%s\nbots=0\nmax_texture_units=4\nlibc_seed=0\nsimulation_step_seconds=0.2\nfirst_frame=13\nlast_frame=73\nintervals=60\nsimulated_seconds=12\n' "$RES" > "$W/manifest.txt"
+printf 'scene=AS-Convoy intro cinematic\nresolution=%s\nbots=0\nmax_texture_units=8\nlibc_seed=0\nsimulation_step_seconds=0.2\nfirst_frame=13\nlast_frame=73\nintervals=60\nsimulated_seconds=12\n' "$RES" > "$W/manifest.txt"
 cleanup
 trap - EXIT
 ps axww > "$W/processes-after.txt"

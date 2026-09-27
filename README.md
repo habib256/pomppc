@@ -17,7 +17,7 @@ Tableau de bord : **`TODO.md`**. Historique : **`CHANGELOG.md`**. Conception et 
 | Flottant rapide (FPU hôte) | fait, résultats identiques au bit près, ×2 à ×3 sur le flottant (`docs/flottant-rapide.md`) |
 | Son (Screamer), réseau, relais web | faits (`patches/screamer/`, `docs/internet-tiger.md`) |
 | Écran paravirtuel QFB | fait (`kext/POMPPCQFB/`, `patches/qfb/`) |
-| **GPU 3D paravirtuel qgpu** | protocole **v21** : pipeline fixe, OpenGL 1.5 annoncé, programmes ARB et GLSL, VBO lus par l'hôte, copies GPU et présentation directe |
+| **GPU 3D paravirtuel qgpu** | protocole **v22** : pipeline fixe et combineurs ATI, OpenGL 1.5 annoncé, programmes ARB et GLSL, VBO lus par l'hôte, copies GPU et présentation directe |
 | Bureau accéléré (Quartz Extreme) | pas commencé |
 
 Jeux, sur le disque quotidien (trois preuves visées : image juste, zéro repli, mesure) :
@@ -61,7 +61,7 @@ maintenant les tampons de sommets sont lus et convertis par l'hôte.
   d'Apple dans l'invité, harnais `tests/run-all.sh`.
 
 Conception détaillée, offsets, mesures : `docs/gpu-3d-tiger.md`. Contrat courant :
-[docs/protocole.md](docs/protocole.md) (v21) ; historique dans `docs/protocole-v*.md`.
+[docs/protocole.md](docs/protocole.md) (v22, ABI transport v19) ; historique dans `docs/protocole-v*.md`.
 Règle du projet : **pas de repli, étendre le
 protocole** — sous programme ARB, un repli vers Apple tue le jeu
 (`docs/re/glengine-exit-interpolateur.md`).
@@ -120,7 +120,16 @@ QFB=1 ./run_tiger.sh        # + écran QFB en second moniteur
 NET=0 ./run_tiger.sh        # sans réseau
 ./run_os9.sh [install]      # Mac OS 9
 ./run_frontend.sh           # frontend ImGui (affichage QEMU par D-Bus)
+POMPPC_FRONTEND=native ./run_tiger.sh  # fenêtre QEMU native, sans ImGuiDock
 ```
+
+`./run_tiger.sh` ouvre maintenant Tiger dans **ImGuiDock**. Le profil maximal
+active FASTFP, SRTLB, LFSINLINE, VFPFAST, VPERMFAST, FPINLINE, RETINLINE,
+JCIDX, JITNEAR, copies GPU et GLSL, sous réserve des capacités sondées.
+Les surcharges `…=0` restent respectées ; les vérificateurs coûteux ne sont
+pas activés. SMP reste à deux cœurs (profil Tiger), pas au nombre de cœurs hôte.
+`HEADLESS=1`, `DBUS_DISPLAY=1` et un `POMPPC_DISPLAY` explicite contournent
+l'ouverture du frontend ; le banc de jeux conserve son lancement natif.
 
 Chaque lanceur documente ses variables dans son en-tête (`head -30 run_tiger.sh`). Les lanceurs
 **sondent le binaire** (`scripts/caps.sh`) et n'annoncent jamais une capacité absente. Verrou

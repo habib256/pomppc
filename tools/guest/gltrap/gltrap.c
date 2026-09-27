@@ -30,6 +30,7 @@
 #include <OpenGL/glext.h>
 #include <malloc/malloc.h>
 #include <unistd.h>
+#include <mach-o/dyld.h>
 
 static FILE *lf;
 static unsigned long n_calls;
@@ -161,9 +162,55 @@ static GLenum my_glGetError(void)
     return e;
 }
 static void col_dump(unsigned long first, unsigned long n);
+/* Diagnostic UT2004 : comparer les getters publics au miroir du plugin.
+ * Armé seulement par un fichier : au plus 30 dessins éclairés de >=300 indices.
+ * Le cube peut être sur une autre unité que 0. */
+static void cube_api_probe(GLsizei count)
+{
+    static int init, shots;
+    static const char *trigger;
+    GLint active, units[8], u, k;
+    if (!init) { trigger = getenv("POMPPC_GLTRAP_CUBE"); init = 1; }
+    if (!trigger || shots >= 30 || count < 300 || access(trigger, F_OK)) return;
+    if (!glIsEnabled(GL_LIGHTING)) return;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+    shots++;
+    if (shots == 1) lg("CUBE-EXT %s\n", glGetString(GL_EXTENSIONS));
+    lg("CUBE-API draw %lu count %d\n", n_draws, (int)count);
+    {
+        GLint src, dst, depth;
+        glGetIntegerv(GL_BLEND_SRC, &src); glGetIntegerv(GL_BLEND_DST, &dst);
+        glGetIntegerv(GL_DEPTH_FUNC, &depth);
+        lg(" blend %d %x/%x depth %x lighting %d\n", glIsEnabled(GL_BLEND),
+           src, dst, depth, glIsEnabled(GL_LIGHTING));
+    }
+    for (u = 0; u < 8; u++) {
+        GLint mode, rgb, alpha, src, op, tex2, texcube;
+        glActiveTexture(GL_TEXTURE0 + u);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &tex2);
+        glGetIntegerv(GL_TEXTURE_BINDING_CUBE_MAP, &texcube);
+        glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &mode);
+        glGetTexEnviv(GL_TEXTURE_ENV, GL_COMBINE_RGB, &rgb);
+        glGetTexEnviv(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, &alpha);
+        units[u] = glIsEnabled(GL_TEXTURE_2D) | (glIsEnabled(GL_TEXTURE_CUBE_MAP) << 1);
+        lg(" u%d enabled %d tex2 %d cube %d mode %x rgb %x alpha %x\n",
+           u, units[u], tex2, texcube, mode, rgb, alpha);
+        for (k = 0; k < 3; k++) {
+            glGetTexEnviv(GL_TEXTURE_ENV, GL_SOURCE0_RGB + k, &src);
+            glGetTexEnviv(GL_TEXTURE_ENV, GL_OPERAND0_RGB + k, &op);
+            lg("  rgb%d src %x op %x", k, src, op);
+            glGetTexEnviv(GL_TEXTURE_ENV, GL_SOURCE0_ALPHA + k, &src);
+            glGetTexEnviv(GL_TEXTURE_ENV, GL_OPERAND0_ALPHA + k, &op);
+            lg(" alpha src %x op %x\n", src, op);
+        }
+    }
+    glActiveTexture(active);
+}
+
 static void my_glDrawArrays(GLenum mode, GLint first, GLsizei count)
 {
     static unsigned long n; draw_seen((unsigned long)count); if (n++ < 40 || win()) lg("glDrawArrays(%x, %d, %d)\n", mode, (int)first, (int)count);
+    cube_api_probe(count);
     col_dump((unsigned long)first, (unsigned long)count);
     glDrawArrays(mode, first, count);
 }
@@ -175,6 +222,7 @@ static void my_glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLv
     int w;
     unsigned long i0 = 0;
     draw_seen((unsigned long)count);
+    cube_api_probe(count);
     w = win();
     if (n++ < 40 || w) lg("glDrawElements(%x, %d, %x, %p)%s\n", mode, (int)count, type, idx, cur_ebuf ? " [EBO]" : "");
     if (w && mem() && !cur_ebuf && idx && count > 0)
@@ -189,6 +237,7 @@ static void my_glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLv
 static void my_glDrawRangeElements(GLenum mode, GLuint a, GLuint b, GLsizei count, GLenum type, const GLvoid *idx)
 {
     static unsigned long n; draw_seen((unsigned long)count); if (n++ < 40 || win()) lg("glDrawRangeElements(%x, %u..%u, %d, %x, %p)\n", mode, (unsigned)a, (unsigned)b, (int)count, type, idx);
+    cube_api_probe(count);
     glDrawRangeElements(mode, a, b, count, type, idx);
 }
 static void my_glTexImage2D(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum fmt, GLenum type, const GLvoid *px)
@@ -462,7 +511,14 @@ static void my_glReadBuffer(GLenum b)
 static void my_glDrawBuffer(GLenum b)
 { if (win()) lg("glDrawBuffer(%x)\n", b); glDrawBuffer(b); }
 static void my_glTexEnvi(GLenum t, GLenum p, GLint v)
-{ if (win()) lg("glTexEnvi(%x, %x, %x)\n", t, p, (unsigned)v); glTexEnvi(t, p, v); }
+{
+    static unsigned n;
+    const char *trigger = getenv("POMPPC_GLTRAP_CUBE");
+    int probe = trigger && n < 1500 && !access(trigger, F_OK);
+    if (win() || probe) lg("glTexEnvi(%x, %x, %x)\n", t, p, (unsigned)v);
+    glTexEnvi(t, p, v);
+    if (probe) { n++; lg(" ENV error %x\n", glGetError()); }
+}
 static void my_glColor4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a)
 { if (win()) lg("glColor4f(%g %g %g %g)\n", r, g, b, a); glColor4f(r, g, b, a); }
 static void my_glTexCoord2f(GLfloat s, GLfloat t)
@@ -471,9 +527,23 @@ static void my_glVertex2f(GLfloat x, GLfloat y)
 { if (win()) lg("glVertex2f(%g %g)\n", x, y); glVertex2f(x, y); }
 static void my_glVertex3f(GLfloat x, GLfloat y, GLfloat z)
 { if (win()) lg("glVertex3f(%g %g %g)\n", x, y, z); glVertex3f(x, y, z); }
+/* SDL d'UT2004 résout OpenGL par NSLookupAndBindSymbol, pas par le lien dyld. */
+static void *my_NSAddressOfSymbol(NSSymbol symbol)
+{
+    const char *n = NSNameOfSymbol(symbol);
+    if (getenv("POMPPC_GLTRAP_CUBE") && n) {
+        if (!strcmp(n, "_glDrawArrays")) return (void *)my_glDrawArrays;
+        if (!strcmp(n, "_glDrawElements")) return (void *)my_glDrawElements;
+        if (!strcmp(n, "_glDrawRangeElements")) return (void *)my_glDrawRangeElements;
+        if (!strcmp(n, "_glTexEnvi")) return (void *)my_glTexEnvi;
+    }
+    return NSAddressOfSymbol(symbol);
+}
+
 typedef struct { const void *replacement, *replacee; } interpose_t;
 __attribute__((used)) static const interpose_t interposers[]
     __attribute__((section("__DATA,__interpose"))) = {
+    { (const void *)my_NSAddressOfSymbol, (const void *)NSAddressOfSymbol },
     { (const void *)my_glProgramStringARB, (const void *)glProgramStringARB },
     { (const void *)my_glBindProgramARB, (const void *)glBindProgramARB },
     { (const void *)my_glGenProgramsARB, (const void *)glGenProgramsARB },

@@ -72,9 +72,14 @@ set(IMGUI_SOURCES
 add_executable(pomppc
     src/main.cpp
     src/QemuBridge.cpp
+    src/StartupChime.cpp
     ${IMGUI_SOURCES})
 target_include_directories(pomppc PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends src)
 if(APPLE)
+    enable_language(OBJCXX)
+    set_property(TARGET pomppc PROPERTY OBJCXX_STANDARD 17)
+    target_sources(pomppc PRIVATE src/StartupChimeMac.mm)
+    target_link_libraries(pomppc PRIVATE "-framework AppKit")
     target_compile_definitions(pomppc PRIVATE GL_SILENCE_DEPRECATION)
     # objc runtime: main.cpp unbinds Cocoa's Ctrl+Cmd+F "Enter Full Screen".
     target_link_libraries(pomppc PRIVATE objc)
@@ -88,6 +93,14 @@ target_link_libraries(pomppc PRIVATE
     ${CMAKE_DL_LIBS})
 
 # ─── Headless verification probe (no GLFW/X) ─────────────────────────────
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(chime_test tests/chime_test.cpp src/StartupChime.cpp)
+    target_include_directories(chime_test PRIVATE src)
+    target_compile_options(chime_test PRIVATE -UNDEBUG)
+    add_test(NAME startup_chime COMMAND chime_test)
+endif()
+
 add_executable(bridge_probe tests/bridge_probe.cpp src/QemuBridge.cpp)
 target_include_directories(bridge_probe PRIVATE src)
 target_link_libraries(bridge_probe PRIVATE

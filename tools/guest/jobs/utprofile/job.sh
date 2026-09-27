@@ -22,7 +22,7 @@ trap 'cat "$W/original.ini" > "$P"' EXIT
 sed -e 's/^WindowedViewportX=.*/WindowedViewportX=800/' \
     -e 's/^WindowedViewportY=.*/WindowedViewportY=600/' \
     -e 's/^StartupFullscreen=.*/StartupFullscreen=False/' \
-    -e 's/^MaxTextureUnits=.*/MaxTextureUnits=4/' "$P" > "$W/settings.ini"
+    -e 's/^MaxTextureUnits=.*/MaxTextureUnits=8/' "$P" > "$W/settings.ini"
 cat "$W/settings.ini" > "$P"
 printf '%s\n' "$UT" > "$W/app-path"
 printf '%s\n' "$DUR" > "$W/duration"
