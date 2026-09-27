@@ -9,6 +9,14 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Invariants de propriété et plan de découpage du plugin** :
+  `docs/architecture.md` décrit propriétaires, verrous, barrières, erreurs,
+  contextes, clients morts et resets. Six limites sont distinguées des garanties,
+  dont la réutilisation après timeout et le nettoyage de créneau non confirmé.
+  Le premier essai d'extraction des formats de texture a été retiré à la demande
+  d'arrêt : compilation et comparaison différentielle faites, validation des
+  scènes avant/après inachevée. Aucun changement de comportement intégré.
+
 - **Audio Tiger et contrôle FPS** : profil CoreAudio stable (8 tampons, timer
   5 ms), retour possible avec `POMPPC_AUDIO_PROFILE=default`. Screamer conserve
   les échantillons refusés par une écriture partielle et poursuit les fragments

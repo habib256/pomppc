@@ -60,8 +60,11 @@ Dans l'ordre ci-dessous. Les défauts de rendu et de session précèdent les opt
       du dessin précédent reste appliqué ; un `glFlush` le corrige mais coûte). Décision :
       ne réappliquer que sur changement, ou passer le biais d'unité dans l'échantillonneur.
 
-- [ ] **[Architecture] A6 — `docs/architecture.md` avec les invariants** : qui possède quoi, quel côté peut
-      refuser, ce qu'un client mort laisse derrière lui, cycle de vie d'un contexte.
+- [ ] **[Architecture] Suites A6 — invariants documentés dans [docs/architecture.md](docs/architecture.md)** :
+      fermer les écarts L1/L2 (mémoire en vol et créneau réutilisés sans fin confirmée),
+      L3/L4 (arrêt bloqué ou dormeurs restants), L5 (erreurs globales) et L6
+      (`SYNCED` sur transfert couleur impossible). Constats statiques, pas des causes
+      établies des incidents de session. Épreuves et règles de fermeture dans le document.
 
 - [ ] **[Système] `kCGLBadDisplay` après un `killall` de DOOM 3** : tout lancement suivant échoue jusqu'au
       redémarrage de l'invité ; Prey et `gltest` démarrent. Cause non trouvée. Avec A6.
@@ -146,6 +149,8 @@ Après les priorités ci-dessus ; conserver les dépendances et mesurer avant d'
 
 - [ ] **[Plugin] A2 — Découper le plugin en modules à frontières écrites** (`pomppc_accel.c`) : lecteur d'état (une seule table d'offsets `gctx+…`, vérifiée au chargement par
       une empreinte de GLEngine), textures, géométrie, programmes, transport, diagnostic. Après fiabilisation de la matrice. Épreuve : mêmes scènes `gltest` à l'octet, mêmes `frames.csv`.
+      Plan de découpage dans `docs/architecture.md` §10 ; premier essai retiré
+      à la demande d’arrêt, validation des scènes avant/après inachevée.
 
 - [ ] **[Plugin] A5 (plugin) — Configuration lue une fois** : une structure remplie au chargement (plus
       de `getenv` dans le chemin chaud), documentée, purge des drapeaux `POMPPC_GL_*` dont le
