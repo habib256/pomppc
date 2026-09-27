@@ -18,27 +18,25 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 
 ## Maintenant
 
-Ordre retenu : contrat à jour, preuves fiables, puis défaut visible de la matrice.
-Cette liste fixe les priorités ; elle ne signifie pas que trois travaux tournent en parallèle.
+Contrat unifié (désormais v22, ABI v19) et rendez-vous de capture implémentés.
+Le réglage des deux exports vidéo Torque a donné un premier contrôle vert de
+Marble Blast, mais le contrôle ultérieur en fenêtre ci-dessous reste ouvert.
+Détails et preuves dans [CHANGELOG.md](CHANGELOG.md).
 
-- [ ] **[Protocole] Unifier le contrat v21** dans `docs/protocole.md` : capacités,
-  clés, formats, tailles et limites ; distinguer l'ABI de transport v19 du protocole
-  GL v21 et intégrer les ajouts v20/v21 aux notes v7…v19.
-  **Fermeture :** contrat confronté à `qgpu_abi.h`, `qgpu_proto.h` et aux tests natifs.
+- [ ] **[Jeux — session] Marble Blast en fenêtre, bureau 800×600×16** : le tour
+  `bench/matrice/priorites-imgui-v22` échoue en fenêtre (surface rognée, replis,
+  pas de présentation capturable), tandis que le plein écran est vert.
+  Identifier le choix du mode vidéo et garantir un bureau assez grand ; un
+  `CGDisplaySwitchToMode` temporaire ne suffit pas à établir une correction
+  persistante. Refaire ensuite Nexuiz fenêtre/plein écran sur le bureau restauré.
+  **Fermeture :** cellules vertes après démarrage frais, réglages utilisateur préservés.
 
-- [ ] **[Outils] Fiabiliser les captures de la matrice** : prendre `frames.csv`
-  comme horloge (déjà vidé à chaque image avec `POMPPC_GL_DUMP_TRIGGER`), puis expliquer
-  les captures hors vidage. Prey fenêtre : 1 tour sur 3 le 26/09 ; DOOM 3 fenêtre :
-  écart 0,44 au tour `20260927-1137`, puis 0,00 au contrôle `20260927-1216`.
-  Vérifier le retard de présentation et `dump_attente`, sans élargir les tolérances.
-  **Fermeture :** dix tours Prey et DOOM 3 fenêtre consécutifs verts, capture rattachée
-  à l'image vidée (`docs/matrice-jeux.md`).
-
-- [ ] **[Jeux] Corriger Marble Blast en fenêtre** : fenêtre 1024×768 recouverte par
-  la barre des menus, malgré `$pref::Video::resolution` ; Swap60 et Swap58 repliés
-  à chaque image. Trouver le réglage de taille ou présenter le rectangle visible.
-  **Fermeture :** cellule `mb-fen` verte, image juste, replis limités aux
-  rafraîchissements admis et mesure sous le seuil de la matrice.
+- [ ] **[Outils — validation différée à la demande de l'utilisateur] Captures** :
+  le rendez-vous `POMPPC_GL_CAPTURE` remplace `dump_attente`, sans élargir les tolérances.
+  Premier contrôle DOOM 3/Prey fenêtre vert, image exacte consignée.
+  **Reste :** dix tours consécutifs verts, explicitement reportés le 27/09.
+  Ce contrôle d'endurance n'est pas remplacé par les tests ciblés
+  (`docs/matrice-jeux.md`).
 
 ## Ensuite
 
@@ -54,9 +52,6 @@ Dans l'ordre ci-dessous. Les défauts de rendu et de session précèdent les opt
       clic par System Events). Épreuve : Zenerchi plein écran et Warcraft III fenêtre
       automatisés et verts ;
       Colin McRae fenêtre reste non applicable (pas de mode fenêtre).
-
-- [ ] **[Jeux] UT2004, arme noire** (`docs/re/ut2004-arme-noire.md`) : trancher entre sources du
-      combineur mal lues et textures 79/120 échangées entre les unités 0 et 1.
 
 - [ ] **[Plugin] Coordonnées de texture en mode immédiat sous programme de sommets** : perdues (vu le
       27/09 en écrivant `gltest rectfp` ; la scène passe par des tableaux). Scène à écrire ; fermeture : coordonnées correctes comparées au rendu d'Apple.
@@ -84,6 +79,13 @@ Dans l'ordre ci-dessous. Les défauts de rendu et de session précèdent les opt
   sur dix (`docs/smp-coeurs.md`). Le choix SMP=2 est déjà tranché.
   **Fermeture :** cause identifiée, correction et série de démarrages sans panique.
 
+- [ ] **[Système] Panique pendant le diagnostic UT2004 (27/09, 15:50)** : CPU 1,
+  `Lock timeout`, PC `0x000AA010`, LR `0x00003820`, pile désalignée. Cause inconnue ;
+  ne pas la confondre avec le défaut visuel corrigé par combine3, ni l'attribuer
+  sans preuve à AppleUSBOHCI. Capture `bench/utweapon-priorites/panic.png`,
+  détails dans `docs/matrice-jeux.md`. **Fermeture :** cause reproduite et correction
+  vérifiée ; les lancements réussis suivants ne suffisent pas à la déclarer réparée.
+
 - [ ] **[TCG] Code réécrit par l'autre vCPU non vu** (défaut de QEMU 9.2 en MTTCG, présent sans aucun
       patch, docs/tcg-g4.md §16.7) : `tools/guest/jobs/smctest` essai E échoue en SMP=2. Cause
       non trouvée (deux courses de `cputlb.c` refermées sans effet). Épreuve : E à 0 erreur.
@@ -103,6 +105,13 @@ Dans l'ordre ci-dessous. Les défauts de rendu et de session précèdent les opt
       `docs/re/cmr-rendu-vers-texture.md`) : en course la voiture roule-t-elle juste (seul le
       départ, voiture arrêtée, est prouvé) ; `POMPPC_GL_RECT=0` fait planter le jeu chez Apple
       (échantillonneur nul dans `glrPolyRGB000`) : ne pas s'en servir pour comparer.
+
+- [ ] **[Jeux] Colin McRae — autres résolutions** (demandé le 27/09) : tester les
+      modes proposés par le jeu au-delà de la résolution déjà validée, dont les
+      formats 4:3 et larges disponibles. Vérifier menus, course, proportions,
+      rendu vers texture, changement de mode et retour au bureau ; consigner
+      résolution, profondeur, capture et temps/image. **Fermeture :** tableau
+      des modes testés et anomalies éventuelles, sans supposer un mode fenêtre.
 
 - [ ] **[Jeux] Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur reste blanc).
       Au 26/09 le menu principal est juste (référence de la matrice validée) : à revoir en
@@ -163,7 +172,7 @@ Après les priorités ci-dessus ; conserver les dépendances et mesurer avant d'
 - [ ] **[Système] Quartz Extreme et Core Image** sur `tiger-dev.raw` : surfaces hôte pour le
       WindowServer, **plus de quatre clients** (`docs/roadmap-opengl15.md`).
 
-- [ ] **[Frontend] Frontend F1, restes non joués** : Tiger 1024×768 dans le frontend, la vraie touche
+- [ ] **[Frontend] Frontend F1, restes non joués** : la vraie touche
       Ctrl+Cmd+F au clavier, écran Retina, plusieurs moniteurs.
 
 - [ ] **[Métrologie] Métrologie boot** (`docs/metrologie-boot.md`) : baseline de 23,32 s à refaire avec le

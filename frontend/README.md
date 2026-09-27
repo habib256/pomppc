@@ -39,6 +39,8 @@ preprocessed `dbus/dbus-display1.xml` (copied from our QEMU 9.2 tree).
 ## Run
 
 ```sh
+../run_tiger.sh                    # Tiger in ImGuiDock, maximum tested optimizations
+POMPPC_FRONTEND=native ../run_tiger.sh  # native QEMU window for diagnostics
 ../run_frontend.sh                 # from anywhere in the repo (same binary, resolved path)
 ./build/pomppc                     # boots Mac OS 9 (../run_os9.sh) by default
 ./build/pomppc ../run_tiger.sh     # boot Mac OS X 10.4 instead
@@ -50,8 +52,60 @@ works from any working directory; an explicit argument is taken relative to your
 `SMP` are forwarded to whichever run script is launched, and the **OS** menu switches guests at
 runtime (each switch relaunches QEMU).
 
+Tiger's launcher delegates to this frontend before taking its disk lock.
+The bridge's `DBUS_DISPLAY=1` then selects QEMU directly, without recursion.
+Tiger enables the tested CPU/TCG optimizations, GPU copies and GLSL by default;
+explicit environment overrides (including `0`) are preserved. The headless and
+explicit native-display paths remain available for automation.
+
 The keyboard is routed to the guest from the start — toggle it with
 **Machine ▸ Clavier → invité** when you need to type into an ImGui field.
+
+### Carillon de démarrage (hôte macOS)
+
+**Périphériques ▸ Carillon de démarrage (hôte)** règle l'activation, le volume
+(0–100 %) et le chemin d'un WAV/AIFF (Entrée pour valider). Ces préférences
+restent dans `.run/chime.conf`, indépendamment du son Screamer de Tiger.
+Le lecteur NSSound est asynchrone : un lancement QEMU réussi puis son premier
+affichage valide déclenchent une seule lecture. Une pause, une nouvelle image,
+un redimensionnement ou une réactivation du son ne la rejouent pas. Une relance
+de QEMU ou **Machine ▸ Redémarrer** réarme le carillon. Un redémarrage demandé
+depuis l'invité seul n'est pas détecté. Une erreur audio est journalisée sans
+empêcher le démarrage de la VM. Aucun son dans les sondes headless.
+
+Surcharges au lancement : `POMPPC_CHIME=0`, `POMPPC_CHIME_VOLUME=0.5` (0–1),
+`POMPPC_CHIME_FILE=/chemin/son.aiff`. Sur un hôte autre que macOS, le lecteur
+signale explicitement que cette fonction n'est pas disponible.
+
+**Identification :** `sysctl hw.model` dans notre Tiger retourne `PowerMac3,1`,
+le Power Mac G4 AGP (Sawtooth), et non un Macintosh LC II. Le profil attend
+`disks/chimes/powermac3-1-4.2.8.wav`, à fournir localement depuis le firmware
+Apple correspondant ; le dépôt ne distribue pas ce son propriétaire.
+Le nom du fichier seul ne certifie pas sa provenance. Un chemin personnalisé
+reste un choix utilisateur, sans identification automatique du carillon.
+Ne pas confondre ce son du firmware avec un son propre à Mac OS X Tiger.
+
+Extraction reproductible après acceptation de la licence Apple :
+[`G4_FW_Update_4.2.8.smi.bin`](https://download.info.apple.com/Apple_Support_Area/Apple_Software_Updates/English-North_American/Macintosh/Power_Mac_G4/G4_FW_Update_4.2.8.smi.bin),
+ouvrir l'image Disk Copy en lecture seule, puis passer le **fichier de données**
+`Power Mac G4 Firmware` à `python3 scripts/extract_g4_chime.py "…/Power Mac G4 Firmware"`.
+Ne jamais lancer le programme de mise à jour du firmware dans la VM.
+L'extracteur refuse tout firmware dont le SHA-256 diffère de
+`8d3e8ca5a01973b3100144affdc88a21692a89c5e3ef4054bcc4774ce9ecf212`.
+Il lit le champ `BOOT-BEEP` du répertoire `sboot`, décode les 1 722 paquets IMA4,
+et produit 110 208 échantillons PCM16 mono à 44 100 Hz (2,499 s).
+SHA-256 du WAV : `f685b917bc5d277986b1c4c164f70d1aae2e8fcc10f8888841ba0eaf67ccc6c5`.
+Le PCM extrait a été comparé au décodage Apple `afconvert` : **identique à l'octet**.
+Le son est celui de cette version du firmware G4 ; cela ne prétend pas que
+chaque modèle de Mac possède nécessairement un enregistrement différent.
+
+Vérification : `ctest --test-dir frontend/build --output-on-failure`
+teste le déclenchement unique, la coupure, les valeurs invalides et la
+persistance des préférences ; cela ne prouve pas l'écoute sur les haut-parleurs.
+Sur le démarrage réel du 27/09 (`bench/tiger-chime-final.log`), NSSound accepte
+une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
+640×480 → 1024×768 ne la rejoue pas. L'utilisateur a confirmé à l'écoute :
+« Le chime est bon ».
 
 ### Layout, ratio, plein écran (F1)
 
@@ -77,6 +131,13 @@ The keyboard is routed to the guest from the start — toggle it with
   pointer relative (clicks landed wherever the accelerated guest cursor was). The frontend
   follows `Mouse.IsAbsolute` changes and makes the tablet current again (`query-mice` +
   `mouse_set`); untick it for games that want relative motion.
+  Tiger now gets `usb-tablet` by default with ImGuiDock (`TABLET=0` opts out).
+  Selection is retried once per second while the requested pointer is absent,
+  including during boot or after hotplug. Native QEMU keeps its previous default.
+  Verified in Tiger at 1024×768: four positions through ImGui's real mapping,
+  measured with `CGSGetCurrentCursorLocation` in the guest; error ≤1 guest pixel
+  in the docked view and zero at both tested full-screen points. Logs:
+  `bench/tiger-chime-pointer.log`, `bench/tiger-pointer-positions.log`.
 - **Bilan** shows the guest size, the drawn rectangle and scale, the window size and the
   pointer mode; **Journal** logs launches, CDs, scanout changes, switches and left clicks
   (host point → guest pixel).
@@ -89,7 +150,9 @@ POMPPC_FE_SCRIPT="wait 75; fs; wait 3; shot /tmp/fs.png; click 1568 262; click 1
 esc; wait 2; shot /tmp/win.png; quit" ./build/pomppc ../run_os9.sh
 ```
 
-Steps: `wait <s>`, `move|click <x> <y>` (window points), `fs` (Ctrl+Cmd+F), `f11`, `esc`,
+Steps: `wait <s>`, `move|click <x> <y>` (window points),
+`guestmove <x> <y>` (fractions 0–1 of the drawn guest view, without clicks),
+`fs` (Ctrl+Cmd+F), `f11`, `esc`,
 `type <a-z 0-9 space .>`, `enter`, `shot <png>`, `quit`.
 
 The headless probe defaults to the *other* guest, and always runs `-snapshot`:

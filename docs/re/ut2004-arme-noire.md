@@ -1,4 +1,46 @@
-# UT2004 : l'arme en main est noire et brillante (enquête en cours, 23/09/2026)
+# UT2004 : texture diffuse perdue, reflets conservés
+
+## Cause établie le 27/09/2026
+
+Le miroir du plugin est fidèle aux getters publics OpenGL **et** à l'état compilé
+par le jeu. La peau n'est pas perdue au transfert : UT2004 ne la combine pas,
+faute de `GL_ATI_texture_env_combine3` ou de `GL_NV_texture_env_combine4` annoncé.
+Le passage de quatre à huit unités fixes ne suffit pas. Les profils de test
+utilisent désormais `MaxTextureUnits=8` (limite fixe réelle ; GLSL possède
+séparément 16 unités d'image).
+
+Le matériau `Combiner UT2004Weapons.WeaponSpecMap2` porte l'opération 6
+(`CO_Add_With_Mask`) : Material1 est `TexEnvMap ...WeaponEnvMap2`, Material2
+et Mask sont `Texture UT2004Weapons.NewWeaps.AssaultRifleTex0`. La fonction
+`FOpenGLRenderInterface::HandleCombinedMaterial` teste ATI (branche `0x461acc`),
+puis NV (`0x461bfc`). Sans ces extensions, son repli à `0x461d40..0x461d90`
+pose explicitement **REPLACE(PREVIOUS)** : seule la réflexion précédente reste.
+Les sondes en mémoire n'ont modifié aucun fichier du jeu.
+
+Correctif général : protocole **v22**, `QGPU_CAP_COMBINE3`, fonctions ATI
+MODULATE_ADD / MODULATE_SIGNED_ADD / MODULATE_SUBTRACT en RGB et alpha, sources
+ZERO/ONE, opérandes et échelles. Backend logiciel et GL ; annonce du plugin
+conditionnée par version/capacité, pas un traitement spécial d'UT2004.
+Voir [le contrat](../protocole.md#combineurs-ati-v22).
+
+Preuves : `tests/qgpu_core_test.c::run_v22` passe sur soft et GL ; la scène
+`gltest combine3` passe dans Tiger, renderer POMPPC, unités 0 et 7, RGB/alpha,
+échelles 1/2/4, ZERO/ONE et inverses, sans erreur GL. Journaux locaux :
+`bench/ut-combine3-native.log`, `bench/ut-combine3-guest.log`.
+
+Contrôle réel : DM-Rankin, huit unités, capture
+`bench/utweapon-priorites11/current.png` : peau visible et reflets conservés,
+confirmés par l'utilisateur. La sonde publique relève le dessin de l'arme
+(1719 indices), unité 1 `GL_COMBINE_RGB=0x8744` : le jeu choisit désormais
+le combineur ATI. Trace et vidage conservés sous
+`bench/utweapon-priorites11/utweapon-probe11/`. Aucun patch du binaire du jeu.
+
+La sonde publique reproductible est `tools/guest/gltrap/gltrap.c`, activée par
+`POMPPC_GLTRAP_CUBE=<fichier déclencheur>`. Elle interpose aussi
+`NSAddressOfSymbol`, car SDL d'UT2004 résout ces fonctions dynamiquement.
+Ne pas employer cette instrumentation pour les mesures de performances.
+
+## Enquête initiale (23/09/2026)
 
 Défaut rapporté par l'utilisateur : « les armes du joueur n'ont pas de texture (mais c'était
 déjà le cas avant) ». Le mitrailleur en main est rendu noir, luisant, sans sa peau. Les
@@ -50,11 +92,11 @@ ambiante à 1. Aucun refus (« fallback ») dans note.txt sur toute la session :
 sont partis à l'hôte, il n'y a pas de seconde passe perdue. Aucun facteur DST_ALPHA dans le
 vidage.
 
-## 3. Ce que ça implique
+## 3. Hypothèses initiales — écartées le 27/09
 
-Le jeu n'a pas pu vouloir cet état : sur un vrai Mac le même état donnerait la même arme
-noire, et elle y est texturée. Donc le miroir du plugin diffère de ce que GLEngine tient,
-sur l'un de ces points :
+L'enquête initiale soupçonnait le miroir du plugin sur les points suivants.
+Cette déduction était fausse : le jeu choisit bien cet état en fonction des
+extensions annoncées (voir la cause établie ci-dessus).
 
 1. **Sources du combineur de l'unité 1 ou 2** (TU_SRC0_RGB… à +0x1c/+0x22 du bloc d'unité,
    pas 0x7c) : une fonction ou une source que le plugin lit à côté quand une carte de cube
@@ -65,7 +107,7 @@ sur l'un de ces points :
    attendu. À tester en premier.
 3. Une 4ᵉ unité que le plugin ne voit pas (masque TU_ENABLE de l'unité 3).
 
-À faire (sur le M4, avec le jeu) : sonde plugin qui, au premier dessin avec carte de cube sur
+Contrôle alors proposé (effectué depuis sur le M4) : sonde plugin qui, au premier dessin avec carte de cube sur
 l'unité 0 et trois unités actives, vide dans note.txt les quatre blocs d'unité bruts (0x7c
 octets chacun) et la table CTX_TEXUNITS, et compare les coordonnées de texture des unités 0
 et 1 dans le vidage (2D en [0,1] ou vecteurs de réflexion 3D) — c'est ce qui tranche entre

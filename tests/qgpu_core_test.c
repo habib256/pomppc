@@ -3292,7 +3292,7 @@ static void run_v9(QgpuCore *c, uint8_t *shmem)
     }
     CHECK(bad == 0, "carte des registres : %u offsets alignés et distincts "
           "sous 0x%x (%u fautes)", n, (unsigned)QGPU_CTRL_TOPADDR, bad);
-    CHECK(QGPU_PROTO_VERSION == 21, "version du protocole %d", QGPU_PROTO_VERSION);
+    CHECK(QGPU_PROTO_VERSION == 22, "version du protocole %d", QGPU_PROTO_VERSION);
     CHECK(QGPU_PROTO_MIN == 12, "version minimale d'attache %d", QGPU_PROTO_MIN);
     CHECK(QGPU_QUEUE_DEPTH >= 2 && (QGPU_QUEUE_DEPTH & (QGPU_QUEUE_DEPTH - 1)) == 0,
           "profondeur de file %d (puissance de 2, >= 2)", QGPU_QUEUE_DEPTH);
@@ -7099,6 +7099,119 @@ static void run_v21_dp(QgpuCore *c, uint8_t *shmem)
     free(perms);
 }
 
+static void run_v22(QgpuCore *c, uint8_t *shmem)
+{
+    Emit e = {0}, v = {0};
+    uint32_t st, caps = c->caps, src = 0, before;
+    unsigned u, i, fn, scale, alpha;
+    printf("-- v22 : ATI_texture_env_combine3 --\n");
+    CHECK(QGPU_PROTO_VERSION == 22 && QGPU_CAP_COMBINE3 == 0x2000, "contrat v22");
+    st = v21_setup(c, shmem);
+    CHECK(st == QGPU_ST_OK, "v22 contexte : %u", st);
+    e.base = v.base = shmem;
+    /* Chaque unité refuse l'extension sans capacité, sans mutation. */
+    c->caps &= ~QGPU_CAP_COMBINE3;
+    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+        const uint32_t values[] = {
+            QGPU_COMBINE(QGPU_CB_MODULATE_ADD, QGPU_CB_REPLACE, 0, 0),
+            QGPU_COMBINE(QGPU_CB_REPLACE, QGPU_CB_MODULATE_SUBTRACT, 0, 0),
+            QGPU_COMBINE_DEFAULT | QGPU_COMBINE_LITERAL_RGB(2, QGPU_CL_ONE),
+            QGPU_COMBINE_DEFAULT | QGPU_COMBINE_LITERAL_A(2, QGPU_CL_ZERO)
+        };
+        for (i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+            before = c->ctx[0].st.v[QGPU_SK_COMBINE(u)];
+            e.off = e.start = CMD_OFF;
+            state(&e, QGPU_SK_COMBINE(u), values[i]);
+            st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+            CHECK(st == QGPU_ST_BACKEND && c->ctx[0].st.v[QGPU_SK_COMBINE(u)] == before,
+                  "v22 sans capacité unité%u cas%u : %u", u, i, st);
+        }
+    }
+    c->caps = caps;
+    {
+        const uint32_t bad[] = {11, 0x60, 0x70, 0x300, 0xC00, 0x1000000,
+                               3u << 12, 3u << 14, 3u << 16, 3u << 18, 3u << 20, 3u << 22};
+        for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            before = c->ctx[0].st.v[QGPU_SK_COMBINE(7)];
+            e.off = e.start = CMD_OFF;
+            state(&e, QGPU_SK_COMBINE(7), bad[i]);
+            st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+            CHECK(st == QGPU_ST_BAD_ARG && c->ctx[0].st.v[QGPU_SK_COMBINE(7)] == before,
+                  "v22 valeur invalide %x sans mutation : %u", bad[i], st);
+        }
+    }
+    if (!(caps & QGPU_CAP_COMBINE3)) return;
+    qgpu_st32(shmem + TEX_OFF, 0xCCCCCCCC);
+    e.off = e.start = CMD_OFF;
+    tex1x1(&e, 40, 0x1908, TEX_OFF);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "v22 texture : %u", st);
+    for (i = 0; i < 3; i++) {
+        const unsigned sources[] = {QGPU_CS_TEXTURE, QGPU_CS_PRIMARY, QGPU_CS_CONSTANT};
+        src |= QGPU_COMBINE_SRC_RGB(i, sources[i], QGPU_CO_COLOR) |
+               QGPU_COMBINE_SRC_A(i, sources[i], QGPU_CA_ALPHA);
+    }
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 4, 4, .2f, .2f, .2f, .2f);
+    rv2c(&v, 60, 4, .2f, .2f, .2f, .2f);
+    rv2c(&v, 4, 20, .2f, .2f, .2f, .2f);
+    for (u = 0; u <= 7; u += 7) {
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_UNIT(0) + QGPU_SK_U_ENABLE, 0);
+        state(&e, QGPU_SK_UNIT(u) + QGPU_SK_U_ENABLE, 1);
+        state(&e, QGPU_SK_UNIT(u) + QGPU_SK_U_BIND, 40);
+        state(&e, QGPU_SK_UNIT(u) + QGPU_SK_U_ENV_MODE, 0x8570);
+        state(&e, QGPU_SK_UNIT(u) + QGPU_SK_U_ENV_COLOR, 0xBFBFBFBF);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_OK, "v22 unité %u : %u", u, st);
+        for (alpha = 0; alpha < 2; alpha++) for (fn = 8; fn <= 10; fn++) for (scale = 0; scale < 3; scale++) {
+            float want = .8f * (191.0f / 255) + (fn == 10 ? -.2f : .2f) - (fn == 9 ? .5f : 0);
+            unsigned b;
+            want *= 1u << scale;
+            b = (unsigned)((want > 1 ? 1 : want < 0 ? 0 : want) * 255 + .5f);
+            e.off = e.start = CMD_OFF;
+            state(&e, QGPU_SK_COMBINE_SRC(u), src);
+            state(&e, QGPU_SK_COMBINE(u), alpha ?
+                  QGPU_COMBINE(QGPU_CB_REPLACE, fn, 0, scale) | QGPU_COMBINE_LITERAL_RGB(0, QGPU_CL_ONE) :
+                  QGPU_COMBINE(fn, QGPU_CB_REPLACE, scale, 0));
+            state(&e, QGPU_SK_BLEND, alpha);
+            state(&e, QGPU_SK_BLEND_SRC_RGB, 0x0302); /* SRC_ALPHA */
+            state(&e, QGPU_SK_BLEND_DST_RGB, 0);
+            st = v21_draw(c, &e, VF_P2C, 0);
+            CHECK(st == QGPU_ST_OK && near_px(px(shmem, 8, 8), b * 0x010101u, 3),
+                  "v22 unité%u %s fn%u scale%u : %06x attendu %02x (st %u)",
+                  u, alpha ? "alpha" : "RGB", fn, 1u << scale, px(shmem, 8, 8), b, st);
+        }
+        for (i = 0; i < 6; i++) for (alpha = 0; alpha < 2; alpha++) {
+            /* ZERO/ONE sur chacun des trois arguments, opérande inversé. */
+            unsigned arg = i / 2, lit = (i & 1) + 1;
+            uint32_t cb = QGPU_COMBINE(QGPU_CB_MODULATE_ADD, QGPU_CB_MODULATE_ADD, 0, 0);
+            uint32_t ls = 0;
+            unsigned k;
+            for (k = 0; k < 3; k++) {
+                /* Après inversion : Arg1=0 pour isoler Arg0/2 ;
+                   Arg0=0 pour isoler Arg1. */
+                unsigned other = k == 1 || (arg == 1 && k == 0) ? QGPU_CL_ONE : QGPU_CL_ZERO;
+                cb |= QGPU_COMBINE_LITERAL_RGB(k, k == arg ? lit : other) |
+                      QGPU_COMBINE_LITERAL_A(k, k == arg ? lit : other);
+                ls |= QGPU_COMBINE_SRC_RGB(k, QGPU_CS_TEXTURE0 + 3, QGPU_CO_ONE_MINUS_COLOR) |
+                      QGPU_COMBINE_SRC_A(k, QGPU_CS_TEXTURE0 + 3, QGPU_CA_ONE_MINUS_ALPHA);
+            }
+            if (alpha) {
+                /* RGB=1 pour voir l'alpha via SRC_ALPHA/ZERO. */
+                cb = (cb & ~0x3F00Fu) | QGPU_CB_REPLACE | QGPU_COMBINE_LITERAL_RGB(0, QGPU_CL_ZERO);
+            }
+            e.off = e.start = CMD_OFF;
+            state(&e, QGPU_SK_BLEND, alpha);
+            state(&e, QGPU_SK_COMBINE(u), cb);
+            state(&e, QGPU_SK_COMBINE_SRC(u), ls);
+            st = v21_draw(c, &e, VF_P2C, 0);
+            CHECK(st == QGPU_ST_OK && near_px(px(shmem, 8, 8), lit == QGPU_CL_ZERO ? 0xFFFFFF : 0, 2),
+                  "v22 sources littérales arg%u lit%u alpha%u : %06x st%u", arg, lit, alpha, px(shmem, 8, 8), st);
+        }
+    }
+}
+
 static void run_v21(QgpuCore *c, uint8_t *shmem)
 {
     static const char vs_basic[] =
@@ -7110,7 +7223,7 @@ static void run_v21(QgpuCore *c, uint8_t *shmem)
     Emit e;
 
     printf("-- v21 : programmes GLSL (%s) --\n", has ? "tenus par le backend" : "non tenus");
-    CHECK(QGPU_PROTO_VERSION == 21 && QGPU_CAP_GLSL == 0x1000 && QGPU_PT_GLSL == 0x8B40,
+    CHECK(QGPU_PROTO_VERSION >= 21 && QGPU_CAP_GLSL == 0x1000 && QGPU_PT_GLSL == 0x8B40,
           "version 21, QGPU_CAP_GLSL, QGPU_PT_GLSL");
     CHECK(QGPU_OP_GLSL_SOURCE == 0x76 && QGPU_OP_GLSL_ATTRIB == 0x77 &&
           QGPU_OP_GLSL_UNIFORM == 0x78 && QGPU_OP_GLSL_LINK == 0x79 &&
@@ -7677,6 +7790,7 @@ static void *run_backend_body(void *arg)
     run_v19(c, shmem);
     run_v20(c, shmem);
     run_v21(c, shmem);          /* GLSL */
+    run_v22(c, shmem);          /* ATI_texture_env_combine3 */
     run_gpu_copy(c, shmem);     /* 27/09 */
 
     qgpu_core_reset(c);

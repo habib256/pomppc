@@ -31,6 +31,7 @@
 #include "imgui_impl_opengl3.h"
 
 #include "QemuBridge.h"
+#include "StartupChime.h"
 
 #ifndef IMGUI_HAS_DOCK
 #error "Dear ImGui docking branch required — run ./setup.sh (it fetches the docking tag)"
@@ -291,6 +292,26 @@ int main(int argc, char** argv) {
     std::string os9Sh = root + "/run_os9.sh";
     // Docking layout persists next to the QMP socket, whatever the cwd.
     static std::string iniPath = runtimeDir + "/imgui.ini";
+    const std::string chimeSettingsPath = runtimeDir + "/chime.conf";
+    const std::string defaultChime = root + "/disks/chimes/powermac3-1-4.2.8.wav";
+    ChimeSettings chime;
+    chime.file = defaultChime;
+    chime.load(chimeSettingsPath);
+    if (const char* p = std::getenv("POMPPC_CHIME_FILE")) chime.file = p;
+    if (const char* p = std::getenv("POMPPC_CHIME")) chime.enabled = std::string(p) != "0";
+    if (const char* p = std::getenv("POMPPC_CHIME_VOLUME")) {
+        char* end = nullptr;
+        float level = std::strtof(p, &end);
+        if (end != p && *end == '\0' && std::isfinite(level))
+            chime.volume = std::clamp(level, 0.0f, 1.0f);
+    }
+    char chimeFile[4096];
+    std::snprintf(chimeFile, sizeof(chimeFile), "%s", chime.file.c_str());
+    ChimePlayer chimePlayer;
+    ChimeTrigger chimeTrigger;
+    auto saveChime = [&]() {
+        if (!chime.save(chimeSettingsPath)) journal("échec sauvegarde carillon");
+    };
 
     std::string curLauncher = defLauncher;   // boots Mac OS 9 by default
     bool sound = true;    // on by default (PulseAudio Screamer); RAM capped ≤768
@@ -302,6 +323,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     journal("QEMU lancé : %s", curLauncher.c_str());
+    chimeTrigger.arm();
 
     glfwSetErrorCallback(glfwErr);
     if (!glfwInit()) { std::fprintf(stderr, "GLFW init failed\n"); return 1; }
@@ -396,8 +418,11 @@ int main(int argc, char** argv) {
     // Décocher pour les jeux qui veulent des déplacements relatifs.
     bool preferTablet = true;
     bool pointerPrefChanged = false;
+    double nextPointerRetry = 0;
 
     auto relaunch = [&](const std::string& launcher) {
+        chimePlayer.stop();
+        chimeTrigger.pending = false;
         bridge->stop();
         bridge = std::make_unique<QemuBridge>();
         std::string e;
@@ -406,12 +431,14 @@ int main(int argc, char** argv) {
         else {
             curLauncher = launcher;
             journal("QEMU relancé : %s", launcher.c_str());
+            chimeTrigger.arm();
         }
         guestW = guestH = 0;
         texW = texH = 0;                 // la texture GPU sera réallouée
         fb.clear();                      // force un latch complet
         for (bool& k : keyHeld) k = false;
         lastAbs = -1;
+        nextPointerRetry = 0;
         paused = false;
         currentCd.clear();
         cdImagesStale = true;
@@ -511,6 +538,14 @@ int main(int argc, char** argv) {
         bool done = true;
         if (st.op == "wait") {
             if (probePhase == 0) { probeUntil = now + st.x; done = false; }
+        } else if (st.op == "guestmove") {
+            if (drawSize.x <= 0 || drawSize.y <= 0) return;
+            probeMx = drawOrigin.x + std::clamp(st.x, 0.0f, 1.0f) * (drawSize.x - 1);
+            probeMy = drawOrigin.y + std::clamp(st.y, 0.0f, 1.0f) * (drawSize.y - 1);
+            pio.AddMousePosEvent(probeMx, probeMy);
+            journal("épreuve position : hôte %.1f,%.1f -> invité %d,%d", probeMx, probeMy,
+                    (int)((probeMx - drawOrigin.x) * guestW / drawSize.x),
+                    (int)((probeMy - drawOrigin.y) * guestH / drawSize.y));
         } else if (st.op == "move") {
             probeMx = st.x; probeMy = st.y;
             pio.AddMousePosEvent(probeMx, probeMy);
@@ -582,6 +617,13 @@ int main(int argc, char** argv) {
         int w = 0, h = 0, dy0 = 0, dy1 = 0;
         bool resized = false;
         if (bridge->latchFrame(fb, w, h, dy0, dy1, resized)) {
+            bridge->checkAlive();
+            if (chimeTrigger.frame(bridge->running(), w, h, chime.enabled, chime.volume)) {
+                std::string error;
+                if (chimePlayer.play(chime.file, chime.volume, error))
+                    journal("carillon hôte : %s (volume %.0f %%)", chime.file.c_str(), chime.volume * 100);
+                else journal("carillon non joué : %s", error.c_str());
+            }
             if (w != guestW || h != guestH) journal("scanout %dx%d", w, h);
             guestW = w; guestH = h;
             glBindTexture(GL_TEXTURE_2D, tex);
@@ -608,12 +650,16 @@ int main(int argc, char** argv) {
         bridge->checkAlive();
         // Souris : suivre le mode de QEMU et, si demandé, rendre la tablette
         // courante chaque fois que la souris HID relative la reprend.
-        if ((int)bridge->mouseIsAbsolute() != lastAbs || pointerPrefChanged) {
+        bool retryPointer = bridge->running() &&
+            bridge->mouseIsAbsolute() != preferTablet && glfwGetTime() >= nextPointerRetry;
+        if ((int)bridge->mouseIsAbsolute() != lastAbs || pointerPrefChanged || retryPointer) {
+            if ((int)bridge->mouseIsAbsolute() != lastAbs || pointerPrefChanged)
+                journal("souris invité : %s", bridge->mouseIsAbsolute() ? "absolue (SetAbsPosition)" : "relative");
             lastAbs = bridge->mouseIsAbsolute();
-            journal("souris invité : %s", lastAbs ? "absolue (SetAbsPosition)" : "relative");
             lastGx = lastGy = -1;
             if (bridge->running() && (lastAbs != (int)preferTablet || pointerPrefChanged)) {
                 int m = bridge->selectMouse(preferTablet);
+                nextPointerRetry = glfwGetTime() + 1.0;
                 if (m > 0)
                     journal("souris QEMU n°%d rendue courante (%s)", m,
                             preferTablet ? "tablette absolue" : "relative");
@@ -646,7 +692,10 @@ int main(int argc, char** argv) {
         // ── Menu bar → machine control over QMP ──────────────────────────
         if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("Machine")) {
-                if (ImGui::MenuItem("Redémarrer")) bridge->reset();
+                if (ImGui::MenuItem("Redémarrer") && bridge->reset()) {
+                    chimePlayer.stop();
+                    chimeTrigger.arm();
+                }
                 if (ImGui::MenuItem(paused ? "Reprendre" : "Pause")) {
                     paused = !paused;
                     bridge->setPaused(paused);
@@ -673,6 +722,27 @@ int main(int argc, char** argv) {
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Périphériques")) {
+                if (ImGui::BeginMenu("Carillon de démarrage (hôte)")) {
+                    ImGui::TextDisabled("Profil attendu : Power Mac G4 AGP / PowerMac3,1");
+                    ImGui::TextDisabled("Fichier WAV/AIFF — provenance : voir frontend/README.md");
+                    if (ImGui::Checkbox("Activer le carillon", &chime.enabled)) {
+                        if (!chime.enabled) chimePlayer.stop();
+                        saveChime();
+                    }
+                    int percent = (int)std::lround(chime.volume * 100);
+                    if (ImGui::SliderInt("Volume", &percent, 0, 100, "%d %%")) {
+                        chime.volume = percent / 100.0f;
+                        chimePlayer.volume(chime.volume);
+                        saveChime();
+                    }
+                    if (ImGui::InputText("Fichier", chimeFile, sizeof(chimeFile), ImGuiInputTextFlags_EnterReturnsTrue)) {
+                        chime.file = chimeFile;
+                        saveChime();
+                    }
+                    ImGui::TextDisabled("Entrée pour valider le chemin ; aucun redémarrage requis.");
+                    ImGui::EndMenu();
+                }
+                ImGui::Separator();
                 ImGui::TextDisabled("(bascule = redémarrage immédiat de la VM)");
                 if (ImGui::MenuItem("Son (PulseAudio)", nullptr, &sound))
                     relaunch(curLauncher);

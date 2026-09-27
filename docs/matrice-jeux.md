@@ -1,5 +1,32 @@
 # Matrice de jeux automatisée (chantier A3)
 
+Depuis le 27/09, la capture utilise `POMPPC_GL_CAPTURE=<chemin>` : après au moins
+deux images depuis le début du vidage, le plugin attend la barrière d'un
+`SURF_PRESENT` vidé, publie atomiquement son numéro dans ce fichier et suspend
+les dessins du processus. Le harnais confirme ce numéro dans `frames.csv`,
+capture la VM figée, puis crée `<chemin>.resume` dans un `finally`.
+L'attente du plugin est bornée à 30 s ; `<chemin>.expired` rend la preuve invalide.
+Sans cette option, aucune attente de capture n'est ajoutée au rendu normal.
+`POMPPC_GL_CAPTURE_DELAY` fixe le nombre minimal d'images depuis le début du
+vidage (2 par défaut, 12 pour Colin McRae qui échange plusieurs surfaces).
+Le numéro est conservé dans `capture-frame.txt` et l'analyse ne compare que les
+présentations de cette image. Les anciens tours sans ce fichier restent analysables
+par recherche de la meilleure image, comme auparavant. Les tolérances ne changent pas.
+Le rejeu conserve aussi le format de présentation : RGB1555 est relu en 16 bits
+puis développé en RGB comme le scanout VGA de la VM quotidienne (décalage de
+trois bits, sans réplication), et le découpage utilise deux octets par pixel au lieu
+de quatre. Le format figure en septième colonne de `presents.txt` ; les anciens
+fichiers à six colonnes restent interprétés comme du 32 bits.
+
+Marble Blast fenêtre : le module règle **les deux** exports Torque,
+`~/Library/MarbleBlast/{common,marble}/client/prefs.cs`, à 800×600 ; chacun pouvait
+réintroduire 1024×768. Les fichiers et leurs caches `.dso` sont restaurés après le tour.
+Premier contrôle : `bench/matrice/priorites-mb-fen`, capture/rejeu 0,00 %, 9,9 ms/image.
+Le tour `priorites-capture-01` confirme Marble Blast, DOOM 3 et Prey en fenêtre :
+trois cellules vertes, capture/rejeu 0,00 %, respectivement 9,9, 34,1 et 70,6 ms/image.
+La série de dix tours consécutifs DOOM 3/Prey est **reportée à la demande de
+l'utilisateur** ; ce premier tour ne la remplace pas.
+
 `tools/matrice/` joue chaque jeu de la matrice (TODO §1) dans chaque mode — **fenêtre** et
 **plein écran** — sur la VM quotidienne, et produit un tableau vert/rouge avec, pour chaque
 cellule, ses preuves rangées. C'est le harnais qui doit autoriser A2 (découpage du plugin) et
@@ -78,15 +105,12 @@ Un lancement (`Cellule.jouer`, `tools/matrice/matrice.py`) :
    au premier plan (osascript) au début puis dès que les replis montent (lancé par ssh, le jeu
    reste derrière et chaque échange se replie, `Swap60`) ;
 4. la **règle de scène** du jeu (§4) dit quand la fenêtre de mesure est passée ;
-5. preuve seulement : `touch /tmp/matrice-go`, puis on attend que le vidage couvre deux
-   images (numéro d'image lu dans l'en-tête du premier et du dernier fichier, `od` dans
-   l'invité) et la VM est arrêtée aussitôt pour la capture ; on attend enfin que le vidage ne
-   grossisse plus. `frames.csv` ne peut pas servir d'horloge : le plugin ne le vide que
-   toutes les 5 s (la première version attendait « 3 images dans frames.csv » et capturait
-   après la fin du vidage de Marble Blast et d'UT2004) ; un jeu dont la scène se rejoue à
-   l'identique déclare `dump_image = n` : le déclencheur vaut alors `@n`
-   (`POMPPC_GL_DUMP_TRIGGER=@n`, plugin `20260927-dumpat`) et le vidage part de l'image n,
-   sans fichier, la même à chaque tour (Nexuiz) ; l'attente et la capture sont les mêmes ;
+5. preuve seulement : `touch /tmp/matrice-go`, attente de `capture-ready`, confirmation
+   de son numéro dans `frames.csv`, capture figée puis acquittement `.resume` ; on attend
+   enfin que le vidage ne grossisse plus. Un jeu déterministe peut déclarer
+   `dump_image = n` : le déclencheur `@n` démarre alors le vidage à une image fixe
+   (Nexuiz), avec le même rendez-vous de capture. Le plugin expire après 30 s si le
+   harnais disparaît ; un plugin sans rendez-vous produit une preuve refusée ;
 6. arrêt du jeu (`kill`), fermeture de Terminal une fois `lance.command` fini (sinon dialogue),
    réglages rendus, nettoyage du jeu (CD démonté) ;
 7. rapatriement du dossier de l'invité (tar par ssh), puis effacement dans l'invité ;
@@ -173,8 +197,8 @@ Détails par jeu dans l'en-tête de chaque module. Points durs :
   plugin voit « not frontmost » et replie chaque échange (Swap60 + le glFinish Swap5c). La
   matrice (et le lanceur `~/nexuiz.command`) préchargent
   `tools/guest/launchers/premierplan.c` (`TransformProcessType` + `SetFrontProcess` dans un
-  constructeur), compilé dans l'invité. Profil `glsl` (`nxg`, `+r_glsl 1`) déclaré non
-  automatisé tant que le plugin n'annonce pas `GL_ARB_fragment_shader`.
+  constructeur), compilé dans l'invité. Profil `glsl` (`nxg`, `+r_glsl 1`) automatisé
+  depuis le protocole v21 ; le profil ARB force `+r_glsl 0`.
 
 Ajouter un jeu : un module `tools/matrice/jeux/<clé>.py` qui définit `JEU`, une instance de
 `jeu.Jeu` (commande par mode, `fenetre(rows)`, réglages à sauvegarder, plancher), ou `JEUX`,
@@ -186,19 +210,18 @@ une liste d'instances (profils d'un même jeu, Nexuiz).
   sur sa copie). Le 26/09, aucun autre QEMU pendant les tours. Les écarts de ±5 % entre deux
   parties restent la règle (`docs/tcg-g4.md` §14.7).
 - **Le déclencheur ralentit le jeu** (§2) : jamais de ms/image prise pendant la preuve.
-- **La capture doit tomber dans le vidage** : le vidage dure `dump_images` images (20 à 120) ;
-  la VM est arrêtée dès que le vidage couvre deux images, ~0,5 s plus tard. Si elle sort quand
-  même du vidage : « rejeu ≠ VM … capture hors du vidage ? ». C'est un échec de la preuve, pas
-  forcément de l'image : relancer la cellule (`--reprendre <tour> -j <jeu> -m <mode>`).
-  L'attente ne lit que les `*.bin` du vidage : depuis le 27/09 il porte aussi `surfaces.txt`
-  (surfaces hôte vivantes, pour le rejeu), qui trié en dernier rompait l'attente tout de suite
-  (capture d'avant le vidage, 0,7 d'écart sur Colin McRae : le chrono en retard d'une image).
+- **La capture doit correspondre à une présentation terminée** : rendez-vous du plugin
+  décrit en tête, confirmé par `frames.csv`. Un marqueur absent, expiré ou dont l'image
+  n'existe pas dans le rejeu rend la cellule rouge. Les anciens tours lisaient les en-têtes
+  des `*.bin` pendant que le jeu continuait ; `surfaces.txt` et la latence SSH pouvaient
+  décaler leur capture. Ils restent analysables, mais ne disposent pas de cette preuve
+  de synchronisation.
 - **Reprendre un tour** : `--reprendre bench/matrice/<tour> -j … -m …` rejoue la sélection et
   garde les autres cellules du tour. Un tour interrompu laisse au pire un jeu en marche et des
   réglages sauvegardés : le tour suivant arrête le jeu (redémarre l'invité si c'est DOOM 3),
   rend les réglages et démonte le CD de Warcraft III avant de commencer.
-- **Marble Blast en fenêtre** : le vidage n'a pas de `SURF_PRESENT` (chaque échange est replié
-  vers Apple), rien à rejouer en image : la cellule est rouge par ses replis.
+- **Marble Blast en fenêtre** : utiliser les deux fichiers de préférences réglés par le
+  module ; une fenêtre 1024×768 sur le bureau 1024×768 perd sa présentation directe.
 - **Invité gelé** : quatre relevés ssh manqués de suite (~5 min) et la cellule est rouge
   (« l'invité ne répond plus »), l'invité est relancé par `system_reset`, puis, si le
   démarrage reste bloqué, QEMU est arrêté et `./run_tiger.sh` relancé (détaché). Vu le 26/09 :
@@ -206,6 +229,13 @@ une liste d'instances (profils d'un même jeu, Nexuiz).
   l'invité), vCPU 0 bouclant en `0x268b4` interruptions coupées, vCPU 1 en `0xaf6b4`, pas
   de `panic.log` ; deux `system_reset` de suite sont ensuite restés bloqués au démarrage
   (« using 1966 buffer headers… ») ; un QEMU relancé est reparti en 30 s. Noté au TODO §5.
+  Le 27/09 à 15:50, lancement de diagnostic UT2004 : panique `CPU 1`, code
+  `0000000A (Lock timeout)`, PC `0x000AA010`, LR `0x00003820`, R1 `0xFE054021`.
+  Pas de `/Library/Logs/panic.log` après reprise. `system_reset` est resté bloqué
+  au même message de buffers ; relance de QEMU, vérification automatique du disque
+  puis retour du bureau. Capture locale : `bench/utweapon-priorites/panic.png`.
+  Le lancement suivant du jeu a réussi ; cause non établie, ne pas attribuer ce
+  panic au défaut de texture sans preuve.
 - **Écran de l'invité** : un Finder ouvert, Terminal, la souris de l'hôte au-dessus de la
   fenêtre QEMU (elle bouge le curseur de Tiger, et la caméra de certains jeux) : ne pas
   toucher à la fenêtre de la VM pendant un tour.
@@ -285,10 +315,11 @@ ne jugent pas la vitesse absolue.
 - **`frames.csv` n'est écrit que toutes les 5 s** (plugin) : inutilisable comme horloge
   fine ; la matrice lit les en-têtes du vidage. **Plugin corrigé le 26/09**
   (`20260926-memo` : vidé à chaque image quand `POMPPC_GL_DUMP_TRIGGER` est posé) ; la
-  matrice n'en profite pas encore. TODO §2.
+  matrice l'utilise désormais avec le rendez-vous de présentation décrit ci-dessus.
 - **Marble Blast en fenêtre** : fenêtre de 1024×768 quelle que soit la résolution demandée,
   recouverte par la barre de menus, donc sans présentation directe : deux replis par image
-  (Swap60, Swap58), ~38 ms/image au lieu de 12 en plein écran. TODO §6.
+  (Swap60, Swap58), ~38 ms/image au lieu de 12 en plein écran. Corrigé le 27/09 en
+  réglant les deux exports de préférences (voir en tête).
 - **Gel de l'invité au chargement de DOOM 3** (1 lancement sur ~12), puis démarrages bloqués
   après `system_reset` : seul un QEMU relancé repart. TODO §5.
 - **Rejoueur** (`tests/qgpu_replay.c`), corrigé : surface synthétique à la taille présentée,

@@ -2,12 +2,49 @@
 
 Ce que chaque journée de travail a changé, du plus récent au plus ancien. Les versions sont
 celles du **protocole qgpu** (`QGPU_PROTO_VERSION`), seul numéro que le projet porte : chaque
-changement de version exige de reconstruire QEMU, le kext et le plugin. Les mesures sont celles
+changement sémantique exige de reconstruire QEMU et le plugin ; depuis v19, le kext
+ne change que si l'ABI de transport change. Les mesures sont celles
 prises le jour même, sur l'hôte indiqué. Le détail de chaque lot est dans le message de commit
 et dans `docs/`.
 
 ## Non publié
 
+- **ImGuiDock : carillon G4 et souris absolue Tiger** (27/09).
+  Lecture WAV/AIFF côté hôte macOS, une fois au premier affichage de la VM,
+  volume et coupure persistants, indépendants de Screamer. Son local extrait
+  du firmware officiel G4 4.2.8f1 pour `PowerMac3,1`, identifié par SHA-256 ;
+  PCM identique au décodeur Apple, aucun son propriétaire dans Git.
+  Tablette USB par défaut avec ImGuiDock, sélection après initialisation HID ;
+  quatre positions mesurées dans Tiger, écart ≤1 pixel en fenêtre, nul sur les
+  deux points plein écran. `TABLET=0` conserve la souris relative.
+
+- **Lanceur Tiger : ImGuiDock et profil maximal** (27/09, demande utilisateur).
+  `run_tiger.sh` ouvre directement le frontend docking, avec garde D-Bus contre
+  la récursion ; fenêtre native et mode headless restent disponibles.
+  Toutes les optimisations CPU/TCG éprouvées, copies GPU et GLSL activées par défaut,
+  surcharges conservées, capacités toujours sondées. Tests de routage sans VM.
+- **UT2004 : peau des armes et reflets ensemble** (27/09, protocole v22).
+  Le jeu abandonnait la couleur diffuse de `WeaponSpecMap2` sans combineur ATI/NV.
+  Implémentation générale de `ATI_texture_env_combine3` : trois opérations RGB/alpha,
+  ZERO/ONE, inverses, échelles et bornage, sur soft et GL ; annonce conditionnelle.
+  Tests natifs soft/GL et scène Tiger `gltest combine3` verts. Arme contrôlée en
+  DM-Rankin, texture et reflets visibles, confirmés par l'utilisateur ; getter
+  `GL_COMBINE_RGB=0x8744`. Profils UT2004 à **8 unités fixes**, pas 16 (unités GLSL).
+  QEMU quotidien et plugin Tiger mis à jour ; ABI transport v19 inchangée.
+  [Enquête et preuve](docs/re/ut2004-arme-noire.md).
+- **Priorités 1–3 : contrat, capture et Marble Blast** (27/09).
+  `docs/protocole.md` unifie le contrat, annexe des constantes vérifiée par
+  `scripts/qgpu_contract.py --check` dans `tests/run-all.sh`.
+  La capture attend une présentation terminée, rattache son numéro à `frames.csv`
+  et acquitte le pilote ; expiration à 30 s détectée, image voisine interdite.
+  Marble Blast règle ses **deux** exports Torque à 800×600 en fenêtre : image juste,
+  9,9 ms/image, cellule verte. Premier contrôle DOOM 3 et Prey fenêtre vert,
+  capture/rejeu 0,00 %. **Les dix tours d'endurance sont reportés**, pas déclarés faits.
+  Une panique UT2004 survenue pendant le diagnostic reste ouverte au TODO.
+  **Réserve du contrôle final :** le tour ImGuiDock ultérieur laisse Marble Blast
+  fenêtre rouge sur un bureau 800×600×16 (plein écran vert) ; reprise au TODO.
+  Nexuiz : raccourci du bureau ouvert et menu 800×600 contrôlé sur le bureau
+  1024×768 (`bench/nexuiz-shortcut-v22.png`) ; cela ne remplace pas une matrice verte.
 - **Nexuiz en GLSL sur le GPU de l'hôte : 107 → 40 ms/image** (27/09, v21 en VM,
   plugin `20260927-glsl`). Scènes `glsl`, `glslvs` (= rendu d'Apple), `glslfs`, `glsldp`
   justes ; deux défauts corrigés (`gl_MultiTexCoord<u>` mal reconnu, lumières éteintes et

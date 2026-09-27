@@ -52,7 +52,7 @@
  * glslvs a sa référence chez le rendu d'Apple (shaders de sommets émulés),
  * les autres des valeurs attendues (Apple n'a pas GL_ARB_fragment_shader).
  *
- * alpharep arbfp arbvp bigstrip blendc caps clip comb combprobe cube cubeprobe depth
+ * alpharep arbfp arbvp bigstrip blendc caps clip comb combine3 combprobe cube cubeprobe depth
  * depthrt dlist drawpack entry fill fogz forkdraw fusion game gl15
  * gouraud lightprobe lit logicop matbegin matprobe mix mixte mtxprobe
  * occl offset polymode prims probe2 ptprobe qprobe r4 rawprim readpack
@@ -1565,6 +1565,68 @@ int main(int argc, char **argv)
             }
             glClear(GL_COLOR_BUFFER_BIT);
         }
+    } else if (!strcmp(scene, "combine3")) {
+        /* v22 : API publique GLEngine → plugin → hôte, RGB ET alpha.
+           ATI : Arg0 * Arg2 + Arg1, -0.5, ou -Arg1 ; échelle puis bornage. */
+        const unsigned char texel[4] = {204, 204, 204, 204};
+        const GLfloat constant[4] = {0.75f, 0.75f, 0.75f, 0.75f};
+        GLuint tex;
+        int unit, op, alpha, scale, i;
+        const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+        check_cond("ATI_texture_env_combine3 annoncée", ext && strstr(ext, "GL_ATI_texture_env_combine3"));
+        glGenTextures(1, &tex);
+        for (unit = 0; unit <= 7; unit += 7) {
+            glActiveTextureARB(GL_TEXTURE0_ARB + unit);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, texel);
+            glEnable(GL_TEXTURE_2D);
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+            glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, constant);
+            glColor4f(0.2f, 0.2f, 0.2f, 0.2f);
+            for (alpha = 0; alpha < 2; alpha++) {
+                for (i = 0; i < 3; i++) {
+                    const GLint sources[3] = {GL_TEXTURE, GL_PRIMARY_COLOR, GL_CONSTANT};
+                    glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB + i, sources[i]);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_ALPHA + i, sources[i]);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_RGB + i, GL_SRC_COLOR);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_ALPHA + i, GL_SRC_ALPHA);
+                }
+                glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_REPLACE);
+                if (alpha) {
+                    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_ONE);
+                    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ZERO);
+                } else glDisable(GL_BLEND);
+                for (op = 0; op < 3; op++) for (scale = 1; scale <= 4; scale *= 2) {
+                    float want = (op == 0 ? 0.8f : op == 1 ? 0.3f : 0.4f) * scale;
+                    unsigned long b = (unsigned long)(255 * (want > 1 ? 1 : want) + 0.5f);
+                    char label[96];
+                    glTexEnvi(GL_TEXTURE_ENV, alpha ? GL_COMBINE_ALPHA : GL_COMBINE_RGB, 0x8744 + op);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_RGB_SCALE, alpha ? 1 : scale);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_ALPHA_SCALE, alpha ? scale : 1);
+                    glRectf(0, 0, W, H); glFinish();
+                    sprintf(label, "combine3 unité %d %s op%d échelle%d", unit, alpha ? "alpha" : "RGB", op, scale);
+                    check_near(label, W / 2, H / 2, b * 0x010101UL, 3);
+                }
+            }
+            glDisable(GL_BLEND);
+            glTexEnvi(GL_TEXTURE_ENV, GL_RGB_SCALE, 1);
+            glTexEnvi(GL_TEXTURE_ENV, GL_ALPHA_SCALE, 1);
+            glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
+            glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_REPLACE);
+            for (i = 0; i < 4; i++) {
+                glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, (i & 1) ? GL_ONE : GL_ZERO);
+                glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_RGB, (i & 2) ? GL_ONE_MINUS_SRC_COLOR : GL_SRC_COLOR);
+                glRectf(0, 0, W, H); glFinish();
+                check("sources ZERO/ONE et inverse", W / 2, H / 2, ((i & 1) != ((i >> 1) & 1)) ? 0xFFFFFF : 0);
+            }
+            check_cond("combine3 sans erreur GL", glGetError() == GL_NO_ERROR);
+            glDisable(GL_TEXTURE_2D);
+        }
+        glActiveTextureARB(GL_TEXTURE0_ARB);
+        glDeleteTextures(1, &tex);
     } else if (!strcmp(scene, "combprobe")) {
         /* Sonde GL_COMBINE et unités 2–3 : un réglage par glClear (le traceur
            vide l'état GL à chaque effacement avec POMPPC_GLTRACE_STATE=1). */

@@ -59,7 +59,7 @@ static void write_present(const uint8_t *vram, const uint32_t *a, const char *pr
     uint32_t off = a[1], stride = a[2], w = a[5], h = a[6], fmt = a[7], x, y;
     char path[512];
     FILE *f;
-    if (fmt != QGPU_PF_XRGB8888 || !w || !h)
+    if ((fmt != QGPU_PF_XRGB8888 && fmt != QGPU_PF_RGB1555) || !w || !h)
         return;
     snprintf(path, sizeof(path), "%s-%04u-f%u.ppm", prefix, n, frame);
     f = fopen(path, "wb");
@@ -69,7 +69,16 @@ static void write_present(const uint8_t *vram, const uint32_t *a, const char *pr
     for (y = 0; y < h; y++) {
         const uint8_t *row = vram + off + (size_t)y * stride;
         for (x = 0; x < w; x++) {
-            uint32_t p = qgpu_ld32(row + x * 4);
+            uint32_t p;
+            if (fmt == QGPU_PF_RGB1555) {
+                uint16_t s = qgpu_ld16(row + x * 2);
+                unsigned r = (s >> 10) & 31, g = (s >> 5) & 31, b = s & 31;
+                /* Scanout VGA de la VM quotidienne : composantes sur 5 bits
+                   décalées, sans réplication des bits faibles. */
+                p = (r << 19) | (g << 11) | (b << 3);
+            } else {
+                p = qgpu_ld32(row + x * 4);
+            }
             uint8_t rgb[3] = { (p >> 16) & 255, (p >> 8) & 255, p & 255 };
             fwrite(rgb, 1, 3, f);
         }
@@ -611,20 +620,28 @@ int main(int argc, char **argv)
                         }
                 }
                 if (op == QGPU_OP_DRAW_RAW || op == QGPU_OP_DRAW_RAW_BUF) {
-                    static const char *fn[8] = { "REPLACE", "MODULATE", "ADD", "ADD_SIGNED", "INTERPOLATE", "SUBTRACT", "DOT3_RGB", "DOT3_RGBA" };
+                    static const char *fn[16] = { "REPLACE", "MODULATE", "ADD", "ADD_SIGNED", "INTERPOLATE", "SUBTRACT", "DOT3_RGB", "DOT3_RGBA",
+                        "MODULATE_ADD_ATI", "MODULATE_SIGNED_ADD_ATI", "MODULATE_SUBTRACT_ATI", "?", "?", "?", "?", "?" };
                     static const char *sn[8] = { "TEX", "CONST", "PRIM", "PREV", "TEX0", "TEX1", "TEX2", "TEX3" };
+                    static const char *ln[4] = { "", "ZERO", "ONE", "?" };
                     static const char *on[4] = { "c", "1-c", "a", "1-a" };
                     uint32_t u;
                     for (u = 0; u < QGPU_MAX_UNITS; u++) {
                         uint32_t cb = sk[QGPU_SK_COMBINE(u)], cs = sk[QGPU_SK_COMBINE_SRC(u)], i;
                         if (u >= 4 && !sk[QGPU_SK_UNIT(u) + QGPU_SK_U_ENABLE])
                             continue;
-                        fprintf(stderr, "   u%u: %s(", u, fn[cb & 7]);
-                        for (i = 0; i < 3; i++) { uint32_t v = (cs >> (5 * i)) & 0x1f; fprintf(stderr, "%s%s.%s", i ? "," : "", sn[v & 7], on[(v >> 3) & 3]); }
-                        fprintf(stderr, ")x%u  A:%s(", 1u << ((cb >> 8) & 3), fn[(cb >> 4) & 7]);
-                        for (i = 0; i < 3; i++) { uint32_t v = (cs >> (15 + 4 * i)) & 0xf; fprintf(stderr, "%s%s.%s", i ? "," : "", sn[v & 7], on[(v >> 3) & 1 ? 3 : 2]); }
+                        fprintf(stderr, "   u%u: %s(", u, fn[cb & 15]);
+                        for (i = 0; i < 3; i++) {
+                            uint32_t v = (cs >> (5 * i)) & 0x1f, lit = (cb >> (12 + 2 * i)) & 3;
+                            fprintf(stderr, "%s%s.%s", i ? "," : "", lit ? ln[lit] : sn[v & 7], on[(v >> 3) & 3]);
+                        }
+                        fprintf(stderr, ")x%u  A:%s(", 1u << ((cb >> 8) & 3), fn[(cb >> 4) & 15]);
+                        for (i = 0; i < 3; i++) {
+                            uint32_t v = (cs >> (15 + 4 * i)) & 0xf, lit = (cb >> (18 + 2 * i)) & 3;
+                            fprintf(stderr, "%s%s.%s", i ? "," : "", lit ? ln[lit] : sn[v & 7], on[(v >> 3) & 1 ? 3 : 2]);
+                        }
                         fprintf(stderr, ")x%u  const %08x\n", 1u << ((cb >> 10) & 3),
-                                sk[u == 0 ? QGPU_SK_TEX_ENV_COLOR : u == 1 ? QGPU_SK_TEX1_ENV_COLOR : u == 2 ? QGPU_SK_TEX2_ENV_COLOR : QGPU_SK_TEX3_ENV_COLOR]);
+                                sk[QGPU_SK_UNIT(u) + QGPU_SK_U_ENV_COLOR]);
                     }
                 }
                 if ((op == QGPU_OP_DRAW_TRIANGLES_TEXN || op == QGPU_OP_DRAW_TRIANGLES_SEC) && len >= 4) {
@@ -782,25 +799,28 @@ int main(int argc, char **argv)
                 uint32_t py = qgpu_ld32(shmem + h.base + (k + 5) * 4);
                 uint32_t pw = qgpu_ld32(shmem + h.base + (k + 6) * 4);
                 uint32_t ph = qgpu_ld32(shmem + h.base + (k + 7) * 4);
+                uint32_t pfmt = qgpu_ld32(shmem + h.base + (k + 8) * 4);
+                uint32_t bpp = pfmt == QGPU_PF_RGB1555 ? 2 : 4;
                 uint32_t roff, pres[9];
                 if (!pw || !ph || pw > 4096 || ph > 4096) { pw = 800; ph = 600; px = py = 0; }
                 roff = SHMEM - 16384 - pw * ph * 4;
-                rb[0] = QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER);
-                rb[1] = surf; rb[2] = roff; rb[3] = pw * 4; rb[4] = px; rb[5] = py; rb[6] = pw; rb[7] = ph;
-                for (j = 0; j < 8; j++) qgpu_st32(shmem + SHMEM - 8192 + j * 4, rb[j]);
-                if (timed_execute(&c, SHMEM - 8192, 32) == QGPU_ST_OK) {
+                rb[0] = QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER_PF);
+                rb[1] = surf; rb[2] = roff; rb[3] = pw * bpp; rb[4] = px; rb[5] = py; rb[6] = pw; rb[7] = ph;
+                rb[8] = pfmt;
+                for (j = 0; j < 9; j++) qgpu_st32(shmem + SHMEM - 8192 + j * 4, rb[j]);
+                if (timed_execute(&c, SHMEM - 8192, 36) == QGPU_ST_OK) {
                     /* QGPU_REPLAY_PRESENTS=<fichier> : une ligne par image écrite,
-                       « n image décalage_vram pas l h », pour situer l'image
+                       « n image décalage_vram pas l h format », pour situer l'image
                        sur l'écran de la VM (tools/matrice/) */
                     static FILE *pl;
                     if (!pl && getenv("QGPU_REPLAY_PRESENTS"))
                         pl = fopen(getenv("QGPU_REPLAY_PRESENTS"), "w");
                     if (pl) {
-                        fprintf(pl, "%u %u %u %u %u %u\n", npresent, h.frame, pdst, pstr, pw, ph);
+                        fprintf(pl, "%u %u %u %u %u %u %u\n", npresent, h.frame, pdst, pstr, pw, ph, pfmt);
                         fflush(pl);
                     }
-                    pres[0] = surf; pres[1] = roff; pres[2] = pw * 4; pres[3] = 0; pres[4] = 0;
-                    pres[5] = pw; pres[6] = ph; pres[7] = QGPU_PF_XRGB8888;
+                    pres[0] = surf; pres[1] = roff; pres[2] = pw * bpp; pres[3] = 0; pres[4] = 0;
+                    pres[5] = pw; pres[6] = ph; pres[7] = pfmt;
                     write_present(shmem, pres, prefix, npresent++, h.frame);
                 } else {
                     fprintf(stderr, "relecture impossible (image %u, surface %u)\n", h.frame, surf);

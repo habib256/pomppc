@@ -608,8 +608,14 @@ static bool valid_env_mode(uint32_t m)
 /* QGPU_SK_COMBINE* : champs connus, échelles 1, 2 ou 4. */
 static bool valid_combine(uint32_t v)
 {
-    return (v & ~0xFFFu) == 0 && (v & 0xF) <= QGPU_CB_DOT3_RGBA &&
-           ((v >> 4) & 0xF) <= QGPU_CB_SUBTRACT &&
+    unsigned i, a = (v >> 4) & 0xF;
+    for (i = 12; i < 24; i += 2) {
+        if (((v >> i) & 3) == 3) {
+            return false;
+        }
+    }
+    return (v & ~0xFFFFFFu) == 0 && (v & 0xF) <= QGPU_CB_MODULATE_SUBTRACT &&
+           (a <= QGPU_CB_SUBTRACT || (a >= QGPU_CB_MODULATE_ADD && a <= QGPU_CB_MODULATE_SUBTRACT)) &&
            ((v >> 8) & 3) <= 2 && ((v >> 10) & 3) <= 2;
 }
 
@@ -2920,6 +2926,17 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         }
         if (a[0] == 0 || a[0] >= QGPU_SK_COUNT || !valid_state(a[0], a[1])) {
             return QGPU_ST_BAD_ARG;
+        }
+        /* v22 : refuser les nouveaux combineurs sans modifier l'état. */
+        if (!(c->caps & QGPU_CAP_COMBINE3)) {
+            unsigned u;
+            for (u = 0; u < QGPU_MAX_UNITS; u++) {
+                if (a[0] == QGPU_SK_COMBINE(u) &&
+                    ((a[1] & 0xF) >= QGPU_CB_MODULATE_ADD ||
+                     ((a[1] >> 4) & 0xF) >= QGPU_CB_MODULATE_ADD || (a[1] >> 12))) {
+                    return QGPU_ST_BACKEND;
+                }
+            }
         }
         /* v10 : une atténuation de point que le backend ne sait pas faire est
            refusée au moment où elle est posée (cf. QGPU_CAP_GL14), sans rien

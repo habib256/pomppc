@@ -167,7 +167,10 @@ class Hote:
         lock = os.path.join(MAIN, ".run", "tiger.lock")
         if os.path.exists(lock):
             os.remove(lock)
-        subprocess.Popen(["./run_tiger.sh"], cwd=MAIN, start_new_session=True,
+        # Le banc conserve la fenêtre QEMU native ; le lanceur quotidien
+        # utilise maintenant ImGuiDock par défaut.
+        env = dict(os.environ, POMPPC_FRONTEND="native")
+        subprocess.Popen(["./run_tiger.sh"], cwd=MAIN, env=env, start_new_session=True,
                          stdout=open(os.path.join(MAIN, ".run", "run_tiger-matrice.log"), "w"),
                          stderr=subprocess.STDOUT)
 

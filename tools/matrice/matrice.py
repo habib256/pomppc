@@ -109,6 +109,17 @@ def lit_frames(txt):
     return rows
 
 
+def capture_frame(txt):
+    """Numéro présenté confirmé par une ligne complète de frames.csv."""
+    marker, sep, frames = txt.partition("@@FRAMES\n")
+    if not sep or not marker.strip().isdigit():
+        return None
+    n = int(marker.strip())
+    # Une écriture interrompue ne constitue pas une preuve de progression.
+    frames = frames[:frames.rfind("\n") + 1]
+    return n if n in lit_frames(frames) else None
+
+
 def entete_vidage(chemin):
     with open(chemin, "rb") as f:
         b = f.read(8)
@@ -173,9 +184,10 @@ def rejoue(dump, prefixe, presents):
     if os.path.exists(presents):
         for l in open(presents):
             p = l.split()
-            if len(p) == 6:
-                n, img, off, pas, w, hh = map(int, p)
-                pres.append({"n": n, "image": img, "x": (off % pas) // 4 if pas else 0,
+            if len(p) in (6, 7):
+                n, img, off, pas, w, hh = map(int, p[:6])
+                bpp = 2 if len(p) == 7 and int(p[6]) == 1 else 4  # QGPU_PF_RGB1555
+                pres.append({"n": n, "image": img, "x": (off % pas) // bpp if pas else 0,
                              "y": off // pas if pas else 0, "w": w, "h": hh,
                              "ppm": "%s-%04d-f%d.ppm" % (prefixe, n, img)})
     return nerr, pres, err
@@ -208,8 +220,21 @@ def analyse_image(cel, cle):
         res["image_motif"].append("rejeu sans présentation")
         return res
     meilleur = None
+    frame_path = os.path.join(cel, "capture-frame.txt")
+    expected = None
+    if os.path.exists(frame_path):
+        try:
+            with open(frame_path) as f:
+                expected = int(f.read().strip())
+        except ValueError:
+            res["image_motif"].append("numéro de capture invalide")
+            return res
+        if not any(p["image"] == expected for p in pres):
+            res["image_motif"].append("image capturée %d absente du rejeu" % expected)
     if os.path.exists(cap):
         for p in pres:
+            if expected is not None and p["image"] != expected:
+                continue
             o = ppmcmp(cap, str(p["x"]), str(p["y"]), p["ppm"]).split()
             if len(o) == 4:
                 moy, mx, pct = float(o[1]), int(o[2]), float(o[3])
@@ -339,7 +364,9 @@ class Cellule:
             # l'identique (Nexuiz), sinon le fichier posé après la fenêtre
             trig = "@%d" % self.j.dump_image if self.j.dump_image else TRIG
             env.update({"POMPPC_GL_DUMP": self.gd + "/dump", "POMPPC_GL_DUMP_TRIGGER": trig,
-                        "POMPPC_GL_DUMP_FRAMES": str(self.j.dump_images)})
+                        "POMPPC_GL_DUMP_FRAMES": str(self.j.dump_images),
+                        "POMPPC_GL_CAPTURE": self.gd + "/capture-ready",
+                        "POMPPC_GL_CAPTURE_DELAY": str(self.j.capture_delay)})
         env.update(self.j.env)
         env.update(self.env_extra)
         l = ["# écrit par tools/matrice/matrice.py (%s)" % self.cle, "D='%s'" % self.gd]
@@ -424,20 +451,29 @@ class Cellule:
             # vidage déclenché puis capture figée pendant le vidage
             if not self.vidage:
                 raise Fini()
-            # la capture doit tomber sur une image VIDÉE et PRÉSENTÉE. frames.csv
-            # n'est vidé par le plugin que toutes les 5 s : c'est le vidage qui
-            # sert d'horloge. Chaque fichier porte dans son en-tête (mot 1,
-            # grand-boutiste = ordre de l'invité, lu par od) l'image en cours ;
-            # on attend que le dernier fichier soit à dump_attente images du
-            # premier, puis VM arrêtée tout de suite. Seulement les .bin : depuis
-            # le 27/09 le vidage porte aussi surfaces.txt, qui trié en dernier
-            # rompait l'attente tout de suite (capture d'avant le vidage).
-            h.ssh("touch %s; V=%s/dump; i=0; while [ $i -lt 3000 ]; do "
-                  "set -- $(ls $V 2>/dev/null | grep '[.]bin$' | sed -n '1p;$p'); "
-                  "if [ $# -ge 2 ]; then a=$(od -An -tu4 -j4 -N4 $V/$1); b=$(od -An -tu4 -j4 -N4 $V/$2); "
-                  "[ $((b - a)) -ge %d ] && break; fi; sleep 0.2; i=$((i+1)); done"
-                  % (TRIG, self.gd, j.dump_attente), delai=700)
-            h.capture_figee(os.path.join(self.dir, "capture.ppm"))
+            # frames.csv donne la progression ; capture-ready est publié après
+            # la barrière du SURF_PRESENT. Le plugin suspend ensuite ses dessins
+            # jusqu'à notre acquittement (30 s max), donc aucune course avec SSH.
+            ready = self.gd + "/capture-ready"
+            try:
+                code, out = h.ssh(
+                    "touch %s; i=0; while [ ! -s %s ] && [ $i -lt 1500 ]; do "
+                    "sleep 0.2; i=$((i+1)); done; cat %s 2>/dev/null; "
+                    "echo @@FRAMES; tail -2 %s/frames.csv" % (TRIG, ready, ready, self.gd),
+                    delai=330)
+                frame = capture_frame(out) if code == 0 else None
+                if frame is None:
+                    raise Echec("capture non synchronisée : marqueur ou frames.csv absent")
+                if h.ssh("test ! -e %s.expired" % ready)[0]:
+                    raise Echec("capture : délai du plugin expiré")
+                if not h.capture_figee(os.path.join(self.dir, "capture.ppm")):
+                    raise Echec("capture : screendump absent")
+                if h.ssh("test ! -e %s.expired" % ready)[0]:
+                    raise Echec("capture : délai du plugin expiré pendant la capture")
+                with open(os.path.join(self.dir, "capture-frame.txt"), "w") as f:
+                    f.write("%d\n" % frame)
+            finally:
+                h.ssh("touch %s.resume" % ready)
             en_png(os.path.join(self.dir, "capture.ppm"))
             # fin du vidage : le nombre de fichiers ne bouge plus
             avant, stable = -1, 0

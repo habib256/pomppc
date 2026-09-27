@@ -50,7 +50,7 @@ static bool soft_init(QgpuCore *c)
     }
     /* v8 : le backend de référence compte toujours les échantillons — c'est
        lui la vérité terrain des tests de requête d'occlusion. */
-    c->caps |= QGPU_CAP_OCCLUSION;
+    c->caps |= QGPU_CAP_OCCLUSION | QGPU_CAP_COMBINE3;
     /* v10 : il tient aussi toutes les cibles et tous les paramètres de texture. */
     c->caps |= QGPU_CAP_GL14;
     c->be_priv = ss;
@@ -736,6 +736,9 @@ static float combine_fn(uint32_t fn, float a0, float a1, float a2)
     case QGPU_CB_ADD:         return a0 + a1;
     case QGPU_CB_ADD_SIGNED:  return a0 + a1 - 0.5f;
     case QGPU_CB_INTERPOLATE: return a0 * a2 + a1 * (1.0f - a2);
+    case QGPU_CB_MODULATE_ADD: return a0 * a2 + a1;
+    case QGPU_CB_MODULATE_SIGNED_ADD: return a0 * a2 + a1 - 0.5f;
+    case QGPU_CB_MODULATE_SUBTRACT: return a0 * a2 - a1;
     default:                  return a0 - a1;                   /* SUBTRACT */
     }
 }
@@ -778,8 +781,10 @@ static void tex_combine(const QgpuState *st, int unit, uint32_t fmt, Rgba tc,
         const Rgba *sr, *sa;
         /* sources croisées : unités 0..3 seulement (champ de 3 bits) */
         const Rgba *pick[8] = { &t, &k, prim, cur, &x[0], &x[1], &x[2], &x[3] };
-        sr = pick[f & 7];
-        sa = pick[g & 7];
+        static const Rgba literal[2] = { {0, 0, 0, 0}, {1, 1, 1, 1} };
+        unsigned lr = (cb >> (12 + 2 * i)) & 3, la = (cb >> (18 + 2 * i)) & 3;
+        sr = lr ? &literal[lr - 1] : pick[f & 7];
+        sa = la ? &literal[la - 1] : pick[g & 7];
         switch (f >> 3) {
         case QGPU_CO_COLOR:           arg[i] = *sr; break;
         case QGPU_CO_ONE_MINUS_COLOR:
