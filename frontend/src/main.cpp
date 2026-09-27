@@ -9,7 +9,7 @@
 // built once with DockBuilder, then saved in .run/imgui.ini). The guest image
 // is always drawn at the largest rectangle keeping the scanout's aspect ratio
 // (black bands, never stretched), unless a fixed zoom is picked in Vue.
-// Vue ▸ Plein écran (Ctrl+Cmd+F, F11; Échap or the same shortcut to leave)
+// Vue ▸ Plein écran (Ctrl+Cmd+F or F11 to enter/leave; Escape goes to the guest)
 // puts the host window on its monitor at native size with only the guest
 // shown. Pointer input is mapped on the rectangle actually drawn.
 #include <GLFW/glfw3.h>
@@ -32,6 +32,7 @@
 
 #include "QemuBridge.h"
 #include "StartupChime.h"
+#include "PointerPolicy.h"
 
 #ifndef IMGUI_HAS_DOCK
 #error "Dear ImGui docking branch required — run ./setup.sh (it fetches the docking tag)"
@@ -419,6 +420,8 @@ int main(int argc, char** argv) {
     bool preferTablet = true;
     bool pointerPrefChanged = false;
     double nextPointerRetry = 0;
+    bool pointerCaptured = false;
+    bool suppressPointerDelta = false;
 
     auto relaunch = [&](const std::string& launcher) {
         chimePlayer.stop();
@@ -470,7 +473,9 @@ int main(int argc, char** argv) {
         drawSize = sz;
         // IsItemHovered = inside the drawn (and visible, clipped) rectangle,
         // with no ImGui window or menu on top: the bands never send events.
-        bool hovered = ImGui::IsItemHovered();
+        const bool pointerReady = bridge->running() && !paused &&
+            (!fullscreen || !bridge->mouseIsAbsolute());
+        bool hovered = pointerReady && (pointerCaptured || ImGui::IsItemHovered());
         float sx = (float)guestW / sz.x, sy = (float)guestH / sz.y;
         if (hovered) {
             if (bridge->mouseIsAbsolute()) {
@@ -482,7 +487,7 @@ int main(int argc, char** argv) {
                     bridge->mouseAbs(gx, gy);
                     lastGx = gx; lastGy = gy;
                 }
-            } else if (io.MouseDelta.x || io.MouseDelta.y) {
+            } else if (!suppressPointerDelta && (io.MouseDelta.x || io.MouseDelta.y)) {
                 relAccX += io.MouseDelta.x * sx;
                 relAccY += io.MouseDelta.y * sy;
                 int dx = (int)relAccX, dy = (int)relAccY;
@@ -590,6 +595,22 @@ int main(int argc, char** argv) {
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+        const bool capture = wantsPointerCapture(fullscreen,
+            glfwGetWindowAttrib(window, GLFW_FOCUSED), bridge->running(), paused,
+            bridge->mouseIsAbsolute());
+        suppressPointerDelta = capture != pointerCaptured;
+        if (suppressPointerDelta) {
+            pointerCaptured = capture;
+            glfwSetInputMode(window, GLFW_CURSOR, capture ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+#if GLFW_VERSION_MAJOR > 3 || (GLFW_VERSION_MAJOR == 3 && GLFW_VERSION_MINOR >= 3)
+            if (glfwRawMouseMotionSupported())
+                glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, capture ? GLFW_TRUE : GLFW_FALSE);
+#endif
+            relAccX = relAccY = 0;
+            lastGx = lastGy = -1;
+            for (int button = 0; button < 3; ++button) bridge->mouseButton(button, false);
+            journal("souris hôte : %s", capture ? "capturée, relative sans bord" : "libérée");
+        }
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         probeTick();
@@ -597,8 +618,8 @@ int main(int argc, char** argv) {
         ImGuiIO& io = ImGui::GetIO();
 
         // ── Raccourcis plein écran (avalés : jamais transmis à l'invité) ──
-        // Ctrl+Cmd+F comme macOS, F11 ; Échap ne sert qu'à sortir du plein
-        // écran (en fenêtre, Échap va à l'invité comme avant).
+        // Ctrl+Cmd+F comme macOS, F11. Échap reste une touche de l'invité,
+        // notamment pour les menus des jeux, même en plein écran capturé.
         bool swallow[kKeyCount] = {};
         auto swallowKey = [&](ImGuiKey k) {
             for (int i = 0; i < kKeyCount; ++i) if (kKeys[i].k == k) swallow[i] = true;
@@ -609,11 +630,6 @@ int main(int argc, char** argv) {
             swallowKey(ImGuiKey_F11);
             swallowKey(ImGuiKey_F);
         }
-        if (fullscreen && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-            toggleFullscreen = true;
-            swallowKey(ImGuiKey_Escape);
-        }
-
         int w = 0, h = 0, dy0 = 0, dy1 = 0;
         bool resized = false;
         if (bridge->latchFrame(fb, w, h, dy0, dy1, resized)) {
@@ -650,19 +666,20 @@ int main(int argc, char** argv) {
         bridge->checkAlive();
         // Souris : suivre le mode de QEMU et, si demandé, rendre la tablette
         // courante chaque fois que la souris HID relative la reprend.
+        const bool wantAbsolute = wantsAbsolutePointer(fullscreen, preferTablet);
         bool retryPointer = bridge->running() &&
-            bridge->mouseIsAbsolute() != preferTablet && glfwGetTime() >= nextPointerRetry;
+            bridge->mouseIsAbsolute() != wantAbsolute && glfwGetTime() >= nextPointerRetry;
         if ((int)bridge->mouseIsAbsolute() != lastAbs || pointerPrefChanged || retryPointer) {
             if ((int)bridge->mouseIsAbsolute() != lastAbs || pointerPrefChanged)
                 journal("souris invité : %s", bridge->mouseIsAbsolute() ? "absolue (SetAbsPosition)" : "relative");
             lastAbs = bridge->mouseIsAbsolute();
             lastGx = lastGy = -1;
-            if (bridge->running() && (lastAbs != (int)preferTablet || pointerPrefChanged)) {
-                int m = bridge->selectMouse(preferTablet);
+            if (bridge->running() && (lastAbs != (int)wantAbsolute || pointerPrefChanged)) {
+                int m = bridge->selectMouse(wantAbsolute);
                 nextPointerRetry = glfwGetTime() + 1.0;
                 if (m > 0)
                     journal("souris QEMU n°%d rendue courante (%s)", m,
-                            preferTablet ? "tablette absolue" : "relative");
+                            wantAbsolute ? "tablette absolue" : "relative");
             }
             pointerPrefChanged = false;
         }
@@ -702,7 +719,7 @@ int main(int argc, char** argv) {
                 }
                 ImGui::Separator();
                 ImGui::MenuItem("Clavier → invité", nullptr, &grabbed);
-                if (ImGui::MenuItem("Souris absolue (tablette)", nullptr, &preferTablet))
+                if (ImGui::MenuItem("Souris absolue en fenêtre", nullptr, &preferTablet))
                     pointerPrefChanged = true;
                 ImGui::Separator();
                 if (ImGui::MenuItem("Quitter")) glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -939,6 +956,8 @@ int main(int argc, char** argv) {
             }
             lastGx = lastGy = -1;
             relAccX = relAccY = 0;
+            pointerPrefChanged = true;
+            nextPointerRetry = 0;
         }
     }
 

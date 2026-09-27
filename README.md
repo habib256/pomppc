@@ -111,6 +111,10 @@ d'un autre `qgpu_proto.h` (`docs/protocole-v19-transport.md`).
 
 ### Lancer
 
+Le son Tiger sur macOS utilise un [profil audio stable](docs/audio-stabilite.md)
+(réserve doublée, timer 5 ms). `POMPPC_AUDIO_PROFILE=default` rétablit les anciens
+réglages. Dans ImGuiDock : souris absolue en fenêtre, relative capturée en plein écran.
+
 ```bash
 ./run_tiger.sh              # Tiger : 2 cœurs MTTCG + son + flottant rapide + GPU qgpu + réseau
 SNAPSHOT=1 ./run_tiger.sh   # disque jetable (debug)

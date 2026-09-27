@@ -118,14 +118,15 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   **Vue ▸ 50/100/150/200 %** still fixes the size in window mode (scrollbars if larger).
 - **Vue ▸ Plein écran**, **Ctrl+Cmd+F** or **F11**: the host window goes to its monitor at
   native size (`glfwSetWindowMonitor`), menus and panels hidden, guest only, 4:3 guest on a
-  16:9 screen = 1440×1080 between two 240-px bands on 1920×1080. **Same shortcut or Échap**
+  16:9 screen = 1440×1080 between two 240-px bands on 1920×1080. **Same shortcut (F11 or Ctrl+Cmd+F)**
   goes back to the window at its previous size and position. These keys are not sent to the
-  guest (Échap only while in full screen). On macOS, GLFW's own *Window ▸ Enter Full Screen*
+  guest. **Escape is always forwarded to the guest**, including in full screen,
+  so games can open their menus without releasing capture. On macOS, GLFW's own *Window ▸ Enter Full Screen*
   (which owns Ctrl+Cmd+F and opens a Spaces full screen) is unbound, and the window's native
   full-screen behaviour is disabled — the green button zooms instead.
 - The pointer is mapped on the **rectangle actually drawn** (`SetAbsPosition` in guest pixels,
   relative motion scaled by the same factor, remainders carried); the bands send nothing.
-- **Machine ▸ Souris absolue (tablette)** (on by default): mac99 has both a tablet
+- **Machine ▸ Souris absolue en fenêtre** (on by default): mac99 has both a tablet
   (virtio-tablet from `run_os9.sh`, usb-tablet with `TABLET=1`) and a USB HID mouse; the HID
   mouse becomes QEMU's *current* pointer as soon as the guest polls it, which made OS 9's
   pointer relative (clicks landed wherever the accelerated guest cursor was). The frontend
@@ -138,6 +139,12 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   measured with `CGSGetCurrentCursorLocation` in the guest; error ≤1 guest pixel
   in the docked view and zero at both tested full-screen points. Logs:
   `bench/tiger-chime-pointer.log`, `bench/tiger-pointer-positions.log`.
+  **Updated policy:** host full screen always selects the relative USB mouse,
+  captures/hides the host cursor and uses unbounded motion (raw motion when
+  supported), suitable for Doom 3. Returning to windowed mode restores the
+  tablet preference. F11 or Ctrl+Cmd+F exits host full screen and releases capture;
+  loss of focus also releases capture. Escape stays in the game. The earlier absolute full-screen measurements above are
+  historical; absolute input is no longer used in full screen.
 - **Bilan** shows the guest size, the drawn rectangle and scale, the window size and the
   pointer mode; **Journal** logs launches, CDs, scanout changes, switches and left clicks
   (host point → guest pixel).
@@ -147,7 +154,7 @@ mouse and keyboard, no macOS Accessibility permission needed) and takes captures
 
 ```sh
 POMPPC_FE_SCRIPT="wait 75; fs; wait 3; shot /tmp/fs.png; click 1568 262; click 1568 262; \
-esc; wait 2; shot /tmp/win.png; quit" ./build/pomppc ../run_os9.sh
+f11; wait 2; shot /tmp/win.png; quit" ./build/pomppc ../run_os9.sh
 ```
 
 Steps: `wait <s>`, `move|click <x> <y>` (window points),

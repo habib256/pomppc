@@ -209,50 +209,41 @@ static void screamerspk_callback(void *opaque, int free_b)
 {
     ScreamerState *s = opaque;
     DBDMA_io *io = &s->io;
-    int samples, generated;
+    while (free_b > 0 && s->wpos > s->rpos) {
+        unsigned samples = MIN((unsigned)free_b >> s->shift,
+                               s->wpos - s->rpos);
+        size_t requested = (size_t)samples << s->shift;
+        size_t accepted;
+        if (!requested) {
+            return;
+        }
+        accepted = AUD_write(s->voice, s->mixbuf + (s->rpos << s->shift),
+                             requested);
+        /* AUD_write may accept less than requested (including zero). Only
+         * retire PCM actually accepted, otherwise samples vanish and the
+         * guest's frame counter runs ahead. Writes are whole stereo frames. */
+        samples = accepted >> s->shift;
+        s->regs[FRAME_CNT_REG] += samples;
+        s->rpos += samples;
+        free_b -= accepted;
+        if (s->rpos < s->wpos) {
+            return; /* includes backpressure: never spin on a zero write */
+        }
+        s->wpos = 0;
+        s->rpos = 0;
 
-    if (free_b == 0) {
-        return;
-    }
-
-    if (s->wpos - s->rpos == 0) {
-        return;
-    }
-
-    samples = MIN(s->samples, free_b >> s->shift);
-    generated = MIN(samples, s->wpos - s->rpos);
-
-    AUD_write(s->voice, s->mixbuf + (uintptr_t)(s->rpos << s->shift),
-              generated << s->shift);
-
-    SCREAMER_DPRINTF("  - generated %d, wpos %d, rpos %d\n", generated, s->wpos, s->rpos);
-    
-    s->regs[FRAME_CNT_REG] += generated;
-    s->rpos += generated;
-    if (s->rpos < s->wpos) {
-        return;
-    }
-
-    s->wpos = 0;
-    s->rpos = 0;
-
-    if (io->len) {
-        DBDMA_channel *ch = io->channel;
-        uint32_t status = ch->regs[DBDMA_STATUS];
-
-        SCREAMER_DPRINTF("Continue deferred transfer\n");
-
-        /* Disable channel so we only complete the current transfer */
-        ch->regs[DBDMA_STATUS] &= ~RUN;
-
-        /* Perform deferred transfer */
-        pmac_screamer_tx_transfer(s);
-
-        /* Re-enable channel */
-        ch->regs[DBDMA_STATUS] = status;
-
-        /* Kick channel to continue */
-        DBDMA_kick(container_of(ch, DBDMAState, channels[ch->channel]));
+        if (io->len) {
+            DBDMA_channel *ch = io->channel;
+            uint32_t status = ch->regs[DBDMA_STATUS];
+            /* Complete only the deferred transfer, then restart the channel. */
+            ch->regs[DBDMA_STATUS] &= ~RUN;
+            pmac_screamer_tx_transfer(s);
+            ch->regs[DBDMA_STATUS] = status;
+            DBDMA_kick(container_of(ch, DBDMAState, channels[ch->channel]));
+        }
+        /* Feed the newly loaded fragment in this callback when space remains,
+         * instead of waiting for another audio timer tick. Each iteration
+         * consumes at least one frame, bounded by the original free_b. */
     }
 }
 
