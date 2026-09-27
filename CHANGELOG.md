@@ -8,6 +8,23 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Nexuiz en GLSL sur le GPU de l'hôte : 107 → 40 ms/image** (27/09, v21 en VM,
+  plugin `20260927-glsl`). Scènes `glsl`, `glslvs` (= rendu d'Apple), `glslfs`, `glsldp`
+  justes ; deux défauts corrigés (`gl_MultiTexCoord<u>` mal reconnu, lumières éteintes et
+  matrices de texture sans texture non envoyées). **Le préprocesseur GLSL de GLEngine
+  10.4.6 est faux** (#if imbriqués dans un groupe sauté : toutes les permutations de
+  DarkPlaces refusées par GLEngine lui-même) : le plugin interpose `glShaderSourceARB`
+  (table de dispatch, +0x94c) et fait les conditions (`pomppc_glslpp.h`,
+  `tests/glsl_pp_test.c`, `docs/re/glsl-glengine.md` §5 bis). Nexuiz `+r_glsl 1` : 23
+  programmes, tous liés par l'hôte, 0 repli hors rafraîchissements, rejeu = VM 0,00 %,
+  VERDICTCHECK/STATECHECK/TEXMEMO 0 écart ; cellules `nxg-fen` / `nxg-pe` automatisées et
+  vertes, 40,5 / 41,2 ms/image contre 107,8 / 108,1 en ARB (profil `nx` forcé à
+  `+r_glsl 0` : DarkPlaces prend GLSL par défaut dès l'extension annoncée). Matrice
+  complète `20260927-1137` sur le QEMU v21 : **13 vertes sur 15** — Marble Blast fenêtre
+  rouge (connu), DOOM 3 fenêtre rouge au tour (capture hors du vidage, 0,44) puis verte
+  seule (`20260927-1216`) ; DOOM 3 60,7 / 60,4, Prey 69,3 / 69,5, UT2004 26,4 / 26,0,
+  Colin McRae 69,4, Warcraft III 17,4. QEMU de référence reconstruit en v21 (précédent en
+  `*.avant-glsl`), contrôlé : scènes GLSL, `d3-pe` et `nxg-pe` vertes (`20260927-1223`).
 - **Protocole v21 — programmes GLSL sur le GPU de l'hôte, étape hors VM** (27/09,
   `docs/protocole-v21-glsl.md`, relevé `docs/re/glsl-glengine.md`). GLEngine compile et lie
   lui-même (libGLProgrammability) : le plugin relit les textes des shaders attachés, les

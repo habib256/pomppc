@@ -121,4 +121,32 @@ chaîne ne tient pas tous.
 * `guest/gltest` : scènes `glsl`, `glslvs` (référence : rendu d'Apple),
   `glslfs`, `glsldp` (mode lightmap de DarkPlaces : unités 1 et 9,
   coordonnées 0 et 4).
-* Nexuiz `+r_glsl 1 -benchmark demos/demo1` : cf. `CHANGELOG.md`.
+* Nexuiz `+r_glsl 1 -benchmark demos/demo1` : cf. `CHANGELOG.md` et ci-dessous.
+
+Validation finale de la branche (27/09) : `tests/run-all.sh`, avec
+`QGPU_DP_ZIP` pointant vers `enginesource20091001.zip` du dépôt principal :
+**145 OK, 0 échec, 4 ignorés** (shellcheck absent et trois épreuves `--slow`
+non lancées). Le harnais inclut le cœur qgpu, le backend, le préprocesseur GLSL
+et les permutations de DarkPlaces lorsque le backend GL est disponible.
+
+## En VM (27/09, QEMU v21 de `~/src/qemu-glsl`, plugin `20260927-glsl`)
+
+* Scènes `glsl`, `glslvs`, `glslfs`, `glsldp` : toutes justes sous le plugin ;
+  `glslvs` identique au rendu d'Apple (référence) sur ses trois cas ; sous
+  Apple, `glslfs` rend le pipeline fixe (pas de `GL_ARB_fragment_shader`).
+  Deux défauts trouvés et corrigés en route : `gl_MultiTexCoord<u>` mal
+  reconnu dans le texte (coordonnées de carte de lumière perdues), paramètres
+  des lumières éteintes et matrices de texture sans texture non envoyés
+  (`gl_LightSource`, `gl_TextureMatrix`).
+* **Le préprocesseur GLSL de GLEngine 10.4.6 est faux** (#if imbriqués dans
+  un groupe sauté) : toutes les permutations de DarkPlaces refusées par
+  GLEngine lui-même. Le plugin fait les conditions à sa place
+  (`guest/gldriver/pomppc_glslpp.h`, `docs/re/glsl-glengine.md` §5 bis).
+* Nexuiz : 23 programmes compilés par GLEngine, **tous liés par l'hôte**, zéro
+  repli hors rafraîchissements de fenêtre ; `demo1` en 72 s, **26,5 img/s**
+  (≈ 40 ms/image) contre ≈ 107 ms/image par le chemin ARB (`+r_glsl 0`) ;
+  rejeu natif = capture de la VM (0,00 %) en fenêtre et plein écran ;
+  `VERDICTCHECK` / `STATECHECK` / TEXMEMO : 0 écart.
+* Coût restant : chaque `glUniform` pose le bit `0x04000000` du bloc de
+  changements, non neutre pour la liste blanche du verdict (154 298 dispatches
+  recalculés sur 173 572 dans la démo) — piste de vitesse.

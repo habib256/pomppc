@@ -175,6 +175,40 @@ brouillard en 8.
   GLEngine) par `dlsym` ; ses signatures sont celles des `glGetActive*ARB`
   (arguments recopiés tels quels par GLEngine, `0x8efa4`, `0x8ff60`).
 
+## 5 bis. Le préprocesseur de GLEngine 10.4.6 est faux (vu en VM, 27/09)
+
+Nexuiz `+r_glsl 1 +developer 1` : « vertex shader compile log : ERROR: 0:373:
+'' : syntax error #else after a #else » (26 fois), puis « GLSL shader …
+generic diffuse failed! … OpenGL 2.0 shaders disabled » — **GLEngine** refuse
+le texte, avant tout pilote. Sonde dans l'invité (petits textes compilés par
+GLEngine, rendu d'Apple comme plugin) :
+
+| texte | GLEngine |
+|---|---|
+| `#ifdef F / #ifdef S … #else … #endif` ×2 / `#endif` (deux niveaux, F non défini) | accepté |
+| `#ifdef F / #ifdef R / #ifdef S … #else … #endif / #endif / #ifdef D / #ifdef S … #else … #endif / #endif / #endif` | **« #else after a #else »** |
+| le même, chaque `#else` réécrit en `#endif` + `#if !(…)` | accepté, mais des lignes SAUTÉES sont prises pour actives (texte de DarkPlaces : `gl_FragColor` dans le shader de sommets) |
+| « # ifdef » (blancs après `#`) | sans effet (accepté) |
+
+Le préprocesseur de 3Dlabs de Tiger compte donc mal les conditions imbriquées
+à plus de deux niveaux sous un groupe sauté. DarkPlaces imbrique tout son texte
+ainsi (mode ▸ étage ▸ effet ▸ option) : aucune permutation ne passait.
+
+**Contournement** (`guest/gldriver/pomppc_glslpp.h`) : le plugin interpose
+`glShaderSourceARB` dans la table de dispatch du contexte (entrée `+0x94c` de
+`GLIFunctionDispatch`, `gliDispatch.h` ; tables `gctx+0x4680` / `+0x4684`,
+posée une fois par contexte à `gldGetString` ou au premier dispatch) et fait
+lui-même les conditions avant que GLEngine ne range le texte : lignes sautées
+et directives de condition remplacées par des lignes vides (numéros inchangés),
+`#define` / `#undef` actifs suivis, évaluation à la C (identificateur inconnu =
+0 : les extensions absentes de Tiger, `GL_EXT_gpu_shader4`… ; `__VERSION__` =
+110) ; au moindre doute (macro à paramètres dans une condition, `#if` non
+fermé) le texte part tel quel. Le texte rangé — celui que GLEngine compile ET
+celui que le plugin relit pour l'hôte — est le même. `POMPPC_GL_GLSLPP=0`
+l'éteint. Épreuves : `tests/glsl_pp_test.c`, et les 596 permutations de
+DarkPlaces préprocessées ainsi puis liées par l'hôte (`run_v21_dp`) ; en VM,
+23 programmes de Nexuiz compilés par GLEngine et liés par l'hôte.
+
 ## 6. Limites connues
 
 * Un texte changé par `glShaderSourceARB` APRÈS la liaison sans nouvelle
