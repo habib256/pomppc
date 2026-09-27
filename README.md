@@ -17,7 +17,7 @@ Tableau de bord : **`TODO.md`**. Historique : **`CHANGELOG.md`**. Conception et 
 | Flottant rapide (FPU hôte) | fait, résultats identiques au bit près, ×2 à ×3 sur le flottant (`docs/flottant-rapide.md`) |
 | Son (Screamer), réseau, relais web | faits (`patches/screamer/`, `docs/internet-tiger.md`) |
 | Écran paravirtuel QFB | fait (`kext/POMPPCQFB/`, `patches/qfb/`) |
-| **GPU 3D paravirtuel qgpu** | protocole **v18** : pipeline fixe complet, OpenGL 1.5 annoncé et tenu, programmes ARB, VBO lus par l'hôte, présentation directe |
+| **GPU 3D paravirtuel qgpu** | protocole **v21** : pipeline fixe, OpenGL 1.5 annoncé, programmes ARB et GLSL, VBO lus par l'hôte, copies GPU et présentation directe |
 | Bureau accéléré (Quartz Extreme) | pas commencé |
 
 Jeux, sur le disque quotidien (trois preuves visées : image juste, zéro repli, mesure) :
@@ -60,8 +60,9 @@ maintenant les tampons de sommets sont lus et convertis par l'hôte.
   des vidages pris dans la VM (`tests/qgpu_replay.c`), scènes `guest/gltest` comparées au rendu
   d'Apple dans l'invité, harnais `tests/run-all.sh`.
 
-Conception détaillée, offsets, mesures : `docs/gpu-3d-tiger.md`. Protocole : un fichier par
-version dans `docs/protocole-v*.md` (v7 → v18). Règle du projet : **pas de repli, étendre le
+Conception détaillée, offsets, mesures : `docs/gpu-3d-tiger.md`. Contrat courant :
+[docs/protocole.md](docs/protocole.md) (v21) ; historique dans `docs/protocole-v*.md`.
+Règle du projet : **pas de repli, étendre le
 protocole** — sous programme ARB, un repli vers Apple tue le jeu
 (`docs/re/glengine-exit-interpolateur.md`).
 

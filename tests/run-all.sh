@@ -275,6 +275,8 @@ PY
 
 echo
 echo "=== 5 bis. contrat qgpu : une seule source de vérité, copiée à l'identique ==="
+if python3 scripts/qgpu_contract.py --check; then ok "documentation du contrat qgpu"
+else ko "documentation du contrat qgpu périmée"; fi
 # Le protocole du GPU paravirtuel n'est PAS relu par regex : le même fichier
 # est copié tel quel côté hôte et côté invité, et doit le rester au bit près.
 # v19 (chantier A1) : le kext ne reçoit que l'ABI de transport (qgpu_abi.h) ;
