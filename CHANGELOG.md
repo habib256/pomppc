@@ -8,6 +8,12 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Copies surface → texture sur le GPU de l'hôte en service** (27/09) : QEMU de référence
+  reconstruit (précédent en `*.avant-gpucopy`). A/B en VM (`tools/matrice/ab-copie-gpu.sh`,
+  même binaire, `QGPU_GPU_COPY=0` puis 1) : Colin McRae plein écran 68,8 → 67,1 ms/image,
+  DOOM 3 59,5-59,7 → 60,0-59,7, Prey 67,9-68,1 → 68,5-68,2 (dans le bruit) ; toutes les
+  cellules vertes, images identiques. Hors VM le fil de rendu gagne 1,2 à 2,4 ms/image ; il
+  tourne en parallèle de l'invité, d'où un effet visible seulement sur Colin McRae.
 - **Copies surface → texture sur le GPU de l'hôte** (27/09, `docs/protocole-v20-surface-texture.md`
   §« Copie GPU »). `SURF_TEX` (Colin McRae) et `COPY_TEX` (vitres et reflets de DOOM 3 et Prey)
   ne relisent plus la surface par le CPU pour renvoyer le niveau entier ensuite : copie FBO →
