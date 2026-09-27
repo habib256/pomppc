@@ -52,6 +52,11 @@ typedef struct QgpuTexLevel {
     uint32_t  fmt;                  /* v10 : format de base de CE niveau */
     uint32_t *px;                   /* NULL si le niveau n'est pas défini ;
                                        w·h·d mots, tranche par tranche */
+    /* 27/09 (copie GPU) : le contenu de ce niveau n'existe que dans l'objet
+       texture du backend (SURF_TEX / COPY_TEX faits par be->tex_copy) ; px
+       est PÉRIMÉ — taille et format restent justes. Le cœur le rapatrie
+       (be->tex_fetch) avant d'y lire ou d'y écrire en partie. */
+    bool      gpu;
 } QgpuTexLevel;
 
 typedef struct QgpuTexture {
@@ -332,7 +337,31 @@ typedef struct QgpuBackend {
        sont poussés par le backend au dessin, d'après les drapeaux dirty. */
     bool (*prog_string)(QgpuCore *c, QgpuProgram *p);
     void (*prog_destroy)(QgpuCore *c, QgpuProgram *p);
+    /* 27/09 (copie GPU, facultatifs) : tex_copy copie le rectangle (sx, sy,
+       w, h) de la couleur de la surface `s` — lignes de SURFACE, ligne 0 en
+       haut — dans le niveau `lvl` de la face `face` de `t`, à (x, y, z), SANS
+       passer par la mémoire de l'hôte. `flip` : la ligne sy + h − 1 va en y
+       (orientation OpenGL de COPY_TEX) ; sinon la ligne sy va en y (SURF_TEX).
+       Le cœur a validé les bornes et posé la géométrie du niveau (w, h, d,
+       fmt) ; le bit dirty du niveau est effacé si la copie le recouvre en
+       entier (son px est périmé), sinon le backend synchronise d'abord.
+       false : rien n'est garanti, le cœur refait la copie par relecture.
+       tex_fetch rapatrie un niveau tenu par le GPU dans son px (texels du
+       format du niveau, relus par le pilote). Absents : tout passe par
+       readback, comme avant. */
+    bool (*tex_copy)(QgpuCore *c, QgpuSurface *s, QgpuTexture *t, uint32_t face,
+                     uint32_t lvl, uint32_t x, uint32_t y, uint32_t z,
+                     uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, bool flip);
+    bool (*tex_fetch)(QgpuCore *c, QgpuTexture *t, uint32_t face, uint32_t lvl);
 } QgpuBackend;
+
+/* 27/09 : compteurs des copies surface → texture (rejeu, épreuves). Temps
+   hôte du thread de rendu, en nanosecondes, relecture ou copie GPU comprise. */
+typedef struct QgpuCopyStats {
+    uint64_t surf_tex, surf_tex_ns, surf_tex_gpu;    /* SURF_TEX : tous, ns, par le GPU */
+    uint64_t copy_tex, copy_tex_ns, copy_tex_gpu;    /* COPY_TEX : idem */
+    uint64_t fetch, fetch_ns;                        /* niveaux rapatriés (tex_fetch) */
+} QgpuCopyStats;
 
 struct QgpuCore {
     const QgpuBackend *be;
@@ -362,6 +391,12 @@ struct QgpuCore {
     uint32_t status;               /* QGPU_ST_* de la dernière exécution */
     uint32_t status_pc;            /* index (mots) de la commande fautive */
     uint32_t ncmds;                /* commandes exécutées en tout (stats) */
+    /* 27/09 : SURF_TEX et COPY_TEX par be->tex_copy (GPU de l'hôte) quand le
+       backend le sait faire. Vrai par défaut ; QGPU_GPU_COPY=0 dans
+       l'environnement (lu par qgpu_core_init) garde l'ancien chemin — la
+       relecture CPU —, pour l'A/B et la preuve. */
+    bool     gpu_copy;
+    QgpuCopyStats cstats;
     bool     trace;                /* journalise chaque commande sur stderr */
 
     /* v13 : cible de SURF_PRESENT (VRAM qfb côté QEMU, tampon de test en
@@ -455,6 +490,13 @@ uint32_t qgpu_core_client_ids(uint32_t cls);
  * QGPU_ST_OK, ou QGPU_ST_BAD_ARG si slot >= QGPU_MAX_CLIENTS. Par le thread
  * de rendu, comme qgpu_core_execute. */
 uint32_t qgpu_core_client_reset(QgpuCore *c, uint32_t slot);
+
+/* 27/09 : texels d'un niveau de texture tels que le cœur les tient, rapatriés
+ * du GPU d'abord si une copie GPU les y a laissés (QgpuTexLevel.gpu). NULL si
+ * le niveau n'existe pas ou si le rapatriement échoue. Pour les épreuves et
+ * les outils ; par le thread de rendu. */
+const uint32_t *qgpu_core_tex_px(QgpuCore *c, uint32_t tex, uint32_t face,
+                                 uint32_t lvl);
 
 extern const QgpuBackend qgpu_backend_soft;
 extern const QgpuBackend qgpu_backend_gl;    /* stub si non compilé avec GL */

@@ -124,6 +124,17 @@ typedef struct GlState {
        tous les contextes invités : on note à qui appartient ce qui y est. */
     const void *env_owner[2];
     uint32_t    env_high[2];       /* entrées de program.env possiblement non nulles */
+    /* 27/09 (copie GPU) : blit de FBO (GL 3.0 / EXT_framebuffer_blit) pour le
+       retournement de COPY_TEX, FACULTATIF (sans lui : une ligne par
+       glCopyTexSubImage2D) ; copie vers une tranche 3D (GL 1.2). Le FBO
+       intermédiaire `flip_*` reçoit le rectangle retourné, grandi à la
+       demande. */
+    void (*BlitFramebuffer)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint,
+                            GLbitfield, GLenum);
+    void (*CopyTexSubImage3D)(GLenum, GLint, GLint, GLint, GLint, GLint, GLint,
+                              GLsizei, GLsizei);
+    GLuint   flip_fbo, flip_tex;
+    uint32_t flip_w, flip_h;
 } GlState;
 
 /* v16 : objet programme côté hôte. */
@@ -493,6 +504,15 @@ static bool gl_resolve(GlState *g)
     g->EnableVertexAttribArrayARB = gl_proc("glEnableVertexAttribArrayARB");
     g->DisableVertexAttribArrayARB = gl_proc("glDisableVertexAttribArrayARB");
     g->GetProgramivARB = gl_proc("glGetProgramivARB");
+    /* 27/09 : copie GPU — FACULTATIFS (repli : une ligne à la fois, relecture). */
+    g->BlitFramebuffer = gl_proc(g->fbo_ext ? "glBlitFramebufferEXT" : "glBlitFramebuffer");
+    if (!g->BlitFramebuffer) {
+        g->BlitFramebuffer = gl_proc(g->fbo_ext ? "glBlitFramebuffer" : "glBlitFramebufferEXT");
+    }
+    g->CopyTexSubImage3D = gl_proc("glCopyTexSubImage3D");
+    if (!g->CopyTexSubImage3D) {
+        g->CopyTexSubImage3D = gl_proc("glCopyTexSubImage3DEXT");
+    }
     return g->GenFramebuffers && g->DeleteFramebuffers && g->BindFramebuffer &&
            g->FramebufferTexture2D && g->CheckFramebufferStatus &&
            g->BlendFuncSeparate && g->BlendEquationSeparate &&
@@ -1551,6 +1571,11 @@ static bool gl_clear(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
 typedef struct GlTexture {
     GLuint id;
     GLenum target;                 /* v10 : cible GL de l'objet */
+    /* 27/09 (copie GPU) : géométrie et format de chaque niveau tel que l'objet
+       GL le tient (dernier envoi ou dernière copie) ; w = 0 : jamais défini.
+       SURF_TEX y voit s'il doit (re)définir le niveau (glCopyTexImage2D) ou
+       seulement le recouvrir (glCopyTexSubImage2D). */
+    struct { uint32_t w, h, d, fmt; } lv[QGPU_TEX_FACES][QGPU_MAX_TEX_LEVELS];
 } GlTexture;
 
 /* G5 : GL_CLAMP (0x2900) est le pincement vers la BORDURE d'OpenGL 1.x — pas
@@ -1711,8 +1736,15 @@ static bool gl_tex_sync(QgpuCore *c, QgpuTexture *t)
             continue;
         }
         for (l = 0; l < QGPU_MAX_TEX_LEVELS; l++) {
-            if ((t->dirty[f] & (1u << l)) && t->level[f][l].px) {
+            const QgpuTexLevel *lv = &t->level[f][l];
+            /* 27/09 : un niveau tenu par le GPU (lv->gpu) a son px périmé :
+               la texture GL est la vérité, on ne l'écrase pas. */
+            if ((t->dirty[f] & (1u << l)) && lv->px && !lv->gpu) {
                 gl_tex_level(g, t, gt->target, f, l);
+                gt->lv[f][l].w = lv->w;
+                gt->lv[f][l].h = lv->h;
+                gt->lv[f][l].d = lv->d;
+                gt->lv[f][l].fmt = lv->fmt;
             }
         }
         t->dirty[f] = 0;
@@ -2423,6 +2455,172 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
     return ok;
 }
 
+/* ── 27/09 : copies surface → texture sur le GPU de l'hôte ─────────────────
+ *
+ * Jusqu'ici SURF_TEX et COPY_TEX passaient par glReadPixels (la relecture
+ * attend la fin du rendu de la surface), une copie dans le niveau du cœur,
+ * puis un glTexImage2D du niveau entier au dessin suivant : deux traversées de
+ * la mémoire de l'hôte et une synchronisation CPU/GPU par copie. Ici tout
+ * reste dans le GPU :
+ *
+ *   - SURF_TEX (ligne 0 = haut) : le FBO de la surface a sa ligne 0 de
+ *     SURFACE en ligne 0 GL, et un niveau envoyé par gl_tex_level a sa ligne 0
+ *     de px en ligne 0 GL : glCopyTexSubImage2D copie donc sans retournement,
+ *     exactement l'image que la relecture aurait rangée dans px ;
+ *     glCopyTexImage2D quand le niveau change de taille ou de format ;
+ *   - COPY_TEX (orientation OpenGL : la ligne sy + h − 1 en y) : un blit
+ *     retourné du FBO de la surface vers un FBO intermédiaire (RGBA8, même
+ *     taille, NEAREST : texels identiques), puis glCopyTexSubImage* de
+ *     celui-ci vers le niveau — ce qui couvre toutes les cibles (1D, 2D,
+ *     rectangle, faces de cube, tranches 3D) et tous les formats (la copie
+ *     réduit RGBA au format du niveau comme l'envoi le faisait : L = R,
+ *     A = A…). Sans blit : une ligne par glCopyTexSubImage2D.
+ *
+ * Rien ici ne dépend des tests ni des masques : gl_target(…, NULL) a coupé le
+ * ciseau (le seul qui touche un blit) ; glCopyTex* les ignore. */
+static bool gl_flip_fbo(GlState *g, uint32_t w, uint32_t h)
+{
+    if (g->flip_fbo && g->flip_w >= w && g->flip_h >= h) {
+        return true;
+    }
+    if (g->flip_fbo) {
+        g->DeleteFramebuffers(1, &g->flip_fbo);
+        glDeleteTextures(1, &g->flip_tex);
+        g->flip_fbo = g->flip_tex = 0;
+    }
+    w = w > g->flip_w ? w : g->flip_w;
+    h = h > g->flip_h ? h : g->flip_h;
+    glGenTextures(1, &g->flip_tex);
+    glBindTexture(GL_TEXTURE_2D, g->flip_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA,
+                 GL_UNSIGNED_INT_8_8_8_8_REV, NULL);
+    g->GenFramebuffers(1, &g->flip_fbo);
+    g->BindFramebuffer(GL_FRAMEBUFFER, g->flip_fbo);
+    g->FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                            g->flip_tex, 0);
+    if (g->CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE ||
+        !gl_err_ok()) {
+        g->DeleteFramebuffers(1, &g->flip_fbo);
+        glDeleteTextures(1, &g->flip_tex);
+        g->flip_fbo = g->flip_tex = 0;
+        g->flip_w = g->flip_h = 0;
+        gl_err_flush();
+        return false;
+    }
+    g->flip_w = w;
+    g->flip_h = h;
+    return true;
+}
+
+/* Copie du rectangle (rx, ry, w, h) du framebuffer LU vers le niveau lié. */
+static void gl_copy_sub(GlState *g, GLenum tg, GLenum itg, uint32_t lvl, uint32_t x,
+                        uint32_t y, uint32_t z, GLint rx, GLint ry, uint32_t w, uint32_t h)
+{
+    switch (tg) {
+    case GL_TEXTURE_1D:
+        glCopyTexSubImage1D(tg, lvl, x, rx, ry, w);
+        break;
+    case GL_TEXTURE_3D:
+        g->CopyTexSubImage3D(tg, lvl, x, y, z, rx, ry, w, h);
+        break;
+    default:                                   /* 2D, rectangle, face de cube */
+        glCopyTexSubImage2D(itg, lvl, x, y, rx, ry, w, h);
+    }
+}
+
+#ifndef GL_READ_FRAMEBUFFER
+#define GL_READ_FRAMEBUFFER 0x8CA8
+#define GL_DRAW_FRAMEBUFFER 0x8CA9
+#endif
+
+static bool gl_tex_copy(QgpuCore *c, QgpuSurface *s, QgpuTexture *t, uint32_t face,
+                        uint32_t lvl, uint32_t x, uint32_t y, uint32_t z,
+                        uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, bool flip)
+{
+    GlState *g = c->be_priv;
+    GlSurface *gs = s->priv;
+    const QgpuTexLevel *lv = &t->level[face][lvl];
+    GlTexture *gt;
+    GLenum tg, itg;
+    bool same;
+
+    if (!gl_target(c, s, NULL)) {              /* contexte, FBO de la surface lié */
+        return false;
+    }
+    g->ActiveTexture(GL_TEXTURE0);
+    if (!gl_tex_sync(c, t)) {                  /* crée, envoie ce que le cœur a de neuf, lie */
+        return false;
+    }
+    gt = t->priv;
+    tg = gt->target;
+    itg = tg == GL_TEXTURE_CUBE_MAP ? GL_TEXTURE_CUBE_MAP_POSITIVE_X + face : tg;
+    if ((tg == GL_TEXTURE_3D && !g->CopyTexSubImage3D) || lv->fmt == 0x1902) {
+        return false;
+    }
+    same = gt->lv[face][lvl].w == lv->w && gt->lv[face][lvl].h == lv->h &&
+           gt->lv[face][lvl].d == lv->d && gt->lv[face][lvl].fmt == lv->fmt;
+    if (!flip || h == 1) {
+        if (same) {
+            gl_copy_sub(g, tg, itg, lvl, x, y, z, sx, sy, w, h);
+        } else if ((tg == GL_TEXTURE_2D || tg == GL_TEXTURE_RECTANGLE) &&
+                   x == 0 && y == 0 && w == lv->w && h == lv->h) {
+            /* SURF_TEX : niveau (re)défini à la taille de la surface */
+            glCopyTexImage2D(itg, lvl, (GLint)lv->fmt, sx, sy, w, h, 0);
+        } else {
+            return false;
+        }
+    } else if (!same) {
+        return false;                          /* COPY_TEX vise un niveau déjà envoyé */
+    } else if (g->BlitFramebuffer && gl_flip_fbo(g, w, h)) {
+        g->BindFramebuffer(GL_READ_FRAMEBUFFER, gs->fbo);
+        g->BindFramebuffer(GL_DRAW_FRAMEBUFFER, g->flip_fbo);
+        g->BlitFramebuffer(sx, sy, sx + w, sy + h, 0, h, w, 0,
+                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        g->BindFramebuffer(GL_FRAMEBUFFER, g->flip_fbo);
+        glBindTexture(tg, gt->id);             /* gl_flip_fbo a pu lier la sienne */
+        gl_copy_sub(g, tg, itg, lvl, x, y, z, 0, 0, w, h);
+        g->BindFramebuffer(GL_FRAMEBUFFER, gs->fbo);
+    } else {
+        uint32_t r;
+        g->BindFramebuffer(GL_FRAMEBUFFER, gs->fbo);
+        glBindTexture(tg, gt->id);
+        for (r = 0; r < h; r++) {
+            gl_copy_sub(g, tg, itg, lvl, x, y + r, z, sx, sy + h - 1 - r, w, 1);
+        }
+    }
+    if (!gl_err_ok()) {
+        return false;
+    }
+    gt->lv[face][lvl].w = lv->w;
+    gt->lv[face][lvl].h = lv->h;
+    gt->lv[face][lvl].d = lv->d;
+    gt->lv[face][lvl].fmt = lv->fmt;
+    return true;
+}
+
+/* Rapatrie un niveau tenu par le GPU dans son px (cf. tex_cpu du cœur). */
+static bool gl_tex_fetch(QgpuCore *c, QgpuTexture *t, uint32_t face, uint32_t lvl)
+{
+    GlState *g = c->be_priv;
+    GlTexture *gt = t->priv;
+    QgpuTexLevel *lv = &t->level[face][lvl];
+    GLenum itg;
+
+    if (!gt || !lv->px || lv->fmt == 0x1902 || !gl_make_current(g)) {
+        return false;
+    }
+    itg = gt->target == GL_TEXTURE_CUBE_MAP ? GL_TEXTURE_CUBE_MAP_POSITIVE_X + face
+                                            : gt->target;
+    g->ActiveTexture(GL_TEXTURE0);
+    glBindTexture(gt->target, gt->id);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glGetTexImage(itg, lvl, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, lv->px);
+    return gl_err_ok();
+}
+
 static bool gl_readback(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
                         uint32_t w, uint32_t h, uint32_t *dst)
 {
@@ -2685,6 +2883,8 @@ const QgpuBackend qgpu_backend_gl = {
     .query_destroy  = gl_query_destroy,
     .prog_string    = gl_prog_string,      /* v16 */
     .prog_destroy   = gl_prog_destroy,
+    .tex_copy       = gl_tex_copy,         /* 27/09 : copie GPU */
+    .tex_fetch      = gl_tex_fetch,
 };
 
 #else /* ni CGL ni EGL : stub */

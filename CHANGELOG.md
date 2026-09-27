@@ -8,6 +8,19 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Copies surface → texture sur le GPU de l'hôte** (27/09, `docs/protocole-v20-surface-texture.md`
+  §« Copie GPU »). `SURF_TEX` (Colin McRae) et `COPY_TEX` (vitres et reflets de DOOM 3 et Prey)
+  ne relisent plus la surface par le CPU pour renvoyer le niveau entier ensuite : copie FBO →
+  texture (`glCopyTexSubImage2D`, `glCopyTexImage2D` au redimensionnement ; blit retourné vers
+  un FBO intermédiaire pour l'orientation OpenGL de `COPY_TEX`), toutes cibles et tous formats.
+  Le cœur marque le niveau tenu par le GPU (`QgpuTexLevel.gpu`) et le rapatrie
+  (`glGetTexImage`) avant une écriture partielle ou une lecture ; mipmaps automatiques sur
+  l'ancien chemin. Côté hôte seulement : protocole, plugin et kext inchangés.
+  `QGPU_GPU_COPY=0` rend la relecture (A/B). Épreuve `run_gpu_copy` (les deux chemins, texels et
+  dessin identiques), `run-all` 140 OK. Rejeu des 21 vidages de la matrice : images identiques
+  à l'octet au binaire d'avant (seule exception, une image déjà non reproductible avec lui) ;
+  copies 4 à 9 fois plus rapides (`COPY_TEX` 1024×768 : ~2,5 → ~0,2 ms), 0,7 à 2,4 ms par
+  image de moins dans le cœur. Mesure en VM à faire (`tools/matrice/ab-copie-gpu.sh`).
 - **Colin McRae : la VM affiche l'image de l'hôte — protocole v20, rendu vers texture** (27/09,
   `docs/re/cmr-rendu-vers-texture.md`, `docs/protocole-v20-surface-texture.md`). IndirectX rend
   dans des fenêtres Carbon cachées (800×600, 400×300, 200×150) puis les échantillonne par

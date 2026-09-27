@@ -14,6 +14,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <dirent.h>
+#include <time.h>
 #include "qgpu_proto.h"
 #include "qgpu-core.h"
 
@@ -30,6 +31,24 @@ struct dump_hdr {
    (x+w, y+h des SURF_PRESENT : fenêtre 640×480, plein écran 1024×768),
    sinon 800×600. */
 static uint32_t surf_w = 800, surf_h = 600;
+
+/* 27/09 : temps hôte passé dans le cœur (soumissions et relectures de
+   présentation), pour mesurer un changement du backend sans le bruit des
+   fichiers. */
+static uint64_t exec_ns;
+static uint64_t now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+static uint32_t timed_execute(QgpuCore *c, uint32_t off, uint32_t len)
+{
+    uint64_t t0 = now_ns();
+    uint32_t st = qgpu_core_execute(c, off, len);
+    exec_ns += now_ns() - t0;
+    return st;
+}
 
 static int cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
@@ -456,7 +475,7 @@ int main(int argc, char **argv)
                 sscanf(getenv("QGPU_REPLAY_SKIPDRAW"), "%u:%u-%u", &sf, &si, &sj) == 3 && h.frame == sf)
                 skipping = 1;
             if (!skipping) {
-                st = qgpu_core_execute(&c, h.base, h.ncmd_bytes);
+                st = timed_execute(&c, h.base, h.ncmd_bytes);
             } else {
                 uint32_t q, seg = 0;
                 for (q = 0; q + 1 < h.ncmd_bytes / 4 && st == QGPU_ST_OK; ) {
@@ -737,7 +756,7 @@ int main(int argc, char **argv)
                 rb[0] = QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER);
                 rb[1] = surf; rb[2] = roff; rb[3] = pw * 4; rb[4] = px; rb[5] = py; rb[6] = pw; rb[7] = ph;
                 for (j = 0; j < 8; j++) qgpu_st32(shmem + SHMEM - 8192 + j * 4, rb[j]);
-                if (qgpu_core_execute(&c, SHMEM - 8192, 32) == QGPU_ST_OK) {
+                if (timed_execute(&c, SHMEM - 8192, 32) == QGPU_ST_OK) {
                     /* QGPU_REPLAY_PRESENTS=<fichier> : une ligne par image écrite,
                        « n image décalage_vram pas l h », pour situer l'image
                        sur l'écran de la VM (tools/matrice/) */
@@ -759,6 +778,17 @@ int main(int argc, char **argv)
         }
     }
     fprintf(stderr, "%zu soumissions, %u présentations écrites, %u en erreur\n", nn, npresent, nerr);
+    /* 27/09 : copies surface → texture (QGPU_GPU_COPY=0 : ancien chemin, relecture) */
+    fprintf(stderr, "copies : SURF_TEX %llu (%llu GPU) %.3f ms, COPY_TEX %llu (%llu GPU) %.3f ms, "
+            "rapatriements %llu %.3f ms, copie GPU %s\n",
+            (unsigned long long)c.cstats.surf_tex, (unsigned long long)c.cstats.surf_tex_gpu,
+            c.cstats.surf_tex_ns / 1e6,
+            (unsigned long long)c.cstats.copy_tex, (unsigned long long)c.cstats.copy_tex_gpu,
+            c.cstats.copy_tex_ns / 1e6,
+            (unsigned long long)c.cstats.fetch, c.cstats.fetch_ns / 1e6,
+            c.gpu_copy ? "oui" : "non");
+    fprintf(stderr, "temps dans le cœur : %.3f ms (soumissions et relectures de présentation)\n",
+            exec_ns / 1e6);
     /* QGPU_REPLAY_SURFS=1 : chaque surface vivante à la fin du rejeu, en PPM
        (<préfixe>-surf<id>-<l>x<h>.ppm) — cibles de rendu, textures de surface */
     if (getenv("QGPU_REPLAY_SURFS")) {
