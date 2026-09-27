@@ -8,6 +8,22 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Nexuiz 2.5.2 dans la matrice de jeux** (27/09, `docs/matrice-jeux.md` §4, §6 ter) :
+  module `tools/matrice/jeux/nx.py`, scène `-benchmark demos/demo1` (timedemo déterministe :
+  l'image n du plugin est la même image de la démo d'un tour et d'un mode à l'autre),
+  mesure aux images 120..600, vidage à l'image FIXE 870 par le nouveau déclencheur
+  `POMPPC_GL_DUMP_TRIGGER=@n` (plugin `20260927-dumpat`, `dump_image` d'un jeu). Fenêtre
+  800×600 et plein écran 1024×768 **verts** : 107,1 / 107,4 ms/image, rejeu = VM 0,00 %,
+  références validées à l'œil (image 872). Profil GLSL `nxg` déclaré non automatisé.
+  **Cause des deux replis par image** du premier essai : lancé par son exécutable
+  (`nexuiz-osx-agl-bin`, qui n'est pas le `CFBundleExecutable`) hors LaunchServices, le jeu
+  est un processus « background only » (DarkPlaces AGL n'appelle pas `TransformProcessType`),
+  jamais au premier plan : « not frontmost », Swap60 + Swap5c repliés. Corrigé côté
+  lanceur : `tools/guest/launchers/premierplan.c` préchargé (`TransformProcessType` +
+  `SetFrontProcess`), `demo1` 8,9 → 10,1 img/s, 0 repli hors rafraîchissements. Matrice
+  complète `20260927-1018` : **12 vertes sur 13** (Marble Blast fenêtre rouge connu),
+  DOOM 3 60,4 / 59,5, Prey 68,9 / 68,7, UT2004 26,1 / 26,0, Colin McRae 72,2. Au passage :
+  `references.csv` réécrit en LF, note de Colin McRae citée (sa virgule la tronquait).
 - **Nexuiz 2.5.2 installé comme banc GL** (27/09) : zip officiel (SourceForge), binaire AGL
   universel PowerPC, `~/Nexuiz` dans l'invité, lanceur `tools/guest/launchers/nexuiz.command`
   (`-basedir`, `~/nexuiz.env`, gltrap). Premier benchmark `demo1` en fenêtre 800×600 : 1 910

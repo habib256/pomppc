@@ -21,7 +21,7 @@ réorganisation par domaine est dans l'historique git (commit précédant celui 
 | Verdict unique : mémoire des unités et des textures, lots 4 et 5 | Plugin (§2) | **fait le 26/09** (plugin `20260926-memo`, drapeaux allumés) : DOOM 3 −3,5 ms/image, Prey inchangé ; R5 : tout ce que lit `compute_state` pose un bit ; option A classée (GLEngine 1,1-2,6 %) | **fermé** : 0 écart `VERDICTCHECK`/`STATECHECK` sur six jeux, `docs/re/verdict-lots-4-5.md`, matrice |
 | Colin McRae : géométrie éclatée | Jeux (§6) | **cause trouvée et corrigée le 26/09** (`docs/re/cmr-var.md`) : IndirectX ne remplit la copie privée de ses tampons de sommets que si `GL_APPLE_vertex_array_range` est annoncée ; plugin `20260926-var` l'annonce ; v19 à 32 contextes par client (le jeu en ouvre 12) ; rejeu de course juste | **fermé le 27/09** avec le rendu vers texture (ligne suivante) |
 | Colin McRae : rendu vers texture | Jeux (§6), protocole (§3) | **fait le 27/09** (`docs/re/cmr-rendu-vers-texture.md`) : protocole **v20** (`SURF_TEX`, `TEX_READBACK`), plugin `20260927-rtt` (textures rectangle, textures de surface `aglSurfaceTexture`, drawables cachés sans présentation ni relecture) ; aplats blancs du rejeu du 26/09 expliqués (cibles de halo blanches, fondu du menu) | **fermé** : capture VM = rejeu 0,00 % en course, 0 repli, cellule `cmr-pe` de la matrice verte (référence validée) |
-| Matrice de jeux automatisée (A3) | Outils (§7) | **harnais fait** (26/09) : `tools/matrice/matrice.py`, 10 vertes sur 11 cellules automatisées (27/09, Colin McRae compris), un lancement par cellule depuis le déclencheur lu une fois par image (26/09) | suites : Zenerchi plein écran, Warcraft III fenêtre (Colin McRae plein écran porté le 27/09) |
+| Matrice de jeux automatisée (A3) | Outils (§7) | **harnais fait** (26/09) : `tools/matrice/matrice.py`, 12 vertes sur 13 cellules automatisées (27/09, Colin McRae et Nexuiz compris), un lancement par cellule depuis le déclencheur lu une fois par image (26/09) | suites : Zenerchi plein écran, Warcraft III fenêtre (Colin McRae plein écran porté le 27/09) |
 
 **Ordre de fond** (« C : le contrat d'abord », 24/09/2026) : figer le contrat (protocole
 unique, §3), en faire le harnais (A3, §7), puis optimiser et élargir dessous (A2, A4, TCG).
@@ -59,7 +59,7 @@ Les trois preuves sont produites par `tools/matrice/matrice.py` (`docs/matrice-j
 rejeu natif du vidage identique à la capture de la VM (0,00 % d'écart partout au 26/09) et
 rejeu de la référence validée à l'œil, replis de `frames.csv` (en fenêtre, 2 par 90 images
 admis : rafraîchissement voulu de la fenêtre), ms/image sans le déclencheur de vidage.
-Dernier tour : `bench/matrice/20260927-0307/tableau.md` (plugin `20260927-rtt`, QEMU v20, 10 vertes sur 11 automatisées, Marble Blast fenêtre rouge connu).
+Dernier tour : `bench/matrice/20260927-1018/tableau.md` (plugin `20260927-dumpat`, QEMU v20, 12 vertes sur 13 automatisées, Nexuiz compris, Marble Blast fenêtre rouge connu).
 
 | Jeu | Famille | Fenêtre | Plein écran | Vitesse à scène fixe (26/09) | Manque |
 |---|---|---|---|---|---|
@@ -70,7 +70,7 @@ Dernier tour : `bench/matrice/20260927-0307/tableau.md` (plugin `20260927-rtt`, 
 | UT2004 Demo | tableaux, VBO, S3TC | **vert** | **vert** | 29,5 / 29,0 ms/image (intro d'AS-Convoy) | arme en main noire, hors de la scène (§6) |
 | Warcraft III | tableaux | non automatisé | **vert** | 19,3 ms/image (menu) | fenêtre (§7) |
 | Colin McRae | ARB via IndirectX, rendu vers texture | non automatisé (pas de mode fenêtre) | **vert** (27/09) | 72,6 ms/image du jeu (départ d'ESP 1, 3 échanges par image ; 69,1 seul) | vitesse |
-| Nexuiz 2.5.2 | DarkPlaces (GPL), ARB / GLSL | tourne (benchmark `demo1` : 8,9 img/s, 4-33) | 2 replis par image en fenêtre | — | installé le 27/09 (`~/Nexuiz`, lanceur `tools/guest/launchers/nexuiz.command`, sources dans `.run/jeux/Nexuiz/sources/`) ; GLSL éteint par le jeu : `GL_ARB_fragment_shader` non annoncée (§6) |
+| Nexuiz 2.5.2 | DarkPlaces (GPL), ARB / fixe (GLSL coupé) | **vert** (27/09) | **vert** (27/09) | 107,1 / 107,4 ms/image (`-benchmark demos/demo1`, images 120..600 ; 10,1 img/s sur toute la démo) | profil GLSL (`nxg`, non automatisé) : `GL_ARB_fragment_shader` non annoncée (§6) ; installé le 27/09 (`~/Nexuiz`, lanceur `tools/guest/launchers/nexuiz.command`, sources dans `.run/jeux/Nexuiz/sources/`) |
 | RTCW | idTech3, pipeline fixe | non automatisé | non automatisé | — | absent du disque quotidien ; quitte après 8 s (§6) |
 | Bureau (Quartz Extreme) | WindowServer | — | — | — | §5 |
 
@@ -252,10 +252,12 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
 - [ ] **Nexuiz / GLSL** (27/09) : le plugin annonce `GL_ARB_shader_objects`,
       `GL_ARB_vertex_shader`, `GL_ARB_shading_language_100` (liste du rendu logiciel d'Apple)
       mais pas `GL_ARB_fragment_shader` : DarkPlaces coupe son chemin GLSL. Étendre le
-      protocole aux programmes GLSL (texte transmis à l'hôte, GL 2.1 de macOS). Et deux
-      replis d'échange par image en fenêtre (Swap60 + Swap5c/58), comme Marble Blast : à
-      comprendre. Le benchmark `-benchmark demos/demo1` donne une scène rejouable : candidat
-      idéal pour la matrice.
+      protocole aux programmes GLSL (texte transmis à l'hôte, GL 2.1 de macOS). Le module de
+      la matrice porte déjà le profil `glsl` (`nxg`, `+r_glsl 1`, non automatisé) : retirer
+      son `non_automatise` le jour venu (`tools/matrice/jeux/nx.py`). Les deux replis par
+      image en fenêtre du premier essai sont compris et corrigés (27/09) : processus
+      « background only », jamais au premier plan ; `premierplan.dylib` préchargé
+      (`docs/matrice-jeux.md` §4).
 - [ ] **Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur reste blanc).
       Au 26/09 le menu principal est juste (référence de la matrice validée) : à revoir en
       partie avant de fermer.

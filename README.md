@@ -138,7 +138,7 @@ réellement actif (le Screamer exige moins de 1 Go), réseau actif si slirp.
   sur `tiger-dev.raw`, `tools/README.md`).
 - **Profil** : `sample <pid> 10` dans Tiger ; `tools/re/sym.py` traduit un `CRASH pc` de
   `<note>.crash` en symbole ; `tools/re/frames.py` résume `frames.csv`.
-- **Vidage et rejeu** : `POMPPC_GL_DUMP=<dossier>` et `POMPPC_GL_DUMP_TRIGGER=<fichier>` dans
+- **Vidage et rejeu** : `POMPPC_GL_DUMP=<dossier>` et `POMPPC_GL_DUMP_TRIGGER=<fichier>` (ou `@<image>`) dans
   l'invité, `tools/re/dumpdec.py` pour lire, `tests/qgpu_replay.c` pour rejouer sur l'hôte et
   bisecter en réécrivant le vidage.
 - **Drapeaux** `POMPPC_GL_*` (dans `guest/gldriver/pomppc_accel.c`) : `NOTE`, `STATS`, `DUMP`,

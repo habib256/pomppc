@@ -6,7 +6,7 @@ cellule, ses preuves rangées. C'est le harnais qui doit autoriser A2 (découpag
 A4 (travail déplacé vers l'hôte) sans peur : on le rejoue avant et après.
 
 ```sh
-tools/matrice/matrice.py                     # tout : jeux automatisés, deux modes (~30 min)
+tools/matrice/matrice.py                     # tout : jeux automatisés, deux modes (~36 min)
 tools/matrice/matrice.py -j mb,zen -m fen    # un sous-ensemble (jeux, modes)
 tools/matrice/matrice.py --deux-passes       # mesure puis preuve séparées (plugin d'avant le 26/09 après midi)
 tools/matrice/matrice.py --sans-vidage       # vitesse et replis seuls
@@ -83,7 +83,10 @@ Un lancement (`Cellule.jouer`, `tools/matrice/matrice.py`) :
    l'invité) et la VM est arrêtée aussitôt pour la capture ; on attend enfin que le vidage ne
    grossisse plus. `frames.csv` ne peut pas servir d'horloge : le plugin ne le vide que
    toutes les 5 s (la première version attendait « 3 images dans frames.csv » et capturait
-   après la fin du vidage de Marble Blast et d'UT2004) ;
+   après la fin du vidage de Marble Blast et d'UT2004) ; un jeu dont la scène se rejoue à
+   l'identique déclare `dump_image = n` : le déclencheur vaut alors `@n`
+   (`POMPPC_GL_DUMP_TRIGGER=@n`, plugin `20260927-dumpat`) et le vidage part de l'image n,
+   sans fichier, la même à chaque tour (Nexuiz) ; l'attente et la capture sont les mêmes ;
 6. arrêt du jeu (`kill`), fermeture de Terminal une fois `lance.command` fini (sinon dialogue),
    réglages rendus, nettoyage du jeu (CD démonté) ;
 7. rapatriement du dossier de l'invité (tar par ssh), puis effacement dans l'invité ;
@@ -121,6 +124,8 @@ UT2004 est déterministe (pas de simulation fixé), les autres non.
 | UT2004 Demo | `StartupFullscreen=False` | `-fullscreen`, 1024×768 | caméra d'intro d'AS-Convoy, pas fixé à 0,2 s (`seed.c`), images 13..73 |
 | Warcraft III | **non automatisé** | défaut (800×600, changement de mode) | menu principal, images 1200..1700 ; CD monté depuis `Warcraft III.toast` |
 | Colin McRae 2005 | **non automatisé** (pas de mode fenêtre) | défaut (800×600, changement de mode) | départ d'ESP 1 Selardu en contre la montre, voiture arrêtée : 600 échanges réguliers après la touche COURSE (3 échanges par image du jeu) |
+| Nexuiz 2.5.2 (DarkPlaces) | `+vid_fullscreen 0`, 800×600 | `+vid_fullscreen 1`, 1024×768 | `-benchmark demos/demo1` (timedemo, déterministe) : images 120..600, vidage à l'image fixe 870 |
+| Nexuiz 2.5.2 (GLSL, `nxg`) | **non automatisé** | **non automatisé** | profil `+r_glsl 1` prévu : GLSL coupé par le jeu faute de `GL_ARB_fragment_shader` |
 | RTCW | **non automatisé** | **non automatisé** | — |
 
 Détails par jeu dans l'en-tête de chaque module. Points durs :
@@ -154,9 +159,26 @@ Détails par jeu dans l'en-tête de chaque module. Points durs :
   = ms par échange × `echanges_par_image` (3 : plein écran + deux échanges de la cible
   cachée 800×600). La voiture change d'un tour à l'autre (tirage du jeu), pas le décor.
   Arrêt `sudo killall -9`, invité redémarré après.
+- **Nexuiz** (27/09) : `-benchmark demos/demo1` rejoue la démo image par image (timedemo)
+  puis quitte (~2017 échanges, ~190 s) ; les ~107 premiers échanges sont le chargement.
+  L'image n du plugin est la **même image de la démo** d'un tour à l'autre et d'un mode à
+  l'autre (sommets par image identiques sauf 85 images sur 2017, texte et particules ; image
+  de preuve identique en fenêtre et en plein écran, chrono 0:38). D'où la fenêtre fixe
+  120..600 et le vidage à l'image fixe 870 (`@870`), assez loin après 600 (~18 s) pour que
+  la matrice soit dans son attente ; la capture tombe à l'image 872. 17 Mio par image
+  vidée : 24 images. **Premier plan** : lancé par son exécutable (le script
+  `nexuiz-osx-agl` fait `exec nexuiz-osx-agl-bin`, qui n'est pas le `CFBundleExecutable`
+  du paquet) et non par LaunchServices, le jeu est un processus « background only »
+  (`vid_agl.c` n'appelle pas `TransformProcessType`) : osascript ne le met jamais devant, le
+  plugin voit « not frontmost » et replie chaque échange (Swap60 + le glFinish Swap5c). La
+  matrice (et le lanceur `~/nexuiz.command`) préchargent
+  `tools/guest/launchers/premierplan.c` (`TransformProcessType` + `SetFrontProcess` dans un
+  constructeur), compilé dans l'invité. Profil `glsl` (`nxg`, `+r_glsl 1`) déclaré non
+  automatisé tant que le plugin n'annonce pas `GL_ARB_fragment_shader`.
 
 Ajouter un jeu : un module `tools/matrice/jeux/<clé>.py` qui définit `JEU`, une instance de
-`jeu.Jeu` (commande par mode, `fenetre(rows)`, réglages à sauvegarder, plancher).
+`jeu.Jeu` (commande par mode, `fenetre(rows)`, réglages à sauvegarder, plancher), ou `JEUX`,
+une liste d'instances (profils d'un même jeu, Nexuiz).
 
 ## 5. Pièges et limites
 
@@ -198,6 +220,22 @@ Ajouter un jeu : un module `tools/matrice/jeux/<clé>.py` qui définit `JEU`, un
   encore le contexte à une surface devinée malgré `surfaces.txt` (images unies) ; la
   relecture attendait l'échange suivant alors que DOOM 3 et Prey copient avant dans une
   texture hôte (`BAD_ARG`). Corrigés : tour `20260927-0307`, 10 vertes.
+
+## 6 ter. Le tour du 27/09/2026 après midi (Nexuiz porté)
+
+Tour `bench/matrice/20260927-1018` (plugin `20260927-dumpat` = `20260927-rtt` + déclencheur
+`@n`, QEMU v20, un lancement par cellule, aucun autre QEMU, 36 min) : **12 vertes sur 13
+automatisées**, rouge Marble Blast en fenêtre (connu). ms/image : Marble Blast plein écran
+10,3 ; Zenerchi 4,5 ; DOOM 3 60,4 / 59,5 ; Prey 68,9 / 68,7 ; UT2004 26,1 / 26,0 ;
+Warcraft III 17,3 ; Colin McRae 72,2 ; **Nexuiz 107,1 / 107,4** (demo1, images 120..600 ;
+10 replis en fenêtre pour 22 admis, 0 en plein écran). Rejeu = VM et rejeu de la référence :
+0,00 / 0,00 % partout. Références Nexuiz créées au tour `20260927-1008` (image 872, la même
+démo image dans les deux modes) et validées à l'œil. Vidage Nexuiz : ~240 Mio par cellule
+(24 images), référence ~80 Mio.
+
+Le premier essai de Nexuiz (27/09 matin, lanceur `~/nexuiz.command`) repliait deux échanges
+par image en fenêtre : processus « background only », jamais au premier plan (§4). Avec
+`premierplan.dylib` : 0 repli hors rafraîchissements, `demo1` 8,9 → 10,1 img/s.
 
 ## 6 bis. Le tour du 27/09/2026 (Colin McRae porté)
 
