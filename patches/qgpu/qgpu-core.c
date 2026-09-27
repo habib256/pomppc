@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "qgpu-core.h"
 
@@ -880,7 +881,62 @@ static bool tex_alloc_level(QgpuTexLevel *lv, uint32_t w, uint32_t h, uint32_t d
     lv->px = px;
     lv->w = w; lv->h = h; lv->d = d;
     lv->fmt = fmt;
+    lv->gpu = false;                /* niveau redéfini : le cœur en tient la vérité */
     return true;
+}
+
+static uint64_t now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+/* 27/09 (copie GPU) : ramène dans px un niveau que seule la texture du
+   backend tient (QgpuTexLevel.gpu), avant que le cœur n'y lise ou n'y écrive
+   en partie. Les texels relus sont ceux du FORMAT du niveau (un RGB revient
+   avec alpha 255, une luminance en L,L,L,255) : ce que la texture échantillonne,
+   donc ce qu'un nouvel envoi du niveau redonnerait à l'identique. */
+static bool tex_cpu(QgpuCore *c, QgpuTexture *t, uint32_t face, uint32_t lvl)
+{
+    QgpuTexLevel *lv = &t->level[face][lvl];
+    uint64_t t0;
+    bool ok;
+
+    if (!lv->gpu) {
+        return true;
+    }
+    if (!lv->px || !c->be->tex_fetch) {
+        return false;
+    }
+    t0 = now_ns();
+    ok = c->be->tex_fetch(c, t, face, lvl);
+    c->cstats.fetch++;
+    c->cstats.fetch_ns += now_ns() - t0;
+    if (ok) {
+        lv->gpu = false;
+    }
+    return ok;
+}
+
+const uint32_t *qgpu_core_tex_px(QgpuCore *c, uint32_t tex, uint32_t face, uint32_t lvl)
+{
+    QgpuTexture *t;
+    if (tex >= QGPU_MAX_TEX || face >= QGPU_TEX_FACES || lvl >= QGPU_MAX_TEX_LEVELS ||
+        !c->tex[tex].used || !c->tex[tex].level[face][lvl].px) {
+        return NULL;
+    }
+    t = &c->tex[tex];
+    return tex_cpu(c, t, face, lvl) ? t->level[face][lvl].px : NULL;
+}
+
+/* La copie peut-elle rester sur le GPU ? Pas si elle doit régénérer les
+   mipmaps (le cœur les calcule depuis px : la relecture serait de toute façon
+   nécessaire, et la moyenne du cœur est la référence). */
+static bool tex_copy_on_gpu(const QgpuCore *c, const QgpuTexture *t, uint32_t lvl)
+{
+    return c->gpu_copy &&
+           !(t->gen_mipmap && lvl == t->base_level && t->target != QGPU_TT_RECTANGLE);
 }
 
 /* Mipmaps automatiques (OpenGL 1.4) d'une face : niveaux b+1..q recalculés
@@ -1226,6 +1282,16 @@ bool qgpu_core_init(QgpuCore *c, const char *backend,
             c->caps |= QGPU_CAP_SURF_TEX;
         }
         c->caps |= QGPU_CAP_TEX_READBACK;   /* v20 : copie des niveaux dans le cœur */
+        /* 27/09 : copies surface → texture sur le GPU de l'hôte si le backend
+           sait les faire ; QGPU_GPU_COPY=0 garde la relecture (A/B). */
+        {
+            const char *e = getenv("QGPU_GPU_COPY");
+            c->gpu_copy = c->be->tex_copy && c->be->tex_fetch && !(e && !strcmp(e, "0"));
+            if (c->be->tex_copy) {
+                fprintf(stderr, "qgpu: copies surface → texture : %s\n",
+                        c->gpu_copy ? "GPU de l'hôte" : "relecture CPU (QGPU_GPU_COPY=0)");
+            }
+        }
     } else {
         c->caps = 0;
     }
@@ -3239,6 +3305,9 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (!in_shmem(c, off, total)) {
             return QGPU_ST_OOB;
         }
+        if (!tex_cpu(c, t, face, lvl)) {                 /* 27/09 : écriture partielle */
+            return QGPU_ST_BACKEND;
+        }
         tex_store(lv, &src, c->shmem + off, x, y, z, w, h, d, row, img);
         t->dirty[face] |= 1u << lvl;
         if (t->gen_mipmap && lvl == t->base_level && !tex_gen_mipmaps(t, face)) {
@@ -3251,6 +3320,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         QgpuTexture *t;
         QgpuTexLevel *lv;
         uint32_t lvl, x, y, z, sx, sy, w, h, row;
+        uint64_t t0;
         int face;
 
         WANT(QGPU_LEN_COPY_TEX);
@@ -3281,7 +3351,18 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             w > s->width - sx || h > s->height - sy) {
             return QGPU_ST_BAD_ARG;
         }
-        if (!grow_pbuf(c, w * h)) {
+        t0 = now_ns();
+        c->cstats.copy_tex++;
+        /* 27/09 : sur le GPU de l'hôte, même retournement, sans relecture. Le
+           niveau n'existe plus alors que dans la texture du backend. */
+        if (tex_copy_on_gpu(c, t, lvl) &&
+            c->be->tex_copy(c, s, t, (uint32_t)face, lvl, x, y, z, sx, sy, w, h, true)) {
+            lv->gpu = true;
+            c->cstats.copy_tex_gpu++;
+            c->cstats.copy_tex_ns += now_ns() - t0;
+            return QGPU_ST_OK;
+        }
+        if (!tex_cpu(c, t, face, lvl) || !grow_pbuf(c, w * h)) {
             return QGPU_ST_BACKEND;
         }
         if (!c->be->readback(c, s, sx, sy, w, h, c->pbuf)) {
@@ -3302,6 +3383,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (t->gen_mipmap && lvl == t->base_level && !tex_gen_mipmaps(t, face)) {
             return QGPU_ST_BACKEND;
         }
+        c->cstats.copy_tex_ns += now_ns() - t0;
         return QGPU_ST_OK;
     }
 
@@ -3312,6 +3394,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         QgpuTexture *t;
         QgpuTexLevel *lv;
         uint32_t lvl, w, h;
+        uint64_t t0;
 
         WANT(QGPU_LEN_SURF_TEX);
         if (!(c->caps & QGPU_CAP_SURF_TEX)) {
@@ -3333,9 +3416,24 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (!w || !h || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM) {
             return QGPU_ST_BAD_ARG;
         }
+        t0 = now_ns();
+        c->cstats.surf_tex++;
         lv = &t->level[0][lvl];
         if (!tex_alloc_level(lv, w, h, 1, 0x1908, false)) {
             return QGPU_ST_BACKEND;
+        }
+        tex_refresh_format(t);
+        /* 27/09 : sur le GPU de l'hôte. Le niveau est recouvert en entier : ce
+           que px en disait n'a pas à partir vers la texture (dirty effacé) ;
+           px garde taille et format, son contenu est périmé (lv->gpu). */
+        if (tex_copy_on_gpu(c, t, lvl)) {
+            t->dirty[0] &= ~(1u << lvl);
+            if (c->be->tex_copy(c, s, t, 0, lvl, 0, 0, 0, 0, 0, w, h, false)) {
+                lv->gpu = true;
+                c->cstats.surf_tex_gpu++;
+                c->cstats.surf_tex_ns += now_ns() - t0;
+                return QGPU_ST_OK;
+            }
         }
         if (!c->be->readback(c, s, 0, 0, w, h, lv->px)) {
             return QGPU_ST_BACKEND;
@@ -3344,7 +3442,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (t->gen_mipmap && lvl == t->base_level && !tex_gen_mipmaps(t, 0)) {
             return QGPU_ST_BACKEND;
         }
-        tex_refresh_format(t);
+        c->cstats.surf_tex_ns += now_ns() - t0;
         return QGPU_ST_OK;
     }
 
@@ -3369,6 +3467,9 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             return QGPU_ST_BAD_ARG;
         }
         lv = &t->level[face][lvl];
+        if (!tex_cpu(c, t, face, lvl)) {                 /* 27/09 : niveau tenu par le GPU */
+            return QGPU_ST_BACKEND;
+        }
         n = lv->px ? lv->w * lv->h * lv->d : 0;
         if (lv->px && lv->fmt == 0x1902) {
             return QGPU_ST_BAD_ARG;                  /* profondeur : pas de mots ARGB */

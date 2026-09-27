@@ -4731,7 +4731,7 @@ static void run_v13(QgpuCore *c, uint8_t *shmem)
         emit(&e, 0); emit(&e, 0); emit(&e, 4); emit(&e, 4);
         st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
         {
-            const uint32_t *lv0 = c->tex[40].level[0][0].px;
+            const uint32_t *lv0 = qgpu_core_tex_px(c, 40, 0, 0);   /* 27/09 : rapatrié si copie GPU */
             uint32_t bas = lv0 ? lv0[0] & 0xFFFFFF : 0, haut = lv0 ? lv0[3 * 8] & 0xFFFFFF : 0;
             CHECK(st == QGPU_ST_OK && bas == 0xFF0000 && haut == 0x0000FF,
                   "COPY_TEX orientation OpenGL : ligne 0 %06x (rouge), ligne 3 %06x (bleu), st %u",
@@ -5899,7 +5899,7 @@ static void run_v20(QgpuCore *c, uint8_t *shmem)
     emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX));
     emit(&e, 50); emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, 5);
     st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
-    lv = c->tex[50].level[0][0].px;
+    lv = qgpu_core_tex_px(c, 50, 0, 0);
     CHECK(st == QGPU_ST_OK && lv && c->tex[50].level[0][0].w == 16 && c->tex[50].level[0][0].h == 8 &&
           c->tex[50].level[0][0].fmt == 0x1908 &&
           (lv[0] & 0xFFFFFF) == 0x0000FF && (lv[7 * 16] & 0xFFFFFF) == 0xFF0000,
@@ -5928,7 +5928,7 @@ static void run_v20(QgpuCore *c, uint8_t *shmem)
     clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF00FF00, 1.0f);
     emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 1);
     st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
-    lv = c->tex[50].level[0][0].px;
+    lv = qgpu_core_tex_px(c, 50, 0, 0);
     CHECK(st == QGPU_ST_OK && lv && (lv[0] & 0xFFFFFF) == 0x0000FF,
           "SURF_TEX est une copie : texture inchangée après effacement de la surface (%06x)",
           lv ? lv[0] & 0xFFFFFF : 0);
@@ -5939,7 +5939,7 @@ static void run_v20(QgpuCore *c, uint8_t *shmem)
     emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX));
     emit(&e, 51); emit(&e, QGPU_TT_RECTANGLE); emit(&e, 0); emit(&e, 5);
     st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
-    lv = c->tex[51].level[0][0].px;
+    lv = qgpu_core_tex_px(c, 51, 0, 0);
     CHECK(st == QGPU_ST_OK && lv && (lv[3 * 16 + 5] & 0xFFFFFF) == 0x00FF00 &&
           c->tex[51].level[0][0].w == 16,
           "SURF_TEX rectangle : st %u texel %06x", st, lv ? lv[3 * 16 + 5] & 0xFFFFFF : 0);
@@ -6609,6 +6609,234 @@ static void run_v15(QgpuCore *c, uint8_t *shmem)
 typedef struct { QgpuCore *c; uint8_t *shmem; } BackendRun;
 
 /* Tout ce qui suit l'initialisation, sur le thread « de rendu ». */
+/* ── 27/09 : copies surface → texture sur le GPU de l'hôte ─────────────────
+ *
+ * Le même flux joué deux fois sur le backend gl : relecture CPU
+ * (c->gpu_copy = false, l'ancien chemin, référence) puis copie GPU
+ * (be->tex_copy). Toutes les cibles et les formats que COPY_TEX et SURF_TEX
+ * peuvent viser, des rectangles décalés, une sous-image par-dessus une copie
+ * GPU (rapatriement), des mipmaps automatiques (restent sur la relecture),
+ * un redimensionnement de SURF_TEX ; puis on compare les texels (dans les
+ * composantes que le format garde) et un dessin de la texture, à l'octet. */
+#define GC_PAT1  0x20000u      /* motif 64×64 de la surface 1 */
+#define GC_PAT7  0x24000u      /* motif 24×12 de la surface 7 */
+#define GC_TEXD  0x26000u      /* 32×16 texels constants */
+#define GC_SUBD  0x27000u      /* 2×2 texels de sous-image */
+#define GC_NLV   11
+#define GC_MAXPX (64 * 64)
+
+static uint32_t gc_pat(uint32_t x, uint32_t y, uint32_t k)
+{
+    return ((128u + x + y + k) & 255) << 24 | ((x * 4 + k) & 255) << 16 |
+           ((y * 4) & 255) << 8 | (((x ^ y) * 3 + k) & 255);
+}
+
+static void run_gpu_copy(QgpuCore *c, uint8_t *shmem)
+{
+    /* niveaux relus : texture, face, niveau, masque des composantes gardées */
+    static const struct { uint32_t tex, face, lvl, mask; const char *nom; } lv[GC_NLV] = {
+        { 60, 0, 0, 0xFFFFFFFF, "2D RGBA, rectangle décalé + sous-image + 2e copie" },
+        { 61, 0, 0, 0x00FF0000, "2D LUMINANCE" },
+        { 62, 4, 0, 0x00FFFFFF, "cube face +Z, RGB" },
+        { 62, 0, 0, 0x00FFFFFF, "cube face +X (intacte)" },
+        { 63, 0, 0, 0xFFFFFFFF, "rectangle RGBA" },
+        { 64, 0, 0, 0xFFFFFFFF, "SURF_TEX 2D redimensionnée" },
+        { 65, 0, 0, 0xFFFFFFFF, "SURF_TEX rectangle" },
+        { 66, 0, 0, 0xFFFFFFFF, "3D, tranche 2" },
+        { 67, 0, 0, 0xFFFFFFFF, "1D" },
+        { 68, 0, 0, 0xFFFFFFFF, "2D mipmaps auto (relecture), niveau 0" },
+        { 68, 0, 1, 0xFFFFFFFF, "2D mipmaps auto (relecture), niveau 1" },
+    };
+    static uint32_t got[2][GC_NLV][GC_MAXPX], n[2][GC_NLV], img[2][64 * 64];
+    static uint32_t sts[2][16];
+    uint64_t gpu_copies[2] = { 0, 0 }, fetches[2] = { 0, 0 };
+    bool keep = c->gpu_copy, has3d = (c->caps & QGPU_CAP_GL14) != 0;
+    Emit e, v;
+    uint32_t m, i, x, y, k;
+    int bad;
+
+    printf("-- copies surface → texture sur le GPU (27/09) --\n");
+    if (!c->be->tex_copy) {
+        printf("  –    backend %s sans tex_copy : relecture seule (ignoré)\n", c->be->name);
+        return;
+    }
+    e.base = v.base = shmem;
+    for (y = 0; y < 64; y++)
+        for (x = 0; x < 64; x++)
+            qgpu_st32(shmem + GC_PAT1 + (y * 64 + x) * 4, gc_pat(x, y, 0));
+    for (y = 0; y < 12; y++)
+        for (x = 0; x < 24; x++)
+            qgpu_st32(shmem + GC_PAT7 + (y * 24 + x) * 4, gc_pat(x, y, 77));
+    for (i = 0; i < 32 * 16; i++)
+        qgpu_st32(shmem + GC_TEXD + i * 4, 0xFF102030);
+    for (i = 0; i < 4; i++)
+        qgpu_st32(shmem + GC_SUBD + i * 4, 0xFFABCDEF);
+
+    for (m = 0; m < 2; m++) {
+        QgpuCopyStats before;
+        uint32_t ns = 0;
+
+        qgpu_core_reset(c);
+        c->gpu_copy = m == 1;
+        before = c->cstats;
+        e.off = e.start = CMD_OFF;
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 0);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 0);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+        emit(&e, 1); emit(&e, W); emit(&e, H); emit(&e, QGPU_FMT_XRGB8888);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+        emit(&e, 7); emit(&e, 24); emit(&e, 12); emit(&e, QGPU_FMT_XRGB8888);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_UPLOAD, QGPU_LEN_SURF_XFER));
+        emit(&e, 1); emit(&e, GC_PAT1); emit(&e, 64 * 4); emit(&e, 0); emit(&e, 0);
+        emit(&e, 64); emit(&e, 64);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_UPLOAD, QGPU_LEN_SURF_XFER));
+        emit(&e, 7); emit(&e, GC_PAT7); emit(&e, 24 * 4); emit(&e, 0); emit(&e, 0);
+        emit(&e, 24); emit(&e, 12);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 1);
+        sts[m][ns++] = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+
+        /* 60 : 2D RGBA 32×16 constante, rectangle décalé */
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, 60, QGPU_TT_2D);
+        timage3(&e, 60, QGPU_TT_2D, 0, 32, 16, 1, 0x1908, 0x80E1, 0x8367, GC_TEXD, 32 * 4, 0);
+        tparam(&e, 60, QGPU_TP_MIN_FILTER, 0x2600);
+        tparam(&e, 60, QGPU_TP_MAG_FILTER, 0x2600);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX));
+        emit(&e, 60); emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, 3); emit(&e, 2); emit(&e, 0);
+        emit(&e, 5); emit(&e, 7); emit(&e, 20); emit(&e, 9);
+        /* 61 : luminance 16×16 */
+        tcreate3(&e, 61, QGPU_TT_2D);
+        timage3(&e, 61, QGPU_TT_2D, 0, 16, 16, 1, 0x1909, 0x1909, 0x1401, QGPU_TEX_NO_DATA, 0, 0);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX));
+        emit(&e, 61); emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, 0); emit(&e, 0); emit(&e, 0);
+        emit(&e, 10); emit(&e, 20); emit(&e, 16); emit(&e, 16);
+        /* 62 : cube RGB, face +Z */
+        tcreate3(&e, 62, QGPU_TT_CUBE_MAP);
+        for (k = 0; k < 6; k++)
+            timage3(&e, 62, QGPU_TT_CUBE_FACE(k), 0, 16, 16, 1, 0x1907, 0x1907, 0x1401,
+                    QGPU_TEX_NO_DATA, 0, 0);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX));
+        emit(&e, 62); emit(&e, QGPU_TT_CUBE_FACE(4)); emit(&e, 0); emit(&e, 2); emit(&e, 1); emit(&e, 0);
+        emit(&e, 30); emit(&e, 40); emit(&e, 12); emit(&e, 13);
+        /* 63 : rectangle 40×30 */
+        tcreate3(&e, 63, QGPU_TT_RECTANGLE);
+        timage3(&e, 63, QGPU_TT_RECTANGLE, 0, 40, 30, 1, 0x1908, 0x1908, 0x1401,
+                QGPU_TEX_NO_DATA, 0, 0);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX));
+        emit(&e, 63); emit(&e, QGPU_TT_RECTANGLE); emit(&e, 0); emit(&e, 0); emit(&e, 0); emit(&e, 0);
+        emit(&e, 1); emit(&e, 2); emit(&e, 40); emit(&e, 30);
+        sts[m][ns++] = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+
+        /* 64 : SURF_TEX 2D de 7 (24×12), de 1 (64×64), de 7 encore ; 65 : rectangle */
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, 64, QGPU_TT_2D);
+        for (k = 0; k < 3; k++) {
+            emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX));
+            emit(&e, 64); emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, k == 1 ? 1 : 7);
+        }
+        tcreate3(&e, 65, QGPU_TT_RECTANGLE);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX));
+        emit(&e, 65); emit(&e, QGPU_TT_RECTANGLE); emit(&e, 0); emit(&e, 7);
+        sts[m][ns++] = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+
+        /* 66 : 3D 8×8×4, tranche 2 */
+        if (has3d) {
+            e.off = e.start = CMD_OFF;
+            tcreate3(&e, 66, QGPU_TT_3D);
+            timage3(&e, 66, QGPU_TT_3D, 0, 8, 8, 4, 0x1908, 0x1908, 0x1401, QGPU_TEX_NO_DATA, 0, 0);
+            emit(&e, QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX));
+            emit(&e, 66); emit(&e, QGPU_TT_3D); emit(&e, 0); emit(&e, 1); emit(&e, 1); emit(&e, 2);
+            emit(&e, 3); emit(&e, 3); emit(&e, 6); emit(&e, 5);
+            sts[m][ns++] = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        }
+        /* 67 : 1D 32 ; 68 : 2D 16×16 à mipmaps automatiques */
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, 67, QGPU_TT_1D);
+        timage3(&e, 67, QGPU_TT_1D, 0, 32, 1, 1, 0x1908, 0x1908, 0x1401, QGPU_TEX_NO_DATA, 0, 0);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX));
+        emit(&e, 67); emit(&e, QGPU_TT_1D); emit(&e, 0); emit(&e, 4); emit(&e, 0); emit(&e, 0);
+        emit(&e, 9); emit(&e, 33); emit(&e, 20); emit(&e, 1);
+        tcreate3(&e, 68, QGPU_TT_2D);
+        tparam(&e, 68, QGPU_TP_GENERATE_MIPMAP, 1);
+        timage3(&e, 68, QGPU_TT_2D, 0, 16, 16, 1, 0x1908, 0x1908, 0x1401, QGPU_TEX_NO_DATA, 0, 0);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX));
+        emit(&e, 68); emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, 0); emit(&e, 0); emit(&e, 0);
+        emit(&e, 20); emit(&e, 20); emit(&e, 16); emit(&e, 16);
+        /* sous-image par-dessus la copie GPU de 60 (rapatriement), puis une
+           seconde copie GPU ailleurs dans le même niveau */
+        tsub(&e, 60, QGPU_TT_2D, 0, 0, 0, 0, 2, 2, 1, 0x80E1, 0x8367, GC_SUBD);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_COPY_TEX, QGPU_LEN_COPY_TEX));
+        emit(&e, 60); emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, 20); emit(&e, 10); emit(&e, 0);
+        emit(&e, 0); emit(&e, 0); emit(&e, 10); emit(&e, 5);
+        sts[m][ns++] = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+
+        /* dessin de 60 (REPLACE, NEAREST) sur toute la surface 1 */
+        v.off = v.start = VTX_OFF;
+        tex_quad(&v, 1, 1, 1, 1, 1, 1);
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_TEXTURE, 1);
+        state(&e, QGPU_SK_TEX_BIND, 60);
+        state(&e, QGPU_SK_TEX_ENV_MODE, 0x1E01);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_DRAW_TRIANGLES_TEX, QGPU_LEN_DRAW));
+        emit(&e, 6); emit(&e, VTX_OFF);
+        state(&e, QGPU_SK_TEXTURE, 0);
+        readback_cmd(&e, 1);
+        sts[m][ns++] = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        memcpy(img[m], shmem + RB_OFF, sizeof(img[m]));
+
+        gpu_copies[m] = (c->cstats.copy_tex_gpu - before.copy_tex_gpu) +
+                        (c->cstats.surf_tex_gpu - before.surf_tex_gpu);
+        fetches[m] = c->cstats.fetch - before.fetch;
+        for (i = 0; i < GC_NLV; i++) {
+            const QgpuTexture *t = &c->tex[lv[i].tex];
+            const QgpuTexLevel *l = &t->level[lv[i].face][lv[i].lvl];
+            const uint32_t *p;
+            n[m][i] = 0;
+            if (lv[i].tex == 66 && !has3d)
+                continue;
+            p = qgpu_core_tex_px(c, lv[i].tex, lv[i].face, lv[i].lvl);
+            if (p && l->w * l->h * l->d <= GC_MAXPX) {
+                n[m][i] = l->w * l->h * l->d;
+                for (k = 0; k < n[m][i]; k++)
+                    got[m][i][k] = p[k] & lv[i].mask;
+            }
+        }
+        for (i = 0; i < ns; i++)
+            CHECK(sts[m][i] == QGPU_ST_OK, "%s, étape %u : st %u",
+                  m ? "copie GPU" : "relecture", i, sts[m][i]);
+    }
+    c->gpu_copy = keep;
+
+    CHECK(gpu_copies[0] == 0 && gpu_copies[1] == (has3d ? 11u : 10u) && fetches[1] >= 1,
+          "copies par le GPU : relecture %llu, GPU %llu (attendu %u : tout sauf les mipmaps "
+          "automatiques), rapatriements %llu",
+          (unsigned long long)gpu_copies[0], (unsigned long long)gpu_copies[1],
+          has3d ? 11u : 10u, (unsigned long long)fetches[1]);
+    for (i = 0; i < GC_NLV; i++) {
+        if (lv[i].tex == 66 && !has3d)
+            continue;
+        bad = -1;
+        for (k = 0; k < n[0][i] && bad < 0; k++)
+            if (got[0][i][k] != got[1][i][k])
+                bad = (int)k;
+        CHECK(n[0][i] && n[0][i] == n[1][i] && bad < 0,
+              "texels identiques relecture/GPU — %s (%u texels%s, 1er écart %d : %08x/%08x)",
+              lv[i].nom, n[0][i], n[0][i] == n[1][i] ? "" : " : TAILLES DIFFÉRENTES", bad,
+              bad >= 0 ? got[0][i][bad] : 0, bad >= 0 ? got[1][i][bad] : 0);
+    }
+    /* repères absolus (la relecture elle-même est éprouvée ailleurs) */
+    CHECK(got[1][0][0] == 0xFFABCDEF && got[1][0][2 * 32 + 3] == gc_pat(5, 7 + 8, 0) &&
+          got[1][0][10 * 32 + 20] == gc_pat(0, 4, 0) && got[1][0][15 * 32 + 31] == 0xFF102030,
+          "60 : sous-image %08x, copie retournée (3,2)=%08x (attendu %08x), 2e copie %08x, "
+          "hors copie %08x", got[1][0][0], got[1][0][2 * 32 + 3], gc_pat(5, 15, 0),
+          got[1][0][10 * 32 + 20], got[1][0][15 * 32 + 31]);
+    CHECK(n[1][5] == 24 * 12 && got[1][5][0] == gc_pat(0, 0, 77) &&
+          got[1][5][11 * 24 + 23] == gc_pat(23, 11, 77),
+          "SURF_TEX redimensionnée : %u texels, ligne 0 = haut (%08x)", n[1][5], got[1][5][0]);
+    CHECK(!memcmp(img[0], img[1], sizeof(img[0])),
+          "dessin de la texture 60 identique à l'octet (relecture / GPU)");
+}
+
 static void *run_backend_body(void *arg)
 {
     BackendRun *r = arg;
@@ -6703,6 +6931,7 @@ static void *run_backend_body(void *arg)
     run_native(c, shmem);
     run_v19(c, shmem);
     run_v20(c, shmem);
+    run_gpu_copy(c, shmem);     /* 27/09 */
 
     qgpu_core_reset(c);
     e.off = e.start = CMD_OFF;

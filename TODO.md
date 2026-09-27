@@ -121,10 +121,13 @@ table de dispatch) classée : GLEngine < 3 % du fil principal. Ce qui reste du p
       son fil `qgpu-render`, 7-9 % d'un cœur en jeu : `docs/smp-coeurs.md` §3, levier L4.)
 - [ ] **`QGPU_REG_ERRORS` par client** : aujourd'hui global, un autre processus fait passer le
       plugin en synchrone sans faute de sa part.
-- [ ] **`SURF_TEX` et `COPY_TEX` par le GPU** (27/09) : les deux relisent la surface côté CPU
-      (`be->readback`) puis téléversent ; une copie FBO → texture (`glCopyTexSubImage2D` sur le
-      FBO lié) l'éviterait. Colin McRae en fait plusieurs par image. Épreuve : ms/image au
-      départ d'ESP 1 (matrice `cmr-pe`).
+- [ ] **`SURF_TEX` et `COPY_TEX` par le GPU** : **fait hors VM le 27/09**
+      (`docs/protocole-v20-surface-texture.md` §« Copie GPU ») — copie FBO → texture
+      (`glCopyTexSubImage2D`, blit retourné pour `COPY_TEX`), niveau tenu par le GPU et
+      rapatrié à la demande, `QGPU_GPU_COPY=0` pour l'ancien chemin ; rejeux des 21 vidages
+      identiques à l'octet, copies 4 à 9 fois plus rapides, 0,7 à 2,4 ms par image de moins
+      dans le cœur. Reste : **mesure en VM** (`tools/matrice/ab-copie-gpu.sh`, ms/image de
+      `cmr-pe`, `d3-*`, `prey-*`) avant de reconstruire le QEMU de référence.
 - [ ] **Coordonnées de texture en mode immédiat sous programme de sommets** : perdues (vu le
       27/09 en écrivant `gltest rectfp` ; la scène passe par des tableaux). Scène à écrire.
 - [ ] **`gltest tex14` « λ=2 sans biais »** : défaut du GL de l'hôte macOS (le biais d'unité
@@ -137,9 +140,9 @@ table de dispatch) classée : GLEngine < 3 % du fil principal. Ce qui reste du p
       device lit et diffère lui-même, textures lues par DMA sur plages sales, empaquetage
       minimal (position en trois mots, texcoords à taille déclarée, tampons hôte réutilisés).
       Épreuve : `send_state` et `compute_state` sortent du profil.
-- [ ] **Backend GL** : G7 `glTexSubImage*` par rectangle sale, G8 `tex_copy` par
-      `glCopyTexSubImage2D` et PBO en rotation pour `SURF_PRESENT`, G9 cache d'état dans
-      `gl_target`.
+- [ ] **Backend GL** : G7 `glTexSubImage*` par rectangle sale, G8 PBO en rotation pour
+      `SURF_PRESENT` (le `tex_copy` par `glCopyTexSubImage2D` est fait le 27/09, ligne
+      `SURF_TEX`/`COPY_TEX` ci-dessus), G9 cache d'état dans `gl_target`.
 
 ---
 
