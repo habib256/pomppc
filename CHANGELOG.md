@@ -8,6 +8,11 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Nexuiz 2.5.2 installé comme banc GL** (27/09) : zip officiel (SourceForge), binaire AGL
+  universel PowerPC, `~/Nexuiz` dans l'invité, lanceur `tools/guest/launchers/nexuiz.command`
+  (`-basedir`, `~/nexuiz.env`, gltrap). Premier benchmark `demo1` en fenêtre 800×600 : 1 910
+  images en 214 s (8,9 img/s, 4-33), sans plantage ; GLSL coupé par le jeu faute de
+  `GL_ARB_fragment_shader` ; deux replis d'échange par image.
 - **Copies surface → texture sur le GPU de l'hôte en service** (27/09) : QEMU de référence
   reconstruit (précédent en `*.avant-gpucopy`). A/B en VM (`tools/matrice/ab-copie-gpu.sh`,
   même binaire, `QGPU_GPU_COPY=0` puis 1) : Colin McRae plein écran 68,8 → 67,1 ms/image,

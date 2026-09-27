@@ -70,6 +70,7 @@ Dernier tour : `bench/matrice/20260927-0307/tableau.md` (plugin `20260927-rtt`, 
 | UT2004 Demo | tableaux, VBO, S3TC | **vert** | **vert** | 29,5 / 29,0 ms/image (intro d'AS-Convoy) | arme en main noire, hors de la scène (§6) |
 | Warcraft III | tableaux | non automatisé | **vert** | 19,3 ms/image (menu) | fenêtre (§7) |
 | Colin McRae | ARB via IndirectX, rendu vers texture | non automatisé (pas de mode fenêtre) | **vert** (27/09) | 72,6 ms/image du jeu (départ d'ESP 1, 3 échanges par image ; 69,1 seul) | vitesse |
+| Nexuiz 2.5.2 | DarkPlaces (GPL), ARB / GLSL | tourne (benchmark `demo1` : 8,9 img/s, 4-33) | 2 replis par image en fenêtre | — | installé le 27/09 (`~/Nexuiz`, lanceur `tools/guest/launchers/nexuiz.command`, sources dans `.run/jeux/Nexuiz/sources/`) ; GLSL éteint par le jeu : `GL_ARB_fragment_shader` non annoncée (§6) |
 | RTCW | idTech3, pipeline fixe | non automatisé | non automatisé | — | absent du disque quotidien ; quitte après 8 s (§6) |
 | Bureau (Quartz Extreme) | WindowServer | — | — | — | §5 |
 
@@ -248,6 +249,13 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
       `docs/re/cmr-rendu-vers-texture.md`) : en course la voiture roule-t-elle juste (seul le
       départ, voiture arrêtée, est prouvé) ; `POMPPC_GL_RECT=0` fait planter le jeu chez Apple
       (échantillonneur nul dans `glrPolyRGB000`) : ne pas s'en servir pour comparer.
+- [ ] **Nexuiz / GLSL** (27/09) : le plugin annonce `GL_ARB_shader_objects`,
+      `GL_ARB_vertex_shader`, `GL_ARB_shading_language_100` (liste du rendu logiciel d'Apple)
+      mais pas `GL_ARB_fragment_shader` : DarkPlaces coupe son chemin GLSL. Étendre le
+      protocole aux programmes GLSL (texte transmis à l'hôte, GL 2.1 de macOS). Et deux
+      replis d'échange par image en fenêtre (Swap60 + Swap5c/58), comme Marble Blast : à
+      comprendre. Le benchmark `-benchmark demos/demo1` donne une scène rejouable : candidat
+      idéal pour la matrice.
 - [ ] **Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur reste blanc).
       Au 26/09 le menu principal est juste (référence de la matrice validée) : à revoir en
       partie avant de fermer.
