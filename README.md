@@ -206,6 +206,7 @@ conservée : le self % du profil localise, il ne valide pas. En jeu, la mesure e
 
 | Fichier | Contenu |
 |---|---|
+| `docs/architecture.md` | propriété des ressources, threads, barrières, clients morts, resets et limites connues |
 | `docs/gpu-3d-tiger.md` | GPU 3D : architecture, rétro-ingénierie d'OpenGL.framework, protocole, mesures, boucle de dev |
 | `docs/re/README.md` | index des relevés (GLEngine, accélérateur IOKit, UT2004, programmes ARB, étude GLEngine) |
 | `docs/protocole-v7…v18` | le protocole qgpu, version par version (fusion prévue en un seul `protocole.md`) |
