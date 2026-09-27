@@ -117,7 +117,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260927-dumpat"
+#define POMPPC_PLUGIN_REV "20260927-glsl"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -719,6 +719,7 @@ typedef struct PCtx {
     unsigned char  c_tg_on[QGPU_MAX_UNITS];          /* du texgen est-il posé sur le device ? */
     unsigned long  c_clip[25];                       /* masque + 6 plans, contigus */
     unsigned long  c_cur[4][4];                      /* couleur, normale, secondaire, brouillard */
+    unsigned long  c_curtex[QGPU_MAX_UNITS][4];      /* v21 : coordonnées courantes (GLSL) */
     /* v18 : valeurs courantes posées par DRAW_NATIVE pour un attribut du
        format sans tableau (ce que l'empaqueteur aurait recopié : couleur
        morte → blanche, etc.) ; bit QGPU_CUR_* = nat_cur est ce que l'hôte a */
@@ -2392,6 +2393,7 @@ static void invalidate_mirrors(void)
         memset(p->c_tg_on, 0, sizeof(p->c_tg_on));
         memset(p->c_clip, 0, sizeof(p->c_clip));
         memset(p->c_cur, 0, sizeof(p->c_cur));
+        memset(p->c_curtex, 0, sizeof(p->c_curtex));
         memset(p->c_pstip, 0, sizeof(p->c_pstip));
         /* v16 : liaisons et program.env repartent ; les objets, eux, sont
            supposés créés (comme les textures) */
@@ -7427,9 +7429,9 @@ static unsigned long glsl_vs_inputs(const char *s, unsigned long n)
         else if (n - j >= 14 && !memcmp(s + j, "SecondaryColor", 14)) need |= VPN_SEC;
         else if (n - j >= 5 && !memcmp(s + j, "Color", 5)) need |= VPN_COLOR;
         else if (n - j >= 8 && !memcmp(s + j, "FogCoord", 8)) need |= VPN_FOG;
-        else if (n - j >= 12 && !memcmp(s + j, "MultiTexCoord", 12) && j + 12 < n &&
-                 s[j + 12] >= '0' && s[j + 12] <= '7')
-            need |= VPN_TEX(s[j + 12] - '0');
+        else if (n - j >= 13 && !memcmp(s + j, "MultiTexCoord", 13) && j + 13 < n &&
+                 s[j + 13] >= '0' && s[j + 13] <= '7')
+            need |= VPN_TEX(s[j + 13] - '0');
     }
     return need;
 }
@@ -8377,7 +8379,8 @@ static void geom_send_matrices(PCtx *p, unsigned long fmt)
         send_cmd(p, QGPU_OP_SET_MATRIX, QGPU_LEN_SET_MATRIX, a);
     }
     for (u = 0; u < QGPU_MAX_UNITS; u++) {
-        if (!(fmt & QGPU_VF_TEX(u)))
+        /* v21 : un shader de sommets GLSL lit gl_TextureMatrix[u] sans texture */
+        if (!(fmt & QGPU_VF_TEX(u)) && !(p->glsl_on && p->vp_on))
             continue;
         if (!changed(p, g + GS_MAT_TEXTURE(u), p->c_mtx[QGPU_MTX_TEXTURE0 + u], 64))
             continue;
@@ -8405,8 +8408,9 @@ static void geom_send_lights(PCtx *p)
         int moved = changed(p, l, p->c_light[i], 0x60);
         if (!moved && !remask)
             continue;
-        if (!on && !remask)
-            continue;                   /* éteinte et déjà éteinte sur le device */
+        if (!on && !remask && !p->glsl_on)
+            continue;                   /* éteinte et déjà éteinte sur le device (v21 : un
+                                           programme GLSL lit gl_LightSource même éteinte) */
         a[0] = (unsigned long)i;
         a[1] = (unsigned long)on;
         put_f(a + 2, (const float *)(l + LT_AMBIENT), 4);
@@ -8561,7 +8565,22 @@ static void geom_send_current(PCtx *p, unsigned long fmt)
     }
     /* Les coordonnées de texture, elles, sont TOUJOURS dans le format dès que
        l'unité porte une texture : l'hôte n'a jamais à prendre leur valeur
-       courante. (Une unité sans texture est coupée, il ne s'y passe rien.) */
+       courante. (Une unité sans texture est coupée, il ne s'y passe rien.)
+       v21 : sauf sous un shader de sommets GLSL, qui lit gl_MultiTexCoord<u>
+       sans tableau — la valeur courante. */
+    if (p->glsl_on && p->vp_on && p->vp_rec) {
+        int u;
+        for (u = 0; u < QGPU_MAX_UNITS; u++) {
+            if (!(p->vp_rec->vp_need & VPN_TEX(u)) || (fmt & QGPU_VF_TEX(u)))
+                continue;
+            if (!changed(p, g + GS_CUR_TEXCOORD(u), p->c_curtex[u], 16))
+                continue;
+            a[0] = QGPU_CUR_TEXCOORD0 + u;
+            p->nat_cur_ok &= ~(1UL << (QGPU_CUR_TEXCOORD0 + u));
+            put_f(a + 1, (const float *)(g + GS_CUR_TEXCOORD(u)), 4);
+            send_cmd(p, QGPU_OP_SET_CURRENT, QGPU_LEN_SET_CURRENT, a);
+        }
+    }
 }
 
 static void geom_send_viewport(PCtx *p)
@@ -8594,7 +8613,7 @@ static void geom_send_all(PCtx *p, unsigned long fmt)
 {
     geom_send_viewport(p);
     geom_send_matrices(p, fmt);
-    if (GLD_U8(gls(p), GS_LIGHTING))
+    if (GLD_U8(gls(p), GS_LIGHTING) || p->glsl_on)     /* v21 : gl_LightSource */
         geom_send_lights(p);
     geom_send_texgen(p, fmt);
     geom_send_clip(p);

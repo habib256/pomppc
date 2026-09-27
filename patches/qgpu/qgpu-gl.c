@@ -2589,14 +2589,15 @@ static bool gl_reset_raw(QgpuCore *c)
 /* Lumières, matériaux, plans de découpe et plans œil du texgen sont posés
    AVEC UNE MODÈLE-VUE IDENTITÉ : OpenGL les transforme au moment de l'appel,
    et l'invité nous les a déjà donnés en coordonnées œil. */
-static void gl_set_lights(const QgpuGeom *gm)
+static void gl_set_lights(const QgpuGeom *gm, bool all)
 {
     int i;
 
     for (i = 0; i < QGPU_MAX_LIGHTS; i++) {
         const QgpuLight *l = &gm->light[i];
         GLenum id = GL_LIGHT0 + i;
-        if (!l->enabled) {
+        /* v21 : `all` — un programme GLSL lit gl_LightSource[i] même éteinte */
+        if (!l->enabled && !all) {
             glDisable(id);
             continue;
         }
@@ -2610,7 +2611,11 @@ static void gl_set_lights(const QgpuGeom *gm)
         glLightf(id, GL_CONSTANT_ATTENUATION, l->att[0]);
         glLightf(id, GL_LINEAR_ATTENUATION, l->att[1]);
         glLightf(id, GL_QUADRATIC_ATTENUATION, l->att[2]);
-        glEnable(id);
+        if (l->enabled) {
+            glEnable(id);
+        } else {
+            glDisable(id);
+        }
     }
 }
 
@@ -2918,7 +2923,7 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
     /* modèle-vue identité pendant qu'on pose ce qu'OpenGL transformerait */
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
-    gl_set_lights(gm);
+    gl_set_lights(gm, gp != NULL);
     gl_set_clip(gm);
     gl_set_texgen(c, gm);
     glLoadMatrixf(gm->mtx[QGPU_MTX_MODELVIEW]);
