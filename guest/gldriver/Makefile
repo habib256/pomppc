@@ -30,7 +30,7 @@ all: $(BIN) $(NAME).bundle/Contents/Info.plist
 # qgpu_proto.h + qgpu_abi.h : le contrat hôte/invité (patches/qgpu/). Dans
 # l'arborescence du dépôt, on les reprend de là ; ailleurs (CD, job de
 # développement), ils doivent déjà être présents à côté des sources.
-%.o: %.c pomppc_gld.h pomppc_qgpu.h qgpu_proto.h qgpu_abi.h
+%.o: %.c pomppc_gld.h pomppc_qgpu.h pomppc_glslpp.h qgpu_proto.h qgpu_abi.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 PROTO_DIR = $(wildcard ../../patches/qgpu)

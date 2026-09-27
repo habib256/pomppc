@@ -59,7 +59,11 @@ Les trois preuves sont produites par `tools/matrice/matrice.py` (`docs/matrice-j
 rejeu natif du vidage identique à la capture de la VM (0,00 % d'écart partout au 26/09) et
 rejeu de la référence validée à l'œil, replis de `frames.csv` (en fenêtre, 2 par 90 images
 admis : rafraîchissement voulu de la fenêtre), ms/image sans le déclencheur de vidage.
-Dernier tour : `bench/matrice/20260927-1018/tableau.md` (plugin `20260927-dumpat`, QEMU v20, 12 vertes sur 13 automatisées, Nexuiz compris, Marble Blast fenêtre rouge connu).
+Dernier tour complet : `bench/matrice/20260927-1137/tableau.md` (plugin `20260927-glsl`,
+QEMU v21, 13 vertes sur 15 automatisées, Nexuiz ARB et GLSL compris). Marble Blast
+fenêtre reste rouge ; DOOM 3 fenêtre, rouge sur la comparaison de capture au tour complet,
+est verte au contrôle isolé `20260927-1216`. Le QEMU de référence reconstruit en v21
+est contrôlé par `20260927-1223` (DOOM 3 et Nexuiz GLSL plein écran verts).
 
 | Jeu | Famille | Fenêtre | Plein écran | Vitesse à scène fixe (26/09) | Manque |
 |---|---|---|---|---|---|
@@ -70,7 +74,8 @@ Dernier tour : `bench/matrice/20260927-1018/tableau.md` (plugin `20260927-dumpat
 | UT2004 Demo | tableaux, VBO, S3TC | **vert** | **vert** | 29,5 / 29,0 ms/image (intro d'AS-Convoy) | arme en main noire, hors de la scène (§6) |
 | Warcraft III | tableaux | non automatisé | **vert** | 19,3 ms/image (menu) | fenêtre (§7) |
 | Colin McRae | ARB via IndirectX, rendu vers texture | non automatisé (pas de mode fenêtre) | **vert** (27/09) | 72,6 ms/image du jeu (départ d'ESP 1, 3 échanges par image ; 69,1 seul) | vitesse |
-| Nexuiz 2.5.2 | DarkPlaces (GPL), ARB / fixe (GLSL coupé) | **vert** (27/09) | **vert** (27/09) | 107,1 / 107,4 ms/image (`-benchmark demos/demo1`, images 120..600 ; 10,1 img/s sur toute la démo) | profil GLSL (`nxg`, non automatisé) : `GL_ARB_fragment_shader` non annoncée (§6) ; installé le 27/09 (`~/Nexuiz`, lanceur `tools/guest/launchers/nexuiz.command`, sources dans `.run/jeux/Nexuiz/sources/`) |
+| Nexuiz 2.5.2 | DarkPlaces (GPL), ARB / fixe (`+r_glsl 0`) | **vert** (27/09) | **vert** (27/09) | 107,8 / 108,1 ms/image (`-benchmark demos/demo1`, images 120..600) | installé dans `~/Nexuiz`, sources dans `.run/jeux/Nexuiz/sources/` |
+| Nexuiz 2.5.2 (GLSL) | DarkPlaces, GLSL (`+r_glsl 1`, protocole v21) | **vert** (27/09) | **vert** (27/09) | 40,5 / 41,2 ms/image (même démo et fenêtre de mesure ; plancher 60 ms) | coût du verdict après `glUniform` (§6) |
 | RTCW | idTech3, pipeline fixe | non automatisé | non automatisé | — | absent du disque quotidien ; quitte après 8 s (§6) |
 | Bureau (Quartz Extreme) | WindowServer | — | — | — | §5 |
 
@@ -249,15 +254,18 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
       `docs/re/cmr-rendu-vers-texture.md`) : en course la voiture roule-t-elle juste (seul le
       départ, voiture arrêtée, est prouvé) ; `POMPPC_GL_RECT=0` fait planter le jeu chez Apple
       (échantillonneur nul dans `glrPolyRGB000`) : ne pas s'en servir pour comparer.
-- [ ] **Nexuiz / GLSL** (27/09) : le plugin annonce `GL_ARB_shader_objects`,
-      `GL_ARB_vertex_shader`, `GL_ARB_shading_language_100` (liste du rendu logiciel d'Apple)
-      mais pas `GL_ARB_fragment_shader` : DarkPlaces coupe son chemin GLSL. Étendre le
-      protocole aux programmes GLSL (texte transmis à l'hôte, GL 2.1 de macOS). Le module de
-      la matrice porte déjà le profil `glsl` (`nxg`, `+r_glsl 1`, non automatisé) : retirer
-      son `non_automatise` le jour venu (`tools/matrice/jeux/nx.py`). Les deux replis par
-      image en fenêtre du premier essai sont compris et corrigés (27/09) : processus
-      « background only », jamais au premier plan ; `premierplan.dylib` préchargé
+- [x] **Nexuiz / GLSL** (27/09) : protocole v21 validé en VM, scènes `glsl*` justes
+      (`glslvs` comparée au rendu d'Apple), 596 permutations de DarkPlaces liées par
+      l'hôte et contournement du préprocesseur de GLEngine 10.4.6 dans le plugin
+      (`docs/protocole-v21-glsl.md`, `docs/re/glsl-glengine.md`). Nexuiz : 23 programmes
+      liés par l'hôte, zéro repli hors rafraîchissements, rejeu = capture VM (0,00 %).
+      Profil `nxg` automatisé, fenêtre et plein écran verts à 40,5 / 41,2 ms/image
+      contre 107,8 / 108,1 en ARB ; QEMU de référence reconstruit et contrôlé en v21.
+      `premierplan.dylib` reste préchargé pour mettre le jeu au premier plan
       (`docs/matrice-jeux.md` §4).
+- [ ] **Nexuiz / GLSL, vitesse** : chaque `glUniform` pose le bit `0x04000000` du bloc
+      de changements et fait recalculer le verdict (154 298 dispatches sur 173 572
+      dans la démo). Étudier ce coût sans perdre la détection des changements de samplers.
 - [ ] **Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur reste blanc).
       Au 26/09 le menu principal est juste (référence de la matrice validée) : à revoir en
       partie avant de fermer.

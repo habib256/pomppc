@@ -712,6 +712,7 @@ const char *gldGetString(long a, long name, long c, long d, long e, long f, long
     long b = name;
     const char *s = (const char *)FWD8(GLD_GetString);
     const char *o = pomppc_override_string(name, s);
+    pomppc_glsl_hook((void *)a);        /* v21 : préprocesseur GLSL de GLEngine */
     pomppc_log("gldGetString(%08lx %lx) -> %s\n", a, name, o ? o : "(nul)");
     return o;
 }

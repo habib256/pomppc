@@ -48,6 +48,10 @@
  * rect rectfp : textures rectangle, pipeline fixe (et copie d'écran) et
  * programme de fragments (27/09, Colin McRae).
  *
+ * glsl glslvs glslfs glsldp : programmes GLSL (protocole v21, DarkPlaces) —
+ * glslvs a sa référence chez le rendu d'Apple (shaders de sommets émulés),
+ * les autres des valeurs attendues (Apple n'a pas GL_ARB_fragment_shader).
+ *
  * alpharep arbfp arbvp bigstrip blendc caps clip comb combprobe cube cubeprobe depth
  * depthrt dlist drawpack entry fill fogz forkdraw fusion game gl15
  * gouraud lightprobe lit logicop matbegin matprobe mix mixte mtxprobe
@@ -374,6 +378,495 @@ static const unsigned char fus_col[6][3] = {
     { 255, 255, 0 }, { 255, 0, 255 }, { 0, 255, 255 }
 };
 #define FCOL(k) fus_col[k][0], fus_col[k][1], fus_col[k][2]
+
+
+/* ─────────── v21 : programmes GLSL (docs/protocole-v21-glsl.md) ───────────
+ *
+ * Scènes glsl, glslvs, glslfs, glsldp. Triangle (4,4) (60,4) (4,60) en
+ * coordonnées GL sur fond bleu, témoins dedans (16, 47 depuis le haut) et
+ * dehors (48, 47), comme arbvp/arbfp. Le rendu d'Apple (POMPPC_GL_DISABLE=1)
+ * tient les shaders de SOMMETS (émulés) mais n'annonce pas
+ * GL_ARB_fragment_shader : glslvs a sa référence chez lui, les autres n'en
+ * ont que sur l'hôte (valeurs attendues écrites ici).
+ *   glsl   : sommets + fragments — uniforms de tous types (float, vec2, vec3,
+ *            vec4, int, bool, ivec2, mat2, mat3, mat4, tableaux), valeur
+ *            changée entre deux dessins, échantillonneurs sur les unités 0 et
+ *            9 (unité d'image au-delà des 8 du pipeline fixe) et sur une unité
+ *            sans texture (noir), attribut nommé lié à l'emplacement 3,
+ *            gl_FragCoord (y depuis le bas), état intégré (gl_LightSource,
+ *            gl_TextureMatrix[1] × gl_MultiTexCoord1 d'une unité sans
+ *            texture), retour au pipeline fixe (glUseProgramObjectARB(0)) ;
+ *   glslvs : shader de sommets seul (fragment du pipeline fixe) : uniform,
+ *            attribut nommé, gl_ModelViewProjectionMatrix, gl_LightSource ;
+ *   glslfs : shader de fragments seul (sommets du pipeline fixe) ;
+ *   glsldp : ce que fait DarkPlaces (mode lightmap) : gl_MultiTexCoord0 et 4,
+ *            gl_TextureMatrix[0], carte de lumière en unité 9, couleur en 1,
+ *            teinte par uniform. */
+typedef unsigned long gs_handle;       /* GLhandleARB de Tiger : 32 bits */
+typedef gs_handle (*gs_create_sh)(GLenum);
+typedef gs_handle (*gs_create_pr)(void);
+typedef void (*gs_source)(gs_handle, GLsizei, const char **, const GLint *);
+typedef void (*gs_h)(gs_handle);
+typedef void (*gs_hh)(gs_handle, gs_handle);
+typedef void (*gs_getiv)(gs_handle, GLenum, GLint *);
+typedef void (*gs_log)(gs_handle, GLsizei, GLsizei *, char *);
+typedef GLint (*gs_loc)(gs_handle, const char *);
+typedef void (*gs_bindattr)(gs_handle, GLuint, const char *);
+typedef void (*gs_u1i)(GLint, GLint);
+typedef void (*gs_u2i)(GLint, GLint, GLint);
+typedef void (*gs_u1f)(GLint, GLfloat);
+typedef void (*gs_u2f)(GLint, GLfloat, GLfloat);
+typedef void (*gs_u3f)(GLint, GLfloat, GLfloat, GLfloat);
+typedef void (*gs_u4f)(GLint, GLfloat, GLfloat, GLfloat, GLfloat);
+typedef void (*gs_ufv)(GLint, GLsizei, const GLfloat *);
+typedef void (*gs_umat)(GLint, GLsizei, GLboolean, const GLfloat *);
+typedef void (*gs_vap)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid *);
+typedef void (*gs_ea)(GLuint);
+typedef void (*gs_at)(GLenum);
+typedef void (*gs_mtc)(GLenum, GLfloat, GLfloat, GLfloat, GLfloat);
+static struct {
+    gs_create_sh create_sh; gs_create_pr create_pr; gs_source source; gs_h compile, link, use, del;
+    gs_hh attach; gs_getiv getiv; gs_log log; gs_loc uloc; gs_bindattr bindattr;
+    gs_u1i u1i; gs_u2i u2i; gs_u1f u1f; gs_u2f u2f; gs_u3f u3f; gs_u4f u4f; gs_ufv u1fv, u4fv;
+    gs_umat m2, m3, m4; gs_vap vap; gs_ea eva, dva; gs_at active; gs_mtc mtc;
+} GS;
+#define GLSL_VERT 0x8B31
+#define GLSL_FRAG 0x8B30
+#define GLSL_COMPILED 0x8B81
+#define GLSL_LINKED 0x8B82
+
+/* Programme de `vs` (ou 0) et `fs` (ou 0) ; `attr3` : nom lié à l'emplacement 3.
+   0 si la compilation ou l'édition des liens échoue (journal imprimé). */
+static gs_handle glsl_prog(const char *vs, const char *fs, const char *attr3)
+{
+    gs_handle p = GS.create_pr(), s;
+    const char *src[2] = { vs, fs };
+    GLenum stage[2] = { GLSL_VERT, GLSL_FRAG };
+    GLint ok = 0;
+    char buf[1024];
+    int k;
+    for (k = 0; k < 2; k++) {
+        if (!src[k])
+            continue;
+        s = GS.create_sh(stage[k]);
+        if (!s) {
+            printf("  glCreateShaderObjectARB(%s) = 0 (erreur 0x%x)\n",
+                   k ? "fragments" : "sommets", (unsigned)glGetError());
+            return 0;
+        }
+        GS.source(s, 1, (const char **)&src[k], NULL);
+        GS.compile(s);
+        GS.getiv(s, GLSL_COMPILED, &ok);
+        buf[0] = 0;
+        GS.log(s, sizeof(buf), NULL, buf);
+        if (!ok || buf[0])
+            printf("  compilation %s : %s %s\n", k ? "fragments" : "sommets",
+                   ok ? "ok" : "REFUSÉE", buf);
+        if (!ok)
+            return 0;
+        GS.attach(p, s);
+        GS.del(s);
+    }
+    if (attr3)
+        GS.bindattr(p, 3, attr3);
+    GS.link(p);
+    GS.getiv(p, GLSL_LINKED, &ok);
+    buf[0] = 0;
+    GS.log(p, sizeof(buf), NULL, buf);
+    if (!ok || buf[0])
+        printf("  liens : %s %s\n", ok ? "ok" : "REFUSÉS", buf);
+    return ok ? p : 0;
+}
+
+static void glsl_tri(void)
+{
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glFinish();
+}
+
+static int scene_glsl(const char *scene)
+{
+    static const GLfloat pos[3][2] = { { 4, 4 }, { 60, 4 }, { 4, 60 } };
+    static const GLfloat white[3][4] = { { 1, 1, 1, 1 }, { 1, 1, 1, 1 }, { 1, 1, 1, 1 } };
+    static const GLfloat magenta[3][4] = { { 1, 0, 1, 1 }, { 1, 0, 1, 1 }, { 1, 0, 1, 1 } };
+    static const char vs_basic[] =
+        "void main()\n{\n    gl_FrontColor = gl_Color;\n    gl_Position = ftransform();\n}\n";
+    static const char fs_tint[] =
+        "uniform vec4 tint;\nvoid main()\n{\n    gl_FragColor = gl_Color * tint;\n}\n";
+    const int IX = 16, IY = 47, OX = 48, OY = 47;
+    gs_handle p;
+    GLint l;
+
+    GS.create_sh = (gs_create_sh)gl_sym("glCreateShaderObjectARB", "glCreateShader");
+    GS.create_pr = (gs_create_pr)gl_sym("glCreateProgramObjectARB", "glCreateProgram");
+    GS.source = (gs_source)gl_sym("glShaderSourceARB", "glShaderSource");
+    GS.compile = (gs_h)gl_sym("glCompileShaderARB", "glCompileShader");
+    GS.link = (gs_h)gl_sym("glLinkProgramARB", "glLinkProgram");
+    GS.use = (gs_h)gl_sym("glUseProgramObjectARB", "glUseProgram");
+    GS.del = (gs_h)gl_sym("glDeleteObjectARB", "glDeleteObjectARB");
+    GS.attach = (gs_hh)gl_sym("glAttachObjectARB", "glAttachShader");
+    GS.getiv = (gs_getiv)gl_sym("glGetObjectParameterivARB", "glGetObjectParameterivARB");
+    GS.log = (gs_log)gl_sym("glGetInfoLogARB", "glGetInfoLogARB");
+    GS.uloc = (gs_loc)gl_sym("glGetUniformLocationARB", "glGetUniformLocation");
+    GS.bindattr = (gs_bindattr)gl_sym("glBindAttribLocationARB", "glBindAttribLocation");
+    GS.u1i = (gs_u1i)gl_sym("glUniform1iARB", "glUniform1i");
+    GS.u2i = (gs_u2i)gl_sym("glUniform2iARB", "glUniform2i");
+    GS.u1f = (gs_u1f)gl_sym("glUniform1fARB", "glUniform1f");
+    GS.u2f = (gs_u2f)gl_sym("glUniform2fARB", "glUniform2f");
+    GS.u3f = (gs_u3f)gl_sym("glUniform3fARB", "glUniform3f");
+    GS.u4f = (gs_u4f)gl_sym("glUniform4fARB", "glUniform4f");
+    GS.u1fv = (gs_ufv)gl_sym("glUniform1fvARB", "glUniform1fv");
+    GS.u4fv = (gs_ufv)gl_sym("glUniform4fvARB", "glUniform4fv");
+    GS.m2 = (gs_umat)gl_sym("glUniformMatrix2fvARB", "glUniformMatrix2fv");
+    GS.m3 = (gs_umat)gl_sym("glUniformMatrix3fvARB", "glUniformMatrix3fv");
+    GS.m4 = (gs_umat)gl_sym("glUniformMatrix4fvARB", "glUniformMatrix4fv");
+    GS.vap = (gs_vap)gl_sym("glVertexAttribPointerARB", "glVertexAttribPointer");
+    GS.eva = (gs_ea)gl_sym("glEnableVertexAttribArrayARB", "glEnableVertexAttribArray");
+    GS.dva = (gs_ea)gl_sym("glDisableVertexAttribArrayARB", "glDisableVertexAttribArray");
+    GS.active = (gs_at)gl_sym("glActiveTextureARB", "glActiveTexture");
+    GS.mtc = (gs_mtc)gl_sym("glMultiTexCoord4fARB", "glMultiTexCoord4f");
+    if (!GS.create_sh || !GS.create_pr || !GS.source || !GS.compile || !GS.link || !GS.use ||
+        !GS.del || !GS.attach || !GS.getiv || !GS.log || !GS.uloc || !GS.bindattr || !GS.u1i ||
+        !GS.u2i || !GS.u1f || !GS.u2f || !GS.u3f || !GS.u4f || !GS.u1fv || !GS.u4fv ||
+        !GS.m2 || !GS.m3 || !GS.m4 || !GS.vap || !GS.eva || !GS.dva || !GS.active || !GS.mtc) {
+        printf("FAIL entrées ARB_shader_objects absentes\n");
+        failures++;
+        return 4;
+    }
+    {
+        const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+        GLint iu = 0;
+        glGetIntegerv(0x8872, &iu);                  /* GL_MAX_TEXTURE_IMAGE_UNITS */
+        printf("  GL_ARB_fragment_shader %s, GL_MAX_TEXTURE_IMAGE_UNITS = %d\n",
+               ext && strstr(ext, "GL_ARB_fragment_shader") ? "annoncée" : "ABSENTE", (int)iu);
+    }
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, W, 0, H, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glDisable(GL_DEPTH_TEST);
+    glClearColor(0, 0, 1, 1);
+    while (glGetError() != GL_NO_ERROR) { }
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(2, GL_FLOAT, 0, pos);
+    glEnableClientState(GL_COLOR_ARRAY);
+    glColorPointer(4, GL_FLOAT, 0, white);
+
+    if (!strcmp(scene, "glslvs")) {
+        static const char vs_col[] =
+            "uniform vec4 col;\nvoid main()\n{\n    gl_FrontColor = col;\n"
+            "    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n}\n";
+        static const char vs_attr[] =
+            "attribute vec4 teinte;\nvoid main()\n{\n    gl_FrontColor = teinte;\n"
+            "    gl_Position = ftransform();\n}\n";
+        static const char vs_light[] =
+            "void main()\n{\n    gl_FrontColor = gl_LightSource[0].diffuse + gl_Color * 0.0;\n"
+            "    gl_Position = ftransform();\n}\n";
+        GLfloat green[4] = { 0, 1, 0, 1 };
+        p = glsl_prog(vs_col, 0, 0);
+        check_cond("(a) shader de sommets seul : lié", p != 0);
+        if (p) {
+            GS.use(p);
+            GS.u4f(GS.uloc(p, "col"), 1, 1, 0, 1);
+            glsl_tri();
+            check("(a) uniform jaune, MVP intégrée", IX, IY, 0xFFFF00);
+            check("(a) dehors : fond", OX, OY, 0x0000FF);
+        }
+        p = glsl_prog(vs_attr, 0, "teinte");
+        check_cond("(b) attribut nommé : lié", p != 0);
+        if (p) {
+            GS.use(p);
+            GS.vap(3, 4, GL_FLOAT, GL_FALSE, 0, magenta);
+            GS.eva(3);
+            glsl_tri();
+            check("(b) attribut 3 magenta", IX, IY, 0xFF00FF);
+            GS.dva(3);
+        }
+        p = glsl_prog(vs_light, 0, 0);
+        check_cond("(c) gl_LightSource : lié", p != 0);
+        if (p) {
+            glLightfv(GL_LIGHT0, GL_DIFFUSE, green);
+            GS.use(p);
+            glsl_tri();
+            check("(c) gl_LightSource[0].diffuse vert", IX, IY, 0x00FF00);
+        }
+        GS.use(0);
+        glsl_tri();
+        check("(d) programme 0 : pipeline fixe blanc", IX, IY, 0xFFFFFF);
+    } else if (!strcmp(scene, "glslfs")) {
+        static const char fs[] = "void main()\n{\n    gl_FragColor = vec4(0.0, 1.0, 1.0, 1.0);\n}\n";
+        p = glsl_prog(0, fs, 0);
+        check_cond("(a) shader de fragments seul : lié (GL_ARB_fragment_shader)", p != 0);
+        if (p) {
+            GS.use(p);
+            glsl_tri();
+            check("(a) cyan, sommets du pipeline fixe", IX, IY, 0x00FFFF);
+            check("(a) dehors : fond", OX, OY, 0x0000FF);
+        }
+        GS.use(0);
+        glsl_tri();
+        check("(b) programme 0 : pipeline fixe blanc", IX, IY, 0xFFFFFF);
+    } else if (!strcmp(scene, "glsl")) {
+        static const char fs1[] =
+            "uniform float f;\nuniform vec2 v2;\nuniform vec3 v3;\n"
+            "void main()\n{\n    gl_FragColor = vec4(f, v2.y, v3.z, 1.0);\n}\n";
+        static const char fs2[] =
+            "uniform int i;\nuniform bool b;\nuniform ivec2 iv;\n"
+            "void main()\n{\n    gl_FragColor = vec4(i == 3 ? 1.0 : 0.0, b ? 1.0 : 0.0,"
+            " iv.y == -2 ? 1.0 : 0.0, 1.0);\n}\n";
+        static const char fs3[] =
+            "uniform mat2 m2;\nuniform mat3 m3;\nuniform mat4 m4;\n"
+            "void main()\n{\n    gl_FragColor = vec4(m2[1][0], m3[2][1], m4[3][2], 1.0);\n}\n";
+        static const char fs4[] =
+            "uniform vec4 arr[3];\nuniform float fa[2];\n"
+            "void main()\n{\n    gl_FragColor = vec4(arr[2].x, arr[1].y, fa[1], 1.0);\n}\n";
+        static const char fs_smp[] =
+            "uniform sampler2D a;\nuniform sampler2D b;\n"
+            "void main()\n{\n    gl_FragColor = texture2D(a, vec2(0.5)) + texture2D(b, vec2(0.5));\n}\n";
+        static const char vs_attr[] =
+            "attribute vec4 teinte;\nvoid main()\n{\n    gl_FrontColor = teinte;\n"
+            "    gl_Position = ftransform();\n}\n";
+        static const char fs_col[] = "void main()\n{\n    gl_FragColor = gl_Color;\n}\n";
+        static const char fs_fc[] =
+            "void main()\n{\n    gl_FragColor = gl_FragCoord.y > 32.0 ? vec4(1.0, 0.0, 0.0, 1.0)"
+            " : vec4(0.0, 1.0, 0.0, 1.0);\n}\n";
+        static const char vs_bi[] =
+            "void main()\n{\n"
+            "    gl_Position = gl_ProjectionMatrix * (gl_ModelViewMatrix * gl_Vertex);\n"
+            "    gl_FrontColor = gl_LightSource[0].diffuse;\n"
+            "    gl_TexCoord[0] = gl_TextureMatrix[1] * gl_MultiTexCoord1;\n}\n";
+        static const char fs_bi[] =
+            "void main()\n{\n    gl_FragColor = gl_Color + vec4(gl_TexCoord[0].x, 0.0, 0.0, 0.0);\n}\n";
+        static const GLfloat full[4][2] = { { 0, 0 }, { 64, 0 }, { 64, 64 }, { 0, 64 } };
+        static const GLubyte red_t[4 * 4] = { 255, 0, 0, 255, 255, 0, 0, 255,
+                                              255, 0, 0, 255, 255, 0, 0, 255 };
+        static const GLubyte grn_t[4 * 4] = { 0, 255, 0, 255, 0, 255, 0, 255,
+                                              0, 255, 0, 255, 0, 255, 0, 255 };
+        GLfloat m2[4] = { 0, 0, 1, 0 }, m3[9], m4[16], arr[12], fa[2] = { 0, 0.25f };
+        GLfloat green[4] = { 0, 1, 0, 1 };
+        GLuint tex[2];
+
+        p = glsl_prog(vs_basic, fs_tint, 0);
+        check_cond("(a) sommets + fragments : lié", p != 0);
+        if (!p)
+            return 1;
+        GS.use(p);
+        l = GS.uloc(p, "tint");
+        GS.u4f(l, 1, 0, 1, 1);
+        glsl_tri();
+        check("(a) gl_Color × tint : magenta", IX, IY, 0xFF00FF);
+        check("(a) dehors : fond", OX, OY, 0x0000FF);
+        GS.u4f(l, 0, 1, 0, 1);
+        glsl_tri();
+        check("(a) uniform changé : vert", IX, IY, 0x00FF00);
+
+        p = glsl_prog(vs_basic, fs1, 0);
+        if (p) {
+            GS.use(p);
+            GS.u1f(GS.uloc(p, "f"), 1.0f);
+            GS.u2f(GS.uloc(p, "v2"), 7, 0.5f);
+            GS.u3f(GS.uloc(p, "v3"), 7, 7, 0.25f);
+            glsl_tri();
+        }
+        check_near("(b) float, vec2, vec3", IX, IY, 0xFF8040, 2);
+        p = glsl_prog(vs_basic, fs2, 0);
+        if (p) {
+            GS.use(p);
+            GS.u1i(GS.uloc(p, "i"), 3);
+            GS.u1i(GS.uloc(p, "b"), 1);
+            GS.u2i(GS.uloc(p, "iv"), 5, -2);
+            glsl_tri();
+        }
+        check("(b) int, bool, ivec2", IX, IY, 0xFFFFFF);
+        memset(m3, 0, sizeof(m3));
+        memset(m4, 0, sizeof(m4));
+        m3[2 * 3 + 1] = 0.5f;                        /* colonne 2, ligne 1 */
+        m4[3 * 4 + 2] = 0.25f;                       /* colonne 3, ligne 2 */
+        p = glsl_prog(vs_basic, fs3, 0);
+        if (p) {
+            GS.use(p);
+            GS.m2(GS.uloc(p, "m2"), 1, GL_FALSE, m2);
+            GS.m3(GS.uloc(p, "m3"), 1, GL_FALSE, m3);
+            GS.m4(GS.uloc(p, "m4"), 1, GL_FALSE, m4);
+            glsl_tri();
+        }
+        check_near("(b) mat2, mat3, mat4", IX, IY, 0xFF8040, 2);
+        memset(arr, 0, sizeof(arr));
+        arr[2 * 4 + 0] = 1.0f;
+        arr[1 * 4 + 1] = 0.5f;
+        p = glsl_prog(vs_basic, fs4, 0);
+        if (p) {
+            GS.use(p);
+            GS.u4fv(GS.uloc(p, "arr"), 3, arr);
+            GS.u1fv(GS.uloc(p, "fa"), 2, fa);
+            glsl_tri();
+        }
+        check_near("(b) tableaux vec4[3], float[2]", IX, IY, 0xFF8040, 2);
+
+        /* échantillonneurs : unité 0 rouge, unité d'image 9 verte */
+        glGenTextures(2, tex);
+        GS.active(GL_TEXTURE0_ARB);
+        glBindTexture(GL_TEXTURE_2D, tex[0]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, red_t);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        GS.active(GL_TEXTURE0_ARB + 9);
+        glBindTexture(GL_TEXTURE_2D, tex[1]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, grn_t);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        GS.active(GL_TEXTURE0_ARB);
+        printf("  unité 9 : erreur GL 0x%x\n", (unsigned)glGetError());
+        p = glsl_prog(vs_basic, fs_smp, 0);
+        if (p) {
+            GS.use(p);
+            GS.u1i(GS.uloc(p, "a"), 0);
+            GS.u1i(GS.uloc(p, "b"), 9);
+            glsl_tri();
+            check("(c) unité 0 + unité d'image 9 : jaune", IX, IY, 0xFFFF00);
+            GS.u1i(GS.uloc(p, "b"), 10);
+            glsl_tri();
+            check("(c) unité 10 sans texture : noir + rouge", IX, IY, 0xFF0000);
+        } else {
+            check_cond("(c) échantillonneurs : lié", 0);
+        }
+        GS.active(GL_TEXTURE0_ARB + 9);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        GS.active(GL_TEXTURE0_ARB);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDeleteTextures(2, tex);
+
+        /* attribut nommé */
+        p = glsl_prog(vs_attr, fs_col, "teinte");
+        if (p) {
+            GS.use(p);
+            GS.vap(3, 4, GL_FLOAT, GL_FALSE, 0, magenta);
+            GS.eva(3);
+            glsl_tri();
+            GS.dva(3);
+        }
+        check("(d) attribut « teinte » en 3 : magenta", IX, IY, 0xFF00FF);
+
+        /* gl_FragCoord sur tout l'écran */
+        p = glsl_prog(vs_basic, fs_fc, 0);
+        if (p) {
+            GS.use(p);
+            glVertexPointer(2, GL_FLOAT, 0, full);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_QUADS, 0, 4);
+            glFinish();
+            glVertexPointer(2, GL_FLOAT, 0, pos);
+        }
+        check("(e) gl_FragCoord : haut rouge", 10, 2, 0xFF0000);
+        check("(e) gl_FragCoord : bas vert", 10, H - 4, 0x00FF00);
+
+        /* état intégré */
+        p = glsl_prog(vs_bi, fs_bi, 0);
+        if (p) {
+            glLightfv(GL_LIGHT0, GL_DIFFUSE, green);
+            GS.active(GL_TEXTURE0_ARB + 1);
+            glMatrixMode(GL_TEXTURE);
+            glLoadIdentity();
+            glScalef(2, 1, 1);
+            glMatrixMode(GL_MODELVIEW);
+            GS.mtc(GL_TEXTURE0_ARB + 1, 0.5f, 0, 0, 1);
+            GS.active(GL_TEXTURE0_ARB);
+            GS.use(p);
+            glsl_tri();
+            GS.active(GL_TEXTURE0_ARB + 1);
+            glMatrixMode(GL_TEXTURE);
+            glLoadIdentity();
+            glMatrixMode(GL_MODELVIEW);
+            GS.active(GL_TEXTURE0_ARB);
+        }
+        check("(f) gl_LightSource + gl_TextureMatrix[1]", IX, IY, 0xFFFF00);
+
+        GS.use(0);
+        glsl_tri();
+        check("(g) programme 0 : pipeline fixe blanc", IX, IY, 0xFFFFFF);
+    } else if (!strcmp(scene, "glsldp")) {
+        /* mode lightmap de DarkPlaces, simplifié : couleur (unité 1) ×
+           carte de lumière (unité 9) × teinte, coordonnées 0 et 4 */
+        static const char vs[] =
+            "varying vec2 TexCoord;\nvarying vec2 TexCoordLightmap;\n"
+            "void main()\n{\n    gl_FrontColor = gl_Color;\n"
+            "    TexCoord = vec2(gl_TextureMatrix[0] * gl_MultiTexCoord0);\n"
+            "    TexCoordLightmap = vec2(gl_MultiTexCoord4);\n"
+            "    gl_Position = ftransform();\n}\n";
+        static const char fs[] =
+            "uniform sampler2D Texture_Color;\nuniform sampler2D Texture_Lightmap;\n"
+            "uniform vec3 DiffuseColor;\nvarying vec2 TexCoord;\nvarying vec2 TexCoordLightmap;\n"
+            "void main()\n{\n    vec4 color = texture2D(Texture_Color, TexCoord);\n"
+            "    color.rgb *= texture2D(Texture_Lightmap, TexCoordLightmap).rgb * DiffuseColor;\n"
+            "    gl_FragColor = color;\n}\n";
+        /* couleur : moitié gauche rouge, droite verte ; carte : haut 1, bas 0.5 */
+        static const GLubyte col_t[4 * 4] = { 255, 0, 0, 255, 0, 255, 0, 255,
+                                              255, 0, 0, 255, 0, 255, 0, 255 };
+        static const GLubyte lm_t[4 * 4] = { 128, 128, 128, 255, 128, 128, 128, 255,
+                                             255, 255, 255, 255, 255, 255, 255, 255 };
+        static const GLfloat full[4][2] = { { 0, 0 }, { 64, 0 }, { 64, 64 }, { 0, 64 } };
+        static const GLfloat tc0[4][2] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+        static const GLfloat tc4[4][2] = { { 0, 0 }, { 0, 0 }, { 0, 1 }, { 0, 1 } };
+        GLuint tex[2];
+        glGenTextures(2, tex);
+        GS.active(GL_TEXTURE0_ARB + 1);
+        glBindTexture(GL_TEXTURE_2D, tex[0]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, col_t);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        GS.active(GL_TEXTURE0_ARB + 9);
+        glBindTexture(GL_TEXTURE_2D, tex[1]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, lm_t);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        GS.active(GL_TEXTURE0_ARB);
+        p = glsl_prog(vs, fs, 0);
+        check_cond("(a) programme « lightmap » : lié", p != 0);
+        if (p) {
+            GS.use(p);
+            GS.u1i(GS.uloc(p, "Texture_Color"), 1);
+            GS.u1i(GS.uloc(p, "Texture_Lightmap"), 9);
+            GS.u3f(GS.uloc(p, "DiffuseColor"), 1, 1, 1);
+            glVertexPointer(2, GL_FLOAT, 0, full);
+            glClientActiveTextureARB(GL_TEXTURE0_ARB);
+            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+            glTexCoordPointer(2, GL_FLOAT, 0, tc0);
+            glClientActiveTextureARB(GL_TEXTURE0_ARB + 4);
+            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+            glTexCoordPointer(2, GL_FLOAT, 0, tc4);
+            glClientActiveTextureARB(GL_TEXTURE0_ARB);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_QUADS, 0, 4);
+            glFinish();
+            /* GL : y bas = 0 → ligne du bas de l'image ; carte (bas) = 0.5 */
+            check_near("(a) haut gauche : rouge × 1", 8, 8, 0xFF0000, 2);
+            check_near("(a) haut droite : vert × 1", 56, 8, 0x00FF00, 2);
+            check_near("(a) bas gauche : rouge × 0,5", 8, H - 8, 0x800000, 2);
+            check_near("(a) bas droite : vert × 0,5", 56, H - 8, 0x008000, 2);
+            GS.u3f(GS.uloc(p, "DiffuseColor"), 0.5f, 1, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_QUADS, 0, 4);
+            glFinish();
+            check_near("(b) teinte (0,5 ; 1 ; 1) : rouge × 0,5", 8, 8, 0x800000, 2);
+            glClientActiveTextureARB(GL_TEXTURE0_ARB + 4);
+            glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+            glClientActiveTextureARB(GL_TEXTURE0_ARB);
+            glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+            glVertexPointer(2, GL_FLOAT, 0, pos);
+        }
+        GS.use(0);
+        GS.active(GL_TEXTURE0_ARB + 9);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        GS.active(GL_TEXTURE0_ARB + 1);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        GS.active(GL_TEXTURE0_ARB);
+        glDeleteTextures(2, tex);
+    } else {
+        return 5;
+    }
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    printf("  erreur GL finale = 0x%x\n", (unsigned)glGetError());
+    glFinish();
+    return 0;
+}
 
 int main(int argc, char **argv)
 {
@@ -2644,6 +3137,12 @@ int main(int argc, char **argv)
         printf("v15 : %d capacité(s) annoncée(s) NON TENUE(S) sur %d\n", v15nt, cell);
         glDeleteTextures(4, tid);
         glFinish();
+    } else if (!strcmp(scene, "glsl") || !strcmp(scene, "glslvs") ||
+               !strcmp(scene, "glslfs") || !strcmp(scene, "glsldp")) {
+        /* v21 : programmes GLSL (scene_glsl, plus haut) */
+        int r = scene_glsl(scene);
+        if (r)
+            return r;
     } else if (!strcmp(scene, "arbvp") || !strcmp(scene, "arbfp")) {
         /* v16 : programmes ARB de sommets (arbvp) et de fragments (arbfp),
            ce que Colin McRae emploie pour toute sa course. Triangle (4,4)

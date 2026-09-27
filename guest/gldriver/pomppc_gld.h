@@ -178,6 +178,7 @@ void pomppc_sync_to_sw(void *ctx);
 int  pomppc_lazy_update(void *ctx, void **procs, unsigned long *chg, long *ret);
 void pomppc_lazy_flush(void *ctx);
 const char *pomppc_override_string(long name, const char *apple);
+void pomppc_glsl_hook(void *ctx);            /* v21 */
 /* Entrée gld que le plugin réalise lui-même (requêtes d'occlusion v8), ou 0 :
    pomppc_pre la rend au trampoline à la place de celle du rendu d'Apple. */
 void *pomppc_gld_override(int id);

@@ -8,6 +8,37 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Nexuiz en GLSL sur le GPU de l'hôte : 107 → 40 ms/image** (27/09, v21 en VM,
+  plugin `20260927-glsl`). Scènes `glsl`, `glslvs` (= rendu d'Apple), `glslfs`, `glsldp`
+  justes ; deux défauts corrigés (`gl_MultiTexCoord<u>` mal reconnu, lumières éteintes et
+  matrices de texture sans texture non envoyées). **Le préprocesseur GLSL de GLEngine
+  10.4.6 est faux** (#if imbriqués dans un groupe sauté : toutes les permutations de
+  DarkPlaces refusées par GLEngine lui-même) : le plugin interpose `glShaderSourceARB`
+  (table de dispatch, +0x94c) et fait les conditions (`pomppc_glslpp.h`,
+  `tests/glsl_pp_test.c`, `docs/re/glsl-glengine.md` §5 bis). Nexuiz `+r_glsl 1` : 23
+  programmes, tous liés par l'hôte, 0 repli hors rafraîchissements, rejeu = VM 0,00 %,
+  VERDICTCHECK/STATECHECK/TEXMEMO 0 écart ; cellules `nxg-fen` / `nxg-pe` automatisées et
+  vertes, 40,5 / 41,2 ms/image contre 107,8 / 108,1 en ARB (profil `nx` forcé à
+  `+r_glsl 0` : DarkPlaces prend GLSL par défaut dès l'extension annoncée). Matrice
+  complète `20260927-1137` sur le QEMU v21 : **13 vertes sur 15** — Marble Blast fenêtre
+  rouge (connu), DOOM 3 fenêtre rouge au tour (capture hors du vidage, 0,44) puis verte
+  seule (`20260927-1216`) ; DOOM 3 60,7 / 60,4, Prey 69,3 / 69,5, UT2004 26,4 / 26,0,
+  Colin McRae 69,4, Warcraft III 17,4. QEMU de référence reconstruit en v21 (précédent en
+  `*.avant-glsl`), contrôlé : scènes GLSL, `d3-pe` et `nxg-pe` vertes (`20260927-1223`).
+- **Protocole v21 — programmes GLSL sur le GPU de l'hôte, étape hors VM** (27/09,
+  `docs/protocole-v21-glsl.md`, relevé `docs/re/glsl-glengine.md`). GLEngine compile et lie
+  lui-même (libGLProgrammability) : le plugin relit les textes des shaders attachés, les
+  uniforms et attributs actifs (API `Sh*`), la table de valeurs (`objet+0x4c`) et les unités
+  échantillonnées (`étage+0x50c`), et les fait recompiler par l'hôte (`GLSL_SOURCE`,
+  `GLSL_ATTRIB`, `GLSL_UNIFORM`, `GLSL_LINK`, `GLSL_UNIFORMS`, `GLSL_INFO_LOG`, cible
+  `QGPU_PT_GLSL`, `QGPU_CAP_GLSL`), 16 unités d'image (clés 130..161, DarkPlaces lie sa carte
+  de lumière en 9), 256 programmes par contexte. Backend GL : réécriture des textes pour le
+  retournement y (`main` enveloppé, `gl_FragCoord`), état intégré ; logiciel : refus propres.
+  Plugin : `GL_ARB_fragment_shader` et `GL_MAX_TEXTURE_IMAGE_UNITS` = 16 annoncés sous v21
+  (`POMPPC_GL_GLSL=0` l'éteint). Épreuves natives : `run_v21` (48 contrôles) et **596
+  permutations de DarkPlaces** compilées et liées par l'hôte (`tests/dp_glsl_extract.py`) ;
+  `run-all` 142 OK ; gltest `glsl`, `glslvs`, `glslfs`, `glsldp` écrites. QEMU v21 construit
+  dans `~/src/qemu-glsl`. Reste la VM : compilation du plugin, scènes, Nexuiz `+r_glsl 1`.
 - **Nexuiz 2.5.2 dans la matrice de jeux** (27/09, `docs/matrice-jeux.md` §4, §6 ter) :
   module `tools/matrice/jeux/nx.py`, scène `-benchmark demos/demo1` (timedemo déterministe :
   l'image n du plugin est la même image de la démo d'un tour et d'un mode à l'autre),

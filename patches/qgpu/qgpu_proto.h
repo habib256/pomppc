@@ -53,7 +53,7 @@
                                        un kext / plugin compilé contre CE fichier
                                        s'attache encore : les opcodes v13/v14 sont
                                        optionnels (QGPU_CAP_SCANOUT, BUF_*, xfer 16). */
-#define QGPU_PROTO_VERSION      20  /* v2 : profondeur, état GL ; v3 : textures ;
+#define QGPU_PROTO_VERSION      21  /* v2 : profondeur, état GL ; v3 : textures ;
                                        v4 : brouillard, 2e unité, lignes, points ;
                                        v5 : 4 unités, GL_COMBINE ;
                                        v6 : stencil ;
@@ -118,7 +118,13 @@
                                              passer par l'invité
                                              (aglSurfaceTexture de Colin
                                              McRae), QGPU_CAP_SURF_TEX.
-                                             docs/protocole-v20-surface-texture.md */
+                                             docs/protocole-v20-surface-texture.md ;
+                                       v21 : programmes GLSL (texte GLSL 1.10
+                                             compilé et lié par l'hôte, uniforms
+                                             par emplacements de GLEngine,
+                                             attributs liés par nom), unités
+                                             d'image 8..15, QGPU_CAP_GLSL.
+                                             docs/protocole-v21-glsl.md */
 
 /* ── Capacités (QGPU_REG_CAPS) ────────────────────────────────────────────────
  * Les bits DE TRANSPORT (QGPU_CAP_ASYNC, QGPU_CAP_CLIENTS) sont définis dans
@@ -188,6 +194,17 @@
    textures dont l'image n'existe que sur l'hôte (COPY_TEX, SURF_TEX) pour que
    le rejeu natif n'ait besoin de rien d'antérieur. */
 #define QGPU_CAP_TEX_READBACK   0x00000800
+/* v21 : le backend actif compile, lie et exécute les programmes GLSL
+   (QGPU_PT_GLSL : GLSL_SOURCE, GLSL_ATTRIB, GLSL_UNIFORM, GLSL_LINK,
+   GLSL_UNIFORMS, GLSL_INFO_LOG) et tient les unités d'image 8..15
+   (QGPU_SK_UNIT(8..15)). Le backend de référence ne le sait pas ; le backend
+   OpenGL ne l'annonce que si l'hôte a les points d'entrée d'OpenGL 2.0,
+   QGPU_MAX_IMAGE_UNITS unités d'image, et qu'un programme d'essai se lie à
+   l'init. Sans ce bit : ces opcodes, PROG_CREATE d'un QGPU_PT_GLSL et
+   PROG_BIND de cette cible répondent QGPU_ST_BACKEND ; les clés des unités
+   8..15 n'acceptent que 0 (BACKEND sinon). L'invité n'émet rien de v21 sans
+   version >= 21 ET ce bit. docs/protocole-v21-glsl.md. */
+#define QGPU_CAP_GLSL           0x00001000
 
 /* ── Statuts : QGPU_ST_* dans qgpu_abi.h ─────────────────────────────────── */
 /* ── Limites ─────────────────────────────────────────────────────────────── */
@@ -210,6 +227,13 @@
                                                les clés, bits de format, matrices
                                                et valeurs courantes des unités
                                                4..7 lui sont inconnus (BAD_ARG). */
+/* v21 : unités d'IMAGE (échantillonneurs des programmes GLSL). Les unités
+   0..QGPU_MAX_UNITS-1 sont complètes (coordonnées, matrices, environnement) ;
+   les unités QGPU_MAX_UNITS..QGPU_MAX_IMAGE_UNITS-1 ne portent qu'une texture
+   liée, que seul un programme GLSL lit (sampler* dont la valeur est l'unité).
+   C'est GL_MAX_TEXTURE_IMAGE_UNITS ; GL_MAX_TEXTURE_COORDS reste
+   QGPU_MAX_UNITS. DarkPlaces lie ses cartes de lumière en 9. */
+#define QGPU_MAX_IMAGE_UNITS    16
 #define QGPU_MAX_LIGHTS         8           /* v7 : GL_LIGHT0..GL_LIGHT7 */
 #define QGPU_MAX_CLIP_PLANES    6           /* v7 : GL_CLIP_PLANE0..5 */
 /* v8 : requêtes d'occlusion. Le découpage est celui des textures : l'espace
@@ -223,11 +247,21 @@
 #define QGPU_BUF_SHMEM          0xFFFFFFFFu /* DRAW_RAW_BUF : cet offset est BAR0 */
 /* v16 : programmes ARB, PAR CONTEXTE (un identifiant ne vaut que dans le
    contexte qui l'a créé : rien à découper entre clients). */
-#define QGPU_MAX_PROG           64          /* identifiants 0..63 par contexte */
+#define QGPU_MAX_PROG           256         /* identifiants par contexte (v16 : 64 ;
+                                               v21 : 256, DarkPlaces compile une
+                                               permutation GLSL par combinaison) */
 #define QGPU_PROG_NONE          0xFFFFFFFFu /* PROG_BIND : aucun programme */
 #define QGPU_MAX_PROG_LEN       65536       /* octets de texte, en-tête compris */
 #define QGPU_MAX_PROG_PARAMS    256         /* program.env et program.local, par
                                                cible (l'hôte en a au moins 96) */
+/* v21 : programmes GLSL (cf. section v21). */
+#define QGPU_MAX_GLSL_SRC       8           /* textes par programme (tous étages) */
+#define QGPU_MAX_GLSL_LEN       (256u * 1024u)  /* octets par texte, sans NUL */
+#define QGPU_MAX_GLSL_UNIFORMS  256         /* déclarations par programme */
+#define QGPU_MAX_GLSL_SLOTS     1024        /* emplacements (vec4) par programme */
+#define QGPU_MAX_GLSL_NAME      128         /* octets d'un nom, sans NUL */
+#define QGPU_MAX_GLSL_ATTRIBS   16          /* emplacements d'attribut 0..15 */
+#define QGPU_MAX_GLSL_LOG       (64u * 1024u)
 /* v7 : les commandes de géométrie sont longues (SET_LIGHT en fait 26), et la v8
    ajoute SET_POLYGON_STIPPLE, qui en fait 32. Le cœur recopie les arguments
    dans un tableau de cette taille : la borne est NOMMÉE ici pour que l'hôte et
@@ -326,6 +360,13 @@
 #define QGPU_OP_PROG_BIND       0x0073  /* [cible, id | QGPU_PROG_NONE] */
 #define QGPU_OP_PROG_ENV        0x0074  /* [cible, premier, n, off] n × 4 flottants */
 #define QGPU_OP_PROG_LOCAL      0x0075  /* [id, premier, n, off] n × 4 flottants */
+/* v21 : programmes GLSL (cf. la section v21 ci-dessous) */
+#define QGPU_OP_GLSL_SOURCE     0x0076  /* [id, étage, len, off] texte GLSL */
+#define QGPU_OP_GLSL_ATTRIB     0x0077  /* [id, emplacement, len, off] nom */
+#define QGPU_OP_GLSL_UNIFORM    0x0078  /* [id, emplacement, type, n, len, off] nom */
+#define QGPU_OP_GLSL_LINK       0x0079  /* [id] */
+#define QGPU_OP_GLSL_UNIFORMS   0x007A  /* [id, premier, n, off] n × 4 mots */
+#define QGPU_OP_GLSL_INFO_LOG   0x007B  /* [id, max, off] journal de l'hôte → BAR0 */
 
 /* Longueurs (en mots, en-tête compris) attendues par opcode. */
 #define QGPU_LEN_NOP            1
@@ -371,6 +412,12 @@
 #define QGPU_LEN_PROG           2           /* DESTROY */
 #define QGPU_LEN_PROG_BIND      3
 #define QGPU_LEN_PROG_PARAMS    5           /* ENV et LOCAL */
+#define QGPU_LEN_GLSL_SOURCE    5           /* v21 */
+#define QGPU_LEN_GLSL_ATTRIB    5
+#define QGPU_LEN_GLSL_UNIFORM   7
+#define QGPU_LEN_GLSL_LINK      2
+#define QGPU_LEN_GLSL_UNIFORMS  5
+#define QGPU_LEN_GLSL_INFO_LOG  4
 
 /* Formats de surface. Le mot de pixel échangé est 0xAARRGGBB big-endian :
  * l'octet « x » du framebuffer Tiger EST l'alpha (v2 ; v1 l'ignorait). */
@@ -569,7 +616,14 @@
  * sans QGPU_CAP_GEN_SIZES vaut QGPU_ST_BACKEND (rien n'est écrit), comme
  * l'activation d'un programme sans QGPU_CAP_PROGRAMS. Cf. QGPU_GS_*. */
 #define QGPU_SK_GEN_SIZES       129
-#define QGPU_SK_COUNT           130
+/* v21 : unités d'IMAGE 8..15 (QGPU_CAP_GLSL), même groupe de quatre clés que
+ * les unités 0..7, adressé par QGPU_SK_UNIT(u) : +0 une texture est liée
+ * (booléen), +1 la texture, +2 et +3 (mode et couleur d'environnement)
+ * acceptés et sans effet — ces unités n'ont ni coordonnées ni environnement :
+ * seul un programme GLSL les échantillonne. Sans QGPU_CAP_GLSL, poser une
+ * valeur non nulle vaut QGPU_ST_BACKEND (rien n'est écrit). */
+#define QGPU_SK_TEXTURE8        130 /* v21, unités 8..15 : 4 clés chacune, 130..161 */
+#define QGPU_SK_COUNT           162
 
 /* Valeurs d'énumération d'OpenGL utilisées par les clés v7, nommées pour que
  * l'invité n'ait pas à les recopier à la main. */
@@ -588,11 +642,12 @@
 #define QGPU_SOP_INCR_WRAP      0x8507  /* v6, GL 1.4 / EXT_stencil_wrap */
 #define QGPU_SOP_DECR_WRAP      0x8508
 
-/* Groupe de quatre clés de l'unité u (0..7) : +0 texturage, +1 texture,
- * +2 mode d'environnement, +3 couleur d'environnement. */
+/* Groupe de quatre clés de l'unité u (0..15 ; 8..15 : v21) : +0 texturage,
+ * +1 texture, +2 mode d'environnement, +3 couleur d'environnement. */
 #define QGPU_SK_UNIT(u)         ((u) == 0 ? QGPU_SK_TEXTURE : (u) == 1 ? QGPU_SK_TEXTURE1 : \
                                  (u) < 4 ? QGPU_SK_TEXTURE2 + 4 * ((u) - 2) : \
-                                 QGPU_SK_TEXTURE4 + 4 * ((u) - 4))
+                                 (u) < 8 ? QGPU_SK_TEXTURE4 + 4 * ((u) - 4) : \
+                                 QGPU_SK_TEXTURE8 + 4 * ((u) - 8))
 /* v17 : GL_COMBINE et biais de LOD de l'unité u (0..7) */
 #define QGPU_SK_COMBINE(u)      ((u) < 4 ? QGPU_SK_COMBINE0 + (u) : QGPU_SK_COMBINE4 + ((u) - 4))
 #define QGPU_SK_COMBINE_SRC(u)  ((u) < 4 ? QGPU_SK_COMBINE_SRC0 + (u) : QGPU_SK_COMBINE_SRC4 + ((u) - 4))
@@ -1555,6 +1610,127 @@
  */
 #define QGPU_PT_VERTEX          0x8620  /* GL_VERTEX_PROGRAM_ARB */
 #define QGPU_PT_FRAGMENT        0x8804  /* GL_FRAGMENT_PROGRAM_ARB */
+
+/* ── v21 : programmes GLSL (OpenGL 2.0 / ARB_shader_objects) ─────────────────
+ *
+ *   Pourquoi. DarkPlaces (Nexuiz) ne prend son chemin de rendu GLSL que si
+ *   GL_ARB_fragment_shader est annoncée, et le rendu logiciel d'Apple ne sait
+ *   pas exécuter un programme de fragments GLSL. GLEngine compile et lie
+ *   LUI-MÊME (compilateur 3Dlabs de libGLProgrammability : c'est lui qui
+ *   répond à COMPILE_STATUS, LINK_STATUS, glGetUniformLocation…) ; l'invité
+ *   relit dans les objets de GLEngine le texte des shaders attachés, les
+ *   uniforms actifs et leurs emplacements, les attributs et leurs
+ *   emplacements, et envoie tout à l'hôte, qui recompile le même texte.
+ *   docs/protocole-v21-glsl.md, docs/re/glsl-glengine.md.
+ *
+ *   OBJET — un programme GLSL est un programme du contexte (même espace
+ *   d'identifiants que la v16) créé par PROG_CREATE [id, QGPU_PT_GLSL]. Il
+ *   se DÉFINIT par une suite de commandes, puis GLSL_LINK :
+ *
+ *   GLSL_SOURCE  [id, étage, len, off]
+ *       `len` octets (1..QGPU_MAX_GLSL_LEN, sans NUL) de texte GLSL à `off`
+ *       dans BAR0, pour l'étage QGPU_GLSL_VERTEX (0x8B31) ou
+ *       QGPU_GLSL_FRAGMENT (0x8B30) : un « shader object » attaché. Octets
+ *       admis : ASCII imprimable, tabulation, fins de ligne (sinon BAD_ARG).
+ *       QGPU_MAX_GLSL_SRC textes au plus (LIMIT au-delà). Sur un programme
+ *       déjà lié (ou cassé), le premier GLSL_SOURCE COMMENCE UNE NOUVELLE
+ *       DÉFINITION : textes, attributs, uniforms et valeurs sont oubliés.
+ *   GLSL_ATTRIB  [id, emplacement, len, off]
+ *       le nom (1..QGPU_MAX_GLSL_NAME octets, identificateur GLSL) de
+ *       l'attribut que l'hôte lie à l'emplacement générique 0..15
+ *       (glBindAttribLocation avant l'édition des liens) : c'est l'emplacement
+ *       que GLEngine a donné, donc celui des QGPU_VF_GEN(k) du format.
+ *   GLSL_UNIFORM [id, emplacement, type, n, len, off]
+ *       déclare un uniform actif : nom (sans « [0] »), type GL (QGPU_GT_*),
+ *       taille de tableau n >= 1, et son EMPLACEMENT de base dans la table de
+ *       valeurs du programme (celui de GLEngine). Un élément occupe 1
+ *       emplacement (vec4), 2 pour mat2, 3 pour mat3, 4 pour mat4 (colonnes)
+ *       — QGPU_GT_SLOTS(type) ; l'élément j est à emplacement + j ×
+ *       QGPU_GT_SLOTS(type). emplacement + n × QGPU_GT_SLOTS(type) <=
+ *       QGPU_MAX_GLSL_SLOTS, QGPU_MAX_GLSL_UNIFORMS déclarations au plus
+ *       (LIMIT). Un nom commençant par « gl_ » vaut BAD_ARG : l'état intégré
+ *       vient des clés, des matrices et des lumières.
+ *   GLSL_LINK    [id]
+ *       l'hôte compile chaque texte, lie les attributs, édite les liens et
+ *       résout les uniforms déclarés. Refus du compilateur ou de l'éditeur de
+ *       liens de l'hôte : QGPU_ST_BAD_ARG NON FATAL (comme PROG_STRING), le
+ *       programme est CASSÉ et son journal est gardé (GLSL_INFO_LOG). Un
+ *       uniform déclaré que l'hôte n'a pas gardé actif est ignoré.
+ *   GLSL_UNIFORMS [id, premier, n, off]
+ *       n × 4 mots big-endian à `off` → emplacements [premier, premier + n)
+ *       de la table du programme. Un mot est lu selon le type déclaré qui le
+ *       couvre : flottant IEEE (float, vec, mat) ou entier signé (int, ivec,
+ *       bool, bvec : 0 / non 0 ; sampler : l'unité, 0..QGPU_MAX_IMAGE_UNITS-1).
+ *       Tout ou rien : un flottant NaN/infini/démesuré ou une unité hors
+ *       bornes vaut BAD_ARG et rien n'est écrit. Accepté avant comme après
+ *       GLSL_LINK : les valeurs survivent à l'édition des liens.
+ *   GLSL_INFO_LOG [id, max, off]
+ *       journal de l'hôte du dernier GLSL_LINK (compilation et liens), octets
+ *       ASCII terminés par NUL, tronqué à `max` (1..QGPU_MAX_GLSL_LOG) octets,
+ *       écrit à `off` : l'invité peut noter POURQUOI l'hôte refuse.
+ *
+ *   LIAISON — PROG_BIND [QGPU_PT_GLSL, id | QGPU_PROG_NONE]. Un programme
+ *   GLSL lié (PROG_BIND) et accepté par l'hôte AGIT sur DRAW_RAW,
+ *   DRAW_RAW_BUF et DRAW_NATIVE (pas sur les opcodes hérités), et il PRIME
+ *   sur les programmes ARB : les clés QGPU_SK_VERTEX_PROGRAM /
+ *   _FRAGMENT_PROGRAM ne sont pas lues. Un étage sans shader reste au
+ *   pipeline fixe (OpenGL 2.0). Lié mais cassé, ou jamais lié : tout dessin
+ *   vaut BAD_ARG non fatal (jeté).
+ *
+ *   SÉMANTIQUE — celle d'OpenGL 2.0 :
+ *     - l'état intégré que lisent les shaders (gl_ModelViewMatrix…,
+ *       gl_TextureMatrix[u], gl_LightSource, gl_FrontMaterial, gl_Fog,
+ *       gl_ClipPlane, gl_DepthRange…) est celui des clés, matrices et lumières
+ *       du contexte, comme pour le pipeline fixe ;
+ *     - attributs : gl_Vertex, gl_Normal, gl_Color, gl_SecondaryColor,
+ *       gl_FogCoord, gl_MultiTexCoord0..7 viennent des champs conventionnels
+ *       du format (ou des valeurs courantes), les attributs nommés des
+ *       QGPU_VF_GEN(k) de leur emplacement (GEN(0) : la position) ;
+ *     - échantillonneurs : sampler* = u lit la texture de l'unité u
+ *       (QGPU_SK_UNIT(u) : texturage à 1, texture complète), de la cible du
+ *       type ; une unité échantillonnée sans texture rend la texture 0 (noir).
+ *       Unités 0..QGPU_MAX_IMAGE_UNITS-1 ;
+ *     - l'axe y : le backend réécrit les textes pour que le programme rende
+ *       comme le pipeline fixe (gl_Position.y retourné après le main du
+ *       shader de sommets ; gl_FragCoord.y compté depuis le bas de la
+ *       surface). Invisible sur le fil.
+ *
+ *   Un flux v20 ignore les opcodes (BAD_OPCODE, fatal) et les clés 130..161
+ *   (BAD_ARG) : l'invité n'émet rien de v21 sans version >= 21 et
+ *   QGPU_CAP_GLSL.
+ */
+#define QGPU_PT_GLSL            0x8B40  /* GL_PROGRAM_OBJECT_ARB */
+#define QGPU_GLSL_FRAGMENT      0x8B30  /* GL_FRAGMENT_SHADER_ARB */
+#define QGPU_GLSL_VERTEX        0x8B31  /* GL_VERTEX_SHADER_ARB */
+/* Types d'uniform (valeurs d'OpenGL 2.0) */
+#define QGPU_GT_FLOAT           0x1406
+#define QGPU_GT_FLOAT_VEC2      0x8B50
+#define QGPU_GT_FLOAT_VEC3      0x8B51
+#define QGPU_GT_FLOAT_VEC4      0x8B52
+#define QGPU_GT_INT             0x1404
+#define QGPU_GT_INT_VEC2        0x8B53
+#define QGPU_GT_INT_VEC3        0x8B54
+#define QGPU_GT_INT_VEC4        0x8B55
+#define QGPU_GT_BOOL            0x8B56
+#define QGPU_GT_BOOL_VEC2       0x8B57
+#define QGPU_GT_BOOL_VEC3       0x8B58
+#define QGPU_GT_BOOL_VEC4       0x8B59
+#define QGPU_GT_FLOAT_MAT2      0x8B5A
+#define QGPU_GT_FLOAT_MAT3      0x8B5B
+#define QGPU_GT_FLOAT_MAT4      0x8B5C
+#define QGPU_GT_SAMPLER_1D      0x8B5D
+#define QGPU_GT_SAMPLER_2D      0x8B5E
+#define QGPU_GT_SAMPLER_3D      0x8B5F
+#define QGPU_GT_SAMPLER_CUBE    0x8B60
+#define QGPU_GT_SAMPLER_1D_SHADOW 0x8B61
+#define QGPU_GT_SAMPLER_2D_SHADOW 0x8B62
+#define QGPU_GT_SAMPLER_2D_RECT 0x8B63
+#define QGPU_GT_SAMPLER_2D_RECT_SHADOW 0x8B64
+#define QGPU_GT_IS_SAMPLER(t)   ((t) >= QGPU_GT_SAMPLER_1D && (t) <= QGPU_GT_SAMPLER_2D_RECT_SHADOW)
+#define QGPU_GT_IS_MAT(t)       ((t) >= QGPU_GT_FLOAT_MAT2 && (t) <= QGPU_GT_FLOAT_MAT4)
+/* emplacements (vec4) par élément */
+#define QGPU_GT_SLOTS(t)        ((t) == QGPU_GT_FLOAT_MAT2 ? 2 : (t) == QGPU_GT_FLOAT_MAT3 ? 3 : \
+                                 (t) == QGPU_GT_FLOAT_MAT4 ? 4 : 1)
 
 /* ── v18 : DRAW_NATIVE — sommets lus dans leur format d'origine ──────────────
  *

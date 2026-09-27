@@ -24,11 +24,12 @@ Swap5c, deux replis par image, 8,9 img/s au premier essai).
 tools/guest/launchers/premierplan.c, préchargé, le transforme en application
 de premier plan (0 repli hors rafraîchissements, 10,1 img/s).
 
-PROFILS : `arb` (défaut) mesure le chemin que le jeu prend aujourd'hui — GLSL
-coupé par le jeu, le plugin n'annonce pas GL_ARB_fragment_shader. Le profil
-`glsl` (+r_glsl 1, cellules nxg-*) est déclaré non automatisé ; le jour où le
-plugin porte GLSL, retirer son `non_automatise`, lui donner un plancher et une
-référence (le tour suivant la crée).
+PROFILS : `arb` (+r_glsl 0) mesure le chemin ARB / fixe ; `glsl` (+r_glsl 1,
+cellules nxg-*), automatisé depuis le protocole v21 (27/09 : programmes GLSL
+exécutés par l'hôte, docs/protocole-v21-glsl.md), est aussi le chemin que le jeu
+prend par défaut quand GL_ARB_fragment_shader est annoncée : ~40 ms/image
+contre ~107 en ARB (DarkPlaces fait en une passe GLSL ce qu'il fait en
+plusieurs passes de multitexture).
 """
 import os
 
@@ -42,14 +43,17 @@ PP_C = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.absp
 PP = "/Users/tiger/matrice/premierplan.dylib"
 
 PROFILS = {
-    "arb": ("", "DarkPlaces, ARB / fixe (GLSL coupé)"),
+    # r_glsl vaut 1 par défaut : depuis que le plugin annonce GL_ARB_fragment_shader
+    # (v21), le profil ARB doit le couper lui-même pour rester le chemin ARB.
+    "arb": ("+r_glsl 0", "DarkPlaces, ARB / fixe (GLSL coupé)"),
     "glsl": ("+r_glsl 1", "DarkPlaces, GLSL"),
 }
 
 
 class Nexuiz(Jeu):
     processus = "nexuiz-osx-agl-bin"
-    plancher_ms = 140           # 107 ms/image au 27/09 (images 120..600), marge pour le bruit
+    plancher_ms = 140           # 107 ms/image au 27/09 (images 120..600), marge pour le bruit ;
+                                # GLSL : ~40
     delai_scene = 600           # image 600 vers 80 s ; la démo finit vers 200 s
     dump_image = 870            # vidage déclenché à l'image fixe 870 (@870)
     dump_images = 24            # ~1,2 s de démo ; la capture tombe à 872 (17 Mio par image vidée)
@@ -60,10 +64,11 @@ class Nexuiz(Jeu):
         self.cle = "nx" if profil == "arb" else "nxg"
         self.titre = "Nexuiz 2.5.2" + ("" if profil == "arb" else " (GLSL)")
         self.args_profil, self.famille = PROFILS[profil]
+        # glsl : automatisé depuis le protocole v21 (27/09, plugin 20260927-glsl,
+        # docs/protocole-v21-glsl.md) — GL_ARB_fragment_shader annoncée, programmes
+        # GLSL exécutés par l'hôte. Plancher propre : ~40 ms/image au 27/09.
         if profil == "glsl":
-            raison = ("GLSL coupé par le jeu : le plugin n'annonce pas GL_ARB_fragment_shader "
-                      "(TODO §6 « Nexuiz / GLSL »)")
-            self.non_automatise = {"fen": raison, "pe": raison}
+            self.plancher_ms = 60
 
     def fichiers_reglages(self, mode):
         return [CFG]            # -benchmark n'enregistre rien, par précaution

@@ -373,6 +373,16 @@ int main(int argc, char **argv)
                     pre[np++] = id; pre[np++] = tgt;
                     prog_seen[bound_ctx][id] = 1;
                 }
+                /* v21 : programme GLSL créé avant le vidage — le plugin
+                   renvoie sa définition (GLSL_SOURCE… GLSL_LINK) sans le
+                   recréer ; on le crée ici au premier texte. */
+                if (o == QGPU_OP_GLSL_SOURCE && l == QGPU_LEN_GLSL_SOURCE && id < QGPU_MAX_PROG &&
+                    bound_ctx < 256 && !prog_seen[bound_ctx][id] && np + 5 <= 4090) {
+                    pre[np++] = QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX); pre[np++] = bound_ctx;
+                    pre[np++] = QGPU_CMD_HDR(QGPU_OP_PROG_CREATE, QGPU_LEN_PROG_CREATE);
+                    pre[np++] = id; pre[np++] = QGPU_PT_GLSL;
+                    prog_seen[bound_ctx][id] = 1;
+                }
                 if (o == QGPU_OP_CTX_BIND && id < 256) bound_ctx = id;
                 if (o == QGPU_OP_SURF_BIND && bound_ctx < 256) ctx_has_surf[bound_ctx] = 1;
                 if (o == QGPU_OP_SURF_BIND && id < 256 && !surf_seen[id] && np + 5 <= 60) {
@@ -660,6 +670,28 @@ int main(int argc, char **argv)
                 if ((op == QGPU_OP_PROG_ENV || op == QGPU_OP_PROG_LOCAL) && len == QGPU_LEN_PROG_PARAMS)
                     fprintf(stderr, "LIST image %u %s %x [%u..%u]\n", h.frame,
                             op == QGPU_OP_PROG_ENV ? "PROG_ENV cible" : "PROG_LOCAL id", a[1], a[2], a[2] + a[3]);
+                /* v21 : programmes GLSL */
+                if (op == QGPU_OP_GLSL_SOURCE && len == QGPU_LEN_GLSL_SOURCE)
+                    fprintf(stderr, "LIST image %u GLSL_SOURCE %u %s len %u\n", h.frame, a[1],
+                            a[2] == QGPU_GLSL_VERTEX ? "sommets" : "fragments", a[3]);
+                if (op == QGPU_OP_GLSL_LINK && len == QGPU_LEN_GLSL_LINK)
+                    fprintf(stderr, "LIST image %u GLSL_LINK %u\n", h.frame, a[1]);
+                if (op == QGPU_OP_GLSL_UNIFORMS && len == QGPU_LEN_GLSL_UNIFORMS)
+                    fprintf(stderr, "LIST image %u GLSL_UNIFORMS %u [%u..%u]\n", h.frame, a[1],
+                            a[2], a[2] + a[3]);
+                /* QGPU_REPLAY_PROGS=dossier : les textes GLSL aussi */
+                if (op == QGPU_OP_GLSL_SOURCE && len == QGPU_LEN_GLSL_SOURCE &&
+                    getenv("QGPU_REPLAY_PROGS") && a[4] + a[3] <= SHMEM) {
+                    char path[600];
+                    FILE *pf;
+                    snprintf(path, sizeof(path), "%s/glsl-%u-f%u-%s.txt", getenv("QGPU_REPLAY_PROGS"),
+                             a[1], h.frame, a[2] == QGPU_GLSL_VERTEX ? "vs" : "fs");
+                    pf = fopen(path, "wb");
+                    if (pf) {
+                        fwrite(shmem + a[4], 1, a[3], pf);
+                        fclose(pf);
+                    }
+                }
                 if (op == QGPU_OP_SET_STATE && len == 3 &&
                     (a[1] == QGPU_SK_VERTEX_PROGRAM || a[1] == QGPU_SK_FRAGMENT_PROGRAM))
                     fprintf(stderr, "LIST image %u SET_STATE %s = %u\n", h.frame,

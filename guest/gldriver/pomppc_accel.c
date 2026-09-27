@@ -117,7 +117,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260927-dumpat"
+#define POMPPC_PLUGIN_REV "20260927-glsl"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -346,6 +346,10 @@ static void buf_raw_invalidate_all(void);
 #define TU_LOD_BIAS      0x3c     /* float : GL_TEXTURE_LOD_BIAS de l'unité (glTexEnv
                                      GL_TEXTURE_FILTER_CONTROL), sonde v14probe */
 #define GL_MAX_TEXUNITS  8
+/* v21 : unités d'IMAGE (échantillonneurs GLSL), 16 dans GLEngine
+   (_gleInitTextureState, table des textures liées de 16 × 5 cibles) ; les 8
+   premières seules ont coordonnées et environnement. */
+#define IMG_UNITS        QGPU_MAX_IMAGE_UNITS
 /* Sommet GLEngine (0x100 octets) : */
 #define V_X 0x00
 #define V_Y 0x04
@@ -534,13 +538,40 @@ typedef struct PProg {
     unsigned long  env_n, local_n;      /* 1 + plus grand indice lu par le texte */
     const char    *parsed_text;         /* texte dont env_n / local_n / fp_unit */
     unsigned long  parsed_len;          /*   ont été tirés (prog_parse) */
-    unsigned char  fp_unit[QGPU_MAX_UNITS];  /* fragments : masque TU_ENABLE de la
+    unsigned char  fp_unit[IMG_UNITS];  /* fragments : masque TU_ENABLE de la
                                                 cible échantillonnée par unité */
     int            fp_units_bad;        /* fragments : texture[u >= 4] ou cible inconnue */
     unsigned long  vp_need;             /* sommets : entrées vertex.* lues par le texte
                                            (VPN_*) ; 0 = pas encore relu */
+    unsigned long  ugen;                /* v21 : gldModifyPipelineProgram(masque 2) vus —
+                                           un glUniform touche l'étage GLSL */
 } PProg;
 static PProg pprog[PPROG_MAX];
+
+/* v21 : programmes GLSL, cf. glsl_state (plus bas). */
+/* Un programme GLSL de GLEngine vu par un contexte. */
+#define GPROG_MAX 512
+typedef struct GProg {
+    void          *ctx;                 /* contexte pilote (0 : entrée libre) */
+    unsigned char *obj;                 /* objet programme de GLEngine (gctx+0x5430) */
+    PProg         *rec_v, *rec_f;       /* ses deux étages (pp_create), ou 0 */
+    long           id;                  /* identifiant qgpu, -1 */
+    unsigned long  sig;                 /* empreinte de la définition envoyée */
+    int            sent;                /* définition (et liaison) sur l'hôte */
+    int            refused;             /* l'hôte a refusé : hors domaine */
+    unsigned long  nslots;              /* emplacements de la table au moment de l'envoi */
+    unsigned long *mirror;              /* valeurs envoyées (nslots × 4 mots) */
+    unsigned char *kind;                /* par emplacement : 0 non déclaré, 1 flottant,
+                                           2 entier, 3 sampler */
+    int            mirror_valid;
+    unsigned long  ugen_v, ugen_f;      /* générations des étages au dernier envoi */
+    unsigned long  units_lo, units_hi;  /* mots d'unités d'image déjà décodés */
+    int            units_valid;         /*   … au moins une fois */
+    unsigned long  need_sig;            /* empreinte pour laquelle vrec.vp_need est à jour */
+    PProg          vrec, frec;          /* vues « programme de sommets / fragments » que
+                                           lisent geom_format, unit_mask… (hors pprog[]) */
+} GProg;
+static GProg gprog[GPROG_MAX];
 
 /* Mots du bloc de changements que GLEngine passe à gldUpdateDispatch (3e
    argument) : +0x00 masque principal, +0x04 et +0x10 unités de texture
@@ -606,7 +637,7 @@ typedef struct TexUnit {
 } TexUnit;
 
 typedef struct TexInfo {                /* textures à appliquer pour le dessin en cours */
-    TexUnit        u[QGPU_MAX_UNITS];
+    TexUnit        u[IMG_UNITS];        /* v21 : 8..15 sous fragments GLSL */
 } TexInfo;
 
 #define VKEY_WORDS 32                   /* lot 2 : mots de la clé du verdict */
@@ -632,8 +663,8 @@ typedef struct PCtx {
     unsigned long  direct_at;           /* n° de la dernière image présentée directement */
     /* mémoire des unités (TEXMEMO) : dernier objet de GLEngine vu à chaque
        unité et son PTex, valables tant qu'aucun PTex n'a été libéré */
-    void          *us_dt[8];
-    struct PTex   *us_t[8];
+    void          *us_dt[IMG_UNITS];
+    struct PTex   *us_t[IMG_UNITS];
     unsigned long  us_del;
     unsigned char *fullscreen_buf;      /* owned software back buffer for CGL fullscreen */
     unsigned long  fullscreen_w, fullscreen_h;
@@ -655,6 +686,14 @@ typedef struct PCtx {
     int            vp_on, fp_on;        /* GLEngine dit le programme actif (prog_state) */
     PProg         *vp_rec, *fp_rec;     /* l'objet courant, s'il est connu */
     PProg         *cur_vp, *cur_fp;     /* ce que l'hôte a lié (PROG_BIND) */
+    /* ── v21 : programmes GLSL ── */
+    int            glsl_on;             /* un objet programme GLSL est courant (gctx+0x5430) */
+    int            img_n;               /* unités relevées : 16 sous fragments GLSL, 8 sinon */
+    struct GProg  *glsl_rec;            /* le programme GLSL courant, s'il est suivi */
+    struct GProg  *glsl_cur;            /* ce que l'hôte a lié (PROG_BIND GLSL) */
+    struct GProg  *glsl_last;           /* dernière recherche objet → GProg */
+    unsigned char *glsl_last_obj;
+    int            glsl_hooked;         /* glShaderSourceARB interposé (préprocesseur) */
     unsigned char  prog_used[QGPU_MAX_PROG];   /* identifiants qgpu pris */
     unsigned long  c_env[2][QGPU_MAX_PROG_PARAMS][4];  /* miroir des program.env */
     unsigned long  c_gs;                /* QGPU_SK_GEN_SIZES posé sur le device */
@@ -681,6 +720,7 @@ typedef struct PCtx {
     unsigned char  c_tg_on[QGPU_MAX_UNITS];          /* du texgen est-il posé sur le device ? */
     unsigned long  c_clip[25];                       /* masque + 6 plans, contigus */
     unsigned long  c_cur[4][4];                      /* couleur, normale, secondaire, brouillard */
+    unsigned long  c_curtex[QGPU_MAX_UNITS][4];      /* v21 : coordonnées courantes (GLSL) */
     /* v18 : valeurs courantes posées par DRAW_NATIVE pour un attribut du
        format sans tableau (ce que l'empaqueteur aurait recopié : couleur
        morte → blanche, etc.) ; bit QGPU_CUR_* = nat_cur est ce que l'hôte a */
@@ -757,6 +797,11 @@ typedef struct PCtx {
 static void prog_state(PCtx *p);
 static int prog_domain_ok(PCtx *p);
 static int prog_sync(PCtx *p);
+/* v21 : unités relevées pour le verdict (16 sous fragments GLSL, 8 sinon ;
+   0 = prog_state pas encore passé), et première unité refusée : le device
+   n'en tient que G.units au pipeline fixe, 16 sous GLSL. */
+#define SCAN_N(p)   ((p)->img_n ? (p)->img_n : GL_MAX_TEXUNITS)
+#define UNIT_LIM(p) (SCAN_N(p) > GL_MAX_TEXUNITS ? SCAN_N(p) : G.units)
 static unsigned char *gctx_of(PCtx *p);          /* sonde v16 dans close_raw */
 
 static void cube_probe(PCtx *p, const TexInfo *ti, const char *where);
@@ -887,6 +932,9 @@ static struct {
     int             pixops;             /* v13 : COPY_TEX / ReadPixels / DrawPixels hôte */
     int             prog;               /* v16 : programmes ARB tenus par l'hôte
                                            (QGPU_CAP_PROGRAMS) ; POMPPC_GL_PROG=0 les coupe */
+    int             glsl;               /* v21 : programmes GLSL tenus par l'hôte
+                                           (QGPU_CAP_GLSL) ; POMPPC_GL_GLSL=0 les coupe */
+    int             img_units;          /* unités d'image tenues (16 avec GLSL, sinon units) */
     int             gensizes;           /* génériques à taille déclarée sur le chemin
                                            tableaux (QGPU_CAP_GEN_SIZES) ;
                                            POMPPC_GL_GENSIZES=0 revient à 4 flottants */
@@ -1992,6 +2040,13 @@ void pomppc_backend_init(void)
                l'émulation par GLEngine (repli sur Apple pour ces dessins). */
             G.prog = G.v7 && G.q.version >= 16 && (G.q.caps & QGPU_CAP_PROGRAMS) &&
                      !(getenv("POMPPC_GL_PROG") && getenv("POMPPC_GL_PROG")[0] == '0');
+            /* v21 : programmes GLSL (DarkPlaces) — sur la machinerie des
+               programmes ARB (génériques, descripteur), et seulement si l'hôte
+               les tient. POMPPC_GL_GLSL=0 revient au refus d'avant (rendu
+               d'Apple, sans GL_ARB_fragment_shader). */
+            G.glsl = G.prog && G.q.version >= 21 && (G.q.caps & QGPU_CAP_GLSL) &&
+                     !(getenv("POMPPC_GL_GLSL") && getenv("POMPPC_GL_GLSL")[0] == '0');
+            G.img_units = G.glsl ? IMG_UNITS : G.units;
             /* Transmission paresseuse des gldUpdateDispatch au GLDriver
                d'Apple (docs/re/dispatch-paresseux.md) : POMPPC_GL_LAZYAPPLE=1
                l'allume, =0 l'éteint ; sans la variable, LAZY_DEFAULT. */
@@ -2339,10 +2394,12 @@ static void invalidate_mirrors(void)
         memset(p->c_tg_on, 0, sizeof(p->c_tg_on));
         memset(p->c_clip, 0, sizeof(p->c_clip));
         memset(p->c_cur, 0, sizeof(p->c_cur));
+        memset(p->c_curtex, 0, sizeof(p->c_curtex));
         memset(p->c_pstip, 0, sizeof(p->c_pstip));
         /* v16 : liaisons et program.env repartent ; les objets, eux, sont
            supposés créés (comme les textures) */
         p->cur_vp = p->cur_fp = 0;
+        p->glsl_cur = 0;                /* v21 : PROG_BIND GLSL à refaire */
         p->c_env_n[0] = p->c_env_n[1] = 0;
         p->c_gs_valid = 0;              /* tailles des génériques : à renvoyer */
         p->nat_cur_ok = 0;              /* v18 : valeurs courantes de DRAW_NATIVE */
@@ -2360,6 +2417,13 @@ static void invalidate_mirrors(void)
                    programme et jette la soumission au premier PROG_BIND. */
                 pprog[k].text_sent = 0;
                 pprog[k].len_sent = pprog[k].sum_sent = 0;
+            }
+        /* v21 : la définition des programmes GLSL repart aussi (le rejeu crée
+           le programme au premier GLSL_SOURCE), et toutes leurs valeurs */
+        for (k = 0; k < GPROG_MAX; k++)
+            if (gprog[k].ctx) {
+                gprog[k].sent = 0;
+                gprog[k].mirror_valid = 0;
             }
     }
     for (t = G.textures; t; t = t->next) {
@@ -3061,7 +3125,7 @@ static long alloc_tex_id(PCtx *p)
     unsigned long i;
     PTex *t, *victim = NULL;
     PCtx *ctx;
-    void *protected[QGPU_MAX_UNITS];
+    void *protected[IMG_UNITS];
     unsigned long mask, *c;
     long id;
     int u;
@@ -3081,8 +3145,8 @@ static long alloc_tex_id(PCtx *p)
     /* Protect every effective unit, including units not uploaded yet. A
      * texture bound by another context may be evicted: that context will
      * reload it when drawn again. Guest storage remains owned by GLEngine. */
-    for (u = 0; u < QGPU_MAX_UNITS; u++)
-        protected[u] = unit_drvtex(p, u, &mask);
+    for (u = 0; u < IMG_UNITS; u++)
+        protected[u] = u < SCAN_N(p) ? unit_drvtex(p, u, &mask) : 0;
     for (t = G.textures; t; t = t->next) {
         /* P15 : une texture remplie par COPY_TEX n'existe QUE sur l'hôte — le
            niveau de l'invité n'a jamais été mis à jour. L'évincer perdrait son
@@ -3091,10 +3155,10 @@ static long alloc_tex_id(PCtx *p)
         if (t->qtex < 0 || t->host_only ||
             (victim && t->last_use >= victim->last_use))
             continue;
-        for (u = 0; u < QGPU_MAX_UNITS; u++)
+        for (u = 0; u < IMG_UNITS; u++)
             if (protected[u] == t->drvtex)
                 break;
-        if (u == QGPU_MAX_UNITS)
+        if (u == IMG_UNITS)
             victim = t;
     }
     if (!victim)
@@ -4377,7 +4441,7 @@ static int unit_slot(unsigned long m)
 static unsigned long unit_mask(PCtx *p, int u)
 {
     if (G.prog && p->fp_on && p->fp_rec && !p->fp_rec->refused)
-        return u < QGPU_MAX_UNITS ? p->fp_rec->fp_unit[u] : 0;
+        return u < IMG_UNITS ? p->fp_rec->fp_unit[u] : 0;
     return GLD_U32(gls(p) + GS_TEXUNIT0 + u * GS_TEXUNIT_SIZE, TU_ENABLE) & 0x1f;
 }
 
@@ -4413,9 +4477,9 @@ typedef struct UScan {
     const PProg   *fp_rec;              /* programme dont unit_mask a lu les unités */
     unsigned long  units;               /* CTX_TEXUNITS */
     int            on;                  /* texturing_on */
-    unsigned long  mask[GL_MAX_TEXUNITS];   /* unit_mask */
-    void          *dt[GL_MAX_TEXUNITS];     /* unit_drvtex */
-    PTex          *t[GL_MAX_TEXUNITS];      /* find_tex(dt) ; intern_tex à la demande */
+    unsigned long  mask[IMG_UNITS];         /* unit_mask (v21 : 16 unités d'image) */
+    void          *dt[IMG_UNITS];           /* unit_drvtex */
+    PTex          *t[IMG_UNITS];            /* find_tex(dt) ; intern_tex à la demande */
 } UScan;
 static UScan US;
 static unsigned long us_seq;            /* un par verdict ouvert */
@@ -4437,7 +4501,12 @@ static void us_fill(PCtx *p, UScan *s)
     s->fp_rec = us_fp(p);
     s->units = units;
     s->on = 0;
-    for (u = 0; u < GL_MAX_TEXUNITS; u++) {
+    for (u = SCAN_N(p); u < IMG_UNITS; u++) {       /* v21 : hors relevé */
+        s->mask[u] = 0;
+        s->dt[u] = 0;
+        s->t[u] = 0;
+    }
+    for (u = 0; u < SCAN_N(p); u++) {
         unsigned long m = unit_mask(p, u);
         void *dt = 0;
         PTex *t = 0;
@@ -4502,7 +4571,7 @@ static UScan *us_get(PCtx *p)
         int u, d;
         us_fill(p, &f);
         d = f.on != US.on;
-        for (u = 0; u < GL_MAX_TEXUNITS; u++)
+        for (u = 0; u < SCAN_N(p); u++)
             if (f.mask[u] != US.mask[u] || f.dt[u] != US.dt[u] ||
                 (f.t[u] && f.t[u] != US.t[u]))
                 d |= 2 << u;
@@ -4546,7 +4615,7 @@ static int texturing_on(PCtx *p)
     if (sc)
         return sc->on;
     units = GLD_U32(p->ctx, CTX_TEXUNITS);
-    for (u = 0; u < GL_MAX_TEXUNITS; u++) {
+    for (u = 0; u < SCAN_N(p); u++) {
         unsigned long m = unit_mask(p, u);
         void *dt;
         if (!m)
@@ -4652,16 +4721,16 @@ static int texture_ok(PCtx *p, TexInfo *ti)
     int i;
     UScan *sc;
 
-    for (i = 0; i < QGPU_MAX_UNITS; i++)
+    for (i = 0; i < IMG_UNITS; i++)
         ti->u[i].t = 0;
     prog_state(p);                                  /* v16 : unit_mask en dépend */
     if (!texturing_on(p))
         return 1;                                   /* pas de texture : dessin simple */
     sc = us_get(p);
-    for (i = G.units; i < GL_MAX_TEXUNITS; i++)
+    for (i = UNIT_LIM(p); i < SCAN_N(p); i++)
         if (sc ? sc->mask[i] : unit_mask(p, i))
             return no(NO_TEX_UNITS, i, 0);          /* au-delà du device : logiciel */
-    for (i = 0; i < QGPU_MAX_UNITS; i++)
+    for (i = 0; i < SCAN_N(p); i++)
         if (!texture_unit_ok(p, i, &ti->u[i]))
             return 0;
     cube_probe(p, ti, "texture_ok");
@@ -5263,13 +5332,25 @@ static void state_units(PCtx *p, const TexInfo *ti, unsigned long *v)
             v[QGPU_SK_COMBINE_SRC(u)] = tu->combine_src;
         }
     }
+    /* v21 : unités d'image 8..15 (texturage et texture seulement) */
+    for (u = QGPU_MAX_UNITS; G.glsl && u < IMG_UNITS; u++) {
+        const TexUnit *tu = ti ? &ti->u[u] : 0;
+        kb = QGPU_SK_UNIT(u);
+        v[kb + QGPU_SK_U_ENABLE] = tu && tu->t;
+        v[kb + QGPU_SK_U_BIND] = tu && tu->t ? (unsigned long)tu->t->qtex
+                                             : p->st_valid ? p->st[kb + QGPU_SK_U_BIND] : 0;
+        v[kb + QGPU_SK_U_ENV_MODE] = 0x2100;
+        v[kb + QGPU_SK_U_ENV_COLOR] = 0;
+    }
 }
 
 /* Clés des programmes ARB (même règle que compute_geom_state). */
 static void state_progs(PCtx *p, unsigned long *v)
 {
-    v[QGPU_SK_VERTEX_PROGRAM] = (G.prog && p->vp_on && p->vp_rec && !p->vp_rec->refused) ? 1 : 0;
-    v[QGPU_SK_FRAGMENT_PROGRAM] = (G.prog && p->fp_on && p->fp_rec && !p->fp_rec->refused) ? 1 : 0;
+    /* v21 : sous GLSL, le programme lié (PROG_BIND GLSL) prime : clés ARB à 0 */
+    int arb = !p->glsl_on;
+    v[QGPU_SK_VERTEX_PROGRAM] = (arb && G.prog && p->vp_on && p->vp_rec && !p->vp_rec->refused) ? 1 : 0;
+    v[QGPU_SK_FRAGMENT_PROGRAM] = (arb && G.prog && p->fp_on && p->fp_rec && !p->fp_rec->refused) ? 1 : 0;
 }
 
 static void compute_state(PCtx *p, const TexInfo *ti, unsigned long *v, int raw)
@@ -5448,7 +5529,8 @@ static void send_state(PCtx *p, const TexInfo *ti, int raw)
 {
     unsigned long v[QGPU_SK_COUNT], *c;
     int k, r, nr = 0, skip;
-    struct { int lo, hi; } rg[5];       /* géométrie, v8, 1.4, programmes, unités 4..7 */
+    struct { int lo, hi; } rg[6];       /* géométrie, v8, 1.4, programmes, unités 4..7,
+                                           unités d'image 8..15 */
     unsigned long sbits = GLD_U32(p->ctx, CTX_STENCIL_BITS);
     /* Lot 4 : sauter compute_state ? Tout ce qu'il lit de l'état GL fait poser
        à GLEngine un bit du bloc de changements (relevés R4 et R5) ; un bit
@@ -5501,12 +5583,14 @@ static void send_state(PCtx *p, const TexInfo *ti, int raw)
     /* v17 : les unités 4..7 (texturage, GL_COMBINE, biais de LOD), les deux
        chemins ; un device plus ancien refuserait ces clés */
     if (G.units > 4) { rg[nr].lo = QGPU_SK_TEXTURE4; rg[nr].hi = QGPU_SK_TEX_LOD_BIAS4 + 4; nr++; }
+    /* v21 : unités d'image 8..15 (GLSL) */
+    if (G.glsl) { rg[nr].lo = QGPU_SK_TEXTURE8; rg[nr].hi = QGPU_SK_UNIT(IMG_UNITS - 1) + 4; nr++; }
     if (skip && !G.stcheck) {
         /* Lot 4 : seules les clés des unités (verdict) et des programmes
            peuvent différer de p->st ; on ne compare qu'elles, dans l'ordre des
            plages (même flux qu'avec le calcul complet). Liste faite une fois :
            les plages ne dépendent que des capacités du device. */
-        static int hot[QGPU_MAX_UNITS * 6 + 2], nhot = -1;
+        static int hot[QGPU_MAX_UNITS * 6 + (IMG_UNITS - QGPU_MAX_UNITS) * 4 + 2], nhot = -1;
         int i;
         if (nhot < 0) {
             static unsigned char is_hot[QGPU_SK_COUNT];
@@ -5516,6 +5600,11 @@ static void send_state(PCtx *p, const TexInfo *ti, int raw)
                 is_hot[kb + QGPU_SK_U_ENABLE] = is_hot[kb + QGPU_SK_U_BIND] = 1;
                 is_hot[kb + QGPU_SK_U_ENV_MODE] = is_hot[kb + QGPU_SK_U_ENV_COLOR] = 1;
                 is_hot[QGPU_SK_COMBINE(u)] = is_hot[QGPU_SK_COMBINE_SRC(u)] = 1;
+            }
+            for (u = QGPU_MAX_UNITS; u < IMG_UNITS; u++) {     /* v21 */
+                int kb = QGPU_SK_UNIT(u);
+                is_hot[kb + QGPU_SK_U_ENABLE] = is_hot[kb + QGPU_SK_U_BIND] = 1;
+                is_hot[kb + QGPU_SK_U_ENV_MODE] = is_hot[kb + QGPU_SK_U_ENV_COLOR] = 1;
             }
             is_hot[QGPU_SK_VERTEX_PROGRAM] = is_hot[QGPU_SK_FRAGMENT_PROGRAM] = 1;
             nhot = 0;
@@ -5539,7 +5628,8 @@ static void send_state(PCtx *p, const TexInfo *ti, int raw)
         return;
     }
     if (skip) {                         /* lot 4, contrôle : calcul complet comparé */
-        unsigned long w[QGPU_SK_COUNT], hv[QGPU_MAX_UNITS * 6 + 2];
+        unsigned long w[QGPU_SK_COUNT],
+                      hv[QGPU_MAX_UNITS * 6 + (IMG_UNITS - QGPU_MAX_UNITS) * 4 + 2];
         int d = 0, first = -1, u, n = 0;
         /* le vecteur sauté : p->st, plus les clés refaites */
         for (u = 0; u < QGPU_MAX_UNITS; u++) {
@@ -5547,6 +5637,11 @@ static void send_state(PCtx *p, const TexInfo *ti, int raw)
             hv[n++] = v[kb + QGPU_SK_U_ENABLE]; hv[n++] = v[kb + QGPU_SK_U_BIND];
             hv[n++] = v[kb + QGPU_SK_U_ENV_MODE]; hv[n++] = v[kb + QGPU_SK_U_ENV_COLOR];
             hv[n++] = v[QGPU_SK_COMBINE(u)]; hv[n++] = v[QGPU_SK_COMBINE_SRC(u)];
+        }
+        for (u = QGPU_MAX_UNITS; u < IMG_UNITS; u++) {        /* v21 */
+            int kb = QGPU_SK_UNIT(u);
+            hv[n++] = v[kb + QGPU_SK_U_ENABLE]; hv[n++] = v[kb + QGPU_SK_U_BIND];
+            hv[n++] = v[kb + QGPU_SK_U_ENV_MODE]; hv[n++] = v[kb + QGPU_SK_U_ENV_COLOR];
         }
         hv[n++] = v[QGPU_SK_VERTEX_PROGRAM];
         hv[n++] = v[QGPU_SK_FRAGMENT_PROGRAM];
@@ -5556,6 +5651,11 @@ static void send_state(PCtx *p, const TexInfo *ti, int raw)
             v[kb + QGPU_SK_U_ENABLE] = hv[n++]; v[kb + QGPU_SK_U_BIND] = hv[n++];
             v[kb + QGPU_SK_U_ENV_MODE] = hv[n++]; v[kb + QGPU_SK_U_ENV_COLOR] = hv[n++];
             v[QGPU_SK_COMBINE(u)] = hv[n++]; v[QGPU_SK_COMBINE_SRC(u)] = hv[n++];
+        }
+        for (u = QGPU_MAX_UNITS; u < IMG_UNITS; u++) {        /* v21 */
+            int kb = QGPU_SK_UNIT(u);
+            v[kb + QGPU_SK_U_ENABLE] = hv[n++]; v[kb + QGPU_SK_U_BIND] = hv[n++];
+            v[kb + QGPU_SK_U_ENV_MODE] = hv[n++]; v[kb + QGPU_SK_U_ENV_COLOR] = hv[n++];
         }
         v[QGPU_SK_VERTEX_PROGRAM] = hv[n++];
         v[QGPU_SK_FRAGMENT_PROGRAM] = hv[n++];
@@ -6427,11 +6527,14 @@ static PProg *pprog_find(void *ctx, const unsigned char *obj)
     return 0;
 }
 
+static void gprog_stage_gone(PProg *r);   /* v21 */
+
 /* L'objet hôte meurt : PROG_DESTROY si le contexte qgpu vit encore, et les
    miroirs du contexte oublient ce programme. Sous G.mu. */
 static void pprog_release(PProg *r)
 {
     PCtx *p = find_ctx(r->ctx);
+    gprog_stage_gone(r);                /* v21 : étage d'un programme GLSL */
     if (p) {
         if (p->cur_vp == r) p->cur_vp = 0;
         if (p->cur_fp == r) p->cur_fp = 0;
@@ -6487,7 +6590,10 @@ static long pp_modify(void *ctx, unsigned long handle, unsigned long mask)
     r = pprog_of(handle);
     if (r) {
         if (mask & 1) r->text_dirty = 1;
-        if (mask & 2) r->local_dirty = 1;
+        if (mask & 2) {
+            r->local_dirty = 1;
+            r->ugen++;                  /* v21 : glUniform sur un étage GLSL */
+        }
         handle = r->apple;
     }
     pthread_mutex_unlock(&G.mu);
@@ -6963,14 +7069,24 @@ static void prog_parse(PProg *r)
 }
 
 /* Ce que GLEngine dit des programmes : actifs ? lesquels ? Aucune commande. */
+static int glsl_state(PCtx *p, unsigned char *gc);    /* v21 */
+
 static void prog_state(PCtx *p)
 {
     unsigned char *gc = gctx_of(p);
     int t;
     p->vp_on = p->fp_on = 0;
     p->vp_rec = p->fp_rec = 0;
+    p->glsl_on = 0;
+    p->img_n = GL_MAX_TEXUNITS;
     if (!gc || !G.prog)
         return;
+    /* v21 : un objet programme GLSL courant décide seul des étages */
+    if (glsl_state(p, gc)) {
+        if (G.glsl && p->fp_on)
+            p->img_n = IMG_UNITS;
+        return;
+    }
     for (t = 0; t < 2; t++) {
         unsigned char *obj = (unsigned char *)GLD_U32(gc, GC_PROG_CUR(t));
         PProg *r;
@@ -6990,8 +7106,21 @@ static int prog_domain_ok(PCtx *p)
     int t;
     if (!gc)
         return 1;
-    if (GLD_U32(gc, GC_GLSL_ACTIVE))
-        return no(NO_G_PROGRAM, 0x5430, GLD_U32(gc, GC_GLSL_ACTIVE));
+    if (GLD_U32(gc, GC_GLSL_ACTIVE)) {
+        /* v21 : sans l'hôte GLSL, le rendu d'Apple (qui ne sait que les
+           sommets) ; avec, refusé par l'hôte ou table pleine seulement */
+        if (!G.glsl)
+            return no(NO_G_PROGRAM, 0x5430, GLD_U32(gc, GC_GLSL_ACTIVE));
+        if (!p->glsl_on)
+            return 1;                   /* aucun étage actif : pipeline fixe */
+        if (!p->glsl_rec)
+            return no(NO_G_PROGRAM, 0x5430, 2);
+        if (p->glsl_rec->refused && p->glsl_rec->sent)
+            return no(NO_G_PROG_HOST, (unsigned long)p->glsl_rec->id, 2);
+        if (p->fp_on && p->fp_rec && p->fp_rec->fp_units_bad)
+            return no(NO_G_PROG_UNITS, (unsigned long)p->glsl_rec->id, 2);
+        return 1;
+    }
     for (t = 0; t < 2; t++) {
         int on = t ? p->fp_on : p->vp_on;
         PProg *r = t ? p->fp_rec : p->vp_rec;
@@ -7173,6 +7302,682 @@ static void prog_send_local(PCtx *p, PProg *r)
     c[4] = G.q.base + off;
 }
 
+
+/* ─────────── v21 : programmes GLSL (docs/re/glsl-glengine.md) ───────────
+ *
+ * GLEngine compile et lie LUI-MÊME (compilateur 3Dlabs de
+ * libGLProgrammability : ShCompile, ShLink) ; c'est lui qui répond à
+ * l'application (COMPILE_STATUS, LINK_STATUS, glGetUniformLocation…). Le
+ * pilote ne reçoit que deux « pipeline programs » par objet programme (un par
+ * étage, créés à glCreateProgramObjectARB, descripteur PS+0x504) et des
+ * gldModifyPipelineProgram(masque 2 / 6) à chaque glUniform. Le plugin relit
+ * donc dans l'objet programme de GLEngine, au dessin :
+ *   - les TEXTES des shaders attachés (objet shader +0x2c, longueur +0x28) ;
+ *   - les uniforms actifs et leurs emplacements, les attributs et leurs
+ *     emplacements, par l'API de libGLProgrammability elle-même
+ *     (ShGetActiveUniform, ShGetUniformLocation, ShGetActiveAttrib,
+ *     ShGetAttribLocation sur la poignée de l'éditeur de liens, P+0x40) —
+ *     exactement ce que rendent glGetActiveUniformARB & co ;
+ *   - les VALEURS des uniforms : la table de GLEngine (P+0x4c), 16 octets par
+ *     emplacement, l'emplacement étant celui que glGetUniformLocationARB a
+ *     rendu à l'application (glUniform*_Exec y écrit directement) ;
+ *   - les unités d'image échantillonnées : 4 bits par unité dans l'étage
+ *     fragments (PS+0x50c, 64 bits ; _evaluateImageUnits), index de cible
+ *     0 cube, 1 3D, 2 rectangle, 3 2D, 4 1D (le bit 1 << index est celui de
+ *     TU_ENABLE), 0xF = unité libre ;
+ *   - l'activité : gctx+0x5430 (objet courant), +0x5434 / +0x5438 (étages
+ *     sommets / fragments actifs, posés par _updateShaderState).
+ * L'hôte recompile le même texte (protocole v21, GLSL_*). */
+#define GC_GLSL_VS_ON    0x5434         /* u32 : étage sommets GLSL actif */
+#define GC_GLSL_FS_ON    0x5438         /* u32 : étage fragments GLSL actif */
+#define GO_TYPE          0x10           /* u32 : 0x8B40 programme, 0x8B48 shader */
+#define GO_PS_V          0x20           /* programme : étage sommets (bloc de 0x520 o) */
+#define GO_PS_F          0x24           /*   étage fragments */
+#define GO_NUNIF         0x28           /*   uniforms actifs (ShGetNumActiveUniforms) */
+#define GO_NSLOTS        0x30           /*   emplacements de la table (ShGetActiveUserUniformsSize) */
+#define GO_NATTR         0x34           /*   attributs actifs */
+#define GO_LINKED        0x3c           /*   u8 : ShLink a réussi */
+#define GO_LINKER        0x40           /*   poignée ShConstructLinker */
+#define GO_ATTACHED      0x44           /*   tableau des objets shader attachés */
+#define GO_NATTACHED     0x48
+#define GO_STORE         0x4c           /*   table des valeurs, 16 o par emplacement */
+#define SO_STAGE         0x20           /* shader : 0x8B30 fragments / 0x8B31 sommets */
+#define SO_COMPILED      0x25           /*   u8 */
+#define SO_LEN           0x28
+#define SO_SRC           0x2c
+#define SO_COMPILER      0x30
+#define PS_STREAM        0x508          /* étage : flux compilé (réalloué à chaque liaison) */
+#define PS_UNITS_HI      0x50c          /*   unités d'image 8..15 (4 bits chacune) */
+#define PS_UNITS_LO      0x510          /*   unités 0..7 */
+#define PS_OBJ           0x3c           /* étage − PProg.obj (descripteur = étage + 0x504) */
+
+typedef int (*sh_active_fn)(void *, int, int, int *, int *, unsigned int *, char *);
+typedef int (*sh_loc_fn)(void *, const char *);
+static struct {
+    int           tried, ok;
+    sh_active_fn  active_unif, active_attr;
+    sh_loc_fn     unif_loc, attr_loc;
+} SH;
+
+/* L'API de libGLProgrammability, déjà chargée par GLEngine. */
+static int sh_resolve(void)
+{
+    void *h;
+    if (SH.tried)
+        return SH.ok;
+    SH.tried = 1;
+    h = dlopen("/System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/"
+               "libGLProgrammability.dylib", RTLD_LAZY);
+    SH.active_unif = (sh_active_fn)(h ? dlsym(h, "ShGetActiveUniform") : 0);
+    SH.active_attr = (sh_active_fn)(h ? dlsym(h, "ShGetActiveAttrib") : 0);
+    SH.unif_loc = (sh_loc_fn)(h ? dlsym(h, "ShGetUniformLocation") : 0);
+    SH.attr_loc = (sh_loc_fn)(h ? dlsym(h, "ShGetAttribLocation") : 0);
+    if (!SH.active_unif)
+        SH.active_unif = (sh_active_fn)dlsym(RTLD_DEFAULT, "ShGetActiveUniform");
+    if (!SH.active_attr)
+        SH.active_attr = (sh_active_fn)dlsym(RTLD_DEFAULT, "ShGetActiveAttrib");
+    if (!SH.unif_loc)
+        SH.unif_loc = (sh_loc_fn)dlsym(RTLD_DEFAULT, "ShGetUniformLocation");
+    if (!SH.attr_loc)
+        SH.attr_loc = (sh_loc_fn)dlsym(RTLD_DEFAULT, "ShGetAttribLocation");
+    SH.ok = SH.active_unif && SH.active_attr && SH.unif_loc && SH.attr_loc;
+    gl_note("GLSL : API de libGLProgrammability %s\n", SH.ok ? "résolue" : "INTROUVABLE");
+    return SH.ok;
+}
+
+
+static unsigned long glsl_sig(const unsigned char *P)
+{
+    unsigned long h = 5381, n, i;
+    const unsigned char *psv = (const unsigned char *)GLD_U32(P, GO_PS_V);
+    const unsigned char *psf = (const unsigned char *)GLD_U32(P, GO_PS_F);
+    const unsigned char *att = (const unsigned char *)GLD_U32(P, GO_ATTACHED);
+#define GS_MIX(v) (h = h * 33 + (unsigned long)(v))
+    GS_MIX(psv); GS_MIX(psf);
+    GS_MIX(GLD_U32(P, GO_STORE)); GS_MIX(GLD_U32(P, GO_NSLOTS));
+    GS_MIX(GLD_U32(P, GO_NUNIF)); GS_MIX(GLD_U32(P, GO_NATTR));
+    GS_MIX(GLD_U8(P, GO_LINKED));
+    if (psv) GS_MIX(GLD_U32(psv, PS_STREAM));
+    if (psf) GS_MIX(GLD_U32(psf, PS_STREAM));
+    n = GLD_U32(P, GO_NATTACHED);
+    GS_MIX(n);
+    for (i = 0; att && i < n && i < 16; i++) {
+        const unsigned char *S = (const unsigned char *)GLD_U32(att, i * 4);
+        GS_MIX(S);
+        if (S) {
+            GS_MIX(GLD_U32(S, SO_SRC));
+            GS_MIX(GLD_U32(S, SO_LEN));
+            GS_MIX(GLD_U32(S, SO_COMPILER));
+        }
+    }
+#undef GS_MIX
+    return h;
+}
+
+/* Entrées de sommet que lit un texte de shader de sommets (VPN_*). */
+static unsigned long glsl_vs_inputs(const char *s, unsigned long n)
+{
+    unsigned long i, need = 0;
+    for (i = 0; i + 3 < n; i++) {
+        unsigned long j;
+        if (s[i] != 'g' || s[i + 1] != 'l' || s[i + 2] != '_')
+            continue;
+        if (i > 0 && ((s[i - 1] >= 'a' && s[i - 1] <= 'z') || (s[i - 1] >= 'A' && s[i - 1] <= 'Z') ||
+                      (s[i - 1] >= '0' && s[i - 1] <= '9') || s[i - 1] == '_'))
+            continue;
+        j = i + 3;
+        if (n - j >= 6 && !memcmp(s + j, "Normal", 6)) need |= VPN_NORMAL;
+        else if (n - j >= 14 && !memcmp(s + j, "SecondaryColor", 14)) need |= VPN_SEC;
+        else if (n - j >= 5 && !memcmp(s + j, "Color", 5)) need |= VPN_COLOR;
+        else if (n - j >= 8 && !memcmp(s + j, "FogCoord", 8)) need |= VPN_FOG;
+        else if (n - j >= 13 && !memcmp(s + j, "MultiTexCoord", 13) && j + 13 < n &&
+                 s[j + 13] >= '0' && s[j + 13] <= '7')
+            need |= VPN_TEX(s[j + 13] - '0');
+    }
+    return need;
+}
+
+/* Octets qu'un texte GLSL peut porter sur le fil (qgpu : ASCII imprimable,
+   blancs) ; le reste — commentaires en Latin-1 par exemple — devient une
+   espace. */
+static void glsl_copy_text(unsigned char *dst, const unsigned char *src, unsigned long n)
+{
+    unsigned long i;
+    for (i = 0; i < n; i++) {
+        unsigned char ch = src[i];
+        dst[i] = ((ch >= 0x20 && ch <= 0x7e) || ch == '\t' || ch == '\n' || ch == '\r' ||
+                  ch == '\f' || ch == '\v') ? ch : ' ';
+    }
+}
+
+static unsigned long glsl_text_len(const char *s)
+{
+    unsigned long n = 0;
+    while (n < QGPU_MAX_GLSL_LEN && s[n])
+        n++;
+    return n;
+}
+
+static GProg *gprog_find(PCtx *p, const unsigned char *P)
+{
+    int i, free_i = -1;
+    for (i = 0; i < GPROG_MAX; i++) {
+        if (gprog[i].ctx == p->ctx && gprog[i].obj == P)
+            return &gprog[i];
+        if (!gprog[i].ctx && free_i < 0)
+            free_i = i;
+    }
+    if (free_i < 0)
+        return 0;
+    memset(&gprog[free_i], 0, sizeof(gprog[free_i]));
+    gprog[free_i].ctx = p->ctx;
+    gprog[free_i].obj = (unsigned char *)P;
+    gprog[free_i].id = -1;
+    gprog[free_i].vrec.id = gprog[free_i].frec.id = -1;
+    gprog[free_i].vrec.target = QGPU_PT_VERTEX;
+    gprog[free_i].frec.target = QGPU_PT_FRAGMENT;
+    return &gprog[free_i];
+}
+
+/* L'objet hôte meurt (programme détruit, étage détruit) ; sous G.mu. */
+static void gprog_release(GProg *g)
+{
+    PCtx *p = find_ctx(g->ctx);
+    if (p) {
+        if (p->glsl_rec == g) p->glsl_rec = 0;
+        if (p->glsl_cur == g) p->glsl_cur = 0;
+        if (p->vp_rec == &g->vrec) p->vp_rec = 0;
+        if (p->fp_rec == &g->frec) p->fp_rec = 0;
+        if (g->id >= 0 && g->id < QGPU_MAX_PROG) {
+            p->prog_used[g->id] = 0;
+            if (G.state > 0 && p->qctx >= 0 && !p->broken) {
+                unsigned long *c = reserve(p, QGPU_LEN_PROG);
+                c[0] = QGPU_CMD_HDR(QGPU_OP_PROG_DESTROY, QGPU_LEN_PROG);
+                c[1] = (unsigned long)g->id;
+            }
+        }
+    }
+    free(g->mirror);
+    free(g->kind);
+    memset(g, 0, sizeof(*g));
+}
+
+/* Un étage de pipeline program disparaît : le programme GLSL dont il était un
+   étage aussi (GLEngine ne détruit les étages qu'avec leur programme). */
+static void gprog_stage_gone(PProg *r)
+{
+    int i;
+    for (i = 0; i < GPROG_MAX; i++)
+        if (gprog[i].ctx && (gprog[i].rec_v == r || gprog[i].rec_f == r))
+            gprog_release(&gprog[i]);
+}
+
+/* Cibles échantillonnées par unité d'image (étage fragments). */
+static void glsl_units(GProg *g, const unsigned char *psf)
+{
+    unsigned long hi = psf ? GLD_U32(psf, PS_UNITS_HI) : 0xFFFFFFFFUL;
+    unsigned long lo = psf ? GLD_U32(psf, PS_UNITS_LO) : 0xFFFFFFFFUL;
+    int u;
+    if (g->units_lo == lo && g->units_hi == hi && g->units_valid)
+        return;
+    g->units_lo = lo;
+    g->units_hi = hi;
+    g->units_valid = 1;
+    g->frec.fp_units_bad = 0;
+    for (u = 0; u < IMG_UNITS; u++) {
+        unsigned long k = u < 8 ? (lo >> (4 * u)) & 0xf : (hi >> (4 * (u - 8))) & 0xf;
+        g->frec.fp_unit[u] = k <= 4 ? (unsigned char)(1u << k) : 0;
+        if (k <= 4 && u >= G.img_units)
+            g->frec.fp_units_bad = 1;
+    }
+}
+
+/* Entrées de sommet du programme (VPN_*) : attributs intégrés que lisent ses
+   textes de sommets, et génériques de ses attributs nommés. Refait quand
+   l'empreinte change — dès le DISPATCH, parce que le format de sommet en
+   dépend avant que le lot ne définisse le programme sur l'hôte. */
+static unsigned long glsl_need(const unsigned char *P)
+{
+    void *linker = (void *)GLD_U32(P, GO_LINKER);
+    const unsigned char *att = (const unsigned char *)GLD_U32(P, GO_ATTACHED);
+    unsigned long natt = GLD_U32(P, GO_NATTACHED), need = VPN_VALID, i;
+    char name[QGPU_MAX_GLSL_NAME + 8];
+    for (i = 0; att && i < natt && i < QGPU_MAX_GLSL_SRC; i++) {
+        const unsigned char *S = (const unsigned char *)GLD_U32(att, i * 4);
+        const char *src = S ? (const char *)GLD_U32(S, SO_SRC) : 0;
+        if (src && GLD_U32(S, SO_STAGE) == QGPU_GLSL_VERTEX)
+            need |= glsl_vs_inputs(src, glsl_text_len(src));
+    }
+    if (!linker || !sh_resolve())
+        return need | 0x0FFFFFFF;       /* inconnu : tout garder */
+    for (i = 0; i < GLD_U32(P, GO_NATTR) && i < 64; i++) {
+        int len = 0, size = 0, loc, k, nloc;
+        unsigned int type = 0;
+        memset(name, 0, sizeof(name));
+        if (!SH.active_attr(linker, (int)i, QGPU_MAX_GLSL_NAME, &len, &size, &type, name) ||
+            len <= 0 || !strncmp(name, "gl_", 3))
+            continue;
+        loc = SH.attr_loc(linker, name);
+        if (loc < 0 || loc >= QGPU_MAX_GLSL_ATTRIBS)
+            continue;
+        nloc = type == 0x8B5C ? 4 : type == 0x8B5B ? 3 : type == 0x8B5A ? 2 : 1;
+        for (k = 0; k < nloc && loc + k < QGPU_VF_GEN_MAX; k++)
+            need |= VPN_GEN(loc + k);
+    }
+    return need;
+}
+
+/* Ce que GLEngine dit du programme GLSL courant (sans rien envoyer). Rend 1
+   si un objet programme GLSL est courant (le mode GLSL décide alors seul des
+   étages : les programmes ARB ne comptent pas). */
+static int glsl_state(PCtx *p, unsigned char *gc)
+{
+    unsigned char *P = (unsigned char *)GLD_U32(gc, GC_GLSL_ACTIVE);
+    GProg *g;
+    p->glsl_on = 0;
+    p->glsl_rec = 0;
+    if (!P)
+        return 0;
+    if (!G.glsl) {
+        p->glsl_on = 1;
+        return 1;                       /* prog_domain_ok refuse */
+    }
+    /* Objet courant sans aucun étage actif (unités incohérentes : deux types
+       de sampler sur une unité, sampler dans les sommets) : GLEngine a
+       coupé les deux étages (_updateShaderState) et dessine au pipeline
+       fixe — les programmes ARB aussi sont coupés. */
+    if (!GLD_U32(gc, GC_GLSL_VS_ON) && !GLD_U32(gc, GC_GLSL_FS_ON))
+        return 1;
+    p->glsl_on = 1;
+    if (p->glsl_last_obj == P && p->glsl_last && p->glsl_last->obj == P &&
+        p->glsl_last->ctx == p->ctx)
+        g = p->glsl_last;
+    else {
+        g = gprog_find(p, P);
+        p->glsl_last = g;
+        p->glsl_last_obj = P;
+    }
+    p->glsl_rec = g;
+    if (!g)
+        return 1;
+    if (GLD_U32(gc, GC_GLSL_VS_ON)) {
+        unsigned long sig = glsl_sig(P);
+        p->vp_on = 1;
+        p->vp_rec = &g->vrec;
+        if (!(g->vrec.vp_need & VPN_VALID) || g->need_sig != sig) {
+            g->vrec.vp_need = glsl_need(P);
+            g->need_sig = sig;
+        }
+    }
+    if (GLD_U32(gc, GC_GLSL_FS_ON)) {
+        p->fp_on = 1;
+        p->fp_rec = &g->frec;
+        glsl_units(g, (const unsigned char *)GLD_U32(P, GO_PS_F));
+    }
+    return 1;
+}
+
+/* Définit le programme sur l'hôte (textes, attributs, uniforms, liaison),
+   dans une soumission sonde : le verdict de l'hôte est connu tout de suite.
+   1 = accepté. */
+static int glsl_define(PCtx *p, GProg *g, unsigned long sig)
+{
+    unsigned char *P = g->obj;
+    void *linker = (void *)GLD_U32(P, GO_LINKER);
+    const unsigned char *att = (const unsigned char *)GLD_U32(P, GO_ATTACHED);
+    unsigned long natt = GLD_U32(P, GO_NATTACHED), nslots = GLD_U32(P, GO_NSLOTS);
+    unsigned long i, off, *c, nsrc = 0, nunif = 0, nattr = 0;
+    char name[QGPU_MAX_GLSL_NAME + 8];
+    long st;
+
+    g->sent = 1;
+    g->sig = sig;
+    g->mirror_valid = 0;
+    g->refused = 1;                     /* jusqu'à preuve du contraire */
+    g->vrec.refused = g->frec.refused = 1;
+    if (!sh_resolve() || !linker || !att || !natt || natt > QGPU_MAX_GLSL_SRC ||
+        !GLD_U8(P, GO_LINKED) || nslots > QGPU_MAX_GLSL_SLOTS)
+        return 0;
+    flush();                            /* ce qui précède part d'abord */
+    if (g->id < 0) {
+        int k;
+        for (k = 0; k < QGPU_MAX_PROG && p->prog_used[k]; k++)
+            ;
+        if (k == QGPU_MAX_PROG) {
+            gl_note("GLSL : plus d'identifiant de programme libre (%d)\n", QGPU_MAX_PROG);
+            return 0;
+        }
+        p->prog_used[k] = 1;
+        g->id = k;
+        c = reserve(p, QGPU_LEN_PROG_CREATE);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_PROG_CREATE, QGPU_LEN_PROG_CREATE);
+        c[1] = (unsigned long)k;
+        c[2] = QGPU_PT_GLSL;
+    }
+    /* les textes des shaders attachés */
+    for (i = 0; i < natt; i++) {
+        const unsigned char *S = (const unsigned char *)GLD_U32(att, i * 4);
+        const char *src = S ? (const char *)GLD_U32(S, SO_SRC) : 0;
+        unsigned long stage = S ? GLD_U32(S, SO_STAGE) : 0, len;
+        if (!src || (stage != QGPU_GLSL_VERTEX && stage != QGPU_GLSL_FRAGMENT))
+            continue;
+        len = glsl_text_len(src);
+        if (!len || len >= QGPU_MAX_GLSL_LEN || !arena_alloc(len, &off))
+            return 0;
+        glsl_copy_text(G.q.win + off, (const unsigned char *)src, len);
+        c = reserve(p, QGPU_LEN_GLSL_SOURCE);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_GLSL_SOURCE, QGPU_LEN_GLSL_SOURCE);
+        c[1] = (unsigned long)g->id;
+        c[2] = stage;
+        c[3] = len;
+        c[4] = G.q.base + off;
+        nsrc++;
+    }
+    if (!nsrc)
+        return 0;
+    /* attributs : l'emplacement que GLEngine a donné (glBindAttribLocation
+       compris) est celui des génériques du format */
+    for (i = 0; i < GLD_U32(P, GO_NATTR) && i < 64; i++) {
+        int len = 0, size = 0, loc;
+        unsigned int type = 0;
+        memset(name, 0, sizeof(name));
+        if (!SH.active_attr(linker, (int)i, QGPU_MAX_GLSL_NAME, &len, &size, &type, name) ||
+            len <= 0 || !strncmp(name, "gl_", 3))
+            continue;
+        loc = SH.attr_loc(linker, name);
+        if (loc < 0 || loc >= QGPU_MAX_GLSL_ATTRIBS)
+            continue;
+        len = (int)strlen(name);
+        if (!arena_alloc((unsigned long)len, &off))
+            return 0;
+        memcpy(G.q.win + off, name, (size_t)len);
+        c = reserve(p, QGPU_LEN_GLSL_ATTRIB);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_GLSL_ATTRIB, QGPU_LEN_GLSL_ATTRIB);
+        c[1] = (unsigned long)g->id;
+        c[2] = (unsigned long)loc;
+        c[3] = (unsigned long)len;
+        c[4] = G.q.base + off;
+        nattr++;
+    }
+    /* uniforms : nom, type, taille, emplacement de base dans la table */
+    free(g->kind);
+    free(g->mirror);
+    g->kind = calloc(nslots ? nslots : 1, 1);
+    g->mirror = calloc(nslots ? nslots : 1, 16);
+    g->nslots = nslots;
+    if (!g->kind || !g->mirror)
+        return 0;
+    for (i = 0; i < GLD_U32(P, GO_NUNIF) && i < QGPU_MAX_GLSL_UNIFORMS; i++) {
+        int len = 0, size = 0, loc;
+        unsigned int type = 0;
+        unsigned long slots, k;
+        char *br;
+        memset(name, 0, sizeof(name));
+        if (!SH.active_unif(linker, (int)i, QGPU_MAX_GLSL_NAME, &len, &size, &type, name) ||
+            len <= 0 || !strncmp(name, "gl_", 3) || size <= 0)
+            continue;
+        br = strchr(name, '[');         /* « nom[0] » → « nom » */
+        if (br)
+            *br = 0;
+        loc = SH.unif_loc(linker, name);
+        slots = (unsigned long)size * (unsigned long)QGPU_GT_SLOTS(type);
+        if (loc < 0 || (unsigned long)loc + slots > nslots)
+            continue;
+        for (k = 0; k < slots; k++)
+            g->kind[loc + k] = QGPU_GT_IS_SAMPLER(type) ? 3 :
+                               (type == QGPU_GT_INT || (type >= QGPU_GT_INT_VEC2 &&
+                                                        type <= QGPU_GT_BOOL_VEC4)) ? 2 : 1;
+        len = (int)strlen(name);
+        if (!arena_alloc((unsigned long)len, &off))
+            return 0;
+        memcpy(G.q.win + off, name, (size_t)len);
+        c = reserve(p, QGPU_LEN_GLSL_UNIFORM);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_GLSL_UNIFORM, QGPU_LEN_GLSL_UNIFORM);
+        c[1] = (unsigned long)g->id;
+        c[2] = (unsigned long)loc;
+        c[3] = type;
+        c[4] = (unsigned long)size;
+        c[5] = (unsigned long)len;
+        c[6] = G.q.base + off;
+        nunif++;
+    }
+    c = reserve(p, QGPU_LEN_GLSL_LINK);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_GLSL_LINK, QGPU_LEN_GLSL_LINK);
+    c[1] = (unsigned long)g->id;
+    st = submit_probe();
+    g->refused = st != QGPU_ST_OK;
+    g->vrec.refused = g->frec.refused = g->refused;
+    g->vrec.vp_need = glsl_need(P);
+    g->need_sig = sig;
+    g->vrec.id = g->frec.id = g->id;
+    if (p->glsl_cur == g)
+        p->glsl_cur = 0;                /* à relier (l'objet hôte a changé) */
+    gl_note("GLSL %ld (objet %p) : %lu texte(s), %lu attribut(s), %lu uniform(s), "
+            "%lu emplacement(s) — %s\n", g->id, (void *)P, nsrc, nattr, nunif, nslots,
+            g->refused ? "REFUSÉ par l'hôte" : "lié par l'hôte");
+    if (g->refused && arena_alloc(4096, &off)) {
+        /* le journal de l'hôte, pour savoir pourquoi */
+        c = reserve(p, QGPU_LEN_GLSL_INFO_LOG);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_GLSL_INFO_LOG, QGPU_LEN_GLSL_INFO_LOG);
+        c[1] = (unsigned long)g->id;
+        c[2] = 4096;
+        c[3] = G.q.base + off;
+        if (submit_probe() == QGPU_ST_OK) {
+            char *log = (char *)G.q.win + off;
+            log[4095] = 0;
+            gl_note("GLSL %ld : journal de l'hôte :\n%s\n", g->id, log);
+        }
+    }
+    return !g->refused;
+}
+
+/* Valeurs des uniforms : ce qui a changé depuis le miroir, par plages. */
+static void glsl_send_uniforms(PCtx *p, GProg *g)
+{
+    const unsigned char *store = (const unsigned char *)GLD_U32(g->obj, GO_STORE);
+    unsigned long n = g->nslots, i = 0;
+    if (!store || !n || !g->mirror)
+        return;
+    if (g->mirror_valid && g->rec_v && g->rec_f &&
+        g->rec_v->ugen == g->ugen_v && g->rec_f->ugen == g->ugen_f)
+        return;                         /* aucun glUniform depuis le dernier envoi */
+    if (g->rec_v) g->ugen_v = g->rec_v->ugen;
+    if (g->rec_f) g->ugen_f = g->rec_f->ugen;
+    while (i < n) {
+        unsigned long j, gap, off, k, *c, *dst;
+        if (!g->kind[i] || (g->mirror_valid && !memcmp(store + i * 16, g->mirror + i * 4, 16))) {
+            i++;
+            continue;
+        }
+        gap = i;
+        j = i + 1;
+        while (j < n && j - gap <= 4) {
+            if (g->kind[j] && !(g->mirror_valid && !memcmp(store + j * 16, g->mirror + j * 4, 16)))
+                gap = j;
+            j++;
+        }
+        j = gap + 1;
+        if (!arena_alloc((j - i) * 16, &off))
+            return;
+        dst = (unsigned long *)(G.q.win + off);
+        for (k = i; k < j; k++) {
+            const unsigned long *w = (const unsigned long *)(store + k * 16);
+            if (g->kind[k] == 1) {
+                put_f(dst + (k - i) * 4, (const float *)w, 4);
+            } else if (g->kind[k] == 3) {
+                dst[(k - i) * 4] = w[0] < (unsigned long)G.img_units ? w[0] : 0;
+                dst[(k - i) * 4 + 1] = dst[(k - i) * 4 + 2] = dst[(k - i) * 4 + 3] = 0;
+            } else {
+                memcpy(dst + (k - i) * 4, w, 16);
+            }
+        }
+        memcpy(g->mirror + i * 4, store + i * 16, (j - i) * 16);
+        c = reserve(p, QGPU_LEN_GLSL_UNIFORMS);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_GLSL_UNIFORMS, QGPU_LEN_GLSL_UNIFORMS);
+        c[1] = (unsigned long)g->id;
+        c[2] = i;
+        c[3] = j - i;
+        c[4] = G.q.base + off;
+        i = j;
+    }
+    if (!g->mirror_valid) {
+        /* le miroir couvre maintenant tout (les non déclarés comptent pour égaux) */
+        memcpy(g->mirror, store, n * 16);
+        g->mirror_valid = 1;
+    }
+}
+
+/* Avant un lot brut sous GLSL : programme défini, lié, valeurs à jour. 0 = ce
+   lot ne peut pas partir (programme refusé, table pleine). */
+static int glsl_sync(PCtx *p)
+{
+    GProg *g = p->glsl_rec;
+    unsigned long sig, *c;
+    if (!g)
+        return 0;
+    if (!g->rec_v || !g->rec_f) {       /* étages : pour les générations de glUniform */
+        const unsigned char *psv = (const unsigned char *)GLD_U32(g->obj, GO_PS_V);
+        const unsigned char *psf = (const unsigned char *)GLD_U32(g->obj, GO_PS_F);
+        int k;
+        for (k = 0; k < PPROG_MAX; k++) {
+            if (!pprog[k].ctx)
+                continue;
+            if (psv && pprog[k].obj == psv + PS_OBJ) g->rec_v = &pprog[k];
+            if (psf && pprog[k].obj == psf + PS_OBJ) g->rec_f = &pprog[k];
+        }
+    }
+    sig = glsl_sig(g->obj);
+    if (!g->sent || sig != g->sig)
+        glsl_define(p, g, sig);
+    if (g->refused)
+        return no(NO_G_PROG_HOST, (unsigned long)g->id, 2);
+    if (p->glsl_cur != g) {
+        c = reserve(p, QGPU_LEN_PROG_BIND);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_PROG_BIND, QGPU_LEN_PROG_BIND);
+        c[1] = QGPU_PT_GLSL;
+        c[2] = (unsigned long)g->id;
+        p->glsl_cur = g;
+    }
+    glsl_send_uniforms(p, g);
+    return 1;
+}
+
+
+/* ─────────── v21 : le préprocesseur GLSL de GLEngine 10.4.6 ───────────
+ *
+ * GLEngine compte mal les conditions imbriquées dans un groupe sauté (tout le
+ * texte de DarkPlaces : chaque permutation refusée, « #else after a #else »).
+ * Le plugin interpose glShaderSourceARB dans la table de dispatch du contexte
+ * (entrée +0x94c, gliDispatch.h ; tables gctx+0x4680 / +0x4684) et fait
+ * lui-même les conditions avant que GLEngine ne range le texte
+ * (pomppc_glslpp.h, épreuve tests/glsl_pp_test.c). POMPPC_GL_GLSLPP=0
+ * l'éteint. */
+#include "pomppc_glslpp.h"
+#define DISP_SHADER_SOURCE  (0x94c / 4)
+typedef void (*shsrc_fn)(void *, unsigned long, long, const char **, const long *);
+static shsrc_fn shsrc_real;
+static unsigned long n_shsrc, n_shsrc_fixed;
+
+static void glsl_source_hook(void *gc, unsigned long obj, long count, const char **str,
+                             const long *len)
+{
+    unsigned long total = 0, o = 0, nfix = 0;
+    long i;
+    char *buf, *fixed;
+    const char *one;
+    n_shsrc++;
+    if (count <= 0 || !str) {
+        shsrc_real(gc, obj, count, str, len);
+        return;
+    }
+    for (i = 0; i < count; i++)
+        total += str[i] ? (len && len[i] >= 0 ? (unsigned long)len[i] : strlen(str[i])) : 0;
+    buf = malloc(total + 1);
+    if (!buf) {
+        shsrc_real(gc, obj, count, str, len);
+        return;
+    }
+    for (i = 0; i < count; i++) {
+        unsigned long l;
+        if (!str[i])
+            continue;
+        l = len && len[i] >= 0 ? (unsigned long)len[i] : strlen(str[i]);
+        memcpy(buf + o, str[i], l);
+        o += l;
+    }
+    buf[o] = 0;
+    fixed = glsl_pp_fix(buf, o, &nfix);
+    if (fixed) {
+        n_shsrc_fixed++;
+        one = fixed;
+    } else {
+        one = buf;
+    }
+    if (n_shsrc <= 4 || (fixed && n_shsrc_fixed <= 4))
+        gl_note("GLSL : glShaderSourceARB n°%lu, %lu octets, %lu condition(s) faites%s\n",
+                n_shsrc, o, nfix, fixed ? "" : " (texte tel quel)");
+    shsrc_real(gc, obj, 1, &one, 0);
+    free(fixed);
+    free(buf);
+}
+
+/* Pose l'interposition dans les tables du contexte, une fois (les tables
+   sont remplies par _gliInitDispatchTable après gldCreateContext, et
+   glShaderSourceARB n'y est plus réécrit). Sous G.mu. */
+static void glsl_hook_ctx(PCtx *p)
+{
+    static int off = -1;
+    unsigned char *gc;
+    int t;
+    if (off < 0) {
+        const char *e = getenv("POMPPC_GL_GLSLPP");
+        off = e && e[0] == '0';
+    }
+    if (off || !p || p->glsl_hooked || G.state <= 0 || !G.glsl)
+        return;
+    gc = gctx_of(p);
+    for (t = 0; gc && t < 2; t++) {
+        void **tab = (void **)GLD_U32(gc, 0x4680 + 4 * t);
+        void *e;
+        if (!tab)
+            continue;
+        e = tab[DISP_SHADER_SOURCE];
+        if (!e || e == (void *)glsl_source_hook)
+            continue;
+        if (!shsrc_real) {
+            shsrc_real = (shsrc_fn)e;
+            gl_note("GLSL : glShaderSourceARB interposé (table %d, %p)\n", t, e);
+        }
+        if (e == (void *)shsrc_real) {
+            tab[DISP_SHADER_SOURCE] = (void *)glsl_source_hook;
+            p->glsl_hooked = 1;
+        }
+    }
+}
+
+/* gldGetString : l'application interroge les extensions avant de compiler. */
+void pomppc_glsl_hook(void *ctx)
+{
+    if (G.state <= 0 || !G.glsl || !ctx)
+        return;
+    pthread_mutex_lock(&G.mu);
+    glsl_hook_ctx(find_ctx(ctx));
+    pthread_mutex_unlock(&G.mu);
+}
+
+/* Hors GLSL : le programme GLSL lié sur l'hôte primerait sur tout le reste. */
+static void glsl_unbind(PCtx *p)
+{
+    unsigned long *c;
+    if (!p->glsl_cur)
+        return;
+    c = reserve(p, QGPU_LEN_PROG_BIND);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_PROG_BIND, QGPU_LEN_PROG_BIND);
+    c[1] = QGPU_PT_GLSL;
+    c[2] = QGPU_PROG_NONE;
+    p->glsl_cur = 0;
+}
+
 /* Avant un lot brut : programmes compilés, liés, paramètres à jour. 0 = ce
    lot doit aller à Apple (texte refusé, table pleine). */
 static int prog_sync(PCtx *p)
@@ -7182,6 +7987,9 @@ static int prog_sync(PCtx *p)
     if (!G.prog || !gc)
         return 1;
     prog_state(p);
+    if (p->glsl_on)                     /* v21 */
+        return G.glsl && glsl_sync(p);
+    glsl_unbind(p);
     for (t = 0; t < 2; t++) {
         PProg *r = t ? p->fp_rec : p->vp_rec;
         PProg **cur = t ? &p->cur_fp : &p->cur_vp;
@@ -7246,10 +8054,10 @@ static int geom_texture_ok(PCtx *p)
     if (!texturing_on(p))
         return 1;
     sc = us_get(p);
-    for (i = G.units; i < GL_MAX_TEXUNITS; i++)
+    for (i = UNIT_LIM(p); i < SCAN_N(p); i++)
         if (sc ? sc->mask[i] : unit_mask(p, i))
             return no(NO_TEX_UNITS, i, 0);
-    for (u = 0; u < QGPU_MAX_UNITS; u++) {
+    for (u = 0; u < SCAN_N(p); u++) {
         unsigned char *us = g + GS_TEXUNIT0 + u * GS_TEXUNIT_SIZE;
         unsigned long mask, env = U16(us, TU_ENV_MODE);
         TexUnit tu;
@@ -7446,6 +8254,14 @@ static unsigned long geom_format(PCtx *p)
         for (k = 1; k < QGPU_VF_GEN_MAX; k++)
             if (hi & (1UL << k))
                 fmt |= QGPU_VF_GEN(k);
+        /* v21 : un shader de sommets GLSL lit gl_MultiTexCoord<u> que l'unité
+           u ait une texture ou non (DarkPlaces : tangentes en 1..3, coordonnées
+           de carte de lumière en 4) — la coordonnée suit le texte, pas
+           l'unité ; le filtre ci-dessous (tableau actif, texte) s'applique */
+        if (p->glsl_on && p->vp_rec && (p->vp_rec->vp_need & VPN_VALID))
+            for (u = 0; u < QGPU_MAX_UNITS; u++)
+                if (p->vp_rec->vp_need & VPN_TEX(u))
+                    fmt |= QGPU_VF_TEX(u);
         /* Colin McRae en course (sonde VA_PTRS, nuit du 23/09) : les pointeurs
            RÉSOLUS de GLEngine des tableaux conventionnels DÉSACTIVÉS restent
            ceux du dernier usage (le HUD), et le déroulage T&L lit là plutôt
@@ -7667,7 +8483,8 @@ static void geom_send_matrices(PCtx *p, unsigned long fmt)
         send_cmd(p, QGPU_OP_SET_MATRIX, QGPU_LEN_SET_MATRIX, a);
     }
     for (u = 0; u < QGPU_MAX_UNITS; u++) {
-        if (!(fmt & QGPU_VF_TEX(u)))
+        /* v21 : un shader de sommets GLSL lit gl_TextureMatrix[u] sans texture */
+        if (!(fmt & QGPU_VF_TEX(u)) && !(p->glsl_on && p->vp_on))
             continue;
         if (!changed(p, g + GS_MAT_TEXTURE(u), p->c_mtx[QGPU_MTX_TEXTURE0 + u], 64))
             continue;
@@ -7695,8 +8512,9 @@ static void geom_send_lights(PCtx *p)
         int moved = changed(p, l, p->c_light[i], 0x60);
         if (!moved && !remask)
             continue;
-        if (!on && !remask)
-            continue;                   /* éteinte et déjà éteinte sur le device */
+        if (!on && !remask && !p->glsl_on)
+            continue;                   /* éteinte et déjà éteinte sur le device (v21 : un
+                                           programme GLSL lit gl_LightSource même éteinte) */
         a[0] = (unsigned long)i;
         a[1] = (unsigned long)on;
         put_f(a + 2, (const float *)(l + LT_AMBIENT), 4);
@@ -7851,7 +8669,22 @@ static void geom_send_current(PCtx *p, unsigned long fmt)
     }
     /* Les coordonnées de texture, elles, sont TOUJOURS dans le format dès que
        l'unité porte une texture : l'hôte n'a jamais à prendre leur valeur
-       courante. (Une unité sans texture est coupée, il ne s'y passe rien.) */
+       courante. (Une unité sans texture est coupée, il ne s'y passe rien.)
+       v21 : sauf sous un shader de sommets GLSL, qui lit gl_MultiTexCoord<u>
+       sans tableau — la valeur courante. */
+    if (p->glsl_on && p->vp_on && p->vp_rec) {
+        int u;
+        for (u = 0; u < QGPU_MAX_UNITS; u++) {
+            if (!(p->vp_rec->vp_need & VPN_TEX(u)) || (fmt & QGPU_VF_TEX(u)))
+                continue;
+            if (!changed(p, g + GS_CUR_TEXCOORD(u), p->c_curtex[u], 16))
+                continue;
+            a[0] = QGPU_CUR_TEXCOORD0 + u;
+            p->nat_cur_ok &= ~(1UL << (QGPU_CUR_TEXCOORD0 + u));
+            put_f(a + 1, (const float *)(g + GS_CUR_TEXCOORD(u)), 4);
+            send_cmd(p, QGPU_OP_SET_CURRENT, QGPU_LEN_SET_CURRENT, a);
+        }
+    }
 }
 
 static void geom_send_viewport(PCtx *p)
@@ -7884,7 +8717,7 @@ static void geom_send_all(PCtx *p, unsigned long fmt)
 {
     geom_send_viewport(p);
     geom_send_matrices(p, fmt);
-    if (GLD_U8(gls(p), GS_LIGHTING))
+    if (GLD_U8(gls(p), GS_LIGHTING) || p->glsl_on)     /* v21 : gl_LightSource */
         geom_send_lights(p);
     geom_send_texgen(p, fmt);
     geom_send_clip(p);
@@ -10015,6 +10848,11 @@ static void vd_key_of(PCtx *p, unsigned long *k)
         k[i++] = (unsigned long)r->text_sent ^ (r->len_sent << 20);
         k[i++] = (unsigned long)r->parsed_text ^ (r->parsed_len << 20);
     }
+    /* v21 : programme GLSL (refus de l'hôte, unités échantillonnées) */
+    if (p->glsl_rec) {
+        k[i++] = (unsigned long)p->glsl_rec->refused | ((unsigned long)p->glsl_rec->sent << 1);
+        k[i++] = p->glsl_rec->units_lo ^ (p->glsl_rec->units_hi * 31);
+    }
 }
 
 /* Range le verdict (dispatch, ou dessin qui a recalculé). La clé est prise
@@ -10844,6 +11682,8 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
         return 0;
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
+    if (p && !p->glsl_hooked)
+        glsl_hook_ctx(p);               /* v21 : une fois par contexte */
     if (p && (!chg || !st_neutral(chg)))
         p->st_dirty = 1;                /* lot 4 : un bit que compute_state lit */
     if (G.count)                        /* lot 0 : compter seulement */
@@ -14153,6 +14993,16 @@ void pomppc_context_destroyed(void *ctx)
             for (k = 0; k < PPROG_MAX; k++)
                 if (pprog[k].ctx == ctx)
                     memset(&pprog[k], 0, sizeof(pprog[k]));
+            for (k = 0; k < GPROG_MAX; k++)     /* v21 */
+                if (gprog[k].ctx == ctx) {
+                    free(gprog[k].mirror);
+                    free(gprog[k].kind);
+                    memset(&gprog[k], 0, sizeof(gprog[k]));
+                } else if (gprog[k].ctx) {
+                    /* étages d'un contexte partagé qui disparaît */
+                    if (gprog[k].rec_v && gprog[k].rec_v->ctx == 0) gprog[k].rec_v = 0;
+                    if (gprog[k].rec_f && gprog[k].rec_f->ctx == 0) gprog[k].rec_f = 0;
+                }
         }
         pend_close(p, 1);                   /* F2 */
         /* Mineur §8.1 : la série DRAW_RAW ouverte appartient peut-être à CE
@@ -14654,6 +15504,18 @@ static void caps_extensions(unsigned char *cfg)
         GLD_U16(cfg, 0x116) = 64;
         GLD_U16(cfg, 0x118) = 1;        /* sommets : registres d'adresse */
         w0 |= 1UL << 15;                /* GL_ARB_fragment_program */
+    }
+    /* v21 : GLSL. GL_ARB_shader_objects, GL_ARB_vertex_shader et
+       GL_ARB_shading_language_100 sont dans la liste FIXE de GLEngine (le
+       rendu logiciel d'Apple les tient pour les sommets) ; il manquait
+       GL_ARB_fragment_shader (bit 16, docs/re/version-extensions.md §4), que
+       le rendu d'Apple ne sait pas exécuter — l'hôte, oui. Et les 16 unités
+       d'IMAGE (GL_MAX_TEXTURE_IMAGE_UNITS, cfg+0xb6, abaissé à 8 par
+       gldCreateContext) : DarkPlaces lie sa carte de lumière en 9. Les unités
+       du pipeline fixe (cfg+0xb4) et les coordonnées (cfg+0xba) restent à 8. */
+    if (G.glsl) {
+        w0 |= 1UL << 16;                /* GL_ARB_fragment_shader */
+        GLD_U16(cfg, 0xb6) = IMG_UNITS;
     }
     GLD_U32(cfg, 0x124) |= w0;
     GLD_U32(cfg, 0x128) |= w1;
