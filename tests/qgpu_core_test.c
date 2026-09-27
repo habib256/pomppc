@@ -3291,7 +3291,7 @@ static void run_v9(QgpuCore *c, uint8_t *shmem)
     }
     CHECK(bad == 0, "carte des registres : %u offsets alignés et distincts "
           "sous 0x%x (%u fautes)", n, (unsigned)QGPU_CTRL_TOPADDR, bad);
-    CHECK(QGPU_PROTO_VERSION == 20, "version du protocole %d", QGPU_PROTO_VERSION);
+    CHECK(QGPU_PROTO_VERSION == 21, "version du protocole %d", QGPU_PROTO_VERSION);
     CHECK(QGPU_PROTO_MIN == 12, "version minimale d'attache %d", QGPU_PROTO_MIN);
     CHECK(QGPU_QUEUE_DEPTH >= 2 && (QGPU_QUEUE_DEPTH & (QGPU_QUEUE_DEPTH - 1)) == 0,
           "profondeur de file %d (puissance de 2, >= 2)", QGPU_QUEUE_DEPTH);
@@ -5188,7 +5188,7 @@ static void run_v16(QgpuCore *c, uint8_t *shmem)
     CHECK(QGPU_LEN_PROG_CREATE == 3 && QGPU_LEN_PROG_STRING == 4 && QGPU_LEN_PROG == 2 &&
           QGPU_LEN_PROG_BIND == 3 && QGPU_LEN_PROG_PARAMS == 5, "longueurs PROG_*");
     CHECK(QGPU_SK_VERTEX_PROGRAM == 99 && QGPU_SK_FRAGMENT_PROGRAM == 100 &&
-          QGPU_SK_COUNT == 130, "clés d'état 99, 100 ; QGPU_SK_COUNT %d", QGPU_SK_COUNT);
+          QGPU_SK_COUNT == 162, "clés d'état 99, 100 ; QGPU_SK_COUNT %d (v21 : 162)", QGPU_SK_COUNT);
     CHECK(QGPU_VF_GEN(0) == 0x400 && QGPU_VF_GEN(15) == 0x2000000 && QGPU_VF_ALL == 0x3FFFFFFF &&
           QGPU_VF_MAX_WORDS == 111 && QGPU_VF_WORDS(VF_P2CG1) == 10 &&
           QGPU_VF_WORDS(QGPU_VF_POS(4) | 0x3FC | QGPU_VF_GEN_MASK) == 95,
@@ -5199,7 +5199,7 @@ static void run_v16(QgpuCore *c, uint8_t *shmem)
                          (uint32_t)QGPU_VF_GEN(11)) == 10,
           "qgpu_vf_offset des génériques (après les textures)");
     CHECK(QGPU_CAP_PROGRAMS == 0x40 && QGPU_PT_VERTEX == 0x8620 && QGPU_PT_FRAGMENT == 0x8804 &&
-          QGPU_MAX_PROG == 64 && QGPU_PROG_NONE == 0xFFFFFFFFu, "capacité, cibles, bornes");
+          QGPU_MAX_PROG == 256 && QGPU_PROG_NONE == 0xFFFFFFFFu, "capacité, cibles, bornes (v21 : 256 programmes)");
 
     qgpu_core_reset(c);
     e.base = shmem; v.base = shmem;
@@ -6837,6 +6837,741 @@ static void run_gpu_copy(QgpuCore *c, uint8_t *shmem)
           "dessin de la texture 60 identique à l'octet (relecture / GPU)");
 }
 
+
+/* ── v21 : programmes GLSL ────────────────────────────────────────────────── */
+
+static void glsl_text(Emit *e, uint8_t *shmem, uint32_t *arena, uint32_t op, uint32_t id,
+                      uint32_t a1, const char *text)
+{
+    uint32_t len = (uint32_t)strlen(text);
+    memcpy(shmem + *arena, text, len);
+    emit(e, QGPU_CMD_HDR(op, op == QGPU_OP_GLSL_SOURCE ? QGPU_LEN_GLSL_SOURCE
+                                                       : QGPU_LEN_GLSL_ATTRIB));
+    emit(e, id); emit(e, a1); emit(e, len); emit(e, *arena);
+    *arena += (len + 3) & ~3u;
+}
+#define glsl_vs(e, sh, ar, id, t) glsl_text(e, sh, ar, QGPU_OP_GLSL_SOURCE, id, QGPU_GLSL_VERTEX, t)
+#define glsl_fs(e, sh, ar, id, t) glsl_text(e, sh, ar, QGPU_OP_GLSL_SOURCE, id, QGPU_GLSL_FRAGMENT, t)
+#define glsl_attrib(e, sh, ar, id, loc, n) glsl_text(e, sh, ar, QGPU_OP_GLSL_ATTRIB, id, loc, n)
+
+static void glsl_uniform(Emit *e, uint8_t *shmem, uint32_t *arena, uint32_t id, uint32_t slot,
+                         uint32_t type, uint32_t n, const char *name)
+{
+    uint32_t len = (uint32_t)strlen(name);
+    memcpy(shmem + *arena, name, len);
+    emit(e, QGPU_CMD_HDR(QGPU_OP_GLSL_UNIFORM, QGPU_LEN_GLSL_UNIFORM));
+    emit(e, id); emit(e, slot); emit(e, type); emit(e, n); emit(e, len); emit(e, *arena);
+    *arena += (len + 3) & ~3u;
+}
+
+static void glsl_link(Emit *e, uint32_t id)
+{
+    emit(e, QGPU_CMD_HDR(QGPU_OP_GLSL_LINK, QGPU_LEN_GLSL_LINK));
+    emit(e, id);
+}
+
+/* n emplacements de 4 mots bruts */
+static void glsl_values(Emit *e, uint8_t *shmem, uint32_t *arena, uint32_t id, uint32_t first,
+                        uint32_t n, const uint32_t *w)
+{
+    uint32_t i;
+    for (i = 0; i < n * 4; i++) {
+        qgpu_st32(shmem + *arena + i * 4, w[i]);
+    }
+    emit(e, QGPU_CMD_HDR(QGPU_OP_GLSL_UNIFORMS, QGPU_LEN_GLSL_UNIFORMS));
+    emit(e, id); emit(e, first); emit(e, n); emit(e, *arena);
+    *arena += n * 16;
+}
+
+static void glsl_valf(Emit *e, uint8_t *shmem, uint32_t *arena, uint32_t id, uint32_t slot,
+                      float x, float y, float z, float w)
+{
+    uint32_t v[4] = { qgpu_f2u(x), qgpu_f2u(y), qgpu_f2u(z), qgpu_f2u(w) };
+    glsl_values(e, shmem, arena, id, slot, 1, v);
+}
+
+static void glsl_vali(Emit *e, uint8_t *shmem, uint32_t *arena, uint32_t id, uint32_t slot,
+                      int32_t x, int32_t y, int32_t z, int32_t w)
+{
+    uint32_t v[4] = { (uint32_t)x, (uint32_t)y, (uint32_t)z, (uint32_t)w };
+    glsl_values(e, shmem, arena, id, slot, 1, v);
+}
+
+static int near_px(uint32_t p, uint32_t want, int tol)
+{
+    int k;
+    for (k = 0; k < 3; k++) {
+        int a = (int)((p >> (8 * k)) & 255), b = (int)((want >> (8 * k)) & 255);
+        if (a - b > tol || b - a > tol) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Contexte 0, surface 1, projection « pixels ». */
+static uint32_t v21_setup(QgpuCore *c, uint8_t *shmem)
+{
+    Emit e;
+    float m[16], mv[16];
+    qgpu_core_reset(c);
+    e.base = shmem;
+    mat_ortho_px(m);
+    mat_identity(mv);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 1); emit(&e, W); emit(&e, H); emit(&e, QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 1);
+    set_matrix(&e, QGPU_MTX_PROJECTION, m);
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    return qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+}
+
+/* triangle haut-gauche (4,4) (60,4) (4,20), couleur conventionnelle */
+static void v21_tri(uint8_t *shmem, float r, float g, float b)
+{
+    Emit v;
+    v.base = shmem;
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 4, 4, r, g, b, 1);
+    rv2c(&v, 60, 4, r, g, b, 1);
+    rv2c(&v, 4, 20, r, g, b, 1);
+}
+
+/* quadrilatère plein écran */
+static void v21_full(uint8_t *shmem)
+{
+    Emit v;
+    v.base = shmem;
+    v.off = v.start = VTX_OFF;
+    rv2c(&v, 0, 0, 1, 1, 1, 1);
+    rv2c(&v, 64, 0, 1, 1, 1, 1);
+    rv2c(&v, 64, 64, 1, 1, 1, 1);
+    rv2c(&v, 0, 64, 1, 1, 1, 1);
+}
+
+/* efface en bleu, dessine le triangle (ou le plein écran), relit */
+static uint32_t v21_draw(QgpuCore *c, Emit *e, uint32_t fmt, int full)
+{
+    clear_cmd(e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF0000FF, 1.0f);
+    if (full) {
+        draw_raw(e, QGPU_PRIM_MODE_QUADS, 4, fmt, 4, QGPU_IDX_NONE, 0);
+    } else {
+        draw_raw(e, QGPU_PRIM_MODE_TRIANGLES, 3, fmt, 3, QGPU_IDX_NONE, 0);
+    }
+    readback_cmd(e, 1);
+    return qgpu_core_execute(c, CMD_OFF, e->off - e->start);
+}
+
+/* Un programme de sommets + fragments, défini et lié ; rend le statut. */
+static uint32_t v21_prog(QgpuCore *c, uint8_t *shmem, uint32_t *arena, uint32_t id,
+                         const char *vs, const char *fs)
+{
+    Emit e;
+    e.base = shmem;
+    e.off = e.start = CMD_OFF;
+    prog_create(&e, id, QGPU_PT_GLSL);
+    if (vs) {
+        glsl_vs(&e, shmem, arena, id, vs);
+    }
+    if (fs) {
+        glsl_fs(&e, shmem, arena, id, fs);
+    }
+    glsl_link(&e, id);
+    return qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+}
+
+/* DarkPlaces : textes extraits de ses sources (tests/dp_glsl_extract.py),
+   facultatifs. Chaque ligne du fichier de permutations est « V F|préambule » :
+   shaders de sommets / fragments présents, et les #define que DarkPlaces place
+   devant le texte (R_GLSL_CompilePermutation). */
+static char *slurp(const char *path, size_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    char *b;
+    long n;
+    if (!f) {
+        return NULL;
+    }
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    b = malloc((size_t)n + 1);
+    if (b && fread(b, 1, (size_t)n, f) != (size_t)n) {
+        free(b);
+        b = NULL;
+    }
+    fclose(f);
+    if (b) {
+        b[n] = 0;
+        if (len) {
+            *len = (size_t)n;
+        }
+    }
+    return b;
+}
+
+static void run_v21_dp(QgpuCore *c, uint8_t *shmem)
+{
+    const char *dir = getenv("QGPU_TEST_DP");
+    char path[512], *body, *perms, *line, *save = NULL;
+    uint32_t n = 0, bad = 0, st, id = 0;
+    size_t blen;
+
+    if (!dir || !*dir) {
+        printf("  –    DarkPlaces : QGPU_TEST_DP non posé (ignoré)\n");
+        return;
+    }
+    snprintf(path, sizeof(path), "%s/default.glsl", dir);
+    body = slurp(path, &blen);
+    snprintf(path, sizeof(path), "%s/permutations.txt", dir);
+    perms = slurp(path, NULL);
+    if (!body || !perms) {
+        CHECK(0, "DarkPlaces : %s illisible", dir);
+        free(body);
+        free(perms);
+        return;
+    }
+    for (line = strtok_r(perms, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        /* « V F|préambule », « \n » littéraux → fins de ligne */
+        char *pre = malloc(strlen(line) + 1), *vs, *fs;
+        size_t i, o = 0, pl;
+        uint32_t arena = ARENA_OFF;
+        int hv = line[0] == '1', hf = line[2] == '1';
+        Emit e;
+        if (strlen(line) < 4 || line[3] != '|') {
+            free(pre);
+            continue;
+        }
+        line += 4;
+        for (i = 0; line[i]; i++) {
+            if (line[i] == '\\' && line[i + 1] == 'n') {
+                pre[o++] = '\n';
+                i++;
+            } else {
+                pre[o++] = line[i];
+            }
+        }
+        pre[o] = 0;
+        pl = o;
+        vs = malloc(pl + blen + 32);
+        fs = malloc(pl + blen + 32);
+        snprintf(vs, pl + blen + 32, "#define VERTEX_SHADER\n%s%s", pre, body);
+        snprintf(fs, pl + blen + 32, "#define FRAGMENT_SHADER\n%s%s", pre, body);
+        st = v21_setup(c, shmem);
+        e.base = shmem;
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, id, QGPU_PT_GLSL);
+        if (hv) {
+            glsl_vs(&e, shmem, &arena, id, vs);
+        }
+        if (hf) {
+            glsl_fs(&e, shmem, &arena, id, fs);
+        }
+        glsl_link(&e, id);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        n++;
+        if (st != QGPU_ST_OK) {
+            QgpuProgram *p = &c->ctx[0].prg.prog[id];
+            bad++;
+            printf("  FAIL DarkPlaces « %.60s » : st %u\n%s\n", line, st,
+                   p->glsl && p->glsl->log ? p->glsl->log : "");
+        }
+        free(pre);
+        free(vs);
+        free(fs);
+    }
+    CHECK(n > 0 && bad == 0, "DarkPlaces : %u permutations compilées et liées par l'hôte "
+          "(%u refus)", n, bad);
+    free(body);
+    free(perms);
+}
+
+static void run_v21(QgpuCore *c, uint8_t *shmem)
+{
+    static const char vs_basic[] =
+        "void main()\n{\n    gl_FrontColor = gl_Color;\n    gl_Position = ftransform();\n}\n";
+    static const char fs_tint[] =
+        "uniform vec4 tint;\nvoid main()\n{\n    gl_FragColor = gl_Color * tint;\n}\n";
+    bool has = (c->caps & QGPU_CAP_GLSL) != 0;
+    uint32_t st, arena = ARENA_OFF, fixed_img[W * H];
+    Emit e;
+
+    printf("-- v21 : programmes GLSL (%s) --\n", has ? "tenus par le backend" : "non tenus");
+    CHECK(QGPU_PROTO_VERSION == 21 && QGPU_CAP_GLSL == 0x1000 && QGPU_PT_GLSL == 0x8B40,
+          "version 21, QGPU_CAP_GLSL, QGPU_PT_GLSL");
+    CHECK(QGPU_OP_GLSL_SOURCE == 0x76 && QGPU_OP_GLSL_ATTRIB == 0x77 &&
+          QGPU_OP_GLSL_UNIFORM == 0x78 && QGPU_OP_GLSL_LINK == 0x79 &&
+          QGPU_OP_GLSL_UNIFORMS == 0x7A && QGPU_OP_GLSL_INFO_LOG == 0x7B,
+          "opcodes GLSL_* 0x76..0x7B");
+    CHECK(QGPU_SK_UNIT(8) == 130 && QGPU_SK_UNIT(15) + 3 == 161 && QGPU_SK_COUNT == 162 &&
+          QGPU_SK_UNIT(7) == 113 && QGPU_MAX_IMAGE_UNITS == 16 && QGPU_MAX_PROG == 256,
+          "clés des unités d'image 130..161, QGPU_SK_COUNT %d", QGPU_SK_COUNT);
+    CHECK(QGPU_GT_SLOTS(QGPU_GT_FLOAT_MAT4) == 4 && QGPU_GT_SLOTS(QGPU_GT_FLOAT_MAT3) == 3 &&
+          QGPU_GT_SLOTS(QGPU_GT_FLOAT_VEC4) == 1 && QGPU_GT_IS_SAMPLER(QGPU_GT_SAMPLER_2D_RECT),
+          "emplacements par type");
+
+    st = v21_setup(c, shmem);
+    CHECK(st == QGPU_ST_OK, "v21 : contexte (st %u)", st);
+    e.base = shmem;
+
+    if (!has) {
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 1, QGPU_PT_GLSL);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BACKEND, "sans capacité : PROG_CREATE GLSL = BACKEND (st %u)", st);
+        e.off = e.start = CMD_OFF;
+        glsl_link(&e, 1);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BACKEND, "sans capacité : GLSL_LINK = BACKEND (st %u)", st);
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_UNIT(9) + QGPU_SK_U_BIND, 3);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BACKEND && c->ctx[0].st.v[QGPU_SK_UNIT(9) + QGPU_SK_U_BIND] == 0,
+              "sans capacité : unité d'image 9 = BACKEND, rien d'écrit (st %u)", st);
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_UNIT(9) + QGPU_SK_U_ENABLE, 0);
+        state(&e, QGPU_SK_UNIT(15) + QGPU_SK_U_ENV_MODE, 0x2100);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_OK, "sans capacité : 0 et valeurs initiales acceptés (st %u)", st);
+        return;
+    }
+
+    /* (0) référence : pipeline fixe, triangle blanc */
+    v21_tri(shmem, 1, 1, 1);
+    e.off = e.start = CMD_OFF;
+    st = v21_draw(c, &e, VF_P2C, 0);
+    memcpy(fixed_img, shmem + RB_OFF, sizeof(fixed_img));
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFFFFFF && px(shmem, 8, 30) == 0x0000FF,
+          "(0) référence fixe : %06x %06x", px(shmem, 30, 8), px(shmem, 8, 30));
+
+    /* (a) sommets + fragments, uniform vec4 */
+    st = v21_prog(c, shmem, &arena, 1, vs_basic, fs_tint);
+    CHECK(st == QGPU_ST_OK, "(a) programme lié (st %u pc %u)", st, c->status_pc);
+    e.off = e.start = CMD_OFF;
+    glsl_uniform(&e, shmem, &arena, 2, 0, QGPU_GT_FLOAT_VEC4, 1, "tint");  /* id 2 : absent */
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "GLSL_UNIFORM d'un programme inexistant = BAD_ARG (st %u)", st);
+    /* une déclaration après la liaison : refusée (une définition commence par ses textes) */
+    e.off = e.start = CMD_OFF;
+    glsl_uniform(&e, shmem, &arena, 1, 0, QGPU_GT_FLOAT_VEC4, 1, "tint");
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "GLSL_UNIFORM après GLSL_LINK = BAD_ARG (st %u)", st);
+    /* on redéfinit : textes, déclaration, liaison */
+    e.off = e.start = CMD_OFF;
+    glsl_vs(&e, shmem, &arena, 1, vs_basic);
+    glsl_fs(&e, shmem, &arena, 1, fs_tint);
+    glsl_uniform(&e, shmem, &arena, 1, 5, QGPU_GT_FLOAT_VEC4, 1, "tint");
+    glsl_valf(&e, shmem, &arena, 1, 5, 1, 0, 1, 1);
+    glsl_link(&e, 1);
+    prog_bind(&e, QGPU_PT_GLSL, 1);
+    v21_tri(shmem, 1, 1, 1);
+    st = v21_draw(c, &e, VF_P2C, 0);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF00FF && px(shmem, 8, 30) == 0x0000FF,
+          "(a) ftransform + gl_Color × tint magenta, retournement : %06x %06x (st %u pc %u)",
+          px(shmem, 30, 8), px(shmem, 8, 30), st, c->status_pc);
+    {
+        int x, y, diff = 0;
+        for (y = 0; y < (int)H; y++) {
+            for (x = 0; x < (int)W; x++) {
+                uint32_t a = qgpu_ld32((uint8_t *)fixed_img + (y * W + x) * 4) & 0xFFFFFF;
+                uint32_t b = px(shmem, x, y);
+                if ((a == 0x0000FF) != (b == 0x0000FF)) {
+                    diff++;
+                }
+            }
+        }
+        CHECK(diff == 0, "(a) même couverture que le pipeline fixe : %d pixel(s) d'écart", diff);
+    }
+    /* la valeur change → suit */
+    e.off = e.start = CMD_OFF;
+    glsl_valf(&e, shmem, &arena, 1, 5, 0, 1, 0, 1);
+    st = v21_draw(c, &e, VF_P2C, 0);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0x00FF00,
+          "(a) uniform changé : vert %06x (st %u)", px(shmem, 30, 8), st);
+
+    /* (b) état intégré : matrices séparées, gl_LightSource, gl_TextureMatrix[1] ×
+       gl_MultiTexCoord1 d'une unité SANS texture (valeur courante) */
+    {
+        static const char vs[] =
+            "void main()\n{\n"
+            "    gl_Position = gl_ProjectionMatrix * (gl_ModelViewMatrix * gl_Vertex);\n"
+            "    gl_FrontColor = gl_LightSource[0].diffuse;\n"
+            "    gl_TexCoord[0] = gl_TextureMatrix[1] * gl_MultiTexCoord1;\n"
+            "}\n";
+        static const char fs[] =
+            "void main()\n{\n    gl_FragColor = gl_Color + vec4(gl_TexCoord[0].x, 0.0, 0.0, 0.0);\n}\n";
+        static const float zero[4] = { 0, 0, 0, 1 }, green[4] = { 0, 1, 0, 1 };
+        static const float pos[4] = { 0, 0, 1, 0 }, sdir[3] = { 0, 0, -1 };
+        float tm[16];
+        st = v21_prog(c, shmem, &arena, 2, vs, fs);
+        mat_identity(tm);
+        tm[0] = 2.0f;
+        e.off = e.start = CMD_OFF;
+        set_light(&e, 0, 1, zero, green, zero, pos, sdir, 0, 180, 1, 0, 0);
+        set_matrix(&e, QGPU_MTX_TEXTURE0 + 1, tm);
+        set_current(&e, QGPU_CUR_TEXCOORD0 + 1, 0.5f, 0, 0, 1);
+        prog_bind(&e, QGPU_PT_GLSL, 2);
+        v21_tri(shmem, 1, 1, 1);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFFFF00 && px(shmem, 8, 30) == 0x0000FF,
+              "(b) gl_LightSource[0].diffuse + gl_TextureMatrix[1] × valeur courante : "
+              "%06x %06x (st %u)", px(shmem, 30, 8), px(shmem, 8, 30), st);
+        e.off = e.start = CMD_OFF;
+        set_light(&e, 0, 0, zero, green, zero, pos, sdir, 0, 180, 1, 0, 0);
+        mat_identity(tm);
+        set_matrix(&e, QGPU_MTX_TEXTURE0 + 1, tm);
+        set_current(&e, QGPU_CUR_TEXCOORD0 + 1, 0, 0, 0, 1);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    }
+
+    /* (c) fragments seuls : le sommet reste au pipeline fixe (et retourné) */
+    {
+        static const char fs[] = "void main()\n{\n    gl_FragColor = vec4(0.0, 1.0, 1.0, 1.0);\n}\n";
+        st = v21_prog(c, shmem, &arena, 3, NULL, fs);
+        e.off = e.start = CMD_OFF;
+        prog_bind(&e, QGPU_PT_GLSL, 3);
+        v21_tri(shmem, 1, 1, 1);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0x00FFFF && px(shmem, 8, 30) == 0x0000FF,
+              "(c) fragments seuls : cyan, bien placé : %06x %06x (st %u)",
+              px(shmem, 30, 8), px(shmem, 8, 30), st);
+    }
+
+    /* (d) sommets seuls : le fragment reste au pipeline fixe */
+    {
+        static const char vs[] =
+            "uniform vec4 col;\nvoid main()\n{\n    gl_FrontColor = col;\n"
+            "    gl_Position = ftransform();\n}\n";
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 4, QGPU_PT_GLSL);
+        glsl_vs(&e, shmem, &arena, 4, vs);
+        glsl_uniform(&e, shmem, &arena, 4, 0, QGPU_GT_FLOAT_VEC4, 1, "col");
+        glsl_valf(&e, shmem, &arena, 4, 0, 1, 1, 0, 1);
+        glsl_link(&e, 4);
+        prog_bind(&e, QGPU_PT_GLSL, 4);
+        v21_tri(shmem, 1, 1, 1);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFFFF00 && px(shmem, 8, 30) == 0x0000FF,
+              "(d) sommets seuls, uniform avant la liaison : jaune %06x %06x (st %u pc %u)",
+              px(shmem, 30, 8), px(shmem, 8, 30), st, c->status_pc);
+    }
+
+    /* (e) types d'uniforms : float, vec2, vec3 ; int, bool, ivec2 ; mat2, mat3,
+       mat4 (colonnes) ; tableaux vec4[3] et float[2] */
+    {
+        static const char fs1[] =
+            "uniform float f;\nuniform vec2 v2;\nuniform vec3 v3;\n"
+            "void main()\n{\n    gl_FragColor = vec4(f, v2.y, v3.z, 1.0);\n}\n";
+        static const char fs2[] =
+            "uniform int i;\nuniform bool b;\nuniform ivec2 iv;\n"
+            "void main()\n{\n"
+            "    gl_FragColor = vec4(i == 3 ? 1.0 : 0.0, b ? 1.0 : 0.0, iv.y == -2 ? 1.0 : 0.0, 1.0);\n"
+            "}\n";
+        static const char fs3[] =
+            "uniform mat2 m2;\nuniform mat3 m3;\nuniform mat4 m4;\n"
+            "void main()\n{\n    gl_FragColor = vec4(m2[1][0], m3[2][1], m4[3][2], 1.0);\n}\n";
+        static const char fs4[] =
+            "uniform vec4 arr[3];\nuniform float fa[2];\n"
+            "void main()\n{\n    gl_FragColor = vec4(arr[2].x, arr[1].y, fa[1], 1.0);\n}\n";
+        uint32_t m[9 * 4];
+        memset(m, 0, sizeof(m));
+
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 5, QGPU_PT_GLSL);
+        glsl_vs(&e, shmem, &arena, 5, vs_basic);
+        glsl_fs(&e, shmem, &arena, 5, fs1);
+        glsl_uniform(&e, shmem, &arena, 5, 0, QGPU_GT_FLOAT, 1, "f");
+        glsl_uniform(&e, shmem, &arena, 5, 1, QGPU_GT_FLOAT_VEC2, 1, "v2");
+        glsl_uniform(&e, shmem, &arena, 5, 2, QGPU_GT_FLOAT_VEC3, 1, "v3");
+        glsl_link(&e, 5);
+        glsl_valf(&e, shmem, &arena, 5, 0, 1, 7, 7, 7);
+        glsl_valf(&e, shmem, &arena, 5, 1, 7, 0.5f, 7, 7);
+        glsl_valf(&e, shmem, &arena, 5, 2, 7, 7, 0.25f, 7);
+        prog_bind(&e, QGPU_PT_GLSL, 5);
+        v21_tri(shmem, 1, 1, 1);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && near_px(px(shmem, 30, 8), 0xFF8040, 1),
+              "(e) float, vec2, vec3 : %06x (st %u)", px(shmem, 30, 8), st);
+
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 6, QGPU_PT_GLSL);
+        glsl_vs(&e, shmem, &arena, 6, vs_basic);
+        glsl_fs(&e, shmem, &arena, 6, fs2);
+        glsl_uniform(&e, shmem, &arena, 6, 0, QGPU_GT_INT, 1, "i");
+        glsl_uniform(&e, shmem, &arena, 6, 1, QGPU_GT_BOOL, 1, "b");
+        glsl_uniform(&e, shmem, &arena, 6, 2, QGPU_GT_INT_VEC2, 1, "iv");
+        glsl_vali(&e, shmem, &arena, 6, 0, 3, 0, 0, 0);
+        glsl_vali(&e, shmem, &arena, 6, 1, 1, 0, 0, 0);
+        glsl_vali(&e, shmem, &arena, 6, 2, 5, -2, 0, 0);
+        glsl_link(&e, 6);
+        prog_bind(&e, QGPU_PT_GLSL, 6);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFFFFFF,
+              "(e) int, bool, ivec2 : %06x (st %u)", px(shmem, 30, 8), st);
+
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 7, QGPU_PT_GLSL);
+        glsl_vs(&e, shmem, &arena, 7, vs_basic);
+        glsl_fs(&e, shmem, &arena, 7, fs3);
+        glsl_uniform(&e, shmem, &arena, 7, 10, QGPU_GT_FLOAT_MAT2, 1, "m2");     /* 10, 11 */
+        glsl_uniform(&e, shmem, &arena, 7, 12, QGPU_GT_FLOAT_MAT3, 1, "m3");     /* 12..14 */
+        glsl_uniform(&e, shmem, &arena, 7, 15, QGPU_GT_FLOAT_MAT4, 1, "m4");     /* 15..18 */
+        glsl_link(&e, 7);
+        /* m2[1] = colonne 1 = emplacement 11 : x = 1 */
+        m[1 * 4 + 0] = qgpu_f2u(1.0f);
+        /* m3[2] = emplacement 12 + 2 = 14 → m[4 * 4 + 1] */
+        m[4 * 4 + 1] = qgpu_f2u(0.5f);
+        /* m4[3] = emplacement 15 + 3 = 18 → m[8 * 4 + 2] */
+        m[8 * 4 + 2] = qgpu_f2u(0.25f);
+        glsl_values(&e, shmem, &arena, 7, 10, 9, m);
+        prog_bind(&e, QGPU_PT_GLSL, 7);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && near_px(px(shmem, 30, 8), 0xFF8040, 1),
+              "(e) mat2, mat3, mat4 par colonnes : %06x (st %u)", px(shmem, 30, 8), st);
+
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 8, QGPU_PT_GLSL);
+        glsl_vs(&e, shmem, &arena, 8, vs_basic);
+        glsl_fs(&e, shmem, &arena, 8, fs4);
+        glsl_uniform(&e, shmem, &arena, 8, 0, QGPU_GT_FLOAT_VEC4, 3, "arr");     /* 0..2 */
+        glsl_uniform(&e, shmem, &arena, 8, 3, QGPU_GT_FLOAT, 2, "fa");           /* 3, 4 */
+        glsl_link(&e, 8);
+        glsl_valf(&e, shmem, &arena, 8, 2, 1, 0, 0, 0);
+        glsl_valf(&e, shmem, &arena, 8, 1, 0, 0.5f, 0, 0);
+        glsl_valf(&e, shmem, &arena, 8, 4, 0.25f, 0, 0, 0);
+        prog_bind(&e, QGPU_PT_GLSL, 8);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && near_px(px(shmem, 30, 8), 0xFF8040, 1),
+              "(e) tableaux vec4[3], float[2] : %06x (st %u)", px(shmem, 30, 8), st);
+    }
+
+    /* (f) échantillonneurs : unité 0 (rouge) + unité d'image 9 (vert) ; puis
+       l'unité 10, échantillonnée SANS texture, rend du noir */
+    {
+        static const char fs[] =
+            "uniform sampler2D a;\nuniform sampler2D b;\n"
+            "void main()\n{\n    gl_FragColor = texture2D(a, vec2(0.5)) + texture2D(b, vec2(0.5));\n}\n";
+        static const uint32_t red[4] = { 0xFFFF0000, 0xFFFF0000, 0xFFFF0000, 0xFFFF0000 };
+        static const uint32_t grn[4] = { 0xFF00FF00, 0xFF00FF00, 0xFF00FF00, 0xFF00FF00 };
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, 5, QGPU_TT_2D);
+        timage_argb(&e, shmem, 5, QGPU_TT_2D, 0, 2, 2, 1, red, 0x80000);
+        tparam(&e, 5, QGPU_TP_MIN_FILTER, 0x2600);
+        tcreate3(&e, 6, QGPU_TT_2D);
+        timage_argb(&e, shmem, 6, QGPU_TT_2D, 0, 2, 2, 1, grn, 0x80100);
+        tparam(&e, 6, QGPU_TP_MIN_FILTER, 0x2600);
+        state(&e, QGPU_SK_UNIT(0) + QGPU_SK_U_ENABLE, 1);
+        state(&e, QGPU_SK_UNIT(0) + QGPU_SK_U_BIND, 5);
+        state(&e, QGPU_SK_UNIT(9) + QGPU_SK_U_ENABLE, 1);
+        state(&e, QGPU_SK_UNIT(9) + QGPU_SK_U_BIND, 6);
+        prog_create(&e, 9, QGPU_PT_GLSL);
+        glsl_vs(&e, shmem, &arena, 9, vs_basic);
+        glsl_fs(&e, shmem, &arena, 9, fs);
+        glsl_uniform(&e, shmem, &arena, 9, 0, QGPU_GT_SAMPLER_2D, 1, "a");
+        glsl_uniform(&e, shmem, &arena, 9, 1, QGPU_GT_SAMPLER_2D, 1, "b");
+        glsl_vali(&e, shmem, &arena, 9, 0, 0, 0, 0, 0);
+        glsl_vali(&e, shmem, &arena, 9, 1, 9, 0, 0, 0);
+        glsl_link(&e, 9);
+        prog_bind(&e, QGPU_PT_GLSL, 9);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFFFF00,
+              "(f) unité 0 + unité d'image 9 : jaune %06x (st %u pc %u)",
+              px(shmem, 30, 8), st, c->status_pc);
+        e.off = e.start = CMD_OFF;
+        glsl_vali(&e, shmem, &arena, 9, 1, 10, 0, 0, 0);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF0000,
+              "(f) unité 10 sans texture : noir, reste le rouge %06x (st %u)",
+              px(shmem, 30, 8), st);
+        e.off = e.start = CMD_OFF;
+        glsl_vali(&e, shmem, &arena, 9, 1, 16, 0, 0, 0);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BAD_ARG && c->ctx[0].prg.prog[9].glsl->val[1][0] == 10,
+              "(f) sampler = 16 : BAD_ARG, rien d'écrit (st %u, %u)", st,
+              c->ctx[0].prg.prog[9].glsl->val[1][0]);
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_UNIT(0) + QGPU_SK_U_ENABLE, 0);
+        state(&e, QGPU_SK_UNIT(9) + QGPU_SK_U_ENABLE, 0);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    }
+
+    /* (g) attribut nommé à l'emplacement 3 (QGPU_VF_GEN(3)) */
+    {
+        static const char vs[] =
+            "attribute vec4 teinte;\nvoid main()\n{\n    gl_FrontColor = teinte;\n"
+            "    gl_Position = ftransform();\n}\n";
+        static const char fs[] = "void main()\n{\n    gl_FragColor = gl_Color;\n}\n";
+        Emit v;
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 10, QGPU_PT_GLSL);
+        glsl_vs(&e, shmem, &arena, 10, vs);
+        glsl_fs(&e, shmem, &arena, 10, fs);
+        glsl_attrib(&e, shmem, &arena, 10, 3, "teinte");
+        glsl_link(&e, 10);
+        prog_bind(&e, QGPU_PT_GLSL, 10);
+        v.base = shmem;
+        v.off = v.start = VTX_OFF;
+        rv2c(&v, 4, 4, 1, 1, 1, 1);  emitf(&v, 1); emitf(&v, 0); emitf(&v, 1); emitf(&v, 1);
+        rv2c(&v, 60, 4, 1, 1, 1, 1); emitf(&v, 1); emitf(&v, 0); emitf(&v, 1); emitf(&v, 1);
+        rv2c(&v, 4, 20, 1, 1, 1, 1); emitf(&v, 1); emitf(&v, 0); emitf(&v, 1); emitf(&v, 1);
+        st = v21_draw(c, &e, VF_P2C | (uint32_t)QGPU_VF_GEN(3), 0);
+        CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF00FF,
+              "(g) attribut « teinte » à l'emplacement 3 : magenta %06x (st %u pc %u)",
+              px(shmem, 30, 8), st, c->status_pc);
+    }
+
+    /* (h) gl_FragCoord : y compté depuis le BAS de la surface, comme dans
+       l'invité (ligne 0 de la surface = y de fenêtre le plus grand) */
+    {
+        static const char fs[] =
+            "void main()\n{\n"
+            "    gl_FragColor = gl_FragCoord.y > 32.0 ? vec4(1.0, 0.0, 0.0, 1.0)\n"
+            "                                        : vec4(0.0, 1.0, 0.0, 1.0);\n"
+            "    if (gl_FragCoord.y < 1.0 && gl_FragCoord.x < 1.0)\n"
+            "        gl_FragColor = vec4(1.0);\n"
+            "}\n";
+        st = v21_prog(c, shmem, &arena, 11, vs_basic, fs);
+        e.off = e.start = CMD_OFF;
+        prog_bind(&e, QGPU_PT_GLSL, 11);
+        v21_full(shmem);
+        st = v21_draw(c, &e, VF_P2C, 1);
+        CHECK(st == QGPU_ST_OK && px(shmem, 10, 2) == 0xFF0000 && px(shmem, 10, 60) == 0x00FF00 &&
+              px(shmem, 0, 63) == 0xFFFFFF && px(shmem, 0, 0) == 0xFF0000,
+              "(h) gl_FragCoord : haut rouge %06x, bas vert %06x, (0, 0) GL = coin bas "
+              "gauche %06x (st %u)", px(shmem, 10, 2), px(shmem, 10, 60), px(shmem, 0, 63), st);
+    }
+
+    /* (i) refus de l'hôte : BAD_ARG non fatal, journal, dessin jeté */
+    {
+        static const char bad[] = "void main()\n{\n    gl_FragColor = frob(1.0);\n}\n";
+        uint32_t pc_link;
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 12, QGPU_PT_GLSL);
+        glsl_vs(&e, shmem, &arena, 12, vs_basic);
+        glsl_fs(&e, shmem, &arena, 12, bad);
+        pc_link = (e.off - e.start) / 4;
+        glsl_link(&e, 12);
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF00FF00, 1.0f);
+        memset(shmem + 0x90000, 0xAA, 256);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_GLSL_INFO_LOG, QGPU_LEN_GLSL_INFO_LOG));
+        emit(&e, 12); emit(&e, 256); emit(&e, 0x90000);
+        readback_cmd(&e, 1);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BAD_ARG && c->status_pc == pc_link && px(shmem, 30, 30) == 0x00FF00 &&
+              c->ctx[0].prg.prog[12].broken && shmem[0x90000] != 0 &&
+              memchr(shmem + 0x90000, 0, 256) != NULL,
+              "(i) texte refusé : BAD_ARG non fatal au GLSL_LINK (pc %u/%u), la suite "
+              "s'exécute, journal « %.40s » (st %u)", c->status_pc, pc_link,
+              (const char *)shmem + 0x90000, st);
+        e.off = e.start = CMD_OFF;
+        prog_bind(&e, QGPU_PT_GLSL, 12);
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+        draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2C, 3, QGPU_IDX_NONE, 0);
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFFFFFFFF, 1.0f);
+        readback_cmd(&e, 1);
+        v21_tri(shmem, 1, 0, 0);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BAD_ARG && px(shmem, 30, 30) == 0xFFFFFF,
+              "(i) dessin sous programme cassé : jeté (BAD_ARG non fatal), suite exécutée "
+              "(st %u %06x)", st, px(shmem, 30, 30));
+        /* redéfinition : le même identifiant repart */
+        e.off = e.start = CMD_OFF;
+        glsl_vs(&e, shmem, &arena, 12, vs_basic);
+        glsl_fs(&e, shmem, &arena, 12, fs_tint);
+        glsl_uniform(&e, shmem, &arena, 12, 0, QGPU_GT_FLOAT_VEC4, 1, "tint");
+        glsl_valf(&e, shmem, &arena, 12, 0, 0, 0, 1, 1);
+        glsl_link(&e, 12);
+        v21_tri(shmem, 1, 1, 1);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0x0000FF && px(shmem, 8, 30) == 0x0000FF &&
+              !c->ctx[0].prg.prog[12].broken,
+              "(i) redéfini après refus : bleu %06x (st %u)", px(shmem, 30, 8), st);
+    }
+
+    /* (j) GLSL prime sur ARB ; PROG_BIND NONE rend la main à ARB ; détruire
+       délie */
+    {
+        static const char fp_env[] = "!!ARBfp1.0\nMOV result.color, program.env[0];\nEND\n";
+        float yellow[4] = { 1, 1, 0, 1 };
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 13, QGPU_PT_FRAGMENT);
+        prog_string(&e, shmem, &arena, 13, fp_env);
+        prog_params(&e, shmem, &arena, QGPU_OP_PROG_ENV, QGPU_PT_FRAGMENT, 0, 1, yellow);
+        prog_bind(&e, QGPU_PT_FRAGMENT, 13);
+        state(&e, QGPU_SK_FRAGMENT_PROGRAM, 1);
+        prog_bind(&e, QGPU_PT_GLSL, 3);                /* cyan (c) */
+        v21_tri(shmem, 1, 1, 1);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0x00FFFF,
+              "(j) GLSL lié + programme ARB actif : GLSL (cyan) %06x (st %u)", px(shmem, 30, 8), st);
+        e.off = e.start = CMD_OFF;
+        prog_bind(&e, QGPU_PT_GLSL, QGPU_PROG_NONE);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFFFF00,
+              "(j) GLSL délié : ARB (jaune) %06x (st %u)", px(shmem, 30, 8), st);
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_FRAGMENT_PROGRAM, 0);
+        prog_bind(&e, QGPU_PT_GLSL, 3);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_PROG_DESTROY, QGPU_LEN_PROG)); emit(&e, 3);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFFFFFF &&
+              c->ctx[0].prg.bound[QGPU_PROG_GLSL] == -1,
+              "(j) PROG_DESTROY du programme lié : délié, pipeline fixe %06x (st %u)",
+              px(shmem, 30, 8), st);
+    }
+
+    /* (k) validation */
+    {
+        uint32_t nanv[4] = { 0x7FC00000, 0, 0, 0 };
+        e.off = e.start = CMD_OFF;
+        glsl_values(&e, shmem, &arena, 1, 5, 1, nanv);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BAD_ARG && c->ctx[0].prg.prog[1].glsl->val[5][0] == 0,
+              "(k) NaN dans un vec4 : BAD_ARG, rien d'écrit (st %u)", st);
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 14, QGPU_PT_GLSL);
+        glsl_vs(&e, shmem, &arena, 14, vs_basic);
+        glsl_uniform(&e, shmem, &arena, 14, 0, QGPU_GT_FLOAT_VEC4, 1, "gl_Color");
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BAD_ARG, "(k) nom « gl_… » : BAD_ARG (st %u)", st);
+        e.off = e.start = CMD_OFF;
+        glsl_uniform(&e, shmem, &arena, 14, 0, QGPU_GT_FLOAT_MAT4, 2, "m");
+        glsl_uniform(&e, shmem, &arena, 14, 7, QGPU_GT_FLOAT, 1, "x");
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BAD_ARG && c->status_pc == QGPU_LEN_GLSL_UNIFORM,
+              "(k) déclarations qui se recouvrent : BAD_ARG à la 2e (st %u pc %u)",
+              st, c->status_pc);
+        e.off = e.start = CMD_OFF;
+        glsl_uniform(&e, shmem, &arena, 14, QGPU_MAX_GLSL_SLOTS - 3, QGPU_GT_FLOAT_MAT4, 1, "big");
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BAD_ARG, "(k) déclaration hors table : BAD_ARG (st %u)", st);
+        e.off = e.start = CMD_OFF;
+        glsl_attrib(&e, shmem, &arena, 14, 16, "a");
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BAD_ARG, "(k) attribut à l'emplacement 16 : BAD_ARG (st %u)", st);
+        e.off = e.start = CMD_OFF;
+        prog_string(&e, shmem, &arena, 14, "!!ARBfp1.0\nEND\n");
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BAD_ARG, "(k) PROG_STRING d'un programme GLSL : BAD_ARG (st %u)", st);
+        e.off = e.start = CMD_OFF;
+        prog_bind(&e, QGPU_PT_GLSL, 13);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BAD_ARG, "(k) PROG_BIND GLSL d'un programme ARB : BAD_ARG (st %u)", st);
+        e.off = e.start = CMD_OFF;
+        prog_bind(&e, QGPU_PT_GLSL, 14);            /* jamais lié */
+        draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P2C, 3, QGPU_IDX_NONE, 0);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BAD_ARG, "(k) dessin sous programme jamais lié : BAD_ARG (st %u)", st);
+        e.off = e.start = CMD_OFF;
+        prog_bind(&e, QGPU_PT_GLSL, QGPU_PROG_NONE);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    }
+    run_v21_dp(c, shmem);
+}
+
 static void *run_backend_body(void *arg)
 {
     BackendRun *r = arg;
@@ -6931,6 +7666,7 @@ static void *run_backend_body(void *arg)
     run_native(c, shmem);
     run_v19(c, shmem);
     run_v20(c, shmem);
+    run_v21(c, shmem);          /* GLSL */
     run_gpu_copy(c, shmem);     /* 27/09 */
 
     qgpu_core_reset(c);

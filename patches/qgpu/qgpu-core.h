@@ -172,7 +172,43 @@ typedef struct QgpuGeom {
  * CONTEXTE (un jeu par cible). Les drapeaux `dirty` sont posés par le cœur et
  * effacés par le backend quand il a poussé les valeurs, comme pour les
  * textures. Les indices : 0 = sommets, 1 = fragments (QGPU_PROG_VP / _FP). */
-enum { QGPU_PROG_VP = 0, QGPU_PROG_FP = 1 };
+enum { QGPU_PROG_VP = 0, QGPU_PROG_FP = 1, QGPU_PROG_GLSL = 2 };
+
+/* v21 : un uniform déclaré d'un programme GLSL (GLSL_UNIFORM). `dirty` : ses
+   valeurs ont changé depuis que le backend les a poussées (posé par le cœur,
+   effacé par le backend). */
+typedef struct QgpuGlslUniform {
+    char     name[QGPU_MAX_GLSL_NAME + 1];
+    uint32_t type;                 /* QGPU_GT_* */
+    uint32_t count;                /* taille de tableau, >= 1 */
+    uint32_t slot;                 /* emplacement de base (vec4) */
+    bool     dirty;
+    int32_t  host_loc;             /* backend : emplacement hôte, -1 = inactif */
+} QgpuGlslUniform;
+
+/* v21 : définition d'un programme GLSL. Le cœur garde les textes, les noms et
+   les valeurs ; le backend compile au GLSL_LINK et range son objet dans
+   QgpuProgram.priv. `val` : table de QGPU_MAX_GLSL_SLOTS emplacements de 4
+   mots, bruts (flottants IEEE ou entiers selon le type qui les couvre). */
+typedef struct QgpuGlsl {
+    uint32_t  nsrc;
+    uint32_t  stage[QGPU_MAX_GLSL_SRC];      /* QGPU_GLSL_VERTEX / _FRAGMENT */
+    char     *src[QGPU_MAX_GLSL_SRC];        /* NUL-terminés */
+    uint32_t  src_len[QGPU_MAX_GLSL_SRC];
+    char     *attr[QGPU_MAX_GLSL_ATTRIBS];   /* nom lié à l'emplacement k, ou NULL */
+    uint32_t  nunif;
+    QgpuGlslUniform *unif;                   /* QGPU_MAX_GLSL_UNIFORMS, alloué */
+    uint32_t (*val)[4];                      /* QGPU_MAX_GLSL_SLOTS, alloué */
+    uint16_t *slot_unif;                     /* emplacement → 1 + uniform, 0 = aucun */
+    bool      has_vs, has_fs;                /* posés au GLSL_LINK */
+    bool      defined;                       /* GLSL_LINK vu depuis le dernier SOURCE */
+    char     *log;                           /* journal de l'hôte (GLSL_LINK) */
+    /* cibles échantillonnées par unité d'image (QGPU_FPS_*), d'après les
+       samplers déclarés et leurs valeurs ; refait par le cœur quand une valeur
+       de sampler change (samples_dirty). */
+    uint8_t   samples[QGPU_MAX_IMAGE_UNITS];
+    bool      samples_dirty;
+} QgpuGlsl;
 
 typedef struct QgpuProgram {
     bool      used;
@@ -190,6 +226,7 @@ typedef struct QgpuProgram {
        échantillonnée sans texture liée doit rendre la texture 0 (noir), pas
        ce qu'un dessin précédent y a laissé (carrosserie de Colin McRae). */
     uint8_t   fp_samples[QGPU_MAX_UNITS];
+    QgpuGlsl *glsl;                /* v21 : cible QGPU_PT_GLSL, sinon NULL */
     void     *priv;                /* propriété du backend */
 } QgpuProgram;
 #define QGPU_FPS_1D     0x01
@@ -200,7 +237,7 @@ typedef struct QgpuProgram {
 
 typedef struct QgpuProgSet {
     QgpuProgram prog[QGPU_MAX_PROG];
-    int32_t     bound[2];          /* [VP, FP] : id lié, -1 si aucun */
+    int32_t     bound[3];          /* [VP, FP, GLSL] : id lié, -1 si aucun */
     float       env[2][QGPU_MAX_PROG_PARAMS][4];
     uint32_t    env_hi[2];         /* 1 + plus grand indice jamais posé */
     bool        env_dirty[2];
@@ -231,6 +268,19 @@ static inline QgpuProgram *qgpu_prog_active(const QgpuState *st, QgpuProgSet *pg
     }
     p = &pg->prog[pg->bound[which]];
     return (p->used && p->compiled && !p->broken) ? p : NULL;
+}
+
+/* v21 : le programme GLSL qui AGIT sur les dessins bruts : lié, défini et
+   accepté par l'hôte. NULL sinon (un programme lié mais cassé ou jamais lié
+   fait jeter le dessin par le cœur avant le backend). */
+static inline QgpuProgram *qgpu_glsl_active(QgpuProgSet *pg)
+{
+    QgpuProgram *p;
+    if (!pg || pg->bound[QGPU_PROG_GLSL] < 0) {
+        return NULL;
+    }
+    p = &pg->prog[pg->bound[QGPU_PROG_GLSL]];
+    return (p->used && p->glsl && p->compiled && !p->broken) ? p : NULL;
 }
 
 void qgpu_state_init(QgpuState *st);
@@ -337,6 +387,14 @@ typedef struct QgpuBackend {
        sont poussés par le backend au dessin, d'après les drapeaux dirty. */
     bool (*prog_string)(QgpuCore *c, QgpuProgram *p);
     void (*prog_destroy)(QgpuCore *c, QgpuProgram *p);
+    /* v21 : glsl_link compile et lie p->glsl (textes validés par le cœur) ;
+       false = refus de l'hôte (le cœur marque le programme cassé), le journal
+       va dans p->glsl->log (malloc, libéré par le cœur). prog_destroy libère
+       aussi l'objet GLSL. Les valeurs des uniforms sont poussées par le
+       backend au dessin, d'après QgpuGlslUniform.dirty. Absent, ou init()
+       n'ayant pas annoncé QGPU_CAP_GLSL : les opcodes GLSL_* répondent
+       QGPU_ST_BACKEND. */
+    bool (*glsl_link)(QgpuCore *c, QgpuProgram *p);
     /* 27/09 (copie GPU, facultatifs) : tex_copy copie le rectangle (sx, sy,
        w, h) de la couleur de la surface `s` — lignes de SURFACE, ligne 0 en
        haut — dans le niveau `lvl` de la face `face` de `t`, à (x, y, z), SANS

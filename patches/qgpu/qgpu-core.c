@@ -94,6 +94,9 @@ void qgpu_state_init(QgpuState *st)
             st->v[QGPU_SK_COMBINE(u)] = QGPU_COMBINE_DEFAULT;
             st->v[QGPU_SK_COMBINE_SRC(u)] = QGPU_COMBINE_SRC_DEFAULT;
         }
+        for (u = QGPU_MAX_UNITS; u < QGPU_MAX_IMAGE_UNITS; u++) {      /* v21 */
+            st->v[QGPU_SK_UNIT(u) + QGPU_SK_U_ENV_MODE] = 0x2100;
+        }
     }
     st->v[QGPU_SK_LINE_WIDTH]    = 0x3F800000;     /* 1.0 */
     st->v[QGPU_SK_POINT_SIZE]    = 0x3F800000;
@@ -276,6 +279,68 @@ static void prog_set_init(QgpuProgSet *pg)
     memset(pg, 0, sizeof(*pg));
     pg->bound[QGPU_PROG_VP] = -1;
     pg->bound[QGPU_PROG_FP] = -1;
+    pg->bound[QGPU_PROG_GLSL] = -1;
+}
+
+/* v21 : oublie la DÉFINITION d'un programme GLSL (textes, attributs,
+   uniforms, valeurs, journal), garde l'allocation des tables. L'objet de
+   l'hôte, s'il existe, est détruit par l'appelant (prog_destroy). */
+static void glsl_forget(QgpuGlsl *g)
+{
+    uint32_t i;
+    for (i = 0; i < QGPU_MAX_GLSL_SRC; i++) {
+        free(g->src[i]);
+        g->src[i] = NULL;
+        g->src_len[i] = 0;
+        g->stage[i] = 0;
+    }
+    for (i = 0; i < QGPU_MAX_GLSL_ATTRIBS; i++) {
+        free(g->attr[i]);
+        g->attr[i] = NULL;
+    }
+    free(g->log);
+    g->log = NULL;
+    g->nsrc = 0;
+    g->nunif = 0;
+    if (g->val) {
+        memset(g->val, 0, sizeof(*g->val) * QGPU_MAX_GLSL_SLOTS);
+    }
+    if (g->slot_unif) {
+        memset(g->slot_unif, 0, sizeof(*g->slot_unif) * QGPU_MAX_GLSL_SLOTS);
+    }
+    memset(g->samples, 0, sizeof(g->samples));
+    g->samples_dirty = true;
+    g->has_vs = g->has_fs = false;
+    g->defined = false;
+}
+
+static void glsl_free(QgpuGlsl *g)
+{
+    if (!g) {
+        return;
+    }
+    glsl_forget(g);
+    free(g->unif);
+    free(g->val);
+    free(g->slot_unif);
+    free(g);
+}
+
+static QgpuGlsl *glsl_new(void)
+{
+    QgpuGlsl *g = calloc(1, sizeof(*g));
+    if (!g) {
+        return NULL;
+    }
+    g->unif = calloc(QGPU_MAX_GLSL_UNIFORMS, sizeof(*g->unif));
+    g->val = calloc(QGPU_MAX_GLSL_SLOTS, sizeof(*g->val));
+    g->slot_unif = calloc(QGPU_MAX_GLSL_SLOTS, sizeof(*g->slot_unif));
+    if (!g->unif || !g->val || !g->slot_unif) {
+        glsl_free(g);
+        return NULL;
+    }
+    g->samples_dirty = true;
+    return g;
 }
 
 static void prog_free(QgpuCore *c, QgpuProgram *p)
@@ -285,7 +350,135 @@ static void prog_free(QgpuCore *c, QgpuProgram *p)
     }
     free(p->text);
     free(p->local);
+    glsl_free(p->glsl);
     memset(p, 0, sizeof(*p));
+}
+
+/* v21 : texte GLSL recevable : ASCII imprimable, tabulation, fins de ligne
+   (et saut de page, que des éditeurs laissent). Le reste — NUL compris —
+   n'a rien à faire dans un shader et ferait mentir la longueur. */
+static bool glsl_text_ok(const uint8_t *s, uint32_t len)
+{
+    uint32_t i;
+    for (i = 0; i < len; i++) {
+        uint8_t ch = s[i];
+        if (!((ch >= 0x20 && ch <= 0x7e) || ch == '\t' || ch == '\n' || ch == '\r' ||
+              ch == '\f' || ch == '\v')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* v21 : nom d'attribut ou d'uniform : identificateur GLSL, 1..QGPU_MAX_GLSL_NAME
+   octets, qui ne commence pas par « gl_ » (l'état intégré ne se déclare pas). */
+static bool glsl_name_ok(const uint8_t *s, uint32_t len)
+{
+    uint32_t i;
+    if (len == 0 || len > QGPU_MAX_GLSL_NAME) {
+        return false;
+    }
+    if (len >= 3 && s[0] == 'g' && s[1] == 'l' && s[2] == '_') {
+        return false;
+    }
+    if (s[0] >= '0' && s[0] <= '9') {
+        return false;
+    }
+    for (i = 0; i < len; i++) {
+        uint8_t ch = s[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+              (ch >= '0' && ch <= '9') || ch == '_')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool glsl_type_ok(uint32_t t)
+{
+    return t == QGPU_GT_FLOAT || (t >= QGPU_GT_FLOAT_VEC2 && t <= QGPU_GT_SAMPLER_2D_RECT_SHADOW) ||
+           t == QGPU_GT_INT;
+}
+
+/* entier (int, ivec, bool, bvec, sampler) plutôt que flottant */
+static bool glsl_type_int(uint32_t t)
+{
+    return t == QGPU_GT_INT || (t >= QGPU_GT_INT_VEC2 && t <= QGPU_GT_BOOL_VEC4) ||
+           QGPU_GT_IS_SAMPLER(t);
+}
+
+/* composantes lues par élément et par emplacement (mat3 : 3 par colonne) */
+static uint32_t glsl_type_comps(uint32_t t)
+{
+    switch (t) {
+    case QGPU_GT_FLOAT: case QGPU_GT_INT: case QGPU_GT_BOOL:
+        return 1;
+    case QGPU_GT_FLOAT_VEC2: case QGPU_GT_INT_VEC2: case QGPU_GT_BOOL_VEC2:
+    case QGPU_GT_FLOAT_MAT2:
+        return 2;
+    case QGPU_GT_FLOAT_VEC3: case QGPU_GT_INT_VEC3: case QGPU_GT_BOOL_VEC3:
+    case QGPU_GT_FLOAT_MAT3:
+        return 3;
+    case QGPU_GT_FLOAT_VEC4: case QGPU_GT_INT_VEC4: case QGPU_GT_BOOL_VEC4:
+    case QGPU_GT_FLOAT_MAT4:
+        return 4;
+    default:
+        return 1;                                /* samplers */
+    }
+}
+
+/* v21 : cibles échantillonnées par unité d'après les samplers déclarés et leur
+   valeur (l'unité). Deux samplers de types différents sur la même unité :
+   les deux cibles sont notées (le backend lie la texture 0 aux autres). */
+static void glsl_samples_update(QgpuGlsl *g)
+{
+    uint32_t i, j;
+    memset(g->samples, 0, sizeof(g->samples));
+    for (i = 0; i < g->nunif; i++) {
+        const QgpuGlslUniform *u = &g->unif[i];
+        uint8_t m;
+        if (!QGPU_GT_IS_SAMPLER(u->type)) {
+            continue;
+        }
+        switch (u->type) {
+        case QGPU_GT_SAMPLER_1D: case QGPU_GT_SAMPLER_1D_SHADOW: m = QGPU_FPS_1D; break;
+        case QGPU_GT_SAMPLER_3D: m = QGPU_FPS_3D; break;
+        case QGPU_GT_SAMPLER_CUBE: m = QGPU_FPS_CUBE; break;
+        case QGPU_GT_SAMPLER_2D_RECT: case QGPU_GT_SAMPLER_2D_RECT_SHADOW: m = QGPU_FPS_RECT; break;
+        default: m = QGPU_FPS_2D; break;
+        }
+        for (j = 0; j < u->count; j++) {
+            uint32_t unit = g->val[u->slot + j][0];
+            if (unit < QGPU_MAX_IMAGE_UNITS) {
+                g->samples[unit] |= m;
+            }
+        }
+    }
+    g->samples_dirty = false;
+}
+
+/* Programme GLSL `id` du contexte courant, ou NULL (id hors bornes, libre,
+   autre cible). */
+static QgpuProgram *glsl_prog(QgpuCore *c, uint32_t id)
+{
+    QgpuProgram *p;
+    if (id >= QGPU_MAX_PROG) {
+        return NULL;
+    }
+    p = &c->ctx[c->cur_ctx].prg.prog[id];
+    return (p->used && p->target == QGPU_PT_GLSL && p->glsl) ? p : NULL;
+}
+
+/* Un programme lié (ou cassé) qui reçoit un nouveau texte repart de zéro :
+   objet hôte détruit, définition oubliée. */
+static void glsl_restart(QgpuCore *c, QgpuProgram *p)
+{
+    if (p->priv && c->be && c->be->prog_destroy) {
+        c->be->prog_destroy(c, p);
+    }
+    glsl_forget(p->glsl);
+    p->compiled = false;
+    p->broken = false;
 }
 
 /* Détruit les programmes d'un contexte (destruction, reset). */
@@ -1208,6 +1401,15 @@ static bool valid_state(uint32_t key, uint32_t val)
     case QGPU_SK_GEN_SIZES:          /* QGPU_CAP_GEN_SIZES : 16 × 2 bits, tous valides */
         return true;
     default:
+        /* v21 : unités d'image 8..15, quatre clés chacune */
+        if (key >= QGPU_SK_TEXTURE8 && key < QGPU_SK_TEXTURE8 + 4 * (QGPU_MAX_IMAGE_UNITS - QGPU_MAX_UNITS)) {
+            switch ((key - QGPU_SK_TEXTURE8) & 3) {
+            case QGPU_SK_U_ENABLE:   return val <= 1;
+            case QGPU_SK_U_BIND:     return val < QGPU_MAX_TEX;
+            case QGPU_SK_U_ENV_MODE: return valid_env_mode(val);
+            default:                 return true;
+            }
+        }
         return false;
     }
 }
@@ -1810,16 +2012,33 @@ static uint32_t raw_finish(QgpuCore *c, QgpuSurface *s, uint32_t mode, uint32_t 
                            uint32_t words, uint32_t nverts, uint32_t itype,
                            uint32_t count, uint32_t first, uint32_t lo, uint32_t hi)
 {
-    QgpuTexture *tex[QGPU_MAX_UNITS];
+    QgpuTexture *tex[QGPU_MAX_IMAGE_UNITS];
     QgpuState *cs;
+    QgpuProgram *glsl = NULL;
     bool vp_on, fp_on;
     uint32_t i, j;
     int u;
 
     cs = cur_state(c);
+    /* v21 : un programme GLSL lié prime sur les programmes ARB. Lié mais
+       cassé, ou jamais défini : le dessin est jeté (BAD_ARG non fatal). */
+    {
+        QgpuProgSet *pg = &c->ctx[c->cur_ctx].prg;
+        if (pg->bound[QGPU_PROG_GLSL] >= 0) {
+            glsl = qgpu_glsl_active(pg);
+            if (!glsl) {
+                TRACE(c, "  dessin brut jeté : programme GLSL %d cassé ou non lié",
+                      pg->bound[QGPU_PROG_GLSL]);
+                return QGPU_ST_BAD_ARG;
+            }
+            if (glsl->glsl->samples_dirty) {
+                glsl_samples_update(glsl->glsl);
+            }
+        }
+    }
     /* v16 : un programme lié, actif et CASSÉ (texte refusé par l'hôte) jette
        le dessin — BAD_ARG non fatal, comme un dessin mal formé. */
-    {
+    if (!glsl) {
         QgpuProgSet *pg = &c->ctx[c->cur_ctx].prg;
         int w;
         for (w = 0; w < 2; w++) {
@@ -1832,6 +2051,9 @@ static uint32_t raw_finish(QgpuCore *c, QgpuSurface *s, uint32_t mode, uint32_t 
         }
         vp_on = qgpu_prog_active(cs, pg, QGPU_PROG_VP) != NULL;
         fp_on = qgpu_prog_active(cs, pg, QGPU_PROG_FP) != NULL;
+    } else {
+        vp_on = glsl->glsl->has_vs;
+        fp_on = false;                           /* règle ARB des unités : non */
     }
     j = 0;                                       /* sommet inutilisable vu ? */
     /* Sous un programme de sommets, la position du sommet n'est pas la position
@@ -1857,6 +2079,10 @@ static uint32_t raw_finish(QgpuCore *c, QgpuSurface *s, uint32_t mode, uint32_t 
     }
     for (u = 0; u < QGPU_MAX_UNITS; u++) {
         tex[u] = fp_on ? unit_texture_bound(c, cs, u) : unit_texture(c, cs, u);
+    }
+    /* v21 : unités d'image 8..15, seulement sous un programme GLSL */
+    for (u = QGPU_MAX_UNITS; u < QGPU_MAX_IMAGE_UNITS; u++) {
+        tex[u] = glsl ? unit_texture(c, cs, u) : NULL;
     }
     if (!c->be->draw_raw) {
         return QGPU_ST_BACKEND;
@@ -2717,6 +2943,12 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (a[0] == QGPU_SK_GEN_SIZES && a[1] && !(c->caps & QGPU_CAP_GEN_SIZES)) {
             return QGPU_ST_BACKEND;
         }
+        /* v21 : unités d'image 8..15 sans backend GLSL : 0 seulement (le mode
+           d'environnement initial, GL_MODULATE, est accepté tel quel). */
+        if (a[0] >= QGPU_SK_TEXTURE8 && a[0] < QGPU_SK_COUNT && !(c->caps & QGPU_CAP_GLSL) &&
+            a[1] != cur_state(c)->v[a[0]] && a[1] != 0) {
+            return QGPU_ST_BACKEND;
+        }
         cur_state(c)->v[a[0]] = a[1];
         return QGPU_ST_OK;
 
@@ -3548,6 +3780,25 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (c->cur_ctx < 0) {
             return QGPU_ST_NO_CTX;
         }
+        if (a[1] == QGPU_PT_GLSL) {                  /* v21 */
+            if (!(c->caps & QGPU_CAP_GLSL) || !c->be->glsl_link) {
+                return QGPU_ST_BACKEND;
+            }
+            if (a[0] >= QGPU_MAX_PROG) {
+                return QGPU_ST_BAD_ARG;
+            }
+            p = &c->ctx[c->cur_ctx].prg.prog[a[0]];
+            if (p->used) {
+                return QGPU_ST_LIMIT;
+            }
+            p->glsl = glsl_new();
+            if (!p->glsl) {
+                return QGPU_ST_BACKEND;
+            }
+            p->used = true;
+            p->target = QGPU_PT_GLSL;
+            return QGPU_ST_OK;
+        }
         if (!(c->caps & QGPU_CAP_PROGRAMS) || !c->be->prog_string) {
             return QGPU_ST_BACKEND;
         }
@@ -3587,7 +3838,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             return QGPU_ST_OOB;
         }
         p = &c->ctx[c->cur_ctx].prg.prog[a[0]];
-        if (!prog_text_ok(c->shmem + off, len, p->target)) {
+        if (p->target == QGPU_PT_GLSL || !prog_text_ok(c->shmem + off, len, p->target)) {
             return QGPU_ST_BAD_ARG;
         }
         text = malloc(len + 1);
@@ -3624,7 +3875,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (c->cur_ctx < 0) {
             return QGPU_ST_NO_CTX;
         }
-        if (!(c->caps & QGPU_CAP_PROGRAMS)) {
+        if (!(c->caps & (QGPU_CAP_PROGRAMS | QGPU_CAP_GLSL))) {
             return QGPU_ST_BACKEND;
         }
         pg = &c->ctx[c->cur_ctx].prg;
@@ -3637,18 +3888,21 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (pg->bound[QGPU_PROG_FP] == (int32_t)a[0]) {
             pg->bound[QGPU_PROG_FP] = -1;
         }
+        if (pg->bound[QGPU_PROG_GLSL] == (int32_t)a[0]) {          /* v21 */
+            pg->bound[QGPU_PROG_GLSL] = -1;
+        }
         prog_free(c, &pg->prog[a[0]]);
         return QGPU_ST_OK;
     }
 
     case QGPU_OP_PROG_BIND: {
         QgpuProgSet *pg;
-        int w = prog_which(a[0]);
+        int w = a[0] == QGPU_PT_GLSL ? QGPU_PROG_GLSL : prog_which(a[0]);
         WANT(QGPU_LEN_PROG_BIND);
         if (c->cur_ctx < 0) {
             return QGPU_ST_NO_CTX;
         }
-        if (!(c->caps & QGPU_CAP_PROGRAMS)) {
+        if (!(c->caps & (w == QGPU_PROG_GLSL ? QGPU_CAP_GLSL : QGPU_CAP_PROGRAMS))) {
             return QGPU_ST_BACKEND;
         }
         pg = &c->ctx[c->cur_ctx].prg;
@@ -3702,7 +3956,8 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             pg->env_dirty[w] = true;
         } else {
             QgpuProgram *p;
-            if (a[0] >= QGPU_MAX_PROG || !pg->prog[a[0]].used) {
+            if (a[0] >= QGPU_MAX_PROG || !pg->prog[a[0]].used ||
+                pg->prog[a[0]].target == QGPU_PT_GLSL) {
                 return QGPU_ST_BAD_ARG;
             }
             if (n == 0) {
@@ -3719,6 +3974,281 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             }
             p->local_dirty = true;
         }
+        return QGPU_ST_OK;
+    }
+
+    /* ── v21 : programmes GLSL ──────────────────────────────────────────── */
+    case QGPU_OP_GLSL_SOURCE: {
+        QgpuProgram *p;
+        QgpuGlsl *g;
+        uint32_t stage = a[1], len = a[2], off = a[3];
+        char *text;
+        WANT(QGPU_LEN_GLSL_SOURCE);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (!(c->caps & QGPU_CAP_GLSL) || !c->be->glsl_link) {
+            return QGPU_ST_BACKEND;
+        }
+        p = glsl_prog(c, a[0]);
+        if (!p || (stage != QGPU_GLSL_VERTEX && stage != QGPU_GLSL_FRAGMENT) ||
+            len == 0 || len > QGPU_MAX_GLSL_LEN) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (!in_shmem(c, off, len)) {
+            return QGPU_ST_OOB;
+        }
+        if (!glsl_text_ok(c->shmem + off, len)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        g = p->glsl;
+        if (g->defined) {
+            glsl_restart(c, p);                  /* nouvelle définition */
+        }
+        if (g->nsrc >= QGPU_MAX_GLSL_SRC) {
+            return QGPU_ST_LIMIT;
+        }
+        text = malloc(len + 1);
+        if (!text) {
+            return QGPU_ST_BACKEND;
+        }
+        memcpy(text, c->shmem + off, len);
+        text[len] = '\0';
+        g->src[g->nsrc] = text;
+        g->src_len[g->nsrc] = len;
+        g->stage[g->nsrc] = stage;
+        g->nsrc++;
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_GLSL_ATTRIB: {
+        QgpuProgram *p;
+        uint32_t loc = a[1], len = a[2], off = a[3];
+        char *name;
+        WANT(QGPU_LEN_GLSL_ATTRIB);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (!(c->caps & QGPU_CAP_GLSL) || !c->be->glsl_link) {
+            return QGPU_ST_BACKEND;
+        }
+        p = glsl_prog(c, a[0]);
+        /* une définition commence par ses textes (GLSL_SOURCE) */
+        if (!p || p->glsl->defined || loc >= QGPU_MAX_GLSL_ATTRIBS ||
+            len == 0 || len > QGPU_MAX_GLSL_NAME) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (!in_shmem(c, off, len)) {
+            return QGPU_ST_OOB;
+        }
+        if (!glsl_name_ok(c->shmem + off, len)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        name = malloc(len + 1);
+        if (!name) {
+            return QGPU_ST_BACKEND;
+        }
+        memcpy(name, c->shmem + off, len);
+        name[len] = '\0';
+        free(p->glsl->attr[loc]);
+        p->glsl->attr[loc] = name;
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_GLSL_UNIFORM: {
+        QgpuProgram *p;
+        QgpuGlsl *g;
+        QgpuGlslUniform *u;
+        uint32_t slot = a[1], type = a[2], n = a[3], len = a[4], off = a[5], k, end;
+        WANT(QGPU_LEN_GLSL_UNIFORM);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (!(c->caps & QGPU_CAP_GLSL) || !c->be->glsl_link) {
+            return QGPU_ST_BACKEND;
+        }
+        p = glsl_prog(c, a[0]);
+        if (!p || p->glsl->defined || !glsl_type_ok(type) || n == 0 ||
+            n > QGPU_MAX_GLSL_SLOTS || slot >= QGPU_MAX_GLSL_SLOTS ||
+            len == 0 || len > QGPU_MAX_GLSL_NAME) {
+            return QGPU_ST_BAD_ARG;
+        }
+        end = slot + n * (uint32_t)QGPU_GT_SLOTS(type);
+        if (end > QGPU_MAX_GLSL_SLOTS) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (!in_shmem(c, off, len)) {
+            return QGPU_ST_OOB;
+        }
+        if (!glsl_name_ok(c->shmem + off, len)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        g = p->glsl;
+        if (g->nunif >= QGPU_MAX_GLSL_UNIFORMS) {
+            return QGPU_ST_LIMIT;
+        }
+        /* deux déclarations ne se recouvrent pas */
+        for (k = slot; k < end; k++) {
+            if (g->slot_unif[k]) {
+                return QGPU_ST_BAD_ARG;
+            }
+        }
+        u = &g->unif[g->nunif++];
+        memset(u, 0, sizeof(*u));
+        memcpy(u->name, c->shmem + off, len);
+        u->name[len] = '\0';
+        u->type = type;
+        u->count = n;
+        u->slot = slot;
+        u->dirty = true;
+        u->host_loc = -1;
+        for (k = slot; k < end; k++) {
+            g->slot_unif[k] = (uint16_t)g->nunif;
+        }
+        if (QGPU_GT_IS_SAMPLER(type)) {
+            g->samples_dirty = true;
+        }
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_GLSL_LINK: {
+        QgpuProgram *p;
+        QgpuGlsl *g;
+        uint32_t i;
+        WANT(QGPU_LEN_GLSL_LINK);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (!(c->caps & QGPU_CAP_GLSL) || !c->be->glsl_link) {
+            return QGPU_ST_BACKEND;
+        }
+        p = glsl_prog(c, a[0]);
+        if (!p || p->glsl->nsrc == 0) {
+            return QGPU_ST_BAD_ARG;
+        }
+        g = p->glsl;
+        if (g->defined) {
+            /* relier la même définition : l'objet hôte repart */
+            if (p->priv && c->be->prog_destroy) {
+                c->be->prog_destroy(c, p);
+            }
+        }
+        g->has_vs = g->has_fs = false;
+        for (i = 0; i < g->nsrc; i++) {
+            if (g->stage[i] == QGPU_GLSL_VERTEX) {
+                g->has_vs = true;
+            } else {
+                g->has_fs = true;
+            }
+        }
+        for (i = 0; i < g->nunif; i++) {
+            g->unif[i].dirty = true;
+            g->unif[i].host_loc = -1;
+        }
+        g->samples_dirty = true;
+        g->defined = true;
+        free(g->log);
+        g->log = NULL;
+        p->compiled = false;
+        if (!c->be->glsl_link(c, p)) {
+            /* Refus de l'hôte : BAD_ARG NON FATAL (cf. draw_op), programme
+               cassé jusqu'à la prochaine définition. */
+            p->broken = true;
+            TRACE(c, "  programme GLSL %u refusé par l'hôte", a[0]);
+            return QGPU_ST_BAD_ARG;
+        }
+        p->compiled = true;
+        p->broken = false;
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_GLSL_UNIFORMS: {
+        QgpuProgram *p;
+        QgpuGlsl *g;
+        uint32_t first = a[1], n = a[2], off = a[3], i, j;
+        const uint8_t *src;
+        bool smp = false;
+        WANT(QGPU_LEN_GLSL_UNIFORMS);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (!(c->caps & QGPU_CAP_GLSL) || !c->be->glsl_link) {
+            return QGPU_ST_BACKEND;
+        }
+        p = glsl_prog(c, a[0]);
+        if (!p || (uint64_t)first + n > QGPU_MAX_GLSL_SLOTS) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (n == 0) {
+            return QGPU_ST_OK;
+        }
+        if (!in_shmem(c, off, (uint64_t)n * 16)) {
+            return QGPU_ST_OOB;
+        }
+        g = p->glsl;
+        src = c->shmem + off;
+        /* tout ou rien : on valide d'abord */
+        for (i = 0; i < n; i++) {
+            uint32_t ui = g->slot_unif[first + i];
+            uint32_t t = ui ? g->unif[ui - 1].type : 0;
+            for (j = 0; j < 4; j++) {
+                uint32_t w = qgpu_ld32(src + (i * 4 + j) * 4);
+                if (!ui) {
+                    continue;                    /* non déclaré : brut */
+                }
+                if (QGPU_GT_IS_SAMPLER(t)) {
+                    if (j == 0 && w >= QGPU_MAX_IMAGE_UNITS) {
+                        return QGPU_ST_BAD_ARG;
+                    }
+                } else if (!glsl_type_int(t)) {
+                    float v = qgpu_u2f(w);
+                    if (v != v || v > 1e9f || v < -1e9f) {
+                        return QGPU_ST_BAD_ARG;
+                    }
+                }
+            }
+        }
+        for (i = 0; i < n; i++) {
+            uint32_t ui = g->slot_unif[first + i];
+            for (j = 0; j < 4; j++) {
+                g->val[first + i][j] = qgpu_ld32(src + (i * 4 + j) * 4);
+            }
+            if (ui) {
+                g->unif[ui - 1].dirty = true;
+                smp |= QGPU_GT_IS_SAMPLER(g->unif[ui - 1].type);
+            }
+        }
+        if (smp) {
+            g->samples_dirty = true;
+        }
+        return QGPU_ST_OK;
+    }
+
+    case QGPU_OP_GLSL_INFO_LOG: {
+        QgpuProgram *p;
+        uint32_t max = a[1], off = a[2], len;
+        const char *log;
+        WANT(QGPU_LEN_GLSL_INFO_LOG);
+        if (c->cur_ctx < 0) {
+            return QGPU_ST_NO_CTX;
+        }
+        if (!(c->caps & QGPU_CAP_GLSL) || !c->be->glsl_link) {
+            return QGPU_ST_BACKEND;
+        }
+        p = glsl_prog(c, a[0]);
+        if (!p || max == 0 || max > QGPU_MAX_GLSL_LOG) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (!in_shmem(c, off, max)) {
+            return QGPU_ST_OOB;
+        }
+        log = p->glsl->log ? p->glsl->log : "";
+        len = (uint32_t)strlen(log);
+        if (len > max - 1) {
+            len = max - 1;
+        }
+        memcpy(c->shmem + off, log, len);
+        c->shmem[off + len] = 0;
         return QGPU_ST_OK;
     }
 
@@ -3760,6 +4290,9 @@ static bool known_op(uint32_t op)
     /* v16 */
     case QGPU_OP_PROG_CREATE: case QGPU_OP_PROG_STRING: case QGPU_OP_PROG_DESTROY:
     case QGPU_OP_PROG_BIND: case QGPU_OP_PROG_ENV: case QGPU_OP_PROG_LOCAL:
+    /* v21 */
+    case QGPU_OP_GLSL_SOURCE: case QGPU_OP_GLSL_ATTRIB: case QGPU_OP_GLSL_UNIFORM:
+    case QGPU_OP_GLSL_LINK: case QGPU_OP_GLSL_UNIFORMS: case QGPU_OP_GLSL_INFO_LOG:
         return true;
     default:
         return false;
@@ -3774,7 +4307,8 @@ static bool draw_op(uint32_t op)
 {
     return (op >= QGPU_OP_DRAW_TRIANGLES && op <= QGPU_OP_DRAW_TRIANGLES_SEC) ||
            op == QGPU_OP_DRAW_RAW || op == QGPU_OP_DRAW_RAW_BUF ||
-           op == QGPU_OP_DRAW_NATIVE || op == QGPU_OP_PROG_STRING;
+           op == QGPU_OP_DRAW_NATIVE || op == QGPU_OP_PROG_STRING ||
+           op == QGPU_OP_GLSL_LINK;                  /* v21 : refus de l'hôte */
 }
 
 uint32_t qgpu_core_execute(QgpuCore *c, uint32_t off, uint32_t len)

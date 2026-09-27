@@ -324,8 +324,19 @@ if command -v cc >/dev/null 2>&1; then
   if cc -std=gnu11 -O1 -pthread -I patches/qgpu tests/qgpu_core_test.c \
         patches/qgpu/qgpu-core.c patches/qgpu/qgpu-soft.c patches/qgpu/qgpu-gl.c \
         ${QGPU_LIBS[@]+"${QGPU_LIBS[@]}"} -lm -o "$QGPU_BIN" 2>/dev/null; then
-    if "$QGPU_BIN" >/dev/null 2>&1; then ok "qgpu_core_test (soft + gl si dispo)"
-    else ko "qgpu_core_test ($("$QGPU_BIN" 2>&1 | grep FAIL | head -1))"; fi
+    # v21 : les permutations GLSL de DarkPlaces (Nexuiz), si ses sources sont
+    # là (non versionnées : .run/jeux/Nexuiz/sources/), compilées et liées par
+    # l'hôte.
+    DP_ZIP="${QGPU_DP_ZIP:-$ROOT/.run/jeux/Nexuiz/sources/enginesource20091001.zip}"
+    DP_DIR=""
+    if [ -f "$DP_ZIP" ]; then
+      DP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qgpu-dp.XXXXXX")"
+      python3 tests/dp_glsl_extract.py "$DP_ZIP" "$DP_DIR" >/dev/null 2>&1 || DP_DIR=""
+    fi
+    if QGPU_TEST_DP="$DP_DIR" "$QGPU_BIN" >/dev/null 2>&1; then
+      ok "qgpu_core_test (soft + gl si dispo${DP_DIR:+, permutations GLSL de DarkPlaces})"
+    else ko "qgpu_core_test ($(QGPU_TEST_DP="$DP_DIR" "$QGPU_BIN" 2>&1 | grep FAIL | head -1))"; fi
+    [ -n "$DP_DIR" ] && rm -rf "$DP_DIR"
   else
     ko "qgpu_core_test ne compile pas"
   fi

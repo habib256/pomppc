@@ -135,6 +135,39 @@ typedef struct GlState {
                               GLsizei, GLsizei);
     GLuint   flip_fbo, flip_tex;
     uint32_t flip_w, flip_h;
+    /* v21 : programmes GLSL (OpenGL 2.0). `has_glsl` = QGPU_CAP_GLSL annoncé ;
+       les attributs génériques passent par les entrées de la v16 (has_prog). */
+    GLuint (*CreateShader)(GLenum);
+    void (*ShaderSource)(GLuint, GLsizei, const GLchar **, const GLint *);
+    void (*CompileShader)(GLuint);
+    void (*GetShaderiv)(GLuint, GLenum, GLint *);
+    void (*GetShaderInfoLog)(GLuint, GLsizei, GLsizei *, GLchar *);
+    void (*DeleteShader)(GLuint);
+    GLuint (*CreateProgram)(void);
+    void (*AttachShader)(GLuint, GLuint);
+    void (*BindAttribLocation)(GLuint, GLuint, const GLchar *);
+    void (*LinkProgram)(GLuint);
+    void (*GetProgramiv)(GLuint, GLenum, GLint *);
+    void (*GetProgramInfoLog)(GLuint, GLsizei, GLsizei *, GLchar *);
+    void (*UseProgram)(GLuint);
+    void (*DeleteProgram)(GLuint);
+    GLint (*GetUniformLocation)(GLuint, const GLchar *);
+    void (*Uniform1f)(GLint, GLfloat);
+    void (*Uniform1fv)(GLint, GLsizei, const GLfloat *);
+    void (*Uniform2fv)(GLint, GLsizei, const GLfloat *);
+    void (*Uniform3fv)(GLint, GLsizei, const GLfloat *);
+    void (*Uniform4fv)(GLint, GLsizei, const GLfloat *);
+    void (*Uniform1iv)(GLint, GLsizei, const GLint *);
+    void (*Uniform2iv)(GLint, GLsizei, const GLint *);
+    void (*Uniform3iv)(GLint, GLsizei, const GLint *);
+    void (*Uniform4iv)(GLint, GLsizei, const GLint *);
+    void (*UniformMatrix2fv)(GLint, GLsizei, GLboolean, const GLfloat *);
+    void (*UniformMatrix3fv)(GLint, GLsizei, GLboolean, const GLfloat *);
+    void (*UniformMatrix4fv)(GLint, GLsizei, GLboolean, const GLfloat *);
+    bool     has_glsl;
+    GLuint   glsl_cur;             /* programme GLSL lié (glUseProgram), 0 sinon */
+    GLfloat *glsl_fbuf;            /* QGPU_MAX_GLSL_SLOTS × 4, valeurs à pousser */
+    GLint   *glsl_ibuf;
 } GlState;
 
 /* v16 : objet programme côté hôte. */
@@ -939,10 +972,16 @@ static bool gl_prog_string(QgpuCore *c, QgpuProgram *p)
     return ok;
 }
 
+static void gl_glsl_destroy(GlState *g, QgpuProgram *p);
+
 static void gl_prog_destroy(QgpuCore *c, QgpuProgram *p)
 {
     GlState *g = c->be_priv;
     GlProgram *gp = p->priv;
+    if (p->target == QGPU_PT_GLSL) {             /* v21 */
+        gl_glsl_destroy(g, p);
+        return;
+    }
     if (gp) {
         if (g && g->has_prog && gl_make_current(g)) {
             g->DeleteProgramsARB(1, &gp->id);
@@ -1055,6 +1094,547 @@ static void gl_prog_use(GlState *g, QgpuProgSet *pg, int w, QgpuProgram *p, floa
     }
 }
 
+
+/* ── v21 : programmes GLSL ──────────────────────────────────────────────────
+ *
+ * L'hôte recompile le texte GLSL de l'invité tel quel (GLSL 1.10 : un
+ * contexte hérité 2.1 de macOS l'accepte sans #version), à deux réécritures
+ * près, pour LE RETOURNEMENT (cf. la v16) :
+ *
+ *   - sommets : le main de l'invité devient qgpu_main_ et un main ajouté à la
+ *     fin l'appelle puis retourne gl_Position.y. La projection de l'hôte n'est
+ *     alors PAS retournée (gl_ProjectionMatrix, ftransform() sont ceux de
+ *     l'invité) ; sans shader de sommets, le pipeline fixe garde son
+ *     glScalef(1, −1, 1) ;
+ *   - fragments : gl_FragCoord devient qgpu_FragCoord_ = (x, H − y, z, w),
+ *     calculé par le main ajouté avant d'appeler qgpu_main_ ; H est l'uniform
+ *     qgpu_fh_, la hauteur de la surface, posé à chaque dessin.
+ *
+ * Les déclarations ajoutées vont après la dernière ligne #version / #extension
+ * (celles-ci doivent précéder tout code) ; les commentaires sont recopiés
+ * sans être réécrits. */
+#ifndef GL_VERTEX_SHADER
+#define GL_FRAGMENT_SHADER                 0x8B30
+#define GL_VERTEX_SHADER                   0x8B31
+#define GL_COMPILE_STATUS                  0x8B81
+#define GL_LINK_STATUS                     0x8B82
+#define GL_INFO_LOG_LENGTH                 0x8B84
+#endif
+#ifndef GL_MAX_TEXTURE_IMAGE_UNITS
+#define GL_MAX_TEXTURE_IMAGE_UNITS         0x8872
+#endif
+
+typedef struct GlGlsl {
+    GLuint prog;
+    GLint  fh_loc;                 /* qgpu_fh_ (gl_FragCoord réécrit), −1 sinon */
+} GlGlsl;
+
+static bool glsl_ident(char ch)
+{
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+           (ch >= '0' && ch <= '9') || ch == '_';
+}
+
+/* Où insérer nos déclarations : après la dernière ligne qui commence (blancs
+   admis) par #version ou #extension, sinon au début. */
+static size_t glsl_insert_point(const char *s, size_t len)
+{
+    size_t i = 0, at = 0;
+    while (i < len) {
+        size_t j = i, e;
+        while (j < len && (s[j] == ' ' || s[j] == '\t')) {
+            j++;
+        }
+        e = j;
+        while (e < len && s[e] != '\n') {
+            e++;
+        }
+        if (j < len && s[j] == '#') {
+            size_t k = j + 1;
+            while (k < e && (s[k] == ' ' || s[k] == '\t')) {
+                k++;
+            }
+            if ((e - k >= 7 && !memcmp(s + k, "version", 7)) ||
+                (e - k >= 9 && !memcmp(s + k, "extension", 9))) {
+                at = e < len ? e + 1 : len;
+            }
+        }
+        i = e + 1;
+    }
+    return at;
+}
+
+/* Réécrit un texte GLSL (cf. ci-dessus). `fragcoord` : remplacer gl_FragCoord.
+   `*had_main` : un main y a été renommé (ce texte reçoit le main ajouté).
+   Rend un texte alloué, ou NULL. */
+static char *glsl_rewrite(const char *s, size_t len, bool vertex, bool fragcoord,
+                          bool *had_main)
+{
+    static const char vs_main[] =
+        "\nvoid main()\n{\n    qgpu_main_();\n    gl_Position.y = -gl_Position.y;\n}\n";
+    static const char fs_main[] =
+        "\nvoid main()\n{\n    qgpu_FragCoord_ = vec4(gl_FragCoord.x, qgpu_fh_ - gl_FragCoord.y,"
+        " gl_FragCoord.z, gl_FragCoord.w);\n    qgpu_main_();\n}\n";
+    static const char fs_decl[] = "vec4 qgpu_FragCoord_;\n";
+    static const char fs_decl_main[] = "uniform float qgpu_fh_;\n";
+    size_t ins = glsl_insert_point(s, len), i = 0, o = 0, cap;
+    bool mains = false, fc = false;
+    char *out;
+
+    *had_main = false;
+    if (!vertex && !fragcoord) {             /* rien à réécrire */
+        out = malloc(len + 1);
+        if (out) {
+            memcpy(out, s, len);
+            out[len] = '\0';
+        }
+        return out;
+    }
+
+    /* taille : chaque renommage allonge d'au plus 16 octets */
+    cap = len * 3 + sizeof(vs_main) + sizeof(fs_main) + sizeof(fs_decl) +
+          sizeof(fs_decl_main) + 64;
+    out = malloc(cap);
+    if (!out) {
+        return NULL;
+    }
+    /* premier passage : y a-t-il un main, un gl_FragCoord (hors commentaires) ? */
+    while (i < len) {
+        if (s[i] == '/' && i + 1 < len && s[i + 1] == '/') {
+            while (i < len && s[i] != '\n') i++;
+            continue;
+        }
+        if (s[i] == '/' && i + 1 < len && s[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < len && !(s[i] == '*' && s[i + 1] == '/')) i++;
+            i += 2;
+            continue;
+        }
+        if (glsl_ident(s[i]) && (i == 0 || !glsl_ident(s[i - 1]))) {
+            size_t j = i;
+            while (j < len && glsl_ident(s[j])) j++;
+            if (j - i == 4 && !memcmp(s + i, "main", 4)) {
+                mains = true;
+            } else if (fragcoord && j - i == 12 && !memcmp(s + i, "gl_FragCoord", 12)) {
+                fc = true;
+            }
+            i = j;
+            continue;
+        }
+        i++;
+    }
+    i = 0;
+    while (i < len) {
+        if (i == ins && !vertex && fragcoord && (fc || mains)) {
+            memcpy(out + o, fs_decl, sizeof(fs_decl) - 1);
+            o += sizeof(fs_decl) - 1;
+            if (mains) {
+                memcpy(out + o, fs_decl_main, sizeof(fs_decl_main) - 1);
+                o += sizeof(fs_decl_main) - 1;
+            }
+        }
+        if (s[i] == '/' && i + 1 < len && s[i + 1] == '/') {
+            while (i < len && s[i] != '\n') out[o++] = s[i++];
+            continue;
+        }
+        if (s[i] == '/' && i + 1 < len && s[i + 1] == '*') {
+            size_t j = i + 2;
+            while (j + 1 < len && !(s[j] == '*' && s[j + 1] == '/')) j++;
+            j = j + 2 < len ? j + 2 : len;
+            /* un commentaire qui enjambe le point d'insertion : on insère
+               après lui (ins avance) */
+            if (ins > i && ins < j) {
+                ins = j;
+            }
+            memcpy(out + o, s + i, j - i);
+            o += j - i;
+            i = j;
+            continue;
+        }
+        if (glsl_ident(s[i]) && (i == 0 || !glsl_ident(s[i - 1]))) {
+            size_t j = i;
+            while (j < len && glsl_ident(s[j])) j++;
+            if (ins > i && ins < j) {
+                ins = j;
+            }
+            if (j - i == 4 && !memcmp(s + i, "main", 4)) {
+                memcpy(out + o, "qgpu_main_", 10);
+                o += 10;
+            } else if (!vertex && fragcoord && j - i == 12 &&
+                       !memcmp(s + i, "gl_FragCoord", 12)) {
+                memcpy(out + o, "qgpu_FragCoord_", 15);
+                o += 15;
+            } else {
+                memcpy(out + o, s + i, j - i);
+                o += j - i;
+            }
+            i = j;
+            continue;
+        }
+        out[o++] = s[i++];
+    }
+    if (ins >= len && !vertex && fragcoord && (fc || mains)) {
+        memcpy(out + o, fs_decl, sizeof(fs_decl) - 1);
+        o += sizeof(fs_decl) - 1;
+        if (mains) {
+            memcpy(out + o, fs_decl_main, sizeof(fs_decl_main) - 1);
+            o += sizeof(fs_decl_main) - 1;
+        }
+    }
+    if (mains) {
+        const char *m = vertex ? vs_main : fs_main;
+        size_t ml = strlen(m);
+        memcpy(out + o, m, ml);
+        o += ml;
+    }
+    out[o] = '\0';
+    *had_main = mains;
+    return out;
+}
+
+/* Ajoute `what` au journal (qui grandit). */
+static void glsl_log(char **log, const char *what)
+{
+    size_t a = *log ? strlen(*log) : 0, b = strlen(what);
+    char *n;
+    if (a + b + 1 > QGPU_MAX_GLSL_LOG) {
+        return;
+    }
+    n = realloc(*log, a + b + 1);
+    if (!n) {
+        return;
+    }
+    memcpy(n + a, what, b + 1);
+    *log = n;
+}
+
+static void glsl_log_object(GlState *g, char **log, GLuint obj, bool program,
+                            const char *head)
+{
+    GLint n = 0;
+    char *buf;
+    if (program) {
+        g->GetProgramiv(obj, GL_INFO_LOG_LENGTH, &n);
+    } else {
+        g->GetShaderiv(obj, GL_INFO_LOG_LENGTH, &n);
+    }
+    if (n <= 1) {
+        return;
+    }
+    buf = malloc((size_t)n + 1);
+    if (!buf) {
+        return;
+    }
+    buf[0] = 0;
+    if (program) {
+        g->GetProgramInfoLog(obj, n, NULL, buf);
+    } else {
+        g->GetShaderInfoLog(obj, n, NULL, buf);
+    }
+    buf[n] = 0;
+    glsl_log(log, head);
+    glsl_log(log, buf);
+    free(buf);
+}
+
+/* Compile et lie ; false = refus de l'hôte (journal dans *log). Ne touche à
+   aucun état sauf le programme courant (remis à 0). */
+static bool gl_glsl_build(GlState *g, QgpuGlsl *q, GlGlsl *gg, char **log, bool trace)
+{
+    GLuint prog, sh[QGPU_MAX_GLSL_SRC];
+    GLint okv = 0;
+    bool fragcoord = false, ok = true;
+    uint32_t i, nsh = 0;
+    char head[96];
+
+    /* gl_FragCoord réécrit dans TOUS les textes de fragments si l'un d'eux
+       le lit : la variable globale est partagée entre eux */
+    for (i = 0; i < q->nsrc; i++) {
+        if (q->stage[i] == QGPU_GLSL_FRAGMENT && strstr(q->src[i], "gl_FragCoord")) {
+            fragcoord = true;
+        }
+    }
+    prog = g->CreateProgram();
+    if (!prog) {
+        glsl_log(log, "qgpu : glCreateProgram a échoué\n");
+        return false;
+    }
+    for (i = 0; i < q->nsrc && ok; i++) {
+        bool vertex = q->stage[i] == QGPU_GLSL_VERTEX, had_main = false;
+        char *text = glsl_rewrite(q->src[i], q->src_len[i], vertex, fragcoord, &had_main);
+        const GLchar *tp;
+        if (!text) {
+            ok = false;
+            break;
+        }
+        sh[nsh] = g->CreateShader(vertex ? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER);
+        tp = text;
+        g->ShaderSource(sh[nsh], 1, &tp, NULL);
+        g->CompileShader(sh[nsh]);
+        g->GetShaderiv(sh[nsh], GL_COMPILE_STATUS, &okv);
+        snprintf(head, sizeof(head), "-- texte %u (%s)%s :\n", i,
+                 vertex ? "sommets" : "fragments", okv ? "" : " REFUSÉ");
+        glsl_log_object(g, log, sh[nsh], false, head);
+        if (!okv) {
+            ok = false;
+            if (trace) {
+                fprintf(stderr, "qgpu: texte GLSL réécrit :\n%s\n", text);
+            }
+        }
+        g->AttachShader(prog, sh[nsh]);
+        nsh++;
+        free(text);
+    }
+    if (ok) {
+        for (i = 0; i < QGPU_MAX_GLSL_ATTRIBS; i++) {
+            if (q->attr[i]) {
+                g->BindAttribLocation(prog, i, q->attr[i]);
+            }
+        }
+        g->LinkProgram(prog);
+        g->GetProgramiv(prog, GL_LINK_STATUS, &okv);
+        glsl_log_object(g, log, prog, true, okv ? "-- édition des liens :\n"
+                                                : "-- édition des liens REFUSÉE :\n");
+        ok = okv != 0;
+    }
+    for (i = 0; i < nsh; i++) {
+        g->DeleteShader(sh[i]);              /* détachés à la destruction */
+    }
+    if (!ok) {
+        g->DeleteProgram(prog);
+        gl_err_flush();
+        return false;
+    }
+    gg->prog = prog;
+    for (i = 0; i < q->nunif; i++) {
+        QgpuGlslUniform *u = &q->unif[i];
+        GLint loc = g->GetUniformLocation(prog, u->name);
+        if (loc < 0 && u->count > 1) {
+            char nm[QGPU_MAX_GLSL_NAME + 8];
+            snprintf(nm, sizeof(nm), "%s[0]", u->name);
+            loc = g->GetUniformLocation(prog, nm);
+        }
+        u->host_loc = loc;
+        u->dirty = true;
+    }
+    gg->fh_loc = fragcoord ? g->GetUniformLocation(prog, "qgpu_fh_") : -1;
+    return gl_err_ok();
+}
+
+static bool gl_glsl_link(QgpuCore *c, QgpuProgram *p)
+{
+    GlState *g = c->be_priv;
+    GlGlsl *gg;
+    bool ok;
+
+    if (!g->has_glsl || !gl_make_current(g)) {
+        return false;
+    }
+    gg = calloc(1, sizeof(*gg));
+    if (!gg) {
+        return false;
+    }
+    gg->fh_loc = -1;
+    ok = gl_glsl_build(g, p->glsl, gg, &p->glsl->log, c->trace);
+    if (!ok) {
+        fprintf(stderr, "qgpu: programme GLSL refusé par l'hôte :\n%s\n",
+                p->glsl->log ? p->glsl->log : "(sans journal)");
+        free(gg);
+        return false;
+    }
+    p->priv = gg;
+    return true;
+}
+
+static void gl_glsl_destroy(GlState *g, QgpuProgram *p)
+{
+    GlGlsl *gg = p->priv;
+    if (gg) {
+        if (g && g->has_glsl && gl_make_current(g)) {
+            if (g->glsl_cur == gg->prog) {
+                g->UseProgram(0);
+                g->glsl_cur = 0;
+            }
+            g->DeleteProgram(gg->prog);
+        }
+        free(gg);
+        p->priv = NULL;
+    }
+}
+
+/* Composantes par élément et par emplacement (mat3 : 3 par colonne). */
+static uint32_t gl_glsl_comps(uint32_t t)
+{
+    switch (t) {
+    case QGPU_GT_FLOAT_VEC2: case QGPU_GT_INT_VEC2: case QGPU_GT_BOOL_VEC2:
+    case QGPU_GT_FLOAT_MAT2:
+        return 2;
+    case QGPU_GT_FLOAT_VEC3: case QGPU_GT_INT_VEC3: case QGPU_GT_BOOL_VEC3:
+    case QGPU_GT_FLOAT_MAT3:
+        return 3;
+    case QGPU_GT_FLOAT_VEC4: case QGPU_GT_INT_VEC4: case QGPU_GT_BOOL_VEC4:
+    case QGPU_GT_FLOAT_MAT4:
+        return 4;
+    default:
+        return 1;
+    }
+}
+
+/* Au dessin : pousse les uniforms dont une valeur a changé (le programme est
+   lié par l'appelant). Les valeurs vivent dans l'objet programme de l'hôte :
+   seul ce qui a bougé repart. */
+static void gl_glsl_uniforms(GlState *g, QgpuGlsl *q)
+{
+    uint32_t i;
+    for (i = 0; i < q->nunif; i++) {
+        QgpuGlslUniform *u = &q->unif[i];
+        uint32_t slots, comps, j, k, n = 0;
+        bool isint;
+        if (!u->dirty) {
+            continue;
+        }
+        u->dirty = false;
+        if (u->host_loc < 0) {
+            continue;
+        }
+        slots = (uint32_t)QGPU_GT_SLOTS(u->type);
+        comps = gl_glsl_comps(u->type);
+        isint = !(u->type == QGPU_GT_FLOAT || (u->type >= QGPU_GT_FLOAT_VEC2 &&
+                                               u->type <= QGPU_GT_FLOAT_VEC4) ||
+                  QGPU_GT_IS_MAT(u->type));
+        for (j = 0; j < u->count * slots; j++) {
+            const uint32_t *w = q->val[u->slot + j];
+            for (k = 0; k < comps; k++) {
+                if (isint) {
+                    g->glsl_ibuf[n++] = (GLint)w[k];
+                } else {
+                    g->glsl_fbuf[n++] = qgpu_u2f(w[k]);
+                }
+            }
+        }
+        switch (u->type) {
+        case QGPU_GT_FLOAT:      g->Uniform1fv(u->host_loc, u->count, g->glsl_fbuf); break;
+        case QGPU_GT_FLOAT_VEC2: g->Uniform2fv(u->host_loc, u->count, g->glsl_fbuf); break;
+        case QGPU_GT_FLOAT_VEC3: g->Uniform3fv(u->host_loc, u->count, g->glsl_fbuf); break;
+        case QGPU_GT_FLOAT_VEC4: g->Uniform4fv(u->host_loc, u->count, g->glsl_fbuf); break;
+        case QGPU_GT_FLOAT_MAT2:
+            g->UniformMatrix2fv(u->host_loc, u->count, GL_FALSE, g->glsl_fbuf);
+            break;
+        case QGPU_GT_FLOAT_MAT3:
+            g->UniformMatrix3fv(u->host_loc, u->count, GL_FALSE, g->glsl_fbuf);
+            break;
+        case QGPU_GT_FLOAT_MAT4:
+            g->UniformMatrix4fv(u->host_loc, u->count, GL_FALSE, g->glsl_fbuf);
+            break;
+        case QGPU_GT_INT_VEC2: case QGPU_GT_BOOL_VEC2:
+            g->Uniform2iv(u->host_loc, u->count, g->glsl_ibuf);
+            break;
+        case QGPU_GT_INT_VEC3: case QGPU_GT_BOOL_VEC3:
+            g->Uniform3iv(u->host_loc, u->count, g->glsl_ibuf);
+            break;
+        case QGPU_GT_INT_VEC4: case QGPU_GT_BOOL_VEC4:
+            g->Uniform4iv(u->host_loc, u->count, g->glsl_ibuf);
+            break;
+        default:                                  /* int, bool, samplers */
+            g->Uniform1iv(u->host_loc, u->count, g->glsl_ibuf);
+        }
+    }
+}
+
+/* À l'init : les points d'entrée d'OpenGL 2.0, 16 unités d'image, et un
+   programme d'essai (gl_FragCoord compris) passé par la réécriture. */
+static bool gl_glsl_probe(GlState *g)
+{
+    static const char vs[] =
+        "varying vec4 c;\nvoid main()\n{\n    c = gl_Color;\n    gl_Position = ftransform();\n}\n";
+    static const char fs[] =
+        "varying vec4 c;\nuniform sampler2D t;\nvoid main()\n{\n"
+        "    gl_FragColor = c * texture2D(t, gl_FragCoord.xy);\n}\n";
+    QgpuGlsl q;
+    GlGlsl gg;
+    char *log = NULL;
+    GLint units = 0;
+    const char *ver = (const char *)glGetString(GL_VERSION);
+    int maj = 0, min = 0;
+    bool ok;
+
+    g->CreateShader = gl_proc("glCreateShader");
+    g->ShaderSource = gl_proc("glShaderSource");
+    g->CompileShader = gl_proc("glCompileShader");
+    g->GetShaderiv = gl_proc("glGetShaderiv");
+    g->GetShaderInfoLog = gl_proc("glGetShaderInfoLog");
+    g->DeleteShader = gl_proc("glDeleteShader");
+    g->CreateProgram = gl_proc("glCreateProgram");
+    g->AttachShader = gl_proc("glAttachShader");
+    g->BindAttribLocation = gl_proc("glBindAttribLocation");
+    g->LinkProgram = gl_proc("glLinkProgram");
+    g->GetProgramiv = gl_proc("glGetProgramiv");
+    g->GetProgramInfoLog = gl_proc("glGetProgramInfoLog");
+    g->UseProgram = gl_proc("glUseProgram");
+    g->DeleteProgram = gl_proc("glDeleteProgram");
+    g->GetUniformLocation = gl_proc("glGetUniformLocation");
+    g->Uniform1fv = gl_proc("glUniform1fv");
+    g->Uniform2fv = gl_proc("glUniform2fv");
+    g->Uniform3fv = gl_proc("glUniform3fv");
+    g->Uniform4fv = gl_proc("glUniform4fv");
+    g->Uniform1iv = gl_proc("glUniform1iv");
+    g->Uniform2iv = gl_proc("glUniform2iv");
+    g->Uniform3iv = gl_proc("glUniform3iv");
+    g->Uniform4iv = gl_proc("glUniform4iv");
+    g->UniformMatrix2fv = gl_proc("glUniformMatrix2fv");
+    g->UniformMatrix3fv = gl_proc("glUniformMatrix3fv");
+    g->UniformMatrix4fv = gl_proc("glUniformMatrix4fv");
+    g->Uniform1f = gl_proc("glUniform1f");
+    if (!g->CreateShader || !g->ShaderSource || !g->CompileShader || !g->GetShaderiv ||
+        !g->GetShaderInfoLog || !g->DeleteShader || !g->CreateProgram ||
+        !g->AttachShader || !g->BindAttribLocation || !g->LinkProgram ||
+        !g->GetProgramiv || !g->GetProgramInfoLog || !g->UseProgram ||
+        !g->DeleteProgram || !g->GetUniformLocation || !g->Uniform1fv ||
+        !g->Uniform2fv || !g->Uniform3fv || !g->Uniform4fv || !g->Uniform1iv ||
+        !g->Uniform2iv || !g->Uniform3iv || !g->Uniform4iv || !g->UniformMatrix2fv ||
+        !g->UniformMatrix3fv || !g->UniformMatrix4fv || !g->Uniform1f) {
+        return false;
+    }
+    /* les attributs génériques passent par les entrées de la v16 */
+    if (!g->has_prog) {
+        return false;
+    }
+    if (!ver || sscanf(ver, "%d.%d", &maj, &min) != 2 || maj < 2) {
+        return false;
+    }
+    glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &units);
+    if (units < QGPU_MAX_IMAGE_UNITS) {
+        gl_err_flush();
+        return false;
+    }
+    g->glsl_fbuf = malloc(sizeof(GLfloat) * QGPU_MAX_GLSL_SLOTS * 4);
+    g->glsl_ibuf = malloc(sizeof(GLint) * QGPU_MAX_GLSL_SLOTS * 4);
+    if (!g->glsl_fbuf || !g->glsl_ibuf) {
+        return false;
+    }
+    memset(&q, 0, sizeof(q));
+    memset(&gg, 0, sizeof(gg));
+    q.nsrc = 2;
+    q.stage[0] = QGPU_GLSL_VERTEX;
+    q.src[0] = (char *)vs;
+    q.src_len[0] = sizeof(vs) - 1;
+    q.stage[1] = QGPU_GLSL_FRAGMENT;
+    q.src[1] = (char *)fs;
+    q.src_len[1] = sizeof(fs) - 1;
+    g->has_glsl = true;                       /* gl_glsl_build le lit */
+    ok = gl_glsl_build(g, &q, &gg, &log, false);
+    if (ok) {
+        ok = gg.fh_loc >= 0;
+        g->DeleteProgram(gg.prog);
+    } else {
+        fprintf(stderr, "qgpu: programme GLSL d'essai refusé :\n%s\n", log ? log : "?");
+    }
+    free(log);
+    g->has_glsl = ok;
+    gl_err_flush();
+    return ok;
+}
+
 static bool gl_init(QgpuCore *c)
 {
     const char *why = NULL;
@@ -1157,6 +1737,16 @@ static bool gl_init(QgpuCore *c)
         if (g->has_prog) {
             c->caps |= QGPU_CAP_PROGRAMS;
         }
+        /* v21 : GLSL, annoncé seulement si un programme d'essai se lie
+           (QGPU_GLSL=0 dans l'environnement : ne pas l'annoncer, A/B). */
+        {
+            const char *e = getenv("QGPU_GLSL");
+            if (!(e && !strcmp(e, "0")) && gl_glsl_probe(g)) {
+                c->caps |= QGPU_CAP_GLSL;
+            } else {
+                g->has_glsl = false;
+            }
+        }
     }
     /* Mineur : le backend de référence borne toutes ses couleurs à [0,1] ;
        un contexte dont le bornage a été éteint (ARB_color_buffer_float)
@@ -1234,6 +1824,8 @@ static void gl_fini(QgpuCore *c)
     eglDestroySurface(g->dpy, g->surf);
     eglTerminate(g->dpy);
 #endif
+    free(g->glsl_fbuf);
+    free(g->glsl_ibuf);
     free(g);
     c->be_priv = NULL;
 }
@@ -1975,6 +2567,10 @@ static bool gl_reset_raw(QgpuCore *c)
     glDisableClientState(GL_NORMAL_ARRAY);
     glDisableClientState(GL_SECONDARY_COLOR_ARRAY);
     glDisableClientState(GL_FOG_COORDINATE_ARRAY);
+    if (g->has_glsl && g->glsl_cur) {               /* v21 */
+        g->UseProgram(0);
+        g->glsl_cur = 0;
+    }
     if (g->has_prog) {                              /* v16 */
         glDisable(GL_VERTEX_PROGRAM_ARB);
         glDisable(GL_FRAGMENT_PROGRAM_ARB);
@@ -2217,6 +2813,56 @@ static bool raw_trace(QgpuCore *c, const QgpuState *st, const QgpuGeom *gm,
     return err == GL_NO_ERROR;
 }
 
+/* v21 : unités d'image et programme GLSL du dessin. Les unités 0..7 ont déjà
+   leur texture (gl_unit_env) ; ici, les unités 8..15, puis la texture 0 sur
+   toute cible qu'un sampler lit sans que la texture de l'unité soit de cette
+   cible (une unité échantillonnée sans texture rend du noir, comme sur une
+   carte ; et une liaison laissée par un autre dessin ne doit pas fuir). */
+static void gl_glsl_use(QgpuCore *c, QgpuProgram *gp, QgpuTexture *const *tex, float surf_h)
+{
+    GlState *g = c->be_priv;
+    GlGlsl *gg = gp->priv;
+    QgpuGlsl *q = gp->glsl;
+    int u;
+
+    for (u = 0; u < QGPU_MAX_IMAGE_UNITS; u++) {
+        uint8_t m = q->samples[u], have = 0;
+        if (u >= QGPU_MAX_UNITS && tex[u]) {
+            g->ActiveTexture(GL_TEXTURE0 + u);
+            gl_tex_sync(c, tex[u]);                  /* lie la texture */
+        }
+        if (!m) {
+            continue;
+        }
+        if (tex[u] && tex[u]->priv) {
+            switch (((GlTexture *)tex[u]->priv)->target) {
+            case GL_TEXTURE_1D: have = QGPU_FPS_1D; break;
+            case GL_TEXTURE_2D: have = QGPU_FPS_2D; break;
+            case GL_TEXTURE_3D: have = QGPU_FPS_3D; break;
+            case GL_TEXTURE_CUBE_MAP: have = QGPU_FPS_CUBE; break;
+            default: have = QGPU_FPS_RECT; break;
+            }
+        }
+        m &= (uint8_t)~have;
+        if (!m) {
+            continue;
+        }
+        g->ActiveTexture(GL_TEXTURE0 + u);
+        if (m & QGPU_FPS_1D) glBindTexture(GL_TEXTURE_1D, 0);
+        if (m & QGPU_FPS_2D) glBindTexture(GL_TEXTURE_2D, 0);
+        if ((m & QGPU_FPS_3D) && g->has_tex) glBindTexture(GL_TEXTURE_3D, 0);
+        if ((m & QGPU_FPS_CUBE) && g->has_tex) glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+        if ((m & QGPU_FPS_RECT) && g->has_rect) glBindTexture(GL_TEXTURE_RECTANGLE, 0);
+    }
+    g->ActiveTexture(GL_TEXTURE0);
+    g->UseProgram(gg->prog);
+    g->glsl_cur = gg->prog;
+    if (gg->fh_loc >= 0) {
+        g->Uniform1f(gg->fh_loc, surf_h);
+    }
+    gl_glsl_uniforms(g, q);
+}
+
 static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
                         const QgpuGeom *gm, QgpuTexture *const *tex,
                         uint32_t mode, uint32_t fmt, const float *verts,
@@ -2237,12 +2883,20 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
        projection (pipeline fixe, ou position invariante). */
     QgpuProgram *vp = qgpu_prog_active(st, c->cur_prg, QGPU_PROG_VP);
     QgpuProgram *fp = qgpu_prog_active(st, c->cur_prg, QGPU_PROG_FP);
+    /* v21 : un programme GLSL lié prime sur les programmes ARB */
+    QgpuProgram *gp = g->has_glsl ? qgpu_glsl_active(c->cur_prg) : NULL;
     bool flip_in_proj = !vp || ((GlProgram *)vp->priv)->pos_invariant;
 
     (void)nverts;
     if (!g->has_prog) {
         vp = fp = NULL;
         flip_in_proj = true;
+    }
+    if (gp) {
+        vp = fp = NULL;
+        /* sommets GLSL : le main ajouté retourne gl_Position.y ; sans eux,
+           le pipeline fixe garde le retournement dans la projection */
+        flip_in_proj = !gp->glsl->has_vs;
     }
     if (!gl_target(c, s, st)) {
         return false;
@@ -2306,9 +2960,10 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
     }
     /* sens inversé : le retournement en y a changé l'orientation des triangles */
     glFrontFace(st->v[QGPU_SK_FRONT_FACE] == 0x0901 ? GL_CW : GL_CCW);
-    if (st->v[QGPU_SK_FOG] && st->v[QGPU_SK_FOG_MODE] != QGPU_FOG_VERTEX) {
+    if ((st->v[QGPU_SK_FOG] || gp) && st->v[QGPU_SK_FOG_MODE] != QGPU_FOG_VERTEX) {
         /* Brouillard calculé par l'hôte : les valeurs d'énumération du mode
-           sont celles d'OpenGL, on les repasse telles quelles. */
+           sont celles d'OpenGL, on les repasse telles quelles. (v21 : un
+           programme GLSL lit gl_Fog même brouillard éteint.) */
         glFogi(GL_FOG_MODE, (GLint)st->v[QGPU_SK_FOG_MODE]);
         glFogf(GL_FOG_DENSITY, qgpu_u2f(st->v[QGPU_SK_FOG_DENSITY]));
         glFogf(GL_FOG_START, qgpu_u2f(st->v[QGPU_SK_FOG_START]));
@@ -2382,9 +3037,16 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
     for (u = 0; u < QGPU_MAX_UNITS && ok; u++) {
         int off_t = qgpu_vf_offset(fmt, (uint32_t)QGPU_VF_TEX(u));
         if (!tex[u]) {
-            continue;
+            /* v21 : sous GLSL, gl_TextureMatrix[u] et gl_MultiTexCoord<u>
+               existent sans texture (DarkPlaces y passe ses tangentes) */
+            if (!gp) {
+                continue;
+            }
+            g->ActiveTexture(GL_TEXTURE0 + u);
+            g->ClientActiveTexture(GL_TEXTURE0 + u);
+        } else {
+            ok = gl_unit_env(c, st, u, tex[u]);
         }
-        ok = gl_unit_env(c, st, u, tex[u]);
         glMatrixMode(GL_TEXTURE);
         glLoadMatrixf(gm->mtx[QGPU_MTX_TEXTURE0 + u]);
         glMatrixMode(GL_MODELVIEW);
@@ -2409,6 +3071,9 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
             } else {
                 g->DisableVertexAttribArrayARB((GLuint)k);
             }
+        }
+        if (gp) {
+            gl_glsl_use(c, gp, tex, (float)s->height);
         }
         if (vp) {
             gl_prog_use(g, c->cur_prg, QGPU_PROG_VP, vp, (float)s->height);
@@ -2883,6 +3548,7 @@ const QgpuBackend qgpu_backend_gl = {
     .query_destroy  = gl_query_destroy,
     .prog_string    = gl_prog_string,      /* v16 */
     .prog_destroy   = gl_prog_destroy,
+    .glsl_link      = gl_glsl_link,        /* v21 */
     .tex_copy       = gl_tex_copy,         /* 27/09 : copie GPU */
     .tex_fetch      = gl_tex_fetch,
 };
