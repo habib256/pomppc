@@ -95,6 +95,10 @@ target_link_libraries(pomppc PRIVATE
 # ─── Headless verification probe (no GLFW/X) ─────────────────────────────
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(pointer_test tests/pointer_test.cpp)
+    target_include_directories(pointer_test PRIVATE src)
+    target_compile_options(pointer_test PRIVATE -UNDEBUG)
+    add_test(NAME pointer_policy COMMAND pointer_test)
     add_executable(chime_test tests/chime_test.cpp src/StartupChime.cpp)
     target_include_directories(chime_test PRIVATE src)
     target_compile_options(chime_test PRIVATE -UNDEBUG)

@@ -9,6 +9,15 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Audio Tiger et contrôle FPS** : profil CoreAudio stable (8 tampons, timer
+  5 ms), retour possible avec `POMPPC_AUDIO_PROFILE=default`. Screamer conserve
+  les échantillons refusés par une écriture partielle et poursuit les fragments
+  DMA dans le même callback ; régression reproduite puis corrigée en test natif.
+  ImGuiDock impose désormais la souris **relative capturée en plein écran**,
+  absolue en fenêtre ; perte de focus ou retour en fenêtre via F11/Ctrl+Cmd+F
+  libèrent la capture. Échap reste transmis au jeu, sans quitter le plein écran. Tests de politique
+  du pointeur et de transport audio ajoutés. Voir `docs/audio-stabilite.md`.
+
 - **ImGuiDock : carillon G4 et souris absolue Tiger** (27/09).
   Lecture WAV/AIFF côté hôte macOS, une fois au premier affichage de la VM,
   volume et coupure persistants, indépendants de Screamer. Son local extrait

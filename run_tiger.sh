@@ -168,7 +168,10 @@ fi
 SND_ON=0
 if [ -z "${NOSOUND:-}" ]; then
   if qemu_machine_has "$BIN" "$MACHINE" screamer; then
-    AUDIO=(-audiodev "$HOST_AUDIODEV,id=snd0" -global screamer.audiodev=snd0)
+    source "$ROOT/scripts/tiger_audio.sh"
+    AUDIO_DEVICE=$(tiger_audio_device) || exit $?
+    AUDIO=(-audiodev "$AUDIO_DEVICE" -global screamer.audiodev=snd0)
+    echo "  Audio : $AUDIO_DEVICE (POMPPC_AUDIO_PROFILE=default pour revenir au défaut QEMU)"
     host_audio_env
     [ "$RAM" -gt 768 ] && RAM=768        # le Screamer exige < 1 Go
     SND_ON=1
