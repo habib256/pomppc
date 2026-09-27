@@ -8,6 +8,20 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Protocole v21 — programmes GLSL sur le GPU de l'hôte, étape hors VM** (27/09,
+  `docs/protocole-v21-glsl.md`, relevé `docs/re/glsl-glengine.md`). GLEngine compile et lie
+  lui-même (libGLProgrammability) : le plugin relit les textes des shaders attachés, les
+  uniforms et attributs actifs (API `Sh*`), la table de valeurs (`objet+0x4c`) et les unités
+  échantillonnées (`étage+0x50c`), et les fait recompiler par l'hôte (`GLSL_SOURCE`,
+  `GLSL_ATTRIB`, `GLSL_UNIFORM`, `GLSL_LINK`, `GLSL_UNIFORMS`, `GLSL_INFO_LOG`, cible
+  `QGPU_PT_GLSL`, `QGPU_CAP_GLSL`), 16 unités d'image (clés 130..161, DarkPlaces lie sa carte
+  de lumière en 9), 256 programmes par contexte. Backend GL : réécriture des textes pour le
+  retournement y (`main` enveloppé, `gl_FragCoord`), état intégré ; logiciel : refus propres.
+  Plugin : `GL_ARB_fragment_shader` et `GL_MAX_TEXTURE_IMAGE_UNITS` = 16 annoncés sous v21
+  (`POMPPC_GL_GLSL=0` l'éteint). Épreuves natives : `run_v21` (48 contrôles) et **596
+  permutations de DarkPlaces** compilées et liées par l'hôte (`tests/dp_glsl_extract.py`) ;
+  `run-all` 142 OK ; gltest `glsl`, `glslvs`, `glslfs`, `glsldp` écrites. QEMU v21 construit
+  dans `~/src/qemu-glsl`. Reste la VM : compilation du plugin, scènes, Nexuiz `+r_glsl 1`.
 - **Nexuiz 2.5.2 dans la matrice de jeux** (27/09, `docs/matrice-jeux.md` §4, §6 ter) :
   module `tools/matrice/jeux/nx.py`, scène `-benchmark demos/demo1` (timedemo déterministe :
   l'image n du plugin est la même image de la démo d'un tour et d'un mode à l'autre),

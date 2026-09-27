@@ -251,8 +251,11 @@ supprime le régime lent (DOOM 3 ~93 → ~80 sans les patches flottants, §14) ;
       (échantillonneur nul dans `glrPolyRGB000`) : ne pas s'en servir pour comparer.
 - [ ] **Nexuiz / GLSL** (27/09) : le plugin annonce `GL_ARB_shader_objects`,
       `GL_ARB_vertex_shader`, `GL_ARB_shading_language_100` (liste du rendu logiciel d'Apple)
-      mais pas `GL_ARB_fragment_shader` : DarkPlaces coupe son chemin GLSL. Étendre le
-      protocole aux programmes GLSL (texte transmis à l'hôte, GL 2.1 de macOS). Le module de
+      mais pas `GL_ARB_fragment_shader` : DarkPlaces coupe son chemin GLSL. **Protocole v21
+      fait hors VM le 27/09** (`docs/protocole-v21-glsl.md`, `docs/re/glsl-glengine.md` ;
+      596 permutations de DarkPlaces liées par l'hôte) ; reste en VM : plugin compilé,
+      scènes `glsl*` (et `glslvs` contre Apple), Nexuiz `+r_glsl 1 -benchmark demos/demo1`
+      (zéro repli GLSL, rejeu natif, vitesse contre `r_glsl 0`), matrice. Le module de
       la matrice porte déjà le profil `glsl` (`nxg`, `+r_glsl 1`, non automatisé) : retirer
       son `non_automatise` le jour venu (`tools/matrice/jeux/nx.py`). Les deux replis par
       image en fenêtre du premier essai sont compris et corrigés (27/09) : processus

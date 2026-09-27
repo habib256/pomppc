@@ -7108,6 +7108,8 @@ static int prog_domain_ok(PCtx *p)
            sommets) ; avec, refusé par l'hôte ou table pleine seulement */
         if (!G.glsl)
             return no(NO_G_PROGRAM, 0x5430, GLD_U32(gc, GC_GLSL_ACTIVE));
+        if (!p->glsl_on)
+            return 1;                   /* aucun étage actif : pipeline fixe */
         if (!p->glsl_rec)
             return no(NO_G_PROGRAM, 0x5430, 2);
         if (p->glsl_rec->refused && p->glsl_rec->sent)
@@ -7573,9 +7575,17 @@ static int glsl_state(PCtx *p, unsigned char *gc)
     p->glsl_rec = 0;
     if (!P)
         return 0;
-    p->glsl_on = 1;
-    if (!G.glsl)
+    if (!G.glsl) {
+        p->glsl_on = 1;
         return 1;                       /* prog_domain_ok refuse */
+    }
+    /* Objet courant sans aucun étage actif (unités incohérentes : deux types
+       de sampler sur une unité, sampler dans les sommets) : GLEngine a
+       coupé les deux étages (_updateShaderState) et dessine au pipeline
+       fixe — les programmes ARB aussi sont coupés. */
+    if (!GLD_U32(gc, GC_GLSL_VS_ON) && !GLD_U32(gc, GC_GLSL_FS_ON))
+        return 1;
+    p->glsl_on = 1;
     if (p->glsl_last_obj == P && p->glsl_last && p->glsl_last->obj == P &&
         p->glsl_last->ctx == p->ctx)
         g = p->glsl_last;
