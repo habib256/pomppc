@@ -49,7 +49,7 @@ BIN = os.path.join(BENCH, "bin")
 MANIFESTE = os.path.join(ICI, "references.csv")
 G = "/Users/tiger/matrice"                         # dossier de la matrice dans l'invité
 TRIG = "/tmp/matrice-go"
-ORDRE = ["mb", "zen", "d3", "prey", "ut", "wc3", "cmr", "rtcw"]
+ORDRE = ["mb", "zen", "d3", "prey", "ut", "wc3", "cmr", "nx", "nxg", "rtcw"]
 
 # tolérances de l'image (écart moyen par composante / % de pixels > 16)
 TOL_CAPTURE = (0.3, 0.2)     # rejeu contre capture de la VM (curseur logiciel : ~0,1 %)
@@ -90,8 +90,9 @@ def charge_jeux():
         spec = importlib.util.spec_from_file_location("jeux." + f[:-3], os.path.join(d, f))
         m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(m)
-        j = m.JEU
-        jeux[j.cle] = j
+        # un module peut porter plusieurs profils (Nexuiz : arb, glsl)
+        for j in getattr(m, "JEUX", [m.JEU]):
+            jeux[j.cle] = j
     return jeux
 
 
@@ -149,7 +150,7 @@ def ecrit_manifeste(m):
         f.write("# Références d'image de la matrice (docs/matrice-jeux.md §3). Les fichiers\n"
                 "# (vidage + image PPM) sont hors dépôt dans bench/matrice/ref/<cellule>/ ;\n"
                 "# ici l'empreinte et la validation à l'œil (validee=oui).\n")
-        w = csv.DictWriter(f, CHAMPS_MANIFESTE)
+        w = csv.DictWriter(f, CHAMPS_MANIFESTE, lineterminator="\n")   # pas de CRLF (diffs)
         w.writeheader()
         for k in sorted(m):
             w.writerow({c: m[k].get(c, "") for c in CHAMPS_MANIFESTE})
@@ -334,7 +335,10 @@ class Cellule:
         env = {"POMPPC_GL_STATS": "1", "POMPPC_GL_NOTE": self.gd + "/note.txt",
                "POMPPC_GL_FRAMES": self.gd + "/frames.csv"}
         if self.vidage:
-            env.update({"POMPPC_GL_DUMP": self.gd + "/dump", "POMPPC_GL_DUMP_TRIGGER": TRIG,
+            # image fixe (@n, plugin 20260927-dumpat) quand la scène se rejoue à
+            # l'identique (Nexuiz), sinon le fichier posé après la fenêtre
+            trig = "@%d" % self.j.dump_image if self.j.dump_image else TRIG
+            env.update({"POMPPC_GL_DUMP": self.gd + "/dump", "POMPPC_GL_DUMP_TRIGGER": trig,
                         "POMPPC_GL_DUMP_FRAMES": str(self.j.dump_images)})
         env.update(self.j.env)
         env.update(self.env_extra)

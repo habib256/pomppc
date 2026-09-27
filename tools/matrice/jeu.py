@@ -23,6 +23,8 @@ class Jeu:
     delai_scene = 900           # s pour atteindre la fin de la fenêtre de mesure
     dump_images = 30            # POMPPC_GL_DUMP_FRAMES
     dump_attente = 2            # images vidées (en-têtes du vidage) avant la capture figée
+    dump_image = None           # vidage à une image FIXE (POMPPC_GL_DUMP_TRIGGER=@n) : scène
+                                # rejouée à l'identique (Nexuiz) ; sinon fichier après la fenêtre
     defaut_connu = ""           # défaut d'image connu (TODO §6), rappelé dans le tableau
     env = {}                    # POMPPC_GL_* en plus
 

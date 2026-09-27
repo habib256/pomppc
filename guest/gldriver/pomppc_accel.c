@@ -117,7 +117,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260927-rtt"
+#define POMPPC_PLUGIN_REV "20260927-dumpat"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -2777,19 +2777,26 @@ struct dump_hdr {
    toujours), 0 tant qu'il n'existe pas, -1 sans déclencheur. Le fichier n'est
    regardé qu'une fois par image : un access() par soumission et par dessin
    texturé coûtait cher tant qu'il manquait (DOOM 3 77 → 139 ms/image, relevé
-   de la matrice A3, 26/09). Partagé par le vidage, la sonde cube et draw_probe. */
+   de la matrice A3, 26/09). Partagé par le vidage, la sonde cube et draw_probe.
+   POMPPC_GL_DUMP_TRIGGER=@<n> (27/09) : 1 à partir de l'image n, sans fichier.
+   Une démo rejouée image par image (timedemo de Nexuiz) donne alors le MÊME
+   vidage à chaque tour ; un fichier posé par ssh tombe une ou deux images plus
+   loin selon le moment. */
 static int dump_trigger(void)
 {
     static const char *trig = (const char *)-1;
-    static unsigned long checked = ~0UL;
+    static unsigned long checked = ~0UL, at;
     static int seen;
-    if (trig == (const char *)-1)
+    if (trig == (const char *)-1) {
         trig = getenv("POMPPC_GL_DUMP_TRIGGER");
+        if (trig && trig[0] == '@')
+            at = strtoul(trig + 1, 0, 10);
+    }
     if (!trig || !*trig)
         return -1;
     if (!seen && checked != G.n_frames) {
         checked = G.n_frames;
-        seen = access(trig, F_OK) == 0;
+        seen = at ? G.n_frames >= at : access(trig, F_OK) == 0;
     }
     return seen;
 }
