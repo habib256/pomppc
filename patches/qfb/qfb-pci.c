@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * "Qemu FrameBuffer" (QFB) — PCI variant, for PowerPC Macintosh machines.
  *

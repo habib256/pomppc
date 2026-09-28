@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * QEMU PowerMac Awacs Screamer device support
  *
@@ -75,12 +76,39 @@ static const char *s_spk = "screamer";
 static void pmac_screamer_tx_transfer(ScreamerState *s)
 {
     DBDMA_io *io = &s->io;
-    int samples;
+    int queued, space, samples, idx, first;
 
-    samples = MIN(io->len >> s->shift, s->samples - s->wpos);
+    if (s->samples <= 0) {
+        return;
+    }
+
+    /* wpos et rpos sont monotones : la place libre est tout l'anneau moins
+     * ce qui n'a pas encore été joué, y compris le préfixe déjà consommé. */
+    queued = (int)(s->wpos - s->rpos);
+    space = s->samples - queued;
+    if (space < 0) {
+        space = 0;
+    }
+    samples = MIN(io->len >> s->shift, space);
+    if (samples <= 0) {
+        return;
+    }
+
+    idx = (int)(s->wpos % (uint32_t)s->samples);
+    first = s->samples - idx;
+    if (first > samples) {
+        first = samples;
+    }
+
     dma_memory_read(&address_space_memory, io->addr,
-                    &s->mixbuf[s->wpos << s->shift], samples << s->shift,
+                    &s->mixbuf[idx << s->shift], first << s->shift,
                     MEMTXATTRS_UNSPECIFIED);
+    if (samples > first) {
+        dma_memory_read(&address_space_memory,
+                        io->addr + (first << s->shift),
+                        s->mixbuf, (samples - first) << s->shift,
+                        MEMTXATTRS_UNSPECIFIED);
+    }
 
     SCREAMER_DPRINTF("DMA actually transferred 0x%x, wpos is %d\n", samples << s->shift, s->wpos);
 
@@ -105,25 +133,11 @@ static void pmac_screamer_tx(DBDMA_io *io)
     memcpy(&s->io, io, sizeof(DBDMA_io));
 
     /*
-     * L'amont avait ici une garde de débordement, commentée :
-     *
-     *     if (s->wpos + (s->io.len >> s->shift) > s->samples) {
-     *         return;
-     *     }
-     *
-     * Elle n'est pas restaurée, et ce n'est pas un oubli. D'une part elle ne
-     * protège de rien : le débordement de mixbuf est déjà empêché par le
-     * MIN(io->len >> shift, s->samples - s->wpos) de
-     * pmac_screamer_tx_transfer(), qui transfère ce qui tient et laisse le
-     * reste en attente. D'autre part elle introduit un blocage : sur une
-     * requête DBDMA plus grosse que mixbuf alors que wpos vaut 0, elle sort
-     * sans rien transférer, donc wpos - rpos reste nul, donc
-     * screamerspk_callback() repart immédiatement (« if (s->wpos - s->rpos ==
-     * 0) return; ») et ne reprend jamais le transfert reporté : 0 octet
-     * transféré, io->dma_end() jamais appelé, le canal DBDMA reste en l'air.
-     *
-     * Le reliquat est repris par le callback audio, branche « Continue
-     * deferred transfer ».
+     * Pas de garde « la requête ne tient pas, on abandonne ». Le transfert
+     * copie ce que l'anneau peut recevoir, y compris à cheval sur la fin du
+     * tampon, et laisse le reliquat dans io->len. Le callback le reprendra
+     * dès qu'une lecture aura libéré de la place. Abandonner ici figerait le
+     * canal : dma_end() ne serait jamais appelé.
      */
     pmac_screamer_tx_transfer(s);
 }
@@ -205,45 +219,145 @@ void macio_screamer_register_dma(ScreamerState *s, void *dbdma, int txchannel, i
                            pmac_screamer_rx, pmac_screamer_rx_flush, s);
 }
 
+/* Pull a DBDMA fragment that did not fit in the ring. A zero-length or missing
+ * channel is a no-op, so silence padding cannot complete a transfer by itself. */
+static void screamer_pull_deferred(ScreamerState *s)
+{
+    DBDMA_io *io = &s->io;
+    DBDMA_channel *ch;
+    uint32_t status;
+
+    if (!io->len || !io->channel) {
+        return;
+    }
+    ch = io->channel;
+    status = ch->regs[DBDMA_STATUS];
+    ch->regs[DBDMA_STATUS] &= ~RUN;
+    pmac_screamer_tx_transfer(s);
+    ch->regs[DBDMA_STATUS] = status;
+    DBDMA_kick(container_of(ch, DBDMAState, channels[ch->channel]));
+}
+
+static int screamer_queued(const ScreamerState *s)
+{
+    return (int)(s->wpos - s->rpos);
+}
+
+/* Réserve avant de démarrer ou de reprendre : ~20 ms, plafonnée à la moitié
+ * de l'anneau. Un débit nul (tests, voix pas encore ouverte) joue dès la
+ * première trame pour ne pas rester muet. */
+static int screamer_prime(const ScreamerState *s)
+{
+    int half, prime;
+
+    if (s->samples < 2) {
+        return 1;
+    }
+    half = s->samples / 2;
+    prime = (int)(s->rate / 50);
+    if (prime < 1) {
+        return 1;
+    }
+    return prime < half ? prime : half;
+}
+
+static void screamer_write_silence(ScreamerState *s, int *free_b)
+{
+    uint8_t silence[256];
+    unsigned frame = 1u << s->shift;
+
+    memset(silence, 0, sizeof(silence));
+    while (*free_b >= (int)frame) {
+        size_t chunk = sizeof(silence);
+        size_t accepted;
+
+        if (chunk > (size_t)*free_b) {
+            chunk = (size_t)*free_b;
+        }
+        chunk &= ~(size_t)(frame - 1);
+        if (!chunk) {
+            break;
+        }
+        accepted = AUD_write(s->voice, silence, chunk);
+        if (!accepted) {
+            break;
+        }
+        *free_b -= (int)accepted;
+    }
+}
+
 static void screamerspk_callback(void *opaque, int free_b)
 {
     ScreamerState *s = opaque;
-    DBDMA_io *io = &s->io;
-    while (free_b > 0 && s->wpos > s->rpos) {
-        unsigned samples = MIN((unsigned)free_b >> s->shift,
-                               s->wpos - s->rpos);
-        size_t requested = (size_t)samples << s->shift;
-        size_t accepted;
-        if (!requested) {
-            return;
-        }
-        accepted = AUD_write(s->voice, s->mixbuf + (s->rpos << s->shift),
-                             requested);
-        /* AUD_write may accept less than requested (including zero). Only
-         * retire PCM actually accepted, otherwise samples vanish and the
-         * guest's frame counter runs ahead. Writes are whole stereo frames. */
-        samples = accepted >> s->shift;
-        s->regs[FRAME_CNT_REG] += samples;
-        s->rpos += samples;
-        free_b -= accepted;
-        if (s->rpos < s->wpos) {
-            return; /* includes backpressure: never spin on a zero write */
-        }
-        s->wpos = 0;
-        s->rpos = 0;
 
-        if (io->len) {
-            DBDMA_channel *ch = io->channel;
-            uint32_t status = ch->regs[DBDMA_STATUS];
-            /* Complete only the deferred transfer, then restart the channel. */
-            ch->regs[DBDMA_STATUS] &= ~RUN;
-            pmac_screamer_tx_transfer(s);
-            ch->regs[DBDMA_STATUS] = status;
-            DBDMA_kick(container_of(ch, DBDMAState, channels[ch->channel]));
+    if (s->samples <= 0) {
+        return;
+    }
+
+    for (;;) {
+        int before = screamer_queued(s);
+        int before_len = s->io.len;
+
+        if (s->io.len && before < s->samples) {
+            screamer_pull_deferred(s);
         }
-        /* Feed the newly loaded fragment in this callback when space remains,
-         * instead of waiting for another audio timer tick. Each iteration
-         * consumes at least one frame, bounded by the original free_b. */
+
+        if (!s->running) {
+            if (screamer_queued(s) < screamer_prime(s)) {
+                break;
+            }
+            s->running = 1;
+        }
+
+        if (free_b <= 0 || screamer_queued(s) <= 0) {
+            break;
+        }
+
+        while (free_b > 0 && screamer_queued(s) > 0) {
+            int cap = s->samples;
+            int idx = (int)(s->rpos % (uint32_t)cap);
+            int contig = cap - idx;
+            unsigned samples = MIN((unsigned)free_b >> s->shift,
+                                   (unsigned)screamer_queued(s));
+            size_t requested, accepted;
+
+            if ((int)samples > contig) {
+                samples = (unsigned)contig;
+            }
+            requested = (size_t)samples << s->shift;
+            if (!requested) {
+                return;
+            }
+            accepted = AUD_write(s->voice, s->mixbuf + (idx << s->shift),
+                                 requested);
+            /* AUD_write may accept less than requested (including zero). Only
+             * retire PCM actually accepted, otherwise samples vanish and the
+             * guest's frame counter runs ahead. Writes are whole stereo frames.
+             * A short write is backpressure: keep the rest, do not replace it
+             * with silence, and do not spin. */
+            samples = (unsigned)(accepted >> s->shift);
+            s->regs[FRAME_CNT_REG] += samples;
+            s->rpos += samples;
+            free_b -= (int)accepted;
+            if (accepted < requested) {
+                return;
+            }
+        }
+
+        if (screamer_queued(s) == before && s->io.len == before_len) {
+            break;
+        }
+    }
+
+    /* Silence only when playback has not started, or the ring is really empty.
+     * Queued PCM below the reserve stays put: padding it here would open a gap
+     * in a stream whose next DBDMA command is only a moment late. Silence is
+     * not guest audio, so the frame counter stays put. */
+    if (!s->running || screamer_queued(s) == 0) {
+        if (screamer_queued(s) == 0) {
+            s->running = 0;
+        }
+        screamer_write_silence(s, &free_b);
     }
 }
 
@@ -258,9 +372,16 @@ static void screamer_update_settings(ScreamerState *s)
         return;
     }
 
+    s->wpos = 0;
+    s->rpos = 0;
+    s->running = 0;
+    g_free(s->mixbuf);
+    s->mixbuf = NULL;
     s->shift = 2;
-    s->samples = AUD_get_buffer_size_out(s->voice) >> s->shift;
-    s->mixbuf = g_malloc0(s->samples << s->shift);
+    /* Taille fixe : la caler sur un seul tampon hôte supprime toute réserve
+     * et bloque l'écriture dès que la lecture a avancé sans tout vider. */
+    s->samples = SCREAMER_RING_FRAMES;
+    s->mixbuf = g_malloc0((size_t)s->samples << s->shift);
 
     AUD_set_active_out(s->voice, true);
 }
@@ -309,62 +430,62 @@ static void screamer_realizefn(DeviceState *dev, Error **errp)
 
 static void screamer_control_write(ScreamerState *s, uint32_t val)
 {
+    uint32_t rate = s->rate;
+
     SCREAMER_DPRINTF("%s: val %" PRId32 "\n", __func__, val);
-        
+
     /* Basic rate selection */
     switch ((val & 0x700) >> 8) {
     case 0x00:
-        s->rate = 44100;
+        rate = 44100;
         break;
     case 0x1:
-        s->rate = 29400;
+        rate = 29400;
         break;
     case 0x2:
-        s->rate = 22050;
+        rate = 22050;
         break;
     case 0x3:
-        s->rate = 17640;
+        rate = 17640;
         break;
     case 0x4:
-        s->rate = 14700;
+        rate = 14700;
         break;
     case 0x5:
-        s->rate = 11025;
+        rate = 11025;
         break;
     case 0x6:
-        s->rate = 8820;
+        rate = 8820;
         break;
     case 0x7:
-        s->rate = 7350;
+        rate = 7350;
         break;
     }
 
-    SCREAMER_DPRINTF("basic rate: %d\n", s->rate);
-    screamer_update_settings(s);
-    
     s->regs[0] = val;
+    if (rate == s->rate) {
+        return;
+    }
+    SCREAMER_DPRINTF("basic rate: %d\n", rate);
+    s->rate = rate;
+    screamer_update_settings(s);
 }
 
 static void screamer_codec_write(ScreamerState *s, hwaddr addr, uint64_t val)
 {
     //SCREAMER_DPRINTF("%s: addr " HWADDR_PRIx " val %" PRIx64 "\n", __func__, addr, val);
 
-    switch (addr) {
-    case 0x1:
+    if (addr == 0x1) {
         /* Clear recalibrate if set */
-        val = val & ~CODEC_CTRL1_RECALIBRATE;    
-
-        /* Update volume in case mute set */
-        screamer_update_volume(s);
-        break;
-
-    case 0x4:
-        /* Speaker attenuation */
-        screamer_update_volume(s);
-        break;
+        val = val & ~CODEC_CTRL1_RECALIBRATE;
     }
-    
+
+    /* Store first: update_volume reads codec_ctrl_regs. Calling it before the
+     * store applied mute and attenuation one write late. */
     s->codec_ctrl_regs[addr] = val;
+    if (addr == 0x1 || addr == 0x4) {
+        screamer_update_volume(s);
+    }
 }
 
 static uint64_t screamer_read(void *opaque, hwaddr addr, unsigned size)

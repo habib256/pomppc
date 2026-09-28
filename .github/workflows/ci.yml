@@ -1,0 +1,18 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['0.*', 'v*']
+  pull_request:
+
+jobs:
+  hote:
+    name: Harnais hôte
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilateur et Python
+        run: sudo apt-get update && sudo apt-get install -y build-essential python3 pkg-config
+      - name: Non-régression
+        run: bash tests/run-all.sh

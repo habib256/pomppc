@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """sampleplug.py SAMPLE.txt [N] — résume un `sample <pid>` pris DANS Tiger
 (jeu + plugin GL) : fil le plus chargé (le fil principal du jeu), puis
   1. les postes du plugin (liste POSTES) : inclusif, part du fil, propre ;

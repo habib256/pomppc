@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * ppcmix.c — greffon TCG : ce que le G4 émulé exécute VRAIMENT, par opcode.
  *

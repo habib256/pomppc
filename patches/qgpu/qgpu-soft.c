@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * qgpu-soft.c — backend logiciel de référence du GPU paravirtuel « qgpu ».
  *

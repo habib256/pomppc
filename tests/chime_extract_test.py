@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """IMA4 tests with synthetic packets only: no Apple sound in the repository."""
 import sys
 from pathlib import Path

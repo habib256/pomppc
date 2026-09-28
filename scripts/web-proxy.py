@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """web-proxy.py — relais web pour les vieux navigateurs de l'invité (Tiger, OS 9).
 
 Tiger n'a qu'OpenSSL 0.9.7, des certificats racines de 2006, Safari 2 et son

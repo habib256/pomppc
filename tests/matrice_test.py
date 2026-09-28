@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """Tests hors VM de la matrice de jeux (tools/matrice/) : lecture de frames.csv,
 règles de scène (fin de la cinématique de DOOM 3, fin du chargement de Prey),
 chargement des modules de jeux, comparateur d'images ppmcmp."""

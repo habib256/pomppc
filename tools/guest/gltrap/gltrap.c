@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /* gltrap.c — mouchard des appels OpenGL d'une application Tiger (programmes ARB,
  * attributs génériques, erreurs GL), par INTERPOSITION dyld comme exitwatch.c.
  * Écrit pour comprendre Colin McRae (23/09/2026) : quels programmes de sommets

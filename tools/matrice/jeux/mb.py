@@ -1,3 +1,4 @@
+# GPL3 - Copyleft VERHILLE Arnaud
 """Marble Blast Gold — témoin du pipeline fixe (GarageGames Torque, Carbon/AGL).
 
 Lancement : `-fullscreen` ou `-windowed` et `-mission

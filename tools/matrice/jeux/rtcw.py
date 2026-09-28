@@ -1,3 +1,4 @@
+# GPL3 - Copyleft VERHILLE Arnaud
 """Return to Castle Wolfenstein — idTech3, pipeline fixe + multitexture (CFM).
 
 Non automatisé : le jeu n'est plus sur le disque quotidien au 26/09/2026

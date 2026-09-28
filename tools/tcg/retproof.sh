@@ -1,4 +1,5 @@
 #!/bin/bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # retproof.sh <config>… — preuves de tcg/0008 (x-ret-inline, x-jc-idx,
 # docs/tcg-g4.md §16) sur le disque de DÉVELOPPEMENT (jamais la VM quotidienne).
 # Une config = « étiquette:SMP:propriétés CPU » ; pour chacune : démarrage du

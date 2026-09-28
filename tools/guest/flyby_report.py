@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """Validate and summarize a completed utflyby job, using the same simulation frames."""
 import argparse
 import csv

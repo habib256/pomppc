@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * accelprobe.c — tâche 4.2 : ce que le système voit de l'accélérateur publié
  * par POMPPCGPU.kext (docs/re/accelerateur-iokit.md).

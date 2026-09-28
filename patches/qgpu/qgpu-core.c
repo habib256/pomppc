@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * qgpu-core.c — analyse et exécution du flux de commandes « qgpu ».
  *

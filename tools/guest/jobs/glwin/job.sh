@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # Mode bureau (devloop.py start --gui) : kext chargé depuis /tmp, puis glwin
 # (fenêtre GLUT, double tampon) dans la session de l'utilisateur, par le relais
 # POMPPCGuiRunner. Suppose le plugin installé (job gpu).

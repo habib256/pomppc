@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # vpermproof.sh [arbre-QEMU] [vecteurs] — preuve hôte de patches/tcg/0004-ppc-vperm-fast.patch.
 # Extrait helper_VPERM et helper_VPERM_FAST TELS QUELS de target/ppc/int_helper.c
 # (défaut ~/src/qemu-tcg19), compile tools/tcg/vpermproof.c contre eux et le lance.

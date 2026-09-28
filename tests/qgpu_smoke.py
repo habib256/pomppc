@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """Test de bout en bout du device « qgpu-pci », sans pilote invité.
 
 Même principe que qfb_smoke.py : on s'arrête à l'invite Open Firmware, on

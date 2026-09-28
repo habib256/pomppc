@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /* premierplan.c — fait d'un exécutable lancé depuis un shell une application
  * « de premier plan » (POMPPC, 27/09/2026).
  *

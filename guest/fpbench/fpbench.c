@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /* fpbench.c — banc de vitesse du flottant PowerPC sous QEMU (G4 7400, Tiger).
  *
  * Un noyau par ligne :

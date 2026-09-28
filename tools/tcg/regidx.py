@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """regidx.py REF[,REF…] FICHIER… — indice de régime d'une passe de Marble Blast
 (docs/tcg-g4.md §14).
 

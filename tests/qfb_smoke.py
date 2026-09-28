@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """Test de bout en bout du device « qfb-pci », sans pilote invité.
 
 On s'arrête à l'invite Open Firmware, on programme les registres en Forth, on

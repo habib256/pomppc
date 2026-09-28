@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # Chaîne GPU complète dans la VM de dev : kext compilé puis chargé depuis /tmp
 # (pas installé : un kext qui panique se répare par un redémarrage), qgpu_test,
 # plugin INSTALLÉ dans /System/Library/Extensions (GLEngine l'y charge par

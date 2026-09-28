@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * QEMU PowerMac Awacs Screamer device support
  *
@@ -33,7 +34,9 @@
 #define TYPE_SCREAMER "screamer"
 OBJECT_DECLARE_SIMPLE_TYPE(ScreamerState, SCREAMER)
 
-#define SCREAMER_BUFFER_SIZE 0x4000
+/* Anneau fixe, indépendant du tampon hôte : 8192 trames stéréo S16
+ * font environ 186 ms à 44,1 kHz. L'ancienne taille 0x4000 n'était pas utilisée. */
+#define SCREAMER_RING_FRAMES 8192
 
 struct ScreamerState {
     /*< private >*/
@@ -54,6 +57,8 @@ struct ScreamerState {
 
     uint32_t wpos;
     uint32_t rpos;
+    /* 0 : on attend la réserve avant de jouer. 1 : on joue jusqu'à la vidange. */
+    int running;
 
     uint32_t bpos;
     uint32_t ppos;

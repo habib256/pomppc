@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """samplesum.py FICHIER [N] — résume un `sample <pid>` macOS du processus QEMU.
 
 1. par fil : échantillons totaux, et part « code généré » (cadres ??? dans

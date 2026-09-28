@@ -1,3 +1,4 @@
+# GPL3 - Copyleft VERHILLE Arnaud
 # lib.sh — étapes communes des jobs GPU (sourcé ; stage.sh le joint au job).
 SRC=$PWD/src; OUT=$PWD/out; SDK=/Developer/SDKs/MacOSX10.4u.sdk
 RES=/System/Library/Frameworks/OpenGL.framework/Versions/A/Resources

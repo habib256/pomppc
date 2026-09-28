@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # One-time: fetch Dear ImGui into ./imgui (CMake creates the build dir itself).
 # Mirrors pom68k/setup_imgui.sh. ImGui is not vendored in git (see .gitignore).
 #

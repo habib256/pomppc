@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # Une ou plusieurs scènes gltest ($SCENES) sous le plugin, chemin brut et chemin
 # hérité (POMPPC_GL_GEOM=0), et sous le rendu d'Apple seul. Suppose le kext
 # chargé ou le recharge.

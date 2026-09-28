@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 // POMPPC — Dear ImGui + GLFW/OpenGL3 shell around a QEMU PowerPC Mac.
 // The QEMU display arrives over D-Bus (QemuBridge); we upload it as a texture
 // and render it inside an ImGui window, exactly like pom68k does with its
@@ -70,7 +71,12 @@ static const KeyMap kKeys[] = {
     {ImGuiKey_PageDown,0xD1},{ImGuiKey_Insert,0xD2},{ImGuiKey_KeypadEnter,0x9C},
 };
 
-static void glfwErr(int e, const char* d) { std::fprintf(stderr, "GLFW %d: %s\n", e, d); }
+static bool gClipboardPoll = false;
+static void glfwErr(int e, const char* d) {
+    // glfwGetClipboardString logs this when the pasteboard has no string.
+    if (gClipboardPoll && e == 0x00010009) return;
+    std::fprintf(stderr, "GLFW %d: %s\n", e, d);
+}
 
 // ── Journal : what the frontend did (launches, CDs, bascules, clics) ─────
 static std::deque<std::string> gJournal;
@@ -202,6 +208,19 @@ static ImGuiKey probeKey(char c) {
 }
 
 #ifdef __APPLE__
+#include <pthread/qos.h>
+// The AppKit main thread is USER_INTERACTIVE, above QEMU. Its frame copy and
+// GL upload then preempt the audio timer, which lives on QEMU's main loop.
+// Utility still runs the UI when the machine is idle; under load the guest
+// audio timer wins.
+static void preferGuestAudio() {
+    pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+}
+#else
+static void preferGuestAudio() {}
+#endif
+
+#ifdef __APPLE__
 // GLFW's Cocoa menu bar carries "Window ▸ Enter Full Screen" bound to
 // Ctrl+Cmd+F (toggleFullScreen:, macOS *Spaces* full screen). The menu eats
 // that key equivalent before GLFW sees it, so our Vue ▸ Plein écran shortcut
@@ -249,6 +268,27 @@ static int disableNativeFullScreen(GLFWwindow* win) {
             nswin, sel_registerName("setCollectionBehavior:"), b);
     }
     return n;
+}
+
+// glfwGetClipboardString prints GLFW_FORMAT_UNAVAILABLE on an empty pasteboard.
+// changeCount is silent; the string is read only when the pasteboard changes.
+static std::string macClipboardText() {
+    using MsgId = id (*)(id, SEL);
+    static long seen = -1;
+    id pb = ((MsgId)objc_msgSend)((id)objc_getClass("NSPasteboard"),
+                                  sel_registerName("generalPasteboard"));
+    if (!pb) return {};
+    long change = ((long (*)(id, SEL))objc_msgSend)(pb, sel_registerName("changeCount"));
+    if (change == seen) return {};
+    seen = change;
+    id type = ((id (*)(id, SEL, const char*))objc_msgSend)(
+        (id)objc_getClass("NSString"), sel_registerName("stringWithUTF8String:"),
+        "public.utf8-plain-text");
+    id str = ((id (*)(id, SEL, id))objc_msgSend)(pb, sel_registerName("stringForType:"), type);
+    if (!str) return {};
+    const char* utf8 = ((const char* (*)(id, SEL))objc_msgSend)(str, sel_registerName("UTF8String"));
+    if (!utf8 || !utf8[0]) return {};
+    return utf8;
 }
 #endif
 
@@ -595,6 +635,9 @@ int main(int argc, char** argv) {
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+        // After the Cocoa event pump, which puts this thread back in the
+        // interactive band above QEMU's audio timer.
+        preferGuestAudio();
         const bool capture = wantsPointerCapture(fullscreen,
             glfwGetWindowAttrib(window, GLFW_FOCUSED), bridge->running(), paused,
             bridge->mouseIsAbsolute());
@@ -891,8 +934,15 @@ int main(int argc, char** argv) {
         static int clipTick = 0;
         if (++clipTick >= 30) {
             clipTick = 0;
-            if (const char* hc = glfwGetClipboardString(window))
-                if (hc[0]) bridge->publishLocalClipboard(hc);
+#ifdef __APPLE__
+            std::string hc = macClipboardText();
+            if (!hc.empty()) bridge->publishLocalClipboard(hc);
+#else
+            gClipboardPoll = true;
+            const char* hc = glfwGetClipboardString(window);
+            gClipboardPoll = false;
+            if (hc && hc[0]) bridge->publishLocalClipboard(hc);
+#endif
         }
         std::string gclip;
         if (bridge->takeGuestClipboard(gclip))

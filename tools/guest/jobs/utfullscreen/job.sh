@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # Persistent UT2004 fullscreen settings and GUI launch. Requires the fullscreen
 # GLDriver fix. Put 800x600 (default) or 1024x768 in resolution.txt in this job.
 . ./guilib.sh

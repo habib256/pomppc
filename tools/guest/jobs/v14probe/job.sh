@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # Relevé d'OpenGL 1.4 : GL_COLOR_SUM, biais de LOD d'unité, ce que GLEngine
 # accepte (stencil wrap, source croisée, textures de profondeur et ombre), et
 # les champs de l'objet texture (docs/re/opengl-1.4.md).

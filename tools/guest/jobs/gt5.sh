@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # gt5.sh <label> [VAR=valeur...] — scènes gltest des lots du verdict unique (lots 1-4
 # et mémoire des unités), jouées dans l'invité avec le plugin installé :
 # verdicts, empreinte md5 de l'image, lignes VERDICT / TEXMEMO / STATE des notes.

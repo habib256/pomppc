@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # Boote le média d'installation Tiger pour installer OS X sur le disque virtuel.
 source "$(dirname "$0")/lib.sh"
 need "$QEMU_BIN"

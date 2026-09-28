@@ -1,3 +1,4 @@
+# GPL3 - Copyleft VERHILLE Arnaud
 # Usage : python3 tools/re/sym.py CHEMIN/GLDriver-POMPPC 0xOFF [0xOFF…] — décalage dans le bundle → symbole (nm -n)
 import sys,subprocess,bisect
 bin_=sys.argv[1]; offs=[int(x,16) for x in sys.argv[2:]]

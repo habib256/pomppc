@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # Jeux réels en mode bureau (devloop.py start --gui), avec le bilan du plugin.
 #
 # Les jeux ne sont pas dans le dépôt : ils sont pris sur le bureau de

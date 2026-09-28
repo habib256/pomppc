@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """killgame.py — tue le processus Colin McRae depuis l'hôte : stub GDB de QEMU sur socket UNIX,
    on attend qu'un vCPU soit en mode utilisateur dans le jeu (PC ou LR dans le binaire, IndirectX,
    GLEngine ou le plugin), et on met son PC à 0 → erreur de bus → CrashReporter → fin du processus.

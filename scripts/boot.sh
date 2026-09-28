@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # Boot headless du système installé, avec socket moniteur. Chronométré.
 # Usage: scripts/boot.sh   (tourne en arrière-plan via setsid)
 set -euo pipefail

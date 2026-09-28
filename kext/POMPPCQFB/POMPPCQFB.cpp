@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * POMPPCQFB.cpp — IOFramebuffer pour le device PCI « qfb1 » de QEMU.
  * Voir POMPPCQFB.h. Licence : identique au projet POMPPC.

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """Référence des constantes qgpu : stdout, ou --check contre docs/protocole.md."""
 import pathlib
 import re

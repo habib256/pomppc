@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 #include "StartupChime.h"
 #include <algorithm>
 #include <cstdio>

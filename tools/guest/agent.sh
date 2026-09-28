@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # agent.sh — agent de la boucle de développement, DANS l'invité Tiger.
 #
 #   sh /pomppc/agent.sh <secteur_inbox> <secteur_outbox>

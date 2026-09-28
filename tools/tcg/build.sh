@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # build.sh — construit le greffon TCG ppcmix (tools/tcg/libppcmix.dylib|.so)
 # contre les en-têtes d'un arbre QEMU (QEMU_SRC, défaut ~/src/qemu-tcg).
 set -euo pipefail

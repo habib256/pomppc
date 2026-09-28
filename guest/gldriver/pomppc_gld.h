@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * pomppc_gld.h — déclarations internes du plugin OpenGL POMPPC.
  * Liste GLD_LIST : ordre de la table glep_gld_names de GLEngine (Tiger 10.4.6),

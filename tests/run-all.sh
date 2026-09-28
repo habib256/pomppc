@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # run-all.sh — harnais de non-régression de POMPPC.
 #
 #   ./tests/run-all.sh          # tout ce qui ne demande ni disque invité ni X

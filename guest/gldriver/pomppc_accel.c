@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * pomppc_accel.c — accélération du plugin OpenGL POMPPC par le GPU de l'hôte.
  *

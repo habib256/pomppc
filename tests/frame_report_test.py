@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """Regression checks for frame-time reporting and measurement windows."""
 import importlib.util
 from pathlib import Path

@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * qgpu_core_test.c — test natif (hôte) du cœur qgpu et de ses backends.
  *

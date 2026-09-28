@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """jitpoll.py SOCKET PERIODE DUREE > fichier — relève `info jit` (HMP) toutes
 les PERIODE secondes pendant DUREE secondes, une ligne par relevé :
 

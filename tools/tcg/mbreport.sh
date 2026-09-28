@@ -1,4 +1,5 @@
 #!/bin/bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # mbreport.sh [dossier] — bilan des A/B Marble Blast de tools/tcg/mbab.sh :
 # pour chaque couple de configurations, toutes les passes de toutes les
 # manches d'un côté (fichiers <manche>-mb-<config>-<n>.txt) contre l'autre.

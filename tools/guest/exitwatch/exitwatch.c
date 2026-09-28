@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /* exitwatch.c — mouchard sur exit()/abort() pour Tiger PPC.
  *
  * Injecté par DYLD_INSERT_LIBRARIES=libexitwatch.dylib (le lanceur « UT2004

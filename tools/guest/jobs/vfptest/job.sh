@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # vfptest - equivalence vaddfp/vsubfp/vmaddfp/vnmsubfp : helpers d'origine <->
 # chemin rapide a 4 voies (patches/tcg/0003-ppc-vfp-fast, docs/tcg-g4.md section 9).
 #   mkdir /tmp/j && cp tools/guest/jobs/vfptest/* /tmp/j && devloop.py run /tmp/j

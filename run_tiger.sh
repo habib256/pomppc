@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # run_tiger.sh — lance Mac OS X 10.4 (Tiger) dans une fenêtre.
 #
 #   ./run_tiger.sh            # ImGuiDock + SMP 2 + son + toutes les optimisations + GPU qgpu

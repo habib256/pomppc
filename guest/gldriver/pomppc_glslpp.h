@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * pomppc_glslpp.h — conditions du préprocesseur GLSL faites par le plugin
  * (v21), à la place de celui de GLEngine 10.4.6, qui compte mal les #if

@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # Relevé : couleur de bordure, CLAMP_TO_BORDER, MIRRORED_REPEAT, textures DXT1
 # (glCompressedTexImage2D, format générique, mipmaps génériques), vus du pilote,
 # et les requêtes de compression (docs/re/bordure-et-compression.md).
