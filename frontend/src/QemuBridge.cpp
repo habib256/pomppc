@@ -1,7 +1,14 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 #include "QemuBridge.h"
 
 #include <gio/gio.h>
 #include <gio/gunixfdlist.h>
+
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+#endif
+
+#include <memory>
 
 #include <cerrno>
 #include <cstdio>
@@ -45,11 +52,29 @@ struct QemuBridge::Impl {
     QemuDBusDisplay1Listener* listenerIface = nullptr;
     QemuDBusDisplay1ListenerUnixMap* mapIface = nullptr;
 
-    // Unix.Map shared-memory scanout (fast path). Mapping owned by D-Bus thread.
-    void* mapAddr = nullptr;         // mmap base (page-aligned; for munmap)
-    size_t mapLen = 0;
-    const uint8_t* mapData = nullptr;  // surface start (base + intra-page offset)
-    uint32_t mapW = 0, mapH = 0, mapStride = 0;
+    // Unix.Map shared-memory scanout. The last latch keeps the previous
+    // mapping alive (shared_ptr) so a new ScanoutMap can munmap without
+    // waiting for the pixel copy, and without the copy reading freed pages.
+    struct MappedSurface {
+        void* addr = nullptr;
+        size_t len = 0;
+        const uint8_t* data = nullptr;
+        uint32_t w = 0, h = 0, stride = 0;
+        ~MappedSurface() {
+            if (addr) munmap(addr, len);
+        }
+    };
+    std::shared_ptr<MappedSurface> mapped;
+
+    // Inline frames whose pixels are copied on the render thread. The GVariant
+    // is immutable and refcounted, so the D-Bus handler only takes a ref.
+    struct InlineFrame {
+        bool scanout = false;
+        int x = 0, y = 0, w = 0, h = 0;
+        uint32_t width = 0, height = 0, stride = 0;
+        GVariant* data = nullptr;
+    };
+    std::vector<InlineFrame> inlineQ;
 
     // Listener-registration handshake bookkeeping.
     GThread* listenerConnThread = nullptr;
@@ -173,10 +198,9 @@ static gboolean on_scanout(QemuDBusDisplay1Listener* obj,
                            GDBusMethodInvocation* inv, guint width,
                            guint height, guint stride, guint pixman_format,
                            GVariant* data, gpointer user_data) {
-    auto* self = static_cast<QemuBridge*>(user_data);
-    gsize len = g_variant_get_size(data);
-    const auto* bytes = static_cast<const uint8_t*>(g_variant_get_data(data));
-    self->ingestScanout(width, height, stride, pixman_format, bytes, len);
+    static_cast<QemuBridge*>(user_data)->queueInline(
+        true, 0, 0, (int)width, (int)height, width, height, stride, data);
+    (void)pixman_format;
     qemu_dbus_display1_listener_complete_scanout(obj, inv);
     return G_DBUS_METHOD_INVOCATION_HANDLED;
 }
@@ -185,10 +209,9 @@ static gboolean on_update(QemuDBusDisplay1Listener* obj,
                           GDBusMethodInvocation* inv, gint x, gint y, gint w,
                           gint h, guint stride, guint pixman_format,
                           GVariant* data, gpointer user_data) {
-    auto* self = static_cast<QemuBridge*>(user_data);
-    gsize len = g_variant_get_size(data);
-    const auto* bytes = static_cast<const uint8_t*>(g_variant_get_data(data));
-    self->ingestUpdate(x, y, w, h, stride, pixman_format, bytes, len);
+    static_cast<QemuBridge*>(user_data)->queueInline(
+        false, x, y, w, h, 0, 0, stride, data);
+    (void)pixman_format;
     qemu_dbus_display1_listener_complete_update(obj, inv);
     return G_DBUS_METHOD_INVOCATION_HANDLED;
 }
@@ -216,6 +239,8 @@ static gboolean on_scanout_map(QemuDBusDisplay1ListenerUnixMap* obj,
 static gboolean on_update_map(QemuDBusDisplay1ListenerUnixMap* obj,
                               GDBusMethodInvocation* inv, gint x, gint y, gint w,
                               gint h, gpointer user_data) {
+    // Reply before any pixel copy. QEMU's audio timer shares its main loop
+    // with this display socket; a slow handler fills the socket and stalls it.
     static_cast<QemuBridge*>(user_data)->mapUpdate(x, y, w, h);
     qemu_dbus_display1_listener_unix_map_complete_update_map(obj, inv);
     return G_DBUS_METHOD_INVOCATION_HANDLED;
@@ -505,6 +530,11 @@ bool QemuBridge::start(const Config& cfg, std::string* err) {
 }
 
 void QemuBridge::runGlibThread() {
+#if defined(__APPLE__)
+    // Match QEMU's default QoS. USER_INTERACTIVE (the AppKit main thread)
+    // preempts the audio timer; this thread only publishes damage rectangles.
+    pthread_set_qos_class_self_np(QOS_CLASS_DEFAULT, 0);
+#endif
     Impl* d = impl_;
     d->ctx = g_main_context_new();
     g_main_context_push_thread_default(d->ctx);
@@ -616,9 +646,11 @@ void QemuBridge::stop() {
     if (qmpFd_ >= 0) { close(qmpFd_); qmpFd_ = -1; }
     if (impl_ && impl_->loop) g_main_loop_quit(impl_->loop);
     if (thread_) { g_thread_join(thread_); thread_ = nullptr; }
-    if (impl_ && impl_->mapAddr) {   // D-Bus thread gone → safe to unmap
-        munmap(impl_->mapAddr, impl_->mapLen);
-        impl_->mapAddr = nullptr; impl_->mapData = nullptr; impl_->mapLen = 0;
+    if (impl_) {
+        std::lock_guard<std::mutex> lk(fbMtx_);
+        for (auto& frame : impl_->inlineQ) g_variant_unref(frame.data);
+        impl_->inlineQ.clear();
+        impl_->mapped.reset();
     }
     if (qemuPid_ > 0 && !qemuReaped_) {
         kill(qemuPid_, SIGTERM);
@@ -651,28 +683,76 @@ bool QemuBridge::checkAlive() {
     return true;
 }
 
-// ── Framebuffer ingest (D-Bus thread) → shared buffer ────────────────────
-void QemuBridge::ingestScanout(uint32_t w, uint32_t h, uint32_t stride,
-                               uint32_t pixmanFormat, const uint8_t* data,
-                               size_t len) {
+// ── Framebuffer ingest ────────────────────────────────────────────────────
+// D-Bus handlers only queue. The render thread copies, so a synchronous
+// ScanoutMap returns to QEMU before the multi-megabyte memcpy.
+void QemuBridge::queueInline(bool scanout, int x, int y, int w, int h,
+                             uint32_t width, uint32_t height, uint32_t stride,
+                             void* variant) {
+    auto* data = static_cast<GVariant*>(variant);
+    if (!data) return;
+    g_variant_ref(data);
+
+    std::lock_guard<std::mutex> lk(fbMtx_);
+    if (scanout && impl_->mapped) {
+        // The guest left the shared surface. A latch that already copied the
+        // shared_ptr keeps the pages until it finishes.
+        impl_->mapped.reset();
+        mapDirty_ = false;
+        mapResize_ = false;
+    }
+    if (scanout) {
+        for (auto& frame : impl_->inlineQ) g_variant_unref(frame.data);
+        impl_->inlineQ.clear();
+    } else if (impl_->inlineQ.size() >= 4) {
+        static bool once = false;
+        if (!once) {
+            std::fprintf(stderr, "QemuBridge: file d'images saturée, image intermédiaire abandonnée\n");
+            once = true;
+        }
+        g_variant_unref(impl_->inlineQ.front().data);
+        impl_->inlineQ.erase(impl_->inlineQ.begin());
+    }
+    Impl::InlineFrame frame;
+    frame.scanout = scanout;
+    frame.x = x;
+    frame.y = y;
+    frame.w = w;
+    frame.h = h;
+    frame.width = width;
+    frame.height = height;
+    frame.stride = stride;
+    frame.data = data;
+    impl_->inlineQ.push_back(frame);
+}
+
+void QemuBridge::ingestScanoutLocked(uint32_t w, uint32_t h, uint32_t stride,
+                                     const uint8_t* data, size_t len) {
+    if (w == 0 || h == 0 || stride < w * 4 || !data) return;  // 32bpp only
     static bool once = false;
     if (!once) {
-        std::fprintf(stderr, "QemuBridge: first Scanout %ux%u stride=%u fmt=0x%x len=%zu\n",
-                     w, h, stride, pixmanFormat, len);
+        std::fprintf(stderr, "QemuBridge: first Scanout %ux%u stride=%u len=%zu\n",
+                     w, h, stride, len);
         once = true;
     }
-    if (w == 0 || h == 0 || stride < w * 4) return;  // P1: 32bpp only
-    std::lock_guard<std::mutex> lk(fbMtx_);
     if ((int)w != fbW_ || (int)h != fbH_) fbResized_ = true;
     fbW_ = (int)w;
     fbH_ = (int)h;
     fb_.assign((size_t)w * h, 0);
     for (uint32_t row = 0; row < h; ++row) {
         size_t off = (size_t)row * stride;
-        if (off + w * 4 > len) break;
+        if (off + (size_t)w * 4 > len) break;
         std::memcpy(&fb_[(size_t)row * w], data + off, (size_t)w * 4);
     }
     markRows(0, fbH_);
+}
+
+void QemuBridge::ingestScanout(uint32_t w, uint32_t h, uint32_t stride,
+                               uint32_t pixmanFormat, const uint8_t* data,
+                               size_t len) {
+    (void)pixmanFormat;
+    std::lock_guard<std::mutex> lk(fbMtx_);
+    ingestScanoutLocked(w, h, stride, data, len);
 }
 
 // Widen the dirty row span. fbMtx_ is held by the caller.
@@ -685,11 +765,9 @@ void QemuBridge::markRows(int y0, int y1) {
     if (y1 > fbY1_) fbY1_ = y1;
 }
 
-void QemuBridge::ingestUpdate(int x, int y, int w, int h, uint32_t stride,
-                              uint32_t /*fmt*/, const uint8_t* data,
-                              size_t len) {
-    std::lock_guard<std::mutex> lk(fbMtx_);
-    if (fbW_ == 0 || fbH_ == 0) return;
+void QemuBridge::ingestUpdateLocked(int x, int y, int w, int h, uint32_t stride,
+                                    const uint8_t* data, size_t len) {
+    if (fbW_ == 0 || fbH_ == 0 || !data) return;
     if (w <= 0 || h <= 0 || stride < (uint32_t)w * 4) return;
 
     // Clamp the span once, then one memcpy per row. The previous version did a
@@ -711,6 +789,13 @@ void QemuBridge::ingestUpdate(int x, int y, int w, int h, uint32_t stride,
     markRows(y, y + h);
 }
 
+void QemuBridge::ingestUpdate(int x, int y, int w, int h, uint32_t stride,
+                              uint32_t /*fmt*/, const uint8_t* data,
+                              size_t len) {
+    std::lock_guard<std::mutex> lk(fbMtx_);
+    ingestUpdateLocked(x, y, w, h, stride, data, len);
+}
+
 // ── Unix.Map fast path (D-Bus thread) ────────────────────────────────────
 void QemuBridge::mapScanout(int fd, uint32_t offset, uint32_t w, uint32_t h,
                             uint32_t stride, uint32_t pixmanFormat) {
@@ -721,10 +806,6 @@ void QemuBridge::mapScanout(int fd, uint32_t offset, uint32_t w, uint32_t h,
                      "stride=%u off=%u fmt=0x%x\n",
                      w, h, stride, offset, pixmanFormat);
         once = true;
-    }
-    if (impl_->mapAddr) {
-        munmap(impl_->mapAddr, impl_->mapLen);
-        impl_->mapAddr = nullptr; impl_->mapData = nullptr; impl_->mapLen = 0;
     }
     if (w == 0 || h == 0 || stride < w * 4) { close(fd); return; }
 
@@ -738,51 +819,103 @@ void QemuBridge::mapScanout(int fd, uint32_t offset, uint32_t w, uint32_t h,
         std::fprintf(stderr, "ScanoutMap mmap failed: %s\n", strerror(errno));
         return;
     }
-    impl_->mapAddr = base;
-    impl_->mapLen = maplen;
-    impl_->mapData = static_cast<const uint8_t*>(base) + extra;
-    impl_->mapW = w; impl_->mapH = h; impl_->mapStride = stride;
 
-    // Full surface → framebuffer.
+    // Publish the mapping and return. The synchronous ScanoutMap reply is what
+    // lets QEMU's main loop reach the audio timer again; the pixels are copied
+    // later, once per displayed frame. Replacing the shared_ptr unmaps the
+    // previous surface only after any in-flight copy drops it.
+    auto hold = std::make_shared<Impl::MappedSurface>();
+    hold->addr = base;
+    hold->len = maplen;
+    hold->data = static_cast<const uint8_t*>(base) + extra;
+    hold->w = w;
+    hold->h = h;
+    hold->stride = stride;
     std::lock_guard<std::mutex> lk(fbMtx_);
-    if ((int)w != fbW_ || (int)h != fbH_) fbResized_ = true;
-    fbW_ = (int)w; fbH_ = (int)h;
-    fb_.assign((size_t)w * h, 0);
-    for (uint32_t row = 0; row < h; ++row)
-        std::memcpy(&fb_[(size_t)row * w],
-                    impl_->mapData + (size_t)row * stride, (size_t)w * 4);
-    markRows(0, fbH_);
+    impl_->mapped = std::move(hold);
+    mapResize_ = true;
+    mapDirty_ = true;
+    mapY0_ = 0;
+    mapY1_ = (int)h;
 }
 
 void QemuBridge::mapUpdate(int x, int y, int w, int h) {
     std::lock_guard<std::mutex> lk(fbMtx_);
-    if (!impl_->mapData || fbW_ == 0 || w <= 0 || h <= 0) return;
+    if (!impl_->mapped || !impl_->mapped->data || w <= 0 || h <= 0) return;
+    int y0 = y < 0 ? 0 : y;
+    int y1 = y + h;
+    int maxH = (int)impl_->mapped->h;
+    if (y1 > maxH) y1 = maxH;
+    if (y0 >= y1) return;
+    if (!mapDirty_) { mapY0_ = y0; mapY1_ = y1; mapDirty_ = true; return; }
+    if (y0 < mapY0_) mapY0_ = y0;
+    if (y1 > mapY1_) mapY1_ = y1;
+}
 
-    // Bound by the MAPPING as well as by the framebuffer. An inline Scanout
-    // arriving after a ScanoutMap resizes fb_ but leaves mapW/mapH/mapStride
-    // describing the old, smaller mmap — reading at fb_ dimensions then walked
-    // off the end of the mapping.
-    int maxW = fbW_ < (int)impl_->mapW ? fbW_ : (int)impl_->mapW;
-    int maxH = fbH_ < (int)impl_->mapH ? fbH_ : (int)impl_->mapH;
-
-    int dx0 = x < 0 ? 0 : x;
-    int cols = x + w - dx0;
-    if (dx0 + cols > maxW) cols = maxW - dx0;
-    if (cols <= 0) return;
-
-    for (int row = 0; row < h; ++row) {
-        int dy = y + row;
-        if (dy < 0 || dy >= maxH) continue;
-        const uint8_t* src = impl_->mapData + (size_t)dy * impl_->mapStride;
-        std::memcpy(&fb_[(size_t)dy * fbW_ + dx0], src + (size_t)dx0 * 4,
-                    (size_t)cols * 4);
+void QemuBridge::copyMapRows(const uint8_t* data, uint32_t mapW, uint32_t mapH,
+                             uint32_t stride, int y0, int y1) {
+    if (!data || fbW_ <= 0 || fbH_ <= 0) return;
+    int maxW = fbW_ < (int)mapW ? fbW_ : (int)mapW;
+    int maxH = fbH_ < (int)mapH ? fbH_ : (int)mapH;
+    if (y0 < 0) y0 = 0;
+    if (y1 > maxH) y1 = maxH;
+    if (maxW <= 0 || y0 >= y1) return;
+    for (int y = y0; y < y1; ++y) {
+        const uint8_t* src = data + (size_t)y * stride;
+        std::memcpy(&fb_[(size_t)y * fbW_], src, (size_t)maxW * 4);
     }
-    markRows(y, y + h);
+    markRows(y0, y1);
 }
 
 bool QemuBridge::latchFrame(std::vector<uint32_t>& out, int& w, int& h,
                             int& y0, int& y1, bool& resized) {
-    std::lock_guard<std::mutex> lk(fbMtx_);
+    // Snapshot the damage and drop the lock before touching pixels. Holding it
+    // across the memcpy inverted priorities: the D-Bus thread (which must keep
+    // reading so QEMU's audio timer is not stuck on a full socket) waited on
+    // this slower render thread.
+    std::vector<Impl::InlineFrame> queued;
+    std::shared_ptr<Impl::MappedSurface> hold;
+    bool resize = false;
+    int my0 = 0, my1 = 0;
+    bool wantMap = false;
+    {
+        std::lock_guard<std::mutex> lk(fbMtx_);
+        queued = std::move(impl_->inlineQ);
+        hold = impl_->mapped;
+        resize = mapResize_;
+        wantMap = (mapDirty_ || mapResize_) && static_cast<bool>(hold);
+        my0 = mapY0_;
+        my1 = mapY1_;
+        mapDirty_ = false;
+        mapResize_ = false;
+    }
+    for (auto& frame : queued) {
+        gsize len = g_variant_get_size(frame.data);
+        const auto* bytes =
+            static_cast<const uint8_t*>(g_variant_get_data(frame.data));
+        if (frame.scanout)
+            ingestScanoutLocked(frame.width, frame.height, frame.stride, bytes, len);
+        else
+            ingestUpdateLocked(frame.x, frame.y, frame.w, frame.h, frame.stride,
+                               bytes, len);
+        g_variant_unref(frame.data);
+    }
+    if (wantMap && hold && hold->data) {
+        if (resize) {
+            int mw = (int)hold->w;
+            int mh = (int)hold->h;
+            if (mw > 0 && mh > 0 &&
+                (mw != fbW_ || mh != fbH_ || fb_.size() != (size_t)mw * mh)) {
+                fb_.assign((size_t)mw * mh, 0);
+                fbResized_ = true;
+            }
+            fbW_ = mw;
+            fbH_ = mh;
+            my0 = 0;
+            my1 = mh;
+        }
+        copyMapRows(hold->data, hold->w, hold->h, hold->stride, my0, my1);
+    }
     if (!fbDirty_ || fbW_ == 0) return false;
 
     w = fbW_;

@@ -1,4 +1,5 @@
 #!/bin/bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # smpab.sh SMP:ÉTIQUETTE… — campagne « combien de cœurs » (docs/smp-coeurs.md) sur le
 # disque de DÉVELOPPEMENT (jamais la VM quotidienne). Chaque argument = un processus
 # QEMU neuf, un démarrage d'invité, lancé par tools/tcg/regab.sh (NGUEST=1) avec

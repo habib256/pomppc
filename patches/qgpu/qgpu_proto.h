@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * qgpu_proto.h — contrat hôte ↔ invité du GPU paravirtuel « qgpu » (POMPPC).
  *

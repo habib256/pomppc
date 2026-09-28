@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # install.sh — installe (ou retire) le GPU paravirtuel dans le système Tiger.
 #
 #   sudo sh install.sh            # compile et installe kext + plugin OpenGL

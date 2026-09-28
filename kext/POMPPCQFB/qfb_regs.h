@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * qfb_regs.h — registres du framebuffer paravirtualisé "qfb1".
  *

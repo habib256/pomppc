@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # build_qemu_qfb.sh — reconstruit LE binaire de référence de POMPPC : QEMU 9.2.0 +
 #
 #   • le device audio « screamer » (AWACS PowerMac)  — patches/screamer/

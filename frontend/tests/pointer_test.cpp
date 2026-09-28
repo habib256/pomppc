@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 #include "PointerPolicy.h"
 #include <cassert>
 int main() {

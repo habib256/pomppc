@@ -1,3 +1,4 @@
+# GPL3 - Copyleft VERHILLE Arnaud
 """Colin McRae Rally 2005 — programmes ARB via IndirectX (Feral, Mach-O),
 rendu vers texture (aglSurfaceTexture, textures rectangle).
 

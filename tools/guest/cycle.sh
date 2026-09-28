@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # cycle.sh — tue le jeu, recompile et réinstalle le plugin dans l'invité, relance Colin McRae
 # jusqu'en course (Jouer, Entrée à l'écran titre, Entrée au menu), déclenche le vidage, capture
 # l'écran. Journal sur stdout. Variables du jeu en plus : /tmp/cmr-env dans l'invité (lu par

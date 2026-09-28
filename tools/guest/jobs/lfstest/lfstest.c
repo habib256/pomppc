@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * lfstest.c - equivalence de lfs/stfs entre les helpers de QEMU (todouble /
  * tosingle) et la traduction en ligne (propriete x-lfs-inline,

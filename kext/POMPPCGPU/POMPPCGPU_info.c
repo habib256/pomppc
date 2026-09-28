@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * POMPPCGPU_info.c — descripteur kmod du kext, ce que Xcode 2.x génère
  * automatiquement pour tout projet « Kernel Extension ». Sans lui, le Mach-O

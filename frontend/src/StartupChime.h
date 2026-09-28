@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 #pragma once
 #include <cmath>
 #include <memory>

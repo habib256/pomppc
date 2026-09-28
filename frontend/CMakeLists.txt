@@ -1,5 +1,6 @@
+# GPL3 - Copyleft VERHILLE Arnaud
 cmake_minimum_required(VERSION 3.16)
-project(POMPPC VERSION 0.1 LANGUAGES C CXX)
+project(POMPPC VERSION 0.3 LANGUAGES C CXX)
 
 # POMPPC frontend — Dear ImGui + GLFW/OpenGL3 shell embedding QEMU's display
 # over D-Bus (-display dbus,p2p=on). Same habillage as pom68k / POM1 / POM2 /

@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * qgpu-core.h — exécuteur du flux de commandes « qgpu », indépendant de QEMU.
  *

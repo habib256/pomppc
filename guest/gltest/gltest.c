@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * gltest.c — programme OpenGL de Tiger, hors écran (CGL), sans WindowServer.
  *

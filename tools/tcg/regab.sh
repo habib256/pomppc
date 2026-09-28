@@ -1,4 +1,5 @@
 #!/bin/bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # regab.sh ÉTIQUETTE… — campagne « deux régimes » (docs/tcg-g4.md §14) sur le
 # disque de DÉVELOPPEMENT (jamais la VM quotidienne). Chaque étiquette = un
 # processus QEMU neuf : démarrage du bureau, relevé de la carte mémoire de QEMU

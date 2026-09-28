@@ -1,4 +1,5 @@
 #!/bin/bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # retd3.sh [N] — A/B DOOM 3 de tcg/0008 (docs/tcg-g4.md §16) sur la VM
 # QUOTIDIENNE : N parties par mode (défaut 3), entrelacées ref / on, SMP=2,
 # x-sr-tlb, `sample` hôte à PROFIL (après la fenêtre de mesure), puis la VM

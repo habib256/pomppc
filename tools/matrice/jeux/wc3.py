@@ -1,3 +1,4 @@
+# GPL3 - Copyleft VERHILLE Arnaud
 """Warcraft III: Reign of Chaos (Blizzard, CFM/PEF, lancé par LaunchCFMApp) — tableaux.
 
 Le jeu réclame son CD : l'image « Warcraft III.toast » du dossier du jeu est

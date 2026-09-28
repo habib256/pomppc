@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # Tâche 4.2 — l'accélérateur IOKit publié par le kext (docs/re/accelerateur-iokit.md).
 #
 # Deux modes, selon qu'il y a un framebuffer :

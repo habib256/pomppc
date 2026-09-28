@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """hmp.py SOCKET "commande" [...] — envoie des commandes HMP au moniteur QEMU
 (-monitor unix:SOCKET,server=on,wait=off) et imprime leurs réponses."""
 import socket, sys, time

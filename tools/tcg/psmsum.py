@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """psmsum.py FICHIER-psM [DÉBUT FIN] — CPU hôte par fil de QEMU (docs/smp-coeurs.md).
 
 FICHIER : relevés `ps -M -p <pid>` successifs (« == HH:MM:SS » puis la sortie),

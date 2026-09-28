@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # Lance le frontend ImGui POMPPC depuis n'importe quel répertoire.
 set -euo pipefail
 

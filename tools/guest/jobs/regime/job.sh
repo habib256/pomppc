@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # regime - lecture du regime de vitesse d'un demarrage (docs/tcg-g4.md §14) :
 # micro-banc regbench (NTOUR tours de six noyaux), puis Marble Blast comme
 # `tcgmb` (chauffe WARMDUR s, NPASS passes de DUR s, bilan POMPPC_GL_STATS),

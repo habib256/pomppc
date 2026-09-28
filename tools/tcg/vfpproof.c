@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * vfpproof.c — preuve d'équivalence de patches/tcg/0003-ppc-vfp-fast.patch
  * (propriété x-vfp-fast, docs/tcg-g4.md §9).

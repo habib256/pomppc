@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # Boote le système déjà installé, et chronomètre le temps mur du run (baseline).
 source "$(dirname "$0")/lib.sh"
 need "$QEMU_BIN"

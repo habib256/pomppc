@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # Diagnostic du chargement du plugin par GLEngine (variantes de GL_RESOURCES).
 #
 # A, B, C sont des variantes CONNUES POUR ÉCHOUER sur ce 10.4.6 (GL_RESOURCES

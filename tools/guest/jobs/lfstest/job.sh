@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # lfstest - equivalence lfs/stfs helper <-> en ligne (patches/tcg/0002-ppc-lfs-inline).
 #   mkdir /tmp/j && cp tools/guest/jobs/lfstest/* /tmp/j && devloop.py run /tmp/j
 # env.sh a cote (facultatif) : LFSBITS=n (defaut 32 : les 2^32 motifs, quelques

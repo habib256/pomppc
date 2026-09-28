@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * glsl_pp_test.c — épreuve native des conditions du préprocesseur GLSL que le
  * plugin fait à la place de GLEngine 10.4.6 (guest/gldriver/pomppc_glslpp.h).

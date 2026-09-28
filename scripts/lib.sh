@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # Fonctions partagées. Sourcé par les scripts numérotés.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

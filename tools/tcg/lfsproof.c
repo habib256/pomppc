@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * lfsproof.c — preuve d'équivalence de patches/tcg/0002-ppc-lfs-inline.patch
  * (propriété x-lfs-inline, docs/tcg-g4.md §8).

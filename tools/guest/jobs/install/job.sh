@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # Installation réelle par guest/gldriver/install.sh (kext et plugin dans
 # /System/Library/Extensions), vérification de la garde contre un second
 # exemplaire du plugin, puis redémarrage : au démarrage suivant, le kext est

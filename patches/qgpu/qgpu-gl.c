@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * qgpu-gl.c — backend OpenGL du GPU paravirtuel « qgpu » : c'est ici que le
  * GPU de l'hôte travaille pour l'invité Tiger.

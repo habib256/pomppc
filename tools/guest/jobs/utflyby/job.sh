@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # AS-Convoy's shipped intro camera sequence, no bots and no -benchmark.
 # Copy this whole directory to a devloop job; resolution.txt selects the mode.
 . ./guilib.sh

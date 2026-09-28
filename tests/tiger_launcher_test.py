@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """Routage du lanceur Tiger, sans démarrer QEMU ni ouvrir de fenêtre."""
 import os
 from pathlib import Path

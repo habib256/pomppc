@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # tcgmb - Marble Blast Gold pour les A/B du processeur emule (docs/tcg-g4.md) :
 # SMP=1 contre SMP=2, binaire QEMU de base contre binaire patche (patches/tcg/).
 # Reprend le protocole de `fpgames` (docs/flottant-rapide.md) : lancement de

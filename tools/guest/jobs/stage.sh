@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # stage.sh — assemble un job devloop : le job.sh de tools/guest/jobs/<nom>/ et,
 # dans src/, les sources invité du dépôt (même disposition que le dépôt).
 #

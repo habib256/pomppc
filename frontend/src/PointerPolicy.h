@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 #pragma once
 constexpr bool wantsAbsolutePointer(bool fullscreen, bool windowTablet) {
     return !fullscreen && windowTablet;

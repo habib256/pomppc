@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # Diagnostic: DM-Rankin, stationary pre-match camera, no bots.
 # This is NOT the final 30 fps gameplay acceptance test. Do not send input
 # during the run. Start the VM with CPU_OPTS=x-fast-fp=on/off for an A/B.

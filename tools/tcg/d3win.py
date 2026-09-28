@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """d3win.py frames.csv [T] — ms/image de DOOM 3 aux fenêtres de référence.
 
 T = fin de la cinématique de demo_mars_city1. Sans T donné : première image

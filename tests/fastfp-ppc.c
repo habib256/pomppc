@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * fastfp-ppc.c — test différentiel au niveau des INSTRUCTIONS PowerPC.
  *

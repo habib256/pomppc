@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * smctest.c - code modifie, recopie ou remappe dans l'invite, pour prouver que
  * les sorties indirectes de TCG (blr, bctr : helper_lookup_tb_ptr, et la

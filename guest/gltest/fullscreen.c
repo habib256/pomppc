@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /* Tiger fullscreen lifecycle and scanout regression. Run in the GUI session.
  * gcc-4.0 -arch ppc -isysroot /Developer/SDKs/MacOSX10.4u.sdk \
  *   fullscreen.c -framework Carbon -framework OpenGL -o fullscreen

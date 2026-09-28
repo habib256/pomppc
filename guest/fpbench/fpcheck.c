@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /* fpcheck.c — test différentiel déterministe du flottant PowerPC (G4 7400).
  *
  * But : prouver que deux QEMU (ou deux réglages de CPU : `-cpu g4` contre

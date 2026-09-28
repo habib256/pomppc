@@ -1,3 +1,4 @@
+# GPL3 - Copyleft VERHILLE Arnaud
 # guilib.sh — à sourcer dans un job.sh de devloop en mode bureau.
 #
 #   . ./guilib.sh

@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 #import <AppKit/AppKit.h>
 #include "StartupChime.h"
 #include <algorithm>

@@ -1,3 +1,4 @@
+# GPL3 - Copyleft VERHILLE Arnaud
 # Usage : python3 tools/re/dumpdec.py VIDAGE [pc-ou-index] [tout] — lancé depuis la racine du dépôt (lit patches/qgpu/qgpu_proto.h)
 import sys,struct,re
 ops={}

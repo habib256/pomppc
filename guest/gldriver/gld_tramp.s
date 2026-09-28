@@ -1,3 +1,4 @@
+; GPL3 - Copyleft VERHILLE Arnaud
 ; gld_tramp.s — GÉNÉRÉ par tools/gld/gen_tramp.py, ne pas éditer.
 ; Trampolines du plugin OpenGL POMPPC (voir pomppc_gld.c).
 

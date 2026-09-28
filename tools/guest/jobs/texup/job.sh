@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # Mesure du téléversement de textures (tâche 2.5) : gltest texup, par format,
 # conversion par l'HÔTE (v10, défaut), par l'INVITÉ (POMPPC_GL_TEX3=0), et rendu
 # d'Apple seul (POMPPC_GL_DISABLE=1). Suppose le kext chargé et le plugin

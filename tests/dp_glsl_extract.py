@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """Extrait des sources de DarkPlaces (Nexuiz 2.5.2) son shader GLSL intégré et
 une liste de permutations, pour que tests/qgpu_core_test.c les fasse compiler
 et lier par le backend GL de l'hôte (protocole v21, run_v21_dp).

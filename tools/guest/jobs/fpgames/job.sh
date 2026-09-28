@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # fpgames — A/B du « flottant rapide » (docs/flottant-rapide.md) sur les VRAIS jeux.
 #
 # Se distingue du job `games` (qui mesure le PLUGIN) par trois points, imposés

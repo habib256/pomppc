@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 set -e
 W=$1
 echo $$ > "$W/runner.pid"

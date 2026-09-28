@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # Crée le disque dur virtuel (qcow2, alloué à la demande => ne prend pas 16G tout de suite).
 source "$(dirname "$0")/lib.sh"
 need qemu-img

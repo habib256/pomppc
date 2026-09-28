@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /* Benchmark-only fixed simulation, seed and telemetry; never installed in UT. */
 #include <stdlib.h>
 #include <stdio.h>

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """Summarize POMPPC_GL_FRAMES swap intervals (not GPU completion timings)."""
 import argparse
 import csv

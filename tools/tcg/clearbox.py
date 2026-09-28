@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """clearbox.py IMAGE — efface l'en-tête de la boîte d'entrée de devloop.
 
 Le StartupItem POMPPCAgent rejoue au démarrage le dernier job resté dans la

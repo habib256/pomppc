@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # Sourced after hostcompat.sh. Keep OS 9 and Linux's existing audio defaults.
 tiger_audio_device() {
   local profile="${POMPPC_AUDIO_PROFILE:-stable}"

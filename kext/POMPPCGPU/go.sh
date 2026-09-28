@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # go.sh — construit et installe POMPPCGPU.kext depuis le CD, en mode single-user.
 #
 #   mkdir /c ; mount_cd9660 /dev/disk1 /c ; sh /c/go.sh

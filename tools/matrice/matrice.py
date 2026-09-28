@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """matrice.py — matrice de jeux automatisée (chantier A3, docs/matrice-jeux.md).
 
 Joue chaque jeu dans chaque mode (fenêtre, plein écran) sur la VM quotidienne

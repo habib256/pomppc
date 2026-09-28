@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * POMPPCQFB.h — pilote IOFramebuffer pour le framebuffer paravirtualisé
  * « qfb1 » exposé en PCI par QEMU (hw/display/qfb-pci.c).

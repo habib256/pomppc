@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 // QemuBridge — drives a QEMU process as POMPPC's "CPU".
 //
 // Unlike the other Pommes (pom68k, POM1/2, POMIIGS) whose core is an in-process
@@ -13,6 +14,12 @@
 // All GDBus I/O runs on a private GLib thread with its own GMainContext; the
 // render thread only touches the framebuffer under a mutex and posts input via
 // g_main_context_invoke.
+//
+// Display handlers do not copy pixels. ScanoutMap is a synchronous QEMU call
+// on the same thread as the audio timer: a full-frame memcpy before the reply
+// stalls that timer. Handlers only publish the shared mapping or a ref on the
+// inline bytes, then return. The render thread copies once per displayed
+// frame, coalescing every UpdateMap received in between.
 #pragma once
 #include <atomic>
 #include <cstdint>
@@ -48,9 +55,8 @@ public:
     // Only the rows that actually changed are copied: `out` is expected to
     // persist across calls (it mirrors the guest surface). `y0`/`y1` bound the
     // touched rows [y0, y1); `resized` says the surface geometry changed, so
-    // the caller must re-upload everything. Copying the whole 3 MB surface on
-    // every frame — under the lock the D-Bus thread needs — was ~180 MB/s of
-    // pure memcpy at 60 fps.
+    // the caller must re-upload everything. The shared-memory damage since the
+    // previous latch is folded into one copy here, on the render thread.
     bool latchFrame(std::vector<uint32_t>& out, int& w, int& h,
                     int& y0, int& y1, bool& resized);
     // Convenience wrapper (whole-surface semantics) for the headless probe.
@@ -102,10 +108,16 @@ public:
                        uint32_t pixmanFormat, const uint8_t* data, size_t len);
     void ingestUpdate(int x, int y, int w, int h, uint32_t stride,
                       uint32_t pixmanFormat, const uint8_t* data, size_t len);
-    // Unix.Map fast path (shared memory): fd is mmap'd; UpdateMap copies from it.
+    // Unix.Map fast path (shared memory): fd is mmap'd. UpdateMap only records
+    // the damaged rows; latchFrame copies them from the mapping.
     void mapScanout(int fd, uint32_t offset, uint32_t w, uint32_t h,
                     uint32_t stride, uint32_t pixmanFormat);
     void mapUpdate(int x, int y, int w, int h);
+    // Inline Scanout/Update: keep the GVariant alive and let latchFrame copy.
+    // `variant` is a GVariant* (glib stays out of this header).
+    void queueInline(bool scanout, int x, int y, int w, int h,
+                     uint32_t width, uint32_t height, uint32_t stride,
+                     void* variant);
     // Mouse.IsAbsolute changed (e.g. OS 9's virtio-tablet driver came up
     // after OpenBIOS): switch SetAbsPosition ↔ RelMotion accordingly.
     void noteMouseMode(bool absolute);
@@ -134,14 +146,25 @@ private:
     bool guestClipReady_ = false;
     uint32_t clipSerial_ = 0;      // our grab serial (D-Bus thread only)
 
-    // Framebuffer shared with the render thread.
+    // fb_ is touched only on the render thread. fbMtx_ guards the damage
+    // flags, the inline queue and the shared-mapping pointer: handlers publish
+    // them and return, without waiting out the pixel copy.
     std::mutex fbMtx_;
     std::vector<uint32_t> fb_;      // BGRA, fbW_*fbH_
     int fbW_ = 0, fbH_ = 0;
     bool fbDirty_ = false;
     bool fbResized_ = false;        // geometry changed since the last latch
     int fbY0_ = 0, fbY1_ = 0;       // dirty row span [fbY0_, fbY1_)
-    void markRows(int y0, int y1);  // fbMtx_ held by the caller
+    bool mapDirty_ = false;         // damaged rows still only in the mapping
+    bool mapResize_ = false;
+    int mapY0_ = 0, mapY1_ = 0;
+    void markRows(int y0, int y1);  // render thread only
+    void ingestScanoutLocked(uint32_t w, uint32_t h, uint32_t stride,
+                             const uint8_t* data, size_t len);
+    void ingestUpdateLocked(int x, int y, int w, int h, uint32_t stride,
+                            const uint8_t* data, size_t len);
+    void copyMapRows(const uint8_t* data, uint32_t mapW, uint32_t mapH,
+                     uint32_t stride, int y0, int y1);
 
     long qemuPid_ = -1;
     bool qemuReaped_ = false;       // waitpid() already collected it

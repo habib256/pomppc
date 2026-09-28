@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # Mesure le temps de boot (headless) jusqu'à l'écran bleu (login/bureau).
 # Détection par couleur moyenne: boot=gris neutre / kernel -v=noir / login=bleu.
 # Usage: scripts/measure-boot.sh [timeout_s]

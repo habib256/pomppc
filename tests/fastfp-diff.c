@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * fastfp-diff.c — test différentiel HÔTE du mode « flottant rapide » (x-fast-fp).
  *

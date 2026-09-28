@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """ppcanno.py — désassembleur annoté pour les Mach-O PowerPC 32 bits (Tiger).
 
 Outil de rétro-ingénierie du plugin OpenGL (docs/gpu-3d-tiger.md, couche C) :

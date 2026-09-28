@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * qgpu_abi.h — ABI DE TRANSPORT du GPU paravirtuel « qgpu » (POMPPC).
  *

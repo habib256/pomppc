@@ -1,3 +1,4 @@
+# GPL3 - Copyleft VERHILLE Arnaud
 """Unreal Tournament 2004 Demo — tableaux, VBO, S3TC, cartes de cube (SDL, Mach-O).
 
 Scène fixe DÉTERMINISTE, reprise du job `utflyby` (tools/guest/jobs/utflyby) :

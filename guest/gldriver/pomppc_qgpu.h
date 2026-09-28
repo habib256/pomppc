@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * pomppc_qgpu.h — client userland du kext POMPPCGPU (GPU paravirtuel qgpu).
  */

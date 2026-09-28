@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # tssh.sh — ssh vers le Tiger quotidien (sshd OpenSSH 3.x : algorithmes anciens).
 #   tools/guest/tssh.sh "commande"        clé privée (hors dépôt)
 #   tools/guest/tssh.sh -p "commande"     mot de passe, par expect (tssh.exp)

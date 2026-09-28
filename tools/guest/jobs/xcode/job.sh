@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # Installe dans la VM de dev les Xcode Tools du DVD de Tiger, ceux dont le
 # dépôt a besoin et rien de plus : gcc 4.0, cctools et make, SDK 10.4u (kext,
 # plugin, programmes de test), en-têtes BSD et OpenGL.

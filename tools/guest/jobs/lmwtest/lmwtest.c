@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * lmwtest.c - equivalence de lmw/stmw entre le helper de QEMU et la traduction
  * en ligne (propriete x-lmw-inline, patches/tcg/0002, docs/tcg-g4.md).

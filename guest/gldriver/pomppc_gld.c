@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * pomppc_gld.c — plugin OpenGL (« GLD ») de Tiger pour le GPU paravirtuel qgpu.
  *

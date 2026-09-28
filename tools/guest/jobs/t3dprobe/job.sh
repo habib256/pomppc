@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # Relevé : où GLEngine range une texture 3D (docs/re/textures-3d.md). gltest
 # t3dprobe avec POMPPC_GL_TRY3D et la sonde de cible du plugin ; les vidages
 # reviennent dans out/trace.

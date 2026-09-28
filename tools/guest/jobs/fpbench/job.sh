@@ -1,4 +1,5 @@
 #!/bin/sh
+# GPL3 - Copyleft VERHILLE Arnaud
 # fpbench — le flottant PowerPC : preuve d'équivalence (fpcheck) et vitesse (fpbench).
 #
 # Se lance identiquement sur le QEMU actuel (mode exact) et sur le QEMU « flottant

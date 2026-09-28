@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """devloop.py — boucle de développement rapide dans l'invité Tiger.
 
 Une VM Tiger reste allumée (single-user, headless) avec l'agent

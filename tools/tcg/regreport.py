@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# GPL3 - Copyleft VERHILLE Arnaud
 """regreport.py REF RES ÉTIQUETTE… — bilan d'une campagne tools/tcg/regab.sh
 (docs/tcg-g4.md §14) : une ligne par démarrage d'invité.
 

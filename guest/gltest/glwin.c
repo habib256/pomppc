@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * glwin.c — test OpenGL FENÊTRÉ pour Tiger (GLUT) : double tampon, échanges,
  * profondeur, dans une vraie fenêtre du WindowServer.

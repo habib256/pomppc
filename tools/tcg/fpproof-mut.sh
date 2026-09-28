@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GPL3 - Copyleft VERHILLE Arnaud
 # fpproof-mut.sh [arbre-QEMU] [vecteurs] — contre-épreuve de fpproof.sh : chaque
 # mutation du bloc « fp-inline » doit être DÉTECTÉE (divergences > 0).
 set -uo pipefail

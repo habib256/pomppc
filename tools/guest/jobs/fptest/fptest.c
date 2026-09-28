@@ -1,3 +1,4 @@
+/* GPL3 - Copyleft VERHILLE Arnaud */
 /*
  * fptest.c - equivalence du flottant scalaire simple precision entre les
  * helpers de QEMU et le chemin court de x-fp-inline
