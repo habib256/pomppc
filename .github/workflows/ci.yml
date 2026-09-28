@@ -15,4 +15,11 @@ jobs:
       - name: Compilateur et Python
         run: sudo apt-get update && sudo apt-get install -y build-essential python3 pkg-config
       - name: Non-régression
-        run: bash tests/run-all.sh
+        run: |
+          # Le harnais traite shellcheck comme optionnel : absent sur le Mac
+          # de référence, il est ignoré. Le runner Ubuntu l'a déjà, et ses
+          # avertissements préexistants feraient échouer la publication.
+          if command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get remove -y shellcheck
+          fi
+          bash tests/run-all.sh
