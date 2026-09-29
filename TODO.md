@@ -133,9 +133,12 @@ fenêtre tourne à 8,9 ms/image et DOOM 3 fenêtre à 33,8 (contre 60,7 au tour 
 - [ ] **[Jeux] Colin McRae en 1024×768 et au-delà** (défaut signalé par l'utilisateur le
   29/09 : 3D fausse en course, polygones justes) : l'hôte copie juste à toutes les tailles
   (repro natif) ; le bug hunt 3 a corrigé l'effacement des textures hôte seulement à chaque
-  erreur (T1), le 4 le `SURF_TEX` refusé en `NO_MEM`. Cellule plein écran 1024×768 jouée le
-  29/09 avec `POMPPC_GL_NOTE` : à lire (`ERRORS`, `SURFTEX taille`), puis essai
-  `POMPPC_GL_VRAM_MB=256`. Ensuite tableau des autres modes (4:3 et larges : menus, course,
+  erreur (T1), le 4 le `SURF_TEX` refusé en `NO_MEM`. **Le 29/09, après ces correctifs :
+  cellule plein écran 1024×768 verte** (`bench/matrice/20260929-1537/cmr-pe`, voiture en
+  course à 78 km/h, rejeu identique à la VM, 63 ms/image) ; journal : cibles cachées
+  1024×768, 512×384 et 256×192 à la taille de l'écran, aucune erreur du device, aucun
+  écart de taille GLEngine/surface. Reste la confirmation par l'utilisateur en jouant,
+  puis tableau des autres modes (4:3 et larges : menus, course,
   proportions, changement de mode, retour au bureau, temps/image). La voiture qui roule
   reste à prouver ; `POMPPC_GL_RECT=0` fait planter le jeu chez Apple : ne pas s'en servir.
 

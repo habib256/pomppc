@@ -272,6 +272,7 @@ int main(int argc, char **argv)
             static uint8_t tex_seen[QGPU_MAX_TEX];
             static uint8_t prog_seen[256][QGPU_MAX_PROG];        /* v16, par contexte */
             static uint8_t buf_seen[QGPU_MAX_BUF];               /* v14 */
+            static uint8_t query_seen[QGPU_MAX_QUERIES];         /* v8 */
             static uint32_t last_present_surf = 1;
             uint32_t pre[4096], np = 0, q, bound_ctx = 256;
             /* la surface présentée dans CETTE soumission, si on la voit */
@@ -392,6 +393,22 @@ int main(int argc, char **argv)
                     pre[np++] = QGPU_CMD_HDR(QGPU_OP_PROG_CREATE, QGPU_LEN_PROG_CREATE);
                     pre[np++] = id; pre[np++] = QGPU_PT_GLSL;
                     prog_seen[bound_ctx][id] = 1;
+                }
+                /* v8 : requête d'occlusion ouverte avant le vidage. Le premier
+                   QUERY_RESULT (ou END) d'une requête jamais lancée dans le
+                   vidage était un BAD_ARG du rejeu seul (Colin McRae, 29/09 :
+                   la cellule restait rouge, « 2 soumissions en erreur », alors
+                   que la VM avait la requête). On l'ouvre ici — et la ferme pour
+                   un RESULT — sur le contexte lié à ce point du flux. */
+                if (o == QGPU_OP_QUERY_BEGIN && id < QGPU_MAX_QUERIES) query_seen[id] = 1;
+                if ((o == QGPU_OP_QUERY_END || o == QGPU_OP_QUERY_RESULT) &&
+                    id < QGPU_MAX_QUERIES && !query_seen[id] && bound_ctx < 256 && np + 6 <= 4090) {
+                    pre[np++] = QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX); pre[np++] = bound_ctx;
+                    pre[np++] = QGPU_CMD_HDR(QGPU_OP_QUERY_BEGIN, QGPU_LEN_QUERY); pre[np++] = id;
+                    if (o == QGPU_OP_QUERY_RESULT) {
+                        pre[np++] = QGPU_CMD_HDR(QGPU_OP_QUERY_END, QGPU_LEN_QUERY); pre[np++] = id;
+                    }
+                    query_seen[id] = 1;
                 }
                 if (o == QGPU_OP_CTX_BIND && id < 256) bound_ctx = id;
                 if (o == QGPU_OP_SURF_BIND && bound_ctx < 256) ctx_has_surf[bound_ctx] = 1;
