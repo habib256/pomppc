@@ -20,7 +20,7 @@ class Jeu:
     non_automatise = {}         # mode -> raison (cellule « non automatisé »)
     plancher_ms = None          # ms/image au-delà : vitesse rouge
     echanges_par_image = 1      # échanges (frames.csv) par image du jeu : Colin McRae en fait 3
-    redemarrer_apres = False    # DOOM 3 : kCGLBadDisplay après un kill
+    redemarrer_apres = False    # redémarrer l'invité après la cellule (Colin McRae)
     delai_scene = 900           # s pour atteindre la fin de la fenêtre de mesure
     dump_images = 30            # POMPPC_GL_DUMP_FRAMES
     capture_delay = 2           # échanges depuis le début du vidage avant le rendez-vous

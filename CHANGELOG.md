@@ -20,6 +20,18 @@ et dans `docs/`.
   erreur (86 M appels périmés) → 0 sur 1 105 ; A-D, F identiques ; +9 ns par `icbi`.
   Démarrage et Marble Blast ne déclenchent aucune des trois courses.
 
+- **Reset après panique, `kCGLBadDisplay`, gel de DOOM 3** (29/09,
+  `docs/gel-doom3-baddisplay.md`). `system_reset` pendant une panique de
+  l'invité bloquait le démarrage suivant (interruption OHCI perpétuelle) :
+  l'OpenPIC de QEMU gardait au reset une source de niveau « en attente »
+  (`patches/openpic/0001`, 2/2 bloqués avant, 8/8 démarrés après).
+  `kCGLBadDisplay` après un kill de DOOM 3 : 0 sur 25 kills. Le symptôme
+  revient en occupant les 4 tranches du kext, donc probablement des tranches
+  perdues avant les bug hunts. La matrice ne redémarre plus l'invité après
+  DOOM 3 et vérifie à la place que le kext a rendu ses tranches. Le « gel »
+  au chargement est une panique (`_panic+0x254`) ; `tools/re/kpanic.py` en
+  lit le texte dans la mémoire de l'invité.
+
 - **Invariants de propriété et plan de découpage du plugin** :
   `docs/architecture.md` décrit propriétaires, verrous, barrières, erreurs,
   contextes, clients morts et resets. Six limites sont distinguées des garanties,
