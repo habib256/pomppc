@@ -39,7 +39,8 @@ SRC="${QEMU_SRC:-$HOME/src/qemu}"
 TAG="${QEMU_TAG:-v9.2.0}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}"
 
-if [ ! -d "$SRC/.git" ]; then
+# -e et non -d : dans un worktree git, .git est un fichier.
+if [ ! -e "$SRC/.git" ]; then
   echo "▶ clone de QEMU $TAG dans $SRC"
   git clone --depth 1 --branch "$TAG" https://gitlab.com/qemu-project/qemu.git "$SRC"
 fi
