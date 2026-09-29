@@ -73,26 +73,9 @@
 /* Audio */
 static const char *s_spk = "screamer";
 
-static void pmac_screamer_tx_transfer(ScreamerState *s)
+static void screamer_tx_copy(ScreamerState *s, DBDMA_io *io, int samples)
 {
-    DBDMA_io *io = &s->io;
-    int queued, space, samples, idx, first;
-
-    if (s->samples <= 0) {
-        return;
-    }
-
-    /* wpos et rpos sont monotones : la place libre est tout l'anneau moins
-     * ce qui n'a pas encore été joué, y compris le préfixe déjà consommé. */
-    queued = (int)(s->wpos - s->rpos);
-    space = s->samples - queued;
-    if (space < 0) {
-        space = 0;
-    }
-    samples = MIN(io->len >> s->shift, space);
-    if (samples <= 0) {
-        return;
-    }
+    int idx, first;
 
     idx = (int)(s->wpos % (uint32_t)s->samples);
     first = s->samples - idx;
@@ -115,6 +98,38 @@ static void pmac_screamer_tx_transfer(ScreamerState *s)
     io->addr += (samples << s->shift);
     io->len -= (samples << s->shift);
     s->wpos += samples;
+}
+
+static void pmac_screamer_tx_transfer(ScreamerState *s)
+{
+    DBDMA_io *io = &s->io;
+    int queued, space, samples;
+
+    if (s->samples <= 0) {
+        return;
+    }
+
+    /* wpos et rpos sont monotones : la place libre est tout l'anneau moins
+     * ce qui n'a pas encore été joué, y compris le préfixe déjà consommé. */
+    queued = (int)(s->wpos - s->rpos);
+    space = s->samples - queued;
+    if (space < 0) {
+        space = 0;
+    }
+    samples = MIN(io->len >> s->shift, space);
+    if (samples > 0) {
+        screamer_tx_copy(s, io, samples);
+    }
+
+    /*
+     * Reliquat de moins d'une trame (commande DBDMA dont la longueur n'est
+     * pas multiple de 4) : il ne formera jamais un échantillon, et le garder
+     * figerait le canal — dma_end() ne serait jamais appelé. On le consomme.
+     */
+    if (io->len > 0 && io->len < (1 << s->shift)) {
+        io->addr += io->len;
+        io->len = 0;
+    }
 
     /* Continue DBDMA if we have completed the transfer, otherwise defer */
     if (io->len == 0) {
@@ -142,10 +157,32 @@ static void pmac_screamer_tx(DBDMA_io *io)
     pmac_screamer_tx_transfer(s);
 }
 
+/*
+ * RUN et PAUSE tels qu'ils seront APRÈS l'écriture de CONTROL en cours.
+ * dbdma_control_write() appelle flush avant de ranger le nouveau statut :
+ * ch->regs[DBDMA_STATUS] porte encore l'ancien, on lui applique l'écriture.
+ */
+static uint32_t screamer_dma_next_status(DBDMA_channel *ch)
+{
+    uint32_t status = ch->regs[DBDMA_STATUS];
+    uint16_t mask = (ch->regs[DBDMA_CONTROL] >> 16) & 0xffff;
+    uint16_t value = ch->regs[DBDMA_CONTROL] & 0xffff;
+
+    if (mask & RUN) {
+        status = (status & ~RUN) | (value & RUN);
+    }
+    if (mask & PAUSE) {
+        status = (status & ~PAUSE) | (value & PAUSE);
+    }
+    return status;
+}
+
 static void pmac_screamer_tx_flush(DBDMA_io *io)
 {
+    ScreamerState *s = io->opaque;
     DBDMA_channel *ch = io->channel;
     dbdma_cmd *current = &ch->current;
+    uint32_t next = screamer_dma_next_status(ch);
     uint16_t cmd;
 
     SCREAMER_DPRINTF("DMA TX flush!\n");
@@ -162,6 +199,35 @@ static void pmac_screamer_tx_flush(DBDMA_io *io)
     }
 #endif
 
+    if ((next & RUN) && !(next & PAUSE)) {
+        /*
+         * FLUSH seul, canal toujours en marche : rien à vider côté sortie.
+         * Remettre processing à false ici laissait DBDMA_run relancer la
+         * MÊME commande (CMDPTR n'a pas avancé) : pmac_screamer_tx écrasait
+         * s->io et rejouait la partie déjà copiée — son dupliqué.
+         */
+        return;
+    }
+
+    if ((next & RUN) && s->io.len && s->io.channel == ch) {
+        /*
+         * PAUSE avec un fragment différé : on le garde, et processing reste
+         * vrai pour que la reprise continue ce fragment au lieu de relancer
+         * la commande depuis le début. screamer_pull_deferred ne tire rien
+         * tant que le canal n'est pas ACTIVE.
+         */
+        return;
+    }
+
+    /*
+     * Arrêt (RUN effacé) : le fragment différé est abandonné. Le callback
+     * audio le tirait encore depuis une adresse que le pilote a pu recycler,
+     * puis appelait dbdma_end() sur un canal arrêté — statut écrit dans le
+     * descripteur courant (peut-être celui d'un NOUVEAU programme), IRQ, et
+     * CMDPTR avancé : la première commande du programme suivant sautée.
+     */
+    s->io.len = 0;
+    s->io.channel = NULL;
     ch->io.processing = false;
 
     cmd = le16_to_cpu(current->command) & COMMAND_MASK;
@@ -225,16 +291,27 @@ static void screamer_pull_deferred(ScreamerState *s)
 {
     DBDMA_io *io = &s->io;
     DBDMA_channel *ch;
-    uint32_t status;
+    uint32_t run;
 
     if (!io->len || !io->channel) {
         return;
     }
     ch = io->channel;
-    status = ch->regs[DBDMA_STATUS];
+    /* Canal arrêté ou en pause : le matériel ne transfère rien. */
+    if (!ch->io.processing ||
+        (ch->regs[DBDMA_STATUS] & (RUN | ACTIVE)) != (RUN | ACTIVE)) {
+        return;
+    }
+    /*
+     * RUN est retiré le temps du transfert pour que dbdma_end() ne relance
+     * pas channel_run() depuis le callback audio (le BH s'en charge), puis
+     * reposé SEUL : restaurer tout le statut effaçait ce que dbdma_end()
+     * venait d'y faire (FLUSH retiré sur is_last, BT posé ou effacé).
+     */
+    run = ch->regs[DBDMA_STATUS] & RUN;
     ch->regs[DBDMA_STATUS] &= ~RUN;
     pmac_screamer_tx_transfer(s);
-    ch->regs[DBDMA_STATUS] = status;
+    ch->regs[DBDMA_STATUS] |= run;
     DBDMA_kick(container_of(ch, DBDMAState, channels[ch->channel]));
 }
 
@@ -504,7 +581,10 @@ static uint64_t screamer_read(void *opaque, hwaddr addr, unsigned size)
     case CODEC_STAT_REG:
         if (s->codec_ctrl_regs[7] & 1) {
             /* Read back mode */
-            val = s->codec_ctrl_regs[(s->codec_ctrl_regs[7] >> 1) & 0xe];
+            /* Sélecteur en bits 3:1 du registre 7 (kReadBackRegisterMask
+             * 0xE). « & 0xe » après le décalage prenait le registre pair
+             * voisin et, bit 4 posé, lisait hors du tableau (index 8..14). */
+            val = s->codec_ctrl_regs[(s->codec_ctrl_regs[7] >> 1) & 7];
         } else {
             /* Return status register */
             val = s->regs[addr] & ~0xff00;

@@ -75,9 +75,13 @@ struct QemuBridge::Impl {
         GVariant* data = nullptr;
     };
     std::vector<InlineFrame> inlineQ;
+    size_t inlineBytes = 0;          // octets de pixels tenus par inlineQ
+
+    // stop() demandé : lu par le fil D-Bus avant g_main_loop_run, car un
+    // g_main_loop_quit antérieur à run est perdu (run remet is_running).
+    std::atomic<bool> quitRequested{false};
 
     // Listener-registration handshake bookkeeping.
-    GThread* listenerConnThread = nullptr;
     GUnixFDList* regFdList = nullptr;
     int listenerLocalFd = -1;        // our end of the listener socket
 };
@@ -176,9 +180,17 @@ bool qmpSendWithFd(int fd, const std::string& json, int passfd) {
     return sendmsg(fd, &msg, 0) >= 0;
 }
 
+// Nos descripteurs ne doivent pas fuir dans le lanceur (bash) ni dans le QEMU
+// d'une relance : posix_spawn hérite de tout ce qui n'est pas FD_CLOEXEC.
+void setCloexec(int fd) {
+    int fl = fcntl(fd, F_GETFD);
+    if (fl >= 0) fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
+}
+
 int connectUnix(const std::string& path) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return -1;
+    setCloexec(fd);
     struct sockaddr_un addr {};
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
@@ -498,6 +510,8 @@ bool QemuBridge::start(const Config& cfg, std::string* err) {
         if (err) *err = std::string("socketpair: ") + strerror(errno);
         close(qmp); stop(); return false;
     }
+    setCloexec(sv[0]);
+    setCloexec(sv[1]);   // SCM_RIGHTS ne transmet pas le drapeau : sans effet pour QEMU
     if (!qmpSendWithFd(qmp, "{\"execute\":\"getfd\",\"arguments\":{\"fdname\":\"pomfd\"}}",
                        sv[1]) ||
         !qmpWaitReturn(qmp, buf)) {
@@ -524,7 +538,12 @@ bool QemuBridge::start(const Config& cfg, std::string* err) {
     impl_->mainFd = sv[0];
     running_.store(true, std::memory_order_relaxed);
 
-    // ── 4. Everything D-Bus runs on a private GLib thread.
+    // ── 4. Everything D-Bus runs on a private GLib thread. Le contexte et la
+    //       boucle sont créés ICI, avant le fil : stop() peut les viser dès
+    //       maintenant (créés par le fil, ils valaient encore NULL pendant
+    //       toute l'authentification et stop() ne quittait rien).
+    impl_->ctx = g_main_context_new();
+    impl_->loop = g_main_loop_new(impl_->ctx, FALSE);
     thread_ = g_thread_new("qemu-dbus", bridge_thread_trampoline, this);
     return true;
 }
@@ -536,18 +555,51 @@ void QemuBridge::runGlibThread() {
     pthread_set_qos_class_self_np(QOS_CLASS_DEFAULT, 0);
 #endif
     Impl* d = impl_;
-    d->ctx = g_main_context_new();
     g_main_context_push_thread_default(d->ctx);
-    d->loop = g_main_loop_new(d->ctx, FALSE);
+    if (setupGlib() && !d->quitRequested.load())
+        g_main_loop_run(d->loop);
+    teardownGlib();
+    g_main_context_pop_thread_default(d->ctx);
+}
 
+// Libère tout ce que setupGlib a créé, sur le fil D-Bus, boucle arrêtée.
+// Avant : rien n'était libéré, et GDBus ne ferme le flux qu'à la
+// finalisation — deux sockets fuyaient à chaque relance.
+void QemuBridge::teardownGlib() {
+    Impl* d = impl_;
+    if (d->clipIface) {
+        g_dbus_interface_skeleton_unexport(G_DBUS_INTERFACE_SKELETON(d->clipIface));
+        g_clear_object(&d->clipIface);
+    }
+    g_clear_object(&d->server);
+    g_clear_object(&d->listenerIface);
+    g_clear_object(&d->mapIface);
+    g_clear_object(&d->clipProxy);
+    g_clear_object(&d->console);
+    g_clear_object(&d->keyboard);
+    g_clear_object(&d->mouse);
+    g_clear_object(&d->regFdList);
+    for (GDBusConnection** c : {&d->listenerConn, &d->mainConn}) {
+        if (!*c) continue;
+        g_dbus_connection_close_sync(*c, nullptr, nullptr);
+        g_clear_object(c);
+    }
+    if (d->listenerLocalFd >= 0) { close(d->listenerLocalFd); d->listenerLocalFd = -1; }
+    // mainFd appartient au GSocket dès que g_socket_new_from_fd a réussi.
+    if (d->mainFd >= 0) { close(d->mainFd); d->mainFd = -1; }
+}
+
+bool QemuBridge::setupGlib() {
+    Impl* d = impl_;
     GError* err = nullptr;
     GSocket* sock = g_socket_new_from_fd(d->mainFd, &err);
     if (!sock) {
         std::fprintf(stderr, "main g_socket_new_from_fd: %s\n",
                      err ? err->message : "?");
         g_clear_error(&err);
-        return;
+        return false;
     }
+    d->mainFd = -1;   // désormais au GSocket
     GSocketConnection* sc = g_socket_connection_factory_create_connection(sock);
     g_object_unref(sock);
     d->mainConn = g_dbus_connection_new_sync(
@@ -560,7 +612,7 @@ void QemuBridge::runGlibThread() {
         std::fprintf(stderr, "main dbus connection: %s\n",
                      err ? err->message : "?");
         g_clear_error(&err);
-        return;
+        return false;
     }
     g_dbus_connection_start_message_processing(d->mainConn);
 
@@ -570,7 +622,7 @@ void QemuBridge::runGlibThread() {
     if (!d->console) {
         std::fprintf(stderr, "Console_0 proxy: %s\n", err ? err->message : "?");
         g_clear_error(&err);
-        return;
+        return false;
     }
     d->keyboard = qemu_dbus_display1_keyboard_proxy_new_sync(
         d->mainConn, G_DBUS_PROXY_FLAGS_NONE, nullptr, CONSOLE, nullptr, nullptr);
@@ -623,8 +675,10 @@ void QemuBridge::runGlibThread() {
     int lp[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, lp) != 0) {
         std::fprintf(stderr, "listener socketpair: %s\n", strerror(errno));
-        return;
+        return false;
     }
+    setCloexec(lp[0]);
+    setCloexec(lp[1]);
     d->listenerLocalFd = lp[0];
     d->regFdList = g_unix_fd_list_new();
     int handle = g_unix_fd_list_append(d->regFdList, lp[1], nullptr);
@@ -634,24 +688,45 @@ void QemuBridge::runGlibThread() {
     qemu_dbus_display1_console_call_register_listener(
         d->console, g_variant_new_handle(handle), G_DBUS_CALL_FLAGS_NONE, -1,
         d->regFdList, nullptr, on_listener_registered, this);
-
-    g_main_loop_run(d->loop);
-
-    // Teardown.
-    g_main_context_pop_thread_default(d->ctx);
+    return true;
 }
 
 void QemuBridge::stop() {
     running_.store(false, std::memory_order_relaxed);
     if (qmpFd_ >= 0) { close(qmpFd_); qmpFd_ = -1; }
-    if (impl_ && impl_->loop) g_main_loop_quit(impl_->loop);
+    // Quitter la boucle de façon fiable : le drapeau couvre un fil pas encore
+    // entré dans g_main_loop_run, la source un fil qui y est (ou y entre).
+    // Pas g_main_context_invoke : si personne ne tient encore le contexte, il
+    // exécute le rappel ICI, tout de suite — et le quit est perdu.
+    if (impl_) {
+        impl_->quitRequested.store(true);
+        if (impl_->ctx && impl_->loop) {
+            GSource* src = g_idle_source_new();
+            g_source_set_callback(src, +[](gpointer l) -> gboolean {
+                g_main_loop_quit(static_cast<GMainLoop*>(l));
+                return G_SOURCE_REMOVE;
+            }, g_main_loop_ref(impl_->loop), (GDestroyNotify)g_main_loop_unref);
+            g_source_attach(src, impl_->ctx);
+            g_source_unref(src);
+        }
+    }
+    // QEMU d'abord, le join ensuite : le fil D-Bus peut être bloqué dans un
+    // appel synchrone (authentification, proxys) que seul l'EOF débloque.
+    stopQemu();
     if (thread_) { g_thread_join(thread_); thread_ = nullptr; }
     if (impl_) {
         std::lock_guard<std::mutex> lk(fbMtx_);
         for (auto& frame : impl_->inlineQ) g_variant_unref(frame.data);
         impl_->inlineQ.clear();
+        impl_->inlineBytes = 0;
         impl_->mapped.reset();
+        if (impl_->loop) { g_main_loop_unref(impl_->loop); impl_->loop = nullptr; }
+        if (impl_->ctx) { g_main_context_unref(impl_->ctx); impl_->ctx = nullptr; }
+        if (impl_->mainFd >= 0) { close(impl_->mainFd); impl_->mainFd = -1; }
     }
+}
+
+void QemuBridge::stopQemu() {
     if (qemuPid_ > 0 && !qemuReaped_) {
         kill(qemuPid_, SIGTERM);
         bool reaped = false;
@@ -704,14 +779,25 @@ void QemuBridge::queueInline(bool scanout, int x, int y, int w, int h,
     if (scanout) {
         for (auto& frame : impl_->inlineQ) g_variant_unref(frame.data);
         impl_->inlineQ.clear();
-    } else if (impl_->inlineQ.size() >= 4) {
-        static bool once = false;
-        if (!once) {
-            std::fprintf(stderr, "QemuBridge: file d'images saturée, image intermédiaire abandonnée\n");
-            once = true;
+        impl_->inlineBytes = 0;
+    } else {
+        // Un Update n'est JAMAIS jeté tant qu'un Scanout plus récent ne le
+        // recouvre pas : ses pixels seraient perdus jusqu'au prochain redessin
+        // de la zone. L'ancienne limite (4 en file) sautait dès qu'une rafale
+        // de petits rectangles tombait entre deux images. Seule borne : la
+        // mémoire, pour un fil de rendu qui ne draine plus du tout.
+        constexpr size_t kMaxInlineBytes = 256u << 20;
+        while (!impl_->inlineQ.empty() && impl_->inlineBytes > kMaxInlineBytes) {
+            static bool once = false;
+            if (!once) {
+                std::fprintf(stderr, "QemuBridge: file d'images saturée (%zu Mio), "
+                             "image intermédiaire abandonnée\n", impl_->inlineBytes >> 20);
+                once = true;
+            }
+            impl_->inlineBytes -= g_variant_get_size(impl_->inlineQ.front().data);
+            g_variant_unref(impl_->inlineQ.front().data);
+            impl_->inlineQ.erase(impl_->inlineQ.begin());
         }
-        g_variant_unref(impl_->inlineQ.front().data);
-        impl_->inlineQ.erase(impl_->inlineQ.begin());
     }
     Impl::InlineFrame frame;
     frame.scanout = scanout;
@@ -723,6 +809,7 @@ void QemuBridge::queueInline(bool scanout, int x, int y, int w, int h,
     frame.height = height;
     frame.stride = stride;
     frame.data = data;
+    impl_->inlineBytes += g_variant_get_size(data);
     impl_->inlineQ.push_back(frame);
 }
 
@@ -881,6 +968,8 @@ bool QemuBridge::latchFrame(std::vector<uint32_t>& out, int& w, int& h,
     {
         std::lock_guard<std::mutex> lk(fbMtx_);
         queued = std::move(impl_->inlineQ);
+        impl_->inlineQ.clear();
+        impl_->inlineBytes = 0;
         hold = impl_->mapped;
         resize = mapResize_;
         wantMap = (mapDirty_ || mapResize_) && static_cast<bool>(hold);

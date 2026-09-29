@@ -24,8 +24,10 @@
 # OS 9 = mono-cœur (SMP OS 9 buggé). Fenêtre GTK ; ferme-la pour quitter.
 # Auto-boot activé : aucune invite OpenFirmware. (Secours '0 >' : boot cd:,\:tbxi)
 set -euo pipefail
+USER_RES="${RES:-}"                        # RES explicite (frontend, utilisateur) : config.env l'écraserait
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$ROOT/config.env"
+[ -n "$USER_RES" ] && RES="$USER_RES"
 source "$ROOT/scripts/hostcompat.sh"
 source "$ROOT/scripts/caps.sh"
 
@@ -47,7 +49,7 @@ if [ -n "${TABLET:-}" ]; then
 fi
 
 SCR="${POMPPC_SCRATCH:-$ROOT/.run}"; mkdir -p "$SCR"
-MON="$SCR/os9-mon.sock"; rm -f "$MON"
+MON="$SCR/os9-mon.sock"
 
 # Verrou disque (run_os9.sh n'en avait aucun) : deux QEMU sur le même qcow2 le
 # corrompent. Le fd 8 survit à l'exec final, le verrou vit donc avec QEMU.
@@ -59,6 +61,9 @@ if [ -z "${SNAPSHOT:-}" ]; then
     exit 1
   fi
 fi
+# APRÈS le verrou : supprimé avant, le socket d'une VM vivante disparaissait
+# et ./mount, killgame.py ou cycle.sh la perdaient.
+rm -f "$MON"
 [ -f "$OS9_DISK" ] || qemu-img create -f qcow2 "$OS9_DISK" "$OS9_DISK_SIZE" >/dev/null
 
 # --- SON via le build UNIFIÉ (QEMU 9.2 + device Screamer porté + OpenBIOS fusionné) ---

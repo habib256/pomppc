@@ -6,8 +6,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/config.env"
 
+source "$ROOT/scripts/hostcompat.sh"
+
 SCR="${POMPPC_SCRATCH:-$ROOT/.run}"
 mkdir -p "$SCR"
+host_lock_vm 9 "$SCR/tiger.lock"   # AVANT le rm : le socket peut être celui d'une VM vivante
 MON="$SCR/mon.sock"; rm -f "$MON"
 PIDFILE="$SCR/boot.pid"; rm -f "$PIDFILE"
 
@@ -22,7 +25,6 @@ BOOTDEV='hd:10,\System\Library\CoreServices\BootX'
 # Mode d'affichage. DÉFAUT = fenêtre (c'est TON Mac).
 # Headless = mode de test pour l'assistant (Claude), pour ne pas encombrer le bureau hôte:
 #   POMPPC_DISPLAY=none scripts/boot.sh
-source "$ROOT/scripts/hostcompat.sh"
 DISP="${POMPPC_DISPLAY:-$HOST_DISPLAY}"
 host_audio_env
 

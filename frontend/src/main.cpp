@@ -430,6 +430,8 @@ int main(int argc, char** argv) {
     constexpr int kKeyCount = (int)(sizeof(kKeys) / sizeof(kKeys[0]));
     bool keyHeld[kKeyCount] = {};
     bool keysWereLive = false;
+    // Même suivi pour les boutons souris (ordre ImGui G/D/M).
+    bool mouseHeld[3] = {};
     bool paused = false;
     // Vue : « ajuster » (plus grand rectangle au ratio de l'invité) par
     // défaut ; un zoom fixe 50-200 % reste possible en fenêtre.
@@ -480,6 +482,7 @@ int main(int argc, char** argv) {
         texW = texH = 0;                 // la texture GPU sera réallouée
         fb.clear();                      // force un latch complet
         for (bool& k : keyHeld) k = false;
+        for (bool& m : mouseHeld) m = false;
         lastAbs = -1;
         nextPointerRetry = 0;
         paused = false;
@@ -544,6 +547,7 @@ int main(int argc, char** argv) {
             int qb = (b == 1) ? 2 : (b == 2 ? 1 : 0);  // ImGui M/R ↔ qemu R/M
             if (ImGui::IsMouseClicked(b) && hovered) {
                 bridge->mouseButton(qb, true);
+                mouseHeld[b] = true;
                 if (b == 0)
                     journal("clic hôte (%.0f,%.0f) -> invité (%d,%d) %s [rect %.0fx%.0f @ %.0f,%.0f]",
                             io.MousePos.x, io.MousePos.y,
@@ -552,7 +556,13 @@ int main(int argc, char** argv) {
                             bridge->mouseIsAbsolute() ? "abs" : "rel", sz.x, sz.y,
                             origin.x, origin.y);
             }
-            if (ImGui::IsMouseReleased(b)) bridge->mouseButton(qb, false);
+            // !IsMouseDown plutôt que IsMouseReleased : à la perte de focus,
+            // ImGui efface l'état souris (ClearInputMouse, DownDurationPrev
+            // à -1) et IsMouseReleased ne devient jamais vrai.
+            if (ImGui::IsMouseReleased(b) || (mouseHeld[b] && !ImGui::IsMouseDown(b))) {
+                bridge->mouseButton(qb, false);
+                mouseHeld[b] = false;
+            }
         }
     };
 
@@ -652,6 +662,7 @@ int main(int argc, char** argv) {
             relAccX = relAccY = 0;
             lastGx = lastGy = -1;
             for (int button = 0; button < 3; ++button) bridge->mouseButton(button, false);
+            for (bool& m : mouseHeld) m = false;
             journal("souris hôte : %s", capture ? "capturée, relative sans bord" : "libérée");
         }
         ImGui_ImplOpenGL3_NewFrame();
@@ -951,14 +962,19 @@ int main(int argc, char** argv) {
         // Keyboard → guest (skip while an ImGui text field wants input).
         // Shortcut keys handled above are swallowed; a release is only sent
         // for a key the guest saw pressed.
-        bool keysLive = grabbed && !io.WantTextInput && bridge->running();
+        // Focus requis : sur Cmd+Tab, ImGui efface l'état clavier
+        // (ClearInputKeys) sans que IsKeyReleased devienne jamais vrai —
+        // Commande restait enfoncée dans l'invité. La perte de focus passe
+        // donc par la branche « relâcher tout » ci-dessous.
+        const bool focused = glfwGetWindowAttrib(window, GLFW_FOCUSED) != 0;
+        bool keysLive = grabbed && focused && !io.WantTextInput && bridge->running();
         if (keysLive) {
             for (int i = 0; i < kKeyCount; ++i) {
                 if (!swallow[i] && ImGui::IsKeyPressed(kKeys[i].k, false)) {
                     bridge->keyPress(kKeys[i].num);
                     keyHeld[i] = true;
                 }
-                if (keyHeld[i] && ImGui::IsKeyReleased(kKeys[i].k)) {
+                if (keyHeld[i] && !ImGui::IsKeyDown(kKeys[i].k)) {
                     bridge->keyRelease(kKeys[i].num);
                     keyHeld[i] = false;
                 }
@@ -970,6 +986,13 @@ int main(int argc, char** argv) {
             }
         }
         keysWereLive = keysLive;
+        if (!focused) {
+            for (int b = 0; b < 3; ++b) {
+                if (!mouseHeld[b]) continue;
+                bridge->mouseButton((b == 1) ? 2 : (b == 2 ? 1 : 0), false);
+                mouseHeld[b] = false;
+            }
+        }
 
         ImGui::Render();
         int fbw, fbh;
