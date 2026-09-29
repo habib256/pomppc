@@ -1,16 +1,23 @@
 # TODO — priorités de POMPPC
 
-État au 27/09/2026. Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
+État au 29/09/2026. Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
 sur le GPU de l'hôte, avec une matrice de jeux verte comme preuve.
+
+**Orientation choisie le 29/09 : une VM qui ne plante plus.** Le code a été relu
+en quatre passes (`docs/bug-hunt-2026-09-2*.md`) ; ce qui reste casse en usage
+réel et ne se trouvera qu'en le reproduisant dans la VM. Les autres orientations
+proposées le même jour (jeux, vitesse, maintenabilité, 1.0) sont rangées dans
+« Plus tard » sous leur nom, dans l'ordre où elles seront reprises.
 
 Les chantiers sont rangés par priorité ; leur domaine figure entre crochets.
 **Maintenant** contient au plus trois chantiers, **Ensuite** donne l'ordre de prise,
 **Plus tard** garde les pistes différées, **Bloqué** indique ce qui manque pour reprendre.
 Une entrée décrit le travail restant et la preuve qui la fermera. Pour les défauts de
-rendu : scène reproduisant le défaut, image corrigée et matrice verte. Pour les
-optimisations : preuve d'équivalence et mesure A/B à scène égale. Pour les défauts de
-session : reproduction avant correction et contrôle après correction. Les travaux clos
-sont dans [CHANGELOG.md](CHANGELOG.md), les études détaillées dans `docs/`.
+session : reproduction avant correction et contrôle après correction ; un incident qui
+ne se reproduit plus n'est pas une correction. Pour les défauts de rendu : scène
+reproduisant le défaut, image corrigée et matrice verte. Pour les optimisations :
+preuve d'équivalence et mesure A/B à scène égale. Les travaux clos sont dans
+[CHANGELOG.md](CHANGELOG.md), les études détaillées dans `docs/`.
 
 L'ancien tableau par domaine est conservé dans
 [docs/archive/todo-par-domaines-2026-09-27.md](docs/archive/todo-par-domaines-2026-09-27.md) :
@@ -18,186 +25,170 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 
 ## Maintenant
 
-Contrat unifié (désormais v22, ABI v19) et rendez-vous de capture implémentés.
-Le réglage des deux exports vidéo Torque a donné un premier contrôle vert de
-Marble Blast, mais le contrôle ultérieur en fenêtre ci-dessous reste ouvert.
-Détails et preuves dans [CHANGELOG.md](CHANGELOG.md).
+- [ ] **[Outils] Banc d'endurance de session** : sans lui, chaque incident ci-dessous
+  reste un souvenir. Un outil qui enchaîne seul N démarrages (SMP=2) et N cycles
+  lancement/arrêt de jeu, sur un clone APFS du disque quotidien (`cp -c`, pour ne
+  jamais toucher `tiger.qcow2` ni occuper la VM quotidienne), détecte panique et gel
+  (ssh muet, image figée), et range pour chaque incident : capture d'écran, registres
+  de tous les vCPU (`info registers -a` au moniteur), `panic.log` si l'invité l'a écrit,
+  PC et LR symbolisés contre `mach_kernel` et les kexts chargés.
+  **Fermeture :** une nuit de banc sans intervention, un rapport par incident, taux
+  d'incident par type avec son intervalle.
 
-- [ ] **[Jeux — session] Marble Blast en fenêtre, bureau 800×600×16** : le tour
-  `bench/matrice/priorites-imgui-v22` échoue en fenêtre (surface rognée, replis,
-  pas de présentation capturable), tandis que le plein écran est vert.
-  Identifier le choix du mode vidéo et garantir un bureau assez grand ; un
-  `CGDisplaySwitchToMode` temporaire ne suffit pas à établir une correction
-  persistante. Refaire ensuite Nexuiz fenêtre/plein écran sur le bureau restauré.
-  **Fermeture :** cellules vertes après démarrage frais, réglages utilisateur préservés.
+- [ ] **[Système] Panique AppleUSBOHCI au démarrage SMP=2** : environ un démarrage
+  sur dix (`docs/smp-coeurs.md`). Premier client du banc : c'est l'incident le plus
+  fréquent et le plus facile à provoquer. Le choix SMP=2 est déjà tranché ; le CPU 1
+  démarre au relâchement du GPIO 4 depuis le 29/09 (bug hunt, M1) — mesurer le taux
+  avant de supposer quoi que ce soit.
+  **Fermeture :** cause identifiée, correction, puis série de démarrages (≥ 100) sans panique.
 
-- [ ] **[Outils — validation différée à la demande de l'utilisateur] Captures** :
-  le rendez-vous `POMPPC_GL_CAPTURE` remplace `dump_attente`, sans élargir les tolérances.
-  Premier contrôle DOOM 3/Prey fenêtre vert, image exacte consignée.
-  **Reste :** dix tours consécutifs verts, explicitement reportés le 27/09.
-  Ce contrôle d'endurance n'est pas remplacé par les tests ciblés
-  (`docs/matrice-jeux.md`).
+- [ ] **[Système] Gel de l'invité au chargement de DOOM 3 et `kCGLBadDisplay` après
+  un `killall`** : gel (matrice, 26/09, 1 lancement sur ~12) = plus de ssh, vCPU 0
+  bouclant en `0x268b4` (EE coupé), vCPU 1 en `0xaf6b4`, pas de `panic.log`, puis deux
+  `system_reset` bloqués au démarrage (« using 1966 buffer headers ») ; relevé dans
+  `docs/matrice-jeux.md` §5. `kCGLBadDisplay` : après un `killall` de DOOM 3, tout
+  lancement GL suivant échoue jusqu'au redémarrage de l'invité ; Prey et `gltest`
+  démarrent. Causes non trouvées.
+  **Fermeture :** chacun reproduit sur le banc, cause établie, correction, série sans incident.
 
 ## Ensuite
 
-Dans l'ordre ci-dessous. Les défauts de rendu et de session précèdent les optimisations.
-
-- [ ] **[Outils] Rejeu : `SURF_READBACK` d'une surface jamais liée dans le vidage** → `NO_SURF` (une
-      soumission en erreur, DOOM 3 fenêtre, tour `20260926-2156`, image pourtant juste) : le
-      prologue de `tests/qgpu_replay.c` ne crée la surface qu'au `SURF_BIND`/présentation.
-      Épreuve : rejeu du vidage concerné sans erreur `NO_SURF`, image inchangée.
-
-- [ ] **[Outils] A3, suites** (harnais fait le 26/09 : `tools/matrice/`, `docs/matrice-jeux.md`) :
-      Zenerchi en plein écran et Warcraft III en fenêtre (réglage à trouver, sinon
-      clic par System Events). Épreuve : Zenerchi plein écran et Warcraft III fenêtre
-      automatisés et verts ;
-      Colin McRae fenêtre reste non applicable (pas de mode fenêtre).
-
-- [ ] **[Plugin] Coordonnées de texture en mode immédiat sous programme de sommets** : perdues (vu le
-      27/09 en écrivant `gltest rectfp` ; la scène passe par des tableaux). Scène à écrire ; fermeture : coordonnées correctes comparées au rendu d'Apple.
-
-- [ ] **[Backend GL] `gltest tex14` « λ=2 sans biais »** : défaut du GL de l'hôte macOS (le biais d'unité
-      du dessin précédent reste appliqué ; un `glFlush` le corrige mais coûte). Décision :
-      ne réappliquer que sur changement, ou passer le biais d'unité dans l'échantillonneur.
-
-- [ ] **[Architecture] Suites A6 — invariants documentés dans [docs/architecture.md](docs/architecture.md)** :
-      fermer les écarts L1/L2 (mémoire en vol et créneau réutilisés sans fin confirmée),
-      L3/L4 (arrêt bloqué ou dormeurs restants), L5 (erreurs globales) et L6
-      (`SYNCED` sur transfert couleur impossible). Constats statiques, pas des causes
-      établies des incidents de session. Épreuves et règles de fermeture dans le document.
-
-- [ ] **[Système] `kCGLBadDisplay` après un `killall` de DOOM 3** : tout lancement suivant échoue jusqu'au
-      redémarrage de l'invité ; Prey et `gltest` démarrent. Cause non trouvée. Avec A6.
-
-- [ ] **[Système] Créneaux perdus, kext sans constante compilée** (robustesse de session). Avec A6.
-
-- [ ] **[Système] Gel de l'invité au chargement de DOOM 3** (matrice, 26/09, 1 lancement sur ~12) :
-      plus de ssh, vCPU 0 bouclant en `0x268b4` (EE coupé), vCPU 1 en `0xaf6b4`, pas de
-      `panic.log` ; ensuite deux `system_reset` bloqués au démarrage (« using 1966 buffer
-      headers ») : seul un QEMU relancé repart (`tools/matrice/hote.py`, `relance_qemu`).
-      À symboliser (`mach_kernel`) au prochain cas ; relevé des registres dans
-      `docs/matrice-jeux.md` §5.
-
-- [ ] **[Système] Panique AppleUSBOHCI au démarrage SMP=2** : environ un démarrage
-  sur dix (`docs/smp-coeurs.md`). Le choix SMP=2 est déjà tranché.
-  **Fermeture :** cause identifiée, correction et série de démarrages sans panique.
+Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête.
 
 - [ ] **[Système] Panique pendant le diagnostic UT2004 (27/09, 15:50)** : CPU 1,
   `Lock timeout`, PC `0x000AA010`, LR `0x00003820`, pile désalignée. Cause inconnue ;
-  ne pas la confondre avec le défaut visuel corrigé par combine3, ni l'attribuer
-  sans preuve à AppleUSBOHCI. Capture `bench/utweapon-priorites/panic.png`,
+  ne pas l'attribuer sans preuve à AppleUSBOHCI. Capture `bench/utweapon-priorites/panic.png`,
   détails dans `docs/matrice-jeux.md`. **Fermeture :** cause reproduite et correction
-  vérifiée ; les lancements réussis suivants ne suffisent pas à la déclarer réparée.
+  vérifiée ; des lancements réussis ne suffisent pas.
 
-- [ ] **[TCG] Code réécrit par l'autre vCPU non vu** (défaut de QEMU 9.2 en MTTCG, présent sans aucun
-      patch, docs/tcg-g4.md §16.7) : `tools/guest/jobs/smctest` essai E échoue en SMP=2. Cause
-      non trouvée (deux courses de `cputlb.c` refermées sans effet). Épreuve : E à 0 erreur.
+- [ ] **[TCG] Code réécrit par l'autre vCPU non vu** (défaut de QEMU 9.2 en MTTCG, présent
+  sans aucun patch, `docs/tcg-g4.md` §16.7) : `tools/guest/jobs/smctest` essai E échoue en
+  SMP=2. Cause non trouvée (deux courses de `cputlb.c` refermées sans effet). Candidat
+  sérieux à une cause commune des incidents SMP ci-dessus. Épreuve : E à 0 erreur.
 
-- [ ] **[Protocole] `QGPU_REG_ERRORS` par client** : aujourd'hui global, un autre processus fait passer le
-      plugin en synchrone sans faute de sa part.
+- [ ] **[Validation] Correctifs des bug hunts jamais éprouvés dans la VM** : `kextunload`
+  avec un jeu ouvert (K4, KG4, KT1), `SUBMIT` après déchargement → erreur propre,
+  `QFB=1` avec Marble Blast, GPU hôte bloqué puis rechargement du kext et
+  `system_reset` (GL3, KT4, K6), `system_reset` en SMP=2 sans relance prématurée du
+  CPU 1 (M1), son Tiger lecture/pause/arrêt/relance (S1–S7, Q3–Q7), plafond mémoire
+  `QGPU_MEM_MB=512` sous DOOM 3 (R5), `run-all.sh` par les deux chemins
+  (`docs/bug-hunt-2026-09-22.md` §11). **Fermeture :** une ligne de preuve par point dans
+  `docs/bug-hunt-2026-09-29-passe4.md`.
 
-- [ ] **[Validation] Preuves du bug hunt non produites** (`docs/bug-hunt-2026-09-22.md` §11) : kext
-      `kextunload` + `SUBMIT` → erreur propre ; `QFB=1` avec Marble Blast ; `run-all.sh` par
-      les deux chemins.
+- [ ] **[Système] Créneaux perdus, kext sans constante compilée** : vérifier que KT2
+  (MAGIC au démarrage du kext), KT3 et K7 (bug hunt du 29/09) les ferment ; sinon cause.
 
-- [ ] **[Jeux] DOOM 3 et Prey en plein écran** : joués le 24/09 (images justes, zéro repli). Reste le
-      changement de mode par le jeu (`r_mode 3`, `CGDisplaySwitchToMode`, `SURF_PRESENT` sur
-      l'écran redimensionné) et la mesure en combat en plein écran.
+- [ ] **[Protocole] `QGPU_REG_ERRORS` par client** : aujourd'hui global, un autre
+  processus fait passer le plugin en synchrone et invalide ses miroirs sans faute de sa
+  part (le plancher `err_floor` du 29/09 limite l'effet, pas la cause).
 
-- [ ] **[Jeux] Colin McRae, suites** (rendu vers texture fait le 27/09,
-      `docs/re/cmr-rendu-vers-texture.md`) : en course la voiture roule-t-elle juste (seul le
-      départ, voiture arrêtée, est prouvé) ; `POMPPC_GL_RECT=0` fait planter le jeu chez Apple
-      (échantillonneur nul dans `glrPolyRGB000`) : ne pas s'en servir pour comparer.
+- [ ] **[Architecture] Suites A6 — écarts restants de [docs/architecture.md](docs/architecture.md)** :
+  L1 (quarantaine et flux coupé, 29/09) et L6 (bandes et bascule ciblée, 29/09) sont
+  traités ; reste à relire L2 à L5 contre le code actuel et à fermer ce qui tient encore.
 
-- [ ] **[Jeux] Colin McRae — autres résolutions** (demandé le 27/09) : tester les
-      modes proposés par le jeu au-delà de la résolution déjà validée, dont les
-      formats 4:3 et larges disponibles. Vérifier menus, course, proportions,
-      rendu vers texture, changement de mode et retour au bureau ; consigner
-      résolution, profondeur, capture et temps/image. **Fermeture :** tableau
-      des modes testés et anomalies éventuelles, sans supposer un mode fenêtre.
-
-- [ ] **[Jeux] Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur reste blanc).
-      Au 26/09 le menu principal est juste (référence de la matrice validée) : à revoir en
-      partie avant de fermer.
-
-- [ ] **[Plugin] Nexuiz / GLSL, vitesse** : chaque `glUniform` pose le bit `0x04000000` du bloc
-      de changements et fait recalculer le verdict (154 298 dispatches sur 173 572
-      dans la démo). Étudier ce coût sans perdre la détection des changements de samplers.
-
-- [ ] **[Métrologie] Troisième facteur de lenteur** (`docs/tcg-g4.md` §14.7) : une partie DOOM 3 sur huit
-      lente de bout en bout (95,3 contre 73,9 ms/image) avec le tampon du JIT bien placé ;
-      cinématique aussi lente (témoin). Cause inconnue (cœurs P/E, autre processus,
-      thermique ?). Épreuve : cause trouvée ou fréquence < 1 sur 20.
-
-- [ ] **[TCG] Cache de sauts plus grand** (16 384 entrées) : sur DOOM 3 les ratés restants sont aux
-      deux tiers des conflits (`docs/tcg-g4.md` §16.6). Épreuve : taux de réussite de `x-ret-verify`, A/B DOOM 3.
-
-- [ ] **[TCG] Verrou global à chaque `mtmsr`/`rfi`** (`ppc_maybe_interrupt`, `cpu_interrupt_exittb` :
-      9-10 % + attente ; au 26/09 : Marble Blast 5 % + 5 % d'attente, DOOM 3 3,5 + 3,4 %) : chemin
-      sans verrou quand l'état d'interruption ne change pas.
-
-- [ ] **[Protocole] Doorbell asynchrone côté invité** (bug hunt D2) : asynchrone + barrière maintenant que
-      K5/K6 sont faits. Mesure : BQL tenu par image sous `GPU_TRACE=1`. (Le rendu est déjà sur
-      son fil `qgpu-render`, 7-9 % d'un cœur en jeu : `docs/smp-coeurs.md` §3, levier L4.)
-
-- [ ] **[Plugin] Transmission paresseuse** : mesure honnête (hangar de DOOM 3, jeu à replis) et décision
-      du défaut (allumée depuis le 24/09 sur le ressenti). À mesurer avec la matrice existante.
+- [ ] **[Outils — validation différée à la demande de l'utilisateur] Captures** :
+  le rendez-vous `POMPPC_GL_CAPTURE` remplace `dump_attente`. Premier contrôle DOOM 3/Prey
+  fenêtre vert. **Reste :** dix tours consécutifs verts, explicitement reportés le 27/09 ;
+  à jouer sur le banc d'endurance quand l'utilisateur le demande.
 
 ## Plus tard
 
-Après les priorités ci-dessus ; conserver les dépendances et mesurer avant d'optimiser.
+Les orientations proposées le 29/09, dans l'ordre de reprise prévu. Conserver les
+dépendances et mesurer avant d'optimiser.
 
-- [ ] **[Plugin] A2 — Découper le plugin en modules à frontières écrites** (`pomppc_accel.c`) : lecteur d'état (une seule table d'offsets `gctx+…`, vérifiée au chargement par
-      une empreinte de GLEngine), textures, géométrie, programmes, transport, diagnostic. Après fiabilisation de la matrice. Épreuve : mêmes scènes `gltest` à l'octet, mêmes `frames.csv`.
-      Plan de découpage dans `docs/architecture.md` §10 ; premier essai retiré
-      à la demande d’arrêt, validation des scènes avant/après inachevée.
+### Jeux — tous les jeux, toutes les résolutions
 
-- [ ] **[Plugin] A5 (plugin) — Configuration lue une fois** : une structure remplie au chargement (plus
-      de `getenv` dans le chemin chaud), documentée, purge des drapeaux `POMPPC_GL_*` dont le
-      repli est mort.
+- [ ] **[Jeux] Colin McRae en 1024×768 et au-delà** (défaut signalé par l'utilisateur le
+  29/09 : 3D fausse en course, polygones justes) : l'hôte copie juste à toutes les tailles
+  (repro natif) ; le bug hunt 3 a corrigé l'effacement des textures hôte seulement à chaque
+  erreur (T1), le 4 le `SURF_TEX` refusé en `NO_MEM`. Cellule plein écran 1024×768 jouée le
+  29/09 avec `POMPPC_GL_NOTE` : à lire (`ERRORS`, `SURFTEX taille`), puis essai
+  `POMPPC_GL_VRAM_MB=256`. Ensuite tableau des autres modes (4:3 et larges : menus, course,
+  proportions, changement de mode, retour au bureau, temps/image). La voiture qui roule
+  reste à prouver ; `POMPPC_GL_RECT=0` fait planter le jeu chez Apple : ne pas s'en servir.
 
-- [ ] **[Plugin] Gardes de faute ramenées à la cause** : chaque `faute de lecture` et niveau envoyé noir
-      devient un compteur observé à zéro sur la matrice. Après fiabilisation de la matrice.
+- [ ] **[Jeux — session] Marble Blast en fenêtre, bureau 800×600×16** : échoue en fenêtre
+  (surface rognée, replis, pas de présentation capturable), le plein écran est vert.
+  Identifier le choix du mode vidéo et garantir un bureau assez grand, puis refaire
+  Nexuiz fenêtre/plein écran. **Fermeture :** cellules vertes après démarrage frais,
+  réglages utilisateur préservés.
 
-- [ ] **[Protocole] A4 — Déplacer le travail vers l'hôte** : bloc d'état partagé en mémoire invité que le
-      device lit et diffère lui-même, textures lues par DMA sur plages sales, empaquetage
-      minimal (position en trois mots, texcoords à taille déclarée, tampons hôte réutilisés).
-      Épreuve : `send_state` et `compute_state` sortent du profil.
+- [ ] **[Jeux] DOOM 3 et Prey en plein écran** : changement de mode par le jeu (`r_mode 3`,
+  `CGDisplaySwitchToMode`, `SURF_PRESENT` sur l'écran redimensionné) et mesure en combat.
 
-- [ ] **[Backend GL] Backend GL** : G7 `glTexSubImage*` par rectangle sale, G8 PBO en rotation pour
-      `SURF_PRESENT` (copies surface → texture déjà en service, voir `CHANGELOG.md`), G9 cache d'état dans `gl_target`.
+- [ ] **[Jeux] Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur
+  reste blanc) ; menu principal juste au 26/09, à revoir en partie.
 
-- [ ] **[Outils] A5 (scripts) — reste** : `tssh.sh`, `cycle.sh`, `killgame.py` sont dans
-      `tools/guest/` (26/09) ; `.run/cmr/` n'a plus que des données. Reste `d3run.sh` à
-      appuyer sur `tools/guest/tssh.sh`.
+- [ ] **[Outils] A3, suites** : Zenerchi en plein écran et Warcraft III en fenêtre
+  (réglage à trouver, sinon clic par System Events) ; Colin McRae fenêtre non applicable.
 
-- [ ] **[TCG] `tlbie` en SMP stock** : défaut de QEMU 9.2 (n'atteint pas l'autre vCPU), corrigé par
-      `x-sr-tlb` ; à signaler en amont.
+- [ ] **[Outils] Rejeu : `SURF_READBACK` d'une surface jamais liée dans le vidage** → `NO_SURF`
+  (DOOM 3 fenêtre, tour `20260926-2156`) : le prologue de `tests/qgpu_replay.c` ne crée la
+  surface qu'au `SURF_BIND`/présentation. Épreuve : rejeu sans `NO_SURF`, image inchangée.
+
+- [ ] **[Plugin] Coordonnées de texture en mode immédiat sous programme de sommets** : perdues
+  (vu en écrivant `gltest rectfp`). Scène à écrire ; fermeture : comparé au rendu d'Apple.
+
+- [ ] **[Backend GL] `gltest tex14` « λ=2 sans biais »** : défaut du GL de l'hôte macOS (le
+  biais d'unité du dessin précédent reste appliqué ; un `glFlush` le corrige mais coûte).
+  Décision : ne réappliquer que sur changement, ou passer le biais dans l'échantillonneur.
+
+### Vitesse
+
+Préalable : recaler les planchers de la matrice. Sur hôte au repos, le 29/09, Marble Blast
+fenêtre tourne à 8,9 ms/image et DOOM 3 fenêtre à 33,8 (contre 60,7 au tour du 27/09).
+
+- [ ] **[Métrologie] Troisième facteur de lenteur** (`docs/tcg-g4.md` §14.7) : une partie DOOM 3
+  sur huit lente de bout en bout ; cause inconnue (cœurs P/E, autre processus, thermique ?).
+  Le 29/09, une charge hôte de 40–53 (autre projet, Spotlight) a doublé les ms/image :
+  la matrice relève désormais la charge avant et après la fenêtre de mesure.
+- [ ] **[Plugin] Nexuiz / GLSL** : chaque `glUniform` pose le bit `0x04000000` et fait recalculer
+  le verdict (154 298 dispatches sur 173 572). Sans perdre la détection des samplers.
+- [ ] **[TCG] Cache de sauts plus grand** (16 384 entrées, `docs/tcg-g4.md` §16.6).
+- [ ] **[TCG] Verrou global à chaque `mtmsr`/`rfi`** (`ppc_maybe_interrupt`,
+  `cpu_interrupt_exittb`) : chemin sans verrou quand l'état d'interruption ne change pas.
+- [ ] **[Protocole] Doorbell asynchrone côté invité** (bug hunt D2) : mesure du BQL tenu par
+  image sous `GPU_TRACE=1` (`docs/smp-coeurs.md` §3, levier L4).
+- [ ] **[Plugin] Transmission paresseuse** : mesure honnête et décision du défaut.
+- [ ] **[Protocole] A4 — Déplacer le travail vers l'hôte** : bloc d'état partagé lu par le
+  device, textures par DMA sur plages sales, empaquetage minimal. Épreuve : `send_state` et
+  `compute_state` sortent du profil.
+- [ ] **[Backend GL]** G7 `glTexSubImage*` par rectangle sale, G8 PBO en rotation pour
+  `SURF_PRESENT`, G9 cache d'état dans `gl_target`.
+- [ ] **[TCG] Flottant scalaire en instructions AArch64 natives** (`docs/tcg-g4.md` §15.7).
+
+### Maintenabilité du plugin
+
+- [ ] **[Plugin] A2 — Découper `pomppc_accel.c` en modules à frontières écrites** : lecteur
+  d'état (table d'offsets `gctx+…` vérifiée par une empreinte de GLEngine), textures,
+  géométrie, programmes, transport, diagnostic. Plan : `docs/architecture.md` §10. Épreuve :
+  mêmes scènes `gltest` à l'octet, mêmes `frames.csv`. Motif : la plupart des bugs des
+  passes 3 et 4 venaient de correctifs de la passe précédente dans ce fichier.
+- [ ] **[Plugin] A5 (plugin) — Configuration lue une fois** (plus de `getenv` dans le chemin
+  chaud) et purge des drapeaux `POMPPC_GL_*` dont le repli est mort.
+- [ ] **[Plugin] Gardes de faute ramenées à la cause** : chaque `faute de lecture` et niveau
+  envoyé noir devient un compteur observé à zéro sur la matrice.
+- [ ] **[Outils] A5 (scripts) — reste** : `.run/cmr/` n'a plus que des données (sa copie
+  locale de `tssh.sh` lit le port publié depuis le 29/09).
+
+### Distribution 1.0 et hôtes
+
+- [ ] **[Distribution] 1.0 = installation reproductible** : CD ou paquet, `install.sh` qui
+  reconstruit kext et plugin, disque quotidien recréable depuis l'ISO, matrice verte à chaque commit.
+- [ ] **[Distribution] Firmware reproductible** : `openbios-smp-screamer.elf` est livré en binaire.
+- [ ] **[Hôtes] Hôte PC x86** : `x-fast-fp` et `x-sr-tlb` jamais validés sur x86
+  (`docs/plan-traducteur-rapide.md` §1.3).
+- [ ] **[Hôtes] Un seul disque, deux hôtes** : `tiger.raw` partagé par USB entre le Mac et le PC.
+- [ ] **[TCG] `tlbie` en SMP stock** : défaut de QEMU 9.2, corrigé par `x-sr-tlb` ; à signaler en amont.
+
+### Divers
 
 - [ ] **[Système] Quartz Extreme et Core Image** sur `tiger-dev.raw` : surfaces hôte pour le
-      WindowServer, **plus de quatre clients** (`docs/roadmap-opengl15.md`).
-
-- [ ] **[Frontend] Frontend F1, restes non joués** : la vraie touche
-      Ctrl+Cmd+F au clavier, écran Retina, plusieurs moniteurs.
-
-- [ ] **[Métrologie] Métrologie boot** (`docs/metrologie-boot.md`) : baseline de 23,32 s à refaire avec le
-      harnais durci ; A/B du coût du Screamer jamais lancé.
-
-- [ ] **[Distribution] 1.0 = installation reproductible** : CD ou paquet, `install.sh` qui reconstruit kext et
-      plugin, disque quotidien recréable depuis l'ISO, matrice verte à chaque commit.
-
-- [ ] **[Hôtes] Hôte PC x86** : construire et éprouver sur le PC (`x-fast-fp` et `x-sr-tlb` jamais
-      validés sur x86 ; moins de registres, FMA3 non garanti : `docs/plan-traducteur-rapide.md`
-      §1.3).
-
-- [ ] **[Hôtes] Un seul disque, deux hôtes** : `tiger.raw` brut partagé par USB entre le Mac et le PC,
-      `devloop` et jeux sur le même disque.
-
-- [ ] **[Distribution] Firmware reproductible** : `openbios-smp-screamer.elf` est livré en binaire.
-
-- [ ] **[TCG] Flottant scalaire en instructions AArch64 natives** : piste bornée mais
-  non réalisée (`docs/tcg-g4.md` §15.7). Le chemin `x-fp-inline` actuel est déjà
-  validé et activé. Fermeture : preuve d'équivalence et gain A/B en jeu.
+  WindowServer, plus de quatre clients (`docs/roadmap-opengl15.md`).
+- [ ] **[Frontend] Frontend F1, restes non joués** : la vraie touche Ctrl+Cmd+F, écran Retina,
+  plusieurs moniteurs.
+- [ ] **[Métrologie] Métrologie boot** (`docs/metrologie-boot.md`) : baseline de 23,32 s à
+  refaire avec le harnais durci ; A/B du coût du Screamer jamais lancé.
 
 ## Bloqué
 
@@ -229,16 +220,16 @@ un travail de diagnostic dans « Ensuite », pas un blocage.
 
 ## Référence validée
 
-État consigné dans les rapports du 27/09 ; aucune nouvelle mesure VM lors de cette réorganisation.
+État au 29/09/2026 (bug hunt en quatre passes, `main` `2d48131` puis `bf14f79`).
 
 | Élément | État |
 |---|---|
-| Protocole / ABI | GL **v21**, transport kext **v19** inchangé |
-| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit en v21 ; précédent en `*.avant-glsl` ; contrôle `20260927-1223` |
-| Invité quotidien | `tiger.qcow2`, kext v19, plugin **`20260927-glsl`**, SMP=2 |
+| Protocole / ABI | GL **v22**, transport kext **v19** (`QGPU_ST_NO_MEM`, `QGPU_REG_NOMEM`, `QGPU_CAP_GLSL_PATHS` ajoutés sans changer d'ABI) |
+| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit depuis `18ad012` ; précédent en `*.avant-bughunt` |
+| Invité quotidien | `tiger.qcow2`, kext et plugin de `18ad012` (gcc-4.0 dans l'invité), SMP=2 |
 | TCG | `0001–0004`, `0006–0008` activés par défaut ; `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0`, `RETINLINE=0`, `JCIDX=0` les désactivent |
-| Tests natifs et scripts | **145 OK, 0 échec, 4 ignorés** : shellcheck absent et trois tests `--slow` non lancés |
-| Travaux clos | Flottant scalaire, sorties indirectes, verdict lots 0–5, Colin McRae VAR/RTT, copies GPU mesurées en VM, Nexuiz GLSL : `CHANGELOG.md` |
+| Tests natifs et scripts | **156 OK, 0 échec, 6 ignorés** ; frontend ctest 3/3 |
+| Travaux clos | Voir `CHANGELOG.md` et `docs/bug-hunt-2026-09-29*.md` |
 | Profils | Plugin : `bench/plugin/ab2-B*/{d3,prey}-fen/mesure/sample.txt` ; TCG : `bench/tcg/` (hors git) |
 
 ## Matrice de jeux
@@ -248,7 +239,11 @@ hors rafraîchissements admis (2 par 90 images en fenêtre), et une mesure à sc
 sous le seuil du jeu. Une scène `gltest` comparée au rendu d'Apple éprouve chaque notion
 nouvelle. Les modes fenêtre et plein écran sont requis quand le jeu les propose.
 
-Dernier tour complet : `bench/matrice/20260927-1137/tableau.md`, **13 vertes sur 15**.
+Tour complet du 29/09 (`bench/matrice/20260929-1334`, commit `4fafc58`) : **images toutes
+justes**, vitesses inexploitables (charge hôte 40–53). Contrôle sur hôte au repos
+(`20260929-15xx`) : Marble Blast fenêtre 8,9 ms/image, DOOM 3 fenêtre 33,8, verts.
+
+Dernier tour complet de référence : `bench/matrice/20260927-1137/tableau.md`, **13 vertes sur 15**.
 DOOM 3 fenêtre est ensuite verte au contrôle isolé `20260927-1216` ; ce contrôle
 ne transforme pas le tour complet en « 14/15 ». Sur le QEMU de référence reconstruit,
 DOOM 3 et Nexuiz GLSL plein écran sont verts au tour `20260927-1223`.
