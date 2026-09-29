@@ -129,8 +129,17 @@ les deux fils à la fois : arrêt de toute la VM. Les plus longs, une rafale de
 30 en 2 s, tombent au kill de DOOM 3 (destruction des objets hôte du client).
 La marge restante est donc de ×2,6 hôte peu chargé (charge 2 à 5). Un profil
 `sample` de QEMU pendant un chargement ne montre aucun vCPU en attente dans
-le doorbell. Le déclencheur du 26/09 (1 lancement sur ~12, juste après un
-redémarrage de l'invité) n'a pas été reproduit ici.
+le doorbell.
+
+**Le déclencheur du 26/09 n'a pas été reproduit.** Il frappait 1 lancement
+sur ~12, juste après un redémarrage de l'invité. Aucun gel sur 39 chargements
+de DOOM 3 jusqu'au jeu : les 25 du §1, 3 cellules de matrice de suite sans
+redémarrage (tours `20260929-1803` et `20260929-1810`, vertes) et 8 cycles
+« `shutdown -r` puis DOOM 3 aussitôt, jusqu'à ~2300 échanges, puis kill »
+(boucle de 18:21 à 18:48, 8 démarrages sans panique). Au taux de 1 sur 12,
+voir 0 gel sur 39 arrive moins de 4 fois sur 100. Le taux a donc baissé
+depuis le 26/09 (binaire, kext et plugin ont changé depuis, bug hunts
+compris), ou bien il dépend d'une charge de l'hôte absente ici (2 à 5).
 
 **Pistes de correctif** (non faites, à trancher) : relever `LockTimeOut` dans
 l'invité par le kext au chargement. C'est une variable du noyau (`0x360ac0`),

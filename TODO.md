@@ -51,6 +51,7 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   arrêt de vCPU côté QEMU (BQL, doorbell synchrone, hôte chargé) compté par `mftb` dans
   un délai de verrou tournant, comme la panique UT2004 du 27/09 (`Lock timeout` dans
   `_fpu_switch`). Arrêts mesurés : 95 ms au plus (`stallmeter`, kills de DOOM 3).
+  Non reproduit le 29/09 : 0 gel sur 39 chargements, dont 8 juste après un redémarrage.
   `docs/gel-doom3-baddisplay.md` §2. **Au prochain gel :** `python3 tools/re/kpanic.py
   mach_kernel` AVANT tout reset (texte, appelant, pile). **Fermeture :** texte d'une
   vraie occurrence lu, cause établie, puis correction (relever `LockTimeOut` par le
