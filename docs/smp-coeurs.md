@@ -108,7 +108,8 @@ simultanées d'une boucle de calcul, puis 48 `gcc -O2 -c` en série et répartis
 Ce qui resterait pour en faire un mode propre (≈ 1-2 jours) : `max_cpus = 4` et le câblage
 sous une garde (les GPIO 15/16 n'existent que sur la variante PMU, comme 3/4) ; un
 commentaire juste dans le patch v2 (« une seule ligne » est faux) ; `run_tiger.sh` qui
-accepte `SMP=3|4` ; la panique AppleUSBOHCI au démarrage (~1/10 en SMP=2) à re-mesurer à 4 ;
+accepte `SMP=3|4` ; le gel AppleUSBOHCI au redémarrage (29/09 : ~1/50-80 `shutdown -r`,
+cause OpenPIC, corrigée, `docs/endurance.md` §6) à re-mesurer à 4 ;
 optionnellement publier `soft-reset` dans OpenBIOS (source absente du dépôt : c'est le vrai
 coût). **Au-delà de 4** : réécrire AppleMPIC (kext d'Apple) ou émuler un contrôleur à plus de
 canaux IPI — hors de portée, et sans intérêt au vu du §2.
@@ -232,7 +233,9 @@ que le processus consomme.
    hôte de moins (fil principal 12 % contre 20 %), et un fil de calcul seul y va 12 % plus vite
    (§1.1). Ce que SMP=2 apporte est ailleurs : le bureau
    quand une tâche de fond tourne, la compilation dans l'invité (§2.4). Ce qu'il coûte : la
-   panique AppleUSBOHCI au démarrage (~1/10) et le binaire `ppc64` en MTTCG. Proposition :
+   panique AppleUSBOHCI au démarrage (~1/10 ; mesurée le 29/09 : gel à ~1/50-80 redémarrages à
+   chaud, 0/100 à froid, cause dans l'OpenPIC de QEMU et corrigée, `docs/endurance.md` §6) et le
+   binaire `ppc64` en MTTCG. Proposition :
    **garder 2 par défaut pour le bureau et passer les lanceurs de jeux à SMP=1** — *après*
    les parties DOOM 3 ci-dessous (seul jeu où SMP=1 n'a pas été mesuré à placement forcé, et
    sa partie SMP=1 du §6 bis de `tcg-g4.md` était un tirage de régime). Décision de

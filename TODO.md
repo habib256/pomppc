@@ -25,22 +25,27 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 
 ## Maintenant
 
-- [ ] **[Outils] Banc d'endurance de session** : sans lui, chaque incident ci-dessous
-  reste un souvenir. Un outil qui enchaîne seul N démarrages (SMP=2) et N cycles
-  lancement/arrêt de jeu, sur un clone APFS du disque quotidien (`cp -c`, pour ne
-  jamais toucher `tiger.qcow2` ni occuper la VM quotidienne), détecte panique et gel
-  (ssh muet, image figée), et range pour chaque incident : capture d'écran, registres
-  de tous les vCPU (`info registers -a` au moniteur), `panic.log` si l'invité l'a écrit,
-  PC et LR symbolisés contre `mach_kernel` et les kexts chargés.
-  **Fermeture :** une nuit de banc sans intervention, un rapport par incident, taux
-  d'incident par type avec son intervalle.
+- [ ] **[Outils] Banc d'endurance de session** — **livré le 29/09** : `tools/endurance/`
+  (`docs/endurance.md`). Démarrages à froid, `shutdown -r` ou `system_reset` en série,
+  plusieurs instances, sur des recouvrements qcow2 d'un clone APFS (`disks/tiger-endurance.qcow2`),
+  sans fenêtre ni son ; panique lue dans la mémoire de l'invité (`panicstr`, `debug_buf`),
+  gel par ssh et échantillons de NIP ; par incident : capture, `info registers -a`, 20 relevés
+  de NIP, 0,3 s de `log int,mmu`, liste `kmod`, registres de l'OHCI, `panic.log` après
+  reset, PC/LR/piles symbolisés (`mach_kernel` + `.sym` de `kextload -n -s -A`) ; taux par type
+  avec intervalle de Wilson. Cycles de jeu (`jeu --jeu mb|d3|…`) éprouvés sur 2 cycles seulement.
+  **Reste pour fermer :** une nuit sans intervention (démarrages + cycles de jeu), et une
+  vraie campagne de cycles de jeu (DOOM 3 sans redémarrage : `kCGLBadDisplay`).
 
-- [ ] **[Système] Panique AppleUSBOHCI au démarrage SMP=2** : environ un démarrage
-  sur dix (`docs/smp-coeurs.md`). Premier client du banc : c'est l'incident le plus
-  fréquent et le plus facile à provoquer. Le choix SMP=2 est déjà tranché ; le CPU 1
-  démarre au relâchement du GPIO 4 depuis le 29/09 (bug hunt, M1) — mesurer le taux
-  avant de supposer quoi que ce soit.
-  **Fermeture :** cause identifiée, correction, puis série de démarrages (≥ 100) sans panique.
+- [ ] **[Système] « Panique » AppleUSBOHCI au démarrage SMP=2** — **cause trouvée le
+  29/09** (`docs/endurance.md` §6) : c'est un **gel**, pas une panique, et seulement au
+  redémarrage à chaud (0/100 à froid ; 3 sur 185 `shutdown -r` avant correction). Tempête
+  d'IRQ 28 sur le CPU 0 dans `AppleUSBOHCI::FilterInterrupt`, alors que l'OHCI ne demande rien :
+  `openpic_reset()` de QEMU gardait `pending` et repassait la source en front, et la
+  baisse de la ligne par le reset PCI, qui arrive ensuite, était perdue. Trace : un « IRQ 28
+  pending au reset » ↔ un gel. Correctif : `patches/openpic/0001` (agent DOOM 3).
+  Après correction : 0/150 redémarrages (`apres-openpic-reboot`) ; avec la trace, 0/103 dont 2 déclencheurs traversés (0/253 au total, IC 0–1,5 %).
+  **Reste :** la « panique cpu 1 » du 24/09 n'est pas reproduite (hypothèse : verrou tenu par
+  le CPU 0 pris dans la même tempête) ; revoir sur la VM quotidienne après le correctif.
 
 - [ ] **[Système] Gel de l'invité au chargement de DOOM 3 et `kCGLBadDisplay` après
   un `killall`** : gel (matrice, 26/09, 1 lancement sur ~12) = plus de ssh, vCPU 0
