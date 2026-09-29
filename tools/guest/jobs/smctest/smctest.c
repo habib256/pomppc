@@ -21,11 +21,16 @@
  *      change les registres de segment (x-sr-tlb, x-jc-idx).
  *   E  deux fils : l'un appelle f en boucle, l'autre la reecrit ; apres avoir
  *      lu la generation publiee (puis isync), l'appelant doit voir au moins
- *      cette generation (MTTCG : invalidation vue de l'autre vCPU).
+ *      cette generation (MTTCG : invalidation vue de l'autre vCPU ; echouait
+ *      sur QEMU 9.2 en SMP=2, corrige par patches/tcg/0010 + x-icbi-sync,
+ *      docs/tcg-g4.md section 17).
  *   F  fonction C recopiee a des adresses successives d'un tampon et appelee.
  *
  *   smctest [n]        essais (n = echelle, defaut 1)
+ *   smctest -t LETTRES [-r R] [n]   essais choisis (p. ex. -t E), R tours
  *   smctest banc N     banc d'appels/retours indirects (64 cibles, 3 N appels)
+ *   smctest icbi N     banc d'icbi (x-icbi-sync) : page sans code, page avec code
+ *                      (autre ligne), ligne du code puis appel (N/100 fois)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -292,9 +297,11 @@ static void test_e(int n)
 {
     pthread_t th;
     fn_t f;
-    long calls = 0, bad = 0;
-    int g, v, gv;
+    long calls = 0, bad = 0, episodes = 0;
+    int g, v, gv, was_bad = 0;
 
+    egen = 0;
+    estop = 0;
     ecode = rwx(4096);
     ecode[0] = LI3(0);
     ecode[1] = BLR;
@@ -314,6 +321,10 @@ static void test_e(int n)
                        v, g, (int)(ecode[0] & 0xffff), f());
             }
             bad++;
+            episodes += !was_bad;
+            was_bad = 1;
+        } else {
+            was_bad = 0;
         }
     }
     pthread_join(th, NULL);
@@ -321,6 +332,9 @@ static void test_e(int n)
     errors += bad;
     mix((uint32_t)bad);
     printf("E appels %s\n", calls > 1000 ? "> 1000" : "<= 1000");
+    if (bad) {
+        printf("E episodes perimes %ld (appels perimes %ld)\n", episodes, bad);
+    }
     report("E");
 }
 
@@ -385,14 +399,90 @@ static void banc(long nloop)
            (long)((b.tv_sec - a.tv_sec) * 1000 + (b.tv_usec - a.tv_usec) / 1000), s);
 }
 
+static long ms_since(struct timeval *a)
+{
+    struct timeval b;
+    gettimeofday(&b, NULL);
+    return (long)((b.tv_sec - a->tv_sec) * 1000 + (b.tv_usec - a->tv_usec) / 1000);
+}
+
+static void banc_icbi(long n)
+{
+    uint32_t *c = rwx(8192);
+    char *d = (char *)c + 4096;                /* page sans code */
+    fn_t f = (fn_t)c;
+    struct timeval a;
+    long i;
+    int s = 0;
+
+    c[0] = LI3(7);
+    c[1] = BLR;
+    flush_code(c, 8);
+    s += f();                                  /* un bloc dans la premiere page */
+    gettimeofday(&a, NULL);
+    for (i = 0; i < n; i++) {
+        __asm__ volatile("icbi 0,%0" : : "r"(d + ((i & 127) << 5)) : "memory");
+    }
+    printf("icbi page sans code : %ld en %ld ms\n", n, ms_since(&a));
+    gettimeofday(&a, NULL);
+    for (i = 0; i < n; i++) {                  /* lignes 1..127 : pas le bloc */
+        __asm__ volatile("icbi 0,%0" : : "r"((char *)c + (((i % 127) + 1) << 5))
+                         : "memory");
+    }
+    printf("icbi page avec code, autre ligne : %ld en %ld ms\n", n, ms_since(&a));
+    gettimeofday(&a, NULL);
+    for (i = 0; i < n / 100; i++) {
+        __asm__ volatile("icbi 0,%0\n\tisync" : : "r"(c) : "memory");
+        s += f();
+    }
+    printf("icbi de la ligne du code + appel : %ld en %ld ms (s=%d)\n", n / 100,
+           ms_since(&a), s);
+}
+
 int main(int argc, char **argv)
 {
     int n = 1;
 
     setvbuf(stdout, NULL, _IOLBF, 0);
+    if (argc > 2 && strcmp(argv[1], "icbi") == 0) {
+        banc_icbi(atol(argv[2]));
+        banc_icbi(atol(argv[2]));
+        return 0;
+    }
     if (argc > 2 && strcmp(argv[1], "banc") == 0) {
         banc(atol(argv[2]));
         return 0;
+    }
+    if (argc > 2 && strcmp(argv[1], "-t") == 0) {
+        const char *t = argv[2];
+        int r, reps = 1;
+        argv += 2;
+        argc -= 2;
+        if (argc > 2 && strcmp(argv[1], "-r") == 0) {
+            reps = atoi(argv[2]);
+            argv += 2;
+            argc -= 2;
+        }
+        if (argc > 1) {
+            n = atoi(argv[1]);
+        }
+        for (r = 0; r < reps; r++) {
+            unsigned long e0 = errors;
+            const char *c;
+            for (c = t; *c; c++) {
+                switch (*c) {
+                case 'A': test_a(n); break;
+                case 'B': test_b(n); break;
+                case 'C': test_c(n); break;
+                case 'D': test_d(n); break;
+                case 'E': test_e(n); break;
+                case 'F': test_f(n); break;
+                }
+            }
+            printf("tour %d erreurs %lu\n", r + 1, errors - e0);
+        }
+        printf("total erreurs %lu\n", errors);
+        return errors != 0;
     }
     if (argc > 1) {
         n = atoi(argv[1]);

@@ -1,0 +1,319 @@
+diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+index 0af9e92..d0f1f09 100644
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -976,9 +976,19 @@ static inline void tlb_set_dirty1_locked(CPUTLBEntry *tlb_entry,
+     }
+ }
+ 
+-/* update the TLB corresponding to virtual page vaddr
+-   so that it is no longer dirty */
+-static void tlb_set_dirty(CPUState *cpu, vaddr addr)
++/*
++ * Update the TLB corresponding to virtual page vaddr so that it is no
++ * longer dirty, unless the page is (again) clean.
++ *
++ * POMPPC tcg/0010: the test must be made with tlb_c.lock held.
++ * tlb_protect_code() on another vCPU clears DIRTY_MEMORY_CODE and only then
++ * takes this lock to set TLB_NOTDIRTY back in our entries.  Tested before
++ * the lock, the page could be protected in between; our entry still carries
++ * TLB_NOTDIRTY at that moment so the other vCPU leaves it alone, and we
++ * would then clear the flag of a page that holds code again: stores through
++ * that entry would no longer invalidate the new TBs.
++ */
++static void tlb_set_dirty(CPUState *cpu, vaddr addr, ram_addr_t ram_addr)
+ {
+     int mmu_idx;
+ 
+@@ -986,6 +996,10 @@ static void tlb_set_dirty(CPUState *cpu, vaddr addr)
+ 
+     addr &= TARGET_PAGE_MASK;
+     qemu_spin_lock(&cpu->neg.tlb.c.lock);
++    if (cpu_physical_memory_is_clean(ram_addr)) {
++        qemu_spin_unlock(&cpu->neg.tlb.c.lock);
++        return;
++    }
+     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+         tlb_set_dirty1_locked(tlb_entry(cpu, mmu_idx, addr), addr);
+     }
+@@ -1105,16 +1119,9 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
+     if (is_ram) {
+         iotlb = memory_region_get_ram_addr(section->mr) + xlat;
+         assert(!(iotlb & ~TARGET_PAGE_MASK));
+-        /*
+-         * Computing is_clean is expensive; avoid all that unless
+-         * the page is actually writable.
+-         */
+-        if (prot & PAGE_WRITE) {
+-            if (section->readonly) {
+-                write_flags |= TLB_DISCARD_WRITE;
+-            } else if (cpu_physical_memory_is_clean(iotlb)) {
+-                write_flags |= TLB_NOTDIRTY;
+-            }
++        /* TLB_NOTDIRTY (is_clean) is computed below, with tlb_c.lock held */
++        if ((prot & PAGE_WRITE) && section->readonly) {
++            write_flags |= TLB_DISCARD_WRITE;
+         }
+     } else {
+         /* I/O or ROMD */
+@@ -1145,6 +1152,22 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
+      */
+     qemu_spin_lock(&tlb->c.lock);
+ 
++    /*
++     * Computing is_clean is expensive; avoid all that unless the page is
++     * actually writable.
++     *
++     * POMPPC tcg/0010: it is done with tlb_c.lock held.  tlb_protect_code()
++     * on another vCPU clears DIRTY_MEMORY_CODE and then takes this lock to
++     * set TLB_NOTDIRTY in our entries.  Tested before the lock, the page
++     * could be protected in between and the entry, not yet installed, would
++     * miss both the test and the reset: stores through it would never
++     * invalidate the TBs of the page.
++     */
++    if (is_ram && (prot & PAGE_WRITE) && !section->readonly &&
++        cpu_physical_memory_is_clean(iotlb)) {
++        write_flags |= TLB_NOTDIRTY;
++    }
++
+     /* Note that the tlb is no longer clean.  */
+     tlb->c.dirty |= 1 << mmu_idx;
+ 
+@@ -1355,10 +1378,13 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
+      */
+     cpu_physical_memory_set_dirty_range(ram_addr, size, DIRTY_CLIENTS_NOCODE);
+ 
+-    /* We remove the notdirty callback only if the code has been flushed. */
++    /*
++     * We remove the notdirty callback only if the code has been flushed.
++     * tlb_set_dirty() tests it again under the TLB lock.
++     */
+     if (!cpu_physical_memory_is_clean(ram_addr)) {
+         trace_memory_notdirty_set_dirty(mem_vaddr);
+-        tlb_set_dirty(cpu, mem_vaddr);
++        tlb_set_dirty(cpu, mem_vaddr, ram_addr);
+     }
+ }
+ 
+diff --git a/accel/tcg/tb-maint.c b/accel/tcg/tb-maint.c
+index cc0f5af..b6f6201 100644
+--- a/accel/tcg/tb-maint.c
++++ b/accel/tcg/tb-maint.c
+@@ -26,6 +26,7 @@
+ #include "exec/page-protection.h"
+ #include "exec/tb-flush.h"
+ #include "exec/translate-all.h"
++#include "exec/ram_addr.h"
+ #include "sysemu/tcg.h"
+ #include "tcg/tcg.h"
+ #include "tb-hash.h"
+@@ -398,9 +399,31 @@ static void page_unlock(PageDesc *pd)
+     page_unlock__debug(pd);
+ }
+ 
++/*
++ * POMPPC tcg/0010.  Write-protect a page before its code is read by the
++ * translator (called with @pd locked).  A page without TBs is not
++ * protected: another vCPU may store to it through a TLB entry without
++ * TLB_NOTDIRTY.  If the protection were only set when the TB is linked
++ * (tb_page_add), a store
++ * landing between the translator's read of the guest code and the link
++ * would never be seen, and the stale TB would stay valid until the next
++ * write to the page.  Protecting first makes every later store take the
++ * notdirty path, which blocks on the page lock held here and invalidates
++ * the new TB once it is linked.
++ */
++static void tb_page_protect_locked(PageDesc *pd, tb_page_addr_t paddr)
++{
++    if (!pd->first_tb) {
++        tlb_protect_code(paddr & TARGET_PAGE_MASK);
++    }
++}
++
+ void tb_lock_page0(tb_page_addr_t paddr)
+ {
+-    page_lock(page_find_alloc(paddr >> TARGET_PAGE_BITS, true));
++    PageDesc *pd = page_find_alloc(paddr >> TARGET_PAGE_BITS, true);
++
++    page_lock(pd);
++    tb_page_protect_locked(pd, paddr);
+ }
+ 
+ void tb_lock_page1(tb_page_addr_t paddr0, tb_page_addr_t paddr1)
+@@ -418,11 +441,13 @@ void tb_lock_page1(tb_page_addr_t paddr0, tb_page_addr_t paddr1)
+     if (pindex0 < pindex1) {
+         /* Correct locking order, we may block. */
+         page_lock(pd1);
++        tb_page_protect_locked(pd1, paddr1);
+         return;
+     }
+ 
+     /* Incorrect locking order, we cannot block lest we deadlock. */
+     if (!page_trylock(pd1)) {
++        tb_page_protect_locked(pd1, paddr1);
+         return;
+     }
+ 
+@@ -434,6 +459,9 @@ void tb_lock_page1(tb_page_addr_t paddr0, tb_page_addr_t paddr1)
+     page_unlock(pd0);
+     page_lock(pd1);
+     page_lock(pd0);
++    /* page0 was unlocked: a store may have unprotected it meanwhile */
++    tb_page_protect_locked(pd1, paddr1);
++    tb_page_protect_locked(pd0, paddr0);
+     siglongjmp(tcg_ctx->jmp_trans, -3);
+ }
+ 
+@@ -1193,6 +1221,70 @@ void tb_invalidate_phys_range(tb_page_addr_t start, tb_page_addr_t last)
+     page_collection_unlock(pages);
+ }
+ 
++/*
++ * POMPPC tcg/0010.  Invalidate the TBs that overlap [@start, @last] (one
++ * page), for an instruction-cache synchronisation of the guest (PowerPC
++ * icbi, x-icbi-sync).
++ *
++ * A store to a page holding code invalidates the TBs of the written bytes
++ * *before* the store is performed (notdirty_write).  With MTTCG another
++ * vCPU can translate the old bytes in between and link a TB that no later
++ * store has invalidated yet: the guest's own synchronisation (dcbst, sync,
++ * icbi, isync, then a flag) does not help, the stale TB stays valid until
++ * the next store to those bytes.  icbi comes after the store in program
++ * order: invalidating here closes the window.  The overlap is tested with
++ * the page lock held, so a translation in progress (it holds the lock from
++ * before it reads the code until the TB is linked) is waited for; a
++ * translation that starts after reads the new bytes.  Returns true if TBs
++ * were invalidated.
++ *
++ * Fast path (almost every icbi, e.g. the kernel's after a page-in): a page
++ * whose DIRTY_MEMORY_CODE bit is set holds no TB (the bit is cleared under
++ * the page lock before a TB is linked, and set only once the page has none),
++ * and a translation that has not cleared it yet will read our stores: the
++ * translator clears the bit before it reads the code, and the barrier below
++ * orders our stores before our read of the bit.
++ */
++bool tb_invalidate_phys_line_sync(tb_page_addr_t start, tb_page_addr_t last)
++{
++    PageDesc *pd;
++    TranslationBlock *tb;
++    PageForEachNext n;
++    bool hit = false;
++
++    tcg_debug_assert(((start ^ last) & TARGET_PAGE_MASK) == 0);
++    smp_mb();
++    if (cpu_physical_memory_get_dirty_flag(start, DIRTY_MEMORY_CODE)) {
++        return false;
++    }
++    pd = page_find(start >> TARGET_PAGE_BITS);
++    if (!pd) {
++        return false;
++    }
++    page_lock(pd);
++    PAGE_FOR_EACH_TB(start, last, pd, tb, n) {
++        tb_page_addr_t tb_start = tb_page_addr0(tb);
++        tb_page_addr_t tb_last = tb_start + tb->size - 1;
++
++        if (n == 0) {
++            tb_last = MIN(tb_last, tb_start | ~TARGET_PAGE_MASK);
++        } else {
++            tb_start = tb_page_addr1(tb);
++            tb_last = tb_start + (tb_last & ~TARGET_PAGE_MASK);
++        }
++        if (!(tb_last < start || tb_start > last)) {
++            hit = true;
++            break;
++        }
++    }
++    page_unlock(pd);
++    if (hit) {
++        /* takes the locks of every page of the TBs found, in order */
++        tb_invalidate_phys_range(start, last);
++    }
++    return hit;
++}
++
+ /*
+  * Call with all @pages in the range [@start, @start + len[ locked.
+  */
+diff --git a/include/exec/exec-all.h b/include/exec/exec-all.h
+index ff231b6..3f3b3f2 100644
+--- a/include/exec/exec-all.h
++++ b/include/exec/exec-all.h
+@@ -450,6 +450,9 @@ static inline void tb_set_page_addr1(TranslationBlock *tb,
+ /* TranslationBlock invalidate API */
+ void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr);
+ void tb_invalidate_phys_range(tb_page_addr_t start, tb_page_addr_t last);
++#ifndef CONFIG_USER_ONLY
++bool tb_invalidate_phys_line_sync(tb_page_addr_t start, tb_page_addr_t last);
++#endif
+ void tb_set_jmp_target(TranslationBlock *tb, int n, uintptr_t addr);
+ 
+ /* GETPC is the true target of the return instruction that we'll execute.  */
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index 747269a..d533a21 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1378,6 +1378,12 @@ struct CPUArchState {
+      * Read by the translator only.
+      */
+     bool ret_inline;
++    /*
++     * x-icbi-sync (POMPPC tcg/0010): icbi invalidates the TBs overlapping
++     * its instruction-cache block (MTTCG: code rewritten by another vCPU,
++     * docs/tcg-g4.md section 17).
++     */
++    bool icbi_sync;
+ 
+     /* Internal devices resources */
+     ppc_tb_t *tb_env;      /* Time base and decrementer */
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index c10ac3f..fbfabfc 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7462,6 +7462,15 @@ static Property ppc_cpu_properties[] = {
+     DEFINE_PROP_BOOL("x-ret-inline", PowerPCCPU, env.ret_inline, false),
+     DEFINE_PROP_BOOL("x-jc-idx", PowerPCCPU, parent_obj.jc_by_idx, false),
+     DEFINE_PROP_BOOL("x-ret-verify", PowerPCCPU, parent_obj.ret_verify, false),
++    /*
++     * POMPPC tcg/0010.  x-icbi-sync: icbi invalidates the TBs that overlap
++     * its instruction-cache block, as the architecture says it discards the
++     * block from the instruction cache of every processor.  Closes, for code
++     * that follows the PowerPC protocol (dcbst, sync, icbi, isync), the
++     * window where another vCPU translates the old bytes between the
++     * invalidation made by a store and the store itself.  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-icbi-sync", PowerPCCPU, env.icbi_sync, false),
+     /*
+      * AltiVec vaddfp/vsubfp/vmaddfp/vnmsubfp: the four lanes at once on the
+      * host FPU when softfloat's hardfloat path would take each of them
+diff --git a/target/ppc/mem_helper.c b/target/ppc/mem_helper.c
+index 51b137f..1c20882 100644
+--- a/target/ppc/mem_helper.c
++++ b/target/ppc/mem_helper.c
+@@ -335,6 +335,26 @@ void helper_icbi(CPUPPCState *env, target_ulong addr)
+      * do the load "by hand".
+      */
+     cpu_ldl_data_ra(env, addr, GETPC());
++#if !defined(CONFIG_USER_ONLY)
++    if (env->icbi_sync) {
++        /* POMPPC tcg/0010 (x-icbi-sync), see tb_invalidate_phys_line_sync */
++        target_ulong line = env->icache_line_size;
++        CPUTLBEntryFull *full;
++        void *host = NULL;
++        int flags;
++
++        addr &= ~(line - 1);
++        /* a TLB hit: the load above has just filled it */
++        flags = probe_access_full(env, addr, 0, MMU_DATA_LOAD,
++                                  cpu_mmu_index(env_cpu(env), false), true,
++                                  &host, &full, 0);
++        if (!(flags & (TLB_INVALID_MASK | TLB_MMIO)) && host) {
++            /* RAM: ram_addr = vaddr + xlat_section, as in notdirty_write */
++            ram_addr_t ra = addr + full->xlat_section;
++            tb_invalidate_phys_line_sync(ra, ra + line - 1);
++        }
++    }
++#endif
+ }
+ 
+ void helper_icbiep(CPUPPCState *env, target_ulong addr)

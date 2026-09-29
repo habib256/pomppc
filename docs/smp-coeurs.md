@@ -243,7 +243,11 @@ que le processus consomme.
 3. **Le parallélisme utile est dans l'hôte et passe par le fil vCPU** : L1 (TCG) et L2
    (déporter vers l'hôte, A4) restent les chantiers ; L5 (second niveau dans un fil à part)
    est la seule façon d'employer vraiment des cœurs hôte en plus, et reste « plus tard ».
-4. Corriger le commentaire de `qemu-mac99-cpus-v2.patch` (« une seule ligne de reset » : il
+4. **MTTCG et code modifié** (29/09/2026, `tcg-g4.md` §17) : QEMU 9.2 perdait, en SMP=2,
+   des invalidations de code réécrit par l'autre vCPU (trois courses) ; corrigé par
+   `patches/tcg/0010` et `x-icbi-sync`. Démarrage et Marble Blast n'ont déclenché aucune de
+   ces courses : ce n'est pas, sans autre preuve, la cause de la panique AppleUSBOHCI.
+5. Corriger le commentaire de `qemu-mac99-cpus-v2.patch` (« une seule ligne de reset » : il
    y en a quatre) au prochain passage sur le patch.
 
 ### 4.1 Parties DOOM 3 à jouer (VM quotidienne, à jouer par l'utilisateur)
