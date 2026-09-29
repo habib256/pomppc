@@ -281,6 +281,11 @@ static inline QgpuProgram *qgpu_prog_active(const QgpuState *st, QgpuProgSet *pg
         return NULL;
     }
     p = &pg->prog[pg->bound[which]];
+    /* Bug hunt 4 : la cible aussi — un lien ne doit jamais faire exécuter un
+       programme GLSL ou de l'autre étage (prog_retarget, ceinture). */
+    if (p->target != (which == QGPU_PROG_VP ? QGPU_PT_VERTEX : QGPU_PT_FRAGMENT)) {
+        return NULL;
+    }
     return (p->used && p->compiled && !p->broken) ? p : NULL;
 }
 

@@ -1018,21 +1018,19 @@ IOReturn POMPPCGPU::resetSlot(int slot, POMPPCGPUUserClient * client)
 /* K1 — COMPTABILITÉ SILENCIEUSE : ni gate, ni MMIO, ni attente. Appelée par le
    fil de terminaison (kextunload, terminate), pour qui entrer dans la gate est
    une panic (removeEventSource a fait setWorkLoop(0), et runAction ferme la
-   gate AVANT tout test) et parler au device une écriture dans le vide. Une
-   écriture de pointeur alignée est atomique sur PowerPC ; le pire effet d'une
-   course avec allocSlot est qu'un nouveau client prenne la tranche un
-   instant plus tôt, ce qui est précisément ce qu'on veut. */
+   gate AVANT tout test) et parler au device une écriture dans le vide.
+   Bug hunt 4 : tester PUIS écrire, hors gate, pouvait effacer la tranche d'un
+   AUTRE client — la gate l'avait rendue (RESET fini, fFreePending) et
+   redonnée par allocSlot entre notre lecture et notre écriture (SMP=2).
+   Comparer-et-échanger atomique : on n'efface que si c'est encore NOUS.
+   Pointeurs de 32 bits sur le noyau PowerPC de Tiger. */
 void POMPPCGPU::forgetSlot(int slot, POMPPCGPUUserClient * client)
 {
-    if (slot < 0 || (UInt32) slot >= fClientCount) {
+    if (slot < 0 || (UInt32) slot >= fClientCount || !client) {
         return;
     }
-    if (fClients[slot] == client) {
-        fClients[slot] = 0;
-    }
-    if (fFreePending[slot] == client) {
-        fFreePending[slot] = 0;
-    }
+    OSCompareAndSwap((UInt32) client, 0, (UInt32 *) &fClients[slot]);
+    OSCompareAndSwap((UInt32) client, 0, (UInt32 *) &fFreePending[slot]);
 }
 
 IODeviceMemory * POMPPCGPU::slotRange(int slot)

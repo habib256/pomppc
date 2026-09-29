@@ -276,6 +276,7 @@ struct QgpuPCIState {
     bool       q_fini;             /* … en libérant d'abord le backend */
     bool       q_reset;            /* demande de reset du cœur, par le thread */
     bool       broken;             /* GL3 : reset non terminé à l'échéance */
+    bool       scanout_rebind;     /* bug hunt 4 : lien sauté pendant la panne */
     bool       thread_ok;
     QEMUBH    *irq_bh;
     Notifier   exit_notifier;
@@ -689,6 +690,8 @@ static void qgpu_client_reset(QgpuPCIState *s, uint32_t slot)
  * kext, redémarrage de la VM) le répare. Mieux vaut une VM sans 3D qu'un
  * QEMU gelé que seul un kill -9 débloque.
  */
+static bool qgpu_bind_scanout(QgpuPCIState *s, bool complain);
+
 static void qgpu_soft_reset(QgpuPCIState *s)
 {
     bool idle = true;
@@ -776,6 +779,14 @@ static void qgpu_soft_reset(QgpuPCIState *s)
                     " bloqué ?) ; 3D désactivée jusqu'au prochain reset"
                     " (rechargement du kext ou redémarrage de la VM).",
                     QGPU_RESET_WAIT_MS);
+    } else if (s->scanout_rebind) {
+        /* Bug hunt 4 : un changement de mode arrivé pendant la panne a été
+           ignoré (qgpu_bind_scanout rend faux sur un device cassé), et avec
+           qfb rien ne le redemandera : la notification est consommée et
+           qgpu_scanout_recheck ne suit que VGA. Le device est réparé et sa
+           file est vide — le drainage est immédiat : relier maintenant. */
+        s->scanout_rebind = false;
+        qgpu_bind_scanout(s, false);
     }
     qemu_irq_lower(s->irq);
 }
@@ -980,6 +991,7 @@ static bool qgpu_bind_scanout(QgpuPCIState *s, bool complain)
        qgpu_scanout_recheck retentera, et le reset qui répare le device
        efface `broken`. */
     if (s->broken) {
+        s->scanout_rebind = true;
         return false;
     }
 
