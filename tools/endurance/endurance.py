@@ -64,6 +64,21 @@ def wilson(k, n, z=1.96):
     return (max(0.0, c - m), min(1.0, c + m))
 
 
+def binaire_qemu(args):
+    """Chemin, date et empreinte du qemu-system-ppc64 réellement lancé : le
+    binaire de référence peut être reconstruit pendant une campagne."""
+    if getattr(args, "qemu", None):
+        p = args.qemu
+    else:
+        p = os.path.expanduser("~/src/qemu/build/qemu-system-ppc64")
+    try:
+        h = hashlib.sha256(open(p, "rb").read()).hexdigest()[:16]
+        return "%s (%s, sha256 %s)" % (p, time.strftime("%Y-%m-%d %H:%M:%S",
+                                                       time.localtime(os.path.getmtime(p))), h)
+    except OSError:
+        return p
+
+
 # ------------------------------------------------------------------ une VM
 class VM:
     """Une instance de Tiger du banc : son disque, son moniteur, son port ssh."""
@@ -313,6 +328,24 @@ def collecte(vm_mon, dossier, sym, motif, notes=None):
                                             for a in chaine_lr]
             lignes.append(ligne)
         info["cpus"] = lignes
+        # Vue des registres du contrôleur USB : côté device (xp sur la BAR de
+        # l'OHCI) et côté invité (page de DAR traduite par la table de pages
+        # du vCPU, gva2gpa + x) ; une différence dit une traduction périmée.
+        vues = []
+        pci = hmp(vm_mon, "info pci")
+        ecr("pci.txt", pci)
+        m = re.search(r"USB controller.*?BAR0: 32 bit memory at (0x[0-9a-f]+)", pci, re.S)
+        if m:
+            bar = int(m.group(1), 16)
+            vues.append("OHCI BAR0 0x%x (xp) : %s" % (bar, " ".join(
+                "%08x" % w for w in mots(vm_mon, bar, 24))))
+        for c, r in sorted(cpus.items()):
+            if r.get("DAR"):
+                page = r["DAR"] & ~0xfff
+                g = hmp_suite(vm_mon, ["cpu %d" % c, "gva2gpa 0x%x" % page])
+                v = hmp_suite(vm_mon, ["cpu %d" % c, "x /24wx 0x%x" % page])
+                vues.append("cpu%d DAR 0x%x : gva2gpa %s\n%s" % (c, r["DAR"], g.strip(), v))
+        ecr("vues.txt", "\n".join(vues) + "\n")
         if texte:
             vus = []
             for a in adresses_du_texte(texte.split("Kernel version")[0]):
@@ -334,6 +367,34 @@ def collecte(vm_mon, dossier, sym, motif, notes=None):
         ecr("registres-2.txt", regs2)
         c1, c2 = lit_registres(regs1), lit_registres(regs2)
         info["nip_immobile"] = {c: c1[c].get("NIP") == c2.get(c, {}).get("NIP") for c in c1}
+        # boucle serrée : où tourne-t-elle ? 20 relevés de NIP/LR/SRR0/DAR,
+        # puis 0,3 s de journal des exceptions et des fautes MMU de QEMU
+        # (`log int,mmu` : une faute répétée à la même adresse s'y lit)
+        ech = []
+        for _ in range(20):
+            r = lit_registres(hmp(vm_mon, "info registers -a"))
+            ech.append({c: {k: "0x%x" % v for k, v in x.items()
+                            if k in ("NIP", "LR", "SRR0", "SRR1", "DAR", "DSISR", "MSR")}
+                        for c, x in r.items()})
+            time.sleep(0.1)
+        ecr("echantillons.json", json.dumps(ech, indent=1))
+        compte = {}
+        for e in ech:
+            for c, x in e.items():
+                k = "cpu%s %s" % (c, x.get("NIP"))
+                compte[k] = compte.get(k, 0) + 1
+        info["nip_echantillons"] = dict(sorted(compte.items(), key=lambda kv: -kv[1])[:12])
+        jl = os.path.join(dossier, "qemu-int.log")
+        hmp(vm_mon, "logfile %s" % jl)
+        hmp(vm_mon, "log int,mmu")
+        time.sleep(0.3)
+        hmp(vm_mon, "log none")
+        try:
+            if os.path.getsize(jl) > 20_000_000:        # on garde le début
+                with open(jl, "r+b") as f:
+                    f.truncate(20_000_000)
+        except OSError:
+            pass
         p2 = os.path.join(dossier, "ecran-2.ppm")
         hmp(vm_mon, "screendump %s" % p2)
         time.sleep(1)
@@ -357,7 +418,8 @@ def rapport_incident(info, texte):
          "- instance : %s, QEMU : %s" % (info.get("instance", "?"), info.get("qemu", "?")),
          "- panicstr : %s %s" % (info.get("panicstr", "?"), info.get("panicstr_texte", "")),
          "- écran figé : %s ; NIP immobile : %s" % (info.get("ecran_fige"), info.get("nip_immobile")),
-         "- kexts lus dans la mémoire (liste kmod) : %s" % info.get("kmods"), ""]
+         "- kexts lus dans la mémoire (liste kmod) : %s" % info.get("kmods"),
+         "- NIP sur 20 relevés : %s" % info.get("nip_echantillons"), ""]
     if info.get("erreur_collecte"):
         l.append("- ⚠ collecte incomplète : %s" % info["erreur_collecte"])
     l.append("## vCPU")
@@ -397,7 +459,7 @@ class Campagne:
         self.jsonl = os.path.join(self.dir, "cycles.jsonl")
         with open(os.path.join(self.dir, "campagne.json"), "w") as f:
             json.dump({"args": vars(args), "debut": time.strftime("%Y-%m-%d %H:%M:%S"),
-                       "base": BASE, "worktree": WT,
+                       "base": BASE, "worktree": WT, "qemu_binaire": binaire_qemu(args),
                        "commit": subprocess.run(["git", "-C", WT, "rev-parse", "--short", "HEAD"],
                                                 capture_output=True, text=True).stdout.strip()},
                       f, indent=1)
@@ -469,6 +531,7 @@ def instance(camp, slot):
     a = camp.args
     vm = VM(camp.nom, slot, a)
     vivante = False
+    echecs = 0
     try:
         while True:
             i = camp.prochain()
@@ -483,10 +546,16 @@ def instance(camp, slot):
                     res = {"cycle": i, "instance": slot, "etat": "lancement",
                            "detail": open(vm.log).read()[-2000:]}
                     camp.note(res)
-                    journal("[%d] #%d : QEMU ne démarre pas" % (slot, i))
+                    journal("[%d] #%d : QEMU ne démarre pas (%s)" % (slot, i, vm.log))
+                    echecs += 1
+                    if echecs >= 3:         # binaire ou réglage cassé : inutile d'insister
+                        journal("[%d] trois lancements ratés de suite : instance arrêtée" % slot)
+                        break
                     time.sleep(10)
                     continue
+                echecs = 0
                 vivante = True
+                vm.binaire = binaire_qemu(a)
                 t0 = time.time()
             elif a.mode == "reboot":
                 vm.ssh("echo tiger974 | sudo -S shutdown -r now", delai=30)
@@ -499,6 +568,7 @@ def instance(camp, slot):
                 t0 = time.time()
             etat, det = attend_demarrage(vm, t0, a.delai, a.repos)
             res = {"cycle": i, "instance": slot, "etat": etat, "mode": a.mode,
+                   "binaire": getattr(vm, "binaire", ""),
                    "duree": round(time.time() - t0),
                    "t_ssh": det.get("t_ssh"), "port": vm.port}
             if etat == "ok":
