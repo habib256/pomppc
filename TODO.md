@@ -55,6 +55,16 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 
 Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête.
 
+- [ ] **[Son] Le son saccade dans DOOM 3** (demande de l'utilisateur, 29/09 ; les autres
+  jeux ne saccadent pas ou presque) : à prendre dès la fusion des chantiers en cours, avant
+  la vitesse. Observer ce qui se passe pendant une saccade : sous-alimentation du Screamer
+  (anneau PCM vide, `screamer_pull_deferred`, silence inséré), DMA de l'invité en retard
+  (fil audio de DOOM 3, vCPU saturé, BQL tenu par le rendu ou les doorbells synchrones,
+  `wait_ms`/`submit_ms` de `frames.csv`), minuterie audio hôte (`timer-period`, CoreAudio),
+  corrélation avec les pics de ms/image. Pistes : `docs/audio-stabilite.md`,
+  `scripts/tiger_audio.sh`. **Fermeture :** mécanisme mesuré sur une saccade reproduite,
+  correction, puis partie DOOM 3 sans saccade audible ni silence inséré compté.
+
 - [ ] **[Système] Panique pendant le diagnostic UT2004 (27/09, 15:50)** : CPU 1,
   `Lock timeout`, PC `0x000AA010`, LR `0x00003820`, pile désalignée. Cause inconnue ;
   ne pas l'attribuer sans preuve à AppleUSBOHCI. Capture `bench/utweapon-priorites/panic.png`,
