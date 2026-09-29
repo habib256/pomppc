@@ -6,8 +6,8 @@ sur le GPU de l'hôte, avec une matrice de jeux verte comme preuve.
 **Orientation choisie le 29/09 : une VM qui ne plante plus.** Le code a été relu
 en quatre passes (`docs/bug-hunt-2026-09-2*.md`) ; ce qui reste casse en usage
 réel et ne se trouvera qu'en le reproduisant dans la VM. Les autres orientations
-proposées le même jour (jeux, vitesse, maintenabilité, 1.0) sont rangées dans
-« Plus tard » sous leur nom, dans l'ordre où elles seront reprises.
+proposées le même jour sont rangées dans « Plus tard » sous leur nom ; **la vitesse
+est l'orientation suivante** (choisie le 29/09), puis jeux, maintenabilité et 1.0.
 
 Les chantiers sont rangés par priorité ; leur domaine figure entre crochets.
 **Maintenant** contient au plus trois chantiers, **Ensuite** donne l'ordre de prise,
@@ -96,6 +96,38 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
 Les orientations proposées le 29/09, dans l'ordre de reprise prévu. Conserver les
 dépendances et mesurer avant d'optimiser.
 
+### Vitesse — orientation suivante (choisie le 29/09)
+
+Ouverte dès que les chantiers de fiabilité libèrent l'hôte : une mesure A/B exige un
+hôte au repos (aucune autre VM, charge relevée avant et après la fenêtre de mesure).
+Ordre : planchers recalés, puis TCG (cache de sauts, verrou `mtmsr`/`rfi`), puis GPU
+(`glUniform`, doorbell asynchrone), puis A4 et flottant AArch64 natif.
+
+- [ ] **[Métrologie] Recaler les planchers de la matrice** (préalable à tout A/B) : tour complet
+  sur hôte au repos, planchers réécrits d'après les ms/image mesurés.
+
+Contexte : Sur hôte au repos, le 29/09, Marble Blast
+fenêtre tourne à 8,9 ms/image et DOOM 3 fenêtre à 33,8 (contre 60,7 au tour du 27/09).
+
+- [ ] **[Métrologie] Troisième facteur de lenteur** (`docs/tcg-g4.md` §14.7) : une partie DOOM 3
+  sur huit lente de bout en bout ; cause inconnue (cœurs P/E, autre processus, thermique ?).
+  Le 29/09, une charge hôte de 40–53 (autre projet, Spotlight) a doublé les ms/image :
+  la matrice relève désormais la charge avant et après la fenêtre de mesure.
+- [ ] **[Plugin] Nexuiz / GLSL** : chaque `glUniform` pose le bit `0x04000000` et fait recalculer
+  le verdict (154 298 dispatches sur 173 572). Sans perdre la détection des samplers.
+- [ ] **[TCG] Cache de sauts plus grand** (16 384 entrées, `docs/tcg-g4.md` §16.6).
+- [ ] **[TCG] Verrou global à chaque `mtmsr`/`rfi`** (`ppc_maybe_interrupt`,
+  `cpu_interrupt_exittb`) : chemin sans verrou quand l'état d'interruption ne change pas.
+- [ ] **[Protocole] Doorbell asynchrone côté invité** (bug hunt D2) : mesure du BQL tenu par
+  image sous `GPU_TRACE=1` (`docs/smp-coeurs.md` §3, levier L4).
+- [ ] **[Plugin] Transmission paresseuse** : mesure honnête et décision du défaut.
+- [ ] **[Protocole] A4 — Déplacer le travail vers l'hôte** : bloc d'état partagé lu par le
+  device, textures par DMA sur plages sales, empaquetage minimal. Épreuve : `send_state` et
+  `compute_state` sortent du profil.
+- [ ] **[Backend GL]** G7 `glTexSubImage*` par rectangle sale, G8 PBO en rotation pour
+  `SURF_PRESENT`, G9 cache d'état dans `gl_target`.
+- [ ] **[TCG] Flottant scalaire en instructions AArch64 natives** (`docs/tcg-g4.md` §15.7).
+
 ### Jeux — tous les jeux, toutes les résolutions
 
 - [ ] **[Jeux] Colin McRae en 1024×768 et au-delà** (défaut signalé par l'utilisateur le
@@ -132,30 +164,6 @@ dépendances et mesurer avant d'optimiser.
 - [ ] **[Backend GL] `gltest tex14` « λ=2 sans biais »** : défaut du GL de l'hôte macOS (le
   biais d'unité du dessin précédent reste appliqué ; un `glFlush` le corrige mais coûte).
   Décision : ne réappliquer que sur changement, ou passer le biais dans l'échantillonneur.
-
-### Vitesse
-
-Préalable : recaler les planchers de la matrice. Sur hôte au repos, le 29/09, Marble Blast
-fenêtre tourne à 8,9 ms/image et DOOM 3 fenêtre à 33,8 (contre 60,7 au tour du 27/09).
-
-- [ ] **[Métrologie] Troisième facteur de lenteur** (`docs/tcg-g4.md` §14.7) : une partie DOOM 3
-  sur huit lente de bout en bout ; cause inconnue (cœurs P/E, autre processus, thermique ?).
-  Le 29/09, une charge hôte de 40–53 (autre projet, Spotlight) a doublé les ms/image :
-  la matrice relève désormais la charge avant et après la fenêtre de mesure.
-- [ ] **[Plugin] Nexuiz / GLSL** : chaque `glUniform` pose le bit `0x04000000` et fait recalculer
-  le verdict (154 298 dispatches sur 173 572). Sans perdre la détection des samplers.
-- [ ] **[TCG] Cache de sauts plus grand** (16 384 entrées, `docs/tcg-g4.md` §16.6).
-- [ ] **[TCG] Verrou global à chaque `mtmsr`/`rfi`** (`ppc_maybe_interrupt`,
-  `cpu_interrupt_exittb`) : chemin sans verrou quand l'état d'interruption ne change pas.
-- [ ] **[Protocole] Doorbell asynchrone côté invité** (bug hunt D2) : mesure du BQL tenu par
-  image sous `GPU_TRACE=1` (`docs/smp-coeurs.md` §3, levier L4).
-- [ ] **[Plugin] Transmission paresseuse** : mesure honnête et décision du défaut.
-- [ ] **[Protocole] A4 — Déplacer le travail vers l'hôte** : bloc d'état partagé lu par le
-  device, textures par DMA sur plages sales, empaquetage minimal. Épreuve : `send_state` et
-  `compute_state` sortent du profil.
-- [ ] **[Backend GL]** G7 `glTexSubImage*` par rectangle sale, G8 PBO en rotation pour
-  `SURF_PRESENT`, G9 cache d'état dans `gl_target`.
-- [ ] **[TCG] Flottant scalaire en instructions AArch64 natives** (`docs/tcg-g4.md` §15.7).
 
 ### Maintenabilité du plugin
 
