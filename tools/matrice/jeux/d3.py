@@ -11,8 +11,11 @@ verdict unique et des A/B TCG.
 Fenêtre : r_mode 3 (640×480) ; plein écran : r_mode 5 (1024×768, la taille du
 bureau, pas de changement de mode). Jamais de `+bind` (il s'enregistre dans
 DoomConfig.cfg) ; DoomConfig.cfg est sauvegardé puis rendu quand même.
-Après un kill de DOOM 3, tout lancement suivant échoue (kCGLBadDisplay) :
-l'invité est redémarré après la cellule.
+Plus de redémarrage de l'invité après la cellule (29/09) : le « kCGLBadDisplay
+après un kill » du 24/09 ne se reproduit plus (25 kills TERM/KILL, fenêtre et
+plein écran, au chargement et en jeu, chacun suivi d'un lancement réussi,
+docs/gel-doom3-baddisplay.md). La matrice vérifie à la place que le kext a
+rendu la tranche du jeu tué.
 """
 from jeu import Jeu
 
@@ -58,7 +61,7 @@ class Doom3(Jeu):
     plancher_ms = 100           # 73-79 ms/image au 26/09 (sans déclencheur), marge pour le bruit
     delai_scene = 1500
     dump_images = 20
-    redemarrer_apres = True
+    redemarrer_apres = False    # 29/09 : voir la docstring
 
     def fichiers_reglages(self, mode):
         return [CFG]

@@ -117,9 +117,12 @@ Un lancement (`Cellule.jouer`, `tools/matrice/matrice.py`) :
 6. arrêt du jeu (`kill`), fermeture de Terminal une fois `lance.command` fini (sinon dialogue),
    réglages rendus, nettoyage du jeu (CD démonté) ;
 7. rapatriement du dossier de l'invité (tar par ssh), puis effacement dans l'invité ;
-8. DOOM 3 : **redémarrage de l'invité** (après un kill, tout relancement échoue en
-   `kCGLBadDisplay`, TODO §5) ; panique AppleUSBOHCI au démarrage : `system_reset` et on
-   réessaie.
+8. contrôle des clients du kext (`ioreg -c POMPPCGPUUserClient`) : il n'en reste aucun
+   hors jeu, sinon la cellule le note et l'invité est **redémarré** (tranches perdues).
+   Depuis le 29/09, DOOM 3 ne redémarre plus l'invité d'office : le `kCGLBadDisplay`
+   après un kill ne se reproduit plus (0 sur 25, `docs/gel-doom3-baddisplay.md` §1).
+   Colin McRae le fait encore. Panique AppleUSBOHCI au démarrage : `system_reset` et
+   on réessaie.
 
 Un tour interrompu laisse au pire des `*.matrice-sauve` : le tour suivant les rend d'abord.
 
@@ -230,12 +233,19 @@ une liste d'instances (profils d'un même jeu, Nexuiz).
 - **Marble Blast en fenêtre** : utiliser les deux fichiers de préférences réglés par le
   module ; une fenêtre 1024×768 sur le bureau 1024×768 perd sa présentation directe.
 - **Invité gelé** : quatre relevés ssh manqués de suite (~5 min) et la cellule est rouge
-  (« l'invité ne répond plus »), l'invité est relancé par `system_reset`, puis, si le
+  (« l'invité ne répond plus ») ; autopsie d'abord (`gel/gel.ppm`, `gel/kpanic.txt` :
+  registres symbolisés et texte de panique, depuis le 29/09), puis l'invité est relancé
+  par `system_reset`, puis, si le
   démarrage reste bloqué, QEMU est arrêté et `./run_tiger.sh` relancé (détaché). Vu le 26/09 :
   un gel pendant le chargement de DOOM 3 (lancement de preuve, juste après un redémarrage de
   l'invité), vCPU 0 bouclant en `0x268b4` interruptions coupées, vCPU 1 en `0xaf6b4`, pas
   de `panic.log` ; deux `system_reset` de suite sont ensuite restés bloqués au démarrage
-  (« using 1966 buffer headers… ») ; un QEMU relancé est reparti en 30 s. Noté au TODO §5.
+  (« using 1966 buffer headers… ») ; un QEMU relancé est reparti en 30 s. **Relu le 29/09**
+  (`docs/gel-doom3-baddisplay.md`) : `0x268b4` = `_panic+0x254`, c'est une panique dont
+  Tiger ne garde aucune trace, et `0xaf6b4` = `_machine_idle` ; au prochain cas, lancer
+  `python3 tools/re/kpanic.py mach_kernel` AVANT le reset. Les resets bloqués venaient de
+  l'OpenPIC de QEMU (interruption OHCI restée en attente), corrigé par
+  `patches/openpic/0001`.
   Le 27/09 à 15:50, lancement de diagnostic UT2004 : panique `CPU 1`, code
   `0000000A (Lock timeout)`, PC `0x000AA010`, LR `0x00003820`, R1 `0xFE054021`.
   Pas de `/Library/Logs/panic.log` après reprise. `system_reset` est resté bloqué

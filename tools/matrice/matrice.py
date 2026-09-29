@@ -529,7 +529,11 @@ class Cellule:
         finally:
             if not en_pause:
                 if self.gele:
-                    # rien ne passe par ssh : RESET, puis on rend les réglages
+                    # rien ne passe par ssh : autopsie AVANT le reset (le texte
+                    # d'une panique ne vit que dans la mémoire de l'invité),
+                    # puis RESET, puis on rend les réglages
+                    self.etape("autopsie de l'invité gelé",
+                               lambda: h.autopsie(os.path.join(self.dir, "gel")))
                     self.etape("redémarrage de l'invité gelé", h.redemarre)
                 self.etape("arrêt du jeu", lambda: j.arreter(h))
                 # Terminal ne quitte sans dialogue que si lance.command est fini
@@ -551,7 +555,15 @@ class Cellule:
         finally:
             # le vidage pèse : on ne le laisse pas dans l'invité
             self.etape("ménage de l'invité", lambda: h.ssh("rm -rf %s" % self.gd))
-            if j.redemarrer_apres and not self.gele:
+            # 29/09 : DOOM 3 ne redémarre plus l'invité — 25 kills suivis d'un
+            # relancement sans redémarrage, tous bons. On vérifie à la place
+            # que le kext a rendu toutes ses tranches ; sinon (ou pour un jeu
+            # qui le demande encore), redémarrage.
+            restants = None if self.gele else self.etape("clients du kext", h.clients_kext)
+            if restants:
+                self.res["motifs"].append("%d client(s) du kext restant(s) après l'arrêt du jeu "
+                                          "(tranches perdues) : invité redémarré" % restants)
+            if (j.redemarrer_apres or restants) and not self.gele:
                 if not self.etape("redémarrage de l'invité", h.redemarre):
                     self.res["motifs"].append("l'invité ne redémarre pas")
         self.res["duree_s"] = int(time.time() - t0)
@@ -812,14 +824,17 @@ def main():
     h = Hote()
     if not h.attend_ssh(60):
         sys.exit("l'invité ne répond pas (VM lancée ? .run/cmr/tssh.sh uptime)")
+    if not h.noyau_local():
+        journal("pas de copie de /mach_kernel : un gel ne sera pas symbolisé")
     # un tour interrompu a pu laisser un jeu en marche : on l'arrête (et on
-    # redémarre l'invité si c'était DOOM 3), puis on rend les réglages
+    # redémarre l'invité si le jeu le demande ou si le kext garde des
+    # clients), puis on rend les réglages
     for j in jeux.values():
         if j.processus and h.processus(j.processus):
             journal("jeu resté en marche : %s, arrêté" % j.titre)
             j.arreter(h)
             h.ssh("osascript -e 'tell application \"Terminal\" to quit' 2>/dev/null; true")
-            if j.redemarrer_apres:
+            if j.redemarrer_apres or h.clients_kext():
                 h.redemarre()
     restaure_orphelins(h, jeux)
     for j in jeux.values():

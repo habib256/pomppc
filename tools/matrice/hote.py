@@ -8,6 +8,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import time
 
 ICI = os.path.dirname(os.path.abspath(__file__))
@@ -142,6 +143,45 @@ class Hote:
         return "\n".join(l for l in out.split("\n")
                          if l.strip() and "(qemu)" not in l and l.strip() != commande)
 
+    NOYAU = os.path.join(RUN, "mach_kernel")
+
+    def noyau_local(self):
+        """Copie hôte du /mach_kernel de l'invité (.run/mach_kernel, non
+        versionnée), prise tant que l'invité répond : kpanic.py en a besoin
+        pour symboliser un gel. Chemin, ou None."""
+        if os.path.exists(self.NOYAU) and os.path.getsize(self.NOYAU) > 1000000:
+            return self.NOYAU
+        try:
+            with open(self.NOYAU + ".part", "wb") as f:
+                r = subprocess.run([TSSH, "cat /mach_kernel"], stdout=f, timeout=120)
+            if r.returncode == 0 and os.path.getsize(self.NOYAU + ".part") > 1000000:
+                os.replace(self.NOYAU + ".part", self.NOYAU)
+                return self.NOYAU
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return None
+
+    def autopsie(self, dossier):
+        """Invité gelé, AVANT tout reset : écran et tools/re/kpanic.py
+        (PC/LR symbolisés, texte de panique, pile) dans `dossier`. Le gel
+        du 26/09 était une panique dont Tiger ne garde aucune trace
+        (docs/gel-doom3-baddisplay.md §2) : ce relevé est la seule preuve."""
+        os.makedirs(dossier, exist_ok=True)
+        try:
+            self.capture(os.path.join(dossier, "gel.ppm"))
+        except OSError:
+            pass
+        if not os.path.exists(self.NOYAU):
+            journal("autopsie : pas de .run/mach_kernel, kpanic.py sauté")
+            return
+        with open(os.path.join(dossier, "kpanic.txt"), "w") as f:
+            try:
+                subprocess.run([sys.executable, os.path.join(WT, "tools", "re", "kpanic.py"),
+                                self.NOYAU, self.mon], stdout=f, stderr=subprocess.STDOUT, timeout=600)
+            except subprocess.TimeoutExpired:
+                f.write("kpanic.py : délai dépassé\n")
+        journal("autopsie : %s" % os.path.join(dossier, "kpanic.txt"))
+
     def capture(self, chemin):
         """screendump de l'écran de la VM (PPM)."""
         if os.path.exists(chemin):
@@ -236,6 +276,18 @@ class Hote:
                          stdout=open(os.path.join(MAIN, ".run", "run_tiger-matrice.log"), "w"),
                          stderr=subprocess.STDOUT)
         return True
+
+    def clients_kext(self):
+        """Nombre de clients ouverts du kext POMPPCGPU (une tranche chacun,
+        quatre au plus). Hors jeu, il doit être nul : un client qui reste
+        après l'arrêt du jeu est une tranche perdue — et quatre tranches
+        perdues donnent à DOOM 3 « no OpenGL-supported video card » (29/09).
+        None si ioreg ne répond pas."""
+        out = self.sortie("ioreg -w0 -c POMPPCGPUUserClient | grep -c 'POMPPCGPUUserClient '; true")
+        try:
+            return int(out.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            return None
 
     def processus(self, nom):
         """pids des processus dont le nom (ps -c) vaut `nom`."""

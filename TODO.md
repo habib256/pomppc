@@ -39,19 +39,24 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   sur dix (`docs/smp-coeurs.md`). Premier client du banc : c'est l'incident le plus
   fréquent et le plus facile à provoquer. Le choix SMP=2 est déjà tranché ; le CPU 1
   démarre au relâchement du GPIO 4 depuis le 29/09 (bug hunt, M1) — mesurer le taux
-  avant de supposer quoi que ce soit.
+  avant de supposer quoi que ce soit. Piste (29/09, non prouvée) : l'OpenPIC gardait au
+  reset une interruption OHCI en attente (`patches/openpic/0001`, binaire du 29/09
+  17:35:50) ; comparer le taux avant et après, et lire chaque panique avec `kpanic.py`.
   **Fermeture :** cause identifiée, correction, puis série de démarrages (≥ 100) sans panique.
 
-- [ ] **[Système] Gel de l'invité au chargement de DOOM 3 et `kCGLBadDisplay` après
-  un `killall`** : gel (matrice, 26/09, 1 lancement sur ~12) = plus de ssh, vCPU 0
-  bouclant en `0x268b4` (EE coupé), vCPU 1 en `0xaf6b4`, pas de `panic.log`, puis deux
-  `system_reset` bloqués au démarrage (« using 1966 buffer headers ») ; relevé dans
-  `docs/matrice-jeux.md` §5. `kCGLBadDisplay` : après un `killall` de DOOM 3, tout
-  lancement GL suivant échoue jusqu'au redémarrage de l'invité ; Prey et `gltest`
-  démarrent. Causes non trouvées.
-  **Fermeture :** chacun reproduit sur le banc, cause établie, correction, série sans incident.
+- [ ] **[Système] Paniques par délai de verrou (`LockTimeOut` = 250 ms)** — le « gel au
+  chargement de DOOM 3 » (26/09, 1 lancement sur ~12) est une **panique** : `0x268b4` =
+  `_panic+0x254` (boucle finale, EE coupé), vCPU 1 au repos (`_machine_idle`) ; sans
+  kdp, Tiger n'en garde ni écran ni `panic.log`. Texte perdu ; mécanisme probable : un
+  arrêt de vCPU côté QEMU (BQL, doorbell synchrone, hôte chargé) compté par `mftb` dans
+  un délai de verrou tournant, comme la panique UT2004 du 27/09 (`Lock timeout` dans
+  `_fpu_switch`). Arrêts mesurés : 95 ms au plus (`stallmeter`, kills de DOOM 3).
+  `docs/gel-doom3-baddisplay.md` §2. **Au prochain gel :** `python3 tools/re/kpanic.py
+  mach_kernel` AVANT tout reset (texte, appelant, pile). **Fermeture :** texte d'une
+  vraie occurrence lu, cause établie, puis correction (relever `LockTimeOut` par le
+  kext, ou borner les arrêts de vCPU) et série sans incident.
 
-## Ensuite
+## Ensuite## Ensuite
 
 Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête.
 
