@@ -11,24 +11,37 @@ source = (ROOT / 'patches/screamer/screamer.c').read_text()
 callback = source[source.index('static void screamer_pull_deferred('):source.index('static void screamer_update_settings(')]
 stub = r'''
 #include <assert.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
 #define MIN(a,b) ((a)<(b)?(a):(b))
 #define FRAME_CNT_REG 5
 #define DBDMA_STATUS 0
-#define RUN 1
-#define ACTIVE 2
+#define DBDMA_CMDPTR_LO 1
+#define RUN 0x8000
+#define ACTIVE 0x0400
 #define SCREAMER_DPRINTF(...) ((void)0)
+#define le16_to_cpu(x) (x)
+#define cpu_to_le16(x) (x)
+#define MEMTXATTRS_UNSPECIFIED 0
+static int address_space_memory;
+typedef struct { uint16_t req_count, command; uint32_t phy_addr, cmd_dep;
+                 uint16_t res_count, xfer_status; } dbdma_cmd;
 typedef struct { int processing; } DBDMA_chan_io;
-typedef struct { unsigned regs[1]; int channel; DBDMA_chan_io io; } DBDMA_channel;
+typedef struct { unsigned regs[2]; int channel; DBDMA_chan_io io; dbdma_cmd current; } DBDMA_channel;
+/* témoin des écritures de descripteur : adresse et valeur du dernier xfer_status */
+static uint32_t wr_addr; static uint16_t wr_val; static unsigned wr_n;
+#define dma_memory_write(as, addr, buf, len, attr) \
+  do { (void)(as); (void)(attr); assert((len)==2); wr_addr=(addr); \
+       memcpy(&wr_val,(buf),2); wr_n++; } while (0)
 typedef struct { DBDMA_channel channels[1]; } DBDMAState;
 #define container_of(p,t,m) ((t *)(p))
 typedef struct { DBDMA_channel *channel; int len; } DBDMA_io;
 typedef struct {
   void *voice; int samples; unsigned shift;
   uint32_t wpos, rpos, rate; int running;
-  unsigned regs[6]; uint8_t *mixbuf; DBDMA_io io;
+  unsigned regs[6]; uint8_t *mixbuf; DBDMA_io io; uint32_t io_cmdptr;
 } ScreamerState;
 static uint8_t output[512];
 static unsigned written, limit = 64, kicks;
@@ -52,13 +65,15 @@ static void pmac_screamer_tx_transfer(ScreamerState *s) {
     memset(s->mixbuf, 0x22, (size_t)(frames - first) << s->shift);
   s->wpos += (uint32_t)frames;
   s->io.len -= frames << s->shift;
+  if (s->io.len == 0)   /* dbdma_end() : statut du canal recopié dans le descripteur */
+    s->io.channel->current.xfer_status = (uint16_t)s->io.channel->regs[DBDMA_STATUS];
 }
 static void DBDMA_kick(DBDMAState *s) { (void)s; ++kicks; }
 '''
 test = r'''
 int main(void) {
   uint8_t pcm[16]; memset(pcm,0x11,sizeof(pcm));
-  DBDMA_channel channel={{RUN|ACTIVE},0,{1}};
+  DBDMA_channel channel={{RUN|ACTIVE,0},0,{1},{0,0,0,0,0,0}};
   ScreamerState s={.samples=4,.shift=2,.wpos=4,.mixbuf=pcm,.io={&channel,0}};
   limit=4; screamerspk_callback(&s,16);
   assert(written==4 && s.rpos==1 && s.regs[5]==1); // no discarded samples
@@ -92,6 +107,23 @@ int main(void) {
   channel.regs[0]=RUN|ACTIVE; channel.io.processing=0; screamerspk_callback(&s,16);
   assert(kicks==0 && s.io.len==8);
   channel.io.processing=1; s.io.len=0;
+  /* Fin de commande par le callback : le descripteur porte RUN|ACTIVE, comme
+     sur le DBDMA réel, et non le statut sans RUN du transfert. */
+  written=0; kicks=0; wr_n=0; s.wpos=0; s.rpos=0; s.io.len=8;
+  channel.regs[DBDMA_CMDPTR_LO]=0x1000; s.io_cmdptr=0x1000; channel.current.xfer_status=0x1234;
+  screamerspk_callback(&s,16);
+  assert(kicks==1 && s.io.len==0 && wr_n==1);
+  assert(wr_addr==0x1000+offsetof(dbdma_cmd,xfer_status) && wr_val==(RUN|ACTIVE));
+  assert(channel.regs[DBDMA_STATUS]==(RUN|ACTIVE));
+  /* Fragment en cours sans fin de commande : témoin rendu, rien d'écrit. */
+  wr_n=0; kicks=0; s.wpos=0; s.rpos=0; s.io.len=64; channel.current.xfer_status=0x1234;
+  screamerspk_callback(&s,4);
+  assert(wr_n==0 && channel.current.xfer_status==0x1234 && s.io.len>0);
+  /* CMDPTR réécrit pendant une pause : fragment abandonné, rien tiré. */
+  unsigned w0=s.wpos; channel.regs[DBDMA_CMDPTR_LO]=0x2000; kicks=0;
+  screamerspk_callback(&s,16);
+  assert(s.io.len==0 && s.io.channel==0 && channel.io.processing==0 && kicks==1 && s.wpos==w0);
+  channel.io.processing=1; s.io.channel=&channel; channel.regs[DBDMA_CMDPTR_LO]=0; s.io_cmdptr=0;
 
   uint8_t ring[256];
   memset(ring, 0x33, sizeof(ring));
