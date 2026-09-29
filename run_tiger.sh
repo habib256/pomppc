@@ -503,7 +503,7 @@ fi
 read -r -a USER_EXTRA <<< "${EXTRA_ARGS:-}"
 
 BOOTDEV='hd:10,\System\Library\CoreServices\BootX'
-MON="$SCR/mon.sock"; rm -f "$MON"
+MON=$(host_mon_path "$SCR/mon.sock")   # jamais le socket d'une VM vivante (SNAPSHOT=1)
 
 echo "▶ Tiger : $MODE | cpu=$CPU_SPEC ram=${RAM}Mo affichage=$DISP \
 réseau=$([ -n "${NET:-}" ] && echo on || echo off) \

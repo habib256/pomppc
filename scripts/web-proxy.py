@@ -95,10 +95,13 @@ DROP_HEADERS = {"strict-transport-security", "content-security-policy",
 HOP_HEADERS = {"proxy-connection", "connection", "keep-alive", "te", "trailer",
                "upgrade", "proxy-authorization", "accept-encoding"}
 MAX_BODY = 64 * 1024 * 1024
-# Anti-boucle : le relais marque ce qu'il émet (Via) et refuse ce qui porte
-# déjà sa marque ; il refuse aussi toute cible qui retombe sur son propre port
-# en local, quel que soit le nom (0.0.0.0, localhost., [::1], 127.1…).
-VIA = "1.1 pomppc"
+# Anti-boucle : le relais refuse toute cible qui retombe sur son propre port en
+# local, quel que soit le nom (0.0.0.0, localhost., [::1], 127.1…), et une
+# requête qui porterait déjà sa marque (Via). Il n'AJOUTE plus cette marque à
+# ce qu'il émet vers les vrais serveurs : nginx (gzip_proxied off par défaut)
+# ne compressait plus rien, et c'est un marqueur de proxy pour les murs
+# anti-robots que UA_MODERNE cherche à éviter. Le relais n'écoutant que sur
+# 127.0.0.1, se_vise suffit à couper toute boucle.
 PORT_ECOUTE = 0
 STREAM_OVER = 8 * 1024 * 1024       # au-delà, un fichier non retouché part en flux
 # Ce que voient les serveurs : un navigateur moderne (sinon « navigateur non
@@ -878,7 +881,6 @@ class Handler(BaseHTTPRequestHandler):
         headers["Connection"] = "close"
         headers["User-Agent"] = UA_MODERNE
         headers["Accept"] = ACCEPT
-        headers["Via"] = (headers["Via"] + ", " + VIA) if headers.get("Via") else VIA
         for k in ("Origin", "Referer"):
             if k in headers:
                 headers[k] = headers[k].replace("http://", "https://", 1)

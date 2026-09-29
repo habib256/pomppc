@@ -18,6 +18,9 @@
 #   host_now                # horloge murale en secondes, avec décimales
 #   host_cpu_time PID       # temps CPU cumulé (s) de PID, « ? » s'il est parti
 #   host_lock_vm FD FICHIER # prend le verrou disque de la VM sur FD, ou sort
+#   host_sock_alive CHEMIN  # 0 si un QEMU écoute sur ce socket unix
+#   host_mon_path CHEMIN    # socket moniteur à utiliser : CHEMIN (libéré) s'il
+#                           # est libre, sinon un socket propre à l'instance
 #
 # Autre piège macOS, traité dans les scripts eux-mêmes : bash 3.2 (celui de
 # macOS) tient un tableau VIDE pour non défini sous `set -u`, et
@@ -72,8 +75,10 @@ host_cpu_time() {
     awk -v hz="$hz" '{print ($14+$15)/hz}' "/proc/$pid/stat"
   else
     # ps : [[h:]m:]s.cc
+    # LC_ALL=C sur les DEUX côtés du tube : l'awk de macOS suit LC_NUMERIC et,
+    # en locale française, lisait « 43.31 » comme 43.
     LC_ALL=C ps -o time= -p "$pid" 2>/dev/null |
-      awk -F: 'NF { t = 0; for (i = 1; i <= NF; i++) t = t * 60 + $i; print t; ok = 1 }
+      LC_ALL=C awk -F: 'NF { t = 0; for (i = 1; i <= NF; i++) t = t * 60 + $i; print t; ok = 1 }
                END { if (!ok) print "?" }'
   fi
 }
@@ -87,6 +92,31 @@ host_lock_vm() {
   if ! host_lock_fd "$fd"; then
     echo "⚠  une VM Tiger tourne déjà (verrou $file) : ferme-la d'abord." >&2
     exit 1
+  fi
+}
+
+host_sock_alive() {
+  [ -S "$1" ] || return 1
+  python3 -c 'import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(1)
+try:
+    s.connect(sys.argv[1])
+except OSError:
+    sys.exit(1)' "$1" 2>/dev/null
+}
+
+# Le verrou disque ne protège pas un socket moniteur : une VM en SNAPSHOT=1
+# n'en prend aucun, et `rm -f` retirait le socket d'une VM vivante — ./mount,
+# killgame.py ou cycle.sh visaient alors la mauvaise VM. Un socket vivant n'est
+# jamais supprimé : l'instance qui arrive prend le sien (base-PID.sock).
+host_mon_path() {
+  local base="$1"
+  if host_sock_alive "$base"; then
+    echo "${base%.sock}-$$.sock"
+  else
+    rm -f "$base"
+    echo "$base"
   fi
 }
 
