@@ -966,7 +966,11 @@ int main(int argc, char** argv) {
         // (ClearInputKeys) sans que IsKeyReleased devienne jamais vrai —
         // Commande restait enfoncée dans l'invité. La perte de focus passe
         // donc par la branche « relâcher tout » ci-dessous.
-        const bool focused = glfwGetWindowAttrib(window, GLFW_FOCUSED) != 0;
+        // Une épreuve POMPPC_FE_SCRIPT en cours injecte ses propres
+        // événements : elle vaut le focus (frontend lancé par un agent ou un
+        // terminal, sans activation de l'application).
+        const bool focused = glfwGetWindowAttrib(window, GLFW_FOCUSED) != 0
+                             || probeIdx < probe.size();
         bool keysLive = grabbed && focused && !io.WantTextInput && bridge->running();
         if (keysLive) {
             for (int i = 0; i < kKeyCount; ++i) {

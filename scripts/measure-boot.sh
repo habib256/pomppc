@@ -29,7 +29,7 @@ MAXLOAD="${MAXLOAD:-1.0}"
 
 SCR="${POMPPC_SCRATCH:-$ROOT/.run}"; mkdir -p "$SCR"
 host_lock_vm 9 "$SCR/tiger.lock"   # AVANT le rm : le socket peut être celui d'une VM vivante
-MON="$SCR/mon.sock"; rm -f "$MON"
+MON=$(host_mon_path "$SCR/mon.sock")   # une VM SNAPSHOT=1 ne tient pas le verrou
 PIDFILE="$SCR/measure.pid"; rm -f "$PIDFILE"
 FRAMES="$ROOT/bench/frames"; mkdir -p "$FRAMES"; rm -f "$FRAMES"/*.png 2>/dev/null || true
 BOOTDEV='hd:10,\System\Library\CoreServices\BootX'

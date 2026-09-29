@@ -786,17 +786,25 @@ void QemuBridge::queueInline(bool scanout, int x, int y, int w, int h,
         // de la zone. L'ancienne limite (4 en file) sautait dès qu'une rafale
         // de petits rectangles tombait entre deux images. Seule borne : la
         // mémoire, pour un fil de rendu qui ne draine plus du tout.
+        // Un Scanout, lui, n'est JAMAIS jeté : il vide la file et s'y place en
+        // tête, et le perdre laissait fb_ à l'ancienne taille — les Updates
+        // suivants étaient collés avec l'ancien pas de ligne (changement de
+        // mode d'un jeu pendant que le fil de rendu est bloqué). On jette
+        // donc le plus ancien Update, derrière un éventuel Scanout de tête.
         constexpr size_t kMaxInlineBytes = 256u << 20;
-        while (!impl_->inlineQ.empty() && impl_->inlineBytes > kMaxInlineBytes) {
+        while (impl_->inlineBytes > kMaxInlineBytes) {
+            auto victim = impl_->inlineQ.begin();
+            if (victim != impl_->inlineQ.end() && victim->scanout) ++victim;
+            if (victim == impl_->inlineQ.end()) break;
             static bool once = false;
             if (!once) {
                 std::fprintf(stderr, "QemuBridge: file d'images saturée (%zu Mio), "
                              "image intermédiaire abandonnée\n", impl_->inlineBytes >> 20);
                 once = true;
             }
-            impl_->inlineBytes -= g_variant_get_size(impl_->inlineQ.front().data);
-            g_variant_unref(impl_->inlineQ.front().data);
-            impl_->inlineQ.erase(impl_->inlineQ.begin());
+            impl_->inlineBytes -= g_variant_get_size(victim->data);
+            g_variant_unref(victim->data);
+            impl_->inlineQ.erase(victim);
         }
     }
     Impl::InlineFrame frame;
