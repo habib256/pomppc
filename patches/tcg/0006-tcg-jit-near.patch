@@ -77,7 +77,7 @@ index f71305765..12e4ed3d1 100644
   * tcg_register_thread: Register this thread with the TCG runtime
   *
 diff --git a/tcg/region.c b/tcg/region.c
-index 478ec051c..6148252eb 100644
+index 478ec051c..a6f8bddf8 100644
 --- a/tcg/region.c
 +++ b/tcg/region.c
 @@ -34,6 +34,10 @@
@@ -157,7 +157,28 @@ index 478ec051c..6148252eb 100644
      if (buf == MAP_FAILED) {
          error_setg_errno(errp, errno,
                           "allocate %zu bytes for jit buffer", size);
-@@ -774,6 +831,8 @@ void tcg_region_init(size_t tb_size, int splitwx, unsigned max_cpus)
+@@ -630,11 +687,18 @@ static int alloc_code_gen_buffer_splitwx_vmremap(size_t size, Error **errp)
+     vm_prot_t cur_prot, max_prot;
+ 
+     /* Map the read-write portion via normal anon memory. */
+-    if (!alloc_code_gen_buffer_anon(size, PROT_READ | PROT_WRITE,
+-                                    MAP_PRIVATE | MAP_ANONYMOUS, errp)) {
++    if (alloc_code_gen_buffer_anon(size, PROT_READ | PROT_WRITE,
++                                   MAP_PRIVATE | MAP_ANONYMOUS, errp) < 0) {
+         return -1;
+     }
+ 
++    /*
++     * POMPPC : x-jit-near peut avoir réduit le tampon. Le remap et le
++     * mprotect qui suivent doivent porter sur la taille OBTENUE, pas sur la
++     * taille demandée, sinon ils débordent au-delà du tampon anonyme.
++     * (Le test amont « !alloc… » laissait passer l'échec, qui rend -1.)
++     */
++    size = region.total_size;
+     buf_rw = (mach_vm_address_t)region.start_aligned;
+     buf_rx = 0;
+     ret = mach_vm_remap(mach_task_self(),
+@@ -774,6 +838,8 @@ void tcg_region_init(size_t tb_size, int splitwx, unsigned max_cpus)
  
      have_prot = alloc_code_gen_buffer(tb_size, splitwx, &error_fatal);
      assert(have_prot >= 0);

@@ -115,7 +115,7 @@ public:
     void     forgetSlot(int slot, POMPPCGPUUserClient * client);
     IODeviceMemory * slotRange(int slot);                    /* retenu par l'appelant */
     /* `len` porte les drapeaux POMPPC_SUB_* dans ses bits hauts (voir plus haut). */
-    IOReturn submit(int slot, UInt32 off, UInt32 len,
+    IOReturn submit(int slot, POMPPCGPUUserClient * client, UInt32 off, UInt32 len,
                     UInt32 * fence, UInt32 * status, UInt32 * statusPC);
     IOReturn waitFence(UInt32 target, UInt32 timeoutMs, UInt32 * current);
 

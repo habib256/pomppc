@@ -18,8 +18,10 @@ stub = r'''
 #define FRAME_CNT_REG 5
 #define DBDMA_STATUS 0
 #define RUN 1
+#define ACTIVE 2
 #define SCREAMER_DPRINTF(...) ((void)0)
-typedef struct { unsigned regs[1]; int channel; } DBDMA_channel;
+typedef struct { int processing; } DBDMA_chan_io;
+typedef struct { unsigned regs[1]; int channel; DBDMA_chan_io io; } DBDMA_channel;
 typedef struct { DBDMA_channel channels[1]; } DBDMAState;
 #define container_of(p,t,m) ((t *)(p))
 typedef struct { DBDMA_channel *channel; int len; } DBDMA_io;
@@ -56,7 +58,7 @@ static void DBDMA_kick(DBDMAState *s) { (void)s; ++kicks; }
 test = r'''
 int main(void) {
   uint8_t pcm[16]; memset(pcm,0x11,sizeof(pcm));
-  DBDMA_channel channel={{RUN},0};
+  DBDMA_channel channel={{RUN|ACTIVE},0,{1}};
   ScreamerState s={.samples=4,.shift=2,.wpos=4,.mixbuf=pcm,.io={&channel,0}};
   limit=4; screamerspk_callback(&s,16);
   assert(written==4 && s.rpos==1 && s.regs[5]==1); // no discarded samples
@@ -82,6 +84,14 @@ int main(void) {
   assert(kicks==1 && s.io.len==0 && s.regs[5]==2 && written==16);
   for (unsigned i=0;i<8;i++) assert(output[i]==0x22);
   for (unsigned i=8;i<16;i++) assert(output[i]==0);
+  /* Canal arrêté (RUN retiré) ou commande abandonnée (processing) : le
+     fragment différé ne doit plus être tiré depuis l'ancienne adresse. */
+  written=0; kicks=0; s.wpos=0; s.rpos=0; s.io.len=8;
+  channel.regs[0]=ACTIVE; screamerspk_callback(&s,16);
+  assert(kicks==0 && s.io.len==8);
+  channel.regs[0]=RUN|ACTIVE; channel.io.processing=0; screamerspk_callback(&s,16);
+  assert(kicks==0 && s.io.len==8);
+  channel.io.processing=1; s.io.len=0;
 
   uint8_t ring[256];
   memset(ring, 0x33, sizeof(ring));
@@ -164,7 +174,7 @@ with tempfile.TemporaryDirectory(prefix='screamer-regs-') as d:
     c.write_text(reg_stub + volume + control + codec + reg_test)
     subprocess.run([os.environ.get('CC','cc'), '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-sign-compare', '-Wno-unused-parameter', str(c), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)
-xfer = source[source.index('static void pmac_screamer_tx_transfer('):source.index('static void pmac_screamer_tx(')]
+xfer = source[source.index('static void screamer_tx_copy('):source.index('static void pmac_screamer_tx(')]
 ring_stub = r'''
 #include <assert.h>
 #include <stdint.h>
@@ -202,6 +212,10 @@ int main(void) {
   ends=0; s.wpos=8; s.rpos=0; s.io.len=16; s.io.addr=0;
   pmac_screamer_tx_transfer(&s);
   assert(s.wpos==8 && s.io.len==16 && ends==0);
+  /* Longueur non multiple de 4 : le reliquat est consommé et dma_end part. */
+  ends=0; s.wpos=0; s.rpos=0; s.io.len=10; s.io.addr=0;
+  pmac_screamer_tx_transfer(&s);
+  assert(s.wpos==2 && s.io.len==0 && ends==1);
   return 0;
 }
 '''

@@ -229,6 +229,7 @@ typedef struct QgpuProgram {
     uint8_t   fp_samples[QGPU_MAX_UNITS];
     QgpuGlsl *glsl;                /* v21 : cible QGPU_PT_GLSL, sinon NULL */
     void     *priv;                /* propriété du backend */
+    uint32_t  mem;                 /* 29/09 : octets comptés (QgpuCore.mem_*) */
 } QgpuProgram;
 #define QGPU_FPS_1D     0x01
 #define QGPU_FPS_2D     0x02
@@ -456,6 +457,16 @@ struct QgpuCore {
        relecture CPU —, pour l'A/B et la preuve. */
     bool     gpu_copy;
     QgpuCopyStats cstats;
+    /* 29/09 — PLAFOND DE MÉMOIRE HÔTE. Textures (niveaux px), surfaces,
+       tampons, textes et tables de programmes : tout ce que le flux invité
+       fait allouer, compté par tranche (celle de l'identifiant de l'objet ;
+       d'un programme, celle de son contexte) et en tout. Au-delà d'un
+       plafond : QGPU_ST_LIMIT, rien d'alloué. Plafonds posés par
+       qgpu_core_init (moitié de la RAM de l'hôte, ¾ de cela par tranche ;
+       QGPU_MEM_MB dans l'environnement pour un autre total). */
+    uint64_t mem_total, mem_slot[QGPU_MAX_CLIENTS];
+    uint64_t mem_cap_total, mem_cap_slot;
+    uint64_t mem_refused;          /* refus depuis le démarrage (stats) */
     bool     trace;                /* journalise chaque commande sur stderr */
 
     /* v13 : cible de SURF_PRESENT (VRAM qfb côté QEMU, tampon de test en

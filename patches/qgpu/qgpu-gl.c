@@ -169,7 +169,17 @@ typedef struct GlState {
     GLuint   glsl_cur;             /* programme GLSL lié (glUseProgram), 0 sinon */
     GLfloat *glsl_fbuf;            /* QGPU_MAX_GLSL_SLOTS × 4, valeurs à pousser */
     GLint   *glsl_ibuf;
+    /* 29/09 : requête d'occlusion dont un SEGMENT est ouvert sur le contexte
+       GL de l'hôte (NULL si aucun), et l'objet GL de ce segment. Voir
+       gl_query_sync : l'hôte n'a qu'UN contexte pour tous les contextes
+       invités, une requête hôte ne peut donc rester ouverte qu'autour des
+       dessins du contexte invité qui l'a lancée. */
+    QgpuQuery *qseg;
+    GLuint     qseg_id;
 } GlState;
+
+static bool gl_query_sync(QgpuCore *c);
+static void gl_query_pause(GlState *g);
 
 /* v16 : objet programme côté hôte. */
 typedef struct GlProgram {
@@ -1064,11 +1074,6 @@ static void gl_prog_use(GlState *g, QgpuProgSet *pg, int w, QgpuProgram *p, floa
 
     g->BindProgramARB(target, gp->id);
     glEnable(target);
-    if (w == QGPU_PROG_FP && gp->uses_fpos) {
-        GLfloat fh[4];
-        fh[0] = 0.0f; fh[1] = surf_h; fh[2] = 0.0f; fh[3] = 0.0f;
-        g->ProgramEnvParameter4fvARB(target, (GLuint)(g->max_env[QGPU_PROG_FP] - 1), fh);
-    }
     if (pg->env_dirty[w] || g->env_owner[w] != pg) {
         /* Tout ce que ce contexte a posé — et, si l'hôte porte encore les
            valeurs d'un autre contexte, assez de zéros pour les recouvrir. */
@@ -1082,6 +1087,21 @@ static void gl_prog_use(GlState *g, QgpuProgSet *pg, int w, QgpuProgram *p, floa
         g->env_high[w] = n;
         pg->env_dirty[w] = false;
         g->env_owner[w] = pg;
+    }
+    /* 29/09 (GL5) : H APRÈS la recopie de program.env. Posé avant, il était
+       écrasé par env[max_env−1] de l'invité dès que celui-ci écrivait le
+       dernier emplacement (n == max_env) : fragment.position non retourné. */
+    if (w == QGPU_PROG_FP && gp->uses_fpos) {
+        GLfloat fh[4];
+        fh[0] = 0.0f; fh[1] = surf_h; fh[2] = 0.0f; fh[3] = 0.0f;
+        g->ProgramEnvParameter4fvARB(target, (GLuint)(g->max_env[QGPU_PROG_FP] - 1), fh);
+        /* H salit le dernier emplacement de l'hôte : le prochain contexte
+           propriétaire doit le recouvrir, et env[max_env−1] de CE contexte
+           doit repartir au prochain programme qui ne lit pas la position. */
+        g->env_high[w] = (uint32_t)g->max_env[w];
+        if (pg->env_hi[w] >= (uint32_t)g->max_env[w]) {
+            pg->env_dirty[w] = true;        /* rare : l'invité y a écrit */
+        }
     }
     if (p->local_dirty) {
         n = p->local_hi;
@@ -1419,7 +1439,15 @@ static bool gl_glsl_build(GlState *g, QgpuGlsl *q, GlGlsl *gg, char **log, bool 
         u->dirty = true;
     }
     gg->fh_loc = fragcoord ? g->GetUniformLocation(prog, "qgpu_fh_") : -1;
-    return gl_err_ok();
+    /* 29/09 (GL7) : l'appelant fait free(gg) sur false — rendre l'objet de
+       l'hôte ici, sans quoi chaque GLSL_LINK retenté en fuyait un. */
+    if (!gl_err_ok()) {
+        g->DeleteProgram(prog);
+        gg->prog = 0;
+        gl_err_flush();
+        return false;
+    }
+    return true;
 }
 
 static bool gl_glsl_link(QgpuCore *c, QgpuProgram *p)
@@ -1809,6 +1837,8 @@ fail:
         eglTerminate(g->dpy);
     }
 #endif
+    free(g->glsl_fbuf);                 /* posés par la sonde GLSL, s'il y en a eu */
+    free(g->glsl_ibuf);
     free(g);
     return false;
 }
@@ -2325,7 +2355,12 @@ static bool gl_tex_sync(QgpuCore *c, QgpuTexture *t)
         }
         t->params_dirty = false;
     }
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    /* 29/09 (GL1) : alignement 1. gl_tex_level téléverse L, I et LA en
+       lignes SERRÉES d'octets ; à 4, un niveau de largeur w·bpp non multiple
+       de 4 (toute queue de mipmap L 2×2, une LA impaire) était cisaillé et
+       le pilote lisait au-delà de `tmp`, jusqu'à ~8 Kio sur une L de 4093 de
+       large. Les lignes BGRA et flottantes font 4·w octets : sans effet. */
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     for (f = 0; f < t->nfaces; f++) {
         if (!t->dirty[f]) {
@@ -2450,7 +2485,7 @@ static bool gl_draw(QgpuCore *c, QgpuSurface *s, const QgpuState *st, uint32_t p
     bool ok = true;
     int u;
 
-    if (!gl_target(c, s, st)) {
+    if (!gl_target(c, s, st) || !gl_query_sync(c)) {
         return false;
     }
     /* v8 : SENS DES FACES DU CHEMIN HÉRITÉ. Ces sommets sont en pixels de
@@ -2909,7 +2944,7 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
            le pipeline fixe garde le retournement dans la projection */
         flip_in_proj = !gp->glsl->has_vs;
     }
-    if (!gl_target(c, s, st)) {
+    if (!gl_target(c, s, st) || !gl_query_sync(c)) {
         return false;
     }
     if (gm->vp_set) {
@@ -3417,6 +3452,7 @@ static bool gl_depth_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
        posée le rastériseur au même z — la transformation des sommets arrondit
        déjà, sur les deux backends.) */
     (void)gs;
+    gl_query_pause(c->be_priv);    /* glDrawPixels : ses fragments ne comptent pas */
     return gl_packed_upload(c, s, x, y, w, h, src, NULL);
 }
 
@@ -3439,6 +3475,7 @@ static bool gl_stencil_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t 
     if (!gl_target(c, s, NULL)) {
         return false;
     }
+    gl_query_pause(c->be_priv);
     return gl_packed_upload(c, s, x, y, w, h, NULL, src);
 }
 
@@ -3464,28 +3501,138 @@ static bool gl_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
  * ATTEND le résultat — glGetQueryObjectuiv(GL_QUERY_RESULT) bloque jusqu'à ce
  * qu'il soit là, ce qui est exactement la sémantique attendue par l'invité.
  * Si les points d'entrée manquent, gl_init n'annonce pas QGPU_CAP_OCCLUSION et
- * le cœur refuse les opcodes avant d'arriver ici. */
+ * le cœur refuse les opcodes avant d'arriver ici.
+ *
+ * 29/09 — PAR SEGMENTS. L'hôte n'a qu'UN contexte GL pour tous les contextes
+ * et tous les processus invités. Ouvrir la requête hôte au QUERY_BEGIN y
+ * faisait compter les dessins de TOUT le monde, et un second BEGIN (autre
+ * contexte, autre id — ce que le cœur accepte à bon droit) échouait en
+ * GL_INVALID_OPERATION, fatal. Désormais BEGIN et END ne font que remettre à
+ * zéro / fermer ; c'est chaque dessin qui, par gl_query_sync, ouvre un segment
+ * pour la requête de SON contexte (c->cur_query, posé par arm_draw) ou ferme
+ * celui d'un autre. Résultat = somme des segments : la sémantique du backend
+ * logiciel, qui compte dans c->cur_query au seul moment du dessin. */
+#define GL_QSEG_MAX 64            /* segments en attente avant repli bloquant */
+
 typedef struct GlQuery {
-    GLuint id;
+    uint64_t sum;                  /* segments déjà relus */
+    uint32_t npend;
+    GLuint   pend[GL_QSEG_MAX];    /* segments fermés, résultat pas encore lu */
 } GlQuery;
+
+static uint64_t gl_query_read(GlState *g, GLuint id)
+{
+    /* Mineur : un compte d'échantillons déborde 32 bits dès 4 milliards de
+       fragments (quelques secondes sur un GPU moderne), et `samples` est un
+       64 bits. On prend l'entrée 64 bits quand l'hôte l'a (GL 3.3 /
+       EXT_timer_query), la 32 bits sinon. */
+    if (g->GetQueryObjectui64v) {
+        uint64_t n64 = 0;
+        g->GetQueryObjectui64v(id, GL_QUERY_RESULT, &n64);
+        return n64;
+    } else {
+        GLuint n = 0;
+        g->GetQueryObjectuiv(id, GL_QUERY_RESULT, &n);
+        return n;
+    }
+}
+
+/* Relit (en bloquant) et libère tous les segments en attente de `gq`. */
+static void gl_query_fold(GlState *g, GlQuery *gq)
+{
+    uint32_t i;
+    for (i = 0; i < gq->npend; i++) {
+        gq->sum += gl_query_read(g, gq->pend[i]);
+    }
+    if (gq->npend) {
+        g->DeleteQueries((GLsizei)gq->npend, gq->pend);
+    }
+    gq->npend = 0;
+}
+
+/* Ferme le segment ouvert, s'il y en a un, et le range dans sa requête. */
+static void gl_query_pause(GlState *g)
+{
+    GlQuery *gq;
+
+    if (!g->qseg) {
+        return;
+    }
+    gq = g->qseg->priv;
+    g->EndQuery(GL_SAMPLES_PASSED);
+    if (gq->npend == GL_QSEG_MAX) {
+        gl_query_fold(g, gq);      /* rare : 64 alternances sans RESULT */
+    }
+    gq->pend[gq->npend++] = g->qseg_id;
+    g->qseg = NULL;
+    g->qseg_id = 0;
+}
+
+/* Avant un dessin : le segment ouvert doit être celui de la requête du
+   contexte courant, ou aucun. */
+static bool gl_query_sync(QgpuCore *c)
+{
+    GlState *g = c->be_priv;
+    QgpuQuery *want = (c->cur_query && c->cur_query->active) ? c->cur_query : NULL;
+
+    if (!g->has_query || g->qseg == want) {
+        return true;
+    }
+    gl_query_pause(g);
+    if (!want) {
+        return true;
+    }
+    if (!want->priv) {
+        want->priv = calloc(1, sizeof(GlQuery));
+        if (!want->priv) {
+            return false;
+        }
+    }
+    g->GenQueries(1, &g->qseg_id);
+    g->BeginQuery(GL_SAMPLES_PASSED, g->qseg_id);
+    if (!gl_err_ok()) {
+        g->DeleteQueries(1, &g->qseg_id);
+        g->qseg_id = 0;
+        return false;
+    }
+    g->qseg = want;
+    return true;
+}
+
+/* Oublie tout ce que la requête a compté (segments compris). */
+static void gl_query_drop(GlState *g, QgpuQuery *q)
+{
+    GlQuery *gq = q->priv;
+
+    if (g->qseg == q) {
+        g->EndQuery(GL_SAMPLES_PASSED);
+        g->DeleteQueries(1, &g->qseg_id);
+        g->qseg = NULL;
+        g->qseg_id = 0;
+    }
+    if (gq) {
+        if (gq->npend) {
+            g->DeleteQueries((GLsizei)gq->npend, gq->pend);
+        }
+        gq->npend = 0;
+        gq->sum = 0;
+    }
+}
 
 static bool gl_query_begin(QgpuCore *c, QgpuQuery *q)
 {
     GlState *g = c->be_priv;
-    GlQuery *gq = q->priv;
 
     if (!g->has_query || !gl_make_current(g)) {
         return false;
     }
-    if (!gq) {
-        gq = calloc(1, sizeof(*gq));
-        if (!gq) {
+    if (!q->priv) {
+        q->priv = calloc(1, sizeof(GlQuery));
+        if (!q->priv) {
             return false;
         }
-        g->GenQueries(1, &gq->id);
-        q->priv = gq;
     }
-    g->BeginQuery(GL_SAMPLES_PASSED, gq->id);
+    gl_query_drop(g, q);           /* un id relancé repart de zéro */
     return gl_err_ok();
 }
 
@@ -3493,10 +3640,12 @@ static bool gl_query_end(QgpuCore *c, QgpuQuery *q)
 {
     GlState *g = c->be_priv;
 
-    if (!g->has_query || !q->priv || !gl_make_current(g)) {
+    if (!g->has_query || !gl_make_current(g)) {
         return false;
     }
-    g->EndQuery(GL_SAMPLES_PASSED);
+    if (g->qseg == q) {
+        gl_query_pause(g);
+    }
     return gl_err_ok();
 }
 
@@ -3504,35 +3653,25 @@ static bool gl_query_result(QgpuCore *c, QgpuQuery *q)
 {
     GlState *g = c->be_priv;
     GlQuery *gq = q->priv;
-    GLuint n = 0;
 
     if (!g->has_query || !gq || !gl_make_current(g)) {
         return false;
     }
-    /* Mineur : un compte d'échantillons déborde 32 bits dès 4 milliards de
-       fragments (quelques secondes sur un GPU moderne), et `samples` est un
-       64 bits. On prend l'entrée 64 bits quand l'hôte l'a (GL 3.3 /
-       EXT_timer_query), la 32 bits sinon. */
-    if (g->GetQueryObjectui64v) {
-        uint64_t n64 = 0;
-        g->GetQueryObjectui64v(gq->id, GL_QUERY_RESULT, &n64);
-        q->samples = n64;
-    } else {
-        g->GetQueryObjectuiv(gq->id, GL_QUERY_RESULT, &n);
-        q->samples = n;
-    }
+    gl_query_fold(g, gq);
+    q->samples = gq->sum;
     return gl_err_ok();
 }
 
 static void gl_query_destroy(QgpuCore *c, QgpuQuery *q)
 {
     GlState *g = c->be_priv;
-    GlQuery *gq = q->priv;
 
-    if (gq && g->has_query && gl_make_current(g)) {
-        g->DeleteQueries(1, &gq->id);
+    if (q->priv && g->has_query && gl_make_current(g)) {
+        gl_query_drop(g, q);
+    } else if (g->qseg == q) {
+        g->qseg = NULL;            /* contexte perdu : l'objet part avec lui */
     }
-    free(gq);
+    free(q->priv);
     q->priv = NULL;
 }
 

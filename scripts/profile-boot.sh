@@ -11,9 +11,11 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/config.env"
+source "$ROOT/scripts/hostcompat.sh"
 DUR="${1:-55}"
 
 SCR="${POMPPC_SCRATCH:-$ROOT/.run}"; mkdir -p "$SCR"
+host_lock_vm 9 "$SCR/tiger.lock"   # AVANT le rm : le socket peut être celui d'une VM vivante
 MON="$SCR/mon.sock"; rm -f "$MON"
 PIDFILE="$SCR/profile.pid"; rm -f "$PIDFILE"
 mkdir -p "$ROOT/bench"          # gitignoré : absent d'un clone neuf
@@ -32,7 +34,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "Binaire profilé: $QEMU_BIN"
-setsid "$QEMU_BIN" -M "$MACHINE" -cpu "$CPU" -m "$RAM_MB" -smp "$SMP" \
+host_detach "$QEMU_BIN" -M "$MACHINE" -cpu "$CPU" -m "$RAM_MB" -smp "$SMP" \
   -display none -g "$RES" \
   -drive "file=$DISK,format=qcow2,media=disk" \
   ${NET_ARGS[@]+"${NET_ARGS[@]}"} \

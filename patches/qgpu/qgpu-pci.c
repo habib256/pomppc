@@ -197,6 +197,15 @@ OBJECT_DECLARE_SIMPLE_TYPE(QgpuPCIState, QGPU_PCI)
  */
 #define QGPU_SYNC_WAIT_MS 2000
 
+/* 29/09 (GL3) — même raison pour les chemins de RESET (écriture de MAGIC au
+ * chargement du kext, system_reset) : ils attendaient sans borne, BQL pris,
+ * la soumission en cours PUIS qgpu_core_reset (destruction de tous les objets
+ * GL). Un pilote hôte bloqué gelait QEMU pour de bon, monitor compris, alors
+ * que le doorbell synchrone, lui, rendait la main à 2 s. Plus long que
+ * QGPU_SYNC_WAIT_MS : détruire des milliers de textures est légitime. Au-delà,
+ * le device passe « cassé » (voir qgpu_soft_reset). */
+#define QGPU_RESET_WAIT_MS 5000
+
 /* Cible de SURF_PRESENT effectivement liée. `base` existe pour que le
    marquage « sale » ne suppose PAS que la fenêtre visible commence à
    l'offset 0 de la région : le cœur reçoit `ram + base` et compte à partir de
@@ -266,6 +275,7 @@ struct QgpuPCIState {
     bool       q_stop;             /* demande d'arrêt du thread */
     bool       q_fini;             /* … en libérant d'abord le backend */
     bool       q_reset;            /* demande de reset du cœur, par le thread */
+    bool       broken;             /* GL3 : reset non terminé à l'échéance */
     bool       thread_ok;
     QEMUBH    *irq_bh;
     Notifier   exit_notifier;
@@ -329,6 +339,15 @@ static void qgpu_run_job(QgpuPCIState *s, const QgpuJob *job)
         st = QGPU_ST_BACKEND;
         pc = 0;
     }
+    /* 29/09 (GL4) : publication SOUS `lock` quand le thread existe. Le vCPU
+       qui abandonne un doorbell synchrone (qgpu_sync_gave_up) relit FENCE et
+       écrit STATUS sous ce même verrou : sans lui, le thread pouvait publier
+       STATUS=OK puis FENCE=cible entre le test d'échéance et l'écriture de
+       QGPU_ST_BACKEND — le kext lisait « barrière atteinte, backend en
+       panne » et le plugin coupait l'accélération sur une image rendue. */
+    if (s->thread_ok) {
+        qemu_mutex_lock(&s->lock);
+    }
     qatomic_set(&s->regs[QGPU_REG_STATUS_PC >> 2], pc);
     qatomic_set(&s->regs[QGPU_REG_STATUS >> 2], st);
     if (st != QGPU_ST_OK) {
@@ -340,6 +359,9 @@ static void qgpu_run_job(QgpuPCIState *s, const QgpuJob *job)
        relectures) avant que l'invité ne puisse voir la barrière avancer. */
     qatomic_store_release(&s->regs[QGPU_REG_FENCE >> 2],
                           qatomic_read(&s->regs[QGPU_REG_FENCE >> 2]) + 1);
+    if (s->thread_ok) {
+        qemu_mutex_unlock(&s->lock);
+    }
     /* Les relectures (SURF_READBACK, QUERY_RESULT, DEPTH_READBACK…) sont
        écrites DANS BAR0 par l'hôte, derrière le dos de QEMU : sans ce
        marquage, le suivi des pages sales ignore ces octets. Seul le cœur sait
@@ -471,8 +493,8 @@ static void qgpu_scanout_recheck(QgpuPCIState *s);
  * « tout va bien » sur une image qui n'est pas rendue. QGPU_REG_ERRORS, en
  * revanche, ne bouge pas : il compte les soumissions TERMINÉES en erreur, et
  * celle-ci n'est pas terminée — c'est le thread qui l'incrémentera s'il y a
- * lieu. Les deux écritures sont atomiques : le thread de rendu écrit les mêmes
- * registres sans verrou.
+ * lieu. Appelée `lock` PRIS (GL4) : le thread publie STATUS et FENCE sous ce
+ * verrou, donc « FENCE n'a pas atteint la cible » reste vrai jusqu'au retour.
  */
 static void qgpu_sync_gave_up(QgpuPCIState *s, uint32_t target, bool queued,
                               const char *why)
@@ -513,6 +535,14 @@ static void qgpu_doorbell(QgpuPCIState *s, bool async)
         return;
     }
 
+    if (s->broken) {
+        /* GL3 : reset non terminé, compteurs non remis à zéro — rien ne part
+           tant qu'un reset n'a pas abouti. Le kext a lu CAPS = CLIENTS = 0. */
+        qatomic_set(&s->regs[QGPU_REG_STATUS >> 2], QGPU_ST_BACKEND);
+        s->regs[QGPU_REG_SUBMIT_ST >> 2] = QGPU_ST_BACKEND;
+        return;
+    }
+
     /* La géométrie de l'écran a-t-elle bougé depuis la dernière soumission ?
        (VGA n'a pas de notification, cf. qgpu_scanout_recheck.) Avant de
        prendre le verrou : le rebinding draine la file. */
@@ -534,8 +564,8 @@ static void qgpu_doorbell(QgpuPCIState *s, bool async)
     if (s->q_count == QGPU_QUEUE_DEPTH &&
         !qgpu_drain_timed_locked(s, QGPU_SYNC_WAIT_MS)) {
         if (s->q_count == QGPU_QUEUE_DEPTH) {
-            qemu_mutex_unlock(&s->lock);
             qgpu_sync_gave_up(s, 0, false, "aucune place dans la file");
+            qemu_mutex_unlock(&s->lock);
             return;
         }
     }
@@ -577,8 +607,24 @@ static void qgpu_doorbell(QgpuPCIState *s, bool async)
             int64_t left = deadline - qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
             if (left <= 0) {
+                /* 29/09 (GL4) : une soumission qui n'a PAS commencé est
+                   retirée de la file. Sinon elle s'exécutait plus tard, sur
+                   une tranche que l'invité, ayant reçu QGPU_ST_BACKEND,
+                   croit libre et réécrit : flux mélangé. Elle est forcément
+                   en QUEUE de file — le BQL, tenu depuis sa mise en file,
+                   empêche tout autre vCPU d'en ajouter une derrière. Celle
+                   qui a commencé ne peut plus être rappelée : elle finira
+                   et fera avancer FENCE (queued). */
+                bool started = s->q_running && s->q_count == 1;
+
+                if (!started) {
+                    s->q_count--;
+                    s->q_submitted--;
+                }
+                qgpu_sync_gave_up(s, target, started,
+                                  started ? "rendu non terminé"
+                                          : "rendu non commencé, retiré");
                 qemu_mutex_unlock(&s->lock);
-                qgpu_sync_gave_up(s, target, true, "rendu non terminé");
                 return;
             }
             qemu_cond_timedwait(&s->cond_done, &s->lock, (int)left);
@@ -604,6 +650,7 @@ static void qgpu_client_reset(QgpuPCIState *s, uint32_t slot)
     uint32_t target;
 
     if (slot >= s->regs[QGPU_REG_CLIENTS >> 2]) {
+        /* CLIENTS vaut 0 sur un device cassé (GL3) : refusé ici aussi. */
         s->regs[QGPU_REG_SUBMIT_ST >> 2] = QGPU_ST_BAD_ARG;
         return;
     }
@@ -633,15 +680,46 @@ static void qgpu_client_reset(QgpuPCIState *s, uint32_t slot)
     s->regs[QGPU_REG_SUBMIT_ST >> 2] = QGPU_ST_OK;
 }
 
+/*
+ * GL3 — BORNÉ, BQL pris. Si la soumission en cours ou la destruction des
+ * objets ne finit pas en QGPU_RESET_WAIT_MS, le device passe « cassé » :
+ * CAPS et CLIENTS à 0 (le kext refuse alors de démarrer), doorbells refusés,
+ * compteurs de file laissés en l'état pour que le thread finisse proprement
+ * ce qu'il a entre les mains. Le prochain reset qui aboutit (rechargement du
+ * kext, redémarrage de la VM) le répare. Mieux vaut une VM sans 3D qu'un
+ * QEMU gelé que seul un kill -9 débloque.
+ */
 static void qgpu_soft_reset(QgpuPCIState *s)
 {
+    bool idle = true;
+
     if (s->thread_ok) {
         qemu_mutex_lock(&s->lock);
-        qgpu_drain_locked(s, true);
-        s->q_head = 0;
-        s->q_submitted = 0;
+        /* Ne reste que celle qui est DÉJÀ entre les mains du thread : les
+           autres n'avanceront jamais FENCE — c'est dit dans qgpu_proto.h.
+           Un reset du cœur encore en cours (échéance précédente) compte
+           aussi : on ne superpose pas deux destructions. */
+        s->q_count = s->q_running ? 1 : 0;
+        idle = qgpu_drain_timed_locked(s, QGPU_RESET_WAIT_MS);
+        if (idle) {
+            int64_t deadline = qemu_clock_get_ms(QEMU_CLOCK_REALTIME)
+                             + QGPU_RESET_WAIT_MS;
+            while (s->q_reset && idle) {
+                int64_t left = deadline - qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+                if (left <= 0) {
+                    idle = false;
+                } else {
+                    qemu_cond_timedwait(&s->cond_done, &s->lock, (int)left);
+                }
+            }
+        }
+        if (idle) {
+            s->q_head = 0;
+            s->q_submitted = 0;
+        }
         qemu_mutex_unlock(&s->lock);
     }
+    s->broken = !idle;
     if (s->irq_bh) {
         /* Un BH encore en attente lèverait DONE APRÈS le reset, pour une
            soumission qui n'existe plus du point de vue de l'invité. */
@@ -669,17 +747,35 @@ static void qgpu_soft_reset(QgpuPCIState *s)
             s->regs[QGPU_REG_LAYOUT_CLASS(k) >> 2] = qgpu_core_client_ids(k);
         }
     }
-    if (s->core_ok && s->thread_ok) {
+    if (s->core_ok && s->thread_ok && idle) {
         /* Par le thread de rendu, qui possède le contexte (cf. en tête). */
+        int64_t deadline = qemu_clock_get_ms(QEMU_CLOCK_REALTIME)
+                         + QGPU_RESET_WAIT_MS;
+
         qemu_mutex_lock(&s->lock);
         s->q_reset = true;
         qemu_cond_signal(&s->cond_work);
         while (s->q_reset) {
-            qemu_cond_wait(&s->cond_done, &s->lock);
+            int64_t left = deadline - qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+            if (left <= 0) {
+                /* Le thread le finira (q_reset reste posé) ; le device, lui,
+                   ne se prétend pas prêt en attendant. */
+                s->broken = true;
+                break;
+            }
+            qemu_cond_timedwait(&s->cond_done, &s->lock, (int)left);
         }
         qemu_mutex_unlock(&s->lock);
-    } else if (s->core_ok) {
+    } else if (s->core_ok && !s->thread_ok) {
         qgpu_core_reset(&s->core);
+    }
+    if (s->broken) {
+        s->regs[QGPU_REG_CAPS >> 2] = 0;
+        s->regs[QGPU_REG_CLIENTS >> 2] = 0;
+        warn_report("qgpu-pci: reset non terminé après %d ms (GPU hôte"
+                    " bloqué ?) ; 3D désactivée jusqu'au prochain reset"
+                    " (rechargement du kext ou redémarrage de la VM).",
+                    QGPU_RESET_WAIT_MS);
     }
     qemu_irq_lower(s->irq);
 }
@@ -863,7 +959,7 @@ static bool qgpu_probe_scanout(QgpuPCIState *s, QfbScanoutInfo *info,
  * décalée en silence. C'est pour cela que la fenêtre est bornée sur
  * `stride × height` et non sur les 32 Mio de VRAM (Q3).
  */
-static void qgpu_bind_scanout(QgpuPCIState *s, bool complain)
+static bool qgpu_bind_scanout(QgpuPCIState *s, bool complain)
 {
     QfbScanoutInfo info;
     const char *which = NULL;
@@ -883,16 +979,17 @@ static void qgpu_bind_scanout(QgpuPCIState *s, bool complain)
                 drained = qgpu_drain_timed_locked(s, QGPU_SYNC_WAIT_MS);
                 qemu_mutex_unlock(&s->lock);
             }
-            if (drained) {
-                qgpu_unbind_scanout(s);
+            if (!drained) {
+                return false;
             }
+            qgpu_unbind_scanout(s);
         }
         if (complain && s->scanout_mode != QGPU_SCANOUT_NONE) {
             warn_report("qgpu-pci: aucun écran à présenter (scanout=%s) :"
                         " SURF_PRESENT sera refusé et l'invité relira ses"
                         " images", s->scanout_pref);
         }
-        return;
+        return true;
     }
 
     /* Fenêtre visible. Sans géométrie observable (repli VGA en mode indexé,
@@ -907,12 +1004,12 @@ static void qgpu_bind_scanout(QgpuPCIState *s, bool complain)
     }
     size = (uint32_t)win;
     if (size == 0) {
-        return;                              /* VRAM vide : rien à présenter */
+        return true;                              /* VRAM vide : rien à présenter */
     }
 
     if (s->scanout.mr == info.mr && s->scanout.base == base &&
         s->scanout.size == size && s->scanout.stride == info.stride) {
-        return;                              /* rien n'a bougé */
+        return true;                              /* rien n'a bougé */
     }
 
     /* La cible est lue SANS VERROU par le thread de rendu : la déplacer sous
@@ -932,7 +1029,7 @@ static void qgpu_bind_scanout(QgpuPCIState *s, bool complain)
                              " géométrie d'écran n'a pas pu être remise à"
                              " jour ; l'image présentée peut être décalée",
                              QGPU_SYNC_WAIT_MS);
-            return;
+            return false;
         }
     }
 
@@ -1011,6 +1108,7 @@ static void qgpu_bind_scanout(QgpuPCIState *s, bool complain)
                 " base 0x%x, %u Kio\n", which, info.width, info.height,
                 info.stride, base, size / 1024u);
     }
+    return true;
 }
 
 /*
@@ -1037,11 +1135,13 @@ static void qgpu_scanout_recheck(QgpuPCIState *s)
     }
     if (data != s->scanout.surf_data || stride != s->scanout.surf_stride ||
         height != s->scanout.surf_height) {
-        qgpu_bind_scanout(s, false);
         /* Retenir l'observation MÊME si le lien n'a pas bougé : une géométrie
            que l'on ne sait pas exploiter (surface convertie) ferait sinon
-           re-sonder l'arbre QOM à chaque doorbell. */
-        if (s->scanout.con) {
+           re-sonder l'arbre QOM à chaque doorbell. 29/09 (GL8) : mais PAS si
+           le lien a été abandonné faute de drainage — la retenir, c'était ne
+           plus jamais réessayer avant le prochain changement de mode, et
+           présenter au mauvais pas jusque-là. */
+        if (qgpu_bind_scanout(s, false) && s->scanout.con) {
             s->scanout.surf_data   = data;
             s->scanout.surf_stride = stride;
             s->scanout.surf_height = height;
@@ -1085,6 +1185,8 @@ static void qgpu_exit_notify(Notifier *n, void *data)
 {
     qgpu_stop_thread(container_of(n, QgpuPCIState, exit_notifier), false);
 }
+
+static void qgpu_pci_exit(PCIDevice *dev);
 
 static void qgpu_pci_realize(PCIDevice *dev, Error **errp)
 {
@@ -1183,7 +1285,14 @@ static void qgpu_pci_realize(PCIDevice *dev, Error **errp)
                " (objets hôte non migrables, IRQ_MASK perdu). Retirer le"
                " -device qgpu-pci pour sauver ou migrer cette VM.");
     if (migrate_add_blocker(&s->mig_blocker, errp) < 0) {
-        /* migrate_add_blocker a déjà libéré s->mig_blocker et l'a mis à NULL. */
+        /* migrate_add_blocker a déjà libéré s->mig_blocker et l'a mis à NULL.
+           29/09 (GL2) : « en dernier » ne suffisait pas — thread de rendu,
+           BH, notificateurs de sortie et de machine-done et cœur existent
+           déjà, et ->exit ne sera pas appelé (voir plus haut). Sans ce
+           démontage, -only-migratable libérait le device sous le thread
+           (endormi sur s->cond_work) et qemu_run_exit_notifiers appelait
+           qgpu_exit_notify sur de la mémoire libérée. */
+        qgpu_pci_exit(dev);
         return;
     }
 }
@@ -1228,10 +1337,17 @@ static int qgpu_pre_save(void *opaque)
        pendant qu'on recopie les registres et BAR0. */
     QgpuPCIState *s = opaque;
 
+    bool idle = true;
+
     if (s->thread_ok) {
         qemu_mutex_lock(&s->lock);
-        qgpu_drain_locked(s, false);
+        idle = qgpu_drain_timed_locked(s, QGPU_RESET_WAIT_MS);   /* GL3 */
         qemu_mutex_unlock(&s->lock);
+    }
+    if (!idle) {
+        error_report("qgpu-pci: file non vide après %d ms, sauvegarde refusée",
+                     QGPU_RESET_WAIT_MS);
+        return -EBUSY;
     }
     return 0;
 }

@@ -119,6 +119,31 @@ def lock_disk(what):
     _DISK_LOCK = f
 
 
+def refuse_if_vm_alive(what):
+    """Le verrou de lock_disk est tenu par CE processus, qui se termine après
+    `start` : la VM, elle, continue d'écrire dans l'image sans que personne ne
+    tienne le verrou (QEMU n'hérite pas du fd). `prepare` ou un second `start`
+    monteraient alors le HFS+ vivant. On regarde donc aussi qemu.pid."""
+    pidf = os.path.join(STATE, "qemu.pid")
+    try:
+        pid = int(open(pidf).read().strip())
+    except (OSError, ValueError):
+        return
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        pass                        # vivant, mais à un autre utilisateur
+    # PID recyclé par un autre programme : ne pas bloquer pour rien.
+    comm = subprocess.run(["ps", "-o", "comm=", "-p", str(pid)],
+                          capture_output=True, text=True).stdout
+    if "qemu" not in comm:
+        return
+    sys.exit("%s refusé : la VM tourne encore (pid %d, %s). "
+             "L'arrêter d'abord : devloop.py shutdown" % (what, pid, pidf))
+
+
 def find_mailbox(tag):
     """Cherche la boîte `tag` (b'IN' ou b'OU') : chaque secteur commence par
     PMBX + tag + index 32 bits. Vérifie la contiguïté."""
@@ -224,6 +249,7 @@ def prepare():
     """VM arrêtée : monte l'image (macOS), écrit agent + boîtes, démonte, localise."""
     need_disk()
     lock_disk("prepare")
+    refuse_if_vm_alive("prepare")
     if not shutil.which("hdiutil"):
         return prepare_guest()
     os.makedirs(STATE, exist_ok=True)
@@ -573,6 +599,7 @@ def click(q, x, y, screen=(1024, 768)):
 def start(gui=False):
     need_disk()
     lock_disk("start%s" % (" --gui" if gui else ""))
+    refuse_if_vm_alive("start")
     boxes = find_mailbox(b"IN"), find_mailbox(b"OU")
     cds = [c for c in os.environ.get("CDROM", "").split(":") if c]
     p, q = boot_vm(gui, cds)

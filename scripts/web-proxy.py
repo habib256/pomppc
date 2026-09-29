@@ -47,6 +47,7 @@ import gzip
 import html
 import http.client
 import io
+import ipaddress
 import json
 import os
 import re
@@ -94,6 +95,11 @@ DROP_HEADERS = {"strict-transport-security", "content-security-policy",
 HOP_HEADERS = {"proxy-connection", "connection", "keep-alive", "te", "trailer",
                "upgrade", "proxy-authorization", "accept-encoding"}
 MAX_BODY = 64 * 1024 * 1024
+# Anti-boucle : le relais marque ce qu'il émet (Via) et refuse ce qui porte
+# déjà sa marque ; il refuse aussi toute cible qui retombe sur son propre port
+# en local, quel que soit le nom (0.0.0.0, localhost., [::1], 127.1…).
+VIA = "1.1 pomppc"
+PORT_ECOUTE = 0
 STREAM_OVER = 8 * 1024 * 1024       # au-delà, un fichier non retouché part en flux
 # Ce que voient les serveurs : un navigateur moderne (sinon « navigateur non
 # pris en charge », ou des murs anti-robots), qui n'accepte NI WebP NI AVIF —
@@ -707,6 +713,24 @@ chaque page change le mode du site.</p>
 
 # ───────────────────────────── le relais ─────────────────────────────
 
+def se_vise(host, port):
+    """Vrai si (host, port) retombe sur le relais lui-même."""
+    if not PORT_ECOUTE or (port or 80) != PORT_ECOUTE:
+        return False
+    try:
+        infos = socket.getaddrinfo(host.strip("[]"), None)
+    except (OSError, UnicodeError):
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        except ValueError:
+            continue
+        if ip.is_loopback or ip.is_unspecified:
+            return True
+    return False
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
     server_version = "POMPPC-web-proxy"
@@ -716,9 +740,17 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── tunnel pour CONNECT ──
     def do_CONNECT(self):
-        host, _, port = self.path.partition(":")
+        host, _, port = self.path.rpartition(":") if ":" in self.path else (self.path, "", "")
         try:
-            up = socket.create_connection((host, int(port or 443)), timeout=20)
+            port = int(port or 443)
+        except ValueError:
+            self.send_error(400, "port invalide")
+            return
+        if se_vise(host, port) or "pomppc" in (self.headers.get("Via") or "").lower():
+            self.send_error(403, "le relais ne se relaie pas lui-même")
+            return
+        try:
+            up = socket.create_connection((host.strip("[]"), port), timeout=20)
         except OSError as e:
             self.send_error(502, "connexion impossible : %s" % e)
             return
@@ -822,7 +854,8 @@ class Handler(BaseHTTPRequestHandler):
         if host in (ICI, "www." + ICI):
             self.ici(path)
             return
-        if host in ("10.0.2.2", "localhost", "127.0.0.1"):
+        if (host in ("10.0.2.2", "localhost", "127.0.0.1") or se_vise(host, port) or
+                "pomppc" in (self.headers.get("Via") or "").lower()):
             self.send_error(403, "le relais ne se relaie pas lui-même")
             return
         # adaptateurs de site : une page fabriquée, ou un renvoi
@@ -845,6 +878,7 @@ class Handler(BaseHTTPRequestHandler):
         headers["Connection"] = "close"
         headers["User-Agent"] = UA_MODERNE
         headers["Accept"] = ACCEPT
+        headers["Via"] = (headers["Via"] + ", " + VIA) if headers.get("Via") else VIA
         for k in ("Origin", "Referer"):
             if k in headers:
                 headers[k] = headers[k].replace("http://", "https://", 1)
@@ -1026,7 +1060,7 @@ class Handler(BaseHTTPRequestHandler):
 def watch_parent(pid):
     """Quitte quand le processus parent (QEMU, après exec du lanceur) disparaît."""
     while True:
-        time.sleep(3)
+        time.sleep(0.5)
         try:
             os.kill(pid, 0)
         except OSError:
@@ -1038,11 +1072,21 @@ def main():
     ap.add_argument("--port", type=int, default=int(os.environ.get("WEB_PROXY_PORT", 8080)))
     ap.add_argument("--parent-pid", type=int, default=0)
     a = ap.parse_args()
-    try:
-        srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
-    except OSError as e:
-        log("port %d indisponible (%s) : relais déjà lancé ?" % (a.port, e))
-        return 1
+    global PORT_ECOUTE
+    PORT_ECOUTE = a.port
+    # Au relancement, l'ancien relais peut tenir le port encore un instant
+    # (il ne voit la mort de QEMU qu'au prochain tour de watch_parent) :
+    # on réessaie quelques secondes avant de conclure.
+    deadline = time.time() + 5
+    while True:
+        try:
+            srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
+            break
+        except OSError as e:
+            if time.time() >= deadline:
+                log("port %d indisponible (%s) : relais déjà lancé ?" % (a.port, e))
+                return 1
+            time.sleep(0.25)
     srv.daemon_threads = True
     if a.parent_pid:
         threading.Thread(target=watch_parent, args=(a.parent_pid,), daemon=True).start()

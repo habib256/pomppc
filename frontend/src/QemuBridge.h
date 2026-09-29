@@ -127,6 +127,9 @@ public:
     void runGlibThread();   // D-Bus thread entry (via C trampoline)
 
 private:
+    bool setupGlib();       // fil D-Bus : connexions, proxys, listener
+    void teardownGlib();    // fil D-Bus : libère ce que setupGlib a créé
+    void stopQemu();        // SIGTERM, attente, SIGKILL si besoin
     Config cfg_;
     Impl* impl_ = nullptr;
     GThread* thread_ = nullptr;

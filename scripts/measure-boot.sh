@@ -23,10 +23,12 @@ set -uo pipefail   # pas de -e: les comparaisons arithmétiques fausses ne doive
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/config.env"
 source "$ROOT/scripts/caps.sh"
+source "$ROOT/scripts/hostcompat.sh"
 TIMEOUT="${1:-360}"
 MAXLOAD="${MAXLOAD:-1.0}"
 
 SCR="${POMPPC_SCRATCH:-$ROOT/.run}"; mkdir -p "$SCR"
+host_lock_vm 9 "$SCR/tiger.lock"   # AVANT le rm : le socket peut être celui d'une VM vivante
 MON="$SCR/mon.sock"; rm -f "$MON"
 PIDFILE="$SCR/measure.pid"; rm -f "$PIDFILE"
 FRAMES="$ROOT/bench/frames"; mkdir -p "$FRAMES"; rm -f "$FRAMES"/*.png 2>/dev/null || true
@@ -90,7 +92,9 @@ preflight() {
     echo "         pkill -x qemu-system-ppc ; ou POMPPC_FORCE=1 pour passer outre." >&2
     return 1
   fi
-  load=$(cut -d' ' -f1 /proc/loadavg)
+  load=$(host_loadavg)
+  # Charge illisible : refuser plutôt que laisser passer en silence.
+  [ -n "$load" ] || { echo "PRÉ-VOL: charge hôte illisible." >&2; return 1; }
   if [ "$(echo "$load > $MAXLOAD" | bc -l)" = "1" ]; then
     echo "PRÉ-VOL: charge hôte $load > $MAXLOAD — attends que la machine se calme." >&2
     echo "         (même le CPU_qemu gonfle sous charge : l'invité spin-attend ses timers)" >&2
@@ -128,15 +132,15 @@ trap cleanup EXIT INT TERM
 #   SMP_N=2 EXTRA_ARGS="-accel tcg,thread=multi,tb-size=256" scripts/measure-boot.sh
 # (SMP_N est déjà résolu plus haut : il décide du binaire et du firmware.)
 read -r -a EXTRA <<< "${EXTRA_ARGS:-}"
-echo "### config: SMP=$SMP_N  binaire=$(basename "$BIN")  extra='${EXTRA_ARGS:-}'  charge=$(cut -d' ' -f1 /proc/loadavg)"
+echo "### config: SMP=$SMP_N  binaire=$(basename "$BIN")  extra='${EXTRA_ARGS:-}'  charge=$(host_loadavg)"
 
 qmon(){ python3 "$ROOT/scripts/moncmd.py" "$MON" "$1" 2>/dev/null; }
 meancolor(){ # -> "R G B" moyen d'un ppm
   convert "$1" -resize 1x1 -format "%[fx:int(255*r)] %[fx:int(255*g)] %[fx:int(255*b)]" info:
 }
 
-START=$(date +%s.%N)
-setsid "$BIN" -M "$MACHINE" -cpu "$CPU" -m "$RAM_MB" -smp "$SMP_N" \
+START=$(host_now)
+host_detach "$BIN" -M "$MACHINE" -cpu "$CPU" -m "$RAM_MB" -smp "$SMP_N" \
   -display none -g "$RES" \
   -drive "file=$DISK,format=qcow2,media=disk" \
   ${BIOS_ARGS[@]+"${BIOS_ARGS[@]}"} \
@@ -159,10 +163,8 @@ if [ -z "$QPID" ] || ! kill -0 "$QPID" 2>/dev/null; then
 fi
 echo "### qemu pid=$QPID (via -pidfile)"
 
-HZ=$(getconf CLK_TCK)
-cpu_time(){ # temps CPU (s) de QEMU: (utime+stime)/HZ — immunisé à la contention
-  [ -r "/proc/$QPID/stat" ] || { echo "?"; return; }
-  awk -v hz="$HZ" '{print ($14+$15)/hz}' "/proc/$QPID/stat"
+cpu_time(){ # temps CPU (s) de QEMU: utime+stime — immunisé à la contention
+  host_cpu_time "$QPID"
 }
 
 echo "t(s)  R   G   B   état"
@@ -170,7 +172,7 @@ BOOT_T=""
 CPU_T=""
 i=0
 while :; do
-  NOW=$(date +%s.%N); EL=$(echo "$NOW - $START" | bc)
+  NOW=$(host_now); EL=$(echo "$NOW - $START" | bc)
   ELI=${EL%.*}; ELI=${ELI:-0}; [ -z "$ELI" ] && ELI=0
   if (( ELI > TIMEOUT )); then echo "timeout ${TIMEOUT}s"; break; fi
   PPM="$SCR/mframe.ppm"

@@ -382,7 +382,10 @@ WEBPROXY_PORT="${WEBPROXY_PORT:-8080}"
 WEBPROXY_ON=""
 if [ -n "$NET" ] && [ "${WEBPROXY:-1}" != 0 ] && command -v python3 >/dev/null 2>&1; then
   mkdir -p "${POMPPC_SCRATCH:-$ROOT/.run}"
-  nohup python3 "$ROOT/scripts/web-proxy.py" --port "$WEBPROXY_PORT" --parent-pid $$ \
+  # 9>&- : le relais ne doit pas hériter du verrou tiger.lock (un flock suit
+  # la description de fichier) — sinon il le tient encore après la mort de QEMU
+  # et la relance suivante croit Tiger toujours lancé.
+  nohup python3 "$ROOT/scripts/web-proxy.py" --port "$WEBPROXY_PORT" --parent-pid $$ 9>&- \
     >> "${POMPPC_SCRATCH:-$ROOT/.run}/web-proxy.log" 2>&1 &
   WEBPROXY_ON=1
 fi

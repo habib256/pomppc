@@ -208,19 +208,23 @@ void POMPPCGPU::stop(IOService * provider)
        gel inkillable, puis free() qui fait IORecursiveLockFree sur la gate
        SOUS un dormeur (commandSleep a relâché le verrou, removeEventSource
        progresse donc sans attendre personne) — panic.
-       On attend ensuite, borné, que les dormeurs soient sortis de la gate :
-       c'est la seule façon de retirer les sources sans leur tirer le tapis. */
+       On attend ensuite que les dormeurs soient sortis de la gate : c'est la
+       seule façon de retirer les sources sans leur tirer le tapis. SANS
+       BORNE : un dormeur qui n'a pas encore repris la gate (un doorbell
+       synchrone la tient jusqu'à 2 s, D2) ferait, après removeEventSource,
+       openGate() sur un work loop NULL — panic certaine. Tout dormeur sort
+       dès qu'il voit fStopping ; on le réveille à chaque tour. */
     fStopping = 1;
     if (fGate) {
         UInt32 spins = 0;
         fGate->commandWakeup(&fIRQCount, false);   /* false = tous les dormeurs */
-        while (fSleepers && spins < 1000) {        /* ≤ 1 s */
+        while (fSleepers) {
             IOSleep(1);
-            spins++;
+            if (++spins % 1000 == 0) {
+                GPULog("stop: %lu waiter(s) still asleep after %lu s\n",
+                       (unsigned long) fSleepers, (unsigned long) (spins / 1000));
+            }
             fGate->commandWakeup(&fIRQCount, false);
-        }
-        if (fSleepers) {
-            GPULog("stop: %lu waiter(s) still asleep\n", (unsigned long) fSleepers);
         }
     }
 
@@ -523,6 +527,8 @@ void POMPPCGPU::timerAction(OSObject * owner, IOTimerEventSource * src)
  */
 
 struct SubmitArgs {
+    POMPPCGPUUserClient * client;
+    int    slot;
     UInt32 off, len, flags;
     UInt32 fence, status, statusPC;
     IOReturn result;
@@ -549,6 +555,16 @@ IOReturn POMPPCGPU::submitGated(OSObject * owner, void * a0, void *, void *, voi
         return kIOReturnSuccess;
     }
 
+    /* Même invariant que slotGated (K3/K7), vérifié DANS la gate : une
+       soumission qui arrive pendant que clientClose détruit la tranche
+       (fSlotBusy, gate relâchée par sleepForFence) recréerait des objets
+       après CLIENT_RESET, laissés au client suivant ; une tranche déjà
+       rendue et redonnée ferait rejouer le flux d'un autre processus. */
+    if (self->fClients[a->slot] != a->client || self->fSlotBusy[a->slot]) {
+        a->result = kIOReturnNotPermitted;
+        return kIOReturnSuccess;
+    }
+
     self->regWrite(QGPU_REG_SUBMIT_OFF, a->off);
     self->regWrite(QGPU_REG_SUBMIT_LEN, a->len);
     if ((a->flags & POMPPC_SUB_ASYNC) && self->fAsync) {
@@ -570,7 +586,7 @@ IOReturn POMPPCGPU::submitGated(OSObject * owner, void * a0, void *, void *, voi
     return kIOReturnSuccess;
 }
 
-IOReturn POMPPCGPU::submit(int slot, UInt32 off, UInt32 len,
+IOReturn POMPPCGPU::submit(int slot, POMPPCGPUUserClient * client, UInt32 off, UInt32 len,
                            UInt32 * fence, UInt32 * status, UInt32 * statusPC)
 {
     SubmitArgs a;
@@ -580,6 +596,7 @@ IOReturn POMPPCGPU::submit(int slot, UInt32 off, UInt32 len,
        rendait au userland trois mots de pile noyau — dont un « fence »
        aléatoire, que le client attendait ensuite jusqu'au délai maximal.
        waitFence et allocSlot le faisaient déjà, submit non. */
+    a.client = client; a.slot = slot;
     a.off = 0; a.len = 0;
     a.fence = 0; a.status = QGPU_ST_BACKEND; a.statusPC = 0;
     a.result = kIOReturnNotReady;
@@ -1007,7 +1024,9 @@ IOReturn POMPPCGPU::readReg(UInt32 offset, UInt32 * value)
     if (!fRegs || !fRegsRange || fStopping) {
         return kIOReturnNotReady;
     }
-    if ((offset & 3) || offset + 4 > fRegsRange->getLength()) {
+    /* Sans addition : offset = 0xFFFFFFFC ferait repasser offset + 4 à 0. */
+    IOByteCount len = fRegsRange->getLength();
+    if ((offset & 3) || offset >= len || len - offset < 4) {
         return kIOReturnBadArgument;
     }
     *value = regRead(offset);
@@ -1206,7 +1225,7 @@ IOReturn POMPPCGPUUserClient::ucSubmit(UInt32 off, UInt32 len, UInt32 * fence,
     if (!owner || slot < 0) {
         return kIOReturnNotAttached;
     }
-    return owner->submit(slot, off, len, fence, status, statusPC);
+    return owner->submit(slot, this, off, len, fence, status, statusPC);
 }
 
 IOReturn POMPPCGPUUserClient::ucWaitFence(UInt32 target, UInt32 timeoutMs, UInt32 * current,
@@ -1232,10 +1251,13 @@ IOReturn POMPPCGPUUserClient::ucWaitFence(UInt32 target, UInt32 timeoutMs, UInt3
    jamais toucher à l'index. */
 IOReturn POMPPCGPUUserClient::ucReset(void *, void *, void *, void *, void *, void *)
 {
-    if (!fOwner || fSlot < 0) {
+    POMPPCGPU * owner = fOwner;      /* K1 : une seule lecture — stop() l'efface */
+    int         slot  = fSlot;
+
+    if (!owner || slot < 0) {
         return kIOReturnNotAttached;
     }
-    return fOwner->resetSlot(fSlot, this);
+    return owner->resetSlot(slot, this);
 }
 
 IOReturn POMPPCGPUUserClient::ucGetSlot(UInt32 * index, UInt32 * base, UInt32 * ctxBase,

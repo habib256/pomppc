@@ -107,7 +107,7 @@ patch_forward() { # patch_forward <fichier.patch> <fichier> <motif> [<fichier> <
   fi
 }
 
-# --- 1. SMP mac99 (série BALATON, révisée : async_run_on_cpu, GPIO 3 et 4) ---
+# --- 1. SMP mac99 (série BALATON, révisée : async_run_on_cpu, GPIO 4 seul) ---
 # Le garde teste un marqueur PROPRE À CETTE VERSION du patch. L'ancien
 # (« CPU1 reset ») ne convient plus : il survit dans un commentaire des deux
 # versions, si bien qu'un arbre portant la série précédente l'aurait satisfait,

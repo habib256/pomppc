@@ -7696,6 +7696,225 @@ static void run_v21(QgpuCore *c, uint8_t *shmem)
     run_v21_dp(c, shmem);
 }
 
+/* ── 29/09 : correctifs du bug hunt du cœur ──────────────────────────────────
+ *
+ * (a) comptabilité mémoire : après TOUTE la suite, détruire les quatre
+ *     tranches doit ramener le compte à zéro exactement (chaque prise a sa
+ *     reprise) ; puis les plafonds refusent, par tranche et en tout ;
+ * (b) requêtes d'occlusion par contexte : le GL de l'hôte comptait les
+ *     dessins de TOUS les contextes dans la requête ouverte, et un second
+ *     BEGIN (autre contexte) échouait en BACKEND ;
+ * (c) client_reset délie la requête qu'un contexte d'une autre tranche avait
+ *     ouverte sur un identifiant de la tranche détruite ;
+ * (d) program.env d'un contexte recréé au même identifiant : 0, pas les
+ *     valeurs de l'ancien (GL : un seul jeu d'env sur l'hôte). */
+static void fx_tri_rect(Emit *v, float x0, float y0, float x1, float y1)
+{
+    vertex(v, x0, y0, 1, 1, 1); vertex(v, x1, y0, 1, 1, 1); vertex(v, x1, y1, 1, 1, 1);
+    vertex(v, x0, y0, 1, 1, 1); vertex(v, x1, y1, 1, 1, 1); vertex(v, x0, y1, 1, 1, 1);
+}
+
+static void fx_bind(Emit *e, uint32_t ctx)
+{
+    emit(e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(e, ctx);
+}
+
+static void run_fix0929(QgpuCore *c, uint8_t *shmem)
+{
+    Emit e, v;
+    uint32_t st, k, n1;
+    const uint64_t MiB = 1u << 20;
+    uint64_t cap_t = c->mem_cap_total, cap_s = c->mem_cap_slot;
+
+    printf("-- 29/09 : mémoire hôte, requêtes par contexte, env ARB\n");
+    for (k = 0; k < QGPU_MAX_CLIENTS; k++) {
+        qgpu_core_client_reset(c, k);
+    }
+    CHECK(c->mem_total == 0 && c->mem_slot[0] == 0 && c->mem_slot[1] == 0 &&
+          c->mem_slot[2] == 0 && c->mem_slot[3] == 0,
+          "(a) toute la suite rendue : %llu octets encore comptés",
+          (unsigned long long)c->mem_total);
+
+    /* (a) plafonds : 64 Mio en tout, 48 par tranche */
+    c->mem_cap_total = 64 * MiB;
+    c->mem_cap_slot = 48 * MiB;
+    e.base = shmem; e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3)); emit(&e, 0);
+    emit(&e, QGPU_TT_2D);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3)); emit(&e, 0);
+    emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, 1024); emit(&e, 1024); emit(&e, 1);
+    emit(&e, 0x1908); emit(&e, 0x80E1); emit(&e, 0x8367); emit(&e, QGPU_TEX_NO_DATA);
+    emit(&e, 0); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE)); emit(&e, 0);
+    emit(&e, QGPU_MAX_BUF_SIZE);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE)); emit(&e, 1);
+    emit(&e, QGPU_MAX_BUF_SIZE);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && c->mem_slot[0] == 36 * MiB && c->mem_total == 36 * MiB,
+          "(a) texture 1024² + 2 tampons de 16 Mio : %llu Mio comptés (36) (st %u)",
+          (unsigned long long)(c->mem_slot[0] / MiB), st);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE)); emit(&e, 2);
+    emit(&e, QGPU_MAX_BUF_SIZE);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_LIMIT && !c->buf[2].used && c->mem_slot[0] == 36 * MiB,
+          "(a) plafond de la tranche 0 : LIMIT, rien alloué (st %u, %llu Mio)", st,
+          (unsigned long long)(c->mem_slot[0] / MiB));
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE));
+    emit(&e, QGPU_CLIENT_BUF_IDS); emit(&e, QGPU_MAX_BUF_SIZE);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE));
+    emit(&e, QGPU_CLIENT_BUF_IDS + 1); emit(&e, QGPU_MAX_BUF_SIZE);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_LIMIT && c->status_pc == 3 && c->mem_slot[1] == 16 * MiB &&
+          c->mem_total == 52 * MiB,
+          "(a) tranche 1 : un tampon, puis le plafond TOTAL (st %u pc %u, %llu Mio)",
+          st, c->status_pc, (unsigned long long)(c->mem_total / MiB));
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_DESTROY, QGPU_LEN_TEX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_DESTROY, QGPU_LEN_BUF)); emit(&e, 1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && c->mem_slot[0] == 16 * MiB,
+          "(a) destructions rendues : tranche 0 à %llu Mio (16) (st %u)",
+          (unsigned long long)(c->mem_slot[0] / MiB), st);
+    qgpu_core_client_reset(c, 0);
+    qgpu_core_client_reset(c, 1);
+    CHECK(c->mem_total == 0, "(a) client_reset rend le reste : %llu octets",
+          (unsigned long long)c->mem_total);
+    c->mem_cap_total = cap_t;
+    c->mem_cap_slot = cap_s;
+
+    /* contextes 0 et 1 sur la surface 0 */
+    qgpu_core_reset(c);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_FMT_XRGB8888);
+    fx_bind(&e, 1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 0);
+    fx_bind(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 0);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "(b) deux contextes sur une surface (st %u)", st);
+
+    if (c->caps & QGPU_CAP_OCCLUSION) {
+        v.base = shmem; v.off = v.start = VTX_OFF;
+        fx_tri_rect(&v, 8, 8, 25, 24);
+        /* référence : un dessin seul */
+        e.off = e.start = CMD_OFF;
+        query_op(&e, QGPU_OP_QUERY_BEGIN, 0);
+        draw_cmd(&e, 6);
+        query_op(&e, QGPU_OP_QUERY_END, 0);
+        query_result(&e, 0, QRES_OFF);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        n1 = qword(shmem, QRES_OFF, 1);
+        CHECK(st == QGPU_ST_OK && n1 > 0, "(b) un dessin seul : %u échantillons (st %u)",
+              n1, st);
+        /* A (ctx 0) ouvre q1 ; B (ctx 1) dessine hors requête, ouvre q2,
+           dessine, la ferme, redessine ; A dessine deux fois entre-temps. */
+        e.off = e.start = CMD_OFF;
+        query_op(&e, QGPU_OP_QUERY_BEGIN, 1);
+        fx_bind(&e, 1);
+        draw_cmd(&e, 6);
+        query_op(&e, QGPU_OP_QUERY_BEGIN, 2);
+        draw_cmd(&e, 6);
+        fx_bind(&e, 0);
+        draw_cmd(&e, 6);
+        fx_bind(&e, 1);
+        draw_cmd(&e, 6);
+        query_op(&e, QGPU_OP_QUERY_END, 2);
+        draw_cmd(&e, 6);
+        fx_bind(&e, 0);
+        draw_cmd(&e, 6);
+        query_op(&e, QGPU_OP_QUERY_END, 1);
+        query_result(&e, 1, QRES_OFF + 8);
+        query_result(&e, 2, QRES_OFF + 16);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_OK && qword(shmem, QRES_OFF + 8, 1) == 2 * n1 &&
+              qword(shmem, QRES_OFF + 16, 1) == 2 * n1,
+              "(b) requêtes de deux contextes entrelacées : A %u, B %u (%u attendus "
+              "chacun) (st %u pc %u)", qword(shmem, QRES_OFF + 8, 1),
+              qword(shmem, QRES_OFF + 16, 1), 2 * n1, st, c->status_pc);
+
+        /* (c) le contexte 0 (tranche 0) ouvre un identifiant de la tranche 1 */
+        {
+            uint32_t q = QGPU_CLIENT_QUERY_IDS + 4, cb = QGPU_CLIENT_CTX_IDS * 2;
+            e.off = e.start = CMD_OFF;
+            emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, cb);
+            fx_bind(&e, cb);
+            emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 0);
+            fx_bind(&e, 0);
+            query_op(&e, QGPU_OP_QUERY_BEGIN, q);
+            st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+            qgpu_core_client_reset(c, 1);
+            CHECK(st == QGPU_ST_OK && c->ctx[0].query == -1 && !c->query[q].active,
+                  "(c) client_reset(1) délie la requête %u du contexte 0 : %d (st %u)",
+                  q, c->ctx[0].query, st);
+            e.off = e.start = CMD_OFF;
+            fx_bind(&e, cb);
+            query_op(&e, QGPU_OP_QUERY_BEGIN, q);
+            draw_cmd(&e, 6);
+            query_op(&e, QGPU_OP_QUERY_END, q);
+            query_result(&e, q, QRES_OFF);
+            st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+            CHECK(st == QGPU_ST_OK && qword(shmem, QRES_OFF, 1) == n1,
+                  "(c) la tranche 2 reprend l'identifiant %u : %u échantillons (st %u pc %u)",
+                  q, qword(shmem, QRES_OFF, 1), st, c->status_pc);
+            e.off = e.start = CMD_OFF;
+            fx_bind(&e, 0);
+            query_op(&e, QGPU_OP_QUERY_END, q);
+            st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+            CHECK(st == QGPU_ST_BAD_ARG, "(c) l'ancien END du contexte 0 est refusé : st %u", st);
+        }
+    }
+
+    /* (d) program.env d'un contexte recréé */
+    if (c->caps & QGPU_CAP_PROGRAMS) {
+        static const char fp[] = "!!ARBfp1.0\nMOV result.color, program.env[0];\nEND\n";
+        static const float quad[12] = { -1, -1, 0, 1, 3, -1, 0, 1, -1, 3, 0, 1 };
+        static const float red[4] = { 1, 0, 0, 1 };
+        const uint32_t TXT = 0x9000u, ENV = 0xB000u, CTX = 5;
+        uint32_t pass, pix[2];
+        memcpy(shmem + TXT, fp, sizeof(fp) - 1);
+        for (k = 0; k < 12; k++) qgpu_st32(shmem + VTX_OFF + k * 4, qgpu_f2u(quad[k]));
+        for (k = 0; k < 4; k++) qgpu_st32(shmem + ENV + k * 4, qgpu_f2u(red[k]));
+        for (pass = 0; pass < 2; pass++) {
+            e.off = e.start = CMD_OFF;
+            if (pass) {
+                emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_DESTROY, QGPU_LEN_CTX)); emit(&e, CTX);
+            }
+            emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, CTX);
+            fx_bind(&e, CTX);
+            emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 0);
+            emit(&e, QGPU_CMD_HDR(QGPU_OP_PROG_CREATE, QGPU_LEN_PROG_CREATE));
+            emit(&e, 1); emit(&e, QGPU_PT_FRAGMENT);
+            emit(&e, QGPU_CMD_HDR(QGPU_OP_PROG_STRING, QGPU_LEN_PROG_STRING));
+            emit(&e, 1); emit(&e, sizeof(fp) - 1); emit(&e, TXT);
+            emit(&e, QGPU_CMD_HDR(QGPU_OP_PROG_BIND, QGPU_LEN_PROG_BIND));
+            emit(&e, QGPU_PT_FRAGMENT); emit(&e, 1);
+            state(&e, QGPU_SK_FRAGMENT_PROGRAM, 1);
+            if (!pass) {
+                emit(&e, QGPU_CMD_HDR(QGPU_OP_PROG_ENV, QGPU_LEN_PROG_PARAMS));
+                emit(&e, QGPU_PT_FRAGMENT); emit(&e, 0); emit(&e, 1); emit(&e, ENV);
+            }
+            emit(&e, QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW));
+            emit(&e, QGPU_PRIM_MODE_TRIANGLES); emit(&e, 3); emit(&e, VTX_OFF); emit(&e, 0);
+            emit(&e, QGPU_VF_POS(4)); emit(&e, 0); emit(&e, QGPU_IDX_NONE); emit(&e, 0);
+            emit(&e, 3);
+            readback_cmd(&e, 0);
+            st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+            pix[pass] = st == QGPU_ST_OK ? px(shmem, 10, 10) : 0xDEAD;
+        }
+        CHECK(pix[0] == 0xFF0000 && pix[1] == 0,
+              "(d) env[0] rouge, puis contexte %u recréé sans env : %06x puis %06x (0)",
+              CTX, pix[0], pix[1]);
+    }
+    qgpu_core_reset(c);
+    CHECK(c->mem_total == 0, "(a) reset : %llu octets comptés",
+          (unsigned long long)c->mem_total);
+}
+
 static void *run_backend_body(void *arg)
 {
     BackendRun *r = arg;
@@ -7793,6 +8012,7 @@ static void *run_backend_body(void *arg)
     run_v21(c, shmem);          /* GLSL */
     run_v22(c, shmem);          /* ATI_texture_env_combine3 */
     run_gpu_copy(c, shmem);     /* 27/09 */
+    run_fix0929(c, shmem);      /* 29/09 : bug hunt du cœur */
 
     qgpu_core_reset(c);
     e.off = e.start = CMD_OFF;

@@ -130,7 +130,11 @@ static void crash_hook_check(void);
    siglongjmp quand pack_jmp_on est posé, et le lot est refusé (GLEngine le
    dessine lui-même), comme le fait un vrai pilote qui copie de la mémoire
    utilisateur sous garde de faute. */
-static sigjmp_buf pack_jmp;
+/* Relecture du 29/09 (finding 1) : le tampon de saut vit sur la PILE de la
+   fonction qui arme (geom_draw_client), pack_jb le désigne. Un tampon global
+   était réécrit par le sigsetjmp d'un autre fil pendant que le nôtre, garde
+   armée, attendait une moitié verrou relâché (voir guards_park). */
+static sigjmp_buf *volatile pack_jb;
 static volatile int pack_jmp_on;
 /* Même garde pour les LECTURES DE NIVEAUX de texture (empreinte, copie vers
    l'arène) : DOOM 3 crée _currentRender par glTexImage2D(NULL) et GLEngine
@@ -145,7 +149,7 @@ static volatile int sig_jmp_on;
    des n pointeurs ne menait nulle part. Sur faute : verrou rendu, primitive
    jetée. Tampon à part. Depuis P2 (relecture du 24/09), armée verrou tenu
    autour des seules lectures de l'application (voir PROC_GUARD_ARM). */
-static sigjmp_buf proc_jmp;
+static sigjmp_buf *volatile proc_jb;   /* finding 1 (29/09) : tampon sur la pile, voir pack_jb */
 static volatile int proc_jmp_on;
 static volatile unsigned long proc_fault_n;
 /* P3 (relecture du 24/09) : le crochet est global au processus ; chaque garde
@@ -903,6 +907,11 @@ static struct {
     int             wait_miss;          /* F8 : dépassements de barrière CONSÉCUTIFS */
     unsigned long   ctx_used, surf_used;
     unsigned long   tex_used[(QGPU_CLIENT_TEX_IDS + 31) / 32];
+    /* Finding 10 (relecture du 29/09) : textures détruites quand aucun
+       contexte hôte ne vivait — TEX_DESTROY impossible (une soumission sans
+       CTX_BIND rend QGPU_ST_NO_CTX). L'objet hôte existe encore, le bit de
+       tex_used reste pris ; alloc_tex_id les détruit au premier besoin. */
+    unsigned long   tex_zombie[(QGPU_CLIENT_TEX_IDS + 31) / 32];
     PCtx           *list;
     PTex           *textures;
     uint64_t        tex_clock;
@@ -1060,10 +1069,54 @@ static pthread_cond_t half_cv = PTHREAD_COND_INITIALIZER;
 /* À appeler, VERROU TENU, avant toute écriture dans la moitié courante.
    Au retour, plus aucune attente n'est en cours : tout ce que l'appelant a pu
    lire avant doit être RELU (G.cur, G.win, G.cmd, G.ncmd, G.vtx…). */
+/* Finding 1 (relecture du 29/09) — LES GARDES pack ET proc SONT CELLES DU
+ * DÉTENTEUR DE G.mu. Elles sont armées verrou tenu, mais leur région peut
+ * vider le flux (tri → prim → flush → switch_half → wait_half_ex) et donc
+ * RELÂCHER G.mu garde armée. Un autre fil pouvait alors armer la sienne par
+ * dessus (proc_thr, tampon de saut) et la désarmer en sortant : notre faute
+ * suivante n'était plus gardée, ou revenait par siglongjmp dans le cadre de
+ * pile de l'autre fil. Chaque relâchement de G.mu (stream_ready,
+ * wait_half_ex) met donc l'état des deux gardes de côté, les désarme, et le
+ * rétablit une fois le verrou repris : la garde active est toujours celle du
+ * fil qui tient le verrou. Une faute pendant l'attente elle-même n'est pas
+ * une lecture de l'application : elle n'a pas à être gardée. */
+typedef struct {
+    int proc_on, pack_on;
+    pthread_t proc_t, pack_t;
+    sigjmp_buf *proc_b, *pack_b;
+} GuardPark;
+
+static void guards_park(GuardPark *g)
+{
+    g->proc_on = proc_jmp_on;
+    g->pack_on = pack_jmp_on;
+    proc_jmp_on = 0;
+    pack_jmp_on = 0;
+    g->proc_t = proc_thr;
+    g->pack_t = pack_thr;
+    g->proc_b = proc_jb;
+    g->pack_b = pack_jb;
+}
+
+static void guards_resume(const GuardPark *g)
+{
+    proc_thr = g->proc_t;
+    pack_thr = g->pack_t;
+    proc_jb = g->proc_b;
+    pack_jb = g->pack_b;
+    proc_jmp_on = g->proc_on;           /* en dernier : état complet d'abord */
+    pack_jmp_on = g->pack_on;
+}
+
 static void stream_ready(void)
 {
+    GuardPark gp;
+    if (G.halt <= 0)
+        return;
+    guards_park(&gp);                   /* finding 1 : G.mu relâché ci-dessous */
     while (G.halt > 0)
         pthread_cond_wait(&half_cv, &G.mu);
+    guards_resume(&gp);
 }
 
 /* F2 — referme la case `pend` du contexte p (verrou tenu). `reclaim` rend la
@@ -2677,6 +2730,9 @@ static void wait_half_ex(int i, int unlock)
     Half *h = &G.h[i];
     unsigned long fence;
     int ok;
+    GuardPark gp;
+
+    guards_park(&gp);                   /* finding 1 : G.mu peut être relâché ici */
 
     /* INVARIANT F9 : dès l'entrée et jusqu'à la sortie, G.halt est levé. Toute
        sortie de G.mu depuis cette fonction — le pthread_cond_wait ci-dessous
@@ -2751,6 +2807,7 @@ static void wait_half_ex(int i, int unlock)
 done:
     G.halt--;
     pthread_cond_broadcast(&half_cv);
+    guards_resume(&gp);
 }
 
 static void wait_half(int i)
@@ -2807,6 +2864,14 @@ static void check_errors(unsigned long errors)
     G.async = 0;
     G.n_syncfall++;
     G.async_retry_at = G.n_frames + ASYNC_RETRY;
+    /* Finding 3 (relecture du 29/09) : P9 n'invalidait les miroirs que dans
+       broken_all. Or le cœur arrête le flux sur la commande fautive, en
+       asynchrone comme en synchrone : tout ce qui la suivait (TEX_IMAGE3,
+       matrices, program.env…) est perdu, et nos miroirs le croyaient livré
+       — texture fausse jusqu'à sa prochaine modification. Même geste que
+       broken_all ; quand ERRORS bouge par le ménage d'un autre client, le
+       coût est une image d'état renvoyé. */
+    invalidate_mirrors();
 }
 
 /* Reprend l'asynchrone si la fenêtre de synchrone n'a rien trouvé. */
@@ -3048,8 +3113,32 @@ static void submit_cur(void)
             G.async_retry_at = G.n_frames + ASYNC_RETRY;
             G.t_submit += now_s() - t;
             G.n_submits++;
-            h->busy = 0;
+            /* Finding 3 (relecture du 29/09) :
+               — M1/M3 : la trame a pu être prise. st ≥ 0 : le kext a écrit
+                 le doorbell et rendu FENCE_SUBMITTED, qui couvre la trame si
+                 elle a été acceptée (sinon il désigne une soumission
+                 précédente : l'attendre ne coûte rien). La moitié reste donc
+                 EN VOL jusque-là ; switch_half l'attendra avant de la
+                 réécrire. st < 0 : l'appel a échoué dans le kext avant le
+                 doorbell (bornes, arrêt, tranche rendue) — rien n'est parti.
+               — C3 : ses relectures ne sont pas faites (l'hôte a pu s'arrêter
+                 avant) : un contexte qui se croyait SYNCED ne l'est plus,
+                 l'hôte redevient la référence.
+               — P9 : ce qui suivait la faute est perdu : miroirs invalidés. */
+            h->busy = st >= 0;
+            h->fence = fence;
+            if (h->npost) {
+                PCtx *q;
+                for (q = G.list; q; q = q->next)
+                    if (q->qctx >= 0 && q->surf >= 0) {
+                        if (q->color == SYNCED)
+                            q->color = HOST_NEWER;
+                        if (q->depth == SYNCED)
+                            q->depth = HOST_NEWER;
+                    }
+            }
             h->npost = 0;
+            invalidate_mirrors();
             return;
         }
     }
@@ -3142,19 +3231,37 @@ static long alloc_tex_id(PCtx *p)
     unsigned long mask, *c;
     long id;
     int u;
+    /* Finding 10 (relecture du 29/09) : les textures détruites sans contexte
+       vivant partent maintenant, sous le contexte p. reserve() peut relâcher
+       G.mu : le bit zombie est retiré AVANT, le bit tex_used après que la
+       commande est écrite (règle P14). Les appelants revalident au retour
+       (tex_id_reserve). */
+    for (i = 0; i < QGPU_CLIENT_TEX_IDS; i++) {
+        if (G.tex_zombie[i / 32] & (1UL << (i % 32))) {
+            G.tex_zombie[i / 32] &= ~(1UL << (i % 32));
+            c = reserve(p, QGPU_LEN_TEX);
+            c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_DESTROY, QGPU_LEN_TEX);
+            c[1] = G.q.tex_base + i;
+            G.tex_used[i / 32] &= ~(1UL << (i % 32));
+        }
+    }
     for (i = 0; i < QGPU_CLIENT_TEX_IDS; i++) {
         if (!(G.tex_used[i / 32] & (1UL << (i % 32)))) {
             G.tex_used[i / 32] |= 1UL << (i % 32);
             return G.q.tex_base + i;
         }
     }
-    /* Close pending RAW/legacy draws and finish both asynchronous halves
-     * before recycling an ID. DESTROY precedes CREATE in the new stream.
-     * F9 : ces deux appels PEUVENT relâcher G.mu — la victime est donc
-     * choisie APRÈS, sur l'état courant, et marquée morte avant tout ce qui
-     * pourrait relâcher à nouveau. Sinon deux fils évinçaient la même. */
-    flush();
-    drain_all();
+    /* Finding 4 (relecture du 29/09) : plus de flush() + drain_all() ici.
+     * Ils relâchaient G.mu (wait_half_ex) pendant que l'appelant tenait son
+     * PTex encore sans identifiant — détruite entre-temps par
+     * pomppc_texture_deleted (libérée sans rien émettre, qtex < 0), ou dotée
+     * d'un identifiant par un autre fil (fuite pour toujours). Ils ne
+     * servaient pas l'ordre : la file de l'hôte est FIFO, donc les dessins
+     * déjà soumis s'exécutent avant le TEX_DESTROY, et reserve() ferme les
+     * séries en attente (run, DRAW_RAW) avant de l'écrire — DESTROY précède
+     * CREATE dans le flux. reserve() peut encore relâcher G.mu (F9) : la
+     * victime est marquée morte AVANT, et les appelants revalident leur
+     * PTex au retour (tex_id_reserve). */
     /* Protect every effective unit, including units not uploaded yet. A
      * texture bound by another context may be evicted: that context will
      * reload it when drawn again. Guest storage remains owned by GLEngine. */
@@ -3190,6 +3297,51 @@ static long alloc_tex_id(PCtx *p)
         ctx->st_valid = 0;
     G.n_texevictions++;
     return id;                          /* bitmap bit stays allocated */
+}
+
+/* Rend un identifiant obtenu d'alloc_tex_id et finalement inutilisé : rien
+   n'existe sous ce nom sur l'hôte (bit libre, ou TEX_DESTROY de la victime
+   déjà dans le flux). */
+static void free_tex_id(long id)
+{
+    unsigned long i = (unsigned long)(id - (long)G.q.tex_base);
+    if (id >= 0 && i < QGPU_CLIENT_TEX_IDS)
+        G.tex_used[i / 32] &= ~(1UL << (i % 32));
+}
+
+static PTex *find_tex(void *drvtex);
+
+/* Finding 4 (relecture du 29/09) — dote t d'un identifiant et réserve les
+ * `words` mots de sa commande de création. alloc_tex_id (éviction) et
+ * reserve() peuvent relâcher G.mu : au retour, t a pu être détruite, ou dotée
+ * par un autre fil. L'identifiant n'est posé dans t qu'ICI, après la
+ * réservation — sinon un autre fil pouvait voir qtex ≥ 0 et écrire un
+ * TEX_IMAGE3 avant notre TEX_CREATE.
+ *   1 : t->qtex posé, écrire la création dans *c ;
+ *   2 : un autre fil l'a dotée entre-temps, rien à créer ;
+ *   0 : échec — plus d'identifiant, ou t DÉTRUITE (ne plus y toucher). */
+static int tex_id_reserve(PCtx *p, PTex *t, unsigned long words, unsigned long **c)
+{
+    void *drvtex = t->drvtex;
+    unsigned long epoch = tex_del_epoch;
+    long id = alloc_tex_id(p);
+    if (id < 0)
+        return 0;
+    *c = reserve(p, words);
+    /* Rien n'a été écrit depuis reserve() (verrou tenu) : on peut rendre les
+       mots. Un CTX_BIND qu'il aurait ajouté reste, sans effet. */
+    if (tex_del_epoch != epoch && find_tex(drvtex) != t) {
+        G.ncmd -= words;
+        free_tex_id(id);
+        return 0;
+    }
+    if (t->qtex >= 0) {
+        G.ncmd -= words;
+        free_tex_id(id);
+        return 2;
+    }
+    t->qtex = id;
+    return 1;
 }
 
 /* Textures par adresse d'objet du GLDriver. Une recherche par unité de
@@ -3288,6 +3440,9 @@ void pomppc_texture_deleted(void *drvtex)
                 c[1] = t->qtex;
                 flush();
                 G.tex_used[i / 32] &= ~(1UL << (i % 32));
+            } else if (i < QGPU_CLIENT_TEX_IDS) {
+                /* finding 10 : ni rendu ni détruit — à détruire plus tard */
+                G.tex_zombie[i / 32] |= 1UL << (i % 32);
             }
         }
         free(t);
@@ -4096,21 +4251,22 @@ static int upload_texture(PCtx *p, PTex *t)
                   (unsigned short)S16(lv0, LV_H));
     }
     if (t->qtex < 0) {
-        t->qtex = alloc_tex_id(p);
-        if (t->qtex < 0)
+        int three = t3 || tex_is_cube(t) || rect;
+        int r = tex_id_reserve(p, t, three ? QGPU_LEN_TEX_CREATE3 : QGPU_LEN_TEX, &c);
+        if (!r)
             return no(NO_TEX_ID, 0, 0);
-        if (t3 || tex_is_cube(t) || rect) {
-            c = reserve(p, QGPU_LEN_TEX_CREATE3);
-            c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3);
-            c[1] = t->qtex;
-            c[2] = t3 ? QGPU_TT_3D : rect ? QGPU_TT_RECTANGLE : QGPU_TT_CUBE_MAP;
-        } else {
-            c = reserve(p, QGPU_LEN_TEX);
-            c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX);
-            c[1] = t->qtex;
+        if (r == 1) {
+            if (three) {
+                c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3);
+                c[1] = t->qtex;
+                c[2] = t3 ? QGPU_TT_3D : rect ? QGPU_TT_RECTANGLE : QGPU_TT_CUBE_MAP;
+            } else {
+                c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX);
+                c[1] = t->qtex;
+            }
+            t->dirty = 1;
+            t->prm_valid = 0;
         }
-        t->dirty = 1;
-        t->prm_valid = 0;
     }
     t->last_use = ++G.tex_clock;
     if (t->dirty) {
@@ -4294,8 +4450,13 @@ static int upload_texture(PCtx *p, PTex *t)
            sont forcés aux valeurs initiales par tex_lod_ok) ; bordure : avec
            G.tex13 (sinon, seule la valeur initiale passe, cf. tex_params_ok) ;
            biais et profondeur : avec G.tex14 (sinon le biais est sans effet,
-           GL_MAX_TEXTURE_LOD_BIAS valant 0, et la profondeur est refusée) */
-        if ((k == 4 && !t3) || (k >= 5 && !G.v10) || (k == 9 && !G.tex13) ||
+           GL_MAX_TEXTURE_LOD_BIAS valant 0, et la profondeur est refusée).
+           Finding 5 (relecture du 29/09) : LOD et niveaux demandent AUSSI
+           QGPU_CAP_GL14 — le cœur rend QGPU_ST_BACKEND pour toute clé de
+           WRAP_R à DEPTH_MODE sans elle (refus fatal, broken_all dès la
+           première texture). Même garde que tex_lod_ok. */
+        if ((k == 4 && !t3) || (k >= 5 && !(G.v10 && (G.q.caps & QGPU_CAP_GL14))) ||
+            (k == 9 && !G.tex13) ||
             (k >= 10 && !G.tex14))
             continue;
         if (rect && (k == 5 || k == 6 || k == 7 || k == 10))
@@ -7644,13 +7805,27 @@ static int glsl_state(PCtx *p, unsigned char *gc)
 /* Définit le programme sur l'hôte (textes, attributs, uniforms, liaison),
    dans une soumission sonde : le verdict de l'hôte est connu tout de suite.
    1 = accepté. */
+/* Finding 7 : même règle que glsl_name_ok du cœur (hors « gl_ », déjà
+   écarté par l'appelant) — identificateur GLSL, lettres, chiffres, '_'. */
+static int glsl_ident_ok(const char *s)
+{
+    const char *q;
+    if (!s[0] || (s[0] >= '0' && s[0] <= '9'))
+        return 0;
+    for (q = s; *q; q++)
+        if (!((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') ||
+              (*q >= '0' && *q <= '9') || *q == '_'))
+            return 0;
+    return 1;
+}
+
 static int glsl_define(PCtx *p, GProg *g, unsigned long sig)
 {
     unsigned char *P = g->obj;
     void *linker = (void *)GLD_U32(P, GO_LINKER);
     const unsigned char *att = (const unsigned char *)GLD_U32(P, GO_ATTACHED);
     unsigned long natt = GLD_U32(P, GO_NATTACHED), nslots = GLD_U32(P, GO_NSLOTS);
-    unsigned long i, off, *c, nsrc = 0, nunif = 0, nattr = 0;
+    unsigned long i, off, *c, nsrc = 0, nunif = 0, nattr = 0, nbad = 0;
     char name[QGPU_MAX_GLSL_NAME + 8];
     long st;
 
@@ -7743,6 +7918,13 @@ static int glsl_define(PCtx *p, GProg *g, unsigned long sig)
         br = strchr(name, '[');         /* « nom[0] » → « nom » */
         if (br)
             *br = 0;
+        /* Finding 7 (relecture du 29/09) : un membre de struct (« s.m », règle
+           GL 2.0 du linker 3Dlabs) n'est pas un identifiant ; glsl_name_ok du
+           cœur le refuse (BAD_ARG). On ne l'émet pas — voir nbad plus bas. */
+        if (!glsl_ident_ok(name)) {
+            nbad++;
+            continue;
+        }
         loc = SH.unif_loc(linker, name);
         slots = (unsigned long)size * (unsigned long)QGPU_GT_SLOTS(type);
         if (loc < 0 || (unsigned long)loc + slots > nslots)
@@ -7764,6 +7946,16 @@ static int glsl_define(PCtx *p, GProg *g, unsigned long sig)
         c[5] = (unsigned long)len;
         c[6] = G.q.base + off;
         nunif++;
+    }
+    if (nbad) {
+        /* Finding 7 : le protocole ne sait pas nommer ces uniforms (v21 :
+           identifiant seul). Lier quand même donnerait un programme dont ils
+           restent à 0 sur l'hôte — image fausse sans le dire. Refusé ICI,
+           sans GLSL_LINK : le programme reste au rendu d'Apple, et aucune
+           commande refusée ne part vers l'hôte. */
+        gl_note("GLSL %ld (objet %p) : %lu uniform(s) sans nom d'identifiant "
+                "(membre de struct) — laissé au rendu d'Apple\n", g->id, (void *)P, nbad);
+        return 0;
     }
     c = reserve(p, QGPU_LEN_GLSL_LINK);
     c[0] = QGPU_CMD_HDR(QGPU_OP_GLSL_LINK, QGPU_LEN_GLSL_LINK);
@@ -8342,7 +8534,12 @@ static int geom_publish(PCtx *p, unsigned long fmt)
        octets de pile écrasés, juste sur `off`, `n` et `u`, qui servent après.
        Atteignable avec COLOR_SUM + coordonnée de brouillard + texgen sans
        éclairage + 4 unités, ou POMPPC_GL_GEOM=2. */
-    unsigned short ent[26];             /* v16 : + 15 génériques (24 au plus) */
+    /* Finding 9 (relecture du 29/09) : position + normale, couleur,
+       secondaire, brouillard + QGPU_MAX_UNITS (8 depuis la v17) coordonnées
+       + 15 génériques = 28 entrées ; le tableau en tenait 26 (4 octets de
+       pile écrasés). p->desc (64 octets) en tient 30. Un tel sommet dépasse
+       GLD_VERTEX_SIZE : pomppc_geom_dispatch le refuse avant d'arriver ici. */
+    unsigned short ent[5 + QGPU_MAX_UNITS + QGPU_VF_GEN_MAX - 1];
     unsigned long off = 0;
     int n = 0, u;
 
@@ -9821,7 +10018,10 @@ static void va_fetch(float *dst, PCtx *p, const unsigned char *V, int slot,
     type &= 0x7fff;
     bpc = va_bpc(type, ent[0xc]);
     stride = (int)GLD_U32(ent, 4);
-    if ((slot == 1 || slot == 2) && type != VA_GL_FLOAT && type != VA_GL_DOUBLE)
+    /* Finding 6 (relecture du 29/09) : la couleur secondaire (emplacement 4)
+       entière est normalisée comme la primaire — glSecondaryColorPointer(3,
+       GL_UNSIGNED_BYTE) arrivait en 0..255, secondaire blanche. */
+    if ((slot == 1 || slot == 2 || slot == 4) && type != VA_GL_FLOAT && type != VA_GL_DOUBLE)
         norm = 1;
     src = va_src(p, V, slot);
     if (!src || stride <= 0 || bpc <= 0) {
@@ -9863,11 +10063,15 @@ static void va_fetch(float *dst, PCtx *p, const unsigned char *V, int slot,
  * ce que l'application demande : on REFUSE le dessin, GLEngine le transforme
  * lui-même (image juste, comme POMPPC_GL_GEOM=0), et on consigne UNE FOIS le
  * descripteur complet pour retrouver d'où la source aurait dû venir. */
-static const unsigned long va_fmt_bit[9] = {
+/* Finding 10 (relecture du 29/09) : les unités 4..7 (v17, 8 unités) étaient
+   absentes — une source nulle sur texcoord 4..7 passait sans refus ni sonde. */
+#define VA_FMT_N 13
+static const unsigned long va_fmt_bit[VA_FMT_N] = {
     0, QGPU_VF_NORMAL, QGPU_VF_COLOR, QGPU_VF_SEC_COLOR, QGPU_VF_FOG,
-    QGPU_VF_TEX(0), QGPU_VF_TEX(1), QGPU_VF_TEX(2), QGPU_VF_TEX(3)
+    QGPU_VF_TEX(0), QGPU_VF_TEX(1), QGPU_VF_TEX(2), QGPU_VF_TEX(3),
+    QGPU_VF_TEX(4), QGPU_VF_TEX(5), QGPU_VF_TEX(6), QGPU_VF_TEX(7)
 };
-static const int va_fmt_slot[9] = { 0, 1, 2, 4, 3, 8, 9, 10, 11 };
+static const int va_fmt_slot[VA_FMT_N] = { 0, 1, 2, 4, 3, 8, 9, 10, 11, 12, 13, 14, 15 };
 
 static void va_probe(PCtx *p, const unsigned char *V, unsigned long fmt,
                      const char *tag, int bad)
@@ -9876,7 +10080,7 @@ static void va_probe(PCtx *p, const unsigned char *V, unsigned long fmt,
     int i, k;
     gl_note("SONDE tableaux (%s) : V %p en_hi %08lx en_lo %08lx fmt %lx fautif %d image %lu\n",
             tag, (void *)V, GLD_U32(V, VA_EN_HI), GLD_U32(V, VA_EN_LO), fmt, bad, G.n_frames);
-    for (i = 0; i < 9; i++) {
+    for (i = 0; i < VA_FMT_N; i++) {
         int s = va_fmt_slot[i];
         const unsigned char *ent = VA_SLOT(V, s);
         unsigned long vbo = GLD_U32(V, VA_VBO(V, s));
@@ -9910,7 +10114,7 @@ static int va_sources_ok(PCtx *p, const unsigned char *V, unsigned long fmt)
 {
     static int probed_first, probed_bad;
     int i, bad = -1;
-    for (i = 0; i < 9; i++) {
+    for (i = 0; i < VA_FMT_N; i++) {
         int s = va_fmt_slot[i];
         const unsigned char *ent;
         if ((i && !(fmt & va_fmt_bit[i])) || !va_enabled(V, s))
@@ -9996,7 +10200,9 @@ static void va_plan_attr(VaAttr *at, PCtx *p, const unsigned char *V, int slot,
     at->type &= 0x7fff;
     at->bpc = va_bpc(at->type, ent[0xc]);
     at->stride = (long)GLD_U32(ent, 4);
-    if ((slot == 1 || slot == 2) && at->type != VA_GL_FLOAT && at->type != VA_GL_DOUBLE)
+    /* finding 6 (29/09) : secondaire (4) comme primaire ; le natif en tire
+       QGPU_NATTR_NORMALIZED, que le contrat laisse à l'invité */
+    if ((slot == 1 || slot == 2 || slot == 4) && at->type != VA_GL_FLOAT && at->type != VA_GL_DOUBLE)
         at->norm = 1;
     src = va_src(p, V, slot);
     if (!src || at->stride <= 0 || at->bpc <= 0)
@@ -10708,6 +10914,10 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
           partiraient dans l'autre moitié que la commande). */
     dbytes = (unsigned long)nd * QGPU_NATTR_WORDS * 4;
     ibytes = (nidx && ib < 0) ? nidx * (isz == 4 ? 4UL : 2UL) : 0;
+    /* Finding 2 (relecture du 29/09) : sans vidage ci-dessous, rien n'avait
+       attendu la fin d'une attente d'un autre fil (F9) avant d'écrire dans
+       la moitié courante. Avant le test : G.ncmd, G.vtx, G.idx relus après. */
+    stream_ready();
     if (G.ncmd + QGPU_LEN_DRAW_NATIVE + QGPU_LEN_DRAW_RAW + 2 * QGPU_LEN_CTX + 8 > CMD_WORDS ||
         VTX_OFF + G.vtx + dbytes > VTX_LIMIT ||
         (ibytes && ((G.idx + 3) & ~3UL) + ibytes > IDX_SIZE))
@@ -11028,13 +11238,14 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
                             const void *indices)
 {
     int r;
+    sigjmp_buf jb;                      /* finding 1 (29/09) : sur NOTRE pile */
     if (G.count)                        /* lot 0 : un dessin par tableaux */
         cnt_draw(p, 0);
     if (G.bd_on && bd_in()) {           /* relevé R4 */
         fprintf(stderr, "BLOC dessin %s %ld\n", indexed ? "indexé" : "tableaux", count);
         fflush(stderr);
     }
-    if (sigsetjmp(pack_jmp, 0) != 0) {     /* 0 : pas de sigprocmask par dessin (5 % du fil !) ;
+    if (sigsetjmp(jb, 0) != 0) {           /* 0 : pas de sigprocmask par dessin (5 % du fil !) ;
                                                SA_NODEFER dans le crochet rend le retour sûr */
         static unsigned long told;
         pack_jmp_on = 0;
@@ -11061,6 +11272,7 @@ static int geom_draw_client(PCtx *p, long indexed, unsigned long mode,
     }
     crash_hook_fresh();                 /* Prey : gestionnaires avant la 1re image */
     pack_thr = self_thr();              /* P3 (relecture du 24/09) ; lot 1 */
+    pack_jb = &jb;
     pack_jmp_on = 1;
     r = geom_draw_client_unsafe(p, indexed, mode, first, count, itype, indices);
     pack_jmp_on = 0;
@@ -11222,6 +11434,7 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
        refusait le DRAW_RAW (BAD_ARG) et tout le chemin brut tombait en
        rastérisation pour la session (UT2004, toute la géométrie « from arrays »
        ; Marble Blast passe par Begin/End, dont le test était juste). */
+    stream_ready();                     /* finding 2 (29/09), F9 : relus après */
     if (G.ncmd + QGPU_LEN_DRAW_RAW_BUF + QGPU_LEN_BUF_SUBDATA +
             QGPU_LEN_BUF_CREATE + QGPU_LEN_SET_STATE + 8 > CMD_WORDS ||
         (!reuse && VTX_OFF + G.vtx + packed > VTX_LIMIT) ||
@@ -11767,6 +11980,28 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
            (p->geom_fmt) : calculé une fois. Lot 2 : le verdict est rangé
            pour le dessin (vd_store), tailles des génériques comprises. */
         fmt = geom_format(p);
+        if (QGPU_VF_WORDS(fmt) * 4 > GLD_VERTEX_SIZE) {
+            /* Finding 9 (relecture du 29/09) : un sommet plus large que celui
+               de GLEngine (0x100 octets) ne tient ni dans son tampon interne
+               ni dans geom_scratch, compté à ce pas (P3). Atteignable avec
+               8 unités + génériques (glsl_need rend tout sans linker). Même
+               refus que texture_ok : GLEngine transforme lui-même. */
+            no(NO_G_STRIDE, QGPU_VF_WORDS(fmt) * 4, GLD_VERTEX_SIZE);
+            us_close();
+            p->geom_on = 0;
+            if (G.count)
+                cnt_keep(p, 0, 0, 0);
+            if (wl) {                   /* lot 3, contrôle */
+                VD.wl_skip++;
+                vd_check_at(p, "dispatch", 1, 0, 0, 0, 0, vd_epoch != ep0);
+            }
+            if (G.verdict) {            /* lot 2 */
+                vd_store(p, 0, 0, 0, 0);
+                p->vd_fresh = 1;
+            }
+            pthread_mutex_unlock(&G.mu);
+            return 0;
+        }
         us_close();
         if (G.count)
             cnt_keep(p, 1, &ti, fmt);
@@ -12437,11 +12672,14 @@ static long a_polygon(void *ctx, void *verts, long n, long flags)
  * seulement autour des lectures de la mémoire de l'application (calcul des
  * primitives, apple_batch_ok, apple_ptrs_touch) ; jamais autour de
  * begin_*, fallback(), apple_guard() (malloc/free) ni du rendu d'Apple
- * real(...) — une faute là reste la leur. Désarmée avant tout unlock.
+ * real(...) — une faute là reste la leur. Désarmée avant tout unlock de
+ * l'appelant ; les unlocks du vidage (flush → wait_half_ex, stream_ready)
+ * la mettent de côté eux-mêmes (finding 1, relecture du 29/09 : guards_park).
+ * `jb` : tampon de saut LOCAL de l'appelant, sur sa pile.
  * P3 : le fil qui arme est noté (proc_thr). crash_hook_fresh : voir sa
  * définition (gestionnaires relus avant la première image). */
 #define PROC_GUARD_ARM()    do { crash_hook_fresh(); proc_thr = self_thr(); \
-                                 proc_jmp_on = 1; } while (0)
+                                 proc_jb = &jb; proc_jmp_on = 1; } while (0)
 #define PROC_GUARD_DISARM() do { proc_jmp_on = 0; } while (0)
 
 /* Lit chaque pointeur et les deux bouts de chaque sommet, sous garde, avant
@@ -12491,9 +12729,10 @@ static long a_polygon_ptr(void *ctx, void *vptrs, long n, long flags)
     proc4 real;
     const unsigned char **pp = (const unsigned char **)vptrs;
     volatile int opened = 0;
+    sigjmp_buf jb;                      /* finding 1 (29/09) : sur NOTRE pile */
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
-    if (sigsetjmp(proc_jmp, 0) != 0)
+    if (sigsetjmp(jb, 0) != 0)
         return proc_fault(p, opened, "a_polygon_ptr", n);
     if (p && begin_tris(p, &b)) {
         opened = 1;
@@ -12535,10 +12774,11 @@ static long name(void *ctx, void *verts, long n, long flags)                    
     int ok;                                                                     \
     lp_fn real;                                                                 \
     volatile int opened = 0;                                                    \
+    sigjmp_buf jb;                      /* finding 1 (29/09) : sur NOTRE pile */ \
     pthread_mutex_lock(&G.mu);                                                  \
     p = find_ctx(ctx);                                                          \
     if (ptrs) {                                                                 \
-        if (sigsetjmp(proc_jmp, 0) != 0)                                        \
+        if (sigsetjmp(jb, 0) != 0)                                              \
             return proc_fault(p, opened, #name, n);                             \
     }                                                                           \
     if (p && begin_lp(p, &b, lines)) {                                          \
@@ -12825,10 +13065,11 @@ static int upload_surftex(PCtx *p, PTex *t, unsigned long sid)
     if (!src || src->qctx < 0)
         return no(NO_TEX_SURF, sid, src ? 1 : 0);
     if (t->qtex < 0) {
-        t->qtex = alloc_tex_id(p);
-        if (t->qtex < 0)
+        int r = tex_id_reserve(p, t, QGPU_LEN_TEX_CREATE3, &c);   /* finding 4 */
+        if (!r)
             return no(NO_TEX_ID, 0, 0);
-        c = reserve(p, QGPU_LEN_TEX_CREATE3);
+        if (r == 2)
+            goto created;
         c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3);
         c[1] = t->qtex;
         c[2] = rect ? QGPU_TT_RECTANGLE : QGPU_TT_2D;
@@ -12845,6 +13086,7 @@ static int upload_surftex(PCtx *p, PTex *t, unsigned long sid)
             }
         }
     }
+created:
     /* son contenu n'existe que sur l'hôte : jamais évincée (P15) */
     t->host_only = 1;
     t->dirty = 0;
@@ -13092,13 +13334,13 @@ static void crash_handler(int sig, siginfo_t *si, void *ucv)
     if (proc_jmp_on && pthread_equal(pthread_self(), proc_thr)) {
         proc_jmp_on = 0;
         proc_fault_n++;
-        siglongjmp(proc_jmp, 1);
+        siglongjmp(*proc_jb, 1);
     }
     if (pack_jmp_on && pthread_equal(pthread_self(), pack_thr)) {
         pack_jmp_on = 0;
         pack_fault_addr = (unsigned long)(si ? si->si_addr : 0);
         pack_fault_n++;
-        siglongjmp(pack_jmp, 1);
+        siglongjmp(*pack_jb, 1);
     }
     /* P4 : réentrance — rendre la main au gestionnaire précédent D'ABORD ;
        la faute se reproduit au retour et c'est lui qui la prend. */
@@ -14123,10 +14365,21 @@ static int pix_scratch(PCtx *p, unsigned long w, unsigned long h)
     if (w == 0 || h == 0 || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM)
         return 0;
     if (G.pixtex < 0) {
-        G.pixtex = alloc_tex_id(p);
-        if (G.pixtex < 0)
+        /* Finding 4 (relecture du 29/09) : alloc_tex_id et reserve() peuvent
+           relâcher G.mu. G.pixtex n'est posé qu'une fois la place de sa
+           création tenue ; si un autre fil l'a créée entre-temps, on rend
+           l'identifiant et les mots réservés (rien n'a été écrit depuis). */
+        const unsigned long words = QGPU_LEN_TEX_CREATE3 + 4 * QGPU_LEN_TEX_PARAM;
+        long id = alloc_tex_id(p);
+        if (id < 0)
             return 0;
-        c = reserve(p, QGPU_LEN_TEX_CREATE3 + 4 * QGPU_LEN_TEX_PARAM);
+        c = reserve(p, words);
+        if (G.pixtex >= 0) {
+            G.ncmd -= words;
+            free_tex_id(id);
+            return 1;
+        }
+        G.pixtex = id;
         c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3);
         c[1] = G.pixtex;
         c[2] = QGPU_TT_2D;
@@ -14345,6 +14598,14 @@ static int try_draw_ds(PCtx *p, unsigned long *a)
         if (p->depth == SW_NEWER)
             sync_to_host(p, 0, 1);
     }
+    /* Finding 8 (relecture du 29/09) — POLITIQUE P2 : CTX_UNPACK_ALIGNMENT
+       n'est pas le mot que glPixelStorei écrit (mesuré le 22/09, voir
+       try_draw_pixels). Seules les lignes SERRÉES multiples de 4 ont le même
+       pas quel que soit l'alignement réel : profondeur (4 octets par pixel)
+       toujours, stencil (1 octet) si w est multiple de 4. Le reste part en
+       logiciel : exact, et plus de lecture au-delà du tampon. */
+    if (fmt == 0x1901 && (w & 3UL))
+        return 0;
     if (!pix_dest(p, vtx, w, h, &dx, &dy))
         return 0;
     align = GLD_U32(p->ctx, CTX_UNPACK_ALIGNMENT);
@@ -14469,8 +14730,11 @@ static int try_draw_pixels(PCtx *p, unsigned long *a)
     c[7] = fmt; c[8] = fmt; c[9] = type;
     c[10] = G.q.base + off; c[11] = rowb; c[12] = 0;
     G.n_texuploads++;
-    G.pixtex_w = w;
-    G.pixtex_h = h;
+    /* Finding 10 (relecture du 29/09) : try_copy_pixels réutilise la base
+       sur la seule taille, sans la respécifier — une base GL_RGB y donnait
+       un alpha à 1 après COPY_TEX. Seule une base RGBA est réutilisable. */
+    G.pixtex_w = fmt == 0x1908 ? w : 0;
+    G.pixtex_h = fmt == 0x1908 ? h : 0;
     if (!pix_quad(p, vtx, w, h, 0))
         return 0;
     G.n_pixdraw++;
@@ -14596,6 +14860,14 @@ static int try_bitmap(PCtx *p, unsigned long *a)
         return 0;
     if (!bits)
         return 1;
+    /* Finding 8 (relecture du 29/09) — POLITIQUE P2 (voir try_draw_pixels) :
+       l'alignement lu à CTX_UNPACK_ALIGNMENT peut valoir 4 quand l'appli a
+       posé 1 (police GLUT : glyphes de 8 px, un octet par ligne → glyphes
+       brouillés et 3·(h−1) octets lus au-delà). Seule une ligne serrée
+       multiple de 4 octets a le même pas quel que soit l'alignement réel ;
+       le reste part en logiciel. */
+    if (((w + 7UL) / 8UL) & 3UL)
+        return 0;
     if (p->color == SW_NEWER || !accel_ok(p) || !ensure_surface(p))
         return 0;
     if (!pix_scratch(p, w, h))
@@ -15004,8 +15276,17 @@ void pomppc_context_created(void *ctx)
     if (G.state > 0) {
         p->qctx = alloc_id(&G.ctx_used, G.q.ctx_base, QGPU_CLIENT_CTX_IDS);
         if (p->qctx >= 0) {
+            /* Finding 2 (relecture du 29/09) : écrire dans la moitié courante
+               sans stream_ready(), c'était écrire pendant qu'un autre fil
+               attend une barrière verrou relâché (F9) — dans une moitié
+               peut-être encore en vol, ou par-dessus le CTX_BIND de tête de
+               ce fil. Pas de reserve() : il lierait le contexte AVANT sa
+               création. La marge est celle de reserve() (close_run/close_raw
+               et leurs CTX_BIND). */
+            stream_ready();
             close_run();
-            if (G.ncmd + QGPU_LEN_CTX > CMD_WORDS)
+            close_raw();
+            if (G.ncmd + QGPU_LEN_CTX + 4 + QGPU_LEN_DRAW_N + QGPU_LEN_DRAW_RAW_BUF > CMD_WORDS)
                 flush();
             c = G.cmd + G.ncmd;
             c[0] = QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX);
@@ -15036,6 +15317,10 @@ void pomppc_context_destroyed(void *ctx)
     PCtx **pp, *p;
     unsigned long *c;
     pthread_mutex_lock(&G.mu);
+    /* Finding 2 (relecture du 29/09) : close_run/close_raw ci-dessous écrivent
+       dans le flux — pas pendant l'attente d'un autre fil (F9). En tête, avant
+       de décrocher la PCtx : stream_ready() peut relâcher le verrou. */
+    stream_ready();
     vd_total("contexte détruit");       /* lot 2 */
     for (pp = &G.list; *pp; pp = &(*pp)->next) {
         if ((*pp)->ctx != ctx)
