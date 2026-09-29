@@ -390,15 +390,17 @@ TCG34_MARKERS
   # M4, un tampon posé hors de la fenêtre de 4 Gio du texte de QEMU (un
   # lancement sur deux environ) ralentit tout le processus de ~10 % : c'étaient
   # « les deux régimes ». Le patch imprime aussi, toujours, où le tampon est posé.
-  # Marqueur PROPRE À CETTE VERSION (29/09/2026) : la ligne « alias RX » du
-  # remap split-wx. « tcg_jit_near » est dans toutes les versions : un arbre à
-  # l'ancienne l'aurait satisfait et les correctifs du remap (taille obtenue,
-  # alias RX près du texte) ne seraient jamais partis. Piège voisin :
+  # Marqueur PROPRE À CETTE VERSION (29/09/2026, bug hunt 4) : « x-jit-near
+  # sur l'alias », imprimé par le remap split-wx depuis que la recherche avec
+  # réduction porte sur l'alias RX et non plus sur la vue RW. « tcg_jit_near »
+  # est dans toutes les versions, et « split-wx, alias RX » dans la
+  # précédente : l'un ou l'autre aurait satisfait un arbre à l'ancienne, et
+  # le correctif ne serait jamais parti. Piège voisin :
   # « size = region.total_size » est une sous-chaîne de « tb_size = … » — le
   # contrôle d'après l'ancre en début de ligne. Aucun autre patch ne touche ces
   # trois fichiers (0008 non plus) : retour à l'amont sur eux, puis nouvelle
   # version.
-  if ! grep -q "split-wx, alias RX" tcg/region.c; then
+  if ! grep -q "x-jit-near sur l'alias" tcg/region.c; then
     if grep -q "tcg_jit_near" tcg/region.c; then
       echo "▶ ancien patch x-jit-near détecté : retour à l'amont de ses trois fichiers"
       git checkout -- accel/tcg/tcg-all.c include/tcg/startup.h tcg/region.c
@@ -421,6 +423,7 @@ tcg/region.c tcg_jit_near
 tcg/region.c tb_size = region.total_size
 tcg/region.c ^    size = region.total_size;
 tcg/region.c split-wx, alias RX
+tcg/region.c x-jit-near sur l'alias
 TCG6_MARKERS
   # --- 4 nonies. Flottant scalaire simple sans helper (x-fp-inline) ---
   # patches/tcg/0007, docs/tcg-g4.md §15 : fadds fsubs fmuls fmadds fmsubs
