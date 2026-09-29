@@ -502,7 +502,14 @@ def attend_demarrage(vm, t0, delai, repos):
                 time.sleep(5)
         else:
             if time.time() - vu_ssh >= repos:
-                if not vm.repond():     # l'invité est-il resté vivant après le bureau ?
+                # l'invité est-il resté vivant après le bureau ? Un seul ssh
+                # raté ne suffit pas (29/09 : bureau intact, vCPU au repos, un
+                # ssh de 20 s perdu sur un hôte chargé) : trois essais sur ~1 min
+                for essai in range(3):
+                    if vm.repond():
+                        break
+                    time.sleep(10)
+                else:
                     return "gel", {"t": round(t), "apres_ssh": True}
                 return "ok", det
             time.sleep(5)
