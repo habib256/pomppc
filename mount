@@ -10,7 +10,9 @@
 # Les images CD vivent dans disks/cdr/ (.cdr/.iso/.img/.toast).
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MON="${POMPPC_SCRATCH:-$ROOT/.run}/os9-mon.sock"
+SCR="${POMPPC_SCRATCH:-$ROOT/.run}"
+# chemin effectif publié par run_os9.sh (la VM qui tient le verrou disque)
+MON="$(cat "$SCR/os9.mon" 2>/dev/null)"; MON="${MON:-$SCR/os9-mon.sock}"
 CDDIR="$ROOT/disks/cdr"
 
 hmp(){ python3 "$ROOT/scripts/moncmd.py" "$MON" "$1" 2>/dev/null; }

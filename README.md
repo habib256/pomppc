@@ -137,7 +137,10 @@ l'ouverture du frontend ; le banc de jeux conserve son lancement natif.
 
 Chaque lanceur documente ses variables dans son en-tête (`head -30 run_tiger.sh`). Les lanceurs
 **sondent le binaire** (`scripts/caps.sh`) et n'annoncent jamais une capacité absente. Verrou
-`flock` sur le disque : `rm -f .run/tiger.lock` si un arrêt brutal l'a laissé. Moniteur QEMU :
+`flock` sur le disque : il meurt avec QEMU, **ne jamais supprimer `.run/tiger.lock`** (le fichier
+resté après un arrêt brutal ne verrouille rien ; le supprimer quand QEMU tourne encore laisse un
+second QEMU écrire le même qcow2). Moniteur QEMU de la VM quotidienne : `.run/mon.sock` (chemin
+effectif dans `.run/tiger.mon`, port ssh dans `.run/tiger.sshport`),
 `scripts/moncmd.py .run/mon.sock "<commande HMP>"` (screendump, sendkey, system_reset…).
 
 Les lanceurs quotidiens surchargent `config.env` : 2 cœurs, RAM 768 Mo si le son est

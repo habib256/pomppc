@@ -9,7 +9,13 @@ import subprocess
 _ici=os.path.dirname(os.path.abspath(__file__))
 _c=subprocess.run(["git","-C",_ici,"rev-parse","--path-format=absolute","--git-common-dir"],capture_output=True,text=True).stdout.strip()
 ROOT=_c[:-5] if _c.endswith("/.git") else os.path.dirname(os.path.dirname(_ici))   # dépôt principal (.run/)
-SOCK=ROOT+"/.run/mon.sock"; GDB=ROOT+"/.run/gdb.sock"
+# moniteur de la VM quotidienne, publié par run_tiger.sh (.run/tiger.mon) : jamais
+# celui d'une VM SNAPSHOT=1 d'un autre agent, qui aurait pris mon.sock avant le 29/09
+try:
+    SOCK=open(ROOT+"/.run/tiger.mon").read().strip() or ROOT+"/.run/mon.sock"
+except OSError:
+    SOCK=ROOT+"/.run/mon.sock"
+GDB=ROOT+"/.run/gdb.sock"
 RANGES=[(0x1000,0x2f3000),(0x1808000,0x1900000),(0x1c2e000,0x1d3f000),(0x1d6c000,0x1d8d000)]
 def hmp():
     s=socket.socket(socket.AF_UNIX); s.settimeout(30); s.connect(SOCK)

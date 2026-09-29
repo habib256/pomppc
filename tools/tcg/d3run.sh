@@ -21,19 +21,24 @@
 set -u
 R=/Users/mercure/src/pomppc
 WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TS=$R/.run/cmr/tssh.sh
-MON=$R/.run/mon.sock
+# tssh.sh du dépôt : il lit le port publié par la VM quotidienne (.run/tiger.sshport)
+TS=$WT/tools/guest/tssh.sh
+LOCK=$R/.run/tiger.lock
+. "$WT/scripts/hostcompat.sh"
+mon() { local m; m="$(cat "$R/.run/tiger.mon" 2>/dev/null)"; echo "${m:-$R/.run/mon.sock}"; }
 
+# La VM quotidienne, c'est le détenteur du verrou (pas `pgrep tiger.qcow2`, qui
+# compte aussi les VM SNAPSHOT=1 des autres agents). JAMAIS de rm du verrou
+# (bug hunt 4, 29/09) : on attend qu'il se libère, sinon on s'arrête là —
+# relancer à côté d'un QEMU vivant écrirait deux fois le même qcow2.
 stop_vm() {
-  if pgrep -f "tiger.qcow2" >/dev/null; then
+  if host_locked "$LOCK"; then
     $TS "echo tiger974 | sudo -S shutdown -h now" >/dev/null 2>&1
-    for i in $(seq 1 40); do pgrep -f "tiger.qcow2" >/dev/null || break; sleep 3; done
-    if pgrep -f "tiger.qcow2" >/dev/null; then
-      echo "arrêt propre raté : quit au moniteur"
-      python3 "$WT/tools/tcg/hmp.py" "$MON" quit >/dev/null 2>&1; sleep 5
-    fi
+    host_wait_unlocked "$LOCK" 120 2>/dev/null && return 0
+    echo "arrêt propre raté : quit au moniteur"
+    python3 "$WT/tools/tcg/hmp.py" "$(mon)" quit >/dev/null 2>&1
+    host_wait_unlocked "$LOCK" 30 || exit 1
   fi
-  rm -f $R/.run/tiger.lock
 }
 
 wait_ssh() { # 0 si l'invité répond à ssh dans les 300 s
@@ -63,11 +68,11 @@ for essai in 1 2; do
   sleep 20
   wait_ssh && break
   echo "pas de ssh (panique au démarrage ?) : system_reset"
-  python3 "$WT/tools/tcg/hmp.py" "$MON" system_reset >/dev/null 2>&1
+  python3 "$WT/tools/tcg/hmp.py" "$(mon)" system_reset >/dev/null 2>&1
   wait_ssh && break
   stop_vm
 done
-PID=$(pgrep -f "tiger.qcow2" | head -1)
+PID=$(host_lock_holders "$LOCK" | awk '{print $1}')   # notre QEMU, pas une VM SNAPSHOT=1
 echo "QEMU $PID : $(grep '▶ Tiger' "$OUT/run_tiger.log")" | tee "$OUT/info.txt"
 # placement du tampon du JIT (docs/tcg-g4.md §14 : hors de la fenêtre de 4 Gio
 # du texte = régime lent) : ligne du patch tcg/0006 si le binaire l'a, et vmmap
@@ -79,7 +84,7 @@ vmmap -interleaved "$PID" 2>/dev/null | awk -v b="$(basename "$QB")" '
 sleep 40                                      # bureau au repos
 $TS "cat > ~/meas-tcg.sh" < "$WT/tools/tcg/guest/meas-tcg.sh"
 $TS "nohup sh ~/meas-tcg.sh $L > /dev/null 2>&1 &"
-python3 "$WT/tools/tcg/jitpoll.py" "$MON" 10 3000 > "$OUT/jit.txt" 2>&1 &
+python3 "$WT/tools/tcg/jitpoll.py" "$(mon)" 10 3000 > "$OUT/jit.txt" 2>&1 &
 JP=$!
 T0=$(date +%s)
 sampled=0
