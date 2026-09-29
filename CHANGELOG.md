@@ -9,6 +9,17 @@ et dans `docs/`.
 
 ## Non publié
 
+- **TCG : le code réécrit par l'autre vCPU est vu** (`patches/tcg/0010`, `docs/tcg-g4.md` §17).
+  Cause du défaut de `smctest` E (QEMU 9.2, MTTCG, présent sans aucun patch) prouvée par un
+  relevé d'événements par page : la page de code n'était protégée qu'après la lecture du
+  code par le traducteur (écriture de l'autre vCPU entre les deux perdue), et deux tests de
+  `cputlb.c` faits hors du verrou du TLB retiraient ou omettaient `TLB_NOTDIRTY` sur une page
+  qui avait de nouveau du code. Les trois courses sont corrigées sans condition ;
+  `x-icbi-sync` (allumé par `run_tiger.sh`, `ICBISYNC=0`) fait invalider par `icbi` les blocs
+  de sa ligne, car une écriture invalide avant d'être faite. E : référence 5/5 exécutions en
+  erreur (86 M appels périmés) → 0 sur 1 105 ; A-D, F identiques ; +9 ns par `icbi`.
+  Démarrage et Marble Blast ne déclenchent aucune des trois courses.
+
 - **Invariants de propriété et plan de découpage du plugin** :
   `docs/architecture.md` décrit propriétaires, verrous, barrières, erreurs,
   contextes, clients morts et resets. Six limites sont distinguées des garanties,

@@ -12,6 +12,8 @@
 #   • AltiVec : vfp à 4 voies, vperm par table       — patches/tcg/0003, 0004
 #   • tampon du JIT près du texte (x-jit-near)        — patches/tcg/0006
 #   • flottant scalaire simple sans helper (x-fp-inline) — patches/tcg/0007
+#   • sorties indirectes en ligne (x-ret-inline, x-jc-idx) — patches/tcg/0008
+#   • code réécrit par l'autre vCPU (courses, x-icbi-sync) — patches/tcg/0010
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
 #   ./scripts/build_qemu_qfb.sh              # build dans ~/src/qemu
@@ -504,6 +506,41 @@ accel/tcg/translator.c translator_lookup_and_goto_ptr_inline
 target/ppc/cpu_init.c x-jc-idx
 target/ppc/translate.c gen_goto_ptr_exit
 TCG8_MARKERS
+  # --- 4 undecies. Code réécrit par l'autre vCPU (MTTCG) --- patches/tcg/0010,
+  # docs/tcg-g4.md §17 : trois courses de QEMU 9.2 où une écriture d'un vCPU
+  # dans une page de code n'invalide plus les blocs de l'autre (page protégée
+  # APRÈS la lecture du code par le traducteur ; TLB_NOTDIRTY retiré ou omis
+  # sur un test fait hors du verrou du TLB) : corrigées sans condition. Plus
+  # la propriété x-icbi-sync (éteinte par défaut dans QEMU, allumée par
+  # run_tiger.sh, ICBISYNC=0 l'éteint) :
+  # icbi invalide les blocs de sa ligne de cache (écriture invalidée AVANT
+  # d'être faite). Garde : le marqueur du dernier fichier du patch.
+  if ! grep -q "tb_invalidate_phys_line_sync" target/ppc/mem_helper.c; then
+    echo "▶ patch TCG : code réécrit par l'autre vCPU (courses de l'invalidation, x-icbi-sync)"
+    patch_forward "$ROOT/patches/tcg/0010-tcg-smc-mttcg.patch" \
+      accel/tcg/cputlb.c      "ram_addr_t ram_addr)" \
+      accel/tcg/tb-maint.c    tb_page_protect_locked \
+      accel/tcg/tb-maint.c    tb_invalidate_phys_line_sync \
+      include/exec/exec-all.h tb_invalidate_phys_line_sync \
+      target/ppc/cpu.h        "bool icbi_sync" \
+      target/ppc/cpu_init.c   x-icbi-sync \
+      target/ppc/mem_helper.c tb_invalidate_phys_line_sync
+    for f in accel/tcg/cputlb.c accel/tcg/tb-maint.c include/exec/exec-all.h \
+             target/ppc/cpu.h target/ppc/cpu_init.c target/ppc/mem_helper.c; do
+      rm -f "$f.orig"
+    done
+  fi
+  while read -r f m; do
+    [ -z "$f" ] && continue
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0010 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG10_MARKERS'
+accel/tcg/cputlb.c POMPPC tcg/0010
+accel/tcg/tb-maint.c tb_page_protect_locked
+accel/tcg/tb-maint.c tb_invalidate_phys_line_sync
+target/ppc/cpu_init.c x-icbi-sync
+target/ppc/mem_helper.c tb_invalidate_phys_line_sync
+TCG10_MARKERS
 fi
 
 # --- 5. Build ---

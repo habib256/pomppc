@@ -129,7 +129,7 @@ POMPPC_FRONTEND=native ./run_tiger.sh  # fenêtre QEMU native, sans ImGuiDock
 
 `./run_tiger.sh` ouvre maintenant Tiger dans **ImGuiDock**. Le profil maximal
 active FASTFP, SRTLB, LFSINLINE, VFPFAST, VPERMFAST, FPINLINE, RETINLINE,
-JCIDX, JITNEAR, copies GPU et GLSL, sous réserve des capacités sondées.
+JCIDX, ICBISYNC, JITNEAR, copies GPU et GLSL, sous réserve des capacités sondées.
 Les surcharges `…=0` restent respectées ; les vérificateurs coûteux ne sont
 pas activés. SMP reste à deux cœurs (profil Tiger), pas au nombre de cœurs hôte.
 `HEADLESS=1`, `DBUS_DISPLAY=1` et un `POMPPC_DISPLAY` explicite contournent

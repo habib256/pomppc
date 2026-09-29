@@ -61,10 +61,14 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   détails dans `docs/matrice-jeux.md`. **Fermeture :** cause reproduite et correction
   vérifiée ; des lancements réussis ne suffisent pas.
 
-- [ ] **[TCG] Code réécrit par l'autre vCPU non vu** (défaut de QEMU 9.2 en MTTCG, présent
-  sans aucun patch, `docs/tcg-g4.md` §16.7) : `tools/guest/jobs/smctest` essai E échoue en
-  SMP=2. Cause non trouvée (deux courses de `cputlb.c` refermées sans effet). Candidat
-  sérieux à une cause commune des incidents SMP ci-dessus. Épreuve : E à 0 erreur.
+- [ ] **[TCG] `tcg/0010` dans le binaire de référence** (code réécrit par l'autre vCPU,
+  corrigé le 29/09, `docs/tcg-g4.md` §17) : reconstruire `~/src/qemu` par
+  `scripts/build_qemu_qfb.sh` (VM quotidienne arrêtée), puis `smctest` E sur la VM
+  quotidienne et, pendant une partie de DOOM 3, les compteurs de
+  `patches/tcg/essais/0010-smcstat.patch` (démarrage et Marble Blast : 0 course ; le défaut
+  n'est donc pas, sans autre preuve, la cause des incidents SMP ci-dessus).
+  **Fermeture :** binaire de référence avec 0010, E à 0 erreur sur la VM quotidienne,
+  compteurs DOOM 3 relevés.
 
 - [ ] **[Validation] Correctifs des bug hunts jamais éprouvés dans la VM** : `kextunload`
   avec un jeu ouvert (K4, KG4, KT1), `SUBMIT` après déchargement → erreur propre,

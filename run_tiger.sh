@@ -34,6 +34,8 @@
 #   RETINLINE=0 JCIDX=0 ./run_tiger.sh  # coupe les sorties indirectes (blr, bctr…) cherchées en
 #                             # ligne et le cache de sauts vidé par mmu_idx (tcg/0008, allumés par
 #                             # défaut, docs/tcg-g4.md §16) ; RETVERIFY=1 : mode preuve
+#   ICBISYNC=0 ./run_tiger.sh # icbi n'invalide plus les blocs de sa ligne (x-icbi-sync, tcg/0010,
+#                             # allumé par défaut : code réécrit par l'autre vCPU, docs/tcg-g4.md §17)
 #   JITNEAR=0 ./run_tiger.sh  # laisse macOS placer le tampon du JIT (défaut : dans la fenêtre de 4 Gio
 #                             # du texte de QEMU, x-jit-near, tcg/0006 : supprime le régime lent, docs/tcg-g4.md §14) ;
 #                             # TCG_OPTS=… propriétés brutes de l'accélérateur
@@ -67,7 +69,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Profil maximal des optimisations disponibles et éprouvées. Les sondes plus
 # bas restent obligatoires ; 0 explicite conserve sa valeur pour les A/B.
 # Les modes VERIFY ne sont pas des optimisations et restent éteints.
-for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX JITNEAR; do
+for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC JITNEAR; do
   export "$_opt=${!_opt:-1}"
 done
 export QGPU_GPU_COPY="${QGPU_GPU_COPY:-1}" QGPU_GLSL="${QGPU_GLSL:-1}"
@@ -304,6 +306,20 @@ for _p in "RETINLINE x-ret-inline SORTIES-EN-LIGNE 1" "JCIDX x-jc-idx CACHE-DE-S
     fi
   fi
 done
+# --- icbi invalide les blocs de sa ligne de cache (x-icbi-sync, patches/tcg/0010,
+# docs/tcg-g4.md §17) --- en SMP, une écriture dans du code invalide les blocs
+# AVANT d'être faite : l'autre vCPU peut retraduire l'ancien code entre les deux,
+# et le protocole de l'invité (dcbst, sync, icbi, isync) ne le rattrapait pas.
+# Allumé par défaut ; ICBISYNC=0 l'éteint.
+if [ "${ICBISYNC:-1}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-icbi-sync=on"; then
+    CPU_SPEC="$CPU_SPEC,x-icbi-sync=on"
+    MODE="$MODE + ICBI-SYNCHRONE"
+  elif [ -n "${ICBISYNC:-}" ]; then
+    echo "⚠  ICBISYNC=1 demandé mais ce QEMU n'a pas la propriété 'x-icbi-sync' (patches/tcg/0010)." >&2
+    MODE="$MODE + ICBI-SYNCHRONE DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
 [ -n "${CPU_OPTS:-}" ] && CPU_SPEC="$CPU_SPEC,${CPU_OPTS#,}"
 # --- Tampon du JIT dans la fenêtre de 4 Gio du texte de QEMU (x-jit-near,
 # patches/tcg/0006) --- propriété de l'ACCÉLÉRATEUR. Sur Apple M4, le noyau pose

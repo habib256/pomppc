@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
-OPTS = "FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX JITNEAR QGPU_GPU_COPY QGPU_GLSL".split()
+OPTS = "FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC JITNEAR QGPU_GPU_COPY QGPU_GLSL".split()
 with tempfile.TemporaryDirectory(prefix="tiger launcher ") as tmp:
     root = Path(tmp)
     for name in ("run_tiger.sh", "run_frontend.sh"):

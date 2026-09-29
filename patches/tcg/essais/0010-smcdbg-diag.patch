@@ -1,0 +1,579 @@
+diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+index 5d8b166..e160250 100644
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -378,6 +378,8 @@ static bool ret_verify_tb(CPUState *cpu, TranslationBlock *tb, vaddr pc,
+ }
+ #endif
+ 
++extern bool smcdbg_on;
++void smcdbg_check(CPUState *cpu, TranslationBlock *tb);
+ static inline TranslationBlock *tb_lookup(CPUState *cpu, vaddr pc,
+                                           uint64_t cs_base, uint32_t flags,
+                                           uint32_t cflags, int src)
+@@ -430,6 +432,9 @@ hit:
+      * the virtual PC has to match for non-CF_PCREL translations.
+      */
+     assert((tb_cflags(tb) & CF_PCREL) || tb->pc == pc);
++    if (unlikely(smcdbg_on)) {
++        smcdbg_check(cpu, tb);
++    }
+     return tb;
+ }
+ 
+diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+index 0af9e92..63960ca 100644
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -874,19 +874,151 @@ void tlb_flush_page_bits_by_mmuidx_all_cpus_synced(CPUState *src_cpu,
+                                               idxmap, bits);
+ }
+ 
++/* ---- SMCDBG : instrumentation de diagnostic (POMPPC_SMCDBG=1) ---- */
++bool smcdbg_on;
++typedef struct SmcEv {
++    uint64_t seq;
++    uint64_t page;
++    int32_t cpu;
++    char type;
++    uint32_t arg;
++    uint64_t vaddr;
++} SmcEv;
++#define SMCDBG_RING (1u << 21)
++static SmcEv *smcdbg_ring;
++static uint64_t smcdbg_seq;
++
++static void __attribute__((constructor)) smcdbg_init(void)
++{
++    const char *e = getenv("POMPPC_SMCDBG");
++    if (e && *e && *e != '0') {
++        smcdbg_on = true;
++        smcdbg_ring = calloc(SMCDBG_RING, sizeof(SmcEv));
++        fprintf(stderr, "smcdbg: actif\n");
++    }
++}
++
++static void smcdbg_ev(uint64_t page, char type, uint32_t arg, uint64_t vaddr)
++{
++    uint64_t s;
++    SmcEv *e;
++
++    if (likely(!smcdbg_on)) {
++        return;
++    }
++    s = qatomic_fetch_inc(&smcdbg_seq);
++    e = &smcdbg_ring[s & (SMCDBG_RING - 1)];
++    e->page = page & TARGET_PAGE_MASK;
++    e->cpu = current_cpu ? current_cpu->cpu_index : -1;
++    e->type = type;
++    e->arg = arg;
++    e->vaddr = vaddr;
++    qatomic_store_release(&e->seq, s + 1);
++}
++
++bool tb_smcdbg_page(tb_page_addr_t page, TranslationBlock *tb, int *ntb);
++
++static int smcdbg_dumps;
++
++static void smcdbg_dump(CPUState *cpu, TranslationBlock *tb, uint32_t cur,
++                        long n)
++{
++    ram_addr_t ra = tb_page_addr0(tb), page = ra & TARGET_PAGE_MASK;
++    uintptr_t hpage = (uintptr_t)qemu_map_ram_ptr(NULL, page);
++    bool code_dirty = cpu_physical_memory_get_dirty_flag(page, DIRTY_MEMORY_CODE);
++    int ntb = 0;
++    bool inlist = tb_smcdbg_page(page, tb, &ntb);
++    uint64_t s, last = qatomic_read(&smcdbg_seq);
++    CPUState *c;
++    int k = 0;
++
++    fprintf(stderr, "smcdbg[%d]: cpu%d tb %p pc %" VADDR_PRIx " ram %" PRIx64
++            " w0 %08x mem %08x apres %ld recherches ; cflags %x inval %d"
++            " CODE-sale %d dans-la-liste %d blocs-de-la-page %d\n",
++            smcdbg_dumps, cpu->cpu_index, tb, tb->pc, (uint64_t)ra,
++            tb->smcdbg_w0, cur, n, tb_cflags(tb),
++            !!(tb_cflags(tb) & CF_INVALID), code_dirty, inlist, ntb);
++    CPU_FOREACH(c) {
++        int mmu_idx;
++        qemu_spin_lock(&c->neg.tlb.c.lock);
++        for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
++            unsigned int i, nent = tlb_n_entries(&c->neg.tlb.f[mmu_idx]);
++            for (i = 0; i < nent + CPU_VTLB_SIZE; i++) {
++                CPUTLBEntry *te = i < nent ? &c->neg.tlb.f[mmu_idx].table[i]
++                                  : &c->neg.tlb.d[mmu_idx].vtable[i - nent];
++                uint64_t aw = te->addr_write;
++                if (aw == -1 || (aw & TLB_INVALID_MASK)) {
++                    continue;
++                }
++                if ((aw & TARGET_PAGE_MASK) + te->addend == hpage) {
++                    fprintf(stderr, "smcdbg:   tlb cpu%d mmu%d %s%u vaddr %"
++                            PRIx64 " addr_write bas %" PRIx64 " NOTDIRTY %d\n",
++                            c->cpu_index, mmu_idx, i < nent ? "p" : "v",
++                            i < nent ? i : i - nent, aw & TARGET_PAGE_MASK,
++                            aw & ~TARGET_PAGE_MASK, !!(aw & TLB_NOTDIRTY));
++                }
++            }
++        }
++        qemu_spin_unlock(&c->neg.tlb.c.lock);
++    }
++    /* derniers evenements de la page, du plus recent au plus ancien */
++    for (s = last; s > 0 && last - s < SMCDBG_RING && k < 60; s--) {
++        SmcEv *e = &smcdbg_ring[(s - 1) & (SMCDBG_RING - 1)];
++        if (qatomic_load_acquire(&e->seq) != s || e->page != page) {
++            continue;
++        }
++        fprintf(stderr, "smcdbg:   ev -%" PRIu64 " cpu%d %c %u vaddr %" PRIx64 "\n",
++                last - s, e->cpu, e->type, e->arg, e->vaddr);
++        k++;
++    }
++    smcdbg_dumps++;
++}
++
++void smcdbg_check(CPUState *cpu, TranslationBlock *tb);
++void smcdbg_check(CPUState *cpu, TranslationBlock *tb)
++{
++    static __thread TranslationBlock *last_tb;
++    static __thread long n;
++    ram_addr_t ra;
++    uint32_t cur;
++
++    if (tb->size != 8 || tb->icount != 2) {
++        return;
++    }
++    ra = tb_page_addr0(tb);
++    if (ra == -1) {
++        return;
++    }
++    cur = ldl_be_p(qemu_map_ram_ptr(NULL, ra));
++    if (cur == tb->smcdbg_w0) {
++        last_tb = NULL;
++        return;
++    }
++    if (last_tb != tb) {
++        last_tb = tb;
++        n = 0;
++    }
++    if (++n == 20000 && smcdbg_dumps < 40) {
++        smcdbg_dump(cpu, tb, cur, n);
++    }
++}
++/* ---- fin SMCDBG ---- */
++
+ /* update the TLBs so that writes to code in the virtual page 'addr'
+    can be detected */
+ void tlb_protect_code(ram_addr_t ram_addr)
+ {
+-    cpu_physical_memory_test_and_clear_dirty(ram_addr & TARGET_PAGE_MASK,
++    bool d = cpu_physical_memory_test_and_clear_dirty(ram_addr & TARGET_PAGE_MASK,
+                                              TARGET_PAGE_SIZE,
+                                              DIRTY_MEMORY_CODE);
++    smcdbg_ev(ram_addr, 'P', d, 0);
+ }
+ 
+ /* update the TLB so that writes in physical page 'phys_addr' are no longer
+    tested for self modifying code */
+ void tlb_unprotect_code(ram_addr_t ram_addr)
+ {
++    smcdbg_ev(ram_addr, 'U', 0, 0);
+     cpu_physical_memory_set_dirty_flag(ram_addr, DIRTY_MEMORY_CODE);
+ }
+ 
+@@ -907,6 +1039,7 @@ void tlb_unprotect_code(ram_addr_t ram_addr)
+  *
+  * Called with tlb_c.lock held.
+  */
++static __thread int smcdbg_nreset;
+ static void tlb_reset_dirty_range_locked(CPUTLBEntry *tlb_entry,
+                                          uintptr_t start, uintptr_t length)
+ {
+@@ -927,6 +1060,7 @@ static void tlb_reset_dirty_range_locked(CPUTLBEntry *tlb_entry,
+             qatomic_set(&tlb_entry->addr_write,
+                         tlb_entry->addr_write | TLB_NOTDIRTY);
+ #endif
++            smcdbg_nreset++;
+         }
+     }
+ }
+@@ -950,6 +1084,7 @@ void tlb_reset_dirty(CPUState *cpu, ram_addr_t start1, ram_addr_t length)
+     int mmu_idx;
+ 
+     qemu_spin_lock(&cpu->neg.tlb.c.lock);
++    smcdbg_nreset = 0;
+     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+         unsigned int i;
+         unsigned int n = tlb_n_entries(&cpu->neg.tlb.f[mmu_idx]);
+@@ -964,6 +1099,13 @@ void tlb_reset_dirty(CPUState *cpu, ram_addr_t start1, ram_addr_t length)
+                                          start1, length);
+         }
+     }
++    if (smcdbg_on && length == TARGET_PAGE_SIZE) {
++        ram_addr_t r = 0;
++        RAMBlock *rb = qemu_ram_block_from_host((void *)start1, false, &r);
++        if (rb) {
++            smcdbg_ev(rb->offset + r, 'R', cpu->cpu_index * 1000 + smcdbg_nreset, 0);
++        }
++    }
+     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+ }
+ 
+@@ -976,9 +1118,19 @@ static inline void tlb_set_dirty1_locked(CPUTLBEntry *tlb_entry,
+     }
+ }
+ 
+-/* update the TLB corresponding to virtual page vaddr
+-   so that it is no longer dirty */
+-static void tlb_set_dirty(CPUState *cpu, vaddr addr)
++/*
++ * Update the TLB corresponding to virtual page vaddr so that it is no
++ * longer dirty, unless the page is (again) clean.
++ *
++ * The test must be made with tlb_c.lock held: tlb_protect_code() on another
++ * vCPU clears DIRTY_MEMORY_CODE and only then takes this lock to set
++ * TLB_NOTDIRTY back in our entries.  Tested before the lock, the page could
++ * be protected in between; the entry still carries TLB_NOTDIRTY at that
++ * moment so the other vCPU leaves it alone, and we would then clear the
++ * flag of a page that holds code again: stores through that entry would no
++ * longer invalidate the new TBs.
++ */
++static void tlb_set_dirty(CPUState *cpu, vaddr addr, ram_addr_t ram_addr)
+ {
+     int mmu_idx;
+ 
+@@ -986,6 +1138,10 @@ static void tlb_set_dirty(CPUState *cpu, vaddr addr)
+ 
+     addr &= TARGET_PAGE_MASK;
+     qemu_spin_lock(&cpu->neg.tlb.c.lock);
++    if (cpu_physical_memory_is_clean(ram_addr)) {
++        qemu_spin_unlock(&cpu->neg.tlb.c.lock);
++        return;
++    }
+     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+         tlb_set_dirty1_locked(tlb_entry(cpu, mmu_idx, addr), addr);
+     }
+@@ -1106,15 +1262,10 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
+         iotlb = memory_region_get_ram_addr(section->mr) + xlat;
+         assert(!(iotlb & ~TARGET_PAGE_MASK));
+         /*
+-         * Computing is_clean is expensive; avoid all that unless
+-         * the page is actually writable.
++         * TLB_NOTDIRTY (is_clean) is computed below, with tlb_c.lock held.
+          */
+-        if (prot & PAGE_WRITE) {
+-            if (section->readonly) {
+-                write_flags |= TLB_DISCARD_WRITE;
+-            } else if (cpu_physical_memory_is_clean(iotlb)) {
+-                write_flags |= TLB_NOTDIRTY;
+-            }
++        if ((prot & PAGE_WRITE) && section->readonly) {
++            write_flags |= TLB_DISCARD_WRITE;
+         }
+     } else {
+         /* I/O or ROMD */
+@@ -1145,6 +1296,24 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
+      */
+     qemu_spin_lock(&tlb->c.lock);
+ 
++    /*
++     * Computing is_clean is expensive; avoid all that unless the page is
++     * actually writable.  It is done with tlb_c.lock held: tlb_protect_code()
++     * on another vCPU clears DIRTY_MEMORY_CODE and then takes this lock to
++     * set TLB_NOTDIRTY in our entries.  Tested before the lock, the page
++     * could be protected in between and the entry, not yet installed, would
++     * miss both the test and the reset: stores through it would never
++     * invalidate the TBs of the page.
++     */
++    if (is_ram && (prot & PAGE_WRITE) && !section->readonly &&
++        cpu_physical_memory_is_clean(iotlb)) {
++        write_flags |= TLB_NOTDIRTY;
++    }
++    if (is_ram && (prot & PAGE_WRITE)) {
++        smcdbg_ev(iotlb, 'F', mmu_idx * 10 + !!(write_flags & TLB_NOTDIRTY),
++                  addr_page);
++    }
++
+     /* Note that the tlb is no longer clean.  */
+     tlb->c.dirty |= 1 << mmu_idx;
+ 
+@@ -1346,7 +1515,10 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
+     trace_memory_notdirty_write_access(mem_vaddr, ram_addr, size);
+ 
+     if (!cpu_physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE)) {
++        smcdbg_ev(ram_addr, 'N', 1, mem_vaddr);
+         tb_invalidate_phys_range_fast(ram_addr, size, retaddr);
++    } else {
++        smcdbg_ev(ram_addr, 'N', 0, mem_vaddr);
+     }
+ 
+     /*
+@@ -1355,10 +1527,16 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
+      */
+     cpu_physical_memory_set_dirty_range(ram_addr, size, DIRTY_CLIENTS_NOCODE);
+ 
+-    /* We remove the notdirty callback only if the code has been flushed. */
++    /*
++     * We remove the notdirty callback only if the code has been flushed.
++     * tlb_set_dirty() tests it again under the TLB lock.
++     */
+     if (!cpu_physical_memory_is_clean(ram_addr)) {
+         trace_memory_notdirty_set_dirty(mem_vaddr);
+-        tlb_set_dirty(cpu, mem_vaddr);
++        smcdbg_ev(ram_addr, 'S', 1, mem_vaddr);
++        tlb_set_dirty(cpu, mem_vaddr, ram_addr);
++    } else {
++        smcdbg_ev(ram_addr, 'S', 0, mem_vaddr);
+     }
+ }
+ 
+diff --git a/accel/tcg/tb-maint.c b/accel/tcg/tb-maint.c
+index cc0f5af..52dbd3d 100644
+--- a/accel/tcg/tb-maint.c
++++ b/accel/tcg/tb-maint.c
+@@ -398,9 +398,30 @@ static void page_unlock(PageDesc *pd)
+     page_unlock__debug(pd);
+ }
+ 
++/*
++ * Write-protect a page before its code is read by the translator
++ * (called with @pd locked).  A page without TBs is not protected: another
++ * vCPU may store to it through a TLB entry without TLB_NOTDIRTY.  If the
++ * protection were only set when the TB is linked (tb_page_add), a store
++ * landing between the translator's read of the guest code and the link
++ * would never be seen, and the stale TB would stay valid until the next
++ * write to the page.  Protecting first makes every later store take the
++ * notdirty path, which blocks on the page lock held here and invalidates
++ * the new TB once it is linked.
++ */
++static void tb_page_protect_locked(PageDesc *pd, tb_page_addr_t paddr)
++{
++    if (!pd->first_tb) {
++        tlb_protect_code(paddr & TARGET_PAGE_MASK);
++    }
++}
++
+ void tb_lock_page0(tb_page_addr_t paddr)
+ {
+-    page_lock(page_find_alloc(paddr >> TARGET_PAGE_BITS, true));
++    PageDesc *pd = page_find_alloc(paddr >> TARGET_PAGE_BITS, true);
++
++    page_lock(pd);
++    tb_page_protect_locked(pd, paddr);
+ }
+ 
+ void tb_lock_page1(tb_page_addr_t paddr0, tb_page_addr_t paddr1)
+@@ -418,11 +439,13 @@ void tb_lock_page1(tb_page_addr_t paddr0, tb_page_addr_t paddr1)
+     if (pindex0 < pindex1) {
+         /* Correct locking order, we may block. */
+         page_lock(pd1);
++        tb_page_protect_locked(pd1, paddr1);
+         return;
+     }
+ 
+     /* Incorrect locking order, we cannot block lest we deadlock. */
+     if (!page_trylock(pd1)) {
++        tb_page_protect_locked(pd1, paddr1);
+         return;
+     }
+ 
+@@ -434,6 +457,9 @@ void tb_lock_page1(tb_page_addr_t paddr0, tb_page_addr_t paddr1)
+     page_unlock(pd0);
+     page_lock(pd1);
+     page_lock(pd0);
++    /* page0 was unlocked: a store may have unprotected it meanwhile */
++    tb_page_protect_locked(pd1, paddr1);
++    tb_page_protect_locked(pd0, paddr0);
+     siglongjmp(tcg_ctx->jmp_trans, -3);
+ }
+ 
+@@ -684,6 +710,27 @@ static void tb_remove_all(void)
+     }
+ }
+ 
++bool tb_smcdbg_page(tb_page_addr_t page, TranslationBlock *tb, int *ntb);
++bool tb_smcdbg_page(tb_page_addr_t page, TranslationBlock *tb, int *ntb)
++{
++    PageDesc *pd = page_find(page >> TARGET_PAGE_BITS);
++    TranslationBlock *t;
++    PageForEachNext n;
++    bool found = false;
++
++    *ntb = 0;
++    if (!pd) {
++        return false;
++    }
++    page_lock(pd);
++    PAGE_FOR_EACH_TB(page, page | ~TARGET_PAGE_MASK, pd, t, n) {
++        (*ntb)++;
++        found |= t == tb;
++    }
++    page_unlock(pd);
++    return found;
++}
++
+ /*
+  * Add the tb in the target page and protect it if necessary.
+  * Called with @p->lock held.
+@@ -1193,6 +1240,57 @@ void tb_invalidate_phys_range(tb_page_addr_t start, tb_page_addr_t last)
+     page_collection_unlock(pages);
+ }
+ 
++/*
++ * Invalidate the TBs that overlap [@start, @last] (within one page), for an
++ * instruction-cache synchronisation of the guest (PowerPC icbi, x-icbi-sync).
++ *
++ * A store to a page holding code invalidates the TBs of the written bytes
++ * *before* the store is performed (notdirty_write).  With MTTCG another
++ * vCPU can translate the old bytes in between and link a TB that no later
++ * store has invalidated yet: the guest's own synchronisation (dcbst, sync,
++ * icbi, isync, then a flag) does not help, the stale TB stays valid until
++ * the next store to those bytes.  icbi comes after the store in program
++ * order: invalidating here closes the window.  The overlap is tested with
++ * the page lock held, so a translation in progress (it holds the lock from
++ * before it reads the code until the TB is linked) is waited for; a
++ * translation that starts after reads the new bytes.  Returns true if TBs
++ * were invalidated.
++ */
++bool tb_invalidate_phys_line_sync(tb_page_addr_t start, tb_page_addr_t last)
++{
++    PageDesc *pd = page_find(start >> TARGET_PAGE_BITS);
++    TranslationBlock *tb;
++    PageForEachNext n;
++    bool hit = false;
++
++    tcg_debug_assert(((start ^ last) & TARGET_PAGE_MASK) == 0);
++    if (!pd) {
++        return false;
++    }
++    page_lock(pd);
++    PAGE_FOR_EACH_TB(start, last, pd, tb, n) {
++        tb_page_addr_t tb_start = tb_page_addr0(tb);
++        tb_page_addr_t tb_last = tb_start + tb->size - 1;
++
++        if (n == 0) {
++            tb_last = MIN(tb_last, tb_start | ~TARGET_PAGE_MASK);
++        } else {
++            tb_start = tb_page_addr1(tb);
++            tb_last = tb_start + (tb_last & ~TARGET_PAGE_MASK);
++        }
++        if (!(tb_last < start || tb_start > last)) {
++            hit = true;
++            break;
++        }
++    }
++    page_unlock(pd);
++    if (hit) {
++        /* takes the locks of every page of the TBs found, in order */
++        tb_invalidate_phys_range(start, last);
++    }
++    return hit;
++}
++
+ /*
+  * Call with all @pages in the range [@start, @start + len[ locked.
+  */
+diff --git a/include/exec/exec-all.h b/include/exec/exec-all.h
+index ff231b6..3f3b3f2 100644
+--- a/include/exec/exec-all.h
++++ b/include/exec/exec-all.h
+@@ -450,6 +450,9 @@ static inline void tb_set_page_addr1(TranslationBlock *tb,
+ /* TranslationBlock invalidate API */
+ void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr);
+ void tb_invalidate_phys_range(tb_page_addr_t start, tb_page_addr_t last);
++#ifndef CONFIG_USER_ONLY
++bool tb_invalidate_phys_line_sync(tb_page_addr_t start, tb_page_addr_t last);
++#endif
+ void tb_set_jmp_target(TranslationBlock *tb, int n, uintptr_t addr);
+ 
+ /* GETPC is the true target of the return instruction that we'll execute.  */
+diff --git a/include/exec/translation-block.h b/include/exec/translation-block.h
+index a6d1af6..120ee82 100644
+--- a/include/exec/translation-block.h
++++ b/include/exec/translation-block.h
+@@ -88,6 +88,7 @@ struct TranslationBlock {
+     /* size of target code for this block (1 <= size <= TARGET_PAGE_SIZE) */
+     uint16_t size;
+     uint16_t icount;
++    uint32_t smcdbg_w0;     /* debug smc : premier mot lu par le traducteur */
+ 
+     struct tb_tc tc;
+ 
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index 747269a..d533a21 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1378,6 +1378,12 @@ struct CPUArchState {
+      * Read by the translator only.
+      */
+     bool ret_inline;
++    /*
++     * x-icbi-sync (POMPPC tcg/0010): icbi invalidates the TBs overlapping
++     * its instruction-cache block (MTTCG: code rewritten by another vCPU,
++     * docs/tcg-g4.md section 17).
++     */
++    bool icbi_sync;
+ 
+     /* Internal devices resources */
+     ppc_tb_t *tb_env;      /* Time base and decrementer */
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index c10ac3f..fbfabfc 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7462,6 +7462,15 @@ static Property ppc_cpu_properties[] = {
+     DEFINE_PROP_BOOL("x-ret-inline", PowerPCCPU, env.ret_inline, false),
+     DEFINE_PROP_BOOL("x-jc-idx", PowerPCCPU, parent_obj.jc_by_idx, false),
+     DEFINE_PROP_BOOL("x-ret-verify", PowerPCCPU, parent_obj.ret_verify, false),
++    /*
++     * POMPPC tcg/0010.  x-icbi-sync: icbi invalidates the TBs that overlap
++     * its instruction-cache block, as the architecture says it discards the
++     * block from the instruction cache of every processor.  Closes, for code
++     * that follows the PowerPC protocol (dcbst, sync, icbi, isync), the
++     * window where another vCPU translates the old bytes between the
++     * invalidation made by a store and the store itself.  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-icbi-sync", PowerPCCPU, env.icbi_sync, false),
+     /*
+      * AltiVec vaddfp/vsubfp/vmaddfp/vnmsubfp: the four lanes at once on the
+      * host FPU when softfloat's hardfloat path would take each of them
+diff --git a/target/ppc/mem_helper.c b/target/ppc/mem_helper.c
+index 51b137f..96d152b 100644
+--- a/target/ppc/mem_helper.c
++++ b/target/ppc/mem_helper.c
+@@ -335,6 +335,25 @@ void helper_icbi(CPUPPCState *env, target_ulong addr)
+      * do the load "by hand".
+      */
+     cpu_ldl_data_ra(env, addr, GETPC());
++#if !defined(CONFIG_USER_ONLY)
++    if (env->icbi_sync) {
++        /* POMPPC tcg/0010 (x-icbi-sync), see tb_invalidate_phys_line_sync */
++        target_ulong line = env->icache_line_size;
++        void *host = NULL;
++        int flags;
++
++        addr &= ~(line - 1);
++        flags = probe_access_flags(env, addr, 0, MMU_DATA_LOAD,
++                                   cpu_mmu_index(env_cpu(env), false), true,
++                                   &host, 0);
++        if (!(flags & TLB_INVALID_MASK) && host) {
++            ram_addr_t ra = qemu_ram_addr_from_host(host);
++            if (ra != RAM_ADDR_INVALID) {
++                tb_invalidate_phys_line_sync(ra, ra + line - 1);
++            }
++        }
++    }
++#endif
+ }
+ 
+ void helper_icbiep(CPUPPCState *env, target_ulong addr)
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+index 064de72..7bb7df5 100644
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -6584,6 +6584,9 @@ static void ppc_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
+ 
+     ctx->cia = pc = ctx->base.pc_next;
+     insn = translator_ldl_swap(env, dcbase, pc, need_byteswap(ctx));
++    if (ctx->base.num_insns == 1) {
++        ctx->base.tb->smcdbg_w0 = insn;
++    }
+     ctx->base.pc_next = pc += 4;
+ 
+     if (!is_prefix_insn(ctx, insn)) {

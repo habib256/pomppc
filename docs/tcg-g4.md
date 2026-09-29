@@ -8,7 +8,9 @@ hôte), mesure **1 contre 2 cœurs**, et décrit **les patches qui en sont sorti
 `0002-ppc-lfs-inline` (`x-lfs-inline`, §8), `0003-ppc-vfp-fast` (`x-vfp-fast`, §9) et
 `0004-ppc-vperm-fast` (`x-vperm-fast`, §10), puis `0006-tcg-jit-near` (`x-jit-near`, §14) et
 `0007-ppc-fp-inline` (`x-fp-inline`, le flottant scalaire simple sans ses helpers, §15), puis
-`0008-tcg-ret-inline` (`x-ret-inline`, `x-jc-idx` : les sorties indirectes, §16) ; trois essais exacts mais sans gain,
+`0008-tcg-ret-inline` (`x-ret-inline`, `x-jc-idx` : les sorties indirectes, §16), puis
+`0010-tcg-smc-mttcg` (le code réécrit par l'autre vCPU : trois courses de QEMU corrigées et
+`x-icbi-sync`, §17) ; trois essais exacts mais sans gain,
 `patches/tcg/essais/0002-ppc-lmw-inline.patch` (`x-lmw-inline`) et
 `essais/0005-ppc-vfp-nrwg.patch` (`x-vfp-nrwg`, §11) et `essais/0009-ppc-isync-chain.patch`
 (`x-isync-chain`, §16.8), ne sont pas appliqués.
@@ -1400,7 +1402,7 @@ la boucle principale de ~110 M à ~30 M par tour : les trois quarts des retours 
 A, B, C, D, F : **0 erreur et empreintes identiques** dans toutes les configurations (stock,
 `x-ret-inline`, `+x-jc-idx`, `+x-isync-chain`, SMP=2 et SMP=1). E : 0 erreur en SMP=1 ; en
 SMP=2, **erreurs dans toutes les configurations, QEMU sans aucune propriété compris**
-(§16.7) — défaut de QEMU 9.2 indépendant de ces patches.
+(§16.7) — défaut de QEMU 9.2 indépendant de ces patches, trouvé et corrigé au §17.
 
 
 ### 16.5 Gains
@@ -1488,10 +1490,13 @@ vCPU a traduit du code peut ne plus invalider ce code. Deux courses de `accel/tc
 ont été lues (le calcul de `TLB_NOTDIRTY` hors verrou dans `tlb_set_page_full`, et
 `tlb_set_dirty` qui retire `TLB_NOTDIRTY` après un test fait hors verrou dans
 `notdirty_write`) ; les refermer (essai `x-smc-fix`, test refait sous le verrou) **ne change
-rien** : la cause est ailleurs, non trouvée. Portée pour Tiger : un programme qui écrit du
-code sur un processeur et l'exécute sur l'autre (JIT multifil ; les jeux du dépôt n'en ont
-pas). À reprendre à part (TODO §4) ; `smctest` en est le test de non-régression. Un essai en
-`thread=single` (SMP=2 sans MTTCG) n'a pas conclu : l'invité a redémarré pendant le test.
+rien** à lui seul. Un essai en `thread=single` (SMP=2 sans MTTCG) n'a pas conclu : l'invité a
+redémarré pendant le test.
+
+**Cause trouvée le 29/09 (§17)** : une troisième course, dominante, masquait les deux
+premières — la page de code n'est protégée qu'**après** que le traducteur a lu le code ;
+les trois sont réelles et corrigées ensemble par `tcg/0010`, et `x-icbi-sync` ferme la
+fenêtre restante (écriture invalidée avant d'être faite).
 
 ### 16.8 Essayé et classé
 
@@ -1511,7 +1516,8 @@ pas). À reprendre à part (TODO §4) ; `smctest` en est le test de non-régress
 - **Chaînage direct des `bctr` monomorphes** : non fait ; la sonde en ligne en prend déjà
   l'essentiel (le saut indirect restant est bien prédit par le processeur hôte quand la cible
   ne change pas).
-- **`x-smc-fix`** (§16.7) : sans effet sur le défaut, retiré.
+- **`x-smc-fix`** (§16.7) : sans effet sur le défaut à lui seul, retiré ; ses deux
+  corrections sont reprises sans condition dans `tcg/0010` (§17), avec la troisième course.
 
 ### 16.9 Suites
 
@@ -1527,7 +1533,7 @@ pas). À reprendre à part (TODO §4) ; `smctest` en est le test de non-régress
   Marble Blast et les remplissages du TLB viennent du vidage du `mmu_idx` utilisateur à
   chaque changement de processus.
 - **Verrou global à chaque `mtmsr`/`rfi`** : 6-10 % du temps vCPU (TODO §4).
-- **Le défaut du §16.7** (code réécrit par l'autre vCPU).
+- **Le défaut du §16.7** (code réécrit par l'autre vCPU) : corrigé, §17.
 
 Commande de l'A/B DOOM 3 (jouée ci-dessus ; pour la rejouer, depuis le worktree de cette
 branche, VM de dev arrêtée) :
@@ -1542,3 +1548,162 @@ branche, VM de dev arrêtée) :
 `tools/tcg/d3run.sh` prend désormais son `sample` avant de sortir sur `FINI` : avec la règle
 de fin de cinématique à seuil relatif, `PROFIL` et `FINI` arrivent dans le même relevé, et le
 `sample` n'était jamais pris.
+
+---
+
+## 17. Le code réécrit par l'autre vCPU : `tcg/0010` (trois courses de QEMU, `x-icbi-sync`)
+
+29/09/2026. Copie isolée `~/src/qemu-smc` (worktree de `~/src/qemu`, branches `smc-base` =
+l'arbre de référence, `smc-fix` = + 0010, `smc-diag` = instrumentation, `smc-stat` =
+compteurs) ; disque de dev cloné (`cp -c`), VM en single-user, SMP=2, propriétés de
+`run_tiger.sh` par défaut (`x-jit-near` compris) sauf mention. `~/src/qemu` n'a pas été touché.
+
+### 17.1 Le défaut
+
+`smctest` E (§16.4, §16.7) : un fil réécrit `li r3,g ; blr` 20 000 fois (`dcbst ; sync ;
+icbi ; sync ; isync`, puis publie `g`), l'autre lit `g`, fait `isync` et appelle la fonction ;
+il doit rendre au moins `g`. Sur l'arbre de référence (5 exécutions) : **5 sur 5 en erreur,
+1 524 épisodes périmés, 86 millions d'appels périmés** ; le bloc périmé tient jusqu'à la
+fin d'une rafale de 64 réécritures (l'écrivain dort toutes les 64), et parfois au-delà du
+`pthread_join` (« E-fin : 19968 au lieu de 20000 »). SMP=1 : 0 erreur.
+
+### 17.2 Diagnostic
+
+Instrumentation (`patches/tcg/essais/0010-smcdbg-diag.patch`, qui porte aussi un premier
+état des correctifs ; `POMPPC_SMCDBG=1` ; hors du patch appliqué) : chaque bloc de
+8 octets retient le premier mot lu par le traducteur ; la recherche du bloc (`tb_lookup`)
+compare ce mot à la mémoire ; après 20 000 recherches d'un bloc périmé, QEMU imprime l'état
+de la page (bit `DIRTY_MEMORY_CODE`, bloc dans la liste de la page), toutes les entrées de
+TLB des deux vCPU qui pointent sur la page (avec `TLB_NOTDIRTY`), et les derniers
+événements de la page, tirés d'un anneau global : remplissage de TLB (`F`, avec
+`NOTDIRTY`), `notdirty_write` (`N`), `tlb_unprotect_code` (`U`), retrait de `NOTDIRTY` par
+`tlb_set_dirty` (`S`), `tlb_protect_code` (`P`) et remise de `NOTDIRTY` dans les TLB des
+autres vCPU (`R`, avec le nombre d'entrées touchées).
+
+Premier relevé (arbre de référence) : bloc valide, dans la liste de la page, page protégée,
+**et aucun événement entre la protection et le relevé** alors que la mémoire a avancé de
+64 générations. Les 64 écritures ont eu lieu **avant** `P` : pendant que le vCPU 0
+traduisait (il avait lu le code), le vCPU 1 écrivait par une entrée sans `NOTDIRTY`, la page
+n'ayant plus de bloc (`U` puis `S`). **Course 1** : `tb_gen_code` lit le code, puis
+`tb_link_page` → `tb_page_add` protège la page ; une écriture de l'autre vCPU entre les
+deux n'est jamais vue, et le bloc reste valide jusqu'à la prochaine écriture piégée.
+
+Une fois la course 1 fermée, les relevés montrent la **course 2** : `S 1` du vCPU 0 (test
+`!cpu_physical_memory_is_clean` fait hors verrou, puis `tlb_set_dirty`), et entre les
+deux la protection du vCPU 1 : `R 0` (l'entrée du vCPU 0 portait encore `NOTDIRTY`, rien à
+remettre), puis `tlb_set_dirty` retire `NOTDIRTY` d'une page qui a de nouveau du code :
+toutes les écritures suivantes du vCPU 0 passent sans invalider, jusqu'au prochain vidage
+de son TLB. La **course 3** est la même, au remplissage (`tlb_set_page_full` calcule
+`NOTDIRTY` avant de prendre le verrou du TLB, l'entrée installée après la remise des
+drapeaux échappe aux deux) : lue dans le code, jamais vue dans les relevés.
+
+Les courses 2 et 3 sont celles de l'essai `x-smc-fix` (§16.7) : réelles, mais masquées par
+la course 1, bien plus fréquente — d'où « sans effet » le 26/09.
+
+Reste, les trois fermées : des erreurs d'**une** génération, isolées (« génération 7573
+vue après 7574 (mémoire 7574, rappel 7573) »), corrigées à l'écriture suivante.
+`notdirty_write` invalide les blocs **avant** que l'écriture soit faite (ordre de
+`mmu_lookup`, et `probe_access` rend un pointeur écrit plus tard par l'appelant, `dcbz`) :
+l'autre vCPU peut retraduire l'ancien code entre l'invalidation et l'écriture. Ce n'est plus
+une perte (l'écriture suivante invalide), mais le protocole de l'invité (`icbi`, `sync`,
+drapeau, `isync`) ne suffit plus à garantir le nouveau code : sur un vrai G4, `icbi` retire
+la ligne de **tous** les caches d'instructions ; dans QEMU, `helper_icbi` ne fait qu'un
+chargement.
+
+### 17.3 Le correctif
+
+- **Course 1**, `tb_lock_page0` / `tb_lock_page1` (`accel/tcg/tb-maint.c`) : la page est
+  protégée (`tlb_protect_code`) **quand le traducteur en prend le verrou, avant de lire le
+  code**, si elle n'a pas encore de bloc. Toute écriture ultérieure passe par
+  `notdirty_write`, dont l'invalidation attend le verrou de page tenu par le traducteur, puis
+  invalide le bloc lié. Aussi au redémarrage `-3` (page 0 relâchée puis reprise). La
+  protection de `tb_page_add` reste (déjà faite, elle ne coûte qu'un test du bit).
+- **Course 2**, `tlb_set_dirty` : le test « la page est-elle propre ? » est refait sous le
+  verrou du TLB. `tlb_protect_code` efface le bit `CODE` puis prend ce verrou pour remettre
+  `NOTDIRTY` : si le test sous verrou voit le bit encore sale, la remise viendra après ; s'il
+  le voit propre, on ne retire rien.
+- **Course 3**, `tlb_set_page_full` : `NOTDIRTY` est calculé sous le verrou du TLB, même
+  raisonnement.
+- **`x-icbi-sync`** (propriété de CPU, éteinte par défaut dans QEMU, **allumée par
+  `run_tiger.sh`**, `ICBISYNC=0` l'éteint) : `helper_icbi` invalide les blocs qui recouvrent
+  sa ligne de cache (`tb_invalidate_phys_line_sync`). `icbi` suit l'écriture dans l'ordre du
+  programme : le bloc retraduit trop tôt est jeté avant que l'écrivain publie. Le
+  recouvrement est testé sous le verrou de la page (une traduction en cours est attendue).
+  Chemin court : une page dont le bit `CODE` est sale n'a aucun bloc, et une traduction qui
+  ne l'a pas encore effacé lira l'écriture (barrière avant la lecture du bit ; le traducteur
+  efface le bit, par une opération atomique séquentielle, avant de lire le code). L'adresse
+  physique vient de `probe_access_full` (le chargement d'origine vient de remplir le TLB).
+
+Les trois courses sont des défauts francs de QEMU en MTTCG : corrigées sans condition.
+
+### 17.4 La preuve
+
+`smctest` (`tools/guest/jobs/smctest`, désormais `-t LETTRES -r TOURS` et `ICBI=N`),
+exécutions de l'essai E (20 000 réécritures chacune) :
+
+| binaire | propriétés | exécutions E | exécutions en erreur | épisodes périmés | appels périmés |
+|---|---|---|---|---|---|
+| référence | `run_tiger.sh` | 5 | **5** | 1 524 | 86 002 222 |
+| référence | aucune | 1 | **1** | — | 11 715 449 |
+| courses 1-3 fermées | `run_tiger.sh`, sans `x-icbi-sync` | 200 | **188** | 802 | 840 (1 génération) |
+| `tcg/0010` | `run_tiger.sh` + `x-icbi-sync` | 50 + 500 | **0** | 0 | 0 |
+| `tcg/0010` | `x-icbi-sync` seule | 200 | **0** | 0 | 0 |
+| `tcg/0010` final (chemin court) | `run_tiger.sh` + `x-icbi-sync` | 300 | **0** | 0 | 0 |
+| `tcg/0010` final, `N=4` (80 000 réécritures) | idem | 50 | **0** | 0 | 0 |
+
+A, B, C, D, F : **empreintes identiques** à celles de l'arbre de référence (et entre elles)
+dans toutes les configurations, SMP=2 et SMP=1 (`qfix`, 32 bits) : `A cd01e214aab92265`,
+`B c37bce5023096e85`, `C ac26223f71fdace5`, `D 952b31e1968f5b8d`, `F 7308784105b8fd59`,
+et `E aa4d72ebdba6b6eb` avec 0 erreur (l'empreinte E de la référence varie avec ses erreurs).
+
+Non-régression : `tests/run-all.sh` 156 OK, 0 échec ; `--slow` avec le binaire corrigé :
+`qfb_smoke` vert, `qgpu_smoke` en échec **identique** avec le binaire de référence
+(« table LAYOUT : contextes par client 0x20, attendu 4 », antérieur). Les preuves de
+`tools/tcg` (`lfsproof`, `fpproof`, `vfpproof`, `vpermproof`) portent sur des helpers que
+0010 ne touche pas.
+
+Rejouer (disque de dev, SMP=2 ; les propriétés de `run_tiger.sh` dans `CPU_OPTS`) :
+
+    QEMU_BIN=<build>/qemu-system-ppc SMP=2 CPU_OPTS=…,x-icbi-sync=on \
+        python3 tools/guest/devloop.py start
+    mkdir /tmp/j && cp tools/guest/jobs/smctest/* /tmp/j
+    printf 'TESTS=E\nREPS=300\n' > /tmp/j/env.sh      # ou rien : A-F une fois ; ICBI=N : banc
+    python3 tools/guest/devloop.py run /tmp/j          # out/smctest.txt : « tour k erreurs 0 »
+
+### 17.5 Fréquence dans Tiger, coût
+
+Compteurs (`patches/tcg/essais/0010-smcstat.patch`, par-dessus 0010) sur un démarrage du bureau, 4 min de démo Marble Blast, puis
+`smctest` : pour chaque course, le cas où l'arbre de référence aurait perdu l'invalidation
+(course 1 : mémoire du bloc changée entre la protection et le lien, sur une page neuve ;
+course 2 : test sous verrou qui refuse de retirer `NOTDIRTY` ; course 3 : `NOTDIRTY` posé
+sous verrou alors que le test hors verrou ne l'aurait pas posé).
+
+| phase | protections de page | course 1 | course 2 | course 3 | `icbi` | `icbi` par le chemin long | `icbi` qui invalident |
+|---|---|---|---|---|---|---|---|
+| démarrage + Marble Blast | ~24 600 | **0** | **0** | **0** | 14,4 M | 47 | **1** |
+| `smctest` (A-F) | ~40 700 | 2 | 7 929 | 0 | 2,1 M | 17 584 | 17 457 |
+
+**Démarrage et Marble Blast ne déclenchent aucune des trois courses** : il faut du code
+réécrit pendant que l'autre vCPU l'exécute ou le traduit (JIT multifil, `smctest`). Ce
+défaut n'explique donc pas, à lui seul, la panique AppleUSBOHCI au démarrage ni le gel de
+DOOM 3 (non mesuré sous DOOM 3, VM quotidienne). `x-icbi-sync` : 14 millions d'`icbi` au
+démarrage (le noyau synchronise chaque page de code chargée), presque tous par le chemin
+court. Banc d'`icbi` (`smctest icbi 20000000`, même VM, `x-icbi-sync` éteint → allumé) :
+
+| cas | éteint | allumé |
+|---|---|---|
+| `icbi` sur une page sans code | 8,5 ns | 17,6 ns |
+| `icbi` sur une page à blocs, autre ligne | 9,3 ns | 20 ns |
+| `icbi` de la ligne d'un bloc, puis appel (retraduction) | 25 ns | 7,2 µs |
+
++9 à 11 ns par `icbi` : 0,13 s de temps vCPU sur les 14 millions d'un démarrage. La
+retraduction n'a lieu que si l'invité synchronise une ligne de code déjà traduite (une fois
+sur tout le démarrage et Marble Blast).
+
+### 17.6 Suites
+
+- Les trois courses touchent tout invité MTTCG (x86 compris, sans `icbi`) : proposables en
+  amont. La fenêtre « invalidé avant d'être écrit » n'a pas de correctif générique simple
+  (`probe_access` rend un pointeur écrit plus tard) ; pour PowerPC, `x-icbi-sync` suffit.
+- Chercher la cause des incidents SMP ailleurs (banc d'endurance) ; `smctest` E reste le
+  test de non-régression de ce chapitre.

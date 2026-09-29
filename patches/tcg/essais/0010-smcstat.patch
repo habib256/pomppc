@@ -1,0 +1,163 @@
+diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+index d0f1f09..ab62ee1 100644
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -874,10 +874,29 @@ void tlb_flush_page_bits_by_mmuidx_all_cpus_synced(CPUState *src_cpu,
+                                               idxmap, bits);
+ }
+ 
++uint64_t smcstat_r1, smcstat_r2, smcstat_r3, smcstat_prot, smcstat_tb;
++static uint64_t smcstat_n;
++void smcstat_print(void);
++static void __attribute__((constructor)) smcstat_init(void)
++{
++    atexit(smcstat_print);
++}
++void smcstat_print(void)
++{
++    fprintf(stderr, "smcstat: protections %" PRIu64 " blocs-sur-page-neuve %" PRIu64
++            " course1(ecrit-pendant-traduction) %" PRIu64
++            " course2(set_dirty) %" PRIu64 " course3(remplissage) %" PRIu64 "\n",
++            smcstat_prot, smcstat_tb, smcstat_r1, smcstat_r2, smcstat_r3);
++}
++
+ /* update the TLBs so that writes to code in the virtual page 'addr'
+    can be detected */
+ void tlb_protect_code(ram_addr_t ram_addr)
+ {
++    if ((qatomic_fetch_inc(&smcstat_n) & ((1 << 12) - 1)) == 0) {
++        smcstat_print();
++    }
++    qatomic_inc(&smcstat_prot);
+     cpu_physical_memory_test_and_clear_dirty(ram_addr & TARGET_PAGE_MASK,
+                                              TARGET_PAGE_SIZE,
+                                              DIRTY_MEMORY_CODE);
+@@ -997,6 +1016,10 @@ static void tlb_set_dirty(CPUState *cpu, vaddr addr, ram_addr_t ram_addr)
+     addr &= TARGET_PAGE_MASK;
+     qemu_spin_lock(&cpu->neg.tlb.c.lock);
+     if (cpu_physical_memory_is_clean(ram_addr)) {
++        if (qatomic_fetch_inc(&smcstat_r2) < 20) {
++            fprintf(stderr, "smcstat: course2 cpu%d vaddr %" VADDR_PRIx "\n",
++                    cpu->cpu_index, addr);
++        }
+         qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+         return;
+     }
+@@ -1139,6 +1162,8 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
+ 
+     wp_flags = cpu_watchpoint_address_matches(cpu, addr_page,
+                                               TARGET_PAGE_SIZE);
++    bool smc_pre = is_ram && (prot & PAGE_WRITE) && !section->readonly &&
++        cpu_physical_memory_is_clean(iotlb);
+ 
+     index = tlb_index(cpu, mmu_idx, addr_page);
+     te = tlb_entry(cpu, mmu_idx, addr_page);
+@@ -1166,6 +1191,10 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
+     if (is_ram && (prot & PAGE_WRITE) && !section->readonly &&
+         cpu_physical_memory_is_clean(iotlb)) {
+         write_flags |= TLB_NOTDIRTY;
++        if (!smc_pre && qatomic_fetch_inc(&smcstat_r3) < 20) {
++            fprintf(stderr, "smcstat: course3 cpu%d vaddr %" VADDR_PRIx "\n",
++                    cpu->cpu_index, addr_page);
++        }
+     }
+ 
+     /* Note that the tlb is no longer clean.  */
+diff --git a/accel/tcg/tb-maint.c b/accel/tcg/tb-maint.c
+index f0f12d0..c74a9cb 100644
+--- a/accel/tcg/tb-maint.c
++++ b/accel/tcg/tb-maint.c
+@@ -410,9 +410,11 @@ static void page_unlock(PageDesc *pd)
+  * notdirty path, which blocks on the page lock held here and invalidates
+  * the new TB once it is linked.
+  */
++__thread bool smcstat_newpage;
+ static void tb_page_protect_locked(PageDesc *pd, tb_page_addr_t paddr)
+ {
+     if (!pd->first_tb) {
++        smcstat_newpage = true;
+         tlb_protect_code(paddr & TARGET_PAGE_MASK);
+     }
+ }
+@@ -1251,6 +1253,13 @@ bool tb_invalidate_phys_line_sync(tb_page_addr_t start, tb_page_addr_t last)
+     PageForEachNext n;
+     bool hit = false;
+ 
++    static uint64_t st_calls, st_pd, st_tbs, st_hit;
++    uint64_t c = qatomic_fetch_inc(&st_calls) + 1;
++    if ((c & ((1 << 18) - 1)) == 0) {
++        fprintf(stderr, "icbistat: appels %" PRIu64 " page-connue %" PRIu64
++                " page-avec-blocs %" PRIu64 " invalidations %" PRIu64 "\n",
++                c, st_pd, st_tbs, st_hit);
++    }
+     tcg_debug_assert(((start ^ last) & TARGET_PAGE_MASK) == 0);
+     smp_mb();
+     if (cpu_physical_memory_get_dirty_flag(start, DIRTY_MEMORY_CODE)) {
+@@ -1260,6 +1269,10 @@ bool tb_invalidate_phys_line_sync(tb_page_addr_t start, tb_page_addr_t last)
+     if (!pd) {
+         return false;
+     }
++    qatomic_inc(&st_pd);
++    if (qatomic_read(&pd->first_tb)) {
++        qatomic_inc(&st_tbs);
++    }
+     page_lock(pd);
+     PAGE_FOR_EACH_TB(start, last, pd, tb, n) {
+         tb_page_addr_t tb_start = tb_page_addr0(tb);
+@@ -1278,6 +1291,7 @@ bool tb_invalidate_phys_line_sync(tb_page_addr_t start, tb_page_addr_t last)
+     }
+     page_unlock(pd);
+     if (hit) {
++        qatomic_inc(&st_hit);
+         /* takes the locks of every page of the TBs found, in order */
+         tb_invalidate_phys_range(start, last);
+     }
+diff --git a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
+index dd6d278..434d0aa 100644
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -284,6 +284,11 @@ static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
+ }
+ 
+ /* Called with mmap_lock held for user mode emulation.  */
++extern __thread bool smcstat_newpage;
++static __thread uint8_t smcstat_snap[TARGET_PAGE_SIZE];
++static __thread unsigned smcstat_len;
++extern uint64_t smcstat_r1, smcstat_tb;
++
+ TranslationBlock *tb_gen_code(CPUState *cpu,
+                               vaddr pc, uint64_t cs_base,
+                               uint32_t flags, int cflags)
+@@ -335,7 +340,12 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
+     tb_set_page_addr0(tb, phys_pc);
+     tb_set_page_addr1(tb, -1);
+     if (phys_pc != -1) {
++        smcstat_newpage = false;
+         tb_lock_page0(phys_pc);
++        if (host_pc) {
++            smcstat_len = TARGET_PAGE_SIZE - (phys_pc & ~TARGET_PAGE_MASK);
++            memcpy(smcstat_snap, host_pc, smcstat_len);
++        }
+     }
+ 
+     tcg_ctx->gen_tb = tb;
+@@ -548,7 +558,18 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
+      * No explicit memory barrier is required -- tb_link_page() makes the
+      * TB visible in a consistent state.
+      */
+-    existing_tb = tb_link_page(tb);
++    {
++        bool np = smcstat_newpage;
++        existing_tb = tb_link_page(tb);
++        if (np && existing_tb == tb && host_pc) {
++            qatomic_inc(&smcstat_tb);
++            if (memcmp(smcstat_snap, host_pc, MIN(tb->size, smcstat_len)) &&
++                qatomic_fetch_inc(&smcstat_r1) < 20) {
++                fprintf(stderr, "smcstat: course1 cpu%d pc %" VADDR_PRIx "\n",
++                        cpu->cpu_index, pc);
++            }
++        }
++    }
+     assert_no_pages_locked();
+ 
+     /* if the TB already exists, discard what we just translated */
