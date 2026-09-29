@@ -147,12 +147,16 @@ partiel ou refusé ne doit pas valider des pixels qu'il n'a pas synchronisés.
 Le retour vers Apple dépend de cette cohérence ; il n'est pas une récupération
 universelle garantie pour tous les états, notamment sous programmes ARB.
 
-**L6 : `sync_to_host`, branche couleur, initialise `done = !can`** puis peut
-poser `SYNCED` lorsque la copie est impossible (source absente, format non
-pris en charge ou arène trop petite). Ne pas déduire une égalité des pixels
-du seul drapeau. Il reste à distinguer explicitement « contenu inutile »,
-« transfert possible/ordonné » et « transfert impossible », avec épreuves
-de format et de taille aux limites.
+**L6 : `sync_to_host` pose encore `SYNCED` quand il n'y a rien à porter**
+(source absente, 16 bits sans la v15). Depuis la 3e passe du bug hunt du
+29/09, la taille n'en fait plus partie : téléversements et relectures d'une
+image plus grande que l'arène partent par bandes de lignes (`band_rows`,
+`upload_bands`, `queue_readback_to`), et `SYNCED` n'est posé que si toutes
+les bandes sont parties. Une relecture dont la soumission s'est arrêtée avant
+elle (`posts_lost` : refus synchrone hors dessin, ou `ERRORS` qui a bougé en
+asynchrone) repasse `SYNCED → HOST_NEWER`, et `sync_to_sw_locked` relit.
+Ne pas déduire une égalité des pixels du seul drapeau pour les deux cas
+« rien à porter ».
 
 Sources : `exec_one`, `qgpu_core_client_reset` dans le cœur ; `sync_to_host`,
 `sync_to_sw_locked`, `run_posts` dans le plugin ;
