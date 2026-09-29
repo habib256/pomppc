@@ -503,7 +503,10 @@ fi
 read -r -a USER_EXTRA <<< "${EXTRA_ARGS:-}"
 
 BOOTDEV='hd:10,\System\Library\CoreServices\BootX'
-MON=$(host_mon_path "$SCR/mon.sock")   # jamais le socket d'une VM vivante (SNAPSHOT=1)
+MON=$(host_mon_path "$SCR/mon.sock")   # mon.sock pour la VM verrouillée, mon-PID.sock en SNAPSHOT=1
+# .run/tiger.mon et .run/tiger.sshport : ce que lisent la matrice, killgame.py,
+# cycle.sh et tools/guest/tssh.sh (rien en SNAPSHOT=1 : ils visent la VM quotidienne)
+host_publish_vm tiger "$MON" "$([ -n "${NET:-}" ] && echo "${SSH_PORT:-0}" || echo 0)"
 
 echo "▶ Tiger : $MODE | cpu=$CPU_SPEC ram=${RAM}Mo affichage=$DISP \
 réseau=$([ -n "${NET:-}" ] && echo on || echo off) \

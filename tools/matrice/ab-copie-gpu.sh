@@ -23,19 +23,22 @@ QB="${1:-/Users/mercure/src/qemu-gpucopy/build/qemu-system-ppc}"
 JEUX="${2:-cmr,d3,prey}"
 MODES="${3:-fen,pe}"
 PASSES="${4:-0 1}"
-TS=$R/.run/cmr/tssh.sh
-MON=$R/.run/mon.sock
+# tssh.sh du dépôt : il lit le port publié par la VM quotidienne (.run/tiger.sshport)
+TS=$WT/tools/guest/tssh.sh
+LOCK=$R/.run/tiger.lock
+. "$WT/scripts/hostcompat.sh"
+mon() { local m; m="$(cat "$R/.run/tiger.mon" 2>/dev/null)"; echo "${m:-$R/.run/mon.sock}"; }
 H=$(date +%Y%m%d-%H%M)
 
+# Même règle que tools/tcg/d3run.sh (bug hunt 4, 29/09) : la VM quotidienne est
+# le détenteur du verrou ; on attend qu'il se libère, on ne le supprime JAMAIS.
 stop_vm() {
-  if pgrep -f "tiger.qcow2" >/dev/null; then
+  if host_locked "$LOCK"; then
     $TS "echo tiger974 | sudo -S shutdown -h now" >/dev/null 2>&1
-    for i in $(seq 1 40); do pgrep -f "tiger.qcow2" >/dev/null || break; sleep 3; done
-    if pgrep -f "tiger.qcow2" >/dev/null; then
-      python3 "$WT/tools/tcg/hmp.py" "$MON" quit >/dev/null 2>&1; sleep 5
-    fi
+    host_wait_unlocked "$LOCK" 120 2>/dev/null && return 0
+    python3 "$WT/tools/tcg/hmp.py" "$(mon)" quit >/dev/null 2>&1
+    host_wait_unlocked "$LOCK" 30 || exit 1
   fi
-  rm -f $R/.run/tiger.lock
 }
 
 wait_ssh() {
@@ -55,7 +58,7 @@ for P in $PASSES; do
     ( cd "$R" && QEMU_BIN="$QB" QGPU_GPU_COPY=$P nohup ./run_tiger.sh > "$OUT/run_tiger.log" 2>&1 & )
     sleep 20
     wait_ssh && break
-    python3 "$WT/tools/tcg/hmp.py" "$MON" system_reset >/dev/null 2>&1
+    python3 "$WT/tools/tcg/hmp.py" "$(mon)" system_reset >/dev/null 2>&1
     wait_ssh && break
     stop_vm
   done
