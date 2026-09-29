@@ -288,11 +288,14 @@ hors rafraîchissements admis (2 par 90 images en fenêtre), et une mesure à sc
 sous le seuil du jeu. Une scène `gltest` comparée au rendu d'Apple éprouve chaque notion
 nouvelle. Les modes fenêtre et plein écran sont requis quand le jeu les propose.
 
-Tour complet du 29/09 (`bench/matrice/20260929-1334`, commit `4fafc58`) : **images toutes
-justes**, vitesses inexploitables (charge hôte 40–53). Contrôle sur hôte au repos
-(`20260929-15xx`) : Marble Blast fenêtre 8,9 ms/image, DOOM 3 fenêtre 33,8, verts.
+**Tour de référence : `bench/matrice/20260929-2344/tableau.md`** (commit `b9004cc`, hôte au
+repos) : **15 vertes sur 16 automatisées**, images toutes justes ; seule rouge, Zenerchi
+fenêtre (7,9 ms/image, régression ouverte). ms/image fenêtre / plein écran : Marble Blast
+9,3 / 10,2 ; DOOM 3 60,9 / 61,0 ; Prey 70,7 / 71,4 ; UT2004 26,9 / 29,3 ; Warcraft III — / 17,3 ;
+Colin McRae — / 70,7 ; Nexuiz ARB 109,5 / 109,2 ; Nexuiz GLSL 41,1 / 41,8. Le tableau
+ci-dessous est celui du 27/09, gardé pour comparaison.
 
-Dernier tour complet de référence : `bench/matrice/20260927-1137/tableau.md`, **13 vertes sur 15**.
+Tour complet précédent : `bench/matrice/20260927-1137/tableau.md`, **13 vertes sur 15**.
 DOOM 3 fenêtre est ensuite verte au contrôle isolé `20260927-1216` ; ce contrôle
 ne transforme pas le tour complet en « 14/15 ». Sur le QEMU de référence reconstruit,
 DOOM 3 et Nexuiz GLSL plein écran sont verts au tour `20260927-1223`.
