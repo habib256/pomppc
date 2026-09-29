@@ -6,6 +6,7 @@
 #   • le device paravirtuel « qfb-pci »              — patches/qfb/
 #   • le GPU paravirtuel « qgpu-pci » (+ backends)   — patches/qgpu/
 #   • le bring-up SMP mac99 de BALATON Zoltan        — patches/smp-mac99/
+#   • le reset des sources de niveau de l'OpenPIC     — patches/openpic/
 #   • le flottant rapide (x-fast-fp)                  — patches/fastfp/
 #   • le TLB gardé par jeu de segments (x-sr-tlb)     — patches/tcg/0001
 #   • lfs/stfs sans helper (x-lfs-inline)             — patches/tcg/0002
@@ -137,6 +138,30 @@ if ! grep -q "define GPIO_RESET_CPU1" hw/misc/macio/gpio.c; then
   patch_strict "$ROOT/patches/smp-mac99/qemu-mac99-cpus-v2.patch" --fuzz=0
   rm -f hw/misc/macio/gpio.c.orig hw/ppc/mac_newworld.c.orig hw/intc/openpic.c.orig
 fi
+
+# --- 1 bis. OpenPIC : le reset oublie l'état verrouillé des sources ---
+# patches/openpic/, docs/gel-doom3-baddisplay.md. Sans lui, un system_reset
+# fait pendant une panique de l'invité (OHCI qui tient sa ligne haute) bloque
+# le démarrage suivant dans une interruption perpétuelle. APRÈS l'étape 1 :
+# elle peut rendre openpic.c à l'amont (git checkout) avant de poser la série.
+if ! grep -q "src->input = level" hw/intc/openpic.c; then
+  echo "▶ patch OpenPIC : reset des sources de niveau"
+  patch_forward "$ROOT/patches/openpic/0001-openpic-reset-niveau.patch" \
+    hw/intc/openpic.c           "src->input = level" \
+    hw/intc/openpic.c           "opp->src\[i\].pending = 0" \
+    hw/intc/openpic.c           "opp->src\[i\].input = opp->src\[i\].pending" \
+    include/hw/ppc/openpic.h    "int input;"
+  rm -f hw/intc/openpic.c.orig include/hw/ppc/openpic.h.orig
+fi
+while read -r f m; do
+  [ -z "$f" ] && continue
+  grep -q "$m" "$f" || {
+    echo "⚠ patch openpic 0001 incomplet : '$m' absent de $f (voir patches/openpic/)" >&2; exit 1; }
+done <<'OPENPIC_MARKERS'
+hw/intc/openpic.c src->input = level
+hw/intc/openpic.c opp->src\[i\].pending = 0
+include/hw/ppc/openpic.h int input;
+OPENPIC_MARKERS
 
 # --- 2. Constantes GPIO absentes de 9.2.0 ---
 # La série SMP les apporte désormais elle-même (OUT_DATA / IN_DATA / OUT_ENABLE

@@ -1,0 +1,67 @@
+diff -ruN a/hw/intc/openpic.c b/hw/intc/openpic.c
+--- a/hw/intc/openpic.c	2026-09-29 17:34:46
++++ b/hw/intc/openpic.c	2026-09-29 17:34:46
+@@ -398,6 +398,7 @@
+     src = &opp->src[n_IRQ];
+     DPRINTF("openpic: set irq %d = %d ivpr=0x%08x",
+             n_IRQ, level, src->ivpr);
++    src->input = level;
+     if (src->level) {
+         /* level-sensitive irq */
+         src->pending = level;
+@@ -534,6 +535,15 @@
+         break;
+     }
+ 
++    /*
++     * POMPPC (29/09/2026) : une source sensible au niveau suit la ligne.
++     * Le reset la remet en front (ivpr_reset) et oublie `pending` ; quand
++     * l'invité la repasse au niveau, l'état réel de la ligne revient ici.
++     */
++    if (opp->src[n_IRQ].level) {
++        opp->src[n_IRQ].pending = opp->src[n_IRQ].input;
++    }
++
+     openpic_update_irq(opp, n_IRQ);
+     DPRINTF("Set IVPR %d to 0x%08x -> 0x%08x", n_IRQ, val,
+             opp->src[n_IRQ].ivpr);
+@@ -1268,6 +1278,19 @@
+     /* Initialise IRQ sources */
+     for (i = 0; i < opp->max_irq; i++) {
+         opp->src[i].ivpr = opp->ivpr_reset;
++        /*
++         * POMPPC (29/09/2026) : `pending` n'était pas remis à zéro. Une ligne
++         * de niveau HAUTE au moment du reset (OHCI de KeyLargo, invité en
++         * panique interruptions coupées) restait « pending » : la source
++         * repasse en front ci-dessous, et la retombée de la ligne que le
++         * reset du device envoie ENSUITE est ignorée en front. Au démarrage
++         * suivant, l'invité remet la source au niveau et la démasque :
++         * interruption perpétuelle, AppleUSBOHCI la rejette, le CPU 0 boucle
++         * dans AppleMPIC, démarrage bloqué après « using 1966 buffer
++         * headers ». On oublie l'état verrouillé ; l'état réel de la ligne
++         * (`input`) est repris quand la source redevient de niveau.
++         */
++        opp->src[i].pending = 0;
+         switch (opp->src[i].type) {
+         case IRQ_TYPE_NORMAL:
+             opp->src[i].level = !!(opp->ivpr_reset & IVPR_SENSE_MASK);
+@@ -1456,6 +1479,8 @@
+ 
+     /* Update internal ivpr and idr variables */
+     for (i = 0; i < opp->max_irq; i++) {
++        /* POMPPC : `input` n'est pas migré ; le niveau restauré en tient lieu */
++        opp->src[i].input = opp->src[i].pending;
+         write_IRQreg_idr(opp, i, opp->src[i].idr);
+         write_IRQreg_ivpr(opp, i, opp->src[i].ivpr);
+     }
+diff -ruN a/include/hw/ppc/openpic.h b/include/hw/ppc/openpic.h
+--- a/include/hw/ppc/openpic.h	2026-09-29 17:34:46
++++ b/include/hw/ppc/openpic.h	2026-09-29 17:34:46
+@@ -71,6 +71,7 @@
+     int last_cpu;
+     int output;     /* IRQ level, e.g. OPENPIC_OUTPUT_INT */
+     int pending;    /* TRUE if IRQ is pending */
++    int input;      /* raw level of the input line (POMPPC, see openpic_reset) */
+     IRQType type;
+     bool level:1;   /* level-triggered */
+     bool nomask:1;  /* critical interrupts ignore mask on some FSL MPICs */
