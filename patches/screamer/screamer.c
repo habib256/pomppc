@@ -146,6 +146,7 @@ static void pmac_screamer_tx(DBDMA_io *io)
                      " len: %x\n", io->addr, io->len);
 
     memcpy(&s->io, io, sizeof(DBDMA_io));
+    s->io_cmdptr = ((DBDMA_channel *)io->channel)->regs[DBDMA_CMDPTR_LO];
 
     /*
      * Pas de garde « la requête ne tient pas, on abandonne ». Le transfert
@@ -279,6 +280,8 @@ static void pmac_screamer_rx_flush(DBDMA_io *io)
 void macio_screamer_register_dma(ScreamerState *s, void *dbdma, int txchannel, int rxchannel)
 {
     s->dbdma = dbdma;
+    s->dma_tx_ch = txchannel;
+    s->dma_rx_ch = rxchannel;
     DBDMA_register_channel(dbdma, txchannel, s->dma_tx_irq,
                            pmac_screamer_tx, pmac_screamer_tx_flush, s);
     DBDMA_register_channel(dbdma, rxchannel, s->dma_rx_irq,
@@ -291,7 +294,8 @@ static void screamer_pull_deferred(ScreamerState *s)
 {
     DBDMA_io *io = &s->io;
     DBDMA_channel *ch;
-    uint32_t run;
+    uint32_t run, cp;
+    uint16_t old_status;
 
     if (!io->len || !io->channel) {
         return;
@@ -303,15 +307,50 @@ static void screamer_pull_deferred(ScreamerState *s)
         return;
     }
     /*
+     * CMDPTR réécrit pendant une pause (dbdma_write ne le protège que si
+     * ACTIVE, et PAUSE efface ACTIVE) : le fragment appartient à l'ancien
+     * programme. Le continuer écrirait son statut dans le premier
+     * descripteur du nouveau, lèverait l'IRQ et le sauterait (S1 par le
+     * chemin de la pause). On l'abandonne et le canal repart du nouveau.
+     */
+    cp = ch->regs[DBDMA_CMDPTR_LO];
+    if (cp != s->io_cmdptr) {
+        io->len = 0;
+        io->channel = NULL;
+        ch->io.processing = false;
+        DBDMA_kick(container_of(ch, DBDMAState, channels[ch->channel]));
+        return;
+    }
+    /*
      * RUN est retiré le temps du transfert pour que dbdma_end() ne relance
      * pas channel_run() depuis le callback audio (le BH s'en charge), puis
      * reposé SEUL : restaurer tout le statut effaçait ce que dbdma_end()
      * venait d'y faire (FLUSH retiré sur is_last, BT posé ou effacé).
+     *
+     * Mais dbdma_end() recopie ce statut SANS RUN dans le xfer_status du
+     * descripteur, là où le DBDMA réel écrit RUN|ACTIVE (0x8400). En régime
+     * établi presque toute commande OUTPUT finit par ici. 0xFFFF sert de
+     * témoin (un statut sans RUN ne peut pas le valoir) : s'il a été
+     * remplacé, dbdma_end() a écrit le descripteur à `cp`, et on y repose
+     * RUN.
      */
+    old_status = ch->current.xfer_status;
+    ch->current.xfer_status = 0xffff;
     run = ch->regs[DBDMA_STATUS] & RUN;
     ch->regs[DBDMA_STATUS] &= ~RUN;
     pmac_screamer_tx_transfer(s);
     ch->regs[DBDMA_STATUS] |= run;
+    if (ch->current.xfer_status == 0xffff) {
+        ch->current.xfer_status = old_status;      /* rien d'écrit */
+    } else if (run) {
+        uint16_t st = le16_to_cpu(ch->current.xfer_status) | RUN;
+
+        ch->current.xfer_status = cpu_to_le16(st);
+        dma_memory_write(&address_space_memory,
+                         cp + offsetof(dbdma_cmd, xfer_status),
+                         &ch->current.xfer_status, sizeof(uint16_t),
+                         MEMTXATTRS_UNSPECIFIED);
+    }
     DBDMA_kick(container_of(ch, DBDMAState, channels[ch->channel]));
 }
 
@@ -483,6 +522,19 @@ static void screamer_reset(DeviceState *dev)
     memset(s->regs, 0, sizeof(s->regs));
     memset(s->codec_ctrl_regs, 0, sizeof(s->codec_ctrl_regs));
     memset(&s->io, 0, sizeof(DBDMA_io));
+    s->io_cmdptr = 0;
+    /*
+     * mac_dbdma_reset ne remet à zéro que les registres des canaux, pas
+     * io.processing : un reset pendant la lecture (fragment différé) le
+     * laissait vrai, et DBDMA_run sautait le canal tant que l'invité
+     * n'effaçait pas RUN — muet pour un invité qui pose RUN directement.
+     */
+    if (s->dbdma) {
+        DBDMAState *d = s->dbdma;
+
+        d->channels[s->dma_tx_ch].io.processing = false;
+        d->channels[s->dma_rx_ch].io.processing = false;
+    }
 
     s->rate = 44100;
     screamer_update_settings(s);
