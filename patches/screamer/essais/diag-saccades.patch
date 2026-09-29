@@ -1,0 +1,536 @@
+Instrumentation des saccades du son (29/09/2026, docs/audio-stabilite.md).
+
+S'applique sur ~/src/qemu tel que construit à ce9522b (screamer.c AVANT le
+correctif du compteur de trames) ; le correctif y figure derrière deux
+interrupteurs : SCREAMER_FC_ANCIEN=1 (compteur avancé à la sortie de
+l'anneau) et SCREAMER_FCW_IGNORE=1 (écriture du registre 5 ignorée).
+
+Variables : SCREAMER_DIAG=<journal> (lignes SEC par seconde, EVT, ZPOS, FCW,
+DMA_REPRISE), SCREAMER_PCM=<fichier> (PCM S16 gros-boutiste stéréo tel qu'il
+part vers AUD_write), SCREAMER_RING=<trames> (taille de l'anneau).
+Compteurs hôte : tampons CoreAudio vides (audio/coreaudio.m), écart entre
+ticks du minuteur audio, attente des doorbells synchrones qgpu (BQL tenu),
+lectures de CMDPTR par canal DBDMA. Outils d'analyse : tools/son/.
+
+--- a/audio/audio.c
++++ b/audio/audio.c
+@@ -800,6 +800,14 @@
+ #undef DAC
+ #include "audio_template.h"
+ 
++uint64_t audio_diag_ca_calls, audio_diag_ca_empty, audio_diag_ca_empty_frames;
++int64_t audio_diag_ca_minpend = INT64_MAX;
++uint32_t audio_diag_ca_frames;
++int64_t audio_diag_timer_maxgap_ns;
++uint64_t qgpu_diag_sync_n;
++uint64_t dbdma_diag_cmdptr_reads[32];
++int64_t qgpu_diag_sync_ns, qgpu_diag_sync_max_ns;
++
+ /*
+  * Timer
+  */
+@@ -847,6 +855,9 @@
+ 
+     now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+     diff = now - s->timer_last;
++    if (diff > audio_diag_timer_maxgap_ns) {
++        audio_diag_timer_maxgap_ns = diff;
++    }
+     if (diff > s->period_ticks * 3 / 2) {
+         trace_audio_timer_delayed(diff / SCALE_MS);
+     }
+--- a/audio/audio.h
++++ b/audio/audio.h
+@@ -115,6 +115,19 @@
+ 
+ void AUD_close_out (QEMUSoundCard *card, SWVoiceOut *sw);
+ size_t AUD_write (SWVoiceOut *sw, void *pcm_buf, size_t size);
++
++/* POMPPC diagnostic du son (saccades DOOM 3, 29/09) : compteurs lus par le
++ * Screamer, qui les écrit une fois par seconde dans SCREAMER_DIAG. */
++extern uint64_t audio_diag_ca_calls;      /* appels de l'IOProc CoreAudio hôte */
++extern uint64_t audio_diag_ca_empty;      /* appels sans assez de PCM : tampon hôte muet */
++extern uint64_t audio_diag_ca_empty_frames;
++extern int64_t audio_diag_ca_minpend;     /* trames en attente au plus bas (IOProc) */
++extern uint32_t audio_diag_ca_frames;     /* trames par appel de l'IOProc */
++extern int64_t audio_diag_timer_maxgap_ns;/* écart max entre deux ticks du minuteur audio */
++extern uint64_t qgpu_diag_sync_n;         /* doorbells synchrones (BQL tenu) */
++extern int64_t qgpu_diag_sync_ns;         /* temps cumulé d'attente, BQL tenu */
++extern int64_t qgpu_diag_sync_max_ns;
++extern uint64_t dbdma_diag_cmdptr_reads[32];
+ int  AUD_get_buffer_size_out (SWVoiceOut *sw);
+ void AUD_set_active_out (SWVoiceOut *sw, int on);
+ int  AUD_is_active_out (SWVoiceOut *sw);
+--- a/audio/coreaudio.m
++++ b/audio/coreaudio.m
+@@ -325,8 +325,15 @@
+     frameCount = core->audioDevicePropertyBufferFrameSize;
+     pending_frames = hw->pending_emul / hw->info.bytes_per_frame;
+ 
++    qatomic_inc(&audio_diag_ca_calls);
++    audio_diag_ca_frames = frameCount;
++    if ((int64_t)pending_frames < audio_diag_ca_minpend) {
++        audio_diag_ca_minpend = pending_frames;
++    }
+     /* if there are not enough samples, set signal and return */
+     if (pending_frames < frameCount) {
++        qatomic_inc(&audio_diag_ca_empty);
++        qatomic_add(&audio_diag_ca_empty_frames, frameCount);
+         inInputTime = 0;
+         coreaudio_buf_unlock (core, "audioDeviceIOProc(empty)");
+         return 0;
+--- a/hw/display/qgpu-pci.c
++++ b/hw/display/qgpu-pci.c
+@@ -73,6 +73,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "audio/audio.h"
+ #include "qemu/module.h"
+ #include "qemu/units.h"
+ #include "qemu/atomic.h"
+@@ -602,6 +603,7 @@
+          */
+         int64_t deadline = qemu_clock_get_ms(QEMU_CLOCK_REALTIME)
+                          + QGPU_SYNC_WAIT_MS;
++        int64_t diag_t0 = get_clock();
+ 
+         while ((int32_t)(qatomic_read(&s->regs[QGPU_REG_FENCE >> 2]) - target)
+                < 0) {
+@@ -630,6 +632,15 @@
+             }
+             qemu_cond_timedwait(&s->cond_done, &s->lock, (int)left);
+         }
++        {
++            int64_t d = get_clock() - diag_t0;
++
++            qgpu_diag_sync_n++;
++            qgpu_diag_sync_ns += d;
++            if (d > qgpu_diag_sync_max_ns) {
++                qgpu_diag_sync_max_ns = d;
++            }
++        }
+     }
+     qemu_mutex_unlock(&s->lock);
+     /* FENCE_SUBMITTED n'est écrit que par le vCPU, sous BQL : pas d'atomique. */
+--- a/hw/misc/macio/mac_dbdma.c
++++ b/hw/misc/macio/mac_dbdma.c
+@@ -38,6 +38,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "audio/audio.h"
+ #include "hw/irq.h"
+ #include "hw/ppc/mac_dbdma.h"
+ #include "migration/vmstate.h"
+@@ -762,8 +763,10 @@
+     case DBDMA_CONTROL:
+         value = ch->regs[DBDMA_STATUS];
+         break;
+-    case DBDMA_STATUS:
+     case DBDMA_CMDPTR_LO:
++        dbdma_diag_cmdptr_reads[channel & 31]++;
++        break;
++    case DBDMA_STATUS:
+     case DBDMA_INTR_SEL:
+     case DBDMA_BRANCH_SEL:
+     case DBDMA_WAIT_SEL:
+--- a/hw/audio/screamer.c
++++ b/hw/audio/screamer.c
+@@ -44,6 +44,7 @@
+ #include "qemu/cutils.h"
+ #include "qemu/log.h"
+ #include "qemu/typedefs.h"
++#include <math.h>
+ 
+ /* debug screamer */
+ //#define DEBUG_SCREAMER
+@@ -73,6 +74,199 @@
+ /* Audio */
+ static const char *s_spk = "screamer";
+ 
++
++/* ------------------------------------------------------------------------
++ * POMPPC — diagnostic des saccades (29/09). SCREAMER_DIAG=<fichier> : une
++ * ligne par seconde (compteurs) et des lignes EVT horodatées. Horloge murale
++ * en ms (corrélation avec l'invité) ; intervalles sur l'horloge monotone.
++ * ---------------------------------------------------------------------- */
++static struct {
++    FILE *f;
++    bool init;
++    int64_t t_rep, t_cb, t_tx;
++    uint64_t cb_n, sil_frames, sil_ev, pulls, dma_bytes, dma_cmds, zero_frames,
++             zero_gaps, stale, cmds_seen;
++    int64_t cb_maxgap, tx_maxgap;
++    int ring_min, ring_max, freeb_max;
++    /* suite de trames nulles de l'invité en cours, et avons-nous déjà eu du son */
++    uint64_t zrun;
++    bool heard;
++    int16_t pl, pr;
++    uint64_t fc_reads, cp_reads, zpos_logs, dma_total;
++    uint32_t cmd_min;
++    hwaddr cmd_addr0;
++    int64_t pos0;
++    FILE *wav;
++    bool sil_prev;
++    int64_t pcm_t0;
++    uint64_t sauts;
++    double energie;
++    /* empreinte de la commande DBDMA en cours */
++    uint32_t h, hcmd;
++    bool hnz;
++    struct { uint32_t cmd, h; } tab[4096];
++    uint64_t ca_calls, ca_empty, ca_empty_frames, q_n;
++    int64_t q_ns;
++} dg;
++
++static int64_t dg_wall_ms(void)
++{
++    return g_get_real_time() / 1000;
++}
++
++static bool dg_on(void)
++{
++    if (!dg.init) {
++        const char *p = getenv("SCREAMER_DIAG");
++
++        dg.init = true;
++        if (p && *p) {
++            dg.f = fopen(p, "a");
++            if (dg.f) {
++                setvbuf(dg.f, NULL, _IOLBF, 0);
++                fprintf(dg.f, "# %" PRId64 " début du diagnostic Screamer\n",
++                        dg_wall_ms());
++                p = getenv("SCREAMER_PCM");
++                if (p && *p) {
++                    dg.wav = fopen(p, "ab");
++                }
++            }
++        }
++        dg.ring_min = INT_MAX;
++        dg.t_rep = get_clock();
++    }
++    return dg.f != NULL;
++}
++
++static void dg_scan(const uint8_t *p, int frames)
++{
++    const uint32_t *w = (const uint32_t *)p;
++    int i;
++
++    for (i = 0; i < frames; i++) {
++        uint32_t v = w[i];
++
++        int16_t l = (int16_t)((p[4 * i] << 8) | p[4 * i + 1]);
++        int16_t r = (int16_t)((p[4 * i + 2] << 8) | p[4 * i + 3]);
++
++        if (abs(l - dg.pl) > 12000 || abs(r - dg.pr) > 12000) {
++            dg.sauts++;
++        }
++        dg.energie += (double)l * l + (double)r * r;
++        dg.pl = l;
++        dg.pr = r;
++        dg.h = (dg.h ^ v) * 16777619u;
++        if (v == 0) {
++            dg.zero_frames++;
++            dg.zrun++;
++        } else {
++            dg.hnz = true;
++            if (dg.zrun >= 441 && dg.heard && dg.zpos_logs < 4000) {
++                dg.zpos_logs++;
++                fprintf(dg.f, "ZPOS %" PRId64 " fin=%" PRId64 " long=%" PRIu64 "\n",
++                        dg_wall_ms(), dg.pos0 + i, dg.zrun);
++            }
++            if (dg.zrun >= 441 && dg.heard) {
++                dg.zero_gaps++;
++                fprintf(dg.f, "EVT %" PRId64 " trou_invite %.1f ms de zéros\n",
++                        dg_wall_ms(), dg.zrun * 1000.0 / 44100);
++            }
++            dg.zrun = 0;
++            dg.heard = true;
++        }
++    }
++}
++
++static void dg_cmd_begin(uint32_t cmd, hwaddr addr, int len)
++{
++    if (!dg_on()) {
++        return;
++    }
++    dg.h = 2166136261u;
++    dg.hcmd = cmd;
++    dg.cmd_addr0 = addr;
++    if (!dg.cmd_min || cmd < dg.cmd_min) {
++        dg.cmd_min = cmd;
++    }
++    dg.hnz = false;
++    if (dg.cmds_seen < 64) {
++        fprintf(dg.f, "CMD %" PRId64 " cmdptr=0x%x addr=0x%" HWADDR_PRIx
++                " len=%d\n", dg_wall_ms(), cmd, addr, len);
++    }
++    dg.cmds_seen++;
++}
++
++static void dg_cmd_end(void)
++{
++    unsigned k = (dg.hcmd >> 4) & 4095;
++
++    dg.dma_cmds++;
++    if (dg.hnz && dg.tab[k].cmd == dg.hcmd && dg.tab[k].h == dg.h) {
++        dg.stale++;
++    }
++    dg.tab[k].cmd = dg.hcmd;
++    dg.tab[k].h = dg.h;
++}
++
++static void dg_report(ScreamerState *s)
++{
++    int64_t now = get_clock();
++    uint64_t c, e, ef, qn;
++    int64_t qns;
++
++    if (now - dg.t_rep < 1000000000LL) {
++        return;
++    }
++    c = qatomic_read(&audio_diag_ca_calls);
++    e = qatomic_read(&audio_diag_ca_empty);
++    ef = qatomic_read(&audio_diag_ca_empty_frames);
++    qn = qgpu_diag_sync_n;
++    qns = qgpu_diag_sync_ns;
++    fprintf(dg.f, "SEC %" PRId64 " rate=%u cb=%" PRIu64 " cbgap_max=%.1f "
++            "tick_max=%.1f ring=%d..%d freeb_max=%d sil=%" PRIu64 "/%" PRIu64
++            " pulls=%" PRIu64 " dma_Bps=%" PRIu64 " cmds=%" PRIu64
++            " txgap_max=%.1f zero=%" PRIu64 " trous=%" PRIu64 " perimes=%" PRIu64
++            " ca=%" PRIu64 " ca_vide=%" PRIu64 " ca_minpend=%" PRId64
++            " ca_frames=%u qsync=%" PRIu64 " qsync_ms=%.1f qsync_max=%.1f"
++            " sauts=%" PRIu64 " rms=%.0f lect_fc=%" PRIu64 " lect_cmdptr=%" PRIu64 "\n",
++            dg_wall_ms(), s->rate, dg.cb_n, dg.cb_maxgap / 1e6,
++            audio_diag_timer_maxgap_ns / 1e6,
++            dg.ring_min == INT_MAX ? -1 : dg.ring_min, dg.ring_max, dg.freeb_max,
++            dg.sil_frames, dg.sil_ev, dg.pulls,
++            dg.dma_bytes * 1000000000ULL / (uint64_t)(now - dg.t_rep), dg.dma_cmds,
++            dg.tx_maxgap / 1e6, dg.zero_frames, dg.zero_gaps, dg.stale,
++            c - dg.ca_calls, e - dg.ca_empty,
++            audio_diag_ca_minpend == INT64_MAX ? -1 : audio_diag_ca_minpend,
++            audio_diag_ca_frames, qn - dg.q_n, (qns - dg.q_ns) / 1e6,
++            qgpu_diag_sync_max_ns / 1e6, dg.sauts,
++            dg.dma_bytes ? sqrt(dg.energie / (dg.dma_bytes / 2)) : 0.0,
++            dg.fc_reads, dbdma_diag_cmdptr_reads[s->dma_tx_ch & 31] - dg.cp_reads);
++    dg.cp_reads = dbdma_diag_cmdptr_reads[s->dma_tx_ch & 31];
++    dg.fc_reads = 0;
++    if (e != dg.ca_empty) {
++        fprintf(dg.f, "EVT %" PRId64 " hote_vide %" PRIu64 " appels (%" PRIu64
++                " trames muettes)\n", dg_wall_ms(), e - dg.ca_empty,
++                ef - dg.ca_empty_frames);
++    }
++    dg.ca_calls = c;
++    dg.ca_empty = e;
++    dg.ca_empty_frames = ef;
++    dg.q_n = qn;
++    dg.q_ns = qns;
++    qgpu_diag_sync_max_ns = 0;
++    audio_diag_ca_minpend = INT64_MAX;
++    audio_diag_timer_maxgap_ns = 0;
++    dg.t_rep = now;
++    dg.cb_n = dg.sil_frames = dg.sil_ev = dg.pulls = dg.dma_bytes = 0;
++    dg.dma_cmds = dg.zero_frames = dg.zero_gaps = dg.stale = 0;
++    dg.sauts = 0;
++    dg.energie = 0;
++    dg.cb_maxgap = dg.tx_maxgap = 0;
++    dg.ring_min = INT_MAX;
++    dg.ring_max = 0;
++    dg.freeb_max = 0;
++}
++
+ static void screamer_tx_copy(ScreamerState *s, DBDMA_io *io, int samples)
+ {
+     int idx, first;
+@@ -93,11 +287,24 @@
+                         MEMTXATTRS_UNSPECIFIED);
+     }
+ 
++    if (dg.f) {
++        dg.pos0 = (int64_t)((s->io_cmdptr - dg.cmd_min) / 16) * 32 +
++                  (int64_t)(io->addr - dg.cmd_addr0) / 4;
++        dg_scan(&s->mixbuf[idx << s->shift], first);
++        if (samples > first) {
++            dg_scan(s->mixbuf, samples - first);
++        }
++        dg.dma_bytes += samples << s->shift;
++        dg.dma_total += samples;
++    }
+     SCREAMER_DPRINTF("DMA actually transferred 0x%x, wpos is %d\n", samples << s->shift, s->wpos);
+ 
+     io->addr += (samples << s->shift);
+     io->len -= (samples << s->shift);
+     s->wpos += samples;
++    if (!getenv("SCREAMER_FC_ANCIEN")) {
++        s->regs[FRAME_CNT_REG] += samples;
++    }
+ }
+ 
+ static void pmac_screamer_tx_transfer(ScreamerState *s)
+@@ -135,6 +342,9 @@
+     if (io->len == 0) {
+         SCREAMER_DPRINTF("-> End of transfer\n");
+         s->io_ended = true;
++        if (dg.f) {
++            dg_cmd_end();
++        }
+         io->dma_end(io);
+     }
+ }
+@@ -148,6 +358,20 @@
+ 
+     memcpy(&s->io, io, sizeof(DBDMA_io));
+     s->io_cmdptr = ((DBDMA_channel *)io->channel)->regs[DBDMA_CMDPTR_LO];
++    dg_cmd_begin(s->io_cmdptr, io->addr, io->len);
++    if (dg.f) {
++        int64_t t = get_clock();
++
++        if (dg.t_tx && t - dg.t_tx > dg.tx_maxgap) {
++            dg.tx_maxgap = t - dg.t_tx;
++        }
++        if (!dg.t_tx || t - dg.t_tx > 200000000LL) {
++            fprintf(dg.f, "DMA_REPRISE %" PRId64 " cmdptr=0x%x fc=%u anneau=%d dma_total=%" PRIu64 "\n",
++                    dg_wall_ms(), s->io_cmdptr, s->regs[FRAME_CNT_REG],
++                    (int)(s->wpos - s->rpos), dg.dma_total);
++        }
++        dg.t_tx = t;
++    }
+ 
+     /*
+      * Pas de garde « la requête ne tient pas, on abandonne ». Le transfert
+@@ -419,6 +643,9 @@
+         accepted = AUD_write(s->voice, silence, chunk);
+         if (!accepted) {
+             break;
++        }
++        if (dg.wav && dg.heard) {
++            fwrite(silence, 1, accepted, dg.wav);
+         }
+         *free_b -= (int)accepted;
+     }
+@@ -431,7 +658,34 @@
+     if (s->samples <= 0) {
+         return;
+     }
++    if (dg_on()) {
++        int64_t t = get_clock();
++        int q = screamer_queued(s);
+ 
++        if (dg.t_cb && t - dg.t_cb > dg.cb_maxgap) {
++            dg.cb_maxgap = t - dg.t_cb;
++        }
++        if (dg.t_cb && t - dg.t_cb > 30000000LL) {
++            fprintf(dg.f, "EVT %" PRId64 " tick_tardif %.1f ms anneau=%d free_b=%d\n",
++                    dg_wall_ms(), (t - dg.t_cb) / 1e6, q, free_b);
++        }
++        dg.t_cb = t;
++        dg.cb_n++;
++        if (q < dg.ring_min) {
++            dg.ring_min = q;
++        }
++        if (q > dg.ring_max) {
++            dg.ring_max = q;
++        }
++        if (free_b > dg.freeb_max) {
++            dg.freeb_max = free_b;
++        }
++        if (s->io.len) {
++            dg.pulls++;
++        }
++        dg_report(s);
++    }
++
+     for (;;) {
+         int before = screamer_queued(s);
+         int before_len = s->io.len;
+@@ -474,7 +728,20 @@
+              * A short write is backpressure: keep the rest, do not replace it
+              * with silence, and do not spin. */
+             samples = (unsigned)(accepted >> s->shift);
+-            s->regs[FRAME_CNT_REG] += samples;
++            if (accepted) {
++                dg.sil_prev = false;
++            }
++            if (dg.wav && accepted) {
++                if (!dg.pcm_t0) {
++                    dg.pcm_t0 = dg_wall_ms();
++                    fprintf(dg.f, "PCM0 %" PRId64 " premières trames du fichier PCM\n",
++                            dg.pcm_t0);
++                }
++                fwrite(s->mixbuf + (idx << s->shift), 1, accepted, dg.wav);
++            }
++            if (getenv("SCREAMER_FC_ANCIEN")) {
++                s->regs[FRAME_CNT_REG] += samples;
++            }
+             s->rpos += samples;
+             free_b -= (int)accepted;
+             if (accepted < requested) {
+@@ -492,10 +759,20 @@
+      * in a stream whose next DBDMA command is only a moment late. Silence is
+      * not guest audio, so the frame counter stays put. */
+     if (!s->running || screamer_queued(s) == 0) {
++        int fb0 = free_b;
++
+         if (screamer_queued(s) == 0) {
+             s->running = 0;
+         }
+         screamer_write_silence(s, &free_b);
++        if (dg.f && fb0 > free_b && dg.heard) {
++            dg.sil_frames += (fb0 - free_b) >> s->shift;
++            dg.sil_ev++;
++            if (!dg.sil_prev)
++            fprintf(dg.f, "EVT %" PRId64 " silence_insere %d trames (running=%d dma_len=%d)\n",
++                    dg_wall_ms(), (fb0 - free_b) >> s->shift, s->running, (int)s->io.len);
++            dg.sil_prev = true;
++        }
+     }
+ }
+ 
+@@ -519,6 +796,13 @@
+     /* Taille fixe : la caler sur un seul tampon hôte supprime toute réserve
+      * et bloque l'écriture dès que la lecture a avancé sans tout vider. */
+     s->samples = SCREAMER_RING_FRAMES;
++    {
++        const char *r = getenv("SCREAMER_RING");
++
++        if (r && atoi(r) >= 64) {
++            s->samples = atoi(r);
++        }
++    }
+     s->mixbuf = g_malloc0((size_t)s->samples << s->shift);
+ 
+     AUD_set_active_out(s->voice, true);
+@@ -667,9 +951,12 @@
+                    CODEC_STAT_MASK_VALID;
+         }
+         break;
++    case FRAME_CNT_REG:
++        dg.fc_reads++;
++        val = s->regs[addr];
++        break;
+     case CLIP_CNT_REG:
+     case BYTE_SWAP_REG:
+-    case FRAME_CNT_REG:
+         val = s->regs[addr];
+         break;
+     default:
+@@ -710,6 +997,16 @@
+     case BYTE_SWAP_REG:
+         s->regs[addr] = val & 0xffffffff;
+         break;
++    case FRAME_CNT_REG:
++        if (dg_on()) {
++            fprintf(dg.f, "FCW %" PRId64 " val=%" PRIu64 " ancien=%u dma_total=%" PRIu64
++                    " anneau=%d\n", dg_wall_ms(), val, s->regs[addr], dg.dma_total,
++                    (int)(s->wpos - s->rpos));
++        }
++        if (!getenv("SCREAMER_FCW_IGNORE")) {
++            s->regs[addr] = val & 0xffffffff;
++        }
++        break;
+     default:
+         qemu_log_mask(LOG_UNIMP,
+                   "screamer: Unimplemented register write "

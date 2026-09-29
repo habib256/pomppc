@@ -65,15 +65,19 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 
 Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête.
 
-- [ ] **[Son] Le son saccade dans DOOM 3** (demande de l'utilisateur, 29/09 ; les autres
-  jeux ne saccadent pas ou presque) : à prendre dès la fusion des chantiers en cours, avant
-  la vitesse. Observer ce qui se passe pendant une saccade : sous-alimentation du Screamer
-  (anneau PCM vide, `screamer_pull_deferred`, silence inséré), DMA de l'invité en retard
-  (fil audio de DOOM 3, vCPU saturé, BQL tenu par le rendu ou les doorbells synchrones,
-  `wait_ms`/`submit_ms` de `frames.csv`), minuterie audio hôte (`timer-period`, CoreAudio),
-  corrélation avec les pics de ms/image. Pistes : `docs/audio-stabilite.md`,
-  `scripts/tiger_audio.sh`. **Fermeture :** mécanisme mesuré sur une saccade reproduite,
-  correction, puis partie DOOM 3 sans saccade audible ni silence inséré compté.
+- [ ] **[Son] Le son saccade dans DOOM 3** — **cause trouvée et corrigée le 29/09**
+  (`docs/audio-stabilite.md` §« Saccades de DOOM 3 ») : ni sous-alimentation ni BQL.
+  Le compteur de trames du Screamer (registre 5), dont le pilote de Tiger tire sa position
+  et sa tête d'effacement, retardait sur le DMA (8192 trames d'anneau, la moitié du tampon
+  invité) et ignorait sa remise à 0 : l'effacement tombait sur ce que le HAL venait
+  d'écrire. Seuls DOOM 3 et Prey (tampon d'E/S de 4096 trames) écrivent assez loin pour
+  être touchés : ~47 ms de zéros toutes les 93 ms. Avant : 84,6 % de trames nulles et
+  776 trous en 84 s (DOOM 3, premier jeu après démarrage), Prey 33,7 % ; après : 0 trou
+  sur 272 s (DOOM 3 fenêtre), 0 en plein écran, Prey et Marble Blast propres.
+  **Reste pour fermer :** reconstruire `~/src/qemu` (`scripts/build_qemu_qfb.sh`, VM
+  arrêtée) et la confirmation à l'oreille de l'utilisateur (extraits avant/après dans
+  `bench/son-doom3/`). À part : un arrêt de la boucle principale de 186 ms (fin de
+  cinématique, doorbell synchrone exclu), 1 fois en 13 parties, 93 ms de silence hôte.
 
 - [ ] **[Système] Panique pendant le diagnostic UT2004 (27/09, 15:50)** : CPU 1,
   `Lock timeout`, PC `0x000AA010`, LR `0x00003820`, pile désalignée. Cause inconnue ;

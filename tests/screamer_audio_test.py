@@ -68,6 +68,7 @@ static void pmac_screamer_tx_transfer(ScreamerState *s) {
   if (frames > first)
     memset(s->mixbuf, 0x22, (size_t)(frames - first) << s->shift);
   s->wpos += (uint32_t)frames;
+  s->regs[FRAME_CNT_REG] += (unsigned)frames;   /* comme screamer_tx_copy */
   s->io.len -= frames << s->shift;
   if (s->io.len == 0) {
     /* dbdma_end() fidèle à mac_dbdma.c : statut du canal (sans RUN, retiré
@@ -93,15 +94,17 @@ int main(void) {
   DBDMA_channel channel={{RUN|ACTIVE,0},0,{1},{0,0,0,0,0,0}};
   ScreamerState s={.samples=4,.shift=2,.wpos=4,.mixbuf=pcm,.io={&channel,0}};
   limit=4; screamerspk_callback(&s,16);
-  assert(written==4 && s.rpos==1 && s.regs[5]==1); // no discarded samples
+  /* Le compteur de trames suit le DMA, pas la sortie : jouer ce qui est
+     déjà dans l'anneau ne le fait pas avancer (saccades DOOM 3, 29/09). */
+  assert(written==4 && s.rpos==1 && s.regs[5]==0); // no discarded samples
   limit=0; screamerspk_callback(&s,12);
   assert(written==4 && s.rpos==1); // backpressure must not spin or advance
   limit=64; screamerspk_callback(&s,12);
-  assert(written==16 && s.rpos==4 && s.wpos==4 && s.regs[5]==4);
+  assert(written==16 && s.rpos==4 && s.wpos==4 && s.regs[5]==0);
   for (unsigned i=0;i<16;i++) assert(output[i]==0x11);
   written=0; s.rpos=0; s.wpos=4; s.io.len=16; s.regs[5]=0;
   screamerspk_callback(&s,32);
-  assert(written==32 && s.io.len==0 && s.regs[5]==8 && kicks==1);
+  assert(written==32 && s.io.len==0 && s.regs[5]==4 && kicks==1); // 4 trames tirées du DMA
   for (unsigned i=0;i<32;i++) assert(output[i]==(i<16?0x11:0x22));
   unsigned frames = s.regs[5];
   screamerspk_callback(&s,32); // empty queue: silence, frame counter stays
@@ -257,9 +260,10 @@ struct DBDMA_io {
   void *opaque; void *channel; uint64_t addr; int len;
   int is_last; int is_dma_out; DBDMA_end dma_end;
 };
+#define FRAME_CNT_REG 5
 typedef struct {
   int samples; unsigned shift; uint32_t wpos, rpos; uint8_t *mixbuf; DBDMA_io io;
-  bool io_ended;
+  bool io_ended; unsigned regs[6];
 } ScreamerState;
 static uint8_t guest[64];
 static int ends;
@@ -276,11 +280,12 @@ int main(void) {
                      .io={0,0,0,16,0,0,endfn}};
   pmac_screamer_tx_transfer(&s);
   assert(s.wpos==10 && s.io.len==0 && ends==1 && s.io_ended);
+  assert(s.regs[FRAME_CNT_REG]==4);   /* compteur = trames lues par le DMA */
   assert(memcmp(mix + 24, guest, 8)==0);
   assert(memcmp(mix, guest + 8, 8)==0);
   ends=0; s.wpos=8; s.rpos=0; s.io.len=16; s.io.addr=0;
   pmac_screamer_tx_transfer(&s);
-  assert(s.wpos==8 && s.io.len==16 && ends==0);
+  assert(s.wpos==8 && s.io.len==16 && ends==0 && s.regs[FRAME_CNT_REG]==4); /* anneau plein */
   /* Longueur non multiple de 4 : le reliquat est consommé et dma_end part. */
   ends=0; s.wpos=0; s.rpos=0; s.io.len=10; s.io.addr=0;
   pmac_screamer_tx_transfer(&s);
@@ -294,4 +299,49 @@ with tempfile.TemporaryDirectory(prefix='screamer-ring-') as d:
     c.write_text(ring_stub + xfer + ring_test)
     subprocess.run([os.environ.get('CC','cc'), '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-sign-compare', str(c), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)
-print('Screamer : anneau, réserve, écritures partielles, silence, débit, volume et profils audio OK')
+
+# Écriture du compteur de trames (registre 5) : le pilote de Tiger le remet à 0
+# au démarrage du moteur. Ignorée, elle décalait la tête d'effacement de
+# l'invité par rapport au DMA (saccades de DOOM 3, 29/09/2026).
+write_fn = source[source.index('static void screamer_write('):source.index('static const MemoryRegionOps screamer_ops')]
+write_stub = r"""
+#include <assert.h>
+#include <stdint.h>
+#include <inttypes.h>
+#define SCREAMER_DPRINTF(...) ((void)0)
+#define HWADDR_PRIx PRIx64
+#define HWADDR_FMT_plx "%016" PRIx64
+#define LOG_UNIMP 0
+#define SND_CTRL_REG 0
+#define CODEC_CTRL_REG 1
+#define CODEC_STAT_REG 2
+#define CLIP_CNT_REG 3
+#define BYTE_SWAP_REG 4
+#define FRAME_CNT_REG 5
+typedef uint64_t hwaddr;
+typedef struct { uint32_t regs[6]; } ScreamerState;
+static int unimp;
+#define qemu_log_mask(m, ...) ((void)(m), unimp++)
+static void screamer_control_write(ScreamerState *s, uint32_t v) { s->regs[0] = v; }
+static void screamer_codec_write(ScreamerState *s, hwaddr a, uint64_t v) { (void)s; (void)a; (void)v; }
+"""
+write_test = r"""
+int main(void) {
+  ScreamerState s = {{0}};
+  s.regs[FRAME_CNT_REG] = 123456;
+  screamer_write(&s, FRAME_CNT_REG << 4, 0, 4);
+  assert(s.regs[FRAME_CNT_REG] == 0 && unimp == 0);
+  screamer_write(&s, FRAME_CNT_REG << 4, 77, 4);
+  assert(s.regs[FRAME_CNT_REG] == 77);
+  screamer_write(&s, 7 << 4, 1, 4);
+  assert(unimp == 1);
+  return 0;
+}
+"""
+with tempfile.TemporaryDirectory(prefix='screamer-fcw-') as d:
+    c = Path(d)/'test.c'
+    exe = Path(d)/'test'
+    c.write_text(write_stub + write_fn + write_test)
+    subprocess.run([os.environ.get('CC','cc'), '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-sign-compare', '-Wno-unused-parameter', str(c), '-o', str(exe)], check=True)
+    subprocess.run([str(exe)], check=True)
+print('Screamer : anneau, réserve, écritures partielles, silence, débit, compteur de trames, volume et profils audio OK')

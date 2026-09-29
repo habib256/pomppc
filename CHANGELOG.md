@@ -9,6 +9,20 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Son : les saccades de DOOM 3 venaient du compteur de trames du Screamer**
+  (`patches/screamer/screamer.c`, `docs/audio-stabilite.md`). Apple02DBDMAAudio lit
+  la position de lecture dans le registre 5 (≈ 11 fois par seconde, tête d'effacement
+  d'IOAudioEngine). Le Screamer l'avançait à la sortie de l'anneau, 8192 trames derrière
+  le DMA (la moitié des 16384 trames du tampon de Tiger), et ignorait sa remise à 0 au
+  démarrage du moteur. L'effacement tombait donc devant le DMA, sur ce que le HAL venait
+  d'écrire. Un client à tampon d'E/S de 512 trames (Marble Blast) n'était pas touché ; DOOM 3
+  et Prey (4096 trames) perdaient la fin de chaque tampon : ~47 ms de zéros toutes les 93 ms.
+  Le compteur suit maintenant le DMA et accepte l'écriture. DOOM 3, premier jeu après le
+  démarrage : 84,6 % de trames nulles et 776 trous en 84 s avant, 0 trou sur 272 s après,
+  0 en plein écran. Côté hôte, rien à corriger : aucun tampon CoreAudio vide, aucun
+  silence inséré, callbacks toutes les 17 ms au plus. Outils : `tools/son/`,
+  `tools/guest/jobs/iotrace/` (IOProc de l'invité), `patches/screamer/essais/diag-saccades.patch`.
+
 - **TCG : le code réécrit par l'autre vCPU est vu** (`patches/tcg/0010`, `docs/tcg-g4.md` §17).
   Cause du défaut de `smctest` E (QEMU 9.2, MTTCG, présent sans aucun patch) prouvée par un
   relevé d'événements par page : la page de code n'était protégée qu'après la lecture du
