@@ -235,6 +235,13 @@ typedef struct QgpuProgram {
     QgpuGlsl *glsl;                /* v21 : cible QGPU_PT_GLSL, sinon NULL */
     void     *priv;                /* propriété du backend */
     uint32_t  mem;                 /* 29/09 : octets comptés (QgpuCore.mem_*) */
+    /* Bug hunt 3 : refus de mémoire (QGPU_ST_NO_MEM) sur ce programme.
+       Case LIBRE (used faux) : PROG_CREATE refusé — la case se souvient de la
+       cible, et toute commande qui la vise rend NO_MEM (non fatal) au lieu
+       d'un BAD_ARG fatal ; liée, elle jette les dessins (broken posé).
+       Case PRISE : un texte de la définition en cours a été refusé — GLSL_LINK
+       rend NO_MEM et laisse le programme cassé. glsl_restart l'efface. */
+    bool      nomem;
 } QgpuProgram;
 #define QGPU_FPS_1D     0x01
 #define QGPU_FPS_2D     0x02

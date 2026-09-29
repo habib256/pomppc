@@ -911,7 +911,9 @@ static void qgpu_unbind_scanout(QgpuPCIState *s)
     memory_region_unref(s->scanout.mr);
     memset(&s->scanout, 0, sizeof(s->scanout));
     s->core.caps &= ~QGPU_CAP_SCANOUT;
-    if (s->core_ok) {
+    /* Bug hunt 3 : un device cassé (GL3) garde CAPS à 0 — c'est ce qui fait
+       refuser le kext ; seul un reset abouti le republie. */
+    if (s->core_ok && !s->broken) {
         s->regs[QGPU_REG_CAPS >> 2] = s->core.caps |
             (s->thread_ok ? QGPU_CAP_ASYNC : 0);
     }
@@ -970,6 +972,16 @@ static bool qgpu_bind_scanout(QgpuPCIState *s, bool complain)
     uint64_t win;
     uint32_t base, size;
     bool same_device;
+
+    /* Bug hunt 3 : device cassé (GL3, une soumission bloquée est encore dans
+       la file) — ne rien lier. Drainer d'abord tiendrait le BQL 2 s pour
+       rien, à chaque écriture de mode (programMode du kext QFB en fait
+       quatre), et le CAPS non nul republié plus bas mentirait. Rend faux :
+       qgpu_scanout_recheck retentera, et le reset qui répare le device
+       efface `broken`. */
+    if (s->broken) {
+        return false;
+    }
 
     if (!qgpu_probe_scanout(s, &info, &which, &is_vga)) {
         if (s->scanout.mr) {
@@ -1088,7 +1100,7 @@ static bool qgpu_bind_scanout(QgpuPCIState *s, bool complain)
                                s->scanout.height, s->scanout.depth);
 #endif
     s->core.caps |= QGPU_CAP_SCANOUT;
-    if (s->core_ok) {
+    if (s->core_ok && !s->broken) {
         s->regs[QGPU_REG_CAPS >> 2] = s->core.caps |
             (s->thread_ok ? QGPU_CAP_ASYNC : 0);
     }
@@ -1168,19 +1180,51 @@ static void qgpu_machine_done(Notifier *n, void *unused)
 }
 
 /* Arrête le thread de rendu après avoir laissé finir ce qui est en cours.
-   Idempotent : appelé à la sortie de QEMU ET à la destruction du device. */
+   Idempotent : appelé à la sortie de QEMU ET à la destruction du device.
+
+   Bug hunt 3 — À LA SORTIE (fini faux), BORNÉ comme les resets (GL3) : un GPU
+   hôte bloqué (soumission en cours, ou qgpu_core_reset resté en vol après
+   une échéance) figeait `quit` pour de bon, seul un kill -9 en sortait. À
+   l'échéance, le thread n'est pas joint : le processus se termine de toute
+   façon, et q_fini faux lui interdit de toucher au backend. Au RETRAIT du
+   device (fini vrai), on joint toujours : l'état va être libéré, un thread
+   encore vivant y écrirait. */
 static void qgpu_stop_thread(QgpuPCIState *s, bool fini)
 {
+    bool idle = true;
+
     if (!s->thread_ok) {
         return;
     }
     qemu_mutex_lock(&s->lock);
-    qgpu_drain_locked(s, true);
+    if (fini) {
+        qgpu_drain_locked(s, true);
+    } else {
+        int64_t deadline = qemu_clock_get_ms(QEMU_CLOCK_REALTIME)
+                         + QGPU_RESET_WAIT_MS;
+
+        s->q_count = s->q_running ? 1 : 0;       /* le reste ne partira pas */
+        idle = qgpu_drain_timed_locked(s, QGPU_RESET_WAIT_MS);
+        while (idle && s->q_reset) {
+            int64_t left = deadline - qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+            if (left <= 0) {
+                idle = false;
+            } else {
+                qemu_cond_timedwait(&s->cond_done, &s->lock, (int)left);
+            }
+        }
+    }
     s->q_stop = true;
     s->q_fini = fini;
     qemu_cond_signal(&s->cond_work);
     qemu_mutex_unlock(&s->lock);
-    qemu_thread_join(&s->render_thread);
+    if (idle) {
+        qemu_thread_join(&s->render_thread);
+    } else {
+        warn_report("qgpu-pci: thread de rendu encore occupé après %d ms à la"
+                    " sortie (GPU hôte bloqué ?) : QEMU sort sans l'attendre",
+                    QGPU_RESET_WAIT_MS);
+    }
     s->thread_ok = false;
 }
 

@@ -99,7 +99,15 @@ public:
        où il attend une acceptation, et sur st != OK il resoumettrait le même
        flux — trame exécutée deux fois — pendant que check_errors reboucle. */
     UInt32   caps(void)       { return fAsync ? fCaps : (fCaps & ~(UInt32) QGPU_CAP_ASYNC); }
-    UInt32   fence(void)      { return fRegs ? regRead(QGPU_REG_FENCE) : 0; }
+    UInt32   fence(void);
+    /* Bug hunt 3 — APPELS EN VOL. Tout service rendu au user client entre par
+       enterCall() (compte l'appel, PUIS relit fStopping) et sort par
+       leaveCall() ; stop() pose fStopping, PUIS attend que le compte tombe à
+       zéro avant de retirer la gate. Sans lui, un appel qui avait passé le
+       test de fStopping (ou attendait la gate derrière un doorbell synchrone)
+       entrait dans une gate déjà retirée : workLoop NULL, panic. */
+    bool     enterCall(void);
+    void     leaveCall(void);
     UInt32   clients(void)    { return fClientCount; }
     /* v19 : lecture d'un registre de BAR1 pour le userland (QGPU_UC_READ_REG).
        Sans effet de bord par contrat (qgpu_abi.h) ; bornée sur le BAR. */
@@ -120,6 +128,7 @@ public:
     IOReturn waitFence(UInt32 target, UInt32 timeoutMs, UInt32 * current);
 
 private:
+    IOReturn waitFenceCounted(UInt32 target, UInt32 timeoutMs, UInt32 * current);
     /* registres big-endian côté QEMU, CPU big-endian : pas d'échange d'octets */
     UInt32 regRead(UInt32 offset) { return fRegs[offset >> 2]; }
     void   regWrite(UInt32 offset, UInt32 value)
@@ -171,6 +180,12 @@ private:
        gate entre deux paquets). Interdit une seconde destruction concurrente
        (clientClose ⊥ clientDied) et toute réattribution de la tranche. */
     UInt32   fSlotBusy[POMPPC_KEXT_MAX_CLIENTS];
+    /* Bug hunt 3 : un FREE arrivé pendant une destruction en cours (RESET du
+       même client) est noté ici ; le fil occupé rend la tranche en sortant.
+       Sans cela, la tranche restait prise jusqu'au déchargement du kext. */
+    POMPPCGPUUserClient * fFreePending[POMPPC_KEXT_MAX_CLIENTS];
+    /* Bug hunt 3 : appels en vol (enterCall/leaveCall), atomique. */
+    volatile SInt32 fCallers;
 
     IOWorkLoop *                   fWorkLoop;
     IOCommandGate *                fGate;
@@ -202,6 +217,7 @@ public:
     virtual bool     initWithTask(task_t owningTask, void * securityID, UInt32 type);
     virtual bool     start(IOService * provider);
     virtual void     stop(IOService * provider);
+    virtual void     free(void);
     virtual IOReturn clientClose(void);
     virtual IOReturn clientDied(void);
     virtual IOExternalMethod * getTargetAndMethodForIndex(IOService ** target,
@@ -223,6 +239,10 @@ public:
 
 private:
     POMPPCGPU * fOwner;
+    /* Bug hunt 3 : RETENU de start() à free(). fOwner est effacé par stop(),
+       mais un appel déjà parti l'a lu avant : l'objet POMPPCGPU (gate,
+       registres) doit survivre jusqu'à ce que ce client disparaisse. */
+    POMPPCGPU * fOwnerRef;
     task_t      fTask;
     int         fSlot;
 };

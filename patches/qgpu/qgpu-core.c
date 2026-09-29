@@ -374,7 +374,7 @@ static bool mem_take(QgpuCore *c, uint32_t slot, uint64_t n)
         c->mem_slot[slot] > c->mem_cap_slot || n > c->mem_cap_slot - c->mem_slot[slot]) {
         if (c->mem_refused++ < 8) {
             fprintf(stderr, "qgpu: plafond mémoire atteint (tranche %u : %llu Mio, "
-                    "total %llu Mio, demande %llu Kio) : QGPU_ST_LIMIT\n", slot,
+                    "total %llu Mio, demande %llu Kio) : QGPU_ST_NO_MEM\n", slot,
                     (unsigned long long)(c->mem_slot[slot] >> 20),
                     (unsigned long long)(c->mem_total >> 20),
                     (unsigned long long)(n >> 10));
@@ -618,6 +618,59 @@ static void glsl_restart(QgpuCore *c, QgpuProgram *p)
     glsl_forget(p->glsl);
     p->compiled = false;
     p->broken = false;
+    p->nomem = false;              /* bug hunt 3 : nouvelle définition complète */
+}
+
+/* Bug hunt 3 : programme `id` du contexte courant dont le PROG_CREATE a été
+   refusé faute de mémoire. Les commandes qui le visent rendent NO_MEM — non
+   fatal, sans effet — au lieu du BAD_ARG fatal d'un programme inexistant :
+   c'est ce que promet QGPU_ST_NO_MEM (le reste du lot s'exécute). */
+static bool prog_refused(QgpuCore *c, uint32_t id)
+{
+    const QgpuProgram *p;
+    if (c->cur_ctx < 0 || id >= QGPU_MAX_PROG) {
+        return false;
+    }
+    p = &c->ctx[c->cur_ctx].prg.prog[id];
+    return !p->used && p->nomem;
+}
+
+/* PROG_CREATE refusé : la case reste libre mais se souvient de sa cible (pour
+   PROG_BIND) et d'être cassée (pour jeter les dessins si on la lie). */
+static void prog_mark_refused(QgpuProgram *p, uint32_t target)
+{
+    p->nomem = true;
+    p->broken = true;
+    p->target = target;
+}
+
+static void prog_unbind(QgpuProgSet *pg, uint32_t id)
+{
+    int w;
+    for (w = 0; w < 3; w++) {
+        if (pg->bound[w] == (int32_t)id) {
+            pg->bound[w] = -1;
+        }
+    }
+}
+
+/* Bug hunt 3 : un texte refusé faute de mémoire rend le programme CASSÉ —
+   l'ancien texte ne doit plus agir sous le nom du nouveau (rendu faux sans
+   erreur). Objet hôte détruit, texte rendu : la mémoire revient au plafond. */
+static void prog_nomem_break(QgpuCore *c, QgpuProgram *p)
+{
+    if (p->priv && c->be && c->be->prog_destroy) {
+        c->be->prog_destroy(c, p);
+    }
+    if (p->text) {
+        mem_give(c, prog_slot(c, p), p->len);
+        p->mem -= p->len < p->mem ? p->len : p->mem;
+        free(p->text);
+        p->text = NULL;
+        p->len = 0;
+    }
+    p->compiled = false;
+    p->broken = true;
 }
 
 /* Détruit les programmes d'un contexte (destruction, reset). */
@@ -3741,10 +3794,14 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             tex_store(lv, &src, c->shmem + off, 0, 0, 0, w, h, d, row, img);
         }
         t->dirty[face] |= 1u << lvl;
+        /* Bug hunt 3 : le format AVANT le test des mipmaps. NO_MEM y est non
+           fatal : le niveau de base vient d'être redéfini (peut-être dans un
+           autre format) et doit être vu comme tel — sinon une base passée en
+           profondeur était échantillonnée comme de la couleur (soft). */
+        tex_refresh_format(t);
         if (t->gen_mipmap && lvl == t->base_level && !tex_gen_nomem(c, t, face)) {
             return QGPU_ST_NO_MEM;                /* niveaux : plafond mémoire */
         }
-        tex_refresh_format(t);
         return QGPU_ST_OK;
     }
 
@@ -4061,6 +4118,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
                 return QGPU_ST_LIMIT;
             }
             if (!mem_take(c, prog_slot(c, p), prog_table_bytes(true))) {
+                prog_mark_refused(p, QGPU_PT_GLSL);
                 return QGPU_ST_NO_MEM;
             }
             p->glsl = glsl_new();
@@ -4071,6 +4129,8 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             p->mem = prog_table_bytes(true);
             p->used = true;
             p->target = QGPU_PT_GLSL;
+            p->nomem = false;                    /* un refus passé est oublié */
+            p->broken = false;
             return QGPU_ST_OK;
         }
         if (!(c->caps & QGPU_CAP_PROGRAMS) || !c->be->prog_string) {
@@ -4084,6 +4144,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             return QGPU_ST_LIMIT;
         }
         if (!mem_take(c, prog_slot(c, p), prog_table_bytes(false))) {
+            prog_mark_refused(p, a[1]);
             return QGPU_ST_NO_MEM;
         }
         p->local = calloc(QGPU_MAX_PROG_PARAMS, sizeof(*p->local));
@@ -4094,6 +4155,8 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         p->mem = prog_table_bytes(false);
         p->used = true;
         p->target = a[1];
+        p->nomem = false;                        /* un refus passé est oublié */
+        p->broken = false;
         return QGPU_ST_OK;
     }
 
@@ -4107,6 +4170,9 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         }
         if (!(c->caps & QGPU_CAP_PROGRAMS) || !c->be->prog_string) {
             return QGPU_ST_BACKEND;
+        }
+        if (prog_refused(c, a[0])) {
+            return QGPU_ST_NO_MEM;               /* bug hunt 3 : créé refusé */
         }
         if (a[0] >= QGPU_MAX_PROG || !c->ctx[c->cur_ctx].prg.prog[a[0]].used ||
             len == 0 || len > QGPU_MAX_PROG_LEN) {
@@ -4132,6 +4198,9 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         }
         if (!mem_take(c, prog_slot(c, p), len)) {
             free(text);
+            /* Bug hunt 3 : l'ANCIEN texte ne doit pas continuer d'agir sous
+               le nom du nouveau — programme cassé, dessins jetés. */
+            prog_nomem_break(c, p);
             return QGPU_ST_NO_MEM;
         }
         p->mem += len;
@@ -4171,6 +4240,13 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             return QGPU_ST_BACKEND;
         }
         pg = &c->ctx[c->cur_ctx].prg;
+        if (prog_refused(c, a[0])) {
+            /* Bug hunt 3 : jamais créé — rien à rendre, la case redevient
+               libre et n'est plus liée nulle part. */
+            prog_unbind(pg, a[0]);
+            memset(&pg->prog[a[0]], 0, sizeof(pg->prog[a[0]]));
+            return QGPU_ST_OK;
+        }
         if (a[0] >= QGPU_MAX_PROG || !pg->prog[a[0]].used) {
             return QGPU_ST_BAD_ARG;
         }
@@ -4204,6 +4280,13 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (a[1] == QGPU_PROG_NONE) {
             pg->bound[w] = -1;
             return QGPU_ST_OK;
+        }
+        if (prog_refused(c, a[1]) && pg->prog[a[1]].target == a[0]) {
+            /* Bug hunt 3 : lier un programme refusé le lie QUAND MÊME (broken
+               posé) : les dessins qui suivent sont jetés, non fatals, au lieu
+               de passer par le programme lié AVANT — rendu faux sans erreur. */
+            pg->bound[w] = (int32_t)a[1];
+            return QGPU_ST_NO_MEM;
         }
         if (a[1] >= QGPU_MAX_PROG || !pg->prog[a[1]].used ||
             pg->prog[a[1]].target != a[0]) {
@@ -4248,6 +4331,9 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             pg->env_dirty[w] = true;
         } else {
             QgpuProgram *p;
+            if (prog_refused(c, a[0])) {
+                return QGPU_ST_NO_MEM;           /* bug hunt 3 : créé refusé */
+            }
             if (a[0] >= QGPU_MAX_PROG || !pg->prog[a[0]].used ||
                 pg->prog[a[0]].target == QGPU_PT_GLSL) {
                 return QGPU_ST_BAD_ARG;
@@ -4282,6 +4368,9 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (!(c->caps & QGPU_CAP_GLSL) || !c->be->glsl_link) {
             return QGPU_ST_BACKEND;
         }
+        if (prog_refused(c, a[0])) {
+            return QGPU_ST_NO_MEM;               /* bug hunt 3 : créé refusé */
+        }
         p = glsl_prog(c, a[0]);
         if (!p || (stage != QGPU_GLSL_VERTEX && stage != QGPU_GLSL_FRAGMENT) ||
             len == 0 || len > QGPU_MAX_GLSL_LEN) {
@@ -4310,6 +4399,10 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         }
         if (!mem_take(c, prog_slot(c, p), len)) {
             free(text);
+            /* Bug hunt 3 : définition INCOMPLÈTE — un GLSL_LINK avec les
+               seuls textes restants réussirait (étage manquant rendu par le
+               pipeline fixe) : rendu faux et durable, sans erreur. */
+            p->nomem = true;
             return QGPU_ST_NO_MEM;
         }
         p->mem += len;
@@ -4330,6 +4423,9 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         }
         if (!(c->caps & QGPU_CAP_GLSL) || !c->be->glsl_link) {
             return QGPU_ST_BACKEND;
+        }
+        if (prog_refused(c, a[0])) {
+            return QGPU_ST_NO_MEM;               /* bug hunt 3 : créé refusé */
         }
         p = glsl_prog(c, a[0]);
         /* une définition commence par ses textes (GLSL_SOURCE) */
@@ -4367,6 +4463,9 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         }
         if (!(c->caps & QGPU_CAP_GLSL) || !c->be->glsl_link) {
             return QGPU_ST_BACKEND;
+        }
+        if (prog_refused(c, a[0])) {
+            return QGPU_ST_NO_MEM;               /* bug hunt 3 : créé refusé */
         }
         p = glsl_prog(c, a[0]);
         if (!p || p->glsl->defined || !glsl_type_ok(type) || n == 0 ||
@@ -4426,11 +4525,25 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (!(c->caps & QGPU_CAP_GLSL) || !c->be->glsl_link) {
             return QGPU_ST_BACKEND;
         }
+        if (prog_refused(c, a[0])) {
+            return QGPU_ST_NO_MEM;               /* bug hunt 3 : créé refusé */
+        }
         p = glsl_prog(c, a[0]);
         if (!p || p->glsl->nsrc == 0) {
             return QGPU_ST_BAD_ARG;
         }
         g = p->glsl;
+        if (p->nomem) {
+            /* Bug hunt 3 : un texte de cette définition a été refusé — ne
+               rien lier, programme cassé jusqu'à la prochaine définition. */
+            if (p->priv && c->be->prog_destroy) {
+                c->be->prog_destroy(c, p);
+            }
+            g->defined = true;                   /* le prochain SOURCE repart */
+            p->compiled = false;
+            p->broken = true;
+            return QGPU_ST_NO_MEM;
+        }
         if (g->defined) {
             /* relier la même définition : l'objet hôte repart */
             if (p->priv && c->be->prog_destroy) {
@@ -4478,6 +4591,9 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         }
         if (!(c->caps & QGPU_CAP_GLSL) || !c->be->glsl_link) {
             return QGPU_ST_BACKEND;
+        }
+        if (prog_refused(c, a[0])) {
+            return QGPU_ST_NO_MEM;               /* bug hunt 3 : créé refusé */
         }
         p = glsl_prog(c, a[0]);
         if (!p || (uint64_t)first + n > QGPU_MAX_GLSL_SLOTS) {
@@ -4543,6 +4659,9 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         }
         if (!(c->caps & QGPU_CAP_GLSL) || !c->be->glsl_link) {
             return QGPU_ST_BACKEND;
+        }
+        if (prog_refused(c, a[0])) {
+            return QGPU_ST_NO_MEM;               /* bug hunt 3 : créé refusé */
         }
         p = glsl_prog(c, a[0]);
         if (!p || max == 0 || max > QGPU_MAX_GLSL_LOG) {
