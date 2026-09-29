@@ -134,6 +134,7 @@ static void pmac_screamer_tx_transfer(ScreamerState *s)
     /* Continue DBDMA if we have completed the transfer, otherwise defer */
     if (io->len == 0) {
         SCREAMER_DPRINTF("-> End of transfer\n");
+        s->io_ended = true;
         io->dma_end(io);
     }
 }
@@ -296,6 +297,7 @@ static void screamer_pull_deferred(ScreamerState *s)
     DBDMA_channel *ch;
     uint32_t run, cp;
     uint16_t old_status;
+    bool saved;
 
     if (!io->len || !io->channel) {
         return;
@@ -329,27 +331,47 @@ static void screamer_pull_deferred(ScreamerState *s)
      *
      * Mais dbdma_end() recopie ce statut SANS RUN dans le xfer_status du
      * descripteur, là où le DBDMA réel écrit RUN|ACTIVE (0x8400). En régime
-     * établi presque toute commande OUTPUT finit par ici. 0xFFFF sert de
-     * témoin (un statut sans RUN ne peut pas le valoir) : s'il a été
-     * remplacé, dbdma_end() a écrit le descripteur à `cp`, et on y repose
-     * RUN.
+     * établi presque toute commande OUTPUT finit par ici : on repose RUN
+     * dans le descripteur, EN MÉMOIRE INVITÉ à `cp`.
+     *
+     * Pas dans ch->current (bug hunt 4, n° 1) : après la sauvegarde,
+     * dbdma_end() fait conditional_branch(), qui RECHARGE ch->current avec
+     * le descripteur SUIVANT. Relire ch->current recopiait le statut du
+     * suivant sur celui qui vient de finir (ACTIVE, BT et DEVSTAT perdus).
+     *
+     * Savoir si la sauvegarde a eu lieu : io_ended dit que dbdma_end() a
+     * été appelé ; il peut encore être sorti par conditional_wait() sans
+     * rien écrire ni avancer. CMDPTR qui bouge prouve la sauvegarde ; s'il
+     * ne bouge pas (branche sur soi-même, ou attente), le témoin 0xFFFF
+     * posé dans ch->current le tranche : un statut sans RUN ne peut pas le
+     * valoir, et le rechargement du même descripteur l'a remplacé.
      */
     old_status = ch->current.xfer_status;
     ch->current.xfer_status = 0xffff;
+    s->io_ended = false;
     run = ch->regs[DBDMA_STATUS] & RUN;
     ch->regs[DBDMA_STATUS] &= ~RUN;
     pmac_screamer_tx_transfer(s);
     ch->regs[DBDMA_STATUS] |= run;
-    if (ch->current.xfer_status == 0xffff) {
-        ch->current.xfer_status = old_status;      /* rien d'écrit */
+    saved = s->io_ended &&
+            (ch->regs[DBDMA_CMDPTR_LO] != cp || ch->current.xfer_status != 0xffff);
+    if (!saved) {
+        if (ch->current.xfer_status == 0xffff) {
+            ch->current.xfer_status = old_status;  /* rien d'écrit */
+        }
     } else if (run) {
-        uint16_t st = le16_to_cpu(ch->current.xfer_status) | RUN;
+        uint16_t st;
 
-        ch->current.xfer_status = cpu_to_le16(st);
+        dma_memory_read(&address_space_memory,
+                        cp + offsetof(dbdma_cmd, xfer_status),
+                        &st, sizeof(uint16_t), MEMTXATTRS_UNSPECIFIED);
+        st = cpu_to_le16(le16_to_cpu(st) | RUN);
         dma_memory_write(&address_space_memory,
                          cp + offsetof(dbdma_cmd, xfer_status),
-                         &ch->current.xfer_status, sizeof(uint16_t),
-                         MEMTXATTRS_UNSPECIFIED);
+                         &st, sizeof(uint16_t), MEMTXATTRS_UNSPECIFIED);
+        if (ch->regs[DBDMA_CMDPTR_LO] == cp) {
+            ch->current.xfer_status = st;          /* branche sur soi-même */
+        }
     }
     DBDMA_kick(container_of(ch, DBDMAState, channels[ch->channel]));
 }
@@ -523,6 +545,7 @@ static void screamer_reset(DeviceState *dev)
     memset(s->codec_ctrl_regs, 0, sizeof(s->codec_ctrl_regs));
     memset(&s->io, 0, sizeof(DBDMA_io));
     s->io_cmdptr = 0;
+    s->io_ended = false;
     /*
      * mac_dbdma_reset ne remet à zéro que les registres des canaux, pas
      * io.processing : un reset pendant la lecture (fragment différé) le

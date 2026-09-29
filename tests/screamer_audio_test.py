@@ -30,18 +30,22 @@ typedef struct { uint16_t req_count, command; uint32_t phy_addr, cmd_dep;
                  uint16_t res_count, xfer_status; } dbdma_cmd;
 typedef struct { int processing; } DBDMA_chan_io;
 typedef struct { unsigned regs[2]; int channel; DBDMA_chan_io io; dbdma_cmd current; } DBDMA_channel;
-/* témoin des écritures de descripteur : adresse et valeur du dernier xfer_status */
+/* Mémoire invitée simulée (les descripteurs y vivent) et témoin des écritures
+   du callback : adresse et valeur du dernier xfer_status. */
+static uint8_t gmem[0x3000];
 static uint32_t wr_addr; static uint16_t wr_val; static unsigned wr_n;
 #define dma_memory_write(as, addr, buf, len, attr) \
   do { (void)(as); (void)(attr); assert((len)==2); wr_addr=(addr); \
-       memcpy(&wr_val,(buf),2); wr_n++; } while (0)
+       memcpy(&wr_val,(buf),2); memcpy(gmem+(addr),(buf),2); wr_n++; } while (0)
+#define dma_memory_read(as, addr, buf, len, attr) \
+  do { (void)(as); (void)(attr); memcpy((buf), gmem+(addr), (len)); } while (0)
 typedef struct { DBDMA_channel channels[1]; } DBDMAState;
 #define container_of(p,t,m) ((t *)(p))
 typedef struct { DBDMA_channel *channel; int len; } DBDMA_io;
 typedef struct {
   void *voice; int samples; unsigned shift;
   uint32_t wpos, rpos, rate; int running;
-  unsigned regs[6]; uint8_t *mixbuf; DBDMA_io io; uint32_t io_cmdptr;
+  unsigned regs[6]; uint8_t *mixbuf; DBDMA_io io; uint32_t io_cmdptr; bool io_ended;
 } ScreamerState;
 static uint8_t output[512];
 static unsigned written, limit = 64, kicks;
@@ -65,8 +69,21 @@ static void pmac_screamer_tx_transfer(ScreamerState *s) {
     memset(s->mixbuf, 0x22, (size_t)(frames - first) << s->shift);
   s->wpos += (uint32_t)frames;
   s->io.len -= frames << s->shift;
-  if (s->io.len == 0)   /* dbdma_end() : statut du canal recopié dans le descripteur */
-    s->io.channel->current.xfer_status = (uint16_t)s->io.channel->regs[DBDMA_STATUS];
+  if (s->io.len == 0) {
+    /* dbdma_end() fidèle à mac_dbdma.c : statut du canal (sans RUN, retiré
+       par l'appelant) recopié dans le descripteur, descripteur SAUVÉ en
+       mémoire à CMDPTR, puis conditional_branch() → next() : CMDPTR avance
+       et ch->current est RECHARGÉ avec le descripteur suivant. */
+    DBDMA_channel *ch = s->io.channel;
+    uint32_t cp = ch->regs[DBDMA_CMDPTR_LO];
+    s->io_ended = true;
+    ch->current.xfer_status = (uint16_t)ch->regs[DBDMA_STATUS];
+    memcpy(gmem + cp, &ch->current, sizeof(dbdma_cmd));
+    ch->regs[DBDMA_CMDPTR_LO] = cp + sizeof(dbdma_cmd);
+    memcpy(&ch->current, gmem + ch->regs[DBDMA_CMDPTR_LO], sizeof(dbdma_cmd));
+    /* le BH lancera la commande suivante : pmac_screamer_tx() note son CMDPTR */
+    s->io_cmdptr = ch->regs[DBDMA_CMDPTR_LO];
+  }
 }
 static void DBDMA_kick(DBDMAState *s) { (void)s; ++kicks; }
 '''
@@ -109,12 +126,30 @@ int main(void) {
   channel.io.processing=1; s.io.len=0;
   /* Fin de commande par le callback : le descripteur porte RUN|ACTIVE, comme
      sur le DBDMA réel, et non le statut sans RUN du transfert. */
+  /* Le descripteur SUIVANT porte en mémoire un statut remis à 0 par le
+     pilote : c'est lui que ch->current contient après dbdma_end(), et ce
+     n'est pas lui qu'il faut recopier (bug hunt 4, n° 1). */
   written=0; kicks=0; wr_n=0; s.wpos=0; s.rpos=0; s.io.len=8;
+  memset(gmem, 0, sizeof(gmem));
   channel.regs[DBDMA_CMDPTR_LO]=0x1000; s.io_cmdptr=0x1000; channel.current.xfer_status=0x1234;
   screamerspk_callback(&s,16);
   assert(kicks==1 && s.io.len==0 && wr_n==1);
   assert(wr_addr==0x1000+offsetof(dbdma_cmd,xfer_status) && wr_val==(RUN|ACTIVE));
+  { uint16_t st; memcpy(&st, gmem+0x1000+offsetof(dbdma_cmd,xfer_status), 2);
+    assert(st==(RUN|ACTIVE)); }                        /* 0x8400 en mémoire */
+  { uint16_t st; memcpy(&st, gmem+0x1010+offsetof(dbdma_cmd,xfer_status), 2);
+    assert(st==0); }                                   /* suivant intact */
+  assert(channel.regs[DBDMA_CMDPTR_LO]==0x1010 && channel.current.xfer_status==0);
   assert(channel.regs[DBDMA_STATUS]==(RUN|ACTIVE));
+  /* Descripteur suivant dont le statut en mémoire vaut 0xFFFF (anneau non
+     initialisé) : la sauvegarde est prouvée par CMDPTR qui a bougé, RUN est
+     reposé quand même, et ch->current (le suivant) n'est pas touché. */
+  wr_n=0; kicks=0; s.wpos=0; s.rpos=0; s.io.len=8;
+  memset(gmem+0x1020, 0xff, sizeof(dbdma_cmd));
+  screamerspk_callback(&s,16);
+  assert(wr_n==1 && wr_addr==0x1010+offsetof(dbdma_cmd,xfer_status) && wr_val==(RUN|ACTIVE));
+  assert(channel.regs[DBDMA_CMDPTR_LO]==0x1020 && channel.current.xfer_status==0xffff);
+  channel.current.xfer_status=0x1234;
   /* Fragment en cours sans fin de commande : témoin rendu, rien d'écrit. */
   wr_n=0; kicks=0; s.wpos=0; s.rpos=0; s.io.len=64; channel.current.xfer_status=0x1234;
   screamerspk_callback(&s,4);
@@ -209,6 +244,7 @@ with tempfile.TemporaryDirectory(prefix='screamer-regs-') as d:
 xfer = source[source.index('static void screamer_tx_copy('):source.index('static void pmac_screamer_tx(')]
 ring_stub = r'''
 #include <assert.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 #define MIN(a,b) ((a)<(b)?(a):(b))
@@ -223,6 +259,7 @@ struct DBDMA_io {
 };
 typedef struct {
   int samples; unsigned shift; uint32_t wpos, rpos; uint8_t *mixbuf; DBDMA_io io;
+  bool io_ended;
 } ScreamerState;
 static uint8_t guest[64];
 static int ends;
@@ -238,7 +275,7 @@ int main(void) {
   ScreamerState s = {.samples=8,.shift=2,.wpos=6,.rpos=4,.mixbuf=mix,
                      .io={0,0,0,16,0,0,endfn}};
   pmac_screamer_tx_transfer(&s);
-  assert(s.wpos==10 && s.io.len==0 && ends==1);
+  assert(s.wpos==10 && s.io.len==0 && ends==1 && s.io_ended);
   assert(memcmp(mix + 24, guest, 8)==0);
   assert(memcmp(mix, guest + 8, 8)==0);
   ends=0; s.wpos=8; s.rpos=0; s.io.len=16; s.io.addr=0;
