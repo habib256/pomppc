@@ -155,6 +155,12 @@ image plus grande que l'arène partent par bandes de lignes (`band_rows`,
 les bandes sont parties. Une relecture dont la soumission s'est arrêtée avant
 elle (`posts_lost` : refus synchrone hors dessin, ou `ERRORS` qui a bougé en
 asynchrone) repasse `SYNCED → HOST_NEWER`, et `sync_to_sw_locked` relit.
+Depuis la 4e passe, seuls le contexte et le canal (couleur ou profondeur) de
+la relecture perdue basculent (`Post.ctx`), `SYNCED` est posé AVANT les
+bandes (un vidage entre deux bandes peut perdre les premières), et quand
+`ERRORS` bouge, TOUTES les moitiés encore en vol perdent leurs relectures.
+L'invalidation descend jusqu'à `err_floor`, la plus ancienne soumission que
+la dernière lecture propre d'`ERRORS` ne couvrait pas.
 Ne pas déduire une égalité des pixels du seul drapeau pour les deux cas
 « rien à porter ».
 
