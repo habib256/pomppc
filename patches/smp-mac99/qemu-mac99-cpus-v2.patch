@@ -1,5 +1,5 @@
 diff --git a/hw/intc/openpic.c b/hw/intc/openpic.c
-index 2ead4b9ba0..4b2964021e 100644
+index 2ead4b9..4b29640 100644
 --- a/hw/intc/openpic.c
 +++ b/hw/intc/openpic.c
 @@ -1580,9 +1580,14 @@ static void openpic_realize(DeviceState *dev, Error **errp)
@@ -21,10 +21,10 @@ index 2ead4b9ba0..4b2964021e 100644
          }
  
 diff --git a/hw/misc/macio/gpio.c b/hw/misc/macio/gpio.c
-index 7cad62819a..cab1256b8c 100644
+index 7cad628..9307da9 100644
 --- a/hw/misc/macio/gpio.c
 +++ b/hw/misc/macio/gpio.c
-@@ -34,6 +34,58 @@
+@@ -34,6 +34,61 @@
  #include "qemu/module.h"
  #include "trace.h"
  
@@ -32,6 +32,9 @@ index 7cad62819a..cab1256b8c 100644
 +#define OUT_DATA    0x01
 +#define IN_DATA     0x02
 +#define OUT_ENABLE  0x04
++
++/* KL_GPIO_RESET_CPU1 (offset 0x5C) : ligne de reset du cœur secondaire */
++#define GPIO_RESET_CPU1 4
 +
 +/*
 + * Effet d'un niveau de GPIO sur sa ligne d'interruption externe.
@@ -45,7 +48,7 @@ index 7cad62819a..cab1256b8c 100644
 +{
 +    switch (gpio) {
 +    case 1:
-+    case 4:
++    case GPIO_RESET_CPU1:
 +        /*
 +         * Level low. GPIO 1 : ligne d'extension du PMU (amont).
 +         * GPIO 4 : Active low, CPU1 reset (KL_GPIO_RESET_CPU1, offset 0x5C).
@@ -83,7 +86,7 @@ index 7cad62819a..cab1256b8c 100644
  
  void macio_set_gpio(MacIOGPIOState *s, uint32_t gpio, bool state)
  {
-@@ -64,39 +116,14 @@ void macio_set_gpio(MacIOGPIOState *s, uint32_t gpio, bool state)
+@@ -64,39 +119,14 @@ void macio_set_gpio(MacIOGPIOState *s, uint32_t gpio, bool state)
       * For now, we hard wire known GPIOs
       */
  
@@ -125,7 +128,7 @@ index 7cad62819a..cab1256b8c 100644
  
      trace_macio_gpio_write(addr, value);
  
-@@ -109,13 +136,31 @@ static void macio_gpio_write(void *opaque, hwaddr addr, uint64_t value,
+@@ -109,13 +139,35 @@ static void macio_gpio_write(void *opaque, hwaddr addr, uint64_t value,
      if (addr < 36) {
          value &= ~2;
  
@@ -147,8 +150,12 @@ index 7cad62819a..cab1256b8c 100644
 +        old = s->gpio_regs[addr];
          s->gpio_regs[addr] = value | ibit;
 +
-+        if (addr == 4) {
-+            /* Sortie inactive : la ligne est tirée haut (reset relâché). */
++        if (addr == GPIO_RESET_CPU1) {
++            /*
++             * Sortie inactive : la ligne est tirée haut (reset relâché).
++             * Seuls les FRONTS partent vers la carte : bas = CPU 1 tenu en
++             * reset, haut = CPU 1 relâché (mac_newworld.c, cpu_reset_line).
++             */
 +            bool level = (value & OUT_ENABLE) ? !!(ibit & IN_DATA) : true;
 +            bool prev = (old & OUT_ENABLE) ? !!(old & IN_DATA) : true;
 +
@@ -160,17 +167,25 @@ index 7cad62819a..cab1256b8c 100644
      }
  }
  
-@@ -181,6 +226,8 @@ static void macio_gpio_reset(DeviceState *dev)
+@@ -181,6 +233,16 @@ static void macio_gpio_reset(DeviceState *dev)
  
      /* GPIO 1 is up by default */
      macio_set_gpio(s, 1, true);
-+    /* Idem pour la ligne de reset du CPU 1 (active bas) */
-+    macio_set_gpio(s, 4, true);
++    /*
++     * Ligne de reset du CPU 1 : entrée, tirée haut, SANS front propagé.
++     * macio_set_gpio() déclencherait l'interruption externe, donc un
++     * « relâchement » du CPU 1 à la mise sous tension (registre à 0 → haut)
++     * ou après un reset machine survenu ligne tenue basse. Le reset machine
++     * remet lui-même le CPU 1 à l'arrêt (start-powered-off) : c'est l'invité,
++     * et lui seul, qui le relâche. Le registre est aussi remis à sa valeur
++     * de reset : un OUT_ENABLE laissé par l'invité ne survit pas au reset.
++     */
++    s->gpio_regs[GPIO_RESET_CPU1] = IN_DATA;
  }
  
  static void macio_gpio_nmi(NMIState *n, int cpu_index, Error **errp)
 diff --git a/hw/ppc/mac_newworld.c b/hw/ppc/mac_newworld.c
-index 9d249a506c..6ddd2bb757 100644
+index 9d249a5..9ad6a27 100644
 --- a/hw/ppc/mac_newworld.c
 +++ b/hw/ppc/mac_newworld.c
 @@ -73,6 +73,7 @@
@@ -181,7 +196,7 @@ index 9d249a506c..6ddd2bb757 100644
  #include "trace.h"
  
  #define MAX_IDE_BUS 2
-@@ -128,12 +129,50 @@ static void ppc_core99_reset(void *opaque)
+@@ -128,12 +129,91 @@ static void ppc_core99_reset(void *opaque)
      cpu->env.nip = PROM_BASE + 0x100;
  }
  
@@ -210,16 +225,57 @@ index 9d249a506c..6ddd2bb757 100644
 +    ppc_cpu_do_system_reset(cs);
 +}
 +
-+static void cpu_kick(void *opaque, int n, int level)
++/*
++ * Ligne tenue basse : le cœur est en reset, donc arrêté. Même thread que
++ * cpu_kick_work, et même file : un front bas suivi d'un front haut s'exécute
++ * dans cet ordre (la file de async_run_on_cpu est FIFO par vCPU).
++ */
++static void cpu_hold_work(CPUState *cs, run_on_cpu_data data)
 +{
++    cpu_reset(cs);
++    cs->halted = 1;
++}
++
++/*
++ * KL_GPIO_RESET_CPU1, active bas, comme sur le KeyLargo réel : tant que la
++ * ligne est tenue, le cœur reste en reset ; il démarre au RELÂCHEMENT.
++ * Tiger 10.4.6 (docs/smp-coeurs.md) et Linux (smp_core99_kick_cpu) écrivent
++ * 0x4 (sortie, bas) puis 0x5 (sortie, haut). Démarrer dès 0x4, comme la
++ * série d'origine, lançait le cœur pendant que le reset était encore tenu.
++ *
++ * `held` : un relâchement ne démarre le cœur que s'il suit une assertion.
++ * gpio.c ne propage plus d'événement au reset machine, mais ce garde ne
++ * dépend pas de l'ordre des handlers de reset : aucun démarrage spontané.
++ */
++typedef struct CpuResetLine {
++    CPUState *cs;
++    bool held;
++} CpuResetLine;
++
++static void cpu_reset_line_reset(void *opaque)
++{
++    CpuResetLine *l = opaque;
++
++    l->held = false;
++}
++
++static void cpu_reset_line(void *opaque, int n, int level)
++{
++    CpuResetLine *l = opaque;
++
++    /*
++     * async_run_on_cpu() met le travail en file PUIS appelle
++     * qemu_cpu_kick(), qui diffuse sur halt_cond : c'est ce qui sort le
++     * thread du cœur secondaire de son qemu_cond_wait(). Sans cela il
++     * dormirait jusqu'au prochain événement fortuit.
++     */
 +    if (level) {
-+        /*
-+         * async_run_on_cpu() met le travail en file PUIS appelle
-+         * qemu_cpu_kick(), qui diffuse sur halt_cond : c'est ce qui sort le
-+         * thread du cœur secondaire de son qemu_cond_wait(). Sans cela il
-+         * dormirait jusqu'au prochain événement fortuit.
-+         */
-+        async_run_on_cpu(CPU(opaque), cpu_kick_work, RUN_ON_CPU_NULL);
++        /* extirq levée = ligne basse = reset tenu */
++        l->held = true;
++        async_run_on_cpu(l->cs, cpu_hold_work, RUN_ON_CPU_NULL);
++    } else if (l->held) {
++        l->held = false;
++        async_run_on_cpu(l->cs, cpu_kick_work, RUN_ON_CPU_NULL);
 +    }
 +}
 +
@@ -233,7 +289,7 @@ index 9d249a506c..6ddd2bb757 100644
      CPUPPCState *env = NULL;
      char *filename;
      IrqLines *openpic_irqs;
-@@ -156,15 +195,40 @@ static void ppc_core99_init(MachineState *machine)
+@@ -156,15 +236,40 @@ static void ppc_core99_init(MachineState *machine)
      hwaddr nvram_addr = 0xFFF04000;
      uint64_t tbfreq = kvm_enabled() ? kvmppc_get_tbfreq() : TBFREQ;
  
@@ -279,7 +335,7 @@ index 9d249a506c..6ddd2bb757 100644
  
      /* allocate RAM */
      if (machine->ram_size > 2 * GiB) {
-@@ -255,8 +319,8 @@ static void ppc_core99_init(MachineState *machine)
+@@ -255,8 +360,8 @@ static void ppc_core99_init(MachineState *machine)
      }
  
      openpic_irqs = g_new0(IrqLines, machine->smp.cpus);
@@ -289,7 +345,7 @@ index 9d249a506c..6ddd2bb757 100644
          /* Mac99 IRQ connection between OpenPIC outputs pins
           * and PowerPC input pins
           */
-@@ -368,9 +432,24 @@ static void ppc_core99_init(MachineState *machine)
+@@ -368,9 +473,28 @@ static void ppc_core99_init(MachineState *machine)
      qdev_prop_set_chr(dev, "chrA", serial_hd(0));
      qdev_prop_set_chr(dev, "chrB", serial_hd(1));
  
@@ -307,15 +363,19 @@ index 9d249a506c..6ddd2bb757 100644
 +         * a aussi GPIO 15 et 16 pour les CPU 2 et 3 (docs/smp-coeurs.md),
 +         * non câblés : d'où mc->max_cpus = 2.
 +         */
++        CpuResetLine *line = g_new0(CpuResetLine, 1);
++
++        line->cs = CPU(cpus[1]);
++        qemu_register_reset(cpu_reset_line_reset, line);
 +        s = SYS_BUS_DEVICE(object_resolve_path_component(macio, "gpio"));
 +        assert(s != NULL);
-+        sysbus_connect_irq(s, 4, qemu_allocate_irq(cpu_kick, cpus[1], 4));
++        sysbus_connect_irq(s, 4, qemu_allocate_irq(cpu_reset_line, line, 4));
 +    }
 +
      for (i = 0; i < 4; i++) {
          qdev_connect_gpio_out(uninorth_pci_dev, i,
                                qdev_get_gpio_in(pic_dev, 0x1b + i));
-@@ -574,8 +653,11 @@ static void core99_machine_class_init(ObjectClass *oc, void *data)
+@@ -574,8 +698,11 @@ static void core99_machine_class_init(ObjectClass *oc, void *data)
      mc->desc = "Mac99 based PowerMac";
      mc->init = ppc_core99_init;
      mc->block_default_type = IF_IDE;

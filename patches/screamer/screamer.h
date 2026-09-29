@@ -64,6 +64,15 @@ struct ScreamerState {
     uint32_t ppos;
     uint32_t rate;
     DBDMA_io io;
+    /* CMDPTR de la commande dont io est le fragment : un CMDPTR réécrit
+       pendant une pause abandonne le fragment (bug hunt 3, n° 4). */
+    uint32_t io_cmdptr;
+    /* posé juste avant io->dma_end() par pmac_screamer_tx_transfer : le
+       callback sait ainsi que dbdma_end() a tourné (bug hunt 4, n° 1). */
+    bool io_ended;
+    /* canaux DBDMA de sortie et d'entrée, pour le reset (bug hunt 3, n° 5) */
+    int dma_tx_ch;
+    int dma_rx_ch;
 
     uint32_t regs[6];
     uint32_t codec_ctrl_regs[8];

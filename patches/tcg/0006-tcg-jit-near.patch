@@ -1,5 +1,5 @@
 diff --git a/accel/tcg/tcg-all.c b/accel/tcg/tcg-all.c
-index 2090907db..1df2ef6c7 100644
+index 2090907..1df2ef6 100644
 --- a/accel/tcg/tcg-all.c
 +++ b/accel/tcg/tcg-all.c
 @@ -193,6 +193,34 @@ static void tcg_set_splitwx(Object *obj, bool value, Error **errp)
@@ -56,7 +56,7 @@ index 2090907db..1df2ef6c7 100644
                                     tcg_get_one_insn_per_tb,
                                     tcg_set_one_insn_per_tb);
 diff --git a/include/tcg/startup.h b/include/tcg/startup.h
-index f71305765..12e4ed3d1 100644
+index f713057..12e4ed3 100644
 --- a/include/tcg/startup.h
 +++ b/include/tcg/startup.h
 @@ -36,6 +36,16 @@
@@ -77,27 +77,27 @@ index f71305765..12e4ed3d1 100644
   * tcg_register_thread: Register this thread with the TCG runtime
   *
 diff --git a/tcg/region.c b/tcg/region.c
-index 478ec051c..a6f8bddf8 100644
+index 478ec05..f6ba955 100644
 --- a/tcg/region.c
 +++ b/tcg/region.c
-@@ -34,6 +34,10 @@
+@@ -34,8 +34,12 @@
  #include "exec/translation-block.h"
  #include "tcg-internal.h"
  #include "host/cpuinfo.h"
 +#include "tcg/startup.h"
-+
+ 
 +bool tcg_jit_near;
 +uint64_t tcg_jit_addr;
  
- 
++
  /*
-@@ -554,9 +558,62 @@ static int alloc_code_gen_buffer(size_t size, int splitwx, Error **errp)
+  * Local source-level compatibility with Unix.
+  * Used by tcg_region_init below.
+@@ -554,10 +558,63 @@ static int alloc_code_gen_buffer_anon(size_t size, int
  static int alloc_code_gen_buffer_anon(size_t size, int prot,
                                        int flags, Error **errp)
  {
 -    void *buf;
--
--    buf = mmap(NULL, size, prot, flags, -1, 0);
 +    void *buf = MAP_FAILED;
 +    /*
 +     * POMPPC (docs/tcg-g4.md §14) : sur Apple M4 (au moins), un saut indirect
@@ -113,7 +113,8 @@ index 478ec051c..a6f8bddf8 100644
 +    uintptr_t text = (uintptr_t)&alloc_code_gen_buffer_anon;
 +    uintptr_t win = text & ~(uintptr_t)0xffffffffu;
 +    const char *how = "noyau";
-+
+ 
+-    buf = mmap(NULL, size, prot, flags, -1, 0);
 +    if (tcg_jit_addr) {
 +        buf = mmap((void *)(uintptr_t)tcg_jit_addr, size, prot, flags, -1, 0);
 +        how = "x-jit-addr";
@@ -144,7 +145,7 @@ index 478ec051c..a6f8bddf8 100644
 +        }
 +        how = buf == MAP_FAILED ? "x-jit-near : pas de place, noyau" : "x-jit-near";
 +    }
-+    if (buf == MAP_FAILED) {
+     if (buf == MAP_FAILED) {
 +        buf = mmap(NULL, size, prot, flags, -1, 0);
 +    }
 +    if (buf != MAP_FAILED) {
@@ -154,31 +155,139 @@ index 478ec051c..a6f8bddf8 100644
 +                buf, (char *)buf + size, how, (void *)text,
 +                same ? "même" : "AUTRE");
 +    }
-     if (buf == MAP_FAILED) {
++    if (buf == MAP_FAILED) {
          error_setg_errno(errp, errno,
                           "allocate %zu bytes for jit buffer", size);
-@@ -630,11 +687,18 @@ static int alloc_code_gen_buffer_splitwx_vmremap(size_t size, Error **errp)
-     vm_prot_t cur_prot, max_prot;
+         return -1;
+@@ -625,30 +682,89 @@ static int alloc_code_gen_buffer_splitwx_vmremap(size_
  
-     /* Map the read-write portion via normal anon memory. */
+ static int alloc_code_gen_buffer_splitwx_vmremap(size_t size, Error **errp)
+ {
+-    kern_return_t ret;
+-    mach_vm_address_t buf_rw, buf_rx;
++    kern_return_t ret = KERN_FAILURE;
++    mach_vm_address_t buf_rw, buf_rx = 0;
+     vm_prot_t cur_prot, max_prot;
++    bool near = tcg_jit_near;
+ 
+-    /* Map the read-write portion via normal anon memory. */
 -    if (!alloc_code_gen_buffer_anon(size, PROT_READ | PROT_WRITE,
 -                                    MAP_PRIVATE | MAP_ANONYMOUS, errp)) {
++    /*
++     * Map the read-write portion via normal anon memory.
++     *
++     * POMPPC : avec split-wx, le code EXÉCUTÉ est l'alias RX, pas la vue RW.
++     * x-jit-near ne sert à rien sur la vue RW, et il y dépensait la place
++     * libre de la fenêtre du texte (souvent < 1 Gio) : l'alias RX n'y
++     * trouvait plus de place de même taille (bug hunt 4). La vue RW est
++     * allouée par le noyau, sans x-jit-near ; la recherche avec réduction
++     * est faite au remap de l'alias RX, ci-dessous.
++     */
++    tcg_jit_near = false;
 +    if (alloc_code_gen_buffer_anon(size, PROT_READ | PROT_WRITE,
 +                                   MAP_PRIVATE | MAP_ANONYMOUS, errp) < 0) {
++        tcg_jit_near = near;
          return -1;
      }
++    tcg_jit_near = near;
  
 +    /*
-+     * POMPPC : x-jit-near peut avoir réduit le tampon. Le remap et le
-+     * mprotect qui suivent doivent porter sur la taille OBTENUE, pas sur la
-+     * taille demandée, sinon ils débordent au-delà du tampon anonyme.
-+     * (Le test amont « !alloc… » laissait passer l'échec, qui rend -1.)
++     * POMPPC : le remap et le mprotect qui suivent portent sur la taille
++     * OBTENUE (region.total_size). (Le test amont « !alloc… » laissait
++     * passer l'échec, qui rend -1.)
 +     */
 +    size = region.total_size;
      buf_rw = (mach_vm_address_t)region.start_aligned;
-     buf_rx = 0;
-     ret = mach_vm_remap(mach_task_self(),
-@@ -774,6 +838,8 @@ void tcg_region_init(size_t tb_size, int splitwx, unsigned max_cpus)
+-    buf_rx = 0;
+-    ret = mach_vm_remap(mach_task_self(),
+-                        &buf_rx,
+-                        size,
+-                        0,
+-                        VM_FLAGS_ANYWHERE,
+-                        mach_task_self(),
+-                        buf_rw,
+-                        false,
+-                        &cur_prot,
+-                        &max_prot,
+-                        VM_INHERIT_NONE);
++
++    if (near) {
++        /*
++         * Même règle que alloc_code_gen_buffer_anon : une place pour l'alias
++         * dans la fenêtre de 4 Gio du texte, en réduisant de 64 Mio en
++         * 64 Mio sans descendre sous 512 Mio. Avec VM_FLAGS_ANYWHERE,
++         * l'adresse passée est le point de départ de la recherche : le début
++         * de la fenêtre. Un alias placé ailleurs est rendu et on réessaie
++         * plus petit ; la vue RW est alors raccourcie à la taille de l'alias.
++         */
++        mach_vm_address_t win = (mach_vm_address_t)
++            ((uintptr_t)&alloc_code_gen_buffer_anon & ~(uintptr_t)0xffffffffu);
++        size_t floor = MIN(size, 512 * MiB);
++
++        for (size_t sz = size; sz >= floor; sz -= 64 * MiB) {
++            buf_rx = win;
++            ret = mach_vm_remap(mach_task_self(), &buf_rx, sz, 0,
++                                VM_FLAGS_ANYWHERE, mach_task_self(), buf_rw,
++                                false, &cur_prot, &max_prot, VM_INHERIT_NONE);
++            if (ret == KERN_SUCCESS &&
++                (buf_rx & ~(mach_vm_address_t)0xffffffffu) == win &&
++                ((buf_rx + sz - 1) & ~(mach_vm_address_t)0xffffffffu) == win) {
++                if (sz < size) {
++                    munmap((void *)(uintptr_t)(buf_rw + sz), size - sz);
++                    size = sz;
++                    region.total_size = sz;
++                }
++                break;
++            }
++            if (ret == KERN_SUCCESS) {
++                munmap((void *)(uintptr_t)buf_rx, sz);   /* comme l'amont */
++            }
++            ret = KERN_FAILURE;
++            if (sz < floor + 64 * MiB) {
++                break;
++            }
++        }
++    }
+     if (ret != KERN_SUCCESS) {
++        buf_rx = 0;
++        ret = mach_vm_remap(mach_task_self(),
++                            &buf_rx,
++                            size,
++                            0,
++                            VM_FLAGS_ANYWHERE,
++                            mach_task_self(),
++                            buf_rw,
++                            false,
++                            &cur_prot,
++                            &max_prot,
++                            VM_INHERIT_NONE);
++    }
++    if (ret != KERN_SUCCESS) {
+         /* TODO: Convert "ret" to a human readable error message. */
+         error_setg(errp, "vm_remap for jit splitwx failed");
+         munmap((void *)buf_rw, size);
+@@ -660,6 +776,20 @@ static int alloc_code_gen_buffer_splitwx_vmremap(size_
+         munmap((void *)buf_rx, size);
+         munmap((void *)buf_rw, size);
+         return -1;
++    }
++
++    {
++        /* La ligne « tampon JIT » a jugé la vue RW ; c'est l'alias RX qui
++           s'exécute et qui doit être dans la fenêtre du texte. */
++        uintptr_t text = (uintptr_t)&alloc_code_gen_buffer_anon;
++        bool same = (buf_rx >> 32) == (text >> 32) &&
++                    ((buf_rx + size - 1) >> 32) == (text >> 32);
++
++        fprintf(stderr, "tcg: split-wx, alias RX exécuté %p-%p (%s) : %s "
++                "fenêtre de 4 Gio que le texte\n", (void *)(uintptr_t)buf_rx,
++                (void *)(uintptr_t)(buf_rx + size),
++                near ? "x-jit-near sur l'alias" : "noyau",
++                same ? "même" : "AUTRE");
+     }
+ 
+     tcg_splitwx_diff = buf_rx - buf_rw;
+@@ -774,6 +904,8 @@ void tcg_region_init(size_t tb_size, int splitwx, unsi
  
      have_prot = alloc_code_gen_buffer(tb_size, splitwx, &error_fatal);
      assert(have_prot >= 0);

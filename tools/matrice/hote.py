@@ -3,6 +3,7 @@
 ssh dans l'invité (tools/guest/tssh.sh), moniteur HMP (.run/mon.sock),
 capture d'écran figée, redémarrage de l'invité, rapatriement de dossiers.
 """
+import fcntl
 import os
 import re
 import socket
@@ -26,8 +27,47 @@ def depot_principal():
 
 
 MAIN = depot_principal()
-MON = os.environ.get("MATRICE_MON", os.path.join(MAIN, ".run", "mon.sock"))
-TSSH = os.path.join(WT, "tools", "guest", "tssh.sh")
+RUN = os.path.join(MAIN, ".run")
+LOCK = os.path.join(RUN, "tiger.lock")
+TSSH = os.path.join(WT, "tools", "guest", "tssh.sh")   # lit .run/tiger.sshport
+
+
+def moniteur():
+    """Socket moniteur de la VM QUOTIDIENNE : celui que run_tiger.sh a publié
+    dans .run/tiger.mon (jamais celui d'une VM SNAPSHOT=1 d'un autre agent)."""
+    if os.environ.get("MATRICE_MON"):
+        return os.environ["MATRICE_MON"]
+    try:
+        with open(os.path.join(RUN, "tiger.mon")) as f:
+            return f.read().strip() or os.path.join(RUN, "mon.sock")
+    except OSError:
+        return os.path.join(RUN, "mon.sock")
+
+
+def verrou_tenu(chemin=LOCK):
+    """Vrai si un processus tient le flock de `chemin` (la VM quotidienne)."""
+    try:
+        fd = os.open(chemin, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def detenteurs(chemin=LOCK):
+    """PID des processus qui ont `chemin` ouvert (lsof) : notre QEMU."""
+    out = subprocess.run(["lsof", "-t", chemin], capture_output=True, text=True).stdout
+    return [int(x) for x in out.split() if x.isdigit()]
+
+
+class VMEnPause(Exception):
+    """`cont` n'est pas passé : la VM reste arrêtée, le tour ne peut pas continuer."""
 
 
 def journal(*a):
@@ -35,8 +75,9 @@ def journal(*a):
 
 
 class Hote:
-    def __init__(self):
-        self.mon = MON
+    @property
+    def mon(self):
+        return moniteur()
 
     # ---------------------------------------------------------------- ssh
     def ssh(self, cmd, entree=None, delai=120, binaire=False):
@@ -120,7 +161,17 @@ class Hote:
             time.sleep(0.3)             # le fil de rendu du device finit sa file
             ok = self.capture(chemin)
         finally:
-            self.hmp("cont")
+            # une VM laissée en pause fausse tout le reste du tour : on insiste,
+            # puis on arrête le tour plutôt que de mesurer une VM figée
+            for essai in range(3):
+                try:
+                    self.hmp("cont")
+                    break
+                except OSError as e:
+                    journal("cont refusé (%s), nouvel essai" % e)
+                    time.sleep(2)
+            else:
+                raise VMEnPause("`cont` impossible après la capture : VM laissée en pause")
         return ok
 
     # ---------------------------------------------------------- invité
@@ -149,31 +200,42 @@ class Hote:
                     # 26/09 : après un gel en jeu, deux system_reset de suite restent
                     # bloqués au démarrage (« cluster IO buffer headers ») ; seul un
                     # QEMU relancé repart
-                    self.relance_qemu()
+                    if not self.relance_qemu():
+                        return False
             except OSError:
                 return False
         return False
 
     def relance_qemu(self):
-        """quit au moniteur puis ./run_tiger.sh du dépôt principal, détaché."""
+        """quit au moniteur puis ./run_tiger.sh du dépôt principal, détaché.
+
+        JAMAIS de suppression de .run/tiger.lock (bug hunt 4, 29/09/2026) :
+        c'est un flock sur l'inode, et sous macOS QEMU ne verrouille pas
+        l'image lui-même. Supprimer le chemin quand `quit` n'est pas arrivé
+        (moniteur occupé, ou d'une autre VM) lançait un second QEMU sur
+        tiger.qcow2 — corruption du HFS+. On attend que le verrou se libère ;
+        sinon on abandonne, sans rien relancer."""
         journal("QEMU arrêté et relancé (run_tiger.sh)")
+        avant = detenteurs()
         try:
             self.hmp("quit")
-        except OSError:
-            pass
-        for _ in range(30):
-            if subprocess.run(["pgrep", "-f", "tiger.qcow2"], capture_output=True).returncode:
+        except OSError as e:
+            journal("quit au moniteur %s refusé : %s" % (self.mon, e))
+        for _ in range(60):
+            if not verrou_tenu():
                 break
             time.sleep(1)
-        lock = os.path.join(MAIN, ".run", "tiger.lock")
-        if os.path.exists(lock):
-            os.remove(lock)
+        else:
+            journal("le verrou %s est toujours tenu (PID %s, avant quit : %s) : "
+                    "QEMU non relancé, à arrêter à la main" % (LOCK, detenteurs(), avant))
+            return False
         # Le banc conserve la fenêtre QEMU native ; le lanceur quotidien
         # utilise maintenant ImGuiDock par défaut.
         env = dict(os.environ, POMPPC_FRONTEND="native")
         subprocess.Popen(["./run_tiger.sh"], cwd=MAIN, env=env, start_new_session=True,
                          stdout=open(os.path.join(MAIN, ".run", "run_tiger-matrice.log"), "w"),
                          stderr=subprocess.STDOUT)
+        return True
 
     def processus(self, nom):
         """pids des processus dont le nom (ps -c) vaut `nom`."""
@@ -196,13 +258,18 @@ class Hote:
             # toute machine mac99 (les copies de QEMU des autres agents s'appellent
             # aussi qret…, qsr…), sauf la nôtre ; pas les shells dont la ligne de
             # commande cite QEMU (26/09 : `pgrep -f qemu-system` comptait un zsh et
-            # manquait un QEMU renommé)
+            # manquait un QEMU renommé). « La nôtre », c'est le détenteur du verrou
+            # disque, pas « tout ce qui démarre sur tiger.qcow2 » : ce motif
+            # excluait aussi les VM SNAPSHOT=1 des autres agents (bug hunt 4).
+            notre = set(detenteurs())
             ps = subprocess.run(["ps", "-Ao", "pid=,comm=,args="], capture_output=True,
                                 text=True).stdout
             autres = []
             for l in ps.splitlines():
                 p = l.split(None, 2)
-                if len(p) < 3 or "tiger.qcow2" in p[2] or "mac99" not in p[2]:
+                if len(p) < 3 or "mac99" not in p[2]:
+                    continue
+                if p[0].isdigit() and int(p[0]) in notre:
                     continue
                 if os.path.basename(p[1]) in ("zsh", "bash", "sh", "python3", "Python", "pgrep"):
                     continue

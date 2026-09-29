@@ -61,9 +61,11 @@ if [ -z "${SNAPSHOT:-}" ]; then
     exit 1
   fi
 fi
-# APRÈS le verrou : supprimé avant, le socket d'une VM vivante disparaissait
-# et ./mount, killgame.py ou cycle.sh la perdaient.
-rm -f "$MON"
+# APRÈS le verrou : os9-mon.sock pour la VM verrouillée, os9-mon-PID.sock en
+# SNAPSHOT=1 (un socket vivant n'est jamais supprimé). ./mount lit le chemin
+# effectif dans .run/os9.mon.
+MON=$(host_mon_path "$MON")
+host_publish_vm os9 "$MON" 0
 [ -f "$OS9_DISK" ] || qemu-img create -f qcow2 "$OS9_DISK" "$OS9_DISK_SIZE" >/dev/null
 
 # --- SON via le build UNIFIÉ (QEMU 9.2 + device Screamer porté + OpenBIOS fusionné) ---

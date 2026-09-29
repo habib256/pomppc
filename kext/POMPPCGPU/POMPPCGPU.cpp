@@ -7,6 +7,7 @@
 #include <IOKit/IOMessage.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <libkern/OSByteOrder.h>
+#include <libkern/OSAtomic.h>
 
 #include "POMPPCGPU.h"
 
@@ -33,6 +34,51 @@
 
 #define super IOService
 OSDefineMetaClassAndStructors(POMPPCGPU, IOService)
+
+/* ─────────────────────── appels en vol (bug hunt 3) ───────────────────────
+ *
+ * Protocole de Dekker à deux variables : l'appelant ÉCRIT fCallers puis LIT
+ * fStopping ; stop() ÉCRIT fStopping puis LIT fCallers. Avec une barrière
+ * complète entre l'écriture et la lecture de chaque côté, l'un des deux voit
+ * forcément l'autre : ou l'appel voit fStopping et rend la main sans toucher
+ * à la gate, ou stop() le voit compté et l'attend. `sync` et non `eieio` :
+ * l'ordre écriture → lecture sur deux adresses différentes n'est garanti sur
+ * PowerPC que par sync (OSSynchronizeIO n'est qu'un eieio). */
+static inline void gpu_full_barrier(void)
+{
+#if defined(__ppc__) || defined(__ppc64__)
+    __asm__ __volatile__ ("sync" ::: "memory");
+#else
+    __asm__ __volatile__ ("" ::: "memory");
+#endif
+}
+
+bool POMPPCGPU::enterCall(void)
+{
+    OSIncrementAtomic((SInt32 *) &fCallers);
+    gpu_full_barrier();
+    if (fStopping || !fGate) {
+        OSDecrementAtomic((SInt32 *) &fCallers);
+        return false;
+    }
+    return true;
+}
+
+void POMPPCGPU::leaveCall(void)
+{
+    OSDecrementAtomic((SInt32 *) &fCallers);
+}
+
+UInt32 POMPPCGPU::fence(void)
+{
+    UInt32 f = 0;
+
+    if (enterCall()) {
+        f = fRegs ? regRead(QGPU_REG_FENCE) : 0;
+        leaveCall();
+    }
+    return f;
+}
 
 /* ────────────────────────────── cycle de vie ────────────────────────────── */
 
@@ -71,6 +117,17 @@ bool POMPPCGPU::start(IOService * provider)
         fPCI->setMemoryEnable(false);
         return false;
     }
+    /* Bug hunt 3 — REMISE À ZÉRO DU DEVICE AU CHARGEMENT. Aucun client
+       n'existe encore : c'est le seul moment où tout détruire est sûr. Un
+       kext déchargé avec un jeu ouvert oublie la tranche en silence (K1) et
+       laissait ses contextes, surfaces et textures sur l'hôte ; le client
+       suivant de la même tranche recevait QGPU_ST_LIMIT à son CTX_CREATE
+       (identifiant déjà pris) et perdait l'accélération. L'écriture de MAGIC
+       vide la file, détruit tous les objets, remet les compteurs à zéro — et
+       répare un device « cassé » (GL3) si le GPU hôte s'est débloqué. Bornée
+       côté device (QGPU_RESET_WAIT_MS). CAPS et CLIENTS sont lus APRÈS : un
+       device resté cassé les rend nuls, et le démarrage est refusé plus bas. */
+    regWrite(QGPU_REG_MAGIC, QGPU_MAGIC);
     fVersion   = regRead(QGPU_REG_VERSION);
     fCaps      = regRead(QGPU_REG_CAPS);
     fShmemSize = regRead(QGPU_REG_SHMEM_SIZE);
@@ -215,14 +272,21 @@ void POMPPCGPU::stop(IOService * provider)
        openGate() sur un work loop NULL — panic certaine. Tout dormeur sort
        dès qu'il voit fStopping ; on le réveille à chaque tour. */
     fStopping = 1;
+    /* Bug hunt 3 : … et pas seulement les dormeurs. Un appel qui a passé le
+       test de fStopping, ou qui attend la gate derrière un doorbell
+       synchrone (jusqu'à 2 s, D2), n'est pas un dormeur : on l'attend aussi
+       (fCallers, voir enterCall — la barrière est la moitié de ce côté-ci du
+       protocole). Il ressort vite : toute action gated revoit fStopping. */
+    gpu_full_barrier();
     if (fGate) {
         UInt32 spins = 0;
         fGate->commandWakeup(&fIRQCount, false);   /* false = tous les dormeurs */
-        while (fSleepers) {
+        while (fCallers > 0 || fSleepers) {
             IOSleep(1);
             if (++spins % 1000 == 0) {
-                GPULog("stop: %lu waiter(s) still asleep after %lu s\n",
-                       (unsigned long) fSleepers, (unsigned long) (spins / 1000));
+                GPULog("stop: %ld call(s) in flight, %lu waiter(s) asleep after %lu s\n",
+                       (long) fCallers, (unsigned long) fSleepers,
+                       (unsigned long) (spins / 1000));
             }
             fGate->commandWakeup(&fIRQCount, false);
         }
@@ -555,6 +619,11 @@ IOReturn POMPPCGPU::submitGated(OSObject * owner, void * a0, void *, void *, voi
         return kIOReturnSuccess;
     }
 
+    if (self->fStopping) {
+        /* Bug hunt 3 : entré juste avant stop() — plus rien ne part. */
+        a->result = kIOReturnNotReady;
+        return kIOReturnSuccess;
+    }
     /* Même invariant que slotGated (K3/K7), vérifié DANS la gate : une
        soumission qui arrive pendant que clientClose détruit la tranche
        (fSlotBusy, gate relâchée par sleepForFence) recréerait des objets
@@ -607,11 +676,6 @@ IOReturn POMPPCGPU::submit(int slot, POMPPCGPUUserClient * client, UInt32 off, U
     }
     /* Un bit de `len` que ce kext ne connaît pas (tel le LAYOUT du 24/09/2026,
        retiré en v19) reste dans `len` et déborde la tranche : refusé plus bas. */
-    /* K1/K4 : plus rien ne part une fois stop() commencé — la gate a pu être
-       retirée du work loop, et runAction ferme la gate AVANT tout test. */
-    if (!fGate || fStopping) {
-        return kIOReturnNotReady;
-    }
     if (a.flags & (POMPPC_SUB_PEEK | POMPPC_SUB_QUEUE)) {
         a.off = 0; a.len = 0;           /* on ne soumet rien : pas de bornes à vérifier */
     } else {
@@ -623,9 +687,16 @@ IOReturn POMPPCGPU::submit(int slot, POMPPCGPUUserClient * client, UInt32 off, U
         }
         a.off = off + (UInt32) slot * fSlotSize; a.len = len;
     }
+    /* K1/K4 : plus rien ne part une fois stop() commencé — la gate a pu être
+       retirée du work loop, et runAction ferme la gate AVANT tout test.
+       Bug hunt 3 : et stop() attend cet appel-ci avant de la retirer. */
+    if (!enterCall()) {
+        return kIOReturnNotReady;
+    }
     /* K9 : le retour de runAction est un verdict, pas un détail — l'action a
        pu ne jamais s'exécuter (gate fermée, work loop retiré). */
     kr = fGate->runAction(&POMPPCGPU::submitGated, &a);
+    leaveCall();
     *fence = a.fence; *status = a.status; *statusPC = a.statusPC;
     if (kr != kIOReturnSuccess) {
         return kr;
@@ -725,10 +796,24 @@ IOReturn POMPPCGPU::waitGated(OSObject * owner, void * a0, void *, void *, void 
 
 IOReturn POMPPCGPU::waitFence(UInt32 target, UInt32 timeoutMs, UInt32 * current)
 {
+    IOReturn kr;
+
+    *current = 0;
+    /* Bug hunt 3 : lecture MMIO comprise — stop() coupe l'accès mémoire du
+       device et retire la gate, l'appel est compté d'un bout à l'autre. */
+    if (!enterCall()) {
+        return kIOReturnNotReady;
+    }
+    kr = waitFenceCounted(target, timeoutMs, current);
+    leaveCall();
+    return kr;
+}
+
+IOReturn POMPPCGPU::waitFenceCounted(UInt32 target, UInt32 timeoutMs, UInt32 * current)
+{
     UInt32 f;
     UInt32 waited = 0;
 
-    *current = 0;
     if (!fRegs) {
         return kIOReturnNotReady;
     }
@@ -812,11 +897,18 @@ IOReturn POMPPCGPU::slotGated(OSObject * owner, void * a0, void *, void *, void 
     a->result = kIOReturnSuccess;
     if (a->op == SLOT_OP_ALLOC) {
         a->slot = -1;
+        if (self->fStopping) {
+            /* Bug hunt 3 : entré juste avant stop() — pas de tranche pour un
+               client que personne ne rendra. */
+            a->result = kIOReturnNotReady;
+            return kIOReturnSuccess;
+        }
         for (i = 0; i < (int) self->fClientCount; i++) {
             /* fSlotBusy : une tranche dont les objets sont encore en cours de
                destruction n'est pas libre, même si son client est parti. */
             if (!self->fClients[i] && !self->fSlotBusy[i]) {
                 self->fClients[i] = a->client;
+                self->fFreePending[i] = 0;
                 a->slot = i;
                 break;
             }
@@ -837,16 +929,25 @@ IOReturn POMPPCGPU::slotGated(OSObject * owner, void * a0, void *, void *, void 
         return kIOReturnSuccess;
     }
     if (self->fSlotBusy[a->slot]) {
-        /* L'autre fil (clientClose ⊥ clientDied) s'en occupe déjà. */
+        /* L'autre fil (clientClose ⊥ clientDied) s'en occupe déjà — ou un
+           RESET du même client (bug hunt 3) : ce FREE est alors noté, et le
+           fil occupé rendra la tranche en sortant. Sinon personne ne la
+           rendait : clientClose a déjà mis fSlot à -1, RESET garde la
+           tranche, UC::stop ne voit plus rien — « 5e client refusé ». */
+        if (a->op == SLOT_OP_FREE) {
+            self->fFreePending[a->slot] = a->client;
+        }
         a->result = kIOReturnBusy;
         return kIOReturnSuccess;
     }
     self->fSlotBusy[a->slot] = 1;
     self->destroyClientObjects(a->slot);        /* peut dormir : gate relâchée */
     self->fSlotBusy[a->slot] = 0;
-    if (a->op == SLOT_OP_FREE && self->fClients[a->slot] == a->client) {
+    if ((a->op == SLOT_OP_FREE || self->fFreePending[a->slot] == a->client) &&
+        self->fClients[a->slot] == a->client) {
         self->fClients[a->slot] = 0;
     }
+    self->fFreePending[a->slot] = 0;
     return kIOReturnSuccess;
 }
 
@@ -857,10 +958,11 @@ int POMPPCGPU::allocSlot(POMPPCGPUUserClient * client)
 
     a.op = SLOT_OP_ALLOC; a.client = client; a.slot = -1;
     a.result = kIOReturnNotReady;
-    if (!fGate || fStopping) {
+    if (!enterCall()) {                                 /* bug hunt 3 */
         return -1;
     }
     kr = fGate->runAction(&POMPPCGPU::slotGated, &a);   /* K9 */
+    leaveCall();
     if (kr != kIOReturnSuccess) {
         GPULog("allocSlot: gate refused (0x%x)\n", (unsigned int) kr);
         return -1;
@@ -881,11 +983,12 @@ IOReturn POMPPCGPU::freeSlot(int slot, POMPPCGPUUserClient * client)
     /* K9 — une tranche non rendue est perdue POUR TOUJOURS (« 5e client
        refusé »). Si la gate ne veut plus de nous, on rend au moins la tranche
        dans la comptabilité, sans toucher au device. */
-    if (!fGate || fStopping) {
+    if (!enterCall()) {                                 /* bug hunt 3 */
         forgetSlot(slot, client);
         return kIOReturnNotReady;
     }
     kr = fGate->runAction(&POMPPCGPU::slotGated, &a);
+    leaveCall();
     if (kr != kIOReturnSuccess) {
         GPULog("freeSlot(%d): gate refused (0x%x)\n", slot, (unsigned int) kr);
         forgetSlot(slot, client);
@@ -904,28 +1007,30 @@ IOReturn POMPPCGPU::resetSlot(int slot, POMPPCGPUUserClient * client)
     if (slot < 0 || (UInt32) slot >= fClientCount) {
         return kIOReturnBadArgument;
     }
-    if (!fGate || fStopping) {
+    if (!enterCall()) {                                 /* bug hunt 3 */
         return kIOReturnNotReady;
     }
     kr = fGate->runAction(&POMPPCGPU::slotGated, &a);
+    leaveCall();
     return (kr == kIOReturnSuccess) ? a.result : kr;
 }
 
 /* K1 — COMPTABILITÉ SILENCIEUSE : ni gate, ni MMIO, ni attente. Appelée par le
    fil de terminaison (kextunload, terminate), pour qui entrer dans la gate est
    une panic (removeEventSource a fait setWorkLoop(0), et runAction ferme la
-   gate AVANT tout test) et parler au device une écriture dans le vide. Une
-   écriture de pointeur alignée est atomique sur PowerPC ; le pire effet d'une
-   course avec allocSlot est qu'un nouveau client prenne la tranche un
-   instant plus tôt, ce qui est précisément ce qu'on veut. */
+   gate AVANT tout test) et parler au device une écriture dans le vide.
+   Bug hunt 4 : tester PUIS écrire, hors gate, pouvait effacer la tranche d'un
+   AUTRE client — la gate l'avait rendue (RESET fini, fFreePending) et
+   redonnée par allocSlot entre notre lecture et notre écriture (SMP=2).
+   Comparer-et-échanger atomique : on n'efface que si c'est encore NOUS.
+   Pointeurs de 32 bits sur le noyau PowerPC de Tiger. */
 void POMPPCGPU::forgetSlot(int slot, POMPPCGPUUserClient * client)
 {
-    if (slot < 0 || (UInt32) slot >= fClientCount) {
+    if (slot < 0 || (UInt32) slot >= fClientCount || !client) {
         return;
     }
-    if (fClients[slot] == client) {
-        fClients[slot] = 0;
-    }
+    OSCompareAndSwap((UInt32) client, 0, (UInt32 *) &fClients[slot]);
+    OSCompareAndSwap((UInt32) client, 0, (UInt32 *) &fFreePending[slot]);
 }
 
 IODeviceMemory * POMPPCGPU::slotRange(int slot)
@@ -1020,17 +1125,22 @@ void POMPPCGPU::destroyClientObjects(int slot)
    effet de bord, par contrat de qgpu_abi.h. */
 IOReturn POMPPCGPU::readReg(UInt32 offset, UInt32 * value)
 {
+    IOByteCount len;
+    IOReturn    kr = kIOReturnSuccess;
+
     *value = 0;
-    if (!fRegs || !fRegsRange || fStopping) {
+    if (!fRegs || !fRegsRange || !enterCall()) {        /* bug hunt 3 */
         return kIOReturnNotReady;
     }
     /* Sans addition : offset = 0xFFFFFFFC ferait repasser offset + 4 à 0. */
-    IOByteCount len = fRegsRange->getLength();
+    len = fRegsRange->getLength();
     if ((offset & 3) || offset >= len || len - offset < 4) {
-        return kIOReturnBadArgument;
+        kr = kIOReturnBadArgument;
+    } else {
+        *value = regRead(offset);
     }
-    *value = regRead(offset);
-    return kIOReturnSuccess;
+    leaveCall();
+    return kr;
 }
 
 /* ─────────────────────────────── user client ────────────────────────────── */
@@ -1078,6 +1188,7 @@ bool POMPPCGPUUserClient::initWithTask(task_t owningTask, void * securityID, UIn
     }
     fTask = owningTask;
     fOwner = 0;
+    fOwnerRef = 0;
     fSlot = -1;
     return true;
 }
@@ -1087,6 +1198,11 @@ bool POMPPCGPUUserClient::start(IOService * provider)
     fOwner = OSDynamicCast(POMPPCGPU, provider);
     if (!fOwner) {
         return false;
+    }
+    /* Bug hunt 3 : retenu jusqu'à free() — voir fOwnerRef. */
+    if (!fOwnerRef) {
+        fOwnerRef = fOwner;
+        fOwnerRef->retain();
     }
     if (!super::start(provider)) {
         fOwner = 0;
@@ -1156,6 +1272,18 @@ IOReturn POMPPCGPUUserClient::clientClose(void)
 IOReturn POMPPCGPUUserClient::clientDied(void)
 {
     return clientClose();
+}
+
+/* Bug hunt 3 : le POMPPCGPU retenu au start() est rendu ici, quand plus aucun
+   appel ne peut passer par ce client — pas au stop(), qu'un appel déjà parti
+   peut devancer. */
+void POMPPCGPUUserClient::free(void)
+{
+    if (fOwnerRef) {
+        fOwnerRef->release();
+        fOwnerRef = 0;
+    }
+    super::free();
 }
 
 IOReturn POMPPCGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options,

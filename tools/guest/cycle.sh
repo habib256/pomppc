@@ -14,6 +14,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MAIN="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')"
 R="${MAIN:-$ROOT}/.run/cmr"; mkdir -p "$R"; T="$ROOT/tools/guest/tssh.sh"
 S=${SHOT_DIR:-$R}
+# moniteur de la VM quotidienne, publié par run_tiger.sh (jamais celui d'une VM SNAPSHOT=1)
+MON="$(cat "${MAIN:-$ROOT}/.run/tiger.mon" 2>/dev/null)"; MON="${MON:-${MAIN:-$ROOT}/.run/mon.sock}"
 step(){ echo "== $(date +%H:%M:%S) $*"; }
 step "kill"; $T "killall 'Colin McRae Rally Mac' 2>/dev/null; sleep 2; killall -9 'Colin McRae Rally Mac' 2>/dev/null; true"
 if [ "${NOBUILD:-}" != 1 ]; then
@@ -29,8 +31,8 @@ step "Jouer"; $T "osascript -e 'tell application \"System Events\" to tell proce
 step "titre"; $T "osascript -e 'tell application \"System Events\" to keystroke return' 2>&1"; sleep 22
 step "menu"; $T "osascript -e 'tell application \"System Events\" to keystroke return' 2>&1"; sleep ${RACE_WAIT:-60}
 [ "${DUMP:-}" = 1 ] && { step "GO"; $T "touch /tmp/cmr-go"; sleep 20; }
-step "capture"; python3 "$ROOT/scripts/moncmd.py" "${MAIN:-$ROOT}/.run/mon.sock" "screendump $S/cycle.ppm" >/dev/null; sips -s format png "$S/cycle.ppm" --out "$S/cycle.png" >/dev/null 2>&1
-step "capture avant kill"; python3 "$ROOT/scripts/moncmd.py" "${MAIN:-$ROOT}/.run/mon.sock" "screendump $S/cycle2.ppm" >/dev/null; sips -s format png "$S/cycle2.ppm" --out "$S/cycle2.png" >/dev/null 2>&1
+step "capture"; python3 "$ROOT/scripts/moncmd.py" "$MON" "screendump $S/cycle.ppm" >/dev/null; sips -s format png "$S/cycle.ppm" --out "$S/cycle.png" >/dev/null 2>&1
+step "capture avant kill"; python3 "$ROOT/scripts/moncmd.py" "$MON" "screendump $S/cycle2.ppm" >/dev/null; sips -s format png "$S/cycle2.ppm" --out "$S/cycle2.png" >/dev/null 2>&1
 # sudo kill -9 : killgame.py (stub GDB) a échoué une fois (26/09) ; KILLGAME=1 pour l'ancien geste
 if [ "${KILLGAME:-}" = 1 ]; then step "kill"; python3 "$ROOT/tools/guest/killgame.py"
 else step "kill -9"; $T "echo tiger974 | sudo -S killall -9 'Colin McRae Rally Mac' 2>&1 | grep -v Password; true"; fi; sleep 15

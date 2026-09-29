@@ -292,8 +292,9 @@ Les redémarrages de la VM sont autorisés ; un seul intervenant dessus à la fo
   entrée dans `CHANGELOG.md` quand il est fini.
 - **Un seul agent sur la VM à la fois** ; les autres travaillent en copie isolée, sur le cœur et
   les tests natifs.
-- **Après un `killall` de DOOM 3, redémarrer l'invité.** Avant `./run_tiger.sh` : `rm -f
-  .run/tiger.lock`. Après `install.sh` en root : `sudo chown -R tiger ~/pomppc-build`.
+- **Après un `killall` de DOOM 3, redémarrer l'invité.** Ne jamais supprimer `.run/tiger.lock`
+  (le flock meurt avec QEMU ; « Tiger tourne déjà » = un QEMU vit encore). Après `install.sh` en
+  root : `sudo chown -R tiger ~/pomppc-build`.
 
 ---
 

@@ -39,7 +39,8 @@ SRC="${QEMU_SRC:-$HOME/src/qemu}"
 TAG="${QEMU_TAG:-v9.2.0}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}"
 
-if [ ! -d "$SRC/.git" ]; then
+# -e et non -d : dans un worktree git, .git est un fichier.
+if [ ! -e "$SRC/.git" ]; then
   echo "▶ clone de QEMU $TAG dans $SRC"
   git clone --depth 1 --branch "$TAG" https://gitlab.com/qemu-project/qemu.git "$SRC"
 fi
@@ -68,10 +69,15 @@ rej_show()  { find . -name '*.rej' | sort | sed 's/^/    /'; }
 rej_any()   { [ -n "$(find . -name '*.rej' -print -quit)" ]; }
 
 # Patch qui doit s'appliquer PROPREMENT : le moindre rejet est une erreur.
+# --forward est INDISPENSABLE : sans tty, le patch d'Apple (2.0-12u11) répond
+# « Assume -R? [y] » tout seul à un hunk déjà posé, DÉFAIT le fichier, sort en
+# 0 et ne laisse aucun .rej — un arbre à moitié patché repartait à moitié
+# dépatché, en silence (bug hunt du 29/09, 3e passe). Avec --forward, un hunk
+# déjà posé donne un .rej et le code 1 : l'erreur voulue.
 patch_strict() { # patch_strict <fichier.patch> [args de patch…]
   local p="$1" rc=0; shift
   rej_clean
-  patch -p1 "$@" < "$p" || rc=$?
+  patch -p1 --forward "$@" < "$p" || rc=$?
   if [ "$rc" -ne 0 ] || rej_any; then
     echo "⚠ patch REJETÉ (code $rc) : $p" >&2
     rej_any && { echo "  hunks refusés, à relire :" >&2; rej_show >&2; }
@@ -107,14 +113,17 @@ patch_forward() { # patch_forward <fichier.patch> <fichier> <motif> [<fichier> <
   fi
 }
 
-# --- 1. SMP mac99 (série BALATON, révisée : async_run_on_cpu, GPIO 4 seul) ---
-# Le garde teste un marqueur PROPRE À CETTE VERSION du patch. L'ancien
-# (« CPU1 reset ») ne convient plus : il survit dans un commentaire des deux
-# versions, si bien qu'un arbre portant la série précédente l'aurait satisfait,
+# --- 1. SMP mac99 (série BALATON, révisée : async_run_on_cpu, GPIO 4 seul,
+#        CPU 1 tenu en reset ligne basse et démarré au relâchement) ---
+# Le garde teste un marqueur PROPRE À CETTE VERSION du patch : « define
+# GPIO_RESET_CPU1 » (29/09/2026). Pas le nom seul : KL_GPIO_RESET_CPU1 est déjà
+# dans un commentaire des versions précédentes. Les marqueurs précédents
+# (« CPU1 reset », puis macio_gpio_set_extirq) survivent dans les versions
+# suivantes : un arbre portant une série plus ancienne les aurait satisfaits,
 # l'étape aurait été sautée et la nouvelle série jamais appliquée — en silence.
 # C'est la classe de panne que ce script existe pour supprimer.
-if ! grep -q "macio_gpio_set_extirq" hw/misc/macio/gpio.c; then
-  # Arbre portant l'ANCIENNE série : ses hunks tomberaient sur des fichiers
+if ! grep -q "define GPIO_RESET_CPU1" hw/misc/macio/gpio.c; then
+  # Arbre portant une ANCIENNE série : ses hunks tomberaient sur des fichiers
   # déjà modifiés. Retour à l'amont sur les trois fichiers du patch d'abord.
   if grep -q "CPU1 reset" hw/misc/macio/gpio.c; then
     echo "▶ ancienne série SMP détectée : retour à l'amont de gpio.c," \
@@ -155,7 +164,19 @@ cp "$ROOT/patches/screamer/screamer.h" include/hw/audio/screamer.h
 # Vu en vrai : un `git checkout hw/misc/macio/macio.c` pour un A/B avait défait
 # l'instanciation, meson.build portait toujours CONFIG_SCREAMER, le patch a été
 # sauté — et le binaire compilait le device sans jamais le brancher.
-if ! grep -q "screamer" hw/misc/macio/macio.c; then
+# Marqueur PROPRE À CETTE VERSION (29/09/2026) : la ligne qui branche l'IRQ 2
+# (réception) en OldWorld. « screamer » seul est aussi dans l'ancienne version,
+# qui connectait l'IRQ 1 deux fois : elle aurait satisfait le garde, et le
+# correctif ne serait jamais parti. Aucun autre patch ne touche ces cinq
+# fichiers : un arbre à l'ancienne version est ramené à l'amont sur eux avant
+# de poser la nouvelle.
+WIRE_MARK="sysbus_connect_irq(sbd, 2, qdev_get_gpio_in(pic_dev, OLDWORLD_SCREAMER_RX_IRQ))"
+if ! grep -qF "$WIRE_MARK" hw/misc/macio/macio.c; then
+  if grep -q "screamer" hw/misc/macio/macio.c; then
+    echo "▶ ancien câblage screamer détecté : retour à l'amont de ses cinq fichiers"
+    git checkout -- hw/misc/macio/macio.c include/hw/misc/macio/macio.h \
+      hw/audio/Kconfig hw/audio/meson.build hw/ppc/Kconfig
+  fi
   echo "▶ câblage screamer (Kconfig / meson / macio)"
   # --forward : les hunks déjà appliqués (meson/Kconfig) sont sautés au lieu de
   # faire échouer le patch ; ceux qui manquent sont posés. Les cinq fichiers du
@@ -169,6 +190,10 @@ if ! grep -q "screamer" hw/misc/macio/macio.c; then
     hw/ppc/Kconfig                'select SCREAMER'
   rm -f hw/misc/macio/macio.c.orig include/hw/misc/macio/macio.h.orig
 fi
+grep -qF "$WIRE_MARK" hw/misc/macio/macio.c || {
+  echo "⚠ câblage screamer : l'IRQ de réception OldWorld n'est pas branchée" >&2
+  echo "  (ancienne version du patch dans l'arbre ; voir patches/screamer/)" >&2
+  exit 1; }
 
 # --- 4. Device qfb-pci ---
 echo "▶ installation de hw/display/qfb-pci.c"
@@ -365,7 +390,21 @@ TCG34_MARKERS
   # M4, un tampon posé hors de la fenêtre de 4 Gio du texte de QEMU (un
   # lancement sur deux environ) ralentit tout le processus de ~10 % : c'étaient
   # « les deux régimes ». Le patch imprime aussi, toujours, où le tampon est posé.
-  if ! grep -q "tcg_jit_near" tcg/region.c; then
+  # Marqueur PROPRE À CETTE VERSION (29/09/2026, bug hunt 4) : « x-jit-near
+  # sur l'alias », imprimé par le remap split-wx depuis que la recherche avec
+  # réduction porte sur l'alias RX et non plus sur la vue RW. « tcg_jit_near »
+  # est dans toutes les versions, et « split-wx, alias RX » dans la
+  # précédente : l'un ou l'autre aurait satisfait un arbre à l'ancienne, et
+  # le correctif ne serait jamais parti. Piège voisin :
+  # « size = region.total_size » est une sous-chaîne de « tb_size = … » — le
+  # contrôle d'après l'ancre en début de ligne. Aucun autre patch ne touche ces
+  # trois fichiers (0008 non plus) : retour à l'amont sur eux, puis nouvelle
+  # version.
+  if ! grep -q "x-jit-near sur l'alias" tcg/region.c; then
+    if grep -q "tcg_jit_near" tcg/region.c; then
+      echo "▶ ancien patch x-jit-near détecté : retour à l'amont de ses trois fichiers"
+      git checkout -- accel/tcg/tcg-all.c include/tcg/startup.h tcg/region.c
+    fi
     echo "▶ patch TCG : placement du tampon du JIT (x-jit-near)"
     patch_forward "$ROOT/patches/tcg/0006-tcg-jit-near.patch" \
       accel/tcg/tcg-all.c   x-jit-near \
@@ -382,6 +421,9 @@ accel/tcg/tcg-all.c x-jit-near
 include/tcg/startup.h tcg_jit_near
 tcg/region.c tcg_jit_near
 tcg/region.c tb_size = region.total_size
+tcg/region.c ^    size = region.total_size;
+tcg/region.c split-wx, alias RX
+tcg/region.c x-jit-near sur l'alias
 TCG6_MARKERS
   # --- 4 nonies. Flottant scalaire simple sans helper (x-fp-inline) ---
   # patches/tcg/0007, docs/tcg-g4.md §15 : fadds fsubs fmuls fmadds fmsubs

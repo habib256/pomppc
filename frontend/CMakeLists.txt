@@ -74,6 +74,7 @@ add_executable(pomppc
     src/main.cpp
     src/QemuBridge.cpp
     src/StartupChime.cpp
+    src/FrontendSettings.cpp
     ${IMGUI_SOURCES})
 target_include_directories(pomppc PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends src)
 if(APPLE)
@@ -104,6 +105,10 @@ if(BUILD_TESTING)
     target_include_directories(chime_test PRIVATE src)
     target_compile_options(chime_test PRIVATE -UNDEBUG)
     add_test(NAME startup_chime COMMAND chime_test)
+    add_executable(settings_test tests/settings_test.cpp src/FrontendSettings.cpp)
+    target_include_directories(settings_test PRIVATE src)
+    target_compile_options(settings_test PRIVATE -UNDEBUG)
+    add_test(NAME frontend_settings COMMAND settings_test)
 endif()
 
 add_executable(bridge_probe tests/bridge_probe.cpp src/QemuBridge.cpp)

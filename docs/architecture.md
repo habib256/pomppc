@@ -105,12 +105,13 @@ Ne resoumettre automatiquement que lorsque la non-acceptation est établie
 (`QUEUE_FULL`), sous peine de rejouer deux fois des commandes.
 
 Le plugin alterne deux moitiés suivies par `Half.busy` et `Half.fence` ;
-`switch_half` attend avant réutilisation. **L1 : le chemin timeout de
-`wait_half_ex` efface pourtant `h->busy` et `h->npost` sans barrière atteinte.**
-La désactivation de l'asynchrone et le marquage ultérieur des contextes cassés
-ne prouvent pas l'arrêt du lecteur hôte. M1 n'est donc pas garanti sur ce chemin.
-Correction attendue : conserver la zone en quarantaine tant que son achèvement
-ou l'arrêt effectif du device n'est pas établi. Épreuve : retarder le backend
+`switch_half` attend avant réutilisation. **L1 (corrigé le 29/09/2026) :** sur
+délai, `wait_half_ex` garde la moitié en quarantaine et réattend ; après
+`WAIT_GIVEUP` délais consécutifs, `stream_dead()` la retire pour toujours
+(flux détourné vers un tampon privé, `G.state = -1`), sans jamais la rendre à
+l'écriture. Un seul fil attend verrou relâché à la fois : au retour de
+`flush()`, `G.halt` est nul et le flux reste à l'appelant jusqu'à ce qu'il
+relâche lui-même le verrou. Épreuve restant à faire : retarder le backend
 au-delà de `WAIT_MS` et vérifier l'absence de réécriture de la zone en vol.
 
 Sources : `qgpu_run_job`, `qgpu_ctrl_read`, `qgpu_sync_gave_up` ;
@@ -146,12 +147,22 @@ partiel ou refusé ne doit pas valider des pixels qu'il n'a pas synchronisés.
 Le retour vers Apple dépend de cette cohérence ; il n'est pas une récupération
 universelle garantie pour tous les états, notamment sous programmes ARB.
 
-**L6 : `sync_to_host`, branche couleur, initialise `done = !can`** puis peut
-poser `SYNCED` lorsque la copie est impossible (source absente, format non
-pris en charge ou arène trop petite). Ne pas déduire une égalité des pixels
-du seul drapeau. Il reste à distinguer explicitement « contenu inutile »,
-« transfert possible/ordonné » et « transfert impossible », avec épreuves
-de format et de taille aux limites.
+**L6 : `sync_to_host` pose encore `SYNCED` quand il n'y a rien à porter**
+(source absente, 16 bits sans la v15). Depuis la 3e passe du bug hunt du
+29/09, la taille n'en fait plus partie : téléversements et relectures d'une
+image plus grande que l'arène partent par bandes de lignes (`band_rows`,
+`upload_bands`, `queue_readback_to`), et `SYNCED` n'est posé que si toutes
+les bandes sont parties. Une relecture dont la soumission s'est arrêtée avant
+elle (`posts_lost` : refus synchrone hors dessin, ou `ERRORS` qui a bougé en
+asynchrone) repasse `SYNCED → HOST_NEWER`, et `sync_to_sw_locked` relit.
+Depuis la 4e passe, seuls le contexte et le canal (couleur ou profondeur) de
+la relecture perdue basculent (`Post.ctx`), `SYNCED` est posé AVANT les
+bandes (un vidage entre deux bandes peut perdre les premières), et quand
+`ERRORS` bouge, TOUTES les moitiés encore en vol perdent leurs relectures.
+L'invalidation descend jusqu'à `err_floor`, la plus ancienne soumission que
+la dernière lecture propre d'`ERRORS` ne couvrait pas.
+Ne pas déduire une égalité des pixels du seul drapeau pour les deux cas
+« rien à porter ».
 
 Sources : `exec_one`, `qgpu_core_client_reset` dans le cœur ; `sync_to_host`,
 `sync_to_sw_locked`, `run_posts` dans le plugin ;

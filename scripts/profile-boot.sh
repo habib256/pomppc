@@ -16,7 +16,7 @@ DUR="${1:-55}"
 
 SCR="${POMPPC_SCRATCH:-$ROOT/.run}"; mkdir -p "$SCR"
 host_lock_vm 9 "$SCR/tiger.lock"   # AVANT le rm : le socket peut être celui d'une VM vivante
-MON="$SCR/mon.sock"; rm -f "$MON"
+MON=$(host_mon_path "$SCR/mon.sock")   # une VM SNAPSHOT=1 ne tient pas le verrou
 PIDFILE="$SCR/profile.pid"; rm -f "$PIDFILE"
 mkdir -p "$ROOT/bench"          # gitignoré : absent d'un clone neuf
 DATA="$ROOT/bench/perf.data"

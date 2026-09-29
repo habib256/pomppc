@@ -39,6 +39,8 @@ Le plancher historique `QGPU_PROTO_MIN=12` ne dispense pas du transport v19.
 | Surface vers texture / lecture de texture | v20, `QGPU_CAP_SURF_TEX` / `QGPU_CAP_TEX_READBACK` |
 | Programmes GLSL et 16 unités d'image | v21, `QGPU_CAP_GLSL` |
 | Combineurs ATI et sources ZERO/ONE | v22, `QGPU_CAP_COMBINE3` |
+| Noms d'uniforms GLSL composés (`s.m`, `l[2].pos`) | v22, `QGPU_CAP_GLSL_PATHS` |
+| Plafond mémoire hôte non fatal (`QGPU_ST_NO_MEM`, `QGPU_REG_NOMEM`) | v22 (statut 11 ; registre à 0 sur un device plus ancien) |
 
 Le backend logiciel ne promet ni programmes ARB ni GLSL. L'annonce GLSL du backend
 GL dépend des points d'entrée 2.0, d'au moins 16 unités d'image et d'un programme
@@ -67,6 +69,40 @@ Le backend logiciel les calcule ; le backend GL n'annonce la capacité que si
 l'hôte annonce l'extension ATI. Le plugin exige version ≥22 **et** capacité,
 puis expose le bit 70 des extensions de GLEngine. `POMPPC_GL_COMBINE3=0`
 permet une comparaison sans annonce. Les huit unités fixes restent inchangées.
+
+### Plafond mémoire et noms GLSL composés (v22, 29/09/2026)
+
+Sans changer `QGPU_PROTO_VERSION` :
+
+- **`QGPU_ST_NO_MEM` (11)** — le cœur compte ce que le flux fait allouer à l'hôte
+  (niveaux de texture, surfaces, tampons, textes et tables de programmes), par
+  tranche et en tout ; `QGPU_MEM_MB` fixe le total (défaut : moitié de la RAM,
+  trois quarts de ce total par tranche). Au-delà, la commande d'allocation
+  (`SURF_CREATE`, `TEX_IMAGE3`, `SURF_TEX`, génération de mipmaps, `BUF_CREATE`,
+  `PROG_CREATE`, `PROG_STRING`, `GLSL_SOURCE`) n'alloue rien et rend `NO_MEM`,
+  **non fatal** : le lot continue. Les mises à jour d'un niveau ou d'un tampon
+  refusé (`TEX_SUBIMAGE`, `COPY_TEX`, `BUF_SUBDATA`) rendent aussi `NO_MEM`,
+  sans effet ; `BUF_DESTROY` d'un tampon refusé rend `OK`. Programmes (bug
+  hunt 3) : un identifiant dont le `PROG_CREATE` a été refusé fait rendre
+  `NO_MEM` à `PROG_STRING`, `PROG_LOCAL` et à tous les `GLSL_*` qui le visent
+  (au lieu d'un `BAD_ARG` fatal) ; `PROG_BIND` le lie quand même et rend
+  `NO_MEM` — les dessins qui suivent sont jetés (`BAD_ARG` non fatal) plutôt
+  que rendus par le programme lié avant ; `PROG_DESTROY` rend `OK` et libère
+  l'identifiant. Un `PROG_STRING` refusé rend le programme **cassé** (l'ancien
+  texte n'agit plus, sa mémoire est rendue) ; un `GLSL_SOURCE` refusé fait
+  rendre `NO_MEM` au `GLSL_LINK` suivant, qui laisse le programme cassé
+  jusqu'à la prochaine définition. `STATUS` porte la
+  première faute ; un arrêt survenu **après** un `NO_MEM` est rendu à sa place,
+  si bien que `NO_MEM` rendu garantit que tout le lot a été exécuté.
+  `QGPU_REG_NOMEM` (0x4C) compte les commandes refusées depuis le démarrage :
+  le plugin le relit par `QGPU_UC_READ_REG` quand `ERRORS` bouge en asynchrone.
+  `LIMIT` reste réservé aux identifiants déjà pris et aux tables pleines.
+- **`QGPU_CAP_GLSL_PATHS`** — annoncé par le cœur avec `QGPU_CAP_GLSL` :
+  `GLSL_UNIFORM` accepte les noms composés du linker GL 2.0, grammaire
+  `identifiant ( '.' identifiant | '[' n ']' )*` (n décimal sans zéro de tête,
+  cinq chiffres au plus, aucun segment en `gl_`). `GLSL_ATTRIB` reste limité
+  aux identifiants. Sans ce bit, le plugin laisse un tel programme au rendu
+  d'Apple.
 
 ## Transport, mémoire et durée de vie
 
@@ -295,6 +331,7 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_REG_SUBMIT_ST` | `0x40` |
 | `QGPU_REG_ERRORS` | `0x44` |
 | `QGPU_REG_QUEUE_DEPTH` | `0x48` |
+| `QGPU_REG_NOMEM` | `0x4C` |
 | `QGPU_REG_CLIENTS` | `0x80` |
 | `QGPU_REG_CLIENT_RESET` | `0x84` |
 | `QGPU_REG_LAYOUT` | `0x88` |
@@ -317,6 +354,7 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_ST_LIMIT` | `8` |
 | `QGPU_ST_BACKEND` | `9` |
 | `QGPU_ST_QUEUE_FULL` | `10` |
+| `QGPU_ST_NO_MEM` | `11` |
 | `QGPU_UC_GET_INFO` | `0` |
 | `QGPU_UC_SUBMIT` | `1` |
 | `QGPU_UC_WAIT_FENCE` | `2` |
@@ -344,6 +382,7 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_CAP_TEX_READBACK` | `0x00000800` |
 | `QGPU_CAP_GLSL` | `0x00001000` |
 | `QGPU_CAP_COMBINE3` | `0x00002000` |
+| `QGPU_CAP_GLSL_PATHS` | `0x00004000` |
 | `QGPU_MAX_CTX` | `128` |
 | `QGPU_MAX_SURF` | `128` |
 | `QGPU_MAX_SURF_DIM` | `4096` |

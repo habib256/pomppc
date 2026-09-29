@@ -122,6 +122,8 @@
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
+static void crash_hook_remove(void);
+static int crash_retired;               /* reste du 29/09 : plugin en déchargement */
 /* 24/09/2026 — garde de lecture des tableaux de l'application. Les copies
    clientes des VBO d'idTech4 (cache de sommets, memory plugin d'Apple) sont
    paginées : la plage [vmin, vmax] d'un glDrawElements peut déborder sur une
@@ -197,7 +199,9 @@ static const void *volatile dbg_plan;
 static const unsigned char *volatile dbg_vao;
 static void flush(void);
 static void drain_all(void);
-static void buf_raw_invalidate_all(void);
+static long submit_probe(void);       /* reste du 29/09 : sonde de SURF_CREATE */
+static unsigned long nomem_poll(void); /* 3e passe : ligne de base à l'ouverture */
+static void buf_raw_invalidate_from(unsigned long from);
 
 /* ───────────────────── dispositions relevées (Tiger 10.4.6) ─────────────────────
  * Contexte du GLDriver (argument r3 de toutes les procédures) : */
@@ -550,6 +554,9 @@ typedef struct PProg {
                                            (VPN_*) ; 0 = pas encore relu */
     unsigned long  ugen;                /* v21 : gldModifyPipelineProgram(masque 2) vus —
                                            un glUniform touche l'étage GLSL */
+    int            orphan;              /* ctx détruit, poignée encore détenue par
+                                           GLEngine (groupe de partage) : seule la
+                                           traduction vers `apple` reste valide */
 } PProg;
 static PProg pprog[PPROG_MAX];
 
@@ -633,6 +640,19 @@ typedef struct PTex {                   /* texture du GLDriver suivie par le plu
     unsigned long  surf_gen;            /*   swap_gen de la source à la dernière copie */
     int            surf_copied;         /*   au moins un SURF_TEX émis depuis la création */
     int            dump_rb;             /* vidage autonome : image hôte à relire (TEX_READBACK) */
+    unsigned long  nomem_until;         /* reste du 29/09 : l'hôte a refusé sa mémoire
+                                           (QGPU_ST_NO_MEM) — rendue par Apple jusqu'à
+                                           cette image, puis nouvel essai */
+    /* 3e passe (bug hunt du 29/09) — PERTE CIBLÉE. up_seq : numéro de la
+       dernière soumission qui a porté l'image de la texture (TEX_IMAGE3,
+       blanc, COPY_TEX, SURF_TEX) ; invalidate_mirrors_from ne remet à zéro
+       que les textures dont l'image a pu être perdue. lost_gen avance à
+       chaque remise à zéro (invalidation, NO_MEM) : un téléversement coupé
+       par un vidage qui l'a déclarée perdue ne la redit pas propre. */
+    unsigned long  up_seq;
+    unsigned long  lost_gen;
+    const void    *surf_src;            /* v20 : PCtx source de la dernière SURF_TEX */
+    unsigned long  surf_note;           /* diagnostic de taille déjà dit (upload_surftex) */
 } PTex;
 
 typedef struct TexUnit {
@@ -657,6 +677,9 @@ typedef struct PCtx {
     unsigned long  sw, sh;              /* taille de la surface */
     int            color, depth;        /* fraîcheur */
     int            broken;              /* plus jamais d'accélération */
+    unsigned long  nomem_until;         /* reste du 29/09 : surface refusée par le
+                                           plafond mémoire de l'hôte — pas de nouvel
+                                           essai avant cette image */
     unsigned long  st[QGPU_SK_COUNT];   /* état envoyé au device */
     int            st_valid;
     /* lot 4 (26/09) : compute_state sauté quand aucun dispatch n'a porté, depuis
@@ -826,6 +849,7 @@ typedef struct Post {                   /* copie à faire APRÈS la barrière */
     unsigned long  w, h, rowbytes;
     unsigned long  pixbytes;            /* 4 (xRGB/float32) ou 2 (1555/UNORM16) */
     float          scale;
+    const void    *ctx;                 /* 4e passe : PCtx relu (comparé, jamais lu) */
 } Post;
 
 /* Une moitié de la tranche, et la soumission qui l'occupe (v9). */
@@ -837,6 +861,7 @@ typedef struct Half {
                                            réattendre ni la réécrire */
     Post           post[MAX_POST];      /* relectures à recopier après la barrière */
     int            npost;
+    unsigned long  seq;                 /* 3e passe : G.sub_seq de la soumission en vol */
 } Half;
 
 typedef struct PBuf PBuf;
@@ -875,6 +900,25 @@ static struct {
     const char     *async_why;          /* pourquoi il ne l'est pas */
     unsigned long   errors;             /* QGPU_REG_ERRORS vu à la dernière soumission */
     int             err_valid;
+    /* Reste du 29/09 — PLAFOND DE MÉMOIRE HÔTE (QGPU_ST_NO_MEM, non fatal).
+       nomem_reg : dernier QGPU_REG_NOMEM lu ; nomem_until : pression mémoire,
+       aucun NOUVEL objet hôte (texture, tampon, surface) avant cette image. */
+    unsigned long   nomem_reg;
+    int             nomem_valid;
+    /* 3e passe : numéro de la soumission EN COURS DE CONSTRUCTION (1, 2…) ;
+       submit_cur et submit_probe le font avancer. probe_op : opcode de la
+       commande refusée par la dernière sonde (0 : aucune). n_posts_lost :
+       relectures jetées (sync_to_sw_locked réessaie). */
+    unsigned long   sub_seq;
+    /* 4e passe : plus ancienne soumission que la dernière lecture PROPRE
+       d'ERRORS ne couvre pas (en vol à ce moment-là). Les sondes et les
+       soumissions synchrones consomment des numéros entre deux doorbells
+       asynchrones : « seq − 2 » ne suffisait pas. */
+    unsigned long   err_floor;
+    unsigned long   probe_op;
+    unsigned long   n_posts_lost;
+    unsigned long   nomem_until;
+    unsigned long   n_nomem;
     unsigned long  *cmd;                /* = win */
     unsigned long   ncmd;
     unsigned long   vtx;                /* octets utilisés depuis VTX_OFF */
@@ -905,6 +949,12 @@ static struct {
        indices ni à l'arène : stream_ready() endort les écrivains. */
     int             halt;
     int             wait_miss;          /* F8 : dépassements de barrière CONSÉCUTIFS */
+    /* L1 (docs/architecture.md, M3) : l'hôte n'a pas atteint une barrière en
+       WAIT_GIVEUP délais consécutifs. La moitié en vol reste EN QUARANTAINE
+       (jamais réécrite : un job accepté peut encore lire BAR0), le flux est
+       détourné vers `dead_buf` et plus rien ne part vers l'hôte. */
+    int             dead;
+    unsigned char  *dead_buf;
     unsigned long   ctx_used, surf_used;
     unsigned long   tex_used[(QGPU_CLIENT_TEX_IDS + 31) / 32];
     /* Finding 10 (relecture du 29/09) : textures détruites quand aucun
@@ -1154,7 +1204,10 @@ enum {
     /* v16 : programme refusé par l'hôte ; programme de fragments hors bornes */
     NO_G_PROG_HOST, NO_G_PROG_UNITS,
     /* v20 : texture de surface dont la source n'est pas rendue par l'hôte */
-    NO_TEX_SURF, NO_COUNT
+    NO_TEX_SURF,
+    /* reste du 29/09 : plafond de mémoire de l'hôte (QGPU_ST_NO_MEM) */
+    NO_TEX_NOMEM,
+    NO_COUNT
 };
 static const char *const no_name[NO_COUNT] = {
     "buffer", "logicop/stipple/smooth", "fog", "polygonmode", "depth",
@@ -1168,6 +1221,7 @@ static const char *const no_name[NO_COUNT] = {
     "raw:null-array", "apple:nan-vertex", "raw:generic-attribs",
     "prog:host-refused", "prog:units",
     "surface-texture",
+    "host-memory",
 };
 static unsigned long no_count[NO_COUNT];
 static char no_detail[NO_COUNT][64];
@@ -1901,6 +1955,7 @@ void pomppc_backend_fini(void)
         pomppc_log("POMPPC: plugin déchargé, tranche %lu rendue\n", G.q.index);
     }
     G.state = -1;
+    crash_hook_remove();                /* reste du 29/09 : NSUnLinkModule suit */
     pthread_mutex_unlock(&G.mu);
 }
 
@@ -1912,7 +1967,9 @@ void pomppc_backend_fini(void)
  * sont pas sûrs après fork, et fermer le user client détruirait les objets du
  * PÈRE) : il OUBLIE. G.mu est relâché ici parce que le handler « prepare » l'a
  * pris dans le fil qui appelle fork(), et que c'est ce fil-là qui continue. */
-void pomppc_backend_forget(void)
+static pid_t owner_pid;                 /* processus qui a ouvert la tranche */
+
+static void backend_forget_locked(void)
 {
     G.state = -1;
     G.async = 0;
@@ -1935,6 +1992,11 @@ void pomppc_backend_forget(void)
     G.raw_ctx = 0;
     frame_file = NULL;                  /* le FILE* du père : ne pas s'en servir */
     qgpu_forget(&G.q);
+}
+
+void pomppc_backend_forget(void)
+{
+    backend_forget_locked();
     pthread_mutex_unlock(&G.mu);
 }
 
@@ -2017,6 +2079,7 @@ void pomppc_backend_init(void)
             why = "POMPPC_GL_DISABLE";
         } else if (qgpu_open(&G.q, &why) == 0) {
             G.state = 1;
+            owner_pid = getpid();       /* reste du 29/09 : fork avant atfork */
             crash_hook_install();       /* 24/09 : journal du plantage avant Quit() */
             /* Une seule moitié par défaut : le mode synchrone garde alors
                exactement la disposition et le comportement d'avant la v9. */
@@ -2180,6 +2243,13 @@ void pomppc_backend_init(void)
                                getenv("POMPPC_GL_NATIVE_RANGE")[0] == '0');
             G.pixtex = -1;
             G.pixtex_w = G.pixtex_h = 0;
+            /* 3e passe : numéros de soumission (perte ciblée) à partir de 1 —
+               0 veut dire « tout » pour invalidate_mirrors_from. Et la ligne
+               de base de QGPU_REG_NOMEM lue MAINTENANT : lue au premier refus,
+               elle comptait déjà les refus de ce lot-là (d = 0), et les
+               autres textures refusées du lot n'étaient jamais renvoyées. */
+            G.sub_seq = 1;
+            nomem_poll();
             G.buf_base = G.q.buf_base;       /* v19 : plages lues dans le device */
             G.query_base = G.q.query_base;
             /* Seulement si le bilan est demandé : un atexit pointe dans NOTRE
@@ -2366,17 +2436,40 @@ static void close_raw(void)
     G.raw_lots = 0;
 }
 
+/* L1 : abandonne les séries ouvertes sans rien écrire (hôte muet). */
+static void close_run_drop(void)
+{
+    G.run_ctx = 0;
+    G.run_count = 0;
+    G.raw_ctx = 0;
+    G.raw_count = 0;
+    G.raw_idx = 0;
+    G.raw_nidx = 0;
+    G.raw_lots = 0;
+}
+
 /* Réserve `words` mots de flux pour le contexte p (CTX_BIND inclus au besoin).
    La marge couvre ce que close_run et close_raw peuvent encore écrire, leurs
    CTX_BIND compris (4 mots : deux liaisons possibles). */
 static unsigned long *reserve(PCtx *p, unsigned long words)
 {
     unsigned long *c;
-    stream_ready();                     /* F9 : G.cmd/G.ncmd relus après */
-    close_run();
-    close_raw();
-    if (G.ncmd + words + 4 + QGPU_LEN_DRAW_N + QGPU_LEN_DRAW_RAW_BUF > CMD_WORDS)
+    /* ≥ 3 fils : même règle qu'arena_alloc — la place se constate verrou
+       tenu, sans attente en cours ; aucun relâchement entre elle et l'écriture.
+       Après stream_dead, G.cmd est le tampon privé : on y écrit dans le vide. */
+    for (;;) {
+        stream_ready();                 /* F9 : G.cmd/G.ncmd relus après */
+        close_run();
+        close_raw();
+        if (G.dead) {
+            if (G.ncmd + words + 4 > CMD_WORDS)
+                G.ncmd = 0;
+            break;
+        }
+        if (G.ncmd + words + 4 + QGPU_LEN_DRAW_N + QGPU_LEN_DRAW_RAW_BUF <= CMD_WORDS)
+            break;
         flush();
+    }
     if (G.bound != p) {
         c = G.cmd + G.ncmd;
         c[0] = QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX);
@@ -2409,13 +2502,23 @@ static int arena_fits(unsigned long n)
 
 static long arena_alloc(unsigned long n, unsigned long *off)
 {
-    stream_ready();                     /* F9 : G.arena/G.hb relus après */
     n = (n + 3) & ~3UL;
-    if (ARENA_OFF + G.arena + n > G.half || G.h[G.cur].npost >= MAX_POST ||
-        G.ncmd + ARENA_CMD_ROOM > CMD_WORDS) {
-        flush();
-        if (ARENA_OFF + n > G.half)
+    if (ARENA_OFF + n > G.half)
+        return 0;
+    /* ≥ 3 fils : on reteste APRÈS le vidage, flux à nous. flush() rend la
+       main avec G.halt nul (wait_half_ex n'admet qu'un attendant), mais
+       stream_ready() peut encore dormir et laisser d'autres fils remplir la
+       moitié : la place n'est acquise que si le test passe verrou tenu, sans
+       attente en cours — et alors le reserve() de l'appelant ne relâche plus
+       G.mu avant d'écrire sa commande. */
+    for (;;) {
+        stream_ready();                 /* F9 : G.arena/G.hb relus après */
+        if (G.dead)                     /* L1 : l'arène n'est plus à nous */
             return 0;
+        if (ARENA_OFF + G.arena + n <= G.half && G.h[G.cur].npost < MAX_POST &&
+            G.ncmd + ARENA_CMD_ROOM <= CMD_WORDS)
+            break;
+        flush();
     }
     /* ABSOLU dans la tranche : une copie différée peut survivre au changement
        de moitié, et se relit alors par G.q.win + off. */
@@ -2430,8 +2533,21 @@ static long arena_alloc(unsigned long n, unsigned long *off)
  * alors un état que l'hôte n'a jamais reçu, et l'image reste fausse
  * DURABLEMENT : c'est le `TEX_DESTROY BAD_ARG` de la sortie d'UT2004
  * (docs/re/ut2004-demo.md). On les invalide donc TOUS, dans les trois branches
- * qui gardent l'accélération. Coût : une image entière d'état renvoyé. */
-static void invalidate_mirrors(void)
+ * qui gardent l'accélération. Coût : une image entière d'état renvoyé.
+ *
+ * 3e passe (bug hunt du 29/09) — PERTE CIBLÉE. Tout remettre à zéro à chaque
+ * mouvement d'ERRORS (le compteur est global : sondes refusées, NO_MEM, ménage
+ * d'un autre client) retéléversait TOUTES les textures, resondait TOUS les
+ * programmes, et surtout effaçait les textures dont l'image n'existe que sur
+ * l'hôte (cibles de COPY_TEX, textures de surface) : reflet de la carrosserie
+ * de Colin McRae, rendu une fois au chargement, perdu jusqu'à la fin de la
+ * course. `from` borne ce qui a pu être perdu : les soumissions de numéro
+ * ≥ from. L'état par contexte (matrices, liaisons…) repart toujours — il est
+ * petit ; l'image d'une texture et le miroir brut d'un tampon ne repartent que
+ * s'ils ont été portés par une soumission ≥ from ; le texte d'un programme ne
+ * repart qu'en remise à zéro TOTALE (from == 0 : vidage autonome) — il part
+ * toujours par une sonde synchrone dont le verdict est exact. */
+static void invalidate_mirrors_from(unsigned long from)
 {
     PCtx *p;
     PTex *t;
@@ -2463,7 +2579,7 @@ static void invalidate_mirrors(void)
     }
     /* v18 : un BUF_SUBDATA perdu laisserait un miroir brut faux pour de bon
        (on ne recopie que ce qui change) : tout est à recopier */
-    buf_raw_invalidate_all();
+    buf_raw_invalidate_from(from);
     {
         int k;
         for (k = 0; k < PPROG_MAX; k++)
@@ -2472,33 +2588,64 @@ static void invalidate_mirrors(void)
                 /* Prey (23/09) : le texte compilé avant le vidage doit repartir
                    (PROG_STRING), sinon le rejeu natif ne connaît pas le
                    programme et jette la soumission au premier PROG_BIND. */
-                pprog[k].text_sent = 0;
-                pprog[k].len_sent = pprog[k].sum_sent = 0;
+                if (!from) {
+                    pprog[k].text_sent = 0;
+                    pprog[k].len_sent = pprog[k].sum_sent = 0;
+                }
             }
         /* v21 : la définition des programmes GLSL repart aussi (le rejeu crée
            le programme au premier GLSL_SOURCE), et toutes leurs valeurs */
         for (k = 0; k < GPROG_MAX; k++)
             if (gprog[k].ctx) {
-                gprog[k].sent = 0;
+                if (!from)
+                    gprog[k].sent = 0;
                 gprog[k].mirror_valid = 0;
             }
     }
     for (t = G.textures; t; t = t->next) {
         t->prm_valid = 0;
-        t->surf_copied = 0;             /* v20 : SURF_TEX à refaire (vidage autonome) */
-        t->dirty = 1;                   /* le TEX_IMAGE3 perdu doit repartir */
         t->cp_frame = 0;                /* lot 1 */
         t->hook_gen++;
         VD_BUMP();                      /* lot 2 */
+        if (from && t->up_seq < from)
+            continue;                   /* son image est arrivée : on la garde */
+        t->surf_copied = 0;             /* v20 : SURF_TEX à refaire (vidage autonome) */
+        t->dirty = 1;                   /* le TEX_IMAGE3 perdu doit repartir */
         t->lv0_sig = 0;
         t->host_only = 0;
+        t->lost_gen++;
     }
+    /* try_copy_pixels réutilise sa texture de travail tant que la taille ne
+       change pas (COPY_TEX seul) : si son TEX_IMAGE3 est perdu, chaque
+       CopyPixels suivant viserait un niveau absent — BAD_ARG en boucle. */
+    G.pixtex_w = G.pixtex_h = 0;
     G.bound = 0;                        /* le CTX_BIND perdu doit repartir */
 }
 
-static void broken_all(const char *why, long st, unsigned long pc)
+/* Remise à zéro TOTALE : vidage autonome et refus dont on ne sait rien. */
+static void invalidate_mirrors(void)
+{
+    invalidate_mirrors_from(0);
+}
+
+/* 3e passe : draw_op() du cœur (qgpu-core.c) — les opcodes dont un BAD_ARG
+   n'arrête PAS le flux : le lot est allé au bout, relectures comprises. */
+static int plugin_draw_op(unsigned long op)
+{
+    return (op >= QGPU_OP_DRAW_TRIANGLES && op <= QGPU_OP_DRAW_TRIANGLES_SEC) ||
+           op == QGPU_OP_DRAW_RAW || op == QGPU_OP_DRAW_RAW_BUF ||
+           op == QGPU_OP_DRAW_NATIVE || op == QGPU_OP_PROG_STRING ||
+           op == QGPU_OP_GLSL_LINK;
+}
+
+/* `seq` : numéro de la soumission refusée (synchrone : statut et pc exacts).
+   Un BAD_ARG de dessin n'a rien arrêté — rien n'est perdu que ce dessin ;
+   sinon, la suite de CETTE soumission l'est, et elle seule. */
+static void broken_all(const char *why, long st, unsigned long pc, unsigned long seq)
 {
     PCtx *p;
+    unsigned long from = (st == QGPU_ST_BAD_ARG && pc < CMD_WORDS &&
+                          plugin_draw_op(QGPU_CMD_OP(G.cmd[pc]))) ? seq + 1 : seq;
     gl_note("broken_all %s : statut %ld commande %lu, image %lu\n", why, st, pc, G.n_frames);
     {   /* lot 11 : la commande fautive et la tête du lot, quelle que soit la branche */
         char hb2[260]; int a2 = 0; unsigned long k2, n2 = 0;
@@ -2527,7 +2674,7 @@ static void broken_all(const char *why, long st, unsigned long pc)
         fprintf(stderr, "POMPPC GL: host present rejected (status %ld), "
                 "falling back to the normal swap\n", st);
         G.scanout = 0;
-        invalidate_mirrors();
+        invalidate_mirrors_from(from);
         return;
     }
     /* v18 : un DRAW_NATIVE refusé (ou la recopie d'un miroir brut) ne coupe
@@ -2542,7 +2689,7 @@ static void broken_all(const char *why, long st, unsigned long pc)
         fprintf(stderr, "POMPPC GL: host rejected native draw (status %ld), "
                 "back to vertex packing\n", st);
         G.native = 0;
-        invalidate_mirrors();
+        invalidate_mirrors_from(from);
         return;
     }
     /* Un DRAW_RAW refusé vient presque toujours d'un sommet que l'application
@@ -2571,7 +2718,7 @@ static void broken_all(const char *why, long st, unsigned long pc)
         for (p = G.list; p; p = p->next)
             p->geom_lost = 1;
         G.v7 = 0;
-        invalidate_mirrors();
+        invalidate_mirrors_from(from);
         return;
     }
     /* Un opcode de requête refusé veut dire que l'hôte ne tient pas
@@ -2585,7 +2732,7 @@ static void broken_all(const char *why, long st, unsigned long pc)
         qry_off = 1;
         for (p = G.list; p; p = p->next)
             p->q_open = -1;
-        invalidate_mirrors();
+        invalidate_mirrors_from(from);
         return;
     }
     {   /* Dire QUELLE commande, avec ses arguments : sans cela un refus coûte
@@ -2624,7 +2771,7 @@ static void broken_all(const char *why, long st, unsigned long pc)
             else if (n_badarg == 8)
                 fprintf(stderr, "POMPPC GL: further BAD_ARG batches omitted\n");
             n_badarg++;
-            invalidate_mirrors();
+            invalidate_mirrors_from(from);
             return;
         }
     }
@@ -2725,6 +2872,11 @@ static void run_posts(Half *h)
  * submit_cur sur QUEUE_FULL — la moitié courante y est en cours de
  * soumission, son flux ne doit ni grandir ni repartir dans une autre
  * soumission. Voir stream_ready(). */
+static void stream_dead(void);
+static void check_errors(unsigned long errors, unsigned long seq);
+static void posts_lost(Half *h);
+static void err_floor_update(const Half *done);
+
 static void wait_half_ex(int i, int unlock)
 {
     Half *h = &G.h[i];
@@ -2733,6 +2885,21 @@ static void wait_half_ex(int i, int unlock)
     GuardPark gp;
 
     guards_park(&gp);                   /* finding 1 : G.mu peut être relâché ici */
+
+    /* ≥ 3 FILS (reste du 29/09) — UN SEUL ATTENDANT VERROU RELÂCHÉ À LA FOIS.
+       Les appelants directs (drain_all, wait_half(i) des relectures) n'ont
+       pas de stream_ready() en amont : ils pouvaient entrer PENDANT l'attente
+       de switch_half, lever G.halt à leur tour et y rester après elle. flush()
+       rendait alors la main avec G.halt > 0 ; le stream_ready() du reserve()
+       suivant relâchait G.mu, un troisième fil vidait le flux, et l'offset
+       d'arène (ou de sommets) déjà calculé par l'appelant désignait une
+       moitié soumise — M1. On attend donc ici, SANS lever G.halt (on n'a
+       encore rien désigné), qu'aucune autre attente ne soit en cours : au
+       retour de flush(), G.halt est nul et le flux est à nous jusqu'à ce que
+       NOUS relâchions le verrou. `unlock == 0` garde G.mu : invisible. */
+    if (unlock)
+        while (G.halt > 0)
+            pthread_cond_wait(&half_cv, &G.mu);
 
     /* INVARIANT F9 : dès l'entrée et jusqu'à la sortie, G.halt est levé. Toute
        sortie de G.mu depuis cette fonction — le pthread_cond_wait ci-dessous
@@ -2746,6 +2913,10 @@ static void wait_half_ex(int i, int unlock)
        plutôt que de repartir en croyant la moitié libre. */
     while (h->waiting)
         pthread_cond_wait(&half_cv, &G.mu);
+    if (G.dead) {
+        h->npost = 0;                   /* L1 : quarantaine, plus rien n'arrive */
+        goto done;
+    }
     if (!h->busy) {
         run_posts(h);                   /* mode synchrone : rien à attendre */
         goto done;
@@ -2753,32 +2924,28 @@ static void wait_half_ex(int i, int unlock)
     {
         double t = now_s();
         fence = h->fence;
-        if (unlock) {
-            h->waiting = 1;
-            pthread_mutex_unlock(&G.mu);
-            ok = qgpu_wait(&G.q, fence, WAIT_MS) == 0;
-            pthread_mutex_lock(&G.mu);
-            h->waiting = 0;
-            pthread_cond_broadcast(&half_cv);
-        } else {
-            /* submit_cur sur QUEUE_FULL : la moitié COURANTE est en cours de
-               soumission. On garde G.mu, sinon un autre fil pourrait allonger
-               son flux — ou le soumettre une seconde fois. */
-            ok = qgpu_wait(&G.q, fence, WAIT_MS) == 0;
-        }
-        /* Rien de ce qu'on avait lu n'a pu bouger : G.halt interdisait d'écrire
-           dans cette moitié, de la désigner courante et d'y ajouter une
-           relecture ; `waiting` interdisait de l'attendre en double. h->busy et
-           h->post sont donc encore ceux de NOTRE soumission. */
-        G.t_wait += now_s() - t;
-        G.n_waits++;
-        if (!ok) {
-            /* On ne peut pas réécrire une moitié encore en vol sans risquer une
-               image fausse. Mais couper DÉFINITIVEMENT toute l'accélération du
-               processus au premier dépassement était pire : on coupe d'abord
-               l'asynchrone (le synchrone, lui, attend sa place sans jamais
-               dépasser), et il faut WAIT_GIVEUP dépassements consécutifs pour
-               déclarer l'hôte mort. */
+        for (;;) {
+            if (unlock) {
+                h->waiting = 1;
+                pthread_mutex_unlock(&G.mu);
+                ok = qgpu_wait(&G.q, fence, WAIT_MS) == 0;
+                pthread_mutex_lock(&G.mu);
+                h->waiting = 0;
+                pthread_cond_broadcast(&half_cv);
+            } else {
+                /* submit_cur sur QUEUE_FULL : la moitié COURANTE est en cours
+                   de soumission. On garde G.mu, sinon un autre fil pourrait
+                   allonger son flux — ou le soumettre une seconde fois. */
+                ok = qgpu_wait(&G.q, fence, WAIT_MS) == 0;
+            }
+            if (ok)
+                break;
+            /* L1 — DÉLAI N'EST PAS ANNULATION (M3). On effaçait h->busy et
+               les relectures : la moitié repartait à l'écriture alors que le
+               job accepté pouvait encore la lire. Elle reste désormais en
+               quarantaine : on RÉATTEND. On coupe l'asynchrone au premier
+               dépassement (F8), et au bout de WAIT_GIVEUP on déclare l'hôte
+               mort — la moitié n'est alors JAMAIS rendue (stream_dead). */
             pomppc_log("POMPPC: barrière %lu jamais atteinte (%d ms), "
                        "dépassement %d/%d\n", fence, WAIT_MS,
                        G.wait_miss + 1, WAIT_GIVEUP);
@@ -2786,21 +2953,43 @@ static void wait_half_ex(int i, int unlock)
             G.async_avail = 0;
             G.async_why = "barrière dépassée";
             if (++G.wait_miss >= WAIT_GIVEUP) {
-                PCtx *p;
                 fprintf(stderr, "POMPPC GL: host did not finish a submit "
                         "in %d ms (%d times), falling back to software\n",
                         WAIT_MS, G.wait_miss);
-                for (p = G.list; p; p = p->next)
-                    p->broken = 1;
-            } else {
-                fprintf(stderr, "POMPPC GL: host submit took more than %d ms, "
-                        "asynchronous doorbell disabled\n", WAIT_MS);
+                G.t_wait += now_s() - t;
+                G.n_waits++;
+                h->npost = 0;
+                stream_dead();
+                goto done;
             }
-            h->npost = 0;
-            h->busy = 0;
-            goto done;
+            fprintf(stderr, "POMPPC GL: host submit took more than %d ms, "
+                    "asynchronous doorbell disabled\n", WAIT_MS);
         }
+        /* Rien de ce qu'on avait lu n'a pu bouger : G.halt interdisait d'écrire
+           dans cette moitié, de la désigner courante et d'y ajouter une
+           relecture ; `waiting` interdisait de l'attendre en double. h->busy et
+           h->post sont donc encore ceux de NOTRE soumission. */
+        G.t_wait += now_s() - t;
+        G.n_waits++;
         G.wait_miss = 0;
+        /* 3e passe — relectures d'une soumission ASYNCHRONE : rien ne disait
+           si elle s'était arrêtée avant elles (arène indéterminée, recopiée
+           quand même et marquée SYNCED). ERRORS a-t-il bougé depuis le
+           dernier doorbell ? Alors on ne sait pas : les copies sont jetées
+           (l'hôte redevient la référence) et la fenêtre synchrone s'ouvre —
+           la relecture suivante sera exacte. Un aller-retour au kext, et
+           seulement quand il y a des relectures. */
+        if (h->npost && G.err_valid) {
+            unsigned long e2 = 0, st2 = 0, pc2 = 0;
+            if (qgpu_peek(&G.q, &e2, &st2, &pc2) == 0) {
+                if (e2 != G.errors) {
+                    posts_lost(h);
+                    check_errors(e2, h->seq);
+                } else {
+                    err_floor_update(h);    /* 4e passe : h a fini proprement */
+                }
+            }
+        }
     }
     h->busy = 0;
     run_posts(h);
@@ -2841,19 +3030,172 @@ static void wait_half(int i)
  */
 #define ASYNC_RETRY   120               /* images de synchrone avant de réessayer */
 
-static void check_errors(unsigned long errors)
+/* Reste du 29/09 — QGPU_ST_NO_MEM. Relit QGPU_REG_NOMEM (commandes refusées
+   par le plafond de mémoire de l'hôte, tous clients) ; rend le nombre de
+   refus nouveaux depuis la dernière lecture et, s'il y en a, ouvre une
+   fenêtre de pression mémoire : aucun NOUVEL objet hôte pendant
+   NOMEM_BACKOFF images (repli local : Apple pour les textures et surfaces,
+   empaquetage pour les tampons). */
+#define NOMEM_BACKOFF 120
+static unsigned long nomem_poll(void)
 {
-    unsigned long e2 = 0, status = 0, pc = 0;
+    unsigned long v = 0, d;
+    if (qgpu_read_reg(&G.q, QGPU_REG_NOMEM, &v) != 0 || v == 0xFFFFFFFFUL)
+        return 0;                       /* device plus ancien : pas de registre */
+    if (!G.nomem_valid) {
+        G.nomem_valid = 1;
+        G.nomem_reg = v;
+        return 0;
+    }
+    d = v - G.nomem_reg;
+    G.nomem_reg = v;
+    if (d) {
+        G.nomem_until = G.n_frames + NOMEM_BACKOFF;
+        gl_note("NOMEM : %lu refus du plafond mémoire hôte, image %lu\n", d, G.n_frames);
+    }
+    return d;
+}
+
+static void buf_nomem(long id, unsigned long until);
+
+/* Soumission SYNCHRONE rendue QGPU_ST_NO_MEM : le cœur l'a exécutée EN ENTIER
+   (un arrêt ultérieur se serait dit lui-même) et `pc` désigne la PREMIÈRE
+   commande refusée. L'objet qu'elle vise cesse d'être résident ; s'il y a eu
+   d'autres refus dans le lot (QGPU_REG_NOMEM), on ne sait pas lesquels :
+   tous les miroirs repartent, le mode synchrone les nommera un par un. */
+static void nomem_seen(unsigned long pc, unsigned long seq)
+{
+    unsigned long op = pc < CMD_WORDS ? QGPU_CMD_OP(G.cmd[pc]) : 0;
+    long id = pc + 1 < CMD_WORDS ? (long)G.cmd[pc + 1] : -1;
+    unsigned long until = G.n_frames + NOMEM_BACKOFF;
+    PTex *t;
+    PCtx *p;
+
+    G.n_nomem++;
+    G.nomem_until = until;
+    switch (op) {
+    case QGPU_OP_TEX_IMAGE3:
+    case QGPU_OP_TEX_SUBIMAGE:
+    case QGPU_OP_COPY_TEX:
+    case QGPU_OP_SURF_TEX:
+        for (t = G.textures; t; t = t->next)
+            if (t->qtex == id) {
+                t->nomem_until = until;
+                t->dirty = 1;           /* niveau absent ou à l'ancienne taille */
+                t->lost_gen++;          /* 3e passe : upload_texture ne la redit pas propre */
+                t->host_only = 0;
+                /* 4e passe : pour une texture de surface, dirty ne veut rien
+                   dire (upload_surftex le remet à 0) — c'est surf_copied qui
+                   fait refaire la SURF_TEX. Sans cela, une cible rendue une
+                   seule fois (reflet de Colin McRae) restait vide. */
+                t->surf_copied = 0;
+                t->surf_src = 0;
+                t->cp_frame = 0;
+                t->hook_gen++;
+                VD_BUMP();
+                break;
+            }
+        break;
+    case QGPU_OP_BUF_CREATE:
+    case QGPU_OP_BUF_SUBDATA:
+        /* Le tampon n'existe pas sur l'hôte : son identifiant est libre (le
+           cœur accepte un BUF_CREATE neuf dessus). */
+        buf_nomem(id, until);
+        break;
+    case QGPU_OP_SURF_CREATE:           /* sondé par ensure_surface ; filet */
+        for (p = G.list; p; p = p->next)
+            if (p->surf == id) {
+                G.surf_used &= ~(1UL << (p->surf - G.q.surf_base));
+                p->surf = -1;
+                p->color = p->depth = SW_NEWER;
+                p->nomem_until = until;
+                break;
+            }
+        break;
+    default:
+        break;
+    }
+    gl_note("NOMEM op %lx id %ld (pc %lu), image %lu : objet rendu localement "
+            "pendant %d images\n", op, id, pc, G.n_frames, NOMEM_BACKOFF);
+    /* 3e passe : les autres refus du lot ne peuvent viser que ce lot-ci */
+    if (nomem_poll() > 1)
+        invalidate_mirrors_from(seq);
+}
+
+/* 3e passe — RELECTURES PERDUES. Une soumission arrêtée avant ses
+   relectures laisse l'arène indéterminée : les contextes qui s'étaient dits
+   SYNCED (sync_to_sw_locked, en posant la relecture) ne le sont pas —
+   l'hôte redevient la référence, et sync_to_sw_locked, qui compte
+   n_posts_lost, relit (en synchrone, la fenêtre de repli étant ouverte). */
+static void posts_lost(Half *h)
+{
+    PCtx *q;
+    int i;
+    if (!h->npost)
+        return;
+    /* 4e passe : seuls les contextes (et les canaux) dont une relecture est
+       perdue. Basculer TOUS les SYNCED rendait « hôte plus récent » un
+       contexte synchronisé par un TÉLÉVERSEMENT : la relecture suivante
+       écrasait alors la bonne image de l'invité par celle, périmée, de l'hôte. */
+    for (q = G.list; q; q = q->next) {
+        if (q->qctx < 0 || q->surf < 0)
+            continue;
+        for (i = 0; i < h->npost; i++) {
+            if (h->post[i].ctx != (const void *)q)
+                continue;
+            if (!h->post[i].depth && q->color == SYNCED)
+                q->color = HOST_NEWER;
+            if (h->post[i].depth && q->depth == SYNCED)
+                q->depth = HOST_NEWER;
+        }
+    }
+    h->npost = 0;
+    G.n_posts_lost++;
+}
+
+/* 4e passe : plancher des soumissions non couvertes par une lecture propre
+   d'ERRORS — la plus ancienne encore en vol (hors `done`, qui vient de
+   finir), sinon la prochaine à partir. */
+static void err_floor_update(const Half *done)
+{
+    unsigned long f = G.sub_seq;
+    int i;
+    for (i = 0; i < HALVES; i++)
+        if (&G.h[i] != done && G.h[i].busy && G.h[i].seq < f)
+            f = G.h[i].seq;
+    G.err_floor = f;
+}
+
+/* `seq` : numéro de la soumission dont le doorbell a rendu `errors`. Au plus
+   une de nos soumissions est en vol pendant qu'on en construit une autre
+   (switch_half attend l'autre moitié) : le compteur n'a pu bouger, de notre
+   fait, que pour seq − 2 (en vol au contrôle précédent), seq − 1 (en vol
+   jusqu'ici) ou seq elle-même (déjà finie, rare). Rien avant n'est perdu. */
+static void check_errors(unsigned long errors, unsigned long seq)
+{
+    unsigned long e2 = 0, status = 0, pc = 0, from;
+    int i;
 
     if (!G.err_valid) {
         G.errors = errors;
         G.err_valid = 1;
+        err_floor_update(0);
         return;
     }
-    if (errors == G.errors)
+    if (errors == G.errors) {
+        err_floor_update(0);            /* 4e passe : ce qui a fini est propre */
         return;
+    }
+    /* 4e passe : toute moitié encore en vol a pu s'arrêter avant ses
+       relectures — la nôtre (seq, finie en erreur dès son doorbell) comme
+       l'autre (la faute de A vue au doorbell de B : switch_half aurait
+       ensuite recopié l'arène de A comme bonne, G.errors étant déjà recalé). */
+    for (i = 0; i < HALVES; i++)
+        if (G.h[i].busy)
+            posts_lost(&G.h[i]);
     pomppc_log("POMPPC: QGPU_REG_ERRORS %lu → %lu", G.errors, errors);
     qgpu_peek(&G.q, &e2, &status, &pc);
+    nomem_poll();                       /* reste du 29/09 : pression mémoire ? */
     /* Note (POMPPC_GL_NOTE) : une soumission asynchrone terminée en erreur
        est une série de dessins PERDUE (mur qui disparaît une image) — 22/09. */
     gl_note("ERRORS %lu -> %lu : statut %lu commande %lu, image %lu\n",
@@ -2870,8 +3212,17 @@ static void check_errors(unsigned long errors)
        matrices, program.env…) est perdu, et nos miroirs le croyaient livré
        — texture fausse jusqu'à sa prochaine modification. Même geste que
        broken_all ; quand ERRORS bouge par le ménage d'un autre client, le
-       coût est une image d'état renvoyé. */
-    invalidate_mirrors();
+       coût est une image d'état renvoyé.
+       3e passe : et seulement ce que les soumissions seq − 2 … seq ont porté
+       (textures, miroirs bruts) — plus toute l'image de toutes les textures,
+       ni les textures qui n'existent que sur l'hôte.
+       4e passe : et jusqu'au plancher — une soumission asynchrone suivie de
+       sondes (qui prennent des numéros) sortait sinon de la fenêtre. */
+    from = seq > 2 ? seq - 2 : 0;
+    if (G.err_floor < from)
+        from = G.err_floor;
+    invalidate_mirrors_from(from);
+    G.err_floor = G.sub_seq;
 }
 
 /* Reprend l'asynchrone si la fenêtre de synchrone n'a rien trouvé. */
@@ -3071,6 +3422,7 @@ static void submit_cur(void)
     Half *h = &G.h[G.cur];
     double t = now_s();
     unsigned long pc = 0, fence = 0, errors = 0;
+    unsigned long seq = G.sub_seq++;    /* 3e passe : la suite part dans seq + 1 */
     long st;
     /* Pendant un BeginPrimitiveBuffer, GLEngine écrit dans CETTE moitié à une
        adresse qu'on lui a déjà donnée : on ne peut pas en changer, donc pas la
@@ -3092,6 +3444,8 @@ static void submit_cur(void)
                le soumettre une seconde fois. */
             G.n_qfull++;
             wait_half_ex(G.cur ^ 1, 0);
+            if (G.dead)                 /* L1 : hôte muet, rien ne part */
+                return;
             st = qgpu_submit_async(&G.q, G.hb, G.ncmd * 4, &fence, &errors);
         }
         if (st == QGPU_ST_QUEUE_FULL) {
@@ -3127,18 +3481,15 @@ static void submit_cur(void)
                — P9 : ce qui suivait la faute est perdu : miroirs invalidés. */
             h->busy = st >= 0;
             h->fence = fence;
-            if (h->npost) {
-                PCtx *q;
-                for (q = G.list; q; q = q->next)
-                    if (q->qctx >= 0 && q->surf >= 0) {
-                        if (q->color == SYNCED)
-                            q->color = HOST_NEWER;
-                        if (q->depth == SYNCED)
-                            q->depth = HOST_NEWER;
-                    }
+            h->seq = seq;
+            posts_lost(h);
+            {   /* 4e passe : jusqu'au plancher d'ERRORS, comme check_errors */
+                unsigned long from = seq > 1 ? seq - 1 : 0;
+                if (G.err_floor < from)
+                    from = G.err_floor;
+                invalidate_mirrors_from(from);
+                G.err_floor = G.sub_seq;
             }
-            h->npost = 0;
-            invalidate_mirrors();
             return;
         }
     }
@@ -3147,25 +3498,73 @@ static void submit_cur(void)
         G.n_submits++;
         h->fence = fence;
         h->busy = 1;
-        check_errors(errors);
+        h->seq = seq;
+        check_errors(errors, seq);
         return;
     }
     st = qgpu_submit(&G.q, G.hb, G.ncmd * 4, &pc);
     G.t_submit += now_s() - t;
     G.n_submits++;
     h->busy = 0;
+    h->seq = seq;
+    /* 3e passe : un refus SYNCHRONE fait avancer QGPU_REG_ERRORS (global) ;
+       on le sait, on le compte — sinon le prochain doorbell asynchrone
+       prendrait notre propre refus, déjà traité, pour une nouvelle faute. */
+    if (st != QGPU_ST_OK && G.err_valid)
+        G.errors++;
+    if (st == QGPU_ST_NO_MEM) {
+        /* reste du 29/09 : non fatal, et le lot est allé AU BOUT (le cœur
+           dit un arrêt ultérieur à la place) — ses relectures sont bonnes */
+        nomem_seen(pc, seq);
+        run_posts(h);
+        return;
+    }
     if (st != QGPU_ST_OK) {
-        broken_all("flush", st, pc);
-        h->npost = 0;
+        /* 3e passe : un BAD_ARG de DESSIN n'arrête pas le cœur — le lot est
+           allé au bout, ses relectures sont bonnes ; ne les jeter que si le
+           flux s'est arrêté avant elles. */
+        int ran = st == QGPU_ST_BAD_ARG && pc < CMD_WORDS &&
+                  plugin_draw_op(QGPU_CMD_OP(G.cmd[pc]));
+        broken_all("flush", st, pc, seq);
+        if (ran)
+            run_posts(h);
+        else
+            posts_lost(h);
         return;
     }
     run_posts(h);
 }
 
+/* L1 — l'hôte ne rend plus ses barrières : on ne sait pas quand il cessera
+   de lire la tranche. Aucune moitié n'est plus jamais rendue à l'écriture ;
+   G.win/G.cmd pointent sur un tampon privé pour que l'appelant en cours (qui
+   a peut-être déjà un pointeur de flux) écrive dans le vide, et G.state = -1
+   retire tous les points d'entrée, comme au déchargement. Verrou tenu. */
+static void stream_dead(void)
+{
+    PCtx *p;
+    if (G.dead)
+        return;
+    G.dead = 1;
+    for (p = G.list; p; p = p->next)
+        p->broken = 1;
+    static unsigned long dead_cmd[CMD_WORDS];
+    G.cmd = dead_cmd;                   /* toujours : le flux ne touche plus BAR0 */
+    G.dead_buf = (unsigned char *)calloc(1, G.half);
+    if (G.dead_buf)
+        G.win = G.dead_buf;             /* sommets et indices écrits par G.win */
+    G.ncmd = 0;
+    G.arena = 0;
+    G.bound = 0;
+    close_run_drop();
+    G.state = -1;
+    pomppc_log("POMPPC: hôte muet, tranche en quarantaine, accélération retirée\n");
+}
+
 /* Passe à l'autre moitié, en attendant qu'elle soit libre. */
 static void switch_half(void)
 {
-    if (G.nhalf < 2)
+    if (G.nhalf < 2 || G.dead)
         return;
     G.cur ^= 1;
     G.hb   = (unsigned long)G.cur * G.half;
@@ -3180,10 +3579,27 @@ static void switch_half(void)
 static void flush(void)
 {
     stream_ready();                     /* F9 : tout est relu après */
+    if (G.dead) {                       /* L1 : rien ne part plus, rien ne bouge */
+        close_run_drop();
+        G.ncmd = 0;
+        G.arena = 0;
+        G.bound = 0;
+        if (!G.npend) {
+            G.vtx = 0;
+            G.idx = 0;
+        }
+        return;
+    }
     close_run();
     close_raw();
     if (G.ncmd)
         submit_cur();
+    if (G.dead) {                       /* l'attente de submit_cur a tout arrêté */
+        G.ncmd = 0;
+        G.arena = 0;
+        G.bound = 0;
+        return;
+    }
     G.ncmd = 0;
     G.arena = 0;
     G.bound = 0;
@@ -4122,10 +4538,25 @@ static int texture_uploadable_full(PTex *t)
        que le drawable source soit rendu par l'hôte. */
     if (tex_surface(t, &sid)) {
         PCtx *src = surf_source(sid);
-        if (!src || src->qctx < 0)
+        /* 3e passe : SURF_TEX refusé par le plafond (nomem_seen) — Apple
+           jusqu'à l'échéance, comme une texture ordinaire */
+        if (t->nomem_until > G.n_frames)
+            return no(NO_TEX_NOMEM, (unsigned long)t->qtex, t->nomem_until);
+        if (!src || src->qctx < 0) {
+            /* 3e passe : l'hôte tient la dernière image — voir upload_surftex */
+            if (t->qtex >= 0 && t->surf_copied)
+                return 1;
             return no(NO_TEX_SURF, sid, src ? 1 : 0);
+        }
+        if (src->sw > QGPU_MAX_TEX_DIM || src->sh > QGPU_MAX_TEX_DIM)
+            return no(NO_TEX_SIZE, src->sw, src->sh);
         return 1;
     }
+    /* Reste du 29/09 : l'hôte a refusé sa mémoire (ou toute allocation
+       nouvelle en période de pression) — rendue par Apple, nouvel essai à
+       l'échéance. */
+    if (t->nomem_until > G.n_frames || (t->qtex < 0 && G.nomem_until > G.n_frames))
+        return no(NO_TEX_NOMEM, (unsigned long)t->qtex, t->nomem_until);
     if (!GLD_U32(dt, DT_PARAMS) || !base_format_ok(base))
         return no(NO_TEX_BASE, base, 0);
     if (!tex_params_ok((const unsigned char *)GLD_U32(dt, DT_PARAMS)))
@@ -4226,7 +4657,7 @@ static int upload_texture(PCtx *p, PTex *t)
         QGPU_TP_MAX_LEVEL, QGPU_TP_BORDER_COLOR, QGPU_TP_LOD_BIAS, QGPU_TP_COMPARE_MODE,
         QGPU_TP_COMPARE_FUNC, QGPU_TP_DEPTH_MODE };
     int l, k, t3 = tex_is_3d(t), rect = tex_is_rect(t);
-    unsigned long sid;
+    unsigned long sid, lost0;
 
     if (tex_surface(t, &sid))
         return upload_surftex(p, t, sid);   /* v20 */
@@ -4269,6 +4700,20 @@ static int upload_texture(PCtx *p, PTex *t)
         }
     }
     t->last_use = ++G.tex_clock;
+    /* 3e passe (bug hunt du 29/09) : chaque niveau fait arena_alloc, qui peut
+       vider le flux ; la soumission peut alors rendre NO_MEM pour CETTE
+       texture (nomem_seen) ou faire invalider les miroirs — qui la déclarent
+       perdue (lost_gen). La redire propre en fin de boucle effaçait cette
+       perte : niveau 0 absent sur l'hôte, pour toujours. */
+    lost0 = t->lost_gen;
+    /* 4e passe : up_seq n'était posé qu'APRÈS la boucle. Un vidage au milieu
+       qui invalidait (broken_all, nomem_seen, check_errors) sautait donc cette
+       texture (up_seq ancien < from), lost_gen ne bougeait pas, et la fin de
+       boucle la redisait propre. « En cours » = toujours dans la fenêtre ;
+       la vraie valeur est posée en fin de boucle. Une texture propre n'est
+       pas touchée (sinon toute invalidation la viserait pour toujours). */
+    if (t->dirty)
+        t->up_seq = ~0UL;
     if (t->dirty) {
         static unsigned texlog;
         const unsigned char *lv0 = dt + DT_LEVEL0;
@@ -4310,13 +4755,16 @@ static int upload_texture(PCtx *p, PTex *t)
                 c[10] = G.q.base + off; c[11] = row; c[12] = 0;
                 G.n_texuploads++;
             }
-        t->dirty = 0;
-        /* P15 : l'invité vient de redonner le contenu — il n'est plus
-           « hôte seulement », la texture redevient évinçable. */
-        t->host_only = 0;
-        t->lv0_sig = tex_lv0_sig(t);
+        t->up_seq = G.sub_seq;          /* 3e passe : perte ciblée */
+        if (t->lost_gen == lost0) {
+            t->dirty = 0;
+            /* P15 : l'invité vient de redonner le contenu — il n'est plus
+               « hôte seulement », la texture redevient évinçable. */
+            t->host_only = 0;
+            t->lv0_sig = tex_lv0_sig(t);
+        }
     }
-    if (t->dirty) {
+    if (t->dirty && !tex_is_cube(t)) {  /* cube perdu en route : nouvel essai au prochain */
         for (l = 0; l < DT_LEVELS; l++) {
             unsigned char *lv = dt + DT_LEVEL0 + l * DT_LEVEL_SIZE;
             unsigned long w = S16(lv, LV_W), h = S16(lv, LV_H);
@@ -4411,11 +4859,14 @@ static int upload_texture(PCtx *p, PTex *t)
             c[6] = G.q.base + off;
             G.n_texuploads++;
         }
-        t->dirty = 0;
-        /* P15 : l'invité vient de redonner le contenu — il n'est plus
-           « hôte seulement », la texture redevient évinçable. */
-        t->host_only = 0;
-        t->lv0_sig = tex_lv0_sig(t);
+        t->up_seq = G.sub_seq;          /* 3e passe : perte ciblée */
+        if (t->lost_gen == lost0) {
+            t->dirty = 0;
+            /* P15 : l'invité vient de redonner le contenu — il n'est plus
+               « hôte seulement », la texture redevient évinçable. */
+            t->host_only = 0;
+            t->lv0_sig = tex_lv0_sig(t);
+        }
     }
     prm[0] = U16(gp, TP_MIN);
     /* Filtre mipmap sans la chaîne : l'hôte refuserait la soumission
@@ -4951,19 +5402,51 @@ static int ensure_surface(PCtx *p)
                    GLD_U32(p->ctx, CTX_DEPTH_BITS) == 32;
     if (p->surf >= 0 && p->sw == w && p->sh == h && p->stencil == want_stencil)
         return 1;
+    /* reste du 29/09 : plafond mémoire hôte — pas de nouvelle surface avant
+       l'échéance ; le contexte est rendu par Apple en attendant. */
+    if (p->nomem_until > G.n_frames || G.nomem_until > G.n_frames)
+        return 0;
     destroy_surface(p);
     p->surf = alloc_id(&G.surf_used, G.q.surf_base, QGPU_CLIENT_SURF_IDS);
     if (p->surf < 0)
         return 0;
-    c = reserve(p, QGPU_LEN_SURF_CREATE + QGPU_LEN_SURF);
-    c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE);
-    c[1] = p->surf;
-    c[2] = w;
-    c[3] = h;
-    c[4] = QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH | (want_stencil ? QGPU_FMT_FLAG_STENCIL : 0);
+    /* SONDE (reste du 29/09) : un SURF_CREATE refusé par le plafond (NO_MEM,
+       non fatal) laisserait le SURF_BIND et les dessins qui suivent sans
+       surface — NO_SURF, fatal. On le soumet seul, synchrone, et on ne lie
+       que si l'hôte l'a créée. Rare : à la création et au redimensionnement. */
+    {
+        long st;
+        flush();
+        if (G.dead || p->broken || p->qctx < 0) {
+            G.surf_used &= ~(1UL << (p->surf - G.q.surf_base));
+            p->surf = -1;
+            return 0;
+        }
+        c = reserve(p, QGPU_LEN_SURF_CREATE);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE);
+        c[1] = p->surf;
+        c[2] = w;
+        c[3] = h;
+        c[4] = QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH |
+               (want_stencil ? QGPU_FMT_FLAG_STENCIL : 0);
+        st = submit_probe();
+        if (st != QGPU_ST_OK) {
+            G.surf_used &= ~(1UL << (p->surf - G.q.surf_base));
+            gl_note("SURF_CREATE %ld (%lux%lu) refusé : statut %ld\n", p->surf, w, h, st);
+            p->surf = -1;
+            if (st == QGPU_ST_NO_MEM) {
+                p->nomem_until = G.n_frames + NOMEM_BACKOFF;
+                G.nomem_until = p->nomem_until;
+            } else {
+                p->broken = 1;          /* comme broken_all l'aurait fait */
+            }
+            return 0;
+        }
+        c = reserve(p, QGPU_LEN_SURF);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF);
+        c[1] = p->surf;
+    }
     p->stencil = want_stencil;
-    c[5] = QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF);
-    c[6] = p->surf;
     p->sw = w;
     p->sh = h;
     p->color = SW_NEWER;
@@ -4974,90 +5457,96 @@ static int ensure_surface(PCtx *p)
 
 /* ───────────────────────────── synchronisation ───────────────────────────── */
 
+/* 3e passe — TRANSFERTS PAR BANDES. Au-delà d'une moitié d'arène (6 Mio :
+ * 1600×1200 en 32 bits), P16 laissait encore passer « SYNCED sans rien
+ * transférer » : le téléversement ou la relecture d'une image entière ne
+ * tenait pas, et on se déclarait synchronisé pour ne pas vider le flux à
+ * chaque dessin — l'hôte dessinait alors sur un contenu non initialisé.
+ * SURF/DEPTH/STENCIL_UPLOAD et les READBACK prennent x, y, w, h : on découpe
+ * en bandes de lignes qui tiennent dans l'arène, chacune sa commande (et, en
+ * relecture, sa copie différée — arena_alloc vide le flux quand MAX_POST est
+ * atteint). Lignes de l'invité et de l'hôte ont la même origine (y = 0 : haut
+ * de l'image), comme pour le transfert entier. */
+static unsigned long band_rows(unsigned long rowbytes)
+{
+    unsigned long room = G.half > ARENA_OFF ? G.half - ARENA_OFF : 0;
+    unsigned long n = rowbytes ? room / ((rowbytes + 3) & ~3UL) : 0;
+    return n ? n : 1;
+}
+
+/* Téléverse l'image de la surface depuis `src` (pas `srow`), par bandes.
+   `kind` : 0 couleur, 1 profondeur, 2 stencil. Rend 1 si tout est parti. */
+static int upload_bands(PCtx *p, int kind, const unsigned char *src, unsigned long srow,
+                        unsigned long bpp)
+{
+    unsigned long w = p->sw, h = p->sh, y0, n, rows = band_rows(w * bpp), off, y, x, *c;
+    float inv = (kind == 1 && bpp == 4) ? 1.0f / GLD_F32(p->ctx, CTX_DEPTH_SCALE) : 0.0f;
+    for (y0 = 0; y0 < h; y0 += n) {
+        n = h - y0 < rows ? h - y0 : rows;
+        if (!arena_alloc(n * w * bpp, &off))
+            return 0;
+        for (y = 0; y < n; y++) {
+            const unsigned char *sl = src + (y0 + y) * srow;
+            unsigned char *d = G.q.win + off + y * w * bpp;
+            if (kind == 0 || bpp == 2) {
+                memcpy(d, sl, w * bpp);
+            } else if (kind == 1) {
+                const unsigned long *sv = (const unsigned long *)sl;
+                float *df = (float *)d;
+                if (p->stencil) {
+                    for (x = 0; x < w; x++)
+                        df[x] = clamp01((sv[x] & 0xFFFFFF00UL) * inv);
+                } else {
+                    for (x = 0; x < w; x++)
+                        df[x] = clamp01(sv[x] * inv);
+                }
+            } else {
+                const unsigned long *sv = (const unsigned long *)sl;
+                unsigned long *dd = (unsigned long *)d;
+                for (x = 0; x < w; x++)
+                    dd[x] = sv[x] & 0xFF;
+            }
+        }
+        {
+            unsigned long op = kind == 0 ? QGPU_OP_SURF_UPLOAD :
+                               kind == 1 ? QGPU_OP_DEPTH_UPLOAD : QGPU_OP_STENCIL_UPLOAD;
+            int pf = bpp == 2;
+            c = reserve(p, pf ? QGPU_LEN_SURF_XFER_PF : QGPU_LEN_SURF_XFER);
+            c[0] = QGPU_CMD_HDR(op, pf ? QGPU_LEN_SURF_XFER_PF : QGPU_LEN_SURF_XFER);
+            c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * bpp;
+            c[4] = 0; c[5] = y0; c[6] = w; c[7] = n;
+            if (pf)
+                c[8] = kind == 0 ? QGPU_PF_RGB1555 : QGPU_DF_UNORM16;
+        }
+        G.n_uploads++;
+    }
+    return 1;
+}
+
 static void sync_to_host(PCtx *p, int color, int depth)
 {
-    unsigned long off, y, x, *c;
-    unsigned long w = p->sw, h = p->sh;
     int tm = stats_timing();            /* F10 : plus de gettimeofday par lot */
     double t0 = tm ? now_s() : 0.0;
 
     if (color && p->color == SW_NEWER) {
         unsigned char *src = sw_color(p);
         unsigned long bpp = color_bpp(p);
-        unsigned long row = sw_rowbytes(p);
-        /* arena_fits : une image trop grande pour la moitié ne passera jamais
-           — inutile de réessayer (et de vider le flux) à chaque dessin. */
-        int can = src && (bpp == 4 || G.v15) && arena_fits(w * h * bpp);
-        int done = !can;                /* rien à téléverser : c'est « fait » */
-        if (can && arena_alloc(w * h * bpp, &off)) {
-            for (y = 0; y < h; y++)
-                memcpy(G.q.win + off + y * w * bpp, src + y * row, w * bpp);
-            if (bpp == 2) {
-                c = reserve(p, QGPU_LEN_SURF_XFER_PF);
-                c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_UPLOAD, QGPU_LEN_SURF_XFER_PF);
-                c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 2;
-                c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
-                c[8] = QGPU_PF_RGB1555;
-            } else {
-                c = reserve(p, QGPU_LEN_SURF_XFER);
-                c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_UPLOAD, QGPU_LEN_SURF_XFER);
-                c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
-                c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
-            }
-            G.n_uploads++;
-            done = 1;
-        }
-        /* P16 : SYNCED voulait dire « les deux copies sont identiques ». Le
-           poser alors qu'arena_alloc a refusé (w·h·4 > 6 Mio : 1600×1200)
-           mentait, et l'hôte dessinait sur un contenu périmé — image figée ou
-           aléatoire en haute résolution. On laisse SW_NEWER : le prochain
-           dessin réessaiera. */
-        if (done)
+        /* Rien à téléverser (pas de tampon invité, 16 bits sans la v15) :
+           c'est « fait ». Sinon SYNCED seulement si TOUTES les bandes sont
+           parties (P16 : SYNCED veut dire « les deux copies sont identiques »). */
+        int can = src && (bpp == 4 || G.v15);
+        if (!can || upload_bands(p, 0, src, sw_rowbytes(p), bpp))
             p->color = SYNCED;
     }
     if (depth && p->depth == SW_NEWER) {
         unsigned char *src = sw_depth(p);
         unsigned long dbpp = depth_bpp(p);
         unsigned long drow = depth_rowbytes(p);
-        int done = 0;
-        if (dbpp == 2) {
-            if (!G.v15 || !src || !arena_fits(w * h * 2))
-                done = 1;               /* jamais téléversable : ne pas boucler */
-            else if (arena_alloc(w * h * 2, &off)) {
-                for (y = 0; y < h; y++)
-                    memcpy(G.q.win + off + y * w * 2, src + y * drow, w * 2);
-                c = reserve(p, QGPU_LEN_SURF_XFER_PF);
-                c[0] = QGPU_CMD_HDR(QGPU_OP_DEPTH_UPLOAD, QGPU_LEN_SURF_XFER_PF);
-                c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 2;
-                c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
-                c[8] = QGPU_DF_UNORM16;
-                G.n_uploads++;
-                done = 1;
-            }
-        } else {
-            float inv = 1.0f / GLD_F32(p->ctx, CTX_DEPTH_SCALE);
-            if (!src || !arena_fits(w * h * 4))
-                done = 1;               /* pas de tampon invité : rien à porter */
-            else if (arena_alloc(w * h * 4, &off)) {
-                for (y = 0; y < h; y++) {
-                    unsigned long *s = (unsigned long *)(src + y * drow);
-                    float *d = (float *)(G.q.win + off + y * w * 4);
-                    if (p->stencil) {
-                        for (x = 0; x < w; x++)
-                            d[x] = clamp01((s[x] & 0xFFFFFF00UL) * inv);
-                    } else {
-                        for (x = 0; x < w; x++)
-                            d[x] = clamp01(s[x] * inv);
-                    }
-                }
-                c = reserve(p, QGPU_LEN_SURF_XFER);
-                c[0] = QGPU_CMD_HDR(QGPU_OP_DEPTH_UPLOAD, QGPU_LEN_SURF_XFER);
-                c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
-                c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
-                G.n_uploads++;
-                done = 1;
-            }
-        }
+        int done;
+        if (!src || (dbpp == 2 && !G.v15))
+            done = 1;                   /* rien à porter, ou jamais portable */
+        else
+            done = upload_bands(p, 1, src, drow, dbpp);
         /* Le stencil de l'invité vit dans les 8 bits bas des mêmes mots. On ne
            le téléverse QUE si le contexte s'en sert vraiment : sur une surface
            hôte combinée, QGPU_OP_STENCIL_UPLOAD abîme la PROFONDEUR déjà posée
@@ -5065,25 +5554,10 @@ static void sync_to_host(PCtx *p, int color, int depth)
            ce qui suivait le premier repli logiciel disparaissait ; le seul fait
            de sauter ce téléversement rend l'image exacte). Beaucoup
            d'applications — GLUT, Marble Blast — demandent un stencil sans
-           jamais s'en servir : elles ne paient plus ni le bogue ni le transfert. */
-        if (src && p->stencil && p->sten_used && dbpp == 4 && arena_fits(w * h * 4)) {
-            if (arena_alloc(w * h * 4, &off)) {
-                for (y = 0; y < h; y++) {
-                    unsigned long *s = (unsigned long *)(src + y * drow);
-                    unsigned long *d = (unsigned long *)(G.q.win + off + y * w * 4);
-                    for (x = 0; x < w; x++)
-                        d[x] = s[x] & 0xFF;
-                }
-                c = reserve(p, QGPU_LEN_SURF_XFER);
-                c[0] = QGPU_CMD_HDR(QGPU_OP_STENCIL_UPLOAD, QGPU_LEN_SURF_XFER);
-                c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * 4;
-                c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
-                G.n_uploads++;
-            } else {
-                done = 0;               /* P16 : stencil non porté = pas synchronisé */
-            }
-        }
-        /* P16 : voir la couleur — SYNCED ment dès qu'un transfert a été refusé. */
+           jamais s'en servir : elles ne paient plus ni le bogue ni le transfert.
+           P16 : stencil non porté = pas synchronisé. */
+        if (done && src && p->stencil && p->sten_used && dbpp == 4)
+            done = upload_bands(p, 2, src, drow, 4);
         if (done)
             p->depth = SYNCED;
     }
@@ -5115,29 +5589,39 @@ static int queue_readback_to(PCtx *p, int depth, unsigned char *dst, unsigned lo
         if (bpp == 2 && !G.v15)
             return 0;
     }
-    if (!arena_alloc(w * h * bpp, &off))
-        return 0;
-    c = reserve(p, len);
-    c[0] = QGPU_CMD_HDR(op, len);
-    c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * bpp;
-    c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
-    if (len == QGPU_LEN_SURF_XFER_PF)
-        c[8] = fmt;
-    {   /* La copie appartient à la MOITIÉ qui porte la soumission : elle ne se
-           fera qu'une fois sa barrière atteinte (contrat mémoire, point 2 —
-           avant, le contenu de l'arène est indéterminé). */
-        Half *hf = &G.h[G.cur];
-        Post *po = &hf->post[hf->npost];
-        po->depth = depth;
-        po->packed = p->stencil;
-        po->off = off;
-        po->dst = dst;
-        po->w = w;
-        po->h = h;
-        po->rowbytes = rowbytes;
-        po->pixbytes = bpp;
-        po->scale = GLD_F32(p->ctx, CTX_DEPTH_SCALE);
-        hf->npost++;
+    {   /* 3e passe : par bandes (voir band_rows) — une bande = une commande
+           et une copie différée ; arena_alloc vide le flux quand l'arène ou
+           MAX_POST sont pleins, les bandes précédentes partant avec leur
+           moitié. */
+        unsigned long rows = band_rows(w * bpp), y0, n;
+        for (y0 = 0; y0 < h; y0 += n) {
+            n = h - y0 < rows ? h - y0 : rows;
+            if (!arena_alloc(n * w * bpp, &off))
+                return 0;
+            c = reserve(p, len);
+            c[0] = QGPU_CMD_HDR(op, len);
+            c[1] = p->surf; c[2] = G.q.base + off; c[3] = w * bpp;
+            c[4] = 0; c[5] = y0; c[6] = w; c[7] = n;
+            if (len == QGPU_LEN_SURF_XFER_PF)
+                c[8] = fmt;
+            {   /* La copie appartient à la MOITIÉ qui porte la soumission : elle
+                   ne se fera qu'une fois sa barrière atteinte (contrat mémoire,
+                   point 2 — avant, le contenu de l'arène est indéterminé). */
+                Half *hf = &G.h[G.cur];
+                Post *po = &hf->post[hf->npost];
+                po->depth = depth;
+                po->packed = p->stencil;
+                po->off = off;
+                po->dst = dst + y0 * rowbytes;
+                po->w = w;
+                po->h = n;
+                po->rowbytes = rowbytes;
+                po->pixbytes = bpp;
+                po->scale = GLD_F32(p->ctx, CTX_DEPTH_SCALE);
+                po->ctx = p;
+                hf->npost++;
+            }
+        }
     }
     G.n_readbacks++;
     return 1;
@@ -5172,58 +5656,67 @@ static int queue_readback(PCtx *p, int depth, unsigned char *dst)
  * a pas besoin, et la relire à chaque image coûtait autant que la couleur. */
 static void sync_to_sw_locked(PCtx *p, int want_depth)
 {
-    int any = 0;
+    int any = 0, tries;
     if (p->surf < 0)
         return;
-    if (p->color == HOST_NEWER) {
-        unsigned char *dst = p->draw_seen;
-        /* Ne pas déverser du xRGB 32 bits dans un tampon invité 16 bits
-           tant que l'hôte ne sait pas packer (v15). */
-        /* P16 : SYNCED seulement si la relecture est vraiment partie — sauf
-           quand l'arène ne pourra JAMAIS la porter (limite connue de la
-           moitié), auquel cas réessayer à chaque appel coûterait un vidage
-           pour rien. */
-        if (dst && (color_bpp(p) == 4 || G.v15)) {
-            if (queue_readback(p, 0, dst)) {
-                any = 1;
+    /* 3e passe : si la soumission s'est arrêtée avant ses relectures
+       (posts_lost), l'hôte redevient la référence — on relit une fois de plus ;
+       la fenêtre synchrone est alors ouverte, la seconde passe est exacte. */
+    for (tries = 0; tries < 2; tries++) {
+        unsigned long lost = G.n_posts_lost;
+        any = 0;
+        if (p->color == HOST_NEWER) {
+            unsigned char *dst = p->draw_seen;
+            /* Ne pas déverser du xRGB 32 bits dans un tampon invité 16 bits
+               tant que l'hôte ne sait pas packer (v15). P16 : SYNCED seulement
+               si la relecture est vraiment partie — par bandes (3e passe),
+               elle part toujours, sauf flux mort. */
+            /* 4e passe : SYNCED AVANT de poser les bandes. Un vidage entre deux
+               bandes peut perdre les premières (posts_lost) ; posé après, SYNCED
+               effaçait ce verdict et la reprise ne relisait rien. */
+            if (dst && (color_bpp(p) == 4 || G.v15)) {
                 p->color = SYNCED;
-            } else if (!arena_fits(p->sw * p->sh * color_bpp(p))) {
-                p->color = SYNCED;
+                if (queue_readback(p, 0, dst))
+                    any = 1;
+                else if (p->color == SYNCED)
+                    p->color = HOST_NEWER;
             }
         }
-    }
-    if (want_depth && p->depth == HOST_NEWER) {
-        unsigned char *dst = sw_depth(p);
-        if (dst && (depth_bpp(p) == 4 || G.v15)) {
-            if (queue_readback(p, 1, dst)) {
-                if (p->stencil && p->sten_used)
-                    queue_readback(p, 2, dst);
-                any = 1;
+        if (want_depth && p->depth == HOST_NEWER) {
+            unsigned char *dst = sw_depth(p);
+            if (dst && (depth_bpp(p) == 4 || G.v15)) {
                 p->depth = SYNCED;
-            } else if (!arena_fits(p->sw * p->sh * depth_bpp(p))) {
-                p->depth = SYNCED;
+                if (queue_readback(p, 1, dst)) {
+                    if (p->stencil && p->sten_used)
+                        queue_readback(p, 2, dst);
+                    any = 1;
+                } else if (p->depth == SYNCED) {
+                    p->depth = HOST_NEWER;
+                }
             }
+            /* Pas (encore) de tampon de profondeur invité : le rendu d'Apple ne
+               l'alloue qu'à son premier usage, et plus tard encore quand il porte
+               un stencil. On garde alors HOST_NEWER : se dire « synchronisé » ici,
+               c'était perdre la profondeur de l'hôte — le repli logiciel allouait
+               ensuite un tampon au contenu indéfini, marqué SW_NEWER, téléversé
+               par-dessus, et tout ce que l'hôte dessinait après était éliminé par
+               le test de profondeur. Vu en vrai : scène « mixte » avec un format de
+               pixel à stencil, toute la géométrie postérieure au premier repli
+               disparaissait. */
         }
-        /* Pas (encore) de tampon de profondeur invité : le rendu d'Apple ne
-           l'alloue qu'à son premier usage, et plus tard encore quand il porte
-           un stencil. On garde alors HOST_NEWER : se dire « synchronisé » ici,
-           c'était perdre la profondeur de l'hôte — le repli logiciel allouait
-           ensuite un tampon au contenu indéfini, marqué SW_NEWER, téléversé
-           par-dessus, et tout ce que l'hôte dessinait après était éliminé par
-           le test de profondeur. Vu en vrai : scène « mixte » avec un format de
-           pixel à stencil, toute la géométrie postérieure au premier repli
-           disparaissait. */
-    }
-    if (any) {
-        /* C'est LE point où l'invité a besoin du résultat : le chemin logiciel
-           qui suit va lire ces pixels. On soumet, puis on attend la barrière de
-           cette soumission-là et on fait ses copies. Ailleurs, on ne les attend
-           jamais — c'est tout l'intérêt du mode asynchrone. */
-        int i = G.cur;
-        flush();
-        wait_half(i);
-    } else if (G.ncmd) {
-        flush();
+        if (any) {
+            /* C'est LE point où l'invité a besoin du résultat : le chemin logiciel
+               qui suit va lire ces pixels. On soumet, puis on attend la barrière de
+               cette soumission-là et on fait ses copies. Ailleurs, on ne les attend
+               jamais — c'est tout l'intérêt du mode asynchrone. */
+            int i = G.cur;
+            flush();
+            wait_half(i);
+        } else if (G.ncmd) {
+            flush();
+        }
+        if (!any || G.n_posts_lost == lost || G.dead)
+            break;
     }
 }
 
@@ -6133,9 +6626,14 @@ struct PBuf {
     int             rp_failed;          /* plus de place : ne réessayer qu'après */
     unsigned long   rp_fail_gen;        /*   une libération (G.rp_gen) */
     unsigned long   raw_base;           /* vbo+0x30 au dernier ajustement */
+    unsigned long   nomem_until;        /* reste du 29/09 : BUF_CREATE refusé (plafond
+                                           hôte) — empaquetage jusqu'à cette image */
+    unsigned long   raw_seq;            /* 3e passe : dernière soumission à porter un
+                                           BUF_SUBDATA de son miroir brut */
     int             rd_n;               /* plages SALES, triées, disjointes, */
     unsigned long   rd_lo[RD_MAX], rd_hi[RD_MAX];   /* non contiguës ; hi borné
                                            à la taille logique à l'usage */
+    unsigned long   rd_gen;             /* 4e passe : avance à chaque rd_all */
 };
 
 /* L'objet tampon de GLEngine (docs/re/tableaux-de-sommets.md §3.2) : */
@@ -6170,6 +6668,7 @@ static void rd_all(PBuf *b)
     b->rd_n = 1;
     b->rd_lo[0] = 0;
     b->rd_hi[0] = 0xFFFFFFFFUL;         /* borné à la taille logique à l'usage */
+    b->rd_gen++;
 }
 
 static void rd_remove(PBuf *b, int i)
@@ -6229,11 +6728,11 @@ static void rd_add(PBuf *b, unsigned long lo, unsigned long hi)
     }
 }
 
-static void buf_raw_invalidate_all(void)
+static void buf_raw_invalidate_from(unsigned long from)
 {
     PBuf *b;
     for (b = G.bufs; b; b = b->next)
-        if (b->rp >= 0)
+        if (b->rp >= 0 && (!from || b->raw_seq >= from))
             rd_all(b);
 }
 
@@ -6293,12 +6792,17 @@ static int rp_take(int pool, unsigned long len, unsigned long *off)
    la réserve existe pour de bon. */
 static long submit_probe(void);
 static long buf_alloc_id(void);
+static void buf_free_id(long id);
 static int rp_create(PCtx *p)
 {
     unsigned long *c;
     RawExt *e;
     long id, st;
     if (G.rp_n >= RAWPOOL_MAX || !p || p->qctx < 0 || p->broken || G.state <= 0)
+        return -1;
+    /* 3e passe : période de pression mémoire (plafond de l'hôte) — pas de
+       nouvelle réserve ; l'empaquetage sert en attendant. */
+    if (G.nomem_until > G.n_frames)
         return -1;
     e = (RawExt *)malloc(sizeof(*e));
     if (!e)
@@ -6314,6 +6818,17 @@ static int rp_create(PCtx *p)
     c[1] = (unsigned long)id;
     c[2] = RAWPOOL_BYTES;
     st = submit_probe();
+    if (st == QGPU_ST_NO_MEM) {
+        /* 3e passe : NO_MEM n'alloue rien (le cœur l'assure) — l'identifiant
+           est libre, et une pression mémoire PASSAGÈRE ne doit pas couper
+           DRAW_NATIVE pour toute la session. Nouvel essai après l'échéance. */
+        free(e);
+        buf_free_id(id);
+        G.nomem_until = G.n_frames + NOMEM_BACKOFF;
+        gl_note("NATIVE : BUF_CREATE de la réserve %d refusé (plafond mémoire hôte) : "
+                "empaquetage jusqu'à l'image %lu\n", G.rp_n, G.nomem_until);
+        return -1;
+    }
     if (st != QGPU_ST_OK) {
         /* l'identifiant n'est pas rendu : on ne sait pas s'il a été pris */
         free(e);
@@ -6359,6 +6874,8 @@ static int raw_ensure(PCtx *p, PBuf *b, unsigned long size, unsigned long base)
             break;
     if (k == G.rp_n) {
         k = rp_create(p);
+        if (k < 0 && G.nomem_until > G.n_frames)
+            return 0;                   /* 3e passe : pression mémoire, nouvel essai à l'échéance */
         if (k < 0 || !rp_take(k, cap, &off)) {
             b->rp_failed = 1;
             b->rp_fail_gen = G.rp_gen;
@@ -6395,6 +6912,7 @@ static int raw_upload(PCtx *p, PBuf *b, unsigned long base,
         c[2] = b->rp_off + lo;
         c[3] = G.q.base + off;
         c[4] = n;
+        b->raw_seq = G.sub_seq;         /* 3e passe : perte ciblée */
         G.n_native_bytes += n;
         G.n_native_subdata++;
         lo += n;
@@ -6433,8 +6951,19 @@ static int raw_sync(PCtx *p, PBuf *b, unsigned long base, unsigned long size,
             i = 0;
             continue;
         }
-        if (!raw_upload(p, b, base, ul, uh))
-            return 0;
+        {
+            /* 4e passe : raw_upload peut vider le flux, et ce vidage invalider
+               le miroir (rd_all). i, a, z, ul, uh décriraient alors une liste
+               qui n'existe plus : la retoucher déclarait propre ce qui ne
+               l'était pas (sommets faux en DRAW_NATIVE). On reprend du début. */
+            unsigned long gen = b->rd_gen;
+            if (!raw_upload(p, b, base, ul, uh))
+                return 0;
+            if (b->rd_gen != gen) {
+                i = 0;
+                continue;
+            }
+        }
         if (ul == a && uh == z) {
             rd_remove(b, i);
         } else if (ul == a) {
@@ -6484,6 +7013,28 @@ static void buf_free_id(long id)
     G.buf_used[i / 32] &= ~(1UL << (i % 32));
 }
 
+/* Reste du 29/09 (nomem_seen) : le tampon hôte `id` n'existe pas — BUF_CREATE
+   refusé par le plafond. Son identifiant est libre (le cœur accepte un
+   BUF_CREATE neuf dessus) ; le VBO repasse par l'empaquetage jusqu'à `until`. */
+static void buf_nomem(long id, unsigned long until)
+{
+    PBuf *b;
+    if (id < 0)
+        return;
+    for (b = G.bufs; b; b = b->next)
+        if (b->qid == id) {
+            buf_free_id(b->qid);
+            b->qid = -1;
+            b->qsize = 0;
+            b->pack_fmt = 0;
+            b->pack_gs = 0;
+            b->pack_nverts = 0;
+            b->pack_key = 0;
+            b->nomem_until = until;
+            return;
+        }
+}
+
 static void buf_host_destroy(PCtx *p, PBuf *b)
 {
     unsigned long *c;
@@ -6515,6 +7066,9 @@ static int buf_host_ensure(PCtx *p, PBuf *b, unsigned long bytes)
         return 0;
     if (b->qid >= 0 && b->qsize >= bytes)
         return 1;
+    /* reste du 29/09 : plafond mémoire hôte — empaquetage en attendant */
+    if (b->nomem_until > G.n_frames || G.nomem_until > G.n_frames)
+        return 0;
     buf_host_destroy(p, b);
     id = buf_alloc_id();
     if (id < 0)
@@ -6699,7 +7253,12 @@ typedef long (*pp_info_fn)(void *, unsigned long, unsigned long, void *);
 static PProg *pprog_of(unsigned long h)
 {
     unsigned long i = h - PPROG_HANDLE - 1;
-    return ((h & 0xfff00000UL) == PPROG_HANDLE && i < PPROG_MAX && pprog[i].ctx)
+    /* Une entrée ORPHELINE traduit encore sa poignée : GLEngine peut appeler
+       Modify/GetInfo/Destroy sur un programme partagé après la destruction du
+       contexte qui l'a créé. Sans elle, PPROG_HANDLE+i partait tel quel au
+       pilote d'Apple — ou désignait un programme recréé dans la même case. */
+    return ((h & 0xfff00000UL) == PPROG_HANDLE && i < PPROG_MAX &&
+            (pprog[i].ctx || pprog[i].orphan))
            ? &pprog[i] : 0;
 }
 
@@ -6749,7 +7308,7 @@ static long pp_create(void *ctx, unsigned long *handle, void *desc)
     if (r != 0)
         return r;
     pthread_mutex_lock(&G.mu);
-    for (i = 0; i < PPROG_MAX && pprog[i].ctx; i++)
+    for (i = 0; i < PPROG_MAX && (pprog[i].ctx || pprog[i].orphan); i++)
         ;
     if (i < PPROG_MAX) {
         memset(&pprog[i], 0, sizeof(pprog[i]));
@@ -6794,7 +7353,8 @@ static long pp_destroy(void *ctx, unsigned long handle)
     r = pprog_of(handle);
     if (r) {
         handle = r->apple;
-        pprog_release(r);
+        if (!r->orphan)                 /* orphelin : plus rien côté hôte */
+            pprog_release(r);
         memset(r, 0, sizeof(*r));
     }
     pthread_mutex_unlock(&G.mu);
@@ -7333,7 +7893,19 @@ static long submit_probe(void)
     long st;
     dump_submit();
     st = qgpu_submit(&G.q, G.hb, G.ncmd * 4, &pc);
+    G.sub_seq++;
     G.n_submits++;
+    /* 3e passe : notre refus attendu fait avancer ERRORS (global) — compté,
+       pour qu'il ne passe pas pour une faute au doorbell asynchrone suivant ;
+       et l'opcode refusé, pour que l'appelant sache quoi rendre. */
+    G.probe_op = (st != QGPU_ST_OK && pc < CMD_WORDS) ? QGPU_CMD_OP(G.cmd[pc]) : 0;
+    if (st != QGPU_ST_OK && G.err_valid)
+        G.errors++;
+    /* 4e passe : ligne de base de QGPU_REG_NOMEM relue — sinon le nomem_seen
+       suivant comptait ce refus-ci comme un second refus de SON lot et
+       invalidait tous ses miroirs pour rien. */
+    if (st == QGPU_ST_NO_MEM)
+        nomem_poll();
     G.h[G.cur].busy = 0;
     G.h[G.cur].npost = 0;
     G.ncmd = 0;
@@ -7352,7 +7924,7 @@ static int prog_ensure(PCtx *p, PProg *r)
 {
     const char *text;
     unsigned long len, off, sum, *c;
-    int t;
+    int t, created;
     long st;
 
     if (!r->obj)
@@ -7376,7 +7948,13 @@ static int prog_ensure(PCtx *p, PProg *r)
         r->text_dirty = 0;
         return !r->refused;
     }
+    /* 3e passe : pression mémoire de l'hôte — pas de nouveau texte avant
+       l'échéance (le programme reste au rendu d'Apple d'ici là, sans être
+       déclaré refusé). */
+    if (G.nomem_until > G.n_frames)
+        return 0;
     flush();                            /* tout ce qui précède part d'abord */
+    created = 0;
     if (r->id < 0) {
         int i;
         for (i = 0; i < QGPU_MAX_PROG && p->prog_used[i]; i++)
@@ -7385,6 +7963,7 @@ static int prog_ensure(PCtx *p, PProg *r)
             return 0;
         p->prog_used[i] = 1;
         r->id = i;
+        created = 1;
         c = reserve(p, QGPU_LEN_PROG_CREATE);
         c[0] = QGPU_CMD_HDR(QGPU_OP_PROG_CREATE, QGPU_LEN_PROG_CREATE);
         c[1] = (unsigned long)i;
@@ -7400,6 +7979,23 @@ static int prog_ensure(PCtx *p, PProg *r)
     c[3] = G.q.base + off;
     prog_parse(r);                      /* déjà fait au dispatch, sauf texte tout neuf */
     st = submit_probe();
+    if (st == QGPU_ST_NO_MEM) {
+        /* 3e passe : refus de MÉMOIRE, pas du compilateur — temporaire. Un
+           PROG_CREATE refusé n'a rien créé : l'identifiant est rendu ; un
+           PROG_STRING refusé laisse l'objet (vide) à son identifiant, que le
+           prochain essai réutilise. Rien n'est « refusé » pour de bon. */
+        if (created && G.probe_op == QGPU_OP_PROG_CREATE) {
+            p->prog_used[r->id] = 0;
+            r->id = -1;
+        }
+        r->text_sent = 0;
+        r->len_sent = r->sum_sent = 0;
+        r->refused = 0;
+        G.nomem_until = G.n_frames + NOMEM_BACKOFF;
+        gl_note("PROG cible %04lx : %lu octets refusés par le plafond mémoire hôte, "
+                "nouvel essai à l'image %lu\n", r->target, len, G.nomem_until);
+        return 0;
+    }
     r->text_sent = text;
     r->len_sent = len;
     r->sum_sent = sum;
@@ -7805,18 +8401,50 @@ static int glsl_state(PCtx *p, unsigned char *gc)
 /* Définit le programme sur l'hôte (textes, attributs, uniforms, liaison),
    dans une soumission sonde : le verdict de l'hôte est connu tout de suite.
    1 = accepté. */
-/* Finding 7 : même règle que glsl_name_ok du cœur (hors « gl_ », déjà
-   écarté par l'appelant) — identificateur GLSL, lettres, chiffres, '_'. */
+/* Finding 7 : mêmes règles que le cœur. Sans QGPU_CAP_GLSL_PATHS :
+   glsl_name_ok, identificateur seul. Avec : glsl_uniform_name_ok, nom
+   composé du linker GL 2.0 (« s.m », « l[2].pos ») — identifiant
+   ( '.' identifiant | '[' n ']' )*, n décimal sans zéro de tête, 5 chiffres
+   au plus, aucun segment en « gl_ ». */
+static int glsl_is_id0(char ch)
+{
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_';
+}
 static int glsl_ident_ok(const char *s)
 {
     const char *q;
-    if (!s[0] || (s[0] >= '0' && s[0] <= '9'))
+    if (!glsl_is_id0(s[0]))
         return 0;
     for (q = s; *q; q++)
-        if (!((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') ||
-              (*q >= '0' && *q <= '9') || *q == '_'))
+        if (!(glsl_is_id0(*q) || (*q >= '0' && *q <= '9')))
             return 0;
     return 1;
+}
+static int glsl_path_ok(const char *s)
+{
+    const char *q = s;
+    for (;;) {
+        const char *b = q, *d;
+        if (!glsl_is_id0(*q))
+            return 0;
+        while (glsl_is_id0(*q) || (*q >= '0' && *q <= '9'))
+            q++;
+        if (q - b >= 3 && b[0] == 'g' && b[1] == 'l' && b[2] == '_')
+            return 0;
+        while (*q == '[') {
+            d = ++q;
+            while (*q >= '0' && *q <= '9')
+                q++;
+            if (q == d || q - d > 5 || (*d == '0' && q - d > 1) || *q != ']')
+                return 0;
+            q++;
+        }
+        if (!*q)
+            return 1;
+        if (*q != '.')
+            return 0;
+        q++;
+    }
 }
 
 static int glsl_define(PCtx *p, GProg *g, unsigned long sig)
@@ -7828,6 +8456,7 @@ static int glsl_define(PCtx *p, GProg *g, unsigned long sig)
     unsigned long i, off, *c, nsrc = 0, nunif = 0, nattr = 0, nbad = 0;
     char name[QGPU_MAX_GLSL_NAME + 8];
     long st;
+    int created;
 
     g->sent = 1;
     g->sig = sig;
@@ -7838,6 +8467,7 @@ static int glsl_define(PCtx *p, GProg *g, unsigned long sig)
         !GLD_U8(P, GO_LINKED) || nslots > QGPU_MAX_GLSL_SLOTS)
         return 0;
     flush();                            /* ce qui précède part d'abord */
+    created = 0;
     if (g->id < 0) {
         int k;
         for (k = 0; k < QGPU_MAX_PROG && p->prog_used[k]; k++)
@@ -7848,6 +8478,7 @@ static int glsl_define(PCtx *p, GProg *g, unsigned long sig)
         }
         p->prog_used[k] = 1;
         g->id = k;
+        created = 1;
         c = reserve(p, QGPU_LEN_PROG_CREATE);
         c[0] = QGPU_CMD_HDR(QGPU_OP_PROG_CREATE, QGPU_LEN_PROG_CREATE);
         c[1] = (unsigned long)k;
@@ -7915,13 +8546,18 @@ static int glsl_define(PCtx *p, GProg *g, unsigned long sig)
         if (!SH.active_unif(linker, (int)i, QGPU_MAX_GLSL_NAME, &len, &size, &type, name) ||
             len <= 0 || !strncmp(name, "gl_", 3) || size <= 0)
             continue;
-        br = strchr(name, '[');         /* « nom[0] » → « nom » */
-        if (br)
-            *br = 0;
+        /* « nom[0] » → « nom » : seul le [0] FINAL d'un tableau. Un [i]
+           intérieur (« l[1].pos », tableau de struct) fait partie du nom —
+           le couper à la première '[' donnait « l », qui passait pour un
+           identifiant et désignait le mauvais uniform. */
+        br = name + strlen(name);
+        if (br - name > 3 && !strcmp(br - 3, "[0]"))
+            br[-3] = 0;
         /* Finding 7 (relecture du 29/09) : un membre de struct (« s.m », règle
-           GL 2.0 du linker 3Dlabs) n'est pas un identifiant ; glsl_name_ok du
-           cœur le refuse (BAD_ARG). On ne l'émet pas — voir nbad plus bas. */
-        if (!glsl_ident_ok(name)) {
+           GL 2.0 du linker 3Dlabs) n'est pas un identifiant. Le cœur ne le
+           sait nommer qu'avec QGPU_CAP_GLSL_PATHS ; sans lui, on ne l'émet
+           pas — voir nbad plus bas. */
+        if (!((G.q.caps & QGPU_CAP_GLSL_PATHS) ? glsl_path_ok(name) : glsl_ident_ok(name))) {
             nbad++;
             continue;
         }
@@ -7948,8 +8584,8 @@ static int glsl_define(PCtx *p, GProg *g, unsigned long sig)
         nunif++;
     }
     if (nbad) {
-        /* Finding 7 : le protocole ne sait pas nommer ces uniforms (v21 :
-           identifiant seul). Lier quand même donnerait un programme dont ils
+        /* Finding 7 : le device ne sait pas nommer ces uniforms (sans
+           QGPU_CAP_GLSL_PATHS : identifiant seul ; avec : nom hors grammaire). Lier quand même donnerait un programme dont ils
            restent à 0 sur l'hôte — image fausse sans le dire. Refusé ICI,
            sans GLSL_LINK : le programme reste au rendu d'Apple, et aucune
            commande refusée ne part vers l'hôte. */
@@ -7961,6 +8597,20 @@ static int glsl_define(PCtx *p, GProg *g, unsigned long sig)
     c[0] = QGPU_CMD_HDR(QGPU_OP_GLSL_LINK, QGPU_LEN_GLSL_LINK);
     c[1] = (unsigned long)g->id;
     st = submit_probe();
+    if (st == QGPU_ST_NO_MEM) {
+        /* 3e passe : refus de MÉMOIRE (textes, tables), temporaire — pas un
+           verdict du compilateur. g->sent retombe : glsl_state redéfinit le
+           programme après l'échéance ; d'ici là, rendu d'Apple. */
+        if (created && G.probe_op == QGPU_OP_PROG_CREATE) {
+            p->prog_used[g->id] = 0;
+            g->id = -1;
+        }
+        g->sent = 0;
+        G.nomem_until = G.n_frames + NOMEM_BACKOFF;
+        gl_note("GLSL (objet %p) : refusé par le plafond mémoire hôte, nouvel essai "
+                "à l'image %lu\n", (void *)P, G.nomem_until);
+        return 0;
+    }
     g->refused = st != QGPU_ST_OK;
     g->vrec.refused = g->frec.refused = g->refused;
     g->vrec.vp_need = glsl_need(P);
@@ -8063,8 +8713,13 @@ static int glsl_sync(PCtx *p)
         }
     }
     sig = glsl_sig(g->obj);
-    if (!g->sent || sig != g->sig)
+    if (!g->sent || sig != g->sig) {
+        /* 3e passe : pas de (re)définition pendant une pression mémoire de
+           l'hôte — rendu d'Apple d'ici l'échéance */
+        if (G.nomem_until > G.n_frames)
+            return no(NO_G_PROG_HOST, (unsigned long)g->id, 2);
         glsl_define(p, g, sig);
+    }
     if (g->refused)
         return no(NO_G_PROG_HOST, (unsigned long)g->id, 2);
     if (p->glsl_cur != g) {
@@ -13035,6 +13690,16 @@ static void surftex_copy(PCtx *p, PTex *t, PCtx *src)
     unsigned long *c;
     if (t->qtex < 0 || src->surf < 0)
         return;
+    /* 3e passe : un SURF_TEX refusé par le plafond mémoire (nomem_seen)
+       repartait à chaque échange, refusé à chaque fois — texture vide sur
+       l'hôte ; texture_uploadable_full la rend à Apple jusqu'à l'échéance. */
+    if (t->nomem_until > G.n_frames)
+        return;
+    /* 3e passe : le cœur refuse SURF_TEX au-delà de QGPU_MAX_TEX_DIM (BAD_ARG,
+       FATAL : la suite du lot perdue) alors qu'une surface peut aller à
+       QGPU_MAX_SURF_DIM. texture_uploadable_full refuse ces textures. */
+    if (src->sw > QGPU_MAX_TEX_DIM || src->sh > QGPU_MAX_TEX_DIM)
+        return;
     if (src->color == SW_NEWER) {
         /* l'image la plus récente est dans l'invité (repli d'Apple) : la
            copie hôte serait périmée — compté, pas copié */
@@ -13048,7 +13713,9 @@ static void surftex_copy(PCtx *p, PTex *t, PCtx *src)
     c[3] = 0;
     c[4] = src->surf;
     t->surf_gen = src->swap_gen;
+    t->surf_src = src;                  /* 3e passe : la fraîcheur dépend de LA source */
     t->surf_copied = 1;
+    t->up_seq = G.sub_seq;              /* 3e passe : perte ciblée */
     G.n_surftex++;
 }
 
@@ -13062,8 +13729,35 @@ static int upload_surftex(PCtx *p, PTex *t, unsigned long sid)
     int rect = tex_is_rect(t), k;
     PCtx *src = surf_source(sid);
 
-    if (!src || src->qctx < 0)
+    if (!src || src->qctx < 0) {
+        /* 3e passe : source disparue (contexte cible détruit, drawable
+           détaché) alors que la texture est encore échantillonnée — l'hôte
+           en tient la dernière image : on la garde plutôt que d'envoyer
+           chaque dessin chez Apple (texture blanche, contexte plein écran
+           passé en SW_NEWER). */
+        if (t->qtex >= 0 && t->surf_copied)
+            return 1;
         return no(NO_TEX_SURF, sid, src ? 1 : 0);
+    }
+    if (src->sw > QGPU_MAX_TEX_DIM || src->sh > QGPU_MAX_TEX_DIM)
+        return no(NO_TEX_SIZE, src->sw, src->sh);
+    {   /* 3e passe (Colin McRae ≥ 1024×768) : la taille que GLEngine donne à la
+           texture de surface (aglSurfaceTexture, paramètre 999) diffère-t-elle
+           de la surface source ? Le cœur prend la taille de la SURFACE : un
+           rectangle échantillonné avec les coordonnées d'une autre taille
+           sortirait décalé ou étiré. Dit une fois par texture et par taille. */
+        const unsigned char *lv0 = t->drvtex + DT_LEVEL0;
+        unsigned long gw = (unsigned short)S16(lv0, LV_W), gh = (unsigned short)S16(lv0, LV_H);
+        static unsigned long told;
+        if ((gw || gh) && (gw != src->sw || gh != src->sh) && told < 16 &&
+            t->surf_note != ((gw << 16) ^ gh ^ (src->sw << 8) ^ (src->sh << 24))) {
+            told++;
+            t->surf_note = (gw << 16) ^ gh ^ (src->sw << 8) ^ (src->sh << 24);
+            gl_note("SURFTEX taille : tex %p (%s) GLEngine %lux%lu, surface source %lux%lu "
+                    "(qctx %ld), image %lu\n", t->drvtex, rect ? "rectangle" : "2D",
+                    gw, gh, src->sw, src->sh, (long)src->qctx, G.n_frames);
+        }
+    }
     if (t->qtex < 0) {
         int r = tex_id_reserve(p, t, QGPU_LEN_TEX_CREATE3, &c);   /* finding 4 */
         if (!r)
@@ -13113,7 +13807,10 @@ created:
         t->prm[k] = ~0UL;               /* jamais envoyés : à renvoyer si la
                                            texture redevient ordinaire */
     t->prm_valid = 1;
-    if (!t->surf_copied || t->surf_gen != src->swap_gen)
+    /* 3e passe : une texture repointée vers une AUTRE source (nouvel
+       aglSurfaceTexture) dont le compteur d'échanges vaut celui de l'ancienne
+       gardait l'image de l'ancienne */
+    if (!t->surf_copied || t->surf_gen != src->swap_gen || t->surf_src != src)
         surftex_copy(p, t, src);
     return 1;
 }
@@ -13432,6 +14129,8 @@ static void crash_hook_install(void)
             break;
         }
     }
+    if (crash_retired)
+        return;
     crash_path[0] = 0;
     if (path && strlen(path) < sizeof(crash_path) - 8) {
         strcpy(crash_path, path);
@@ -13451,10 +14150,41 @@ static void crash_hook_install(void)
    (Quit → double faute → rapport CrashReporter). Relu à chaque image : si un
    autre gestionnaire est en place, il devient le « précédent » et le nôtre
    revient devant. Deux appels système par image, négligeable. */
+/* Reste du 29/09 — DÉCHARGEMENT. gldTerminateLibrary précède NSUnLinkModule :
+   crash_handler vit dans NOTRE image, qui va être démappée. Laissé en place,
+   la faute suivante du processus (même sans rapport avec OpenGL) sauterait
+   dans une page absente — double faute, mort sans rapport. On remet donc le
+   gestionnaire précédent là où le nôtre est encore devant ; si quelqu'un
+   s'est posé devant nous depuis, on ne touche à rien (le démonter casserait
+   sa chaîne), et crash_retired interdit tout réarmement ultérieur. */
+static void crash_hook_remove(void)
+{
+    struct sigaction cur;
+    int k;
+    if (crash_retired)
+        return;
+    crash_retired = 1;
+    for (k = 0; k < 2; k++) {
+        int sig = k == 0 ? SIGBUS : SIGSEGV;
+        if (sigaction(sig, 0, &cur) == 0 && cur.sa_sigaction == crash_handler)
+            sigaction(sig, &crash_prev[k], 0);
+    }
+}
+
+/* Filet si le module est démonté sans gldTerminateLibrary (terminaisons de
+   module appelées par dyld au NSUnLinkModule, ou à la sortie). Idempotent. */
+static void pomppc_accel_unload(void) __attribute__((destructor));
+static void pomppc_accel_unload(void)
+{
+    crash_hook_remove();
+}
+
 static void crash_hook_check(void)
 {
     struct sigaction cur, sa;
     int k;
+    if (crash_retired)
+        return;
     for (k = 0; k < 2; k++) {
         int sig = k == 0 ? SIGBUS : SIGSEGV;
         if (sigaction(sig, 0, &cur) != 0 || cur.sa_sigaction == crash_handler)
@@ -13937,7 +14667,7 @@ static void capture_presented(void)
     done = 1;
     wait_half_ex(0, 0);
     wait_half_ex(1, 0);
-    if (G.wait_miss) return;
+    if (G.wait_miss || G.dead) return;
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     snprintf(resume, sizeof(resume), "%s.resume", path);
     snprintf(expired, sizeof(expired), "%s.expired", path);
@@ -14217,6 +14947,7 @@ static int try_copy_tex(PCtx *p, unsigned long *a)
     c[9] = w;
     c[10] = h;
     t->dirty = 0;
+    t->up_seq = G.sub_seq;              /* 3e passe : perte ciblée */
     G.n_copytex++;
     return 1;
 }
@@ -15273,6 +16004,13 @@ void pomppc_context_created(void *ctx)
     p->color = p->depth = SW_NEWER;
     p->lazy_ret = 4;                    /* ce que rend le gldInitDispatch d'Apple */
     pthread_mutex_lock(&G.mu);
+    /* Reste du 29/09 — P8 AVANT le premier contexte : pthread_atfork n'est
+       posé qu'au premier contexte (pomppc_gld.c), la tranche est pourtant
+       ouverte dès gldInitializeLibrary. Un enfant de fork() sans exec
+       arrivant ici hérite de la tranche MAPPÉE du père : il oublie tout,
+       comme le ferait le rappel enfant. */
+    if (G.state > 0 && owner_pid && getpid() != owner_pid)
+        backend_forget_locked();
     if (G.state > 0) {
         p->qctx = alloc_id(&G.ctx_used, G.q.ctx_base, QGPU_CLIENT_CTX_IDS);
         if (p->qctx >= 0) {
@@ -15342,12 +16080,20 @@ void pomppc_context_destroyed(void *ctx)
         if (p->cfg)
             GLD_U32(p->cfg, 0x11c) = 0;     /* le descripteur meurt avec le contexte */
         /* v16 : les programmes de ce contexte meurent avec lui côté hôte
-           (CTX_DESTROY) ; nos entrées ne doivent plus le désigner. */
+           (CTX_DESTROY) ; nos entrées ne doivent plus le désigner. Mais la
+           POIGNÉE peut survivre dans un groupe de partage : l'entrée devient
+           orpheline (ctx = 0, invisible de tous les parcours) et garde la
+           poignée d'Apple jusqu'au gldDestroyPipelineProgram. */
         {
             int k;
             for (k = 0; k < PPROG_MAX; k++)
-                if (pprog[k].ctx == ctx)
+                if (pprog[k].ctx == ctx) {
+                    unsigned long apple = pprog[k].apple;
                     memset(&pprog[k], 0, sizeof(pprog[k]));
+                    pprog[k].apple  = apple;
+                    pprog[k].orphan = 1;
+                    pprog[k].id     = -1;
+                }
             for (k = 0; k < GPROG_MAX; k++)     /* v21 */
                 if (gprog[k].ctx == ctx) {
                     free(gprog[k].mirror);
@@ -15601,10 +16347,22 @@ void pomppc_patch_renderer_info(unsigned char *info)
         /* Le GLDriver logiciel laisse 0 : CGLDescribeRenderer rend alors
            kCGLRPVideoMemory = 0, et Warcraft III (comme d'autres jeux 2002)
            refuse d'initialiser OpenGL. GeForce3 y copie la VRAM IOAccelerator. */
+        /* 3e passe (Colin McRae ≥ 1024×768) : POMPPC_GL_VRAM_MB=<n> (16 à
+           2047) annonce une autre VRAM — IndirectX choisit ses cibles de
+           rendu d'après ce budget ; l'essai dit si c'est lui qui change en
+           haute résolution. Défaut inchangé : 64 Mio. 4e passe : 2047 au
+           plus — 2048 << 20 = 0x80000000, lu comme GLint négatif. */
+        unsigned long vram = RI_VRAM_BYTES;
+        const char *ve = getenv("POMPPC_GL_VRAM_MB");
+        if (ve && *ve) {
+            unsigned long mb = strtoul(ve, 0, 10);
+            if (mb >= 16 && mb <= 2047)
+                vram = mb << 20;
+        }
         if (GLD_U32(info, RI_VRAM) == 0)
-            GLD_U32(info, RI_VRAM) = RI_VRAM_BYTES;
+            GLD_U32(info, RI_VRAM) = vram;
         if (GLD_U32(info, RI_TEXMEM) == 0)
-            GLD_U32(info, RI_TEXMEM) = RI_VRAM_BYTES;
+            GLD_U32(info, RI_TEXMEM) = vram;
     }
 }
 

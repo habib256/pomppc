@@ -40,7 +40,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from hote import Hote, MAIN, WT, journal          # noqa: E402
+from hote import Hote, MAIN, WT, VMEnPause, journal   # noqa: E402
 from jeu import NOM_MODE, MODES                    # noqa: E402
 
 ICI = os.path.dirname(os.path.abspath(__file__))
@@ -377,9 +377,22 @@ class Cellule:
         return "\n".join(l) + "\n"
 
     def sauvegarde(self):
+        # Une sauvegarde orpheline (restauration ratée d'une cellule précédente)
+        # est l'ORIGINAL : ne jamais l'écraser par la version modifiée en place.
         for f in self.j.fichiers_reglages(self.mode):
-            self.h.ssh("f='%s'; if [ -e \"$f\" ]; then cp -p \"$f\" \"$f.matrice-sauve\"; "
+            self.h.ssh("f='%s'; if [ -e \"$f.matrice-sauve\" ] || [ -e \"$f.matrice-absent\" ]; then :; "
+                       "elif [ -e \"$f\" ]; then cp -p \"$f\" \"$f.matrice-sauve\"; "
                        "else touch \"$f.matrice-absent\"; fi" % f)
+
+    def etape(self, nom, fn):
+        """Une étape de remise en état : une erreur est notée, les suivantes ont lieu."""
+        try:
+            return fn()
+        except VMEnPause:
+            raise
+        except Exception as e:
+            self.res["motifs"].append("%s : %s: %s" % (nom, type(e).__name__, e))
+            return None
 
     def restaure(self):
         for f in self.j.fichiers_reglages(self.mode):
@@ -390,6 +403,15 @@ class Cellule:
         h, j = self.h, self.j
         t0 = time.time()
         os.makedirs(self.dir, exist_ok=True)
+        # --reprendre : rien d'un tour précédent ne doit servir de preuve à
+        # celui-ci (un vidage ancien comparé à la nouvelle capture de la même
+        # image rendait la cellule verte sans le vidage de cette partie)
+        shutil.rmtree(os.path.join(self.dir, self.sous), ignore_errors=True)
+        if self.vidage:
+            shutil.rmtree(os.path.join(self.dir, "rejeu"), ignore_errors=True)
+            for f in ("capture.ppm", "capture.png", "capture-frame.txt"):
+                if os.path.exists(os.path.join(self.dir, f)):
+                    os.remove(os.path.join(self.dir, f))
         self.res["charge_hote"] = h.charge_hote()
         journal("== %s (%s) — %s" % (j.titre, NOM_MODE[self.mode], self.res["charge_hote"]))
         h.ssh("mkdir -p %s; rm -rf %s; rm -f %s; killall ScreenSaverEngine 2>/dev/null; true"
@@ -397,6 +419,7 @@ class Cellule:
         self.sauvegarde()
         rows = {}
         a = b = None
+        en_pause = False
         try:
             j.preparer(h, self.mode)
             h.depose(self.cellule_sh(), G + "/cellule.sh")
@@ -442,6 +465,9 @@ class Cellule:
                 if t > j.delai_scene:
                     raise Echec("scène non atteinte en %d s (image %s)" % (t, max(rows) if rows else "aucune"))
             journal("fenêtre de mesure %d..%d atteinte (%.0f s)" % (a, b, time.time() - lance))
+            # la charge du DÉBUT de cellule ne dit rien d'une VM lancée pendant
+            # la fenêtre : on la relève aussi juste après
+            self.res["charge_hote"] += " ; après la mesure : " + h.charge_hote()
             if self.sample_s:
                 # profil APRÈS la fenêtre (sample ralentit le jeu) : même scène fixe
                 pids = h.processus(j.processus)
@@ -491,28 +517,43 @@ class Cellule:
             rows = lit_frames(h.sortie("cat %s/frames.csv" % self.gd))
         except Echec as e:
             self.res["motifs"].append(str(e))
+        except VMEnPause:
+            en_pause = True             # rien ne passe plus par ssh : le tour s'arrête
+            raise
+        except Exception as e:
+            # HMP (OSError, socket.timeout), preparer() d'un jeu (RuntimeError)… :
+            # sans cela le rapatriement, le ménage et SURTOUT le redémarrage de
+            # l'invité étaient sautés, et la cellule suivante échouait en
+            # kCGLBadDisplay pour une mauvaise raison (bug hunt 4)
+            self.res["motifs"].append("erreur de l'outil : %s: %s" % (type(e).__name__, e))
         finally:
-            if self.gele:
-                # rien ne passe par ssh : RESET, puis on rend les réglages
-                h.redemarre()
-            try:
-                j.arreter(h)
-            finally:
+            if not en_pause:
+                if self.gele:
+                    # rien ne passe par ssh : RESET, puis on rend les réglages
+                    self.etape("redémarrage de l'invité gelé", h.redemarre)
+                self.etape("arrêt du jeu", lambda: j.arreter(h))
                 # Terminal ne quitte sans dialogue que si lance.command est fini
-                h.ssh("rm -f %s; i=0; while ! grep -q '^exit ' %s/log.txt 2>/dev/null && [ $i -lt 20 ]; "
-                      "do sleep 1; i=$((i+1)); done; osascript -e 'tell application \"Terminal\" to quit' "
-                      "2>/dev/null; true" % (TRIG, self.gd), delai=60)
-                self.restaure()
-                j.nettoyer(h, self.mode)
-        h.rapatrie(self.gd, os.path.join(self.dir))
-        nom = os.path.basename(self.gd)
-        if os.path.isdir(os.path.join(self.dir, nom)):
-            shutil.rmtree(os.path.join(self.dir, self.sous), ignore_errors=True)
-            os.rename(os.path.join(self.dir, nom), os.path.join(self.dir, self.sous))
-        h.ssh("rm -rf %s" % self.gd)               # le vidage pèse : on ne le laisse pas dans l'invité
-        if j.redemarrer_apres and not self.gele:
-            if not h.redemarre():
-                self.res["motifs"].append("l'invité ne redémarre pas")
+                self.etape("fermeture de Terminal", lambda: h.ssh(
+                    "rm -f %s; i=0; while ! grep -q '^exit ' %s/log.txt 2>/dev/null && [ $i -lt 20 ]; "
+                    "do sleep 1; i=$((i+1)); done; osascript -e 'tell application \"Terminal\" to quit' "
+                    "2>/dev/null; true" % (TRIG, self.gd), delai=60))
+                self.etape("remise des réglages", self.restaure)
+                self.etape("nettoyage du jeu", lambda: j.nettoyer(h, self.mode))
+        try:
+            if not h.rapatrie(self.gd, os.path.join(self.dir)):
+                self.res["motifs"].append("rapatriement de %s en échec" % self.gd)
+            nom = os.path.basename(self.gd)
+            if os.path.isdir(os.path.join(self.dir, nom)):
+                shutil.rmtree(os.path.join(self.dir, self.sous), ignore_errors=True)
+                os.rename(os.path.join(self.dir, nom), os.path.join(self.dir, self.sous))
+        except Exception as e:
+            self.res["motifs"].append("rapatriement : %s: %s" % (type(e).__name__, e))
+        finally:
+            # le vidage pèse : on ne le laisse pas dans l'invité
+            self.etape("ménage de l'invité", lambda: h.ssh("rm -rf %s" % self.gd))
+            if j.redemarrer_apres and not self.gele:
+                if not self.etape("redémarrage de l'invité", h.redemarre):
+                    self.res["motifs"].append("l'invité ne redémarre pas")
         self.res["duree_s"] = int(time.time() - t0)
         self.res["fenetre"] = "%s..%s" % (a, b) if a is not None else ""
         self.mesures(rows, a, b)
@@ -668,11 +709,23 @@ def joue_cellule(h, j, mode, tour, a):
 
 
 # ------------------------------------------------------------ principal
-def restaure_orphelins(h):
-    """Un tour interrompu a pu laisser des réglages sauvegardés : on les rend."""
-    out = h.sortie("find /Users/tiger/Library /Users/tiger/Desktop -name '*.matrice-sauve' -o "
+def restaure_orphelins(h, jeux):
+    """Un tour interrompu a pu laisser des réglages sauvegardés : on les rend.
+    On cherche à côté de chaque fichier que les jeux déclarent (Nexuiz range
+    le sien dans ~/.nexuiz, hors de ~/Library et ~/Desktop), puis, pour les
+    jeux retirés depuis, dans ~/Library et ~/Desktop."""
+    connus = set()
+    for j in jeux.values():
+        for mode in MODES:
+            try:
+                connus.update(j.fichiers_reglages(mode))
+            except Exception:
+                pass
+    tests = "".join("for x in '%s.matrice-sauve' '%s.matrice-absent'; do [ -e \"$x\" ] && echo \"$x\"; done; "
+                    % (f, f) for f in sorted(connus))
+    out = h.sortie(tests + "find /Users/tiger/Library /Users/tiger/Desktop -name '*.matrice-sauve' -o "
                    "-name '*.matrice-absent' 2>/dev/null", delai=120)
-    for f in out.split("\n"):
+    for f in sorted(set(out.split("\n"))):
         f = f.strip()
         if f.endswith(".matrice-sauve"):
             journal("réglage rendu : %s" % f[:-14])
@@ -768,7 +821,7 @@ def main():
             h.ssh("osascript -e 'tell application \"Terminal\" to quit' 2>/dev/null; true")
             if j.redemarrer_apres:
                 h.redemarre()
-    restaure_orphelins(h)
+    restaure_orphelins(h, jeux)
     for j in jeux.values():
         for mode in MODES:
             if mode not in j.non_automatise:

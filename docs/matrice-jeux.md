@@ -49,7 +49,10 @@ python3 tests/matrice_test.py                 # règles de scène et comparateur
 ```
 
 Prérequis : la VM quotidienne lancée (`./run_tiger.sh`), ssh (`tools/guest/tssh.sh uptime`),
-moniteur `.run/mon.sock`, personne d'autre sur la VM. Sorties dans
+moniteur `.run/mon.sock` (chemin et port ssh effectifs publiés par le lanceur dans
+`.run/tiger.mon` et `.run/tiger.sshport`, que la matrice lit), personne d'autre sur la VM.
+La matrice ne supprime jamais `.run/tiger.lock` : si le QEMU qu'elle relance ne libère pas le
+verrou en 60 s, elle s'arrête sans rien relancer. Sorties dans
 `bench/matrice/<AAAAMMJJ-HHMM>/` du dépôt principal (non versionné) : `tableau.md`,
 `resultats.csv`, un dossier par cellule ; `bench/matrice/dernier` pointe sur le dernier tour.
 
@@ -207,8 +210,12 @@ une liste d'instances (profils d'un même jeu, Nexuiz).
 ## 5. Pièges et limites
 
 - **Vitesse bruitée** : la colonne `charge_hote` dit si un autre QEMU tournait (l'agent TCG
-  sur sa copie). Le 26/09, aucun autre QEMU pendant les tours. Les écarts de ±5 % entre deux
-  parties restent la règle (`docs/tcg-g4.md` §14.7).
+  sur sa copie) et la charge de l'hôte, relevées au début de la cellule ET après la fenêtre de
+  mesure. Depuis le 29/09, « notre » QEMU est le détenteur de `tiger.lock` : une VM
+  SNAPSHOT=1 d'un autre agent, qui démarre elle aussi sur `tiger.qcow2`, compte bien comme
+  « autre ». La charge compte aussi ce qui n'est pas QEMU (Spotlight, tests d'un autre projet :
+  charge 40-53 le 29/09, mesures inexploitables). Le 26/09, aucun autre QEMU pendant les
+  tours. Les écarts de ±5 % entre deux parties restent la règle (`docs/tcg-g4.md` §14.7).
 - **Le déclencheur ralentit le jeu** (§2) : jamais de ms/image prise pendant la preuve.
 - **La capture doit correspondre à une présentation terminée** : rendez-vous du plugin
   décrit en tête, confirmé par `frames.csv`. Un marqueur absent, expiré ou dont l'image

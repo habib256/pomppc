@@ -208,6 +208,17 @@
    version >= 21 ET ce bit. docs/protocole-v21-glsl.md. */
 #define QGPU_CAP_GLSL           0x00001000
 #define QGPU_CAP_COMBINE3       0x00002000  /* v22 : opérations ATI et sources ZERO/ONE */
+/* v22+ : GLSL_UNIFORM accepte un nom COMPOSÉ, tel que le rend le linker d'un
+   pilote GL 2.0 pour les membres de struct et les éléments de tableaux de
+   struct : « s.m », « l[2].pos », « a[1].b.c ». Grammaire stricte :
+   identifiant ( '.' identifiant | '[' entier décimal ≤ 99999 ']' )*, sans
+   segment en « gl_ », QGPU_MAX_GLSL_NAME octets au plus. Annoncé par le
+   CŒUR avec QGPU_CAP_GLSL (c'est sa validation qui change ; le backend GL
+   passe le nom tel quel à glGetUniformLocation). Sans ce bit, un tel nom
+   vaut BAD_ARG (FATAL pour la soumission) : l'invité ne l'émet pas.
+   GLSL_ATTRIB reste limité aux identifiants. Ajouté sans changer
+   QGPU_PROTO_VERSION (même règle que QGPU_CAP_GEN_SIZES). */
+#define QGPU_CAP_GLSL_PATHS     0x00004000
 
 /* ── Statuts : QGPU_ST_* dans qgpu_abi.h ─────────────────────────────────── */
 /* ── Limites ─────────────────────────────────────────────────────────────── */
