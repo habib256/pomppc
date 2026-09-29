@@ -9,6 +9,18 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Matrice : la « régression Zenerchi 4,4 → 7,9 ms/image » était une fenêtre de mesure mal
+  placée** (`tools/matrice/jeux/zen.py`, `docs/matrice-jeux.md` §7). L'écran de l'éditeur
+  dure un temps fixe et tourne, selon le lancement, à ~3,4 ou ~15 ms/image : le menu arrive
+  vers l'image 1650 ou 490, et la fenêtre fixe 1500..2500 contenait parfois ses ~4 s de
+  chargement. Bissection sur hôte au repos (QEMU d'avant les bug hunts, kext et plugin de
+  `8af9efc`, puis HEAD) : Zenerchi au menu 3,94-4,07 ms/image dans toutes les piles, Marble
+  Blast plein écran 9,4-10,2 ; le plugin de `8af9efc` donne lui aussi 4,3 ou 7,7 selon le
+  lancement. Aucun code des bug hunts ne coûte. La fenêtre est maintenant repérée sur la
+  scène (15 dessins par image tenus 100 images, puis +200, sur 1000 images) ; plancher
+  7 → 6. Zenerchi 4,5 / 4,4 / 4,4 ms/image, image juste ; tour complet `20260930-0128` :
+  16 vertes sur 16 automatisées, images toutes justes.
+
 - **Son : les saccades de DOOM 3 venaient du compteur de trames du Screamer**
   (`patches/screamer/screamer.c`, `docs/audio-stabilite.md`). Apple02DBDMAAudio lit
   la position de lecture dans le registre 5 (≈ 11 fois par seconde, tête d'effacement
