@@ -47,6 +47,13 @@ POMPPC_FRONTEND=native ../run_tiger.sh  # native QEMU window for diagnostics
 RES=1024x768x32 ./build/pomppc     # pick the guest resolution (SMP=N works too)
 ```
 
+**Réglages gardés** : à l'arrêt (menu Quitter, fermeture de la fenêtre, Ctrl+C ou `SIGTERM`),
+ImGuiDock écrit `.run/imguidock.conf` — OS, son, manette, clavier et souris, vue et zoom,
+fenêtres affichées, plein écran, géométrie de la fenêtre — et le relit au lancement suivant
+(un lanceur passé en argument prime sur l'OS retenu). Texte « clé = valeur », modifiable à la
+main ; la disposition des fenêtres reste dans `.run/imgui.ini`, le carillon dans
+`.run/chime.conf`. Une épreuve `POMPPC_FE_SCRIPT` ne le lit ni ne l'écrit.
+
 The *default* launcher is derived from the binary's own location (`build/` → repo root), so it
 works from any working directory; an explicit argument is taken relative to your cwd. `RES` and
 `SMP` are forwarded to whichever run script is launched, and the **OS** menu switches guests at

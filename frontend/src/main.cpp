@@ -16,6 +16,7 @@
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cmath>
+#include <csignal>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +34,7 @@
 
 #include "QemuBridge.h"
 #include "StartupChime.h"
+#include "FrontendSettings.h"
 #include "PointerPolicy.h"
 
 #ifndef IMGUI_HAS_DOCK
@@ -298,6 +300,12 @@ static const char* kWinLibrary = "Ludothèque";
 static const char* kWinBilan   = "Bilan";
 static const char* kWinJournal = "Journal";
 
+// Ctrl+C ou SIGTERM : quitter par la fin de main (réglages écrits, QEMU
+// arrêté proprement) au lieu de mourir sur place. Le gestionnaire ne fait que
+// lever le drapeau ; la boucle le lit à chaque image.
+static volatile std::sig_atomic_t gQuitSignal = 0;
+static void onQuitSignal(int) { gQuitSignal = 1; }
+
 // Default layout, built only when imgui.ini has no node for the dockspace
 // (first launch, or after Vue ▸ Disposition par défaut): guest in the
 // central node, Ludothèque on the right, Bilan + Journal below.
@@ -334,6 +342,13 @@ int main(int argc, char** argv) {
     // Docking layout persists next to the QMP socket, whatever the cwd.
     static std::string iniPath = runtimeDir + "/imgui.ini";
     const std::string chimeSettingsPath = runtimeDir + "/chime.conf";
+    // Réglages d'ImGuiDock : relus ici, écrits à l'arrêt (fin de main).
+    const std::string feSettingsPath = runtimeDir + "/imguidock.conf";
+    // Une épreuve scriptée (POMPPC_FE_SCRIPT) part des défauts et n'écrit
+    // rien : elle doit être reproductible et ne pas écraser ceux de l'usager.
+    const bool feKeep = std::getenv("POMPPC_FE_SCRIPT") == nullptr;
+    FrontendSettings fe;
+    const bool feLoaded = feKeep && fe.load(feSettingsPath);
     const std::string defaultChime = root + "/disks/chimes/powermac3-1-4.2.8.wav";
     ChimeSettings chime;
     chime.file = defaultChime;
@@ -354,9 +369,12 @@ int main(int argc, char** argv) {
         if (!chime.save(chimeSettingsPath)) journal("échec sauvegarde carillon");
     };
 
+    // Un lanceur passé en argument (run_tiger.sh délègue ainsi) prime sur
+    // l'OS retenu à l'arrêt précédent.
     std::string curLauncher = defLauncher;   // boots Mac OS 9 by default
-    bool sound = true;    // on by default (PulseAudio Screamer); RAM capped ≤768
-    bool pad = true;      // usb-host passthrough; the run script self-guards
+    if (argc <= 1 && fe.os == "tiger" && fs::exists(tigerSh)) curLauncher = tigerSh;
+    bool sound = fe.sound;  // on by default (PulseAudio Screamer); RAM capped ≤768
+    bool pad = fe.pad;      // usb-host passthrough; the run script self-guards
     auto bridge = std::make_unique<QemuBridge>();
     std::string err;
     if (!bridge->start(makeConfig(curLauncher, runtimeDir, sound, pad), &err)) {
@@ -382,15 +400,20 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 #endif
+    const bool feGeom = fe.winW > 0 && fe.winH > 0;
     GLFWwindow* window =
-        glfwCreateWindow(1280, 900, "POMPPC — PowerPC Macintosh (QEMU)", nullptr, nullptr);
+        glfwCreateWindow(feGeom ? fe.winW : 1280, feGeom ? fe.winH : 900,
+                         "POMPPC — PowerPC Macintosh (QEMU)", nullptr, nullptr);
     if (!window) { glfwTerminate(); return 1; }
+    if (feGeom) glfwSetWindowPos(window, fe.winX, fe.winY);
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 #ifdef __APPLE__
     journal("Ctrl+Cmd+F rendu au frontend (%d entrée(s) « Enter Full Screen » du menu Cocoa)",
             disableNativeFullScreen(window));
 #endif
+    std::signal(SIGINT, onQuitSignal);
+    std::signal(SIGTERM, onQuitSignal);
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     {
@@ -422,7 +445,7 @@ int main(int argc, char** argv) {
     // seconde, même fenêtre fermée). Mis en cache, rafraîchi à la demande.
     std::vector<std::string> cdImages = listCdImages(root);
     bool cdImagesStale = false;
-    bool grabbed = true;    // keyboard → guest (toggle in the Machine menu)
+    bool grabbed = fe.grabbed;    // keyboard → guest (toggle in the Machine menu)
     // Touches actuellement enfoncées côté invité. Sans ce suivi, décocher
     // « Clavier → invité » (ou ouvrir un champ de saisie ImGui) pendant qu'une
     // touche est tenue n'envoyait jamais le relâchement : Shift/Ctrl restaient
@@ -435,19 +458,24 @@ int main(int argc, char** argv) {
     bool paused = false;
     // Vue : « ajuster » (plus grand rectangle au ratio de l'invité) par
     // défaut ; un zoom fixe 50-200 % reste possible en fenêtre.
-    bool fitView = true;
-    float zoom = 1.0f;
-    bool showLibrary = true;      // ludothèque window
-    bool showBilan = true;
-    bool showJournal = true;
+    bool fitView = fe.fitView;
+    float zoom = fe.zoom;
+    bool showLibrary = fe.showLibrary;      // ludothèque window
+    bool showBilan = fe.showBilan;
+    bool showJournal = fe.showJournal;
     bool resetLayout = false;
     std::string currentCd;        // game CD currently inserted in gamecd
 
     // Plein écran hôte : la fenêtre GLFW passe sur son moniteur à la
     // résolution native ; on retient la géométrie fenêtrée pour y revenir.
     bool fullscreen = false;
-    bool toggleFullscreen = false;   // appliqué après le swap (hors frame ImGui)
+    // Plein écran retenu à l'arrêt : rétabli par la bascule habituelle, après
+    // la première image (hors frame ImGui, comme Ctrl+Cmd+F).
+    bool toggleFullscreen = fe.fullscreen;
     int winX = 0, winY = 0, winW = 1280, winH = 900;
+    glfwGetWindowPos(window, &winX, &winY);
+    glfwGetWindowSize(window, &winW, &winH);
+    if (feLoaded) journal("réglages relus : %s", feSettingsPath.c_str());
 
     // Rectangle réellement dessiné (points ImGui) : la seule référence de la
     // souris invité. Mis à jour à chaque frame par la vue de l'invité.
@@ -459,7 +487,7 @@ int main(int argc, char** argv) {
     // souris absolue, mais la souris USB HID de mac99 redevient « courante »
     // dès qu'OS 9 l'interroge ; on rend la tablette courante (mouse_set).
     // Décocher pour les jeux qui veulent des déplacements relatifs.
-    bool preferTablet = true;
+    bool preferTablet = fe.preferTablet;
     bool pointerPrefChanged = false;
     double nextPointerRetry = 0;
     bool pointerCaptured = false;
@@ -645,6 +673,7 @@ int main(int argc, char** argv) {
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+        if (gQuitSignal) glfwSetWindowShouldClose(window, GLFW_TRUE);
         // After the Cocoa event pump, which puts this thread back in the
         // interactive band above QEMU's audio timer.
         preferGuestAudio();
@@ -1037,6 +1066,28 @@ int main(int argc, char** argv) {
             nextPointerRetry = 0;
         }
     }
+
+    // ── Réglages d'ImGuiDock, écrits à l'arrêt ────────────────────────────
+    // En plein écran, la géométrie fenêtrée retenue avant la bascule est
+    // celle à rétablir ; sinon, celle de la fenêtre au moment de quitter.
+    if (!fullscreen) {
+        glfwGetWindowPos(window, &winX, &winY);
+        glfwGetWindowSize(window, &winW, &winH);
+    }
+    fe.os = (curLauncher == tigerSh) ? "tiger" : "os9";
+    fe.sound = sound;
+    fe.pad = pad;
+    fe.grabbed = grabbed;
+    fe.preferTablet = preferTablet;
+    fe.fitView = fitView;
+    fe.zoom = zoom;
+    fe.showLibrary = showLibrary;
+    fe.showBilan = showBilan;
+    fe.showJournal = showJournal;
+    fe.fullscreen = fullscreen;
+    fe.winX = winX; fe.winY = winY; fe.winW = winW; fe.winH = winH;
+    if (feKeep && !fe.save(feSettingsPath))
+        std::fprintf(stderr, "[pomppc] échec de l'écriture de %s\n", feSettingsPath.c_str());
 
     bridge->stop();
     glDeleteTextures(1, &tex);
