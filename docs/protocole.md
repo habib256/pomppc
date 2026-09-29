@@ -82,7 +82,16 @@ Sans changer `QGPU_PROTO_VERSION` :
   `PROG_CREATE`, `PROG_STRING`, `GLSL_SOURCE`) n'alloue rien et rend `NO_MEM`,
   **non fatal** : le lot continue. Les mises à jour d'un niveau ou d'un tampon
   refusé (`TEX_SUBIMAGE`, `COPY_TEX`, `BUF_SUBDATA`) rendent aussi `NO_MEM`,
-  sans effet ; `BUF_DESTROY` d'un tampon refusé rend `OK`. `STATUS` porte la
+  sans effet ; `BUF_DESTROY` d'un tampon refusé rend `OK`. Programmes (bug
+  hunt 3) : un identifiant dont le `PROG_CREATE` a été refusé fait rendre
+  `NO_MEM` à `PROG_STRING`, `PROG_LOCAL` et à tous les `GLSL_*` qui le visent
+  (au lieu d'un `BAD_ARG` fatal) ; `PROG_BIND` le lie quand même et rend
+  `NO_MEM` — les dessins qui suivent sont jetés (`BAD_ARG` non fatal) plutôt
+  que rendus par le programme lié avant ; `PROG_DESTROY` rend `OK` et libère
+  l'identifiant. Un `PROG_STRING` refusé rend le programme **cassé** (l'ancien
+  texte n'agit plus, sa mémoire est rendue) ; un `GLSL_SOURCE` refusé fait
+  rendre `NO_MEM` au `GLSL_LINK` suivant, qui laisse le programme cassé
+  jusqu'à la prochaine définition. `STATUS` porte la
   première faute ; un arrêt survenu **après** un `NO_MEM` est rendu à sa place,
   si bien que `NO_MEM` rendu garantit que tout le lot a été exécuté.
   `QGPU_REG_NOMEM` (0x4C) compte les commandes refusées depuis le démarrage :

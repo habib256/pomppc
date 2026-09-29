@@ -7849,6 +7849,146 @@ static void run_reste0929(QgpuCore *c, uint8_t *shmem)
     CHECK(st == QGPU_ST_BAD_ARG, "(g) GLSL_ATTRIB reste limité aux identifiants (st %u)", st);
 }
 
+/* Bug hunt 3 : NO_MEM sur les PROGRAMMES — le correctif « non fatal » ne les
+   couvrait pas (repros de scratchpad/bh3-nomem/poc.c). Un PROG_CREATE refusé
+   faisait tomber les commandes suivantes du lot en BAD_ARG fatal ; un texte
+   refusé laissait l'ancien agir, ou le LINK réussir avec un étage manquant.
+   Et le format d'une base redéfinie avant un refus de mipmaps. */
+static void run_bh3(QgpuCore *c, uint8_t *shmem)
+{
+    static const char fp_red[] = "!!ARBfp1.0\nMOV result.color, {1,0,0,1};\nEND\n";
+    static const char fp_green[] = "!!ARBfp1.0\nMOV result.color, {0,1,0,1};\nEND\n";
+    static const char vs[] =
+        "void main()\n{\n    gl_FrontColor = vec4(0.0,1.0,0.0,1.0);\n"
+        "    gl_Position = ftransform();\n}\n";
+    static const char fs[] = "void main()\n{\n    gl_FragColor = vec4(1.0,0.0,0.0,1.0);\n}\n";
+    Emit e;
+    uint32_t st, arena = ARENA_OFF, k;
+    uint64_t cap_t = c->mem_cap_total, cap_s = c->mem_cap_slot;
+
+    printf("-- bug hunt 3 : NO_MEM sur les programmes, format sous refus de mipmaps\n");
+    e.base = shmem;
+    if (c->caps & QGPU_CAP_PROGRAMS) {
+        /* (p1) PROG_CREATE refusé : STRING/BIND/LOCAL rendent NO_MEM, le lot
+           va au bout ; lié et actif, le programme refusé jette le dessin */
+        st = v21_setup(c, shmem);
+        c->mem_cap_total = c->mem_cap_slot = c->mem_total;
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 1, QGPU_PT_FRAGMENT);
+        prog_string(&e, shmem, &arena, 1, fp_red);
+        prog_bind(&e, QGPU_PT_FRAGMENT, 1);
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF00FF00, 1.0f);
+        readback_cmd(&e, 1);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_NO_MEM && px(shmem, 5, 5) == 0x00FF00,
+              "(p1) PROG_CREATE refusé puis STRING + BIND : non fatal, CLEAR exécuté "
+              "(st %u pc %u, pixel %06x)", st, c->status_pc, px(shmem, 5, 5));
+        c->mem_cap_total = cap_t;
+        c->mem_cap_slot = cap_s;
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_FRAGMENT_PROGRAM, 1);
+        v21_tri(shmem, 1, 1, 1);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(px(shmem, 30, 8) == 0x0000FF && (st == QGPU_ST_BAD_ARG || st == QGPU_ST_OK),
+              "(p1) dessin sous le programme refusé : jeté, non fatal (pixel %06x, st %u)",
+              px(shmem, 30, 8), st);
+        e.off = e.start = CMD_OFF;
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_PROG_DESTROY, QGPU_LEN_PROG)); emit(&e, 1);
+        prog_create(&e, 1, QGPU_PT_FRAGMENT);
+        prog_string(&e, shmem, &arena, 1, fp_red);
+        prog_bind(&e, QGPU_PT_FRAGMENT, 1);
+        v21_tri(shmem, 1, 1, 1);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF0000,
+              "(p1) DESTROY du refusé puis CREATE sous le plafond : rouge (st %u, %06x)",
+              st, px(shmem, 30, 8));
+
+        /* (p2) PROG_STRING de redéfinition refusé : l'ANCIEN texte n'agit plus */
+        c->mem_cap_total = c->mem_cap_slot = c->mem_total + 10;
+        e.off = e.start = CMD_OFF;
+        prog_string(&e, shmem, &arena, 1, fp_green);
+        v21_tri(shmem, 1, 1, 1);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_NO_MEM && px(shmem, 30, 8) == 0x0000FF &&
+              c->ctx[0].prg.prog[1].broken,
+              "(p2) texte vert refusé : programme cassé, dessin jeté, pas l'ancien rouge "
+              "(st %u, pixel %06x)", st, px(shmem, 30, 8));
+        c->mem_cap_total = cap_t;
+        c->mem_cap_slot = cap_s;
+    }
+    if (c->caps & QGPU_CAP_GLSL) {
+        /* (p3) GLSL : source de fragments refusée — le LINK ne lie PAS le seul
+           étage de sommets (vert = FS manquant rendu par le pipeline fixe) */
+        st = v21_setup(c, shmem);
+        arena = ARENA_OFF;
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 1, QGPU_PT_GLSL);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        c->mem_cap_total = c->mem_cap_slot = c->mem_total + sizeof(vs) - 1;
+        e.off = e.start = CMD_OFF;
+        glsl_vs(&e, shmem, &arena, 1, vs);
+        glsl_fs(&e, shmem, &arena, 1, fs);
+        glsl_link(&e, 1);
+        prog_bind(&e, QGPU_PT_GLSL, 1);
+        v21_tri(shmem, 1, 1, 1);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_NO_MEM && px(shmem, 30, 8) == 0x0000FF &&
+              c->ctx[0].prg.prog[1].broken,
+              "(p3) FS refusé : LINK refusé, programme cassé, dessin jeté (st %u, %06x)",
+              st, px(shmem, 30, 8));
+        c->mem_cap_total = cap_t;
+        c->mem_cap_slot = cap_s;
+        e.off = e.start = CMD_OFF;
+        glsl_vs(&e, shmem, &arena, 1, vs);
+        glsl_fs(&e, shmem, &arena, 1, fs);
+        glsl_link(&e, 1);
+        v21_tri(shmem, 1, 1, 1);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF0000,
+              "(p3) redéfinition sous le plafond : rouge (st %u, %06x)", st, px(shmem, 30, 8));
+
+        /* (p4) PROG_CREATE GLSL refusé : GLSL_SOURCE rend NO_MEM, le lot suit */
+        st = v21_setup(c, shmem);
+        arena = ARENA_OFF;
+        c->mem_cap_total = c->mem_cap_slot = c->mem_total;
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 1, QGPU_PT_GLSL);
+        glsl_vs(&e, shmem, &arena, 1, vs);
+        glsl_link(&e, 1);
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF00FF00, 1.0f);
+        readback_cmd(&e, 1);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_NO_MEM && px(shmem, 5, 5) == 0x00FF00,
+              "(p4) PROG_CREATE GLSL refusé puis SOURCE + LINK : non fatal (st %u pc %u, %06x)",
+              st, c->status_pc, px(shmem, 5, 5));
+        c->mem_cap_total = cap_t;
+        c->mem_cap_slot = cap_s;
+    }
+
+    /* (m) base redéfinie en profondeur, mipmaps auto refusées : le format de
+       la texture est celui de la NOUVELLE base */
+    st = v21_setup(c, shmem);
+    e.off = e.start = CMD_OFF;
+    tcreate3(&e, 0, QGPU_TT_2D);
+    tparam(&e, 0, QGPU_TP_GENERATE_MIPMAP, 1);
+    timage3(&e, 0, QGPU_TT_2D, 0, 4, 4, 1, 0x1908, 0x80E1, 0x8367, QGPU_TEX_NO_DATA, 0, 0);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    c->mem_cap_total = c->mem_cap_slot = c->mem_total + 256 * 256 * 4 + 1000;
+    e.off = e.start = CMD_OFF;
+    timage3(&e, 0, QGPU_TT_2D, 0, 256, 256, 1, 0x1902, 0x1902, 0x1406, QGPU_TEX_NO_DATA, 0, 0);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_NO_MEM && c->tex[0].base_format == 0x1902 &&
+          qgpu_texture_is_depth(&c->tex[0]),
+          "(m) base en profondeur, mipmaps refusées : format 0x%x (0x1902), st %u",
+          c->tex[0].base_format, st);
+    c->mem_cap_total = cap_t;
+    c->mem_cap_slot = cap_s;
+    for (k = 0; k < QGPU_MAX_CLIENTS; k++) {
+        qgpu_core_client_reset(c, k);
+    }
+    CHECK(c->mem_total == 0, "(bh3) tout rendu (%llu octets)", (unsigned long long)c->mem_total);
+}
+
 static void run_fix0929(QgpuCore *c, uint8_t *shmem)
 {
     Emit e, v;
@@ -8040,9 +8180,18 @@ static void run_fix0929(QgpuCore *c, uint8_t *shmem)
               "(d) env[0] rouge, puis contexte %u recréé sans env : %06x puis %06x (0)",
               CTX, pix[0], pix[1]);
     }
+    /* Bug hunt 3 : qgpu_core_reset() force mem_total à 0, le contrôler
+       après lui ne prouvait rien. Ce sont les destructions de tranche qui
+       doivent rendre CHAQUE octet — sans dérive — et le reset suit. */
+    {
+        uint32_t k;
+        for (k = 0; k < QGPU_MAX_CLIENTS; k++) {
+            qgpu_core_client_reset(c, k);
+        }
+        CHECK(c->mem_total == 0, "(a) destruction des %u tranches : %llu octets comptés",
+              QGPU_MAX_CLIENTS, (unsigned long long)c->mem_total);
+    }
     qgpu_core_reset(c);
-    CHECK(c->mem_total == 0, "(a) reset : %llu octets comptés",
-          (unsigned long long)c->mem_total);
 }
 
 static void *run_backend_body(void *arg)
@@ -8144,6 +8293,7 @@ static void *run_backend_body(void *arg)
     run_gpu_copy(c, shmem);     /* 27/09 */
     run_fix0929(c, shmem);      /* 29/09 : bug hunt du cœur */
     run_reste0929(c, shmem);    /* 29/09 : reste (NO_MEM, noms GLSL composés) */
+    run_bh3(c, shmem);          /* bug hunt 3 : NO_MEM des programmes */
 
     qgpu_core_reset(c);
     e.off = e.start = CMD_OFF;
