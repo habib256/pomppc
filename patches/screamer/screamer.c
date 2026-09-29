@@ -98,6 +98,22 @@ static void screamer_tx_copy(ScreamerState *s, DBDMA_io *io, int samples)
     io->addr += (samples << s->shift);
     io->len -= (samples << s->shift);
     s->wpos += samples;
+    /*
+     * Compteur de trames = position de lecture du DMA, comme sur le matériel
+     * (la FIFO du Screamer ne tient que quelques trames). Apple02DBDMAAudio
+     * en tire getCurrentSampleFrame() : la tête d'effacement d'IOAudioEngine
+     * efface derrière lui, quatre fois par tour du tampon invité.
+     *
+     * Il comptait les trames sorties de l'anneau vers AUD_write, 8192 trames
+     * (l'anneau plein) derrière le DMA : la moitié exacte des 16384 trames du
+     * tampon de Tiger. « Derrière le compteur » tombait alors 8192 trames
+     * DEVANT le DMA, là où le HAL venait d'écrire. Un client à petit tampon
+     * d'E/S (512 trames) écrit plus près du DMA et n'était pas touché ;
+     * DOOM 3 (tampon de 4096 trames) perdait la fin de chaque tampon :
+     * ~47 ms de zéros toutes les 93 ms, la saccade (29/09/2026,
+     * docs/audio-stabilite.md).
+     */
+    s->regs[FRAME_CNT_REG] += samples;
 }
 
 static void pmac_screamer_tx_transfer(ScreamerState *s)
@@ -469,12 +485,11 @@ static void screamerspk_callback(void *opaque, int free_b)
             accepted = AUD_write(s->voice, s->mixbuf + (idx << s->shift),
                                  requested);
             /* AUD_write may accept less than requested (including zero). Only
-             * retire PCM actually accepted, otherwise samples vanish and the
-             * guest's frame counter runs ahead. Writes are whole stereo frames.
-             * A short write is backpressure: keep the rest, do not replace it
-             * with silence, and do not spin. */
+             * retire PCM actually accepted, otherwise samples vanish. Writes
+             * are whole stereo frames. A short write is backpressure: keep the
+             * rest, do not replace it with silence, and do not spin. The frame
+             * counter follows the DMA (screamer_tx_copy), not this output. */
             samples = (unsigned)(accepted >> s->shift);
-            s->regs[FRAME_CNT_REG] += samples;
             s->rpos += samples;
             free_b -= (int)accepted;
             if (accepted < requested) {
@@ -708,6 +723,14 @@ static void screamer_write(void *opaque, hwaddr addr,
     case CODEC_STAT_REG:
     case CLIP_CNT_REG:
     case BYTE_SWAP_REG:
+    /*
+     * Le pilote de Tiger remet le compteur de trames à 0 au démarrage du
+     * moteur, juste avant de lancer le DMA au début de son tampon. Ignorée,
+     * cette écriture laissait le compte de toutes les lectures précédentes :
+     * la tête d'effacement tombait n'importe où par rapport au DMA (voir
+     * screamer_tx_copy).
+     */
+    case FRAME_CNT_REG:
         s->regs[addr] = val & 0xffffffff;
         break;
     default:
