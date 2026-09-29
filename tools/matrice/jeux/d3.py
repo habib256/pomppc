@@ -58,7 +58,7 @@ class Doom3(Jeu):
     titre = "DOOM 3 Demo"
     famille = "ARB2, VBO, DXT"
     processus = "Doom 3 Demo"
-    plancher_ms = 100           # 73-79 ms/image au 26/09 (sans déclencheur), marge pour le bruit
+    plancher_ms = 76          # 60,9 / 61,0 ms/image au 29/09 (tour 20260929-2344, hôte au repos)
     delai_scene = 1500
     dump_images = 20
     redemarrer_apres = False    # 29/09 : voir la docstring

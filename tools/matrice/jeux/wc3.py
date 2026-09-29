@@ -24,7 +24,7 @@ class Warcraft3(Jeu):
     famille = "tableaux"
     processus = "LaunchCFMApp"
     processus_ui = "Warcraft III"
-    plancher_ms = 25            # 19,3 ms/image au menu (26/09, sans déclencheur)
+    plancher_ms = 22          # 17,3 ms/image au menu au 29/09 (tour 20260929-2344)
     delai_scene = 400
     dump_images = 20
     non_automatise = {"fen": "s'ouvre en plein écran ; aucun réglage de fenêtre connu "

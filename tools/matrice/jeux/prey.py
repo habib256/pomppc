@@ -33,7 +33,7 @@ class Prey(Jeu):
     titre = "Prey Demo"
     famille = "ARB2, VBO, DXT5"
     processus = "Prey"
-    plancher_ms = 90            # 67 ms/image au 26/09 (fenêtre, sans déclencheur)
+    plancher_ms = 89          # 70,7 / 71,4 ms/image au 29/09 (tour 20260929-2344)
     delai_scene = 1200
     dump_images = 20
 

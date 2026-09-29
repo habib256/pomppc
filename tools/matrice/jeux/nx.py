@@ -53,7 +53,7 @@ PROFILS = {
 
 class Nexuiz(Jeu):
     processus = "nexuiz-osx-agl-bin"
-    plancher_ms = 140           # 107 ms/image au 27/09 (images 120..600), marge pour le bruit ;
+    plancher_ms = 137           # 109,5 / 109,2 ms/image au 29/09 (tour 20260929-2344), ×1,25
                                 # GLSL : ~40
     delai_scene = 600           # image 600 vers 80 s ; la démo finit vers 200 s
     dump_image = 870            # vidage déclenché à l'image fixe 870 (@870)
@@ -68,7 +68,7 @@ class Nexuiz(Jeu):
         # docs/protocole-v21-glsl.md) — GL_ARB_fragment_shader annoncée, programmes
         # GLSL exécutés par l'hôte. Plancher propre : ~40 ms/image au 27/09.
         if profil == "glsl":
-            self.plancher_ms = 60
+            self.plancher_ms = 52        # GLSL : 41,1 / 41,8 au 29/09
 
     def fichiers_reglages(self, mode):
         return [CFG]            # -benchmark n'enregistre rien, par précaution

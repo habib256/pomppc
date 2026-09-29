@@ -133,11 +133,19 @@ hôte au repos (aucune autre VM, charge relevée avant et après la fenêtre de 
 Ordre : planchers recalés, puis TCG (cache de sauts, verrou `mtmsr`/`rfi`), puis GPU
 (`glUniform`, doorbell asynchrone), puis A4 et flottant AArch64 natif.
 
-- [ ] **[Métrologie] Recaler les planchers de la matrice** (préalable à tout A/B) : tour complet
-  sur hôte au repos, planchers réécrits d'après les ms/image mesurés.
+- [x] **[Métrologie] Planchers recalés** (30/09) : tour `bench/matrice/20260929-2344` sur hôte
+  au repos, **15 vertes sur 16 automatisées**, images toutes justes ; planchers = mesure × ~1,25
+  (DOOM 3 76, Prey 89, UT 36, WC3 22, CMR 88, Nexuiz 137/52, Marble Blast 13). Correction :
+  le « DOOM 3 à 33,8 ms/image » du 29/09 après-midi était une fenêtre de mesure prise trop
+  tôt (images 2968..3198 au lieu de ~4050) ; DOOM 3 est à 61, comme le 27/09.
 
-Contexte : Sur hôte au repos, le 29/09, Marble Blast
-fenêtre tourne à 8,9 ms/image et DOOM 3 fenêtre à 33,8 (contre 60,7 au tour du 27/09).
+- [ ] **[Plugin — régression] Zenerchi 4,4 → 7,9 ms/image** (fenêtre, menu) : stable à 4,4 du
+  26 au 27/09, 6,0 sur `6c11f37` (bug hunts passes 2 et 2-bis), 7,9 sur `ce9522b`+son. Scène
+  très légère : c'est le témoin d'un coût fixe ajouté par image (attente, aller-retour au
+  kext, soumission synchrone ajoutés par les bug hunts). Marble Blast plein écran 9,3 → 10,2
+  va dans le même sens. **À prendre avant toute optimisation.** Bissection par binaires
+  (QEMU `*.avant-bughunt`, plugin et kext de `8af9efc`, puis chaque passe), puis `sample`
+  dans l'invité. **Fermeture :** cause nommée, Zenerchi revenu à ≤ 4,6, matrice verte.
 
 - [ ] **[Métrologie] Troisième facteur de lenteur** (`docs/tcg-g4.md` §14.7) : une partie DOOM 3
   sur huit lente de bout en bout ; cause inconnue (cœurs P/E, autre processus, thermique ?).

@@ -44,7 +44,7 @@ class MarbleBlast(Jeu):
     titre = "Marble Blast Gold"
     famille = "pipeline fixe"
     processus = "MarbleBlast Gold"
-    plancher_ms = 16            # 12,3 ms/image au 26/09 (plein écran, sans déclencheur)
+    plancher_ms = 13          # 9,3 fenêtre / 10,2 plein écran au 29/09 (tour 20260929-2344, hôte au repos)
     delai_scene = 300
     dump_images = 60
 

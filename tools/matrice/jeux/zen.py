@@ -22,7 +22,7 @@ class Zenerchi(Jeu):
     titre = "Zenerchi"
     famille = "pipeline fixe (AGL)"
     processus = "Zenerchi"
-    plancher_ms = 7             # 5,2 ms/image au menu (26/09, sans déclencheur)
+    plancher_ms = 7           # 4,4 ms/image au 27/09 ; 7,9 au 29/09 = RÉGRESSION ouverte (TODO, vitesse) : plancher gardé
     delai_scene = 300
     dump_images = 120
     non_automatise = {

@@ -48,7 +48,7 @@ class ColinMcRae(Jeu):
     titre = "Colin McRae Rally 2005"
     famille = "ARB via IndirectX, rendu vers texture"
     processus = "Colin McRae Rally Mac"
-    plancher_ms = 90            # 70 ms/image du jeu au départ (27/09, 3 échanges par image)
+    plancher_ms = 88          # 70,7 ms/image du jeu au 29/09 (tour 20260929-2344, 3 échanges par image)
     echanges_par_image = 3
     delai_scene = 900
     dump_images = 30            # 10 images du jeu
