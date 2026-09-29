@@ -19,6 +19,8 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <csignal>
+#include <dirent.h>
 #include <sys/wait.h>
 #include <signal.h>
 #include <unistd.h>
@@ -459,8 +461,31 @@ static gpointer bridge_thread_trampoline(gpointer p) {
 
 bool QemuBridge::start(const Config& cfg, std::string* err) {
     cfg_ = cfg;
-    std::string qmpPath = cfg.runtimeDir + "/qmp.sock";
+    // Un socket par frontend : deux ImGuiDock lancés depuis le même dépôt
+    // (Tiger et une VM jetable, par exemple) partageaient .run/qmp.sock, que
+    // chaque lancement supprimait sous l'autre. QEMU l'efface en sortant.
+    std::string qmpPath = cfg.runtimeDir + "/qmp-" + std::to_string((long)::getpid()) + ".sock";
+    // sun_path fait 104 octets sous macOS (108 sous Linux) : un runtimeDir
+    // profond échouait plus loin en « could not connect », sans dire pourquoi.
+    if (qmpPath.size() >= sizeof(sockaddr_un{}.sun_path)) {
+        if (err) *err = "chemin du socket QMP trop long (" + std::to_string(qmpPath.size()) +
+                        " octets) : " + qmpPath;
+        return false;
+    }
     ::unlink(qmpPath.c_str());
+    // Sockets laissés par un frontend mort (QEMU tué avant d'avoir pu les
+    // effacer) : on retire ceux dont le processus n'existe plus.
+    if (DIR* d = ::opendir(cfg.runtimeDir.c_str())) {
+        while (struct dirent* e = ::readdir(d)) {
+            long other = 0;
+            char tail[8] = {};
+            if (std::sscanf(e->d_name, "qmp-%ld%7s", &other, tail) == 2 &&
+                std::strcmp(tail, ".sock") == 0 && other > 0 &&
+                ::kill((pid_t)other, 0) != 0 && errno == ESRCH)
+                ::unlink((cfg.runtimeDir + "/" + e->d_name).c_str());
+        }
+        ::closedir(d);
+    }
 
     // ── 1. Launch the QEMU launcher script (it exec()s qemu → child PID is
     //       qemu). DBUS_DISPLAY + QMP_SOCK switch the run script to our path.

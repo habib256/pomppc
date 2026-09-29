@@ -356,7 +356,10 @@ if [ "$NET_WANT" != 0 ]; then
         if ! (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
           ssh_port="$p"; break
         fi
-        exec 3>&- 2>/dev/null || true
+        # Pas de « exec 3>&- 2>/dev/null » ici : le sous-shell ferme déjà son
+        # fd 3, et un exec avec redirection s'applique à TOUT le script — dès
+        # que 2222 était pris (une autre VM), la sortie d'erreur du lanceur et
+        # de QEMU partait dans /dev/null : QEMU mourait sans un mot.
       done
       if [ -n "$ssh_port" ]; then
         NETDEV="$NETDEV,hostfwd=tcp:127.0.0.1:${ssh_port}-:22"
