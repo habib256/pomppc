@@ -34,8 +34,8 @@
 #   RETINLINE=0 JCIDX=0 ./run_tiger.sh  # coupe les sorties indirectes (blr, bctr…) cherchées en
 #                             # ligne et le cache de sauts vidé par mmu_idx (tcg/0008, allumés par
 #                             # défaut, docs/tcg-g4.md §16) ; RETVERIFY=1 : mode preuve
-#   ICBISYNC=0 ./run_tiger.sh # icbi n'invalide plus les blocs de sa ligne (x-icbi-sync, tcg/0010,
-#                             # allumé par défaut : code réécrit par l'autre vCPU, docs/tcg-g4.md §17)
+#   ICBISYNC=1 ./run_tiger.sh # icbi invalide les blocs de sa ligne (x-icbi-sync, tcg/0010,
+#                             # éteint par défaut avant l'A/B DOOM 3 : docs/tcg-g4.md §17)
 #   JITNEAR=0 ./run_tiger.sh  # laisse macOS placer le tampon du JIT (défaut : dans la fenêtre de 4 Gio
 #                             # du texte de QEMU, x-jit-near, tcg/0006 : supprime le régime lent, docs/tcg-g4.md §14) ;
 #                             # TCG_OPTS=… propriétés brutes de l'accélérateur
@@ -69,9 +69,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Profil maximal des optimisations disponibles et éprouvées. Les sondes plus
 # bas restent obligatoires ; 0 explicite conserve sa valeur pour les A/B.
 # Les modes VERIFY ne sont pas des optimisations et restent éteints.
-for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC JITNEAR; do
+for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX JITNEAR; do
   export "$_opt=${!_opt:-1}"
 done
+# x-icbi-sync (tcg/0010) : exact, mais pas encore passé l'A/B DOOM 3 exigé pour
+# allumer un patch TCG par défaut (TODO, orientation vitesse). ICBISYNC=1 l'allume.
+export ICBISYNC="${ICBISYNC:-0}"
 export QGPU_GPU_COPY="${QGPU_GPU_COPY:-1}" QGPU_GLSL="${QGPU_GLSL:-1}"
 
 # Avant le verrou disque : ImGui relance CE script avec DBUS_DISPLAY=1.
@@ -310,8 +313,8 @@ done
 # docs/tcg-g4.md §17) --- en SMP, une écriture dans du code invalide les blocs
 # AVANT d'être faite : l'autre vCPU peut retraduire l'ancien code entre les deux,
 # et le protocole de l'invité (dcbst, sync, icbi, isync) ne le rattrapait pas.
-# Allumé par défaut ; ICBISYNC=0 l'éteint.
-if [ "${ICBISYNC:-1}" != 0 ]; then
+# Éteint par défaut tant que l'A/B DOOM 3 n'est pas fait ; ICBISYNC=1 l'allume.
+if [ "${ICBISYNC:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-icbi-sync=on"; then
     CPU_SPEC="$CPU_SPEC,x-icbi-sync=on"
     MODE="$MODE + ICBI-SYNCHRONE"

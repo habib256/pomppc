@@ -67,8 +67,10 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   quotidienne et, pendant une partie de DOOM 3, les compteurs de
   `patches/tcg/essais/0010-smcstat.patch` (démarrage et Marble Blast : 0 course ; le défaut
   n'est donc pas, sans autre preuve, la cause des incidents SMP ci-dessus).
-  **Fermeture :** binaire de référence avec 0010, E à 0 erreur sur la VM quotidienne,
-  compteurs DOOM 3 relevés.
+  `x-icbi-sync` reste éteint par défaut (`ICBISYNC=1` l'allume) : sans lui, E garde des
+  erreurs isolées d'une génération ; il sera allumé après l'A/B DOOM 3 (orientation vitesse).
+  **Fermeture :** binaire de référence avec 0010, E à 0 erreur sur la VM quotidienne
+  (`ICBISYNC=1`), compteurs DOOM 3 relevés, décision sur `x-icbi-sync` par A/B.
 
 - [ ] **[Validation] Correctifs des bug hunts jamais éprouvés dans la VM** : `kextunload`
   avec un jeu ouvert (K4, KG4, KT1), `SUBMIT` après déchargement → erreur propre,

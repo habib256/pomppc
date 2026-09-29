@@ -1624,8 +1624,8 @@ chargement.
   le voit propre, on ne retire rien.
 - **Course 3**, `tlb_set_page_full` : `NOTDIRTY` est calculé sous le verrou du TLB, même
   raisonnement.
-- **`x-icbi-sync`** (propriété de CPU, éteinte par défaut dans QEMU, **allumée par
-  `run_tiger.sh`**, `ICBISYNC=0` l'éteint) : `helper_icbi` invalide les blocs qui recouvrent
+- **`x-icbi-sync`** (propriété de CPU, éteinte par défaut dans QEMU, **éteinte aussi par
+  `run_tiger.sh`** tant que l'A/B DOOM 3 n'est pas fait, `ICBISYNC=1` l'allume) : `helper_icbi` invalide les blocs qui recouvrent
   sa ligne de cache (`tb_invalidate_phys_line_sync`). `icbi` suit l'écriture dans l'ordre du
   programme : le bloc retraduit trop tôt est jeté avant que l'écrivain publie. Le
   recouvrement est testé sous le verrou de la page (une traduction en cours est attendue).

@@ -15,7 +15,7 @@ et dans `docs/`.
   code par le traducteur (écriture de l'autre vCPU entre les deux perdue), et deux tests de
   `cputlb.c` faits hors du verrou du TLB retiraient ou omettaient `TLB_NOTDIRTY` sur une page
   qui avait de nouveau du code. Les trois courses sont corrigées sans condition ;
-  `x-icbi-sync` (allumé par `run_tiger.sh`, `ICBISYNC=0`) fait invalider par `icbi` les blocs
+  `x-icbi-sync` (éteint par défaut en attendant l'A/B DOOM 3, `ICBISYNC=1` l'allume) fait invalider par `icbi` les blocs
   de sa ligne, car une écriture invalide avant d'être faite. E : référence 5/5 exécutions en
   erreur (86 M appels périmés) → 0 sur 1 105 ; A-D, F identiques ; +9 ns par `icbi`.
   Démarrage et Marble Blast ne déclenchent aucune des trois courses.

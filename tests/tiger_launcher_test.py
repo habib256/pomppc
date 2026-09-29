@@ -29,7 +29,10 @@ with tempfile.TemporaryDirectory(prefix="tiger launcher ") as tmp:
 
     p = run()
     assert p.returncode == 0 and "frontend:" + str(root / "run_tiger.sh") in p.stdout, p
-    assert all(k + "=1\n" in p.stdout for k in OPTS), p.stdout
+    assert all(k + "=1\n" in p.stdout for k in OPTS if k != "ICBISYNC"), p.stdout
+    assert "ICBISYNC=0\n" in p.stdout, p.stdout      # éteint tant que l'A/B DOOM 3 manque
+    p = run(ICBISYNC="1")
+    assert p.returncode == 0 and "ICBISYNC=1\n" in p.stdout, p
     p = run(FASTFP="0", JITNEAR="0", QGPU_GLSL="0")
     assert p.returncode == 0 and all(k + "=0\n" in p.stdout for k in ("FASTFP", "JITNEAR", "QGPU_GLSL")), p
     for settings in ({"DBUS_DISPLAY": "1"}, {"HEADLESS": "1"},
