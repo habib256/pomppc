@@ -155,6 +155,12 @@ Ordre : planchers recalés, puis TCG (cache de sauts, verrou `mtmsr`/`rfi`), pui
   la matrice relève désormais la charge avant et après la fenêtre de mesure.
 - [ ] **[Plugin] Nexuiz / GLSL** : chaque `glUniform` pose le bit `0x04000000` et fait recalculer
   le verdict (154 298 dispatches sur 173 572). Sans perdre la détection des samplers.
+  **Code prêt (30/09, phase 1 sans VM)** : `POMPPC_GL_WLUNIF` (défaut 1) rend ce bit neutre
+  pour la liste blanche et pour `compute_state` ; les unités échantillonnées, le programme
+  courant, ses étages et ses entrées de sommet sont dans la clé du verdict (`vd_key_of`) —
+  un sampler déplacé change la clé et fait recalculer. Scène `gltest glslsmp`. **Reste :**
+  `VERDICTCHECK=1` et `STATECHECK=1` à 0 écart sur Nexuiz GLSL, `glslsmp` juste, A/B
+  `WLUNIF=0/1` fenêtre et plein écran, matrice complète.
 - [x] **[TCG] Cache de sauts plus grand** (30/09, `tcg/0011`, `x-jc-bits`, propriété de
   l'accélérateur ; `docs/tcg-g4.md` §18) : 2^14 entrées, 0 divergence sur 23 G blocs
   vérifiés ; réussite 91,4 → 92,6 % ; DOOM 3 61,6 → 60,4 ms/image (médianes, 6 + 6
@@ -173,6 +179,12 @@ Ordre : planchers recalés, puis TCG (cache de sauts, verrou `mtmsr`/`rfi`), pui
   (`scripts/build_qemu_qfb.sh`, patches 0011 et 0012).
 - [ ] **[Protocole] Doorbell asynchrone côté invité** (bug hunt D2) : mesure du BQL tenu par
   image sous `GPU_TRACE=1` (`docs/smp-coeurs.md` §3, levier L4).
+  **Instrumentation prête (30/09, phase 1)** : lignes `SYNC` de la note du plugin (doorbells
+  synchrones par cause — BeginPrimitiveBuffer ouvert, file pleine, asynchrone coupé, sondes —
+  et leur durée) ; device `stats=on` (`GPU_STATS=1`) : bilan toutes les 5 s du temps passé
+  BQL pris dans les doorbells, sans le coût de `trace=on`. `POMPPC_GL_SYNCBAR=1` (défaut 0)
+  remplace le doorbell synchrone d'un BeginPrimitiveBuffer ouvert par asynchrone + barrière.
+  **Reste :** mesure sur DOOM 3, Prey, UT2004, puis décision.
 - [ ] **[Plugin] Transmission paresseuse** : mesure honnête et décision du défaut.
 - [ ] **[Protocole] A4 — Déplacer le travail vers l'hôte** : bloc d'état partagé lu par le
   device, textures par DMA sur plages sales, empaquetage minimal. Épreuve : `send_state` et

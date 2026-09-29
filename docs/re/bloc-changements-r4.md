@@ -116,7 +116,7 @@ changer.
 Le verdict (lot 2) = `geom_ok` && `texture_ok`, `TexInfo`, `geom_format`, `va_gen_sizes` ; la clé
 `vd_key_of` couvre ce qui bouge sans dispatch (image, époque des textures, état du plugin,
 VAO et `VA_EN`, table des unités, drawable, étage de sommets, programmes courants et actifs).
-Trois classes de bits, dans `wl_mask` (`guest/gldriver/pomppc_accel.c`) :
+Quatre classes de bits, dans `wl_mask` (`guest/gldriver/pomppc_accel.c`) :
 
 1. **Neutres** (l'état n'est lu par aucune des quatre fonctions) : `+00` `glClearColor`,
    masques de couleur, profondeur et pochoir, découpe, modèle d'ombrage (`WL_N0 = 0c1c0008`) ;
@@ -131,6 +131,13 @@ Trois classes de bits, dans `wl_mask` (`guest/gldriver/pomppc_accel.c`) :
    suite.
 3. **Tableaux** `+0c 00100000` (`WL_GS`) : `geom_format` ne lit que `VA_EN` (dans la clé) ; la
    taille des génériques et leur source lisible, si — `va_gen_sizes` est refait seul.
+
+4. **glUniform** `+0c 04000000` (`WL_UNIF`, 30/09, `POMPPC_GL_WLUNIF`) : posé par tout
+   `glUniform*` et par `_updateShaderState` (GLSL, `docs/re/glsl-glengine.md` §3). Neutre
+   pour le verdict et pour `compute_state` : ce qu'il peut y changer (objet GLSL courant,
+   étages actifs, unités échantillonnées de l'étage de fragments, entrées de sommet du
+   programme et empreinte de liaison) est dans la clé ; un sampler déplacé change la clé
+   (et pose `+04 1 << u`). Les valeurs d'uniforms partent au dessin (`prog_sync`).
 
 Tout le reste **n'est pas neutre** et fait recalculer : unités (`+04`), allumage des cibles et
 matrices de texture (`+08` bits 16-23), environnement de texture (`+10`), éclairage,

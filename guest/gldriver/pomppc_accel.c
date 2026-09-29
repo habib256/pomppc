@@ -48,6 +48,10 @@
  *                         tant qu'il n'a pas forcé le repli mixte)
  *   POMPPC_GL_ASYNC=0/1   doorbell asynchrone (défaut : activé si le device et
  *                         le kext le tiennent ; voir « soumission » plus bas)
+ *   POMPPC_GL_SYNCBAR=1   doorbell ASYNCHRONE + barrière à la place du doorbell
+ *                         synchrone d'un BeginPrimitiveBuffer ouvert (30/09,
+ *                         levier L4 : le fil invité dort dans le kext au lieu
+ *                         de tenir le vCPU et le BQL ; défaut 0, à la mesure)
  *   POMPPC_GL_VBO=0       pas de tampons hôte v14 (DRAW_RAW retraverse BAR0) ;
  *                         coupe aussi DRAW_NATIVE, qui en dépend
  *   POMPPC_GL_NATIVE=0    pas de DRAW_NATIVE (v18, QGPU_CAP_NATIVE) : les
@@ -118,7 +122,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260927-combine3-capture"
+#define POMPPC_PLUGIN_REV "20260930-wlunif-sync"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -594,6 +598,7 @@ static GProg gprog[GPROG_MAX];
 #define WL_DEFAULT   1          /* lot 3 : sans POMPPC_GL_WHITELIST */
 #define TEXMEMO_DEFAULT 1       /* mémoire des unités et des textures : sans POMPPC_GL_TEXMEMO */
 #define STSKIP_DEFAULT  1       /* lot 4 : sans POMPPC_GL_STSKIP */
+#define WLUNIF_DEFAULT  1       /* 30/09 : sans POMPPC_GL_WLUNIF (glUniform neutre) */
 
 typedef struct PTex {                   /* texture du GLDriver suivie par le plugin */
     struct PTex   *next;
@@ -665,7 +670,7 @@ typedef struct TexInfo {                /* textures à appliquer pour le dessin 
     TexUnit        u[IMG_UNITS];        /* v21 : 8..15 sous fragments GLSL */
 } TexInfo;
 
-#define VKEY_WORDS 32                   /* lot 2 : mots de la clé du verdict */
+#define VKEY_WORDS 34                   /* lot 2 : mots de la clé du verdict */
 typedef struct PCtx {
     struct PCtx   *next;
     void          *ctx;                 /* contexte du GLDriver d'Apple */
@@ -1043,6 +1048,15 @@ static struct {
     unsigned long   n_syncfall;         /* retours en synchrone sur ERRORS */
     unsigned long   n_qsamples, n_qsum; /* profondeur de file échantillonnée */
     double          t_wait;             /* secondes passées à attendre une barrière */
+    /* ── 30/09, levier L4 : doorbells SYNCHRONES qui restent (le vCPU est
+       gelé et le BQL tenu par le device jusqu'à la fin du rendu), par
+       cause ; et doorbells asynchrones, pour comparaison. Sur la période
+       (note, lignes SYNC toutes les CNT_PERIOD images) et en tout. */
+    unsigned long   n_sync[4], n_sync_all[4];
+    double          t_sync[4], t_sync_all[4];
+    unsigned long   n_async, n_bar;     /* asynchrones acceptés ; dont avec barrière */
+    double          t_async, t_bar;     /* doorbell asynchrone ; attente de barrière (SYNCBAR) */
+    int             syncbar;            /* POMPPC_GL_SYNCBAR */
     /* ── transmission paresseuse au GLDriver d'Apple ── */
     int             lazy;               /* POMPPC_GL_LAZYAPPLE */
     unsigned long   n_lazy_defer;       /* gldUpdateDispatch gardés pour plus tard */
@@ -1057,6 +1071,10 @@ static struct {
                                            fait une fois par verdict (us_get) */
     int             stskip;             /* lot 4 : POMPPC_GL_STSKIP */
     int             stcheck;            /* lot 4 : POMPPC_GL_STATECHECK */
+    int             wlunif;             /* 30/09 : POMPPC_GL_WLUNIF — le bit
+                                           « glUniform » (+0x0c 0x04000000) est
+                                           neutre pour la liste blanche et pour
+                                           compute_state (wl_extra, st_neutral) */
     unsigned long   bd_a, bd_n;         /* R4 : POMPPC_GL_BLOCKDUMP=a[:n], images [a, a+n) */
     int             bd_on;
 } G = { PTHREAD_MUTEX_INITIALIZER };
@@ -1549,6 +1567,53 @@ static void cnt_frame(void)
     CNT.nat0 = G.n_native_draws;
 }
 
+/* 30/09 — pourquoi un doorbell part SYNCHRONE (compteurs G.n_sync) :
+ *   SYNC_NPEND : BeginPrimitiveBuffer ouvert (GLEngine écrit dans la moitié) ;
+ *   SYNC_QFULL : file du device pleine deux fois (un autre client l'occupe) ;
+ *   SYNC_OFF   : asynchrone coupé (ERRORS a bougé, fenêtre ASYNC_RETRY ;
+ *                barrière dépassée ; kext ou device sans asynchrone) ;
+ *   SYNC_PROBE : soumission sonde (définition d'un programme : le statut est
+ *                la réponse, une par programme). */
+enum { SYNC_NPEND, SYNC_QFULL, SYNC_OFF, SYNC_PROBE, SYNC_N };
+static const char *const sync_name[SYNC_N] = { "npend", "file pleine", "async coupé", "sonde" };
+
+static void sync_count(int why, double dt)
+{
+    G.n_sync[why]++;
+    G.t_sync[why] += dt;
+}
+
+/* Ligne SYNC de la note, toutes les CNT_PERIOD images (stats_frame). */
+static void sync_frame(void)
+{
+    unsigned long n = 0;
+    double t = 0;
+    int k;
+    if (G.n_frames % CNT_PERIOD != 0)
+        return;
+    for (k = 0; k < SYNC_N; k++) {
+        n += G.n_sync[k];
+        t += G.t_sync[k];
+    }
+    gl_note("SYNC image %lu (%d images) : %lu doorbells synchrones, %.2f ms (%.3f ms/image) — "
+            "%s %lu (%.2f ms), %s %lu (%.2f ms), %s %lu (%.2f ms), %s %lu (%.2f ms) ; "
+            "%lu asynchrones (%.2f ms), dont %lu avec barrière (%.2f ms d'attente)\n",
+            G.n_frames, CNT_PERIOD, n, t * 1000, t * 1000 / CNT_PERIOD,
+            sync_name[0], G.n_sync[0], G.t_sync[0] * 1000,
+            sync_name[1], G.n_sync[1], G.t_sync[1] * 1000,
+            sync_name[2], G.n_sync[2], G.t_sync[2] * 1000,
+            sync_name[3], G.n_sync[3], G.t_sync[3] * 1000,
+            G.n_async, G.t_async * 1000, G.n_bar, G.t_bar * 1000);
+    for (k = 0; k < SYNC_N; k++) {
+        G.n_sync_all[k] += G.n_sync[k];
+        G.t_sync_all[k] += G.t_sync[k];
+        G.n_sync[k] = 0;
+        G.t_sync[k] = 0;
+    }
+    G.n_async = G.n_bar = 0;
+    G.t_async = G.t_bar = 0;
+}
+
 /* Bilan périodique (POMPPC_GL_STATS=<fichier>), appelé à chaque échange. */
 static void stats_frame(void *ctx)
 {
@@ -1582,6 +1647,7 @@ static void stats_frame(void *ctx)
         cnt_frame();
     if (G.verdict)
         vd_frame();
+    sync_frame();                       /* 30/09 : lignes SYNC (note) */
     if (!path)
         return;
     /* Profondeur de la file du device, une fois par image et SEULEMENT quand
@@ -1911,6 +1977,14 @@ static void on_exit_stats(void)
                 G.n_dropped_fault, G.n_texblack,     /* I9 (relecture du 24/09) */
                 G.async ? "async" : "sync", G.n_waits, G.t_wait * 1000,
                 G.n_qfull, G.n_syncfall);
+    if (getenv("POMPPC_GL_STATS")) {    /* 30/09 : doorbells synchrones (vCPU gelé, BQL tenu) */
+        int k;
+        fprintf(stderr, "POMPPC GL: synchronous doorbells:");
+        for (k = 0; k < SYNC_N; k++)
+            fprintf(stderr, " %s %lu (%.1f ms)%s", sync_name[k],
+                    G.n_sync_all[k] + G.n_sync[k],
+                    (G.t_sync_all[k] + G.t_sync[k]) * 1000, k + 1 < SYNC_N ? "," : "\n");
+    }
     if (getenv("POMPPC_GL_STATS"))      /* v20 */
         fprintf(stderr, "POMPPC GL: render to texture: %lu SURF_TEX (%s), %lu skipped "
                 "(guest newer), %lu hidden-drawable swaps kept on host; rectangle %s\n",
@@ -2213,6 +2287,17 @@ void pomppc_backend_init(void)
                 G.stskip = e && e[0] ? e[0] != '0' : STSKIP_DEFAULT;
                 e = getenv("POMPPC_GL_STATECHECK");
                 G.stcheck = e && e[0] && e[0] != '0';
+                /* 30/09 : glUniform (Nexuiz GLSL, 154 298 dispatches
+                   recalculés sur 173 572) — le bit +0x0c 0x04000000 ne fait
+                   plus recalculer ; ce qu'il peut changer au verdict (unités
+                   échantillonnées, programme courant, étages, relecture de
+                   liaison) est dans la clé (vd_key_of). POMPPC_GL_WLUNIF=0 :
+                   comme avant. */
+                e = getenv("POMPPC_GL_WLUNIF");
+                G.wlunif = e && e[0] ? e[0] != '0' : WLUNIF_DEFAULT;
+                /* 30/09 : asynchrone + barrière sous BeginPrimitiveBuffer */
+                e = getenv("POMPPC_GL_SYNCBAR");
+                G.syncbar = e && e[0] && e[0] != '0';
                 /* Relevé R4 : POMPPC_GL_BLOCKDUMP=a[:n] écrit sur stderr le
                    bloc de chaque dispatch (mots non nuls) et chaque dessin
                    des images [a, a+n) (n = 1 par défaut). */
@@ -2264,9 +2349,10 @@ void pomppc_backend_init(void)
         if (G.state > 0) {
             gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d lazyapple=%d "
                     "native=%d (plages %d) count=%d verdict=%d verdictcheck=%d whitelist=%d "
-                    "texmemo=%d stskip=%d statecheck=%d\n",
+                    "texmemo=%d stskip=%d statecheck=%d wlunif=%d syncbar=%d\n",
                     G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range,
-                    G.count, G.verdict, G.vcheck, G.wl, G.texmemo, G.stskip, G.stcheck);
+                    G.count, G.verdict, G.vcheck, G.wl, G.texmemo, G.stskip, G.stcheck,
+                    G.wlunif, G.syncbar);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
                        " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
@@ -3430,7 +3516,13 @@ static void submit_cur(void)
        geom_begin fait la place avant d'ouvrir — et c'est la seule façon
        d'être exact (vu en vrai : un téléversement de texture au milieu d'une
        primitive vide le flux). */
-    int async = G.async && !G.npend;
+    int async = G.async && (!G.npend || G.syncbar);
+    /* 30/09 (POMPPC_GL_SYNCBAR) : sous BeginPrimitiveBuffer, asynchrone PUIS
+       barrière avant de rendre la main — même contrat M1 que le synchrone
+       (la moitié n'est pas réécrite avant la fin du job), mais le fil invité
+       dort dans le kext (sleepForFence) au lieu de geler le vCPU, BQL tenu
+       par le device (D2). */
+    int bar = async && G.npend;
 
     dump_submit();
     if (async) {
@@ -3494,15 +3586,41 @@ static void submit_cur(void)
         }
     }
     if (async) {
-        G.t_submit += now_s() - t;
+        double dt = now_s() - t;
+        G.t_submit += dt;
         G.n_submits++;
+        G.n_async++;
+        G.t_async += dt;
         h->fence = fence;
         h->busy = 1;
         h->seq = seq;
         check_errors(errors, seq);
+        if (bar && h->busy) {
+            /* G.mu reste TENU (comme l'attente sur QUEUE_FULL) : GLEngine
+               écrit dans cette moitié, personne ne doit y ajouter de flux ni
+               la soumettre une seconde fois. wait_half_ex la rend libre (et
+               fait ses relectures, ERRORS relu s'il y en a) ; sans
+               relecture, ERRORS est relu ici : une faute de CETTE soumission
+               ouvre la fenêtre synchrone, comme au doorbell suivant. */
+            double tb = now_s();
+            G.n_bar++;
+            wait_half_ex(G.cur, 0);
+            G.t_bar += now_s() - tb;
+            if (!G.dead && G.async && G.err_valid) {
+                unsigned long e2 = 0, st2 = 0, pc2 = 0;
+                if (qgpu_peek(&G.q, &e2, &st2, &pc2) == 0 && e2 != G.errors)
+                    check_errors(e2, seq);
+            }
+        }
         return;
     }
-    st = qgpu_submit(&G.q, G.hb, G.ncmd * 4, &pc);
+    {
+        /* 30/09 : cause du doorbell synchrone (levier L4) */
+        int why = !G.async ? SYNC_OFF : G.npend && !G.syncbar ? SYNC_NPEND : SYNC_QFULL;
+        double ts = now_s();
+        st = qgpu_submit(&G.q, G.hb, G.ncmd * 4, &pc);
+        sync_count(why, now_s() - ts);
+    }
     G.t_submit += now_s() - t;
     G.n_submits++;
     h->busy = 0;
@@ -7892,7 +8010,11 @@ static long submit_probe(void)
     unsigned long pc = 0;
     long st;
     dump_submit();
-    st = qgpu_submit(&G.q, G.hb, G.ncmd * 4, &pc);
+    {
+        double ts = now_s();
+        st = qgpu_submit(&G.q, G.hb, G.ncmd * 4, &pc);
+        sync_count(SYNC_PROBE, now_s() - ts);
+    }
     G.sub_seq++;
     G.n_submits++;
     /* 3e passe : notre refus attendu fait avancer ERRORS (global) — compté,
@@ -11689,6 +11811,11 @@ static struct {
     unsigned long wl_uonly, wl_usame;   /* sous COUNT : non neutres par les
                                            seules unités (+0x04), dont table des
                                            unités identique (piste, pas admis) */
+    unsigned long wl_unif;              /* 30/09 : court-circuités qui portaient
+                                           le bit glUniform (+0x0c 0x04000000) */
+    unsigned long wl_uonly_unif;        /* sous COUNT, WLUNIF=0 : non neutres par
+                                           ce seul bit (ce que WLUNIF=1 prendrait,
+                                           clé permettant) */
     unsigned long told;                 /* écarts notés en détail (toute la vie) */
     unsigned long diff_all;             /* écarts (toute la vie) */
     unsigned long reuse_all, recalc_all, same_all;  /* toute la vie */
@@ -11741,6 +11868,12 @@ static void vd_key_of(PCtx *p, unsigned long *k)
     if (p->glsl_rec) {
         k[i++] = (unsigned long)p->glsl_rec->refused | ((unsigned long)p->glsl_rec->sent << 1);
         k[i++] = p->glsl_rec->units_lo ^ (p->glsl_rec->units_hi * 31);
+        /* 30/09 (glUniform neutre) : entrées de sommet du programme et
+           empreinte qui les a données — une nouvelle liaison du programme
+           courant (_updateShaderState, même bit que glUniform) change le
+           format de sommet sans changer d'objet. */
+        k[i++] = p->glsl_rec->vrec.vp_need;
+        k[i++] = p->glsl_rec->need_sig;
     }
 }
 
@@ -11856,6 +11989,9 @@ static void vd_frame(void)
             gl_note("VERDICT image %lu dispatch : %lu non neutres par les seules unités "
                     "(+0x04), dont %lu à table des unités identique\n",
                     G.n_frames, VD.wl_uonly, VD.wl_usame);
+        gl_note("VERDICT image %lu glUniform (wlunif %d) : %lu court-circuités avec le bit "
+                "0x04000000 ; %lu non neutres par ce seul bit\n",
+                G.n_frames, G.wlunif, VD.wl_unif, VD.wl_uonly_unif);
     }
     VD.reuse_all += VD.reuse;
     VD.recalc_all += VD.recalc;
@@ -11864,6 +12000,7 @@ static void vd_frame(void)
     VD.reuse = VD.recalc = VD.chk_same = VD.chk_diff = 0;
     VD.wl_skip = VD.wl_blk = VD.wl_key = VD.wl_none = VD.wl_same = VD.wl_diff = 0;
     VD.wl_uonly = VD.wl_usame = 0;
+    VD.wl_unif = VD.wl_uonly_unif = 0;
     USC.fill = USC.hit = USC.same = USC.diff = 0;
     USC.tex_hit = USC.tex_same = USC.unit_hit = 0;
     STC.skip = STC.full = STC.same = STC.diff = 0;
@@ -12421,6 +12558,20 @@ static const unsigned long wl_mask[CNT_BLOCK] = {
 };
 #define WL_GS_WORD 3
 #define WL_GS      0x00100000UL
+/* 30/09 — +0x0c 0x04000000 : tout glUniform* (_glUniform*_Exec) et
+ * _updateShaderState (glUseProgramObjectARB, liaison du programme courant),
+ * docs/re/glsl-glengine.md §3. Le verdict n'en lit que ce que la clé
+ * (vd_key_of) couvre déjà : objet GLSL courant (gctx+0x5430), étages actifs
+ * (0x5434/0x5438, par vp_rec/fp_rec), unités échantillonnées (+0x50c de
+ * l'étage de fragments, units_lo/hi), entrées de sommet (vp_need, need_sig).
+ * Un glUniform1i sur un sampler déplace l'unité : units_lo/hi changent, la
+ * clé aussi, et le dispatch recalcule (_setImageUnit pose en plus +0x04
+ * 1 << u, non neutre). Les VALEURS d'uniforms ne sont lues ni par le verdict
+ * ni par compute_state : prog_sync les envoie au dessin, sur le
+ * gldModifyPipelineProgram de GLEngine. Admis seulement sous G.wlunif
+ * (POMPPC_GL_WLUNIF, défaut 1), pour la liste blanche ET pour st_neutral. */
+#define WL_UNIF_WORD 3
+#define WL_UNIF      0x04000000UL
 
 /* Lot 4 : bits du bloc dont compute_state ne lit PAS l'état (relevés R4 et R5,
  * docs/re/etude-court-circuit-glengine.md §6). Tout bit absent d'ici fait
@@ -12443,11 +12594,17 @@ static const unsigned long st_mask[CNT_BLOCK] = {
     0xffffffffUL, 0xffffffffUL, 0xffffffffUL, 0xffffffffUL
 };
 
+/* Bits admis en plus sous G.wlunif (30/09), pour le mot k. */
+static unsigned long wl_extra(int k)
+{
+    return k == WL_UNIF_WORD && G.wlunif ? WL_UNIF : 0;
+}
+
 static int st_neutral(const unsigned long *c)
 {
     int k;
     for (k = 0; k < CNT_BLOCK; k++)
-        if (c[k] & ~st_mask[k])
+        if (c[k] & ~(st_mask[k] | wl_extra(k)))
             return 0;
     return 1;
 }
@@ -12456,7 +12613,7 @@ static int wl_neutral(const unsigned long *c)
 {
     int k;
     for (k = 0; k < CNT_BLOCK; k++)
-        if (c[k] & ~wl_mask[k])
+        if (c[k] & ~(wl_mask[k] | wl_extra(k)))
             return 0;
     return 1;
 }
@@ -12532,6 +12689,15 @@ static int wl_take(PCtx *p, const unsigned long *chg)
     }
     if (!wl_neutral(chg)) {
         VD.wl_blk++;
+        if (G.count && !G.wlunif && (chg[WL_UNIF_WORD] & WL_UNIF)) {
+            /* 30/09 : ce que WLUNIF=1 admettrait (bloc seulement) */
+            int k, only = 1;
+            for (k = 0; k < CNT_BLOCK && only; k++)
+                if (chg[k] & ~(wl_mask[k] | (k == WL_UNIF_WORD ? WL_UNIF : 0)))
+                    only = 0;
+            if (only)
+                VD.wl_uonly_unif++;
+        }
         if (G.count) {                  /* piste : les unités seules ? */
             int k, only = (chg[1] & ~wl_mask[1]) != 0 && !(chg[1] & ~0xffUL);
             for (k = 0; k < CNT_BLOCK && only; k++)
@@ -12555,6 +12721,8 @@ static int wl_take(PCtx *p, const unsigned long *chg)
         VD.wl_blk++;                    /* rastérisation hors domaine : recalcul */
         return 0;
     }
+    if (chg[WL_UNIF_WORD] & WL_UNIF)
+        VD.wl_unif++;
     return 1;
 }
 
