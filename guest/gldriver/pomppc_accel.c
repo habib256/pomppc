@@ -849,6 +849,7 @@ typedef struct Post {                   /* copie à faire APRÈS la barrière */
     unsigned long  w, h, rowbytes;
     unsigned long  pixbytes;            /* 4 (xRGB/float32) ou 2 (1555/UNORM16) */
     float          scale;
+    const void    *ctx;                 /* 4e passe : PCtx relu (comparé, jamais lu) */
 } Post;
 
 /* Une moitié de la tranche, et la soumission qui l'occupe (v9). */
@@ -909,6 +910,11 @@ static struct {
        commande refusée par la dernière sonde (0 : aucune). n_posts_lost :
        relectures jetées (sync_to_sw_locked réessaie). */
     unsigned long   sub_seq;
+    /* 4e passe : plus ancienne soumission que la dernière lecture PROPRE
+       d'ERRORS ne couvre pas (en vol à ce moment-là). Les sondes et les
+       soumissions synchrones consomment des numéros entre deux doorbells
+       asynchrones : « seq − 2 » ne suffisait pas. */
+    unsigned long   err_floor;
     unsigned long   probe_op;
     unsigned long   n_posts_lost;
     unsigned long   nomem_until;
@@ -2869,6 +2875,7 @@ static void run_posts(Half *h)
 static void stream_dead(void);
 static void check_errors(unsigned long errors, unsigned long seq);
 static void posts_lost(Half *h);
+static void err_floor_update(const Half *done);
 
 static void wait_half_ex(int i, int unlock)
 {
@@ -2974,9 +2981,13 @@ static void wait_half_ex(int i, int unlock)
            seulement quand il y a des relectures. */
         if (h->npost && G.err_valid) {
             unsigned long e2 = 0, st2 = 0, pc2 = 0;
-            if (qgpu_peek(&G.q, &e2, &st2, &pc2) == 0 && e2 != G.errors) {
-                posts_lost(h);
-                check_errors(e2, h->seq);
+            if (qgpu_peek(&G.q, &e2, &st2, &pc2) == 0) {
+                if (e2 != G.errors) {
+                    posts_lost(h);
+                    check_errors(e2, h->seq);
+                } else {
+                    err_floor_update(h);    /* 4e passe : h a fini proprement */
+                }
             }
         }
     }
@@ -3073,6 +3084,12 @@ static void nomem_seen(unsigned long pc, unsigned long seq)
                 t->dirty = 1;           /* niveau absent ou à l'ancienne taille */
                 t->lost_gen++;          /* 3e passe : upload_texture ne la redit pas propre */
                 t->host_only = 0;
+                /* 4e passe : pour une texture de surface, dirty ne veut rien
+                   dire (upload_surftex le remet à 0) — c'est surf_copied qui
+                   fait refaire la SURF_TEX. Sans cela, une cible rendue une
+                   seule fois (reflet de Colin McRae) restait vide. */
+                t->surf_copied = 0;
+                t->surf_src = 0;
                 t->cp_frame = 0;
                 t->hook_gen++;
                 VD_BUMP();
@@ -3113,17 +3130,40 @@ static void nomem_seen(unsigned long pc, unsigned long seq)
 static void posts_lost(Half *h)
 {
     PCtx *q;
+    int i;
     if (!h->npost)
         return;
-    for (q = G.list; q; q = q->next)
-        if (q->qctx >= 0 && q->surf >= 0) {
-            if (q->color == SYNCED)
+    /* 4e passe : seuls les contextes (et les canaux) dont une relecture est
+       perdue. Basculer TOUS les SYNCED rendait « hôte plus récent » un
+       contexte synchronisé par un TÉLÉVERSEMENT : la relecture suivante
+       écrasait alors la bonne image de l'invité par celle, périmée, de l'hôte. */
+    for (q = G.list; q; q = q->next) {
+        if (q->qctx < 0 || q->surf < 0)
+            continue;
+        for (i = 0; i < h->npost; i++) {
+            if (h->post[i].ctx != (const void *)q)
+                continue;
+            if (!h->post[i].depth && q->color == SYNCED)
                 q->color = HOST_NEWER;
-            if (q->depth == SYNCED)
+            if (h->post[i].depth && q->depth == SYNCED)
                 q->depth = HOST_NEWER;
         }
+    }
     h->npost = 0;
     G.n_posts_lost++;
+}
+
+/* 4e passe : plancher des soumissions non couvertes par une lecture propre
+   d'ERRORS — la plus ancienne encore en vol (hors `done`, qui vient de
+   finir), sinon la prochaine à partir. */
+static void err_floor_update(const Half *done)
+{
+    unsigned long f = G.sub_seq;
+    int i;
+    for (i = 0; i < HALVES; i++)
+        if (&G.h[i] != done && G.h[i].busy && G.h[i].seq < f)
+            f = G.h[i].seq;
+    G.err_floor = f;
 }
 
 /* `seq` : numéro de la soumission dont le doorbell a rendu `errors`. Au plus
@@ -3133,15 +3173,26 @@ static void posts_lost(Half *h)
    jusqu'ici) ou seq elle-même (déjà finie, rare). Rien avant n'est perdu. */
 static void check_errors(unsigned long errors, unsigned long seq)
 {
-    unsigned long e2 = 0, status = 0, pc = 0;
+    unsigned long e2 = 0, status = 0, pc = 0, from;
+    int i;
 
     if (!G.err_valid) {
         G.errors = errors;
         G.err_valid = 1;
+        err_floor_update(0);
         return;
     }
-    if (errors == G.errors)
+    if (errors == G.errors) {
+        err_floor_update(0);            /* 4e passe : ce qui a fini est propre */
         return;
+    }
+    /* 4e passe : toute moitié encore en vol a pu s'arrêter avant ses
+       relectures — la nôtre (seq, finie en erreur dès son doorbell) comme
+       l'autre (la faute de A vue au doorbell de B : switch_half aurait
+       ensuite recopié l'arène de A comme bonne, G.errors étant déjà recalé). */
+    for (i = 0; i < HALVES; i++)
+        if (G.h[i].busy)
+            posts_lost(&G.h[i]);
     pomppc_log("POMPPC: QGPU_REG_ERRORS %lu → %lu", G.errors, errors);
     qgpu_peek(&G.q, &e2, &status, &pc);
     nomem_poll();                       /* reste du 29/09 : pression mémoire ? */
@@ -3164,8 +3215,14 @@ static void check_errors(unsigned long errors, unsigned long seq)
        coût est une image d'état renvoyé.
        3e passe : et seulement ce que les soumissions seq − 2 … seq ont porté
        (textures, miroirs bruts) — plus toute l'image de toutes les textures,
-       ni les textures qui n'existent que sur l'hôte. */
-    invalidate_mirrors_from(seq > 2 ? seq - 2 : 0);
+       ni les textures qui n'existent que sur l'hôte.
+       4e passe : et jusqu'au plancher — une soumission asynchrone suivie de
+       sondes (qui prennent des numéros) sortait sinon de la fenêtre. */
+    from = seq > 2 ? seq - 2 : 0;
+    if (G.err_floor < from)
+        from = G.err_floor;
+    invalidate_mirrors_from(from);
+    G.err_floor = G.sub_seq;
 }
 
 /* Reprend l'asynchrone si la fenêtre de synchrone n'a rien trouvé. */
@@ -3426,7 +3483,13 @@ static void submit_cur(void)
             h->fence = fence;
             h->seq = seq;
             posts_lost(h);
-            invalidate_mirrors_from(seq > 1 ? seq - 1 : 0);
+            {   /* 4e passe : jusqu'au plancher d'ERRORS, comme check_errors */
+                unsigned long from = seq > 1 ? seq - 1 : 0;
+                if (G.err_floor < from)
+                    from = G.err_floor;
+                invalidate_mirrors_from(from);
+                G.err_floor = G.sub_seq;
+            }
             return;
         }
     }
@@ -4643,6 +4706,14 @@ static int upload_texture(PCtx *p, PTex *t)
        perdue (lost_gen). La redire propre en fin de boucle effaçait cette
        perte : niveau 0 absent sur l'hôte, pour toujours. */
     lost0 = t->lost_gen;
+    /* 4e passe : up_seq n'était posé qu'APRÈS la boucle. Un vidage au milieu
+       qui invalidait (broken_all, nomem_seen, check_errors) sautait donc cette
+       texture (up_seq ancien < from), lost_gen ne bougeait pas, et la fin de
+       boucle la redisait propre. « En cours » = toujours dans la fenêtre ;
+       la vraie valeur est posée en fin de boucle. Une texture propre n'est
+       pas touchée (sinon toute invalidation la viserait pour toujours). */
+    if (t->dirty)
+        t->up_seq = ~0UL;
     if (t->dirty) {
         static unsigned texlog;
         const unsigned char *lv0 = dt + DT_LEVEL0;
@@ -5547,6 +5618,7 @@ static int queue_readback_to(PCtx *p, int depth, unsigned char *dst, unsigned lo
                 po->rowbytes = rowbytes;
                 po->pixbytes = bpp;
                 po->scale = GLD_F32(p->ctx, CTX_DEPTH_SCALE);
+                po->ctx = p;
                 hf->npost++;
             }
         }
@@ -5599,18 +5671,28 @@ static void sync_to_sw_locked(PCtx *p, int want_depth)
                tant que l'hôte ne sait pas packer (v15). P16 : SYNCED seulement
                si la relecture est vraiment partie — par bandes (3e passe),
                elle part toujours, sauf flux mort. */
-            if (dst && (color_bpp(p) == 4 || G.v15) && queue_readback(p, 0, dst)) {
-                any = 1;
+            /* 4e passe : SYNCED AVANT de poser les bandes. Un vidage entre deux
+               bandes peut perdre les premières (posts_lost) ; posé après, SYNCED
+               effaçait ce verdict et la reprise ne relisait rien. */
+            if (dst && (color_bpp(p) == 4 || G.v15)) {
                 p->color = SYNCED;
+                if (queue_readback(p, 0, dst))
+                    any = 1;
+                else if (p->color == SYNCED)
+                    p->color = HOST_NEWER;
             }
         }
         if (want_depth && p->depth == HOST_NEWER) {
             unsigned char *dst = sw_depth(p);
-            if (dst && (depth_bpp(p) == 4 || G.v15) && queue_readback(p, 1, dst)) {
-                if (p->stencil && p->sten_used)
-                    queue_readback(p, 2, dst);
-                any = 1;
+            if (dst && (depth_bpp(p) == 4 || G.v15)) {
                 p->depth = SYNCED;
+                if (queue_readback(p, 1, dst)) {
+                    if (p->stencil && p->sten_used)
+                        queue_readback(p, 2, dst);
+                    any = 1;
+                } else if (p->depth == SYNCED) {
+                    p->depth = HOST_NEWER;
+                }
             }
             /* Pas (encore) de tampon de profondeur invité : le rendu d'Apple ne
                l'alloue qu'à son premier usage, et plus tard encore quand il porte
@@ -6551,6 +6633,7 @@ struct PBuf {
     int             rd_n;               /* plages SALES, triées, disjointes, */
     unsigned long   rd_lo[RD_MAX], rd_hi[RD_MAX];   /* non contiguës ; hi borné
                                            à la taille logique à l'usage */
+    unsigned long   rd_gen;             /* 4e passe : avance à chaque rd_all */
 };
 
 /* L'objet tampon de GLEngine (docs/re/tableaux-de-sommets.md §3.2) : */
@@ -6585,6 +6668,7 @@ static void rd_all(PBuf *b)
     b->rd_n = 1;
     b->rd_lo[0] = 0;
     b->rd_hi[0] = 0xFFFFFFFFUL;         /* borné à la taille logique à l'usage */
+    b->rd_gen++;
 }
 
 static void rd_remove(PBuf *b, int i)
@@ -6867,8 +6951,19 @@ static int raw_sync(PCtx *p, PBuf *b, unsigned long base, unsigned long size,
             i = 0;
             continue;
         }
-        if (!raw_upload(p, b, base, ul, uh))
-            return 0;
+        {
+            /* 4e passe : raw_upload peut vider le flux, et ce vidage invalider
+               le miroir (rd_all). i, a, z, ul, uh décriraient alors une liste
+               qui n'existe plus : la retoucher déclarait propre ce qui ne
+               l'était pas (sommets faux en DRAW_NATIVE). On reprend du début. */
+            unsigned long gen = b->rd_gen;
+            if (!raw_upload(p, b, base, ul, uh))
+                return 0;
+            if (b->rd_gen != gen) {
+                i = 0;
+                continue;
+            }
+        }
         if (ul == a && uh == z) {
             rd_remove(b, i);
         } else if (ul == a) {
@@ -7806,6 +7901,11 @@ static long submit_probe(void)
     G.probe_op = (st != QGPU_ST_OK && pc < CMD_WORDS) ? QGPU_CMD_OP(G.cmd[pc]) : 0;
     if (st != QGPU_ST_OK && G.err_valid)
         G.errors++;
+    /* 4e passe : ligne de base de QGPU_REG_NOMEM relue — sinon le nomem_seen
+       suivant comptait ce refus-ci comme un second refus de SON lot et
+       invalidait tous ses miroirs pour rien. */
+    if (st == QGPU_ST_NO_MEM)
+        nomem_poll();
     G.h[G.cur].busy = 0;
     G.h[G.cur].npost = 0;
     G.ncmd = 0;
@@ -16248,14 +16348,15 @@ void pomppc_patch_renderer_info(unsigned char *info)
            kCGLRPVideoMemory = 0, et Warcraft III (comme d'autres jeux 2002)
            refuse d'initialiser OpenGL. GeForce3 y copie la VRAM IOAccelerator. */
         /* 3e passe (Colin McRae ≥ 1024×768) : POMPPC_GL_VRAM_MB=<n> (16 à
-           2048) annonce une autre VRAM — IndirectX choisit ses cibles de
+           2047) annonce une autre VRAM — IndirectX choisit ses cibles de
            rendu d'après ce budget ; l'essai dit si c'est lui qui change en
-           haute résolution. Défaut inchangé : 64 Mio. */
+           haute résolution. Défaut inchangé : 64 Mio. 4e passe : 2047 au
+           plus — 2048 << 20 = 0x80000000, lu comme GLint négatif. */
         unsigned long vram = RI_VRAM_BYTES;
         const char *ve = getenv("POMPPC_GL_VRAM_MB");
         if (ve && *ve) {
             unsigned long mb = strtoul(ve, 0, 10);
-            if (mb >= 16 && mb <= 2048)
+            if (mb >= 16 && mb <= 2047)
                 vram = mb << 20;
         }
         if (GLD_U32(info, RI_VRAM) == 0)
