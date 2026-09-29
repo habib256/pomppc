@@ -654,6 +654,18 @@ static void prog_unbind(QgpuProgSet *pg, uint32_t id)
     }
 }
 
+/* Bug hunt 4 : une case refusée peut être liée (PROG_BIND d'un refusé, bug
+   hunt 3). Recréée avec une AUTRE cible, elle restait liée à l'ancienne : le
+   VP exécutait un programme GLSL ou un FP, BindProgramARB recevait le nom
+   d'un autre type d'objet. Toute (re)création d'une case libre sous une cible
+   différente de celle qu'elle portait la délie d'abord. */
+static void prog_retarget(QgpuProgSet *pg, uint32_t id, uint32_t target)
+{
+    if (!pg->prog[id].used && pg->prog[id].target != target) {
+        prog_unbind(pg, id);
+    }
+}
+
 /* Bug hunt 3 : un texte refusé faute de mémoire rend le programme CASSÉ —
    l'ancien texte ne doit plus agir sous le nom du nouveau (rendu faux sans
    erreur). Objet hôte détruit, texte rendu : la mémoire revient au plafond. */
@@ -4117,6 +4129,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             if (p->used) {
                 return QGPU_ST_LIMIT;
             }
+            prog_retarget(&c->ctx[c->cur_ctx].prg, a[0], QGPU_PT_GLSL);
             if (!mem_take(c, prog_slot(c, p), prog_table_bytes(true))) {
                 prog_mark_refused(p, QGPU_PT_GLSL);
                 return QGPU_ST_NO_MEM;
@@ -4143,6 +4156,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (p->used) {
             return QGPU_ST_LIMIT;
         }
+        prog_retarget(&c->ctx[c->cur_ctx].prg, a[0], a[1]);
         if (!mem_take(c, prog_slot(c, p), prog_table_bytes(false))) {
             prog_mark_refused(p, a[1]);
             return QGPU_ST_NO_MEM;
@@ -4529,10 +4543,14 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             return QGPU_ST_NO_MEM;               /* bug hunt 3 : créé refusé */
         }
         p = glsl_prog(c, a[0]);
-        if (!p || p->glsl->nsrc == 0) {
+        if (!p) {
             return QGPU_ST_BAD_ARG;
         }
         g = p->glsl;
+        /* Bug hunt 4 : `nomem` AVANT `nsrc == 0`. Si TOUTES les sources ont
+           été refusées, nsrc vaut 0 : le BAD_ARG sortait avant de poser
+           `defined`, et le nouvel essai empilait ses sources (et ses
+           uniforms) sur celles de la définition ratée — faute fatale. */
         if (p->nomem) {
             /* Bug hunt 3 : un texte de cette définition a été refusé — ne
                rien lier, programme cassé jusqu'à la prochaine définition. */
@@ -4543,6 +4561,9 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             p->compiled = false;
             p->broken = true;
             return QGPU_ST_NO_MEM;
+        }
+        if (g->nsrc == 0) {
+            return QGPU_ST_BAD_ARG;
         }
         if (g->defined) {
             /* relier la même définition : l'objet hôte repart */

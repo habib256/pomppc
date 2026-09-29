@@ -7989,6 +7989,131 @@ static void run_bh3(QgpuCore *c, uint8_t *shmem)
     CHECK(c->mem_total == 0, "(bh3) tout rendu (%llu octets)", (unsigned long long)c->mem_total);
 }
 
+/* Bug hunt 4 : les deux trous du correctif C6 (passe 3), et un décompte
+   mémoire contrôlé EXACTEMENT avant/après (mem_give s'arrête à 0 : une
+   sur-restitution passerait sous un simple « tout rendu à 0 »). */
+static void run_bh4(QgpuCore *c, uint8_t *shmem)
+{
+    static const char vsu[] =
+        "uniform vec4 col;\nvoid main()\n{\n    gl_FrontColor = col;\n"
+        "    gl_Position = ftransform();\n}\n";
+    static const char fs2[] = "void main()\n{\n    gl_FragColor = gl_Color;\n}\n";
+    static const char vs[] =
+        "void main()\n{\n    gl_FrontColor = vec4(0.0,1.0,0.0,1.0);\n"
+        "    gl_Position = ftransform();\n}\n";
+    static const char fp_red[] = "!!ARBfp1.0\nMOV result.color, {1,0,0,1};\nEND\n";
+    Emit e;
+    uint32_t st, arena, k;
+    uint64_t cap_t = c->mem_cap_total, cap_s = c->mem_cap_slot, m0, sum;
+
+    printf("-- bug hunt 4 : GLSL sans source acceptée, case refusée recréée\n");
+    e.base = shmem;
+    if (c->caps & QGPU_CAP_GLSL) {
+        /* (q1) le lot du plugin — SOURCE VS + FS + UNIFORM + LINK — avec
+           TOUTES les sources refusées, puis le même lot sous le plafond */
+        st = v21_setup(c, shmem);
+        m0 = c->mem_total;
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 1, QGPU_PT_GLSL);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        for (k = 0; k < 3; k++) {
+            if (k == 0) {
+                c->mem_cap_total = c->mem_cap_slot = c->mem_total;
+            } else {
+                c->mem_cap_total = cap_t;
+                c->mem_cap_slot = cap_s;
+            }
+            arena = ARENA_OFF;
+            e.off = e.start = CMD_OFF;
+            glsl_vs(&e, shmem, &arena, 1, vsu);
+            glsl_fs(&e, shmem, &arena, 1, fs2);
+            glsl_uniform(&e, shmem, &arena, 1, 0, QGPU_GT_FLOAT_VEC4, 1, "col");
+            glsl_link(&e, 1);
+            st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+            if (k == 0) {
+                CHECK(st == QGPU_ST_NO_MEM && c->ctx[0].prg.prog[1].broken,
+                      "(q1) sources toutes refusées : LINK en NO_MEM, pas BAD_ARG "
+                      "(st %u pc %u)", st, c->status_pc);
+            } else {
+                CHECK(st == QGPU_ST_OK && c->ctx[0].prg.prog[1].compiled &&
+                      !c->ctx[0].prg.prog[1].broken &&
+                      c->ctx[0].prg.prog[1].glsl->nsrc == 2 &&
+                      c->ctx[0].prg.prog[1].glsl->nunif == 1,
+                      "(q1) essai %u sous le plafond : lié, 2 sources, 1 uniform, rien "
+                      "d'empilé (st %u pc %u, nsrc %u)", k, st, c->status_pc,
+                      c->ctx[0].prg.prog[1].glsl->nsrc);
+            }
+        }
+        e.off = e.start = CMD_OFF;
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_PROG_DESTROY, QGPU_LEN_PROG)); emit(&e, 1);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_OK && c->mem_total == m0,
+              "(q1) décompte exact : %llu octets après destruction (%llu avant)",
+              (unsigned long long)c->mem_total, (unsigned long long)m0);
+
+        /* (q2) case refusée en VERTEX, liée VP, recréée GLSL : plus liée VP */
+        st = v21_setup(c, shmem);
+        arena = ARENA_OFF;
+        c->mem_cap_total = c->mem_cap_slot = c->mem_total;
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 2, QGPU_PT_VERTEX);
+        prog_bind(&e, QGPU_PT_VERTEX, 2);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        c->mem_cap_total = cap_t;
+        c->mem_cap_slot = cap_s;
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 2, QGPU_PT_GLSL);
+        glsl_vs(&e, shmem, &arena, 2, vs);
+        glsl_link(&e, 2);
+        state(&e, QGPU_SK_VERTEX_PROGRAM, 1);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_OK && c->ctx[0].prg.bound[QGPU_PROG_VP] == -1 &&
+              !qgpu_prog_active(&c->ctx[0].st, &c->ctx[0].prg, QGPU_PROG_VP),
+              "(q2) refusé VERTEX lié puis recréé GLSL : délié du VP (st %u, bound %d)",
+              st, c->ctx[0].prg.bound[QGPU_PROG_VP]);
+        e.off = e.start = CMD_OFF;
+        v21_tri(shmem, 1, 1, 1);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFFFFFF,
+              "(q2) dessin : pipeline fixe, pas le programme GLSL au VP (st %u, %06x)",
+              st, px(shmem, 30, 8));
+    }
+    if (c->caps & QGPU_CAP_PROGRAMS) {
+        /* (q3) même chose, recréée FRAGMENT */
+        st = v21_setup(c, shmem);
+        arena = ARENA_OFF;
+        c->mem_cap_total = c->mem_cap_slot = c->mem_total;
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 3, QGPU_PT_VERTEX);
+        prog_bind(&e, QGPU_PT_VERTEX, 3);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        c->mem_cap_total = cap_t;
+        c->mem_cap_slot = cap_s;
+        e.off = e.start = CMD_OFF;
+        prog_create(&e, 3, QGPU_PT_FRAGMENT);
+        prog_string(&e, shmem, &arena, 3, fp_red);
+        state(&e, QGPU_SK_VERTEX_PROGRAM, 1);
+        v21_tri(shmem, 1, 1, 1);
+        st = v21_draw(c, &e, VF_P2C, 0);
+        CHECK(st == QGPU_ST_OK && c->ctx[0].prg.bound[QGPU_PROG_VP] == -1 &&
+              px(shmem, 30, 8) == 0xFFFFFF,
+              "(q3) refusé VERTEX lié puis recréé FRAGMENT : délié, dessin fixe "
+              "(st %u pc %u, %06x)", st, c->status_pc, px(shmem, 30, 8));
+    }
+    c->mem_cap_total = cap_t;
+    c->mem_cap_slot = cap_s;
+    for (sum = 0, k = 0; k < QGPU_MAX_CLIENTS; k++) {
+        sum += c->mem_slot[k];
+    }
+    CHECK(sum == c->mem_total, "(bh4) somme des tranches = total (%llu / %llu)",
+          (unsigned long long)sum, (unsigned long long)c->mem_total);
+    for (k = 0; k < QGPU_MAX_CLIENTS; k++) {
+        qgpu_core_client_reset(c, k);
+    }
+    CHECK(c->mem_total == 0, "(bh4) tout rendu (%llu octets)",
+          (unsigned long long)c->mem_total);
+}
+
 static void run_fix0929(QgpuCore *c, uint8_t *shmem)
 {
     Emit e, v;
@@ -8294,6 +8419,7 @@ static void *run_backend_body(void *arg)
     run_fix0929(c, shmem);      /* 29/09 : bug hunt du cœur */
     run_reste0929(c, shmem);    /* 29/09 : reste (NO_MEM, noms GLSL composés) */
     run_bh3(c, shmem);          /* bug hunt 3 : NO_MEM des programmes */
+    run_bh4(c, shmem);          /* bug hunt 4 : GLSL sans source, recréation */
 
     qgpu_core_reset(c);
     e.off = e.start = CMD_OFF;
