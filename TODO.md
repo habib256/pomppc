@@ -139,13 +139,15 @@ Ordre : planchers recalés, puis TCG (cache de sauts, verrou `mtmsr`/`rfi`), pui
   le « DOOM 3 à 33,8 ms/image » du 29/09 après-midi était une fenêtre de mesure prise trop
   tôt (images 2968..3198 au lieu de ~4050) ; DOOM 3 est à 61, comme le 27/09.
 
-- [ ] **[Plugin — régression] Zenerchi 4,4 → 7,9 ms/image** (fenêtre, menu) : stable à 4,4 du
-  26 au 27/09, 6,0 sur `6c11f37` (bug hunts passes 2 et 2-bis), 7,9 sur `ce9522b`+son. Scène
-  très légère : c'est le témoin d'un coût fixe ajouté par image (attente, aller-retour au
-  kext, soumission synchrone ajoutés par les bug hunts). Marble Blast plein écran 9,3 → 10,2
-  va dans le même sens. **À prendre avant toute optimisation.** Bissection par binaires
-  (QEMU `*.avant-bughunt`, plugin et kext de `8af9efc`, puis chaque passe), puis `sample`
-  dans l'invité. **Fermeture :** cause nommée, Zenerchi revenu à ≤ 4,6, matrice verte.
+- [x] **[Métrologie] « Régression » Zenerchi 4,4 → 7,9 ms/image** (30/09) : pas de régression,
+  une fenêtre de mesure mal placée. L'écran de l'éditeur dure un temps fixe et tourne selon le
+  lancement à ~3,4 ou ~15 ms/image : le menu arrive vers l'image 1650 ou 490, et la fenêtre fixe
+  1500..2500 contenait parfois ses ~4 s de chargement. Bissection hôte au repos (QEMU
+  `*.avant-bughunt`, kext et plugin de `8af9efc`, HEAD) : Zenerchi au menu 3,94-4,07 ms/image
+  dans toutes les piles, Marble Blast plein écran 9,4-10,2 (9,3-10,3 dès le 26/09) ; le plugin de
+  `8af9efc` donne aussi 4,3 ou 7,7 selon le lancement (`docs/matrice-jeux.md` §7). Fenêtre
+  repérée sur la scène (`jeux/zen.py`), plancher 7 → 6 : 4,4 / 4,5 / 4,4 / 4,4 ; tour
+  `20260930-0128` 16 vertes sur 16.
 
 - [ ] **[Métrologie] Troisième facteur de lenteur** (`docs/tcg-g4.md` §14.7) : une partie DOOM 3
   sur huit lente de bout en bout ; cause inconnue (cœurs P/E, autre processus, thermique ?).
@@ -288,11 +290,12 @@ hors rafraîchissements admis (2 par 90 images en fenêtre), et une mesure à sc
 sous le seuil du jeu. Une scène `gltest` comparée au rendu d'Apple éprouve chaque notion
 nouvelle. Les modes fenêtre et plein écran sont requis quand le jeu les propose.
 
-**Tour de référence : `bench/matrice/20260929-2344/tableau.md`** (commit `b9004cc`, hôte au
-repos) : **15 vertes sur 16 automatisées**, images toutes justes ; seule rouge, Zenerchi
-fenêtre (7,9 ms/image, régression ouverte). ms/image fenêtre / plein écran : Marble Blast
-9,3 / 10,2 ; DOOM 3 60,9 / 61,0 ; Prey 70,7 / 71,4 ; UT2004 26,9 / 29,3 ; Warcraft III — / 17,3 ;
-Colin McRae — / 70,7 ; Nexuiz ARB 109,5 / 109,2 ; Nexuiz GLSL 41,1 / 41,8. Le tableau
+**Tour de référence : `bench/matrice/20260930-0128/tableau.md`** (b9004cc pour QEMU, kext et
+plugin, matrice de ce jour, hôte au repos, charge 1-2) : **16 vertes sur 16 automatisées**,
+images toutes justes. ms/image fenêtre / plein écran : Marble Blast 9,9 / 9,7 ; Zenerchi 4,4 / — ;
+DOOM 3 61,7 / 61,6 ; Prey 70,9 / 70,3 ; UT2004 27,2 / 27,5 ; Warcraft III — / 17,8 ;
+Colin McRae — / 71,5 ; Nexuiz ARB 110,7 / 109,4 ; Nexuiz GLSL 41,7 / 41,1. Précédent :
+`20260929-2344` (15/16, Zenerchi rouge à 7,9 par sa fenêtre de mesure). Le tableau
 ci-dessous est celui du 27/09, gardé pour comparaison.
 
 Tour complet précédent : `bench/matrice/20260927-1137/tableau.md`, **13 vertes sur 15**.

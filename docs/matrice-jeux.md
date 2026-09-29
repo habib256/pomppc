@@ -148,7 +148,7 @@ UT2004 est déterministe (pas de simulation fixé), les autres non.
 | Jeu | Fenêtre | Plein écran | Scène fixe, fenêtre de mesure |
 |---|---|---|---|
 | Marble Blast Gold | `-windowed` | `-fullscreen` | `-mission …/beginner/gems.mis` : bille immobile au départ, images 900..1500 |
-| Zenerchi | défaut (800×600) | **non automatisé** | menu d'accueil animé, images 1500..2500 |
+| Zenerchi | défaut (800×600) | **non automatisé** | menu d'accueil animé, repéré sur la scène (15 dessins par image tenus 100 images) : M+200..M+1200 (images 1500..2500 jusqu'au 29/09, voir §7) |
 | DOOM 3 Demo | `r_mode 3` (640×480) | `r_mode 5` (1024×768) | `+map game/demo_mars_city1`, joueur immobile après la cinématique : T+50..T+280 |
 | Prey Demo | `r_mode 3` | `r_mode 5` | `+loadGame Auto___Fuite_____toute_vitesse` : L+300..L+600 après le chargement |
 | UT2004 Demo | `StartupFullscreen=False` | `-fullscreen`, 1024×768 | caméra d'intro d'AS-Convoy, pas fixé à 0,2 s (`seed.c`), images 13..73 |
@@ -343,6 +343,31 @@ ne jugent pas la vitesse absolue.
   relecture de la zone présentée, `TEX_CREATE` v3 et `TEX_DESTROY` dans le prologue.
 - **Le texte des menus de Warcraft III** est juste le 26/09 (image validée) : la ligne du
   TODO §6 date d'avant les corrections du chemin tableaux.
+- **Fausse régression de Zenerchi (29-30/09)** : 4,4 ms/image au 27/09, 6,0 au tour
+  `20260929-1234`, 7,9 au tour `20260929-2344`, lue comme un coût fixe ajouté par les bug
+  hunts. Ce n'en était pas un : la fenêtre FIXE 1500..2500 tombait sur le chargement du menu.
+  L'écran de l'éditeur dure un temps, pas un nombre d'images, et tourne selon le lancement à
+  ~3,4 ms/image (menu vers l'image 1650) ou ~15 ms/image (menu vers l'image 490) ; au 27/09
+  les premières images, plus lentes (relectures et replis corrigés depuis), mettaient le
+  menu vers l'image 1250, juste avant la fenêtre. Les deux régimes se voient avec la même
+  pile (8af9efc comme HEAD). Bissection (30/09, hôte au repos, charge 1,4-2,1, médiane de
+  blocs de 200 images au menu, `--sans-vidage` sauf mention) :
+
+  | Pile (QEMU / kext / plugin) | Zenerchi fenêtre 1500..2500 | Zenerchi au menu | Marble Blast plein écran 900..1500 |
+  |---|---|---|---|
+  | référence b9004cc / HEAD / HEAD | 3,9-4,1 (5 passes) | 4,01-4,07 | 9,4 / 9,7 / 10,2 |
+  | idem, avec vidage (tour normal) | 7,7 / 7,8 | 4,32 / 4,38 | — |
+  | `*.avant-bughunt` / HEAD / HEAD | 3,9 / 4,0 / 4,0 | 3,95-4,02 | 9,8 / 9,9 |
+  | `*.avant-bughunt` / HEAD / 8af9efc | 3,9 / 3,9 / 3,9 | 3,94-4,00 | — |
+  | idem, avec vidage | **4,3 / 7,7** | 4,25 / 4,25 | — |
+  | `*.avant-bughunt` / 8af9efc / 8af9efc | 4,0 / 4,0 / 4,0 | 4,01-4,04 | 9,5 / 9,7 |
+
+  Aucune couche ne coûte (écarts ≤ 2 %, dans le bruit) ; le tour du 29/09 midi (6,0) avait
+  une charge hôte de 5,3 et Marble Blast à 20 ms/image. Marble Blast plein écran va de 9,3 à
+  10,3 d'un tour à l'autre depuis le 26/09 : son 10,2 n'est pas un écart. Corrigé dans
+  `jeux/zen.py` (fenêtre repérée sur la scène, plancher 7 → 6) : 4,5 / 4,4 / 4,4 ms/image
+  (tours `zenreg-corr-*`) ; tour complet `20260930-0128` : 16 vertes sur 16. Le mode vidage (un `access()` et un `fflush` par image) coûte
+  ~0,4 ms/image à Zenerchi : les vitesses de la matrice l'incluent.
 - **Anciennes vitesses du TODO §1** : « Marble Blast ~88 img/s », « Zenerchi ~50 img/s »
   venaient d'autres scènes (bureau du disque de dev, démo) ; à scène fixe : Marble Blast
   12,4 ms/image (~80 img/s) en plein écran, Zenerchi 5,2 ms/image au menu.
