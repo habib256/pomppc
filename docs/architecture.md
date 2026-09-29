@@ -105,12 +105,13 @@ Ne resoumettre automatiquement que lorsque la non-acceptation est établie
 (`QUEUE_FULL`), sous peine de rejouer deux fois des commandes.
 
 Le plugin alterne deux moitiés suivies par `Half.busy` et `Half.fence` ;
-`switch_half` attend avant réutilisation. **L1 : le chemin timeout de
-`wait_half_ex` efface pourtant `h->busy` et `h->npost` sans barrière atteinte.**
-La désactivation de l'asynchrone et le marquage ultérieur des contextes cassés
-ne prouvent pas l'arrêt du lecteur hôte. M1 n'est donc pas garanti sur ce chemin.
-Correction attendue : conserver la zone en quarantaine tant que son achèvement
-ou l'arrêt effectif du device n'est pas établi. Épreuve : retarder le backend
+`switch_half` attend avant réutilisation. **L1 (corrigé le 29/09/2026) :** sur
+délai, `wait_half_ex` garde la moitié en quarantaine et réattend ; après
+`WAIT_GIVEUP` délais consécutifs, `stream_dead()` la retire pour toujours
+(flux détourné vers un tampon privé, `G.state = -1`), sans jamais la rendre à
+l'écriture. Un seul fil attend verrou relâché à la fois : au retour de
+`flush()`, `G.halt` est nul et le flux reste à l'appelant jusqu'à ce qu'il
+relâche lui-même le verrou. Épreuve restant à faire : retarder le backend
 au-delà de `WAIT_MS` et vérifier l'absence de réécriture de la zone en vol.
 
 Sources : `qgpu_run_job`, `qgpu_ctrl_read`, `qgpu_sync_gave_up` ;

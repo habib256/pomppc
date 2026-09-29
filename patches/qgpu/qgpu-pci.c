@@ -809,6 +809,9 @@ static uint64_t qgpu_ctrl_read(void *opaque, hwaddr addr, unsigned size)
     case QGPU_REG_STATUS_PC:
     case QGPU_REG_ERRORS:
         return qatomic_read(&s->regs[addr >> 2]);
+    case QGPU_REG_NOMEM:
+        /* reste du 29/09 : écrit par le thread de rendu (qgpu_core_execute) */
+        return qatomic_read(&s->core.nomem_cmds);
     case QGPU_REG_DEBUG:
         return 0;
     default:

@@ -8,7 +8,7 @@ liste, essais revertés, binaires supplantés) gardé pour pouvoir refaire le ra
 
 | Fichier | Rôle |
 | --- | --- |
-| `smp-mac99/qemu-mac99-cpus-v2.patch` | SMP mac99. Remplace le garde-fou `« Only UP supported today »` d'`hw/intc/openpic.c` par la vraie limite du modèle (`nb_cpus > KEYLARGO_MAX_CPU`), ajoute les GPIO 3 **et** 4 de KeyLargo (lignes de reset du CPU 1) dans `hw/misc/macio/gpio.c`, et dans `hw/ppc/mac_newworld.c` le `PIR = cpu_index` plus le `cpu_kick()` qui relâche le cœur secondaire par `async_run_on_cpu()`. S'applique **sans fuzz ni décalage** sur QEMU 9.2.0 pristine (le build l'applique quand même avec `--fuzz=3`). |
+| `smp-mac99/qemu-mac99-cpus-v2.patch` | SMP mac99. Remplace le garde-fou `« Only UP supported today »` d'`hw/intc/openpic.c` par la vraie limite du modèle (`nb_cpus > KEYLARGO_MAX_CPU`), ajoute le GPIO 4 de KeyLargo (0x5C, `KL_GPIO_RESET_CPU1`, active basse) dans `hw/misc/macio/gpio.c`, et dans `hw/ppc/mac_newworld.c` le `PIR = cpu_index` plus `cpu_reset_line()` : ligne tenue basse = CPU 1 remis à zéro et arrêté, relâchement = démarrage, par `async_run_on_cpu()`. S'applique **sans fuzz ni décalage** sur QEMU 9.2.0 pristine (le build l'applique quand même avec `--fuzz=3`). |
 | `qfb/qfb-pci.c` | Le device paravirtuel `qfb-pci`, copié dans `hw/display/`. Protocole « qfb1 » de Solra Bizna porté du NuBus vers PCI. |
 | `qfb/0002-wire-qfb-pci-build.patch` | Câblage meson/Kconfig du device ci-dessus. |
 | `qgpu/qgpu-pci.c`, `qgpu-core.[ch]`, `qgpu-soft.c`, `qgpu-gl.c`, `qgpu_proto.h` | Le GPU paravirtuel `qgpu-pci` (protocole v16 : géométrie brute, tampons hôte, programmes ARB) : device (transport), cœur d'exécution du flux de commandes (contextes, surfaces, textures, programmes, état GL), backend logiciel de référence, **backend OpenGL** (CGL/EGL, rendu sur le GPU hôte), et le contrat hôte/invité. Copiés dans `hw/display/`. |
@@ -50,9 +50,13 @@ Findings S-C1, S-C2, S-C3, S-M1, S-M2, S-M3 et mineurs de
   `hw/ppc/spapr_cpu_core.c` : après `realize`, avant le reset.
 - **`gpio_regs[addr]` toujours stocké** (S-M2) : `OUT_ENABLE`/`OUT_DATA` restent relisibles ;
   seul le niveau est dérivé pour la ligne de reset.
-- **GPIO 3 en plus du GPIO 4** (S-M3) : le firmware livré ne publie pas de propriété
-  `soft-reset` et Tiger retombe sur son offset codé en dur, 0x5B ou 0x5C selon les versions,
-  soit GPIO 3 soit GPIO 4. Le GPIO 3 tombait dans `LOG_UNIMP`, en silence.
+- **GPIO 4 seul** (S-M3, révisé le 29/09/2026) : le firmware livré ne publie pas de propriété
+  `soft-reset` et Tiger retombe sur son offset codé en dur. `AppleMacRISC2PE` prend 0x5B pour
+  le **CPU 0** et 0x5C pour les autres : le GPIO 3 est la ligne du CPU 0, et le relier à
+  `cpus[1]` réinitialisait le CPU 1 en pleine exécution. Retiré (docs/bug-hunt-2026-09-29.md, M1).
+- **Démarrage au relâchement** (29/09/2026) : le CPU 1 démarrait à l'assertion (écriture 0x4)
+  et une ligne tenue basse ne le retenait pas. Le reset machine remet la ligne haute sans
+  front, pour ne pas lancer le CPU 1 avant que l'invité le demande.
 - Mineurs : garde-fou openpic réel au lieu d'`#if 0` ; plus de boucle qui écrase le lien d'IRQ
   au-delà de deux CPU ; `-smp 2` sans `via=pmu` sort par un `error_report` au lieu d'un
   `sysbus_connect_irq(NULL, …)`.

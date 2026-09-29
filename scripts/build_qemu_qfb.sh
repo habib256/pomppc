@@ -107,14 +107,17 @@ patch_forward() { # patch_forward <fichier.patch> <fichier> <motif> [<fichier> <
   fi
 }
 
-# --- 1. SMP mac99 (série BALATON, révisée : async_run_on_cpu, GPIO 4 seul) ---
-# Le garde teste un marqueur PROPRE À CETTE VERSION du patch. L'ancien
-# (« CPU1 reset ») ne convient plus : il survit dans un commentaire des deux
-# versions, si bien qu'un arbre portant la série précédente l'aurait satisfait,
+# --- 1. SMP mac99 (série BALATON, révisée : async_run_on_cpu, GPIO 4 seul,
+#        CPU 1 tenu en reset ligne basse et démarré au relâchement) ---
+# Le garde teste un marqueur PROPRE À CETTE VERSION du patch : « define
+# GPIO_RESET_CPU1 » (29/09/2026). Pas le nom seul : KL_GPIO_RESET_CPU1 est déjà
+# dans un commentaire des versions précédentes. Les marqueurs précédents
+# (« CPU1 reset », puis macio_gpio_set_extirq) survivent dans les versions
+# suivantes : un arbre portant une série plus ancienne les aurait satisfaits,
 # l'étape aurait été sautée et la nouvelle série jamais appliquée — en silence.
 # C'est la classe de panne que ce script existe pour supprimer.
-if ! grep -q "macio_gpio_set_extirq" hw/misc/macio/gpio.c; then
-  # Arbre portant l'ANCIENNE série : ses hunks tomberaient sur des fichiers
+if ! grep -q "define GPIO_RESET_CPU1" hw/misc/macio/gpio.c; then
+  # Arbre portant une ANCIENNE série : ses hunks tomberaient sur des fichiers
   # déjà modifiés. Retour à l'amont sur les trois fichiers du patch d'abord.
   if grep -q "CPU1 reset" hw/misc/macio/gpio.c; then
     echo "▶ ancienne série SMP détectée : retour à l'amont de gpio.c," \

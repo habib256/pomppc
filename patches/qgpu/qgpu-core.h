@@ -77,6 +77,11 @@ typedef struct QgpuTexture {
     uint32_t     dirty[QGPU_TEX_FACES];  /* bit n : niveau n de la face modifié
                                             depuis la dernière synchro */
     bool         params_dirty;
+    /* Reste du 29/09 : bit n = le niveau n de la face a été refusé par le
+       plafond mémoire (QGPU_ST_NO_MEM) à sa dernière définition. Ses
+       sous-mises à jour (TEX_SUBIMAGE, COPY_TEX) rendent alors NO_MEM, non
+       fatal, au lieu d'un BAD_ARG qui arrêterait la soumission. */
+    uint32_t     nomem[QGPU_TEX_FACES];
     void        *priv;              /* propriété du backend */
 } QgpuTexture;
 
@@ -461,12 +466,15 @@ struct QgpuCore {
        tampons, textes et tables de programmes : tout ce que le flux invité
        fait allouer, compté par tranche (celle de l'identifiant de l'objet ;
        d'un programme, celle de son contexte) et en tout. Au-delà d'un
-       plafond : QGPU_ST_LIMIT, rien d'alloué. Plafonds posés par
+       plafond : QGPU_ST_NO_MEM (non fatal), rien d'alloué. Plafonds posés par
        qgpu_core_init (moitié de la RAM de l'hôte, ¾ de cela par tranche ;
        QGPU_MEM_MB dans l'environnement pour un autre total). */
     uint64_t mem_total, mem_slot[QGPU_MAX_CLIENTS];
     uint64_t mem_cap_total, mem_cap_slot;
     uint64_t mem_refused;          /* refus depuis le démarrage (stats) */
+    uint32_t nomem_cmds;           /* commandes rendues QGPU_ST_NO_MEM depuis le
+                                      démarrage : QGPU_REG_NOMEM (lu par le vCPU,
+                                      écrit par le thread de rendu : atomique) */
     bool     trace;                /* journalise chaque commande sur stderr */
 
     /* v13 : cible de SURF_PRESENT (VRAM qfb côté QEMU, tampon de test en
@@ -489,6 +497,9 @@ struct QgpuCore {
     /* v14 : tampons persistants hors BAR0 */
     struct {
         bool     used;
+        bool     nomem;                  /* reste du 29/09 : BUF_CREATE refusé par
+                                            le plafond — BUF_SUBDATA/BUF_DESTROY
+                                            rendent NO_MEM (non fatal), pas BAD_ARG */
         uint8_t *data;
         uint32_t size;
     } buf[QGPU_MAX_BUF];

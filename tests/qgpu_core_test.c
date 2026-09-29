@@ -7719,6 +7719,136 @@ static void fx_bind(Emit *e, uint32_t ctx)
     emit(e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(e, ctx);
 }
 
+/* Reste du 29/09 : QGPU_ST_NO_MEM non fatal, niveaux et tampons refusés
+   tolérés par leurs mises à jour, règle de compte rendu, et noms d'uniforms
+   GLSL composés (QGPU_CAP_GLSL_PATHS). */
+static void run_reste0929(QgpuCore *c, uint8_t *shmem)
+{
+    static const char vs_basic[] =
+        "void main()\n{\n    gl_FrontColor = gl_Color;\n    gl_Position = ftransform();\n}\n";
+    static const char fs_struct[] =
+        "struct L { vec4 c; float k; };\nuniform L l[2];\n"
+        "void main()\n{\n    gl_FragColor = l[1].c * l[0].k;\n}\n";
+    static const char *const bad[] = {
+        "l.gl_x", "l[01].c", "a..b", "a[]", "1a", "a.", "a[1", "a[123456]", "a b", "gl_x.y"
+    };
+    Emit e;
+    uint32_t st, n0, k, arena = ARENA_OFF;
+    const uint64_t MiB = 1u << 20;
+    uint64_t cap_t = c->mem_cap_total, cap_s = c->mem_cap_slot, m0;
+
+    printf("-- 29/09 (reste) : NO_MEM non fatal, noms GLSL composés\n");
+    CHECK(QGPU_ST_NO_MEM == 11 && QGPU_REG_NOMEM == 0x4C && QGPU_CAP_GLSL_PATHS == 0x4000,
+          "contrat : NO_MEM 11, registre 0x4C, capacité 0x4000");
+    st = v21_setup(c, shmem);
+    CHECK(st == QGPU_ST_OK, "(n) contexte et surface (st %u)", st);
+    e.base = shmem;
+
+    /* (n1) tout refus du plafond est NON fatal : le lot va au bout */
+    c->mem_cap_total = 8 * MiB;
+    c->mem_cap_slot = 8 * MiB;
+    n0 = c->nomem_cmds;
+    m0 = c->mem_total;                  /* la surface de v21_setup */
+    e.off = e.start = CMD_OFF;
+    tcreate3(&e, 0, QGPU_TT_2D);
+    timage3(&e, 0, QGPU_TT_2D, 0, 2048, 2048, 1, 0x1908, 0x80E1, 0x8367, QGPU_TEX_NO_DATA, 0, 0);
+    tsub(&e, 0, QGPU_TT_2D, 0, 0, 0, 0, 1, 1, 1, 0x80E1, 0x8367, ARENA_OFF);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE)); emit(&e, 0);
+    emit(&e, QGPU_MAX_BUF_SIZE);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_SUBDATA, QGPU_LEN_BUF_SUBDATA)); emit(&e, 0);
+    emit(&e, 0); emit(&e, ARENA_OFF); emit(&e, 4);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF00FF00, 1.0f);
+    readback_cmd(&e, 1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_NO_MEM && c->status_pc == QGPU_LEN_TEX_CREATE3 &&
+          c->nomem_cmds - n0 == 4 && px(shmem, 5, 5) == 0x00FF00,
+          "(n1) image, sous-image, tampon, sous-données refusés ; CLEAR et relecture "
+          "exécutés : st %u pc %u, %u refus, pixel %06x", st, c->status_pc,
+          c->nomem_cmds - n0, px(shmem, 5, 5));
+    CHECK(!c->buf[0].used && c->buf[0].nomem && (c->tex[0].nomem[0] & 1) &&
+          !c->tex[0].level[0][0].px && c->mem_total == m0,
+          "(n1) rien d'alloué, refus notés (tampon %d, niveau %u), %llu octets comptés (%llu)",
+          c->buf[0].nomem, c->tex[0].nomem[0], (unsigned long long)c->mem_total,
+          (unsigned long long)m0);
+
+    /* (n2) un ARRÊT après un NO_MEM se dit lui-même : NO_MEM rendu = lot entier */
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE)); emit(&e, 1);
+    emit(&e, QGPU_MAX_BUF_SIZE);
+    emit(&e, QGPU_CMD_HDR(0x7FF0, 1));
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_OPCODE && c->status_pc == QGPU_LEN_BUF_CREATE,
+          "(n2) NO_MEM puis opcode inconnu : l'arrêt est rendu (st %u pc %u)", st, c->status_pc);
+
+    /* (n3) un tampon refusé se détruit sans faute, son identifiant resert */
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_DESTROY, QGPU_LEN_BUF)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE)); emit(&e, 1); emit(&e, 64);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_SUBDATA, QGPU_LEN_BUF_SUBDATA)); emit(&e, 1);
+    emit(&e, 0); emit(&e, ARENA_OFF); emit(&e, 4);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && !c->buf[0].nomem && c->buf[1].used && !c->buf[1].nomem,
+          "(n3) BUF_DESTROY d'un refusé = OK, BUF_CREATE neuf sur un refusé = OK (st %u pc %u)",
+          st, c->status_pc);
+
+    /* (n4) le niveau redéfini sous le plafond redevient une cible normale */
+    e.off = e.start = CMD_OFF;
+    timage3(&e, 0, QGPU_TT_2D, 0, 4, 4, 1, 0x1908, 0x80E1, 0x8367, QGPU_TEX_NO_DATA, 0, 0);
+    tsub(&e, 0, QGPU_TT_2D, 0, 0, 0, 0, 1, 1, 1, 0x80E1, 0x8367, ARENA_OFF);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && c->tex[0].nomem[0] == 0 && c->tex[0].level[0][0].px,
+          "(n4) niveau 4×4 accepté, sous-image OK, refus effacé (st %u pc %u)",
+          st, c->status_pc);
+    e.off = e.start = CMD_OFF;
+    tsub(&e, 0, QGPU_TT_2D, 1, 0, 0, 0, 1, 1, 1, 0x80E1, 0x8367, ARENA_OFF);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(n4) sous-image d'un niveau jamais défini : BAD_ARG, "
+          "comme avant (st %u)", st);
+    c->mem_cap_total = cap_t;
+    c->mem_cap_slot = cap_s;
+    for (k = 0; k < QGPU_MAX_CLIENTS; k++) {
+        qgpu_core_client_reset(c, k);
+    }
+    CHECK(c->mem_total == 0 && !c->buf[0].nomem, "(n) tout rendu (%llu octets)",
+          (unsigned long long)c->mem_total);
+
+    /* (g) noms d'uniforms composés */
+    if (!(c->caps & QGPU_CAP_GLSL)) {
+        CHECK(!(c->caps & QGPU_CAP_GLSL_PATHS), "(g) sans GLSL, pas de QGPU_CAP_GLSL_PATHS");
+        return;
+    }
+    CHECK(c->caps & QGPU_CAP_GLSL_PATHS, "(g) QGPU_CAP_GLSL_PATHS annoncé avec GLSL");
+    st = v21_setup(c, shmem);
+    e.off = e.start = CMD_OFF;
+    prog_create(&e, 1, QGPU_PT_GLSL);
+    glsl_vs(&e, shmem, &arena, 1, vs_basic);
+    glsl_fs(&e, shmem, &arena, 1, fs_struct);
+    glsl_uniform(&e, shmem, &arena, 1, 0, QGPU_GT_FLOAT, 1, "l[0].k");
+    glsl_uniform(&e, shmem, &arena, 1, 1, QGPU_GT_FLOAT_VEC4, 1, "l[1].c");
+    glsl_valf(&e, shmem, &arena, 1, 0, 1, 0, 0, 0);
+    glsl_valf(&e, shmem, &arena, 1, 1, 1, 0, 1, 1);
+    glsl_link(&e, 1);
+    prog_bind(&e, QGPU_PT_GLSL, 1);
+    v21_tri(shmem, 1, 1, 1);
+    st = v21_draw(c, &e, VF_P2C, 0);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 8) == 0xFF00FF,
+          "(g) uniform L l[2] : l[1].c × l[0].k = magenta (%06x, st %u pc %u)",
+          px(shmem, 30, 8), st, c->status_pc);
+    e.off = e.start = CMD_OFF;
+    prog_create(&e, 2, QGPU_PT_GLSL);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    for (k = 0; k < sizeof(bad) / sizeof(bad[0]); k++) {
+        e.off = e.start = CMD_OFF;
+        glsl_uniform(&e, shmem, &arena, 2, k, QGPU_GT_FLOAT, 1, bad[k]);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_BAD_ARG, "(g) nom « %s » refusé (st %u)", bad[k], st);
+    }
+    e.off = e.start = CMD_OFF;
+    glsl_attrib(&e, shmem, &arena, 2, 1, "s.m");
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "(g) GLSL_ATTRIB reste limité aux identifiants (st %u)", st);
+}
+
 static void run_fix0929(QgpuCore *c, uint8_t *shmem)
 {
     Emit e, v;
@@ -7757,8 +7887,8 @@ static void run_fix0929(QgpuCore *c, uint8_t *shmem)
     emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE)); emit(&e, 2);
     emit(&e, QGPU_MAX_BUF_SIZE);
     st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
-    CHECK(st == QGPU_ST_LIMIT && !c->buf[2].used && c->mem_slot[0] == 36 * MiB,
-          "(a) plafond de la tranche 0 : LIMIT, rien alloué (st %u, %llu Mio)", st,
+    CHECK(st == QGPU_ST_NO_MEM && !c->buf[2].used && c->mem_slot[0] == 36 * MiB,
+          "(a) plafond de la tranche 0 : NO_MEM, rien alloué (st %u, %llu Mio)", st,
           (unsigned long long)(c->mem_slot[0] / MiB));
     e.off = e.start = CMD_OFF;
     emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE));
@@ -7766,7 +7896,7 @@ static void run_fix0929(QgpuCore *c, uint8_t *shmem)
     emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE));
     emit(&e, QGPU_CLIENT_BUF_IDS + 1); emit(&e, QGPU_MAX_BUF_SIZE);
     st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
-    CHECK(st == QGPU_ST_LIMIT && c->status_pc == 3 && c->mem_slot[1] == 16 * MiB &&
+    CHECK(st == QGPU_ST_NO_MEM && c->status_pc == 3 && c->mem_slot[1] == 16 * MiB &&
           c->mem_total == 52 * MiB,
           "(a) tranche 1 : un tampon, puis le plafond TOTAL (st %u pc %u, %llu Mio)",
           st, c->status_pc, (unsigned long long)(c->mem_total / MiB));
@@ -8013,6 +8143,7 @@ static void *run_backend_body(void *arg)
     run_v22(c, shmem);          /* ATI_texture_env_combine3 */
     run_gpu_copy(c, shmem);     /* 27/09 */
     run_fix0929(c, shmem);      /* 29/09 : bug hunt du cœur */
+    run_reste0929(c, shmem);    /* 29/09 : reste (NO_MEM, noms GLSL composés) */
 
     qgpu_core_reset(c);
     e.off = e.start = CMD_OFF;

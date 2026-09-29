@@ -103,6 +103,12 @@
 #define QGPU_REG_ERRORS         0x44  /* r  : nombre de soumissions TERMINÉES avec un
                                               statut ≠ QGPU_ST_OK depuis le reset */
 #define QGPU_REG_QUEUE_DEPTH    0x48  /* r  : profondeur de la file de CE device */
+/* Reste du 29/09 : nombre de commandes terminées en QGPU_ST_NO_MEM (plafond de
+ * mémoire hôte) depuis le démarrage de QEMU, tous clients confondus. Le kext
+ * ne le lit pas ; le plugin le relit par QGPU_UC_READ_REG quand ERRORS bouge
+ * en asynchrone, pour distinguer « pression mémoire » d'une faute. 0 sur un
+ * device plus ancien (lecture d'un registre non câblé). */
+#define QGPU_REG_NOMEM          0x4C
 
 /* ── v19 : clients (QGPU_CAP_CLIENTS) ────────────────────────────────────────
  *
@@ -182,6 +188,13 @@
  * que dans QGPU_REG_SUBMIT_ST, jamais dans QGPU_REG_STATUS. Le doorbell
  * SYNCHRONE ne le rend jamais : il attend une place. */
 #define QGPU_ST_QUEUE_FULL      10
+/* Reste du 29/09 : plafond de mémoire hôte atteint (QGPU_MEM_MB). Statut de
+ * FLUX, NON FATAL : la commande d'allocation (SURF_CREATE, TEX_IMAGE3,
+ * SURF_TEX, génération de mipmaps, BUF_CREATE, PROG_CREATE, PROG_STRING,
+ * GLSL_SOURCE) n'a rien alloué — l'objet n'existe pas, ou le niveau garde
+ * son ancienne taille — et la soumission CONTINUE. Comme un dessin refusé,
+ * c'est la première faute qui est rendue dans STATUS/STATUS_PC. */
+#define QGPU_ST_NO_MEM          11
 
 /* ── Interface du kext POMPPCGPU (IOUserClient) ──────────────────────────────
  *

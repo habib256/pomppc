@@ -434,7 +434,6 @@ long gldInitializeLibrary(long a, long b, long c, long d, long e, long f, long g
     if (!second_copy) {
         gld_live = 1;
         pthread_once(&owner_once, owner_mark);
-        pthread_once(&atfork_once, atfork_install);
         pomppc_backend_init();
     }
     return r;
@@ -551,6 +550,17 @@ long gldCreateContext(long a, long b, long c, long d, long e, long f, long g, lo
     if (r == 0 && e)
         pomppc_patch_caps((void *)e);
     if (r == 0 && a && *(long *)a) {
+        /* Reste du 29/09 — pthread_atfork ne se retire pas, et ses rappels
+           vivent dans NOTRE image. Posés dans gldInitializeLibrary, ils
+           survivaient au plugin quand GLEngine le rejetait juste après
+           (_glepValidatePlugin : version, identifiant déjà pris) et le
+           démappait : le fork() suivant sautait dans le vide. Un premier
+           contexte prouve que le plugin a été retenu ; un fork antérieur n'a
+           rien à protéger (aucun flux n'a encore été écrit). Reste possible :
+           un plugin retenu puis déchargé avant la fin du processus — GLEngine
+           ne le fait pas (docs/re/accelerateur-iokit.md). */
+        if (!second_copy)
+            pthread_once(&atfork_once, atfork_install);
         pomppc_context_created((void *)*(long *)a);
         /* 5ᵉ argument = bloc de configuration. Le chemin brut y pose cfg+0x79
            (valeur initiale du verrou T&L) et y publiera son descripteur de

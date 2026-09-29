@@ -122,6 +122,8 @@
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
+static void crash_hook_remove(void);
+static int crash_retired;               /* reste du 29/09 : plugin en déchargement */
 /* 24/09/2026 — garde de lecture des tableaux de l'application. Les copies
    clientes des VBO d'idTech4 (cache de sommets, memory plugin d'Apple) sont
    paginées : la plage [vmin, vmax] d'un glDrawElements peut déborder sur une
@@ -197,6 +199,7 @@ static const void *volatile dbg_plan;
 static const unsigned char *volatile dbg_vao;
 static void flush(void);
 static void drain_all(void);
+static long submit_probe(void);       /* reste du 29/09 : sonde de SURF_CREATE */
 static void buf_raw_invalidate_all(void);
 
 /* ───────────────────── dispositions relevées (Tiger 10.4.6) ─────────────────────
@@ -550,6 +553,9 @@ typedef struct PProg {
                                            (VPN_*) ; 0 = pas encore relu */
     unsigned long  ugen;                /* v21 : gldModifyPipelineProgram(masque 2) vus —
                                            un glUniform touche l'étage GLSL */
+    int            orphan;              /* ctx détruit, poignée encore détenue par
+                                           GLEngine (groupe de partage) : seule la
+                                           traduction vers `apple` reste valide */
 } PProg;
 static PProg pprog[PPROG_MAX];
 
@@ -633,6 +639,9 @@ typedef struct PTex {                   /* texture du GLDriver suivie par le plu
     unsigned long  surf_gen;            /*   swap_gen de la source à la dernière copie */
     int            surf_copied;         /*   au moins un SURF_TEX émis depuis la création */
     int            dump_rb;             /* vidage autonome : image hôte à relire (TEX_READBACK) */
+    unsigned long  nomem_until;         /* reste du 29/09 : l'hôte a refusé sa mémoire
+                                           (QGPU_ST_NO_MEM) — rendue par Apple jusqu'à
+                                           cette image, puis nouvel essai */
 } PTex;
 
 typedef struct TexUnit {
@@ -657,6 +666,9 @@ typedef struct PCtx {
     unsigned long  sw, sh;              /* taille de la surface */
     int            color, depth;        /* fraîcheur */
     int            broken;              /* plus jamais d'accélération */
+    unsigned long  nomem_until;         /* reste du 29/09 : surface refusée par le
+                                           plafond mémoire de l'hôte — pas de nouvel
+                                           essai avant cette image */
     unsigned long  st[QGPU_SK_COUNT];   /* état envoyé au device */
     int            st_valid;
     /* lot 4 (26/09) : compute_state sauté quand aucun dispatch n'a porté, depuis
@@ -875,6 +887,13 @@ static struct {
     const char     *async_why;          /* pourquoi il ne l'est pas */
     unsigned long   errors;             /* QGPU_REG_ERRORS vu à la dernière soumission */
     int             err_valid;
+    /* Reste du 29/09 — PLAFOND DE MÉMOIRE HÔTE (QGPU_ST_NO_MEM, non fatal).
+       nomem_reg : dernier QGPU_REG_NOMEM lu ; nomem_until : pression mémoire,
+       aucun NOUVEL objet hôte (texture, tampon, surface) avant cette image. */
+    unsigned long   nomem_reg;
+    int             nomem_valid;
+    unsigned long   nomem_until;
+    unsigned long   n_nomem;
     unsigned long  *cmd;                /* = win */
     unsigned long   ncmd;
     unsigned long   vtx;                /* octets utilisés depuis VTX_OFF */
@@ -905,6 +924,12 @@ static struct {
        indices ni à l'arène : stream_ready() endort les écrivains. */
     int             halt;
     int             wait_miss;          /* F8 : dépassements de barrière CONSÉCUTIFS */
+    /* L1 (docs/architecture.md, M3) : l'hôte n'a pas atteint une barrière en
+       WAIT_GIVEUP délais consécutifs. La moitié en vol reste EN QUARANTAINE
+       (jamais réécrite : un job accepté peut encore lire BAR0), le flux est
+       détourné vers `dead_buf` et plus rien ne part vers l'hôte. */
+    int             dead;
+    unsigned char  *dead_buf;
     unsigned long   ctx_used, surf_used;
     unsigned long   tex_used[(QGPU_CLIENT_TEX_IDS + 31) / 32];
     /* Finding 10 (relecture du 29/09) : textures détruites quand aucun
@@ -1154,7 +1179,10 @@ enum {
     /* v16 : programme refusé par l'hôte ; programme de fragments hors bornes */
     NO_G_PROG_HOST, NO_G_PROG_UNITS,
     /* v20 : texture de surface dont la source n'est pas rendue par l'hôte */
-    NO_TEX_SURF, NO_COUNT
+    NO_TEX_SURF,
+    /* reste du 29/09 : plafond de mémoire de l'hôte (QGPU_ST_NO_MEM) */
+    NO_TEX_NOMEM,
+    NO_COUNT
 };
 static const char *const no_name[NO_COUNT] = {
     "buffer", "logicop/stipple/smooth", "fog", "polygonmode", "depth",
@@ -1168,6 +1196,7 @@ static const char *const no_name[NO_COUNT] = {
     "raw:null-array", "apple:nan-vertex", "raw:generic-attribs",
     "prog:host-refused", "prog:units",
     "surface-texture",
+    "host-memory",
 };
 static unsigned long no_count[NO_COUNT];
 static char no_detail[NO_COUNT][64];
@@ -1901,6 +1930,7 @@ void pomppc_backend_fini(void)
         pomppc_log("POMPPC: plugin déchargé, tranche %lu rendue\n", G.q.index);
     }
     G.state = -1;
+    crash_hook_remove();                /* reste du 29/09 : NSUnLinkModule suit */
     pthread_mutex_unlock(&G.mu);
 }
 
@@ -1912,7 +1942,9 @@ void pomppc_backend_fini(void)
  * sont pas sûrs après fork, et fermer le user client détruirait les objets du
  * PÈRE) : il OUBLIE. G.mu est relâché ici parce que le handler « prepare » l'a
  * pris dans le fil qui appelle fork(), et que c'est ce fil-là qui continue. */
-void pomppc_backend_forget(void)
+static pid_t owner_pid;                 /* processus qui a ouvert la tranche */
+
+static void backend_forget_locked(void)
 {
     G.state = -1;
     G.async = 0;
@@ -1935,6 +1967,11 @@ void pomppc_backend_forget(void)
     G.raw_ctx = 0;
     frame_file = NULL;                  /* le FILE* du père : ne pas s'en servir */
     qgpu_forget(&G.q);
+}
+
+void pomppc_backend_forget(void)
+{
+    backend_forget_locked();
     pthread_mutex_unlock(&G.mu);
 }
 
@@ -2017,6 +2054,7 @@ void pomppc_backend_init(void)
             why = "POMPPC_GL_DISABLE";
         } else if (qgpu_open(&G.q, &why) == 0) {
             G.state = 1;
+            owner_pid = getpid();       /* reste du 29/09 : fork avant atfork */
             crash_hook_install();       /* 24/09 : journal du plantage avant Quit() */
             /* Une seule moitié par défaut : le mode synchrone garde alors
                exactement la disposition et le comportement d'avant la v9. */
@@ -2366,17 +2404,40 @@ static void close_raw(void)
     G.raw_lots = 0;
 }
 
+/* L1 : abandonne les séries ouvertes sans rien écrire (hôte muet). */
+static void close_run_drop(void)
+{
+    G.run_ctx = 0;
+    G.run_count = 0;
+    G.raw_ctx = 0;
+    G.raw_count = 0;
+    G.raw_idx = 0;
+    G.raw_nidx = 0;
+    G.raw_lots = 0;
+}
+
 /* Réserve `words` mots de flux pour le contexte p (CTX_BIND inclus au besoin).
    La marge couvre ce que close_run et close_raw peuvent encore écrire, leurs
    CTX_BIND compris (4 mots : deux liaisons possibles). */
 static unsigned long *reserve(PCtx *p, unsigned long words)
 {
     unsigned long *c;
-    stream_ready();                     /* F9 : G.cmd/G.ncmd relus après */
-    close_run();
-    close_raw();
-    if (G.ncmd + words + 4 + QGPU_LEN_DRAW_N + QGPU_LEN_DRAW_RAW_BUF > CMD_WORDS)
+    /* ≥ 3 fils : même règle qu'arena_alloc — la place se constate verrou
+       tenu, sans attente en cours ; aucun relâchement entre elle et l'écriture.
+       Après stream_dead, G.cmd est le tampon privé : on y écrit dans le vide. */
+    for (;;) {
+        stream_ready();                 /* F9 : G.cmd/G.ncmd relus après */
+        close_run();
+        close_raw();
+        if (G.dead) {
+            if (G.ncmd + words + 4 > CMD_WORDS)
+                G.ncmd = 0;
+            break;
+        }
+        if (G.ncmd + words + 4 + QGPU_LEN_DRAW_N + QGPU_LEN_DRAW_RAW_BUF <= CMD_WORDS)
+            break;
         flush();
+    }
     if (G.bound != p) {
         c = G.cmd + G.ncmd;
         c[0] = QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX);
@@ -2409,13 +2470,23 @@ static int arena_fits(unsigned long n)
 
 static long arena_alloc(unsigned long n, unsigned long *off)
 {
-    stream_ready();                     /* F9 : G.arena/G.hb relus après */
     n = (n + 3) & ~3UL;
-    if (ARENA_OFF + G.arena + n > G.half || G.h[G.cur].npost >= MAX_POST ||
-        G.ncmd + ARENA_CMD_ROOM > CMD_WORDS) {
-        flush();
-        if (ARENA_OFF + n > G.half)
+    if (ARENA_OFF + n > G.half)
+        return 0;
+    /* ≥ 3 fils : on reteste APRÈS le vidage, flux à nous. flush() rend la
+       main avec G.halt nul (wait_half_ex n'admet qu'un attendant), mais
+       stream_ready() peut encore dormir et laisser d'autres fils remplir la
+       moitié : la place n'est acquise que si le test passe verrou tenu, sans
+       attente en cours — et alors le reserve() de l'appelant ne relâche plus
+       G.mu avant d'écrire sa commande. */
+    for (;;) {
+        stream_ready();                 /* F9 : G.arena/G.hb relus après */
+        if (G.dead)                     /* L1 : l'arène n'est plus à nous */
             return 0;
+        if (ARENA_OFF + G.arena + n <= G.half && G.h[G.cur].npost < MAX_POST &&
+            G.ncmd + ARENA_CMD_ROOM <= CMD_WORDS)
+            break;
+        flush();
     }
     /* ABSOLU dans la tranche : une copie différée peut survivre au changement
        de moitié, et se relit alors par G.q.win + off. */
@@ -2725,6 +2796,8 @@ static void run_posts(Half *h)
  * submit_cur sur QUEUE_FULL — la moitié courante y est en cours de
  * soumission, son flux ne doit ni grandir ni repartir dans une autre
  * soumission. Voir stream_ready(). */
+static void stream_dead(void);
+
 static void wait_half_ex(int i, int unlock)
 {
     Half *h = &G.h[i];
@@ -2733,6 +2806,21 @@ static void wait_half_ex(int i, int unlock)
     GuardPark gp;
 
     guards_park(&gp);                   /* finding 1 : G.mu peut être relâché ici */
+
+    /* ≥ 3 FILS (reste du 29/09) — UN SEUL ATTENDANT VERROU RELÂCHÉ À LA FOIS.
+       Les appelants directs (drain_all, wait_half(i) des relectures) n'ont
+       pas de stream_ready() en amont : ils pouvaient entrer PENDANT l'attente
+       de switch_half, lever G.halt à leur tour et y rester après elle. flush()
+       rendait alors la main avec G.halt > 0 ; le stream_ready() du reserve()
+       suivant relâchait G.mu, un troisième fil vidait le flux, et l'offset
+       d'arène (ou de sommets) déjà calculé par l'appelant désignait une
+       moitié soumise — M1. On attend donc ici, SANS lever G.halt (on n'a
+       encore rien désigné), qu'aucune autre attente ne soit en cours : au
+       retour de flush(), G.halt est nul et le flux est à nous jusqu'à ce que
+       NOUS relâchions le verrou. `unlock == 0` garde G.mu : invisible. */
+    if (unlock)
+        while (G.halt > 0)
+            pthread_cond_wait(&half_cv, &G.mu);
 
     /* INVARIANT F9 : dès l'entrée et jusqu'à la sortie, G.halt est levé. Toute
        sortie de G.mu depuis cette fonction — le pthread_cond_wait ci-dessous
@@ -2746,6 +2834,10 @@ static void wait_half_ex(int i, int unlock)
        plutôt que de repartir en croyant la moitié libre. */
     while (h->waiting)
         pthread_cond_wait(&half_cv, &G.mu);
+    if (G.dead) {
+        h->npost = 0;                   /* L1 : quarantaine, plus rien n'arrive */
+        goto done;
+    }
     if (!h->busy) {
         run_posts(h);                   /* mode synchrone : rien à attendre */
         goto done;
@@ -2753,32 +2845,28 @@ static void wait_half_ex(int i, int unlock)
     {
         double t = now_s();
         fence = h->fence;
-        if (unlock) {
-            h->waiting = 1;
-            pthread_mutex_unlock(&G.mu);
-            ok = qgpu_wait(&G.q, fence, WAIT_MS) == 0;
-            pthread_mutex_lock(&G.mu);
-            h->waiting = 0;
-            pthread_cond_broadcast(&half_cv);
-        } else {
-            /* submit_cur sur QUEUE_FULL : la moitié COURANTE est en cours de
-               soumission. On garde G.mu, sinon un autre fil pourrait allonger
-               son flux — ou le soumettre une seconde fois. */
-            ok = qgpu_wait(&G.q, fence, WAIT_MS) == 0;
-        }
-        /* Rien de ce qu'on avait lu n'a pu bouger : G.halt interdisait d'écrire
-           dans cette moitié, de la désigner courante et d'y ajouter une
-           relecture ; `waiting` interdisait de l'attendre en double. h->busy et
-           h->post sont donc encore ceux de NOTRE soumission. */
-        G.t_wait += now_s() - t;
-        G.n_waits++;
-        if (!ok) {
-            /* On ne peut pas réécrire une moitié encore en vol sans risquer une
-               image fausse. Mais couper DÉFINITIVEMENT toute l'accélération du
-               processus au premier dépassement était pire : on coupe d'abord
-               l'asynchrone (le synchrone, lui, attend sa place sans jamais
-               dépasser), et il faut WAIT_GIVEUP dépassements consécutifs pour
-               déclarer l'hôte mort. */
+        for (;;) {
+            if (unlock) {
+                h->waiting = 1;
+                pthread_mutex_unlock(&G.mu);
+                ok = qgpu_wait(&G.q, fence, WAIT_MS) == 0;
+                pthread_mutex_lock(&G.mu);
+                h->waiting = 0;
+                pthread_cond_broadcast(&half_cv);
+            } else {
+                /* submit_cur sur QUEUE_FULL : la moitié COURANTE est en cours
+                   de soumission. On garde G.mu, sinon un autre fil pourrait
+                   allonger son flux — ou le soumettre une seconde fois. */
+                ok = qgpu_wait(&G.q, fence, WAIT_MS) == 0;
+            }
+            if (ok)
+                break;
+            /* L1 — DÉLAI N'EST PAS ANNULATION (M3). On effaçait h->busy et
+               les relectures : la moitié repartait à l'écriture alors que le
+               job accepté pouvait encore la lire. Elle reste désormais en
+               quarantaine : on RÉATTEND. On coupe l'asynchrone au premier
+               dépassement (F8), et au bout de WAIT_GIVEUP on déclare l'hôte
+               mort — la moitié n'est alors JAMAIS rendue (stream_dead). */
             pomppc_log("POMPPC: barrière %lu jamais atteinte (%d ms), "
                        "dépassement %d/%d\n", fence, WAIT_MS,
                        G.wait_miss + 1, WAIT_GIVEUP);
@@ -2786,20 +2874,24 @@ static void wait_half_ex(int i, int unlock)
             G.async_avail = 0;
             G.async_why = "barrière dépassée";
             if (++G.wait_miss >= WAIT_GIVEUP) {
-                PCtx *p;
                 fprintf(stderr, "POMPPC GL: host did not finish a submit "
                         "in %d ms (%d times), falling back to software\n",
                         WAIT_MS, G.wait_miss);
-                for (p = G.list; p; p = p->next)
-                    p->broken = 1;
-            } else {
-                fprintf(stderr, "POMPPC GL: host submit took more than %d ms, "
-                        "asynchronous doorbell disabled\n", WAIT_MS);
+                G.t_wait += now_s() - t;
+                G.n_waits++;
+                h->npost = 0;
+                stream_dead();
+                goto done;
             }
-            h->npost = 0;
-            h->busy = 0;
-            goto done;
+            fprintf(stderr, "POMPPC GL: host submit took more than %d ms, "
+                    "asynchronous doorbell disabled\n", WAIT_MS);
         }
+        /* Rien de ce qu'on avait lu n'a pu bouger : G.halt interdisait d'écrire
+           dans cette moitié, de la désigner courante et d'y ajouter une
+           relecture ; `waiting` interdisait de l'attendre en double. h->busy et
+           h->post sont donc encore ceux de NOTRE soumission. */
+        G.t_wait += now_s() - t;
+        G.n_waits++;
         G.wait_miss = 0;
     }
     h->busy = 0;
@@ -2841,6 +2933,90 @@ static void wait_half(int i)
  */
 #define ASYNC_RETRY   120               /* images de synchrone avant de réessayer */
 
+/* Reste du 29/09 — QGPU_ST_NO_MEM. Relit QGPU_REG_NOMEM (commandes refusées
+   par le plafond de mémoire de l'hôte, tous clients) ; rend le nombre de
+   refus nouveaux depuis la dernière lecture et, s'il y en a, ouvre une
+   fenêtre de pression mémoire : aucun NOUVEL objet hôte pendant
+   NOMEM_BACKOFF images (repli local : Apple pour les textures et surfaces,
+   empaquetage pour les tampons). */
+#define NOMEM_BACKOFF 120
+static unsigned long nomem_poll(void)
+{
+    unsigned long v = 0, d;
+    if (qgpu_read_reg(&G.q, QGPU_REG_NOMEM, &v) != 0 || v == 0xFFFFFFFFUL)
+        return 0;                       /* device plus ancien : pas de registre */
+    if (!G.nomem_valid) {
+        G.nomem_valid = 1;
+        G.nomem_reg = v;
+        return 0;
+    }
+    d = v - G.nomem_reg;
+    G.nomem_reg = v;
+    if (d) {
+        G.nomem_until = G.n_frames + NOMEM_BACKOFF;
+        gl_note("NOMEM : %lu refus du plafond mémoire hôte, image %lu\n", d, G.n_frames);
+    }
+    return d;
+}
+
+static void buf_nomem(long id, unsigned long until);
+
+/* Soumission SYNCHRONE rendue QGPU_ST_NO_MEM : le cœur l'a exécutée EN ENTIER
+   (un arrêt ultérieur se serait dit lui-même) et `pc` désigne la PREMIÈRE
+   commande refusée. L'objet qu'elle vise cesse d'être résident ; s'il y a eu
+   d'autres refus dans le lot (QGPU_REG_NOMEM), on ne sait pas lesquels :
+   tous les miroirs repartent, le mode synchrone les nommera un par un. */
+static void nomem_seen(unsigned long pc)
+{
+    unsigned long op = pc < CMD_WORDS ? QGPU_CMD_OP(G.cmd[pc]) : 0;
+    long id = pc + 1 < CMD_WORDS ? (long)G.cmd[pc + 1] : -1;
+    unsigned long until = G.n_frames + NOMEM_BACKOFF;
+    PTex *t;
+    PCtx *p;
+
+    G.n_nomem++;
+    G.nomem_until = until;
+    switch (op) {
+    case QGPU_OP_TEX_IMAGE3:
+    case QGPU_OP_TEX_SUBIMAGE:
+    case QGPU_OP_COPY_TEX:
+    case QGPU_OP_SURF_TEX:
+        for (t = G.textures; t; t = t->next)
+            if (t->qtex == id) {
+                t->nomem_until = until;
+                t->dirty = 1;           /* niveau absent ou à l'ancienne taille */
+                t->host_only = 0;
+                t->cp_frame = 0;
+                t->hook_gen++;
+                VD_BUMP();
+                break;
+            }
+        break;
+    case QGPU_OP_BUF_CREATE:
+    case QGPU_OP_BUF_SUBDATA:
+        /* Le tampon n'existe pas sur l'hôte : son identifiant est libre (le
+           cœur accepte un BUF_CREATE neuf dessus). */
+        buf_nomem(id, until);
+        break;
+    case QGPU_OP_SURF_CREATE:           /* sondé par ensure_surface ; filet */
+        for (p = G.list; p; p = p->next)
+            if (p->surf == id) {
+                G.surf_used &= ~(1UL << (p->surf - G.q.surf_base));
+                p->surf = -1;
+                p->color = p->depth = SW_NEWER;
+                p->nomem_until = until;
+                break;
+            }
+        break;
+    default:
+        break;
+    }
+    gl_note("NOMEM op %lx id %ld (pc %lu), image %lu : objet rendu localement "
+            "pendant %d images\n", op, id, pc, G.n_frames, NOMEM_BACKOFF);
+    if (nomem_poll() > 1)
+        invalidate_mirrors();
+}
+
 static void check_errors(unsigned long errors)
 {
     unsigned long e2 = 0, status = 0, pc = 0;
@@ -2854,6 +3030,7 @@ static void check_errors(unsigned long errors)
         return;
     pomppc_log("POMPPC: QGPU_REG_ERRORS %lu → %lu", G.errors, errors);
     qgpu_peek(&G.q, &e2, &status, &pc);
+    nomem_poll();                       /* reste du 29/09 : pression mémoire ? */
     /* Note (POMPPC_GL_NOTE) : une soumission asynchrone terminée en erreur
        est une série de dessins PERDUE (mur qui disparaît une image) — 22/09. */
     gl_note("ERRORS %lu -> %lu : statut %lu commande %lu, image %lu\n",
@@ -3092,6 +3269,8 @@ static void submit_cur(void)
                le soumettre une seconde fois. */
             G.n_qfull++;
             wait_half_ex(G.cur ^ 1, 0);
+            if (G.dead)                 /* L1 : hôte muet, rien ne part */
+                return;
             st = qgpu_submit_async(&G.q, G.hb, G.ncmd * 4, &fence, &errors);
         }
         if (st == QGPU_ST_QUEUE_FULL) {
@@ -3154,6 +3333,13 @@ static void submit_cur(void)
     G.t_submit += now_s() - t;
     G.n_submits++;
     h->busy = 0;
+    if (st == QGPU_ST_NO_MEM) {
+        /* reste du 29/09 : non fatal, et le lot est allé AU BOUT (le cœur
+           dit un arrêt ultérieur à la place) — ses relectures sont bonnes */
+        nomem_seen(pc);
+        run_posts(h);
+        return;
+    }
     if (st != QGPU_ST_OK) {
         broken_all("flush", st, pc);
         h->npost = 0;
@@ -3162,10 +3348,36 @@ static void submit_cur(void)
     run_posts(h);
 }
 
+/* L1 — l'hôte ne rend plus ses barrières : on ne sait pas quand il cessera
+   de lire la tranche. Aucune moitié n'est plus jamais rendue à l'écriture ;
+   G.win/G.cmd pointent sur un tampon privé pour que l'appelant en cours (qui
+   a peut-être déjà un pointeur de flux) écrive dans le vide, et G.state = -1
+   retire tous les points d'entrée, comme au déchargement. Verrou tenu. */
+static void stream_dead(void)
+{
+    PCtx *p;
+    if (G.dead)
+        return;
+    G.dead = 1;
+    for (p = G.list; p; p = p->next)
+        p->broken = 1;
+    static unsigned long dead_cmd[CMD_WORDS];
+    G.cmd = dead_cmd;                   /* toujours : le flux ne touche plus BAR0 */
+    G.dead_buf = (unsigned char *)calloc(1, G.half);
+    if (G.dead_buf)
+        G.win = G.dead_buf;             /* sommets et indices écrits par G.win */
+    G.ncmd = 0;
+    G.arena = 0;
+    G.bound = 0;
+    close_run_drop();
+    G.state = -1;
+    pomppc_log("POMPPC: hôte muet, tranche en quarantaine, accélération retirée\n");
+}
+
 /* Passe à l'autre moitié, en attendant qu'elle soit libre. */
 static void switch_half(void)
 {
-    if (G.nhalf < 2)
+    if (G.nhalf < 2 || G.dead)
         return;
     G.cur ^= 1;
     G.hb   = (unsigned long)G.cur * G.half;
@@ -3180,10 +3392,27 @@ static void switch_half(void)
 static void flush(void)
 {
     stream_ready();                     /* F9 : tout est relu après */
+    if (G.dead) {                       /* L1 : rien ne part plus, rien ne bouge */
+        close_run_drop();
+        G.ncmd = 0;
+        G.arena = 0;
+        G.bound = 0;
+        if (!G.npend) {
+            G.vtx = 0;
+            G.idx = 0;
+        }
+        return;
+    }
     close_run();
     close_raw();
     if (G.ncmd)
         submit_cur();
+    if (G.dead) {                       /* l'attente de submit_cur a tout arrêté */
+        G.ncmd = 0;
+        G.arena = 0;
+        G.bound = 0;
+        return;
+    }
     G.ncmd = 0;
     G.arena = 0;
     G.bound = 0;
@@ -4126,6 +4355,11 @@ static int texture_uploadable_full(PTex *t)
             return no(NO_TEX_SURF, sid, src ? 1 : 0);
         return 1;
     }
+    /* Reste du 29/09 : l'hôte a refusé sa mémoire (ou toute allocation
+       nouvelle en période de pression) — rendue par Apple, nouvel essai à
+       l'échéance. */
+    if (t->nomem_until > G.n_frames || (t->qtex < 0 && G.nomem_until > G.n_frames))
+        return no(NO_TEX_NOMEM, (unsigned long)t->qtex, t->nomem_until);
     if (!GLD_U32(dt, DT_PARAMS) || !base_format_ok(base))
         return no(NO_TEX_BASE, base, 0);
     if (!tex_params_ok((const unsigned char *)GLD_U32(dt, DT_PARAMS)))
@@ -4951,19 +5185,51 @@ static int ensure_surface(PCtx *p)
                    GLD_U32(p->ctx, CTX_DEPTH_BITS) == 32;
     if (p->surf >= 0 && p->sw == w && p->sh == h && p->stencil == want_stencil)
         return 1;
+    /* reste du 29/09 : plafond mémoire hôte — pas de nouvelle surface avant
+       l'échéance ; le contexte est rendu par Apple en attendant. */
+    if (p->nomem_until > G.n_frames || G.nomem_until > G.n_frames)
+        return 0;
     destroy_surface(p);
     p->surf = alloc_id(&G.surf_used, G.q.surf_base, QGPU_CLIENT_SURF_IDS);
     if (p->surf < 0)
         return 0;
-    c = reserve(p, QGPU_LEN_SURF_CREATE + QGPU_LEN_SURF);
-    c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE);
-    c[1] = p->surf;
-    c[2] = w;
-    c[3] = h;
-    c[4] = QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH | (want_stencil ? QGPU_FMT_FLAG_STENCIL : 0);
+    /* SONDE (reste du 29/09) : un SURF_CREATE refusé par le plafond (NO_MEM,
+       non fatal) laisserait le SURF_BIND et les dessins qui suivent sans
+       surface — NO_SURF, fatal. On le soumet seul, synchrone, et on ne lie
+       que si l'hôte l'a créée. Rare : à la création et au redimensionnement. */
+    {
+        long st;
+        flush();
+        if (G.dead || p->broken || p->qctx < 0) {
+            G.surf_used &= ~(1UL << (p->surf - G.q.surf_base));
+            p->surf = -1;
+            return 0;
+        }
+        c = reserve(p, QGPU_LEN_SURF_CREATE);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE);
+        c[1] = p->surf;
+        c[2] = w;
+        c[3] = h;
+        c[4] = QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH |
+               (want_stencil ? QGPU_FMT_FLAG_STENCIL : 0);
+        st = submit_probe();
+        if (st != QGPU_ST_OK) {
+            G.surf_used &= ~(1UL << (p->surf - G.q.surf_base));
+            gl_note("SURF_CREATE %ld (%lux%lu) refusé : statut %ld\n", p->surf, w, h, st);
+            p->surf = -1;
+            if (st == QGPU_ST_NO_MEM) {
+                p->nomem_until = G.n_frames + NOMEM_BACKOFF;
+                G.nomem_until = p->nomem_until;
+            } else {
+                p->broken = 1;          /* comme broken_all l'aurait fait */
+            }
+            return 0;
+        }
+        c = reserve(p, QGPU_LEN_SURF);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF);
+        c[1] = p->surf;
+    }
     p->stencil = want_stencil;
-    c[5] = QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF);
-    c[6] = p->surf;
     p->sw = w;
     p->sh = h;
     p->color = SW_NEWER;
@@ -6133,6 +6399,8 @@ struct PBuf {
     int             rp_failed;          /* plus de place : ne réessayer qu'après */
     unsigned long   rp_fail_gen;        /*   une libération (G.rp_gen) */
     unsigned long   raw_base;           /* vbo+0x30 au dernier ajustement */
+    unsigned long   nomem_until;        /* reste du 29/09 : BUF_CREATE refusé (plafond
+                                           hôte) — empaquetage jusqu'à cette image */
     int             rd_n;               /* plages SALES, triées, disjointes, */
     unsigned long   rd_lo[RD_MAX], rd_hi[RD_MAX];   /* non contiguës ; hi borné
                                            à la taille logique à l'usage */
@@ -6484,6 +6752,28 @@ static void buf_free_id(long id)
     G.buf_used[i / 32] &= ~(1UL << (i % 32));
 }
 
+/* Reste du 29/09 (nomem_seen) : le tampon hôte `id` n'existe pas — BUF_CREATE
+   refusé par le plafond. Son identifiant est libre (le cœur accepte un
+   BUF_CREATE neuf dessus) ; le VBO repasse par l'empaquetage jusqu'à `until`. */
+static void buf_nomem(long id, unsigned long until)
+{
+    PBuf *b;
+    if (id < 0)
+        return;
+    for (b = G.bufs; b; b = b->next)
+        if (b->qid == id) {
+            buf_free_id(b->qid);
+            b->qid = -1;
+            b->qsize = 0;
+            b->pack_fmt = 0;
+            b->pack_gs = 0;
+            b->pack_nverts = 0;
+            b->pack_key = 0;
+            b->nomem_until = until;
+            return;
+        }
+}
+
 static void buf_host_destroy(PCtx *p, PBuf *b)
 {
     unsigned long *c;
@@ -6515,6 +6805,9 @@ static int buf_host_ensure(PCtx *p, PBuf *b, unsigned long bytes)
         return 0;
     if (b->qid >= 0 && b->qsize >= bytes)
         return 1;
+    /* reste du 29/09 : plafond mémoire hôte — empaquetage en attendant */
+    if (b->nomem_until > G.n_frames || G.nomem_until > G.n_frames)
+        return 0;
     buf_host_destroy(p, b);
     id = buf_alloc_id();
     if (id < 0)
@@ -6699,7 +6992,12 @@ typedef long (*pp_info_fn)(void *, unsigned long, unsigned long, void *);
 static PProg *pprog_of(unsigned long h)
 {
     unsigned long i = h - PPROG_HANDLE - 1;
-    return ((h & 0xfff00000UL) == PPROG_HANDLE && i < PPROG_MAX && pprog[i].ctx)
+    /* Une entrée ORPHELINE traduit encore sa poignée : GLEngine peut appeler
+       Modify/GetInfo/Destroy sur un programme partagé après la destruction du
+       contexte qui l'a créé. Sans elle, PPROG_HANDLE+i partait tel quel au
+       pilote d'Apple — ou désignait un programme recréé dans la même case. */
+    return ((h & 0xfff00000UL) == PPROG_HANDLE && i < PPROG_MAX &&
+            (pprog[i].ctx || pprog[i].orphan))
            ? &pprog[i] : 0;
 }
 
@@ -6749,7 +7047,7 @@ static long pp_create(void *ctx, unsigned long *handle, void *desc)
     if (r != 0)
         return r;
     pthread_mutex_lock(&G.mu);
-    for (i = 0; i < PPROG_MAX && pprog[i].ctx; i++)
+    for (i = 0; i < PPROG_MAX && (pprog[i].ctx || pprog[i].orphan); i++)
         ;
     if (i < PPROG_MAX) {
         memset(&pprog[i], 0, sizeof(pprog[i]));
@@ -6794,7 +7092,8 @@ static long pp_destroy(void *ctx, unsigned long handle)
     r = pprog_of(handle);
     if (r) {
         handle = r->apple;
-        pprog_release(r);
+        if (!r->orphan)                 /* orphelin : plus rien côté hôte */
+            pprog_release(r);
         memset(r, 0, sizeof(*r));
     }
     pthread_mutex_unlock(&G.mu);
@@ -7805,18 +8104,50 @@ static int glsl_state(PCtx *p, unsigned char *gc)
 /* Définit le programme sur l'hôte (textes, attributs, uniforms, liaison),
    dans une soumission sonde : le verdict de l'hôte est connu tout de suite.
    1 = accepté. */
-/* Finding 7 : même règle que glsl_name_ok du cœur (hors « gl_ », déjà
-   écarté par l'appelant) — identificateur GLSL, lettres, chiffres, '_'. */
+/* Finding 7 : mêmes règles que le cœur. Sans QGPU_CAP_GLSL_PATHS :
+   glsl_name_ok, identificateur seul. Avec : glsl_uniform_name_ok, nom
+   composé du linker GL 2.0 (« s.m », « l[2].pos ») — identifiant
+   ( '.' identifiant | '[' n ']' )*, n décimal sans zéro de tête, 5 chiffres
+   au plus, aucun segment en « gl_ ». */
+static int glsl_is_id0(char ch)
+{
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_';
+}
 static int glsl_ident_ok(const char *s)
 {
     const char *q;
-    if (!s[0] || (s[0] >= '0' && s[0] <= '9'))
+    if (!glsl_is_id0(s[0]))
         return 0;
     for (q = s; *q; q++)
-        if (!((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') ||
-              (*q >= '0' && *q <= '9') || *q == '_'))
+        if (!(glsl_is_id0(*q) || (*q >= '0' && *q <= '9')))
             return 0;
     return 1;
+}
+static int glsl_path_ok(const char *s)
+{
+    const char *q = s;
+    for (;;) {
+        const char *b = q, *d;
+        if (!glsl_is_id0(*q))
+            return 0;
+        while (glsl_is_id0(*q) || (*q >= '0' && *q <= '9'))
+            q++;
+        if (q - b >= 3 && b[0] == 'g' && b[1] == 'l' && b[2] == '_')
+            return 0;
+        while (*q == '[') {
+            d = ++q;
+            while (*q >= '0' && *q <= '9')
+                q++;
+            if (q == d || q - d > 5 || (*d == '0' && q - d > 1) || *q != ']')
+                return 0;
+            q++;
+        }
+        if (!*q)
+            return 1;
+        if (*q != '.')
+            return 0;
+        q++;
+    }
 }
 
 static int glsl_define(PCtx *p, GProg *g, unsigned long sig)
@@ -7915,13 +8246,18 @@ static int glsl_define(PCtx *p, GProg *g, unsigned long sig)
         if (!SH.active_unif(linker, (int)i, QGPU_MAX_GLSL_NAME, &len, &size, &type, name) ||
             len <= 0 || !strncmp(name, "gl_", 3) || size <= 0)
             continue;
-        br = strchr(name, '[');         /* « nom[0] » → « nom » */
-        if (br)
-            *br = 0;
+        /* « nom[0] » → « nom » : seul le [0] FINAL d'un tableau. Un [i]
+           intérieur (« l[1].pos », tableau de struct) fait partie du nom —
+           le couper à la première '[' donnait « l », qui passait pour un
+           identifiant et désignait le mauvais uniform. */
+        br = name + strlen(name);
+        if (br - name > 3 && !strcmp(br - 3, "[0]"))
+            br[-3] = 0;
         /* Finding 7 (relecture du 29/09) : un membre de struct (« s.m », règle
-           GL 2.0 du linker 3Dlabs) n'est pas un identifiant ; glsl_name_ok du
-           cœur le refuse (BAD_ARG). On ne l'émet pas — voir nbad plus bas. */
-        if (!glsl_ident_ok(name)) {
+           GL 2.0 du linker 3Dlabs) n'est pas un identifiant. Le cœur ne le
+           sait nommer qu'avec QGPU_CAP_GLSL_PATHS ; sans lui, on ne l'émet
+           pas — voir nbad plus bas. */
+        if (!((G.q.caps & QGPU_CAP_GLSL_PATHS) ? glsl_path_ok(name) : glsl_ident_ok(name))) {
             nbad++;
             continue;
         }
@@ -7948,8 +8284,8 @@ static int glsl_define(PCtx *p, GProg *g, unsigned long sig)
         nunif++;
     }
     if (nbad) {
-        /* Finding 7 : le protocole ne sait pas nommer ces uniforms (v21 :
-           identifiant seul). Lier quand même donnerait un programme dont ils
+        /* Finding 7 : le device ne sait pas nommer ces uniforms (sans
+           QGPU_CAP_GLSL_PATHS : identifiant seul ; avec : nom hors grammaire). Lier quand même donnerait un programme dont ils
            restent à 0 sur l'hôte — image fausse sans le dire. Refusé ICI,
            sans GLSL_LINK : le programme reste au rendu d'Apple, et aucune
            commande refusée ne part vers l'hôte. */
@@ -13432,6 +13768,8 @@ static void crash_hook_install(void)
             break;
         }
     }
+    if (crash_retired)
+        return;
     crash_path[0] = 0;
     if (path && strlen(path) < sizeof(crash_path) - 8) {
         strcpy(crash_path, path);
@@ -13451,10 +13789,41 @@ static void crash_hook_install(void)
    (Quit → double faute → rapport CrashReporter). Relu à chaque image : si un
    autre gestionnaire est en place, il devient le « précédent » et le nôtre
    revient devant. Deux appels système par image, négligeable. */
+/* Reste du 29/09 — DÉCHARGEMENT. gldTerminateLibrary précède NSUnLinkModule :
+   crash_handler vit dans NOTRE image, qui va être démappée. Laissé en place,
+   la faute suivante du processus (même sans rapport avec OpenGL) sauterait
+   dans une page absente — double faute, mort sans rapport. On remet donc le
+   gestionnaire précédent là où le nôtre est encore devant ; si quelqu'un
+   s'est posé devant nous depuis, on ne touche à rien (le démonter casserait
+   sa chaîne), et crash_retired interdit tout réarmement ultérieur. */
+static void crash_hook_remove(void)
+{
+    struct sigaction cur;
+    int k;
+    if (crash_retired)
+        return;
+    crash_retired = 1;
+    for (k = 0; k < 2; k++) {
+        int sig = k == 0 ? SIGBUS : SIGSEGV;
+        if (sigaction(sig, 0, &cur) == 0 && cur.sa_sigaction == crash_handler)
+            sigaction(sig, &crash_prev[k], 0);
+    }
+}
+
+/* Filet si le module est démonté sans gldTerminateLibrary (terminaisons de
+   module appelées par dyld au NSUnLinkModule, ou à la sortie). Idempotent. */
+static void pomppc_accel_unload(void) __attribute__((destructor));
+static void pomppc_accel_unload(void)
+{
+    crash_hook_remove();
+}
+
 static void crash_hook_check(void)
 {
     struct sigaction cur, sa;
     int k;
+    if (crash_retired)
+        return;
     for (k = 0; k < 2; k++) {
         int sig = k == 0 ? SIGBUS : SIGSEGV;
         if (sigaction(sig, 0, &cur) != 0 || cur.sa_sigaction == crash_handler)
@@ -13937,7 +14306,7 @@ static void capture_presented(void)
     done = 1;
     wait_half_ex(0, 0);
     wait_half_ex(1, 0);
-    if (G.wait_miss) return;
+    if (G.wait_miss || G.dead) return;
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     snprintf(resume, sizeof(resume), "%s.resume", path);
     snprintf(expired, sizeof(expired), "%s.expired", path);
@@ -15273,6 +15642,13 @@ void pomppc_context_created(void *ctx)
     p->color = p->depth = SW_NEWER;
     p->lazy_ret = 4;                    /* ce que rend le gldInitDispatch d'Apple */
     pthread_mutex_lock(&G.mu);
+    /* Reste du 29/09 — P8 AVANT le premier contexte : pthread_atfork n'est
+       posé qu'au premier contexte (pomppc_gld.c), la tranche est pourtant
+       ouverte dès gldInitializeLibrary. Un enfant de fork() sans exec
+       arrivant ici hérite de la tranche MAPPÉE du père : il oublie tout,
+       comme le ferait le rappel enfant. */
+    if (G.state > 0 && owner_pid && getpid() != owner_pid)
+        backend_forget_locked();
     if (G.state > 0) {
         p->qctx = alloc_id(&G.ctx_used, G.q.ctx_base, QGPU_CLIENT_CTX_IDS);
         if (p->qctx >= 0) {
@@ -15342,12 +15718,20 @@ void pomppc_context_destroyed(void *ctx)
         if (p->cfg)
             GLD_U32(p->cfg, 0x11c) = 0;     /* le descripteur meurt avec le contexte */
         /* v16 : les programmes de ce contexte meurent avec lui côté hôte
-           (CTX_DESTROY) ; nos entrées ne doivent plus le désigner. */
+           (CTX_DESTROY) ; nos entrées ne doivent plus le désigner. Mais la
+           POIGNÉE peut survivre dans un groupe de partage : l'entrée devient
+           orpheline (ctx = 0, invisible de tous les parcours) et garde la
+           poignée d'Apple jusqu'au gldDestroyPipelineProgram. */
         {
             int k;
             for (k = 0; k < PPROG_MAX; k++)
-                if (pprog[k].ctx == ctx)
+                if (pprog[k].ctx == ctx) {
+                    unsigned long apple = pprog[k].apple;
                     memset(&pprog[k], 0, sizeof(pprog[k]));
+                    pprog[k].apple  = apple;
+                    pprog[k].orphan = 1;
+                    pprog[k].id     = -1;
+                }
             for (k = 0; k < GPROG_MAX; k++)     /* v21 */
                 if (gprog[k].ctx == ctx) {
                     free(gprog[k].mirror);
