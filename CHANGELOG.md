@@ -9,6 +9,55 @@ et dans `docs/`.
 
 ## Non publié
 
+- **A4 — déplacer le travail vers l'hôte, trois volets, plus l'attente de l'invité**
+  (30/09, branche `a4-integration` ; plugin `20260930-a4` ; QEMU d'essai `~/src/qemu-a4`).
+  Tout est **éteint par défaut** en attendant l'A/B de la VM quotidienne. Capacités ajoutées
+  sans changer `QGPU_PROTO_VERSION` (22) ni l'ABI du kext ; le plugin garde les anciennes voies
+  sans elles et marche donc sur le QEMU de référence. `tests/run-all.sh` : 181 OK, 0 échec.
+  Profil de départ de toute la matrice : `bench/a4/depart/LISEZMOI.md` ; outils
+  `tools/re/sampleplug.py` (plusieurs relevés) et `tools/re/dumpstat.py` (octets par image).
+  - **État** (`docs/protocole-v23-etat.md`) : `QGPU_OP_STATE_BLOCK` (0x0080),
+    `QGPU_CAP_STATE_BLOCK` (0x8000). L'invité recopie 104 mots de l'état brut de GLEngine et
+    le cœur en tire les clés `QGPU_SK_*` (hors unités et programmes), ne posant que celles qui
+    changent ; reprise des clés d'unités dont le verdict n'a pas bougé.
+    `POMPPC_GL_STATEBLK=1` (`QGPU_STATE_BLOCK=0` retire la capacité). 0 écart sur 13,9 M blocs
+    contrôlés, 42 scènes `gltest` identiques. A/B entrelacé (hôte au repos) : DOOM 3 fenêtre
+    60,7 → 59,3 ms/image (6 paires, toutes négatives), UT2004 25,7 → 25,1, Nexuiz GLSL dans le
+    bruit ; DOOM 3 : `compute_state` 2,2 → 0,2 %, `send_state` 3,8 → 2,1 % du fil principal.
+    Matrice allumée 14/16, images justes ; DOOM 3 plein écran mort au chargement 3 fois dans une
+    même session de la VM (**dont une fois option éteinte**), puis 10 parties sur 10 sans
+    incident : cause inconnue.
+  - **Géométrie** (`docs/protocole-v23-geometrie.md`) : `QGPU_OP_DRAW_RAW_SANE` (0x0090, tri
+    des sommets fous par l'hôte) et descripteurs `DRAW_NATIVE` dans BAR0 (`QGPU_BUF_SHMEM`,
+    « premier » = base des indices), `QGPU_CAP_GEOM_HOST` (0x20000). `POMPPC_GL_RAWSANE=1` :
+    `raw_scan_nan` retiré (8-13 % du fil principal de Nexuiz ARB, 4,8 % de Warcraft III) ;
+    `POMPPC_GL_NATSHM=1` : tableaux clients envoyés aux octets de l'application (Colin McRae :
+    empaqueteur 12,3 → 2,1 %). 400 lots tirés identiques à l'octet, rejeu de 357 images
+    identique, `gltest` identique dans 4 modes, matrice juste en VM de contrôle. Rien pour
+    DOOM 3/Prey/UT2004 (`DRAW_NATIVE` déjà) ; tampons hôte pour tableaux clients statiques
+    classés (vérifier coûte autant que recopier). Coût : l'attente de l'hôte de Nexuiz ARB
+    passe de 2,7 à 4,8 %.
+  - **Textures** (`docs/protocole-v23-textures.md`) : **mesuré, rien à construire**. En régime
+    0 octet de texels recopié par l'invité (14 cellules sur 16 ; 0,9 Kio dans Marble Blast),
+    chargements ≤ 0,3 % ; un DMA après l'appel GL violerait la durée de vie des octets. G7 sans
+    objet (aucun niveau sali en régime). Compteur `present_ns` du cœur, `tools/re/a4tex.py`.
+  - **Attente de l'invité sur l'hôte** (`docs/backend-gl-attente.md`) : seul Nexuiz dépasse
+    2 % (GLSL 2,5 ms/image, 6,2 % ; ARB 3,6, 3,3 %), à cause de ses requêtes d'occlusion ;
+    Colin McRae 0,12 ms/image (le « 10 % » annoncé mesurait un menu). G9 (poser l'état : 15-21 %
+    du temps hôte, ≤ 1,25 % d'attente) et G8 (présentation hors du chemin d'attente) classés.
+    Construits, éteints : `QGPU_GL_FLUSH=1` (glFlush en fin de soumission, après la barrière),
+    `QGPU_PRESENT_SKIP=N` (épreuve G8) et, côté plugin, `POMPPC_GL_QFLUSH=1` (soumission
+    anticipée au premier `QUERY_BEGIN`) : comptes d'occlusion exacts, images justes, attente de
+    Nexuiz GLSL 2,5 → ~2,0 ms/image avec le flush (~1 %, VM chargée ; le modèle promettait 2,3 ms).
+    Rejeu : `QGPU_REPLAY_OPTIME/REPEAT/GAP_US/SPLITQ` ; `tools/re/attente.py`.
+  - **Outils** : kits `tools/matrice/ab-geometrie.sh` et `ab-attente.sh` (`g8`, `flush`,
+    `matrice`, `qflush`, `matriceq`) ; `matab.sh` transmet les `POMPPC_GL_*` au jeu ;
+    `matrice.py` accepte `MATRICE_BIN` (le binaire de rejeu `bench/matrice/bin` était écrasé par
+    chaque worktree qui lançait la matrice).
+  - Pièges relevés : une VM arrêtée depuis l'invité laisse `frontend/build/pomppc` vivant
+    (40-60 % d'un cœur, GPU) et double les ms/image ; recopier en place un binaire signé le fait
+    tuer (`Killed: 9`), passer par une nouvelle inode.
+
 - **Plugin : `glUniform` neutre pour le verdict ; doorbells synchrones mesurés** (plugin
   `20260930-wlunif`). Nexuiz GLSL : le bit `+0x0c 0x04000000` (tout `glUniform*`,
   `_updateShaderState`) ne fait plus recalculer le verdict ni `compute_state`

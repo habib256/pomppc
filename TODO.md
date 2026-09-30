@@ -1,6 +1,6 @@
 # TODO — priorités de POMPPC
 
-État au 29/09/2026. Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
+État au 30/09/2026. Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
 sur le GPU de l'hôte, avec une matrice de jeux verte comme preuve.
 
 **Orientation choisie le 29/09 : une VM qui ne plante plus.** Le code a été relu
@@ -182,12 +182,41 @@ Ordre : planchers recalés, puis TCG (cache de sauts, verrou `mtmsr`/`rfi`), pui
   GLSL 0,05, UT2004 2 au chargement) ; BeginPrimitiveBuffer, file pleine, asynchrone coupé :
   0 dans les 13 cellules de la matrice. Très loin du seuil S-M6 (2 ms/image).
 - [ ] **[Plugin] Transmission paresseuse** : mesure honnête et décision du défaut.
-- [ ] **[Protocole] A4 — Déplacer le travail vers l'hôte** : bloc d'état partagé lu par le
-  device, textures par DMA sur plages sales, empaquetage minimal. Épreuve : `send_state` et
-  `compute_state` sortent du profil.
-- [ ] **[Backend GL]** G7 `glTexSubImage*` par rectangle sale, G8 PBO en rotation pour
-  `SURF_PRESENT`, G9 cache d'état dans `gl_target`.
-- [ ] **[TCG] Flottant scalaire en instructions AArch64 natives** (`docs/tcg-g4.md` §15.7).
+- [ ] **[Protocole] A4 — Déplacer le travail vers l'hôte** (30/09, branche `a4-integration`,
+  plugin `20260930-a4`, QEMU `~/src/qemu-a4` ; `CHANGELOG.md`). Trois volets, tout éteint par
+  défaut, capacités sans changer de version :
+  - [~] **État** (`POMPPC_GL_STATEBLK`, `docs/protocole-v23-etat.md`) : 0 écart sur 13,9 M
+    blocs ; DOOM 3 60,7 → 59,3, UT2004 25,7 → 25,1 ms/image ; `compute_state` sorti du profil,
+    `send_state` 3,8 → 2,1 %. **Avant l'allumage :** plantage de DOOM 3 plein écran au
+    chargement (3 fois dans une session de la copie A4, dont une option éteinte), cause inconnue.
+    Suites : clés chaudes par une table « objet GLEngine → qtex » côté device (0,3-0,6 ms/image
+    estimés) ; `geom_send_all` (1,5-3,9 %).
+  - [~] **Géométrie** (`POMPPC_GL_RAWSANE`, `POMPPC_GL_NATSHM`,
+    `docs/protocole-v23-geometrie.md`) : équivalence prouvée, images justes en VM de contrôle ;
+    gain en ms/image non mesuré. Ouvert : GLEngine déroule les tableaux clients en Begin/End
+    (Nexuiz ARB 14-16 %, Warcraft III 4,5 %) — RE du canal `gldCreateVertexArray`.
+  - [x] **Textures par DMA** : mesuré, rien à construire (0 octet par image en régime,
+    chargements ≤ 0,3 %, `docs/protocole-v23-textures.md`).
+  - [ ] **Campagne d'intégration en cours** (`bench/matrice/ab-geo-a4tout/`) : A/B entrelacé de
+    toute la matrice, tout éteint contre état + géométrie allumés, 3 parties par mode, puis un
+    tour de justesse avec vidage. **Fermeture :** gain par jeu, matrice 16/16 leviers allumés,
+    décision des défauts, passage du protocole en v23, fusion dans `main`.
+- [x] **[Backend GL]** G7/G8/G9 (30/09, `docs/backend-gl-attente.md`) : **mesuré**. Seul Nexuiz
+  attend l'hôte au-delà de 2 % (GLSL 2,5 ms/image, ARB 3,6) : ses requêtes d'occlusion. Colin
+  McRae : 0,12 ms/image. G7 sans objet, G9 (≤ 1,25 % d'attente) et G8 classés.
+- [ ] **[VM] Épreuves d'attente** : `tools/matrice/ab-attente.sh 6 "g8 flush"`, puis `… 6 qflush`
+  et `… 1 matriceq` (plugin `20260930-a4`). Fermeture : G8 clos si l'attente baisse de moins de
+  1 ms/image ; `QGPU_GL_FLUSH` et `POMPPC_GL_QFLUSH` allumés seulement si l'attente de Nexuiz
+  GLSL baisse d'au moins 1 ms/image et la matrice reste 16/16 (mesuré sur VM chargée : ~0,5 ms,
+  issue probable « gain faible »). Pour les ~2 ms restantes : soumettre par tranches pendant les
+  dessins, ou résultats de requête écrits par l'hôte (protocole).
+- [ ] **[Cœur] DOOM 3 : `nat_conv_attr`** = 27 % du temps du fil de rendu hôte (attributs
+  reconvertis à chaque dessin natif) ; convertir une fois au `BUF_SUBDATA`. Hors du chemin
+  d'attente (≤ 1,3 %) : utile seulement si l'hôte devient la limite.
+- [ ] **[TCG] Flottant scalaire en instructions AArch64 natives** (`docs/tcg-g4.md` §15.7,
+  §22) : **agent en cours** (30/09, copie `~/src/qemu-fpnat`) — patches `tcg/0013`
+  (`x-fp-flat`, un appel sans branchement) et `tcg/0014` (`x-fp-native`, FPU de l'hôte) écrits,
+  éteints ; mesure en attente de la VM.
 
 ### Jeux — tous les jeux, toutes les résolutions
 
