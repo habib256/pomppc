@@ -147,6 +147,8 @@ et les permutations de DarkPlaces lorsque le backend GL est disponible.
   (≈ 40 ms/image) contre ≈ 107 ms/image par le chemin ARB (`+r_glsl 0`) ;
   rejeu natif = capture de la VM (0,00 %) en fenêtre et plein écran ;
   `VERDICTCHECK` / `STATECHECK` / TEXMEMO : 0 écart.
-* Coût restant : chaque `glUniform` pose le bit `0x04000000` du bloc de
-  changements, non neutre pour la liste blanche du verdict (154 298 dispatches
-  recalculés sur 173 572 dans la démo) — piste de vitesse.
+* Coût restant : 154 298 dispatches recalculés sur 173 572 dans la démo. Le
+  bit `0x04000000` de `glUniform` est neutre depuis le 30/09
+  (`POMPPC_GL_WLUNIF`) ; il ne rapporte que ~4 400 dispatches par 500 images,
+  les autres lient des textures (`+04`) ou changent une matrice ou cible de
+  texture (`+08`) — gain dans le bruit (`CHANGELOG.md`).

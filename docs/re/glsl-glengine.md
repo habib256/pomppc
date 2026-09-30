@@ -123,7 +123,7 @@ Le plugin trouve le pipeline program d'un étage par `PProg.obj = étage + 0x3c`
 | `gctx+0x5430` | objet programme courant (`glUseProgramObjectARB`), 0 sinon |
 | `gctx+0x5434` | u32 : étage SOMMETS actif — posé par `_updateShaderState 0x865a8` : étage présent ET unités cohérentes |
 | `gctx+0x5438` | u32 : étage FRAGMENTS actif |
-| `gctx+0x31c` | bit `0x04000000` posé par tout `glUniform` et `_updateShaderState` : dispatch au dessin suivant (non neutre pour la liste blanche du verdict, `pomppc_accel.c` `wl_mask`) |
+| `gctx+0x31c` | bit `0x04000000` posé par tout `glUniform` et `_updateShaderState` : dispatch au dessin suivant. Neutre pour la liste blanche du verdict et pour `compute_state` depuis le 30/09 (`POMPPC_GL_WLUNIF`, `pomppc_accel.c` `WL_UNIF`) : ce qu'il peut changer au verdict — objet courant, étages, unités échantillonnées, entrées de sommet — est dans la clé `vd_key_of` |
 | `gctx+0x314` | bit `1 << u` : l'unité u a changé (sampler déplacé, `_setImageUnit`) |
 | `gctx+0x18878 + 0x2e0·r` / `+0x1887c` | poignées de pipeline program des étages courants pour le renderer r |
 

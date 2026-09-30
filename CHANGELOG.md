@@ -9,6 +9,33 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Plugin : `glUniform` neutre pour le verdict ; doorbells synchrones mesurés** (plugin
+  `20260930-wlunif`). Nexuiz GLSL : le bit `+0x0c 0x04000000` (tout `glUniform*`,
+  `_updateShaderState`) ne fait plus recalculer le verdict ni `compute_state`
+  (`POMPPC_GL_WLUNIF`, défaut 1). Ce qu'il peut changer est dans la clé `vd_key_of` : objet
+  courant, étages, unités échantillonnées, et désormais entrées de sommet et empreinte de
+  liaison. Sonde : un sampler déplacé pose `+04` (ancienne et nouvelle unité) et change la clé,
+  un uniform valeur ne pose que `+0c 04000000`, gardé. Épreuves : `gltest glsl glslvs glslfs
+  glsldp glslsmp` (nouvelle) justes et identiques à l'octet avec `WLUNIF=0` ; Nexuiz GLSL
+  fenêtre et plein écran sous `VERDICTCHECK=1 STATECHECK=1` : 0 écart (285 204 verdicts
+  repris, 51 076 dispatches court-circuités, 202 965 états sautés). A/B entrelacé ABBA, 3 + 3
+  par mode, même binaire : fenêtre 39,7 → 39,4, plein écran 39,9 → 39,4 ms/image (médianes ;
+  étendues 0,5-0,9) — dans le bruit. Cause : le bit n'est que dans 51 k des 175 k dispatches
+  par 500 images, et presque tous portent aussi une liaison de texture (`+04`, 147 k) ou une
+  matrice/cible d'unité 0 (`+08 00010000`, 116 k) ; seuls ~4 400 dispatches par 500 images
+  passent au court-circuit. Le chiffre « 154 298 recalculés à cause de glUniform » était donc
+  faux : ce sont les textures, comme dans DOOM 3. Gardé allumé (équivalence prouvée, coût nul).
+  Levier L4 (bug hunt D2) : lignes `SYNC` dans la note (doorbells synchrones par cause, et
+  asynchrones). Matrice `20260930-wlunif` : en jeu, seuls les doorbells sondes (définition
+  d'un programme) restent synchrones — DOOM 3 0,0005 ms/image, Prey ≤ 0,014, Nexuiz GLSL 0,05,
+  Colin McRae 0,001 ; BeginPrimitiveBuffer, file pleine, asynchrone coupé : 0 partout. Rien à
+  convertir en asynchrone + barrière : l'essai `POMPPC_GL_SYNCBAR` (jamais déclenché en jeu) et
+  la propriété `stats=on` du device (non nécessaire) sont retirés.
+  **Matrice complète `20260930-wlunif`** (QEMU de référence avec `0011`/`0012`, hôte au repos) :
+  **16 vertes sur 16 automatisées**, images toutes justes ; Marble Blast 9,2 / 9,7, Zenerchi 3,9,
+  DOOM 3 59,9 / 59,5, Prey 71,5 / 71,0, UT2004 25,9 / 25,9, Warcraft III 17,8, Colin McRae
+  69,3, Nexuiz ARB 109,0 / 109,6, Nexuiz GLSL 39,9 / 40,8 ms/image.
+
 - **TCG : cache de sauts de 16 384 entrées, `mtmsr`/`rfi` sans verrou global,
   `x-icbi-sync` allumé** (`patches/tcg/0011`, `0012`, `docs/tcg-g4.md` §18-§21). Trois
   propriétés allumées par défaut dans `run_tiger.sh` après A/B DOOM 3 entrelacés (6 + 6

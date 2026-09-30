@@ -39,7 +39,7 @@
  *                            et pas le rendu logiciel d'Apple) ;
  *   GLTEST_DIFF_MAX=<n>      seuil de « gltest diff » hors arêtes (défaut 2).
  *
- * 74 SCÈNES (par ordre alphabétique ; « diff » n'en est pas une, c'est le
+ * 75 SCÈNES (par ordre alphabétique ; « diff » n'en est pas une, c'est le
  * comparateur d'images). Neuf sont celles de la chaîne de verdict, une par
  * trou du bug hunt : alpharep (H1), texcross (H2), readpack (P1), drawpack
  * (P2), texdelmid (P10), vbocolor (P13), rawprim (S2), offset (H4), forkdraw
@@ -52,6 +52,8 @@
  * glsl glslvs glslfs glsldp : programmes GLSL (protocole v21, DarkPlaces) —
  * glslvs a sa référence chez le rendu d'Apple (shaders de sommets émulés),
  * les autres des valeurs attendues (Apple n'a pas GL_ARB_fragment_shader).
+ * glslsmp : un seul glUniform (sampler ou valeur) ou un seul changement de
+ * programme entre deux dessins (verdict gardé sur glUniform, 30/09).
  *
  * alpharep arbfp arbvp bigstrip blendc caps clip comb combine3 combprobe cube cubeprobe depth
  * depthrt dlist drawpack entry fill fogz forkdraw fusion game gl15
@@ -859,6 +861,102 @@ static int scene_glsl(const char *scene)
         glBindTexture(GL_TEXTURE_2D, 0);
         GS.active(GL_TEXTURE0_ARB);
         glDeleteTextures(2, tex);
+    } else if (!strcmp(scene, "glslsmp")) {
+        /* 30/09 — glUniform entre deux dessins, rien d'autre : GLEngine pose
+           alors +0x0c 0x04000000 (et, pour un sampler, l'unité déplacée) ;
+           le plugin garde le verdict tant que les unités échantillonnées ne
+           bougent pas (liste blanche, POMPPC_GL_WLUNIF). Chaque étape ne
+           change QU'UN uniform, ou que le programme courant. Textures :
+           unité 0 rouge, 2 blanche, 9 verte ; l'unité 10 n'en a pas (noir). */
+        static const char fs_one[] =
+            "uniform sampler2D s;\nuniform vec4 k;\n"
+            "void main()\n{\n    gl_FragColor = texture2D(s, vec2(0.5)) * k;\n}\n";
+        static const GLubyte red_t[4 * 4] = { 255, 0, 0, 255, 255, 0, 0, 255,
+                                              255, 0, 0, 255, 255, 0, 0, 255 };
+        static const GLubyte grn_t[4 * 4] = { 0, 255, 0, 255, 0, 255, 0, 255,
+                                              0, 255, 0, 255, 0, 255, 0, 255 };
+        static const GLubyte wht_t[4 * 4] = { 255, 255, 255, 255, 255, 255, 255, 255,
+                                              255, 255, 255, 255, 255, 255, 255, 255 };
+        static const struct { int unit; const GLubyte *px; } T[3] = {
+            { 0, red_t }, { 2, wht_t }, { 9, grn_t } };
+        gs_handle p2;
+        GLint ls, lk;
+        GLuint tex[3];
+        int i;
+        glGenTextures(3, tex);
+        for (i = 0; i < 3; i++) {
+            GS.active(GL_TEXTURE0_ARB + T[i].unit);
+            glBindTexture(GL_TEXTURE_2D, tex[i]);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, T[i].px);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+        GS.active(GL_TEXTURE0_ARB);
+        p = glsl_prog(vs_basic, fs_one, 0);
+        p2 = glsl_prog(vs_basic, fs_tint, 0);
+        check_cond("(a) programmes « sampler × k » et « tint » : liés", p != 0 && p2 != 0);
+        if (!p || !p2)
+            return 1;
+        GS.use(p2);
+        GS.u4f(GS.uloc(p2, "tint"), 0, 1, 1, 1);
+        GS.use(p);
+        ls = GS.uloc(p, "s");
+        lk = GS.uloc(p, "k");
+        GS.u4f(lk, 1, 1, 1, 1);
+        GS.u1i(ls, 0);
+        glsl_tri();
+        check("(a) s = unité 0 : rouge", IX, IY, 0xFF0000);
+        check("(a) dehors : fond", OX, OY, 0x0000FF);
+        /* (b) le sampler seul change d'unité, dessin après dessin */
+        GS.u1i(ls, 9);
+        glsl_tri();
+        check("(b) s = unité 9 : vert", IX, IY, 0x00FF00);
+        GS.u1i(ls, 2);
+        glsl_tri();
+        check("(b) s = unité 2 : blanc", IX, IY, 0xFFFFFF);
+        GS.u1i(ls, 10);
+        glsl_tri();
+        check("(b) s = unité 10, sans texture : noir", IX, IY, 0x000000);
+        GS.u1i(ls, 0);
+        glsl_tri();
+        check("(b) s = unité 0 de nouveau : rouge", IX, IY, 0xFF0000);
+        /* (c) un uniform non sampler seul : verdict gardé, valeur envoyée */
+        GS.u1i(ls, 2);
+        glsl_tri();
+        GS.u4f(lk, 1, 0, 1, 1);
+        glsl_tri();
+        check("(c) k = (1,0,1) sur blanc : magenta", IX, IY, 0xFF00FF);
+        GS.u4f(lk, 0, 1, 0, 1);
+        glsl_tri();
+        check("(c) k = (0,1,0) : vert", IX, IY, 0x00FF00);
+        GS.u4f(lk, 1, 1, 0, 1);
+        glsl_tri();
+        check("(c) k = (1,1,0) : jaune", IX, IY, 0xFFFF00);
+        /* (d) le programme courant seul change (glUseProgramObjectARB) */
+        GS.use(p2);
+        glsl_tri();
+        check("(d) programme « tint » (0,1,1) : cyan", IX, IY, 0x00FFFF);
+        GS.use(p);
+        glsl_tri();
+        check("(d) retour à « sampler × k » : jaune", IX, IY, 0xFFFF00);
+        /* (e) uniform ET sampler dans la même étape, puis sampler seul */
+        GS.u4f(lk, 1, 1, 1, 1);
+        GS.u1i(ls, 9);
+        glsl_tri();
+        check("(e) k = 1 et s = unité 9 : vert", IX, IY, 0x00FF00);
+        GS.u1i(ls, 0);
+        glsl_tri();
+        check("(e) s = unité 0 : rouge", IX, IY, 0xFF0000);
+        GS.use(0);
+        glsl_tri();
+        check("(f) programme 0 : pipeline fixe, texture de l'unité 0 éteinte : blanc",
+              IX, IY, 0xFFFFFF);
+        for (i = 0; i < 3; i++) {
+            GS.active(GL_TEXTURE0_ARB + T[i].unit);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+        GS.active(GL_TEXTURE0_ARB);
+        glDeleteTextures(3, tex);
     } else {
         return 5;
     }
@@ -3201,7 +3299,8 @@ int main(int argc, char **argv)
         glDeleteTextures(4, tid);
         glFinish();
     } else if (!strcmp(scene, "glsl") || !strcmp(scene, "glslvs") ||
-               !strcmp(scene, "glslfs") || !strcmp(scene, "glsldp")) {
+               !strcmp(scene, "glslfs") || !strcmp(scene, "glsldp") ||
+               !strcmp(scene, "glslsmp")) {
         /* v21 : programmes GLSL (scene_glsl, plus haut) */
         int r = scene_glsl(scene);
         if (r)
