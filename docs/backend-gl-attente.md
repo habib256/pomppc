@@ -23,8 +23,12 @@ de ~2 % du temps d'image d'au moins un jeu.
   - le kit d'A/B en VM `tools/matrice/ab-attente.sh` (§6).
 - **Le gisement est côté plugin** : soumettre la moitié courante, sans l'attendre, au premier
   `QUERY_BEGIN`. Modèle du rejeu, avec le flush de l'hôte : attente de Nexuiz GLSL 2,7 → 0,45
-  ms/image (~5,5 %), ARB 1,7 → 0,4 (§7). Pas de changement de protocole. Non construit : le
-  plugin est en travaux (A4).
+  ms/image (~5,5 %), ARB 1,7 → 0,4 (§7). Pas de changement de protocole.
+- **Construit, mesuré en VM, gain faible** (§9) : `POMPPC_GL_QFLUSH=1`, éteint par défaut. Les
+  comptes d'occlusion sont exacts et les images justes. Avec `QGPU_GL_FLUSH=1`, l'attente des
+  lectures de Nexuiz GLSL passe de 2,5 à ~2,0 ms/image, soit **−0,5 ms/image (~1 %)**, et non
+  −2,3. Le modèle supposait que l'invité mettait 2 ms à émettre ses requêtes. En VM, il met
+  **0,4 ms** entre la coupe et la première lecture : l'hôte n'a que ce temps d'avance.
 
 ## 1. L'attente de l'invité, par jeu (VM)
 
@@ -294,6 +298,8 @@ pèsent peu. Les regrouper voudrait un changement de protocole, par exemple une 
 résultat est écrit par l'hôte à sa disponibilité, que l'invité lirait sans attendre la barrière.
 Ce n'est pas nécessaire au gain ci-dessus.
 
+Construit et mesuré en VM : §9. Le gain réel est quatre fois plus petit que ce modèle.
+
 ## 8. Reproduire
 
 Scripts de la session dans le scratchpad (`rj.sh`, `mesure.sh`, `images.sh`, `qseq.py`,
@@ -320,3 +326,178 @@ Options du rejeu :
 
 Ligne `sortes` : soumissions « requête », « présentation » et autres, en ms/image. Ligne
 `fin de soumission` : temps total des `glFlush`.
+
+## 9. Construit : la coupe au premier `QUERY_BEGIN` (`POMPPC_GL_QFLUSH`, plugin)
+
+**Où l'invité attendait.** Le code confirme le §2. `q_info` fait `flush()`, puis `wait_half(i)`
+sur la moitié qu'il vient de soumettre. `flush()` passe par `switch_half`, qui attend d'abord
+l'autre moitié, celle de la soumission précédente. La première lecture d'une image attend donc
+toute la moitié qui porte les ~320–430 lots et les requêtes : l'hôte doit les exécuter, puis le
+GPU les rendre (`glGetQueryObjectuiv` bloque). Les lectures suivantes font chacune un
+aller-retour. Les compteurs le confirment en VM : Nexuiz GLSL fait **~4,6 requêtes par image**
+(démo 1, pas 14 ; 2 310 `QUERY_BEGIN` sur 500 images), en **un seul groupe** (461 premières
+lectures sur 500 images). La première lecture pèse **90 %** de l'attente des lectures
+(2,25 ms sur 2,5).
+
+**Ce que fait la coupe** (`q_begin`, section des requêtes d'occlusion) :
+
+- elle s'active au **premier** `QUERY_BEGIN` d'une soumission, si la moitié courante porte au
+  moins `QCUT_MIN` = 256 mots de flux (`POMPPC_GL_QFLUSH=<n>`, n > 1, change le seuil) ;
+- elle fait alors `flush()` **avant** d'émettre la requête, sans attendre la barrière de la
+  moitié soumise ;
+- l'attente de `switch_half` porte sur la soumission d'avant, que l'hôte exécute de toute façon
+  en premier (la file est dans l'ordre) : elle était déjà comprise dans l'attente de `q_info` ;
+- la variable est lue une fois (`qcut_init`), sans `getenv` dans le chemin chaud ; protocole,
+  device et kext sont inchangés.
+
+**Cas traités** (commentaire en tête de la section) :
+
+- **`QUERY_BEGIN` répétés.** `qcut_seq` retient la soumission (`G.sub_seq`) qui porte déjà un
+  `QUERY_BEGIN`. Il est relevé **après** le `reserve` de la requête, donc sur la moitié qui la
+  porte, même si `reserve` a vidé une moitié pleine. On ne coupe jamais entre les requêtes d'un
+  groupe : 2 310 `QUERY_BEGIN`, 447 coupes, 461 premières lectures.
+- **Requête ouverte à cheval.** La coupe précède le `QUERY_END` implicite de `q_begin`. Une
+  requête qui court d'une soumission à l'autre existait déjà (moitié pleine), et le cœur la tient
+  par contexte.
+- **Octets de BAR0.** `flush()` est le geste ordinaire : arène, sommets et indices restent dans
+  la moitié soumise, en vol jusqu'à sa barrière (architecture §3).
+- **`BeginPrimitiveBuffer` ouvert (`G.npend`), mode synchrone, une seule moitié, hôte mort.**
+  Pas de coupe : `flush()` y soumettrait en synchrone. Le cas est compté « non coupé »
+  (4 à 9 sur 500 images).
+- **`G.mu` relâché** par l'attente de `switch_half` : le contexte est recherché de nouveau.
+- **Vidage.** La coupe ajoute une soumission par image, vidée comme les autres. Le rejeu joue
+  des soumissions, il ne suppose rien de leur découpage. `QGPU_REPLAY_SPLITQ` ne coupe pas en
+  tête de soumission (`q && …`). Images justes ci-dessous.
+- **Autres lecteurs synchrones** (`sync_to_sw_locked`, `present_direct`) : inchangés.
+
+**Compteurs.** Ligne `QRY` de la note, toutes les 500 images, plus une dernière à la sortie
+avec `POMPPC_GL_STATS` pour les processus courts comme `gltest`. Elle donne :
+
+- les `QUERY_BEGIN`, les coupes et leur attente, les requêtes non coupées ;
+- les lectures et leur attente, dont les **premières** (celles qui soumettent des
+  `QUERY_BEGIN`) ;
+- l'**avance de la coupe** : le temps de l'invité entre la coupe et la première lecture ;
+- l'attente totale (`G.t_wait`).
+
+La ligne sort dès qu'une requête a été vue ou que la coupe est allumée.
+
+### Épreuves (instance sur recouvrement de `tiger-endurance.qcow2`, QEMU `~/src/qemu-backend`)
+
+L'hôte était chargé pendant toute la mesure : charge 4,5 à 8,9, deux ou trois autres QEMU.
+Nexuiz GLSL tourne à 55–60 ms/image au lieu de 41 : les cellules sont rouges **par le
+plancher de vitesse seul**. Les ms/image et l'attente de `attente.py` (fenêtre 120..600) sont
+dans le bruit (±0,5 ms d'une partie à l'autre). La preuve s'appuie sur les lignes `QRY`,
+images 500..1000.
+
+- **`tests/run-all.sh`** : 176 OK.
+- **`gltest occl`** : comptes **exacts** (1024 / 512 / 0) sous `POMPPC_GL_QFLUSH` = 0, 1 et 2
+  (seuil de 2 mots). Ils le restent avec et sans `QGPU_GL_FLUSH=1`. Il y a une coupe par
+  lancement, et une soumission de plus (11 contre 10). Même chose pour `qprobe` (2016
+  échantillons, disponible 1) et pour `game`, qui n'a pas de requête : 0 `QUERY_BEGIN`,
+  0 coupe, 65 soumissions dans les deux cas.
+- **Images** : matrice avec vidage sur l'instance (`MATRICE_MON`, `TSSH_PORT`, `MATRICE_BIN`).
+  Nexuiz GLSL et ARB en fenêtre, coupe éteinte et allumée, avec et sans `QGPU_GL_FLUSH=1` :
+  **juste**, rejeu contre capture 0,00/0,00 %, rejeu de la référence 0,00/0,00 % (validée).
+- **Jeu sans requêtes** (Marble Blast, fenêtre, coupe allumée) : ligne `QRY` à 0 `QUERY_BEGIN`,
+  0 coupe, 0 lecture. Les replis varient d'une partie à l'autre (40, 60, 526) : c'est la mise
+  au premier plan de l'instance sans fenêtre, que la coupe ne touche pas (aucun `QUERY_BEGIN`).
+  17,0 ms/image avec la coupe, 16,6 sans.
+
+**Attente des lectures, Nexuiz GLSL fenêtre**, images 500..1000, ms par image (lignes `QRY`) :
+
+| QEMU | coupe | parties | lectures | dont premières | avance de la coupe |
+|---|---|---|---:|---:|---:|
+| `QGPU_GL_FLUSH` éteint | éteinte | 3 | 2,92 / 2,62 / 2,69 | 2,40 / 2,52 | — |
+| `QGPU_GL_FLUSH` éteint | allumée | 3 | 2,59 / 2,10 / 2,77 | 1,96 / 2,46 | — |
+| `QGPU_GL_FLUSH=1` | éteinte | 2 | **2,50 / 2,54** | 2,25 / 2,27 | — |
+| `QGPU_GL_FLUSH=1` | allumée | 4 | **1,93 / 2,14 / 1,97 / 1,98** | 1,72 / 1,87 / 1,71 / 1,71 | **0,39** |
+
+Nexuiz ARB, `QGPU_GL_FLUSH=1`, lectures : images 0..500, 1,16 → 0,87 ms/image ; au-delà,
+2,39 → 1,49, mais les fenêtres diffèrent (274 contre 500 images). Sans le flush, images 0..500 :
+1,62 → 1,31.
+
+**Lecture.**
+
+- **Avec `QGPU_GL_FLUSH=1`**, la coupe enlève ~0,55 ms/image de l'attente de Nexuiz GLSL (les
+  quatre parties coupées sont toutes sous les deux témoins), soit **~1 % du temps d'image**,
+  sous le seuil de 2 %.
+- **Sans le flush**, l'écart (~0,25) est dans le bruit : le pilote d'Apple garde le travail
+  encodé jusqu'à la lecture, et le GPU ne démarre de toute façon qu'à ce moment-là (§5).
+- **Pourquoi pas les 2,3 ms du modèle.** L'avance mesurée est de **0,39 ms/image**, soit
+  ~0,4 ms par coupe : DarkPlaces émet ses ~4,6 requêtes et lit la première en 0,4 ms de temps
+  invité. L'hôte ne gagne donc que ces 0,4 ms sur les ~2,3 ms que lui coûtent la moitié
+  (encodage de ~320 lots, puis GPU). Le rejeu supposait 2 ms de pause (`QGPU_REPLAY_GAP_US=2000`)
+  ; la VM en donne cinq fois moins. Le gain observé (~0,55) est de l'ordre de cette avance,
+  plus le flush qui fait démarrer le GPU plus tôt.
+
+**Verdict.** La coupe est **construite, exacte et sans risque mesuré**, avec un gain **faible**
+(≈ 1 % sur Nexuiz GLSL avec `QGPU_GL_FLUSH=1`, dans le bruit sans lui). Elle reste **éteinte
+par défaut**. L'A/B entrelacé sur la VM quotidienne (`ab-attente.sh … qflush`, §6 et
+ci-dessous) doit trancher : elle ne mérite d'être allumée que s'il confirme ≥ 1 ms/image, ce que
+ces chiffres ne laissent pas prévoir.
+
+**Ce qui reste, si l'on veut les ~2 ms.** Il faut que l'hôte ait travaillé **avant** les
+requêtes, donc pendant les ~320 dessins eux-mêmes. Deux pistes :
+
+- **soumettre par tranches** pendant l'image (flush tous les N lots) : c'est le chemin de la
+  géométrie (`reserve`, `geom_*`), aujourd'hui en travaux par un autre agent ;
+- **des résultats de requête écrits par l'hôte à leur disponibilité**, lus sans barrière :
+  c'est un changement de protocole (§7).
+
+Les deux sortent de ce lot.
+
+### Kit d'A/B (VM quotidienne, non joué ici)
+
+Deux épreuves ajoutées à `tools/matrice/ab-attente.sh`. Prérequis : le plugin de la branche,
+installé dans la VM quotidienne par `NORUN=1 tools/guest/cycle.sh`, depuis son worktree.
+Éteint, il se comporte comme celui de main. Le kit vérifie par `strings` que le plugin
+installé connaît `POMPPC_GL_QFLUSH`, et saute l'épreuve sinon.
+
+```
+tools/matrice/ab-attente.sh 6 qflush       # 5 campagnes A/B entrelacées (~5 × 12 parties)
+tools/matrice/ab-attente.sh 1 matriceq     # tour complet sous POMPPC_GL_QFLUSH=1 (+ QGPU_GL_FLUSH=1 ; QMAT_FLUSH=0 sans)
+```
+
+`qflush` compare à la référence :
+
+- `q` (`POMPPC_GL_QFLUSH=1`) sur Nexuiz GLSL et ARB fenêtre ;
+- `qf` (`POMPPC_GL_QFLUSH=1 QGPU_GL_FLUSH=1`) sur les mêmes ;
+- `q` sur Marble Blast, témoin sans requêtes.
+
+Il relève ensuite la dernière ligne `QRY` de chaque partie dans le bilan. `tools/tcg/matab.sh`
+passe désormais les variables `POMPPC_GL_*` d'un mode au jeu (`matrice.py --env`) ;
+auparavant, elles n'atteignaient que QEMU.
+
+| Épreuve | Si… | Alors |
+|---|---|---|
+| qflush | l'attente médiane de nxg baisse de ≥ 1 ms/image (sous `q` ou `qf`), ses ms/image ne montent pas, nx et mb ne se dégradent pas, `QRY` de mb à 0 coupe | la coupe peut être allumée par défaut… |
+| matriceq | … et le tour est à 16/16 | … effectivement allumée (et `QGPU_GL_FLUSH=1` avec elle si c'est `qf` qui gagne) |
+| qflush | la baisse est < 1 ms/image (prévu ici : ~0,5 avec `qf`, ~0 avec `q`) | **coupe close « mesuré, gain faible »** : on la laisse éteinte, le code reste pour l'étude |
+
+### Reproduire sur une instance à soi
+
+Recouvrement :
+
+```
+qemu-img create -f qcow2 -b disks/tiger-endurance.qcow2 -F qcow2 .run/a4req/disque.qcow2
+```
+
+Lancement, depuis le worktree :
+
+```
+HEADLESS=1 TABLET=1 WEBPROXY=0 GLISO=0 POMPPC_AUDIO_PROFILE=muet SSH_FWD=2290 \
+  POMPPC_SCRATCH=$PWD/../../.run/a4req DISK=…/disque.qcow2 \
+  QEMU_BIN=~/src/qemu-backend/build/qemu-system-ppc [QGPU_GL_FLUSH=1] ./run_tiger.sh
+```
+
+Le port réel est dans `.run/a4req/tiger.sshport` (2291 ici). Ensuite :
+
+```
+TSSH_PORT=2291 NORUN=1 tools/guest/cycle.sh
+MATRICE_MON=.run/a4req/mon.sock TSSH_PORT=2291 MATRICE_BIN=bench/a4req/bin \
+  python3 tools/matrice/matrice.py -j nxg -m fen --sans-vidage --env POMPPC_GL_QFLUSH=1 --sortie …
+grep '^QRY' <cellule>/mesure/note.txt
+```
+
+`MATRICE_BIN` (nouveau) garde les outils de la matrice hors de `bench/matrice/bin`, qui est
+partagé. Relevés : `bench/a4req/p1..p5/` (hors dépôt).

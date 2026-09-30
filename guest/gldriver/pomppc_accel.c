@@ -1609,6 +1609,8 @@ static void sync_frame(void)
     G.t_async = 0;
 }
 
+static void qry_frame(int fin);         /* section des requêtes d'occlusion */
+
 /* Bilan périodique (POMPPC_GL_STATS=<fichier>), appelé à chaque échange. */
 static void stats_frame(void *ctx)
 {
@@ -1643,6 +1645,7 @@ static void stats_frame(void *ctx)
     if (G.verdict)
         vd_frame();
     sync_frame();                       /* 30/09 : lignes SYNC (note) */
+    qry_frame(0);                       /* 30/09 : lignes QRY (note, §7 attente) */
     if (!path)
         return;
     /* Profondeur de la file du device, une fois par image et SEULEMENT quand
@@ -1980,6 +1983,8 @@ static void on_exit_stats(void)
                     G.n_sync_all[k] + G.n_sync[k],
                     (G.t_sync_all[k] + G.t_sync[k]) * 1000, k + 1 < SYNC_N ? "," : "\n");
     }
+    if (getenv("POMPPC_GL_STATS"))      /* 30/09 : dernière ligne QRY (note) */
+        qry_frame(1);
     if (getenv("POMPPC_GL_STATS"))      /* v20 */
         fprintf(stderr, "POMPPC GL: render to texture: %lu SURF_TEX (%s), %lu skipped "
                 "(guest newer), %lu hidden-drawable swaps kept on host; rectangle %s\n",
@@ -6554,6 +6559,99 @@ static unsigned long sat_add(unsigned long a, unsigned long b)
     return (a > 0xFFFFFFFFUL - b) ? 0xFFFFFFFFUL : a + b;
 }
 
+/* ── 30/09 : SOUMISSION ANTICIPÉE DES REQUÊTES (docs/backend-gl-attente.md §7) ──
+ *
+ * Où l'invité attend. DarkPlaces (Nexuiz) pose ses ~14 requêtes de halos juste
+ * APRÈS ~430 dessins, puis lit leurs comptes. Le premier q_info soumet alors
+ * une moitié de ~430 lots, et son wait_half attend que l'hôte les exécute et
+ * que le GPU les rende : 2,5 ms/image en GLSL (6 % du temps d'image).
+ *
+ * La coupe. POMPPC_GL_QFLUSH=1 : au PREMIER QUERY_BEGIN d'une soumission, si
+ * la moitié courante porte au moins QCUT_MIN mots de flux, on la soumet
+ * (flush, asynchrone) AVANT d'émettre la requête, sans attendre sa barrière.
+ * L'hôte rend les 430 lots pendant que le jeu émet ses requêtes ; au premier
+ * q_info, il ne reste que les petits dessins des requêtes. flush() fait
+ * switch_half, qui attend l'AUTRE moitié : la soumission d'avant, que l'hôte
+ * exécute de toute façon avant celle-ci (file dans l'ordre) — cette attente
+ * était déjà comprise dans celle du q_info. Protocole inchangé.
+ *
+ * Cas :
+ *   — QUERY_BEGIN répétés : qcut_seq retient la soumission (G.sub_seq, celle
+ *     que la moitié courante deviendra) qui porte déjà un QUERY_BEGIN ; on ne
+ *     coupe qu'au premier, jamais entre les 14 requêtes ;
+ *   — requête ouverte à cheval : la coupe précède le QUERY_END implicite de
+ *     q_begin ; une requête qui court d'une soumission à la suivante existait
+ *     déjà (moitié pleine) et le cœur la tient par contexte ;
+ *   — moitié pleine : reserve() soumet elle-même ; qcut_seq est relevé APRÈS
+ *     la réservation du QUERY_BEGIN, donc sur la moitié qui le porte ;
+ *   — octets de BAR0 : flush() est le geste ordinaire (arène, sommets et
+ *     indices restent dans la moitié soumise, en vol jusqu'à sa barrière) ;
+ *   — BeginPrimitiveBuffer ouvert (G.npend), synchrone (G.async nul), une
+ *     seule moitié : pas de coupe (flush y soumettrait en synchrone) ;
+ *   — G.mu relâché par flush (switch_half) : le contexte est recherché de
+ *     nouveau, comme après toute attente ;
+ *   — vidage (POMPPC_GL_DUMP) : une soumission de plus par image, vidée comme
+ *     les autres ; le rejeu joue des soumissions, il n'en suppose pas le
+ *     découpage.
+ * Compteurs : ligne QRY de la note (qry_frame), toutes les CNT_PERIOD images
+ * et à la sortie. */
+#define QCUT_MIN     256                /* mots de flux (1 Kio) : quelques lots */
+static int qcut_on = -1;                /* -1 : POMPPC_GL_QFLUSH pas encore lu */
+static unsigned long qcut_min = QCUT_MIN;
+static unsigned long qcut_seq = ~0UL;   /* soumission qui porte déjà un QUERY_BEGIN */
+static struct {
+    unsigned long begin, cut, skip, info;       /* période */
+    unsigned long info1;                        /* lectures qui soumettent des QUERY_BEGIN */
+    double        t_cut, t_info, t_info1, t_wait0;
+    double        t_lead, cut_at;               /* avance : de la coupe à la 1re lecture */
+    unsigned long a_begin, a_cut, a_info;       /* toute la vie */
+    unsigned long f0;                           /* début de la période */
+    double        a_t_cut, a_t_info;
+} QC;
+
+static void qcut_init(void)
+{
+    const char *e = getenv("POMPPC_GL_QFLUSH");
+    unsigned long v = e && *e ? strtoul(e, 0, 0) : 0;
+    qcut_on = v != 0;
+    if (v > 1)
+        qcut_min = v;                   /* POMPPC_GL_QFLUSH=<n> : seuil en mots */
+}
+
+/* Ligne QRY de la note : toutes les CNT_PERIOD images (stats_frame), et une
+   dernière à la sortie (on_exit_stats, POMPPC_GL_STATS) pour les processus
+   courts (gltest). Preuve de la coupe sans `sample`. */
+static void qry_frame(int fin)
+{
+    double tw;
+    unsigned long nf;
+    if (!fin && G.n_frames % CNT_PERIOD != 0)
+        return;
+    if (qcut_on < 0)
+        qcut_init();
+    nf = G.n_frames - QC.f0 ? G.n_frames - QC.f0 : 1;
+    QC.f0 = G.n_frames;
+    tw = G.t_wait - QC.t_wait0;
+    QC.t_wait0 = G.t_wait;
+    QC.a_begin += QC.begin; QC.a_cut += QC.cut; QC.a_info += QC.info;
+    QC.a_t_cut += QC.t_cut; QC.a_t_info += QC.t_info;
+    if (qcut_on || QC.a_begin || QC.a_info)
+        gl_note("QRY image %lu (%lu images%s) : coupe %s (seuil %lu mots) — %lu QUERY_BEGIN, "
+                "%lu coupes (%.2f ms d'attente, %.3f ms/image), %lu non coupées, "
+                "%lu lectures (%.2f ms d'attente, %.3f ms/image ; dont %lu premières, "
+                "%.3f ms/image ; avance de la coupe %.3f ms/image) ; attente totale "
+                "%.3f ms/image ; depuis le début : %lu QUERY_BEGIN, %lu coupes, "
+                "%lu lectures, attente coupes %.1f ms, lectures %.1f ms\n",
+                G.n_frames, nf, fin ? ", sortie" : "", qcut_on ? "allumée" : "éteinte",
+                qcut_min, QC.begin, QC.cut, QC.t_cut * 1000, QC.t_cut * 1000 / nf,
+                QC.skip, QC.info, QC.t_info * 1000, QC.t_info * 1000 / nf,
+                QC.info1, QC.t_info1 * 1000 / nf, QC.t_lead * 1000 / nf, tw * 1000 / nf,
+                QC.a_begin, QC.a_cut, QC.a_info,
+                QC.a_t_cut * 1000, QC.a_t_info * 1000);
+    QC.begin = QC.cut = QC.skip = QC.info = QC.info1 = 0;
+    QC.t_cut = QC.t_info = QC.t_info1 = QC.t_lead = 0;
+}
+
 /* Les deux procédures de rastérisation. GLEngine ignore leur valeur de retour. */
 static long q_begin(void *ctx, unsigned long h)
 {
@@ -6563,6 +6661,25 @@ static long q_begin(void *ctx, unsigned long h)
     p = find_ctx(ctx);
     if (p && G.v8 && !qry_off && h && !p->broken && p->qctx >= 0 &&
         h - 1 < QGPU_CLIENT_QUERY_IDS) {
+        if (qcut_on < 0)
+            qcut_init();
+        QC.begin++;
+        if (qcut_on && qcut_seq != G.sub_seq && G.ncmd) {
+            if (G.ncmd >= qcut_min && G.async && !G.npend && G.nhalf >= 2 && !G.dead) {
+                double w = G.t_wait;
+                flush();                /* soumise, PAS attendue (§7) */
+                QC.cut++;
+                QC.t_cut += G.t_wait - w;
+                QC.cut_at = now_s();
+                p = find_ctx(ctx);      /* G.mu a pu être relâché */
+                if (!p || qry_off || p->broken || p->qctx < 0) {
+                    pthread_mutex_unlock(&G.mu);
+                    return 0;
+                }
+            } else {
+                QC.skip++;
+            }
+        }
         id = G.query_base + (h - 1);
         /* Le cœur refuse une seconde ouverture ; GLEngine l'interdit déjà, mais
            un contexte détruit puis recréé pourrait laisser la nôtre ouverte. */
@@ -6574,6 +6691,7 @@ static long q_begin(void *ctx, unsigned long h)
         c = reserve(p, QGPU_LEN_QUERY);
         c[0] = QGPU_CMD_HDR(QGPU_OP_QUERY_BEGIN, QGPU_LEN_QUERY);
         c[1] = id;
+        qcut_seq = G.sub_seq;           /* après reserve : la moitié qui le porte */
         qry_extra[h - 1] = 0;
         p->q_open = (long)id;
         p->q_extra = 0;
@@ -6665,8 +6783,23 @@ static long q_info(void *ctx, unsigned long h, unsigned long pname, unsigned lon
         c[2] = G.q.base + off;
         {
             int i = G.cur;
+            double w = G.t_wait;
+            /* « première » lecture : la moitié qu'elle soumet porte des
+               QUERY_BEGIN — c'est elle qui attendait les ~430 lots */
+            int first = qcut_seq == G.sub_seq;
             flush();
             wait_half(i);
+            QC.info++;
+            QC.t_info += G.t_wait - w;
+            if (first && QC.cut_at > 0) {
+                /* temps laissé à l'hôte entre la coupe et cette lecture */
+                QC.t_lead += now_s() - (G.t_wait - w) - QC.cut_at;
+                QC.cut_at = 0;
+            }
+            if (first) {
+                QC.info1++;
+                QC.t_info1 += G.t_wait - w;
+            }
         }
         if (!qry_off && !p->broken) {
             const unsigned long *w = (const unsigned long *)(G.q.win + off);

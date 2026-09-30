@@ -46,7 +46,9 @@ from jeu import NOM_MODE, MODES                    # noqa: E402
 ICI = os.path.dirname(os.path.abspath(__file__))
 BENCH = os.path.join(MAIN, "bench", "matrice")
 REF = os.path.join(BENCH, "ref")
-BIN = os.path.join(BENCH, "bin")
+# MATRICE_BIN : outils d'un worktree à part (instance sur recouvrement, 30/09) —
+# sinon bench/matrice/bin, partagé, reconstruit par quiconque a des sources plus récentes
+BIN = os.environ.get("MATRICE_BIN") or os.path.join(BENCH, "bin")
 MANIFESTE = os.path.join(ICI, "references.csv")
 G = "/Users/tiger/matrice"                         # dossier de la matrice dans l'invité
 TRIG = "/tmp/matrice-go"
