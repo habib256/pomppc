@@ -4763,6 +4763,13 @@ static bool draw_op(uint32_t op)
            op == QGPU_OP_GLSL_LINK;                  /* v21 : refus de l'hôte */
 }
 
+void qgpu_core_submit_end(QgpuCore *c)
+{
+    if (c->be && c->be->submit_end) {
+        c->be->submit_end(c);
+    }
+}
+
 uint32_t qgpu_core_execute(QgpuCore *c, uint32_t off, uint32_t len)
 {
     uint32_t nwords, pc = 0, st = QGPU_ST_OK;

@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <dirent.h>
 #include <time.h>
+#include <unistd.h>
 #include "qgpu_proto.h"
 #include "qgpu-core.h"
 
@@ -43,6 +44,19 @@ static uint64_t exec_ns;
    part pour écrire le PPM (même relecture que celle d'un SURF_PRESENT). */
 static uint64_t reg_sub_ns, reg_pres_ns;
 static uint32_t first_frame = ~0u, reg_last = ~0u, reg_frames, reg_pres;
+/* 30/09 (backend : G8, G9) : QGPU_REPLAY_OPTIME=1 — en régime, temps hôte par
+   opcode : chaque commande est exécutée seule (qgpu_core_execute enchaîne les
+   commandes sans autre état que le flux : équivalent). Le temps d'un dessin
+   est le temps CPU du fil (appels GL, pilote) ; l'attente du GPU tombe sur la
+   commande qui synchronise (SURF_PRESENT : glReadPixels). */
+static uint64_t op_ns[256], op_n[256];
+/* 30/09 : en régime, temps des soumissions par sorte — celles qui portent un
+   QUERY_RESULT (l'invité les attend aussitôt : q_info fait flush + wait_half
+   de la moitié qu'il vient de soumettre), celles qui portent un SURF_PRESENT,
+   les autres. Le temps hôte d'une soumission « requête » est une estimation
+   de ce que l'invité y attend quand l'hôte était à jour à son arrivée. */
+static uint64_t kind_ns[3], kind_n[3];
+static uint64_t end_ns;            /* qgpu_core_submit_end (glFlush) */
 static uint64_t now_ns(void)
 {
     struct timespec ts;
@@ -238,6 +252,13 @@ int main(int argc, char **argv)
         }
     }
     uint32_t ndraw_frame = 0, ndraw_last_frame = 0xffffffffu;
+    /* 30/09 : QGPU_REPLAY_REPEAT=n — rejoue n fois les images de régime (hors
+       première image du vidage), sans réécrire les PPM : un rejeu assez long
+       pour `sample`, et des moyennes moins bruitées. Les téléversements de
+       premier envoi (contamination du vidage) sont refaits à chaque passe. */
+    unsigned pass, npass = getenv("QGPU_REPLAY_REPEAT") ? (unsigned)atoi(getenv("QGPU_REPLAY_REPEAT")) : 1;
+    if (npass < 1) npass = 1;
+    for (pass = 0; pass < npass; pass++)
     for (i = 0; i < nn; i++) {
         char path[512];
         struct dump_hdr h;
@@ -260,6 +281,7 @@ int main(int argc, char **argv)
             continue;
         }
         if (h.frame > fmax) { fclose(f); break; }
+        if (pass && h.frame == first_frame) { fclose(f); continue; }
         if ((uint64_t)h.base + h.arena_off + h.arena_len > SHMEM) {
             fprintf(stderr, "%s : hors fenêtre\n", path); fclose(f); continue;
         }
@@ -511,13 +533,49 @@ int main(int argc, char **argv)
            i..j (DRAW_RAW/DRAW_RAW_BUF comptés depuis le début de l'image) sont
            sautés ; la soumission est exécutée par tronçons autour d'eux. */
         st = QGPU_ST_OK;
+        uint64_t sub_ns = 0, sub0 = exec_ns;
         if (h.frame != ndraw_last_frame) { ndraw_last_frame = h.frame; ndraw_frame = 0; }
         {
             unsigned sf = 0, si = 0, sj = 0; int skipping = 0;
             if (getenv("QGPU_REPLAY_SKIPDRAW") &&
                 sscanf(getenv("QGPU_REPLAY_SKIPDRAW"), "%u:%u-%u", &sf, &si, &sj) == 3 && h.frame == sf)
                 skipping = 1;
-            if (!skipping) {
+            if (!skipping && getenv("QGPU_REPLAY_OPTIME") && first_frame != ~0u &&
+                h.frame != first_frame) {
+                uint64_t e0 = exec_ns;
+                uint32_t q;
+                int split_done = 0;
+                for (q = 0; q + 1 <= h.ncmd_bytes / 4 && st == QGPU_ST_OK; ) {
+                    uint32_t hd = qgpu_ld32(shmem + h.base + q * 4);
+                    uint32_t o = QGPU_CMD_OP(hd), l = QGPU_CMD_LEN(hd);
+                    uint64_t t0 = exec_ns;
+                    if (!l || q + l > h.ncmd_bytes / 4) break;
+                    /* 30/09, MODÈLE QGPU_REPLAY_SPLITQ=1 (avec OPTIME) : le
+                       plugin soumettrait sa moitié, sans attendre, au premier
+                       QUERY_BEGIN ; la soumission se coupe là (fin de
+                       soumission, pause QGPU_REPLAY_GAP_US), et seul ce qui
+                       suit (requêtes, premier QUERY_RESULT) compte comme
+                       attendu dans la ligne « sortes ». */
+                    if (o == QGPU_OP_QUERY_BEGIN && q && getenv("QGPU_REPLAY_SPLITQ") && !split_done) {
+                        split_done = 1;
+                        { uint64_t tf = now_ns(); qgpu_core_submit_end(&c); tf = now_ns() - tf; exec_ns += tf; end_ns += tf; reg_sub_ns += tf; }
+                        if (getenv("QGPU_REPLAY_GAP_US"))
+                            usleep((useconds_t)atoi(getenv("QGPU_REPLAY_GAP_US")));
+                        sub0 = exec_ns;
+                        t0 = exec_ns;
+                    }
+                    st = timed_execute(&c, h.base + q * 4, l * 4);
+                    if (st != QGPU_ST_OK && st != QGPU_ST_NO_MEM &&
+                        (st == QGPU_ST_BAD_ARG && (o == QGPU_OP_DRAW_RAW || o == QGPU_OP_DRAW_RAW_BUF ||
+                                                   o == QGPU_OP_DRAW_NATIVE)))
+                        st = QGPU_ST_OK;            /* H4 : un dessin refusé ne coûte que lui */
+                    op_ns[o & 255] += exec_ns - t0;
+                    op_n[o & 255]++;
+                    q += l;
+                }
+                reg_sub_ns += exec_ns - e0;
+                if (h.frame != reg_last) { reg_last = h.frame; reg_frames++; }
+            } else if (!skipping) {
                 uint64_t e0 = exec_ns;
                 st = timed_execute(&c, h.base, h.ncmd_bytes);
                 /* 30/09 (A4) : temps des soumissions en régime, hors première
@@ -546,6 +604,38 @@ int main(int argc, char **argv)
                 }
                 if (st == QGPU_ST_OK && q > seg) st = qgpu_core_execute(&c, h.base + seg * 4, (q - seg) * 4);
             }
+        }
+        /* 30/09 (backend : attente de l'invité) — expériences de cadence.
+           QGPU_REPLAY_GAP_US=n : pause de n µs entre deux soumissions (hors
+           temps mesuré), pour figurer le temps que l'invité met à remplir la
+           moitié suivante : sans elle, le rejeu enchaîne les soumissions et le
+           GPU n'est jamais en avance. */
+        if (getenv("QGPU_REPLAY_GAP_US"))
+            usleep((useconds_t)atoi(getenv("QGPU_REPLAY_GAP_US")));
+        sub_ns = exec_ns - sub0;
+        /* fin de soumission, comme le thread de rendu du device après la
+           barrière (backend GL : glFlush, QGPU_GL_FLUSH) : temps du fil de
+           rendu, mais pas de ce que l'invité attend (hors sub_ns) */
+        {
+            uint64_t t0 = now_ns();
+            qgpu_core_submit_end(&c);
+            t0 = now_ns() - t0;
+            exec_ns += t0;
+            end_ns += t0;
+            if (first_frame != ~0u && h.frame != first_frame)
+                reg_sub_ns += t0;
+        }
+        if (first_frame != ~0u && h.frame != first_frame && reg_last == h.frame) {
+            uint32_t q, kind = 2;
+            for (q = 0; q + 1 <= h.ncmd_bytes / 4; ) {
+                uint32_t hd = qgpu_ld32(shmem + h.base + q * 4), l = QGPU_CMD_LEN(hd);
+                if (!l || q + l > h.ncmd_bytes / 4) break;
+                if (QGPU_CMD_OP(hd) == QGPU_OP_QUERY_RESULT) kind = 0;
+                if (QGPU_CMD_OP(hd) == QGPU_OP_SURF_PRESENT && kind) kind = 1;
+                q += l;
+            }
+            kind_ns[kind] += sub_ns;
+            kind_n[kind]++;
         }
         if (st != QGPU_ST_OK) {
             nerr++;
@@ -822,7 +912,7 @@ int main(int argc, char **argv)
                             sk[QGPU_SK_COMBINE0], sk[QGPU_SK_COMBINE_SRC0],
                             sk[QGPU_SK_LIGHTING], sk[QGPU_SK_BLEND], sk[QGPU_SK_ALPHA_TEST], sk[QGPU_SK_COLOR_MATERIAL], sk[QGPU_SK_COLOR_MAT_MODE]);
             }
-            if (op == QGPU_OP_SURF_PRESENT && len == QGPU_LEN_SURF_PRESENT && h.frame >= fmin) {
+            if (op == QGPU_OP_SURF_PRESENT && len == QGPU_LEN_SURF_PRESENT && h.frame >= fmin && !pass) {
                 /* relecture de la surface par le cœur (SURF_READBACK dans une
                    zone de travail), puis PPM : ne dépend pas du scanout */
                 uint32_t rb[9], surf = qgpu_ld32(shmem + h.base + (k + 1) * 4);
@@ -887,6 +977,46 @@ int main(int argc, char **argv)
                 reg_pres);
     fprintf(stderr, "SURF_PRESENT : %llu, %.3f ms en tout (relecture et empaquetage vers le scanout)\n",
             (unsigned long long)c.cstats.present, c.cstats.present_ns / 1e6);
+    fprintf(stderr, "fin de soumission (glFlush) : %.3f ms en tout\n", end_ns / 1e6);
+    if (reg_frames)
+        fprintf(stderr, "sortes : requête %.2f/image %.3f ms/image, présentation %.2f/image %.3f ms/image, "
+                "autres %.2f/image %.3f ms/image\n",
+                (double)kind_n[0] / reg_frames, kind_ns[0] / 1e6 / reg_frames,
+                (double)kind_n[1] / reg_frames, kind_ns[1] / 1e6 / reg_frames,
+                (double)kind_n[2] / reg_frames, kind_ns[2] / 1e6 / reg_frames);
+    if (getenv("QGPU_REPLAY_OPTIME") && reg_frames) {
+        static const struct { uint32_t op; const char *nom; } noms[] = {
+            { QGPU_OP_CTX_BIND, "CTX_BIND" }, { QGPU_OP_SURF_BIND, "SURF_BIND" },
+            { QGPU_OP_SURF_PRESENT, "SURF_PRESENT" }, { QGPU_OP_COPY_TEX, "COPY_TEX" },
+            { QGPU_OP_SURF_TEX, "SURF_TEX" }, { QGPU_OP_BUF_SUBDATA, "BUF_SUBDATA" },
+            { QGPU_OP_CLEAR, "CLEAR" }, { QGPU_OP_SET_STATE, "SET_STATE" },
+            { QGPU_OP_TEX_IMAGE3, "TEX_IMAGE3" }, { QGPU_OP_TEX_PARAM, "TEX_PARAM" },
+            { QGPU_OP_TEX_SUBIMAGE, "TEX_SUBIMAGE" }, { QGPU_OP_SET_MATRIX, "SET_MATRIX" },
+            { QGPU_OP_DRAW_RAW, "DRAW_RAW" }, { QGPU_OP_DRAW_RAW_BUF, "DRAW_RAW_BUF" },
+            { QGPU_OP_DRAW_NATIVE, "DRAW_NATIVE" }, { QGPU_OP_QUERY_BEGIN, "QUERY_BEGIN" },
+            { QGPU_OP_QUERY_END, "QUERY_END" }, { QGPU_OP_QUERY_RESULT, "QUERY_RESULT" },
+            { QGPU_OP_PROG_BIND, "PROG_BIND" }, { QGPU_OP_PROG_ENV, "PROG_ENV" },
+            { QGPU_OP_PROG_LOCAL, "PROG_LOCAL" }, { QGPU_OP_PROG_STRING, "PROG_STRING" },
+            { QGPU_OP_GLSL_UNIFORMS, "GLSL_UNIFORMS" }, { QGPU_OP_GLSL_LINK, "GLSL_LINK" },
+            { QGPU_OP_SET_LIGHT, "SET_LIGHT" }, { QGPU_OP_SET_CURRENT, "SET_CURRENT" },
+            { QGPU_OP_TEX_READBACK, "TEX_READBACK" }, { QGPU_OP_SURF_READBACK, "SURF_READBACK" },
+            { QGPU_OP_DRAW_TRIANGLES_TEXN, "DRAW_TRIANGLES_TEXN" },
+        };
+        uint64_t tot = 0;
+        unsigned o, j;
+        for (o = 0; o < 256; o++) tot += op_ns[o];
+        for (o = 0; o < 256; o++) {
+            const char *nom = NULL;
+            char buf[16];
+            if (!op_n[o]) continue;
+            for (j = 0; j < sizeof(noms) / sizeof(noms[0]); j++)
+                if (noms[j].op == o) nom = noms[j].nom;
+            if (!nom) { snprintf(buf, sizeof(buf), "op 0x%02x", o); nom = buf; }
+            fprintf(stderr, "OPTIME %-20s %8.1f /image  %7.3f ms/image  %6.2f us/cmd  %5.1f %%\n", nom,
+                    (double)op_n[o] / reg_frames, op_ns[o] / 1e6 / reg_frames,
+                    op_ns[o] / 1e3 / op_n[o], 100.0 * op_ns[o] / (tot ? tot : 1));
+        }
+    }
     /* QGPU_REPLAY_SURFS=1 : chaque surface vivante à la fin du rejeu, en PPM
        (<préfixe>-surf<id>-<l>x<h>.ppm) — cibles de rendu, textures de surface */
     if (getenv("QGPU_REPLAY_SURFS")) {

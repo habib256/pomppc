@@ -4,6 +4,11 @@
 # vidage de la matrice (premier écart de plus d'une seconde dans la seconde moitié), et pauses
 # de plus de 250 ms avant lui (chargements).
 # Usage : python3 tools/re/a4attente.py frames.csv...
+# ATTENTION (30/09, docs/backend-gl-attente.md §1) : cette fenêtre n'est pas celle
+# de la mesure. Chez Colin McRae elle tombe dans un menu à 2 ms par échange
+# (« 10 % d'attente ») ; en course, l'attente est de 0,12 ms par image. Pour un
+# tour de matrice, préférer tools/re/attente.py (fenêtre de resultats.csv,
+# contexte affiché).
 # Un gain côté hôte (backend : G7, G8) ne se voit dans le temps d'image que par cette attente :
 # le fil de rendu du device tourne en parallèle du vCPU.
 import csv

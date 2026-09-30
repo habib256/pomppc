@@ -430,6 +430,14 @@ typedef struct QgpuBackend {
                      uint32_t lvl, uint32_t x, uint32_t y, uint32_t z,
                      uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, bool flip);
     bool (*tex_fetch)(QgpuCore *c, QgpuTexture *t, uint32_t face, uint32_t lvl);
+    /* 30/09 (attente de l'invité, docs/backend-gl-attente.md ; facultatif) :
+       fin d'une soumission, appelé par qgpu_core_submit_end APRÈS la
+       publication de sa barrière. Le backend GL y confie au GPU ce qu'il a
+       encodé (glFlush) : sinon le travail attend la prochaine synchronisation
+       (relecture de présentation, requête d'occlusion), qui paie alors tout
+       le rendu de l'image d'un coup. Ne change aucun état ni aucun compte ;
+       l'arrondi d'un pixel mélangé peut varier d'une unité (passe coupée). */
+    void (*submit_end)(QgpuCore *c);
 } QgpuBackend;
 
 /* 27/09 : compteurs des copies surface → texture (rejeu, épreuves). Temps
@@ -573,6 +581,12 @@ void     qgpu_core_set_scanout_geom(QgpuCore *c, uint32_t stride, uint32_t width
 /* Exécute un flux ; renvoie le statut (aussi dans c->status / status_pc).
  * off/len en octets dans la fenêtre partagée. */
 uint32_t qgpu_core_execute(QgpuCore *c, uint32_t off, uint32_t len);
+
+/* 30/09 : fin d'une soumission (QgpuBackend.submit_end), à appeler par qui
+ * exécute les soumissions — le thread de rendu, après la publication de la
+ * barrière ; le rejeu, après chaque soumission. */
+void     qgpu_core_submit_end(QgpuCore *c);
+#define QGPU_CORE_HAS_SUBMIT_END 1
 
 /* Nom du backend actif, empaqueté pour QGPU_REG_BACKEND_NAME. */
 uint32_t qgpu_core_backend_tag(const QgpuCore *c);
