@@ -1871,7 +1871,7 @@ corrigé. Bilan sur stderr toutes les 2^26 décisions et à la sortie.
 |---|---|---|
 | banc d'endurance `msr-verif-reboot`, 2 instances | `x-msr-nobql` + `-verify` | 30 démarrages sur 30 (shutdown -r), 0 panique, 0 gel ; **378 M décisions sans verrou vérifiées, 0 divergence** ; 0,06 % de passages au verrou ; 162 M `EXITTB` supprimés |
 | banc d'endurance `msr-jc14-reboot`, 2 instances | `x-msr-nobql` + `x-jc-bits=14`, sans preuve | 40 sur 40, 0 panique, 0 gel |
-| `smctest` A-F + E×100 (disque de dev) | toutes les propriétés, preuves allumées | voir §19.5 |
+| `smctest` A-F, puis E × 100 (copie du disque de dev, single-user, SMP=2) | configuration retenue (`x-jc-bits=14`, `x-msr-nobql`, `x-icbi-sync`) + `x-msr-nobql-verify` + `x-ret-verify` | **0 erreur**, empreintes A-F identiques à celles du §17.4 (`A cd01e214aab92265` … `F 7308784105b8fd59`, `E aa4d72ebdba6b6eb` à chaque tour) ; 137 M décisions sans verrou, 0 divergence ; 6,3 G blocs pris dans le cache de sauts vérifiés, 0 divergence (32 749 « courses » : blocs invalidés par l'autre vCPU entre lecture et vérification, que `x-icbi-sync` multiplie sous `smctest`) |
 
 ### 19.4 A/B DOOM 3
 
