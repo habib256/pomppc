@@ -520,7 +520,7 @@ int main(int argc, char **argv)
                     uint32_t o = QGPU_CMD_OP(hd), l = QGPU_CMD_LEN(hd);
                     if (!l || q + l > h.ncmd_bytes / 4) break;
                     if (o == QGPU_OP_DRAW_RAW || o == QGPU_OP_DRAW_RAW_BUF ||
-                        o == QGPU_OP_DRAW_NATIVE) {
+                        o == QGPU_OP_DRAW_NATIVE || o == QGPU_OP_DRAW_RAW_SANE) {
                         if (ndraw_frame >= si && ndraw_frame <= sj) {
                             if (q > seg) st = qgpu_core_execute(&c, h.base + seg * 4, (q - seg) * 4);
                             seg = q + l;
@@ -556,7 +556,7 @@ int main(int argc, char **argv)
                 if (id < QGPU_MAX_TEX) tex_img_seen[id] |= (op == QGPU_OP_TEX_IMAGE3) ? 2 : 1;
             }
             if (op == QGPU_OP_DRAW_RAW || op == QGPU_OP_DRAW_RAW_BUF ||
-                op == QGPU_OP_DRAW_NATIVE || op == QGPU_OP_DRAW_TRIANGLES_TEXN || op == QGPU_OP_DRAW_TRIANGLES_SEC ||
+                op == QGPU_OP_DRAW_NATIVE || op == QGPU_OP_DRAW_RAW_SANE || op == QGPU_OP_DRAW_TRIANGLES_TEXN || op == QGPU_OP_DRAW_TRIANGLES_SEC ||
                 op == QGPU_OP_DRAW_TRIANGLES_TEX || op == QGPU_OP_DRAW_TRIANGLES_TEX2) {
                 /* lot 11 : une texture liée dont aucune image n'est dans le
                    vidage rend le rejeu infidèle — le dire, une fois par texture */

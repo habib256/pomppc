@@ -219,6 +219,17 @@
    GLSL_ATTRIB reste limité aux identifiants. Ajouté sans changer
    QGPU_PROTO_VERSION (même règle que QGPU_CAP_GEN_SIZES). */
 #define QGPU_CAP_GLSL_PATHS     0x00004000
+/* A4, volet géométrie (30/09/2026) : le travail par sommet passe à l'hôte.
+   (1) QGPU_OP_DRAW_RAW_SANE : DRAW_RAW dont l'HÔTE trie les sommets fous
+   (NaN, infini, |v| >= 1e9, w ≈ 0) comme le plugin le faisait sur le G4 ;
+   (2) un descripteur de DRAW_NATIVE peut désigner BAR0 (buf =
+   QGPU_BUF_SHMEM, offset absolu dans la fenêtre) : des tableaux CLIENTS
+   partent aux octets de l'application, l'hôte convertit. Annoncé par le
+   CŒUR avec QGPU_CAP_NATIVE. Sans ce bit : DRAW_RAW_SANE = BAD_OPCODE
+   (FATAL), descripteur BAR0 = BAD_ARG (non fatal) ; l'invité n'émet ni l'un
+   ni l'autre. Ajouté sans changer QGPU_PROTO_VERSION (même règle que
+   QGPU_CAP_GEN_SIZES). docs/protocole-v23-geometrie.md. */
+#define QGPU_CAP_GEOM_HOST      0x00020000
 
 /* ── Statuts : QGPU_ST_* dans qgpu_abi.h ─────────────────────────────────── */
 /* ── Limites ─────────────────────────────────────────────────────────────── */
@@ -359,6 +370,10 @@
                                            premier, nverts] */
 #define QGPU_OP_DRAW_RAW_BUF    0x0059  /* v14, [mode, n, vbuf, voff, pas, format,
                                            ibuf, ioff, itype, premier, nverts] */
+/* A4 (QGPU_CAP_GEOM_HOST) : DRAW_RAW + [drapeaux QGPU_RAWS_*], cf. section
+   « A4 : DRAW_RAW_SANE ». Opcodes 0x0090..0x0097 réservés au volet géométrie. */
+#define QGPU_OP_DRAW_RAW_SANE   0x0090  /* [mode, n, voff, pas, format, ioff, itype,
+                                           premier, nverts, drapeaux] */
 #define QGPU_OP_DRAW_NATIVE     0x005A  /* v18, [mode, n, ibuf, ioff, itype, premier,
                                            nattr, aoff], cf. section v18 */
 
@@ -418,6 +433,7 @@
 #define QGPU_LEN_DRAW_RAW       10
 #define QGPU_LEN_DRAW_RAW_BUF   12          /* v14 */
 #define QGPU_LEN_DRAW_NATIVE    9           /* v18 */
+#define QGPU_LEN_DRAW_RAW_SANE  11          /* A4 */
 #define QGPU_LEN_SET_POLYGON_STIPPLE 33     /* v8 : la plus longue commande */
 #define QGPU_LEN_QUERY          2
 #define QGPU_LEN_QUERY_RESULT   3
@@ -1790,8 +1806,11 @@
  *     code   : attribut qgpu — QGPU_NA_POSITION (0), _NORMAL (1), _COLOR (2),
  *              _SEC_COLOR (3), _FOG (4), QGPU_NA_TEX(u) = 8 + u (u 0..7),
  *              QGPU_NA_GEN(k) = 16 + k (k 0..15). Au plus une fois chacun.
- *     buf    : tampon hôte (BUF_CREATE) ; JAMAIS QGPU_BUF_SHMEM : des
- *              sommets encore dans BAR0 passent par DRAW_RAW.
+ *     buf    : tampon hôte (BUF_CREATE). QGPU_BUF_SHMEM seulement sous
+ *              QGPU_CAP_GEOM_HOST (A4) : `offset` est alors un offset
+ *              ABSOLU dans BAR0, et les bornes (point 3 ci-dessous) se
+ *              comptent sur la fenêtre entière ; sans le bit, des sommets
+ *              encore dans BAR0 passent par DRAW_RAW.
  *     offset : octet du premier sommet (sommet d'indice 0) dans le tampon.
  *     pas    : octets d'un sommet au suivant ; 0 = serré (taille × octets du
  *              type), comme OpenGL. Aucun alignement exigé.
@@ -1834,7 +1853,7 @@
  *   son dessin. Liste : mode, itype, n = 0 ou > QGPU_MAX_VERTS, premier ≠ 0
  *   indexé, premier + n débordant 32 bits, nattr hors de 1..24, aoff hors de
  *   BAR0 ou non aligné, code inconnu (5..7, > 31) ou en double, buf inexistant
- *   ou QGPU_BUF_SHMEM, type inconnu, taille 0 ou > 4, drapeaux réservés,
+ *   ou QGPU_BUF_SHMEM sans QGPU_CAP_GEOM_HOST, type inconnu, taille 0 ou > 4, drapeaux réservés,
  *   position à 1 composante, ni position ni générique 0, générique sans
  *   QGPU_CAP_PROGRAMS, indices hors de leur tampon, plage d'un attribut hors
  *   de son tampon, hi − lo + 1 > QGPU_MAX_VERTS. Un index n'a pas d'autre
@@ -1863,6 +1882,41 @@
 #define QGPU_NT_UINT            0x1405
 #define QGPU_NT_FLOAT           0x1406
 #define QGPU_NT_DOUBLE          0x140A
+
+/* ── A4 : DRAW_RAW_SANE — le tri des sommets fous, fait par l'hôte ──────────
+ *
+ *   Pourquoi. Le chemin Begin/End (GLEngine écrit les sommets directement dans
+ *   BAR0) passait chaque mot de chaque sommet au crible sur le G4 émulé
+ *   (raw_scan_nan du plugin) : 12,8 % du fil principal de Nexuiz ARB au
+ *   30/09 (bench/a4/depart), des centaines de milliers de sommets par image.
+ *
+ *   QGPU_OP_DRAW_RAW_SANE [mode, n, voff, pas, format, ioff, itype, premier,
+ *                          nverts, drapeaux]
+ *
+ *   Les neuf premiers mots : exactement DRAW_RAW (mêmes règles, mêmes refus,
+ *   BAR0 seulement). drapeaux : QGPU_RAWS_KEEP_W0 (sous programme de sommets :
+ *   w = 0 n'est pas fou, volumes d'ombre projetés à l'infini) ; autres bits
+ *   réservés (BAD_ARG). La clé QGPU_SK_GEN_SIZES doit valoir 0 pour les
+ *   génériques du format (sinon BAD_ARG).
+ *
+ *   Un sommet (parmi les nverts) est FOU si l'un de ses mots a des bits
+ *   IEEE |u| >= 0x4e6e6b28 (NaN, infini, |v| >= 1e9), ou, sans
+ *   QGPU_RAWS_KEEP_W0 et avec une position à 4 composantes, |w| < 1e-6
+ *   (bits < 0x358637bd). Sans sommet fou : DRAW_RAW. Sinon :
+ *     GL_TRIANGLES indexé : les triangles dont un indice est >= nverts ou
+ *       cite un sommet fou sont retirés, le reste dessiné dans l'ordre
+ *       (un reste de moins de 3 indices en fin de liste est ignoré) ;
+ *     GL_TRIANGLES non indexé : les triangles entiers gardés sont recopiés
+ *       bout à bout (premier + 3t…) et dessinés sans indices ;
+ *     autre mode : le dessin est jeté (statut OK) ;
+ *     rien à dessiner : statut OK.
+ *   Les mots fous d'un sommet fou non cité mais converti valent 0. C'est à la
+ *   lettre ce que faisait raw_fix_nan dans le plugin : le backend reçoit les
+ *   mêmes sommets et les mêmes indices (tests/qgpu_core_test.c, A4).
+ *   Un refus est un BAD_ARG non fatal, comme DRAW_RAW ; un device sans
+ *   QGPU_CAP_GEOM_HOST répond BAD_OPCODE (fatal) — l'invité ne l'émet pas. */
+#define QGPU_RAWS_KEEP_W0       0x00000001
+#define QGPU_RAWS_ON            0x80000000  /* interne au cœur, jamais sur le fil */
 
 /* ── Tranches de clients : la DISPOSITION que le device publie ──────────────
  *

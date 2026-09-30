@@ -1746,6 +1746,9 @@ bool qgpu_core_init(QgpuCore *c, const char *backend,
            DRAW_RAW ; tout backend qui dessine en brut le tient. */
         if (c->be->draw_raw) {
             c->caps |= QGPU_CAP_NATIVE;
+            /* A4 : descripteurs dans BAR0 (même conversion, autre source) et
+               DRAW_RAW_SANE (le tri des sommets fous du plugin, fait ici) */
+            c->caps |= QGPU_CAP_GEOM_HOST;
         }
         /* v19 : la disposition des clients et leur destruction sont l'affaire
            du cœur, quel que soit le backend. */
@@ -2389,12 +2392,43 @@ static uint32_t raw_finish(QgpuCore *c, QgpuSurface *s, uint32_t mode, uint32_t 
     return QGPU_ST_OK;
 }
 
-static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint32_t ibuf, int raw_buf)
+/* A4 (QGPU_CAP_GEOM_HOST) : un mot « fou » pour l'invité — NaN, infini,
+   |v| >= 1e9, comparaison entière sur les bits IEEE (u_insane du plugin). */
+static inline bool raw_word_insane(uint32_t u)
+{
+    return (u & 0x7fffffffu) >= 0x4e6e6b28u;             /* 1e9 = 0x4e6e6b28 */
+}
+
+/* A4 : les sommets que le plugin marquait (raw_scan_nan, à la lettre) : un mot
+   fou, ou |w| < 1e-6 sur une position à 4 composantes hors programme de
+   sommets. Rend leur nombre ; bad[i] = 0/1. */
+static uint32_t raw_scan_bad(const uint8_t *vbase, uint32_t stride, uint32_t words,
+                             uint32_t fmt, uint32_t nverts, bool keep_w0, uint8_t *bad)
+{
+    uint32_t i, j, nbad = 0;
+    bool w4 = !keep_w0 && QGPU_VF_POS_COUNT(fmt) == 4;
+
+    for (i = 0; i < nverts; i++) {
+        const uint8_t *p = vbase + (size_t)i * stride * 4;
+        uint8_t b = w4 && (qgpu_ld32(p + 12) & 0x7fffffffu) < 0x358637bdu;   /* 1e-6 */
+        for (j = 0; j < words && !b; j++) {
+            b = raw_word_insane(qgpu_ld32(p + j * 4));
+        }
+        bad[i] = b;
+        nbad += b;
+    }
+    return nbad;
+}
+
+/* `sane` : 0 pour DRAW_RAW / DRAW_RAW_BUF ; DRAW_RAW_SANE (A4) :
+   QGPU_RAWS_ON | ses drapeaux QGPU_RAWS_*. */
+static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint32_t ibuf, int raw_buf,
+                            uint32_t sane)
 {
     uint32_t mode = a[0], count = a[1], voff, stride, fmt, ioff, itype, first, nverts;
-    uint32_t words, swords, gs, pre = 0, ng = 0, i, st, lo, hi;
+    uint32_t words, swords, gs, pre = 0, ng = 0, i, st, lo, hi, nbad = 0;
     uint8_t gn[QGPU_VF_GEN_MAX];
-    bool dense;
+    bool dense, compact = false, have_idx = false;
     QgpuSurface *s = bound_surface(c, &st);
     const uint8_t *vbase, *ibase;
 
@@ -2480,8 +2514,73 @@ static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint3
             return st;
         }
     }
-    if (!grow_vbuf(c, nverts * words)) {
+    /* A4 : DRAW_RAW_SANE — le tri des sommets fous que le plugin faisait sur
+       le G4 (raw_fix_nan), fait ici, à la lettre : un sommet marqué retire
+       les triangles qui le citent (GL_TRIANGLES, indexé ou non) ; dans tout
+       autre mode, il fait jeter le dessin. Rien n'est écrit dans BAR0. */
+    if (sane) {
+        if (sane & ~(uint32_t)(QGPU_RAWS_ON | QGPU_RAWS_KEEP_W0)) {
+            return QGPU_ST_BAD_ARG;
+        }
+        if (gs) {
+            return QGPU_ST_BAD_ARG;              /* Begin/End : génériques à 4 */
+        }
+        if (!grow_sbuf(c, nverts)) {
+            return QGPU_ST_BACKEND;
+        }
+        nbad = raw_scan_bad(vbase, stride, swords, fmt, nverts,
+                            (sane & QGPU_RAWS_KEEP_W0) != 0, c->sbuf);
+    }
+    if (nbad) {
+        uint32_t o = 0, t, v[3];
+        if (mode != QGPU_PRIM_MODE_TRIANGLES) {
+            TRACE(c, "  dessin brut vérifié jeté : %u sommet(s) fou(s), mode %u", nbad, mode);
+            return QGPU_ST_OK;
+        }
+        if (!grow_ibuf(c, count)) {
+            return QGPU_ST_BACKEND;
+        }
+        for (t = 0; t + 2 < count; t += 3) {
+            int k, keep = 1;
+            for (k = 0; k < 3; k++) {
+                if (itype == QGPU_IDX_NONE) {
+                    v[k] = first + t + k;
+                } else if (itype == QGPU_IDX_U16) {
+                    v[k] = qgpu_ld16(ibase + (t + k) * 2);
+                } else {
+                    v[k] = qgpu_ld32(ibase + (t + k) * 4);
+                }
+                if (v[k] >= nverts || c->sbuf[v[k]]) {
+                    keep = 0;
+                }
+            }
+            if (keep) {
+                c->ibuf[o++] = v[0];
+                c->ibuf[o++] = v[1];
+                c->ibuf[o++] = v[2];
+            }
+        }
+        if (!o) {
+            return QGPU_ST_OK;
+        }
+        count = o;
+        have_idx = true;
+        /* non indexé : les sommets gardés sont RECOPIÉS bout à bout (le
+           plugin compactait la zone des sommets) — même tableau, même ordre */
+        compact = itype == QGPU_IDX_NONE;
+    }
+    if (!grow_vbuf(c, (compact ? count : nverts) * words)) {
         return QGPU_ST_BACKEND;
+    }
+    if (compact) {
+        for (i = 0; i < count; i++) {
+            const uint8_t *p = vbase + (size_t)c->ibuf[i] * stride * 4;
+            uint32_t j;
+            for (j = 0; j < words; j++) {
+                c->vbuf[(size_t)i * words + j] = sane_coord(qgpu_u2f(qgpu_ld32(p + j * 4)));
+            }
+        }
+        return raw_finish(c, s, mode, fmt, words, count, QGPU_IDX_NONE, count, 0, 0, count - 1);
     }
     /* H4 : les INDICES d'abord — ce sont eux qui disent quels sommets sont
        réellement lus. Un VBO surdimensionné (queue jamais écrite par
@@ -2489,7 +2588,14 @@ static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint3
        tuer l'image entière parce qu'un mot jamais lu contenait un NaN. */
     lo = first;
     hi = first + count - 1;
-    if (itype != QGPU_IDX_NONE) {
+    if (have_idx) {                     /* A4 : liste déjà filtrée, bornée */
+        lo = ~0u;
+        hi = 0;
+        for (i = 0; i < count; i++) {
+            if (c->ibuf[i] < lo) lo = c->ibuf[i];
+            if (c->ibuf[i] > hi) hi = c->ibuf[i];
+        }
+    } else if (itype != QGPU_IDX_NONE) {
         if (!grow_ibuf(c, count)) {
             return QGPU_ST_BACKEND;
         }
@@ -2539,6 +2645,21 @@ static uint32_t do_draw_raw(QgpuCore *c, const uint32_t *a, uint32_t vbuf, uint3
     } else {
         for (i = 0; i < count; i++) {
             conv_raw_vertex(c, vbase, stride, words, c->ibuf[i]);
+        }
+    }
+    /* A4 : un sommet fou resté dans le bloc converti (non cité) porte ses
+       mots fous à 0, comme le plugin les laissait dans BAR0 */
+    if (nbad && dense) {
+        for (i = lo; i <= hi; i++) {
+            if (c->sbuf[i]) {
+                const uint8_t *p = vbase + (size_t)i * stride * 4;
+                uint32_t j;
+                for (j = 0; j < words; j++) {
+                    if (raw_word_insane(qgpu_ld32(p + j * 4))) {
+                        c->vbuf[(size_t)i * words + j] = 0.0f;
+                    }
+                }
+            }
         }
     }
     return raw_finish(c, s, mode, fmt, words, nverts, itype, count, first, lo, hi);
@@ -2718,17 +2839,21 @@ static uint32_t do_draw_native(QgpuCore *c, const uint32_t *a)
         t->tb = nat_type_bytes(t->type);
         t->n = szf & QGPU_NA_SIZE_MASK;
         t->norm = (szf & QGPU_NA_NORMALIZED) != 0;
+        /* A4 (QGPU_CAP_GEOM_HOST) : QGPU_BUF_SHMEM = octets de BAR0, offset
+           absolu ; les bornes se comptent sur la fenêtre entière, comme la
+           voff de DRAW_RAW. */
+        bool shm = buf == QGPU_BUF_SHMEM && (c->caps & QGPU_CAP_GEOM_HOST);
         if (code > QGPU_NA_CODE_MAX ||
             (code > QGPU_NA_FOG && code < QGPU_NA_TEX(0)) ||
             ((seen >> code) & 1) ||
-            buf >= QGPU_MAX_BUF || !c->buf[buf].used || !c->buf[buf].data ||
+            (!shm && (buf >= QGPU_MAX_BUF || !c->buf[buf].used || !c->buf[buf].data)) ||
             t->tb == 0 || t->n == 0 || t->n > 4 ||
             (szf & ~(uint32_t)(QGPU_NA_SIZE_MASK | QGPU_NA_NORMALIZED))) {
             return QGPU_ST_BAD_ARG;
         }
         seen |= 1u << code;
-        t->data = c->buf[buf].data;
-        t->size = c->buf[buf].size;
+        t->data = shm ? c->shmem : c->buf[buf].data;
+        t->size = shm ? c->shmem_size : c->buf[buf].size;
         if (t->stride == 0) {
             t->stride = t->n * t->tb;
         }
@@ -3480,11 +3605,22 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
 
     case QGPU_OP_DRAW_RAW:
         WANT(QGPU_LEN_DRAW_RAW);
-        return do_draw_raw(c, a, QGPU_BUF_SHMEM, QGPU_BUF_SHMEM, 0);
+        return do_draw_raw(c, a, QGPU_BUF_SHMEM, QGPU_BUF_SHMEM, 0, 0);
 
     case QGPU_OP_DRAW_RAW_BUF:
         WANT(QGPU_LEN_DRAW_RAW_BUF);
-        return do_draw_raw(c, a, a[2], a[6], 1);
+        return do_draw_raw(c, a, a[2], a[6], 1, 0);
+
+    case QGPU_OP_DRAW_RAW_SANE:                      /* A4 */
+        WANT(QGPU_LEN_DRAW_RAW_SANE);
+        if (!(c->caps & QGPU_CAP_GEOM_HOST)) {
+            return QGPU_ST_BAD_OPCODE;
+        }
+        if (a[QGPU_LEN_DRAW_RAW - 1] & ~(uint32_t)QGPU_RAWS_KEEP_W0) {
+            return QGPU_ST_BAD_ARG;              /* drapeaux réservés */
+        }
+        return do_draw_raw(c, a, QGPU_BUF_SHMEM, QGPU_BUF_SHMEM, 0,
+                           QGPU_RAWS_ON | a[QGPU_LEN_DRAW_RAW - 1]);
 
     case QGPU_OP_DRAW_NATIVE:                        /* v18 */
         WANT(QGPU_LEN_DRAW_NATIVE);
@@ -4733,6 +4869,7 @@ static bool known_op(uint32_t op)
     case QGPU_OP_SET_TEXGEN: case QGPU_OP_SET_CLIP_PLANE:
     case QGPU_OP_SET_CURRENT: case QGPU_OP_DRAW_RAW: case QGPU_OP_DRAW_RAW_BUF:
     case QGPU_OP_DRAW_NATIVE:                        /* v18 */
+    case QGPU_OP_DRAW_RAW_SANE:                      /* A4 */
     /* v8 */
     case QGPU_OP_SET_POLYGON_STIPPLE: case QGPU_OP_QUERY_BEGIN:
     case QGPU_OP_QUERY_END: case QGPU_OP_QUERY_RESULT:
@@ -4757,6 +4894,7 @@ static bool draw_op(uint32_t op)
     return (op >= QGPU_OP_DRAW_TRIANGLES && op <= QGPU_OP_DRAW_TRIANGLES_SEC) ||
            op == QGPU_OP_DRAW_RAW || op == QGPU_OP_DRAW_RAW_BUF ||
            op == QGPU_OP_DRAW_NATIVE || op == QGPU_OP_PROG_STRING ||
+           op == QGPU_OP_DRAW_RAW_SANE ||                /* A4 */
            op == QGPU_OP_GLSL_LINK;                  /* v21 : refus de l'hôte */
 }
 
