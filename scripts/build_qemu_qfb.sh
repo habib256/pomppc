@@ -18,6 +18,7 @@
 #   • taille du cache de sauts (x-jc-bits)             — patches/tcg/0011
 #   • mtmsr/rfi sans verrou global (x-msr-nobql)       — patches/tcg/0012
 #   • flottant scalaire sans branchement (x-fp-flat)   — patches/tcg/0013
+#   • flottant scalaire natif, op TCG ppc_fp32 (x-fp-native) — patches/tcg/0014
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
 #   ./scripts/build_qemu_qfb.sh              # build dans ~/src/qemu
@@ -638,6 +639,34 @@ target/ppc/fpu_helper.c helper_fp32_flat
 target/ppc/helper.h fp32_flat
 target/ppc/translate/fp-impl.c.inc do_fp_flat
 TCG13_MARKERS
+  # --- 4 quindecies. Le chemin court du flottant scalaire simple par le FPU de
+  # l'hôte dans le code généré (x-fp-native) --- patches/tcg/0014,
+  # docs/tcg-g4.md §22 : op TCG ppc_fp32 (cœur de TCG et backend arm64), chemin
+  # lent hors ligne vers le helper de x-fp-flat. Garde : le marqueur du dernier
+  # fichier du patch.
+  if ! grep -q "do_fp_native" target/ppc/translate/fp-impl.c.inc; then
+    echo "▶ patch TCG : flottant scalaire natif (x-fp-native)"
+    patch_strict "$ROOT/patches/tcg/0014-tcg-fp-native.patch"
+    for f in include/tcg/tcg-opc.h include/tcg/tcg.h include/tcg/tcg-op-common.h \
+             tcg/tcg.c tcg/tcg-op.c tcg/tcg-ldst.c.inc tcg/optimize.c \
+             tcg/aarch64/tcg-target.h tcg/aarch64/tcg-target-con-set.h \
+             tcg/aarch64/tcg-target.c.inc target/ppc/cpu.h target/ppc/cpu_init.c \
+             target/ppc/fpu_helper.c target/ppc/helper.h target/ppc/internal.h \
+             target/ppc/translate.c target/ppc/translate/fp-impl.c.inc; do
+      rm -f "$f.orig"
+    done
+  fi
+  while read -r f m; do
+    [ -z "$f" ] && continue
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0014 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG14_MARKERS'
+include/tcg/tcg-opc.h ppc_fp32
+tcg/aarch64/tcg-target.c.inc tcg_out_ppc_fp32
+target/ppc/cpu_init.c x-fp-native
+target/ppc/fpu_helper.c ppc_fp32_native_slow
+target/ppc/translate/fp-impl.c.inc do_fp_native
+TCG14_MARKERS
 fi
 
 # --- 5. Build ---
