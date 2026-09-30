@@ -3089,6 +3089,30 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             return QGPU_ST_BACKEND;
         }
         t0 = now_ns();
+        /* 30/09 — ÉPREUVE G8, débogage seulement (docs/backend-gl-attente.md) :
+           QGPU_PRESENT_SKIP=N (N ≥ 2) saute la relecture et la copie vers le
+           scanout de N − 1 présentations sur N, pour mesurer ce que l'invité
+           gagnerait si la présentation ne coûtait rien au fil de rendu (la
+           borne d'un PBO en rotation, à (N − 1)/N près). L'écran n'est
+           rafraîchi qu'une image sur N : assez pour que la matrice reconnaisse
+           ses écrans (Colin McRae), et la cellule sort rouge (image). Lu une
+           fois ; absent ou 1 : rien ne change. */
+        {
+            static uint32_t skip, seq;
+            if (!skip) {
+                const char *e = getenv("QGPU_PRESENT_SKIP");
+                skip = e && atoi(e) > 1 ? (uint32_t)atoi(e) : 1;
+                if (skip > 1) {
+                    fprintf(stderr, "qgpu: QGPU_PRESENT_SKIP=%u : %u relecture(s) de "
+                            "présentation sautée(s) sur %u (épreuve G8)\n",
+                            skip, skip - 1, skip);
+                }
+            }
+            if (skip > 1 && ++seq % skip) {
+                c->cstats.present++;
+                return QGPU_ST_OK;
+            }
+        }
         if (!c->be->readback(c, s, x, y, w, h, c->pbuf)) {
             return QGPU_ST_BACKEND;
         }
