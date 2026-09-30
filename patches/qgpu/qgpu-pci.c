@@ -66,13 +66,7 @@
  * à écrire sur l'autre écran, au pas d'un autre écran : l'image du jeu restait
  * figée, statut OK, aucun message (rapport du 22/09/2026, §8.3, Q1).
  *
- *   -device qgpu-pci[,shmem_mb=64][,backend=auto|soft|gl][,trace=on][,stats=on]
- *
- *   stats=on (30/09, levier L4) : toutes les 5 s, une ligne « qgpu-pci: bilan »
- *   sur stderr — écritures de registres (BQL tenu par le vCPU pendant chacune),
- *   doorbells synchrones (dont l'attente du rendu, BQL tenu : D2) et
- *   asynchrones, refus sur file pleine, lectures, soumissions terminées. Rien
- *   par commande, contrairement à trace=on : mesurable en jeu.
+ *   -device qgpu-pci[,shmem_mb=64][,backend=auto|soft|gl][,trace=on]
  *                   [,scanout=auto|qfb|vga|none]
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
@@ -259,13 +253,6 @@ struct QgpuPCIState {
     char *scanout_pref;            /* propriété : auto | qfb | vga | none */
     int  scanout_mode;             /* QGPU_SCANOUT_*, résolu au realize */
     bool trace;
-    bool stats;                    /* 30/09 : bilan toutes les 5 s (stats=on) */
-
-    /* stats=on — sous BQL (chemins MMIO du vCPU), remis à zéro à chaque bilan */
-    int64_t  st_t0;                /* début de la période (ns, horloge réelle) */
-    uint32_t st_fence0;            /* FENCE au début de la période */
-    uint32_t st_sync_n, st_async_n, st_full_n, st_other_n, st_reads;
-    int64_t  st_sync_ns, st_sync_max_ns, st_async_ns, st_other_ns;
 
     uint32_t regs[QGPU_NUM_REGS];
     qemu_irq irq;
@@ -804,74 +791,10 @@ static void qgpu_soft_reset(QgpuPCIState *s)
     qemu_irq_lower(s->irq);
 }
 
-/*
- * stats=on (30/09) — ce que le vCPU passe BQL PRIS dans les écritures de
- * registres de ce device : un doorbell synchrone attend la fin du rendu hôte
- * (D2), les autres ne font que déposer. Seuil du bug hunt (S-M6) : plus de
- * 2 ms cumulées par image = un tick de décrémenteur perdu par image. La
- * ligne se lit avec le ms/image du jeu (frames.csv) sur la même fenêtre.
- */
-static void qgpu_stats_flush(QgpuPCIState *s, int64_t now)
-{
-    double dt;
-    uint32_t fence;
-
-    if (!s->st_t0) {
-        s->st_t0 = now;
-        s->st_fence0 = qatomic_read(&s->regs[QGPU_REG_FENCE >> 2]);
-        return;
-    }
-    if (now - s->st_t0 < 5 * NANOSECONDS_PER_SECOND) {
-        return;
-    }
-    dt = (now - s->st_t0) / 1e9;
-    fence = qatomic_read(&s->regs[QGPU_REG_FENCE >> 2]);
-    fprintf(stderr, "qgpu-pci: bilan %.1f s : doorbells synchrones %u, BQL tenu %.2f ms"
-            " (%.3f ms/s, max %.2f ms) ; asynchrones %u, %.2f ms ; refus file pleine %u ;"
-            " autres écritures %u, %.2f ms ; lectures %u ; soumissions terminées %u\n",
-            dt, s->st_sync_n, s->st_sync_ns / 1e6, s->st_sync_ns / 1e6 / dt,
-            s->st_sync_max_ns / 1e6, s->st_async_n, s->st_async_ns / 1e6,
-            s->st_full_n, s->st_other_n, s->st_other_ns / 1e6, s->st_reads,
-            fence - s->st_fence0);
-    s->st_t0 = now;
-    s->st_fence0 = fence;
-    s->st_sync_n = s->st_async_n = s->st_full_n = s->st_other_n = s->st_reads = 0;
-    s->st_sync_ns = s->st_sync_max_ns = s->st_async_ns = s->st_other_ns = 0;
-}
-
-static void qgpu_stats_write(QgpuPCIState *s, hwaddr addr, uint32_t v,
-                             int64_t t0)
-{
-    int64_t now = get_clock_realtime(), d = now - t0;
-
-    if (addr == QGPU_REG_DOORBELL && (v & QGPU_DOORBELL_GO)) {
-        if (!(v & QGPU_DOORBELL_ASYNC) || !s->thread_ok) {
-            s->st_sync_n++;
-            s->st_sync_ns += d;
-            if (d > s->st_sync_max_ns) {
-                s->st_sync_max_ns = d;
-            }
-        } else if (s->regs[QGPU_REG_SUBMIT_ST >> 2] == QGPU_ST_QUEUE_FULL) {
-            s->st_full_n++;
-            s->st_async_ns += d;
-        } else {
-            s->st_async_n++;
-            s->st_async_ns += d;
-        }
-    } else {
-        s->st_other_n++;
-        s->st_other_ns += d;
-    }
-    qgpu_stats_flush(s, now);
-}
-
 static uint64_t qgpu_ctrl_read(void *opaque, hwaddr addr, unsigned size)
 {
     QgpuPCIState *s = opaque;
 
-    if (s->stats) {
-        s->st_reads++;
-    }
     if (addr >= QGPU_CTRL_TOPADDR) {
         return 0xFFFFFFFF;
     }
@@ -912,7 +835,6 @@ static void qgpu_ctrl_write(void *opaque, hwaddr addr, uint64_t val,
 {
     QgpuPCIState *s = opaque;
     uint32_t v = val;
-    int64_t t0 = s->stats ? get_clock_realtime() : 0;
 
     if (addr >= QGPU_CTRL_TOPADDR) {
         return;
@@ -955,9 +877,6 @@ static void qgpu_ctrl_write(void *opaque, hwaddr addr, uint64_t val,
     default:
         /* registres en lecture seule : ignoré */
         break;
-    }
-    if (t0) {
-        qgpu_stats_write(s, addr, v, t0);
     }
 }
 
@@ -1532,7 +1451,6 @@ static Property qgpu_pci_properties[] = {
        fichier que build_qemu_qfb.sh recopie tel quel. */
     DEFINE_PROP_STRING("scanout", QgpuPCIState, scanout_pref),
     DEFINE_PROP_BOOL("trace", QgpuPCIState, trace, false),
-    DEFINE_PROP_BOOL("stats", QgpuPCIState, stats, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 

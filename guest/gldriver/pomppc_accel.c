@@ -48,10 +48,6 @@
  *                         tant qu'il n'a pas forcé le repli mixte)
  *   POMPPC_GL_ASYNC=0/1   doorbell asynchrone (défaut : activé si le device et
  *                         le kext le tiennent ; voir « soumission » plus bas)
- *   POMPPC_GL_SYNCBAR=1   doorbell ASYNCHRONE + barrière à la place du doorbell
- *                         synchrone d'un BeginPrimitiveBuffer ouvert (30/09,
- *                         levier L4 : le fil invité dort dans le kext au lieu
- *                         de tenir le vCPU et le BQL ; défaut 0, à la mesure)
  *   POMPPC_GL_VBO=0       pas de tampons hôte v14 (DRAW_RAW retraverse BAR0) ;
  *                         coupe aussi DRAW_NATIVE, qui en dépend
  *   POMPPC_GL_NATIVE=0    pas de DRAW_NATIVE (v18, QGPU_CAP_NATIVE) : les
@@ -122,7 +118,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260930-wlunif-sync"
+#define POMPPC_PLUGIN_REV "20260930-wlunif"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -1054,9 +1050,8 @@ static struct {
        (note, lignes SYNC toutes les CNT_PERIOD images) et en tout. */
     unsigned long   n_sync[4], n_sync_all[4];
     double          t_sync[4], t_sync_all[4];
-    unsigned long   n_async, n_bar;     /* asynchrones acceptés ; dont avec barrière */
-    double          t_async, t_bar;     /* doorbell asynchrone ; attente de barrière (SYNCBAR) */
-    int             syncbar;            /* POMPPC_GL_SYNCBAR */
+    unsigned long   n_async;            /* doorbells asynchrones acceptés */
+    double          t_async;            /* … et leur durée (appel au kext compris) */
     /* ── transmission paresseuse au GLDriver d'Apple ── */
     int             lazy;               /* POMPPC_GL_LAZYAPPLE */
     unsigned long   n_lazy_defer;       /* gldUpdateDispatch gardés pour plus tard */
@@ -1597,21 +1592,21 @@ static void sync_frame(void)
     }
     gl_note("SYNC image %lu (%d images) : %lu doorbells synchrones, %.2f ms (%.3f ms/image) — "
             "%s %lu (%.2f ms), %s %lu (%.2f ms), %s %lu (%.2f ms), %s %lu (%.2f ms) ; "
-            "%lu asynchrones (%.2f ms), dont %lu avec barrière (%.2f ms d'attente)\n",
+            "%lu asynchrones (%.2f ms)\n",
             G.n_frames, CNT_PERIOD, n, t * 1000, t * 1000 / CNT_PERIOD,
             sync_name[0], G.n_sync[0], G.t_sync[0] * 1000,
             sync_name[1], G.n_sync[1], G.t_sync[1] * 1000,
             sync_name[2], G.n_sync[2], G.t_sync[2] * 1000,
             sync_name[3], G.n_sync[3], G.t_sync[3] * 1000,
-            G.n_async, G.t_async * 1000, G.n_bar, G.t_bar * 1000);
+            G.n_async, G.t_async * 1000);
     for (k = 0; k < SYNC_N; k++) {
         G.n_sync_all[k] += G.n_sync[k];
         G.t_sync_all[k] += G.t_sync[k];
         G.n_sync[k] = 0;
         G.t_sync[k] = 0;
     }
-    G.n_async = G.n_bar = 0;
-    G.t_async = G.t_bar = 0;
+    G.n_async = 0;
+    G.t_async = 0;
 }
 
 /* Bilan périodique (POMPPC_GL_STATS=<fichier>), appelé à chaque échange. */
@@ -2295,9 +2290,6 @@ void pomppc_backend_init(void)
                    comme avant. */
                 e = getenv("POMPPC_GL_WLUNIF");
                 G.wlunif = e && e[0] ? e[0] != '0' : WLUNIF_DEFAULT;
-                /* 30/09 : asynchrone + barrière sous BeginPrimitiveBuffer */
-                e = getenv("POMPPC_GL_SYNCBAR");
-                G.syncbar = e && e[0] && e[0] != '0';
                 /* Relevé R4 : POMPPC_GL_BLOCKDUMP=a[:n] écrit sur stderr le
                    bloc de chaque dispatch (mots non nuls) et chaque dessin
                    des images [a, a+n) (n = 1 par défaut). */
@@ -2349,10 +2341,10 @@ void pomppc_backend_init(void)
         if (G.state > 0) {
             gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d lazyapple=%d "
                     "native=%d (plages %d) count=%d verdict=%d verdictcheck=%d whitelist=%d "
-                    "texmemo=%d stskip=%d statecheck=%d wlunif=%d syncbar=%d\n",
+                    "texmemo=%d stskip=%d statecheck=%d wlunif=%d\n",
                     G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range,
                     G.count, G.verdict, G.vcheck, G.wl, G.texmemo, G.stskip, G.stcheck,
-                    G.wlunif, G.syncbar);
+                    G.wlunif);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
                        " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
@@ -3516,13 +3508,7 @@ static void submit_cur(void)
        geom_begin fait la place avant d'ouvrir — et c'est la seule façon
        d'être exact (vu en vrai : un téléversement de texture au milieu d'une
        primitive vide le flux). */
-    int async = G.async && (!G.npend || G.syncbar);
-    /* 30/09 (POMPPC_GL_SYNCBAR) : sous BeginPrimitiveBuffer, asynchrone PUIS
-       barrière avant de rendre la main — même contrat M1 que le synchrone
-       (la moitié n'est pas réécrite avant la fin du job), mais le fil invité
-       dort dans le kext (sleepForFence) au lieu de geler le vCPU, BQL tenu
-       par le device (D2). */
-    int bar = async && G.npend;
+    int async = G.async && !G.npend;
 
     dump_submit();
     if (async) {
@@ -3595,28 +3581,11 @@ static void submit_cur(void)
         h->busy = 1;
         h->seq = seq;
         check_errors(errors, seq);
-        if (bar && h->busy) {
-            /* G.mu reste TENU (comme l'attente sur QUEUE_FULL) : GLEngine
-               écrit dans cette moitié, personne ne doit y ajouter de flux ni
-               la soumettre une seconde fois. wait_half_ex la rend libre (et
-               fait ses relectures, ERRORS relu s'il y en a) ; sans
-               relecture, ERRORS est relu ici : une faute de CETTE soumission
-               ouvre la fenêtre synchrone, comme au doorbell suivant. */
-            double tb = now_s();
-            G.n_bar++;
-            wait_half_ex(G.cur, 0);
-            G.t_bar += now_s() - tb;
-            if (!G.dead && G.async && G.err_valid) {
-                unsigned long e2 = 0, st2 = 0, pc2 = 0;
-                if (qgpu_peek(&G.q, &e2, &st2, &pc2) == 0 && e2 != G.errors)
-                    check_errors(e2, seq);
-            }
-        }
         return;
     }
     {
         /* 30/09 : cause du doorbell synchrone (levier L4) */
-        int why = !G.async ? SYNC_OFF : G.npend && !G.syncbar ? SYNC_NPEND : SYNC_QFULL;
+        int why = !G.async ? SYNC_OFF : G.npend ? SYNC_NPEND : SYNC_QFULL;
         double ts = now_s();
         st = qgpu_submit(&G.q, G.hb, G.ncmd * 4, &pc);
         sync_count(why, now_s() - ts);

@@ -153,14 +153,13 @@ Ordre : planchers recalés, puis TCG (cache de sauts, verrou `mtmsr`/`rfi`), pui
   sur huit lente de bout en bout ; cause inconnue (cœurs P/E, autre processus, thermique ?).
   Le 29/09, une charge hôte de 40–53 (autre projet, Spotlight) a doublé les ms/image :
   la matrice relève désormais la charge avant et après la fenêtre de mesure.
-- [ ] **[Plugin] Nexuiz / GLSL** : chaque `glUniform` pose le bit `0x04000000` et fait recalculer
-  le verdict (154 298 dispatches sur 173 572). Sans perdre la détection des samplers.
-  **Code prêt (30/09, phase 1 sans VM)** : `POMPPC_GL_WLUNIF` (défaut 1) rend ce bit neutre
-  pour la liste blanche et pour `compute_state` ; les unités échantillonnées, le programme
-  courant, ses étages et ses entrées de sommet sont dans la clé du verdict (`vd_key_of`) —
-  un sampler déplacé change la clé et fait recalculer. Scène `gltest glslsmp`. **Reste :**
-  `VERDICTCHECK=1` et `STATECHECK=1` à 0 écart sur Nexuiz GLSL, `glslsmp` juste, A/B
-  `WLUNIF=0/1` fenêtre et plein écran, matrice complète.
+- [x] **[Plugin] Nexuiz / GLSL : `glUniform` neutre** (30/09, `POMPPC_GL_WLUNIF`, défaut 1) :
+  le bit `0x04000000` ne fait plus recalculer, samplers suivis par la clé. 0 écart
+  (`VERDICTCHECK`, `STATECHECK`), `gltest glslsmp` juste ; **gain dans le bruit** (fenêtre
+  39,7 → 39,4, plein écran 39,9 → 39,4 ms/image, médianes de 3) : le bit n'est que dans
+  51 k des 175 k dispatches, et presque tous portent aussi une liaison de texture (`+04`) ou
+  une matrice/cible de texture (`+08 00010000`) — ce sont elles qui font recalculer
+  (`CHANGELOG.md`). Suite éventuelle : la mémoire par texture et par époque du verdict.
 - [x] **[TCG] Cache de sauts plus grand** (30/09, `tcg/0011`, `x-jc-bits`, propriété de
   l'accélérateur ; `docs/tcg-g4.md` §18) : 2^14 entrées, 0 divergence sur 23 G blocs
   vérifiés ; réussite 91,4 → 92,6 % ; DOOM 3 61,6 → 60,4 ms/image (médianes, 6 + 6
@@ -177,14 +176,11 @@ Ordre : planchers recalés, puis TCG (cache de sauts, verrou `mtmsr`/`rfi`), pui
   (`bench/tcg/ab/matrice-vit`) : 16 vertes sur 16, images toutes justes (§21).
   **À faire par l'utilisateur** : reconstruire le binaire de référence
   (`scripts/build_qemu_qfb.sh`, patches 0011 et 0012).
-- [ ] **[Protocole] Doorbell asynchrone côté invité** (bug hunt D2) : mesure du BQL tenu par
-  image sous `GPU_TRACE=1` (`docs/smp-coeurs.md` §3, levier L4).
-  **Instrumentation prête (30/09, phase 1)** : lignes `SYNC` de la note du plugin (doorbells
-  synchrones par cause — BeginPrimitiveBuffer ouvert, file pleine, asynchrone coupé, sondes —
-  et leur durée) ; device `stats=on` (`GPU_STATS=1`) : bilan toutes les 5 s du temps passé
-  BQL pris dans les doorbells, sans le coût de `trace=on`. `POMPPC_GL_SYNCBAR=1` (défaut 0)
-  remplace le doorbell synchrone d'un BeginPrimitiveBuffer ouvert par asynchrone + barrière.
-  **Reste :** mesure sur DOOM 3, Prey, UT2004, puis décision.
+- [x] **[Protocole] Doorbell asynchrone côté invité** (bug hunt D2, levier L4) : **mesuré, rien
+  à convertir** (30/09). Lignes `SYNC` de la note : en jeu, les seuls doorbells synchrones
+  sont les sondes de définition de programme (DOOM 3 0,0005 ms/image, Prey ≤ 0,014, Nexuiz
+  GLSL 0,05, UT2004 2 au chargement) ; BeginPrimitiveBuffer, file pleine, asynchrone coupé :
+  0 dans les 13 cellules de la matrice. Très loin du seuil S-M6 (2 ms/image).
 - [ ] **[Plugin] Transmission paresseuse** : mesure honnête et décision du défaut.
 - [ ] **[Protocole] A4 — Déplacer le travail vers l'hôte** : bloc d'état partagé lu par le
   device, textures par DMA sur plages sales, empaquetage minimal. Épreuve : `send_state` et
@@ -314,6 +310,12 @@ Une cellule verte exige une image juste (rejeu = VM et référence validée), z�
 hors rafraîchissements admis (2 par 90 images en fenêtre), et une mesure à scène fixe
 sous le seuil du jeu. Une scène `gltest` comparée au rendu d'Apple éprouve chaque notion
 nouvelle. Les modes fenêtre et plein écran sont requis quand le jeu les propose.
+
+**Dernier tour complet : `bench/matrice/20260930-wlunif/tableau.md`** (QEMU de référence
+avec `0011`/`0012`, plugin `20260930-wlunif`) : 16 vertes sur 16, images toutes justes ;
+Marble Blast 9,2 / 9,7 ; Zenerchi 3,9 ; DOOM 3 59,9 / 59,5 ; Prey 71,5 / 71,0 ; UT2004
+25,9 / 25,9 ; Warcraft III — / 17,8 ; Colin McRae — / 69,3 ; Nexuiz ARB 109,0 / 109,6 ;
+Nexuiz GLSL 39,9 / 40,8.
 
 **Tour de référence : `bench/matrice/20260930-0128/tableau.md`** (b9004cc pour QEMU, kext et
 plugin, matrice de ce jour, hôte au repos, charge 1-2) : **16 vertes sur 16 automatisées**,

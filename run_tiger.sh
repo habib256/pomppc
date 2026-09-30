@@ -478,9 +478,7 @@ fi
 #     Allumé par défaut : l'invité y soumet des flux de commandes, l'hôte les
 #     rend en OpenGL (docs/gpu-3d-tiger.md). GPU=0 pour l'omettre.
 #     GPU_BACKEND choisit le backend hôte (défaut auto) ; GPU_SCANOUT choisit la
-#     cible de présentation ; GPU_TRACE=1 journalise chaque commande sur stderr ;
-#     GPU_STATS=1 écrit toutes les 5 s le temps passé BQL pris dans les
-#     doorbells (synchrones / asynchrones), mesurable en jeu (30/09, levier L4).
+#     cible de présentation ; GPU_TRACE=1 journalise chaque commande sur stderr.
 #
 #     Défaut 'auto' et PAS 'gl' : le cas 'gl' du cœur n'a aucun repli, et
 #     realize() fait error_setg si EGL manque — le lanceur imposait donc un
@@ -526,7 +524,6 @@ if [ "${GPU:-1}" != 0 ]; then
       esac
     fi
     [ -n "${GPU_TRACE:-}" ] && GPU_OPTS="$GPU_OPTS,trace=on"
-    [ -n "${GPU_STATS:-}" ] && GPU_OPTS="$GPU_OPTS,stats=on"
     GPU_ARGS=(-device "qgpu-pci,id=gpu0,$GPU_OPTS")
     GPU_ON=1
     if [ -n "$GPU_BE" ]; then
