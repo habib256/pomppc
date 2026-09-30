@@ -1,0 +1,332 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1372,6 +1372,15 @@
+     bool fp_inline;
+     bool fp_verify;
+     /*
++     * x-fp-flat (POMPPC tcg/0013, needs x-fast-fp): the same instructions as
++     * x-fp-inline (fcmpu included) translated as ONE helper call and no
++     * branch: the short path of x-fp-inline and, when it does not apply, the
++     * original sequence, both run in C (helper_fp32_flat, helper_fcmpu_flat),
++     * which returns the result and the new FPSCR.  x-fp-verify checks its
++     * short path too.
++     */
++    bool fp_flat;
++    /*
+      * x-ret-inline (POMPPC tcg/0008): the indirect exits of a TB (blr, bctr,
+      * bclr, bcctr, cross-page branches, DISAS_CHAIN) probe the jump cache in
+      * the generated code and only call helper_lookup_tb_ptr on a miss.
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7451,6 +7451,12 @@
+      */
+     DEFINE_PROP_BOOL("x-fp-inline", PowerPCCPU, env.fp_inline, false),
+     DEFINE_PROP_BOOL("x-fp-verify", PowerPCCPU, env.fp_verify, false),
++    /*
++     * The same instructions as x-fp-inline as one helper call each and no
++     * branch in the generated code (short path or original sequence, in C);
++     * bit-exact with the helpers.  Needs x-fast-fp.  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-fp-flat", PowerPCCPU, env.fp_flat, false),
+     /*
+      * POMPPC tcg/0008.  x-ret-inline: the jump-cache probe of
+      * helper_lookup_tb_ptr done in the generated code at every indirect
+diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
+--- a/target/ppc/fpu_helper.c
++++ b/target/ppc/fpu_helper.c
+@@ -940,8 +940,8 @@
+     return 0x8 | (fg_flag ? 4 : 0) | (fe_flag ? 2 : 0);
+ }
+ 
+-void helper_fcmpu(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
+-                  uint32_t crfD)
++static void do_fcmpu(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
++                     uint32_t crfD, uintptr_t retaddr)
+ {
+     CPU_DoubleU farg1, farg2;
+     uint32_t ret = 0;
+@@ -967,8 +967,14 @@
+                  && (float64_is_signaling_nan(farg1.d, &env->fp_status) ||
+                      float64_is_signaling_nan(farg2.d, &env->fp_status)))) {
+         /* sNaN comparison */
+-        float_invalid_op_vxsnan(env, GETPC());
++        float_invalid_op_vxsnan(env, retaddr);
+     }
++}
++
++void helper_fcmpu(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
++                  uint32_t crfD)
++{
++    do_fcmpu(env, arg1, arg2, crfD, GETPC());
+ }
+ 
+ void helper_fcmpo(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
+@@ -4054,3 +4060,120 @@
+ 
+     qatomic_inc(gate ? &fpv_slow_opnd[op] : &fpv_slow_gate[op]);
+ }
++
++/*
++ * x-fp-flat (POMPPC patches/tcg/0013, docs/tcg-g4.md section 22).
++ *
++ * x-fp-inline (above) needs one branch per instruction in the generated
++ * code: "short path or original sequence".  That branch ends a TCG basic
++ * block, so every guest register held in a host register is written back
++ * and read again at every fadds/fmadds/fcmpu -- measured: about 1 ns per
++ * instruction when they come in a row.  x-fp-flat emits one call and no
++ * branch; the choice is made here, in C:
++ *
++ *   short path  exactly the x-fp-inline one: fpi_gate(), helper_fp32_fast(),
++ *               fpi_fpscr_arith() (fpi_fcmpu(), fpi_fpscr_fcmpu() for fcmpu),
++ *               soft-fp flags = inexact;
++ *   otherwise   the original sequence, in the same order, with the return
++ *               address of the generated code: reset_fpstatus, the helper,
++ *               frT written, fprf_check_float64 (fcmpu: reset_fpstatus,
++ *               fcmpu, float_check_status).
++ *
++ * The helper is TCG_CALL_NO_WG: TCG writes the dirty globals back before
++ * the call (the original sequence may raise a deferred FP exception, which
++ * needs them) and keeps its copies after it.  It writes no global as far as
++ * TCG can tell: the new FPSCR (and the CR field of fcmpu) is returned, and
++ * the generated code assigns it.  The original sequence does write
++ * env->fpscr (and env->crf[bf]) in memory -- with the very value returned,
++ * so TCG's view stays consistent.  frT is written here too before
++ * float_check_status, as in the original sequence, where a deferred
++ * exception is raised after the target FPR update.
++ */
++static uint64_t fpf_slow(CPUPPCState *env, uint32_t op, uint64_t a,
++                         uint64_t b, uint64_t c, uintptr_t ra)
++{
++    float64 r;
++
++    switch (op) {
++    case FPI_ADD:
++        r = float64r32_add(a, b, &env->fp_status);
++        addsub_flags_handler(env, get_float_exception_flags(&env->fp_status),
++                             ra);
++        return r;
++    case FPI_SUB:
++        r = float64r32_sub(a, b, &env->fp_status);
++        addsub_flags_handler(env, get_float_exception_flags(&env->fp_status),
++                             ra);
++        return r;
++    case FPI_MUL:
++        r = float64r32_mul(a, c, &env->fp_status);
++        mul_flags_handler(env, get_float_exception_flags(&env->fp_status), ra);
++        return r;
++    case FPI_MADD:
++        return do_fmadds(env, a, c, b, MADD_FLGS, ra);
++    case FPI_MSUB:
++        return do_fmadds(env, a, c, b, MSUB_FLGS, ra);
++    case FPI_NMADD:
++        return do_fmadds(env, a, c, b, NMADD_FLGS, ra);
++    default:
++        return do_fmadds(env, a, c, b, NMSUB_FLGS, ra);
++    }
++}
++
++Int128 helper_fp32_flat(CPUPPCState *env, uint64_t a, uint64_t b, uint64_t c,
++                        uint32_t op, uint32_t frt)
++{
++    uintptr_t ra = GETPC();
++    uint64_t fpscr = env->fpscr;
++    uint64_t r;
++
++    if (fpi_gate(fpscr)) {
++        r = helper_fp32_fast(a, b, c, op);
++        if (r != FPI_FAIL) {
++            uint64_t nf = fpi_fpscr_arith(fpscr, r);
++
++            if (unlikely(env->fp_verify)) {
++                helper_fpv_arith(env, op, a, b, c, r, nf);
++                env->fpscr = fpscr;
++            }
++            set_float_exception_flags(float_flag_inexact, &env->fp_status);
++            return int128_make128(r, nf);
++        }
++    }
++    if (unlikely(env->fp_verify)) {
++        helper_fpv_slow(env, op, a, b, c, fpscr);
++    }
++    helper_reset_fpstatus(env);
++    r = fpf_slow(env, op, a, b, c, ra);
++    *cpu_fpr_ptr(env, frt) = r;
++    helper_compute_fprf_float64(env, r);
++    do_float_check_status(env, true, ra);
++    return int128_make128(r, env->fpscr);
++}
++
++/* fcmpu: returns (CR field, FPSCR) */
++Int128 helper_fcmpu_flat(CPUPPCState *env, uint64_t a, uint64_t b,
++                         uint32_t bf)
++{
++    uintptr_t ra = GETPC();
++    uint64_t fpscr = env->fpscr;
++    uint32_t crf = fpi_fcmpu(fpscr, a, b);
++
++    if (crf) {
++        uint64_t nf = fpi_fpscr_fcmpu(fpscr, crf);
++
++        if (unlikely(env->fp_verify)) {
++            helper_fpv_fcmpu(env, bf, a, b, crf, nf);
++            env->fpscr = fpscr;
++        }
++        set_float_exception_flags(float_flag_inexact, &env->fp_status);
++        return int128_make128(crf, nf);
++    }
++    if (unlikely(env->fp_verify)) {
++        helper_fpv_slow(env, FPI_CMPU, a, b, 0, fpscr);
++    }
++    helper_reset_fpstatus(env);
++    do_fcmpu(env, a, b, bf, ra);
++    do_float_check_status(env, true, ra);
++    return int128_make128(env->crf[bf], env->fpscr);
++}
+diff --git a/target/ppc/helper.h b/target/ppc/helper.h
+--- a/target/ppc/helper.h
++++ b/target/ppc/helper.h
+@@ -93,6 +93,14 @@
+ DEF_HELPER_7(fpv_arith, void, env, i32, i64, i64, i64, i64, tl)
+ DEF_HELPER_6(fpv_fcmpu, void, env, i32, i64, i64, i32, tl)
+ DEF_HELPER_FLAGS_6(fpv_slow, TCG_CALL_NO_RWG, void, env, i32, i64, i64, i64, tl)
++/*
++ * x-fp-flat (POMPPC tcg/0013): one call, no branch.  NO_WG: the globals are
++ * synced before the call (a deferred FP exception may be raised from it),
++ * and the helper does not write any: the new FPSCR (and CR field) come back
++ * in the result, the generated code writes them.
++ */
++DEF_HELPER_FLAGS_6(fp32_flat, TCG_CALL_NO_WG, i128, env, i64, i64, i64, i32, i32)
++DEF_HELPER_FLAGS_4(fcmpu_flat, TCG_CALL_NO_WG, i128, env, i64, i64, i32)
+ DEF_HELPER_3(store_fpscr, void, env, i64, i32)
+ DEF_HELPER_2(fpscr_clrbit, void, env, i32)
+ DEF_HELPER_2(fpscr_setbit, void, env, i32)
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -187,6 +187,7 @@
+ #endif
+     bool fpu_enabled;
+     bool fp_inline, fp_verify;  /* x-fp-inline, x-fp-verify (tcg/0007) */
++    bool fp_flat;               /* x-fp-flat (tcg/0013) */
+     bool ret_inline, ret_verify; /* x-ret-inline, x-ret-verify (tcg/0008) */
+     bool altivec_enabled;
+     bool vsx_enabled;
+@@ -6529,6 +6530,7 @@
+     ctx->fpu_enabled = (hflags >> HFLAGS_FP) & 1;
+     ctx->fp_inline = env->fp_inline && env->fp_prime_mask;
+     ctx->fp_verify = ctx->fp_inline && env->fp_verify;
++    ctx->fp_flat = env->fp_flat && env->fp_prime_mask;
+     ctx->ret_inline = env->ret_inline;
+     ctx->ret_verify = cs->ret_verify;
+     ctx->spe_enabled = (hflags >> HFLAGS_SPE) & 1;
+diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c.inc
+--- a/target/ppc/translate/fp-impl.c.inc
++++ b/target/ppc/translate/fp-impl.c.inc
+@@ -252,16 +252,74 @@
+     gen_compute_fprf_float64(r);
+ 
+     gen_set_label(l_done);
++    if (unlikely(rc)) {
++        gen_set_cr1_from_fpscr(ctx);
++    }
++    return true;
++}
++
++/*
++ * x-fp-flat (POMPPC tcg/0013): the same instructions as one call and no
++ * branch; helper_fp32_flat() of fpu_helper.c chooses between the short path
++ * and the original sequence, and returns (frT, FPSCR).
++ */
++static bool do_fp_flat(DisasContext *ctx, int op, int frt, int fra, int frb,
++                       int frc, bool rc)
++{
++    TCGv_i64 a = tcg_temp_new_i64();
++    TCGv_i64 b = tcg_constant_i64(0);
++    TCGv_i64 c = tcg_constant_i64(0);
++    TCGv_i64 r = tcg_temp_new_i64();
++    TCGv_i64 f = tcg_temp_new_i64();
++    TCGv_i128 ret = tcg_temp_new_i128();
++
++    REQUIRE_INSNS_FLAGS(ctx, FLOAT);
++    REQUIRE_FPU(ctx);
++
++    get_fpr(a, fra);
++    if (op == FPI_ADD || op == FPI_SUB || op >= FPI_MADD) {
++        b = tcg_temp_new_i64();
++        get_fpr(b, frb);
++    }
++    if (op >= FPI_MUL) {
++        c = tcg_temp_new_i64();
++        get_fpr(c, frc);
++    }
++    gen_helper_fp32_flat(ret, tcg_env, a, b, c, tcg_constant_i32(op),
++                         tcg_constant_i32(frt));
++    tcg_gen_extr_i128_i64(r, f, ret);
++    set_fpr(frt, r);
++    tcg_gen_trunc_i64_tl(cpu_fpscr, f);
+     if (unlikely(rc)) {
+         gen_set_cr1_from_fpscr(ctx);
+     }
+     return true;
+ }
+ 
++static void gen_fcmpu_flat(DisasContext *ctx)
++{
++    int bf = crfD(ctx->opcode);
++    TCGv_i64 a = tcg_temp_new_i64();
++    TCGv_i64 b = tcg_temp_new_i64();
++    TCGv_i64 crf = tcg_temp_new_i64();
++    TCGv_i64 f = tcg_temp_new_i64();
++    TCGv_i128 ret = tcg_temp_new_i128();
++
++    get_fpr(a, rA(ctx->opcode));
++    get_fpr(b, rB(ctx->opcode));
++    gen_helper_fcmpu_flat(ret, tcg_env, a, b, tcg_constant_i32(bf));
++    tcg_gen_extr_i128_i64(crf, f, ret);
++    tcg_gen_extrl_i64_i32(cpu_crf[bf], crf);
++    tcg_gen_trunc_i64_tl(cpu_fpscr, f);
++}
++
+ static bool do_fpi_ab(DisasContext *ctx, arg_A_tab *a,
+                       void (*helper)(TCGv_i64, TCGv_ptr, TCGv_i64, TCGv_i64),
+                       int op)
+ {
++    if (ctx->fp_flat) {
++        return do_fp_flat(ctx, op, a->frt, a->fra, a->frb, 0, a->rc);
++    }
+     if (ctx->fp_inline) {
+         return do_fp_inline(ctx, op, a->frt, a->fra, a->frb, 0, a->rc);
+     }
+@@ -272,6 +330,9 @@
+                       void (*helper)(TCGv_i64, TCGv_ptr, TCGv_i64, TCGv_i64),
+                       int op)
+ {
++    if (ctx->fp_flat) {
++        return do_fp_flat(ctx, op, a->frt, a->fra, 0, a->frc, a->rc);
++    }
+     if (ctx->fp_inline) {
+         return do_fp_inline(ctx, op, a->frt, a->fra, 0, a->frc, a->rc);
+     }
+@@ -283,6 +344,9 @@
+                                       TCGv_i64, TCGv_i64),
+                        int op)
+ {
++    if (ctx->fp_flat) {
++        return do_fp_flat(ctx, op, a->frt, a->fra, a->frb, a->frc, a->rc);
++    }
+     if (ctx->fp_inline) {
+         return do_fp_inline(ctx, op, a->frt, a->fra, a->frb, a->frc, a->rc);
+     }
+@@ -572,6 +636,10 @@
+         gen_exception(ctx, POWERPC_EXCP_FPU);
+         return;
+     }
++    if (ctx->fp_flat) {
++        gen_fcmpu_flat(ctx);
++        return;
++    }
+     if (ctx->fp_inline) {
+         gen_fcmpu_inline(ctx);
+         return;

@@ -17,6 +17,7 @@
 #   • code réécrit par l'autre vCPU (courses, x-icbi-sync) — patches/tcg/0010
 #   • taille du cache de sauts (x-jc-bits)             — patches/tcg/0011
 #   • mtmsr/rfi sans verrou global (x-msr-nobql)       — patches/tcg/0012
+#   • flottant scalaire sans branchement (x-fp-flat)   — patches/tcg/0013
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
 #   ./scripts/build_qemu_qfb.sh              # build dans ~/src/qemu
@@ -614,6 +615,29 @@ target/ppc/excp_helper.c ppc_maybe_interrupt_nolock
 target/ppc/helper_regs.c hreg_store_msr_tb
 target/ppc/helper_regs.h hreg_store_msr_tb
 TCG12_MARKERS
+  # --- 4 quaterdecies. Flottant scalaire simple en un appel, sans branchement
+  # (x-fp-flat) --- patches/tcg/0013, docs/tcg-g4.md §22 : les instructions de
+  # x-fp-inline en un seul appel (chemin court ou séquence d'origine, en C),
+  # plus de bloc de base coupé à chaque instruction. Garde : le marqueur du
+  # dernier fichier du patch.
+  if ! grep -q "do_fp_flat" target/ppc/translate/fp-impl.c.inc; then
+    echo "▶ patch TCG : flottant scalaire sans branchement (x-fp-flat)"
+    patch_strict "$ROOT/patches/tcg/0013-ppc-fp-flat.patch"
+    for f in target/ppc/cpu.h target/ppc/cpu_init.c target/ppc/fpu_helper.c \
+             target/ppc/helper.h target/ppc/translate.c target/ppc/translate/fp-impl.c.inc; do
+      rm -f "$f.orig"
+    done
+  fi
+  while read -r f m; do
+    [ -z "$f" ] && continue
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0013 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG13_MARKERS'
+target/ppc/cpu_init.c x-fp-flat
+target/ppc/fpu_helper.c helper_fp32_flat
+target/ppc/helper.h fp32_flat
+target/ppc/translate/fp-impl.c.inc do_fp_flat
+TCG13_MARKERS
 fi
 
 # --- 5. Build ---
