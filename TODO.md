@@ -155,9 +155,22 @@ Ordre : planchers recalés, puis TCG (cache de sauts, verrou `mtmsr`/`rfi`), pui
   la matrice relève désormais la charge avant et après la fenêtre de mesure.
 - [ ] **[Plugin] Nexuiz / GLSL** : chaque `glUniform` pose le bit `0x04000000` et fait recalculer
   le verdict (154 298 dispatches sur 173 572). Sans perdre la détection des samplers.
-- [ ] **[TCG] Cache de sauts plus grand** (16 384 entrées, `docs/tcg-g4.md` §16.6).
-- [ ] **[TCG] Verrou global à chaque `mtmsr`/`rfi`** (`ppc_maybe_interrupt`,
-  `cpu_interrupt_exittb`) : chemin sans verrou quand l'état d'interruption ne change pas.
+- [x] **[TCG] Cache de sauts plus grand** (30/09, `tcg/0011`, `x-jc-bits`, propriété de
+  l'accélérateur ; `docs/tcg-g4.md` §18) : 2^14 entrées, 0 divergence sur 23 G blocs
+  vérifiés ; réussite 91,4 → 92,6 % ; DOOM 3 61,6 → 60,4 ms/image (médianes, 6 + 6
+  entrelacées, p ≈ 0,06). **Allumé par défaut** (`JCBITS=14`). Les conflits plafonnent
+  (65 536 entrées : 92,8 %) : la limite est la structure du hachage (2^(N/2) emplacements
+  par page), un hachage replié fait moins bien (essai `x-jc-mix`).
+- [x] **[TCG] Verrou global à chaque `mtmsr`/`rfi`** (30/09, `tcg/0012`, `x-msr-nobql`,
+  §19) : décision sans verrou contre un compteur de séquence, `EXITTB` redondant supprimé ;
+  378 M décisions vérifiées sous verrou, 0 divergence, 70 redémarrages SMP=2 sans incident ;
+  DOOM 3 61,7 → 61,3 (p ≈ 0,004). **Allumé par défaut** (`MSRNOBQL=1`). Reste : Marble Blast
+  non concluant (cellule trop bruitée), à refaire par `tools/tcg/mbab.sh`.
+- [x] **[TCG] `x-icbi-sync` : A/B DOOM 3** (30/09, §20) : 61,8 → 61,6, dans le bruit ;
+  **allumé par défaut** (`ICBISYNC=1`). Matrice complète sur la configuration retenue
+  (`bench/tcg/ab/matrice-vit`) : 16 vertes sur 16, images toutes justes (§21).
+  **À faire par l'utilisateur** : reconstruire le binaire de référence
+  (`scripts/build_qemu_qfb.sh`, patches 0011 et 0012).
 - [ ] **[Protocole] Doorbell asynchrone côté invité** (bug hunt D2) : mesure du BQL tenu par
   image sous `GPU_TRACE=1` (`docs/smp-coeurs.md` §3, levier L4).
 - [ ] **[Plugin] Transmission paresseuse** : mesure honnête et décision du défaut.

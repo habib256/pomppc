@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
-OPTS = "FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC JITNEAR QGPU_GPU_COPY QGPU_GLSL".split()
+OPTS = "FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JCBITS JITNEAR QGPU_GPU_COPY QGPU_GLSL".split()
 with tempfile.TemporaryDirectory(prefix="tiger launcher ") as tmp:
     root = Path(tmp)
     for name in ("run_tiger.sh", "run_frontend.sh"):
@@ -29,10 +29,12 @@ with tempfile.TemporaryDirectory(prefix="tiger launcher ") as tmp:
 
     p = run()
     assert p.returncode == 0 and "frontend:" + str(root / "run_tiger.sh") in p.stdout, p
-    assert all(k + "=1\n" in p.stdout for k in OPTS if k != "ICBISYNC"), p.stdout
-    assert "ICBISYNC=0\n" in p.stdout, p.stdout      # éteint tant que l'A/B DOOM 3 manque
-    p = run(ICBISYNC="1")
-    assert p.returncode == 0 and "ICBISYNC=1\n" in p.stdout, p
+    assert all(k + "=1\n" in p.stdout for k in OPTS if k != "JCBITS"), p.stdout
+    assert "JCBITS=14\n" in p.stdout, p.stdout       # 2^14 entrées de cache de sauts (tcg/0011)
+    p = run(JCBITS="12")
+    assert p.returncode == 0 and "JCBITS=12\n" in p.stdout, p
+    p = run(ICBISYNC="0", MSRNOBQL="0")
+    assert p.returncode == 0 and "ICBISYNC=0\n" in p.stdout and "MSRNOBQL=0\n" in p.stdout, p
     p = run(FASTFP="0", JITNEAR="0", QGPU_GLSL="0")
     assert p.returncode == 0 and all(k + "=0\n" in p.stdout for k in ("FASTFP", "JITNEAR", "QGPU_GLSL")), p
     for settings in ({"DBUS_DISPLAY": "1"}, {"HEADLESS": "1"},

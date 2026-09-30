@@ -1,0 +1,274 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index d533a21..ca1ccaf 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1384,6 +1384,18 @@ struct CPUArchState {
+      * docs/tcg-g4.md section 17).
+      */
+     bool icbi_sync;
++    /*
++     * x-msr-nobql (POMPPC tcg/0012): ppc_maybe_interrupt() called by the vCPU
++     * itself (mtmsr, rfi) without the BQL when CPU_INTERRUPT_HARD already
++     * says what the stock code would set; irq_seq is a sequence count that
++     * every locked ppc_maybe_interrupt() makes odd then even (writers hold
++     * the BQL), docs/tcg-g4.md section 19.  The EXITTB request of rfi and of
++     * an mtmsr that flips IR/DR is dropped: those TBs exit to the main loop
++     * anyway.  x-msr-nobql-verify: proof mode.
++     */
++    bool msr_nobql;
++    bool msr_nobql_verify;
++    uint32_t irq_seq;
+ 
+     /* Internal devices resources */
+     ppc_tb_t *tb_env;      /* Time base and decrementer */
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index fbfabfc..cb58596 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7471,6 +7471,15 @@ static Property ppc_cpu_properties[] = {
+      * invalidation made by a store and the store itself.  Off by default.
+      */
+     DEFINE_PROP_BOOL("x-icbi-sync", PowerPCCPU, env.icbi_sync, false),
++    /*
++     * POMPPC tcg/0012.  x-msr-nobql: mtmsr and rfi re-evaluate the
++     * interrupt line without the BQL when it does not change (sequence
++     * count against the locked updates), and drop the redundant EXITTB
++     * request.  x-msr-nobql-verify: proof mode (every lock-free decision
++     * re-checked under the BQL).  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-msr-nobql", PowerPCCPU, env.msr_nobql, false),
++    DEFINE_PROP_BOOL("x-msr-nobql-verify", PowerPCCPU, env.msr_nobql_verify, false),
+     /*
+      * AltiVec vaddfp/vsubfp/vmaddfp/vnmsubfp: the four lanes at once on the
+      * host FPU when softfloat's hardfloat path would take each of them
+diff --git a/target/ppc/excp_helper.c b/target/ppc/excp_helper.c
+index 9f811af..ef7dc18 100644
+--- a/target/ppc/excp_helper.c
++++ b/target/ppc/excp_helper.c
+@@ -2156,16 +2156,133 @@ static int ppc_next_unmasked_interrupt(CPUPPCState *env)
+  *  - When cs->halted is changed and the CPU has a different interrupt masking
+  *    logic in power-saving mode (e.g., POWER7/8/9/10);
+  */
++/*
++ * POMPPC tcg/0012 (x-msr-nobql), docs/tcg-g4.md section 19.
++ *
++ * The stock function takes the BQL at every mtmsr and rfi (twice per rfi
++ * with the EXITTB request), although it nearly always leaves
++ * CPU_INTERRUPT_HARD as it was.  Inputs: env->pending_interrupts, written
++ * by other threads under the BQL (ppc_set_irq, followed by a locked
++ * ppc_maybe_interrupt), and state owned by this vCPU (msr...).
++ *
++ * Writers: every locked ppc_maybe_interrupt() brackets its read of the
++ * inputs and its update of HARD with irq_seq odd / even, with a full
++ * barrier between "irq_seq odd" and the read of env->msr.
++ * Lock-free reader (this vCPU, after writing its own state):
++ *   full barrier; s = irq_seq (acquire); s odd -> locked path;
++ *   r = next unmasked interrupt; h = HARD bit; read barrier;
++ *   irq_seq != s -> locked path; (r != 0) != h -> locked path; else done.
++ * If no locked update overlapped [first, last read of irq_seq], either it
++ * finished before (acquire: its pending_interrupts and HARD are seen, and
++ * the decision is the one the stock code would take now), or it starts
++ * after the last read: then (Dekker, both sides W; mb; R) it reads the new
++ * msr, and its own result, computed from the latest inputs, is final --
++ * exactly the result of the stock serialization.
++ * When HARD is already set and r != 0, cpu_interrupt() from the vCPU itself
++ * would also set icount_decr.high: done here too.
++ */
++static uint64_t mnb_fast, mnb_slow, mnb_bad, mnb_exittb, mnb_total;
++static bool mnb_atexit;
++
++static void mnb_report(void)
++{
++    fprintf(stderr, "msr-nobql-verify: %" PRIu64 " décisions sans verrou, %"
++            PRIu64 " passages au verrou, %" PRIu64 " divergences, %" PRIu64
++            " EXITTB supprimés\n", qatomic_read(&mnb_fast),
++            qatomic_read(&mnb_slow), qatomic_read(&mnb_bad),
++            qatomic_read(&mnb_exittb));
++}
++
++static void mnb_count(CPUPPCState *env, uint64_t *c)
++{
++    if (unlikely(env->msr_nobql_verify)) {
++        if (!qatomic_read(&mnb_atexit)) {
++            qatomic_set(&mnb_atexit, true);
++            atexit(mnb_report);
++        }
++        qatomic_inc(c);
++        if ((qatomic_fetch_inc(&mnb_total) & ((1u << 26) - 1)) == 0) {
++            mnb_report();
++        }
++    }
++}
++
++void ppc_nobql_exittb_count(CPUPPCState *env)
++{
++    mnb_count(env, &mnb_exittb);
++}
++
++static bool ppc_maybe_interrupt_nolock(CPUPPCState *env, CPUState *cs)
++{
++    uint32_t s;
++    bool r, h;
++
++    smp_mb();                     /* our msr (...) writes before irq_seq */
++    s = qatomic_load_acquire(&env->irq_seq);
++    if (s & 1) {
++        return false;
++    }
++    r = ppc_next_unmasked_interrupt(env) != 0;
++    h = qatomic_read(&cs->interrupt_request) & CPU_INTERRUPT_HARD;
++    smp_rmb();
++    if (qatomic_read(&env->irq_seq) != s || r != h) {
++        return false;
++    }
++    if (r) {
++        qatomic_set(&cs->neg.icount_decr.u16.high, -1);
++    }
++    if (unlikely(env->msr_nobql_verify)) {
++        /* proof: under the BQL the stock code must leave HARD as it is */
++        bool r2;
++
++        bql_lock();
++        r2 = ppc_next_unmasked_interrupt(env) != 0;
++        h = cs->interrupt_request & CPU_INTERRUPT_HARD;
++        if (r2 != h) {
++            if (qatomic_fetch_inc(&mnb_bad) < 50) {
++                fprintf(stderr, "msr-nobql-verify: DIVERGENCE cpu %d msr 0x%"
++                        PRIx64 " pending 0x%x : sans verrou %d, HARD %d, "
++                        "sous verrou %d\n", cs->cpu_index, (uint64_t)env->msr,
++                        env->pending_interrupts, r, h, r2);
++            }
++            if (r2) {
++                cpu_interrupt(cs, CPU_INTERRUPT_HARD);
++            } else {
++                cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
++            }
++        }
++        bql_unlock();
++    }
++    mnb_count(env, &mnb_fast);
++    return true;
++}
++
+ void ppc_maybe_interrupt(CPUPPCState *env)
+ {
+     CPUState *cs = env_cpu(env);
++
++    if (env->msr_nobql && tcg_enabled() && !bql_locked() &&
++        qemu_cpu_is_self(cs)) {
++        if (ppc_maybe_interrupt_nolock(env, cs)) {
++            return;
++        }
++        mnb_count(env, &mnb_slow);
++    }
++
+     BQL_LOCK_GUARD();
+ 
++    if (env->msr_nobql) {
++        qatomic_set(&env->irq_seq, env->irq_seq + 1);       /* odd */
++        smp_mb();                  /* irq_seq odd before reading env->msr */
++    }
+     if (ppc_next_unmasked_interrupt(env)) {
+         cpu_interrupt(cs, CPU_INTERRUPT_HARD);
+     } else {
+         cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
+     }
++    if (env->msr_nobql) {
++        qatomic_store_release(&env->irq_seq, env->irq_seq + 1);   /* even */
++    }
+ }
+ 
+ #ifdef TARGET_PPC64
+@@ -2598,7 +2715,7 @@ void helper_raise_exception(CPUPPCState *env, uint32_t exception)
+ #ifndef CONFIG_USER_ONLY
+ void helper_store_msr(CPUPPCState *env, target_ulong val)
+ {
+-    uint32_t excp = hreg_store_msr(env, val, 0);
++    uint32_t excp = hreg_store_msr_tb(env, val, 0);
+ 
+     if (excp != 0) {
+         cpu_interrupt_exittb(env_cpu(env));
+@@ -2660,13 +2777,23 @@ static void do_rfi(CPUPPCState *env, target_ulong nip, target_ulong msr)
+ #endif
+     /* XXX: beware: this is false if VLE is supported */
+     env->nip = nip & ~((target_ulong)0x00000003);
+-    hreg_store_msr(env, msr, 1);
++    hreg_store_msr_tb(env, msr, 1);
+     trace_ppc_excp_rfi(env->nip, env->msr);
+     /*
+      * No need to raise an exception here, as rfi is always the last
+      * insn of a TB
+      */
+-    cpu_interrupt_exittb(env_cpu(env));
++    if (env->msr_nobql) {
++        /*
++         * POMPPC tcg/0012: every rfi-class TB ends with DISAS_EXIT, i.e.
++         * exit_tb(NULL, 0): back to the main loop with last_tb = NULL,
++         * which is all that EXITTB would obtain (at the cost of the BQL
++         * here and again in cpu_handle_interrupt).
++         */
++        ppc_nobql_exittb_count(env);
++    } else {
++        cpu_interrupt_exittb(env_cpu(env));
++    }
+     /* Reset the reservation */
+     env->reserve_addr = -1;
+ 
+diff --git a/target/ppc/helper_regs.c b/target/ppc/helper_regs.c
+index eea1976..8912fb1 100644
+--- a/target/ppc/helper_regs.c
++++ b/target/ppc/helper_regs.c
+@@ -296,7 +296,26 @@ void cpu_interrupt_exittb(CPUState *cs)
+     }
+ }
+ 
++/*
++ * POMPPC tcg/0012: from_tb = called by helper_store_msr (mtmsr, mtmsrd) or
++ * do_rfi, whose TB exits to the main loop right after the helper
++ * (DISAS_EXIT / DISAS_EXIT_UPDATE, or the single-step debug exception).
++ */
++static int hreg_store_msr_common(CPUPPCState *env, target_ulong value,
++                                 int alter_hv, bool from_tb);
++
+ int hreg_store_msr(CPUPPCState *env, target_ulong value, int alter_hv)
++{
++    return hreg_store_msr_common(env, value, alter_hv, false);
++}
++
++int hreg_store_msr_tb(CPUPPCState *env, target_ulong value, int alter_hv)
++{
++    return hreg_store_msr_common(env, value, alter_hv, true);
++}
++
++static int hreg_store_msr_common(CPUPPCState *env, target_ulong value,
++                                 int alter_hv, bool from_tb)
+ {
+     int excp;
+ #if !defined(CONFIG_USER_ONLY)
+@@ -317,7 +336,11 @@ int hreg_store_msr(CPUPPCState *env, target_ulong value, int alter_hv)
+         value |= env->msr & (1 << MSR_ME);
+     }
+     if ((value ^ env->msr) & (R_MSR_IR_MASK | R_MSR_DR_MASK)) {
+-        cpu_interrupt_exittb(cs);
++        if (from_tb && env->msr_nobql) {
++            ppc_nobql_exittb_count(env);    /* tcg/0012: the TB exits anyway */
++        } else {
++            cpu_interrupt_exittb(cs);
++        }
+     }
+     if ((env->mmu_model == POWERPC_MMU_BOOKE ||
+          env->mmu_model == POWERPC_MMU_BOOKE206) &&
+diff --git a/target/ppc/helper_regs.h b/target/ppc/helper_regs.h
+index e62b1e5..aa09d1b 100644
+--- a/target/ppc/helper_regs.h
++++ b/target/ppc/helper_regs.h
+@@ -25,6 +25,9 @@ void hreg_compute_hflags(CPUPPCState *env);
+ void hreg_update_pmu_hflags(CPUPPCState *env);
+ void cpu_interrupt_exittb(CPUState *cs);
+ int hreg_store_msr(CPUPPCState *env, target_ulong value, int alter_hv);
++/* POMPPC tcg/0012: same, from a helper whose TB then exits to the main loop */
++int hreg_store_msr_tb(CPUPPCState *env, target_ulong value, int alter_hv);
++void ppc_nobql_exittb_count(CPUPPCState *env);
+ 
+ #ifdef CONFIG_USER_ONLY
+ static inline void check_tlb_flush(CPUPPCState *env, bool global) { }

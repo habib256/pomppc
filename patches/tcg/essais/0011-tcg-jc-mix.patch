@@ -1,0 +1,150 @@
+diff --git a/accel/tcg/tb-hash.h b/accel/tcg/tb-hash.h
+index a0c61f2..9dcda52 100644
+--- a/accel/tcg/tb-hash.h
++++ b/accel/tcg/tb-hash.h
+@@ -35,9 +35,31 @@
+ #define TB_JMP_ADDR_MASK (TB_JMP_PAGE_SIZE - 1)
+ #define TB_JMP_PAGE_MASK (TB_JMP_CACHE_SIZE - TB_JMP_PAGE_SIZE)
+ 
++/*
++ * POMPPC tcg/0011 (x-jc-mix): the stock page part only sees the page-number
++ * bits 12 .. 12 + 2 * TB_JMP_PAGE_BITS; everything above is ignored, so code
++ * at the same low address in different 16 MiB regions (kernel, application,
++ * frameworks at 0x9xxxxxxx under Mac OS X) always collides.  With x-jc-mix
++ * the page part folds the whole page number (xor of successive slices of
++ * TB_JMP_CACHE_BITS - TB_JMP_PAGE_BITS bits).  It stays a function of the
++ * page number alone: all the pcs of a page still share the TB_JMP_PAGE_SIZE
++ * slots from tb_jmp_cache_hash_page(), which tb_jmp_cache_clear_page needs.
++ */
++static inline unsigned int tb_jmp_cache_mix_page(vaddr pc)
++{
++    unsigned hb = tb_jmp_cache_bits - TB_JMP_PAGE_BITS;
++    vaddr p = pc >> TARGET_PAGE_BITS;
++
++    p ^= (p >> hb) ^ (p >> (2 * hb)) ^ (p >> (3 * hb));
++    return (p << TB_JMP_PAGE_BITS) & TB_JMP_PAGE_MASK;
++}
++
+ static inline unsigned int tb_jmp_cache_hash_page(vaddr pc)
+ {
+     vaddr tmp;
++    if (tb_jmp_cache_mix) {
++        return tb_jmp_cache_mix_page(pc);
++    }
+     tmp = pc ^ (pc >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS));
+     return (tmp >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS)) & TB_JMP_PAGE_MASK;
+ }
+@@ -46,6 +68,9 @@ static inline unsigned int tb_jmp_cache_hash_func(vaddr pc)
+ {
+     vaddr tmp;
+     tmp = pc ^ (pc >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS));
++    if (tb_jmp_cache_mix) {
++        return tb_jmp_cache_mix_page(pc) | (tmp & TB_JMP_ADDR_MASK);
++    }
+     return (((tmp >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS)) & TB_JMP_PAGE_MASK)
+            | (tmp & TB_JMP_ADDR_MASK));
+ }
+diff --git a/accel/tcg/tb-jmp-cache.h b/accel/tcg/tb-jmp-cache.h
+index e0f70cf..a883c0f 100644
+--- a/accel/tcg/tb-jmp-cache.h
++++ b/accel/tcg/tb-jmp-cache.h
+@@ -25,6 +25,7 @@
+ #define TB_JMP_CACHE_MAX (1 << TB_JMP_CACHE_MAX_BITS)
+ extern unsigned tb_jmp_cache_bits;
+ extern bool tb_jmp_cache_bits_frozen;
++extern bool tb_jmp_cache_mix;             /* x-jc-mix, see tb-hash.h */
+ #define TB_JMP_CACHE_SIZE (1u << tb_jmp_cache_bits)
+ 
+ /*
+diff --git a/accel/tcg/tcg-all.c b/accel/tcg/tcg-all.c
+index 1a4161e..63e4dc9 100644
+--- a/accel/tcg/tcg-all.c
++++ b/accel/tcg/tcg-all.c
+@@ -251,6 +251,20 @@ static void tcg_set_jc_bits(Object *obj, Visitor *v, const char *name,
+     tb_jmp_cache_bits = value;
+ }
+ 
++static bool tcg_get_jc_mix(Object *obj, Error **errp)
++{
++    return tb_jmp_cache_mix;
++}
++
++static void tcg_set_jc_mix(Object *obj, bool value, Error **errp)
++{
++    if (tb_jmp_cache_bits_frozen && value != tb_jmp_cache_mix) {
++        error_setg(errp, "x-jc-mix cannot change once a CPU exists");
++        return;
++    }
++    tb_jmp_cache_mix = value;
++}
++
+ static bool tcg_get_one_insn_per_tb(Object *obj, Error **errp)
+ {
+     TCGState *s = TCG_STATE(obj);
+@@ -317,6 +331,11 @@ static void tcg_accel_class_init(ObjectClass *oc, void *data)
+         "log2 of the number of jump-cache entries per CPU, 12 (stock) "
+         "to 16 (POMPPC tcg/0011, docs/tcg-g4.md 18)");
+ 
++    object_class_property_add_bool(oc, "x-jc-mix",
++        tcg_get_jc_mix, tcg_set_jc_mix);
++    object_class_property_set_description(oc, "x-jc-mix",
++        "Jump-cache hash folds the whole page number (POMPPC tcg/0011)");
++
+     object_class_property_add(oc, "x-jit-addr", "uint64",
+         tcg_get_jit_addr, tcg_set_jit_addr, NULL, NULL);
+     object_class_property_set_description(oc, "x-jit-addr",
+diff --git a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
+index 059be66..f976d3b 100644
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -653,6 +653,7 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
+ /* POMPPC tcg/0011: size of the jump cache (x-jc-bits), see tb-jmp-cache.h */
+ unsigned tb_jmp_cache_bits = TB_JMP_CACHE_BITS;
+ bool tb_jmp_cache_bits_frozen;
++bool tb_jmp_cache_mix;
+ 
+ void tcg_flush_jmp_cache(CPUState *cpu)
+ {
+diff --git a/accel/tcg/translator.c b/accel/tcg/translator.c
+index 4298bd3..706d4a5 100644
+--- a/accel/tcg/translator.c
++++ b/accel/tcg/translator.c
+@@ -516,12 +516,32 @@ void translator_lookup_and_goto_ptr_inline(DisasContextBase *db, TCGv_i64 pc,
+     QEMU_BUILD_BUG_ON(sizeof(((CPUJumpCache *)0)->array[0]) != 16);
+ #ifndef CONFIG_USER_ONLY
+     /* hash = tb_jmp_cache_hash_func(pc), system-mode version */
+-    tcg_gen_shri_i64(t, pc, sh);
+-    tcg_gen_xor_i64(t, t, pc);
+-    tcg_gen_shri_i64(h, t, sh);
+-    tcg_gen_andi_i64(h, h, TB_JMP_PAGE_MASK);
+-    tcg_gen_andi_i64(t, t, TB_JMP_ADDR_MASK);
+-    tcg_gen_or_i64(h, h, t);
++    if (tb_jmp_cache_mix) {
++        /* tb_jmp_cache_mix_page(pc) | ((pc ^ pc >> sh) & ADDR_MASK) */
++        const int hb = tb_jmp_cache_bits - TB_JMP_PAGE_BITS;
++        TCGv_i64 q = tcg_temp_new_i64();
++
++        tcg_gen_shri_i64(t, pc, TARGET_PAGE_BITS);
++        tcg_gen_shri_i64(h, t, hb);
++        tcg_gen_xor_i64(h, h, t);
++        tcg_gen_shri_i64(q, t, 2 * hb);
++        tcg_gen_xor_i64(h, h, q);
++        tcg_gen_shri_i64(q, t, 3 * hb);
++        tcg_gen_xor_i64(h, h, q);
++        tcg_gen_shli_i64(h, h, TB_JMP_PAGE_BITS);
++        tcg_gen_andi_i64(h, h, TB_JMP_PAGE_MASK);
++        tcg_gen_shri_i64(t, pc, sh);
++        tcg_gen_xor_i64(t, t, pc);
++        tcg_gen_andi_i64(t, t, TB_JMP_ADDR_MASK);
++        tcg_gen_or_i64(h, h, t);
++    } else {
++        tcg_gen_shri_i64(t, pc, sh);
++        tcg_gen_xor_i64(t, t, pc);
++        tcg_gen_shri_i64(h, t, sh);
++        tcg_gen_andi_i64(h, h, TB_JMP_PAGE_MASK);
++        tcg_gen_andi_i64(t, t, TB_JMP_ADDR_MASK);
++        tcg_gen_or_i64(h, h, t);
++    }
+ #else
+ #error "x-ret-inline: system mode only"
+ #endif

@@ -15,6 +15,8 @@
 #   • flottant scalaire simple sans helper (x-fp-inline) — patches/tcg/0007
 #   • sorties indirectes en ligne (x-ret-inline, x-jc-idx) — patches/tcg/0008
 #   • code réécrit par l'autre vCPU (courses, x-icbi-sync) — patches/tcg/0010
+#   • taille du cache de sauts (x-jc-bits)             — patches/tcg/0011
+#   • mtmsr/rfi sans verrou global (x-msr-nobql)       — patches/tcg/0012
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
 #   ./scripts/build_qemu_qfb.sh              # build dans ~/src/qemu
@@ -566,6 +568,52 @@ accel/tcg/tb-maint.c tb_invalidate_phys_line_sync
 target/ppc/cpu_init.c x-icbi-sync
 target/ppc/mem_helper.c tb_invalidate_phys_line_sync
 TCG10_MARKERS
+  # --- 4 duodecies. Taille du cache de sauts (x-jc-bits, propriété de
+  # l'ACCÉLÉRATEUR, 12 = QEMU d'origine, jusqu'à 16) --- patches/tcg/0011,
+  # docs/tcg-g4.md §18 : hachage, vidages par page et journal par mmu_idx
+  # suivent la taille choisie au démarrage (JCBITS=14 ./run_tiger.sh).
+  # Garde : le marqueur du dernier fichier du patch.
+  if ! grep -q "x-jc-bits" accel/tcg/tcg-all.c; then
+    echo "▶ patch TCG : taille du cache de sauts (x-jc-bits)"
+    patch_strict "$ROOT/patches/tcg/0011-tcg-jc-bits.patch"
+    for f in accel/tcg/cpu-exec.c accel/tcg/tb-jmp-cache.h accel/tcg/tcg-all.c \
+             accel/tcg/translate-all.c include/exec/exec-all.h; do
+      rm -f "$f.orig"
+    done
+  fi
+  while read -r f m; do
+    [ -z "$f" ] && continue
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0011 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG11_MARKERS'
+accel/tcg/tb-jmp-cache.h TB_JMP_CACHE_MAX_BITS
+accel/tcg/translate-all.c tb_jmp_cache_bits_frozen
+accel/tcg/cpu-exec.c pomppc_jc_scan_stat
+accel/tcg/tcg-all.c x-jc-bits
+TCG11_MARKERS
+  # --- 4 terdecies. mtmsr/rfi sans verrou global quand la ligne
+  # d'interruption ne change pas (x-msr-nobql, x-msr-nobql-verify) ---
+  # patches/tcg/0012, docs/tcg-g4.md §19 : compteur de séquence contre les
+  # mises à jour sous verrou, EXITTB redondant de rfi/mtmsr supprimé.
+  # Garde : le marqueur du dernier fichier du patch.
+  if ! grep -q "hreg_store_msr_tb" target/ppc/helper_regs.h; then
+    echo "▶ patch TCG : mtmsr/rfi sans verrou global (x-msr-nobql)"
+    patch_strict "$ROOT/patches/tcg/0012-ppc-msr-nobql.patch"
+    for f in target/ppc/cpu.h target/ppc/cpu_init.c target/ppc/excp_helper.c \
+             target/ppc/helper_regs.c target/ppc/helper_regs.h; do
+      rm -f "$f.orig"
+    done
+  fi
+  while read -r f m; do
+    [ -z "$f" ] && continue
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0012 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG12_MARKERS'
+target/ppc/cpu_init.c x-msr-nobql
+target/ppc/excp_helper.c ppc_maybe_interrupt_nolock
+target/ppc/helper_regs.c hreg_store_msr_tb
+target/ppc/helper_regs.h hreg_store_msr_tb
+TCG12_MARKERS
 fi
 
 # --- 5. Build ---
@@ -657,6 +705,9 @@ check_opt x-jit-near     qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jit-
 check_opt x-fp-inline    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fp-inline=on
 check_opt x-ret-inline   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-ret-inline=on
 check_opt x-jc-idx       qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-jc-idx=on
+check_opt x-icbi-sync    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-icbi-sync=on
+check_opt x-jc-bits      qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jc-bits=14
+check_opt x-msr-nobql    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-msr-nobql=on
 echo
 echo "→ $CAPS"
 

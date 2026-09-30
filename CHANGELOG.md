@@ -9,6 +9,21 @@ et dans `docs/`.
 
 ## Non publié
 
+- **TCG : cache de sauts de 16 384 entrées, `mtmsr`/`rfi` sans verrou global,
+  `x-icbi-sync` allumé** (`patches/tcg/0011`, `0012`, `docs/tcg-g4.md` §18-§21). Trois
+  propriétés allumées par défaut dans `run_tiger.sh` après A/B DOOM 3 entrelacés (6 + 6
+  parties, cellule `d3-fen` sans vidage, `tools/tcg/matab.sh`, hôte au repos, aucun autre
+  QEMU) :
+  `x-jc-bits=14` (propriété de l'accélérateur ; 23 G blocs vérifiés par `x-ret-verify`,
+  0 divergence ; réussite du cache 91,4 → 92,6 %) : 61,6 → 60,4 ms/image, −1,9 % ;
+  `x-msr-nobql` (décision sans BQL contre un compteur de séquence, preuve de l'ordre mémoire
+  au §19.2, 378 M décisions vérifiées sous verrou et 0 divergence, 70 redémarrages SMP=2
+  sans incident) : 61,7 → 61,3, −0,6 % (Marble Blast non concluant) ;
+  `x-icbi-sync` (§17) : 61,8 → 61,6, sans coût mesurable. Matrice complète sur cette
+  configuration : 16 vertes sur 16, images justes, DOOM 3 60,0 / 60,3 ms/image. Essai
+  classé : hachage replié du cache de sauts (`essais/0011-tcg-jc-mix.patch`, moins bon).
+  Le binaire de référence est à reconstruire (`scripts/build_qemu_qfb.sh`).
+
 - **Matrice : la « régression Zenerchi 4,4 → 7,9 ms/image » était une fenêtre de mesure mal
   placée** (`tools/matrice/jeux/zen.py`, `docs/matrice-jeux.md` §7). L'écran de l'éditeur
   dure un temps fixe et tourne, selon le lancement, à ~3,4 ou ~15 ms/image : le menu arrive
