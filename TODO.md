@@ -188,6 +188,11 @@ Ordre : planchers recalés, puis TCG (cache de sauts, verrou `mtmsr`/`rfi`), pui
   McRae −27 % (66,5 → 48,2, seuil de course de la matrice recalé à 15 ms/échange), Nexuiz GLSL −6 %, UT2004 −3 %, DOOM 3 −2,3 %, Prey dans le bruit ; images justes.
   Textures par DMA : mesuré, rien à construire (`docs/protocole-v23-textures.md`).
   Capacités 0x8000 / 0x20000 ajoutées sans changer `QGPU_PROTO_VERSION` (22).
+  **À faire par l'utilisateur** : reconstruire le binaire de référence
+  (`scripts/build_qemu_qfb.sh`, VM arrêtée ; binaires d'avant déjà copiés en
+  `~/src/qemu/build/*.avant-a4`). Tant qu'il n'est pas reconstruit, le device de référence
+  n'annonce pas les capacités et le plugin `20261001-a4on` (installé) garde les anciennes
+  voies : aucun gain, rien de cassé. `~/src/qemu-a4` porte déjà ce device.
 - [ ] **[Système] DOOM 3 plein écran mort au chargement** (`exit 139`, tas du jeu corrompu) :
   3 fois de suite dans une même session de la VM pendant le volet état d'A4, **dont une fois
   leviers éteints** ; 0 sur les ~20 parties suivantes (campagne d'intégration comprise).
