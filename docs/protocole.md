@@ -383,6 +383,7 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_CAP_GLSL` | `0x00001000` |
 | `QGPU_CAP_COMBINE3` | `0x00002000` |
 | `QGPU_CAP_GLSL_PATHS` | `0x00004000` |
+| `QGPU_CAP_GEOM_HOST` | `0x00020000` |
 | `QGPU_MAX_CTX` | `128` |
 | `QGPU_MAX_SURF` | `128` |
 | `QGPU_MAX_SURF_DIM` | `4096` |
@@ -463,6 +464,7 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_OP_SET_CURRENT` | `0x0057` |
 | `QGPU_OP_DRAW_RAW` | `0x0058` |
 | `QGPU_OP_DRAW_RAW_BUF` | `0x0059` |
+| `QGPU_OP_DRAW_RAW_SANE` | `0x0090` |
 | `QGPU_OP_DRAW_NATIVE` | `0x005A` |
 | `QGPU_OP_SET_POLYGON_STIPPLE` | `0x0060` |
 | `QGPU_OP_QUERY_BEGIN` | `0x0061` |
@@ -515,6 +517,7 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_LEN_DRAW_RAW` | `10` |
 | `QGPU_LEN_DRAW_RAW_BUF` | `12` |
 | `QGPU_LEN_DRAW_NATIVE` | `9` |
+| `QGPU_LEN_DRAW_RAW_SANE` | `11` |
 | `QGPU_LEN_SET_POLYGON_STIPPLE` | `33` |
 | `QGPU_LEN_QUERY` | `2` |
 | `QGPU_LEN_QUERY_RESULT` | `3` |
@@ -868,6 +871,8 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_NT_UINT` | `0x1405` |
 | `QGPU_NT_FLOAT` | `0x1406` |
 | `QGPU_NT_DOUBLE` | `0x140A` |
+| `QGPU_RAWS_KEEP_W0` | `0x00000001` |
+| `QGPU_RAWS_ON` | `0x80000000` |
 | `QGPU_CLASS_CTX` | `0` |
 | `QGPU_CLASS_SURF` | `1` |
 | `QGPU_CLASS_TEX` | `2` |

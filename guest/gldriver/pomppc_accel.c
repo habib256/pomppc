@@ -55,6 +55,14 @@
  *   POMPPC_GL_NATIVE_RANGE=0  ne pas croire la plage (ptr, longueur) de
  *                         gldFlushBuffer : tout le VBO devient sale (seul ce
  *                         que les dessins lisent est recopié, cf. raw_sync)
+ *   POMPPC_GL_RAWSANE=1   A4 : les séries Begin/End partent en DRAW_RAW_SANE
+ *                         (QGPU_CAP_GEOM_HOST) — l'hôte trie les sommets fous,
+ *                         raw_fix_nan ne tourne plus sur le G4. Éteint par défaut.
+ *   POMPPC_GL_NATSHM=1    A4 : un dessin arrivé à RenderVertexArray avec des
+ *                         tableaux CLIENTS (plage VAR de Colin McRae, mélange
+ *                         VBO/client) part aux octets de l'application
+ *                         (DRAW_NATIVE depuis BAR0, l'hôte convertit) au lieu
+ *                         d'être empaqueté sommet par sommet. Éteint par défaut.
  *   POMPPC_GL_XFER16=0    pas de transfert 16 bits hôte (v15) : fenêtre 16 bits
  *                         et Z 16 restent sans aller-retour
  *   POMPPC_GL_NOTE=chemin journal d'appoint (gl_note). SANS elle, rien n'est
@@ -118,7 +126,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260930-wlunif"
+#define POMPPC_PLUGIN_REV "20260930-a4geo"
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -1027,6 +1035,12 @@ static struct {
     unsigned long   n_vbohits, n_vbomiss;
     /* ── v18 : DRAW_NATIVE, miroirs bruts des VBO ── */
     int             native;             /* QGPU_CAP_NATIVE ; POMPPC_GL_NATIVE=0 le coupe */
+    int             rawsane;            /* A4 : DRAW_RAW_SANE (QGPU_CAP_GEOM_HOST,
+                                           POMPPC_GL_RAWSANE=1) */
+    unsigned long   n_rawsane;          /* séries Begin/End vérifiées par l'hôte */
+    int             natshm;             /* A4 : tableaux clients en DRAW_NATIVE
+                                           (QGPU_CAP_GEOM_HOST, POMPPC_GL_NATSHM=1) */
+    unsigned long   n_natshm_draws, n_natshm_bytes, n_natshm_fall;
     int             native_range;       /* plage de gldFlushBuffer crue (défaut) */
     PBuf           *buf_hash[BUF_HASH]; /* recherche O(1) de buf_from_vbo */
     long            rp_qid[RAWPOOL_MAX];
@@ -1705,6 +1719,17 @@ static void stats_frame(void *ctx)
                             (G.n_native_draws - nd0) / fr, (G.n_native_verts - nv0) / fr,
                             ((G.n_native_bytes - nb0) >> 10) / fr,
                             (G.n_native_fall - nf0) / fr);
+                /* A4, volet géométrie : ce que l'hôte fait à la place du G4 */
+                if (G.rawsane || G.natshm) {
+                    static unsigned long rs0, sd0, sb0, sf0;
+                    fprintf(f, "    geom-host: %lu DRAW_RAW_SANE/frame, %lu client-array native "
+                            "draws/frame, %lu KiB client arrays copied/frame, %lu fell back "
+                            "to packing/frame\n",
+                            (G.n_rawsane - rs0) / fr, (G.n_natshm_draws - sd0) / fr,
+                            ((G.n_natshm_bytes - sb0) >> 10) / fr, (G.n_natshm_fall - sf0) / fr);
+                    rs0 = G.n_rawsane; sd0 = G.n_natshm_draws;
+                    sb0 = G.n_natshm_bytes; sf0 = G.n_natshm_fall;
+                }
             }
             {
                 int k;
@@ -2323,6 +2348,18 @@ void pomppc_backend_init(void)
                          getenv("POMPPC_GL_NATIVE")[0] == '0');
             G.native_range = !(getenv("POMPPC_GL_NATIVE_RANGE") &&
                                getenv("POMPPC_GL_NATIVE_RANGE")[0] == '0');
+            /* A4, volet géométrie : le tri des sommets fous de Begin/End
+               (raw_fix_nan, 12,8 % du fil de Nexuiz ARB) fait par l'hôte.
+               ÉTEINT par défaut tant que la matrice ne l'a pas prouvé :
+               POMPPC_GL_RAWSANE=1 l'allume, s'il est annoncé. */
+            G.rawsane = G.v7 && (G.q.caps & QGPU_CAP_GEOM_HOST) &&
+                        getenv("POMPPC_GL_RAWSANE") && getenv("POMPPC_GL_RAWSANE")[0] == '1';
+            /* A4 : les tableaux CLIENTS qui arrivent à RenderVertexArray (plage
+               VAR, mélange VBO/client) partent aux octets de l'application en
+               DRAW_NATIVE (l'hôte convertit) au lieu de l'empaquetage.
+               Éteint par défaut : POMPPC_GL_NATSHM=1. */
+            G.natshm = G.native && (G.q.caps & QGPU_CAP_GEOM_HOST) &&
+                       getenv("POMPPC_GL_NATSHM") && getenv("POMPPC_GL_NATSHM")[0] == '1';
             G.pixtex = -1;
             G.pixtex_w = G.pixtex_h = 0;
             /* 3e passe : numéros de soumission (perte ciblée) à partir de 1 —
@@ -2346,10 +2383,10 @@ void pomppc_backend_init(void)
         if (G.state > 0) {
             gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d lazyapple=%d "
                     "native=%d (plages %d) count=%d verdict=%d verdictcheck=%d whitelist=%d "
-                    "texmemo=%d stskip=%d statecheck=%d wlunif=%d\n",
+                    "texmemo=%d stskip=%d statecheck=%d wlunif=%d rawsane=%d natshm=%d\n",
                     G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range,
                     G.count, G.verdict, G.vcheck, G.wl, G.texmemo, G.stskip, G.stcheck,
-                    G.wlunif);
+                    G.wlunif, G.rawsane, G.natshm);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
                        " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
@@ -2408,7 +2445,9 @@ static void va_probe(PCtx *p, const unsigned char *V, unsigned long fmt,
                      const char *tag, int bad);
 static void close_raw(void)
 {
-    if (G.raw_ctx && G.raw_count && raw_fix_nan()) {
+    /* A4 (POMPPC_GL_RAWSANE) : le tri des sommets fous passe à l'hôte
+       (DRAW_RAW_SANE) — raw_fix_nan ne relit plus chaque mot sur le G4. */
+    if (G.raw_ctx && G.raw_count && (G.rawsane || raw_fix_nan())) {
         unsigned long *c;
         /* Un vidage a pu survenir entre l'ouverture de la série et ici :
            geom_begin vide le flux APRÈS avoir envoyé l'état, quand la place des
@@ -2493,7 +2532,8 @@ static void close_raw(void)
                     gl_note("  (pas de descripteur VAO)\n");
             }
         }
-        c[0] = QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW);
+        c[0] = G.rawsane ? QGPU_CMD_HDR(QGPU_OP_DRAW_RAW_SANE, QGPU_LEN_DRAW_RAW_SANE)
+                         : QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW);
         c[1] = G.raw_mode;
         c[2] = G.raw_count;             /* sommets, ou INDICES si la série est indexée */
         c[3] = G.base + VTX_OFF + G.raw_start;
@@ -2507,7 +2547,14 @@ static void close_raw(void)
            tableau. C'est l'étendue des sommets de la série, pas le nombre
            d'indices — les deux coïncident quand la série n'est pas indexée. */
         c[9] = (G.raw_vend - G.raw_start) / (G.raw_words * 4);
-        G.ncmd += QGPU_LEN_DRAW_RAW;
+        if (G.rawsane) {
+            /* S3 : sous programme de sommets, w = 0 n'est pas fou */
+            c[10] = (G.prog && G.raw_ctx->vp_on) ? QGPU_RAWS_KEEP_W0 : 0;
+            G.ncmd += QGPU_LEN_DRAW_RAW_SANE;
+            G.n_rawsane++;
+        } else {
+            G.ncmd += QGPU_LEN_DRAW_RAW;
+        }
         G.n_rawdraws++;
         if (G.raw_lots > 1)
             G.n_rawmerged += G.raw_lots - 1;
@@ -2718,6 +2765,7 @@ static int plugin_draw_op(unsigned long op)
     return (op >= QGPU_OP_DRAW_TRIANGLES && op <= QGPU_OP_DRAW_TRIANGLES_SEC) ||
            op == QGPU_OP_DRAW_RAW || op == QGPU_OP_DRAW_RAW_BUF ||
            op == QGPU_OP_DRAW_NATIVE || op == QGPU_OP_PROG_STRING ||
+           op == QGPU_OP_DRAW_RAW_SANE ||                  /* A4 */
            op == QGPU_OP_GLSL_LINK;
 }
 
@@ -2766,6 +2814,18 @@ static void broken_all(const char *why, long st, unsigned long pc, unsigned long
     if (pc < CMD_WORDS && G.native &&
         (QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_NATIVE ||
          QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_BUF_SUBDATA)) {
+        {   /* A4 : vidage de la soumission fautive, une fois (comme DRAW_RAW) */
+            static int done;
+            const char *fd = getenv("POMPPC_GL_DUMPFAIL");
+            if (fd && *fd && !done) {
+                char fp[300];
+                done = 1;
+                snprintf(fp, sizeof(fp), "%s/fail-native-%06lu.bin", fd, G.n_frames);
+                dump_one(fp);
+                gl_note("DUMPFAIL %s : op %lx pc %lu statut %ld ncmd %lu\n",
+                        fp, (unsigned long)QGPU_CMD_OP(G.cmd[pc]), pc, st, G.ncmd);
+            }
+        }
         pomppc_log("POMPPC: %s refusé (statut %ld, commande %lu) : DRAW_NATIVE coupé\n",
                    QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_NATIVE ? "DRAW_NATIVE" : "BUF_SUBDATA",
                    st, pc);
@@ -2781,7 +2841,8 @@ static void broken_all(const char *why, long st, unsigned long pc, unsigned long
        brut suffit — l'accélération de la rastérisation, elle, reste bonne. */
     if (pc < CMD_WORDS &&
         (QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_RAW ||
-         QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_RAW_BUF)) {
+         QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_RAW_BUF ||
+         QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_RAW_SANE)) {
         {   /* lot 11 : vidage de la soumission fautive, une fois */
             static int done;
             const char *fd = getenv("POMPPC_GL_DUMPFAIL");
@@ -7776,6 +7837,12 @@ static int geom_va_on(PCtx *p)
        §3 bis). glBegin garde le descripteur (mode mixte). */
     if (G.prog && p->vp_on && V && (va_enabled(V, 0) || va_enabled(V, 16)))
         return 1;
+    /* A4 (30/09) : POMPPC_GL_NATSHM ne touche PAS au routage. Essayé en VM
+       (gltest varray) : cfg+0x78 posé en permanence, ou POMPPC_GL_ARRAY=1,
+       laisse les tableaux CLIENTS du pipeline fixe au déroulage de GLEngine ;
+       POMPPC_GL_ARRAY=2 (descripteur retiré) les perd sans aucun appel au
+       pilote. Seuls les VBO et la plage VAR arrivent à RenderVertexArray
+       (docs/protocole-v23-geometrie.md §3). */
     if (!sw)
         return 0;
     if (sw >= 2)
@@ -10128,7 +10195,7 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
     geom_send_all(p, p->geom_fmt);
     /* Plus aucun vidage entre ici et EndPrimitiveBuffer : GLEngine écrit dans
        la fenêtre partagée pendant ce temps. On fait donc la place maintenant. */
-    if (G.ncmd + QGPU_LEN_DRAW_RAW + 4 > CMD_WORDS || geom_slots(words) < GEOM_MIN_SLOTS)
+    if (G.ncmd + QGPU_LEN_DRAW_RAW_SANE + 4 > CMD_WORDS || geom_slots(words) < GEOM_MIN_SLOTS)
         flush();
     slots = geom_slots(words);
     /* TAMPON = NOMBRE ENTIER DE PRIMITIVES. GLEngine remplit le tampon offert
@@ -11664,6 +11731,20 @@ static int nat_cur_of(int slot, int *n)
     return -1;
 }
 
+/* A4, volet géométrie (POMPPC_GL_NATSHM) : un tableau CLIENT (hors VBO) lu
+ * par un dessin. Ses octets [src + vmin·pas, src + vmax·pas + taille) sont
+ * recopiés TELS QUELS dans la zone des sommets (memcpy, aucune conversion sur
+ * le G4) et décrits en QGPU_BUF_SHMEM ; les tableaux entrelacés (plages qui se
+ * chevauchent ou se touchent) partagent un bloc. Les descripteurs désignent
+ * le sommet vmin : indexé, `premier` = vmin est la base des indices
+ * (QGPU_CAP_GEOM_HOST) ; non indexé, premier = 0. */
+typedef struct NatCli {
+    const unsigned char *lo, *hi;       /* octets lus : [lo, hi) */
+    int d;                              /* descripteur */
+    int blk;                            /* bloc (après fusion) */
+} NatCli;
+#define NATSHM_GAP 64                   /* trou toléré entre deux plages d'un bloc */
+
 static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
                             unsigned long mode, long first, long count,
                             unsigned long itype, const void *indices,
@@ -11672,7 +11753,11 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
     NatBuf nb[QGPU_NATTR_MAX + 1];
     unsigned long d[QGPU_NATTR_MAX][QGPU_NATTR_WORDS];
     int dbuf[QGPU_NATTR_MAX];
-    int nd = 0, nn = 0, j, k, ib = -1, seen_vbo = 0, cn, w;
+    NatCli cl[QGPU_NATTR_MAX];
+    const unsigned char *blo[QGPU_NATTR_MAX], *bhi[QGPU_NATTR_MAX];
+    unsigned long boff[QGPU_NATTR_MAX], cbytes = 0, vbase = 0;
+    int nd = 0, nn = 0, j, k, ib = -1, seen_vbo = 0, cn, w, ncl = 0, nblk = 0;
+    int fwhy = 0;                       /* A4 : ligne du repli (note) */
     unsigned long isz = 0, ioff_b = 0, itype_h = QGPU_IDX_NONE, ibuf = QGPU_BUF_SHMEM;
     unsigned long ioff = 0, aoff, dbytes, ibytes, nverts, *c, *dst;
     unsigned long a[QGPU_LEN_SET_CURRENT - 1];
@@ -11689,35 +11774,60 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
         int code;
         if (!at->src) {
             if (j == 0 || nat_cur_of(at->slot, &cn) < 0)
-                goto fall;
+                { fwhy = __LINE__; goto fall; }
             continue;
         }
         vbo = GLD_U32(V, VA_VBO(V, at->slot));
-        if (!vbo)
-            goto fall;                  /* tableau client : l'empaquetage */
+        if (!vbo) {
+            /* tableau client : recopié tel quel (A4), sinon l'empaquetage */
+            unsigned long len;
+            code = nat_code(j, at->slot);
+            if (!G.natshm || code < 0 || !nat_type_ok(at->type, at->bpc) ||
+                at->src_n < 1 || at->src_n > 4 || at->stride <= 0)
+                { fwhy = __LINE__; goto fall; }
+            stride = (unsigned long)at->stride;
+            if (vmax - vmin > (0x7fffffffUL - 64) / stride)
+                { fwhy = __LINE__; goto fall; }
+            len = (vmax - vmin) * stride + (unsigned long)(at->src_n * at->bpc);
+            cl[ncl].lo = at->src + vmin * stride;
+            cl[ncl].hi = cl[ncl].lo + len;
+            if (cl[ncl].hi < cl[ncl].lo)
+                { fwhy = __LINE__; goto fall; }              /* bout de l'espace d'adressage */
+            cl[ncl].d = nd;
+            ncl++;
+            dbuf[nd] = -1;
+            d[nd][0] = (unsigned long)code;
+            d[nd][1] = QGPU_BUF_SHMEM;
+            d[nd][2] = 0;               /* après la recopie */
+            d[nd][3] = stride;
+            d[nd][4] = at->type;
+            d[nd][5] = (unsigned long)at->src_n | (at->norm ? QGPU_NATTR_NORMALIZED : 0);
+            nd++;
+            continue;
+        }
         seen_vbo = 1;
         code = nat_code(j, at->slot);
         b = buf_from_vbo(vbo);
         if (code < 0 || !b)
-            goto fall;
+            { fwhy = __LINE__; goto fall; }
         base = GLD_U32((unsigned char *)vbo, VBO_DATA);
         size = GLD_U32((unsigned char *)vbo, VBO_SIZE);
         if (!base || !size || size > RAWPOOL_BYTES || (unsigned long)at->src < base)
-            goto fall;
+            { fwhy = __LINE__; goto fall; }
         off = (unsigned long)at->src - base;
         stride = (unsigned long)at->stride;
         if (!nat_type_ok(at->type, at->bpc) || at->src_n < 1 || at->src_n > 4 ||
             at->stride <= 0 || off >= size)
-            goto fall;
+            { fwhy = __LINE__; goto fall; }
         /* off + vmax·pas + taille ≤ taille logique, sans débordement 32 bits */
         if (vmax && vmax > (size - off) / stride)
-            goto fall;
+            { fwhy = __LINE__; goto fall; }
         end = off + vmax * stride + (unsigned long)(at->src_n * at->bpc);
         if (end > size)
-            goto fall;
+            { fwhy = __LINE__; goto fall; }
         k = nat_buf_add(nb, &nn, b, base, size, off + vmin * stride, end);
         if (k < 0)
-            goto fall;
+            { fwhy = __LINE__; goto fall; }
         dbuf[nd] = k;
         d[nd][0] = (unsigned long)code;
         d[nd][1] = 0;                   /* tampon hôte : après raw_ensure */
@@ -11727,8 +11837,36 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
         d[nd][5] = (unsigned long)at->src_n | (at->norm ? QGPU_NATTR_NORMALIZED : 0);
         nd++;
     }
-    if (!seen_vbo)
+    if (!seen_vbo && !ncl)
         return -1;
+    if (ncl) {
+        /* A4 : les descripteurs désignent le sommet vmin (base des indices) */
+        vbase = vmin;
+        /* fusion des plages : triées par début (≤ 24, insertion) */
+        for (j = 1; j < ncl; j++) {
+            NatCli t = cl[j];
+            for (k = j; k > 0 && cl[k - 1].lo > t.lo; k--)
+                cl[k] = cl[k - 1];
+            cl[k] = t;
+        }
+        for (j = 0; j < ncl; j++) {
+            if (nblk && cl[j].lo <= bhi[nblk - 1] + NATSHM_GAP) {
+                if (cl[j].hi > bhi[nblk - 1])
+                    bhi[nblk - 1] = cl[j].hi;
+            } else {
+                blo[nblk] = cl[j].lo;
+                bhi[nblk] = cl[j].hi;
+                nblk++;
+            }
+            cl[j].blk = nblk - 1;
+        }
+        for (k = 0; k < nblk; k++) {
+            boff[k] = cbytes;
+            cbytes += ((unsigned long)(bhi[k] - blo[k]) + 3) & ~3UL;
+        }
+        if (cbytes > VTX_LIMIT - VTX_OFF - 0x10000)
+            { fwhy = __LINE__; goto fall; }                  /* plus grand que la zone : l'empaquetage */
+    }
 
     /* 2. Indices : dans un VBO d'éléments lié (décrit tel quel), sinon
           recopiés dans la zone des indices (u8 → u16) */
@@ -11737,7 +11875,7 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
         isz = itype == VA_GL_UINT ? 4 : itype == VA_GL_USHORT ? 2 :
               itype == VA_GL_UBYTE ? 1 : 0;
         if (!isz || !indices)
-            goto fall;
+            { fwhy = __LINE__; goto fall; }
         ev = GLD_U32(V, VA_EBO);
         if (ev && isz > 1) {
             PBuf *e = buf_from_vbo(ev);
@@ -11750,7 +11888,7 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
                 ioff_b = p0 - base;
                 ib = nat_buf_add(nb, &nn, e, base, size, ioff_b, ioff_b + nidx * isz);
                 if (ib < 0)
-                    goto fall;
+                    { fwhy = __LINE__; goto fall; }
             }
         }
         itype_h = isz == 4 ? QGPU_IDX_U32 : QGPU_IDX_U16;
@@ -11762,7 +11900,7 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
     for (k = 0; k < nn; k++)
         if (!raw_ensure(p, nb[k].b, nb[k].size, nb[k].base) || !G.native ||
             !raw_sync(p, nb[k].b, nb[k].base, nb[k].size, nb[k].lo, nb[k].hi))
-            goto fall;
+            { fwhy = __LINE__; goto fall; }
 
     /* 4. Attributs constants du plan : leur valeur en SET_CURRENT (peut
           vider le flux, lui aussi) */
@@ -11791,7 +11929,7 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
           indices dans la sienne, commande — AUCUN vidage entre les trois (pas
           d'arène ici : arena_alloc peut vider, et les indices écrits avant
           partiraient dans l'autre moitié que la commande). */
-    dbytes = (unsigned long)nd * QGPU_NATTR_WORDS * 4;
+    dbytes = (unsigned long)nd * QGPU_NATTR_WORDS * 4 + cbytes;
     ibytes = (nidx && ib < 0) ? nidx * (isz == 4 ? 4UL : 2UL) : 0;
     /* Finding 2 (relecture du 29/09) : sans vidage ci-dessous, rien n'avait
        attendu la fin d'une attente d'un autre fil (F9) avant d'écrire dans
@@ -11804,18 +11942,40 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
     if (G.ncmd + QGPU_LEN_DRAW_NATIVE + QGPU_LEN_DRAW_RAW + 2 * QGPU_LEN_CTX + 8 > CMD_WORDS ||
         VTX_OFF + G.vtx + dbytes > VTX_LIMIT ||
         (ibytes && ((G.idx + 3) & ~3UL) + ibytes > IDX_SIZE))
-        goto fall;
+        { fwhy = __LINE__; goto fall; }
     /* un vidage ci-dessus a pu rendre un refus de l'hôte (broken_all) :
        DRAW_NATIVE coupé, ou le contexte perdu */
     if (!G.native || p->broken || p->qctx < 0)
-        goto fall;
+        { fwhy = __LINE__; goto fall; }
     close_raw();                        /* la série Begin/End en attente d'abord */
+    if (ncl) {
+        /* A4 : les octets de l'application, tels quels (lecture sous la
+           garde pack_jmp de geom_draw_client : une faute jette le dessin
+           avant qu'aucune commande ne soit écrite) */
+        unsigned char *cb = G.win + VTX_OFF + G.vtx;
+        for (k = 0; k < nblk; k++)
+            memcpy(cb + boff[k], blo[k], (unsigned long)(bhi[k] - blo[k]));
+        for (j = 0; j < ncl; j++)
+            d[cl[j].d][2] = G.base + VTX_OFF + G.vtx + boff[cl[j].blk] +
+                            (unsigned long)(cl[j].lo - blo[cl[j].blk]);
+        G.vtx += cbytes;
+        dbytes -= cbytes;
+        G.n_natshm_draws++;
+        G.n_natshm_bytes += cbytes;
+    }
     dst = (unsigned long *)(G.win + VTX_OFF + G.vtx);
     for (j = 0; j < nd; j++) {
-        const PBuf *b = nb[dbuf[j]].b;
-        dst[0] = d[j][0];
-        dst[1] = (unsigned long)G.rp_qid[b->rp];
-        dst[2] = b->rp_off + d[j][2];
+        if (dbuf[j] < 0) {              /* A4 : tableau client dans BAR0 */
+            dst[0] = d[j][0];
+            dst[1] = QGPU_BUF_SHMEM;
+            dst[2] = d[j][2];
+        } else {
+            const PBuf *b = nb[dbuf[j]].b;
+            dst[0] = d[j][0];
+            dst[1] = (unsigned long)G.rp_qid[b->rp];
+            /* A4 : désigné au sommet vbase (0 sans tableau client) */
+            dst[2] = b->rp_off + d[j][2] + vbase * d[j][3];
+        }
         dst[3] = d[j][3];
         dst[4] = d[j][4];
         dst[5] = d[j][5];
@@ -11857,7 +12017,9 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
     c[3] = ibuf;
     c[4] = ioff;
     c[5] = itype_h;
-    c[6] = nidx ? 0 : (unsigned long)first;
+    /* indexé : base des indices (A4, 0 sans tableau client) ; non indexé :
+       premier sommet, compté depuis le sommet que désignent les descripteurs */
+    c[6] = nidx ? vbase : (unsigned long)first - vbase;
     c[7] = (unsigned long)nd;
     c[8] = aoff;
     G.ncmd += QGPU_LEN_DRAW_NATIVE;
@@ -11885,6 +12047,17 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
 fall:
     if (seen_vbo)
         G.n_native_fall++;
+    if (ncl)
+        G.n_natshm_fall++;
+    if (G.natshm) {                     /* A4 : pourquoi l'empaquetage (8 fois) */
+        static int told;
+        if (told < 8) {
+            told++;
+            gl_note("NATSHM repli ligne %d : %d attributs du plan, %d clients, VBO %d, "
+                    "mode %lu n %ld indexé %d, sommets %lu..%lu\n", fwhy, pl->n, ncl,
+                    seen_vbo, mode, count, nidx != 0, vmin, vmax);
+        }
+    }
     return -1;
 }
 
@@ -12068,6 +12241,12 @@ static void vd_frame(void)
 {
     if (G.n_frames % CNT_PERIOD != 0)
         return;
+    if (G.rawsane || G.natshm) {        /* A4, volet géométrie (cumuls) */
+        gl_note("GEOMHOST image %lu : %lu DRAW_RAW_SANE, %lu dessins de tableaux clients "
+                "natifs (%lu Kio recopiés), %lu retombés sur l'empaquetage\n",
+                G.n_frames, G.n_rawsane, G.n_natshm_draws, G.n_natshm_bytes >> 10,
+                G.n_natshm_fall);
+    }
     if (G.vcheck || G.count || G.stcheck) {
         gl_note("VERDICT image %lu : %lu repris, %lu recalculés (clé changée ou sans "
                 "verdict) ; contrôle : %lu identiques, %lu écarts (%lu depuis le début)\n",
@@ -12112,6 +12291,11 @@ static void vd_frame(void)
    contexte : gltest ne fait pas 500 images. */
 static void vd_total(const char *why)
 {
+    if (G.rawsane || G.natshm)          /* A4 : bilan de toute la vie (gltest) */
+        gl_note("GEOMHOST total (%s, image %lu) : %lu DRAW_RAW_SANE, %lu dessins de "
+                "tableaux clients natifs (%lu Kio recopiés), %lu retombés sur l'empaquetage\n",
+                why, G.n_frames, G.n_rawsane, G.n_natshm_draws, G.n_natshm_bytes >> 10,
+                G.n_natshm_fall);
     if (!G.vcheck && !G.stcheck)
         return;
     gl_note("VERDICT total (%s, image %lu) : %lu repris, %lu recalculés ; contrôle : "
