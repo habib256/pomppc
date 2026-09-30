@@ -118,7 +118,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260930-stblk"
+#define POMPPC_PLUGIN_REV "20260930-stblk3"
 /* A4 : bloc d'état éteint par défaut tant que l'A/B ne l'a pas justifié */
 #define STATEBLK_DEFAULT 0
 static void gl_note(const char *fmt, ...);
@@ -694,6 +694,13 @@ typedef struct PCtx {
        c'est le device qui les tire de STATE_BLOCK et les compare à son état.
        Seules les clés des unités et des programmes restent exactes. */
     int            st_host;
+    /* A4 : verdict des unités de la dernière série de clés chaudes. Même
+       contenu (mêmes PTex, environnement, combinaison), même époque des
+       textures (vd_epoch : un qtex ne bouge pas sans elle) et p->st valide :
+       les clés des unités sont déjà celles du device. */
+    TexInfo        hot_ti;
+    unsigned long  hot_epoch;
+    int            hot_valid;
     unsigned char *draw_seen;           /* tampon de dessin connu */
     unsigned long  direct_at;           /* n° de la dernière image présentée directement */
     /* mémoire des unités (TEXMEMO) : dernier objet de GLEngine vu à chaque
@@ -6312,6 +6319,8 @@ static struct {
     unsigned long skip, full, same, diff, diff_all, told;
     unsigned long blk, hot;             /* A4 : blocs envoyés, clés chaudes envoyées */
     unsigned long blk_all;              /* A4 : blocs depuis le début */
+    unsigned long hot_skip, hot_diff, hot_diff_all;  /* A4 : unités reprises ; contrôle */
+    unsigned long hot_chk;              /* A4 : reprises contrôlées (sous STATECHECK) */
 } STC;
 #define ST_TOLD 24
 
@@ -6582,20 +6591,63 @@ static void send_state_blk(PCtx *p, const TexInfo *ti, int raw)
             skip = 0;                   /* on envoie le vrai */
         }
     }
-    /* clés chaudes : verdict et programmes, avant le bloc */
-    state_units(p, ti, v);
-    state_progs(p, v);
-    hot = hot_list(&nhot);
-    for (i = 0; i < nhot; i++) {
-        k = hot[i];
-        if (valid && p->st[k] == v[k])
-            continue;
-        c = reserve(p, QGPU_LEN_SET_STATE);
-        c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
-        c[1] = k;
-        c[2] = v[k];
-        p->st[k] = v[k];
-        STC.hot++;
+    /* clés chaudes : verdict et programmes, avant le bloc. Les unités ne
+       sont refaites que si leur verdict a changé depuis la dernière série
+       (hot_ti) ; sous contrôle, elles le sont toujours et un envoi alors que
+       le verdict était « le même » est un écart. */
+    {
+        static const TexInfo ti_zero;
+        const TexInfo *tk = ti ? ti : &ti_zero;
+        int same = valid && p->hot_valid && p->hot_epoch == vd_epoch &&
+                   !memcmp(tk, &p->hot_ti, sizeof(TexInfo));
+        if (same && !G.stblk_check) {
+            STC.hot_skip++;
+            if (G.prog) {
+                state_progs(p, v);
+                for (k = QGPU_SK_VERTEX_PROGRAM; k <= QGPU_SK_FRAGMENT_PROGRAM; k++) {
+                    if (p->st[k] == v[k])
+                        continue;
+                    c = reserve(p, QGPU_LEN_SET_STATE);
+                    c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
+                    c[1] = k;
+                    c[2] = v[k];
+                    p->st[k] = v[k];
+                    STC.hot++;
+                }
+            }
+        } else {
+            int sent = 0;
+            state_units(p, ti, v);
+            state_progs(p, v);
+            hot = hot_list(&nhot);
+            for (i = 0; i < nhot; i++) {
+                k = hot[i];
+                if (valid && p->st[k] == v[k])
+                    continue;
+                c = reserve(p, QGPU_LEN_SET_STATE);
+                c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
+                c[1] = k;
+                c[2] = v[k];
+                p->st[k] = v[k];
+                STC.hot++;
+                if (k != QGPU_SK_VERTEX_PROGRAM && k != QGPU_SK_FRAGMENT_PROGRAM)
+                    sent++;
+            }
+            if (same)
+                STC.hot_chk++;
+            if (same && sent) {         /* contrôle : la reprise aurait menti */
+                STC.hot_diff++;
+                STC.hot_diff_all++;
+                if (STC.told < ST_TOLD) {
+                    STC.told++;
+                    gl_note("STATEBLK écart des unités, image %lu : %d clés\n",
+                            G.n_frames, sent);
+                }
+            }
+            p->hot_ti = *tk;
+            p->hot_epoch = vd_epoch;
+            p->hot_valid = 1;
+        }
     }
     if (skip) {
         STC.skip++;
@@ -12137,8 +12189,11 @@ static void vd_frame(void)
                     "%lu écarts (%lu depuis le début)\n", G.n_frames, STC.skip, STC.full,
                     STC.same, STC.diff, STC.diff_all);
         if (G.stblk)
-            gl_note("STATEBLK image %lu : %lu blocs (contrôle %d), %lu clés chaudes\n",
-                    G.n_frames, STC.blk, G.stblk_check, STC.hot);
+            gl_note("STATEBLK image %lu : %lu blocs (contrôle %d), %lu clés chaudes, "
+                    "%lu unités reprises ; contrôle des unités : %lu reprises vérifiées, "
+                    "%lu écarts (%lu depuis le début)\n", G.n_frames, STC.blk,
+                    G.stblk_check, STC.hot, STC.hot_skip, STC.hot_chk, STC.hot_diff,
+                    STC.hot_diff_all);
         if (G.texmemo)
             gl_note("TEXMEMO image %lu : %lu relevés (%lu unités sans table), %lu repris, "
                     "%lu textures gardées ; contrôle : %lu identiques, %lu textures identiques, "
@@ -12165,6 +12220,7 @@ static void vd_frame(void)
     STC.skip = STC.full = STC.same = STC.diff = 0;
     STC.blk_all += STC.blk;
     STC.blk = STC.hot = 0;
+    STC.hot_skip = STC.hot_diff = STC.hot_chk = 0;
 }
 
 /* Bilan de toute la vie du processus (VERDICTCHECK), à la destruction d'un
@@ -12172,8 +12228,9 @@ static void vd_frame(void)
 static void vd_total(const char *why)
 {
     if (G.stblk)                        /* A4 : preuve que la voie a servi */
-        gl_note("STATEBLK total (%s, image %lu) : %lu blocs (contrôle %d)\n",
-                why, G.n_frames, STC.blk_all + STC.blk, G.stblk_check);
+        gl_note("STATEBLK total (%s, image %lu) : %lu blocs (contrôle %d), unités : "
+                "%lu écarts\n", why, G.n_frames, STC.blk_all + STC.blk, G.stblk_check,
+                STC.hot_diff_all);
     if (!G.vcheck && !G.stcheck)
         return;
     gl_note("VERDICT total (%s, image %lu) : %lu repris, %lu recalculés ; contrôle : "
