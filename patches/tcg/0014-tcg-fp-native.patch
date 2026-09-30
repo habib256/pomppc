@@ -622,9 +622,9 @@ diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
 diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
 --- a/target/ppc/fpu_helper.c
 +++ b/target/ppc/fpu_helper.c
-@@ -4190,4 +4190,124 @@
-                          uint64_t fpscr, uint32_t bf)
- {
+@@ -4213,4 +4213,124 @@
+         return int128_make128(crf, fpi_fpscr_fcmpu(fpscr, crf));
+     }
      return fcmpu_flat(env, a, b, fpscr, bf, GETPC());
 +}
 +

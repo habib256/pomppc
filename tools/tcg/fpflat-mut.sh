@@ -20,19 +20,21 @@ done <<'MUT'
 # frT pas écrit avant float_check_status (exception différée)
 s/\*cpu_fpr_ptr(env, frt) = r;/;/
 # séquence d'origine sans reset_fpstatus
-/^static Int128 fp32_flat/,/^}/s/^    helper_reset_fpstatus(env);$/    ;/
+/^Int128 fp32_flat(/,/^}/s/^    helper_reset_fpstatus(env);$/    ;/
 # fmuls lent sur b au lieu de c
 s/r = float64r32_mul(a, c, \&env->fp_status);/r = float64r32_mul(a, b, \&env->fp_status);/
 # chemin court sans les drapeaux « inexact »
-/^static Int128 fp32_flat/,/^}/s/set_float_exception_flags(float_flag_inexact, \&env->fp_status);/;/
+/^Int128 helper_fp32_flat/,/^}/s/set_float_exception_flags(float_flag_inexact, \&env->fp_status);/;/
+# chemin court sans la porte
+s/    if (likely(fpi_gate(fpscr) \&\& !env->fp_verify)) {/    if (likely(!env->fp_verify)) {/
 # fcmpu lent sans FI
-/^static Int128 fcmpu_flat/,/^}/s/do_float_check_status(env, true, ra);/do_float_check_status(env, false, ra);/
+/^Int128 fcmpu_flat(/,/^}/s/do_float_check_status(env, true, ra);/do_float_check_status(env, false, ra);/
 # fnmsubs lent avec les drapeaux de fnmadds
 s/return do_fmadds(env, a, c, b, NMSUB_FLGS, ra);/return do_fmadds(env, a, c, b, NMADD_FLGS, ra);/
 # FPSCR rendu : l'ancien au lieu de celui de la séquence d'origine
 s/return int128_make128(r, env->fpscr);/return int128_make128(r, fpscr);/
 # fcmpu court : CR rendu faux pour l'égalité
-s/return int128_make128(crf, nf);/return int128_make128(crf == 2 ? 4 : crf, nf);/
+s/return int128_make128(crf, fpi_fpscr_fcmpu(fpscr, crf));/return int128_make128(crf == 2 ? 4 : crf, fpi_fpscr_fcmpu(fpscr, crf));/
 # fcmpu lent : CR lu avant la comparaison
 s/return int128_make128(env->crf\[bf\], env->fpscr);/return int128_make128(fpi_fcmpu(fpscr, a, b), env->fpscr);/
 MUT

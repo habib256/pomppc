@@ -65,10 +65,33 @@ diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
  void helper_fcmpo(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
                    uint32_t crfD)
  {
-@@ -4054,3 +4060,134 @@
+@@ -3796,7 +3802,8 @@
+  * nearest-even by the host: bit for bit what float64r32_* computes for
+  * these operands.  fmadds & co. use fmaf(): PowerPC rounds a*c+b once.
+  */
+-uint64_t helper_fp32_fast(uint64_t a, uint64_t b, uint64_t c, uint32_t op)
++static inline QEMU_ALWAYS_INLINE uint64_t fpi_fp32(uint64_t a, uint64_t b,
++                                                  uint64_t c, uint32_t op)
+ {
+     float fa, fb, fc, r;
+ 
+@@ -3858,6 +3865,11 @@
+         return fpi_f64(r);
+     }
+     return FPI_FAIL;
++}
++
++uint64_t helper_fp32_fast(uint64_t a, uint64_t b, uint64_t c, uint32_t op)
++{
++    return fpi_fp32(a, b, c, op);
+ }
+ 
+ /*
+@@ -4053,4 +4065,152 @@
+         : fpi_gate(fpscr);
  
      qatomic_inc(gate ? &fpv_slow_opnd[op] : &fpv_slow_gate[op]);
- }
++}
 +
 +/*
 + * x-fp-flat (POMPPC patches/tcg/0013, docs/tcg-g4.md section 22).
@@ -129,9 +152,9 @@ diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
 +    }
 +}
 +
-+static Int128 fp32_flat(CPUPPCState *env, uint64_t a, uint64_t b, uint64_t c,
-+                        uint64_t fpscr, uint32_t op, uint32_t frt,
-+                        uintptr_t ra)
++static __attribute__((noinline))
++Int128 fp32_flat(CPUPPCState *env, uint64_t a, uint64_t b, uint64_t c,
++                 uint64_t fpscr, uint32_t op, uint32_t frt, uintptr_t ra)
 +{
 +    uint64_t r;
 +
@@ -157,22 +180,33 @@ diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
 +    helper_compute_fprf_float64(env, r);
 +    do_float_check_status(env, true, ra);
 +    return int128_make128(r, env->fpscr);
-+}
+ }
 +
 +/*
 + * fpscr == env->fpscr (TCG_CALL_NO_WG: the globals are synced before the
 + * call); passed in a register so that the short path reads no memory.
-+ * sel = op | frT << 8.
++ * sel = op | frT << 8.  The short path is done here, in a leaf function
++ * with no stack frame; anything else (and x-fp-verify) in fp32_flat(), out
++ * of line, which starts again from the same inputs.
 + */
 +Int128 helper_fp32_flat(CPUPPCState *env, uint64_t a, uint64_t b, uint64_t c,
 +                        uint64_t fpscr, uint32_t sel)
 +{
++    if (likely(fpi_gate(fpscr) && !env->fp_verify)) {
++        uint64_t r = fpi_fp32(a, b, c, sel & 0xff);
++
++        if (likely(r != FPI_FAIL)) {
++            set_float_exception_flags(float_flag_inexact, &env->fp_status);
++            return int128_make128(r, fpi_fpscr_arith(fpscr, r));
++        }
++    }
 +    return fp32_flat(env, a, b, c, fpscr, sel & 0xff, sel >> 8, GETPC());
 +}
 +
 +/* fcmpu: returns (CR field, FPSCR) */
-+static Int128 fcmpu_flat(CPUPPCState *env, uint64_t a, uint64_t b,
-+                         uint64_t fpscr, uint32_t bf, uintptr_t ra)
++static __attribute__((noinline))
++Int128 fcmpu_flat(CPUPPCState *env, uint64_t a, uint64_t b, uint64_t fpscr,
++                  uint32_t bf, uintptr_t ra)
 +{
 +    uint32_t crf = fpi_fcmpu(fpscr, a, b);
 +
@@ -198,6 +232,12 @@ diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
 +Int128 helper_fcmpu_flat(CPUPPCState *env, uint64_t a, uint64_t b,
 +                         uint64_t fpscr, uint32_t bf)
 +{
++    uint32_t crf = fpi_fcmpu(fpscr, a, b);
++
++    if (likely(crf && !env->fp_verify)) {
++        set_float_exception_flags(float_flag_inexact, &env->fp_status);
++        return int128_make128(crf, fpi_fpscr_fcmpu(fpscr, crf));
++    }
 +    return fcmpu_flat(env, a, b, fpscr, bf, GETPC());
 +}
 diff --git a/target/ppc/helper.h b/target/ppc/helper.h
