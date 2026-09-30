@@ -622,7 +622,7 @@ diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
 diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
 --- a/target/ppc/fpu_helper.c
 +++ b/target/ppc/fpu_helper.c
-@@ -4213,4 +4213,124 @@
+@@ -4213,4 +4213,128 @@
          return int128_make128(crf, fpi_fpscr_fcmpu(fpscr, crf));
      }
      return fcmpu_flat(env, a, b, fpscr, bf, GETPC());
@@ -654,8 +654,10 @@ diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
 + * sequence is run again from the FPSCR the op started from, and its
 + * result, FPSCR and soft-float flags compared with what the op produced.
 + * The whole state it touches is saved and put back, so the guest runs
-+ * exactly as without it.  Not when FP exceptions are enabled in the MSR
-+ * (the original sequence could raise one from here): counted apart.
++ * exactly as without it.  Not when the original sequence could raise an
++ * exception from here -- FP exceptions enabled in the MSR and a trap armed
++ * in the FPSCR (VE OE UE ZE XE), or a deferred FP exception already
++ * pending: counted apart.  (DOOM 3 runs with MSR[FE] != 0 and no trap.)
 + */
 +static uint64_t fpn_ok[FPI_NOPS], fpn_bad[FPI_NOPS], fpn_fast[FPI_NOPS];
 +static uint64_t fpn_skip, fpn_total;
@@ -673,7 +675,7 @@ diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
 +    }
 +    fprintf(stderr, "fp-native-verify: %" PRIu64 " vérifiés (%" PRIu64
 +            " par le chemin court), %" PRIu64 " divergences, %" PRIu64
-+            " non vérifiés (MSR[FE]) ;", ok + bad, fast, bad,
++            " non vérifiés (MSR[FE] et trappe armée) ;", ok + bad, fast, bad,
 +            qatomic_read(&fpn_skip));
 +    for (i = 0; i < FPI_NOPS; i++) {
 +        fprintf(stderr, " %s %" PRIu64 "/%" PRIu64 "/%" PRIu64, fpi_names[i],
@@ -699,7 +701,9 @@ diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
 +        qatomic_set(&fpn_atexit, true);
 +        atexit(fpn_report);
 +    }
-+    if (fp_exceptions_enabled(env)) {
++    if (fp_exceptions_enabled(env) &&
++        ((fpscr_old & (FP_VE | FP_OE | FP_UE | FP_ZE | FP_XE)) ||
++         (excp == POWERPC_EXCP_PROGRAM && (err & POWERPC_EXCP_FP)))) {
 +        qatomic_inc(&fpn_skip);
 +        return;
 +    }
