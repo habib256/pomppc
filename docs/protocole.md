@@ -383,6 +383,7 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_CAP_GLSL` | `0x00001000` |
 | `QGPU_CAP_COMBINE3` | `0x00002000` |
 | `QGPU_CAP_GLSL_PATHS` | `0x00004000` |
+| `QGPU_CAP_STATE_BLOCK` | `0x00008000` |
 | `QGPU_MAX_CTX` | `128` |
 | `QGPU_MAX_SURF` | `128` |
 | `QGPU_MAX_SURF_DIM` | `4096` |
@@ -413,6 +414,7 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_MAX_GLSL_ATTRIBS` | `16` |
 | `QGPU_MAX_GLSL_LOG` | `(64u * 1024u)` |
 | `QGPU_MAX_CMD_ARGS` | `32` |
+| `QGPU_MAX_CMD_ARGS_LONG` | `320` |
 | `QGPU_CMD_HDR(op, len)` | `(((unsigned long)(op) << 16) \| ((unsigned long)(len) & 0xFFFF))` |
 | `QGPU_CMD_OP(hdr)` | `(((unsigned long)(hdr) >> 16) & 0xFFFF)` |
 | `QGPU_CMD_LEN(hdr)` | `((unsigned long)(hdr) & 0xFFFF)` |
@@ -480,6 +482,7 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_OP_GLSL_LINK` | `0x0079` |
 | `QGPU_OP_GLSL_UNIFORMS` | `0x007A` |
 | `QGPU_OP_GLSL_INFO_LOG` | `0x007B` |
+| `QGPU_OP_STATE_BLOCK` | `0x0080` |
 | `QGPU_LEN_NOP` | `1` |
 | `QGPU_LEN_CTX` | `2` |
 | `QGPU_LEN_SURF_CREATE` | `5` |
@@ -529,6 +532,8 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_LEN_GLSL_LINK` | `2` |
 | `QGPU_LEN_GLSL_UNIFORMS` | `5` |
 | `QGPU_LEN_GLSL_INFO_LOG` | `4` |
+| `QGPU_LEN_STATE_BLOCK` | `(1 + QGPU_SB_HDR + QGPU_SB_WORDS)` |
+| `QGPU_LEN_STATE_BLOCK_CHECK` | `(QGPU_LEN_STATE_BLOCK + QGPU_SK_COUNT)` |
 | `QGPU_FMT_XRGB8888` | `1` |
 | `QGPU_FMT_MASK` | `0xFF` |
 | `QGPU_FMT_FLAG_DEPTH` | `0x100` |
@@ -880,3 +885,27 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_CLIENT_TEX_IDS` | `(QGPU_MAX_TEX / QGPU_MAX_CLIENTS)` |
 | `QGPU_CLIENT_QUERY_IDS` | `(QGPU_MAX_QUERIES / QGPU_MAX_CLIENTS)` |
 | `QGPU_CLIENT_BUF_IDS` | `(QGPU_MAX_BUF / QGPU_MAX_CLIENTS)` |
+| `QGPU_SB_HDR` | `4` |
+| `QGPU_SB_W0_OFF` | `0x24ac` |
+| `QGPU_SB_W0_N` | `1` |
+| `QGPU_SB_W1_OFF` | `0x2d44` |
+| `QGPU_SB_W1_N` | `65` |
+| `QGPU_SB_W2_OFF` | `0x30bc` |
+| `QGPU_SB_W2_N` | `7` |
+| `QGPU_SB_W3_OFF` | `0x3168` |
+| `QGPU_SB_W3_N` | `23` |
+| `QGPU_SB_LOD_OFF` | `(0x31c4 + 0x3c)` |
+| `QGPU_SB_LOD_STRIDE` | `0x7c` |
+| `QGPU_SB_LOD_N` | `8` |
+| `QGPU_SB_WORDS` | `(QGPU_SB_W0_N + QGPU_SB_W1_N + QGPU_SB_W2_N + QGPU_SB_W3_N + QGPU_SB_LOD_N)` |
+| `QGPU_SB_F_RAW` | `0x0001` |
+| `QGPU_SB_F_VALID` | `0x0002` |
+| `QGPU_SB_F_STENCIL` | `0x0004` |
+| `QGPU_SB_F_CHECK` | `0x0008` |
+| `QGPU_SB_F_V7` | `0x0100` |
+| `QGPU_SB_F_V8` | `0x0200` |
+| `QGPU_SB_F_TEX14` | `0x0400` |
+| `QGPU_SB_F_PROG` | `0x0800` |
+| `QGPU_SB_F_UNITS8` | `0x1000` |
+| `QGPU_SB_F_GLSL` | `0x2000` |
+| `QGPU_SB_F_ALL` | `0x3F0F` |

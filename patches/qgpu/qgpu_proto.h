@@ -219,6 +219,14 @@
    GLSL_ATTRIB reste limité aux identifiants. Ajouté sans changer
    QGPU_PROTO_VERSION (même règle que QGPU_CAP_GEN_SIZES). */
 #define QGPU_CAP_GLSL_PATHS     0x00004000
+/* A4 (bloc d'état) : STATE_BLOCK — l'invité envoie les octets bruts de
+   l'état de GLEngine (fenêtres QGPU_SB_W*) et le CŒUR en tire lui-même les
+   clés QGPU_SK_* (hors unités et programmes), puis les pose comme autant de
+   SET_STATE, seulement celles qui changent. Annoncé par le cœur quel que soit
+   le backend. Sans ce bit : BAD_OPCODE ; l'invité garde SET_STATE. Ajouté sans
+   changer QGPU_PROTO_VERSION (même règle que QGPU_CAP_GEN_SIZES). Cf. la
+   section « A4 » en fin de fichier. */
+#define QGPU_CAP_STATE_BLOCK    0x00008000
 
 /* ── Statuts : QGPU_ST_* dans qgpu_abi.h ─────────────────────────────────── */
 /* ── Limites ─────────────────────────────────────────────────────────────── */
@@ -281,6 +289,9 @@
    dans un tableau de cette taille : la borne est NOMMÉE ici pour que l'hôte et
    l'invité ne puissent pas en avoir deux idées. */
 #define QGPU_MAX_CMD_ARGS       32
+/* A4 : STATE_BLOCK est plus long (QGPU_LEN_STATE_BLOCK_CHECK) ; le cœur
+   recopie ses arguments dans un tableau de cette taille. */
+#define QGPU_MAX_CMD_ARGS_LONG  320
 
 /* ── Flux de commandes ───────────────────────────────────────────────────────
  *
@@ -381,6 +392,9 @@
 #define QGPU_OP_GLSL_LINK       0x0079  /* [id] */
 #define QGPU_OP_GLSL_UNIFORMS   0x007A  /* [id, premier, n, off] n × 4 mots */
 #define QGPU_OP_GLSL_INFO_LOG   0x007B  /* [id, max, off] journal de l'hôte → BAR0 */
+/* A4 : bloc d'état (QGPU_CAP_STATE_BLOCK ; opcodes 0x0080..0x0087 réservés) */
+#define QGPU_OP_STATE_BLOCK     0x0080  /* [drapeaux, largeur, hauteur, bits de stencil,
+                                           fenêtres QGPU_SB_W* (, vecteur de contrôle)] */
 
 /* Longueurs (en mots, en-tête compris) attendues par opcode. */
 #define QGPU_LEN_NOP            1
@@ -432,6 +446,8 @@
 #define QGPU_LEN_GLSL_LINK      2
 #define QGPU_LEN_GLSL_UNIFORMS  5
 #define QGPU_LEN_GLSL_INFO_LOG  4
+#define QGPU_LEN_STATE_BLOCK    (1 + QGPU_SB_HDR + QGPU_SB_WORDS)            /* A4 : 109 */
+#define QGPU_LEN_STATE_BLOCK_CHECK (QGPU_LEN_STATE_BLOCK + QGPU_SK_COUNT)    /* 271 */
 
 /* Formats de surface. Le mot de pixel échangé est 0xAARRGGBB big-endian :
  * l'octet « x » du framebuffer Tiger EST l'alpha (v2 ; v1 l'ignorait). */
@@ -1896,5 +1912,78 @@
 #define QGPU_CLIENT_TEX_IDS     (QGPU_MAX_TEX / QGPU_MAX_CLIENTS)    /* 1024 */
 #define QGPU_CLIENT_QUERY_IDS   (QGPU_MAX_QUERIES / QGPU_MAX_CLIENTS) /* 16, v8 */
 #define QGPU_CLIENT_BUF_IDS     (QGPU_MAX_BUF / QGPU_MAX_CLIENTS)     /* 64, v14 */
+
+/* ── A4 : bloc d'état (QGPU_CAP_STATE_BLOCK) ────────────────────────────────
+ *
+ *   Jusqu'ici, à chaque dessin dont l'état a pu changer, l'invité (le G4
+ *   émulé, ~10 fois plus lent que l'hôte) lisait l'état de GLEngine,
+ *   calculait les clés QGPU_SK_* et les comparait à l'ombre du dernier envoi
+ *   (compute_state, send_state du plugin). STATE_BLOCK déplace ce travail
+ *   dans le cœur : l'invité ne fait plus que RECOPIER quatre fenêtres de
+ *   l'état de GLEngine de Tiger 10.4 (octets gros-boutistes, tels quels),
+ *   le cœur en tire les clés et ne pose que celles qui diffèrent de l'état
+ *   courant du contexte. La commande porte les octets : le cœur ne lit
+ *   JAMAIS la mémoire de l'invité hors du flux, et toute clé qu'il en tire
+ *   passe la même validation qu'un SET_STATE.
+ *
+ *   QGPU_OP_STATE_BLOCK [drapeaux, largeur, hauteur, sbits, W0, W1, W2, W3, LOD
+ *                        (, vecteur de contrôle : QGPU_SK_COUNT mots)]
+ *
+ *   drapeaux  QGPU_SB_F_* ci-dessous ; un bit inconnu = BAD_ARG.
+ *   largeur, hauteur : taille de la surface vue par l'invité (ciseaux).
+ *   sbits     bits de stencil du drawable (0 = pas de stencil).
+ *   W0..W3    fenêtres de l'état de GLEngine (base = QGPU_SB_W*_OFF, octets
+ *             relatifs au bloc d'état de GLEngine, QGPU_SB_W*_N mots).
+ *   LOD       les 8 biais de LOD d'unité (glTexEnv GL_TEXTURE_LOD_BIAS),
+ *             mot à QGPU_SB_LOD_OFF + u × QGPU_SB_LOD_STRIDE.
+ *
+ *   Clés tirées : toutes celles des plages que l'invité enverrait par
+ *   SET_STATE (géométrie si F_V7, v8 si F_V8, 1.4 si F_TEX14, unités 4..7
+ *   si F_UNITS8, 8..15 si F_GLSL), SAUF les clés « chaudes » : les quatre
+ *   clés de chaque unité 0..15, GL_COMBINE et ses sources (0..7), et
+ *   l'activation des programmes. Celles-là viennent du verdict de l'invité
+ *   (identifiants de texture, programmes connus de l'hôte) et partent
+ *   toujours par SET_STATE, AVANT le bloc. Les règles de calcul sont celles
+ *   de compute_state (guest/gldriver/pomppc_accel.c) ; les valeurs
+ *   « conservées » (couleur de brouillard sans brouillard, facteur et unités
+ *   de décalage sans décalage) sont l'état courant du contexte si F_VALID,
+ *   0 sinon. Ordre de pose : celui des plages, clé croissante ; au premier
+ *   refus (validation de SET_STATE), le statut de ce refus, et les clés
+ *   suivantes ne sont pas posées — comme la suite de SET_STATE qu'il
+ *   remplace.
+ *
+ *   F_CHECK (contrôle) : le vecteur calculé par l'invité (QGPU_SK_COUNT
+ *   mots, index = clé) suit les fenêtres ; le cœur compare clé à clé ce
+ *   qu'il a tiré, compte les écarts (journal de QEMU, lignes « qgpu: bloc
+ *   d'état ») et pose le vecteur de l'INVITÉ : le rendu est celui de
+ *   l'ancienne voie, l'écart est seulement mesuré.
+ */
+#define QGPU_SB_HDR             4       /* drapeaux, largeur, hauteur, sbits */
+#define QGPU_SB_W0_OFF          0x24ac  /* normalisation (0x24ad, 0x24ae) */
+#define QGPU_SB_W0_N            1
+#define QGPU_SB_W1_OFF          0x2d44  /* éclairage, alpha, mélange, profondeur,
+                                           brouillard, lignes, masques */
+#define QGPU_SB_W1_N            65      /* .. 0x2e48 */
+#define QGPU_SB_W2_OFF          0x30bc  /* taille et paramètres de point */
+#define QGPU_SB_W2_N            7       /* .. 0x30d8 */
+#define QGPU_SB_W3_OFF          0x3168  /* décalage, modes de polygone, faces,
+                                           ciseaux, ombrage, stencil */
+#define QGPU_SB_W3_N            23      /* .. 0x31c4 */
+#define QGPU_SB_LOD_OFF         (0x31c4 + 0x3c) /* unité 0 : GS_TEXUNIT0 + TU_LOD_BIAS */
+#define QGPU_SB_LOD_STRIDE      0x7c
+#define QGPU_SB_LOD_N           8
+#define QGPU_SB_WORDS           (QGPU_SB_W0_N + QGPU_SB_W1_N + QGPU_SB_W2_N + \
+                                 QGPU_SB_W3_N + QGPU_SB_LOD_N)       /* 104 */
+#define QGPU_SB_F_RAW           0x0001  /* dessin du chemin brut (modes de polygone) */
+#define QGPU_SB_F_VALID         0x0002  /* valeurs conservées = état courant */
+#define QGPU_SB_F_STENCIL       0x0004  /* la surface a un stencil suivi */
+#define QGPU_SB_F_CHECK         0x0008  /* vecteur de contrôle joint */
+#define QGPU_SB_F_V7            0x0100  /* plages envoyées : géométrie (v7) */
+#define QGPU_SB_F_V8            0x0200  /* fin du pipeline fixe (v8) */
+#define QGPU_SB_F_TEX14         0x0400  /* OpenGL 1.4 (v10) */
+#define QGPU_SB_F_PROG          0x0800  /* programmes ARB (v16) */
+#define QGPU_SB_F_UNITS8        0x1000  /* unités 4..7 (v17) */
+#define QGPU_SB_F_GLSL          0x2000  /* unités d'image 8..15 (v21) */
+#define QGPU_SB_F_ALL           0x3F0F
 
 #endif /* QGPU_PROTO_H */

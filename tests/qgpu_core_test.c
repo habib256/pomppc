@@ -7100,6 +7100,252 @@ static void run_v21_dp(QgpuCore *c, uint8_t *shmem)
     free(perms);
 }
 
+/* ── A4 : bloc d'état (STATE_BLOCK) ─────────────────────────────────────────
+ *
+ * Le cœur tire les clés de l'état brut de GLEngine. L'équivalence avec
+ * compute_state du plugin se prouve dans l'invité (drapeau de contrôle
+ * F_CHECK sur les jeux et les scènes gltest) ; ici : le contrat (longueurs,
+ * drapeaux, refus), les fenêtres, quelques valeurs calculées à la main, les
+ * clés chaudes jamais touchées, seules les clés changées posées, l'arrêt au
+ * premier refus, le contrôle. */
+typedef struct { uint32_t a[QGPU_SB_HDR + QGPU_SB_WORDS]; } SbBlk;
+
+/* index du mot de l'état de GLEngine `off` dans les fenêtres, -1 hors fenêtre */
+static int sb_idx(uint32_t off)
+{
+    static const uint32_t wo[4] = { QGPU_SB_W0_OFF, QGPU_SB_W1_OFF, QGPU_SB_W2_OFF, QGPU_SB_W3_OFF };
+    static const uint32_t wn[4] = { QGPU_SB_W0_N, QGPU_SB_W1_N, QGPU_SB_W2_N, QGPU_SB_W3_N };
+    uint32_t i, base = 0;
+    for (i = 0; i < 4; i++) {
+        if (off >= wo[i] && off < wo[i] + 4 * wn[i])
+            return (int)(QGPU_SB_HDR + base + (off - wo[i]) / 4);
+        base += wn[i];
+    }
+    return -1;
+}
+
+static void sb_b8(SbBlk *b, uint32_t off, uint32_t v)
+{
+    int i = sb_idx(off & ~3u);
+    unsigned sh = 8 * (3 - (off & 3));
+    if (i >= 0) b->a[i] = (b->a[i] & ~(0xFFu << sh)) | ((v & 0xFF) << sh);
+}
+
+static void sb_b16(SbBlk *b, uint32_t off, uint32_t v)
+{
+    int i = sb_idx(off & ~3u);
+    unsigned sh = 8 * (2 - (off & 2));
+    if (i >= 0) b->a[i] = (b->a[i] & ~(0xFFFFu << sh)) | ((v & 0xFFFF) << sh);
+}
+
+static void sb_b32(SbBlk *b, uint32_t off, uint32_t v)
+{
+    int i = sb_idx(off);
+    if (i >= 0) b->a[i] = v;
+}
+
+static uint32_t sb_send(QgpuCore *c, uint8_t *shmem, const SbBlk *b, const uint32_t *chk)
+{
+    Emit e;
+    uint32_t i;
+    e.base = shmem;
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_STATE_BLOCK, chk ? QGPU_LEN_STATE_BLOCK_CHECK : QGPU_LEN_STATE_BLOCK));
+    for (i = 0; i < QGPU_SB_HDR + QGPU_SB_WORDS; i++)
+        emit(&e, b->a[i]);
+    for (i = 0; chk && i < QGPU_SK_COUNT; i++)
+        emit(&e, chk[i]);
+    return qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+}
+
+static void run_stblock(QgpuCore *c, uint8_t *shmem)
+{
+    SbBlk b;
+    Emit e;
+    uint32_t st, v[QGPU_SK_COUNT], ref[QGPU_SK_COUNT], sets;
+    uint64_t diff;
+    const uint32_t all = QGPU_SB_F_ALL & ~QGPU_SB_F_CHECK;
+    unsigned k;
+    printf("-- A4 : bloc d'état (STATE_BLOCK) --\n");
+    CHECK(QGPU_OP_STATE_BLOCK == 0x0080 && QGPU_CAP_STATE_BLOCK == 0x8000 &&
+          QGPU_SB_WORDS == 104 && QGPU_LEN_STATE_BLOCK == 109 &&
+          QGPU_LEN_STATE_BLOCK_CHECK == 109 + QGPU_SK_COUNT &&
+          QGPU_LEN_STATE_BLOCK_CHECK - 1 <= QGPU_MAX_CMD_ARGS_LONG, "contrat A4");
+    CHECK(c->caps & QGPU_CAP_STATE_BLOCK, "A4 : capacité annoncée par le cœur");
+    /* chaque offset lu est dans une fenêtre (même liste que le cœur) */
+    {
+        static const uint32_t offs[] = { 0x24ad, 0x24ae, 0x2d44, 0x2d46, 0x2d48, 0x2d4a, 0x2d4b,
+            0x2d4c, 0x2d4d, 0x2d60, 0x2d64, 0x2d66, 0x2d68, 0x2d6e, 0x2d70, 0x2d7c, 0x2d80, 0x2d82,
+            0x2d84, 0x2db4, 0x2dc4, 0x2dc8, 0x2de0, 0x2dec, 0x2df0, 0x2df8, 0x2e04, 0x2e0a, 0x2e0b,
+            0x2e20, 0x2e26, 0x2e28, 0x2e2c, 0x2e30, 0x2e33, 0x2e38, 0x2e40, 0x2e43, 0x2e44,
+            0x30bc, 0x30c0, 0x30c4, 0x30c8, 0x30cc, 0x30d4, 0x3168, 0x316c, 0x3170, 0x3172,
+            0x3174, 0x3176, 0x3178, 0x317a, 0x317b, 0x317c, 0x317d, 0x3180, 0x318c, 0x3190,
+            0x3194, 0x3198, 0x319c, 0x31a0, 0x31a2, 0x31a4, 0x31a6, 0x31c0 };
+        unsigned i, bad = 0;
+        for (i = 0; i < sizeof(offs) / sizeof(offs[0]); i++)
+            if (sb_idx(offs[i] & ~3u) < 0) bad++;
+        CHECK(!bad, "A4 : %u offset(s) de GLEngine hors des fenêtres", bad);
+    }
+
+    /* sans contexte, longueurs et drapeaux */
+    qgpu_core_reset(c);
+    memset(&b, 0, sizeof(b));
+    b.a[0] = all | QGPU_SB_F_RAW;
+    b.a[1] = W; b.a[2] = H;
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_NO_CTX, "A4 sans contexte : %u", st);
+    st = v21_setup(c, shmem);
+    CHECK(st == QGPU_ST_OK, "A4 contexte : %u", st);
+    e.base = shmem;
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_STATE_BLOCK, QGPU_LEN_STATE_BLOCK - 1));
+    for (k = 0; k < QGPU_LEN_STATE_BLOCK - 2; k++) emit(&e, 0);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "A4 longueur fausse : %u", st);
+    b.a[0] = all | 0x10;
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_BAD_ARG, "A4 drapeau inconnu : %u", st);
+    b.a[0] = all | QGPU_SB_F_CHECK;
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_BAD_ARG, "A4 F_CHECK sans vecteur : %u", st);
+    b.a[0] = all;
+    b.a[1] = QGPU_MAX_SURF_DIM + 1;
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_BAD_ARG, "A4 largeur hors bornes : %u", st);
+    {   /* sans la capacité : opcode inconnu */
+        uint32_t caps = c->caps;
+        c->caps &= ~QGPU_CAP_STATE_BLOCK;
+        b.a[1] = W;
+        st = sb_send(c, shmem, &b, NULL);
+        c->caps = caps;
+        CHECK(st == QGPU_ST_BAD_OPCODE, "A4 sans capacité : %u", st);
+    }
+
+    /* état brut tout à zéro (sauf l'atténuation de point 1, 0, 0, que le
+       backend de référence exige) : valeurs neutres de compute_state */
+    memset(&b, 0, sizeof(b));
+    b.a[0] = all | QGPU_SB_F_RAW;
+    b.a[1] = W; b.a[2] = H;
+    sb_b32(&b, 0x30cc, qgpu_f2u(1.0f));
+    /* clés chaudes posées avant : le bloc ne doit pas y toucher */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_UNIT(5) + QGPU_SK_U_ENV_MODE, 0x1E01);
+    state(&e, QGPU_SK_COMBINE(2), QGPU_COMBINE_DEFAULT);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "A4 clés chaudes : %u", st);
+    st = sb_send(c, shmem, &b, NULL);
+    {
+        const uint32_t *s = c->ctx[0].st.v;
+        CHECK(st == QGPU_ST_OK && s[QGPU_SK_DEPTH_TEST] == 0 && s[QGPU_SK_DEPTH_FUNC] == 0x0201 &&
+              s[QGPU_SK_DEPTH_WRITE] == 0 && s[QGPU_SK_COLOR_MASK] == 0 &&
+              s[QGPU_SK_BLEND_SRC_RGB] == 1 && s[QGPU_SK_BLEND_EQ_A] == 0x8006 &&
+              s[QGPU_SK_ALPHA_FUNC] == 0x0207 && s[QGPU_SK_STENCIL_FUNC] == 0x0207 &&
+              s[QGPU_SK_STENCIL_OP_ZPASS] == 0x1E00 && s[QGPU_SK_STENCIL_VALUE_MASK] == 0xFF &&
+              s[QGPU_SK_LINE_WIDTH] == qgpu_f2u(1.0f) && s[QGPU_SK_POINT_SIZE] == qgpu_f2u(1.0f) &&
+              s[QGPU_SK_SHADE_MODEL] == 0x1D01 && s[QGPU_SK_CULL_MODE] == 0x0405 &&
+              s[QGPU_SK_FRONT_FACE] == 0x0901 && s[QGPU_SK_COLOR_MAT_FACE] == 0x0408 &&
+              s[QGPU_SK_COLOR_MAT_MODE] == 0x1602 && s[QGPU_SK_COLOR_CONTROL] == 0x81F9 &&
+              s[QGPU_SK_FOG_DENSITY] == qgpu_f2u(0.0f) && s[QGPU_SK_LOGIC_OP_MODE] == QGPU_LO_COPY &&
+              s[QGPU_SK_POLYGON_MODE_BACK] == QGPU_POLY_FILL && s[QGPU_SK_LINE_STIPPLE_FACTOR] == 1 &&
+              s[QGPU_SK_POINT_SIZE_MAX] == qgpu_f2u(64.0f) && s[QGPU_SK_COLOR_SUM] == QGPU_CSUM_OFF &&
+              s[QGPU_SK_UNIT(5) + QGPU_SK_U_ENV_MODE] == 0x1E01 &&
+              s[QGPU_SK_COMBINE(2)] == QGPU_COMBINE_DEFAULT,
+              "A4 état neutre : %u (profondeur %x, point max %x)", st,
+              s[QGPU_SK_DEPTH_FUNC], s[QGPU_SK_POINT_SIZE_MAX]);
+    }
+    /* même bloc : aucune clé posée */
+    sets = (uint32_t)c->sb_sets;
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_OK && c->sb_sets == sets, "A4 bloc identique : %u clés posées",
+          (unsigned)(c->sb_sets - sets));
+
+    /* valeurs calculées à la main */
+    sb_b8(&b, 0x2dc8, 1); sb_b16(&b, 0x2dc4, 0x0203);             /* profondeur LEQUAL */
+    sb_b8(&b, 0x2e44, 1);
+    sb_b8(&b, 0x2e40, 1); sb_b8(&b, 0x2e42, 1);                   /* R et B */
+    sb_b8(&b, 0x2d84, 1); sb_b16(&b, 0x2d68, 0x0302); sb_b16(&b, 0x2d6a, 0x0303);
+    sb_b16(&b, 0x2d6c, 1); sb_b16(&b, 0x2d6e, 0); sb_b16(&b, 0x2d80, 0x8006); sb_b16(&b, 0x2d82, 0x800A);
+    sb_b8(&b, 0x3190, 1);                                          /* ciseaux 8,4 16×10 */
+    sb_b32(&b, 0x3180, 8); sb_b32(&b, 0x3184, 4); sb_b32(&b, 0x3188, 16); sb_b32(&b, 0x318c, 10);
+    sb_b32(&b, 0x31c0, 1); b.a[3] = 8; b.a[0] |= QGPU_SB_F_STENCIL; /* stencil */
+    sb_b16(&b, 0x31a0, 0x0202); sb_b32(&b, 0x319c, 0x1FF); sb_b32(&b, 0x3198, 0x0F);
+    sb_b16(&b, 0x31a2, 0x1E01); sb_b16(&b, 0x31a4, 0x1E02); sb_b16(&b, 0x31a6, 0x8507);
+    sb_b8(&b, 0x2e0a, 1);                                          /* brouillard 0,5 0,25 1 1 */
+    sb_b32(&b, 0x2de0, qgpu_f2u(0.5f)); sb_b32(&b, 0x2de4, qgpu_f2u(0.25f));
+    sb_b32(&b, 0x2de8, qgpu_f2u(1.0f)); sb_b32(&b, 0x2dec, qgpu_f2u(1.0f));
+    sb_b32(&b, 0x2e20, qgpu_f2u(2.6f));                            /* ligne 2,6 → 3 */
+    sb_b8(&b, 0x317d, 1); sb_b32(&b, 0x3168, qgpu_f2u(1e9f));      /* décalage borné */
+    sb_b16(&b, 0x3170, QGPU_POLY_LINE);                            /* brut : LINE */
+    b.a[QGPU_SB_HDR + QGPU_SB_WORDS - 8 + 6] = qgpu_f2u(40.0f);    /* biais d'unité 6 */
+    st = sb_send(c, shmem, &b, NULL);
+    {
+        const uint32_t *s = c->ctx[0].st.v;
+        CHECK(st == QGPU_ST_OK && s[QGPU_SK_DEPTH_TEST] == 1 && s[QGPU_SK_DEPTH_FUNC] == 0x0203 &&
+              s[QGPU_SK_DEPTH_WRITE] == 1 && s[QGPU_SK_COLOR_MASK] == 5 && s[QGPU_SK_BLEND] == 1 &&
+              s[QGPU_SK_BLEND_SRC_RGB] == 0x0302 && s[QGPU_SK_BLEND_EQ_A] == 0x800A &&
+              s[QGPU_SK_SCISSOR] == 1 && s[QGPU_SK_SCISSOR_X] == 8 &&
+              s[QGPU_SK_SCISSOR_Y] == H - 14 && s[QGPU_SK_SCISSOR_W] == 16 && s[QGPU_SK_SCISSOR_H] == 10 &&
+              s[QGPU_SK_STENCIL_TEST] == 1 && s[QGPU_SK_STENCIL_FUNC] == 0x0202 &&
+              s[QGPU_SK_STENCIL_REF] == 0xFF && s[QGPU_SK_STENCIL_VALUE_MASK] == 0x0F &&
+              s[QGPU_SK_STENCIL_OP_ZPASS] == 0x8507 &&
+              s[QGPU_SK_FOG] == 1 && s[QGPU_SK_FOG_COLOR] == 0xFF8040FF &&
+              s[QGPU_SK_LINE_WIDTH] == qgpu_f2u(3.0f) &&
+              s[QGPU_SK_POLY_OFFSET] == 1 && s[QGPU_SK_POLY_FACTOR] == qgpu_f2u(999999.0f) &&
+              s[QGPU_SK_POLYGON_MODE_FRONT] == QGPU_POLY_LINE &&
+              s[QGPU_SK_TEX_LOD_BIAS(6)] == qgpu_f2u(16.0f),
+              "A4 valeurs : %u (ciseaux y %u, brouillard %08x)", st, s[QGPU_SK_SCISSOR_Y],
+              s[QGPU_SK_FOG_COLOR]);
+    }
+    /* chemin non brut : modes de polygone pleins ; sans F_STENCIL : pas de test */
+    b.a[0] &= ~(QGPU_SB_F_RAW | QGPU_SB_F_STENCIL);
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_OK && c->ctx[0].st.v[QGPU_SK_POLYGON_MODE_FRONT] == QGPU_POLY_FILL &&
+          c->ctx[0].st.v[QGPU_SK_STENCIL_TEST] == 0 && c->ctx[0].st.v[QGPU_SK_STENCIL_REF] == 0,
+          "A4 chemin non brut : %u", st);
+    /* brouillard coupé : couleur conservée sous F_VALID, 0 sinon */
+    sb_b8(&b, 0x2e0a, 0);
+    b.a[0] |= QGPU_SB_F_VALID;
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_OK && c->ctx[0].st.v[QGPU_SK_FOG_COLOR] == 0xFF8040FF,
+          "A4 couleur de brouillard conservée : %08x", c->ctx[0].st.v[QGPU_SK_FOG_COLOR]);
+    b.a[0] &= ~QGPU_SB_F_VALID;
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_OK && c->ctx[0].st.v[QGPU_SK_FOG_COLOR] == 0,
+          "A4 couleur de brouillard sans F_VALID : %08x", c->ctx[0].st.v[QGPU_SK_FOG_COLOR]);
+    /* sans F_V7 : ni éclairage ni faces (plage 1..LIGHTING) */
+    b.a[0] &= ~QGPU_SB_F_V7;
+    sb_b16(&b, 0x3176, 0x0404);
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_OK && c->ctx[0].st.v[QGPU_SK_CULL_MODE] == 0x0405, "A4 sans F_V7 : %u", st);
+    b.a[0] |= QGPU_SB_F_V7;
+    /* premier refus : statut de SET_STATE, clés suivantes non posées */
+    sb_b16(&b, 0x2dc4, 0x0999);                                    /* profondeur invalide */
+    sb_b8(&b, 0x2d66, 1); sb_b16(&b, 0x2d64, 0x0201);             /* alpha après */
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_BAD_ARG && c->ctx[0].st.v[QGPU_SK_DEPTH_FUNC] == 0x0203 &&
+          c->ctx[0].st.v[QGPU_SK_ALPHA_TEST] == 0, "A4 refus au premier écart : %u", st);
+    sb_b16(&b, 0x2dc4, 0x0203);
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_OK && c->ctx[0].st.v[QGPU_SK_ALPHA_TEST] == 1, "A4 reprise : %u", st);
+
+    /* contrôle : vecteur de l'invité identique → 0 écart ; faux → compté,
+       et c'est le vecteur de l'invité qui est posé */
+    qgpu_state_block_compute(b.a, &c->ctx[0].st, v);
+    memcpy(ref, v, sizeof(ref));
+    b.a[0] |= QGPU_SB_F_CHECK;
+    diff = c->sb_diff;
+    st = sb_send(c, shmem, &b, ref);
+    CHECK(st == QGPU_ST_OK && c->sb_diff == diff, "A4 contrôle identique : %u", st);
+    ref[QGPU_SK_BLEND_DST_RGB] = 0x0304;
+    ref[QGPU_SK_UNIT(3) + QGPU_SK_U_BIND] = 77;                    /* chaude : ignorée */
+    st = sb_send(c, shmem, &b, ref);
+    CHECK(st == QGPU_ST_OK && c->sb_diff == diff + 1 &&
+          c->ctx[0].st.v[QGPU_SK_BLEND_DST_RGB] == 0x0304 &&
+          c->ctx[0].st.v[QGPU_SK_UNIT(3) + QGPU_SK_U_BIND] != 77,
+          "A4 contrôle en écart : %u (écarts %llu)", st, (unsigned long long)(c->sb_diff - diff));
+    qgpu_core_reset(c);
+}
+
 static void run_v22(QgpuCore *c, uint8_t *shmem)
 {
     Emit e = {0}, v = {0};
@@ -8420,6 +8666,7 @@ static void *run_backend_body(void *arg)
     run_reste0929(c, shmem);    /* 29/09 : reste (NO_MEM, noms GLSL composés) */
     run_bh3(c, shmem);          /* bug hunt 3 : NO_MEM des programmes */
     run_bh4(c, shmem);          /* bug hunt 4 : GLSL sans source, recréation */
+    run_stblock(c, shmem);      /* A4 : bloc d'état */
 
     qgpu_core_reset(c);
     e.off = e.start = CMD_OFF;
