@@ -41,6 +41,7 @@ for m in "$@"; do
   cp "$WT/tools/guest/jobs/$JOB/"* "$J/"
   echo "BANC=$BANC" > "$J/env.sh"
   [ -n "${NRAND:-}" ] && echo "NRAND=$NRAND" >> "$J/env.sh"
+  [ -n "${DIS:-}" ] && echo "DIS=$DIS" >> "$J/env.sh"
   # shellcheck disable=SC2086
   eval "env $vars python3 $WT/tools/guest/devloop.py start" > "$D/start.txt" 2>&1
   # Hôte chargé : devloop peut taper `mount -uw /` avant l'invite, la racine
