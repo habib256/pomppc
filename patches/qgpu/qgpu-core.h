@@ -305,6 +305,9 @@ static inline QgpuProgram *qgpu_glsl_active(QgpuProgSet *pg)
 void qgpu_state_init(QgpuState *st);
 /* v10 : paramètres de point (chemin brut). */
 bool  qgpu_points_plain(const QgpuState *st);
+/* A4 : clés tirées d'un STATE_BLOCK (a = ses arguments ; v reçoit
+   QGPU_SK_COUNT mots, les clés chaudes à 0). */
+void  qgpu_state_block_compute(const uint32_t *a, const QgpuState *cur, uint32_t *v);
 float qgpu_point_size(const QgpuState *st, float d);
 void qgpu_geom_init(QgpuGeom *gm);              /* v7 : valeurs initiales d'OpenGL */
 void qgpu_stipple_init(QgpuStipple *sp);        /* v8 : tout à 1, comme en OpenGL */
@@ -497,6 +500,11 @@ struct QgpuCore {
                                       démarrage : QGPU_REG_NOMEM (lu par le vCPU,
                                       écrit par le thread de rendu : atomique) */
     bool     trace;                /* journalise chaque commande sur stderr */
+    /* A4 : STATE_BLOCK. Compteurs depuis le démarrage (thread de rendu
+       seulement) : blocs reçus, clés posées, blocs de contrôle (F_CHECK),
+       blocs de contrôle en écart, écarts déjà dits sur stderr. */
+    uint64_t sb_blocks, sb_sets, sb_checked, sb_diff;
+    uint32_t sb_told;
 
     /* v13 : cible de SURF_PRESENT (VRAM qfb côté QEMU, tampon de test en
        natif). N'appartient pas au cœur : reset ne la touche pas. */
