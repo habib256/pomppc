@@ -442,6 +442,87 @@ static void run_s3(QgpuCore *c, uint8_t *shmem, const char *backend)
     qgpu_core_execute(c, CMD_OFF, e.off - e.start);
 }
 
+/* ═══════ F1 (30/09) : la fin de soumission ne change rien ═════════════════
+ *
+ * qgpu_core_submit_end (backend GL : glFlush, docs/backend-gl-attente.md)
+ * est appelé par le device après chaque soumission. Il ne doit changer ni
+ * une image ni un compte d'occlusion, même appelé ENTRE DEUX COMMANDES
+ * quelconques — au milieu d'une requête ouverte, entre un envoi de texture
+ * et son dessin, avant une relecture. Même scène deux fois : d'un bloc, puis
+ * commande par commande avec une fin de soumission après chacune. */
+static uint32_t f1_scene(QgpuCore *c, uint8_t *shmem, bool split, uint32_t *samples,
+                         uint32_t *nst)
+{
+    Emit e = { shmem, CMD_OFF, CMD_OFF }, v = { shmem, VTX_OFF, VTX_OFF };
+    Emit t = { shmem, TEX_OFF, TEX_OFF };
+    float m[16], mv[16];
+    uint32_t st = QGPU_ST_OK, q, n;
+    bool occl = (c->caps & QGPU_CAP_OCCLUSION) != 0;
+
+    mat_ortho_px(m, 1.0f);
+    mat_identity(mv);
+    v.off = v.start = VTX_OFF;
+    /* quad texturé (texture 1×1 rouge) + triangle vert par-dessus */
+    emitf(&v, 4);  emitf(&v, 4);  emitf(&v, 1); emitf(&v, 1); emitf(&v, 1); emitf(&v, 1);
+    emitf(&v, 0);  emitf(&v, 0);  emitf(&v, 0); emitf(&v, 1);
+    emitf(&v, 60); emitf(&v, 4);  emitf(&v, 1); emitf(&v, 1); emitf(&v, 1); emitf(&v, 1);
+    emitf(&v, 1);  emitf(&v, 0);  emitf(&v, 0); emitf(&v, 1);
+    emitf(&v, 60); emitf(&v, 60); emitf(&v, 1); emitf(&v, 1); emitf(&v, 1); emitf(&v, 1);
+    emitf(&v, 1);  emitf(&v, 1);  emitf(&v, 0); emitf(&v, 1);
+    emitf(&v, 4);  emitf(&v, 60); emitf(&v, 1); emitf(&v, 1); emitf(&v, 1); emitf(&v, 1);
+    emitf(&v, 0);  emitf(&v, 1);  emitf(&v, 0); emitf(&v, 1);
+    e.off = e.start = CMD_OFF;
+    make_tex(&e, &t, 9);                /* détruite en fin de scène */
+    set_matrix(&e, QGPU_MTX_PROJECTION, m);
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    clear_cmd(&e, 0xFF000040);
+    state(&e, QGPU_SK_TEXTURE, 1);
+    state(&e, QGPU_SK_TEX_BIND, 9);
+    if (occl) {
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_QUERY_BEGIN, QGPU_LEN_QUERY)); emit(&e, 3);
+    }
+    draw_raw(&e, QGPU_PRIM_MODE_QUADS, 4, VF_P2CT, 4);
+    state(&e, QGPU_SK_TEXTURE, 0);
+    if (occl) {
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_QUERY_END, QGPU_LEN_QUERY)); emit(&e, 3);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_QUERY_RESULT, QGPU_LEN_QUERY_RESULT));
+        emit(&e, 3); emit(&e, RB_OFF - 16);
+    }
+    readback_cmd(&e);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_DESTROY, QGPU_LEN_TEX)); emit(&e, 9);
+    if (!split) {
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        qgpu_core_submit_end(c);
+        *nst = 1;
+    } else {
+        *nst = 0;
+        for (q = CMD_OFF; q < e.off && st == QGPU_ST_OK; q += n * 4) {
+            n = QGPU_CMD_LEN(qgpu_ld32(shmem + q));
+            st = qgpu_core_execute(c, q, n * 4);
+            qgpu_core_submit_end(c);
+            (*nst)++;
+        }
+    }
+    *samples = occl ? qgpu_ld32(shmem + RB_OFF - 12) : 0;
+    return st;
+}
+
+static void run_f1(QgpuCore *c, uint8_t *shmem)
+{
+    uint32_t st, s0 = 0, s1 = 0, n0, n1, d;
+
+    st = f1_scene(c, shmem, false, &s0, &n0);
+    take_snap(shmem);
+    CHECK(st == QGPU_ST_OK && px(shmem, 30, 30) == 0xFF0000 && px(shmem, 1, 1) == 0x000040,
+          "(F1) scène d'un bloc + fin de soumission : dedans %06x, fond %06x, "
+          "%u échantillon(s) (st %u)", px(shmem, 30, 30), px(shmem, 1, 1), s0, st);
+    st = f1_scene(c, shmem, true, &s1, &n1);
+    d = snap_diff(shmem);
+    CHECK(st == QGPU_ST_OK && d == 0 && s1 == s0,
+          "(F1) même scène, fin de soumission après chacune des %u commandes : "
+          "%u pixel(s) d'écart, %u échantillon(s) contre %u (st %u)", n1, d, s1, s0, st);
+}
+
 typedef struct { QgpuCore *c; uint8_t *shmem; const char *name; } BackendRun;
 
 static void *run_body(void *arg)
@@ -463,6 +544,7 @@ static void *run_body(void *arg)
     run_s1(c, shmem);
     run_s2(c, shmem);
     run_s3(c, shmem, r->name);
+    run_f1(c, shmem);
 
     qgpu_core_reset(c);
     qgpu_core_fini(c);
@@ -498,6 +580,9 @@ static void run_backend(const char *name)
 
 int main(void)
 {
+    /* F1 : la fin de soumission du backend GL (éteinte par défaut) doit être
+       ALLUMÉE pour être éprouvée ; S1–S3 passent aussi sous elle. */
+    setenv("QGPU_GL_FLUSH", "1", 1);
     run_backend("soft");
     run_backend("gl");
     printf("%s (%d échec(s))\n", failures ? "ÉCHEC" : "OK", failures);
