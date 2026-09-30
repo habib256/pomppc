@@ -10,7 +10,9 @@ hôte), mesure **1 contre 2 cœurs**, et décrit **les patches qui en sont sorti
 `0007-ppc-fp-inline` (`x-fp-inline`, le flottant scalaire simple sans ses helpers, §15), puis
 `0008-tcg-ret-inline` (`x-ret-inline`, `x-jc-idx` : les sorties indirectes, §16), puis
 `0010-tcg-smc-mttcg` (le code réécrit par l'autre vCPU : trois courses de QEMU corrigées et
-`x-icbi-sync`, §17) ; trois essais exacts mais sans gain,
+`x-icbi-sync`, §17, allumée par défaut depuis l'A/B du §20), puis `0011-tcg-jc-bits`
+(`x-jc-bits`, le cache de sauts de 16 384 entrées, §18) et `0012-ppc-msr-nobql`
+(`x-msr-nobql`, `mtmsr`/`rfi` sans verrou global, §19) ; trois essais exacts mais sans gain,
 `patches/tcg/essais/0002-ppc-lmw-inline.patch` (`x-lmw-inline`) et
 `essais/0005-ppc-vfp-nrwg.patch` (`x-vfp-nrwg`, §11) et `essais/0009-ppc-isync-chain.patch`
 (`x-isync-chain`, §16.8), ne sont pas appliqués.
@@ -1524,7 +1526,7 @@ fenêtre restante (écriture invalidée avant d'être faite).
 - **Allumer `x-ret-inline` et `x-jc-idx` par défaut** (`RETINLINE`/`JCIDX` à 1 dans
   `run_tiger.sh`, `tcg/0008` dans le binaire de référence) : décision de l'utilisateur ;
   DOOM 3 −6,8 %, Marble Blast +4 à +7 % (bruité), 34 milliards de blocs vérifiés.
-- **Cache de sauts plus grand** : sur DOOM 3 les deux tiers des ratés restants sont des
+- **Cache de sauts plus grand** (fait, §18 : `x-jc-bits=14`, DOOM 3 −1,9 %) : sur DOOM 3 les deux tiers des ratés restants sont des
   conflits. Avec le journal par `mmu_idx`, le vidage par `mmu_idx` ne dépend plus de la
   taille de la table : passer de 4 096 à 16 384 entrées (256 Kio par vCPU) ne coûterait que
   les vidages complets (`tb_flush`, plages), rares. Épreuve : taux de réussite du mode preuve
@@ -1532,7 +1534,8 @@ fenêtre restante (écriture invalidée avant d'être faite).
 - **Étiquettes multiples par mode pour `x-sr-tlb`** (§3.4) : les ratés « entrée vidée » de
   Marble Blast et les remplissages du TLB viennent du vidage du `mmu_idx` utilisateur à
   chaque changement de processus.
-- **Verrou global à chaque `mtmsr`/`rfi`** : 6-10 % du temps vCPU (TODO §4).
+- **Verrou global à chaque `mtmsr`/`rfi`** : 6-10 % du temps vCPU (TODO §4) ; fait, §19
+  (`x-msr-nobql`, DOOM 3 −0,6 %).
 - **Le défaut du §16.7** (code réécrit par l'autre vCPU) : corrigé, §17.
 
 Commande de l'A/B DOOM 3 (jouée ci-dessus ; pour la rejouer, depuis le worktree de cette
@@ -1625,7 +1628,8 @@ chargement.
 - **Course 3**, `tlb_set_page_full` : `NOTDIRTY` est calculé sous le verrou du TLB, même
   raisonnement.
 - **`x-icbi-sync`** (propriété de CPU, éteinte par défaut dans QEMU, **éteinte aussi par
-  `run_tiger.sh`** tant que l'A/B DOOM 3 n'est pas fait, `ICBISYNC=1` l'allume) : `helper_icbi` invalide les blocs qui recouvrent
+  `run_tiger.sh`** jusqu'à l'A/B DOOM 3 du §20 ; allumée par défaut depuis le 30/09,
+  `ICBISYNC=0` l'éteint) : `helper_icbi` invalide les blocs qui recouvrent
   sa ligne de cache (`tb_invalidate_phys_line_sync`). `icbi` suit l'écriture dans l'ordre du
   programme : le bloc retraduit trop tôt est jeté avant que l'écrivain publie. Le
   recouvrement est testé sous le verrou de la page (une traduction en cours est attendue).
@@ -1707,3 +1711,238 @@ sur tout le démarrage et Marble Blast).
   (`probe_access` rend un pointeur écrit plus tard) ; pour PowerPC, `x-icbi-sync` suffit.
 - Chercher la cause des incidents SMP ailleurs (banc d'endurance) ; `smctest` E reste le
   test de non-régression de ce chapitre.
+
+---
+
+## 18. Le cache de sauts plus grand : `tcg/0011` (`x-jc-bits`)
+
+30/09/2026. Copie isolée `~/src/qemu-vit` (worktree de `~/src/qemu`, branche `vit-jc` :
+`vit-base` = l'arbre de `build_qemu_qfb.sh` à `05a47fe`, puis un commit par patch) ;
+`~/src/qemu` n'a pas été touché. Binaires `~/src/qemu-vit/build/qvit`/`qvit64` (0011 + 0012,
+propriétés éteintes par défaut). VM quotidienne, SMP=2, propriétés de `run_tiger.sh` par
+défaut des deux côtés.
+
+### 18.1 La conception
+
+**`x-jc-bits`** (propriété de l'**accélérateur**, 12 à 16, 12 = QEMU d'origine,
+`JCBITS=14 ./run_tiger.sh`) : 2^N entrées de cache de sauts par vCPU. Globale et non par
+CPU : les blocs sont partagés entre vCPU, et la sonde en ligne de `x-ret-inline` (§16.2)
+fige le hachage dans le code généré. Elle est figée dès la création du premier CPU
+(`tb_jmp_cache_bits_frozen`, un `qom-set` ultérieur est refusé). Les tableaux de
+`CPUJumpCache` sont dimensionnés pour 2^16 (1 Mio + 64 Kio + journal de 512 Kio par vCPU,
+alloués à zéro : seules les pages touchées coûtent) ; seules les 2^N premières entrées
+servent. Suivent la taille : le hachage (`tb_jmp_cache_hash_func`, `_hash_page`, et sa copie
+émise par `translator_lookup_and_goto_ptr_inline`), le vidage par page
+(`tb_jmp_cache_clear_page`, 2^(N/2) entrées), le seuil du vidage par plage, le vidage
+complet, le parcours complet de `x-jc-idx` et la longueur de son journal par `mmu_idx`
+(un quart de la table : 1 024 à 2^12, comme avant).
+
+**Pourquoi c'est exact.** Le cache de sauts n'est qu'un cache : une entrée n'est prise que
+si `pc`, `flags`, `cflags` sont égaux (et, en ligne, les mêmes comparaisons, §16.2). La
+taille ne change que *où* une entrée est rangée ; il faut seulement que tous ceux qui
+calculent l'emplacement calculent le même, et que le vidage par page couvre toutes les
+entrées de la page. Les deux tiennent pour tout N de 12 à 16 : avec P = ⌊N/2⌋ et
+s = 12 − P, la partie haute de l'indice, bits [P, N), vaut les bits [12, N + s) de
+`pc ^ (pc >> s)`, qui ne dépendent que des bits ≥ 12 de `pc` (le numéro de page) ; toutes
+les adresses d'une page tombent donc dans les 2^P entrées qui commencent à
+`tb_jmp_cache_hash_page(page)`. Le hachage est lu dans une variable globale écrite une
+seule fois avant tout CPU.
+
+**Preuve** (mode `x-ret-verify`, §16.3, qui compte aussi les ratés par cause et, depuis
+0011, les parcours complets du journal) : une partie de DOOM 3 par taille, démarrage compris
+(`tools/tcg/matab.sh jc-verif`, `jc-verif2`) :
+
+| entrées | blocs pris dans le cache vérifiés | divergences | réussite | ratés : entrée vidée / autre pc / autres drapeaux | parcours complets |
+|---|---|---|---|---|---|
+| 4 096 | 7 930 M | **0** | 91,37 % | 2,68 / 5,83 / 0,11 % | 46 847 |
+| 16 384 | 7 786 M | **0** | **92,59 %** | 2,83 / 4,46 / 0,12 % | 6 335 |
+| 65 536 | 7 758 M | **0** | 92,83 % | 2,86 / 4,19 / 0,12 % | 2 173 |
+| 16 384, hachage replié (essai) | 7 891 M | **0** | 91,99 % | 2,79 / 5,11 / 0,11 % | 6 618 |
+
+**23 milliards de blocs vérifiés, 0 divergence.** Les ratés passent de 8,63 à 7,41 % des
+sorties indirectes (−14 %) ; les conflits (« autre pc ») de 5,83 à 4,46 %, puis 4,19 % à
+65 536 entrées : ils **plafonnent**, ce n'est donc plus la capacité. La cause probable est
+la structure du hachage : les adresses d'une même page n'ont que 2^(N/2) emplacements
+(128 à 2^14) pour 1 024 instructions possibles. Un essai de hachage qui replie tout le
+numéro de page (`x-jc-mix`, `patches/tcg/essais/0011-tcg-jc-mix.patch` : sans lui, les
+bits de page au-dessus de 12 + N ne comptent pas, et le code à la même adresse basse de deux
+régions de 16 Mio se heurte) fait **moins bien** (91,99 %) : non retenu.
+
+### 18.2 A/B DOOM 3
+
+`tools/tcg/matab.sh ab-jc 6 "j12:" "j14:TCG_OPTS=x-jc-bits=14"` : parties entrelacées
+A B B A…, chacune dans un QEMU neuf, cellule `d3-fen` de la matrice sans vidage (fenêtre
+repérée sur la scène) ; aucun autre QEMU, charge de l'hôte relevée avant et après chaque
+fenêtre (1,36 à 2,55). Bilan `bench/tcg/ab/ab-jc/bilan.txt`.
+
+| | n | médiane | min..max | dispersion |
+|---|---|---|---|---|
+| 4 096 entrées | 6 | 61,6 ms/image | 61,1..61,8 | 1,1 % |
+| 16 384 entrées | 6 | **60,4 ms/image** | 60,1..62,0 | 3,1 % |
+
+**−1,9 % (médianes)** ; cinq parties sur six à 16 384 sont sous la plus rapide à 4 096 (la
+sixième, 62,0, est la plus lente des douze) ; Mann-Whitney U = 6, p ≈ 0,058 (bilatéral, exact).
+Plus que ce qu'annonce la part de `tb_htable_lookup` (4,5 % × 14 % ≈ 0,6 %) : un raté coûte
+aussi le saut indirect mal prédit et la sortie du code généré.
+
+### 18.3 Décision
+
+**Allumé par défaut** (`JCBITS=14` dans `run_tiger.sh`) : exact (0 divergence), gain
+supérieur à la dispersion de la référence, coût mémoire négligeable, sans régression sur la
+matrice complète (§21). 2^16 n'apporterait que 0,24 point de réussite de plus.
+
+---
+
+## 19. `mtmsr` et `rfi` sans verrou global : `tcg/0012` (`x-msr-nobql`)
+
+### 19.1 Le poste
+
+Chaque `mtmsr` (`helper_store_msr` → `hreg_store_msr`) et chaque `rfi` (`do_rfi`) appelle
+`ppc_maybe_interrupt`, qui prend le verrou global (BQL) pour poser ou retirer
+`CPU_INTERRUPT_HARD` — presque toujours à la valeur qu'il a déjà. `rfi` y ajoute
+`cpu_interrupt_exittb` (BQL encore) pour demander `CPU_INTERRUPT_EXITTB`, que la boucle
+principale retire aussitôt… en reprenant le BQL (`cpu_handle_interrupt` : `interrupt_request`
+≠ 0). Un `mtmsr` qui change `IR`/`DR` fait de même. Soit trois prises du BQL par `rfi`, en
+concurrence avec l'autre vCPU et les fils des devices (le GPU paravirtuel le tient à chaque
+commande). Profils (§16.6) : verrou 3,0 % + 3,0 % d'attente sur DOOM 3, 4 + 4 % sur Marble
+Blast ; 0,16 M `mtmsr`/s et 0,035 M `rfi`/s sur DOOM 3, 208 000 `mtmsr`/s sur Marble Blast.
+
+### 19.2 La conception
+
+**Décision sans verrou.** Quand `ppc_maybe_interrupt` est appelée par le vCPU lui-même
+(`qemu_cpu_is_self`), sans le BQL, sous TCG, avec la propriété : lire l'état, et si
+`CPU_INTERRUPT_HARD` vaut déjà ce que la fonction d'origine poserait, ne rien faire (si le
+bit est posé et reste dû, poser `icount_decr.high = -1` comme le ferait `cpu_interrupt` du
+vCPU lui-même) ; sinon, le chemin d'origine sous le BQL.
+
+Entrées de la décision : `env->pending_interrupts`, écrit par les autres fils **sous le BQL**
+(`ppc_set_irq`, qui appelle ensuite `ppc_maybe_interrupt` sous le BQL), et l'état du vCPU
+(`msr`…), écrit par lui seul. `CPU_INTERRUPT_HARD` n'est écrit que par
+`ppc_maybe_interrupt` (sous le BQL) et par `ppc_cpu_exec_interrupt` du vCPU lui-même.
+
+**Compteur de séquence** `env->irq_seq` : chaque `ppc_maybe_interrupt` sous le BQL (un seul
+écrivain à la fois) le rend impair, **barrière complète**, lit les entrées et met
+`HARD` à jour, puis le rend pair (écriture *release*). Le lecteur sans verrou :
+
+    (écriture de msr faite)      barrière complète
+    s = irq_seq (acquire)        s impair → chemin sous verrou
+    r = interruption due ?       h = bit HARD            barrière de lecture
+    irq_seq ≠ s ou r ≠ h         → chemin sous verrou   ; sinon terminé
+
+**Pourquoi c'est exact** (le résultat final de `HARD` est celui de la sérialisation
+d'origine). Soit une mise à jour sous verrou U d'un autre fil, concurrente de la décision D :
+
+- U finie avant la première lecture de `irq_seq` par D : D lit la valeur paire écrite par U
+  (*acquire* / *release*), donc voit `pending_interrupts` et `HARD` tels que U les a laissés ;
+  sa décision est celle que le code d'origine prendrait maintenant sous le verrou.
+- U commencée (impair) avant la dernière lecture de D : D voit un impair ou une valeur
+  changée → chemin sous verrou, sérialisé après U.
+- U commence après la dernière lecture de D : U écrit l'impair, barrière, lit `msr` ; D a
+  écrit `msr`, barrière, lu `irq_seq` sans voir l'impair. C'est le motif de Dekker (deux
+  écritures suivies, après barrière complète, de la lecture de l'écriture de l'autre) :
+  l'un des deux voit forcément l'écriture de l'autre ; D ne l'a pas vue, donc U lit le
+  nouveau `msr`. Le résultat de U, calculé sur les dernières entrées, est définitif —
+  exactement ce que donnait l'ordre d'origine (le vCPU prenait le BQL après U).
+
+La décision ne peut donc laisser `HARD` faux qu'en l'absence de toute mise à jour
+concurrente, et dans ce cas elle compare à l'état courant : rien n'est perdu. Les lectures
+de `pending_interrupts` sans verrou peuvent être déchirées par une écriture concurrente :
+alors `irq_seq` a changé, et la décision est jetée. Rebouclage de `irq_seq` (2^32
+mises à jour pendant une seule décision) : exclu. Les propriétés éteintes, rien ne change
+(pas même le compteur).
+
+**`EXITTB` supprimé** à `rfi` et au `mtmsr` qui change `IR`/`DR`, quand ils viennent du bloc
+traduit (`hreg_store_msr_tb`, appelée par `helper_store_msr` et `do_rfi` seulement) : ces
+blocs finissent par `DISAS_EXIT` / `DISAS_EXIT_UPDATE`, c'est-à-dire `exit_tb(NULL, 0)`
+(ou l'exception de pas à pas), donc retour à la boucle principale avec `last_tb = NULL` —
+tout ce qu'`EXITTB` obtenait (pas de chaînage du bloc précédent au suivant). Les autres
+appelants (`ppc_store_msr` du gdbstub, de la migration, du reset ; le passage en veille
+`POW`) gardent le chemin d'origine.
+
+**Mode preuve `x-msr-nobql-verify`** : après chaque décision sans verrou, prendre le BQL et
+recalculer comme le code d'origine ; sous le verrou, aucune mise à jour n'est en cours, et
+une mise à jour pas encore commencée n'a pas encore écrit `pending_interrupts` : le
+résultat doit être égal à `HARD`. Tout écart est imprimé, compté (« divergence ») et
+corrigé. Bilan sur stderr toutes les 2^26 décisions et à la sortie.
+
+### 19.3 La preuve
+
+| épreuve | configuration | résultat |
+|---|---|---|
+| banc d'endurance `msr-verif-reboot`, 2 instances | `x-msr-nobql` + `-verify` | 30 démarrages sur 30 (shutdown -r), 0 panique, 0 gel ; **378 M décisions sans verrou vérifiées, 0 divergence** ; 0,06 % de passages au verrou ; 162 M `EXITTB` supprimés |
+| banc d'endurance `msr-jc14-reboot`, 2 instances | `x-msr-nobql` + `x-jc-bits=14`, sans preuve | 40 sur 40, 0 panique, 0 gel |
+| `smctest` A-F + E×100 (disque de dev) | toutes les propriétés, preuves allumées | voir §19.5 |
+
+### 19.4 A/B DOOM 3
+
+`tools/tcg/matab.sh ab-msr 6 "m0:" "m1:CPU_OPTS=x-msr-nobql=on"` (même protocole que §18.2,
+cache de sauts d'origine des deux côtés, charge 1,18 à 2,37) :
+
+| | n | médiane | min..max | dispersion |
+|---|---|---|---|---|
+| éteint | 6 | 61,7 ms/image | 61,4..62,0 | 1,0 % |
+| `x-msr-nobql` | 6 | **61,3 ms/image** | 61,1..61,5 | 0,7 % |
+
+**−0,6 %**, petit mais net : une seule paire inversée sur 36 (Mann-Whitney U = 1,
+p ≈ 0,004 bilatéral).
+
+**Marble Blast** (`ab-msr-mb`, cellule `mb-pe`, même protocole) : 9,8 → 10,1 ms/image
+(médianes), mais 8 et 15 % de dispersion dans chaque mode (le jeu tourne selon le
+lancement à ~9,5 ou ~10,2) : Mann-Whitney p ≈ 0,20, **non concluant** dans un sens comme
+dans l'autre. La cellule de la matrice n'a pas la résolution voulue (0,1 ms/image sur 10).
+
+Pourquoi si peu, alors que le verrou pesait 3 + 3 % sur DOOM 3 ? Ce poste compte toutes les
+prises du BQL, dont celles du GPU paravirtuel et de la boucle d'E/S ; `hreg_store_msr` /
+`ppc_maybe_interrupt` ne pesaient que < 1 % (§16.6). La part `mtmsr`/`rfi` retirée est
+celle-là.
+
+### 19.5 Décision
+
+**Allumé par défaut** (`MSRNOBQL=1`) : exact (378 M décisions vérifiées sous verrou,
+0 divergence ; 70 redémarrages de l'invité en SMP=2 sans incident), gain petit mais net
+sur DOOM 3 (−0,6 %, p ≈ 0,004), sans régression sur la matrice complète (§21). Marble
+Blast reste à mesurer avec un banc plus fin (`tools/tcg/mbab.sh`, fenêtres appariées).
+
+---
+
+## 20. `x-icbi-sync` : l'A/B DOOM 3 (`tcg/0010`)
+
+La propriété (§17.3) était exacte mais éteinte faute d'A/B DOOM 3. `tools/tcg/matab.sh
+ab-icbi 6 "i0:" "i1:ICBISYNC=1"` (même protocole que §18.2, cache de sauts d'origine,
+`x-msr-nobql` éteint, charge 1,30 à 2,78) :
+
+| | n | médiane | min..max | dispersion |
+|---|---|---|---|---|
+| éteint | 6 | 61,8 ms/image | 61,3..63,1 | 2,9 % |
+| `x-icbi-sync` | 6 | 61,6 ms/image | 61,3..62,3 | 1,6 % |
+
+−0,4 %, dans le bruit : **aucun coût mesurable**, comme l'annonçait le banc d'`icbi` (§17.5 :
++9 à 11 ns par `icbi`, presque tous par le chemin court). **Allumé par défaut**
+(`ICBISYNC=1`) : c'est une correction d'exactitude (le code réécrit par l'autre vCPU selon
+le protocole PowerPC est vu), gratuite, sans régression sur la matrice complète (§21).
+
+---
+
+## 21. La matrice complète sur la configuration retenue (30/09/2026)
+
+Binaire `~/src/qemu-vit/build/qvit64`, `x-jc-bits=14`, `x-msr-nobql`, `x-icbi-sync`, les
+autres propriétés de `run_tiger.sh` par défaut ; tour `bench/tcg/ab/matrice-vit` (preuves
+d'image complètes, vidage et rejeu), aucun autre QEMU, charge 1,7 à 3,2. Comparaison au
+tour de référence `bench/matrice/20260930-0128` (binaire de référence, mêmes jeux) :
+
+| cellule | référence | retenue | plancher |
+|---|---|---|---|
+| Marble Blast fenêtre / plein écran | 9,9 / 9,7 | 10,1 / 10,0 | 13 |
+| Zenerchi fenêtre | 4,4 | 3,9 | 6 |
+| DOOM 3 fenêtre / plein écran | 61,7 / 61,6 | **60,0 / 60,3** | 76 |
+| Prey fenêtre / plein écran | 70,9 / 70,3 | 70,9 / 70,9 | 89 |
+| UT2004 fenêtre / plein écran | 27,2 / 27,5 | 26,4 / 26,6 | 36 |
+| Warcraft III plein écran | 17,8 | 17,8 | 22 |
+| Colin McRae plein écran | 71,5 | 66,7 | 88 |
+| Nexuiz fenêtre / plein écran | 110,7 / 109,4 | 109,0 / 108,7 | 137 |
+| Nexuiz GLSL fenêtre / plein écran | 41,7 / 41,1 | 40,5 / 41,1 | 52 |
+
+(ms/image, une partie par cellule : seules les A/B des §18-§20 mesurent un gain.) **16
+vertes sur 16 automatisées, images toutes justes, replis dans les tolérances, aucune
+cellule au-dessus de son plancher.** Marble Blast un peu plus lent d'un tour à l'autre,
+dans son bruit connu (9,3 à 10,3 depuis le 26/09, §19.4).

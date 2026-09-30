@@ -34,8 +34,13 @@
 #   RETINLINE=0 JCIDX=0 ./run_tiger.sh  # coupe les sorties indirectes (blr, bctr…) cherchées en
 #                             # ligne et le cache de sauts vidé par mmu_idx (tcg/0008, allumés par
 #                             # défaut, docs/tcg-g4.md §16) ; RETVERIFY=1 : mode preuve
-#   ICBISYNC=1 ./run_tiger.sh # icbi invalide les blocs de sa ligne (x-icbi-sync, tcg/0010,
-#                             # éteint par défaut avant l'A/B DOOM 3 : docs/tcg-g4.md §17)
+#   ICBISYNC=0 ./run_tiger.sh # coupe icbi qui invalide les blocs de sa ligne (x-icbi-sync, tcg/0010,
+#                             # allumé par défaut depuis le 30/09 : docs/tcg-g4.md §17, §20)
+#   MSRNOBQL=0 ./run_tiger.sh # coupe mtmsr/rfi sans verrou global quand la ligne d'interruption ne
+#                             # change pas (x-msr-nobql, tcg/0012, allumé par défaut, docs/tcg-g4.md §19) ;
+#                             # MSRVERIFY=1 : mode preuve
+#   JCBITS=12 ./run_tiger.sh  # cache de sauts d'origine (2^12 entrées par vCPU) ; défaut 14 (x-jc-bits,
+#                             # tcg/0011, propriété de l'accélérateur, 12 à 16 ; docs/tcg-g4.md §18)
 #   JITNEAR=0 ./run_tiger.sh  # laisse macOS placer le tampon du JIT (défaut : dans la fenêtre de 4 Gio
 #                             # du texte de QEMU, x-jit-near, tcg/0006 : supprime le régime lent, docs/tcg-g4.md §14) ;
 #                             # TCG_OPTS=… propriétés brutes de l'accélérateur
@@ -69,12 +74,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Profil maximal des optimisations disponibles et éprouvées. Les sondes plus
 # bas restent obligatoires ; 0 explicite conserve sa valeur pour les A/B.
 # Les modes VERIFY ne sont pas des optimisations et restent éteints.
-for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX JITNEAR; do
+# Depuis le 30/09/2026 (docs/tcg-g4.md §18-§21) : ICBISYNC (x-icbi-sync, tcg/0010)
+# et MSRNOBQL (x-msr-nobql, tcg/0012) en font partie.
+for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JITNEAR; do
   export "$_opt=${!_opt:-1}"
 done
-# x-icbi-sync (tcg/0010) : exact, mais pas encore passé l'A/B DOOM 3 exigé pour
-# allumer un patch TCG par défaut (TODO, orientation vitesse). ICBISYNC=1 l'allume.
-export ICBISYNC="${ICBISYNC:-0}"
+# x-jc-bits (tcg/0011) : 2^14 entrées de cache de sauts (12 = QEMU d'origine).
+export JCBITS="${JCBITS:-14}"
 export QGPU_GPU_COPY="${QGPU_GPU_COPY:-1}" QGPU_GLSL="${QGPU_GLSL:-1}"
 
 # Avant le verrou disque : ImGui relance CE script avec DBUS_DISPLAY=1.
@@ -313,8 +319,9 @@ done
 # docs/tcg-g4.md §17) --- en SMP, une écriture dans du code invalide les blocs
 # AVANT d'être faite : l'autre vCPU peut retraduire l'ancien code entre les deux,
 # et le protocole de l'invité (dcbst, sync, icbi, isync) ne le rattrapait pas.
-# Éteint par défaut tant que l'A/B DOOM 3 n'est pas fait ; ICBISYNC=1 l'allume.
-if [ "${ICBISYNC:-0}" != 0 ]; then
+# Allumé par défaut depuis le 30/09/2026 (DOOM 3 sans coût mesurable, docs/tcg-g4.md
+# §20) ; ICBISYNC=0 l'éteint.
+if [ "${ICBISYNC:-1}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-icbi-sync=on"; then
     CPU_SPEC="$CPU_SPEC,x-icbi-sync=on"
     MODE="$MODE + ICBI-SYNCHRONE"
@@ -323,6 +330,24 @@ if [ "${ICBISYNC:-0}" != 0 ]; then
     MODE="$MODE + ICBI-SYNCHRONE DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
+# --- mtmsr/rfi sans verrou global quand la ligne d'interruption ne change pas
+# (x-msr-nobql, patches/tcg/0012, docs/tcg-g4.md §19) --- compteur de séquence
+# contre les mises à jour faites sous le verrou ; MSRVERIFY=1 ajoute le mode
+# preuve (chaque décision sans verrou refaite sous le verrou, bilan sur stderr).
+# Allumé par défaut depuis le 30/09/2026 (DOOM 3 −0,6 %, docs/tcg-g4.md §19) ;
+# MSRNOBQL=0 l'éteint.
+for _p in "MSRNOBQL x-msr-nobql MSR-SANS-VERROU" "MSRVERIFY x-msr-nobql-verify MSR-VÉRIFIÉ"; do
+  set -- $_p
+  if [ "${!1:-0}" != 0 ]; then
+    if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "$2=on"; then
+      CPU_SPEC="$CPU_SPEC,$2=on"
+      MODE="$MODE + $3"
+    else
+      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0012)." >&2
+      MODE="$MODE + $3 DEMANDÉ MAIS INDISPONIBLE"
+    fi
+  fi
+done
 [ -n "${CPU_OPTS:-}" ] && CPU_SPEC="$CPU_SPEC,${CPU_OPTS#,}"
 # --- Tampon du JIT dans la fenêtre de 4 Gio du texte de QEMU (x-jit-near,
 # patches/tcg/0006) --- propriété de l'ACCÉLÉRATEUR. Sur Apple M4, le noyau pose
@@ -337,6 +362,20 @@ if [ "${JITNEAR:-1}" != 0 ]; then
   elif [ -n "${JITNEAR:-}" ]; then
     echo "⚠  JITNEAR=1 demandé mais ce QEMU n'a pas la propriété 'x-jit-near' (patches/tcg/0006)." >&2
     MODE="$MODE + JIT près du texte DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+# --- Taille du cache de sauts (x-jc-bits, patches/tcg/0011, docs/tcg-g4.md §18)
+# --- propriété de l'ACCÉLÉRATEUR (les blocs sont partagés entre vCPU et la
+# sonde en ligne de x-ret-inline fige le hachage dans le code généré). 12 =
+# QEMU d'origine (rien n'est passé), 13..16 l'agrandit ; 14 par défaut depuis le
+# 30/09/2026 (DOOM 3 −1,9 %, docs/tcg-g4.md §18). Sondé.
+if [ -n "${JCBITS:-}" ] && [ "${JCBITS}" != 12 ]; then
+  if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-jc-bits=$JCBITS"; then
+    TCG_ACCEL="${TCG_ACCEL:-tcg},x-jc-bits=$JCBITS"
+    MODE="$MODE + CACHE DE SAUTS 2^$JCBITS"
+  else
+    echo "⚠  JCBITS=$JCBITS demandé mais ce QEMU n'a pas la propriété 'x-jc-bits' (patches/tcg/0011) ou refuse la valeur." >&2
+    MODE="$MODE + cache de sauts 2^$JCBITS DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
 [ -n "${TCG_OPTS:-}" ] && TCG_ACCEL="${TCG_ACCEL:-tcg},${TCG_OPTS#,}"

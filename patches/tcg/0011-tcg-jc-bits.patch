@@ -1,0 +1,202 @@
+diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+index 5d8b166..6e7355d 100644
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -260,6 +260,7 @@ enum { RV_LOOP, RV_HELPER, RV_INLINE, RV_N };
+ static const char *const rv_name[RV_N] = { "boucle", "helper", "en-ligne" };
+ static uint64_t rv_hit[RV_N], rv_miss[RV_N], rv_bad[RV_N], rv_race[RV_N];
+ static uint64_t rv_nophys[RV_N], rv_jc_drop, rv_jc_skip, rv_total;
++static uint64_t rv_jc_scan;     /* tcg/0011: log overflowed, whole table scanned */
+ /* misses: entry dropped (same pc, no tb), other pc (conflict), same pc other flags/cflags */
+ static uint64_t rv_m_drop, rv_m_other, rv_m_flags;
+ static bool rv_atexit;
+@@ -275,10 +276,12 @@ static void rv_report(void)
+                 qatomic_read(&rv_bad[i]), qatomic_read(&rv_race[i]),
+                 qatomic_read(&rv_nophys[i]));
+     }
+-    fprintf(stderr, " vidages du cache de sauts : %" PRIu64 " faits, %" PRIu64
+-            " évités ; ratés : %" PRIu64 " entrée vidée, %" PRIu64 " autre pc, %"
+-            PRIu64 " autres drapeaux\n", qatomic_read(&rv_jc_drop),
+-            qatomic_read(&rv_jc_skip), qatomic_read(&rv_m_drop),
++    fprintf(stderr, " vidages du cache de sauts (%u entrées) : %" PRIu64
++            " faits, %" PRIu64 " évités, %" PRIu64 " parcours complets ;"
++            " ratés : %" PRIu64 " entrée vidée, %" PRIu64 " autre pc, %"
++            PRIu64 " autres drapeaux\n", TB_JMP_CACHE_SIZE,
++            qatomic_read(&rv_jc_drop), qatomic_read(&rv_jc_skip),
++            qatomic_read(&rv_jc_scan), qatomic_read(&rv_m_drop),
+             qatomic_read(&rv_m_other), qatomic_read(&rv_m_flags));
+ }
+ 
+@@ -298,6 +301,14 @@ void pomppc_jc_flush_stat(CPUState *cpu, bool dropped)
+     }
+ }
+ 
++void pomppc_jc_scan_stat(CPUState *cpu)
++{
++    if (unlikely(cpu->ret_verify)) {
++        rv_start();
++        qatomic_inc(&rv_jc_scan);
++    }
++}
++
+ static void rv_miss_stat(int src, TranslationBlock *tb, vaddr epc, vaddr pc)
+ {
+     rv_start();
+@@ -1257,6 +1268,7 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
+         tcg_target_initialized = true;
+     }
+ 
++    tb_jmp_cache_bits_frozen = true;          /* POMPPC tcg/0011 */
+     cpu->tb_jmp_cache = g_new0(CPUJumpCache, 1);
+     tlb_init(cpu);
+ #ifndef CONFIG_USER_ONLY
+diff --git a/accel/tcg/tb-jmp-cache.h b/accel/tcg/tb-jmp-cache.h
+index 24bda05..e0f70cf 100644
+--- a/accel/tcg/tb-jmp-cache.h
++++ b/accel/tcg/tb-jmp-cache.h
+@@ -13,7 +13,19 @@
+ #include "exec/cpu-common.h"
+ 
+ #define TB_JMP_CACHE_BITS 12
+-#define TB_JMP_CACHE_SIZE (1 << TB_JMP_CACHE_BITS)
++/*
++ * POMPPC tcg/0011 (x-jc-bits, accelerator property): the number of entries
++ * of the jump cache is chosen at start-up, 2^12 (stock) to 2^16.  It is
++ * global, not per CPU: TBs are shared and the inline probe of x-ret-inline
++ * bakes the hash into the generated code.  Fixed before the first CPU is
++ * realized (tb_jmp_cache_bits_frozen); the arrays below are sized for the
++ * maximum and only the first TB_JMP_CACHE_SIZE entries are used.
++ */
++#define TB_JMP_CACHE_MAX_BITS 16
++#define TB_JMP_CACHE_MAX (1 << TB_JMP_CACHE_MAX_BITS)
++extern unsigned tb_jmp_cache_bits;
++extern bool tb_jmp_cache_bits_frozen;
++#define TB_JMP_CACHE_SIZE (1u << tb_jmp_cache_bits)
+ 
+ /*
+  * Invalidated in parallel; all accesses to 'tb' must be atomic.
+@@ -27,22 +39,24 @@ typedef struct CPUJumpCache {
+     struct {
+         TranslationBlock *tb;
+         vaddr pc;
+-    } array[TB_JMP_CACHE_SIZE];
++    } array[TB_JMP_CACHE_MAX];
+     /*
+      * POMPPC tcg/0008 (x-jc-idx): instruction mmu_idx under which array[i]
+      * was looked up.  Written and read by the owning CPU only.
+      */
+-    uint8_t idx[TB_JMP_CACHE_SIZE];
++    uint8_t idx[TB_JMP_CACHE_MAX];
+     /*
+      * Slots filled under each mmu_idx since the last drop of that mmu_idx,
+      * so that tcg_flush_jmp_cache_idx visits only them (a few hundred,
+      * instead of the whole table: ~7000 drops per second under Tiger).
+      * log_n[i] > TB_JMP_IDX_LOG: overflowed, scan the whole table.
++     * TB_JMP_IDX_LOG is a quarter of the table (1024 for 2^12, tcg/0011).
+      */
+ #define TB_JMP_IDX_MAX 16
+-#define TB_JMP_IDX_LOG 1024
++#define TB_JMP_IDX_LOG (TB_JMP_CACHE_SIZE / 4)
++#define TB_JMP_IDX_LOG_MAX (TB_JMP_CACHE_MAX / 4)
+     uint16_t log_n[TB_JMP_IDX_MAX];
+-    uint16_t log[TB_JMP_IDX_MAX][TB_JMP_IDX_LOG];
++    uint16_t log[TB_JMP_IDX_MAX][TB_JMP_IDX_LOG_MAX];
+ } CPUJumpCache;
+ 
+ /* POMPPC tcg/0008: record the instruction mmu_idx of a slot being filled */
+diff --git a/accel/tcg/tcg-all.c b/accel/tcg/tcg-all.c
+index 1df2ef6..1a4161e 100644
+--- a/accel/tcg/tcg-all.c
++++ b/accel/tcg/tcg-all.c
+@@ -39,6 +39,7 @@
+ #include "hw/boards.h"
+ #endif
+ #include "internal-common.h"
++#include "tb-jmp-cache.h"
+ 
+ struct TCGState {
+     AccelState parent_obj;
+@@ -221,6 +222,35 @@ static void tcg_set_jit_addr(Object *obj, Visitor *v, const char *name,
+     }
+ }
+ 
++/* POMPPC tcg/0011: x-jc-bits, size of the jump cache (tb-jmp-cache.h) */
++static void tcg_get_jc_bits(Object *obj, Visitor *v, const char *name,
++                            void *opaque, Error **errp)
++{
++    uint32_t value = tb_jmp_cache_bits;
++
++    visit_type_uint32(v, name, &value, errp);
++}
++
++static void tcg_set_jc_bits(Object *obj, Visitor *v, const char *name,
++                            void *opaque, Error **errp)
++{
++    uint32_t value;
++
++    if (!visit_type_uint32(v, name, &value, errp)) {
++        return;
++    }
++    if (value < TB_JMP_CACHE_BITS || value > TB_JMP_CACHE_MAX_BITS) {
++        error_setg(errp, "x-jc-bits must be between %d and %d",
++                   TB_JMP_CACHE_BITS, TB_JMP_CACHE_MAX_BITS);
++        return;
++    }
++    if (tb_jmp_cache_bits_frozen && value != tb_jmp_cache_bits) {
++        error_setg(errp, "x-jc-bits cannot change once a CPU exists");
++        return;
++    }
++    tb_jmp_cache_bits = value;
++}
++
+ static bool tcg_get_one_insn_per_tb(Object *obj, Error **errp)
+ {
+     TCGState *s = TCG_STATE(obj);
+@@ -281,6 +311,12 @@ static void tcg_accel_class_init(ObjectClass *oc, void *data)
+         "Place the jit buffer in the same 4 GiB window as QEMU's text "
+         "(POMPPC, docs/tcg-g4.md 14)");
+ 
++    object_class_property_add(oc, "x-jc-bits", "uint32",
++        tcg_get_jc_bits, tcg_set_jc_bits, NULL, NULL);
++    object_class_property_set_description(oc, "x-jc-bits",
++        "log2 of the number of jump-cache entries per CPU, 12 (stock) "
++        "to 16 (POMPPC tcg/0011, docs/tcg-g4.md 18)");
++
+     object_class_property_add(oc, "x-jit-addr", "uint64",
+         tcg_get_jit_addr, tcg_set_jit_addr, NULL, NULL);
+     object_class_property_set_description(oc, "x-jit-addr",
+diff --git a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
+index dd6d278..059be66 100644
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -650,6 +650,10 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
+  * Called by generic code at e.g. cpu reset after cpu creation,
+  * therefore we must be prepared to allocate the jump cache.
+  */
++/* POMPPC tcg/0011: size of the jump cache (x-jc-bits), see tb-jmp-cache.h */
++unsigned tb_jmp_cache_bits = TB_JMP_CACHE_BITS;
++bool tb_jmp_cache_bits_frozen;
++
+ void tcg_flush_jmp_cache(CPUState *cpu)
+ {
+     CPUJumpCache *jc = cpu->tb_jmp_cache;
+@@ -687,6 +691,7 @@ void tcg_flush_jmp_cache_idx(CPUState *cpu, uint16_t idxmap)
+         }
+         n = jc->log_n[k];
+         if (n > TB_JMP_IDX_LOG) {
++            pomppc_jc_scan_stat(cpu);
+             for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
+                 if (jc->idx[i] == k) {
+                     qatomic_set(&jc->array[i].tb, NULL);
+diff --git a/include/exec/exec-all.h b/include/exec/exec-all.h
+index 3f3b3f2..d4096da 100644
+--- a/include/exec/exec-all.h
++++ b/include/exec/exec-all.h
+@@ -509,6 +509,7 @@ tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, vaddr addr,
+ /* POMPPC tcg/0008: see accel/tcg/cputlb.c and accel/tcg/cpu-exec.c */
+ tb_page_addr_t pomppc_code_phys_nofault(CPUArchState *env, vaddr addr);
+ void pomppc_jc_flush_stat(CPUState *cpu, bool dropped);
++void pomppc_jc_scan_stat(CPUState *cpu);       /* tcg/0011 */
+ #endif
+ 
+ /**
