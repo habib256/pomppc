@@ -3037,7 +3037,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
 
     case QGPU_OP_SURF_PRESENT: {
         uint32_t off, stride, x, y, w, h, fmt, bpp, row, i;
-        uint64_t rowbytes, total;
+        uint64_t rowbytes, total, t0;
         WANT(QGPU_LEN_SURF_PRESENT);
         if (!c->scanout || c->scanout_size == 0) {
             return QGPU_ST_BAD_ARG;
@@ -3088,6 +3088,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (!grow_pbuf(c, w * h)) {
             return QGPU_ST_BACKEND;
         }
+        t0 = now_ns();
         if (!c->be->readback(c, s, x, y, w, h, c->pbuf)) {
             return QGPU_ST_BACKEND;
         }
@@ -3105,6 +3106,8 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
                 }
             }
         }
+        c->cstats.present++;
+        c->cstats.present_ns += now_ns() - t0;
         if (c->scanout_dirty) {
             c->scanout_dirty(c->scanout_opaque, off, (uint32_t)total);
         }

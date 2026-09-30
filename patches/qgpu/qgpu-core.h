@@ -438,6 +438,7 @@ typedef struct QgpuCopyStats {
     uint64_t surf_tex, surf_tex_ns, surf_tex_gpu;    /* SURF_TEX : tous, ns, par le GPU */
     uint64_t copy_tex, copy_tex_ns, copy_tex_gpu;    /* COPY_TEX : idem */
     uint64_t fetch, fetch_ns;                        /* niveaux rapatriés (tex_fetch) */
+    uint64_t present, present_ns;                    /* 30/09 (A4, G8) : SURF_PRESENT */
 } QgpuCopyStats;
 
 struct QgpuCore {

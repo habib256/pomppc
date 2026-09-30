@@ -37,6 +37,12 @@ static uint32_t surf_w = 800, surf_h = 600;
    présentation), pour mesurer un changement du backend sans le bruit des
    fichiers. */
 static uint64_t exec_ns;
+/* 30/09 (A4, G8) : en régime (images après la première du vidage), temps des
+   soumissions — SURF_PRESENT compris, relecture et empaquetage vers le
+   scanout — et temps de la relecture de présentation que le rejeu refait à
+   part pour écrire le PPM (même relecture que celle d'un SURF_PRESENT). */
+static uint64_t reg_sub_ns, reg_pres_ns;
+static uint32_t first_frame = ~0u, reg_last = ~0u, reg_frames, reg_pres;
 static uint64_t now_ns(void)
 {
     struct timespec ts;
@@ -512,7 +518,16 @@ int main(int argc, char **argv)
                 sscanf(getenv("QGPU_REPLAY_SKIPDRAW"), "%u:%u-%u", &sf, &si, &sj) == 3 && h.frame == sf)
                 skipping = 1;
             if (!skipping) {
+                uint64_t e0 = exec_ns;
                 st = timed_execute(&c, h.base, h.ncmd_bytes);
+                /* 30/09 (A4) : temps des soumissions en régime, hors première
+                   image du vidage (réémission de tout l'état et des textures) */
+                if (first_frame == ~0u)
+                    first_frame = h.frame;
+                if (h.frame != first_frame) {
+                    reg_sub_ns += exec_ns - e0;
+                    if (h.frame != reg_last) { reg_last = h.frame; reg_frames++; }
+                }
             } else {
                 uint32_t q, seg = 0;
                 for (q = 0; q + 1 < h.ncmd_bytes / 4 && st == QGPU_ST_OK; ) {
@@ -826,7 +841,13 @@ int main(int argc, char **argv)
                 rb[1] = surf; rb[2] = roff; rb[3] = pw * bpp; rb[4] = px; rb[5] = py; rb[6] = pw; rb[7] = ph;
                 rb[8] = pfmt;
                 for (j = 0; j < 9; j++) qgpu_st32(shmem + SHMEM - 8192 + j * 4, rb[j]);
-                if (timed_execute(&c, SHMEM - 8192, 36) == QGPU_ST_OK) {
+                uint64_t p0 = exec_ns;
+                uint32_t pst = timed_execute(&c, SHMEM - 8192, 36);
+                if (h.frame != first_frame) {
+                    reg_pres_ns += exec_ns - p0;
+                    reg_pres++;
+                }
+                if (pst == QGPU_ST_OK) {
                     /* QGPU_REPLAY_PRESENTS=<fichier> : une ligne par image écrite,
                        « n image décalage_vram pas l h format », pour situer l'image
                        sur l'écran de la VM (tools/matrice/) */
@@ -859,6 +880,13 @@ int main(int argc, char **argv)
             c.gpu_copy ? "oui" : "non");
     fprintf(stderr, "temps dans le cœur : %.3f ms (soumissions et relectures de présentation)\n",
             exec_ns / 1e6);
+    if (reg_frames)
+        fprintf(stderr, "régime : %u images, soumissions %.3f ms/image, relecture de "
+                "présentation %.3f ms/présentation (%u)\n", reg_frames,
+                reg_sub_ns / 1e6 / reg_frames, reg_pres ? reg_pres_ns / 1e6 / reg_pres : 0.0,
+                reg_pres);
+    fprintf(stderr, "SURF_PRESENT : %llu, %.3f ms en tout (relecture et empaquetage vers le scanout)\n",
+            (unsigned long long)c.cstats.present, c.cstats.present_ns / 1e6);
     /* QGPU_REPLAY_SURFS=1 : chaque surface vivante à la fin du rejeu, en PPM
        (<préfixe>-surf<id>-<l>x<h>.ppm) — cibles de rendu, textures de surface */
     if (getenv("QGPU_REPLAY_SURFS")) {
