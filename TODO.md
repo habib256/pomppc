@@ -1,6 +1,6 @@
 # TODO — priorités de POMPPC
 
-État au 29/09/2026. Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
+État au 30/09/2026. Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
 sur le GPU de l'hôte, avec une matrice de jeux verte comme preuve.
 
 **Orientation choisie le 29/09 : une VM qui ne plante plus.** Le code a été relu
@@ -182,12 +182,42 @@ Ordre : planchers recalés, puis TCG (cache de sauts, verrou `mtmsr`/`rfi`), pui
   GLSL 0,05, UT2004 2 au chargement) ; BeginPrimitiveBuffer, file pleine, asynchrone coupé :
   0 dans les 13 cellules de la matrice. Très loin du seuil S-M6 (2 ms/image).
 - [ ] **[Plugin] Transmission paresseuse** : mesure honnête et décision du défaut.
-- [ ] **[Protocole] A4 — Déplacer le travail vers l'hôte** : bloc d'état partagé lu par le
-  device, textures par DMA sur plages sales, empaquetage minimal. Épreuve : `send_state` et
-  `compute_state` sortent du profil.
-- [ ] **[Backend GL]** G7 `glTexSubImage*` par rectangle sale, G8 PBO en rotation pour
-  `SURF_PRESENT`, G9 cache d'état dans `gl_target`.
-- [ ] **[TCG] Flottant scalaire en instructions AArch64 natives** (`docs/tcg-g4.md` §15.7).
+- [x] **[Protocole] A4 — Déplacer le travail vers l'hôte** (30/09-01/10, plugin
+  `20261001-a4on` ; `CHANGELOG.md`) : **état et géométrie allumés par défaut** après l'A/B
+  d'intégration `bench/matrice/ab-geo-a4tout` — Nexuiz ARB −23 %, Warcraft III −11 %, Colin
+  McRae −27 % (66,5 → 48,2, seuil de course de la matrice recalé à 15 ms/échange), Nexuiz GLSL −6 %, UT2004 −3 %, DOOM 3 −2,3 %, Prey dans le bruit ; images justes.
+  Textures par DMA : mesuré, rien à construire (`docs/protocole-v23-textures.md`).
+  Capacités 0x8000 / 0x20000 ajoutées sans changer `QGPU_PROTO_VERSION` (22).
+  **À faire par l'utilisateur** : reconstruire le binaire de référence
+  (`scripts/build_qemu_qfb.sh`, VM arrêtée ; binaires d'avant déjà copiés en
+  `~/src/qemu/build/*.avant-a4`). Tant qu'il n'est pas reconstruit, le device de référence
+  n'annonce pas les capacités et le plugin `20261001-a4on` (installé) garde les anciennes
+  voies : aucun gain, rien de cassé. `~/src/qemu-a4` porte déjà ce device.
+- [ ] **[Système] DOOM 3 plein écran mort au chargement** (`exit 139`, tas du jeu corrompu) :
+  3 fois de suite dans une même session de la VM pendant le volet état d'A4, **dont une fois
+  leviers éteints** ; 0 sur les ~20 parties suivantes (campagne d'intégration comprise).
+  `bench/a4/etat/rouges`. Cause inconnue ; à rapprocher des paniques `LockTimeOut` (Maintenant).
+- [ ] **[Plugin] Suites A4** : clés chaudes (unités) par une table « objet GLEngine → qtex »
+  côté device (0,3-0,6 ms/image estimés sur DOOM 3) ; `geom_send_all` (1,5-3,9 %) ; GLEngine
+  déroule les tableaux clients en Begin/End (Nexuiz ARB 14-16 %, Warcraft III 4,5 %) — RE du
+  canal `gldCreateVertexArray` (`docs/protocole-v23-geometrie.md`). Contribution de chaque
+  levier séparément non mesurée (la campagne les allumait ensemble).
+- [x] **[Backend GL]** G7/G8/G9 (30/09, `docs/backend-gl-attente.md`) : **mesuré**. Seul Nexuiz
+  attend l'hôte au-delà de 2 % (GLSL 2,5 ms/image, ARB 3,6) : ses requêtes d'occlusion. Colin
+  McRae : 0,12 ms/image. G7 sans objet, G9 (≤ 1,25 % d'attente) et G8 classés.
+- [ ] **[VM] Épreuves d'attente** : `tools/matrice/ab-attente.sh 6 "g8 flush"`, puis `… 6 qflush`
+  et `… 1 matriceq` (plugin `20260930-a4`). Fermeture : G8 clos si l'attente baisse de moins de
+  1 ms/image ; `QGPU_GL_FLUSH` et `POMPPC_GL_QFLUSH` allumés seulement si l'attente de Nexuiz
+  GLSL baisse d'au moins 1 ms/image et la matrice reste 16/16 (mesuré sur VM chargée : ~0,5 ms,
+  issue probable « gain faible »). Pour les ~2 ms restantes : soumettre par tranches pendant les
+  dessins, ou résultats de requête écrits par l'hôte (protocole).
+- [ ] **[Cœur] DOOM 3 : `nat_conv_attr`** = 27 % du temps du fil de rendu hôte (attributs
+  reconvertis à chaque dessin natif) ; convertir une fois au `BUF_SUBDATA`. Hors du chemin
+  d'attente (≤ 1,3 %) : utile seulement si l'hôte devient la limite.
+- [ ] **[TCG] Flottant scalaire en instructions AArch64 natives** (`docs/tcg-g4.md` §15.7,
+  §22) : **agent en cours** (30/09, copie `~/src/qemu-fpnat`) — patches `tcg/0013`
+  (`x-fp-flat`, un appel sans branchement) et `tcg/0014` (`x-fp-native`, FPU de l'hôte) écrits,
+  éteints ; mesure en attente de la VM.
 
 ### Jeux — tous les jeux, toutes les résolutions
 

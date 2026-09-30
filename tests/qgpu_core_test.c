@@ -6336,7 +6336,9 @@ static void run_native(QgpuCore *c, uint8_t *shmem)
             { "code 32",               1, 0, 32 },
             { "code en double",        2, 0, QGPU_NA_COLOR },
             { "tampon inexistant",     1, 1, 99 },
-            { "tampon QGPU_BUF_SHMEM", 1, 1, QGPU_BUF_SHMEM },
+            /* QGPU_BUF_SHMEM : accepté sous QGPU_CAP_GEOM_HOST (A4),
+               refus éprouvés par run_native_shmem */
+            { "tampon 64 (hors de la table)", 1, 1, QGPU_MAX_BUF },
             { "type 0x1407",           1, 4, 0x1407 },
             { "taille 0",              2, 5, 0 },
             { "taille 5",              2, 5, 5 },
@@ -6502,6 +6504,590 @@ static void run_native(QgpuCore *c, uint8_t *shmem)
     }
 #undef NAT_SAME
 #undef NAT_RUN
+}
+
+/* ── A4, volet géométrie : DRAW_NATIVE lu dans BAR0 (QGPU_CAP_GEOM_HOST) ──
+ *
+ * Les tableaux CLIENTS d'un jeu (glVertexPointer sur la mémoire de
+ * l'application) partent aux octets de l'application, recopiés tels quels
+ * dans BAR0 ; l'hôte convertit. Épreuve : la même géométrie reconstruite À
+ * L'OCTET côté hôte (c->vbuf, c->ibuf remis au backend) et la même image que
+ * (i) la référence DRAW_RAW — ce que l'empaqueteur du plugin envoyait — et
+ * (ii) DRAW_NATIVE depuis un tampon hôte (v18). */
+#define NSH_OFF 0x60000u            /* tableaux « clients » dans BAR0 */
+static void run_native_shmem(QgpuCore *c, uint8_t *shmem)
+{
+    static const uint32_t texels[4] = { 0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFFFF };
+    static const uint16_t quad_idx[6] = { 0, 1, 2, 0, 2, 3 };
+    static uint32_t ref[W * H], ref4[W * H];
+    static float ref_vb[4 * 11];
+    static uint32_t ref_ib[6];
+    Emit e, v, t;
+    float m[16], mv[16];
+    uint32_t st, i, j, k, n;
+    const uint32_t fw = (uint32_t)QGPU_VF_WORDS(NAT_FMT_FIXED);
+    const uint32_t saved_caps = c->caps;
+    int same, vsame;
+
+#define NSH_SAME(r) do { same = 1; for (i = 0; i < W * H; i++) \
+        if (qgpu_ld32(shmem + RB_OFF + i * 4) != (r)[i]) { same = 0; break; } } while (0)
+#define NSH_VB() (vsame = memcmp(c->vbuf, ref_vb, sizeof(float) * 4 * fw) == 0 && \
+                          memcmp(c->ibuf, ref_ib, sizeof(ref_ib)) == 0)
+#define NSH_RUN() (st = qgpu_core_execute(c, CMD_OFF, e.off - e.start))
+
+    printf("-- A4 : DRAW_NATIVE depuis BAR0 (%s) --\n",
+           (c->caps & QGPU_CAP_GEOM_HOST) ? "QGPU_CAP_GEOM_HOST annoncé" : "non annoncé");
+    CHECK(QGPU_CAP_GEOM_HOST == 0x00020000 &&
+          (QGPU_CAP_GEOM_HOST & (QGPU_CAP_SOFT | QGPU_CAP_GL | QGPU_CAP_OCCLUSION |
+                                    QGPU_CAP_ASYNC | QGPU_CAP_GL14 | QGPU_CAP_SCANOUT |
+                                    QGPU_CAP_PROGRAMS | QGPU_CAP_GEN_SIZES | QGPU_CAP_NATIVE |
+                                    QGPU_CAP_CLIENTS | QGPU_CAP_SURF_TEX |
+                                    QGPU_CAP_TEX_READBACK | QGPU_CAP_GLSL |
+                                    QGPU_CAP_COMBINE3 | QGPU_CAP_GLSL_PATHS)) == 0,
+          "capacité 0x%x, distincte des autres", QGPU_CAP_GEOM_HOST);
+    CHECK((c->caps & QGPU_CAP_GEOM_HOST) && (c->caps & QGPU_CAP_NATIVE),
+          "annoncée par le cœur avec QGPU_CAP_NATIVE (caps 0x%x)", c->caps);
+
+    qgpu_core_reset(c);
+    e.base = shmem; v.base = shmem; t.base = shmem;
+    mat_ortho_px(m);
+    mat_identity(mv);
+    t.off = t.start = TEX_OFF;
+    for (k = 0; k < 4; k++) emit(&t, texels[k]);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 1); emit(&e, W); emit(&e, H); emit(&e, QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 1);
+    set_matrix(&e, QGPU_MTX_PROJECTION, m);
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX)); emit(&e, 5);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE, QGPU_LEN_TEX_IMAGE));
+    emit(&e, 5); emit(&e, 0); emit(&e, 2); emit(&e, 2); emit(&e, 0x1908); emit(&e, TEX_OFF);
+    tparam(&e, 5, QGPU_TP_MIN_FILTER, 0x2600);
+    tparam(&e, 5, QGPU_TP_MAG_FILTER, 0x2600);
+    state(&e, QGPU_SK_TEXTURE, 1);
+    state(&e, QGPU_SK_TEX_BIND, 5);
+    state(&e, QGPU_SK_TEX_ENV_MODE, 0x2100);            /* MODULATE */
+    /* tampon hôte 20 : les 4 idDrawVert (la voie v18, témoin) */
+    for (k = 0; k < 4; k++) idvert(shmem + NAT_STAGE_OFF + k * IDV, (int)k);
+    nat_buf(&e, 20, 4 * IDV, 4 * IDV);
+    NSH_RUN();
+    CHECK(st == QGPU_ST_OK, "contexte, texture 2×2, tampon hôte 20 (st %u pc %u)", st, c->status_pc);
+
+    /* (a) référence : DRAW_RAW, sommets empaquetés (position 3f, couleur 4f, st 4f) */
+    v.off = v.start = VTX_OFF;
+    for (k = 0; k < 4; k++) nat_ref_fixed(&v, (int)k);
+    for (k = 0; k < 6; k++) qgpu_st16(shmem + IDX_OFF + k * 2, quad_idx[k]);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF102030, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 6, NAT_FMT_FIXED, 4, QGPU_IDX_U16, IDX_OFF);
+    readback_cmd(&e, 1);
+    NSH_RUN();
+    for (i = 0; i < W * H; i++) ref[i] = qgpu_ld32(shmem + RB_OFF + i * 4);
+    memcpy(ref_vb, c->vbuf, sizeof(float) * 4 * fw);
+    memcpy(ref_ib, c->ibuf, sizeof(ref_ib));
+    CHECK(st == QGPU_ST_OK && px(shmem, 32, 32) != 0x102030 && px(shmem, 1, 1) == 0x102030,
+          "(a) référence DRAW_RAW : %06x au centre (st %u)", px(shmem, 32, 32), st);
+    /* la forme que le plugin empaquetait vraiment : position à 4 mots (w = 1) */
+    v.off = v.start = VTX_OFF;
+    for (k = 0; k < 4; k++) {
+        uint32_t q;
+        emitf(&v, nat_xy[k][0]); emitf(&v, nat_xy[k][1]); emitf(&v, 0.0f); emitf(&v, 1.0f);
+        for (q = 0; q < 4; q++) emitf(&v, (float)nat_rgba[k][q] / 255.0f);
+        emitf(&v, nat_st[k][0]); emitf(&v, nat_st[k][1]); emitf(&v, 0.0f); emitf(&v, 1.0f);
+    }
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF102030, 1.0f);
+    draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 6,
+             (uint32_t)QGPU_VF_POS(4) | QGPU_VF_COLOR | (uint32_t)QGPU_VF_TEX(0), 4,
+             QGPU_IDX_U16, IDX_OFF);
+    readback_cmd(&e, 1);
+    NSH_RUN();
+    for (i = 0; i < W * H; i++) ref4[i] = qgpu_ld32(shmem + RB_OFF + i * 4);
+    NSH_SAME(ref);
+    CHECK(st == QGPU_ST_OK && same, "(a) empaquetage du plugin (position 4 mots) : même image (st %u)", st);
+
+    /* (b) idDrawVert entrelacés DANS BAR0, indices U16 dans BAR0 */
+    for (k = 0; k < 4; k++) idvert(shmem + NSH_OFF + k * IDV, (int)k);
+    for (k = 0; k < 6; k++) qgpu_st16(shmem + NAT_IDX_OFF + k * 2, quad_idx[k]);
+    n = nat_desc_fixed(shmem, QGPU_BUF_SHMEM, NSH_OFF, IDV);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF102030, 1.0f);
+    draw_native(&e, QGPU_PRIM_MODE_TRIANGLES, 6, QGPU_BUF_SHMEM, NAT_IDX_OFF, QGPU_IDX_U16, 0,
+                n, NAT_DESC_OFF);
+    readback_cmd(&e, 1);
+    NSH_RUN();
+    NSH_SAME(ref);
+    NSH_VB();
+    CHECK(st == QGPU_ST_OK && same && vsame,
+          "(b) entrelacés dans BAR0 : sommets et indices remis au backend identiques à l'octet, "
+          "même image (st %u pc %u)", st, c->status_pc);
+
+    /* (c) la voie v18 (tampon hôte) donne la même chose : témoin */
+    n = nat_desc_fixed(shmem, 20, 0, IDV);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF102030, 1.0f);
+    draw_native(&e, QGPU_PRIM_MODE_TRIANGLES, 6, QGPU_BUF_SHMEM, NAT_IDX_OFF, QGPU_IDX_U16, 0,
+                n, NAT_DESC_OFF);
+    readback_cmd(&e, 1);
+    NSH_RUN();
+    NSH_SAME(ref);
+    NSH_VB();
+    CHECK(st == QGPU_ST_OK && same && vsame, "(c) témoin v18, tampon hôte : identique (st %u)", st);
+
+    /* (d) tableaux séparés, comme glVertexPointer / glColorPointer /
+       glTexCoordPointer sur trois blocs clients recopiés bout à bout : position
+       3f serrée, couleur 4ub à un offset IMPAIR (aucun alignement exigé), st
+       2f au pas de 12 ; position mêlée : tampon hôte, le reste dans BAR0 */
+    {
+        const uint32_t P = NSH_OFF + 0x1000, C = NSH_OFF + 0x2001, S = NSH_OFF + 0x3000;
+        for (k = 0; k < 4; k++) {
+            stf(shmem + P + k * 12, nat_xy[k][0]);
+            stf(shmem + P + k * 12 + 4, nat_xy[k][1]);
+            stf(shmem + P + k * 12 + 8, 0.0f);
+            memcpy(shmem + C + k * 4, nat_rgba[k], 4);
+            stf(shmem + S + k * 12, nat_st[k][0]);
+            stf(shmem + S + k * 12 + 4, nat_st[k][1]);
+            qgpu_st32(shmem + S + k * 12 + 8, 0x7FC00000u);   /* bourrage jamais lu */
+        }
+        nat_desc(shmem, 0, QGPU_NA_POSITION, QGPU_BUF_SHMEM, P, 0, QGPU_NT_FLOAT, 3);
+        nat_desc(shmem, 1, QGPU_NA_COLOR, QGPU_BUF_SHMEM, C, 0, QGPU_NT_UBYTE, 4 | QGPU_NA_NORMALIZED);
+        nat_desc(shmem, 2, QGPU_NA_TEX(0), QGPU_BUF_SHMEM, S, 12, QGPU_NT_FLOAT, 2);
+        e.off = e.start = CMD_OFF;
+        clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF102030, 1.0f);
+        draw_native(&e, QGPU_PRIM_MODE_TRIANGLES, 6, QGPU_BUF_SHMEM, NAT_IDX_OFF, QGPU_IDX_U16, 0,
+                    3, NAT_DESC_OFF);
+        readback_cmd(&e, 1);
+        NSH_RUN();
+        NSH_SAME(ref);
+        NSH_VB();
+        CHECK(st == QGPU_ST_OK && same && vsame,
+              "(d) trois tableaux séparés, couleur à offset impair, pas 0 et 12 : identique (st %u)", st);
+        nat_desc(shmem, 0, QGPU_NA_POSITION, 20, 0, IDV, QGPU_NT_FLOAT, 3);
+        e.off = e.start = CMD_OFF;
+        clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF102030, 1.0f);
+        draw_native(&e, QGPU_PRIM_MODE_TRIANGLES, 6, QGPU_BUF_SHMEM, NAT_IDX_OFF, QGPU_IDX_U16, 0,
+                    3, NAT_DESC_OFF);
+        readback_cmd(&e, 1);
+        NSH_RUN();
+        NSH_SAME(ref);
+        NSH_VB();
+        CHECK(st == QGPU_ST_OK && same && vsame,
+              "(d) position dans un tampon hôte, couleur et st dans BAR0 : identique (st %u)", st);
+
+        /* (e) non indexé, premier = 1 : le quad déroulé en 6 sommets après
+           un sommet fou, st en SHORT brut (glTexCoordPointer(2, GL_SHORT)) */
+        {
+            static const int unrolled[6] = { 0, 1, 2, 0, 2, 3 };
+            const uint32_t P2 = NSH_OFF + 0x4000, S2 = NSH_OFF + 0x5000;
+            for (k = 0; k < 7; k++) {
+                int q = k ? unrolled[k - 1] : 0;
+                stf(shmem + P2 + k * 12, k ? nat_xy[q][0] : 1e30f);
+                stf(shmem + P2 + k * 12 + 4, k ? nat_xy[q][1] : 1e30f);
+                stf(shmem + P2 + k * 12 + 8, 0.0f);
+                memcpy(shmem + C + 0x100 + k * 4, nat_rgba[q], 4);
+                qgpu_st16(shmem + S2 + k * 4, (uint16_t)nat_st[q][0]);
+                qgpu_st16(shmem + S2 + k * 4 + 2, (uint16_t)nat_st[q][1]);
+            }
+            v.off = v.start = VTX_OFF;
+            for (k = 0; k < 6; k++) nat_ref_fixed(&v, unrolled[k]);
+            e.off = e.start = CMD_OFF;
+            clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF102030, 1.0f);
+            draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 6, NAT_FMT_FIXED, 6, QGPU_IDX_NONE, 0);
+            readback_cmd(&e, 1);
+            NSH_RUN();
+            for (i = 0; i < W * H; i++) ref4[i] = qgpu_ld32(shmem + RB_OFF + i * 4);
+            {
+                static float vb6[6 * 11];
+                memcpy(vb6, c->vbuf, sizeof(vb6));
+                nat_desc(shmem, 0, QGPU_NA_POSITION, QGPU_BUF_SHMEM, P2, 0, QGPU_NT_FLOAT, 3);
+                nat_desc(shmem, 1, QGPU_NA_COLOR, QGPU_BUF_SHMEM, C + 0x100, 0, QGPU_NT_UBYTE,
+                         4 | QGPU_NA_NORMALIZED);
+                nat_desc(shmem, 2, QGPU_NA_TEX(0), QGPU_BUF_SHMEM, S2, 4, QGPU_NT_SHORT, 2);
+                e.off = e.start = CMD_OFF;
+                clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF102030, 1.0f);
+                draw_native(&e, QGPU_PRIM_MODE_TRIANGLES, 6, 0, 0, QGPU_IDX_NONE, 1, 3, NAT_DESC_OFF);
+                readback_cmd(&e, 1);
+                NSH_RUN();
+                NSH_SAME(ref4);
+                CHECK(st == QGPU_ST_OK && same && memcmp(c->vbuf, vb6, sizeof(vb6)) == 0,
+                      "(e) non indexé, premier = 1 (sommet 0 fou jamais lu), st SHORT : "
+                      "sommets identiques à l'octet, même image (st %u pc %u)", st, c->status_pc);
+            }
+        }
+    }
+
+    /* (i) indexé, `premier` = base des indices : indices 1000..1003, les
+       descripteurs désignent le sommet 1000 (le premier recopié) */
+    for (k = 0; k < 6; k++) qgpu_st16(shmem + NAT_IDX_OFF + k * 2, (uint16_t)(1000 + quad_idx[k]));
+    n = nat_desc_fixed(shmem, QGPU_BUF_SHMEM, NSH_OFF, IDV);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF102030, 1.0f);
+    draw_native(&e, QGPU_PRIM_MODE_TRIANGLES, 6, QGPU_BUF_SHMEM, NAT_IDX_OFF, QGPU_IDX_U16, 1000,
+                n, NAT_DESC_OFF);
+    readback_cmd(&e, 1);
+    NSH_RUN();
+    NSH_SAME(ref);
+    NSH_VB();
+    CHECK(st == QGPU_ST_OK && same && vsame,
+          "(i) premier = 1000, base des indices 1000..1003 : sommets et indices identiques (st %u pc %u)",
+          st, c->status_pc);
+    e.off = e.start = CMD_OFF;
+    draw_native(&e, QGPU_PRIM_MODE_TRIANGLES, 6, QGPU_BUF_SHMEM, NAT_IDX_OFF, QGPU_IDX_U16, 1001,
+                n, NAT_DESC_OFF);
+    NSH_RUN();
+    CHECK(st == QGPU_ST_BAD_ARG, "(i) un indice sous la base : BAD_ARG (st %u)", st);
+    c->caps &= ~(uint32_t)QGPU_CAP_GEOM_HOST;
+    e.off = e.start = CMD_OFF;
+    draw_native(&e, QGPU_PRIM_MODE_TRIANGLES, 6, QGPU_BUF_SHMEM, NAT_IDX_OFF, QGPU_IDX_U16, 1000,
+                n, NAT_DESC_OFF);
+    NSH_RUN();
+    c->caps = saved_caps;
+    CHECK(st == QGPU_ST_BAD_ARG, "(i) sans la capacité, premier ≠ 0 indexé : BAD_ARG, comme en v18 (st %u)", st);
+    for (k = 0; k < 6; k++) qgpu_st16(shmem + NAT_IDX_OFF + k * 2, quad_idx[k]);
+
+    /* (f) bornes : sur la fenêtre entière, refus non fatals */
+    {
+        uint32_t ok_all = 1;
+        struct { const char *what; uint32_t off; uint32_t want; } cas[] = {
+            /* dernier sommet (hi = 3) : off + 3 × 60 + 12 octets de position */
+            { "dernier octet exact",        SHMEM_SIZE - 3 * IDV - 12, QGPU_ST_OK },
+            { "un octet au-delà",           SHMEM_SIZE - 3 * IDV - 11, QGPU_ST_BAD_ARG },
+            { "offset au-delà de BAR0",     SHMEM_SIZE + 16,           QGPU_ST_BAD_ARG },
+            { "offset + pas × hi débordant 32 bits", 0xFFFFFF00u,      QGPU_ST_BAD_ARG },
+        };
+        for (j = 0; j < sizeof(cas) / sizeof(cas[0]); j++) {
+            nat_desc(shmem, 0, QGPU_NA_POSITION, QGPU_BUF_SHMEM, cas[j].off, IDV, QGPU_NT_FLOAT, 3);
+            e.off = e.start = CMD_OFF;
+            draw_native(&e, QGPU_PRIM_MODE_TRIANGLES, 6, QGPU_BUF_SHMEM, NAT_IDX_OFF, QGPU_IDX_U16, 0,
+                        1, NAT_DESC_OFF);
+            clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000 | (j + 1), 1.0f);
+            readback_cmd(&e, 1);
+            NSH_RUN();
+            if (st != cas[j].want || c->status_pc != 0 || px(shmem, 32, 32) != j + 1) {
+                ok_all = 0;
+                printf("  FAIL borne « %s » : st %u pc %u px %06x\n", cas[j].what, st,
+                       c->status_pc, px(shmem, 32, 32));
+                failures++;
+            }
+        }
+        CHECK(ok_all, "(f) bornes sur BAR0 : dernier octet accepté, au-delà BAD_ARG non fatal");
+
+        /* (g) device sans la capacité : BAD_ARG, non fatal */
+        c->caps &= ~(uint32_t)QGPU_CAP_GEOM_HOST;
+        n = nat_desc_fixed(shmem, QGPU_BUF_SHMEM, NSH_OFF, IDV);
+        e.off = e.start = CMD_OFF;
+        draw_native(&e, QGPU_PRIM_MODE_TRIANGLES, 6, QGPU_BUF_SHMEM, NAT_IDX_OFF, QGPU_IDX_U16, 0,
+                    n, NAT_DESC_OFF);
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000042, 1.0f);
+        readback_cmd(&e, 1);
+        NSH_RUN();
+        c->caps = saved_caps;
+        CHECK(st == QGPU_ST_BAD_ARG && c->status_pc == 0 && px(shmem, 32, 32) == 0x42,
+              "(g) sans QGPU_CAP_GEOM_HOST : BAD_ARG non fatal (st %u pc %u)", st, c->status_pc);
+    }
+
+    /* (h) sous programme de sommets : génériques 8..11 d'idDrawVert lus dans
+       BAR0 = mêmes génériques lus dans le tampon hôte (backend gl) */
+    if (!(c->caps & QGPU_CAP_PROGRAMS)) {
+        printf("  –    (h) programmes non tenus par ce backend (épreuve gl)\n");
+    } else {
+        static const char vp[] =
+            "!!ARBvp1.0\n"
+            "PARAM mvp[4] = { program.env[0..3] };\n"
+            "TEMP t;\n"
+            "DP4 result.position.x, mvp[0], vertex.position;\n"
+            "DP4 result.position.y, mvp[1], vertex.position;\n"
+            "DP4 result.position.z, mvp[2], vertex.position;\n"
+            "DP4 result.position.w, mvp[3], vertex.position;\n"
+            "MOV t.x, vertex.attrib[8].x;\n"
+            "ADD t.y, vertex.attrib[9].x, vertex.attrib[8].z;\n"
+            "MUL t.z, vertex.attrib[10].y, vertex.attrib[10].w;\n"
+            "MUL t.w, vertex.attrib[8].w, vertex.attrib[11].z;\n"
+            "MOV result.color, t;\n"
+            "END\n";
+        static uint32_t refp[W * H];
+        static float vbp[4 * 32];
+        float rows[16];
+        uint32_t arena = ARENA_OFF, words;
+        mat_rows(m, rows);
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_TEXTURE, 0);
+        prog_create(&e, 3, QGPU_PT_VERTEX);
+        prog_string(&e, shmem, &arena, 3, vp);
+        prog_params(&e, shmem, &arena, QGPU_OP_PROG_ENV, QGPU_PT_VERTEX, 0, 4, rows);
+        prog_bind(&e, QGPU_PT_VERTEX, 3);
+        state(&e, QGPU_SK_VERTEX_PROGRAM, 1);
+        NSH_RUN();
+        for (j = 0; j < 2; j++) {
+            uint32_t b = j ? QGPU_BUF_SHMEM : 20, o = j ? NSH_OFF : 0;
+            nat_desc(shmem, 0, QGPU_NA_POSITION, b, o, IDV, QGPU_NT_FLOAT, 3);
+            nat_desc(shmem, 1, QGPU_NA_GEN(8), b, o + 12, IDV, QGPU_NT_FLOAT, 2);
+            nat_desc(shmem, 2, QGPU_NA_GEN(9), b, o + 20, IDV, QGPU_NT_FLOAT, 3);
+            nat_desc(shmem, 3, QGPU_NA_GEN(10), b, o + 32, IDV, QGPU_NT_FLOAT, 3);
+            nat_desc(shmem, 4, QGPU_NA_GEN(11), b, o + 44, IDV, QGPU_NT_FLOAT, 3);
+            nat_desc(shmem, 5, QGPU_NA_COLOR, b, o + 56, IDV, QGPU_NT_UBYTE, 4 | QGPU_NA_NORMALIZED);
+            e.off = e.start = CMD_OFF;
+            clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF102030, 1.0f);
+            draw_native(&e, QGPU_PRIM_MODE_TRIANGLES, 6, QGPU_BUF_SHMEM, NAT_IDX_OFF, QGPU_IDX_U16, 0,
+                        6, NAT_DESC_OFF);
+            readback_cmd(&e, 1);
+            NSH_RUN();
+            words = (uint32_t)QGPU_VF_WORDS((uint32_t)QGPU_VF_POS(3) | QGPU_VF_COLOR |
+                                            (uint32_t)QGPU_VF_GEN(8) | (uint32_t)QGPU_VF_GEN(9) |
+                                            (uint32_t)QGPU_VF_GEN(10) | (uint32_t)QGPU_VF_GEN(11));
+            if (!j) {
+                for (i = 0; i < W * H; i++) refp[i] = qgpu_ld32(shmem + RB_OFF + i * 4);
+                memcpy(vbp, c->vbuf, sizeof(float) * 4 * words);
+                CHECK(st == QGPU_ST_OK && px(shmem, 32, 32) != 0x102030,
+                      "(h) témoin sous programme, tampon hôte : %08x (st %u pc %u)",
+                      pxa(shmem, 32, 32), st, c->status_pc);
+            } else {
+                NSH_SAME(refp);
+                CHECK(st == QGPU_ST_OK && same && memcmp(c->vbuf, vbp, sizeof(float) * 4 * words) == 0,
+                      "(h) génériques 8 (2f), 9..11 (3f) et couleur 4ub dans BAR0 : "
+                      "sommets identiques à l'octet, même image (st %u)", st);
+            }
+        }
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_VERTEX_PROGRAM, 0);
+        NSH_RUN();
+    }
+#undef NSH_SAME
+#undef NSH_VB
+#undef NSH_RUN
+}
+
+/* ── A4 : DRAW_RAW_SANE — le tri des sommets fous passe à l'hôte ──
+ *
+ * Référence : raw_scan_nan / raw_fix_nan du plugin, recopiés ici à la lettre
+ * (guest/gldriver/pomppc_accel.c), appliqués à une COPIE des mots dans BAR0,
+ * puis DRAW_RAW sur ce qu'ils laissent — c'est le flux d'avant. Épreuve :
+ * DRAW_RAW_SANE sur les mots d'origine remet au backend les mêmes sommets et
+ * les mêmes indices, à l'octet, et donne la même image ; sur des lots tirés au
+ * hasard (sommets NaN, infinis, ≥ 1e9, w ≈ 0, indices hors bornes, modes). */
+#define RS_SRC   0x70000u               /* sommets d'origine (BAR0) */
+#define RS_ISRC  0x78000u               /* indices d'origine */
+#define RS_VREF  0x80000u               /* copie filtrée par la référence */
+#define RS_IREF  0x88000u
+static uint32_t rs_seed = 12345;
+static uint32_t rs_rand(void) { rs_seed = rs_seed * 1103515245u + 12345u; return rs_seed >> 8; }
+
+static int rs_insane(uint32_t u) { return (u & 0x7fffffffu) >= 0x4e6e6b28u; }
+
+/* raw_scan_nan + raw_fix_nan du plugin (u16 : indices de la fusion) ; rend
+   0 = rien à soumettre, sinon *count et *nv mis à jour */
+static int rs_guest_fix(uint8_t *w, uint32_t nv, uint32_t words, uint32_t fmt, int keep_w0,
+                        uint32_t mode, uint8_t *idx16, uint32_t *count, uint32_t *nvo)
+{
+    static uint8_t bad[4096];
+    uint32_t i, j, nbad = 0, o = 0;
+    for (i = 0; i < nv; i++) {
+        uint8_t b = 0;
+        uint8_t *v = w + i * words * 4;
+        if (!keep_w0 && QGPU_VF_POS_COUNT(fmt) == 4 &&
+            (qgpu_ld32(v + 12) & 0x7fffffffu) < 0x358637bdu)
+            b = 1;
+        for (j = 0; j < words; j++)
+            if (rs_insane(qgpu_ld32(v + j * 4))) {
+                qgpu_st32(v + j * 4, 0);
+                b = 1;
+            }
+        bad[i] = b;
+        nbad += b;
+    }
+    *nvo = nv;
+    if (!nbad)
+        return 1;
+    if (idx16 && mode == QGPU_PRIM_MODE_TRIANGLES) {
+        for (i = 0; i + 2 < *count; i += 3) {
+            uint32_t a = qgpu_ld16(idx16 + i * 2), b0 = qgpu_ld16(idx16 + i * 2 + 2),
+                     c2 = qgpu_ld16(idx16 + i * 2 + 4);
+            if (a < nv && b0 < nv && c2 < nv && !bad[a] && !bad[b0] && !bad[c2]) {
+                qgpu_st16(idx16 + o * 2, (uint16_t)a);
+                qgpu_st16(idx16 + o * 2 + 2, (uint16_t)b0);
+                qgpu_st16(idx16 + o * 2 + 4, (uint16_t)c2);
+                o += 3;
+            }
+        }
+        *count = o;
+        return o > 0;
+    }
+    if (!idx16 && mode == QGPU_PRIM_MODE_TRIANGLES) {
+        for (i = 0; i + 2 < nv; i += 3)
+            if (!bad[i] && !bad[i + 1] && !bad[i + 2]) {
+                if (o != i)
+                    memmove(w + o * words * 4, w + i * words * 4, words * 12);
+                o += 3;
+            }
+        *count = o;
+        *nvo = o;
+        return o > 0;
+    }
+    return 0;
+}
+
+static void draw_raw_at2(Emit *e, uint32_t op, uint32_t mode, uint32_t count, uint32_t voff,
+                         uint32_t fmt, uint32_t nverts, uint32_t itype, uint32_t ioff,
+                         int with_flags, uint32_t flags)
+{
+    emit(e, QGPU_CMD_HDR(op, with_flags ? QGPU_LEN_DRAW_RAW_SANE : QGPU_LEN_DRAW_RAW));
+    emit(e, mode); emit(e, count); emit(e, voff); emit(e, 0); emit(e, fmt);
+    emit(e, ioff); emit(e, itype); emit(e, 0); emit(e, nverts);
+    if (with_flags)
+        emit(e, flags);
+}
+
+static void run_raw_sane(QgpuCore *c, uint8_t *shmem)
+{
+    static uint32_t img_ref[W * H];
+    static float vb_ref[4096 * 16];
+    static uint32_t ib_ref[4096];
+    Emit e;
+    float m[16], mv[16];
+    uint32_t st, i, iter, n_ok = 0, n_drawn = 0, n_dropped = 0, n_filtered = 0, n_bad = 0;
+    const uint32_t saved_caps = c->caps;
+    int fail_told = 0;
+
+    printf("-- A4 : DRAW_RAW_SANE (tri des sommets fous par l'hôte) --\n");
+    CHECK(QGPU_OP_DRAW_RAW_SANE == 0x0090 && QGPU_LEN_DRAW_RAW_SANE == QGPU_LEN_DRAW_RAW + 1 &&
+          QGPU_CAP_GEOM_HOST == 0x00020000 && (c->caps & QGPU_CAP_GEOM_HOST),
+          "opcode 0x%x longueur %d, capacité annoncée (caps 0x%x)", QGPU_OP_DRAW_RAW_SANE,
+          QGPU_LEN_DRAW_RAW_SANE, c->caps);
+
+    qgpu_core_reset(c);
+    e.base = shmem;
+    mat_ortho_px(m);
+    mat_identity(mv);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+    emit(&e, 1); emit(&e, W); emit(&e, H); emit(&e, QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF)); emit(&e, 1);
+    set_matrix(&e, QGPU_MTX_PROJECTION, m);
+    set_matrix(&e, QGPU_MTX_MODELVIEW, mv);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "contexte et surface (st %u)", st);
+
+    for (iter = 0; iter < 400; iter++) {
+        /* format : position 4 (w = 1) ou 3, couleur, parfois texcoord 0
+           (sans texture : l'unité est éteinte, les mots comptent quand même) */
+        uint32_t pos = (rs_rand() % 4) ? 4 : 3;
+        uint32_t fmt = (uint32_t)QGPU_VF_POS(pos) | QGPU_VF_COLOR |
+                       ((rs_rand() & 1) ? (uint32_t)QGPU_VF_TEX(0) : 0);
+        uint32_t words = (uint32_t)QGPU_VF_WORDS(fmt);
+        uint32_t nv = 3 + rs_rand() % 60, mode, indexed, count, nvo, cnt_ref, j;
+        uint32_t keep = rs_rand() % 5 == 0 ? QGPU_RAWS_KEEP_W0 : 0;
+        uint32_t nbad_want = rs_rand() % 3 == 0 ? 0 : 1 + rs_rand() % 4;
+        int drew, same = 1, vsame = 1;
+        uint32_t rmode = rs_rand() % 10;
+        mode = rmode < 6 ? QGPU_PRIM_MODE_TRIANGLES :
+               rmode < 8 ? QGPU_PRIM_MODE_TRIANGLE_STRIP : QGPU_PRIM_MODE_TRIANGLE_FAN;
+        indexed = rs_rand() & 1;
+        if (!indexed && mode == QGPU_PRIM_MODE_TRIANGLES)
+            nv -= nv % 3;
+        count = indexed ? 3 * (1 + rs_rand() % 40) + (rs_rand() % 7 == 0 ? rs_rand() % 3 : 0) : nv;
+        for (i = 0; i < nv; i++) {
+            uint8_t *v = shmem + RS_SRC + i * words * 4;
+            stf(v, (float)(rs_rand() % 80) - 8.0f);
+            stf(v + 4, (float)(rs_rand() % 80) - 8.0f);
+            stf(v + 8, 0.0f);
+            if (pos == 4) stf(v + 12, 1.0f);
+            for (j = pos; j < words; j++) stf(v + j * 4, (float)(rs_rand() % 256) / 255.0f);
+        }
+        for (j = 0; j < nbad_want; j++) {
+            uint8_t *v = shmem + RS_SRC + (rs_rand() % nv) * words * 4;
+            static const uint32_t fous[5] = { 0x7FC00000u, 0x7F800000u, 0xFF800000u,
+                                              0x4e6e6b28u, 0xCE6E6B29u };
+            uint32_t kind = rs_rand() % 6;
+            if (kind == 5 && pos == 4)
+                stf(v + 12, (rs_rand() & 1) ? 0.0f : 5e-7f);      /* w ≈ 0 */
+            else
+                qgpu_st32(v + (rs_rand() % words) * 4, fous[kind % 5]);
+        }
+        if (indexed) {
+            for (i = 0; i < count; i++) {
+                /* rarement : un indice hors bornes */
+                uint32_t x = rs_rand() % 41 == 0 ? nv + rs_rand() % 3 : rs_rand() % nv;
+                qgpu_st16(shmem + RS_ISRC + i * 2, (uint16_t)x);
+            }
+        }
+        /* référence : filtre invité sur une copie, puis DRAW_RAW */
+        memcpy(shmem + RS_VREF, shmem + RS_SRC, nv * words * 4);
+        if (indexed)
+            memcpy(shmem + RS_IREF, shmem + RS_ISRC, count * 2);
+        cnt_ref = count;
+        drew = rs_guest_fix(shmem + RS_VREF, nv, words, fmt, keep != 0, mode,
+                            indexed ? shmem + RS_IREF : NULL, &cnt_ref, &nvo);
+        e.off = e.start = CMD_OFF;
+        clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF102030, 1.0f);
+        if (drew)
+            draw_raw_at2(&e, QGPU_OP_DRAW_RAW, mode, cnt_ref, RS_VREF, fmt, nvo,
+                         indexed ? QGPU_IDX_U16 : QGPU_IDX_NONE, indexed ? RS_IREF : 0, 0, 0);
+        readback_cmd(&e, 1);
+        {
+            uint32_t st_ref, pc_ref;
+            if (drew && c->vbuf) c->vbuf[0] = -12345.0f;
+            st_ref = qgpu_core_execute(c, CMD_OFF, e.off - e.start); pc_ref = c->status_pc;
+            for (i = 0; i < W * H; i++) img_ref[i] = qgpu_ld32(shmem + RB_OFF + i * 4);
+            if (drew && st_ref == QGPU_ST_OK) {
+                memcpy(vb_ref, c->vbuf, (size_t)nvo * words * sizeof(float));
+                if (indexed) memcpy(ib_ref, c->ibuf, cnt_ref * sizeof(uint32_t));
+            }
+            /* nouvelle voie : DRAW_RAW_SANE sur les mots d'origine */
+            e.off = e.start = CMD_OFF;
+            clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF102030, 1.0f);
+            draw_raw_at2(&e, QGPU_OP_DRAW_RAW_SANE, mode, count, RS_SRC, fmt, nv,
+                         indexed ? QGPU_IDX_U16 : QGPU_IDX_NONE, indexed ? RS_ISRC : 0, 1, keep);
+            readback_cmd(&e, 1);
+            if (c->vbuf) c->vbuf[0] = -12345.0f;
+            st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+            for (i = 0; i < W * H; i++)
+                if (qgpu_ld32(shmem + RB_OFF + i * 4) != img_ref[i]) { same = 0; break; }
+            if (drew && st_ref == QGPU_ST_OK)
+                vsame = memcmp(vb_ref, c->vbuf, (size_t)nvo * words * sizeof(float)) == 0 &&
+                        (!indexed || memcmp(ib_ref, c->ibuf, cnt_ref * sizeof(uint32_t)) == 0);
+            if (st == st_ref && c->status_pc == pc_ref && same && vsame) {
+                n_ok++;
+                n_drawn += drew && st_ref == QGPU_ST_OK;
+                n_dropped += !drew;
+                n_filtered += drew && (cnt_ref != count || nvo != nv);
+                n_bad += st_ref != QGPU_ST_OK;
+            } else if (fail_told++ < 5) {
+                printf("  FAIL tirage %u : mode %u %s n %u nv %u fmt %x keep %u : st %u/%u pc %u image %s sommets %s\n",
+                       iter, mode, indexed ? "indexé" : "non indexé", count, nv, fmt, keep,
+                       st_ref, st, c->status_pc, same ? "=" : "≠", vsame ? "=" : "≠");
+            }
+        }
+    }
+    if (fail_told)
+        failures++;
+    CHECK(n_ok == 400,
+          "400 lots tirés : %u identiques (image, sommets et indices à l'octet, statut) — "
+          "%u dessinés dont %u filtrés, %u jetés, %u refusés par les deux voies",
+          n_ok, n_drawn, n_filtered, n_dropped, n_bad);
+    CHECK(n_filtered > 20 && n_dropped > 20 && n_drawn > 100,
+          "le tirage couvre filtre, rejet et dessin intact");
+
+    /* drapeau réservé, génériques déclarés courts, device sans la capacité */
+    e.off = e.start = CMD_OFF;
+    draw_raw_at2(&e, QGPU_OP_DRAW_RAW_SANE, QGPU_PRIM_MODE_TRIANGLES, 3, RS_SRC,
+                 (uint32_t)QGPU_VF_POS(3), 3, QGPU_IDX_NONE, 0, 1, 2);
+    clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000011, 1.0f);
+    readback_cmd(&e, 1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG && c->status_pc == 0 && px(shmem, 32, 32) == 0x11,
+          "drapeau réservé : BAD_ARG non fatal (st %u)", st);
+    c->caps &= ~(uint32_t)QGPU_CAP_GEOM_HOST;
+    e.off = e.start = CMD_OFF;
+    draw_raw_at2(&e, QGPU_OP_DRAW_RAW_SANE, QGPU_PRIM_MODE_TRIANGLES, 3, RS_SRC,
+                 (uint32_t)QGPU_VF_POS(3), 3, QGPU_IDX_NONE, 0, 1, 0);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    c->caps = saved_caps;
+    CHECK(st == QGPU_ST_BAD_OPCODE, "sans QGPU_CAP_GEOM_HOST : BAD_OPCODE, comme un device d'avant (st %u)", st);
 }
 
 static void run_v15(QgpuCore *c, uint8_t *shmem)
@@ -7098,6 +7684,252 @@ static void run_v21_dp(QgpuCore *c, uint8_t *shmem)
           "tel(s) quel(s)), compilées et liées par l'hôte (%u refus)", n, npp_kept, bad);
     free(body);
     free(perms);
+}
+
+/* ── A4 : bloc d'état (STATE_BLOCK) ─────────────────────────────────────────
+ *
+ * Le cœur tire les clés de l'état brut de GLEngine. L'équivalence avec
+ * compute_state du plugin se prouve dans l'invité (drapeau de contrôle
+ * F_CHECK sur les jeux et les scènes gltest) ; ici : le contrat (longueurs,
+ * drapeaux, refus), les fenêtres, quelques valeurs calculées à la main, les
+ * clés chaudes jamais touchées, seules les clés changées posées, l'arrêt au
+ * premier refus, le contrôle. */
+typedef struct { uint32_t a[QGPU_SB_HDR + QGPU_SB_WORDS]; } SbBlk;
+
+/* index du mot de l'état de GLEngine `off` dans les fenêtres, -1 hors fenêtre */
+static int sb_idx(uint32_t off)
+{
+    static const uint32_t wo[4] = { QGPU_SB_W0_OFF, QGPU_SB_W1_OFF, QGPU_SB_W2_OFF, QGPU_SB_W3_OFF };
+    static const uint32_t wn[4] = { QGPU_SB_W0_N, QGPU_SB_W1_N, QGPU_SB_W2_N, QGPU_SB_W3_N };
+    uint32_t i, base = 0;
+    for (i = 0; i < 4; i++) {
+        if (off >= wo[i] && off < wo[i] + 4 * wn[i])
+            return (int)(QGPU_SB_HDR + base + (off - wo[i]) / 4);
+        base += wn[i];
+    }
+    return -1;
+}
+
+static void sb_b8(SbBlk *b, uint32_t off, uint32_t v)
+{
+    int i = sb_idx(off & ~3u);
+    unsigned sh = 8 * (3 - (off & 3));
+    if (i >= 0) b->a[i] = (b->a[i] & ~(0xFFu << sh)) | ((v & 0xFF) << sh);
+}
+
+static void sb_b16(SbBlk *b, uint32_t off, uint32_t v)
+{
+    int i = sb_idx(off & ~3u);
+    unsigned sh = 8 * (2 - (off & 2));
+    if (i >= 0) b->a[i] = (b->a[i] & ~(0xFFFFu << sh)) | ((v & 0xFFFF) << sh);
+}
+
+static void sb_b32(SbBlk *b, uint32_t off, uint32_t v)
+{
+    int i = sb_idx(off);
+    if (i >= 0) b->a[i] = v;
+}
+
+static uint32_t sb_send(QgpuCore *c, uint8_t *shmem, const SbBlk *b, const uint32_t *chk)
+{
+    Emit e;
+    uint32_t i;
+    e.base = shmem;
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_STATE_BLOCK, chk ? QGPU_LEN_STATE_BLOCK_CHECK : QGPU_LEN_STATE_BLOCK));
+    for (i = 0; i < QGPU_SB_HDR + QGPU_SB_WORDS; i++)
+        emit(&e, b->a[i]);
+    for (i = 0; chk && i < QGPU_SK_COUNT; i++)
+        emit(&e, chk[i]);
+    return qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+}
+
+static void run_stblock(QgpuCore *c, uint8_t *shmem)
+{
+    SbBlk b;
+    Emit e;
+    uint32_t st, v[QGPU_SK_COUNT], ref[QGPU_SK_COUNT], sets;
+    uint64_t diff;
+    const uint32_t all = QGPU_SB_F_ALL & ~QGPU_SB_F_CHECK;
+    unsigned k;
+    printf("-- A4 : bloc d'état (STATE_BLOCK) --\n");
+    CHECK(QGPU_OP_STATE_BLOCK == 0x0080 && QGPU_CAP_STATE_BLOCK == 0x8000 &&
+          QGPU_SB_WORDS == 104 && QGPU_LEN_STATE_BLOCK == 109 &&
+          QGPU_LEN_STATE_BLOCK_CHECK == 109 + QGPU_SK_COUNT &&
+          QGPU_LEN_STATE_BLOCK_CHECK - 1 <= QGPU_MAX_CMD_ARGS_LONG, "contrat A4");
+    CHECK(c->caps & QGPU_CAP_STATE_BLOCK, "A4 : capacité annoncée par le cœur");
+    /* chaque offset lu est dans une fenêtre (même liste que le cœur) */
+    {
+        static const uint32_t offs[] = { 0x24ad, 0x24ae, 0x2d44, 0x2d46, 0x2d48, 0x2d4a, 0x2d4b,
+            0x2d4c, 0x2d4d, 0x2d60, 0x2d64, 0x2d66, 0x2d68, 0x2d6e, 0x2d70, 0x2d7c, 0x2d80, 0x2d82,
+            0x2d84, 0x2db4, 0x2dc4, 0x2dc8, 0x2de0, 0x2dec, 0x2df0, 0x2df8, 0x2e04, 0x2e0a, 0x2e0b,
+            0x2e20, 0x2e26, 0x2e28, 0x2e2c, 0x2e30, 0x2e33, 0x2e38, 0x2e40, 0x2e43, 0x2e44,
+            0x30bc, 0x30c0, 0x30c4, 0x30c8, 0x30cc, 0x30d4, 0x3168, 0x316c, 0x3170, 0x3172,
+            0x3174, 0x3176, 0x3178, 0x317a, 0x317b, 0x317c, 0x317d, 0x3180, 0x318c, 0x3190,
+            0x3194, 0x3198, 0x319c, 0x31a0, 0x31a2, 0x31a4, 0x31a6, 0x31c0 };
+        unsigned i, bad = 0;
+        for (i = 0; i < sizeof(offs) / sizeof(offs[0]); i++)
+            if (sb_idx(offs[i] & ~3u) < 0) bad++;
+        CHECK(!bad, "A4 : %u offset(s) de GLEngine hors des fenêtres", bad);
+    }
+
+    /* sans contexte, longueurs et drapeaux */
+    qgpu_core_reset(c);
+    memset(&b, 0, sizeof(b));
+    b.a[0] = all | QGPU_SB_F_RAW;
+    b.a[1] = W; b.a[2] = H;
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_NO_CTX, "A4 sans contexte : %u", st);
+    st = v21_setup(c, shmem);
+    CHECK(st == QGPU_ST_OK, "A4 contexte : %u", st);
+    e.base = shmem;
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_STATE_BLOCK, QGPU_LEN_STATE_BLOCK - 1));
+    for (k = 0; k < QGPU_LEN_STATE_BLOCK - 2; k++) emit(&e, 0);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "A4 longueur fausse : %u", st);
+    b.a[0] = all | 0x10;
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_BAD_ARG, "A4 drapeau inconnu : %u", st);
+    b.a[0] = all | QGPU_SB_F_CHECK;
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_BAD_ARG, "A4 F_CHECK sans vecteur : %u", st);
+    b.a[0] = all;
+    b.a[1] = QGPU_MAX_SURF_DIM + 1;
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_BAD_ARG, "A4 largeur hors bornes : %u", st);
+    {   /* sans la capacité : opcode inconnu */
+        uint32_t caps = c->caps;
+        c->caps &= ~QGPU_CAP_STATE_BLOCK;
+        b.a[1] = W;
+        st = sb_send(c, shmem, &b, NULL);
+        c->caps = caps;
+        CHECK(st == QGPU_ST_BAD_OPCODE, "A4 sans capacité : %u", st);
+    }
+
+    /* état brut tout à zéro (sauf l'atténuation de point 1, 0, 0, que le
+       backend de référence exige) : valeurs neutres de compute_state */
+    memset(&b, 0, sizeof(b));
+    b.a[0] = all | QGPU_SB_F_RAW;
+    b.a[1] = W; b.a[2] = H;
+    sb_b32(&b, 0x30cc, qgpu_f2u(1.0f));
+    /* clés chaudes posées avant : le bloc ne doit pas y toucher */
+    e.off = e.start = CMD_OFF;
+    state(&e, QGPU_SK_UNIT(5) + QGPU_SK_U_ENV_MODE, 0x1E01);
+    state(&e, QGPU_SK_COMBINE(2), QGPU_COMBINE_DEFAULT);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "A4 clés chaudes : %u", st);
+    st = sb_send(c, shmem, &b, NULL);
+    {
+        const uint32_t *s = c->ctx[0].st.v;
+        CHECK(st == QGPU_ST_OK && s[QGPU_SK_DEPTH_TEST] == 0 && s[QGPU_SK_DEPTH_FUNC] == 0x0201 &&
+              s[QGPU_SK_DEPTH_WRITE] == 0 && s[QGPU_SK_COLOR_MASK] == 0 &&
+              s[QGPU_SK_BLEND_SRC_RGB] == 1 && s[QGPU_SK_BLEND_EQ_A] == 0x8006 &&
+              s[QGPU_SK_ALPHA_FUNC] == 0x0207 && s[QGPU_SK_STENCIL_FUNC] == 0x0207 &&
+              s[QGPU_SK_STENCIL_OP_ZPASS] == 0x1E00 && s[QGPU_SK_STENCIL_VALUE_MASK] == 0xFF &&
+              s[QGPU_SK_LINE_WIDTH] == qgpu_f2u(1.0f) && s[QGPU_SK_POINT_SIZE] == qgpu_f2u(1.0f) &&
+              s[QGPU_SK_SHADE_MODEL] == 0x1D01 && s[QGPU_SK_CULL_MODE] == 0x0405 &&
+              s[QGPU_SK_FRONT_FACE] == 0x0901 && s[QGPU_SK_COLOR_MAT_FACE] == 0x0408 &&
+              s[QGPU_SK_COLOR_MAT_MODE] == 0x1602 && s[QGPU_SK_COLOR_CONTROL] == 0x81F9 &&
+              s[QGPU_SK_FOG_DENSITY] == qgpu_f2u(0.0f) && s[QGPU_SK_LOGIC_OP_MODE] == QGPU_LO_COPY &&
+              s[QGPU_SK_POLYGON_MODE_BACK] == QGPU_POLY_FILL && s[QGPU_SK_LINE_STIPPLE_FACTOR] == 1 &&
+              s[QGPU_SK_POINT_SIZE_MAX] == qgpu_f2u(64.0f) && s[QGPU_SK_COLOR_SUM] == QGPU_CSUM_OFF &&
+              s[QGPU_SK_UNIT(5) + QGPU_SK_U_ENV_MODE] == 0x1E01 &&
+              s[QGPU_SK_COMBINE(2)] == QGPU_COMBINE_DEFAULT,
+              "A4 état neutre : %u (profondeur %x, point max %x)", st,
+              s[QGPU_SK_DEPTH_FUNC], s[QGPU_SK_POINT_SIZE_MAX]);
+    }
+    /* même bloc : aucune clé posée */
+    sets = (uint32_t)c->sb_sets;
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_OK && c->sb_sets == sets, "A4 bloc identique : %u clés posées",
+          (unsigned)(c->sb_sets - sets));
+
+    /* valeurs calculées à la main */
+    sb_b8(&b, 0x2dc8, 1); sb_b16(&b, 0x2dc4, 0x0203);             /* profondeur LEQUAL */
+    sb_b8(&b, 0x2e44, 1);
+    sb_b8(&b, 0x2e40, 1); sb_b8(&b, 0x2e42, 1);                   /* R et B */
+    sb_b8(&b, 0x2d84, 1); sb_b16(&b, 0x2d68, 0x0302); sb_b16(&b, 0x2d6a, 0x0303);
+    sb_b16(&b, 0x2d6c, 1); sb_b16(&b, 0x2d6e, 0); sb_b16(&b, 0x2d80, 0x8006); sb_b16(&b, 0x2d82, 0x800A);
+    sb_b8(&b, 0x3190, 1);                                          /* ciseaux 8,4 16×10 */
+    sb_b32(&b, 0x3180, 8); sb_b32(&b, 0x3184, 4); sb_b32(&b, 0x3188, 16); sb_b32(&b, 0x318c, 10);
+    sb_b32(&b, 0x31c0, 1); b.a[3] = 8; b.a[0] |= QGPU_SB_F_STENCIL; /* stencil */
+    sb_b16(&b, 0x31a0, 0x0202); sb_b32(&b, 0x319c, 0x1FF); sb_b32(&b, 0x3198, 0x0F);
+    sb_b16(&b, 0x31a2, 0x1E01); sb_b16(&b, 0x31a4, 0x1E02); sb_b16(&b, 0x31a6, 0x8507);
+    sb_b8(&b, 0x2e0a, 1);                                          /* brouillard 0,5 0,25 1 1 */
+    sb_b32(&b, 0x2de0, qgpu_f2u(0.5f)); sb_b32(&b, 0x2de4, qgpu_f2u(0.25f));
+    sb_b32(&b, 0x2de8, qgpu_f2u(1.0f)); sb_b32(&b, 0x2dec, qgpu_f2u(1.0f));
+    sb_b32(&b, 0x2e20, qgpu_f2u(2.6f));                            /* ligne 2,6 → 3 */
+    sb_b8(&b, 0x317d, 1); sb_b32(&b, 0x3168, qgpu_f2u(1e9f));      /* décalage borné */
+    sb_b16(&b, 0x3170, QGPU_POLY_LINE);                            /* brut : LINE */
+    b.a[QGPU_SB_HDR + QGPU_SB_WORDS - 8 + 6] = qgpu_f2u(40.0f);    /* biais d'unité 6 */
+    st = sb_send(c, shmem, &b, NULL);
+    {
+        const uint32_t *s = c->ctx[0].st.v;
+        CHECK(st == QGPU_ST_OK && s[QGPU_SK_DEPTH_TEST] == 1 && s[QGPU_SK_DEPTH_FUNC] == 0x0203 &&
+              s[QGPU_SK_DEPTH_WRITE] == 1 && s[QGPU_SK_COLOR_MASK] == 5 && s[QGPU_SK_BLEND] == 1 &&
+              s[QGPU_SK_BLEND_SRC_RGB] == 0x0302 && s[QGPU_SK_BLEND_EQ_A] == 0x800A &&
+              s[QGPU_SK_SCISSOR] == 1 && s[QGPU_SK_SCISSOR_X] == 8 &&
+              s[QGPU_SK_SCISSOR_Y] == H - 14 && s[QGPU_SK_SCISSOR_W] == 16 && s[QGPU_SK_SCISSOR_H] == 10 &&
+              s[QGPU_SK_STENCIL_TEST] == 1 && s[QGPU_SK_STENCIL_FUNC] == 0x0202 &&
+              s[QGPU_SK_STENCIL_REF] == 0xFF && s[QGPU_SK_STENCIL_VALUE_MASK] == 0x0F &&
+              s[QGPU_SK_STENCIL_OP_ZPASS] == 0x8507 &&
+              s[QGPU_SK_FOG] == 1 && s[QGPU_SK_FOG_COLOR] == 0xFF8040FF &&
+              s[QGPU_SK_LINE_WIDTH] == qgpu_f2u(3.0f) &&
+              s[QGPU_SK_POLY_OFFSET] == 1 && s[QGPU_SK_POLY_FACTOR] == qgpu_f2u(999999.0f) &&
+              s[QGPU_SK_POLYGON_MODE_FRONT] == QGPU_POLY_LINE &&
+              s[QGPU_SK_TEX_LOD_BIAS(6)] == qgpu_f2u(16.0f),
+              "A4 valeurs : %u (ciseaux y %u, brouillard %08x)", st, s[QGPU_SK_SCISSOR_Y],
+              s[QGPU_SK_FOG_COLOR]);
+    }
+    /* chemin non brut : modes de polygone pleins ; sans F_STENCIL : pas de test */
+    b.a[0] &= ~(QGPU_SB_F_RAW | QGPU_SB_F_STENCIL);
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_OK && c->ctx[0].st.v[QGPU_SK_POLYGON_MODE_FRONT] == QGPU_POLY_FILL &&
+          c->ctx[0].st.v[QGPU_SK_STENCIL_TEST] == 0 && c->ctx[0].st.v[QGPU_SK_STENCIL_REF] == 0,
+          "A4 chemin non brut : %u", st);
+    /* brouillard coupé : couleur conservée sous F_VALID, 0 sinon */
+    sb_b8(&b, 0x2e0a, 0);
+    b.a[0] |= QGPU_SB_F_VALID;
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_OK && c->ctx[0].st.v[QGPU_SK_FOG_COLOR] == 0xFF8040FF,
+          "A4 couleur de brouillard conservée : %08x", c->ctx[0].st.v[QGPU_SK_FOG_COLOR]);
+    b.a[0] &= ~QGPU_SB_F_VALID;
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_OK && c->ctx[0].st.v[QGPU_SK_FOG_COLOR] == 0,
+          "A4 couleur de brouillard sans F_VALID : %08x", c->ctx[0].st.v[QGPU_SK_FOG_COLOR]);
+    /* sans F_V7 : ni éclairage ni faces (plage 1..LIGHTING) */
+    b.a[0] &= ~QGPU_SB_F_V7;
+    sb_b16(&b, 0x3176, 0x0404);
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_OK && c->ctx[0].st.v[QGPU_SK_CULL_MODE] == 0x0405, "A4 sans F_V7 : %u", st);
+    b.a[0] |= QGPU_SB_F_V7;
+    /* premier refus : statut de SET_STATE, clés suivantes non posées */
+    sb_b16(&b, 0x2dc4, 0x0999);                                    /* profondeur invalide */
+    sb_b8(&b, 0x2d66, 1); sb_b16(&b, 0x2d64, 0x0201);             /* alpha après */
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_BAD_ARG && c->ctx[0].st.v[QGPU_SK_DEPTH_FUNC] == 0x0203 &&
+          c->ctx[0].st.v[QGPU_SK_ALPHA_TEST] == 0, "A4 refus au premier écart : %u", st);
+    sb_b16(&b, 0x2dc4, 0x0203);
+    st = sb_send(c, shmem, &b, NULL);
+    CHECK(st == QGPU_ST_OK && c->ctx[0].st.v[QGPU_SK_ALPHA_TEST] == 1, "A4 reprise : %u", st);
+
+    /* contrôle : vecteur de l'invité identique → 0 écart ; faux → compté,
+       et c'est le vecteur de l'invité qui est posé */
+    qgpu_state_block_compute(b.a, &c->ctx[0].st, v);
+    memcpy(ref, v, sizeof(ref));
+    b.a[0] |= QGPU_SB_F_CHECK;
+    diff = c->sb_diff;
+    st = sb_send(c, shmem, &b, ref);
+    CHECK(st == QGPU_ST_OK && c->sb_diff == diff, "A4 contrôle identique : %u", st);
+    ref[QGPU_SK_BLEND_DST_RGB] = 0x0304;
+    ref[QGPU_SK_UNIT(3) + QGPU_SK_U_BIND] = 77;                    /* chaude : ignorée */
+    st = sb_send(c, shmem, &b, ref);
+    CHECK(st == QGPU_ST_OK && c->sb_diff == diff + 1 &&
+          c->ctx[0].st.v[QGPU_SK_BLEND_DST_RGB] == 0x0304 &&
+          c->ctx[0].st.v[QGPU_SK_UNIT(3) + QGPU_SK_U_BIND] != 77,
+          "A4 contrôle en écart : %u (écarts %llu)", st, (unsigned long long)(c->sb_diff - diff));
+    qgpu_core_reset(c);
 }
 
 static void run_v22(QgpuCore *c, uint8_t *shmem)
@@ -8411,6 +9243,8 @@ static void *run_backend_body(void *arg)
     run_v17(c, shmem);
     run_gensizes(c, shmem);
     run_native(c, shmem);
+    run_native_shmem(c, shmem); /* A4, volet géométrie */
+    run_raw_sane(c, shmem);     /* A4 : tri des sommets fous par l'hôte */
     run_v19(c, shmem);
     run_v20(c, shmem);
     run_v21(c, shmem);          /* GLSL */
@@ -8420,6 +9254,7 @@ static void *run_backend_body(void *arg)
     run_reste0929(c, shmem);    /* 29/09 : reste (NO_MEM, noms GLSL composés) */
     run_bh3(c, shmem);          /* bug hunt 3 : NO_MEM des programmes */
     run_bh4(c, shmem);          /* bug hunt 4 : GLSL sans source, recréation */
+    run_stblock(c, shmem);      /* A4 : bloc d'état */
 
     qgpu_core_reset(c);
     e.off = e.start = CMD_OFF;

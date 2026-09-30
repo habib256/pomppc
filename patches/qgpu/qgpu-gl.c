@@ -176,6 +176,9 @@ typedef struct GlState {
        dessins du contexte invité qui l'a lancée. */
     QgpuQuery *qseg;
     GLuint     qseg_id;
+    /* 30/09 (docs/backend-gl-attente.md) : glFlush à la fin de chaque
+       soumission (QGPU_GL_FLUSH=1 ; éteint par défaut, voir gl_init). */
+    bool       flush_end;
 } GlState;
 
 static bool gl_query_sync(QgpuCore *c);
@@ -1805,6 +1808,19 @@ static bool gl_init(QgpuCore *c)
                 getenv("QGPU_GL_FORCE") ? " — passé outre (QGPU_GL_FORCE)" : "");
         if (!getenv("QGPU_GL_FORCE")) {
             goto fail;
+        }
+    }
+    /* 30/09 : QGPU_GL_FLUSH=1 — le travail encodé part au GPU à la fin de
+       chaque soumission (gl_submit_end). ÉTEINT PAR DÉFAUT : chaque glFlush
+       coupe la passe de rendu de Metal, et une image sur ~150 de la matrice
+       (Prey, Colin McRae) change alors d'une unité sur quelques pixels
+       mélangés (arrondi entre deux passes) ; à allumer après l'A/B en VM
+       (docs/backend-gl-attente.md §5). */
+    {
+        const char *e = getenv("QGPU_GL_FLUSH");
+        g->flush_end = e && !strcmp(e, "1");
+        if (g->flush_end) {
+            fprintf(stderr, "qgpu: QGPU_GL_FLUSH=1 : glFlush en fin de soumission\n");
         }
     }
     if (c->trace) {
@@ -3675,6 +3691,28 @@ static void gl_query_destroy(QgpuCore *c, QgpuQuery *q)
     q->priv = NULL;
 }
 
+/* 30/09 — FIN DE SOUMISSION (docs/backend-gl-attente.md). Le pilote d'Apple
+ * (OpenGL sur Metal) garde ce que le fil de rendu encode jusqu'à la prochaine
+ * synchronisation : relecture de présentation, résultat de requête
+ * d'occlusion, copie. Celle-ci paie alors TOUT le rendu de l'image au GPU, en
+ * série : c'était l'essentiel des 1 à 2,4 ms d'un SURF_PRESENT (A4, G8), et une
+ * part des requêtes de Nexuiz, que l'invité attend. Un glFlush quand la
+ * soumission est finie (sa barrière est déjà publiée : l'invité n'attend pas
+ * ce glFlush) confie ce travail au GPU pendant que le fil de rendu attend la
+ * soumission suivante. glFlush ne change aucun état ; il coupe la passe de
+ * rendu de Metal, ce qui peut changer d'une unité l'arrondi d'un pixel
+ * mélangé de part et d'autre de la coupure (QGPU_GL_FLUSH=1, éteint par
+ * défaut). */
+static void gl_submit_end(QgpuCore *c)
+{
+    GlState *g = c->be_priv;
+
+    if (!g || !g->flush_end || !gl_make_current(g)) {
+        return;
+    }
+    glFlush();
+}
+
 const QgpuBackend qgpu_backend_gl = {
     .name           = "gl",
     .cap            = QGPU_CAP_GL,
@@ -3701,6 +3739,7 @@ const QgpuBackend qgpu_backend_gl = {
     .glsl_link      = gl_glsl_link,        /* v21 */
     .tex_copy       = gl_tex_copy,         /* 27/09 : copie GPU */
     .tex_fetch      = gl_tex_fetch,
+    .submit_end     = gl_submit_end,       /* 30/09 : glFlush de fin de soumission */
 };
 
 #else /* ni CGL ni EGL : stub */

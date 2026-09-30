@@ -385,6 +385,14 @@ static void qgpu_run_job(QgpuPCIState *s, const QgpuJob *job)
     if (s->irq_bh) {
         qemu_bh_schedule(s->irq_bh);
     }
+    /* 30/09 (docs/backend-gl-attente.md) : APRÈS la barrière, le marquage de
+       BAR0 et l'IRQ — l'invité n'attend pas ce qui suit. Le backend GL confie
+       au GPU le travail encodé (glFlush), que la prochaine synchronisation
+       aurait payé en série. Le job compte encore dans q_count : un drainage
+       l'attend. */
+    if (s->core_ok && job->kind != QGPU_JOB_CLIENT_RESET) {
+        qgpu_core_submit_end(&s->core);
+    }
 }
 
 static void *qgpu_render_thread(void *opaque)

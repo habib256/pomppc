@@ -16,7 +16,8 @@
 # Les variables d'un mode passent par l'environnement de run_tiger.sh ET de la
 # matrice (qui relance QEMU elle-même si l'invité gèle) : utiliser celles que
 # le run_tiger.sh du dépôt principal connaît (QEMU_BIN, TCG_OPTS, CPU_OPTS,
-# ICBISYNC, RETVERIFY…). Résultats : <dépôt principal>/bench/tcg/ab/CAMPAGNE/
+# ICBISYNC, RETVERIFY…) ; une variable POMPPC_GL_* (drapeau du plugin) est en
+# plus transmise au jeu par `matrice.py --env` (30/09). Résultats : <dépôt principal>/bench/tcg/ab/CAMPAGNE/
 # <mode>-<k>/ (tour de matrice, run_tiger.log = stderr de QEMU), bilan
 # bench/tcg/ab/CAMPAGNE/bilan.txt (tools/tcg/matabsum.py).
 # JAMAIS de suppression de .run/tiger.lock : on attend qu'il se libère.
@@ -79,8 +80,12 @@ for p in "${ordre[@]}"; do
   start_vm "$D/run_tiger.log" "$@" || { echo "  pas de ssh" | tee -a "$OUT/journal.txt"; continue; }
   grep -h '▶ Tiger' "$D/run_tiger.log" | tee -a "$OUT/journal.txt"
   sleep 60                                  # bureau au repos (Finder, Dock, mds)
+  # 30/09 : une variable POMPPC_GL_* du mode vise le plugin, donc le JEU dans
+  # l'invité : elle passe aussi en --env à la matrice (sans effet sur QEMU)
+  genv=()
+  for v in "$@"; do case $v in POMPPC_GL_*=*) genv+=(--env "$v") ;; esac; done
   env "$@" python3 "$WT/tools/matrice/matrice.py" -j "$JEU" -m "$MODE" --sans-vidage \
-      --sortie "$D" > "$D/matrice.log" 2>&1
+      ${genv[@]+"${genv[@]}"} --sortie "$D" > "$D/matrice.log" 2>&1
   tail -1 "$D/resultats.csv" 2>/dev/null | tee -a "$OUT/journal.txt"
 done
 stop_vm

@@ -219,6 +219,25 @@
    GLSL_ATTRIB reste limité aux identifiants. Ajouté sans changer
    QGPU_PROTO_VERSION (même règle que QGPU_CAP_GEN_SIZES). */
 #define QGPU_CAP_GLSL_PATHS     0x00004000
+/* A4 (bloc d'état) : STATE_BLOCK — l'invité envoie les octets bruts de
+   l'état de GLEngine (fenêtres QGPU_SB_W*) et le CŒUR en tire lui-même les
+   clés QGPU_SK_* (hors unités et programmes), puis les pose comme autant de
+   SET_STATE, seulement celles qui changent. Annoncé par le cœur quel que soit
+   le backend. Sans ce bit : BAD_OPCODE ; l'invité garde SET_STATE. Ajouté sans
+   changer QGPU_PROTO_VERSION (même règle que QGPU_CAP_GEN_SIZES). Cf. la
+   section « A4 » en fin de fichier. */
+#define QGPU_CAP_STATE_BLOCK    0x00008000
+/* A4, volet géométrie (30/09/2026) : le travail par sommet passe à l'hôte.
+   (1) QGPU_OP_DRAW_RAW_SANE : DRAW_RAW dont l'HÔTE trie les sommets fous
+   (NaN, infini, |v| >= 1e9, w ≈ 0) comme le plugin le faisait sur le G4 ;
+   (2) un descripteur de DRAW_NATIVE peut désigner BAR0 (buf =
+   QGPU_BUF_SHMEM, offset absolu dans la fenêtre) : des tableaux CLIENTS
+   partent aux octets de l'application, l'hôte convertit. Annoncé par le
+   CŒUR avec QGPU_CAP_NATIVE. Sans ce bit : DRAW_RAW_SANE = BAD_OPCODE
+   (FATAL), descripteur BAR0 = BAD_ARG (non fatal) ; l'invité n'émet ni l'un
+   ni l'autre. Ajouté sans changer QGPU_PROTO_VERSION (même règle que
+   QGPU_CAP_GEN_SIZES). docs/protocole-v23-geometrie.md. */
+#define QGPU_CAP_GEOM_HOST      0x00020000
 
 /* ── Statuts : QGPU_ST_* dans qgpu_abi.h ─────────────────────────────────── */
 /* ── Limites ─────────────────────────────────────────────────────────────── */
@@ -281,6 +300,9 @@
    dans un tableau de cette taille : la borne est NOMMÉE ici pour que l'hôte et
    l'invité ne puissent pas en avoir deux idées. */
 #define QGPU_MAX_CMD_ARGS       32
+/* A4 : STATE_BLOCK est plus long (QGPU_LEN_STATE_BLOCK_CHECK) ; le cœur
+   recopie ses arguments dans un tableau de cette taille. */
+#define QGPU_MAX_CMD_ARGS_LONG  320
 
 /* ── Flux de commandes ───────────────────────────────────────────────────────
  *
@@ -359,6 +381,10 @@
                                            premier, nverts] */
 #define QGPU_OP_DRAW_RAW_BUF    0x0059  /* v14, [mode, n, vbuf, voff, pas, format,
                                            ibuf, ioff, itype, premier, nverts] */
+/* A4 (QGPU_CAP_GEOM_HOST) : DRAW_RAW + [drapeaux QGPU_RAWS_*], cf. section
+   « A4 : DRAW_RAW_SANE ». Opcodes 0x0090..0x0097 réservés au volet géométrie. */
+#define QGPU_OP_DRAW_RAW_SANE   0x0090  /* [mode, n, voff, pas, format, ioff, itype,
+                                           premier, nverts, drapeaux] */
 #define QGPU_OP_DRAW_NATIVE     0x005A  /* v18, [mode, n, ibuf, ioff, itype, premier,
                                            nattr, aoff], cf. section v18 */
 
@@ -381,6 +407,9 @@
 #define QGPU_OP_GLSL_LINK       0x0079  /* [id] */
 #define QGPU_OP_GLSL_UNIFORMS   0x007A  /* [id, premier, n, off] n × 4 mots */
 #define QGPU_OP_GLSL_INFO_LOG   0x007B  /* [id, max, off] journal de l'hôte → BAR0 */
+/* A4 : bloc d'état (QGPU_CAP_STATE_BLOCK ; opcodes 0x0080..0x0087 réservés) */
+#define QGPU_OP_STATE_BLOCK     0x0080  /* [drapeaux, largeur, hauteur, bits de stencil,
+                                           fenêtres QGPU_SB_W* (, vecteur de contrôle)] */
 
 /* Longueurs (en mots, en-tête compris) attendues par opcode. */
 #define QGPU_LEN_NOP            1
@@ -418,6 +447,7 @@
 #define QGPU_LEN_DRAW_RAW       10
 #define QGPU_LEN_DRAW_RAW_BUF   12          /* v14 */
 #define QGPU_LEN_DRAW_NATIVE    9           /* v18 */
+#define QGPU_LEN_DRAW_RAW_SANE  11          /* A4 */
 #define QGPU_LEN_SET_POLYGON_STIPPLE 33     /* v8 : la plus longue commande */
 #define QGPU_LEN_QUERY          2
 #define QGPU_LEN_QUERY_RESULT   3
@@ -432,6 +462,8 @@
 #define QGPU_LEN_GLSL_LINK      2
 #define QGPU_LEN_GLSL_UNIFORMS  5
 #define QGPU_LEN_GLSL_INFO_LOG  4
+#define QGPU_LEN_STATE_BLOCK    (1 + QGPU_SB_HDR + QGPU_SB_WORDS)            /* A4 : 109 */
+#define QGPU_LEN_STATE_BLOCK_CHECK (QGPU_LEN_STATE_BLOCK + QGPU_SK_COUNT)    /* 271 */
 
 /* Formats de surface. Le mot de pixel échangé est 0xAARRGGBB big-endian :
  * l'octet « x » du framebuffer Tiger EST l'alpha (v2 ; v1 l'ignorait). */
@@ -1780,7 +1812,11 @@
  *   itype   : QGPU_IDX_NONE / _U16 / _U32 ; indices GRAND-BOUTISTES (écrits
  *             par l'invité, jamais permutés par l'hôte).
  *   premier : non indexé : premier sommet dessiné (glDrawArrays) ; indexé :
- *             doit valoir 0 (réservé, BAD_ARG sinon).
+ *             doit valoir 0 (réservé, BAD_ARG sinon) — sauf sous
+ *             QGPU_CAP_GEOM_HOST (A4) : BASE des indices, l'indice i désigne
+ *             le sommet i − premier des descripteurs (un indice < premier =
+ *             BAD_ARG). L'invité recopie un tableau client à partir de son
+ *             plus petit sommet cité sans réécrire les indices.
  *   nattr   : nombre de descripteurs, 1..QGPU_NATIVE_MAX_ATTRS.
  *   aoff    : offset dans BAR0 (multiple de 4) d'une table de nattr
  *             descripteurs de QGPU_NATIVE_DESC_WORDS mots big-endian :
@@ -1790,8 +1826,11 @@
  *     code   : attribut qgpu — QGPU_NA_POSITION (0), _NORMAL (1), _COLOR (2),
  *              _SEC_COLOR (3), _FOG (4), QGPU_NA_TEX(u) = 8 + u (u 0..7),
  *              QGPU_NA_GEN(k) = 16 + k (k 0..15). Au plus une fois chacun.
- *     buf    : tampon hôte (BUF_CREATE) ; JAMAIS QGPU_BUF_SHMEM : des
- *              sommets encore dans BAR0 passent par DRAW_RAW.
+ *     buf    : tampon hôte (BUF_CREATE). QGPU_BUF_SHMEM seulement sous
+ *              QGPU_CAP_GEOM_HOST (A4) : `offset` est alors un offset
+ *              ABSOLU dans BAR0, et les bornes (point 3 ci-dessous) se
+ *              comptent sur la fenêtre entière ; sans le bit, des sommets
+ *              encore dans BAR0 passent par DRAW_RAW.
  *     offset : octet du premier sommet (sommet d'indice 0) dans le tampon.
  *     pas    : octets d'un sommet au suivant ; 0 = serré (taille × octets du
  *              type), comme OpenGL. Aucun alignement exigé.
@@ -1834,7 +1873,7 @@
  *   son dessin. Liste : mode, itype, n = 0 ou > QGPU_MAX_VERTS, premier ≠ 0
  *   indexé, premier + n débordant 32 bits, nattr hors de 1..24, aoff hors de
  *   BAR0 ou non aligné, code inconnu (5..7, > 31) ou en double, buf inexistant
- *   ou QGPU_BUF_SHMEM, type inconnu, taille 0 ou > 4, drapeaux réservés,
+ *   ou QGPU_BUF_SHMEM sans QGPU_CAP_GEOM_HOST, type inconnu, taille 0 ou > 4, drapeaux réservés,
  *   position à 1 composante, ni position ni générique 0, générique sans
  *   QGPU_CAP_PROGRAMS, indices hors de leur tampon, plage d'un attribut hors
  *   de son tampon, hi − lo + 1 > QGPU_MAX_VERTS. Un index n'a pas d'autre
@@ -1863,6 +1902,41 @@
 #define QGPU_NT_UINT            0x1405
 #define QGPU_NT_FLOAT           0x1406
 #define QGPU_NT_DOUBLE          0x140A
+
+/* ── A4 : DRAW_RAW_SANE — le tri des sommets fous, fait par l'hôte ──────────
+ *
+ *   Pourquoi. Le chemin Begin/End (GLEngine écrit les sommets directement dans
+ *   BAR0) passait chaque mot de chaque sommet au crible sur le G4 émulé
+ *   (raw_scan_nan du plugin) : 12,8 % du fil principal de Nexuiz ARB au
+ *   30/09 (bench/a4/depart), des centaines de milliers de sommets par image.
+ *
+ *   QGPU_OP_DRAW_RAW_SANE [mode, n, voff, pas, format, ioff, itype, premier,
+ *                          nverts, drapeaux]
+ *
+ *   Les neuf premiers mots : exactement DRAW_RAW (mêmes règles, mêmes refus,
+ *   BAR0 seulement). drapeaux : QGPU_RAWS_KEEP_W0 (sous programme de sommets :
+ *   w = 0 n'est pas fou, volumes d'ombre projetés à l'infini) ; autres bits
+ *   réservés (BAD_ARG). La clé QGPU_SK_GEN_SIZES doit valoir 0 pour les
+ *   génériques du format (sinon BAD_ARG).
+ *
+ *   Un sommet (parmi les nverts) est FOU si l'un de ses mots a des bits
+ *   IEEE |u| >= 0x4e6e6b28 (NaN, infini, |v| >= 1e9), ou, sans
+ *   QGPU_RAWS_KEEP_W0 et avec une position à 4 composantes, |w| < 1e-6
+ *   (bits < 0x358637bd). Sans sommet fou : DRAW_RAW. Sinon :
+ *     GL_TRIANGLES indexé : les triangles dont un indice est >= nverts ou
+ *       cite un sommet fou sont retirés, le reste dessiné dans l'ordre
+ *       (un reste de moins de 3 indices en fin de liste est ignoré) ;
+ *     GL_TRIANGLES non indexé : les triangles entiers gardés sont recopiés
+ *       bout à bout (premier + 3t…) et dessinés sans indices ;
+ *     autre mode : le dessin est jeté (statut OK) ;
+ *     rien à dessiner : statut OK.
+ *   Les mots fous d'un sommet fou non cité mais converti valent 0. C'est à la
+ *   lettre ce que faisait raw_fix_nan dans le plugin : le backend reçoit les
+ *   mêmes sommets et les mêmes indices (tests/qgpu_core_test.c, A4).
+ *   Un refus est un BAD_ARG non fatal, comme DRAW_RAW ; un device sans
+ *   QGPU_CAP_GEOM_HOST répond BAD_OPCODE (fatal) — l'invité ne l'émet pas. */
+#define QGPU_RAWS_KEEP_W0       0x00000001
+#define QGPU_RAWS_ON            0x80000000  /* interne au cœur, jamais sur le fil */
 
 /* ── Tranches de clients : la DISPOSITION que le device publie ──────────────
  *
@@ -1896,5 +1970,78 @@
 #define QGPU_CLIENT_TEX_IDS     (QGPU_MAX_TEX / QGPU_MAX_CLIENTS)    /* 1024 */
 #define QGPU_CLIENT_QUERY_IDS   (QGPU_MAX_QUERIES / QGPU_MAX_CLIENTS) /* 16, v8 */
 #define QGPU_CLIENT_BUF_IDS     (QGPU_MAX_BUF / QGPU_MAX_CLIENTS)     /* 64, v14 */
+
+/* ── A4 : bloc d'état (QGPU_CAP_STATE_BLOCK) ────────────────────────────────
+ *
+ *   Jusqu'ici, à chaque dessin dont l'état a pu changer, l'invité (le G4
+ *   émulé, ~10 fois plus lent que l'hôte) lisait l'état de GLEngine,
+ *   calculait les clés QGPU_SK_* et les comparait à l'ombre du dernier envoi
+ *   (compute_state, send_state du plugin). STATE_BLOCK déplace ce travail
+ *   dans le cœur : l'invité ne fait plus que RECOPIER quatre fenêtres de
+ *   l'état de GLEngine de Tiger 10.4 (octets gros-boutistes, tels quels),
+ *   le cœur en tire les clés et ne pose que celles qui diffèrent de l'état
+ *   courant du contexte. La commande porte les octets : le cœur ne lit
+ *   JAMAIS la mémoire de l'invité hors du flux, et toute clé qu'il en tire
+ *   passe la même validation qu'un SET_STATE.
+ *
+ *   QGPU_OP_STATE_BLOCK [drapeaux, largeur, hauteur, sbits, W0, W1, W2, W3, LOD
+ *                        (, vecteur de contrôle : QGPU_SK_COUNT mots)]
+ *
+ *   drapeaux  QGPU_SB_F_* ci-dessous ; un bit inconnu = BAD_ARG.
+ *   largeur, hauteur : taille de la surface vue par l'invité (ciseaux).
+ *   sbits     bits de stencil du drawable (0 = pas de stencil).
+ *   W0..W3    fenêtres de l'état de GLEngine (base = QGPU_SB_W*_OFF, octets
+ *             relatifs au bloc d'état de GLEngine, QGPU_SB_W*_N mots).
+ *   LOD       les 8 biais de LOD d'unité (glTexEnv GL_TEXTURE_LOD_BIAS),
+ *             mot à QGPU_SB_LOD_OFF + u × QGPU_SB_LOD_STRIDE.
+ *
+ *   Clés tirées : toutes celles des plages que l'invité enverrait par
+ *   SET_STATE (géométrie si F_V7, v8 si F_V8, 1.4 si F_TEX14, unités 4..7
+ *   si F_UNITS8, 8..15 si F_GLSL), SAUF les clés « chaudes » : les quatre
+ *   clés de chaque unité 0..15, GL_COMBINE et ses sources (0..7), et
+ *   l'activation des programmes. Celles-là viennent du verdict de l'invité
+ *   (identifiants de texture, programmes connus de l'hôte) et partent
+ *   toujours par SET_STATE, AVANT le bloc. Les règles de calcul sont celles
+ *   de compute_state (guest/gldriver/pomppc_accel.c) ; les valeurs
+ *   « conservées » (couleur de brouillard sans brouillard, facteur et unités
+ *   de décalage sans décalage) sont l'état courant du contexte si F_VALID,
+ *   0 sinon. Ordre de pose : celui des plages, clé croissante ; au premier
+ *   refus (validation de SET_STATE), le statut de ce refus, et les clés
+ *   suivantes ne sont pas posées — comme la suite de SET_STATE qu'il
+ *   remplace.
+ *
+ *   F_CHECK (contrôle) : le vecteur calculé par l'invité (QGPU_SK_COUNT
+ *   mots, index = clé) suit les fenêtres ; le cœur compare clé à clé ce
+ *   qu'il a tiré, compte les écarts (journal de QEMU, lignes « qgpu: bloc
+ *   d'état ») et pose le vecteur de l'INVITÉ : le rendu est celui de
+ *   l'ancienne voie, l'écart est seulement mesuré.
+ */
+#define QGPU_SB_HDR             4       /* drapeaux, largeur, hauteur, sbits */
+#define QGPU_SB_W0_OFF          0x24ac  /* normalisation (0x24ad, 0x24ae) */
+#define QGPU_SB_W0_N            1
+#define QGPU_SB_W1_OFF          0x2d44  /* éclairage, alpha, mélange, profondeur,
+                                           brouillard, lignes, masques */
+#define QGPU_SB_W1_N            65      /* .. 0x2e48 */
+#define QGPU_SB_W2_OFF          0x30bc  /* taille et paramètres de point */
+#define QGPU_SB_W2_N            7       /* .. 0x30d8 */
+#define QGPU_SB_W3_OFF          0x3168  /* décalage, modes de polygone, faces,
+                                           ciseaux, ombrage, stencil */
+#define QGPU_SB_W3_N            23      /* .. 0x31c4 */
+#define QGPU_SB_LOD_OFF         (0x31c4 + 0x3c) /* unité 0 : GS_TEXUNIT0 + TU_LOD_BIAS */
+#define QGPU_SB_LOD_STRIDE      0x7c
+#define QGPU_SB_LOD_N           8
+#define QGPU_SB_WORDS           (QGPU_SB_W0_N + QGPU_SB_W1_N + QGPU_SB_W2_N + \
+                                 QGPU_SB_W3_N + QGPU_SB_LOD_N)       /* 104 */
+#define QGPU_SB_F_RAW           0x0001  /* dessin du chemin brut (modes de polygone) */
+#define QGPU_SB_F_VALID         0x0002  /* valeurs conservées = état courant */
+#define QGPU_SB_F_STENCIL       0x0004  /* la surface a un stencil suivi */
+#define QGPU_SB_F_CHECK         0x0008  /* vecteur de contrôle joint */
+#define QGPU_SB_F_V7            0x0100  /* plages envoyées : géométrie (v7) */
+#define QGPU_SB_F_V8            0x0200  /* fin du pipeline fixe (v8) */
+#define QGPU_SB_F_TEX14         0x0400  /* OpenGL 1.4 (v10) */
+#define QGPU_SB_F_PROG          0x0800  /* programmes ARB (v16) */
+#define QGPU_SB_F_UNITS8        0x1000  /* unités 4..7 (v17) */
+#define QGPU_SB_F_GLSL          0x2000  /* unités d'image 8..15 (v21) */
+#define QGPU_SB_F_ALL           0x3F0F
 
 #endif /* QGPU_PROTO_H */

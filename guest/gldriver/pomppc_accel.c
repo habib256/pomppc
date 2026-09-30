@@ -55,6 +55,16 @@
  *   POMPPC_GL_NATIVE_RANGE=0  ne pas croire la plage (ptr, longueur) de
  *                         gldFlushBuffer : tout le VBO devient sale (seul ce
  *                         que les dessins lisent est recopié, cf. raw_sync)
+ *   POMPPC_GL_RAWSANE=0   A4 : les séries Begin/End partent en DRAW_RAW_SANE
+ *                         (QGPU_CAP_GEOM_HOST) — l'hôte trie les sommets fous,
+ *                         raw_fix_nan ne tourne plus sur le G4. Allumé par
+ *                         défaut depuis le 30/09 ; =0 revient au tri du G4.
+ *   POMPPC_GL_NATSHM=0    A4 : un dessin arrivé à RenderVertexArray avec des
+ *                         tableaux CLIENTS (plage VAR de Colin McRae, mélange
+ *                         VBO/client) part aux octets de l'application
+ *                         (DRAW_NATIVE depuis BAR0, l'hôte convertit) au lieu
+ *                         d'être empaqueté sommet par sommet. Allumé par
+ *                         défaut depuis le 30/09 ; =0 revient à l'empaquetage.
  *   POMPPC_GL_XFER16=0    pas de transfert 16 bits hôte (v15) : fenêtre 16 bits
  *                         et Z 16 restent sans aller-retour
  *   POMPPC_GL_NOTE=chemin journal d'appoint (gl_note). SANS elle, rien n'est
@@ -118,7 +128,10 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260930-wlunif"
+#define POMPPC_PLUGIN_REV "20261001-a4on"
+/* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
+   (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
+#define STATEBLK_DEFAULT 1
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -688,6 +701,17 @@ typedef struct PCtx {
        rien d'autre de ce qu'il lit n'a bougé (surface, stencil, chemin) */
     int            st_known, st_dirty, st_raw, st_stencil;
     unsigned long  st_sw, st_sh, st_sbits;
+    /* A4 (bloc d'état) : les clés NON chaudes de p->st ne sont plus tenues —
+       c'est le device qui les tire de STATE_BLOCK et les compare à son état.
+       Seules les clés des unités et des programmes restent exactes. */
+    int            st_host;
+    /* A4 : verdict des unités de la dernière série de clés chaudes. Même
+       contenu (mêmes PTex, environnement, combinaison), même époque des
+       textures (vd_epoch : un qtex ne bouge pas sans elle) et p->st valide :
+       les clés des unités sont déjà celles du device. */
+    TexInfo        hot_ti;
+    unsigned long  hot_epoch;
+    int            hot_valid;
     unsigned char *draw_seen;           /* tampon de dessin connu */
     unsigned long  direct_at;           /* n° de la dernière image présentée directement */
     /* mémoire des unités (TEXMEMO) : dernier objet de GLEngine vu à chaque
@@ -1027,6 +1051,12 @@ static struct {
     unsigned long   n_vbohits, n_vbomiss;
     /* ── v18 : DRAW_NATIVE, miroirs bruts des VBO ── */
     int             native;             /* QGPU_CAP_NATIVE ; POMPPC_GL_NATIVE=0 le coupe */
+    int             rawsane;            /* A4 : DRAW_RAW_SANE (QGPU_CAP_GEOM_HOST,
+                                           POMPPC_GL_RAWSANE=1) */
+    unsigned long   n_rawsane;          /* séries Begin/End vérifiées par l'hôte */
+    int             natshm;             /* A4 : tableaux clients en DRAW_NATIVE
+                                           (QGPU_CAP_GEOM_HOST, POMPPC_GL_NATSHM=1) */
+    unsigned long   n_natshm_draws, n_natshm_bytes, n_natshm_fall;
     int             native_range;       /* plage de gldFlushBuffer crue (défaut) */
     PBuf           *buf_hash[BUF_HASH]; /* recherche O(1) de buf_from_vbo */
     long            rp_qid[RAWPOOL_MAX];
@@ -1066,6 +1096,8 @@ static struct {
                                            fait une fois par verdict (us_get) */
     int             stskip;             /* lot 4 : POMPPC_GL_STSKIP */
     int             stcheck;            /* lot 4 : POMPPC_GL_STATECHECK */
+    int             stblk;              /* A4 : POMPPC_GL_STATEBLK (bloc d'état) */
+    int             stblk_check;        /* A4 : vecteur de contrôle joint (STATECHECK) */
     int             wlunif;             /* 30/09 : POMPPC_GL_WLUNIF — le bit
                                            « glUniform » (+0x0c 0x04000000) est
                                            neutre pour la liste blanche et pour
@@ -1609,6 +1641,8 @@ static void sync_frame(void)
     G.t_async = 0;
 }
 
+static void qry_frame(int fin);         /* section des requêtes d'occlusion */
+
 /* Bilan périodique (POMPPC_GL_STATS=<fichier>), appelé à chaque échange. */
 static void stats_frame(void *ctx)
 {
@@ -1643,6 +1677,7 @@ static void stats_frame(void *ctx)
     if (G.verdict)
         vd_frame();
     sync_frame();                       /* 30/09 : lignes SYNC (note) */
+    qry_frame(0);                       /* 30/09 : lignes QRY (note, §7 attente) */
     if (!path)
         return;
     /* Profondeur de la file du device, une fois par image et SEULEMENT quand
@@ -1702,6 +1737,17 @@ static void stats_frame(void *ctx)
                             (G.n_native_draws - nd0) / fr, (G.n_native_verts - nv0) / fr,
                             ((G.n_native_bytes - nb0) >> 10) / fr,
                             (G.n_native_fall - nf0) / fr);
+                /* A4, volet géométrie : ce que l'hôte fait à la place du G4 */
+                if (G.rawsane || G.natshm) {
+                    static unsigned long rs0, sd0, sb0, sf0;
+                    fprintf(f, "    geom-host: %lu DRAW_RAW_SANE/frame, %lu client-array native "
+                            "draws/frame, %lu KiB client arrays copied/frame, %lu fell back "
+                            "to packing/frame\n",
+                            (G.n_rawsane - rs0) / fr, (G.n_natshm_draws - sd0) / fr,
+                            ((G.n_natshm_bytes - sb0) >> 10) / fr, (G.n_natshm_fall - sf0) / fr);
+                    rs0 = G.n_rawsane; sd0 = G.n_natshm_draws;
+                    sb0 = G.n_natshm_bytes; sf0 = G.n_natshm_fall;
+                }
             }
             {
                 int k;
@@ -1980,6 +2026,8 @@ static void on_exit_stats(void)
                     G.n_sync_all[k] + G.n_sync[k],
                     (G.t_sync_all[k] + G.t_sync[k]) * 1000, k + 1 < SYNC_N ? "," : "\n");
     }
+    if (getenv("POMPPC_GL_STATS"))      /* 30/09 : dernière ligne QRY (note) */
+        qry_frame(1);
     if (getenv("POMPPC_GL_STATS"))      /* v20 */
         fprintf(stderr, "POMPPC GL: render to texture: %lu SURF_TEX (%s), %lu skipped "
                 "(guest newer), %lu hidden-drawable swaps kept on host; rectangle %s\n",
@@ -2282,6 +2330,22 @@ void pomppc_backend_init(void)
                 G.stskip = e && e[0] ? e[0] != '0' : STSKIP_DEFAULT;
                 e = getenv("POMPPC_GL_STATECHECK");
                 G.stcheck = e && e[0] && e[0] != '0';
+                /* A4 (30/09) : bloc d'état — au lieu de compute_state et du
+                   différentiel, les fenêtres brutes de l'état de GLEngine
+                   partent dans STATE_BLOCK et le device en tire les clés
+                   (docs/protocole-v23-etat.md). Seulement si le device
+                   l'annonce. Sous STATECHECK=1, le vecteur de compute_state
+                   est joint : le device compte les écarts (journal de QEMU)
+                   et pose le vecteur de l'invité. Les sondes NOCULL, FLIPFACE
+                   et GLYPHTEST retouchent le vecteur : elles gardent
+                   l'ancienne voie. Allumé par défaut (STATEBLK_DEFAULT) ;
+                   POMPPC_GL_STATEBLK=0 l'éteint. */
+                e = getenv("POMPPC_GL_STATEBLK");
+                G.stblk = (e && e[0] ? e[0] != '0' : STATEBLK_DEFAULT) &&
+                          (G.q.caps & QGPU_CAP_STATE_BLOCK) &&
+                          !getenv("POMPPC_GL_NOCULL") && !getenv("POMPPC_GL_FLIPFACE") &&
+                          !getenv("POMPPC_GL_GLYPHTEST");
+                G.stblk_check = G.stblk && G.stcheck;
                 /* 30/09 : glUniform (Nexuiz GLSL, 154 298 dispatches
                    recalculés sur 173 572) — le bit +0x0c 0x04000000 ne fait
                    plus recalculer ; ce qu'il peut changer au verdict (unités
@@ -2318,6 +2382,18 @@ void pomppc_backend_init(void)
                          getenv("POMPPC_GL_NATIVE")[0] == '0');
             G.native_range = !(getenv("POMPPC_GL_NATIVE_RANGE") &&
                                getenv("POMPPC_GL_NATIVE_RANGE")[0] == '0');
+            /* A4, volet géométrie : le tri des sommets fous de Begin/End
+               (raw_fix_nan, 12,8 % du fil de Nexuiz ARB) fait par l'hôte.
+               Allumé par défaut s'il est annoncé (A/B d'intégration du 30/09) ;
+               POMPPC_GL_RAWSANE=0 l'éteint. */
+            G.rawsane = G.v7 && (G.q.caps & QGPU_CAP_GEOM_HOST) &&
+                        !(getenv("POMPPC_GL_RAWSANE") && getenv("POMPPC_GL_RAWSANE")[0] == '0');
+            /* A4 : les tableaux CLIENTS qui arrivent à RenderVertexArray (plage
+               VAR, mélange VBO/client) partent aux octets de l'application en
+               DRAW_NATIVE (l'hôte convertit) au lieu de l'empaquetage.
+               Allumé par défaut s'il est annoncé ; POMPPC_GL_NATSHM=0 l'éteint. */
+            G.natshm = G.native && (G.q.caps & QGPU_CAP_GEOM_HOST) &&
+                       !(getenv("POMPPC_GL_NATSHM") && getenv("POMPPC_GL_NATSHM")[0] == '0');
             G.pixtex = -1;
             G.pixtex_w = G.pixtex_h = 0;
             /* 3e passe : numéros de soumission (perte ciblée) à partir de 1 —
@@ -2341,10 +2417,11 @@ void pomppc_backend_init(void)
         if (G.state > 0) {
             gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d lazyapple=%d "
                     "native=%d (plages %d) count=%d verdict=%d verdictcheck=%d whitelist=%d "
-                    "texmemo=%d stskip=%d statecheck=%d wlunif=%d\n",
+                    "texmemo=%d stskip=%d statecheck=%d wlunif=%d stateblk=%d "
+                    "rawsane=%d natshm=%d\n",
                     G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range,
                     G.count, G.verdict, G.vcheck, G.wl, G.texmemo, G.stskip, G.stcheck,
-                    G.wlunif);
+                    G.wlunif, G.stblk + G.stblk_check, G.rawsane, G.natshm);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
                        " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
@@ -2403,7 +2480,9 @@ static void va_probe(PCtx *p, const unsigned char *V, unsigned long fmt,
                      const char *tag, int bad);
 static void close_raw(void)
 {
-    if (G.raw_ctx && G.raw_count && raw_fix_nan()) {
+    /* A4 (POMPPC_GL_RAWSANE) : le tri des sommets fous passe à l'hôte
+       (DRAW_RAW_SANE) — raw_fix_nan ne relit plus chaque mot sur le G4. */
+    if (G.raw_ctx && G.raw_count && (G.rawsane || raw_fix_nan())) {
         unsigned long *c;
         /* Un vidage a pu survenir entre l'ouverture de la série et ici :
            geom_begin vide le flux APRÈS avoir envoyé l'état, quand la place des
@@ -2488,7 +2567,8 @@ static void close_raw(void)
                     gl_note("  (pas de descripteur VAO)\n");
             }
         }
-        c[0] = QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW);
+        c[0] = G.rawsane ? QGPU_CMD_HDR(QGPU_OP_DRAW_RAW_SANE, QGPU_LEN_DRAW_RAW_SANE)
+                         : QGPU_CMD_HDR(QGPU_OP_DRAW_RAW, QGPU_LEN_DRAW_RAW);
         c[1] = G.raw_mode;
         c[2] = G.raw_count;             /* sommets, ou INDICES si la série est indexée */
         c[3] = G.base + VTX_OFF + G.raw_start;
@@ -2502,7 +2582,14 @@ static void close_raw(void)
            tableau. C'est l'étendue des sommets de la série, pas le nombre
            d'indices — les deux coïncident quand la série n'est pas indexée. */
         c[9] = (G.raw_vend - G.raw_start) / (G.raw_words * 4);
-        G.ncmd += QGPU_LEN_DRAW_RAW;
+        if (G.rawsane) {
+            /* S3 : sous programme de sommets, w = 0 n'est pas fou */
+            c[10] = (G.prog && G.raw_ctx->vp_on) ? QGPU_RAWS_KEEP_W0 : 0;
+            G.ncmd += QGPU_LEN_DRAW_RAW_SANE;
+            G.n_rawsane++;
+        } else {
+            G.ncmd += QGPU_LEN_DRAW_RAW;
+        }
         G.n_rawdraws++;
         if (G.raw_lots > 1)
             G.n_rawmerged += G.raw_lots - 1;
@@ -2713,6 +2800,7 @@ static int plugin_draw_op(unsigned long op)
     return (op >= QGPU_OP_DRAW_TRIANGLES && op <= QGPU_OP_DRAW_TRIANGLES_SEC) ||
            op == QGPU_OP_DRAW_RAW || op == QGPU_OP_DRAW_RAW_BUF ||
            op == QGPU_OP_DRAW_NATIVE || op == QGPU_OP_PROG_STRING ||
+           op == QGPU_OP_DRAW_RAW_SANE ||                  /* A4 */
            op == QGPU_OP_GLSL_LINK;
 }
 
@@ -2761,6 +2849,18 @@ static void broken_all(const char *why, long st, unsigned long pc, unsigned long
     if (pc < CMD_WORDS && G.native &&
         (QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_NATIVE ||
          QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_BUF_SUBDATA)) {
+        {   /* A4 : vidage de la soumission fautive, une fois (comme DRAW_RAW) */
+            static int done;
+            const char *fd = getenv("POMPPC_GL_DUMPFAIL");
+            if (fd && *fd && !done) {
+                char fp[300];
+                done = 1;
+                snprintf(fp, sizeof(fp), "%s/fail-native-%06lu.bin", fd, G.n_frames);
+                dump_one(fp);
+                gl_note("DUMPFAIL %s : op %lx pc %lu statut %ld ncmd %lu\n",
+                        fp, (unsigned long)QGPU_CMD_OP(G.cmd[pc]), pc, st, G.ncmd);
+            }
+        }
         pomppc_log("POMPPC: %s refusé (statut %ld, commande %lu) : DRAW_NATIVE coupé\n",
                    QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_NATIVE ? "DRAW_NATIVE" : "BUF_SUBDATA",
                    st, pc);
@@ -2776,7 +2876,8 @@ static void broken_all(const char *why, long st, unsigned long pc, unsigned long
        brut suffit — l'accélération de la rastérisation, elle, reste bonne. */
     if (pc < CMD_WORDS &&
         (QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_RAW ||
-         QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_RAW_BUF)) {
+         QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_RAW_BUF ||
+         QGPU_CMD_OP(G.cmd[pc]) == QGPU_OP_DRAW_RAW_SANE)) {
         {   /* lot 11 : vidage de la soumission fautive, une fois */
             static int done;
             const char *fd = getenv("POMPPC_GL_DUMPFAIL");
@@ -6287,13 +6388,23 @@ static void send_polygon_stipple(PCtx *p)
 /* Lot 4 : compteurs (note, lignes STATE, toutes les CNT_PERIOD images). */
 static struct {
     unsigned long skip, full, same, diff, diff_all, told;
+    unsigned long blk, hot;             /* A4 : blocs envoyés, clés chaudes envoyées */
+    unsigned long blk_all;              /* A4 : blocs depuis le début */
+    unsigned long hot_skip, hot_diff, hot_diff_all;  /* A4 : unités reprises ; contrôle */
+    unsigned long hot_chk;              /* A4 : reprises contrôlées (sous STATECHECK) */
 } STC;
 #define ST_TOLD 24
+
+static void send_state_blk(PCtx *p, const TexInfo *ti, int raw);
 
 static void send_state(PCtx *p, const TexInfo *ti, int raw)
 {
     unsigned long v[QGPU_SK_COUNT], *c;
     int k, r, nr = 0, skip;
+    if (G.stblk) {                      /* A4 : bloc d'état */
+        send_state_blk(p, ti, raw);
+        return;
+    }
     struct { int lo, hi; } rg[6];       /* géométrie, v8, 1.4, programmes, unités 4..7,
                                            unités d'image 8..15 */
     unsigned long sbits = GLD_U32(p->ctx, CTX_STENCIL_BITS);
@@ -6462,6 +6573,205 @@ static void send_state(PCtx *p, const TexInfo *ti, int raw)
         send_polygon_stipple(p);
 }
 
+/* ── A4 : bloc d'état (QGPU_OP_STATE_BLOCK, docs/protocole-v23-etat.md) ──
+ *
+ * Même contrat que send_state, travail déplacé vers l'hôte : les clés
+ * CHAUDES (unités, depuis le verdict `ti` ; programmes) sont faites ici et
+ * envoyées par SET_STATE quand elles diffèrent de p->st (comme le chemin
+ * sauté du lot 4) ; tout le reste — ce que compute_state lisait de GLEngine —
+ * part en octets bruts dans STATE_BLOCK, quand le lot 4 ne l'aurait pas
+ * sauté. Le device en tire les clés et ne pose que celles qui changent. */
+static int state_ranges(int lo[6], int hi[6])
+{
+    int nr = 0;
+    lo[nr] = 1; hi[nr] = G.v7 ? PLUGIN_SK_END_GEOM : QGPU_SK_LIGHTING; nr++;
+    if (G.v8) { lo[nr] = QGPU_SK_BLEND_COLOR; hi[nr] = PLUGIN_SK_END_V8; nr++; }
+    if (G.tex14) { lo[nr] = QGPU_SK_TEX_LOD_BIAS0; hi[nr] = QGPU_SK_POINT_ATT_QUAD + 1; nr++; }
+    if (G.prog) { lo[nr] = QGPU_SK_VERTEX_PROGRAM; hi[nr] = QGPU_SK_FRAGMENT_PROGRAM + 1; nr++; }
+    if (G.units > 4) { lo[nr] = QGPU_SK_TEXTURE4; hi[nr] = QGPU_SK_TEX_LOD_BIAS4 + 4; nr++; }
+    if (G.glsl) { lo[nr] = QGPU_SK_TEXTURE8; hi[nr] = QGPU_SK_UNIT(IMG_UNITS - 1) + 4; nr++; }
+    return nr;
+}
+
+static unsigned char st_is_hot[QGPU_SK_COUNT];
+
+/* Clés chaudes des plages, dans l'ordre (liste faite une fois : les plages
+   ne dépendent que des capacités du device). */
+static const int *hot_list(int *n)
+{
+    static int hot[QGPU_MAX_UNITS * 6 + (IMG_UNITS - QGPU_MAX_UNITS) * 4 + 2], nhot = -1;
+    if (nhot < 0) {
+        int u, r, k, nr, lo[6], hi[6];
+        for (u = 0; u < QGPU_MAX_UNITS; u++) {
+            int kb = QGPU_SK_UNIT(u);
+            st_is_hot[kb + QGPU_SK_U_ENABLE] = st_is_hot[kb + QGPU_SK_U_BIND] = 1;
+            st_is_hot[kb + QGPU_SK_U_ENV_MODE] = st_is_hot[kb + QGPU_SK_U_ENV_COLOR] = 1;
+            st_is_hot[QGPU_SK_COMBINE(u)] = st_is_hot[QGPU_SK_COMBINE_SRC(u)] = 1;
+        }
+        for (u = QGPU_MAX_UNITS; u < IMG_UNITS; u++) {
+            int kb = QGPU_SK_UNIT(u);
+            st_is_hot[kb + QGPU_SK_U_ENABLE] = st_is_hot[kb + QGPU_SK_U_BIND] = 1;
+            st_is_hot[kb + QGPU_SK_U_ENV_MODE] = st_is_hot[kb + QGPU_SK_U_ENV_COLOR] = 1;
+        }
+        st_is_hot[QGPU_SK_VERTEX_PROGRAM] = st_is_hot[QGPU_SK_FRAGMENT_PROGRAM] = 1;
+        nr = state_ranges(lo, hi);
+        nhot = 0;
+        for (r = 0; r < nr; r++)
+            for (k = lo[r]; k < hi[r]; k++)
+                if (st_is_hot[k] && nhot < (int)(sizeof(hot) / sizeof(hot[0])))
+                    hot[nhot++] = k;
+    }
+    *n = nhot;
+    return hot;
+}
+
+static void send_state_blk(PCtx *p, const TexInfo *ti, int raw)
+{
+    unsigned long v[QGPU_SK_COUNT], w[QGPU_SK_COUNT], *c, fl;
+    unsigned long sbits = GLD_U32(p->ctx, CTX_STENCIL_BITS);
+    unsigned char *g = gls(p);
+    const int *hot;
+    int i, k, nhot, skip, valid = p->st_valid;
+
+    skip = G.stskip && raw && p->st_valid && p->st_known && !p->st_dirty &&
+           p->st_raw == raw && p->st_sw == p->sw && p->st_sh == p->sh &&
+           p->st_stencil == p->stencil && p->st_sbits == sbits;
+    if (skip && G.stblk_check && G.stcheck) {
+        /* lot 4, contrôle : p->st est tenu en entier sous contrôle ; le
+           calcul complet doit redonner les clés non chaudes */
+        int lo[6], hi[6], nr = state_ranges(lo, hi), r, d = 0, first = -1;
+        hot_list(&nhot);
+        compute_state(p, ti, w, raw);
+        for (r = 0; r < nr; r++)
+            for (k = lo[r]; k < hi[r]; k++)
+                if (!st_is_hot[k] && w[k] != p->st[k]) {
+                    if (first < 0)
+                        first = k;
+                    d++;
+                }
+        if (!d) {
+            STC.same++;
+        } else {
+            STC.diff++;
+            STC.diff_all++;
+            if (STC.told < ST_TOLD) {
+                STC.told++;
+                gl_note("STATE écart, image %lu : %d clés, première %d : sautée %08lx, "
+                        "calculée %08lx\n", G.n_frames, d, first, p->st[first], w[first]);
+            }
+            skip = 0;                   /* on envoie le vrai */
+        }
+    }
+    /* clés chaudes : verdict et programmes, avant le bloc. Les unités ne
+       sont refaites que si leur verdict a changé depuis la dernière série
+       (hot_ti) ; sous contrôle, elles le sont toujours et un envoi alors que
+       le verdict était « le même » est un écart. */
+    {
+        static const TexInfo ti_zero;
+        const TexInfo *tk = ti ? ti : &ti_zero;
+        int same = valid && p->hot_valid && p->hot_epoch == vd_epoch &&
+                   !memcmp(tk, &p->hot_ti, sizeof(TexInfo));
+        if (same && !G.stblk_check) {
+            STC.hot_skip++;
+            if (G.prog) {
+                state_progs(p, v);
+                for (k = QGPU_SK_VERTEX_PROGRAM; k <= QGPU_SK_FRAGMENT_PROGRAM; k++) {
+                    if (p->st[k] == v[k])
+                        continue;
+                    c = reserve(p, QGPU_LEN_SET_STATE);
+                    c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
+                    c[1] = k;
+                    c[2] = v[k];
+                    p->st[k] = v[k];
+                    STC.hot++;
+                }
+            }
+        } else {
+            int sent = 0;
+            state_units(p, ti, v);
+            state_progs(p, v);
+            hot = hot_list(&nhot);
+            for (i = 0; i < nhot; i++) {
+                k = hot[i];
+                if (valid && p->st[k] == v[k])
+                    continue;
+                c = reserve(p, QGPU_LEN_SET_STATE);
+                c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
+                c[1] = k;
+                c[2] = v[k];
+                p->st[k] = v[k];
+                STC.hot++;
+                if (k != QGPU_SK_VERTEX_PROGRAM && k != QGPU_SK_FRAGMENT_PROGRAM)
+                    sent++;
+            }
+            if (same)
+                STC.hot_chk++;
+            if (same && sent) {         /* contrôle : la reprise aurait menti */
+                STC.hot_diff++;
+                STC.hot_diff_all++;
+                if (STC.told < ST_TOLD) {
+                    STC.told++;
+                    gl_note("STATEBLK écart des unités, image %lu : %d clés\n",
+                            G.n_frames, sent);
+                }
+            }
+            p->hot_ti = *tk;
+            p->hot_epoch = vd_epoch;
+            p->hot_valid = 1;
+        }
+    }
+    if (skip) {
+        STC.skip++;
+    } else {
+        if (G.stblk_check)
+            compute_state(p, ti, w, raw);
+        fl = (raw ? QGPU_SB_F_RAW : 0) | (valid ? QGPU_SB_F_VALID : 0) |
+             (p->stencil ? QGPU_SB_F_STENCIL : 0) | (G.stblk_check ? QGPU_SB_F_CHECK : 0) |
+             (G.v7 ? QGPU_SB_F_V7 : 0) | (G.v8 ? QGPU_SB_F_V8 : 0) |
+             (G.tex14 ? QGPU_SB_F_TEX14 : 0) | (G.prog ? QGPU_SB_F_PROG : 0) |
+             (G.units > 4 ? QGPU_SB_F_UNITS8 : 0) | (G.glsl ? QGPU_SB_F_GLSL : 0);
+        c = reserve(p, G.stblk_check ? QGPU_LEN_STATE_BLOCK_CHECK : QGPU_LEN_STATE_BLOCK);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_STATE_BLOCK,
+                            G.stblk_check ? QGPU_LEN_STATE_BLOCK_CHECK : QGPU_LEN_STATE_BLOCK);
+        c[1] = fl;
+        c[2] = p->sw;
+        c[3] = p->sh;
+        c[4] = sbits;
+        c += 1 + QGPU_SB_HDR;
+        memcpy(c, g + QGPU_SB_W0_OFF, QGPU_SB_W0_N * 4);
+        c += QGPU_SB_W0_N;
+        memcpy(c, g + QGPU_SB_W1_OFF, QGPU_SB_W1_N * 4);
+        c += QGPU_SB_W1_N;
+        memcpy(c, g + QGPU_SB_W2_OFF, QGPU_SB_W2_N * 4);
+        c += QGPU_SB_W2_N;
+        memcpy(c, g + QGPU_SB_W3_OFF, QGPU_SB_W3_N * 4);
+        c += QGPU_SB_W3_N;
+        for (i = 0; i < QGPU_SB_LOD_N; i++)
+            *c++ = GLD_U32(g, QGPU_SB_LOD_OFF + i * QGPU_SB_LOD_STRIDE);
+        if (G.stblk_check) {
+            /* le vecteur de compute_state ; p->st reste tenu en entier (les
+               clés chaudes de w sont celles envoyées ci-dessus) */
+            memcpy(c, w, sizeof(w));
+            memcpy(p->st, w, sizeof(w));
+            p->st_host = 0;
+        } else {
+            p->st_host = 1;
+        }
+        p->st_known = 1;
+        p->st_dirty = 0;
+        p->st_raw = raw;
+        p->st_sw = p->sw;
+        p->st_sh = p->sh;
+        p->st_stencil = p->stencil;
+        p->st_sbits = sbits;
+        STC.full++;
+        STC.blk++;
+    }
+    p->st_valid = 1;
+    if (G.v8 && GLD_U8(g, GS_POLY_STIPPLE))
+        send_polygon_stipple(p);
+}
+
 /* ── Génériques à taille déclarée (QGPU_CAP_GEN_SIZES) ──
  * La clé QGPU_SK_GEN_SIZES est un état du contexte qui s'applique à TOUS les
  * DRAW_RAW / DRAW_RAW_BUF qui suivent. Le chemin tableaux déclare la taille
@@ -6554,6 +6864,99 @@ static unsigned long sat_add(unsigned long a, unsigned long b)
     return (a > 0xFFFFFFFFUL - b) ? 0xFFFFFFFFUL : a + b;
 }
 
+/* ── 30/09 : SOUMISSION ANTICIPÉE DES REQUÊTES (docs/backend-gl-attente.md §7) ──
+ *
+ * Où l'invité attend. DarkPlaces (Nexuiz) pose ses ~14 requêtes de halos juste
+ * APRÈS ~430 dessins, puis lit leurs comptes. Le premier q_info soumet alors
+ * une moitié de ~430 lots, et son wait_half attend que l'hôte les exécute et
+ * que le GPU les rende : 2,5 ms/image en GLSL (6 % du temps d'image).
+ *
+ * La coupe. POMPPC_GL_QFLUSH=1 : au PREMIER QUERY_BEGIN d'une soumission, si
+ * la moitié courante porte au moins QCUT_MIN mots de flux, on la soumet
+ * (flush, asynchrone) AVANT d'émettre la requête, sans attendre sa barrière.
+ * L'hôte rend les 430 lots pendant que le jeu émet ses requêtes ; au premier
+ * q_info, il ne reste que les petits dessins des requêtes. flush() fait
+ * switch_half, qui attend l'AUTRE moitié : la soumission d'avant, que l'hôte
+ * exécute de toute façon avant celle-ci (file dans l'ordre) — cette attente
+ * était déjà comprise dans celle du q_info. Protocole inchangé.
+ *
+ * Cas :
+ *   — QUERY_BEGIN répétés : qcut_seq retient la soumission (G.sub_seq, celle
+ *     que la moitié courante deviendra) qui porte déjà un QUERY_BEGIN ; on ne
+ *     coupe qu'au premier, jamais entre les 14 requêtes ;
+ *   — requête ouverte à cheval : la coupe précède le QUERY_END implicite de
+ *     q_begin ; une requête qui court d'une soumission à la suivante existait
+ *     déjà (moitié pleine) et le cœur la tient par contexte ;
+ *   — moitié pleine : reserve() soumet elle-même ; qcut_seq est relevé APRÈS
+ *     la réservation du QUERY_BEGIN, donc sur la moitié qui le porte ;
+ *   — octets de BAR0 : flush() est le geste ordinaire (arène, sommets et
+ *     indices restent dans la moitié soumise, en vol jusqu'à sa barrière) ;
+ *   — BeginPrimitiveBuffer ouvert (G.npend), synchrone (G.async nul), une
+ *     seule moitié : pas de coupe (flush y soumettrait en synchrone) ;
+ *   — G.mu relâché par flush (switch_half) : le contexte est recherché de
+ *     nouveau, comme après toute attente ;
+ *   — vidage (POMPPC_GL_DUMP) : une soumission de plus par image, vidée comme
+ *     les autres ; le rejeu joue des soumissions, il n'en suppose pas le
+ *     découpage.
+ * Compteurs : ligne QRY de la note (qry_frame), toutes les CNT_PERIOD images
+ * et à la sortie. */
+#define QCUT_MIN     256                /* mots de flux (1 Kio) : quelques lots */
+static int qcut_on = -1;                /* -1 : POMPPC_GL_QFLUSH pas encore lu */
+static unsigned long qcut_min = QCUT_MIN;
+static unsigned long qcut_seq = ~0UL;   /* soumission qui porte déjà un QUERY_BEGIN */
+static struct {
+    unsigned long begin, cut, skip, info;       /* période */
+    unsigned long info1;                        /* lectures qui soumettent des QUERY_BEGIN */
+    double        t_cut, t_info, t_info1, t_wait0;
+    double        t_lead, cut_at;               /* avance : de la coupe à la 1re lecture */
+    unsigned long a_begin, a_cut, a_info;       /* toute la vie */
+    unsigned long f0;                           /* début de la période */
+    double        a_t_cut, a_t_info;
+} QC;
+
+static void qcut_init(void)
+{
+    const char *e = getenv("POMPPC_GL_QFLUSH");
+    unsigned long v = e && *e ? strtoul(e, 0, 0) : 0;
+    qcut_on = v != 0;
+    if (v > 1)
+        qcut_min = v;                   /* POMPPC_GL_QFLUSH=<n> : seuil en mots */
+}
+
+/* Ligne QRY de la note : toutes les CNT_PERIOD images (stats_frame), et une
+   dernière à la sortie (on_exit_stats, POMPPC_GL_STATS) pour les processus
+   courts (gltest). Preuve de la coupe sans `sample`. */
+static void qry_frame(int fin)
+{
+    double tw;
+    unsigned long nf;
+    if (!fin && G.n_frames % CNT_PERIOD != 0)
+        return;
+    if (qcut_on < 0)
+        qcut_init();
+    nf = G.n_frames - QC.f0 ? G.n_frames - QC.f0 : 1;
+    QC.f0 = G.n_frames;
+    tw = G.t_wait - QC.t_wait0;
+    QC.t_wait0 = G.t_wait;
+    QC.a_begin += QC.begin; QC.a_cut += QC.cut; QC.a_info += QC.info;
+    QC.a_t_cut += QC.t_cut; QC.a_t_info += QC.t_info;
+    if (qcut_on || QC.a_begin || QC.a_info)
+        gl_note("QRY image %lu (%lu images%s) : coupe %s (seuil %lu mots) — %lu QUERY_BEGIN, "
+                "%lu coupes (%.2f ms d'attente, %.3f ms/image), %lu non coupées, "
+                "%lu lectures (%.2f ms d'attente, %.3f ms/image ; dont %lu premières, "
+                "%.3f ms/image ; avance de la coupe %.3f ms/image) ; attente totale "
+                "%.3f ms/image ; depuis le début : %lu QUERY_BEGIN, %lu coupes, "
+                "%lu lectures, attente coupes %.1f ms, lectures %.1f ms\n",
+                G.n_frames, nf, fin ? ", sortie" : "", qcut_on ? "allumée" : "éteinte",
+                qcut_min, QC.begin, QC.cut, QC.t_cut * 1000, QC.t_cut * 1000 / nf,
+                QC.skip, QC.info, QC.t_info * 1000, QC.t_info * 1000 / nf,
+                QC.info1, QC.t_info1 * 1000 / nf, QC.t_lead * 1000 / nf, tw * 1000 / nf,
+                QC.a_begin, QC.a_cut, QC.a_info,
+                QC.a_t_cut * 1000, QC.a_t_info * 1000);
+    QC.begin = QC.cut = QC.skip = QC.info = QC.info1 = 0;
+    QC.t_cut = QC.t_info = QC.t_info1 = QC.t_lead = 0;
+}
+
 /* Les deux procédures de rastérisation. GLEngine ignore leur valeur de retour. */
 static long q_begin(void *ctx, unsigned long h)
 {
@@ -6563,6 +6966,25 @@ static long q_begin(void *ctx, unsigned long h)
     p = find_ctx(ctx);
     if (p && G.v8 && !qry_off && h && !p->broken && p->qctx >= 0 &&
         h - 1 < QGPU_CLIENT_QUERY_IDS) {
+        if (qcut_on < 0)
+            qcut_init();
+        QC.begin++;
+        if (qcut_on && qcut_seq != G.sub_seq && G.ncmd) {
+            if (G.ncmd >= qcut_min && G.async && !G.npend && G.nhalf >= 2 && !G.dead) {
+                double w = G.t_wait;
+                flush();                /* soumise, PAS attendue (§7) */
+                QC.cut++;
+                QC.t_cut += G.t_wait - w;
+                QC.cut_at = now_s();
+                p = find_ctx(ctx);      /* G.mu a pu être relâché */
+                if (!p || qry_off || p->broken || p->qctx < 0) {
+                    pthread_mutex_unlock(&G.mu);
+                    return 0;
+                }
+            } else {
+                QC.skip++;
+            }
+        }
         id = G.query_base + (h - 1);
         /* Le cœur refuse une seconde ouverture ; GLEngine l'interdit déjà, mais
            un contexte détruit puis recréé pourrait laisser la nôtre ouverte. */
@@ -6574,6 +6996,7 @@ static long q_begin(void *ctx, unsigned long h)
         c = reserve(p, QGPU_LEN_QUERY);
         c[0] = QGPU_CMD_HDR(QGPU_OP_QUERY_BEGIN, QGPU_LEN_QUERY);
         c[1] = id;
+        qcut_seq = G.sub_seq;           /* après reserve : la moitié qui le porte */
         qry_extra[h - 1] = 0;
         p->q_open = (long)id;
         p->q_extra = 0;
@@ -6665,8 +7088,23 @@ static long q_info(void *ctx, unsigned long h, unsigned long pname, unsigned lon
         c[2] = G.q.base + off;
         {
             int i = G.cur;
+            double w = G.t_wait;
+            /* « première » lecture : la moitié qu'elle soumet porte des
+               QUERY_BEGIN — c'est elle qui attendait les ~430 lots */
+            int first = qcut_seq == G.sub_seq;
             flush();
             wait_half(i);
+            QC.info++;
+            QC.t_info += G.t_wait - w;
+            if (first && QC.cut_at > 0) {
+                /* temps laissé à l'hôte entre la coupe et cette lecture */
+                QC.t_lead += now_s() - (G.t_wait - w) - QC.cut_at;
+                QC.cut_at = 0;
+            }
+            if (first) {
+                QC.info1++;
+                QC.t_info1 += G.t_wait - w;
+            }
         }
         if (!qry_off && !p->broken) {
             const unsigned long *w = (const unsigned long *)(G.q.win + off);
@@ -7643,6 +8081,12 @@ static int geom_va_on(PCtx *p)
        §3 bis). glBegin garde le descripteur (mode mixte). */
     if (G.prog && p->vp_on && V && (va_enabled(V, 0) || va_enabled(V, 16)))
         return 1;
+    /* A4 (30/09) : POMPPC_GL_NATSHM ne touche PAS au routage. Essayé en VM
+       (gltest varray) : cfg+0x78 posé en permanence, ou POMPPC_GL_ARRAY=1,
+       laisse les tableaux CLIENTS du pipeline fixe au déroulage de GLEngine ;
+       POMPPC_GL_ARRAY=2 (descripteur retiré) les perd sans aucun appel au
+       pilote. Seuls les VBO et la plage VAR arrivent à RenderVertexArray
+       (docs/protocole-v23-geometrie.md §3). */
     if (!sw)
         return 0;
     if (sw >= 2)
@@ -9995,7 +10439,7 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
     geom_send_all(p, p->geom_fmt);
     /* Plus aucun vidage entre ici et EndPrimitiveBuffer : GLEngine écrit dans
        la fenêtre partagée pendant ce temps. On fait donc la place maintenant. */
-    if (G.ncmd + QGPU_LEN_DRAW_RAW + 4 > CMD_WORDS || geom_slots(words) < GEOM_MIN_SLOTS)
+    if (G.ncmd + QGPU_LEN_DRAW_RAW_SANE + 4 > CMD_WORDS || geom_slots(words) < GEOM_MIN_SLOTS)
         flush();
     slots = geom_slots(words);
     /* TAMPON = NOMBRE ENTIER DE PRIMITIVES. GLEngine remplit le tampon offert
@@ -11531,6 +11975,20 @@ static int nat_cur_of(int slot, int *n)
     return -1;
 }
 
+/* A4, volet géométrie (POMPPC_GL_NATSHM) : un tableau CLIENT (hors VBO) lu
+ * par un dessin. Ses octets [src + vmin·pas, src + vmax·pas + taille) sont
+ * recopiés TELS QUELS dans la zone des sommets (memcpy, aucune conversion sur
+ * le G4) et décrits en QGPU_BUF_SHMEM ; les tableaux entrelacés (plages qui se
+ * chevauchent ou se touchent) partagent un bloc. Les descripteurs désignent
+ * le sommet vmin : indexé, `premier` = vmin est la base des indices
+ * (QGPU_CAP_GEOM_HOST) ; non indexé, premier = 0. */
+typedef struct NatCli {
+    const unsigned char *lo, *hi;       /* octets lus : [lo, hi) */
+    int d;                              /* descripteur */
+    int blk;                            /* bloc (après fusion) */
+} NatCli;
+#define NATSHM_GAP 64                   /* trou toléré entre deux plages d'un bloc */
+
 static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
                             unsigned long mode, long first, long count,
                             unsigned long itype, const void *indices,
@@ -11539,7 +11997,11 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
     NatBuf nb[QGPU_NATTR_MAX + 1];
     unsigned long d[QGPU_NATTR_MAX][QGPU_NATTR_WORDS];
     int dbuf[QGPU_NATTR_MAX];
-    int nd = 0, nn = 0, j, k, ib = -1, seen_vbo = 0, cn, w;
+    NatCli cl[QGPU_NATTR_MAX];
+    const unsigned char *blo[QGPU_NATTR_MAX], *bhi[QGPU_NATTR_MAX];
+    unsigned long boff[QGPU_NATTR_MAX], cbytes = 0, vbase = 0;
+    int nd = 0, nn = 0, j, k, ib = -1, seen_vbo = 0, cn, w, ncl = 0, nblk = 0;
+    int fwhy = 0;                       /* A4 : ligne du repli (note) */
     unsigned long isz = 0, ioff_b = 0, itype_h = QGPU_IDX_NONE, ibuf = QGPU_BUF_SHMEM;
     unsigned long ioff = 0, aoff, dbytes, ibytes, nverts, *c, *dst;
     unsigned long a[QGPU_LEN_SET_CURRENT - 1];
@@ -11556,35 +12018,60 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
         int code;
         if (!at->src) {
             if (j == 0 || nat_cur_of(at->slot, &cn) < 0)
-                goto fall;
+                { fwhy = __LINE__; goto fall; }
             continue;
         }
         vbo = GLD_U32(V, VA_VBO(V, at->slot));
-        if (!vbo)
-            goto fall;                  /* tableau client : l'empaquetage */
+        if (!vbo) {
+            /* tableau client : recopié tel quel (A4), sinon l'empaquetage */
+            unsigned long len;
+            code = nat_code(j, at->slot);
+            if (!G.natshm || code < 0 || !nat_type_ok(at->type, at->bpc) ||
+                at->src_n < 1 || at->src_n > 4 || at->stride <= 0)
+                { fwhy = __LINE__; goto fall; }
+            stride = (unsigned long)at->stride;
+            if (vmax - vmin > (0x7fffffffUL - 64) / stride)
+                { fwhy = __LINE__; goto fall; }
+            len = (vmax - vmin) * stride + (unsigned long)(at->src_n * at->bpc);
+            cl[ncl].lo = at->src + vmin * stride;
+            cl[ncl].hi = cl[ncl].lo + len;
+            if (cl[ncl].hi < cl[ncl].lo)
+                { fwhy = __LINE__; goto fall; }              /* bout de l'espace d'adressage */
+            cl[ncl].d = nd;
+            ncl++;
+            dbuf[nd] = -1;
+            d[nd][0] = (unsigned long)code;
+            d[nd][1] = QGPU_BUF_SHMEM;
+            d[nd][2] = 0;               /* après la recopie */
+            d[nd][3] = stride;
+            d[nd][4] = at->type;
+            d[nd][5] = (unsigned long)at->src_n | (at->norm ? QGPU_NATTR_NORMALIZED : 0);
+            nd++;
+            continue;
+        }
         seen_vbo = 1;
         code = nat_code(j, at->slot);
         b = buf_from_vbo(vbo);
         if (code < 0 || !b)
-            goto fall;
+            { fwhy = __LINE__; goto fall; }
         base = GLD_U32((unsigned char *)vbo, VBO_DATA);
         size = GLD_U32((unsigned char *)vbo, VBO_SIZE);
         if (!base || !size || size > RAWPOOL_BYTES || (unsigned long)at->src < base)
-            goto fall;
+            { fwhy = __LINE__; goto fall; }
         off = (unsigned long)at->src - base;
         stride = (unsigned long)at->stride;
         if (!nat_type_ok(at->type, at->bpc) || at->src_n < 1 || at->src_n > 4 ||
             at->stride <= 0 || off >= size)
-            goto fall;
+            { fwhy = __LINE__; goto fall; }
         /* off + vmax·pas + taille ≤ taille logique, sans débordement 32 bits */
         if (vmax && vmax > (size - off) / stride)
-            goto fall;
+            { fwhy = __LINE__; goto fall; }
         end = off + vmax * stride + (unsigned long)(at->src_n * at->bpc);
         if (end > size)
-            goto fall;
+            { fwhy = __LINE__; goto fall; }
         k = nat_buf_add(nb, &nn, b, base, size, off + vmin * stride, end);
         if (k < 0)
-            goto fall;
+            { fwhy = __LINE__; goto fall; }
         dbuf[nd] = k;
         d[nd][0] = (unsigned long)code;
         d[nd][1] = 0;                   /* tampon hôte : après raw_ensure */
@@ -11594,8 +12081,36 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
         d[nd][5] = (unsigned long)at->src_n | (at->norm ? QGPU_NATTR_NORMALIZED : 0);
         nd++;
     }
-    if (!seen_vbo)
+    if (!seen_vbo && !ncl)
         return -1;
+    if (ncl) {
+        /* A4 : les descripteurs désignent le sommet vmin (base des indices) */
+        vbase = vmin;
+        /* fusion des plages : triées par début (≤ 24, insertion) */
+        for (j = 1; j < ncl; j++) {
+            NatCli t = cl[j];
+            for (k = j; k > 0 && cl[k - 1].lo > t.lo; k--)
+                cl[k] = cl[k - 1];
+            cl[k] = t;
+        }
+        for (j = 0; j < ncl; j++) {
+            if (nblk && cl[j].lo <= bhi[nblk - 1] + NATSHM_GAP) {
+                if (cl[j].hi > bhi[nblk - 1])
+                    bhi[nblk - 1] = cl[j].hi;
+            } else {
+                blo[nblk] = cl[j].lo;
+                bhi[nblk] = cl[j].hi;
+                nblk++;
+            }
+            cl[j].blk = nblk - 1;
+        }
+        for (k = 0; k < nblk; k++) {
+            boff[k] = cbytes;
+            cbytes += ((unsigned long)(bhi[k] - blo[k]) + 3) & ~3UL;
+        }
+        if (cbytes > VTX_LIMIT - VTX_OFF - 0x10000)
+            { fwhy = __LINE__; goto fall; }                  /* plus grand que la zone : l'empaquetage */
+    }
 
     /* 2. Indices : dans un VBO d'éléments lié (décrit tel quel), sinon
           recopiés dans la zone des indices (u8 → u16) */
@@ -11604,7 +12119,7 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
         isz = itype == VA_GL_UINT ? 4 : itype == VA_GL_USHORT ? 2 :
               itype == VA_GL_UBYTE ? 1 : 0;
         if (!isz || !indices)
-            goto fall;
+            { fwhy = __LINE__; goto fall; }
         ev = GLD_U32(V, VA_EBO);
         if (ev && isz > 1) {
             PBuf *e = buf_from_vbo(ev);
@@ -11617,7 +12132,7 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
                 ioff_b = p0 - base;
                 ib = nat_buf_add(nb, &nn, e, base, size, ioff_b, ioff_b + nidx * isz);
                 if (ib < 0)
-                    goto fall;
+                    { fwhy = __LINE__; goto fall; }
             }
         }
         itype_h = isz == 4 ? QGPU_IDX_U32 : QGPU_IDX_U16;
@@ -11629,7 +12144,7 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
     for (k = 0; k < nn; k++)
         if (!raw_ensure(p, nb[k].b, nb[k].size, nb[k].base) || !G.native ||
             !raw_sync(p, nb[k].b, nb[k].base, nb[k].size, nb[k].lo, nb[k].hi))
-            goto fall;
+            { fwhy = __LINE__; goto fall; }
 
     /* 4. Attributs constants du plan : leur valeur en SET_CURRENT (peut
           vider le flux, lui aussi) */
@@ -11658,7 +12173,7 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
           indices dans la sienne, commande — AUCUN vidage entre les trois (pas
           d'arène ici : arena_alloc peut vider, et les indices écrits avant
           partiraient dans l'autre moitié que la commande). */
-    dbytes = (unsigned long)nd * QGPU_NATTR_WORDS * 4;
+    dbytes = (unsigned long)nd * QGPU_NATTR_WORDS * 4 + cbytes;
     ibytes = (nidx && ib < 0) ? nidx * (isz == 4 ? 4UL : 2UL) : 0;
     /* Finding 2 (relecture du 29/09) : sans vidage ci-dessous, rien n'avait
        attendu la fin d'une attente d'un autre fil (F9) avant d'écrire dans
@@ -11671,18 +12186,40 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
     if (G.ncmd + QGPU_LEN_DRAW_NATIVE + QGPU_LEN_DRAW_RAW + 2 * QGPU_LEN_CTX + 8 > CMD_WORDS ||
         VTX_OFF + G.vtx + dbytes > VTX_LIMIT ||
         (ibytes && ((G.idx + 3) & ~3UL) + ibytes > IDX_SIZE))
-        goto fall;
+        { fwhy = __LINE__; goto fall; }
     /* un vidage ci-dessus a pu rendre un refus de l'hôte (broken_all) :
        DRAW_NATIVE coupé, ou le contexte perdu */
     if (!G.native || p->broken || p->qctx < 0)
-        goto fall;
+        { fwhy = __LINE__; goto fall; }
     close_raw();                        /* la série Begin/End en attente d'abord */
+    if (ncl) {
+        /* A4 : les octets de l'application, tels quels (lecture sous la
+           garde pack_jmp de geom_draw_client : une faute jette le dessin
+           avant qu'aucune commande ne soit écrite) */
+        unsigned char *cb = G.win + VTX_OFF + G.vtx;
+        for (k = 0; k < nblk; k++)
+            memcpy(cb + boff[k], blo[k], (unsigned long)(bhi[k] - blo[k]));
+        for (j = 0; j < ncl; j++)
+            d[cl[j].d][2] = G.base + VTX_OFF + G.vtx + boff[cl[j].blk] +
+                            (unsigned long)(cl[j].lo - blo[cl[j].blk]);
+        G.vtx += cbytes;
+        dbytes -= cbytes;
+        G.n_natshm_draws++;
+        G.n_natshm_bytes += cbytes;
+    }
     dst = (unsigned long *)(G.win + VTX_OFF + G.vtx);
     for (j = 0; j < nd; j++) {
-        const PBuf *b = nb[dbuf[j]].b;
-        dst[0] = d[j][0];
-        dst[1] = (unsigned long)G.rp_qid[b->rp];
-        dst[2] = b->rp_off + d[j][2];
+        if (dbuf[j] < 0) {              /* A4 : tableau client dans BAR0 */
+            dst[0] = d[j][0];
+            dst[1] = QGPU_BUF_SHMEM;
+            dst[2] = d[j][2];
+        } else {
+            const PBuf *b = nb[dbuf[j]].b;
+            dst[0] = d[j][0];
+            dst[1] = (unsigned long)G.rp_qid[b->rp];
+            /* A4 : désigné au sommet vbase (0 sans tableau client) */
+            dst[2] = b->rp_off + d[j][2] + vbase * d[j][3];
+        }
         dst[3] = d[j][3];
         dst[4] = d[j][4];
         dst[5] = d[j][5];
@@ -11724,7 +12261,9 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
     c[3] = ibuf;
     c[4] = ioff;
     c[5] = itype_h;
-    c[6] = nidx ? 0 : (unsigned long)first;
+    /* indexé : base des indices (A4, 0 sans tableau client) ; non indexé :
+       premier sommet, compté depuis le sommet que désignent les descripteurs */
+    c[6] = nidx ? vbase : (unsigned long)first - vbase;
     c[7] = (unsigned long)nd;
     c[8] = aoff;
     G.ncmd += QGPU_LEN_DRAW_NATIVE;
@@ -11752,6 +12291,17 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
 fall:
     if (seen_vbo)
         G.n_native_fall++;
+    if (ncl)
+        G.n_natshm_fall++;
+    if (G.natshm) {                     /* A4 : pourquoi l'empaquetage (8 fois) */
+        static int told;
+        if (told < 8) {
+            told++;
+            gl_note("NATSHM repli ligne %d : %d attributs du plan, %d clients, VBO %d, "
+                    "mode %lu n %ld indexé %d, sommets %lu..%lu\n", fwhy, pl->n, ncl,
+                    seen_vbo, mode, count, nidx != 0, vmin, vmax);
+        }
+    }
     return -1;
 }
 
@@ -11935,6 +12485,12 @@ static void vd_frame(void)
 {
     if (G.n_frames % CNT_PERIOD != 0)
         return;
+    if (G.rawsane || G.natshm) {        /* A4, volet géométrie (cumuls) */
+        gl_note("GEOMHOST image %lu : %lu DRAW_RAW_SANE, %lu dessins de tableaux clients "
+                "natifs (%lu Kio recopiés), %lu retombés sur l'empaquetage\n",
+                G.n_frames, G.n_rawsane, G.n_natshm_draws, G.n_natshm_bytes >> 10,
+                G.n_natshm_fall);
+    }
     if (G.vcheck || G.count || G.stcheck) {
         gl_note("VERDICT image %lu : %lu repris, %lu recalculés (clé changée ou sans "
                 "verdict) ; contrôle : %lu identiques, %lu écarts (%lu depuis le début)\n",
@@ -11949,6 +12505,12 @@ static void vd_frame(void)
             gl_note("STATE image %lu : %lu sautés, %lu calculés ; contrôle : %lu identiques, "
                     "%lu écarts (%lu depuis le début)\n", G.n_frames, STC.skip, STC.full,
                     STC.same, STC.diff, STC.diff_all);
+        if (G.stblk)
+            gl_note("STATEBLK image %lu : %lu blocs (contrôle %d), %lu clés chaudes, "
+                    "%lu unités reprises ; contrôle des unités : %lu reprises vérifiées, "
+                    "%lu écarts (%lu depuis le début)\n", G.n_frames, STC.blk,
+                    G.stblk_check, STC.hot, STC.hot_skip, STC.hot_chk, STC.hot_diff,
+                    STC.hot_diff_all);
         if (G.texmemo)
             gl_note("TEXMEMO image %lu : %lu relevés (%lu unités sans table), %lu repris, "
                     "%lu textures gardées ; contrôle : %lu identiques, %lu textures identiques, "
@@ -11973,12 +12535,24 @@ static void vd_frame(void)
     USC.fill = USC.hit = USC.same = USC.diff = 0;
     USC.tex_hit = USC.tex_same = USC.unit_hit = 0;
     STC.skip = STC.full = STC.same = STC.diff = 0;
+    STC.blk_all += STC.blk;
+    STC.blk = STC.hot = 0;
+    STC.hot_skip = STC.hot_diff = STC.hot_chk = 0;
 }
 
 /* Bilan de toute la vie du processus (VERDICTCHECK), à la destruction d'un
    contexte : gltest ne fait pas 500 images. */
 static void vd_total(const char *why)
 {
+    if (G.rawsane || G.natshm)          /* A4 : bilan de toute la vie (gltest) */
+        gl_note("GEOMHOST total (%s, image %lu) : %lu DRAW_RAW_SANE, %lu dessins de "
+                "tableaux clients natifs (%lu Kio recopiés), %lu retombés sur l'empaquetage\n",
+                why, G.n_frames, G.n_rawsane, G.n_natshm_draws, G.n_natshm_bytes >> 10,
+                G.n_natshm_fall);
+    if (G.stblk)                        /* A4 : preuve que la voie a servi */
+        gl_note("STATEBLK total (%s, image %lu) : %lu blocs (contrôle %d), unités : "
+                "%lu écarts\n", why, G.n_frames, STC.blk_all + STC.blk, G.stblk_check,
+                STC.hot_diff_all);
     if (!G.vcheck && !G.stcheck)
         return;
     gl_note("VERDICT total (%s, image %lu) : %lu repris, %lu recalculés ; contrôle : "
@@ -13120,7 +13694,7 @@ static void pt_size(Batch *b, const unsigned char *v0)
     if (sz > 64.0f) sz = 64.0f;
     sz = (float)(int)(sz + 0.5f);
     bits = fbits(sz);
-    if (b->p->st_valid && b->p->st[QGPU_SK_POINT_SIZE] == bits)
+    if (b->p->st_valid && !b->p->st_host && b->p->st[QGPU_SK_POINT_SIZE] == bits)
         return;
     c = reserve(b->p, QGPU_LEN_SET_STATE);     /* ferme la série en cours */
     c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);

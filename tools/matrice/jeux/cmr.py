@@ -17,8 +17,10 @@ Le plugin compte des ÉCHANGES : en course, trois par image du jeu (plein
 écran + deux aglSwapBuffers de la cible 800×600 cachée) ; echanges_par_image
 ramène ms/image à l'image du jeu (70 ms au 27/09, plugin 20260927-rtt).
 Fenêtre de mesure : après la touche COURSE, la première tranche de 600
-échanges régulière (deux moitiés à 10 % près, > 18 ms/échange : le survol
-d'avant le départ tourne à ~12) et sans pause de chargement (> 500 ms).
+échanges régulière (deux moitiés à 10 % près, > 15 ms/échange : le survol
+d'avant le départ tourne à 7-14) et sans pause de chargement (> 500 ms).
+Seuil abaissé de 18 à 15 le 01/10 : avec POMPPC_GL_NATSHM la course tourne à
+~17 ms/échange (~22 sans), et la cellule restait rouge, course non reconnue.
 
 Fenêtre non automatisée : le dialogue d'options n'offre que résolution,
 couleurs et FSAA, le jeu s'ouvre toujours en plein écran (800×600, changement
@@ -122,7 +124,7 @@ class ColinMcRae(Jeu):
             if any(i not in rows for i in (x, x + 300, x + 600)):
                 continue
             s1, s2 = ms(x, x + 300), ms(x + 300, x + 600)
-            if min(s1, s2) < 18 or abs(s1 - s2) > 0.1 * max(s1, s2):
+            if min(s1, s2) < 15 or abs(s1 - s2) > 0.1 * max(s1, s2):
                 continue
             if any(i + 1 in rows and i in rows and rows[i + 1][0] - rows[i][0] > 500
                    for i in range(x, x + 600)):
