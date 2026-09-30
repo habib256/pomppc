@@ -10,7 +10,8 @@
 # softfloat (fpu_softfloat.c.o).
 # Quand l'arbre a x-fp-flat (patches/tcg/0013, §22), fpproof.c est compilé
 # avec -DFPPROOF_FLAT : helper_fp32_flat/helper_fcmpu_flat de l'objet sont
-# comparés à la séquence d'origine sur TOUS les vecteurs.
+# comparés à la séquence d'origine sur TOUS les vecteurs ; avec x-fp-native
+# (patches/tcg/0014), ppc_fp32_native_slow (le talon hors ligne) aussi.
 # BUILD=… : dossier de construction de l'arbre (défaut <arbre>/build).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,6 +36,7 @@ B="${BUILD:-$SRC/build}"
 P="$B/libqemu-ppc64-softmmu.a.p"
 DFLAT=""
 grep -q "helper_fp32_flat" "$SRC/target/ppc/fpu_helper.c" && DFLAT="-DFPPROOF_FLAT"
+grep -q "ppc_fp32_native_slow" "$SRC/target/ppc/fpu_helper.c" && DFLAT="$DFLAT -DFPPROOF_NATIVE"
 FLAGS="$(python3 - "$B/compile_commands.json" <<'PY'
 import json, shlex, sys
 for e in json.load(open(sys.argv[1])):

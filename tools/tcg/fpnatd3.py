@@ -87,6 +87,7 @@ def main():
     if a.cpu:
         os.environ["CPU_OPTS"] = a.cpu
     args = argparse.Namespace(smp=2, qemu=a.qemu, extra=a.extra)
+    E.SYM = E.Symboliseur()
     vm = E.VM("fpnat-" + a.nom, a.slot, args)
     note("binaire", E.binaire_qemu(args), "CPU_OPTS+=%s" % a.cpu, "EXTRA=%s" % a.extra)
     try:

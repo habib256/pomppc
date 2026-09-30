@@ -20,13 +20,13 @@ done <<'MUT'
 # frT pas écrit avant float_check_status (exception différée)
 s/\*cpu_fpr_ptr(env, frt) = r;/;/
 # séquence d'origine sans reset_fpstatus
-/^Int128 helper_fp32_flat/,/^}/s/^    helper_reset_fpstatus(env);$/    ;/
+/^static Int128 fp32_flat/,/^}/s/^    helper_reset_fpstatus(env);$/    ;/
 # fmuls lent sur b au lieu de c
 s/r = float64r32_mul(a, c, \&env->fp_status);/r = float64r32_mul(a, b, \&env->fp_status);/
 # chemin court sans les drapeaux « inexact »
-/^Int128 helper_fp32_flat/,/^}/s/set_float_exception_flags(float_flag_inexact, \&env->fp_status);/;/
+/^static Int128 fp32_flat/,/^}/s/set_float_exception_flags(float_flag_inexact, \&env->fp_status);/;/
 # fcmpu lent sans FI
-/^Int128 helper_fcmpu_flat/,/^}/s/do_float_check_status(env, true, ra);/do_float_check_status(env, false, ra);/
+/^static Int128 fcmpu_flat/,/^}/s/do_float_check_status(env, true, ra);/do_float_check_status(env, false, ra);/
 # fnmsubs lent avec les drapeaux de fnmadds
 s/return do_fmadds(env, a, c, b, NMSUB_FLGS, ra);/return do_fmadds(env, a, c, b, NMADD_FLGS, ra);/
 # FPSCR rendu : l'ancien au lieu de celui de la séquence d'origine

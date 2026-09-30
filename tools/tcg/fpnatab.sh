@@ -19,7 +19,7 @@ WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT=$1; shift
 mkdir -p "$OUT"
 JOB=${JOB:-fptest}
-BANC=${BANC:-10000000}
+BANC=${BANC-10000000}
 export SMP=${SMP:-2}
 export BASECPU="x-fast-fp=on,x-sr-tlb=on,x-lfs-inline=on,x-vfp-fast=on,x-vperm-fast=on,x-fp-inline=on,x-ret-inline=on,x-jc-idx=on,x-icbi-sync=on,x-msr-nobql=on"
 export BASETCG="x-jit-near=on,x-jc-bits=14"
@@ -46,6 +46,12 @@ for m in "$@"; do
   # Hôte chargé : devloop peut taper `mount -uw /` avant l'invite, la racine
   # reste en lecture seule et l'agent échoue. Sonde : un job vide ; s'il ne
   # revient pas, Ctrl-C à l'agent, `mount -uw /`, agent relancé.
+  if ! kill -0 "$(cat "$WT/bench/devloop/qemu.pid" 2>/dev/null)" 2>/dev/null; then
+    echo "  $nom-$k : QEMU n'a pas démarré (voir $D/qemu.log)" | tee -a "$OUT/journal.txt"
+    cp "$WT/bench/devloop/qemu.log" "$D/qemu.log" 2>/dev/null
+    rm -f "$MYLOCK" "$WT/bench/devloop/qemu.pid"
+    continue
+  fi
   P=$(mktemp -d); printf '#!/bin/sh\necho sonde\n' > "$P/job.sh"
   for essai in 1 2 3; do
     python3 "$WT/tools/guest/devloop.py" run "$P" --timeout 60 >> "$D/start.txt" 2>&1 && break

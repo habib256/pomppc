@@ -47,23 +47,25 @@ diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
  {
      CPU_DoubleU farg1, farg2;
      uint32_t ret = 0;
-@@ -967,8 +967,14 @@
+@@ -967,10 +967,16 @@
                   && (float64_is_signaling_nan(farg1.d, &env->fp_status) ||
                       float64_is_signaling_nan(farg2.d, &env->fp_status)))) {
          /* sNaN comparison */
 -        float_invalid_op_vxsnan(env, GETPC());
 +        float_invalid_op_vxsnan(env, retaddr);
      }
-+}
-+
+ }
+ 
 +void helper_fcmpu(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
 +                  uint32_t crfD)
 +{
 +    do_fcmpu(env, arg1, arg2, crfD, GETPC());
- }
- 
++}
++
  void helper_fcmpo(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
-@@ -4054,3 +4060,120 @@
+                   uint32_t crfD)
+ {
+@@ -4054,3 +4060,134 @@
  
      qatomic_inc(gate ? &fpv_slow_opnd[op] : &fpv_slow_gate[op]);
  }
@@ -127,11 +129,10 @@ diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
 +    }
 +}
 +
-+Int128 helper_fp32_flat(CPUPPCState *env, uint64_t a, uint64_t b, uint64_t c,
-+                        uint32_t op, uint32_t frt)
++static Int128 fp32_flat(CPUPPCState *env, uint64_t a, uint64_t b, uint64_t c,
++                        uint64_t fpscr, uint32_t op, uint32_t frt,
++                        uintptr_t ra)
 +{
-+    uintptr_t ra = GETPC();
-+    uint64_t fpscr = env->fpscr;
 +    uint64_t r;
 +
 +    if (fpi_gate(fpscr)) {
@@ -158,12 +159,21 @@ diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
 +    return int128_make128(r, env->fpscr);
 +}
 +
-+/* fcmpu: returns (CR field, FPSCR) */
-+Int128 helper_fcmpu_flat(CPUPPCState *env, uint64_t a, uint64_t b,
-+                         uint32_t bf)
++/*
++ * fpscr == env->fpscr (TCG_CALL_NO_WG: the globals are synced before the
++ * call); passed in a register so that the short path reads no memory.
++ * sel = op | frT << 8.
++ */
++Int128 helper_fp32_flat(CPUPPCState *env, uint64_t a, uint64_t b, uint64_t c,
++                        uint64_t fpscr, uint32_t sel)
 +{
-+    uintptr_t ra = GETPC();
-+    uint64_t fpscr = env->fpscr;
++    return fp32_flat(env, a, b, c, fpscr, sel & 0xff, sel >> 8, GETPC());
++}
++
++/* fcmpu: returns (CR field, FPSCR) */
++static Int128 fcmpu_flat(CPUPPCState *env, uint64_t a, uint64_t b,
++                         uint64_t fpscr, uint32_t bf, uintptr_t ra)
++{
 +    uint32_t crf = fpi_fcmpu(fpscr, a, b);
 +
 +    if (crf) {
@@ -184,10 +194,16 @@ diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
 +    do_float_check_status(env, true, ra);
 +    return int128_make128(env->crf[bf], env->fpscr);
 +}
++
++Int128 helper_fcmpu_flat(CPUPPCState *env, uint64_t a, uint64_t b,
++                         uint64_t fpscr, uint32_t bf)
++{
++    return fcmpu_flat(env, a, b, fpscr, bf, GETPC());
++}
 diff --git a/target/ppc/helper.h b/target/ppc/helper.h
 --- a/target/ppc/helper.h
 +++ b/target/ppc/helper.h
-@@ -93,6 +93,14 @@
+@@ -93,6 +93,16 @@
  DEF_HELPER_7(fpv_arith, void, env, i32, i64, i64, i64, i64, tl)
  DEF_HELPER_6(fpv_fcmpu, void, env, i32, i64, i64, i32, tl)
  DEF_HELPER_FLAGS_6(fpv_slow, TCG_CALL_NO_RWG, void, env, i32, i64, i64, i64, tl)
@@ -195,10 +211,12 @@ diff --git a/target/ppc/helper.h b/target/ppc/helper.h
 + * x-fp-flat (POMPPC tcg/0013): one call, no branch.  NO_WG: the globals are
 + * synced before the call (a deferred FP exception may be raised from it),
 + * and the helper does not write any: the new FPSCR (and CR field) come back
-+ * in the result, the generated code writes them.
++ * in the result, the generated code writes them.  The FPSCR is also passed
++ * as an argument: the short path reads no memory (a read of env->fpscr,
++ * just stored by the sync, would chain every instruction through memory).
 + */
-+DEF_HELPER_FLAGS_6(fp32_flat, TCG_CALL_NO_WG, i128, env, i64, i64, i64, i32, i32)
-+DEF_HELPER_FLAGS_4(fcmpu_flat, TCG_CALL_NO_WG, i128, env, i64, i64, i32)
++DEF_HELPER_FLAGS_6(fp32_flat, TCG_CALL_NO_WG, i128, env, i64, i64, i64, i64, i32)
++DEF_HELPER_FLAGS_5(fcmpu_flat, TCG_CALL_NO_WG, i128, env, i64, i64, i64, i32)
  DEF_HELPER_3(store_fpscr, void, env, i64, i32)
  DEF_HELPER_2(fpscr_clrbit, void, env, i32)
  DEF_HELPER_2(fpscr_setbit, void, env, i32)
@@ -224,7 +242,7 @@ diff --git a/target/ppc/translate.c b/target/ppc/translate.c
 diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c.inc
 --- a/target/ppc/translate/fp-impl.c.inc
 +++ b/target/ppc/translate/fp-impl.c.inc
-@@ -252,16 +252,74 @@
+@@ -252,16 +252,76 @@
      gen_compute_fprf_float64(r);
  
      gen_set_label(l_done);
@@ -252,6 +270,7 @@ diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c
 +    REQUIRE_INSNS_FLAGS(ctx, FLOAT);
 +    REQUIRE_FPU(ctx);
 +
++    tcg_gen_extu_tl_i64(f, cpu_fpscr);
 +    get_fpr(a, fra);
 +    if (op == FPI_ADD || op == FPI_SUB || op >= FPI_MADD) {
 +        b = tcg_temp_new_i64();
@@ -261,8 +280,8 @@ diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c
 +        c = tcg_temp_new_i64();
 +        get_fpr(c, frc);
 +    }
-+    gen_helper_fp32_flat(ret, tcg_env, a, b, c, tcg_constant_i32(op),
-+                         tcg_constant_i32(frt));
++    gen_helper_fp32_flat(ret, tcg_env, a, b, c, f,
++                         tcg_constant_i32(op | frt << 8));
 +    tcg_gen_extr_i128_i64(r, f, ret);
 +    set_fpr(frt, r);
 +    tcg_gen_trunc_i64_tl(cpu_fpscr, f);
@@ -270,8 +289,8 @@ diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c
          gen_set_cr1_from_fpscr(ctx);
      }
      return true;
- }
- 
++}
++
 +static void gen_fcmpu_flat(DisasContext *ctx)
 +{
 +    int bf = crfD(ctx->opcode);
@@ -283,12 +302,13 @@ diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c
 +
 +    get_fpr(a, rA(ctx->opcode));
 +    get_fpr(b, rB(ctx->opcode));
-+    gen_helper_fcmpu_flat(ret, tcg_env, a, b, tcg_constant_i32(bf));
++    tcg_gen_extu_tl_i64(f, cpu_fpscr);
++    gen_helper_fcmpu_flat(ret, tcg_env, a, b, f, tcg_constant_i32(bf));
 +    tcg_gen_extr_i128_i64(crf, f, ret);
 +    tcg_gen_extrl_i64_i32(cpu_crf[bf], crf);
 +    tcg_gen_trunc_i64_tl(cpu_fpscr, f);
-+}
-+
+ }
+ 
  static bool do_fpi_ab(DisasContext *ctx, arg_A_tab *a,
                        void (*helper)(TCGv_i64, TCGv_ptr, TCGv_i64, TCGv_i64),
                        int op)
@@ -299,7 +319,7 @@ diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c
      if (ctx->fp_inline) {
          return do_fp_inline(ctx, op, a->frt, a->fra, a->frb, 0, a->rc);
      }
-@@ -272,6 +330,9 @@
+@@ -272,6 +332,9 @@
                        void (*helper)(TCGv_i64, TCGv_ptr, TCGv_i64, TCGv_i64),
                        int op)
  {
@@ -309,7 +329,7 @@ diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c
      if (ctx->fp_inline) {
          return do_fp_inline(ctx, op, a->frt, a->fra, 0, a->frc, a->rc);
      }
-@@ -283,6 +344,9 @@
+@@ -283,6 +346,9 @@
                                        TCGv_i64, TCGv_i64),
                         int op)
  {
@@ -319,7 +339,7 @@ diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c
      if (ctx->fp_inline) {
          return do_fp_inline(ctx, op, a->frt, a->fra, a->frb, a->frc, a->rc);
      }
-@@ -572,6 +636,10 @@
+@@ -572,6 +638,10 @@
          gen_exception(ctx, POWERPC_EXCP_FPU);
          return;
      }
