@@ -10,8 +10,21 @@ et dans `docs/`.
 ## Non publié
 
 - **A4 — déplacer le travail vers l'hôte, trois volets, plus l'attente de l'invité**
-  (30/09, branche `a4-integration` ; plugin `20260930-a4` ; QEMU d'essai `~/src/qemu-a4`).
-  Tout est **éteint par défaut** en attendant l'A/B de la VM quotidienne. Capacités ajoutées
+  (30/09-01/10, plugin `20261001-a4on`). **État et géométrie allumés par défaut**
+  (`POMPPC_GL_STATEBLK`, `POMPPC_GL_RAWSANE`, `POMPPC_GL_NATSHM` ; `=0` éteint chacun) après
+  l'A/B d'intégration `bench/matrice/ab-geo-a4tout` (VM quotidienne, hôte au repos, charge 2-3,
+  aucun autre QEMU ; 3 parties par mode entrelacées, médianes en ms/image, éteint → allumé) :
+  Nexuiz ARB 110,4 → 85,2 / 109,9 → 84,5 (**−23 %**), Warcraft III 17,6 → 15,6 (**−11 %**),
+  Colin McRae 66,5 → **48,2** (−27 %, une partie avec vidage, seuil de course corrigé), Nexuiz GLSL 40,3 → 37,8 / 40,1 → 37,7 (−6 %), UT2004
+  26,8 → 25,9 / 26,6 → 25,9 (−3 %), DOOM 3 61,2 → 59,7 / 61,1 → 59,8 (−2,3 %), Prey 70,4 → 71,4
+  / 70,6 → 69,0 (bruit), Marble Blast 9,3 → 9,2 / 10,3 → 9,5, Zenerchi 4,0 → 3,7. Tours de
+  justesse avec vidage : images toutes justes dans les deux modes ; UT2004 plein écran éteint
+  rouge par la capture (rejeu ≠ VM, défaut connu de capture hors du vidage). Colin McRae
+  allumé sortait rouge 3 fois sur 5 (« scène non atteinte ») : il était en course (capture),
+  mais à ~17 ms/échange (~22 éteint), sous le seuil de 18 qui séparait la course du survol ;
+  seuil passé à 15 (`tools/matrice/jeux/cmr.py`, survol 7-14), cellule verte, image juste,
+  48,2 ms/image (les 62 des parties de vitesse réussies étaient des fenêtres prises à côté de
+  la course). Bissection : sans `NATSHM` la course est reconnue (64,5 / 62,8). Capacités ajoutées
   sans changer `QGPU_PROTO_VERSION` (22) ni l'ABI du kext ; le plugin garde les anciennes voies
   sans elles et marche donc sur le QEMU de référence. `tests/run-all.sh` : 181 OK, 0 échec.
   Profil de départ de toute la matrice : `bench/a4/depart/LISEZMOI.md` ; outils

@@ -182,25 +182,21 @@ Ordre : planchers recalés, puis TCG (cache de sauts, verrou `mtmsr`/`rfi`), pui
   GLSL 0,05, UT2004 2 au chargement) ; BeginPrimitiveBuffer, file pleine, asynchrone coupé :
   0 dans les 13 cellules de la matrice. Très loin du seuil S-M6 (2 ms/image).
 - [ ] **[Plugin] Transmission paresseuse** : mesure honnête et décision du défaut.
-- [ ] **[Protocole] A4 — Déplacer le travail vers l'hôte** (30/09, branche `a4-integration`,
-  plugin `20260930-a4`, QEMU `~/src/qemu-a4` ; `CHANGELOG.md`). Trois volets, tout éteint par
-  défaut, capacités sans changer de version :
-  - [~] **État** (`POMPPC_GL_STATEBLK`, `docs/protocole-v23-etat.md`) : 0 écart sur 13,9 M
-    blocs ; DOOM 3 60,7 → 59,3, UT2004 25,7 → 25,1 ms/image ; `compute_state` sorti du profil,
-    `send_state` 3,8 → 2,1 %. **Avant l'allumage :** plantage de DOOM 3 plein écran au
-    chargement (3 fois dans une session de la copie A4, dont une option éteinte), cause inconnue.
-    Suites : clés chaudes par une table « objet GLEngine → qtex » côté device (0,3-0,6 ms/image
-    estimés) ; `geom_send_all` (1,5-3,9 %).
-  - [~] **Géométrie** (`POMPPC_GL_RAWSANE`, `POMPPC_GL_NATSHM`,
-    `docs/protocole-v23-geometrie.md`) : équivalence prouvée, images justes en VM de contrôle ;
-    gain en ms/image non mesuré. Ouvert : GLEngine déroule les tableaux clients en Begin/End
-    (Nexuiz ARB 14-16 %, Warcraft III 4,5 %) — RE du canal `gldCreateVertexArray`.
-  - [x] **Textures par DMA** : mesuré, rien à construire (0 octet par image en régime,
-    chargements ≤ 0,3 %, `docs/protocole-v23-textures.md`).
-  - [ ] **Campagne d'intégration en cours** (`bench/matrice/ab-geo-a4tout/`) : A/B entrelacé de
-    toute la matrice, tout éteint contre état + géométrie allumés, 3 parties par mode, puis un
-    tour de justesse avec vidage. **Fermeture :** gain par jeu, matrice 16/16 leviers allumés,
-    décision des défauts, passage du protocole en v23, fusion dans `main`.
+- [x] **[Protocole] A4 — Déplacer le travail vers l'hôte** (30/09-01/10, plugin
+  `20261001-a4on` ; `CHANGELOG.md`) : **état et géométrie allumés par défaut** après l'A/B
+  d'intégration `bench/matrice/ab-geo-a4tout` — Nexuiz ARB −23 %, Warcraft III −11 %, Colin
+  McRae −27 % (66,5 → 48,2, seuil de course de la matrice recalé à 15 ms/échange), Nexuiz GLSL −6 %, UT2004 −3 %, DOOM 3 −2,3 %, Prey dans le bruit ; images justes.
+  Textures par DMA : mesuré, rien à construire (`docs/protocole-v23-textures.md`).
+  Capacités 0x8000 / 0x20000 ajoutées sans changer `QGPU_PROTO_VERSION` (22).
+- [ ] **[Système] DOOM 3 plein écran mort au chargement** (`exit 139`, tas du jeu corrompu) :
+  3 fois de suite dans une même session de la VM pendant le volet état d'A4, **dont une fois
+  leviers éteints** ; 0 sur les ~20 parties suivantes (campagne d'intégration comprise).
+  `bench/a4/etat/rouges`. Cause inconnue ; à rapprocher des paniques `LockTimeOut` (Maintenant).
+- [ ] **[Plugin] Suites A4** : clés chaudes (unités) par une table « objet GLEngine → qtex »
+  côté device (0,3-0,6 ms/image estimés sur DOOM 3) ; `geom_send_all` (1,5-3,9 %) ; GLEngine
+  déroule les tableaux clients en Begin/End (Nexuiz ARB 14-16 %, Warcraft III 4,5 %) — RE du
+  canal `gldCreateVertexArray` (`docs/protocole-v23-geometrie.md`). Contribution de chaque
+  levier séparément non mesurée (la campagne les allumait ensemble).
 - [x] **[Backend GL]** G7/G8/G9 (30/09, `docs/backend-gl-attente.md`) : **mesuré**. Seul Nexuiz
   attend l'hôte au-delà de 2 % (GLSL 2,5 ms/image, ARB 3,6) : ses requêtes d'occlusion. Colin
   McRae : 0,12 ms/image. G7 sans objet, G9 (≤ 1,25 % d'attente) et G8 classés.

@@ -55,14 +55,16 @@
  *   POMPPC_GL_NATIVE_RANGE=0  ne pas croire la plage (ptr, longueur) de
  *                         gldFlushBuffer : tout le VBO devient sale (seul ce
  *                         que les dessins lisent est recopié, cf. raw_sync)
- *   POMPPC_GL_RAWSANE=1   A4 : les séries Begin/End partent en DRAW_RAW_SANE
+ *   POMPPC_GL_RAWSANE=0   A4 : les séries Begin/End partent en DRAW_RAW_SANE
  *                         (QGPU_CAP_GEOM_HOST) — l'hôte trie les sommets fous,
- *                         raw_fix_nan ne tourne plus sur le G4. Éteint par défaut.
- *   POMPPC_GL_NATSHM=1    A4 : un dessin arrivé à RenderVertexArray avec des
+ *                         raw_fix_nan ne tourne plus sur le G4. Allumé par
+ *                         défaut depuis le 30/09 ; =0 revient au tri du G4.
+ *   POMPPC_GL_NATSHM=0    A4 : un dessin arrivé à RenderVertexArray avec des
  *                         tableaux CLIENTS (plage VAR de Colin McRae, mélange
  *                         VBO/client) part aux octets de l'application
  *                         (DRAW_NATIVE depuis BAR0, l'hôte convertit) au lieu
- *                         d'être empaqueté sommet par sommet. Éteint par défaut.
+ *                         d'être empaqueté sommet par sommet. Allumé par
+ *                         défaut depuis le 30/09 ; =0 revient à l'empaquetage.
  *   POMPPC_GL_XFER16=0    pas de transfert 16 bits hôte (v15) : fenêtre 16 bits
  *                         et Z 16 restent sans aller-retour
  *   POMPPC_GL_NOTE=chemin journal d'appoint (gl_note). SANS elle, rien n'est
@@ -126,9 +128,10 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20260930-a4"
-/* A4 : bloc d'état éteint par défaut tant que l'A/B ne l'a pas justifié */
-#define STATEBLK_DEFAULT 0
+#define POMPPC_PLUGIN_REV "20261001-a4on"
+/* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
+   (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
+#define STATEBLK_DEFAULT 1
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -2335,7 +2338,8 @@ void pomppc_backend_init(void)
                    est joint : le device compte les écarts (journal de QEMU)
                    et pose le vecteur de l'invité. Les sondes NOCULL, FLIPFACE
                    et GLYPHTEST retouchent le vecteur : elles gardent
-                   l'ancienne voie. POMPPC_GL_STATEBLK=1 l'allume. */
+                   l'ancienne voie. Allumé par défaut (STATEBLK_DEFAULT) ;
+                   POMPPC_GL_STATEBLK=0 l'éteint. */
                 e = getenv("POMPPC_GL_STATEBLK");
                 G.stblk = (e && e[0] ? e[0] != '0' : STATEBLK_DEFAULT) &&
                           (G.q.caps & QGPU_CAP_STATE_BLOCK) &&
@@ -2380,16 +2384,16 @@ void pomppc_backend_init(void)
                                getenv("POMPPC_GL_NATIVE_RANGE")[0] == '0');
             /* A4, volet géométrie : le tri des sommets fous de Begin/End
                (raw_fix_nan, 12,8 % du fil de Nexuiz ARB) fait par l'hôte.
-               ÉTEINT par défaut tant que la matrice ne l'a pas prouvé :
-               POMPPC_GL_RAWSANE=1 l'allume, s'il est annoncé. */
+               Allumé par défaut s'il est annoncé (A/B d'intégration du 30/09) ;
+               POMPPC_GL_RAWSANE=0 l'éteint. */
             G.rawsane = G.v7 && (G.q.caps & QGPU_CAP_GEOM_HOST) &&
-                        getenv("POMPPC_GL_RAWSANE") && getenv("POMPPC_GL_RAWSANE")[0] == '1';
+                        !(getenv("POMPPC_GL_RAWSANE") && getenv("POMPPC_GL_RAWSANE")[0] == '0');
             /* A4 : les tableaux CLIENTS qui arrivent à RenderVertexArray (plage
                VAR, mélange VBO/client) partent aux octets de l'application en
                DRAW_NATIVE (l'hôte convertit) au lieu de l'empaquetage.
-               Éteint par défaut : POMPPC_GL_NATSHM=1. */
+               Allumé par défaut s'il est annoncé ; POMPPC_GL_NATSHM=0 l'éteint. */
             G.natshm = G.native && (G.q.caps & QGPU_CAP_GEOM_HOST) &&
-                       getenv("POMPPC_GL_NATSHM") && getenv("POMPPC_GL_NATSHM")[0] == '1';
+                       !(getenv("POMPPC_GL_NATSHM") && getenv("POMPPC_GL_NATSHM")[0] == '0');
             G.pixtex = -1;
             G.pixtex_w = G.pixtex_h = 0;
             /* 3e passe : numéros de soumission (perte ciblée) à partir de 1 —
