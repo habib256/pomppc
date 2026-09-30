@@ -12,7 +12,9 @@ OUT=$PWD/out
 gcc -O2 -Wall -o fptest fptest.c > $OUT/build.txt 2>&1 || { cat $OUT/build.txt; exit 1; }
 # DIS=1 : le code de banc() tel que gcc l'a compilé (quelles instructions)
 if [ -n "$DIS" ]; then
-  otool -tV fptest | sed -n '/^_banc:/,/^_[a-z]/p' > $OUT/banc-dis.txt
+  # banc() est statique et appelée une fois : gcc la met en ligne dans main
+  gcc -O2 -Wall -fno-inline -S -o $OUT/fptest.s fptest.c
+  sed -n '/^_banc:/,/^_[a-z_]*:$/p' $OUT/fptest.s > $OUT/banc-dis.txt
   echo "banc() : $(grep -c . $OUT/banc-dis.txt) lignes ;" \
        "fcmpu $(grep -c 'fcmpu' $OUT/banc-dis.txt), fcmpo $(grep -c 'fcmpo' $OUT/banc-dis.txt)," \
        "fsel $(grep -c 'fsel' $OUT/banc-dis.txt), fmadds $(grep -c 'fmadds' $OUT/banc-dis.txt)"
