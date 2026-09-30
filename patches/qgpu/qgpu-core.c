@@ -2805,7 +2805,7 @@ static uint32_t do_draw_native(QgpuCore *c, const uint32_t *a)
     uint32_t mode = a[0], count = a[1], ibuf = a[2], ioff = a[3], itype = a[4];
     uint32_t first = a[5], nattr = a[6], aoff = a[7];
     NatAttr at[QGPU_NATIVE_MAX_ATTRS];
-    uint32_t seen = 0, fmt = 0, possz = 2, words, st, i, k, lo, hi, range;
+    uint32_t seen = 0, fmt = 0, possz = 2, words, st, i, k, lo, hi, range, rb = 0;
     bool dense;
     QgpuSurface *s = bound_surface(c, &st);
     const uint8_t *tab;
@@ -2819,8 +2819,11 @@ static uint32_t do_draw_native(QgpuCore *c, const uint32_t *a)
         !in_shmem(c, aoff, (uint64_t)nattr * QGPU_NATIVE_DESC_WORDS * 4)) {
         return QGPU_ST_BAD_ARG;
     }
+    /* A4 (QGPU_CAP_GEOM_HOST) : indexé, `premier` est la BASE soustraite de
+       chaque indice — les descripteurs désignent alors le sommet `premier`
+       (tableaux clients recopiés à partir de leur plus petit sommet cité). */
     if (itype == QGPU_IDX_NONE ? (uint64_t)first + count - 1 > 0xFFFFFFFFu
-                               : first != 0) {
+                               : first != 0 && !(c->caps & QGPU_CAP_GEOM_HOST)) {
         return QGPU_ST_BAD_ARG;
     }
 
@@ -2940,6 +2943,16 @@ static uint32_t do_draw_native(QgpuCore *c, const uint32_t *a)
     if (range == 0 || range > QGPU_MAX_VERTS) {
         return QGPU_ST_BAD_ARG;
     }
+    if (itype != QGPU_IDX_NONE) {
+        rb = lo;                               /* rebasage des indices : sur lo */
+        if (first) {                           /* A4 : base des indices */
+            if (lo < first) {
+                return QGPU_ST_BAD_ARG;
+            }
+            lo -= first;
+            hi -= first;
+        }
+    }
 
     /* 3. chaque attribut reste dans son tampon jusqu'au sommet hi */
     for (k = 0; k < nattr; k++) {
@@ -2956,9 +2969,9 @@ static uint32_t do_draw_native(QgpuCore *c, const uint32_t *a)
         return QGPU_ST_BACKEND;
     }
     dense = itype == QGPU_IDX_NONE || range <= count;
-    if (itype != QGPU_IDX_NONE && lo) {
+    if (itype != QGPU_IDX_NONE && rb) {
         for (i = 0; i < count; i++) {
-            c->ibuf[i] -= lo;
+            c->ibuf[i] -= rb;
         }
     }
     if (!dense || !(seen & (1u << QGPU_NA_POSITION))) {

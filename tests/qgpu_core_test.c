@@ -6719,6 +6719,35 @@ static void run_native_shmem(QgpuCore *c, uint8_t *shmem)
         }
     }
 
+    /* (i) indexé, `premier` = base des indices : indices 1000..1003, les
+       descripteurs désignent le sommet 1000 (le premier recopié) */
+    for (k = 0; k < 6; k++) qgpu_st16(shmem + NAT_IDX_OFF + k * 2, (uint16_t)(1000 + quad_idx[k]));
+    n = nat_desc_fixed(shmem, QGPU_BUF_SHMEM, NSH_OFF, IDV);
+    e.off = e.start = CMD_OFF;
+    clear_cmd(&e, QGPU_CLEAR_COLOR | QGPU_CLEAR_DEPTH, 0xFF102030, 1.0f);
+    draw_native(&e, QGPU_PRIM_MODE_TRIANGLES, 6, QGPU_BUF_SHMEM, NAT_IDX_OFF, QGPU_IDX_U16, 1000,
+                n, NAT_DESC_OFF);
+    readback_cmd(&e, 1);
+    NSH_RUN();
+    NSH_SAME(ref);
+    NSH_VB();
+    CHECK(st == QGPU_ST_OK && same && vsame,
+          "(i) premier = 1000, base des indices 1000..1003 : sommets et indices identiques (st %u pc %u)",
+          st, c->status_pc);
+    e.off = e.start = CMD_OFF;
+    draw_native(&e, QGPU_PRIM_MODE_TRIANGLES, 6, QGPU_BUF_SHMEM, NAT_IDX_OFF, QGPU_IDX_U16, 1001,
+                n, NAT_DESC_OFF);
+    NSH_RUN();
+    CHECK(st == QGPU_ST_BAD_ARG, "(i) un indice sous la base : BAD_ARG (st %u)", st);
+    c->caps &= ~(uint32_t)QGPU_CAP_GEOM_HOST;
+    e.off = e.start = CMD_OFF;
+    draw_native(&e, QGPU_PRIM_MODE_TRIANGLES, 6, QGPU_BUF_SHMEM, NAT_IDX_OFF, QGPU_IDX_U16, 1000,
+                n, NAT_DESC_OFF);
+    NSH_RUN();
+    c->caps = saved_caps;
+    CHECK(st == QGPU_ST_BAD_ARG, "(i) sans la capacité, premier ≠ 0 indexé : BAD_ARG, comme en v18 (st %u)", st);
+    for (k = 0; k < 6; k++) qgpu_st16(shmem + NAT_IDX_OFF + k * 2, quad_idx[k]);
+
     /* (f) bornes : sur la fenêtre entière, refus non fatals */
     {
         uint32_t ok_all = 1;

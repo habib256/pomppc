@@ -1796,7 +1796,11 @@
  *   itype   : QGPU_IDX_NONE / _U16 / _U32 ; indices GRAND-BOUTISTES (écrits
  *             par l'invité, jamais permutés par l'hôte).
  *   premier : non indexé : premier sommet dessiné (glDrawArrays) ; indexé :
- *             doit valoir 0 (réservé, BAD_ARG sinon).
+ *             doit valoir 0 (réservé, BAD_ARG sinon) — sauf sous
+ *             QGPU_CAP_GEOM_HOST (A4) : BASE des indices, l'indice i désigne
+ *             le sommet i − premier des descripteurs (un indice < premier =
+ *             BAD_ARG). L'invité recopie un tableau client à partir de son
+ *             plus petit sommet cité sans réécrire les indices.
  *   nattr   : nombre de descripteurs, 1..QGPU_NATIVE_MAX_ATTRS.
  *   aoff    : offset dans BAR0 (multiple de 4) d'une table de nattr
  *             descripteurs de QGPU_NATIVE_DESC_WORDS mots big-endian :
