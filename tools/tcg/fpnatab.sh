@@ -31,7 +31,13 @@ charge() {
 }
 for m in "$@"; do
   nom=${m%%:*}; vars=${m#*:}
-  while [ -e "$R/.run/a4-mesure.lock" ]; do sleep 30; done
+  while :; do
+    while [ -e "$R/.run/a4-mesure.lock" ]; do sleep 30; done
+    echo "fpnat $$ $(date)" > "$MYLOCK"
+    sleep 10          # une mesure A4 qui partait en même temps : on lui cède
+    [ -e "$R/.run/a4-mesure.lock" ] || break
+    rm -f "$MYLOCK"
+  done
   D="$OUT/$nom"; k=1
   while [ -e "$D-$k" ]; do k=$((k + 1)); done
   D="$D-$k"; mkdir -p "$D"

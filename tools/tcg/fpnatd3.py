@@ -81,9 +81,15 @@ def main():
         info.flush()
 
     mylock = os.path.join(MAIN, ".run", "a4-vm-tcg.lock")
-    while os.path.exists(os.path.join(MAIN, ".run", "a4-mesure.lock")):
-        time.sleep(30)
-    open(mylock, "w").write("fpnatd3 %d %s\n" % (os.getpid(), a.nom))
+    mesure = os.path.join(MAIN, ".run", "a4-mesure.lock")
+    while True:
+        while os.path.exists(mesure):
+            time.sleep(30)
+        open(mylock, "w").write("fpnatd3 %d %s\n" % (os.getpid(), a.nom))
+        time.sleep(10)          # une mesure A4 qui partait en même temps : on lui cède
+        if not os.path.exists(mesure):
+            break
+        os.remove(mylock)
     if a.cpu:
         os.environ["CPU_OPTS"] = a.cpu
     args = argparse.Namespace(smp=2, qemu=a.qemu, extra=a.extra)
