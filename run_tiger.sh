@@ -31,6 +31,11 @@
 #   FPINLINE=0 ./run_tiger.sh # coupe le flottant scalaire simple (fmuls, fmadds, fcmpu…) sans ses
 #                             # deux helpers dans le cas courant (x-fp-inline, tcg/0007, allumé
 #                             # par défaut, docs/tcg-g4.md §15) ; FPVERIFY=1 : mode preuve
+#   FPFLAT=1 ./run_tiger.sh   # les mêmes en UN appel, sans branchement dans le code généré
+#                             # (x-fp-flat, tcg/0013, éteint par défaut, docs/tcg-g4.md §22)
+#   FPNATIVE=1 ./run_tiger.sh # leur chemin court en instructions flottantes de l'hôte (arm64),
+#                             # le helper de x-fp-flat hors ligne sinon (x-fp-native, tcg/0014,
+#                             # éteint par défaut, docs/tcg-g4.md §22)
 #   RETINLINE=0 JCIDX=0 ./run_tiger.sh  # coupe les sorties indirectes (blr, bctr…) cherchées en
 #                             # ligne et le cache de sauts vidé par mmu_idx (tcg/0008, allumés par
 #                             # défaut, docs/tcg-g4.md §16) ; RETVERIFY=1 : mode preuve
@@ -292,6 +297,55 @@ if [ "${FPINLINE:-1}" != 0 ]; then
   elif [ -n "${FPINLINE:-}" ]; then
     echo "⚠  FPINLINE=1 demandé mais ce QEMU n'a pas la propriété 'x-fp-inline' (patches/tcg/0007)." >&2
     MODE="$MODE + flottant scalaire en ligne DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+# --- Flottant scalaire en un appel, sans branchement (x-fp-flat, patches/tcg/0013,
+# docs/tcg-g4.md §22) --- les mêmes instructions que x-fp-inline, traduites en UN
+# appel et aucun branchement : le choix « chemin court de x-fp-inline ou séquence
+# d'origine » est fait en C, le code généré n'est plus coupé en blocs de base à
+# chaque instruction. Mêmes résultats, même FPSCR au bit près. N'agit qu'avec
+# x-fast-fp ; prime sur x-fp-inline. Éteint par défaut (A/B DOOM 3 à jouer) :
+# FPFLAT=1 l'allume ; FPVERIFY=1 vérifie aussi son chemin court.
+if [ "${FPFLAT:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-fp-flat=on"; then
+    case "$CPU_SPEC" in
+      *x-fast-fp=on*) CPU_SPEC="$CPU_SPEC,x-fp-flat=on"; MODE="$MODE + FLOTTANT SCALAIRE SANS BRANCHEMENT"
+                      case "$CPU_SPEC" in
+                        *x-fp-verify=on*) ;;
+                        *) if [ "${FPVERIFY:-0}" != 0 ]; then
+                             CPU_SPEC="$CPU_SPEC,x-fp-verify=on"; MODE="$MODE (VÉRIFIÉ)"
+                           fi ;;
+                      esac ;;
+      *) echo "⚠  FPFLAT=1 sans flottant rapide : x-fp-flat n'agit qu'avec x-fast-fp (FASTFP=1)." >&2
+         MODE="$MODE + flottant scalaire sans branchement SANS EFFET (flottant exact)" ;;
+    esac
+  else
+    echo "⚠  FPFLAT=1 demandé mais ce QEMU n'a pas la propriété 'x-fp-flat' (patches/tcg/0013)." >&2
+    MODE="$MODE + flottant scalaire sans branchement DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+# --- Flottant scalaire par le FPU de l'hôte dans le code généré (x-fp-native,
+# patches/tcg/0014, docs/tcg-g4.md §22) --- le chemin court de x-fp-inline en
+# instructions flottantes arm64 (op TCG ppc_fp32), le helper de x-fp-flat appelé
+# hors ligne quand il ne s'applique pas. Mêmes résultats, même FPSCR au bit près.
+# N'agit qu'avec x-fast-fp ; x-fp-flat sur un hôte qui n'est pas arm64. Éteint par
+# défaut (A/B DOOM 3 à jouer) : FPNATIVE=1 l'allume ; FPVERIFY=1 le vérifie.
+if [ "${FPNATIVE:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-fp-native=on"; then
+    case "$CPU_SPEC" in
+      *x-fast-fp=on*) CPU_SPEC="$CPU_SPEC,x-fp-native=on"; MODE="$MODE + FLOTTANT SCALAIRE NATIF"
+                      case "$CPU_SPEC" in
+                        *x-fp-verify=on*) ;;
+                        *) if [ "${FPVERIFY:-0}" != 0 ]; then
+                             CPU_SPEC="$CPU_SPEC,x-fp-verify=on"; MODE="$MODE (VÉRIFIÉ)"
+                           fi ;;
+                      esac ;;
+      *) echo "⚠  FPNATIVE=1 sans flottant rapide : x-fp-native n'agit qu'avec x-fast-fp (FASTFP=1)." >&2
+         MODE="$MODE + flottant scalaire natif SANS EFFET (flottant exact)" ;;
+    esac
+  else
+    echo "⚠  FPNATIVE=1 demandé mais ce QEMU n'a pas la propriété 'x-fp-native' (patches/tcg/0014)." >&2
+    MODE="$MODE + flottant scalaire natif DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
 # --- Sorties indirectes des blocs (blr, bctr…) : recherche du bloc suivant en

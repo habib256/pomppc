@@ -1,0 +1,938 @@
+diff --git a/include/tcg/tcg-opc.h b/include/tcg/tcg-opc.h
+--- a/include/tcg/tcg-opc.h
++++ b/include/tcg/tcg-opc.h
+@@ -241,6 +241,19 @@
+     TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_64BIT |
+     IMPL(TCG_TARGET_HAS_qemu_ldst_i128))
+ 
++/*
++ * POMPPC tcg/0014 (x-fp-native): a PowerPC scalar single-precision
++ * operation (fadds ... fnmsubs, fcmpu) done by the host FPU inline when its
++ * short path applies, else by a call to a C helper, out of line (like the
++ * qemu_ld/st slow paths).  Outputs: result (CR field for fcmpu), new FPSCR.
++ * Inputs: frA, frB, frC, FPSCR.  Constants: selector (operation | frT << 8),
++ * the slow helper, and (env offset of the soft-float exception flags |
++ * value to store there << 32).  Behaves as a call for register allocation.
++ */
++DEF(ppc_fp32, 2, 4, 3,
++    TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_64BIT |
++    IMPL(TCG_TARGET_HAS_ppc_fp32))
++
+ /* Host vector support.  */
+ 
+ #define IMPLVEC  TCG_OPF_VECTOR | IMPL(TCG_TARGET_MAYBE_vec)
+diff --git a/include/tcg/tcg.h b/include/tcg/tcg.h
+--- a/include/tcg/tcg.h
++++ b/include/tcg/tcg.h
+@@ -159,6 +159,9 @@
+ #else
+ #define TCG_TARGET_MAYBE_vec            1
+ #endif
++#ifndef TCG_TARGET_HAS_ppc_fp32
++#define TCG_TARGET_HAS_ppc_fp32         0   /* POMPPC tcg/0014 */
++#endif
+ #ifndef TCG_TARGET_HAS_v64
+ #define TCG_TARGET_HAS_v64              0
+ #endif
+diff --git a/include/tcg/tcg-op-common.h b/include/tcg/tcg-op-common.h
+--- a/include/tcg/tcg-op-common.h
++++ b/include/tcg/tcg-op-common.h
+@@ -47,6 +47,10 @@
+  * @idx should be one of the TB_EXIT_ values.
+  */
+ void tcg_gen_exit_tb(const TranslationBlock *tb, unsigned idx);
++/* POMPPC tcg/0014: see INDEX_op_ppc_fp32 in tcg-opc.h */
++void tcg_gen_ppc_fp32(TCGv_i64 r, TCGv_i64 nf, TCGv_i64 a, TCGv_i64 b,
++                      TCGv_i64 c, TCGv_i64 fpscr, unsigned sel,
++                      const void *slow, uint64_t flags_st);
+ 
+ /**
+  * tcg_gen_goto_tb() - output goto_tb TCG operation
+diff --git a/tcg/tcg.c b/tcg/tcg.c
+--- a/tcg/tcg.c
++++ b/tcg/tcg.c
+@@ -100,6 +100,11 @@
+     TCGReg datahi_reg;      /* reg index for high word to be loaded or stored */
+     const tcg_insn_unit *raddr;   /* addr of the next IR of qemu_ld/st IR */
+     tcg_insn_unit *label_ptr[2]; /* label pointers to be updated */
++    /* POMPPC tcg/0014: slow path of a ppc_fp32 op instead of qemu_ld/st */
++    bool is_ppc_fp32;
++    unsigned fp_sel;
++    TCGReg fp_in[3], fp_out[2];
++    const void *fp_slow;
+     QSIMPLEQ_ENTRY(TCGLabelQemuLdst) next;
+ } TCGLabelQemuLdst;
+ 
+@@ -662,6 +667,7 @@
+ #define C_O2_I3(O1, O2, I1, I2, I3)     C_PFX5(c_o2_i3_, O1, O2, I1, I2, I3),
+ #define C_O2_I4(O1, O2, I1, I2, I3, I4) C_PFX6(c_o2_i4_, O1, O2, I1, I2, I3, I4),
+ #define C_N1_O1_I4(O1, O2, I1, I2, I3, I4) C_PFX6(c_n1_o1_i4_, O1, O2, I1, I2, I3, I4),
++#define C_N2_I4(O1, O2, I1, I2, I3, I4) C_PFX6(c_n2_i4_, O1, O2, I1, I2, I3, I4),
+ 
+ typedef enum {
+ #include "tcg-target-con-set.h"
+@@ -685,6 +691,7 @@
+ #undef C_O2_I3
+ #undef C_O2_I4
+ #undef C_N1_O1_I4
++#undef C_N2_I4
+ 
+ /* Put all of the constraint sets into an array, indexed by the enum. */
+ 
+@@ -707,6 +714,7 @@
+ #define C_O2_I3(O1, O2, I1, I2, I3)     { .args_ct_str = { #O1, #O2, #I1, #I2, #I3 } },
+ #define C_O2_I4(O1, O2, I1, I2, I3, I4) { .args_ct_str = { #O1, #O2, #I1, #I2, #I3, #I4 } },
+ #define C_N1_O1_I4(O1, O2, I1, I2, I3, I4) { .args_ct_str = { "&" #O1, #O2, #I1, #I2, #I3, #I4 } },
++#define C_N2_I4(O1, O2, I1, I2, I3, I4) { .args_ct_str = { "&" #O1, "&" #O2, #I1, #I2, #I3, #I4 } },
+ 
+ static const TCGTargetOpDef constraint_sets[] = {
+ #include "tcg-target-con-set.h"
+@@ -729,6 +737,7 @@
+ #undef C_O2_I3
+ #undef C_O2_I4
+ #undef C_N1_O1_I4
++#undef C_N2_I4
+ 
+ /* Expand the enumerator to be returned from tcg_target_op_def(). */
+ 
+@@ -751,6 +760,7 @@
+ #define C_O2_I3(O1, O2, I1, I2, I3)     C_PFX5(c_o2_i3_, O1, O2, I1, I2, I3)
+ #define C_O2_I4(O1, O2, I1, I2, I3, I4) C_PFX6(c_o2_i4_, O1, O2, I1, I2, I3, I4)
+ #define C_N1_O1_I4(O1, O2, I1, I2, I3, I4) C_PFX6(c_n1_o1_i4_, O1, O2, I1, I2, I3, I4)
++#define C_N2_I4(O1, O2, I1, I2, I3, I4) C_PFX6(c_n2_i4_, O1, O2, I1, I2, I3, I4)
+ 
+ #include "tcg-target.c.inc"
+ 
+@@ -1968,6 +1978,9 @@
+     case INDEX_op_qemu_st_a64_i128:
+         return TCG_TARGET_HAS_qemu_ldst_i128;
+ 
++    case INDEX_op_ppc_fp32:
++        return TCG_TARGET_HAS_ppc_fp32;
++
+     case INDEX_op_mov_i32:
+     case INDEX_op_setcond_i32:
+     case INDEX_op_brcond_i32:
+diff --git a/tcg/tcg-op.c b/tcg/tcg-op.c
+--- a/tcg/tcg-op.c
++++ b/tcg/tcg-op.c
+@@ -95,6 +95,26 @@
+     op->args[4] = a5;
+     op->args[5] = a6;
+     return op;
++}
++
++/*
++ * POMPPC tcg/0014: see INDEX_op_ppc_fp32 in tcg-opc.h.
++ */
++void tcg_gen_ppc_fp32(TCGv_i64 r, TCGv_i64 nf, TCGv_i64 a, TCGv_i64 b,
++                      TCGv_i64 c, TCGv_i64 fpscr, unsigned sel,
++                      const void *slow, uint64_t flags_st)
++{
++    TCGOp *op = tcg_emit_op(INDEX_op_ppc_fp32, 9);
++
++    op->args[0] = tcgv_i64_arg(r);
++    op->args[1] = tcgv_i64_arg(nf);
++    op->args[2] = tcgv_i64_arg(a);
++    op->args[3] = tcgv_i64_arg(b);
++    op->args[4] = tcgv_i64_arg(c);
++    op->args[5] = tcgv_i64_arg(fpscr);
++    op->args[6] = sel;
++    op->args[7] = (uintptr_t)slow;
++    op->args[8] = flags_st;
+ }
+ 
+ /*
+diff --git a/tcg/tcg-ldst.c.inc b/tcg/tcg-ldst.c.inc
+--- a/tcg/tcg-ldst.c.inc
++++ b/tcg/tcg-ldst.c.inc
+@@ -26,6 +26,9 @@
+ 
+ static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *l);
+ static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *l);
++#if TCG_TARGET_HAS_ppc_fp32
++static bool tcg_out_ppc_fp32_slow_path(TCGContext *s, TCGLabelQemuLdst *l);
++#endif
+ 
+ static int tcg_out_ldst_finalize(TCGContext *s)
+ {
+@@ -33,6 +36,13 @@
+ 
+     /* qemu_ld/st slow paths */
+     QSIMPLEQ_FOREACH(lb, &s->ldst_labels, next) {
++#if TCG_TARGET_HAS_ppc_fp32
++        if (lb->is_ppc_fp32) {
++            if (!tcg_out_ppc_fp32_slow_path(s, lb)) {
++                return -2;
++            }
++        } else
++#endif
+         if (lb->is_ld
+             ? !tcg_out_qemu_ld_slow_path(s, lb)
+             : !tcg_out_qemu_st_slow_path(s, lb)) {
+diff --git a/tcg/optimize.c b/tcg/optimize.c
+--- a/tcg/optimize.c
++++ b/tcg/optimize.c
+@@ -2982,6 +2982,10 @@
+         case INDEX_op_qemu_ld_a32_i128:
+         case INDEX_op_qemu_ld_a64_i128:
+             done = fold_qemu_ld(&ctx, op);
++            break;
++        case INDEX_op_ppc_fp32:
++            /* POMPPC tcg/0014: its slow path writes env (FPR, flags) */
++            remove_mem_copy_all(&ctx);
+             break;
+         case INDEX_op_qemu_st8_a32_i32:
+         case INDEX_op_qemu_st8_a64_i32:
+diff --git a/tcg/aarch64/tcg-target.h b/tcg/aarch64/tcg-target.h
+--- a/tcg/aarch64/tcg-target.h
++++ b/tcg/aarch64/tcg-target.h
+@@ -143,6 +143,7 @@
+ #endif
+ 
+ #define TCG_TARGET_HAS_tst              1
++#define TCG_TARGET_HAS_ppc_fp32         1   /* POMPPC tcg/0014 */
+ 
+ #define TCG_TARGET_HAS_v64              1
+ #define TCG_TARGET_HAS_v128             1
+diff --git a/tcg/aarch64/tcg-target-con-set.h b/tcg/aarch64/tcg-target-con-set.h
+--- a/tcg/aarch64/tcg-target-con-set.h
++++ b/tcg/aarch64/tcg-target-con-set.h
+@@ -35,3 +35,4 @@
+ C_O1_I4(r, r, rC, rZ, rZ)
+ C_O2_I1(r, r, r)
+ C_O2_I4(r, r, rZ, rZ, rA, rMZ)
++C_N2_I4(r, r, r, r, r, r)
+diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
+--- a/tcg/aarch64/tcg-target.c.inc
++++ b/tcg/aarch64/tcg-target.c.inc
+@@ -1901,8 +1901,357 @@
+     default:
+         g_assert_not_reached();
+     }
++}
++
++/*
++ * POMPPC tcg/0014 (x-fp-native): INDEX_op_ppc_fp32.
++ *
++ * The short path of x-fp-inline (target/ppc/fpu_helper.c, "fp-inline"
++ * block) done by the host FPU inline, with every test of that short path,
++ * branch-free, accumulated in one register; when any of them fails, a
++ * branch to an out-of-line stub that calls the C helper given by the op
++ * (the whole x-fp-flat helper: short path or original sequence), exactly as
++ * the qemu_ld/st slow paths do.  The op is TCG_OPF_CALL_CLOBBER: no live
++ * value is left in a call-clobbered register, so the call-clobbered GPRs
++ * that hold no argument and V0-V3 are free scratch here.
++ *
++ * PowerPC FPSCR bits (QEMU numbering, target/ppc/cpu.h; the translator
++ * checks them at build time): XX = 25, XE = 3, UE = 5, OE = 6, RN = 1:0,
++ * FPRF = 16:12 (FPCC = 15:12), FI = 17.
++ */
++#define PFP_XX          (1ull << 25)
++#define PFP_TRAPS       ((1ull << 3) | (1ull << 5) | (1ull << 6))
++#define PFP_FI          (1ull << 17)
++
++enum { PFP_ADD, PFP_SUB, PFP_MUL, PFP_MADD, PFP_MSUB, PFP_NMADD, PFP_NMSUB,
++       PFP_CMPU };
++enum { PFP_EQ = 0, PFP_NE = 1, PFP_HS = 2, PFP_LO = 3, PFP_HI = 8,
++       PFP_LS = 9, PFP_GE = 10, PFP_LT = 11, PFP_GT = 12 };
++
++/* raw A64 encodings (64-bit forms) */
++static void pfp_lsl(TCGContext *s, TCGReg d, TCGReg n, unsigned sh)
++{
++    tcg_out32(s, 0xd3400000 | ((64 - sh) & 63) << 16 | (63 - sh) << 10 |
++              n << 5 | d);                              /* ubfm */
++}
++
++static void pfp_lsr(TCGContext *s, TCGReg d, TCGReg n, unsigned sh)
++{
++    tcg_out32(s, 0xd3400000 | sh << 16 | 63 << 10 | n << 5 | d);
++}
++
++static void pfp_rrr(TCGContext *s, uint32_t insn, TCGReg d, TCGReg n,
++                    TCGReg m, unsigned lsl)
++{
++    tcg_out32(s, insn | m << 16 | lsl << 10 | n << 5 | d);
++}
++#define PFP_SUBX        0xcb000000
++#define PFP_ANDX        0x8a000000
++#define PFP_ORRX        0xaa000000
++#define PFP_LSLVX       0x9ac02000
++
++static void pfp_cmp(TCGContext *s, TCGReg n, TCGReg m)
++{
++    tcg_out32(s, 0xeb00001f | m << 16 | n << 5);        /* subs xzr */
+ }
+ 
++static void pfp_cmpi(TCGContext *s, TCGReg n, unsigned imm12)
++{
++    tcg_out32(s, 0xf100001f | imm12 << 10 | n << 5);
++}
++
++static void pfp_ccmp(TCGContext *s, TCGReg n, TCGReg m, unsigned nzcv,
++                     unsigned cond)
++{
++    tcg_out32(s, 0xfa400000 | m << 16 | cond << 12 | n << 5 | nzcv);
++}
++
++static void pfp_ccmpi(TCGContext *s, TCGReg n, unsigned imm5, unsigned nzcv,
++                      unsigned cond)
++{
++    tcg_out32(s, 0xfa400800 | imm5 << 16 | cond << 12 | n << 5 | nzcv);
++}
++
++/* csel / csinc / csneg: d = cond ? n : (m | m + 1 | -m) */
++static void pfp_cs(TCGContext *s, uint32_t insn, TCGReg d, TCGReg n,
++                   TCGReg m, unsigned cond)
++{
++    tcg_out32(s, insn | m << 16 | cond << 12 | n << 5 | d);
++}
++#define PFP_CSEL        0x9a800000
++#define PFP_CSINC       0x9a800400
++#define PFP_CSNEG       0xda800400
++
++/* scalar FP, V registers 0-3 */
++static void pfp_fmov_dx(TCGContext *s, unsigned vd, TCGReg xn)
++{
++    tcg_out32(s, 0x9e670000 | xn << 5 | vd);
++}
++
++static void pfp_fmov_xd(TCGContext *s, TCGReg xd, unsigned vn)
++{
++    tcg_out32(s, 0x9e660000 | vn << 5 | xd);
++}
++
++static void pfp_fcvt_sd(TCGContext *s, unsigned sd, unsigned dn)
++{
++    tcg_out32(s, 0x1e624000 | dn << 5 | sd);            /* double -> single */
++}
++
++static void pfp_fcvt_ds(TCGContext *s, unsigned dd, unsigned sn)
++{
++    tcg_out32(s, 0x1e22c000 | sn << 5 | dd);            /* single -> double */
++}
++
++static void pfp_f3(TCGContext *s, uint32_t insn, unsigned d, unsigned n,
++                   unsigned m)
++{
++    tcg_out32(s, insn | m << 16 | n << 5 | d);
++}
++#define PFP_FADDS       0x1e202800
++#define PFP_FSUBS       0x1e203800
++#define PFP_FMULS       0x1e200800
++
++static void pfp_fneg(TCGContext *s, unsigned d, unsigned n)
++{
++    tcg_out32(s, 0x1e214000 | n << 5 | d);
++}
++
++/* sd = sa + sn * sm, one rounding */
++static void pfp_fmadd(TCGContext *s, unsigned d, unsigned n, unsigned m,
++                      unsigned a)
++{
++    tcg_out32(s, 0x1f000000 | m << 16 | a << 10 | n << 5 | d);
++}
++
++static TCGReg pfp_scratch(TCGRegSet *used)
++{
++    for (TCGReg r = TCG_REG_X0; r <= TCG_REG_X15; r++) {
++        if (!tcg_regset_test_reg(*used, r)) {
++            tcg_regset_set_reg(*used, r);
++            return r;
++        }
++    }
++    g_assert_not_reached();
++}
++
++/*
++ * One operand, x = frA/frB/frC as a double: t = x << 1, and "bad" gets
++ * incremented unless x is a float32 zero or normal: t == 0, or its low 29
++ * fraction bits are zero and its exponent is in [0x381, 0x47e] (the test of
++ * fpi_zon()).  k1 = 0x381 << 53, k2 = 0xfe << 53, u a scratch.
++ */
++static void pfp_zon(TCGContext *s, TCGReg bad, TCGReg t, TCGReg x,
++                    TCGReg k1, TCGReg k2, TCGReg u)
++{
++    pfp_lsl(s, t, x, 1);
++    pfp_rrr(s, PFP_SUBX, u, t, k1, 0);
++    tcg_out_logicali(s, I3404_ANDSI, TCG_TYPE_I64, TCG_REG_XZR, t,
++                     0x3ffffffe);                       /* low 29 bits */
++    pfp_ccmp(s, u, k2, 2, PFP_EQ);      /* bits clear: u - k2 ; else C (hs) */
++    pfp_ccmpi(s, t, 0, 4, PFP_HS);      /* hs: t == 0 ? ; else Z */
++    pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_EQ);        /* !Z: bad + 1 */
++}
++
++static void tcg_out_ppc_fp32(TCGContext *s, const TCGArg *args)
++{
++    TCGReg xr = args[0], xnf = args[1];
++    TCGReg xa = args[2], xb = args[3], xc = args[4], xf = args[5];
++    unsigned sel = args[6], op = sel & 0xff;
++    uint64_t fst = args[8];
++    TCGRegSet used = 0;
++    TCGReg bad, k1, k3, ta, tc = TCG_REG_XZR, tr, t, u;
++    TCGLabelQemuLdst *l;
++
++    tcg_regset_set_reg(used, xr);
++    tcg_regset_set_reg(used, xnf);
++    tcg_regset_set_reg(used, xa);
++    tcg_regset_set_reg(used, xb);
++    tcg_regset_set_reg(used, xc);
++    tcg_regset_set_reg(used, xf);
++    bad = pfp_scratch(&used);
++    k3 = pfp_scratch(&used);
++    ta = pfp_scratch(&used);
++    t = pfp_scratch(&used);
++
++    /* the gate: XX = 1, XE = OE = UE = 0 (and RN = 00 but for fcmpu) */
++    tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP0,
++                 PFP_XX | PFP_TRAPS | (op == PFP_CMPU ? 0 : 3));
++    pfp_rrr(s, PFP_ANDX, bad, xf, TCG_REG_TMP0, 0);
++    tcg_out_logicali(s, I3404_EORI, TCG_TYPE_I64, bad, bad, PFP_XX);
++
++    if (op == PFP_CMPU) {
++        /*
++         * fpi_fcmpu(): no NaN (magnitude > 0x7ff0...), then a signed
++         * comparison of sign-magnitude turned into two's complement.
++         */
++        TCGReg tb = pfp_scratch(&used);
++
++        tcg_out_movi(s, TCG_TYPE_I64, k3, 0x7ff0000000000000ull);
++        tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64, ta, xa, INT64_MAX);
++        tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64, tb, xb, INT64_MAX);
++        pfp_cmp(s, ta, k3);
++        pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_LS);
++        pfp_cmp(s, tb, k3);
++        pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_LS);
++        pfp_cmpi(s, xa, 0);
++        pfp_cs(s, PFP_CSNEG, ta, ta, ta, PFP_GE);
++        pfp_cmpi(s, xb, 0);
++        pfp_cs(s, PFP_CSNEG, tb, tb, tb, PFP_GE);
++        tcg_out_movi(s, TCG_TYPE_I64, xr, 2);
++        tcg_out_movi(s, TCG_TYPE_I64, t, 4);
++        pfp_cmp(s, ta, tb);
++        pfp_cs(s, PFP_CSEL, xr, t, xr, PFP_GT);
++        tcg_out_movi(s, TCG_TYPE_I64, t, 8);
++        pfp_cs(s, PFP_CSEL, xr, t, xr, PFP_LT);
++        /* fpi_fpscr_fcmpu(): FPCC = crf, FI = 1 */
++        tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64, xnf, xf,
++                         ~(uint64_t)0xf000);
++        pfp_rrr(s, PFP_ORRX, xnf, xnf, xr, 12);
++        tcg_out_logicali(s, I3404_ORRI, TCG_TYPE_I64, xnf, xnf, PFP_FI);
++    } else {
++        bool use_b = op != PFP_MUL;
++        bool use_c = op >= PFP_MUL;
++
++        k1 = pfp_scratch(&used);
++        tr = pfp_scratch(&used);
++        u = TCG_REG_TMP2;
++        /* operands: fpi_zon(), k2 in TMP1 */
++        tcg_out_movi(s, TCG_TYPE_I64, k1, 0x381ull << 53);
++        tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP1, 0xfeull << 53);
++        pfp_zon(s, bad, ta, xa, k1, TCG_REG_TMP1, u);
++        if (use_b) {
++            pfp_zon(s, bad, t, xb, k1, TCG_REG_TMP1, u);
++        }
++        if (use_c) {
++            tc = pfp_scratch(&used);
++            pfp_zon(s, bad, tc, xc, k1, TCG_REG_TMP1, u);
++        }
++
++        /* the operation, float32, as helper_fp32_fast() */
++        pfp_fmov_dx(s, 0, xa);
++        pfp_fcvt_sd(s, 0, 0);
++        if (use_b) {
++            pfp_fmov_dx(s, 1, xb);
++            pfp_fcvt_sd(s, 1, 1);
++        }
++        if (use_c) {
++            pfp_fmov_dx(s, 2, xc);
++            pfp_fcvt_sd(s, 2, 2);
++        }
++        switch (op) {
++        case PFP_ADD:
++            pfp_f3(s, PFP_FADDS, 3, 0, 1);
++            break;
++        case PFP_SUB:
++            pfp_f3(s, PFP_FSUBS, 3, 0, 1);
++            break;
++        case PFP_MUL:
++            pfp_f3(s, PFP_FMULS, 3, 0, 2);
++            break;
++        case PFP_MADD:
++            pfp_fmadd(s, 3, 0, 2, 1);                   /* a * c + b */
++            break;
++        case PFP_MSUB:
++            pfp_fneg(s, 1, 1);
++            pfp_fmadd(s, 3, 0, 2, 1);                   /* a * c + -b */
++            break;
++        case PFP_NMADD:
++            pfp_fmadd(s, 3, 0, 2, 1);
++            pfp_fneg(s, 3, 3);                          /* after rounding */
++            break;
++        case PFP_NMSUB:
++            pfp_fneg(s, 1, 1);
++            pfp_fmadd(s, 3, 0, 2, 1);
++            pfp_fneg(s, 3, 3);
++            break;
++        default:
++            g_assert_not_reached();
++        }
++        pfp_fcvt_ds(s, 3, 3);
++        pfp_fmov_xd(s, xr, 3);
++
++        /* the result: tr = r << 1, k3 = infinity << 1 */
++        pfp_lsl(s, tr, xr, 1);
++        tcg_out_movi(s, TCG_TYPE_I64, k3, 0xffe0000000000000ull);
++        if (op <= PFP_SUB) {
++            /* any finite sum */
++            pfp_cmp(s, tr, k3);
++            pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_NE);
++        } else {
++            /* a zero product, or FLT_MIN < |r| < inf */
++            pfp_cmpi(s, ta, 0);
++            pfp_ccmpi(s, tc, 0, 4, PFP_NE);
++            pfp_cs(s, PFP_CSINC, t, TCG_REG_XZR, TCG_REG_XZR, PFP_NE);
++            pfp_cmp(s, tr, k1);
++            pfp_ccmp(s, tr, k3, 2, PFP_HI);
++            pfp_ccmpi(s, t, 0, 0, PFP_HS);
++            pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_NE);
++        }
++
++        /* fpi_fpscr_arith(): FPRF of r (+-zero, +-normal), FI = 1 */
++        pfp_lsr(s, TCG_REG_TMP0, xr, 63);                       /* neg */
++        pfp_lsl(s, TCG_REG_TMP1, TCG_REG_TMP0, 4);
++        tcg_out_logicali(s, I3404_ORRI, TCG_TYPE_I64, TCG_REG_TMP1,
++                         TCG_REG_TMP1, 2);                      /* 0x02/0x12 */
++        tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP2, 4);
++        pfp_rrr(s, PFP_LSLVX, TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP0, 0);
++        pfp_cmpi(s, tr, 0);
++        pfp_cs(s, PFP_CSEL, TCG_REG_TMP2, TCG_REG_TMP1, TCG_REG_TMP2, PFP_EQ);
++        tcg_out_logicali(s, I3404_ANDI, TCG_TYPE_I64, xnf, xf,
++                         ~(uint64_t)(0x1f000 | PFP_FI));
++        pfp_rrr(s, PFP_ORRX, xnf, xnf, TCG_REG_TMP2, 12);
++        tcg_out_logicali(s, I3404_ORRI, TCG_TYPE_I64, xnf, xnf, PFP_FI);
++    }
++
++    /* any test failed: the helper, out of line */
++    l = new_ldst_label(s);
++    l->is_ppc_fp32 = true;
++    l->fp_sel = sel;
++    l->fp_in[0] = xa;
++    l->fp_in[1] = xb;
++    l->fp_in[2] = xc;
++    l->fp_out[0] = xr;
++    l->fp_out[1] = xnf;
++    l->fp_slow = (const void *)args[7];
++    l->label_ptr[0] = s->code_ptr;
++    tcg_out_insn(s, 3201, CBNZ, TCG_TYPE_I64, bad, 0);
++
++    /* short path: soft-float exception flags = inexact (primed) */
++    tcg_out_movi(s, TCG_TYPE_I32, t, fst >> 32);
++    tcg_out_ldst(s, I3312_STRH, t, TCG_AREG0, (uint32_t)fst, 1);
++    l->raddr = tcg_splitwx_to_rx(s->code_ptr);
++}
++
++/*
++ * The stub: x0 = env, x1-x3 = frA frB frC, w4 = selector, x5 = return
++ * address in the generated code (for a deferred FP exception); the helper
++ * returns (result, FPSCR) in x0:x1.  Arguments and results go through the
++ * reserved temporaries, so any register assignment is fine.
++ */
++static bool tcg_out_ppc_fp32_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
++{
++    if (!reloc_pc19(l->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
++        return false;
++    }
++    tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_TMP0, l->fp_in[0]);
++    tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_TMP1, l->fp_in[1]);
++    tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_TMP2, l->fp_in[2]);
++    tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X1, TCG_REG_TMP0);
++    tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X2, TCG_REG_TMP1);
++    tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X3, TCG_REG_TMP2);
++    tcg_out_mov(s, TCG_TYPE_PTR, TCG_REG_X0, TCG_AREG0);
++    tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X4, l->fp_sel);
++    tcg_out_movi(s, TCG_TYPE_PTR, TCG_REG_X5, (uintptr_t)l->raddr);
++    tcg_out_call_int(s, l->fp_slow);
++    tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_TMP0, TCG_REG_X0);
++    tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_TMP1, TCG_REG_X1);
++    tcg_out_mov(s, TCG_TYPE_I64, l->fp_out[0], TCG_REG_TMP0);
++    tcg_out_mov(s, TCG_TYPE_I64, l->fp_out[1], TCG_REG_TMP1);
++    tcg_out_goto(s, l->raddr);
++    return true;
++}
++
+ static void tcg_out_qemu_ld(TCGContext *s, TCGReg data_reg, TCGReg addr_reg,
+                             MemOpIdx oi, TCGType data_type)
+ {
+@@ -2396,6 +2745,9 @@
+     case INDEX_op_qemu_ld_a32_i64:
+     case INDEX_op_qemu_ld_a64_i64:
+         tcg_out_qemu_ld(s, a0, a1, a2, ext);
++        break;
++    case INDEX_op_ppc_fp32:
++        tcg_out_ppc_fp32(s, args);
+         break;
+     case INDEX_op_qemu_st_a32_i32:
+     case INDEX_op_qemu_st_a64_i32:
+@@ -3070,6 +3422,9 @@
+     case INDEX_op_movcond_i32:
+     case INDEX_op_movcond_i64:
+         return C_O1_I4(r, r, rC, rZ, rZ);
++
++    case INDEX_op_ppc_fp32:
++        return C_N2_I4(r, r, r, r, r, r);
+ 
+     case INDEX_op_qemu_ld_a32_i32:
+     case INDEX_op_qemu_ld_a64_i32:
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1381,6 +1381,15 @@
+      */
+     bool fp_flat;
+     /*
++     * x-fp-native (POMPPC tcg/0014, needs x-fast-fp and a TCG backend with
++     * INDEX_op_ppc_fp32, i.e. aarch64): the same instructions, the short
++     * path done by the host FPU in the generated code, the x-fp-flat helper
++     * called out of line when it does not apply.  Falls back to x-fp-flat
++     * elsewhere.  x-fp-verify checks every such instruction.
++     */
++    bool fp_native;
++    uint32_t fpn_sel;           /* x-fp-verify: selector of the checked op */
++    /*
+      * x-ret-inline (POMPPC tcg/0008): the indirect exits of a TB (blr, bctr,
+      * bclr, bcctr, cross-page branches, DISAS_CHAIN) probe the jump cache in
+      * the generated code and only call helper_lookup_tb_ptr on a miss.
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7457,6 +7457,12 @@
+      * bit-exact with the helpers.  Needs x-fast-fp.  Off by default.
+      */
+     DEFINE_PROP_BOOL("x-fp-flat", PowerPCCPU, env.fp_flat, false),
++    /*
++     * The same instructions with their short path done by the host FPU in
++     * the generated code (aarch64 hosts; x-fp-flat elsewhere); bit-exact
++     * with the helpers.  Needs x-fast-fp.  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-fp-native", PowerPCCPU, env.fp_native, false),
+     /*
+      * POMPPC tcg/0008.  x-ret-inline: the jump-cache probe of
+      * helper_lookup_tb_ptr done in the generated code at every indirect
+diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
+--- a/target/ppc/fpu_helper.c
++++ b/target/ppc/fpu_helper.c
+@@ -4213,4 +4213,128 @@
+         return int128_make128(crf, fpi_fpscr_fcmpu(fpscr, crf));
+     }
+     return fcmpu_flat(env, a, b, fpscr, bf, GETPC());
++}
++
++/*
++ * x-fp-native (POMPPC patches/tcg/0014, docs/tcg-g4.md section 22).
++ *
++ * INDEX_op_ppc_fp32 (tcg/aarch64) does the short path of x-fp-inline with
++ * the host FPU in the generated code and, when one of its tests fails,
++ * calls this function from an out-of-line stub: not a TCG helper, a plain
++ * C function with the stub's own convention.  sel = op | frT (bf) << 8; ra
++ * is the return address in the generated code, as GETPC() would be.  It is
++ * the whole x-fp-flat helper: short path or original sequence.
++ */
++Int128 ppc_fp32_native_slow(CPUPPCState *env, uint64_t a, uint64_t b,
++                            uint64_t c, uint32_t sel, uintptr_t ra)
++{
++    uint32_t op = sel & 0xff, frt = (sel >> 8) & 0xff;
++
++    if (op == FPI_CMPU) {
++        return fcmpu_flat(env, a, b, env->fpscr, frt, ra);
++    }
++    return fp32_flat(env, a, b, c, env->fpscr, op, frt, ra);
++}
++
++/*
++ * x-fp-verify with x-fp-native: after each native op, the original
++ * sequence is run again from the FPSCR the op started from, and its
++ * result, FPSCR and soft-float flags compared with what the op produced.
++ * The whole state it touches is saved and put back, so the guest runs
++ * exactly as without it.  Not when the original sequence could raise an
++ * exception from here -- FP exceptions enabled in the MSR and a trap armed
++ * in the FPSCR (VE OE UE ZE XE), or a deferred FP exception already
++ * pending: counted apart.  (DOOM 3 runs with MSR[FE] != 0 and no trap.)
++ */
++static uint64_t fpn_ok[FPI_NOPS], fpn_bad[FPI_NOPS], fpn_fast[FPI_NOPS];
++static uint64_t fpn_skip, fpn_total;
++static bool fpn_atexit;
++
++static void fpn_report(void)
++{
++    uint64_t ok = 0, bad = 0, fast = 0;
++    int i;
++
++    for (i = 0; i < FPI_NOPS; i++) {
++        ok += qatomic_read(&fpn_ok[i]);
++        bad += qatomic_read(&fpn_bad[i]);
++        fast += qatomic_read(&fpn_fast[i]);
++    }
++    fprintf(stderr, "fp-native-verify: %" PRIu64 " vérifiés (%" PRIu64
++            " par le chemin court), %" PRIu64 " divergences, %" PRIu64
++            " non vérifiés (MSR[FE] et trappe armée) ;", ok + bad, fast, bad,
++            qatomic_read(&fpn_skip));
++    for (i = 0; i < FPI_NOPS; i++) {
++        fprintf(stderr, " %s %" PRIu64 "/%" PRIu64 "/%" PRIu64, fpi_names[i],
++                qatomic_read(&fpn_ok[i]), qatomic_read(&fpn_fast[i]),
++                qatomic_read(&fpn_bad[i]));
++    }
++    fprintf(stderr, "\n");
++}
++
++void helper_fpn_verify(CPUPPCState *env, uint64_t a, uint64_t b, uint64_t c,
++                       uint64_t fpscr_old, uint64_t r, uint64_t nf)
++{
++    CPUState *cs = env_cpu(env);
++    uint32_t sel = env->fpn_sel, op = sel & 0xff, frt = (sel >> 8) & 0xff;
++    target_ulong fpscr_after = env->fpscr;
++    int flags_after = get_float_exception_flags(&env->fp_status);
++    int excp = cs->exception_index, err = env->error_code;
++    uint32_t crf_after = op == FPI_CMPU ? env->crf[frt] : 0;
++    uint64_t ref;
++    bool fast, good;
++
++    if (!qatomic_read(&fpn_atexit)) {
++        qatomic_set(&fpn_atexit, true);
++        atexit(fpn_report);
++    }
++    if (fp_exceptions_enabled(env) &&
++        ((fpscr_old & (FP_VE | FP_OE | FP_UE | FP_ZE | FP_XE)) ||
++         (excp == POWERPC_EXCP_PROGRAM && (err & POWERPC_EXCP_FP)))) {
++        qatomic_inc(&fpn_skip);
++        return;
++    }
++    if (op == FPI_CMPU) {
++        fast = fpi_fcmpu(fpscr_old, a, b) != 0;
++    } else {
++        fast = fpi_gate(fpscr_old) &&
++               helper_fp32_fast(a, b, c, op) != FPI_FAIL;
++    }
++    env->fpscr = fpscr_old;
++    helper_reset_fpstatus(env);
++    if (op == FPI_CMPU) {
++        do_fcmpu(env, a, b, frt, 0);
++        do_float_check_status(env, true, 0);
++        ref = env->crf[frt];
++        env->crf[frt] = crf_after;
++    } else {
++        ref = fpf_slow(env, op, a, b, c, 0);
++        helper_compute_fprf_float64(env, ref);
++        do_float_check_status(env, true, 0);
++    }
++    good = ref == r && env->fpscr == nf &&
++           get_float_exception_flags(&env->fp_status) == flags_after &&
++           cs->exception_index == excp && env->error_code == err &&
++           fpscr_after == nf;
++    if (!good) {
++        fprintf(stderr, "fp-native-verify: DIVERGENCE %s a=%016" PRIx64
++                " b=%016" PRIx64 " c=%016" PRIx64 " fpscr=%08" PRIx64
++                " : natif %016" PRIx64 " fpscr %08" PRIx64 " drapeaux %x"
++                ", helpers %016" PRIx64 " fpscr %08" PRIx64 " drapeaux %x"
++                " excp %d->%d\n", fpi_names[op], a, b, c, fpscr_old, r, nf,
++                flags_after, ref, (uint64_t)env->fpscr,
++                get_float_exception_flags(&env->fp_status), excp,
++                cs->exception_index);
++    }
++    env->fpscr = fpscr_after;
++    set_float_exception_flags(flags_after, &env->fp_status);
++    cs->exception_index = excp;
++    env->error_code = err;
++    qatomic_inc(good ? &fpn_ok[op] : &fpn_bad[op]);
++    if (fast) {
++        qatomic_inc(&fpn_fast[op]);
++    }
++    if ((qatomic_fetch_inc(&fpn_total) & ((1u << 24) - 1)) == 0) {
++        fpn_report();
++    }
+ }
+diff --git a/target/ppc/helper.h b/target/ppc/helper.h
+--- a/target/ppc/helper.h
++++ b/target/ppc/helper.h
+@@ -103,6 +103,8 @@
+  */
+ DEF_HELPER_FLAGS_6(fp32_flat, TCG_CALL_NO_WG, i128, env, i64, i64, i64, i64, i32)
+ DEF_HELPER_FLAGS_5(fcmpu_flat, TCG_CALL_NO_WG, i128, env, i64, i64, i64, i32)
++/* x-fp-native (POMPPC tcg/0014): x-fp-verify, after each native op */
++DEF_HELPER_7(fpn_verify, void, env, i64, i64, i64, i64, i64, i64)
+ DEF_HELPER_3(store_fpscr, void, env, i64, i32)
+ DEF_HELPER_2(fpscr_clrbit, void, env, i32)
+ DEF_HELPER_2(fpscr_setbit, void, env, i32)
+diff --git a/target/ppc/internal.h b/target/ppc/internal.h
+--- a/target/ppc/internal.h
++++ b/target/ppc/internal.h
+@@ -314,5 +314,12 @@
+ #define FPI_FAIL 0x7ff8000000000001ull
+ /* the arithmetic short path needs (fpscr & FPI_GATE_MASK) == FP_XX */
+ #define FPI_GATE_MASK (FP_XX | FP_XE | FP_OE | FP_UE | FP_RN)
++/*
++ * x-fp-native (POMPPC tcg/0014): called by the out-of-line stub of
++ * INDEX_op_ppc_fp32 (sel = op | frT << 8, ra = return address in the
++ * generated code); fpu_helper.c.
++ */
++Int128 ppc_fp32_native_slow(CPUPPCState *env, uint64_t a, uint64_t b,
++                            uint64_t c, uint32_t sel, uintptr_t ra);
+ 
+ #endif /* PPC_INTERNAL_H */
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -188,6 +188,7 @@
+     bool fpu_enabled;
+     bool fp_inline, fp_verify;  /* x-fp-inline, x-fp-verify (tcg/0007) */
+     bool fp_flat;               /* x-fp-flat (tcg/0013) */
++    bool fp_native;             /* x-fp-native (tcg/0014) */
+     bool ret_inline, ret_verify; /* x-ret-inline, x-ret-verify (tcg/0008) */
+     bool altivec_enabled;
+     bool vsx_enabled;
+@@ -6531,6 +6532,12 @@
+     ctx->fp_inline = env->fp_inline && env->fp_prime_mask;
+     ctx->fp_verify = ctx->fp_inline && env->fp_verify;
+     ctx->fp_flat = env->fp_flat && env->fp_prime_mask;
++    ctx->fp_native = env->fp_native && env->fp_prime_mask &&
++                     TCG_TARGET_HAS_ppc_fp32;
++    /* without the host op, x-fp-native is x-fp-flat */
++    ctx->fp_flat |= env->fp_native && env->fp_prime_mask;
++    /* x-fp-verify also checks x-fp-native (x-fp-flat checks itself, in C) */
++    ctx->fp_verify |= ctx->fp_native && env->fp_verify;
+     ctx->ret_inline = env->ret_inline;
+     ctx->ret_verify = cs->ret_verify;
+     ctx->spe_enabled = (hflags >> HFLAGS_SPE) & 1;
+diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c.inc
+--- a/target/ppc/translate/fp-impl.c.inc
++++ b/target/ppc/translate/fp-impl.c.inc
+@@ -295,8 +295,88 @@
+         gen_set_cr1_from_fpscr(ctx);
+     }
+     return true;
++}
++
++/*
++ * x-fp-native (POMPPC tcg/0014): INDEX_op_ppc_fp32, the short path by the
++ * host FPU in the generated code, ppc_fp32_native_slow() (the x-fp-flat
++ * helper) out of line otherwise.  sel = op | frT (or bf) << 8.
++ */
++/* the FPSCR layout the host op hard-codes (tcg/aarch64/tcg-target.c.inc) */
++QEMU_BUILD_BUG_ON(FP_XX != 1u << 25 || FP_XE != 1u << 3 || FP_UE != 1u << 5 ||
++                  FP_OE != 1u << 6 || FP_RN != 3 || FPSCR_FPRF != 12 ||
++                  FP_FPRF != 0x1f << 12 || FP_FPCC != 0xf << 12 ||
++                  FP_FI != 1u << 17);
++
++static void gen_fp_native(DisasContext *ctx, TCGv_i64 r, TCGv_i64 nf, int op,
++                          int t, TCGv_i64 a, TCGv_i64 b, TCGv_i64 c)
++{
++    TCGv_i64 f = tcg_temp_new_i64();
++    unsigned sel = op | t << 8;
++
++    tcg_gen_extu_tl_i64(f, cpu_fpscr);
++    tcg_gen_ppc_fp32(r, nf, a, b, c, f, sel, ppc_fp32_native_slow,
++                     offsetof(CPUPPCState, fp_status.float_exception_flags) |
++                     (uint64_t)float_flag_inexact << 32);
++    if (ctx->fp_verify) {
++        tcg_gen_st_i32(tcg_constant_i32(sel), tcg_env,
++                       offsetof(CPUPPCState, fpn_sel));
++        if (op == FPI_CMPU) {
++            /* the helper reads env->crf[bf]: the op's value */
++            tcg_gen_extrl_i64_i32(cpu_crf[t], r);
++        }
++        tcg_gen_trunc_i64_tl(cpu_fpscr, nf);
++        gen_helper_fpn_verify(tcg_env, a, b, c, f, r, nf);
++    }
+ }
+ 
++static bool do_fp_native(DisasContext *ctx, int op, int frt, int fra, int frb,
++                         int frc, bool rc)
++{
++    TCGv_i64 a = tcg_temp_new_i64();
++    TCGv_i64 b = tcg_temp_new_i64();
++    TCGv_i64 c = tcg_temp_new_i64();
++    TCGv_i64 r = tcg_temp_new_i64();
++    TCGv_i64 nf = tcg_temp_new_i64();
++
++    REQUIRE_INSNS_FLAGS(ctx, FLOAT);
++    REQUIRE_FPU(ctx);
++
++    get_fpr(a, fra);
++    if (op == FPI_ADD || op == FPI_SUB || op >= FPI_MADD) {
++        get_fpr(b, frb);
++    } else {
++        tcg_gen_movi_i64(b, 0);
++    }
++    if (op >= FPI_MUL) {
++        get_fpr(c, frc);
++    } else {
++        tcg_gen_movi_i64(c, 0);
++    }
++    gen_fp_native(ctx, r, nf, op, frt, a, b, c);
++    set_fpr(frt, r);
++    tcg_gen_trunc_i64_tl(cpu_fpscr, nf);
++    if (unlikely(rc)) {
++        gen_set_cr1_from_fpscr(ctx);
++    }
++    return true;
++}
++
++static void gen_fcmpu_native(DisasContext *ctx)
++{
++    int bf = crfD(ctx->opcode);
++    TCGv_i64 a = tcg_temp_new_i64();
++    TCGv_i64 b = tcg_temp_new_i64();
++    TCGv_i64 r = tcg_temp_new_i64();
++    TCGv_i64 nf = tcg_temp_new_i64();
++
++    get_fpr(a, rA(ctx->opcode));
++    get_fpr(b, rB(ctx->opcode));
++    gen_fp_native(ctx, r, nf, FPI_CMPU, bf, a, b, tcg_constant_i64(0));
++    tcg_gen_extrl_i64_i32(cpu_crf[bf], r);
++    tcg_gen_trunc_i64_tl(cpu_fpscr, nf);
++}
++
+ static void gen_fcmpu_flat(DisasContext *ctx)
+ {
+     int bf = crfD(ctx->opcode);
+@@ -319,6 +399,9 @@
+                       void (*helper)(TCGv_i64, TCGv_ptr, TCGv_i64, TCGv_i64),
+                       int op)
+ {
++    if (ctx->fp_native) {
++        return do_fp_native(ctx, op, a->frt, a->fra, a->frb, 0, a->rc);
++    }
+     if (ctx->fp_flat) {
+         return do_fp_flat(ctx, op, a->frt, a->fra, a->frb, 0, a->rc);
+     }
+@@ -332,6 +415,9 @@
+                       void (*helper)(TCGv_i64, TCGv_ptr, TCGv_i64, TCGv_i64),
+                       int op)
+ {
++    if (ctx->fp_native) {
++        return do_fp_native(ctx, op, a->frt, a->fra, 0, a->frc, a->rc);
++    }
+     if (ctx->fp_flat) {
+         return do_fp_flat(ctx, op, a->frt, a->fra, 0, a->frc, a->rc);
+     }
+@@ -346,6 +432,9 @@
+                                       TCGv_i64, TCGv_i64),
+                        int op)
+ {
++    if (ctx->fp_native) {
++        return do_fp_native(ctx, op, a->frt, a->fra, a->frb, a->frc, a->rc);
++    }
+     if (ctx->fp_flat) {
+         return do_fp_flat(ctx, op, a->frt, a->fra, a->frb, a->frc, a->rc);
+     }
+@@ -636,6 +725,10 @@
+     TCGv_i64 t1;
+     if (unlikely(!ctx->fpu_enabled)) {
+         gen_exception(ctx, POWERPC_EXCP_FPU);
++        return;
++    }
++    if (ctx->fp_native) {
++        gen_fcmpu_native(ctx);
+         return;
+     }
+     if (ctx->fp_flat) {

@@ -12,7 +12,9 @@ hôte), mesure **1 contre 2 cœurs**, et décrit **les patches qui en sont sorti
 `0010-tcg-smc-mttcg` (le code réécrit par l'autre vCPU : trois courses de QEMU corrigées et
 `x-icbi-sync`, §17, allumée par défaut depuis l'A/B du §20), puis `0011-tcg-jc-bits`
 (`x-jc-bits`, le cache de sauts de 16 384 entrées, §18) et `0012-ppc-msr-nobql`
-(`x-msr-nobql`, `mtmsr`/`rfi` sans verrou global, §19) ; trois essais exacts mais sans gain,
+(`x-msr-nobql`, `mtmsr`/`rfi` sans verrou global, §19), puis `0013-ppc-fp-flat` (`x-fp-flat`)
+et `0014-tcg-fp-native` (`x-fp-native`, le flottant scalaire simple par le FPU de l'hôte dans
+le code généré, une op TCG nouvelle, §22) ; trois essais exacts mais sans gain,
 `patches/tcg/essais/0002-ppc-lmw-inline.patch` (`x-lmw-inline`) et
 `essais/0005-ppc-vfp-nrwg.patch` (`x-vfp-nrwg`, §11) et `essais/0009-ppc-isync-chain.patch`
 (`x-isync-chain`, §16.8), ne sont pas appliqués.
@@ -1946,3 +1948,356 @@ tour de référence `bench/matrice/20260930-0128` (binaire de référence, même
 vertes sur 16 automatisées, images toutes justes, replis dans les tolérances, aucune
 cellule au-dessus de son plancher.** Marble Blast un peu plus lent d'un tour à l'autre,
 dans son bruit connu (9,3 à 10,3 depuis le 26/09, §19.4).
+
+---
+
+## 22. Le flottant scalaire « natif » : `tcg/0013` (`x-fp-flat`) et `tcg/0014` (`x-fp-native`)
+
+30/09/2026. Copie isolée `~/src/qemu-fpnat` (clone APFS de `~/src/qemu`, qui n'a pas été
+touché ; `qgpu` identique octet pour octet à la référence), construite dans `bfn/` ; binaires
+rangés dans `~/src/qemu-fpnat/bin/<nom>/qemu-system-ppc64` (`fx` : l'essai de borne ; `nat2` :
+0013 + 0014, celui des mesures ; `nat3` : le même avec le vérificateur affiné du §22.7, le
+binaire final ; `mut1..6` : les mutants). Bancs invités sur un clone du disque
+de dev (`bench/tcg/fpnat/dev.raw`, `tools/tcg/fpnatab.sh`), DOOM 3 sur des recouvrements neufs
+de `disks/tiger-endurance.qcow2` (`tools/tcg/fpnatd3.py`) : la VM quotidienne n'a pas servi.
+**Hôte chargé pendant toutes les mesures** : deux ou trois autres QEMU (chantier A4) tournaient,
+charge 5 à 11 (`charge.txt` de chaque campagne) ; seuls les écarts entre modes entrelacés
+comptent, pas les valeurs absolues.
+
+### 22.1 La question
+
+Le §15.7 avait classé « des opérations flottantes aarch64 dans le code généré » : tant que les
+FPR vivent en mémoire comme des doubles, une op en ligne paie encore `fmov`, `fcvt`, le calcul,
+`fcvt`, `fmov` et ne gagne que l'appel. Question reposée : FPR (ou temporaires) tenus dans des
+registres flottants de l'hôte le temps d'un bloc, calcul en `fadd`/`fmul`/`fmadd` natifs —
+faisable dans TCG 9.2, exact, et que rapporte-t-il ?
+
+### 22.2 Ce que TCG 9.2 permet (lu dans le code)
+
+- **Aucune opération flottante dans TCG** : les ops vectorielles (`TCG_TYPE_V64/V128`) sont
+  entières (add, and, décalages, cmp, bitsel…). Du flottant natif demande une op nouvelle dans le
+  cœur de TCG et dans le backend.
+- **Un registre V ne survit à rien** : sur arm64 tous les V allouables sont « call-clobbered »
+  (V8-V15, sauvés par l'ABI, sont exclus de l'allocation) et **chaque accès mémoire invité**
+  (`qemu_ld/st` : `TCG_OPF_CALL_CLOBBER`) libère tous les registres sauvés par l'appelant. Dans du
+  code flottant (`lfs` … `fmadds` … `stfs`), une valeur tenue en registre V serait déversée à
+  chaque `lfs`/`stfs`. Garder les FPR en registres « le temps d'un bloc » demanderait des
+  globales TCG de type V64, V8-V15 allouables pour le seul V64 et sauvés par le prologue, et un
+  chemin lent sans branchement par instruction : hors de portée d'un patch — et la borne
+  (§22.3) dit que l'essentiel du gain n'est pas là.
+- **Ce qui coûte aujourd'hui** : le **branchement** que `x-fp-inline` émet à chaque instruction
+  (« chemin court ou helpers ») termine un bloc de base TCG — globales réécrites, temporaires
+  déversés, tout relu ensuite, à chaque `fadds` — puis le calcul fait dans le helper.
+
+**Le temps vCPU aujourd'hui** (`sample` de 10 s du QEMU pendant la scène fixe de DOOM 3,
+configuration retenue, partie `ref-1` du §22.9 ; `tools/tcg/samplesum.py`,
+`tools/tcg/fpnatd3sum.py`) : le fil vCPU du jeu est occupé **71 %** du temps (l'autre 37 %), le
+reste en attente (vCPU arrêté par l'invité) — le jeu n'est plus lié au seul vCPU. Du temps
+occupé des deux fils (7 521 échantillons) :
+
+| poste | part |
+|---|---|
+| code généré (self) | 60,8 % |
+| flottant scalaire restant (`helper_fp32_fast`) | **7,6 %** (+ sa porte, FPRF et le branchement, dans le code généré) |
+| AltiVec (`vfp_fma4`, `helper_vmaddfp`, `vsldoi`, `vperm`, `vfp_add4`) | ~6,5 % |
+| verrou global (attente) | 4,1 % |
+| TLB (`probe_access`, `mmu_lookup`, `tlb_fill`) | ~5 % |
+| `lmw`/`stmw` | 2,1 % |
+| horloge (`mftb` : `cpu_get_clock`, `mach_absolute_time`) | ~2,5 % |
+| sorties indirectes (`tb_lookup`, `qht`) | ~2 % |
+
+Le flottant scalaire simple pèse donc toujours ~8 % du temps vCPU en helper, plus sa part du
+code généré ; le double précision reste négligeable (§15.7).
+
+### 22.3 La borne : ce que coûte chaque morceau (`x-fpx-mode`, banc invité)
+
+Binaire d'essai `bin/fx` (`patches/tcg/essais/0013-ppc-fpx-borne.patch`) : la propriété
+`x-fpx-mode` change la traduction des sept instructions de `x-fp-inline` et de `fcmpu` :
+
+| mode | ce que fait chaque instruction | exact ? |
+|---|---|---|
+| 0 | `x-fp-inline` tel quel (appel pur, porte, **branchement**, FPRF en ligne) | oui |
+| 1 | l'appel de `helper_fp32_fast`, FPRF en ligne, **sans porte ni branchement** | non (NaN, dénormaux) |
+| 4 | `x-fp-inline` avec un helper qui rend frA sans calculer (l'essai du §15.7) | non |
+| 2 | ni appel ni branchement : frT = frA, FPRF en ligne | non (plancher) |
+| 3 | frT = frA seulement | non (plancher) |
+
+`BANC=10000000 fptest banc` (chaîne dépendante `fmadds fmuls fmsubs fadds`, 40 M op. ;
+transformation 4×4 de sommets, 160 M op. ; « min/max », voir la réserve du §22.7), disque de
+dev, SMP=2, propriétés de `run_tiger.sh` par défaut, deux passes `0 1 2 3 4 4 3 2 1 0`, trois
+tours par démarrage (`bench/tcg/fpnat/borne1`, `tools/tcg/fpnatsum.py`) :
+
+| mode | chaîne | sommets | min/max |
+|---|---|---|---|
+| 0 `x-fp-inline` | 245 ms — 6,14 ns/op | 703 ms — 4,40 ns/op | 129 ms |
+| 1 sans branchement | 243 ms — 6,09 | **549 ms — 3,43** | 97 ms |
+| 4 sans calcul (avec branchement) | 85 ms — 2,14 | 424 ms — 2,65 | 104 ms |
+| 2 plancher avec FPRF | 34 ms — 0,86 | 188 ms — 1,18 | 74 ms |
+| 3 plancher | 18 ms — 0,46 | 111 ms — 0,69 | 57 ms |
+
+(médianes de 6 tours, dispersion ±3 %.) Par opération :
+
+- **le branchement** (0 → 1) : −1,0 ns sur les sommets (−22 %), rien sur la chaîne (bornée par
+  la latence) ;
+- **le calcul dans le helper** (0 → 4) : 1,75 ns (sommets) ; 4,0 ns (chaîne : `fmov`, `fcvt`,
+  `fmadd`, `fcvt`, `fmov` et les tests, en série) ;
+- l'appel lui-même ~0,4 ns, FPRF en ligne ~0,5 ns ; le plancher (lectures et écritures de
+  `env`) 0,5-1,2 ns.
+
+Borne hôte (`tools/tcg/fpnatbench.c` : mêmes motifs en C natif, FPR relus et écrits en mémoire
+à chaque opération comme le fait le code généré) :
+
+| | chaîne | sommets |
+|---|---|---|
+| appel de `helper_fp32_fast` | 5,8 ns/op | 2,8 ns/op |
+| même calcul, mêmes tests, **en ligne** | 6,2 | 2,1 |
+| rien (lectures/écritures, FPRF) | 1,5 | 1,5 |
+| suite entière **en registres** (FPR lus au début, un test cumulé, écrits à la fin) | **2,3** | 1,8 |
+
+Avec les FPR en mémoire, le calcul en ligne gagne ~0,7 ns/op en débit et rien en latence (le
+§15.7 avait raison sur ce point) ; seuls des FPR en registres coupent la latence d'une chaîne
+(6 → 2,3 ns), ce que TCG ne tient pas (§22.2). Mais dans le code généré, « en ligne » veut aussi
+dire **sans branchement ni appel** : c'est là le gros du gain (modes 1 et 2).
+
+**Projection DOOM 3** (avant de construire) : ~2,6 M instructions concernées par image
+(34,7 M/s à 74 ms/image au §15.1, même travail par image depuis), gain de 0,4 (motif chaîne) à
+1,4 ns (motif sommets) chacune ⇒ **1 à 3,6 ms/image, 2 à 6 %** : au-dessus du seuil de 2 %.
+
+### 22.4 `tcg/0013` : un appel, aucun branchement (`x-fp-flat`)
+
+`x-fp-flat` (propriété de CPU, défaut éteint, prime sur `x-fp-inline`, n'agit qu'avec
+`x-fast-fp` ; `FPFLAT=1 ./run_tiger.sh`) traduit les mêmes huit instructions en **un appel** et
+**aucun branchement** :
+
+    (r, fpscr) = helper_fp32_flat(env, frA, frB, frC, FPSCR, op | frT << 8)   NO_WG, rend un i128
+    frT = r ; FPSCR = fpscr ; (Rc=1) CR1 depuis le FPSCR
+    fcmpu : (crf, fpscr) = helper_fcmpu_flat(env, frA, frB, FPSCR, bf) ; CR[bf] = crf
+
+Le choix est fait **en C**. Le helper est une **fonction feuille** (sans cadre de pile) qui fait
+le chemin court de `x-fp-inline` — `fpi_gate()`, `fpi_fp32()` (le calcul de `helper_fp32_fast`,
+désormais toujours en ligne), `fpi_fpscr_arith()`, drapeaux softfloat = `inexact` ; sinon il
+passe la main à `fp32_flat()`, hors ligne, qui repart des mêmes entrées et fait **la séquence
+d'origine elle-même**, dans le même ordre, avec l'adresse de retour du code généré :
+`reset_fpstatus`, l'opération (`float64r32_*` et son `flags_handler`, `do_fmadds`), **frT écrit
+en mémoire**, `compute_fprf_float64`, `do_float_check_status` (`fcmpu` : `do_fcmpu`, nouveau,
+puis `do_float_check_status`). Ce que ça demande :
+
+- **`TCG_CALL_NO_WG`** : TCG réécrit les globales sales avant l'appel (une exception FP
+  différée peut être levée depuis le helper, `cpu_restore_state` les veut à jour) et garde ses
+  copies après. Le helper n'écrit aucune globale du point de vue de TCG : le nouveau FPSCR (et le
+  champ CR de `fcmpu`) revient dans le résultat et le code généré l'affecte. La séquence
+  d'origine écrit bien `env->fpscr` (et `env->crf[bf]`) en mémoire — la valeur même qui est
+  rendue.
+- **Le FPSCR passe en argument** : le chemin court ne lit rien en mémoire (§22.6).
+- **frT écrit avant `float_check_status`** : dans la séquence d'origine, l'exception différée
+  est levée *après* la mise à jour de frT ; le chemin lent l'écrit donc lui-même
+  (`*cpu_fpr_ptr(env, frT) = r`), le code généré le réécrit ensuite.
+- **L'adresse de retour** : `do_fcmpu`, `do_fmadds`, les `flags_handler` et
+  `do_float_check_status` reçoivent celle que le helper plat a capturée (et non `GETPC()`, qui
+  désignerait le helper).
+- `x-fp-verify` couvre `x-fp-flat` : sous le vérificateur, tout passe par `fp32_flat()`, dont
+  le chemin court appelle `helper_fpv_arith`/`_fcmpu` du §15.
+
+### 22.5 `tcg/0014` : le chemin court en instructions flottantes de l'hôte (`x-fp-native`)
+
+Une op TCG nouvelle, **`INDEX_op_ppc_fp32`** (cœur de TCG : `tcg-opc.h`, `tcg_gen_ppc_fp32`,
+`tcg_op_supported`, contrainte `C_N2_I4`, l'optimiseur oublie ses copies mémoire ; backend
+arm64 seulement, `TCG_TARGET_HAS_ppc_fp32`), faite comme un accès mémoire invité : **chemin
+rapide en ligne, chemin lent hors ligne** (une étiquette de plus dans `ldst_labels`, émise en fin
+de bloc).
+
+    sorties : r (CR pour fcmpu), FPSCR ; entrées : frA, frB, frC, FPSCR (i64 en GPR)
+    constantes : op | frT << 8, le helper lent, (offset | valeur) des drapeaux softfloat
+    drapeaux : TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS (comme un qemu_ld)
+
+Chemin rapide (`tcg_out_ppc_fp32`, ~50 instructions pour `fmadds`, aucun branchement avant le
+dernier) : la porte (`(fpscr & (XX|XE|OE|UE|RN)) ^ XX`) ; pour chaque opérande le test de
+`fpi_zon()` en six instructions (`lsl`, `sub`, `tst`, deux `ccmp`, `csinc`) ; `fmov`, `fcvt`
+simple, `fadd`/`fsub`/`fmul`/`fmadd` **simple précision** — `fmsubs` : `fneg` de frB avant,
+`fnmadds`/`fnmsubs` : `fneg` après l'arrondi, exactement comme `helper_fp32_fast` ; `fcvt`
+double, `fmov` ; le test du résultat (somme finie ; produit nul, ou `FLT_MIN < |r| < inf`) ;
+FPRF et FI en entier ; chaque test raté incrémente un registre, **un seul `cbnz`** vers le
+talon ; sur le chemin court, `strh` des drapeaux softfloat (`inexact`). `fcmpu` : porte, pas de
+NaN, clé signe-grandeur → complément à deux (`csneg`), `csel` 8/4/2, FPCC et FI.
+
+Le **talon hors ligne** passe les opérandes par les temporaires réservés (aucun conflit
+d'affectation possible), `x0 = env`, `w4 = op | frT << 8`, `x5` = l'adresse de retour dans le
+code généré (comme les chemins lents mémoire), appelle **`ppc_fp32_native_slow`** — c'est
+`fp32_flat()` du §22.4 — et rend `x0:x1` dans les sorties. Registres de travail : les GPR sauvés
+par l'appelant qui ne tiennent ni entrée ni sortie, et V0-V3 (l'op est `CALL_CLOBBER` : rien de
+vivant n'y reste). Sans backend arm64, `x-fp-native` est `x-fp-flat`.
+
+`x-fp-verify` avec `x-fp-native` : après chaque op, `helper_fpn_verify` refait la séquence
+d'origine depuis le FPSCR de départ et compare résultat, FPSCR, drapeaux et état d'exception ;
+tout l'état touché est remis ensuite (pas quand MSR[FE] ≠ 0 : compté à part, « non vérifiés »).
+
+### 22.6 Ce qu'a appris `x-fp-flat`
+
+Le premier `x-fp-flat` était **plus lent** que `x-fp-inline` (sommets 898 contre 696 ms) alors
+que le mode 1 de la borne gagnait 22 %. Deux causes, trouvées l'une après l'autre :
+
+1. `TCG_CALL_NO_WG` réécrit les globales sales avant l'appel, et le helper relisait aussitôt
+   `env->fpscr` : chaque instruction flottante attendait la précédente **par la mémoire**. Le
+   FPSCR passe désormais en argument — sans effet mesurable à lui seul (913 ms) ;
+2. le vrai coût : `helper_fp32_flat` sauvait **six paires de registres** à chaque appel
+   (prologue imposé par le chemin lent) et appelait `helper_fp32_fast` hors ligne. Banc hôte
+   des objets réels : 4,5 ns par appel contre 2,5 pour `helper_fp32_fast`. D'où la fonction
+   feuille du §22.4 : 3,2-3,5 ns par appel.
+
+Même ainsi, `x-fp-flat` ne rend qu'une partie du mode 1 (§22.8) : l'appel `NO_WG` synchronise
+les globales à chaque instruction et le helper fait FPRF et les drapeaux que le mode 1 laissait
+au code généré (où TCG supprime ceux qui sont écrasés). Il reste utile comme **chemin lent de
+`x-fp-native`** et comme repli sur un hôte qui n'est pas arm64.
+
+### 22.7 La preuve
+
+**Hôte** (`tools/tcg/fpproof.sh`, qui compile `fpproof.c` avec `-DFPPROOF_FLAT
+-DFPPROOF_NATIVE` quand l'arbre a les patches, lié aux vrais objets de l'arbre construit) : pour
+chaque vecteur du §15.5 (catalogue croisé, puis aléatoire ; FPSCR dans trois familles, dont
+toutes les trappes armées ; MSR[FE] au hasard), `helper_fp32_flat`/`helper_fcmpu_flat` **et**
+`ppc_fp32_native_slow` (le talon de `x-fp-native`) sont appelés depuis le même état que la
+séquence d'origine, **chemin court ou non** : résultat, frT en mémoire, FPSCR, drapeaux,
+exception levée ou non, `exception_index`, CR doivent être égaux.
+
+| `fpproof.sh ~/src/qemu-fpnat 20000000` (graine 0x5eed) | vecteurs | exceptions levées | divergences |
+|---|---|---|---|
+| chemin court de `x-fp-inline` (§15.5) | 174 427 024 (97 691 628 courts) | — | **0** |
+| `x-fp-flat`, tous chemins | 174 427 024 | 5 537 173 | **0** |
+| talon de `x-fp-native`, tous chemins | 174 427 024 | 5 537 173 | **0** |
+
+Contre-épreuves : `tools/tcg/fpflat-mut.sh` (copie de `fpu_helper.c` mutée et recompilée) :
+**10 mutations sur 10 détectées** (frT non écrit avant l'exception différée 1 116 057
+divergences ; sans `reset_fpstatus` 12,5 M ; `fmuls` lent sur frB 62 996 ; drapeaux du chemin
+court oubliés 1,1 M ; porte retirée du chemin court 1,1 M ; `fcmpu` lent sans FI 15 282 ;
+`fnmsubs` avec les drapeaux de `fnmadds` 1,6 M ; ancien FPSCR rendu 12 M ; CR faux pour
+l'égalité 168 ; CR lu avant la comparaison 30 509) ; `fpproof-mut.sh` (le modèle de
+`x-fp-inline`, dont `fpi_fp32` fait désormais partie) : 10 sur 10.
+
+**Encodages** : les 25 formes brutes émises par `tcg_out_ppc_fp32` comparées à celles de
+l'assembleur de l'hôte : 0 différence.
+
+**Patches** : 0013 puis 0014 appliqués aux fichiers de `~/src/qemu` redonnent l'arbre de
+travail à l'octet.
+
+**Invité** (`tools/guest/jobs/fptest`, les vraies instructions dans Tiger, disque de dev,
+SMP=2 ; 30 124 880 instructions, onze états du FPSCR, §15.5) :
+
+| binaire, mode | empreinte | vérificateur |
+|---|---|---|
+| `x-fp-inline` (référence) | `755efae4e391b7ea` | — |
+| `x-fp-flat` + `x-fp-verify` | `755efae4e391b7ea` | 7 001 644 chemins courts vérifiés, **0 divergence** |
+| `x-fp-native` + `x-fp-verify` | `755efae4e391b7ea` | **32 288 599 ops vérifiées** (6 999 243 par le chemin court), **0 divergence**, 3 149 non vérifiées (MSR[FE]) |
+
+L'empreinte est celle du §15.5 (identique octet pour octet à QEMU sans `x-fp-inline`) ; elle
+l'est aussi pour `x-fp-flat` et `x-fp-native` **sans** vérificateur (le chemin court de la
+fonction feuille de `x-fp-flat` n'est pris que hors vérificateur).
+
+Contre-épreuve invitée (`tools/tcg/fpnat-mut.sh` : un binaire par mutation de l'émetteur arm64,
+job `fptest` avec `NRAND=16384`, `x-fp-native` + `x-fp-verify`, `bench/tcg/fpnat/mut-nat1`) :
+**6 mutations sur 6 détectées** — frB non testé 45 369 divergences ; `|r| = FLT_MIN` accepté
+3 419 ; `fmsubs` sans la négation de frB 149 222 ; `fcmpu` avec −0 ≠ +0 319 ; porte sans RN
+174 440 ; FPRF de −0 faux 2 794 (sur ~8,6 M opérations vérifiées chacune, empreintes toutes
+différentes).
+
+**Tour réel** (`tools/tcg/fpnatd3.py`, DOOM 3 sur un recouvrement de `tiger-endurance.qcow2`,
+démarrage de Tiger, bureau, chargement, cinématique et scène fixe, `x-fp-native` +
+`x-fp-verify`) : **12 504 396 235 opérations vérifiées, dont 12 425 672 585 par le chemin
+court natif, 0 divergence**, 0 non vérifiée (`bench/tcg/fpnat/d3/natv-2/qemu.log`). Une
+première partie vérifiée n'en couvrait que 12 % : **DOOM 3 tourne avec MSR[FE] ≠ 0** et le
+vérificateur sautait alors toute opération ; il ne saute plus que celles où la séquence
+d'origine pourrait lever (trappe armée au FPSCR, ou exception différée en attente) — aucune
+dans ce tour. Taux du chemin court natif en jeu : **99,4 %** (replis : `fsubs` 40,7 M,
+`fcmpu` 35,3 M, `fmsubs` 2,6 M, le reste < 0,1 M ; au §15.9 les mêmes venaient surtout d'un
+FPSCR non amorcé).
+
+### 22.8 Gains sur le banc invité
+
+Binaire final `bin/nat2`, trois modes entrelacés `ref plat nat nat plat ref ref plat nat`
+(`bench/tcg/fpnat/banc-nat2`), trois tours par démarrage ; hôte chargé (charge 5-7, trois
+autres QEMU) :
+
+| mode | chaîne | sommets | min/max |
+|---|---|---|---|
+| `x-fp-inline` (référence) | 254 ms — 6,35 ns/op | 731 ms — 4,57 ns/op | 124 ms |
+| `x-fp-flat` | 248 ms (−2 %) | 690 ms (−6 %) | 120 ms (−3 %) |
+| **`x-fp-native`** | **223 ms (−12 %)** | **480 ms (−34 %)** | **94 ms (−24 %)** |
+
+(médianes de 9 tours pour la référence, 6 pour les autres, tous joués entre 14 h 56 et 15 h 20 ;
+dispersion ±2 %. `plat-3` et `nat-3`, joués plus tard sur un hôte plus calme — 577 et 411 ms
+sur les sommets — sont écartés : leur rapport, 0,71, est celui du tableau.) Le natif descend
+sous le mode 1 de la borne (549 ms,
+sans branchement mais avec appel) : il reste ~1,8 ns par opération au-dessus du plancher (1,2),
+le coût des ~50 instructions et des déversements qu'impose `CALL_CLOBBER`.
+
+**Réserve sur « min/max »** (le banc « fcmpu » du §15.6) : sous le vérificateur de `x-fp-flat`,
+il ne passait que ~2 000 `fcmpu` là où l'on en attendait 60 M. Le gcc de Tiger a compilé ces
+comparaisons en **`fsubs` + `fsel`** (`fptest.s` avec `DIS=1` : 4 `fsel`, 0 `fcmpu`,
+`bench/tcg/fpnat/dis1`) : ce banc mesure `fsubs`, pas `fcmpu` — le §15.6 lui attribuait à
+tort −41 % de `fcmpu`. `fcmpu` n'est exercé que par l'équivalence de `fptest` et par les jeux.
+
+### 22.9 DOOM 3 sur recouvrement (jeu de contrôle, pas l'A/B)
+
+`tools/tcg/fpnatd3.py` : une partie par QEMU neuf sur un recouvrement neuf de
+`disks/tiger-endurance.qcow2` (sans écran, `qgpu` `backend=auto`), `demo_mars_city1` en
+fenêtre 640×480, règle de fenêtre de la matrice (T+50..T+280), binaire `bin/nat2`, SMP=2,
+propriétés de `run_tiger.sh` par défaut ; `bench/tcg/fpnat/d3/`, `tools/tcg/fpnatd3sum.py`.
+**Pas l'hôte au repos** : une VM du chantier A4 tournait à côté pendant presque toutes les
+parties (charge 2 à 4) ; une longue mesure A4 a coupé la série en deux (20 h 00, puis 1 h 28 -
+3 h 10).
+
+| partie (ordre) | ref-1 | nat-1 | plat-1 | plat-2 | nat-2 | ref-2 | ref-3 | nat-3 | nat-4 | ref-4 | ref-5 | nat-5 | nat-6 | ref-6 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ms/image | 59,6 | 63,7 | 62,5 | 62,0 | 57,6 | 66,8 | 60,8 | 57,7 | 57,6 | 59,9 | 59,8 | 57,1 | 57,6 | 59,8 |
+
+- **`x-fp-inline` (réf.) : médiane 59,85 ; `x-fp-native` : 57,6 ms/image, −3,8 %** (6 + 6 ;
+  Mann-Whitney U = 5, p ≈ 0,04 bilatéral). Sur les huit dernières, strictement entrelacées et
+  dans les mêmes conditions : 59,85 → 57,6, les quatre natives sous les quatre références. Une
+  partie lente dans chaque mode (nat-1 63,7, ref-2 66,8), toutes deux dans la même période
+  chargée.
+- `x-fp-flat` : 62,0 et 62,5, dans la période où la référence faisait 66,8 : non concluant.
+- Profil (`sample` de 10 s, fil vCPU le plus occupé) : les helpers du flottant scalaire passent
+  de **7,8 % à 0,3-0,5 %** du temps occupé.
+- Le gain (~2,2 ms/image) est dans la projection du §22.3 (1 à 3,6 ms/image) ; le fil vCPU du
+  jeu n'étant occupé qu'à ~70 % (§22.2), tout le temps vCPU gagné ne se retrouve pas à
+  l'image.
+
+### 22.10 Essayé et classé
+
+- **FPR tenus en registres flottants de l'hôte le temps d'un bloc** (la question du §22.1) :
+  non construit. Dans TCG 9.2 un registre V ne survit ni à un appel ni à un accès mémoire
+  invité (§22.2) ; il faudrait des globales V64, V8-V15 allouables et sauvés par le prologue, et
+  une vérification sans branchement par instruction. La borne hôte dit ce que ça rapporterait
+  en plus de `x-fp-native` : la latence d'une chaîne (≈ 5,6 → 2,3 ns/op) — pas le débit (3,0
+  → ~1,8). À reconsidérer seulement si le profil montrait des chaînes de flottant scalaire
+  longues et dominantes.
+- **Supprimer `CALL_CLOBBER`** de l'op native (le talon sauverait lui-même tous les registres
+  appelant-sauvés, V compris) : pas fait ; le déversement évité par op est incertain, le talon
+  coûterait ~400 octets de sauvegarde à chaque repli.
+- **Élimination statique des tests d'opérande** (un résultat de `fmuls`/`fmadds` natif est un
+  simple normal ou nul) : pas fait — faux quand le chemin lent a produit le résultat (NaN,
+  dénormal), et rien dans le code généré ne dit lequel des deux a tourné.
+- **`x-fp-flat` seul** : exact mais ne rend qu'une partie de la borne (−6 % sur les sommets) ;
+  gardé comme chemin lent de `x-fp-native` et repli des hôtes non arm64, pas proposé seul.
+
+### 22.11 L'A/B DOOM 3 à jouer (VM quotidienne)
+
+Binaire `~/src/qemu-fpnat/bin/nat3/qemu-system-ppc64` (`nat2` plus le vérificateur affiné du
+§22.7, code hors vérificateur identique) : l'arbre de référence (0001-0012,
+`qgpu` v19 identique octet pour octet) + 0013 + 0014, toutes les propriétés nouvelles éteintes
+par défaut (ses fichiers de données par `~/src/qemu-fpnat/bin/share/qemu`, lien vers le
+`qemu-bundle` de `bfn/`). Depuis le dépôt principal (son `run_tiger.sh` passe `CPU_OPTS`), hôte
+au repos, aucun autre QEMU :
+
+    QEMU_BIN=~/src/qemu-fpnat/bin/nat3/qemu-system-ppc tools/tcg/matab.sh ab-fpnat 6 \
+        "n0:" "n1:CPU_OPTS=x-fp-native=on"
+    # une partie vérifiée, pas pour la vitesse (bilan « fp-native-verify » dans
+    # bench/tcg/ab/fpnat-verif/v1-1/run_tiger.log, 0 divergence attendu)
+    QEMU_BIN=~/src/qemu-fpnat/bin/nat3/qemu-system-ppc tools/tcg/matab.sh fpnat-verif 1 \
+        "v0:CPU_OPTS=x-fp-verify=on" "v1:CPU_OPTS=x-fp-native=on,x-fp-verify=on"
+    tools/tcg/matab.sh --restore
+
+Après fusion, `FPNATIVE=1` fait la même chose que `CPU_OPTS=x-fp-native=on`. Attendu (§22.9) :
+`n0` ~60 ms/image, `n1` ~57,5-58 (−3 à −4 %) ; partie vérifiée : 0 divergence, 0 non
+vérifiée.
+Puis, avant de l'allumer par défaut (`FPNATIVE` à 1, 0013 et 0014 dans le binaire de
+référence), un tour de la matrice complète sur ce binaire, comme au §21.

@@ -9,6 +9,16 @@ et dans `docs/`.
 
 ## Non publié
 
+- **TCG : flottant scalaire simple par le FPU de l'hôte** (`patches/tcg/0013` `x-fp-flat`,
+  `0014` `x-fp-native`, éteints par défaut ; `FPFLAT=1`, `FPNATIVE=1` ; `docs/tcg-g4.md` §22).
+  Nouvelle op TCG `ppc_fp32` (backend arm64) : porte, tests d'opérandes et de résultat,
+  `fadd`/`fmul`/`fmadd` simple, FPRF en ligne, un `cbnz` vers le helper plat de `x-fp-flat`
+  hors ligne. `fptest` identique à l'octet (`755efae4e391b7ea`) ; DOOM 3 sous vérificateur :
+  12,5 G puis 11,1 G opérations, 0 divergence (DOOM 3 tourne avec MSR[FE] ≠ 0 : le premier
+  vérificateur en sautait 88 %). Banc invité −34 % (sommets) ; A/B DOOM 3 sur la VM
+  quotidienne (6 + 6 entrelacées, hôte au repos) : 60,5 → 58,3 ms/image (−3,6 %).
+  Correction : le « −41 % de `fcmpu` » du §15.6 mesurait `fsubs` + `fsel` (§22.8).
+
 - **A4 — déplacer le travail vers l'hôte, trois volets, plus l'attente de l'invité**
   (30/09-01/10, plugin `20261001-a4on`). **État et géométrie allumés par défaut**
   (`POMPPC_GL_STATEBLK`, `POMPPC_GL_RAWSANE`, `POMPPC_GL_NATSHM` ; `=0` éteint chacun) après

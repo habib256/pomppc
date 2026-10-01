@@ -21,6 +21,12 @@
  * au bit près.  Quand il ne l'est pas, le code généré exécute la séquence
  * d'origine elle-même (rien à comparer) ; on compte les deux.
  *
+ * x-fp-flat (tcg/0013, compilé avec -DFPPROOF_FLAT quand l'arbre l'a) : pour
+ * CHAQUE vecteur, chemin court ou non, helper_fp32_flat() (helper_fcmpu_flat)
+ * de l'objet, appelé depuis le même état, doit rendre ce que fait la séquence
+ * d'origine du code généré : résultat, frT écrit en mémoire, FPSCR, drapeaux,
+ * exception levée ou non, exception_index (et CR pour fcmpu).
+ *
  * Usage : fpproof N [graine]  (N vecteurs aléatoires par opération et par
  * famille de FPSCR ; plus le catalogue croisé).
  */
@@ -89,15 +95,19 @@ static void env_setup(uint64_t fpscr, uint64_t msr)
 }
 
 typedef struct {
-    uint64_t r, fpscr;
+    uint64_t r, fpscr, fpr;
     int flags, excp, raised;
     uint32_t cr;
 } Out;
+
+#define FRT 7
+#define FPR_POISON 0x5555aaaa5555aaaaull
 
 static void ref_arith(int op, uint64_t a, uint64_t b, uint64_t c, Out *o)
 {
     uint64_t r = 0;
 
+    *cpu_fpr_ptr(env, FRT) = FPR_POISON;
     if (setjmp(jb) == 0) {
         helper_reset_fpstatus(env);
         switch (op) {
@@ -109,8 +119,10 @@ static void ref_arith(int op, uint64_t a, uint64_t b, uint64_t c, Out *o)
         case FPI_NMADD: r = helper_FNMADDS(env, a, c, b); break;
         default: r = helper_FNMSUBS(env, a, c, b); break;
         }
+        *cpu_fpr_ptr(env, FRT) = r;     /* set_fpr() du code généré */
         helper_fprf_check_float64(env, r);
     }
+    o->fpr = *cpu_fpr_ptr(env, FRT);
     o->r = r;
     o->fpscr = env->fpscr;
     o->flags = get_float_exception_flags(&env->fp_status);
@@ -252,6 +264,86 @@ static uint64_t rnd_fpscr(int fam, uint64_t *msr)
 }
 
 static uint64_t n_fast[FPI_NOPS], n_slow[FPI_NOPS], n_bad[FPI_NOPS];
+/* [0] : helper_fp32_flat/helper_fcmpu_flat ; [1] : ppc_fp32_native_slow */
+static uint64_t n_flat[2][FPI_NOPS], n_flat_raised[2][FPI_NOPS];
+static uint64_t n_flat_bad[2][FPI_NOPS];
+static const char *names[FPI_NOPS];
+
+#ifdef FPPROOF_FLAT
+/*
+ * x-fp-flat : le helper de l'objet, depuis l'état (fpscr, msr), contre la
+ * séquence d'origine depuis le même état.  Le code généré écrit ensuite frT
+ * et le FPSCR rendus (quand rien n'est levé) : c'est ce qu'on compare.
+ */
+static void check_flat(int op, uint64_t a, uint64_t b, uint64_t c,
+                       uint64_t fpscr, uint64_t msr, int nat)
+{
+    Out ref, flat = { 0 };
+    Int128 ret = int128_zero();
+
+    env_setup(fpscr, msr);
+    if (op == FPI_CMPU) {
+        ref_fcmpu(a, b, &ref);
+    } else {
+        ref_arith(op, a, b, c, &ref);
+    }
+    env_setup(fpscr, msr);
+    *cpu_fpr_ptr(env, FRT) = FPR_POISON;
+    env->crf[3] = 0xf;
+    if (setjmp(jb) == 0) {
+#ifdef FPPROOF_NATIVE
+        if (nat) {
+            /* le talon de x-fp-native (tcg/0014) : env->fpscr à jour */
+            ret = ppc_fp32_native_slow(env, a, b, c,
+                                       op | (op == FPI_CMPU ? 3 : FRT) << 8, 0);
+        } else
+#endif
+        if (op == FPI_CMPU) {
+            ret = helper_fcmpu_flat(env, a, b, env->fpscr, 3);
+        } else {
+            ret = helper_fp32_flat(env, a, b, c, env->fpscr, op | FRT << 8);
+        }
+    }
+    if (raised) {
+        /* longjmp : le code généré n'écrit rien ; l'état est celui de env */
+        flat.r = ref.r;
+        flat.fpr = *cpu_fpr_ptr(env, FRT);
+        flat.fpscr = env->fpscr;
+        flat.cr = env->crf[3];
+        n_flat_raised[nat][op]++;
+    } else if (op == FPI_CMPU) {
+        flat.cr = int128_getlo(ret);
+        flat.fpscr = int128_gethi(ret);
+    } else {
+        flat.r = int128_getlo(ret);
+        flat.fpr = flat.r;              /* set_fpr(frT, r) du code généré */
+        flat.fpscr = int128_gethi(ret);
+    }
+    flat.flags = get_float_exception_flags(&env->fp_status);
+    flat.excp = cpu->parent_obj.exception_index;
+    flat.raised = raised;
+    n_flat[nat][op]++;
+    if (op == FPI_CMPU ? (flat.cr != ref.cr) :
+                         (flat.r != ref.r || flat.fpr != ref.fpr)) {
+        goto bad;
+    }
+    if (flat.fpscr != ref.fpscr || flat.flags != ref.flags ||
+        flat.excp != ref.excp || flat.raised != ref.raised) {
+        goto bad;
+    }
+    return;
+bad:
+    if (n_flat_bad[nat][op]++ < 20) {
+        printf("DIVERGENCE %s %s a=%016" PRIx64 " b=%016" PRIx64 " c=%016"
+               PRIx64 " fpscr=%08" PRIx64 " msr=%" PRIx64 " : plat %016" PRIx64
+               " frT %016" PRIx64 " %08" PRIx64 " cr %x dr %x ex %d lev %d / réf %016"
+               PRIx64 " frT %016" PRIx64 " %08" PRIx64 " cr %x dr %x ex %d lev %d\n",
+               nat ? "natif-lent" : "plat", names[op], a, b, c, fpscr, msr, flat.r, flat.fpr, flat.fpscr,
+               flat.cr, flat.flags, flat.excp, flat.raised, ref.r, ref.fpr,
+               ref.fpscr, ref.cr, ref.flags, ref.excp, ref.raised);
+    }
+}
+#endif
 static uint64_t n_modelbad;
 static bool use_model;
 static const char *names[FPI_NOPS] = {
@@ -320,6 +412,12 @@ static void check_fcmpu(uint64_t a, uint64_t b, uint64_t fpscr, uint64_t msr)
 static void check_any(int op, uint64_t a, uint64_t b, uint64_t c,
                       uint64_t fpscr, uint64_t msr)
 {
+#ifdef FPPROOF_FLAT
+    check_flat(op, a, b, c, fpscr, msr, 0);
+#endif
+#ifdef FPPROOF_NATIVE
+    check_flat(op, a, b, c, fpscr, msr, 1);
+#endif
     if (op == FPI_CMPU) {
         check_fcmpu(a, b, fpscr, msr);
     } else {
@@ -395,5 +493,29 @@ int main(int argc, char **argv)
     printf("total %" PRIu64 " vecteurs, %" PRIu64 " par le chemin court, %"
            PRIu64 " divergences ; modèle != objet : %" PRIu64 "\n",
            tot, tot_fast, tot_bad, n_modelbad);
+#ifdef FPPROOF_FLAT
+    {
+        int v;
+        for (v = 0; v < 2; v++) {
+            uint64_t f = 0, fr = 0, fb = 0;
+            for (op = 0; op < FPI_NOPS; op++) {
+                if (n_flat[v][op]) {
+                    printf("%s %-8s %12" PRIu64 " (levées %" PRIu64
+                           ")  divergences %" PRIu64 "\n",
+                           v ? "natif-lent" : "plat", names[op], n_flat[v][op],
+                           n_flat_raised[v][op], n_flat_bad[v][op]);
+                }
+                f += n_flat[v][op]; fr += n_flat_raised[v][op];
+                fb += n_flat_bad[v][op];
+            }
+            if (f) {
+                printf("%s : %" PRIu64 " vecteurs (tous chemins), %" PRIu64
+                       " exceptions levées, %" PRIu64 " divergences\n",
+                       v ? "x-fp-native (talon)" : "x-fp-flat", f, fr, fb);
+            }
+            tot_bad += fb;
+        }
+    }
+#endif
     return tot_bad || n_modelbad;
 }
