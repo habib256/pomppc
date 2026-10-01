@@ -110,6 +110,8 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   démarrage frais, réglages utilisateur préservés.
 - [ ] **[Jeux] Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur
   reste blanc) ; menu principal juste au 26/09, à revoir en partie.
+- [ ] **[Jeux] UT2004 : armes noires dans la démo de test** (plus en jeu, constaté par
+  l'utilisateur le 01/10). Scène à isoler ; fermeture : image juste dans la démo.
 - [ ] **[Outils] A3, suites** : Zenerchi en plein écran et Warcraft III en fenêtre (réglage à
   trouver, sinon clic par System Events) ; Colin McRae fenêtre non applicable.
 - [ ] **[Outils] Rejeu : `SURF_READBACK` d'une surface jamais liée dans le vidage** → `NO_SURF`
@@ -137,7 +139,11 @@ Le travail est fait ; il ne manque que l'essai ou la décision de l'utilisateur.
 ### Vitesse — reprise après la fiabilité
 
 Une mesure A/B exige un hôte au repos (aucune autre VM, charge relevée avant et après).
-Dans l'ordre des gains estimés.
+Dans l'ordre des gains estimés. Profil du 01/10 et lecture : `docs/vitesse-profil-2026-10-01.md`
+(moteur multifil d'Apple absent : `docs/re/moteur-multifil.md`).
+
+- [ ] **[TCG] Flottant double natif** (Nexuiz ~7 % du temps vCPU, Prey ~4 %), sur le modèle de 0014.
+- [ ] **[TCG] `mftb` en ligne** (2-3 % partout).
 
 - [ ] **[Plugin] Suites A4** : GLEngine déroule les tableaux clients en Begin/End (Nexuiz ARB
   14-16 %, Warcraft III 4,5 %) — RE du canal `gldCreateVertexArray`
@@ -223,7 +229,7 @@ un travail de diagnostic dans « Ensuite », pas un blocage.
 |---|---|
 | Protocole / ABI | GL **v22**, transport kext **v19** (`QGPU_ST_NO_MEM`, `QGPU_REG_NOMEM`, `QGPU_CAP_GLSL_PATHS`, `QGPU_CAP_STATE_BLOCK`, `QGPU_CAP_GEOM_HOST` ajoutés sans changer d'ABI) |
 | QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 01/10 (device A4, TCG 0010-0014, Screamer corrigé) ; précédent en `*.avant-a4` |
-| Invité quotidien | `tiger.qcow2`, kext v19, plugin `20261001-tout` (gcc-4.0 dans l'invité), SMP=2 |
+| Invité quotidien | `tiger.qcow2`, kext v19, plugin `20261001-tout` (gcc-4.0 dans l'invité), SMP=2 ; `POMPPCFsqrt.kext` chargé au démarrage par `/Library/StartupItems/POMPPCFsqrt` (`kHasFsqrt` : la libm prend `fsqrt` ; `sudo sh install.sh --retirer` l'enlève) |
 | TCG | `0001–0004`, `0006–0008`, `0010–0012`, `0014` activés par défaut (`JCBITS=14`) ; `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0`, `RETINLINE=0`, `JCIDX=0`, `ICBISYNC=0`, `MSRNOBQL=0`, `FPNATIVE=0` les désactivent ; `0013` (`FPFLAT=1`) éteint |
 | Plugin et device | `POMPPC_GL_STATEBLK`, `POMPPC_GL_RAWSANE`, `POMPPC_GL_NATSHM`, `POMPPC_GL_WLUNIF`, `POMPPC_GL_QFLUSH`, `QGPU_GL_FLUSH` allumés (`=0` éteint chacun) |
 | Tests natifs et scripts | **190 OK, 0 échec, 4 ignorés** ; frontend ctest 3/3 |
@@ -237,22 +243,22 @@ hors rafraîchissements admis (2 par 90 images en fenêtre), et une mesure à sc
 sous le seuil du jeu. Une scène `gltest` comparée au rendu d'Apple éprouve chaque notion
 nouvelle. Les modes fenêtre et plein écran sont requis quand le jeu les propose.
 
-**Dernier tour complet : `bench/matrice/20261001-tout/tableau.md`** (QEMU de référence
-reconstruit le 01/10, plugin `20261001-tout`, aucune variable : tout par défaut) : **15 vertes
-sur 15 automatisées**, images toutes justes. Tours précédents pour comparaison :
+**Dernier tour complet : `bench/matrice/20261001-fsqrt/<jeu>/tableau.md`** (configuration du
+01/10 plus `POMPPCFsqrt` chargé ; Nexuiz dans `nx-bis`/`nxg-bis`) : **15 vertes sur 15
+automatisées**, images toutes justes. Tours précédents : `20261001-tout` (15/15, sans `fsqrt`),
 `20260930-wlunif` (16/16), `20260930-0128` (16/16, tour de référence au repos d'avant A4).
 
-| Jeu / chemin | Fenêtre | Plein écran | ms/image fenêtre / plein écran (01/10) | 30/09 (`0128`) | Travail restant |
+| Jeu / chemin | Fenêtre | Plein écran | ms/image fenêtre / plein écran (01/10, `fsqrt`) | 30/09 (`0128`) | Travail restant |
 |---|---|---|---|---|---|
-| Marble Blast Gold | vert | vert | 8,9 / 10,3 | 9,9 / 9,7 | fenêtre sur bureau 800×600 en session |
-| Zenerchi | vert | non automatisé | 4,3 / — | 4,4 / — | automatiser plein écran |
-| DOOM 3 | vert | vert | 56,6 / 56,8 | 61,7 / 61,6 | plantages au chargement, changements de mode, combat |
-| Prey | vert | vert | 59,1 / 58,6 | 70,9 / 70,3 | changements de mode, combat |
-| UT2004 | vert | vert | 25,3 / 25,8 | 27,2 / 27,5 | — |
-| Warcraft III | non automatisé | vert | — / 15,6 | — / 17,8 | fenêtre, texte des menus |
-| Colin McRae | non applicable | vert | — / 47,8 | — / 71,5 | — |
-| Nexuiz ARB (`+r_glsl 0`) | vert | vert | 80,2 / 80,3 | 110,7 / 109,4 | tableaux clients déroulés (suites A4) |
-| Nexuiz GLSL (`+r_glsl 1`) | vert | vert | 35,3 / 35,2 | 41,7 / 41,1 | attente des requêtes d'occlusion |
+| Marble Blast Gold | vert | vert | 9,0 / 9,6 | 9,9 / 9,7 | fenêtre sur bureau 800×600 en session |
+| Zenerchi | vert | non automatisé | 4,0 / — | 4,4 / — | automatiser plein écran |
+| DOOM 3 | vert | vert | 56,1 / 56,2 | 61,7 / 61,6 | plantages au chargement, changements de mode, combat |
+| Prey | vert | vert | 50,5 / 49,5 | 70,9 / 70,3 | changements de mode, combat |
+| UT2004 | vert | vert | 25,0 / 25,4 | 27,2 / 27,5 | — |
+| Warcraft III | non automatisé | vert | — / 15,4 | — / 17,8 | fenêtre, texte des menus |
+| Colin McRae | non applicable | vert | — / 48,1 | — / 71,5 | — |
+| Nexuiz ARB (`+r_glsl 0`) | vert | vert | 72,4 / 72,8 | 110,7 / 109,4 | tableaux clients déroulés (suites A4) |
+| Nexuiz GLSL (`+r_glsl 1`) | vert | vert | 33,4 / 33,5 | 41,7 / 41,1 | attente des requêtes d'occlusion |
 | RTCW | non automatisé | non automatisé | — / — | — / — | réinstallation puis diagnostic |
 
 Ces scènes ne prouvent pas le jeu entier. Sources et critères : `docs/matrice-jeux.md`.

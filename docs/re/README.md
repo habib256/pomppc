@@ -20,4 +20,5 @@ hors dépôt (disque USB : `pomppc/re/`).
 | `etat-v8.md` | mélange constant, opération logique, pointillés, modes de polygone ; et comment les **requêtes d'occlusion** atteignent le pilote |
 | `accelerateur-iokit.md` | comment CGL et GLEngine trouvent le pilote d'une carte (`IOAccelTypes` sur le framebuffer, `IOGLBundleName` sur l'accélérateur), et quand le WindowServer tente Quartz Extreme — tâche 4.2 |
 | `ut2004-demo.md` | premier passage UT2004 Demo (20/09/2026) : portes GPU levées, lenteur restante, **contrôle de la VM quotidienne** (AZERTY, QMP, CD) |
+| `moteur-multifil.md` | `kCGLCEMPEngine` (313) absent de Tiger 10.4.6 : GLEngine ne crée aucun fil, `CGLEnable(313)` → `kCGLBadEnumeration` (01/10) |
 | `version-extensions.md` | ce que la chaîne **tient** vraiment, fonction par fonction — d'où la version et les extensions annoncées ; table bit → extension corrigée par l'expérience |

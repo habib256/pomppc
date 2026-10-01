@@ -345,6 +345,7 @@ def verifie_reference(cle, cel, p, dump, creer=True):
 class Cellule:
     env_extra = {}              # --env K=V (A/B d'un drapeau du plugin)
     sample_s = 0                # --sample N : `sample` du jeu dans l'invité après la fenêtre
+    sample_hote_s = 0           # --sample-hote N : `sample` du QEMU (hôte) juste avant
 
     def __init__(self, h, jeu, mode, tour, vidage=True):
         """vidage=False : lancement de MESURE (ni déclencheur ni vidage, rangé dans
@@ -470,6 +471,18 @@ class Cellule:
             # la charge du DÉBUT de cellule ne dit rien d'une VM lancée pendant
             # la fenêtre : on la relève aussi juste après
             self.res["charge_hote"] += " ; après la mesure : " + h.charge_hote()
+            if self.sample_hote_s:
+                # profil du processus QEMU (fils vCPU : code généré, helpers), AVANT
+                # le `sample` de l'invité qui ralentit le jeu
+                q = subprocess.run(["pgrep", "-f", "qemu-system.*disks/tiger.qcow2"],
+                                   capture_output=True, text=True).stdout.split()
+                if q:
+                    # à la racine de la cellule : le rapatriement remplace <sous>/
+                    os.makedirs(self.dir, exist_ok=True)
+                    subprocess.run(["sample", q[0], str(self.sample_hote_s), "-file",
+                                    os.path.join(self.dir, "sample-hote-%s.txt" % self.sous)],
+                                   capture_output=True)
+                    journal("sample hôte %d s pris (QEMU %s)" % (self.sample_hote_s, q[0]))
             if self.sample_s:
                 # profil APRÈS la fenêtre (sample ralentit le jeu) : même scène fixe
                 pids = h.processus(j.processus)
@@ -765,6 +778,9 @@ def main():
                     help="ni vidage ni capture : vitesse et replis seuls")
     ap.add_argument("--env", action="append", default=[], metavar="K=V",
                     help="variable POMPPC_GL_* en plus pour chaque lancement (A/B d'un drapeau)")
+    ap.add_argument("--sample-hote", type=int, default=0, metavar="S",
+                    help="`sample` du processus QEMU sur l'hôte pendant S s, juste avant "
+                         "celui de l'invité (sample-hote-<mesure|invite>.txt à la racine de la cellule)")
     ap.add_argument("--sample", type=int, default=0, metavar="S",
                     help="`sample` du jeu dans l'invité pendant S s, la fenêtre de mesure passée "
                          "(sample.txt dans le dossier de la cellule)")
@@ -773,6 +789,7 @@ def main():
         k, _, v = kv.partition("=")
         Cellule.env_extra[k] = v
     Cellule.sample_s = a.sample
+    Cellule.sample_hote_s = a.sample_hote
     jeux = charge_jeux()
     ordre = [k for k in ORDRE if k in jeux] + sorted(k for k in jeux if k not in ORDRE)
     if a.liste:

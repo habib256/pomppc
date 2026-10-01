@@ -9,6 +9,22 @@ et dans `docs/`.
 
 ## Non publié
 
+- **`sqrt` par l'instruction `fsqrt`** (01/10, `kext/POMPPCFsqrt`, `docs/vitesse-profil-2026-10-01.md`).
+  La libm de Tiger ne prend `fsqrt` que si la commpage annonce `kHasFsqrt` (G5 seulement) et
+  calcule sinon la racine en logiciel ; QEMU exécute `fsqrt` sur son G4. Le kext lève le bit
+  (`__cpu_capabilities` et `_commPagePtr32 + 0x20`) et le rebaisse au déchargement.
+  `tools/guest/jobs/sqrttest` : 0 écart sur 2,3 M valeurs, 228 → 22,8 ns par appel ; `sqrt()`
+  de la libm 218 → 25,5 ns. A/B entrelacé (`tools/matrice/ab-fsqrt.sh`, 3 + 3, fenêtre) :
+  Prey 57,3 → 47,3 ms/image (−17,5 %), Nexuiz ARB 80,5 → 71,4 (−11,3 %). Matrice complète kext
+  chargé (`bench/matrice/20261001-fsqrt`) : 15 vertes sur 15, images justes ; Prey 50,5 / 49,5,
+  Nexuiz ARB 72,4 / 72,8, Nexuiz GLSL 33,4 / 33,5, Colin McRae 48,1, DOOM 3 56,1 / 56,2 (sans
+  effet). Installé sur `tiger.qcow2` (`kext/POMPPCFsqrt/install.sh` : kext dans
+  `/System/Library/Extensions`, chargé à chaque démarrage par `/Library/StartupItems/POMPPCFsqrt`) ;
+  bit relu levé après redémarrage.
+- **Profil de vitesse et moteur multifil** (01/10) : `matrice.py --sample-hote`,
+  `tools/re/partfil.py` (fil principal partagé entre jeu, GLEngine, plugin) ; le moteur multifil
+  d'Apple n'existe sur PowerPC dans aucune version de Tiger (`docs/re/moteur-multifil.md`).
+
 - **Confirmé en jouant par l'utilisateur** (01/10), sur la configuration par défaut du 01/10 :
   le son de DOOM 3 ne saccade plus (correctif du compteur de trames du Screamer, 29/09) ;
   l'arme du joueur n'est plus noire dans UT2004 ; Colin McRae n'a plus d'erreurs graphiques
