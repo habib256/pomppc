@@ -19,6 +19,8 @@
 #   • mtmsr/rfi sans verrou global (x-msr-nobql)       — patches/tcg/0012
 #   • flottant scalaire sans branchement (x-fp-flat)   — patches/tcg/0013
 #   • flottant scalaire natif, op TCG ppc_fp32 (x-fp-native) — patches/tcg/0014
+#   • base de temps par le compteur de l'hôte (x-tb-fast)  — patches/tcg/0015
+#   • flottant double natif (x-fp-native64)             — patches/tcg/0016
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
 #   ./scripts/build_qemu_qfb.sh              # build dans ~/src/qemu
@@ -667,6 +669,48 @@ target/ppc/cpu_init.c x-fp-native
 target/ppc/fpu_helper.c ppc_fp32_native_slow
 target/ppc/translate/fp-impl.c.inc do_fp_native
 TCG14_MARKERS
+  # --- 4 sexdecies. La base de temps par le compteur de l'hôte (x-tb-fast) ---
+  # patches/tcg/0015, docs/tcg-g4.md §23 : get_clock() = cntvct_el0 + K quand
+  # la propriété le demande, mftb sans clock_gettime ni division 128 bits.
+  if ! grep -q "qemu_raw_clock_enable" util/qemu-timer-common.c; then
+    echo "▶ patch TCG : base de temps par le compteur de l'hôte (x-tb-fast)"
+    patch_strict "$ROOT/patches/tcg/0015-ppc-tb-fast.patch"
+    for f in hw/ppc/ppc.c include/qemu/timer.h include/sysemu/cpu-timers.h \
+             system/cpu-timers.c target/ppc/cpu.h target/ppc/cpu_init.c \
+             util/qemu-timer-common.c; do
+      rm -f "$f.orig"
+    done
+  fi
+  while read -r f m; do
+    [ -z "$f" ] && continue
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0015 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG15_MARKERS'
+util/qemu-timer-common.c qemu_raw_clock_enable
+hw/ppc/ppc.c tbf_load
+target/ppc/cpu_init.c x-tb-fast
+TCG15_MARKERS
+  # --- 4 septdecies. Le flottant double par le FPU de l'hôte (x-fp-native64) ---
+  # patches/tcg/0016, docs/tcg-g4.md §24 : les formes double de l'op ppc_fp32.
+  if ! grep -q "do_fpd_ab" target/ppc/translate/fp-impl.c.inc; then
+    echo "▶ patch TCG : flottant double natif (x-fp-native64)"
+    patch_strict "$ROOT/patches/tcg/0016-tcg-fp-native64.patch"
+    for f in target/ppc/cpu.h target/ppc/cpu_init.c target/ppc/fpu_helper.c \
+             target/ppc/internal.h target/ppc/translate.c \
+             target/ppc/translate/fp-impl.c.inc tcg/aarch64/tcg-target.c.inc; do
+      rm -f "$f.orig"
+    done
+  fi
+  while read -r f m; do
+    [ -z "$f" ] && continue
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0016 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG16_MARKERS'
+target/ppc/translate/fp-impl.c.inc do_fpd_ab
+tcg/aarch64/tcg-target.c.inc pfp_zon64
+target/ppc/fpu_helper.c fpi_fp64
+target/ppc/cpu_init.c x-fp-native64
+TCG16_MARKERS
 fi
 
 # --- 5. Build ---
@@ -763,6 +807,8 @@ check_opt x-jc-bits      qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jc-b
 check_opt x-msr-nobql    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-msr-nobql=on
 check_opt x-fp-flat      qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fp-flat=on
 check_opt x-fp-native    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fp-native=on
+check_opt x-fp-native64  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fp-native64=on
+check_opt x-tb-fast      qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-tb-fast=on
 echo
 echo "→ $CAPS"
 

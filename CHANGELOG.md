@@ -9,6 +9,20 @@ et dans `docs/`.
 
 ## Non publié
 
+- **TCG : base de temps par le compteur de l'hôte et flottant double natif** (01/10,
+  `patches/tcg/0015` `x-tb-fast`, `0016` `x-fp-native64` ; **allumés par défaut** le soir même à
+  la demande de l'utilisateur, sans tour de matrice, binaire de référence reconstruit (précédent
+  `*.avant-tbfp`) ; `TBFAST=0`, `FPNATIVE64=0` les éteignent ; `docs/tcg-g4.md` §23-§24). 0015 : l'horloge de QEMU devient `cntvct_el0 + K`
+  (1 GHz, linéaire, à la ns ; `CLOCK_MONOTONIC` de macOS n'a qu'1 µs de résolution et dérive de
+  12 ppm), `mftb` sans division 128 bits : 27 → 12 ns dans l'invité ; 1,6 G lectures vérifiées,
+  0 écart positif ; A/B 6 + 6 DOOM 3 −0,6 %, Nexuiz ARB −0,8 %. 0016 : les formes double de l'op
+  `ppc_fp32` (`fadd fsub fmul fmadd fmsub fnmadd fnmsub`) ; `fptest d` identique octet pour octet
+  (87,7 M instructions), 20 G opérations vérifiées en jeu dont 1,4 G doubles, 0 divergence,
+  4/4 mutants détectés ; banc invité −40 à −64 % ; A/B 6 + 6 Prey −1,7 %, Nexuiz rien (son double
+  venait de la racine logicielle, supprimée par `POMPPCFsqrt`). Nouveaux outils :
+  `tools/tcg/tbclock.c`, `tools/tcg/vmwith.sh`, `tools/guest/jobs/tbtest`, `fptest d`/`banc-d`,
+  `matabsum.py` par cellule.
+
 - **`sqrt` par l'instruction `fsqrt`** (01/10, `kext/POMPPCFsqrt`, `docs/vitesse-profil-2026-10-01.md`).
   La libm de Tiger ne prend `fsqrt` que si la commpage annonce `kHasFsqrt` (G5 seulement) et
   calcule sinon la racine en logiciel ; QEMU exécute `fsqrt` sur son G4. Le kext lève le bit

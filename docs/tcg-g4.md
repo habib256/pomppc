@@ -14,7 +14,9 @@ hôte), mesure **1 contre 2 cœurs**, et décrit **les patches qui en sont sorti
 (`x-jc-bits`, le cache de sauts de 16 384 entrées, §18) et `0012-ppc-msr-nobql`
 (`x-msr-nobql`, `mtmsr`/`rfi` sans verrou global, §19), puis `0013-ppc-fp-flat` (`x-fp-flat`)
 et `0014-tcg-fp-native` (`x-fp-native`, le flottant scalaire simple par le FPU de l'hôte dans
-le code généré, une op TCG nouvelle, §22) ; trois essais exacts mais sans gain,
+le code généré, une op TCG nouvelle, §22), puis `0015-ppc-tb-fast` (`x-tb-fast`, la base de
+temps par le compteur de l'hôte, §23) et `0016-tcg-fp-native64` (`x-fp-native64`, le flottant
+double par la même op, §24) ; trois essais exacts mais sans gain,
 `patches/tcg/essais/0002-ppc-lmw-inline.patch` (`x-lmw-inline`) et
 `essais/0005-ppc-vfp-nrwg.patch` (`x-vfp-nrwg`, §11) et `essais/0009-ppc-isync-chain.patch`
 (`x-isync-chain`, §16.8), ne sont pas appliqués.
@@ -2301,3 +2303,144 @@ Après fusion, `FPNATIVE=1` fait la même chose que `CPU_OPTS=x-fp-native=on`. A
 vérifiée.
 Puis, avant de l'allumer par défaut (`FPNATIVE` à 1, 0013 et 0014 dans le binaire de
 référence), un tour de la matrice complète sur ce binaire, comme au §21.
+
+---
+
+## 23. La base de temps par le compteur de l'hôte : `tcg/0015` (`x-tb-fast`)
+
+01/10/2026. Copie isolée `~/src/qemu-tbfp` (clone APFS de la référence, construite dans
+`btf/`), VM quotidienne.
+
+### 23.1 Le poste
+
+Le profil du 01/10 (`docs/vitesse-profil-2026-10-01.md`) met `mftb`/`mftbu`
+(`helper_load_tbu`, `cpu_ppc_load_tbl`) à 2-3 % du temps vCPU de chaque jeu. Un `mftb` coûte
+**27 ns** dans l'invité (`tools/guest/jobs/tbtest`). Le chemin d'origine :
+`qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)` = seqlock + `cpu_clock_offset` + `get_clock()`
+(`clock_gettime(CLOCK_MONOTONIC)`, 23 ns sur l'hôte), puis `muldiv64()` et sa division 128 bits.
+
+Banc hôte (`tools/tcg/tbclock.c`) : sur ce Mac, `cntvct_el0` bat à **1 GHz** (`cntfrq_el0`) et se
+lit en 0,9 ns. Deux surprises :
+
+- `CLOCK_MONOTONIC` de macOS n'a qu'**une microseconde de résolution** : dans l'invité, 92 % des
+  lectures successives de la base de temps rendaient la même valeur (pas de 25 ticks) ;
+- il est **ralenti par la synchronisation horaire** : −12,5 ppm contre `cntvct` (−62 µs toutes
+  les 5 s), alors que `CLOCK_MONOTONIC_RAW` et `CLOCK_UPTIME_RAW` le suivent à la ns.
+
+Un premier essai (TB calculée depuis `cntvct`, calée une fois sur `get_clock()`) dérivait donc
+de centaines de µs contre la valeur d'origine en quelques minutes (`x-tb-verify`).
+
+### 23.2 La conception
+
+`x-tb-fast` (propriété de CPU, éteinte par défaut ; `TBFAST=1 ./run_tiger.sh`) :
+
+- **l'horloge de QEMU elle-même** devient le compteur : `get_clock()` = `cntvct_el0 + K`
+  (`include/qemu/timer.h`, `qemu_raw_clock_enable()` dans `util/qemu-timer-common.c`). K est
+  calé une fois, au démarrage de la machine, contre `CLOCK_MONOTONIC` (20 000 échantillons
+  encadrés de deux lectures du compteur : borne basse de l'écart, tolérance de 100 ns pour le
+  pas de 41,7 ns de l'horloge de macOS) : pas de saut à la bascule. L'horloge de QEMU devient
+  linéaire, à la ns, en 1 ns par lecture ; elle ne suit plus les corrections de fréquence de
+  l'hôte (12 ppm), ce qui ne gêne pas l'invité. Refusé (horloge d'origine, message) si le
+  compteur ne bat pas à 1 GHz ;
+- **`mftb`** fait le même calcul que l'origine sans division 128 bits :
+  `(cpu_clock_offset + get_clock()) / (1e9 / tb_freq) + tb_offset` (le plancher de `muldiv64`
+  quand `tb_freq` divise 1e9 : 25 MHz ⇒ 40), l'offset lu sous le seqlock
+  (`cpu_get_clock_offset()`, nouveau).
+
+`x-tb-verify` recalcule la valeur d'origine juste après chaque lecture rapide : l'écart
+rapide − origine doit être 0, ou négatif du nombre de ticks écoulés entre les deux lectures.
+
+### 23.3 La preuve
+
+| épreuve | résultat |
+|---|---|
+| `tbtest` + bureau + DOOM 3, Prey, Nexuiz (`x-tb-verify`) | **1 610 612 737 lectures, 0 écart positif**, écart −785..0 ticks ; 598 lectures d'origine retardées de plus de 1 µs (préemption entre les deux) |
+| `tbtest` (monotonie, fréquence) | 0 recul, 24,99 MHz |
+
+### 23.4 Gains
+
+`mftb` dans l'invité : 27 → 12 ns avec le vérificateur, **5,5 ns** sans. Effet de bord : la TB
+avançant à la ns, le chronométrage de `dcba` du noyau (`commpage_time_dcba`, au démarrage) peut
+la juger rentable — selon le démarrage (vu une fois sur deux) : `hw.optional.dcba` = 1, bit 0x20
+de `_cpu_capabilities`. `dcba` est un nop dans QEMU et les
+routines de la libc qui s'en servent écrivent tout le bloc : résultat inchangé.
+
+**Allumé par défaut le 01/10 au soir** (`TBFAST`, avec `FPNATIVE64`), à la demande de
+l'utilisateur, sans tour de matrice ; binaire de référence reconstruit (précédent en
+`~/src/qemu/build/*.avant-tbfp`).
+
+### 23.5 A/B en jeu
+
+`QEMU_BIN=~/src/qemu-tbfp/btf/qemu-system-ppc tools/tcg/matab.sh ab-tb 6 "t0:" "t1:TBFAST=1"
+d3,nx fen` (VM quotidienne, `POMPPCFsqrt` chargé, hôte au repos, charge ≤ 2,9, 0 autre QEMU) :
+
+| cellule | éteint (médiane, min..max) | `x-tb-fast` | écart |
+|---|---|---|---|
+| DOOM 3 fenêtre | 56,5 (56,2..57,6) | 56,2 (55,4..56,3) | **−0,6 %** |
+| Nexuiz ARB fenêtre | 72,9 (72,4..73,7) | 72,3 (71,6..72,5) | **−0,8 %** |
+
+Gain faible mais de même sens sur les deux jeux, et presque sans recouvrement : le profil
+promettait 2-3 % du temps vCPU, mais le temps d'image n'en récupère qu'une partie (le helper
+reste appelé, seule sa durée baisse).
+
+## 24. Le flottant double par le FPU de l'hôte : `tcg/0016` (`x-fp-native64`)
+
+01/10/2026, même copie isolée.
+
+### 24.1 Le poste
+
+`x-fp-native` (§22) ne couvre que le simple. Le profil du 01/10 met le double (`helper_FMADD`,
+`FNMSUB`, `FSUB`, `FADD`, `do_float_check_status`, FPRF) à ~7 % du temps vCPU de Nexuiz, ~4 % de
+Prey. En jeu, 98 % de ces opérations prennent le chemin court (§24.4).
+
+### 24.2 La conception
+
+Les formes double de l'op `INDEX_op_ppc_fp32` : sélecteurs `FPI_DADD..FPI_DNMSUB` (8 à 14,
+`internal.h`), même porte, même talon hors ligne, même chemin lent (`fp32_flat()`, qui fait
+désormais aussi `float64_add/sub/mul` et `do_fmadd` avec l'adresse de retour du code généré).
+
+- **Modèle C** (`fpi_fp64()`, `fpu_helper.c`) : opérandes zéro ou normaux en double
+  (`fpi_zon64()`) ; une opération IEEE double arrondie au plus proche par l'hôte ; retour aux
+  helpers sur débordement, sur une **somme minuscule non nulle** (exacte, mais FPRF dirait
+  « dénormal »), sur un **produit non nul minuscule, DBL_MIN compris** (dépassement par le bas,
+  la tininess du PowerPC étant détectée avant l'arrondi). `fnmadd`/`fnmsub` : négation après
+  l'arrondi, zéro compris.
+- **Émetteur arm64** : `pfp_zon64()` (`t = x << 1` ; `t == 0` ou `t − 2^53 < 0x7fe·2^53`), les
+  instructions `fadd`/`fsub`/`fmul`/`fmadd`/`fneg` en double (ftype 01), aucune conversion ; test
+  du résultat : celui du simple avec k1 = DBL_MIN « << 1 », plus, pour les sommes, `r == 0` ou
+  `|r| ≥ DBL_MIN`.
+- **Traduction** : `fadd fsub fmul fmadd fmsub fnmadd fnmsub` passent par `do_fpd_*`
+  (`x-fp-native64` : l'op ; sans backend arm64 : un appel du helper plat ; sinon les helpers
+  d'origine).
+
+### 24.3 La preuve
+
+| épreuve | résultat |
+|---|---|
+| `fptest d 65536` et `fptest d 1048576` (formes double, 11 états du FPSCR, opérandes doubles : sous-normaux, voisins de DBL_MIN, produits qui sous-débordent ou débordent, annulations exactes ou à 1 ulp), éteint contre allumé | **identiques octet pour octet** (87 672 964 instructions, empreinte `4bdf8376a39ed79a`) ; `fptest` simple inchangé |
+| `x-fp-verify` pendant `fptest d` | 134 M opérations vérifiées, 0 divergence |
+| `x-fp-verify` en jeu (DOOM 3, Prey, Nexuiz, fenêtre) | **19 981 664 257 opérations vérifiées, 0 divergence**, dont en double : `fadd` 96 M, `fsub` 459 M, `fmul` 391 M, `fmadd` 385 M, `fnmsub` 77 M (98 % par le chemin court) |
+| mutants de l'émetteur (opérandes infinis acceptés ; somme sous-normale acceptée ; produit = DBL_MIN accepté ; `fnmadd` nié avant l'arrondi) | **4/4 détectés** par `fptest d` (sortie différente) et par `x-fp-verify` (372 à 95 253 divergences) |
+
+### 24.4 Gains
+
+Banc invité (`fptest banc-d 10000000`, 3 tours, même démarrage de VM par mode) :
+
+| | éteint | `x-fp-native64` |
+|---|---|---|
+| chaîne dépendante `fmadd fmul fmsub fadd` | 221 ms | **132 ms (−40 %)** |
+| sommets 4×4 en double | 935 ms | **336 ms (−64 %)** |
+
+### 24.5 A/B en jeu
+
+`QEMU_BIN=~/src/qemu-tbfp/btf/qemu-system-ppc tools/tcg/matab.sh ab-fp64 6 "f0:"
+"f1:FPNATIVE64=1" nx,prey fen` (mêmes conditions) :
+
+| cellule | éteint (médiane, min..max) | `x-fp-native64` | écart |
+|---|---|---|---|
+| Prey fenêtre | 48,1 (47,1..48,8) | 47,3 (46,7..47,3) | **−1,7 %** |
+| Nexuiz ARB fenêtre | — | — | **+0,1 %** (rien) |
+
+Le ~7 % de flottant double du profil de Nexuiz venait surtout de la **racine logicielle**
+`___sqrt` de la libm (itérations de Newton en double) : depuis `POMPPCFsqrt` (même jour), la
+libm prend `fsqrt` et ce double a disparu. Reste Prey (squelettes, `idSIMD_Generic`).

@@ -1,0 +1,313 @@
+diff --git a/hw/ppc/ppc.c b/hw/ppc/ppc.c
+index b86b584..5a7590c 100644
+--- a/hw/ppc/ppc.c
++++ b/hw/ppc/ppc.c
+@@ -37,6 +37,7 @@
+ #include "kvm_ppc.h"
+ #include "migration/vmstate.h"
+ #include "trace.h"
++#include "sysemu/cpu-timers.h"
+ 
+ static void cpu_ppc_tb_stop (CPUPPCState *env);
+ static void cpu_ppc_tb_start (CPUPPCState *env);
+@@ -512,6 +513,88 @@ uint64_t cpu_ppc_get_tb(ppc_tb_t *tb_env, uint64_t vmclk, int64_t tb_offset)
+     return ns_to_tb(tb_env->tb_freq, vmclk) + tb_offset;
+ }
+ 
++/*
++ * POMPPC tcg/0015 (x-tb-fast), docs/tcg-g4.md section 23.
++ *
++ * Stock mftb: qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) = cpu_clock_offset +
++ * get_clock(), then muldiv64() and its 128-bit division.  With x-tb-fast,
++ * get_clock() is the host counter (qemu_raw_clock_enable(), include/qemu/
++ * timer.h) and this path computes the very same value: offset + cntvct + K,
++ * divided by 1e9 / tb_freq (floor, as muldiv64, when tb_freq divides 1e9).
++ * x-tb-verify recomputes the stock value right after: fast - stock must be
++ * 0, or negative by the ticks elapsed between the two reads.
++ */
++static int tbf_div;                 /* 1e9 / tb_freq, 0: stock path */
++static int64_t tbf_dmin = INT64_MAX, tbf_dmax = INT64_MIN;
++static uint64_t tbf_n, tbf_pos, tbf_late;
++static bool tbf_atexit;
++
++static void tbf_report(void)
++{
++    fprintf(stderr, "tb-verify: %" PRIu64 " lectures, écart rapide-origine "
++            "%" PRId64 "..%" PRId64 " ticks, %" PRIu64 " positifs (faux), "
++            "%" PRIu64 " < -25 (lecture d'origine retardée)\n",
++            qatomic_read(&tbf_n), tbf_dmin, tbf_dmax,
++            qatomic_read(&tbf_pos), qatomic_read(&tbf_late));
++}
++
++static void tbf_init(CPUPPCState *env, uint32_t freq)
++{
++    if (env->tb_fast && freq && NANOSECONDS_PER_SECOND % freq == 0 &&
++        qemu_raw_clock_enable()) {
++        tbf_div = NANOSECONDS_PER_SECOND / freq;
++    }
++}
++
++/* Returns true and the TB in *tb when the fast path applies. */
++static inline bool tbf_load(CPUPPCState *env, uint64_t *tb)
++{
++    ppc_tb_t *tb_env = env->tb_env;
++    bool ticking;
++    int64_t ns;
++    uint64_t v;
++
++    if (unlikely(!tbf_div || tb_env->tb_freq * (uint64_t)tbf_div !=
++                 NANOSECONDS_PER_SECOND)) {
++        return false;
++    }
++    ns = cpu_get_clock_offset(&ticking);
++    if (ticking) {
++        ns += get_clock();
++    }
++    v = (uint64_t)ns / (uint64_t)tbf_div + tb_env->tb_offset;
++    if (unlikely(env->tb_verify)) {
++        uint64_t s = cpu_ppc_get_tb(tb_env, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
++                                    tb_env->tb_offset);
++        int64_t d = (int64_t)(v - s);
++
++        if (!qatomic_read(&tbf_atexit)) {
++            qatomic_set(&tbf_atexit, true);
++            atexit(tbf_report);
++        }
++        if (d < tbf_dmin) {         /* racy min/max: diagnostic only */
++            tbf_dmin = d;
++        }
++        if (d > tbf_dmax) {
++            tbf_dmax = d;
++        }
++        if (d > 0) {
++            if (qatomic_fetch_inc(&tbf_pos) < 20) {
++                fprintf(stderr, "tb-verify: cpu %d rapide %" PRIu64
++                        " > origine %" PRIu64 "\n",
++                        env_cpu(env)->cpu_index, v, s);
++            }
++        } else if (d < -25) {
++            qatomic_inc(&tbf_late);
++        }
++        if ((qatomic_fetch_inc(&tbf_n) & ((1u << 26) - 1)) == 0) {
++            tbf_report();
++        }
++    }
++    *tb = v;
++    return true;
++}
++
+ uint64_t cpu_ppc_load_tbl (CPUPPCState *env)
+ {
+     ppc_tb_t *tb_env = env->tb_env;
+@@ -521,6 +604,9 @@ uint64_t cpu_ppc_load_tbl (CPUPPCState *env)
+         return env->spr[SPR_TBL];
+     }
+ 
++    if (env->tb_fast && tbf_load(env, &tb)) {
++        return tb;
++    }
+     tb = cpu_ppc_get_tb(tb_env, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
+                         tb_env->tb_offset);
+     trace_ppc_tb_load(tb);
+@@ -533,6 +619,9 @@ static inline uint32_t _cpu_ppc_load_tbu(CPUPPCState *env)
+     ppc_tb_t *tb_env = env->tb_env;
+     uint64_t tb;
+ 
++    if (env->tb_fast && tbf_load(env, &tb)) {
++        return tb >> 32;
++    }
+     tb = cpu_ppc_get_tb(tb_env, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
+                         tb_env->tb_offset);
+     trace_ppc_tb_load(tb);
+@@ -1109,6 +1198,7 @@ void cpu_ppc_tb_init(CPUPPCState *env, uint32_t freq)
+ 
+     tb_env->tb_freq = freq;
+     tb_env->decr_freq = freq;
++    tbf_init(env, freq);            /* POMPPC tcg/0015 */
+ }
+ 
+ void cpu_ppc_tb_reset(CPUPPCState *env)
+diff --git a/include/qemu/timer.h b/include/qemu/timer.h
+index cc167bd..123ad4b 100644
+--- a/include/qemu/timer.h
++++ b/include/qemu/timer.h
+@@ -823,8 +823,26 @@ static inline int64_t get_clock(void)
+ 
+ extern int use_rt_clock;
+ 
++/*
++ * POMPPC tcg/0015 (x-tb-fast): once qemu_raw_clock_enable() succeeded,
++ * get_clock() is the arm64 virtual counter (cntvct_el0, 1 GHz) plus a
++ * constant calibrated against CLOCK_MONOTONIC at the switch: linear (macOS
++ * slews CLOCK_MONOTONIC by NTP, ~12 ppm here), 1 ns resolution instead of
++ * 1 us, ~1 ns per read instead of ~23.  docs/tcg-g4.md section 23.
++ */
++extern int qemu_raw_clock;
++extern int64_t qemu_raw_clock_k;
++bool qemu_raw_clock_enable(void);
++
+ static inline int64_t get_clock(void)
+ {
++#if defined(__aarch64__)
++    if (qemu_raw_clock) {
++        uint64_t v;
++        asm volatile("mrs %0, cntvct_el0" : "=r"(v));
++        return (int64_t)v + qemu_raw_clock_k;
++    }
++#endif
+     if (use_rt_clock) {
+         struct timespec ts;
+         clock_gettime(CLOCK_MONOTONIC, &ts);
+diff --git a/include/sysemu/cpu-timers.h b/include/sysemu/cpu-timers.h
+index 7bfa960..fe78563 100644
+--- a/include/sysemu/cpu-timers.h
++++ b/include/sysemu/cpu-timers.h
+@@ -94,6 +94,12 @@ int64_t cpu_get_ticks(void);
+  */
+ int64_t cpu_get_clock(void);
+ 
++/*
++ * POMPPC tcg/0015 (x-tb-fast): cpu_get_clock() == offset + (ticking ?
++ * get_clock() : 0).  Returns offset and sets *ticking, read consistently.
++ */
++int64_t cpu_get_clock_offset(bool *ticking);
++
+ void qemu_timer_notify_cb(void *opaque, QEMUClockType type);
+ 
+ /* get/set VIRTUAL clock and VM elapsed ticks via the cpus accel interface */
+diff --git a/system/cpu-timers.c b/system/cpu-timers.c
+index 856e502..180986f 100644
+--- a/system/cpu-timers.c
++++ b/system/cpu-timers.c
+@@ -99,6 +99,23 @@ int64_t cpu_get_clock(void)
+     return ti;
+ }
+ 
++/* POMPPC tcg/0015 (x-tb-fast), see include/sysemu/cpu-timers.h */
++int64_t cpu_get_clock_offset(bool *ticking)
++{
++    int64_t off;
++    bool on;
++    unsigned start;
++
++    do {
++        start = seqlock_read_begin(&timers_state.vm_clock_seqlock);
++        off = timers_state.cpu_clock_offset;
++        on = timers_state.cpu_ticks_enabled;
++    } while (seqlock_read_retry(&timers_state.vm_clock_seqlock, start));
++
++    *ticking = on;
++    return off;
++}
++
+ /*
+  * enable cpu_get_ticks()
+  * Caller must hold BQL which serves as mutex for vm_clock_seqlock.
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index 9537b8b..5cfacb9 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1413,6 +1413,14 @@ struct CPUArchState {
+      */
+     bool msr_nobql;
+     bool msr_nobql_verify;
++    /*
++     * x-tb-fast (POMPPC tcg/0015): mftb/mftbu compute the time base from
++     * the host counter (cntvct_el0 at 1 GHz, calibrated once against
++     * get_clock()) instead of clock_gettime() and a 128-bit division,
++     * docs/tcg-g4.md section 23.  x-tb-verify: proof mode.
++     */
++    bool tb_fast;
++    bool tb_verify;
+     uint32_t irq_seq;
+ 
+     /* Internal devices resources */
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index cfd9115..144209c 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7492,6 +7492,14 @@ static Property ppc_cpu_properties[] = {
+      */
+     DEFINE_PROP_BOOL("x-msr-nobql", PowerPCCPU, env.msr_nobql, false),
+     DEFINE_PROP_BOOL("x-msr-nobql-verify", PowerPCCPU, env.msr_nobql_verify, false),
++    /*
++     * POMPPC tcg/0015.  x-tb-fast: the time base read by mftb/mftbu comes
++     * from the host counter (arm64 hosts whose cntvct_el0 runs at 1 GHz;
++     * elsewhere the property does nothing).  x-tb-verify: every fast read
++     * is compared with the stock value.  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-tb-fast", PowerPCCPU, env.tb_fast, false),
++    DEFINE_PROP_BOOL("x-tb-verify", PowerPCCPU, env.tb_verify, false),
+     /*
+      * AltiVec vaddfp/vsubfp/vmaddfp/vnmsubfp: the four lanes at once on the
+      * host FPU when softfloat's hardfloat path would take each of them
+diff --git a/util/qemu-timer-common.c b/util/qemu-timer-common.c
+index cc1326f..3047f08 100644
+--- a/util/qemu-timer-common.c
++++ b/util/qemu-timer-common.c
+@@ -23,6 +23,7 @@
+  */
+ #include "qemu/osdep.h"
+ #include "qemu/timer.h"
++#include "qemu/atomic.h"
+ 
+ /***********************************************************/
+ /* real time host monotonic timer */
+@@ -49,6 +50,57 @@ static void __attribute__((constructor)) init_get_clock(void)
+ #else
+ 
+ int use_rt_clock;
++int qemu_raw_clock;
++int64_t qemu_raw_clock_k;
++
++/* POMPPC tcg/0015, see include/qemu/timer.h */
++bool qemu_raw_clock_enable(void)
++{
++#if defined(__aarch64__)
++    static int state;               /* 0 not tried, 1 on, -1 refused */
++    uint64_t f, c1, c2;
++    int64_t m, lo = INT64_MIN, hi = INT64_MAX;
++    struct timespec ts;
++    int i;
++
++    if (state) {
++        return state > 0;
++    }
++    asm volatile("mrs %0, cntfrq_el0" : "=r"(f));
++    if (f != 1000000000ULL || !use_rt_clock) {
++        fprintf(stderr, "x-tb-fast : cntfrq %" PRIu64 " Hz, horloge d'origine\n", f);
++        state = -1;
++        return false;
++    }
++    /* CLOCK_MONOTONIC = floor_res(cnt + C) near now: bound C from both sides */
++    for (i = 0; i < 20000; i++) {
++        asm volatile("mrs %0, cntvct_el0" : "=r"(c1));
++        clock_gettime(CLOCK_MONOTONIC, &ts);
++        asm volatile("mrs %0, cntvct_el0" : "=r"(c2));
++        m = ts.tv_sec * 1000000000LL + ts.tv_nsec;
++        lo = MAX(lo, m - (int64_t)c2);
++        hi = MIN(hi, m + 1000 - (int64_t)c1);
++    }
++    /*
++     * macOS steps CLOCK_MONOTONIC on its 24 MHz tick (41.7 ns): the two
++     * bounds may cross by that much.
++     */
++    if (lo - hi > 100 || hi - lo > 2000) {
++        fprintf(stderr, "x-tb-fast : CLOCK_MONOTONIC ne suit pas cntvct "
++                "(%" PRId64 "..%" PRId64 "), horloge d'origine\n", lo, hi);
++        state = -1;
++        return false;
++    }
++    /* lo: the counter lands at or just above CLOCK_MONOTONIC, never below */
++    qemu_raw_clock_k = lo;
++    smp_wmb();
++    qemu_raw_clock = 1;
++    state = 1;
++    return true;
++#else
++    return false;
++#endif
++}
+ 
+ static void __attribute__((constructor)) init_get_clock(void)
+ {

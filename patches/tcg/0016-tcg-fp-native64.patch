@@ -1,0 +1,603 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index 5cfacb9..3193edb 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1388,6 +1388,11 @@ struct CPUArchState {
+      * elsewhere.  x-fp-verify checks every such instruction.
+      */
+     bool fp_native;
++    /*
++     * x-fp-native64 (POMPPC tcg/0016): the same for fadd fsub fmul fmadd
++     * fmsub fnmadd fnmsub (double precision), docs/tcg-g4.md section 24.
++     */
++    bool fp_native64;
+     uint32_t fpn_sel;           /* x-fp-verify: selector of the checked op */
+     /*
+      * x-ret-inline (POMPPC tcg/0008): the indirect exits of a TB (blr, bctr,
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index 144209c..8456f13 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7463,6 +7463,13 @@ static Property ppc_cpu_properties[] = {
+      * with the helpers.  Needs x-fast-fp.  Off by default.
+      */
+     DEFINE_PROP_BOOL("x-fp-native", PowerPCCPU, env.fp_native, false),
++    /*
++     * POMPPC tcg/0016: the double-precision fadd fsub fmul fmadd fmsub
++     * fnmadd fnmsub the same way (aarch64 hosts; one helper call each
++     * elsewhere); bit-exact with the helpers.  Needs x-fast-fp.  Off by
++     * default.
++     */
++    DEFINE_PROP_BOOL("x-fp-native64", PowerPCCPU, env.fp_native64, false),
+     /*
+      * POMPPC tcg/0008.  x-ret-inline: the jump-cache probe of
+      * helper_lookup_tb_ptr done in the generated code at every indirect
+diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
+index 7611ca1..55dba74 100644
+--- a/target/ppc/fpu_helper.c
++++ b/target/ppc/fpu_helper.c
+@@ -3867,9 +3867,102 @@ static inline QEMU_ALWAYS_INLINE uint64_t fpi_fp32(uint64_t a, uint64_t b,
+     return FPI_FAIL;
+ }
+ 
++/*
++ * x-fp-native64 (POMPPC tcg/0016): the double-precision forms.  Every
++ * operand a float64 zero or normal (fpi_zon64), one IEEE float64 operation
++ * correctly rounded to nearest-even by the host: bit for bit what
++ * float64_add/sub/mul/muladd compute for them.  Back to the helpers:
++ * overflow; a tiny sum other than zero (exact, but FPRF would say
++ * denormal); a non-zero product whose result is tiny, DBL_MIN included
++ * (an underflow, PowerPC detecting tininess before rounding).
++ */
++static inline bool fpi_zon64(uint64_t x)
++{
++    int exp = extract64(x, 52, 11);
++
++    if (exp == 0) {
++        return (x << 1) == 0;
++    }
++    return exp != 0x7ff;
++}
++
++static inline double fpi_d(uint64_t x)
++{
++    union { double d; uint64_t u; } v = { .u = x };
++    return v.d;
++}
++
++static inline uint64_t fpi_u(double d)
++{
++    union { double d; uint64_t u; } v = { .d = d };
++    return v.u;
++}
++
++static inline QEMU_ALWAYS_INLINE uint64_t fpi_fp64(uint64_t a, uint64_t b,
++                                                  uint64_t c, uint32_t op)
++{
++    double fa, fb, fc, r;
++
++    switch (op) {
++    case FPI_ADD:
++    case FPI_SUB:
++        if (!fpi_zon64(a) || !fpi_zon64(b)) {
++            return FPI_FAIL;
++        }
++        fa = fpi_d(a);
++        fb = fpi_d(b);
++        r = op == FPI_ADD ? fa + fb : fa - fb;
++        if (isinf(r) || (r != 0 && fabs(r) < DBL_MIN)) {
++            return FPI_FAIL;
++        }
++        return fpi_u(r);
++    case FPI_MUL:
++        if (!fpi_zon64(a) || !fpi_zon64(c)) {
++            return FPI_FAIL;
++        }
++        fa = fpi_d(a);
++        fc = fpi_d(c);
++        r = fa * fc;
++        if (fa != 0 && fc != 0 && (isinf(r) || fabs(r) <= DBL_MIN)) {
++            return FPI_FAIL;
++        }
++        return fpi_u(r);
++    case FPI_MADD:
++    case FPI_MSUB:
++    case FPI_NMADD:
++    case FPI_NMSUB:
++        if (!fpi_zon64(a) || !fpi_zon64(b) || !fpi_zon64(c)) {
++            return FPI_FAIL;
++        }
++        fa = fpi_d(a);
++        fb = fpi_d(b);
++        fc = fpi_d(c);
++        if (op == FPI_MSUB || op == FPI_NMSUB) {
++            fb = -fb;
++        }
++        r = fma(fa, fc, fb);
++        if (fa != 0 && fc != 0 && (isinf(r) || fabs(r) <= DBL_MIN)) {
++            return FPI_FAIL;
++        }
++        if (op == FPI_NMADD || op == FPI_NMSUB) {
++            r = -r;             /* after rounding, zero included */
++        }
++        return fpi_u(r);
++    }
++    return FPI_FAIL;
++}
++
++/* single (tcg/0007) or double (tcg/0016) form */
++static inline QEMU_ALWAYS_INLINE uint64_t fpi_arith(uint64_t a, uint64_t b,
++                                                   uint64_t c, uint32_t op)
++{
++    return FPI_IS_D(op) ? fpi_fp64(a, b, c, op - FPI_DADD)
++                        : fpi_fp32(a, b, c, op);
++}
++
+ uint64_t helper_fp32_fast(uint64_t a, uint64_t b, uint64_t c, uint32_t op)
+ {
+-    return fpi_fp32(a, b, c, op);
++    return fpi_arith(a, b, c, op);
+ }
+ 
+ /*
+@@ -3931,7 +4024,7 @@ static inline uint64_t fpi_fpscr_fcmpu(uint64_t fpscr, uint32_t crf)
+  */
+ static const char *const fpi_names[FPI_NOPS] = {
+     "fadds", "fsubs", "fmuls", "fmadds", "fmsubs", "fnmadds", "fnmsubs",
+-    "fcmpu",
++    "fcmpu", "fadd", "fsub", "fmul", "fmadd", "fmsub", "fnmadd", "fnmsub",
+ };
+ static uint64_t fpv_ok[FPI_NOPS], fpv_bad[FPI_NOPS];
+ static uint64_t fpv_slow_gate[FPI_NOPS], fpv_slow_opnd[FPI_NOPS];
+@@ -4001,9 +4094,30 @@ void helper_fpv_arith(CPUPPCState *env, uint32_t op, uint64_t a, uint64_t b,
+     case FPI_NMADD:
+         ref = helper_FNMADDS(env, a, c, b);
+         break;
+-    default:
++    case FPI_NMSUB:
+         ref = helper_FNMSUBS(env, a, c, b);
+         break;
++    case FPI_DADD:
++        ref = helper_FADD(env, a, b);
++        break;
++    case FPI_DSUB:
++        ref = helper_FSUB(env, a, b);
++        break;
++    case FPI_DMUL:
++        ref = helper_FMUL(env, a, c);
++        break;
++    case FPI_DMADD:
++        ref = helper_FMADD(env, a, c, b);
++        break;
++    case FPI_DMSUB:
++        ref = helper_FMSUB(env, a, c, b);
++        break;
++    case FPI_DNMADD:
++        ref = helper_FNMADD(env, a, c, b);
++        break;
++    default:
++        ref = helper_FNMSUB(env, a, c, b);
++        break;
+     }
+     helper_compute_fprf_float64(env, ref);
+     do_float_check_status(env, true, GETPC());
+@@ -4121,8 +4235,31 @@ static uint64_t fpf_slow(CPUPPCState *env, uint32_t op, uint64_t a,
+         return do_fmadds(env, a, c, b, MSUB_FLGS, ra);
+     case FPI_NMADD:
+         return do_fmadds(env, a, c, b, NMADD_FLGS, ra);
+-    default:
++    case FPI_NMSUB:
+         return do_fmadds(env, a, c, b, NMSUB_FLGS, ra);
++    /* tcg/0016: helper_FADD & co. with the generated code's return address */
++    case FPI_DADD:
++        r = float64_add(a, b, &env->fp_status);
++        addsub_flags_handler(env, get_float_exception_flags(&env->fp_status),
++                             ra);
++        return r;
++    case FPI_DSUB:
++        r = float64_sub(a, b, &env->fp_status);
++        addsub_flags_handler(env, get_float_exception_flags(&env->fp_status),
++                             ra);
++        return r;
++    case FPI_DMUL:
++        r = float64_mul(a, c, &env->fp_status);
++        mul_flags_handler(env, get_float_exception_flags(&env->fp_status), ra);
++        return r;
++    case FPI_DMADD:
++        return do_fmadd(env, a, c, b, MADD_FLGS, ra);
++    case FPI_DMSUB:
++        return do_fmadd(env, a, c, b, MSUB_FLGS, ra);
++    case FPI_DNMADD:
++        return do_fmadd(env, a, c, b, NMADD_FLGS, ra);
++    default:
++        return do_fmadd(env, a, c, b, NMSUB_FLGS, ra);
+     }
+ }
+ 
+@@ -4167,7 +4304,7 @@ Int128 helper_fp32_flat(CPUPPCState *env, uint64_t a, uint64_t b, uint64_t c,
+                         uint64_t fpscr, uint32_t sel)
+ {
+     if (likely(fpi_gate(fpscr) && !env->fp_verify)) {
+-        uint64_t r = fpi_fp32(a, b, c, sel & 0xff);
++        uint64_t r = fpi_arith(a, b, c, sel & 0xff);
+ 
+         if (likely(r != FPI_FAIL)) {
+             set_float_exception_flags(float_flag_inexact, &env->fp_status);
+diff --git a/target/ppc/internal.h b/target/ppc/internal.h
+index ad89c66..a528f5c 100644
+--- a/target/ppc/internal.h
++++ b/target/ppc/internal.h
+@@ -308,8 +308,18 @@ static inline int ger_pack_masks(int pmsk, int ymsk, int xmsk)
+  */
+ enum {
+     FPI_ADD, FPI_SUB, FPI_MUL, FPI_MADD, FPI_MSUB, FPI_NMADD, FPI_NMSUB,
+-    FPI_CMPU, FPI_NOPS
++    FPI_CMPU,
++    /*
++     * x-fp-native64 (POMPPC tcg/0016): the double-precision forms, in the
++     * same order (fadd fsub fmul fmadd fmsub fnmadd fnmsub); the host op
++     * keys on op >= FPI_DADD.
++     */
++    FPI_DADD, FPI_DSUB, FPI_DMUL, FPI_DMADD, FPI_DMSUB, FPI_DNMADD,
++    FPI_DNMSUB, FPI_NOPS
+ };
++#define FPI_IS_D(op) ((op) >= FPI_DADD)
++/* single-precision op of the same form (FPI_CMPU stays itself) */
++#define FPI_BASE(op) (FPI_IS_D(op) ? (op) - FPI_DADD : (op))
+ /* helper_fp32_fast() "take the helpers" result: a NaN, never a result. */
+ #define FPI_FAIL 0x7ff8000000000001ull
+ /* the arithmetic short path needs (fpscr & FPI_GATE_MASK) == FP_XX */
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+index e089b84..eb6e6cd 100644
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -189,6 +189,7 @@ struct DisasContext {
+     bool fp_inline, fp_verify;  /* x-fp-inline, x-fp-verify (tcg/0007) */
+     bool fp_flat;               /* x-fp-flat (tcg/0013) */
+     bool fp_native;             /* x-fp-native (tcg/0014) */
++    bool fp_native64, fp_flat64; /* x-fp-native64 (tcg/0016) */
+     bool ret_inline, ret_verify; /* x-ret-inline, x-ret-verify (tcg/0008) */
+     bool altivec_enabled;
+     bool vsx_enabled;
+@@ -6538,6 +6539,12 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+     ctx->fp_flat |= env->fp_native && env->fp_prime_mask;
+     /* x-fp-verify also checks x-fp-native (x-fp-flat checks itself, in C) */
+     ctx->fp_verify |= ctx->fp_native && env->fp_verify;
++    /* x-fp-native64 (tcg/0016): host op, or one x-fp-flat call without it */
++    ctx->fp_native64 = env->fp_native64 && env->fp_prime_mask &&
++                       TCG_TARGET_HAS_ppc_fp32;
++    ctx->fp_flat64 = env->fp_native64 && env->fp_prime_mask &&
++                     !TCG_TARGET_HAS_ppc_fp32;
++    ctx->fp_verify |= ctx->fp_native64 && env->fp_verify;
+     ctx->ret_inline = env->ret_inline;
+     ctx->ret_verify = cs->ret_verify;
+     ctx->spe_enabled = (hflags >> HFLAGS_SPE) & 1;
+diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c.inc
+index 31fddb7..cf929aa 100644
+--- a/target/ppc/translate/fp-impl.c.inc
++++ b/target/ppc/translate/fp-impl.c.inc
+@@ -278,11 +278,11 @@ static bool do_fp_flat(DisasContext *ctx, int op, int frt, int fra, int frb,
+ 
+     tcg_gen_extu_tl_i64(f, cpu_fpscr);
+     get_fpr(a, fra);
+-    if (op == FPI_ADD || op == FPI_SUB || op >= FPI_MADD) {
++    if (FPI_BASE(op) != FPI_MUL) {
+         b = tcg_temp_new_i64();
+         get_fpr(b, frb);
+     }
+-    if (op >= FPI_MUL) {
++    if (FPI_BASE(op) >= FPI_MUL) {
+         c = tcg_temp_new_i64();
+         get_fpr(c, frc);
+     }
+@@ -307,6 +307,8 @@ QEMU_BUILD_BUG_ON(FP_XX != 1u << 25 || FP_XE != 1u << 3 || FP_UE != 1u << 5 ||
+                   FP_OE != 1u << 6 || FP_RN != 3 || FPSCR_FPRF != 12 ||
+                   FP_FPRF != 0x1f << 12 || FP_FPCC != 0xf << 12 ||
+                   FP_FI != 1u << 17);
++/* tcg/0016: the op numbering the host op hard-codes (PFP_CMPU, PFP_D) */
++QEMU_BUILD_BUG_ON(FPI_CMPU != 7 || FPI_DADD != 8 || FPI_DNMSUB != 14);
+ 
+ static void gen_fp_native(DisasContext *ctx, TCGv_i64 r, TCGv_i64 nf, int op,
+                           int t, TCGv_i64 a, TCGv_i64 b, TCGv_i64 c)
+@@ -343,12 +345,12 @@ static bool do_fp_native(DisasContext *ctx, int op, int frt, int fra, int frb,
+     REQUIRE_FPU(ctx);
+ 
+     get_fpr(a, fra);
+-    if (op == FPI_ADD || op == FPI_SUB || op >= FPI_MADD) {
++    if (FPI_BASE(op) != FPI_MUL) {
+         get_fpr(b, frb);
+     } else {
+         tcg_gen_movi_i64(b, 0);
+     }
+-    if (op >= FPI_MUL) {
++    if (FPI_BASE(op) >= FPI_MUL) {
+         get_fpr(c, frc);
+     } else {
+         tcg_gen_movi_i64(c, 0);
+@@ -444,6 +446,51 @@ static bool do_fpi_acb(DisasContext *ctx, arg_A *a,
+     return do_helper_acb(ctx, a, helper);
+ }
+ 
++/*
++ * x-fp-native64 (POMPPC tcg/0016): fadd fsub fmul fmadd fmsub fnmadd fnmsub
++ * by the same op (double forms of the selector), or one x-fp-flat call each
++ * without the host op; the stock helpers otherwise.
++ */
++static bool do_fpd_ab(DisasContext *ctx, arg_A_tab *a,
++                      void (*helper)(TCGv_i64, TCGv_ptr, TCGv_i64, TCGv_i64),
++                      int op)
++{
++    if (ctx->fp_native64) {
++        return do_fp_native(ctx, op, a->frt, a->fra, a->frb, 0, a->rc);
++    }
++    if (ctx->fp_flat64) {
++        return do_fp_flat(ctx, op, a->frt, a->fra, a->frb, 0, a->rc);
++    }
++    return do_helper_ab(ctx, a, helper);
++}
++
++static bool do_fpd_ac(DisasContext *ctx, arg_A_tac *a,
++                      void (*helper)(TCGv_i64, TCGv_ptr, TCGv_i64, TCGv_i64),
++                      int op)
++{
++    if (ctx->fp_native64) {
++        return do_fp_native(ctx, op, a->frt, a->fra, 0, a->frc, a->rc);
++    }
++    if (ctx->fp_flat64) {
++        return do_fp_flat(ctx, op, a->frt, a->fra, 0, a->frc, a->rc);
++    }
++    return do_helper_ac(ctx, a, helper);
++}
++
++static bool do_fpd_acb(DisasContext *ctx, arg_A *a,
++                       void (*helper)(TCGv_i64, TCGv_ptr, TCGv_i64,
++                                      TCGv_i64, TCGv_i64),
++                       int op)
++{
++    if (ctx->fp_native64) {
++        return do_fp_native(ctx, op, a->frt, a->fra, a->frb, a->frc, a->rc);
++    }
++    if (ctx->fp_flat64) {
++        return do_fp_flat(ctx, op, a->frt, a->fra, a->frb, a->frc, a->rc);
++    }
++    return do_helper_acb(ctx, a, helper);
++}
++
+ /* sign-magnitude -> two's complement (fpi_cmp_key() of fpu_helper.c) */
+ static void gen_fpi_cmp_key(TCGv_i64 k, TCGv_i64 x)
+ {
+@@ -607,23 +654,23 @@ static bool do_helper_fsqrt(DisasContext *ctx, arg_A_tb *a,
+     return true;
+ }
+ 
+-TRANS(FADD, do_helper_ab, gen_helper_FADD);
++TRANS(FADD, do_fpd_ab, gen_helper_FADD, FPI_DADD);
+ TRANS(FADDS, do_fpi_ab, gen_helper_FADDS, FPI_ADD);
+-TRANS(FSUB, do_helper_ab, gen_helper_FSUB);
++TRANS(FSUB, do_fpd_ab, gen_helper_FSUB, FPI_DSUB);
+ TRANS(FSUBS, do_fpi_ab, gen_helper_FSUBS, FPI_SUB);
+ TRANS(FDIV, do_helper_ab, gen_helper_FDIV);
+ TRANS(FDIVS, do_helper_ab, gen_helper_FDIVS);
+-TRANS(FMUL, do_helper_ac, gen_helper_FMUL);
++TRANS(FMUL, do_fpd_ac, gen_helper_FMUL, FPI_DMUL);
+ TRANS(FMULS, do_fpi_ac, gen_helper_FMULS, FPI_MUL);
+ 
+-TRANS(FMADD, do_helper_acb, gen_helper_FMADD);
++TRANS(FMADD, do_fpd_acb, gen_helper_FMADD, FPI_DMADD);
+ TRANS(FMADDS, do_fpi_acb, gen_helper_FMADDS, FPI_MADD);
+-TRANS(FMSUB, do_helper_acb, gen_helper_FMSUB);
++TRANS(FMSUB, do_fpd_acb, gen_helper_FMSUB, FPI_DMSUB);
+ TRANS(FMSUBS, do_fpi_acb, gen_helper_FMSUBS, FPI_MSUB);
+ 
+-TRANS(FNMADD, do_helper_acb, gen_helper_FNMADD);
++TRANS(FNMADD, do_fpd_acb, gen_helper_FNMADD, FPI_DNMADD);
+ TRANS(FNMADDS, do_fpi_acb, gen_helper_FNMADDS, FPI_NMADD);
+-TRANS(FNMSUB, do_helper_acb, gen_helper_FNMSUB);
++TRANS(FNMSUB, do_fpd_acb, gen_helper_FNMSUB, FPI_DNMSUB);
+ TRANS(FNMSUBS, do_fpi_acb, gen_helper_FNMSUBS, FPI_NMSUB);
+ 
+ TRANS_FLAGS(FLOAT_EXT, FRE, do_helper_bs, gen_helper_FRE);
+diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
+index b31c379..5de5f19 100644
+--- a/tcg/aarch64/tcg-target.c.inc
++++ b/tcg/aarch64/tcg-target.c.inc
+@@ -1924,7 +1924,8 @@ static void tcg_out_qemu_st_direct(TCGContext *s, MemOp memop,
+ #define PFP_FI          (1ull << 17)
+ 
+ enum { PFP_ADD, PFP_SUB, PFP_MUL, PFP_MADD, PFP_MSUB, PFP_NMADD, PFP_NMSUB,
+-       PFP_CMPU };
++       PFP_CMPU,
++       PFP_D = 8 };    /* tcg/0016: PFP_D + PFP_ADD..PFP_NMSUB, double forms */
+ enum { PFP_EQ = 0, PFP_NE = 1, PFP_HS = 2, PFP_LO = 3, PFP_HI = 8,
+        PFP_LS = 9, PFP_GE = 10, PFP_LT = 11, PFP_GT = 12 };
+ 
+@@ -2011,17 +2012,20 @@ static void pfp_f3(TCGContext *s, uint32_t insn, unsigned d, unsigned n,
+ #define PFP_FADDS       0x1e202800
+ #define PFP_FSUBS       0x1e203800
+ #define PFP_FMULS       0x1e200800
++#define PFP_FTYPE_D     0x00400000      /* ftype = 01: double */
+ 
+-static void pfp_fneg(TCGContext *s, unsigned d, unsigned n)
++/* dbl: the double-precision form (ftype 01) of the same instruction */
++static void pfp_fneg(TCGContext *s, unsigned d, unsigned n, bool dbl)
+ {
+-    tcg_out32(s, 0x1e214000 | n << 5 | d);
++    tcg_out32(s, 0x1e214000 | (dbl ? PFP_FTYPE_D : 0) | n << 5 | d);
+ }
+ 
+ /* sd = sa + sn * sm, one rounding */
+ static void pfp_fmadd(TCGContext *s, unsigned d, unsigned n, unsigned m,
+-                      unsigned a)
++                      unsigned a, bool dbl)
+ {
+-    tcg_out32(s, 0x1f000000 | m << 16 | a << 10 | n << 5 | d);
++    tcg_out32(s, 0x1f000000 | (dbl ? PFP_FTYPE_D : 0) | m << 16 | a << 10 |
++              n << 5 | d);
+ }
+ 
+ static TCGReg pfp_scratch(TCGRegSet *used)
+@@ -2053,6 +2057,21 @@ static void pfp_zon(TCGContext *s, TCGReg bad, TCGReg t, TCGReg x,
+     pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_EQ);        /* !Z: bad + 1 */
+ }
+ 
++/*
++ * tcg/0016, double forms: x a float64 zero or normal (fpi_zon64()): t == 0,
++ * or t - (1 << 53) below 0x7fe << 53 (exponent 1..0x7fe).  k1 = 1 << 53,
++ * k2 = 0x7fe << 53.
++ */
++static void pfp_zon64(TCGContext *s, TCGReg bad, TCGReg t, TCGReg x,
++                      TCGReg k1, TCGReg k2, TCGReg u)
++{
++    pfp_lsl(s, t, x, 1);
++    pfp_rrr(s, PFP_SUBX, u, t, k1, 0);
++    pfp_cmp(s, u, k2);
++    pfp_ccmpi(s, t, 0, 4, PFP_HS);      /* hs: t == 0 ? ; else Z */
++    pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_EQ);        /* !Z: bad + 1 */
++}
++
+ static void tcg_out_ppc_fp32(TCGContext *s, const TCGArg *args)
+ {
+     TCGReg xr = args[0], xnf = args[1];
+@@ -2110,76 +2129,111 @@ static void tcg_out_ppc_fp32(TCGContext *s, const TCGArg *args)
+         pfp_rrr(s, PFP_ORRX, xnf, xnf, xr, 12);
+         tcg_out_logicali(s, I3404_ORRI, TCG_TYPE_I64, xnf, xnf, PFP_FI);
+     } else {
+-        bool use_b = op != PFP_MUL;
+-        bool use_c = op >= PFP_MUL;
++        bool dbl = op >= PFP_D;
++        unsigned base = dbl ? op - PFP_D : op;
++        uint32_t ft = dbl ? PFP_FTYPE_D : 0;
++        bool use_b = base != PFP_MUL;
++        bool use_c = base >= PFP_MUL;
+ 
+         k1 = pfp_scratch(&used);
+         tr = pfp_scratch(&used);
+         u = TCG_REG_TMP2;
+-        /* operands: fpi_zon(), k2 in TMP1 */
+-        tcg_out_movi(s, TCG_TYPE_I64, k1, 0x381ull << 53);
+-        tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP1, 0xfeull << 53);
+-        pfp_zon(s, bad, ta, xa, k1, TCG_REG_TMP1, u);
+-        if (use_b) {
+-            pfp_zon(s, bad, t, xb, k1, TCG_REG_TMP1, u);
+-        }
+-        if (use_c) {
+-            tc = pfp_scratch(&used);
+-            pfp_zon(s, bad, tc, xc, k1, TCG_REG_TMP1, u);
++        /*
++         * operands: fpi_zon() (float32 zero or normal), k2 in TMP1;
++         * tcg/0016: fpi_zon64() (float64 zero or normal)
++         */
++        tcg_out_movi(s, TCG_TYPE_I64, k1, dbl ? 1ull << 53 : 0x381ull << 53);
++        tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP1,
++                     dbl ? 0x7feull << 53 : 0xfeull << 53);
++        if (dbl) {
++            pfp_zon64(s, bad, ta, xa, k1, TCG_REG_TMP1, u);
++            if (use_b) {
++                pfp_zon64(s, bad, t, xb, k1, TCG_REG_TMP1, u);
++            }
++            if (use_c) {
++                tc = pfp_scratch(&used);
++                pfp_zon64(s, bad, tc, xc, k1, TCG_REG_TMP1, u);
++            }
++        } else {
++            pfp_zon(s, bad, ta, xa, k1, TCG_REG_TMP1, u);
++            if (use_b) {
++                pfp_zon(s, bad, t, xb, k1, TCG_REG_TMP1, u);
++            }
++            if (use_c) {
++                tc = pfp_scratch(&used);
++                pfp_zon(s, bad, tc, xc, k1, TCG_REG_TMP1, u);
++            }
+         }
+ 
+-        /* the operation, float32, as helper_fp32_fast() */
++        /*
++         * the operation, float32 as helper_fp32_fast() (fpi_fp32()), or
++         * float64 as fpi_fp64() (tcg/0016: no conversion)
++         */
+         pfp_fmov_dx(s, 0, xa);
+-        pfp_fcvt_sd(s, 0, 0);
++        if (!dbl) {
++            pfp_fcvt_sd(s, 0, 0);
++        }
+         if (use_b) {
+             pfp_fmov_dx(s, 1, xb);
+-            pfp_fcvt_sd(s, 1, 1);
++            if (!dbl) {
++                pfp_fcvt_sd(s, 1, 1);
++            }
+         }
+         if (use_c) {
+             pfp_fmov_dx(s, 2, xc);
+-            pfp_fcvt_sd(s, 2, 2);
++            if (!dbl) {
++                pfp_fcvt_sd(s, 2, 2);
++            }
+         }
+-        switch (op) {
++        switch (base) {
+         case PFP_ADD:
+-            pfp_f3(s, PFP_FADDS, 3, 0, 1);
++            pfp_f3(s, PFP_FADDS | ft, 3, 0, 1);
+             break;
+         case PFP_SUB:
+-            pfp_f3(s, PFP_FSUBS, 3, 0, 1);
++            pfp_f3(s, PFP_FSUBS | ft, 3, 0, 1);
+             break;
+         case PFP_MUL:
+-            pfp_f3(s, PFP_FMULS, 3, 0, 2);
++            pfp_f3(s, PFP_FMULS | ft, 3, 0, 2);
+             break;
+         case PFP_MADD:
+-            pfp_fmadd(s, 3, 0, 2, 1);                   /* a * c + b */
++            pfp_fmadd(s, 3, 0, 2, 1, dbl);              /* a * c + b */
+             break;
+         case PFP_MSUB:
+-            pfp_fneg(s, 1, 1);
+-            pfp_fmadd(s, 3, 0, 2, 1);                   /* a * c + -b */
++            pfp_fneg(s, 1, 1, dbl);
++            pfp_fmadd(s, 3, 0, 2, 1, dbl);              /* a * c + -b */
+             break;
+         case PFP_NMADD:
+-            pfp_fmadd(s, 3, 0, 2, 1);
+-            pfp_fneg(s, 3, 3);                          /* after rounding */
++            pfp_fmadd(s, 3, 0, 2, 1, dbl);
++            pfp_fneg(s, 3, 3, dbl);                     /* after rounding */
+             break;
+         case PFP_NMSUB:
+-            pfp_fneg(s, 1, 1);
+-            pfp_fmadd(s, 3, 0, 2, 1);
+-            pfp_fneg(s, 3, 3);
++            pfp_fneg(s, 1, 1, dbl);
++            pfp_fmadd(s, 3, 0, 2, 1, dbl);
++            pfp_fneg(s, 3, 3, dbl);
+             break;
+         default:
+             g_assert_not_reached();
+         }
+-        pfp_fcvt_ds(s, 3, 3);
++        if (!dbl) {
++            pfp_fcvt_ds(s, 3, 3);
++        }
+         pfp_fmov_xd(s, xr, 3);
+ 
+         /* the result: tr = r << 1, k3 = infinity << 1 */
+         pfp_lsl(s, tr, xr, 1);
+         tcg_out_movi(s, TCG_TYPE_I64, k3, 0xffe0000000000000ull);
+-        if (op <= PFP_SUB) {
++        if (base <= PFP_SUB) {
+             /* any finite sum */
+             pfp_cmp(s, tr, k3);
+             pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_NE);
++            if (dbl) {
++                /* tcg/0016: and zero or normal (|r| >= DBL_MIN) */
++                pfp_cmp(s, tr, k1);
++                pfp_ccmpi(s, tr, 0, 4, PFP_LO);  /* lo: r == 0 ? ; else Z */
++                pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_EQ);
++            }
+         } else {
+-            /* a zero product, or FLT_MIN < |r| < inf */
++            /* a zero product, or FLT_MIN (DBL_MIN) < |r| < inf */
+             pfp_cmpi(s, ta, 0);
+             pfp_ccmpi(s, tc, 0, 4, PFP_NE);
+             pfp_cs(s, PFP_CSINC, t, TCG_REG_XZR, TCG_REG_XZR, PFP_NE);

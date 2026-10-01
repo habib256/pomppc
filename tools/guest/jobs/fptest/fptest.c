@@ -24,6 +24,12 @@
  *
  *   fptest [NRAND]            (defaut 2^18 vecteurs aleatoires par op et etat)
  *   fptest banc N             bancs de N iterations
+ *   fptest d [NRAND]          les formes double precision (fadd fsub fmul fmadd
+ *                             fmsub fnmadd fnmsub) : x-fp-native64, tcg/0016,
+ *                             docs/tcg-g4.md section 24 ; operandes doubles
+ *                             (sous-normaux, voisins de DBL_MIN, debordements,
+ *                             annulations exactes)
+ *   fptest banc-d N           bancs double (chaine, sommets)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,9 +80,11 @@ static u64 bits_d(double d)
     return u;
 }
 
-enum { ADD, SUB, MUL, MADD, MSUB, NMADD, NMSUB, CMPU, NOPS };
+enum { ADD, SUB, MUL, MADD, MSUB, NMADD, NMSUB, CMPU,
+       ADDD, SUBD, MULD, MADDD, MSUBD, NMADDD, NMSUBD, NOPS };
 static const char *names[NOPS] = {
-    "fadds", "fsubs", "fmuls", "fmadds", "fmsubs", "fnmadds", "fnmsubs", "fcmpu"
+    "fadds", "fsubs", "fmuls", "fmadds", "fmsubs", "fnmadds", "fnmsubs", "fcmpu",
+    "fadd", "fsub", "fmul", "fmadd", "fmsub", "fnmadd", "fnmsub"
 };
 
 /* une instruction ; r = resultat (ou CR pour fcmpu) */
@@ -92,6 +100,13 @@ static u64 run(int op, double a, double b, double c)
     case MSUB:  __asm__ __volatile__("fmsubs %0,%1,%2,%3" : "=f"(r) : "f"(a), "f"(c), "f"(b)); break;
     case NMADD: __asm__ __volatile__("fnmadds %0,%1,%2,%3" : "=f"(r) : "f"(a), "f"(c), "f"(b)); break;
     case NMSUB: __asm__ __volatile__("fnmsubs %0,%1,%2,%3" : "=f"(r) : "f"(a), "f"(c), "f"(b)); break;
+    case ADDD:  __asm__ __volatile__("fadd %0,%1,%2" : "=f"(r) : "f"(a), "f"(b)); break;
+    case SUBD:  __asm__ __volatile__("fsub %0,%1,%2" : "=f"(r) : "f"(a), "f"(b)); break;
+    case MULD:  __asm__ __volatile__("fmul %0,%1,%2" : "=f"(r) : "f"(a), "f"(c)); break;
+    case MADDD: __asm__ __volatile__("fmadd %0,%1,%2,%3" : "=f"(r) : "f"(a), "f"(c), "f"(b)); break;
+    case MSUBD: __asm__ __volatile__("fmsub %0,%1,%2,%3" : "=f"(r) : "f"(a), "f"(c), "f"(b)); break;
+    case NMADDD: __asm__ __volatile__("fnmadd %0,%1,%2,%3" : "=f"(r) : "f"(a), "f"(c), "f"(b)); break;
+    case NMSUBD: __asm__ __volatile__("fnmsub %0,%1,%2,%3" : "=f"(r) : "f"(a), "f"(c), "f"(b)); break;
     default:
         __asm__ __volatile__("fcmpu cr1,%1,%2\n\tmfcr %0" : "=r"(cr) : "f"(a), "f"(b) : "cr1");
         return (cr >> 24) & 0xf;
@@ -160,6 +175,30 @@ static double rnd_operand(void)
             f = ((u32)(x >> 32) & 0x807fffff) | (u32)(0x60 + ((x >> 8) & 0x3f)) << 23;
             return ld_s(f);
     }
+}
+
+/*
+ * Operandes doubles : exposant choisi pres des bords (sous-normaux, DBL_MIN,
+ * produits qui sous-debordent ou debordent, sommes qui s'annulent), mantisse
+ * au hasard, signe au hasard.
+ */
+static double rnd_operand_d(void)
+{
+    u64 x = rnd(), m = rnd() & 0x000fffffffffffffULL, sg = x & 0x8000000000000000ULL;
+    unsigned e;
+    switch (x & 15) {
+    case 0: return cat[(x >> 8) % NCAT];
+    case 1: return ld_d(rnd());                                  /* tout */
+    case 2: return ld_d(sg | m);                                 /* sous-normal */
+    case 3: return ld_d(sg | m >> ((x >> 8) & 31));              /* petit sous-normal */
+    case 4: e = 1 + ((x >> 8) & 7); break;                       /* pres de DBL_MIN */
+    case 5: e = 0x1ff + ((x >> 8) & 0x3ff); break;               /* produits minuscules */
+    case 6: e = 0x5ff + ((x >> 8) & 0x1ff); break;               /* produits enormes */
+    case 7: e = 0x7f6 + ((x >> 8) & 7); break;                   /* pres du max */
+    case 8: return ld_d(sg | 0x7ff0000000000000ULL | (m & ((x >> 8) & 1 ? 0 : ~0ULL)));
+    default: e = 0x3c0 + ((x >> 8) & 0x7f); break;               /* ordinaire */
+    }
+    return ld_d(sg | (u64)e << 52 | m);
 }
 
 /* ---- etats du FPSCR ---- */
@@ -280,6 +319,48 @@ static void banc(long n)
            (double)mn, (double)mx);
 }
 
+static double vind[NV][4], voutd[NV][4], matd[16];
+
+static void banc_d(long n)
+{
+    volatile double three = 3.0;
+    double x, y = 1.0001, z = 0.9999, w = 0.5, t0;
+    long i, p, np;
+    int j;
+
+    setfpscr(0);
+    x = 1.0 / three;                    /* inexact : pose XX */
+    t0 = now_ms();
+    for (i = 0; i < n; i++) {
+        x = x * y + z;
+        x = x * w;
+        x = x * y - z;
+        x = x + w;
+    }
+    printf("banc-d : chaine %ld x 4 %.0f ms (%g)\n", n, now_ms() - t0, x);
+    for (j = 0; j < 16; j++) {
+        matd[j] = (j + 1) / three;
+    }
+    for (j = 0; j < NV; j++) {
+        vind[j][0] = j / three; vind[j][1] = 1.0 - j / three;
+        vind[j][2] = j * 0.25; vind[j][3] = 1.0;
+    }
+    np = n / NV;
+    t0 = now_ms();
+    for (p = 0; p < np; p++) {
+        for (j = 0; j < NV; j++) {
+            double a = vind[j][0], b = vind[j][1], c = vind[j][2], d = vind[j][3];
+            voutd[j][0] = matd[0] * a + matd[4] * b + matd[8] * c + matd[12] * d;
+            voutd[j][1] = matd[1] * a + matd[5] * b + matd[9] * c + matd[13] * d;
+            voutd[j][2] = matd[2] * a + matd[6] * b + matd[10] * c + matd[14] * d;
+            voutd[j][3] = matd[3] * a + matd[7] * b + matd[11] * c + matd[15] * d;
+        }
+        matd[p & 15] += voutd[p & (NV - 1)][p & 3] * 1e-9;
+    }
+    printf("banc-d : sommets %ld x 16 %.0f ms (%g)\n", np * NV, now_ms() - t0,
+           voutd[7][2]);
+}
+
 int main(int argc, char **argv)
 {
     long nrand = 1L << 18;
@@ -288,18 +369,29 @@ int main(int argc, char **argv)
     long i;
     u64 total = 0;
 
+    int dbl = 0, op0 = 0, op1 = CMPU + 1;
+
     if (argc > 2 && !strcmp(argv[1], "banc")) {
         banc(atol(argv[2]));
         return 0;
+    }
+    if (argc > 2 && !strcmp(argv[1], "banc-d")) {
+        banc_d(atol(argv[2]));
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "d")) {
+        dbl = 1; op0 = ADDD; op1 = NOPS;
+        argc--; argv++;
     }
     if (argc > 1) {
         nrand = atol(argv[1]);
     }
     build_cat();
     for (ph = 0; ph < NPH; ph++) {
-        for (op = 0; op < NOPS; op++) {
+        for (op = op0; op < op1; op++) {
             u64 n = 0;
-            int fma = op >= MADD && op <= NMSUB;
+            int bop = dbl ? op - ADDD : op;
+            int fma = bop >= MADD && bop <= NMSUB;
             phash = 1469598103934665603ULL;
             rs = 0x9e3779b97f4a7c15ULL + ph * 131 + op;
             if (ph == 9) {
@@ -315,7 +407,7 @@ int main(int argc, char **argv)
                             rec(ph, op, cat[x], cat[zz], cat[y], 0);
                             n++;
                         }
-                    } else if (op == MUL) {
+                    } else if (bop == MUL) {
                         rec(ph, op, cat[x], 0, cat[y], 0);
                         n++;
                     } else {
@@ -325,12 +417,22 @@ int main(int argc, char **argv)
                 }
             }
             for (i = 0; i < nrand; i++) {
-                double a = rnd_operand(), b = rnd_operand(), c = rnd_operand();
-                if ((i & 7) == 3) {
+                double a, b, c;
+                if (dbl) {
+                    a = rnd_operand_d(); b = rnd_operand_d(); c = rnd_operand_d();
+                } else {
+                    a = rnd_operand(); b = rnd_operand(); c = rnd_operand();
+                }
+                if ((i & 7) == 3 && !dbl) {
                     /* annulation exacte ou presque */
                     float fa = (float)a, fc = (float)c, p;
                     p = op == ADD ? -fa : op == SUB ? fa : -(fa * fc);
                     b = (double)p;
+                } else if ((i & 7) == 3) {
+                    /* annulation exacte, voisine (1 ulp) ou produit arrondi oppose */
+                    u64 k = rnd();
+                    double p = bop == ADD ? -a : bop == SUB ? a : -(a * c);
+                    b = (k & 3) == 0 ? p : ld_d(bits_d(p) + ((k & 4) ? 1 : -1));
                 }
                 rec(ph, op, a, b, c, i < 2 && ph == 1);
                 n++;

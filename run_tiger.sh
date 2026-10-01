@@ -36,6 +36,11 @@
 #   FPNATIVE=0 ./run_tiger.sh # coupe leur chemin court en instructions flottantes de l'hôte
 #                             # (arm64), le helper de x-fp-flat hors ligne sinon (x-fp-native,
 #                             # tcg/0014, allumé par défaut depuis le 01/10, docs/tcg-g4.md §22)
+#   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
+#                             # tcg/0016, allumé par défaut, docs/tcg-g4.md §24) ; FPVERIFY=1 : preuve
+#   TBFAST=0 ./run_tiger.sh   # coupe mftb/mftbu calculés depuis le compteur de l'hôte (cntvct, 1 GHz)
+#                             # et l'horloge de QEMU linéaire à la ns (x-tb-fast, tcg/0015, allumé
+#                             # par défaut, docs/tcg-g4.md §23) ; TBVERIFY=1 : mode preuve
 #   RETINLINE=0 JCIDX=0 ./run_tiger.sh  # coupe les sorties indirectes (blr, bctr…) cherchées en
 #                             # ligne et le cache de sauts vidé par mmu_idx (tcg/0008, allumés par
 #                             # défaut, docs/tcg-g4.md §16) ; RETVERIFY=1 : mode preuve
@@ -81,8 +86,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Les modes VERIFY ne sont pas des optimisations et restent éteints.
 # Depuis le 30/09/2026 (docs/tcg-g4.md §18-§21) : ICBISYNC (x-icbi-sync, tcg/0010)
 # et MSRNOBQL (x-msr-nobql, tcg/0012) en font partie ; depuis le 01/10/2026 (§22),
-# FPNATIVE (x-fp-native, tcg/0014).
-for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JITNEAR FPNATIVE; do
+# FPNATIVE (x-fp-native, tcg/0014) ; depuis le soir du 01/10 (§23-§24, à la demande de
+# l'utilisateur, sans tour de matrice), TBFAST (x-tb-fast, tcg/0015) et FPNATIVE64
+# (x-fp-native64, tcg/0016).
+for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JITNEAR FPNATIVE TBFAST FPNATIVE64; do
   export "$_opt=${!_opt:-1}"
 done
 # x-jc-bits (tcg/0011) : 2^14 entrées de cache de sauts (12 = QEMU d'origine).
@@ -352,6 +359,45 @@ if [ "${FPNATIVE:-0}" != 0 ]; then
   else
     echo "⚠  FPNATIVE=1 demandé mais ce QEMU n'a pas la propriété 'x-fp-native' (patches/tcg/0014)." >&2
     MODE="$MODE + flottant scalaire natif DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+# --- Flottant DOUBLE par le FPU de l'hôte (x-fp-native64, patches/tcg/0016,
+# docs/tcg-g4.md §24) --- fadd fsub fmul fmadd fmsub fnmadd fnmsub par la même op
+# TCG que x-fp-native (formes double). N'agit qu'avec x-fast-fp. Allumé par défaut
+# depuis le 01/10 (A/B Prey −1,7 %) : FPNATIVE64=0 l'éteint ; FPVERIFY=1 le vérifie.
+if [ "${FPNATIVE64:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-fp-native64=on"; then
+    case "$CPU_SPEC" in
+      *x-fast-fp=on*) CPU_SPEC="$CPU_SPEC,x-fp-native64=on"; MODE="$MODE + FLOTTANT DOUBLE NATIF"
+                      case "$CPU_SPEC" in
+                        *x-fp-verify=on*) ;;
+                        *) if [ "${FPVERIFY:-0}" != 0 ]; then
+                             CPU_SPEC="$CPU_SPEC,x-fp-verify=on"; MODE="$MODE (VÉRIFIÉ)"
+                           fi ;;
+                      esac ;;
+      *) echo "⚠  FPNATIVE64=1 sans flottant rapide : x-fp-native64 n'agit qu'avec x-fast-fp (FASTFP=1)." >&2
+         MODE="$MODE + flottant double natif SANS EFFET (flottant exact)" ;;
+    esac
+  else
+    echo "⚠  FPNATIVE64=1 demandé mais ce QEMU n'a pas la propriété 'x-fp-native64' (patches/tcg/0016)." >&2
+    MODE="$MODE + flottant double natif DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+# --- Base de temps par le compteur de l'hôte (x-tb-fast, patches/tcg/0015,
+# docs/tcg-g4.md §23) --- mftb/mftbu sans clock_gettime ni division 128 bits ;
+# l'horloge de QEMU devient cntvct_el0 + K (linéaire, à la ns). Hôtes arm64 dont
+# le compteur bat à 1 GHz (sinon sans effet, QEMU le dit). Allumé par défaut depuis
+# le 01/10 (A/B DOOM 3 −0,6 %, Nexuiz −0,8 %) : TBFAST=0 l'éteint ;
+# TBVERIFY=1 compare chaque lecture à la valeur d'origine (bilan sur stderr).
+if [ "${TBFAST:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-tb-fast=on"; then
+    CPU_SPEC="$CPU_SPEC,x-tb-fast=on"; MODE="$MODE + BASE-DE-TEMPS-RAPIDE"
+    if [ "${TBVERIFY:-0}" != 0 ]; then
+      CPU_SPEC="$CPU_SPEC,x-tb-verify=on"; MODE="$MODE (VÉRIFIÉE)"
+    fi
+  else
+    echo "⚠  TBFAST=1 demandé mais ce QEMU n'a pas la propriété 'x-tb-fast' (patches/tcg/0015)." >&2
+    MODE="$MODE + base de temps rapide DEMANDÉE MAIS INDISPONIBLE"
   fi
 fi
 # --- Sorties indirectes des blocs (blr, bctr…) : recherche du bloc suivant en

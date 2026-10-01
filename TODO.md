@@ -34,7 +34,7 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   (`tools/endurance/`, `docs/endurance.md` : démarrages à froid, `shutdown -r`/`system_reset`
   en série, plusieurs instances sur recouvrements qcow2, panique lue dans `panicstr`/`debug_buf`,
   gel par ssh, captures et piles symbolisées, taux avec intervalle de Wilson). Il n'a jamais
-  tourné sur le binaire de référence reconstruit le 01/10 (A4, 0011-0014, `QGPU_GL_FLUSH`).
+  tourné sur le binaire de référence reconstruit le 01/10 (A4, 0011-0016, `QGPU_GL_FLUSH`).
   **Reste pour fermer :** une nuit sans intervention (démarrages + cycles de jeu), et une
   vraie campagne de cycles de jeu (`jeu --jeu mb|d3|…`, éprouvés sur 2 cycles seulement ;
   DOOM 3 sans redémarrage : `kCGLBadDisplay` après un kill).
@@ -142,8 +142,10 @@ Une mesure A/B exige un hôte au repos (aucune autre VM, charge relevée avant e
 Dans l'ordre des gains estimés. Profil du 01/10 et lecture : `docs/vitesse-profil-2026-10-01.md`
 (moteur multifil d'Apple absent : `docs/re/moteur-multifil.md`).
 
-- [ ] **[TCG] Flottant double natif** (Nexuiz ~7 % du temps vCPU, Prey ~4 %), sur le modèle de 0014.
-- [ ] **[TCG] `mftb` en ligne** (2-3 % partout).
+- [ ] **[TCG] `x-fp-native64` (tcg/0016) et `x-tb-fast` (tcg/0015) allumés par défaut le 01/10**
+  sans tour de matrice, à la demande de l'utilisateur (prouvés exacts, A/B Prey −1,7 %, DOOM 3
+  −0,6 %, Nexuiz −0,8 % ; `docs/tcg-g4.md` §23-§24). **Reste :** l'essai de l'utilisateur, puis
+  un tour de matrice complet sur le binaire de référence reconstruit.
 
 - [ ] **[Plugin] Suites A4** : GLEngine déroule les tableaux clients en Begin/End (Nexuiz ARB
   14-16 %, Warcraft III 4,5 %) — RE du canal `gldCreateVertexArray`
@@ -228,9 +230,9 @@ un travail de diagnostic dans « Ensuite », pas un blocage.
 | Élément | État |
 |---|---|
 | Protocole / ABI | GL **v22**, transport kext **v19** (`QGPU_ST_NO_MEM`, `QGPU_REG_NOMEM`, `QGPU_CAP_GLSL_PATHS`, `QGPU_CAP_STATE_BLOCK`, `QGPU_CAP_GEOM_HOST` ajoutés sans changer d'ABI) |
-| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 01/10 (device A4, TCG 0010-0014, Screamer corrigé) ; précédent en `*.avant-a4` |
+| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 01/10 au soir (device A4, TCG 0010-0016, Screamer corrigé) ; précédents en `*.avant-tbfp`, `*.avant-a4` |
 | Invité quotidien | `tiger.qcow2`, kext v19, plugin `20261001-tout` (gcc-4.0 dans l'invité), SMP=2 ; `POMPPCFsqrt.kext` chargé au démarrage par `/Library/StartupItems/POMPPCFsqrt` (`kHasFsqrt` : la libm prend `fsqrt` ; `sudo sh install.sh --retirer` l'enlève) |
-| TCG | `0001–0004`, `0006–0008`, `0010–0012`, `0014` activés par défaut (`JCBITS=14`) ; `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0`, `RETINLINE=0`, `JCIDX=0`, `ICBISYNC=0`, `MSRNOBQL=0`, `FPNATIVE=0` les désactivent ; `0013` (`FPFLAT=1`) éteint |
+| TCG | `0001–0004`, `0006–0008`, `0010–0012`, `0014–0016` activés par défaut (`JCBITS=14`) ; `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0`, `RETINLINE=0`, `JCIDX=0`, `ICBISYNC=0`, `MSRNOBQL=0`, `FPNATIVE=0`, `FPNATIVE64=0`, `TBFAST=0` les désactivent ; `0013` (`FPFLAT=1`) éteint |
 | Plugin et device | `POMPPC_GL_STATEBLK`, `POMPPC_GL_RAWSANE`, `POMPPC_GL_NATSHM`, `POMPPC_GL_WLUNIF`, `POMPPC_GL_QFLUSH`, `QGPU_GL_FLUSH` allumés (`=0` éteint chacun) |
 | Tests natifs et scripts | **190 OK, 0 échec, 4 ignorés** ; frontend ctest 3/3 |
 | Travaux clos | Voir `CHANGELOG.md` et `docs/bug-hunt-2026-09-29*.md` |
