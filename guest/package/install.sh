@@ -52,6 +52,11 @@ put "$HERE/POMPPCGPU.kext" "$EXT/POMPPCGPU.kext"
 rm -rf "$RES/GLDriver-POMPPC.bundle" "$RES/GLDriverPOMPPC.bundle"
 put "$HERE/GLDriver-POMPPC.bundle" "$EXT/GLDriver-POMPPC.bundle"
 put "$HERE/POMPPCFsqrt.kext" "$EXT/POMPPCFsqrt.kext"
+# POMPPCFsqrt links against com.apple.kernel (non-KPI symbols): its dependency must name the
+# running kernel's exact version (8.6.0 on 10.4.6, 8.11.0 on 10.4.11).
+sed "/<key>com.apple.kernel<\/key>/{n;s|<string>[^<]*</string>|<string>$(uname -r)</string>|;}" \
+    "$HERE/POMPPCFsqrt.kext/Contents/Info.plist" > "$EXT/POMPPCFsqrt.kext/Contents/Info.plist"
+chmod 644 "$EXT/POMPPCFsqrt.kext/Contents/Info.plist"
 put "$HERE/StartupItems/POMPPCFsqrt" "$SI"
 chmod 644 "$SI/StartupParameters.plist"
 rm -f /System/Library/Extensions.mkext /System/Library/Extensions.kextcache

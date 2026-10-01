@@ -160,8 +160,11 @@ static unsigned char *buf;
    scènes valent pour les deux profondeurs. */
 static unsigned long px(int x, int y)
 {
-    unsigned char *p = buf + y * ROWB + x * BPP;
+    unsigned char *p;
     unsigned v, r, g, b;
+    if (x < 0 || y < 0 || x >= W || y >= H)
+        return 0x1000000;            /* hors du drawable : aucune couleur 24 bits n'y répond */
+    p = buf + y * ROWB + x * BPP;
     if (BPP == 4)
         return ((unsigned long)p[1] << 16) | ((unsigned long)p[2] << 8) | p[3];
     v = ((unsigned)p[0] << 8) | p[1];
@@ -173,8 +176,17 @@ static unsigned long px(int x, int y)
 static int failures;
 static void check(const char *what, int x, int y, unsigned long want)
 {
-    unsigned long got = px(x, y);
-    int ok = (got == want);
+    unsigned long got;
+    int ok;
+    /* un témoin hors du drawable lisait au-delà de buf (SIGSEGV de tex13 tex14 gl15
+       texlod en 64×64, 24/09) : c'est un échec du test, dit comme tel */
+    if (x < 0 || y < 0 || x >= W || y >= H) {
+        printf("  FAIL %-28s (%3d,%3d) hors du tampon %dx%d\n", what, x, y, W, H);
+        failures++;
+        return;
+    }
+    got = px(x, y);
+    ok = (got == want);
     printf("  %s %-28s (%3d,%3d) = %06lx%s\n", ok ? "ok  " : "FAIL", what, x, y, got,
            ok ? "" : " (attendu autre)");
     if (!ok) failures++;
@@ -984,6 +996,14 @@ int main(int argc, char **argv)
     CGLError e;
 
     if (argc > 3) { W = atoi(argv[2]); H = atoi(argv[3]); }
+    else if (argc > 1) {
+        /* scènes dont les témoins dépassent 64×64 (gl15 : x jusqu'à 148, y jusqu'à 88) :
+           sans taille donnée, « gltest gl15 » se joue dans la taille qu'elles exigent */
+        static const char *grandes[] = { "tex13", "tex14", "gl15", "texlod", 0 };
+        int g;
+        for (g = 0; grandes[g]; g++)
+            if (!strcmp(argv[1], grandes[g])) { W = 256; H = 256; }
+    }
     list_renderers();
 
     if (getenv("GLTEST_NOWS"))

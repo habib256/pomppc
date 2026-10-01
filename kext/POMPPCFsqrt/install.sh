@@ -20,6 +20,10 @@ fi
 
 make
 rm -rf "$E" && cp -R POMPPCFsqrt.kext "$E"
+# Lié à com.apple.kernel (symboles hors KPI) : la dépendance doit porter la version EXACTE
+# du noyau, sinon « cannot resolve dependencies » (vu après le Combo 10.4.11, noyau 8.11.0).
+sed "/<key>com.apple.kernel<\/key>/{n;s|<string>[^<]*</string>|<string>$(uname -r)</string>|;}" \
+    POMPPCFsqrt.kext/Contents/Info.plist > "$E/Contents/Info.plist"
 chown -R root:wheel "$E" && chmod -R 755 "$E"
 rm -rf "$S" && mkdir -p "$S"
 cp StartupItem/POMPPCFsqrt StartupItem/StartupParameters.plist "$S/"
