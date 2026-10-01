@@ -28,6 +28,8 @@
 #   QEMU_SRC=/chemin ./scripts/build_qemu_qfb.sh
 #   RECONFIGURE=1 ./scripts/build_qemu_qfb.sh   # force un ../configure
 #   PYTHON=/chemin/python3 ./scripts/build_qemu_qfb.sh   # Python pour configure
+#   CONFIGURE_EXTRA="--disable-sdl" …                    # options de configure en plus
+#                                    (la publication macOS, scripts/package_release_macos.sh)
 #
 # macOS : affichage Cocoa et son CoreAudio au lieu de GTK/SDL et PulseAudio.
 # Le configure de QEMU 9.2 exige un Python ≥ 3.8 avec « tomli » (ou ≥ 3.11) et
@@ -728,7 +730,7 @@ if [ ! -f build.ninja ] || [ -n "${RECONFIGURE:-}" ]; then
   [ -n "${PYTHON:-}" ] && PY_OPTS=(--python="$PYTHON")
   ../configure --target-list=ppc-softmmu,ppc64-softmmu \
                ${UI_OPTS[@]+"${UI_OPTS[@]}"} --enable-slirp ${PY_OPTS[@]+"${PY_OPTS[@]}"} \
-               --disable-docs --disable-werror
+               --disable-docs --disable-werror ${CONFIGURE_EXTRA:-}
 fi
 ninja -j"$JOBS"
 

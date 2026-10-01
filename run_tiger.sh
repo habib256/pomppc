@@ -652,7 +652,12 @@ fi
 #     correspond toujours au dépôt. Dans l'invité, il apparaît comme POMPPCSRC.
 GLISO_WANT="${GLISO:-}"
 [ -z "$GLISO_WANT" ] && [ -n "$GPU_ON" ] && GLISO_WANT=1
-if [ "$GLISO_WANT" = 1 ]; then
+if [ "$GLISO_WANT" = 1 ] && [ -f "$ROOT/pomppc-guest.iso" ]; then
+  # paquet publié : binaires invités déjà compilés (scripts/make_guest_iso.sh)
+  CD_ARGS=(-drive "id=gamecd,if=ide,media=cdrom,format=raw,readonly=on,file=$ROOT/pomppc-guest.iso")
+  echo "  💿 CD POMPPC_GUEST inserted. In Tiger (once, Terminal), then reboot:"
+  echo "       sudo sh /Volumes/POMPPC_GUEST/install.sh"
+elif [ "$GLISO_WANT" = 1 ]; then
   GL_ISO="$ROOT/disks/pomppc-src.iso"
   GL_SRCS=("$ROOT/kext/POMPPCGPU" "$ROOT/kext/POMPPCQFB" "$ROOT/guest/gldriver"
            "$ROOT/guest/gltest" "$ROOT/guest/qgpu-test" "$ROOT/guest/net")

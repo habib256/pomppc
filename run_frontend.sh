@@ -6,6 +6,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$ROOT/frontend/build/pomppc"
+# paquet publié : frontend déjà compilé dans bin/
+if [ ! -x "$BIN" ] && [ -x "$ROOT/bin/pomppc" ]; then BIN="$ROOT/bin/pomppc"; fi
 
 if [ ! -x "$BIN" ]; then
   echo "Frontend non compilé. Lance d'abord :" >&2
@@ -13,4 +15,6 @@ if [ ! -x "$BIN" ]; then
   exit 1
 fi
 
+# sans argument, le frontend cherche run_os9.sh deux niveaux au-dessus de lui : faux depuis bin/
+[ $# -eq 0 ] && set -- "$ROOT/run_os9.sh"
 exec "$BIN" "$@"

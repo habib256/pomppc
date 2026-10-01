@@ -48,3 +48,10 @@ TEST/
 # copies du contrat faites par les Makefiles invités (source : patches/qgpu/)
 guest/gldriver/qgpu_proto.h
 guest/gldriver/qgpu_abi.h
+
+# publication (scripts/package_release_macos.sh)
+/pomppc-guest.iso
+/bin/
+/lib/
+/share/
+/dist/
