@@ -1,10 +1,12 @@
 diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index 6f3cbcf..65e4e88 100644
 --- a/target/ppc/cpu.h
 +++ b/target/ppc/cpu.h
-@@ -1372,6 +1372,15 @@
+@@ -1432,6 +1432,15 @@ struct CPUArchState {
+      */
      bool fp_inline;
      bool fp_verify;
-     /*
++    /*
 +     * x-fp-flat (POMPPC tcg/0013, needs x-fast-fp): the same instructions as
 +     * x-fp-inline (fcmpu included) translated as ONE helper call and no
 +     * branch: the short path of x-fp-inline and, when it does not apply, the
@@ -13,14 +15,14 @@ diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
 +     * short path too.
 +     */
 +    bool fp_flat;
-+    /*
+     /*
       * x-ret-inline (POMPPC tcg/0008): the indirect exits of a TB (blr, bctr,
       * bclr, bcctr, cross-page branches, DISAS_CHAIN) probe the jump cache in
-      * the generated code and only call helper_lookup_tb_ptr on a miss.
 diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index 2a5f582..fe1a43f 100644
 --- a/target/ppc/cpu_init.c
 +++ b/target/ppc/cpu_init.c
-@@ -7451,6 +7451,12 @@
+@@ -86,6 +86,12 @@ static const Property powerpc_cpu_properties[] = {
       */
      DEFINE_PROP_BOOL("x-fp-inline", PowerPCCPU, env.fp_inline, false),
      DEFINE_PROP_BOOL("x-fp-verify", PowerPCCPU, env.fp_verify, false),
@@ -34,20 +36,21 @@ diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
       * POMPPC tcg/0008.  x-ret-inline: the jump-cache probe of
       * helper_lookup_tb_ptr done in the generated code at every indirect
 diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
+index 97d0e76..70e4951 100644
 --- a/target/ppc/fpu_helper.c
 +++ b/target/ppc/fpu_helper.c
-@@ -940,8 +940,8 @@
+@@ -938,8 +938,8 @@ uint32_t helper_FTSQRT(uint64_t frb)
      return 0x8 | (fg_flag ? 4 : 0) | (fe_flag ? 2 : 0);
  }
  
--void helper_fcmpu(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
+-void helper_FCMPU(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
 -                  uint32_t crfD)
 +static void do_fcmpu(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
 +                     uint32_t crfD, uintptr_t retaddr)
  {
      CPU_DoubleU farg1, farg2;
      uint32_t ret = 0;
-@@ -967,10 +967,16 @@
+@@ -965,10 +965,16 @@ void helper_FCMPU(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
                   && (float64_is_signaling_nan(farg1.d, &env->fp_status) ||
                       float64_is_signaling_nan(farg2.d, &env->fp_status)))) {
          /* sNaN comparison */
@@ -56,16 +59,16 @@ diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
      }
  }
  
-+void helper_fcmpu(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
++void helper_FCMPU(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
 +                  uint32_t crfD)
 +{
 +    do_fcmpu(env, arg1, arg2, crfD, GETPC());
 +}
 +
- void helper_fcmpo(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
+ void helper_FCMPO(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
                    uint32_t crfD)
  {
-@@ -3796,7 +3802,8 @@
+@@ -3794,7 +3800,8 @@ static inline uint64_t fpi_f64(float f)
   * nearest-even by the host: bit for bit what float64r32_* computes for
   * these operands.  fmadds & co. use fmaf(): PowerPC rounds a*c+b once.
   */
@@ -75,23 +78,31 @@ diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
  {
      float fa, fb, fc, r;
  
-@@ -3858,6 +3865,11 @@
-         return fpi_f64(r);
-     }
+@@ -3858,6 +3865,11 @@ uint64_t helper_fp32_fast(uint64_t a, uint64_t b, uint64_t c, uint32_t op)
      return FPI_FAIL;
-+}
-+
+ }
+ 
 +uint64_t helper_fp32_fast(uint64_t a, uint64_t b, uint64_t c, uint32_t op)
 +{
 +    return fpi_fp32(a, b, c, op);
- }
- 
++}
++
  /*
-@@ -4053,4 +4065,152 @@
-         : fpi_gate(fpscr);
+  * FPSCR after the original sequence, for a short-path result r: FPRF is
+  * that of the float64 r, which is +-zero or a float64 normal (every float32,
+@@ -4022,7 +4034,7 @@ void helper_fpv_fcmpu(CPUPPCState *env, uint32_t crf, uint64_t a, uint64_t b,
+     bool good;
+ 
+     helper_reset_fpstatus(env);
+-    helper_fcmpu(env, a, b, crf);
++    helper_FCMPU(env, a, b, crf);
+     do_float_check_status(env, true, GETPC());
+     ref = env->crf[crf];
+     flags = get_float_exception_flags(&env->fp_status);
+@@ -4052,3 +4064,151 @@ void helper_fpv_slow(CPUPPCState *env, uint32_t op, uint64_t a, uint64_t b,
  
      qatomic_inc(gate ? &fpv_slow_opnd[op] : &fpv_slow_gate[op]);
-+}
+ }
 +
 +/*
 + * x-fp-flat (POMPPC patches/tcg/0013, docs/tcg-g4.md section 22).
@@ -180,7 +191,7 @@ diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
 +    helper_compute_fprf_float64(env, r);
 +    do_float_check_status(env, true, ra);
 +    return int128_make128(r, env->fpscr);
- }
++}
 +
 +/*
 + * fpscr == env->fpscr (TCG_CALL_NO_WG: the globals are synced before the
@@ -241,9 +252,10 @@ diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
 +    return fcmpu_flat(env, a, b, fpscr, bf, GETPC());
 +}
 diff --git a/target/ppc/helper.h b/target/ppc/helper.h
+index cd75bfc..4b7c914 100644
 --- a/target/ppc/helper.h
 +++ b/target/ppc/helper.h
-@@ -93,6 +93,16 @@
+@@ -94,6 +94,16 @@ DEF_HELPER_FLAGS_4(fp32_fast, TCG_CALL_NO_RWG_SE, i64, i64, i64, i64, i32)
  DEF_HELPER_7(fpv_arith, void, env, i32, i64, i64, i64, i64, tl)
  DEF_HELPER_6(fpv_fcmpu, void, env, i32, i64, i64, i32, tl)
  DEF_HELPER_FLAGS_6(fpv_slow, TCG_CALL_NO_RWG, void, env, i32, i64, i64, i64, tl)
@@ -261,9 +273,10 @@ diff --git a/target/ppc/helper.h b/target/ppc/helper.h
  DEF_HELPER_2(fpscr_clrbit, void, env, i32)
  DEF_HELPER_2(fpscr_setbit, void, env, i32)
 diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+index dd89f90..382c2f4 100644
 --- a/target/ppc/translate.c
 +++ b/target/ppc/translate.c
-@@ -187,6 +187,7 @@
+@@ -188,6 +188,7 @@ struct DisasContext {
  #endif
      bool fpu_enabled;
      bool fp_inline, fp_verify;  /* x-fp-inline, x-fp-verify (tcg/0007) */
@@ -271,7 +284,7 @@ diff --git a/target/ppc/translate.c b/target/ppc/translate.c
      bool ret_inline, ret_verify; /* x-ret-inline, x-ret-verify (tcg/0008) */
      bool altivec_enabled;
      bool vsx_enabled;
-@@ -6529,6 +6530,7 @@
+@@ -6575,6 +6576,7 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
      ctx->fpu_enabled = (hflags >> HFLAGS_FP) & 1;
      ctx->fp_inline = env->fp_inline && env->fp_prime_mask;
      ctx->fp_verify = ctx->fp_inline && env->fp_verify;
@@ -280,18 +293,13 @@ diff --git a/target/ppc/translate.c b/target/ppc/translate.c
      ctx->ret_verify = cs->ret_verify;
      ctx->spe_enabled = (hflags >> HFLAGS_SPE) & 1;
 diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c.inc
+index c509a68..ad7ab30 100644
 --- a/target/ppc/translate/fp-impl.c.inc
 +++ b/target/ppc/translate/fp-impl.c.inc
-@@ -252,16 +252,76 @@
-     gen_compute_fprf_float64(r);
+@@ -344,10 +344,70 @@ static bool do_fp_inline(DisasContext *ctx, int op, int frt, int fra,
+     return true;
+ }
  
-     gen_set_label(l_done);
-+    if (unlikely(rc)) {
-+        gen_set_cr1_from_fpscr(ctx);
-+    }
-+    return true;
-+}
-+
 +/*
 + * x-fp-flat (POMPPC tcg/0013): the same instructions as one call and no
 + * branch; helper_fp32_flat() of fpu_helper.c chooses between the short path
@@ -325,30 +333,30 @@ diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c
 +    tcg_gen_extr_i128_i64(r, f, ret);
 +    set_fpr(frt, r);
 +    tcg_gen_trunc_i64_tl(cpu_fpscr, f);
-     if (unlikely(rc)) {
-         gen_set_cr1_from_fpscr(ctx);
-     }
-     return true;
++    if (unlikely(rc)) {
++        gen_set_cr1_from_fpscr(ctx);
++    }
++    return true;
 +}
 +
-+static void gen_fcmpu_flat(DisasContext *ctx)
++static void gen_fcmpu_flat(DisasContext *ctx, arg_X_bf *x)
 +{
-+    int bf = crfD(ctx->opcode);
++    int bf = x->bf;
 +    TCGv_i64 a = tcg_temp_new_i64();
 +    TCGv_i64 b = tcg_temp_new_i64();
 +    TCGv_i64 crf = tcg_temp_new_i64();
 +    TCGv_i64 f = tcg_temp_new_i64();
 +    TCGv_i128 ret = tcg_temp_new_i128();
 +
-+    get_fpr(a, rA(ctx->opcode));
-+    get_fpr(b, rB(ctx->opcode));
++    get_fpr(a, x->ra);
++    get_fpr(b, x->rb);
 +    tcg_gen_extu_tl_i64(f, cpu_fpscr);
 +    gen_helper_fcmpu_flat(ret, tcg_env, a, b, f, tcg_constant_i32(bf));
 +    tcg_gen_extr_i128_i64(crf, f, ret);
 +    tcg_gen_extrl_i64_i32(cpu_crf[bf], crf);
 +    tcg_gen_trunc_i64_tl(cpu_fpscr, f);
- }
- 
++}
++
  static bool do_fpi_ab(DisasContext *ctx, arg_A_tab *a,
                        void (*helper)(TCGv_i64, TCGv_ptr, TCGv_i64, TCGv_i64),
                        int op)
@@ -359,7 +367,7 @@ diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c
      if (ctx->fp_inline) {
          return do_fp_inline(ctx, op, a->frt, a->fra, a->frb, 0, a->rc);
      }
-@@ -272,6 +332,9 @@
+@@ -358,6 +418,9 @@ static bool do_fpi_ac(DisasContext *ctx, arg_A_tac *a,
                        void (*helper)(TCGv_i64, TCGv_ptr, TCGv_i64, TCGv_i64),
                        int op)
  {
@@ -369,7 +377,7 @@ diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c
      if (ctx->fp_inline) {
          return do_fp_inline(ctx, op, a->frt, a->fra, 0, a->frc, a->rc);
      }
-@@ -283,6 +346,9 @@
+@@ -369,6 +432,9 @@ static bool do_fpi_acb(DisasContext *ctx, arg_A *a,
                                        TCGv_i64, TCGv_i64),
                         int op)
  {
@@ -379,14 +387,16 @@ diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c
      if (ctx->fp_inline) {
          return do_fp_inline(ctx, op, a->frt, a->fra, a->frb, a->frc, a->rc);
      }
-@@ -572,6 +638,10 @@
-         gen_exception(ctx, POWERPC_EXCP_FPU);
-         return;
-     }
+@@ -545,6 +611,12 @@ static bool do_helper_cmp(DisasContext *ctx, arg_X_bf *a,
+ 
+ static bool trans_FCMPU(DisasContext *ctx, arg_X_bf *a)
+ {
 +    if (ctx->fp_flat) {
-+        gen_fcmpu_flat(ctx);
-+        return;
++        REQUIRE_INSNS_FLAGS(ctx, FLOAT);
++        REQUIRE_FPU(ctx);
++        gen_fcmpu_flat(ctx, a);
++        return true;
 +    }
      if (ctx->fp_inline) {
-         gen_fcmpu_inline(ctx);
-         return;
+         REQUIRE_INSNS_FLAGS(ctx, FLOAT);
+         REQUIRE_FPU(ctx);

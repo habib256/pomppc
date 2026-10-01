@@ -84,8 +84,8 @@ TP="$OUT/THIRD-PARTY-LICENSES"; mkdir -p "$TP"
 {
   echo "Third-party components bundled in $NAME"
   echo
-  echo "QEMU 9.2.0 (GPL-2.0, https://www.qemu.org) with POMPPC's patches (patches/, GPL-2.0-or-later);"
-  echo "  source: https://gitlab.com/qemu-project/qemu.git tag v9.2.0 + scripts/build_qemu_qfb.sh."
+  echo "QEMU $(cat "$QSRC/VERSION") (GPL-2.0, https://www.qemu.org) with POMPPC's patches (patches/, GPL-2.0-or-later);"
+  echo "  source: https://gitlab.com/qemu-project/qemu.git tag v$(cat "$QSRC/VERSION") + scripts/build_qemu_qfb.sh."
   echo "OpenBIOS (GPL-2.0): patches/smp-mac99/openbios-smp-screamer.elf, source in"
   echo "  patches/smp-mac99/openbios-smp-screamer-source.patch."
   echo "Dear ImGui (MIT, https://github.com/ocornut/imgui), statically linked in bin/pomppc."

@@ -1,8 +1,8 @@
 diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
-index f03c04e99..ec52bd6f2 100644
+index 1598eed..b09f11f 100644
 --- a/target/ppc/cpu.h
 +++ b/target/ppc/cpu.h
-@@ -1281,6 +1281,33 @@ struct CPUArchState {
+@@ -1342,6 +1342,33 @@ struct CPUArchState {
      uint32_t tlb_need_flush; /* Delayed flush needed */
  #define TLB_NEED_LOCAL_FLUSH   0x1
  #define TLB_NEED_GLOBAL_FLUSH  0x2
@@ -37,10 +37,26 @@ index f03c04e99..ec52bd6f2 100644
  
      /* Other registers */
 diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
-index 59c7dd9da..31be9c287 100644
+index edcd8ed..a041132 100644
 --- a/target/ppc/cpu_init.c
 +++ b/target/ppc/cpu_init.c
-@@ -7287,6 +7287,16 @@ static void ppc_cpu_reset_hold(Object *obj, ResetType type)
+@@ -65,6 +65,15 @@ static const Property powerpc_cpu_properties[] = {
+      * off by default.
+      */
+     DEFINE_PROP_BOOL("x-fast-fp", PowerPCCPU, env.fast_fp, false),
++    /*
++     * 32-bit hash MMU: keep the softmmu TLB of each translated mmu_idx
++     * across segment register changes, and flush it only when it is used
++     * under a segment set other than the one it was filled under.  Off by
++     * default (experimental).  Only honoured on POWERPC_MMU_32B.
++     */
++    DEFINE_PROP_BOOL("x-sr-tlb", PowerPCCPU, env.sr_tlb, false),
++    /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
++    DEFINE_PROP_UINT32("x-sr-tlb-verify", PowerPCCPU, env.sr_verify, 0),
+ };
+ 
+ static inline void vscr_init(CPUPPCState *env, uint32_t val)
+@@ -7361,6 +7370,16 @@ static void ppc_cpu_reset_hold(Object *obj, ResetType type)
      env->vec_status.no_hardfloat = !env->fast_fp;
      env->fp_prime_mask = env->fast_fp ? float_flag_inexact : 0;
  
@@ -57,27 +73,11 @@ index 59c7dd9da..31be9c287 100644
      for (i = 0; i < ARRAY_SIZE(env->spr_cb); i++) {
          ppc_spr_t *spr = &env->spr_cb[i];
  
-@@ -7420,6 +7430,15 @@ static Property ppc_cpu_properties[] = {
-      * off by default.
-      */
-     DEFINE_PROP_BOOL("x-fast-fp", PowerPCCPU, env.fast_fp, false),
-+    /*
-+     * 32-bit hash MMU: keep the softmmu TLB of each translated mmu_idx
-+     * across segment register changes, and flush it only when it is used
-+     * under a segment set other than the one it was filled under.  Off by
-+     * default (experimental).  Only honoured on POWERPC_MMU_32B.
-+     */
-+    DEFINE_PROP_BOOL("x-sr-tlb", PowerPCCPU, env.sr_tlb, false),
-+    /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
-+    DEFINE_PROP_UINT32("x-sr-tlb-verify", PowerPCCPU, env.sr_verify, 0),
-     DEFINE_PROP_END_OF_LIST(),
- };
- 
 diff --git a/target/ppc/helper_regs.c b/target/ppc/helper_regs.c
-index 42c681ca4..eea197605 100644
+index acf74c5..205f88d 100644
 --- a/target/ppc/helper_regs.c
 +++ b/target/ppc/helper_regs.c
-@@ -242,6 +242,15 @@ static uint32_t hreg_compute_hflags_value(CPUPPCState *env)
+@@ -247,6 +247,15 @@ static uint32_t hreg_compute_hflags_value(CPUPPCState *env)
  void hreg_compute_hflags(CPUPPCState *env)
  {
      env->hflags = hreg_compute_hflags_value(env);
@@ -93,7 +93,7 @@ index 42c681ca4..eea197605 100644
  }
  
  /*
-@@ -378,8 +387,97 @@ void check_tlb_flush(CPUPPCState *env, bool global)
+@@ -387,8 +396,97 @@ void check_tlb_flush(CPUPPCState *env, bool global)
  
      /* Then handle local ones */
      if (env->tlb_need_flush & TLB_NEED_LOCAL_FLUSH) {
@@ -193,10 +193,10 @@ index 42c681ca4..eea197605 100644
  }
  #endif /* !CONFIG_USER_ONLY */
 diff --git a/target/ppc/helper_regs.h b/target/ppc/helper_regs.h
-index 8196c1346..e62b1e5c8 100644
+index b928c2c..f491af1 100644
 --- a/target/ppc/helper_regs.h
 +++ b/target/ppc/helper_regs.h
-@@ -28,8 +28,13 @@ int hreg_store_msr(CPUPPCState *env, target_ulong value, int alter_hv);
+@@ -30,8 +30,13 @@ int hreg_store_msr(CPUPPCState *env, target_ulong value, int alter_hv);
  
  #ifdef CONFIG_USER_ONLY
  static inline void check_tlb_flush(CPUPPCState *env, bool global) { }
@@ -211,10 +211,18 @@ index 8196c1346..e62b1e5c8 100644
  
  #endif /* HELPER_REGS_H */
 diff --git a/target/ppc/mmu_helper.c b/target/ppc/mmu_helper.c
-index b167b37e0..040bf5237 100644
+index ac60705..8db9d9d 100644
 --- a/target/ppc/mmu_helper.c
 +++ b/target/ppc/mmu_helper.c
-@@ -313,6 +313,18 @@ void ppc_tlb_invalidate_one(CPUPPCState *env, target_ulong addr)
+@@ -20,6 +20,7 @@
+ #include "qemu/osdep.h"
+ #include "qemu/units.h"
+ #include "cpu.h"
++#include "exec/tlb-flags.h"
+ #include "system/kvm.h"
+ #include "kvm_ppc.h"
+ #include "mmu-hash64.h"
+@@ -314,6 +315,18 @@ void ppc_tlb_invalidate_one(CPUPPCState *env, target_ulong addr)
           * synchronizing event or sync instruction on 32-bit).
           */
          env->tlb_need_flush |= TLB_NEED_LOCAL_FLUSH;
@@ -233,7 +241,7 @@ index b167b37e0..040bf5237 100644
          break;
      default:
          /* Should never reach here with other MMU models */
-@@ -361,6 +373,16 @@ void helper_store_sr(CPUPPCState *env, target_ulong srnum, target_ulong value)
+@@ -362,6 +375,16 @@ void helper_store_sr(CPUPPCState *env, target_ulong srnum, target_ulong value)
  #endif
      if (env->sr[srnum] != value) {
          env->sr[srnum] = value;
@@ -250,7 +258,7 @@ index b167b37e0..040bf5237 100644
          /*
           * Invalidating 256MB of virtual memory in 4kB pages is way
           * longer than flushing the whole TLB.
-@@ -1357,6 +1379,80 @@ void helper_check_tlb_flush_global(CPUPPCState *env)
+@@ -1358,6 +1381,80 @@ void helper_check_tlb_flush_global(CPUPPCState *env)
  }
  
  
@@ -331,7 +339,7 @@ index b167b37e0..040bf5237 100644
  bool ppc_cpu_tlb_fill(CPUState *cs, vaddr eaddr, int size,
                        MMUAccessType access_type, int mmu_idx,
                        bool probe, uintptr_t retaddr)
-@@ -1367,6 +1463,9 @@ bool ppc_cpu_tlb_fill(CPUState *cs, vaddr eaddr, int size,
+@@ -1368,6 +1465,9 @@ bool ppc_cpu_tlb_fill(CPUState *cs, vaddr eaddr, int size,
  
      if (ppc_xlate(cpu, eaddr, access_type, &raddr,
                    &page_size, &prot, mmu_idx, !probe)) {

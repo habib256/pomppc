@@ -34,7 +34,7 @@ otherwise): `setup.sh` clones the pinned tag **`v1.92.9b-docking`** (override wi
 a sibling Pomme's checkout only if it is a docking build too. On macOS the window
 asks for a GL 3.2 core forward-compatible context (a 3.0 request fails there).
 The `org.qemu.Display1` bindings are generated at build time from the vendored,
-preprocessed `dbus/dbus-display1.xml` (copied from our QEMU 9.2 tree).
+preprocessed `dbus/dbus-display1.xml` (copied from our QEMU 9.2 tree; the 11.1 interface only adds optional members).
 
 ## Run
 
@@ -46,6 +46,10 @@ POMPPC_FRONTEND=native ../run_tiger.sh  # native QEMU window for diagnostics
 ./build/pomppc ../run_tiger.sh     # boot Mac OS X 10.4 instead
 RES=1024x768x32 ./build/pomppc     # pick the guest resolution (SMP=N works too)
 ```
+
+The window title shows the version of the QEMU actually launched, read from its QMP
+greeting (`POMPPC — PowerPC Macintosh (QEMU 11.1.2)`), so a `QEMU_BIN` pointing at
+another tree is visible at a glance.
 
 **Réglages gardés** : à l'arrêt (menu Quitter, fermeture de la fenêtre, Ctrl+C ou `SIGTERM`),
 ImGuiDock écrit `.run/imguidock.conf` — OS, son, manette, clavier et souris, vue et zoom,

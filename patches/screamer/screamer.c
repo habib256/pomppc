@@ -33,15 +33,15 @@
  */
 
 #include "qemu/osdep.h"
-#include "audio/audio.h"
-#include "hw/hw.h"
-#include "hw/irq.h"
-#include "audio/audio.h"
+#include "qemu/error-report.h"
+#include "qemu/audio.h"
+#include "hw/core/irq.h"
+#include "qemu/audio.h"
 #include "hw/audio/screamer.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "qemu/timer.h"
 #include "hw/ppc/mac_dbdma.h"
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 #include "qemu/cutils.h"
 #include "qemu/log.h"
 #include "qemu/typedefs.h"
@@ -433,7 +433,7 @@ static void screamer_write_silence(ScreamerState *s, int *free_b)
         if (!chunk) {
             break;
         }
-        accepted = AUD_write(s->voice, silence, chunk);
+        accepted = audio_be_write(s->audio_be, s->voice, silence, chunk);
         if (!accepted) {
             break;
         }
@@ -483,7 +483,7 @@ static void screamerspk_callback(void *opaque, int free_b)
             if (!requested) {
                 return;
             }
-            accepted = AUD_write(s->voice, s->mixbuf + (idx << s->shift),
+            accepted = audio_be_write(s->audio_be, s->voice, s->mixbuf + (idx << s->shift),
                                  requested);
             /* AUD_write may accept less than requested (including zero). Only
              * retire PCM actually accepted, otherwise samples vanish. Writes
@@ -520,9 +520,9 @@ static void screamer_update_settings(ScreamerState *s)
     struct audsettings as = { s->rate, 2, AUDIO_FORMAT_S16,
         1 };
 
-    s->voice = AUD_open_out(&s->card, s->voice, s_spk, s, screamerspk_callback, &as);
+    s->voice = audio_be_open_out(s->audio_be, s->voice, s_spk, s, screamerspk_callback, &as);
     if (!s->voice) {
-        AUD_log(s_spk, "Could not open voice\n");
+        error_report("%s: could not open voice", s_spk);
         return;
     }
 
@@ -537,7 +537,7 @@ static void screamer_update_settings(ScreamerState *s)
     s->samples = SCREAMER_RING_FRAMES;
     s->mixbuf = g_malloc0((size_t)s->samples << s->shift);
 
-    AUD_set_active_out(s->voice, true);
+    audio_be_set_active_out(s->audio_be, s->voice, true);
 }
 
 static void screamer_update_volume(ScreamerState *s)
@@ -549,7 +549,7 @@ static void screamer_update_volume(ScreamerState *s)
     SCREAMER_DPRINTF("setting mute: %d, attenuation L: %d R: %d\n",
                      muted, att_left, att_right);
 
-    AUD_set_volume_out(s->voice, muted, (0xf - att_left) << 4,
+    audio_be_set_volume_out_lr(s->audio_be, s->voice, muted, (0xf - att_left) << 4,
                        (0xf - att_right) << 4);
 }
 
@@ -588,7 +588,7 @@ static void screamer_realizefn(DeviceState *dev, Error **errp)
 {
     ScreamerState *s = SCREAMER(dev);
 
-    if (!AUD_register_card(s_spk, &s->card, errp)) {
+    if (!audio_be_check(&s->audio_be, errp)) {
         return;
     }
 
@@ -767,12 +767,11 @@ static void screamer_initfn(Object *obj)
     sysbus_init_irq(d, &s->dma_rx_irq);
 }
 
-static Property screamer_properties[] = {
-    DEFINE_AUDIO_PROPERTIES(ScreamerState, card),
-    DEFINE_PROP_END_OF_LIST()
+static const Property screamer_properties[] = {
+    DEFINE_AUDIO_PROPERTIES(ScreamerState, audio_be),
 };
 
-static void screamer_class_init(ObjectClass *oc, void *data)
+static void screamer_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 

@@ -1,8 +1,8 @@
 diff --git a/hw/display/Kconfig b/hw/display/Kconfig
-index 1b02fa0..3c1a2e4 100644
+index c170833..ad6aabf 100644
 --- a/hw/display/Kconfig
 +++ b/hw/display/Kconfig
-@@ -145,3 +145,12 @@ config QFB_PCI
+@@ -158,3 +158,12 @@ config QFB_PCI
      bool
      default y if PCI_DEVICES
      depends on PCI
@@ -16,7 +16,7 @@ index 1b02fa0..3c1a2e4 100644
 +    # QGPU_PCI sans QFB_PCI compile mais ne se lie pas.
 +    select QFB_PCI
 diff --git a/hw/display/meson.build b/hw/display/meson.build
-index 7235958..8b1f0c2 100644
+index 51456a5..fd8dd1f 100644
 --- a/hw/display/meson.build
 +++ b/hw/display/meson.build
 @@ -141,6 +141,20 @@ if config_all_devices.has_key('CONFIG_VIRTIO_VGA')

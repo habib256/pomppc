@@ -402,9 +402,15 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 #endif
     const bool feGeom = fe.winW > 0 && fe.winH > 0;
+    // La version vient de l'accueil QMP du QEMU réellement lancé (QEMU_BIN
+    // peut viser un autre arbre que ~/src/qemu).
+    auto windowTitle = [](const QemuBridge& b) {
+        const std::string& v = b.qemuVersion();
+        return std::string("POMPPC — PowerPC Macintosh (QEMU") + (v.empty() ? "" : " " + v) + ")";
+    };
     GLFWwindow* window =
         glfwCreateWindow(feGeom ? fe.winW : 1280, feGeom ? fe.winH : 900,
-                         "POMPPC — PowerPC Macintosh (QEMU)", nullptr, nullptr);
+                         windowTitle(*bridge).c_str(), nullptr, nullptr);
     if (!window) { glfwTerminate(); return 1; }
     if (feGeom) glfwSetWindowPos(window, fe.winX, fe.winY);
     glfwMakeContextCurrent(window);
@@ -505,6 +511,7 @@ int main(int argc, char** argv) {
         else {
             curLauncher = launcher;
             journal("QEMU relancé : %s", launcher.c_str());
+            glfwSetWindowTitle(window, windowTitle(*bridge).c_str());
             chimeTrigger.arm();
         }
         guestW = guestH = 0;

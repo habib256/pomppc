@@ -68,7 +68,7 @@
 # Piloté par le frontend ImGui : DBUS_DISPLAY=1 (sortie -display dbus,p2p=on) et
 # QMP_SOCK=<chemin> (socket QMP). POMPPC_SCRATCH déplace .run/ (socket moniteur).
 #
-# Build UNIFIÉ : QEMU 9.2 (device Screamer, patches/screamer/) + OpenBIOS fusionné
+# Build UNIFIÉ : QEMU 11.1.2 (device Screamer, patches/screamer/) + OpenBIOS fusionné
 # (bring-up SMP balaton + nœud audio screamer). SMP *et* son ensemble, produits
 # tous les deux par scripts/build_qemu_qfb.sh.
 # Le son est SONDÉ, pas supposé : si le binaire n'a pas la classe 'screamer', le
@@ -145,7 +145,7 @@ if [ -z "${SNAPSHOT:-}" ]; then
 fi
 
 # --- Sélection binaire / accélérateur / firmware ---
-# Build UNIFIÉ (QEMU 9.2 + device Screamer porté) : SMP *et* son ensemble.
+# Build UNIFIÉ (QEMU 11.1.2 + device Screamer porté) : SMP *et* son ensemble.
 EXTRA=(); AUDIO=(); RAM="$RAM_MB"
 [ -f "$UNI_OBIOS" ] || { echo "⚠  OpenBIOS unifié introuvable ($UNI_OBIOS)." >&2; exit 1; }
 EXTRA+=(-bios "$UNI_OBIOS")

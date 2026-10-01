@@ -4,11 +4,47 @@ Deux natures de fichiers cohabitent ici, et la distinction compte : **ce que
 `scripts/build_qemu_qfb.sh` applique réellement**, et **le matériau d'origine** (mails de
 liste, essais revertés, binaires supplantés) gardé pour pouvoir refaire le raisonnement.
 
+## Base : QEMU 11.1.2 (portage du 01/10/2026)
+
+Toute la série vise **QEMU v11.1.2** (elle visait 9.2.0 jusqu'au 01/10/2026 ; l'historique git
+garde l'ancienne). Chaque patch a été reposé à la main sur 11.1.2 dans un arbre git, un commit
+par patch, puis régénéré ici par `git diff` : il s'applique sans fuzz. Ce que l'amont a changé
+entre-temps, et que les patches suivent :
+
+- **TCG** : recherche de TB par `TCGTBCPUState` et `tcg_ops->get_tb_cpu_state` (0008) ;
+  `accel/tcg/translator.c` est du code commun (plus d'`ArchCPU`, `TARGET_PAGE_BITS` est une
+  valeur d'exécution : les champs du CPU s'atteignent par `offsetof(CPUState, x) -
+  sizeof(CPUState)` depuis `tcg_env`) ; `NB_MMU_MODES` vaut 22 et les masques sont des
+  `MMUIdxMap` 32 bits (cache de sauts de 0008/0011 élargi en conséquence) ; ops sans type et
+  backends par tables `outop_*` : `ppc_fp32` (0014) est un op `TCG_TYPE_I64` sans `outop`,
+  contraint par `tcg_target_op_def` et émis par un `case` de `tcg_reg_alloc_op`, et la cible
+  demande `tcg_ppc_fp32_supported()` au lieu de lire `TCG_TARGET_HAS_*` ; dans
+  `tcg_optimize`, la boucle n'appelle plus `finish_folding` pour un `case` resté `!done`
+  (seul le `default` le fait) : le `case` de `ppc_fp32` l'appelle lui-même, sans quoi le
+  temporaire de sortie gardait ses listes de copies, qui se corrompaient, et l'optimiseur
+  bouclait sans fin (démarrage de Tiger gelé après « BSD root », moniteur muet, 01/10/2026) ; `exec-all.h`
+  supprimé (déclarations dans `accel/tcg/internal-common.h` et
+  `include/exec/translation-block.h`) ; `tb_invalidate_phys_range` prend le CPU ;
+  `cpu_physical_memory_*` → `physical_memory_*`, `xlat_section` → `xlat_offset`.
+- **ppc** : instructions flottantes et `fcmpu` en decodetree (`trans_FCMPU`, `helper_FCMPU`) ;
+  `helper_store_msr`/`do_rfi` dans `tcg-excp_helper.c` ; propriétés du CPU dans
+  `powerpc_cpu_properties` (`const`).
+- **softfloat** commun à toutes les cibles : plus de veto `TARGET_PPC` sur le hardfloat ;
+  `float_status` en champs de bits, d'où `PPC_FP_FLAGS_OFS` (les 16 bits de
+  `float_exception_flags` en tête de structure, vérifiés au `realize` du CPU) ;
+  `float_muladd_halve_result` remplacé par `scalbn`.
+- **Devices** : en-têtes sous `hw/core/` et `system/`, audio par `AudioBackend`
+  (`audio_be_*`, `qemu/audio.h`), console par `qemu_console_*` et
+  `qemu_graphic_console_create` (`gfx_update` rend un `bool`), listes de propriétés `const` sans
+  `DEFINE_PROP_END_OF_LIST`, `class_init(ObjectClass *, const void *)`. GPIO de macio : l'amont a
+  ses noms de bits (`enum MacioGPIORegisterBits`) ; le patch SMP n'ajoute que
+  `GPIO_RESET_CPU1`, `macio_gpio_set_extirq()` et les fronts de la ligne de reset du CPU 1.
+
 ## Appliqué par `scripts/build_qemu_qfb.sh`
 
 | Fichier | Rôle |
 | --- | --- |
-| `smp-mac99/qemu-mac99-cpus-v2.patch` | SMP mac99. Remplace le garde-fou `« Only UP supported today »` d'`hw/intc/openpic.c` par la vraie limite du modèle (`nb_cpus > KEYLARGO_MAX_CPU`), ajoute le GPIO 4 de KeyLargo (0x5C, `KL_GPIO_RESET_CPU1`, active basse) dans `hw/misc/macio/gpio.c`, et dans `hw/ppc/mac_newworld.c` le `PIR = cpu_index` plus `cpu_reset_line()` : ligne tenue basse = CPU 1 remis à zéro et arrêté, relâchement = démarrage, par `async_run_on_cpu()`. S'applique **sans fuzz ni décalage** sur QEMU 9.2.0 pristine (le build l'applique quand même avec `--fuzz=3`). |
+| `smp-mac99/qemu-mac99-cpus-v2.patch` | SMP mac99. Remplace le garde-fou `« Only UP supported today »` d'`hw/intc/openpic.c` par la vraie limite du modèle (`nb_cpus > KEYLARGO_MAX_CPU`), ajoute le GPIO 4 de KeyLargo (0x5C, `KL_GPIO_RESET_CPU1`, active basse) dans `hw/misc/macio/gpio.c`, et dans `hw/ppc/mac_newworld.c` le `PIR = cpu_index` plus `cpu_reset_line()` : ligne tenue basse = CPU 1 remis à zéro et arrêté, relâchement = démarrage, par `async_run_on_cpu()`. S'applique **sans fuzz ni décalage** sur QEMU 11.1.2 pristine (le build l'exige : `--fuzz=0`). |
 | `openpic/0001-openpic-reset-niveau.patch` | **Reset de l'OpenPIC** (29/09/2026) : `openpic_reset` remettait les sources en front sans oublier `pending` ; une ligne de niveau haute au reset (OHCI pendant une panique de l'invité) restait en attente pour toujours, et le démarrage suivant se bloquait dans une interruption perpétuelle (« using 1966 buffer headers »). Chaque source retient le niveau brut de sa ligne (`input`), le reset remet `pending` à 0, l'écriture de l'IVPR d'une source de niveau reprend l'état réel de la ligne. Touche `hw/intc/openpic.c`, `include/hw/ppc/openpic.h`. Posé après la série SMP (même fichier). `docs/gel-doom3-baddisplay.md` §3. |
 | `qfb/qfb-pci.c` | Le device paravirtuel `qfb-pci`, copié dans `hw/display/`. Protocole « qfb1 » de Solra Bizna porté du NuBus vers PCI. |
 | `qfb/0002-wire-qfb-pci-build.patch` | Câblage meson/Kconfig du device ci-dessus. |
@@ -25,9 +61,11 @@ liste, essais revertés, binaires supplantés) gardé pour pouvoir refaire le ra
 | `tcg/0006-tcg-jit-near.patch` | **Tampon du JIT près du texte de QEMU** : propriétés de l'**accélérateur** `x-jit-near` (défaut *off*, `JITNEAR=1 ./run_tiger.sh`) et `x-jit-addr` (essais). macOS pose le tampon de 1 Gio hors de la fenêtre de 4 Gio du texte un lancement sur deux environ ; sur Apple M4 chaque appel de helper est alors plus lent et tout le processus perd ~6 % (Marble Blast) : c'étaient « les deux régimes ». `x-jit-near` garde le tampon dans la fenêtre (en le réduisant au besoin, 512 Mio au moins). Imprime toujours `tcg: tampon JIT … même/AUTRE fenêtre`. Avec `split-wx` (éteint par défaut), le code exécuté est l'alias RX de `mach_vm_remap` : la vue RW est laissée au noyau et c'est l'alias RX qui est cherché dans la fenêtre du texte, avec la même réduction (bug hunt 4) ; sa place est imprimée à part (`tcg: split-wx, alias RX exécuté … (x-jit-near sur l'alias)`). Touche `tcg/region.c`, `accel/tcg/tcg-all.c`, `include/tcg/startup.h`. `docs/tcg-g4.md` §14. |
 | `tcg/0007-ppc-fp-inline.patch` | **Flottant scalaire simple sans ses helpers** : propriété de CPU `x-fp-inline` (défaut *off*, `FPINLINE=1 ./run_tiger.sh` ; n'agit qu'avec `x-fast-fp`), mode preuve `x-fp-verify` (`FPVERIFY=1`). `fadds fsubs fmuls fmadds fmsubs fnmadds fnmsubs` : quand le FPSCR est amorcé sans trappe (XX, pas XE/OE/UE), RN = 00, et que les opérandes sont des float32 nuls ou normaux, un seul appel **pur** (`helper_fp32_fast`, l'op float32 sur le FPU hôte, `fmaf` pour les FMA) et FPRF/FI en ligne, au lieu de deux helpers sans drapeau ; `fcmpu` entièrement en ligne (comparaison entière). Sinon la séquence d'origine, inchangée (un branchement). Preuve hôte contre les vrais objets de l'arbre (`tools/tcg/fpproof.sh` : 174 M vecteurs, 0 divergence ; 10 mutations sur 10 détectées, `fpproof-mut.sh`), invitée (`tools/guest/jobs/fptest`, 30 M instructions dans 11 états du FPSCR, empreinte identique) et vérificateur en jeu (Marble Blast : 3,04 milliards de passages vérifiés, 0 divergence, 99 % par le chemin court). Banc invité −21 à −46 %. Touche `target/ppc/{cpu.h,cpu_init.c,fpu_helper.c,helper.h,internal.h,translate.c,translate/fp-impl.c.inc}`. Par-dessus `tcg/0001-0004` ; `NO_TCG=1` le saute. `docs/tcg-g4.md` §15. |
 | `tcg/0008-tcg-ret-inline.patch` | **Sorties indirectes des blocs** : propriétés de CPU `x-ret-inline` et `x-jc-idx` (défaut *off*, `RETINLINE=1 JCIDX=1 ./run_tiger.sh`), mode preuve `x-ret-verify` (`RETVERIFY=1`). `x-ret-inline` : à chaque `blr`, `bctr`, `bclr`/`bcctr`, branchement vers une autre page, la sonde du cache de sauts de `helper_lookup_tb_ptr` est émise dans le code généré (mêmes comparaisons : pc, hflags relus, cflags, points d'arrêt), le helper n'est appelé que sur un raté. `x-jc-idx` : un vidage du TLB ne jette que les entrées du cache de sauts des `mmu_idx` vidés (rien si aucun n'était sale), en ne visitant que les emplacements posés depuis le dernier vidage de ce `mmu_idx`. Preuve : `x-ret-verify` compare chaque bloc pris dans le cache à une recherche physique complète (plus de 25 milliards de blocs, 0 divergence, SMP=2 et SMP=1) ; code modifié/remappé dans l'invité (`tools/guest/jobs/smctest`, empreintes identiques). Touche `accel/tcg/{cpu-exec.c,cputlb.c,tb-jmp-cache.h,tcg-runtime.h,translate-all.c,translator.c}`, `include/exec/{exec-all.h,tb-flush.h,translator.h}`, `include/hw/core/cpu.h`, `include/tcg/tcg-op-common.h`, `tcg/tcg-op.c`, `target/ppc/{cpu.h,cpu_init.c,translate.c}`. Par-dessus `tcg/0007` ; `NO_TCG=1` le saute. `docs/tcg-g4.md` §16. |
-| `tcg/0010-tcg-smc-mttcg.patch` | **Code réécrit par l'autre vCPU (MTTCG)** : trois courses de QEMU 9.2 corrigées **sans condition** — la page de code est protégée quand le traducteur en prend le verrou, avant de lire le code (et non plus au lien du bloc) ; `tlb_set_dirty` et `tlb_set_page_full` testent la propreté de la page sous le verrou du TLB. Plus la propriété de CPU `x-icbi-sync` (défaut *off* dans QEMU, **allumée par `run_tiger.sh`**, `ICBISYNC=0` l'éteint) : `icbi` invalide les blocs qui recouvrent sa ligne (une écriture invalide avant d'être faite ; l'autre vCPU pouvait retraduire l'ancien code entre les deux). Preuve : `smctest` E, référence 5/5 exécutions en erreur (86 M appels périmés) → 0 erreur sur 1 105 exécutions (SMP=2) ; A-D, F identiques ; +9 ns par `icbi`. Touche `accel/tcg/{cputlb.c,tb-maint.c}`, `include/exec/exec-all.h`, `target/ppc/{cpu.h,cpu_init.c,mem_helper.c}`. Par-dessus `tcg/0008` ; `NO_TCG=1` le saute. `docs/tcg-g4.md` §17. Outils du diagnostic dans `tcg/essais/0010-smcdbg-diag.patch` (anneau d'événements par page, relevé du bloc périmé) et `0010-smcstat.patch` (compteurs des courses). |
+| `tcg/0010-tcg-smc-mttcg.patch` | **Code réécrit par l'autre vCPU (MTTCG)** : trois courses de QEMU 9.2 corrigées **sans condition** — la page de code est protégée quand le traducteur en prend le verrou, avant de lire le code (et non plus au lien du bloc) ; `tlb_set_dirty` et `tlb_set_page_full` testent la propreté de la page sous le verrou du TLB. Plus la propriété de CPU `x-icbi-sync` (défaut *off* dans QEMU, **allumée par `run_tiger.sh`**, `ICBISYNC=0` l'éteint) : `icbi` invalide les blocs qui recouvrent sa ligne (une écriture invalide avant d'être faite ; l'autre vCPU pouvait retraduire l'ancien code entre les deux). Preuve : `smctest` E, référence 5/5 exécutions en erreur (86 M appels périmés) → 0 erreur sur 1 105 exécutions (SMP=2) ; A-D, F identiques ; +9 ns par `icbi`. Touche `accel/tcg/{cputlb.c,tb-maint.c}`, `include/exec/translation-block.h`, `target/ppc/{cpu.h,cpu_init.c,mem_helper.c}`. Par-dessus `tcg/0008` ; `NO_TCG=1` le saute. `docs/tcg-g4.md` §17. Outils du diagnostic dans `tcg/essais/0010-smcdbg-diag.patch` (anneau d'événements par page, relevé du bloc périmé) et `0010-smcstat.patch` (compteurs des courses). |
 
-Les constantes `OUT_DATA` / `IN_DATA` / `OUT_ENABLE` sont absentes de `gpio.c` en 9.2.0 :
+Les constantes `OUT_DATA` / `IN_DATA` / `OUT_ENABLE` étaient absentes de `gpio.c` en 9.2.0 ;
+11.1 les a dans `enum MacioGPIORegisterBits`, et le garde de l'étape 2 reconnaît cette forme
+(une macro du même nom casserait l'enum). Historique :
 le patch les **porte désormais lui-même** (mêmes valeurs que l'enum de `balaton2`, voir plus
 bas), de sorte qu'il compile seul sur un arbre pristine. L'étape 2 de
 `scripts/build_qemu_qfb.sh`, qui les réinjectait par un script Python, devient de ce fait un

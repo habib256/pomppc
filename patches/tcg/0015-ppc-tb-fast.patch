@@ -1,17 +1,17 @@
 diff --git a/hw/ppc/ppc.c b/hw/ppc/ppc.c
-index b86b584..5a7590c 100644
+index b123b4c..f402b17 100644
 --- a/hw/ppc/ppc.c
 +++ b/hw/ppc/ppc.c
-@@ -37,6 +37,7 @@
+@@ -38,6 +38,7 @@
  #include "kvm_ppc.h"
  #include "migration/vmstate.h"
  #include "trace.h"
-+#include "sysemu/cpu-timers.h"
++#include "system/cpu-timers.h"
  
  static void cpu_ppc_tb_stop (CPUPPCState *env);
  static void cpu_ppc_tb_start (CPUPPCState *env);
-@@ -512,6 +513,88 @@ uint64_t cpu_ppc_get_tb(ppc_tb_t *tb_env, uint64_t vmclk, int64_t tb_offset)
-     return ns_to_tb(tb_env->tb_freq, vmclk) + tb_offset;
+@@ -520,6 +521,88 @@ int64_t cpu_ppc_load_tb_offset(CPUPPCState *env)
+     return env->tb_env->tb_offset;
  }
  
 +/*
@@ -99,7 +99,7 @@ index b86b584..5a7590c 100644
  uint64_t cpu_ppc_load_tbl (CPUPPCState *env)
  {
      ppc_tb_t *tb_env = env->tb_env;
-@@ -521,6 +604,9 @@ uint64_t cpu_ppc_load_tbl (CPUPPCState *env)
+@@ -529,6 +612,9 @@ uint64_t cpu_ppc_load_tbl (CPUPPCState *env)
          return env->spr[SPR_TBL];
      }
  
@@ -109,7 +109,7 @@ index b86b584..5a7590c 100644
      tb = cpu_ppc_get_tb(tb_env, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
                          tb_env->tb_offset);
      trace_ppc_tb_load(tb);
-@@ -533,6 +619,9 @@ static inline uint32_t _cpu_ppc_load_tbu(CPUPPCState *env)
+@@ -541,6 +627,9 @@ static inline uint32_t _cpu_ppc_load_tbu(CPUPPCState *env)
      ppc_tb_t *tb_env = env->tb_env;
      uint64_t tb;
  
@@ -119,7 +119,7 @@ index b86b584..5a7590c 100644
      tb = cpu_ppc_get_tb(tb_env, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
                          tb_env->tb_offset);
      trace_ppc_tb_load(tb);
-@@ -1109,6 +1198,7 @@ void cpu_ppc_tb_init(CPUPPCState *env, uint32_t freq)
+@@ -1117,6 +1206,7 @@ void cpu_ppc_tb_init(CPUPPCState *env, uint32_t freq)
  
      tb_env->tb_freq = freq;
      tb_env->decr_freq = freq;
@@ -128,10 +128,10 @@ index b86b584..5a7590c 100644
  
  void cpu_ppc_tb_reset(CPUPPCState *env)
 diff --git a/include/qemu/timer.h b/include/qemu/timer.h
-index cc167bd..123ad4b 100644
+index 9a62ac8..30ec688 100644
 --- a/include/qemu/timer.h
 +++ b/include/qemu/timer.h
-@@ -823,8 +823,26 @@ static inline int64_t get_clock(void)
+@@ -835,8 +835,26 @@ static inline int64_t get_clock(void)
  
  extern int use_rt_clock;
  
@@ -158,11 +158,11 @@ index cc167bd..123ad4b 100644
      if (use_rt_clock) {
          struct timespec ts;
          clock_gettime(CLOCK_MONOTONIC, &ts);
-diff --git a/include/sysemu/cpu-timers.h b/include/sysemu/cpu-timers.h
-index 7bfa960..fe78563 100644
---- a/include/sysemu/cpu-timers.h
-+++ b/include/sysemu/cpu-timers.h
-@@ -94,6 +94,12 @@ int64_t cpu_get_ticks(void);
+diff --git a/include/system/cpu-timers.h b/include/system/cpu-timers.h
+index a1abed0..6df4234 100644
+--- a/include/system/cpu-timers.h
++++ b/include/system/cpu-timers.h
+@@ -36,6 +36,12 @@ int64_t cpu_get_ticks(void);
   */
  int64_t cpu_get_clock(void);
  
@@ -176,10 +176,10 @@ index 7bfa960..fe78563 100644
  
  /* get/set VIRTUAL clock and VM elapsed ticks via the cpus accel interface */
 diff --git a/system/cpu-timers.c b/system/cpu-timers.c
-index 856e502..180986f 100644
+index 9919b46..8a28d91 100644
 --- a/system/cpu-timers.c
 +++ b/system/cpu-timers.c
-@@ -99,6 +99,23 @@ int64_t cpu_get_clock(void)
+@@ -100,6 +100,23 @@ int64_t cpu_get_clock(void)
      return ti;
  }
  
@@ -204,10 +204,10 @@ index 856e502..180986f 100644
   * enable cpu_get_ticks()
   * Caller must hold BQL which serves as mutex for vm_clock_seqlock.
 diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
-index 9537b8b..5cfacb9 100644
+index 078fd14..c7d219d 100644
 --- a/target/ppc/cpu.h
 +++ b/target/ppc/cpu.h
-@@ -1413,6 +1413,14 @@ struct CPUArchState {
+@@ -1474,6 +1474,14 @@ struct CPUArchState {
       */
      bool msr_nobql;
      bool msr_nobql_verify;
@@ -223,10 +223,10 @@ index 9537b8b..5cfacb9 100644
  
      /* Internal devices resources */
 diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
-index cfd9115..144209c 100644
+index 9a47edf..1034d1c 100644
 --- a/target/ppc/cpu_init.c
 +++ b/target/ppc/cpu_init.c
-@@ -7492,6 +7492,14 @@ static Property ppc_cpu_properties[] = {
+@@ -127,6 +127,14 @@ static const Property powerpc_cpu_properties[] = {
       */
      DEFINE_PROP_BOOL("x-msr-nobql", PowerPCCPU, env.msr_nobql, false),
      DEFINE_PROP_BOOL("x-msr-nobql-verify", PowerPCCPU, env.msr_nobql_verify, false),

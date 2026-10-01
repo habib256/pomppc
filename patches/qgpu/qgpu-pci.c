@@ -81,9 +81,9 @@
 #include "qemu/thread.h"
 #include "qemu/rcu.h"
 #include "qemu/timer.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "hw/pci/pci_device.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
@@ -91,7 +91,7 @@
 #include "ui/console.h"
 #include "ui/surface.h"
 #include "qom/object.h"
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 
 #include "qgpu-core.h"
 
@@ -1452,7 +1452,7 @@ static const VMStateDescription vmstate_qgpu_pci = {
     }
 };
 
-static Property qgpu_pci_properties[] = {
+static const Property qgpu_pci_properties[] = {
     DEFINE_PROP_UINT32("shmem_mb", QgpuPCIState, shmem_mb, QGPU_SHMEM_DEFAULT_MB),
     DEFINE_PROP_STRING("backend", QgpuPCIState, backend),
     /* auto | qfb | vga | none — cf. en-tête. Chaîne et non enum qapi : le
@@ -1460,7 +1460,6 @@ static Property qgpu_pci_properties[] = {
        fichier que build_qemu_qfb.sh recopie tel quel. */
     DEFINE_PROP_STRING("scanout", QgpuPCIState, scanout_pref),
     DEFINE_PROP_BOOL("trace", QgpuPCIState, trace, false),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void qgpu_pci_instance_init(Object *obj)
@@ -1471,7 +1470,7 @@ static void qgpu_pci_instance_init(Object *obj)
     s->scanout_pref = g_strdup("auto");
 }
 
-static void qgpu_pci_class_init(ObjectClass *klass, void *data)
+static void qgpu_pci_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);

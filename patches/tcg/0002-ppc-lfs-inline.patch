@@ -1,8 +1,8 @@
 diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
-index ec52bd6f2..1cf200525 100644
+index b09f11f..842759d 100644
 --- a/target/ppc/cpu.h
 +++ b/target/ppc/cpu.h
-@@ -1296,6 +1296,13 @@ struct CPUArchState {
+@@ -1357,6 +1357,13 @@ struct CPUArchState {
       * See ppc_sr_tlb_fill() and ppc_sr_tlb_check() in mmu_helper.c.
       */
      bool sr_tlb;
@@ -17,10 +17,10 @@ index ec52bd6f2..1cf200525 100644
      uint32_t sr_gen;
      uint32_t sr_snap_gen[2];
 diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
-index 31be9c287..d6ff38d29 100644
+index a041132..4afc6ff 100644
 --- a/target/ppc/cpu_init.c
 +++ b/target/ppc/cpu_init.c
-@@ -7437,6 +7437,12 @@ static Property ppc_cpu_properties[] = {
+@@ -72,6 +72,12 @@ static const Property powerpc_cpu_properties[] = {
       * default (experimental).  Only honoured on POWERPC_MMU_32B.
       */
      DEFINE_PROP_BOOL("x-sr-tlb", PowerPCCPU, env.sr_tlb, false),
@@ -32,12 +32,12 @@ index 31be9c287..d6ff38d29 100644
 +    DEFINE_PROP_BOOL("x-lfs-inline", PowerPCCPU, env.lfs_inline, false),
      /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
      DEFINE_PROP_UINT32("x-sr-tlb-verify", PowerPCCPU, env.sr_verify, 0),
-     DEFINE_PROP_END_OF_LIST(),
+ };
 diff --git a/target/ppc/translate.c b/target/ppc/translate.c
-index 47ca50a06..ccebf6002 100644
+index 06ed2ad..edd53fa 100644
 --- a/target/ppc/translate.c
 +++ b/target/ppc/translate.c
-@@ -172,6 +172,7 @@ struct DisasContext {
+@@ -173,6 +173,7 @@ struct DisasContext {
      /* Routine used to access memory */
      bool pr, hv, dr, le_mode;
      bool lazy_tlb_flush;
@@ -45,7 +45,7 @@ index 47ca50a06..ccebf6002 100644
      bool need_access_type;
      int mem_idx;
      int access_type;
-@@ -6496,6 +6497,7 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+@@ -6542,6 +6543,7 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
      ctx->has_cfar = !!(env->flags & POWERPC_FLAG_CFAR);
      ctx->has_bhrb = !!(env->flags & POWERPC_FLAG_BHRB);
  #endif
@@ -54,10 +54,10 @@ index 47ca50a06..ccebf6002 100644
          || env->mmu_model & POWERPC_MMU_64;
  
 diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c.inc
-index bb8bb4d70..b3edf3093 100644
+index bc3c458..0d96ece 100644
 --- a/target/ppc/translate/fp-impl.c.inc
 +++ b/target/ppc/translate/fp-impl.c.inc
-@@ -757,9 +757,105 @@ static void gen_mtfsfi(DisasContext *ctx)
+@@ -674,9 +674,105 @@ static void gen_mtfsfi(DisasContext *ctx)
      gen_helper_fpscr_check_status(tcg_env);
  }
  
@@ -164,7 +164,7 @@ index bb8bb4d70..b3edf3093 100644
      tcg_gen_qemu_ld_i32(tmp, addr, ctx->mem_idx, DEF_MEMOP(MO_UL));
      gen_helper_todouble(dest, tmp);
  }
-@@ -902,7 +998,15 @@ static void glue(gen_, name##x)(DisasContext *ctx)                            \
+@@ -819,7 +915,15 @@ static void glue(gen_, name##x)(DisasContext *ctx)                            \
  
  static void gen_qemu_st32fs(DisasContext *ctx, TCGv_i64 src, TCGv addr)
  {

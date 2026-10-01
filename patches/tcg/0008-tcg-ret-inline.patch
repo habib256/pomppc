@@ -1,11 +1,19 @@
 diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
-index 8163295f3..5d8b16610 100644
+index b2f4c80..fd7d7af 100644
 --- a/accel/tcg/cpu-exec.c
 +++ b/accel/tcg/cpu-exec.c
-@@ -246,9 +246,141 @@ static TranslationBlock *tb_htable_lookup(CPUState *cpu, vaddr pc,
+@@ -41,6 +41,7 @@
+ #include "system/tcg.h"
+ #include "exec/helper-proto-common.h"
+ #include "tcg-accel-ops.h"
++#include "accel/tcg/cpu-mmu-index.h"
+ #include "tb-jmp-cache.h"
+ #include "tb-hash.h"
+ #include "tb-context.h"
+@@ -213,6 +214,137 @@ static TranslationBlock *tb_htable_lookup(CPUState *cpu, TCGTBCPUState s)
+     return qht_lookup_custom(&tb_ctx.htable, &desc, h, tb_lookup_cmp);
  }
  
- /* Might cause an exception, so have a longjmp destination ready */
 +#ifndef CONFIG_USER_ONLY
 +/*
 + * POMPPC tcg/0008, x-ret-verify.  Every TB taken from the jump cache (main
@@ -71,25 +79,27 @@ index 8163295f3..5d8b16610 100644
 +    const TranslationBlock *tb = p;
 +    const struct tb_desc *desc = d;
 +
-+    if ((tb_cflags(tb) & CF_PCREL || tb->pc == desc->pc) &&
++    if ((tb_cflags(tb) & CF_PCREL || tb->pc == desc->s.pc) &&
 +        tb_page_addr0(tb) == desc->page_addr0 &&
-+        tb->cs_base == desc->cs_base &&
-+        tb->flags == desc->flags &&
-+        tb_cflags(tb) == desc->cflags) {
++        tb->cs_base == desc->s.cs_base &&
++        tb->flags == desc->s.flags &&
++        tb_cflags(tb) == desc->s.cflags) {
 +        tb_page_addr_t tb_phys_page1 = tb_page_addr1(tb);
 +        if (tb_phys_page1 == -1) {
 +            return true;
 +        }
 +        return tb_phys_page1 ==
-+            pomppc_code_phys_nofault(desc->env, TARGET_PAGE_ALIGN(desc->pc));
++            pomppc_code_phys_nofault(desc->env, TARGET_PAGE_ALIGN(desc->s.pc));
 +    }
 +    return false;
 +}
 +
-+static bool ret_verify_tb(CPUState *cpu, TranslationBlock *tb, vaddr pc,
-+                          uint64_t cs_base, uint32_t flags, uint32_t cflags,
-+                          int src)
++static bool ret_verify_tb(CPUState *cpu, TranslationBlock *tb,
++                          TCGTBCPUState s, int src)
 +{
++    vaddr pc = s.pc;
++    uint64_t cs_base = s.cs_base;
++    uint32_t flags = s.flags, cflags = s.cflags;
 +    struct tb_desc desc;
 +    TranslationBlock *ref = NULL;
 +    tb_page_addr_t phys;
@@ -97,10 +107,7 @@ index 8163295f3..5d8b16610 100644
 +
 +    rv_start();
 +    desc.env = cpu_env(cpu);
-+    desc.cs_base = cs_base;
-+    desc.flags = flags;
-+    desc.cflags = cflags;
-+    desc.pc = pc;
++    desc.s = s;
 +    phys = pomppc_code_phys_nofault(desc.env, pc);
 +    if (phys != -1 && phys != -2) {
 +        desc.page_addr0 = phys;
@@ -138,20 +145,25 @@ index 8163295f3..5d8b16610 100644
 +}
 +#endif
 +
- static inline TranslationBlock *tb_lookup(CPUState *cpu, vaddr pc,
-                                           uint64_t cs_base, uint32_t flags,
--                                          uint32_t cflags)
-+                                          uint32_t cflags, int src)
+ /**
+  * tb_lookup:
+  * @cpu: CPU that will execute the returned translation block
+@@ -227,7 +359,8 @@ static TranslationBlock *tb_htable_lookup(CPUState *cpu, TCGTBCPUState s)
+  *
+  * Returns: an existing translation block or NULL.
+  */
+-static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
++static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s,
++                                          int src)
  {
      TranslationBlock *tb;
      CPUJumpCache *jc;
-@@ -266,8 +398,20 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, vaddr pc,
-                tb->cs_base == cs_base &&
-                tb->flags == flags &&
-                tb_cflags(tb) == cflags)) {
+@@ -245,8 +378,19 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
+                tb->cs_base == s.cs_base &&
+                tb->flags == s.flags &&
+                tb_cflags(tb) == s.cflags)) {
 +#ifndef CONFIG_USER_ONLY
-+        if (unlikely(cpu->ret_verify) &&
-+            !ret_verify_tb(cpu, tb, pc, cs_base, flags, cflags, src)) {
++        if (unlikely(cpu->ret_verify) && !ret_verify_tb(cpu, tb, s, src)) {
 +            goto miss;
 +        }
 +#endif
@@ -159,33 +171,33 @@ index 8163295f3..5d8b16610 100644
      }
 +#ifndef CONFIG_USER_ONLY
 +    if (unlikely(cpu->ret_verify)) {
-+        rv_miss_stat(src, tb, jc->array[hash].pc, pc);
++        rv_miss_stat(src, tb, jc->array[hash].pc, s.pc);
 +    }
 + miss:
 +#endif
  
-     tb = tb_htable_lookup(cpu, pc, cs_base, flags, cflags);
+     tb = tb_htable_lookup(cpu, s);
      if (tb == NULL) {
-@@ -275,6 +419,9 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, vaddr pc,
+@@ -254,6 +398,9 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
      }
  
-     jc->array[hash].pc = pc;
+     jc->array[hash].pc = s.pc;
 +#ifndef CONFIG_USER_ONLY
 +    tb_jmp_cache_set_idx(jc, hash, cpu_mmu_index(cpu, true)); /* tcg/0008 */
 +#endif
      qatomic_set(&jc->array[hash].tb, tb);
  
  hit:
-@@ -421,7 +568,7 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
+@@ -395,7 +542,7 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
          cpu_loop_exit(cpu);
      }
  
--    tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
-+    tb = tb_lookup(cpu, pc, cs_base, flags, cflags, 1);
+-    tb = tb_lookup(cpu, s);
++    tb = tb_lookup(cpu, s, 1);
      if (tb == NULL) {
          return tcg_code_gen_epilogue;
      }
-@@ -433,6 +580,31 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
+@@ -407,6 +554,28 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
      return tb->tc.ptr;
  }
  
@@ -199,14 +211,11 @@ index 8163295f3..5d8b16610 100644
 +#ifndef CONFIG_USER_ONLY
 +    CPUState *cpu = env_cpu(env);
 +    TranslationBlock *tb = ptb;
-+    vaddr pc;
-+    uint64_t cs_base;
-+    uint32_t flags, cflags;
++    TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
 +
-+    cpu_get_tb_cpu_state(env, &pc, &cs_base, &flags);
-+    cflags = curr_cflags(cpu);
++    s.cflags = curr_cflags(cpu);
 +    if (QTAILQ_EMPTY(&cpu->breakpoints) &&
-+        ret_verify_tb(cpu, tb, pc, cs_base, flags, cflags, RV_INLINE)) {
++        ret_verify_tb(cpu, tb, s, RV_INLINE)) {
 +        cpu->neg.can_do_io = true;
 +        return tb->tc.ptr;
 +    }
@@ -214,31 +223,31 @@ index 8163295f3..5d8b16610 100644
 +    return HELPER(lookup_tb_ptr)(env);
 +}
 +
- /* Execute a TB, and fix up the CPU state afterwards if necessary */
- /*
-  * Disable CFI checks.
-@@ -594,7 +766,7 @@ void cpu_exec_step_atomic(CPUState *cpu)
+ /* Return the current PC from CPU, which may be cached in TB. */
+ static vaddr log_pc(CPUState *cpu, const TranslationBlock *tb)
+ {
+@@ -576,7 +745,7 @@ void cpu_exec_step_atomic(CPUState *cpu)
           * Any breakpoint for this insn will have been recognized earlier.
           */
  
--        tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
-+        tb = tb_lookup(cpu, pc, cs_base, flags, cflags, 0);
+-        tb = tb_lookup(cpu, s);
++        tb = tb_lookup(cpu, s, 0);
          if (tb == NULL) {
              mmap_lock();
-             tb = tb_gen_code(cpu, pc, cs_base, flags, cflags);
-@@ -984,7 +1156,7 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+             tb = tb_gen_code(cpu, s);
+@@ -966,7 +1135,7 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                  break;
              }
  
--            tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
-+            tb = tb_lookup(cpu, pc, cs_base, flags, cflags, 0);
+-            tb = tb_lookup(cpu, s);
++            tb = tb_lookup(cpu, s, 0);
              if (tb == NULL) {
                  CPUJumpCache *jc;
                  uint32_t h;
-@@ -1000,6 +1172,9 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
-                 h = tb_jmp_cache_hash_func(pc);
+@@ -982,6 +1151,9 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+                 h = tb_jmp_cache_hash_func(s.pc);
                  jc = cpu->tb_jmp_cache;
-                 jc->array[h].pc = pc;
+                 jc->array[h].pc = s.pc;
 +#ifndef CONFIG_USER_ONLY
 +                tb_jmp_cache_set_idx(jc, h, cpu_mmu_index(cpu, true));
 +#endif
@@ -246,10 +255,10 @@ index 8163295f3..5d8b16610 100644
              }
  
 diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
-index b76a4eac4..0af9e923e 100644
+index dc83f3b..6cbb6d0 100644
 --- a/accel/tcg/cputlb.c
 +++ b/accel/tcg/cputlb.c
-@@ -398,7 +398,21 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
+@@ -391,7 +391,21 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
  
      qemu_spin_unlock(&cpu->neg.tlb.c.lock);
  
@@ -272,7 +281,7 @@ index b76a4eac4..0af9e923e 100644
  
      if (to_clean == ALL_MMUIDX_BITS) {
          qatomic_set(&cpu->neg.tlb.c.full_flush_count,
-@@ -1528,6 +1542,28 @@ void *tlb_vaddr_to_host(CPUArchState *env, abi_ptr addr,
+@@ -1534,6 +1548,28 @@ void *tlb_vaddr_to_host(CPUArchState *env, vaddr addr,
   * NOTE: This function will trigger an exception if the page is
   * not executable.
   */
@@ -301,8 +310,25 @@ index b76a4eac4..0af9e923e 100644
  tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, vaddr addr,
                                          void **hostp)
  {
+diff --git a/accel/tcg/internal-common.h b/accel/tcg/internal-common.h
+index 9e7be2d..b411302 100644
+--- a/accel/tcg/internal-common.h
++++ b/accel/tcg/internal-common.h
+@@ -91,6 +91,12 @@ void tb_check_watchpoint(CPUState *cpu, uintptr_t retaddr);
+ tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, vaddr addr,
+                                         void **hostp);
+ 
++#ifndef CONFIG_USER_ONLY
++/* POMPPC tcg/0008: see accel/tcg/cputlb.c and accel/tcg/cpu-exec.c */
++tb_page_addr_t pomppc_code_phys_nofault(CPUArchState *env, vaddr addr);
++void pomppc_jc_flush_stat(CPUState *cpu, bool dropped);
++#endif
++
+ /**
+  * get_page_addr_code()
+  * @env: CPUArchState
 diff --git a/accel/tcg/tb-jmp-cache.h b/accel/tcg/tb-jmp-cache.h
-index c3a505e39..24bda0552 100644
+index c3a505e..1b7b237 100644
 --- a/accel/tcg/tb-jmp-cache.h
 +++ b/accel/tcg/tb-jmp-cache.h
 @@ -28,6 +28,36 @@ typedef struct CPUJumpCache {
@@ -320,7 +346,7 @@ index c3a505e39..24bda0552 100644
 +     * instead of the whole table: ~7000 drops per second under Tiger).
 +     * log_n[i] > TB_JMP_IDX_LOG: overflowed, scan the whole table.
 +     */
-+#define TB_JMP_IDX_MAX 16
++#define TB_JMP_IDX_MAX NB_MMU_MODES  /* 22 since QEMU 10 */
 +#define TB_JMP_IDX_LOG 1024
 +    uint16_t log_n[TB_JMP_IDX_MAX];
 +    uint16_t log[TB_JMP_IDX_MAX][TB_JMP_IDX_LOG];
@@ -331,7 +357,7 @@ index c3a505e39..24bda0552 100644
 +{
 +    unsigned n;
 +
-+    jc->idx[h] = idx;                /* idx < NB_MMU_MODES <= TB_JMP_IDX_MAX */
++    jc->idx[h] = idx;                /* idx < NB_MMU_MODES == TB_JMP_IDX_MAX */
 +    n = jc->log_n[idx];
 +    if (n < TB_JMP_IDX_LOG) {
 +        jc->log[idx][n] = h;
@@ -343,10 +369,10 @@ index c3a505e39..24bda0552 100644
 +
  #endif /* ACCEL_TCG_TB_JMP_CACHE_H */
 diff --git a/accel/tcg/tcg-runtime.h b/accel/tcg/tcg-runtime.h
-index c23b5e66c..bda0b46be 100644
+index 0b83217..13eb965 100644
 --- a/accel/tcg/tcg-runtime.h
 +++ b/accel/tcg/tcg-runtime.h
-@@ -25,6 +25,7 @@ DEF_HELPER_FLAGS_1(ctpop_i32, TCG_CALL_NO_RWG_SE, i32, i32)
+@@ -21,6 +21,7 @@ DEF_HELPER_FLAGS_1(ctpop_i32, TCG_CALL_NO_RWG_SE, i32, i32)
  DEF_HELPER_FLAGS_1(ctpop_i64, TCG_CALL_NO_RWG_SE, i64, i64)
  
  DEF_HELPER_FLAGS_1(lookup_tb_ptr, TCG_CALL_NO_WG_SE, cptr, env)
@@ -355,10 +381,10 @@ index c23b5e66c..bda0b46be 100644
  DEF_HELPER_FLAGS_1(exit_atomic, TCG_CALL_NO_WG, noreturn, env)
  
 diff --git a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
-index fdf6d8ac1..dd6d27887 100644
+index 328d96a..7e1933d 100644
 --- a/accel/tcg/translate-all.c
 +++ b/accel/tcg/translate-all.c
-@@ -663,3 +663,44 @@ void tcg_flush_jmp_cache(CPUState *cpu)
+@@ -636,3 +636,44 @@ void tcg_flush_jmp_cache(CPUState *cpu)
          qatomic_set(&jc->array[i].tb, NULL);
      }
  }
@@ -370,7 +396,7 @@ index fdf6d8ac1..dd6d27887 100644
 + * Flushing the TLB of other mmu_idx cannot change that translation, so
 + * only the entries of the flushed mmu_idx are dropped.
 + */
-+void tcg_flush_jmp_cache_idx(CPUState *cpu, uint16_t idxmap)
++void tcg_flush_jmp_cache_idx(CPUState *cpu, MMUIdxMap idxmap)
 +{
 +    CPUJumpCache *jc = cpu->tb_jmp_cache;
 +
@@ -404,20 +430,20 @@ index fdf6d8ac1..dd6d27887 100644
 +    }
 +}
 diff --git a/accel/tcg/translator.c b/accel/tcg/translator.c
-index cbad00a51..4298bd341 100644
+index 57daded..78328cd 100644
 --- a/accel/tcg/translator.c
 +++ b/accel/tcg/translator.c
-@@ -18,6 +18,9 @@
- #include "tcg/tcg-op-common.h"
- #include "internal-target.h"
+@@ -20,6 +20,9 @@
+ #include "internal-common.h"
  #include "disas/disas.h"
+ #include "tb-internal.h"
 +#include "exec/helper-gen-common.h"
 +#include "tb-jmp-cache.h"
 +#include "tb-hash.h"
  
  static void set_can_do_io(DisasContextBase *db, bool val)
  {
-@@ -472,3 +475,86 @@ void translator_fake_ld(DisasContextBase *db, const void *data, size_t len)
+@@ -528,3 +531,86 @@ void translator_fake_ld(DisasContextBase *db, const void *data, size_t len)
      db->fake_insn = true;
      record_save(db, db->pc_first, data, len);
  }
@@ -449,7 +475,7 @@ index cbad00a51..4298bd341 100644
 +void translator_lookup_and_goto_ptr_inline(DisasContextBase *db, TCGv_i64 pc,
 +                                           TCGv_i32 flags, bool verify)
 +{
-+    const int sh = TARGET_PAGE_BITS - TB_JMP_PAGE_BITS;
++    const int sh = TARGET_PAGE_BITS - TB_JMP_PAGE_BITS;  /* runtime in common code */
 +    TCGLabel *slow = gen_new_label();
 +    TCGv_i64 h = tcg_temp_new_i64();
 +    TCGv_i64 t = tcg_temp_new_i64();
@@ -473,8 +499,8 @@ index cbad00a51..4298bd341 100644
 +#endif
 +    tcg_gen_shli_i64(h, h, 4);
 +    tcg_gen_trunc_i64_ptr(p, h);
-+    tcg_gen_ld_ptr(e, tcg_env, offsetof(ArchCPU, parent_obj.tb_jmp_cache) -
-+                               offsetof(ArchCPU, env));
++    tcg_gen_ld_ptr(e, tcg_env, offsetof(CPUState, tb_jmp_cache) -
++                               (int)sizeof(CPUState));
 +    tcg_gen_add_ptr(e, e, p);
 +
 +    /* tb = entry.tb (atomic in the helper: an aligned pointer load) */
@@ -485,11 +511,11 @@ index cbad00a51..4298bd341 100644
 +    tcg_gen_ld_i32(a, tb, offsetof(TranslationBlock, flags));
 +    tcg_gen_brcond_i32(TCG_COND_NE, a, flags, slow);
 +    tcg_gen_ld_i32(a, tb, offsetof(TranslationBlock, cflags));
-+    tcg_gen_ld_i32(b, tcg_env, offsetof(ArchCPU, parent_obj.tcg_cflags) -
-+                               offsetof(ArchCPU, env));
++    tcg_gen_ld_i32(b, tcg_env, offsetof(CPUState, tcg_cflags) -
++                               (int)sizeof(CPUState));
 +    tcg_gen_brcond_i32(TCG_COND_NE, a, b, slow);
-+    tcg_gen_ld_ptr(p, tcg_env, offsetof(ArchCPU, parent_obj.breakpoints.tqh_first) -
-+                               offsetof(ArchCPU, env));
++    tcg_gen_ld_ptr(p, tcg_env, offsetof(CPUState, breakpoints.tqh_first) -
++                               (int)sizeof(CPUState));
 +    tcg_gen_brcondi_ptr(TCG_COND_NE, p, 0, slow);
 +
 +    if (verify) {
@@ -504,40 +530,24 @@ index cbad00a51..4298bd341 100644
 +    gen_helper_lookup_tb_ptr(p, tcg_env);
 +    tcg_gen_goto_ptr(p);
 +}
-diff --git a/include/exec/exec-all.h b/include/exec/exec-all.h
-index 2e4c4cc4b..ff231b6ef 100644
---- a/include/exec/exec-all.h
-+++ b/include/exec/exec-all.h
-@@ -502,6 +502,12 @@ struct MemoryRegionSection *iotlb_to_section(CPUState *cpu,
- tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, vaddr addr,
-                                         void **hostp);
- 
-+#ifndef CONFIG_USER_ONLY
-+/* POMPPC tcg/0008: see accel/tcg/cputlb.c and accel/tcg/cpu-exec.c */
-+tb_page_addr_t pomppc_code_phys_nofault(CPUArchState *env, vaddr addr);
-+void pomppc_jc_flush_stat(CPUState *cpu, bool dropped);
-+#endif
-+
- /**
-  * get_page_addr_code()
-  * @env: CPUArchState
+\ No newline at end of file
 diff --git a/include/exec/tb-flush.h b/include/exec/tb-flush.h
-index 142c240d9..b9d481895 100644
+index e971d4b..055eb74 100644
 --- a/include/exec/tb-flush.h
 +++ b/include/exec/tb-flush.h
-@@ -24,5 +24,7 @@
- void tb_flush(CPUState *cs);
+@@ -34,5 +34,7 @@ void tb_flush__exclusive_or_serial(void);
+ void queue_tb_flush(CPUState *cs);
  
  void tcg_flush_jmp_cache(CPUState *cs);
 +/* POMPPC tcg/0008: drop only the entries looked up under an mmu_idx of @idxmap */
-+void tcg_flush_jmp_cache_idx(CPUState *cs, uint16_t idxmap);
++void tcg_flush_jmp_cache_idx(CPUState *cs, MMUIdxMap idxmap);
  
  #endif /* _TB_FLUSH_H_ */
 diff --git a/include/exec/translator.h b/include/exec/translator.h
-index d8dcb77b5..7cd0c7cdb 100644
+index 978dee2..2b2fcd3 100644
 --- a/include/exec/translator.h
 +++ b/include/exec/translator.h
-@@ -172,6 +172,26 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
+@@ -161,6 +161,26 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
   */
  bool translator_use_goto_tb(DisasContextBase *db, vaddr dest);
  
@@ -565,10 +575,10 @@ index d8dcb77b5..7cd0c7cdb 100644
   * translator_io_start
   * @db: Disassembly context
 diff --git a/include/hw/core/cpu.h b/include/hw/core/cpu.h
-index c3ca0babc..dc63f2944 100644
+index b54035f..43a2ba2 100644
 --- a/include/hw/core/cpu.h
 +++ b/include/hw/core/cpu.h
-@@ -507,6 +507,16 @@ struct CPUState {
+@@ -519,6 +519,16 @@ struct CPUState {
      MemoryRegion *memory;
  
      struct CPUJumpCache *tb_jmp_cache;
@@ -586,10 +596,10 @@ index c3ca0babc..dc63f2944 100644
      GArray *gdb_regs;
      int gdb_num_regs;
 diff --git a/include/tcg/tcg-op-common.h b/include/tcg/tcg-op-common.h
-index 009e2778c..001cae86e 100644
+index c7d1529..9964775 100644
 --- a/include/tcg/tcg-op-common.h
 +++ b/include/tcg/tcg-op-common.h
-@@ -74,6 +74,12 @@ void tcg_gen_goto_tb(unsigned idx);
+@@ -85,6 +85,12 @@ void tcg_gen_goto_tb(unsigned idx);
   */
  void tcg_gen_lookup_and_goto_ptr(void);
  
@@ -603,10 +613,10 @@ index 009e2778c..001cae86e 100644
  void tcg_gen_plugin_mem_cb(TCGv_i64 addr, unsigned meminfo);
  
 diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
-index 00149616a..8d029bd72 100644
+index 767140d..c7373f8 100644
 --- a/target/ppc/cpu.h
 +++ b/target/ppc/cpu.h
-@@ -1373,6 +1373,13 @@ struct CPUArchState {
+@@ -1432,6 +1432,13 @@ struct CPUArchState {
       */
      bool fp_inline;
      bool fp_verify;
@@ -621,10 +631,10 @@ index 00149616a..8d029bd72 100644
      /* Internal devices resources */
      ppc_tb_t *tb_env;      /* Time base and decrementer */
 diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
-index 94c55458f..5fa219333 100644
+index 9853b7b..f546fba 100644
 --- a/target/ppc/cpu_init.c
 +++ b/target/ppc/cpu_init.c
-@@ -7451,6 +7451,17 @@ static Property ppc_cpu_properties[] = {
+@@ -86,6 +86,17 @@ static const Property powerpc_cpu_properties[] = {
       */
      DEFINE_PROP_BOOL("x-fp-inline", PowerPCCPU, env.fp_inline, false),
      DEFINE_PROP_BOOL("x-fp-verify", PowerPCCPU, env.fp_verify, false),
@@ -643,7 +653,7 @@ index 94c55458f..5fa219333 100644
       * AltiVec vaddfp/vsubfp/vmaddfp/vnmsubfp: the four lanes at once on the
       * host FPU when softfloat's hardfloat path would take each of them
 diff --git a/target/ppc/translate.c b/target/ppc/translate.c
-index c328f2e9b..461645712 100644
+index 914b4b5..dd89f90 100644
 --- a/target/ppc/translate.c
 +++ b/target/ppc/translate.c
 @@ -188,6 +188,7 @@ struct DisasContext {
@@ -654,7 +664,7 @@ index c328f2e9b..461645712 100644
      bool altivec_enabled;
      bool vsx_enabled;
      bool spe_enabled;
-@@ -3614,6 +3615,27 @@ static inline bool use_goto_tb(DisasContext *ctx, target_ulong dest)
+@@ -3654,6 +3655,27 @@ static inline bool use_goto_tb(DisasContext *ctx, target_ulong dest)
      return translator_use_goto_tb(&ctx->base, dest);
  }
  
@@ -681,8 +691,8 @@ index c328f2e9b..461645712 100644
 +
  static void gen_lookup_and_goto_ptr(DisasContext *ctx)
  {
-     if (unlikely(ctx->singlestep_enabled)) {
-@@ -3627,7 +3649,7 @@ static void gen_lookup_and_goto_ptr(DisasContext *ctx)
+     if (unlikely(ctx->singlestep_flags)) {
+@@ -3667,7 +3689,7 @@ static void gen_lookup_and_goto_ptr(DisasContext *ctx)
              pmu_count_insns(ctx);
          }
  
@@ -691,7 +701,7 @@ index c328f2e9b..461645712 100644
      }
  }
  
-@@ -6509,6 +6531,8 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+@@ -6553,6 +6575,8 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
      ctx->fpu_enabled = (hflags >> HFLAGS_FP) & 1;
      ctx->fp_inline = env->fp_inline && env->fp_prime_mask;
      ctx->fp_verify = ctx->fp_inline && env->fp_verify;
@@ -700,7 +710,7 @@ index c328f2e9b..461645712 100644
      ctx->spe_enabled = (hflags >> HFLAGS_SPE) & 1;
      ctx->altivec_enabled = (hflags >> HFLAGS_VR) & 1;
      ctx->vsx_enabled = (hflags >> HFLAGS_VSX) & 1;
-@@ -6653,7 +6677,7 @@ static void ppc_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
+@@ -6697,7 +6721,7 @@ static void ppc_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
              pmu_count_insns(ctx);
          }
  
@@ -710,17 +720,18 @@ index c328f2e9b..461645712 100644
  
      case DISAS_EXIT_UPDATE:
 diff --git a/tcg/tcg-op.c b/tcg/tcg-op.c
-index 4a7e70536..c60339a2b 100644
+index 4d15d1a..e23f531 100644
 --- a/tcg/tcg-op.c
 +++ b/tcg/tcg-op.c
-@@ -3353,3 +3353,10 @@ void tcg_gen_lookup_and_goto_ptr(void)
-     tcg_gen_op1i(INDEX_op_goto_ptr, tcgv_ptr_arg(ptr));
+@@ -2640,3 +2640,11 @@ void tcg_gen_lookup_and_goto_ptr(void)
+     tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
      tcg_temp_free_ptr(ptr);
  }
 +
++/* POMPPC tcg/0008: jump to a code pointer the caller has looked up */
 +void tcg_gen_goto_ptr(TCGv_ptr ptr)
 +{
 +    tcg_debug_assert(!(tcg_ctx->gen_tb->cflags & CF_NO_GOTO_PTR));
 +    plugin_gen_disable_mem_helpers();
-+    tcg_gen_op1i(INDEX_op_goto_ptr, tcgv_ptr_arg(ptr));
++    tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
 +}

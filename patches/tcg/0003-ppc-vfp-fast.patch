@@ -1,8 +1,8 @@
 diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
-index 1cf200525..19142815a 100644
+index 842759d..c787609 100644
 --- a/target/ppc/cpu.h
 +++ b/target/ppc/cpu.h
-@@ -1303,6 +1303,12 @@ struct CPUArchState {
+@@ -1364,6 +1364,12 @@ struct CPUArchState {
       * translator only.
       */
      bool lfs_inline;
@@ -16,10 +16,10 @@ index 1cf200525..19142815a 100644
      uint32_t sr_gen;
      uint32_t sr_snap_gen[2];
 diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
-index d6ff38d29..30209bd1a 100644
+index 4afc6ff..ffb290f 100644
 --- a/target/ppc/cpu_init.c
 +++ b/target/ppc/cpu_init.c
-@@ -7443,6 +7443,12 @@ static Property ppc_cpu_properties[] = {
+@@ -78,6 +78,12 @@ static const Property powerpc_cpu_properties[] = {
       * every input.  Off by default.
       */
      DEFINE_PROP_BOOL("x-lfs-inline", PowerPCCPU, env.lfs_inline, false),
@@ -31,9 +31,9 @@ index d6ff38d29..30209bd1a 100644
 +    DEFINE_PROP_BOOL("x-vfp-fast", PowerPCCPU, env.vfp_fast, false),
      /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
      DEFINE_PROP_UINT32("x-sr-tlb-verify", PowerPCCPU, env.sr_verify, 0),
-     DEFINE_PROP_END_OF_LIST(),
+ };
 diff --git a/target/ppc/int_helper.c b/target/ppc/int_helper.c
-index ef4b2e75d..0a95443f9 100644
+index ef4b2e7..0a95443 100644
 --- a/target/ppc/int_helper.c
 +++ b/target/ppc/int_helper.c
 @@ -32,6 +32,8 @@

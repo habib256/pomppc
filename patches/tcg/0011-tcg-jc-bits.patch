@@ -1,8 +1,8 @@
 diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
-index 5d8b166..6e7355d 100644
+index fd7d7af..0b55b0d 100644
 --- a/accel/tcg/cpu-exec.c
 +++ b/accel/tcg/cpu-exec.c
-@@ -260,6 +260,7 @@ enum { RV_LOOP, RV_HELPER, RV_INLINE, RV_N };
+@@ -228,6 +228,7 @@ enum { RV_LOOP, RV_HELPER, RV_INLINE, RV_N };
  static const char *const rv_name[RV_N] = { "boucle", "helper", "en-ligne" };
  static uint64_t rv_hit[RV_N], rv_miss[RV_N], rv_bad[RV_N], rv_race[RV_N];
  static uint64_t rv_nophys[RV_N], rv_jc_drop, rv_jc_skip, rv_total;
@@ -10,7 +10,7 @@ index 5d8b166..6e7355d 100644
  /* misses: entry dropped (same pc, no tb), other pc (conflict), same pc other flags/cflags */
  static uint64_t rv_m_drop, rv_m_other, rv_m_flags;
  static bool rv_atexit;
-@@ -275,10 +276,12 @@ static void rv_report(void)
+@@ -243,10 +244,12 @@ static void rv_report(void)
                  qatomic_read(&rv_bad[i]), qatomic_read(&rv_race[i]),
                  qatomic_read(&rv_nophys[i]));
      }
@@ -27,7 +27,7 @@ index 5d8b166..6e7355d 100644
              qatomic_read(&rv_m_other), qatomic_read(&rv_m_flags));
  }
  
-@@ -298,6 +301,14 @@ void pomppc_jc_flush_stat(CPUState *cpu, bool dropped)
+@@ -266,6 +269,14 @@ void pomppc_jc_flush_stat(CPUState *cpu, bool dropped)
      }
  }
  
@@ -42,7 +42,7 @@ index 5d8b166..6e7355d 100644
  static void rv_miss_stat(int src, TranslationBlock *tb, vaddr epc, vaddr pc)
  {
      rv_start();
-@@ -1257,6 +1268,7 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
+@@ -1242,6 +1253,7 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
          tcg_target_initialized = true;
      }
  
@@ -50,8 +50,20 @@ index 5d8b166..6e7355d 100644
      cpu->tb_jmp_cache = g_new0(CPUJumpCache, 1);
      tlb_init(cpu);
  #ifndef CONFIG_USER_ONLY
+diff --git a/accel/tcg/internal-common.h b/accel/tcg/internal-common.h
+index b411302..4913913 100644
+--- a/accel/tcg/internal-common.h
++++ b/accel/tcg/internal-common.h
+@@ -95,6 +95,7 @@ tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, vaddr addr,
+ /* POMPPC tcg/0008: see accel/tcg/cputlb.c and accel/tcg/cpu-exec.c */
+ tb_page_addr_t pomppc_code_phys_nofault(CPUArchState *env, vaddr addr);
+ void pomppc_jc_flush_stat(CPUState *cpu, bool dropped);
++void pomppc_jc_scan_stat(CPUState *cpu);       /* tcg/0011 */
+ #endif
+ 
+ /**
 diff --git a/accel/tcg/tb-jmp-cache.h b/accel/tcg/tb-jmp-cache.h
-index 24bda05..e0f70cf 100644
+index 1b7b237..f02567e 100644
 --- a/accel/tcg/tb-jmp-cache.h
 +++ b/accel/tcg/tb-jmp-cache.h
 @@ -13,7 +13,19 @@
@@ -94,7 +106,7 @@ index 24bda05..e0f70cf 100644
       * log_n[i] > TB_JMP_IDX_LOG: overflowed, scan the whole table.
 +     * TB_JMP_IDX_LOG is a quarter of the table (1024 for 2^12, tcg/0011).
       */
- #define TB_JMP_IDX_MAX 16
+ #define TB_JMP_IDX_MAX NB_MMU_MODES  /* 22 since QEMU 10 */
 -#define TB_JMP_IDX_LOG 1024
 +#define TB_JMP_IDX_LOG (TB_JMP_CACHE_SIZE / 4)
 +#define TB_JMP_IDX_LOG_MAX (TB_JMP_CACHE_MAX / 4)
@@ -105,18 +117,18 @@ index 24bda05..e0f70cf 100644
  
  /* POMPPC tcg/0008: record the instruction mmu_idx of a slot being filled */
 diff --git a/accel/tcg/tcg-all.c b/accel/tcg/tcg-all.c
-index 1df2ef6..1a4161e 100644
+index 6e4d208..d119644 100644
 --- a/accel/tcg/tcg-all.c
 +++ b/accel/tcg/tcg-all.c
-@@ -39,6 +39,7 @@
- #include "hw/boards.h"
- #endif
+@@ -45,6 +45,7 @@
+ #include "accel/accel-cpu-ops.h"
+ #include "accel/tcg/cpu-ops.h"
  #include "internal-common.h"
 +#include "tb-jmp-cache.h"
  
+ 
  struct TCGState {
-     AccelState parent_obj;
-@@ -221,6 +222,35 @@ static void tcg_set_jit_addr(Object *obj, Visitor *v, const char *name,
+@@ -270,6 +271,35 @@ static void tcg_set_jit_addr(Object *obj, Visitor *v, const char *name,
      }
  }
  
@@ -152,7 +164,7 @@ index 1df2ef6..1a4161e 100644
  static bool tcg_get_one_insn_per_tb(Object *obj, Error **errp)
  {
      TCGState *s = TCG_STATE(obj);
-@@ -281,6 +311,12 @@ static void tcg_accel_class_init(ObjectClass *oc, void *data)
+@@ -315,6 +345,12 @@ static void tcg_accel_class_init(ObjectClass *oc, const void *data)
          "Place the jit buffer in the same 4 GiB window as QEMU's text "
          "(POMPPC, docs/tcg-g4.md 14)");
  
@@ -166,10 +178,10 @@ index 1df2ef6..1a4161e 100644
          tcg_get_jit_addr, tcg_set_jit_addr, NULL, NULL);
      object_class_property_set_description(oc, "x-jit-addr",
 diff --git a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
-index dd6d278..059be66 100644
+index 7e1933d..3b09ef8 100644
 --- a/accel/tcg/translate-all.c
 +++ b/accel/tcg/translate-all.c
-@@ -650,6 +650,10 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
+@@ -623,6 +623,10 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
   * Called by generic code at e.g. cpu reset after cpu creation,
   * therefore we must be prepared to allocate the jump cache.
   */
@@ -180,7 +192,7 @@ index dd6d278..059be66 100644
  void tcg_flush_jmp_cache(CPUState *cpu)
  {
      CPUJumpCache *jc = cpu->tb_jmp_cache;
-@@ -687,6 +691,7 @@ void tcg_flush_jmp_cache_idx(CPUState *cpu, uint16_t idxmap)
+@@ -660,6 +664,7 @@ void tcg_flush_jmp_cache_idx(CPUState *cpu, MMUIdxMap idxmap)
          }
          n = jc->log_n[k];
          if (n > TB_JMP_IDX_LOG) {
@@ -188,15 +200,3 @@ index dd6d278..059be66 100644
              for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
                  if (jc->idx[i] == k) {
                      qatomic_set(&jc->array[i].tb, NULL);
-diff --git a/include/exec/exec-all.h b/include/exec/exec-all.h
-index 3f3b3f2..d4096da 100644
---- a/include/exec/exec-all.h
-+++ b/include/exec/exec-all.h
-@@ -509,6 +509,7 @@ tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, vaddr addr,
- /* POMPPC tcg/0008: see accel/tcg/cputlb.c and accel/tcg/cpu-exec.c */
- tb_page_addr_t pomppc_code_phys_nofault(CPUArchState *env, vaddr addr);
- void pomppc_jc_flush_stat(CPUState *cpu, bool dropped);
-+void pomppc_jc_scan_stat(CPUState *cpu);       /* tcg/0011 */
- #endif
- 
- /**

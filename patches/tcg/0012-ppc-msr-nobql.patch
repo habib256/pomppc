@@ -1,8 +1,8 @@
 diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
-index d533a21..ca1ccaf 100644
+index 1ebd510..6f3cbcf 100644
 --- a/target/ppc/cpu.h
 +++ b/target/ppc/cpu.h
-@@ -1384,6 +1384,18 @@ struct CPUArchState {
+@@ -1445,6 +1445,18 @@ struct CPUArchState {
       * docs/tcg-g4.md section 17).
       */
      bool icbi_sync;
@@ -22,10 +22,10 @@ index d533a21..ca1ccaf 100644
      /* Internal devices resources */
      ppc_tb_t *tb_env;      /* Time base and decrementer */
 diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
-index fbfabfc..cb58596 100644
+index d3bf4bb..2a5f582 100644
 --- a/target/ppc/cpu_init.c
 +++ b/target/ppc/cpu_init.c
-@@ -7471,6 +7471,15 @@ static Property ppc_cpu_properties[] = {
+@@ -106,6 +106,15 @@ static const Property powerpc_cpu_properties[] = {
       * invalidation made by a store and the store itself.  Off by default.
       */
      DEFINE_PROP_BOOL("x-icbi-sync", PowerPCCPU, env.icbi_sync, false),
@@ -42,10 +42,10 @@ index fbfabfc..cb58596 100644
       * AltiVec vaddfp/vsubfp/vmaddfp/vnmsubfp: the four lanes at once on the
       * host FPU when softfloat's hardfloat path would take each of them
 diff --git a/target/ppc/excp_helper.c b/target/ppc/excp_helper.c
-index 9f811af..ef7dc18 100644
+index 6d05b86..047783b 100644
 --- a/target/ppc/excp_helper.c
 +++ b/target/ppc/excp_helper.c
-@@ -2156,16 +2156,133 @@ static int ppc_next_unmasked_interrupt(CPUPPCState *env)
+@@ -2295,16 +2295,133 @@ static int ppc_next_unmasked_interrupt(CPUPPCState *env)
   *  - When cs->halted is changed and the CPU has a different interrupt masking
   *    logic in power-saving mode (e.g., POWER7/8/9/10);
   */
@@ -179,8 +179,70 @@ index 9f811af..ef7dc18 100644
  }
  
  #ifdef TARGET_PPC64
-@@ -2598,7 +2715,7 @@ void helper_raise_exception(CPUPPCState *env, uint32_t exception)
- #ifndef CONFIG_USER_ONLY
+diff --git a/target/ppc/helper_regs.c b/target/ppc/helper_regs.c
+index 205f88d..13d9fdb 100644
+--- a/target/ppc/helper_regs.c
++++ b/target/ppc/helper_regs.c
+@@ -302,7 +302,26 @@ void cpu_interrupt_exittb(CPUState *cs)
+ }
+ #endif
+ 
++/*
++ * POMPPC tcg/0012: from_tb = called by helper_store_msr (mtmsr, mtmsrd) or
++ * do_rfi, whose TB exits to the main loop right after the helper
++ * (DISAS_EXIT / DISAS_EXIT_UPDATE, or the single-step debug exception).
++ */
++static int hreg_store_msr_common(CPUPPCState *env, target_ulong value,
++                                 int alter_hv, bool from_tb);
++
+ int hreg_store_msr(CPUPPCState *env, target_ulong value, int alter_hv)
++{
++    return hreg_store_msr_common(env, value, alter_hv, false);
++}
++
++int hreg_store_msr_tb(CPUPPCState *env, target_ulong value, int alter_hv)
++{
++    return hreg_store_msr_common(env, value, alter_hv, true);
++}
++
++static int hreg_store_msr_common(CPUPPCState *env, target_ulong value,
++                                 int alter_hv, bool from_tb)
+ {
+     int excp;
+ #if !defined(CONFIG_USER_ONLY)
+@@ -335,7 +354,11 @@ int hreg_store_msr(CPUPPCState *env, target_ulong value, int alter_hv)
+     /* PPE42 uses IR, DR and EP MSR bits for other purposes */
+     if (likely(!(env->flags & POWERPC_FLAG_PPE42))) {
+         if ((value ^ env->msr) & (R_MSR_IR_MASK | R_MSR_DR_MASK)) {
+-            cpu_interrupt_exittb(cs);
++            if (from_tb && env->msr_nobql) {
++                ppc_nobql_exittb_count(env);  /* tcg/0012: the TB exits anyway */
++            } else {
++                cpu_interrupt_exittb(cs);
++            }
+         }
+         if (unlikely((value ^ env->msr) & R_MSR_EP_MASK)) {
+             env->excp_prefix = FIELD_EX64(value, MSR, EP) * 0xFFF00000;
+diff --git a/target/ppc/helper_regs.h b/target/ppc/helper_regs.h
+index f491af1..51f8302 100644
+--- a/target/ppc/helper_regs.h
++++ b/target/ppc/helper_regs.h
+@@ -27,6 +27,9 @@ void hreg_compute_hflags(CPUPPCState *env);
+ void hreg_update_pmu_hflags(CPUPPCState *env);
+ void cpu_interrupt_exittb(CPUState *cs);
+ int hreg_store_msr(CPUPPCState *env, target_ulong value, int alter_hv);
++/* POMPPC tcg/0012: same, from a helper whose TB then exits to the main loop */
++int hreg_store_msr_tb(CPUPPCState *env, target_ulong value, int alter_hv);
++void ppc_nobql_exittb_count(CPUPPCState *env);
+ 
+ #ifdef CONFIG_USER_ONLY
+ static inline void check_tlb_flush(CPUPPCState *env, bool global) { }
+diff --git a/target/ppc/tcg-excp_helper.c b/target/ppc/tcg-excp_helper.c
+index b04f07a..11fb1f7 100644
+--- a/target/ppc/tcg-excp_helper.c
++++ b/target/ppc/tcg-excp_helper.c
+@@ -481,7 +481,7 @@ void helper_pminsn(CPUPPCState *env, uint32_t insn)
+ #endif /* TARGET_PPC64 */
  void helper_store_msr(CPUPPCState *env, target_ulong val)
  {
 -    uint32_t excp = hreg_store_msr(env, val, 0);
@@ -188,7 +250,7 @@ index 9f811af..ef7dc18 100644
  
      if (excp != 0) {
          cpu_interrupt_exittb(env_cpu(env));
-@@ -2660,13 +2777,23 @@ static void do_rfi(CPUPPCState *env, target_ulong nip, target_ulong msr)
+@@ -514,13 +514,23 @@ static void do_rfi(CPUPPCState *env, target_ulong nip, target_ulong msr)
  #endif
      /* XXX: beware: this is false if VLE is supported */
      env->nip = nip & ~((target_ulong)0x00000003);
@@ -214,61 +276,3 @@ index 9f811af..ef7dc18 100644
      /* Reset the reservation */
      env->reserve_addr = -1;
  
-diff --git a/target/ppc/helper_regs.c b/target/ppc/helper_regs.c
-index eea1976..8912fb1 100644
---- a/target/ppc/helper_regs.c
-+++ b/target/ppc/helper_regs.c
-@@ -296,7 +296,26 @@ void cpu_interrupt_exittb(CPUState *cs)
-     }
- }
- 
-+/*
-+ * POMPPC tcg/0012: from_tb = called by helper_store_msr (mtmsr, mtmsrd) or
-+ * do_rfi, whose TB exits to the main loop right after the helper
-+ * (DISAS_EXIT / DISAS_EXIT_UPDATE, or the single-step debug exception).
-+ */
-+static int hreg_store_msr_common(CPUPPCState *env, target_ulong value,
-+                                 int alter_hv, bool from_tb);
-+
- int hreg_store_msr(CPUPPCState *env, target_ulong value, int alter_hv)
-+{
-+    return hreg_store_msr_common(env, value, alter_hv, false);
-+}
-+
-+int hreg_store_msr_tb(CPUPPCState *env, target_ulong value, int alter_hv)
-+{
-+    return hreg_store_msr_common(env, value, alter_hv, true);
-+}
-+
-+static int hreg_store_msr_common(CPUPPCState *env, target_ulong value,
-+                                 int alter_hv, bool from_tb)
- {
-     int excp;
- #if !defined(CONFIG_USER_ONLY)
-@@ -317,7 +336,11 @@ int hreg_store_msr(CPUPPCState *env, target_ulong value, int alter_hv)
-         value |= env->msr & (1 << MSR_ME);
-     }
-     if ((value ^ env->msr) & (R_MSR_IR_MASK | R_MSR_DR_MASK)) {
--        cpu_interrupt_exittb(cs);
-+        if (from_tb && env->msr_nobql) {
-+            ppc_nobql_exittb_count(env);    /* tcg/0012: the TB exits anyway */
-+        } else {
-+            cpu_interrupt_exittb(cs);
-+        }
-     }
-     if ((env->mmu_model == POWERPC_MMU_BOOKE ||
-          env->mmu_model == POWERPC_MMU_BOOKE206) &&
-diff --git a/target/ppc/helper_regs.h b/target/ppc/helper_regs.h
-index e62b1e5..aa09d1b 100644
---- a/target/ppc/helper_regs.h
-+++ b/target/ppc/helper_regs.h
-@@ -25,6 +25,9 @@ void hreg_compute_hflags(CPUPPCState *env);
- void hreg_update_pmu_hflags(CPUPPCState *env);
- void cpu_interrupt_exittb(CPUState *cs);
- int hreg_store_msr(CPUPPCState *env, target_ulong value, int alter_hv);
-+/* POMPPC tcg/0012: same, from a helper whose TB then exits to the main loop */
-+int hreg_store_msr_tb(CPUPPCState *env, target_ulong value, int alter_hv);
-+void ppc_nobql_exittb_count(CPUPPCState *env);
- 
- #ifdef CONFIG_USER_ONLY
- static inline void check_tlb_flush(CPUPPCState *env, bool global) { }

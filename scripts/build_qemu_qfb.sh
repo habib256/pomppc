@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 VERHILLE Arnaud
-# build_qemu_qfb.sh — reconstruit LE binaire de référence de POMPPC : QEMU 9.2.0 +
+# build_qemu_qfb.sh — reconstruit LE binaire de référence de POMPPC : QEMU 11.1.2 +
 #
 #   • le device audio « screamer » (AWACS PowerMac)  — patches/screamer/
 #   • le device paravirtuel « qfb-pci »              — patches/qfb/
@@ -32,7 +32,7 @@
 #                                    (la publication macOS, scripts/package_release_macos.sh)
 #
 # macOS : affichage Cocoa et son CoreAudio au lieu de GTK/SDL et PulseAudio.
-# Le configure de QEMU 9.2 exige un Python ≥ 3.8 avec « tomli » (ou ≥ 3.11) et
+# Le configure de QEMU 11.1 exige un Python ≥ 3.9 avec « tomli » (ou ≥ 3.11) et
 # « distlib » : sur macOS, un venv suffit (python3 -m venv v && v/bin/pip
 # install distlib tomli ; PYTHON=v/bin/python3).
 #
@@ -48,7 +48,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="${QEMU_SRC:-$HOME/src/qemu}"
-TAG="${QEMU_TAG:-v9.2.0}"
+TAG="${QEMU_TAG:-v11.1.2}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}"
 
 # -e et non -d : dans un worktree git, .git est un fichier.
@@ -58,6 +58,15 @@ if [ ! -e "$SRC/.git" ]; then
 fi
 
 cd "$SRC"
+
+# La série de patches vise UNE version de QEMU. Un arbre d'une autre version (le
+# ~/src/qemu en 9.2.0 d'avant le passage à 11.1.2, le 01/10/2026) recevrait des
+# hunks posés de travers : refus net, plutôt qu'un binaire à moitié patché.
+if [ "$(cat VERSION)" != "${TAG#v}" ]; then
+  echo "⚠ $SRC est QEMU $(cat VERSION), la série de patches vise ${TAG#v}." >&2
+  echo "  QEMU_SRC=<autre dossier> pour un clone neuf, ou QEMU_TAG= pour forcer." >&2
+  exit 1
+fi
 
 # --- 0. Application des patches : aucun rejet silencieux ---
 #
@@ -143,7 +152,7 @@ if ! grep -q "define GPIO_RESET_CPU1" hw/misc/macio/gpio.c; then
     git checkout -- hw/misc/macio/gpio.c hw/ppc/mac_newworld.c hw/intc/openpic.c
   fi
   echo "▶ patch SMP mac99"
-  # --fuzz=0 : cette série s'applique exactement sur v9.2.0 (aucun décalage).
+  # --fuzz=0 : cette série s'applique exactement sur v11.1.2 (aucun décalage).
   # Un fuzz toléré, c'est un hunk posé ailleurs qu'à sa place, et la seule
   # trace serait un bug de timing dans l'invité.
   patch_strict "$ROOT/patches/smp-mac99/qemu-mac99-cpus-v2.patch" --fuzz=0
@@ -174,12 +183,13 @@ hw/intc/openpic.c opp->src\[i\].pending = 0
 include/hw/ppc/openpic.h int input;
 OPENPIC_MARKERS
 
-# --- 2. Constantes GPIO absentes de 9.2.0 ---
+# --- 2. Constantes GPIO (absentes de 9.2.0 ; enum MacioGPIORegisterBits depuis 10.x) ---
 # La série SMP les apporte désormais elle-même (OUT_DATA / IN_DATA / OUT_ENABLE
 # en tête de gpio.c) : le garde les trouve et saute l'insertion. Le bloc reste
 # pour un arbre patché avec une série plus ancienne, qui les supposait sans les
 # définir.
-if ! grep -q "define OUT_ENABLE" hw/misc/macio/gpio.c; then
+# 11.1 les déclare dans une enum : y ajouter une macro du même nom casserait l'enum.
+if ! grep -qE "define OUT_ENABLE|OUT_ENABLE *=" hw/misc/macio/gpio.c; then
   echo "▶ ajout des constantes GPIO IN_DATA / OUT_ENABLE"
   python3 - <<'PY'
 p = 'hw/misc/macio/gpio.c'
@@ -512,7 +522,7 @@ TCG7_MARKERS
       accel/tcg/tcg-runtime.h     lookup_tb_ptr_check \
       accel/tcg/translate-all.c   tcg_flush_jmp_cache_idx \
       accel/tcg/translator.c      translator_lookup_and_goto_ptr_inline \
-      include/exec/exec-all.h     pomppc_jc_flush_stat \
+      accel/tcg/internal-common.h pomppc_jc_flush_stat \
       include/exec/tb-flush.h     tcg_flush_jmp_cache_idx \
       include/exec/translator.h   translator_can_goto_ptr_inline \
       include/hw/core/cpu.h       jc_by_idx \
@@ -555,7 +565,7 @@ TCG8_MARKERS
       accel/tcg/cputlb.c      "ram_addr_t ram_addr)" \
       accel/tcg/tb-maint.c    tb_page_protect_locked \
       accel/tcg/tb-maint.c    tb_invalidate_phys_line_sync \
-      include/exec/exec-all.h tb_invalidate_phys_line_sync \
+      include/exec/translation-block.h tb_invalidate_phys_line_sync \
       target/ppc/cpu.h        "bool icbi_sync" \
       target/ppc/cpu_init.c   x-icbi-sync \
       target/ppc/mem_helper.c tb_invalidate_phys_line_sync

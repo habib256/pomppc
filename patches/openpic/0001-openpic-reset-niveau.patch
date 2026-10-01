@@ -1,7 +1,8 @@
-diff -ruN a/hw/intc/openpic.c b/hw/intc/openpic.c
---- a/hw/intc/openpic.c	2026-09-29 17:34:46
-+++ b/hw/intc/openpic.c	2026-09-29 17:34:46
-@@ -398,6 +398,7 @@
+diff --git a/hw/intc/openpic.c b/hw/intc/openpic.c
+index 381a204..c6b5b36 100644
+--- a/hw/intc/openpic.c
++++ b/hw/intc/openpic.c
+@@ -398,6 +398,7 @@ static void openpic_set_irq(void *opaque, int n_IRQ, int level)
      src = &opp->src[n_IRQ];
      DPRINTF("openpic: set irq %d = %d ivpr=0x%08x",
              n_IRQ, level, src->ivpr);
@@ -9,7 +10,7 @@ diff -ruN a/hw/intc/openpic.c b/hw/intc/openpic.c
      if (src->level) {
          /* level-sensitive irq */
          src->pending = level;
-@@ -534,6 +535,15 @@
+@@ -534,6 +535,15 @@ static inline void write_IRQreg_ivpr(OpenPICState *opp, int n_IRQ, uint32_t val)
          break;
      }
  
@@ -25,7 +26,7 @@ diff -ruN a/hw/intc/openpic.c b/hw/intc/openpic.c
      openpic_update_irq(opp, n_IRQ);
      DPRINTF("Set IVPR %d to 0x%08x -> 0x%08x", n_IRQ, val,
              opp->src[n_IRQ].ivpr);
-@@ -1268,6 +1278,19 @@
+@@ -1268,6 +1278,19 @@ static void openpic_reset(DeviceState *d)
      /* Initialise IRQ sources */
      for (i = 0; i < opp->max_irq; i++) {
          opp->src[i].ivpr = opp->ivpr_reset;
@@ -45,7 +46,7 @@ diff -ruN a/hw/intc/openpic.c b/hw/intc/openpic.c
          switch (opp->src[i].type) {
          case IRQ_TYPE_NORMAL:
              opp->src[i].level = !!(opp->ivpr_reset & IVPR_SENSE_MASK);
-@@ -1456,6 +1479,8 @@
+@@ -1456,6 +1479,8 @@ static int openpic_post_load(void *opaque, int version_id)
  
      /* Update internal ivpr and idr variables */
      for (i = 0; i < opp->max_irq; i++) {
@@ -54,10 +55,11 @@ diff -ruN a/hw/intc/openpic.c b/hw/intc/openpic.c
          write_IRQreg_idr(opp, i, opp->src[i].idr);
          write_IRQreg_ivpr(opp, i, opp->src[i].ivpr);
      }
-diff -ruN a/include/hw/ppc/openpic.h b/include/hw/ppc/openpic.h
---- a/include/hw/ppc/openpic.h	2026-09-29 17:34:46
-+++ b/include/hw/ppc/openpic.h	2026-09-29 17:34:46
-@@ -71,6 +71,7 @@
+diff --git a/include/hw/ppc/openpic.h b/include/hw/ppc/openpic.h
+index 5856955..38ce47d 100644
+--- a/include/hw/ppc/openpic.h
++++ b/include/hw/ppc/openpic.h
+@@ -71,6 +71,7 @@ typedef struct IRQSource {
      int last_cpu;
      int output;     /* IRQ level, e.g. OPENPIC_OUTPUT_INT */
      int pending;    /* TRUE if IRQ is pending */

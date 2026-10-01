@@ -28,9 +28,9 @@
 #define HW_AUDIO_SCREAMER_H
 
 #include "qemu/osdep.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "hw/ppc/mac_dbdma.h"
-#include "audio/audio.h"
+#include "qemu/audio.h"
 
 #define TYPE_SCREAMER "screamer"
 OBJECT_DECLARE_SIMPLE_TYPE(ScreamerState, SCREAMER)
@@ -50,7 +50,7 @@ struct ScreamerState {
     qemu_irq dma_tx_irq;
     qemu_irq dma_rx_irq;
 
-    QEMUSoundCard card;
+    AudioBackend *audio_be;
     SWVoiceOut *voice;
     uint8_t *mixbuf;
     int samples;
