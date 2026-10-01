@@ -1,5 +1,6 @@
 #!/bin/bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # regab.sh ÉTIQUETTE… — campagne « deux régimes » (docs/tcg-g4.md §14) sur le
 # disque de DÉVELOPPEMENT (jamais la VM quotidienne). Chaque étiquette = un
 # processus QEMU neuf : démarrage du bureau, relevé de la carte mémoire de QEMU

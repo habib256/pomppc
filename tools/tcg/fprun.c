@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * fprun.c — greffon TCG : longueur des « suites » de flottant scalaire que le
  * G4 émulé exécute (docs/tcg-g4.md §22).

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """moncmd.py — envoie une commande HMP au moniteur QEMU et affiche la réponse.
 
 Le moniteur est exposé en socket UNIX par les lanceurs (`-monitor unix:...`) :

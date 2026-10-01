@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """samplesum.py FICHIER [N] — résume un `sample <pid>` macOS du processus QEMU.
 
 1. par fil : échantillons totaux, et part « code généré » (cadres ??? dans

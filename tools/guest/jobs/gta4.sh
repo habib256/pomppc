@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # gta4.sh <label> [VAR=valeur...] — scènes gltest de l'état (A4, bloc d'état :
 # docs/protocole-v23-etat.md), jouées dans l'invité avec le plugin installé :
 # verdict de chaque scène, empreinte md5 de l'image, lignes STATE / STATEBLK /

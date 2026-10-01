@@ -1,5 +1,6 @@
 #!/bin/bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # d3run.sh <étiquette> <SMP> <SRTLB 0|1> [sample 0|1] — une partie de DOOM 3
 # (demo_mars_city1) sur la VM QUOTIDIENNE, pour les A/B du processeur émulé
 # (docs/tcg-g4.md). Chaque partie redémarre QEMU (DOOM 3 ne se relance pas

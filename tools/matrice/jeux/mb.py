@@ -1,4 +1,5 @@
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """Marble Blast Gold — témoin du pipeline fixe (GarageGames Torque, Carbon/AGL).
 
 Lancement : `-fullscreen` ou `-windowed` et `-mission

@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * qgpu-pci.c — GPU paravirtuel « qgpu » pour l'invité Mac OS X Tiger PPC
  *              (machine mac99), côté QEMU.

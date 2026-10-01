@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """regidx.py REF[,REF…] FICHIER… — indice de régime d'une passe de Marble Blast
 (docs/tcg-g4.md §14).
 

@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # fptest - equivalence du flottant scalaire simple precision : helpers d'origine
 # <-> chemin court de x-fp-inline (patches/tcg/0007-ppc-fp-inline, docs/tcg-g4.md
 # section 15).

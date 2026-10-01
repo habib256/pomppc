@@ -1,4 +1,5 @@
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """DOOM 3 Demo — idTech4, programmes ARB2, VBO, 7 unités, DXT.
 
 Partie `game/demo_mars_city1` lancée par `+map`, sans toucher à rien : la

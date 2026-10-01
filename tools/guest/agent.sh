@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # agent.sh — agent de la boucle de développement, DANS l'invité Tiger.
 #
 #   sh /pomppc/agent.sh <secteur_inbox> <secteur_outbox>

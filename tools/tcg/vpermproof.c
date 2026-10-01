@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * vpermproof.c — preuve d'équivalence de patches/tcg/0004-ppc-vperm-fast.patch
  * (propriété x-vperm-fast, docs/tcg-g4.md §10).

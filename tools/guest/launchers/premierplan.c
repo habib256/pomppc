@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /* premierplan.c — fait d'un exécutable lancé depuis un shell une application
  * « de premier plan » (POMPPC, 27/09/2026).
  *

@@ -1,4 +1,5 @@
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """Unreal Tournament 2004 Demo — tableaux, VBO, S3TC, cartes de cube (SDL, Mach-O).
 
 Scène fixe DÉTERMINISTE, reprise du job `utflyby` (tools/guest/jobs/utflyby) :

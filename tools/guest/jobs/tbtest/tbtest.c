@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (c) 2026 VERHILLE Arnaud
  * tbtest — coût et cohérence de la base de temps lue par mftb/mftbu.
  *   gcc -O2 -o tbtest tbtest.c && ./tbtest [N]
  * 1. ns par lecture (mftb seul, couple mftbu/mftb/mftbu comme le fait Tiger) ;

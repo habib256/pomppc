@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # Crée le disque dur virtuel (qcow2, alloué à la demande => ne prend pas 16G tout de suite).
 source "$(dirname "$0")/lib.sh"
 need qemu-img

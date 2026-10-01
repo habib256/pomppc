@@ -1,4 +1,5 @@
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """Prey Demo — idTech4 (Human Head), ARB2, VBO, DXT5 (cartes de normales).
 
 Sauvegarde automatique « Fuite à toute vitesse » (`+loadGame

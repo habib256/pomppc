@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """hmp.py SOCKET "commande" [...] — envoie des commandes HMP au moniteur QEMU
 (-monitor unix:SOCKET,server=on,wait=off) et imprime leurs réponses."""
 import socket, sys, time

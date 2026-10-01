@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # hostcompat.sh — ce qui diffère entre un hôte Linux et un hôte macOS.
 #
 # Sourcé par run_tiger.sh, run_os9.sh et scripts/boot.sh. Les lanceurs ont été

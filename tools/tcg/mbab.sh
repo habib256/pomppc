@@ -1,5 +1,6 @@
 #!/bin/bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # mbab.sh <config>… — A/B Marble Blast entrelacé sur le disque de DÉVELOPPEMENT
 # (jamais la VM quotidienne). Une config = « étiquette:SMP:propriétés CPU » ;
 # chaque config = un démarrage de la VM, une chauffe, NPASS passes de 240 s

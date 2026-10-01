@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * lfsproof.c — preuve d'équivalence de patches/tcg/0002-ppc-lfs-inline.patch
  * (propriété x-lfs-inline, docs/tcg-g4.md §8).

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # fpproof-mut.sh [arbre-QEMU] [vecteurs] — contre-épreuve de fpproof.sh : chaque
 # mutation du bloc « fp-inline » doit être DÉTECTÉE (divergences > 0).
 set -uo pipefail

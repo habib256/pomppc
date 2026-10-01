@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # Tâche 4.2 — l'accélérateur IOKit publié par le kext (docs/re/accelerateur-iokit.md).
 #
 # Deux modes, selon qu'il y a un framebuffer :

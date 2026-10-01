@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """fpnatd3sum.py [DOSSIER] — résume les parties DOOM 3 de tools/tcg/fpnatd3.py
 (défaut <dépôt principal>/bench/tcg/fpnat/d3) : par mode (nom de partie sans
 son numéro), ms/image de chaque partie sur la fenêtre T+50..T+280 et sur les

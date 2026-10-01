@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """gen_tramp.py — génère les trampolines PowerPC du plugin OpenGL POMPPC.
 
 Deux familles, toutes deux sans toucher aux arguments (entiers r3–r10,
@@ -84,7 +85,7 @@ def tramp(label, hookid):
 
 
 def main():
-    out = ["; GPL3 - Copyleft VERHILLE Arnaud",
+    out = ["; SPDX-License-Identifier: GPL-3.0-or-later", "; Copyright (c) 2026 VERHILLE Arnaud",
            "; gld_tramp.s — GÉNÉRÉ par tools/gld/gen_tramp.py, ne pas éditer.",
            "; Trampolines du plugin OpenGL POMPPC (voir pomppc_gld.c).", "",
            "\t.text", ""]

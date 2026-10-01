@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """epreuve_reset.py — épreuve « panique puis system_reset » sur la VM quotidienne.
 
     python3 tools/re/epreuve_reset.py MACH_KERNEL [N] [--normal]

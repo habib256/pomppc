@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 // Headless verification of the QEMU↔D-Bus pipeline (no GLFW/ImGui/X needed).
 // Launches the guest under -snapshot, waits for the first live Scanout, prints
 // its dimensions and a PPM screenshot, then tears down.

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # make_kext_iso.sh — grave les sources des kexts (POMPPCQFB, POMPPCGPU) et du
 # programme de test invité (guest/qgpu-test) sur un CD ISO, à monter dans
 # l'invité Tiger pour les y compiler (l'hôte n'a pas de toolchain

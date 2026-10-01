@@ -1,0 +1,83 @@
+Source of patches/smp-mac99/openbios-smp-screamer.elf (GPL-2.0, OpenBIOS).
+Base: https://github.com/mcayland/openbios.git commit e1e703ac0ad615ab0d7edea54db600aaa629bf07
+("macio: add awacs/screamer device", Mark Cave-Ayland, 2019-08-22), plus this diff.
+Build: ./config/scripts/switch-arch ppc && make (powerpc cross gcc); obj-ppc/openbios-qemu.elf
+is byte-identical to openbios-smp-screamer.elf (sha1 f11083a8f54782530be6154dfa56c6a9c3ace97e).
+
+diff --git a/Makefile.target b/Makefile.target
+index 4c54105..0ad3da4 100644
+--- a/Makefile.target
++++ b/Makefile.target
+@@ -25,11 +25,11 @@ NM     := $(TARGET)nm
+ STRIP  := $(TARGET)strip
+ RANLIB := $(TARGET)ranlib
+ 
+-CFLAGS+= -Os -g -DNATIVE_BITWIDTH_EQUALS_HOST_BITWIDTH -USWAP_ENDIANNESS
++CFLAGS+= -O1 -g -DNATIVE_BITWIDTH_EQUALS_HOST_BITWIDTH -USWAP_ENDIANNESS
+ CFLAGS+= -Wall -Wredundant-decls -Wshadow -Wpointer-arith
+ CFLAGS+= -Wstrict-prototypes -Wmissing-declarations -Wundef -Wendif-labels
+ CFLAGS+= -Wstrict-aliasing -Wwrite-strings -Wmissing-prototypes -Wnested-externs
+-CFLAGS+= -Werror
++CFLAGS+= -Werror -Wno-error
+ # Flags for dependency generation
+ CFLAGS+= -MMD -MP -MT $@ -MF '$(*D)/$(*F).d'
+ INCLUDES := -I$(SRCDIR)/include -I$(SRCDIR)/kernel/include -I$(ODIR)/target/include
+diff --git a/arch/ppc/qemu/init.c b/arch/ppc/qemu/init.c
+index 45cd77e..9bd2ee3 100644
+--- a/arch/ppc/qemu/init.c
++++ b/arch/ppc/qemu/init.c
+@@ -350,6 +350,7 @@ cpu_add_pir_property(void)
+     asm("mfspr %0, 1023\n"
+         : "=r"(pir) :);
+     PUSH(pir);
++    printk("Pir = %lu \n", pir);
+     fword("encode-int");
+     push_str("reg");
+     fword("property");
+@@ -381,9 +382,9 @@ static void
+ cpu_g4_init(const struct cpudef *cpu)
+ {
+     cpu_generic_init(cpu);
+-    cpu_add_pir_property();
++    //cpu_add_pir_property();
+ 
+-    fword("finish-device");
++    //fword("finish-device");
+ }
+ 
+ #ifdef CONFIG_PPC_64BITSUPPORT
+@@ -554,7 +555,7 @@ static const struct cpudef ppc_defs[] = {
+         .dcache_block_size = 0x20,
+         .tlb_sets = 0x40,
+         .tlb_size = 0x80,
+-        .initfn = cpu_750_init,
++        .initfn = cpu_g4_init,
+     },
+     {
+         .iu_version = 0x0000c0000,
+@@ -1009,11 +1010,24 @@ arch_of_init(void)
+     push_str("reg");
+     fword("property");
+ 
++for (int i= 0; i<temp; i++) {
+     cpu = id_cpu();
+     cpu->initfn(cpu);
+-    printk("CPU type %s\n", cpu->name);
+ 
++    printk("CPU type %s\n", cpu->name);
+     snprintf(buf, sizeof(buf), "/cpus/%s", cpu->name);
++    PUSH(i);
++    fword("encode-int");
++    push_str("reg");
++    fword("property");
++    if (i!=0){
++        push_str("stopped");
++        fword("encode-string");
++        push_str("state");
++        fword("property");
++        }
++    fword("finish-device");
++}
+     ofmem_register(find_dev("/memory"), find_dev(buf));
+     node_methods_init(buf);
+ 

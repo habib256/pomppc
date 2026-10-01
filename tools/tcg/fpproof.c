@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * fpproof.c — preuve hôte de patches/tcg/0007-ppc-fp-inline.patch (x-fp-inline).
  * Lancé par tools/tcg/fpproof.sh, qui le compile avec les -I/-D de

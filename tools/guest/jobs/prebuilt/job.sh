@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # Binaires prêts à installer, pour un Tiger SANS Xcode Tools : kext, plugin
 # OpenGL, gltest, glwin et accelprobe, compilés ici puis rapportés dans out/prebuilt.
 # scripts/make_kext_iso.sh les grave sur le CD (disks/prebuilt), et

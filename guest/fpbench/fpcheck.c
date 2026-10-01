@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /* fpcheck.c — test différentiel déterministe du flottant PowerPC (G4 7400).
  *
  * But : prouver que deux QEMU (ou deux réglages de CPU : `-cpu g4` contre

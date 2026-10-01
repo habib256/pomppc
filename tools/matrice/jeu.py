@@ -1,4 +1,5 @@
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """jeu.py — classe de base d'un jeu de la matrice (un module par jeu dans
 tools/matrice/jeux/). Un jeu dit comment il se lance dans chaque mode, quand
 sa scène fixe est atteinte (fenêtre de mesure dans frames.csv), comment il

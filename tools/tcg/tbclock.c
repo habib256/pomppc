@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (c) 2026 VERHILLE Arnaud
  * tbclock.c — sur l'hôte (arm64 macOS) : ce que coûte la base de temps de QEMU
  * (clock_gettime(CLOCK_MONOTONIC) + muldiv64) et ce que coûterait sa lecture
  * directe (cntvct_el0), résolution et relation entre les horloges.

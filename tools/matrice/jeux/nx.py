@@ -1,4 +1,5 @@
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """Nexuiz 2.5.2 — moteur DarkPlaces (GPL), AGL (Carbon), chemin ARB / fixe.
 
 Scène fixe DÉTERMINISTE : `-benchmark demos/demo1` (démo de

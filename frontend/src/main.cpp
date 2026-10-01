@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 // POMPPC — Dear ImGui + GLFW/OpenGL3 shell around a QEMU PowerPC Mac.
 // The QEMU display arrives over D-Bus (QemuBridge); we upload it as a texture
 // and render it inside an ImGui window, exactly like pom68k does with its

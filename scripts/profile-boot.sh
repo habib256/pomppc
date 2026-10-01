@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # Profile un boot headless avec perf pour voir où l'hôte brûle ses cycles.
 # Usage: scripts/profile-boot.sh [duree_s]   (défaut 55s, ~ le temps d'un boot)
 # Nécessite peut-être: sudo sysctl kernel.perf_event_paranoid=1

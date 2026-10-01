@@ -66,8 +66,8 @@ Findings S-C1, S-C2, S-C3, S-M1, S-M2, S-M3 et mineurs de
 Pour trancher en VM, les traces amont suffisent :
 `-d trace:macio_gpio_write,trace:macio_set_gpio,trace:macio_gpio_irq_assert,trace:macio_gpio_irq_deassert`.
 
-Reste **côté firmware**, hors de portée de ce patch : `openbios-smp-screamer.elf` n'a pas de
-source dans le dépôt, ne publie pas de propriété `soft-reset`, et c'est lui qui décide de ce
+Reste **côté firmware**, hors de portée de ce patch : `openbios-smp-screamer.elf` (source :
+`smp-mac99/openbios-smp-screamer-source.patch`) ne publie pas de propriété `soft-reset`, et c'est lui qui décide de ce
 que vaut `reg` dans les nœuds `/cpus` (il doit y mettre le PIR pour que le correctif S-C1
 serve).
 
@@ -153,8 +153,11 @@ moitié appliqué ». Les cinq marqueurs sont vérifiés un par un après coup.
 | `smp-mac99/openbios-smp-screamer.elf` | **Celui qu'on utilise.** OpenBIOS unifié : bring-up SMP + nœud audio screamer. Passé en `-bios` par `run_tiger.sh` et `run_os9.sh`. Compilé en `-O1` (gcc-13 miscompile ce code OpenBIOS à `-Os`). |
 | `smp-mac99/openbios-qemu-smp.elf` | **Supplanté.** Build antérieur, SMP seul, sans le nœud audio. Gardé pour bissecter si l'unifié régresse. Aucun script ne le référence. |
 
-Ces `.elf` sont des binaires : ils ne se régénèrent pas depuis ce dépôt (il faut un arbre
-OpenBIOS et la chaîne croisée PowerPC).
+Ces `.elf` sont des binaires (OpenBIOS, GPL-2.0). La source de `openbios-smp-screamer.elf` est
+`smp-mac99/openbios-smp-screamer-source.patch` : le commit `e1e703a` de
+`github.com/mcayland/openbios` (branche screamer de Mark Cave-Ayland) plus un diff de deux
+fichiers ; l'arbre ainsi patché redonne l'ELF à l'octet près (sha1 `f11083a8…`, vérifié le
+01/10/2026). Il faut la chaîne croisée PowerPC pour le reconstruire.
 
 ## Matériau d'origine — non appliqué
 

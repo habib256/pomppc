@@ -1,4 +1,5 @@
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # Usage : python3 tools/re/frames.py frames.csv [fenêtre=100] — ms/image, dessins/image, replis par tranche
 import sys
 rows=[l.strip().split(',') for l in open(sys.argv[1]) if l[0].isdigit()]

@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * fptest.c - equivalence du flottant scalaire simple precision entre les
  * helpers de QEMU et le chemin court de x-fp-inline

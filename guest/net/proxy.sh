@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # proxy.sh — règle le proxy web de Tiger sur le relais de l'hôte (scripts/web-proxy.py).
 #
 #   sudo sh proxy.sh on [hôte] [port]   # défaut : 10.0.2.2 8080 (hôte QEMU)

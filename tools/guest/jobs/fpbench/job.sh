@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # fpbench — le flottant PowerPC : preuve d'équivalence (fpcheck) et vitesse (fpbench).
 #
 # Se lance identiquement sur le QEMU actuel (mode exact) et sur le QEMU « flottant

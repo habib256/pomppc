@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # invite-syms.sh — exécuté DANS l'invité (sh, par ssh, sous sudo) : écrit dans
 # $1 (défaut /tmp/endurance-syms) un fichier de symboles par kext chargé
 # (kextload -n -s -A : lié aux adresses du démarrage en cours, sans rien

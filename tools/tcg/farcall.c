@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * farcall.c — banc hôte (Apple Silicon) : un appel indirect (BLR) depuis du
  * code généré vers une fonction du binaire coûte-t-il plus cher quand le code

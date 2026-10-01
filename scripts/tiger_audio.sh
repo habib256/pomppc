@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # Sourced after hostcompat.sh. Keep OS 9 and Linux's existing audio defaults.
 tiger_audio_device() {
   local profile="${POMPPC_AUDIO_PROFILE:-stable}"

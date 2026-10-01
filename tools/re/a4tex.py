@@ -1,4 +1,5 @@
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # A4, volet textures (30/09/2026, docs/protocole-v23-textures.md) : trafic de texels par image
 # dans un vidage POMPPC_GL_DUMP de la matrice.
 # Usage : python3 tools/re/a4tex.py DOSSIER_DE_VIDAGE... — lancé depuis la racine du dépôt.

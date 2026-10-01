@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /* ppmcmp.c — comparaison d'images PPM (P6, 8 bits) pour la matrice de jeux
  * (tools/matrice/, docs/matrice-jeux.md). Sans dépendance : l'hôte n'a ni
  * numpy ni PIL.

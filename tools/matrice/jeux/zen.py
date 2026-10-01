@@ -1,4 +1,5 @@
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """Zenerchi (PlayFirst, 2007) — témoin du pipeline fixe par AGL (Carbon).
 
 Sur le disque quotidien, Zenerchi s'ouvre EN FENÊTRE (800×600) : il attache

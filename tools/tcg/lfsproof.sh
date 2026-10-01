@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # lfsproof.sh [arbre-QEMU] — preuve hôte de patches/tcg/0002-ppc-lfs-inline.patch.
 # Extrait helper_todouble / helper_tosingle TELS QUELS de target/ppc/fpu_helper.c
 # de l'arbre (défaut ~/src/qemu-tcg19), compile tools/tcg/lfsproof.c contre eux et

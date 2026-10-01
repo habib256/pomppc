@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """kpanic.py — autopsie d'un invité Tiger gelé, depuis l'hôte, par le moniteur QEMU.
 
     python3 tools/re/kpanic.py MACH_KERNEL [SOCKET_MONITEUR]

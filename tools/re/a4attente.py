@@ -1,4 +1,5 @@
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # A4 (30/09/2026, docs/protocole-v23-textures.md) : attente de l'invité sur l'hôte, par image,
 # d'après un frames.csv du plugin (POMPPC_GL_FRAMES), sur les 600 images qui précèdent le
 # vidage de la matrice (premier écart de plus d'une seconde dans la seconde moitié), et pauses

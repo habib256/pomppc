@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * qgpu-core.c — analyse et exécution du flux de commandes « qgpu ».
  *

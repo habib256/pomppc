@@ -1,5 +1,6 @@
 #!/bin/bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # ab-attente.sh — kit d'A/B en VM du chantier « attente de l'invité sur l'hôte »
 # (30/09/2026, docs/backend-gl-attente.md). Cinq épreuves, sur la VM QUOTIDIENNE
 # (libre : aucun autre intervenant), chacune par tools/tcg/matab.sh (A/B

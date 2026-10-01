@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # ab-measure.sh — A/B interleavé entre deux binaires QEMU, protocole du README.
 #
 #   ./scripts/ab-measure.sh <binA> <binB> [n_paires]     # n_paires: 4 par défaut

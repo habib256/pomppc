@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # fpnat-mut.sh [arbre-QEMU] [build] — contre-épreuve de x-fp-native
 # (patches/tcg/0014, docs/tcg-g4.md §22) : construit un binaire par mutation
 # de l'émetteur arm64 (tcg/aarch64/tcg-target.c.inc, fonction

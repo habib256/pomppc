@@ -1,4 +1,5 @@
-// GPL3 - Copyleft VERHILLE Arnaud
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 VERHILLE Arnaud
 // FrontendSettings — réglages d'ImGuiDock gardés d'un lancement à l'autre.
 //
 // Écrits à l'arrêt dans .run/imguidock.conf (à côté d'imgui.ini, qui garde la

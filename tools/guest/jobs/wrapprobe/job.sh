@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # Relevé : couleur de bordure, CLAMP_TO_BORDER, MIRRORED_REPEAT, textures DXT1
 # (glCompressedTexImage2D, format générique, mipmaps génériques), vus du pilote,
 # et les requêtes de compression (docs/re/bordure-et-compression.md).

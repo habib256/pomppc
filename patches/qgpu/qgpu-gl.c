@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * qgpu-gl.c — backend OpenGL du GPU paravirtuel « qgpu » : c'est ici que le
  * GPU de l'hôte travaille pour l'invité Tiger.

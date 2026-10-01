@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # Boote le système déjà installé, et chronomètre le temps mur du run (baseline).
 source "$(dirname "$0")/lib.sh"
 need "$QEMU_BIN"

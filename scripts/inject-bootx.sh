@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # Réinjecte BootX (extrait du CD d'install) dans le volume système de tiger.qcow2.
 # Le boot échoue parce que /System/Library/CoreServices/BootX manque sur le disque installé.
 # Nécessite root (qemu-nbd + montage HFS+ en écriture). À lancer: sudo bash scripts/inject-bootx.sh

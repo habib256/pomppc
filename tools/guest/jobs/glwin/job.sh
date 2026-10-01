@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # Mode bureau (devloop.py start --gui) : kext chargé depuis /tmp, puis glwin
 # (fenêtre GLUT, double tampon) dans la session de l'utilisateur, par le relais
 # POMPPCGuiRunner. Suppose le plugin installé (job gpu).

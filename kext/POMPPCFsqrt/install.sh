@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # install.sh — DANS l'invité, en root : construit POMPPCFsqrt.kext, l'installe dans
 # /System/Library/Extensions, pose l'élément de démarrage qui le charge à chaque
 # démarrage (/Library/StartupItems/POMPPCFsqrt) et le charge tout de suite.

@@ -1,4 +1,5 @@
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """hote.py — gestes de l'hôte sur la VM quotidienne pour la matrice de jeux :
 ssh dans l'invité (tools/guest/tssh.sh), moniteur HMP (.run/mon.sock),
 capture d'écran figée, redémarrage de l'invité, rapatriement de dossiers.

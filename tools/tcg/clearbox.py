@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """clearbox.py IMAGE — efface l'en-tête de la boîte d'entrée de devloop.
 
 Le StartupItem POMPPCAgent rejoue au démarrage le dernier job resté dans la

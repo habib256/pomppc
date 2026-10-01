@@ -1,4 +1,5 @@
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # Usage : python3 tools/re/dumpdec.py VIDAGE [pc-ou-index] [tout] — lancé depuis la racine du dépôt (lit patches/qgpu/qgpu_proto.h)
 import sys,struct,re
 ops={}

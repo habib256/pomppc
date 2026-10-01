@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """endurance.py — banc d'endurance de session : enchaîne seul N démarrages de
 Tiger (et, en option, N cycles lancement/arrêt d'un jeu), détecte panique et
 gel, range un dossier par incident et donne le taux par type avec son

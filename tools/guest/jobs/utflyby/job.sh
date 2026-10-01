@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # AS-Convoy's shipped intro camera sequence, no bots and no -benchmark.
 # Copy this whole directory to a devloop job; resolution.txt selects the mode.
 . ./guilib.sh

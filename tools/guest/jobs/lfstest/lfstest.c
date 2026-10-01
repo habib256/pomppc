@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * lfstest.c - equivalence de lfs/stfs entre les helpers de QEMU (todouble /
  * tosingle) et la traduction en ligne (propriete x-lfs-inline,

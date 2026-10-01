@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """devloop.py — boucle de développement rapide dans l'invité Tiger.
 
 Une VM Tiger reste allumée (single-user, headless) avec l'agent

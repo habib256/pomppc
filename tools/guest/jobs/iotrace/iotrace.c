@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * iotrace.c — trace des appels de l'IOProc CoreAudio d'une application Tiger
  * (saccades du son de DOOM 3, 29/09/2026).

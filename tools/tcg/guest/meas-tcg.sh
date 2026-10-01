@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # meas-tcg.sh <label> - DOOM 3 demo_mars_city1 pour les A/B du processeur emule
 # (docs/tcg-g4.md). Derive de meas3.sh (lot 3) : meme lanceur (~/doom3-env.command,
 # ~/lot3.env vide = plugin par defaut), meme fenetre T+50..T+280, mais :

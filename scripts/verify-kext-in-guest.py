@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """Vérifie le kext POMPPCGPU DANS l'invité Tiger, à l'aveugle.
 
 Boote disks/tiger.qcow2 en single-user (boot-args -s), attend que l'écran se

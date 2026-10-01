@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """Analyse du PCM enregistré par le Screamer (S16 gros-boutiste stéréo 44,1 kHz).
 usage : pcm.py fichier.raw [debut_s fin_s] [--wav sortie.wav]
 Sort : trous de zéros exacts >= 2 ms, sauts (|Δ| > 12000), creux d'enveloppe

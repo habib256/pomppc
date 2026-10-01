@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # One-time: fetch Dear ImGui into ./imgui (CMake creates the build dir itself).
 # Mirrors pom68k/setup_imgui.sh. ImGui is not vendored in git (see .gitignore).
 #

@@ -1,5 +1,6 @@
 #!/bin/bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # fpnatab.sh SORTIE "A:VAR=v …" "B:VAR=v …" … — bancs invités ENTRELACÉS sur le
 # disque de dev (docs/tcg-g4.md §22) : pour chaque mode, dans l'ordre donné,
 # démarrage single-user par devloop.py, job JOB (défaut fptest, BANC=10000000),

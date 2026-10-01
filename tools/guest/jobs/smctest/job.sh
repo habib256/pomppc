@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # smctest - code modifie / recopie / remappe dans l'invite : preuve de
 # l'invalidation pour les sorties indirectes de TCG (patches/tcg/0008,
 # x-ret-inline, x-jc-idx ; docs/tcg-g4.md section 16).

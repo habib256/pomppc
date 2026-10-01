@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # fpproof.sh [arbre-QEMU] [vecteurs] [graine] — preuve hôte de
 # patches/tcg/0007-ppc-fp-inline.patch (x-fp-inline, docs/tcg-g4.md §15).
 # Extrait le bloc « fp-inline » TEL QUEL de target/ppc/fpu_helper.c de l'arbre

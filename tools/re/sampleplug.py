@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """sampleplug.py SAMPLE.txt [SAMPLE2.txt …] [N] [--ms X] [--enfants F,G…] — résume un
 ou plusieurs `sample <pid>` pris DANS Tiger (jeu + plugin GL) : fil le plus chargé
 (le fil principal du jeu : le plus chargé de ceux qui passent par le plugin) de chaque relevé, les relevés AGRÉGÉS (sommes

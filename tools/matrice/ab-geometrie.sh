@@ -1,5 +1,6 @@
 #!/bin/bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # ab-geometrie.sh CAMPAGNE N [JEUX] [MODES] [VARIABLES_B] — A/B ENTRELACÉ du
 # volet géométrie d'A4 (docs/protocole-v23-geometrie.md) sur la VM QUOTIDIENNE.
 #

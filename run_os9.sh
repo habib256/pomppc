@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # run_os9.sh — lance Mac OS 9.2.2 sur QEMU (mac99, mono-cœur), sans intervention.
 #
 #   ./run_os9.sh            # AUTO : boote le disque installé si présent,

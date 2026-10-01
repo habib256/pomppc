@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # Lanceur POMPPC : Unreal Tournament 2004 Demo avec la trace du plugin OpenGL (pour apprendre).
 T=/Users/tiger/pomppc-trace/UT2004-$(date +%H%M%S)
 mkdir -p $T/gltrace

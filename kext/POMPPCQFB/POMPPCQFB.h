@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * POMPPCQFB.h — pilote IOFramebuffer pour le framebuffer paravirtualisé
  * « qfb1 » exposé en PCI par QEMU (hw/display/qfb-pci.c).

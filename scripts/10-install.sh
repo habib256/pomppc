@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # Boote le média d'installation Tiger pour installer OS X sur le disque virtuel.
 source "$(dirname "$0")/lib.sh"
 need "$QEMU_BIN"

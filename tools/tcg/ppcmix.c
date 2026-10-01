@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * ppcmix.c — greffon TCG : ce que le G4 émulé exécute VRAIMENT, par opcode.
  *

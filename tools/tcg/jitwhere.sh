@@ -1,5 +1,6 @@
 #!/bin/bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # jitwhere.sh N [BINAIRE] [ARGS…] — où le noyau pose-t-il le tampon du JIT ?
 # (docs/tcg-g4.md §14). Lance N fois QEMU arrêté (-S, sans invité, sans
 # affichage), relève par `vmmap` la base du tampon du JIT (régions rwx/rwx

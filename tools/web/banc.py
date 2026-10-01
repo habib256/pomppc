@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """banc.py — banc de sites pour le relais web des vieux navigateurs.
 
 Lance SA PROPRE instance de scripts/web-proxy.py (port libre, jamais celle de

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """fpnatd3.py — une partie de DOOM 3 (demo_mars_city1, fenêtre 640×480) sur un
 RECOUVREMENT neuf de disks/tiger-endurance.qcow2, pour mesurer un QEMU d'essai
 sans toucher à la VM quotidienne (docs/tcg-g4.md §22).

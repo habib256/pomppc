@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * vfptest.c - equivalence de vaddfp/vsubfp/vmaddfp/vnmsubfp entre les helpers
  * d'origine et le chemin rapide a 4 voies (propriete x-vfp-fast,

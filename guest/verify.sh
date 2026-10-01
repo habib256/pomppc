@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # verify.sh — vérification automatique du kext POMPPCGPU DANS l'invité Tiger,
 # pensée pour tourner à l'aveugle en single-user (tapée via `sendkey`, résultat
 # relu sur le disque depuis l'hôte). Tout est journalisé dans /pomppc/result.txt.

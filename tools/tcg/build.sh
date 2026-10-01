@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # build.sh [NOM] — construit le greffon TCG NOM (défaut ppcmix ; fprun) en
 # tools/tcg/libNOM.dylib|.so contre les en-têtes d'un arbre QEMU (QEMU_SRC,
 # défaut ~/src/qemu-tcg).

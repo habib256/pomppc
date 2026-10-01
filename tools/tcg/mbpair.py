@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """mbpair.py A.txt B.txt [...] — A/B de Marble Blast par fenêtres de 5 s
 appariées par triangles/image (protocole de docs/gpu-3d-tiger.md §4.7 et de
 docs/flottant-rapide.md : la démo se joue toute seule, les mêmes images

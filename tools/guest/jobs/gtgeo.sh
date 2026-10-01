@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # gtgeo.sh <label> — scènes gltest de géométrie (A4, volet géométrie,
 # docs/protocole-v23-geometrie.md) jouées dans l'invité, plugin installé, dans
 # cinq modes : ref (voies d'avant), sane (POMPPC_GL_RAWSANE=1), natshm

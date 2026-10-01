@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """Bilan d'une partie : secondes où l'invité envoie du son (rms > 0), trames
 nulles et trous >= 10 ms dans ces secondes, silence inséré, tampons hôte vides.
 usage : bilan.py diag.log t0 t1   (t0/t1 : horloge murale en s, bornes de la partie)"""

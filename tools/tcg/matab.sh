@@ -1,5 +1,6 @@
 #!/bin/bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # matab.sh CAMPAGNE N "A:VAR=v …" "B:VAR=v …" [JEU MODE] — A/B ENTRELACÉ d'un
 # réglage de QEMU sur la VM QUOTIDIENNE, par la matrice (docs/tcg-g4.md §18).
 #

@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # Diagnostic du chargement du plugin par GLEngine (variantes de GL_RESOURCES).
 #
 # A, B, C sont des variantes CONNUES POUR ÉCHOUER sur ce 10.4.6 (GL_RESOURCES

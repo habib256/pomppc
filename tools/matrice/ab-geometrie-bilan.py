@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """ab-geometrie-bilan.py CAMPAGNE — bilan de tools/matrice/ab-geometrie.sh.
 
 Par cellule (jeu, mode d'affichage) et par mode de l'A/B (ref, geo) : ms/image

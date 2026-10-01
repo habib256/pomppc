@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """attente.py DOSSIER... — attente de l'invité sur l'hôte, par image AFFICHÉE, sur
 la fenêtre de mesure de la matrice (30/09/2026, docs/backend-gl-attente.md).
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """fpnatsum.py DOSSIER… — résume les bancs `fptest banc` rangés par
 tools/tcg/fpnatab.sh (<dossier>/<mode>-<k>/run.txt) : par mode, médiane de
 chaque banc sur tous les tours de tous les démarrages, min..max, et ns par

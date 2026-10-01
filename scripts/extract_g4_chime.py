@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """Extract the boot beep from Apple's unmodified G4 firmware 4.2.8f1.
 
 Input: the DATA FORK of 'Power Mac G4 Firmware', not the updater executable.

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """dumpstat.py DOSSIER_DE_VIDAGE [--toutes] — volumes par image d'un vidage
 POMPPC_GL_DUMP (fichiers NNNNNN.bin, en-tête `struct dump_hdr` de 64 octets :
 magic, image, base, octets de commandes, vtx_off/len, idx_off/len,

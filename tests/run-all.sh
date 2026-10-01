@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # run-all.sh — harnais de non-régression de POMPPC.
 #
 #   ./tests/run-all.sh          # tout ce qui ne demande ni disque invité ni X

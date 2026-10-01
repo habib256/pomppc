@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # caps.sh — sondage des capacités réelles d'un binaire QEMU.
 #
 # Sourcé par les lanceurs (run_tiger.sh, run_os9.sh) et par scripts/build_qemu_qfb.sh.

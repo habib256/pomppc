@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /* exitwatch.c — mouchard sur exit()/abort() pour Tiger PPC.
  *
  * Injecté par DYLD_INSERT_LIBRARIES=libexitwatch.dylib (le lanceur « UT2004

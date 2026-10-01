@@ -1,5 +1,6 @@
 #!/bin/bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # ab-copie-gpu.sh — A/B en VM des copies surface → texture (27/09/2026,
 # docs/protocole-v20-surface-texture.md §« Copie GPU ») : la matrice des jeux
 # qui copient (Colin McRae : SURF_TEX ; DOOM 3, Prey : COPY_TEX) jouée deux

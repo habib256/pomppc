@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * qgpu_test.c — programme de test invité (Tiger PPC, userland) du GPU
  * paravirtuel qgpu : ouvre le kext POMPPCGPU, mappe la fenêtre partagée,

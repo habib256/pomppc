@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # Textures 3D de bout en bout (OpenGL 1.2, protocole v10) : scène tex3d par le
 # chemin brut (défaut) et par le chemin hérité (POMPPC_GL_GEOM=0), puis avec la
 # 3D coupée (POMPPC_GL_TEX3D=0) : elle ne doit plus être annoncée.

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """matabsum.py CAMPAGNE — bilan d'un A/B entrelacé de tools/tcg/matab.sh.
 
 Une ligne par partie (ms/image de la cellule, fenêtre, charge de l'hôte avant

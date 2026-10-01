@@ -1,4 +1,5 @@
-; GPL3 - Copyleft VERHILLE Arnaud
+; SPDX-License-Identifier: GPL-3.0-or-later
+; Copyright (c) 2026 VERHILLE Arnaud
 ; gld_tramp.s — GÉNÉRÉ par tools/gld/gen_tramp.py, ne pas éditer.
 ; Trampolines du plugin OpenGL POMPPC (voir pomppc_gld.c).
 

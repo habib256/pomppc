@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """partfil.py SYMS_DIR SAMPLE.txt [SAMPLE2.txt …] [--ms X] — partage le fil principal
 d'un jeu (`sample` pris DANS Tiger) entre quatre propriétaires :
 

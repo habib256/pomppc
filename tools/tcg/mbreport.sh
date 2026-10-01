@@ -1,5 +1,6 @@
 #!/bin/bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # mbreport.sh [dossier] — bilan des A/B Marble Blast de tools/tcg/mbab.sh :
 # pour chaque couple de configurations, toutes les passes de toutes les
 # manches d'un côté (fichiers <manche>-mb-<config>-<n>.txt) contre l'autre.

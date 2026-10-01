@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """diffstate.py — differ les vidages d'état de GLEngine produits par le traceur
 du plugin POMPPC, et y chercher des valeurs flottantes big-endian.
 

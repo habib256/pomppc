@@ -1,4 +1,5 @@
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """symbolise.py — adresse du noyau de Tiger → symbole, contre `mach_kernel` et
 les kexts chargés.
 

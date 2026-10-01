@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (c) 2026 VERHILLE Arnaud
  *
  * qhold — ouvre N clients du kext POMPPCGPU et les garde SECONDES secondes
  * (29/09/2026). Simule des tranches perdues (« 5e client refusé », K3/K9 des

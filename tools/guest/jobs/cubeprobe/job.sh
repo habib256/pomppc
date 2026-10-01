@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # Relevé : où GLEngine range les faces d'une carte de cube (docs/re/cartes-de-cube.md).
 . ./lib.sh
 plugin_install && gltest_build || exit 1

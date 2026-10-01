@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * rtt.c — rendu vers texture à la manière d'IndirectX (Colin McRae) : une
  * fenêtre CACHÉE (CreateNewWindow sans ShowWindow) sert de drawable à un

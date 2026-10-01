@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * smctest.c - code modifie, recopie ou remappe dans l'invite, pour prouver que
  * les sorties indirectes de TCG (blr, bctr : helper_lookup_tb_ptr, et la

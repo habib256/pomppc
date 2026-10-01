@@ -1,5 +1,6 @@
 #!/bin/bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # vmwith.sh JOURNAL [VAR=v …] — arrête la VM quotidienne proprement et la relance
 # par ./run_tiger.sh avec ces variables (QEMU_BIN, CPU_OPTS, TCG_OPTS…), bureau
 # atteint par ssh. Même arrêt et même relance que tools/tcg/matab.sh.

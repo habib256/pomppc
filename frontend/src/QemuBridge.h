@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 // QemuBridge — drives a QEMU process as POMPPC's "CPU".
 //
 // Unlike the other Pommes (pom68k, POM1/2, POMIIGS) whose core is an in-process

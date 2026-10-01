@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """fprun.py FICHIER [T0 T1] — résume la sortie du greffon fprun (tools/tcg/fprun.c).
 
 Différence des instantanés les plus proches de T0 et T1 (secondes depuis le

@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # À copier dans l'invité : ~/son/d3.command (tools/son/partie.py le lance).
 # DOOM 3, relevé des saccades du son (pas de gltrap). FS=1 : plein écran.
 [ -f /Users/tiger/son/env ] && . /Users/tiger/son/env

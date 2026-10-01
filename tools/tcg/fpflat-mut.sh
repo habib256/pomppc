@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # fpflat-mut.sh [arbre-QEMU] [vecteurs] — contre-épreuve de x-fp-flat
 # (patches/tcg/0013, docs/tcg-g4.md §22) : chaque mutation de
 # helper_fp32_flat/helper_fcmpu_flat (copie de fpu_helper.c recompilée,

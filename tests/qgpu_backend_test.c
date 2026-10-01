@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * qgpu_backend_test.c — les RÈGLES DE RASTÉRISATION que les deux backends
  * doivent tenir (lot 8 du bug hunt du 22/09/2026 : S1, S2, S3).

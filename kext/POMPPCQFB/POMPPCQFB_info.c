@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * POMPPCQFB_info.c — descripteur kmod du kext, ce que Xcode 2.x génère
  * automatiquement pour tout projet « Kernel Extension ». Sans lui, le Mach-O

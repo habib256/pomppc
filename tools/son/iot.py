@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """Résumé d'iotrace.csv : par tranche de 10 s, appels, durée moyenne/max de
 l'IOProc, marge min, sauts de temps d'échantillon ; puis la liste des sauts."""
 import sys, collections

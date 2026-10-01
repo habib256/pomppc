@@ -1,4 +1,5 @@
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 """hmp.py — client minimal du moniteur HMP de QEMU (socket unix), sans écho.
 
     python3 tools/endurance/hmp.py SOCKET info registers -a

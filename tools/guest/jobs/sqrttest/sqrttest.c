@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (c) 2026 VERHILLE Arnaud
  * sqrttest — la racine de la libm de Tiger contre l'instruction fsqrt.
  *
  * La libm de Tiger (`_sqrt`, libSystem) lit _cpu_capabilities dans la commpage

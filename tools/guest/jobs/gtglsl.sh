@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # gtglsl.sh <label> [VAR=valeur...] — scènes gltest GLSL (glsl glslvs glslfs glsldp
 # glslsmp) jouées dans l'invité avec le plugin installé : verdicts, empreinte md5 de
 # l'image, lignes VERDICT / STATE des notes (30/09, glUniform neutre). Binaire

@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /* qgpu_replay.c — rejoue en natif les soumissions vidées par le plugin
  * (POMPPC_GL_DUMP, guest/gldriver/pomppc_accel.c : dump_submit) sur le cœur et
  * un backend de l'hôte, et écrit une image PPM par SURF_PRESENT — ce que

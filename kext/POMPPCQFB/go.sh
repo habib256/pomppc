@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # go.sh — construit et installe POMPPCQFB.kext depuis le CD, en mode single-user.
 #
 #   mkdir /c ; mount_cd9660 /dev/disk1 /c ; sh /c/go.sh

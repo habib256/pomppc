@@ -1,4 +1,5 @@
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 cmake_minimum_required(VERSION 3.16)
 project(POMPPC VERSION 0.3 LANGUAGES C CXX)
 

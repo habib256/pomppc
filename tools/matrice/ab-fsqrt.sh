@@ -1,5 +1,6 @@
 #!/bin/bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # ab-fsqrt.sh N [JEUX] [MODES] — A/B entrelacé de kext/POMPPCFsqrt (kHasFsqrt dans la
 # commpage : la libm prend `fsqrt` au lieu de sa racine logicielle).
 #

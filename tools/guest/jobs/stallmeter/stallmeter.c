@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (c) 2026 VERHILLE Arnaud
  *
  * stallmeter — mesure, DANS l'invité, les arrêts des vCPU vus par la base de
  * temps (29/09/2026, chantier « gel au chargement de DOOM 3 »).

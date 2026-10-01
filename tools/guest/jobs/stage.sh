@@ -1,5 +1,6 @@
 #!/bin/sh
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # stage.sh — assemble un job devloop : le job.sh de tools/guest/jobs/<nom>/ et,
 # dans src/, les sources invité du dépôt (même disposition que le dépôt).
 #

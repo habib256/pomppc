@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPL3 - Copyleft VERHILLE Arnaud
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
 # vfpproof.sh [arbre-QEMU] [vecteurs] — preuve hôte de patches/tcg/0003-ppc-vfp-fast.patch.
 # Extrait les fonctions « vfp-fast » TELLES QUELLES de target/ppc/int_helper.c de
 # l'arbre (défaut ~/src/qemu-tcg19), compile tools/tcg/vfpproof.c contre elles et

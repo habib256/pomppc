@@ -1,4 +1,5 @@
-/* GPL3 - Copyleft VERHILLE Arnaud */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2026 VERHILLE Arnaud */
 /* regbench.c - noyaux courts pour lire le « regime » de vitesse d'un demarrage
  * (docs/tcg-g4.md §14) : chacun vise ~1-2 s sur le G4 emule, chacun sollicite
  * un chemin different de TCG :
