@@ -214,15 +214,16 @@ Ordre : planchers recalés, puis TCG (cache de sauts, verrou `mtmsr`/`rfi`), pui
 - [ ] **[Cœur] DOOM 3 : `nat_conv_attr`** = 27 % du temps du fil de rendu hôte (attributs
   reconvertis à chaque dessin natif) ; convertir une fois au `BUF_SUBDATA`. Hors du chemin
   d'attente (≤ 1,3 %) : utile seulement si l'hôte devient la limite.
-- [~] **[TCG] Flottant scalaire en instructions AArch64 natives** (01/10, `tcg/0013`
+- [x] **[TCG] Flottant scalaire en instructions AArch64 natives** (01/10, `tcg/0013`
   `x-fp-flat` + `tcg/0014` `x-fp-native`, `docs/tcg-g4.md` §22) : borne mesurée d'abord — le
   coût était le branchement par instruction (1,0 ns) et l'appel, pas les FPR en mémoire ; op
   TCG `ppc_fp32` (backend arm64), chemin court natif, helper plat hors ligne sinon. Preuves :
   174 M vecteurs hôte et 12,5 G + 11,1 G opérations vérifiées en jeu, 0 divergence ; mutants
   10/10 et 6/6. **A/B DOOM 3 sur la VM quotidienne** (`bench/tcg/ab/ab-fpnat`, hôte au repos,
   6 + 6 entrelacées) : 60,5 → **58,3 ms/image (−3,6 %)**, les 6 parties allumées toutes sous
-  les 6 éteintes. Éteint par défaut (`FPNATIVE=1`). **Reste avant l'allumage :** tour de
-  matrice complet ; non vérifiés : exception FP levée depuis le chemin natif, formes Rc=1,
+  les 6 éteintes. Matrice complète allumée (`bench/matrice/20261001-fpnat`) : 15 vertes sur
+  15, images justes (DOOM 3 57,5 / 57,4, Prey 63,5 / 61,6). **Allumé par défaut**
+  (`FPNATIVE=0` l'éteint ; agit dès que le binaire de référence porte 0013/0014). Non vérifiés : exception FP levée depuis le chemin natif, formes Rc=1,
   cible 32 bits en VM, hôtes non arm64.
 - [ ] **[Jeux] Colin McRae en 1024×768 et au-delà** (défaut signalé par l'utilisateur le
   29/09 : 3D fausse en course, polygones justes) : l'hôte copie juste à toutes les tailles

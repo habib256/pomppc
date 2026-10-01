@@ -10,7 +10,8 @@ et dans `docs/`.
 ## Non publié
 
 - **TCG : flottant scalaire simple par le FPU de l'hôte** (`patches/tcg/0013` `x-fp-flat`,
-  `0014` `x-fp-native`, éteints par défaut ; `FPFLAT=1`, `FPNATIVE=1` ; `docs/tcg-g4.md` §22).
+  `0014` `x-fp-native` ; **`x-fp-native` allumé par défaut** après la matrice complète
+  `bench/matrice/20261001-fpnat`, 15/15 vertes, images justes ; `FPNATIVE=0` l'éteint, `FPFLAT=1` ; `docs/tcg-g4.md` §22).
   Nouvelle op TCG `ppc_fp32` (backend arm64) : porte, tests d'opérandes et de résultat,
   `fadd`/`fmul`/`fmadd` simple, FPRF en ligne, un `cbnz` vers le helper plat de `x-fp-flat`
   hors ligne. `fptest` identique à l'octet (`755efae4e391b7ea`) ; DOOM 3 sous vérificateur :

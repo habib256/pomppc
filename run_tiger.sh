@@ -33,9 +33,9 @@
 #                             # par défaut, docs/tcg-g4.md §15) ; FPVERIFY=1 : mode preuve
 #   FPFLAT=1 ./run_tiger.sh   # les mêmes en UN appel, sans branchement dans le code généré
 #                             # (x-fp-flat, tcg/0013, éteint par défaut, docs/tcg-g4.md §22)
-#   FPNATIVE=1 ./run_tiger.sh # leur chemin court en instructions flottantes de l'hôte (arm64),
-#                             # le helper de x-fp-flat hors ligne sinon (x-fp-native, tcg/0014,
-#                             # éteint par défaut, docs/tcg-g4.md §22)
+#   FPNATIVE=0 ./run_tiger.sh # coupe leur chemin court en instructions flottantes de l'hôte
+#                             # (arm64), le helper de x-fp-flat hors ligne sinon (x-fp-native,
+#                             # tcg/0014, allumé par défaut depuis le 01/10, docs/tcg-g4.md §22)
 #   RETINLINE=0 JCIDX=0 ./run_tiger.sh  # coupe les sorties indirectes (blr, bctr…) cherchées en
 #                             # ligne et le cache de sauts vidé par mmu_idx (tcg/0008, allumés par
 #                             # défaut, docs/tcg-g4.md §16) ; RETVERIFY=1 : mode preuve
@@ -80,8 +80,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # bas restent obligatoires ; 0 explicite conserve sa valeur pour les A/B.
 # Les modes VERIFY ne sont pas des optimisations et restent éteints.
 # Depuis le 30/09/2026 (docs/tcg-g4.md §18-§21) : ICBISYNC (x-icbi-sync, tcg/0010)
-# et MSRNOBQL (x-msr-nobql, tcg/0012) en font partie.
-for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JITNEAR; do
+# et MSRNOBQL (x-msr-nobql, tcg/0012) en font partie ; depuis le 01/10/2026 (§22),
+# FPNATIVE (x-fp-native, tcg/0014).
+for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JITNEAR FPNATIVE; do
   export "$_opt=${!_opt:-1}"
 done
 # x-jc-bits (tcg/0011) : 2^14 entrées de cache de sauts (12 = QEMU d'origine).
@@ -328,8 +329,9 @@ fi
 # patches/tcg/0014, docs/tcg-g4.md §22) --- le chemin court de x-fp-inline en
 # instructions flottantes arm64 (op TCG ppc_fp32), le helper de x-fp-flat appelé
 # hors ligne quand il ne s'applique pas. Mêmes résultats, même FPSCR au bit près.
-# N'agit qu'avec x-fast-fp ; x-fp-flat sur un hôte qui n'est pas arm64. Éteint par
-# défaut (A/B DOOM 3 à jouer) : FPNATIVE=1 l'allume ; FPVERIFY=1 le vérifie.
+# N'agit qu'avec x-fast-fp ; x-fp-flat sur un hôte qui n'est pas arm64. Allumé par
+# défaut depuis le 01/10/2026 (A/B DOOM 3 60,5 -> 58,3 ms/image, matrice verte,
+# §22) : FPNATIVE=0 l'éteint ; FPVERIFY=1 le vérifie.
 if [ "${FPNATIVE:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-fp-native=on"; then
     case "$CPU_SPEC" in
