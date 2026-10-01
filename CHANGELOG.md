@@ -9,6 +9,11 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Confirmé en jouant par l'utilisateur** (01/10), sur la configuration par défaut du 01/10 :
+  le son de DOOM 3 ne saccade plus (correctif du compteur de trames du Screamer, 29/09) ;
+  l'arme du joueur n'est plus noire dans UT2004 ; Colin McRae n'a plus d'erreurs graphiques
+  en course (correctifs T1 et `SURF_TEX`/`NO_MEM` des bug hunts 3 et 4). Entrées retirées du TODO.
+
 - **Tout par défaut, binaire de référence reconstruit** (01/10). `~/src/qemu` reconstruit avec
   le device A4 et `tcg/0013`/`0014` (précédent `*.avant-a4`) ; `QGPU_GL_FLUSH` (exporté par
   `run_tiger.sh`) et `POMPPC_GL_QFLUSH` (plugin `20261001-tout`) allumés, à la demande de

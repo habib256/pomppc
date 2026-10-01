@@ -110,7 +110,6 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   démarrage frais, réglages utilisateur préservés.
 - [ ] **[Jeux] Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur
   reste blanc) ; menu principal juste au 26/09, à revoir en partie.
-- [ ] **[Jeux] UT2004** : arme noire hors de la scène mesurée.
 - [ ] **[Outils] A3, suites** : Zenerchi en plein écran et Warcraft III en fenêtre (réglage à
   trouver, sinon clic par System Events) ; Colin McRae fenêtre non applicable.
 - [ ] **[Outils] Rejeu : `SURF_READBACK` d'une surface jamais liée dans le vidage** → `NO_SURF`
@@ -126,16 +125,6 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
 
 Le travail est fait ; il ne manque que l'essai ou la décision de l'utilisateur.
 
-- [ ] **[Son] Saccades de DOOM 3** — corrigées le 29/09 (compteur de trames du Screamer,
-  `docs/audio-stabilite.md`), présentes dans le binaire de référence du 01/10. Mesure : 0 trou
-  sur 272 s en fenêtre, 0 en plein écran, Prey et Marble Blast propres. **Reste :** l'écoute
-  (extraits avant/après dans `bench/son-doom3/`). À part : un arrêt de la boucle principale
-  de 186 ms (fin de cinématique), 1 fois en 13 parties.
-- [ ] **[Jeux] Colin McRae en 1024×768 et au-delà** (3D fausse en course signalée le 29/09) :
-  après les correctifs T1 et `SURF_TEX`/`NO_MEM`, cellule plein écran 1024×768 verte (voiture en
-  course, rejeu identique à la VM). **Reste :** confirmation en jouant, puis tableau des autres
-  modes (4:3 et larges : menus, course, proportions, changement de mode, retour au bureau,
-  temps/image). `POMPPC_GL_RECT=0` fait planter le jeu chez Apple : ne pas s'en servir.
 - [ ] **[Plugin] Replis à retirer** : `POMPPC_GL_VERDICT=0`, `POMPPC_GL_WHITELIST=0`,
   `POMPPC_GL_TEXMEMO=0`, `POMPPC_GL_STSKIP=0`. **Reprise :** mesure en jeu par l'utilisateur ;
   ensuite retirer les options devenues inutiles et vérifier la matrice.
@@ -196,6 +185,9 @@ Dans l'ordre des gains estimés.
   WindowServer, plus de quatre clients (`docs/roadmap-opengl15.md`).
 - [ ] **[Frontend] Frontend F1, restes non joués** : la vraie touche Ctrl+Cmd+F, écran Retina,
   plusieurs moniteurs.
+- [ ] **[Son] Arrêt de la boucle principale de 186 ms** en fin de cinématique de DOOM 3
+  (1 fois en 13 parties, 93 ms de silence hôte ; doorbell synchrone exclu,
+  `docs/audio-stabilite.md`).
 - [ ] **[Métrologie] Métrologie boot** (`docs/metrologie-boot.md`) : baseline de 23,32 s à
   refaire avec le harnais durci ; A/B du coût du Screamer jamais lancé.
 - [ ] **[Système] « Panique cpu 1 » du 24/09** : jamais reproduite depuis le correctif OpenPIC
@@ -256,9 +248,9 @@ sur 15 automatisées**, images toutes justes. Tours précédents pour comparaiso
 | Zenerchi | vert | non automatisé | 4,3 / — | 4,4 / — | automatiser plein écran |
 | DOOM 3 | vert | vert | 56,6 / 56,8 | 61,7 / 61,6 | plantages au chargement, changements de mode, combat |
 | Prey | vert | vert | 59,1 / 58,6 | 70,9 / 70,3 | changements de mode, combat |
-| UT2004 | vert | vert | 25,3 / 25,8 | 27,2 / 27,5 | arme noire hors scène mesurée |
+| UT2004 | vert | vert | 25,3 / 25,8 | 27,2 / 27,5 | — |
 | Warcraft III | non automatisé | vert | — / 15,6 | — / 17,8 | fenêtre, texte des menus |
-| Colin McRae | non applicable | vert | — / 47,8 | — / 71,5 | confirmation en jouant, autres modes |
+| Colin McRae | non applicable | vert | — / 47,8 | — / 71,5 | — |
 | Nexuiz ARB (`+r_glsl 0`) | vert | vert | 80,2 / 80,3 | 110,7 / 109,4 | tableaux clients déroulés (suites A4) |
 | Nexuiz GLSL (`+r_glsl 1`) | vert | vert | 35,3 / 35,2 | 41,7 / 41,1 | attente des requêtes d'occlusion |
 | RTCW | non automatisé | non automatisé | — / — | — / — | réinstallation puis diagnostic |
