@@ -1811,11 +1811,12 @@ static bool gl_init(QgpuCore *c)
         }
     }
     /* 30/09 : QGPU_GL_FLUSH=1 — le travail encodé part au GPU à la fin de
-       chaque soumission (gl_submit_end). ÉTEINT PAR DÉFAUT : chaque glFlush
+       chaque soumission (gl_submit_end). Éteint dans le device, ALLUMÉ par
+       run_tiger.sh depuis le 01/10 (QGPU_GL_FLUSH=0 l'éteint) : chaque glFlush
        coupe la passe de rendu de Metal, et une image sur ~150 de la matrice
        (Prey, Colin McRae) change alors d'une unité sur quelques pixels
-       mélangés (arrondi entre deux passes) ; à allumer après l'A/B en VM
-       (docs/backend-gl-attente.md §5). */
+       mélangés (arrondi entre deux passes), dans les tolérances de la
+       matrice (docs/backend-gl-attente.md §5). */
     {
         const char *e = getenv("QGPU_GL_FLUSH");
         g->flush_end = e && !strcmp(e, "1");

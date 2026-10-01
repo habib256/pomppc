@@ -9,6 +9,16 @@ et dans `docs/`.
 
 ## Non publié
 
+- **Tout par défaut, binaire de référence reconstruit** (01/10). `~/src/qemu` reconstruit avec
+  le device A4 et `tcg/0013`/`0014` (précédent `*.avant-a4`) ; `QGPU_GL_FLUSH` (exporté par
+  `run_tiger.sh`) et `POMPPC_GL_QFLUSH` (plugin `20261001-tout`) allumés, à la demande de
+  l'utilisateur, sans A/B dédié ; `scripts/build_qemu_qfb.sh` vérifie aussi `x-fp-flat` et
+  `x-fp-native`. Matrice `bench/matrice/20261001-tout`, aucune variable : 15 vertes sur 15
+  automatisées, images justes. Depuis le tour `20260930-wlunif` (ms/image, fenêtre / plein
+  écran) : DOOM 3 59,9 → 56,6 / 59,5 → 56,8 ; Prey 71,5 → 59,1 / 71,0 → 58,6 ; Colin McRae
+  69,3 → 47,8 ; Nexuiz ARB 109,0 → 80,2 ; Nexuiz GLSL 39,9 → 35,3 ; Warcraft III 17,8 → 15,6 ;
+  UT2004 25,9 → 25,3 ; Marble Blast et Zenerchi inchangés.
+
 - **TCG : flottant scalaire simple par le FPU de l'hôte** (`patches/tcg/0013` `x-fp-flat`,
   `0014` `x-fp-native` ; **`x-fp-native` allumé par défaut** après la matrice complète
   `bench/matrice/20261001-fpnat`, 15/15 vertes, images justes ; `FPNATIVE=0` l'éteint, `FPFLAT=1` ; `docs/tcg-g4.md` §22).

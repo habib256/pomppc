@@ -761,6 +761,8 @@ check_opt x-jc-idx       qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-j
 check_opt x-icbi-sync    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-icbi-sync=on
 check_opt x-jc-bits      qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jc-bits=14
 check_opt x-msr-nobql    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-msr-nobql=on
+check_opt x-fp-flat      qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fp-flat=on
+check_opt x-fp-native    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fp-native=on
 echo
 echo "→ $CAPS"
 

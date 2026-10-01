@@ -174,8 +174,7 @@ Ordre : planchers recalés, puis TCG (cache de sauts, verrou `mtmsr`/`rfi`), pui
 - [x] **[TCG] `x-icbi-sync` : A/B DOOM 3** (30/09, §20) : 61,8 → 61,6, dans le bruit ;
   **allumé par défaut** (`ICBISYNC=1`). Matrice complète sur la configuration retenue
   (`bench/tcg/ab/matrice-vit`) : 16 vertes sur 16, images toutes justes (§21).
-  **À faire par l'utilisateur** : reconstruire le binaire de référence
-  (`scripts/build_qemu_qfb.sh`, patches 0011 et 0012).
+  Binaire de référence reconstruit le 01/10 avec 0011 et 0012.
 - [x] **[Protocole] Doorbell asynchrone côté invité** (bug hunt D2, levier L4) : **mesuré, rien
   à convertir** (30/09). Lignes `SYNC` de la note : en jeu, les seuls doorbells synchrones
   sont les sondes de définition de programme (DOOM 3 0,0005 ms/image, Prey ≤ 0,014, Nexuiz
@@ -188,11 +187,7 @@ Ordre : planchers recalés, puis TCG (cache de sauts, verrou `mtmsr`/`rfi`), pui
   McRae −27 % (66,5 → 48,2, seuil de course de la matrice recalé à 15 ms/échange), Nexuiz GLSL −6 %, UT2004 −3 %, DOOM 3 −2,3 %, Prey dans le bruit ; images justes.
   Textures par DMA : mesuré, rien à construire (`docs/protocole-v23-textures.md`).
   Capacités 0x8000 / 0x20000 ajoutées sans changer `QGPU_PROTO_VERSION` (22).
-  **À faire par l'utilisateur** : reconstruire le binaire de référence
-  (`scripts/build_qemu_qfb.sh`, VM arrêtée ; binaires d'avant déjà copiés en
-  `~/src/qemu/build/*.avant-a4`). Tant qu'il n'est pas reconstruit, le device de référence
-  n'annonce pas les capacités et le plugin `20261001-a4on` (installé) garde les anciennes
-  voies : aucun gain, rien de cassé. `~/src/qemu-a4` porte déjà ce device.
+  Binaire de référence reconstruit le 01/10 (précédent en `~/src/qemu/build/*.avant-a4`).
 - [ ] **[Système] DOOM 3 plein écran mort au chargement** (`exit 139`, tas du jeu corrompu) :
   3 fois de suite dans une même session de la VM pendant le volet état d'A4, **dont une fois
   leviers éteints** ; 0 sur les ~20 parties suivantes (campagne d'intégration comprise).
@@ -205,12 +200,14 @@ Ordre : planchers recalés, puis TCG (cache de sauts, verrou `mtmsr`/`rfi`), pui
 - [x] **[Backend GL]** G7/G8/G9 (30/09, `docs/backend-gl-attente.md`) : **mesuré**. Seul Nexuiz
   attend l'hôte au-delà de 2 % (GLSL 2,5 ms/image, ARB 3,6) : ses requêtes d'occlusion. Colin
   McRae : 0,12 ms/image. G7 sans objet, G9 (≤ 1,25 % d'attente) et G8 classés.
-- [ ] **[VM] Épreuves d'attente** : `tools/matrice/ab-attente.sh 6 "g8 flush"`, puis `… 6 qflush`
-  et `… 1 matriceq` (plugin `20260930-a4`). Fermeture : G8 clos si l'attente baisse de moins de
-  1 ms/image ; `QGPU_GL_FLUSH` et `POMPPC_GL_QFLUSH` allumés seulement si l'attente de Nexuiz
-  GLSL baisse d'au moins 1 ms/image et la matrice reste 16/16 (mesuré sur VM chargée : ~0,5 ms,
-  issue probable « gain faible »). Pour les ~2 ms restantes : soumettre par tranches pendant les
-  dessins, ou résultats de requête écrits par l'hôte (protocole).
+- [x] **[Plugin/Backend GL] Attente des requêtes d'occlusion** : `QGPU_GL_FLUSH` (glFlush du
+  device en fin de soumission, exporté par `run_tiger.sh`) et `POMPPC_GL_QFLUSH` (soumission
+  anticipée au premier `QUERY_BEGIN`) **allumés par défaut le 01/10** à la demande de
+  l'utilisateur, sans l'A/B prévu (`tools/matrice/ab-attente.sh 6 qflush`, toujours jouable) ;
+  matrice `bench/matrice/20261001-tout` 15/15 vertes, images justes, Nexuiz GLSL 36,1 → 35,3 et
+  ARB 81,2 → 80,2 ms/image (un tour). `=0` éteint chacun. G8 clos sans épreuve (`g8`).
+  Pour les ~2 ms restantes de Nexuiz : soumettre par tranches pendant les dessins, ou
+  résultats de requête écrits par l'hôte (protocole).
 - [ ] **[Cœur] DOOM 3 : `nat_conv_attr`** = 27 % du temps du fil de rendu hôte (attributs
   reconvertis à chaque dessin natif) ; convertir une fois au `BUF_SUBDATA`. Hors du chemin
   d'attente (≤ 1,3 %) : utile seulement si l'hôte devient la limite.
@@ -326,15 +323,16 @@ un travail de diagnostic dans « Ensuite », pas un blocage.
 
 ## Référence validée
 
-État au 29/09/2026 (bug hunt en quatre passes, `main` `2d48131` puis `bf14f79`).
+État au 01/10/2026 (A4, flottant natif et attente allumés ; tout par défaut).
 
 | Élément | État |
 |---|---|
 | Protocole / ABI | GL **v22**, transport kext **v19** (`QGPU_ST_NO_MEM`, `QGPU_REG_NOMEM`, `QGPU_CAP_GLSL_PATHS` ajoutés sans changer d'ABI) |
-| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit depuis `18ad012` ; précédent en `*.avant-bughunt` |
-| Invité quotidien | `tiger.qcow2`, kext et plugin de `18ad012` (gcc-4.0 dans l'invité), SMP=2 |
-| TCG | `0001–0004`, `0006–0008` activés par défaut ; `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0`, `RETINLINE=0`, `JCIDX=0` les désactivent |
-| Tests natifs et scripts | **156 OK, 0 échec, 6 ignorés** ; frontend ctest 3/3 |
+| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 01/10 (A4 : `QGPU_CAP_STATE_BLOCK`, `QGPU_CAP_GEOM_HOST` ; TCG 0011-0014) ; précédent en `*.avant-a4` |
+| Invité quotidien | `tiger.qcow2`, kext v19, plugin `20261001-tout` (gcc-4.0 dans l'invité), SMP=2 |
+| TCG | `0001–0004`, `0006–0008`, `0010–0012`, `0014` activés par défaut ; `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0`, `RETINLINE=0`, `JCIDX=0`, `ICBISYNC=0`, `MSRNOBQL=0`, `FPNATIVE=0` les désactivent |
+| Plugin et device | `POMPPC_GL_STATEBLK`, `POMPPC_GL_RAWSANE`, `POMPPC_GL_NATSHM`, `POMPPC_GL_QFLUSH`, `QGPU_GL_FLUSH` allumés (`=0` éteint chacun) |
+| Tests natifs et scripts | **190 OK, 0 échec, 4 ignorés** ; frontend ctest 3/3 |
 | Travaux clos | Voir `CHANGELOG.md` et `docs/bug-hunt-2026-09-29*.md` |
 | Profils | Plugin : `bench/plugin/ab2-B*/{d3,prey}-fen/mesure/sample.txt` ; TCG : `bench/tcg/` (hors git) |
 
@@ -345,7 +343,13 @@ hors rafraîchissements admis (2 par 90 images en fenêtre), et une mesure à sc
 sous le seuil du jeu. Une scène `gltest` comparée au rendu d'Apple éprouve chaque notion
 nouvelle. Les modes fenêtre et plein écran sont requis quand le jeu les propose.
 
-**Dernier tour complet : `bench/matrice/20260930-wlunif/tableau.md`** (QEMU de référence
+**Dernier tour complet : `bench/matrice/20261001-tout/tableau.md`** (QEMU de référence
+reconstruit le 01/10, plugin `20261001-tout`, aucune variable : tout par défaut) : 15 vertes
+sur 15 automatisées, images toutes justes ; Marble Blast 8,9 / 10,3 ; Zenerchi 4,3 ; DOOM 3
+56,6 / 56,8 ; Prey 59,1 / 58,6 ; UT2004 25,3 / 25,8 ; Warcraft III — / 15,6 ; Colin McRae
+— / 47,8 ; Nexuiz ARB 80,2 / 80,3 ; Nexuiz GLSL 35,3 / 35,2.
+
+Tour précédent : `bench/matrice/20260930-wlunif/tableau.md` (QEMU de référence
 avec `0011`/`0012`, plugin `20260930-wlunif`) : 16 vertes sur 16, images toutes justes ;
 Marble Blast 9,2 / 9,7 ; Zenerchi 3,9 ; DOOM 3 59,9 / 59,5 ; Prey 71,5 / 71,0 ; UT2004
 25,9 / 25,9 ; Warcraft III — / 17,8 ; Colin McRae — / 69,3 ; Nexuiz ARB 109,0 / 109,6 ;

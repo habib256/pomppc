@@ -128,7 +128,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261001-a4on"
+#define POMPPC_PLUGIN_REV "20261001-tout"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -6917,7 +6917,8 @@ static struct {
 static void qcut_init(void)
 {
     const char *e = getenv("POMPPC_GL_QFLUSH");
-    unsigned long v = e && *e ? strtoul(e, 0, 0) : 0;
+    /* allumée par défaut depuis le 01/10 ; POMPPC_GL_QFLUSH=0 l'éteint */
+    unsigned long v = e && *e ? strtoul(e, 0, 0) : 1;
     qcut_on = v != 0;
     if (v > 1)
         qcut_min = v;                   /* POMPPC_GL_QFLUSH=<n> : seuil en mots */

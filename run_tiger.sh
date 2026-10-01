@@ -88,6 +88,10 @@ done
 # x-jc-bits (tcg/0011) : 2^14 entrées de cache de sauts (12 = QEMU d'origine).
 export JCBITS="${JCBITS:-14}"
 export QGPU_GPU_COPY="${QGPU_GPU_COPY:-1}" QGPU_GLSL="${QGPU_GLSL:-1}"
+# glFlush du device en fin de soumission (docs/backend-gl-attente.md §5) : allumé
+# par défaut depuis le 01/10/2026 avec la soumission anticipée des requêtes du
+# plugin (POMPPC_GL_QFLUSH) ; QGPU_GL_FLUSH=0 l'éteint.
+export QGPU_GL_FLUSH="${QGPU_GL_FLUSH:-1}"
 
 # Avant le verrou disque : ImGui relance CE script avec DBUS_DISPLAY=1.
 # Cette garde évite la récursion et laisse les outils sans fenêtre inchangés.
