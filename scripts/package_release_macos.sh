@@ -68,13 +68,11 @@ left="$(for f in "$OUT"/bin/* "$OUT"/lib/*; do deps "$f"; done | sort -u)"
 
 echo "▶ signature ad hoc"
 for f in "$OUT"/lib/*; do codesign --force -s - "$f" 2>/dev/null; done
-ENT="$QSRC/accel/hvf/entitlements.plist"
-for f in "$OUT"/bin/*; do
-  case "$(basename "$f")" in
-    qemu-system-*) codesign --force -s - --entitlements "$ENT" "$f" 2>/dev/null ;;
-    *)             codesign --force -s - "$f" 2>/dev/null ;;
-  esac
-done
+# Sans l'entitlement Hypervisor.framework de QEMU (accel/hvf/entitlements.plist) :
+# un invité PowerPC ne passe jamais par HVF, et un processus qui le porte voit
+# cntfrq_el0 à 24 MHz au lieu d'1 GHz (Apple M4, macOS 26) — x-tb-fast (tcg/0015)
+# retombait alors sur l'horloge d'origine, en silence, dans le paquet v0.1.0.
+for f in "$OUT"/bin/*; do codesign --force -s - "$f" 2>/dev/null; done
 "$OUT/bin/qemu-system-ppc64" --version | head -1
 "$OUT/bin/qemu-img" --version | head -1
 

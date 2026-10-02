@@ -28,6 +28,11 @@ Paquet macOS Apple Silicon (`scripts/package_release_macos.sh v0.3.0`) au commit
   le gestionnaire du jeu appelait `exit()`, dont le nettoyage SDL revenait dans le plugin et
   attendait ce verrou. Garde de faute dédiée (`post_jmp`) : les copies sans destination sont
   jetées. Gel reproduit avec l'ancien plugin, sortie propre confirmée par l'utilisateur.
+- **Paquet : `x-tb-fast` réellement actif** (02/10). Le script d'empaquetage signait QEMU avec
+  l'entitlement Hypervisor.framework ; un processus qui le porte voit `cntfrq_el0` à 24 MHz
+  (Apple M4, macOS 26) au lieu d'1 GHz, et la base de temps rapide (tcg/0015) retombait sur
+  l'horloge d'origine (« x-tb-fast : cntfrq 24000000 Hz »). C'était le cas du paquet v0.1.0.
+  Signature ad hoc sans entitlement : HVF ne sert jamais à un invité PowerPC.
 - **gltest et POMPPCFsqrt sous Tiger 10.4.11** (01/10) : `gl15`, `tex13`, `tex14`, `texlod` en
   256×256 par défaut ; la dépendance de `POMPPCFsqrt` porte la version exacte du noyau
   (`uname -r`, écrite par les installateurs), sans quoi le kext ne se chargeait pas sous 10.4.11.
