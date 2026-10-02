@@ -87,6 +87,12 @@ qemu_has_device() {
   grep -qF "\"name\": \"$2\"" <<< "$_CAPS_DEV"
 }
 
+# qemu_dev_has_prop <bin> <device> <prop> : la propriété existe-t-elle sur ce
+# device instanciable (`-device X,help` en liste une par ligne, « prop=<type> ») ?
+qemu_dev_has_prop() {
+  "$1" -device "$2,help" 2>/dev/null | grep -q "^ *$3="
+}
+
 # -netdev help / -audiodev help impriment un nom par ligne.
 qemu_has_netdev() {
   _caps_load "$1" || return 2

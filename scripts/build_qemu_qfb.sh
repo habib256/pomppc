@@ -23,6 +23,7 @@
 #   • base de temps par le compteur de l'hôte (x-tb-fast)  — patches/tcg/0015
 #   • flottant double natif (x-fp-native64)             — patches/tcg/0016
 #   • les trois mêmes sur hôte x86-64 (op ppc_fp32, TSC, vperm) — patches/tcg/0017-0019
+#   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
 #   ./scripts/build_qemu_qfb.sh              # build dans ~/src/qemu
@@ -763,6 +764,17 @@ target/ppc/int_helper.c vperm_fast_avx
 TCG17_MARKERS
 fi
 
+# --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---
+# patches/usbhid/0001 : l'IOHIDEventDriver de 10.4.11 retire 7,5 % de chaque bout
+# des axes absolus ; la tablette rend ses coordonnées dans la fenêtre gardée.
+if ! grep -q "abs_margin_pct" include/hw/input/hid.h; then
+  echo "▶ patch : marge absolue de usb-tablet (x-abs-margin, Tiger 10.4.11)"
+  patch_strict "$ROOT/patches/usbhid/0001-usb-tablet-abs-margin.patch"
+  rm -f include/hw/input/hid.h.orig hw/input/hid.c.orig hw/usb/dev-hid.c.orig
+fi
+grep -q "x-abs-margin" hw/usb/dev-hid.c || {
+  echo "⚠ patch usbhid 0001 incomplet : x-abs-margin absent de hw/usb/dev-hid.c" >&2; exit 1; }
+
 # --- 5. Build ---
 mkdir -p build && cd build
 if [ ! -f build.ninja ] || [ -n "${RECONFIGURE:-}" ]; then
@@ -819,6 +831,7 @@ echo "=== capacités du binaire produit ==="
 check screamer   qemu_machine_has  "$BIN" "mac99,via=pmu" screamer
 check qfb-pci    qemu_has_device   "$BIN" qfb-pci
 check qgpu-pci   qemu_has_device   "$BIN" qgpu-pci
+check x-abs-margin qemu_dev_has_prop "$BIN" usb-tablet x-abs-margin
 # Pas seulement « le device existe » : a-t-il un écran où présenter ?
 check qgpu-scanout qemu_qgpu_has_scanout "$BIN" "mac99,via=pmu"
 # Le backend de rendu hôte : le lanceur demande 'auto' (qui retombe toujours

@@ -62,6 +62,8 @@
 #                             # TABLET=0 garde seulement la souris relative.
 #                             # ImGuiDock sélectionne explicitement la tablette
 #                             # pour éviter le repli vers la souris relative.
+#   TABLET_MARGIN=0 ./run_tiger.sh  # tablette sans la marge de Tiger 10.4.11 (défaut 15 :
+#                             # x-abs-margin, patches/usbhid/0001) — pour un invité ≤ 10.4.10
 #   NOCD=1 ./run_tiger.sh     # omet le lecteur CD amovible vide 'gamecd'
 #   GLISO=0 ./run_tiger.sh    # omet l'ISO des sources du plugin GL (disks/pomppc-src.iso)
 #                             # dans 'gamecd' ; implicite avec le GPU (GLISO=1 pour forcer)
@@ -109,8 +111,27 @@ case "${POMPPC_FRONTEND:-imgui}" in
   imgui|native) ;;
   *) echo "POMPPC_FRONTEND attendu : imgui ou native" >&2; exit 2 ;;
 esac
+# Version de QEMU : la série patches/ vise POMPPC_QEMU_VERSION (config.env). Un
+# binaire d'une autre version (l'ancien ~/src/qemu en 9.2.0, un QEMU de
+# distribution) démarre peut-être, mais sans les correctifs ni les capacités
+# attendues. Vérifiée AVANT d'ouvrir ImGuiDock (sa sortie s'y perdait : Tiger
+# repartait sur le 9.2.0 sans qu'on le voie, 02/10/2026) ; refus net, sauf
+# QEMU_BIN= explicite (essais) ou POMPPC_QEMU_ANY=1.
+check_qemu_version() { # check_qemu_version <binaire>
+  local v
+  v="$("$1" --version 2>/dev/null | sed -n '1s/.*version \([0-9][0-9.]*\).*/\1/p')"
+  [ -z "${POMPPC_QEMU_VERSION:-}" ] || [ "$v" = "$POMPPC_QEMU_VERSION" ] && return 0
+  echo "⚠  $1 est QEMU ${v:-?}, la série de patches vise $POMPPC_QEMU_VERSION." >&2
+  echo "   Reconstruis le binaire de référence : ./scripts/build_qemu_qfb.sh" >&2
+  if [ -z "${USER_QEMU_BIN:-}" ] && [ -z "${POMPPC_QEMU_ANY:-}" ]; then
+    echo "   (POMPPC_QEMU_ANY=1 ou QEMU_BIN=… pour lancer quand même)" >&2
+    exit 1
+  fi
+}
+USER_QEMU_BIN="${USER_QEMU_BIN-${QEMU_BIN:-}}"; export USER_QEMU_BIN
 if [ "${POMPPC_FRONTEND:-imgui}" = imgui ] && [ -z "${DBUS_DISPLAY:-}" ] &&
    [ -z "${HEADLESS:-}" ] && [ -z "${POMPPC_DISPLAY:-}" ]; then
+  ( source "$ROOT/config.env"; check_qemu_version "$QEMU_BIN" ) || exit 1
   echo "▶ Tiger : ImGuiDock, profil optimisations maximales (réglages surchargeables)"
   exec "$ROOT/run_frontend.sh" "$ROOT/run_tiger.sh"
 fi
@@ -194,15 +215,9 @@ else
   MODE="mono-cœur${SMP_TAG}"
 fi
 
-# Version de QEMU : la série patches/ vise POMPPC_QEMU_VERSION (config.env). Un
-# binaire d'une autre version (l'ancien ~/src/qemu en 9.2.0, un QEMU de
-# distribution) démarre peut-être, mais sans les correctifs ni les capacités
-# attendues : on le dit, sans bloquer (QEMU_BIN= reste libre pour les essais).
+# Version du binaire réellement lancé (ppc64 en SMP) : check_qemu_version, plus haut.
+check_qemu_version "$BIN"
 QEMU_VER="$("$BIN" --version 2>/dev/null | sed -n '1s/.*version \([0-9][0-9.]*\).*/\1/p')"
-if [ -n "${POMPPC_QEMU_VERSION:-}" ] && [ "$QEMU_VER" != "$POMPPC_QEMU_VERSION" ]; then
-  echo "⚠  $BIN est QEMU ${QEMU_VER:-?}, la série de patches vise $POMPPC_QEMU_VERSION." >&2
-  echo "   Reconstruis le binaire de référence : ./scripts/build_qemu_qfb.sh" >&2
-fi
 
 # Son ON par défaut ; NOSOUND=1 pour couper. On SONDE le binaire : sans la
 # classe 'screamer' QEMU se contente d'un warning sur le -global, et on se
@@ -722,9 +737,22 @@ fi
 TABLET_ARGS=()
 TABLET_DEFAULT=0
 [ -n "${DBUS_DISPLAY:-}" ] && TABLET_DEFAULT=1
+# Tiger 10.4.11 : son IOHIDEventDriver retire 7,5 % de chaque bout des axes
+# absolus, le pointeur s'écartait du clic (×1,18 depuis le centre). La tablette
+# rend ses coordonnées dans la fenêtre gardée (x-abs-margin, patches/usbhid/0001) ;
+# TABLET_MARGIN=0 pour un invité 10.4.10 ou plus ancien.
 if [ "${TABLET:-$TABLET_DEFAULT}" = 1 ]; then
-  TABLET_ARGS=(-device usb-tablet,id=pointer0)
-  echo "  Souris absolue : tablette USB (sélectionnée par ImGuiDock)"
+  TABLET_DEV="usb-tablet,id=pointer0"
+  TABLET_MARGIN="${TABLET_MARGIN:-15}"
+  if [ "$TABLET_MARGIN" != 0 ]; then
+    if qemu_dev_has_prop "$BIN" usb-tablet x-abs-margin; then
+      TABLET_DEV="$TABLET_DEV,x-abs-margin=$TABLET_MARGIN"
+    else
+      echo "⚠  usb-tablet sans x-abs-margin (patches/usbhid/0001) : pointeur décalé sous Tiger 10.4.11." >&2
+    fi
+  fi
+  TABLET_ARGS=(-device "$TABLET_DEV")
+  echo "  Souris absolue : tablette USB (sélectionnée par ImGuiDock, marge $TABLET_MARGIN %)"
 fi
 
 exec "$BIN" -M "$MACHINE" -cpu "$CPU_SPEC" -m "$RAM" -smp "$SMP_N" \
