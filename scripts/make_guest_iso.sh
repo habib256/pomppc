@@ -47,5 +47,12 @@ tools/gltest and tools/glwin are small OpenGL test programs.
 Source code and documentation: https://github.com/habib256/pomppc (GPL-3.0-or-later).
 EOF
 rm -f "$OUT"
-hdiutil makehybrid -quiet -iso -joliet -hfs -default-volume-name POMPPC_GUEST -o "$OUT" "$STAGE"
+if command -v hdiutil >/dev/null; then
+  hdiutil makehybrid -quiet -iso -joliet -hfs -default-volume-name POMPPC_GUEST -o "$OUT" "$STAGE"
+elif command -v xorriso >/dev/null; then
+  # Linux : hybride ISO 9660 (Rock Ridge, Joliet) + HFS+, que Tiger monte comme le HFS de hdiutil
+  xorriso -as mkisofs -quiet -r -J -hfsplus -V POMPPC_GUEST -o "$OUT" "$STAGE"
+else
+  echo "ni hdiutil ni xorriso (apt install xorriso) : impossible de graver l'ISO" >&2; exit 1
+fi
 echo "$OUT ($(du -h "$OUT" | cut -f1))"
