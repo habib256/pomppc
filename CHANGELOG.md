@@ -7,9 +7,9 @@ ne change que si l'ABI de transport change. Les mesures sont celles
 prises le jour même, sur l'hôte indiqué. Le détail de chaque lot est dans le message de commit
 et dans `docs/`.
 
-## v0.3.0 (02/10/2026)
+## 0.3 (02/10/2026)
 
-Paquet macOS Apple Silicon (`scripts/package_release_macos.sh v0.3.0`) au commit de la version.
+Paquet macOS Apple Silicon (`scripts/package_release_macos.sh 0.3`) au commit de la version.
 
 - **QEMU 11.1.2** (01-02/10). Toute la série `patches/` reposée sur QEMU v11.1.2 (elle visait
   9.2.0), un commit par patch, appliquée sans fuzz (`patches/README.md`, « Base : QEMU 11.1.2 »).
@@ -37,7 +37,7 @@ Paquet macOS Apple Silicon (`scripts/package_release_macos.sh v0.3.0`) au commit
   256×256 par défaut ; la dépendance de `POMPPCFsqrt` porte la version exacte du noyau
   (`uname -r`, écrite par les installateurs), sans quoi le kext ne se chargeait pas sous 10.4.11.
 
-## Avant v0.3.0
+## Avant 0.3
 
 - **TCG : base de temps par le compteur de l'hôte et flottant double natif** (01/10,
   `patches/tcg/0015` `x-tb-fast`, `0016` `x-fp-native64` ; **allumés par défaut** le soir même à
