@@ -37,8 +37,6 @@ Paquet macOS Apple Silicon (`scripts/package_release_macos.sh 0.3`) au commit de
   256×256 par défaut ; la dépendance de `POMPPCFsqrt` porte la version exacte du noyau
   (`uname -r`, écrite par les installateurs), sans quoi le kext ne se chargeait pas sous 10.4.11.
 
-## Avant 0.3
-
 - **TCG : base de temps par le compteur de l'hôte et flottant double natif** (01/10,
   `patches/tcg/0015` `x-tb-fast`, `0016` `x-fp-native64` ; **allumés par défaut** le soir même à
   la demande de l'utilisateur, sans tour de matrice, binaire de référence reconstruit (précédent
