@@ -48,7 +48,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="${QEMU_SRC:-$HOME/src/qemu}"
-TAG="${QEMU_TAG:-v11.1.2}"
+# Version visée : POMPPC_QEMU_VERSION de config.env (une seule source).
+TAG="${QEMU_TAG:-v$(sed -n 's/^POMPPC_QEMU_VERSION=//p' "$ROOT/config.env")}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}"
 
 # -e et non -d : dans un worktree git, .git est un fichier.
