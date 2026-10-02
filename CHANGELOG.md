@@ -7,6 +7,22 @@ reconstruire QEMU et le plugin ; le kext ne change que si l'ABI de transport cha
 sont celles prises le jour même, sur l'hôte indiqué. Le détail de chaque lot est dans le message
 de commit et dans `docs/`.
 
+## Non publié
+
+- **Hôte x86-64 au niveau de l'arm64** (02/10, `patches/tcg/0017`-`0019`, `docs/tcg-g4.md`
+  §25). `x-fp-native` et `x-fp-native64` ont leur émetteur x86_64 (VEX et FMA3, sondés à
+  l'exécution ; `x-fp-flat` sans eux), `x-tb-fast` lit le TSC invariant sous Linux (source
+  d'horloge `tsc` du noyau), `vperm` passe par `pshufb` (AVX). `fptest` simple et double
+  identiques octet pour octet, 486 M opérations sous `x-fp-verify` sans divergence, 1,2 G
+  lectures de la base de temps sans écart positif, `vperm` 50,7 M cas sans divergence. Bancs
+  invités (i7-10700F) contre l'x86 d'avant, options par défaut : chaîne simple 287 → 180 ms,
+  sommets double 1 227 → 749 ms, `mftb` 31,8 → 17,5 ns, `vperm` 452 → 95 ms ; mutants de
+  l'émetteur 5/5 détectés. Le vérificateur ignore `float_flag_input_denormal_used` (QEMU 10+, jamais lu
+  par la cible) : faux positif de `fcmpu` sur opérande dénormal, commun aux deux hôtes.
+- **Paquet Linux x86-64** : `scripts/package_release_linux.sh` (dépôt, QEMU, frontend, CD
+  invité repris de la publication ou gravé par `xorriso`) ; les bibliothèques viennent du
+  système, `DEPENDS.txt` liste les paquets apt. `make_guest_iso.sh` grave aussi sous Linux.
+
 ## 0.3 (02/10/2026)
 
 Paquet macOS Apple Silicon (`scripts/package_release_macos.sh 0.3`) au commit de la version.

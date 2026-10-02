@@ -121,7 +121,8 @@ QEMU's `configure` needs Python ≥ 3.9 with `tomli` and `distlib`; on macOS a v
 (`PYTHON=venv/bin/python3 ./scripts/build_qemu_qfb.sh`). The guest kext and plugin are compiled
 **inside Tiger** with the Xcode 2.5 tools (gcc 4.0, SDK 10.4u): `./run_tiger.sh` burns a
 `POMPPCSRC` CD with their sources, and `guest/gldriver/install.sh` builds and installs them.
-`scripts/package_release_macos.sh` produces the release archive.
+`scripts/package_release_macos.sh` produces the release archive (`scripts/package_release_linux.sh`
+for Linux x86-64).
 
 ## How it works
 

@@ -35,11 +35,13 @@
 #   FPFLAT=1 ./run_tiger.sh   # les mêmes en UN appel, sans branchement dans le code généré
 #                             # (x-fp-flat, tcg/0013, éteint par défaut, docs/tcg-g4.md §22)
 #   FPNATIVE=0 ./run_tiger.sh # coupe leur chemin court en instructions flottantes de l'hôte
-#                             # (arm64), le helper de x-fp-flat hors ligne sinon (x-fp-native,
+#                             # (arm64 ; x86-64 avec AVX et FMA3, tcg/0017), le helper de x-fp-flat
+#                             # hors ligne sinon (x-fp-native,
 #                             # tcg/0014, allumé par défaut depuis le 01/10, docs/tcg-g4.md §22)
 #   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
 #                             # tcg/0016, allumé par défaut, docs/tcg-g4.md §24) ; FPVERIFY=1 : preuve
-#   TBFAST=0 ./run_tiger.sh   # coupe mftb/mftbu calculés depuis le compteur de l'hôte (cntvct, 1 GHz)
+#   TBFAST=0 ./run_tiger.sh   # coupe mftb/mftbu calculés depuis le compteur de l'hôte (cntvct, 1 GHz ;
+#                             # TSC invariant sous Linux x86-64, tcg/0018)
 #                             # et l'horloge de QEMU linéaire à la ns (x-tb-fast, tcg/0015, allumé
 #                             # par défaut, docs/tcg-g4.md §23) ; TBVERIFY=1 : mode preuve
 #   RETINLINE=0 JCIDX=0 ./run_tiger.sh  # coupe les sorties indirectes (blr, bctr…) cherchées en
@@ -349,9 +351,10 @@ if [ "${FPFLAT:-0}" != 0 ]; then
 fi
 # --- Flottant scalaire par le FPU de l'hôte dans le code généré (x-fp-native,
 # patches/tcg/0014, docs/tcg-g4.md §22) --- le chemin court de x-fp-inline en
-# instructions flottantes arm64 (op TCG ppc_fp32), le helper de x-fp-flat appelé
-# hors ligne quand il ne s'applique pas. Mêmes résultats, même FPSCR au bit près.
-# N'agit qu'avec x-fast-fp ; x-fp-flat sur un hôte qui n'est pas arm64. Allumé par
+# instructions flottantes de l'hôte (op TCG ppc_fp32 : arm64, ou x86-64 avec AVX et
+# FMA3 depuis tcg/0017), le helper de x-fp-flat appelé hors ligne quand il ne
+# s'applique pas. Mêmes résultats, même FPSCR au bit près. N'agit qu'avec
+# x-fast-fp ; x-fp-flat sur un autre hôte. Allumé par
 # défaut depuis le 01/10/2026 (A/B DOOM 3 60,5 -> 58,3 ms/image, matrice verte,
 # §22) : FPNATIVE=0 l'éteint ; FPVERIFY=1 le vérifie.
 if [ "${FPNATIVE:-0}" != 0 ]; then
@@ -397,7 +400,8 @@ fi
 # --- Base de temps par le compteur de l'hôte (x-tb-fast, patches/tcg/0015,
 # docs/tcg-g4.md §23) --- mftb/mftbu sans clock_gettime ni division 128 bits ;
 # l'horloge de QEMU devient cntvct_el0 + K (linéaire, à la ns). Hôtes arm64 dont
-# le compteur bat à 1 GHz (sinon sans effet, QEMU le dit). Allumé par défaut depuis
+# le compteur bat à 1 GHz ; Linux x86-64 dont le noyau compte le temps sur un TSC
+# invariant, mis à l'échelle en ns (tcg/0018). Ailleurs sans effet, QEMU le dit. Allumé par défaut depuis
 # le 01/10 (A/B DOOM 3 −0,6 %, Nexuiz −0,8 %) : TBFAST=0 l'éteint ;
 # TBVERIFY=1 compare chaque lecture à la valeur d'origine (bilan sur stderr).
 if [ "${TBFAST:-0}" != 0 ]; then

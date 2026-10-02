@@ -31,6 +31,14 @@
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 typedef union { uint8_t u8[16]; uint64_t u64[2]; } ppc_avr_t;
 
+#if defined(__x86_64__) && !HOST_BIG_ENDIAN
+/* tcg/0019 : le chemin AVX (pshufb), choisi à l'exécution comme dans QEMU */
+#include <immintrin.h>
+#define likely(x) __builtin_expect(!!(x), 1)
+#define CPUINFO_AVX1 1u
+static unsigned cpuinfo;
+#endif
+
 #include "vpermproof-helpers.h"   /* helper_VPERM, helper_VPERM_FAST */
 
 static uint64_t st = 0x5eed;
@@ -63,6 +71,14 @@ int main(int argc, char **argv)
     uint64_t n = argc > 1 ? strtoull(argv[1], 0, 0) : 50000000;
     ppc_avr_t a, b, c;
     uint64_t alias = 0, abad = 0;
+
+#if defined(__x86_64__) && !HOST_BIG_ENDIAN
+    /* VPERMPROOF_NOAVX=1 : le C portable, pour le prouver lui aussi */
+    __builtin_cpu_init();
+    cpuinfo = __builtin_cpu_supports("avx") && !getenv("VPERMPROOF_NOAVX")
+              ? CPUINFO_AVX1 : 0;
+    printf("chemin %s\n", cpuinfo ? "AVX (pshufb, tcg/0019)" : "C portable");
+#endif
 
     for (int pos = 0; pos < 16; pos++) {
         for (int v = 0; v < 256; v++) {
