@@ -2444,3 +2444,93 @@ Banc invité (`fptest banc-d 10000000`, 3 tours, même démarrage de VM par mode
 Le ~7 % de flottant double du profil de Nexuiz venait surtout de la **racine logicielle**
 `___sqrt` de la libm (itérations de Newton en double) : depuis `POMPPCFsqrt` (même jour), la
 libm prend `fsqrt` et ce double a disparu. Reste Prey (squelettes, `idSIMD_Generic`).
+
+## 25. Les mêmes sur un hôte x86-64 : `tcg/0017` à `0019`
+
+02/10/2026, PC Linux (i7-10700F, Ubuntu 24.04). Arbre `~/src/qemu11` (clone neuf de v11.1.2 par
+`build_qemu_qfb.sh`, un commit par patch), binaire de référence intact ; preuves sur la VM de dev
+(`disks/tiger-dev.raw`, 10.4.6, mono-cœur, single-user, `devloop.py`). Jusqu'ici `x-fp-native`,
+`x-fp-native64` et `x-tb-fast` ne valaient que sur arm64 (ailleurs : `x-fp-flat`, un appel par
+instruction, et l'horloge d'origine), et `vperm` n'avait son `tbl` NEON que là. Les deux postes
+de développement (M4 et ce PC) ont désormais le même niveau.
+
+### 25.1 `tcg/0017` : l'émetteur x86_64 de `INDEX_op_ppc_fp32`
+
+- **Même op, même talon, même chemin lent** que l'arm64 (§22, §24) ; seul l'émetteur change
+  (`tcg/x86_64/tcg-target.c.inc`, `tcg_out_ppc_fp32`). Opérandes VEX scalaires (`vmovq`,
+  `vcvtsd2ss`/`vcvtss2sd`, `vaddss`/`vsubss`/`vmulss` et leurs formes `sd`) et **FMA3**
+  (`vfmadd231`, `vfmsub231` : une seule rondeur ; `a·c − b` est exactement `a·c + (−b)`).
+  `fnmadd`/`fnmsub` : `btc r, 63` **après** l'arrondi, zéro compris, comme l'arm64.
+- **Tests par sauts** : chaque test du chemin court (porte du FPSCR, `fpi_zon`/`fpi_zon64` des
+  opérandes, résultat infini, somme double minuscule, produit non nul ≤ FLT_MIN/DBL_MIN) est un
+  `jcc rel32` vers le talon hors ligne (jusqu'à 12 par op, `fp_jmp[]` du label), au lieu du
+  registre « bad » accumulé sans branchement de l'arm64 : x86 a deux fois moins de registres et
+  des branches non prises quasi gratuites. Constantes 64 bits par `movabs` ; FPRF/FPCC par
+  `cmov`.
+- **Registres** : op `TCG_OPF_CALL_CLOBBER`, donc les GPR sauvés par l'appelant qui ne portent
+  aucun argument (au moins 3 sur 9 en SysV), les deux sorties avant d'être écrites et XMM0-3
+  servent de brouillon. Talon : arguments par la pile (`push`/`pop`, toute affectation
+  convient), `rdi` = env, `r8d` = sélecteur, `r9` = adresse de retour, retour `rax:rdx`.
+- **Disponibilité à l'exécution** : `TCG_TARGET_HAS_ppc_fp32` vaut `have_avx1 && FMA3`
+  (`CPUINFO_FMA`, nouveau dans `util/cpuinfo-i386.c`) ; sans eux, `x-fp-native` retombe sur
+  `x-fp-flat` comme sur tout autre hôte. D'où `TCG_TARGET_PPC_FP32_IMPL` (constante de build,
+  posée aussi par l'arm64) pour les `#if` de `tcg/tcg.c`, où une valeur d'exécution vaudrait 0
+  en silence. ABI Win64 exclue (pas assez de registres sauvés par l'appelant).
+- **Vérificateur** : `helper_fpn_verify` ignore désormais `float_flag_input_denormal_used`
+  (QEMU 10+), que softfloat lève sur un opérande dénormal de `fcmpu` et que la cible PowerPC ne
+  lit jamais. Faux positif commun à l'arm64 et au chemin C (même `fpi_fcmpu`), apparu avec le
+  passage à 11.1.2 : 5 462 « divergences » `fcmpu` au premier tour, résultat, CR et FPSCR
+  identiques.
+
+### 25.2 `tcg/0018` : `x-tb-fast` par le TSC
+
+`get_clock()` = `(rdtsc · mult) >> 32 + K` (`qemu_raw_clock_tsc_ns()`, produit 128 bits). Exigé :
+TSC invariant (CPUID 0x80000007 EDX[8]) **et** source d'horloge du noyau `tsc`
+(`/sys/devices/system/clocksource/clocksource0/current_clocksource`) : le noyau l'a jugé
+synchronisé entre les CPU et stable. Sinon refusé, avec message. `mult` (ns par tick en 32.32)
+est étalonné une fois contre `CLOCK_MONOTONIC` : deux couples (TSC, horloge) à 20 ms d'écart,
+chacun le plus serré de 32 lectures encadrées (~2 ppm) ; K comme sur arm64 (20 000 encadrements,
+borne basse, résolution 1 ns sous Linux). Le calcul de `mftb` (§23.2) est inchangé.
+
+### 25.3 `tcg/0019` : `vperm` par `pshufb`
+
+`helper_VPERM_FAST` sur hôte x86-64 avec AVX (sondé à l'exécution) : `idx = ~c & 31`, un
+`pshufb` dans chaque moitié (b pour idx < 16, a sinon, 4 bits bas), `pblendvb` sur
+`idx > 15`. C portable sans AVX.
+
+### 25.4 La preuve
+
+| épreuve | résultat |
+|---|---|
+| `fptest` (simple, 2^18) et `fptest d 65536`, `x-fast-fp` seul contre `x-fp-native` + `x-fp-native64` | **identiques octet pour octet** (30 124 880 et 11 978 884 instructions, empreintes `e80ec8026301ef1d`, `fb3e6006e03c4f53`) |
+| `x-fp-verify` pendant `fptest`, `fptest d` et leurs bancs | **486 541 466 opérations vérifiées, 0 divergence en arithmétique** (449 972 515 par le chemin court ; `fadd` à `fnmsub` en double, `fadds` à `fnmsubs`) ; `fcmpu` : 5 462 faux positifs de drapeau (§25.1), **0** une fois le vérificateur corrigé (40 760 262 vérifiés) |
+| mutants de l'émetteur x86 (1 opérandes doubles infinis acceptés ; 2 somme double sous-normale acceptée ; 3 produit double = DBL_MIN accepté ; 4 `fnmadd` nié avant l'arrondi ; 5 opérande simple non représentable accepté) | **5/5 détectés** : 1-4 par `fptest d`, 5 par `fptest` simple (sortie différente), et par `x-fp-verify` (372 à 103 499 divergences) |
+| `tbtest` sous `x-tb-verify` | **1 216 403 275 lectures, 0 écart positif**, écart −3 360..0 ticks (15 728 lectures d'origine retardées de plus de 1 µs) ; 0 recul, 24,98 MHz |
+| bureau Tiger **SMP=2** (`qemu-system-ppc64`, toutes les options de `run_tiger.sh`) + Marble Blast Gold, sous `x-fp-verify` et `x-tb-verify` | **956 016 000 opérations vérifiées, 0 divergence** (913 697 704 par le chemin court) ; **1 345 858 821 lectures de la base de temps sur deux vCPU, 0 écart positif** ; rendu du jeu juste |
+| `vpermproof.sh` (hôte, `helper_VPERM` contre la version AVX tirés tels quels de `int_helper.c`) | **50 662 144 cas, 0 divergence** (recouvrements compris) ; C portable (`VPERMPROOF_NOAVX=1`) : 5,66 M, 0 |
+| `vfptest` invité, `x-vperm-fast`/`x-vfp-fast` éteints contre allumés | empreintes identiques |
+| clone neuf par `build_qemu_qfb.sh` | 0017-0019 posés sans fuzz, 25/25 capacités, sources identiques à l'arbre de travail |
+
+### 25.5 Gains
+
+A/B entrelacé avant/après (`ab.sh`) : binaire « avant » = le même arbre sans 0017-0019 (donc
+`x-fp-flat` en repli, horloge d'origine, `vperm` en C), « après » = avec ; mêmes options que
+`run_tiger.sh` par défaut (`x-fast-fp x-fp-inline x-fp-native x-fp-native64 x-tb-fast x-vfp-fast
+x-vperm-fast x-lfs-inline`), deux démarrages de VM par binaire, trois tours chacun, hôte au repos
+(charge ≤ 1,5). Médianes des 6 tours (écart min..max ≤ 3 %) :
+
+| banc invité | avant | après | écart |
+|---|---|---|---|
+| `fptest banc` chaîne simple `fmadds fmuls fmsubs fadds` | 287 ms | **180 ms** | **−37 %** |
+| `fptest banc` sommets 4×4 simple | 1 462 ms | **1 078 ms** | **−26 %** |
+| `fptest banc` `fcmpu` | 185 ms | **146 ms** | **−21 %** |
+| `fptest banc-d` chaîne double | 271 ms | **125 ms** | **−54 %** |
+| `fptest banc-d` sommets 4×4 double | 1 227 ms | **749 ms** | **−39 %** |
+| `mftb` (`tbtest`) | 31,8 ns | **17,5 ns** | **−45 %** |
+| `vfptest` banc `vperm` | 452 ms | **95 ms** | **−79 %** |
+| `vfptest` banc `vmaddfp…` (non touché, témoin) | 766 ms | 764 ms | 0 |
+
+Contre `x-fast-fp` seul (sans `x-fp-inline` ni `x-fp-flat`), le même jour : chaîne simple
+460 → 185 ms, sommets double 1 970 → 754 ms.
+
+Ce PC n'a pas les jeux de la matrice (`bench/matrice` tourne sur le M4) : pas d'A/B en jeu ici.
