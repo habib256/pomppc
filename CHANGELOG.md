@@ -1,11 +1,11 @@
 # Changelog
 
-Ce que chaque journée de travail a changé, du plus récent au plus ancien. Les versions sont
-celles du **protocole qgpu** (`QGPU_PROTO_VERSION`), seul numéro que le projet porte : chaque
-changement sémantique exige de reconstruire QEMU et le plugin ; depuis v19, le kext
-ne change que si l'ABI de transport change. Les mesures sont celles
-prises le jour même, sur l'hôte indiqué. Le détail de chaque lot est dans le message de commit
-et dans `docs/`.
+Ce que chaque version publiée de POMPPC a changé, de la plus récente à la plus ancienne
+(publications : https://github.com/habib256/pomppc/releases). Le **protocole qgpu**
+(`QGPU_PROTO_VERSION`, v22 en 0.3) a son propre numéro : chaque changement sémantique exige de
+reconstruire QEMU et le plugin ; le kext ne change que si l'ABI de transport change. Les mesures
+sont celles prises le jour même, sur l'hôte indiqué. Le détail de chaque lot est dans le message
+de commit et dans `docs/`.
 
 ## 0.3 (02/10/2026)
 
