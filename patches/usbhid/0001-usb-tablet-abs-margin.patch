@@ -1,0 +1,57 @@
+diff --git a/hw/input/hid.c b/hw/input/hid.c
+index 0f28827..64a4141 100644
+--- a/hw/input/hid.c
++++ b/hw/input/hid.c
+@@ -404,6 +404,18 @@ int hid_pointer_poll(HIDState *hs, uint8_t *buf, int len)
+         break;
+ 
+     case HID_TABLET:
++        if (hs->abs_margin_pct) {
++            /*
++             * POMPPC x-abs-margin: [0, max] into [m, max - m], m computed
++             * as the guest does (IOHIDEventDriver: logical range * pct / 200).
++             */
++            int m = INPUT_EVENT_ABS_MAX * hs->abs_margin_pct / 200;
++
++            dx = m + (int64_t)dx * (INPUT_EVENT_ABS_MAX - 2 * m) /
++                 INPUT_EVENT_ABS_MAX;
++            dy = m + (int64_t)dy * (INPUT_EVENT_ABS_MAX - 2 * m) /
++                 INPUT_EVENT_ABS_MAX;
++        }
+         if (len > l) {
+             buf[l++] = e->buttons_state;
+         }
+diff --git a/hw/usb/dev-hid.c b/hw/usb/dev-hid.c
+index ae19d60..54b6aa1 100644
+--- a/hw/usb/dev-hid.c
++++ b/hw/usb/dev-hid.c
+@@ -797,6 +797,11 @@ static const Property usb_tablet_properties[] = {
+         DEFINE_PROP_UINT32("usb_version", USBHIDState, usb_version, 2),
+         DEFINE_PROP_STRING("display", USBHIDState, display),
+         DEFINE_PROP_UINT32("head", USBHIDState, head, 0),
++        /*
++         * POMPPC (patches/usbhid/0001): margin, in percent of each axis, that
++         * the guest drops from the absolute range (Mac OS X 10.4.11: 15).
++         */
++        DEFINE_PROP_UINT32("x-abs-margin", USBHIDState, hid.abs_margin_pct, 0),
+ };
+ 
+ static void usb_tablet_class_initfn(ObjectClass *klass, const void *data)
+diff --git a/include/hw/input/hid.h b/include/hw/input/hid.h
+index 6a9d7bf..40fa7ff 100644
+--- a/include/hw/input/hid.h
++++ b/include/hw/input/hid.h
+@@ -41,6 +41,13 @@ struct HIDState {
+     uint32_t n;
+     int kind;
+     int32_t protocol;
++    /*
++     * POMPPC (patches/usbhid/0001): usb-tablet "x-abs-margin", percent.
++     * Mac OS X 10.4.11's IOHIDEventDriver drops pct/2 % of an absolute
++     * axis at each end (15 there); the tablet then reports into that
++     * window so the guest maps it back onto the whole screen.  0: off.
++     */
++    uint32_t abs_margin_pct;
+     uint8_t idle;
+     bool idle_pending;
+     QEMUTimer *idle_timer;

@@ -37,6 +37,9 @@ Variables d'environnement :
                    lui que `screendump device=` désigne, pour ne jamais capturer
                    l'écran d'un AUTRE device (QFB) par hasard. Vide = écran de
                    la machine, sans identifiant, et capture de l'écran primaire.
+    TABLET_MARGIN  marge de la usb-tablet en % (défaut 15 : Tiger 10.4.11 en
+                   retire 7,5 % à chaque bout, patches/usbhid/0001) ; 0 pour
+                   un invité 10.4.10 ou plus ancien
     TCG_OPTS    propriétés de l'accélérateur TCG (p. ex. x-jit-near=on, docs/tcg-g4.md §14)
     QEMU_EXTRA  arguments ajoutés tels quels en fin de ligne de commande
                (p. ex. le greffon TCG : QEMU_EXTRA="-plugin tools/tcg/libppcmix.dylib,out=…")
@@ -321,6 +324,29 @@ echo "setup: fini"
 """
 
 
+def tablet_device(qemu):
+    """usb-tablet, avec la marge absolue de Tiger 10.4.11 (patches/usbhid/0001).
+
+    L'IOHIDEventDriver de 10.4.11 retire 7,5 % de chaque bout des axes absolus :
+    sans `x-abs-margin=15`, le pointeur s'écarte du clic (×1,18 depuis le
+    centre). TABLET_MARGIN=0 pour un invité 10.4.10 ou plus ancien ; un QEMU
+    sans la propriété garde la tablette d'origine.
+    """
+    margin = os.environ.get("TABLET_MARGIN", "15")
+    if margin in ("", "0"):
+        return "usb-tablet"
+    try:
+        props = subprocess.run([qemu, "-device", "usb-tablet,help"], capture_output=True,
+                               text=True, timeout=20).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        props = ""
+    if "x-abs-margin" not in props:
+        print("⚠ %s : usb-tablet sans x-abs-margin (patches/usbhid/0001), pointeur décalé "
+              "sous 10.4.11" % qemu)
+        return "usb-tablet"
+    return "usb-tablet,x-abs-margin=%s" % margin
+
+
 def vm_args(gui, cdroms=()):
     """Ligne de commande QEMU de la VM de dev (single-user sauf `gui`)."""
     smp = int(os.environ.get("SMP", "1"))
@@ -358,7 +384,7 @@ def vm_args(gui, cdroms=()):
             "-display", os.environ.get("POMPPC_DISPLAY", "none"), "-bios", BIOS,
             "-g", os.environ.get("RES", "1024x768x32"),
             "-drive", "file=%s,format=raw,media=disk" % DISK,
-            "-device", "usb-tablet",
+            "-device", tablet_device(qemu),
             *(["-netdev", "user,id=net0" + SSH_FWD, "-device", "sungem,netdev=net0"]
               if os.environ.get("NET") == "1" else ["-nic", "none"]),
             "-device", "qgpu-pci,id=gpu0,backend=%s%s" % (
