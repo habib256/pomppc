@@ -1,8 +1,8 @@
 diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
-index 5cfacb9..3193edb 100644
+index c7d219d..c740b44 100644
 --- a/target/ppc/cpu.h
 +++ b/target/ppc/cpu.h
-@@ -1388,6 +1388,11 @@ struct CPUArchState {
+@@ -1449,6 +1449,11 @@ struct CPUArchState {
       * elsewhere.  x-fp-verify checks every such instruction.
       */
      bool fp_native;
@@ -15,10 +15,10 @@ index 5cfacb9..3193edb 100644
      /*
       * x-ret-inline (POMPPC tcg/0008): the indirect exits of a TB (blr, bctr,
 diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
-index 144209c..8456f13 100644
+index 1034d1c..3b58822 100644
 --- a/target/ppc/cpu_init.c
 +++ b/target/ppc/cpu_init.c
-@@ -7463,6 +7463,13 @@ static Property ppc_cpu_properties[] = {
+@@ -98,6 +98,13 @@ static const Property powerpc_cpu_properties[] = {
       * with the helpers.  Needs x-fast-fp.  Off by default.
       */
      DEFINE_PROP_BOOL("x-fp-native", PowerPCCPU, env.fp_native, false),
@@ -33,10 +33,10 @@ index 144209c..8456f13 100644
       * POMPPC tcg/0008.  x-ret-inline: the jump-cache probe of
       * helper_lookup_tb_ptr done in the generated code at every indirect
 diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
-index 7611ca1..55dba74 100644
+index e105c90..80a51f8 100644
 --- a/target/ppc/fpu_helper.c
 +++ b/target/ppc/fpu_helper.c
-@@ -3867,9 +3867,102 @@ static inline QEMU_ALWAYS_INLINE uint64_t fpi_fp32(uint64_t a, uint64_t b,
+@@ -3865,9 +3865,102 @@ static inline QEMU_ALWAYS_INLINE uint64_t fpi_fp32(uint64_t a, uint64_t b,
      return FPI_FAIL;
  }
  
@@ -140,7 +140,7 @@ index 7611ca1..55dba74 100644
  }
  
  /*
-@@ -3931,7 +4024,7 @@ static inline uint64_t fpi_fpscr_fcmpu(uint64_t fpscr, uint32_t crf)
+@@ -3929,7 +4022,7 @@ static inline uint64_t fpi_fpscr_fcmpu(uint64_t fpscr, uint32_t crf)
   */
  static const char *const fpi_names[FPI_NOPS] = {
      "fadds", "fsubs", "fmuls", "fmadds", "fmsubs", "fnmadds", "fnmsubs",
@@ -149,7 +149,7 @@ index 7611ca1..55dba74 100644
  };
  static uint64_t fpv_ok[FPI_NOPS], fpv_bad[FPI_NOPS];
  static uint64_t fpv_slow_gate[FPI_NOPS], fpv_slow_opnd[FPI_NOPS];
-@@ -4001,9 +4094,30 @@ void helper_fpv_arith(CPUPPCState *env, uint32_t op, uint64_t a, uint64_t b,
+@@ -3999,9 +4092,30 @@ void helper_fpv_arith(CPUPPCState *env, uint32_t op, uint64_t a, uint64_t b,
      case FPI_NMADD:
          ref = helper_FNMADDS(env, a, c, b);
          break;
@@ -181,7 +181,7 @@ index 7611ca1..55dba74 100644
      }
      helper_compute_fprf_float64(env, ref);
      do_float_check_status(env, true, GETPC());
-@@ -4121,8 +4235,31 @@ static uint64_t fpf_slow(CPUPPCState *env, uint32_t op, uint64_t a,
+@@ -4119,8 +4233,31 @@ static uint64_t fpf_slow(CPUPPCState *env, uint32_t op, uint64_t a,
          return do_fmadds(env, a, c, b, MSUB_FLGS, ra);
      case FPI_NMADD:
          return do_fmadds(env, a, c, b, NMADD_FLGS, ra);
@@ -214,7 +214,7 @@ index 7611ca1..55dba74 100644
      }
  }
  
-@@ -4167,7 +4304,7 @@ Int128 helper_fp32_flat(CPUPPCState *env, uint64_t a, uint64_t b, uint64_t c,
+@@ -4165,7 +4302,7 @@ Int128 helper_fp32_flat(CPUPPCState *env, uint64_t a, uint64_t b, uint64_t c,
                          uint64_t fpscr, uint32_t sel)
  {
      if (likely(fpi_gate(fpscr) && !env->fp_verify)) {
@@ -224,10 +224,10 @@ index 7611ca1..55dba74 100644
          if (likely(r != FPI_FAIL)) {
              set_float_exception_flags(float_flag_inexact, &env->fp_status);
 diff --git a/target/ppc/internal.h b/target/ppc/internal.h
-index ad89c66..a528f5c 100644
+index 96aee7d..60613c6 100644
 --- a/target/ppc/internal.h
 +++ b/target/ppc/internal.h
-@@ -308,8 +308,18 @@ static inline int ger_pack_masks(int pmsk, int ymsk, int xmsk)
+@@ -288,8 +288,18 @@ static inline void pte_invalidate(target_ulong *pte0)
   */
  enum {
      FPI_ADD, FPI_SUB, FPI_MUL, FPI_MADD, FPI_MSUB, FPI_NMADD, FPI_NMSUB,
@@ -248,10 +248,10 @@ index ad89c66..a528f5c 100644
  #define FPI_FAIL 0x7ff8000000000001ull
  /* the arithmetic short path needs (fpscr & FPI_GATE_MASK) == FP_XX */
 diff --git a/target/ppc/translate.c b/target/ppc/translate.c
-index e089b84..eb6e6cd 100644
+index b280f02..2c567ba 100644
 --- a/target/ppc/translate.c
 +++ b/target/ppc/translate.c
-@@ -189,6 +189,7 @@ struct DisasContext {
+@@ -190,6 +190,7 @@ struct DisasContext {
      bool fp_inline, fp_verify;  /* x-fp-inline, x-fp-verify (tcg/0007) */
      bool fp_flat;               /* x-fp-flat (tcg/0013) */
      bool fp_native;             /* x-fp-native (tcg/0014) */
@@ -259,24 +259,24 @@ index e089b84..eb6e6cd 100644
      bool ret_inline, ret_verify; /* x-ret-inline, x-ret-verify (tcg/0008) */
      bool altivec_enabled;
      bool vsx_enabled;
-@@ -6538,6 +6539,12 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+@@ -6584,6 +6585,12 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
      ctx->fp_flat |= env->fp_native && env->fp_prime_mask;
      /* x-fp-verify also checks x-fp-native (x-fp-flat checks itself, in C) */
      ctx->fp_verify |= ctx->fp_native && env->fp_verify;
 +    /* x-fp-native64 (tcg/0016): host op, or one x-fp-flat call without it */
 +    ctx->fp_native64 = env->fp_native64 && env->fp_prime_mask &&
-+                       TCG_TARGET_HAS_ppc_fp32;
++                       tcg_ppc_fp32_supported();
 +    ctx->fp_flat64 = env->fp_native64 && env->fp_prime_mask &&
-+                     !TCG_TARGET_HAS_ppc_fp32;
++                     !tcg_ppc_fp32_supported();
 +    ctx->fp_verify |= ctx->fp_native64 && env->fp_verify;
      ctx->ret_inline = env->ret_inline;
      ctx->ret_verify = cs->ret_verify;
      ctx->spe_enabled = (hflags >> HFLAGS_SPE) & 1;
 diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c.inc
-index 31fddb7..cf929aa 100644
+index 6466c91..b3b4de0 100644
 --- a/target/ppc/translate/fp-impl.c.inc
 +++ b/target/ppc/translate/fp-impl.c.inc
-@@ -278,11 +278,11 @@ static bool do_fp_flat(DisasContext *ctx, int op, int frt, int fra, int frb,
+@@ -363,11 +363,11 @@ static bool do_fp_flat(DisasContext *ctx, int op, int frt, int fra, int frb,
  
      tcg_gen_extu_tl_i64(f, cpu_fpscr);
      get_fpr(a, fra);
@@ -290,7 +290,7 @@ index 31fddb7..cf929aa 100644
          c = tcg_temp_new_i64();
          get_fpr(c, frc);
      }
-@@ -307,6 +307,8 @@ QEMU_BUILD_BUG_ON(FP_XX != 1u << 25 || FP_XE != 1u << 3 || FP_UE != 1u << 5 ||
+@@ -392,6 +392,8 @@ QEMU_BUILD_BUG_ON(FP_XX != 1u << 25 || FP_XE != 1u << 3 || FP_UE != 1u << 5 ||
                    FP_OE != 1u << 6 || FP_RN != 3 || FPSCR_FPRF != 12 ||
                    FP_FPRF != 0x1f << 12 || FP_FPCC != 0xf << 12 ||
                    FP_FI != 1u << 17);
@@ -299,7 +299,7 @@ index 31fddb7..cf929aa 100644
  
  static void gen_fp_native(DisasContext *ctx, TCGv_i64 r, TCGv_i64 nf, int op,
                            int t, TCGv_i64 a, TCGv_i64 b, TCGv_i64 c)
-@@ -343,12 +345,12 @@ static bool do_fp_native(DisasContext *ctx, int op, int frt, int fra, int frb,
+@@ -428,12 +430,12 @@ static bool do_fp_native(DisasContext *ctx, int op, int frt, int fra, int frb,
      REQUIRE_FPU(ctx);
  
      get_fpr(a, fra);
@@ -314,7 +314,7 @@ index 31fddb7..cf929aa 100644
          get_fpr(c, frc);
      } else {
          tcg_gen_movi_i64(c, 0);
-@@ -444,6 +446,51 @@ static bool do_fpi_acb(DisasContext *ctx, arg_A *a,
+@@ -529,6 +531,51 @@ static bool do_fpi_acb(DisasContext *ctx, arg_A *a,
      return do_helper_acb(ctx, a, helper);
  }
  
@@ -366,8 +366,8 @@ index 31fddb7..cf929aa 100644
  /* sign-magnitude -> two's complement (fpi_cmp_key() of fpu_helper.c) */
  static void gen_fpi_cmp_key(TCGv_i64 k, TCGv_i64 x)
  {
-@@ -607,23 +654,23 @@ static bool do_helper_fsqrt(DisasContext *ctx, arg_A_tb *a,
-     return true;
+@@ -604,23 +651,23 @@ static void gen_fcmpu_inline(DisasContext *ctx, arg_X_bf *x)
+     gen_set_label(l_done);
  }
  
 -TRANS(FADD, do_helper_ab, gen_helper_FADD);
@@ -398,10 +398,10 @@ index 31fddb7..cf929aa 100644
  
  TRANS_FLAGS(FLOAT_EXT, FRE, do_helper_bs, gen_helper_FRE);
 diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
-index b31c379..5de5f19 100644
+index 5fa8e5c..ee37c2d 100644
 --- a/tcg/aarch64/tcg-target.c.inc
 +++ b/tcg/aarch64/tcg-target.c.inc
-@@ -1924,7 +1924,8 @@ static void tcg_out_qemu_st_direct(TCGContext *s, MemOp memop,
+@@ -1856,7 +1856,8 @@ static void tgen_qemu_ld(TCGContext *s, TCGType data_type, TCGReg data_reg,
  #define PFP_FI          (1ull << 17)
  
  enum { PFP_ADD, PFP_SUB, PFP_MUL, PFP_MADD, PFP_MSUB, PFP_NMADD, PFP_NMSUB,
@@ -411,7 +411,7 @@ index b31c379..5de5f19 100644
  enum { PFP_EQ = 0, PFP_NE = 1, PFP_HS = 2, PFP_LO = 3, PFP_HI = 8,
         PFP_LS = 9, PFP_GE = 10, PFP_LT = 11, PFP_GT = 12 };
  
-@@ -2011,17 +2012,20 @@ static void pfp_f3(TCGContext *s, uint32_t insn, unsigned d, unsigned n,
+@@ -1943,17 +1944,20 @@ static void pfp_f3(TCGContext *s, uint32_t insn, unsigned d, unsigned n,
  #define PFP_FADDS       0x1e202800
  #define PFP_FSUBS       0x1e203800
  #define PFP_FMULS       0x1e200800
@@ -436,7 +436,7 @@ index b31c379..5de5f19 100644
  }
  
  static TCGReg pfp_scratch(TCGRegSet *used)
-@@ -2053,6 +2057,21 @@ static void pfp_zon(TCGContext *s, TCGReg bad, TCGReg t, TCGReg x,
+@@ -1985,6 +1989,21 @@ static void pfp_zon(TCGContext *s, TCGReg bad, TCGReg t, TCGReg x,
      pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_EQ);        /* !Z: bad + 1 */
  }
  
@@ -458,9 +458,9 @@ index b31c379..5de5f19 100644
  static void tcg_out_ppc_fp32(TCGContext *s, const TCGArg *args)
  {
      TCGReg xr = args[0], xnf = args[1];
-@@ -2110,76 +2129,111 @@ static void tcg_out_ppc_fp32(TCGContext *s, const TCGArg *args)
+@@ -2042,76 +2061,111 @@ static void tcg_out_ppc_fp32(TCGContext *s, const TCGArg *args)
          pfp_rrr(s, PFP_ORRX, xnf, xnf, xr, 12);
-         tcg_out_logicali(s, I3404_ORRI, TCG_TYPE_I64, xnf, xnf, PFP_FI);
+         tcg_out_logicali(s, Ilogic_imm_ORRI, TCG_TYPE_I64, xnf, xnf, PFP_FI);
      } else {
 -        bool use_b = op != PFP_MUL;
 -        bool use_c = op >= PFP_MUL;

@@ -96,6 +96,8 @@ public:
     bool ejectCd(const std::string& id = "gamecd");
     // Raw QMP line, waits for reply (the reply line is copied to *reply).
     bool qmpCommand(const std::string& json, std::string* reply = nullptr);
+    // QEMU version from the QMP greeting ("11.1.2"), empty if not seen.
+    const std::string& qemuVersion() const { return qemuVersion_; }
     // Make an absolute (tablet) or relative pointer QEMU's current mouse.
     // mac99 has both a virtio/USB tablet and a USB HID mouse; the HID mouse
     // grabs "current" as soon as the guest polls it, which turned OS 9's
@@ -171,6 +173,7 @@ private:
                      uint32_t stride, int y0, int y1);
 
     long qemuPid_ = -1;
+    std::string qemuVersion_;
     bool qemuReaped_ = false;       // waitpid() already collected it
     uint32_t qmpSeq_ = 0;           // correlates QMP replies with commands
 };

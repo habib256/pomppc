@@ -107,17 +107,17 @@ GLEngine's internal structures, so a different GLEngine may not work.
 
 ## Building from source
 
-Works on macOS (Apple Silicon) and Linux x86-64. QEMU 9.2.0 is cloned from upstream and patched;
+Works on macOS (Apple Silicon) and Linux x86-64. QEMU 11.1.2 is cloned from upstream and patched;
 nothing is fetched from third-party forks.
 
 ```bash
-./scripts/build_qemu_qfb.sh        # clones QEMU v9.2.0 into ~/src/qemu, applies patches/,
+./scripts/build_qemu_qfb.sh        # clones QEMU v11.1.2 into ~/src/qemu, applies patches/,
                                    # builds, then probes the binary for each capability
 cd frontend && ./setup.sh && cmake -S . -B build && cmake --build build -j   # front end
 ./tests/run-all.sh                 # test harness (add --slow for boot tests)
 ```
 
-QEMU's `configure` needs Python ≥ 3.8 with `tomli` and `distlib`; on macOS a venv is enough
+QEMU's `configure` needs Python ≥ 3.9 with `tomli` and `distlib`; on macOS a venv is enough
 (`PYTHON=venv/bin/python3 ./scripts/build_qemu_qfb.sh`). The guest kext and plugin are compiled
 **inside Tiger** with the Xcode 2.5 tools (gcc 4.0, SDK 10.4u): `./run_tiger.sh` burns a
 `POMPPCSRC` CD with their sources, and `guest/gldriver/install.sh` builds and installs them.
@@ -125,7 +125,7 @@ QEMU's `configure` needs Python ≥ 3.8 with `tomli` and `distlib`; on macOS a v
 
 ## How it works
 
-- **QEMU 9.2 + patches** (`patches/`, applied by `scripts/build_qemu_qfb.sh`): SMP for `mac99`,
+- **QEMU 11.1.2 + patches** (`patches/`, applied by `scripts/build_qemu_qfb.sh`): SMP for `mac99`,
   the Screamer (AWACS) sound device, the `qfb-pci` paravirtual framebuffer, the `qgpu-pci`
   paravirtual GPU, a fast FPU mode that hands PowerPC floating point to the host FPU with
   bit-identical results, and a series of TCG speed-ups for the G4 (`patches/README.md`).

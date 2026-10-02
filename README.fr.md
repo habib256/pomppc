@@ -37,7 +37,7 @@ maintenant les tampons de sommets sont lus et convertis par l'hôte.
 
 ## Architecture
 
-- **QEMU 9.2 amont + patches** (`patches/`, appliqués par `scripts/build_qemu_qfb.sh`, qui
+- **QEMU 11.1.2 amont + patches** (`patches/`, appliqués par `scripts/build_qemu_qfb.sh`, qui
   vérifie chaque capacité sur le binaire produit) : SMP mac99, Screamer, `qfb-pci`,
   `qgpu-pci`, flottant rapide `x-fast-fp`. Le firmware OpenBIOS SMP est livré en binaire
   (`patches/smp-mac99/openbios-smp-screamer.elf`), non reproductible aujourd'hui.

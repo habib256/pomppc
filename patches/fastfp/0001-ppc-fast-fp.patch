@@ -1,72 +1,13 @@
-Mode « flottant rapide » pour PowerPC (propriété de CPU x-fast-fp)
-=================================================================
-
-Ce patch s'applique PAR-DESSUS les autres patches du dépôt, sur QEMU 9.2.0
-(voir scripts/build_qemu_qfb.sh). Conception et preuves : docs/flottant-rapide.md.
-
-Ce qu'il fait, en quatre morceaux :
-
-1. fpu/softfloat.c — hardfloat n'est plus désactivé à la compilation pour
-   TARGET_PPC. Le veto devient une donnée de float_status (no_hardfloat), ce
-   qui permet de l'armer ou non à l'exécution, par contexte flottant.
-   can_use_fpu() refuse aussi les modes rebias_overflow / rebias_underflow,
-   que le FPU hôte ne sait pas reproduire (PPC les arme quand FPSCR[OE]/[UE]
-   sont mis).
-
-2. fpu/softfloat.c — chemins rapides EXACTS pour float64r32_{add,sub,mul,div,
-   sqrt,muladd}, c'est-à-dire les instructions simple précision de PowerPC
-   (fadds, fmuls, fdivs, fsqrts, fmadds…), qui n'en avaient aucun. Quand les
-   opérandes sont exactement des float32 « zéro ou normal », l'opération EST
-   une opération float32 unique : le FPU hôte la fait, l'élargissement du
-   résultat est exact, et le résultat est au bit près celui du logiciel.
-
-3. target/ppc — propriété de CPU booléenne x-fast-fp (défaut : off). Éteinte,
-   env->fp_status et env->vec_status portent no_hardfloat = 1 : tout passe par
-   le logiciel, exactement comme avant. Allumée, AltiVec profite de hardfloat
-   (VSCR n'a aucun drapeau flottant) et la FPU scalaire s'amorce (point 4).
-
-4. target/ppc/fpu_helper.c — amorçage : helper_reset_fpstatus() pose
-   float_flag_inexact au lieu de 0 dès que FPSCR[XX] (collant) est à 1 et
-   qu'aucune exception modélisée par le logiciel n'est armée (XE, OE, UE).
-   Tant que XX = 0, tout reste logiciel : XX est donc posé exactement, au
-   premier résultat inexact. Une fois amorcé, do_float_check_status() ne
-   rappelle plus float_inexact_excp() (XX est déjà à 1 ; et le matériel réel
-   ne pose FX que sur une transition 0→1). FPSCR[FI] vaut alors 1 en
-   permanence : c'est la seule déviation architecturale, avec la nuance FX.
-   FPSCR[FR] n'est de toute façon pas modélisé par QEMU.
-
-Tout le reste — résultats, FPRF, OX, UX, VX*, ZX — est identique au bit près
-dans les deux modes.
-
+diff --git a/fpu/softfloat.c b/fpu/softfloat.c
+index bc244a4..d285955 100644
 --- a/fpu/softfloat.c
 +++ b/fpu/softfloat.c
-@@ -219,12 +219,16 @@
-  * Some targets clear the FP flags before most FP operations. This prevents
-  * the use of hardfloat, since hardfloat relies on the inexact flag being
-  * already set.
-+ *
-+ * Such a target can still opt in at run time, per float_status, by keeping
-+ * float_flag_inexact set across operations and leaving ->no_hardfloat clear;
-+ * see target/ppc and its "x-fast-fp" CPU property.  A target that never does
-+ * so simply keeps ->no_hardfloat set and is unaffected by this file being
-+ * compiled with the hardfloat paths present.
-  */
--#if defined(TARGET_PPC) || defined(__FAST_MATH__)
--# if defined(__FAST_MATH__)
--#  warning disabling hardfloat due to -ffast-math: hardfloat requires an exact \
-+#if defined(__FAST_MATH__)
-+# warning disabling hardfloat due to -ffast-math: hardfloat requires an exact \
-     IEEE implementation
--# endif
- # define QEMU_NO_HARDFLOAT 1
- # define QEMU_SOFTFLOAT_ATTR QEMU_FLATTEN
- #else
-@@ -237,8 +241,15 @@
+@@ -233,8 +233,15 @@ static inline bool can_use_fpu(const float_status *s)
      if (QEMU_NO_HARDFLOAT) {
          return false;
      }
 -    return likely(s->float_exception_flags & float_flag_inexact &&
--                  s->float_rounding_mode == float_round_nearest_even);
+-                  get_float_rounding_mode(s) == float_round_nearest_even);
 +    /*
 +     * ->rebias_overflow / ->rebias_underflow make soft-fp return a scaled
 +     * result instead of an infinity or a denormal; the host FPU cannot do
@@ -74,12 +15,12 @@ dans les deux modes.
 +     */
 +    return likely(!s->no_hardfloat &&
 +                  s->float_exception_flags & float_flag_inexact &&
-+                  s->float_rounding_mode == float_round_nearest_even &&
++                  get_float_rounding_mode(s) == float_round_nearest_even &&
 +                  !s->rebias_overflow && !s->rebias_underflow);
  }
  
  /*
-@@ -339,6 +350,92 @@
+@@ -335,6 +342,92 @@ static inline bool f64_is_inf(union_float64 a)
      return float64_is_infinity(a.s);
  }
  
@@ -172,8 +113,8 @@ dans les deux modes.
  static inline float32
  float32_gen2(float32 xa, float32 xb, float_status *s,
               hard_f32_op2_fn hard, soft_f32_op2_fn soft,
-@@ -2018,16 +2115,32 @@
-     return float64r32_round_pack_canonical(pr, status);
+@@ -1738,16 +1831,32 @@ static float64 float64r32_addsub(float64 a, float64 b, float_status *status,
+     return float64r32_round_pack_canonical(&pr, status);
  }
  
 -float64 float64r32_add(float64 a, float64 b, float_status *status)
@@ -207,7 +148,7 @@ dans les deux modes.
  static bfloat16 QEMU_FLATTEN
  bfloat16_addsub(bfloat16 a, bfloat16 b, float_status *status, bool subtract)
  {
-@@ -2159,7 +2272,8 @@
+@@ -1869,7 +1978,8 @@ float64_mul(float64 a, float64 b, float_status *s)
                          f64_is_zon2, f64_addsubmul_post);
  }
  
@@ -215,10 +156,10 @@ dans les deux modes.
 +static float64 QEMU_SOFTFLOAT_ATTR
 +soft_f64r32_mul(float64 a, float64 b, float_status *status)
  {
-     FloatParts64 pa, pb, *pr;
- 
-@@ -2170,6 +2284,13 @@
-     return float64r32_round_pack_canonical(pr, status);
+     FloatParts64 pa = float64_unpack_canonical(a, status);
+     FloatParts64 pb = float64_unpack_canonical(b, status);
+@@ -1878,6 +1988,13 @@ float64 float64r32_mul(float64 a, float64 b, float_status *status)
+     return float64r32_round_pack_canonical(&pr, status);
  }
  
 +float64 QEMU_FLATTEN
@@ -231,8 +172,8 @@ dans les deux modes.
  bfloat16 QEMU_FLATTEN
  bfloat16_mul(bfloat16 a, bfloat16 b, float_status *status)
  {
-@@ -2397,8 +2518,9 @@
-     return soft_f64_muladd(ua.s, ub.s, uc.s, flags, s);
+@@ -2125,8 +2242,9 @@ float64_muladd(float64 xa, float64 xb, float64 xc, int flags, float_status *s)
+     return float64_muladd_scalbn(ua.s, ub.s, uc.s, 0, flags, s);
  }
  
 -float64 float64r32_muladd(float64 a, float64 b, float64 c,
@@ -241,10 +182,10 @@ dans les deux modes.
 +soft_f64r32_muladd(float64 a, float64 b, float64 c,
 +                   int flags, float_status *status)
  {
-     FloatParts64 pa, pb, pc, *pr;
- 
-@@ -2410,6 +2532,85 @@
-     return float64r32_round_pack_canonical(pr, status);
+     FloatParts64 pa = float64_unpack_canonical(a, status);
+     FloatParts64 pb = float64_unpack_canonical(b, status);
+@@ -2141,6 +2259,82 @@ float64 float64r32_muladd(float64 a, float64 b, float64 c,
+     return float64r32_pack_raw(&pr);
  }
  
 +float64 QEMU_FLATTEN
@@ -259,9 +200,6 @@ dans les deux modes.
 +    uc.s = xc;
 +
 +    if (unlikely(!can_use_fpu(s))) {
-+        goto soft;
-+    }
-+    if (unlikely(flags & float_muladd_halve_result)) {
 +        goto soft;
 +    }
 +
@@ -326,10 +264,10 @@ dans les deux modes.
 +    return soft_f64r32_muladd(ua.s, ub.s, uc.s, flags, s);
 +}
 +
- bfloat16 QEMU_FLATTEN bfloat16_muladd(bfloat16 a, bfloat16 b, bfloat16 c,
-                                       int flags, float_status *status)
+ bfloat16 bfloat16_muladd(bfloat16 a, bfloat16 b, bfloat16 c,
+                          int flags, float_status *status)
  {
-@@ -2533,7 +2734,8 @@
+@@ -2264,7 +2458,8 @@ float64_div(float64 a, float64 b, float_status *s)
                          f64_div_pre, f64_div_post);
  }
  
@@ -337,10 +275,10 @@ dans les deux modes.
 +static float64 QEMU_SOFTFLOAT_ATTR
 +soft_f64r32_div(float64 a, float64 b, float_status *status)
  {
-     FloatParts64 pa, pb, *pr;
- 
-@@ -2544,6 +2746,13 @@
-     return float64r32_round_pack_canonical(pr, status);
+     FloatParts64 pa = float64_unpack_canonical(a, status);
+     FloatParts64 pb = float64_unpack_canonical(b, status);
+@@ -2273,6 +2468,13 @@ float64 float64r32_div(float64 a, float64 b, float_status *status)
+     return float64r32_round_pack_canonical(&pr, status);
  }
  
 +float64 QEMU_FLATTEN
@@ -353,7 +291,7 @@ dans les deux modes.
  bfloat16 QEMU_FLATTEN
  bfloat16_div(bfloat16 a, bfloat16 b, float_status *status)
  {
-@@ -4669,7 +4878,8 @@
+@@ -4434,7 +4636,8 @@ float64 QEMU_FLATTEN float64_sqrt(float64 xa, float_status *s)
      return soft_f64_sqrt(ua.s, s);
  }
  
@@ -361,9 +299,9 @@ dans les deux modes.
 +static float64 QEMU_SOFTFLOAT_ATTR
 +soft_f64r32_sqrt(float64 a, float_status *status)
  {
-     FloatParts64 p;
+     FloatParts64 p = float64_unpack_canonical(a, status);
  
-@@ -4678,6 +4888,32 @@
+@@ -4442,6 +4645,32 @@ float64 float64r32_sqrt(float64 a, float_status *status)
      return float64r32_round_pack_canonical(&p, status);
  }
  
@@ -395,26 +333,30 @@ dans les deux modes.
 +
  bfloat16 QEMU_FLATTEN bfloat16_sqrt(bfloat16 a, float_status *status)
  {
-     FloatParts64 p;
+     FloatParts64 p = bfloat16_unpack_canonical(a, status);
+diff --git a/include/fpu/softfloat-types.h b/include/fpu/softfloat-types.h
+index d7f5303..0d4459d 100644
 --- a/include/fpu/softfloat-types.h
 +++ b/include/fpu/softfloat-types.h
-@@ -237,6 +237,13 @@
-     bool rebias_overflow;
-     /* should underflowed results add re_bias to its exponent? */
-     bool rebias_underflow;
+@@ -450,6 +450,13 @@ typedef struct float_status {
+      * create a default NaN.
+      */
+     unsigned default_nan_pattern : 8;
 +    /*
 +     * Veto the hardfloat fast paths of fpu/softfloat.c for this context, even
 +     * when float_flag_inexact happens to be set.  Zero (hardfloat allowed)
 +     * keeps the historical behaviour; a target that is not ready to let the
 +     * host FPU compute its results sets it once, at reset.
 +     */
-+    bool no_hardfloat;
++    bool no_hardfloat : 1;
  } float_status;
  
  #endif /* SOFTFLOAT_TYPES_H */
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index cbd5964..43cc8a7 100644
 --- a/target/ppc/cpu.h
 +++ b/target/ppc/cpu.h
-@@ -1302,6 +1302,14 @@
+@@ -1363,6 +1363,14 @@ struct CPUArchState {
      float_status vec_status;
      float_status fp_status; /* Floating point execution context */
      target_ulong fpscr;     /* Floating point status and control register */
@@ -429,11 +371,28 @@ dans les deux modes.
  
      /* Internal devices resources */
      ppc_tb_t *tb_env;      /* Time base and decrementer */
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index c23ef68..9f5213f 100644
 --- a/target/ppc/cpu_init.c
 +++ b/target/ppc/cpu_init.c
-@@ -7271,6 +7271,21 @@
-     set_float_2nan_prop_rule(float_2nan_prop_ab, &env->fp_status);
-     set_float_2nan_prop_rule(float_2nan_prop_ab, &env->vec_status);
+@@ -57,6 +57,14 @@
+ static const Property powerpc_cpu_properties[] = {
+     DEFINE_PROP_BOOL("rtas-stopped-state", PowerPCCPU,
+                       rtas_stopped_state, true),
++    /*
++     * Let soft-fp use the host FPU for the most common floating point
++     * operations.  Results, FPRF and every FPSCR exception bit but FI (and
++     * the FX transition rule for XX) stay bit-exact; FI becomes a constant 1
++     * while the fast path is armed.  Experimental, hence the x- prefix, and
++     * off by default.
++     */
++    DEFINE_PROP_BOOL("x-fast-fp", PowerPCCPU, env.fast_fp, false),
+ };
+ 
+ static inline void vscr_init(CPUPPCState *env, uint32_t val)
+@@ -7337,6 +7345,21 @@ static void ppc_cpu_reset_hold(Object *obj, ResetType type)
+     set_float_default_nan_pattern(0b01000000, &env->fp_status);
+     set_float_default_nan_pattern(0b01000000, &env->vec_status);
  
 +    /*
 +     * Unless the x-fast-fp property is on, veto the hardfloat paths of
@@ -453,25 +412,11 @@ dans les deux modes.
      for (i = 0; i < ARRAY_SIZE(env->spr_cb); i++) {
          ppc_spr_t *spr = &env->spr_cb[i];
  
-@@ -7396,7 +7411,14 @@
- }
- 
- static Property ppc_cpu_properties[] = {
--    /* add default property here */
-+    /*
-+     * Let soft-fp use the host FPU for the most common floating point
-+     * operations.  Results, FPRF and every FPSCR exception bit but FI (and
-+     * the FX transition rule for XX) stay bit-exact; FI becomes a constant 1
-+     * while the fast path is armed.  Experimental, hence the x- prefix, and
-+     * off by default.
-+     */
-+    DEFINE_PROP_BOOL("x-fast-fp", PowerPCCPU, env.fast_fp, false),
-     DEFINE_PROP_END_OF_LIST(),
- };
- 
+diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
+index c1bdde9..d87487d 100644
 --- a/target/ppc/fpu_helper.c
 +++ b/target/ppc/fpu_helper.c
-@@ -441,6 +441,38 @@
+@@ -439,6 +439,38 @@ void helper_fpscr_check_status(CPUPPCState *env)
      do_fpscr_check_status(env, GETPC());
  }
  
@@ -510,7 +455,7 @@ dans les deux modes.
  static void do_float_check_status(CPUPPCState *env, bool change_fi,
                                    uintptr_t raddr)
  {
-@@ -452,7 +484,16 @@
+@@ -450,7 +482,16 @@ static void do_float_check_status(CPUPPCState *env, bool change_fi,
      } else if (status & float_flag_underflow) {
          float_underflow_excp(env);
      }
@@ -528,7 +473,7 @@ dans les deux modes.
          float_inexact_excp(env);
      }
      if (change_fi) {
-@@ -477,7 +518,15 @@
+@@ -475,7 +516,15 @@ void helper_float_check_status(CPUPPCState *env)
  
  void helper_reset_fpstatus(CPUPPCState *env)
  {

@@ -1,19 +1,16 @@
 diff --git a/hw/audio/Kconfig b/hw/audio/Kconfig
-index daf060e1..a940493e 100644
+index daf060e..878b7fc 100644
 --- a/hw/audio/Kconfig
 +++ b/hw/audio/Kconfig
-@@ -55,3 +55,9 @@ config VIRTIO_SND
+@@ -55,3 +55,6 @@ config VIRTIO_SND
      bool
      default y
      depends on VIRTIO
 +
-+config MARVELL_88W8618
-+    bool
-+
 +config SCREAMER
 +    bool
 diff --git a/hw/audio/meson.build b/hw/audio/meson.build
-index 29909744..e0c32f96 100644
+index 2154cbd..39314d5 100644
 --- a/hw/audio/meson.build
 +++ b/hw/audio/meson.build
 @@ -11,6 +11,7 @@ system_ss.add(when: 'CONFIG_MARVELL_88W8618', if_true: files('marvell_88w8618.c'
@@ -25,7 +22,7 @@ index 29909744..e0c32f96 100644
  system_ss.add(when: 'CONFIG_WM8750', if_true: files('wm8750.c'))
  system_ss.add(when: ['CONFIG_VIRTIO_SND', 'CONFIG_VIRTIO'], if_true: files('virtio-snd.c'))
 diff --git a/hw/misc/macio/macio.c b/hw/misc/macio/macio.c
-index 3f449f91..e8b3ef2d 100644
+index 2813705..907b208 100644
 --- a/hw/misc/macio/macio.c
 +++ b/hw/misc/macio/macio.c
 @@ -102,6 +102,13 @@ static bool macio_common_realize(PCIDevice *d, Error **errp)
@@ -88,10 +85,10 @@ index 3f449f91..e8b3ef2d 100644
  
  static const VMStateDescription vmstate_macio_oldworld = {
 diff --git a/hw/ppc/Kconfig b/hw/ppc/Kconfig
-index 5addad11..05f6bea4 100644
+index 347dcce..5ec4ac0 100644
 --- a/hw/ppc/Kconfig
 +++ b/hw/ppc/Kconfig
-@@ -136,6 +136,7 @@ config MAC_OLDWORLD
+@@ -132,6 +132,7 @@ config MAC_OLDWORLD
      select HEATHROW_PIC
      select MACIO
      select FW_CFG_PPC
@@ -99,7 +96,7 @@ index 5addad11..05f6bea4 100644
  
  config MAC_NEWWORLD
      bool
-@@ -151,6 +152,7 @@ config MAC_NEWWORLD
+@@ -147,6 +148,7 @@ config MAC_NEWWORLD
      select MAC_PMU
      select UNIN_PCI
      select FW_CFG_PPC
@@ -108,7 +105,7 @@ index 5addad11..05f6bea4 100644
  config E500
      bool
 diff --git a/include/hw/misc/macio/macio.h b/include/hw/misc/macio/macio.h
-index 16aa95b8..c806fb5f 100644
+index 16aa95b..c806fb5 100644
 --- a/include/hw/misc/macio/macio.h
 +++ b/include/hw/misc/macio/macio.h
 @@ -36,6 +36,7 @@

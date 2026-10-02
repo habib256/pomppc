@@ -26,9 +26,9 @@
 #include "qemu/module.h"
 #include "qemu/units.h"
 #include "qemu/timer.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "hw/pci/pci_device.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "ui/console.h"
@@ -387,7 +387,7 @@ static bool qfb_can_share(QfbState *s)
     if (qfb_visible_lines(s) != s->height) {
         return false;
     }
-    return dpy_gfx_check_format(s->con, QFB_SHARE_FORMAT);
+    return qemu_console_check_format(s->con, QFB_SHARE_FORMAT);
 }
 
 static void qfb_draw_graphic(QfbState *s, bool share)
@@ -455,14 +455,14 @@ static void qfb_draw_graphic(QfbState *s, bool share)
             }
         } else {
             if (ymin >= 0) {
-                dpy_gfx_update(s->con, 0, ymin, s->width, y - ymin);
+                qemu_console_update(s->con, 0, ymin, s->width, y - ymin);
                 ymin = -1;
             }
         }
     }
 
     if (ymin >= 0) {
-        dpy_gfx_update(s->con, 0, ymin, s->width, y - ymin);
+        qemu_console_update(s->con, 0, ymin, s->width, y - ymin);
     }
 
     g_free(snap);
@@ -491,7 +491,7 @@ static void qfb_update_mode(QfbState *s)
     }
 }
 
-static void qfb_update_display(void *opaque)
+static bool qfb_update_display(void *opaque)
 {
     QfbState *s = opaque;
     DisplaySurface *surface = qemu_console_surface(s->con);
@@ -500,7 +500,7 @@ static void qfb_update_display(void *opaque)
     qemu_flush_coalesced_mmio_buffer();
 
     if (s->width == 0 || s->height == 0) {
-        return;
+        return true;
     }
 
     if (s->pal_dirty) {
@@ -525,7 +525,7 @@ static void qfb_update_display(void *opaque)
             surface = qemu_create_displaysurface_from(s->width, s->height,
                                                       QFB_SHARE_FORMAT,
                                                       s->stride, data);
-            dpy_gfx_replace_surface(s->con, surface);
+            qemu_console_set_surface(s->con, surface);
             qfb_invalidate_display(s);
         }
     } else if (!surface_is_allocated(surface) ||
@@ -538,6 +538,7 @@ static void qfb_update_display(void *opaque)
     }
 
     qfb_draw_graphic(s, share);
+    return true;
 }
 
 static void qfb_update_irq(QfbState *s)
@@ -819,7 +820,7 @@ static void qfb_pci_realize(PCIDevice *dev, Error **errp)
     }
     qfb->regs[QFB_CUSTOM_DEPTH >> 2] = qfb->depth;
 
-    qfb->con = graphic_console_init(DEVICE(dev), 0, &qfb_ops, qfb);
+    qfb->con = qemu_graphic_console_create(DEVICE(dev), 0, &qfb_ops, qfb);
     surface = qemu_console_surface(qfb->con);
     if (surface_bits_per_pixel(surface) != 32) {
         error_setg(errp, "unknown host depth %d",
@@ -862,7 +863,7 @@ static void qfb_pci_exit(PCIDevice *dev)
     if (qfb_scanout_cb) {
         qfb_scanout_set_notifier(NULL, NULL);
     }
-    graphic_console_close(qfb->con);
+    qemu_graphic_console_close(qfb->con);
     timer_free(qfb->vbl_timer);
     qemu_free_irq(qfb->irq);
 }
@@ -874,11 +875,10 @@ static void qfb_pci_reset_handler(DeviceState *d)
     qfb_reset(&s->qfb);
 }
 
-static Property qfb_pci_properties[] = {
+static const Property qfb_pci_properties[] = {
     DEFINE_PROP_UINT32("width", QfbPCIState, qfb.width, 1024),
     DEFINE_PROP_UINT32("height", QfbPCIState, qfb.height, 768),
     DEFINE_PROP_UINT8("depth", QfbPCIState, qfb.depth, 8),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static const VMStateDescription vmstate_qfb_pci = {
@@ -892,7 +892,7 @@ static const VMStateDescription vmstate_qfb_pci = {
     }
 };
 
-static void qfb_pci_class_init(ObjectClass *klass, void *data)
+static void qfb_pci_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);

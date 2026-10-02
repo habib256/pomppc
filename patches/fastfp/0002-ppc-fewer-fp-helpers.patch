@@ -1,48 +1,8 @@
-Moins d'appels de helper par instruction flottante PowerPC
-==========================================================
-
-S'applique PAR-DESSUS patches/fastfp/0001-ppc-fast-fp.patch.
-
-Purement une optimisation : ce patch ne change RIEN au comportement, dans
-AUCUN des deux modes. Il est séparé du 0001 exprès, pour qu'un A/B puisse
-attribuer les gains.
-
-Chaque instruction flottante « classique » de PowerPC coûtait QUATRE appels de
-helper : reset_fpstatus, l'opération, compute_fprf, float_check_status. Il en
-reste deux :
-
-1. reset_fpstatus est émis EN LIGNE. La valeur à écrire dans
-   fp_status.float_exception_flags est exactement celle que calcule
-   helper_reset_fpstatus :
-
-       (fpscr & (XX|XE|OE|UE)) == XX  ?  env->fp_prime_mask  :  0
-
-   env->fp_prime_mask (nouveau champ) vaut float_flag_inexact quand x-fast-fp
-   est allumé, 0 sinon ; il est posé au reset et ne bouge plus jamais — donc
-   aucun cache à invalider. En mode exact la séquence écrit toujours 0, ce qui
-   est exactement le comportement historique. ppc_fp_primed() est réécrit avec
-   la même expression, pour que les deux côtés soient visiblement les mêmes.
-
-2. compute_fprf + float_check_status deviennent UN helper,
-   helper_fprf_check_float64(), qui fait les deux choses dans le même ordre.
-   GETPC() y désigne toujours la même instruction invité, donc une exception
-   différée est levée avec la bonne adresse de retour.
-
-Vérification : 189 920 enregistrements (résultat + FPSCR + CR, sur les
-instructions arithmétiques, fcmpu/fcmpo, mffs/mcrfs/mtfsb0/mtfsb1/mtfsfi),
-produits par un binaire PowerPC autonome sous qemu-ppc — sortie IDENTIQUE
-OCTET POUR OCTET à celle d'un QEMU non patché du tout, et identique à celle du
-0001 seul, dans les deux modes.
-
-Gain mesuré sur une boucle flottante dense (24 M d'instructions simple
-précision) : environ 2 à 4 %, également réparti entre les deux points. C'est
-peu : l'expérience de contrôle (supprimer carrément l'appel fprf+check, ce qui
-est faux) ne fait gagner que 22 %, donc le coût d'une instruction flottante
-émulée n'est pas dominé par les appels de helper.
-
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index 43cc8a7..1598eed 100644
 --- a/target/ppc/cpu.h
 +++ b/target/ppc/cpu.h
-@@ -1310,6 +1310,13 @@
+@@ -1371,6 +1371,13 @@ struct CPUArchState {
       * paths of fpu/softfloat.c run.  See ppc_fp_primed() in fpu_helper.c.
       */
      bool fast_fp;
@@ -56,9 +16,11 @@ est faux) ne fait gagner que 22 %, donc le coût d'une instruction flottante
  
      /* Internal devices resources */
      ppc_tb_t *tb_env;      /* Time base and decrementer */
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index 9f5213f..edcd8ed 100644
 --- a/target/ppc/cpu_init.c
 +++ b/target/ppc/cpu_init.c
-@@ -7285,6 +7285,7 @@
+@@ -7359,6 +7359,7 @@ static void ppc_cpu_reset_hold(Object *obj, ResetType type)
       */
      env->fp_status.no_hardfloat = !env->fast_fp;
      env->vec_status.no_hardfloat = !env->fast_fp;
@@ -66,9 +28,11 @@ est faux) ne fait gagner que 22 %, donc le coût d'une instruction flottante
  
      for (i = 0; i < ARRAY_SIZE(env->spr_cb); i++) {
          ppc_spr_t *spr = &env->spr_cb[i];
+diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
+index d87487d..40a8be5 100644
 --- a/target/ppc/fpu_helper.c
 +++ b/target/ppc/fpu_helper.c
-@@ -465,12 +465,15 @@
+@@ -463,12 +463,15 @@ void helper_fpscr_check_status(CPUPPCState *env)
   * never changes between its reset_fpstatus and its float_check_status, so
   * evaluating it again in do_float_check_status() yields the same answer as
   * at reset time.
@@ -87,7 +51,7 @@ est faux) ne fait gagner que 22 %, donc le coût d'une instruction flottante
  }
  
  static void do_float_check_status(CPUPPCState *env, bool change_fi,
-@@ -516,6 +519,19 @@
+@@ -514,6 +517,19 @@ void helper_float_check_status(CPUPPCState *env)
      do_float_check_status(env, true, GETPC());
  }
  
@@ -107,9 +71,11 @@ est faux) ne fait gagner que 22 %, donc le coût d'une instruction flottante
  void helper_reset_fpstatus(CPUPPCState *env)
  {
      /*
+diff --git a/target/ppc/helper.h b/target/ppc/helper.h
+index 6b2d19a..f4f0d95 100644
 --- a/target/ppc/helper.h
 +++ b/target/ppc/helper.h
-@@ -86,6 +86,8 @@
+@@ -87,6 +87,8 @@ DEF_HELPER_1(float_check_status, void, env)
  DEF_HELPER_1(fpscr_check_status, void, env)
  DEF_HELPER_1(reset_fpstatus, void, env)
  DEF_HELPER_2(compute_fprf_float64, void, env, i64)
@@ -118,6 +84,8 @@ est faux) ne fait gagner que 22 %, donc le coût d'une instruction flottante
  DEF_HELPER_3(store_fpscr, void, env, i64, i32)
  DEF_HELPER_2(fpscr_clrbit, void, env, i32)
  DEF_HELPER_2(fpscr_setbit, void, env, i32)
+diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c.inc
+index 464fb1d..bc3c458 100644
 --- a/target/ppc/translate/fp-impl.c.inc
 +++ b/target/ppc/translate/fp-impl.c.inc
 @@ -4,15 +4,45 @@
@@ -141,8 +109,6 @@ est faux) ne fait gagner que 22 %, donc le coût d'une instruction flottante
  static inline void gen_reset_fpstatus(void)
  {
 -    gen_helper_reset_fpstatus(tcg_env);
--}
--
 +    TCGv t = tcg_temp_new();
 +    TCGv_i32 v = tcg_temp_new_i32();
 +    TCGv_i32 m = tcg_temp_new_i32();
@@ -156,8 +122,8 @@ est faux) ne fait gagner que 22 %, donc le coût d'une instruction flottante
 +    tcg_gen_and_i32(v, v, m);
 +    tcg_gen_st16_i32(v, tcg_env,
 +                     offsetof(CPUPPCState, fp_status.float_exception_flags));
-+}
-+
+ }
+ 
 +/*
 + * compute_fprf then float_check_status: one helper call instead of two.
 + * helper_fprf_check_float64() does exactly the same two things, in the same
@@ -171,16 +137,16 @@ est faux) ne fait gagner que 22 %, donc le coût d'une instruction flottante
  }
  
  #if defined(TARGET_PPC64)
-@@ -114,9 +144,10 @@
-     gen_helper_f##name(t1, tcg_env, t0);                                      \
-     set_fpr(rD(ctx->opcode), t1);                                             \
-     if (set_fprf) {                                                           \
--        gen_helper_compute_fprf_float64(tcg_env, t1);                         \
-+        gen_compute_fprf_float64(t1);                                         \
-+    } else {                                                                  \
-+        gen_helper_float_check_status(tcg_env);                               \
-     }                                                                         \
--    gen_helper_float_check_status(tcg_env);                                   \
-     if (unlikely(Rc(ctx->opcode) != 0)) {                                     \
-         gen_set_cr1_from_fpscr(ctx);                                          \
-     }                                                                         \
+@@ -111,9 +141,10 @@ static bool do_round_convert(DisasContext *ctx, arg_X_tb_rc *a,
+     helper(t1, tcg_env, t0);
+     set_fpr(a->rt, t1);
+     if (set_fprf) {
+-        gen_helper_compute_fprf_float64(tcg_env, t1);
++        gen_compute_fprf_float64(t1);
++    } else {
++        gen_helper_float_check_status(tcg_env);
+     }
+-    gen_helper_float_check_status(tcg_env);
+     if (unlikely(a->rc)) {
+         gen_set_cr1_from_fpscr(ctx);
+     }

@@ -1,8 +1,8 @@
 diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
-index 1be9a6fa4..00149616a 100644
+index 9f49ddf..767140d 100644
 --- a/target/ppc/cpu.h
 +++ b/target/ppc/cpu.h
-@@ -1361,6 +1361,18 @@ struct CPUArchState {
+@@ -1420,6 +1420,18 @@ struct CPUArchState {
       * needing to know about fast_fp.  See gen_reset_fpstatus().
       */
      uint16_t fp_prime_mask;
@@ -22,10 +22,10 @@ index 1be9a6fa4..00149616a 100644
      /* Internal devices resources */
      ppc_tb_t *tb_env;      /* Time base and decrementer */
 diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
-index b1edb8751..94c55458f 100644
+index 9724937..9853b7b 100644
 --- a/target/ppc/cpu_init.c
 +++ b/target/ppc/cpu_init.c
-@@ -7443,6 +7443,14 @@ static Property ppc_cpu_properties[] = {
+@@ -78,6 +78,14 @@ static const Property powerpc_cpu_properties[] = {
       * every input.  Off by default.
       */
      DEFINE_PROP_BOOL("x-lfs-inline", PowerPCCPU, env.lfs_inline, false),
@@ -41,11 +41,11 @@ index b1edb8751..94c55458f 100644
       * AltiVec vaddfp/vsubfp/vmaddfp/vnmsubfp: the four lanes at once on the
       * host FPU when softfloat's hardfloat path would take each of them
 diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
-index 867c53484..5755d1ac4 100644
+index 40a8be5..97d0e76 100644
 --- a/target/ppc/fpu_helper.c
 +++ b/target/ppc/fpu_helper.c
-@@ -22,6 +22,8 @@
- #include "exec/exec-all.h"
+@@ -21,6 +21,8 @@
+ #include "exec/helper-proto.h"
  #include "internal.h"
  #include "fpu/softfloat.h"
 +#include <float.h>
@@ -53,7 +53,7 @@ index 867c53484..5755d1ac4 100644
  
  static inline float128 float128_snan_to_qnan(float128 x)
  {
-@@ -3724,3 +3726,331 @@ void helper_XVF64GERNN(CPUPPCState *env, ppc_vsr_t *a, ppc_vsr_t *b,
+@@ -3722,3 +3724,331 @@ void helper_XVF64GERNN(CPUPPCState *env, ppc_vsr_t *a, ppc_vsr_t *b,
      vsxger(env, a, b, at, mask, true, true, true, vsxger_mul64,
             vsxger_muladd64, vsxger_zero64);
  }
@@ -386,10 +386,10 @@ index 867c53484..5755d1ac4 100644
 +    qatomic_inc(gate ? &fpv_slow_opnd[op] : &fpv_slow_gate[op]);
 +}
 diff --git a/target/ppc/helper.h b/target/ppc/helper.h
-index 85249caf3..a81560031 100644
+index 5c26df8..cd75bfc 100644
 --- a/target/ppc/helper.h
 +++ b/target/ppc/helper.h
-@@ -88,6 +88,11 @@ DEF_HELPER_1(reset_fpstatus, void, env)
+@@ -89,6 +89,11 @@ DEF_HELPER_1(reset_fpstatus, void, env)
  DEF_HELPER_2(compute_fprf_float64, void, env, i64)
  /* compute_fprf_float64 + float_check_status, in one call */
  DEF_HELPER_2(fprf_check_float64, void, env, i64)
@@ -402,11 +402,11 @@ index 85249caf3..a81560031 100644
  DEF_HELPER_2(fpscr_clrbit, void, env, i32)
  DEF_HELPER_2(fpscr_setbit, void, env, i32)
 diff --git a/target/ppc/internal.h b/target/ppc/internal.h
-index 20fb2ec59..2ce8b190f 100644
+index a3bb12a..72f94f8 100644
 --- a/target/ppc/internal.h
 +++ b/target/ppc/internal.h
-@@ -302,4 +302,17 @@ static inline int ger_pack_masks(int pmsk, int ymsk, int xmsk)
-     return msk;
+@@ -282,6 +282,19 @@ static inline void pte_invalidate(target_ulong *pte0)
+     *pte0 &= ~0x80000000;
  }
  
 +/*
@@ -422,9 +422,11 @@ index 20fb2ec59..2ce8b190f 100644
 +/* the arithmetic short path needs (fpscr & FPI_GATE_MASK) == FP_XX */
 +#define FPI_GATE_MASK (FP_XX | FP_XE | FP_OE | FP_UE | FP_RN)
 +
- #endif /* PPC_INTERNAL_H */
+ #define PTE_PTEM_MASK 0x7FFFFFBF
+ #define PTE_CHECK_MASK (TARGET_PAGE_MASK | 0x7B)
+ 
 diff --git a/target/ppc/translate.c b/target/ppc/translate.c
-index 8308bccfa..c328f2e9b 100644
+index f4bf30c..914b4b5 100644
 --- a/target/ppc/translate.c
 +++ b/target/ppc/translate.c
 @@ -187,6 +187,7 @@ struct DisasContext {
@@ -435,7 +437,7 @@ index 8308bccfa..c328f2e9b 100644
      bool altivec_enabled;
      bool vsx_enabled;
      bool spe_enabled;
-@@ -6506,6 +6507,8 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+@@ -6550,6 +6551,8 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
          || env->mmu_model & POWERPC_MMU_64;
  
      ctx->fpu_enabled = (hflags >> HFLAGS_FP) & 1;
@@ -445,10 +447,10 @@ index 8308bccfa..c328f2e9b 100644
      ctx->altivec_enabled = (hflags >> HFLAGS_VR) & 1;
      ctx->vsx_enabled = (hflags >> HFLAGS_VSX) & 1;
 diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c.inc
-index b3edf3093..ba0952e41 100644
+index 0d96ece..c509a68 100644
 --- a/target/ppc/translate/fp-impl.c.inc
 +++ b/target/ppc/translate/fp-impl.c.inc
-@@ -128,6 +128,242 @@ static bool do_helper_ac(DisasContext *ctx, arg_A_tac *a,
+@@ -214,24 +214,260 @@ static bool do_helper_fsqrt(DisasContext *ctx, arg_A_tb *a,
      return true;
  }
  
@@ -627,9 +629,9 @@ index b3edf3093..ba0952e41 100644
 + * x-fp-inline: fcmpu without its two helpers when neither operand is a NaN
 + * and the FPSCR is primed (fpi_fcmpu() of fpu_helper.c).
 + */
-+static void gen_fcmpu_inline(DisasContext *ctx)
++static void gen_fcmpu_inline(DisasContext *ctx, arg_X_bf *x)
 +{
-+    int bf = crfD(ctx->opcode);
++    int bf = x->bf;
 +    TCGLabel *l_slow = gen_new_label();
 +    TCGLabel *l_done = gen_new_label();
 +    TCGv_i64 a = tcg_temp_new_i64();
@@ -644,8 +646,8 @@ index b3edf3093..ba0952e41 100644
 +    TCGv nf = tcg_temp_new();
 +    TCGv rt = tcg_temp_new();
 +
-+    get_fpr(a, rA(ctx->opcode));
-+    get_fpr(b, rB(ctx->opcode));
++    get_fpr(a, x->ra);
++    get_fpr(b, x->rb);
 +    tcg_gen_andi_tl(g, cpu_fpscr, FP_XX | FP_XE | FP_OE | FP_UE);
 +    tcg_gen_xori_tl(g, g, FP_XX);                   /* 0 iff primed */
 +    tcg_gen_extu_tl_i64(bad, g);
@@ -682,18 +684,12 @@ index b3edf3093..ba0952e41 100644
 +                            tcg_constant_i64(0), cpu_fpscr);
 +    }
 +    gen_reset_fpstatus();
-+    gen_helper_fcmpu(tcg_env, a, b, tcg_constant_i32(bf));
++    gen_helper_FCMPU(tcg_env, a, b, tcg_constant_i32(bf));
 +    gen_helper_float_check_status(tcg_env);
 +
 +    gen_set_label(l_done);
 +}
 +
- #define GEN_FLOAT_B(name, op2, op3, set_fprf, type)                           \
- static void gen_f##name(DisasContext *ctx)                                    \
- {                                                                             \
-@@ -217,23 +453,23 @@ static bool do_helper_fsqrt(DisasContext *ctx, arg_A_tb *a,
- }
- 
  TRANS(FADD, do_helper_ab, gen_helper_FADD);
 -TRANS(FADDS, do_helper_ab, gen_helper_FADDS);
 +TRANS(FADDS, do_fpi_ab, gen_helper_FADDS, FPI_ADD);
@@ -722,14 +718,21 @@ index b3edf3093..ba0952e41 100644
  
  TRANS_FLAGS(FLOAT_EXT, FRE, do_helper_bs, gen_helper_FRE);
  TRANS_FLAGS(FLOAT_FRES, FRES, do_helper_bs, gen_helper_FRES);
-@@ -336,6 +572,10 @@ static void gen_fcmpu(DisasContext *ctx)
-         gen_exception(ctx, POWERPC_EXCP_FPU);
-         return;
-     }
+@@ -307,7 +543,16 @@ static bool do_helper_cmp(DisasContext *ctx, arg_X_bf *a,
+     return true;
+ }
+ 
+-TRANS(FCMPU, do_helper_cmp, gen_helper_FCMPU);
++static bool trans_FCMPU(DisasContext *ctx, arg_X_bf *a)
++{
 +    if (ctx->fp_inline) {
-+        gen_fcmpu_inline(ctx);
-+        return;
++        REQUIRE_INSNS_FLAGS(ctx, FLOAT);
++        REQUIRE_FPU(ctx);
++        gen_fcmpu_inline(ctx, a);
++        return true;
 +    }
-     t0 = tcg_temp_new_i64();
-     t1 = tcg_temp_new_i64();
-     gen_reset_fpstatus();
++    return do_helper_cmp(ctx, a, gen_helper_FCMPU);
++}
+ TRANS(FCMPO, do_helper_cmp, gen_helper_FCMPO);
+ 
+ /***                         Floating-point move                           ***/

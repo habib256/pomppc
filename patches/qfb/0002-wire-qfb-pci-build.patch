@@ -1,18 +1,18 @@
 diff --git a/hw/display/Kconfig b/hw/display/Kconfig
-index 2250c74..1b02fa0 100644
+index b3593fe..c170833 100644
 --- a/hw/display/Kconfig
 +++ b/hw/display/Kconfig
-@@ -140,3 +140,8 @@ config XLNX_DISPLAYPORT
- 
- config DM163
+@@ -153,3 +153,8 @@ config MAC_PVG_PCI
      bool
+     depends on MAC_PVG && PCI
+     default y if PCI_DEVICES
 +
 +config QFB_PCI
 +    bool
 +    default y if PCI_DEVICES
 +    depends on PCI
 diff --git a/hw/display/meson.build b/hw/display/meson.build
-index 20a9497..7235958 100644
+index ffecedb..51456a5 100644
 --- a/hw/display/meson.build
 +++ b/hw/display/meson.build
 @@ -140,6 +140,7 @@ if config_all_devices.has_key('CONFIG_VIRTIO_VGA')

@@ -13,6 +13,7 @@
 
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <spawn.h>
@@ -202,6 +203,19 @@ int connectUnix(const std::string& path) {
         return -1;
     }
     return fd;
+}
+
+// {"QMP": {"version": {"qemu": {"micro": 2, "minor": 1, "major": 11}, ...}}}
+// → "11.1.2" ; vide si l'accueil n'a pas cette forme.
+std::string qmpGreetingVersion(const std::string& g) {
+    auto num = [&](const char* key) -> long {
+        size_t at = g.find(std::string("\"") + key + "\":");
+        if (at == std::string::npos) return -1;
+        return std::strtol(g.c_str() + at + std::strlen(key) + 3, nullptr, 10);
+    };
+    long ma = num("major"), mi = num("minor"), mc = num("micro");
+    if (ma < 0 || mi < 0 || mc < 0) return {};
+    return std::to_string(ma) + "." + std::to_string(mi) + "." + std::to_string(mc);
 }
 
 }  // namespace
@@ -523,6 +537,7 @@ bool QemuBridge::start(const Config& cfg, std::string* err) {
     std::string buf;
     std::string greeting;
     qmpReadLine(qmp, buf, greeting);  // {"QMP": ...}
+    qemuVersion_ = qmpGreetingVersion(greeting);
     if (!qmpSend(qmp, "{\"execute\":\"qmp_capabilities\"}") ||
         !qmpWaitReturn(qmp, buf)) {
         if (err) *err = "qmp_capabilities failed";

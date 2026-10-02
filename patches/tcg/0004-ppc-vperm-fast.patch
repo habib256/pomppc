@@ -1,8 +1,8 @@
 diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
-index 19142815a..77a0fc3e6 100644
+index c787609..9f49ddf 100644
 --- a/target/ppc/cpu.h
 +++ b/target/ppc/cpu.h
-@@ -1309,6 +1309,8 @@ struct CPUArchState {
+@@ -1370,6 +1370,8 @@ struct CPUArchState {
       * take every lane; same results and flags (int_helper.c, vfp_*4).
       */
      bool vfp_fast;
@@ -12,10 +12,10 @@ index 19142815a..77a0fc3e6 100644
      uint32_t sr_gen;
      uint32_t sr_snap_gen[2];
 diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
-index 30209bd1a..6c17c48da 100644
+index ffb290f..9724937 100644
 --- a/target/ppc/cpu_init.c
 +++ b/target/ppc/cpu_init.c
-@@ -7449,6 +7449,11 @@ static Property ppc_cpu_properties[] = {
+@@ -84,6 +84,11 @@ static const Property powerpc_cpu_properties[] = {
       * (needs x-fast-fp to ever apply).  Off by default.
       */
      DEFINE_PROP_BOOL("x-vfp-fast", PowerPCCPU, env.vfp_fast, false),
@@ -26,12 +26,12 @@ index 30209bd1a..6c17c48da 100644
 +    DEFINE_PROP_BOOL("x-vperm-fast", PowerPCCPU, env.vperm_fast, false),
      /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
      DEFINE_PROP_UINT32("x-sr-tlb-verify", PowerPCCPU, env.sr_verify, 0),
-     DEFINE_PROP_END_OF_LIST(),
+ };
 diff --git a/target/ppc/helper.h b/target/ppc/helper.h
-index dadd06abf..0a853ff3a 100644
+index f4f0d95..5c26df8 100644
 --- a/target/ppc/helper.h
 +++ b/target/ppc/helper.h
-@@ -249,6 +249,7 @@ DEF_HELPER_FLAGS_2(vupklsw, TCG_CALL_NO_RWG, void, avr, avr)
+@@ -250,6 +250,7 @@ DEF_HELPER_FLAGS_2(vupklsw, TCG_CALL_NO_RWG, void, avr, avr)
  DEF_HELPER_FLAGS_4(VMSUMUBM, TCG_CALL_NO_RWG, void, avr, avr, avr, avr)
  DEF_HELPER_FLAGS_4(VMSUMMBM, TCG_CALL_NO_RWG, void, avr, avr, avr, avr)
  DEF_HELPER_FLAGS_4(VPERM, TCG_CALL_NO_RWG, void, avr, avr, avr, avr)
@@ -40,7 +40,7 @@ index dadd06abf..0a853ff3a 100644
  DEF_HELPER_4(vpkshss, void, env, avr, avr, avr)
  DEF_HELPER_4(vpkshus, void, env, avr, avr, avr)
 diff --git a/target/ppc/int_helper.c b/target/ppc/int_helper.c
-index 0a95443f9..86a253e2b 100644
+index 0a95443..86a253e 100644
 --- a/target/ppc/int_helper.c
 +++ b/target/ppc/int_helper.c
 @@ -34,6 +34,9 @@
@@ -101,10 +101,10 @@ index 0a95443f9..86a253e2b 100644
  {
      ppc_avr_t result;
 diff --git a/target/ppc/translate.c b/target/ppc/translate.c
-index ccebf6002..3df55b2f1 100644
+index edd53fa..f4bf30c 100644
 --- a/target/ppc/translate.c
 +++ b/target/ppc/translate.c
-@@ -173,6 +173,7 @@ struct DisasContext {
+@@ -174,6 +174,7 @@ struct DisasContext {
      bool pr, hv, dr, le_mode;
      bool lazy_tlb_flush;
      bool lfs_inline;
@@ -112,7 +112,7 @@ index ccebf6002..3df55b2f1 100644
      bool need_access_type;
      int mem_idx;
      int access_type;
-@@ -6498,6 +6499,7 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+@@ -6544,6 +6545,7 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
      ctx->has_bhrb = !!(env->flags & POWERPC_FLAG_BHRB);
  #endif
      ctx->lfs_inline = env->lfs_inline;
@@ -121,7 +121,7 @@ index ccebf6002..3df55b2f1 100644
          || env->mmu_model & POWERPC_MMU_64;
  
 diff --git a/target/ppc/translate/vmx-impl.c.inc b/target/ppc/translate/vmx-impl.c.inc
-index 70d0ad2e7..40090a7f2 100644
+index 92d6e8c..4c1e071 100644
 --- a/target/ppc/translate/vmx-impl.c.inc
 +++ b/target/ppc/translate/vmx-impl.c.inc
 @@ -2304,7 +2304,13 @@ TRANS_FLAGS2(ALTIVEC_207, VADDEUQM, do_va_helper, gen_helper_VADDEUQM)

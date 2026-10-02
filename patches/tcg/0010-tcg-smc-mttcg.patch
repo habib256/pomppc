@@ -1,8 +1,8 @@
 diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
-index 0af9e92..d0f1f09 100644
+index 6cbb6d0..a043554 100644
 --- a/accel/tcg/cputlb.c
 +++ b/accel/tcg/cputlb.c
-@@ -976,9 +976,19 @@ static inline void tlb_set_dirty1_locked(CPUTLBEntry *tlb_entry,
+@@ -963,9 +963,19 @@ static inline void tlb_set_dirty1_locked(CPUTLBEntry *tlb_entry,
      }
  }
  
@@ -25,18 +25,18 @@ index 0af9e92..d0f1f09 100644
  {
      int mmu_idx;
  
-@@ -986,6 +996,10 @@ static void tlb_set_dirty(CPUState *cpu, vaddr addr)
+@@ -973,6 +983,10 @@ static void tlb_set_dirty(CPUState *cpu, vaddr addr)
  
      addr &= TARGET_PAGE_MASK;
      qemu_spin_lock(&cpu->neg.tlb.c.lock);
-+    if (cpu_physical_memory_is_clean(ram_addr)) {
++    if (physical_memory_is_clean(ram_addr)) {
 +        qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 +        return;
 +    }
      for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
          tlb_set_dirty1_locked(tlb_entry(cpu, mmu_idx, addr), addr);
      }
-@@ -1105,16 +1119,9 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
+@@ -1092,16 +1106,9 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
      if (is_ram) {
          iotlb = memory_region_get_ram_addr(section->mr) + xlat;
          assert(!(iotlb & ~TARGET_PAGE_MASK));
@@ -47,7 +47,7 @@ index 0af9e92..d0f1f09 100644
 -        if (prot & PAGE_WRITE) {
 -            if (section->readonly) {
 -                write_flags |= TLB_DISCARD_WRITE;
--            } else if (cpu_physical_memory_is_clean(iotlb)) {
+-            } else if (physical_memory_is_clean(iotlb)) {
 -                write_flags |= TLB_NOTDIRTY;
 -            }
 +        /* TLB_NOTDIRTY (is_clean) is computed below, with tlb_c.lock held */
@@ -56,7 +56,7 @@ index 0af9e92..d0f1f09 100644
          }
      } else {
          /* I/O or ROMD */
-@@ -1145,6 +1152,22 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
+@@ -1132,6 +1139,22 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
       */
      qemu_spin_lock(&tlb->c.lock);
  
@@ -72,23 +72,19 @@ index 0af9e92..d0f1f09 100644
 +     * invalidate the TBs of the page.
 +     */
 +    if (is_ram && (prot & PAGE_WRITE) && !section->readonly &&
-+        cpu_physical_memory_is_clean(iotlb)) {
++        physical_memory_is_clean(iotlb)) {
 +        write_flags |= TLB_NOTDIRTY;
 +    }
 +
      /* Note that the tlb is no longer clean.  */
      tlb->c.dirty |= 1 << mmu_idx;
  
-@@ -1355,10 +1378,13 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
-      */
-     cpu_physical_memory_set_dirty_range(ram_addr, size, DIRTY_CLIENTS_NOCODE);
+@@ -1366,9 +1389,10 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
+     physical_memory_set_dirty_range(ram_addr, size, DIRTY_CLIENTS_NOCODE);
  
--    /* We remove the notdirty callback only if the code has been flushed. */
-+    /*
-+     * We remove the notdirty callback only if the code has been flushed.
-+     * tlb_set_dirty() tests it again under the TLB lock.
-+     */
-     if (!cpu_physical_memory_is_clean(ram_addr)) {
+     /* We remove the notdirty callback only if the code has been flushed. */
++    /* tlb_set_dirty() tests it again under the TLB lock (POMPPC tcg/0010) */
+     if (!physical_memory_is_clean(ram_addr)) {
          trace_memory_notdirty_set_dirty(mem_vaddr);
 -        tlb_set_dirty(cpu, mem_vaddr);
 +        tlb_set_dirty(cpu, mem_vaddr, ram_addr);
@@ -96,18 +92,18 @@ index 0af9e92..d0f1f09 100644
  }
  
 diff --git a/accel/tcg/tb-maint.c b/accel/tcg/tb-maint.c
-index cc0f5af..b6f6201 100644
+index 4313864..1cffbe3 100644
 --- a/accel/tcg/tb-maint.c
 +++ b/accel/tcg/tb-maint.c
-@@ -26,6 +26,7 @@
- #include "exec/page-protection.h"
- #include "exec/tb-flush.h"
- #include "exec/translate-all.h"
-+#include "exec/ram_addr.h"
- #include "sysemu/tcg.h"
+@@ -32,6 +32,7 @@
+ #include "system/tcg.h"
  #include "tcg/tcg.h"
  #include "tb-hash.h"
-@@ -398,9 +399,31 @@ static void page_unlock(PageDesc *pd)
++#include "system/physmem.h"
+ #include "tb-context.h"
+ #include "internal-common.h"
+ #ifdef CONFIG_USER_ONLY
+@@ -406,9 +407,31 @@ static void page_unlock(PageDesc *pd)
      page_unlock__debug(pd);
  }
  
@@ -140,7 +136,7 @@ index cc0f5af..b6f6201 100644
  }
  
  void tb_lock_page1(tb_page_addr_t paddr0, tb_page_addr_t paddr1)
-@@ -418,11 +441,13 @@ void tb_lock_page1(tb_page_addr_t paddr0, tb_page_addr_t paddr1)
+@@ -426,11 +449,13 @@ void tb_lock_page1(tb_page_addr_t paddr0, tb_page_addr_t paddr1)
      if (pindex0 < pindex1) {
          /* Correct locking order, we may block. */
          page_lock(pd1);
@@ -154,7 +150,7 @@ index cc0f5af..b6f6201 100644
          return;
      }
  
-@@ -434,6 +459,9 @@ void tb_lock_page1(tb_page_addr_t paddr0, tb_page_addr_t paddr1)
+@@ -442,6 +467,9 @@ void tb_lock_page1(tb_page_addr_t paddr0, tb_page_addr_t paddr1)
      page_unlock(pd0);
      page_lock(pd1);
      page_lock(pd0);
@@ -164,7 +160,7 @@ index cc0f5af..b6f6201 100644
      siglongjmp(tcg_ctx->jmp_trans, -3);
  }
  
-@@ -1193,6 +1221,70 @@ void tb_invalidate_phys_range(tb_page_addr_t start, tb_page_addr_t last)
+@@ -1202,6 +1230,71 @@ void tb_invalidate_phys_range(CPUState *cpu, tb_page_addr_t start,
      page_collection_unlock(pages);
  }
  
@@ -192,7 +188,8 @@ index cc0f5af..b6f6201 100644
 + * translator clears the bit before it reads the code, and the barrier below
 + * orders our stores before our read of the bit.
 + */
-+bool tb_invalidate_phys_line_sync(tb_page_addr_t start, tb_page_addr_t last)
++bool tb_invalidate_phys_line_sync(CPUState *cpu, tb_page_addr_t start,
++                                  tb_page_addr_t last)
 +{
 +    PageDesc *pd;
 +    TranslationBlock *tb;
@@ -201,7 +198,7 @@ index cc0f5af..b6f6201 100644
 +
 +    tcg_debug_assert(((start ^ last) & TARGET_PAGE_MASK) == 0);
 +    smp_mb();
-+    if (cpu_physical_memory_get_dirty_flag(start, DIRTY_MEMORY_CODE)) {
++    if (physical_memory_get_dirty_flag(start, DIRTY_MEMORY_CODE)) {
 +        return false;
 +    }
 +    pd = page_find(start >> TARGET_PAGE_BITS);
@@ -227,33 +224,34 @@ index cc0f5af..b6f6201 100644
 +    page_unlock(pd);
 +    if (hit) {
 +        /* takes the locks of every page of the TBs found, in order */
-+        tb_invalidate_phys_range(start, last);
++        tb_invalidate_phys_range(cpu, start, last);
 +    }
 +    return hit;
 +}
 +
  /*
-  * Call with all @pages in the range [@start, @start + len[ locked.
-  */
-diff --git a/include/exec/exec-all.h b/include/exec/exec-all.h
-index ff231b6..3f3b3f2 100644
---- a/include/exec/exec-all.h
-+++ b/include/exec/exec-all.h
-@@ -450,6 +450,9 @@ static inline void tb_set_page_addr1(TranslationBlock *tb,
+  * len must be <= 8 and start must be a multiple of len.
+  * Called via softmmu_template.h when code areas are written to with
+diff --git a/include/exec/translation-block.h b/include/exec/translation-block.h
+index 7c42c57..7d8832a 100644
+--- a/include/exec/translation-block.h
++++ b/include/exec/translation-block.h
+@@ -214,5 +214,10 @@ static inline void tb_set_page_addr1(TranslationBlock *tb,
  /* TranslationBlock invalidate API */
- void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr);
- void tb_invalidate_phys_range(tb_page_addr_t start, tb_page_addr_t last);
+ void tb_invalidate_phys_range(CPUState *cpu, tb_page_addr_t start,
+                               tb_page_addr_t last);
 +#ifndef CONFIG_USER_ONLY
-+bool tb_invalidate_phys_line_sync(tb_page_addr_t start, tb_page_addr_t last);
++/* POMPPC tcg/0010 (x-icbi-sync), see accel/tcg/tb-maint.c */
++bool tb_invalidate_phys_line_sync(CPUState *cpu, tb_page_addr_t start,
++                                  tb_page_addr_t last);
 +#endif
- void tb_set_jmp_target(TranslationBlock *tb, int n, uintptr_t addr);
  
- /* GETPC is the true target of the return instruction that we'll execute.  */
+ #endif /* EXEC_TRANSLATION_BLOCK_H */
 diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
-index 747269a..d533a21 100644
+index c7373f8..1ebd510 100644
 --- a/target/ppc/cpu.h
 +++ b/target/ppc/cpu.h
-@@ -1378,6 +1378,12 @@ struct CPUArchState {
+@@ -1439,6 +1439,12 @@ struct CPUArchState {
       * Read by the translator only.
       */
      bool ret_inline;
@@ -267,10 +265,10 @@ index 747269a..d533a21 100644
      /* Internal devices resources */
      ppc_tb_t *tb_env;      /* Time base and decrementer */
 diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
-index c10ac3f..fbfabfc 100644
+index f546fba..d3bf4bb 100644
 --- a/target/ppc/cpu_init.c
 +++ b/target/ppc/cpu_init.c
-@@ -7462,6 +7462,15 @@ static Property ppc_cpu_properties[] = {
+@@ -97,6 +97,15 @@ static const Property powerpc_cpu_properties[] = {
      DEFINE_PROP_BOOL("x-ret-inline", PowerPCCPU, env.ret_inline, false),
      DEFINE_PROP_BOOL("x-jc-idx", PowerPCCPU, parent_obj.jc_by_idx, false),
      DEFINE_PROP_BOOL("x-ret-verify", PowerPCCPU, parent_obj.ret_verify, false),
@@ -287,13 +285,23 @@ index c10ac3f..fbfabfc 100644
       * AltiVec vaddfp/vsubfp/vmaddfp/vnmsubfp: the four lanes at once on the
       * host FPU when softfloat's hardfloat path would take each of them
 diff --git a/target/ppc/mem_helper.c b/target/ppc/mem_helper.c
-index 51b137f..1c20882 100644
+index 787ba2c..d3f505f 100644
 --- a/target/ppc/mem_helper.c
 +++ b/target/ppc/mem_helper.c
-@@ -335,6 +335,26 @@ void helper_icbi(CPUPPCState *env, target_ulong addr)
-      * do the load "by hand".
+@@ -19,6 +19,9 @@
+ 
+ #include "qemu/osdep.h"
+ #include "cpu.h"
++#include "exec/tlb-flags.h"
++#include "system/ram_addr.h"
++#include "exec/translation-block.h"
+ #include "exec/target_page.h"
+ #include "qemu/host-utils.h"
+ #include "exec/helper-proto.h"
+@@ -355,6 +358,25 @@ void helper_icbi(CPUPPCState *env, target_ulong addr)
+      * endianness is irrelevant.
       */
-     cpu_ldl_data_ra(env, addr, GETPC());
+     cpu_ldl_mmu(env, addr, oi, GETPC());
 +#if !defined(CONFIG_USER_ONLY)
 +    if (env->icbi_sync) {
 +        /* POMPPC tcg/0010 (x-icbi-sync), see tb_invalidate_phys_line_sync */
@@ -304,13 +312,12 @@ index 51b137f..1c20882 100644
 +
 +        addr &= ~(line - 1);
 +        /* a TLB hit: the load above has just filled it */
-+        flags = probe_access_full(env, addr, 0, MMU_DATA_LOAD,
-+                                  cpu_mmu_index(env_cpu(env), false), true,
++        flags = probe_access_full(env, addr, 0, MMU_DATA_LOAD, mmu_idx, true,
 +                                  &host, &full, 0);
 +        if (!(flags & (TLB_INVALID_MASK | TLB_MMIO)) && host) {
-+            /* RAM: ram_addr = vaddr + xlat_section, as in notdirty_write */
-+            ram_addr_t ra = addr + full->xlat_section;
-+            tb_invalidate_phys_line_sync(ra, ra + line - 1);
++            /* RAM: ram_addr = vaddr + xlat_offset, as in notdirty_write */
++            ram_addr_t ra = addr + full->xlat_offset;
++            tb_invalidate_phys_line_sync(env_cpu(env), ra, ra + line - 1);
 +        }
 +    }
 +#endif

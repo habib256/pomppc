@@ -1,5 +1,5 @@
 diff --git a/hw/intc/openpic.c b/hw/intc/openpic.c
-index 2ead4b9..4b29640 100644
+index 99d2a1e..381a204 100644
 --- a/hw/intc/openpic.c
 +++ b/hw/intc/openpic.c
 @@ -1580,9 +1580,14 @@ static void openpic_realize(DeviceState *dev, Error **errp)
@@ -21,18 +21,13 @@ index 2ead4b9..4b29640 100644
          }
  
 diff --git a/hw/misc/macio/gpio.c b/hw/misc/macio/gpio.c
-index 7cad628..9307da9 100644
+index 1a7c534..5c9d92b 100644
 --- a/hw/misc/macio/gpio.c
 +++ b/hw/misc/macio/gpio.c
-@@ -34,6 +34,61 @@
- #include "qemu/module.h"
- #include "trace.h"
+@@ -40,6 +40,57 @@ enum MacioGPIORegisterBits {
+     OUT_ENABLE = 4,
+ };
  
-+/* GPIO register bits (names from BALATON Zoltan's SMP series) */
-+#define OUT_DATA    0x01
-+#define IN_DATA     0x02
-+#define OUT_ENABLE  0x04
-+
 +/* KL_GPIO_RESET_CPU1 (offset 0x5C) : ligne de reset du cœur secondaire */
 +#define GPIO_RESET_CPU1 4
 +
@@ -83,10 +78,11 @@ index 7cad628..9307da9 100644
 +        qemu_log_mask(LOG_UNIMP, "GPIO: setting unimplemented GPIO %d", gpio);
 +    }
 +}
- 
++
  void macio_set_gpio(MacIOGPIOState *s, uint32_t gpio, bool state)
  {
-@@ -64,39 +119,14 @@ void macio_set_gpio(MacIOGPIOState *s, uint32_t gpio, bool state)
+     uint8_t new_reg;
+@@ -69,39 +120,14 @@ void macio_set_gpio(MacIOGPIOState *s, uint32_t gpio, bool state)
       * For now, we hard wire known GPIOs
       */
  
@@ -128,17 +124,8 @@ index 7cad628..9307da9 100644
  
      trace_macio_gpio_write(addr, value);
  
-@@ -109,13 +139,35 @@ static void macio_gpio_write(void *opaque, hwaddr addr, uint64_t value,
-     if (addr < 36) {
-         value &= ~2;
- 
--        if (value & 4) {
--            ibit = (value & 1) << 1;
-+        if (value & OUT_ENABLE) {
-+            ibit = (value & OUT_DATA) << 1;
-         } else {
--            ibit = s->gpio_regs[addr] & 2;
-+            ibit = s->gpio_regs[addr] & IN_DATA;
+@@ -120,7 +146,29 @@ static void macio_gpio_write(void *opaque, hwaddr addr, uint64_t value,
+             ibit = s->gpio_regs[addr] & IN_DATA;
          }
  
 +        /*
@@ -167,36 +154,19 @@ index 7cad628..9307da9 100644
      }
  }
  
-@@ -181,6 +233,16 @@ static void macio_gpio_reset(DeviceState *dev)
- 
-     /* GPIO 1 is up by default */
-     macio_set_gpio(s, 1, true);
-+    /*
-+     * Ligne de reset du CPU 1 : entrée, tirée haut, SANS front propagé.
-+     * macio_set_gpio() déclencherait l'interruption externe, donc un
-+     * « relâchement » du CPU 1 à la mise sous tension (registre à 0 → haut)
-+     * ou après un reset machine survenu ligne tenue basse. Le reset machine
-+     * remet lui-même le CPU 1 à l'arrêt (start-powered-off) : c'est l'invité,
-+     * et lui seul, qui le relâche. Le registre est aussi remis à sa valeur
-+     * de reset : un OUT_ENABLE laissé par l'invité ne survit pas au reset.
-+     */
-+    s->gpio_regs[GPIO_RESET_CPU1] = IN_DATA;
- }
- 
- static void macio_gpio_nmi(NMIState *n, int cpu_index, Error **errp)
 diff --git a/hw/ppc/mac_newworld.c b/hw/ppc/mac_newworld.c
-index 9d249a5..9ad6a27 100644
+index 3680d96..a00d843 100644
 --- a/hw/ppc/mac_newworld.c
 +++ b/hw/ppc/mac_newworld.c
-@@ -73,6 +73,7 @@
+@@ -74,6 +74,7 @@
  #include "kvm_ppc.h"
- #include "hw/usb.h"
- #include "hw/sysbus.h"
-+#include "hw/irq.h"
+ #include "hw/usb/usb.h"
+ #include "hw/core/sysbus.h"
++#include "hw/core/irq.h"
  #include "trace.h"
  
  #define MAX_IDE_BUS 2
-@@ -128,12 +129,91 @@ static void ppc_core99_reset(void *opaque)
+@@ -129,12 +130,91 @@ static void ppc_core99_reset(void *opaque)
      cpu->env.nip = PROM_BASE + 0x100;
  }
  
@@ -289,7 +259,7 @@ index 9d249a5..9ad6a27 100644
      CPUPPCState *env = NULL;
      char *filename;
      IrqLines *openpic_irqs;
-@@ -156,15 +236,40 @@ static void ppc_core99_init(MachineState *machine)
+@@ -157,15 +237,40 @@ static void ppc_core99_init(MachineState *machine)
      hwaddr nvram_addr = 0xFFF04000;
      uint64_t tbfreq = kvm_enabled() ? kvmppc_get_tbfreq() : TBFREQ;
  
@@ -335,7 +305,7 @@ index 9d249a5..9ad6a27 100644
  
      /* allocate RAM */
      if (machine->ram_size > 2 * GiB) {
-@@ -255,8 +360,8 @@ static void ppc_core99_init(MachineState *machine)
+@@ -245,8 +350,8 @@ static void ppc_core99_init(MachineState *machine)
      }
  
      openpic_irqs = g_new0(IrqLines, machine->smp.cpus);
@@ -345,7 +315,7 @@ index 9d249a5..9ad6a27 100644
          /* Mac99 IRQ connection between OpenPIC outputs pins
           * and PowerPC input pins
           */
-@@ -368,9 +473,28 @@ static void ppc_core99_init(MachineState *machine)
+@@ -358,9 +463,28 @@ static void ppc_core99_init(MachineState *machine)
      qdev_prop_set_chr(dev, "chrA", serial_hd(0));
      qdev_prop_set_chr(dev, "chrB", serial_hd(1));
  
@@ -375,7 +345,7 @@ index 9d249a5..9ad6a27 100644
      for (i = 0; i < 4; i++) {
          qdev_connect_gpio_out(uninorth_pci_dev, i,
                                qdev_get_gpio_in(pic_dev, 0x1b + i));
-@@ -574,8 +698,11 @@ static void core99_machine_class_init(ObjectClass *oc, void *data)
+@@ -573,8 +697,11 @@ static void core99_machine_class_init(ObjectClass *oc, const void *data)
      mc->desc = "Mac99 based PowerMac";
      mc->init = ppc_core99_init;
      mc->block_default_type = IF_IDE;
