@@ -1,0 +1,200 @@
+diff --git a/hw/ppc/ppc.c b/hw/ppc/ppc.c
+index f402b17..b66601d 100644
+--- a/hw/ppc/ppc.c
++++ b/hw/ppc/ppc.c
+@@ -527,7 +527,8 @@ int64_t cpu_ppc_load_tb_offset(CPUPPCState *env)
+  * Stock mftb: qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) = cpu_clock_offset +
+  * get_clock(), then muldiv64() and its 128-bit division.  With x-tb-fast,
+  * get_clock() is the host counter (qemu_raw_clock_enable(), include/qemu/
+- * timer.h) and this path computes the very same value: offset + cntvct + K,
++ * timer.h) and this path computes the very same value: offset + cntvct + K
++ * (x86_64, tcg/0018: offset + tsc_ns + K),
+  * divided by 1e9 / tb_freq (floor, as muldiv64, when tb_freq divides 1e9).
+  * x-tb-verify recomputes the stock value right after: fast - stock must be
+  * 0, or negative by the ticks elapsed between the two reads.
+diff --git a/include/qemu/timer.h b/include/qemu/timer.h
+index 30ec688..0060d1e 100644
+--- a/include/qemu/timer.h
++++ b/include/qemu/timer.h
+@@ -845,6 +845,26 @@ extern int use_rt_clock;
+ extern int qemu_raw_clock;
+ extern int64_t qemu_raw_clock_k;
+ bool qemu_raw_clock_enable(void);
++/*
++ * POMPPC tcg/0018 (x-tb-fast on x86_64 Linux hosts): the invariant TSC,
++ * when the kernel itself keeps time with it (synchronized across CPUs),
++ * scaled to ns by qemu_raw_clock_mult (32.32 fixed point, calibrated once
++ * against CLOCK_MONOTONIC), plus the same K: ~7 ns per read instead of ~20.
++ */
++extern uint64_t qemu_raw_clock_mult;
++
++static inline int64_t qemu_raw_clock_tsc_ns(void)
++{
++#if defined(__x86_64__)
++    uint32_t lo, hi;
++
++    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
++    return (int64_t)(((unsigned __int128)((uint64_t)hi << 32 | lo) *
++                      qemu_raw_clock_mult) >> 32);
++#else
++    return 0;
++#endif
++}
+ 
+ static inline int64_t get_clock(void)
+ {
+@@ -854,6 +874,10 @@ static inline int64_t get_clock(void)
+         asm volatile("mrs %0, cntvct_el0" : "=r"(v));
+         return (int64_t)v + qemu_raw_clock_k;
+     }
++#elif defined(__x86_64__) && defined(__linux__)
++    if (qemu_raw_clock) {
++        return qemu_raw_clock_tsc_ns() + qemu_raw_clock_k;
++    }
+ #endif
+     if (use_rt_clock) {
+         struct timespec ts;
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index 478e5be..3b64972 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1482,7 +1482,8 @@ struct CPUArchState {
+     bool msr_nobql_verify;
+     /*
+      * x-tb-fast (POMPPC tcg/0015): mftb/mftbu compute the time base from
+-     * the host counter (cntvct_el0 at 1 GHz, calibrated once against
++     * the host counter (cntvct_el0 at 1 GHz, or the invariant TSC of an
++     * x86_64 Linux host scaled to ns, tcg/0018; calibrated once against
+      * get_clock()) instead of clock_gettime() and a 128-bit division,
+      * docs/tcg-g4.md section 23.  x-tb-verify: proof mode.
+      */
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index 6dd284e..8cc7c39 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -138,7 +138,8 @@ static const Property powerpc_cpu_properties[] = {
+     /*
+      * POMPPC tcg/0015.  x-tb-fast: the time base read by mftb/mftbu comes
+      * from the host counter (arm64 hosts whose cntvct_el0 runs at 1 GHz;
+-     * elsewhere the property does nothing).  x-tb-verify: every fast read
++     * x86_64 Linux hosts whose kernel keeps time with an invariant TSC,
++     * tcg/0018; elsewhere the property does nothing).  x-tb-verify: every fast read
+      * is compared with the stock value.  Off by default.
+      */
+     DEFINE_PROP_BOOL("x-tb-fast", PowerPCCPU, env.tb_fast, false),
+diff --git a/util/qemu-timer-common.c b/util/qemu-timer-common.c
+index 3047f08..0f5165b 100644
+--- a/util/qemu-timer-common.c
++++ b/util/qemu-timer-common.c
+@@ -52,6 +52,7 @@ static void __attribute__((constructor)) init_get_clock(void)
+ int use_rt_clock;
+ int qemu_raw_clock;
+ int64_t qemu_raw_clock_k;
++uint64_t qemu_raw_clock_mult;
+ 
+ /* POMPPC tcg/0015, see include/qemu/timer.h */
+ bool qemu_raw_clock_enable(void)
+@@ -97,6 +98,103 @@ bool qemu_raw_clock_enable(void)
+     qemu_raw_clock = 1;
+     state = 1;
+     return true;
++#elif defined(__x86_64__) && defined(__linux__)
++    /* POMPPC tcg/0018, see include/qemu/timer.h */
++    static int state;               /* 0 not tried, 1 on, -1 refused */
++    uint32_t a, b, c, d;
++    uint64_t c0, c1, mult;
++    int64_t m0, m1, m, t1, t2, lo = INT64_MIN, hi = INT64_MAX;
++    char src[32] = "";
++    FILE *f;
++    int i;
++
++    if (state) {
++        return state > 0;
++    }
++    /* invariant TSC (CPUID 0x80000007 EDX[8]) */
++    asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
++                 : "a"(0x80000000u), "c"(0));
++    if (a >= 0x80000007u) {
++        asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
++                     : "a"(0x80000007u), "c"(0));
++    } else {
++        d = 0;
++    }
++    /* the kernel keeps time with it: synchronized and stable on this host */
++    f = fopen("/sys/devices/system/clocksource/clocksource0/"
++              "current_clocksource", "r");
++    if (f) {
++        if (!fgets(src, sizeof(src), f)) {
++            src[0] = 0;
++        }
++        fclose(f);
++    }
++    if (!(d & (1u << 8)) || strcmp(src, "tsc\n") || !use_rt_clock) {
++        fprintf(stderr, "x-tb-fast : TSC %s, source d'horloge « %.*s », "
++                "horloge d'origine\n", d & (1u << 8) ? "invariant" : "variable",
++                (int)strcspn(src, "\n"), src);
++        state = -1;
++        return false;
++    }
++    /*
++     * The TSC rate in ns: two (TSC, CLOCK_MONOTONIC) pairs 20 ms apart, each
++     * the tightest of 32 bracketed reads (~2 ppm).
++     */
++    for (int p = 0; p < 2; p++) {
++        uint64_t best = UINT64_MAX, cb = 0;
++        int64_t mb = 0;
++
++        if (p) {
++            do {
++                m = get_clock();
++            } while (m - m0 < 20 * 1000 * 1000);
++        }
++        for (i = 0; i < 32; i++) {
++            struct timespec ts;
++            uint64_t x1, x2;
++
++            x1 = __builtin_ia32_rdtsc();
++            clock_gettime(CLOCK_MONOTONIC, &ts);
++            x2 = __builtin_ia32_rdtsc();
++            if (x2 - x1 < best) {
++                best = x2 - x1;
++                cb = x1 + (x2 - x1) / 2;
++                mb = ts.tv_sec * 1000000000LL + ts.tv_nsec;
++            }
++        }
++        if (p) {
++            c1 = cb;
++            m1 = mb;
++        } else {
++            c0 = cb;
++            m0 = mb;
++        }
++    }
++    mult = ((uint64_t)(m1 - m0) << 32) / (c1 - c0);
++    qemu_raw_clock_mult = mult;
++    /* CLOCK_MONOTONIC = floor_res(tsc_ns + C) near now: bound C both sides */
++    for (i = 0; i < 20000; i++) {
++        struct timespec ts;
++
++        t1 = qemu_raw_clock_tsc_ns();
++        clock_gettime(CLOCK_MONOTONIC, &ts);
++        t2 = qemu_raw_clock_tsc_ns();
++        m = ts.tv_sec * 1000000000LL + ts.tv_nsec;
++        lo = MAX(lo, m - t2);
++        hi = MIN(hi, m + 1 - t1);
++    }
++    if (lo - hi > 100 || hi - lo > 2000) {
++        fprintf(stderr, "x-tb-fast : CLOCK_MONOTONIC ne suit pas le TSC "
++                "(%" PRId64 "..%" PRId64 "), horloge d'origine\n", lo, hi);
++        state = -1;
++        return false;
++    }
++    /* lo: the counter lands at or just above CLOCK_MONOTONIC, never below */
++    qemu_raw_clock_k = lo;
++    smp_wmb();
++    qemu_raw_clock = 1;
++    state = 1;
++    return true;
+ #else
+     return false;
+ #endif

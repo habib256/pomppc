@@ -1,0 +1,58 @@
+diff --git a/target/ppc/int_helper.c b/target/ppc/int_helper.c
+index 86a253e..f47e687 100644
+--- a/target/ppc/int_helper.c
++++ b/target/ppc/int_helper.c
+@@ -37,6 +37,10 @@
+ #if defined(__aarch64__)
+ #include <arm_neon.h>
+ #endif
++#if defined(__x86_64__) && !HOST_BIG_ENDIAN
++#include <immintrin.h>
++#include "host/cpuinfo.h"
++#endif
+ /*****************************************************************************/
+ /* Fixed point operations helpers */
+ 
+@@ -1398,9 +1402,28 @@ void helper_VPERM(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
+  * a.u8[0..15], result.u8[j] = T[31 - (c.u8[j] & 31)] = T[~c.u8[j] & 31]
+  * (s < 16: T[31 - s] = a.u8[15 - s]; s >= 16: T[31 - s] = b.u8[31 - s]).
+  * On a big-endian host VsrB(i) is u8[i]: T = a.u8 then b.u8, index s.
+- * An arm64 host does the lookup with a single tbl on two registers.
++ * An arm64 host does the lookup with a single tbl on two registers; an
++ * x86_64 host with AVX (POMPPC tcg/0019) with a pshufb in each half and a
++ * blend on bit 4 of the index.
+  * All three operands are read before r is written (r may alias them).
+  */
++#if defined(__x86_64__) && !HOST_BIG_ENDIAN
++static void __attribute__((target("avx")))
++vperm_fast_avx(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
++{
++    __m128i va = _mm_loadu_si128((const __m128i *)a->u8);
++    __m128i vb = _mm_loadu_si128((const __m128i *)b->u8);
++    __m128i k = _mm_set1_epi8(0x1f);
++    __m128i idx = _mm_andnot_si128(_mm_loadu_si128((const __m128i *)c->u8), k);
++    /* idx < 16: T[idx] = b.u8[idx]; idx >= 16: a.u8[idx - 16] (low 4 bits) */
++    __m128i hi = _mm_cmpgt_epi8(idx, _mm_set1_epi8(15));
++
++    _mm_storeu_si128((__m128i *)r->u8,
++                     _mm_blendv_epi8(_mm_shuffle_epi8(vb, idx),
++                                     _mm_shuffle_epi8(va, idx), hi));
++}
++#endif
++
+ void helper_VPERM_FAST(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
+ {
+ #if defined(__aarch64__) && !HOST_BIG_ENDIAN
+@@ -1409,6 +1432,12 @@ void helper_VPERM_FAST(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
+ 
+     vst1q_u8(r->u8, vqtbl2q_u8(t, idx));
+ #else
++#if defined(__x86_64__) && !HOST_BIG_ENDIAN
++    if (likely(cpuinfo & CPUINFO_AVX1)) {
++        vperm_fast_avx(r, a, b, c);
++        return;
++    }
++#endif
+     uint8_t t[32], res[16];
+     int j;
+ 

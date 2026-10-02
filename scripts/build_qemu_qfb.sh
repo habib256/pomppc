@@ -22,6 +22,7 @@
 #   • flottant scalaire natif, op TCG ppc_fp32 (x-fp-native) — patches/tcg/0014
 #   • base de temps par le compteur de l'hôte (x-tb-fast)  — patches/tcg/0015
 #   • flottant double natif (x-fp-native64)             — patches/tcg/0016
+#   • les trois mêmes sur hôte x86-64 (op ppc_fp32, TSC, vperm) — patches/tcg/0017-0019
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
 #   ./scripts/build_qemu_qfb.sh              # build dans ~/src/qemu
@@ -725,6 +726,41 @@ tcg/aarch64/tcg-target.c.inc pfp_zon64
 target/ppc/fpu_helper.c fpi_fp64
 target/ppc/cpu_init.c x-fp-native64
 TCG16_MARKERS
+  # --- 4 duodevicies. Les mêmes sur un hôte x86-64 (tcg/0017-0019) ---
+  # patches/tcg/0017, docs/tcg-g4.md §25 : l'émetteur x86_64 de l'op ppc_fp32
+  # (x-fp-native, x-fp-native64 : VEX et FMA3, sondés à l'exécution) ; 0018 :
+  # x-tb-fast par le TSC invariant (Linux) ; 0019 : vperm par pshufb (AVX).
+  if ! grep -q "TCG_TARGET_PPC_FP32_IMPL" tcg/tcg-has.h; then
+    echo "▶ patch TCG : flottant natif sur hôte x86-64 (x-fp-native, x-fp-native64)"
+    patch_strict "$ROOT/patches/tcg/0017-tcg-fp-native-x86.patch"
+  fi
+  if ! grep -q "qemu_raw_clock_mult" util/qemu-timer-common.c; then
+    echo "▶ patch TCG : base de temps par le TSC sur hôte x86-64 (x-tb-fast)"
+    patch_strict "$ROOT/patches/tcg/0018-ppc-tb-fast-x86.patch"
+  fi
+  if ! grep -q "vperm_fast_avx" target/ppc/int_helper.c; then
+    echo "▶ patch TCG : vperm par pshufb sur hôte x86-64 (x-vperm-fast)"
+    patch_strict "$ROOT/patches/tcg/0019-ppc-vperm-fast-x86.patch"
+  fi
+  for f in host/include/x86_64/host/cpuinfo.h hw/ppc/ppc.c include/qemu/cpuid.h \
+           include/qemu/timer.h target/ppc/cpu.h target/ppc/cpu_init.c \
+           target/ppc/fpu_helper.c target/ppc/int_helper.c target/ppc/translate/fp-impl.c.inc \
+           tcg/aarch64/tcg-target-has.h tcg/tcg-has.h tcg/tcg.c \
+           tcg/x86_64/tcg-target-con-set.h tcg/x86_64/tcg-target-has.h tcg/x86_64/tcg-target.c.inc \
+           util/cpuinfo-i386.c util/qemu-timer-common.c; do
+    rm -f "$f.orig"
+  done
+  while read -r f m; do
+    [ -z "$f" ] && continue
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0017-0019 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG17_MARKERS'
+tcg/x86_64/tcg-target.c.inc tcg_out_ppc_fp32_slow_path
+tcg/tcg-has.h TCG_TARGET_PPC_FP32_IMPL
+util/cpuinfo-i386.c CPUINFO_FMA
+util/qemu-timer-common.c qemu_raw_clock_mult
+target/ppc/int_helper.c vperm_fast_avx
+TCG17_MARKERS
 fi
 
 # --- 5. Build ---
