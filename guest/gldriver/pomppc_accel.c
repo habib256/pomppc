@@ -205,6 +205,18 @@ static pthread_t self_thr(void)
     return thr_last;
 }
 static volatile unsigned long sig_fault_n;
+/* Quatrième garde (02/10/2026) : les copies différées de run_posts écrivent
+   dans le tampon de l'APPLICATION (drawable logiciel). UT2004, en quittant :
+   NSOpenGLContext clearDrawable → gldAttachDrawable → sync_to_sw_locked →
+   run_posts, tampon déjà rendu → faute, verrou tenu ; le gestionnaire du jeu
+   appelait exit(), dont le nettoyage SDL revenait dans gldAttachDrawable →
+   pomppc_lazy_flush → G.mu : gel. Sur faute, les copies restantes sont
+   jetées (leur destination n'existe plus). Tampon sur la pile, vérifiée EN
+   PREMIER par le crochet : c'est toujours la plus intérieure. */
+static sigjmp_buf *volatile post_jb;
+static volatile int post_jmp_on;
+static volatile pthread_t post_thr;
+static volatile unsigned long post_fault_n, post_fault_addr;
 static int upload_blank;                /* COPY_TEX : niveaux noirs, sans lire l'invité */
 static volatile unsigned long pack_fault_addr, pack_fault_n;
 /* état du dernier empaquetage de tableaux, pour le crochet de plantage (24/09) */
@@ -2999,10 +3011,30 @@ static void run_posts(Half *h)
 {
     double t;
     int i;
+    sigjmp_buf jb;
+    sigjmp_buf *volatile prev_jb = post_jb;
+    volatile int prev_on = post_jmp_on;
+    volatile pthread_t prev_thr = post_thr;
 
     if (!h->npost)
         return;
     t = now_s();
+    crash_hook_fresh();
+    if (sigsetjmp(jb, 0) != 0) {
+        post_jmp_on = 0;
+        post_thr = prev_thr;
+        post_jb = prev_jb;
+        post_jmp_on = prev_on;
+        gl_note("relecture jetée : destination illisible (0x%08lx), %d copie(s) perdue(s)",
+                (unsigned long)post_fault_addr, h->npost);
+        h->npost = 0;
+        G.t_copy += now_s() - t;
+        return;
+    }
+    post_jmp_on = 0;
+    post_jb = &jb;
+    post_thr = self_thr();
+    post_jmp_on = 1;
     for (i = 0; i < h->npost; i++) {
         Post *po = &h->post[i];
         /* arène = offset ABSOLU dans la tranche : la moitié courante a pu
@@ -3036,6 +3068,10 @@ static void run_posts(Half *h)
             }
         }
     }
+    post_jmp_on = 0;
+    post_thr = prev_thr;
+    post_jb = prev_jb;
+    post_jmp_on = prev_on;
     h->npost = 0;
     G.t_copy += now_s() - t;
 }
@@ -14736,6 +14772,12 @@ static void crash_handler(int sig, siginfo_t *si, void *ucv)
     int fd;
     /* P3 (relecture du 24/09) : ne revenir dans une garde que sur le fil qui
        l'a armée ; la faute d'un autre fil suit l'enregistrement normal. */
+    if (post_jmp_on && pthread_equal(pthread_self(), post_thr)) {
+        post_jmp_on = 0;
+        post_fault_addr = (unsigned long)(si ? si->si_addr : 0);
+        post_fault_n++;
+        siglongjmp(*post_jb, 1);
+    }
     if (sig_jmp_on && pthread_equal(pthread_self(), sig_thr)) {
         sig_jmp_on = 0;
         sig_fault_n++;

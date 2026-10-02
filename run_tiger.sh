@@ -145,7 +145,7 @@ if [ -z "${SNAPSHOT:-}" ]; then
 fi
 
 # --- Sélection binaire / accélérateur / firmware ---
-# Build UNIFIÉ (QEMU 11.1.2 + device Screamer porté) : SMP *et* son ensemble.
+# Build UNIFIÉ (QEMU $POMPPC_QEMU_VERSION, config.env + device Screamer porté) : SMP *et* son ensemble.
 EXTRA=(); AUDIO=(); RAM="$RAM_MB"
 [ -f "$UNI_OBIOS" ] || { echo "⚠  OpenBIOS unifié introuvable ($UNI_OBIOS)." >&2; exit 1; }
 EXTRA+=(-bios "$UNI_OBIOS")
@@ -190,6 +190,16 @@ if [ "$SMP_N" -ge 2 ]; then
 else
   BIN="$QEMU_BIN"
   MODE="mono-cœur${SMP_TAG}"
+fi
+
+# Version de QEMU : la série patches/ vise POMPPC_QEMU_VERSION (config.env). Un
+# binaire d'une autre version (l'ancien ~/src/qemu en 9.2.0, un QEMU de
+# distribution) démarre peut-être, mais sans les correctifs ni les capacités
+# attendues : on le dit, sans bloquer (QEMU_BIN= reste libre pour les essais).
+QEMU_VER="$("$BIN" --version 2>/dev/null | sed -n '1s/.*version \([0-9][0-9.]*\).*/\1/p')"
+if [ -n "${POMPPC_QEMU_VERSION:-}" ] && [ "$QEMU_VER" != "$POMPPC_QEMU_VERSION" ]; then
+  echo "⚠  $BIN est QEMU ${QEMU_VER:-?}, la série de patches vise $POMPPC_QEMU_VERSION." >&2
+  echo "   Reconstruis le binaire de référence : ./scripts/build_qemu_qfb.sh" >&2
 fi
 
 # Son ON par défaut ; NOSOUND=1 pour couper. On SONDE le binaire : sans la
@@ -681,7 +691,7 @@ MON=$(host_mon_path "$SCR/mon.sock")   # mon.sock pour la VM verrouillée, mon-P
 # cycle.sh et tools/guest/tssh.sh (rien en SNAPSHOT=1 : ils visent la VM quotidienne)
 host_publish_vm tiger "$MON" "$([ -n "${NET:-}" ] && echo "${SSH_PORT:-0}" || echo 0)"
 
-echo "▶ Tiger : $MODE | cpu=$CPU_SPEC ram=${RAM}Mo affichage=$DISP \
+echo "▶ Tiger (QEMU ${QEMU_VER:-?}) : $MODE | cpu=$CPU_SPEC ram=${RAM}Mo affichage=$DISP \
 réseau=$([ -n "${NET:-}" ] && echo on || echo off) \
 disque=$([ -n "${SNAPSHOT:-}" ] && echo jetable || echo persistant)"
 echo "  moniteur QEMU : $MON"
