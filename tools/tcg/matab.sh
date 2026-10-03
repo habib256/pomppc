@@ -21,6 +21,8 @@
 # plus transmise au jeu par `matrice.py --env` (30/09). Résultats : <dépôt principal>/bench/tcg/ab/CAMPAGNE/
 # <mode>-<k>/ (tour de matrice, run_tiger.log = stderr de QEMU), bilan
 # bench/tcg/ab/CAMPAGNE/bilan.txt (tools/tcg/matabsum.py).
+# MATRICE_OPTS="--sample-hote 30" : options de plus pour matrice.py (profil hôte ;
+# sous Linux, avec "mode:EXTRA_ARGS=-perfmap" pour nommer le code JIT).
 # JAMAIS de suppression de .run/tiger.lock : on attend qu'il se libère.
 set -u
 WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -88,7 +90,7 @@ for p in "${ordre[@]}"; do
   genv=()
   for v in "$@"; do case $v in POMPPC_GL_*=*) genv+=(--env "$v") ;; esac; done
   env "$@" python3 "$WT/tools/matrice/matrice.py" -j "$JEU" -m "$MODE" --sans-vidage \
-      ${genv[@]+"${genv[@]}"} --sortie "$D" > "$D/matrice.log" 2>&1
+      ${genv[@]+"${genv[@]}"} ${MATRICE_OPTS:-} --sortie "$D" > "$D/matrice.log" 2>&1
   tail -1 "$D/resultats.csv" 2>/dev/null | tee -a "$OUT/journal.txt"
 done
 stop_vm
