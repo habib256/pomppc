@@ -33,6 +33,8 @@ class UT2004(Jeu):
     famille = "tableaux, VBO, S3TC"
     processus = "ut2004-bin"
     plancher_ms = 36          # 26,9 / 29,3 ms/image au 29/09 (tour 20260929-2344)
+    plancher_ms_linux = 104   # PC : 58,5-66 fenêtre sans vidage, 60,5-83,4 avec, au 03/10 ;
+                              # les deux vCPU à 96 % (émulation), le rendu GL à 15 %
     delai_scene = 900
     dump_images = 60
 

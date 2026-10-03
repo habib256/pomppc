@@ -1,0 +1,9 @@
+# Références d'image de la matrice, hôte PC Linux (NVIDIA) (docs/matrice-jeux.md §3). Les fichiers
+# (vidage + image PPM) sont hors dépôt dans bench/matrice/ref-linux/<cellule>/ ;
+# ici l'empreinte et la validation à l'œil (validee=oui).
+cellule,image,sha256,fichiers,octets,date,validee,note
+mb-fen,1803,2c412fe648720df09202d0008a33ec5f74d6db7302763b7281327181fa7b41b4,7,8066143,2026-10-03,oui,créée par le tour 20261003-0000
+mb-pe,1705,794f8ef4f95d4a0d5af6671d5c7a1321f05b50501f92109a1e25801f63b1dc09,6,8066072,2026-10-03,oui,créée par le tour 20261003-0003
+ut-fen,188,e3ee21ecc6e23181e1b5f70116eb47b12db167a400d092f7f3a60d96106ae572,6,22574139,2026-10-03,oui,créée par le tour 20261003-0003
+ut-pe,344,6a970130f898d141eb33d0d74be8f05db41c2fa2fd24575a7fe86fe458da0069,4,7243908,2026-10-03,oui,créée par le tour 20261003-0003
+zen-fen,2507,796bda708350125beebd9e09b1dd3c8d5979cd915d6bf4ae11bac1f123dbf303,6,15669251,2026-10-03,oui,créée par le tour 20261003-0003

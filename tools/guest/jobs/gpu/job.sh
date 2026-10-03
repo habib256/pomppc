@@ -34,7 +34,7 @@
 #              clip, fogz, texpersp sans qu'aucune image soit fausse)
 set -e
 . ./lib.sh          # SRC, OUT, SDK, RES, EXT, plugin_layout
-SCENES=${SCENES:-"tri gouraud depth fill prims tex texfmt texpack texpersp comb mix state
+SCENES=${SCENES:-"tri gouraud depth fill prims tex texfmt texpack texpersp comb units mix state
   stencil depthrt varray varrayvbo game lit texgen clip fogz bigstrip dlist mixte fusion blendc logicop
   polymode stipple occl caps entry v15 tex3d texlod sepspec cube tex13 tex14 tcprobe gl15 texcache
   alpharep texcross readpack drawpack texdelmid vbocolor rawprim offset forkdraw"}

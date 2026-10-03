@@ -51,6 +51,7 @@ class Zenerchi(Jeu):
     famille = "pipeline fixe (AGL)"
     processus = "Zenerchi"
     plancher_ms = 6           # menu à 4,0-4,4 ms/image (fenêtre repérée sur la scène, 30/09)
+    plancher_ms_linux = 10    # PC : 6,8-7,9 ms/image au 03/10
     delai_scene = 300
     dump_images = 120
     non_automatise = {

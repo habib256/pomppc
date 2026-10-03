@@ -43,6 +43,7 @@ __pycache__/
 frontend/imgui/
 frontend/build/
 disks/*.lock
+disks/*.tablet-margin
 TEST/
 
 # copies du contrat faites par les Makefiles invités (source : patches/qgpu/)

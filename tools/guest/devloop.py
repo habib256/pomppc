@@ -332,7 +332,12 @@ def tablet_device(qemu):
     centre). TABLET_MARGIN=0 pour un invité 10.4.10 ou plus ancien ; un QEMU
     sans la propriété garde la tablette d'origine.
     """
-    margin = os.environ.get("TABLET_MARGIN", "15")
+    margin = os.environ.get("TABLET_MARGIN")
+    if margin is None:                  # par disque : <image>.tablet-margin (comme run_tiger.sh)
+        try:
+            margin = "".join(c for c in open(DISK + ".tablet-margin").read() if c.isdigit())
+        except OSError:
+            margin = "15"
     if margin in ("", "0"):
         return "usb-tablet"
     try:

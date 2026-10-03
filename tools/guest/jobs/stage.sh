@@ -9,7 +9,9 @@ set -e
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 NAME=$1; DEST=$2
 [ -n "$NAME" ] && [ -n "$DEST" ] || { echo "usage: stage.sh NOM DOSSIER"; exit 1; }
-rm -rf "$DEST"; mkdir -p "$DEST/src/kext" "$DEST/src/guest"
+rm -rf "$DEST"; mkdir -p "$DEST/src/kext" "$DEST/src/guest" "$DEST/src/patches/qgpu"
+# le contrat hôte/invité, que les Makefile invités prennent dans patches/qgpu/
+cp "$ROOT/patches/qgpu/qgpu_proto.h" "$ROOT/patches/qgpu/qgpu_abi.h" "$DEST/src/patches/qgpu/"
 cp "$ROOT/tools/guest/jobs/$NAME/job.sh" "$ROOT/tools/guest/jobs/lib.sh" "$DEST/"
 cp -R "$ROOT/kext/POMPPCGPU" "$DEST/src/kext/"
 cp -R "$ROOT/guest/gldriver" "$ROOT/guest/gltest" "$ROOT/guest/qgpu-test" \

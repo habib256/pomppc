@@ -867,7 +867,9 @@ static int prog_sync(PCtx *p);
    0 = prog_state pas encore passé), et première unité refusée : le device
    n'en tient que G.units au pipeline fixe, 16 sous GLSL. */
 #define SCAN_N(p)   ((p)->img_n ? (p)->img_n : GL_MAX_TEXUNITS)
-#define UNIT_LIM(p) (SCAN_N(p) > GL_MAX_TEXUNITS ? SCAN_N(p) : G.units)
+#define UNIT_LIM(p) (SCAN_N(p) > GL_MAX_TEXUNITS ? SCAN_N(p) : \
+                     (us_fp(p) ? G.units : G.fixed_units))
+static const struct PProg *us_fp(PCtx *p);      /* programme de fragments en vigueur */
 static unsigned char *gctx_of(PCtx *p);          /* sonde v16 dans close_raw */
 
 static void cube_probe(PCtx *p, const TexInfo *ti, const char *where);
@@ -1047,6 +1049,9 @@ static struct {
     int             v15;                /* v15 : SURF/DEPTH xfer 16 bits par l'hôte */
     int             units;              /* v17 : unités de texture que le device tient
                                            (8 ; 4 avant la v17). Au-delà : rendu d'Apple. */
+    int             fixed_units;        /* QGPU_CAP_FIXED4 : celles du pipeline FIXE (4 sur
+                                           un hôte NVIDIA, sinon units) ; sous programme ARB
+                                           ou GLSL, units reste la borne */
     /* ── v20 : rendu vers texture (Colin McRae, 27/09) ── */
     int             rect;               /* textures rectangle (v10 + QGPU_CAP_GL14) ;
                                            POMPPC_GL_RECT=0 les renvoie à Apple */
@@ -2154,6 +2159,12 @@ int pomppc_backend_units(void)
     return G.units ? G.units : 4;
 }
 
+/* QGPU_CAP_FIXED4 : unités du pipeline FIXE (GL_MAX_TEXTURE_UNITS annoncé). */
+int pomppc_backend_fixed_units(void)
+{
+    return G.fixed_units ? G.fixed_units : pomppc_backend_units();
+}
+
 int pomppc_accel_enabled(void)
 {
     return G.state > 0;
@@ -2233,6 +2244,11 @@ void pomppc_backend_init(void)
                plus ancien n'en tient que 4 : les clés, bits de format et
                matrices des unités 4..7 lui seraient refusés. */
             G.units = G.q.version >= 17 ? QGPU_MAX_UNITS : 4;
+            /* QGPU_CAP_FIXED4 (02/10/2026) : l'hôte (NVIDIA) n'a que 4 unités au
+               pipeline fixe et IGNORE les suivantes sans erreur. On annonce 4,
+               comme un GeForce FX ; un dessin fixe qui en allume une 5ᵉ va au
+               rendu d'Apple. Sous programme, les 8 restent. */
+            G.fixed_units = (G.q.caps & QGPU_CAP_FIXED4) && G.units > 4 ? 4 : G.units;
             /* v10 : l'hôte convertit les texels (TEX_IMAGE3). POMPPC_GL_TEX3=0
                revient à la conversion par l'invité, pour comparer. */
             G.v10 = G.q.version >= 10 &&

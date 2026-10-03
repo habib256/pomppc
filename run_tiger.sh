@@ -63,7 +63,8 @@
 #                             # ImGuiDock sélectionne explicitement la tablette
 #                             # pour éviter le repli vers la souris relative.
 #   TABLET_MARGIN=0 ./run_tiger.sh  # tablette sans la marge de Tiger 10.4.11 (défaut 15 :
-#                             # x-abs-margin, patches/usbhid/0001) — pour un invité ≤ 10.4.10
+#                             # x-abs-margin, patches/usbhid/0001) — pour un invité ≤ 10.4.10 ;
+#                             # ou une fois pour toutes : echo 0 > disks/tiger.qcow2.tablet-margin
 #   NOCD=1 ./run_tiger.sh     # omet le lecteur CD amovible vide 'gamecd'
 #   GLISO=0 ./run_tiger.sh    # omet l'ISO des sources du plugin GL (disks/pomppc-src.iso)
 #                             # dans 'gamecd' ; implicite avec le GPU (GLISO=1 pour forcer)
@@ -743,6 +744,11 @@ TABLET_DEFAULT=0
 # TABLET_MARGIN=0 pour un invité 10.4.10 ou plus ancien.
 if [ "${TABLET:-$TABLET_DEFAULT}" = 1 ]; then
   TABLET_DEV="usb-tablet,id=pointer0"
+  # Par disque : <disque>.tablet-margin (une ligne, 0 pour un invité ≤ 10.4.10 ;
+  # le tiger.qcow2 du PC est en 10.4.6 au 02/10/2026), sinon 15 (10.4.11).
+  if [ -z "${TABLET_MARGIN:-}" ] && [ -r "$DISK.tablet-margin" ]; then
+    TABLET_MARGIN="$(tr -dc 0-9 < "$DISK.tablet-margin")"
+  fi
   TABLET_MARGIN="${TABLET_MARGIN:-15}"
   if [ "$TABLET_MARGIN" != 0 ]; then
     if qemu_dev_has_prop "$BIN" usb-tablet x-abs-margin; then
