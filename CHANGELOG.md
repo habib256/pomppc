@@ -9,6 +9,12 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Flottant AltiVec à 4 voies sur hôte x86-64** (03/10, `patches/tcg/0020`, `docs/tcg-g4.md`
+  §26). `x-vfp-fast` laissait `vmaddfp`/`vnmsubfp` au logiciel sur x86 ; ils passent maintenant
+  par un `vfmadd231ps` (FMA3, sondé à l'exécution) et `vaddfp`/`vsubfp` par AVX, avec les mêmes
+  décisions par voie que l'arm64. `vfpproof.sh` (porté sur QEMU 11) : 648 M vecteurs, 0
+  divergence, même nombre de passages rapides que le M4 ; 9 mutants sur 9 détectés ; `vfptest`
+  invité à l'empreinte identique. Banc invité (i7-10700F) : 4 054 → 1 492 ms (−63 %).
 - **Matrice de jeux sur le PC Linux** (nuit du 02 au 03/10, `docs/matrice-jeux.md` §6 quater).
   Portage (rejoueur EGL, ImageMagick, `/proc/loadavg`, `matab.sh` sans chemin du M4), références
   et planchers par hôte (`references-linux.csv`, `plancher_ms_linux`). Cinq cellules (Marble Blast,
