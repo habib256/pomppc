@@ -9,6 +9,15 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Carillon de démarrage sous Linux** (03/10) : le frontend n'avait de lecteur que pour macOS
+  (`NSSound`) ; sous Linux un bouchon refusait de jouer. `StartupChimeLinux.cpp` joue le WAV ou
+  l'AIFF par PulseAudio (PipeWire compris), volume réglable pendant la lecture. Le son par défaut
+  (`disks/chimes/powermac3-1-4.2.8.wav`, extrait du firmware G4, local) reste à copier sur chaque
+  hôte ; `POMPPC_CHIME_FILE` en désigne un autre.
+- **VM quotidienne du PC en Tiger 10.4.11, DOOM 3 Demo installé** (03/10). Marble Blast 20,7,
+  Zenerchi 6,8, UT2004 57,6 ms/image (10.4.6 : 21,0 / 7,0 / 60,0) ; DOOM 3 150,5 ms/image en
+  fenêtre. Le combo remet la mise en veille à 10 min : l'invité endormi coupe ssh et fait
+  échouer DOOM 3 (`kCGLBadDisplay`) ; à couper par `pmset`. Lanceur `Doom 3 trace.app`.
 - **`x-sr-tlb` validé sur l'hôte x86-64** (03/10, `docs/tcg-g4.md` §27) : `x-sr-tlb-verify`
   sans divergence en SMP=1 (6,6 M contrôles) et en SMP=2 sous Marble Blast (2,2 M). Le PC est
   désormais au niveau du M4 sur toutes les accélérations TCG. La matrice sait profiler QEMU
