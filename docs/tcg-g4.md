@@ -2549,3 +2549,61 @@ matrice sont sur ce PC.
 
 Gain modeste et de même sens partout, comme sur le M4 (§23.5, §24.5) : le temps d'image n'en
 récupère qu'une partie, le reste est ailleurs (plugin, géométrie, rendu).
+
+---
+
+## 26. Le flottant AltiVec sur hôte x86-64 : `tcg/0020`
+
+03/10/2026, PC Linux (i7-10700F). Restait un écart entre les deux postes dans `x-vfp-fast`
+(§9) : sur x86, `vfp_fma4` était coupé en dur (`ok = false`, « softfloat peut y forcer la FMA
+logicielle ») ; `vmaddfp` et `vnmsubfp` repassaient donc toujours par quatre `float32_muladd`.
+D'où le « témoin » inchangé du §25.5 (`vfptest` banc `vmaddfp…` 766 → 764 ms).
+
+### 26.1 La conception
+
+- **La crainte d'origine ne tenait pas.** `force_soft_fma` (`fpu/softfloat.c`) n'est posé que
+  si le `fma()` de la libc est faux (glibc < 2.23) ; et même alors, ce n'est qu'une
+  optimisation de softfloat : chemin dur et chemin logiciel donnent le même résultat et les
+  mêmes drapeaux dans les conditions que `vfp_fma4` exige. Ce qui compte, c'est que notre FMA
+  à nous soit juste : une instruction FMA3 l'est par définition (un seul arrondi).
+- **Hôte x86-64 avec FMA3** (`CPUINFO_FMA`, sondé à l'exécution, ajouté par `tcg/0017`) :
+  `vfp_fma4_fma3` fait les quatre voies d'un `vfmadd231ps`, **et les mêmes décisions par
+  voie** que la version scalaire, prises sur les motifs binaires (`pcmpgtd`/`pcmpeqd`,
+  `movmskps`) : entrée nulle ou normale ssi `|x| = 0` ou `0x00800000 ≤ |x| ≤ 0x7f7fffff` ;
+  `|r| ≤ FLT_MIN` ssi `|r| ≤ 0x00800000` (`r` n'est jamais un NaN : entrées finies).
+  `vnmsubfp` : addende nié avant (`pxor`), résultat nié après, comme `float32_chs`.
+- **Hôte x86-64 avec AVX** : `vfp_add4_avx`, `vaddps`/`vsubps` et les mêmes tests, au lieu
+  de la boucle scalaire (déjà juste sur x86, elle n'était pas vectorisée).
+- **Sans FMA3** (ou i386) : FMA toujours au logiciel, comme avant (`fmaf()` serait l'émulation
+  lente de la libm). Sans AVX : la boucle scalaire d'avant.
+- Le tout reste **entre les marqueurs `vfp-fast`**, donc extrait tel quel par `vfpproof.sh`.
+
+### 26.2 La preuve
+
+| épreuve | résultat |
+|---|---|
+| `vfpproof.sh ~/src/qemu11 20000000` (le vrai softfloat de 11.1.2), chemin AVX + FMA3 | **648 454 144 vecteurs (2,59 G voies), 0 divergence** (résultats et `float_status` entier) ; **97 486 278 par le chemin rapide : exactement le compte du M4** (§9.3), donc les mêmes décisions voie par voie |
+| même banc, `VFPPROOF_NOX86=1` (chemin scalaire, 2 M) | 72 454 144 vecteurs, 0 divergence, 0 FMA par le chemin rapide (comme avant) |
+| `vfpproof-x86-mut.sh` : 9 mutants (seuil `< FLT_MIN`, `|r| ≤ FLT_MIN` admis en add, un seul zéro exempte, addende nul exempte en FMA, overflow oublié, dénormaux admis, infinis admis, résultat ou addende de `vnmsubfp` non niés) | **9/9 détectés** (6 à 777 618 divergences) |
+| `vfptest` invité (VM de dev, 10.4.11, `-faltivec`, NJ 0 et 1, catalogue 40³ et 2^22 vecteurs par NJ, plus `vperm`), référence contre 0020, options par défaut de `run_tiger.sh` | **empreinte identique** `bc13e93c39e62602` aux six démarrages |
+| clone de la référence (`patch --fuzz=0 --dry-run`) | 0020 posé sans fuzz après 0019 |
+
+`vfpproof.sh` suit QEMU 10+ : softfloat y est compilé une seule fois (`libcommon.a.p/`, plus
+`libqemu-ppc-softmmu.a.p/`), et un `float_status` sans motif de NaN par défaut fait échouer
+une assertion : le banc pose désormais les règles NaN de `cpu_init.c` (`-DVFPPROOF_QEMU10`).
+
+### 26.3 Gains
+
+A/B entrelacé avant/après (A B B A A B), VM de dev mono-cœur relancée à chaque fois, hôte au
+repos (charge ≤ 0,6 sauf le premier démarrage, 3,0 au lancement, retombée pendant le boot),
+binaire « avant » = la référence `~/src/qemu` (0017-0019, sans 0020), `BANC=50000000` :
+
+| banc invité | avant (3 tours) | après (3 tours) | écart |
+|---|---|---|---|
+| `vfptest` 50 M × (2 `vmaddfp` + `vaddfp` + `vsubfp`) | 4 054 ms (3 771..4 065) | **1 492 ms** (1 489..1 495) | **−63 %** (×2,7) |
+| `vfptest` 50 M × 4 `vperm` (témoin, non touché) | 470 ms (468..470) | 468 ms (467..476) | 0 |
+
+Le PC fait désormais ce banc en 1,49 s contre 1,31 s sur le M4 (§9.3) ; avant, 4,05 s. Attendu
+en jeu : les jeux du PC (Marble Blast, Zenerchi, UT2004) font peu d'AltiVec flottant (§2.2) ;
+c'est DOOM 3 (`idSIMD_AltiVec`, `vmaddfp` 4,3 % du temps sur le M4, §16) qui en profitera, quand
+il sera sur ce PC.

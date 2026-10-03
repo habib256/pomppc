@@ -23,6 +23,7 @@
 #   • base de temps par le compteur de l'hôte (x-tb-fast)  — patches/tcg/0015
 #   • flottant double natif (x-fp-native64)             — patches/tcg/0016
 #   • les trois mêmes sur hôte x86-64 (op ppc_fp32, TSC, vperm) — patches/tcg/0017-0019
+#   • flottant AltiVec à 4 voies par AVX/FMA3 sur hôte x86-64 — patches/tcg/0020
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -727,7 +728,7 @@ tcg/aarch64/tcg-target.c.inc pfp_zon64
 target/ppc/fpu_helper.c fpi_fp64
 target/ppc/cpu_init.c x-fp-native64
 TCG16_MARKERS
-  # --- 4 duodevicies. Les mêmes sur un hôte x86-64 (tcg/0017-0019) ---
+  # --- 4 duodevicies. Les mêmes sur un hôte x86-64 (tcg/0017-0020) ---
   # patches/tcg/0017, docs/tcg-g4.md §25 : l'émetteur x86_64 de l'op ppc_fp32
   # (x-fp-native, x-fp-native64 : VEX et FMA3, sondés à l'exécution) ; 0018 :
   # x-tb-fast par le TSC invariant (Linux) ; 0019 : vperm par pshufb (AVX).
@@ -743,6 +744,12 @@ TCG16_MARKERS
     echo "▶ patch TCG : vperm par pshufb sur hôte x86-64 (x-vperm-fast)"
     patch_strict "$ROOT/patches/tcg/0019-ppc-vperm-fast-x86.patch"
   fi
+  # 0020 : vaddfp/vsubfp (AVX) et vmaddfp/vnmsubfp (FMA3) à 4 voies d'un coup ;
+  # sans lui, x-vfp-fast n'accélérait pas les FMA AltiVec sur x86 (docs §26).
+  if ! grep -q "vfp_fma4_fma3" target/ppc/int_helper.c; then
+    echo "▶ patch TCG : flottant AltiVec par AVX/FMA3 sur hôte x86-64 (x-vfp-fast)"
+    patch_strict "$ROOT/patches/tcg/0020-ppc-vfp-fast-x86.patch"
+  fi
   for f in host/include/x86_64/host/cpuinfo.h hw/ppc/ppc.c include/qemu/cpuid.h \
            include/qemu/timer.h target/ppc/cpu.h target/ppc/cpu_init.c \
            target/ppc/fpu_helper.c target/ppc/int_helper.c target/ppc/translate/fp-impl.c.inc \
@@ -754,13 +761,14 @@ TCG16_MARKERS
   while read -r f m; do
     [ -z "$f" ] && continue
     grep -q "$m" "$f" || {
-      echo "⚠ patch tcg 0017-0019 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+      echo "⚠ patch tcg 0017-0020 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
   done <<'TCG17_MARKERS'
 tcg/x86_64/tcg-target.c.inc tcg_out_ppc_fp32_slow_path
 tcg/tcg-has.h TCG_TARGET_PPC_FP32_IMPL
 util/cpuinfo-i386.c CPUINFO_FMA
 util/qemu-timer-common.c qemu_raw_clock_mult
 target/ppc/int_helper.c vperm_fast_avx
+target/ppc/int_helper.c vfp_fma4_fma3
 TCG17_MARKERS
 fi
 

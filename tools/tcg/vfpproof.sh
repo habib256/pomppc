@@ -15,11 +15,15 @@ mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 sed -n '/vfp-fast: début/,/vfp-fast: fin/p' "$SRC/target/ppc/int_helper.c" > "$OUT/vfpproof-fast.h"
 grep -q "vfp_fma4" "$OUT/vfpproof-fast.h" || { echo "arbre sans le patch 0003 ($SRC)" >&2; exit 2; }
-OBJ="$SRC/build/libqemu-ppc-softmmu.a.p/fpu_softfloat.c.o"
-FLAGS="$(python3 - "$SRC/build/compile_commands.json" <<'PY'
+# QEMU 9.2 : softfloat est compilé par cible ; 10 et plus : une fois, dans libcommon
+SFO=libqemu-ppc-softmmu.a.p/fpu_softfloat.c.o
+V10=
+[ -f "$SRC/build/$SFO" ] || { SFO=libcommon.a.p/fpu_softfloat.c.o; V10=-DVFPPROOF_QEMU10; }
+OBJ="$SRC/build/$SFO"
+FLAGS="$(python3 - "$SRC/build/compile_commands.json" "$SFO" <<'PY'
 import json, shlex, sys
 for e in json.load(open(sys.argv[1])):
-    if e['output'].endswith('libqemu-ppc-softmmu.a.p/fpu_softfloat.c.o'):
+    if e['output'] == sys.argv[2]:
         t = shlex.split(e['command']); out = []; i = 0
         while i < len(t):
             if t[i].startswith(('-I', '-iquote', '-isystem', '-D', '-include')):
@@ -30,6 +34,6 @@ for e in json.load(open(sys.argv[1])):
         print(' '.join(shlex.quote(x) for x in out)); break
 PY
 )"
-( cd "$SRC/build" && eval cc -O2 -Wall -fno-strict-aliasing "$FLAGS" -I"$OUT" \
+( cd "$SRC/build" && eval cc -O2 -Wall -fno-strict-aliasing $V10 "$FLAGS" -I"$OUT" \
     "$HERE/vfpproof.c" "$OBJ" -lm "$(pkg-config --libs glib-2.0)" -lpthread -o "$OUT/vfpproof" )
 time "$OUT/vfpproof" "$N"

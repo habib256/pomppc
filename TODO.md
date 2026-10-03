@@ -182,8 +182,9 @@ Dans l'ordre des gains estimés. Profil du 01/10 et lecture : `docs/vitesse-prof
 - [ ] **[Distribution] 1.0 = installation reproductible** : CD ou paquet, `install.sh` qui
   reconstruit kext et plugin, disque quotidien recréable depuis l'ISO, matrice verte à chaque commit.
 - [ ] **[Distribution] Firmware reproductible** : `openbios-smp-screamer.elf` est livré en binaire.
-- [ ] **[Hôtes] Hôte PC x86** : `x-fast-fp` et `x-sr-tlb` jamais validés sur x86
-  (`docs/plan-traducteur-rapide.md` §1.3) ; `x-fp-native` n'existe que pour arm64.
+- [ ] **[Hôtes] Hôte PC x86** : `x-sr-tlb` jamais validé à part sur x86. Le reste est au
+  niveau de l'arm64 : `x-fast-fp` (fpcheck, 19/09), `x-fp-native`/`x-fp-native64`, `x-tb-fast`,
+  `vperm` (`tcg/0017`-`0019`, `docs/tcg-g4.md` §25), `x-vfp-fast` FMA comprise (`tcg/0020`, §26).
 - [ ] **[Hôtes] Un seul disque, deux hôtes** : `tiger.raw` partagé par USB entre le Mac et le PC.
 - [ ] **[TCG] `tlbie` en SMP stock** : défaut de QEMU 9.2, corrigé par `x-sr-tlb` ; à signaler en amont.
 

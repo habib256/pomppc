@@ -17,13 +17,16 @@
  *
  * États : no_hardfloat 0/1 × inexact déjà posé ou non × NJ (flush_to_zero et
  * flush_inputs_to_zero) 0/1 — les 8 combinaisons, arrondi au plus proche
- * (AltiVec n'a que celui-là), règle NaN « ab » comme cpu_init.c.
+ * (AltiVec n'a que celui-là), règles NaN comme cpu_init.c.
  * Opérations : vaddfp, vsubfp, vmaddfp, vnmsubfp.
  * Entrées : (1) catalogue de 64 valeurs limites, croisé en entier sur une voie
  * (64^2 pour add/sub, 64^3 pour les FMA) avec les autres voies normales ;
  * (2) vecteurs aléatoires dont chaque voie tire une classe (normal « doux »,
  * exposants extrêmes pour les débordements, annulations exactes a*c = -b,
  * zéros signés, dénormaux, infinis, NaN calmes et signalants).
+ *
+ * Hôte x86-64 : les voies AVX/FMA3 de tcg/0020 si le processeur les a ;
+ * VFPPROOF_NOX86=1 prouve le chemin scalaire (add/sub seuls, FMA logicielle).
  *
  * Usage : vfpproof [vecteurs aléatoires par (op, état)] [graine]
  */
@@ -32,6 +35,12 @@
 #include <float.h>
 #include <math.h>
 #include <pthread.h>
+
+#if defined(__x86_64__)
+#include <immintrin.h>
+#include "host/cpuinfo.h"
+unsigned cpuinfo;                 /* posé par main(), comme cpuinfo_init() */
+#endif
 
 #include "vfpproof-fast.h"    /* vfp_can_use_fpu, vfp_zon, vfp_add4, vfp_fma4 */
 
@@ -44,6 +53,11 @@ static float_status mkstatus(int cfg)
     memset(&s, 0, sizeof s);
     set_float_rounding_mode(float_round_nearest_even, &s);
     set_float_2nan_prop_rule(float_2nan_prop_ab, &s);
+#ifdef VFPPROOF_QEMU10    /* QEMU 10+ : règles NaN explicites, comme cpu_init.c */
+    set_float_3nan_prop_rule(float_3nan_prop_acb, &s);
+    set_float_infzeronan_rule(float_infzeronan_dnan_never, &s);
+    set_float_default_nan_pattern(0b01000000, &s);
+#endif
     s.no_hardfloat = cfg & 1;
     if (cfg & 2) {
         s.float_exception_flags = float_flag_inexact;
@@ -230,6 +244,17 @@ int main(int argc, char **argv)
     Job jobs[NOPS * 8];
     pthread_t th[NOPS * 8];
     uint64_t tc = 0, tf = 0, tb = 0;
+
+#if defined(__x86_64__)
+    if (!getenv("VFPPROOF_NOX86")) {
+        __builtin_cpu_init();
+        cpuinfo = (__builtin_cpu_supports("avx") ? CPUINFO_AVX1 : 0) |
+                  (__builtin_cpu_supports("avx") && __builtin_cpu_supports("fma")
+                   ? CPUINFO_FMA : 0);
+    }
+    printf("chemin %s\n", cpuinfo & CPUINFO_FMA ? "AVX + FMA3 (tcg/0020)" :
+           cpuinfo & CPUINFO_AVX1 ? "AVX, FMA logicielle" : "scalaire");
+#endif
 
     for (int op = 0; op < NOPS; op++) {
         for (int cfg = 0; cfg < 8; cfg++) {
