@@ -24,6 +24,7 @@
 #   • flottant double natif (x-fp-native64)             — patches/tcg/0016
 #   • les trois mêmes sur hôte x86-64 (op ppc_fp32, TSC, vperm) — patches/tcg/0017-0019
 #   • flottant AltiVec à 4 voies par AVX/FMA3 sur hôte x86-64 — patches/tcg/0020
+#   • AltiVec en ligne, flottant AltiVec natif, mftb sans div, JIT à 2 Gio — patches/tcg/0021-0024
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -770,6 +771,52 @@ util/qemu-timer-common.c qemu_raw_clock_mult
 target/ppc/int_helper.c vperm_fast_avx
 target/ppc/int_helper.c vfp_fma4_fma3
 TCG17_MARKERS
+  # --- 4 vicies. DOOM 3 sur hôte x86-64 (tcg/0021-0024), docs/tcg-g4.md §28 ---
+  # 0021 : vsldoi, vmrghw/vmrglw, stve[bhw]x en ops TCG (x-vmx-inline) ; 0022 :
+  # l'op TCG ppc_vfp, vaddfp/vsubfp/vmaddfp/vnmsubfp par le FPU de l'hôte dans le
+  # code généré (x-vfp-native ; émetteurs x86_64 et aarch64) ; 0023 : mftb divise
+  # par la constante 40. Propriétés éteintes par défaut (0023 : sous x-tb-fast).
+  if ! grep -q "x-vmx-inline" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : AltiVec en ligne (x-vmx-inline)"
+    patch_strict "$ROOT/patches/tcg/0021-ppc-vmx-inline.patch"
+  fi
+  if ! grep -q "TCG_TARGET_PPC_VFP_IMPL" tcg/tcg-has.h; then
+    echo "▶ patch TCG : flottant AltiVec dans le code généré (x-vfp-native)"
+    patch_strict "$ROOT/patches/tcg/0022-tcg-vfp-native.patch"
+  fi
+  if ! grep -q "POMPPC tcg/0023" hw/ppc/ppc.c; then
+    echo "▶ patch TCG : mftb sans division 64 bits (x-tb-fast)"
+    patch_strict "$ROOT/patches/tcg/0023-ppc-tb-div.patch"
+  fi
+  # 0024 : tampon du JIT à moins de 2 Gio du texte sous Linux x86-64 (x-jit-rel32)
+  if ! grep -q "tcg_jit_rel32" tcg/region.c; then
+    echo "▶ patch TCG : tampon du JIT près du texte sous Linux x86-64 (x-jit-rel32)"
+    patch_strict "$ROOT/patches/tcg/0024-tcg-jit-rel32.patch"
+  fi
+  for f in accel/tcg/tcg-all.c include/tcg/startup.h tcg/region.c \
+           hw/ppc/ppc.c include/tcg/tcg-op-common.h include/tcg/tcg-opc.h \
+           target/ppc/cpu.h target/ppc/cpu_init.c target/ppc/helper.h \
+           target/ppc/int_helper.c target/ppc/mem_helper.c target/ppc/translate.c \
+           target/ppc/translate/vmx-impl.c.inc tcg/aarch64/tcg-target-has.h \
+           tcg/aarch64/tcg-target.c.inc tcg/optimize.c tcg/tcg-has.h tcg/tcg-op.c \
+           tcg/tcg.c tcg/x86_64/tcg-target-has.h tcg/x86_64/tcg-target.c.inc; do
+    rm -f "$f.orig"
+  done
+  while read -r f m; do
+    [ -z "$f" ] && continue
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0021-0024 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG21_MARKERS'
+target/ppc/cpu_init.c x-vmx-inline
+target/ppc/mem_helper.c helper_vmx_verify_stve
+target/ppc/cpu_init.c x-vfp-native
+tcg/x86_64/tcg-target.c.inc tcg_out_ppc_vfp_slow_path
+tcg/aarch64/tcg-target.c.inc tcg_out_ppc_vfp_slow_path
+tcg/tcg.c tcg_reg_alloc_ppc_vfp
+hw/ppc/ppc.c POMPPC tcg/0023
+tcg/region.c tcg_jit_rel32
+accel/tcg/tcg-all.c x-jit-rel32
+TCG21_MARKERS
 fi
 
 # --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---
@@ -818,7 +865,10 @@ if [ -n "${QEMU_OPT:-}" ]; then
       lto)     OPT_CONF+=(--enable-lto -Dbackend_max_links=1 -Db_lto_threads="${LTO_JOBS:-6}") ;;
       pgo-gen) OPT_CFLAGS="$OPT_CFLAGS -fprofile-generate=$PGO_DIR -fprofile-update=prefer-atomic"
                OPT_LDFLAGS="$OPT_LDFLAGS -fprofile-generate=$PGO_DIR" ;;
-      pgo)     OPT_CFLAGS="$OPT_CFLAGS -fprofile-use=$PGO_DIR -fprofile-partial-training -Wno-missing-profile"
+      # -Wno-error=coverage-mismatch : un profil pris sur un arbre voisin (PGO_DIR
+      # renommé) sert aux fichiers inchangés ; ceux qu'un patch a changés sont
+      # compilés sans profil au lieu d'arrêter la construction.
+      pgo)     OPT_CFLAGS="$OPT_CFLAGS -fprofile-use=$PGO_DIR -fprofile-partial-training -Wno-missing-profile -Wno-error=coverage-mismatch"
                OPT_LDFLAGS="$OPT_LDFLAGS -fprofile-use=$PGO_DIR" ;;
       *) echo "⚠ QEMU_OPT : variante inconnue « $o » (native, nohard, lto, pgo-gen, pgo)" >&2; exit 1 ;;
     esac

@@ -1,0 +1,1005 @@
+diff --git a/include/tcg/tcg-op-common.h b/include/tcg/tcg-op-common.h
+index ef80ecf..a897e0b 100644
+--- a/include/tcg/tcg-op-common.h
++++ b/include/tcg/tcg-op-common.h
+@@ -63,6 +63,12 @@ bool tcg_ppc_fp32_supported(void);
+ void tcg_gen_ppc_fp32(TCGv_i64 r, TCGv_i64 nf, TCGv_i64 a, TCGv_i64 b,
+                       TCGv_i64 c, TCGv_i64 fpscr, unsigned sel,
+                       const void *slow, uint64_t flags_st);
++/* POMPPC tcg/0022: see INDEX_op_ppc_vfp in tcg-opc.h */
++bool tcg_ppc_vfp_supported(void);
++void tcg_gen_ppc_vfp(unsigned kind, intptr_t vd, intptr_t va, intptr_t vb,
++                     intptr_t vc, const void *slow,
++                     intptr_t g0_ofs, uint64_t g0_mask, uint64_t g0_val,
++                     intptr_t g1_ofs, uint64_t g1_mask, uint64_t g1_val);
+ 
+ /**
+  * tcg_gen_goto_tb() - output goto_tb TCG operation
+diff --git a/include/tcg/tcg-opc.h b/include/tcg/tcg-opc.h
+index 2bc8de3..619b633 100644
+--- a/include/tcg/tcg-opc.h
++++ b/include/tcg/tcg-opc.h
+@@ -134,6 +134,19 @@ DEF(qemu_st2, 0, 3, 1, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_INT
+  * Always TCG_TYPE_I64; only emitted when TCG_TARGET_HAS_ppc_fp32.
+  */
+ DEF(ppc_fp32, 2, 4, 3, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_INT)
++/*
++ * POMPPC tcg/0022 (x-vfp-native): a PowerPC AltiVec vaddfp, vsubfp,
++ * vmaddfp or vnmsubfp done by the host FPU on the four lanes inline when
++ * the short path of x-vfp-fast applies (and no lane overflows), else by a
++ * call to the original helper, out of line (like the qemu_ld/st slow
++ * paths).  No TCG operand: the AVRs and vec_status live in env, outside the
++ * TCG globals.  Constants: kind, env offsets of vD vA vB vC, the helper, and
++ * the gate: two (env offset, 64-bit mask, value) windows on vec_status, a
++ * window whose mask is 0 being skipped.  Allocated as a
++ * call that touches no global (tcg_reg_alloc_ppc_vfp), emitted only when
++ * TCG_TARGET_HAS_ppc_vfp.
++ */
++DEF(ppc_vfp, 0, 0, 12, TCG_OPF_NOT_PRESENT | TCG_OPF_CALL_CLOBBER)
+ 
+ /* Host vector support.  */
+ 
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index deb9b61..692ecc1 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1381,6 +1381,26 @@ struct CPUArchState {
+     bool vmx_inline;
+     bool vmx_verify;
+     ppc_avr_t vmxv_in[2];       /* x-vmx-verify: the operands, saved */
++    /*
++     * x-vfp-native (POMPPC tcg/0022, needs x-vfp-fast and a TCG backend
++     * with INDEX_op_ppc_vfp: x86_64 with AVX and FMA3, aarch64):
++     * vaddfp/vsubfp/vmaddfp/vnmsubfp done by the host FPU in the generated
++     * code when the short path of x-vfp-fast applies and no lane overflows,
++     * the original helper called out of line otherwise.  vfn_gate_*:
++     * vfp_can_use_fpu(&vec_status) as a mask and a value on each of two
++     * 64-bit windows of the float_status, its first and its last 8 bytes
++     * (cpu_init.c, ppc_vfn_gate_init()); vfn_gate_ok false when it cannot
++     * be expressed so.
++     * x-vfp-native-verify: proof mode, each op re-done by the per-lane loop
++     * of softfloat from the saved operands and vec_status (vfn_*).
++     */
++    bool vfp_native;
++    bool vfp_native_verify;
++    bool vfn_gate_ok;
++    uint32_t vfn_gate_ofs[2];   /* window offsets in the float_status */
++    uint64_t vfn_gate_mask[2], vfn_gate_val[2];
++    ppc_avr_t vfn_in[3];
++    float_status vfn_vs;
+     bool sr_snap_ok[2];
+     uint32_t sr_gen;
+     uint32_t sr_snap_gen[2];
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index e10c282..e4446e2 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -163,6 +163,16 @@ static const Property powerpc_cpu_properties[] = {
+      */
+     DEFINE_PROP_BOOL("x-vmx-inline", PowerPCCPU, env.vmx_inline, false),
+     DEFINE_PROP_BOOL("x-vmx-verify", PowerPCCPU, env.vmx_verify, false),
++    /*
++     * POMPPC tcg/0022.  x-vfp-native: vaddfp/vsubfp/vmaddfp/vnmsubfp by the
++     * host FPU in the generated code (TCG op ppc_vfp: x86_64 with AVX and
++     * FMA3, aarch64), the original helper out of line when the short path
++     * of x-vfp-fast does not apply or a lane overflows; needs x-vfp-fast.
++     * x-vfp-native-verify: proof mode (stderr summary).  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-vfp-native", PowerPCCPU, env.vfp_native, false),
++    DEFINE_PROP_BOOL("x-vfp-native-verify", PowerPCCPU, env.vfp_native_verify,
++                     false),
+     /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
+     DEFINE_PROP_UINT32("x-sr-tlb-verify", PowerPCCPU, env.sr_verify, 0),
+ };
+@@ -7021,6 +7031,94 @@ static void init_ppc_proc(PowerPCCPU *cpu)
+ }
+ 
+ 
++/* vfp-native-gate: début (extrait tel quel par POMPPC tools/tcg/vfpproof.sh) */
++/*
++ * POMPPC tcg/0022 (x-vfp-native): vfp_can_use_fpu() of int_helper.c,
++ *   !no_hardfloat && (flags & inexact) && rounding == nearest_even &&
++ *   !rebias_overflow && !rebias_underflow,
++ * as ((window 0 & mask0) == val0 && (window 1 & mask1) == val1), the two
++ * windows being the first and the last 8 bytes of the float_status (they
++ * overlap when it is smaller than 16 bytes: 12 with GCC on x86_64, with
++ * no_hardfloat in byte 8), for the generated code.  The bit-field layout
++ * is the compiler's: each field is set alone in a zeroed float_status and
++ * its bytes read back; a field goes to the first window that holds all of
++ * them.  If one fits in neither, x-vfp-native is left off (vfn_gate_ok).
++ */
++static bool vfn_field(const float_status *f, uint64_t *m)
++{
++    uint8_t raw[sizeof(float_status)];
++    size_t sz = sizeof(raw), lo = sz, hi = 0;
++    uint64_t w;
++
++    memcpy(raw, f, sz);
++    for (size_t i = 0; i < sz; i++) {
++        if (raw[i]) {
++            lo = MIN(lo, i);
++            hi = i;
++        }
++    }
++    if (lo == sz) {
++        return false;
++    }
++    if (hi < 8) {
++        memcpy(&w, raw, 8);
++        m[0] |= w;
++        return true;
++    }
++    if (lo >= sz - 8) {
++        memcpy(&w, raw + sz - 8, 8);
++        m[1] |= w;
++        return true;
++    }
++    return false;
++}
++
++static void ppc_vfn_gate_init(CPUPPCState *env)
++{
++    float_status f;
++    uint8_t raw[sizeof(float_status)];
++    uint64_t m[2] = { 0, 0 }, v;
++    bool ok = sizeof(float_status) >= 8 && sizeof(float_status) <= 16;
++
++    if (ok) {
++        memset(&f, 0, sizeof(f));
++        f.no_hardfloat = 1;
++        ok &= vfn_field(&f, m);
++        memset(&f, 0, sizeof(f));
++        f.float_exception_flags = float_flag_inexact;
++        ok &= vfn_field(&f, m);
++        memset(&f, 0, sizeof(f));
++        f.float_rounding_mode = 7;              /* the whole 3-bit field */
++        ok &= vfn_field(&f, m);
++        memset(&f, 0, sizeof(f));
++        f.rebias_overflow = 1;
++        ok &= vfn_field(&f, m);
++        memset(&f, 0, sizeof(f));
++        f.rebias_underflow = 1;
++        ok &= vfn_field(&f, m);
++    }
++    env->vfn_gate_ok = ok;
++    if (!ok) {
++        if (env->vfp_native) {
++            warn_report("x-vfp-native: float_status layout not supported, "
++                        "the original helpers are used");
++        }
++        return;
++    }
++    memset(&f, 0, sizeof(f));
++    f.float_exception_flags = float_flag_inexact;
++    f.float_rounding_mode = float_round_nearest_even;
++    memcpy(raw, &f, sizeof(raw));
++    env->vfn_gate_ofs[0] = 0;
++    env->vfn_gate_ofs[1] = sizeof(float_status) - 8;
++    for (int k = 0; k < 2; k++) {
++        memcpy(&v, raw + env->vfn_gate_ofs[k], 8);
++        env->vfn_gate_mask[k] = m[k];
++        env->vfn_gate_val[k] = v & m[k];
++    }
++}
++/* vfp-native-gate: fin */
++
+ static void ppc_cpu_realize(DeviceState *dev, Error **errp)
+ {
+     CPUState *cs = CPU(dev);
+@@ -7041,6 +7139,7 @@ static void ppc_cpu_realize(DeviceState *dev, Error **errp)
+             return;
+         }
+     }
++    ppc_vfn_gate_init(env);
+ 
+     cpu_exec_realizefn(cs, &local_err);
+     if (local_err != NULL) {
+diff --git a/target/ppc/helper.h b/target/ppc/helper.h
+index fce756b..f5fcfc3 100644
+--- a/target/ppc/helper.h
++++ b/target/ppc/helper.h
+@@ -300,6 +300,9 @@ DEF_HELPER_3(STVEWX, void, env, avr, tl)
+ /* POMPPC tcg/0021: x-vmx-verify */
+ DEF_HELPER_FLAGS_2(vmx_verify, TCG_CALL_NO_RWG, void, env, i32)
+ DEF_HELPER_FLAGS_4(vmx_verify_stve, TCG_CALL_NO_RWG, void, env, i32, tl, i64)
++/* POMPPC tcg/0022: x-vfp-native-verify */
++DEF_HELPER_FLAGS_2(vfn_save, TCG_CALL_NO_RWG, void, env, i32)
++DEF_HELPER_FLAGS_2(vfn_verify, TCG_CALL_NO_RWG, void, env, i32)
+ #if defined(TARGET_PPC64)
+ DEF_HELPER_4(LXVL, void, env, tl, vsr, tl)
+ DEF_HELPER_4(LXVLL, void, env, tl, vsr, tl)
+diff --git a/target/ppc/int_helper.c b/target/ppc/int_helper.c
+index 4afc7c6..c7ee168 100644
+--- a/target/ppc/int_helper.c
++++ b/target/ppc/int_helper.c
+@@ -776,6 +776,101 @@ VARITHFPFMA(maddfp, 0);
+ VARITHFPFMA(nmsubfp, float_muladd_negate_result | float_muladd_negate_c);
+ #undef VARITHFPFMA
+ 
++/*
++ * POMPPC tcg/0022, x-vfp-native-verify: before each INDEX_op_ppc_vfp the
++ * operands and vec_status are saved (helper_vfn_save); after it, the
++ * instruction is re-done from them by the per-lane loop of softfloat, as
++ * QEMU without x-vfp-fast does it, and vD and the whole vec_status must be
++ * equal.  On a divergence the reference values are written back.  Also
++ * counts the operations the inline short path should have taken
++ * (vfp_add4()/vfp_fma4() succeed and no lane is infinite).  Summary on
++ * stderr every 2^26 checks and at exit.
++ */
++enum { VFN_ADD, VFN_SUB, VFN_MADD, VFN_NMSUB };     /* vmx-impl.c.inc */
++static uint64_t vfn_n, vfn_short, vfn_bad;
++static bool vfn_atexit;
++
++static void vfn_report(void)
++{
++    fprintf(stderr, "vfp-native-verify: %" PRIu64 " opérations vérifiées "
++            "(%" PRIu64 " prédites par le chemin court), %" PRIu64
++            " divergences\n", qatomic_read(&vfn_n), qatomic_read(&vfn_short),
++            qatomic_read(&vfn_bad));
++}
++
++void helper_vfn_save(CPUPPCState *env, uint32_t regs)
++{
++    env->vfn_in[0] = *cpu_avr_ptr(env, regs & 31);
++    env->vfn_in[1] = *cpu_avr_ptr(env, (regs >> 8) & 31);
++    env->vfn_in[2] = *cpu_avr_ptr(env, (regs >> 16) & 31);
++    env->vfn_vs = env->vec_status;
++}
++
++void helper_vfn_verify(CPUPPCState *env, uint32_t desc)
++{
++    int kind = desc & 3, rd = (desc >> 8) & 31, i;
++    ppc_avr_t *a = &env->vfn_in[0], *b = &env->vfn_in[1], *c = &env->vfn_in[2];
++    ppc_avr_t ref, fast, *r = cpu_avr_ptr(env, rd);
++    float_status s = env->vfn_vs, sf = env->vfn_vs;
++    bool ok, bad;
++
++    for (i = 0; i < ARRAY_SIZE(ref.f32); i++) {
++        switch (kind) {
++        case VFN_ADD:
++            ref.f32[i] = float32_add(a->f32[i], b->f32[i], &s);
++            break;
++        case VFN_SUB:
++            ref.f32[i] = float32_sub(a->f32[i], b->f32[i], &s);
++            break;
++        case VFN_MADD:
++            ref.f32[i] = float32_muladd(a->f32[i], c->f32[i], b->f32[i], 0, &s);
++            break;
++        default:
++            ref.f32[i] = float32_muladd(a->f32[i], c->f32[i], b->f32[i],
++                                        float_muladd_negate_result |
++                                        float_muladd_negate_c, &s);
++            break;
++        }
++    }
++    /* the inline short path: x-vfp-fast's, without an infinite lane */
++    if (kind <= VFN_SUB) {
++        ok = env->vfp_fast &&
++             vfp_add4(&sf, fast.u32, a->u32, b->u32, kind == VFN_SUB);
++    } else {
++        ok = env->vfp_fast &&
++             vfp_fma4(&sf, fast.u32, a->u32, b->u32, c->u32,
++                      kind == VFN_MADD ? 0 : float_muladd_negate_result |
++                                             float_muladd_negate_c);
++    }
++    for (i = 0; ok && i < 4; i++) {
++        ok = (fast.u32[i] & 0x7fffffff) != 0x7f800000;
++    }
++    if (ok) {
++        qatomic_inc(&vfn_short);
++    }
++    bad = ref.VsrD(0) != r->VsrD(0) || ref.VsrD(1) != r->VsrD(1) ||
++          memcmp(&s, &env->vec_status, sizeof(s));
++    if (bad) {
++        if (qatomic_fetch_inc(&vfn_bad) < 20) {
++            fprintf(stderr, "vfp-native-verify: op %d v%d : %08x %08x %08x %08x"
++                    " flags %04x, attendu %08x %08x %08x %08x flags %04x\n",
++                    kind, rd, r->VsrW(0), r->VsrW(1), r->VsrW(2), r->VsrW(3),
++                    get_float_exception_flags(&env->vec_status),
++                    ref.VsrW(0), ref.VsrW(1), ref.VsrW(2), ref.VsrW(3),
++                    get_float_exception_flags(&s));
++        }
++        *r = ref;
++        env->vec_status = s;
++    }
++    if (!qatomic_read(&vfn_atexit)) {
++        qatomic_set(&vfn_atexit, true);
++        atexit(vfn_report);
++    }
++    if ((qatomic_fetch_inc(&vfn_n) & ((1u << 26) - 1)) == 0) {
++        vfn_report();
++    }
++}
++
+ #define VARITHSAT_CASE(type, op, cvt, element)                          \
+     {                                                                   \
+         type result = (type)a->element[i] op (type)b->element[i];       \
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+index 25631aa..e2c7caa 100644
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -176,6 +176,8 @@ struct DisasContext {
+     bool lfs_inline;
+     bool vperm_fast;
+     bool vmx_inline, vmx_verify; /* x-vmx-inline, x-vmx-verify (tcg/0021) */
++    bool vfp_native, vfp_nverify; /* x-vfp-native(-verify) (tcg/0022) */
++    const CPUPPCState *env;     /* x-vfp-native: its gate (tcg/0022) */
+     bool need_access_type;
+     int mem_idx;
+     int access_type;
+@@ -6575,6 +6577,10 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+     ctx->vperm_fast = env->vperm_fast;
+     ctx->vmx_inline = env->vmx_inline;
+     ctx->vmx_verify = env->vmx_inline && env->vmx_verify;
++    ctx->vfp_native = env->vfp_native && env->vfp_fast &&
++                      env->vfn_gate_ok && tcg_ppc_vfp_supported();
++    ctx->vfp_nverify = ctx->vfp_native && env->vfp_native_verify;
++    ctx->env = env;
+     ctx->lazy_tlb_flush = env->mmu_model == POWERPC_MMU_32B
+         || env->mmu_model & POWERPC_MMU_64;
+ 
+diff --git a/target/ppc/translate/vmx-impl.c.inc b/target/ppc/translate/vmx-impl.c.inc
+index 6c91ad8..a7edfb0 100644
+--- a/target/ppc/translate/vmx-impl.c.inc
++++ b/target/ppc/translate/vmx-impl.c.inc
+@@ -1192,8 +1192,57 @@ GEN_VXFORM_ENV(vsum4sbs, 4, 28);
+ GEN_VXFORM_ENV(vsum4shs, 4, 25);
+ GEN_VXFORM_ENV(vsum2sws, 4, 26);
+ GEN_VXFORM_ENV(vsumsws, 4, 30);
+-GEN_VXFORM_ENV(vaddfp, 5, 0);
+-GEN_VXFORM_ENV(vsubfp, 5, 1);
++/*
++ * x-vfp-native (POMPPC tcg/0022): vaddfp/vsubfp/vmaddfp/vnmsubfp as one
++ * INDEX_op_ppc_vfp: the short path of x-vfp-fast by the host FPU in the
++ * generated code, the original helper out of line otherwise (same results,
++ * same vec_status).  Kinds as in tcg/<host>/tcg-target.c.inc.
++ * x-vfp-native-verify: operands and vec_status saved before, the op re-done
++ * after by the per-lane loop of softfloat and compared (int_helper.c).
++ */
++enum { PVF_ADD, PVF_SUB, PVF_MADD, PVF_NMSUB };
++
++static void gen_vfp_native(DisasContext *ctx, int kind, int rd, int ra,
++                           int rb, int rc, const void *helper)
++{
++    const CPUPPCState *env = ctx->env;
++    intptr_t vs = offsetof(CPUPPCState, vec_status);
++
++    if (ctx->vfp_nverify) {
++        gen_helper_vfn_save(tcg_env, tcg_constant_i32(ra | rb << 8 | rc << 16));
++    }
++    tcg_gen_ppc_vfp(kind, avr_full_offset(rd), avr_full_offset(ra),
++                    avr_full_offset(rb), avr_full_offset(rc), helper,
++                    vs + env->vfn_gate_ofs[0], env->vfn_gate_mask[0],
++                    env->vfn_gate_val[0],
++                    vs + env->vfn_gate_ofs[1], env->vfn_gate_mask[1],
++                    env->vfn_gate_val[1]);
++    if (ctx->vfp_nverify) {
++        gen_helper_vfn_verify(tcg_env, tcg_constant_i32(kind | rd << 8));
++    }
++}
++
++#define GEN_VXFORM_VFP(name, kind)                                      \
++static void glue(gen_, name)(DisasContext *ctx)                         \
++{                                                                       \
++    TCGv_ptr ra, rb, rd;                                                \
++    if (unlikely(!ctx->altivec_enabled)) {                              \
++        gen_exception(ctx, POWERPC_EXCP_VPU);                           \
++        return;                                                         \
++    }                                                                   \
++    if (ctx->vfp_native) {                                              \
++        gen_vfp_native(ctx, kind, rD(ctx->opcode), rA(ctx->opcode),     \
++                       rB(ctx->opcode), rA(ctx->opcode),                \
++                       (const void *)glue(helper_, name));              \
++        return;                                                         \
++    }                                                                   \
++    ra = gen_avr_ptr(rA(ctx->opcode));                                  \
++    rb = gen_avr_ptr(rB(ctx->opcode));                                  \
++    rd = gen_avr_ptr(rD(ctx->opcode));                                  \
++    gen_helper_##name(tcg_env, rd, ra, rb);                             \
++}
++GEN_VXFORM_VFP(vaddfp, PVF_ADD);
++GEN_VXFORM_VFP(vsubfp, PVF_SUB);
+ GEN_VXFORM_ENV(vmaxfp, 5, 16);
+ GEN_VXFORM_ENV(vminfp, 5, 17);
+ GEN_VXFORM_HETRO(vextublx, 6, 24)
+@@ -2438,7 +2487,32 @@ static void glue(gen_, name0##_##name1)(DisasContext *ctx)              \
+         }                                                               \
+     }
+ 
+-GEN_VAFORM_PAIRED(vmaddfp, vnmsubfp, 23)
++/* x-vfp-native (tcg/0022): vmaddfp (Rc = 0) and vnmsubfp (Rc = 1) */
++static void gen_vmaddfp_vnmsubfp(DisasContext *ctx)
++{
++    TCGv_ptr ra, rb, rc, rd;
++    if (unlikely(!ctx->altivec_enabled)) {
++        gen_exception(ctx, POWERPC_EXCP_VPU);
++        return;
++    }
++    if (ctx->vfp_native) {
++        gen_vfp_native(ctx, Rc(ctx->opcode) ? PVF_NMSUB : PVF_MADD,
++                       rD(ctx->opcode), rA(ctx->opcode), rB(ctx->opcode),
++                       rC(ctx->opcode),
++                       Rc(ctx->opcode) ? (const void *)helper_vnmsubfp
++                                       : (const void *)helper_vmaddfp);
++        return;
++    }
++    ra = gen_avr_ptr(rA(ctx->opcode));
++    rb = gen_avr_ptr(rB(ctx->opcode));
++    rc = gen_avr_ptr(rC(ctx->opcode));
++    rd = gen_avr_ptr(rD(ctx->opcode));
++    if (Rc(ctx->opcode)) {
++        gen_helper_vnmsubfp(tcg_env, rd, ra, rb, rc);
++    } else {
++        gen_helper_vmaddfp(tcg_env, rd, ra, rb, rc);
++    }
++}
+ 
+ static bool do_va_helper(DisasContext *ctx, arg_VA *a,
+     void (*gen_helper)(TCGv_ptr, TCGv_ptr, TCGv_ptr, TCGv_ptr))
+diff --git a/tcg/aarch64/tcg-target-has.h b/tcg/aarch64/tcg-target-has.h
+index a9c41d8..039d906 100644
+--- a/tcg/aarch64/tcg-target-has.h
++++ b/tcg/aarch64/tcg-target-has.h
+@@ -29,6 +29,8 @@
+ #define TCG_TARGET_HAS_tst              1
+ #define TCG_TARGET_HAS_ppc_fp32         1   /* POMPPC tcg/0014 */
+ #define TCG_TARGET_PPC_FP32_IMPL        1   /* POMPPC tcg/0017 */
++#define TCG_TARGET_HAS_ppc_vfp          1   /* POMPPC tcg/0022 */
++#define TCG_TARGET_PPC_VFP_IMPL         1   /* POMPPC tcg/0022 */
+ 
+ #define TCG_TARGET_HAS_v64              1
+ #define TCG_TARGET_HAS_v128             1
+diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
+index ee37c2d..3d8acfa 100644
+--- a/tcg/aarch64/tcg-target.c.inc
++++ b/tcg/aarch64/tcg-target.c.inc
+@@ -2238,6 +2238,184 @@ static bool tcg_out_ppc_fp32_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
+     return true;
+ }
+ 
++/*
++ * POMPPC tcg/0022 (x-vfp-native): INDEX_op_ppc_vfp.  NOT BUILT on the x86
++ * host where it was written (03/10/2026): to be compiled and proven on the
++ * M4 (docs/tcg-g4.md section 28) before any use.
++ *
++ * vaddfp/vsubfp/vmaddfp/vnmsubfp: the short path of x-vfp-fast
++ * (target/ppc/int_helper.c, vfp_add4()/vfp_fma4(): fadd/fmaf per lane on
++ * this host) on the four lanes at once, NEON 4S, FPCR at its default (as
++ * for those functions).  The same decisions as the x86_64 emitter, with
++ * t = x << 1 and the unsigned compares NEON has:
++ *
++ *   gate     or of (window & mask) ^ value over two 64-bit windows of
++ *            vec_status (cpu_init.c, ppc_vfn_gate_init()), in a GPR
++ *   operand  t == 0, or 0x01000000 <=u t <u 0xff000000
++ *   result   0x01000000 <u t <u 0xff000000 (FLT_MIN < |r| < inf), or exempt:
++ *            both operands zero (add/sub), a zero product (FMA)
++ *
++ * Every test is accumulated without a branch (umaxv of the failed lanes,
++ * or'ed with the gate), then one cbnz to the stub, which calls the original
++ * helper; an infinite lane goes there too, so the short path writes vD and
++ * nothing else.  The op is TCG_OPF_CALL_CLOBBER: X9-X11 and V0-V7,
++ * V16-V18 are scratch here (V8-V15 are callee-saved, V31 is TCG_VEC_TMP0).
++ */
++enum { PVF_ADD, PVF_SUB, PVF_MADD, PVF_NMSUB };
++
++/* raw A64 AdvSIMD encodings, Q = 1 (128 bits) */
++#define PVF_ADD4S       0x4ea08400      /* add  vd.4s, vn.4s, vm.4s */
++#define PVF_SUB4S       0x6ea08400      /* sub */
++#define PVF_CMHI4S      0x6ea03400      /* vd = vn >u vm */
++#define PVF_CMHS4S      0x6ea03c00      /* vd = vn >=u vm */
++#define PVF_AND16B      0x4e201c00
++#define PVF_ORR16B      0x4ea01c00
++#define PVF_FADD4S      0x4e20d400      /* fadd vd.4s, vn.4s, vm.4s */
++#define PVF_FSUB4S      0x4ea0d400      /* vd = vn - vm */
++#define PVF_FMLA4S      0x4e20cc00      /* vd = vd + vn * vm, one rounding */
++#define PVF_FNEG4S      0x6ea0f800      /* fneg vd.4s, vn.4s */
++#define PVF_CMEQ0_4S    0x4ea09800      /* vd = vn == 0 */
++#define PVF_NOT16B      0x6e205800
++#define PVF_UMAXV4S     0x6eb0a800      /* umaxv sd, vn.4s */
++#define PVF_UMOVWS0     0x0e043c00      /* umov wd, vn.s[0] */
++
++/* call-clobbered GPRs, free here (no operand, TCG_OPF_CALL_CLOBBER) */
++#define PVF_G           TCG_REG_X9
++#define PVF_T1          TCG_REG_X10
++#define PVF_T2          TCG_REG_X11
++
++static void pvf_3(TCGContext *s, uint32_t insn, TCGReg d, TCGReg n, TCGReg m)
++{
++    tcg_out32(s, insn | (m & 31) << 16 | (n & 31) << 5 | (d & 31));
++}
++
++static void pvf_2(TCGContext *s, uint32_t insn, TCGReg d, TCGReg n)
++{
++    tcg_out32(s, insn | (n & 31) << 5 | (d & 31));
++}
++
++/* d = all-ones in the lanes of t (an operand << 1) that are a zero or normal */
++static void pvf_zon(TCGContext *s, TCGReg d, TCGReg t, TCGReg k1, TCGReg k4,
++                    TCGReg u)
++{
++    pvf_3(s, PVF_CMHS4S, d, t, k1);         /* t >=u 0x01000000 */
++    pvf_3(s, PVF_CMHI4S, u, k4, t);         /* 0xff000000 >u t */
++    pvf_3(s, PVF_AND16B, d, d, u);
++    pvf_2(s, PVF_CMEQ0_4S, u, t);           /* t == 0 */
++    pvf_3(s, PVF_ORR16B, d, d, u);
++}
++
++static void tcg_out_ppc_vfp(TCGContext *s, const TCGArg *args)
++{
++    const TCGReg xa = TCG_REG_V0, xb = TCG_REG_V1, xc = TCG_REG_V2;
++    const TCGReg k1 = TCG_REG_V3, k4 = TCG_REG_V4;
++    const TCGReg ta = TCG_REG_V5, tb = TCG_REG_V6, tc = TCG_REG_V7;
++    const TCGReg ok = TCG_REG_V16, t = TCG_REG_V17, u = TCG_REG_V18;
++    unsigned kind = args[0];
++    bool fma = kind >= PVF_MADD;
++    TCGLabelQemuLdst *l;
++    TCGReg r;
++
++    /*
++     * the gate, in PVF_G: the or of (window & mask) ^ value over the two
++     * windows, 0 when it passes.  Not in TMP0-2: tcg_out_ld() takes TMP0
++     * for an offset beyond its immediate (the AVRs are past spr_cb[])
++     */
++    tcg_out_movi(s, TCG_TYPE_I64, PVF_G, 0);
++    for (int w = 0; w < 2; w++) {
++        if (args[7 + 3 * w]) {
++            tcg_out_ld(s, TCG_TYPE_I64, PVF_T2, TCG_AREG0,
++                       args[6 + 3 * w]);
++            tcg_out_movi(s, TCG_TYPE_I64, PVF_T1, args[7 + 3 * w]);
++            pfp_rrr(s, PFP_ANDX, PVF_T2, PVF_T2, PVF_T1, 0);
++            tcg_out_movi(s, TCG_TYPE_I64, PVF_T1, args[8 + 3 * w]);
++            pfp_rrr(s, 0xca000000 /* eor x */, PVF_T2, PVF_T2,
++                    PVF_T1, 0);
++            pfp_rrr(s, PFP_ORRX, PVF_G, PVF_G, PVF_T2, 0);
++        }
++    }
++
++    tcg_out_ld(s, TCG_TYPE_V128, xa, TCG_AREG0, args[2]);
++    tcg_out_ld(s, TCG_TYPE_V128, xb, TCG_AREG0, args[3]);
++    if (fma) {
++        tcg_out_ld(s, TCG_TYPE_V128, xc, TCG_AREG0, args[4]);
++    }
++    tcg_out_dupi_vec(s, TCG_TYPE_V128, MO_32, k1, dup_const(MO_32, 0x01000000));
++    tcg_out_dupi_vec(s, TCG_TYPE_V128, MO_32, k4, dup_const(MO_32, 0xff000000));
++
++    /* operands: zero or normal */
++    pvf_3(s, PVF_ADD4S, ta, xa, xa);
++    pvf_3(s, PVF_ADD4S, tb, xb, xb);
++    pvf_zon(s, ok, ta, k1, k4, u);
++    pvf_zon(s, t, tb, k1, k4, u);
++    pvf_3(s, PVF_AND16B, ok, ok, t);
++    if (fma) {
++        pvf_3(s, PVF_ADD4S, tc, xc, xc);
++        pvf_zon(s, t, tc, k1, k4, u);
++        pvf_3(s, PVF_AND16B, ok, ok, t);
++        /* xb = a * c + b, or a * c + -b (vnmsubfp, negated below) */
++        if (kind == PVF_NMSUB) {
++            pvf_2(s, PVF_FNEG4S, xb, xb);
++        }
++        pvf_3(s, PVF_FMLA4S, xb, xa, xc);
++        r = xb;
++        /* exempt: a zero product */
++        pvf_2(s, PVF_CMEQ0_4S, t, ta);
++        pvf_2(s, PVF_CMEQ0_4S, u, tc);
++        pvf_3(s, PVF_ORR16B, t, t, u);
++    } else {
++        pvf_3(s, kind == PVF_ADD ? PVF_FADD4S : PVF_FSUB4S, xc, xa, xb);
++        r = xc;
++        /* exempt: both operands zero */
++        pvf_3(s, PVF_ORR16B, t, ta, tb);
++        pvf_2(s, PVF_CMEQ0_4S, t, t);
++    }
++
++    /* the result: FLT_MIN < |r| < inf, or exempt */
++    pvf_3(s, PVF_ADD4S, ta, r, r);
++    pvf_3(s, PVF_CMHI4S, u, ta, k1);
++    pvf_3(s, PVF_CMHI4S, tb, k4, ta);
++    pvf_3(s, PVF_AND16B, u, u, tb);
++    pvf_3(s, PVF_ORR16B, u, u, t);
++    pvf_3(s, PVF_AND16B, ok, ok, u);
++
++    /* any lane not ok, or the gate: the helper, out of line */
++    pvf_2(s, PVF_NOT16B, ok, ok);
++    pvf_2(s, PVF_UMAXV4S, ok, ok);
++    pvf_2(s, PVF_UMOVWS0, PVF_T1, ok);
++    pfp_rrr(s, PFP_ORRX, PVF_G, PVF_G, PVF_T1, 0);
++    l = new_ldst_label(s);
++    l->is_ppc_vfp = true;
++    l->fp_sel = kind;
++    l->fp_slow = (const void *)args[5];
++    for (int i = 0; i < 4; i++) {
++        l->vfp_off[i] = args[1 + i];
++    }
++    l->label_ptr[0] = s->code_ptr;
++    tcg_out_insn(s, cbz, CBNZ, TCG_TYPE_I64, PVF_G, 0);
++
++    if (kind == PVF_NMSUB) {
++        pvf_2(s, PVF_FNEG4S, r, r);         /* after the rounding */
++    }
++    tcg_out_st(s, TCG_TYPE_V128, r, TCG_AREG0, args[1]);
++    l->raddr = tcg_splitwx_to_rx(s->code_ptr);
++}
++
++/* The stub: helper(env, &vD, &vA, &vB, &vC) in x0-x4; no exception raised */
++static bool tcg_out_ppc_vfp_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
++{
++    if (!reloc_pc19(l->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
++        return false;
++    }
++    tcg_out_mov(s, TCG_TYPE_PTR, TCG_REG_X0, TCG_AREG0);
++    for (int i = 0; i < 4; i++) {
++        tcg_out_addi_ptr(s, TCG_REG_X1 + i, TCG_AREG0, l->vfp_off[i]);
++    }
++    tcg_out_call_int(s, l->fp_slow);
++    tcg_out_goto(s, l->raddr);
++    return true;
++}
++
+ static const TCGOutOpQemuLdSt outop_qemu_ld = {
+     .base.static_constraint = C_O1_I1(r, r),
+     .out = tgen_qemu_ld,
+diff --git a/tcg/optimize.c b/tcg/optimize.c
+index 2a9c1c0..fa2a1ac 100644
+--- a/tcg/optimize.c
++++ b/tcg/optimize.c
+@@ -3227,6 +3227,15 @@ void tcg_optimize(TCGContext *s)
+             remove_mem_copy_all(&ctx);
+             done = finish_folding(&ctx, op);
+             break;
++        case INDEX_op_ppc_vfp:
++            /*
++             * POMPPC tcg/0022: reads and writes env (AVR, vec_status) behind
++             * the optimizer's back, like a call with side effects.
++             */
++            remove_mem_copy_all(&ctx);
++            ctx.prev_mb = NULL;
++            done = true;
++            break;
+         case INDEX_op_rems:
+         case INDEX_op_remu:
+             done = fold_remainder(&ctx, op);
+diff --git a/tcg/tcg-has.h b/tcg/tcg-has.h
+index 03afd22..378d530 100644
+--- a/tcg/tcg-has.h
++++ b/tcg/tcg-has.h
+@@ -56,5 +56,12 @@
+ #ifndef TCG_TARGET_PPC_FP32_IMPL
+ #define TCG_TARGET_PPC_FP32_IMPL        0
+ #endif
++/* POMPPC tcg/0022: INDEX_op_ppc_vfp, same two-level scheme */
++#ifndef TCG_TARGET_HAS_ppc_vfp
++#define TCG_TARGET_HAS_ppc_vfp          0
++#endif
++#ifndef TCG_TARGET_PPC_VFP_IMPL
++#define TCG_TARGET_PPC_VFP_IMPL         0
++#endif
+ 
+ #endif
+diff --git a/tcg/tcg-op.c b/tcg/tcg-op.c
+index dd2aa5d..5a6a4f7 100644
+--- a/tcg/tcg-op.c
++++ b/tcg/tcg-op.c
+@@ -130,6 +130,35 @@ void tcg_gen_ppc_fp32(TCGv_i64 r, TCGv_i64 nf, TCGv_i64 a, TCGv_i64 b,
+     op->args[8] = flags_st;
+ }
+ 
++/*
++ * POMPPC tcg/0022: see INDEX_op_ppc_vfp in tcg-opc.h.
++ */
++bool tcg_ppc_vfp_supported(void)
++{
++    return TCG_TARGET_HAS_ppc_vfp;
++}
++
++void tcg_gen_ppc_vfp(unsigned kind, intptr_t vd, intptr_t va, intptr_t vb,
++                     intptr_t vc, const void *slow,
++                     intptr_t g0_ofs, uint64_t g0_mask, uint64_t g0_val,
++                     intptr_t g1_ofs, uint64_t g1_mask, uint64_t g1_val)
++{
++    TCGOp *op = tcg_emit_op(INDEX_op_ppc_vfp, 12);
++
++    op->args[0] = kind;
++    op->args[1] = vd;
++    op->args[2] = va;
++    op->args[3] = vb;
++    op->args[4] = vc;
++    op->args[5] = (uintptr_t)slow;
++    op->args[6] = g0_ofs;
++    op->args[7] = g0_mask;
++    op->args[8] = g0_val;
++    op->args[9] = g1_ofs;
++    op->args[10] = g1_mask;
++    op->args[11] = g1_val;
++}
++
+ /*
+  * With CONFIG_DEBUG_TCG, tcgv_*_tmp via tcgv_*_arg, is an out-of-line
+  * assertion check.  Force tail calls to avoid too much code expansion.
+diff --git a/tcg/tcg.c b/tcg/tcg.c
+index 37d0bba..109267d 100644
+--- a/tcg/tcg.c
++++ b/tcg/tcg.c
+@@ -77,6 +77,10 @@ static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *l);
+ static void tcg_out_ppc_fp32(TCGContext *s, const TCGArg *args);
+ static bool tcg_out_ppc_fp32_slow_path(TCGContext *s, TCGLabelQemuLdst *l);
+ #endif
++#if TCG_TARGET_PPC_VFP_IMPL
++static void tcg_out_ppc_vfp(TCGContext *s, const TCGArg *args);
++static bool tcg_out_ppc_vfp_slow_path(TCGContext *s, TCGLabelQemuLdst *l);
++#endif
+ 
+ /* The CIE and FDE header definitions will be common to all hosts.  */
+ typedef struct {
+@@ -118,6 +122,9 @@ struct TCGLabelQemuLdst {
+     /* POMPPC tcg/0017 (x86_64): every jump of the inline tests to the stub */
+     tcg_insn_unit *fp_jmp[12];
+     unsigned fp_njmp;
++    /* POMPPC tcg/0022: slow path of a ppc_vfp op (fp_sel = kind, fp_slow) */
++    bool is_ppc_vfp;
++    intptr_t vfp_off[4];        /* env offsets of vD, vA, vB, vC */
+     QSIMPLEQ_ENTRY(TCGLabelQemuLdst) next;
+ };
+ 
+@@ -777,6 +784,13 @@ static int tcg_out_ldst_finalize(TCGContext *s)
+ 
+     /* qemu_ld/st slow paths */
+     QSIMPLEQ_FOREACH(lb, &s->ldst_labels, next) {
++#if TCG_TARGET_PPC_VFP_IMPL
++        if (lb->is_ppc_vfp) {
++            if (!tcg_out_ppc_vfp_slow_path(s, lb)) {
++                return -2;
++            }
++        } else
++#endif
+ #if TCG_TARGET_PPC_FP32_IMPL
+         if (lb->is_ppc_fp32) {
+             if (!tcg_out_ppc_fp32_slow_path(s, lb)) {
+@@ -2389,6 +2403,8 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
+ 
+     case INDEX_op_ppc_fp32:                         /* POMPPC tcg/0014 */
+         return TCG_TARGET_HAS_ppc_fp32 && type == TCG_TYPE_I64;
++    case INDEX_op_ppc_vfp:                          /* POMPPC tcg/0022 */
++        return TCG_TARGET_HAS_ppc_vfp;
+ 
+     case INDEX_op_add:
+     case INDEX_op_and:
+@@ -4168,6 +4184,14 @@ liveness_pass_1(TCGContext *s)
+             op->args[2] = temp_arg(ts);
+             goto do_default;
+ 
++        case INDEX_op_ppc_vfp:
++            /*
++             * POMPPC tcg/0022: no operand, no global read or written (the
++             * AVRs and vec_status are not TCG globals); clobbers like a call.
++             */
++            la_cross_call(s, nb_temps);
++            break;
++
+         default:
+         do_default:
+             /*
+@@ -5909,6 +5933,25 @@ static void load_arg_ref(TCGContext *s, unsigned arg_slot, TCGReg ref_base,
+     }
+ }
+ 
++#if TCG_TARGET_PPC_VFP_IMPL
++/*
++ * POMPPC tcg/0022: INDEX_op_ppc_vfp has no operand and touches no TCG
++ * global (as a TCG_CALL_NO_RWG helper would not): only the call-clobbered
++ * registers are freed, their live values spilled, before its code (whose
++ * slow path calls a C helper).
++ */
++static void tcg_reg_alloc_ppc_vfp(TCGContext *s, const TCGOp *op)
++{
++    assert_carry_dead(s);
++    for (int i = 0; i < TCG_TARGET_NB_REGS; i++) {
++        if (tcg_regset_test_reg(tcg_target_call_clobber_regs, i)) {
++            tcg_reg_free(s, i, s->reserved_regs);
++        }
++    }
++    tcg_out_ppc_vfp(s, op->args);
++}
++#endif
++
+ static void tcg_reg_alloc_call(TCGContext *s, TCGOp *op)
+ {
+     const int nb_oargs = TCGOP_CALLO(op);
+@@ -6753,6 +6796,11 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
+         case INDEX_op_mb:
+             tcg_out_mb(s, op->args[0]);
+             break;
++#if TCG_TARGET_PPC_VFP_IMPL
++        case INDEX_op_ppc_vfp:                      /* POMPPC tcg/0022 */
++            tcg_reg_alloc_ppc_vfp(s, op);
++            break;
++#endif
+         default:
+         do_default:
+             /* Sanity check that we've not introduced any unhandled opcodes. */
+diff --git a/tcg/x86_64/tcg-target-has.h b/tcg/x86_64/tcg-target-has.h
+index 8198529..073ccfe 100644
+--- a/tcg/x86_64/tcg-target-has.h
++++ b/tcg/x86_64/tcg-target-has.h
+@@ -41,6 +41,12 @@
+ #ifndef _WIN64
+ #define TCG_TARGET_PPC_FP32_IMPL        1
+ #define TCG_TARGET_HAS_ppc_fp32         (have_avx1 && (cpuinfo & CPUINFO_FMA))
++/*
++ * POMPPC tcg/0022: INDEX_op_ppc_vfp (x-vfp-native), VEX.128 packed single
++ * and FMA3, the same run-time condition.
++ */
++#define TCG_TARGET_PPC_VFP_IMPL         1
++#define TCG_TARGET_HAS_ppc_vfp          (have_avx1 && (cpuinfo & CPUINFO_FMA))
+ #endif
+ 
+ /* We do not support older SSE systems, only beginning with AVX1.  */
+diff --git a/tcg/x86_64/tcg-target.c.inc b/tcg/x86_64/tcg-target.c.inc
+index 79af8cd..f2d37a7 100644
+--- a/tcg/x86_64/tcg-target.c.inc
++++ b/tcg/x86_64/tcg-target.c.inc
+@@ -2264,6 +2264,165 @@ static bool tcg_out_ppc_fp32_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
+ }
+ #endif /* TCG_TARGET_PPC_FP32_IMPL */
+ 
++#if TCG_TARGET_PPC_VFP_IMPL
++/*
++ * POMPPC tcg/0022 (x-vfp-native on x86_64 hosts): INDEX_op_ppc_vfp.
++ *
++ * vaddfp/vsubfp/vmaddfp/vnmsubfp: the short path of x-vfp-fast (target/ppc/
++ * int_helper.c, vfp_add4_avx() and vfp_fma4_fma3(), tcg/0020) in the
++ * generated code, on the four lanes at once (VEX.128, FMA3; MXCSR at its
++ * default, as for those functions).  The same decisions, on the bit
++ * patterns, with t = x << 1 (the sign dropped):
++ *
++ *   gate     vfp_can_use_fpu(&env->vec_status): on each of two 64-bit
++ *            windows, load, and, cmp with the mask and value computed at
++ *            realize (cpu_init.c, ppc_vfn_gate_init())
++ *   operand  zero or normal: t == 0, or t - 0x01000000 <=u 0xfdffffff
++ *   result   FLT_MIN < |r| < inf: t - 0x01000001 <=u 0xfdfffffe; exempt:
++ *            both operands zero (add/sub), a zero product (FMA)
++ *
++ * Only finite results are kept: an infinite lane (where the helper raises
++ * overflow) goes to the slow path too, so the short path writes vD and
++ * nothing else.  Slow path: the original helper (helper_vaddfp ...
++ * helper_vnmsubfp: x-vfp-fast or the per-lane loop), out of line, which
++ * computes everything again from the unchanged operands.  The op is
++ * TCG_OPF_CALL_CLOBBER: RAX, RCX and every XMM register are scratch here.
++ */
++enum { PVF_ADD, PVF_SUB, PVF_MADD, PVF_NMSUB };
++
++#define PVF_VADDPS      (0x58 | P_EXT)
++#define PVF_VSUBPS      (0x5c | P_EXT)
++#define PVF_VMOVMSKPS   (0x50 | P_EXT)
++#define PVF_VFMADD231PS (0xb8 | P_EXT38 | P_DATA16)
++#define PVF_VFMSUB231PS (0xba | P_EXT38 | P_DATA16)
++
++/* d = all-ones in the lanes of t (an operand << 1) that are a zero or normal */
++static void pvf_zon(TCGContext *s, TCGReg d, TCGReg t, TCGReg k1, TCGReg k2,
++                    TCGReg z, TCGReg u)
++{
++    tcg_out_vex_modrm(s, OPC_PSUBD, d, t, k1);          /* d = t - k1 */
++    tcg_out_vex_modrm(s, OPC_PMINUD, u, d, k2);
++    tcg_out_vex_modrm(s, OPC_PCMPEQD, d, u, d);         /* d <=u k2 */
++    tcg_out_vex_modrm(s, OPC_PCMPEQD, u, t, z);         /* t == 0 */
++    tcg_out_vex_modrm(s, OPC_POR, d, d, u);
++}
++
++static void tcg_out_ppc_vfp(TCGContext *s, const TCGArg *args)
++{
++    const TCGReg xa = TCG_REG_XMM0, xb = TCG_REG_XMM1, xc = TCG_REG_XMM2;
++    const TCGReg k1 = TCG_REG_XMM3, k2 = TCG_REG_XMM4, z = TCG_REG_XMM6;
++    const TCGReg ta = TCG_REG_XMM7, tb = TCG_REG_XMM8, tc = TCG_REG_XMM9;
++    const TCGReg ok = TCG_REG_XMM10, t = TCG_REG_XMM11, u = TCG_REG_XMM12;
++    unsigned kind = args[0];
++    bool fma = kind >= PVF_MADD;
++    TCGLabelQemuLdst *l = new_ldst_label(s);
++    TCGReg r;
++
++    l->is_ppc_vfp = true;
++    l->fp_sel = kind;
++    l->fp_slow = (const void *)args[5];
++    for (int i = 0; i < 4; i++) {
++        l->vfp_off[i] = args[1 + i];
++    }
++
++    /* the gate: (window & mask) == value, for each window with a mask */
++    for (int w = 0; w < 2; w++) {
++        if (args[7 + 3 * w]) {
++            tcg_out_ld(s, TCG_TYPE_I64, TCG_REG_RAX, TCG_AREG0,
++                       args[6 + 3 * w]);
++            tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_RCX, args[7 + 3 * w]);
++            tgen_arithr(s, ARITH_AND + P_REXW, TCG_REG_RAX, TCG_REG_RCX);
++            tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_RCX, args[8 + 3 * w]);
++            tgen_arithr(s, ARITH_CMP + P_REXW, TCG_REG_RAX, TCG_REG_RCX);
++            pfp_jslow(s, l, JCC_JNE);
++        }
++    }
++
++    tcg_out_ld(s, TCG_TYPE_V128, xa, TCG_AREG0, args[2]);
++    tcg_out_ld(s, TCG_TYPE_V128, xb, TCG_AREG0, args[3]);
++    if (fma) {
++        tcg_out_ld(s, TCG_TYPE_V128, xc, TCG_AREG0, args[4]);
++    }
++    tcg_out_dupi_vec(s, TCG_TYPE_V128, MO_32, k1, dup_const(MO_32, 0x01000000));
++    tcg_out_dupi_vec(s, TCG_TYPE_V128, MO_32, k2, dup_const(MO_32, 0xfdffffff));
++    tcg_out_vex_modrm(s, OPC_PXOR, z, z, z);
++
++    /* operands: zero or normal */
++    tcg_out_vex_modrm(s, OPC_PADDD, ta, xa, xa);
++    tcg_out_vex_modrm(s, OPC_PADDD, tb, xb, xb);
++    pvf_zon(s, ok, ta, k1, k2, z, u);
++    pvf_zon(s, t, tb, k1, k2, z, u);
++    tcg_out_vex_modrm(s, OPC_PAND, ok, ok, t);
++    if (fma) {
++        tcg_out_vex_modrm(s, OPC_PADDD, tc, xc, xc);
++        pvf_zon(s, t, tc, k1, k2, z, u);
++        tcg_out_vex_modrm(s, OPC_PAND, ok, ok, t);
++        /*
++         * xb = a * c + b (vmaddfp), a * c - b (vnmsubfp, negated below):
++         * one rounding each, as fmaf(a, c, b ^ sign) in vfp_fma4_fma3()
++         */
++        tcg_out_vex_modrm(s, kind == PVF_MADD ? PVF_VFMADD231PS
++                                              : PVF_VFMSUB231PS, xb, xa, xc);
++        r = xb;
++        /* exempt: a zero product */
++        tcg_out_vex_modrm(s, OPC_PCMPEQD, t, ta, z);
++        tcg_out_vex_modrm(s, OPC_PCMPEQD, u, tc, z);
++        tcg_out_vex_modrm(s, OPC_POR, t, t, u);
++    } else {
++        tcg_out_vex_modrm(s, kind == PVF_ADD ? PVF_VADDPS : PVF_VSUBPS,
++                          xc, xa, xb);                  /* a + b, a - b */
++        r = xc;
++        /* exempt: both operands zero */
++        tcg_out_vex_modrm(s, OPC_POR, t, ta, tb);
++        tcg_out_vex_modrm(s, OPC_PCMPEQD, t, t, z);
++    }
++
++    /* the result: FLT_MIN < |r| < inf, or exempt */
++    tcg_out_dupi_vec(s, TCG_TYPE_V128, MO_32, k1, dup_const(MO_32, 0x01000001));
++    tcg_out_dupi_vec(s, TCG_TYPE_V128, MO_32, k2, dup_const(MO_32, 0xfdfffffe));
++    tcg_out_vex_modrm(s, OPC_PADDD, u, r, r);
++    tcg_out_vex_modrm(s, OPC_PSUBD, u, u, k1);
++    tcg_out_vex_modrm(s, OPC_PMINUD, ta, u, k2);
++    tcg_out_vex_modrm(s, OPC_PCMPEQD, u, ta, u);
++    tcg_out_vex_modrm(s, OPC_POR, u, u, t);
++    tcg_out_vex_modrm(s, OPC_PAND, ok, ok, u);
++
++    /* any lane not ok: the helper, out of line */
++    tcg_out_vex_modrm(s, PVF_VMOVMSKPS, TCG_REG_EAX, 0, ok);
++    tgen_arithi(s, ARITH_CMP, TCG_REG_EAX, 15, 0);
++    pfp_jslow(s, l, JCC_JNE);
++
++    if (kind == PVF_NMSUB) {
++        /* negated after the rounding, zero included (float32_chs) */
++        tcg_out_dupi_vec(s, TCG_TYPE_V128, MO_32, t,
++                         dup_const(MO_32, 0x80000000));
++        tcg_out_vex_modrm(s, OPC_PXOR, r, r, t);
++    }
++    tcg_out_st(s, TCG_TYPE_V128, r, TCG_AREG0, args[1]);
++    l->raddr = tcg_splitwx_to_rx(s->code_ptr);
++}
++
++/*
++ * The stub: helper(env, &vD, &vA, &vB, &vC) in rdi rsi rdx rcx r8 (vC is
++ * vA for vaddfp/vsubfp, whose helper has no fifth argument).  The helper
++ * raises no exception: no return address is needed.
++ */
++static bool tcg_out_ppc_vfp_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
++{
++    for (unsigned i = 0; i < l->fp_njmp; i++) {
++        tcg_patch32(l->fp_jmp[i], s->code_ptr - l->fp_jmp[i] - 4);
++    }
++    tcg_out_mov(s, TCG_TYPE_PTR, tcg_target_call_iarg_regs[0], TCG_AREG0);
++    for (int i = 0; i < 4; i++) {
++        tcg_out_addi_ptr(s, tcg_target_call_iarg_regs[1 + i], TCG_AREG0,
++                         l->vfp_off[i]);
++    }
++    tcg_out_branch(s, 1, l->fp_slow);
++    tcg_out_jmp(s, l->raddr);
++    return true;
++}
++#endif /* TCG_TARGET_PPC_VFP_IMPL */
++
+ #ifdef CONFIG_USER_ONLY
+ static HostAddress x86_guest_base = {
+     .index = -1

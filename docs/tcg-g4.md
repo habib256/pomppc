@@ -2622,3 +2622,204 @@ référence reconstruit (11.1.2, 0001-0020), `x-sr-tlb-verify=64`, toutes les op
 
 Marble Blast sous vérificateur : 20,9 et 20,4 ms/image (21,0 sans, §25.6). Aucune divergence
 « fenêtre `tlbie` » de l'autre CPU cette fois (§4 : une sur le M4, licite).
+
+---
+
+## 28. DOOM 3 sur l'hôte x86-64 : le traducteur poste par poste (`tcg/0021` à `0024`)
+
+03/10/2026, PC Linux (i7-10700F, AVX2/FMA3). DOOM 3 (VM 10.4.11) y tourne à **150,5 ms/image**
+contre 56-61 sur le M4, limité par le G4 émulé. Étape 2 du chantier vitesse : ce que le
+traducteur fait encore par helper, ou plus mal que sur arm64, pour ce que DOOM 3 exécute.
+**Phase d'étude et d'écriture** : l'hôte était pris par la VM quotidienne et les A/B d'un autre
+agent ; rien n'a tourné dans une VM, aucun `make` complet. Copie isolée `~/src/qemu-d3tcg`
+(clone de `~/src/qemu11`, un commit par patch ; `target/ppc`, `tcg`, `accel/tcg`, `fpu`,
+`include`, `util`, `host` identiques octet pour octet à la référence `~/src/qemu` avant les
+patches). Chaque fichier touché a été compilé seul (`tools/tcg/cc1.py`, nouveau : la ligne de
+`compile_commands.json` de l'arbre construit, les en-têtes des sources pris dans la copie,
+`nice 19`), pour `ppc` et `ppc64` ; les quatre patches s'appliquent sans fuzz à la suite de 0020
+et redonnent la copie à l'octet.
+
+### 28.1 Inventaire statique
+
+**Le code de DOOM 3** : l'exécutable PPC de la démo Mac 1.3 (`doom3macdemo.dmg`, extrait par
+`7z`, Mach-O lu par un petit script, même moteur que le jeu installé), désassemblé : 645 030
+instructions dans le moteur, 576 652 dans `gameppc.dylib`. `idSIMD_AltiVec` (70 fonctions,
+10 424 instructions) : `vperm` 603, `vmaddfp` 293, `vsldoi` 145, `vaddfp` 127, `stvewx` 94,
+`vmrghw` 76, `vmrglw` 61, `vsubfp` 48, `vnmsubfp` 21, `vrsqrtefp` 11, `vrefp` 6 ; déjà en ligne :
+`lvx` 664, `stvx` 217, `lvsl`/`lvsr` 215, `vaddubm` 137, `vspltw` 134, `vsel` 126.
+`NormalizeTangents` (un des trois postes du profil du 01/10) : `vperm` 50, `vmaddfp` 49, `vsldoi`
+40, `vaddfp` 40, `stvewx` 36. Profil dynamique du M4 (§6 bis, 598 M instr./s) : `vperm` 1,0 %,
+`vmaddfp` 0,5, `vmrghw` 0,4, `vmrglw` 0,3, `vaddfp` 0,2 % des instructions.
+
+| instructions de DOOM 3 | arm64 (M4) | x86-64 (PC) avant ces patches |
+|---|---|---|
+| `vaddfp vsubfp vmaddfp vnmsubfp` | helper **sans drapeau** (globales réécrites et relues), 4 voies NEON dedans (0003) | idem, 4 voies AVX/FMA3 dedans (0020) ; banc 7,5 ns/instr. contre 2,3 pour `vperm` |
+| `vperm` | helper `NO_RWG`, `tbl` (0004) | helper `NO_RWG`, `pshufb` (0019) |
+| `vsldoi`, `vmrghw`, `vmrglw` | helper `NO_RWG`, boucle d'octets/mots | idem |
+| `stvewx` (`stvebx`, `stvehx`) | helper **sans drapeau** | idem |
+| `vrsqrtefp`, `vrefp`, `vcmp*fp`, `vctsxs`, `vcfsx` | helpers softfloat par voie | idem (rares dans le code chaud) |
+| scalaire simple, double | op `ppc_fp32` en ligne (0014, 0016) | même op, émetteur VEX/FMA3 (0017) |
+| `lfs`/`stfs` | ops entières (0002) | idem (code commun) |
+| `frsp`, `fctiwz`, `frsqrte`, `fdivs` | helpers (2 041, 546, 8, 610 dans le moteur) | idem |
+| `mftb` | `cntvct` (0015), 5,5 ns | TSC (0018), **17,5 ns** : `rdtsc` ~5,5 ns, puis un `div r64` par une variable (~3,3 ns, banc hôte) |
+| `lmw`/`stmw` | helper (`lmw` sans drapeau) | idem |
+
+- **`x-lmw-inline` n'est ni actif ni dans la série** : c'est l'essai `essais/0002` (§5.4), écrit
+  pour 9.2, jamais reposé sur 11.1.2 ; il ne couvrait que les plages tenant dans une page et
+  n'avait rien gagné sur le M4 (−1,3 % au banc : le coût est celui des accès). DOOM 3 en a peu :
+  209 `lmw` et 210 `stmw` dans le moteur, 79/71 dans `gameppc` (GCC 3.3 sauve les registres un
+  par un) ; les 5,4 % du profil viennent des bibliothèques d'Apple, de GLEngine, du plugin et du
+  noyau. Pas de patch tant que le profil x86 ne le désigne pas.
+- **`helper_lookup_tb_ptr`** : la sonde en ligne de `x-ret-inline` (0008) est faite d'ops TCG
+  génériques, la même sur les deux hôtes ; restent les ratés du cache de sauts (§18). Rien de
+  propre à x86 — sauf l'appel du helper lui-même, ci-dessous.
+- **`helper_ldul_mmu`** (chargement lent, 2,2 % sur le M4) : ratés du TLB, accès à cheval sur
+  deux pages, MMIO (registres du `qgpu`). Le chemin rapide x86 (`movbe` après la comparaison du
+  TLB) vaut celui de l'arm64 ; à reprendre avec le profil x86.
+- **Ce que le code x86 fait de plus — trouvé en route, sans doute le plus gros** : sous Linux, le
+  tampon du JIT est posé par le noyau vers `0x7f…`, à ~35 Tio du texte PIE de QEMU
+  (`0x55…-0x5f…`). Tous les journaux du PC disent « `x-jit-near : pas de place, noyau … AUTRE
+  fenêtre de 4 Gio` » : `x-jit-near` (0006) fait `mmap(NULL)` et espère, ce qui marche sur macOS,
+  jamais sous Linux. Alors `tcg_out_branch()` ne peut émettre aucun `call rel32` : **chaque appel
+  de helper depuis le code généré** (helpers, chemins lents de `qemu_ld/st`, `lookup_tb_ptr`,
+  talons de `ppc_fp32`) est un `call *[rip+pool]`, un chargement plus un saut indirect, et 8
+  octets de constante par cible dans chaque bloc.
+- Registres : 12-13 GPR allouables sur x86 contre ~25 sur arm64 ; les ops `ppc_fp32` (0017) font
+  leurs tests par `jcc` vers le talon (branches non prises), choix déjà fait au §25.1.
+
+### 28.2 Les quatre postes retenus
+
+| patch | propriété (défaut éteint) | quoi | attendu (temps vCPU, d'après le profil du M4) |
+|---|---|---|---|
+| `0022-tcg-vfp-native` | `x-vfp-native` (`VFPNATIVE=1`) | `vaddfp vsubfp vmaddfp vnmsubfp` dans le code généré (op TCG nouvelle), helper hors ligne | AltiVec flottant 4,3-6,6 % ; ~5 M instr./s × ~4-5 ns gagnées : **2,5-4 %** |
+| `0024-tcg-jit-rel32` | `x-jit-rel32` (accélérateur, `JITREL32=1`) | tampon du JIT à < 2 Gio du texte : appels directs | tous les appels de helpers (dizaines de millions par seconde) : **1-5 %**, inconnu avant mesure |
+| `0021-ppc-vmx-inline` | `x-vmx-inline` (`VMXINLINE=1`) | `vsldoi`, `vmrghw`/`vmrglw`, `stve[bhw]x` en ops TCG | ~6 M instr./s × 1,5-3 ns : **~1-1,5 %** |
+| `0023-ppc-tb-div` | (sous `x-tb-fast`) | `mftb` : `/ 40` constant au lieu d'un `div r64` | ~1 M `mftb`/s × 3,3 ns : **~0,3 %** |
+
+Ensemble : de l'ordre de **4 à 10 % du temps vCPU**, à confirmer par le profil x86 de DOOM 3. Le
+fil du jeu étant presque toujours occupé sur le PC, l'essentiel devrait se retrouver à l'image.
+
+### 28.3 `tcg/0021` : `x-vmx-inline`
+
+Code commun aux deux hôtes (parité automatique). `x-vmx-verify` : mode preuve.
+
+- `vsldoi vD,vA,vB,sh` : avec w0..w3 = vA.haut, vA.bas, vB.haut, vB.bas, q = sh/8,
+  s = 8·(sh mod 8) : vD = (w[q], w[q+1]) si s = 0, sinon chaque double mot est
+  `extract2(w[i+1], w[i], 64 − s)` (`shld` sur x86, `extr` sur arm64). 2 à 3 chargements, 2 ops,
+  2 rangements, au lieu d'un appel et d'une boucle de 16 octets.
+- `vmrghw` : `rh = deposit(a.haut, b.haut >> 32, 0, 32)`, `rl = deposit(b.haut, a.haut, 32, 32)` ;
+  `vmrglw` de même sur les doubles mots bas. Opérandes lus avant d'écrire vD.
+- `stvebx/stvehx/stvewx` (mode grand-boutiste ; petit-boutiste : helper) : le double mot
+  (`EA & 8 ? bas : haut`, `movcond`) décalé de `64 − 8·taille − 8·(EA & 7)`, puis **un `qemu_st` de
+  même taille, même endianité, même `mmu_idx`, même adresse** que `cpu_st*_be_data_ra` : même
+  faute, même DAR/DSISR, globales synchronisées comme pour tout accès ; le helper d'origine était
+  un appel sans drapeau.
+- `vmrghb/h`, `vmrglb/h` : absents de DOOM 3, laissés aux helpers (l'entrelacement d'octets
+  coûterait ~30 ops).
+- `x-vmx-verify` : opérandes copiés avant (`vmxv_in`), puis le **helper d'origine** refait
+  l'instruction et compare (vD reçoit sa valeur en cas d'écart) ; `stve*x` : l'élément que
+  l'expression du macro `STVE` aurait rangé contre la valeur rangée. Bilan `vmx-verify:`.
+
+### 28.4 `tcg/0022` : `x-vfp-native`, l'op TCG `ppc_vfp`
+
+Le chemin court de `x-vfp-fast` (§9, §26) sans appel. **Op nouvelle sans opérande TCG** : les AVR
+et `vec_status` vivent dans `env`, hors des globales ; constantes : le genre, les décalages de
+vD vA vB vC, le helper d'origine et la porte. `TCG_OPF_NOT_PRESENT | CALL_CLOBBER` : allouée par
+`tcg_reg_alloc_ppc_vfp()` comme un appel `NO_RWG` (registres appelant-sauvés libérés, aucune
+globale synchronisée), `la_cross_call` en vivacité, `remove_mem_copy_all` dans l'optimiseur (elle
+écrit `env` dans son dos). Chemin lent : étiquette de `ldst_labels`, talon hors ligne qui appelle
+`helper_vaddfp`… `helper_vnmsubfp` (env, &vD, &vA, &vB, &vC) et revient ; ces helpers ne lèvent
+rien, aucune adresse de retour n'est nécessaire.
+
+- **Les mêmes décisions que `vfp_add4_avx()`/`vfp_fma4_fma3()`**, sur les motifs, t = x << 1 :
+  opérande nul ou normal ssi `t == 0` ou `t − 0x01000000 ≤u 0xfdffffff` (`vpsubd`, `vpminud`,
+  `vpcmpeqd`) ; résultat gardé ssi `FLT_MIN < |r| < inf` (`t − 0x01000001 ≤u 0xfdfffffe`), ou
+  exempté si les deux opérandes sont nuls (add/sub) ou le produit nul (FMA). **Une voie infinie
+  part au helper** (qui lève overflow) : le chemin court n'écrit que vD, jamais `vec_status`.
+  `vmaddfp` : `vfmadd231ps` ; `vnmsubfp` : `vfmsub231ps` (a·c − b, égal à `fmaf(a, c, −b)`, zéro
+  compris) puis le signe inversé après l'arrondi. Un `vmovmskps` et un `jne` vers le talon.
+- **La porte** : `vfp_can_use_fpu(&vec_status)` (`!no_hardfloat`, inexact posé, arrondi au plus
+  proche, pas de re-biaisage). Le `float_status` de 11.1.2 est en champs de bits, 12 octets avec
+  GCC sur x86_64, `no_hardfloat` à l'octet 8 : un mot de 64 bits ne suffit pas (premier jet,
+  attrapé par la preuve hôte : porte impossible, aucun chemin court). `ppc_vfn_gate_init()` (au
+  `realize`) pose chaque champ seul dans un `float_status` nul, relit ses octets et range son
+  masque dans la première de deux fenêtres de 64 bits (les 8 premiers, les 8 derniers octets) qui
+  le contient : ici `+0 : 0x03070010 / 0x10` et `+4 : 0x1_00000000 / 0`. Si un champ ne tient dans
+  aucune, `x-vfp-native` reste éteint (message).
+- `x-vfp-native` n'agit qu'avec `x-vfp-fast` et l'op disponible : x86_64 avec AVX et FMA3 (sondé
+  à l'exécution, `TCG_TARGET_HAS_ppc_vfp`), aarch64. **Émetteur aarch64 écrit, pas compilé** (pas
+  de chaîne arm64 sur le PC) : NEON 4S, mêmes tests en comparaisons non signées (`cmhs`/`cmhi`),
+  `fmla` (b nié avant pour `vnmsubfp`, résultat nié après), tous les tests accumulés sans
+  branchement (`umaxv` des voies ratées, ou avec la porte) puis un `cbnz` ; registres X9-X11 (pas
+  TMP0 : `tcg_out_ld()` le prend pour un décalage au-delà de l'immédiat, et les AVR sont après
+  `spr_cb[]`). Encodages vérifiés à la main contre les constantes `Iqrrr_e_*` du backend (ADD,
+  SUB, CMHI, CMHS, AND, ORR, CMEQ0, NOT) et l'ARM ARM (FADD, FSUB, FMLA, FNEG, UMAXV, UMOV) :
+  **à compiler et prouver sur le M4 avant tout usage**.
+- `x-vfp-native-verify` : opérandes et `vec_status` sauvés avant l'op (`helper_vfn_save`), puis
+  l'instruction refaite par **la boucle par voie de softfloat** (QEMU sans `x-vfp-fast`) : vD et
+  tout le `float_status` doivent être égaux ; compte aussi les opérations que le chemin court
+  aurait dû prendre. Bilan `vfp-native-verify:`.
+
+### 28.5 `tcg/0024` : `x-jit-rel32` (Linux x86-64)
+
+Propriété de l'accélérateur. Avant `x-jit-near`, `alloc_code_gen_buffer_anon()` demande la place
+juste sous le texte (`__executable_start`), par l'indication de `mmap` (Linux la prend telle quelle
+si elle est libre ; le résultat est vérifié), 64 Mio plus bas à chaque essai, le tampon réduit de
+64 en 64 Mio jusqu'à 512 Mio, tant que tout le tampon reste à moins de 2 Gio − 16 Mio de `etext`.
+QEMU imprime le texte, l'écart maximal et « appels des helpers directs (rel32) » ou
+« INDIRECTS ». La boucle seule, dans un PIE de test : tampon de 1 Gio posé à 1 089 Mio sous la fin
+du texte, trois lancements sur trois. Aucune sémantique ne change (seul l'encodage des appels) :
+pas de vérificateur ; la preuve est que QEMU l'annonce et que les épreuves des §25-27 et de la
+matrice redonnent les mêmes empreintes. Sans objet sur arm64 (macOS : 0006 ; la portée d'un `bl`
+est de ±128 Mio, qu'un tampon de 512 Mio ne tiendrait pas) et sur les autres hôtes.
+
+### 28.6 `tcg/0023` : `mftb` sans `div`
+
+Sous `x-tb-fast`, `tbf_load()` divisait les ns par `tbf_div`, une variable : `div r64`, 35 à 88
+cycles sur ce cœur. À 25 MHz (mac99), `tbf_div` vaut 40 : `ns / 40` est une multiplication et un
+décalage (`mul`, `shr $5` dans l'objet compilé), même quotient pour tout `uint64_t`. Banc hôte
+(`rdtsc` + produit 128 bits + division, 20 M lectures) : 8,83 → 5,53 ns, le `rdtsc` seul en coûte
+5,51. Pas de propriété nouvelle (identité arithmétique, sous `x-tb-fast`) : `x-tb-verify` compare
+toujours chaque lecture à la valeur d'origine ; l'A/B se joue binaire contre binaire.
+
+### 28.7 Ce qui est prouvé, ce qui reste à prouver
+
+Fait sans VM (un cœur, `taskset -c 15 nice -n 19`) :
+
+| épreuve | résultat |
+|---|---|
+| `tools/tcg/vmxproof.sh ~/src/qemu-d3tcg 200000 mut` : helpers `vsldoi`, `vmrg[hl]w`, `STVE*` extraits tels quels contre le modèle op par op (le script vérifie que l'arbre émet bien ces 19 ops) | vsldoi 6 400 000 cas (16 décalages, recouvrements), vmrg 1 200 000, stve 9 600 000 (16 adresses × 3 tailles) : **0 divergence** ; **6 mutants sur 6 détectés** |
+| `VFPPROOF_NATIVE=1 VFPPROOF_BUILT=~/src/qemu11 tools/tcg/vfpproof.sh ~/src/qemu-d3tcg 20000` : modèle instruction pour instruction de l'émetteur x86, porte extraite de `cpu_init.c`, contre la boucle softfloat du vrai `fpu_softfloat.c.o`, 8 états | 9 094 144 vecteurs (36,4 M voies), 905 792 par le chemin court : **0 divergence** ; **8 mutants sur 8 détectés** (borne d'opérande, b non testé, `vfmadd` pour `vnmsubfp`, exemption sur b au lieu de c, `FLT_MIN` admis, infini admis, signe non inversé, seconde fenêtre de la porte oubliée) |
+| compilation isolée des fichiers touchés (`ppc`, `ppc64`, `libsystem`) | sans erreur ni avertissement ; aarch64 non compilé |
+
+Ce sont des preuves du **modèle** ; l'émetteur réel (encodages, registres) ne sera prouvé qu'en
+VM. À faire au feu vert, dans l'ordre :
+
+1. **Construire** `~/src/qemu-d3tcg` (`configure` comme la référence) ; `-d out_asm` sur un
+   démarrage court pour relire le code de `ppc_vfp` et les appels directs de `x-jit-rel32` ;
+   `vfpproof.sh` complet (`N = 20 000 000`, comme §26.2) avec `VFPPROOF_NATIVE=1`.
+2. **VM de dev** (`devloop.py`, 10.4.11) : `vfptest` (NJ 0/1, catalogue 40³, 2^22 vecteurs) et
+   `vmxtest` (nouveau : `vsldoi` aux 16 décalages, `vmrg[hl]w`, recouvrements de registres par
+   `asm`, `stve[bhw]x` aux 16 adresses, fautes sur une page en lecture seule) : **empreintes
+   identiques** propriétés éteintes, allumées, allumées avec vérificateurs ; bilans `vmx-verify`
+   et `vfp-native-verify` à 0 divergence ; `tbtest` sous `x-tb-verify` avec 0023.
+3. **Mutants de l'émetteur x86** (à la manière de `fpnat-mut.sh`) : borne d'opérande, infini
+   admis, `vfmadd231ps` pour `vnmsubfp`, seconde fenêtre de porte sautée ; pour 0021 un décalage
+   de `stve` faux et un `extract2` décalé : chacun doit changer l'empreinte de `vfptest`/`vmxtest`
+   et faire diverger le vérificateur.
+4. **Partie DOOM 3 vérifiée** (`VMXINLINE=1 VFPNATIVE=1 VMXVERIFY=1 VFPNVERIFY=1 TBVERIFY=1`,
+   VM quotidienne) : des centaines de millions d'opérations, 0 divergence, part du chemin court.
+5. **Bancs** : `vfptest banc` (1 492 ms aujourd'hui, attendu ~500-700), `vmxtest banc`, `tbtest`.
+6. **A/B DOOM 3** (`tools/tcg/matab.sh`, VM quotidienne, hôte au repos, parties entrelacées sur
+   un QEMU relancé), un poste à la fois puis l'ensemble, binaire `qemu-d3tcg` des deux côtés :
+
+        QEMU_BIN=~/src/qemu-d3tcg/build/qemu-system-ppc tools/tcg/matab.sh d3-rel32 6 \
+            "r0:" "r1:JITREL32=1" d3 fen
+        # de même "v0:" "v1:VFPNATIVE=1", "m0:" "m1:VMXINLINE=1",
+        # puis "t0:" "t1:VMXINLINE=1 VFPNATIVE=1 JITREL32=1"
+
+   0023 se lit au banc `tbtest` et binaire contre binaire (référence contre `qemu-d3tcg`, les trois
+   propriétés éteintes). Puis la matrice du PC (mb, zen, ut, d3) sur la configuration retenue,
+   avant toute mise par défaut. L'ordre des A/B suivra le profil x86 de DOOM 3.
+7. **Parité** : sur le M4, compiler l'émetteur aarch64 de 0022 et refaire 2-5 avec des mutants
+   NEON ; 0021 et 0023 y valent tels quels ; 0024 n'y a pas d'objet.
