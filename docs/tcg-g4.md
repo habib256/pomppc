@@ -2533,4 +2533,19 @@ x-vperm-fast x-lfs-inline`), deux démarrages de VM par binaire, trois tours cha
 Contre `x-fast-fp` seul (sans `x-fp-inline` ni `x-fp-flat`), le même jour : chaîne simple
 460 → 185 ms, sommets double 1 970 → 754 ms.
 
-Ce PC n'a pas les jeux de la matrice (`bench/matrice` tourne sur le M4) : pas d'A/B en jeu ici.
+### 25.6 A/B en jeu (03/10/2026)
+
+`tools/tcg/matab.sh x86-<jeu> 3 "avant:QEMU_BIN=~/src/qemu-avant0017/build/qemu-system-ppc"
+"apres:" <jeu> fen` : binaire « avant » = la référence moins 0017-0019 (mêmes sources qgpu, même
+tablette), VM quotidienne du PC (10.4.6, SMP 2, backend GL de la RTX 4060 Ti), parties entrelacées
+A B B A A B, chacune sur un QEMU relancé, hôte au repos (0 autre QEMU). Seuls trois jeux de la
+matrice sont sur ce PC.
+
+| cellule | avant (médiane, min..max) | après | écart |
+|---|---|---|---|
+| UT2004 fenêtre | 62,7 (61,4..63,3) | 60,0 (58,5..61,6) | **−4,3 %** |
+| Marble Blast fenêtre | 21,8 (21,5..22,2) | 21,0 (20,4..21,0) | **−3,7 %** |
+| Zenerchi fenêtre (menu) | 7,5 (7,4..7,6) | 7,0 (6,8..7,1) | **−6,7 %** |
+
+Gain modeste et de même sens partout, comme sur le M4 (§23.5, §24.5) : le temps d'image n'en
+récupère qu'une partie, le reste est ailleurs (plugin, géométrie, rendu).

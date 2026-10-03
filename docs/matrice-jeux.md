@@ -268,6 +268,53 @@ une liste d'instances (profils d'un même jeu, Nexuiz).
   relecture attendait l'échange suivant alors que DOOM 3 et Prey copient avant dans une
   texture hôte (`BAD_ARG`). Corrigés : tour `20260927-0307`, 10 vertes.
 
+## 6 quater. La matrice du PC Linux (nuit du 02 au 03/10/2026)
+
+PC Linux (i7-10700F, RTX 4060 Ti, pilote NVIDIA 595.91.07), VM quotidienne `disks/tiger.qcow2`
+(**Tiger 10.4.6**, SMP 2, fenêtre QEMU native), QEMU de référence 11.1.2 avec toute la série
+(tcg/0017-0019, usbhid/0001, `QGPU_CAP_FIXED4`), backend GL sur le GPU de l'hôte, paquet invité
+du 02/10 (plugin `FIXED4`, kexts POMPPCGPU et POMPPCFsqrt). Hôte au repos (0 autre QEMU).
+
+**Ce que ce PC a** : Marble Blast, Zenerchi, UT2004. Les autres jeux (DOOM 3, Prey, Colin
+McRae, Warcraft III, Nexuiz, RTCW) ne sont que sur le M4 : cinq cellules sur seize.
+
+**Portage** : rejoueur compilé contre EGL (`GL_LIBS`), PNG par ImageMagick, charge par
+`/proc/loadavg` ; `tools/tcg/matab.sh` tire le dépôt de git (il avait le chemin du M4 en dur).
+**Références par hôte** : une image rendue par NVIDIA n'est pas celle d'Apple ; sous Linux, le
+manifeste est `tools/matrice/references-linux.csv` et les fichiers `bench/matrice/ref-linux/`
+(le premier tour avait réécrit l'entrée `mb-fen` du manifeste du M4, remise en état). **Planchers
+par hôte** : `plancher_ms_linux` (Marble Blast 26, Zenerchi 10, UT2004 104), même règle
+(1,25 × le temps typique ; le pire observé pour UT2004, très dispersé). Le premier passage sur
+la VM a demandé : la clé de la matrice (`.run/cmr/id_rsa`, déposée par mot de passe ; `expect`
+manque ici), `~/matrice/ut-seed.dylib` compilé dans la VM de dev (pas de gcc dans la VM
+quotidienne).
+
+| tour | Marble Blast fen / pe | Zenerchi fen | UT2004 fen / pe |
+|---|---|---|---|
+| `20261003-0003` (références créées) | — (jeu non lancé, aléa) / 19,8 | 7,9 | 60,5 / 74,7 |
+| `20261003-0018` (références validées) | 20,8 / 20,0 | 7,9 | 82,8 / 83,4 |
+| `20261003-0157` (planchers du PC) | **vert** 22,0 / **vert** 21,0 | **vert** 7,8 | **vert** 82,7 / rouge (image) 59,3 |
+
+Images justes partout où il y a une image (rejeu = VM et référence à 0,00), sauf une fois :
+
+- **UT2004 plein écran, « rejeu ≠ VM »** (`20261003-0157/ut-pe`) : la capture de la VM (image
+  130, confirmée par `frames.csv`) montre une surface irisée en gros plan ; **aucune** des 60
+  images rejouées du vidage n'en approche (écart moyen minimal 32). Ce n'est donc pas une
+  capture prise hors du vidage : l'écran vivant a montré ce que le flux, rejoué depuis l'état
+  vidé, ne produit pas. Rejouée quatre fois : verte 4 sur 4 (1 sur 7 cette nuit). Le M4 l'a vu
+  aussi (`docs/protocole-v23-etat.md` §4) ; cause non trouvée.
+
+Vitesse : UT2004 est limité par l'émulation (`sample` dans l'invité : le fil principal calcule
+— moteur, particules —, la présentation pèse 4 % ; côté hôte, les deux vCPU à 96 %, le rendu GL
+à 15 %) ; d'où le facteur ~2 contre le M4, dont un cœur va bien plus vite. Sa dispersion est
+réelle et s'explique : sur un QEMU tout juste relancé et sans vidage (A/B), 58,5 à 63,3 ms/image ;
+dans une session de 35 min déjà passée par d'autres jeux, 65,8 à 67,7 sans vidage et **70,1 à
+77,9 avec** (même session, trois parties chacun) ; les tours complets, avec vidage et en fin de
+session, vont de 59 à 83. Le mode vidage coûte ~10 % à UT2004 (~0,4 ms à Zenerchi, §5). Un gel au démarrage (deux vCPU au même
+PC du noyau, écran noir) a été levé par un `system_reset` (procédure de la matrice).
+
+A/B en jeu de tcg/0017-0019 (avant/après) : `docs/tcg-g4.md` §25.6.
+
 ## 6 ter. Le tour du 27/09/2026 après midi (Nexuiz porté)
 
 Tour `bench/matrice/20260927-1018` (plugin `20260927-dumpat` = `20260927-rtt` + déclencheur

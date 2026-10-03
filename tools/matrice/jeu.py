@@ -6,6 +6,7 @@ sa scène fixe est atteinte (fenêtre de mesure dans frames.csv), comment il
 s'arrête et ce qu'il faut sauvegarder puis rendre (fichiers de réglages).
 """
 
+import sys
 import time
 
 MODES = ("fen", "pe")          # fenêtre, plein écran
@@ -19,7 +20,9 @@ class Jeu:
     processus = None            # nom du processus (ps -c) : arrêt
     processus_ui = None         # nom pour System Events (premier plan), défaut = processus
     non_automatise = {}         # mode -> raison (cellule « non automatisé »)
-    plancher_ms = None          # ms/image au-delà : vitesse rouge
+    plancher_ms = None          # ms/image au-delà : vitesse rouge (calé sur le M4)
+    plancher_ms_linux = None    # le même pour le PC Linux (02/10/2026 : hôte, GPU et
+                                # émulation différents) ; None : plancher_ms
     echanges_par_image = 1      # échanges (frames.csv) par image du jeu : Colin McRae en fait 3
     redemarrer_apres = False    # redémarrer l'invité après la cellule (Colin McRae)
     delai_scene = 900           # s pour atteindre la fin de la fenêtre de mesure
@@ -32,6 +35,12 @@ class Jeu:
 
     def modes(self):
         return [m for m in MODES]
+
+    def plancher(self):
+        """Plancher de vitesse de CET hôte (ms/image), ou None."""
+        if sys.platform.startswith("linux") and self.plancher_ms_linux:
+            return self.plancher_ms_linux
+        return self.plancher_ms
 
     # --- réglages du jeu : sauvegarde et remise en état (configs intactes)
     def fichiers_reglages(self, mode):

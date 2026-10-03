@@ -46,6 +46,7 @@ class MarbleBlast(Jeu):
     famille = "pipeline fixe"
     processus = "MarbleBlast Gold"
     plancher_ms = 13          # 9,3 fenêtre / 10,2 plein écran au 29/09 (tour 20260929-2344, hôte au repos)
+    plancher_ms_linux = 26    # PC (i7-10700F, RTX 4060 Ti) : 20,4-21,0 fenêtre / 19,8-20,0 plein écran au 03/10
     delai_scene = 300
     dump_images = 60
 

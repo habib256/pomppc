@@ -327,8 +327,12 @@ class Hote:
                 if os.path.basename(p[1]) in ("zsh", "bash", "sh", "python3", "Python", "pgrep"):
                     continue
                 autres.append(l)
-            la = subprocess.run(["sysctl", "-n", "vm.loadavg"], capture_output=True, text=True).stdout
-            la = la.strip("{} \n").split()[0]
+            if sys.platform == "darwin":
+                la = subprocess.run(["sysctl", "-n", "vm.loadavg"], capture_output=True,
+                                    text=True).stdout
+                la = la.strip("{} \n").split()[0]
+            else:
+                la = open("/proc/loadavg").read().split()[0]
         except OSError:
             return "?"
         return "%s autre(s) QEMU, charge %s" % (len(autres), la)

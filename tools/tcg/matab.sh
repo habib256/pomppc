@@ -23,8 +23,10 @@
 # bench/tcg/ab/CAMPAGNE/bilan.txt (tools/tcg/matabsum.py).
 # JAMAIS de suppression de .run/tiger.lock : on attend qu'il se libère.
 set -u
-R=/Users/mercure/src/pomppc
 WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# dépôt principal (.run/, bench/), même depuis un worktree ; c'était le chemin du M4 en dur
+R="$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')"
+R="${R:-$WT}"
 TS=$WT/tools/guest/tssh.sh
 LOCK=$R/.run/tiger.lock
 . "$WT/scripts/hostcompat.sh"

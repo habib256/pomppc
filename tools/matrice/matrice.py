@@ -46,11 +46,15 @@ from jeu import NOM_MODE, MODES                    # noqa: E402
 
 ICI = os.path.dirname(os.path.abspath(__file__))
 BENCH = os.path.join(MAIN, "bench", "matrice")
-REF = os.path.join(BENCH, "ref")
+# Références par hôte (02/10/2026) : une image rendue par le GL d'Apple (M4) et une
+# rendue par NVIDIA (PC Linux) ne sont pas les mêmes ; chaque hôte a son manifeste
+# versionné et son dossier de référence (hors dépôt).
+LINUX = sys.platform.startswith("linux")
+REF = os.path.join(BENCH, "ref-linux" if LINUX else "ref")
 # MATRICE_BIN : outils d'un worktree à part (instance sur recouvrement, 30/09) —
 # sinon bench/matrice/bin, partagé, reconstruit par quiconque a des sources plus récentes
 BIN = os.environ.get("MATRICE_BIN") or os.path.join(BENCH, "bin")
-MANIFESTE = os.path.join(ICI, "references.csv")
+MANIFESTE = os.path.join(ICI, "references-linux.csv" if LINUX else "references.csv")
 G = "/Users/tiger/matrice"                         # dossier de la matrice dans l'invité
 TRIG = "/tmp/matrice-go"
 ORDRE = ["mb", "zen", "d3", "prey", "ut", "wc3", "cmr", "nx", "nxg", "rtcw"]
@@ -58,6 +62,10 @@ ORDRE = ["mb", "zen", "d3", "prey", "ut", "wc3", "cmr", "nx", "nxg", "rtcw"]
 # tolérances de l'image (écart moyen par composante / % de pixels > 16)
 TOL_CAPTURE = (0.3, 0.2)     # rejeu contre capture de la VM (curseur logiciel : ~0,1 %)
 TOL_REF = (0.5, 0.1)         # rejeu de la référence contre l'image de référence
+
+
+# OpenGL du rejoueur : CGL sur macOS, EGL sous Linux (02/10/2026, matrice du PC)
+GL_LIBS = (["-framework", "OpenGL"] if sys.platform == "darwin" else ["-lEGL", "-lGL", "-ldl"])
 
 
 # ------------------------------------------------------------------ outils
@@ -72,7 +80,7 @@ def construit_outils():
                         ["cc", "-std=gnu11", "-O1", "-pthread", "-w", "-I", q,
                          os.path.join(WT, "tests", "qgpu_replay.c"),
                          os.path.join(q, "qgpu-core.c"), os.path.join(q, "qgpu-soft.c"),
-                         os.path.join(q, "qgpu-gl.c"), "-framework", "OpenGL", "-lm"]),
+                         os.path.join(q, "qgpu-gl.c")] + GL_LIBS + ["-lm"]),
         "ppmcmp": ([os.path.join(ICI, "ppmcmp.c")],
                    ["cc", "-O2", "-Wall", os.path.join(ICI, "ppmcmp.c"), "-lm"]),
     }
@@ -143,7 +151,10 @@ def sha256(chemin):
 
 def en_png(ppm):
     png = ppm[:-4] + ".png"
-    subprocess.run(["sips", "-s", "format", "png", ppm, "--out", png], capture_output=True)
+    if sys.platform == "darwin":
+        subprocess.run(["sips", "-s", "format", "png", ppm, "--out", png], capture_output=True)
+    else:                               # Linux : ImageMagick
+        subprocess.run(["convert", ppm, png], capture_output=True)
     return png if os.path.exists(png) else None
 
 
@@ -162,8 +173,10 @@ CHAMPS_MANIFESTE = ["cellule", "image", "sha256", "fichiers", "octets", "date", 
 
 def ecrit_manifeste(m):
     with open(MANIFESTE, "w") as f:
-        f.write("# Références d'image de la matrice (docs/matrice-jeux.md §3). Les fichiers\n"
-                "# (vidage + image PPM) sont hors dépôt dans bench/matrice/ref/<cellule>/ ;\n"
+        f.write("# Références d'image de la matrice%s (docs/matrice-jeux.md §3). Les fichiers\n"
+                "# (vidage + image PPM) sont hors dépôt dans bench/matrice/%s/<cellule>/ ;\n"
+                % (", hôte PC Linux (NVIDIA)" if LINUX else "", os.path.basename(REF)))
+        f.write(
                 "# ici l'empreinte et la validation à l'œil (validee=oui).\n")
         w = csv.DictWriter(f, CHAMPS_MANIFESTE, lineterminator="\n")   # pas de CRLF (diffs)
         w.writeheader()
@@ -623,8 +636,8 @@ def verdict(res, jeu):
         if int(res["replis"]) > int(res.get("replis_admis") or 0):
             m.append("%s repli(s)%s" % (res["replis"], " (rafraîchissement de fenêtre admis : %s)"
                                         % res["replis_admis"] if res.get("replis_admis", "0") != "0" else ""))
-        if jeu.plancher_ms and float(res["ms_image"]) > jeu.plancher_ms:
-            m.append("%s ms/image > plancher %d" % (res["ms_image"], jeu.plancher_ms))
+        if jeu.plancher() and float(res["ms_image"]) > jeu.plancher():
+            m.append("%s ms/image > plancher %d" % (res["ms_image"], jeu.plancher()))
     m += res.get("image_motif", [])
     if jeu.defaut_connu:
         m.append("défaut connu : " + jeu.defaut_connu)
@@ -685,8 +698,8 @@ def complete(res, jeu, mode, analyse):
         res["image"] = "fausse"
     else:
         res["image"] = "non prouvée"    # pas de vidage, de capture, rejeu en erreur…
-    if jeu.plancher_ms:
-        res["plancher"] = str(jeu.plancher_ms)
+    if jeu.plancher():
+        res["plancher"] = str(jeu.plancher())
     return verdict(res, jeu)
 
 
@@ -805,7 +818,7 @@ def main():
             sys.exit("pas de référence %s" % a.valider)
         m[a.valider]["validee"] = "oui"
         ecrit_manifeste(m)
-        print("référence %s validée : pensez à committer tools/matrice/references.csv" % a.valider)
+        print("référence %s validée : pensez à committer tools/matrice/%s" % (a.valider, os.path.basename(MANIFESTE)))
         return
     construit_outils()
     choisis = [k for k in (a.jeux.split(",") if a.jeux else ordre) if k]
