@@ -239,6 +239,17 @@
    ni l'autre. Ajouté sans changer QGPU_PROTO_VERSION (même règle que
    QGPU_CAP_GEN_SIZES). docs/protocole-v23-geometrie.md. */
 #define QGPU_CAP_GEOM_HOST      0x00020000
+/* 02/10/2026 : le backend GL ne tient que QUATRE unités de texture au pipeline
+   FIXE (GL_MAX_TEXTURE_UNITS de l'hôte = 4 : NVIDIA ; Apple en donne 8). Les
+   unités 4..7 restent entières sous programme ARB ou GLSL (coordonnées,
+   matrices, textures : GL_MAX_TEXTURE_COORDS et _IMAGE_UNITS de l'hôte ≥ 8).
+   L'invité annonce alors GL_MAX_TEXTURE_UNITS = 4, comme un GeForce FX, et
+   rend en logiciel un dessin du pipeline fixe qui allume une 5ᵉ unité. NVIDIA
+   IGNORE ces unités sans la moindre erreur GL : sans ce bit, c'est l'image qui
+   serait fausse. Ajouté sans changer QGPU_PROTO_VERSION (même règle que
+   QGPU_CAP_GEN_SIZES) : un plugin qui l'ignore annonce 8 unités, et l'hôte le
+   signale (stderr) au premier dessin qui en allume une au-delà de 4. */
+#define QGPU_CAP_FIXED4         0x00040000
 
 /* ── Statuts : QGPU_ST_* dans qgpu_abi.h ─────────────────────────────────── */
 /* ── Limites ─────────────────────────────────────────────────────────────── */

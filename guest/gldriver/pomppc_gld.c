@@ -527,7 +527,10 @@ long gldCreateContext(long a, long b, long c, long d, long e, long f, long g, lo
     if (r == 0 && e && pomppc_accel_enabled()) {
         unsigned char *cfg = (unsigned char *)e;
         unsigned short u = (unsigned short)pomppc_backend_units();
-        if (GLD_U16(cfg, 0xb4) > u) GLD_U16(cfg, 0xb4) = u;
+        unsigned short uf = (unsigned short)pomppc_backend_fixed_units();
+        /* +b4 = GL_MAX_TEXTURE_UNITS, le pipeline fixe : 4 sur un hôte NVIDIA
+           (QGPU_CAP_FIXED4) ; images et coordonnées gardent les 8 du device. */
+        if (GLD_U16(cfg, 0xb4) > uf) GLD_U16(cfg, 0xb4) = uf;
         if (GLD_U16(cfg, 0xb6) > u) GLD_U16(cfg, 0xb6) = u;
         if (GLD_U16(cfg, 0xba) > u) GLD_U16(cfg, 0xba) = u;
     }

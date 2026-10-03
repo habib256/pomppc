@@ -121,6 +121,10 @@ typedef struct GlState {
     void (*DisableVertexAttribArrayARB)(GLuint);
     void (*GetProgramivARB)(GLenum, GLenum, GLint *);
     bool has_prog;
+    /* QGPU_CAP_FIXED4 : unités du pipeline FIXE de l'hôte (4 sur NVIDIA, 8
+       sur Apple), bornées à QGPU_MAX_UNITS ; au-delà, seulement sous programme */
+    int fixed_units;
+    bool fixed_warned;
     GLint max_env[2], max_local[2];   /* limites de l'hôte, [VP, FP] */
     /* program.env est un état du contexte GL HÔTE, unique, que se partagent
        tous les contextes invités : on note à qui appartient ce qui y est. */
@@ -342,6 +346,12 @@ typedef struct GlSurface {
 #endif
 #ifndef GL_NUM_EXTENSIONS
 #define GL_NUM_EXTENSIONS       0x821D
+#endif
+#ifndef GL_MAX_TEXTURE_COORDS
+#define GL_MAX_TEXTURE_COORDS   0x8871      /* QGPU_CAP_FIXED4 */
+#endif
+#ifndef GL_MAX_TEXTURE_IMAGE_UNITS
+#define GL_MAX_TEXTURE_IMAGE_UNITS 0x8872
 #endif
 #ifndef GL_MAX_TEXTURE_UNITS
 #define GL_MAX_TEXTURE_UNITS    0x84E2
@@ -674,10 +684,23 @@ static bool gl_selftest(GlState *g, const char **why)
     *why = NULL;
     gl_err_flush();
     glGetIntegerv(GL_MAX_TEXTURE_UNITS, &units);
-    if (!gl_err_ok() || units < QGPU_MAX_UNITS) {
+    if (!gl_err_ok() || units < 4) {
         /* la requête elle-même n'existe plus en profil cœur */
         *why = "unités de texture du pipeline fixe";
         return false;
+    }
+    /* QGPU_CAP_FIXED4 : 4 unités fixes suffisent (NVIDIA : 4, et les unités
+       4..7 y sont IGNORÉES sans erreur), pourvu que les programmes aient
+       leurs 8 jeux de coordonnées et 8 textures. */
+    g->fixed_units = units < QGPU_MAX_UNITS ? units : QGPU_MAX_UNITS;
+    if (units < QGPU_MAX_UNITS) {
+        GLint coords = 0, img = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_COORDS, &coords);
+        glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &img);
+        if (!gl_err_ok() || coords < QGPU_MAX_UNITS || img < QGPU_MAX_UNITS) {
+            *why = "coordonnées ou unités d'image de texture";
+            return false;
+        }
     }
     if (!gl_probe_make(g, true, &fbo, &tex, &zt)) {
         *why = "FBO 1×1 profondeur+stencil";
@@ -1803,6 +1826,7 @@ static bool gl_init(QgpuCore *c)
         }
     }
     /* G4/G6 : ce qu'on annonce, on le tient — ou on laisse la place au soft. */
+    g->fixed_units = QGPU_MAX_UNITS;
     if (!gl_selftest(g, &why)) {
         fprintf(stderr, "qgpu: backend gl refusé par l'auto-test : %s (%s)%s\n",
                 why ? why : "?", g->renderer ? g->renderer : "?",
@@ -1810,6 +1834,12 @@ static bool gl_init(QgpuCore *c)
         if (!getenv("QGPU_GL_FORCE")) {
             goto fail;
         }
+    }
+    if (g->fixed_units < QGPU_MAX_UNITS) {
+        c->caps |= QGPU_CAP_FIXED4;
+        fprintf(stderr, "qgpu: backend gl : %d unités de texture au pipeline fixe "
+                "(%d sous programme), QGPU_CAP_FIXED4 (%s)\n", g->fixed_units,
+                QGPU_MAX_UNITS, g->renderer ? g->renderer : "?");
     }
     /* 30/09 : QGPU_GL_FLUSH=1 — le travail encodé part au GPU à la fin de
        chaque soumission (gl_submit_end). Éteint dans le device, ALLUMÉ par
@@ -1858,6 +1888,11 @@ fail:
     free(g->glsl_fbuf);                 /* posés par la sonde GLSL, s'il y en a eu */
     free(g->glsl_ibuf);
     free(g);
+    /* 02/10/2026 : les bits posés à chaud plus haut ne survivent pas à un
+       refus. Le backend logiciel qui prend la suite les héritait (refus de
+       l'auto-test après la sonde des programmes et du GLSL, hôte NVIDIA). */
+    c->caps &= ~(QGPU_CAP_COMBINE3 | QGPU_CAP_OCCLUSION | QGPU_CAP_GL14 |
+                 QGPU_CAP_PROGRAMS | QGPU_CAP_GLSL | QGPU_CAP_FIXED4);
     return false;
 }
 
@@ -2453,6 +2488,15 @@ static bool gl_unit_env(QgpuCore *c, const QgpuState *st, int u, QgpuTexture *te
     g->ClientActiveTexture(GL_TEXTURE0 + u);
     if (!gl_tex_sync(c, tex)) {
         return false;
+    }
+    /* QGPU_CAP_FIXED4 : un plugin qui l'ignore peut allumer une unité FIXE
+       que l'hôte ignore en silence (NVIDIA) ; on le dit, une fois. */
+    if (u >= g->fixed_units && !st->v[QGPU_SK_FRAGMENT_PROGRAM] && !g->glsl_cur &&
+        !g->fixed_warned) {
+        g->fixed_warned = true;
+        fprintf(stderr, "qgpu: unité de texture %d au pipeline fixe, l'hôte n'en tient "
+                "que %d : ignorée (plugin sans QGPU_CAP_FIXED4, à mettre à jour)\n",
+                u, g->fixed_units);
     }
     gl_disable_targets(g);
     glEnable(((GlTexture *)tex->priv)->target);

@@ -1494,6 +1494,55 @@ int main(int argc, char **argv)
            couleur. La couleur du brouillard n'est pas comparée directement :
            son arrondi dépend de l'implémentation. */
         check_cond("couloir dessiné (image non uniforme)", distinct_colors(24) >= 24);
+    } else if (!strcmp(scene, "units")) {
+        /* QGPU_CAP_FIXED4 (02/10/2026) : GL_MAX_TEXTURE_UNITS annoncé (4 sur un
+           hôte NVIDIA, qui ignore EN SILENCE les unités fixes suivantes ; 8
+           sinon), puis TOUTES ces unités allumées au pipeline fixe, chacune en
+           GL_MODULATE d'un texel 1×1. Blanc partout, sauf l'avant-dernière
+           (255,255,0) et la dernière (0,255,255) : vert attendu, jaune si la
+           dernière est perdue, cyan si c'est l'avant-dernière. */
+        static const unsigned char white[3] = { 255, 255, 255 };
+        static const unsigned char noblue[3] = { 255, 255, 0 };
+        static const unsigned char nored[3] = { 0, 255, 255 };
+        GLint nu = 0;
+        GLuint id[3];
+        int u;
+        glGetIntegerv(GL_MAX_TEXTURE_UNITS_ARB, &nu);
+        printf("  GL_MAX_TEXTURE_UNITS = %d\n", (int)nu);
+        check_cond("au moins 4 unités annoncées", nu >= 4);
+        if (nu > 8) nu = 8;
+        glGenTextures(3, id);
+        for (u = 0; u < 3; u++) {
+            glBindTexture(GL_TEXTURE_2D, id[u]);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 1, 1, 0, GL_RGB, GL_UNSIGNED_BYTE,
+                         u == 0 ? white : u == 1 ? noblue : nored);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        for (u = 0; u < nu; u++) {
+            glActiveTextureARB(GL_TEXTURE0_ARB + u);
+            glBindTexture(GL_TEXTURE_2D, id[u == nu - 1 ? 2 : u == nu - 2 ? 1 : 0]);
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+            glEnable(GL_TEXTURE_2D);
+        }
+        glColor3f(1, 1, 1);
+        glBegin(GL_QUADS);
+        for (u = 0; u < 4; u++) {
+            int k;
+            for (k = 0; k < nu; k++)
+                glMultiTexCoord2fARB(GL_TEXTURE0_ARB + k, 0.5f, 0.5f);
+            glVertex2f(u == 1 || u == 2 ? W : 0, u >= 2 ? H : 0);
+        }
+        glEnd();
+        glFinish();
+        check_near("toutes les unités annoncées appliquées", W / 2, H / 2, 0x00FF00, 2);
+        for (u = nu - 1; u >= 0; u--) {
+            glActiveTextureARB(GL_TEXTURE0_ARB + u);
+            glDisable(GL_TEXTURE_2D);
+        }
+        glDeleteTextures(3, id);
     } else if (!strcmp(scene, "comb")) {
         /* GL_COMBINE et quatre unités (Marble Blast, moteur Torque) : une
            bande par montage, textures 1×1 pour que le résultat soit exact.
