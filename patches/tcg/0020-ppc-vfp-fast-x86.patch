@@ -1,0 +1,128 @@
+diff --git a/target/ppc/int_helper.c b/target/ppc/int_helper.c
+index f47e687..4afc7c6 100644
+--- a/target/ppc/int_helper.c
++++ b/target/ppc/int_helper.c
+@@ -571,6 +571,96 @@ static inline uint32_t vfp_u(float f)
+     return x;
+ }
+ 
++#if defined(__x86_64__) && !HOST_BIG_ENDIAN
++/*
++ * x86_64 host (POMPPC tcg/0020): the same per-lane decisions, for the four
++ * lanes at once, on the bit patterns: x is zero or normal iff |x| == 0 or
++ * 0x00800000 <= |x| <= 0x7f7fffff; |r| <= FLT_MIN iff |r| <= 0x00800000
++ * (r is finite or infinite, never a NaN: the inputs are zero or normal).
++ * vaddps/vsubps (AVX), vfmadd231ps (FMA3: one rounding, like fmaf()).
++ */
++static inline __m128i __attribute__((target("avx")))
++vfp_x86_notzon(__m128i abs)
++{
++    __m128i den = _mm_and_si128(_mm_cmpgt_epi32(abs, _mm_setzero_si128()),
++                                _mm_cmplt_epi32(abs, _mm_set1_epi32(0x00800000)));
++
++    return _mm_or_si128(den, _mm_cmpgt_epi32(abs, _mm_set1_epi32(0x7f7fffff)));
++}
++
++static inline __m128i __attribute__((target("avx")))
++vfp_x86_abs(__m128i x)
++{
++    return _mm_and_si128(x, _mm_set1_epi32(0x7fffffff));
++}
++
++static inline __m128i __attribute__((target("avx")))
++vfp_x86_tiny(__m128i abs)
++{
++    return _mm_cmplt_epi32(abs, _mm_set1_epi32(0x00800001));
++}
++
++static bool __attribute__((target("avx")))
++vfp_add4_avx(float_status *s, uint32_t *r, const uint32_t *a,
++             const uint32_t *b, bool sub)
++{
++    __m128 va = _mm_loadu_ps((const float *)a);
++    __m128 vb = _mm_loadu_ps((const float *)b);
++    __m128 vr = sub ? _mm_sub_ps(va, vb) : _mm_add_ps(va, vb);
++    __m128i aa = vfp_x86_abs(_mm_castps_si128(va));
++    __m128i ab = vfp_x86_abs(_mm_castps_si128(vb));
++    __m128i ar = vfp_x86_abs(_mm_castps_si128(vr));
++    __m128i both_zero = _mm_cmpeq_epi32(_mm_or_si128(aa, ab),
++                                        _mm_setzero_si128());
++    __m128i bad = _mm_or_si128(_mm_or_si128(vfp_x86_notzon(aa),
++                                            vfp_x86_notzon(ab)),
++                               _mm_andnot_si128(both_zero, vfp_x86_tiny(ar)));
++
++    if (_mm_movemask_ps(_mm_castsi128_ps(bad))) {
++        return false;
++    }
++    if (_mm_movemask_ps(_mm_castsi128_ps(
++            _mm_cmpeq_epi32(ar, _mm_set1_epi32(0x7f800000))))) {
++        float_raise(float_flag_overflow, s);
++    }
++    _mm_storeu_ps((float *)r, vr);
++    return true;
++}
++
++static bool __attribute__((target("avx,fma")))
++vfp_fma4_fma3(float_status *s, uint32_t *r, const uint32_t *a,
++              const uint32_t *b, const uint32_t *c, int flags)
++{
++    __m128i ia = _mm_loadu_si128((const __m128i *)a);
++    __m128i ib = _mm_loadu_si128((const __m128i *)b);
++    __m128i ic = _mm_loadu_si128((const __m128i *)c);
++    __m128i nc = _mm_set1_epi32(flags & float_muladd_negate_c ? 0x80000000 : 0);
++    __m128i nres = _mm_set1_epi32(flags & float_muladd_negate_result ?
++                                  0x80000000 : 0);
++    __m128 vr = _mm_fmadd_ps(_mm_castsi128_ps(ia), _mm_castsi128_ps(ic),
++                             _mm_castsi128_ps(_mm_xor_si128(ib, nc)));
++    __m128i aa = vfp_x86_abs(ia), ac = vfp_x86_abs(ic);
++    __m128i ar = vfp_x86_abs(_mm_castps_si128(vr));
++    __m128i prod_zero = _mm_or_si128(_mm_cmpeq_epi32(aa, _mm_setzero_si128()),
++                                     _mm_cmpeq_epi32(ac, _mm_setzero_si128()));
++    __m128i bad = _mm_or_si128(_mm_or_si128(vfp_x86_notzon(aa),
++                                            vfp_x86_notzon(vfp_x86_abs(ib))),
++                               _mm_or_si128(vfp_x86_notzon(ac),
++                                            _mm_andnot_si128(prod_zero,
++                                                             vfp_x86_tiny(ar))));
++
++    if (_mm_movemask_ps(_mm_castsi128_ps(bad))) {
++        return false;
++    }
++    if (_mm_movemask_ps(_mm_castsi128_ps(_mm_andnot_si128(prod_zero,
++            _mm_cmpeq_epi32(ar, _mm_set1_epi32(0x7f800000)))))) {
++        float_raise(float_flag_overflow, s);
++    }
++    _mm_storeu_si128((__m128i *)r, _mm_xor_si128(_mm_castps_si128(vr), nres));
++    return true;
++}
++#endif
++
+ static bool vfp_add4(float_status *s, uint32_t *r, const uint32_t *a,
+                      const uint32_t *b, bool sub)
+ {
+@@ -578,6 +668,11 @@ static bool vfp_add4(float_status *s, uint32_t *r, const uint32_t *a,
+     bool ok = vfp_can_use_fpu(s), inf = false;
+     int i;
+ 
++#if defined(__x86_64__) && !HOST_BIG_ENDIAN
++    if (likely(cpuinfo & CPUINFO_AVX1)) {
++        return ok && vfp_add4_avx(s, r, a, b, sub);
++    }
++#endif
+     for (i = 0; i < 4; i++) {
+         float fa = vfp_f(a[i]), fb = vfp_f(b[i]);
+         float fr = sub ? fa - fb : fa + fb;
+@@ -610,8 +705,13 @@ static bool vfp_fma4(float_status *s, uint32_t *r, const uint32_t *a,
+     bool ok = vfp_can_use_fpu(s), inf = false;
+     int i;
+ 
++#if defined(__x86_64__) && !HOST_BIG_ENDIAN
++    if (likely(cpuinfo & CPUINFO_FMA)) {
++        return ok && vfp_fma4_fma3(s, r, a, b, c, flags);
++    }
++#endif
+ #if defined(__x86_64__) || defined(__i386__)
+-    ok = false;     /* softfloat may force soft FMA there (force_soft_fma) */
++    ok = false;     /* without FMA3, fmaf() may be libm's slow emulation */
+ #endif
+     for (i = 0; i < 4; i++) {
+         float fr = fmaf(vfp_f(a[i]), vfp_f(c[i]), vfp_f(b[i] ^ nc));
