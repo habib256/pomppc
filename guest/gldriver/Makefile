@@ -23,7 +23,7 @@ LIBS    = -framework IOKit -framework CoreFoundation
 # « GLDriver » quand il vivait dans Resources, ne sert plus.
 NAME    = GLDriver-POMPPC
 BIN     = $(NAME).bundle/Contents/MacOS/$(NAME)
-OBJS    = pomppc_gld.o pomppc_accel.o pomppc_qgpu.o gld_tramp.o
+OBJS    = pomppc_gld.o pomppc_accel.o pomppc_qgpu.o pomppc_vec.o gld_tramp.o
 
 all: $(BIN) $(NAME).bundle/Contents/Info.plist
 
@@ -40,6 +40,12 @@ qgpu_proto.h: $(PROTO_DIR)/qgpu_proto.h
 qgpu_abi.h: $(PROTO_DIR)/qgpu_abi.h
 	cp $< $@
 endif
+
+# 03/10 (POMPPC_GL_IDXVEC) : le balayage AltiVec des indices, SEUL fichier
+# compilé avec -faltivec (mots-clés vector / pixel / bool : à tenir hors du
+# reste). Appelé seulement si hw.vectorunit l'annonce.
+pomppc_vec.o: pomppc_vec.c pomppc_gld.h
+	$(CC) $(CFLAGS) -faltivec -c $< -o $@
 
 gld_tramp.o: gld_tramp.s
 	$(CC) -arch ppc -c $< -o $@

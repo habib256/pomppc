@@ -129,10 +129,16 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261001-tout"
+#define POMPPC_PLUGIN_REV "20261003-d3x"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
+/* 03/10, étape 3 (docs/d3-plugin-x86.md) : éteints tant que l'A/B et la
+   preuve d'image ne sont pas faits. La variable d'environnement prime. */
+#define IDXLAZY_DEFAULT 0
+#define IDXVEC_DEFAULT  0
+#define DISPONE_DEFAULT 0
+#define UNITVD_DEFAULT  0
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -699,6 +705,10 @@ typedef struct PCtx {
     void         **procs;               /* table de procédures de GLEngine */
     void          *real[PROC_COUNT];    /* procédures d'Apple pour ce contexte */
     void          *mine[PROC_COUNT];    /* ce que le plugin a installé (0 : rien) */
+    /* 03/10 (POMPPC_GL_DISPONE) : la table telle que le dernier crochetage
+       complet l'a laissée — hook_locked est sans effet sur elle (point fixe) */
+    void          *hook_snap[PROC_COUNT];
+    void         **hook_snap_procs;     /* table photographiée ; 0 : aucune */
     long           qctx;                /* identifiant qgpu, -1 si aucun */
     long           surf;                /* surface qgpu, -1 si aucune */
     unsigned long  sw, sh;              /* taille de la surface */
@@ -1075,6 +1085,31 @@ static struct {
     int             natshm;             /* A4 : tableaux clients en DRAW_NATIVE
                                            (QGPU_CAP_GEOM_HOST, POMPPC_GL_NATSHM=1) */
     unsigned long   n_natshm_draws, n_natshm_bytes, n_natshm_fall;
+    /* ── 03/10, étape 3 de DOOM 3 sur le PC (docs/d3-plugin-x86.md) ──
+       Trois leviers, éteints par défaut (*_DEFAULT), chacun avec ses
+       compteurs (ligne D3X de la note, toutes les CNT_PERIOD images). */
+    int             idxlazy;            /* POMPPC_GL_IDXLAZY : 1 = indices d'un dessin
+                                           natif non balayés quand tous les miroirs
+                                           lus sont propres ; 2 = de même, mais balayés
+                                           quand même pour contrôle (écarts comptés) */
+    int             idxvec;             /* POMPPC_GL_IDXVEC : balayage min/max des
+                                           indices par AltiVec ; 2 = contrôle scalaire */
+    int             dispone;            /* POMPPC_GL_DISPONE : gldUpdateDispatch en une
+                                           passe (un verrou, crochetage sauté quand la
+                                           table est celle du dernier crochetage) */
+    int             unitvd;             /* POMPPC_GL_UNITVD : verdict du dispatch refait
+                                           pour les seules unités que le bloc désigne */
+    unsigned long   n_idx_scan, n_idx_scan_n;   /* dessins indexés balayés, indices */
+    unsigned long   n_idx_vec;          /* … dont balayés par AltiVec */
+    unsigned long   n_idx_lazy, n_idx_lazy_n;   /* natifs sans balayage, indices */
+    unsigned long   n_idx_late;         /* sans balayage décidé, puis balayés (repli) */
+    unsigned long   n_idx_chk, n_idx_chk_diff;  /* IDXLAZY=2 : contrôlés, l'ancienne
+                                           voie aurait refusé (indice hors du VBO) */
+    unsigned long   n_vec_chk, n_vec_diff;      /* IDXVEC=2 */
+    unsigned long   n_hook_skip, n_hook_full;   /* DISPONE */
+    unsigned long   n_uv_take, n_uv_units, n_uv_full;   /* UNITVD : repris, unités
+                                           refaites, renvois au verdict complet */
+    unsigned long   n_uv_chk_same, n_uv_chk_diff;       /* UNITVD + VERDICTCHECK */
     int             native_range;       /* plage de gldFlushBuffer crue (défaut) */
     PBuf           *buf_hash[BUF_HASH]; /* recherche O(1) de buf_from_vbo */
     long            rp_qid[RAWPOOL_MAX];
@@ -2423,6 +2458,29 @@ void pomppc_backend_init(void)
                Allumé par défaut s'il est annoncé ; POMPPC_GL_NATSHM=0 l'éteint. */
             G.natshm = G.native && (G.q.caps & QGPU_CAP_GEOM_HOST) &&
                        !(getenv("POMPPC_GL_NATSHM") && getenv("POMPPC_GL_NATSHM")[0] == '0');
+            /* 03/10, étape 3 (docs/d3-plugin-x86.md). Aucun ne change le
+               protocole ; 0 = comme avant, au bit près. */
+            {
+                const char *e;
+                e = getenv("POMPPC_GL_IDXLAZY");
+                G.idxlazy = G.native ? (e && e[0] ? (int)(e[0] - '0') : IDXLAZY_DEFAULT) : 0;
+                if (G.idxlazy < 0 || G.idxlazy > 2)
+                    G.idxlazy = 1;
+                e = getenv("POMPPC_GL_IDXVEC");
+                G.idxvec = e && e[0] ? (int)(e[0] - '0') : IDXVEC_DEFAULT;
+                if (G.idxvec < 0 || G.idxvec > 2)
+                    G.idxvec = 1;
+                if (G.idxvec && !pomppc_vec_available()) {
+                    gl_note("IDXVEC : pas d'unité AltiVec annoncée (hw.vectorunit) : "
+                            "balayage scalaire\n");
+                    G.idxvec = 0;
+                }
+                e = getenv("POMPPC_GL_DISPONE");
+                G.dispone = e && e[0] ? e[0] != '0' : DISPONE_DEFAULT;
+                e = getenv("POMPPC_GL_UNITVD");
+                G.unitvd = (e && e[0] ? e[0] != '0' : UNITVD_DEFAULT) &&
+                           G.verdict && G.wl && G.texmemo;
+            }
             G.pixtex = -1;
             G.pixtex_w = G.pixtex_h = 0;
             /* 3e passe : numéros de soumission (perte ciblée) à partir de 1 —
@@ -2447,10 +2505,11 @@ void pomppc_backend_init(void)
             gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d lazyapple=%d "
                     "native=%d (plages %d) count=%d verdict=%d verdictcheck=%d whitelist=%d "
                     "texmemo=%d stskip=%d statecheck=%d wlunif=%d stateblk=%d "
-                    "rawsane=%d natshm=%d\n",
+                    "rawsane=%d natshm=%d idxlazy=%d idxvec=%d dispone=%d unitvd=%d\n",
                     G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range,
                     G.count, G.verdict, G.vcheck, G.wl, G.texmemo, G.stskip, G.stcheck,
-                    G.wlunif, G.stblk + G.stblk_check, G.rawsane, G.natshm);
+                    G.wlunif, G.stblk + G.stblk_check, G.rawsane, G.natshm,
+                    G.idxlazy, G.idxvec, G.dispone, G.unitvd);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
                        " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
@@ -9505,9 +9564,10 @@ static int unit_textured(PCtx *p, int u)
 /* Le texturage courant tiendra-t-il sur l'hôte ? Prédicat pur (aucune commande,
  * aucune conversion) : c'est la moitié chère du domaine, appelée à chaque
  * changement d'état, d'où le raccourci « déjà téléversée et propre ». */
+static int geom_texture_unit_ok(PCtx *p, UScan *sc, int u);
+
 static int geom_texture_ok(PCtx *p)
 {
-    unsigned char *g = gls(p);
     int u, i;
     UScan *sc;
 
@@ -9517,7 +9577,18 @@ static int geom_texture_ok(PCtx *p)
     for (i = UNIT_LIM(p); i < SCAN_N(p); i++)
         if (sc ? sc->mask[i] : unit_mask(p, i))
             return no(NO_TEX_UNITS, i, 0);
-    for (u = 0; u < SCAN_N(p); u++) {
+    for (u = 0; u < SCAN_N(p); u++)
+        if (!geom_texture_unit_ok(p, sc, u))
+            return 0;
+    return 1;
+}
+
+/* L'unité u de geom_texture_ok (03/10 : extraite telle quelle pour le
+   verdict par unité, POMPPC_GL_UNITVD). 1 = rien qui refuse. */
+static int geom_texture_unit_ok(PCtx *p, UScan *sc, int u)
+{
+    unsigned char *g = gls(p);
+    {
         unsigned char *us = g + GS_TEXUNIT0 + u * GS_TEXUNIT_SIZE;
         unsigned long mask, env = U16(us, TU_ENV_MODE);
         TexUnit tu;
@@ -9531,7 +9602,7 @@ static int geom_texture_ok(PCtx *p)
         PTex *t;
         unsigned char *lv;
         if (!mask)
-            continue;
+            return 1;
         if (unit_slot(mask) < 0)
             return no(NO_TEX_TARGET, mask, GLD_U32(p->ctx, CTX_TEXUNITS));
         /* Texture 3D ou carte de cube : GLEngine jetait la géométrie brute
@@ -9552,7 +9623,7 @@ static int geom_texture_ok(PCtx *p)
             return no(NO_TEX_UNKNOWN, (unsigned long)dt, mask);
         (void)lv;
         if (!tex_cp(t))
-            continue;                   /* jamais définie : l'unité est coupée, comme en GL */
+            return 1;                   /* jamais définie : l'unité est coupée, comme en GL */
         if (!texture_uploadable(t))
             return 0;
     }
@@ -11598,8 +11669,48 @@ static void __attribute__((unused)) va_pack_vertex(float *dst, PCtx *p, const un
         }
 }
 
+static int va_scan_idx_scalar(const void *idx, unsigned long itype, long count,
+                              unsigned long *minv, unsigned long *maxv);
+
+/* Plage [min, max] des indices. 03/10 (POMPPC_GL_IDXVEC) : 16 et 32 bits par
+   AltiVec (pomppc_vec.c) au-delà de 32 indices ; IDXVEC=2 compare au scalaire
+   (exact par construction : min et max entiers). Même garde de faute que le
+   scalaire (région pack_jmp de geom_draw_client). */
 static int va_scan_idx(const void *idx, unsigned long itype, long count,
                        unsigned long *minv, unsigned long *maxv)
+{
+    int r;
+    G.n_idx_scan++;
+    G.n_idx_scan_n += count > 0 ? (unsigned long)count : 0;
+    if (G.idxvec && count >= 32 && idx &&
+        (itype == VA_GL_UINT || itype == VA_GL_USHORT)) {
+        r = itype == VA_GL_UINT
+            ? pomppc_vec_minmax_u32((const unsigned long *)idx, count, minv, maxv)
+            : pomppc_vec_minmax_u16((const unsigned short *)idx, count, minv, maxv);
+        G.n_idx_vec++;
+        if (G.idxvec == 2) {
+            unsigned long a = 0, b = 0;
+            int rs = va_scan_idx_scalar(idx, itype, count, &a, &b);
+            G.n_vec_chk++;
+            if (rs != r || (r && (a != *minv || b != *maxv))) {
+                G.n_vec_diff++;
+                if (G.n_vec_diff <= 8)
+                    gl_note("IDXVEC écart, image %lu : %ld indices type %lx à %p : "
+                            "vectoriel %d [%lu, %lu], scalaire %d [%lu, %lu]\n",
+                            G.n_frames, count, itype, idx, r, r ? *minv : 0UL,
+                            r ? *maxv : 0UL, rs, a, b);
+                *minv = a;              /* le scalaire fait foi */
+                *maxv = b;
+                return rs;
+            }
+        }
+        return r;
+    }
+    return va_scan_idx_scalar(idx, itype, count, minv, maxv);
+}
+
+static int va_scan_idx_scalar(const void *idx, unsigned long itype, long count,
+                              unsigned long *minv, unsigned long *maxv)
 {
     unsigned long mn = ~0UL, mx = 0;
     long i;
@@ -12043,10 +12154,75 @@ typedef struct NatCli {
 } NatCli;
 #define NATSHM_GAP 64                   /* trou toléré entre deux plages d'un bloc */
 
+/* 03/10 (POMPPC_GL_IDXLAZY, docs/d3-plugin-x86.md §2). Un dessin indexé dont
+ * tous les attributs lus viennent de VBO à miroir PROPRE n'a pas besoin de sa
+ * plage [vmin, vmax] : elle ne sert, dans geom_draw_native, qu'à (1) recopier
+ * les plages sales qu'elle couvre — il n'y en a aucune — et (2) refuser un
+ * indice qui sort du VBO (comportement indéfini en GL ; l'hôte, lui, borne la
+ * lecture à son tampon et rend BAD_ARG non fatal au-delà). Sans tableau
+ * client, les descripteurs désignent le sommet 0 et la commande est la même
+ * octet pour octet que celle de l'ancienne voie. Propre = tranche assez
+ * grande, même copie cliente qu'au dernier ajustement (sinon raw_ensure
+ * salirait tout), aucune plage sale : exactement les cas où raw_ensure rend 1
+ * sans rien toucher et où raw_sync ne recopie rien. */
+static int nat_mirror_clean(const PBuf *b, unsigned long base, unsigned long size)
+{
+    return b && b->rp >= 0 && b->rp_cap >= size && b->raw_base == base && b->rd_n == 0;
+}
+
+static int nat_mirrors_clean(const unsigned char *V, const VaPlan *pl)
+{
+    int j;
+    for (j = 0; j < pl->n; j++) {
+        const VaAttr *at = &pl->a[j];
+        unsigned long vbo, base, size;
+        if (!at->src)
+            continue;                   /* constant : SET_CURRENT ou repli, sans plage */
+        vbo = GLD_U32(V, VA_VBO(V, at->slot));
+        if (!vbo)
+            return 0;                   /* tableau client : la recopie suit la plage */
+        base = GLD_U32((unsigned char *)vbo, VBO_DATA);
+        size = GLD_U32((unsigned char *)vbo, VBO_SIZE);
+        if (!base || !size || size > RAWPOOL_BYTES ||
+            !nat_mirror_clean(buf_from_vbo(vbo), base, size))
+            return 0;
+    }
+    return 1;
+}
+
+/* IDXLAZY=2 : ce que l'ancienne voie aurait refusé avec la vraie plage
+   (attribut hors de son VBO, plage trop large). 1 = mêmes décisions. */
+static int nat_lazy_check(const unsigned char *V, const VaPlan *pl,
+                          unsigned long vmin, unsigned long vmax)
+{
+    int j;
+    if (vmax < vmin || vmax - vmin + 1 > QGPU_MAX_VERTS)
+        return 0;
+    for (j = 0; j < pl->n; j++) {
+        const VaAttr *at = &pl->a[j];
+        unsigned long vbo, base, size, off, stride;
+        if (!at->src)
+            continue;
+        vbo = GLD_U32(V, VA_VBO(V, at->slot));
+        base = GLD_U32((unsigned char *)vbo, VBO_DATA);
+        size = GLD_U32((unsigned char *)vbo, VBO_SIZE);
+        off = (unsigned long)at->src - base;
+        stride = (unsigned long)at->stride;
+        if ((unsigned long)at->src < base || off >= size || at->stride <= 0)
+            continue;                   /* refusé par les deux voies */
+        if (vmax && vmax > (size - off) / stride)
+            return 0;
+        if (off + vmax * stride + (unsigned long)(at->src_n * at->bpc) > size)
+            return 0;
+    }
+    return 1;
+}
+
 static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
                             unsigned long mode, long first, long count,
                             unsigned long itype, const void *indices,
-                            unsigned long vmin, unsigned long vmax, unsigned long nidx)
+                            unsigned long vmin, unsigned long vmax, unsigned long nidx,
+                            int lazy)
 {
     NatBuf nb[QGPU_NATTR_MAX + 1];
     unsigned long d[QGPU_NATTR_MAX][QGPU_NATTR_WORDS];
@@ -12062,6 +12238,32 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
 
     if (!G.native || !V || !pl || pl->n < 1 || pl->n > QGPU_NATTR_MAX)
         return -1;
+    if (lazy) {
+        /* IDXLAZY : plage inutile si tous les miroirs lus sont propres ;
+           sinon, le balayage d'avant (et ses refus, par l'appelant) */
+        if (!nidx || !indices || !nat_mirrors_clean(V, pl)) {
+            if (!nidx || !va_scan_idx(indices, itype, (long)nidx, &vmin, &vmax) ||
+                vmax - vmin + 1 > QGPU_MAX_VERTS)
+                { fwhy = __LINE__; goto fall; }
+            lazy = 0;
+        } else {
+            G.n_idx_lazy++;
+            G.n_idx_lazy_n += nidx;
+            if (G.idxlazy == 2) {       /* contrôle : la vraie plage, jetée après */
+                unsigned long a0 = 0, a1 = 0;
+                G.n_idx_chk++;
+                if (!va_scan_idx(indices, itype, (long)nidx, &a0, &a1) ||
+                    !nat_lazy_check(V, pl, a0, a1)) {
+                    G.n_idx_chk_diff++;
+                    if (G.n_idx_chk_diff <= 8)
+                        gl_note("IDXLAZY écart, image %lu : %lu indices, plage %lu..%lu "
+                                "que l'ancienne voie aurait refusée (DRAW_NATIVE envoyé, "
+                                "l'hôte borne)\n", G.n_frames, nidx, a0, a1);
+                }
+            }
+            vmin = vmax = 0;
+        }
+    }
     nverts = vmax - vmin + 1;
 
     /* 1. Descripteurs : chaque attribut lu vient d'un VBO, dans ses bornes */
@@ -12117,13 +12319,15 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
         if (!nat_type_ok(at->type, at->bpc) || at->src_n < 1 || at->src_n > 4 ||
             at->stride <= 0 || off >= size)
             { fwhy = __LINE__; goto fall; }
-        /* off + vmax·pas + taille ≤ taille logique, sans débordement 32 bits */
-        if (vmax && vmax > (size - off) / stride)
+        /* off + vmax·pas + taille ≤ taille logique, sans débordement 32 bits
+           (IDXLAZY : plage inconnue, l'hôte borne ; [0, 0) ne recopie rien,
+           le miroir étant propre) */
+        if (!lazy && vmax && vmax > (size - off) / stride)
             { fwhy = __LINE__; goto fall; }
-        end = off + vmax * stride + (unsigned long)(at->src_n * at->bpc);
+        end = lazy ? 0 : off + vmax * stride + (unsigned long)(at->src_n * at->bpc);
         if (end > size)
             { fwhy = __LINE__; goto fall; }
-        k = nat_buf_add(nb, &nn, b, base, size, off + vmin * stride, end);
+        k = nat_buf_add(nb, &nn, b, base, size, lazy ? 0 : off + vmin * stride, end);
         if (k < 0)
             { fwhy = __LINE__; goto fall; }
         dbuf[nd] = k;
@@ -12199,6 +12403,14 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
         if (!raw_ensure(p, nb[k].b, nb[k].size, nb[k].base) || !G.native ||
             !raw_sync(p, nb[k].b, nb[k].base, nb[k].size, nb[k].lo, nb[k].hi))
             { fwhy = __LINE__; goto fall; }
+    /* IDXLAZY : la recopie des indices (VBO d'éléments) a pu vider le flux,
+       et un vidage peut invalider des miroirs (rd_all) : ceux des sommets
+       doivent être restés propres, sinon l'empaquetage (qui balaie). */
+    if (lazy)
+        for (j = 0; j < nd; j++)
+            if (dbuf[j] >= 0 && !nat_mirror_clean(nb[dbuf[j]].b, nb[dbuf[j]].base,
+                                                  nb[dbuf[j]].size))
+                { fwhy = __LINE__; goto fall; }
 
     /* 4. Attributs constants du plan : leur valeur en SET_CURRENT (peut
           vider le flux, lui aussi) */
@@ -12335,7 +12547,7 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
         }
     }
     G.n_native_draws++;
-    G.n_native_verts += nverts;
+    G.n_native_verts += lazy ? 0 : nverts;     /* IDXLAZY : plage inconnue */
     va_count_prims(mode, nidx ? nidx : (unsigned long)count);
     p->color = HOST_NEWER;
     if (writes_depth(p))
@@ -12534,6 +12746,25 @@ static void vd_check_at(PCtx *p, const char *where, int disp, int ok, const TexI
     }
 }
 
+/* 03/10 (docs/d3-plugin-x86.md) : compteurs cumulés des trois leviers de
+   l'étape 3, une ligne D3X — seulement si l'un d'eux est allumé. */
+static void d3x_note(const char *why, unsigned long frame)
+{
+    if (!G.idxlazy && !G.idxvec && !G.dispone && !G.unitvd)
+        return;
+    gl_note("D3X %s %lu : indices (idxlazy %d, idxvec %d) %lu dessins balayés "
+            "(%lu indices, %lu par AltiVec), %lu natifs sans balayage (%lu indices), "
+            "%lu balayés après coup ; contrôle %lu, %lu écarts, AltiVec %lu contrôlés, "
+            "%lu écarts | dispatch (dispone %d) %lu crochetages sautés, %lu complets | "
+            "verdict par unité (unitvd %d) %lu repris (%lu unités refaites), %lu "
+            "complets ; contrôle %lu identiques, %lu écarts\n",
+            why, frame, G.idxlazy, G.idxvec, G.n_idx_scan, G.n_idx_scan_n, G.n_idx_vec,
+            G.n_idx_lazy, G.n_idx_lazy_n, G.n_idx_late, G.n_idx_chk, G.n_idx_chk_diff,
+            G.n_vec_chk, G.n_vec_diff, G.dispone, G.n_hook_skip, G.n_hook_full,
+            G.unitvd, G.n_uv_take, G.n_uv_units, G.n_uv_full, G.n_uv_chk_same,
+            G.n_uv_chk_diff);
+}
+
 /* À chaque échange (stats_frame, verrou tenu). */
 static void vd_frame(void)
 {
@@ -12545,6 +12776,7 @@ static void vd_frame(void)
                 G.n_frames, G.n_rawsane, G.n_natshm_draws, G.n_natshm_bytes >> 10,
                 G.n_natshm_fall);
     }
+    d3x_note("image", G.n_frames);
     if (G.vcheck || G.count || G.stcheck) {
         gl_note("VERDICT image %lu : %lu repris, %lu recalculés (clé changée ou sans "
                 "verdict) ; contrôle : %lu identiques, %lu écarts (%lu depuis le début)\n",
@@ -12603,6 +12835,7 @@ static void vd_total(const char *why)
                 "tableaux clients natifs (%lu Kio recopiés), %lu retombés sur l'empaquetage\n",
                 why, G.n_frames, G.n_rawsane, G.n_natshm_draws, G.n_natshm_bytes >> 10,
                 G.n_natshm_fall);
+    d3x_note(why, G.n_frames);          /* 03/10 : bilan cumulé (gltest) */
     if (G.stblk)                        /* A4 : preuve que la voie a servi */
         gl_note("STATEBLK total (%s, image %lu) : %lu blocs (contrôle %d), unités : "
                 "%lu écarts\n", why, G.n_frames, STC.blk_all + STC.blk, G.stblk_check,
@@ -12690,7 +12923,7 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
     unsigned long vk[VKEY_WORDS];
     float *dst;
     PBuf *hb;
-    int host, reuse, filter_bad = 0, vd_same = 0, fresh;
+    int host, reuse, filter_bad = 0, vd_same = 0, fresh, lazy = 0;
     long i;
     static VaPlan plan;                 /* verrou tenu : une seule à la fois */
 
@@ -12779,7 +13012,17 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
         return 0;
     if (!va_sources_ok(p, V, fmt))
         return no(NO_G_SRC, (unsigned long)V, (unsigned long)count);
-    if (indexed && itype != VA_ITYPE_NONE && indices) {
+    if (indexed && itype != VA_ITYPE_NONE && indices && G.idxlazy && G.native &&
+        (itype == VA_GL_UINT || itype == VA_GL_USHORT || itype == VA_GL_UBYTE)) {
+        /* 03/10 (POMPPC_GL_IDXLAZY, docs/d3-plugin-x86.md §2) : la plage
+           n'est balayée que si le chemin natif en a besoin (geom_draw_native),
+           ou s'il se dérobe (plus bas). nverts n'est pas connu ici : seul le
+           nombre d'indices est borné, l'hôte borne la plage. */
+        lazy = 1;
+        vmin = vmax = 0;
+        nverts = 1;
+        nidx = (unsigned long)count;
+    } else if (indexed && itype != VA_ITYPE_NONE && indices) {
         if (!va_scan_idx(indices, itype, count, &vmin, &vmax))
             return no(NO_G_ARRAY, itype, (unsigned long)count);
         nverts = vmax - vmin + 1;
@@ -12807,9 +13050,20 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
     if (G.native) {
         int nr = geom_draw_native(p, V, &plan, mode, first, count,
                                   nidx ? itype : VA_ITYPE_NONE, indices,
-                                  vmin, vmax, nidx);
+                                  vmin, vmax, nidx, lazy);
         if (nr >= 0)
             return nr;
+    }
+    if (lazy) {
+        /* IDXLAZY : le chemin natif s'est dérobé, l'empaquetage a besoin de
+           la plage — le balayage d'avant, et ses refus */
+        G.n_idx_late++;
+        if (!va_scan_idx(indices, itype, count, &vmin, &vmax))
+            return no(NO_G_ARRAY, itype, (unsigned long)count);
+        nverts = vmax - vmin + 1;
+        if (nverts == 0 || nverts > QGPU_MAX_VERTS)
+            return no(NO_G_ARRAY, nverts, nidx);
+        packed = nverts * words * 4;
     }
     host = va_host_ready(V, &plan, &hb);
     key = va_pack_key(&plan, fmt);      /* P13 : clé COMPLÈTE */
@@ -13323,22 +13577,150 @@ static int wl_take(PCtx *p, const unsigned long *chg)
     return 1;
 }
 
+/* ─────────── 03/10 : verdict refait par unité (POMPPC_GL_UNITVD) ───────────
+ * docs/d3-plugin-x86.md §3. DOOM 3 : ~46 % des dispatches ne sont pas
+ * neutres pour la liste blanche, presque tous pour la même raison — une
+ * interaction relie ses textures de bosselage, de diffuse et de spéculaire
+ * (bloc `0 00000032 … 02900000`, unités 1, 4, 5). Le verdict complet refaisait
+ * alors geom_ok (rastérisation, programmes, tableaux, toutes les unités),
+ * texture_ok (toutes les unités), geom_format et va_gen_sizes. Ici, quand le
+ * bloc ne porte, hors des bits neutres de la liste blanche, que des bits
+ * d'unité (+0x04, bits 0..7, un par unité), que la clé du verdict gardé n'a
+ * pas bougé et que ce verdict était bon :
+ *   — les unités désignées sont refaites comme geom_texture_ok et texture_ok
+ *     les feraient (geom_texture_unit_ok, texture_unit_ok : mêmes refus, même
+ *     téléversement) ;
+ *   — les autres reprennent leur TexUnit gardé, après avoir vérifié que le
+ *     relevé (us_get) y voit encore le même objet de GLEngine ;
+ *   — geom_format est refait (bon marché sous TEXMEMO), va_gen_sizes si le
+ *     format ou les tableaux ont bougé.
+ * Tout autre cas (texturage qui s'allume ou s'éteint, unité au-delà du
+ * device, unités d'image GLSL au-delà de 8, refus d'une unité) : verdict
+ * complet, comme avant. Sous VERDICTCHECK, le verdict complet est calculé
+ * aussi et comparé (lignes UNITVD de la note). */
+static struct {
+    int            pending;             /* contrôle : un résultat attend la comparaison */
+    int            ok;
+    TexInfo        ti;
+    unsigned long  fmt, gs;
+    unsigned long  told;
+} UVC;
+
+static int uv_take(PCtx *p, const unsigned long *chg, TexInfo *ti,
+                   unsigned long *fmt, unsigned long *gs)
+{
+    unsigned long umask, vk[VKEY_WORDS];
+    unsigned char *g, *V;
+    UScan *sc;
+    int u, k, n = SCAN_N(p), any = 0;
+
+    if (!p->vd_valid || !p->vd_ok || n > QGPU_MAX_UNITS || !chg)
+        return 0;
+    umask = chg[1] & 0xffUL;
+    if (!umask || (chg[1] & ~0xffUL))
+        return 0;
+    for (k = 0; k < CNT_BLOCK; k++)
+        if (k != 1 && (chg[k] & ~(wl_mask[k] | wl_extra(k))))
+            return 0;
+    vd_key_of(p, vk);                   /* appelle prog_state, comme texture_ok */
+    if (memcmp(vk, p->vd_key, sizeof(vk)) != 0)
+        return 0;
+    if ((chg[0] & WL_R0) && !geom_raster_ok(p))
+        return 0;
+    for (u = 0; u < n; u++)
+        if (p->vd_ti.u[u].t)
+            any = 1;
+    if (!any)
+        return 0;                       /* texturage éteint (ou unités vides) avant */
+    us_open();
+    sc = us_get(p);
+    if (!sc || !sc->on) {
+        us_close();
+        return 0;
+    }
+    for (u = UNIT_LIM(p); u < n; u++)
+        if (sc->mask[u]) {
+            us_close();
+            return 0;                   /* le complet refusera (NO_TEX_UNITS) */
+        }
+    *ti = p->vd_ti;
+    for (u = 0; u < n; u++) {
+        const PTex *t0 = p->vd_ti.u[u].t;
+        if (!(umask & (1UL << u))) {
+            /* gardée : même objet de GLEngine qu'au verdict gardé */
+            if (t0 ? (!sc->mask[u] || sc->dt[u] != t0->drvtex) : sc->mask[u] != 0) {
+                us_close();
+                return 0;
+            }
+            continue;
+        }
+        if (!geom_texture_unit_ok(p, sc, u) || !texture_unit_ok(p, u, &ti->u[u])) {
+            us_close();
+            return 0;
+        }
+    }
+    *fmt = geom_format(p);              /* sous le relevé, comme le complet */
+    us_close();
+    if (QGPU_VF_WORDS(*fmt) * 4 > GLD_VERTEX_SIZE)
+        return 0;
+    if ((chg[WL_GS_WORD] & WL_GS) || *fmt != p->vd_fmt) {
+        g = gls(p);
+        V = g ? (unsigned char *)GLD_U32(g, GS_VAO) : 0;
+        *gs = va_gen_sizes(p, V, *fmt);
+    } else {
+        *gs = p->vd_gs;
+    }
+    for (k = 0; k < QGPU_MAX_UNITS; k++)
+        if (umask & (1UL << k))
+            G.n_uv_units++;
+    return 1;
+}
+
+/* VERDICTCHECK : le verdict complet qu'on vient de calculer, comparé à celui
+   par unité (UVC). Appelé avant chaque vd_store du dispatch. */
+static void uv_check(PCtx *p, int ok, const TexInfo *ti, unsigned long fmt, unsigned long gs)
+{
+    unsigned long s0[QGPU_MAX_UNITS][5], s1[QGPU_MAX_UNITS][5], du = 0;
+    int u;
+    if (!UVC.pending)
+        return;
+    UVC.pending = 0;
+    ok = ok ? 1 : 0;
+    if (ok) {
+        cnt_ti_sig(ti, s1);
+        cnt_ti_sig(&UVC.ti, s0);
+        for (u = 0; u < QGPU_MAX_UNITS; u++)
+            if (memcmp(s0[u], s1[u], sizeof(s0[u])) != 0)
+                du |= 1UL << u;
+    }
+    if (ok == UVC.ok && (!ok || (fmt == UVC.fmt && gs == UVC.gs && !du))) {
+        G.n_uv_chk_same++;
+        return;
+    }
+    G.n_uv_chk_diff++;
+    if (UVC.told < VD_TOLD) {
+        UVC.told++;
+        gl_note("UNITVD écart, image %lu : ok %d -> %d, format %08lx -> %08lx, "
+                "génériques %08lx -> %08lx, unités différentes 0x%02lx\n",
+                G.n_frames, UVC.ok, ok, UVC.fmt, ok ? fmt : 0UL, UVC.gs,
+                ok ? gs : 0UL, du);
+    }
+    (void)p;
+}
+
 /* Bits à ajouter au retour de gldInitDispatch / gldUpdateDispatch :
  *   bit 0 : « le pilote fait la transformation et l'éclairage » ;
  *   bit 1 : « refais le chemin » — sans lui, GLEngine compare (retour & 3) à
  *           gctx+0x7580, trouve égal et saute tout le bloc, dont la relecture
  *           de cfg+0x11c. Il n'est donc nécessaire que si le descripteur a
  *           changé SANS que le verrou change. */
-long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
+/* Verrou tenu, p = find_ctx(ctx) (peut être nul). Peut relâcher G.mu le temps
+   d'un flush (texture_ok), comme avant. */
+static long geom_dispatch_locked(PCtx *p, const unsigned long *chg)
 {
-    PCtx *p;
     long bits = 0;
     int wl = 0;
 
-    if (!G.v7)
-        return 0;
-    pthread_mutex_lock(&G.mu);
-    p = find_ctx(ctx);
     if (p && !p->glsl_hooked)
         glsl_hook_ctx(p);               /* v21 : une fois par contexte */
     if (p && (!chg || !st_neutral(chg)))
@@ -13364,8 +13746,29 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
             cnt_keep(p, 1, &p->vd_ti, fmt);
         p->vd_fresh = 1;
         bits = geom_dispatch_publish(p, fmt);
-        pthread_mutex_unlock(&G.mu);
         return bits;
+    }
+    if (!wl && p && G.unitvd && chg) {
+        /* 03/10 : verdict refait pour les seules unités désignées */
+        TexInfo ti;
+        unsigned long fmt, gs;
+        if (uv_take(p, chg, &ti, &fmt, &gs)) {
+            if (!G.vcheck) {
+                G.n_uv_take++;
+                if (G.count)
+                    cnt_keep(p, 1, &ti, fmt);
+                vd_store(p, 1, &ti, fmt, gs);
+                p->vd_fresh = 1;
+                return geom_dispatch_publish(p, fmt);
+            }
+            UVC.pending = 1;            /* contrôle : le complet suit, comparé */
+            UVC.ok = 1;
+            UVC.ti = ti;
+            UVC.fmt = fmt;
+            UVC.gs = gs;
+        } else {
+            G.n_uv_full++;
+        }
     }
     us_open();                          /* mémoire des unités, le temps du verdict */
     if (p && geom_ok(p)) {
@@ -13387,11 +13790,11 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
                     VD.wl_skip++;
                     vd_check_at(p, "dispatch", 1, 0, 0, 0, 0, vd_epoch != ep0);
                 }
+                uv_check(p, 0, 0, 0, 0);
                 if (G.verdict) {        /* lot 2 */
                     vd_store(p, 0, 0, 0, 0);
                     p->vd_fresh = 1;
                 }
-                pthread_mutex_unlock(&G.mu);
                 return 0;
             }
         }
@@ -13415,11 +13818,11 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
                 VD.wl_skip++;
                 vd_check_at(p, "dispatch", 1, 0, 0, 0, 0, vd_epoch != ep0);
             }
+            uv_check(p, 0, 0, 0, 0);
             if (G.verdict) {            /* lot 2 */
                 vd_store(p, 0, 0, 0, 0);
                 p->vd_fresh = 1;
             }
-            pthread_mutex_unlock(&G.mu);
             return 0;
         }
         us_close();
@@ -13433,6 +13836,7 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
                 VD.wl_skip++;
                 vd_check_at(p, "dispatch", 1, 1, &ti, fmt, gs, vd_epoch != ep0);
             }
+            uv_check(p, 1, &ti, fmt, gs);
             vd_store(p, 1, &ti, fmt, gs);
             p->vd_fresh = 1;
         }
@@ -13446,12 +13850,24 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
             VD.wl_skip++;
             vd_check_at(p, "dispatch", 1, 0, 0, 0, 0, 0);
         }
+        uv_check(p, 0, 0, 0, 0);
         if (G.verdict) {                /* lot 2 */
             vd_store(p, 0, 0, 0, 0);
             p->vd_fresh = 1;
         }
     }
     us_close();                         /* (p nul) */
+    return bits;
+}
+
+long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
+{
+    long bits;
+    if (!G.v7)
+        return 0;
+    pthread_mutex_lock(&G.mu);
+    bits = geom_dispatch_locked(find_ctx(ctx), chg);
+    UVC.pending = 0;                    /* jamais d'un dispatch à l'autre */
     pthread_mutex_unlock(&G.mu);
     return bits;
 }
@@ -16641,6 +17057,61 @@ void pomppc_unhook_procs(void *ctx, void **procs)
     if (p)
         unhook_locked(p, procs);
     pthread_mutex_unlock(&G.mu);
+}
+
+/* 03/10 (POMPPC_GL_DISPONE, docs/d3-plugin-x86.md §4). gldUpdateDispatch
+ * finissait par trois sections sous G.mu (transmission paresseuse,
+ * crochetage, verdict), soit ~1 300 fois par image dans DOOM 3, et le
+ * crochetage relisait les 36 cases (install_for, comparaison) même quand
+ * Apple n'avait pas été appelé — la table n'avait alors pas bougé. Ici :
+ * un seul verrou pour le crochetage et le verdict, et le crochetage est
+ * sauté si la table est, case pour case, celle que le dernier crochetage
+ * complet a laissée : hook_locked n'y changerait rien (après lui, chaque case
+ * vaut la nôtre, ou est nulle et sans repli, et install_for est figée dès
+ * que l'état du device est connu). Apple appelé (bit 0x80, ou transmission
+ * paresseuse éteinte) : crochetage complet, comme avant. */
+static long geom_dispatch_locked(PCtx *p, const unsigned long *chg);
+
+static int install_final;               /* install_for figée (G.state connu) */
+
+long pomppc_hook_and_dispatch(void *ctx, void **procs, const unsigned long *chg,
+                              int apple_called)
+{
+    PCtx *p;
+    long bits = 0;
+    int k;
+
+    if (!G.dispone) {
+        pomppc_hook_procs(ctx, procs);
+        return pomppc_geom_dispatch(ctx, chg);
+    }
+    pthread_mutex_lock(&G.mu);
+    p = find_ctx(ctx);
+    if (p) {
+        int same = !apple_called && install_final && procs && p->hook_snap_procs == procs;
+        for (k = 0; same && k < PROC_COUNT; k++)
+            if (procs[k] != p->hook_snap[k])
+                same = 0;
+        if (same) {
+            p->procs = procs;
+            G.n_hook_skip++;
+        } else {
+            hook_locked(p, procs);
+            G.n_hook_full++;
+            if (procs) {
+                for (k = 0; k < PROC_COUNT; k++)
+                    p->hook_snap[k] = procs[k];
+                p->hook_snap_procs = procs;
+            }
+            install_final = G.state != 0;   /* install_for figée par ce crochetage */
+        }
+    }
+    if (G.v7) {
+        bits = geom_dispatch_locked(p, chg);
+        UVC.pending = 0;
+    }
+    pthread_mutex_unlock(&G.mu);
+    return bits;
 }
 
 /* ─────────── transmission paresseuse des dispatches au GLDriver d'Apple ───────────
