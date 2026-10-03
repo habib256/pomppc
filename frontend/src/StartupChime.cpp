@@ -28,7 +28,7 @@ bool ChimeSettings::save(const std::string& path) const {
     return true;
 }
 
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(POMPPC_CHIME_PULSE)
 // Do not pretend to have played a sound on an unsupported host.
 struct ChimePlayer::Impl {};
 ChimePlayer::ChimePlayer() : impl_(new Impl) {}

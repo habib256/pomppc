@@ -86,6 +86,17 @@ if(APPLE)
     target_compile_definitions(pomppc PRIVATE GL_SILENCE_DEPRECATION)
     # objc runtime: main.cpp unbinds Cocoa's Ctrl+Cmd+F "Enter Full Screen".
     target_link_libraries(pomppc PRIVATE objc)
+else()
+    # Linux: the chime through PulseAudio (PipeWire's pulse server too); without
+    # libpulse-simple the frontend keeps the stub, which plays nothing and says so.
+    pkg_check_modules(PULSE_SIMPLE IMPORTED_TARGET libpulse-simple)
+    if(PULSE_SIMPLE_FOUND)
+        target_sources(pomppc PRIVATE src/StartupChimeLinux.cpp)
+        target_compile_definitions(pomppc PRIVATE POMPPC_CHIME_PULSE)
+        target_link_libraries(pomppc PRIVATE PkgConfig::PULSE_SIMPLE)
+    else()
+        message(WARNING "libpulse-simple absent : pas de carillon de démarrage")
+    endif()
 endif()
 target_link_libraries(pomppc PRIVATE
     dbus_display1
