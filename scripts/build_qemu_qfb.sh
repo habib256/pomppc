@@ -784,7 +784,52 @@ grep -q "x-abs-margin" hw/usb/dev-hid.c || {
   echo "⚠ patch usbhid 0001 incomplet : x-abs-margin absent de hw/usb/dev-hid.c" >&2; exit 1; }
 
 # --- 5. Build ---
-mkdir -p build && cd build
+# QEMU_OPT (éteint par défaut, docs/vitesse-doom3-x86.md) : variantes de
+# compilation, liste séparée par des virgules, construites dans build-<variante>
+# (jamais dans build/, le binaire de référence) et sondées comme lui :
+#   native   -O3 -march=native (binaire propre à CETTE machine)
+#   nohard   sans les durcissements de QEMU (-fzero-call-used-regs=used-gpr,
+#            -ftrivial-auto-var-init=zero) ni protection de pile
+#   lto      optimisation à l'édition de liens (-Db_lto=true)
+#   pgo-gen  instrumenté pour le profil (PGO_DIR, défaut <arbre>/pgo-data) : jouer
+#            puis quitter QEMU proprement (les .gcda s'écrivent à la sortie)
+#   pgo      même dossier de build, recompilé avec le profil (-fprofile-use)
+# Ex. : QEMU_SRC=~/src/qemu-opt QEMU_OPT=native,nohard,lto ./scripts/build_qemu_qfb.sh
+#       QEMU_SRC=~/src/qemu-opt QEMU_OPT=native,nohard,lto,pgo-gen …  (jouer)  puis
+#       QEMU_SRC=~/src/qemu-opt QEMU_OPT=native,nohard,lto,pgo …
+# Pour pgo-gen / pgo, le dossier de build est le même (build-<…>-pgo) : les .gcda
+# sont rangés par chemin d'objet. QEMU_BUILD=<dossier> force le nom.
+BDIR=build
+OPT_CFLAGS="" OPT_LDFLAGS="" OPT_CONF=()
+if [ -n "${QEMU_OPT:-}" ]; then
+  [ "$SRC" = "$HOME/src/qemu" ] && [ -z "${QEMU_BUILD:-}" ] && {
+    echo "⚠ QEMU_OPT vise un arbre séparé (QEMU_SRC=~/src/qemu-opt), pas le binaire de référence" >&2; exit 1; }
+  PGO_DIR="${PGO_DIR:-$SRC/pgo-data}"
+  tag=""
+  IFS=, read -r -a _opts <<< "$QEMU_OPT"
+  for o in "${_opts[@]}"; do
+    case "$o" in
+      native)  OPT_CFLAGS="$OPT_CFLAGS -O3 -march=native" ;;
+      nohard)  OPT_CFLAGS="$OPT_CFLAGS -fzero-call-used-regs=skip -ftrivial-auto-var-init=uninitialized"
+               OPT_CONF+=(--disable-stack-protector) ;;
+      # Une seule édition de liens à la fois, LTO_JOBS processus ltrans (6 par
+      # défaut) : sinon les deux qemu-system-* se lient ensemble avec nproc ltrans
+      # chacun, et sous pgo la mémoire déborde (PC 40 Go gelé au swap, 03/10/2026).
+      lto)     OPT_CONF+=(--enable-lto -Dbackend_max_links=1 -Db_lto_threads="${LTO_JOBS:-6}") ;;
+      pgo-gen) OPT_CFLAGS="$OPT_CFLAGS -fprofile-generate=$PGO_DIR -fprofile-update=prefer-atomic"
+               OPT_LDFLAGS="$OPT_LDFLAGS -fprofile-generate=$PGO_DIR" ;;
+      pgo)     OPT_CFLAGS="$OPT_CFLAGS -fprofile-use=$PGO_DIR -fprofile-partial-training -Wno-missing-profile"
+               OPT_LDFLAGS="$OPT_LDFLAGS -fprofile-use=$PGO_DIR" ;;
+      *) echo "⚠ QEMU_OPT : variante inconnue « $o » (native, nohard, lto, pgo-gen, pgo)" >&2; exit 1 ;;
+    esac
+    case "$o" in pgo-gen|pgo) tag="$tag-pgo" ;; *) tag="$tag-$o" ;; esac
+  done
+  BDIR="${QEMU_BUILD:-build$tag}"
+  echo "▶ variante de compilation $QEMU_OPT → $SRC/$BDIR"
+  # options de configure changées : reconfigurer
+  RECONFIGURE=1
+fi
+mkdir -p "$BDIR" && cd "$BDIR"
 if [ ! -f build.ninja ] || [ -n "${RECONFIGURE:-}" ]; then
   # slirp et pa sont demandés EXPLICITEMENT : sans cela ils sont auto-détectés,
   # et leur absence produit un binaire silencieusement amputé (le piège qui a
@@ -797,14 +842,18 @@ if [ ! -f build.ninja ] || [ -n "${RECONFIGURE:-}" ]; then
   [ -n "${PYTHON:-}" ] && PY_OPTS=(--python="$PYTHON")
   ../configure --target-list=ppc-softmmu,ppc64-softmmu \
                ${UI_OPTS[@]+"${UI_OPTS[@]}"} --enable-slirp ${PY_OPTS[@]+"${PY_OPTS[@]}"} \
-               --disable-docs --disable-werror ${CONFIGURE_EXTRA:-}
+               --disable-docs --disable-werror ${CONFIGURE_EXTRA:-} \
+               ${OPT_CFLAGS:+--extra-cflags="$OPT_CFLAGS"} ${OPT_LDFLAGS:+--extra-ldflags="$OPT_LDFLAGS"} \
+               ${OPT_CONF[@]+"${OPT_CONF[@]}"}
 fi
 ninja -j"$JOBS"
 
 # --- 6. Vérification de capacités (fait foi, et sert aux lanceurs) ---
-BIN="$SRC/build/qemu-system-ppc"
+BIN="$SRC/$BDIR/qemu-system-ppc"
 mkdir -p "$ROOT/bench"
 CAPS="$ROOT/bench/build-capabilities.txt"
+# une variante n'écrase pas le relevé du binaire de référence
+[ "$BDIR" != build ] && CAPS="$ROOT/bench/build-capabilities-$BDIR.txt"
 fail=0
 {
   echo "# généré par scripts/build_qemu_qfb.sh le $(date "+%Y-%m-%dT%H:%M:%S%z")"

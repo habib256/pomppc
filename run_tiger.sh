@@ -69,6 +69,9 @@
 #   GLISO=0 ./run_tiger.sh    # omet l'ISO des sources du plugin GL (disks/pomppc-src.iso)
 #                             # dans 'gamecd' ; implicite avec le GPU (GLISO=1 pour forcer)
 #   EXTRA_ARGS="-device ..."  # arguments QEMU supplémentaires
+#   PIN=1 ./run_tiger.sh      # Linux : fils vCPU épinglés sur des cœurs physiques distincts
+#                             # (PIN_VCPUS=2,4), le reste de QEMU ailleurs (PIN_REST) ; éteint
+#                             # par défaut (docs/vitesse-doom3-x86.md)
 #
 # Piloté par le frontend ImGui : DBUS_DISPLAY=1 (sortie -display dbus,p2p=on) et
 # QMP_SOCK=<chemin> (socket QMP). POMPPC_SCRATCH déplace .run/ (socket moniteur).
@@ -704,6 +707,41 @@ fi
 
 # --- Arguments QEMU ad hoc : EXTRA_ARGS="-device ..." ./run_tiger.sh ---
 read -r -a USER_EXTRA <<< "${EXTRA_ARGS:-}"
+
+# --- Épinglage des fils (Linux, PIN=1, éteint par défaut ; docs/vitesse-doom3-x86.md) ---
+# Chaque fil vCPU sur son cœur physique (PIN_VCPUS, un processeur logique par vCPU),
+# les autres fils de QEMU (boucle principale, rendu qgpu, son…) sur PIN_REST ; les
+# frères SMT des cœurs des vCPU restent libres. Les fils sont nommés
+# (debug-threads=on) ; QEMU garde le PID de ce script (exec), un sous-shell les
+# retrouve dans /proc une fois créés. Défaut pour l'i7-10700F (cœur N = CPU N et
+# N+8, `lscpu -e`) : vCPU sur 2 et 4 ; le reste sur 0,1,3,5-9,11,13-15.
+if [ "${PIN:-0}" != 0 ] && [ "$(uname -s)" = Linux ] && command -v taskset >/dev/null; then
+  PIN_VCPUS="${PIN_VCPUS:-2,4}"
+  PIN_REST="${PIN_REST:-0,1,3,5-9,11,13-15}"
+  USER_EXTRA+=(-name "Tiger,debug-threads=on")
+  ( pid=$$ v=()
+    IFS=, read -r -a v <<< "$PIN_VCPUS"
+    for _i in $(seq 1 120); do
+      sleep 0.5
+      [ -d "/proc/$pid/task" ] || exit 0
+      n=0
+      for t in /proc/$pid/task/*; do
+        case "$(cat "$t/comm" 2>/dev/null)" in "CPU "*"/TCG") n=$((n + 1)) ;; esac
+      done
+      [ "$n" -ge "$SMP_N" ] && break
+    done
+    sleep 2          # les fils du rendu et du son naissent avec les devices
+    for t in /proc/$pid/task/*; do
+      c="$(cat "$t/comm" 2>/dev/null)"
+      case "$c" in
+        "CPU "*"/TCG") k="${c#CPU }"; k="${k%%/*}"
+                       taskset -pc "${v[$k]:-$PIN_REST}" "${t##*/}" >/dev/null 2>&1 ;;
+        *)             taskset -pc "$PIN_REST" "${t##*/}" >/dev/null 2>&1 ;;
+      esac
+    done
+    echo "  📌 épinglage : vCPU sur $PIN_VCPUS, autres fils sur $PIN_REST" >&2 ) 9>&- &
+  MODE="$MODE + ÉPINGLÉ"
+fi
 
 BOOTDEV='hd:10,\System\Library\CoreServices\BootX'
 MON=$(host_mon_path "$SCR/mon.sock")   # mon.sock pour la VM verrouillée, mon-PID.sock en SNAPSHOT=1
