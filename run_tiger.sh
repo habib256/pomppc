@@ -29,6 +29,11 @@
 #   LFSINLINE=0 VFPFAST=0 VPERMFAST=0 ./run_tiger.sh  # coupe lfs/stfs sans helper, flottant AltiVec
 #                             # à 4 voies, vperm par table (tcg/0002-0004, allumés par défaut)
 #                             # docs/flottant-rapide.md
+#   VMXINLINE=1 ./run_tiger.sh  # vsldoi, vmrghw/vmrglw, stve[bhw]x en ligne, sans helper (x-vmx-inline,
+#                             # tcg/0021, éteint par défaut, docs/tcg-g4.md §28) ; VMXVERIFY=1 : preuve
+#   VFPNATIVE=1 ./run_tiger.sh  # vaddfp/vsubfp/vmaddfp/vnmsubfp par le FPU de l'hôte dans le code
+#                             # généré (x-vfp-native, tcg/0022 : x86-64 AVX+FMA3, arm64 ; éteint par
+#                             # défaut, docs/tcg-g4.md §28) ; VFPNVERIFY=1 : mode preuve
 #   FPINLINE=0 ./run_tiger.sh # coupe le flottant scalaire simple (fmuls, fmadds, fcmpu…) sans ses
 #                             # deux helpers dans le cas courant (x-fp-inline, tcg/0007, allumé
 #                             # par défaut, docs/tcg-g4.md §15) ; FPVERIFY=1 : mode preuve
@@ -57,6 +62,8 @@
 #   JITNEAR=0 ./run_tiger.sh  # laisse macOS placer le tampon du JIT (défaut : dans la fenêtre de 4 Gio
 #                             # du texte de QEMU, x-jit-near, tcg/0006 : supprime le régime lent, docs/tcg-g4.md §14) ;
 #                             # TCG_OPTS=… propriétés brutes de l'accélérateur
+#   JITREL32=1 ./run_tiger.sh # x86-64 Linux : tampon du JIT à moins de 2 Gio du texte de QEMU, appels
+#                             # de helpers directs (x-jit-rel32, tcg/0024, éteint par défaut, §28)
 #   NOPAD=1 ./run_tiger.sh    # coupe le passthrough de la manette USB
 #   TABLET=1 ./run_tiger.sh   # + usb-tablet (défaut avec ImGuiDock).
 #                             # TABLET=0 garde seulement la souris relative.
@@ -314,6 +321,26 @@ for _p in "VFPFAST x-vfp-fast VFP-4-VOIES" "VPERMFAST x-vperm-fast VPERM-TABLE";
     fi
   fi
 done
+# --- AltiVec en ligne (x-vmx-inline, patches/tcg/0021) et flottant AltiVec par
+# le FPU de l'hôte dans le code généré (x-vfp-native, patches/tcg/0022),
+# docs/tcg-g4.md §28 --- mêmes résultats au bit près que les helpers. Éteints par
+# défaut (A/B DOOM 3 à jouer) : VMXINLINE=1, VFPNATIVE=1 ; VMXVERIFY=1 et
+# VFPNVERIFY=1 ajoutent les modes preuve (bilan sur stderr). x-vfp-native n'agit
+# qu'avec x-vfp-fast (VFPFAST, allumé par défaut) et un hôte qui a l'op TCG
+# (x86-64 avec AVX et FMA3, arm64) ; ailleurs il ne change rien.
+for _p in "VMXINLINE x-vmx-inline VMX-EN-LIGNE" "VMXVERIFY x-vmx-verify VMX-VÉRIFIÉ" \
+          "VFPNATIVE x-vfp-native VFP-NATIF" "VFPNVERIFY x-vfp-native-verify VFP-NATIF-VÉRIFIÉ"; do
+  set -- $_p
+  if [ "${!1:-0}" != 0 ]; then
+    if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "$2=on"; then
+      CPU_SPEC="$CPU_SPEC,$2=on"
+      MODE="$MODE + $3"
+    else
+      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0021-0022)." >&2
+      MODE="$MODE + $3 DEMANDÉ MAIS INDISPONIBLE"
+    fi
+  fi
+done
 # --- Flottant scalaire sans helper (x-fp-inline, patches/tcg/0007) ---
 # fadds fsubs fmuls fmadds fmsubs fnmadds fnmsubs fcmpu : un chemin court (un
 # appel pur + FPRF/FI/FPCC en ligne) quand le FPSCR est amorcé sans trappe, en
@@ -499,6 +526,21 @@ if [ "${JITNEAR:-1}" != 0 ]; then
   elif [ -n "${JITNEAR:-}" ]; then
     echo "⚠  JITNEAR=1 demandé mais ce QEMU n'a pas la propriété 'x-jit-near' (patches/tcg/0006)." >&2
     MODE="$MODE + JIT près du texte DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+# --- Tampon du JIT à moins de 2 Gio du texte (x-jit-rel32, patches/tcg/0024,
+# docs/tcg-g4.md §28) --- propriété de l'ACCÉLÉRATEUR, hôte x86-64 sous Linux
+# (ailleurs sans effet) : le noyau pose sinon le tampon à ~35 Tio du texte et
+# chaque appel de helper depuis le code généré passe par `call *[rip+pool]'. La
+# place prise est imprimée (« appels des helpers directs (rel32) »). Éteint par
+# défaut (A/B à jouer) : JITREL32=1. Prime sur x-jit-near quand il réussit.
+if [ "${JITREL32:-0}" != 0 ]; then
+  if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-jit-rel32=on"; then
+    TCG_ACCEL="${TCG_ACCEL:-tcg},x-jit-rel32=on"
+    MODE="$MODE + JIT À 2 GIO DU TEXTE"
+  else
+    echo "⚠  JITREL32=1 demandé mais ce QEMU n'a pas la propriété 'x-jit-rel32' (patches/tcg/0024)." >&2
+    MODE="$MODE + JIT à 2 Gio du texte DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
 # --- Taille du cache de sauts (x-jc-bits, patches/tcg/0011, docs/tcg-g4.md §18)
