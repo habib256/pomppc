@@ -1,0 +1,386 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index 3b64972..deb9b61 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1372,6 +1372,15 @@ struct CPUArchState {
+     bool vfp_fast;
+     /* x-vperm-fast: vperm through helper_VPERM_FAST (translator only) */
+     bool vperm_fast;
++    /*
++     * x-vmx-inline (POMPPC tcg/0021): vsldoi, vmrghw, vmrglw and the
++     * big-endian stvebx/stvehx/stvewx as inline TCG ops instead of helper
++     * calls (translator only).  x-vmx-verify: proof mode, every such
++     * instruction re-done by the original helper and compared.
++     */
++    bool vmx_inline;
++    bool vmx_verify;
++    ppc_avr_t vmxv_in[2];       /* x-vmx-verify: the operands, saved */
+     bool sr_snap_ok[2];
+     uint32_t sr_gen;
+     uint32_t sr_snap_gen[2];
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index 8cc7c39..e10c282 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -155,6 +155,14 @@ static const Property powerpc_cpu_properties[] = {
+      * instead of the byte loop; same bytes.  Off by default.
+      */
+     DEFINE_PROP_BOOL("x-vperm-fast", PowerPCCPU, env.vperm_fast, false),
++    /*
++     * POMPPC tcg/0021.  x-vmx-inline: vsldoi, vmrghw/vmrglw and the
++     * big-endian stvebx/stvehx/stvewx as inline TCG ops (no helper call);
++     * same bytes, same access.  x-vmx-verify: proof mode, each one re-done
++     * by the original helper and compared (stderr summary).  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-vmx-inline", PowerPCCPU, env.vmx_inline, false),
++    DEFINE_PROP_BOOL("x-vmx-verify", PowerPCCPU, env.vmx_verify, false),
+     /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
+     DEFINE_PROP_UINT32("x-sr-tlb-verify", PowerPCCPU, env.sr_verify, 0),
+ };
+diff --git a/target/ppc/helper.h b/target/ppc/helper.h
+index 09c1b5a..fce756b 100644
+--- a/target/ppc/helper.h
++++ b/target/ppc/helper.h
+@@ -297,6 +297,9 @@ DEF_HELPER_3(LVEWX, void, env, avr, tl)
+ DEF_HELPER_3(STVEBX, void, env, avr, tl)
+ DEF_HELPER_3(STVEHX, void, env, avr, tl)
+ DEF_HELPER_3(STVEWX, void, env, avr, tl)
++/* POMPPC tcg/0021: x-vmx-verify */
++DEF_HELPER_FLAGS_2(vmx_verify, TCG_CALL_NO_RWG, void, env, i32)
++DEF_HELPER_FLAGS_4(vmx_verify_stve, TCG_CALL_NO_RWG, void, env, i32, tl, i64)
+ #if defined(TARGET_PPC64)
+ DEF_HELPER_4(LXVL, void, env, tl, vsr, tl)
+ DEF_HELPER_4(LXVLL, void, env, tl, vsr, tl)
+diff --git a/target/ppc/mem_helper.c b/target/ppc/mem_helper.c
+index d3f505f..b9df49e 100644
+--- a/target/ppc/mem_helper.c
++++ b/target/ppc/mem_helper.c
+@@ -459,6 +459,114 @@ STVE(STVEWX, cpu_stl_be_data_ra, bswap32, u32)
+ #undef I
+ #undef LVE
+ 
++/*
++ * POMPPC tcg/0021, x-vmx-verify: each instruction that x-vmx-inline
++ * translates inline is re-done here by the original code and compared.
++ * vsldoi, vmrghw, vmrglw: the original helper on the operands saved before
++ * the inline ops (env->vmxv_in); on a divergence, vD gets the helper's
++ * value.  stvebx/stvehx/stvewx (big-endian): the element the STVE helper
++ * above would have stored, same expression, against the value stored.
++ * Summary on stderr every 2^26 checks and at exit.
++ */
++static uint64_t vmxv_n[2], vmxv_bad[2];
++static bool vmxv_atexit;
++
++static void vmxv_report(void)
++{
++    fprintf(stderr, "vmx-verify: %" PRIu64 " permutations (vsldoi, vmrg[hl]w),"
++            " %" PRIu64 " rangements (stve[bhw]x) vérifiés, %" PRIu64
++            " + %" PRIu64 " divergences\n",
++            qatomic_read(&vmxv_n[0]), qatomic_read(&vmxv_n[1]),
++            qatomic_read(&vmxv_bad[0]), qatomic_read(&vmxv_bad[1]));
++}
++
++static void vmxv_count(int k, bool bad)
++{
++    if (!qatomic_read(&vmxv_atexit)) {
++        qatomic_set(&vmxv_atexit, true);
++        atexit(vmxv_report);
++    }
++    if (bad) {
++        qatomic_inc(&vmxv_bad[k]);
++    }
++    if ((qatomic_fetch_inc(&vmxv_n[k]) & ((1u << 26) - 1)) == 0) {
++        vmxv_report();
++    }
++}
++
++void helper_vmx_verify(CPUPPCState *env, uint32_t desc)
++{
++    enum { VMXV_SLDOI, VMXV_MRGHW, VMXV_MRGLW };    /* vmx-impl.c.inc */
++    int rd = (desc >> 8) & 31;
++    ppc_avr_t ref, *r = cpu_avr_ptr(env, rd);
++    bool bad;
++
++    switch (desc & 0xff) {
++    case VMXV_SLDOI:
++        helper_vsldoi(&ref, &env->vmxv_in[0], &env->vmxv_in[1], desc >> 16);
++        break;
++    case VMXV_MRGHW:
++        helper_vmrghw(&ref, &env->vmxv_in[0], &env->vmxv_in[1]);
++        break;
++    case VMXV_MRGLW:
++        helper_vmrglw(&ref, &env->vmxv_in[0], &env->vmxv_in[1]);
++        break;
++    default:
++        g_assert_not_reached();
++    }
++    bad = ref.VsrD(0) != r->VsrD(0) || ref.VsrD(1) != r->VsrD(1);
++    if (bad && qatomic_read(&vmxv_bad[0]) < 20) {
++        fprintf(stderr, "vmx-verify: op %u v%d: en ligne %016" PRIx64 "%016"
++                PRIx64 ", helper %016" PRIx64 "%016" PRIx64 "\n",
++                desc & 0xff, rd, r->VsrD(0), r->VsrD(1),
++                ref.VsrD(0), ref.VsrD(1));
++    }
++    if (bad) {
++        *r = ref;
++    }
++    vmxv_count(0, bad);
++}
++
++void helper_vmx_verify_stve(CPUPPCState *env, uint32_t desc,
++                            target_ulong addr, uint64_t val)
++{
++    int size = desc & 0xff;
++    ppc_avr_t *r = cpu_avr_ptr(env, (desc >> 8) & 31);
++    uint64_t ref, got;
++    bool bad;
++
++#define STVE_REF(element)                                               \
++    do {                                                                \
++        size_t n_elems = ARRAY_SIZE(r->element);                        \
++        int adjust = HI_IDX * (n_elems - 1);                            \
++        int sh = sizeof(r->element[0]) >> 1;                            \
++        int index = (addr & 0xf) >> sh;                                 \
++        ref = r->element[LO_IDX ? index : (adjust - index)];            \
++        got = val & (uint64_t)(typeof(r->element[0]))-1;                \
++    } while (0)
++    switch (size) {
++    case 1:
++        STVE_REF(u8);
++        break;
++    case 2:
++        STVE_REF(u16);
++        break;
++    case 4:
++        STVE_REF(u32);
++        break;
++    default:
++        g_assert_not_reached();
++    }
++#undef STVE_REF
++    bad = ref != got;
++    if (bad && qatomic_read(&vmxv_bad[1]) < 20) {
++        fprintf(stderr, "vmx-verify: stve %d octet(s) à " TARGET_FMT_lx
++                " : rangé %" PRIx64 ", helper %" PRIx64 "\n",
++                size, addr, got, ref);
++    }
++    vmxv_count(1, bad);
++}
++
+ #ifdef TARGET_PPC64
+ #define GET_NB(rb) ((rb >> 56) & 0xFF)
+ 
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+index 2c567ba..25631aa 100644
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -175,6 +175,7 @@ struct DisasContext {
+     bool lazy_tlb_flush;
+     bool lfs_inline;
+     bool vperm_fast;
++    bool vmx_inline, vmx_verify; /* x-vmx-inline, x-vmx-verify (tcg/0021) */
+     bool need_access_type;
+     int mem_idx;
+     int access_type;
+@@ -6572,6 +6573,8 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+ #endif
+     ctx->lfs_inline = env->lfs_inline;
+     ctx->vperm_fast = env->vperm_fast;
++    ctx->vmx_inline = env->vmx_inline;
++    ctx->vmx_verify = env->vmx_inline && env->vmx_verify;
+     ctx->lazy_tlb_flush = env->mmu_model == POWERPC_MMU_32B
+         || env->mmu_model & POWERPC_MMU_64;
+ 
+diff --git a/target/ppc/translate/vmx-impl.c.inc b/target/ppc/translate/vmx-impl.c.inc
+index 4c1e071..6c91ad8 100644
+--- a/target/ppc/translate/vmx-impl.c.inc
++++ b/target/ppc/translate/vmx-impl.c.inc
+@@ -101,9 +101,57 @@ TRANS(LVEBX, do_ldst_ve_X, 1, gen_helper_LVEBX);
+ TRANS(LVEHX, do_ldst_ve_X, 2, gen_helper_LVEHX);
+ TRANS(LVEWX, do_ldst_ve_X, 4, gen_helper_LVEWX);
+ 
+-TRANS(STVEBX, do_ldst_ve_X, 1, gen_helper_STVEBX);
+-TRANS(STVEHX, do_ldst_ve_X, 2, gen_helper_STVEHX);
+-TRANS(STVEWX, do_ldst_ve_X, 4, gen_helper_STVEWX);
++/*
++ * x-vmx-inline (POMPPC tcg/0021): stvebx/stvehx/stvewx without their helper
++ * (a call without flags: every TCG global written back and reloaded).  In
++ * big-endian mode the helper stores element (EA & 15) / size of vS, counted
++ * from the most significant end, with cpu_st*_be_data_ra at the masked EA:
++ * that is the doubleword (EA & 8 ? low : high) shifted right by
++ * 64 - 8 * size - 8 * (EA & 7), stored here by one qemu_st of the same size,
++ * endianness, mmu_idx and address (same faults, same DAR/DSISR).
++ * Little-endian mode keeps the helper (element index and byte swap).
++ */
++static bool do_stve_X(DisasContext *ctx, arg_X *a, int size,
++                      void (*helper)(TCGv_env, TCGv_ptr, TCGv))
++{
++    TCGv EA;
++    TCGv_i64 ea, d, lo, t;
++
++    if (!ctx->vmx_inline || ctx->le_mode) {
++        return do_ldst_ve_X(ctx, a, size, helper);
++    }
++    REQUIRE_INSNS_FLAGS(ctx, ALTIVEC);
++    REQUIRE_VECTOR(ctx);
++    gen_set_access_type(ctx, ACCESS_INT);
++    EA = do_ea_calc(ctx, a->ra, cpu_gpr[a->rb]);
++    if (size > 1) {
++        tcg_gen_andi_tl(EA, EA, ~(size - 1));
++    }
++    ea = tcg_temp_new_i64();
++    d = tcg_temp_new_i64();
++    lo = tcg_temp_new_i64();
++    t = tcg_temp_new_i64();
++    tcg_gen_extu_tl_i64(ea, EA);
++    get_avr64(d, a->rt, true);
++    get_avr64(lo, a->rt, false);
++    tcg_gen_andi_i64(t, ea, 8);
++    tcg_gen_movcond_i64(TCG_COND_NE, d, t, tcg_constant_i64(0), lo, d);
++    tcg_gen_andi_i64(t, ea, 7);
++    tcg_gen_shli_i64(t, t, 3);
++    tcg_gen_subfi_i64(t, 64 - 8 * size, t);
++    tcg_gen_shr_i64(d, d, t);
++    tcg_gen_qemu_st_i64(d, EA, ctx->mem_idx,
++                        size == 1 ? MO_UB : size == 2 ? MO_BEUW : MO_BEUL);
++    if (ctx->vmx_verify) {
++        gen_helper_vmx_verify_stve(tcg_env, tcg_constant_i32(size | a->rt << 8),
++                                   EA, d);
++    }
++    return true;
++}
++
++TRANS(STVEBX, do_stve_X, 1, gen_helper_STVEBX);
++TRANS(STVEHX, do_stve_X, 2, gen_helper_STVEHX);
++TRANS(STVEWX, do_stve_X, 4, gen_helper_STVEWX);
+ 
+ static void gen_mfvscr(DisasContext *ctx)
+ {
+@@ -352,10 +400,79 @@ GEN_VXFORM_V(vsubuwm, MO_32, tcg_gen_gvec_sub, 0, 18);
+ GEN_VXFORM_V(vsubudm, MO_64, tcg_gen_gvec_sub, 0, 19);
+ GEN_VXFORM(vmrghb, 6, 0);
+ GEN_VXFORM(vmrghh, 6, 1);
+-GEN_VXFORM(vmrghw, 6, 2);
+ GEN_VXFORM(vmrglb, 6, 4);
+ GEN_VXFORM(vmrglh, 6, 5);
+-GEN_VXFORM(vmrglw, 6, 6);
++
++/*
++ * x-vmx-inline (POMPPC tcg/0021): vmrghw/vmrglw (helpers TCG_CALL_NO_RWG)
++ * as four i64 ops.  The high doubleword of a vector holds its words 0
++ * (bits 63:32) and 1; vmrghw makes a.W0 b.W0 a.W1 b.W1 from the high
++ * doublewords of vA and vB, vmrglw the same from the low ones.  Both
++ * operands are read before vD is written (vD may be vA or vB).
++ */
++enum { VMXV_SLDOI, VMXV_MRGHW, VMXV_MRGLW };
++
++/* x-vmx-verify: the two operands, saved before the inline ops */
++static void gen_vmxv_save(int ra, int rb)
++{
++    TCGv_i128 t = tcg_temp_new_i128();
++
++    tcg_gen_ld_i128(t, tcg_env, avr_full_offset(ra));
++    tcg_gen_st_i128(t, tcg_env, offsetof(CPUPPCState, vmxv_in[0]));
++    tcg_gen_ld_i128(t, tcg_env, avr_full_offset(rb));
++    tcg_gen_st_i128(t, tcg_env, offsetof(CPUPPCState, vmxv_in[1]));
++}
++
++static void gen_vmrgw(DisasContext *ctx, bool high)
++{
++    TCGv_ptr ra, rb, rd;
++    TCGv_i64 a, b, rh, rl;
++
++    if (unlikely(!ctx->altivec_enabled)) {
++        gen_exception(ctx, POWERPC_EXCP_VPU);
++        return;
++    }
++    if (!ctx->vmx_inline) {
++        ra = gen_avr_ptr(rA(ctx->opcode));
++        rb = gen_avr_ptr(rB(ctx->opcode));
++        rd = gen_avr_ptr(rD(ctx->opcode));
++        if (high) {
++            gen_helper_vmrghw(rd, ra, rb);
++        } else {
++            gen_helper_vmrglw(rd, ra, rb);
++        }
++        return;
++    }
++    if (ctx->vmx_verify) {
++        gen_vmxv_save(rA(ctx->opcode), rB(ctx->opcode));
++    }
++    a = tcg_temp_new_i64();
++    b = tcg_temp_new_i64();
++    rh = tcg_temp_new_i64();
++    rl = tcg_temp_new_i64();
++    get_avr64(a, rA(ctx->opcode), high);
++    get_avr64(b, rB(ctx->opcode), high);
++    tcg_gen_shri_i64(rh, b, 32);
++    tcg_gen_deposit_i64(rh, a, rh, 0, 32);      /* a.W0 : b.W0 */
++    tcg_gen_deposit_i64(rl, b, a, 32, 32);      /* a.W1 : b.W1 */
++    set_avr64(rD(ctx->opcode), rh, true);
++    set_avr64(rD(ctx->opcode), rl, false);
++    if (ctx->vmx_verify) {
++        gen_helper_vmx_verify(tcg_env,
++                              tcg_constant_i32((high ? VMXV_MRGHW : VMXV_MRGLW)
++                                               | rD(ctx->opcode) << 8));
++    }
++}
++
++static void gen_vmrghw(DisasContext *ctx)
++{
++    gen_vmrgw(ctx, true);
++}
++
++static void gen_vmrglw(DisasContext *ctx)
++{
++    gen_vmrgw(ctx, false);
++}
+ 
+ static void trans_vmrgew(DisasContext *ctx)
+ {
+@@ -1887,6 +2004,45 @@ static void gen_vsldoi(DisasContext *ctx)
+         gen_exception(ctx, POWERPC_EXCP_VPU);
+         return;
+     }
++    if (ctx->vmx_inline) {
++        /*
++         * x-vmx-inline (POMPPC tcg/0021): bytes sh..sh+15 of vA:vB.  With
++         * the doublewords w0..w3 = vA.high, vA.low, vB.high, vB.low, q =
++         * sh / 8 and s = 8 * (sh % 8): vD = (w[q], w[q+1]) when s == 0,
++         * else each doubleword is (w[i]:w[i+1]) >> (64 - s), i = q, q+1
++         * (extract2).  Every operand is read before vD is written.
++         */
++        int vsh = VSH(ctx->opcode) & 0xf, q = vsh >> 3, s = (vsh & 7) * 8;
++        int n = s ? q + 3 : q + 2;      /* doublewords used: w[q .. n-1] */
++        TCGv_i64 w[4], rh, rl;
++
++        if (ctx->vmx_verify) {
++            gen_vmxv_save(rA(ctx->opcode), rB(ctx->opcode));
++        }
++        for (int i = q; i < n; i++) {
++            w[i] = tcg_temp_new_i64();
++            get_avr64(w[i], i < 2 ? rA(ctx->opcode) : rB(ctx->opcode),
++                      !(i & 1));
++        }
++        if (s == 0) {
++            rh = w[q];
++            rl = w[q + 1];
++        } else {
++            rh = tcg_temp_new_i64();
++            rl = tcg_temp_new_i64();
++            tcg_gen_extract2_i64(rh, w[q + 1], w[q], 64 - s);
++            tcg_gen_extract2_i64(rl, w[q + 2], w[q + 1], 64 - s);
++        }
++        set_avr64(rD(ctx->opcode), rh, true);
++        set_avr64(rD(ctx->opcode), rl, false);
++        if (ctx->vmx_verify) {
++            gen_helper_vmx_verify(tcg_env,
++                                  tcg_constant_i32(VMXV_SLDOI |
++                                                   rD(ctx->opcode) << 8 |
++                                                   vsh << 16));
++        }
++        return;
++    }
+     ra = gen_avr_ptr(rA(ctx->opcode));
+     rb = gen_avr_ptr(rB(ctx->opcode));
+     rd = gen_avr_ptr(rD(ctx->opcode));
