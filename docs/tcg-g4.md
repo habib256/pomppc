@@ -2607,3 +2607,18 @@ Le PC fait désormais ce banc en 1,49 s contre 1,31 s sur le M4 (§9.3) ; avant,
 en jeu : les jeux du PC (Marble Blast, Zenerchi, UT2004) font peu d'AltiVec flottant (§2.2) ;
 c'est DOOM 3 (`idSIMD_AltiVec`, `vmaddfp` 4,3 % du temps sur le M4, §16) qui en profitera, quand
 il sera sur ce PC.
+
+---
+
+## 27. `x-sr-tlb` validé sur l'hôte x86-64 (03/10/2026)
+
+Code indépendant de l'hôte, mais sa preuve (§4) n'avait tourné que sur le M4. Binaire de
+référence reconstruit (11.1.2, 0001-0020), `x-sr-tlb-verify=64`, toutes les options par défaut :
+
+| passe | contrôles gardés vérifiés | entrées retraduites | divergences |
+|---|---|---|---|
+| VM de dev (10.4.11), **SMP=1**, démarrage + ~35 min de compilations, `vfptest`, lectures de fichiers | 6 576 128 | 44 420 706 | **0** |
+| VM quotidienne (10.4.6), **SMP=2**, démarrage + Marble Blast fenêtre, deux parties (`matab.sh x86-srtlb`) | 2 235 392 (cpu 0 : 1 144 832 ; cpu 1 : 1 090 560) | 11 072 952 | **0** |
+
+Marble Blast sous vérificateur : 20,9 et 20,4 ms/image (21,0 sans, §25.6). Aucune divergence
+« fenêtre `tlbie` » de l'autre CPU cette fois (§4 : une sur le M4, licite).

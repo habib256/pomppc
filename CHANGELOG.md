@@ -9,6 +9,10 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **`x-sr-tlb` validé sur l'hôte x86-64** (03/10, `docs/tcg-g4.md` §27) : `x-sr-tlb-verify`
+  sans divergence en SMP=1 (6,6 M contrôles) et en SMP=2 sous Marble Blast (2,2 M). Le PC est
+  désormais au niveau du M4 sur toutes les accélérations TCG. La matrice sait profiler QEMU
+  sous Linux (`--sample-hote` par `perf`, code JIT nommé par `EXTRA_ARGS=-perfmap`).
 - **Flottant AltiVec à 4 voies sur hôte x86-64** (03/10, `patches/tcg/0020`, `docs/tcg-g4.md`
   §26). `x-vfp-fast` laissait `vmaddfp`/`vnmsubfp` au logiciel sur x86 ; ils passent maintenant
   par un `vfmadd231ps` (FMA3, sondé à l'exécution) et `vaddfp`/`vsubfp` par AVX, avec les mêmes

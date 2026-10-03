@@ -493,9 +493,22 @@ class Cellule:
                 if q:
                     # à la racine de la cellule : le rapatriement remplace <sous>/
                     os.makedirs(self.dir, exist_ok=True)
-                    subprocess.run(["sample", q[0], str(self.sample_hote_s), "-file",
-                                    os.path.join(self.dir, "sample-hote-%s.txt" % self.sous)],
-                                   capture_output=True)
+                    if sys.platform == "darwin":
+                        subprocess.run(["sample", q[0], str(self.sample_hote_s), "-file",
+                                        os.path.join(self.dir, "sample-hote-%s.txt" % self.sous)],
+                                       capture_output=True)
+                    else:
+                        # Linux : perf (kernel.perf_event_paranoid ≤ 1) ; le code JIT est
+                        # nommé par la carte /tmp/perf-<pid>.map de QEMU (-perfmap :
+                        # EXTRA_ARGS=-perfmap ./run_tiger.sh)
+                        data = os.path.join(self.dir, "perf-hote-%s.data" % self.sous)
+                        subprocess.run(["perf", "record", "-F", "999", "-o", data, "-p", q[0],
+                                        "--", "sleep", str(self.sample_hote_s)],
+                                       capture_output=True)
+                        with open(os.path.join(self.dir, "sample-hote-%s.txt" % self.sous), "w") as f:
+                            subprocess.run(["perf", "report", "-i", data, "--stdio", "--no-children",
+                                            "--sort", "comm,dso,sym", "--percent-limit", "0.2"],
+                                           stdout=f, stderr=subprocess.DEVNULL)
                     journal("sample hôte %d s pris (QEMU %s)" % (self.sample_hote_s, q[0]))
             if self.sample_s:
                 # profil APRÈS la fenêtre (sample ralentit le jeu) : même scène fixe
