@@ -18,6 +18,8 @@ plein écran, au chargement et en jeu, chacun suivi d'un lancement réussi,
 docs/gel-doom3-baddisplay.md). La matrice vérifie à la place que le kext a
 rendu la tranche du jeu tué.
 """
+import os
+
 from jeu import Jeu
 
 APP = "/Users/tiger/Desktop/Doom 3 Demo/Doom 3 Demo.app"
@@ -69,8 +71,13 @@ class Doom3(Jeu):
 
     def commande(self, mode):
         fs, rm = ("1", "5") if mode == "pe" else ("0", "3")
+        # D3_SET="r_useIndexBuffers=1,…" (A/B d'une variable du jeu par tools/tcg/matab.sh,
+        # sans espace : matab découpe les variables d'un mode aux blancs)
+        extra = "".join(" +set %s %s" % tuple(kv.split("=", 1))
+                        for kv in os.environ.get("D3_SET", "").split(",") if "=" in kv)
         return ('cd "%s/Contents/MacOS" && "./Doom 3 Demo" +set r_fullscreen %s +set r_mode %s '
-                '+set com_showFPS 1 +set r_useARBProgram 1 +map game/demo_mars_city1' % (APP, fs, rm))
+                '+set com_showFPS 1 +set r_useARBProgram 1%s +map game/demo_mars_city1'
+                % (APP, fs, rm, extra))
 
     def fenetre(self, rows):
         t = fin_cinematique(rows)

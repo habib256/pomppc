@@ -27,7 +27,7 @@ for d in sorted(os.listdir(camp)):
             lignes.append("%-10s %-3s %-9s pas de mesure : %s" % (mode0, k, cel, r.get("motifs", "")))
             continue
         ch = r.get("charge_hote", "")
-        charges = [float(x.replace(",", ".")) for x in re.findall(r"charge ([0-9]+,[0-9]+)", ch)]
+        charges = [float(x.replace(",", ".")) for x in re.findall(r"charge ([0-9]+[,.][0-9]+)", ch)]
         autres = [int(x) for x in re.findall(r"([0-9]+) autre\(s\) QEMU", ch)]
         drap = []
         if r.get("verdict") != "vert":

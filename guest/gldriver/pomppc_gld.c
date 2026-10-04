@@ -616,12 +616,15 @@ long gldUpdateDispatch(long a, long b, long c, long d, long e, long f, long g, l
     long r;
     /* 0x80 : le tampon de dessin change (gldSetDrawBufferPtrs chez Apple) */
     int buf = c && (*(unsigned long *)c & 0x80);
+    int apple = 1;                      /* le GLDriver d'Apple a-t-il récrit la table ? */
     if (pomppc_lazy_update((void *)a, (void **)b, (unsigned long *)c, &r)) {
         /* Transmission paresseuse : Apple n'est appelé que sous 0x80 ; sinon
            les changements sont cumulés et lui seront transmis juste avant
            qu'une de ses procédures travaille (docs/re/dispatch-paresseux.md). */
-        pomppc_log("gldUpdateDispatch(%08lx %08lx changes %08lx) -> %ld%s\n", a, b,
-                   c ? *(unsigned long *)c : 0, r, buf ? "" : " (gardé)");
+        apple = buf;
+        if (trace_on)                   /* 03/10 : -1 (pas encore lu) ou 1 */
+            pomppc_log("gldUpdateDispatch(%08lx %08lx changes %08lx) -> %ld%s\n", a, b,
+                       c ? *(unsigned long *)c : 0, r, buf ? "" : " (gardé)");
     } else {
         pomppc_unhook_procs((void *)a, (void **)b);
         r = FWD8(GLD_UpdateDispatch);
@@ -630,10 +633,12 @@ long gldUpdateDispatch(long a, long b, long c, long d, long e, long f, long g, l
     }
     if (buf)
         pomppc_after_draw_buffer_change((void *)a);
-    pomppc_hook_procs((void *)a, (void **)b);
     {
-        long bits = pomppc_geom_dispatch((void *)a, (const unsigned long *)c);
-        if (bits)
+        /* POMPPC_GL_DISPONE éteint : pomppc_hook_procs puis pomppc_geom_dispatch,
+           comme avant ; allumé, une passe sous un seul verrou */
+        long bits = pomppc_hook_and_dispatch((void *)a, (void **)b,
+                                             (const unsigned long *)c, apple);
+        if (bits && trace_on)
             pomppc_log("  géométrie brute : +%ld\n", bits);
         return r | bits;
     }

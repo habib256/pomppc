@@ -9,6 +9,39 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **DOOM 3 sur le PC : 150 → 115 ms/image (−23 %), allumé par défaut le 04/10** (nuit du 03
+  au 04/10, `docs/vitesse-doom3-x86.md`). Le surcoût propre à DOOM 3 sur x86 (2,5× le M4 au lieu
+  de 2×) vient de sa logique à 60 tics/s, payée ~9 fois par image à 150 ms (§3.1) : tout gain
+  brut y est amplifié. Leviers, chacun en A/B entrelacé (3 parties par bras) :
+  `QEMU_OPT=native,nohard,lto,pgo` (variante de `build_qemu_qfb.sh`, arbre séparé) **−12,9 %** ;
+  `tcg/0024` `x-jit-rel32` (tampon du JIT à < 2 Gio du texte sous Linux : appels de helpers
+  directs) −2,3 % ; `tcg/0021` `x-vmx-inline` + `tcg/0022` `x-vfp-native` (vsldoi, vmrg[hl]w,
+  stve*x et le flottant AltiVec dans le code généré) −3,8 % ; plugin `20261003-d3x` (4 leviers)
+  −3,3 % ; `tcg/0023` (mftb sans `div`) dans le bruit. Épreuves : vfptest et vmxtest à
+  l'empreinte identique dans 4 modes ; une partie de DOOM 3 sous tous les vérificateurs
+  (2,35 G opérations vfp, 2,7 G vmx, 2,1 G lectures de base de temps, 0 divergence ; plugin en
+  contrôle, 0 écart) ; 5 mutants de l'émetteur réel sur 5 détectés ; gltest 59 scènes
+  identiques dans 7 modes. Matrice du PC tout allumé, avec vidage : mb 17,5, zen 6,3, ut 47,9
+  ms/image (−18-19 %), images justes. **Allumés par défaut le 04/10** (à la demande de
+  l'utilisateur) : `VMXINLINE` partout, `VFPNATIVE` sur Linux x86-64 seulement
+  (émetteur aarch64 de 0022 jamais compilé : à prouver sur le M4), les 4 leviers du plugin
+  (révision `20261004-d3x`). **Reconstruire QEMU** (`scripts/build_qemu_qfb.sh`, patches
+  0021-0024) **et réinstaller le plugin** ; le binaire PGO reste une variante (`QEMU_OPT`).
+  **`JITREL32` reste éteint** : sur UT2004 il a deux régimes selon la place du tampon du JIT
+  (57 ou 64-67 ms/image contre 58 sans lui, `bench/tcg/ab/x86-ut-tcg`), cause à trouver. `r_useIndexBuffers 1` : +8 %, à éviter.
+  Le vrai `-O3` (`-Doptimization=3`, posé par `native` ; un `-O3` en CFLAGS était écrasé par
+  meson) : encore −2,4 %. Piège : la liaison LTO+PGO simultanée des deux QEMU a gelé le PC (swap) ;
+  `build_qemu_qfb.sh` lie désormais un binaire à la fois, 6 ltrans.
+- **Plugin : trois leviers pour DOOM 3 sur le PC, éteints** (03/10, `docs/d3-plugin-x86.md`,
+  révision `20261003-d3x`). Diagnostic : DOOM 3 prend déjà `DRAW_NATIVE` pour tous ses dessins
+  (`GEOMHOST 0` n'est pas un refus : il n'a pas de tableaux clients) ; restent au G4 le verdict
+  des ~46 % de dispatches qui relient des textures, le balayage et la recopie de 456 000
+  indices par image, et trois verrous par dispatch. `POMPPC_GL_IDXLAZY` (pas de balayage quand
+  les miroirs sont propres, commande identique), `POMPPC_GL_IDXVEC` (balayage AltiVec,
+  `pomppc_vec.c` compilé avec `-faltivec`), `POMPPC_GL_UNITVD` (verdict refait par unité,
+  contrôlé par `VERDICTCHECK`), `POMPPC_GL_DISPONE` (dispatch en une passe). Ni protocole ni
+  kext : **plugin à recompiler et réinstaller seulement**. Prouvé et mesuré la nuit suivante
+  (entrée ci-dessus) ; installé dans la VM quotidienne du PC, leviers éteints.
 - **Carillon de démarrage sous Linux** (03/10) : le frontend n'avait de lecteur que pour macOS
   (`NSSound`) ; sous Linux un bouchon refusait de jouer. `StartupChimeLinux.cpp` joue le WAV ou
   l'AIFF par PulseAudio (PipeWire compris), volume réglable pendant la lecture. Le son par défaut

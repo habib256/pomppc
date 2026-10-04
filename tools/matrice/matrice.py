@@ -475,7 +475,7 @@ class Cellule:
                     if n > 40 and n - 20 in rows and rows[n][1] - rows[n - 20][1] > 5:
                         h.premier_plan(j.nom_ui())
                 j.pendant(h, rows, t)
-                w = j.fenetre(rows)
+                w = j.fenetre(rows) if rows else None   # pas encore d'image (QEMU lent, 03/10)
                 if w:
                     a, b = w
                     break

@@ -103,6 +103,107 @@ static bool patched(int op, float_status *s, uint32_t *r, const uint32_t *a,
     return fast;
 }
 
+#if defined(__x86_64__) && defined(VFPPROOF_NATIVE)
+/*
+ * tcg/0022 (x-vfp-native) : le modèle, instruction pour instruction, de ce
+ * qu'émet tcg_out_ppc_vfp() de tcg/x86_64/tcg-target.c.inc (mêmes registres
+ * nommés, mêmes constantes), puis, si un test échoue, le helper d'origine
+ * (patched() ci-dessus : x-vfp-fast, sinon la boucle) — le talon hors ligne.
+ * La porte est celle que calcule ppc_vfn_gate_init() de cpu_init.c, EXTRAITE
+ * TELLE QUELLE (vfpproof-gate.h) et appliquée aux 8 premiers octets du
+ * float_status, comme le code généré.  VFPPROOF_MUT=k : mutation k du modèle.
+ */
+typedef struct {
+    bool vfp_native;
+    bool vfn_gate_ok;
+    uint32_t vfn_gate_ofs[2];
+    uint64_t vfn_gate_mask[2], vfn_gate_val[2];
+} CPUPPCState;
+#define warn_report(...) fprintf(stderr, __VA_ARGS__)
+#include "vfpproof-gate.h"            /* vfn_bits, ppc_vfn_gate_init */
+static CPUPPCState genv;
+static int vmut;
+
+static __m128i __attribute__((target("avx")))
+nzon(__m128i t, __m128i k1, __m128i k2, __m128i z)
+{
+    __m128i d = _mm_sub_epi32(t, k1);
+    __m128i u = _mm_min_epu32(d, k2);
+    d = _mm_cmpeq_epi32(u, d);
+    u = _mm_cmpeq_epi32(t, z);
+    return _mm_or_si128(d, u);
+}
+
+static bool __attribute__((target("avx,fma")))
+native(int op, float_status *s, uint32_t *r, const uint32_t *a,
+       const uint32_t *b, const uint32_t *c)
+{
+    uint64_t g;
+    __m128i xa, xb, xc, k1, k2, z, ta, tb, tc, ok, t, u, vr;
+    bool fma = op >= OP_MADD;
+
+    for (int w = 0; w < 2; w++) {
+        if (genv.vfn_gate_mask[w] && !(vmut == 8 && w == 1)) {
+            memcpy(&g, (const char *)s + genv.vfn_gate_ofs[w], 8);
+            if ((g & genv.vfn_gate_mask[w]) != genv.vfn_gate_val[w]) {
+                goto slow;
+            }
+        }
+    }
+    xa = _mm_loadu_si128((const __m128i *)a);
+    xb = _mm_loadu_si128((const __m128i *)b);
+    xc = _mm_loadu_si128((const __m128i *)c);
+    k1 = _mm_set1_epi32(0x01000000);
+    k2 = _mm_set1_epi32(vmut == 1 ? 0xfeffffff : 0xfdffffff);
+    z = _mm_setzero_si128();
+    ta = _mm_add_epi32(xa, xa);
+    tb = _mm_add_epi32(xb, xb);
+    ok = nzon(ta, k1, k2, z);
+    t = nzon(tb, k1, k2, z);
+    if (vmut != 2) {
+        ok = _mm_and_si128(ok, t);
+    }
+    if (fma) {
+        tc = _mm_add_epi32(xc, xc);
+        t = nzon(tc, k1, k2, z);
+        ok = _mm_and_si128(ok, t);
+        vr = _mm_castps_si128(op == OP_MADD || vmut == 3
+             ? _mm_fmadd_ps(_mm_castsi128_ps(xa), _mm_castsi128_ps(xc),
+                            _mm_castsi128_ps(xb))
+             : _mm_fmsub_ps(_mm_castsi128_ps(xa), _mm_castsi128_ps(xc),
+                            _mm_castsi128_ps(xb)));
+        t = _mm_cmpeq_epi32(ta, z);
+        u = _mm_cmpeq_epi32(vmut == 4 ? tb : tc, z);    /* 4 : b au lieu de c */
+        t = _mm_or_si128(t, u);
+    } else {
+        vr = _mm_castps_si128(op == OP_ADD
+             ? _mm_add_ps(_mm_castsi128_ps(xa), _mm_castsi128_ps(xb))
+             : _mm_sub_ps(_mm_castsi128_ps(xa), _mm_castsi128_ps(xb)));
+        t = _mm_or_si128(ta, tb);
+        t = _mm_cmpeq_epi32(t, z);
+    }
+    k1 = _mm_set1_epi32(vmut == 5 ? 0x01000000 : 0x01000001);
+    k2 = _mm_set1_epi32(vmut == 6 ? 0xfdffffff : 0xfdfffffe);
+    u = _mm_add_epi32(vr, vr);
+    u = _mm_sub_epi32(u, k1);
+    ta = _mm_min_epu32(u, k2);
+    u = _mm_cmpeq_epi32(ta, u);
+    u = _mm_or_si128(u, t);
+    ok = _mm_and_si128(ok, u);
+    if (_mm_movemask_ps(_mm_castsi128_ps(ok)) != 15) {
+        goto slow;
+    }
+    if (op == OP_NMSUB && vmut != 7) {
+        vr = _mm_xor_si128(vr, _mm_set1_epi32(0x80000000));
+    }
+    _mm_storeu_si128((__m128i *)r, vr);
+    return true;
+slow:
+    patched(op, s, r, a, b, c);
+    return false;
+}
+#endif
+
 typedef struct {
     int op, cfg;
     uint64_t n, seed;
@@ -113,7 +214,11 @@ static bool one(Job *j, const uint32_t *a, const uint32_t *b, const uint32_t *c)
 {
     float_status s1 = mkstatus(j->cfg), s2 = s1;
     uint32_t r1[4], r2[4];
+#if defined(__x86_64__) && defined(VFPPROOF_NATIVE)
+    j->fast += native(j->op, &s1, r1, a, b, c);
+#else
     j->fast += patched(j->op, &s1, r1, a, b, c);
+#endif
     ref(j->op, &s2, r2, a, b, c);
     j->cases++;
     if (memcmp(r1, r2, sizeof r1) || memcmp(&s1, &s2, sizeof s1)) {
@@ -252,6 +357,23 @@ int main(int argc, char **argv)
                   (__builtin_cpu_supports("avx") && __builtin_cpu_supports("fma")
                    ? CPUINFO_FMA : 0);
     }
+#if defined(VFPPROOF_NATIVE)
+    ppc_vfn_gate_init(&genv);
+    vmut = getenv("VFPPROOF_MUT") ? atoi(getenv("VFPPROOF_MUT")) : 0;
+    printf("modèle de x-vfp-native (tcg/0022), porte %s : +%u %016" PRIx64
+           " / %016" PRIx64 ", +%u %016" PRIx64 " / %016" PRIx64 "%s\n",
+           genv.vfn_gate_ok ? "ok" : "IMPOSSIBLE",
+           genv.vfn_gate_ofs[0], genv.vfn_gate_mask[0], genv.vfn_gate_val[0],
+           genv.vfn_gate_ofs[1], genv.vfn_gate_mask[1], genv.vfn_gate_val[1],
+           vmut ? ", MUTANT" : "");
+    if (!genv.vfn_gate_ok) {
+        return 2;
+    }
+    if (!(cpuinfo & CPUINFO_FMA)) {
+        fprintf(stderr, "x-vfp-native exige AVX et FMA3\n");
+        return 2;
+    }
+#endif
     printf("chemin %s\n", cpuinfo & CPUINFO_FMA ? "AVX + FMA3 (tcg/0020)" :
            cpuinfo & CPUINFO_AVX1 ? "AVX, FMA logicielle" : "scalaire");
 #endif

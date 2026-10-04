@@ -24,6 +24,7 @@
 #   • flottant double natif (x-fp-native64)             — patches/tcg/0016
 #   • les trois mêmes sur hôte x86-64 (op ppc_fp32, TSC, vperm) — patches/tcg/0017-0019
 #   • flottant AltiVec à 4 voies par AVX/FMA3 sur hôte x86-64 — patches/tcg/0020
+#   • AltiVec en ligne, flottant AltiVec natif, mftb sans div, JIT à 2 Gio — patches/tcg/0021-0024
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -770,6 +771,52 @@ util/qemu-timer-common.c qemu_raw_clock_mult
 target/ppc/int_helper.c vperm_fast_avx
 target/ppc/int_helper.c vfp_fma4_fma3
 TCG17_MARKERS
+  # --- 4 vicies. DOOM 3 sur hôte x86-64 (tcg/0021-0024), docs/tcg-g4.md §28 ---
+  # 0021 : vsldoi, vmrghw/vmrglw, stve[bhw]x en ops TCG (x-vmx-inline) ; 0022 :
+  # l'op TCG ppc_vfp, vaddfp/vsubfp/vmaddfp/vnmsubfp par le FPU de l'hôte dans le
+  # code généré (x-vfp-native ; émetteurs x86_64 et aarch64) ; 0023 : mftb divise
+  # par la constante 40. Propriétés éteintes par défaut (0023 : sous x-tb-fast).
+  if ! grep -q "x-vmx-inline" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : AltiVec en ligne (x-vmx-inline)"
+    patch_strict "$ROOT/patches/tcg/0021-ppc-vmx-inline.patch"
+  fi
+  if ! grep -q "TCG_TARGET_PPC_VFP_IMPL" tcg/tcg-has.h; then
+    echo "▶ patch TCG : flottant AltiVec dans le code généré (x-vfp-native)"
+    patch_strict "$ROOT/patches/tcg/0022-tcg-vfp-native.patch"
+  fi
+  if ! grep -q "POMPPC tcg/0023" hw/ppc/ppc.c; then
+    echo "▶ patch TCG : mftb sans division 64 bits (x-tb-fast)"
+    patch_strict "$ROOT/patches/tcg/0023-ppc-tb-div.patch"
+  fi
+  # 0024 : tampon du JIT à moins de 2 Gio du texte sous Linux x86-64 (x-jit-rel32)
+  if ! grep -q "tcg_jit_rel32" tcg/region.c; then
+    echo "▶ patch TCG : tampon du JIT près du texte sous Linux x86-64 (x-jit-rel32)"
+    patch_strict "$ROOT/patches/tcg/0024-tcg-jit-rel32.patch"
+  fi
+  for f in accel/tcg/tcg-all.c include/tcg/startup.h tcg/region.c \
+           hw/ppc/ppc.c include/tcg/tcg-op-common.h include/tcg/tcg-opc.h \
+           target/ppc/cpu.h target/ppc/cpu_init.c target/ppc/helper.h \
+           target/ppc/int_helper.c target/ppc/mem_helper.c target/ppc/translate.c \
+           target/ppc/translate/vmx-impl.c.inc tcg/aarch64/tcg-target-has.h \
+           tcg/aarch64/tcg-target.c.inc tcg/optimize.c tcg/tcg-has.h tcg/tcg-op.c \
+           tcg/tcg.c tcg/x86_64/tcg-target-has.h tcg/x86_64/tcg-target.c.inc; do
+    rm -f "$f.orig"
+  done
+  while read -r f m; do
+    [ -z "$f" ] && continue
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0021-0024 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG21_MARKERS'
+target/ppc/cpu_init.c x-vmx-inline
+target/ppc/mem_helper.c helper_vmx_verify_stve
+target/ppc/cpu_init.c x-vfp-native
+tcg/x86_64/tcg-target.c.inc tcg_out_ppc_vfp_slow_path
+tcg/aarch64/tcg-target.c.inc tcg_out_ppc_vfp_slow_path
+tcg/tcg.c tcg_reg_alloc_ppc_vfp
+hw/ppc/ppc.c POMPPC tcg/0023
+tcg/region.c tcg_jit_rel32
+accel/tcg/tcg-all.c x-jit-rel32
+TCG21_MARKERS
 fi
 
 # --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---
@@ -784,7 +831,57 @@ grep -q "x-abs-margin" hw/usb/dev-hid.c || {
   echo "⚠ patch usbhid 0001 incomplet : x-abs-margin absent de hw/usb/dev-hid.c" >&2; exit 1; }
 
 # --- 5. Build ---
-mkdir -p build && cd build
+# QEMU_OPT (éteint par défaut, docs/vitesse-doom3-x86.md) : variantes de
+# compilation, liste séparée par des virgules, construites dans build-<variante>
+# (jamais dans build/, le binaire de référence) et sondées comme lui :
+#   native   -O3 -march=native (binaire propre à CETTE machine). -O3 passe par
+#            -Doptimization=3 : un -O3 dans --extra-cflags est écrasé par le -O2
+#            que meson ajoute après (−2,4 % sur DOOM 3, docs/vitesse-doom3-x86.md §5.5)
+#   nohard   sans les durcissements de QEMU (-fzero-call-used-regs=used-gpr,
+#            -ftrivial-auto-var-init=zero) ni protection de pile
+#   lto      optimisation à l'édition de liens (-Db_lto=true)
+#   pgo-gen  instrumenté pour le profil (PGO_DIR, défaut <arbre>/pgo-data) : jouer
+#            puis quitter QEMU proprement (les .gcda s'écrivent à la sortie)
+#   pgo      même dossier de build, recompilé avec le profil (-fprofile-use)
+# Ex. : QEMU_SRC=~/src/qemu-opt QEMU_OPT=native,nohard,lto ./scripts/build_qemu_qfb.sh
+#       QEMU_SRC=~/src/qemu-opt QEMU_OPT=native,nohard,lto,pgo-gen …  (jouer)  puis
+#       QEMU_SRC=~/src/qemu-opt QEMU_OPT=native,nohard,lto,pgo …
+# Pour pgo-gen / pgo, le dossier de build est le même (build-<…>-pgo) : les .gcda
+# sont rangés par chemin d'objet. QEMU_BUILD=<dossier> force le nom.
+BDIR=build
+OPT_CFLAGS="" OPT_LDFLAGS="" OPT_CONF=()
+if [ -n "${QEMU_OPT:-}" ]; then
+  [ "$SRC" = "$HOME/src/qemu" ] && [ -z "${QEMU_BUILD:-}" ] && {
+    echo "⚠ QEMU_OPT vise un arbre séparé (QEMU_SRC=~/src/qemu-opt), pas le binaire de référence" >&2; exit 1; }
+  PGO_DIR="${PGO_DIR:-$SRC/pgo-data}"
+  tag=""
+  IFS=, read -r -a _opts <<< "$QEMU_OPT"
+  for o in "${_opts[@]}"; do
+    case "$o" in
+      native)  OPT_CFLAGS="$OPT_CFLAGS -march=native"; OPT_CONF+=(-Doptimization=3) ;;
+      nohard)  OPT_CFLAGS="$OPT_CFLAGS -fzero-call-used-regs=skip -ftrivial-auto-var-init=uninitialized"
+               OPT_CONF+=(--disable-stack-protector) ;;
+      # Une seule édition de liens à la fois, LTO_JOBS processus ltrans (6 par
+      # défaut) : sinon les deux qemu-system-* se lient ensemble avec nproc ltrans
+      # chacun, et sous pgo la mémoire déborde (PC 40 Go gelé au swap, 03/10/2026).
+      lto)     OPT_CONF+=(--enable-lto -Dbackend_max_links=1 -Db_lto_threads="${LTO_JOBS:-6}") ;;
+      pgo-gen) OPT_CFLAGS="$OPT_CFLAGS -fprofile-generate=$PGO_DIR -fprofile-update=prefer-atomic"
+               OPT_LDFLAGS="$OPT_LDFLAGS -fprofile-generate=$PGO_DIR" ;;
+      # -Wno-error=coverage-mismatch : un profil pris sur un arbre voisin (PGO_DIR
+      # renommé) sert aux fichiers inchangés ; ceux qu'un patch a changés sont
+      # compilés sans profil au lieu d'arrêter la construction.
+      pgo)     OPT_CFLAGS="$OPT_CFLAGS -fprofile-use=$PGO_DIR -fprofile-partial-training -Wno-missing-profile -Wno-error=coverage-mismatch"
+               OPT_LDFLAGS="$OPT_LDFLAGS -fprofile-use=$PGO_DIR" ;;
+      *) echo "⚠ QEMU_OPT : variante inconnue « $o » (native, nohard, lto, pgo-gen, pgo)" >&2; exit 1 ;;
+    esac
+    case "$o" in pgo-gen|pgo) tag="$tag-pgo" ;; *) tag="$tag-$o" ;; esac
+  done
+  BDIR="${QEMU_BUILD:-build$tag}"
+  echo "▶ variante de compilation $QEMU_OPT → $SRC/$BDIR"
+  # options de configure changées : reconfigurer
+  RECONFIGURE=1
+fi
+mkdir -p "$BDIR" && cd "$BDIR"
 if [ ! -f build.ninja ] || [ -n "${RECONFIGURE:-}" ]; then
   # slirp et pa sont demandés EXPLICITEMENT : sans cela ils sont auto-détectés,
   # et leur absence produit un binaire silencieusement amputé (le piège qui a
@@ -797,14 +894,18 @@ if [ ! -f build.ninja ] || [ -n "${RECONFIGURE:-}" ]; then
   [ -n "${PYTHON:-}" ] && PY_OPTS=(--python="$PYTHON")
   ../configure --target-list=ppc-softmmu,ppc64-softmmu \
                ${UI_OPTS[@]+"${UI_OPTS[@]}"} --enable-slirp ${PY_OPTS[@]+"${PY_OPTS[@]}"} \
-               --disable-docs --disable-werror ${CONFIGURE_EXTRA:-}
+               --disable-docs --disable-werror ${CONFIGURE_EXTRA:-} \
+               ${OPT_CFLAGS:+--extra-cflags="$OPT_CFLAGS"} ${OPT_LDFLAGS:+--extra-ldflags="$OPT_LDFLAGS"} \
+               ${OPT_CONF[@]+"${OPT_CONF[@]}"}
 fi
 ninja -j"$JOBS"
 
 # --- 6. Vérification de capacités (fait foi, et sert aux lanceurs) ---
-BIN="$SRC/build/qemu-system-ppc"
+BIN="$SRC/$BDIR/qemu-system-ppc"
 mkdir -p "$ROOT/bench"
 CAPS="$ROOT/bench/build-capabilities.txt"
+# une variante n'écrase pas le relevé du binaire de référence
+[ "$BDIR" != build ] && CAPS="$ROOT/bench/build-capabilities-$BDIR.txt"
 fail=0
 {
   echo "# généré par scripts/build_qemu_qfb.sh le $(date "+%Y-%m-%dT%H:%M:%S%z")"

@@ -1,0 +1,144 @@
+diff --git a/accel/tcg/tcg-all.c b/accel/tcg/tcg-all.c
+index d119644..8352a20 100644
+--- a/accel/tcg/tcg-all.c
++++ b/accel/tcg/tcg-all.c
+@@ -248,6 +248,17 @@ static bool tcg_get_jit_near(Object *obj, Error **errp)
+     return tcg_jit_near;
+ }
+ 
++/* POMPPC tcg/0024 */
++static bool tcg_get_jit_rel32(Object *obj, Error **errp)
++{
++    return tcg_jit_rel32;
++}
++
++static void tcg_set_jit_rel32(Object *obj, bool value, Error **errp)
++{
++    tcg_jit_rel32 = value;
++}
++
+ static void tcg_set_jit_near(Object *obj, bool value, Error **errp)
+ {
+     tcg_jit_near = value;
+@@ -339,6 +350,12 @@ static void tcg_accel_class_init(ObjectClass *oc, const void *data)
+     object_class_property_set_description(oc, "split-wx",
+         "Map jit pages into separate RW and RX regions");
+ 
++    object_class_property_add_bool(oc, "x-jit-rel32",
++        tcg_get_jit_rel32, tcg_set_jit_rel32);
++    object_class_property_set_description(oc, "x-jit-rel32",
++        "x86_64 Linux: place the jit buffer within 2 GiB of QEMU's text, "
++        "so that helper calls are direct (POMPPC, docs/tcg-g4.md 28)");
++
+     object_class_property_add_bool(oc, "x-jit-near",
+         tcg_get_jit_near, tcg_set_jit_near);
+     object_class_property_set_description(oc, "x-jit-near",
+diff --git a/include/tcg/startup.h b/include/tcg/startup.h
+index 68469cd..edd5193 100644
+--- a/include/tcg/startup.h
++++ b/include/tcg/startup.h
+@@ -45,6 +45,12 @@ void tcg_init(size_t tb_size, int splitwx, unsigned max_threads);
+  */
+ extern bool tcg_jit_near;
+ extern uint64_t tcg_jit_addr;
++/*
++ * POMPPC tcg/0024 : tcg_jit_rel32 (hôte x86_64 sous Linux) : le tampon à
++ * moins de 2 Gio du texte de QEMU, pour que le code généré appelle ses
++ * helpers par `call rel32' et non `call *[rip+pool]' (docs/tcg-g4.md §28).
++ */
++extern bool tcg_jit_rel32;
+ 
+ /**
+  * tcg_register_thread: Register this thread with the TCG runtime
+diff --git a/tcg/region.c b/tcg/region.c
+index 51e2c2a..2430756 100644
+--- a/tcg/region.c
++++ b/tcg/region.c
+@@ -38,6 +38,11 @@
+ 
+ bool tcg_jit_near;
+ uint64_t tcg_jit_addr;
++bool tcg_jit_rel32;
++#if defined(__linux__) && defined(__x86_64__)
++/* POMPPC tcg/0024 : début et fin du texte de QEMU (éditeur de liens GNU) */
++extern char __executable_start[], etext[];
++#endif
+ 
+ 
+ /*
+@@ -583,7 +588,54 @@ static int alloc_code_gen_buffer_anon(size_t size, int prot,
+     uintptr_t win = text & ~(uintptr_t)0xffffffffu;
+     const char *how = "noyau";
+ 
+-    if (tcg_jit_addr) {
++#if defined(__linux__) && defined(__x86_64__)
++    /*
++     * POMPPC tcg/0024 (x-jit-rel32), docs/tcg-g4.md §28.  Sous Linux,
++     * mmap(NULL) pose le tampon sous le haut de l'espace (0x7f…), à ~35 Tio
++     * du texte PIE de QEMU (0x55…-0x5f…) : x-jit-near n'y trouve jamais la
++     * même fenêtre, et tcg_out_branch() (tcg/x86_64) ne peut émettre aucun
++     * `call rel32' vers un helper ; chaque appel du code généré (helpers,
++     * chemins lents de qemu_ld/st, talons de ppc_fp32/ppc_vfp) devient
++     * `call *[rip+pool]', un chargement et un saut indirect.  x-jit-rel32
++     * demande la place juste sous le texte (indication de mmap, vérifiée :
++     * Linux la prend telle quelle si elle est libre), de 64 Mio en 64 Mio
++     * plus bas, en réduisant le tampon jusqu'à 512 Mio, tant que le tampon
++     * entier reste à moins de 2 Gio - 16 Mio de la fin du texte.
++     */
++    if (!tcg_jit_addr && tcg_jit_rel32) {
++        uintptr_t lo = (uintptr_t)__executable_start & -(uintptr_t)(2 * MiB);
++        uintptr_t hi = (uintptr_t)etext;
++        size_t floor = MIN(size, 512 * MiB);
++
++        for (size_t sz = size; buf == MAP_FAILED && sz >= floor;
++             sz -= 64 * MiB) {
++            for (uintptr_t gap = 64 * MiB; gap <= 512 * MiB; gap += 64 * MiB) {
++                uintptr_t want = (lo - sz - gap) & -(uintptr_t)(2 * MiB);
++                void *p;
++
++                if (want > lo || hi - want >= 2 * GiB - 16 * MiB) {
++                    break;
++                }
++                p = mmap((void *)want, sz, prot, flags, -1, 0);
++                if (p == (void *)want) {
++                    buf = p;
++                    size = sz;
++                    break;
++                }
++                if (p != MAP_FAILED) {
++                    munmap(p, sz);
++                }
++            }
++            if (sz < floor + 64 * MiB) {
++                break;
++            }
++        }
++        how = buf == MAP_FAILED ? "x-jit-rel32 : pas de place, suite" : "x-jit-rel32";
++    }
++#endif
++    if (buf != MAP_FAILED) {
++        /* placé par x-jit-rel32 */
++    } else if (tcg_jit_addr) {
+         buf = mmap((void *)(uintptr_t)tcg_jit_addr, size, prot, flags, -1, 0);
+         how = "x-jit-addr";
+     } else if (tcg_jit_near) {
+@@ -622,6 +674,19 @@ static int alloc_code_gen_buffer_anon(size_t size, int prot,
+         fprintf(stderr, "tcg: tampon JIT %p-%p (%s), texte %p : %s fenêtre de 4 Gio\n",
+                 buf, (char *)buf + size, how, (void *)text,
+                 same ? "même" : "AUTRE");
++#if defined(__linux__) && defined(__x86_64__)
++        {
++            /* tcg/0024 : les appels vers le texte tiennent-ils en rel32 ? */
++            uintptr_t b0 = (uintptr_t)buf, b1 = b0 + size;
++            uintptr_t t0 = (uintptr_t)__executable_start, t1 = (uintptr_t)etext;
++            uintptr_t far = MAX(MAX(t1, b1) - MIN(t0, b0), 0);
++
++            fprintf(stderr, "tcg: texte %p-%p, écart maximal %" PRIuPTR
++                    " Mio : appels des helpers %s\n", (void *)t0, (void *)t1,
++                    far / MiB, far < 2 * GiB ? "directs (rel32)" :
++                    "INDIRECTS (call *[rip+pool])");
++        }
++#endif
+     }
+     if (buf == MAP_FAILED) {
+         error_setg_errno(errp, errno,

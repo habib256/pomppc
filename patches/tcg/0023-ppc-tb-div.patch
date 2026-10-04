@@ -1,0 +1,24 @@
+diff --git a/hw/ppc/ppc.c b/hw/ppc/ppc.c
+index b66601d..c3ed594 100644
+--- a/hw/ppc/ppc.c
++++ b/hw/ppc/ppc.c
+@@ -571,7 +571,18 @@ static inline bool tbf_load(CPUPPCState *env, uint64_t *tb)
+     if (ticking) {
+         ns += get_clock();
+     }
+-    v = (uint64_t)ns / (uint64_t)tbf_div + tb_env->tb_offset;
++    /*
++     * POMPPC tcg/0023: the time base of mac99 runs at 25 MHz, tbf_div = 40.
++     * A division by the constant is a multiply-high and a shift (same
++     * quotient for every uint64_t, C semantics), instead of the 64-bit
++     * `div' of a variable divisor: ~3.3 ns less per mftb on the i7-10700F,
++     * whose `div r64' takes ~35-88 cycles (docs/tcg-g4.md section 28).
++     */
++    if (likely(tbf_div == 40)) {
++        v = (uint64_t)ns / 40 + tb_env->tb_offset;
++    } else {
++        v = (uint64_t)ns / (uint64_t)tbf_div + tb_env->tb_offset;
++    }
+     if (unlikely(env->tb_verify)) {
+         uint64_t s = cpu_ppc_get_tb(tb_env, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
+                                     tb_env->tb_offset);

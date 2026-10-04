@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 VERHILLE Arnaud
-# matab.sh CAMPAGNE N "A:VAR=v …" "B:VAR=v …" [JEU MODE] — A/B ENTRELACÉ d'un
+# matab.sh CAMPAGNE N "A:VAR=v …" "B:VAR=v …" ["C:…" …] [JEU MODE] — A/B ENTRELACÉ d'un
 # réglage de QEMU sur la VM QUOTIDIENNE, par la matrice (docs/tcg-g4.md §18).
 #
 # Chaque partie relance QEMU (le dépôt principal, ./run_tiger.sh, fenêtre
@@ -65,18 +65,26 @@ if [ "${1:-}" = "--restore" ]; then
   exit 0
 fi
 
-C=$1; N=$2; MA=$3; MB=$4; JEU=${5:-d3}; MODE=${6:-fen}
+# Plus de deux modes : chaque argument qui contient « : » en est un ; les deux
+# suivants éventuels sont JEU et MODE. Ordre par tour : A B C… puis …C B A.
+C=$1; N=$2; shift 2
+MODES=()
+while [ $# -gt 0 ] && [[ "$1" == *:* ]]; do MODES+=("$1"); shift; done
+JEU=${1:-d3}; MODE=${2:-fen}
 OUT=$R/bench/tcg/ab/$C; mkdir -p "$OUT"
 QB="${QEMU_BIN:-}"
-na=${MA%%:*}; va=${MA#*:}; nb=${MB%%:*}; vb=${MB#*:}
 ordre=()
 for k in $(seq 1 "$N"); do
-  if [ $((k % 2)) = 1 ]; then ordre+=("a:$k" "b:$k"); else ordre+=("b:$k" "a:$k"); fi
+  if [ $((k % 2)) = 1 ]; then
+    for i in "${!MODES[@]}"; do ordre+=("$i:$k"); done
+  else
+    for ((i = ${#MODES[@]} - 1; i >= 0; i--)); do ordre+=("$i:$k"); done
+  fi
 done
-echo "campagne $C : $na='$va' / $nb='$vb', QEMU_BIN='$QB', $JEU $MODE, $N parties par mode" | tee -a "$OUT/journal.txt"
+echo "campagne $C : ${MODES[*]}, QEMU_BIN='$QB', $JEU $MODE, $N parties par mode" | tee -a "$OUT/journal.txt"
 for p in "${ordre[@]}"; do
   m=${p%%:*}; k=${p#*:}
-  if [ "$m" = a ]; then nom=$na; vars=$va; else nom=$nb; vars=$vb; fi
+  nom=${MODES[$m]%%:*}; vars=${MODES[$m]#*:}
   D="$OUT/$nom-$k"; mkdir -p "$D"
   echo "$(date +%H:%M:%S) $nom-$k : $vars" | tee -a "$OUT/journal.txt"
   stop_vm
@@ -89,7 +97,10 @@ for p in "${ordre[@]}"; do
   # l'invité : elle passe aussi en --env à la matrice (sans effet sur QEMU)
   genv=()
   for v in "$@"; do case $v in POMPPC_GL_*=*) genv+=(--env "$v") ;; esac; done
-  env "$@" python3 "$WT/tools/matrice/matrice.py" -j "$JEU" -m "$MODE" --sans-vidage \
+  # MATAB_VIDAGE=1 : tour complet avec vidage et preuve d'image (non-régression
+  # d'une configuration sur plusieurs jeux, p. ex. JEU=mb,zen,ut,d3), pas un A/B de vitesse
+  vid=--sans-vidage; [ "${MATAB_VIDAGE:-0}" != 0 ] && vid=
+  env "$@" python3 "$WT/tools/matrice/matrice.py" -j "$JEU" -m "$MODE" $vid \
       ${genv[@]+"${genv[@]}"} ${MATRICE_OPTS:-} --sortie "$D" > "$D/matrice.log" 2>&1
   tail -1 "$D/resultats.csv" 2>/dev/null | tee -a "$OUT/journal.txt"
 done

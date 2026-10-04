@@ -29,6 +29,11 @@
 #   LFSINLINE=0 VFPFAST=0 VPERMFAST=0 ./run_tiger.sh  # coupe lfs/stfs sans helper, flottant AltiVec
 #                             # à 4 voies, vperm par table (tcg/0002-0004, allumés par défaut)
 #                             # docs/flottant-rapide.md
+#   VMXINLINE=0 ./run_tiger.sh  # coupe vsldoi, vmrghw/vmrglw, stve[bhw]x en ligne (x-vmx-inline,
+#                             # tcg/0021, allumé par défaut, docs/tcg-g4.md §28) ; VMXVERIFY=1 : preuve
+#   VFPNATIVE=0 ./run_tiger.sh  # coupe vaddfp/vsubfp/vmaddfp/vnmsubfp par le FPU de l'hôte dans le
+#                             # code généré (x-vfp-native, tcg/0022 : allumé par défaut sur Linux
+#                             # x86-64 ; arm64 non prouvé, VFPNATIVE=1) ; VFPNVERIFY=1 : mode preuve
 #   FPINLINE=0 ./run_tiger.sh # coupe le flottant scalaire simple (fmuls, fmadds, fcmpu…) sans ses
 #                             # deux helpers dans le cas courant (x-fp-inline, tcg/0007, allumé
 #                             # par défaut, docs/tcg-g4.md §15) ; FPVERIFY=1 : mode preuve
@@ -57,6 +62,8 @@
 #   JITNEAR=0 ./run_tiger.sh  # laisse macOS placer le tampon du JIT (défaut : dans la fenêtre de 4 Gio
 #                             # du texte de QEMU, x-jit-near, tcg/0006 : supprime le régime lent, docs/tcg-g4.md §14) ;
 #                             # TCG_OPTS=… propriétés brutes de l'accélérateur
+#   JITREL32=1 ./run_tiger.sh # x86-64 Linux : tampon du JIT à moins de 2 Gio du texte, appels de
+#                             # helpers directs (x-jit-rel32, tcg/0024, éteint : deux régimes sur UT2004)
 #   NOPAD=1 ./run_tiger.sh    # coupe le passthrough de la manette USB
 #   TABLET=1 ./run_tiger.sh   # + usb-tablet (défaut avec ImGuiDock).
 #                             # TABLET=0 garde seulement la souris relative.
@@ -69,6 +76,9 @@
 #   GLISO=0 ./run_tiger.sh    # omet l'ISO des sources du plugin GL (disks/pomppc-src.iso)
 #                             # dans 'gamecd' ; implicite avec le GPU (GLISO=1 pour forcer)
 #   EXTRA_ARGS="-device ..."  # arguments QEMU supplémentaires
+#   PIN=1 ./run_tiger.sh      # Linux : fils vCPU épinglés sur des cœurs physiques distincts
+#                             # (PIN_VCPUS=2,4), le reste de QEMU ailleurs (PIN_REST) ; éteint
+#                             # par défaut (docs/vitesse-doom3-x86.md)
 #
 # Piloté par le frontend ImGui : DBUS_DISPLAY=1 (sortie -display dbus,p2p=on) et
 # QMP_SOCK=<chemin> (socket QMP). POMPPC_SCRATCH déplace .run/ (socket moniteur).
@@ -94,10 +104,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # et MSRNOBQL (x-msr-nobql, tcg/0012) en font partie ; depuis le 01/10/2026 (§22),
 # FPNATIVE (x-fp-native, tcg/0014) ; depuis le soir du 01/10 (§23-§24, à la demande de
 # l'utilisateur, sans tour de matrice), TBFAST (x-tb-fast, tcg/0015) et FPNATIVE64
-# (x-fp-native64, tcg/0016).
-for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JITNEAR FPNATIVE TBFAST FPNATIVE64; do
+# (x-fp-native64, tcg/0016). Depuis le 04/10/2026 (docs/vitesse-doom3-x86.md, DOOM 3
+# sur le PC −23 % avec la compilation et le plugin) : VMXINLINE (x-vmx-inline, tcg/0021) ;
+# PAS JITREL32 (x-jit-rel32, tcg/0024) : deux régimes sur UT2004 selon la place du
+# tampon (57 / 64-67 ms/image, bench/tcg/ab/x86-ut-tcg) ; VFPNATIVE
+# (x-vfp-native, tcg/0022) sur Linux x86-64 seulement : son émetteur aarch64 n'est
+# ni compilé ni prouvé (à faire sur le M4, VFPNATIVE=1 pour l'essayer).
+for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JITNEAR FPNATIVE TBFAST FPNATIVE64 VMXINLINE; do
   export "$_opt=${!_opt:-1}"
 done
+if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
+  export VFPNATIVE="${VFPNATIVE:-1}"
+fi
 # x-jc-bits (tcg/0011) : 2^14 entrées de cache de sauts (12 = QEMU d'origine).
 export JCBITS="${JCBITS:-14}"
 export QGPU_GPU_COPY="${QGPU_GPU_COPY:-1}" QGPU_GLSL="${QGPU_GLSL:-1}"
@@ -314,6 +332,27 @@ for _p in "VFPFAST x-vfp-fast VFP-4-VOIES" "VPERMFAST x-vperm-fast VPERM-TABLE";
     fi
   fi
 done
+# --- AltiVec en ligne (x-vmx-inline, patches/tcg/0021) et flottant AltiVec par
+# le FPU de l'hôte dans le code généré (x-vfp-native, patches/tcg/0022),
+# docs/tcg-g4.md §28 --- mêmes résultats au bit près que les helpers. Allumés par
+# défaut depuis le 04/10/2026 (VFPNATIVE : Linux x86-64), VMXINLINE=0 / VFPNATIVE=0
+# les éteignent ; VMXVERIFY=1 et
+# VFPNVERIFY=1 ajoutent les modes preuve (bilan sur stderr). x-vfp-native n'agit
+# qu'avec x-vfp-fast (VFPFAST, allumé par défaut) et un hôte qui a l'op TCG
+# (x86-64 avec AVX et FMA3, arm64) ; ailleurs il ne change rien.
+for _p in "VMXINLINE x-vmx-inline VMX-EN-LIGNE" "VMXVERIFY x-vmx-verify VMX-VÉRIFIÉ" \
+          "VFPNATIVE x-vfp-native VFP-NATIF" "VFPNVERIFY x-vfp-native-verify VFP-NATIF-VÉRIFIÉ"; do
+  set -- $_p
+  if [ "${!1:-0}" != 0 ]; then
+    if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "$2=on"; then
+      CPU_SPEC="$CPU_SPEC,$2=on"
+      MODE="$MODE + $3"
+    else
+      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0021-0022)." >&2
+      MODE="$MODE + $3 DEMANDÉ MAIS INDISPONIBLE"
+    fi
+  fi
+done
 # --- Flottant scalaire sans helper (x-fp-inline, patches/tcg/0007) ---
 # fadds fsubs fmuls fmadds fmsubs fnmadds fnmsubs fcmpu : un chemin court (un
 # appel pur + FPRF/FI/FPCC en ligne) quand le FPSCR est amorcé sans trappe, en
@@ -499,6 +538,23 @@ if [ "${JITNEAR:-1}" != 0 ]; then
   elif [ -n "${JITNEAR:-}" ]; then
     echo "⚠  JITNEAR=1 demandé mais ce QEMU n'a pas la propriété 'x-jit-near' (patches/tcg/0006)." >&2
     MODE="$MODE + JIT près du texte DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+# --- Tampon du JIT à moins de 2 Gio du texte (x-jit-rel32, patches/tcg/0024,
+# docs/tcg-g4.md §28) --- propriété de l'ACCÉLÉRATEUR, hôte x86-64 sous Linux
+# (ailleurs sans effet) : le noyau pose sinon le tampon à ~35 Tio du texte et
+# chaque appel de helper depuis le code généré passe par `call *[rip+pool]'. La
+# place prise est imprimée (« appels des helpers directs (rel32) »). Éteint par
+# défaut : DOOM 3 −2,3 %, mais UT2004 a deux régimes (57 ou 64-67 ms/image selon la
+# place du tampon, bench/tcg/ab/x86-ut-tcg, docs/vitesse-doom3-x86.md §12) :
+# JITREL32=1. Prime sur x-jit-near quand il réussit.
+if [ "${JITREL32:-0}" != 0 ]; then
+  if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-jit-rel32=on"; then
+    TCG_ACCEL="${TCG_ACCEL:-tcg},x-jit-rel32=on"
+    MODE="$MODE + JIT À 2 GIO DU TEXTE"
+  else
+    echo "⚠  JITREL32=1 demandé mais ce QEMU n'a pas la propriété 'x-jit-rel32' (patches/tcg/0024)." >&2
+    MODE="$MODE + JIT à 2 Gio du texte DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
 # --- Taille du cache de sauts (x-jc-bits, patches/tcg/0011, docs/tcg-g4.md §18)
@@ -704,6 +760,41 @@ fi
 
 # --- Arguments QEMU ad hoc : EXTRA_ARGS="-device ..." ./run_tiger.sh ---
 read -r -a USER_EXTRA <<< "${EXTRA_ARGS:-}"
+
+# --- Épinglage des fils (Linux, PIN=1, éteint par défaut ; docs/vitesse-doom3-x86.md) ---
+# Chaque fil vCPU sur son cœur physique (PIN_VCPUS, un processeur logique par vCPU),
+# les autres fils de QEMU (boucle principale, rendu qgpu, son…) sur PIN_REST ; les
+# frères SMT des cœurs des vCPU restent libres. Les fils sont nommés
+# (debug-threads=on) ; QEMU garde le PID de ce script (exec), un sous-shell les
+# retrouve dans /proc une fois créés. Défaut pour l'i7-10700F (cœur N = CPU N et
+# N+8, `lscpu -e`) : vCPU sur 2 et 4 ; le reste sur 0,1,3,5-9,11,13-15.
+if [ "${PIN:-0}" != 0 ] && [ "$(uname -s)" = Linux ] && command -v taskset >/dev/null; then
+  PIN_VCPUS="${PIN_VCPUS:-2,4}"
+  PIN_REST="${PIN_REST:-0,1,3,5-9,11,13-15}"
+  USER_EXTRA+=(-name "Tiger,debug-threads=on")
+  ( pid=$$ v=()
+    IFS=, read -r -a v <<< "$PIN_VCPUS"
+    for _i in $(seq 1 120); do
+      sleep 0.5
+      [ -d "/proc/$pid/task" ] || exit 0
+      n=0
+      for t in /proc/$pid/task/*; do
+        case "$(cat "$t/comm" 2>/dev/null)" in "CPU "*"/TCG") n=$((n + 1)) ;; esac
+      done
+      [ "$n" -ge "$SMP_N" ] && break
+    done
+    sleep 2          # les fils du rendu et du son naissent avec les devices
+    for t in /proc/$pid/task/*; do
+      c="$(cat "$t/comm" 2>/dev/null)"
+      case "$c" in
+        "CPU "*"/TCG") k="${c#CPU }"; k="${k%%/*}"
+                       taskset -pc "${v[$k]:-$PIN_REST}" "${t##*/}" >/dev/null 2>&1 ;;
+        *)             taskset -pc "$PIN_REST" "${t##*/}" >/dev/null 2>&1 ;;
+      esac
+    done
+    echo "  📌 épinglage : vCPU sur $PIN_VCPUS, autres fils sur $PIN_REST" >&2 ) 9>&- &
+  MODE="$MODE + ÉPINGLÉ"
+fi
 
 BOOTDEV='hd:10,\System\Library\CoreServices\BootX'
 MON=$(host_mon_path "$SCR/mon.sock")   # mon.sock pour la VM verrouillée, mon-PID.sock en SNAPSHOT=1

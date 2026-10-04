@@ -154,6 +154,11 @@ Dans l'ordre des gains estimés. Profil du 01/10 et lecture : `docs/vitesse-prof
   Contribution de chaque levier A4 séparément non mesurée (la campagne les allumait ensemble).
 - [ ] **[Protocole] Nexuiz : les ~2 ms restantes d'attente des requêtes d'occlusion** :
   soumettre par tranches pendant les dessins, ou résultats de requête écrits par l'hôte.
+- [ ] **[Plugin] DOOM 3 sur le PC, étape 3** (`docs/d3-plugin-x86.md`) : trois leviers écrits,
+  éteints, **pas encore compilés dans l'invité** — indices sans balayage quand les miroirs
+  sont propres et balayage AltiVec (`POMPPC_GL_IDXLAZY`, `POMPPC_GL_IDXVEC`), verdict refait
+  par unité (`POMPPC_GL_UNITVD`), dispatch en une passe (`POMPPC_GL_DISPONE`). Reste : gltest
+  51 scènes et DOOM 3 sous contrôle, matrice avec vidage, A/B sur le PC (§6-§7), puis défauts.
 - [ ] **[Plugin] Transmission paresseuse** : mesure honnête et décision du défaut.
 - [ ] **[Plugin] Verdict GLSL : mémoire par texture et par époque** (suite de `WLUNIF`, dont le
   gain était dans le bruit : ce sont les liaisons de texture qui font recalculer).
