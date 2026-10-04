@@ -350,9 +350,9 @@ durcissements, LTO, PGO) ~13 %, `x-jit-rel32` ~2 %, `x-vmx-inline` + `x-vfp-nati
 
 ## 10. Pour la suite
 
-1. **Défauts.** Rien n'est encore allumé par défaut : tout est prouvé exact sur le PC et mesuré
-   sur DOOM 3, et le tour de non-régression sur la matrice du PC (mb, zen, ut, d3, avec vidage)
-   est au §11 (vert). D'où : `JITREL32`, `VMXINLINE` et `VFPNATIVE` peuvent passer à 1 dans
+1. **Défauts — fait le 04/10** : `VMXINLINE=1` partout, `VFPNATIVE=1` sur Linux x86-64
+   (**pas `JITREL32`**, §12), les quatre leviers du plugin à 1 (révision `20261004-d3x`), binaire de
+   référence `~/src/qemu` reconstruit avec 0021-0024. Ce qui était prévu : `JITREL32`, `VMXINLINE` et `VFPNATIVE` peuvent passer à 1 dans
    `run_tiger.sh` sur Linux x86-64, les quatre leviers du plugin à 1 (`*_DEFAULT`) — sur le M4
    seulement après la parité arm64 de 0022 et un A/B là-bas.
 2. **Binaire PGO du PC.** `QEMU_OPT=native,nohard,lto,pgo` reste une variante (binaire propre au
@@ -388,10 +388,48 @@ de référence sur le PC : le tour `ref` l'a créée (`references-linux.csv`, `v
 valider à l'œil (`matrice.py --valider d3-fen`) ; les deux captures montrent la même scène,
 justement rendue (`ref-1/d3-fen/capture.png`, `all-1/d3-fen/capture.png`).
 
-**Pour jouer à DOOM 3 au plus vite sur le PC aujourd'hui** (tout prouvé, rien par défaut) :
+**Pour jouer à DOOM 3 au plus vite sur le PC** (depuis le 04/10, les réglages sont par défaut ; reste le binaire PGO) :
 
-    QEMU_BIN=~/src/qemu-d3tcg/build-pgo3/qemu-system-ppc JITREL32=1 VMXINLINE=1 VFPNATIVE=1 \
-        POMPPC_FRONTEND=native ./run_tiger.sh
+    QEMU_BIN=~/src/qemu-d3tcg/build-pgo3/qemu-system-ppc JITREL32=1 POMPPC_FRONTEND=native ./run_tiger.sh
 
-et, dans l'invité, `POMPPC_GL_IDXLAZY=1 POMPPC_GL_IDXVEC=1 POMPPC_GL_DISPONE=1
-POMPPC_GL_UNITVD=1` dans l'environnement du jeu (ou les `*_DEFAULT` du plugin à 1).
+(`JITREL32=1` pour DOOM 3 seulement : voir §12.)
+
+## 12. Mise par défaut (04/10) et le piège de `x-jit-rel32`
+
+Défauts allumés le 04/10 : `x-vmx-inline` partout, `x-vfp-native` sur Linux x86-64 (émetteur
+aarch64 non prouvé), les quatre leviers du plugin (révision `20261004-d3x`, installée dans la VM
+quotidienne et dans `disks/prebuilt`, CD regravé ; ancien `prebuilt` dans
+`bench/devloop/prebuilt-20261002`) ; binaire de référence `~/src/qemu` reconstruit avec 0021-0024.
+
+Le premier tour de vérification avec **tous** les nouveaux défauts (binaire de référence, sans
+PGO) a montré UT2004 plus lent ; A/B à 3 parties par bras sur `ut-fen` :
+
+| campagne | bras | ms/image (min..max) |
+|---|---|---|
+| `x86-ut-def` | nouveaux défauts (dont `JITREL32`) | 62,5 (60,5..63,9) |
+| | tout éteint | 57,9 (57,2..58,6) |
+| `x86-ut-split` | options TCG seules | 67,2 (65,9..67,4) |
+| | plugin seul | 57,1 (55,8..62,1) |
+| `x86-ut-tcg` | `JITREL32` seul | **64,1 (57,0..67,2)** |
+| | `VMXINLINE` seul | 58,3 (56,7..58,7) |
+| | `VFPNATIVE` seul | 58,2 (57,9..59,0) |
+
+**`x-jit-rel32` a deux régimes sur UT2004** (57 ou 64-67 ms/image d'un lancement à l'autre, la
+place du tampon changeant avec l'ASLR) ; sur DOOM 3 il gagnait 2-3 % dans les deux campagnes. Même
+allure que les « deux régimes » de `x-jit-near` sur le M4 (`docs/tcg-g4.md` §14) : sans doute un
+conflit d'adresses entre le code généré et le texte de QEMU (alias de cache ou de prédicteur), à
+étudier (`perf stat` des deux régimes). **Il reste éteint par défaut** (`JITREL32=1` pour l'avoir).
+Le gain total de DOOM 3 par défaut perd donc ses ~2 % ; le reste est inchangé.
+
+**Tours de vérification avec les défauts définitifs** (sans `JITREL32`, binaire de référence) :
+matrice avec vidage `x86-defauts2` : mb 21,0, zen 7,6, d3 138,5 ms/image, images justes (d3 :
+référence à valider) ; UT2004 y sort à 76,6 ms/image, mais c'est un **transitoire** de début de
+fenêtre (les ~20 premières images à 100-280 ms, puis 40-70 comme d'habitude) quand UT suit le
+vidage de DOOM 3 (40 Mo) dans la même VM, vu aussi une fois avant. Sans vidage, DOOM 3 puis UT
+dans la même VM (`x86-d3ut`, une partie par bras, campagne arrêtée là) : **défauts d3 137,7 /
+ut 56,4 ; tout éteint d3 149,5 / ut 57,3**. Pas de régression d'UT ; DOOM 3 −8 % par défaut sur le
+binaire de référence (−23 % avec le binaire PGO et `JITREL32=1`).
+
+**Suite sur le M4** : compiler et prouver l'émetteur aarch64 de 0022 (vfptest, vfpproof,
+mutants), A/B de `x-vmx-inline`/`x-vfp-native` et des leviers du plugin là-bas ; comprendre les
+deux régimes de `x-jit-rel32` ; valider la référence `d3-fen` du PC.

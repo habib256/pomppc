@@ -9,7 +9,7 @@ de commit et dans `docs/`.
 
 ## Non publié
 
-- **DOOM 3 sur le PC : 150 → 115 ms/image (−23 %), sans rien allumer par défaut** (nuit du 03
+- **DOOM 3 sur le PC : 150 → 115 ms/image (−23 %), allumé par défaut le 04/10** (nuit du 03
   au 04/10, `docs/vitesse-doom3-x86.md`). Le surcoût propre à DOOM 3 sur x86 (2,5× le M4 au lieu
   de 2×) vient de sa logique à 60 tics/s, payée ~9 fois par image à 150 ms (§3.1) : tout gain
   brut y est amplifié. Leviers, chacun en A/B entrelacé (3 parties par bras) :
@@ -22,8 +22,13 @@ de commit et dans `docs/`.
   (2,35 G opérations vfp, 2,7 G vmx, 2,1 G lectures de base de temps, 0 divergence ; plugin en
   contrôle, 0 écart) ; 5 mutants de l'émetteur réel sur 5 détectés ; gltest 59 scènes
   identiques dans 7 modes. Matrice du PC tout allumé, avec vidage : mb 17,5, zen 6,3, ut 47,9
-  ms/image (−18-19 %), images justes. Propriétés et leviers **éteints par défaut** ; émetteur
-  aarch64 de 0022 jamais compilé (à prouver sur le M4). `r_useIndexBuffers 1` : +8 %, à éviter.
+  ms/image (−18-19 %), images justes. **Allumés par défaut le 04/10** (à la demande de
+  l'utilisateur) : `VMXINLINE` partout, `VFPNATIVE` sur Linux x86-64 seulement
+  (émetteur aarch64 de 0022 jamais compilé : à prouver sur le M4), les 4 leviers du plugin
+  (révision `20261004-d3x`). **Reconstruire QEMU** (`scripts/build_qemu_qfb.sh`, patches
+  0021-0024) **et réinstaller le plugin** ; le binaire PGO reste une variante (`QEMU_OPT`).
+  **`JITREL32` reste éteint** : sur UT2004 il a deux régimes selon la place du tampon du JIT
+  (57 ou 64-67 ms/image contre 58 sans lui, `bench/tcg/ab/x86-ut-tcg`), cause à trouver. `r_useIndexBuffers 1` : +8 %, à éviter.
   Le vrai `-O3` (`-Doptimization=3`, posé par `native` ; un `-O3` en CFLAGS était écrasé par
   meson) : encore −2,4 %. Piège : la liaison LTO+PGO simultanée des deux QEMU a gelé le PC (swap) ;
   `build_qemu_qfb.sh` lie désormais un binaire à la fois, 6 ltrans.

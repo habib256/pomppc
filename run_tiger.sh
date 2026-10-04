@@ -29,11 +29,11 @@
 #   LFSINLINE=0 VFPFAST=0 VPERMFAST=0 ./run_tiger.sh  # coupe lfs/stfs sans helper, flottant AltiVec
 #                             # à 4 voies, vperm par table (tcg/0002-0004, allumés par défaut)
 #                             # docs/flottant-rapide.md
-#   VMXINLINE=1 ./run_tiger.sh  # vsldoi, vmrghw/vmrglw, stve[bhw]x en ligne, sans helper (x-vmx-inline,
-#                             # tcg/0021, éteint par défaut, docs/tcg-g4.md §28) ; VMXVERIFY=1 : preuve
-#   VFPNATIVE=1 ./run_tiger.sh  # vaddfp/vsubfp/vmaddfp/vnmsubfp par le FPU de l'hôte dans le code
-#                             # généré (x-vfp-native, tcg/0022 : x86-64 AVX+FMA3, arm64 ; éteint par
-#                             # défaut, docs/tcg-g4.md §28) ; VFPNVERIFY=1 : mode preuve
+#   VMXINLINE=0 ./run_tiger.sh  # coupe vsldoi, vmrghw/vmrglw, stve[bhw]x en ligne (x-vmx-inline,
+#                             # tcg/0021, allumé par défaut, docs/tcg-g4.md §28) ; VMXVERIFY=1 : preuve
+#   VFPNATIVE=0 ./run_tiger.sh  # coupe vaddfp/vsubfp/vmaddfp/vnmsubfp par le FPU de l'hôte dans le
+#                             # code généré (x-vfp-native, tcg/0022 : allumé par défaut sur Linux
+#                             # x86-64 ; arm64 non prouvé, VFPNATIVE=1) ; VFPNVERIFY=1 : mode preuve
 #   FPINLINE=0 ./run_tiger.sh # coupe le flottant scalaire simple (fmuls, fmadds, fcmpu…) sans ses
 #                             # deux helpers dans le cas courant (x-fp-inline, tcg/0007, allumé
 #                             # par défaut, docs/tcg-g4.md §15) ; FPVERIFY=1 : mode preuve
@@ -62,8 +62,8 @@
 #   JITNEAR=0 ./run_tiger.sh  # laisse macOS placer le tampon du JIT (défaut : dans la fenêtre de 4 Gio
 #                             # du texte de QEMU, x-jit-near, tcg/0006 : supprime le régime lent, docs/tcg-g4.md §14) ;
 #                             # TCG_OPTS=… propriétés brutes de l'accélérateur
-#   JITREL32=1 ./run_tiger.sh # x86-64 Linux : tampon du JIT à moins de 2 Gio du texte de QEMU, appels
-#                             # de helpers directs (x-jit-rel32, tcg/0024, éteint par défaut, §28)
+#   JITREL32=1 ./run_tiger.sh # x86-64 Linux : tampon du JIT à moins de 2 Gio du texte, appels de
+#                             # helpers directs (x-jit-rel32, tcg/0024, éteint : deux régimes sur UT2004)
 #   NOPAD=1 ./run_tiger.sh    # coupe le passthrough de la manette USB
 #   TABLET=1 ./run_tiger.sh   # + usb-tablet (défaut avec ImGuiDock).
 #                             # TABLET=0 garde seulement la souris relative.
@@ -104,10 +104,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # et MSRNOBQL (x-msr-nobql, tcg/0012) en font partie ; depuis le 01/10/2026 (§22),
 # FPNATIVE (x-fp-native, tcg/0014) ; depuis le soir du 01/10 (§23-§24, à la demande de
 # l'utilisateur, sans tour de matrice), TBFAST (x-tb-fast, tcg/0015) et FPNATIVE64
-# (x-fp-native64, tcg/0016).
-for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JITNEAR FPNATIVE TBFAST FPNATIVE64; do
+# (x-fp-native64, tcg/0016). Depuis le 04/10/2026 (docs/vitesse-doom3-x86.md, DOOM 3
+# sur le PC −23 % avec la compilation et le plugin) : VMXINLINE (x-vmx-inline, tcg/0021) ;
+# PAS JITREL32 (x-jit-rel32, tcg/0024) : deux régimes sur UT2004 selon la place du
+# tampon (57 / 64-67 ms/image, bench/tcg/ab/x86-ut-tcg) ; VFPNATIVE
+# (x-vfp-native, tcg/0022) sur Linux x86-64 seulement : son émetteur aarch64 n'est
+# ni compilé ni prouvé (à faire sur le M4, VFPNATIVE=1 pour l'essayer).
+for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JITNEAR FPNATIVE TBFAST FPNATIVE64 VMXINLINE; do
   export "$_opt=${!_opt:-1}"
 done
+if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
+  export VFPNATIVE="${VFPNATIVE:-1}"
+fi
 # x-jc-bits (tcg/0011) : 2^14 entrées de cache de sauts (12 = QEMU d'origine).
 export JCBITS="${JCBITS:-14}"
 export QGPU_GPU_COPY="${QGPU_GPU_COPY:-1}" QGPU_GLSL="${QGPU_GLSL:-1}"
@@ -326,8 +334,9 @@ for _p in "VFPFAST x-vfp-fast VFP-4-VOIES" "VPERMFAST x-vperm-fast VPERM-TABLE";
 done
 # --- AltiVec en ligne (x-vmx-inline, patches/tcg/0021) et flottant AltiVec par
 # le FPU de l'hôte dans le code généré (x-vfp-native, patches/tcg/0022),
-# docs/tcg-g4.md §28 --- mêmes résultats au bit près que les helpers. Éteints par
-# défaut (A/B DOOM 3 à jouer) : VMXINLINE=1, VFPNATIVE=1 ; VMXVERIFY=1 et
+# docs/tcg-g4.md §28 --- mêmes résultats au bit près que les helpers. Allumés par
+# défaut depuis le 04/10/2026 (VFPNATIVE : Linux x86-64), VMXINLINE=0 / VFPNATIVE=0
+# les éteignent ; VMXVERIFY=1 et
 # VFPNVERIFY=1 ajoutent les modes preuve (bilan sur stderr). x-vfp-native n'agit
 # qu'avec x-vfp-fast (VFPFAST, allumé par défaut) et un hôte qui a l'op TCG
 # (x86-64 avec AVX et FMA3, arm64) ; ailleurs il ne change rien.
@@ -536,7 +545,9 @@ fi
 # (ailleurs sans effet) : le noyau pose sinon le tampon à ~35 Tio du texte et
 # chaque appel de helper depuis le code généré passe par `call *[rip+pool]'. La
 # place prise est imprimée (« appels des helpers directs (rel32) »). Éteint par
-# défaut (A/B à jouer) : JITREL32=1. Prime sur x-jit-near quand il réussit.
+# défaut : DOOM 3 −2,3 %, mais UT2004 a deux régimes (57 ou 64-67 ms/image selon la
+# place du tampon, bench/tcg/ab/x86-ut-tcg, docs/vitesse-doom3-x86.md §12) :
+# JITREL32=1. Prime sur x-jit-near quand il réussit.
 if [ "${JITREL32:-0}" != 0 ]; then
   if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-jit-rel32=on"; then
     TCG_ACCEL="${TCG_ACCEL:-tcg},x-jit-rel32=on"

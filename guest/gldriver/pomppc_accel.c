@@ -129,16 +129,18 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261003-d3x"
+#define POMPPC_PLUGIN_REV "20261004-d3x"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
-/* 03/10, étape 3 (docs/d3-plugin-x86.md) : éteints tant que l'A/B et la
-   preuve d'image ne sont pas faits. La variable d'environnement prime. */
-#define IDXLAZY_DEFAULT 0
-#define IDXVEC_DEFAULT  0
-#define DISPONE_DEFAULT 0
-#define UNITVD_DEFAULT  0
+/* 03/10, étape 3 (docs/d3-plugin-x86.md) : allumés le 04/10 après preuve
+   (gltest, DOOM 3 sous contrôle, matrice avec vidage) et A/B DOOM 3 −3,3 %
+   (docs/vitesse-doom3-x86.md §6.2, §7-§8). La variable d'environnement prime
+   (POMPPC_GL_IDXLAZY=0 …). */
+#define IDXLAZY_DEFAULT 1
+#define IDXVEC_DEFAULT  1
+#define DISPONE_DEFAULT 1
+#define UNITVD_DEFAULT  1
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
