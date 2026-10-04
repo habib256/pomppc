@@ -834,7 +834,8 @@ grep -q "x-abs-margin" hw/usb/dev-hid.c || {
 # QEMU_OPT (éteint par défaut, docs/vitesse-doom3-x86.md) : variantes de
 # compilation, liste séparée par des virgules, construites dans build-<variante>
 # (jamais dans build/, le binaire de référence) et sondées comme lui :
-#   native   -O3 -march=native (binaire propre à CETTE machine)
+#   native   -march=native (binaire propre à CETTE machine ; le -O3 posé est
+#            écrasé par le -O2 que meson ajoute après : -Doptimization=3 à essayer)
 #   nohard   sans les durcissements de QEMU (-fzero-call-used-regs=used-gpr,
 #            -ftrivial-auto-var-init=zero) ni protection de pile
 #   lto      optimisation à l'édition de liens (-Db_lto=true)
