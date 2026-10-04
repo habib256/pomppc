@@ -9,6 +9,15 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Plugin : trois leviers pour DOOM 3 sur le PC, éteints** (03/10, `docs/d3-plugin-x86.md`,
+  révision `20261003-d3x`). Diagnostic : DOOM 3 prend déjà `DRAW_NATIVE` pour tous ses dessins
+  (`GEOMHOST 0` n'est pas un refus : il n'a pas de tableaux clients) ; restent au G4 le verdict
+  des ~46 % de dispatches qui relient des textures, le balayage et la recopie de 456 000
+  indices par image, et trois verrous par dispatch. `POMPPC_GL_IDXLAZY` (pas de balayage quand
+  les miroirs sont propres, commande identique), `POMPPC_GL_IDXVEC` (balayage AltiVec,
+  `pomppc_vec.c` compilé avec `-faltivec`), `POMPPC_GL_UNITVD` (verdict refait par unité,
+  contrôlé par `VERDICTCHECK`), `POMPPC_GL_DISPONE` (dispatch en une passe). Ni protocole ni
+  kext : **plugin à recompiler et réinstaller seulement**. Rien de mesuré ni de prouvé en VM.
 - **Carillon de démarrage sous Linux** (03/10) : le frontend n'avait de lecteur que pour macOS
   (`NSSound`) ; sous Linux un bouchon refusait de jouer. `StartupChimeLinux.cpp` joue le WAV ou
   l'AIFF par PulseAudio (PipeWire compris), volume réglable pendant la lecture. Le son par défaut

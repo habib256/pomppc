@@ -195,5 +195,20 @@ void *pomppc_geom_proc(int slot);       /* Begin/End, RenderVertexArray/Buffer *
    gldInitDispatch. Lu seulement par les compteurs (POMPPC_GL_COUNT). */
 long pomppc_geom_dispatch(void *ctx, const unsigned long *chg);
 void pomppc_geom_context(void *ctx, void *cfg);
+/* 03/10 (POMPPC_GL_DISPONE, docs/d3-plugin-x86.md §4) : fin de
+   gldUpdateDispatch en une passe — crochetage (sauté si la table est restée
+   celle du dernier crochetage et qu'Apple n'a pas été appelé) et verdict sous
+   un seul verrou. Rend les bits de pomppc_geom_dispatch. Éteint : exactement
+   pomppc_hook_procs puis pomppc_geom_dispatch. */
+long pomppc_hook_and_dispatch(void *ctx, void **procs, const unsigned long *chg,
+                              int apple_called);
+
+/* pomppc_vec.c (compilé avec -faltivec) : min et max d'indices non signés
+   (POMPPC_GL_IDXVEC). Rend 1 et remplit *mn, *mx (n >= 1). */
+int  pomppc_vec_available(void);
+int  pomppc_vec_minmax_u32(const unsigned long *p, long n,
+                           unsigned long *mn, unsigned long *mx);
+int  pomppc_vec_minmax_u16(const unsigned short *p, long n,
+                           unsigned long *mn, unsigned long *mx);
 
 #endif
