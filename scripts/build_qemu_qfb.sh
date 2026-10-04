@@ -834,8 +834,9 @@ grep -q "x-abs-margin" hw/usb/dev-hid.c || {
 # QEMU_OPT (éteint par défaut, docs/vitesse-doom3-x86.md) : variantes de
 # compilation, liste séparée par des virgules, construites dans build-<variante>
 # (jamais dans build/, le binaire de référence) et sondées comme lui :
-#   native   -march=native (binaire propre à CETTE machine ; le -O3 posé est
-#            écrasé par le -O2 que meson ajoute après : -Doptimization=3 à essayer)
+#   native   -O3 -march=native (binaire propre à CETTE machine). -O3 passe par
+#            -Doptimization=3 : un -O3 dans --extra-cflags est écrasé par le -O2
+#            que meson ajoute après (−2,4 % sur DOOM 3, docs/vitesse-doom3-x86.md §5.5)
 #   nohard   sans les durcissements de QEMU (-fzero-call-used-regs=used-gpr,
 #            -ftrivial-auto-var-init=zero) ni protection de pile
 #   lto      optimisation à l'édition de liens (-Db_lto=true)
@@ -857,7 +858,7 @@ if [ -n "${QEMU_OPT:-}" ]; then
   IFS=, read -r -a _opts <<< "$QEMU_OPT"
   for o in "${_opts[@]}"; do
     case "$o" in
-      native)  OPT_CFLAGS="$OPT_CFLAGS -O3 -march=native" ;;
+      native)  OPT_CFLAGS="$OPT_CFLAGS -march=native"; OPT_CONF+=(-Doptimization=3) ;;
       nohard)  OPT_CFLAGS="$OPT_CFLAGS -fzero-call-used-regs=skip -ftrivial-auto-var-init=uninitialized"
                OPT_CONF+=(--disable-stack-protector) ;;
       # Une seule édition de liens à la fois, LTO_JOBS processus ltrans (6 par

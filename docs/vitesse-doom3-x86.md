@@ -211,9 +211,12 @@ Variantes construites par `QEMU_OPT` (`scripts/build_qemu_qfb.sh`) dans l'arbre 
 | `lto` | `native,nohard,lto` : `-march=native`, sans `-fzero-call-used-regs` ni `-ftrivial-auto-var-init`, sans protection de pile, LTO | 138,1 (137,7..140,2) | **−8,1 %** |
 | `pgo` | `native,nohard,lto,pgo` : idem + profil d'une partie de DOOM 3 (`pgo-gen`, 25 min de jeu, 1 356 `.gcda`) | **130,8 (129,1..131,1)** | **−12,9 %** |
 
-**`-O3` n'agit pas** : meson ajoute `-g -O2` après `--extra-cflags` (ligne `CFLAGS` du
-configure : `-O3 -march=native … -g -O2`), le dernier `-O` l'emporte ; ces binaires sont donc en
-`-O2 -march=native`. Les étendues ne se recouvrent pas : c'est le plus gros levier de l'hôte, sans une ligne de code
+**`-O3` dans `--extra-cflags` n'agit pas** : meson ajoute `-g -O2` après (ligne `CFLAGS` du
+configure : `-O3 -march=native … -g -O2`), le dernier `-O` l'emporte ; les binaires de ce tableau
+sont donc en `-O2 -march=native`. Le vrai `-O3` (`-Doptimization=3`, que `native` pose
+désormais) a été mesuré à la fin, sur la configuration complète (`bench/tcg/ab/x86-o3`, copie TCG
+en PGO réentraîné, tout allumé) : **115,3 (115,1..117,3) contre 118,1 (116,8..118,4) ms/image,
+−2,4 %**. Les étendues ne se recouvrent pas : c'est le plus gros levier de l'hôte, sans une ligne de code
 de l'émulateur. Un binaire `native` n'est valable que sur CE processeur (AVX2, FMA3 ; il ne
 démarrerait pas sur un x86 plus ancien). La justesse ne dépend pas des options (ni
 `-ffast-math` ni rien qui touche au flottant ; softfloat et les chemins natifs gardent leurs
@@ -334,8 +337,9 @@ Dans une même campagne (3 parties par bras, entrelacées) :
 | `q3` | copie TCG, PGO au profil renommé (`build-native-nohard-lto-pgo`) | `JITREL32 VMXINLINE VFPNATIVE` + plugin `IDXLAZY IDXVEC DISPONE UNITVD` | 117,5 (114,2..117,5) | **−21,6 %** |
 | `r3` | copie TCG, PGO **réentraîné** sur elle-même avec tous ces réglages (`build-pgo2`, 25 min de DOOM 3, 1 421 `.gcda`) | idem | **116,9 (116,6..118,7)** | **−22,0 %** |
 
-**DOOM 3 passe de ~150 à ~117 ms/image sur le PC** (8,5 images/s au lieu de 6,7), contre 56-61
-sur le M4 : l'écart tombe de 2,5-2,7× à ~2,0×, le rapport des autres jeux (§3.1). Réentraîner le
+**DOOM 3 passe de ~150 à ~117 ms/image sur le PC** (8,5 images/s au lieu de 6,7), et à
+**115,3 ms/image (−23 %) en vrai `-O3`** (§5.5), contre 56-61 sur le M4 : l'écart tombe de
+2,5-2,7× à ~2,0×, le rapport des autres jeux (§3.1). Réentraîner le
 profil sur la copie TCG n'apporte rien de mesurable (`r3` contre `q3` : −0,5 %, dans le bruit) :
 le profil d'un arbre voisin suffit.
 
@@ -353,7 +357,8 @@ durcissements, LTO, PGO) ~13 %, `x-jit-rel32` ~2 %, `x-vmx-inline` + `x-vfp-nati
 2. **Binaire PGO du PC.** `QEMU_OPT=native,nohard,lto,pgo` reste une variante (binaire propre au
    processeur, profil à refaire à chaque changement notable de la série) : soit en faire le
    binaire quotidien du PC (`QEMU_BIN` des lanceurs), soit garder la référence et ne s'en servir
-   que pour jouer. Essayer aussi `-Doptimization=3` (le `-O3` actuel n'agit pas, §5.5).
+   que pour jouer. Le meilleur binaire mesuré : `~/src/qemu-d3tcg/build-pgo3/` (`-O3`, PGO
+   réentraîné, `PGO_DIR=pgo-data3`).
 3. **Gouverneur** `performance` (§5.4) : un A/B à faire, il demande la racine.
 4. **Plugin, indices en VBO** (§5.6) : `r_useIndexBuffers 1` serait le cas idéal pour IDXLAZY
    (indices déjà chez l'hôte) mais retombe aujourd'hui sur l'empaquetage ; comprendre le refus
@@ -384,7 +389,7 @@ justement rendue (`ref-1/d3-fen/capture.png`, `all-1/d3-fen/capture.png`).
 
 **Pour jouer à DOOM 3 au plus vite sur le PC aujourd'hui** (tout prouvé, rien par défaut) :
 
-    QEMU_BIN=~/src/qemu-d3tcg/build-pgo2/qemu-system-ppc JITREL32=1 VMXINLINE=1 VFPNATIVE=1 \
+    QEMU_BIN=~/src/qemu-d3tcg/build-pgo3/qemu-system-ppc JITREL32=1 VMXINLINE=1 VFPNATIVE=1 \
         POMPPC_FRONTEND=native ./run_tiger.sh
 
 et, dans l'invité, `POMPPC_GL_IDXLAZY=1 POMPPC_GL_IDXVEC=1 POMPPC_GL_DISPONE=1
