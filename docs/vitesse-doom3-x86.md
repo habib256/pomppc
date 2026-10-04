@@ -324,6 +324,68 @@ balayages restants de plus de 32 indices (3,14 M sur 4,54 M), DISPONE saute le c
 **99,9 %** des dispatches, UNITVD remplace le verdict complet dans **73 %** des cas où il est
 tenté. Mesure : `q3` contre `q2` au §6.2, **−3,3 %** (122,9 → 118,8 ms/image).
 
-## 9. Pour la suite
+## 9. Bilan : tout ensemble (campagne `x86-c3`)
 
-(à compléter)
+Dans une même campagne (3 parties par bras, entrelacées) :
+
+| bras | binaire | réglages | ms/image (min..max) | contre `ref` |
+|---|---|---|---|---|
+| `ref` | référence `~/src/qemu/build` | défauts | 149,9 (149,4..151,4) | — |
+| `q3` | copie TCG, PGO au profil renommé (`build-native-nohard-lto-pgo`) | `JITREL32 VMXINLINE VFPNATIVE` + plugin `IDXLAZY IDXVEC DISPONE UNITVD` | 117,5 (114,2..117,5) | **−21,6 %** |
+| `r3` | copie TCG, PGO **réentraîné** sur elle-même avec tous ces réglages (`build-pgo2`, 25 min de DOOM 3, 1 421 `.gcda`) | idem | **116,9 (116,6..118,7)** | **−22,0 %** |
+
+**DOOM 3 passe de ~150 à ~117 ms/image sur le PC** (8,5 images/s au lieu de 6,7), contre 56-61
+sur le M4 : l'écart tombe de 2,5-2,7× à ~2,0×, le rapport des autres jeux (§3.1). Réentraîner le
+profil sur la copie TCG n'apporte rien de mesurable (`r3` contre `q3` : −0,5 %, dans le bruit) :
+le profil d'un arbre voisin suffit.
+
+D'où vient le gain, en cumulé (`x86-c1`, `x86-c2`) : compilation (`-march=native`, sans
+durcissements, LTO, PGO) ~13 %, `x-jit-rel32` ~2 %, `x-vmx-inline` + `x-vfp-native` ~4 %, plugin
+~3 %.
+
+## 10. Pour la suite
+
+1. **Défauts.** Rien n'est encore allumé par défaut : tout est prouvé exact sur le PC et mesuré
+   sur DOOM 3, et le tour de non-régression sur la matrice du PC (mb, zen, ut, d3, avec vidage)
+   est au §11 (vert). D'où : `JITREL32`, `VMXINLINE` et `VFPNATIVE` peuvent passer à 1 dans
+   `run_tiger.sh` sur Linux x86-64, les quatre leviers du plugin à 1 (`*_DEFAULT`) — sur le M4
+   seulement après la parité arm64 de 0022 et un A/B là-bas.
+2. **Binaire PGO du PC.** `QEMU_OPT=native,nohard,lto,pgo` reste une variante (binaire propre au
+   processeur, profil à refaire à chaque changement notable de la série) : soit en faire le
+   binaire quotidien du PC (`QEMU_BIN` des lanceurs), soit garder la référence et ne s'en servir
+   que pour jouer. Essayer aussi `-Doptimization=3` (le `-O3` actuel n'agit pas, §5.5).
+3. **Gouverneur** `performance` (§5.4) : un A/B à faire, il demande la racine.
+4. **Plugin, indices en VBO** (§5.6) : `r_useIndexBuffers 1` serait le cas idéal pour IDXLAZY
+   (indices déjà chez l'hôte) mais retombe aujourd'hui sur l'empaquetage ; comprendre le refus
+   de `raw_ensure` pour le tampon d'éléments.
+5. **Le reste du temps vCPU** (§4) : softmmu 11 % (`probe_access*`, remplissages du TLB), recherche
+   de blocs 5 %, logique du jeu à 60 Hz (§3.1 : chaque gain est amplifié).
+6. **Parité arm64** de 0022 sur le M4 (§7).
+
+## 11. Non-régression : la matrice du PC, tout allumé (`bench/tcg/ab/x86-mat`)
+
+Un tour de matrice **avec vidage** (preuve d'image : rejeu natif du vidage contre la capture de
+la VM, rejeu de la référence) par configuration, `MATAB_VIDAGE=1 tools/tcg/matab.sh x86-mat 1
+"ref:" "all:QEMU_BIN=…/build-pgo2/qemu-system-ppc JITREL32=1 VMXINLINE=1 VFPNATIVE=1
+POMPPC_GL_IDXLAZY=1 POMPPC_GL_IDXVEC=1 POMPPC_GL_DISPONE=1 POMPPC_GL_UNITVD=1" mb,zen,ut,d3 fen`
+(une partie par configuration : la vitesse est indicative, pas un A/B) :
+
+| cellule | `ref` : verdict, ms/image | `all` : verdict, ms/image | image (`all`) |
+|---|---|---|---|
+| `mb-fen` | vert, 21,5 | vert, **17,5** | juste (0,00/0,00 %) |
+| `zen-fen` | vert, 7,8 | vert, **6,3** | juste (0,00/0,00 %) |
+| `ut-fen` | vert, 58,7 | vert, **47,9** | juste (0,00/0,00 %) |
+| `d3-fen` | rouge (plancher 76), 151,3 | rouge (plancher 76), **116,4** | rejeu contre VM 0,03/0,00 % ; rejeu de la référence 0,00/0,00 % |
+
+Aucune régression ; les trois autres jeux gagnent ~18-19 %, comme DOOM 3. `d3-fen` n'avait pas
+de référence sur le PC : le tour `ref` l'a créée (`references-linux.csv`, `validee=non`), à
+valider à l'œil (`matrice.py --valider d3-fen`) ; les deux captures montrent la même scène,
+justement rendue (`ref-1/d3-fen/capture.png`, `all-1/d3-fen/capture.png`).
+
+**Pour jouer à DOOM 3 au plus vite sur le PC aujourd'hui** (tout prouvé, rien par défaut) :
+
+    QEMU_BIN=~/src/qemu-d3tcg/build-pgo2/qemu-system-ppc JITREL32=1 VMXINLINE=1 VFPNATIVE=1 \
+        POMPPC_FRONTEND=native ./run_tiger.sh
+
+et, dans l'invité, `POMPPC_GL_IDXLAZY=1 POMPPC_GL_IDXVEC=1 POMPPC_GL_DISPONE=1
+POMPPC_GL_UNITVD=1` dans l'environnement du jeu (ou les `*_DEFAULT` du plugin à 1).

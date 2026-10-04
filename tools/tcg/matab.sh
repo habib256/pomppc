@@ -97,7 +97,10 @@ for p in "${ordre[@]}"; do
   # l'invité : elle passe aussi en --env à la matrice (sans effet sur QEMU)
   genv=()
   for v in "$@"; do case $v in POMPPC_GL_*=*) genv+=(--env "$v") ;; esac; done
-  env "$@" python3 "$WT/tools/matrice/matrice.py" -j "$JEU" -m "$MODE" --sans-vidage \
+  # MATAB_VIDAGE=1 : tour complet avec vidage et preuve d'image (non-régression
+  # d'une configuration sur plusieurs jeux, p. ex. JEU=mb,zen,ut,d3), pas un A/B de vitesse
+  vid=--sans-vidage; [ "${MATAB_VIDAGE:-0}" != 0 ] && vid=
+  env "$@" python3 "$WT/tools/matrice/matrice.py" -j "$JEU" -m "$MODE" $vid \
       ${genv[@]+"${genv[@]}"} ${MATRICE_OPTS:-} --sortie "$D" > "$D/matrice.log" 2>&1
   tail -1 "$D/resultats.csv" 2>/dev/null | tee -a "$OUT/journal.txt"
 done
