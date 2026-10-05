@@ -817,6 +817,41 @@ hw/ppc/ppc.c POMPPC tcg/0023
 tcg/region.c tcg_jit_rel32
 accel/tcg/tcg-all.c x-jit-rel32
 TCG21_MARKERS
+  # Existing patched trees also need the signed-zero fix (fresh trees get it
+  # from 0003/0022). Apply each migration independently and check its marker.
+  if grep -q 'ok &= prod_zero || is_inf' target/ppc/int_helper.c; then
+    patch_strict "$ROOT/patches/tcg/fixes/0003-nmsub-zero.patch"
+  fi
+  if grep -q '^    pvf_3(s, PVF_ORR16B, u, u, t);' tcg/aarch64/tcg-target.c.inc; then
+    patch_strict "$ROOT/patches/tcg/fixes/0022-neon-nmsub-zero.patch"
+  fi
+  # M4: proven fixes and optional variants; QEMU properties default off.
+  if ! grep -q 'x-lmw-vector' target/ppc/cpu_init.c; then
+    patch_strict "$ROOT/patches/tcg/0025-ppc-lmw-vector.patch"
+  fi
+  if ! grep -q 'x-jc-word' accel/tcg/tcg-all.c; then
+    patch_strict "$ROOT/patches/tcg/0026-tcg-jc-word.patch"
+  fi
+  if ! grep -q 'saved_addr = tcg_jit_addr' tcg/region.c; then
+    patch_strict "$ROOT/patches/tcg/0027-tcg-splitwx-rw-away.patch"
+  fi
+  if grep -q 'tcg_out_addi_ptr(s, TCG_REG_X1 + i' tcg/aarch64/tcg-target.c.inc; then
+    patch_strict "$ROOT/patches/tcg/0028-tcg-vfp-neon-slow.patch"
+  fi
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch M4 incomplet : '$m' absent de $f" >&2; exit 1; }
+  done <<'TCG_M4_MARKERS'
+target/ppc/int_helper.c prod_zero && !nres
+tcg/aarch64/tcg-target.c.inc kind != PVF_NMSUB
+target/ppc/lmw-vector.h ppc_lmw_vector
+target/ppc/mem_helper.c ppc_stmw_vector
+target/ppc/cpu_init.c x-lmw-vector
+accel/tcg/tcg-all.c x-jc-word
+accel/tcg/translator.c tb_jmp_cache_word
+tcg/region.c saved_addr = tcg_jit_addr
+tcg/aarch64/tcg-target.c.inc TCG_TYPE_PTR, arg
+TCG_M4_MARKERS
 fi
 
 # --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---
@@ -981,6 +1016,10 @@ check_opt x-fp-flat      qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-f
 check_opt x-fp-native    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fp-native=on
 check_opt x-fp-native64  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fp-native64=on
 check_opt x-tb-fast      qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-tb-fast=on
+check_opt x-vmx-inline   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-vmx-inline=on
+check_opt x-vfp-native   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-vfp-native=on
+check_opt x-lmw-vector   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-lmw-vector=on
+check_opt x-jc-word      qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jc-word=on
 echo
 echo "→ $CAPS"
 

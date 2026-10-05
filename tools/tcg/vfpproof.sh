@@ -16,10 +16,14 @@ mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 sed -n '/vfp-fast: début/,/vfp-fast: fin/p' "$SRC/target/ppc/int_helper.c" > "$OUT/vfpproof-fast.h"
 grep -q "vfp_fma4" "$OUT/vfpproof-fast.h" || { echo "arbre sans le patch 0003 ($SRC)" >&2; exit 2; }
-# VFPPROOF_NATIVE=1 : le modèle de l'émetteur x86 de x-vfp-native (tcg/0022), sa
+# VFPPROOF_NATIVE=1 : modèle AVX/FMA3 ou NEON de x-vfp-native (tcg/0022), sa
 # porte extraite de cpu_init.c ; VFPPROOF_MUT=k (dans l'environnement) : mutant k
 NAT=
 if [ -n "${VFPPROOF_NATIVE:-}" ]; then
+  case "$(uname -m)" in
+    arm64|aarch64|x86_64) ;;
+    *) echo "modèle natif absent pour $(uname -m)" >&2; exit 2 ;;
+  esac
   sed -n '/vfp-native-gate: début/,/vfp-native-gate: fin/p' "$SRC/target/ppc/cpu_init.c" \
     > "$OUT/vfpproof-gate.h"
   grep -q "ppc_vfn_gate_init" "$OUT/vfpproof-gate.h" || { echo "arbre sans le patch 0022 ($SRC)" >&2; exit 2; }

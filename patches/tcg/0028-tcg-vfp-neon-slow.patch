@@ -1,0 +1,17 @@
+diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
+--- a/tcg/aarch64/tcg-target.c.inc
++++ b/tcg/aarch64/tcg-target.c.inc
+@@ -2409,7 +2409,12 @@
+     }
+     tcg_out_mov(s, TCG_TYPE_PTR, TCG_REG_X0, TCG_AREG0);
+     for (int i = 0; i < 4; i++) {
+-        tcg_out_addi_ptr(s, TCG_REG_X1 + i, TCG_AREG0, l->vfp_off[i]);
++        TCGReg arg = TCG_REG_X1 + i;
++        /* QEMU 11's tcg_out_addi_ptr is an unreachable ABI stub on A64.
++         * AVR offsets exceed the ADD-immediate range: materialize them.
++         */
++        tcg_out_movi(s, TCG_TYPE_PTR, arg, l->vfp_off[i]);
++        tcg_out_insn(s, addsub_shift, ADD, 1, arg, TCG_AREG0, arg);
+     }
+     tcg_out_call_int(s, l->fp_slow);
+     tcg_out_goto(s, l->raddr);

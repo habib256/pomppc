@@ -595,7 +595,7 @@ index ee37c2d..3d8acfa 100644
 +    pvf_3(s, PVF_CMHI4S, u, ta, k1);
 +    pvf_3(s, PVF_CMHI4S, tb, k4, ta);
 +    pvf_3(s, PVF_AND16B, u, u, tb);
-+    pvf_3(s, PVF_ORR16B, u, u, t);
++    if (kind != PVF_NMSUB) pvf_3(s, PVF_ORR16B, u, u, t);
 +    pvf_3(s, PVF_AND16B, ok, ok, u);
 +
 +    /* any lane not ok, or the gate: the helper, out of line */

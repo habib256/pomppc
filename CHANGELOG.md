@@ -9,6 +9,18 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **JIT M4, 05/10** (`docs/jit-m4-2026-10-05.md`) : modèle natif NEON enfin
+  sélectionné par `VFPPROOF_NATIVE=1`, 648 M vecteurs sans divergence, huit mutants
+  détectés ; correction du zéro signé `vnmsubfp` et du helper lent aarch64 (0028).
+  Vérification en VM SMP=1 et SMP=2, instructions et invalidations sans divergence.
+  Flottant AltiVec natif : **1 336 → 362 ms (−73 %) sur microbanc**, gain en jeu
+  non mesuré. Variantes `LMWVEC`/`JCWORD` exactes mais sans gain mesuré. À la demande de
+  l’utilisateur, `VFPNATIVE`, `LMWVEC` et `JCWORD` sont allumés dans `run_tiger.sh`
+  sur macOS arm64 ; chaque variable mise à `0` coupe son option. Rebuild QEMU
+  avec 0025–0028 requis.
+  Profil des blocs et du code ARM (`hotblocks`, `jitblocks`) ; correction du
+  placement RX sous `split-wx` (0027), 20/20 lancements dans la fenêtre du texte.
+
 - **DOOM 3 sur le PC : 150 → 115 ms/image (−23 %), allumé par défaut le 04/10** (nuit du 03
   au 04/10, `docs/vitesse-doom3-x86.md`). Le surcoût propre à DOOM 3 sur x86 (2,5× le M4 au lieu
   de 2×) vient de sa logique à 60 tics/s, payée ~9 fois par image à 150 ms (§3.1) : tout gain

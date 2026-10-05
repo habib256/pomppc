@@ -1,0 +1,94 @@
+diff --git a/accel/tcg/tb-jmp-cache.h b/accel/tcg/tb-jmp-cache.h
+--- a/accel/tcg/tb-jmp-cache.h
++++ b/accel/tcg/tb-jmp-cache.h
+@@ -24,6 +24,7 @@
+ #define TB_JMP_CACHE_MAX_BITS 16
+ #define TB_JMP_CACHE_MAX (1 << TB_JMP_CACHE_MAX_BITS)
+ extern unsigned tb_jmp_cache_bits;
++extern bool tb_jmp_cache_word; /* fixed before CPU realize, x-jc-word */
+ extern bool tb_jmp_cache_bits_frozen;
+ #define TB_JMP_CACHE_SIZE (1u << tb_jmp_cache_bits)
+ 
+diff --git a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -625,6 +625,7 @@
+  */
+ /* POMPPC tcg/0011: size of the jump cache (x-jc-bits), see tb-jmp-cache.h */
+ unsigned tb_jmp_cache_bits = TB_JMP_CACHE_BITS;
++bool tb_jmp_cache_word;
+ bool tb_jmp_cache_bits_frozen;
+ 
+ void tcg_flush_jmp_cache(CPUState *cpu)
+diff --git a/accel/tcg/tb-hash.h b/accel/tcg/tb-hash.h
+--- a/accel/tcg/tb-hash.h
++++ b/accel/tcg/tb-hash.h
+@@ -48,7 +48,9 @@
+     vaddr tmp;
+     tmp = pc ^ (pc >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS));
+     return (((tmp >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS)) & TB_JMP_PAGE_MASK)
+-           | (tmp & TB_JMP_ADDR_MASK));
++           | (((tb_jmp_cache_word ? pc >> 2 : pc) ^
++                (pc >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS)))
++               & TB_JMP_ADDR_MASK));
+ }
+ 
+ #else
+diff --git a/accel/tcg/translator.c b/accel/tcg/translator.c
+--- a/accel/tcg/translator.c
++++ b/accel/tcg/translator.c
+@@ -573,9 +573,16 @@
+ #ifndef CONFIG_USER_ONLY
+     /* hash = tb_jmp_cache_hash_func(pc), system-mode version */
+     tcg_gen_shri_i64(t, pc, sh);
+-    tcg_gen_xor_i64(t, t, pc);
+-    tcg_gen_shri_i64(h, t, sh);
++    tcg_gen_xor_i64(h, t, pc);
++    tcg_gen_shri_i64(h, h, sh);
+     tcg_gen_andi_i64(h, h, TB_JMP_PAGE_MASK);
++    if (tb_jmp_cache_word) {
++        TCGv_i64 word = tcg_temp_new_i64();
++        tcg_gen_shri_i64(word, pc, 2);
++        tcg_gen_xor_i64(t, t, word);
++    } else {
++        tcg_gen_xor_i64(t, t, pc);
++    }
+     tcg_gen_andi_i64(t, t, TB_JMP_ADDR_MASK);
+     tcg_gen_or_i64(h, h, t);
+ #else
+diff --git a/accel/tcg/tcg-all.c b/accel/tcg/tcg-all.c
+--- a/accel/tcg/tcg-all.c
++++ b/accel/tcg/tcg-all.c
+@@ -311,6 +311,20 @@
+     tb_jmp_cache_bits = value;
+ }
+ 
++static bool tcg_get_jc_word(Object *obj, Error **errp)
++{
++    return tb_jmp_cache_word;
++}
++
++static void tcg_set_jc_word(Object *obj, bool value, Error **errp)
++{
++    if (tb_jmp_cache_bits_frozen && value != tb_jmp_cache_word) {
++        error_setg(errp, "x-jc-word cannot change once a CPU exists");
++        return;
++    }
++    tb_jmp_cache_word = value;
++}
++
+ static bool tcg_get_one_insn_per_tb(Object *obj, Error **errp)
+ {
+     TCGState *s = TCG_STATE(obj);
+@@ -361,6 +375,11 @@
+     object_class_property_set_description(oc, "x-jit-near",
+         "Place the jit buffer in the same 4 GiB window as QEMU's text "
+         "(POMPPC, docs/tcg-g4.md 14)");
++
++    object_class_property_add_bool(oc, "x-jc-word",
++        tcg_get_jc_word, tcg_set_jc_word);
++    object_class_property_set_description(oc, "x-jc-word",
++        "Hash word-aligned PCs within the existing page bucket (POMPPC)");
+ 
+     object_class_property_add(oc, "x-jc-bits", "uint32",
+         tcg_get_jc_bits, tcg_set_jc_bits, NULL, NULL);

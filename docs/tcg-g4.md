@@ -2823,3 +2823,15 @@ VM. À faire au feu vert, dans l'ordre :
    avant toute mise par défaut. L'ordre des A/B suivra le profil x86 de DOOM 3.
 7. **Parité** : sur le M4, compiler l'émetteur aarch64 de 0022 et refaire 2-5 avec des mutants
    NEON ; 0021 et 0023 y valent tels quels ; 0024 n'y a pas d'objet.
+
+## 29. Validation du JIT sur M4 (05/10/2026)
+
+L’émetteur NEON de 0022 est maintenant construit et vérifié sur QEMU 11.1.2,
+avec correction du helper lent aarch64 (0028) et du zéro signé `vnmsubfp`.
+Preuves hôte, huit mutants du modèle, instructions et invalidations en SMP=1/2 :
+zéro divergence. Microbanc flottant : 1 336 → 362 ms (−73 %), sans mesure en jeu.
+Les variantes de copie `lmw/stmw` (0025) et de hachage du cache (0026) n’apportent
+aucun gain mesuré ; le lanceur les allume néanmoins sur macOS arm64 avec
+`VFPNATIVE`, à la demande de l’utilisateur. 0027 corrige le placement RX sous
+`split-wx` ; `hotblocks`/`jitblocks` permettent d’inspecter les blocs ARM émis.
+Méthodes, limites et résultats : [rapport M4](jit-m4-2026-10-05.md).
