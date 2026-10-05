@@ -36,6 +36,10 @@
 #include <math.h>
 #include <pthread.h>
 
+#if defined(__aarch64__) && defined(VFPPROOF_NATIVE)
+#include <arm_neon.h>
+#endif
+
 #if defined(__x86_64__)
 #include <immintrin.h>
 #include "host/cpuinfo.h"
@@ -103,15 +107,15 @@ static bool patched(int op, float_status *s, uint32_t *r, const uint32_t *a,
     return fast;
 }
 
-#if defined(__x86_64__) && defined(VFPPROOF_NATIVE)
+#if (defined(__x86_64__) || defined(__aarch64__)) && defined(VFPPROOF_NATIVE)
 /*
  * tcg/0022 (x-vfp-native) : le modèle, instruction pour instruction, de ce
- * qu'émet tcg_out_ppc_vfp() de tcg/x86_64/tcg-target.c.inc (mêmes registres
- * nommés, mêmes constantes), puis, si un test échoue, le helper d'origine
+ * qu'émet tcg_out_ppc_vfp() sur x86_64 (AVX/FMA3) ou aarch64 (NEON),
+ * avec les mêmes constantes, puis, si un test échoue, le helper d'origine
  * (patched() ci-dessus : x-vfp-fast, sinon la boucle) — le talon hors ligne.
  * La porte est celle que calcule ppc_vfn_gate_init() de cpu_init.c, EXTRAITE
- * TELLE QUELLE (vfpproof-gate.h) et appliquée aux 8 premiers octets du
- * float_status, comme le code généré.  VFPPROOF_MUT=k : mutation k du modèle.
+ * TELLE QUELLE (vfpproof-gate.h) et appliquée aux deux fenêtres de 64 bits du
+ * float_status, comme le code généré. VFPPROOF_MUT=k : mutation k du modèle.
  */
 typedef struct {
     bool vfp_native;
@@ -124,6 +128,7 @@ typedef struct {
 static CPUPPCState genv;
 static int vmut;
 
+#if defined(__x86_64__)
 static __m128i __attribute__((target("avx")))
 nzon(__m128i t, __m128i k1, __m128i k2, __m128i z)
 {
@@ -202,6 +207,79 @@ slow:
     patched(op, s, r, a, b, c);
     return false;
 }
+#else
+/* NEON model of tcg/aarch64's emitted 4S arithmetic and lane predicates.
+ * The machine-code encodings are checked separately by guest vfptest.
+ */
+static uint32x4_t nzon(uint32x4_t t)
+{
+    uint32x4_t normal = vandq_u32(vcgeq_u32(t, vdupq_n_u32(0x01000000)),
+                                vcltq_u32(t, vdupq_n_u32(
+                                    vmut == 1 ? 0xffffffff : 0xff000000)));
+    return vorrq_u32(normal, vceqq_u32(t, vdupq_n_u32(0)));
+}
+
+static bool native(int op, float_status *s, uint32_t *r, const uint32_t *a,
+                   const uint32_t *b, const uint32_t *c)
+{
+    uint64_t g;
+    uint32x4_t xa, xb, xc, ta, tb, tc, ok, exempt, vr, valid;
+    bool fma = op >= OP_MADD;
+    for (int w = 0; w < 2; w++) {
+        if (genv.vfn_gate_mask[w] && !(vmut == 8 && w == 1)) {
+            memcpy(&g, (const char *)s + genv.vfn_gate_ofs[w], 8);
+            if ((g & genv.vfn_gate_mask[w]) != genv.vfn_gate_val[w]) {
+                goto slow;
+            }
+        }
+    }
+    xa = vld1q_u32(a); xb = vld1q_u32(b); xc = vld1q_u32(c);
+    ta = vaddq_u32(xa, xa); tb = vaddq_u32(xb, xb);
+    tc = vaddq_u32(xc, xc);
+    ok = nzon(ta);
+    if (vmut != 2) {
+        ok = vandq_u32(ok, nzon(tb));
+    }
+    if (fma) {
+        float32x4_t addend = vreinterpretq_f32_u32(xb);
+        ok = vandq_u32(ok, nzon(tc));
+        if (op == OP_NMSUB && vmut != 3) {
+            addend = vnegq_f32(addend);
+        }
+        vr = vreinterpretq_u32_f32(vfmaq_f32(addend,
+                                  vreinterpretq_f32_u32(xa),
+                                  vreinterpretq_f32_u32(xc)));
+        exempt = vorrq_u32(vceqq_u32(ta, vdupq_n_u32(0)),
+                          vceqq_u32(vmut == 4 ? tb : tc, vdupq_n_u32(0)));
+    } else {
+        vr = vreinterpretq_u32_f32(op == OP_ADD
+             ? vaddq_f32(vreinterpretq_f32_u32(xa), vreinterpretq_f32_u32(xb))
+             : vsubq_f32(vreinterpretq_f32_u32(xa), vreinterpretq_f32_u32(xb)));
+        exempt = vceqq_u32(vorrq_u32(ta, tb), vdupq_n_u32(0));
+    }
+    ta = vaddq_u32(vr, vr);
+    valid = vandq_u32(vmut == 5
+        ? vcgeq_u32(ta, vdupq_n_u32(0x01000000))
+        : vcgtq_u32(ta, vdupq_n_u32(0x01000000)),
+        vmut == 6 ? vcleq_u32(ta, vdupq_n_u32(0xff000000))
+                  : vcltq_u32(ta, vdupq_n_u32(0xff000000)));
+    if (op != OP_NMSUB) {
+        valid = vorrq_u32(valid, exempt);
+    }
+    ok = vandq_u32(ok, valid);
+    if (vmaxvq_u32(vmvnq_u32(ok))) {
+        goto slow;
+    }
+    if (op == OP_NMSUB && vmut != 7) {
+        vr = vreinterpretq_u32_f32(vnegq_f32(vreinterpretq_f32_u32(vr)));
+    }
+    vst1q_u32(r, vr);
+    return true;
+slow:
+    patched(op, s, r, a, b, c);
+    return false;
+}
+#endif
 #endif
 
 typedef struct {
@@ -214,7 +292,7 @@ static bool one(Job *j, const uint32_t *a, const uint32_t *b, const uint32_t *c)
 {
     float_status s1 = mkstatus(j->cfg), s2 = s1;
     uint32_t r1[4], r2[4];
-#if defined(__x86_64__) && defined(VFPPROOF_NATIVE)
+#if (defined(__x86_64__) || defined(__aarch64__)) && defined(VFPPROOF_NATIVE)
     j->fast += native(j->op, &s1, r1, a, b, c);
 #else
     j->fast += patched(j->op, &s1, r1, a, b, c);
@@ -357,7 +435,8 @@ int main(int argc, char **argv)
                   (__builtin_cpu_supports("avx") && __builtin_cpu_supports("fma")
                    ? CPUINFO_FMA : 0);
     }
-#if defined(VFPPROOF_NATIVE)
+#endif
+#if (defined(__x86_64__) || defined(__aarch64__)) && defined(VFPPROOF_NATIVE)
     ppc_vfn_gate_init(&genv);
     vmut = getenv("VFPPROOF_MUT") ? atoi(getenv("VFPPROOF_MUT")) : 0;
     printf("modèle de x-vfp-native (tcg/0022), porte %s : +%u %016" PRIx64
@@ -369,11 +448,14 @@ int main(int argc, char **argv)
     if (!genv.vfn_gate_ok) {
         return 2;
     }
+#if defined(__x86_64__)
     if (!(cpuinfo & CPUINFO_FMA)) {
         fprintf(stderr, "x-vfp-native exige AVX et FMA3\n");
         return 2;
     }
 #endif
+#endif
+#if defined(__x86_64__)
     printf("chemin %s\n", cpuinfo & CPUINFO_FMA ? "AVX + FMA3 (tcg/0020)" :
            cpuinfo & CPUINFO_AVX1 ? "AVX, FMA logicielle" : "scalaire");
 #endif

@@ -157,7 +157,7 @@ index ef4b2e7..0a95443 100644
 +        bool prod_zero = !(a[i] & 0x7fffffff) || !(c[i] & 0x7fffffff);
 +
 +        ok &= vfp_zon(a[i]) & vfp_zon(b[i]) & vfp_zon(c[i]);
-+        ok &= prod_zero || is_inf || !(fabsf(fr) <= FLT_MIN);
++        ok &= (prod_zero && !nres) || is_inf || !(fabsf(fr) <= FLT_MIN);
 +        inf |= is_inf && !prod_zero;
 +        res[i] = ur ^ nres;
 +    }

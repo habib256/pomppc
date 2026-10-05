@@ -33,7 +33,7 @@
 #                             # tcg/0021, allumé par défaut, docs/tcg-g4.md §28) ; VMXVERIFY=1 : preuve
 #   VFPNATIVE=0 ./run_tiger.sh  # coupe vaddfp/vsubfp/vmaddfp/vnmsubfp par le FPU de l'hôte dans le
 #                             # code généré (x-vfp-native, tcg/0022 : allumé par défaut sur Linux
-#                             # x86-64 ; arm64 non prouvé, VFPNATIVE=1) ; VFPNVERIFY=1 : mode preuve
+#                             # x86-64 et sur macOS arm64 depuis le 05/10, rebuild requis) ; VFPNVERIFY=1 : mode preuve
 #   FPINLINE=0 ./run_tiger.sh # coupe le flottant scalaire simple (fmuls, fmadds, fcmpu…) sans ses
 #                             # deux helpers dans le cas courant (x-fp-inline, tcg/0007, allumé
 #                             # par défaut, docs/tcg-g4.md §15) ; FPVERIFY=1 : mode preuve
@@ -108,14 +108,19 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # sur le PC −23 % avec la compilation et le plugin) : VMXINLINE (x-vmx-inline, tcg/0021) ;
 # PAS JITREL32 (x-jit-rel32, tcg/0024) : deux régimes sur UT2004 selon la place du
 # tampon (57 / 64-67 ms/image, bench/tcg/ab/x86-ut-tcg) ; VFPNATIVE
-# (x-vfp-native, tcg/0022) sur Linux x86-64 seulement : son émetteur aarch64 n'est
-# ni compilé ni prouvé (à faire sur le M4, VFPNATIVE=1 pour l'essayer).
+# (x-vfp-native, tcg/0022) sur Linux x86-64 et, depuis le 05/10, macOS arm64.
+# M4 : VFPNATIVE, LMWVEC et JCWORD allumés à la demande de l'utilisateur après
+# les preuves SMP=1/2 (docs/jit-m4-2026-10-05.md). LMWVEC/JCWORD sans gain
+# mesuré ; chacun reste surchargeable à 0. Reconstruire QEMU avec 0025-0028.
 for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JITNEAR FPNATIVE TBFAST FPNATIVE64 VMXINLINE; do
   export "$_opt=${!_opt:-1}"
 done
-if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
-  export VFPNATIVE="${VFPNATIVE:-1}"
-fi
+case "$(uname -s):$(uname -m)" in
+  Linux:x86_64) export VFPNATIVE="${VFPNATIVE:-1}" ;;
+  Darwin:arm64)
+    export VFPNATIVE="${VFPNATIVE:-1}" LMWVEC="${LMWVEC:-1}" JCWORD="${JCWORD:-1}"
+    ;;
+esac
 # x-jc-bits (tcg/0011) : 2^14 entrées de cache de sauts (12 = QEMU d'origine).
 export JCBITS="${JCBITS:-14}"
 export QGPU_GPU_COPY="${QGPU_GPU_COPY:-1}" QGPU_GLSL="${QGPU_GLSL:-1}"
@@ -335,20 +340,21 @@ done
 # --- AltiVec en ligne (x-vmx-inline, patches/tcg/0021) et flottant AltiVec par
 # le FPU de l'hôte dans le code généré (x-vfp-native, patches/tcg/0022),
 # docs/tcg-g4.md §28 --- mêmes résultats au bit près que les helpers. Allumés par
-# défaut depuis le 04/10/2026 (VFPNATIVE : Linux x86-64), VMXINLINE=0 / VFPNATIVE=0
+# défaut depuis le 04/10/2026 (VFPNATIVE : Linux x86-64 et macOS arm64 le 05/10), VMXINLINE=0 / VFPNATIVE=0
 # les éteignent ; VMXVERIFY=1 et
 # VFPNVERIFY=1 ajoutent les modes preuve (bilan sur stderr). x-vfp-native n'agit
 # qu'avec x-vfp-fast (VFPFAST, allumé par défaut) et un hôte qui a l'op TCG
 # (x86-64 avec AVX et FMA3, arm64) ; ailleurs il ne change rien.
 for _p in "VMXINLINE x-vmx-inline VMX-EN-LIGNE" "VMXVERIFY x-vmx-verify VMX-VÉRIFIÉ" \
-          "VFPNATIVE x-vfp-native VFP-NATIF" "VFPNVERIFY x-vfp-native-verify VFP-NATIF-VÉRIFIÉ"; do
+          "VFPNATIVE x-vfp-native VFP-NATIF" "VFPNVERIFY x-vfp-native-verify VFP-NATIF-VÉRIFIÉ" \
+          "LMWVEC x-lmw-vector LMW-STMW-NEON"; do
   set -- $_p
   if [ "${!1:-0}" != 0 ]; then
     if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "$2=on"; then
       CPU_SPEC="$CPU_SPEC,$2=on"
       MODE="$MODE + $3"
     else
-      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0021-0022)." >&2
+      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0021-0022, 0025)." >&2
       MODE="$MODE + $3 DEMANDÉ MAIS INDISPONIBLE"
     fi
   fi
@@ -571,6 +577,18 @@ if [ -n "${JCBITS:-}" ] && [ "${JCBITS}" != 12 ]; then
     MODE="$MODE + cache de sauts 2^$JCBITS DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
+# M4 : hachage alternatif dans le même groupe de page.
+# macOS arm64 : allumé à la demande le 05/10 ; JCWORD=0 pour l’A/B.
+if [ "${JCWORD:-0}" != 0 ]; then
+  if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-jc-word=on"; then
+    TCG_ACCEL="${TCG_ACCEL:-tcg},x-jc-word=on"
+    MODE="$MODE + CACHE DE SAUTS PPC"
+  else
+    echo "⚠ JCWORD=1 demandé mais ce QEMU n'a pas x-jc-word (tcg/0026)." >&2
+    MODE="$MODE + CACHE DE SAUTS PPC DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+
 [ -n "${TCG_OPTS:-}" ] && TCG_ACCEL="${TCG_ACCEL:-tcg},${TCG_OPTS#,}"
 [ -n "${TCG_ACCEL:-}" ] && EXTRA+=(-accel "$TCG_ACCEL")
 

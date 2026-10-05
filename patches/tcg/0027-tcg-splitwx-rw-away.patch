@@ -1,0 +1,32 @@
+diff --git a/tcg/region.c b/tcg/region.c
+--- a/tcg/region.c
++++ b/tcg/region.c
+@@ -771,13 +771,24 @@
+      * allouée par le noyau, sans x-jit-near ; la recherche avec réduction
+      * est faite au remap de l'alias RX, ci-dessous.
+      */
++    uint64_t saved_addr = tcg_jit_addr;
+     tcg_jit_near = false;
+-    if (alloc_code_gen_buffer_anon(size, PROT_READ | PROT_WRITE,
+-                                   MAP_PRIVATE | MAP_ANONYMOUS, errp) < 0) {
+-        tcg_jit_near = near;
++    /* A plain mmap(NULL) can still consume the text window.  Hint the RW
++     * mapping two windows away, leaving the scarce text window for RX.
++     * No MAP_FIXED: an existing mapping is never replaced.  Preserve an
++     * explicit x-jit-addr and restore both accelerator options afterward.
++     */
++    if (near && !saved_addr) {
++        tcg_jit_addr = ((uintptr_t)&alloc_code_gen_buffer_anon &
++                        ~(uintptr_t)0xffffffffu) + 8 * GiB;
++    }
++    int rw_ret = alloc_code_gen_buffer_anon(size, PROT_READ | PROT_WRITE,
++                                           MAP_PRIVATE | MAP_ANONYMOUS, errp);
++    tcg_jit_near = near;
++    tcg_jit_addr = saved_addr;
++    if (rw_ret < 0) {
+         return -1;
+     }
+-    tcg_jit_near = near;
+ 
+     /*
+      * POMPPC : le remap et le mprotect qui suivent portent sur la taille
