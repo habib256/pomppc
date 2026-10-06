@@ -64,6 +64,9 @@
 #                             # TCG_OPTS=… propriétés brutes de l'accélérateur
 #   JITREL32=1 ./run_tiger.sh # x86-64 Linux : tampon du JIT à moins de 2 Gio du texte, appels de
 #                             # helpers directs (x-jit-rel32, tcg/0024, éteint : deux régimes sur UT2004)
+#   QEMU_FAST=0 ./run_tiger.sh  # Linux x86-64 : binaire de référence build/ au lieu du binaire
+#                             # rapide build-fast/ (PGO, -O3, -march=native ; pris d'office s'il est
+#                             # là, à jour et complet ; QEMU_BIN=… prime ; docs/binaire-rapide-x86.md)
 #   NOPAD=1 ./run_tiger.sh    # coupe le passthrough de la manette USB
 #   TABLET=1 ./run_tiger.sh   # + usb-tablet (défaut avec ImGuiDock).
 #                             # TABLET=0 garde seulement la souris relative.
@@ -172,6 +175,10 @@ SMP_N="${USER_SMP:-2}"                     # défaut = 2 cœurs (la nouveauté)
 # OpenBIOS UNIFIÉ : bring-up SMP (balaton) + nœud audio screamer (mcayland),
 # buildé en -O1 (gcc-13 miscompile ce code OpenBIOS à -Os). Marche mono ET SMP.
 UNI_OBIOS="$ROOT/patches/smp-mac99/openbios-smp-screamer.elf"
+# Binaire rapide du PC (build-fast/, PGO -O3 -march=native) s'il est là, à jour et
+# complet ; QEMU_FAST=0 force la référence, QEMU_BIN=… prime. docs/binaire-rapide-x86.md
+source "$ROOT/scripts/qemu_fast.sh"
+pomppc_pick_qemu "$SMP_N" || exit 1
 QEMU_BIN64="${QEMU_BIN}64"                # qemu-system-ppc -> qemu-system-ppc64
 
 # --- Verrou disque ---
@@ -820,9 +827,10 @@ MON=$(host_mon_path "$SCR/mon.sock")   # mon.sock pour la VM verrouillée, mon-P
 # cycle.sh et tools/guest/tssh.sh (rien en SNAPSHOT=1 : ils visent la VM quotidienne)
 host_publish_vm tiger "$MON" "$([ -n "${NET:-}" ] && echo "${SSH_PORT:-0}" || echo 0)"
 
-echo "▶ Tiger (QEMU ${QEMU_VER:-?}) : $MODE | cpu=$CPU_SPEC ram=${RAM}Mo affichage=$DISP \
+echo "▶ Tiger (QEMU ${QEMU_VER:-?}, ${QEMU_BIN_LABEL:-binaire de référence}) : $MODE | cpu=$CPU_SPEC ram=${RAM}Mo affichage=$DISP \
 réseau=$([ -n "${NET:-}" ] && echo on || echo off) \
 disque=$([ -n "${SNAPSHOT:-}" ] && echo jetable || echo persistant)"
+echo "  binaire : $BIN"
 echo "  moniteur QEMU : $MON"
 [ -n "$WEBPROXY_ON" ] && echo "  🌐 relais web : 10.0.2.2:$WEBPROXY_PORT (proxy HTTP de Tiger ; journal .run/web-proxy.log)"
 [ -n "$NET" ] && [ "${SSH_PORT:-0}" != 0 ] && echo "  🔑 SSH : ssh -p ${SSH_PORT} tiger@127.0.0.1  (invité 10.0.2.15:22)"

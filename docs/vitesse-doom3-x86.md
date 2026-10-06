@@ -359,7 +359,10 @@ durcissements, LTO, PGO) ~13 %, `x-jit-rel32` ~2 %, `x-vmx-inline` + `x-vfp-nati
    processeur, profil à refaire à chaque changement notable de la série) : soit en faire le
    binaire quotidien du PC (`QEMU_BIN` des lanceurs), soit garder la référence et ne s'en servir
    que pour jouer. Le meilleur binaire mesuré : `~/src/qemu-d3tcg/build-pgo3/` (`-O3`, PGO
-   réentraîné, `PGO_DIR=pgo-data3`).
+   réentraîné, `PGO_DIR=pgo-data3`). **06/10 : choisi la première voie**, sans toucher à la
+   référence : `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh` construit `~/src/qemu/build-fast/` à
+   côté de `build/`, `run_tiger.sh` le prend s'il est à jour (`QEMU_FAST=0` : référence), le
+   profil s'entraîne par `tools/tcg/pgo-train.sh` : `docs/binaire-rapide-x86.md`.
 3. **Gouverneur** `performance` (§5.4) : un A/B à faire, il demande la racine.
 4. **Plugin, indices en VBO** (§5.6) : `r_useIndexBuffers 1` serait le cas idéal pour IDXLAZY
    (indices déjà chez l'hôte) mais retombe aujourd'hui sur l'empaquetage ; comprendre le refus

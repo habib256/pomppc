@@ -124,6 +124,10 @@ QEMU's `configure` needs Python ≥ 3.9 with `tomli` and `distlib`; on macOS a v
 `scripts/package_release_macos.sh` produces the release archive (`scripts/package_release_linux.sh`
 for Linux x86-64).
 
+On a Linux x86-64 PC, `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh` also builds `~/src/qemu/build-fast/`
+(`-O3 -march=native`, LTO, PGO; ~20 % faster in games), which `run_tiger.sh` then prefers
+(`QEMU_FAST=0` for the reference build): see [docs/binaire-rapide-x86.md](docs/binaire-rapide-x86.md).
+
 ## How it works
 
 - **QEMU 11.1.2 + patches** (`patches/`, applied by `scripts/build_qemu_qfb.sh`): SMP for `mac99`,

@@ -48,7 +48,17 @@
 # slirp, audio pa) et écrit le résultat dans bench/build-capabilities.txt. Les
 # lanceurs sondent le binaire de la même façon : un build incomplet dégrade
 # proprement au lieu de mentir.
+#
+# Binaire RAPIDE du PC (Linux x86-64, docs/binaire-rapide-x86.md) : en plus de
+# build/, ~/src/qemu/build-fast/ en -O3 -march=native, LTO et PGO, que
+# run_tiger.sh préfère quand il est là (QEMU_FAST=0 pour la référence) :
+#   QEMU_FAST=1 ./scripts/build_qemu_qfb.sh     # (ou --fast) build/ puis build-fast/
+#   QEMU_FAST=only ./scripts/build_qemu_qfb.sh  # build-fast/ seulement
+#   tools/tcg/pgo-train.sh                      # entraîne le profil (VM quotidienne)
 set -euo pipefail
+case "${1:-}" in
+  --fast) export QEMU_FAST=1; shift ;;
+esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="${QEMU_SRC:-$HOME/src/qemu}"
@@ -883,11 +893,91 @@ grep -q "x-abs-margin" hw/usb/dev-hid.c || {
 #       QEMU_SRC=~/src/qemu-opt QEMU_OPT=native,nohard,lto,pgo …
 # Pour pgo-gen / pgo, le dossier de build est le même (build-<…>-pgo) : les .gcda
 # sont rangés par chemin d'objet. QEMU_BUILD=<dossier> force le nom.
+#
+# QEMU_FAST (docs/binaire-rapide-x86.md) : le binaire RAPIDE du PC, build-fast/ à
+# côté de build/ dans le MÊME arbre (build/ reste le binaire de référence, et la
+# référence des A/B). Même série de patches, posée ci-dessus une seule fois :
+#   QEMU_FAST=1     build/ comme d'habitude, PUIS build-fast/ (native,nohard,lto
+#                   + pgo si le profil existe) — le script se relance lui-même
+#   QEMU_FAST=only  build-fast/ seulement
+#   QEMU_FAST_PGO=  auto (défaut : pgo si PGO_DIR a des .gcda pour build-fast,
+#                   sinon sans PGO avec un avertissement), use (profil exigé),
+#                   gen (instrumenté : tools/tcg/pgo-train.sh), non (sans PGO)
+#   PGO_DIR         profil de build-fast, défaut <arbre>/pgo-fast (stable :
+#                   tools/tcg/pgo-train.sh l'écrit, l'archive et sait importer
+#                   celui d'un arbre voisin en renommant les .gcda)
+# Une seule édition de liens LTO à la fois sur la machine : refus si un lto1
+# tourne déjà (QEMU_FAST_FORCE=1 pour passer outre). Construire sous plafond
+# mémoire (systemd-run --user --scope -p MemoryMax=20G -p MemorySwapMax=1G
+# nice -n 10 …) : c'est ce que fait tools/tcg/pgo-train.sh.
+# Empreinte de la série (pomppc_serie_hash) : un profil pris sur une autre série
+# sert encore aux fichiers inchangés, mais il est temps de le refaire.
+source "$ROOT/scripts/qemu_fast.sh"
+FAST_AFTER=""
+case "${QEMU_FAST:-0}" in
+  0) ;;
+  1|only)
+    [ -z "${QEMU_OPT:-}" ] || { echo "⚠ QEMU_FAST et QEMU_OPT s'excluent" >&2; exit 1; }
+    [ "$(uname -s):$(uname -m)" = Linux:x86_64 ] || {
+      echo "⚠ QEMU_FAST : binaire rapide du PC Linux x86-64 seulement" >&2; exit 1; }
+    if [ "$QEMU_FAST" = 1 ]; then
+      FAST_AFTER=1                  # build/ d'abord, build-fast/ en fin de script
+    else
+      PGO_DIR="${PGO_DIR:-$SRC/pgo-fast}"
+      # Les .gcda portent le chemin de l'objet, '/' → '#' : seuls ceux de
+      # <arbre>/build-fast servent. Un profil d'un autre arbre, non renommé,
+      # serait ignoré EN SILENCE (-Wno-missing-profile) : refus.
+      _mangled="$(printf '%s' "$SRC/build-fast" | tr / '#')#"
+      _ngcda="$(find "$PGO_DIR" -maxdepth 1 -name "${_mangled}*.gcda" 2>/dev/null | wc -l)"
+      _nall="$(find "$PGO_DIR" -maxdepth 1 -name '*.gcda' 2>/dev/null | wc -l)"
+      case "${QEMU_FAST_PGO:-auto}" in
+        gen) _pgo=pgo-gen ;;
+        non) _pgo="" ;;
+        auto|use)
+          if [ "$_nall" -gt 0 ] && [ "$_ngcda" -eq 0 ]; then
+            echo "⚠ $PGO_DIR a $_nall .gcda, aucun pour $SRC/build-fast : profil d'un autre" >&2
+            echo "  arbre ou d'un autre dossier de build. tools/tcg/pgo-train.sh --importer" >&2
+            echo "  les renomme ; QEMU_FAST_PGO=non construit sans profil." >&2
+            exit 1
+          fi
+          if [ "$_ngcda" -gt 0 ]; then
+            _pgo=pgo
+            echo "▶ binaire rapide : profil PGO $PGO_DIR ($_ngcda .gcda)"
+            _serie="$(sed -n 's/^serie=//p' "$PGO_DIR/pomppc-profil.txt" 2>/dev/null)"
+            if [ -n "$_serie" ] && [ "$_serie" != "$(pomppc_serie_hash "$ROOT/patches")" ]; then
+              echo "  ⚠ profil pris sur une autre série de patches ($_serie) : les fichiers" >&2
+              echo "    changés seront compilés sans profil ; réentraîner (tools/tcg/pgo-train.sh)" >&2
+            fi
+          elif [ "${QEMU_FAST_PGO:-auto}" = use ]; then
+            echo "⚠ QEMU_FAST_PGO=use : aucun profil dans $PGO_DIR" >&2; exit 1
+          else
+            _pgo=""
+            echo "⚠ binaire rapide SANS PGO : pas de profil dans $PGO_DIR" >&2
+            echo "  (tools/tcg/pgo-train.sh l'entraîne ; docs/binaire-rapide-x86.md)" >&2
+          fi ;;
+        *) echo "⚠ QEMU_FAST_PGO attendu : auto, use, gen ou non" >&2; exit 1 ;;
+      esac
+      QEMU_OPT="native,nohard,lto${_pgo:+,$_pgo}"
+      QEMU_BUILD=build-fast
+    fi ;;
+  *) echo "⚠ QEMU_FAST attendu : 1 ou only" >&2; exit 1 ;;
+esac
 BDIR=build
 OPT_CFLAGS="" OPT_LDFLAGS="" OPT_CONF=()
 if [ -n "${QEMU_OPT:-}" ]; then
   [ "$SRC" = "$HOME/src/qemu" ] && [ -z "${QEMU_BUILD:-}" ] && {
-    echo "⚠ QEMU_OPT vise un arbre séparé (QEMU_SRC=~/src/qemu-opt), pas le binaire de référence" >&2; exit 1; }
+    echo "⚠ QEMU_OPT vise un arbre séparé (QEMU_SRC=~/src/qemu-opt) ou build-fast/" >&2
+    echo "  (QEMU_FAST=1), jamais build/, le binaire de référence" >&2; exit 1; }
+  [ "${QEMU_BUILD:-}" = build ] && {
+    echo "⚠ QEMU_BUILD=build : une variante n'écrase jamais le binaire de référence" >&2; exit 1; }
+  case ",$QEMU_OPT," in
+    *,lto,*)
+      if [ -z "${QEMU_FAST_FORCE:-}" ] && pgrep -x 'lto1|lto-wrapper' >/dev/null 2>&1; then
+        echo "⚠ une édition de liens LTO tourne déjà sur la machine (pgrep lto1) :" >&2
+        echo "  une seule à la fois (gel du PC le 03/10). QEMU_FAST_FORCE=1 pour passer outre." >&2
+        exit 1
+      fi ;;
+  esac
   PGO_DIR="${PGO_DIR:-$SRC/pgo-data}"
   tag=""
   IFS=, read -r -a _opts <<< "$QEMU_OPT"
@@ -1023,10 +1113,43 @@ check_opt x-jc-word      qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jc-w
 echo
 echo "→ $CAPS"
 
+# Relevé d'une variante, À CÔTÉ du binaire : scripts/qemu_fast.sh le lit pour
+# décider si run_tiger.sh peut prendre build-fast/ (complet, pas instrumenté,
+# construit sur CE processeur : -march=native).
+if [ "$BDIR" != build ]; then
+  {
+    echo "# relevé de construction (scripts/build_qemu_qfb.sh), lu par scripts/qemu_fast.sh"
+    echo "date=$(date "+%Y-%m-%dT%H:%M:%S%z")"
+    echo "variante=${QEMU_OPT:-}"
+    case ",${QEMU_OPT:-}," in
+      *,pgo,*|*,pgo-gen,*) echo "pgo_dir=$PGO_DIR"
+                           echo "gcda=$(find "$PGO_DIR" -maxdepth 1 -name '*.gcda' 2>/dev/null | wc -l)" ;;
+    esac
+    echo "cpu=$(sed -n 's/^model name[[:space:]]*: *//p' /proc/cpuinfo 2>/dev/null | head -1)"
+    echo "march=$(${CC:-cc} -march=native -Q --help=target 2>/dev/null | awk '$1=="-march=" {print $2; exit}')"
+    echo "serie=$(pomppc_serie_hash "$ROOT/patches")"
+    echo "pomppc=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)"
+    echo "complet=$([ "$fail" -eq 0 ] && echo oui || echo non)"
+  } > "$SRC/$BDIR/pomppc-build.txt"
+  echo "→ $SRC/$BDIR/pomppc-build.txt"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "⚠ build INCOMPLET : au moins une capacité manque (voir ci-dessus)." >&2
   echo "  Les lanceurs sonderont le binaire et dégraderont proprement," >&2
   echo "  mais ce binaire n'est pas le binaire de référence." >&2
   exit 1
 fi
-echo "✔ binaire de référence complet : $BIN"
+if [ "$BDIR" = build ]; then
+  echo "✔ binaire de référence complet : $BIN"
+else
+  echo "✔ binaire complet ($BDIR, ${QEMU_OPT:-}) : $BIN"
+fi
+# QEMU_FAST=1 : la référence est faite, au tour de build-fast/ (même arbre, même
+# série, déjà posée ; le second passage la revérifie, ce qui ne coûte rien).
+if [ -n "$FAST_AFTER" ]; then
+  echo
+  echo "▶ binaire rapide : build-fast/ (QEMU_FAST=only)"
+  exec env QEMU_FAST=only QEMU_SRC="$SRC" QEMU_TAG="$TAG" \
+    bash "$ROOT/scripts/build_qemu_qfb.sh"
+fi

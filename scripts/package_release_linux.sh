@@ -14,6 +14,9 @@
 # qui le construit ; DEPENDS.txt liste les paquets à installer (apt), tirés de ldd et de
 # dpkg -S au moment de l'empaquetage.
 #
+# Le paquet est générique : $QEMU_SRC/build, jamais build-fast/ (-march=native, PGO :
+# binaire propre au PC qui l'a construit, docs/binaire-rapide-x86.md).
+#
 # Prérequis :
 #   - QEMU construit par scripts/build_qemu_qfb.sh dans $QEMU_SRC au commit courant ;
 #   - frontend/build/pomppc construit (frontend/README.md) ;
@@ -35,6 +38,13 @@ for f in "$QSRC/build/qemu-system-ppc" "$QSRC/build/qemu-system-ppc64" "$ROOT/fr
   [ -x "$f" ] || { echo "$f manque" >&2; exit 1; }
 done
 [ -z "${GUEST_ISO:-}" ] || [ -f "$GUEST_ISO" ] || { echo "$GUEST_ISO manque" >&2; exit 1; }
+# Le paquet est GÉNÉRIQUE : toujours $QSRC/build (-O2, x86-64 de base), jamais le
+# binaire rapide build-fast/ (-march=native : SIGILL sur un autre processeur,
+# docs/binaire-rapide-x86.md). Garde contre un build/ configuré à la main en natif.
+if grep -qE -- '-march=native|-fprofile-(use|generate)' "$QSRC/build/build.ninja" 2>/dev/null; then
+  echo "$QSRC/build est compilé en -march=native ou avec un profil PGO : le paquet doit" >&2
+  echo "être générique (reconstruire build/ sans QEMU_OPT)" >&2; exit 1
+fi
 
 rm -rf "$OUT" && mkdir -p "$OUT"
 echo "▶ dépôt $(git -C "$ROOT" rev-parse --short HEAD)"

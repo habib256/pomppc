@@ -9,6 +9,17 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Binaire rapide du PC, 06/10** (`docs/binaire-rapide-x86.md`) : la compilation
+  `-O3 -march=native`, sans durcissements, LTO et PGO (DOOM 3 −23 %, autres jeux −18-19 % le
+  04/10) quitte l'arbre d'essai : `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh` construit
+  `~/src/qemu/build-fast/` à côté de la référence `build/` (même série, capacités sondées,
+  relevé `pomppc-build.txt`), et `run_tiger.sh` le préfère sur Linux x86-64 quand il est
+  complet, construit sur ce processeur et sur la série du dépôt (`QEMU_FAST=0` : référence ;
+  `QEMU_BIN` prime ; la bannière dit lequel). Profil entraîné sur une charge mixte (Marble Blast,
+  Zenerchi, UT2004, DOOM 3) par `tools/tcg/pgo-train.sh`, constructions sous plafond mémoire ;
+  les bras de `matab.sh` et le paquet publié restent sur la référence générique. Mesures sur la
+  VM quotidienne : à venir.
+
 - **JIT M4, 05/10** (`docs/jit-m4-2026-10-05.md`) : modèle natif NEON enfin
   sélectionné par `VFPPROOF_NATIVE=1`, 648 M vecteurs sans divergence, huit mutants
   détectés ; correction du zéro signé `vnmsubfp` et du helper lent aarch64 (0028).
