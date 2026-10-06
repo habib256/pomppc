@@ -1,0 +1,9 @@
+jeu,mode,verdict,image,replis,replis_admis,replis_detail,ms_image,ms_image_preuve,plancher,rejeu_erreurs,capture_ecart,ref,fenetre,duree_s,charge_hote,dossier,motifs,motifs_execution
+Marble Blast Gold,fenêtre,vert,juste,42,42,,9.0,,13,0,0.00/0.00%,0.00/0.00% (validée),900..1500,83,"0 autre(s) QEMU, charge 1.59 ; après la mesure : 0 autre(s) QEMU, charge 2.01",bench/matrice/20261006-m4/mb-fen,,
+Marble Blast Gold,plein écran,vert,juste,0,0,,9.6,,13,0,0.00/0.00%,0.00/0.00% (validée),900..1500,83,"0 autre(s) QEMU, charge 2.17 ; après la mesure : 0 autre(s) QEMU, charge 2.04",bench/matrice/20261006-m4/mb-pe,,
+Zenerchi,fenêtre,rouge,juste,47,94,,6.3,,6,0,0.00/0.00%,0.00/0.00% (validée),893..1893,77,"0 autre(s) QEMU, charge 2.60 ; après la mesure : 0 autre(s) QEMU, charge 3.08",bench/matrice/20261006-m4/zen-fen,6.3 ms/image > plancher 6,
+Zenerchi,plein écran,non automatisé,,,,,,,,,,,,,,,"plein écran = case du menu Options, rangée dans prefs.dat (chiffré) ; aucune touche de bascule (Option+Entrée, Cmd+F essayés)",
+DOOM 3 Demo,fenêtre,vert,juste,14,28,,42.3,,76,0,0.00/0.00%,0.00/0.00% (validée),4343..4573,212,"0 autre(s) QEMU, charge 2.52 ; après la mesure : 0 autre(s) QEMU, charge 2.44",bench/matrice/20261006-m4/d3-fen,,
+DOOM 3 Demo,plein écran,vert,juste,0,0,,42.7,,76,0,0.00/0.00%,0.00/0.00% (validée),4317..4547,211,"0 autre(s) QEMU, charge 2.66 ; après la mesure : 0 autre(s) QEMU, charge 3.46",bench/matrice/20261006-m4/d3-pe,,
+Prey Demo,fenêtre,vert,juste,10,22,,55.1,,89,0,0.00/0.00%,0.00/0.00% (validée),384..684,147,"0 autre(s) QEMU, charge 2.69 ; après la mesure : 0 autre(s) QEMU, charge 2.73",bench/matrice/20261006-m4/prey-fen,,
+Prey Demo,plein écran,vert,juste,0,0,,50.6,,89,0,0.00/0.00%,0.00/0.00% (validée),385..685,146,"0 autre(s) QEMU, charge 2.67 ; après la mesure : 0 autre(s) QEMU, charge 2.60",bench/matrice/20261006-m4/prey-pe,,

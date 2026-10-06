@@ -1,0 +1,10 @@
+modèle de x-vfp-native (tcg/0022), porte ok : +0 0000000003070010 / 0000000000000010, +4 0000000100000000 / 0000000000000000
+vaddfp    : 160032768 vecteurs, 21189400 par le chemin rapide (21189400 dans les états amorcés), 0 divergences
+vsubfp    : 160032768 vecteurs, 27029991 par le chemin rapide (27029991 dans les états amorcés), 0 divergences
+vmaddfp   : 164194304 vecteurs, 23563086 par le chemin rapide (23563086 dans les états amorcés), 0 divergences
+vnmsubfp  : 164194304 vecteurs, 22638536 par le chemin rapide (22638536 dans les états amorcés), 0 divergences
+total : 648454144 vecteurs (2593816576 voies), 94421013 rapides, 0 divergences — OK : résultats et drapeaux identiques au helper d'origine
+
+real	0m23.198s
+user	3m22.604s
+sys	0m0.545s
