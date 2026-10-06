@@ -42,6 +42,10 @@ il est transmis dans le même callback, sans attendre un nouveau tick.
 audio/DMA simulées : écriture courte, écriture nulle, reprise sans perte ni
 duplication, deux fragments consécutifs, file vide, sortie pleine, profils de
 lanceur. L'ancien callback échoue sur l'écriture courte ; le nouveau passe.
+Depuis le portage à QEMU 11.1.2 (02/10), le device écrit par `audio_be_write(s->audio_be, …)`
+et règle le volume par `audio_be_set_volume_out_lr` ; les bouchons du test ont suivi le
+07/10 (ils ne compilaient plus) et vérifient en plus que le PCM et le volume vont au backend
+du device.
 Cela prouve la correction de ces cas, pas que tous les craquements rapportés
 étaient causés par eux. Le QEMU quotidien doit être reconstruit puis la VM relancée.
 

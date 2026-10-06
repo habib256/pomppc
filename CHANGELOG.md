@@ -9,6 +9,16 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **`tests/run-all.sh` sur le PC : deux échecs hors binaire rapide levés, 07/10**
+  (`docs/backend-gl-unites-fixes.md` « Test natif », `docs/audio-stabilite.md`) :
+  `qgpu_core_test` v17 (a)/(b) exigeait les unités 5 et 6 **au pipeline fixe** du backend GL,
+  que `QGPU_CAP_FIXED4` (NVIDIA, 02/10) ne promet plus et que le plugin n'envoie pas (rendu
+  d'Apple) ; sous `FIXED4`, ils sont refaits sous programme de fragments (mêmes pixels, obtenus
+  sur la RTX 4060 Ti), le backend logiciel garde le pipeline fixe. `screamer_audio_test.py` ne
+  compilait plus depuis le portage à QEMU 11.1.2 (02/10 : `audio_be_write`,
+  `audio_be_set_volume_out_lr`, membre `audio_be`) ; ses bouchons suivent le device et
+  vérifient que PCM et volume vont au backend du device. PC : 235 OK, 3 échecs, 7 ignorés →
+  **237 OK, 1 échec (binaire rapide écarté), 7 ignorés**.
 - **Architecture, suites A6 : L2 à L5 relues contre le code, 07/10**
   (`docs/architecture.md` §5-§8) : **L3** (attentes non bornées du reset et de l'arrêt du
   thread) et **L4** (arrêt du kext avec dormeurs) sont **fermées dans le code** par les
