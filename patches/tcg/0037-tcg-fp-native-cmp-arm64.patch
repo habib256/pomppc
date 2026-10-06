@@ -1,0 +1,248 @@
+POMPPC tcg/0037 — x-fp-native-cmp sur hôte arm64 (pendant aarch64 de tcg/0033)
+
+ATTENTION : Écrit sur le PC, NON compilé pour le M4 (ni construit ni exécuté sur arm64),
+ATTENTION : NON prouvé : à construire et prouver sur le M4 avant tout usage
+ATTENTION : (docs/parite-arm64-0031-0035.md, tools/tcg/m4-serie-0031-0035-proofs.sh).
+Seules vérifications faites sur le PC (06/10/2026) : le fichier compile avec le
+clang aarch64 du NDK Android (tools/tcg/a64syntax.sh, sans édition de liens), et
+chaque encodage A64 brut ajouté est égal au mot que produit l'assembleur de ce
+clang (tools/tcg/a64enc-check.py, 33 sur 33).
+
+Les sélecteurs FPI_FRSP..FPI_DDIV (15-20) de l'op ppc_fp32 dans l'émetteur
+tcg/aarch64, mêmes décisions que l'émetteur x86_64 de 0033 et que le modèle C
+« fp-inline » (fpi_frsp, fpi_fcti, fpi_fp32/64(FPI_DIVS), fpi_gate_op) :
+
+  frsp    |frB| << 1 nul ou dans [FLT_MIN << 1, (FLT_MAX + ½ ulp) << 1) (test
+          de pfp_zon64 avec ces bornes), fcvt s,d puis fcvt d,s ; FPRF, FI
+  fctiw   frB double nul ou normal ; fcvtns (au plus proche pair, quel que soit
+  fctiwz  FPCR ; la porte exige RN = 00) ou fcvtzs vers x, le résultat 64 bits
+          doit tenir dans un int32 (sxtw + cmp) ; FI, FPRF intact
+  fcmpo   le code de fcmpu (aucun NaN), porte sans RN
+  fdivs   opérandes nuls ou normaux, diviseur non nul, quotient nul (dividende
+  fdiv    nul) ou FLT_MIN (DBL_MIN) < |q| < inf : fdiv s/d ; FPRF, FI
+
+et TCG_TARGET_HAS_ppc_fp_cmp = 1 (fsel, en ops TCG depuis 0033, suit). Le bloc
+FPRF de l'op est sorti tel quel dans pfp_fprf() (frsp s'en sert aussi).
+Propriété x-fp-native-cmp éteinte par défaut ; run_tiger.sh ne l'allume pas sur
+macOS arm64.
+
+diff --git a/tcg/aarch64/tcg-target-has.h b/tcg/aarch64/tcg-target-has.h
+--- a/tcg/aarch64/tcg-target-has.h
++++ b/tcg/aarch64/tcg-target-has.h
+@@ -31,6 +31,12 @@
+ #define TCG_TARGET_PPC_FP32_IMPL        1   /* POMPPC tcg/0017 */
+ #define TCG_TARGET_HAS_ppc_vfp          1   /* POMPPC tcg/0022 */
+ #define TCG_TARGET_PPC_VFP_IMPL         1   /* POMPPC tcg/0022 */
++/*
++ * POMPPC tcg/0037 (x-fp-native-cmp): the selectors of tcg/0033 in the
++ * aarch64 emitter of ppc_fp32.  Written on the x86 PC, NOT RUN, NOT
++ * PROVEN: to be built and proven on the M4 (docs/parite-arm64-0031-0035.md).
++ */
++#define TCG_TARGET_HAS_ppc_fp_cmp       1
+ 
+ #define TCG_TARGET_HAS_v64              1
+ #define TCG_TARGET_HAS_v128             1
+diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
+--- a/tcg/aarch64/tcg-target.c.inc
++++ b/tcg/aarch64/tcg-target.c.inc
+@@ -1857,7 +1857,14 @@
+ 
+ enum { PFP_ADD, PFP_SUB, PFP_MUL, PFP_MADD, PFP_MSUB, PFP_NMADD, PFP_NMSUB,
+        PFP_CMPU,
+-       PFP_D = 8 };    /* tcg/0016: PFP_D + PFP_ADD..PFP_NMSUB, double forms */
++       PFP_D = 8,      /* tcg/0016: PFP_D + PFP_ADD..PFP_NMSUB, double forms */
++       /*
++        * POMPPC tcg/0037 (x-fp-native-cmp, the selectors of tcg/0033, same
++        * numbering as FPI_FRSP.. of target/ppc/internal.h and PFP_FRSP.. of
++        * tcg/x86_64).  Written on the x86 PC: NOT RUN, NOT PROVEN.
++        */
++       PFP_FRSP = 15, PFP_FCTIW, PFP_FCTIWZ, PFP_CMPO, PFP_DIVS, PFP_DDIV,
++       PFP_B_DIV = 0x40 };     /* base operation of PFP_DIVS/PFP_DDIV */
+ enum { PFP_EQ = 0, PFP_NE = 1, PFP_HS = 2, PFP_LO = 3, PFP_HI = 8,
+        PFP_LS = 9, PFP_GE = 10, PFP_LT = 11, PFP_GT = 12 };
+ 
+@@ -1945,6 +1952,16 @@
+ #define PFP_FSUBS       0x1e203800
+ #define PFP_FMULS       0x1e200800
+ #define PFP_FTYPE_D     0x00400000      /* ftype = 01: double */
++/*
++ * tcg/0037, NOT RUN: scalar fdiv (FP data-processing, 2 sources,
++ * opcode 0001: sd = sn / sm), and the conversions double -> int64
++ * (FP <-> integer, sf = 1, ftype = 01, opcode 000): fcvtns (rmode 00, to
++ * nearest, ties to even, whatever FPCR says) and fcvtzs (rmode 11, toward
++ * zero); both saturate to INT64_MIN/MAX and give 0 for a NaN.
++ */
++#define PFP_FDIVS       0x1e201800
++#define PFP_FCVTNS_XD   0x9e600000      /* fcvtns xd, dn */
++#define PFP_FCVTZS_XD   0x9e780000      /* fcvtzs xd, dn */
+ 
+ /* dbl: the double-precision form (ftype 01) of the same instruction */
+ static void pfp_fneg(TCGContext *s, unsigned d, unsigned n, bool dbl)
+@@ -2004,6 +2021,27 @@
+     pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_EQ);        /* !Z: bad + 1 */
+ }
+ 
++/*
++ * fpi_fpscr_arith(): FPRF of r (+-zero, +-normal), FI = 1; tr = r << 1.
++ * Moved out of tcg_out_ppc_fp32() unchanged by tcg/0037 (frsp uses it too).
++ */
++static void pfp_fprf(TCGContext *s, TCGReg xr, TCGReg tr, TCGReg xnf,
++                     TCGReg xf)
++{
++    pfp_lsr(s, TCG_REG_TMP0, xr, 63);                       /* neg */
++    pfp_lsl(s, TCG_REG_TMP1, TCG_REG_TMP0, 4);
++    tcg_out_logicali(s, Ilogic_imm_ORRI, TCG_TYPE_I64, TCG_REG_TMP1,
++                     TCG_REG_TMP1, 2);                      /* 0x02/0x12 */
++    tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP2, 4);
++    pfp_rrr(s, PFP_LSLVX, TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP0, 0);
++    pfp_cmpi(s, tr, 0);
++    pfp_cs(s, PFP_CSEL, TCG_REG_TMP2, TCG_REG_TMP1, TCG_REG_TMP2, PFP_EQ);
++    tcg_out_logicali(s, Ilogic_imm_ANDI, TCG_TYPE_I64, xnf, xf,
++                     ~(uint64_t)(0x1f000 | PFP_FI));
++    pfp_rrr(s, PFP_ORRX, xnf, xnf, TCG_REG_TMP2, 12);
++    tcg_out_logicali(s, Ilogic_imm_ORRI, TCG_TYPE_I64, xnf, xnf, PFP_FI);
++}
++
+ static void tcg_out_ppc_fp32(TCGContext *s, const TCGArg *args)
+ {
+     TCGReg xr = args[0], xnf = args[1];
+@@ -2025,13 +2063,60 @@
+     ta = pfp_scratch(&used);
+     t = pfp_scratch(&used);
+ 
+-    /* the gate: XX = 1, XE = OE = UE = 0 (and RN = 00 but for fcmpu) */
++    /*
++     * the gate: XX = 1, XE = OE = UE = 0 (and RN = 00 but for fcmpu, and
++     * tcg/0037 fcmpo and fctiwz: FPI_NO_RN() of target/ppc/internal.h)
++     */
+     tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP0,
+-                 PFP_XX | PFP_TRAPS | (op == PFP_CMPU ? 0 : 3));
++                 PFP_XX | PFP_TRAPS |
++                 (op == PFP_CMPU || op == PFP_CMPO || op == PFP_FCTIWZ ? 0 : 3));
+     pfp_rrr(s, PFP_ANDX, bad, xf, TCG_REG_TMP0, 0);
+     tcg_out_logicali(s, Ilogic_imm_EORI, TCG_TYPE_I64, bad, bad, PFP_XX);
+ 
+-    if (op == PFP_CMPU) {
++    if (op == PFP_FCTIW || op == PFP_FCTIWZ) {
++        /*
++         * tcg/0037 (NOT RUN), fpi_fcti(): frB a double zero or normal
++         * (fpi_zon64(), as the double forms of tcg/0016: no NaN, no
++         * infinity, no denormal reaches the conversion); the 64-bit
++         * conversion, to nearest even (fcvtns; the gate has RN = 00) or
++         * toward zero (fcvtzs), must fit an int32: it then is the
++         * sign-extended int32 the helpers return.  |x| >= 2^63 saturates to
++         * INT64_MIN/MAX, never an int32.  FI = 1, FPRF untouched
++         * (fpi_fpscr_op() of FPI_IS_CVT()).
++         */
++        k1 = pfp_scratch(&used);
++        tcg_out_movi(s, TCG_TYPE_I64, k1, 1ull << 53);
++        tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP1, 0x7feull << 53);
++        pfp_zon64(s, bad, t, xb, k1, TCG_REG_TMP1, TCG_REG_TMP2);
++        pfp_fmov_dx(s, 0, xb);
++        tcg_out32(s, (op == PFP_FCTIWZ ? PFP_FCVTZS_XD : PFP_FCVTNS_XD) |
++                  0 << 5 | xr);
++        tcg_out_ext32s(s, t, xr);                       /* sxtw */
++        pfp_cmp(s, t, xr);
++        pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_EQ);    /* not an int32 */
++        tcg_out_logicali(s, Ilogic_imm_ORRI, TCG_TYPE_I64, xnf, xf, PFP_FI);
++    } else if (op == PFP_FRSP) {
++        /*
++         * tcg/0037 (NOT RUN), fpi_frsp(): t = |frB| << 1 zero, or in
++         * [FPI_FRSP_LO, FPI_FRSP_HI) = [FLT_MIN << 1, (FLT_MAX + 1/2 ulp)
++         * << 1): the test of pfp_zon64() with k1 = FPI_FRSP_LO and k2 =
++         * FPI_FRSP_HI - FPI_FRSP_LO.  Then fcvt s, d (FPCR: to nearest,
++         * no FZ, as tcg/0014 already assumes) and fcvt d, s; FPRF, FI.
++         */
++        k1 = pfp_scratch(&used);
++        tr = pfp_scratch(&used);
++        tcg_out_movi(s, TCG_TYPE_I64, k1, 0x381ull << 53);
++        tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP1,
++                     (0x47effffff0000000ull << 1) - (0x381ull << 53));
++        pfp_zon64(s, bad, t, xb, k1, TCG_REG_TMP1, TCG_REG_TMP2);
++        pfp_fmov_dx(s, 0, xb);
++        pfp_fcvt_sd(s, 0, 0);
++        pfp_fcvt_ds(s, 0, 0);
++        pfp_fmov_xd(s, xr, 0);
++        pfp_lsl(s, tr, xr, 1);
++        pfp_fprf(s, xr, tr, xnf, xf);
++    } else if (op == PFP_CMPU || op == PFP_CMPO) {
++        /* tcg/0037: fcmpo without a NaN is fcmpu (same code as on x86_64) */
+         /*
+          * fpi_fcmpu(): no NaN (magnitude > 0x7ff0...), then a signed
+          * comparison of sign-magnitude turned into two's complement.
+@@ -2061,11 +2146,13 @@
+         pfp_rrr(s, PFP_ORRX, xnf, xnf, xr, 12);
+         tcg_out_logicali(s, Ilogic_imm_ORRI, TCG_TYPE_I64, xnf, xnf, PFP_FI);
+     } else {
+-        bool dbl = op >= PFP_D;
+-        unsigned base = dbl ? op - PFP_D : op;
++        /* tcg/0037: fdivs, fdiv (base PFP_B_DIV: frA / frB) */
++        bool dbl = op == PFP_DDIV || (op >= PFP_D && op < PFP_FRSP);
++        unsigned base = op == PFP_DIVS || op == PFP_DDIV ? PFP_B_DIV
++                      : dbl ? op - PFP_D : op;
+         uint32_t ft = dbl ? PFP_FTYPE_D : 0;
+         bool use_b = base != PFP_MUL;
+-        bool use_c = base >= PFP_MUL;
++        bool use_c = base >= PFP_MUL && base != PFP_B_DIV;
+ 
+         k1 = pfp_scratch(&used);
+         tr = pfp_scratch(&used);
+@@ -2096,6 +2183,11 @@
+                 pfp_zon(s, bad, tc, xc, k1, TCG_REG_TMP1, u);
+             }
+         }
++        if (base == PFP_B_DIV) {
++            /* tcg/0037: a zero divisor (t = frB << 1): ZX or VXZDZ, helpers */
++            pfp_cmpi(s, t, 0);
++            pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_NE);
++        }
+ 
+         /*
+          * the operation, float32 as helper_fp32_fast() (fpi_fp32()), or
+@@ -2127,6 +2219,9 @@
+         case PFP_MUL:
+             pfp_f3(s, PFP_FMULS | ft, 3, 0, 2);
+             break;
++        case PFP_B_DIV:
++            pfp_f3(s, PFP_FDIVS | ft, 3, 0, 1);         /* tcg/0037: a / b */
++            break;
+         case PFP_MADD:
+             pfp_fmadd(s, 3, 0, 2, 1, dbl);              /* a * c + b */
+             break;
+@@ -2165,9 +2260,14 @@
+                 pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_EQ);
+             }
+         } else {
+-            /* a zero product, or FLT_MIN (DBL_MIN) < |r| < inf */
++            /*
++             * a zero product (tcg/0037: a zero dividend), or FLT_MIN
++             * (DBL_MIN) < |r| < inf; t = 1 when exempt
++             */
+             pfp_cmpi(s, ta, 0);
+-            pfp_ccmpi(s, tc, 0, 4, PFP_NE);
++            if (base != PFP_B_DIV) {
++                pfp_ccmpi(s, tc, 0, 4, PFP_NE);
++            }
+             pfp_cs(s, PFP_CSINC, t, TCG_REG_XZR, TCG_REG_XZR, PFP_NE);
+             pfp_cmp(s, tr, k1);
+             pfp_ccmp(s, tr, k3, 2, PFP_HI);
+@@ -2176,18 +2276,7 @@
+         }
+ 
+         /* fpi_fpscr_arith(): FPRF of r (+-zero, +-normal), FI = 1 */
+-        pfp_lsr(s, TCG_REG_TMP0, xr, 63);                       /* neg */
+-        pfp_lsl(s, TCG_REG_TMP1, TCG_REG_TMP0, 4);
+-        tcg_out_logicali(s, Ilogic_imm_ORRI, TCG_TYPE_I64, TCG_REG_TMP1,
+-                         TCG_REG_TMP1, 2);                      /* 0x02/0x12 */
+-        tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP2, 4);
+-        pfp_rrr(s, PFP_LSLVX, TCG_REG_TMP2, TCG_REG_TMP2, TCG_REG_TMP0, 0);
+-        pfp_cmpi(s, tr, 0);
+-        pfp_cs(s, PFP_CSEL, TCG_REG_TMP2, TCG_REG_TMP1, TCG_REG_TMP2, PFP_EQ);
+-        tcg_out_logicali(s, Ilogic_imm_ANDI, TCG_TYPE_I64, xnf, xf,
+-                         ~(uint64_t)(0x1f000 | PFP_FI));
+-        pfp_rrr(s, PFP_ORRX, xnf, xnf, TCG_REG_TMP2, 12);
+-        tcg_out_logicali(s, Ilogic_imm_ORRI, TCG_TYPE_I64, xnf, xnf, PFP_FI);
++        pfp_fprf(s, xr, tr, xnf, xf);
+     }
+ 
+     /* any test failed: the helper, out of line */

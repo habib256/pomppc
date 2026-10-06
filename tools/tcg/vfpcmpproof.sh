@@ -40,7 +40,8 @@ open(sys.argv[2] + '/vfpcmpproof-model.h', 'w').write('\n'.join(model))
 PY
 if [ -n "${MUTATE:-}" ]; then
   cp "$OUT/vfpcmpproof-model.h" "$OUT/orig.h"
-  sed -i -e "$MUTATE" "$OUT/vfpcmpproof-model.h"
+  # sed -i.bak : -i seul est GNU (sous macOS, « -i -e » prend -e pour suffixe)
+  sed -i.bak -e "$MUTATE" "$OUT/vfpcmpproof-model.h"
   cmp -s "$OUT/orig.h" "$OUT/vfpcmpproof-model.h" && { echo "mutation sans effet : $MUTATE" >&2; exit 2; }
 fi
 B="${BUILD:-$SRC/build}"
