@@ -25,7 +25,7 @@
 #   • les trois mêmes sur hôte x86-64 (op ppc_fp32, TSC, vperm) — patches/tcg/0017-0019
 #   • flottant AltiVec à 4 voies par AVX/FMA3 sur hôte x86-64 — patches/tcg/0020
 #   • AltiVec en ligne, flottant AltiVec natif, mftb sans div, JIT à 2 Gio — patches/tcg/0021-0024
-#   • TLB invalidé avec précision, lmw/stmw courts et dcbz en ligne — patches/tcg/0031-0033
+#   • TLB invalidé avec précision, lmw/stmw et dcbz en ligne — patches/tcg/0031-0033
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -856,14 +856,14 @@ TCG_M4_MARKERS
   # --- 4 vicies ter. Le côté mémoire sur le PC (tcg/0031-0033), docs/tcg-g4.md §32 ---
   # 0031 : invalidations précises du TLB (x-tlb-precise : tlbie par classe,
   # changement de segment par pages journalisées, BAT par balayage) et compteurs
-  # (x-mem-stats) ; 0032 : lmw/stmw courts en ligne (x-lmw-inline) ; 0033 : dcbz
+  # (x-mem-stats) ; 0032 : lmw/stmw en ligne (x-lmw-inline) ; 0033 : dcbz
   # en ligne (x-dcbz-inline). Propriétés éteintes par défaut.
   if ! grep -q "x-tlb-precise" target/ppc/cpu_init.c; then
     echo "▶ patch TCG : invalidations précises du TLB (x-tlb-precise)"
     patch_strict "$ROOT/patches/tcg/0031-ppc-tlb-precise.patch"
   fi
   if ! grep -q "x-lmw-inline" target/ppc/cpu_init.c; then
-    echo "▶ patch TCG : lmw/stmw courts en ligne (x-lmw-inline)"
+    echo "▶ patch TCG : lmw/stmw en ligne (x-lmw-inline)"
     patch_strict "$ROOT/patches/tcg/0032-ppc-lmw-inline.patch"
   fi
   if ! grep -q "x-dcbz-inline" target/ppc/cpu_init.c; then

@@ -9,6 +9,20 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Le côté mémoire du traducteur sur le PC, 06/10** (`docs/tcg-g4.md` §32) : trois
+  propriétés éteintes par défaut. `x-tlb-precise` (`tcg/0031`, `TLBPRECISE=1`) : `tlbie`, les
+  changements de registre de segment (avec `x-sr-tlb`) et les écritures de BAT ne retirent plus
+  du TLB que les entrées concernées (classe de `tlbie` élargie, pages journalisées par segment,
+  balayage), et le TLB grandit enfin (**−90 % de remplissages**). `x-lmw-inline`
+  (`tcg/0032`, `LMWINLINE=1`) : `lmw`/`stmw` dans une page en accès mot ; `x-dcbz-inline`
+  (`tcg/0033`, `DCBZINLINE=1`) : `dcbz` en quatre rangements. Les trois ensemble, A/B ABBA dans
+  la VM de dev : **Marble Blast 19,5 → 35 img/s (+80 %)**, softmmu 24 → 7,5 % du temps vCPU,
+  allers-retours par tubes −74 %, `dcbz` −65 %, `lmw`/`stmw` −9 à −47 %. Vérificateurs
+  (`x-tlb-precise-verify=N`, `x-lmw-inline-verify`, `x-dcbz-inline-verify`) à zéro divergence
+  sur des centaines de millions d'opérations, empreintes invité identiques (`tlbtest`,
+  `dcbztest`, `lmwtest`, `smctest`), 10 mutants sur 11 détectés ; compteurs `x-mem-stats`. Défaut
+  corrigé en route : le vérificateur de `x-sr-tlb` lisait la mauvaise table depuis QEMU 11.
+  A/B en jeu (DOOM 3, Marble Blast, UT2004) à faire sur la VM quotidienne.
 - **JIT M4, 05/10** (`docs/jit-m4-2026-10-05.md`) : modèle natif NEON enfin
   sélectionné par `VFPPROOF_NATIVE=1`, 648 M vecteurs sans divergence, huit mutants
   détectés ; correction du zéro signé `vnmsubfp` et du helper lent aarch64 (0028).

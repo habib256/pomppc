@@ -537,7 +537,7 @@ done
 # écritures de BAT ne retirent du TLB que les entrées concernées au lieu de tout
 # vider ; TLBPVERIFY=N : x-tlb-precise-verify=N (une invalidation sur N, chaque
 # entrée gardée retraduite depuis la table des pages, bilan sur stderr).
-# LMWINLINE=1 : x-lmw-inline, lmw/stmw de 8 registres au plus dans une page en
+# LMWINLINE=1 : x-lmw-inline, lmw/stmw dont la plage tient dans une page en
 # accès mot en ligne ; DCBZINLINE=1 : x-dcbz-inline, dcbz en quatre rangements de
 # zéros ; LMWVERIFY=1 / DCBZVERIFY=1 : leurs modes preuve. MEMSTATS=1 :
 # x-mem-stats (compteurs toutes les 10 s sur stderr). Éteints par défaut.

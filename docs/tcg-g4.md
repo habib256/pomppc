@@ -2835,3 +2835,242 @@ aucun gain mesuré ; le lanceur les allume néanmoins sur macOS arm64 avec
 `VFPNATIVE`, à la demande de l’utilisateur. 0027 corrige le placement RX sous
 `split-wx` ; `hotblocks`/`jitblocks` permettent d’inspecter les blocs ARM émis.
 Méthodes, limites et résultats : [rapport M4](jit-m4-2026-10-05.md).
+
+## 32. Le côté mémoire sur le PC : TLB invalidé avec précision, `lmw`/`stmw` et `dcbz` en ligne (06/10/2026)
+
+PC Linux (i7-10700F), QEMU 11.1.2 + série jusqu'à 0028, copie `~/src/qemu-mem` (= `~/src/qemu-d3tcg`
++ 0025-0028 posés par `build_qemu_qfb.sh`). VM de dev **privée** (`disks/tiger-dev-mem.raw`, 10.4.11,
+bureau, SMP=2 ppc64, toutes les options de production de `run_tiger.sh`, `x-fast-fp` compris) ;
+l'hôte était partagé avec d'autres agents (constructions, autres VM) : seules les **parts** et
+les **comptes par seconde** se comparent d'une session à l'autre, les temps absolus moins.
+Patches : `tcg/0031-ppc-tlb-precise` (`x-tlb-precise`, `x-tlb-precise-verify=N`, `x-mem-stats`),
+`tcg/0032-ppc-lmw-inline` (`x-lmw-inline`, `x-lmw-inline-verify`), `tcg/0033-ppc-dcbz-inline`
+(`x-dcbz-inline`, `x-dcbz-inline-verify`), tous éteints par défaut ; lanceur : `TLBPRECISE=1`,
+`LMWINLINE=1`, `DCBZINLINE=1` (preuves : `TLBPVERIFY=N`, `LMWVERIFY=1`, `DCBZVERIFY=1` ;
+compteurs : `MEMSTATS=1`).
+
+### 32.1 Ce que coûtait le côté mémoire
+
+Le profil DOOM 3 du 03/10 (`docs/vitesse-doom3-x86.md` §4, relu par fonction dans
+`bench/vitesse/d3-x86/profil-1/d3-fen/perf-hote-mesure.data`, part du temps vCPU) :
+
+| poste | part |
+|---|---|
+| remplissages du TLB (`tlb_set_page_full`, lectures des PTEG `address_space_ldm_internal`, `ppc_hash32_xlate`, `flatview_*`, `qemu_ram_*`, victimes…) | ~3,5 % |
+| chemin lent des accès (`mmu_lookup*`, `do_ld4_mmu`, `helper_ldul_mmu`…), surtout des ratés du TLB | ~2,2 % |
+| `probe_access*` (sondes de `lmw`/`stmw`/`dcbz`, et `get_page_addr_code` des ratés du cache de sauts) | 3,2 % |
+| `helper_lmw` + `helper_stmw` (en propre) | 1,5 % |
+| `dcbz_common` + `memset` | ~0,3 % |
+| recherche de blocs (ratés du cache de sauts : `qht_lookup_custom`, `tb_lookup`) | 5,0 % |
+
+Pour savoir **qui** remplit et vide, `x-mem-stats` (0031) imprime toutes les 10 s, par CPU :
+remplissages par `mmu_idx` (et le temps passé dedans, au compteur de cycles de l'hôte), vidages
+par cause (`tlbie`, changement de segment par `mmu_idx`, BAT), `dcbz`, `lmw`/`stmw` (mots,
+pages franchies, histogramme des registres), taille du TLB. Sur Marble Blast dans la VM de dev
+(la démo tourne, deux sessions de référence, 60 s chacune, par CPU) :
+
+| | /s par CPU |
+|---|---|
+| remplissages du TLB | **270 000 à 380 000** (dont noyau, `mmu_idx` 1 : 220 000-300 000), **7-8 % du temps du fil** en `ppc_cpu_tlb_fill` seul, 540-900 cycles l'un |
+| vidages d'un `mmu_idx` à un changement de segment (`x-sr-tlb`) | `mmu_idx` 1 : 2 400-4 700 ; `mmu_idx` 0 : ~100 |
+| `tlbie` → vidage **complet et synchrone des deux CPU** | 800-1 450 |
+| écritures de BAT → boucle de 1 à 1 024 `tlb_flush_page` | 750-1 400 |
+| `dcbz` | 160 000-300 000 |
+| `lmw` (autant de `stmw`) | 0,86-1,1 M, dont 69 % de 19 registres (`r13`), 24 % de 8 au plus ; 0,05 % à cheval sur deux pages |
+| taille du TLB | **64 à 512 entrées**, jamais plus |
+
+Deux constats. (1) Après `x-sr-tlb`, les vidages restants sont ceux du noyau qui recharge un
+registre de segment (fenêtre de copie `copyin`/`copyout` dans le segment 14 : la valeur
+`0x1` « pas d'espace » alterne avec le VSID de la tâche), les `tlbie` et les BAT ; chacun vidait
+**tout** un `mmu_idx` (ou tout le TLB des deux CPU) et le **cache de sauts** avec lui. (2) QEMU ne
+redimensionne un TLB qu'au moment où il le vide entièrement (`tlb_mmu_resize_locked`) : il reste
+donc à la taille où il a été vidé en dernier, souvent petite. Le profil `perf` de la même scène :
+softmmu **24,7 %**, recherche de blocs **13,8 %**, `lmw`/`stmw` 2,8 % du temps vCPU occupé.
+Plafond de C (remplissages) : bien au-dessus des 3 % demandés. Levier retenu en premier.
+
+### 32.2 `tcg/0031` : `x-tlb-precise`
+
+Chaque invalidation ne retire que ce qu'elle concerne, et **jamais moins que ce que l'architecture
+demande** :
+
+- **Segments** (avec `x-sr-tlb`) : une traduction du segment *s* ne dépend que de `sr[s]` (VSID,
+  clés) — plus la table des pages, couverte par `tlbie`, et les BAT, couverts plus bas.
+  L'invariant de `x-sr-tlb` devient *par segment* : `sr_mixed[i]` marque les segments où une
+  entrée a été remplie sous une autre valeur que `sr_snap[i][s]`. Au contrôle (synchronisation,
+  changement de MSR), le `mmu_idx` courant perd les segments changés ou mêlés, pas le reste.
+  Pour les retirer sans balayer la table : chaque remplissage de `mmu_idx` 0/1 est **journalisé
+  par segment** (32 pages au plus, au-delà « débordé »), et le retrait passe les pages du journal
+  une à une à `tlb_flush_page_by_mmuidx` (le code d'origine : entrée, victimes, grandes pages, et
+  les deux pages du cache de sauts). Un segment débordé est balayé, cache de sauts du `mmu_idx`
+  vidé comme avant. Toute entrée du segment a été remplie depuis son dernier retrait, donc
+  journalisée (ou le journal a débordé).
+- **`tlbie`** : le 7400/7450 invalide toute la classe de congruence (EA[14:19], 64 classes) ; on
+  prend une classe **plus large**, EA[16:19] (16 classes, toujours un sur-ensemble), ce qui
+  garde exact un système qui balaie le TLB à coups de `tlbie` (`tlbia` émulé). L'indice d'une
+  entrée dans la table de QEMU est son numéro de page modulo n (n ≥ 64) : les entrées d'une
+  classe sont aux indices ≡ classe (mod 16), on n'en visite qu'un seizième. Même calendrier que le
+  code d'origine : retrait local à la prochaine synchronisation de contexte, puis **sur tous les
+  CPU à la `sync`** (le translateur ne pose plus `TLB_NEED_GLOBAL_FLUSH` ; `async_run_on_cpu` sur
+  les autres, `async_safe_run_on_cpu` sur soi : la même section exclusive que
+  `tlb_flush_all_cpus_synced`). Le **cache de sauts**, qui n'est pas vérifié contre le TLB,
+  perd les pages des opérandes de `tlbie` sous les 16 segments (8 pages en attente au plus,
+  au-delà : vidage de ses `mmu_idx` 0/1), et il est vidé entièrement pour 0/1 dès que les 16
+  classes ont été retirées depuis le dernier vidage — un balayage de type `tlbia`, même étalé sur
+  plusieurs `sync`, le vide donc toujours. Hypothèse (écrite dans `cpu.h`) : un invité qui change
+  la PTE d'une page **de code** l'invalide par `tlbie` de cette page ou par un balayage complet,
+  ce que fait xnu ; il ne compte pas sur l'effet de bord de classe d'un `tlbie` d'une autre page.
+- **BAT** : jusqu'à 64 pages, la boucle d'origine ; au-delà, un balayage du TLB au lieu de 1 024
+  `tlb_flush_page` sur 22 `mmu_idx`.
+- **Taille** : un `mmu_idx` qui prend en 100 ms plus de remplissages qu'il n'a d'entrées est vidé
+  (au plus toutes les 100 ms), et la politique d'origine le double ; plafond 8 192 entrées (les
+  balayages restent courts).
+
+Le code commun ajouté (`accel/tcg/cputlb.c`) : `pomppc_tlb_flush_match()` (balayage par prédicat,
+table principale au pas de 16 si demandé, victimes) et `pomppc_jc_clear_page()`. **Défaut trouvé
+en route** : dans QEMU 11 la table rapide est indexée à l'envers (`cpu_tlb_fast()`,
+`mmuidx_to_fast_index`) ; le vérificateur de `x-sr-tlb` (`ppc_sr_tlb_verify`, 0001, porté de 9.2)
+lisait `neg.tlb.f[mmu_idx]`, c'est-à-dire la table du `mmu_idx` 21 − i, vide : il ne vérifiait que
+les 8 victimes. Corrigé dans 0031 (la première version de `x-tlb-precise` avait la même erreur et a
+fait paniquer le noyau ; c'est son vérificateur, qui contrôle aussi les victimes, qui l'a montré).
+
+`x-tlb-precise-verify=N` : une invalidation précise sur N, chaque entrée gardée des `mmu_idx`
+0/1 courants (table et victimes) est **retraduite** par `ppc_xlate()` pour chacun des accès
+qu'elle permet (lecture, écriture, exécution) et la page physique comparée. Pas de contrôle
+tant qu'un vidage est en attente sur ce CPU, qu'un contrôle de segments est dû, ou que le CPU a
+du travail en file (l'invalidation qu'un autre CPU lui a envoyée). Une entrée périmée est d'abord
+**suspecte** : l'invité efface la PTE, puis fait `tlbie` et `sync` ; elle ne devient divergence
+que si elle est encore là, toujours fausse, trois contrôles plus tard. Les divergences sont
+classées « plus de PTE » (OpenBIOS évince ses PTE d'identité sans `tlbie` ; un 7400 garde aussi
+l'entrée) et « autre page ».
+
+### 32.3 `tcg/0032` : `x-lmw-inline`
+
+`lmw`/`stmw` dont la plage `[EA, EA + 4n)` tient dans une page (test à l'exécution) : n accès mot
+de TCG ; sinon (0,05 % des cas mesurés) le helper. Dans une page, tous les mots passent par la
+même entrée du TLB : le premier accès fait la faute (à EA, même type d'accès) ou aucun — le
+tout-ou-rien du helper, qui sonde la plage avant d'écrire. Mêmes largeur, ordre et boutisme que
+le chemin d'E/S du helper (`cpu_ldl_mmu`, `MO_UNALN`) ; sur la RAM, mêmes octets.
+`x-lmw-inline-verify` : après chaque forme en ligne, un helper relit la plage par le TLB et la
+compare aux registres.
+
+D'abord écrit pour **8 registres au plus** (les épilogues `lmw r24…r31` ; l'essai `essais/0002`
+du §5.4, même nom de propriété, n'avait rien gagné sur 19 registres sur le M4). Mais l'histogramme
+de `x-mem-stats` sur Marble Blast donne **69 % de `lmw r13` (19 registres)**, 24 % de 8 au plus.
+Le maximum a donc été mesuré sur l'hôte x86 (même binaire, maximum lu dans l'environnement le
+temps de l'essai, deux sessions par bras, bancs `lmwtest` et `dcbztest`) :
+
+| | `stmw`+`lmw` de 19 registres, 20 M paires | de 4 registres (`r28`), 3,2 M paires |
+|---|---|---|
+| helper (propriété éteinte, ou maximum 8 pour 19 registres) | 3 397, 3 496, 3 368, 3 527 ms | 361-365 ms |
+| en ligne, maximum 8 | (helper) | 198-202 ms (**−45 %**) |
+| en ligne, tous les comptes | 2 999, 3 107 ms (**−10 %**) | 194-198 ms |
+
+Sur x86-64 la forme longue gagne aussi (l'appel sans drapeau de `helper_lmw` recopie et relit
+toutes les globales, et 12-13 registres allouables seulement) : **tous les comptes** sont en ligne
+(`PPC_LMW_INLINE_MAX` 32). Le code émis grossit (un contrôle de TLB par mot), sans effet visible
+sur les bancs ni sur Marble Blast.
+
+### 32.4 `tcg/0033` : `x-dcbz-inline`
+
+`dcbz` avec une ligne de 32 octets (G4) : ligne = EA & ~31 ; la réservation est retirée si elle
+couvre la ligne (avant l'accès, comme le helper, donc aussi sur faute) ; puis quatre rangements
+de 8 octets nuls — ceux du chemin d'E/S du helper. Une ligne alignée ne franchit jamais une page :
+le premier rangement fait la faute (à la ligne, en écriture, comme la sonde) ou aucun.
+**Une différence observable avec le code d'origine, voulue** : `helper_dcbz` est déclaré
+`TCG_CALL_NO_WG` mais écrit `env->reserve_addr`, qui est une globale TCG ; quand la réservation
+est encore dans un registre de l'hôte (un `lwarx` juste avant), le `stwcx.` qui suit la voit
+intacte. La forme en ligne la retire toujours, comme le helper l'écrit. `dcbztest` le montre :
+empreintes identiques hors de cette partie (16 cas `lwarx`/`dcbz`/`stwcx.`, 7 diffèrent). Hors
+G4 (970 et `dcbzl`, autre taille de ligne) : le helper. `x-dcbz-inline-verify` : la ligne relue
+nulle et la réservation retirée.
+
+### 32.5 Preuves
+
+| épreuve | résultat |
+|---|---|
+| hôte : `tools/tcg/tlbpproof.py ~/src/qemu-mem 200000 mut` (prédicats, balayage au pas de 16 et `ppc_tlbie_set_add` extraits tels quels, table simulée de 64 à 8 192 entrées) | 272 M cas, **0 écart** ; **5 mutants sur 5 détectés** (`bench/tcg/mem-pc/tlbpproof.log`) |
+| invité, SMP=2 ppc64, toutes options de production + les trois propriétés : `tlbtest` (mprotect et fautes à l'adresse près, munmap/mmap, fork et copie sur écriture, tubes, fichier), `smctest` (A-F), `lmwtest`, `dcbztest` | **empreintes identiques** à la référence : `tlbtest` `deee3d7026183c65`, `smctest` A-F identiques, `lmwtest` `2575eafce78adf66` (la même qu'au §5.4), `dcbztest` identique hors réservation (§32.4) ; 0 erreur |
+| vérificateurs, session complète, première version (`lmw`/`stmw` de 8 registres au plus) (bureau, `tlbtest`, `smctest`, `lmwtest`, `dcbztest`, Marble Blast 150 s ; `x-tlb-precise-verify=256`, `x-lmw-inline-verify`, `x-dcbz-inline-verify`, `x-ret-verify`) | TLB : 3,4 M invalidations précises, 413 000 contrôles, **534 M accès retraduits, 0 divergence** ; `lmw`/`stmw` : **454 M contrôlés, 0** ; `dcbz` : **148 M contrôlés, 0** (65 000 sur des pages sans pointeur hôte, VRAM suivie) ; `x-ret-verify` (cache de sauts) : **2,1 G blocs vérifiés, 0 divergence** |
+| session complète refaite avec la version finale (`lmw`/`stmw` de tous les comptes), SMP=2 (`ver3`, vérification 1/64) | TLB : 2,8 M invalidations précises, 1,3 M contrôles, 1,5 G accès retraduits, **0** ; `lmw`/`stmw` 583 M, **0** ; `dcbz` 121 M, **0** ; cache de sauts 1,6 G, **0** ; mêmes empreintes |
+| SMP=1 (`qemu-system-ppc`, `target_ulong` 32 bits) : référence, puis tout + vérificateurs | empreintes de la référence SMP=1 = celles de SMP=2 ; avec les propriétés, identiques (`dcbztest` : hors réservation) ; TLB 987 M accès retraduits, **0** ; `lmw` 360 M, **0** ; `dcbz` 50 M, **0** ; `x-ret-verify` : **une** entrée du cache de sauts sur une page de noyau à identité (`0x5610664`) devenue **sans traduction** (classe « plus de PTE » : la PTE a disparu sans que ce `tlbie` ait visé cette page ; un 7400 garderait aussi sa traduction) sur 805 M vérifiés, 0 de l'autre sorte |
+| démarrages du bureau sous `x-tlb-precise-verify=16` (puis `=64` avec `x-ret-verify`) | 0 divergence ; une fois (premier essai), une page d'identité d'OpenBIOS sans PTE (classe « plus de PTE », §32.2) |
+| mutants de l'émetteur réel (`~/src/qemu-memmut`, `POMPPC_MUT`) | voir 32.6 |
+
+### 32.6 Mutants
+
+Arbre `~/src/qemu-memmut` (= l'arbre final, chaque mutant derrière `POMPPC_MUT=<nom>`, construit
+à part). T* et L1/L3/D2 : démarrage du bureau sur instantané (`-snapshot`) avec les trois propriétés
+et tous les vérificateurs, arrêt à la première divergence ; L2, D1, D3 : session sur le disque
+(bureau), `dcbztest` et `lmwtest` (`bench/tcg/mem-pc/mutants.txt`).
+
+| mutant | ce qu'il change | détecté par |
+|---|---|---|
+| T1 | le retrait d'un segment oublie les pages journalisées | `x-tlb-precise-verify`, 20 s (pages du segment 14 restées) |
+| T2 | segments « mêlés » non suivis | **non détecté** : sous Tiger aucun remplissage n'a lieu entre un `mtsr` et la synchronisation qui le suit (xnu fait `isync`) ; défense gardée par construction |
+| T3 | classe de `tlbie` prise un bit trop haut | vérificateur, 20 s |
+| T4 | classes non envoyées aux autres CPU | vérificateur, 20 s |
+| T5 | petite plage de BAT oubliée | vérificateur, 20 s |
+| L1 | registres de `lmw` dans l'ordre inverse | `x-lmw-inline-verify`, 10 s |
+| L2 | borne « dans la page » trop large d'un mot | `dcbztest` : `stmw` à cheval écrit 28 et 24 octets avant la faute, empreinte changée |
+| L3 | `stmw` en demi-mots | `x-lmw-inline-verify`, 10 s |
+| D1 | ligne de 16 octets | `dcbztest` (empreinte changée ; le noyau n'émet que des `dcbz` alignés, le vérificateur ne le voit pas) |
+| D2 | trois rangements au lieu de quatre | `x-dcbz-inline-verify`, 20 s |
+| D3 | réservation gardée | `dcbztest` : retombe exactement sur l'empreinte du helper d'origine (`afbd3bd3…`), pas sur celle de la forme en ligne (`b9d327c6…`) |
+
+**10 sur 11 détectés** ; plus les 5 mutants du modèle hôte (`tlbpproof.py`).
+
+### 32.7 Gains mesurés (VM de dev)
+
+A/B entrelacé **A B B A** (`ab-ref1`, `ab-all1`, `ab-all2`, `ab-ref2`), une session par bras (bureau,
+SMP=2, options de production, **sans** compteurs ni vérificateurs), même binaire ; « tout » =
+`x-tlb-precise` + `x-lmw-inline` + `x-dcbz-inline`. Bancs invités (trois passes chacun dans la
+session ; médianes des deux sessions) :
+
+| banc invité | référence | tout | écart |
+|---|---|---|---|
+| `tlbtest banc` : 20 000 allers-retours par tube entre deux processus | 1 687 / 1 697 ms | 442 / 426 ms | **−74 %** |
+| `tlbtest banc` : 2 000 × mmap, toucher 16 pages, munmap | 1 053 / 1 018 ms | 974 / 935 ms | −8 % |
+| `tlbtest banc` : 200 fork + exit | 676 / 652 ms | 588 / 485 ms | −18 % (bruité) |
+| `dcbztest banc` : 6,4 M `dcbz` | 80 / 81 ms | 28 / 28 ms | **−65 %** |
+| `dcbztest banc` : 3,2 M paires `stmw`/`lmw` de 4 registres | 365 / 383 ms | 203 / 193 ms | **−47 %** |
+| `lmwtest` : 20 M paires de 19 registres | 3 352 / 3 358 ms | 3 060 / 3 027 ms | −9 % |
+
+**Marble Blast** (la démo, 120 s, 17 fenêtres de 5 s par session ; dans la VM de dev le jeu est
+limité par le processeur émulé, avec beaucoup de noyau) : **19,5 / 19,4 → 34,9 / 35,5 img/s
+(+80 %)**. Profil `perf` de 20 s au milieu (part du temps vCPU occupé, 1,15 cœur dans les deux
+bras) :
+
+| poste | référence | tout |
+|---|---|---|
+| code généré | 47,9 / 47,4 % | 69,7 / 69,9 % |
+| softmmu | 23,7 / 24,1 % | 7,4 / 7,6 % |
+| recherche de blocs | 14,3 / 14,4 % | 11,6 / 11,3 % |
+| `lmw`/`stmw` | 3,6 / 3,3 % | ~0 |
+
+Séparément (sessions précédentes, avec compteurs) : `x-tlb-precise` seul fait l'essentiel
+(remplissages −90 %, softmmu 24,7 → 10,9 %) ; la mise en ligne de `lmw`/`stmw` retire leurs helpers
+du profil ; `dcbz` pèse peu sur Marble Blast (0,6 % du temps du fil).
+
+### 32.8 Phase 2 : A/B en jeu sur la VM quotidienne (à faire, hôte au repos)
+
+Binaire figé `~/src/qemu-mem/bin-phase2/` (lien `qemu-bundle`), les deux bras sur le même
+binaire, propriétés passées par `CPU_OPTS` (le `run_tiger.sh` du dépôt principal ne connaît pas
+encore `TLBPRECISE`/`LMWINLINE`/`DCBZINLINE` ; après fusion, ces variables suffisent) :
+
+    QEMU_BIN=~/src/qemu-mem/bin-phase2/qemu-system-ppc tools/tcg/matab.sh x86-mem 6 \
+        "ref:" "mem:CPU_OPTS=x-tlb-precise=on,x-lmw-inline=on,x-dcbz-inline=on" d3 fen
+    # puis mb et ut (même ligne, « mb fen », « ut fen ») ; poste par poste :
+    # "tlb:CPU_OPTS=x-tlb-precise=on" ; et une partie DOOM 3 sous
+    # CPU_OPTS=…,x-tlb-precise-verify=256,x-lmw-inline-verify=on,x-dcbz-inline-verify=on,x-mem-stats=on
+
+Attendu. DOOM 3 sur le PC (profil du 03/10) : softmmu 11,2 %, recherche de blocs 5 %, `lmw`/`stmw`
+1,5 % (plus leurs sondes) du temps vCPU. Sur Marble Blast dans la VM de dev, les trois propriétés
+ramènent softmmu de 24 à 7,5 % (−70 %), la recherche de blocs de 14,4 à 11,4 %, et `lmw`/`stmw` à
+rien ; transposé à DOOM 3 : **~8-10 % de temps vCPU en moins, soit −6 à −10 % de ms/image** si
+l'image reste limitée par le G4 émulé ; davantage sur Marble Blast et UT2004, qui vident et
+remplissent plus (noyau, fenêtres de copie, `lmw r13` des prologues). À confirmer en jeu ; puis la
+matrice du PC avant toute mise par défaut.
+
+Journaux (non versionnés) : `bench/tcg/mem-pc/` du dépôt principal — `compteurs.txt` (chaque
+session : compteurs `x-mem-stats`, bancs, empreintes, partition `perf`, bilans des
+vérificateurs), `mutants.txt`, `tlbpproof.log` ; arbre des mutants `~/src/qemu-memmut`.
