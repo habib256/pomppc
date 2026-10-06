@@ -526,3 +526,49 @@ FPNATIVECMP VFPNATIVECMP LMWVEC JCWORD` (avec `VFPNATIVE` du 04/10) ; chacun `=0
 l'éteindre ; les vérificateurs restent éteints. macOS arm64 inchangé (`VFPNATIVE LMWVEC
 JCWORD` ; 0031-0035 attendent leur parité arm64). `tests/tiger_launcher_test.py` vérifie les
 défauts propres à l'hôte. Les bras `ref:` de `matab.sh` portent désormais ces défauts.
+
+### 13.5 Binaire rapide : entraîné, construit, A/B à refaire hôte au repos
+
+Profil entraîné le 06/10 sur la configuration retenue (§13.4) par `tools/tcg/pgo-train.sh`, et
+`~/src/qemu/build-fast/` reconstruit avec (`docs/binaire-rapide-x86.md` §6) ; `run_tiger.sh`
+le choisit (« binaire rapide (PGO, -O3, -march=native) », les nouvelles propriétés dans la
+bannière, `x-jit-rel32` placé : vérifié VM arrêtée puis éteinte proprement).
+
+**L'A/B `x86-fast` n'a pas pu se faire** : pendant sa troisième partie, une autre session de
+travail sur le PC (projet `~/src/pom2`, 12 processus à 100 % puis des compilations par
+intermittence) a pris jusqu'à 13 cœurs. La campagne est arrêtée et rangée dans
+`bench/tcg/ab/x86-fast-pollue/` :
+
+| partie | binaire | ms/image | état |
+|---|---|---|---|
+| `ref-1` | référence, nouveaux défauts | 144,2 | hôte propre d'après la matrice (charge 1,75 / 1,82, 0 autre QEMU), mais au-dessus des 133,0 de `x86-petits` pour la même configuration : douteuse |
+| `fast-1` | `build-fast`, nouveaux défauts | **124,1** | hôte propre (1,64 / 2,20) : **une partie, indication seulement** |
+| `fast-2` | `build-fast` | 297,1 | **écartée** : charge 13,5 après la mesure (autre session) |
+| `ref-2` | référence | — | arrêtée au démarrage (hôte occupé) |
+
+Ensuite, un relevé de la charge étrangère (processeur de l'hôte hors `qemu-system`, toutes
+les 5 s) a montré un fond de bureau de ~0,6 cœur (Firefox, POM2, gnome-shell) et l'autre
+session entre 1,5 et 13 cœurs jusqu'à 21:20 ; l'utilisateur travaillant sur le PC ce soir,
+l'A/B et la matrice finale sont reportés (commandes au §13.7 et dans TODO.md).
+
+### 13.6 Bilan provisoire
+
+| jeu (`fen`) | départ 04/10 (référence, défauts) | 06/10, binaire de référence, nouveaux défauts | binaire rapide | M4 |
+|---|---|---|---|---|
+| DOOM 3 | 138 | ~123 estimé (−8,5 % puis −2,6 % : −10,9 % chaînés ; mesuré 132,0-133,0 dans des campagnes dont le `ref` était à 144) | 124,1 (une partie) ; 115 le 04/10 avec l'ancien profil et les anciens défauts | ~42 |
+| Marble Blast | 21 | **16,5** (−21 %, `x86-mem-mb`) | à mesurer | — |
+| Zenerchi | 7,6 | non mesuré | à mesurer | — |
+| UT2004 | 56 | **54,7** (−7 %, `x86-mem-ut` ; son `ref` à 58,9) | à mesurer | — |
+
+Les pas mesurés dans une même campagne (entrelacée) sont sûrs ; les niveaux absolus
+glissent d'une campagne à l'autre (le `ref` DOOM 3 du jour est à 144, contre 138 le 04/10).
+L'écart au M4 reste ~3× sur DOOM 3 avec le binaire de référence, ~2,9× avec le binaire rapide.
+
+### 13.7 À refaire hôte au repos
+
+    tools/tcg/matab.sh x86-fast 3 "ref:" "fast:QEMU_BIN=$HOME/src/qemu/build-fast/qemu-system-ppc" d3 fen
+    MATAB_VIDAGE=1 tools/tcg/matab.sh x86-final 1 "ref:QEMU_FAST=0 TLBPRECISE=0 LMWINLINE=0 DCBZINLINE=0 JITREL32=0 FPNATIVECMP=0 VFPNATIVECMP=0 LMWVEC=0 JCWORD=0" "final:QEMU_BIN=$HOME/src/qemu/build-fast/qemu-system-ppc" mb,zen,ut,d3 fen
+
+(le bras `ref` de la matrice = l'ancien défaut du 04/10, pour l'image de référence et la vitesse
+d'avant ; toutes ces variables à 0 sont reconnues par `run_tiger.sh`). Avant chaque campagne :
+aucune autre session lourde (`top` : rien au-dessus du fond de bureau), charge < 1.
