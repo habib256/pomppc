@@ -43,6 +43,8 @@
 #                             # (arm64 ; x86-64 avec AVX et FMA3, tcg/0017), le helper de x-fp-flat
 #                             # hors ligne sinon (x-fp-native,
 #                             # tcg/0014, allumé par défaut depuis le 01/10, docs/tcg-g4.md §22)
+#   FPNATIVECMP=1 ./run_tiger.sh # frsp fctiw fctiwz fcmpo fdivs fdiv par le FPU de l'hôte, fsel en ops
+#                             # TCG (x-fp-native-cmp, patches/tcg/0033, x86-64 ; éteint par défaut)
 #   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
 #                             # tcg/0016, allumé par défaut, docs/tcg-g4.md §24) ; FPVERIFY=1 : preuve
 #   TBFAST=0 ./run_tiger.sh   # coupe mftb/mftbu calculés depuis le compteur de l'hôte (cntvct, 1 GHz ;
@@ -466,6 +468,27 @@ if [ "${FPNATIVE64:-0}" != 0 ]; then
   else
     echo "⚠  FPNATIVE64=1 demandé mais ce QEMU n'a pas la propriété 'x-fp-native64' (patches/tcg/0016)." >&2
     MODE="$MODE + flottant double natif DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+# --- Comparaisons et conversions flottantes par le FPU de l'hôte (x-fp-native-cmp,
+# patches/tcg/0033, docs/tcg-g4.md §33) --- frsp fctiw fctiwz fcmpo fdivs fdiv par
+# la même op TCG que x-fp-native (émetteur x86-64 seulement : sans effet sur arm64),
+# fsel en ops TCG. Mêmes résultats, même FPSCR au bit près. N'agit qu'avec
+# x-fast-fp. ÉTEINT par défaut (A/B en jeu à faire) : FPNATIVECMP=1 l'allume ;
+# FPNCMPVERIFY=1 ajoute le mode preuve (x-fp-native-cmp-verify, bilan sur stderr).
+if [ "${FPNATIVECMP:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-fp-native-cmp=on"; then
+    case "$CPU_SPEC" in
+      *x-fast-fp=on*) CPU_SPEC="$CPU_SPEC,x-fp-native-cmp=on"; MODE="$MODE + COMPARAISONS-CONVERSIONS NATIVES"
+                      if [ "${FPNCMPVERIFY:-0}" != 0 ]; then
+                        CPU_SPEC="$CPU_SPEC,x-fp-native-cmp-verify=on"; MODE="$MODE (VÉRIFIÉES)"
+                      fi ;;
+      *) echo "⚠  FPNATIVECMP=1 sans flottant rapide : x-fp-native-cmp n'agit qu'avec x-fast-fp (FASTFP=1)." >&2
+         MODE="$MODE + comparaisons-conversions natives SANS EFFET (flottant exact)" ;;
+    esac
+  else
+    echo "⚠  FPNATIVECMP=1 demandé mais ce QEMU n'a pas la propriété 'x-fp-native-cmp' (patches/tcg/0033)." >&2
+    MODE="$MODE + comparaisons-conversions natives DEMANDÉES MAIS INDISPONIBLES"
   fi
 fi
 # --- Base de temps par le compteur de l'hôte (x-tb-fast, patches/tcg/0015,

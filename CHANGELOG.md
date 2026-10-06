@@ -48,6 +48,19 @@ de commit et dans `docs/`.
   (replis notés, remise au premier plan après) ; System Events lancé avant le jeu.
   `tools/guest/tssh.sh` multiplexe ses connexions (`ControlMaster`, `.run/tssh-<port>`,
   `TSSH_MUX=0` pour revenir) : 0,04 s par commande au lieu de 0,9-2,2 s.
+- **Flottant scalaire restant sur le PC, 06/10** (`docs/tcg-g4.md` §33,
+  `patches/tcg/0033-ppc-fp-native-cmp.patch`) : `frsp`, `fctiw`, `fctiwz`,
+  `fcmpo`, `fdivs` et `fdiv` passent par l'op native de `x-fp-native` (émetteur
+  x86-64 ; sans effet sur arm64 en attendant le pendant NEON), `fsel` en ops TCG.
+  Propriété `x-fp-native-cmp`, **éteinte par défaut** (`FPNATIVECMP=1`), vérificateur
+  `x-fp-native-cmp-verify` (`FPNCMPVERIFY=1`). Exact au bit près hors FI/FX déjà
+  admis par `x-fast-fp` : 461,7 M vecteurs contre le softfloat de QEMU sans
+  divergence, émetteur réel éprouvé sous `qemu-ppc` linux-user (9 mutants sur 9
+  détectés), `fptest c` identique dans Tiger (SMP=1 et 2), Marble Blast sous le
+  vérificateur : 70 M opérations, 0 divergence. Banc invité : `frsp` −57 %, `fctiwz` −72 %.
+  L'inventaire montre que le reste du « softfloat » de DOOM 3 et d'UT2004 est surtout
+  de l'AltiVec (`vcmp*fp`, `vcfsx`). Gain attendu en jeu ~1 % sur DOOM 3, A/B à jouer.
+
 - **JIT M4, 05/10** (`docs/jit-m4-2026-10-05.md`) : modèle natif NEON enfin
   sélectionné par `VFPPROOF_NATIVE=1`, 648 M vecteurs sans divergence, huit mutants
   détectés ; correction du zéro signé `vnmsubfp` et du helper lent aarch64 (0028).
