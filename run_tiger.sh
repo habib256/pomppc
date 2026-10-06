@@ -43,6 +43,8 @@
 #                             # (arm64 ; x86-64 avec AVX et FMA3, tcg/0017), le helper de x-fp-flat
 #                             # hors ligne sinon (x-fp-native,
 #                             # tcg/0014, allumé par défaut depuis le 01/10, docs/tcg-g4.md §22)
+#   VFPNATIVECMP=1 ./run_tiger.sh # vcmp*fp vcfsx vcfux vctsxs vctuxs par le FPU de l'hôte
+#                             # (x-vfp-native-cmp, patches/tcg/0034, x86-64 ; éteint par défaut)
 #   FPNATIVECMP=1 ./run_tiger.sh # frsp fctiw fctiwz fcmpo fdivs fdiv par le FPU de l'hôte, fsel en ops
 #                             # TCG (x-fp-native-cmp, patches/tcg/0033, x86-64 ; éteint par défaut)
 #   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
@@ -489,6 +491,27 @@ if [ "${FPNATIVECMP:-0}" != 0 ]; then
   else
     echo "⚠  FPNATIVECMP=1 demandé mais ce QEMU n'a pas la propriété 'x-fp-native-cmp' (patches/tcg/0033)." >&2
     MODE="$MODE + comparaisons-conversions natives DEMANDÉES MAIS INDISPONIBLES"
+  fi
+fi
+# --- Comparaisons et conversions AltiVec par le FPU de l'hôte (x-vfp-native-cmp,
+# patches/tcg/0034, docs/tcg-g4.md §34) --- vcmpeqfp vcmpgefp vcmpgtfp vcmpbfp
+# (et formes Rc), vcfsx vcfux vctsxs vctuxs par l'op TCG de x-vfp-native (émetteur
+# x86-64 seulement : sans effet sur arm64). Mêmes résultats, même VSCR[SAT], même
+# CR6 au bit près. N'agit qu'avec x-vfp-native (VFPNATIVE). ÉTEINT par défaut (A/B
+# en jeu à faire) : VFPNATIVECMP=1 l'allume ; VFPNCMPVERIFY=1 le vérifie.
+if [ "${VFPNATIVECMP:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-vfp-native-cmp=on"; then
+    case "$CPU_SPEC" in
+      *x-vfp-native=on*) CPU_SPEC="$CPU_SPEC,x-vfp-native-cmp=on"; MODE="$MODE + VCMP-VCF-VCT-NATIFS"
+                         if [ "${VFPNCMPVERIFY:-0}" != 0 ]; then
+                           CPU_SPEC="$CPU_SPEC,x-vfp-native-cmp-verify=on"; MODE="$MODE (VÉRIFIÉS)"
+                         fi ;;
+      *) echo "⚠  VFPNATIVECMP=1 sans x-vfp-native : x-vfp-native-cmp n'agit qu'avec lui (VFPNATIVE=1)." >&2
+         MODE="$MODE + vcmp/vcf/vct natifs SANS EFFET" ;;
+    esac
+  else
+    echo "⚠  VFPNATIVECMP=1 demandé mais ce QEMU n'a pas la propriété 'x-vfp-native-cmp' (patches/tcg/0034)." >&2
+    MODE="$MODE + vcmp/vcf/vct natifs DEMANDÉS MAIS INDISPONIBLES"
   fi
 fi
 # --- Base de temps par le compteur de l'hôte (x-tb-fast, patches/tcg/0015,

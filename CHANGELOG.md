@@ -9,6 +9,20 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Flottant AltiVec restant sur le PC, 06/10** (`docs/tcg-g4.md` §34,
+  `patches/tcg/0034-ppc-vfp-native-cmp.patch`) : `vcmpeqfp`, `vcmpgefp`, `vcmpgtfp`,
+  `vcmpbfp` (et formes Rc, CR6 calculé en ops TCG), `vcfsx`/`vcfux` et `vctsxs`/`vctuxs`
+  (saturation et VSCR[SAT]) par l'op native de `x-vfp-native` (émetteur x86-64, sans
+  effet sur arm64). Propriété `x-vfp-native-cmp`, **éteinte par défaut**
+  (`VFPNATIVECMP=1`), vérificateur `x-vfp-native-cmp-verify` (`VFPNCMPVERIFY=1`). Exact
+  au bit près : 422,7 M vecteurs contre les helpers et le softfloat de QEMU, émetteur
+  réel sous `qemu-ppc` linux-user (10 mutants sur 10), `vfptest c` identique dans Tiger
+  (SMP=1 et 2), Marble Blast sous vérificateur sans divergence. Banc invité :
+  comparaisons −40 à −71 %, conversions −94 à −96 %. Le vérificateur montre que Tiger
+  tourne avec VSCR[NJ] = 1 et que ~42 % des `vmaddfp`/`vsubfp` de Marble Blast
+  retombent au logiciel pour des dénormaux mis à zéro par NJ : prochaine cible.
+  Gain attendu en jeu ~0,5 % sur DOOM 3, ~1 % sur UT2004, A/B à jouer.
+
 - **La série 0025-0028 sur le PC x86-64, 06/10** (`docs/tcg-g4.md` §30) : binaire de référence
   du PC reconstruit avec `tcg/fixes/` et 0025-0028, plus **`tcg/0029`**, le pendant x86-64 de la
   copie `lmw`/`stmw` de 0025 (gcc 13 laisse la boucle d'origine scalaire, un `bswap` par mot) :

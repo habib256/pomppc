@@ -28,6 +28,7 @@
 #   • lmw/stmw vectoriel, cache de sauts par mots, split-wx, NEON lent — patches/tcg/0025-0028
 #   • lmw/stmw vectoriel sur hôte x86-64 (SSE2)        — patches/tcg/0029
 #   • frsp fctiw fctiwz fcmpo fdivs fdiv natifs, fsel en ops TCG (x-fp-native-cmp) — patches/tcg/0033
+#   • vcmp*fp, vcfsx/vcfux, vctsxs/vctuxs natifs (x-vfp-native-cmp)  — patches/tcg/0034
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -893,6 +894,23 @@ target/ppc/fpu_helper.c helper_fpnc_fsel
 tcg/x86_64/tcg-target.c.inc PFP_VCVTTSD2SI
 tcg/tcg-op.c tcg_ppc_fp_cmp_supported
 TCG33_MARKERS
+  # --- tcg/0034 : comparaisons et conversions AltiVec natives (x-vfp-native-cmp) ---
+  # vcmpeqfp vcmpgefp vcmpgtfp vcmpbfp (et formes Rc), vcfsx vcfux vctsxs vctuxs
+  # par l'op ppc_vfp (émetteur x86_64 seulement, sans effet ailleurs) ; propriété
+  # éteinte par défaut (VFPNATIVECMP=1). docs/tcg-g4.md §34.
+  if ! grep -q 'x-vfp-native-cmp' target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : comparaisons et conversions AltiVec natives (x-vfp-native-cmp)"
+    patch_strict "$ROOT/patches/tcg/0034-ppc-vfp-native-cmp.patch"
+  fi
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0034 incomplet : '$m' absent de $f" >&2; exit 1; }
+  done <<'TCG34_MARKERS'
+target/ppc/cpu_init.c x-vfp-native-cmp-verify
+target/ppc/int_helper.c helper_vfnc_verify
+tcg/x86_64/tcg-target.c.inc tcg_out_ppc_vfp_cmp
+tcg/tcg-op.c tcg_ppc_vfp_cmp_supported
+TCG34_MARKERS
 fi
 
 # --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---
@@ -1142,6 +1160,7 @@ check_opt x-vfp-native   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-v
 check_opt x-lmw-vector   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-lmw-vector=on
 check_opt x-jc-word      qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jc-word=on
 check_opt x-fp-native-cmp qemu_cpu_has_prop "${BIN}64"    "mac99,via=pmu" g4 x-fp-native-cmp=on
+check_opt x-vfp-native-cmp qemu_cpu_has_prop "${BIN}64"   "mac99,via=pmu" g4 x-vfp-native-cmp=on
 echo
 echo "→ $CAPS"
 
