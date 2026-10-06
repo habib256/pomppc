@@ -30,6 +30,41 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 
 ## Maintenant
 
+- [ ] **[TCG — PC] A/B du binaire rapide et matrice finale avec vidage, hôte au repos**
+  (`docs/vitesse-doom3-x86.md` §13.5-13.7). Le 06/10, le côté mémoire et les petits leviers
+  sont prouvés, mesurés et allumés par défaut sur Linux x86-64, `build-fast/` entraîné et
+  reconstruit ; l'A/B et la matrice ont été arrêtés par une autre session qui occupait l'hôte
+  (une seule partie propre : DOOM 3 124,1 ms/image sur `build-fast`). Avant chaque campagne :
+  rien au-dessus du fond de bureau dans `top`, charge < 1, 0 autre QEMU.
+
+      tools/tcg/matab.sh x86-fast 3 "ref:" "fast:QEMU_BIN=$HOME/src/qemu/build-fast/qemu-system-ppc" d3 fen
+      MATAB_VIDAGE=1 tools/tcg/matab.sh x86-final 1 "ref:QEMU_FAST=0 TLBPRECISE=0 LMWINLINE=0 DCBZINLINE=0 JITREL32=0 FPNATIVECMP=0 VFPNATIVECMP=0 LMWVEC=0 JCWORD=0" "final:QEMU_BIN=$HOME/src/qemu/build-fast/qemu-system-ppc" mb,zen,ut,d3 fen
+
+  **Fermeture :** bilan `x86-fast` (dispersion < 8 %), matrice `x86-final` aux images justes
+  (rejeu contre VM et référence 0,00 %), capture `d3-fen` comparée à
+  `bench/matrice/ref-linux/d3-fen/capture.png` (la référence `d3-fen` du PC est toujours
+  `validee=non` : à valider à l'œil par l'utilisateur, `matrice.py --valider d3-fen`), chiffres
+  reportés au §13 et dans CHANGELOG. **Planchers** `plancher_ms_linux` à revoir sur ce tour
+  (1,25 × le temps typique, `docs/matrice-jeux.md` §6 quater) : Marble Blast 26 → ~21 (16,5
+  mesuré), DOOM 3 n'en a pas (il prend les 76 du M4 et sort toujours rouge) → ~155 (124 sur
+  le binaire rapide), UT2004 104 (pire observé, très dispersé) et Zenerchi 10 à reprendre
+  sur les mesures du tour.
+
+- [ ] **[TCG] `x-ret-verify` : entrée du cache de sauts « sans traduction »** — 1 cas en SMP=1
+  (`0x5610664`, `docs/tcg-g4.md` §32) et 2 cas en SMP=2 le 06/10 (partie vérifiée
+  `bench/tcg/ab/x86-ver`, cpu 0, pc `0x5605d88`, page de noyau à identité, `mmu_idx` 1),
+  tous au **démarrage** (ou redémarrage) de l'invité, jamais en jeu (0 sur 12,8 G sorties).
+  Même endroit du noyau à chaque démarrage : reproductible. Comprendre si la PTE disparaît
+  sans `tlbie` visant la page (comportement d'un 7400) ou si `x-tlb-precise` garde une
+  entrée qu'il aurait dû retirer ; fermer par l'explication et, s'il le faut, une correction
+  repassée sous les vérificateurs.
+
+- [ ] **[TCG — M4] Parité arm64 de 0031-0035** : `x-tlb-precise`, `x-lmw-inline`,
+  `x-dcbz-inline` (0031, 0032, 0035) et les émetteurs aarch64 de `x-fp-native-cmp` /
+  `x-vfp-native-cmp` (0033-0034, sans effet sur arm64 aujourd'hui) : preuves au même niveau
+  que sur le PC (vérificateurs, mutants, empreintes invité), puis A/B DOOM 3, Marble Blast,
+  UT2004 sur le M4 avant de les allumer là-bas (règle de parité des hôtes).
+
 - [ ] **[Outils] Endurance sur la configuration par défaut du 01/10** — banc livré le 29/09
   (`tools/endurance/`, `docs/endurance.md` : démarrages à froid, `shutdown -r`/`system_reset`
   en série, plusieurs instances sur recouvrements qcow2, panique lue dans `panicstr`/`debug_buf`,

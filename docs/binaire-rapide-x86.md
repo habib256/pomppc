@@ -161,4 +161,4 @@ rapide (PGO, -O3, -march=native) »), avec les nouveaux défauts de Linux x86-64
 **A/B contre la référence : à refaire hôte au repos.** Une seule partie DOOM 3 propre sur
 `build-fast` (124,1 ms/image, `bench/tcg/ab/x86-fast-pollue/fast-1`) avant qu'une autre session
 de travail n'occupe l'hôte (`docs/vitesse-doom3-x86.md` §13.5) ; commandes de l'A/B et de la
-matrice finale au §13.7 de ce document.
+matrice finale au §13.7 de `docs/vitesse-doom3-x86.md`.
