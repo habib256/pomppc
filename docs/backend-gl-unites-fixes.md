@@ -44,5 +44,16 @@ et ne les retirait pas en cas de refus ; le backend logiciel qui prenait la suit
 | `prebuilt` régénéré sous 10.4.11 (plugin, kexts POMPPCGPU et POMPPCFsqrt), CD gravé par `xorriso` | monté par Tiger (HFS+), `install.sh` réussit, les deux kexts se chargent au redémarrage |
 | Marble Blast sur le backend GL | rendu juste, aucun avertissement d'unité ignorée |
 
+## Test natif (07/10)
+
+`tests/qgpu_core_test.c` (`run_v17`) dessinait les unités 5 et 6 **au pipeline fixe** sur les deux
+backends ; sur le GL de ce PC, (a) et (b) rendaient le fond blanc (`ffffff`, texel ignoré) : le
+test demandait ce que `QGPU_CAP_FIXED4` ne promet plus, et que le plugin n'envoie jamais (dessin
+rendu par Apple, `UNIT_LIM`). Sous `QGPU_CAP_FIXED4`, (a) et (b) sont refaits sous **programme
+de fragments** (`TEX texture[5]`, `MUL texture[0] × texture[6]`), ce que le device promet
+toujours : mêmes textures, mêmes pixels attendus (`4080c0`, `208000`), obtenus sur la RTX 4060
+Ti. Le backend logiciel garde le pipeline fixe. Le test vérifie aussi que `FIXED4` ne vient
+qu'avec `QGPU_CAP_PROGRAMS` et jamais du backend logiciel.
+
 Les VM existantes doivent recevoir le nouveau plugin (CD POMPPCSRC : `install.sh` du dépôt, ou
 CD invité) : avec l'ancien, le backend GL marche mais annonce 8 unités fixes à l'application.

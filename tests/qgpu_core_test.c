@@ -5084,12 +5084,39 @@ static void mat_rows(const float *m, float *rows)
 
 /* v17 : huit unités de texture. Les clés, bits de format et offsets des unités
    4..7 viennent APRÈS tout le reste (un flux v16 reste valide tel quel), et le
-   rendu les applique : unité 5 seule, puis unité 0 + unité 6 en GL_COMBINE. */
+   rendu les applique : unité 5 seule, puis unité 0 + unité 6 en GL_COMBINE.
+
+   07/10/2026 — QGPU_CAP_FIXED4 (docs/backend-gl-unites-fixes.md) : un backend
+   qui l'annonce (GL sur NVIDIA : 4 unités au pipeline FIXE, 8 sous programme)
+   ne promet plus les unités 4..7 au pipeline fixe ; le plugin n'y envoie alors
+   aucun dessin fixe qui en allume une (UNIT_LIM, rendu d'Apple). (a) et (b)
+   y sont donc refaits SOUS PROGRAMME DE FRAGMENTS, ce que le device promet
+   toujours : mêmes textures, mêmes coordonnées, mêmes pixels attendus. */
 static void run_v17(QgpuCore *c, uint8_t *shmem)
 {
+    static const char fp_u5[] =
+        "!!ARBfp1.0\n"
+        "TEX result.color, fragment.texcoord[5], texture[5], 2D;\n"
+        "END\n";
+    static const char fp_u06[] =
+        "!!ARBfp1.0\n"
+        "TEMP a, b;\n"
+        "TEX a, fragment.texcoord[0], texture[0], 2D;\n"
+        "TEX b, fragment.texcoord[6], texture[6], 2D;\n"
+        "MUL result.color, b, a;\n"
+        "END\n";
     Emit e, v, t;
     float m[16];
-    uint32_t st, p, i;
+    uint32_t st, p, i, arena = ARENA_OFF;
+    const bool fixed4 = (c->caps & QGPU_CAP_FIXED4) != 0;
+
+    printf("-- v17 : huit unités de texture (%s, %s) --\n", c->be->name,
+           fixed4 ? "sous programme de fragments, QGPU_CAP_FIXED4" : "pipeline fixe");
+    /* FIXED4 n'est annoncé qu'avec les programmes (sans eux, rien ne tient
+       les unités 4..7) et jamais par le backend de référence. */
+    CHECK(!fixed4 || ((c->caps & QGPU_CAP_PROGRAMS) && strcmp(c->be->name, "soft") != 0),
+          "v17 : QGPU_CAP_FIXED4 seulement avec QGPU_CAP_PROGRAMS, hors backend soft (caps 0x%x)",
+          c->caps);
 
     CHECK(QGPU_MAX_UNITS == 8 && QGPU_PROTO_VERSION >= 17 &&
           QGPU_VF_TEX(3) == 0x200 && QGPU_VF_TEX(4) == 0x4000000 && QGPU_VF_TEX(7) == 0x20000000 &&
@@ -5124,8 +5151,15 @@ static void run_v17(QgpuCore *c, uint8_t *shmem)
     set_matrix(&e, QGPU_MTX_TEXTURE0 + 7, m);
     emit(&e, QGPU_CMD_HDR(QGPU_OP_SET_CURRENT, QGPU_LEN_SET_CURRENT));
     emit(&e, QGPU_CUR_TEXCOORD0 + 7); emitf(&e, 0.0f); emitf(&e, 0.0f); emitf(&e, 0.0f); emitf(&e, 1.0f);
+    if (fixed4) {
+        prog_create(&e, 1, QGPU_PT_FRAGMENT);
+        prog_string(&e, shmem, &arena, 1, fp_u5);
+        prog_create(&e, 2, QGPU_PT_FRAGMENT);
+        prog_string(&e, shmem, &arena, 2, fp_u06);
+    }
     st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
-    CHECK(st == QGPU_ST_OK, "v17 : contexte, matrice et valeur courante de l'unité 7 (st %u)", st);
+    CHECK(st == QGPU_ST_OK, "v17 : contexte, matrice et valeur courante de l'unité 7%s (st %u)",
+          fixed4 ? ", programmes des unités 5 et 0+6" : "", st);
 
     /* (a) l'unité 5 seule, REPLACE d'un texel (0x40, 0x80, 0xC0) */
     t.off = t.start = TEX_OFF;
@@ -5136,6 +5170,10 @@ static void run_v17(QgpuCore *c, uint8_t *shmem)
     state(&e, QGPU_SK_UNIT(5) + QGPU_SK_U_ENABLE, 1);
     state(&e, QGPU_SK_UNIT(5) + QGPU_SK_U_BIND, 40);
     state(&e, QGPU_SK_UNIT(5) + QGPU_SK_U_ENV_MODE, 0x1E01);          /* REPLACE */
+    if (fixed4) {
+        prog_bind(&e, QGPU_PT_FRAGMENT, 1);
+        state(&e, QGPU_SK_FRAGMENT_PROGRAM, 1);
+    }
     v.off = v.start = VTX_OFF;
     for (i = 0; i < 3; i++) {
         static const float xy[3][2] = { { 0, 0 }, { 64, 0 }, { 0, 64 } };
@@ -5148,7 +5186,8 @@ static void run_v17(QgpuCore *c, uint8_t *shmem)
     st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
     p = px(shmem, 8, 8);
     CHECK(st == QGPU_ST_OK && near_rgb(p, 0x4080C0),
-          "v17 (a) unité 5 seule, REPLACE : %06x (st %u)", p, st);
+          "v17 (a) unité 5 seule, %s : %06x (st %u)",
+          fixed4 ? "TEX texture[5] par programme" : "REPLACE", p, st);
 
     /* (b) unité 0 REPLACE blanc, unité 6 en GL_COMBINE MODULATE(texture, précédent)
        avec (0.5, 1, 0) ; l'unité 5 coupée */
@@ -5166,6 +5205,9 @@ static void run_v17(QgpuCore *c, uint8_t *shmem)
           QGPU_COMBINE_SRC_A(0, QGPU_CS_TEXTURE, QGPU_CA_ALPHA) |
           QGPU_COMBINE_SRC_A(1, QGPU_CS_PREVIOUS, QGPU_CA_ALPHA));
     state(&e, QGPU_SK_TEX_LOD_BIAS(6), 0);
+    if (fixed4) {
+        prog_bind(&e, QGPU_PT_FRAGMENT, 2);
+    }
     v.off = v.start = VTX_OFF;
     for (i = 0; i < 3; i++) {
         static const float xy[3][2] = { { 0, 0 }, { 64, 0 }, { 0, 64 } };
@@ -5181,7 +5223,16 @@ static void run_v17(QgpuCore *c, uint8_t *shmem)
     p = px(shmem, 8, 8);
     /* texture 40 (0x4080C0) × texture 41 (0x80FF00) : (0x20, 0x80, 0x00) */
     CHECK(st == QGPU_ST_OK && near_rgb(p, 0x208000),
-          "v17 (b) unités 0 et 6, GL_COMBINE : %06x (st %u)", p, st);
+          "v17 (b) unités 0 et 6, %s : %06x (st %u)",
+          fixed4 ? "MUL de texture[0] et texture[6] par programme" : "GL_COMBINE", p, st);
+    if (fixed4) {
+        e.off = e.start = CMD_OFF;
+        state(&e, QGPU_SK_FRAGMENT_PROGRAM, 0);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st == QGPU_ST_OK, "v17 : programme de fragments coupé (st %u)", st);
+        printf("  –    v17 (a)/(b) au pipeline fixe : hors contrat sous QGPU_CAP_FIXED4 "
+               "(%s : 4 unités fixes ; le plugin rend ces dessins par Apple)\n", c->be->name);
+    }
 
     /* (c) bornes : clé au-delà de QGPU_SK_COUNT, unité 8 en texgen, bit 30 du format */
     e.off = e.start = CMD_OFF;
