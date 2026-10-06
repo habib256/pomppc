@@ -1,0 +1,396 @@
+POMPPC tcg/0038 — x-vfp-native-cmp sur hôte arm64 (pendant NEON de tcg/0034)
+
+ATTENTION : Écrit sur le PC, NON compilé pour le M4 (ni construit ni exécuté sur arm64),
+ATTENTION : NON prouvé : à construire et prouver sur le M4 avant tout usage
+ATTENTION : (docs/parite-arm64-0031-0035.md, tools/tcg/m4-serie-0031-0035-proofs.sh).
+Seules vérifications faites sur le PC (06/10/2026) : compilé par le clang
+aarch64 du NDK Android (tools/tcg/a64syntax.sh : tcg/tcg.c et int_helper.c,
+sans édition de liens) ; encodages A64 bruts égaux à ceux de l'assembleur de
+ce clang (tools/tcg/a64enc-check.py) ; le MODÈLE NEON (vfnc_x86, branche
+aarch64) compilé par ce clang et exécuté sous qemu-aarch64 (émulation, pas le
+silicium du M4) donne exactement la sortie du modèle x86 prouvé, sur 2 653 392
+vecteurs (tools/tcg/vfncxcheck.sh), et 9 mutants NEON sur 9 y sont vus.
+L'émetteur réel n'a jamais tourné.
+
+Les sortes PVF_CMPEQ..PVF_CTSXS (4-11) de l'op ppc_vfp dans l'émetteur
+tcg/aarch64 (tcg_out_ppc_vfp_cmp), mêmes décisions que l'émetteur x86_64 :
+
+  vcmpeqfp vcmpgefp  chaque voie de vA et vB ni NaN ni dénormale (t = x << 1 :
+  vcmpgtfp vcmpbfp   t == 0 ou 0x01000000 <=u t, et t <=u 0xff000000), puis
+                     fcmeq/fcmge/fcmgt (vcmpbfp : bit 31 = a > b, bit 30 =
+                     -b > a) ; sinon le helper sans Rc ; CR6 en ops TCG (0034)
+  vcfsx vcfux        porte de x-vfp-native ; scvtf/ucvtf (uint32 en un seul
+                     arrondi) puis × 2^-uim exact ; sinon le helper (talon :
+                     helper_vcf*(env, &vD, &vB, uim))
+  vctsxs vctuxs      toujours : x = b × 2^uim, fcvtzs/fcvtzu (vers zéro,
+                     saturants, NaN -> 0 : les valeurs de cvtsdsw/cvtsduw) ;
+                     VSCR[SAT] |= 1 si une voie sature, sans branchement
+
+Plus le modèle NEON dans le bloc « vfp-native-cmp » de int_helper.c (lu par
+x-vfp-native-cmp-verify et tools/tcg/vfpcmpproof.sh), et
+TCG_TARGET_HAS_ppc_vfp_cmp = 1. FPCR supposé à son défaut (au plus proche,
+FZ = 0, AH = 0), comme pour 0022. Propriété x-vfp-native-cmp éteinte par
+défaut ; run_tiger.sh ne l'allume pas sur macOS arm64.
+
+diff --git a/tcg/aarch64/tcg-target-has.h b/tcg/aarch64/tcg-target-has.h
+--- a/tcg/aarch64/tcg-target-has.h
++++ b/tcg/aarch64/tcg-target-has.h
+@@ -37,6 +37,11 @@
+  * PROVEN: to be built and proven on the M4 (docs/parite-arm64-0031-0035.md).
+  */
+ #define TCG_TARGET_HAS_ppc_fp_cmp       1
++/*
++ * POMPPC tcg/0038 (x-vfp-native-cmp): the kinds of tcg/0034 in the aarch64
++ * emitter of ppc_vfp.  Written on the x86 PC, NOT RUN, NOT PROVEN.
++ */
++#define TCG_TARGET_HAS_ppc_vfp_cmp      1
+ 
+ #define TCG_TARGET_HAS_v64              1
+ #define TCG_TARGET_HAS_v128             1
+diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
+--- a/tcg/aarch64/tcg-target.c.inc
++++ b/tcg/aarch64/tcg-target.c.inc
+@@ -2350,7 +2350,10 @@
+  * nothing else.  The op is TCG_OPF_CALL_CLOBBER: X9-X11 and V0-V7,
+  * V16-V18 are scratch here (V8-V15 are callee-saved, V31 is TCG_VEC_TMP0).
+  */
+-enum { PVF_ADD, PVF_SUB, PVF_MADD, PVF_NMSUB };
++enum { PVF_ADD, PVF_SUB, PVF_MADD, PVF_NMSUB,
++       /* POMPPC tcg/0038 (x-vfp-native-cmp), the kinds of tcg/0034 */
++       PVF_CMPEQ, PVF_CMPGE, PVF_CMPGT, PVF_CMPB, PVF_CFUX, PVF_CFSX,
++       PVF_CTUXS, PVF_CTSXS };
+ 
+ /* raw A64 AdvSIMD encodings, Q = 1 (128 bits) */
+ #define PVF_ADD4S       0x4ea08400      /* add  vd.4s, vn.4s, vm.4s */
+@@ -2394,6 +2397,186 @@
+     pvf_3(s, PVF_ORR16B, d, d, u);
+ }
+ 
++/*
++ * POMPPC tcg/0038 (x-vfp-native-cmp): the kinds of tcg/0034 on aarch64.
++ * Written on the x86 PC (06/10/2026): NOT RUN, NOT PROVEN, to be built
++ * and proven on the M4 (docs/parite-arm64-0031-0035.md) before any use.
++ * On the PC it was only compiled by the aarch64 clang of the Android NDK
++ * (tools/tcg/a64syntax.sh) and its raw encodings checked against that
++ * clang's assembler (tools/tcg/a64enc-check.py).
++ * Its model, lane for lane: the aarch64 branch of vfnc_x86() in
++ * target/ppc/int_helper.c (bloc « vfp-native-cmp »).
++ *
++ *   vcmpeqfp vcmpgefp vcmpgtfp vcmpbfp  every lane of vA and vB neither a
++ *       NaN nor a denormal (t = x << 1: t == 0 or 0x01000000 <=u t, and
++ *       t <=u 0xff000000; infinities are fine), then fcmeq / fcmge / fcmgt
++ *       (vcmpbfp: bit 31 = a > b, bit 30 = -b > a); any state of
++ *       vec_status.  Else the helper without Rc; CR6 in TCG ops (tcg/0034).
++ *   vcfsx vcfux  the gate of x-vfp-native (as tcg_out_ppc_vfp()), scvtf /
++ *       ucvtf (FPCR rounding: to nearest even), then * 2^-uim, exact.
++ *   vctsxs vctuxs  always: x = b * 2^uim (exact, or an infinity that
++ *       saturates the same way), fcvtzs / fcvtzu (toward zero, saturating,
++ *       NaN -> 0: exactly cvtsdsw / cvtsduw of the helper on these values);
++ *       VSCR[SAT] |= 1 when a lane saturated (x >= 2^31 or x < -2^31;
++ *       vctuxs: x >= 2^32 or x <= -1), branch-free: vscr_sat.u32[0] is
++ *       read, or'ed and written back (args[6] is its env offset).
++ *
++ * Same frame as tcg_out_ppc_vfp(): no TCG operand, TCG_OPF_CALL_CLOBBER,
++ * scratch X9-X11 and V0-V7, V16-V19; every test accumulated in PVF_G,
++ * then one cbnz to the stub before vD is stored.  FPCR at its default (to
++ * nearest, FZ = 0, AH = 0), as for tcg/0022.
++ */
++#define PVF_FCMEQ4S     0x4e20e400      /* vd = vn == vm (float) */
++#define PVF_FCMGE4S     0x6e20e400      /* vd = vn >= vm (float) */
++#define PVF_FCMGT4S     0x6ea0e400      /* vd = vn > vm (float) */
++#define PVF_FMUL4S      0x6e20dc00      /* vd = vn * vm */
++#define PVF_SCVTF4S     0x4e21d800      /* int32 -> float32, FPCR rounding */
++#define PVF_UCVTF4S     0x6e21d800      /* uint32 -> float32 */
++#define PVF_FCVTZS4S    0x4ea1b800      /* float32 -> int32, toward zero */
++#define PVF_FCVTZU4S    0x6ea1b800      /* float32 -> uint32, toward zero */
++
++static void pvf_dup(TCGContext *s, TCGReg d, uint32_t v)
++{
++    tcg_out_dupi_vec(s, TCG_TYPE_V128, MO_32, d, dup_const(MO_32, v));
++}
++
++/* the float 2^e, broadcast */
++static void pvf_pow2(TCGContext *s, TCGReg d, int e)
++{
++    pvf_dup(s, d, (uint32_t)(127 + e) << 23);
++}
++
++/*
++ * d = all-ones in the lanes of t (an operand << 1) that are neither a NaN
++ * nor a denormal (vfnc_good()): t >=u 0x01000000 or t == 0, and t <=u
++ * 0xff000000.  k1 = 0x01000000, k4 = 0xff000000.
++ */
++static void pvf_good(TCGContext *s, TCGReg d, TCGReg t, TCGReg k1, TCGReg k4,
++                     TCGReg u)
++{
++    pvf_3(s, PVF_CMHS4S, d, t, k1);         /* t >=u 0x01000000 */
++    pvf_2(s, PVF_CMEQ0_4S, u, t);           /* t == 0 */
++    pvf_3(s, PVF_ORR16B, d, d, u);
++    pvf_3(s, PVF_CMHS4S, u, k4, t);         /* 0xff000000 >=u t */
++    pvf_3(s, PVF_AND16B, d, d, u);
++}
++
++static void tcg_out_ppc_vfp_cmp(TCGContext *s, const TCGArg *args)
++{
++    const TCGReg xa = TCG_REG_V0, xb = TCG_REG_V1, xm = TCG_REG_V2;
++    const TCGReg r = TCG_REG_V3, t = TCG_REG_V4, u = TCG_REG_V5;
++    const TCGReg k1 = TCG_REG_V6, k4 = TCG_REG_V7, ok = TCG_REG_V16;
++    const TCGReg hi = TCG_REG_V17, lo = TCG_REG_V18, c = TCG_REG_V19;
++    unsigned kind = args[0];
++    int uim = args[4];
++    TCGLabelQemuLdst *l;
++    TCGReg x;
++
++    tcg_out_ld(s, TCG_TYPE_V128, xb, TCG_AREG0, args[3]);
++
++    switch (kind) {
++    case PVF_CMPEQ:
++    case PVF_CMPGE:
++    case PVF_CMPGT:
++    case PVF_CMPB:
++        tcg_out_ld(s, TCG_TYPE_V128, xa, TCG_AREG0, args[2]);
++        /* every lane of vA and vB neither a NaN nor a denormal */
++        pvf_dup(s, k1, 0x01000000);
++        pvf_dup(s, k4, 0xff000000);
++        pvf_3(s, PVF_ADD4S, t, xa, xa);
++        pvf_good(s, ok, t, k1, k4, u);
++        pvf_3(s, PVF_ADD4S, t, xb, xb);
++        pvf_good(s, hi, t, k1, k4, u);
++        pvf_3(s, PVF_AND16B, ok, ok, hi);
++        pvf_2(s, PVF_NOT16B, ok, ok);
++        pvf_2(s, PVF_UMAXV4S, ok, ok);
++        pvf_2(s, PVF_UMOVWS0, PVF_G, ok);
++        if (kind == PVF_CMPEQ) {
++            pvf_3(s, PVF_FCMEQ4S, r, xa, xb);
++        } else if (kind == PVF_CMPGE) {
++            pvf_3(s, PVF_FCMGE4S, r, xa, xb);           /* a >= b */
++        } else if (kind == PVF_CMPGT) {
++            pvf_3(s, PVF_FCMGT4S, r, xa, xb);           /* a > b */
++        } else {
++            /* bit 31: a > b (!(a <= b)); bit 30: -b > a (!(a >= -b)) */
++            pvf_3(s, PVF_FCMGT4S, hi, xa, xb);
++            pvf_2(s, PVF_FNEG4S, t, xb);
++            pvf_3(s, PVF_FCMGT4S, lo, t, xa);
++            pvf_dup(s, c, 0x80000000);
++            pvf_3(s, PVF_AND16B, hi, hi, c);
++            pvf_dup(s, c, 0x40000000);
++            pvf_3(s, PVF_AND16B, lo, lo, c);
++            pvf_3(s, PVF_ORR16B, r, hi, lo);
++        }
++        break;
++    case PVF_CFSX:
++    case PVF_CFUX:
++        /* the gate of x-vfp-native, in PVF_G (as tcg_out_ppc_vfp()) */
++        tcg_out_movi(s, TCG_TYPE_I64, PVF_G, 0);
++        for (int w = 0; w < 2; w++) {
++            if (args[7 + 3 * w]) {
++                tcg_out_ld(s, TCG_TYPE_I64, PVF_T2, TCG_AREG0,
++                           args[6 + 3 * w]);
++                tcg_out_movi(s, TCG_TYPE_I64, PVF_T1, args[7 + 3 * w]);
++                pfp_rrr(s, PFP_ANDX, PVF_T2, PVF_T2, PVF_T1, 0);
++                tcg_out_movi(s, TCG_TYPE_I64, PVF_T1, args[8 + 3 * w]);
++                pfp_rrr(s, 0xca000000 /* eor x */, PVF_T2, PVF_T2,
++                        PVF_T1, 0);
++                pfp_rrr(s, PFP_ORRX, PVF_G, PVF_G, PVF_T2, 0);
++            }
++        }
++        pvf_2(s, kind == PVF_CFSX ? PVF_SCVTF4S : PVF_UCVTF4S, r, xb);
++        if (uim) {
++            pvf_pow2(s, c, -uim);                       /* exact scaling */
++            pvf_3(s, PVF_FMUL4S, r, r, c);
++        }
++        break;
++    default:            /* PVF_CTSXS, PVF_CTUXS: no slow path */
++        x = xb;
++        if (uim) {
++            pvf_pow2(s, c, uim);
++            pvf_3(s, PVF_FMUL4S, xm, xb, c);
++            x = xm;
++        }
++        if (kind == PVF_CTSXS) {
++            pvf_2(s, PVF_FCVTZS4S, r, x);
++            pvf_pow2(s, c, 31);
++            pvf_3(s, PVF_FCMGE4S, hi, x, c);            /* x >= 2^31 */
++            pvf_dup(s, k1, 0xcf000000);                 /* -2^31 */
++            pvf_3(s, PVF_FCMGT4S, lo, k1, x);           /* x < -2^31 */
++        } else {
++            pvf_2(s, PVF_FCVTZU4S, r, x);
++            pvf_pow2(s, c, 32);
++            pvf_3(s, PVF_FCMGE4S, hi, x, c);            /* x >= 2^32 */
++            pvf_dup(s, k1, 0xbf800000);                 /* -1.0 */
++            pvf_3(s, PVF_FCMGE4S, lo, k1, x);           /* x <= -1 */
++        }
++        /* VSCR[SAT] |= any lane saturated (set_vscr_sat()), no branch */
++        pvf_3(s, PVF_ORR16B, t, hi, lo);
++        pvf_2(s, PVF_UMAXV4S, t, t);
++        pvf_2(s, PVF_UMOVWS0, PVF_T1, t);
++        tcg_out_logicali(s, Ilogic_imm_ANDI, TCG_TYPE_I32, PVF_T1, PVF_T1, 1);
++        tcg_out_ld(s, TCG_TYPE_I32, PVF_T2, TCG_AREG0, args[6]);
++        pfp_rrr(s, PFP_ORRX, PVF_T2, PVF_T2, PVF_T1, 0);
++        tcg_out_st(s, TCG_TYPE_I32, PVF_T2, TCG_AREG0, args[6]);
++        tcg_out_st(s, TCG_TYPE_V128, r, TCG_AREG0, args[1]);
++        return;
++    }
++
++    /* compares, vcf*: any test failed, the helper out of line */
++    l = new_ldst_label(s);
++    l->is_ppc_vfp = true;
++    l->fp_sel = kind;
++    l->fp_slow = (const void *)args[5];
++    for (int i = 0; i < 4; i++) {
++        l->vfp_off[i] = args[1 + i];
++    }
++    l->label_ptr[0] = s->code_ptr;
++    tcg_out_insn(s, cbz, CBNZ, TCG_TYPE_I64, PVF_G, 0);
++    tcg_out_st(s, TCG_TYPE_V128, r, TCG_AREG0, args[1]);
++    l->raddr = tcg_splitwx_to_rx(s->code_ptr);
++}
++
+ static void tcg_out_ppc_vfp(TCGContext *s, const TCGArg *args)
+ {
+     const TCGReg xa = TCG_REG_V0, xb = TCG_REG_V1, xc = TCG_REG_V2;
+@@ -2405,6 +2588,11 @@
+     TCGLabelQemuLdst *l;
+     TCGReg r;
+ 
++    if (kind >= PVF_CMPEQ) {
++        tcg_out_ppc_vfp_cmp(s, args);                   /* tcg/0038 */
++        return;
++    }
++
+     /*
+      * the gate, in PVF_G: the or of (window & mask) ^ value over the two
+      * windows, 0 when it passes.  Not in TMP0-2: tcg_out_ld() takes TMP0
+@@ -2497,13 +2685,23 @@
+         return false;
+     }
+     tcg_out_mov(s, TCG_TYPE_PTR, TCG_REG_X0, TCG_AREG0);
+-    for (int i = 0; i < 4; i++) {
+-        TCGReg arg = TCG_REG_X1 + i;
+-        /* QEMU 11's tcg_out_addi_ptr is an unreachable ABI stub on A64.
+-         * AVR offsets exceed the ADD-immediate range: materialize them.
+-         */
+-        tcg_out_movi(s, TCG_TYPE_PTR, arg, l->vfp_off[i]);
+-        tcg_out_insn(s, addsub_shift, ADD, 1, arg, TCG_AREG0, arg);
++    if (l->fp_sel == PVF_CFUX || l->fp_sel == PVF_CFSX) {
++        /* tcg/0038 (NOT RUN): helper_vcf*(env, &vD, &vB, uim) */
++        for (int i = 0; i < 2; i++) {
++            TCGReg arg = TCG_REG_X1 + i;
++            tcg_out_movi(s, TCG_TYPE_PTR, arg, l->vfp_off[i ? 2 : 0]);
++            tcg_out_insn(s, addsub_shift, ADD, 1, arg, TCG_AREG0, arg);
++        }
++        tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X3, l->vfp_off[3]);
++    } else {
++        for (int i = 0; i < 4; i++) {
++            TCGReg arg = TCG_REG_X1 + i;
++            /* QEMU 11's tcg_out_addi_ptr is an unreachable ABI stub on A64.
++             * AVR offsets exceed the ADD-immediate range: materialize them.
++             */
++            tcg_out_movi(s, TCG_TYPE_PTR, arg, l->vfp_off[i]);
++            tcg_out_insn(s, addsub_shift, ADD, 1, arg, TCG_AREG0, arg);
++        }
+     }
+     tcg_out_call_int(s, l->fp_slow);
+     tcg_out_goto(s, l->raddr);
+diff --git a/target/ppc/int_helper.c b/target/ppc/int_helper.c
+--- a/target/ppc/int_helper.c
++++ b/target/ppc/int_helper.c
+@@ -863,6 +863,98 @@
+     _mm_storeu_si128((__m128i *)pr, r);
+     return true;
+ }
++#elif defined(__aarch64__) && !HOST_BIG_ENDIAN
++/*
++ * POMPPC tcg/0038: on an aarch64 host, the model of the NEON emitter
++ * (tcg/aarch64/tcg-target.c.inc, tcg_out_ppc_vfp_cmp()), lane for lane; the
++ * name vfnc_x86() is kept for the verifier and tools/tcg/vfpcmpproof.c.
++ * Written on the x86 PC: NOT RUN, NOT PROVEN (docs/parite-arm64-
++ * 0031-0035.md).  The same decisions as the x86_64 model; what differs:
++ *
++ *   compares  fcmeq / fcmge / fcmgt (vn OP vm, so a OP b directly);
++ *   vcfsx     scvtf, vcfux ucvtf: uint32 -> float32 in one rounding
++ *             (no split in halves), then the same exact scaling by 2^-uim;
++ *   vct*      fcvtzs / fcvtzu already saturate (INT32_MIN/MAX, 0/UINT32_MAX)
++ *             and give 0 for a NaN, as cvtsdsw/cvtsduw: only VSCR[SAT] is
++ *             computed apart, from x (x >= 2^31 or x < -2^31; vctuxs:
++ *             x >= 2^32 or x <= -1).
++ *
++ * FPCR is assumed at its default (round to nearest, FZ = 0, AH = 0), as for
++ * tcg/0003 and tcg/0022.
++ */
++static inline float32x4_t vfnc_pow2(int e)
++{
++    return vreinterpretq_f32_u32(vdupq_n_u32((uint32_t)(127 + e) << 23));
++}
++
++/* lanes of x (as t = x << 1) that are neither a NaN nor a denormal */
++static inline uint32x4_t vfnc_good(uint32x4_t x)
++{
++    uint32x4_t t = vaddq_u32(x, x);
++    uint32x4_t d = vorrq_u32(vcgeq_u32(t, vdupq_n_u32(0x01000000)),
++                             vceqzq_u32(t));                /* not denormal */
++
++    return vandq_u32(d, vcgeq_u32(vdupq_n_u32(0xff000000), t)); /* not NaN */
++}
++
++static bool vfnc_x86(int kind, int uim, bool gate, const uint32_t *pa,
++                     const uint32_t *pb, uint32_t *pr, bool *sat)
++{
++    uint32x4_t ia = vld1q_u32(pa), ib = vld1q_u32(pb), r, hi, lo;
++    float32x4_t a = vreinterpretq_f32_u32(ia), b = vreinterpretq_f32_u32(ib);
++    float32x4_t x;
++
++    *sat = false;
++    switch (kind) {
++    case VFNC_CMPEQ:
++    case VFNC_CMPGE:
++    case VFNC_CMPGT:
++    case VFNC_CMPB:
++        if (vmaxvq_u32(vmvnq_u32(vandq_u32(vfnc_good(ia), vfnc_good(ib))))) {
++            return false;
++        }
++        if (kind == VFNC_CMPEQ) {
++            r = vceqq_f32(a, b);
++        } else if (kind == VFNC_CMPGE) {
++            r = vcgeq_f32(a, b);
++        } else if (kind == VFNC_CMPGT) {
++            r = vcgtq_f32(a, b);
++        } else {
++            /* bit 31: !(a <= b) = a > b ; bit 30: !(a >= -b) = -b > a */
++            r = vorrq_u32(vandq_u32(vcgtq_f32(a, b), vdupq_n_u32(0x80000000)),
++                          vandq_u32(vcgtq_f32(vnegq_f32(b), a),
++                                    vdupq_n_u32(0x40000000)));
++        }
++        break;
++    case VFNC_CFSX:
++    case VFNC_CFUX:
++        if (!gate) {
++            return false;
++        }
++        x = kind == VFNC_CFSX ? vcvtq_f32_s32(vreinterpretq_s32_u32(ib))
++                              : vcvtq_f32_u32(ib);
++        if (uim) {
++            x = vmulq_f32(x, vfnc_pow2(-uim));
++        }
++        r = vreinterpretq_u32_f32(x);
++        break;
++    default:            /* VFNC_CTSXS, VFNC_CTUXS */
++        x = uim ? vmulq_f32(b, vfnc_pow2(uim)) : b;
++        if (kind == VFNC_CTSXS) {
++            r = vreinterpretq_u32_s32(vcvtq_s32_f32(x));
++            hi = vcgeq_f32(x, vfnc_pow2(31));
++            lo = vcgtq_f32(vdupq_n_f32(-2147483648.0f), x);
++        } else {
++            r = vcvtq_u32_f32(x);
++            hi = vcgeq_f32(x, vfnc_pow2(32));
++            lo = vcgeq_f32(vdupq_n_f32(-1.0f), x);     /* trunc(x) < 0 */
++        }
++        *sat = vmaxvq_u32(vorrq_u32(hi, lo)) != 0;
++        break;
++    }
++    vst1q_u32(pr, r);
++    return true;
++}
+ #else
+ static bool vfnc_x86(int kind, int uim, bool gate, const uint32_t *pa,
+                      const uint32_t *pb, uint32_t *pr, bool *sat)

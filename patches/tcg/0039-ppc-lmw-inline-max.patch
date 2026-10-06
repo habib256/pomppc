@@ -1,0 +1,75 @@
+POMPPC tcg/0039 — x-lmw-inline-max : le maximum de registres de x-lmw-inline (tcg/0032)
+
+Code commun (aucune partie propre à l'hôte), construit sur le PC x86-64 le
+06/10/2026. Le maximum codé en dur de 0032 (PPC_LMW_INLINE_MAX = 32, « tous
+les comptes », mesuré sur x86-64, docs/tcg-g4.md §32.3) devient une propriété
+du CPU, x-lmw-inline-max, défaut 32 : comportement de 0032 INCHANGÉ tant
+qu'on ne la règle pas. Raison : sur le M4 la copie NEON de tcg/0025 rend déjà
+helper_lmw rapide, et l'essai essais/0002 n'y avait rien gagné sur les
+prologues de 19 registres ; le M4 doit pouvoir mesurer 8 contre 32 sans
+reconstruire (CPU_OPTS=x-lmw-inline-max=8 dans un bras de matab.sh).
+docs/parite-arm64-0031-0035.md.
+
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1511,6 +1511,8 @@
+      */
+     bool lmw_inline, lmw_inline_verify;
+     uint64_t lmwv_n, lmwv_bad, lmwv_io;
++    /* x-lmw-inline-max (POMPPC tcg/0039): most registers inline, 0-32 */
++    uint32_t lmw_inline_max;
+     /*
+      * x-dcbz-inline (POMPPC tcg/0035): dcbz with a 32-byte line as four
+      * 8-byte stores of zero in the generated code (those of the helper's
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -210,6 +210,12 @@
+     DEFINE_PROP_BOOL("x-lmw-inline-verify", PowerPCCPU, env.lmw_inline_verify,
+                      false),
+     /*
++     * POMPPC tcg/0039.  x-lmw-inline-max: most registers of an inline
++     * lmw/stmw (32, every count: the behaviour of tcg/0032; 8: only the
++     * epilogues, the 19-register prologues keep the helper).
++     */
++    DEFINE_PROP_UINT32("x-lmw-inline-max", PowerPCCPU, env.lmw_inline_max, 32),
++    /*
+      * POMPPC tcg/0035.  x-dcbz-inline: dcbz (32-byte line) as four stores
+      * of zero in the generated code.  x-dcbz-inline-verify: proof mode.
+      * Off by default.
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -179,6 +179,7 @@
+     bool tlb_precise;            /* x-tlb-precise, 32-bit hash MMU (tcg/0031) */
+     bool mem_stats;              /* x-mem-stats (tcg/0031) */
+     bool lmw_inline, lmw_verify; /* x-lmw-inline(-verify) (tcg/0032) */
++    uint32_t lmw_inline_max;     /* x-lmw-inline-max (tcg/0039) */
+     bool dcbz_inline, dcbz_verify; /* x-dcbz-inline(-verify) (tcg/0035) */
+     bool vfp_native, vfp_nverify; /* x-vfp-native(-verify) (tcg/0022) */
+     bool vfp_native_cmp, vfpnc_verify; /* x-vfp-native-cmp(-verify), 0034 */
+@@ -2830,7 +2831,14 @@
+     TCGLabel *l_helper, *l_done;
+     TCGv off, a;
+ 
+-    if (!ctx->lmw_inline || n > PPC_LMW_INLINE_MAX) {
++    /*
++     * POMPPC tcg/0039: the maximum is x-lmw-inline-max (default
++     * PPC_LMW_INLINE_MAX, the behaviour of tcg/0032), so that the M4 can
++     * measure 8 against 32 registers without a rebuild (its NEON copy of
++     * tcg/0025 may beat the inline form of the 19-register prologues).
++     */
++    if (!ctx->lmw_inline ||
++        n > (int)MIN(ctx->lmw_inline_max, (uint32_t)PPC_LMW_INLINE_MAX)) {
+         return false;
+     }
+     l_helper = gen_new_label();
+@@ -6696,6 +6704,7 @@
+     ctx->mem_stats = env->mem_stats;
+     ctx->lmw_inline = env->lmw_inline;
+     ctx->lmw_verify = env->lmw_inline && env->lmw_inline_verify;
++    ctx->lmw_inline_max = env->lmw_inline_max;
+     ctx->dcbz_inline = env->dcbz_inline && env->dcache_line_size == 32;
+     ctx->dcbz_verify = ctx->dcbz_inline && env->dcbz_inline_verify;
+ 
