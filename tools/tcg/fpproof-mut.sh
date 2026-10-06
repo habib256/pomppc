@@ -35,5 +35,20 @@ s/(a \& INT64_MAX) > 0x7ff0000000000000ull/(a \& INT64_MAX) > 0x7ff8000000000000
 s/if (fa != 0 \&\& fc != 0 \&\& (isinf/if (r != 0 \&\& (isinf/
 # débordement accepté
 s/(isinf(r) || fabsf(r) <= FLT_MIN))/(fabsf(r) <= FLT_MIN))/
+# --- x-fp-native-cmp (tcg/0033) ---
+# frsp : borne basse retirée
+s/if (t < FPI_FRSP_LO || t >= FPI_FRSP_HI)/if (t >= FPI_FRSP_HI)/
+# frsp : borne haute à 2^128
+s/(0x47effffff0000000ull << 1)/(0x47f0000000000000ull << 1)/
+# fctiw tronqué
+s/r = rz ? trunc(fpi_d(x)) : rint(fpi_d(x));/r = trunc(fpi_d(x));/
+# fctiw(z) : 2^31 accepté
+s/r <= 2147483647.0/r <= 2147483648.0/
+# fctiw(z) : FI non posé
+s/return FPI_IS_CVT(op) ? fpscr | FP_FI :/return FPI_IS_CVT(op) ? fpscr :/
+# fdivs : diviseur nul accepté
+s/!fpi_zon(b) || (b << 1) == 0/!fpi_zon(b)/
+# RN ignoré pour toutes les ops de 0033
+s/return FPI_NO_RN(op) ?/return 1 ?/
 MUT
 exit $fail
