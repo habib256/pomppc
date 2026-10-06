@@ -18,6 +18,15 @@ de commit et dans `docs/`.
   tiennent : correction du kext et ABI par tranche décrites, avec leurs épreuves. Nouveau test
   natif `run_a6` (`tests/qgpu_core_test.c`) : ce que le cœur fait d'un nettoyage manqué
   (`QGPU_ST_LIMIT` fatal), retardé (sans effet, FIFO) ou rejoué après réattribution.
+- **Rejeu : surface lue sans être liée dans le vidage, 07/10** (`docs/matrice-jeux.md` §5) :
+  `tests/qgpu_replay.c` ne créait une surface d'avant le vidage qu'au `SURF_BIND` ou d'après
+  la présentation ; un `SURF_READBACK`/`UPLOAD` (ou `DEPTH_*`, `STENCIL_*`, `SURF_TEX`) d'une
+  surface jamais liée donnait `NO_SURF` (DOOM 3 fenêtre, tour `20260926-2156` du M4, vidage
+  sans `surfaces.txt`). Le prologue la crée comme le device l'avait (relue noire si jamais
+  dessinée) et relie le contexte à la surface de ses transferts quand sa liaison était
+  devinée. DOOM 3 fenêtre du PC sans `surfaces.txt` : 2 `NO_SURF` → 0, 20 images identiques
+  au rejeu avec `surfaces.txt` ; rejeux des quatre cellules du PC (avec `surfaces.txt`)
+  inchangés à l'octet.
 - **Binaire rapide du PC mesuré hôte au repos, matrice finale, planchers du PC, 06-07/10**
   (`docs/vitesse-doom3-x86.md` §13.5-13.7) : A/B entrelacé DOOM 3 `d3-fen`, 3 parties par bras,
   défauts du 06/10 : binaire de référence **122,9** ms/image (121,8..124,6), **binaire rapide

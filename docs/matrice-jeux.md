@@ -294,6 +294,27 @@ une liste d'instances (profils d'un même jeu, Nexuiz).
   encore le contexte à une surface devinée malgré `surfaces.txt` (images unies) ; la
   relecture attendait l'échange suivant alors que DOOM 3 et Prey copient avant dans une
   texture hôte (`BAD_ARG`). Corrigés : tour `20260927-0307`, 10 vertes.
+- **Surface lue ou écrite sans être liée dans le vidage** (07/10, DOOM 3 fenêtre, tour
+  `20260926-2156` du M4) : le device n'exige aucune liaison pour `SURF_READBACK`/`UPLOAD`,
+  `DEPTH_*`, `STENCIL_*` ni `SURF_TEX` (la surface existe dès son `SURF_CREATE`, une surface
+  jamais dessinée se relit noire : `glClear` à 0 à la création) ; le prologue du rejoueur ne
+  créait la surface qu'au `SURF_BIND` ou d'après la présentation → `NO_SURF` et fin de la
+  soumission. C'est le cas des vidages **sans `surfaces.txt`** (avant le 27/09) : la
+  relecture/réécriture d'état du déclenchement (`CTX_BIND` puis `SURF_READBACK`/`SURF_UPLOAD`
+  de la surface du contexte) y tombait. Le prologue crée maintenant la surface (assez grande
+  pour le rectangle) sans la lier, et un tel transfert juste après un `CTX_BIND` relie ce
+  contexte à cette surface quand sa liaison était inconnue ou devinée (le plugin n'en émet que
+  sur la surface du contexte qu'il vient de lier). Avec `surfaces.txt`, rien ne change : toutes
+  les surfaces vivantes sont déjà créées, un identifiant inconnu n'existe pas non plus sur le
+  device et le `NO_SURF` reste le sien. Épreuves : vidage synthétique (relecture de la surface 3
+  avant tout `SURF_BIND`, renvoyée dans la surface présentée) — avant 1 soumission en erreur et
+  carré blanc, après 0 et carré noir comme le device, backends gl et logiciel ; DOOM 3 fenêtre
+  de la matrice du PC du 06-07/10 privé de son `surfaces.txt` — avant 2 `NO_SURF` (soumissions
+  `000020`/`000021`, image 5077), après 0 et les 20 images identiques à l'octet au rejeu
+  avec `surfaces.txt` ; les huit rejeux de `bench/tcg/ab/x86-final/{ref,final}-1/` (mb, zen,
+  ut, d3 en fenêtre, avec `surfaces.txt`) inchangés à l'octet. Le plafond de 60 mots du
+  prologue pour `CTX_CREATE` et `SURF_CREATE` sur `SURF_BIND` (reste d'un `pre[64]`, au-delà
+  la surface n'était plus créée) suit celui des autres créations (4090).
 
 ## 6 quater. La matrice du PC Linux (nuit du 02 au 03/10/2026)
 
