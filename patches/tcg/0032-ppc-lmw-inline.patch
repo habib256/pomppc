@@ -1,0 +1,197 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1502,6 +1502,16 @@
+     int64_t tlbp_win_ns[4];
+     uint64_t tlbp_grows, tlbp_scans;
+     /*
++     * x-lmw-inline (POMPPC tcg/0032): lmw/stmw whose range lies in one page
++     * as word accesses in the generated code (same accesses as the helper's
++     * I/O path, in the same order; the first one faults for the whole range,
++     * as the helper's probe does); the helper otherwise.
++     * x-lmw-inline-verify: each inline one re-checked against memory by a
++     * helper (stderr summary).
++     */
++    bool lmw_inline, lmw_inline_verify;
++    uint64_t lmwv_n, lmwv_bad, lmwv_io;
++    /*
+      * A kept entry that no longer translates may be legitimate for a short
+      * while: the guest invalidates the PTE, then issues tlbie and sync.  It
+      * is a suspect; a divergence only if it is still there, still stale,
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -202,6 +202,13 @@
+      */
+     DEFINE_PROP_BOOL("x-tlb-precise", PowerPCCPU, env.tlb_precise, false),
+     DEFINE_PROP_UINT32("x-tlb-precise-verify", PowerPCCPU, env.tlbp_verify, 0),
++    /*
++     * POMPPC tcg/0032.  x-lmw-inline: lmw/stmw within a page as inline word
++     * accesses.  x-lmw-inline-verify: proof mode.  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-lmw-inline", PowerPCCPU, env.lmw_inline, false),
++    DEFINE_PROP_BOOL("x-lmw-inline-verify", PowerPCCPU, env.lmw_inline_verify,
++                     false),
+     /* POMPPC tcg/0031: memory-side counters on stderr every 10 s */
+     DEFINE_PROP_BOOL("x-mem-stats", PowerPCCPU, env.mem_stats, false),
+     /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
+diff --git a/target/ppc/helper.h b/target/ppc/helper.h
+--- a/target/ppc/helper.h
++++ b/target/ppc/helper.h
+@@ -46,6 +46,7 @@
+ DEF_HELPER_3(lmw, void, env, tl, i32)
+ DEF_HELPER_FLAGS_3(stmw, TCG_CALL_NO_WG, void, env, tl, i32)
+ DEF_HELPER_FLAGS_3(mem_stat, TCG_CALL_NO_RWG, void, env, tl, i32)
++DEF_HELPER_3(lmw_verify, void, env, tl, i32)
+ DEF_HELPER_4(lsw, void, env, tl, i32, i32)
+ DEF_HELPER_5(lswx, void, env, tl, i32, i32, i32)
+ DEF_HELPER_FLAGS_4(stsw, TCG_CALL_NO_WG, void, env, tl, i32, i32)
+diff --git a/target/ppc/mem_helper.c b/target/ppc/mem_helper.c
+--- a/target/ppc/mem_helper.c
++++ b/target/ppc/mem_helper.c
+@@ -670,3 +670,43 @@
+     env->spr[SPR_TFHAR] = env->nip + 4;
+     env->crf[0] = 0xB; /* 0b1010 = transaction failure */
+ }
++
++/*
++ * x-lmw-inline-verify (POMPPC tcg/0032).  After an inline lmw (reg > 0) or
++ * stmw (reg | 0x100), the words of [addr, addr + 4 * (32 - r)) read through
++ * the TLB without fault must equal the low 32 bits of r..r31: what the
++ * helper would have loaded, or what it would have stored.  I/O pages are
++ * not re-read (counted).
++ */
++static void lmwv_report(CPUPPCState *env)
++{
++    fprintf(stderr, "lmw-inline-verify: cpu %d, %" PRIu64 " checked, %" PRIu64
++            " on I/O (not re-read), %" PRIu64 " divergent\n",
++            env_cpu(env)->cpu_index, env->lmwv_n, env->lmwv_io, env->lmwv_bad);
++}
++
++void helper_lmw_verify(CPUPPCState *env, target_ulong addr, uint32_t arg)
++{
++    uint32_t reg = arg & 31;
++    int mmu_idx = ppc_env_mmu_index(env, false);
++    void *host = tlb_vaddr_to_host(env, addr, MMU_DATA_LOAD, mmu_idx);
++
++    if (!host) {
++        env->lmwv_io++;
++        return;
++    }
++    for (uint32_t r = reg; r < 32; r++, host += 4) {
++        if ((uint32_t)env->gpr[r] != (uint32_t)ldl_be_p(host)) {
++            if (env->lmwv_bad++ < 20) {
++                fprintf(stderr, "lmw-inline-verify: DIVERGENCE %s r%u ea 0x"
++                        TARGET_FMT_lx " reg %08x mem %08x\n",
++                        arg & 0x100 ? "stmw" : "lmw", r, addr,
++                        (uint32_t)env->gpr[r], (uint32_t)ldl_be_p(host));
++            }
++            break;
++        }
++    }
++    if ((++env->lmwv_n & 0x3ffff) == 0) {
++        lmwv_report(env);
++    }
++}
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -178,6 +178,7 @@
+     bool vmx_inline, vmx_verify; /* x-vmx-inline, x-vmx-verify (tcg/0021) */
+     bool tlb_precise;            /* x-tlb-precise, 32-bit hash MMU (tcg/0031) */
+     bool mem_stats;              /* x-mem-stats (tcg/0031) */
++    bool lmw_inline, lmw_verify; /* x-lmw-inline(-verify) (tcg/0032) */
+     bool vfp_native, vfp_nverify; /* x-vfp-native(-verify) (tcg/0022) */
+     bool vfp_native_cmp, vfpnc_verify; /* x-vfp-native-cmp(-verify), 0034 */
+     const CPUPPCState *env;     /* x-vfp-native: its gate (tcg/0022) */
+@@ -2807,6 +2808,61 @@
+ 
+ /***                    Integer load and store multiple                    ***/
+ 
++/*
++ * POMPPC tcg/0032 (x-lmw-inline).  lmw/stmw of n <= PPC_LMW_INLINE_MAX
++ * registers (all of them: on x86-64 hosts the 19-register form of the
++ * prologues gains too, docs/tcg-g4.md section 32): if [EA, EA + 4n) lies in
++ * one page, n word accesses in the generated code, else the helper.  In one
++ * page every word goes through the same TLB entry: the first access faults
++ * (at EA, with the same access type) or none does -- the all-or-nothing of
++ * the helper, which probes the whole range first.  Same width, order and
++ * endianness as the helper's I/O path (cpu_ldl_mmu/cpu_stl_mmu, MO_UNALN),
++ * the RAM path being equivalent to it.  The page offset of EA does not wrap
++ * in 32-bit mode: EA + 4n stays in the page.  rA in the loaded range (an
++ * invalid form) is harmless: EA is in a temporary.
++ */
++#define PPC_LMW_INLINE_MAX 32
++
++static bool gen_lmw_inline(DisasContext *ctx, TCGv ea, int reg, bool store)
++{
++    int n = 32 - reg;
++    TCGLabel *l_helper, *l_done;
++    TCGv off, a;
++
++    if (!ctx->lmw_inline || n > PPC_LMW_INLINE_MAX) {
++        return false;
++    }
++    l_helper = gen_new_label();
++    l_done = gen_new_label();
++    off = tcg_temp_new();
++    a = tcg_temp_new();
++    tcg_gen_andi_tl(off, ea, ~TARGET_PAGE_MASK);
++    tcg_gen_brcondi_tl(TCG_COND_GTU, off, TARGET_PAGE_SIZE - 4 * n, l_helper);
++    for (int i = 0; i < n; i++) {
++        tcg_gen_addi_tl(a, ea, 4 * i);
++        if (store) {
++            tcg_gen_qemu_st_tl(cpu_gpr[reg + i], a, ctx->mem_idx,
++                               DEF_MEMOP(MO_UL | MO_UNALN));
++        } else {
++            tcg_gen_qemu_ld_tl(cpu_gpr[reg + i], a, ctx->mem_idx,
++                               DEF_MEMOP(MO_UL | MO_UNALN));
++        }
++    }
++    if (ctx->lmw_verify) {
++        gen_helper_lmw_verify(tcg_env, ea,
++                              tcg_constant_i32(reg | (store ? 0x100 : 0)));
++    }
++    tcg_gen_br(l_done);
++    gen_set_label(l_helper);
++    if (store) {
++        gen_helper_stmw(tcg_env, ea, tcg_constant_i32(reg));
++    } else {
++        gen_helper_lmw(tcg_env, ea, tcg_constant_i32(reg));
++    }
++    gen_set_label(l_done);
++    return true;
++}
++
+ /* lmw */
+ static void gen_lmw(DisasContext *ctx)
+ {
+@@ -2824,6 +2880,9 @@
+     if (ctx->mem_stats) {
+         gen_helper_mem_stat(tcg_env, t0, tcg_constant_i32(rD(ctx->opcode)));
+     }
++    if (gen_lmw_inline(ctx, t0, rD(ctx->opcode), false)) {
++        return;
++    }
+     gen_helper_lmw(tcg_env, t0, t1);
+ }
+ 
+@@ -2845,6 +2904,9 @@
+         gen_helper_mem_stat(tcg_env, t0,
+                             tcg_constant_i32(rS(ctx->opcode) | 32));
+     }
++    if (gen_lmw_inline(ctx, t0, rS(ctx->opcode), true)) {
++        return;
++    }
+     gen_helper_stmw(tcg_env, t0, t1);
+ }
+ 
+@@ -6603,6 +6665,8 @@
+         || env->mmu_model & POWERPC_MMU_64;
+     ctx->tlb_precise = env->tlb_precise && env->mmu_model == POWERPC_MMU_32B;
+     ctx->mem_stats = env->mem_stats;
++    ctx->lmw_inline = env->lmw_inline;
++    ctx->lmw_verify = env->lmw_inline && env->lmw_inline_verify;
+ 
+     ctx->fpu_enabled = (hflags >> HFLAGS_FP) & 1;
+     ctx->fp_inline = env->fp_inline && env->fp_prime_mask;

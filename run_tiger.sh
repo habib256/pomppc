@@ -34,6 +34,8 @@
 #   VFPNATIVE=0 ./run_tiger.sh  # coupe vaddfp/vsubfp/vmaddfp/vnmsubfp par le FPU de l'hôte dans le
 #                             # code généré (x-vfp-native, tcg/0022 : allumé par défaut sur Linux
 #                             # x86-64 et sur macOS arm64 depuis le 05/10, rebuild requis) ; VFPNVERIFY=1 : mode preuve
+#   TLBPRECISE=1 LMWINLINE=1 DCBZINLINE=1 ./run_tiger.sh  # côté mémoire (tcg/0031, 0032, 0035, éteints,
+#                             # docs/tcg-g4.md §32) ; TLBPVERIFY=N LMWVERIFY=1 DCBZVERIFY=1 : preuves
 #   FPINLINE=0 ./run_tiger.sh # coupe le flottant scalaire simple (fmuls, fmadds, fcmpu…) sans ses
 #                             # deux helpers dans le cas courant (x-fp-inline, tcg/0007, allumé
 #                             # par défaut, docs/tcg-g4.md §15) ; FPVERIFY=1 : mode preuve
@@ -586,6 +588,36 @@ for _p in "MSRNOBQL x-msr-nobql MSR-SANS-VERROU" "MSRVERIFY x-msr-nobql-verify M
     fi
   fi
 done
+# --- Le côté mémoire du traducteur (patches/tcg/0031, 0032, 0035, docs/tcg-g4.md §32) ---
+# TLBPRECISE=1 : x-tlb-precise, tlbie, changements de segment (avec x-sr-tlb) et
+# écritures de BAT ne retirent du TLB que les entrées concernées au lieu de tout
+# vider ; TLBPVERIFY=N : x-tlb-precise-verify=N (une invalidation sur N, chaque
+# entrée gardée retraduite depuis la table des pages, bilan sur stderr).
+# LMWINLINE=1 : x-lmw-inline, lmw/stmw dont la plage tient dans une page en
+# accès mot en ligne ; DCBZINLINE=1 : x-dcbz-inline, dcbz en quatre rangements de
+# zéros ; LMWVERIFY=1 / DCBZVERIFY=1 : leurs modes preuve. MEMSTATS=1 :
+# x-mem-stats (compteurs toutes les 10 s sur stderr). Éteints par défaut.
+for _p in "TLBPRECISE x-tlb-precise TLB-PRÉCIS" "LMWINLINE x-lmw-inline LMW-EN-LIGNE" \
+          "LMWVERIFY x-lmw-inline-verify LMW-VÉRIFIÉ" "DCBZINLINE x-dcbz-inline DCBZ-EN-LIGNE" \
+          "DCBZVERIFY x-dcbz-inline-verify DCBZ-VÉRIFIÉ" "MEMSTATS x-mem-stats COMPTEURS-MÉMOIRE"; do
+  set -- $_p
+  if [ "${!1:-0}" != 0 ]; then
+    if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "$2=on"; then
+      CPU_SPEC="$CPU_SPEC,$2=on"
+      MODE="$MODE + $3"
+    else
+      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0031, 0032, 0035)." >&2
+      MODE="$MODE + $3 DEMANDÉ MAIS INDISPONIBLE"
+    fi
+  fi
+done
+if [ "${TLBPVERIFY:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-tlb-precise-verify=$TLBPVERIFY"; then
+    CPU_SPEC="$CPU_SPEC,x-tlb-precise-verify=$TLBPVERIFY"; MODE="$MODE (TLB VÉRIFIÉ 1/$TLBPVERIFY)"
+  else
+    echo "⚠  TLBPVERIFY=$TLBPVERIFY demandé mais ce QEMU n'a pas 'x-tlb-precise-verify' (patches/tcg/0031)." >&2
+  fi
+fi
 [ -n "${CPU_OPTS:-}" ] && CPU_SPEC="$CPU_SPEC,${CPU_OPTS#,}"
 # --- Tampon du JIT dans la fenêtre de 4 Gio du texte de QEMU (x-jit-near,
 # patches/tcg/0006) --- propriété de l'ACCÉLÉRATEUR. Sur Apple M4, le noyau pose
