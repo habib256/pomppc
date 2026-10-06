@@ -17,7 +17,9 @@
 # doit pas les changer.
 # Le qemu-ppc vient d'une COPIE de l'arbre où le code « système seulement » des
 # patches 0001/0008/0011 est neutralisé (le binaire système n'en est pas
-# touché) : ~/src/qemu-fpu/build-user/qemu-ppc, voir docs/tcg-g4.md §33.
+# touché) : rsync de l'arbre vers ~/src/qemu-fpu, tools/tcg/fpnatcmp-userhack.py,
+# configure --target-list=ppc-linux-user --static dans build-user, ninja qemu-ppc
+# (docs/tcg-g4.md §33.3).
 set -uo pipefail
 Q="${1:?qemu-ppc}"
 N="${2:-65536}"

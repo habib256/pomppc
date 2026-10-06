@@ -2835,3 +2835,272 @@ aucun gain mesuré ; le lanceur les allume néanmoins sur macOS arm64 avec
 `VFPNATIVE`, à la demande de l’utilisateur. 0027 corrige le placement RX sous
 `split-wx` ; `hotblocks`/`jitblocks` permettent d’inspecter les blocs ARM émis.
 Méthodes, limites et résultats : [rapport M4](jit-m4-2026-10-05.md).
+
+---
+
+## 33. Le flottant scalaire restant sur le PC : comparaisons et conversions natives (06/10/2026)
+
+PC Linux x86-64 (i7-10700F). Copie isolée `~/src/qemu-fp` (= `~/src/qemu-d3tcg`, c'est-à-dire la
+référence + 0021-0024, plus 0025-0028 posés par `build_qemu_qfb.sh`), binaire
+`~/src/qemu-fp/build/qemu-system-ppc{,64}` ; l'arbre de référence `~/src/qemu` n'a pas été touché.
+Patch `patches/tcg/0033-ppc-fp-native-cmp.patch`, propriétés `x-fp-native-cmp` et
+`x-fp-native-cmp-verify` (éteintes par défaut), lanceur `FPNATIVECMP=1` / `FPNCMPVERIFY=1`.
+
+### 33.1 Inventaire : ce qui passait encore par softfloat
+
+Point de départ : « softfloat 3,3 % du temps vCPU » de DOOM 3 sur le PC
+(`docs/vitesse-doom3-x86.md` §4), avec `x-fast-fp`, `x-fp-native` et `x-fp-native64` allumés.
+Les trois relevés `perf` de la campagne x86 (DOOM 3 `bench/vitesse/d3-x86/profil-1/d3-fen`,
+Marble Blast `bench/tcg/ab/x86-prof-mb/p1-1/mb-fen`, UT2004 `bench/tcg/ab/x86-prof-ut/p1-1/ut-fen`),
+relus fonction par fonction (`perf report --sort sym`, fils `CPU n/TCG` seulement, parts du
+temps vCPU), rangés par instruction d'origine :
+
+| poste (part du temps vCPU) | DOOM 3 | Marble Blast | UT2004 |
+|---|---|---|---|
+| `frsp` (`helper_FRSP`, `float64_to_float32`, `helper_todouble`) | 0,32 % | 0,16 % | 0,12 % |
+| `fctiw`/`fctiwz` (`helper_FCTIWZ`, `float64_to_int32*`) | 0,10 % | 0,12 % | 0,09 % |
+| `fdivs`/`fdiv` (`helper_FDIV*`, `float64r32_div`, `float64_div`) | 0,14 % | 0,10 % | 0,06 % |
+| `fsel` (`helper_FSEL`, pur) | 0,03 % | 0 | 0,06 % |
+| `fcmpo` | 0,01 % | 0 | 0,01 % |
+| FPRF et contrôle des helpers restants (`helper_compute_fprf_float64`, `helper_fprf_check_float64`, `do_float_check_status`) | 0,40 % | 0,41 % | 0,31 % |
+| `float64_unpack_canonical` (frsp, fctiw, fdiv) | 0,39 % | 0,30 % | 0,22 % |
+| `parts64_*` partagés (canonicalize, uncanon, float_to_sint, round_to_int, scalbn…) | 0,81 % | 0,55 % | 1,42 % |
+| replis du scalaire déjà natif (`do_fcmpu`, talon, `fp32_flat`) | 0,19 % | 0,04 % | 0,14 % |
+| `fsqrt`, `fres`, `frsqrte` | 0,02 % | 0,03 % | 0,03 % |
+| **AltiVec** (`float32_compare_quiet` de `vcmpgtfp`/`vcmpgefp`, `vcfsx` = `int32_to_float32` + `float32_scalbn`, `float32_muladd` des replis de `vmaddfp`, `vmaxfp`, `vrefp`, `vrsqrtefp`) | **1,22 %** | 0,23 % | **1,36 %** |
+| total flottant hors code généré | 3,63 % | 1,94 % | 3,82 % |
+
+Lecture :
+
+- **`fcmpu` n'y est plus** : il passe par l'op native depuis 0014/0017 (§22.5, §25.1) ; seuls
+  ses replis (NaN, porte fermée) restent. Le `float32_compare_quiet` que le §4 citait en tête
+  vient de **`vcmpgtfp`/`vcmpgefp` (AltiVec)**, pas du scalaire (la cible n'emploie
+  `float32_compare*` que dans les comparaisons vectorielles) ; même chose pour la grosse part
+  `parts64_scalbn`/`int32_to_float32` d'UT2004 (`vcfsx`). Hors du périmètre de ce patch.
+- **Le scalaire qui restait en helpers** : `frsp` en tête, puis `fctiwz`, `fdivs`/`fdiv`, et
+  leur FPRF/contrôle (deux appels de helper par instruction, `fastfp/0002`). Avec la part de
+  `float64_unpack_canonical` et des `parts64_*` qui leur revient, **~1,5 % du temps vCPU sur
+  DOOM 3, ~1,3 % sur Marble Blast, ~0,8 % sur UT2004**.
+- `fsel` est déjà un helper pur (`NO_RWG_SE`) : rien à gagner (vérifié au banc, §33.5) ; `fcmpo`
+  est absent des jeux (gcc émet `fcmpu`). Les deux sont faits quand même : pour `fcmpo` c'est la
+  même op que `fcmpu`, pour `fsel` trois `movcond`.
+- `fabs`, `fneg`, `fnabs`, `fmr`, `lfd`/`stfd` sont déjà des ops entières de TCG ; `lfs`/`stfs`
+  aussi (0002). `fsqrt`/`fres`/`frsqrte` pèsent 0,02-0,03 % : laissés aux helpers.
+- **Fréquences**. Le profil d'instructions du M4 (§15.1, 74 ms/image) donnait `frsp` à 0,7 M/s,
+  soit ~50 000 par image ; même travail par image ici, à 138 ms/image : **~0,35 M `frsp`/s**
+  sur le PC. Statiquement, le moteur de DOOM 3 contient 2 041 `frsp`, 546 `fctiwz`, 610 `fdivs`
+  (§28.1). Le coût mesuré d'un `frsp` par les helpers est ~25 ns (banc, §33.5), ce qui redonne
+  la part du profil (0,35 M/s × 25 ns ≈ 0,9 % d'un vCPU occupé à ~110 %). Les compteurs du
+  vérificateur (`x-fp-native-cmp-verify`, une ligne par opération : vérifiés / par le chemin
+  court / divergences) donnent les nombres exacts : sur Marble Blast dans la VM de dev,
+  **`frsp` 0,22 M/s, `fctiwz` 0,20 M/s, `fctiw` 0,10 M/s, `fdivs` 31 000/s** (§33.4) ; DOOM 3 à
+  relever pendant la partie vérifiée de la phase 2 (§33.7).
+
+### 33.2 Conception
+
+Même mécanique que `x-fp-native` (§22.5) : **mêmes porte, op, talon, vérificateur**, six
+sélecteurs de plus pour `INDEX_op_ppc_fp32` (`internal.h`, `FPI_FRSP = 15` … `FPI_DDIV = 20`,
+vérifiés à la compilation contre ceux de l'émetteur) :
+
+| instruction | chemin court (porte : XX = 1, XE = OE = UE = 0, et RN = 00 sauf `fcmpo`/`fctiwz`) | sinon |
+|---|---|---|
+| `frsp` | frB nul, ou FLT_MIN ≤ \|frB\| < FLT_MAX + ½ ulp : `vcvtsd2ss` + `vcvtss2sd` ; FPRF du résultat, FI | talon |
+| `fctiw`, `fctiwz` | frB double nul ou normal (`fpi_zon64`), `vcvtsd2si`/`vcvttsd2si` **64 bits** dont le résultat doit tenir dans un int32 (`movslq` + `cmp`) : c'est alors l'int32 étendu en signe que rendent les helpers ; FI ; FPRF intact | talon (NaN, infini, dénormal, VXCVI, saturation) |
+| `fcmpo` | aucun NaN : exactement `fcmpu` (même code émis) | talon : `do_fcmpo` (VXVC, VXSNAN) |
+| `fdivs`, `fdiv` | opérandes nuls ou normaux (`fpi_zon`/`fpi_zon64`), diviseur non nul, quotient nul (dividende nul) ou FLT_MIN (DBL_MIN) < \|q\| < ∞ : `vdivss`/`vdivsd` ; FPRF, FI | talon (ZX, VXZDZ, VXIDI, OX, UX, dénormaux) |
+| `fsel` | trois `movcond` (pas de FPSCR) | — |
+
+Pourquoi c'est exact (modèle C `fpi_frsp()`, `fpi_fcti()`, `fpi_fp32/64(FPI_DIVS)` du bloc
+« fp-inline » de `fpu_helper.c`, extrait tel quel par `fpproof.sh`) :
+
+- **`frsp`** : avec \|x\| ≥ FLT_MIN le simple arrondi est normal, la petitesse (testée avant
+  l'arrondi sur PowerPC) n'est pas atteinte ; sous FLT_MAX + ½ ulp il est fini, pas de
+  débordement (au-delà, l'arrondi au pair va à 2^128 : OX, au talon). Le FPSCR amorcé ne laisse
+  alors que l'inexact (déjà posé) : FPRF du résultat, FI = 1, comme la séquence d'origine.
+- **`fctiw(z)`** : le test « tient dans un int32 » sur la conversion 64 bits couvre aussi les
+  bords (−2^31 − 0,5 arrondi vers zéro tient ; 2^31 − 0,5 arrondi au pair ne tient pas) ;
+  NaN, infinis et \|x\| ≥ 2^63 donnent 2^63, jamais un int32. Les dénormaux vont au talon
+  (softfloat y lève `input_denormal_used`).
+- **`fdivs`** : sur des simples exacts, `float64r32_div` est la division simple correctement
+  arrondie, ce que fait `vdivss` (le même argument que `x-fast-fp` pour son chemin hardfloat).
+- MXCSR : arrondi au plus proche, ni DAZ ni FTZ (QEMU ne le touche pas ; l'émetteur 0017 le
+  suppose déjà).
+
+Traduction (`translate/fp-impl.c.inc`) : `do_fpnc()` (frB, frA pour la division) appelle
+`gen_fp_native()` ; `fcmpo` réutilise `gen_fcmpu_native(…, FPI_CMPO)`. Chemin lent :
+`fp32_flat()`/`fcmpu_flat()` font la séquence d'origine (`do_frsp`, `float64_to_int32*` +
+`float_invalid_cvt`, `float64r32_div`/`float64_div` + `div_flags_handler`, `do_fcmpo`) avec
+l'adresse de retour du code généré, frT écrit avant le contrôle, FPRF sauf pour `fctiw(z)`.
+`helper_FCMPO` est réécrit en `do_fcmpo(…, GETPC())` sans changement de comportement.
+
+**Porte de l'hôte** : `TCG_TARGET_HAS_ppc_fp_cmp` (`tcg/tcg-has.h`, 0 par défaut ; x86_64 :
+`TCG_TARGET_HAS_ppc_fp32`, AVX + FMA3), `tcg_ppc_fp_cmp_supported()`. **Sur arm64 la propriété
+ne change rien** (ni `fsel`) : l'émetteur aarch64 ne connaît pas ces sélecteurs, et aucune
+chaîne aarch64 n'est disponible sur le PC pour en écrire un prouvé. Pendant NEON à faire sur le
+M4 (`fcvt s,d`/`fcvt d,s`, `fcvtzs`/`fcvtns` vers x, `fdiv`, même test de plage int32),
+prouvé là-bas par `fptest c` dans Tiger (empreinte de référence ci-dessous) et
+`x-fp-native-cmp-verify` — `fpnatcmp-user.sh` demande linux-user, absent de macOS.
+
+Vérificateur : `helper_fpn_verify` (§22.5) connaît les nouveaux sélecteurs (`fpi_short()`,
+`fpi_gate_op()`, `do_fcmpo`, pas de FPRF pour `fctiw(z)`) ; `fsel` a le sien
+(`helper_fpnc_fsel`, contre `helper_FSEL`). Il s'allume par `x-fp-native-cmp-verify` (pas
+`x-fp-verify`) et écrit sur la même ligne `fp-native-verify:` (une colonne par opération,
+`frsp` à `fsel`).
+
+### 33.3 La preuve hôte
+
+**Modèle et talon contre le vrai softfloat** (`tools/tcg/fpproof.sh ~/src/qemu-fp 20000000`,
+journal `logs/fpproof-20M.log` du §33.8) : `fpproof.c` était resté à 9.2 (ni formes double, ni
+objets de QEMU 11 : `fpu_softfloat.c.o` est dans `libcommon`, `helper_FCMPU`, motif du NaN par
+défaut) ; remis à jour, puis étendu (`-DFPPROOF_NCMP`) : catalogue croisé (bords de `frsp` et de
+`fctiw` ajoutés : FLT_MAX, FLT_MAX + ½ ulp et ses voisins, sous FLT_MIN, 2^-149, ±2^31 ± ¼, ½, 1,
+2^63, 0,5, 2,5), puis aléatoire (entiers, demi- et quarts d'entier jusqu'à 2^33, voisins de
+±2^31 et des bornes de `frsp`, diviseurs à mantisse courte), FPSCR en trois familles (porte
+ouverte, au hasard, fermée d'un bit), MSR[FE] au hasard. Résultat, frT en mémoire, FPSCR entier,
+drapeaux softfloat (sauf `input_denormal_used`, §25.1), exception levée et `exception_index` :
+
+| `fpproof.sh … 20000000` | vecteurs | par le chemin court | divergences |
+|---|---|---|---|
+| tout (simple, double, 0033) | 461 749 260 | 297 198 078 | **0** |
+| dont `frsp` / `fctiw` / `fctiwz` | 20 000 420 chacun | 14,8 M / 11,6 M / 12,6 M | **0** |
+| dont `fcmpo` / `fdivs` / `fdiv` | 20 058 800 chacun | 17,6 M / 4,3 M / 16,8 M | **0** |
+| talon `ppc_fp32_native_slow`, tous chemins | 461 749 260 (16,8 M exceptions levées) | — | **0** |
+| `x-fp-flat`, tous chemins (ops d'origine) | 341 571 600 | — | **0** |
+
+Contre-épreuves du modèle (`fpproof-mut.sh`, 200 000 vecteurs) : les 10 mutants d'origine et 7
+nouveaux (borne basse ou haute de `frsp`, `fctiw` tronqué, 2^31 accepté, FI oublié, diviseur nul
+accepté, RN ignoré) : **17 sur 17 détectés** (9 à 650 491 divergences).
+
+**L'émetteur réel** : `tools/tcg/fpnatcmp-user.sh` construit le job `fptest` pour
+`powerpc-linux-gnu` et le fait tourner sous un `qemu-ppc` **linux-user** construit depuis une
+copie de l'arbre patché (`~/src/qemu-fpu`) : même traducteur, même op, même émetteur x86_64,
+même talon que le binaire système. Trois choses y sont neutralisées, dans la copie seulement
+(`tools/tcg/fpnatcmp-userhack.py`) : le code « système seulement » de 0008 (`x-ret-inline`, jamais allumé
+ici) et des champs de 0001/0021-0025 rangés sous `!CONFIG_USER_ONLY`, et
+**MSR[FE0] = MSR[FE1] = 0 comme sous Tiger** (linux-user les pose et force
+`fp_exceptions_enabled()`). Le mode `d` y redonne l'empreinte de Tiger (`fb3e6006e03c4f53`,
+§25.4) : le banc linux-user exécute bien les mêmes instructions de la même façon.
+
+| `fpnatcmp-user.sh qemu-ppc 65536` | instructions | référence contre `x-fp-native-cmp` | sous `x-fp-native-cmp-verify` |
+|---|---|---|---|
+| `fptest c` (frsp fctiw fctiwz fcmpo fdivs fdiv fsel, 11 états du FPSCR) | 6 206 354 | **identiques** (`e6bba64145ea9bbf`) | identique ; 8 060 929 vérifiées (2 841 840 par le chemin court), **0 divergence** |
+| `fptest` (simple) | 12 823 376 | identiques (`c2dffc9e43a020d8`) | identique ; `frsp` du programme : 0 divergence |
+| `fptest d` | 11 978 884 | identiques (`fb3e6006e03c4f53`) | identique |
+
+Contre-épreuve de l'émetteur (`tools/tcg/fpnatcmp-mut.sh`, un `qemu-ppc` par mutation,
+`fptest c 16384`) : **9 mutants sur 9 détectés**, chacun par une sortie différente **et** par
+le vérificateur — borne basse de `frsp` retirée (3 271 divergences), borne haute à 2^128
+(1 817), `fctiw` tronqué (7 385), test de plage int32 retiré (39 779), FI oublié par `fctiw(z)`
+(80 782), diviseur nul accepté (18), quotient non testé (7 976), NaN de frB accepté par
+`fcmpo` (12 009), NaN oublié par `fsel` (13 990).
+
+**Patch** : 0033 posé (`patch --fuzz=0`) sur l'instantané des douze fichiers d'avant redonne
+l'arbre de travail à l'octet ; `build_qemu_qfb.sh` le pose (section « tcg/0033 », marqueurs) et
+sonde la propriété (`check_opt x-fp-native-cmp`).
+
+### 33.4 La preuve invitée
+
+VM de dev : copie privée `disks/tiger-dev-fp.raw` de `tiger-dev.raw` (10.4.11, supprimée
+ensuite), `devloop.py` depuis le worktree, **toutes les options de production** de
+`run_tiger.sh` (`x-fast-fp x-sr-tlb x-lfs-inline x-vfp-fast x-vperm-fast x-fp-inline
+x-ret-inline x-jc-idx x-icbi-sync x-msr-nobql x-fp-native x-tb-fast x-fp-native64
+x-vmx-inline x-vfp-native`, `x-jit-near`, `x-jc-bits=14`), plus ou moins `x-fp-native-cmp`.
+Le job `fptest` (`MODE=c`, 2^18 vecteurs aléatoires par état et opération) est compilé dans
+Tiger par gcc 4.0 :
+
+| binaire, mode | `fptest c` (21 345 170 instr.) | `fptest` simple (30 124 880) | `fptest d 65536` | vérificateur |
+|---|---|---|---|---|
+| ppc64, SMP=1, sans 0033 | `67cf96efa75f9286` | `e80ec8026301ef1d` | — | — |
+| ppc64, SMP=1, `x-fp-native-cmp` + vérif. | `67cf96efa75f9286` | `e80ec8026301ef1d` | `fb3e6006e03c4f53` | 34 777 776 opérations vérifiées (12 011 755 par le chemin court), **0 divergence** |
+| ppc64, SMP=2, `x-fp-native-cmp` + vérif. | `67cf96efa75f9286` | `e80ec8026301ef1d` | — | 34 744 722 vérifiées, **0 divergence** |
+| ppc (32 bits), SMP=1, `x-fp-native-cmp` + vérif. | `67cf96efa75f9286` | — | — | 28 944 953 vérifiées, **0 divergence** |
+
+**Identiques à l'octet** avec et sans la propriété, en SMP=1 et SMP=2 ; les empreintes simple
+et double sont celles du §25.4 (inchangées depuis 0017), et celle du mode c est **la même que
+sous `qemu-ppc` linux-user** (`fpnatcmp-user.sh … 262144`, `logs/user-262144.log`) : le banc
+hôte du §33.3 voit exactement ce que voit Tiger.
+
+**Bureau et jeu sous le vérificateur** (ppc64, SMP=2, `start --gui`) :
+
+| | vérifiées | par le chemin court | divergences | détail (vérifiées / chemin court) |
+|---|---|---|---|---|
+| démarrage de Tiger jusqu'au bureau, puis arrêt | 359 007 | 313 974 | **0** | `frsp` 92 011 / 92 009, `fctiw` 44 377 / 52, `fctiwz` 181 237 / 180 757, `fdiv` 38 681, `fdivs` 2 697 |
+| bureau + **Marble Blast Gold, 120 s** (`fpgames`, `GAMES=mb DUR=120`) | **70 271 934** | 67 037 278 (95,4 %) | **0** | `frsp` 26 851 765 / 26 843 032, `fctiwz` 24 564 589 / 24 564 036, `fctiw` 12 123 084 / 8 899 614, `fdivs` 3 728 571, `fdiv` 1 666 799, `fsel` 1 337 078, `fcmpo` 48 |
+
+Soit, en jeu (Marble Blast dans la VM de dev, ~37 img/s) : **`frsp` ~0,22 M/s, `fctiwz` ~0,20 M/s,
+`fctiw` ~0,10 M/s** (73 % par le chemin court : le reste sont des valeurs hors int32 ou un FPSCR
+non amorcé), `fdivs` ~31 000/s, `fdiv` ~14 000/s, `fsel` ~11 000/s, `fcmpo` ~0. Ce sont les
+fréquences de l'inventaire (§33.1) mesurées, et non plus estimées.
+
+### 33.5 Gains
+
+Banc hôte (`fptest banc-c 20000000` sous le `qemu-ppc` du §33.3, trois tours entrelacés,
+médianes ; hôte peu chargé) :
+
+| boucle (20 M itérations) | helpers | `x-fp-native-cmp` | écart | par instruction |
+|---|---|---|---|---|
+| `frsp` (débit) | 514 ms | **156 ms** | **−70 %** | −18 ns |
+| `fctiwz` + `stfd` + `lwz` | 450 ms | **101 ms** | **−78 %** | −17 ns |
+| `fdivs` (chaîne dépendante) | 277 ms | **208 ms** | −25 % | −3,5 ns |
+| `fcmpo` + branchement | 402 ms | **265 ms** | −34 % | −7 ns |
+| `fsel` | 79 ms | 78 ms | 0 | — (helper pur) |
+
+Banc invité (`fptest banc-c 10000000` dans Tiger, ppc64 SMP=2, options de production,
+trois passes par démarrage, deux démarrages par mode entrelacés ref/cmp/ref/cmp ; même ordre
+de grandeur que le banc hôte) :
+
+| boucle (10 M itérations) | helpers | `x-fp-native-cmp` | écart |
+|---|---|---|---|
+| `frsp` | 348-354 ms | **152-153 ms** | **−57 %** |
+| `fctiwz` + `stfd` + `lwz` | 250-253 ms | **70 ms** | **−72 %** |
+| `fdivs` (chaîne) | 159-161 ms | **115-117 ms** | −28 % |
+| `fcmpo` + branchement | 238-239 ms | **163 ms** | −32 % |
+| `fsel` | 141-144 ms | 136-140 ms | ~0 |
+| témoin `fptest banc` (chaîne simple, sommets, `fcmpu`) | 202 / 1 247-1 265 / 164-168 ms | 209-212 / 1 278-1 300 / 169-171 ms | +2-3 % (bruit, non touchés) |
+
+**Attendu en jeu** : le poste visé pèse ~1,5 % du temps vCPU de DOOM 3 (§33.1) et l'op native
+en retire ~75 % : **~1 % du temps vCPU, soit ~1-1,5 ms/image sur 138** (moins sur Marble Blast et
+UT2004, ~0,5-1 %). C'est sous la dispersion d'une matrice à trois parties : il faut six
+parties par bras pour le voir.
+
+### 33.6 Ce qui reste en helper, et pourquoi
+
+- **L'AltiVec softfloat** (1,2 % sur DOOM 3, 1,4 % sur UT2004) : `vcmpgtfp`/`vcmpgefp`
+  (`float32_compare_quiet`), `vcfsx`/`vctsxs` (`int32_to_float32` + `scalbn`), replis de
+  `vmaddfp`, `vmaxfp`/`vminfp`, `vrefp`/`vrsqrtefp`. **Le plus gros poste restant**, hors de ce
+  patch (AltiVec) : `vcmp*fp` et `vcfsx` en ops vectorielles seraient la suite logique.
+- `fsqrt`, `fsqrts`, `fres`, `frsqrte` (0,02-0,03 %) : rares (la libm prend `fsqrt` avec le
+  kext `POMPPCFsqrt` depuis le 01/10 ; 8 `frsqrte` dans DOOM 3).
+- `fctiw` en arrondi autre qu'au plus proche, et tout opérande ou résultat hors des conditions
+  du §33.2 : le talon, exact par construction.
+- `mffs`, `mtfsf`, `mtfsb0/1`, `mcrfs` : rares, inchangés.
+
+### 33.7 Phase 2 : l'A/B en jeu (VM quotidienne, hôte au repos)
+
+Depuis le dépôt principal (après fusion, `FPNATIVECMP` existe dans `run_tiger.sh`), binaire
+`~/src/qemu-fp/build/qemu-system-ppc` (qemu-bundle à côté, dans `build/`) :
+
+    tools/tcg/matab.sh x86-fpcmp 6 "ref:QEMU_BIN=$HOME/src/qemu-fp/build/qemu-system-ppc" \
+        "fp:QEMU_BIN=$HOME/src/qemu-fp/build/qemu-system-ppc FPNATIVECMP=1" d3 fen
+    # une partie vérifiée (pas pour la vitesse) : bilan « fp-native-verify » du run_tiger.log,
+    # colonnes frsp..fsel = les fréquences exactes de la partie, 0 divergence attendu
+    tools/tcg/matab.sh x86-fpcmp-verif 1 \
+        "v:QEMU_BIN=$HOME/src/qemu-fp/build/qemu-system-ppc FPNATIVECMP=1 FPNCMPVERIFY=1" d3 fen
+    tools/tcg/matab.sh --restore
+
+Même binaire des deux côtés : seul `x-fp-native-cmp` change. Attendu : DOOM 3 −0,7 à −1,5 %
+(138 → ~136-137 ms/image) ; Marble Blast, UT2004 (`mb,ut fen`) dans le bruit.
+
+### 33.8 Chemins
+
+- Patch : `patches/tcg/0033-ppc-fp-native-cmp.patch` ; arbre `~/src/qemu-fp` (binaire
+  `build/`, binaire d'avant 0033 dans `bin/base/`), copie linux-user `~/src/qemu-fpu`
+  (`build-user/qemu-ppc`).
+- Outils : `tools/tcg/fpproof.{c,sh}`, `fpproof-mut.sh`, `fpnatcmp-user.sh`,
+  `fpnatcmp-mut.sh` ; job `tools/guest/jobs/fptest` (`MODE=c`, `BANCMODE=banc-c`).
+- Journaux (non versionnés) : `bench/tcg/fpcmp/` du dépôt principal — `logs/fpproof-20M.log`,
+  `logs/mut.log` (mutants de l'émetteur), `logs/user-262144.log` et `u2/` (banc linux-user),
+  `logs/bench-user.txt`, `guest/` (journaux `devloop` et `qemu.log` de chaque démarrage :
+  `v1-*`, `v2-*`, `b2*`, `desk-qemu.log`, `mb2-qemu.log`), `prof-*.txt` et `cats.py` (relevés
+  `perf` du §33.1), `seq.sh`/`vm.sh`/`start2.py` (la campagne invitée).
+- Banc linux-user : `tools/tcg/fpnatcmp-userhack.py` (la copie `~/src/qemu-fpu`).
