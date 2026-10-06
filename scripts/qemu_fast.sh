@@ -26,12 +26,22 @@
 # (3-4 fois plus lent), un binaire construit sur une autre série de patches que ce
 # dépôt n'a pas les derniers (la référence a été reconstruite sans lui).
 
-# Empreinte de la série de patches (tout patches/ sauf essais/ et l'OpenBIOS, qui
-# n'entre pas dans le binaire) : écrite dans le relevé de construction et dans
-# celui du profil PGO, comparée au lancement.
+# Empreinte de la série de patches : les fichiers de patches/ que
+# scripts/build_qemu_qfb.sh applique ou copie réellement (ceux qu'il nomme par
+# "$ROOT"/patches/…), écrite dans le relevé de construction et dans celui du
+# profil PGO, comparée au lancement. Jusqu'au 07/10 elle couvrait tout patches/
+# (sauf essais/ et l'OpenBIOS) : un patch posé pour un autre hôte (tcg/0037-0039,
+# arm64) ou une ligne de README écartait le binaire rapide sans qu'il ait changé.
 pomppc_serie_hash() { # pomppc_serie_hash <dossier patches>
-  find "$1" -type f -not -path '*/essais/*' -not -name '*.elf' | LC_ALL=C sort |
-    while read -r f; do cat "$f"; done | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16
+  local d="$1" b="$1/../scripts/build_qemu_qfb.sh"
+  {
+    if [ -f "$b" ]; then
+      grep -o '"\$ROOT"\?/patches/[^" ]*' "$b" | sed 's|^"\$ROOT"\?/patches/||' |
+        LC_ALL=C sort -u | while read -r f; do [ -f "$d/$f" ] && echo "$d/$f"; done
+    else
+      find "$d" -type f -not -path '*/essais/*' -not -name '*.elf' | LC_ALL=C sort
+    fi
+  } | while read -r f; do cat "$f"; done | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16
 }
 
 pomppc_fast_cpu() { sed -n 's/^model name[[:space:]]*: *//p' /proc/cpuinfo 2>/dev/null | head -1; }
