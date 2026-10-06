@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Compare the actual NEON RAM-copy functions with word-by-word references.
  * Every start register and byte alignment, 32/64-bit GPRs, and guard pages.
+ * x86_64: the SSE2 functions of tcg/0029, from the same lmw-vector.h.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -28,6 +29,14 @@ static void stl_be_p(void *p, uint32_t v)
     v = __builtin_bswap32(v); memcpy(p, &v, 4);
 }
 #include "lmw-vector.h"
+/* refuse to "prove" an empty header: a host without a vector copy */
+#if defined(__aarch64__)
+#define IMPL "NEON (tcg/0025)"
+#elif defined(__x86_64__) && defined(PPC_LMW_VECTOR_HOST) && PPC_LMW_VECTOR_HOST
+#define IMPL "SSE2 (tcg/0029)"
+#else
+#error "lmw-vector.h has no vector copy for this host (tcg/0025 aarch64, tcg/0029 x86_64)"
+#endif
 
 static uint64_t rng = 0x1badc0de;
 static uint64_t next(void)
@@ -72,7 +81,7 @@ int main(void)
         check(m + 2 * page - 4 * (32 - reg), reg); cases += 2;
     }
     munmap(m, 3 * page);
-    printf("lmw/stmw %d bits: %llu cases, guard pages, zero differences\n",
-           TARGET_LONG_BITS, (unsigned long long)cases);
+    printf("lmw/stmw %s %d bits: %llu cases, guard pages, zero differences\n",
+           IMPL, TARGET_LONG_BITS, (unsigned long long)cases);
     return 0;
 }

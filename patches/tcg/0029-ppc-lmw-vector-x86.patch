@@ -1,0 +1,136 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1394,7 +1394,7 @@
+      * x-vfp-native-verify: proof mode, each op re-done by the per-lane loop
+      * of softfloat from the saved operands and vec_status (vfn_*).
+      */
+-    bool lmw_vector; /* POMPPC: NEON copy after the stock RAM probe */
++    bool lmw_vector; /* POMPPC: NEON or SSE2 copy after the stock RAM probe */
+     bool vfp_native;
+     bool vfp_native_verify;
+     bool vfn_gate_ok;
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7141,6 +7141,15 @@
+         }
+     }
+     ppc_vfn_gate_init(env);
++#if !((defined(__aarch64__) || defined(__x86_64__)) && !HOST_BIG_ENDIAN)
++    /* POMPPC tcg/0029: no vector copy for this host (lmw-vector.h, NEON or
++     * SSE2 only); say so, and keep the original loop */
++    if (env->lmw_vector) {
++        warn_report("x-lmw-vector: no vector copy on this host, "
++                    "the original lmw/stmw loop is used");
++        env->lmw_vector = false;
++    }
++#endif
+ 
+     cpu_exec_realizefn(cs, &local_err);
+     if (local_err != NULL) {
+diff --git a/target/ppc/lmw-vector.h b/target/ppc/lmw-vector.h
+--- a/target/ppc/lmw-vector.h
++++ b/target/ppc/lmw-vector.h
+@@ -2,10 +2,17 @@
+ /* POMPPC: RAM copies after probe_contiguous has checked the entire access.
+  * Four guest big-endian words at a time, preserving 32-bit zero extension.
+  * No overread, including the final one to three words and unaligned input.
++ * NEON on aarch64 (tcg/0025), SSE2 on x86_64 (tcg/0029).
+  */
+ #ifndef PPC_LMW_VECTOR_H
+ #define PPC_LMW_VECTOR_H
+ 
++#if (defined(__aarch64__) || defined(__x86_64__)) && !HOST_BIG_ENDIAN
++#define PPC_LMW_VECTOR_HOST 1
++#else
++#define PPC_LMW_VECTOR_HOST 0
++#endif
++
+ #if defined(__aarch64__) && !HOST_BIG_ENDIAN
+ #include <arm_neon.h>
+ 
+@@ -42,6 +49,62 @@
+     }
+     for (; reg < 32; reg++, p += 4) {
+         stl_be_p(p, gpr[reg]);
++    }
++}
++#elif defined(__x86_64__) && !HOST_BIG_ENDIAN
++/*
++ * x86_64 (tcg/0029): SSE2 only, the x86-64 baseline: no runtime probe, no
++ * target attribute, inlined into the helper (gcc 13 -O2 leaves the original
++ * loop scalar: one mov/bswap/mov per word).  The byte swap of four words:
++ * 16-bit halves exchanged (pshuflw/pshufhw), then the bytes of each half.
++ */
++#include <emmintrin.h>
++
++static inline __m128i ppc_lmw_bswap32x4(__m128i w)
++{
++    w = _mm_shufflehi_epi16(_mm_shufflelo_epi16(w, 0xb1), 0xb1);
++    return _mm_or_si128(_mm_slli_epi16(w, 8), _mm_srli_epi16(w, 8));
++}
++
++static inline void ppc_lmw_vector(target_ulong *gpr, const void *host,
++                                  unsigned reg)
++{
++    const uint8_t *p = host;
++    for (; reg + 4 <= 32; reg += 4, p += 16) {
++        __m128i w = ppc_lmw_bswap32x4(_mm_loadu_si128((const __m128i *)p));
++#if TARGET_LONG_BITS == 64
++        /* zero extension: interleaved with zero words */
++        __m128i z = _mm_setzero_si128();
++        _mm_storeu_si128((__m128i *)&gpr[reg], _mm_unpacklo_epi32(w, z));
++        _mm_storeu_si128((__m128i *)&gpr[reg + 2], _mm_unpackhi_epi32(w, z));
++#else
++        _mm_storeu_si128((__m128i *)&gpr[reg], w);
++#endif
++    }
++    for (; reg < 32; reg++, p += 4) {
++        gpr[reg] = ldl_be_p(p);
++    }
++}
++
++static inline void ppc_stmw_vector(const target_ulong *gpr, void *host,
++                                   unsigned reg)
++{
++    uint8_t *p = host;
++    for (; reg + 4 <= 32; reg += 4, p += 16) {
++#if TARGET_LONG_BITS == 64
++        /* the low halves of four GPRs: words 0 and 2 of each pair */
++        __m128i lo = _mm_shuffle_epi32(
++            _mm_loadu_si128((const __m128i *)&gpr[reg]), 0x08);
++        __m128i hi = _mm_shuffle_epi32(
++            _mm_loadu_si128((const __m128i *)&gpr[reg + 2]), 0x08);
++        __m128i w = _mm_unpacklo_epi64(lo, hi);
++#else
++        __m128i w = _mm_loadu_si128((const __m128i *)&gpr[reg]);
++#endif
++        _mm_storeu_si128((__m128i *)p, ppc_lmw_bswap32x4(w));
++    }
++    for (; reg < 32; reg++, p += 4) {
++        stl_be_p(p, gpr[reg]);
+     }
+ }
+ #endif
+diff --git a/target/ppc/mem_helper.c b/target/ppc/mem_helper.c
+--- a/target/ppc/mem_helper.c
++++ b/target/ppc/mem_helper.c
+@@ -86,7 +86,7 @@
+ 
+     if (likely(host)) {
+         /* Fast path -- the entire operation is in RAM at host.  */
+-#if defined(__aarch64__) && !HOST_BIG_ENDIAN
++#if PPC_LMW_VECTOR_HOST
+         if (env->lmw_vector) {
+             ppc_lmw_vector(env->gpr, host, reg);
+             return;
+@@ -117,7 +117,7 @@
+ 
+     if (likely(host)) {
+         /* Fast path -- the entire operation is in RAM at host.  */
+-#if defined(__aarch64__) && !HOST_BIG_ENDIAN
++#if PPC_LMW_VECTOR_HOST
+         if (env->lmw_vector) {
+             ppc_stmw_vector(env->gpr, host, reg);
+             return;

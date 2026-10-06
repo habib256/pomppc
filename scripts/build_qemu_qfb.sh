@@ -25,6 +25,8 @@
 #   • les trois mêmes sur hôte x86-64 (op ppc_fp32, TSC, vperm) — patches/tcg/0017-0019
 #   • flottant AltiVec à 4 voies par AVX/FMA3 sur hôte x86-64 — patches/tcg/0020
 #   • AltiVec en ligne, flottant AltiVec natif, mftb sans div, JIT à 2 Gio — patches/tcg/0021-0024
+#   • lmw/stmw vectoriel, cache de sauts par mots, split-wx, NEON lent — patches/tcg/0025-0028
+#   • lmw/stmw vectoriel sur hôte x86-64 (SSE2)        — patches/tcg/0029
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -838,6 +840,13 @@ TCG21_MARKERS
   if grep -q 'tcg_out_addi_ptr(s, TCG_REG_X1 + i' tcg/aarch64/tcg-target.c.inc; then
     patch_strict "$ROOT/patches/tcg/0028-tcg-vfp-neon-slow.patch"
   fi
+  # 0029 : le pendant SSE2 de la copie de 0025 sur hôte x86-64 (même propriété
+  # x-lmw-vector) ; ailleurs, la propriété est refusée par un avertissement
+  # au realize au lieu d'être acceptée sans effet. docs/tcg-g4.md §30.
+  if ! grep -q 'PPC_LMW_VECTOR_HOST' target/ppc/lmw-vector.h; then
+    echo "▶ patch TCG : copie lmw/stmw par SSE2 sur hôte x86-64 (x-lmw-vector)"
+    patch_strict "$ROOT/patches/tcg/0029-ppc-lmw-vector-x86.patch"
+  fi
   while read -r f m; do
     grep -q "$m" "$f" || {
       echo "⚠ patch M4 incomplet : '$m' absent de $f" >&2; exit 1; }
@@ -851,6 +860,9 @@ accel/tcg/tcg-all.c x-jc-word
 accel/tcg/translator.c tb_jmp_cache_word
 tcg/region.c saved_addr = tcg_jit_addr
 tcg/aarch64/tcg-target.c.inc TCG_TYPE_PTR, arg
+target/ppc/lmw-vector.h ppc_lmw_bswap32x4
+target/ppc/mem_helper.c if PPC_LMW_VECTOR_HOST
+target/ppc/cpu_init.c POMPPC tcg/0029
 TCG_M4_MARKERS
 fi
 

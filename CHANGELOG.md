@@ -9,6 +9,18 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **La série 0025-0028 sur le PC x86-64, 06/10** (`docs/tcg-g4.md` §30) : binaire de référence
+  du PC reconstruit avec `tcg/fixes/` et 0025-0028, plus **`tcg/0029`**, le pendant x86-64 de la
+  copie `lmw`/`stmw` de 0025 (gcc 13 laisse la boucle d'origine scalaire, un `bswap` par mot) :
+  quatre mots à la fois en SSE2, inlinés, sous la même propriété `x-lmw-vector` ; microbanc de
+  la copie −40 % sur 19 registres. Preuves hôte : 1 024 064 cas en 32 et 64 bits, 12 mutants sur
+  12 ; `vfpproof` helpers et modèle natif x86 648 M vecteurs chacun sans divergence (le zéro
+  signé de `vnmsubfp` corrigé sur le M4 n'existe pas sur le chemin FMA3 x86, qui nie après
+  l'arrondi par un `xor`) ; `jcwordproof` 573 440 cas. VM de dev SMP=1 et SMP=2, options de
+  production et vérificateurs : empreintes VFP/VMX/LMW identiques à celles du M4, 0 divergence.
+  `jitcheck.py` et `jit-m4-proof.sh` portables sous Linux. `LMWVEC`/`JCWORD` restent éteints par
+  défaut sur le PC en attendant l'A/B en jeu.
+
 - **JIT M4, 05/10** (`docs/jit-m4-2026-10-05.md`) : modèle natif NEON enfin
   sélectionné par `VFPPROOF_NATIVE=1`, 648 M vecteurs sans divergence, huit mutants
   détectés ; correction du zéro signé `vnmsubfp` et du helper lent aarch64 (0028).
