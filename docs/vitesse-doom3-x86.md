@@ -436,3 +436,45 @@ binaire de référence (−23 % avec le binaire PGO et `JITREL32=1`).
 **Suite sur le M4** : compiler et prouver l'émetteur aarch64 de 0022 (vfptest, vfpproof,
 mutants), A/B de `x-vmx-inline`/`x-vfp-native` et des leviers du plugin là-bas ; comprendre les
 deux régimes de `x-jit-rel32` ; valider la référence `d3-fen` du PC.
+
+## 13. Phase 2 du 06/10 : A/B, défauts, binaire rapide, matrice
+
+Hôte au repos (charge < 1 au départ de chaque campagne, aucun autre QEMU), VM quotidienne
+`disks/tiger.qcow2` (10.4.11, plugin `20261004-d3x`), binaire de référence `~/src/qemu/build`
+reconstruit le 06/10 à 15:58 avec toute la série (0021-0035). État de départ (04/10, défauts,
+binaire de référence) : DOOM 3 `d3-fen` 138 ms/image, Marble Blast 21, Zenerchi 7,6, UT2004 56 ;
+binaire PGO du 04/10 : DOOM 3 115. M4 : DOOM 3 ~42 ms/image.
+
+### 13.1 Partie vérifiée (`bench/tcg/ab/x86-ver`)
+
+Une partie DOOM 3 `d3-fen` avec **toutes** les nouvelles propriétés (`x-tlb-precise`,
+`x-lmw-inline`, `x-dcbz-inline`, `x-fp-native-cmp`, `x-vfp-native-cmp`, `x-lmw-vector`,
+`x-jc-word`, `x-jit-rel32`) et **tous** les vérificateurs (`x-tlb-precise-verify=256`,
+`x-lmw-inline-verify`, `x-dcbz-inline-verify`, `x-fp-native-cmp-verify`,
+`x-vfp-native-cmp-verify`, `x-vfp-native-verify`, `x-ret-verify`, `x-mem-stats`), SMP=2. Ralenti
+par les vérificateurs, le jeu n'atteint pas la scène mesurée en 1 508 s (image 4 726) : pas de
+chiffre de vitesse, mais 25 min de démarrage, chargement et jeu sous preuve. Bilans finaux :
+
+| vérificateur | contrôlés (cpu 0 + cpu 1) | divergences |
+|---|---|---|
+| `x-tlb-precise-verify` (1 invalidation précise sur 256) | 1 651 712 contrôles, 2,85 G accès retraduits ; 10,0 M invalidations précises | **0** (65 suspects, tous résolus) |
+| `x-lmw-inline-verify` | 2,24 G `lmw`/`stmw` | **0** |
+| `x-dcbz-inline-verify` | 837 M `dcbz` (189 k sur des E/S, non relus) | **0** |
+| `x-fp-native-cmp-verify` (avec `x-fp-native`) | 810 M (`frsp` 403 M, `fctiw` 133 M, `fdivs` 120 M, `fctiwz` 91 M, `fsel` 59 M, `fdiv` 3,5 M) | **0** |
+| `x-vfp-native-verify` | 2,61 G opérations | **0** |
+| `x-vfp-native-cmp-verify` | `vcmpgtfp` 212 M, `vcmpgefp` 83 M, `vcfux` 369 k, `vcfsx` 118 k, `vctsxs` 1 142 | **0** |
+| `x-ret-verify` | boucle 787 M, en ligne 12,0 G | **2** « sans traduction », 0 autre |
+
+**Le point de vigilance `x-ret-verify`** : deux cas, tous deux sur **cpu 0, pc `0x5605d88`**
+(page de noyau à identité, phys = pc, `mmu_idx` 1), entrée du cache de sauts valide mais
+recherche complète sans traduction (`phys 0xfffffffffffffffe`) ; l'un au **démarrage** de
+l'invité (ligne 26 du journal, quelques secondes après le lancement), l'autre au **redémarrage**
+de l'invité que la matrice fait après le jeu. Même classe que le cas SMP=1 de `docs/tcg-g4.md`
+§32 (`0x5610664`, « plus de PTE ») : le même endroit du noyau au démarrage, donc reproductible,
+et **pas pendant le jeu** (0 sur ~12,8 G sorties vérifiées en jeu). Aucun effet visible ; non
+bloquant pour l'A/B, à comprendre (TODO.md).
+
+Compteurs `x-mem-stats` en jeu (dernière fenêtre de 10 s, cpu 0 / cpu 1) : `dcbz` 79 k/s et
+56 k/s, `lmw` 151 k/s et 91 k/s (`stmw` autant), ~6,5 mots par `lmw`, `tlbie` 1 200/s et
+550/s, ~5,0 M invalidations précises par vCPU sur la partie (~3 000/s), TLB grandi à 32 768
+entrées (`grows` 188 et 42), aucun vidage complet de BAT.
