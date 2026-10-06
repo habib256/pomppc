@@ -2835,3 +2835,183 @@ aucun gain mesuré ; le lanceur les allume néanmoins sur macOS arm64 avec
 `VFPNATIVE`, à la demande de l’utilisateur. 0027 corrige le placement RX sous
 `split-wx` ; `hotblocks`/`jitblocks` permettent d’inspecter les blocs ARM émis.
 Méthodes, limites et résultats : [rapport M4](jit-m4-2026-10-05.md).
+
+## 30. La série 0025-0028 sur le PC x86-64 (06/10/2026)
+
+Le binaire de référence du PC (`~/src/qemu/build`, construit le 04/10 jusqu'à `tcg/0024`) est
+remis au niveau de la série complète, et chaque pièce venue du M4 reçoit son pendant ou sa
+preuve x86-64 (règle de parité des hôtes). Hôte : i7-10700F, Ubuntu 24.04, gcc 13.3 ; l'hôte
+n'est **pas** au repos (d'autres constructions tournent) : aucun temps ci-dessous n'est une
+mesure de vitesse en jeu, seuls les microbancs hôte servent à décider.
+
+### 30.1 Le binaire de référence
+
+`scripts/build_qemu_qfb.sh` (construction standard, sans `QEMU_OPT`, sous
+`systemd-run --user --scope -p MemoryMax=20G nice`) a posé sur l'arbre déjà patché les deux
+correctifs `tcg/fixes/0003-nmsub-zero` et `0022-neon-nmsub-zero` (gardes : l'ancienne ligne
+présente), puis `0025`-`0028` (gardes : marqueur absent), puis `0029` (§30.2). Les marqueurs de
+fin de bloc sont tous présents (`prod_zero && !nres`, `kind != PVF_NMSUB`, `ppc_lmw_vector`,
+`ppc_stmw_vector`, `x-lmw-vector`, `x-jc-word`, `tb_jmp_cache_word`, `saved_addr = tcg_jit_addr`,
+`TCG_TYPE_PTR, arg`, `ppc_lmw_bswap32x4`, `PPC_LMW_VECTOR_HOST`, `POMPPC tcg/0029`) et les
+anciennes lignes absentes. Contrôle de capacités **complet, 30/30**, backend GL compris
+(`bench/build-capabilities.txt`). Binaires du 06/10 à 11:56 :
+
+| binaire | sha256 |
+|---|---|
+| `qemu-system-ppc` | `581f24e6fdc613615de4e79e18373740e8e5389f4e79c2fbed98061cf2d2ba9f` |
+| `qemu-system-ppc64` | `bda5fa21040f544c059a40c3ed4fd3eaa954bf3e058ba6c967c1303b82469063` |
+
+Journaux : `bench/build-qemu-pc-20261006.log` (0025-0028 et correctifs),
+`bench/build-qemu-pc-20261006-0029.log` (0029). Sur x86-64, `0027` (vue RW sous `split-wx`,
+chemin `mach_vm_remap`) et `0028` (émetteur aarch64) sont compilés hors du binaire : ils ne
+changent rien au PC, ils gardent l'arbre identique à celui du M4.
+
+### 30.2 `lmw`/`stmw` : `tcg/0029`, la copie SSE2
+
+**Le constat.** gcc 13 `-O2` (options de QEMU) laisse la boucle d'origine de `helper_lmw` et
+`helper_stmw` **scalaire** : `mov (%rax,%rdx,4) ; bswap ; mov … ; add ; cmp ; jne`, un mot par
+tour (`objdump -d target_ppc_mem_helper.c.o`). Sur le M4, clang la vectorisait déjà, d'où le
+gain nul de 0025 ; ici la place existe.
+
+**La conception.** Même propriété `x-lmw-vector`, même endroit (après `probe_contiguous`, seule
+la copie RAM change ; E/S et fautes par la boucle d'origine). Bloc `#elif defined(__x86_64__)` de
+`target/ppc/lmw-vector.h` en **SSE2 seul** (le socle x86-64) : pas de sonde d'exécution, pas
+d'attribut de cible, pas de transition AVX/SSE, inliné dans le helper. L'échange d'octets de
+quatre mots : `pshuflw`/`pshufhw` 0xb1 (demi-mots échangés) puis `psllw`/`psrlw` 8 + `por` ;
+GPR 64 bits : `punpckldq`/`punpckhdq` avec zéro (extension sans signe) ; `stmw` 64 bits :
+`pshufd` 0x08 de chaque paire puis `punpcklqdq`. Queue de 1 à 3 mots scalaire, aucune lecture
+ni écriture hors plage. Ailleurs qu'aarch64/x86-64, `x-lmw-vector=on` est désormais refusé
+**proprement** : avertissement au `realize` (« no vector copy on this host ») et propriété
+remise à faux, au lieu d'être acceptée sans effet. Sur le PC, la propriété reste vraie après le
+`realize` (lue par `qom-get`).
+
+**Microbanc hôte** (copie seule, `taskset -c 5`, fonctions non inlinées des deux côtés, médiane
+de 5 × 20 M paires `lmw`+`stmw`, hôte chargé : ordres de grandeur) :
+
+| registres | origine, GPR 32 bits | SSE2 | origine, GPR 64 bits | SSE2 |
+|---|---:|---:|---:|---:|
+| r0 (32 mots) | 30,3 ns | 14,7 ns (−52 %) | 60,0 ns | 36,9 ns (−39 %) |
+| r13 (19 mots) | 18,8 ns | 11,2 ns (−41 %) | 37,7 ns | 27,3 ns (−28 %) |
+| r20 (12 mots) | 12,7 ns | 7,7 ns (−40 %) | 26,0 ns | 18,3 ns (−29 %) |
+| r26 (6 mots) | 7,5 ns | 6,4 ns (−15 %) | 14,9 ns | 14,4 ns (−3 %) |
+| r29 (3 mots) | 4,9 ns | 5,6 ns (+14 %) | 9,5 ns | 10,2 ns (+8 %) |
+
+Soit 3 à 5 ns de moins par `lmw` ou `stmw` de prologue/épilogue (r13-r14) ; une variante AVX2
+(`vpshufb`, `vpmovzxdq`, sonde `CPUINFO_AVX2`) donnait le même ordre de gain, avec un appel non
+inlinable et une sonde en plus : SSE2 retenu. Le surcoût des queues courtes est celui du
+banc (fonctions non inlinées) ; dans QEMU la copie est inlinée. Ce que cela vaut en jeu (le
+helper garde son appel et sa sonde `probe_contiguous`) reste à mesurer (§30.6).
+
+**Preuve.** `tools/tcg/lmwvectorproof.sh ~/src/qemu` compile les fonctions **réelles** de
+`lmw-vector.h` (il refuse désormais un en-tête sans copie vectorielle pour l'hôte et nomme
+l'implémentation prouvée) : chaque registre de départ × chaque décalage de 0 à 31 octets ×
+1 000 tirages, plus les pages de garde des deux côtés et le contrôle des octets voisins :
+**1 024 064 cas en GPR 32 bits et autant en 64 bits, zéro écart**.
+`tools/tcg/lmwvectorproof-x86-mut.sh` : **12 mutants sur 12 détectés** (demi-mots, octets,
+décalage de 7, extension par zéro, moitié haute, moitiés hautes au `stmw`, second couple,
+vecteur au-delà de la plage en lecture et en écriture — faute sur la page de garde —, queues
+oubliées, pas de 12 octets). Invité : `lmwtest`, §30.5.
+
+### 30.3 Le zéro signé de `vnmsubfp` sur x86-64
+
+Le défaut trouvé sur le M4 (2 413 écarts sur 14,8 M vecteurs dans la boucle scalaire de
+`vfp_fma4`) **n'existe pas sur le chemin x86**, et les correctifs n'y changent pas le code
+exécuté :
+
+- `fixes/0003` corrige la boucle scalaire de `vfp_fma4`. Sur x86-64 elle n'est **jamais** un
+  chemin rapide : avec FMA3 c'est `vfp_fma4_fma3` (0020) qui répond, sans FMA3 la boucle pose
+  `ok = false` (le `fmaf` de la libm y est une émulation). `fixes/0022` touche l'émetteur
+  aarch64, non compilé ici.
+- Le cas fautif est un produit nul avec un addende nul : il faut `-(a·c − b)` arrondi **puis**
+  nié (`float32_chs`). Le chemin x86 de 0020 calcule `vfmadd231ps` sur `b ^ signe` puis
+  **`vpxor` du bit de signe** (désassemblage du vrai `target_ppc_int_helper.c.o` :
+  `vfmadd231ps` puis `vpxor` à `+0x231` de `vfp_fma4_fma3`) ; l'émetteur de 0022 émet
+  `vfmsub231ps` puis `pxor` 0x80000000. Les deux nient après l'arrondi : `+0 − +0 = +0`, nié
+  `−0`, comme softfloat (les 24 combinaisons de zéros signés à produit nul comparées au vrai
+  `fpu_softfloat.c.o`, chemin dur et logiciel, NJ 0/1 : softfloat rend `0x80000000` partout).
+- Le piège est réel côté compilateur, ce qui rend plausible l'origine aarch64 : gcc 13
+  `-O2 -mfma` replie `-fmaf(a, c, -b)` écrit en **flottant** en un seul `vfnmadd132ss`
+  (`−(a·c) + b`, qui rend `+0` dans ce cas), mais ne replie pas la négation écrite comme un
+  `xor` entier (`vfmsub132ss` puis `add $0x80000000`), forme qu'emploient 0003 et 0020. Sur
+  le M4, clang a vraisemblablement fait le repli vers FNMADD dans la boucle scalaire ; non
+  vérifié ici.
+
+Preuves (journaux `bench/tcg/pc-serie-20261006/`, résumé `bilan.txt`, refaites par
+`tools/tcg/pc-serie-proofs.sh ~/src/qemu <dossier>`) :
+
+| épreuve | résultat |
+|---|---|
+| `tools/tcg/vfpproof.sh ~/src/qemu 20000000` (helpers 0003/0020 tels quels, chemin AVX + FMA3, contre softfloat, 8 états) | **648 454 144 vecteurs** (2,59 G voies), 97 486 278 par le chemin rapide, **0 divergence** |
+| `VFPPROOF_NATIVE=1 tools/tcg/vfpproof.sh ~/src/qemu 20000000` (modèle de l'émetteur x86 de 0022, porte extraite de `cpu_init.c`) | **648 454 144 vecteurs**, 95 698 607 par le chemin court, **0 divergence** |
+| `tools/tcg/vfpproof-x86-mut.sh` | **9 mutants sur 9** |
+| `tools/tcg/vfpproof-native-mut.sh` | **8 mutants sur 8** |
+| invité `vfptest` sous `x-vfp-native-verify` | §30.5 : empreinte du M4, 0 divergence |
+
+Aucun correctif x86 n'est donc nécessaire ; les deux `fixes/` sont appliqués pour garder
+l'arbre du PC identique à celui du M4.
+
+### 30.4 `x-jc-word` (0026) et le placement du tampon (0027) sous Linux
+
+- `python3 tools/tcg/jcwordproof.py ~/src/qemu` : sonde C et ops TCG émises, **573 440 cas,
+  zéro écart**, groupes de page préservés (code commun aux deux hôtes).
+- `tools/tcg/jitcheck.py` est rendu portable : `--rel32` juge `x-jit-rel32` (0024) sur la ligne
+  « appels des helpers directs (rel32) » ; sous Linux, `--split-wx` lit la vue RX du `memfd`
+  dans `/proc/<pid>/maps`, faute de ligne de placement.
+- Relevés sous Linux (constats, pas des défauts de la série) :
+  - `x-jit-near` : **0/5** dans la fenêtre du texte (« pas de place, noyau ») ; `mmap(NULL)`
+    pose le tampon vers `0x7xxx…`, le texte PIE est vers `0x5xxx…` (~30 Tio) ;
+  - `x-jit-rel32` : **5/5** à moins de 2 Gio du texte (écart maximal 1 098 Mio, appels
+    directs) ; la fenêtre de 4 Gio est franchie 1 fois sur 5, sans effet sur `rel32` (les deux
+    régimes de 0024 sont étudiés à part) ;
+  - `split-wx` : Linux prend le chemin `memfd` (`alloc_code_gen_buffer_splitwx_memfd`), que ni
+    `x-jit-near`, ni `x-jit-rel32`, ni **0027 (propre à Darwin)** ne placent : vue RX loin du
+    texte dans **20/20** lancements, avec `x-jit-near` comme avec `x-jit-rel32`. `split-wx`
+    est éteint par défaut et n'est pas employé sur le PC.
+
+### 30.5 Preuves en VM de dev (10.4.11), SMP=1 puis SMP=2
+
+`tools/tcg/jit-m4-proof.sh` (écrit sur le Mac) est rendu portable : greffon en `.so`,
+`JIT_BENCH=0` pour sauter les bancs (hôte chargé), `JIT_TIMEOUT`, et une **sonde de l'agent**
+après chaque démarrage : `devloop start` a perdu sa frappe à **chaque** démarrage sur le PC
+(écran gris d'Apple jugé stable, surtout sous les vérificateurs) ; la sonde lance un job
+minuscule et retape `mount -uw /` puis `sh /pomppc/agent.sh IN OUT` tant que l'agent ne répond
+pas (l'agent ignore le job présent à son démarrage, d'où la sonde suivante). Options de
+production complètes (`x-fast-fp`, `x-sr-tlb`, `x-lfs-inline`, `x-vfp-fast`, `x-vperm-fast`,
+`x-fp-inline` — ajouté au script, il manquait —, `x-ret-inline`, `x-jc-idx`, `x-icbi-sync`,
+`x-msr-nobql`, `x-fp-native`, `x-fp-native64`, `x-tb-fast`, `x-vmx-inline`), `x-jit-near`,
+`x-jc-bits=14`. Deux démarrages par campagne : **référence** (`x-vfp-native=off`,
+`x-lmw-vector=off`, `x-jc-word=off`) et **vérifié** (`x-vfp-native=on`, `x-lmw-vector=on`,
+`x-jc-word=on`, `x-vfp-native-verify`, `x-vmx-verify`, `x-ret-verify`, `x-tb-verify`).
+Résultats bruts dans `bench/tcg/pc-serie-20261006/vm-smp1/` et `vm-smp2/`.
+
+| | SMP=1 (`qemu-system-ppc`) | SMP=2 (`qemu-system-ppc64`) |
+|---|---|---|
+| `vfptest` | `bc13e93c39e62602` dans les deux modes | identique |
+| `vmxtest` | `c24e3d31d479381b` ; fautes 48/48, page intacte | identique |
+| `lmwtest` | `2575eafce78adf66` ; faute `lmw 31` signal 10 dans les deux modes | identique (GPR 64 bits) |
+| `smctest` A-F | 0 erreur | 0 erreur |
+| `jctest` | appels indirects et invalidation à chaud OK | OK |
+| `tbtest` | 0 recul | 0 recul |
+| `x-vfp-native-verify` | 34 066 432 opérations, 8 573 259 prédites courtes, **0 divergence** | 34 066 432, 8 573 259 prédites courtes, **0 divergence** |
+| `x-vmx-verify` | 301 989 888 permutations + 50 331 648 rangements, **0 + 0** | mêmes nombres, **0 + 0** |
+| `x-ret-verify` | 2 988 915 365 blocs en ligne + 25 606 798 en boucle, **0 divergence, 0 course** | 3 003 369 517 + 41 754 618, **0 divergence**, 148 courses (`smctest`, attendues, §16) |
+| `x-tb-verify` | 648 147 710 lectures, 0 positif | 641 132 799 lectures, 0 positif |
+
+Les empreintes VFP, VMX et LMW sont **celles du M4** (`docs/jit-m4-2026-10-05.md`) : mêmes
+résultats sur les deux hôtes, helpers d'origine compris. Le seul fichier qui diffère entre les
+deux modes est `jctest.txt`, par ses temps (`ns=`).
+
+### 30.6 Lanceur et phase 2
+
+`run_tiger.sh` : `LMWVEC` et `JCWORD` restent **éteints par défaut sous Linux** ; `LMWVEC=1`
+et `JCWORD=1` y fonctionnent (sondes du lanceur sur les deux binaires : propriétés acceptées,
+témoin inconnu refusé), libellé `LMW-STMW-VECTEUR`. À mesurer en phase 2 sur la VM quotidienne,
+hôte au repos, par A/B entrelacé (DOOM 3 fenêtre, 6 parties par bras) :
+
+    tools/tcg/matab.sh x86-lmw-jcw 6 "ref:LMWVEC=0 JCWORD=0" "lmw:LMWVEC=1" \
+        "jcw:JCWORD=1" "les2:LMWVEC=1 JCWORD=1" d3 fen
+
+puis, si un bras gagne, la matrice du PC (mb, zen, ut, d3) avant toute mise par défaut. Pour
+chiffrer d'abord le poste : `perf` est utilisable depuis le 06/10 (`perf_event_paranoid=1`) ;
+`perf record -p` sur QEMU lancé avec `EXTRA_ARGS=-perfmap` donne la part de `helper_lmw` /
+`helper_stmw` en jeu.
