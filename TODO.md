@@ -142,9 +142,10 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   l'utilisateur le 01/10). Scène à isoler ; fermeture : image juste dans la démo.
 - [ ] **[Outils] A3, suites** : Zenerchi en plein écran et Warcraft III en fenêtre (réglage à
   trouver, sinon clic par System Events) ; Colin McRae fenêtre non applicable.
-- [ ] **[Outils] Rejeu : `SURF_READBACK` d'une surface jamais liée dans le vidage** → `NO_SURF`
-  (DOOM 3 fenêtre, tour `20260926-2156`) : le prologue de `tests/qgpu_replay.c` ne crée la
-  surface qu'au `SURF_BIND`/présentation. Épreuve : rejeu sans `NO_SURF`, image inchangée.
+- [ ] **[Outils] Rejeu : `SURF_READBACK` d'une surface jamais liée** — corrigé le 07/10 sur le
+  PC (`docs/matrice-jeux.md` §5 : reproduit sur le vidage DOOM 3 fenêtre du PC privé de son
+  `surfaces.txt`, 2 `NO_SURF` → 0) ; à confirmer sur le tour `20260926-2156` du M4 (rejeu sans
+  `NO_SURF`, image inchangée).
 - [ ] **[Plugin] Coordonnées de texture en mode immédiat sous programme de sommets** : perdues
   (vu en écrivant `gltest rectfp`). Scène à écrire ; fermeture : comparé au rendu d'Apple.
 - [ ] **[Backend GL] `gltest tex14` « λ=2 sans biais »** : défaut du GL de l'hôte macOS (le

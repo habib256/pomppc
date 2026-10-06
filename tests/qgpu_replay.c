@@ -126,6 +126,11 @@ int main(int argc, char **argv)
     static uint32_t skc[256][QGPU_SK_COUNT];
     uint32_t *sk = skc[0];
     static uint8_t ctx_seen[256], surf_seen[256], ctx_has_surf[256];
+    /* 07/10, sans surfaces.txt : surface liée au contexte PAR DÉDUCTION du
+       prologue (id + 1 ; 0 = liaison connue, ou aucune) ; surface créée par
+       le prologue pour un transfert, liée à aucun contexte */
+    static uint32_t ctx_inv[256];
+    static uint8_t surf_xonly[256];
     int surf_txt = 0;       /* surfaces.txt lu : les liaisons contexte → surface sont connues */
     static uint32_t tex_hint[QGPU_MAX_TEX];         /* v20 : cible lue dans un SURF_TEX */
 
@@ -304,6 +309,7 @@ int main(int argc, char **argv)
             static uint8_t query_seen[QGPU_MAX_QUERIES];         /* v8 */
             static uint32_t last_present_surf = 1;
             uint32_t pre[4096], np = 0, q, bound_ctx = 256;
+            uint32_t xfer_ctx = 256, xfer_sid = 0xffffffffu;    /* 07/10, cf. plus bas */
             /* la surface présentée dans CETTE soumission, si on la voit */
             for (q = 0; q + 1 < h.ncmd_bytes / 4; ) {
                 uint32_t hd = qgpu_ld32(shmem + h.base + q * 4);
@@ -330,7 +336,7 @@ int main(int argc, char **argv)
                 id = qgpu_ld32(shmem + h.base + (q + 1) * 4);
                 if (o == QGPU_OP_CTX_CREATE && id < 256) ctx_seen[id] = 1;
                 if (o == QGPU_OP_SURF_CREATE && id < 256) surf_seen[id] = 1;
-                if (o == QGPU_OP_CTX_BIND && id < 256 && !ctx_seen[id] && np + 2 <= 60) {
+                if (o == QGPU_OP_CTX_BIND && id < 256 && !ctx_seen[id] && np + 2 <= 4090) {
                     pre[np++] = QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX); pre[np++] = id; ctx_seen[id] = 1;
                 }
                 /* TEX_CREATE (v3, sans cible) crée aussi : sans lui, un TEX_IMAGE3
@@ -440,8 +446,60 @@ int main(int argc, char **argv)
                     query_seen[id] = 1;
                 }
                 if (o == QGPU_OP_CTX_BIND && id < 256) bound_ctx = id;
-                if (o == QGPU_OP_SURF_BIND && bound_ctx < 256) ctx_has_surf[bound_ctx] = 1;
-                if (o == QGPU_OP_SURF_BIND && id < 256 && !surf_seen[id] && np + 5 <= 60) {
+                if (o == QGPU_OP_SURF_BIND && bound_ctx < 256) {
+                    ctx_has_surf[bound_ctx] = 1;
+                    ctx_inv[bound_ctx] = 0;
+                    if (id < 256) surf_xonly[id] = 0;
+                }
+                /* 07/10 : surface créée avant le vidage et seulement LUE ou
+                   ÉCRITE dans le vidage, jamais liée (DOOM 3 fenêtre, tour
+                   20260926-2156 : SURF_READBACK → NO_SURF). Le device n'exige
+                   aucune liaison : la surface existe dès son SURF_CREATE
+                   (check_xfer et SURF_TEX la cherchent par son identifiant),
+                   et une surface jamais dessinée se relit noire (glClear à 0
+                   dans gl_surf_create, calloc dans le logiciel) — c'est ce
+                   que donne une surface fraîche du prologue. On la crée sans
+                   la lier, assez grande pour le rectangle demandé. Avec
+                   surfaces.txt, toutes les surfaces vivantes du client sont
+                   déjà créées : un identifiant inconnu n'existe pas non plus
+                   sur le device, et le NO_SURF est le sien — on n'invente rien. */
+                if (!surf_txt && np + 5 <= 4090) {
+                    uint32_t sid = 0xffffffffu, rw = 0, rh = 0;
+                    if ((o == QGPU_OP_SURF_READBACK || o == QGPU_OP_SURF_UPLOAD ||
+                         o == QGPU_OP_DEPTH_READBACK || o == QGPU_OP_DEPTH_UPLOAD ||
+                         o == QGPU_OP_STENCIL_READBACK || o == QGPU_OP_STENCIL_UPLOAD) &&
+                        (l == QGPU_LEN_SURF_XFER || l == QGPU_LEN_SURF_XFER_PF)) {
+                        sid = id;
+                        rw = qgpu_ld32(shmem + h.base + (q + 4) * 4) + qgpu_ld32(shmem + h.base + (q + 6) * 4);
+                        rh = qgpu_ld32(shmem + h.base + (q + 5) * 4) + qgpu_ld32(shmem + h.base + (q + 7) * 4);
+                        /* le plugin n'émet ces transferts que sur la surface
+                           du contexte qu'il vient de lier (reserve(p) → CTX_BIND
+                           p, puis p->surf : synchronisation par bandes, état
+                           des surfaces au déclenchement du vidage) : c'est la
+                           liaison à refaire, plutôt que la surface présentée */
+                        if (bound_ctx < 256 && (!ctx_has_surf[bound_ctx] || ctx_inv[bound_ctx]) &&
+                            xfer_ctx == 256) {
+                            xfer_ctx = bound_ctx;
+                            xfer_sid = id;
+                        }
+                    } else if (o == QGPU_OP_SURF_TEX && l == QGPU_LEN_SURF_TEX) {
+                        sid = qgpu_ld32(shmem + h.base + (q + 4) * 4);
+                    } else if (o == QGPU_OP_SURF_DESTROY && l == QGPU_LEN_SURF) {
+                        sid = id;
+                    }
+                    if (sid < 256 && !surf_seen[sid]) {
+                        pre[np++] = QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE); pre[np++] = sid;
+                        pre[np++] = rw > surf_w && rw <= QGPU_MAX_SURF_DIM ? rw : surf_w;
+                        pre[np++] = rh > surf_h && rh <= QGPU_MAX_SURF_DIM ? rh : surf_h;
+                        pre[np++] = QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH | QGPU_FMT_FLAG_STENCIL;
+                        surf_seen[sid] = 1;
+                        surf_xonly[sid] = 1;
+                    }
+                }
+                /* (le plafond était 60 mots, reste d'un pre[64] : passé
+                   quelques textures créées par le prologue, la surface d'un
+                   SURF_BIND n'était plus créée → NO_SURF) */
+                if (o == QGPU_OP_SURF_BIND && id < 256 && !surf_seen[id] && np + 5 <= 4090) {
                     pre[np++] = QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE); pre[np++] = id;
                     pre[np++] = surf_w; pre[np++] = surf_h;
                     pre[np++] = QGPU_FMT_XRGB8888 | QGPU_FMT_FLAG_DEPTH | QGPU_FMT_FLAG_STENCIL;
@@ -457,11 +515,23 @@ int main(int argc, char **argv)
                last_present_surf vaut 1 avant la première présentation, le
                contexte 0 était relié à une surface 1 inventée, et tout le
                vidage y dessinait ; image unie). */
-            if (bound_ctx < 256 && (!ctx_has_surf[bound_ctx] ||
+            /* 07/10 : sans surfaces.txt, un transfert sur une surface juste
+               après le CTX_BIND d'un contexte dont la liaison est inconnue ou
+               déduite désigne SA surface (voir plus haut) : on (re)lie le
+               contexte à celle-ci. Une surface créée pour un transfert seul
+               ne compte pas comme « déjà vue » pour la liaison d'après la
+               présentation. */
+            int xfer_bind = xfer_ctx == bound_ctx && xfer_sid < 256 &&
+                            (!ctx_has_surf[bound_ctx] ||
+                             (ctx_inv[bound_ctx] && ctx_inv[bound_ctx] != xfer_sid + 1));
+            if (bound_ctx < 256 && (!ctx_has_surf[bound_ctx] || xfer_bind ||
                                     (!surf_txt && last_present_surf < 256 &&
-                                     !surf_seen[last_present_surf])) &&
+                                     (!surf_seen[last_present_surf] ||
+                                      surf_xonly[last_present_surf]))) &&
                 np + 9 <= 4090) {
                 uint32_t sid = last_present_surf < 256 ? last_present_surf : 1;
+                if (xfer_bind)
+                    sid = xfer_sid;
                 if (!surf_seen[sid]) {
                     pre[np++] = QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE); pre[np++] = sid;
                     pre[np++] = surf_w; pre[np++] = surf_h;
@@ -471,6 +541,10 @@ int main(int argc, char **argv)
                 pre[np++] = QGPU_CMD_HDR(QGPU_OP_CTX_BIND, QGPU_LEN_CTX); pre[np++] = bound_ctx;
                 pre[np++] = QGPU_CMD_HDR(QGPU_OP_SURF_BIND, QGPU_LEN_SURF); pre[np++] = sid;
                 ctx_has_surf[bound_ctx] = 1;
+                if (!surf_txt) {
+                    ctx_inv[bound_ctx] = sid + 1;
+                    surf_xonly[sid] = 0;
+                }
             }
             if (np) {
                 uint32_t poff = SHMEM - 16384;
