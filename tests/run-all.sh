@@ -125,6 +125,29 @@ if [ -x "$QEMU_BIN" ] || command -v "$QEMU_BIN" >/dev/null 2>&1; then
 else
   noop "QEMU introuvable ($QEMU_BIN)"
 fi
+# Binaire RAPIDE du PC (build-fast/, docs/binaire-rapide-x86.md) : run_tiger.sh le
+# préfère s'il passe pomppc_fast_ok (relevé, version, processeur, série, caps).
+# Présent mais écarté = le lanceur retombe sur la référence : à reconstruire.
+source scripts/qemu_fast.sh
+if [ "$(uname -s):$(uname -m)" != Linux:x86_64 ]; then
+  noop "binaire rapide : PC Linux x86-64 seulement"
+elif [ -e "${QEMU_FAST_BIN:-}" ]; then
+  echo "  binaire rapide : $QEMU_FAST_BIN"
+  if pomppc_fast_ok "$QEMU_FAST_BIN" 2 "$MACHINE"; then
+    ok "binaire rapide pris par run_tiger.sh : $(pomppc_fast_label "$QEMU_FAST_BIN")"
+  else
+    case "$POMPPC_FAST_WHY" in
+      *instrumenté*) noop "binaire rapide en cours d'entraînement ($POMPPC_FAST_WHY)" ;;
+      *) ko "binaire rapide écarté : $POMPPC_FAST_WHY — QEMU_FAST=1 ./scripts/build_qemu_qfb.sh" ;;
+    esac
+  fi
+else
+  noop "binaire rapide absent ($QEMU_FAST_BIN : QEMU_FAST=1 ./scripts/build_qemu_qfb.sh)"
+fi
+if [ "$(uname -s):$(uname -m)" = Linux:x86_64 ] && [ -d "${QEMU_SRC:-$HOME/src/qemu}" ]; then
+  if tools/tcg/pgo-train.sh --dry-run >/dev/null 2>&1; then ok "pgo-train.sh --dry-run"
+  else ko "pgo-train.sh --dry-run (tools/tcg/pgo-train.sh --dry-run)"; fi
+fi
 
 echo
 echo "=== 4 bis. flottant rapide : test différentiel hôte (softfloat) ==="
