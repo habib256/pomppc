@@ -109,11 +109,23 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
 
 - [ ] **[Protocole] `QGPU_REG_ERRORS` par client** : aujourd'hui global, un autre
   processus fait passer le plugin en synchrone et invalide ses miroirs sans faute de sa
-  part (le plancher `err_floor` du 29/09 limite l'effet, pas la cause).
+  part (le plancher `err_floor` du 29/09 limite l'effet, pas la cause). C'est la limite L5
+  de [docs/architecture.md](docs/architecture.md) §7 (relue le 07/10 : tient encore) ;
+  `STATUS`/`STATUS_PC` sont lus en trois MMIO non atomiques par le kext. **Fermeture :** deux
+  processus en VM, l'un fautif, l'autre reste en asynchrone (`n_syncfall` à 0).
 
-- [ ] **[Architecture] Suites A6 — écarts restants de [docs/architecture.md](docs/architecture.md)** :
-  L1 (quarantaine et flux coupé) et L6 (bandes et bascule ciblée) traités le 29/09 ; relire
-  L2 à L5 contre le code actuel et fermer ce qui tient encore.
+- [ ] **[Architecture] A6, reste L2 — créneau rendu malgré un nettoyage échoué**
+  ([docs/architecture.md](docs/architecture.md) §5, relu le 07/10 ; L3 et L4 fermées dans le
+  code, leurs épreuves sont dans l'entrée « Validation » ; L5 est l'entrée `ERRORS` par client
+  ci-dessus). Kext : `destroyClientObjects` rend un `IOReturn` et la barrière visée,
+  `slotGated` marque le créneau sale au lieu de le rendre, `allocSlot` ne le redonne qu'une
+  fois cette barrière atteinte et relance d'abord un CLIENT_RESET jamais parti, `resetSlot`
+  rend l'échec. `run_a6` (`tests/qgpu_core_test.c`) fixe ce que voit le cœur : nettoyage
+  manqué → `QGPU_ST_LIMIT` fatal à la première création du nouvel occupant, retardé → sans
+  effet sur les objets (FIFO), rejoué après réattribution → objets du nouveau détruits.
+  **Fermeture :** propriété de test du device (retard du thread de rendu, refus de
+  CLIENT_RESET), puis en VM : client tué pendant une soumission, file pleine, nouveau client
+  ouvert → autre créneau ou attente, jamais `QGPU_ST_LIMIT` à sa première création.
 
 - [ ] **[Métrologie] A/B de l'attente** : `QGPU_GL_FLUSH` et `POMPPC_GL_QFLUSH` ont été allumés
   le 01/10 à la demande de l'utilisateur sans l'A/B prévu (un seul tour : Nexuiz GLSL 36,1 → 35,3,

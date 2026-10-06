@@ -1,13 +1,17 @@
 # Architecture — propriété et synchronisation
 
-État relu le 27/09/2026 : protocole qgpu v22, ABI de transport v19.
+État relu le 27/09/2026 : protocole qgpu v22, ABI de transport v19. Limites
+L2 à L5 relues contre le code le 07/10/2026 (suites A6) : chacune porte son
+état daté et ses preuves `fichier:ligne` (lignes de `954c452`, sauf le test `run_a6` ajouté ce jour-là).
 Ce document décrit principalement la chaîne graphique Tiger, où se croisent
 mémoire partagée, clients IOKit, vCPU et rendu hôte. Le contrat binaire reste
 dans [protocole.md](protocole.md) et les en-têtes qu'il référence.
 
 **Lecture des invariants :** une règle « doit » exprime le contrat à préserver.
 Les mécanismes cités décrivent le code actuel. Les écarts identifiés par
-**L1…L6** sont des limites actuelles, pas des garanties ni des corrections.
+**L1…L6** sont des limites relevées le 27/09, pas des garanties ni des
+corrections ; chacune dit son état daté (au 07/10 : L2 et L5 tiennent, L1,
+L3, L4 et L6 sont fermées dans le code, leurs épreuves en VM restent dues).
 La relecture statique ne remplace pas une épreuve de concurrence en VM.
 
 ## 1. Frontières et propriétaires
@@ -58,8 +62,9 @@ est l'ordre FIFO d'acceptation, tous clients confondus, resets de client compris
 
 Le doorbell synchrone conserve le BQL pendant son attente. Le relâcher
 localement violerait les hypothèses de la garde de réentrance MMIO de ce device.
-Son attente est bornée par `QGPU_SYNC_WAIT_MS` ; cela ne rend pas toutes les
-autres attentes bornées (L3). L'attente asynchrone invitée utilise IRQ et timer
+Son attente est bornée par `QGPU_SYNC_WAIT_MS` ; depuis le 29/09, les resets,
+la sauvegarde et la sortie de QEMU le sont aussi par `QGPU_RESET_WAIT_MS`
+(L3, fermée sauf au retrait du device). L'attente asynchrone invitée utilise IRQ et timer
 de secours ; un réveil signifie « relire la barrière », pas « travail réussi ».
 
 Sources : `qgpu_render_thread`, `qgpu_doorbell`, `qgpu_irq_bh` dans le device ;
@@ -187,10 +192,52 @@ du processus mort n'est requis pour nettoyer les objets hôte.
 `destroyClientObjects` retourne `void` ; un refus, un défaut de drainage ou
 un timeout est seulement journalisé. `slotGated` efface ensuite busy et peut
 libérer le créneau malgré cet échec. Le retour réussi de la fermeture ou du
-reset ne prouve donc pas que le nettoyage a terminé. Correction attendue :
-propager le résultat, conserver un créneau non réattribuable en cas d'échec,
-et définir sa récupération. Épreuves : file pleine, reset refusé et reset
-accepté mais retardé, puis tentative d'ouverture d'un nouveau client.
+reset ne prouve donc pas que le nettoyage a terminé.
+
+*État au 07/10/2026 : **tient encore**, telle qu'écrite.* Aucun correctif
+depuis le 27/09 n'y touche (KG3, KT3 et K7 règlent la propriété du créneau,
+pas le résultat du nettoyage). Preuves : `destroyClientObjects` est `void`
+(kext/POMPPCGPU/POMPPCGPU.cpp:1086) ; ses trois échecs se contentent de
+`GPULog` puis rendent la main — CLIENT_RESET refusé ou file pleine au-delà
+de `DESTROY_RETRIES` (:1105-1109), file non drainée avant (:1111-1114),
+barrière non atteinte après (:1117-1119) ; `slotGated` efface busy et rend
+le créneau sans regarder (:945-950) et pose `kIOReturnSuccess` d'office
+(:898) ; `resetSlot` rend donc un succès au plugin même après échec
+(:1014-1016). Les deux échecs n'ont pas la même gravité, ce que
+`tests/qgpu_core_test.c` fixe désormais au niveau du cœur (`run_a6`,
+tests/qgpu_core_test.c:9418) :
+
+- **nettoyage jamais mis en file** (refus, file non drainée) : les objets
+  de l'ancien occupant restent, et la première création du nouvel occupant
+  sur le même identifiant est une faute **fatale** `QGPU_ST_LIMIT`
+  (patches/qgpu/qgpu-core.c:3542-3543) qui arrête son flux : accélération
+  perdue pour ce processus (cas (a) du test) ;
+- **nettoyage accepté mais retardé** (le kext a cessé d'attendre) : la file
+  est FIFO (patches/qgpu/qgpu-pci.c:684-686), la destruction passe donc
+  avant toute soumission du nouvel occupant, qui crée ses objets sans
+  erreur (cas (b)). Reste à risque la mémoire, pas les objets : les
+  dernières soumissions de l'ancien occupant, devant le CLIENT_RESET dans
+  la file, lisent encore la tranche de BAR0 que le nouveau commence à
+  écrire (M1) ;
+- un CLIENT_RESET mis en file **après** la réattribution détruit les objets
+  du nouvel occupant (cas (c)) : un nettoyage manqué ne se rattrape
+  qu'avant de rendre le créneau.
+
+Correction à faire dans le kext (pas dans cette relecture : il se compile
+dans l'invité) : `destroyClientObjects` rend un `IOReturn` et, en cas
+d'acceptation, la barrière visée ; `slotGated` ne remet pas le créneau à
+`allocSlot` sur échec mais le marque « sale » avec cette barrière
+(`fSlotFence[slot]`) ; `allocSlot` saute un créneau sale tant que `FENCE`
+n'a pas atteint sa barrière (FIFO : objets détruits ET tranche plus lue),
+et relance d'abord, dans la gate, le CLIENT_RESET d'un créneau sale sans
+barrière (refusé la première fois) ; `resetSlot` rend l'échec au plugin.
+Épreuve de fermeture : en VM, avec un retard injecté dans le thread de
+rendu de l'hôte (propriété de test du device à ajouter, par ex.
+`x-test-stall-ms`, et un refus forcé de CLIENT_RESET), tuer un client
+pendant une soumission, file pleine, puis ouvrir un nouveau client : il
+doit recevoir un autre créneau (ou attendre), jamais `QGPU_ST_LIMIT` à sa
+première création, et le journal du kext doit nommer le créneau sale puis
+sa libération.
 
 `QGPU_UC_RESET` nettoie les objets **sans rendre le créneau** : `resetSlot`
 conserve son propriétaire. Le plugin doit abandonner ses anciens identifiants
@@ -213,7 +260,7 @@ fork en prenant `G.mu`, puis père et enfant le relâchent chacun de leur côté
 | `CLIENT_RESET` / reset user client | Job FIFO, barrière globale avancée à sa fin ; détruit une tranche d'objets, pas les compteurs globaux. |
 | Reset global du device | Jette les jobs non commencés, attend le job courant, annule le BH IRQ en attente, remet registres et compteurs à zéro, demande au thread de rendre le cœur vide, abaisse l'IRQ. |
 | Arrêt du thread | Jette les jobs non commencés, attend le courant puis joint le thread. Au retrait, libère le backend sur ce thread ; à la sortie de QEMU, évite les appels aux bibliothèques GL potentiellement déjà démontées. |
-| Arrêt du kext | Pose `fStopping`, réveille les dormeurs, puis retire IRQ, timer et gate. Les nouveaux appels doivent être refusés. |
+| Arrêt du kext | Pose `fStopping`, réveille les dormeurs et attend, sans borne, qu'il ne reste ni dormeur ni appel en vol (`fSleepers`, `fCallers`), puis retire IRQ, timer et gate. Les nouveaux appels sont refusés par `enterCall`. |
 | `POMPPCGPUUserClient::stop` | Efface propriétaire et créneau, utilise `forgetSlot` pour la seule comptabilité ; aucun MMIO ni entrée dans une gate potentiellement retirée. Ce chemin n'est pas un nettoyage hôte confirmé. |
 | Changement de cible / géométrie | Drainage avant modification du pointeur et du pas lus sans verrou par le rendu ; à l'expiration du drainage, conserve l'ancienne cible, avec possible défaut visuel. |
 
@@ -223,16 +270,55 @@ de numéro d'époque ne permettent pas de reprendre un client vivant comme si
 rien n'avait changé. Ses objets et attentes doivent être réinitialisés ; le
 reset global n'est pas une réparation transparente d'une seule application.
 
-**L3 — La disponibilité n'est pas bornée partout.** `qgpu_soft_reset` et
-`qgpu_stop_thread` utilisent un drainage non borné du job courant. Un backend
-bloqué peut donc empêcher reset/arrêt d'aboutir malgré le timeout du doorbell.
-Ne jamais libérer de force ses ressources pendant qu'il les utilise encore.
+**L3 — La disponibilité n'est pas bornée partout.** Écrit le 27/09 :
+`qgpu_soft_reset` et `qgpu_stop_thread` utilisaient un drainage non borné
+du job courant ; un backend bloqué pouvait empêcher reset/arrêt d'aboutir
+malgré le timeout du doorbell. Ne jamais libérer de force ses ressources
+pendant qu'il les utilise encore.
 
-**L4 — Arrêt du kext avec dormeurs restants.** `POMPPCGPU::stop` attend au plus
-environ une seconde ; s'il reste des dormeurs, il journalise puis retire quand
-même les sources. Le code ne démontre donc pas l'invariant « aucun dormeur au
-retrait de la gate » sur ce chemin. Épreuve encore nécessaire : arrêt pendant
-`WAIT_FENCE`/`SUBMIT`, y compris dépassement du délai de sortie.
+*État au 07/10/2026 : **fermée par des correctifs**, sauf un chemin non
+borné assumé.* GL3 (888f45d, bug hunt du 29/09) borne le reset :
+`qgpu_soft_reset` draine au plus `QGPU_RESET_WAIT_MS` = 5 s le job courant
+puis le reset du cœur par le thread (patches/qgpu/qgpu-pci.c:715-727,
+764-779) ; à l'échéance le device passe « cassé » (:734, :775) — CAPS et
+CLIENTS à 0, doorbells et CLIENT_RESET refusés (:548-553, :662-665,
+:784-790) — sans rien libérer sous le thread, et le prochain reset qui
+aboutit le répare. `qgpu_pre_save` est borné de même (:1412). KT5
+(4e3ea68, bug hunt 3) borne l'arrêt à la sortie de QEMU : drainage borné
+(:1224-1236), et le thread n'est pas joint s'il est encore occupé
+(:1242-1248) — `q_fini` faux lui interdit de toucher au backend. Seul
+reste non borné le drainage du **retrait du device** (`fini` vrai,
+:1221-1222) : il est voulu, l'état va être libéré et le thread y écrit
+encore. Ce chemin n'est atteint que par un retrait à chaud, refusé
+(`hotpluggable = false`, :1492), ou par l'échec de `migrate_add_blocker`
+au realize (:1363), où le thread vient de naître et n'a aucun job. Aucune
+attente non bornée ne reste donc sous BQL dans un scénario pris en charge.
+L'épreuve en VM (GPU hôte bloqué puis rechargement du kext et
+`system_reset`, GL3/KT4/KT5) est suivie par l'entrée « Correctifs des bug
+hunts jamais éprouvés dans la VM » de [TODO.md](../TODO.md) ; le device
+n'a pas de harnais natif (`qgpu-pci.c` ne se compile qu'avec QEMU), ce qui
+interdit de l'éprouver sur l'hôte seul.
+
+**L4 — Arrêt du kext avec dormeurs restants.** Écrit le 27/09 :
+`POMPPCGPU::stop` attendait au plus environ une seconde ; s'il restait des
+dormeurs, il journalisait puis retirait quand même les sources.
+
+*État au 07/10/2026 : **description périmée, limite fermée dans le code**.*
+KG4 (888f45d) a rendu l'attente sans borne, journal chaque seconde ; KT1
+(4e3ea68) attend aussi les appels déjà passés le test de `fStopping`
+(compteur `fCallers`, protocole de Dekker `enterCall`/`leaveCall`,
+kext/POMPPCGPU/POMPPCGPU.cpp:41-70) : `stop` ne retire IRQ, timer et gate
+qu'une fois `fCallers == 0 && fSleepers == 0` (:275-294). L'invariant
+« aucun dormeur au retrait de la gate » est donc démontré par lecture. La
+boucle se termine parce que chaque chemin gated revoit `fStopping` :
+`sleepForFence` en tête et à chaque tour (:742, :765), `waitFenceCounted`
+(:828, :859), `waitDestroy` (:1075), `destroyClientObjects` (:1091),
+`submitGated` (:623), `slotGated` à l'allocation (:901) ; le plus long
+passage non interruptible est un doorbell synchrone, borné à 2 s par le
+device (patches/qgpu/qgpu-pci.c:199, :612-641). Épreuve encore à faire, en
+VM : `kextunload` pendant `WAIT_FENCE`/`SUBMIT` d'un jeu ouvert, et
+`SUBMIT` après déchargement → erreur propre ; elle est suivie par la même
+entrée « Validation » de TODO.md (K4, KG4, KT1).
 
 La migration et la sauvegarde/restauration de l'état VM sont bloquées par
 `migrate_add_blocker` lorsque qgpu est présent : les objets GL hôte ne sont
@@ -249,7 +335,7 @@ Sources : `qgpu_soft_reset`, `qgpu_stop_thread`, `qgpu_bind_scanout` et
 | Ouverture du plugin | Version, capacités, disposition incompatibles | Ne pas utiliser ce transport ; ne pas improviser des plages d'identifiants. |
 | Kext | Arguments hors tranche, état arrêté, gate refusée | L'appel a échoué ; ne pas interpréter des paramètres de sortie comme un succès. |
 | Admission device | `SUBMIT_ST`, notamment `QUEUE_FULL` | Acceptation ou refus de mise en file, pas résultat d'exécution. |
-| Exécution cœur/backend | `STATUS`, `STATUS_PC`, `ERRORS` | Résultat publié globalement ; les commandes précédemment exécutées ne sont pas annulées. |
+| Exécution cœur/backend | `STATUS`, `STATUS_PC`, `ERRORS` | Résultat publié globalement (L5) ; les commandes précédemment exécutées ne sont pas annulées. |
 | Attente | Timeout / transport interrompu | Achèvement non établi ; aucune autorisation implicite de réutiliser la mémoire. |
 
 Une erreur de flux n'est **pas transactionnelle**. `qgpu_core_execute`
@@ -268,9 +354,34 @@ temporairement l'asynchrone lorsqu'ERRORS évolue, même si un autre client est
 responsable. Le signalement local de timeout synchrone est également distinct
 du résultat final du job qui peut arriver plus tard.
 
-Évolution attendue : attribution des erreurs au client / à la soumission,
-avec une durée de conservation définie. Ne pas déduire une cause précise d'un
-simple rapprochement entre une barrière et le dernier STATUS lu.
+*État au 07/10/2026 : **tient encore**, réduite dans ses effets.* Le device
+publie un seul triplet global (patches/qgpu/qgpu-pci.c:353-358) ; le kext le
+lit en trois MMIO séparés, après un doorbell synchrone
+(kext/POMPPCGPU/POMPPCGPU.cpp:652-654) comme pour le `PEEK` du plugin
+(:611-613), et un autre job peut finir entre deux lectures ; le plugin
+repasse en synchrone à tout mouvement d'`ERRORS`, quel qu'en soit l'auteur
+(guest/gldriver/pomppc_accel.c:3478-3501). Ce qui a changé depuis le
+27/09 : GL4 (888f45d) publie STATUS, STATUS_PC, ERRORS et FENCE sous
+`s->lock`, et le doorbell synchrone abandonné écrit son `QGPU_ST_BACKEND`
+sous ce même verrou (qgpu-pci.c:350-366, :509-514) : plus de « barrière
+atteinte, backend en panne » sur une image rendue. Côté plugin, les
+miroirs ne sont plus invalidés en bloc mais à partir du plancher
+`err_floor` (T1, PC2, P-I2 : pomppc_accel.c:3452-3460, :3514-3518), et les
+relectures de toutes les moitiés en vol sont déclarées perdues (P-I5,
+:3486-3488). L'effet d'une erreur d'un autre client est donc borné à
+`ASYNC_RETRY` images synchrones et à un renvoi ciblé d'état, mais la cause
+reste. La fermer change l'ABI de transport (`qgpu_abi.h`, donc kext et
+plugin) : compteur d'erreurs et dernier verdict **par tranche** (le device
+déduit la tranche d'un job de son offset, avec le même découpage que le
+kext, `(SHMEM_SIZE / CLIENTS) & ~0xFFF`), publiés ensemble avec la barrière
+du job fautif, et un `PEEK` du kext qui rend ceux de la tranche du client.
+Épreuve de fermeture : deux processus en VM, l'un qui soumet des flux
+fautifs, l'autre qui doit rester en asynchrone (`n_syncfall` à 0) sans
+qu'aucune de ses relectures soit invalidée ; c'est l'entrée « [Protocole]
+`QGPU_REG_ERRORS` par client » de [TODO.md](../TODO.md).
+
+Ne pas déduire une cause précise d'un simple rapprochement entre une
+barrière et le dernier STATUS lu.
 
 ## 8. Preuves et limites de couverture
 
@@ -278,9 +389,9 @@ simple rapprochement entre une barrière et le dernier STATUS lu.
 |---|---|---|
 | Kext indépendant des opcodes | `tests/run-all.sh` : ABI identique et absence de symboles sémantiques ; `scripts/qgpu_contract.py --check` | Ces contrôles ne prouvent pas les cycles de vie. |
 | Objets et reset de tranche | `tests/qgpu_core_test.c` : bornes, reset, destruction, déliaison des surfaces, conservation d'une autre tranche | Les tests natifs ne traversent ni IOKit ni la file du device. |
-| Admission, barrières et transport | `tests/qgpu_smoke.py`, à lancer explicitement | Injection de retard et non-réutilisation après timeout (L1/L2). |
+| Admission, barrières et transport | `tests/qgpu_smoke.py`, à lancer explicitement ; `run_a6` de `tests/qgpu_core_test.c` (07/10) : conséquences au cœur d'un nettoyage manqué, retardé ou rejoué (L2) | Injection de retard et non-réutilisation après timeout (L1/L2) : demande une propriété de test du device et la correction du kext (L2). |
 | Cohérence de rendu | `guest/gltest`, tests croisés des backends, matrice et rejeu | Transferts impossibles (L6), scénarios de panne ; rejeu et VM partagent le même moteur. |
-| Fin de session | Mécanismes de gate, busy, arrêt et fork relus dans les sources | Mort pendant soumission, double fermeture, réouverture, kext arrêté avec dormeurs (L2/L4), backend bloqué (L3). |
+| Fin de session | Mécanismes de gate, busy, arrêt et fork relus dans les sources ; L3 et L4 fermées par lecture le 07/10 (resets et sortie bornés, `stop` qui attend dormeurs et appels en vol) | Mort pendant soumission, double fermeture, réouverture (L2) ; en VM, kext arrêté pendant `WAIT_FENCE`/`SUBMIT` (L4) et backend bloqué puis reset (L3), suivis par l'entrée « Validation » de TODO.md. |
 
 Les tests natifs peuvent ignorer OpenGL s'il est indisponible : vérifier le
 backend effectivement exécuté avant de conclure. Une matrice de jeux verte

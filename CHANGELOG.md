@@ -9,6 +9,15 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Architecture, suites A6 : L2 à L5 relues contre le code, 07/10**
+  (`docs/architecture.md` §5-§8) : **L3** (attentes non bornées du reset et de l'arrêt du
+  thread) et **L4** (arrêt du kext avec dormeurs) sont **fermées dans le code** par les
+  correctifs du 29/09 (GL3, KT5 ; KG4, KT1) — seul reste non borné le drainage du retrait du
+  device, inatteignable (`hotpluggable = false`) ; leurs épreuves en VM restent dans l'entrée
+  « Validation ». **L2** (créneau rendu malgré un nettoyage échoué) et **L5** (verdict global)
+  tiennent : correction du kext et ABI par tranche décrites, avec leurs épreuves. Nouveau test
+  natif `run_a6` (`tests/qgpu_core_test.c`) : ce que le cœur fait d'un nettoyage manqué
+  (`QGPU_ST_LIMIT` fatal), retardé (sans effet, FIFO) ou rejoué après réattribution.
 - **Binaire rapide du PC mesuré hôte au repos, matrice finale, planchers du PC, 06-07/10**
   (`docs/vitesse-doom3-x86.md` §13.5-13.7) : A/B entrelacé DOOM 3 `d3-fen`, 3 parties par bras,
   défauts du 06/10 : binaire de référence **122,9** ms/image (121,8..124,6), **binaire rapide
