@@ -136,5 +136,20 @@ toutes présentes (`x-lmw-vector`, `x-jc-word` compris, backend GL), `-M none` d
 `complet=oui`, `march=skylake`, et `pomppc_pick_qemu 2` choisit ce binaire en 0,25 s
 (« binaire rapide (PGO, -O3, -march=native) »).
 
-Phase 2 (hôte au repos) : profil sur la VM quotidienne, A/B `ref:` contre `fast:` sur DOOM 3,
-puis un tour de matrice avec vidage. À compléter.
+**Phase 2, 06/10 (hôte au repos, `~/src/qemu`)** : premier entraînement réel par
+`tools/tcg/pgo-train.sh` sur la configuration retenue le jour même (nouveaux défauts de Linux
+x86-64 : côté mémoire, `x-jit-rel32`, `x-fp-native-cmp`, `x-vfp-native-cmp`, `x-lmw-vector`,
+`x-jc-word`, que portait la bannière du bras d'entraînement). Journaux :
+`bench/vitesse/pgo-fast/20261006-1911/`, partie `bench/tcg/ab/pgo-train-20261006-1911`.
+
+| étape | durée | mémoire max (cgroup) | détail |
+|---|---|---|---|
+| gen | 8 min 04 s | 1 811 Mio | instrumenté complet, profil remis à zéro |
+| jouer | 35 min | — | mb, zen, d3, ut en fenêtre sur l'instrumenté (40,2 / 13,2 / 156,1 / 157,5 ms/image), les quatre scènes atteintes ; **1 356 `.gcda`** |
+| use | 7 min 46 s | 1 649 Mio | 3 avertissements `-Wcoverage-mismatch` seulement (profil pris sur la série même) |
+
+Relevé `build-fast/pomppc-build.txt` : `variante=native,nohard,lto,pgo`, `complet=oui`,
+`march=skylake`, `serie=c9e8afe33871fc49` (celle du dépôt), `pomppc=9e67226` ; profil
+`pgo-fast/pomppc-profil.txt` du 06/10 19:55. Capacités (`bench/build-capabilities-build-fast.txt`)
+identiques à celles de la référence, 0031-0035 comprises.
+
