@@ -29,6 +29,9 @@ Lectures : `xp` (physique) pour les variables du noyau, en V=R sur PPC ; `x`
 par la MMU du CPU choisi (`cpu N`) pour les piles, hors V=R."""
 import bisect, os, re, socket, subprocess, sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import machonm  # noqa: E402
+
 ici = os.path.dirname(os.path.abspath(__file__))
 _c = subprocess.run(["git", "-C", ici, "rev-parse", "--path-format=absolute", "--git-common-dir"],
                     capture_output=True, text=True).stdout.strip()
@@ -61,15 +64,55 @@ def moniteur(chemin):
 
 
 def symboles(noyau):
+    """(texte trié [(adresse, nom)], tous les symboles {nom: adresse}). Lecture
+    du Mach-O en Python (tools/re/machonm.py) : le `nm` de binutils du PC Linux
+    ne lit pas le Mach-O et rendait une table VIDE sans erreur (06/10/2026) ;
+    `nm` reste le repli."""
     t, d = [], {}
-    for l in subprocess.run(["nm", "-n", noyau], capture_output=True, text=True).stdout.splitlines():
-        p = l.split()
+    lignes = [("%x" % a, l, n) for a, l, n in machonm.nm(noyau)]
+    if not lignes:
+        lignes = [tuple(l.split()) for l in subprocess.run(
+            ["nm", "-n", noyau], capture_output=True, text=True).stdout.splitlines()]
+    for p in lignes:
         if len(p) == 3:
             a = int(p[0], 16)
             d[p[2]] = a
             if p[1] in "tT":
                 t.append((a, p[2]))
+    t.sort()
+    if not d:
+        print("⚠  aucun symbole lu dans %s : rien ne sera symbolisé" % noyau)
     return t, d
+
+
+def prologue_panic(noyau, adr):
+    """(décalage des arguments variables depuis r1, registre du format) lus
+    dans le prologue de panic() du noyau donné, au lieu des valeurs du 10.4.6
+    (r1+0x9c, r24) : un autre noyau (10.4.11 sur le PC) peut avoir un autre
+    cadre. Cherche `stw r4,d(r1)` après `stwu r1,…` et `mr rN,r3` avant le
+    premier appel. (0x9c, 24, « supposé ») si le décodage échoue."""
+    try:
+        b = machonm.MachO(noyau).octets(adr, 4 * 48)
+    except (OSError, ValueError):
+        b = b""
+    off = reg = None
+    vu_stwu = False
+    for i in range(len(b) // 4):
+        w = int.from_bytes(b[4 * i:4 * i + 4], "big")
+        op, rs, ra, dd = w >> 26, (w >> 21) & 31, (w >> 16) & 31, w & 0xffff
+        dd = dd - 0x10000 if dd & 0x8000 else dd
+        if op == 18 and w & 1:                    # bl : fin du prologue
+            break
+        if op == 37 and rs == 1 and ra == 1:      # stwu r1,-N(r1)
+            vu_stwu = True
+        elif op == 36 and rs == 4 and ra == 1 and vu_stwu and off is None:
+            off = dd                              # stw r4,d(r1)
+        elif (op == 31 and (w >> 1) & 0x3ff == 444 and rs == 3
+              and (w >> 11) & 31 == 3 and reg is None):
+            reg = ra                              # mr rN,r3 (or rN,r3,r3)
+    if off is None or reg is None:
+        return 0x9c, 24, "supposé (valeurs du 10.4.6, prologue non décodé)"
+    return off, reg, "lu dans le prologue de _panic"
 
 
 def nommer(t, a):
@@ -169,6 +212,23 @@ def main():
     t, d = symboles(noyau)
     cmd = moniteur(mon)
     print(cmd("info status"))
+    # Le fichier est-il le noyau de CET invité ? (06/10/2026 : la copie
+    # .run/mach_kernel du PC était restée celle du 10.4.6 alors que la VM était
+    # passée en 10.4.11 ; toutes les adresses — panicstr compris — seraient
+    # fausses.) `version` est en V=R : le texte lu en mémoire doit être celui du fichier.
+    if "_version" in d:
+        try:
+            dans_fichier = texte(machonm.MachO(noyau).octets(d["_version"], 120))
+        except (OSError, ValueError):
+            dans_fichier = ""
+        en_memoire = texte(octets(cmd, d["_version"], 120))
+        if dans_fichier and en_memoire != dans_fichier:
+            print("⚠  %s n'est PAS le noyau de l'invité : fichier « %s », mémoire « %s »"
+                  % (noyau, dans_fichier[:60], en_memoire[:60]))
+            print("   (copier le /mach_kernel de l'invité ; rien n'est symbolisé)")
+            cmd.close()
+            sys.exit(2)
+        print("noyau : %s" % dans_fichier)
     regs = cmd("info registers -a")
     cpus = []
     for bloc in re.split(r"\n(?=CPU#)", regs):
@@ -212,21 +272,26 @@ def main():
     # CPU arrêté dans panic() : ses arguments variables (r4-r10 rangés à
     # r1+0x9c par le prologue, cadre de 0x80) et sa pile, par la MMU de CE CPU
     # (piles noyau hors V=R) : `cpu N` puis `x`.
-    lo, hi = d.get("_panic", 0), d.get("_log", 0)
+    lo = d.get("_panic", 0)
+    # fin de panic() : le symbole de texte suivant (_log dans le 10.4.6)
+    hi = next((a for a, _ in t if a > lo), lo) if lo else 0
+    off_args, reg_fmt, origine = prologue_panic(noyau, lo) if lo else (0x9c, 24, "?")
     for n, p, gpr in cpus:
         if not (lo <= p < hi) or 1 not in gpr:
             continue
         cmd("cpu %d" % n)
         r1 = gpr[1]
-        args = mots(cmd, r1 + 0x9c, 7, virt=True)
-        if not fmt and gpr.get(24):
+        print("CPU %d dans panic (%08x) ; arguments à r1+0x%x, format dans r%d (%s)"
+              % (n, p, off_args, reg_fmt, origine))
+        args = mots(cmd, r1 + off_args, 7, virt=True)
+        if not fmt and gpr.get(reg_fmt):
             # panic() remet panicstr à 0 au retour de Debugger(), AVANT la
-            # boucle finale ; le format reste dans r24 (mr r24,r3 au prologue)
+            # boucle finale ; le format reste dans r24 (mr r24,r3 au prologue du 10.4.6)
             b = bytearray()
-            for w in mots(cmd, gpr[24], 64, virt=True):
+            for w in mots(cmd, gpr[reg_fmt], 64, virt=True):
                 b += w.to_bytes(4, "big")
             fmt = texte(bytes(b))
-            print("  format (r24 = %08x) « %s »" % (gpr[24], fmt.rstrip()))
+            print("  format (r%d = %08x) « %s »" % (reg_fmt, gpr[reg_fmt], fmt.rstrip()))
         print("CPU %d dans panic : arguments %s" % (n, " ".join("%08x" % a for a in args)))
         if fmt and args:
             print("  texte : %s" % formater(cmd, fmt, args).rstrip())
