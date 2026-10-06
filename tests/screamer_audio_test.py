@@ -44,14 +44,18 @@ typedef struct { DBDMA_channel channels[1]; } DBDMAState;
 #define container_of(p,t,m) ((t *)(p))
 typedef struct { DBDMA_channel *channel; int len; } DBDMA_io;
 typedef struct {
-  void *voice; int samples; unsigned shift;
+  void *audio_be; void *voice; int samples; unsigned shift;
   uint32_t wpos, rpos, rate; int running;
   unsigned regs[6]; uint8_t *mixbuf; DBDMA_io io; uint32_t io_cmdptr; bool io_ended;
 } ScreamerState;
 static uint8_t output[512];
 static unsigned written, limit = 64, kicks;
-static size_t AUD_write(void *v, void *data, size_t n) {
-  (void)v; n=MIN(n,limit); assert(written+n<=sizeof(output));
+/* QEMU 11.1.2 : audio_be_write(s->audio_be, voix, …) a remplacé AUD_write ;
+   le témoin vérifie que le PCM part bien vers le backend du device. */
+static int be_token;
+#define BE ((void *)&be_token)
+static size_t audio_be_write(void *be, void *v, void *data, size_t n) {
+  (void)v; assert(be==BE); n=MIN(n,limit); assert(written+n<=sizeof(output));
   memcpy(output+written,data,n); written+=n; return n;
 }
 static void pmac_screamer_tx_transfer(ScreamerState *s) {
@@ -93,7 +97,7 @@ test = r'''
 int main(void) {
   uint8_t pcm[16]; memset(pcm,0x11,sizeof(pcm));
   DBDMA_channel channel={{RUN|ACTIVE,0},0,{1},{0,0,0,0,0,0}};
-  ScreamerState s={.samples=4,.shift=2,.wpos=4,.mixbuf=pcm,.io={&channel,0}};
+  ScreamerState s={.audio_be=BE,.samples=4,.shift=2,.wpos=4,.mixbuf=pcm,.io={&channel,0}};
   limit=4; screamerspk_callback(&s,16);
   /* Le compteur de trames suit le DMA, pas la sortie : jouer ce qui est
      déjà dans l'anneau ne le fait pas avancer (saccades DOOM 3, 29/09). */
@@ -166,7 +170,7 @@ int main(void) {
 
   uint8_t ring[256];
   memset(ring, 0x33, sizeof(ring));
-  ScreamerState w={.samples=64,.shift=2,.rate=44100,.wpos=16,.mixbuf=ring,.io={&channel,0}};
+  ScreamerState w={.audio_be=BE,.samples=64,.shift=2,.rate=44100,.wpos=16,.mixbuf=ring,.io={&channel,0}};
   written=0; limit=512;
   screamerspk_callback(&w, 64); /* 16 trames < réserve 32 : silence, PCM conservé */
   assert(w.rpos==0 && w.wpos==16 && w.running==0 && written==64);
@@ -180,7 +184,7 @@ int main(void) {
   memset(wrapb, 0x11, sizeof(wrapb));
   memset(wrapb + 12, 0xAB, 4);
   memset(wrapb, 0xCD, 4);
-  ScreamerState wr={.samples=4,.shift=2,.wpos=5,.rpos=3,.mixbuf=wrapb,.io={&channel,0}};
+  ScreamerState wr={.audio_be=BE,.samples=4,.shift=2,.wpos=5,.rpos=3,.mixbuf=wrapb,.io={&channel,0}};
   written=0; limit=64;
   screamerspk_callback(&wr, 8);
   assert(written==8 && wr.rpos==5 && output[0]==0xAB && output[4]==0xCD);
@@ -212,17 +216,20 @@ reg_stub = r'''
 #define SCREAMER_DPRINTF(...) ((void)0)
 #define CODEC_CTRL1_RECALIBRATE 0x4
 typedef unsigned long hwaddr;
-typedef struct { void *voice; uint32_t rate; uint32_t regs[1]; uint32_t codec_ctrl_regs[8]; } ScreamerState;
+typedef struct { void *audio_be; void *voice; uint32_t rate; uint32_t regs[1]; uint32_t codec_ctrl_regs[8]; } ScreamerState;
 static int settings_calls;
 static void screamer_update_settings(ScreamerState *s) { (void)s; settings_calls++; }
 static int vol_mute, vol_l, vol_r, vol_calls;
-static void AUD_set_volume_out(void *v, int mute, int l, int r) {
-  (void)v; vol_mute=mute; vol_l=l; vol_r=r; vol_calls++;
+static int be_token;
+/* QEMU 11.1.2 : audio_be_set_volume_out_lr a remplacé AUD_set_volume_out. */
+static void audio_be_set_volume_out_lr(void *be, void *v, int mute, int l, int r) {
+  (void)v; assert(be==&be_token); vol_mute=mute; vol_l=l; vol_r=r; vol_calls++;
 }
 '''
 reg_test = r'''
 int main(void) {
   ScreamerState s = {0};
+  s.audio_be = &be_token;
   s.rate = 22050;
   screamer_control_write(&s, 0x000);
   assert(settings_calls==1 && s.rate==44100);
