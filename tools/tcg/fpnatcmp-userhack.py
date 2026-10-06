@@ -63,4 +63,11 @@ s = open(p).read()
 s = s.replace("if ((qatomic_fetch_inc(&fpn_total) & ((1u << 24) - 1)) == 0) {",
               "if ((qatomic_fetch_inc(&fpn_total) & ((1u << 16) - 1)) == 0) {")
 open(p, 'w').write(s)
+# idem pour les bilans AltiVec (x-vfp-native-verify, tcg/0034)
+p = os.path.join(Q, 'target/ppc/int_helper.c')
+s = open(p).read()
+for c in ("vfn_n", "vfnc_total"):
+    s = s.replace("if ((qatomic_fetch_inc(&%s) & ((1u << 26) - 1)) == 0) {" % c,
+                  "if ((qatomic_fetch_inc(&%s) & ((1u << 16) - 1)) == 0) {" % c)
+open(p, 'w').write(s)
 print('ok')

@@ -3425,3 +3425,190 @@ Même binaire des deux côtés : seul `x-fp-native-cmp` change. Attendu : DOOM 3
   `v1-*`, `v2-*`, `b2*`, `desk-qemu.log`, `mb2-qemu.log`), `prof-*.txt` et `cats.py` (relevés
   `perf` du §33.1), `seq.sh`/`vm.sh`/`start2.py` (la campagne invitée).
 - Banc linux-user : `tools/tcg/fpnatcmp-userhack.py` (la copie `~/src/qemu-fpu`).
+
+---
+
+## 34. Le flottant AltiVec restant : comparaisons et conversions natives (06/10/2026)
+
+Suite du §33, même méthode. PC x86-64, copie `~/src/qemu-fp` (référence + 0025-0029 + 0033),
+patch `patches/tcg/0034-ppc-vfp-native-cmp.patch`, propriétés `x-vfp-native-cmp` et
+`x-vfp-native-cmp-verify` (éteintes par défaut), lanceur `VFPNATIVECMP=1` / `VFPNCMPVERIFY=1`.
+
+### 34.1 Les chiffres
+
+**Parts** (relevés `perf` du §33.1, pris avant `x-vfp-native`) : le softfloat AltiVec pesait
+1,22 % du temps vCPU de DOOM 3 et 1,36 % d'UT2004 — DOOM 3 surtout dans les comparaisons
+(`float32_compare_quiet` 0,42 %, `helper_vcmpgtfp` 0,17 %, `helper_vcmpgefp` 0,04 %, plus leur
+part de `float32_unpack_canonical`), UT2004 surtout dans `vcfsx` (`int32_to_float32` 0,23 %,
+`float32_scalbn` 0,36 %, `parts64_scalbn` 0,32 %, `helper_vcfsx` 0,08 %). Marble Blast (relevé
+neuf, `perf` de 25 s en jeu dans la VM de dev, `bench/tcg/fpcmp34/ref1`) : **~0,3 %** en tout,
+Marble Blast n'est pas un jeu AltiVec (§2.2).
+
+**Fréquences** (vérificateurs, VM de dev, bureau + Marble Blast 120 s, ppc64 SMP=2, options de
+production) :
+
+| instruction | en 120 s | par seconde | par le chemin court de 0034 |
+|---|---|---|---|
+| `vcfsx` | 3 703 468 | ~31 000 | 100 % |
+| `vctsxs` | 1 202 037 | ~10 000 | 100 % |
+| `vcmpgefp` | 224 680 | ~1 900 | 100 % |
+| `vcfux` | 28 085 | ~230 | 100 % |
+| `vcmpeqfp`, `vcmpgtfp`, `vcmpbfp`, `vctuxs` | 0 | — | — |
+
+**Pourquoi `vmaddfp`/`vsubfp` quittent le chemin court de `x-vfp-native`** : le vérificateur
+de 0022 classe désormais chaque repli (première raison, dans l'ordre : porte de `vec_status`,
+opérande dénormal, opérande infini ou NaN, résultat infini, résultat minuscule ; dénormal et
+minuscule séparés selon VSCR[NJ]). Même partie de Marble Blast :
+
+| | porte | dénormal (NJ=1) | inf/NaN | minuscule (NJ=1) |
+|---|---|---|---|---|
+| `vsubfp` | 174 | **1 188 352** | 0 | **596 269** |
+| `vmaddfp` | 174 | **1 172 480** | 168 510 | 26 |
+| `vnmsubfp` | 0 | 0 | 168 510 | 56 170 |
+| `vaddfp` | 482 | 0 | 0 | 0 |
+
+**Tiger tourne avec VSCR[NJ] = 1** (mode non-Java) et ces replis sont presque tous des
+**dénormaux en entrée que NJ fait mettre à zéro** et des **résultats minuscules que NJ met à
+zéro** : ~3,3 M replis en 120 s (~28 000/s, ~42 % des `vaddfp`…`vnmsubfp` de la partie). Le
+chemin court de 0003/0022 les refuse (« un dénormal en entrée va au logiciel, qui le met à
+zéro sous NJ »). **Pas traité ici** : le reproduire exactement demande, dans l'émetteur, la mise à
+zéro des voies dénormales et le drapeau `input_denormal_flushed` à poser dans `vec_status`
+(entrées), puis la mise à zéro des résultats minuscules avec `output_denormal_flushed`,
+`underflow` et `inexact` (sorties) — chacun à prouver comme ici. Coût actuel estimé : ~150 ns
+par repli (appel, tentative à 4 voies, boucle softfloat), soit ~0,4 % d'un vCPU sur Marble
+Blast ; **la suite logique**, à chiffrer d'abord sur DOOM 3.
+
+### 34.2 La conception
+
+Huit sortes de plus pour l'op `INDEX_op_ppc_vfp` de 0022 (`PVF_CMPEQ` = 4 … `PVF_CTSXS` = 11),
+même allocation (aucun opérande TCG, `CALL_CLOBBER`), même talon hors ligne, émetteur x86_64
+seulement (`tcg_out_ppc_vfp_cmp`, VEX.128) ; modèle C ligne à ligne `vfnc_x86()` (bloc
+« vfp-native-cmp » de `int_helper.c`), qui sert au vérificateur et à la preuve hôte.
+
+| instructions | chemin court | sinon |
+|---|---|---|
+| `vcmpeqfp` `vcmpgefp` `vcmpgtfp` `vcmpbfp` | chaque voie de vA et vB ni NaN ni dénormale (`t = x << 1` : `t == 0` ou `0x01000000 ≤ t ≤ 0xff000000`, testé sans branchement par `vpminud`) : `vcmpps` (EQ_OQ, b ≤ a, b < a ; `vcmpbfp` : bit 31 = b < a, bit 30 = a < −b) ; **tout état de `vec_status`** | le helper sans Rc |
+| formes Rc | **CR6 calculé depuis vD en ops TCG** (`gen_vfnc_cr6` : toutes à un → 8, aucune → 2 ; `vcmpbfp.` : toutes nulles → 2), exactement le calcul des helpers `_dot` ; l'op n'écrit donc jamais de globale TCG | — |
+| `vcfsx` `vcfux` | porte de `x-vfp-native` (`vfp_can_use_fpu` : inexact déjà posé, arrondi au plus proche, pas de rebiais) : `vcvtdq2ps` (`vcfux` : `(b >> 16)·2^16 + (b & 0xffff)`, deux conversions exactes et une addition arrondie), puis `× 2^-uim`, exact (résultat nul ou ≥ 2^-31) | le helper |
+| `vctsxs` `vctuxs` | **toujours** : `b × 2^uim` (exact, ou ±∞ qui sature de la même façon), `vcvttps2dq`, saturation et VSCR[SAT] de `cvtsdsw`/`cvtsduw` (`vctuxs` : ≥ 2^31 par `x − 2^31`, ≤ −1 → 0 saturé), NaN → 0 sans SAT ; VSCR[SAT] = 1 écrit dans `env->vscr_sat` si une voie a saturé | — |
+
+Pourquoi c'est exact : sur des voies ni NaN ni dénormales, `float32_compare_quiet` ne lève
+aucun drapeau et la mise à zéro des entrées (NJ) ne change rien ; `int32_to_float32` sous la
+porte ne peut lever qu'inexact, déjà posé ; le helper `vct*` travaille sur une **copie** de
+`vec_status` en arrondi vers zéro (aucun drapeau ne s'échappe) et passe par le double, où le
+produit par 2^uim est exact comme en simple (un dénormal tronque à 0 avec ou sans NJ).
+
+**Porte de l'hôte** : `TCG_TARGET_HAS_ppc_vfp_cmp` (0 par défaut, x86_64 = celle de 0022) ;
+**sur arm64 la propriété ne change rien**, pendant NEON (`fcmeq`/`fcmge`/`fcmgt`, `scvtf`/`ucvtf`
+à virgule fixe, `fcvtzs`/`fcvtzu` à virgule fixe, qui saturent déjà) à écrire et prouver sur le
+M4 (`vfptest c` donne l'empreinte de référence ci-dessous).
+
+**Vérificateur** `x-vfp-native-cmp-verify` : `helper_vfn_save` (de 0022) sauve aussi VSCR[SAT] ;
+après l'op (et après CR6), `helper_vfnc_verify` — helper qui lit les globales, CR6 est donc en
+mémoire — refait le helper d'origine (`_dot` pour les formes Rc) depuis l'état sauvé et compare
+vD, `vec_status` entier, VSCR[SAT] et CR6, et vérifie que le modèle donne la même chose ; en cas
+d'écart il garde les valeurs du helper. Bilan `vfp-native-cmp-verify:` (vérifiés / chemin court
+/ divergences par instruction) et la ligne `replis` du §34.1 (avec `x-vfp-native-verify`).
+
+### 34.3 La preuve hôte
+
+**Modèle contre les helpers et le vrai softfloat** (`tools/tcg/vfpcmpproof.sh ~/src/qemu-fp
+200000` : helpers et modèle extraits **tels quels** de `int_helper.c`, liés à
+`fpu_softfloat.c.o`) : chaque instruction, chaque uim 0..31, seize états de `vec_status` (NJ,
+inexact posé ou non, `no_hardfloat`, drapeaux résiduels), catalogue (zéros signés, dénormaux,
+FLT_MIN, FLT_MAX, infinis, NaN silencieux et signalants, ±2^31 et voisins, 2^32, −1, −½, entiers
+limites) croisé puis aléatoire (dont les bords de saturation à 2^-uim près) ; vD, VSCR[SAT],
+`vec_status` entier et CR6 :
+
+| | vecteurs | chemin court | divergences |
+|---|---|---|---|
+| `vcmpeqfp`/`gefp`/`gtfp`/`bfp` | 3,25 M chacune | 1,28 M chacune | **0** |
+| `vcfux`, `vcfsx` | 102,4 M chacune | 25,6 M chacune | **0** |
+| `vctuxs`, `vctsxs` | 102,4 M chacune | 102,4 M | **0** |
+| total | **422 674 432** | 261 165 771 | **0** |
+
+Mutants du modèle (`vfpcmpproof-mut.sh`) : **8 sur 8 détectés** (dénormaux acceptés, NaN
+accepté, `vcmpgefp` strict, porte des `vcf*` retirée, moitié haute de `vcfux` fausse, saturation
+basse de `vctsxs` à −2^31 inclus, de `vctuxs` dès −½, NaN des conversions non annulé ; 12 313 à
+1 005 984 divergences).
+
+**Émetteur réel** (`tools/tcg/vfpcmp-user.sh`, le job `vfptest` mode c sous `qemu-ppc`
+linux-user de la copie `~/src/qemu-fpu`, §33.3) : référence, `x-vfp-native-cmp` et
+`x-vfp-native-cmp-verify` **identiques à l'octet** (NVEC = 262 144 : `78b16a04c80b79b7`), 6,4 M
+instructions vérifiées, **0 divergence** ; le mode d'origine de `vfptest` y donne l'empreinte de
+Tiger (`d516534e99880a90`). Mutants de l'émetteur et de la traduction (`tools/tcg/
+vfpcmp-mut.sh`) : **10 sur 10 détectés** — dénormaux acceptés par les comparaisons (80
+divergences), `vcmpgefp` strict, `vcmpbfp` contre b au lieu de −b, moitié haute de `vcfux` à
+2^15, porte des `vcf*` retirée (seul le vérificateur le voit : inexact de `vec_status`),
+`vctsxs` sans saturation haute, VSCR[SAT] jamais posé, `vctuxs` saturé dès −½, `vctuxs` ≥ 2^31
+sans le retrait de 2^31, CR6 « toutes » faux. (Un premier mutant 9, « r & ~big » retiré, était
+**équivalent** — la conversion indéfinie 0x80000000 de ces voies est absorbée par le OU — et a
+été remplacé.)
+
+**Patch** : posé avec `--fuzz=0` sur l'instantané des douze fichiers d'avant (référence +
+0029 + 0033), il redonne l'arbre à l'octet ; section « tcg/0034 » de `build_qemu_qfb.sh`.
+
+### 34.4 La preuve invitée
+
+Copie `disks/tiger-dev-fp.raw` (supprimée ensuite), options de production (+ `x-vfp-native`),
+job `vfptest` (`MODE=c` : quatre comparaisons et leurs formes Rc, quatre conversions × 32 uim,
+NJ = 0 puis 1, CR6 et VSCR[SAT] hachés ; le mode d'origine, `NVEC=262144`), compilé dans Tiger :
+
+| binaire, mode | `vfptest c` | `vfptest` (origine) | vérificateurs |
+|---|---|---|---|
+| ppc64 SMP=1, référence | `65be3233b17bc60b` | `d516534e99880a90` | — |
+| ppc64 SMP=1, `x-vfp-native-cmp` + vérif. | `65be3233b17bc60b` | `d516534e99880a90` | 103,4 M opérations, **0 divergence** |
+| ppc64 SMP=2, `x-vfp-native-cmp` + vérif. | `65be3233b17bc60b` | `d516534e99880a90` | 103,4 M, **0 divergence** |
+| ppc64 SMP=2, référence / `x-vfp-native-cmp` | `65be3233b17bc60b` / `65be3233b17bc60b` | — | — |
+
+Démarrage du bureau (SMP=2) sous les deux vérificateurs : 211 `vctsxs`, 0 divergence ; bureau +
+**Marble Blast 120 s** : 5,18 M opérations de 0034 vérifiées (toutes par le chemin court sauf
+une porte fermée au premier `vcfux`), **0 divergence**, avec les 8 M opérations de 0022 (0
+divergence) — §34.1.
+
+### 34.5 Gains
+
+Banc invité (`vfptest c 2000000`, ppc64 SMP=2, single-user, deux démarrages par mode
+entrelacés) :
+
+| boucle (2 M × 4 instructions) | référence | `x-vfp-native-cmp` | écart |
+|---|---|---|---|
+| `vcmpgtfp`/`vcmpgefp`/`vcmpeqfp` + `vsel` | 105 ms | **30 ms** | **−71 %** |
+| `vcmpbfp.` + branchement (+ `vsldoi`) | 123-126 ms | **74-75 ms** | **−40 %** |
+| `vcfsx` + `vctsxs` | 613-668 ms | **26 ms** (porte ouverte) / 298 ms (fermée) | **−96 %** / −53 % |
+| `vcfux` + `vctuxs` | 611-641 ms | **38 ms** / 292 ms | **−94 %** / −53 % |
+
+« Porte fermée » : un démarrage où rien n'a encore levé l'inexact de `vec_status` (le banc ne
+convertit que des entiers exacts) ; les `vcf*` passent alors par le helper, seuls les `vct*` sont
+natifs. Dans un jeu, le premier `vmaddfp` inexact l'ouvre pour toujours (Marble Blast :
+100 % des `vcfsx` par le chemin court). Hôte (`qemu-ppc`, `logs/vbench-user.txt`) : mêmes
+rapports (`vcmpgtfp + vsel` 265 → 77 ms, `vcfsx + vctsxs` 1 680 → 770 ms porte fermée).
+
+**Attendu en jeu** : le poste visé pesait ~0,7 % du temps vCPU de DOOM 3 (comparaisons) et
+~1-1,5 % d'UT2004 (`vcfsx`), dont l'op retire ~70-95 % : **DOOM 3 −0,5 %, UT2004 −1 %**
+(environ), Marble Blast rien de mesurable. Sous la dispersion d'une matrice à trois parties.
+
+### 34.6 Phase 2 : l'A/B en jeu (VM quotidienne, hôte au repos)
+
+    tools/tcg/matab.sh x86-vfpcmp 6 "ref:QEMU_BIN=$HOME/src/qemu-fp/build/qemu-system-ppc" \
+        "vc:QEMU_BIN=$HOME/src/qemu-fp/build/qemu-system-ppc VFPNATIVECMP=1" d3 fen
+    tools/tcg/matab.sh x86-vfpcmp-ut 6 "ref:QEMU_BIN=$HOME/src/qemu-fp/build/qemu-system-ppc" \
+        "vc:QEMU_BIN=$HOME/src/qemu-fp/build/qemu-system-ppc VFPNATIVECMP=1" ut fen
+    # une partie vérifiée de DOOM 3 : bilans « vfp-native-cmp-verify » et « replis » (NJ)
+    tools/tcg/matab.sh x86-vfpcmp-verif 1 "v:QEMU_BIN=$HOME/src/qemu-fp/build/qemu-system-ppc \
+        VFPNATIVECMP=1 VFPNCMPVERIFY=1 VFPNVERIFY=1" d3 fen
+    tools/tcg/matab.sh --restore
+
+Le binaire de `~/src/qemu-fp/build` porte 0033 **et** 0034 : les deux A/B (`FPNATIVECMP`,
+`VFPNATIVECMP`) se jouent sur le même binaire, et `FPNATIVECMP=1 VFPNATIVECMP=1` ensemble.
+
+### 34.7 Chemins
+
+- Patch : `patches/tcg/0034-ppc-vfp-native-cmp.patch` ; arbres `~/src/qemu-fp` (système) et
+  `~/src/qemu-fpu` (linux-user, `tools/tcg/fpnatcmp-userhack.py`).
+- Outils : `tools/tcg/vfpcmpproof.{c,sh}`, `vfpcmpproof-mut.sh`, `vfpcmp-user.sh`,
+  `vfpcmp-mut.sh` ; job `tools/guest/jobs/vfptest` (`MODE=c`, banc `vfptest c N`).
+- Journaux (non versionnés) : `bench/tcg/fpcmp34/` du dépôt principal — `logs/
+  vfpcmpproof-200k.log`, `logs/vmut2.log`, `logs/vuser-262144.log`, `logs/vbench-user.txt`,
+  `logs/seq34.log` et `g34/` (chaque démarrage, `qemu.log` compris : `desk`, `mb2`, `r1`, `v1`,
+  `v2`, `r2`, `c2`, `r2b`, `c2b`), `ref1/` (profil `perf` de Marble Blast).

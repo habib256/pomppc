@@ -17,11 +17,15 @@
  * chaque position, et des vecteurs aleatoires (dont r = a = c).
  * Un banc (BANC=N) : N x (2 vmaddfp + vaddfp + vsubfp) dependants, puis
  * N x 4 vperm dependants, temps en ms.
+ * Mode c (vfptest c [BANC], patches/tcg/0034, x-vfp-native-cmp) : voir plus bas.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#ifndef __APPLE__
+#include <altivec.h>      /* powerpc-linux-gnu-gcc -maltivec (tools/tcg/vfpcmp-user.sh) */
+#endif
 
 typedef unsigned int u32;
 typedef unsigned long long u64;
@@ -90,6 +94,220 @@ static const u32 CAT[] = {
 };
 #define NCAT (sizeof CAT / sizeof CAT[0])
 
+/*
+ * ---- mode c (patches/tcg/0034, x-vfp-native-cmp, docs/tcg-g4.md §34) ----
+ * vcmpeqfp vcmpgefp vcmpgtfp vcmpbfp et leurs formes Rc (CR6 relu par mfcr),
+ * vcfux vcfsx vctuxs vctsxs pour chaque uim 0..31 (VSCR[SAT] relu par
+ * mfvscr, remis a 0 avant chaque conversion), VSCR[NJ] a 0 puis a 1 ;
+ * catalogue croise sur une voie puis vecteurs aleatoires. Empreinte FNV.
+ *   vfptest c [BANC]
+ */
+typedef union { vector unsigned int v; vector float f; u32 u[4]; } W;
+
+#define U32X(M) M(0) M(1) M(2) M(3) M(4) M(5) M(6) M(7) M(8) M(9) M(10) \
+    M(11) M(12) M(13) M(14) M(15) M(16) M(17) M(18) M(19) M(20) M(21)   \
+    M(22) M(23) M(24) M(25) M(26) M(27) M(28) M(29) M(30) M(31)
+
+static void cvt(int op, int uim, const W *b, W *r)
+{
+    switch (op * 32 + uim) {
+#define CFU(k) case 0 * 32 + k: __asm__ __volatile__("vcfux %0,%1,%2" : "=v"(r->v) : "v"(b->v), "i"(k)); break;
+#define CFS(k) case 1 * 32 + k: __asm__ __volatile__("vcfsx %0,%1,%2" : "=v"(r->v) : "v"(b->v), "i"(k)); break;
+#define CTU(k) case 2 * 32 + k: __asm__ __volatile__("vctuxs %0,%1,%2" : "=v"(r->v) : "v"(b->v), "i"(k)); break;
+#define CTS(k) case 3 * 32 + k: __asm__ __volatile__("vctsxs %0,%1,%2" : "=v"(r->v) : "v"(b->v), "i"(k)); break;
+    U32X(CFU) U32X(CFS) U32X(CTU) U32X(CTS)
+    }
+}
+
+/* op 0..3 : eq ge gt b ; dot : forme Rc, CR6 rendu */
+static u32 cmpf(int op, int dot, const W *a, const W *b, W *r)
+{
+    u32 cr = 0;
+    switch (op * 2 + dot) {
+    case 0: __asm__ __volatile__("vcmpeqfp %0,%1,%2" : "=v"(r->v) : "v"(a->v), "v"(b->v)); break;
+    case 1: __asm__ __volatile__("vcmpeqfp. %0,%2,%3\n\tmfcr %1" : "=v"(r->v), "=r"(cr) : "v"(a->v), "v"(b->v) : "cr6"); break;
+    case 2: __asm__ __volatile__("vcmpgefp %0,%1,%2" : "=v"(r->v) : "v"(a->v), "v"(b->v)); break;
+    case 3: __asm__ __volatile__("vcmpgefp. %0,%2,%3\n\tmfcr %1" : "=v"(r->v), "=r"(cr) : "v"(a->v), "v"(b->v) : "cr6"); break;
+    case 4: __asm__ __volatile__("vcmpgtfp %0,%1,%2" : "=v"(r->v) : "v"(a->v), "v"(b->v)); break;
+    case 5: __asm__ __volatile__("vcmpgtfp. %0,%2,%3\n\tmfcr %1" : "=v"(r->v), "=r"(cr) : "v"(a->v), "v"(b->v) : "cr6"); break;
+    case 6: __asm__ __volatile__("vcmpbfp %0,%1,%2" : "=v"(r->v) : "v"(a->v), "v"(b->v)); break;
+    default: __asm__ __volatile__("vcmpbfp. %0,%2,%3\n\tmfcr %1" : "=v"(r->v), "=r"(cr) : "v"(a->v), "v"(b->v) : "cr6"); break;
+    }
+    return (cr >> 4) & 0xf;
+}
+
+static void setvscr(u32 x)
+{
+    W m;
+    m.u[0] = m.u[1] = m.u[2] = 0; m.u[3] = x;
+    vec_mtvscr((vector unsigned short)m.v);
+}
+static u32 getvscr(void)
+{
+    W m;
+    m.v = (vector unsigned int)vec_mfvscr();
+    return m.u[3];
+}
+
+static const u32 ICAT[] = {
+    0, 1, 2, 3, 0x7fffffff, 0x80000000, 0x80000001, 0xffffffff, 0xfffffffe,
+    0x00ffffff, 0x01000000, 0x01000001, 0x01000003, 0xff000001, 0xfefffffd,
+    0x7ffffffe, 0x7fffff80, 0x7fffffc0, 0xffffff7f, 0x80000080, 0x55555555,
+    0xaaaaaaab, 0x00010000, 0xffff0000, 0x0000ffff, 0x12345678,
+};
+#define NICAT (sizeof ICAT / sizeof ICAT[0])
+/* bords de la saturation : +-2^31, 2^32, -1, a uim pres */
+static const u32 FCAT2[] = {
+    0x4f000000, 0x4effffff, 0xcf000000, 0xcf000001, 0x4f800000, 0x4f7fffff,
+    0xbf800000, 0xbf7fffff, 0xbf000000, 0x80000000, 0x3f7fffff, 0x3effffff,
+    0x30000000, 0x2f800000, 0x307fffff, 0x30800000, 0xb0000000, 0xb0800000,
+    0x5f000000, 0xdf000000, 0x7f7fffff, 0xff7fffff,
+};
+#define NFCAT2 (sizeof FCAT2 / sizeof FCAT2[0])
+
+static u32 ilane(void)
+{
+    u32 r = rnd(), k = r % 8;
+    if (k < 2) return ICAT[(r >> 8) % NICAT];
+    if (k < 4) return rnd() >> ((r >> 8) % 32);
+    if (k < 5) return (u32)-(int)(rnd() >> ((r >> 8) % 32));
+    return rnd();
+}
+static u32 flane_c(void)
+{
+    u32 r = rnd(), k = r % 8;
+    if (k < 1) return FCAT2[(r >> 8) % NFCAT2];
+    if (k < 2) return CAT[(r >> 8) % NCAT];
+    if (k < 3) return mkf(r >> 31, 126 + (r >> 8) % 34, rnd());   /* 0.5 .. 2^33 */
+    if (k < 4) return mkf(r >> 31, 158 - (r >> 8) % 32, (rnd() & 0x7fffff) | (r & 1 ? 0x7fff00 : 0));
+    return lane();
+}
+
+static void recc(const W *r, u32 x)
+{
+    acc((const V *)r);
+    hh[0] = (hh[0] ^ x) * 16777619u;
+}
+
+static void mode_c(long nrand)
+{
+    char line[256];
+    unsigned nj, x, y, i, op, uim, dot;
+    long n;
+    W a, b, r;
+
+    for (nj = 0; nj < 2; nj++) {
+        u32 vs = nj ? 0x00010000 : 0;
+        /* comparaisons */
+        for (op = 0; op < 4; op++) {
+            memset(hh, 0, sizeof hh);
+            setvscr(vs);
+            for (x = 0; x < NCAT + NFCAT2; x++) {
+                for (y = 0; y < NCAT + NFCAT2; y++) {
+                    for (i = 1; i < 4; i++) {
+                        a.u[i] = mkf(i & 1, 120 + i, 0x123456 * i);
+                        b.u[i] = mkf(0, 118 + i * 2, 0x654321 * i);
+                    }
+                    a.u[0] = x < NCAT ? CAT[x] : FCAT2[x - NCAT];
+                    b.u[0] = y < NCAT ? CAT[y] : FCAT2[y - NCAT];
+                    for (dot = 0; dot < 2; dot++) {
+                        u32 cr = cmpf(op, dot, &a, &b, &r);
+                        recc(&r, cr);
+                        /* les quatre voies egales : CR6 « toutes » */
+                        b.u[1] = a.u[1]; b.u[2] = a.u[2]; b.u[3] = a.u[3];
+                        cr = cmpf(op, dot, &a, &b, &r);
+                        recc(&r, cr);
+                    }
+                }
+            }
+            for (n = 0; n < nrand; n++) {
+                for (i = 0; i < 4; i++) {
+                    a.u[i] = flane_c(); b.u[i] = flane_c();
+                    if ((rnd() & 7) == 0) b.u[i] = a.u[i] ^ ((rnd() & 1) ? 0x80000000u : 0);
+                }
+                for (dot = 0; dot < 2; dot++) {
+                    u32 cr = cmpf(op, dot, &a, &b, &r);
+                    recc(&r, cr);
+                }
+            }
+            snprintf(line, sizeof line, "NJ=%u %s : %ld, h=%08x%08x%08x%08x\n", nj,
+                     (const char *[]){ "vcmpeqfp", "vcmpgefp", "vcmpgtfp", "vcmpbfp" }[op],
+                     (long)((NCAT + NFCAT2) * (NCAT + NFCAT2) * 4 + nrand * 2),
+                     hh[0], hh[1], hh[2], hh[3]);
+            out(line);
+        }
+        /* conversions, chaque uim ; VSCR[SAT] remis a 0 avant chacune */
+        for (op = 0; op < 4; op++) {
+            memset(hh, 0, sizeof hh);
+            for (uim = 0; uim < 32; uim++) {
+                unsigned nc = op < 2 ? NICAT : NCAT + NFCAT2;
+                for (x = 0; x < nc; x++) {
+                    for (i = 0; i < 4; i++) {
+                        b.u[i] = op < 2 ? ICAT[(x + i * 7) % NICAT]
+                               : (x + i * 5) % nc < NCAT ? CAT[(x + i * 5) % nc]
+                               : FCAT2[(x + i * 5) % nc - NCAT];
+                    }
+                    setvscr(vs);
+                    cvt(op, uim, &b, &r);
+                    recc(&r, getvscr());
+                }
+                for (n = 0; n < nrand / 32; n++) {
+                    for (i = 0; i < 4; i++) {
+                        b.u[i] = op < 2 ? ilane() : flane_c();
+                    }
+                    setvscr(vs);
+                    cvt(op, uim, &b, &r);
+                    recc(&r, getvscr());
+                }
+            }
+            snprintf(line, sizeof line, "NJ=%u %s : 32 uim, h=%08x%08x%08x%08x\n", nj,
+                     (const char *[]){ "vcfux", "vcfsx", "vctuxs", "vctsxs" }[op],
+                     hh[0], hh[1], hh[2], hh[3]);
+            out(line);
+        }
+    }
+    snprintf(line, sizeof line, "empreinte %016llx\n", fnv);
+    fputs(line, stdout);
+}
+
+/* bancs de mode c : n x 4 instructions de chaque sorte, dependantes */
+static void banc_c(long banc)
+{
+    struct timeval t0, t1;
+    W a, b, k, r;
+    long n;
+    int i;
+    for (i = 0; i < 4; i++) {
+        a.u[i] = mkf(0, 127, i * 0x1000); b.u[i] = mkf(0, 127, 0x400000);
+        k.u[i] = 3 * i + 1;
+    }
+    setvscr(0);
+#define BANC(nom, corps)                                                     \
+    gettimeofday(&t0, 0);                                                    \
+    for (n = 0; n < banc; n++) { corps }                                     \
+    gettimeofday(&t1, 0);                                                    \
+    printf("banc-c : %ld x 4 %s en %ld ms (%08x)\n", banc, nom,              \
+           (long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_usec - t0.tv_usec) / 1000), \
+           r.u[0] ^ r.u[3]);
+    BANC("vcmpgtfp + vsel",
+         r.v = (vector unsigned int)vec_cmpgt(a.f, b.f); a.f = vec_sel(a.f, b.f, r.v);
+         r.v = (vector unsigned int)vec_cmpgt(b.f, a.f); b.f = vec_sel(b.f, a.f, r.v);
+         r.v = (vector unsigned int)vec_cmpge(a.f, b.f); a.f = vec_sel(b.f, a.f, r.v);
+         r.v = (vector unsigned int)vec_cmpeq(b.f, a.f); b.f = vec_sel(a.f, b.f, r.v);)
+    BANC("vcmpbfp.",
+         if (vec_all_in(a.f, b.f)) k.u[0]++; a.f = vec_sld(a.f, a.f, 4);
+         if (vec_any_gt(a.f, b.f)) k.u[1]++; b.f = vec_sld(b.f, b.f, 8);
+         if (vec_all_in(b.f, a.f)) k.u[2]++; a.f = vec_sld(a.f, a.f, 12);
+         if (vec_any_ge(b.f, a.f)) k.u[3]++; b.f = vec_sld(b.f, b.f, 4);
+         r = k;)
+    BANC("vcfsx + vctsxs",
+         r.f = vec_ctf((vector signed int)k.v, 3); k.v = (vector unsigned int)vec_cts(r.f, 2);
+         r.f = vec_ctf((vector signed int)k.v, 1); k.v = (vector unsigned int)vec_cts(r.f, 0);)
+    BANC("vcfux + vctuxs",
+         r.f = vec_ctf(k.v, 2); k.v = vec_ctu(r.f, 2);
+         r.f = vec_ctf(k.v, 0); k.v = vec_ctu(r.f, 1);)
+}
+
 int main(int argc, char **argv)
 {
     char line[256];
@@ -100,6 +318,15 @@ int main(int argc, char **argv)
     struct timeval t0, t1;
 
     setvbuf(stdout, 0, _IONBF, 0);
+    if (argc > 1 && !strcmp(argv[1], "c")) {
+        banc = argc > 2 ? atol(argv[2]) : 0;
+        if (banc > 0) {
+            banc_c(banc);
+        } else {
+            mode_c(nrand);
+        }
+        return 0;
+    }
     for (nj = 0; nj < 2; nj++) {
         vector unsigned short vs = (vector unsigned short)vec_splat_u32(0);
         V m;
