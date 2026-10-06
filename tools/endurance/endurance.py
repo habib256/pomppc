@@ -13,10 +13,15 @@ intervalle de confiance. Mode d'emploi : docs/endurance.md.
     python3 tools/endurance/endurance.py collecte SOCKET_MONITEUR DOSSIER
 
 Jamais sur la VM quotidienne : chaque instance démarre sur un recouvrement
-qcow2 NEUF (disks/tiger-endurance.qcow2 en lecture seule dessous, clone APFS
-du disque quotidien), avec son répertoire d'exécution
+qcow2 NEUF (disks/tiger-endurance.qcow2 en lecture seule dessous, copie du
+disque quotidien ARRÊTÉ), avec son répertoire d'exécution
 (.run/endurance/<campagne>-<i> : verrou, moniteur, port ssh publié), son port
 ssh (2240 + 10·i) et sans son (POMPPC_AUDIO_PROFILE=muet).
+
+Hôtes : macOS (M4, banc d'origine) et Linux x86-64 (PC, porté le 06/10/2026 :
+symboles par tools/re/machonm.py, PNG par Pillow ou ImageMagick, binaire
+réellement lancé lu dans la bannière de run_tiger.sh, texte de panique par
+tools/re/kpanic.py, charge de l'hôte relevée).
 """
 import argparse
 import datetime
@@ -45,6 +50,16 @@ TSSH = os.path.join(WT, "tools", "guest", "tssh.sh")
 BANC = os.path.join(MAIN, "bench", "endurance")
 RUNDIR = os.path.join(MAIN, ".run", "endurance")
 QUOTIDIEN = os.path.join(MAIN, "disks", "tiger.qcow2")
+KPANIC = os.path.join(WT, "tools", "re", "kpanic.py")
+# Le bras témoin « anciens défauts » (avant le 06/10/2026 sur le PC) : binaire de
+# référence et les leviers TCG allumés ce jour-là éteints (run_tiger.sh).
+ANCIENS_DEFAUTS = {"QEMU_FAST": "0", "TLBPRECISE": "0", "LMWINLINE": "0", "DCBZINLINE": "0",
+                   "JITREL32": "0", "FPNATIVECMP": "0", "VFPNATIVECMP": "0", "LMWVEC": "0",
+                   "JCWORD": "0"}
+# Durée de jeu par cycle (s) et silence de frames.csv toléré (s), par jeu ; DOOM 3
+# charge longtemps (cinématique puis niveau), UT2004 aussi.
+DUREE_JEU = {"mb": 150, "zen": 120, "ut": 300, "d3": 600}
+FIGE_JEU = {"mb": 120, "zen": 120, "ut": 180, "d3": 300}
 
 _verrou_journal = threading.Lock()
 
@@ -65,10 +80,49 @@ def wilson(k, n, z=1.96):
     return (max(0.0, c - m), min(1.0, c + m))
 
 
-def binaire_qemu(args):
+def en_png(ppm, png):
+    """PPM → PNG : sips sous macOS, Pillow ou ImageMagick ailleurs."""
+    if sys.platform == "darwin":
+        subprocess.run(["sips", "-s", "format", "png", ppm, "--out", png], capture_output=True)
+        return os.path.exists(png)
+    try:
+        from PIL import Image
+        Image.open(ppm).save(png)
+        return True
+    except Exception:           # Pillow absent ou PPM illisible : ImageMagick
+        subprocess.run(["convert", ppm, png], capture_output=True)
+        return os.path.exists(png)
+
+
+def autres_qemu():
+    """QEMU mac99 en marche sur l'hôte (les nôtres compris)."""
+    ps = subprocess.run(["ps", "-Ao", "comm=,args="], capture_output=True, text=True).stdout
+    n = 0
+    for l in ps.splitlines():
+        p = l.split(None, 1)
+        if len(p) == 2 and "mac99" in p[1] and os.path.basename(p[0]).startswith("qemu"):
+            n += 1
+    return n
+
+
+def heure_limite(hhmm):
+    """Prochaine occurrence de HH:MM (heure locale), en secondes epoch."""
+    h, m = (int(x) for x in hhmm.split(":"))
+    now = datetime.datetime.now()
+    t = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    if t <= now:
+        t += datetime.timedelta(days=1)
+    return t.timestamp()
+
+
+def binaire_qemu(args, chemin=None):
     """Chemin, date et empreinte du qemu-system-ppc64 réellement lancé : le
-    binaire de référence peut être reconstruit pendant une campagne."""
-    if getattr(args, "qemu", None):
+    binaire de référence peut être reconstruit pendant une campagne. `chemin`
+    est celui que run_tiger.sh annonce (« binaire : … ») : sur le PC, le
+    lanceur prend le binaire RAPIDE build-fast/ et non build/ (QEMU_FAST)."""
+    if chemin:
+        p = chemin
+    elif getattr(args, "qemu", None):
         p = args.qemu
     else:
         p = os.path.expanduser("~/src/qemu/build/qemu-system-ppc64")
@@ -78,6 +132,18 @@ def binaire_qemu(args):
                                                        time.localtime(os.path.getmtime(p))), h)
     except OSError:
         return p
+
+
+def env_campagne(args):
+    """Variables passées à run_tiger.sh pour toute la campagne : --env K=V et,
+    avec --anciens-defauts, le bras témoin d'avant le 06/10."""
+    env = {}
+    if getattr(args, "anciens_defauts", False):
+        env.update(ANCIENS_DEFAUTS)
+    for kv in getattr(args, "env", None) or []:
+        k, _, v = kv.partition("=")
+        env[k] = v
+    return env
 
 
 # ------------------------------------------------------------------ une VM
@@ -96,6 +162,8 @@ class VM:
         self.port = None
         self.log = None
         self.sym = SYM
+        self.binaire = self.chemin_bin = None
+        self.etiquette = self.leviers = self.gpu = "?"
 
     @property
     def mon(self):
@@ -119,15 +187,25 @@ class VM:
                    POMPPC_SCRATCH=self.scr, DISK=self.disque, SMP=str(self.args.smp))
         env.pop("DBUS_DISPLAY", None)
         env.pop("QMP_SOCK", None)
+        env.pop("POMPPC_FRONTEND", None)
         if self.args.qemu:
             env["QEMU_BIN"] = self.args.qemu.replace("qemu-system-ppc64", "qemu-system-ppc")
         if self.args.extra:
             env["EXTRA_ARGS"] = self.args.extra
+        env.update(env_campagne(self.args))
+        if getattr(self.args, "fenetre", False):
+            # repli : fenêtre QEMU native au lieu de -display none (le backend GL
+            # de qgpu a son propre contexte EGL, mais si un pilote le refusait
+            # sans fenêtre, c'est le geste le moins intrusif)
+            env.pop("HEADLESS", None)
+            env["POMPPC_DISPLAY"] = "gtk" if sys.platform != "darwin" else "cocoa"
         self.log = os.path.join(dossier_log, "qemu.log")
         self.proc = subprocess.Popen([RUN_TIGER], cwd=WT, env=env, start_new_session=True,
                                      stdout=open(self.log, "w"), stderr=subprocess.STDOUT)
         t0 = time.time()
-        while time.time() - t0 < 60:
+        # 90 s et non 60 : les sondages de capacités de run_tiger.sh (une
+        # vingtaine de QEMU -S) s'allongent sur un hôte chargé
+        while time.time() - t0 < 90:
             if self.proc.poll() is not None:
                 return False
             try:
@@ -135,11 +213,28 @@ class VM:
                     self.port = int(f.read().strip() or 0)
                 if os.path.exists(self.mon):
                     hmp(self.mon, "info status", delai=5)
+                    self.lit_banniere()
                     return True
             except (OSError, ValueError):
                 pass
             time.sleep(1)
         return False
+
+    def lit_banniere(self):
+        """Ce que run_tiger.sh a réellement lancé : binaire (le RAPIDE sur le
+        PC par défaut), leviers allumés (ligne « ▶ Tiger … »), backend qgpu."""
+        try:
+            txt = open(self.log, errors="replace").read()
+        except OSError:
+            return
+        m = re.search(r"^  binaire : (.+)$", txt, re.M)
+        self.chemin_bin = m.group(1).strip() if m else None
+        m = re.search(r"^▶ Tiger \(QEMU [^,]*, (.*?)\) : (.*)$", txt, re.M)
+        self.etiquette = m.group(1) if m else "?"
+        self.leviers = m.group(2) if m else "?"
+        m = re.search(r"qgpu \(backend ([A-Za-z0-9_]+),", txt)
+        self.gpu = m.group(1) if m else "?"
+        self.binaire = "%s ; %s" % (self.etiquette, binaire_qemu(self.args, self.chemin_bin))
 
     def vivant(self):
         return self.proc is not None and self.proc.poll() is None
@@ -159,7 +254,10 @@ class VM:
 
     # --- invité
     def ssh(self, cmd, delai=60, entree=None):
-        env = dict(os.environ, TSSH_PORT=str(self.port or self.port_voulu))
+        # TSSH_MUX=0 : pas de connexion maîtresse partagée (tssh.sh la range dans
+        # .run/ du dépôt principal) ; une maîtresse restée sur un invité qui
+        # redémarre ou qui a gelé fait attendre chaque ssh jusqu'à ServerAlive
+        env = dict(os.environ, TSSH_PORT=str(self.port or self.port_voulu), TSSH_MUX="0")
         try:
             p = subprocess.run([TSSH, cmd], env=env, capture_output=True, text=True,
                                timeout=delai, input=entree)
@@ -181,9 +279,20 @@ class VM:
             return None
 
     def panique_en_cours(self):
-        """panicstr != 0 : panic() a été appelé (lu dans la mémoire de l'invité)."""
-        v = self.mot_noyau("panicstr")
-        return bool(v)
+        """panic() a été appelé : panicstr != 0 (lu dans la mémoire de
+        l'invité), OU un vCPU tourne dans panic(). panic() remet panicstr à 0
+        au retour de Debugger(), AVANT sa boucle finale (`b .`, tools/re/kpanic.py) :
+        le seul panicstr laissait passer une panique pour un gel."""
+        if self.mot_noyau("panicstr"):
+            return True
+        if self.sym.panic:
+            lo, hi = self.sym.panic
+            try:
+                cpus = lit_registres(hmp(self.mon, "info registers -a", delai=10))
+            except OSError:
+                return False
+            return any(lo <= r.get("NIP", 0) < hi for r in cpus.values())
+        return False
 
 
 # ------------------------------------------------------------- collecte
@@ -294,8 +403,26 @@ def collecte(vm_mon, dossier, sym, motif, notes=None):
             if os.path.exists(ppm) and os.path.getsize(ppm) > 1000:
                 break
             time.sleep(0.1)
-        subprocess.run(["sips", "-s", "format", "png", ppm, "--out",
-                        os.path.join(dossier, "ecran.png")], capture_output=True)
+        en_png(ppm, os.path.join(dossier, "ecran.png"))
+        # tools/re/kpanic.py, VM arrêtée : le texte de la panique reconstitué
+        # (format + arguments lus sur la pile de panic()), l'appelant, la pile
+        # et la fin du msgbuf. Sans boot-arg de débogage, Tiger n'alloue pas
+        # debug_buf : c'est souvent la SEULE source du texte.
+        kp = os.path.join(dossier, "kpanic.txt")
+        with open(kp, "w") as f:
+            try:
+                subprocess.run([sys.executable, KPANIC, os.path.join(sym.invite, "mach_kernel"),
+                                vm_mon], stdout=f, stderr=subprocess.STDOUT, timeout=600)
+            except subprocess.TimeoutExpired:
+                f.write("kpanic.py : délai dépassé\n")
+        kt = open(kp, errors="replace").read()
+        info["kpanic_sortie"] = kt[:12000]
+        for cle, motif in (("kpanic_format", r"format(?: \(r\d+ = [0-9a-f]+\))? « (.*?) »"),
+                           ("kpanic_texte", r"^  texte : (.*)$"),
+                           ("kpanic_appelant", r"^panic_caller = (.*)$")):
+            m = re.search(motif, kt, re.M)
+            if m:
+                info[cle] = m.group(1).strip()
         # panique : panicstr, debug_buf (texte complet que l'invité écrirait en NVRAM)
         pstr = mots(vm_mon, sym.symbole_noyau("panicstr"), 1)[0]
         info["panicstr"] = "0x%x" % pstr
@@ -408,7 +535,7 @@ def collecte(vm_mon, dossier, sym, motif, notes=None):
     ecr("incident.md", rapport_incident(info, texte))
     for f in ("ecran.ppm", "ecran-2.ppm"):
         p = os.path.join(dossier, f)
-        if os.path.exists(p) and f == "ecran-2.ppm":
+        if os.path.exists(p) and (f == "ecran-2.ppm" or os.path.exists(os.path.join(dossier, "ecran.png"))):
             os.remove(p)
     return info
 
@@ -418,6 +545,10 @@ def rapport_incident(info, texte):
          "- date : %s" % info.get("date"), "- cycle : %s" % info.get("cycle", "?"),
          "- instance : %s, QEMU : %s" % (info.get("instance", "?"), info.get("qemu", "?")),
          "- panicstr : %s %s" % (info.get("panicstr", "?"), info.get("panicstr_texte", "")),
+         "- kpanic.py : texte « %s » ; format « %s » ; appelant %s"
+         % (info.get("kpanic_texte", "-"), info.get("kpanic_format", "-"),
+            info.get("kpanic_appelant", "-")),
+         "- charge de l'hôte : %s" % info.get("charge", "?"),
          "- écran figé : %s ; NIP immobile : %s" % (info.get("ecran_fige"), info.get("nip_immobile")),
          "- kexts lus dans la mémoire (liste kmod) : %s" % info.get("kmods"),
          "- NIP sur 20 relevés : %s" % info.get("nip_echantillons"), ""]
@@ -435,6 +566,8 @@ def rapport_incident(info, texte):
                 l.extend("    - %s" % x for x in v)
             else:
                 l.append("- %s : %s" % (k, v))
+    if info.get("kpanic_sortie"):
+        l += ["", "## tools/re/kpanic.py (VM arrêtée)", "", "```", info["kpanic_sortie"].strip(), "```"]
     if texte:
         l += ["", "## Texte de panique (debug_buf)", "", "```", texte.strip(), "```"]
     if info.get("panique_symbolisee"):
@@ -442,40 +575,141 @@ def rapport_incident(info, texte):
         l.extend("- %s" % x for x in info["panique_symbolisee"])
     if info.get("panic_log"):
         l += ["", "## panic.log (démarrage suivant)", "", "```", info["panic_log"].strip(), "```"]
-    l += ["", "Fichiers : ecran.png, registres.txt (arrêt), registres-2.txt (3 s après `cont`), "
-          "kmods.txt, panique.txt, qemu.log.", ""]
+    l += ["", "Fichiers : ecran.png, kpanic.txt (texte, appelant, pile, msgbuf), registres.txt "
+          "(arrêt), registres-2.txt (3 s après `cont`), kmods.txt, panique.txt, qemu.log.", ""]
     return "\n".join(l)
 
 
-# ------------------------------------------------------------- un démarrage
+# ------------------------------------------------------------- une campagne
+def type_cycle(c):
+    """Type d'une ligne de cycles.jsonl (les campagnes du M4 n'en avaient pas)."""
+    return c.get("type") or ("jeu" if "jeu" in c else "demarrage")
+
+
 class Campagne:
-    def __init__(self, args):
+    """Un dossier bench/endurance/<nom>. Relancer avec le même --nom AJOUTE des
+    cycles (tranches) : la numérotation reprend, et le banc refuse de mêler
+    deux bras (variables de run_tiger.sh, QEMU imposé) dans un même dossier."""
+
+    def __init__(self, args, type_principal):
         self.args = args
+        self.type = type_principal
         self.nom = args.nom or time.strftime("%Y%m%d-%H%M")
         self.dir = os.path.join(BANC, self.nom)
         os.makedirs(self.dir, exist_ok=True)
         self.verrou = threading.Lock()
         self.fait = 0
         self.arret = False
+        self.noyau_vu = None
+        self.limite = heure_limite(args.jusqua) if getattr(args, "jusqua", None) else None
         self.jsonl = os.path.join(self.dir, "cycles.jsonl")
-        with open(os.path.join(self.dir, "campagne.json"), "w") as f:
-            json.dump({"args": vars(args), "debut": time.strftime("%Y-%m-%d %H:%M:%S"),
-                       "base": BASE, "worktree": WT, "qemu_binaire": binaire_qemu(args),
-                       "commit": subprocess.run(["git", "-C", WT, "rev-parse", "--short", "HEAD"],
-                                                capture_output=True, text=True).stdout.strip()},
-                      f, indent=1)
+        self.base = {}
+        if os.path.exists(self.jsonl):
+            for l in open(self.jsonl):
+                try:
+                    c = json.loads(l)
+                except ValueError:
+                    continue
+                t = type_cycle(c)
+                self.base[t] = max(self.base.get(t, 0), int(c.get("cycle", 0)))
+        self.compteurs = {}
+        bras = {"env": env_campagne(args), "qemu": args.qemu, "smp": args.smp, "extra": args.extra}
+        info = {"args": {k: v for k, v in vars(args).items() if k != "func"},
+                "debut": time.strftime("%Y-%m-%d %H:%M:%S"), "bras": bras,
+                "base": BASE, "worktree": WT, "invite": SYM.invite if SYM else None,
+                "noyau": SYM.version if SYM else None, "hote": " ".join(os.uname()),
+                "qemu_binaire": binaire_qemu(args),
+                "commit": subprocess.run(["git", "-C", WT, "rev-parse", "--short", "HEAD"],
+                                         capture_output=True, text=True).stdout.strip()}
+        cj = os.path.join(self.dir, "campagne.json")
+        if os.path.exists(cj):
+            ancien = json.load(open(cj))
+            if ancien.get("bras", bras) != bras:
+                raise SystemExit("campagne %s : autre bras (%s) que celui demandé (%s) : "
+                                 "prendre un autre --nom" % (self.nom, ancien.get("bras"), bras))
+        else:
+            json.dump(info, open(cj, "w"), indent=1, ensure_ascii=False)
+        with open(os.path.join(self.dir, "lancements.jsonl"), "a") as f:
+            f.write(json.dumps(info, ensure_ascii=False) + "\n")
+        # charge de l'hôte, relevée toutes les 10 s (une autre session peut
+        # charger l'hôte par moments : un LockTimeOut se lit avec elle)
+        self.charges = []
+        self.csv_charge = os.path.join(self.dir, "charge.csv")
+        threading.Thread(target=self._releve_charge, daemon=True).start()
+
+    def _releve_charge(self):
+        while True:
+            try:
+                l1, l5, _ = os.getloadavg()
+                q = autres_qemu()
+            except OSError:
+                l1 = l5 = q = -1
+            t = time.time()
+            with self.verrou:
+                self.charges.append((t, l1, q))
+                del self.charges[:-5000]
+            with open(self.csv_charge, "a") as f:
+                f.write("%s,%.2f,%.2f,%d\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), l1, l5, q))
+            time.sleep(10)
+
+    def charge_entre(self, t0, t1=None):
+        """Charge sur 1 min (début, max, fin) et QEMU mac99 en marche (max) entre t0 et t1."""
+        t1 = t1 or time.time()
+        with self.verrou:
+            r = [c for c in self.charges if t0 - 10 <= c[0] <= t1 + 10]
+        if not r:
+            l1 = os.getloadavg()[0]
+            return {"l1_debut": round(l1, 1), "l1_max": round(l1, 1), "l1_fin": round(l1, 1),
+                    "qemu_max": None}
+        return {"l1_debut": round(r[0][1], 1), "l1_max": round(max(c[1] for c in r), 1),
+                "l1_fin": round(r[-1][1], 1), "qemu_max": max(c[2] for c in r)}
+
+    def fini(self):
+        if self.arret:
+            return True
+        if self.limite and time.time() >= self.limite:
+            return True
+        if os.path.exists(os.path.join(self.dir, "ARRET")):     # touch ARRET : arrêt propre
+            return True
+        return False
 
     def prochain(self):
+        """Numéro du prochain cycle principal (démarrage ou jeu), None si fini."""
         with self.verrou:
-            if self.arret or self.fait >= self.args.n:
+            if self.fini() or self.fait >= self.args.n:
                 return None
             self.fait += 1
-            return self.fait
+            return self.base.get(self.type, 0) + self.fait
+
+    def numero(self, t):
+        """Numéro d'un cycle secondaire (les démarrages d'une campagne de jeu)."""
+        with self.verrou:
+            self.compteurs[t] = self.compteurs.get(t, 0) + 1
+            return self.base.get(t, 0) + self.compteurs[t]
 
     def note(self, res):
+        res.setdefault("date", time.strftime("%Y-%m-%d %H:%M:%S"))
         with self.verrou:
             with open(self.jsonl, "a") as f:
                 f.write(json.dumps(res, ensure_ascii=False) + "\n")
+
+    def verifie_noyau(self, sortie):
+        """Le noyau de l'invité est-il celui dont on a les symboles ? Sinon
+        panicstr se lirait à une fausse adresse : la campagne s'arrête."""
+        m = re.search(r"Darwin Kernel Version [0-9.]+", sortie)
+        if not m:
+            return True
+        v = m.group(0)
+        with self.verrou:
+            if self.noyau_vu:
+                return self.noyau_vu == v
+            self.noyau_vu = v
+        if v + ":" not in (SYM.version or ""):
+            journal("⚠  noyau de l'invité « %s », symboles de « %s » (%s) : campagne arrêtée"
+                    % (v, SYM.version, SYM.invite))
+            self.arret = True
+            return False
+        return True
 
 
 def attend_demarrage(vm, t0, delai, repos):
@@ -491,8 +725,8 @@ def attend_demarrage(vm, t0, delai, repos):
         if vu_ssh is None:
             if vm.repond():
                 vu_ssh = time.time()
-                code, out = vm.ssh("sysctl -n hw.ncpu; uptime; kextstat; "
-                                   "ls /Library/Logs/panic.log 2>/dev/null", delai=60)
+                code, out = vm.ssh("sysctl -n hw.ncpu; uname -v; uptime; pmset -g | grep -i sleep; "
+                                   "kextstat; ls /Library/Logs/panic.log 2>/dev/null", delai=60)
                 det = {"t_ssh": round(t), "sortie": out}
                 n = out.split("\n", 1)[0].strip()
                 if n.isdigit() and int(n) != vm.args.smp:
@@ -535,6 +769,59 @@ def recupere_panic_log(vm, info, dossier):
     info["panic_log_redemarrage"] = "pas de ssh en 300 s après system_reset"
 
 
+def incident(camp, vm, nom, etat, notes, t0, panic_log=True):
+    """Collecte d'un incident AVANT tout reset ; (chemin relatif, résumé)."""
+    inc = os.path.join(camp.dir, "incidents", "%s-%s" % (nom, etat))
+    notes = dict(notes, instance=vm.nom, qemu=vm.binaire or camp.args.qemu or "référence",
+                 leviers=vm.leviers, charge=camp.charge_entre(t0))
+    if vm.vivant():
+        info = collecte(vm.mon, inc, SYM, etat, notes)
+    else:
+        os.makedirs(inc, exist_ok=True)
+        info = dict(notes, motif=etat)
+    if vm.log and os.path.exists(vm.log) and os.path.isdir(inc):
+        shutil.copy(vm.log, os.path.join(inc, "qemu.log"))
+    if etat in ("panique", "gel") and vm.vivant() and panic_log \
+            and not camp.args.sans_panic_log:
+        recupere_panic_log(vm, info, inc)
+    p = os.path.join(inc, "panique.txt")
+    open(os.path.join(inc, "incident.json"), "w").write(json.dumps(info, indent=1, ensure_ascii=False))
+    open(os.path.join(inc, "incident.md"), "w").write(
+        rapport_incident(info, open(p).read() if os.path.exists(p) else ""))
+    return os.path.relpath(inc, camp.dir), resume_incident(info)
+
+
+def res_demarrage(camp, vm, t, num, depart, etat, det, t0):
+    """Ligne de cycles.jsonl d'un démarrage, et collecte s'il a échoué."""
+    a = camp.args
+    res = {"type": "demarrage", "cycle": num, "instance": vm.slot, "etat": etat,
+           "mode": a.mode if hasattr(a, "mode") else "jeu", "depart": depart,
+           "binaire": vm.binaire, "leviers": vm.leviers, "gpu": vm.gpu,
+           "duree": round(time.time() - t0), "t_ssh": det.get("t_ssh"), "port": vm.port,
+           "charge": camp.charge_entre(t0)}
+    if etat == "ok":
+        sortie = det.get("sortie", "")
+        ks = lit_kextstat(sortie)
+        oh = [x for x in ks if x[0].endswith("AppleUSBOHCI")]
+        if oh:
+            res["ohci"] = "0x%x" % oh[0][1]
+        if "/Library/Logs/panic.log" in sortie:
+            res["panic_log_present"] = True
+        m = re.search(r"^\s*sleep\s+(\d+)", sortie, re.M)
+        if m:
+            res["pmset_sleep"] = int(m.group(1))
+        camp.verifie_noyau(sortie)
+        journal("[%d] %s #%d : ok (%s, ssh à %s s, charge %s)"
+                % (vm.slot, t, num, depart, det.get("t_ssh"), res["charge"]["l1_max"]))
+    else:
+        journal("[%d] %s #%d : INCIDENT %s (%s)" % (vm.slot, t, num, etat, det))
+        prefixe = "%04d" % num if t == camp.type else "%s%04d" % (t[0], num)
+        res["incident"], res["resume"] = incident(camp, vm, prefixe, etat,
+                                                  {"cycle": num, "t": det.get("t")}, t0)
+    return res
+
+
+# ------------------------------------------------------------- démarrages
 def instance(camp, slot):
     a = camp.args
     vm = VM(camp.nom, slot, a)
@@ -548,10 +835,11 @@ def instance(camp, slot):
             cyc = os.path.join(camp.dir, "cycles", "%04d" % i)
             os.makedirs(cyc, exist_ok=True)
             t0 = time.time()
+            depart = a.mode
             if not vivante or a.mode == "froid":
                 vm.quitte()
                 if not vm.demarre(cyc):
-                    res = {"cycle": i, "instance": slot, "etat": "lancement",
+                    res = {"type": "demarrage", "cycle": i, "instance": slot, "etat": "lancement",
                            "detail": open(vm.log).read()[-2000:]}
                     camp.note(res)
                     journal("[%d] #%d : QEMU ne démarre pas (%s)" % (slot, i, vm.log))
@@ -563,7 +851,7 @@ def instance(camp, slot):
                     continue
                 echecs = 0
                 vivante = True
-                vm.binaire = binaire_qemu(a)
+                depart = "froid"
                 t0 = time.time()
             elif a.mode == "reboot":
                 vm.ssh("echo tiger974 | sudo -S shutdown -r now", delai=30)
@@ -575,38 +863,12 @@ def instance(camp, slot):
                 hmp(vm.mon, "system_reset")
                 t0 = time.time()
             etat, det = attend_demarrage(vm, t0, a.delai, a.repos)
-            res = {"cycle": i, "instance": slot, "etat": etat, "mode": a.mode,
-                   "binaire": getattr(vm, "binaire", ""),
-                   "duree": round(time.time() - t0),
-                   "t_ssh": det.get("t_ssh"), "port": vm.port}
+            res = res_demarrage(camp, vm, "demarrage", i, depart, etat, det, t0)
             if etat == "ok":
                 open(os.path.join(cyc, "sante.txt"), "w").write(det.get("sortie", ""))
-                ks = lit_kextstat(det.get("sortie", ""))
-                oh = [x for x in ks if x[0].endswith("AppleUSBOHCI")]
-                if oh:
-                    res["ohci"] = "0x%x" % oh[0][1]
-                if "/Library/Logs/panic.log" in det.get("sortie", ""):
-                    res["panic_log_present"] = True
-                journal("[%d] #%d : ok (ssh à %s s)" % (slot, i, det.get("t_ssh")))
-                if a.mode == "froid":
-                    shutil.rmtree(cyc, ignore_errors=True) if not a.garde else None
+                if a.mode == "froid" and not a.garde:
+                    shutil.rmtree(cyc, ignore_errors=True)
             else:
-                journal("[%d] #%d : INCIDENT %s (%s)" % (slot, i, etat, det))
-                inc = os.path.join(camp.dir, "incidents", "%04d-%s" % (i, etat))
-                notes = {"cycle": i, "instance": vm.nom, "qemu": a.qemu or "référence",
-                         "t": det.get("t")}
-                info = collecte(vm.mon, inc, SYM, etat, notes) if vm.vivant() else dict(notes, motif=etat)
-                if vm.log and os.path.exists(vm.log):
-                    shutil.copy(vm.log, os.path.join(inc, "qemu.log")) if os.path.isdir(inc) else None
-                if etat in ("panique", "gel") and vm.vivant() and not a.sans_panic_log:
-                    recupere_panic_log(vm, info, inc)
-                    open(os.path.join(inc, "incident.json"), "w").write(
-                        json.dumps(info, indent=1, ensure_ascii=False))
-                    open(os.path.join(inc, "incident.md"), "w").write(
-                        rapport_incident(info, open(os.path.join(inc, "panique.txt")).read()
-                                         if os.path.exists(os.path.join(inc, "panique.txt")) else ""))
-                res["incident"] = os.path.relpath(inc, camp.dir)
-                res["resume"] = resume_incident(info)
                 vm.quitte()
                 vivante = False
             camp.note(res)
@@ -619,46 +881,96 @@ def instance(camp, slot):
 
 def resume_incident(info):
     """Une ligne : texte de panique ou PC symbolisés."""
-    s = info.get("panicstr_texte", "")
+    s = (info.get("kpanic_texte") or info.get("panicstr_texte") or info.get("kpanic_format")
+         or info.get("jeu_texte") or "")
     cpus = info.get("cpus", [])
     pcs = "; ".join("cpu%s %s" % (c["cpu"], c.get("NIP", "?").split(" ", 1)[-1]) for c in cpus)
-    return (s.strip()[:120] + " | " if s else "") + pcs
+    return (s.strip()[:160] + " | " if s else "") + pcs
 
 
 # ------------------------------------------------------------- rapport
+def mediane(v):
+    v = sorted(v)
+    return v[len(v) // 2] if v else None
+
+
 def rapport(dossier):
     cycles = []
     with open(os.path.join(dossier, "cycles.jsonl")) as f:
         for l in f:
-            cycles.append(json.loads(l))
-    n = len([c for c in cycles if c["etat"] != "lancement"])
-    types = {}
-    for c in cycles:
-        if c["etat"] in ("lancement",):
-            continue
-        types.setdefault(c["etat"], []).append(c)
+            try:
+                cycles.append(json.loads(l))
+            except ValueError:
+                pass
     camp = json.load(open(os.path.join(dossier, "campagne.json")))
     l = ["# Banc d'endurance — %s" % os.path.basename(dossier.rstrip("/")), "",
          "Paramètres : `%s`" % " ".join("%s=%s" % (k, v) for k, v in camp["args"].items()
-                                          if v not in (None, False) and k != "func"),
-         "Commit du banc : %s ; base : %s" % (camp.get("commit"), camp.get("base")), "",
-         "| type | n | taux | IC 95 % (Wilson) |", "|---|---|---|---|"]
-    for t in sorted(types, key=lambda x: (x != "ok", x)):
-        k = len(types[t])
-        lo, hi = wilson(k, n)
-        l.append("| %s | %d / %d | %.1f %% | %.1f – %.1f %% |" % (t, k, n, 100 * k / n, 100 * lo, 100 * hi))
-    if "panique" not in types:
-        lo, hi = wilson(0, n)
-        l.append("| panique | 0 / %d | 0 %% | 0 – %.1f %% |" % (n, 100 * hi))
-    ts = [c["t_ssh"] for c in types.get("ok", []) if c.get("t_ssh")]
-    if ts:
-        ts.sort()
-        l += ["", "Démarrage jusqu'au ssh : médiane %d s, min %d, max %d." % (ts[len(ts) // 2], ts[0], ts[-1])]
-    inc = [c for c in cycles if c.get("incident")]
-    if inc:
-        l += ["", "## Incidents", ""]
-        for c in inc:
-            l.append("- #%d (%s) `%s` : %s" % (c["cycle"], c["etat"], c["incident"], c.get("resume", "")))
+                                          if v not in (None, False, []) and k != "func"),
+         "Bras (variables de run_tiger.sh) : `%s`" % (camp.get("bras", {}).get("env") or "défauts du lanceur"),
+         "Commit du banc : %s ; base : %s ; noyau des symboles : %s"
+         % (camp.get("commit"), camp.get("base"), camp.get("noyau", "?")),
+         "Hôte : %s" % camp.get("hote", "?")]
+    bins = sorted({c.get("binaire") for c in cycles if c.get("binaire")})
+    levs = sorted({c.get("leviers") for c in cycles if c.get("leviers") and c.get("leviers") != "?"})
+    if bins:
+        l += ["", "Binaires lancés :"] + ["- `%s`" % b for b in bins]
+    if levs:
+        l += ["", "Leviers annoncés par run_tiger.sh :"] + ["- `%s`" % x for x in levs]
+    types = {}
+    for c in cycles:
+        types.setdefault(type_cycle(c), []).append(c)
+    for t in sorted(types, key=lambda x: x != "demarrage"):
+        cs = [c for c in types[t] if c["etat"] != "lancement"]
+        n = len(cs)
+        l += ["", "## %s (%d cycles)" % ("Démarrages" if t == "demarrage" else "Cycles de jeu", n), "",
+              "| type | n | taux | IC 95 % (Wilson) |", "|---|---|---|---|"]
+        etats = {}
+        for c in cs:
+            etats.setdefault(c["etat"], []).append(c)
+        for e in ("panique", "gel"):
+            etats.setdefault(e, [])
+        for e in sorted(etats, key=lambda x: (x != "ok", x)):
+            k = len(etats[e])
+            lo, hi = wilson(k, n)
+            l.append("| %s | %d / %d | %.1f %% | %.1f – %.1f %% |"
+                     % (e, k, n, 100 * k / n if n else 0, 100 * lo, 100 * hi))
+        inc = [c for c in cs if c["etat"] != "ok"]
+        lo, hi = wilson(len(inc), n)
+        l.append("| **tout incident** | %d / %d | %.1f %% | %.1f – %.1f %% |"
+                 % (len(inc), n, 100 * len(inc) / n if n else 0, 100 * lo, 100 * hi))
+        if t == "demarrage":
+            for dep in sorted({c.get("depart") or c.get("mode") for c in cs} - {None}):
+                sous = [c for c in cs if (c.get("depart") or c.get("mode")) == dep]
+                k = len([c for c in sous if c["etat"] != "ok"])
+                lo, hi = wilson(k, len(sous))
+                l.append("| départ %s | %d incident(s) / %d | | %.1f – %.1f %% |"
+                         % (dep, k, len(sous), 100 * lo, 100 * hi))
+            ts = [c["t_ssh"] for c in etats.get("ok", []) if c.get("t_ssh")]
+            if ts:
+                ts.sort()
+                l += ["", "Démarrage jusqu'au ssh : médiane %d s, min %d, max %d."
+                      % (mediane(ts), ts[0], ts[-1])]
+        else:
+            l += ["", "| jeu | cycles | incidents | IC 95 % du taux d'incident | images (médiane) |",
+                  "|---|---|---|---|---|"]
+            for j in sorted({c.get("jeu") for c in cs}):
+                sous = [c for c in cs if c.get("jeu") == j]
+                k = len([c for c in sous if c["etat"] != "ok"])
+                lo, hi = wilson(k, len(sous))
+                l.append("| %s | %d | %d | %.1f – %.1f %% | %s |"
+                         % (j, len(sous), k, 100 * lo, 100 * hi,
+                            mediane([c.get("images", 0) for c in sous])))
+        ch = [c["charge"]["l1_max"] for c in cs if isinstance(c.get("charge"), dict)]
+        if ch:
+            l += ["", "Charge de l'hôte (max sur 1 min pendant le cycle) : médiane %.1f, max %.1f."
+                  % (mediane(ch), max(ch))]
+        if inc:
+            l += ["", "### Incidents", ""]
+            for c in inc:
+                l.append("- #%s (%s%s, charge %s) `%s` : %s"
+                         % (c["cycle"], c["etat"], ", " + c["jeu"] if c.get("jeu") else "",
+                            (c.get("charge") or {}).get("l1_max", "?"), c.get("incident", ""),
+                            c.get("resume", "")))
     lanc = [c for c in cycles if c["etat"] == "lancement"]
     if lanc:
         l += ["", "%d lancement(s) de QEMU en échec (non comptés)." % len(lanc)]
@@ -668,111 +980,239 @@ def rapport(dossier):
 
 
 # ------------------------------------------------------------- cycles de jeu
-def cycles_jeu(args):
-    """N cycles lancement/arrêt d'un jeu de la matrice sur une instance."""
-    sys.path.insert(0, os.path.join(WT, "tools", "matrice"))
-    import importlib
-    j = importlib.import_module("jeux." + args.jeu).JEU
-    camp = Campagne(args)
-    vm = VM(camp.nom, args.slot, args)
-    G = "/Users/tiger/matrice"
+class HoteBanc:
+    """Ce que les modules de tools/matrice/jeux attendent de l'hôte, sur une VM du banc."""
 
-    class H:        # ce que les modules de jeux attendent de l'hôte
-        def ssh(self, cmd, delai=120, entree=None, binaire=False):
-            return vm.ssh(cmd, delai=delai, entree=entree)
+    def __init__(self, vm):
+        self.vm = vm
 
-        def sortie(self, cmd, delai=120):
-            return vm.ssh(cmd, delai=delai)[1]
+    def ssh(self, cmd, delai=120, entree=None, binaire=False):
+        return self.vm.ssh(cmd, delai=delai, entree=entree)
 
-        def depose(self, texte, chemin):
-            return vm.ssh("cat > '%s'" % chemin, entree=texte)[0] == 0
+    def sortie(self, cmd, delai=120):
+        return self.vm.ssh(cmd, delai=delai)[1]
 
-        def processus(self, nom):
-            out = self.sortie("ps -axco pid,command")
-            return [int(p[0]) for p in (l.strip().split(None, 1) for l in out.splitlines()[1:])
-                    if len(p) == 2 and p[1] == nom]
+    def depose(self, texte, chemin):
+        return self.vm.ssh("cat > '%s'" % chemin, entree=texte)[0] == 0
 
-        def premier_plan(self, nom):
-            self.ssh("osascript -e 'tell application \"System Events\" to set frontmost of "
-                     "process \"%s\" to true'" % nom, delai=30)
-    h = H()
-    boot = os.path.join(camp.dir, "demarrage")
-    os.makedirs(boot, exist_ok=True)
-    try:
-        if not vm.demarre(boot):
-            raise SystemExit("QEMU ne démarre pas (%s)" % vm.log)
-        etat, det = attend_demarrage(vm, time.time(), args.delai, args.repos)
-        if etat != "ok":
-            collecte(vm.mon, os.path.join(camp.dir, "incidents", "0000-demarrage-" + etat), SYM, etat)
-            raise SystemExit("démarrage : %s" % etat)
-        lanceur = open(os.path.join(WT, "tools", "matrice", "guest", "lance.command")).read()
-        h.ssh("mkdir -p %s" % G)
-        h.depose(lanceur, G + "/lance.command")
-        h.ssh("chmod +x %s/lance.command" % G)
-        for i in range(1, args.n + 1):
-            gd = "%s/endurance-%04d" % (G, i)
-            h.ssh("rm -rf %s; killall ScreenSaverEngine 2>/dev/null; true" % gd)
-            h.depose("D='%s'\njeu() {\n%s\n}\n" % (gd, j.commande(args.jeu_mode).strip("\n")),
-                     G + "/cellule.sh")
-            h.ssh("mkdir -p %s && open %s/lance.command" % (gd, G))
-            t0 = time.time()
-            etat, muet, vu = "ok", 0, False
-            while time.time() - t0 < args.duree:
-                time.sleep(10)
-                if vm.panique_en_cours():
-                    etat = "panique"
-                    break
-                code, out = vm.ssh("cat %s/log.txt 2>/dev/null; echo @@; tail -5 %s/stdout.txt 2>/dev/null"
-                                   % (gd, gd), delai=40)
-                if code in (124, 255):
-                    muet += 1
-                    if muet >= 4:
-                        etat = "gel"
-                        break
-                    continue
-                muet = 0
-                if "\nexit " in "\n" + out.split("@@")[0]:
-                    etat = "sortie-du-jeu"
-                    break
-                if not vu and h.processus(j.processus):
-                    vu = True
-                    h.premier_plan(j.nom_ui())
-            if etat == "ok" and not vu:
-                etat = "pas-lance"
-            res = {"cycle": i, "instance": args.slot, "etat": etat, "jeu": args.jeu,
-                   "duree": round(time.time() - t0)}
-            if etat != "ok":
-                inc = os.path.join(camp.dir, "incidents", "%04d-%s" % (i, etat))
-                if etat in ("panique", "gel"):
-                    info = collecte(vm.mon, inc, SYM, etat, {"cycle": i, "instance": vm.nom})
-                    res["resume"] = resume_incident(info)
-                else:
-                    os.makedirs(inc, exist_ok=True)
-                    _, out = vm.ssh("cat %s/log.txt %s/stdout.txt 2>/dev/null" % (gd, gd))
-                    open(os.path.join(inc, "jeu.txt"), "w").write(out)
-                    res["resume"] = out.strip().splitlines()[-1][:200] if out.strip() else ""
-                res["incident"] = os.path.relpath(inc, camp.dir)
-                journal("#%d : INCIDENT %s %s" % (i, etat, res.get("resume", "")))
-            else:
-                journal("#%d : ok" % i)
-            camp.note(res)
-            if etat in ("panique", "gel"):
+    def processus(self, nom):
+        out = self.sortie("ps -axco pid,command")
+        return [int(p[0]) for p in (l.strip().split(None, 1) for l in out.splitlines()[1:])
+                if len(p) == 2 and p[1] == nom and p[0].isdigit()]
+
+    def premier_plan(self, nom):
+        return self.ssh("osascript -e 'tell application \"System Events\" to set frontmost of "
+                        "process \"%s\" to true'" % nom, delai=30)[0] == 0
+
+    def clients_kext(self):
+        """Clients ouverts du kext POMPPCGPU (tools/matrice/hote.py) ; None si illisible."""
+        out = self.sortie("ioreg -w0 -c POMPPCGPUUserClient | grep -c 'POMPPCGPUUserClient '; true")
+        try:
+            return int(out.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            return None
+
+
+G = "/Users/tiger/matrice"
+
+
+def prepare_invite(h, jeux, mode):
+    """Comme la matrice : lance.command, réglages de chaque jeu sauvegardés
+    (une fois) puis écrits pour le mode. Le recouvrement qcow2 est jeté à la fin
+    de l'instance : rien de tout cela n'atteint la base."""
+    h.ssh("mkdir -p %s" % G)
+    h.depose(open(os.path.join(WT, "tools", "matrice", "guest", "lance.command")).read(),
+             G + "/lance.command")
+    h.ssh("chmod +x %s/lance.command" % G)
+    for j in jeux:
+        for f in j.fichiers_reglages(mode):
+            h.ssh("f='%s'; if [ -e \"$f.matrice-sauve\" ] || [ -e \"$f.matrice-absent\" ]; then :; "
+                  "elif [ -e \"$f\" ]; then cp -p \"$f\" \"$f.matrice-sauve\"; "
+                  "else touch \"$f.matrice-absent\"; fi" % f)
+        try:
+            j.preparer(h, mode)
+        except Exception as e:
+            journal("réglages de %s : %s: %s" % (j.cle, type(e).__name__, e))
+
+
+def cycle_jeu(camp, vm, h, j, i):
+    """Un lancement du jeu j, `duree` s de jeu, sans l'arrêter (l'appelant le fait)."""
+    a = camp.args
+    gd = "%s/endurance-%04d" % (G, i)
+    h.ssh("rm -rf %s; killall ScreenSaverEngine 2>/dev/null; true" % gd)
+    env = {"POMPPC_GL_STATS": "1", "POMPPC_GL_NOTE": gd + "/note.txt",
+           "POMPPC_GL_FRAMES": gd + "/frames.csv"}
+    env.update(j.env)
+    cel = ["# écrit par tools/endurance/endurance.py (%s, cycle %d)" % (j.cle, i), "D='%s'" % gd]
+    cel += ["%s='%s'; export %s" % (k, v, k) for k, v in env.items()]
+    cel.append("jeu() {\n%s\n}" % j.commande(a.jeu_mode).strip("\n"))
+    h.depose("\n".join(cel) + "\n", G + "/cellule.sh")
+    h.ssh("mkdir -p %s && open %s/lance.command" % (gd, G))
+    t0 = time.time()
+    duree = a.duree or DUREE_JEU.get(j.cle, 180)
+    fige = FIGE_JEU.get(j.cle, 180)
+    etat, muet, vu, images, t_images, log = "ok", 0, False, 0, None, ""
+    while time.time() - t0 < duree:
+        time.sleep(10)
+        if not vm.vivant():
+            etat = "qemu-mort"
+            break
+        if vm.panique_en_cours():
+            etat = "panique"
+            break
+        code, out = vm.ssh("cat %s/log.txt 2>/dev/null; echo @@; wc -l < %s/frames.csv 2>/dev/null"
+                           % (gd, gd), delai=40)
+        if code in (124, 255):
+            muet += 1
+            if muet >= 4:
+                etat = "gel"
                 break
+            continue
+        muet = 0
+        log, _, n = out.partition("@@")
+        if "\nexit " in "\n" + log:
+            etat = "sortie-du-jeu"
+            break
+        n = int(n.strip()) if n.strip().isdigit() else 0
+        if n > images:
+            images, t_images = n, time.time()
+        if not vu and h.processus(j.processus):
+            vu = True
+            h.premier_plan(j.nom_ui())
+        if images and time.time() - t_images > fige:
+            etat = "jeu-fige"           # le jeu ne présente plus d'image ; l'invité répond
+            break
+    if etat == "ok" and not vu:
+        etat = "pas-lance"
+    res = {"type": "jeu", "cycle": i, "instance": vm.slot, "etat": etat, "jeu": j.cle,
+           "duree": round(time.time() - t0), "images": images, "binaire": vm.binaire,
+           "leviers": vm.leviers, "gpu": vm.gpu, "charge": camp.charge_entre(t0)}
+    if etat != "ok":
+        notes = {"cycle": i, "jeu": j.cle, "t": round(time.time() - t0), "images": images}
+        if etat in ("sortie-du-jeu", "pas-lance", "jeu-fige"):
+            # ce que le jeu a dit : log.txt (état de sortie), stdout, rapport de plantage
+            _, out = vm.ssh("cat %s/log.txt; echo ----; tail -60 %s/stdout.txt; echo ----; "
+                            "ls -t ~/Library/Logs/CrashReporter 2>/dev/null | head -3; "
+                            "f=~/Library/Logs/CrashReporter/'%s.crash.log'; "
+                            "[ -f \"$f\" ] && tail -120 \"$f\"; true" % (gd, gd, j.processus), delai=60)
+            m = re.search(r"^exit (\d+)", out, re.M)
+            notes["jeu_texte"] = ("exit %s" % m.group(1) if m else etat) + " ; " + \
+                (log.strip().splitlines()[-1][:120] if log.strip() else "")
+            notes["jeu_sortie"] = out[-8000:]
+        if etat == "sortie-du-jeu" or etat == "pas-lance":
+            inc = os.path.join(camp.dir, "incidents", "%04d-%s" % (i, etat))
+            os.makedirs(inc, exist_ok=True)
+            open(os.path.join(inc, "jeu.txt"), "w").write(notes.get("jeu_sortie", ""))
+            notes["charge"] = res["charge"]
+            open(os.path.join(inc, "incident.json"), "w").write(
+                json.dumps(notes, indent=1, ensure_ascii=False))
+            res["incident"], res["resume"] = os.path.relpath(inc, camp.dir), notes["jeu_texte"]
+        else:
+            res["incident"], res["resume"] = incident(camp, vm, "%04d" % i, etat, notes, t0)
+            if notes.get("jeu_sortie"):
+                open(os.path.join(camp.dir, res["incident"], "jeu.txt"), "w").write(notes["jeu_sortie"])
+        journal("[%d] jeu #%d %s : INCIDENT %s %s" % (vm.slot, i, j.cle, etat, res.get("resume", "")))
+    else:
+        journal("[%d] jeu #%d %s : ok (%d images, charge %s)"
+                % (vm.slot, i, j.cle, images, res["charge"]["l1_max"]))
+    return etat, res
+
+
+def instance_jeu(camp, slot, jeux):
+    """Une VM : démarrage, puis cycles de jeu à tour de rôle (jeux[i % len]) ;
+    entre deux cycles, `shutdown -r` dans l'invité (--redemarre) ; après un
+    incident qui laisse l'invité douteux, QEMU neuf sur un recouvrement neuf."""
+    a = camp.args
+    vm = VM(camp.nom, slot, a)
+    h = HoteBanc(vm)
+    vivante, echecs = False, 0
+    try:
+        while not camp.fini():
+            if not vivante:
+                vm.quitte()
+                boot = os.path.join(camp.dir, "demarrages", "%d-%s" % (slot, time.strftime("%H%M%S")))
+                os.makedirs(boot, exist_ok=True)
+                if not vm.demarre(boot):
+                    journal("[%d] QEMU ne démarre pas (%s)" % (slot, vm.log))
+                    camp.note({"type": "demarrage", "cycle": camp.numero("demarrage"), "instance": slot,
+                               "etat": "lancement", "detail": open(vm.log).read()[-2000:]})
+                    echecs += 1
+                    if echecs >= 3:
+                        journal("[%d] trois lancements ratés de suite : instance arrêtée" % slot)
+                        break
+                    time.sleep(10)
+                    continue
+                echecs = 0
+                if vm.gpu != "gl" and not a.gpu_quelconque:
+                    journal("[%d] backend qgpu « %s » et non gl : les jeux ne seraient pas rendus "
+                            "par le GPU de l'hôte ; campagne arrêtée (--gpu-quelconque pour passer)"
+                            % (slot, vm.gpu))
+                    camp.arret = True
+                    break
+                t0 = time.time()
+                etat, det = attend_demarrage(vm, t0, a.delai, a.repos)
+                camp.note(res_demarrage(camp, vm, "demarrage", camp.numero("demarrage"), "froid",
+                                        etat, det, t0))
+                if etat != "ok":
+                    vm.quitte()
+                    continue
+                if camp.fini():
+                    break
+                prepare_invite(h, jeux, a.jeu_mode)
+                vivante = True
+            i = camp.prochain()
+            if i is None:
+                break
+            j = jeux[(i - 1) % len(jeux)]
+            etat, res = cycle_jeu(camp, vm, h, j, i)
+            camp.note(res)
+            if etat in ("panique", "gel", "jeu-fige", "qemu-mort"):
+                vm.quitte()
+                vivante = False
+                continue
+            # arrêt du jeu et remise en état, comme la matrice
             j.arreter(h)
+            gd = "%s/endurance-%04d" % (G, i)
             h.ssh("i=0; while ! grep -q '^exit ' %s/log.txt 2>/dev/null && [ $i -lt 20 ]; "
                   "do sleep 1; i=$((i+1)); done; osascript -e 'tell application \"Terminal\" to quit' "
                   "2>/dev/null; rm -rf %s; true" % (gd, gd), delai=60)
-            if j.redemarrer_apres and args.redemarre:
-                h.ssh("echo tiger974 | sudo -S shutdown -r now", delai=30)
-                time.sleep(20)
-                etat, det = attend_demarrage(vm, time.time(), args.delai, args.repos)
-                if etat != "ok":
-                    collecte(vm.mon, os.path.join(camp.dir, "incidents", "%04d-redemarrage-%s" % (i, etat)),
-                             SYM, etat)
+            restants = h.clients_kext()
+            if a.redemarre == "toujours" or (a.redemarre == "d3" and j.cle == "d3") \
+                    or j.redemarrer_apres or restants:
+                if camp.fini():
                     break
-            time.sleep(args.pause)
+                vm.ssh("echo tiger974 | sudo -S shutdown -r now", delai=30)
+                t1 = time.time()
+                while time.time() - t1 < 120 and vm.repond():
+                    time.sleep(2)
+                t0 = time.time()
+                etat, det = attend_demarrage(vm, t0, a.delai, a.repos)
+                r = res_demarrage(camp, vm, "demarrage", camp.numero("demarrage"), "reboot", etat, det, t0)
+                if restants:
+                    r["apres_clients_kext"] = restants
+                camp.note(r)
+                if etat != "ok":
+                    vm.quitte()
+                    vivante = False
+                    continue
+            time.sleep(a.pause)
     finally:
         vm.quitte()
+
+
+def lance_instances(camp, cible, slots, ecart, *extra):
+    fils = [threading.Thread(target=cible, args=(camp, s) + extra, daemon=True) for s in slots]
+    for f in fils:
+        f.start()
+        time.sleep(ecart)          # décale les démarrages
+    try:
+        while any(f.is_alive() for f in fils):
+            time.sleep(2)
+    except KeyboardInterrupt:
+        camp.arret = True
+        journal("arrêt demandé : les instances finissent leur cycle")
+        for f in fils:
+            f.join()
     print(rapport(camp.dir))
 
 
@@ -786,65 +1226,82 @@ def main():
     sp = ap.add_subparsers(dest="cmd", required=True)
     for nom in ("demarrages", "jeu"):
         p = sp.add_parser(nom)
-        p.add_argument("-n", type=int, default=20)
-        p.add_argument("--nom", help="nom de la campagne (dossier bench/endurance/NOM)")
-        p.add_argument("--qemu", help="qemu-system-ppc64 à essayer (défaut : celui de config.env)")
+        p.add_argument("-n", type=int, default=20, help="cycles au plus (démarrages ou jeux)")
+        p.add_argument("--jusqua", metavar="HH:MM",
+                       help="ne plus commencer de cycle après cette heure locale")
+        p.add_argument("--nom", help="nom de la campagne (dossier bench/endurance/NOM) ; "
+                                     "un nom déjà pris AJOUTE des cycles (même bras exigé)")
+        p.add_argument("--qemu", help="qemu-system-ppc64 imposé (défaut : celui que choisit "
+                                      "run_tiger.sh, le binaire rapide sur le PC)")
         p.add_argument("--smp", type=int, default=2)
         p.add_argument("--extra", help="EXTRA_ARGS passés à run_tiger.sh")
+        p.add_argument("--env", action="append", metavar="K=V",
+                       help="variable passée à run_tiger.sh (répétable), p. ex. TLBPRECISE=0")
+        p.add_argument("--anciens-defauts", action="store_true",
+                       help="bras témoin : " + " ".join("%s=%s" % kv for kv in ANCIENS_DEFAUTS.items()))
+        p.add_argument("--invite", help="dossier des symboles de l'invité (mach_kernel, "
+                                        "endurance-syms/) ; défaut $ENDURANCE_INVITE ou "
+                                        "bench/endurance/invite")
         p.add_argument("--delai", type=int, default=360, help="s sans ssh avant de déclarer un gel")
         p.add_argument("--repos", type=int, default=20, help="s d'observation après le premier ssh")
         p.add_argument("--sans-panic-log", action="store_true",
                        help="ne pas redémarrer après un incident pour lire panic.log")
+        p.add_argument("--instances", type=int, default=1)
+        p.add_argument("--fenetre", action="store_true",
+                       help="fenêtre QEMU native (POMPPC_DISPLAY) au lieu de HEADLESS=1")
     p = sp.choices["demarrages"]
-    p.add_argument("--instances", type=int, default=1)
     p.add_argument("--mode", choices=("froid", "reboot", "reset"), default="froid",
                    help="froid : un QEMU neuf par démarrage ; reboot : shutdown -r dans "
                         "l'invité ; reset : system_reset au moniteur")
     p.add_argument("--garde", action="store_true", help="garder les dossiers des cycles réussis")
+    p.add_argument("--slot", type=int, default=0, help="première instance (port 2240 + 10·slot)")
     p = sp.choices["jeu"]
-    p.add_argument("--jeu", required=True, help="module de tools/matrice/jeux (mb, d3, prey…)")
+    p.add_argument("--jeu", required=True,
+                   help="module(s) de tools/matrice/jeux, à tour de rôle : mb,zen,ut,d3")
     p.add_argument("--jeu-mode", default="fen", choices=("fen", "pe"))
-    p.add_argument("--duree", type=int, default=90, help="s de jeu par cycle avant l'arrêt")
+    p.add_argument("--duree", type=int, default=None,
+                   help="s de jeu par cycle (défaut par jeu : %s)" % DUREE_JEU)
     p.add_argument("--pause", type=int, default=10)
-    p.add_argument("--slot", type=int, default=5)
-    p.add_argument("--redemarre", action="store_true",
-                   help="redémarrer l'invité après un jeu qui l'exige (DOOM 3) ; "
-                        "par défaut NON : c'est le kCGLBadDisplay qu'on cherche")
+    p.add_argument("--slot", type=int, default=5, help="première instance (port 2240 + 10·slot)")
+    p.add_argument("--redemarre", choices=("toujours", "d3", "jamais"), default="toujours",
+                   help="shutdown -r dans l'invité entre deux cycles (défaut toujours ; « jamais » "
+                        "pour chercher le kCGLBadDisplay de DOOM 3 ; un client du kext resté "
+                        "ouvert redémarre toujours)")
+    p.add_argument("--gpu-quelconque", action="store_true",
+                   help="accepter un backend qgpu autre que gl")
     p = sp.add_parser("rapport")
     p.add_argument("dossier")
     p = sp.add_parser("collecte", help="collecte d'incident sur une VM du banc déjà lancée")
     p.add_argument("moniteur")
     p.add_argument("dossier")
+    p.add_argument("--invite")
     a = ap.parse_args()
     if a.cmd == "rapport":
         print(rapport(a.dossier))
         return
-    SYM = Symboliseur()
+    SYM = Symboliseur(a.invite or INVITE)
     if a.cmd == "collecte":
         print(json.dumps(collecte(a.moniteur, a.dossier, SYM, "manuel"), indent=1, ensure_ascii=False))
         return
     if not os.path.exists(BASE):
         raise SystemExit("base %s absente (voir docs/endurance.md §Préparation)" % BASE)
+    if os.access(BASE, os.W_OK):
+        journal("⚠  base %s inscriptible : chmod a-w (docs/endurance.md §2)" % BASE)
     if a.cmd == "jeu":
-        cycles_jeu(a)
+        sys.path.insert(0, os.path.join(WT, "tools", "matrice"))
+        import importlib
+        jeux = [importlib.import_module("jeux." + k.strip()).JEU for k in a.jeu.split(",") if k.strip()]
+        camp = Campagne(a, "jeu")
+        journal("campagne %s : %d cycles de jeu (%s) au plus%s, %d instance(s), noyau %s"
+                % (camp.nom, a.n, ",".join(j.cle for j in jeux),
+                   " jusqu'à " + a.jusqua if a.jusqua else "", a.instances, SYM.version[:40]))
+        lance_instances(camp, instance_jeu, range(a.slot, a.slot + a.instances), 60, jeux)
         return
-    camp = Campagne(a)
-    journal("campagne %s : %d démarrages, %d instance(s), mode %s, QEMU %s"
-            % (camp.nom, a.n, a.instances, a.mode, a.qemu or "référence"))
-    fils = [threading.Thread(target=instance, args=(camp, s), daemon=True)
-            for s in range(a.instances)]
-    for f in fils:
-        f.start()
-        time.sleep(20)          # décale les démarrages
-    try:
-        while any(f.is_alive() for f in fils):
-            time.sleep(2)
-    except KeyboardInterrupt:
-        camp.arret = True
-        journal("arrêt demandé : les instances finissent leur cycle")
-        for f in fils:
-            f.join()
-    print(rapport(camp.dir))
+    camp = Campagne(a, "demarrage")
+    journal("campagne %s : %d démarrages au plus%s, %d instance(s), mode %s, QEMU %s, noyau %s"
+            % (camp.nom, a.n, " jusqu'à " + a.jusqua if a.jusqua else "", a.instances, a.mode,
+               a.qemu or "celui de run_tiger.sh", SYM.version[:40]))
+    lance_instances(camp, instance, range(a.slot, a.slot + a.instances), 20)
 
 
 if __name__ == "__main__":

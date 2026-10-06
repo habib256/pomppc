@@ -151,7 +151,13 @@ class Hote:
         versionnée), prise tant que l'invité répond : kpanic.py en a besoin
         pour symboliser un gel. Chemin, ou None."""
         if os.path.exists(self.NOYAU) and os.path.getsize(self.NOYAU) > 1000000:
-            return self.NOYAU
+            # la copie doit être celle du noyau EN MARCHE : sur le PC, elle était
+            # restée celle du 10.4.6 après le passage de la VM en 10.4.11 (06/10/2026)
+            m = re.search(r"Darwin Kernel Version [0-9.]+", self.sortie("uname -v", delai=30))
+            with open(self.NOYAU, "rb") as f:
+                if not m or (m.group(0) + ":").encode() in f.read():
+                    return self.NOYAU
+            journal("%s n'est pas le noyau de l'invité (%s) : nouvelle copie" % (self.NOYAU, m.group(0)))
         try:
             with open(self.NOYAU + ".part", "wb") as f:
                 r = subprocess.run([TSSH, "cat /mach_kernel"], stdout=f, timeout=120)
