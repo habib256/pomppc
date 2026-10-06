@@ -2,6 +2,7 @@
 # (vidage + image PPM) sont hors dépôt dans bench/matrice/ref-linux/<cellule>/ ;
 # ici l'empreinte et la validation à l'œil (validee=oui).
 cellule,image,sha256,fichiers,octets,date,validee,note
+d3-fen,5013,02247a296d794aa5b9ae7308d0717f2b6b5edee80255e8c4e2c82584f3cd7ebc,43,40916443,2026-10-04,non,créée par le tour ref-1
 mb-fen,1803,2c412fe648720df09202d0008a33ec5f74d6db7302763b7281327181fa7b41b4,7,8066143,2026-10-03,oui,créée par le tour 20261003-0000
 mb-pe,1705,794f8ef4f95d4a0d5af6671d5c7a1321f05b50501f92109a1e25801f63b1dc09,6,8066072,2026-10-03,oui,créée par le tour 20261003-0003
 ut-fen,188,e3ee21ecc6e23181e1b5f70116eb47b12db167a400d092f7f3a60d96106ae572,6,22574139,2026-10-03,oui,créée par le tour 20261003-0003
