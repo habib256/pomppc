@@ -19,9 +19,10 @@ Premier client : la « panique AppleUSBOHCI au démarrage SMP=2 » (§4).
   `POMPPC_AUDIO_PROFILE=muet`. Ce nouveau profil de `scripts/tiger_audio.sh` passe par
   `-audiodev none` : le Screamer reste présent, la RAM reste à 768 Mo, et aucun carillon ne
   sonne. Réglages communs : `TABLET=1` (comme sous ImGuiDock), `WEBPROXY=0`, `GLISO=0`.
-- `run_tiger.sh` est celui du worktree. Le QEMU par défaut est celui de `config.env`
-  (`~/src/qemu`, qu'on lance sans le modifier) ; `--qemu` en désigne un autre, par exemple
-  une copie d'essai dans `~/src/qemu-endurance`.
+- `run_tiger.sh` est celui du worktree. Le QEMU par défaut est celui que choisit le
+  lanceur : `~/src/qemu/build` (config.env) sur le M4, le binaire rapide
+  `~/src/qemu/build-fast` sur le PC (scripts/qemu_fast.sh) ; on le lance sans le modifier.
+  `--qemu` en désigne un autre, par exemple une copie d'essai dans `~/src/qemu-endurance`.
 
 ## 2. Préparation (une fois)
 
@@ -38,14 +39,81 @@ Premier client : la « panique AppleUSBOHCI au démarrage SMP=2 » (§4).
      lié aux adresses du démarrage courant, plus `kextstat.txt`, qui donne ces adresses de
      référence.
 
+### 2 bis. Sur le PC Linux (porté le 06/10/2026)
+
+Ce qui changeait sous Linux, et ce que le banc fait désormais :
+
+- **Symboles.** Le `nm` de binutils ne lit pas le Mach-O (« file format not recognized ») et
+  rendait une table **vide sans erreur** : `panicstr` introuvable, aucune panique vue, rien de
+  symbolisé. `symbolise.py` et `tools/re/kpanic.py` lisent maintenant la table de symboles
+  en Python (`tools/re/machonm.py -n`, même sortie que `nm -n` d'Apple) ; `nm` reste le repli.
+- **Un dossier de symboles par noyau.** La VM du PC est en 10.4.11 (Darwin 8.11.0) ; le banc
+  du M4 a pris le 10.4.6. `--invite DOSSIER` ou `ENDURANCE_INVITE` (défaut
+  `bench/endurance/invite/`) ; au premier démarrage, le banc compare `uname -v` de l'invité
+  au noyau des symboles et **arrête la campagne** s'ils diffèrent. `kpanic.py` compare de
+  même la chaîne `version` en mémoire à celle du fichier et refuse un faux noyau (la copie
+  `.run/mach_kernel` de la matrice du PC était restée celle du 10.4.6 :
+  `tools/matrice/hote.py` la reprend désormais quand elle n'est plus celle de l'invité).
+- **Rien n'est en dur dans le noyau** sauf ce que lit `kpanic.py` dans le cadre de `panic()`
+  (arguments à `r1+0x9c`, format dans `r24` sur le 10.4.6) : ces deux valeurs sont maintenant
+  **décodées dans le prologue de `_panic`** du noyau donné (`stw r4,d(r1)`, `mr rN,r3`), et
+  la sortie dit si elles ont été lues ou supposées.
+- **Panique vue même quand `panicstr` est retombé à 0.** `panic()` le remet à zéro au retour
+  de `Debugger()`, avant sa boucle finale (`kpanic.py`) : le banc tient aussi pour panique un
+  vCPU dont le PC est dans `panic()` (de `_panic` au symbole suivant). Sans cela, une panique
+  passait pour un gel.
+- **Texte de la panique.** Sans boot-arg de débogage, Tiger n'alloue pas `debug_buf` :
+  `panique.txt` reste vide. Chaque collecte lance donc `kpanic.py` VM arrêtée
+  (`kpanic.txt` : texte reconstitué, appelant, pile, fin du msgbuf) ; le texte va dans
+  `incident.md` et dans le résumé du rapport.
+- **Image** : `ecran.png` par Pillow, sinon ImageMagick (`sips` sous macOS).
+- **Binaire.** Sur le PC, `run_tiger.sh` prend le binaire **rapide** `build-fast/` (PGO), pas
+  `build/` : le banc lit la bannière du lanceur (`binaire : …`, ligne `▶ Tiger …` avec les
+  leviers allumés, backend qgpu) et range binaire, empreinte et leviers dans chaque cycle.
+- **ssh sans connexion maîtresse** (`TSSH_MUX=0`) : une maîtresse restée sur un invité qui
+  redémarre ou qui gèle fait attendre chaque ssh, et `tssh.sh` la range dans `.run/` du dépôt
+  principal.
+- **Affichage.** `HEADLESS=1` (`-display none`) : le backend GL de qgpu ouvre son propre
+  contexte EGL (pbuffer 1×1, `eglGetDisplay(EGL_DEFAULT_DISPLAY)`), indépendant de
+  l'affichage de QEMU, et la présentation écrit dans l'écran VGA, que `screendump` lit. Le
+  sondage du lanceur se fait déjà en `-display none`. Une campagne de jeu **s'arrête** si le
+  backend annoncé n'est pas `gl` ; `--fenetre` est le repli (fenêtre QEMU native).
+- **Verrous** : `flock` (scripts/hostcompat.sh), un par instance dans son
+  `.run/endurance/<campagne>-<i>/`. Jamais de suppression d'un verrou.
+
+**Base sur le PC** (ext4, pas de clone) : VM quotidienne **arrêtée**, puis
+`cp --sparse=always disks/tiger.qcow2 disks/tiger-endurance-brut.qcow2` (~8,8 Go),
+`~/src/qemu/build/qemu-img check`, un démarrage (`SNAPSHOT=` vide, `DISK=` la copie), vérifier
+`pmset -g` (sleep, displaysleep, disksleep à 0 : l'invité 10.4.11 s'endort sinon), arrêt propre,
+renommage en `tiger-endurance.qcow2`, `chmod a-w`. Symboles : `cat /mach_kernel` de cet invité
+dans `bench/endurance/invite-10.4.11/mach_kernel`, `invite-syms.sh` dans
+`…/invite-10.4.11/endurance-syms/`.
+
 ## 3. Lancer
 
     python3 tools/endurance/endurance.py demarrages -n 100 --instances 2 --mode reboot --nom ma-campagne
     python3 tools/endurance/endurance.py demarrages -n 100 --mode froid --qemu ~/src/qemu-endurance/build/qemu-system-ppc64
     python3 tools/endurance/endurance.py jeu --jeu mb -n 20 --duree 90      # cycles lancement/arrêt
-    python3 tools/endurance/endurance.py jeu --jeu d3 -n 10                 # sans redémarrage : kCGLBadDisplay
+    python3 tools/endurance/endurance.py jeu --jeu d3 -n 10 --redemarre jamais   # kCGLBadDisplay
+    python3 tools/endurance/endurance.py jeu --jeu mb,zen,ut,d3 --instances 2 -n 999 --jusqua 07:00 \
+        --invite bench/endurance/invite-10.4.11 --nom pc-jeux        # le PC, toute une nuit
     python3 tools/endurance/endurance.py rapport bench/endurance/ma-campagne
     python3 tools/endurance/endurance.py collecte <socket moniteur> <dossier>   # à la main
+
+- `--jusqua HH:MM` : aucun cycle ne commence après cette heure ; `touch
+  bench/endurance/<campagne>/ARRET` arrête proprement. Relancer avec le même `--nom` **ajoute**
+  des cycles (tranches) ; le banc refuse d'y mêler un autre bras.
+- `--anciens-defauts` : le bras témoin d'avant le 06/10 sur le PC (`QEMU_FAST=0` et les leviers
+  TCG de ce jour-là à 0) ; `--env K=V` passe toute autre variable à `run_tiger.sh`.
+- Jeux : `--jeu` prend une liste, jouée à tour de rôle ; réglages préparés comme la matrice
+  (`preparer`, `lance.command`, `POMPPC_GL_STATS/NOTE/FRAMES`) ; durée par jeu (mb 150 s,
+  zen 120, ut 300, d3 600). `--redemarre toujours` (défaut) fait `shutdown -r` entre deux
+  cycles et compte ce redémarrage comme un démarrage ; un client du kext resté ouvert
+  redémarre toujours. États d'un cycle : ok, panique, gel, `jeu-fige` (frames.csv immobile,
+  l'invité répond), `sortie-du-jeu` (état de sortie, stdout et rapport de CrashReporter dans
+  `jeu.txt`), `pas-lance`, qemu-mort. Après panique, gel ou jeu figé : QEMU neuf.
+- La charge de l'hôte (1 min) et le nombre de QEMU mac99 sont relevés toutes les 10 s
+  (`charge.csv`) et rangés avec chaque cycle (début, max, fin).
 
 - `--mode froid` lance un QEMU neuf sur un disque neuf à chaque démarrage. `--mode reboot`
   fait `shutdown -r now` dans l'invité, dans le même QEMU, comme la matrice après DOOM 3.
@@ -69,7 +137,10 @@ VM arrêtée (`stop`) pendant la collecte :
   d'intervalle.
 - `qemu-int.log` : 0,3 s de `log int,mmu` de QEMU.
 - `panique.txt` : le texte complet de la panique, lu dans `debug_buf`, c'est-à-dire ce
-  que l'invité écrirait en NVRAM. `panicstr` figure dans `incident.json`.
+  que l'invité écrirait en NVRAM (vide sans boot-arg de débogage). `panicstr` figure dans
+  `incident.json`.
+- `kpanic.txt` : `tools/re/kpanic.py`, VM arrêtée — texte reconstitué depuis la pile de
+  `panic()`, appelant, pile symbolisée, fin du msgbuf.
 - `kmods.txt` : la liste `kmod` du noyau lue en mémoire (nom, base, taille). Les kexts
   chargés au démarrage sont V=R, donc leur `kmod_info` se lit en physique.
 - `vues.txt` : les registres de l'OHCI vus côté device (`xp` sur sa BAR) et, pour chaque

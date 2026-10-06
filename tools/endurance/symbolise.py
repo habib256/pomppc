@@ -25,6 +25,8 @@ import sys
 
 ICI = os.path.dirname(os.path.abspath(__file__))
 WT = os.path.dirname(os.path.dirname(ICI))
+sys.path.insert(0, os.path.join(WT, "tools", "re"))
+import machonm  # noqa: E402
 
 
 def depot_principal():
@@ -39,29 +41,50 @@ def depot_principal():
 
 
 MAIN = depot_principal()
-INVITE = os.path.join(MAIN, "bench", "endurance", "invite")
+# Symboles de l'invité : un dossier PAR NOYAU (le banc du M4 a pris le 10.4.6,
+# la VM du PC est en 10.4.11 depuis le 02/10). ENDURANCE_INVITE le désigne ;
+# le banc vérifie au premier démarrage que le noyau de l'invité est bien celui-là.
+INVITE = os.environ.get("ENDURANCE_INVITE") or os.path.join(MAIN, "bench", "endurance", "invite")
+
+
+def _table(chemin):
+    """[(adresse, lettre, nom)] : lecteur Mach-O en Python (tools/re/machonm.py),
+    `nm -n` en repli. Le `nm` de binutils du PC Linux ne lit pas le Mach-O et
+    rendait une table VIDE sans erreur (06/10/2026) : panicstr introuvable, plus
+    aucune panique vue, rien de symbolisé."""
+    t = machonm.nm(chemin)
+    if t:
+        return t
+    out = subprocess.run(["nm", "-n", chemin], capture_output=True, text=True).stdout
+    res = []
+    for l in out.splitlines():
+        p = l.split()
+        if len(p) == 3:
+            res.append((int(p[0], 16), p[1], p[2]))
+    return res
 
 
 def _nm(chemin):
-    syms = []
-    out = subprocess.run(["nm", "-n", chemin], capture_output=True, text=True).stdout
-    for l in out.splitlines():
-        p = l.split()
-        if len(p) == 3 and p[1] in "tT":
-            syms.append((int(p[0], 16), p[2]))
-    syms.sort()
-    return syms
+    return sorted((a, n) for a, l, n in _table(chemin) if l in "tT")
 
 
 def _nm_tout(chemin):
     """Tous les symboles définis (données comprises) : nom → adresse."""
     d = {}
-    out = subprocess.run(["nm", chemin], capture_output=True, text=True).stdout
-    for l in out.splitlines():
-        p = l.split()
-        if len(p) == 3 and p[1] not in "UuA":
-            d.setdefault(p[2], int(p[0], 16))
+    for a, l, n in _table(chemin):
+        if l not in "UuA":
+            d.setdefault(n, a)
     return d
+
+
+def version_noyau(chemin):
+    """« Darwin Kernel Version 8.11.0: … » lu dans le fichier, ou ""."""
+    try:
+        b = open(chemin, "rb").read()
+    except OSError:
+        return ""
+    m = re.search(rb"Darwin Kernel Version [^\0]*", b)
+    return m.group(0).decode("latin-1").strip() if m else ""
 
 
 def lit_kextstat(texte):
@@ -93,6 +116,24 @@ class Symboliseur:
         self.noyau = _nm(os.path.join(invite, "mach_kernel"))
         self.adr_noyau = [a for a, _ in self.noyau]
         self.donnees = _nm_tout(os.path.join(invite, "mach_kernel"))
+        if not self.noyau or "_panicstr" not in self.donnees:
+            raise SystemExit("aucun symbole lisible dans %s/mach_kernel (panicstr absent) : "
+                             "le banc ne verrait aucune panique" % invite)
+        self.version = version_noyau(os.path.join(invite, "mach_kernel"))
+        try:
+            self.fin_texte = machonm.MachO(os.path.join(invite, "mach_kernel")).fin_texte()
+        except (OSError, ValueError):
+            self.fin_texte = None
+        self.fin_texte = self.fin_texte or 0x400000
+        # panic() : de _panic au symbole de texte suivant ; un vCPU qui y tourne
+        # est en panique même quand panicstr est déjà retombé à 0 (panic() le
+        # remet à zéro au retour de Debugger(), avant sa boucle finale :
+        # tools/re/kpanic.py)
+        p = self.symbole_noyau("panic")
+        self.panic = None
+        if p is not None:
+            i = bisect.bisect_right(self.adr_noyau, p)
+            self.panic = (p, self.adr_noyau[i] if i < len(self.adr_noyau) else p + 0x400)
         # fin du texte du noyau : premier kext de référence au-dessus, ou 4 Mo
         sd = os.path.join(invite, "endurance-syms")
         self.ref = {}
@@ -127,7 +168,7 @@ class Symboliseur:
                     if i >= 0:
                         return "%s:%s+0x%x" % (court(nom), syms[i][1], cible - syms[i][0])
                 return "%s+0x%x" % (court(nom), dec)
-        if self.noyau and adresse < 0x400000:
+        if self.noyau and adresse < self.fin_texte:
             i = bisect.bisect_right(self.adr_noyau, adresse) - 1
             if i >= 0 and adresse - self.adr_noyau[i] < 0x4000:
                 return "mach_kernel:%s+0x%x" % (self.noyau[i][1], adresse - self.adr_noyau[i])
