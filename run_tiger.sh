@@ -112,6 +112,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # M4 : VFPNATIVE, LMWVEC et JCWORD allumés à la demande de l'utilisateur après
 # les preuves SMP=1/2 (docs/jit-m4-2026-10-05.md). LMWVEC/JCWORD sans gain
 # mesuré ; chacun reste surchargeable à 0. Reconstruire QEMU avec 0025-0028.
+# Linux x86-64 (06/10/2026, docs/tcg-g4.md §30) : LMWVEC (copie SSE2, tcg/0029)
+# et JCWORD prouvés sur le PC mais PAS allumés par défaut : ils attendent l'A/B
+# en jeu de la phase 2. LMWVEC=1 / JCWORD=1 les demandent explicitement.
 for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JITNEAR FPNATIVE TBFAST FPNATIVE64 VMXINLINE; do
   export "$_opt=${!_opt:-1}"
 done
@@ -347,14 +350,14 @@ done
 # (x86-64 avec AVX et FMA3, arm64) ; ailleurs il ne change rien.
 for _p in "VMXINLINE x-vmx-inline VMX-EN-LIGNE" "VMXVERIFY x-vmx-verify VMX-VÉRIFIÉ" \
           "VFPNATIVE x-vfp-native VFP-NATIF" "VFPNVERIFY x-vfp-native-verify VFP-NATIF-VÉRIFIÉ" \
-          "LMWVEC x-lmw-vector LMW-STMW-NEON"; do
+          "LMWVEC x-lmw-vector LMW-STMW-VECTEUR"; do
   set -- $_p
   if [ "${!1:-0}" != 0 ]; then
     if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "$2=on"; then
       CPU_SPEC="$CPU_SPEC,$2=on"
       MODE="$MODE + $3"
     else
-      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0021-0022, 0025)." >&2
+      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0021-0022, 0025/0029)." >&2
       MODE="$MODE + $3 DEMANDÉ MAIS INDISPONIBLE"
     fi
   fi
