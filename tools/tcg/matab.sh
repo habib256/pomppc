@@ -25,6 +25,8 @@
 # bench/tcg/ab/CAMPAGNE/bilan.txt (tools/tcg/matabsum.py).
 # MATRICE_OPTS="--sample-hote 30" : options de plus pour matrice.py (profil hôte ;
 # sous Linux, avec "mode:EXTRA_ARGS=-perfmap" pour nommer le code JIT).
+# MATAB_AVANT="commande" : barrière lancée avant chaque partie, VM arrêtée (attendre l'hôte au
+# repos : tools/tcg/chargehote.py attendre) ; un code non nul arrête la campagne.
 # JAMAIS de suppression de .run/tiger.lock : on attend qu'il se libère.
 set -u
 WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -90,6 +92,12 @@ for p in "${ordre[@]}"; do
   D="$OUT/$nom-$k"; mkdir -p "$D"
   echo "$(date +%H:%M:%S) $nom-$k : $vars" | tee -a "$OUT/journal.txt"
   stop_vm
+  # MATAB_AVANT="commande" : barrière avant chaque partie, VM arrêtée (p. ex. attendre l'hôte
+  # au repos) ; un code non nul arrête la campagne (06/10 : une autre session occupait l'hôte)
+  if [ -n "${MATAB_AVANT:-}" ]; then
+    bash -c "$MATAB_AVANT" 2>&1 | tee -a "$OUT/journal.txt"
+    [ "${PIPESTATUS[0]}" = 0 ] || { echo "$(date +%H:%M:%S) barrière refusée : campagne arrêtée" | tee -a "$OUT/journal.txt"; exit 1; }
+  fi
   # QEMU_FAST=0 d'abord : sans QEMU_BIN, un bras tourne sur le binaire de RÉFÉRENCE
   # (build/), pas sur le binaire rapide que run_tiger.sh préfère sur le PC ;
   # un bras peut le redemander ("fast:QEMU_FAST=1" ou "fast:QEMU_BIN=…").
