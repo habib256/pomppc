@@ -9,6 +9,23 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Bilan de la phase 2 sur le PC, 06/10** (`docs/vitesse-doom3-x86.md` §13) : une partie
+  DOOM 3 sous **tous** les vérificateurs (TLB précis, `lmw`/`stmw` et `dcbz` en ligne, flottant
+  et AltiVec natifs avec leurs comparaisons, sorties) : 0 divergence sur 2,9 G accès
+  retraduits, 2,2 G `lmw`/`stmw`, 837 M `dcbz`, 810 M opérations flottantes et 2,9 G
+  vectorielles ; `x-ret-verify` relève 2 cas « sans traduction » sur 12,8 G sorties, au même
+  pc du noyau (`0x5605d88`), au démarrage et au redémarrage de l'invité seulement (à
+  comprendre). A/B entrelacés, 3 parties par bras, binaire de référence : le côté mémoire
+  (`TLBPRECISE LMWINLINE DCBZINLINE`) fait **DOOM 3 144,3 → 132,0 ms/image (−8,5 %)**, **Marble
+  Blast 20,9 → 16,5 (−21 %)**, **UT2004 58,9 → 54,7 (−7 %)** (aucune rafale dans la fenêtre) ;
+  par-dessus, `JITREL32 FPNATIVECMP VFPNATIVECMP LMWVEC JCWORD` ensemble **−2,6 %** sur DOOM 3.
+  **Tous allumés par défaut sur Linux x86-64** (`=0` pour couper ; macOS arm64 inchangé). Le
+  profil PGO du binaire rapide est entraîné sur cette configuration (mb, zen, ut, d3 ;
+  1 356 `.gcda`) et `build-fast/` reconstruit (complet, même série) : `run_tiger.sh` le prend.
+  Départ du 04/10 (référence) : DOOM 3 138, Marble Blast 21, Zenerchi 7,6, UT2004 56
+  ms/image ; DOOM 3 sur le binaire rapide : 124,1 sur une partie. L'A/B du binaire rapide et la
+  matrice finale avec vidage restent à faire hôte au repos (une autre session occupait le PC ;
+  commandes dans TODO.md). `tools/tcg/utrafales.py` lit les enregistrements courts d'UT2004.
 - **Le côté mémoire du traducteur sur le PC, 06/10** (`docs/tcg-g4.md` §32) : trois
   propriétés éteintes par défaut. `x-tlb-precise` (`tcg/0031`, `TLBPRECISE=1`) : `tlbie`, les
   changements de registre de segment (avec `x-sr-tlb`) et les écritures de BAT ne retirent plus

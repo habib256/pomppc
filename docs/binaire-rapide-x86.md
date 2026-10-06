@@ -153,3 +153,12 @@ Relevé `build-fast/pomppc-build.txt` : `variante=native,nohard,lto,pgo`, `compl
 `pgo-fast/pomppc-profil.txt` du 06/10 19:55. Capacités (`bench/build-capabilities-build-fast.txt`)
 identiques à celles de la référence, 0031-0035 comprises.
 
+
+**Vérification du lanceur** (06/10, après la reconstruction) : `POMPPC_FRONTEND=native
+./run_tiger.sh` sans `QEMU_BIN` ni `QEMU_FAST` prend `build-fast/qemu-system-ppc64` (« binaire
+rapide (PGO, -O3, -march=native) »), avec les nouveaux défauts de Linux x86-64 dans la bannière.
+
+**A/B contre la référence : à refaire hôte au repos.** Une seule partie DOOM 3 propre sur
+`build-fast` (124,1 ms/image, `bench/tcg/ab/x86-fast-pollue/fast-1`) avant qu'une autre session
+de travail n'occupe l'hôte (`docs/vitesse-doom3-x86.md` §13.5) ; commandes de l'A/B et de la
+matrice finale au §13.7 de ce document.
