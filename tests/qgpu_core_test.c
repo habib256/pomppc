@@ -6027,6 +6027,7 @@ static void run_v20(QgpuCore *c, uint8_t *shmem)
 }
 
 static void run_v19(QgpuCore *c, uint8_t *shmem);
+static void run_a6(QgpuCore *c, uint8_t *shmem);
 static void run_native(QgpuCore *c, uint8_t *shmem)
 {
     static const char vp_nat[] =
@@ -9247,6 +9248,7 @@ static void *run_backend_body(void *arg)
     run_native_shmem(c, shmem); /* A4, volet géométrie */
     run_raw_sane(c, shmem);     /* A4 : tri des sommets fous par l'hôte */
     run_v19(c, shmem);
+    run_a6(c, shmem);           /* 07/10 : L2 vue du cœur */
     run_v20(c, shmem);
     run_v21(c, shmem);          /* GLSL */
     run_v22(c, shmem);          /* ATI_texture_env_combine3 */
@@ -9392,6 +9394,89 @@ static void run_v19(QgpuCore *c, uint8_t *shmem)
     for (k = 0; k < QGPU_MAX_BUF; k++)     bad += c->buf[k].used;
     for (k = 0; k < QGPU_MAX_QUERIES; k++) bad += c->query[k].used;
     CHECK(bad == 0 && q1 > 0, "toutes les tranches détruites : %u objet(s) restant(s)", bad);
+}
+
+/* ── A6, 07/10 : L2 de docs/architecture.md vue du cœur ──────────────────────
+ *
+ * Le kext rend une tranche même quand son nettoyage a échoué
+ * (`destroyClientObjects` ne rend rien, `slotGated` libère quand même). Deux
+ * cas, que ce test fixe tels qu'ils se présentent au nouvel occupant :
+ *   (a) CLIENT_RESET jamais mis en file (refusé, ou file non drainée à
+ *       l'échéance) : les objets de l'ancien occupant restent, et la première
+ *       création du nouveau sur le même identifiant est une faute FATALE
+ *       (QGPU_ST_LIMIT) qui arrête le flux ;
+ *   (b) CLIENT_RESET accepté mais retardé (le kext a cessé d'attendre) : la
+ *       file est FIFO, la destruction passe donc AVANT la première soumission
+ *       du nouvel occupant, qui crée ses objets sans erreur. Ce qui reste à
+ *       risque dans ce cas, ce sont les octets de BAR0 encore lus par les
+ *       dernières soumissions de l'ancien (M1), pas les objets.
+ * Plus (c) : un CLIENT_RESET de la même tranche mis en file APRÈS la
+ * réattribution détruit les objets du nouvel occupant. Le kext d'aujourd'hui
+ * ne réessaie que sur QUEUE_FULL (rien n'était parti) ; une correction de L2
+ * qui relancerait un nettoyage manqué plus tard doit donc le faire AVANT de
+ * rendre le créneau, jamais après. */
+static void run_a6(QgpuCore *c, uint8_t *shmem)
+{
+    Emit e; uint32_t st, k;
+    const uint32_t c1 = QGPU_CLIENT_CTX_IDS;
+    const uint32_t t1 = QGPU_CLIENT_TEX_IDS;
+    const uint32_t b1 = QGPU_CLIENT_BUF_IDS;
+    uint64_t base;
+
+    printf("-- A6 : nettoyage de tranche manqué ou retardé (L2) --\n");
+    qgpu_core_reset(c);
+    for (k = 0; k < QGPU_MAX_CLIENTS; k++) {
+        qgpu_core_client_reset(c, k);
+    }
+    base = c->mem_total;
+
+    /* Ancien occupant de la tranche 1, et un voisin dans la tranche 0. */
+    e.base = shmem; e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, 0);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, c1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX)); emit(&e, t1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE)); emit(&e, b1); emit(&e, 64);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "A6 : tranches 0 et 1 peuplées : st %u (pc %u)", st, c->status_pc);
+
+    /* (a) Nettoyage jamais parti : premier flux du nouvel occupant. */
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, c1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, c1 + 1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_LIMIT && c->status_pc == 0 && !c->ctx[c1 + 1].used,
+          "A6 (a) objets laissés : CTX_CREATE %u → st %u pc %u, flux arrêté (ctx %u %s)",
+          c1, st, c->status_pc, c1 + 1, c->ctx[c1 + 1].used ? "CRÉÉ" : "non créé");
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX)); emit(&e, t1);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_LIMIT, "A6 (a) TEX_CREATE %u sur la texture laissée : st %u", t1, st);
+
+    /* (b) Nettoyage accepté mais retardé : FIFO, il passe avant le nouvel
+       occupant, qui crée alors tout sans erreur. Le voisin est intact. */
+    st = qgpu_core_client_reset(c, 1);
+    CHECK(st == QGPU_ST_OK && !c->ctx[c1].used && !c->tex[t1].used && !c->buf[b1].used &&
+          c->ctx[0].used,
+          "A6 (b) CLIENT_RESET tardif : st %u, tranche 1 vide, tranche 0 intacte", st);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(&e, c1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_CREATE, QGPU_LEN_TEX)); emit(&e, t1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_BUF_CREATE, QGPU_LEN_BUF_CREATE)); emit(&e, b1); emit(&e, 64);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK, "A6 (b) le nouvel occupant recrée ses objets : st %u (pc %u)",
+          st, c->status_pc);
+
+    /* (c) Un nettoyage relancé après la réattribution détruit le nouvel
+       occupant : c'est au kext de ne pas le faire (voir L2). */
+    st = qgpu_core_client_reset(c, 1);
+    CHECK(st == QGPU_ST_OK && !c->ctx[c1].used && !c->tex[t1].used && !c->buf[b1].used,
+          "A6 (c) CLIENT_RESET rejoué après réattribution : objets du nouvel occupant détruits");
+    st = qgpu_core_client_reset(c, 1);
+    CHECK(st == QGPU_ST_OK, "A6 (c) CLIENT_RESET d'une tranche vide : st %u", st);
+
+    qgpu_core_client_reset(c, 0);
+    CHECK(c->mem_total == base, "A6 : mémoire rendue (%llu octets, attendu %llu)",
+          (unsigned long long)c->mem_total, (unsigned long long)base);
 }
 
 static void run_backend(const char *name)
