@@ -18,7 +18,7 @@ d'introduction ne montre pas l'arme du joueur.
 """
 import os
 
-from jeu import Jeu, fenetre_fixe
+from jeu import Jeu
 
 UT = "/Users/tiger/Desktop/Unreal Tournament 2004 Demo.app"
 INI = "/Users/tiger/Library/Application Support/Unreal Tournament 2004 Demo/System/UT2004.ini"
@@ -59,8 +59,7 @@ class UT2004(Jeu):
                 './ut2004-bin \'AS-Convoy?game=UT2k4Assault.ASGameInfo?NumBots=0\'%s'
                 % (UT, SEED, " -fullscreen" if mode == "pe" else ""))
 
-    def fenetre(self, rows):
-        return fenetre_fixe(rows, 13, 73)
+    images_fenetre = (13, 73)
 
 
 JEU = UT2004()

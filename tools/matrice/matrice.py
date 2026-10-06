@@ -356,6 +356,22 @@ def verifie_reference(cle, cel, p, dump, creer=True):
 
 
 # ------------------------------------------------------------ une cellule
+def plan_permis(images, rows, marge_s=6.0):
+    """Un osascript (premier_plan) lancé maintenant peut-il éviter la fenêtre FIXE
+    `images` = (a, b) ? Oui sans fenêtre fixe, une fois b passé, ou si l'image a
+    est à plus de `marge_s` secondes au rythme courant. Avant la première image,
+    oui : l'osascript part pendant le chargement (docs/matrice-jeux.md, rafales)."""
+    if not images or not rows:
+        return True
+    a, b = images
+    n = max(rows)
+    if n > b:
+        return True
+    el = rows[n][0] / 1000.0
+    rythme = n / el if n > 1 and el > 0 else 30.0
+    return n + rythme * marge_s < a
+
+
 class Cellule:
     env_extra = {}              # --env K=V (A/B d'un drapeau du plugin)
     sample_s = 0                # --sample N : `sample` du jeu dans l'invité après la fenêtre
@@ -442,7 +458,11 @@ class Cellule:
             h.depose(self.cellule_sh(), G + "/cellule.sh")
             h.ssh("mkdir -p %s && open %s/lance.command" % (self.gd, G))
             lance = time.time()
-            premier = muet = 0
+            premier = muet = differe = 0
+            # System Events lancé AVANT le jeu : le premier osascript du tour
+            # coûtait jusqu'à 4,7 s (3 s de processeur invité) en le démarrant
+            h.ssh("osascript -e 'tell application \"System Events\" to count processes' "
+                  ">/dev/null 2>&1; true", delai=60)
             brut, decal = "", 0
             while True:
                 time.sleep(10)
@@ -467,13 +487,23 @@ class Cellule:
                 if "\nexit " in "\n" + log:
                     raise Echec("le jeu a quitté avant la scène (%s)" %
                                 log.strip().splitlines()[-1] if log.strip() else "?")
-                if rows and premier < 2 and t > 10:
-                    h.premier_plan(j.nom_ui())       # lancé par ssh : sinon repli Swap60
-                    premier += 1
+                # Remise au premier plan (lancé par ssh : sinon repli Swap60). Un
+                # osascript coûte 1 à 3 s de processeur invité (docs/tcg-g4.md §31) :
+                # jamais quand il peut tomber dans une fenêtre fixe connue d'avance ;
+                # dès que le processus du jeu existe, avant ses premières images.
+                permis = plan_permis(j.images_fenetre, rows)
+                if premier < 2 and t > 10 and permis and (rows or h.processus(j.processus)):
+                    if h.premier_plan(j.nom_ui()) or rows:
+                        premier += 1
                 elif rows:
                     n = max(rows)
                     if n > 40 and n - 20 in rows and rows[n][1] - rows[n - 20][1] > 5:
-                        h.premier_plan(j.nom_ui())
+                        if permis:
+                            h.premier_plan(j.nom_ui())
+                        elif not differe:
+                            differe = n
+                            journal("replis pendant la fenêtre (image %d) : premier plan "
+                                    "remis après la fenêtre, sans osascript pendant" % n)
                 j.pendant(h, rows, t)
                 w = j.fenetre(rows) if rows else None   # pas encore d'image (QEMU lent, 03/10)
                 if w:
@@ -482,6 +512,9 @@ class Cellule:
                 if t > j.delai_scene:
                     raise Echec("scène non atteinte en %d s (image %s)" % (t, max(rows) if rows else "aucune"))
             journal("fenêtre de mesure %d..%d atteinte (%.0f s)" % (a, b, time.time() - lance))
+            if differe:
+                self.res["premier_plan"] = "replis à l'image %d, premier plan différé" % differe
+                h.premier_plan(j.nom_ui())
             # la charge du DÉBUT de cellule ne dit rien d'une VM lancée pendant
             # la fenêtre : on la relève aussi juste après
             self.res["charge_hote"] += " ; après la mesure : " + h.charge_hote()

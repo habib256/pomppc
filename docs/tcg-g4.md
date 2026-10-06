@@ -3015,3 +3015,145 @@ puis, si un bras gagne, la matrice du PC (mb, zen, ut, d3) avant toute mise par 
 chiffrer d'abord le poste : `perf` est utilisable depuis le 06/10 (`perf_event_paranoid=1`) ;
 `perf record -p` sur QEMU lancé avec `EXTRA_ARGS=-perfmap` donne la part de `helper_lmw` /
 `helper_stmw` en jeu.
+## 31. Les deux régimes de `x-jit-rel32` sur le PC (06/10/2026)
+
+**En une phrase** : `x-jit-rel32` n'a pas de régime lent. Les « 64-67 ms/image » d'UT2004
+(`bench/tcg/ab/x86-ut-tcg`, `x86-ut-def`, `x86-ut-split`) viennent d'une **rafale d'images
+lentes que la matrice provoque elle-même** dans l'invité : l'`osascript` de
+`premier_plan()`, lancé au premier relevé ssh qui voit des images. La fenêtre `ut-fen`
+(images 13..73) ne couvre que ~4 s de jeu, et la rafale y tombe ou non selon la phase des
+relevés (toutes les ~10 s depuis le lancement) par rapport à l'image 1. QEMU plus rapide, le
+jeu arrive plus tôt à l'image 1 et la phase glisse : avec `x-jit-rel32`, la rafale est tombée
+dans la fenêtre 8 fois sur 9. À contenu égal, hors rafales, `x-jit-rel32` est **~3 % plus
+rapide** sur UT2004, comme sur DOOM 3. Pas de correctif de QEMU ; le défaut peut être allumé
+après l'A/B de phase 2, à lire avec `tools/tcg/utrafales.py`.
+
+Journaux : `bench/tcg/rel32-x86/` (dépôt principal, non versionné) : `utrafales.txt`,
+`jitcheck-20.txt`, `outasm-appels.txt`, `sshburst/`, `jb-r*-*/` et `jit-bench-bilan.txt`.
+Copie de travail `~/src/qemu-rel32` (= `qemu-d3tcg` + 0025-0028, construite par
+`build_qemu_qfb.sh`), VM de dev privée `tiger-dev-rel32.raw` (supprimée après).
+
+### 31.1 Ce que disaient les parties
+
+Neuf parties avec `x-jit-rel32` (bras `rel`, `def`, `tcg`), douze sans (`vfp`, `vmx`, `off`,
+`plg`). Sur la fenêtre de la matrice : 57,0 à 67,4 ms/image avec, 55,8 à 62,1 sans. Mais
+`frames.csv` garde toute la partie (570-950 images), et le pas de simulation est fixe
+(`seed.c` : 0,2 s) : **l'image n est la même dans toutes les parties**. On peut donc rapporter
+chaque image à la médiane de la même image entre les 21 parties (`utrafales.py`) :
+
+| | avec `x-jit-rel32` (9) | sans (12) |
+|---|---|---|
+| ms/image, fenêtre 13..73 (la mesure de la matrice) | 57,0-67,4, méd. 64,1 | 55,8-62,1, méd. 58,0 |
+| excès cumulé sur la référence, fenêtre 13..73 | **309-662 ms** (8 parties), 83 ms (`rel-3`) | 10-121 ms (11), 348 ms (`plg-3`) |
+| rapport médian à la référence, fenêtre 13..73 | 0,961-1,038 | 0,981-1,015 |
+| rapport médian à la référence, images 74..560 | **0,960-0,999, méd. 0,980** | 0,984-1,037, méd. 1,009 |
+
+- **Le temps « normal » d'une image ne change pas** dans la fenêtre (rapport médian ~1,00
+  partout) : la différence est tout entière dans 10 à 30 images à 100-190 ms, groupées en
+  1,5-2 s. Les parties « lentes » sont exactement celles où ce paquet est dans 13..73 (excès
+  ≥ 300 ms), y compris `plg-3`, **sans** `x-jit-rel32` (62,1 ms/image) ; `rel-3`, avec, l'a eu
+  aux images 1-7 et sort à 57,0.
+- **Le paquet suit l'horloge, pas l'image** : aux images 1-6 et ~175-215 (t ≈ 0,2 s et
+  10,5 s) dans les parties sans, aux images 7-40 (t ≈ 0,5-3 s) dans 8 des 9 parties avec. Deux
+  paquets à ~10,5 s d'écart : la période de la boucle de `matrice.py` (`sleep 10` puis un
+  `ssh`), dont les **deux premiers relevés qui voient des images appellent `premier_plan()`**
+  (`osascript … System Events … set frontmost`).
+- Hors rafales, `x-jit-rel32` gagne : rapport médian 0,980 contre 1,009 sur les images
+  74..560 (**−2,9 %**), les neuf parties avec sous les onze sans sauf `plg-3` (0,984, partie
+  plus longue, 945 images). C'est l'ordre de grandeur de DOOM 3 (−2,3 à −2,8 %, §28, x86-c1/c2).
+
+### 31.2 La rafale mesurée dans la VM de dev
+
+Job `sshburst` (deux sondes de calcul, une par vCPU, travail compté par tranche de 100 ms
+pendant 80 s, VM de dev au bureau, SMP=2, options de production, `x-jit-rel32`) ; l'hôte
+frappe à heure fixe, comme la matrice (`bench/tcg/rel32-x86/sshburst/bilan.txt`) :
+
+| événement hôte | durée vue de l'hôte | travail perdu par les sondes (2 vCPU) |
+|---|---|---|
+| `ssh` neuf (`tssh.sh` : échange de clés DH, RSA) + `tail` | 2,1-2,3 s | ~200 ms (≈ bruit d'une fenêtre de 3 s calme : 154 ms) |
+| même commande sur une connexion multiplexée (`ControlMaster`) | 0,09 s | ~0 |
+| `osascript … System Events … set frontmost` | **4,7 s (1er), 1,6 s (2e)** | **3,1 s, puis 1,0 s** |
+
+Le relevé ssh lui-même est presque gratuit pour l'invité (le coût est surtout côté hôte et
+réseau) ; **l'`osascript` coûte 1 à 3 s de processeur invité**, ce que montrent les paquets
+d'UT2004 (+300 à +650 ms sur ~1,5 s, le jeu gardant une part des deux vCPU). OpenSSH 4.5p1 de
+Tiger accepte le multiplexage (`ControlPath` court exigé : chemin de socket ≤ 108 octets).
+
+### 31.3 Les hypothèses de placement, éliminées une à une
+
+- **(a) Pages énormes** : 20 lancements `tools/tcg/jitcheck.py --rel32` (SMP 2, Linux : lit
+  `/proc/<pid>/smaps`) : **20/20** tampon de 1 Gio aligné sur 2 Mio, 16 VMA rwx (une par
+  région, page de garde entre deux) toutes `hg` (`MADV_HUGEPAGE`) et éligibles THP, le
+  prologue déjà dans une page énorme. Après jit-bench dans la VM de dev : 85-97 % du tampon
+  résident en pages énormes, avec ou sans `x-jit-rel32` (`placement.txt` de chaque partie).
+- **(b) Alias texte/tampon** : la place relative est la même à chaque lancement — fin du
+  tampon 64 Mio sous `__executable_start` arrondi à 2 Mio (64 ou 65 Mio dans le journal) ;
+  seul le texte modulo 2 Mio change (ASLR à la page). Dans les parties UT, ce décalage
+  (0x005000 à 0x1e1000) ne trie pas les parties « lentes » ; et le rapport médian hors rafales
+  n'a qu'un mode.
+- **(c) Appels pas vraiment directs** : `-d out_asm` sur 3 s d'OpenBIOS
+  (`outasm-appels.txt`) : avec `x-jit-rel32`, 1 593 `mov rdi,rbp ; call rel32` et **aucun
+  octet `ff 15`** ; sans, les mêmes 1 593 appels en `call *[rip+X]` (8 979 `ff 15` en tout).
+  La trace « appels des helpers directs (rel32) » est dans toutes les parties avec.
+- **(d) split-wx, régions par vCPU** : sans objet sous Linux (anonyme, sans alias RX ; 0027 ne
+  touche que le chemin macOS) ; les 16 régions sont alignées et identiques à chaque lancement.
+
+### 31.4 Banc invité et compteurs (`perf stat`), VM de dev
+
+`jit-bench` (vperm, flottant AltiVec, `lmw/stmw`, appel indirect `jctest`), QEMU relancé à
+chaque partie, bras entrelacés, `perf stat -p` sur le processus pendant le job
+(`jit-bench-bilan.txt`) :
+
+| (médiane, min..max) | sans `x-jit-rel32` (7) | avec (8) |
+|---|---|---|
+| 4 `vperm` × 50 M | 549 ms (528..628) | **530 ms (500..564)** |
+| flottant AltiVec × 50 M | 601 ms (577..682) | 592 ms (572..657) |
+| `stmw+lmw` × 20 M | 3 774 ms (3 619..4 268) | 3 670 ms (3 505..4 008) |
+| `jctest`, pas de 16 octets | 96,9 ns (90,3..111,4) | 92,9 ns (88,8..101,6) |
+| IPC du processus QEMU | 2,91 (2,37..2,99) | 2,95 (2,74..3,03) |
+| défauts de prédiction ‰ instr. | 0,60 (0,58..0,76) | **0,51 (0,49..0,57)** |
+| défauts d'iTLB par M instr. | 31,6 (26,9..34,3) | **20,4 (17,5..36,9)** |
+| défauts L1i ‰ instr. | 6,6 (6,4..7,9) | 6,4 (6,1..6,8) |
+| tampon résident en pages énormes | 96-98 % (35 % une fois) | 91-97 % |
+
+**Un seul régime** de chaque côté (étendue 8-13 %, la partie la plus lente de chaque bras
+coïncidant avec la charge de l'hôte, `charge.txt`), et `x-jit-rel32` devant sur tous les
+postes : −2 à −3 %, moins de défauts de prédiction (−15 %, les sauts indirects vers les
+helpers disparus) et d'iTLB (la constante de chaque `call *[rip+X]` n'est plus lue). Trois
+parties prises pendant une construction concurrente (charge 11-14, ×2 sur les deux bras) sont
+écartées (`hote-charge/`). Les adresses du tampon et le texte modulo 2 Mio de chaque partie
+sont dans le bilan : aucun ne trie les temps.
+
+### 31.5 Ce que ça change, et ce qui reste
+
+- **QEMU : rien à corriger.** Pas de `tcg/0030` : le placement de 0024 est déjà aligné sur
+  2 Mio, en THP, au même endroit relatif à chaque lancement, et la trace de démarrage dit déjà
+  l'adresse, l'écart au texte et la forme des appels. L'état THP ne peut pas être annoncé au
+  démarrage (rien n'est encore touché) : `jitcheck.py --rel32` le relit.
+- **La mesure, corrigée le 06/10** (`docs/matrice-jeux.md` §5, « Mesure et rafales ») :
+  - `tools/matrice` : les jeux à fenêtre fixe la déclarent (`images_fenetre`), et
+    `plan_permis()` interdit tout `osascript` de `premier_plan()` quand l'image a est à moins
+    de 6 s au rythme courant, jusqu'à l'image b ; System Events est lancé avant le jeu (le 1er
+    appel coûtait 3 s de processeur invité) ; les deux remises au premier plan du début partent
+    dès que le processus du jeu existe, pendant le chargement ; des replis vus pendant la
+    fenêtre sont notés (`premier_plan` dans le résultat de la cellule, journal) et la remise au
+    premier plan attend la fin de la fenêtre. Tests : `tests/matrice_test.py`.
+  - `tools/guest/tssh.sh` multiplexe (`ControlMaster=auto`, socket `.run/tssh-<port>` du dépôt
+    principal, `ControlPersist` 300 s, `ServerAliveInterval` 15 s ; `TSSH_MUX=0` pour
+    l'ancien comportement). Validé sur la VM de dev (`bench/tcg/rel32-x86/tssh-mux.txt`) :
+    commande seule 0,9-2,2 s sans, **0,04 s** multiplexée ; entrée standard (300 ko aller-retour
+    identiques), `tar` par le canal, code de sortie, 10 commandes parallèles ; VM arrêtée : la
+    socket disparaît, la commande suivante échoue tout de suite (`Connection refused`), et
+    après redémarrage une nouvelle maîtresse se forme.
+  - Pour relire une campagne d'avant : `tools/tcg/utrafales.py <campagne>`.
+- **Phase 2** (VM quotidienne, binaire de référence, qui porte 0024) :
+
+        tools/tcg/matab.sh x86-rel32-ut 6 "ref:" "rel:JITREL32=1" ut fen
+        tools/tcg/matab.sh x86-rel32-d3 6 "ref:" "rel:JITREL32=1" d3 fen
+        tools/tcg/utrafales.py bench/tcg/ab/x86-rel32-ut
+
+  Attendu : UT2004 −2 à −3 %, sur la fenêtre 13..73 (désormais sans osascript) comme au
+  rapport médian 74..560 ; à vérifier dans la phase 2 : `utrafales.py` ne doit plus montrer
+  d'excès de fenêtre au-delà de ~150 ms, et aucune cellule ne doit se replier faute de premier
+  plan (colonne replis) ; DOOM 3 −2 à −3 % (fenêtre de ~230 images, les
+  paquets s'y diluent). Ensuite seulement `JITREL32` à 1 dans `run_tiger.sh`.

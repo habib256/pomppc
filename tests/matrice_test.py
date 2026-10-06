@@ -134,5 +134,20 @@ with tempfile.TemporaryDirectory() as d:
         o = subprocess.run([exe, "-r", c, zone], capture_output=True, text=True).stdout.split()
         verifie(o == ["0.000", "0", "0.000"], "ppmcmp découpe : %s" % o)
 
+# premier_plan (osascript, 1 à 3 s de processeur invité) jamais dans une fenêtre fixe
+import ut  # noqa: E402
+verifie(ut.JEU.images_fenetre == (13, 73) and ut.JEU.fenetre({13: 0, 73: 0}) == (13, 73)
+        and ut.JEU.fenetre({13: 0}) is None, "fenêtre fixe d'UT2004 lue sur images_fenetre")
+verifie(mb.JEU.fenetre({900: 0, 1500: 0}) == (900, 1500), "fenêtre fixe de Marble Blast")
+verifie(d3.JEU.images_fenetre is None, "DOOM 3 : fenêtre non fixe")
+P = matrice.plan_permis
+verifie(P((13, 73), {}), "avant la première image : permis")
+verifie(not P((13, 73), {1: (0, 0, 0), 5: (300.0, 0, 0)}), "image 5 à ~16 img/s : fenêtre trop proche")
+verifie(not P((13, 73), {40: (2500.0, 0, 0)}), "dans la fenêtre : interdit")
+verifie(P((13, 73), {80: (5000.0, 0, 0)}), "après la fenêtre : permis")
+verifie(P((900, 1500), {100: (5000.0, 0, 0)}), "image 100 à 20 img/s, fenêtre à 900 : permis")
+verifie(not P((900, 1500), {850: (40000.0, 0, 0)}), "image 850, fenêtre à 900 : interdit")
+verifie(P(None, {40: (2500.0, 0, 0)}), "sans fenêtre fixe : permis")
+
 print("matrice : %s" % ("OK" if not echecs else "%d échec(s)" % echecs))
 sys.exit(1 if echecs else 0)

@@ -13,7 +13,7 @@ Fenêtre non automatisée : pas de réglage connu (préférences vides,
 LaunchCFMApp ne passe pas d'arguments au jeu).
 Le 26/09, le texte des menus paraît juste (TODO §6 le disait défectueux).
 """
-from jeu import Jeu, fenetre_fixe
+from jeu import Jeu
 
 W3 = "/Users/tiger/Desktop/Warcraft III Folder"
 LCFM = "/System/Library/Frameworks/Carbon.framework/Versions/A/Support/LaunchCFMApp"
@@ -45,8 +45,7 @@ class Warcraft3(Jeu):
     def commande(self, mode):
         return 'cd "%s" && %s "%s/Warcraft III"' % (W3, LCFM, W3)
 
-    def fenetre(self, rows):
-        return fenetre_fixe(rows, 1200, 1700)
+    images_fenetre = (1200, 1700)
 
 
 JEU = Warcraft3()
