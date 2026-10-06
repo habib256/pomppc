@@ -225,7 +225,16 @@ dans `Resources` d'OpenGL.framework : `install.sh` l'en retire.
   fautive ; quand le compteur bouge, il repasse en synchrone pendant 120 images
   — le temps que l'erreur, si elle est la nôtre, revienne avec son statut et son
   `pc` exacts — puis reprend l'asynchrone. Vu en vrai : un repli par application
-  GL qui se ferme à côté, suivi d'une reprise.
+  GL qui se ferme à côté, suivi d'une reprise. (Le balayage est fait par le
+  device depuis la v19, sans erreur ; restaient la sonde attendue ou le flux
+  fautif d'un autre processus.) **Depuis le 07/10/2026**, sur un device qui
+  annonce `QGPU_CAP_CLIENT_ERRORS`, le global n'est plus qu'un déclencheur :
+  quand il bouge, le plugin relit `QGPU_REG_CLIENT_ERRORS` de **sa** tranche
+  (`QGPU_UC_READ_REG`, un appel au kext) et, s'il n'a pas bougé, se recale et
+  reste en asynchrone, miroirs intacts (`POMPPC_GL_STATS` : « foreign error
+  move(s) » ; trace : « aucune de notre tranche »). Le repli de 120 images ne
+  vise plus que ses propres erreurs. Sans le bit, ou si sa tranche n'est pas
+  celle que le device calcule (autre kext), règle globale d'avant.
 - Tampons de dessin 32 bits. Une demande 16 bits (Warcraft III / Colin McRae
   « milliers de couleurs ») est élevée en 32 côté hôte ; `aglSetFullScreen`
   peut commuter l'écran QFB en 1555, et le swap convertit xRGB → 1555.

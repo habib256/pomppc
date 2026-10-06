@@ -124,7 +124,8 @@ de chemin tableaux ou de cycle de vie des tableaux : P1 les rapproche.
   (exposer `tex_ids`, `buf_ids`… dans la réponse du kext, refuser sinon) : ce soir, le désaccord a
   coûté une heure et deux plantages.
 - `QGPU_REG_ERRORS` par client, pas global (un autre processus fait passer le plugin en
-  synchrone).
+  synchrone). *Fait le 07/10/2026 : `QGPU_CAP_CLIENT_ERRORS`,
+  [protocole-v19-transport.md](protocole-v19-transport.md#erreurs-par-client-07102026).*
 - `cycle.sh` : une variante qui reconstruit le kext et redémarre quand `qgpu_proto.h` change.
 - **Commit.** Tout ceci (v16, v17, S3TC, 4096 textures, rejeu) est non commité : 37 fichiers.
   Un lot par notion, avec ses épreuves.

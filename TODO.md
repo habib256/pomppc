@@ -107,10 +107,6 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   `patches/tcg/essais/0010-smcstat.patch` pendant une partie de DOOM 3 (démarrage et Marble
   Blast : 0 course).
 
-- [ ] **[Protocole] `QGPU_REG_ERRORS` par client** : aujourd'hui global, un autre
-  processus fait passer le plugin en synchrone et invalide ses miroirs sans faute de sa
-  part (le plancher `err_floor` du 29/09 limite l'effet, pas la cause).
-
 - [ ] **[Architecture] Suites A6 — écarts restants de [docs/architecture.md](docs/architecture.md)** :
   L1 (quarantaine et flux coupé) et L6 (bandes et bascule ciblée) traités le 29/09 ; relire
   L2 à L5 contre le code actuel et fermer ce qui tient encore.

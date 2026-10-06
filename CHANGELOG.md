@@ -9,6 +9,17 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **`QGPU_REG_ERRORS` par client, 07/10** (`docs/protocole-v19-transport.md`, « Erreurs par
+  client ») : le compteur d'erreurs du device était global, et la sonde attendue ou le flux fautif
+  d'un **autre** processus faisait repasser le plugin en synchrone 120 images, miroirs invalidés.
+  Le device tient maintenant un compteur par tranche de BAR0 (`QGPU_CAP_CLIENT_ERRORS`,
+  `QGPU_REG_CLIENT_ERRORS(i)` en 0xC8 + 4·i), attribué par l'offset du flux ; le plugin garde le
+  global comme déclencheur et ne relit le sien (`QGPU_UC_READ_REG`) que quand il bouge. Ni version
+  du protocole ni `qgpu_abi.h` : **QEMU et plugin, kext inchangé**. Épreuve à deux clients dans
+  l'invité (`tools/guest/jobs/regerr`, client fautif `guest/qgpu-test/errpeer` toutes les 10 ms
+  pendant `gltest game`) : plugin d'avant **1 repli, fin en synchrone** ; d'après **0 repli, 71
+  mouvements étrangers ignorés**. `gltest` 52 OK / 0 échec, `qgpu_smoke.py` 61/61 (dont l'attente
+  périmée de 4 contextes par client, 32 depuis le 26/09, corrigée).
 - **Binaire rapide du PC mesuré hôte au repos, matrice finale, planchers du PC, 06-07/10**
   (`docs/vitesse-doom3-x86.md` §13.5-13.7) : A/B entrelacé DOOM 3 `d3-fen`, 3 parties par bras,
   défauts du 06/10 : binaire de référence **122,9** ms/image (121,8..124,6), **binaire rapide

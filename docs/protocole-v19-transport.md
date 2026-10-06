@@ -107,7 +107,51 @@ d'objets laissés vivants en silence.
 
 - L'isolation entre clients (un processus peut toujours toucher les identifiants d'un autre) :
   choix assumé, `qgpu-pci.c` en tête.
-- `QGPU_REG_ERRORS` global au device (`TODO.md` §5) : un registre par tranche suivrait
-  naturellement la voie ouverte ici.
+- ~~`QGPU_REG_ERRORS` global au device~~ : un compteur par tranche depuis le 07/10/2026,
+  ci-dessous.
 - Le nombre de tranches reste 4 et fixé par le device ; le WindowServer comme cinquième client
   est le chantier A6.
+
+## Erreurs par client (07/10/2026)
+
+**Le défaut.** `QGPU_REG_ERRORS` est global au device. En asynchrone le plugin ne voit que lui
+(le kext le rend à chaque doorbell, à la place de `status_pc`) : quand il bouge, il repassait en
+synchrone pendant 120 images et invalidait ses miroirs (`check_errors`), que l'erreur soit la
+sienne ou non. Observé le 24/09 (8 877 erreurs du balayage de fermeture du kext, un repli par
+application GL fermée à côté) ; le balayage est fait par le device depuis la v19, sans erreur, mais
+la sonde attendue d'un autre processus (`PROG`, `NO_MEM`) ou son flux fautif suffisaient encore.
+Reproduit le 07/10 (ci-dessous) : un voisin fautif fait finir `gltest game` en synchrone.
+
+**La voie.** Rien dans le kext. Le device sait déjà de quelle tranche vient un flux : son offset
+absolu dans BAR0, découpé comme le kext le découpe (`(fenêtre / CLIENTS) & ~0xFFF`, `fSlotSize`) —
+et un `CLIENT_RESET` porte l'index de sa tranche. Il tient donc un compteur par tranche, et le
+plugin le lit par `QGPU_UC_READ_REG`, qui existe depuis la v19. Tout est dans `qgpu_proto.h` :
+
+| symbole | valeur | sens |
+|---|---|---|
+| `QGPU_CAP_CLIENT_ERRORS` | `0x00080000` | le device tient les compteurs ci-dessous (bit posé par `qgpu-pci.c`) |
+| `QGPU_REG_CLIENT_ERRORS(i)` | `0xC8 + 4·i` | soumissions terminées en erreur dont le flux est dans la tranche *i* ; publié avant `FENCE`, comme le global |
+| `QGPU_CLIENT_SLOT_BYTES(shm, n)` | `(shm / n) & ~0xFFF` | le découpage supposé, partagé par le device et le plugin |
+
+Même règle que le global (ni `QUEUE_FULL`, ni doorbell synchrone abandonné par l'échéance D2) ; la
+somme des compteurs vaut le global, sauf un flux hors de toute tranche. Ni `QGPU_PROTO_VERSION` ni
+`qgpu_abi.h` ne changent : QEMU et plugin, sans réinstaller le kext ni redémarrer.
+
+**Le plugin.** Le global reste le **déclencheur** (gratuit, rendu à chaque doorbell) ; quand il a
+bougé, `errors_foreign` relit le compteur de sa tranche — un appel au kext, seulement alors. Immobile :
+mouvement étranger, on se recale, l'asynchrone et les miroirs restent. Le compteur est lu *après* le
+global : une faute à nous plus récente est prise tout de suite (prudent). `qgpu_open` ne l'active
+que si le bit est là **et** que sa tranche (`GET_INFO`, `GET_SLOT`) est celle que le device calcule
+depuis `SHMEM_SIZE` et `CLIENTS` : un autre kext, qui découperait autrement, ferait sinon désigner
+le compteur d'un voisin. Compatibilité : vieux plugin ou vieux device → règle globale d'avant (sur
+un device v19 sans le bit, les registres valent 0).
+
+**Épreuves (07/10/2026, PC Linux, VM de dev 10.4.11, single-user).**
+
+| épreuve | où | résultat |
+|---|---|---|
+| carte des registres (0xC8..0xD4 sous `TOPADDR`, après `LAYOUT`), bit disjoint, `QGPU_CLIENT_SLOT_BYTES` | `tests/qgpu_core_test.c` `run_v9` | OK |
+| depuis Open Firmware : tranche 0 = global ; un flux fautif en tranche 1 ne fait bouger que la tranche 1 | `tests/qgpu_smoke.py` | 61/61 (6 de plus) |
+| par le vrai kext : refus `LIMIT` → global +1, sa tranche +1, les autres 0 | `guest/qgpu-test` | OK |
+| deux clients : `errpeer` refuse un flux toutes les 10 ms pendant `gltest game` (60 images) | `tools/guest/jobs/regerr` | plugin d'**avant** : 1 repli, fin en **synchrone** ; d'**après** : **0 repli, 71 mouvements étrangers**, fin en asynchrone ; chacun seul : 0 repli |
+| non-régression : `qgpu_test`, scènes `gltest` contre Apple, `TEX3`, `C16` | `tools/guest/jobs/gpu` | `gltest` **52 OK, 0 échec**, verdict 0 échec |
