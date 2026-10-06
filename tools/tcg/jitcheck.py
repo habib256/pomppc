@@ -17,9 +17,17 @@ x-jit-near nor x-jit-rel32 nor tcg/0027 (Darwin only) touches and which prints
 no placement line. The RX view is then read from /proc/<pid>/maps (the
 "memfd:tcg-jit" r-x mapping) and judged against the text mapping of the
 binary with the same criterion as the mode; the report says so.
+
+Linux, without --split-wx: each run also prints, on an indented second line,
+the placement read from /proc/<pid>/smaps (docs/tcg-g4.md §31): buffer base and
+its 2 MiB alignment, gap between the buffer end and the start of QEMU's text,
+the text base modulo 2 MiB (the only thing ASLR changes in the relative
+placement), and how many of the buffer's rwx VMAs carry MADV_HUGEPAGE ("hg")
+and are THP-eligible. Informational: it does not change the verdict.
 """
 import argparse
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -27,6 +35,43 @@ import time
 from pathlib import Path
 
 GIB = 1 << 30
+MIB = 1 << 20
+
+
+def smaps_placement(pid, binary):
+    """Linux, anonymous rwx buffer: placement and THP state from /proc/<pid>/smaps."""
+    vmas, cur = [], None
+    try:
+        f = open(f"/proc/{pid}/smaps")
+    except OSError:
+        return None
+    with f:
+        for line in f:
+            m = re.match(r"([0-9a-f]+)-([0-9a-f]+) (\S+) \S+ \S+ \S+\s*(.*)$", line)
+            if m:
+                cur = {"lo": int(m[1], 16), "hi": int(m[2], 16), "perm": m[3],
+                       "path": m[4].strip(), "hg": False, "elig": False, "ahp": 0}
+                vmas.append(cur)
+            elif cur is None:
+                continue
+            elif line.startswith("VmFlags:"):
+                cur["hg"] = " hg" in line
+            elif line.startswith("THPeligible:"):
+                cur["elig"] = line.split()[1] == "1"
+            elif line.startswith("AnonHugePages:"):
+                cur["ahp"] = int(line.split()[1])
+    text = [v for v in vmas if v["path"] == binary]
+    jit = [v for v in vmas if v["perm"].startswith("rwx") and not v["path"]]
+    if not text or not jit:
+        return None
+    t0 = min(v["lo"] for v in text)
+    b0, b1 = min(v["lo"] for v in jit), max(v["hi"] for v in jit)
+    gap = f"fin à {(t0 - b1) // MIB} Mio sous le texte" if t0 > b1 else "loin du texte"
+    return (f"placement : tampon {b0:#x} ({'aligné' if b0 % (2 * MIB) == 0 else 'NON aligné'} "
+            f"2 Mio) {(b1 - b0) // MIB} Mio, {gap} {t0:#x} (texte mod 2 Mio = {t0 % (2 * MIB):#x}) ; "
+            f"{len(jit)} VMA rwx, hg {sum(v['hg'] for v in jit)}, "
+            f"THP éligibles {sum(v['elig'] for v in jit)}, "
+            f"AnonHugePages {sum(v['ahp'] for v in jit)} kio")
 
 
 def maps_report(pid, binary, rel32):
@@ -73,7 +118,7 @@ def check(binary, runs, split, rel32):
                 marker = "appels des helpers"
             else:
                 marker = "alias RX exécuté" if split else "tampon JIT"
-            good, line = False, ""
+            good, line, where = False, "", None
             try:
                 deadline = time.monotonic() + 10
                 report = ""
@@ -87,6 +132,9 @@ def check(binary, runs, split, rel32):
                             good, line = r
                             break
                     elif marker in report:
+                        if linux and p.poll() is None:
+                            time.sleep(0.3)     # régions et pages de garde posées après le rapport
+                            where = smaps_placement(p.pid, binary)
                         break
                     time.sleep(0.1)
             finally:
@@ -107,6 +155,8 @@ def check(binary, runs, split, rel32):
                     place = [l for l in report.splitlines() if "tampon JIT" in l]
                     line = (place[0] + " | " if place else "") + line
             print(f"{n + 1}: {'OK' if good else 'FAIL'} " + (line or report.strip()))
+            if where:
+                print("   " + where)
             failed |= not good
     return int(failed)
 
