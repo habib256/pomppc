@@ -125,5 +125,16 @@ retombe sur la référence : jamais un binaire rapide en retard sur la série en
 
 ## 6. Mesures
 
+**Validation de la mécanique (06/10, arbre voisin `~/src/qemu-opt`, sans toucher à
+`~/src/qemu`)** : profil `~/src/qemu-d3tcg/pgo-data3` importé (`--importer`, 1 418 `.gcda`
+renommés `#qemu-d3tcg#build-pgo3#` → `#qemu-opt#build-fast#`), série 0021-0028 posée sur l'arbre
+par le script, puis `QEMU_SRC=~/src/qemu-opt tools/tcg/pgo-train.sh --etapes use` : **15 min 18 s**
+(hôte chargé par deux autres constructions), **1,75 Gio de mémoire max** pour toute la
+construction (cgroup, plafond 20 Gio), 1 212 avertissements `-Wcoverage-mismatch` (fichiers
+changés depuis le profil, compilés sans lui) et l'avertissement « autre série ». Capacités
+toutes présentes (`x-lmw-vector`, `x-jc-word` compris, backend GL), `-M none` démarre, relevé
+`complet=oui`, `march=skylake`, et `pomppc_pick_qemu 2` choisit ce binaire en 0,25 s
+(« binaire rapide (PGO, -O3, -march=native) »).
+
 Phase 2 (hôte au repos) : profil sur la VM quotidienne, A/B `ref:` contre `fast:` sur DOOM 3,
 puis un tour de matrice avec vidage. À compléter.
