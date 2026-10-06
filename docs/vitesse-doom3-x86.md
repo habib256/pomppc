@@ -478,3 +478,29 @@ Compteurs `x-mem-stats` en jeu (dernière fenêtre de 10 s, cpu 0 / cpu 1) : `dc
 56 k/s, `lmw` 151 k/s et 91 k/s (`stmw` autant), ~6,5 mots par `lmw`, `tlbie` 1 200/s et
 550/s, ~5,0 M invalidations précises par vCPU sur la partie (~3 000/s), TLB grandi à 32 768
 entrées (`grows` 188 et 42), aucun vidage complet de BAT.
+
+### 13.2 A/B du côté mémoire (`x86-mem`, `x86-mem-mb`, `x86-mem-ut`)
+
+`ref:` (défauts du 04/10) contre `mem:TLBPRECISE=1 LMWINLINE=1 DCBZINLINE=1`, binaire de
+référence, 3 parties par bras entrelacées (ABBA), 0 autre QEMU, charge < 1 au départ de chaque
+partie (la charge relevée pendant la mesure, 1,5-2,6, est celle du QEMU mesuré lui-même).
+
+| campagne | cellule | `ref` ms/image (min..max) | `mem` ms/image (min..max) | pas |
+|---|---|---|---|---|
+| `x86-mem` | `d3-fen` | 144,3 (143,6..153,6) | **132,0** (129,5..135,1) | **−8,5 %** |
+| `x86-mem-mb` | `mb-fen` | 20,9 (20,3..21,1) | **16,5** (16,5..17,3) | **−21 %** |
+| `x86-mem-ut` | `ut-fen` | 58,9 (58,1..60,7) | **54,7** (53,7..55,3) | **−7,1 %** |
+
+Dispersions 2,9 à 6,9 % (la plus forte : `ref-2` de DOOM 3 à 153,6, gardée, la médiane n'en
+dépend pas). Le `ref` de DOOM 3 (144,3) est au-dessus des 138 du 04/10 : binaire de
+référence reconstruit depuis (0025-0035, propriétés éteintes) et autre jour ; seul le pas
+dans une même campagne compte. UT2004 (`tools/tcg/utrafales.py bench/tcg/ab/x86-mem-ut`) :
+**aucune rafale dans la fenêtre** 13..73 (celles relevées tombent aux images 136-183), aucun
+premier plan différé (pas de « replis pendant la fenêtre » au journal), replis 3-4 pour 8
+admis ; à contenu égal, rapport à la médiane 0,961 contre 1,031 (−6,8 %), même pas que la
+fenêtre. `utrafales.py` corrigé en route : il exigeait 560 images enregistrées, la matrice
+s'arrête désormais vers 340-460 ; l'intervalle « après la fenêtre » suit la partie la plus
+courte.
+
+**Le côté mémoire est retenu** : DOOM 3 −8,5 %, Marble Blast −21 %, UT2004 −7 %, aucun
+vérificateur en défaut (§13.1).
