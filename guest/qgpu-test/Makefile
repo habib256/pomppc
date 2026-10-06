@@ -5,10 +5,16 @@ CFLAGS  = -arch ppc -O1 -Wall
 LDLIBS  = -framework IOKit -framework CoreFoundation
 
 # Le contrat (qgpu_proto.h, qui inclut l'ABI qgpu_abi.h) vient de patches/qgpu/.
+all: qgpu_test errpeer
+
 qgpu_test: qgpu_test.c ../../patches/qgpu/qgpu_proto.h ../../patches/qgpu/qgpu_abi.h
 	$(CC) $(CFLAGS) -I../../patches/qgpu -o $@ qgpu_test.c $(LDLIBS)
 
-clean:
-	rm -f qgpu_test out.ppm
+# 07/10/2026 : client fautif de l'épreuve des erreurs par client (jobs/regerr)
+errpeer: errpeer.c ../../patches/qgpu/qgpu_proto.h ../../patches/qgpu/qgpu_abi.h
+	$(CC) $(CFLAGS) -I../../patches/qgpu -o $@ errpeer.c $(LDLIBS)
 
-.PHONY: clean
+clean:
+	rm -f qgpu_test errpeer out.ppm
+
+.PHONY: all clean

@@ -97,6 +97,11 @@ erreur — a été écartée : elle aurait changé la sémantique v8 de l'indép
 des soumissions, et un flux fautif est de toute façon un bug du plugin, pas un
 état à rattraper.)
 
+`QGPU_REG_ERRORS` est **global au device** : un autre client le fait bouger.
+Depuis le 07/10/2026, `QGPU_CAP_CLIENT_ERRORS` ajoute un compteur par tranche
+(`QGPU_REG_CLIENT_ERRORS(i)`, 0xC8 + 4·i) ; voir
+[protocole-v19-transport.md](protocole-v19-transport.md#erreurs-par-client-07102026).
+
 ### Interruption
 
 `QGPU_IRQ_DONE` est levée à **chaque** soumission terminée, et se démasque

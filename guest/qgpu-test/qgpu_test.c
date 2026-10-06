@@ -47,6 +47,7 @@ static volatile unsigned int *win;
 static unsigned int pc;
 static unsigned int base;              /* début de notre tranche dans BAR0 */
 static unsigned int ctx_id, surf_id;   /* premiers identifiants de notre plage */
+static unsigned int slot_idx;          /* index de notre tranche */
 
 static void emit(unsigned int v)  { win[pc++] = v; }
 static void emitf(float f)
@@ -147,7 +148,7 @@ int main(void)
               idx, base, cb, sb);
         CHECK(cb == idx * got[QGPU_CLASS_CTX] && sb == idx * got[QGPU_CLASS_SURF],
               "GET_SLOT recopie la table du device (ctx %u surf %u)", cb, sb);
-        ctx_id = cb; surf_id = sb;
+        ctx_id = cb; surf_id = sb; slot_idx = idx;
     }
 
     kr = IOConnectMapMemory(conn, QGPU_UC_MEM_SHMEM, mach_task_self(),
@@ -413,13 +414,40 @@ int main(void)
        sonde « peek » de la section v9 lit le statut de la DERNIÈRE soumission
        terminée, et ceci en ferait une autre. */
     {
-        unsigned int f2, st2, pc2;
+        unsigned int f2, st2, pc2, k, g0 = 0, g1 = 0, c0[QGPU_MAX_CLIENTS], c1[QGPU_MAX_CLIENTS];
+        /* 07/10/2026 — QGPU_CAP_CLIENT_ERRORS : ce refus attendu fait avancer
+           le compteur global ET celui de NOTRE tranche, pas ceux des autres
+           (aucun autre client ne soumet pendant ce programme). */
+        for (k = 0; k < QGPU_MAX_CLIENTS; k++) {
+            c0[k] = c1[k] = 0;
+            IOConnectMethodScalarIScalarO(conn, QGPU_UC_READ_REG, 1, 1,
+                                          (unsigned int)QGPU_REG_CLIENT_ERRORS(k), &c0[k]);
+        }
+        IOConnectMethodScalarIScalarO(conn, QGPU_UC_READ_REG, 1, 1,
+                                      (unsigned int)QGPU_REG_ERRORS, &g0);
         pc = CMD_OFF / 4;
         emit(QGPU_CMD_HDR(QGPU_OP_CTX_CREATE, QGPU_LEN_CTX)); emit(ctx_id);
         kr = IOConnectMethodScalarIScalarO(conn, QGPU_UC_SUBMIT, 2, 3,
                                            CMD_OFF, 8, &f2, &st2, &pc2);
         CHECK(kr == KERN_SUCCESS && st2 == QGPU_ST_LIMIT,
               "avant RESET : recréer le contexte %u = LIMIT (%u)", ctx_id, st2);
+        for (k = 0; k < QGPU_MAX_CLIENTS; k++)
+            IOConnectMethodScalarIScalarO(conn, QGPU_UC_READ_REG, 1, 1,
+                                          (unsigned int)QGPU_REG_CLIENT_ERRORS(k), &c1[k]);
+        IOConnectMethodScalarIScalarO(conn, QGPU_UC_READ_REG, 1, 1,
+                                      (unsigned int)QGPU_REG_ERRORS, &g1);
+        if (caps & QGPU_CAP_CLIENT_ERRORS) {
+            int others = 0;
+            for (k = 0; k < QGPU_MAX_CLIENTS; k++)
+                if (k != slot_idx && c1[k] != c0[k])
+                    others++;
+            CHECK(g1 - g0 == 1 && c1[slot_idx] - c0[slot_idx] == 1 && others == 0,
+                  "erreurs par tranche : global +%u, tranche %u +%u, autres tranches "
+                  "inchangées (%d bougé)", g1 - g0, slot_idx,
+                  c1[slot_idx] - c0[slot_idx], others);
+        } else {
+            printf("  –    device sans QGPU_CAP_CLIENT_ERRORS : erreurs par tranche non vérifiées\n");
+        }
         kr = IOConnectMethodScalarIScalarO(conn, QGPU_UC_RESET, 0, 0);
         CHECK(kr == KERN_SUCCESS, "QGPU_UC_RESET : kr 0x%x", kr);
         pc = CMD_OFF / 4;

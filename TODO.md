@@ -107,17 +107,10 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   `patches/tcg/essais/0010-smcstat.patch` pendant une partie de DOOM 3 (démarrage et Marble
   Blast : 0 course).
 
-- [ ] **[Protocole] `QGPU_REG_ERRORS` par client** : aujourd'hui global, un autre
-  processus fait passer le plugin en synchrone et invalide ses miroirs sans faute de sa
-  part (le plancher `err_floor` du 29/09 limite l'effet, pas la cause). C'est la limite L5
-  de [docs/architecture.md](docs/architecture.md) §7 (relue le 07/10 : tient encore) ;
-  `STATUS`/`STATUS_PC` sont lus en trois MMIO non atomiques par le kext. **Fermeture :** deux
-  processus en VM, l'un fautif, l'autre reste en asynchrone (`n_syncfall` à 0).
-
 - [ ] **[Architecture] A6, reste L2 — créneau rendu malgré un nettoyage échoué**
   ([docs/architecture.md](docs/architecture.md) §5, relu le 07/10 ; L3 et L4 fermées dans le
-  code, leurs épreuves sont dans l'entrée « Validation » ; L5 est l'entrée `ERRORS` par client
-  ci-dessus). Kext : `destroyClientObjects` rend un `IOReturn` et la barrière visée,
+  code, leurs épreuves sont dans l'entrée « Validation » ; L5 fermée le 07/10 par le compteur
+  d'erreurs par tranche, `CHANGELOG.md`). Kext : `destroyClientObjects` rend un `IOReturn` et la barrière visée,
   `slotGated` marque le créneau sale au lieu de le rendre, `allocSlot` ne le redonne qu'une
   fois cette barrière atteinte et relance d'abord un CLIENT_RESET jamais parti, `resetSlot`
   rend l'échec. `run_a6` (`tests/qgpu_core_test.c`) fixe ce que voit le cœur : nettoyage

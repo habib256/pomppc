@@ -952,6 +952,10 @@ static struct {
     const char     *async_why;          /* pourquoi il ne l'est pas */
     unsigned long   errors;             /* QGPU_REG_ERRORS vu à la dernière soumission */
     int             err_valid;
+    /* 07/10/2026 : QGPU_REG_CLIENT_ERRORS de NOTRE tranche, relu quand le
+       global bouge (voir errors_foreign) ; cerr_ok = le device le tient. */
+    unsigned long   cerr;
+    int             cerr_ok;
     /* Reste du 29/09 — PLAFOND DE MÉMOIRE HÔTE (QGPU_ST_NO_MEM, non fatal).
        nomem_reg : dernier QGPU_REG_NOMEM lu ; nomem_until : pression mémoire,
        aucun NOUVEL objet hôte (texture, tampon, surface) avant cette image. */
@@ -1127,6 +1131,7 @@ static struct {
     unsigned long   n_waits;            /* barrières réellement attendues */
     unsigned long   n_qfull;            /* soumissions refusées (file pleine) */
     unsigned long   n_syncfall;         /* retours en synchrone sur ERRORS */
+    unsigned long   n_foreign;          /* 07/10 : mouvements d'ERRORS d'un autre client, ignorés */
     unsigned long   n_qsamples, n_qsum; /* profondeur de file échantillonnée */
     double          t_wait;             /* secondes passées à attendre une barrière */
     /* ── 30/09, levier L4 : doorbells SYNCHRONES qui restent (le vCPU est
@@ -1764,11 +1769,11 @@ static void stats_frame(void *ctx)
                 unsigned long fr = G.n_frames - f0 ? G.n_frames - f0 : 1;
                 fprintf(f, "    submit %s: %lu fence wait(s)/frame, "
                         "%.2f ms wait/frame, queue %.2f in flight, %lu QUEUE_FULL, "
-                        "%lu sync fallback(s)\n",
+                        "%lu sync fallback(s), %lu foreign error move(s)\n",
                         G.async ? "async" : "sync",
                         (G.n_waits - w0) / fr, (G.t_wait - tw0) * 1000 / fr,
                         G.n_qsamples ? (double)G.n_qsum / G.n_qsamples : 0.0,
-                        G.n_qfull - qf0, G.n_syncfall);
+                        G.n_qfull - qf0, G.n_syncfall, G.n_foreign);
                 G.n_qsum = 0; G.n_qsamples = 0;
             }
             {
@@ -2064,7 +2069,7 @@ static void on_exit_stats(void)
                 "%lu host VBO hits / %lu packs, %lu dropped prims "
                 "(%lu on read fault), %lu tex levels sent black; "
                 "submit %s: %lu fences waited (%.0f ms), %lu QUEUE_FULL, "
-                "%lu sync fallback(s)\n",
+                "%lu sync fallback(s), %lu foreign error move(s)\n",
                 G.n_tris, G.n_textris, G.n_lines, G.n_points, G.n_clears, G.n_submits,
                 G.n_uploads, G.n_texuploads, G.n_readbacks, G.n_present,
                 G.n_copytex, G.n_pixread, G.n_pixdraw, G.n_fallback,
@@ -2072,7 +2077,7 @@ static void on_exit_stats(void)
                 G.n_vbohits, G.n_vbomiss, G.n_geomdrop,
                 G.n_dropped_fault, G.n_texblack,     /* I9 (relecture du 24/09) */
                 G.async ? "async" : "sync", G.n_waits, G.t_wait * 1000,
-                G.n_qfull, G.n_syncfall);
+                G.n_qfull, G.n_syncfall, G.n_foreign);
     if (getenv("POMPPC_GL_STATS")) {    /* 30/09 : doorbells synchrones (vCPU gelé, BQL tenu) */
         int k;
         fprintf(stderr, "POMPPC GL: synchronous doorbells:");
@@ -3166,7 +3171,7 @@ static void run_posts(Half *h)
  * soumission, son flux ne doit ni grandir ni repartir dans une autre
  * soumission. Voir stream_ready(). */
 static void stream_dead(void);
-static void check_errors(unsigned long errors, unsigned long seq);
+static void check_errors(unsigned long errors, unsigned long seq, const Half *done);
 static void posts_lost(Half *h);
 static void err_floor_update(const Half *done);
 
@@ -3274,14 +3279,12 @@ static void wait_half_ex(int i, int unlock)
            seulement quand il y a des relectures. */
         if (h->npost && G.err_valid) {
             unsigned long e2 = 0, st2 = 0, pc2 = 0;
-            if (qgpu_peek(&G.q, &e2, &st2, &pc2) == 0) {
-                if (e2 != G.errors) {
-                    posts_lost(h);
-                    check_errors(e2, h->seq);
-                } else {
-                    err_floor_update(h);    /* 4e passe : h a fini proprement */
-                }
-            }
+            /* check_errors jette les relectures de toute moitié encore en vol
+               — h l'est toujours ici — si l'erreur est la nôtre ; sinon (ERRORS
+               immobile, ou mouvement d'un autre client) h a fini proprement
+               (4e passe : err_floor_update(h)). */
+            if (qgpu_peek(&G.q, &e2, &st2, &pc2) == 0)
+                check_errors(e2, h->seq, h);
         }
     }
     h->busy = 0;
@@ -3320,6 +3323,13 @@ static void wait_half(int i)
  * domaine) : la prochaine image la reproduit, et broken_all a alors SON statut
  * et SON pc, exacts, comme avant la v9. Si elle ne revient pas — c'était le
  * ménage d'un autre client — on reprend l'asynchrone et on se recale.
+ *
+ * 07/10/2026 : depuis la v19 le ménage de fermeture est fait par le device
+ * (CLIENT_RESET, sans erreur), mais la sonde attendue d'un autre processus
+ * (PROG, NOMEM) ou son flux fautif faisait encore tomber TOUS les clients en
+ * synchrone, miroirs invalidés. Avec QGPU_CAP_CLIENT_ERRORS le global n'est
+ * plus qu'un DÉCLENCHEUR : errors_foreign relit alors le compteur de NOTRE
+ * tranche, et la règle ci-dessus ne s'applique qu'à nos propres erreurs.
  */
 #define ASYNC_RETRY   120               /* images de synchrone avant de réessayer */
 
@@ -3459,12 +3469,43 @@ static void err_floor_update(const Half *done)
     G.err_floor = f;
 }
 
+/* 07/10/2026 — QGPU_REG_ERRORS a bougé : est-ce NOUS ? Avec
+   QGPU_CAP_CLIENT_ERRORS, le device compte aussi les erreurs par tranche de
+   BAR0 (QGPU_REG_CLIENT_ERRORS) : un aller-retour au kext, seulement quand le
+   global a bougé. Le nôtre immobile → l'erreur est celle d'un autre client (sa
+   sonde attendue, son flux fautif) : on se recale et on reste en asynchrone,
+   miroirs intacts. Lu APRÈS le global : toute soumission à nous finie avant
+   cette lecture y est comptée, et une faute à nous plus récente que `errors`
+   est prise pour la nôtre dès maintenant (prudent) ; le prochain mouvement du
+   global sera alors reconnu étranger. Rend 1 si étranger. Sans le compteur
+   (device plus ancien, autre découpage de BAR0) : 0, la règle globale d'avant. */
+static int errors_foreign(unsigned long errors)
+{
+    unsigned long mine = 0;
+
+    if (!G.cerr_ok || qgpu_client_errors(&G.q, &mine) != 0)
+        return 0;
+    if (mine != G.cerr) {
+        G.cerr = mine;
+        return 0;
+    }
+    G.n_foreign++;
+    pomppc_log("POMPPC: QGPU_REG_ERRORS %lu → %lu, aucune de notre tranche "
+               "(%lu) : asynchrone conservé\n", G.errors, errors, mine);
+    gl_note("ERRORS %lu -> %lu : autre client (tranche %lu : %lu), image %lu\n",
+            G.errors, errors, G.q.index, mine, G.n_frames);
+    G.errors = errors;
+    nomem_poll();                       /* le plafond mémoire, lui, est commun */
+    return 1;
+}
+
 /* `seq` : numéro de la soumission dont le doorbell a rendu `errors`. Au plus
    une de nos soumissions est en vol pendant qu'on en construit une autre
    (switch_half attend l'autre moitié) : le compteur n'a pu bouger, de notre
    fait, que pour seq − 2 (en vol au contrôle précédent), seq − 1 (en vol
-   jusqu'ici) ou seq elle-même (déjà finie, rare). Rien avant n'est perdu. */
-static void check_errors(unsigned long errors, unsigned long seq)
+   jusqu'ici) ou seq elle-même (déjà finie, rare). Rien avant n'est perdu.
+   `done` : moitié qui vient de finir (wait_half), 0 depuis le doorbell. */
+static void check_errors(unsigned long errors, unsigned long seq, const Half *done)
 {
     unsigned long e2 = 0, status = 0, pc = 0, from;
     int i;
@@ -3472,11 +3513,12 @@ static void check_errors(unsigned long errors, unsigned long seq)
     if (!G.err_valid) {
         G.errors = errors;
         G.err_valid = 1;
-        err_floor_update(0);
+        G.cerr_ok = qgpu_client_errors(&G.q, &G.cerr) == 0;
+        err_floor_update(done);
         return;
     }
-    if (errors == G.errors) {
-        err_floor_update(0);            /* 4e passe : ce qui a fini est propre */
+    if (errors == G.errors || errors_foreign(errors)) {
+        err_floor_update(done);         /* 4e passe : ce qui a fini est propre */
         return;
     }
     /* 4e passe : toute moitié encore en vol a pu s'arrêter avant ses
@@ -3795,7 +3837,7 @@ static void submit_cur(void)
         h->fence = fence;
         h->busy = 1;
         h->seq = seq;
-        check_errors(errors, seq);
+        check_errors(errors, seq, 0);
         return;
     }
     {
@@ -3811,9 +3853,13 @@ static void submit_cur(void)
     h->seq = seq;
     /* 3e passe : un refus SYNCHRONE fait avancer QGPU_REG_ERRORS (global) ;
        on le sait, on le compte — sinon le prochain doorbell asynchrone
-       prendrait notre propre refus, déjà traité, pour une nouvelle faute. */
-    if (st != QGPU_ST_OK && G.err_valid)
+       prendrait notre propre refus, déjà traité, pour une nouvelle faute.
+       07/10 : et notre compteur de tranche ; st < 0 (le kext a refusé
+       l'appel), rien n'est parti et rien n'a bougé. */
+    if (st > 0 && G.err_valid) {
         G.errors++;
+        G.cerr++;
+    }
     if (st == QGPU_ST_NO_MEM) {
         /* reste du 29/09 : non fatal, et le lot est allé AU BOUT (le cœur
            dit un arrêt ultérieur à la place) — ses relectures sont bonnes */
@@ -8549,8 +8595,10 @@ static long submit_probe(void)
        pour qu'il ne passe pas pour une faute au doorbell asynchrone suivant ;
        et l'opcode refusé, pour que l'appelant sache quoi rendre. */
     G.probe_op = (st != QGPU_ST_OK && pc < CMD_WORDS) ? QGPU_CMD_OP(G.cmd[pc]) : 0;
-    if (st != QGPU_ST_OK && G.err_valid)
+    if (st > 0 && G.err_valid) {        /* 07/10 : st < 0 = rien n'est parti */
         G.errors++;
+        G.cerr++;
+    }
     /* 4e passe : ligne de base de QGPU_REG_NOMEM relue — sinon le nomem_seen
        suivant comptait ce refus-ci comme un second refus de SON lot et
        invalidait tous ses miroirs pour rien. */

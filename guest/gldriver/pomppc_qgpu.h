@@ -27,6 +27,9 @@ typedef struct QgpuClient {
     unsigned long  nclients;     /* QGPU_REG_CLIENTS */
     unsigned long  version;
     unsigned long  caps;
+    /* 07/10/2026 : QGPU_REG_CLIENT_ERRORS(index) si le device le tient
+       (QGPU_CAP_CLIENT_ERRORS) ET découpe BAR0 comme notre kext ; 0 sinon. */
+    unsigned long  cerr_reg;
 } QgpuClient;
 
 /* 0 si le device est utilisable ; sinon un message dans *why. Vérifie, dans
@@ -65,6 +68,11 @@ int  qgpu_wait(QgpuClient *q, unsigned long fence, unsigned long ms);
    soumission TERMINÉE. */
 int  qgpu_peek(QgpuClient *q, unsigned long *errors, unsigned long *status,
                unsigned long *pc);
+/* 07/10/2026 : soumissions de NOTRE tranche terminées en erreur
+   (QGPU_REG_CLIENT_ERRORS). -1 si le device ne les compte pas pour nous
+   (pas de QGPU_CAP_CLIENT_ERRORS, ou découpage de BAR0 différent) : le plugin
+   s'en tient alors au compteur global. */
+int  qgpu_client_errors(QgpuClient *q, unsigned long *errors);
 /* Sans rien soumettre : soumissions en vol, places libres, profondeur. */
 int  qgpu_queue(QgpuClient *q, unsigned long *inflight, unsigned long *freeslots,
                 unsigned long *depth);

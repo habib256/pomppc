@@ -250,6 +250,41 @@
    QGPU_CAP_GEN_SIZES) : un plugin qui l'ignore annonce 8 unités, et l'hôte le
    signale (stderr) au premier dessin qui en allume une au-delà de 4. */
 #define QGPU_CAP_FIXED4         0x00040000
+/* 07/10/2026 : QGPU_REG_ERRORS PAR CLIENT. QGPU_REG_ERRORS est global au
+   device : la sonde attendue ou le flux fautif d'un AUTRE processus le fait
+   bouger, et le plugin, qui ne voit que lui en asynchrone, repassait en
+   synchrone et invalidait ses miroirs sans faute de sa part. Avec ce bit, le
+   device tient en plus UN compteur par tranche de BAR0 :
+   QGPU_REG_CLIENT_ERRORS(i) = soumissions TERMINÉES avec un statut ≠ OK dont
+   le flux est dans la tranche i (même règle que QGPU_REG_ERRORS : pas un
+   QUEUE_FULL, pas un doorbell synchrone abandonné par l'échéance D2 ; un
+   QGPU_REG_CLIENT_RESET compte, s'il échouait, pour la tranche qu'il vise).
+   La somme des compteurs vaut QGPU_REG_ERRORS, sauf une soumission hors de
+   toute tranche (QGPU_ST_BAD_SUBMIT au-delà de la dernière), qui ne compte
+   que dans le global.
+
+   La tranche d'un flux se déduit de son offset ABSOLU dans BAR0 par le
+   découpage du kext : QGPU_CLIENT_SLOT_BYTES ci-dessous, celui de
+   POMPPCGPU.cpp (fSlotSize) depuis la v19. Le device ne le reçoit pas — l'ABI
+   du kext n'a pas bougé pour ce bit — : le plugin VÉRIFIE donc à l'ouverture
+   que sa tranche (GET_INFO, GET_SLOT) est bien celle que le device calcule
+   depuis QGPU_REG_SHMEM_SIZE et QGPU_REG_CLIENTS, et se passe du compteur par
+   client si ce n'est pas le cas (un autre kext) : il retombe alors sur la
+   règle globale d'avant.
+
+   Le kext ne lit ni le bit ni les registres (le plugin les lit par
+   QGPU_UC_READ_REG) : ajouté sans changer QGPU_PROTO_VERSION ni qgpu_abi.h.
+   Un plugin qui l'ignore garde la règle globale ; un plugin qui le connaît,
+   sur un device sans lui, aussi (les registres y valent 0). Usage : le
+   plugin garde QGPU_REG_ERRORS, rendu gratuitement à chaque doorbell
+   asynchrone, comme DÉCLENCHEUR, et ne relit SON compteur que quand le global
+   a bougé. docs/protocole-v19-transport.md, « Erreurs par client ». */
+#define QGPU_CAP_CLIENT_ERRORS  0x00080000
+#define QGPU_REG_CLIENT_ERRORS_BASE 0xC8  /* après QGPU_REG_LAYOUT (0x88..0xC4) */
+#define QGPU_REG_CLIENT_ERRORS(i)   (QGPU_REG_CLIENT_ERRORS_BASE + 4 * (i))
+/* Taille d'une tranche de BAR0 : la fenêtre partagée en `n` parts égales,
+   arrondies à la page (POMPPCGPU.cpp, fSlotSize). */
+#define QGPU_CLIENT_SLOT_BYTES(shmem, n) (((shmem) / (n)) & ~0xFFFUL)
 
 /* ── Statuts : QGPU_ST_* dans qgpu_abi.h ─────────────────────────────────── */
 /* ── Limites ─────────────────────────────────────────────────────────────── */
@@ -1260,6 +1295,8 @@
  *   suffit donc plus à conclure « tout s'est bien passé » : c'est QGPU_REG_ERRORS
  *   qui fait foi — le lire avant la rafale et après la barrière dit s'il y a eu
  *   une erreur, et STATUS/STATUS_PC disent laquelle pour la dernière.
+ *   QGPU_REG_ERRORS est GLOBAL : avec QGPU_CAP_CLIENT_ERRORS (07/10/2026),
+ *   QGPU_REG_CLIENT_ERRORS(i) dit la même chose pour la seule tranche i.
  *
  *   INTERRUPTION. QGPU_IRQ_DONE est levée à CHAQUE soumission terminée, comme
  *   en v8, et se démasque de la même façon (QGPU_REG_IRQ_MASK). Elle est de

@@ -38,6 +38,7 @@ int qgpu_open(QgpuClient *q, const char **why)
 
     q->conn = 0;
     q->win = 0;
+    q->cerr_reg = 0;
     if (IOMasterPort(MACH_PORT_NULL, &master) != KERN_SUCCESS) {
         *why = "IOMasterPort";
         return -1;
@@ -116,6 +117,19 @@ int qgpu_open(QgpuClient *q, const char **why)
     q->index = idx;
     q->version = version;
     q->caps = caps;
+    /* 07/10/2026 — erreurs par tranche. Le device attribue une soumission à
+       la tranche de BAR0 qui contient son flux, en découpant la fenêtre comme
+       le kext (QGPU_CLIENT_SLOT_BYTES) — il ne reçoit pas la tranche. On
+       vérifie que NOTRE tranche est bien celle-là ; sinon (un autre kext), le
+       compteur par client désignerait quelqu'un d'autre : on s'en passe. */
+    q->cerr_reg = 0;
+    if ((caps & QGPU_CAP_CLIENT_ERRORS) && idx < QGPU_MAX_CLIENTS && n == QGPU_MAX_CLIENTS) {
+        unsigned long shm = 0;
+        if (qgpu_read_reg(q, QGPU_REG_SHMEM_SIZE, &shm) == 0 &&
+            (unsigned long)size == QGPU_CLIENT_SLOT_BYTES(shm, n) &&
+            (unsigned long)base == (unsigned long)idx * size)
+            q->cerr_reg = QGPU_REG_CLIENT_ERRORS(idx);
+    }
     return 0;
 
 fail:
@@ -155,6 +169,7 @@ void qgpu_forget(QgpuClient *q)
     q->nclients = 0;
     q->version = 0;
     q->caps = 0;
+    q->cerr_reg = 0;
 }
 
 long qgpu_submit(QgpuClient *q, unsigned long off, unsigned long len, unsigned long *pc)
@@ -209,6 +224,13 @@ int qgpu_peek(QgpuClient *q, unsigned long *errors, unsigned long *status,
     if (status) *status = st;
     if (pc)     *pc = spc;
     return 0;
+}
+
+int qgpu_client_errors(QgpuClient *q, unsigned long *errors)
+{
+    if (!q->cerr_reg)
+        return -1;
+    return qgpu_read_reg(q, q->cerr_reg, errors);
 }
 
 int qgpu_queue(QgpuClient *q, unsigned long *inflight, unsigned long *freeslots,
