@@ -24,7 +24,12 @@
 #include "cpu.h"
 #include "internal.h"
 #include "fpu/softfloat.h"
+/* le modèle : SSE/AVX sur x86-64, NEON sur aarch64 (tcg/0038) */
+#if defined(__x86_64__)
 #include <immintrin.h>
+#elif defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #pragma GCC diagnostic ignored "-Wmissing-prototypes"
 #pragma GCC diagnostic ignored "-Wunused-function"
