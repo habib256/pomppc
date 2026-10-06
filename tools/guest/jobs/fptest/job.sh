@@ -6,7 +6,9 @@
 # section 15).
 #   mkdir /tmp/j && cp tools/guest/jobs/fptest/* /tmp/j && devloop.py run /tmp/j
 # env.sh a cote (facultatif) : NRAND=n vecteurs aleatoires par (etat, op)
-# (defaut 2^18), BANC=N (bancs de N iterations au lieu de l'equivalence).
+# (defaut 2^18), BANC=N (bancs de N iterations au lieu de l'equivalence),
+# MODE=d|c (formes double, tcg/0016 ; comparaisons et conversions, tcg/0033),
+# BANCMODE=banc|banc-d|banc-c (defaut banc).
 # Sortie : out/fptest.txt ; comparer les deux modes par `diff`.
 [ -f ./env.sh ] && . ./env.sh
 OUT=$PWD/out
@@ -21,11 +23,12 @@ if [ -n "$DIS" ]; then
        "fsel $(grep -c 'fsel' $OUT/banc-dis.txt), fmadds $(grep -c 'fmadds' $OUT/banc-dis.txt)"
 fi
 if [ -n "$BANC" ]; then
-  ./fptest banc $BANC > $OUT/fptest.txt 2> $OUT/fptest.err
-  ./fptest banc $BANC >> $OUT/fptest.txt 2>> $OUT/fptest.err
-  ./fptest banc $BANC >> $OUT/fptest.txt 2>> $OUT/fptest.err
+  B=${BANCMODE:-banc}
+  ./fptest $B $BANC > $OUT/fptest.txt 2> $OUT/fptest.err
+  ./fptest $B $BANC >> $OUT/fptest.txt 2>> $OUT/fptest.err
+  ./fptest $B $BANC >> $OUT/fptest.txt 2>> $OUT/fptest.err
 else
-  ./fptest $NRAND > $OUT/fptest.txt 2> $OUT/fptest.err
+  ./fptest $MODE $NRAND > $OUT/fptest.txt 2> $OUT/fptest.err
 fi
 rc=$?
 cat $OUT/fptest.err $OUT/fptest.txt

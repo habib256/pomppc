@@ -15,7 +15,7 @@ de commit et dans `docs/`.
   du TLB que les entrées concernées (classe de `tlbie` élargie, pages journalisées par segment,
   balayage), et le TLB grandit enfin (**−90 % de remplissages**). `x-lmw-inline`
   (`tcg/0032`, `LMWINLINE=1`) : `lmw`/`stmw` dans une page en accès mot ; `x-dcbz-inline`
-  (`tcg/0033`, `DCBZINLINE=1`) : `dcbz` en quatre rangements. Les trois ensemble, A/B ABBA dans
+  (`tcg/0035`, `DCBZINLINE=1`) : `dcbz` en quatre rangements. Les trois ensemble, A/B ABBA dans
   la VM de dev : **Marble Blast 19,5 → 35 img/s (+80 %)**, softmmu 24 → 7,5 % du temps vCPU,
   allers-retours par tubes −74 %, `dcbz` −65 %, `lmw`/`stmw` −9 à −47 %. Vérificateurs
   (`x-tlb-precise-verify=N`, `x-lmw-inline-verify`, `x-dcbz-inline-verify`) à zéro divergence
@@ -23,6 +23,72 @@ de commit et dans `docs/`.
   `dcbztest`, `lmwtest`, `smctest`), 10 mutants sur 11 détectés ; compteurs `x-mem-stats`. Défaut
   corrigé en route : le vérificateur de `x-sr-tlb` lisait la mauvaise table depuis QEMU 11.
   A/B en jeu (DOOM 3, Marble Blast, UT2004) à faire sur la VM quotidienne.
+- **Flottant AltiVec restant sur le PC, 06/10** (`docs/tcg-g4.md` §34,
+  `patches/tcg/0034-ppc-vfp-native-cmp.patch`) : `vcmpeqfp`, `vcmpgefp`, `vcmpgtfp`,
+  `vcmpbfp` (et formes Rc, CR6 calculé en ops TCG), `vcfsx`/`vcfux` et `vctsxs`/`vctuxs`
+  (saturation et VSCR[SAT]) par l'op native de `x-vfp-native` (émetteur x86-64, sans
+  effet sur arm64). Propriété `x-vfp-native-cmp`, **éteinte par défaut**
+  (`VFPNATIVECMP=1`), vérificateur `x-vfp-native-cmp-verify` (`VFPNCMPVERIFY=1`). Exact
+  au bit près : 422,7 M vecteurs contre les helpers et le softfloat de QEMU, émetteur
+  réel sous `qemu-ppc` linux-user (10 mutants sur 10), `vfptest c` identique dans Tiger
+  (SMP=1 et 2), Marble Blast sous vérificateur sans divergence. Banc invité :
+  comparaisons −40 à −71 %, conversions −94 à −96 %. Le vérificateur montre que Tiger
+  tourne avec VSCR[NJ] = 1 et que ~42 % des `vmaddfp`/`vsubfp` de Marble Blast
+  retombent au logiciel pour des dénormaux mis à zéro par NJ : prochaine cible.
+  Gain attendu en jeu ~0,5 % sur DOOM 3, ~1 % sur UT2004, A/B à jouer.
+
+- **La série 0025-0028 sur le PC x86-64, 06/10** (`docs/tcg-g4.md` §30) : binaire de référence
+  du PC reconstruit avec `tcg/fixes/` et 0025-0028, plus **`tcg/0029`**, le pendant x86-64 de la
+  copie `lmw`/`stmw` de 0025 (gcc 13 laisse la boucle d'origine scalaire, un `bswap` par mot) :
+  quatre mots à la fois en SSE2, inlinés, sous la même propriété `x-lmw-vector` ; microbanc de
+  la copie −40 % sur 19 registres. Preuves hôte : 1 024 064 cas en 32 et 64 bits, 12 mutants sur
+  12 ; `vfpproof` helpers et modèle natif x86 648 M vecteurs chacun sans divergence (le zéro
+  signé de `vnmsubfp` corrigé sur le M4 n'existe pas sur le chemin FMA3 x86, qui nie après
+  l'arrondi par un `xor`) ; `jcwordproof` 573 440 cas. VM de dev SMP=1 et SMP=2, options de
+  production et vérificateurs : empreintes VFP/VMX/LMW identiques à celles du M4, 0 divergence.
+  `jitcheck.py` et `jit-m4-proof.sh` portables sous Linux. `LMWVEC`/`JCWORD` restent éteints par
+  défaut sur le PC en attendant l'A/B en jeu.
+- **Binaire rapide du PC, 06/10** (`docs/binaire-rapide-x86.md`) : la compilation
+  `-O3 -march=native`, sans durcissements, LTO et PGO (DOOM 3 −23 %, autres jeux −18-19 % le
+  04/10) quitte l'arbre d'essai : `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh` construit
+  `~/src/qemu/build-fast/` à côté de la référence `build/` (même série, capacités sondées,
+  relevé `pomppc-build.txt`), et `run_tiger.sh` le préfère sur Linux x86-64 quand il est
+  complet, construit sur ce processeur et sur la série du dépôt (`QEMU_FAST=0` : référence ;
+  `QEMU_BIN` prime ; la bannière dit lequel). Profil entraîné sur une charge mixte (Marble Blast,
+  Zenerchi, UT2004, DOOM 3) par `tools/tcg/pgo-train.sh`, constructions sous plafond mémoire ;
+  les bras de `matab.sh` et le paquet publié restent sur la référence générique. Mesures sur la
+  VM quotidienne : à venir.
+
+- **`x-jit-rel32` sur le PC, 06/10** (`docs/tcg-g4.md` §31) : ses « deux régimes »
+  sur UT2004 (57 ou 64-67 ms/image) ne viennent pas de QEMU mais de la mesure. La fenêtre
+  `ut-fen` (images 13..73, ~4 s) attrape ou non la rafale de 1 à 3 s de processeur invité
+  que coûte l'`osascript` de `premier_plan()` de la matrice, selon la phase de ses relevés ;
+  QEMU plus rapide, la phase glisse et la rafale y tombe (8 parties sur 9 avec `JITREL32`).
+  À contenu égal (pas de simulation fixe, image rapportée à la même image des 21 parties),
+  `x-jit-rel32` est **−2,9 %** sur UT2004. Placement prouvé stable (20/20 lancements :
+  aligné 2 Mio, `MADV_HUGEPAGE`, 64 Mio sous le texte), appels réellement directs
+  (`-d out_asm`). Outils : `tools/tcg/utrafales.py` (lecture d'une campagne `ut-fen` sans
+  les rafales), `tools/tcg/jitcheck.py --rel32` (placement et THP sous Linux). `JITREL32`
+  reste à 0 jusqu'à l'A/B de phase 2.
+- **Matrice : plus d'osascript dans la fenêtre de mesure, ssh multiplexé** (06/10,
+  `docs/matrice-jeux.md` §5) : les jeux à fenêtre fixe la déclarent (`images_fenetre`) ;
+  `premier_plan()` part pendant le chargement, jamais à moins de 6 s de la fenêtre ni dedans
+  (replis notés, remise au premier plan après) ; System Events lancé avant le jeu.
+  `tools/guest/tssh.sh` multiplexe ses connexions (`ControlMaster`, `.run/tssh-<port>`,
+  `TSSH_MUX=0` pour revenir) : 0,04 s par commande au lieu de 0,9-2,2 s.
+- **Flottant scalaire restant sur le PC, 06/10** (`docs/tcg-g4.md` §33,
+  `patches/tcg/0033-ppc-fp-native-cmp.patch`) : `frsp`, `fctiw`, `fctiwz`,
+  `fcmpo`, `fdivs` et `fdiv` passent par l'op native de `x-fp-native` (émetteur
+  x86-64 ; sans effet sur arm64 en attendant le pendant NEON), `fsel` en ops TCG.
+  Propriété `x-fp-native-cmp`, **éteinte par défaut** (`FPNATIVECMP=1`), vérificateur
+  `x-fp-native-cmp-verify` (`FPNCMPVERIFY=1`). Exact au bit près hors FI/FX déjà
+  admis par `x-fast-fp` : 461,7 M vecteurs contre le softfloat de QEMU sans
+  divergence, émetteur réel éprouvé sous `qemu-ppc` linux-user (9 mutants sur 9
+  détectés), `fptest c` identique dans Tiger (SMP=1 et 2), Marble Blast sous le
+  vérificateur : 70 M opérations, 0 divergence. Banc invité : `frsp` −57 %, `fctiwz` −72 %.
+  L'inventaire montre que le reste du « softfloat » de DOOM 3 et d'UT2004 est surtout
+  de l'AltiVec (`vcmp*fp`, `vcfsx`). Gain attendu en jeu ~1 % sur DOOM 3, A/B à jouer.
+
 - **JIT M4, 05/10** (`docs/jit-m4-2026-10-05.md`) : modèle natif NEON enfin
   sélectionné par `VFPPROOF_NATIVE=1`, 648 M vecteurs sans divergence, huit mutants
   détectés ; correction du zéro signé `vnmsubfp` et du helper lent aarch64 (0028).

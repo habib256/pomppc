@@ -34,7 +34,7 @@
 #   VFPNATIVE=0 ./run_tiger.sh  # coupe vaddfp/vsubfp/vmaddfp/vnmsubfp par le FPU de l'hôte dans le
 #                             # code généré (x-vfp-native, tcg/0022 : allumé par défaut sur Linux
 #                             # x86-64 et sur macOS arm64 depuis le 05/10, rebuild requis) ; VFPNVERIFY=1 : mode preuve
-#   TLBPRECISE=1 LMWINLINE=1 DCBZINLINE=1 ./run_tiger.sh  # côté mémoire (tcg/0031-0033, éteints,
+#   TLBPRECISE=1 LMWINLINE=1 DCBZINLINE=1 ./run_tiger.sh  # côté mémoire (tcg/0031, 0032, 0035, éteints,
 #                             # docs/tcg-g4.md §32) ; TLBPVERIFY=N LMWVERIFY=1 DCBZVERIFY=1 : preuves
 #   FPINLINE=0 ./run_tiger.sh # coupe le flottant scalaire simple (fmuls, fmadds, fcmpu…) sans ses
 #                             # deux helpers dans le cas courant (x-fp-inline, tcg/0007, allumé
@@ -45,6 +45,10 @@
 #                             # (arm64 ; x86-64 avec AVX et FMA3, tcg/0017), le helper de x-fp-flat
 #                             # hors ligne sinon (x-fp-native,
 #                             # tcg/0014, allumé par défaut depuis le 01/10, docs/tcg-g4.md §22)
+#   VFPNATIVECMP=1 ./run_tiger.sh # vcmp*fp vcfsx vcfux vctsxs vctuxs par le FPU de l'hôte
+#                             # (x-vfp-native-cmp, patches/tcg/0034, x86-64 ; éteint par défaut)
+#   FPNATIVECMP=1 ./run_tiger.sh # frsp fctiw fctiwz fcmpo fdivs fdiv par le FPU de l'hôte, fsel en ops
+#                             # TCG (x-fp-native-cmp, patches/tcg/0033, x86-64 ; éteint par défaut)
 #   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
 #                             # tcg/0016, allumé par défaut, docs/tcg-g4.md §24) ; FPVERIFY=1 : preuve
 #   TBFAST=0 ./run_tiger.sh   # coupe mftb/mftbu calculés depuis le compteur de l'hôte (cntvct, 1 GHz ;
@@ -66,6 +70,9 @@
 #                             # TCG_OPTS=… propriétés brutes de l'accélérateur
 #   JITREL32=1 ./run_tiger.sh # x86-64 Linux : tampon du JIT à moins de 2 Gio du texte, appels de
 #                             # helpers directs (x-jit-rel32, tcg/0024, éteint : deux régimes sur UT2004)
+#   QEMU_FAST=0 ./run_tiger.sh  # Linux x86-64 : binaire de référence build/ au lieu du binaire
+#                             # rapide build-fast/ (PGO, -O3, -march=native ; pris d'office s'il est
+#                             # là, à jour et complet ; QEMU_BIN=… prime ; docs/binaire-rapide-x86.md)
 #   NOPAD=1 ./run_tiger.sh    # coupe le passthrough de la manette USB
 #   TABLET=1 ./run_tiger.sh   # + usb-tablet (défaut avec ImGuiDock).
 #                             # TABLET=0 garde seulement la souris relative.
@@ -114,6 +121,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # M4 : VFPNATIVE, LMWVEC et JCWORD allumés à la demande de l'utilisateur après
 # les preuves SMP=1/2 (docs/jit-m4-2026-10-05.md). LMWVEC/JCWORD sans gain
 # mesuré ; chacun reste surchargeable à 0. Reconstruire QEMU avec 0025-0028.
+# Linux x86-64 (06/10/2026, docs/tcg-g4.md §30) : LMWVEC (copie SSE2, tcg/0029)
+# et JCWORD prouvés sur le PC mais PAS allumés par défaut : ils attendent l'A/B
+# en jeu de la phase 2. LMWVEC=1 / JCWORD=1 les demandent explicitement.
 for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JITNEAR FPNATIVE TBFAST FPNATIVE64 VMXINLINE; do
   export "$_opt=${!_opt:-1}"
 done
@@ -174,6 +184,10 @@ SMP_N="${USER_SMP:-2}"                     # défaut = 2 cœurs (la nouveauté)
 # OpenBIOS UNIFIÉ : bring-up SMP (balaton) + nœud audio screamer (mcayland),
 # buildé en -O1 (gcc-13 miscompile ce code OpenBIOS à -Os). Marche mono ET SMP.
 UNI_OBIOS="$ROOT/patches/smp-mac99/openbios-smp-screamer.elf"
+# Binaire rapide du PC (build-fast/, PGO -O3 -march=native) s'il est là, à jour et
+# complet ; QEMU_FAST=0 force la référence, QEMU_BIN=… prime. docs/binaire-rapide-x86.md
+source "$ROOT/scripts/qemu_fast.sh"
+pomppc_pick_qemu "$SMP_N" || exit 1
 QEMU_BIN64="${QEMU_BIN}64"                # qemu-system-ppc -> qemu-system-ppc64
 
 # --- Verrou disque ---
@@ -349,14 +363,14 @@ done
 # (x86-64 avec AVX et FMA3, arm64) ; ailleurs il ne change rien.
 for _p in "VMXINLINE x-vmx-inline VMX-EN-LIGNE" "VMXVERIFY x-vmx-verify VMX-VÉRIFIÉ" \
           "VFPNATIVE x-vfp-native VFP-NATIF" "VFPNVERIFY x-vfp-native-verify VFP-NATIF-VÉRIFIÉ" \
-          "LMWVEC x-lmw-vector LMW-STMW-NEON"; do
+          "LMWVEC x-lmw-vector LMW-STMW-VECTEUR"; do
   set -- $_p
   if [ "${!1:-0}" != 0 ]; then
     if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "$2=on"; then
       CPU_SPEC="$CPU_SPEC,$2=on"
       MODE="$MODE + $3"
     else
-      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0021-0022, 0025)." >&2
+      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0021-0022, 0025/0029)." >&2
       MODE="$MODE + $3 DEMANDÉ MAIS INDISPONIBLE"
     fi
   fi
@@ -460,6 +474,48 @@ if [ "${FPNATIVE64:-0}" != 0 ]; then
     MODE="$MODE + flottant double natif DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
+# --- Comparaisons et conversions flottantes par le FPU de l'hôte (x-fp-native-cmp,
+# patches/tcg/0033, docs/tcg-g4.md §33) --- frsp fctiw fctiwz fcmpo fdivs fdiv par
+# la même op TCG que x-fp-native (émetteur x86-64 seulement : sans effet sur arm64),
+# fsel en ops TCG. Mêmes résultats, même FPSCR au bit près. N'agit qu'avec
+# x-fast-fp. ÉTEINT par défaut (A/B en jeu à faire) : FPNATIVECMP=1 l'allume ;
+# FPNCMPVERIFY=1 ajoute le mode preuve (x-fp-native-cmp-verify, bilan sur stderr).
+if [ "${FPNATIVECMP:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-fp-native-cmp=on"; then
+    case "$CPU_SPEC" in
+      *x-fast-fp=on*) CPU_SPEC="$CPU_SPEC,x-fp-native-cmp=on"; MODE="$MODE + COMPARAISONS-CONVERSIONS NATIVES"
+                      if [ "${FPNCMPVERIFY:-0}" != 0 ]; then
+                        CPU_SPEC="$CPU_SPEC,x-fp-native-cmp-verify=on"; MODE="$MODE (VÉRIFIÉES)"
+                      fi ;;
+      *) echo "⚠  FPNATIVECMP=1 sans flottant rapide : x-fp-native-cmp n'agit qu'avec x-fast-fp (FASTFP=1)." >&2
+         MODE="$MODE + comparaisons-conversions natives SANS EFFET (flottant exact)" ;;
+    esac
+  else
+    echo "⚠  FPNATIVECMP=1 demandé mais ce QEMU n'a pas la propriété 'x-fp-native-cmp' (patches/tcg/0033)." >&2
+    MODE="$MODE + comparaisons-conversions natives DEMANDÉES MAIS INDISPONIBLES"
+  fi
+fi
+# --- Comparaisons et conversions AltiVec par le FPU de l'hôte (x-vfp-native-cmp,
+# patches/tcg/0034, docs/tcg-g4.md §34) --- vcmpeqfp vcmpgefp vcmpgtfp vcmpbfp
+# (et formes Rc), vcfsx vcfux vctsxs vctuxs par l'op TCG de x-vfp-native (émetteur
+# x86-64 seulement : sans effet sur arm64). Mêmes résultats, même VSCR[SAT], même
+# CR6 au bit près. N'agit qu'avec x-vfp-native (VFPNATIVE). ÉTEINT par défaut (A/B
+# en jeu à faire) : VFPNATIVECMP=1 l'allume ; VFPNCMPVERIFY=1 le vérifie.
+if [ "${VFPNATIVECMP:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-vfp-native-cmp=on"; then
+    case "$CPU_SPEC" in
+      *x-vfp-native=on*) CPU_SPEC="$CPU_SPEC,x-vfp-native-cmp=on"; MODE="$MODE + VCMP-VCF-VCT-NATIFS"
+                         if [ "${VFPNCMPVERIFY:-0}" != 0 ]; then
+                           CPU_SPEC="$CPU_SPEC,x-vfp-native-cmp-verify=on"; MODE="$MODE (VÉRIFIÉS)"
+                         fi ;;
+      *) echo "⚠  VFPNATIVECMP=1 sans x-vfp-native : x-vfp-native-cmp n'agit qu'avec lui (VFPNATIVE=1)." >&2
+         MODE="$MODE + vcmp/vcf/vct natifs SANS EFFET" ;;
+    esac
+  else
+    echo "⚠  VFPNATIVECMP=1 demandé mais ce QEMU n'a pas la propriété 'x-vfp-native-cmp' (patches/tcg/0034)." >&2
+    MODE="$MODE + vcmp/vcf/vct natifs DEMANDÉS MAIS INDISPONIBLES"
+  fi
+fi
 # --- Base de temps par le compteur de l'hôte (x-tb-fast, patches/tcg/0015,
 # docs/tcg-g4.md §23) --- mftb/mftbu sans clock_gettime ni division 128 bits ;
 # l'horloge de QEMU devient cntvct_el0 + K (linéaire, à la ns). Hôtes arm64 dont
@@ -532,7 +588,7 @@ for _p in "MSRNOBQL x-msr-nobql MSR-SANS-VERROU" "MSRVERIFY x-msr-nobql-verify M
     fi
   fi
 done
-# --- Le côté mémoire du traducteur (patches/tcg/0031-0033, docs/tcg-g4.md §32) ---
+# --- Le côté mémoire du traducteur (patches/tcg/0031, 0032, 0035, docs/tcg-g4.md §32) ---
 # TLBPRECISE=1 : x-tlb-precise, tlbie, changements de segment (avec x-sr-tlb) et
 # écritures de BAT ne retirent du TLB que les entrées concernées au lieu de tout
 # vider ; TLBPVERIFY=N : x-tlb-precise-verify=N (une invalidation sur N, chaque
@@ -550,7 +606,7 @@ for _p in "TLBPRECISE x-tlb-precise TLB-PRÉCIS" "LMWINLINE x-lmw-inline LMW-EN-
       CPU_SPEC="$CPU_SPEC,$2=on"
       MODE="$MODE + $3"
     else
-      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0031-0033)." >&2
+      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0031, 0032, 0035)." >&2
       MODE="$MODE + $3 DEMANDÉ MAIS INDISPONIBLE"
     fi
   fi
@@ -852,9 +908,10 @@ MON=$(host_mon_path "$SCR/mon.sock")   # mon.sock pour la VM verrouillée, mon-P
 # cycle.sh et tools/guest/tssh.sh (rien en SNAPSHOT=1 : ils visent la VM quotidienne)
 host_publish_vm tiger "$MON" "$([ -n "${NET:-}" ] && echo "${SSH_PORT:-0}" || echo 0)"
 
-echo "▶ Tiger (QEMU ${QEMU_VER:-?}) : $MODE | cpu=$CPU_SPEC ram=${RAM}Mo affichage=$DISP \
+echo "▶ Tiger (QEMU ${QEMU_VER:-?}, ${QEMU_BIN_LABEL:-binaire de référence}) : $MODE | cpu=$CPU_SPEC ram=${RAM}Mo affichage=$DISP \
 réseau=$([ -n "${NET:-}" ] && echo on || echo off) \
 disque=$([ -n "${SNAPSHOT:-}" ] && echo jetable || echo persistant)"
+echo "  binaire : $BIN"
 echo "  moniteur QEMU : $MON"
 [ -n "$WEBPROXY_ON" ] && echo "  🌐 relais web : 10.0.2.2:$WEBPROXY_PORT (proxy HTTP de Tiger ; journal .run/web-proxy.log)"
 [ -n "$NET" ] && [ "${SSH_PORT:-0}" != 0 ] && echo "  🔑 SSH : ssh -p ${SSH_PORT} tiger@127.0.0.1  (invité 10.0.2.15:22)"

@@ -159,7 +159,7 @@ diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
      /*
       * "Segment-tagged TLB" mode (x-sr-tlb property, 32-bit hash MMU only).
       * A segment register write no longer flushes the whole softmmu TLB at
-@@ -1414,6 +1436,79 @@
+@@ -1424,6 +1446,79 @@
      uint32_t sr_verify;
      uint32_t sr_verify_n;
      uint64_t sr_verify_runs, sr_verify_entries, sr_verify_bad;
@@ -242,7 +242,7 @@ diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
 diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
 --- a/target/ppc/cpu_init.c
 +++ b/target/ppc/cpu_init.c
-@@ -174,6 +174,16 @@
+@@ -194,6 +194,16 @@
      DEFINE_PROP_BOOL("x-vfp-native", PowerPCCPU, env.vfp_native, false),
      DEFINE_PROP_BOOL("x-vfp-native-verify", PowerPCCPU, env.vfp_native_verify,
                       false),
@@ -974,9 +974,9 @@ diff --git a/target/ppc/translate.c b/target/ppc/translate.c
 +    bool tlb_precise;            /* x-tlb-precise, 32-bit hash MMU (tcg/0031) */
 +    bool mem_stats;              /* x-mem-stats (tcg/0031) */
      bool vfp_native, vfp_nverify; /* x-vfp-native(-verify) (tcg/0022) */
+     bool vfp_native_cmp, vfpnc_verify; /* x-vfp-native-cmp(-verify), 0034 */
      const CPUPPCState *env;     /* x-vfp-native: its gate (tcg/0022) */
-     bool need_access_type;
-@@ -2817,6 +2819,9 @@
+@@ -2819,6 +2821,9 @@
      t0 = tcg_temp_new();
      t1 = tcg_constant_i32(rD(ctx->opcode));
      gen_addr_imm_index(ctx, t0, 0);
@@ -986,7 +986,7 @@ diff --git a/target/ppc/translate.c b/target/ppc/translate.c
      gen_helper_lmw(tcg_env, t0, t1);
  }
  
-@@ -2834,6 +2839,10 @@
+@@ -2836,6 +2841,10 @@
      t0 = tcg_temp_new();
      t1 = tcg_constant_i32(rS(ctx->opcode));
      gen_addr_imm_index(ctx, t0, 0);
@@ -997,7 +997,7 @@ diff --git a/target/ppc/translate.c b/target/ppc/translate.c
      gen_helper_stmw(tcg_env, t0, t1);
  }
  
-@@ -4539,6 +4548,9 @@
+@@ -4541,6 +4550,9 @@
  
      gen_set_access_type(ctx, ACCESS_CACHE);
      gen_addr_reg_index(ctx, tcgv_addr);
@@ -1007,7 +1007,7 @@ diff --git a/target/ppc/translate.c b/target/ppc/translate.c
  
  #ifdef TARGET_PPC64
      if (ctx->excp_model == POWERPC_EXCP_970 && !(ctx->opcode & 0x00200000)) {
-@@ -6583,6 +6595,8 @@
+@@ -6589,6 +6601,8 @@
      ctx->env = env;
      ctx->lazy_tlb_flush = env->mmu_model == POWERPC_MMU_32B
          || env->mmu_model & POWERPC_MMU_64;

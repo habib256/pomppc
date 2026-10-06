@@ -18,6 +18,20 @@ OPTS=(-p "$PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o 
       -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa
       -o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1
       -o Ciphers=+aes128-cbc,3des-cbc -o MACs=+hmac-sha1 -o ConnectTimeout=10)
+# Multiplexage (docs/matrice-jeux.md, « Mesure et rafales ») : une connexion
+# maîtresse par port, réutilisée ControlPersist s ; chaque commande suivante ne
+# refait ni l'échange de clés ni l'authentification (2,2 s → 0,09 s vu de
+# l'hôte). OpenSSH 4.5p1 de Tiger accepte plusieurs sessions par connexion.
+# Socket sous .run/ du dépôt principal (chemin court : ≤ 108 octets avec le
+# suffixe que ssh ajoute) ; ServerAlive tue une maîtresse dont la VM est morte
+# ou en pause. TSSH_MUX=0 : une connexion par commande, comme avant.
+if [ "${TSSH_MUX:-1}" != 0 ]; then
+  RUN="${MAIN:-$D/../..}/.run"
+  if mkdir -p "$RUN" 2>/dev/null && [ ${#RUN} -lt 70 ]; then
+    OPTS+=(-o ControlMaster=auto -o "ControlPath=$RUN/tssh-%p" -o "ControlPersist=${TSSH_PERSIST:-300}"
+           -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+  fi
+fi
 if [ "${1:-}" = "-p" ]; then shift
   export TSSH_CMD="$*"; export TSSH_OPTS="${OPTS[*]}"
   exec expect -f "$D/tssh.exp"

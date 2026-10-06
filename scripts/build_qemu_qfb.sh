@@ -25,7 +25,11 @@
 #   • les trois mêmes sur hôte x86-64 (op ppc_fp32, TSC, vperm) — patches/tcg/0017-0019
 #   • flottant AltiVec à 4 voies par AVX/FMA3 sur hôte x86-64 — patches/tcg/0020
 #   • AltiVec en ligne, flottant AltiVec natif, mftb sans div, JIT à 2 Gio — patches/tcg/0021-0024
-#   • TLB invalidé avec précision, lmw/stmw et dcbz en ligne — patches/tcg/0031-0033
+#   • lmw/stmw vectoriel, cache de sauts par mots, split-wx, NEON lent — patches/tcg/0025-0028
+#   • lmw/stmw vectoriel sur hôte x86-64 (SSE2)        — patches/tcg/0029
+#   • frsp fctiw fctiwz fcmpo fdivs fdiv natifs, fsel en ops TCG (x-fp-native-cmp) — patches/tcg/0033
+#   • vcmp*fp, vcfsx/vcfux, vctsxs/vctuxs natifs (x-vfp-native-cmp)  — patches/tcg/0034
+#   • TLB invalidé avec précision, lmw/stmw et dcbz en ligne — patches/tcg/0031, 0032, 0035
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -49,7 +53,17 @@
 # slirp, audio pa) et écrit le résultat dans bench/build-capabilities.txt. Les
 # lanceurs sondent le binaire de la même façon : un build incomplet dégrade
 # proprement au lieu de mentir.
+#
+# Binaire RAPIDE du PC (Linux x86-64, docs/binaire-rapide-x86.md) : en plus de
+# build/, ~/src/qemu/build-fast/ en -O3 -march=native, LTO et PGO, que
+# run_tiger.sh préfère quand il est là (QEMU_FAST=0 pour la référence) :
+#   QEMU_FAST=1 ./scripts/build_qemu_qfb.sh     # (ou --fast) build/ puis build-fast/
+#   QEMU_FAST=only ./scripts/build_qemu_qfb.sh  # build-fast/ seulement
+#   tools/tcg/pgo-train.sh                      # entraîne le profil (VM quotidienne)
 set -euo pipefail
+case "${1:-}" in
+  --fast) export QEMU_FAST=1; shift ;;
+esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="${QEMU_SRC:-$HOME/src/qemu}"
@@ -839,6 +853,13 @@ TCG21_MARKERS
   if grep -q 'tcg_out_addi_ptr(s, TCG_REG_X1 + i' tcg/aarch64/tcg-target.c.inc; then
     patch_strict "$ROOT/patches/tcg/0028-tcg-vfp-neon-slow.patch"
   fi
+  # 0029 : le pendant SSE2 de la copie de 0025 sur hôte x86-64 (même propriété
+  # x-lmw-vector) ; ailleurs, la propriété est refusée par un avertissement
+  # au realize au lieu d'être acceptée sans effet. docs/tcg-g4.md §30.
+  if ! grep -q 'PPC_LMW_VECTOR_HOST' target/ppc/lmw-vector.h; then
+    echo "▶ patch TCG : copie lmw/stmw par SSE2 sur hôte x86-64 (x-lmw-vector)"
+    patch_strict "$ROOT/patches/tcg/0029-ppc-lmw-vector-x86.patch"
+  fi
   while read -r f m; do
     grep -q "$m" "$f" || {
       echo "⚠ patch M4 incomplet : '$m' absent de $f" >&2; exit 1; }
@@ -852,12 +873,51 @@ accel/tcg/tcg-all.c x-jc-word
 accel/tcg/translator.c tb_jmp_cache_word
 tcg/region.c saved_addr = tcg_jit_addr
 tcg/aarch64/tcg-target.c.inc TCG_TYPE_PTR, arg
+target/ppc/lmw-vector.h ppc_lmw_bswap32x4
+target/ppc/mem_helper.c if PPC_LMW_VECTOR_HOST
+target/ppc/cpu_init.c POMPPC tcg/0029
 TCG_M4_MARKERS
-  # --- 4 vicies ter. Le côté mémoire sur le PC (tcg/0031-0033), docs/tcg-g4.md §32 ---
+  # --- tcg/0033 : comparaisons et conversions natives (x-fp-native-cmp) ---
+  # frsp fctiw fctiwz fcmpo fdivs fdiv par l'op ppc_fp32 (émetteur x86_64
+  # seulement, sans effet ailleurs), fsel en ops TCG ; propriété éteinte par
+  # défaut (FPNATIVECMP=1). docs/tcg-g4.md §33.
+  if ! grep -q 'x-fp-native-cmp' target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : comparaisons et conversions flottantes natives (x-fp-native-cmp)"
+    patch_strict "$ROOT/patches/tcg/0033-ppc-fp-native-cmp.patch"
+  fi
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0033 incomplet : '$m' absent de $f" >&2; exit 1; }
+  done <<'TCG33_MARKERS'
+target/ppc/cpu_init.c x-fp-native-cmp-verify
+target/ppc/fpu_helper.c fpi_short
+target/ppc/fpu_helper.c helper_fpnc_fsel
+tcg/x86_64/tcg-target.c.inc PFP_VCVTTSD2SI
+tcg/tcg-op.c tcg_ppc_fp_cmp_supported
+TCG33_MARKERS
+  # --- tcg/0034 : comparaisons et conversions AltiVec natives (x-vfp-native-cmp) ---
+  # vcmpeqfp vcmpgefp vcmpgtfp vcmpbfp (et formes Rc), vcfsx vcfux vctsxs vctuxs
+  # par l'op ppc_vfp (émetteur x86_64 seulement, sans effet ailleurs) ; propriété
+  # éteinte par défaut (VFPNATIVECMP=1). docs/tcg-g4.md §34.
+  if ! grep -q 'x-vfp-native-cmp' target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : comparaisons et conversions AltiVec natives (x-vfp-native-cmp)"
+    patch_strict "$ROOT/patches/tcg/0034-ppc-vfp-native-cmp.patch"
+  fi
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0034 incomplet : '$m' absent de $f" >&2; exit 1; }
+  done <<'TCG34_MARKERS'
+target/ppc/cpu_init.c x-vfp-native-cmp-verify
+target/ppc/int_helper.c helper_vfnc_verify
+tcg/x86_64/tcg-target.c.inc tcg_out_ppc_vfp_cmp
+tcg/tcg-op.c tcg_ppc_vfp_cmp_supported
+TCG34_MARKERS
+  # --- 4 vicies ter. Le côté mémoire sur le PC (tcg/0031, 0032), docs/tcg-g4.md §32 ---
   # 0031 : invalidations précises du TLB (x-tlb-precise : tlbie par classe,
   # changement de segment par pages journalisées, BAT par balayage) et compteurs
-  # (x-mem-stats) ; 0032 : lmw/stmw en ligne (x-lmw-inline) ; 0033 : dcbz
-  # en ligne (x-dcbz-inline). Propriétés éteintes par défaut.
+  # (x-mem-stats) ; 0032 : lmw/stmw en ligne (x-lmw-inline) ; 0035 : dcbz en
+  # ligne. Posés après 0033-0034 (écrits sur cet état : aucun décalage).
+  # Propriétés éteintes par défaut.
   if ! grep -q "x-tlb-precise" target/ppc/cpu_init.c; then
     echo "▶ patch TCG : invalidations précises du TLB (x-tlb-precise)"
     patch_strict "$ROOT/patches/tcg/0031-ppc-tlb-precise.patch"
@@ -866,9 +926,10 @@ TCG_M4_MARKERS
     echo "▶ patch TCG : lmw/stmw en ligne (x-lmw-inline)"
     patch_strict "$ROOT/patches/tcg/0032-ppc-lmw-inline.patch"
   fi
+  # --- tcg/0035 : dcbz en ligne (x-dcbz-inline), docs/tcg-g4.md §32 ---
   if ! grep -q "x-dcbz-inline" target/ppc/cpu_init.c; then
     echo "▶ patch TCG : dcbz en ligne (x-dcbz-inline)"
-    patch_strict "$ROOT/patches/tcg/0033-ppc-dcbz-inline.patch"
+    patch_strict "$ROOT/patches/tcg/0035-ppc-dcbz-inline.patch"
   fi
   for f in accel/tcg/cputlb.c include/exec/cputlb.h target/ppc/cpu.h \
            target/ppc/cpu_init.c target/ppc/helper.h target/ppc/helper_regs.c \
@@ -878,7 +939,7 @@ TCG_M4_MARKERS
   done
   while read -r f m; do
     grep -q "$m" "$f" || {
-      echo "⚠ patch tcg 0031-0033 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+      echo "⚠ patch tcg 0031, 0032, 0035 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
   done <<'TCG31_MARKERS'
 accel/tcg/cputlb.c pomppc_tlb_flush_match
 target/ppc/cpu_init.c x-tlb-precise
@@ -920,11 +981,91 @@ grep -q "x-abs-margin" hw/usb/dev-hid.c || {
 #       QEMU_SRC=~/src/qemu-opt QEMU_OPT=native,nohard,lto,pgo …
 # Pour pgo-gen / pgo, le dossier de build est le même (build-<…>-pgo) : les .gcda
 # sont rangés par chemin d'objet. QEMU_BUILD=<dossier> force le nom.
+#
+# QEMU_FAST (docs/binaire-rapide-x86.md) : le binaire RAPIDE du PC, build-fast/ à
+# côté de build/ dans le MÊME arbre (build/ reste le binaire de référence, et la
+# référence des A/B). Même série de patches, posée ci-dessus une seule fois :
+#   QEMU_FAST=1     build/ comme d'habitude, PUIS build-fast/ (native,nohard,lto
+#                   + pgo si le profil existe) — le script se relance lui-même
+#   QEMU_FAST=only  build-fast/ seulement
+#   QEMU_FAST_PGO=  auto (défaut : pgo si PGO_DIR a des .gcda pour build-fast,
+#                   sinon sans PGO avec un avertissement), use (profil exigé),
+#                   gen (instrumenté : tools/tcg/pgo-train.sh), non (sans PGO)
+#   PGO_DIR         profil de build-fast, défaut <arbre>/pgo-fast (stable :
+#                   tools/tcg/pgo-train.sh l'écrit, l'archive et sait importer
+#                   celui d'un arbre voisin en renommant les .gcda)
+# Une seule édition de liens LTO à la fois sur la machine : refus si un lto1
+# tourne déjà (QEMU_FAST_FORCE=1 pour passer outre). Construire sous plafond
+# mémoire (systemd-run --user --scope -p MemoryMax=20G -p MemorySwapMax=1G
+# nice -n 10 …) : c'est ce que fait tools/tcg/pgo-train.sh.
+# Empreinte de la série (pomppc_serie_hash) : un profil pris sur une autre série
+# sert encore aux fichiers inchangés, mais il est temps de le refaire.
+source "$ROOT/scripts/qemu_fast.sh"
+FAST_AFTER=""
+case "${QEMU_FAST:-0}" in
+  0) ;;
+  1|only)
+    [ -z "${QEMU_OPT:-}" ] || { echo "⚠ QEMU_FAST et QEMU_OPT s'excluent" >&2; exit 1; }
+    [ "$(uname -s):$(uname -m)" = Linux:x86_64 ] || {
+      echo "⚠ QEMU_FAST : binaire rapide du PC Linux x86-64 seulement" >&2; exit 1; }
+    if [ "$QEMU_FAST" = 1 ]; then
+      FAST_AFTER=1                  # build/ d'abord, build-fast/ en fin de script
+    else
+      PGO_DIR="${PGO_DIR:-$SRC/pgo-fast}"
+      # Les .gcda portent le chemin de l'objet, '/' → '#' : seuls ceux de
+      # <arbre>/build-fast servent. Un profil d'un autre arbre, non renommé,
+      # serait ignoré EN SILENCE (-Wno-missing-profile) : refus.
+      _mangled="$(printf '%s' "$SRC/build-fast" | tr / '#')#"
+      _ngcda="$(find "$PGO_DIR" -maxdepth 1 -name "${_mangled}*.gcda" 2>/dev/null | wc -l)"
+      _nall="$(find "$PGO_DIR" -maxdepth 1 -name '*.gcda' 2>/dev/null | wc -l)"
+      case "${QEMU_FAST_PGO:-auto}" in
+        gen) _pgo=pgo-gen ;;
+        non) _pgo="" ;;
+        auto|use)
+          if [ "$_nall" -gt 0 ] && [ "$_ngcda" -eq 0 ]; then
+            echo "⚠ $PGO_DIR a $_nall .gcda, aucun pour $SRC/build-fast : profil d'un autre" >&2
+            echo "  arbre ou d'un autre dossier de build. tools/tcg/pgo-train.sh --importer" >&2
+            echo "  les renomme ; QEMU_FAST_PGO=non construit sans profil." >&2
+            exit 1
+          fi
+          if [ "$_ngcda" -gt 0 ]; then
+            _pgo=pgo
+            echo "▶ binaire rapide : profil PGO $PGO_DIR ($_ngcda .gcda)"
+            _serie="$(sed -n 's/^serie=//p' "$PGO_DIR/pomppc-profil.txt" 2>/dev/null)"
+            if [ -n "$_serie" ] && [ "$_serie" != "$(pomppc_serie_hash "$ROOT/patches")" ]; then
+              echo "  ⚠ profil pris sur une autre série de patches ($_serie) : les fichiers" >&2
+              echo "    changés seront compilés sans profil ; réentraîner (tools/tcg/pgo-train.sh)" >&2
+            fi
+          elif [ "${QEMU_FAST_PGO:-auto}" = use ]; then
+            echo "⚠ QEMU_FAST_PGO=use : aucun profil dans $PGO_DIR" >&2; exit 1
+          else
+            _pgo=""
+            echo "⚠ binaire rapide SANS PGO : pas de profil dans $PGO_DIR" >&2
+            echo "  (tools/tcg/pgo-train.sh l'entraîne ; docs/binaire-rapide-x86.md)" >&2
+          fi ;;
+        *) echo "⚠ QEMU_FAST_PGO attendu : auto, use, gen ou non" >&2; exit 1 ;;
+      esac
+      QEMU_OPT="native,nohard,lto${_pgo:+,$_pgo}"
+      QEMU_BUILD=build-fast
+    fi ;;
+  *) echo "⚠ QEMU_FAST attendu : 1 ou only" >&2; exit 1 ;;
+esac
 BDIR=build
 OPT_CFLAGS="" OPT_LDFLAGS="" OPT_CONF=()
 if [ -n "${QEMU_OPT:-}" ]; then
   [ "$SRC" = "$HOME/src/qemu" ] && [ -z "${QEMU_BUILD:-}" ] && {
-    echo "⚠ QEMU_OPT vise un arbre séparé (QEMU_SRC=~/src/qemu-opt), pas le binaire de référence" >&2; exit 1; }
+    echo "⚠ QEMU_OPT vise un arbre séparé (QEMU_SRC=~/src/qemu-opt) ou build-fast/" >&2
+    echo "  (QEMU_FAST=1), jamais build/, le binaire de référence" >&2; exit 1; }
+  [ "${QEMU_BUILD:-}" = build ] && {
+    echo "⚠ QEMU_BUILD=build : une variante n'écrase jamais le binaire de référence" >&2; exit 1; }
+  case ",$QEMU_OPT," in
+    *,lto,*)
+      if [ -z "${QEMU_FAST_FORCE:-}" ] && pgrep -x 'lto1|lto-wrapper' >/dev/null 2>&1; then
+        echo "⚠ une édition de liens LTO tourne déjà sur la machine (pgrep lto1) :" >&2
+        echo "  une seule à la fois (gel du PC le 03/10). QEMU_FAST_FORCE=1 pour passer outre." >&2
+        exit 1
+      fi ;;
+  esac
   PGO_DIR="${PGO_DIR:-$SRC/pgo-data}"
   tag=""
   IFS=, read -r -a _opts <<< "$QEMU_OPT"
@@ -1057,11 +1198,34 @@ check_opt x-vmx-inline   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-v
 check_opt x-vfp-native   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-vfp-native=on
 check_opt x-lmw-vector   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-lmw-vector=on
 check_opt x-jc-word      qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jc-word=on
+check_opt x-fp-native-cmp qemu_cpu_has_prop "${BIN}64"    "mac99,via=pmu" g4 x-fp-native-cmp=on
+check_opt x-vfp-native-cmp qemu_cpu_has_prop "${BIN}64"   "mac99,via=pmu" g4 x-vfp-native-cmp=on
 check_opt x-tlb-precise  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-tlb-precise=on
 check_opt x-lmw-inline   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-lmw-inline=on
 check_opt x-dcbz-inline  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-dcbz-inline=on
 echo
 echo "→ $CAPS"
+
+# Relevé d'une variante, À CÔTÉ du binaire : scripts/qemu_fast.sh le lit pour
+# décider si run_tiger.sh peut prendre build-fast/ (complet, pas instrumenté,
+# construit sur CE processeur : -march=native).
+if [ "$BDIR" != build ]; then
+  {
+    echo "# relevé de construction (scripts/build_qemu_qfb.sh), lu par scripts/qemu_fast.sh"
+    echo "date=$(date "+%Y-%m-%dT%H:%M:%S%z")"
+    echo "variante=${QEMU_OPT:-}"
+    case ",${QEMU_OPT:-}," in
+      *,pgo,*|*,pgo-gen,*) echo "pgo_dir=$PGO_DIR"
+                           echo "gcda=$(find "$PGO_DIR" -maxdepth 1 -name '*.gcda' 2>/dev/null | wc -l)" ;;
+    esac
+    echo "cpu=$(sed -n 's/^model name[[:space:]]*: *//p' /proc/cpuinfo 2>/dev/null | head -1)"
+    echo "march=$(${CC:-cc} -march=native -Q --help=target 2>/dev/null | awk '$1=="-march=" {print $2; exit}')"
+    echo "serie=$(pomppc_serie_hash "$ROOT/patches")"
+    echo "pomppc=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)"
+    echo "complet=$([ "$fail" -eq 0 ] && echo oui || echo non)"
+  } > "$SRC/$BDIR/pomppc-build.txt"
+  echo "→ $SRC/$BDIR/pomppc-build.txt"
+fi
 
 if [ "$fail" -ne 0 ]; then
   echo "⚠ build INCOMPLET : au moins une capacité manque (voir ci-dessus)." >&2
@@ -1069,4 +1233,16 @@ if [ "$fail" -ne 0 ]; then
   echo "  mais ce binaire n'est pas le binaire de référence." >&2
   exit 1
 fi
-echo "✔ binaire de référence complet : $BIN"
+if [ "$BDIR" = build ]; then
+  echo "✔ binaire de référence complet : $BIN"
+else
+  echo "✔ binaire complet ($BDIR, ${QEMU_OPT:-}) : $BIN"
+fi
+# QEMU_FAST=1 : la référence est faite, au tour de build-fast/ (même arbre, même
+# série, déjà posée ; le second passage la revérifie, ce qui ne coûte rien).
+if [ -n "$FAST_AFTER" ]; then
+  echo
+  echo "▶ binaire rapide : build-fast/ (QEMU_FAST=only)"
+  exec env QEMU_FAST=only QEMU_SRC="$SRC" QEMU_TAG="$TAG" \
+    bash "$ROOT/scripts/build_qemu_qfb.sh"
+fi

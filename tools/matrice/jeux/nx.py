@@ -35,7 +35,7 @@ plusieurs passes de multitexture).
 """
 import os
 
-from jeu import Jeu, fenetre_fixe
+from jeu import Jeu
 
 APP = "/Users/tiger/Nexuiz/Nexuiz.app"
 BASE = "/Users/tiger/Nexuiz"
@@ -86,8 +86,7 @@ class Nexuiz(Jeu):
                 '-nosound +vid_fullscreen %s +vid_width %d +vid_height %d %s -benchmark demos/demo1'
                 % (APP, PP, BASE, fs, w, hh, self.args_profil))
 
-    def fenetre(self, rows):
-        return fenetre_fixe(rows, 120, 600)
+    images_fenetre = (120, 600)
 
 
 JEUX = [Nexuiz("arb"), Nexuiz("glsl")]

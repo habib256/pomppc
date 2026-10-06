@@ -31,6 +31,13 @@
  *                             (sous-normaux, voisins de DBL_MIN, debordements,
  *                             annulations exactes)
  *   fptest banc-d N           bancs double (chaine, sommets)
+ *   fptest c [NRAND]          comparaisons et conversions : frsp fctiw fctiwz
+ *                             fcmpo fdivs fdiv fsel (x-fp-native-cmp, tcg/0033,
+ *                             docs/tcg-g4.md section 33) ; operandes simples,
+ *                             doubles, entiers et demi-entiers, voisins de
+ *                             +-2^31, de FLT_MAX + 1/2 ulp, de FLT_MIN ; CR
+ *                             de fcmpo
+ *   fptest banc-c N           bancs de ces instructions (latence et debit)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,10 +89,13 @@ static u64 bits_d(double d)
 }
 
 enum { ADD, SUB, MUL, MADD, MSUB, NMADD, NMSUB, CMPU,
-       ADDD, SUBD, MULD, MADDD, MSUBD, NMADDD, NMSUBD, NOPS };
-static const char *names[NOPS] = {
+       ADDD, SUBD, MULD, MADDD, MSUBD, NMADDD, NMSUBD, NOPS,
+       /* mode c (tcg/0033) : hors des modes d'origine, empreintes inchangees */
+       FRSP = NOPS, FCTIW, FCTIWZ, CMPO, DIVS, DIVD, FSEL, NOPSC };
+static const char *names[NOPSC] = {
     "fadds", "fsubs", "fmuls", "fmadds", "fmsubs", "fnmadds", "fnmsubs", "fcmpu",
-    "fadd", "fsub", "fmul", "fmadd", "fmsub", "fnmadd", "fnmsub"
+    "fadd", "fsub", "fmul", "fmadd", "fmsub", "fnmadd", "fnmsub",
+    "frsp", "fctiw", "fctiwz", "fcmpo", "fdivs", "fdiv", "fsel"
 };
 
 /* une instruction ; r = resultat (ou CR pour fcmpu) */
@@ -108,6 +118,15 @@ static u64 run(int op, double a, double b, double c)
     case MSUBD: __asm__ __volatile__("fmsub %0,%1,%2,%3" : "=f"(r) : "f"(a), "f"(c), "f"(b)); break;
     case NMADDD: __asm__ __volatile__("fnmadd %0,%1,%2,%3" : "=f"(r) : "f"(a), "f"(c), "f"(b)); break;
     case NMSUBD: __asm__ __volatile__("fnmsub %0,%1,%2,%3" : "=f"(r) : "f"(a), "f"(c), "f"(b)); break;
+    case FRSP:  __asm__ __volatile__("frsp %0,%1" : "=f"(r) : "f"(b)); break;
+    case FCTIW: __asm__ __volatile__("fctiw %0,%1" : "=f"(r) : "f"(b)); break;
+    case FCTIWZ: __asm__ __volatile__("fctiwz %0,%1" : "=f"(r) : "f"(b)); break;
+    case DIVS:  __asm__ __volatile__("fdivs %0,%1,%2" : "=f"(r) : "f"(a), "f"(b)); break;
+    case DIVD:  __asm__ __volatile__("fdiv %0,%1,%2" : "=f"(r) : "f"(a), "f"(b)); break;
+    case FSEL:  __asm__ __volatile__("fsel %0,%1,%2,%3" : "=f"(r) : "f"(a), "f"(c), "f"(b)); break;
+    case CMPO:
+        __asm__ __volatile__("fcmpo cr1,%1,%2\n\tmfcr %0" : "=r"(cr) : "f"(a), "f"(b) : "cr1");
+        return (cr >> 24) & 0xf;
     default:
         __asm__ __volatile__("fcmpu cr1,%1,%2\n\tmfcr %0" : "=r"(cr) : "f"(a), "f"(b) : "cr1");
         return (cr >> 24) & 0xf;
@@ -200,6 +219,62 @@ static double rnd_operand_d(void)
     default: e = 0x3c0 + ((x >> 8) & 0x7f); break;               /* ordinaire */
     }
     return ld_d(sg | (u64)e << 52 | m);
+}
+
+/*
+ * ---- mode c (tcg/0033) : catalogue elargi et operandes des conversions ----
+ * (les modes d'origine gardent leur catalogue : leurs empreintes ne bougent pas)
+ */
+static const u64 cat_x[] = {
+    0x41dfffffffc00000ULL, 0x41dfffffffe00000ULL, 0x41dffffffff00000ULL, /* 2^31 - 1, -0.5, -0.25 */
+    0x41e0000000000000ULL, 0x41e0000000100000ULL,                        /* 2^31, 2^31 + 0.5 */
+    0xc1e0000000080000ULL, 0xc1e0000000100000ULL, 0xc1e0000000200000ULL, /* -2^31 - 0.25, -0.5, -1 */
+    0x43e0000000000000ULL, 0x3fe0000000000000ULL, 0x3ff8000000000000ULL, /* 2^63, 0.5, 1.5 */
+    0x4004000000000000ULL, 0x3fdfffffffffffffULL, 0x3fe0000000000001ULL, /* 2.5, 0.5 -+ ulp */
+    0x47efffffe0000000ULL, 0x47effffff0000000ULL, 0x47efffffefffffffULL, /* FLT_MAX, + 1/2 ulp, dessous */
+    0x47effffff0000001ULL, 0x47effffff8000000ULL,
+    0x380fffffffffffffULL, 0x380ffffff0000000ULL, 0x380ffffff0000001ULL, /* sous FLT_MIN */
+    0x36a0000000000000ULL, 0x369fffffffffffffULL, 0x3690000000000000ULL, /* 2^-149, ..., 2^-150 */
+    0x3e70000000000000ULL, 0x4170000000000000ULL, 0x4330000000000000ULL, /* 2^-24, 2^24, 2^52 */
+};
+#define NCX (sizeof(cat_x) / sizeof(cat_x[0]))
+#define NCATC (NCAT + 2 * NCX)
+static double catc[NCATC];
+
+static void build_catc(void)
+{
+    unsigned i, k = NCAT;
+    for (i = 0; i < NCAT; i++) {
+        catc[i] = cat[i];
+    }
+    for (i = 0; i < NCX; i++) {
+        catc[k++] = ld_d(cat_x[i]);
+        catc[k++] = ld_d(cat_x[i] ^ 0x8000000000000000ULL);
+    }
+}
+
+static double rnd_operand_c(void)
+{
+    u64 x = rnd(), k = rnd(), b;
+    switch (x & 7) {
+    case 0: return catc[(x >> 8) % NCATC];
+    case 1: case 2: return rnd_operand();
+    case 3: return rnd_operand_d();
+    case 4: /* entier, demi-entier ou quart d'entier, de 0 a 2^33 */
+        b = k >> (31 + (unsigned)((x >> 8) % 33));
+        return ld_d(bits_d((double)(long long)b / (double)(1 << ((x >> 16) & 3))) |
+                    ((x & 0x1000000) ? 0x8000000000000000ULL : 0));
+    case 5: /* a quelques ulp de +-2^31 */
+        b = ((x & 0x100) ? 0x41e0000000000000ULL : 0xc1e0000000000000ULL) +
+            (k % 8192) - 4096;
+        return ld_d(b);
+    case 6: /* a quelques ulp de FLT_MAX + 1/2 ulp, ou de FLT_MIN */
+        b = ((x & 0x100) ? 0x47effffff0000000ULL : 0x3810000000000000ULL) +
+            (k % 65536) - 32768;
+        return ld_d(b | (x & 0x8000000000000000ULL));
+    default:
+        return ld_s((u32)(x >> 32));
+    }
 }
 
 /* ---- etats du FPSCR ---- */
@@ -362,6 +437,71 @@ static void banc_d(long n)
            voutd[7][2]);
 }
 
+/*
+ * Bancs de mode c (tcg/0033) : chaque instruction en boucle, sur des
+ * operandes qui prennent le chemin court (FPSCR amorce par une division
+ * inexacte) ; frsp et fctiwz comme les produit le code compile (double ->
+ * float, float -> int), fdivs, fcmpo + branchement, fsel.
+ */
+static void banc_c(long n)
+{
+    volatile double three = 3.0;
+    double x = 1.0, t0, acc = 0, f = 0.0;
+    float fs = 1.0f, q = 1.0f;
+    long i, si = 0;
+    u32 cr;
+
+    setfpscr(0);
+    x = 1.0 / three;                    /* inexact : pose XX */
+    t0 = now_ms();
+    for (i = 0; i < n; i++) {           /* frsp (debit) : x -> simple */
+        double r;
+        __asm__ __volatile__("frsp %0,%1" : "=f"(r) : "f"(x));
+        acc += r;
+        x += 0.0001;
+    }
+    printf("banc-c : frsp %ld %.0f ms (%g)\n", n, now_ms() - t0, acc);
+    x = 1.0 / three;
+    t0 = now_ms();
+    for (i = 0; i < n; i++) {           /* fctiwz + stfd + lwz : (int)x */
+        double r;
+        union { double d; u64 u; } v;
+        __asm__ __volatile__("fctiwz %0,%1" : "=f"(r) : "f"(x));
+        v.d = r;
+        si += (long)(u32)v.u;
+        x += 0.37;
+    }
+    printf("banc-c : fctiwz %ld %.0f ms (%ld)\n", n, now_ms() - t0, si);
+    t0 = now_ms();
+    for (i = 0; i < n; i++) {           /* fdivs, chaine */
+        __asm__ __volatile__("fdivs %0,%1,%2" : "=f"(q) : "f"((double)fs), "f"((double)1.0001f));
+        fs = q + 0.5f;
+    }
+    printf("banc-c : fdivs %ld %.0f ms (%g)\n", n, now_ms() - t0, (double)fs);
+    x = 0.25; acc = 0;
+    t0 = now_ms();
+    for (i = 0; i < n; i++) {           /* fcmpo + branchement */
+        __asm__ __volatile__("fcmpo cr1,%1,%2\n\tmfcr %0" : "=r"(cr) : "f"(x), "f"(f) : "cr1");
+        if (cr & 0x04000000) {
+            acc += 1.0;
+        }
+        f += 0.5;
+        if (f > 1.0) {
+            f = -1.0;
+        }
+    }
+    printf("banc-c : fcmpo %ld %.0f ms (%g)\n", n, now_ms() - t0, acc);
+    f = -0.5; acc = 0;
+    t0 = now_ms();
+    for (i = 0; i < n; i++) {           /* fsel */
+        double r;
+        __asm__ __volatile__("fsel %0,%1,%2,%3" : "=f"(r) : "f"(f), "f"(1.0), "f"(2.0));
+        acc += r;
+        f = -f;
+    }
+    printf("banc-c : fsel %ld %.0f ms (%g)\n", n, now_ms() - t0, acc);
+}
+
 int main(int argc, char **argv)
 {
     long nrand = 1L << 18;
@@ -370,7 +510,7 @@ int main(int argc, char **argv)
     long i;
     u64 total = 0;
 
-    int dbl = 0, op0 = 0, op1 = CMPU + 1;
+    int dbl = 0, cmode = 0, op0 = 0, op1 = CMPU + 1;
 
     if (argc > 2 && !strcmp(argv[1], "banc")) {
         banc(atol(argv[2]));
@@ -380,14 +520,22 @@ int main(int argc, char **argv)
         banc_d(atol(argv[2]));
         return 0;
     }
+    if (argc > 2 && !strcmp(argv[1], "banc-c")) {
+        banc_c(atol(argv[2]));
+        return 0;
+    }
     if (argc > 1 && !strcmp(argv[1], "d")) {
         dbl = 1; op0 = ADDD; op1 = NOPS;
+        argc--; argv++;
+    } else if (argc > 1 && !strcmp(argv[1], "c")) {
+        cmode = 1; op0 = FRSP; op1 = NOPSC;
         argc--; argv++;
     }
     if (argc > 1) {
         nrand = atol(argv[1]);
     }
     build_cat();
+    build_catc();
     for (ph = 0; ph < NPH; ph++) {
         for (op = op0; op < op1; op++) {
             u64 n = 0;
@@ -397,6 +545,33 @@ int main(int argc, char **argv)
             rs = 0x9e3779b97f4a7c15ULL + ph * 131 + op;
             if (ph == 9) {
                 setfpscr(0);
+            }
+            if (cmode) {
+                /* catalogue croise elargi, puis aleatoire (a, b, c independants) */
+                for (x = 0; x < NCATC; x++) {
+                    if (op == FRSP || op == FCTIW || op == FCTIWZ) {
+                        rec(ph, op, 0, catc[x], 0, 0);
+                        n++;
+                        continue;
+                    }
+                    for (y = 0; y < NCATC; y++) {
+                        rec(ph, op, catc[x], catc[y], catc[(x * 7 + y * 3) % NCATC], 0);
+                        n++;
+                    }
+                }
+                for (i = 0; i < nrand; i++) {
+                    double a = rnd_operand_c(), b = rnd_operand_c(), c = rnd_operand_c();
+                    if ((i & 7) == 5 && op == DIVS) {
+                        /* diviseur a mantisse courte : quotients pile sur un demi-ulp */
+                        b = ld_s(0x3f800000 | ((u32)rnd() & 0x7ff) << 12);
+                    }
+                    rec(ph, op, a, b, c, i < 2 && ph == 1);
+                    n++;
+                }
+                printf("P%-2d %-8s %8llu vecteurs  empreinte %016llx\n", ph, names[op],
+                       n, phash);
+                total += n;
+                continue;
             }
             /* catalogue croise (les FMA : croisement complet a b c en P1 seulement) */
             for (x = 0; x < NCAT; x++) {

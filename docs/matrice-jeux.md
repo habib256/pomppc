@@ -106,7 +106,11 @@ Un lancement (`Cellule.jouer`, `tools/matrice/matrice.py`) :
 3. toutes les 10 s, relevé **incrémental** de `frames.csv` (`tail -c +N`) — relire tout le
    fichier coûtait jusqu'à 35 % du processeur invité à `sshd` et ralentissait le jeu —, remise
    au premier plan (osascript) au début puis dès que les replis montent (lancé par ssh, le jeu
-   reste derrière et chaque échange se replie, `Swap60`) ;
+   reste derrière et chaque échange se replie, `Swap60`). Depuis le 06/10, jamais d'osascript
+   qui puisse tomber dans une fenêtre fixe (§5, « Mesure et rafales ») : System Events est
+   lancé avant le jeu, la remise au premier plan part dès que le processus du jeu existe, et
+   des replis vus pendant la fenêtre sont notés (`premier_plan` dans le résultat) et traités
+   après elle ;
 4. la **règle de scène** du jeu (§4) dit quand la fenêtre de mesure est passée ;
 5. preuve seulement : `touch /tmp/matrice-go`, attente de `capture-ready`, confirmation
    de son numéro dans `frames.csv`, capture figée puis acquittement `.resume` ; on attend
@@ -220,6 +224,29 @@ une liste d'instances (profils d'un même jeu, Nexuiz).
   charge 40-53 le 29/09, mesures inexploitables). Le 26/09, aucun autre QEMU pendant les
   tours. Les écarts de ±5 % entre deux parties restent la règle (`docs/tcg-g4.md` §14.7).
 - **Le déclencheur ralentit le jeu** (§2) : jamais de ms/image prise pendant la preuve.
+- **Mesure et rafales** (06/10/2026, `docs/tcg-g4.md` §31). Ce que la matrice fait dans
+  l'invité pendant une partie se voit dans la vitesse. Mesuré dans la VM de dev (deux sondes
+  de calcul, SMP=2) : un `osascript … System Events … set frontmost` coûte **3,1 s de
+  processeur invité au premier appel** (System Events démarre), 1,0 s ensuite ; un `ssh` neuf
+  (échange de clés DH et RSA d'OpenSSH 4.5) 2,2 s vu de l'hôte, ~0,2 s de processeur invité ;
+  la même commande multiplexée 0,09 s et rien de mesurable. Sur UT2004 (fenêtre fixe 13..73,
+  ~4 s de jeu), l'osascript du premier relevé qui voyait des images faisait un paquet de
+  10-30 images à 100-190 ms qui tombait dans la fenêtre ou non selon la phase des relevés :
+  +5 à +11 ms/image (« deux régimes » de `x-jit-rel32`, en fait de la mesure). D'où :
+  - les jeux à fenêtre fixe la déclarent (`images_fenetre = (a, b)`, `jeu.py` ; UT2004, Marble
+    Blast, Nexuiz, Warcraft III) et `plan_permis()` (`matrice.py`) refuse tout osascript
+    quand l'image a est à moins de 6 s au rythme courant, jusqu'à l'image b ; DOOM 3, Prey,
+    Zen, Colin McRae (fenêtres décidées en cours de partie, loin du début) gardent l'ancienne
+    règle ;
+  - System Events est lancé avant le jeu, et les deux remises au premier plan du début partent
+    dès que le processus du jeu existe, pendant le chargement ; un appel qui échoue (processus
+    pas encore connu de System Events) ne compte pas ;
+  - `tools/guest/tssh.sh` multiplexe ses connexions (`ControlMaster`, socket
+    `.run/tssh-<port>`, `ControlPersist` 300 s, `TSSH_PERSIST=` ; `TSSH_MUX=0` pour l'ancien
+    comportement) : chaque relevé ne coûte plus d'échange de clés ;
+  - relire une ancienne campagne `ut-fen` : `tools/tcg/utrafales.py <campagne>` (rapport de
+    chaque image à la même image des autres parties, pas de simulation fixe ; excès dans la
+    fenêtre ; instants des rafales).
 - **La capture doit correspondre à une présentation terminée** : rendez-vous du plugin
   décrit en tête, confirmé par `frames.csv`. Un marqueur absent, expiré ou dont l'image
   n'existe pas dans le rejeu rend la cellule rouge. Les anciens tours lisaient les en-têtes

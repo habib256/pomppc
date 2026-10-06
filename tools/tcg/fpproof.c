@@ -28,6 +28,17 @@
  * d'origine du code généré : résultat, frT écrit en mémoire, FPSCR, drapeaux,
  * exception levée ou non, exception_index (et CR pour fcmpu).
  *
+ * Formes double (tcg/0016) et x-fp-native-cmp (tcg/0033 : frsp fctiw fctiwz
+ * fcmpo fdivs fdiv, -DFPPROOF_NCMP quand l'arbre l'a) : même contrat, contre
+ * helper_FADD.. / helper_FRSP, helper_FCTIW(Z) (sans FPRF), helper_FCMPO,
+ * helper_FDIV(S) ; le chemin court est le modèle extrait (fpi_short(),
+ * fpi_gate_op(), fpi_fpscr_op()) et, pour tous les vecteurs, le talon
+ * ppc_fp32_native_slow de l'objet.  Les drapeaux softfloat sont comparés au
+ * bit près sauf float_flag_input_denormal_used (QEMU 10+), que softfloat lève
+ * sur un opérande dénormal de fcmpu/fcmpo et que la cible PowerPC ne lit
+ * jamais (la remise à zéro de l'instruction suivante l'efface) : même règle
+ * que le vérificateur (docs/tcg-g4.md §25.1).
+ *
  * Usage : fpproof N [graine]  (N vecteurs aléatoires par opération et par
  * famille de FPSCR ; plus le catalogue croisé).
  */
@@ -83,6 +94,11 @@ static void env_setup(uint64_t fpscr, uint64_t msr)
     memset(&env->fp_status, 0, sizeof(env->fp_status));
     set_float_detect_tininess(float_tininess_before_rounding, &env->fp_status);
     set_float_2nan_prop_rule(float_2nan_prop_ab, &env->fp_status);
+    /* QEMU 11 : le reste de ppc_cpu_reset_hold() pour fp_status */
+    set_float_ftz_detection(float_ftz_before_rounding, &env->fp_status);
+    set_float_3nan_prop_rule(float_3nan_prop_acb, &env->fp_status);
+    set_float_infzeronan_rule(float_infzeronan_dnan_never, &env->fp_status);
+    set_float_default_nan_pattern(0b01000000, &env->fp_status);
     env->fast_fp = true;
     env->fp_status.no_hardfloat = false;
     env->fp_prime_mask = float_flag_inexact;
@@ -95,6 +111,9 @@ static void env_setup(uint64_t fpscr, uint64_t msr)
     raised = 0;
 }
 
+/* drapeaux comparés : tous sauf input_denormal_used (voir l'en-tête) */
+#define FLAGMASK (~(int)float_flag_input_denormal_used)
+
 typedef struct {
     uint64_t r, fpscr, fpr;
     int flags, excp, raised;
@@ -103,6 +122,12 @@ typedef struct {
 
 #define FRT 7
 #define FPR_POISON 0x5555aaaa5555aaaaull
+
+#ifdef FPPROOF_NCMP
+#define IS_CVT(op) FPI_IS_CVT(op)
+#else
+#define IS_CVT(op) 0
+#endif
 
 static void ref_arith(int op, uint64_t a, uint64_t b, uint64_t c, Out *o)
 {
@@ -118,10 +143,31 @@ static void ref_arith(int op, uint64_t a, uint64_t b, uint64_t c, Out *o)
         case FPI_MADD: r = helper_FMADDS(env, a, c, b); break;
         case FPI_MSUB: r = helper_FMSUBS(env, a, c, b); break;
         case FPI_NMADD: r = helper_FNMADDS(env, a, c, b); break;
-        default: r = helper_FNMSUBS(env, a, c, b); break;
+        case FPI_NMSUB: r = helper_FNMSUBS(env, a, c, b); break;
+        /* tcg/0016 */
+        case FPI_DADD: r = helper_FADD(env, a, b); break;
+        case FPI_DSUB: r = helper_FSUB(env, a, b); break;
+        case FPI_DMUL: r = helper_FMUL(env, a, c); break;
+        case FPI_DMADD: r = helper_FMADD(env, a, c, b); break;
+        case FPI_DMSUB: r = helper_FMSUB(env, a, c, b); break;
+        case FPI_DNMADD: r = helper_FNMADD(env, a, c, b); break;
+        case FPI_DNMSUB: r = helper_FNMSUB(env, a, c, b); break;
+#ifdef FPPROOF_NCMP
+        /* tcg/0033 : la traduction d'origine (do_round_convert, do_helper_ab) */
+        case FPI_FRSP: r = helper_FRSP(env, b); break;
+        case FPI_FCTIW: r = helper_FCTIW(env, b); break;
+        case FPI_FCTIWZ: r = helper_FCTIWZ(env, b); break;
+        case FPI_DIVS: r = helper_FDIVS(env, a, b); break;
+        case FPI_DDIV: r = helper_FDIV(env, a, b); break;
+#endif
+        default: abort();
         }
         *cpu_fpr_ptr(env, FRT) = r;     /* set_fpr() du code généré */
-        helper_fprf_check_float64(env, r);
+        if (IS_CVT(op)) {
+            helper_float_check_status(env);     /* fctiw : pas de FPRF */
+        } else {
+            helper_fprf_check_float64(env, r);
+        }
     }
     o->fpr = *cpu_fpr_ptr(env, FRT);
     o->r = r;
@@ -131,12 +177,26 @@ static void ref_arith(int op, uint64_t a, uint64_t b, uint64_t c, Out *o)
     o->raised = raised;
 }
 
-static void ref_fcmpu(uint64_t a, uint64_t b, Out *o)
+static bool is_cmp(int op)
+{
+#ifdef FPPROOF_NCMP
+    return op == FPI_CMPU || op == FPI_CMPO;
+#else
+    return op == FPI_CMPU;
+#endif
+}
+
+static void ref_fcmpu(int op, uint64_t a, uint64_t b, Out *o)
 {
     env->crf[3] = 0xf;
     if (setjmp(jb) == 0) {
         helper_reset_fpstatus(env);
-        helper_fcmpu(env, a, b, 3);
+#ifdef FPPROOF_NCMP
+        if (op == FPI_CMPO) {
+            helper_FCMPO(env, a, b, 3);
+        } else
+#endif
+        helper_FCMPU(env, a, b, 3);
         helper_float_check_status(env);
     }
     o->cr = env->crf[3];
@@ -205,6 +265,55 @@ static void build_catalog(void)
     cat_add(0x3ff0000020000000ull);                /* 1 + 2^-23 (simple) */
     cat_add(0x7ff4000000000000ull);                /* sNaN double */
     cat_add(0x7ff0000000000001ull);                /* sNaN minimal */
+    /* tcg/0033 : bords de frsp et de fctiw(z) */
+    cat_add(0x47efffffe0000000ull);                /* FLT_MAX */
+    cat_add(0x47effffff0000000ull);                /* FLT_MAX + 1/2 ulp */
+    cat_add(0x47efffffefffffffull);                /* juste dessous */
+    cat_add(0x47effffff0000001ull);
+    cat_add(0x380fffffffffffffull);                /* juste sous FLT_MIN */
+    cat_add(0x380ffffff0000000ull);
+    cat_add(0x36a0000000000000ull);                /* 2^-149 */
+    cat_add(0x41dfffffffc00000ull);                /* 2^31 - 1 */
+    cat_add(0x41dfffffffe00000ull);                /* 2^31 - 0.5 */
+    cat_add(0x41e0000000000000ull);                /* 2^31 */
+    cat_add(0x41e0000000100000ull);                /* 2^31 + 0.5 */
+    cat_add(0xc1e0000000080000ull);                /* -2^31 - 0.25 */
+    cat_add(0xc1e0000000100000ull);                /* -2^31 - 0.5 */
+    cat_add(0xc1e0000000200000ull);                /* -2^31 - 1 */
+    cat_add(0x43e0000000000000ull);                /* 2^63 */
+    cat_add(0x3fe0000000000000ull);                /* 0.5 */
+    cat_add(0x4004000000000000ull);                /* 2.5 */
+}
+
+/* tcg/0033 : opérandes des conversions (entiers, demi-entiers, bords) */
+static uint64_t rnd_operand(void);
+static uint64_t rnd_operand_c(void)
+{
+    uint64_t x = rnd(), k = rnd(), b;
+    double v;
+
+    switch (x & 7) {
+    case 0:
+        return cat[(x >> 8) % ncat];
+    case 1:
+    case 2:
+        return rnd_operand();
+    case 3:                                     /* double quelconque, exposant doux */
+        return (rnd() & 0x800fffffffffffffull) |
+               (uint64_t)(0x3b0 + ((x >> 8) & 0xff)) << 52;
+    case 4:                                     /* (demi/quart d')entier */
+        v = (double)(int64_t)(k >> (31 + (unsigned)((x >> 8) % 33))) /
+            (double)(1 << ((x >> 16) & 3));
+        return d_bits(v) | ((x & 0x1000000) ? 1ull << 63 : 0);
+    case 5:                                     /* +-2^31 à quelques ulp */
+        b = (x & 0x100) ? 0x41e0000000000000ull : 0xc1e0000000000000ull;
+        return b + (k % 8192) - 4096;
+    case 6:                                     /* FLT_MAX + 1/2 ulp, FLT_MIN */
+        b = (x & 0x100) ? 0x47effffff0000000ull : 0x3810000000000000ull;
+        return (b + (k % 65536) - 32768) | (x & (1ull << 63));
+    default:
+        return d_of_f((uint32_t)(x >> 32));
+    }
 }
 
 /* un float32 normal (ou zéro) élargi, avec des familles utiles */
@@ -283,8 +392,8 @@ static void check_flat(int op, uint64_t a, uint64_t b, uint64_t c,
     Int128 ret = int128_zero();
 
     env_setup(fpscr, msr);
-    if (op == FPI_CMPU) {
-        ref_fcmpu(a, b, &ref);
+    if (is_cmp(op)) {
+        ref_fcmpu(op, a, b, &ref);
     } else {
         ref_arith(op, a, b, c, &ref);
     }
@@ -296,7 +405,7 @@ static void check_flat(int op, uint64_t a, uint64_t b, uint64_t c,
         if (nat) {
             /* le talon de x-fp-native (tcg/0014) : env->fpscr à jour */
             ret = ppc_fp32_native_slow(env, a, b, c,
-                                       op | (op == FPI_CMPU ? 3 : FRT) << 8, 0);
+                                       op | (is_cmp(op) ? 3 : FRT) << 8, 0);
         } else
 #endif
         if (op == FPI_CMPU) {
@@ -312,7 +421,7 @@ static void check_flat(int op, uint64_t a, uint64_t b, uint64_t c,
         flat.fpscr = env->fpscr;
         flat.cr = env->crf[3];
         n_flat_raised[nat][op]++;
-    } else if (op == FPI_CMPU) {
+    } else if (is_cmp(op)) {
         flat.cr = int128_getlo(ret);
         flat.fpscr = int128_gethi(ret);
     } else {
@@ -324,11 +433,12 @@ static void check_flat(int op, uint64_t a, uint64_t b, uint64_t c,
     flat.excp = cpu->parent_obj.exception_index;
     flat.raised = raised;
     n_flat[nat][op]++;
-    if (op == FPI_CMPU ? (flat.cr != ref.cr) :
-                         (flat.r != ref.r || flat.fpr != ref.fpr)) {
+    if (is_cmp(op) ? (flat.cr != ref.cr) :
+                     (flat.r != ref.r || flat.fpr != ref.fpr)) {
         goto bad;
     }
-    if (flat.fpscr != ref.fpscr || flat.flags != ref.flags ||
+    if (flat.fpscr != ref.fpscr ||
+        ((flat.flags ^ ref.flags) & FLAGMASK) ||
         flat.excp != ref.excp || flat.raised != ref.raised) {
         goto bad;
     }
@@ -345,20 +455,38 @@ bad:
     }
 }
 #endif
+#ifdef FPPROOF_NCMP
+#define IS_UNARY(op) ((op) == FPI_FRSP || FPI_IS_CVT(op))
+#else
+#define IS_UNARY(op) 0
+#endif
 static uint64_t n_modelbad;
 static bool use_model;
 static const char *names[FPI_NOPS] = {
     "fadds", "fsubs", "fmuls", "fmadds", "fmsubs", "fnmadds", "fnmsubs",
-    "fcmpu",
+    "fcmpu", "fadd", "fsub", "fmul", "fmadd", "fmsub", "fnmadd", "fnmsub",
+#ifdef FPPROOF_NCMP
+    "frsp", "fctiw", "fctiwz", "fcmpo", "fdivs", "fdiv", "fsel",
+#endif
 };
 
 static void check_arith(int op, uint64_t a, uint64_t b, uint64_t c,
                         uint64_t fpscr, uint64_t msr)
 {
     Out ref;
-    uint64_t r = helper_fp32_fast(a, b, c, op);
-    uint64_t rm = model_fp32_fast(a, b, c, op);
+    uint64_t r, rm, nf;
+    bool gate;
 
+#ifdef FPPROOF_NCMP
+    /* tcg/0033 : le modèle extrait, fpi_short() (frsp et fctiw n'ont pas
+     * d'équivalent exporté par l'objet ; fdiv(s) passent par fpi_arith) */
+    rm = fpi_short(a, b, c, op);
+    r = op < FPI_FRSP || op == FPI_DIVS || op == FPI_DDIV
+        ? helper_fp32_fast(a, b, c, op) : rm;
+#else
+    rm = model_fp32_fast(a, b, c, op);
+    r = helper_fp32_fast(a, b, c, op);
+#endif
     if (use_model) {
         r = rm;                     /* contre-épreuve : modèle muté */
     } else if (r != rm) {
@@ -366,26 +494,34 @@ static void check_arith(int op, uint64_t a, uint64_t b, uint64_t c,
     }
     env_setup(fpscr, msr);
     fpscr = env->fpscr;             /* tel que ppc_store_fpscr() l'a rangé */
-    if (!fpi_gate(fpscr) || r == FPI_FAIL) {
+#ifdef FPPROOF_NCMP
+    gate = fpi_gate_op(fpscr, op);
+    nf = fpi_fpscr_op(fpscr, r, op);
+#else
+    gate = fpi_gate(fpscr);
+    nf = fpi_fpscr_arith(fpscr, r);
+#endif
+    if (!gate || r == FPI_FAIL) {
         n_slow[op]++;
         return;
     }
     n_fast[op]++;
     ref_arith(op, a, b, c, &ref);
-    if (ref.r != r || ref.fpscr != fpi_fpscr_arith(fpscr, r) ||
+    if (ref.r != r || ref.fpscr != nf ||
         ref.flags != float_flag_inexact || ref.excp != -1 || ref.raised) {
         if (n_bad[op]++ < 20) {
             printf("DIVERGENCE %s a=%016" PRIx64 " b=%016" PRIx64 " c=%016"
                    PRIx64 " fpscr=%08" PRIx64 " : court %016" PRIx64
                    " %08" PRIx64 " / réf %016" PRIx64 " %08" PRIx64
                    " drapeaux %x excp %d levée %d\n", names[op], a, b, c,
-                   fpscr, r, fpi_fpscr_arith(fpscr, r), ref.r, ref.fpscr,
+                   fpscr, r, nf, ref.r, ref.fpscr,
                    ref.flags, ref.excp, ref.raised);
         }
     }
 }
 
-static void check_fcmpu(uint64_t a, uint64_t b, uint64_t fpscr, uint64_t msr)
+static void check_fcmpu(int op, uint64_t a, uint64_t b, uint64_t fpscr,
+                        uint64_t msr)
 {
     Out ref;
     uint32_t cr;
@@ -394,18 +530,19 @@ static void check_fcmpu(uint64_t a, uint64_t b, uint64_t fpscr, uint64_t msr)
     fpscr = env->fpscr;
     cr = fpi_fcmpu(fpscr, a, b);
     if (cr == 0) {
-        n_slow[FPI_CMPU]++;
+        n_slow[op]++;
         return;
     }
-    n_fast[FPI_CMPU]++;
-    ref_fcmpu(a, b, &ref);
+    n_fast[op]++;
+    ref_fcmpu(op, a, b, &ref);
     if (ref.cr != cr || ref.fpscr != fpi_fpscr_fcmpu(fpscr, cr) ||
-        ref.flags != float_flag_inexact || ref.excp != -1 || ref.raised) {
-        if (n_bad[FPI_CMPU]++ < 20) {
-            printf("DIVERGENCE fcmpu a=%016" PRIx64 " b=%016" PRIx64
+        (ref.flags & FLAGMASK) != float_flag_inexact || ref.excp != -1 ||
+        ref.raised) {
+        if (n_bad[op]++ < 20) {
+            printf("DIVERGENCE %s a=%016" PRIx64 " b=%016" PRIx64
                    " fpscr=%08" PRIx64 " : court %x / réf %x %08" PRIx64
-                   " drapeaux %x\n", a, b, fpscr, cr, ref.cr, ref.fpscr,
-                   ref.flags);
+                   " drapeaux %x\n", names[op], a, b, fpscr, cr, ref.cr,
+                   ref.fpscr, ref.flags);
         }
     }
 }
@@ -414,13 +551,15 @@ static void check_any(int op, uint64_t a, uint64_t b, uint64_t c,
                       uint64_t fpscr, uint64_t msr)
 {
 #ifdef FPPROOF_FLAT
-    check_flat(op, a, b, c, fpscr, msr, 0);
+    if (op <= FPI_DNMSUB) {         /* x-fp-flat : les ops d'origine */
+        check_flat(op, a, b, c, fpscr, msr, 0);
+    }
 #endif
 #ifdef FPPROOF_NATIVE
     check_flat(op, a, b, c, fpscr, msr, 1);
 #endif
-    if (op == FPI_CMPU) {
-        check_fcmpu(a, b, fpscr, msr);
+    if (is_cmp(op)) {
+        check_fcmpu(op, a, b, fpscr, msr);
     } else {
         check_arith(op, a, b, c, fpscr, msr);
     }
@@ -442,13 +581,27 @@ int main(int argc, char **argv)
 
     /* catalogue croisé : porte ouverte, et chaque façon de la fermer */
     for (op = 0; op < FPI_NOPS; op++) {
+        if (!names[op] || !strcmp(names[op], "fsel")) {
+            continue;           /* fsel : ops TCG, prouvé par fpnatcmp-user */
+        }
         for (x = 0; x < ncat; x++) {
             for (y = 0; y < ncat; y++) {
-                int zn = (op >= FPI_MADD && op <= FPI_NMSUB) ? ncat : 1;
+                int zn = (op >= FPI_MADD && op <= FPI_NMSUB) ? ncat :
+                         (FPI_IS_D(op) && FPI_BASE(op) >= FPI_MADD) ? ncat / 4 : 1;
+                if (IS_UNARY(op)) {
+                    if (y > 0) {
+                        break;
+                    }
+                    for (fam = 0; fam < 3; fam++) {
+                        uint64_t f = rnd_fpscr(fam, &msr);
+                        check_any(op, 0, cat[x], 0, f, msr);
+                    }
+                    continue;
+                }
                 for (z = 0; z < zn; z++) {
                     for (fam = 0; fam < 3; fam++) {
                         uint64_t f = rnd_fpscr(fam, &msr);
-                        if (op == FPI_MUL || zn > 1) {
+                        if (FPI_BASE(op) == FPI_MUL || zn > 1) {
                             check_any(op, cat[x], cat[z], cat[y], f, msr);
                         } else {
                             check_any(op, cat[x], cat[y], 0, f, msr);
@@ -460,16 +613,37 @@ int main(int argc, char **argv)
     }
     /* aléatoire */
     for (op = 0; op < FPI_NOPS; op++) {
+        if (!names[op] || !strcmp(names[op], "fsel")) {
+            continue;
+        }
         for (i = 0; i < n; i++) {
             uint64_t a = rnd_operand(), b = rnd_operand(), c = rnd_operand();
             uint64_t f = rnd_fpscr(i % 8 == 7 ? 1 + (i & 8 ? 1 : 0) : 0, &msr);
-            if (op == FPI_MUL || op >= FPI_MADD) {
+            if (op > FPI_DNMSUB) {
+                /* tcg/0033 */
+                a = rnd_operand_c();
+                b = rnd_operand_c();
+                if ((i & 7) == 5 && (op == FPI_DIVS || op == FPI_DDIV)) {
+                    /* diviseur à mantisse courte : quotients sur un demi-ulp */
+                    b = d_of_f(0x3f800000 | ((uint32_t)rnd() & 0x7ff) << 12);
+                }
+                check_any(op, IS_UNARY(op) ? 0 : a, b, 0, f, msr);
+                continue;
+            }
+            if (FPI_IS_D(op)) {
+                /* doubles quelconques à exposant doux, de temps en temps */
+                if (i & 1) {
+                    a = (rnd() & 0x800fffffffffffffull) |
+                        (uint64_t)(0x300 + (rnd() & 0x1ff)) << 52;
+                }
+            }
+            if (FPI_BASE(op) == FPI_MUL || FPI_BASE(op) >= FPI_MADD) {
                 /* produit pile sur un demi-ulp de temps en temps */
                 if ((i & 3) == 1) {
                     c = d_of_f(0x3f800000 | ((uint32_t)rnd() & 0x7ff) << 12);
                 }
             }
-            if ((i & 7) == 3 && op != FPI_CMPU) {
+            if ((i & 7) == 3 && op != FPI_CMPU && !FPI_IS_D(op)) {
                 /* annulation exacte ou presque : b = -(a*c) arrondi */
                 float fa, fc, p;
                 double da, dc;
@@ -478,12 +652,16 @@ int main(int argc, char **argv)
                 if (op == FPI_ADD || op == FPI_SUB) {
                     p = op == FPI_ADD ? -fa : fa;
                 }
+                (void)0;
                 b = d_bits(p) ^ ((i & 16) ? 1ull << 29 : 0);
             }
             check_any(op, a, b, c, f, msr);
         }
     }
     for (op = 0; op < FPI_NOPS; op++) {
+        if (n_fast[op] + n_slow[op] == 0) {
+            continue;
+        }
         printf("%-8s court %12" PRIu64 "  helpers %12" PRIu64
                "  divergences %" PRIu64 "\n", names[op], n_fast[op],
                n_slow[op], n_bad[op]);

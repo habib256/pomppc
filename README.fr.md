@@ -73,7 +73,10 @@ protocole** — sous programme ARB, un repli vers Apple tue le jeu
 1. **QEMU du dépôt** : `./scripts/build_qemu_qfb.sh` clone l'amont, applique les patches et
    sonde les capacités (verdict dans `bench/build-capabilities.txt`). `config.env` cherche
    `$HOME/src/qemu/build/qemu-system-ppc` ; `QEMU_BIN=` force un binaire. Le paquet distro
-   suffit à la baseline (`scripts/`), pas aux lanceurs quotidiens.
+   suffit à la baseline (`scripts/`), pas aux lanceurs quotidiens. Sur un PC Linux x86-64,
+   `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh` construit en plus `~/src/qemu/build-fast/`
+   (`-O3 -march=native`, LTO, PGO : ~20 % plus rapide en jeu), que `run_tiger.sh` préfère
+   alors (`QEMU_FAST=0` pour la référence) : [docs/binaire-rapide-x86.md](docs/binaire-rapide-x86.md).
 2. **Un média d'installation Tiger PPC que vous possédez**, dans `images/` (gitignoré), nommé
    dans `config.env` (`INSTALL_MEDIA`). ISO tel quel ; un DMG compressé doit être converti
    (`dmg2img`, ou `hdiutil convert -format UDRO`). Aucune ROM Apple : OpenBIOS suffit.

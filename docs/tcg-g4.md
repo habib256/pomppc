@@ -2836,6 +2836,329 @@ aucun gain mesuré ; le lanceur les allume néanmoins sur macOS arm64 avec
 `split-wx` ; `hotblocks`/`jitblocks` permettent d’inspecter les blocs ARM émis.
 Méthodes, limites et résultats : [rapport M4](jit-m4-2026-10-05.md).
 
+## 30. La série 0025-0028 sur le PC x86-64 (06/10/2026)
+
+Le binaire de référence du PC (`~/src/qemu/build`, construit le 04/10 jusqu'à `tcg/0024`) est
+remis au niveau de la série complète, et chaque pièce venue du M4 reçoit son pendant ou sa
+preuve x86-64 (règle de parité des hôtes). Hôte : i7-10700F, Ubuntu 24.04, gcc 13.3 ; l'hôte
+n'est **pas** au repos (d'autres constructions tournent) : aucun temps ci-dessous n'est une
+mesure de vitesse en jeu, seuls les microbancs hôte servent à décider.
+
+### 30.1 Le binaire de référence
+
+`scripts/build_qemu_qfb.sh` (construction standard, sans `QEMU_OPT`, sous
+`systemd-run --user --scope -p MemoryMax=20G nice`) a posé sur l'arbre déjà patché les deux
+correctifs `tcg/fixes/0003-nmsub-zero` et `0022-neon-nmsub-zero` (gardes : l'ancienne ligne
+présente), puis `0025`-`0028` (gardes : marqueur absent), puis `0029` (§30.2). Les marqueurs de
+fin de bloc sont tous présents (`prod_zero && !nres`, `kind != PVF_NMSUB`, `ppc_lmw_vector`,
+`ppc_stmw_vector`, `x-lmw-vector`, `x-jc-word`, `tb_jmp_cache_word`, `saved_addr = tcg_jit_addr`,
+`TCG_TYPE_PTR, arg`, `ppc_lmw_bswap32x4`, `PPC_LMW_VECTOR_HOST`, `POMPPC tcg/0029`) et les
+anciennes lignes absentes. Contrôle de capacités **complet, 30/30**, backend GL compris
+(`bench/build-capabilities.txt`). Binaires du 06/10 à 11:56 :
+
+| binaire | sha256 |
+|---|---|
+| `qemu-system-ppc` | `581f24e6fdc613615de4e79e18373740e8e5389f4e79c2fbed98061cf2d2ba9f` |
+| `qemu-system-ppc64` | `bda5fa21040f544c059a40c3ed4fd3eaa954bf3e058ba6c967c1303b82469063` |
+
+Journaux : `bench/build-qemu-pc-20261006.log` (0025-0028 et correctifs),
+`bench/build-qemu-pc-20261006-0029.log` (0029). Sur x86-64, `0027` (vue RW sous `split-wx`,
+chemin `mach_vm_remap`) et `0028` (émetteur aarch64) sont compilés hors du binaire : ils ne
+changent rien au PC, ils gardent l'arbre identique à celui du M4.
+
+### 30.2 `lmw`/`stmw` : `tcg/0029`, la copie SSE2
+
+**Le constat.** gcc 13 `-O2` (options de QEMU) laisse la boucle d'origine de `helper_lmw` et
+`helper_stmw` **scalaire** : `mov (%rax,%rdx,4) ; bswap ; mov … ; add ; cmp ; jne`, un mot par
+tour (`objdump -d target_ppc_mem_helper.c.o`). Sur le M4, clang la vectorisait déjà, d'où le
+gain nul de 0025 ; ici la place existe.
+
+**La conception.** Même propriété `x-lmw-vector`, même endroit (après `probe_contiguous`, seule
+la copie RAM change ; E/S et fautes par la boucle d'origine). Bloc `#elif defined(__x86_64__)` de
+`target/ppc/lmw-vector.h` en **SSE2 seul** (le socle x86-64) : pas de sonde d'exécution, pas
+d'attribut de cible, pas de transition AVX/SSE, inliné dans le helper. L'échange d'octets de
+quatre mots : `pshuflw`/`pshufhw` 0xb1 (demi-mots échangés) puis `psllw`/`psrlw` 8 + `por` ;
+GPR 64 bits : `punpckldq`/`punpckhdq` avec zéro (extension sans signe) ; `stmw` 64 bits :
+`pshufd` 0x08 de chaque paire puis `punpcklqdq`. Queue de 1 à 3 mots scalaire, aucune lecture
+ni écriture hors plage. Ailleurs qu'aarch64/x86-64, `x-lmw-vector=on` est désormais refusé
+**proprement** : avertissement au `realize` (« no vector copy on this host ») et propriété
+remise à faux, au lieu d'être acceptée sans effet. Sur le PC, la propriété reste vraie après le
+`realize` (lue par `qom-get`).
+
+**Microbanc hôte** (copie seule, `taskset -c 5`, fonctions non inlinées des deux côtés, médiane
+de 5 × 20 M paires `lmw`+`stmw`, hôte chargé : ordres de grandeur) :
+
+| registres | origine, GPR 32 bits | SSE2 | origine, GPR 64 bits | SSE2 |
+|---|---:|---:|---:|---:|
+| r0 (32 mots) | 30,3 ns | 14,7 ns (−52 %) | 60,0 ns | 36,9 ns (−39 %) |
+| r13 (19 mots) | 18,8 ns | 11,2 ns (−41 %) | 37,7 ns | 27,3 ns (−28 %) |
+| r20 (12 mots) | 12,7 ns | 7,7 ns (−40 %) | 26,0 ns | 18,3 ns (−29 %) |
+| r26 (6 mots) | 7,5 ns | 6,4 ns (−15 %) | 14,9 ns | 14,4 ns (−3 %) |
+| r29 (3 mots) | 4,9 ns | 5,6 ns (+14 %) | 9,5 ns | 10,2 ns (+8 %) |
+
+Soit 3 à 5 ns de moins par `lmw` ou `stmw` de prologue/épilogue (r13-r14) ; une variante AVX2
+(`vpshufb`, `vpmovzxdq`, sonde `CPUINFO_AVX2`) donnait le même ordre de gain, avec un appel non
+inlinable et une sonde en plus : SSE2 retenu. Le surcoût des queues courtes est celui du
+banc (fonctions non inlinées) ; dans QEMU la copie est inlinée. Ce que cela vaut en jeu (le
+helper garde son appel et sa sonde `probe_contiguous`) reste à mesurer (§30.6).
+
+**Preuve.** `tools/tcg/lmwvectorproof.sh ~/src/qemu` compile les fonctions **réelles** de
+`lmw-vector.h` (il refuse désormais un en-tête sans copie vectorielle pour l'hôte et nomme
+l'implémentation prouvée) : chaque registre de départ × chaque décalage de 0 à 31 octets ×
+1 000 tirages, plus les pages de garde des deux côtés et le contrôle des octets voisins :
+**1 024 064 cas en GPR 32 bits et autant en 64 bits, zéro écart**.
+`tools/tcg/lmwvectorproof-x86-mut.sh` : **12 mutants sur 12 détectés** (demi-mots, octets,
+décalage de 7, extension par zéro, moitié haute, moitiés hautes au `stmw`, second couple,
+vecteur au-delà de la plage en lecture et en écriture — faute sur la page de garde —, queues
+oubliées, pas de 12 octets). Invité : `lmwtest`, §30.5.
+
+### 30.3 Le zéro signé de `vnmsubfp` sur x86-64
+
+Le défaut trouvé sur le M4 (2 413 écarts sur 14,8 M vecteurs dans la boucle scalaire de
+`vfp_fma4`) **n'existe pas sur le chemin x86**, et les correctifs n'y changent pas le code
+exécuté :
+
+- `fixes/0003` corrige la boucle scalaire de `vfp_fma4`. Sur x86-64 elle n'est **jamais** un
+  chemin rapide : avec FMA3 c'est `vfp_fma4_fma3` (0020) qui répond, sans FMA3 la boucle pose
+  `ok = false` (le `fmaf` de la libm y est une émulation). `fixes/0022` touche l'émetteur
+  aarch64, non compilé ici.
+- Le cas fautif est un produit nul avec un addende nul : il faut `-(a·c − b)` arrondi **puis**
+  nié (`float32_chs`). Le chemin x86 de 0020 calcule `vfmadd231ps` sur `b ^ signe` puis
+  **`vpxor` du bit de signe** (désassemblage du vrai `target_ppc_int_helper.c.o` :
+  `vfmadd231ps` puis `vpxor` à `+0x231` de `vfp_fma4_fma3`) ; l'émetteur de 0022 émet
+  `vfmsub231ps` puis `pxor` 0x80000000. Les deux nient après l'arrondi : `+0 − +0 = +0`, nié
+  `−0`, comme softfloat (les 24 combinaisons de zéros signés à produit nul comparées au vrai
+  `fpu_softfloat.c.o`, chemin dur et logiciel, NJ 0/1 : softfloat rend `0x80000000` partout).
+- Le piège est réel côté compilateur, ce qui rend plausible l'origine aarch64 : gcc 13
+  `-O2 -mfma` replie `-fmaf(a, c, -b)` écrit en **flottant** en un seul `vfnmadd132ss`
+  (`−(a·c) + b`, qui rend `+0` dans ce cas), mais ne replie pas la négation écrite comme un
+  `xor` entier (`vfmsub132ss` puis `add $0x80000000`), forme qu'emploient 0003 et 0020. Sur
+  le M4, clang a vraisemblablement fait le repli vers FNMADD dans la boucle scalaire ; non
+  vérifié ici.
+
+Preuves (journaux `bench/tcg/pc-serie-20261006/`, résumé `bilan.txt`, refaites par
+`tools/tcg/pc-serie-proofs.sh ~/src/qemu <dossier>`) :
+
+| épreuve | résultat |
+|---|---|
+| `tools/tcg/vfpproof.sh ~/src/qemu 20000000` (helpers 0003/0020 tels quels, chemin AVX + FMA3, contre softfloat, 8 états) | **648 454 144 vecteurs** (2,59 G voies), 97 486 278 par le chemin rapide, **0 divergence** |
+| `VFPPROOF_NATIVE=1 tools/tcg/vfpproof.sh ~/src/qemu 20000000` (modèle de l'émetteur x86 de 0022, porte extraite de `cpu_init.c`) | **648 454 144 vecteurs**, 95 698 607 par le chemin court, **0 divergence** |
+| `tools/tcg/vfpproof-x86-mut.sh` | **9 mutants sur 9** |
+| `tools/tcg/vfpproof-native-mut.sh` | **8 mutants sur 8** |
+| invité `vfptest` sous `x-vfp-native-verify` | §30.5 : empreinte du M4, 0 divergence |
+
+Aucun correctif x86 n'est donc nécessaire ; les deux `fixes/` sont appliqués pour garder
+l'arbre du PC identique à celui du M4.
+
+### 30.4 `x-jc-word` (0026) et le placement du tampon (0027) sous Linux
+
+- `python3 tools/tcg/jcwordproof.py ~/src/qemu` : sonde C et ops TCG émises, **573 440 cas,
+  zéro écart**, groupes de page préservés (code commun aux deux hôtes).
+- `tools/tcg/jitcheck.py` est rendu portable : `--rel32` juge `x-jit-rel32` (0024) sur la ligne
+  « appels des helpers directs (rel32) » ; sous Linux, `--split-wx` lit la vue RX du `memfd`
+  dans `/proc/<pid>/maps`, faute de ligne de placement.
+- Relevés sous Linux (constats, pas des défauts de la série) :
+  - `x-jit-near` : **0/5** dans la fenêtre du texte (« pas de place, noyau ») ; `mmap(NULL)`
+    pose le tampon vers `0x7xxx…`, le texte PIE est vers `0x5xxx…` (~30 Tio) ;
+  - `x-jit-rel32` : **5/5** à moins de 2 Gio du texte (écart maximal 1 098 Mio, appels
+    directs) ; la fenêtre de 4 Gio est franchie 1 fois sur 5, sans effet sur `rel32` (les deux
+    régimes de 0024 sont étudiés à part) ;
+  - `split-wx` : Linux prend le chemin `memfd` (`alloc_code_gen_buffer_splitwx_memfd`), que ni
+    `x-jit-near`, ni `x-jit-rel32`, ni **0027 (propre à Darwin)** ne placent : vue RX loin du
+    texte dans **20/20** lancements, avec `x-jit-near` comme avec `x-jit-rel32`. `split-wx`
+    est éteint par défaut et n'est pas employé sur le PC.
+
+### 30.5 Preuves en VM de dev (10.4.11), SMP=1 puis SMP=2
+
+`tools/tcg/jit-m4-proof.sh` (écrit sur le Mac) est rendu portable : greffon en `.so`,
+`JIT_BENCH=0` pour sauter les bancs (hôte chargé), `JIT_TIMEOUT`, et une **sonde de l'agent**
+après chaque démarrage : `devloop start` a perdu sa frappe à **chaque** démarrage sur le PC
+(écran gris d'Apple jugé stable, surtout sous les vérificateurs) ; la sonde lance un job
+minuscule et retape `mount -uw /` puis `sh /pomppc/agent.sh IN OUT` tant que l'agent ne répond
+pas (l'agent ignore le job présent à son démarrage, d'où la sonde suivante). Options de
+production complètes (`x-fast-fp`, `x-sr-tlb`, `x-lfs-inline`, `x-vfp-fast`, `x-vperm-fast`,
+`x-fp-inline` — ajouté au script, il manquait —, `x-ret-inline`, `x-jc-idx`, `x-icbi-sync`,
+`x-msr-nobql`, `x-fp-native`, `x-fp-native64`, `x-tb-fast`, `x-vmx-inline`), `x-jit-near`,
+`x-jc-bits=14`. Deux démarrages par campagne : **référence** (`x-vfp-native=off`,
+`x-lmw-vector=off`, `x-jc-word=off`) et **vérifié** (`x-vfp-native=on`, `x-lmw-vector=on`,
+`x-jc-word=on`, `x-vfp-native-verify`, `x-vmx-verify`, `x-ret-verify`, `x-tb-verify`).
+Résultats bruts dans `bench/tcg/pc-serie-20261006/vm-smp1/` et `vm-smp2/`.
+
+| | SMP=1 (`qemu-system-ppc`) | SMP=2 (`qemu-system-ppc64`) |
+|---|---|---|
+| `vfptest` | `bc13e93c39e62602` dans les deux modes | identique |
+| `vmxtest` | `c24e3d31d479381b` ; fautes 48/48, page intacte | identique |
+| `lmwtest` | `2575eafce78adf66` ; faute `lmw 31` signal 10 dans les deux modes | identique (GPR 64 bits) |
+| `smctest` A-F | 0 erreur | 0 erreur |
+| `jctest` | appels indirects et invalidation à chaud OK | OK |
+| `tbtest` | 0 recul | 0 recul |
+| `x-vfp-native-verify` | 34 066 432 opérations, 8 573 259 prédites courtes, **0 divergence** | 34 066 432, 8 573 259 prédites courtes, **0 divergence** |
+| `x-vmx-verify` | 301 989 888 permutations + 50 331 648 rangements, **0 + 0** | mêmes nombres, **0 + 0** |
+| `x-ret-verify` | 2 988 915 365 blocs en ligne + 25 606 798 en boucle, **0 divergence, 0 course** | 3 003 369 517 + 41 754 618, **0 divergence**, 148 courses (`smctest`, attendues, §16) |
+| `x-tb-verify` | 648 147 710 lectures, 0 positif | 641 132 799 lectures, 0 positif |
+
+Les empreintes VFP, VMX et LMW sont **celles du M4** (`docs/jit-m4-2026-10-05.md`) : mêmes
+résultats sur les deux hôtes, helpers d'origine compris. Le seul fichier qui diffère entre les
+deux modes est `jctest.txt`, par ses temps (`ns=`).
+
+### 30.6 Lanceur et phase 2
+
+`run_tiger.sh` : `LMWVEC` et `JCWORD` restent **éteints par défaut sous Linux** ; `LMWVEC=1`
+et `JCWORD=1` y fonctionnent (sondes du lanceur sur les deux binaires : propriétés acceptées,
+témoin inconnu refusé), libellé `LMW-STMW-VECTEUR`. À mesurer en phase 2 sur la VM quotidienne,
+hôte au repos, par A/B entrelacé (DOOM 3 fenêtre, 6 parties par bras) :
+
+    tools/tcg/matab.sh x86-lmw-jcw 6 "ref:LMWVEC=0 JCWORD=0" "lmw:LMWVEC=1" \
+        "jcw:JCWORD=1" "les2:LMWVEC=1 JCWORD=1" d3 fen
+
+puis, si un bras gagne, la matrice du PC (mb, zen, ut, d3) avant toute mise par défaut. Pour
+chiffrer d'abord le poste : `perf` est utilisable depuis le 06/10 (`perf_event_paranoid=1`) ;
+`perf record -p` sur QEMU lancé avec `EXTRA_ARGS=-perfmap` donne la part de `helper_lmw` /
+`helper_stmw` en jeu.
+## 31. Les deux régimes de `x-jit-rel32` sur le PC (06/10/2026)
+
+**En une phrase** : `x-jit-rel32` n'a pas de régime lent. Les « 64-67 ms/image » d'UT2004
+(`bench/tcg/ab/x86-ut-tcg`, `x86-ut-def`, `x86-ut-split`) viennent d'une **rafale d'images
+lentes que la matrice provoque elle-même** dans l'invité : l'`osascript` de
+`premier_plan()`, lancé au premier relevé ssh qui voit des images. La fenêtre `ut-fen`
+(images 13..73) ne couvre que ~4 s de jeu, et la rafale y tombe ou non selon la phase des
+relevés (toutes les ~10 s depuis le lancement) par rapport à l'image 1. QEMU plus rapide, le
+jeu arrive plus tôt à l'image 1 et la phase glisse : avec `x-jit-rel32`, la rafale est tombée
+dans la fenêtre 8 fois sur 9. À contenu égal, hors rafales, `x-jit-rel32` est **~3 % plus
+rapide** sur UT2004, comme sur DOOM 3. Pas de correctif de QEMU ; le défaut peut être allumé
+après l'A/B de phase 2, à lire avec `tools/tcg/utrafales.py`.
+
+Journaux : `bench/tcg/rel32-x86/` (dépôt principal, non versionné) : `utrafales.txt`,
+`jitcheck-20.txt`, `outasm-appels.txt`, `sshburst/`, `jb-r*-*/` et `jit-bench-bilan.txt`.
+Copie de travail `~/src/qemu-rel32` (= `qemu-d3tcg` + 0025-0028, construite par
+`build_qemu_qfb.sh`), VM de dev privée `tiger-dev-rel32.raw` (supprimée après).
+
+### 31.1 Ce que disaient les parties
+
+Neuf parties avec `x-jit-rel32` (bras `rel`, `def`, `tcg`), douze sans (`vfp`, `vmx`, `off`,
+`plg`). Sur la fenêtre de la matrice : 57,0 à 67,4 ms/image avec, 55,8 à 62,1 sans. Mais
+`frames.csv` garde toute la partie (570-950 images), et le pas de simulation est fixe
+(`seed.c` : 0,2 s) : **l'image n est la même dans toutes les parties**. On peut donc rapporter
+chaque image à la médiane de la même image entre les 21 parties (`utrafales.py`) :
+
+| | avec `x-jit-rel32` (9) | sans (12) |
+|---|---|---|
+| ms/image, fenêtre 13..73 (la mesure de la matrice) | 57,0-67,4, méd. 64,1 | 55,8-62,1, méd. 58,0 |
+| excès cumulé sur la référence, fenêtre 13..73 | **309-662 ms** (8 parties), 83 ms (`rel-3`) | 10-121 ms (11), 348 ms (`plg-3`) |
+| rapport médian à la référence, fenêtre 13..73 | 0,961-1,038 | 0,981-1,015 |
+| rapport médian à la référence, images 74..560 | **0,960-0,999, méd. 0,980** | 0,984-1,037, méd. 1,009 |
+
+- **Le temps « normal » d'une image ne change pas** dans la fenêtre (rapport médian ~1,00
+  partout) : la différence est tout entière dans 10 à 30 images à 100-190 ms, groupées en
+  1,5-2 s. Les parties « lentes » sont exactement celles où ce paquet est dans 13..73 (excès
+  ≥ 300 ms), y compris `plg-3`, **sans** `x-jit-rel32` (62,1 ms/image) ; `rel-3`, avec, l'a eu
+  aux images 1-7 et sort à 57,0.
+- **Le paquet suit l'horloge, pas l'image** : aux images 1-6 et ~175-215 (t ≈ 0,2 s et
+  10,5 s) dans les parties sans, aux images 7-40 (t ≈ 0,5-3 s) dans 8 des 9 parties avec. Deux
+  paquets à ~10,5 s d'écart : la période de la boucle de `matrice.py` (`sleep 10` puis un
+  `ssh`), dont les **deux premiers relevés qui voient des images appellent `premier_plan()`**
+  (`osascript … System Events … set frontmost`).
+- Hors rafales, `x-jit-rel32` gagne : rapport médian 0,980 contre 1,009 sur les images
+  74..560 (**−2,9 %**), les neuf parties avec sous les onze sans sauf `plg-3` (0,984, partie
+  plus longue, 945 images). C'est l'ordre de grandeur de DOOM 3 (−2,3 à −2,8 %, §28, x86-c1/c2).
+
+### 31.2 La rafale mesurée dans la VM de dev
+
+Job `sshburst` (deux sondes de calcul, une par vCPU, travail compté par tranche de 100 ms
+pendant 80 s, VM de dev au bureau, SMP=2, options de production, `x-jit-rel32`) ; l'hôte
+frappe à heure fixe, comme la matrice (`bench/tcg/rel32-x86/sshburst/bilan.txt`) :
+
+| événement hôte | durée vue de l'hôte | travail perdu par les sondes (2 vCPU) |
+|---|---|---|
+| `ssh` neuf (`tssh.sh` : échange de clés DH, RSA) + `tail` | 2,1-2,3 s | ~200 ms (≈ bruit d'une fenêtre de 3 s calme : 154 ms) |
+| même commande sur une connexion multiplexée (`ControlMaster`) | 0,09 s | ~0 |
+| `osascript … System Events … set frontmost` | **4,7 s (1er), 1,6 s (2e)** | **3,1 s, puis 1,0 s** |
+
+Le relevé ssh lui-même est presque gratuit pour l'invité (le coût est surtout côté hôte et
+réseau) ; **l'`osascript` coûte 1 à 3 s de processeur invité**, ce que montrent les paquets
+d'UT2004 (+300 à +650 ms sur ~1,5 s, le jeu gardant une part des deux vCPU). OpenSSH 4.5p1 de
+Tiger accepte le multiplexage (`ControlPath` court exigé : chemin de socket ≤ 108 octets).
+
+### 31.3 Les hypothèses de placement, éliminées une à une
+
+- **(a) Pages énormes** : 20 lancements `tools/tcg/jitcheck.py --rel32` (SMP 2, Linux : lit
+  `/proc/<pid>/smaps`) : **20/20** tampon de 1 Gio aligné sur 2 Mio, 16 VMA rwx (une par
+  région, page de garde entre deux) toutes `hg` (`MADV_HUGEPAGE`) et éligibles THP, le
+  prologue déjà dans une page énorme. Après jit-bench dans la VM de dev : 85-97 % du tampon
+  résident en pages énormes, avec ou sans `x-jit-rel32` (`placement.txt` de chaque partie).
+- **(b) Alias texte/tampon** : la place relative est la même à chaque lancement — fin du
+  tampon 64 Mio sous `__executable_start` arrondi à 2 Mio (64 ou 65 Mio dans le journal) ;
+  seul le texte modulo 2 Mio change (ASLR à la page). Dans les parties UT, ce décalage
+  (0x005000 à 0x1e1000) ne trie pas les parties « lentes » ; et le rapport médian hors rafales
+  n'a qu'un mode.
+- **(c) Appels pas vraiment directs** : `-d out_asm` sur 3 s d'OpenBIOS
+  (`outasm-appels.txt`) : avec `x-jit-rel32`, 1 593 `mov rdi,rbp ; call rel32` et **aucun
+  octet `ff 15`** ; sans, les mêmes 1 593 appels en `call *[rip+X]` (8 979 `ff 15` en tout).
+  La trace « appels des helpers directs (rel32) » est dans toutes les parties avec.
+- **(d) split-wx, régions par vCPU** : sans objet sous Linux (anonyme, sans alias RX ; 0027 ne
+  touche que le chemin macOS) ; les 16 régions sont alignées et identiques à chaque lancement.
+
+### 31.4 Banc invité et compteurs (`perf stat`), VM de dev
+
+`jit-bench` (vperm, flottant AltiVec, `lmw/stmw`, appel indirect `jctest`), QEMU relancé à
+chaque partie, bras entrelacés, `perf stat -p` sur le processus pendant le job
+(`jit-bench-bilan.txt`) :
+
+| (médiane, min..max) | sans `x-jit-rel32` (7) | avec (8) |
+|---|---|---|
+| 4 `vperm` × 50 M | 549 ms (528..628) | **530 ms (500..564)** |
+| flottant AltiVec × 50 M | 601 ms (577..682) | 592 ms (572..657) |
+| `stmw+lmw` × 20 M | 3 774 ms (3 619..4 268) | 3 670 ms (3 505..4 008) |
+| `jctest`, pas de 16 octets | 96,9 ns (90,3..111,4) | 92,9 ns (88,8..101,6) |
+| IPC du processus QEMU | 2,91 (2,37..2,99) | 2,95 (2,74..3,03) |
+| défauts de prédiction ‰ instr. | 0,60 (0,58..0,76) | **0,51 (0,49..0,57)** |
+| défauts d'iTLB par M instr. | 31,6 (26,9..34,3) | **20,4 (17,5..36,9)** |
+| défauts L1i ‰ instr. | 6,6 (6,4..7,9) | 6,4 (6,1..6,8) |
+| tampon résident en pages énormes | 96-98 % (35 % une fois) | 91-97 % |
+
+**Un seul régime** de chaque côté (étendue 8-13 %, la partie la plus lente de chaque bras
+coïncidant avec la charge de l'hôte, `charge.txt`), et `x-jit-rel32` devant sur tous les
+postes : −2 à −3 %, moins de défauts de prédiction (−15 %, les sauts indirects vers les
+helpers disparus) et d'iTLB (la constante de chaque `call *[rip+X]` n'est plus lue). Trois
+parties prises pendant une construction concurrente (charge 11-14, ×2 sur les deux bras) sont
+écartées (`hote-charge/`). Les adresses du tampon et le texte modulo 2 Mio de chaque partie
+sont dans le bilan : aucun ne trie les temps.
+
+### 31.5 Ce que ça change, et ce qui reste
+
+- **QEMU : rien à corriger.** Pas de `tcg/0030` : le placement de 0024 est déjà aligné sur
+  2 Mio, en THP, au même endroit relatif à chaque lancement, et la trace de démarrage dit déjà
+  l'adresse, l'écart au texte et la forme des appels. L'état THP ne peut pas être annoncé au
+  démarrage (rien n'est encore touché) : `jitcheck.py --rel32` le relit.
+- **La mesure, corrigée le 06/10** (`docs/matrice-jeux.md` §5, « Mesure et rafales ») :
+  - `tools/matrice` : les jeux à fenêtre fixe la déclarent (`images_fenetre`), et
+    `plan_permis()` interdit tout `osascript` de `premier_plan()` quand l'image a est à moins
+    de 6 s au rythme courant, jusqu'à l'image b ; System Events est lancé avant le jeu (le 1er
+    appel coûtait 3 s de processeur invité) ; les deux remises au premier plan du début partent
+    dès que le processus du jeu existe, pendant le chargement ; des replis vus pendant la
+    fenêtre sont notés (`premier_plan` dans le résultat de la cellule, journal) et la remise au
+    premier plan attend la fin de la fenêtre. Tests : `tests/matrice_test.py`.
+  - `tools/guest/tssh.sh` multiplexe (`ControlMaster=auto`, socket `.run/tssh-<port>` du dépôt
+    principal, `ControlPersist` 300 s, `ServerAliveInterval` 15 s ; `TSSH_MUX=0` pour
+    l'ancien comportement). Validé sur la VM de dev (`bench/tcg/rel32-x86/tssh-mux.txt`) :
+    commande seule 0,9-2,2 s sans, **0,04 s** multiplexée ; entrée standard (300 ko aller-retour
+    identiques), `tar` par le canal, code de sortie, 10 commandes parallèles ; VM arrêtée : la
+    socket disparaît, la commande suivante échoue tout de suite (`Connection refused`), et
+    après redémarrage une nouvelle maîtresse se forme.
+  - Pour relire une campagne d'avant : `tools/tcg/utrafales.py <campagne>`.
+- **Phase 2** (VM quotidienne, binaire de référence, qui porte 0024) :
+
+        tools/tcg/matab.sh x86-rel32-ut 6 "ref:" "rel:JITREL32=1" ut fen
+        tools/tcg/matab.sh x86-rel32-d3 6 "ref:" "rel:JITREL32=1" d3 fen
+        tools/tcg/utrafales.py bench/tcg/ab/x86-rel32-ut
+
+  Attendu : UT2004 −2 à −3 %, sur la fenêtre 13..73 (désormais sans osascript) comme au
+  rapport médian 74..560 ; à vérifier dans la phase 2 : `utrafales.py` ne doit plus montrer
+  d'excès de fenêtre au-delà de ~150 ms, et aucune cellule ne doit se replier faute de premier
+  plan (colonne replis) ; DOOM 3 −2 à −3 % (fenêtre de ~230 images, les
+  paquets s'y diluent). Ensuite seulement `JITREL32` à 1 dans `run_tiger.sh`.
+---
+
 ## 32. Le côté mémoire sur le PC : TLB invalidé avec précision, `lmw`/`stmw` et `dcbz` en ligne (06/10/2026)
 
 PC Linux (i7-10700F), QEMU 11.1.2 + série jusqu'à 0028, copie `~/src/qemu-mem` (= `~/src/qemu-d3tcg`
@@ -2844,7 +3167,7 @@ bureau, SMP=2 ppc64, toutes les options de production de `run_tiger.sh`, `x-fast
 l'hôte était partagé avec d'autres agents (constructions, autres VM) : seules les **parts** et
 les **comptes par seconde** se comparent d'une session à l'autre, les temps absolus moins.
 Patches : `tcg/0031-ppc-tlb-precise` (`x-tlb-precise`, `x-tlb-precise-verify=N`, `x-mem-stats`),
-`tcg/0032-ppc-lmw-inline` (`x-lmw-inline`, `x-lmw-inline-verify`), `tcg/0033-ppc-dcbz-inline`
+`tcg/0032-ppc-lmw-inline` (`x-lmw-inline`, `x-lmw-inline-verify`), `tcg/0035-ppc-dcbz-inline`
 (`x-dcbz-inline`, `x-dcbz-inline-verify`), tous éteints par défaut ; lanceur : `TLBPRECISE=1`,
 `LMWINLINE=1`, `DCBZINLINE=1` (preuves : `TLBPVERIFY=N`, `LMWVERIFY=1`, `DCBZVERIFY=1` ;
 compteurs : `MEMSTATS=1`).
@@ -2970,7 +3293,7 @@ toutes les globales, et 12-13 registres allouables seulement) : **tous les compt
 (`PPC_LMW_INLINE_MAX` 32). Le code émis grossit (un contrôle de TLB par mot), sans effet visible
 sur les bancs ni sur Marble Blast.
 
-### 32.4 `tcg/0033` : `x-dcbz-inline`
+### 32.4 `tcg/0035` : `x-dcbz-inline`
 
 `dcbz` avec une ligne de 32 octets (G4) : ligne = EA & ~31 ; la réservation est retirée si elle
 couvre la ligne (avant l'accès, comme le helper, donc aussi sur faute) ; puis quatre rangements
@@ -3053,15 +3376,13 @@ du profil ; `dcbz` pèse peu sur Marble Blast (0,6 % du temps du fil).
 
 ### 32.8 Phase 2 : A/B en jeu sur la VM quotidienne (à faire, hôte au repos)
 
-Binaire figé `~/src/qemu-mem/bin-phase2/` (lien `qemu-bundle`), les deux bras sur le même
-binaire, propriétés passées par `CPU_OPTS` (le `run_tiger.sh` du dépôt principal ne connaît pas
-encore `TLBPRECISE`/`LMWINLINE`/`DCBZINLINE` ; après fusion, ces variables suffisent) :
+Binaire de référence `~/src/qemu/build` reconstruit le 06/10 avec la série complète (jusqu'à
+0035) ; les deux bras sur ce binaire, propriétés par les variables du lanceur :
 
-    QEMU_BIN=~/src/qemu-mem/bin-phase2/qemu-system-ppc tools/tcg/matab.sh x86-mem 6 \
-        "ref:" "mem:CPU_OPTS=x-tlb-precise=on,x-lmw-inline=on,x-dcbz-inline=on" d3 fen
-    # puis mb et ut (même ligne, « mb fen », « ut fen ») ; poste par poste :
-    # "tlb:CPU_OPTS=x-tlb-precise=on" ; et une partie DOOM 3 sous
-    # CPU_OPTS=…,x-tlb-precise-verify=256,x-lmw-inline-verify=on,x-dcbz-inline-verify=on,x-mem-stats=on
+    tools/tcg/matab.sh x86-mem 6 "ref:" "mem:TLBPRECISE=1 LMWINLINE=1 DCBZINLINE=1" d3 fen
+    # puis « mb fen » et « ut fen » ; poste par poste : "tlb:TLBPRECISE=1" ;
+    # une partie DOOM 3 vérifiée : "ver:TLBPRECISE=1 LMWINLINE=1 DCBZINLINE=1 TLBPVERIFY=256
+    #   LMWVERIFY=1 DCBZVERIFY=1 MEMSTATS=1 RETVERIFY=1"
 
 Attendu. DOOM 3 sur le PC (profil du 03/10) : softmmu 11,2 %, recherche de blocs 5 %, `lmw`/`stmw`
 1,5 % (plus leurs sondes) du temps vCPU. Sur Marble Blast dans la VM de dev, les trois propriétés
@@ -3074,3 +3395,457 @@ matrice du PC avant toute mise par défaut.
 Journaux (non versionnés) : `bench/tcg/mem-pc/` du dépôt principal — `compteurs.txt` (chaque
 session : compteurs `x-mem-stats`, bancs, empreintes, partition `perf`, bilans des
 vérificateurs), `mutants.txt`, `tlbpproof.log` ; arbre des mutants `~/src/qemu-memmut`.
+
+## 33. Le flottant scalaire restant sur le PC : comparaisons et conversions natives (06/10/2026)
+
+PC Linux x86-64 (i7-10700F). Copie isolée `~/src/qemu-fp` (= `~/src/qemu-d3tcg`, c'est-à-dire la
+référence + 0021-0024, plus 0025-0028 posés par `build_qemu_qfb.sh`), binaire
+`~/src/qemu-fp/build/qemu-system-ppc{,64}` ; l'arbre de référence `~/src/qemu` n'a pas été touché.
+Patch `patches/tcg/0033-ppc-fp-native-cmp.patch`, propriétés `x-fp-native-cmp` et
+`x-fp-native-cmp-verify` (éteintes par défaut), lanceur `FPNATIVECMP=1` / `FPNCMPVERIFY=1`.
+
+### 33.1 Inventaire : ce qui passait encore par softfloat
+
+Point de départ : « softfloat 3,3 % du temps vCPU » de DOOM 3 sur le PC
+(`docs/vitesse-doom3-x86.md` §4), avec `x-fast-fp`, `x-fp-native` et `x-fp-native64` allumés.
+Les trois relevés `perf` de la campagne x86 (DOOM 3 `bench/vitesse/d3-x86/profil-1/d3-fen`,
+Marble Blast `bench/tcg/ab/x86-prof-mb/p1-1/mb-fen`, UT2004 `bench/tcg/ab/x86-prof-ut/p1-1/ut-fen`),
+relus fonction par fonction (`perf report --sort sym`, fils `CPU n/TCG` seulement, parts du
+temps vCPU), rangés par instruction d'origine :
+
+| poste (part du temps vCPU) | DOOM 3 | Marble Blast | UT2004 |
+|---|---|---|---|
+| `frsp` (`helper_FRSP`, `float64_to_float32`, `helper_todouble`) | 0,32 % | 0,16 % | 0,12 % |
+| `fctiw`/`fctiwz` (`helper_FCTIWZ`, `float64_to_int32*`) | 0,10 % | 0,12 % | 0,09 % |
+| `fdivs`/`fdiv` (`helper_FDIV*`, `float64r32_div`, `float64_div`) | 0,14 % | 0,10 % | 0,06 % |
+| `fsel` (`helper_FSEL`, pur) | 0,03 % | 0 | 0,06 % |
+| `fcmpo` | 0,01 % | 0 | 0,01 % |
+| FPRF et contrôle des helpers restants (`helper_compute_fprf_float64`, `helper_fprf_check_float64`, `do_float_check_status`) | 0,40 % | 0,41 % | 0,31 % |
+| `float64_unpack_canonical` (frsp, fctiw, fdiv) | 0,39 % | 0,30 % | 0,22 % |
+| `parts64_*` partagés (canonicalize, uncanon, float_to_sint, round_to_int, scalbn…) | 0,81 % | 0,55 % | 1,42 % |
+| replis du scalaire déjà natif (`do_fcmpu`, talon, `fp32_flat`) | 0,19 % | 0,04 % | 0,14 % |
+| `fsqrt`, `fres`, `frsqrte` | 0,02 % | 0,03 % | 0,03 % |
+| **AltiVec** (`float32_compare_quiet` de `vcmpgtfp`/`vcmpgefp`, `vcfsx` = `int32_to_float32` + `float32_scalbn`, `float32_muladd` des replis de `vmaddfp`, `vmaxfp`, `vrefp`, `vrsqrtefp`) | **1,22 %** | 0,23 % | **1,36 %** |
+| total flottant hors code généré | 3,63 % | 1,94 % | 3,82 % |
+
+Lecture :
+
+- **`fcmpu` n'y est plus** : il passe par l'op native depuis 0014/0017 (§22.5, §25.1) ; seuls
+  ses replis (NaN, porte fermée) restent. Le `float32_compare_quiet` que le §4 citait en tête
+  vient de **`vcmpgtfp`/`vcmpgefp` (AltiVec)**, pas du scalaire (la cible n'emploie
+  `float32_compare*` que dans les comparaisons vectorielles) ; même chose pour la grosse part
+  `parts64_scalbn`/`int32_to_float32` d'UT2004 (`vcfsx`). Hors du périmètre de ce patch.
+- **Le scalaire qui restait en helpers** : `frsp` en tête, puis `fctiwz`, `fdivs`/`fdiv`, et
+  leur FPRF/contrôle (deux appels de helper par instruction, `fastfp/0002`). Avec la part de
+  `float64_unpack_canonical` et des `parts64_*` qui leur revient, **~1,5 % du temps vCPU sur
+  DOOM 3, ~1,3 % sur Marble Blast, ~0,8 % sur UT2004**.
+- `fsel` est déjà un helper pur (`NO_RWG_SE`) : rien à gagner (vérifié au banc, §33.5) ; `fcmpo`
+  est absent des jeux (gcc émet `fcmpu`). Les deux sont faits quand même : pour `fcmpo` c'est la
+  même op que `fcmpu`, pour `fsel` trois `movcond`.
+- `fabs`, `fneg`, `fnabs`, `fmr`, `lfd`/`stfd` sont déjà des ops entières de TCG ; `lfs`/`stfs`
+  aussi (0002). `fsqrt`/`fres`/`frsqrte` pèsent 0,02-0,03 % : laissés aux helpers.
+- **Fréquences**. Le profil d'instructions du M4 (§15.1, 74 ms/image) donnait `frsp` à 0,7 M/s,
+  soit ~50 000 par image ; même travail par image ici, à 138 ms/image : **~0,35 M `frsp`/s**
+  sur le PC. Statiquement, le moteur de DOOM 3 contient 2 041 `frsp`, 546 `fctiwz`, 610 `fdivs`
+  (§28.1). Le coût mesuré d'un `frsp` par les helpers est ~25 ns (banc, §33.5), ce qui redonne
+  la part du profil (0,35 M/s × 25 ns ≈ 0,9 % d'un vCPU occupé à ~110 %). Les compteurs du
+  vérificateur (`x-fp-native-cmp-verify`, une ligne par opération : vérifiés / par le chemin
+  court / divergences) donnent les nombres exacts : sur Marble Blast dans la VM de dev,
+  **`frsp` 0,22 M/s, `fctiwz` 0,20 M/s, `fctiw` 0,10 M/s, `fdivs` 31 000/s** (§33.4) ; DOOM 3 à
+  relever pendant la partie vérifiée de la phase 2 (§33.7).
+
+### 33.2 Conception
+
+Même mécanique que `x-fp-native` (§22.5) : **mêmes porte, op, talon, vérificateur**, six
+sélecteurs de plus pour `INDEX_op_ppc_fp32` (`internal.h`, `FPI_FRSP = 15` … `FPI_DDIV = 20`,
+vérifiés à la compilation contre ceux de l'émetteur) :
+
+| instruction | chemin court (porte : XX = 1, XE = OE = UE = 0, et RN = 00 sauf `fcmpo`/`fctiwz`) | sinon |
+|---|---|---|
+| `frsp` | frB nul, ou FLT_MIN ≤ \|frB\| < FLT_MAX + ½ ulp : `vcvtsd2ss` + `vcvtss2sd` ; FPRF du résultat, FI | talon |
+| `fctiw`, `fctiwz` | frB double nul ou normal (`fpi_zon64`), `vcvtsd2si`/`vcvttsd2si` **64 bits** dont le résultat doit tenir dans un int32 (`movslq` + `cmp`) : c'est alors l'int32 étendu en signe que rendent les helpers ; FI ; FPRF intact | talon (NaN, infini, dénormal, VXCVI, saturation) |
+| `fcmpo` | aucun NaN : exactement `fcmpu` (même code émis) | talon : `do_fcmpo` (VXVC, VXSNAN) |
+| `fdivs`, `fdiv` | opérandes nuls ou normaux (`fpi_zon`/`fpi_zon64`), diviseur non nul, quotient nul (dividende nul) ou FLT_MIN (DBL_MIN) < \|q\| < ∞ : `vdivss`/`vdivsd` ; FPRF, FI | talon (ZX, VXZDZ, VXIDI, OX, UX, dénormaux) |
+| `fsel` | trois `movcond` (pas de FPSCR) | — |
+
+Pourquoi c'est exact (modèle C `fpi_frsp()`, `fpi_fcti()`, `fpi_fp32/64(FPI_DIVS)` du bloc
+« fp-inline » de `fpu_helper.c`, extrait tel quel par `fpproof.sh`) :
+
+- **`frsp`** : avec \|x\| ≥ FLT_MIN le simple arrondi est normal, la petitesse (testée avant
+  l'arrondi sur PowerPC) n'est pas atteinte ; sous FLT_MAX + ½ ulp il est fini, pas de
+  débordement (au-delà, l'arrondi au pair va à 2^128 : OX, au talon). Le FPSCR amorcé ne laisse
+  alors que l'inexact (déjà posé) : FPRF du résultat, FI = 1, comme la séquence d'origine.
+- **`fctiw(z)`** : le test « tient dans un int32 » sur la conversion 64 bits couvre aussi les
+  bords (−2^31 − 0,5 arrondi vers zéro tient ; 2^31 − 0,5 arrondi au pair ne tient pas) ;
+  NaN, infinis et \|x\| ≥ 2^63 donnent 2^63, jamais un int32. Les dénormaux vont au talon
+  (softfloat y lève `input_denormal_used`).
+- **`fdivs`** : sur des simples exacts, `float64r32_div` est la division simple correctement
+  arrondie, ce que fait `vdivss` (le même argument que `x-fast-fp` pour son chemin hardfloat).
+- MXCSR : arrondi au plus proche, ni DAZ ni FTZ (QEMU ne le touche pas ; l'émetteur 0017 le
+  suppose déjà).
+
+Traduction (`translate/fp-impl.c.inc`) : `do_fpnc()` (frB, frA pour la division) appelle
+`gen_fp_native()` ; `fcmpo` réutilise `gen_fcmpu_native(…, FPI_CMPO)`. Chemin lent :
+`fp32_flat()`/`fcmpu_flat()` font la séquence d'origine (`do_frsp`, `float64_to_int32*` +
+`float_invalid_cvt`, `float64r32_div`/`float64_div` + `div_flags_handler`, `do_fcmpo`) avec
+l'adresse de retour du code généré, frT écrit avant le contrôle, FPRF sauf pour `fctiw(z)`.
+`helper_FCMPO` est réécrit en `do_fcmpo(…, GETPC())` sans changement de comportement.
+
+**Porte de l'hôte** : `TCG_TARGET_HAS_ppc_fp_cmp` (`tcg/tcg-has.h`, 0 par défaut ; x86_64 :
+`TCG_TARGET_HAS_ppc_fp32`, AVX + FMA3), `tcg_ppc_fp_cmp_supported()`. **Sur arm64 la propriété
+ne change rien** (ni `fsel`) : l'émetteur aarch64 ne connaît pas ces sélecteurs, et aucune
+chaîne aarch64 n'est disponible sur le PC pour en écrire un prouvé. Pendant NEON à faire sur le
+M4 (`fcvt s,d`/`fcvt d,s`, `fcvtzs`/`fcvtns` vers x, `fdiv`, même test de plage int32),
+prouvé là-bas par `fptest c` dans Tiger (empreinte de référence ci-dessous) et
+`x-fp-native-cmp-verify` — `fpnatcmp-user.sh` demande linux-user, absent de macOS.
+
+Vérificateur : `helper_fpn_verify` (§22.5) connaît les nouveaux sélecteurs (`fpi_short()`,
+`fpi_gate_op()`, `do_fcmpo`, pas de FPRF pour `fctiw(z)`) ; `fsel` a le sien
+(`helper_fpnc_fsel`, contre `helper_FSEL`). Il s'allume par `x-fp-native-cmp-verify` (pas
+`x-fp-verify`) et écrit sur la même ligne `fp-native-verify:` (une colonne par opération,
+`frsp` à `fsel`).
+
+### 33.3 La preuve hôte
+
+**Modèle et talon contre le vrai softfloat** (`tools/tcg/fpproof.sh ~/src/qemu-fp 20000000`,
+journal `logs/fpproof-20M.log` du §33.8) : `fpproof.c` était resté à 9.2 (ni formes double, ni
+objets de QEMU 11 : `fpu_softfloat.c.o` est dans `libcommon`, `helper_FCMPU`, motif du NaN par
+défaut) ; remis à jour, puis étendu (`-DFPPROOF_NCMP`) : catalogue croisé (bords de `frsp` et de
+`fctiw` ajoutés : FLT_MAX, FLT_MAX + ½ ulp et ses voisins, sous FLT_MIN, 2^-149, ±2^31 ± ¼, ½, 1,
+2^63, 0,5, 2,5), puis aléatoire (entiers, demi- et quarts d'entier jusqu'à 2^33, voisins de
+±2^31 et des bornes de `frsp`, diviseurs à mantisse courte), FPSCR en trois familles (porte
+ouverte, au hasard, fermée d'un bit), MSR[FE] au hasard. Résultat, frT en mémoire, FPSCR entier,
+drapeaux softfloat (sauf `input_denormal_used`, §25.1), exception levée et `exception_index` :
+
+| `fpproof.sh … 20000000` | vecteurs | par le chemin court | divergences |
+|---|---|---|---|
+| tout (simple, double, 0033) | 461 749 260 | 297 198 078 | **0** |
+| dont `frsp` / `fctiw` / `fctiwz` | 20 000 420 chacun | 14,8 M / 11,6 M / 12,6 M | **0** |
+| dont `fcmpo` / `fdivs` / `fdiv` | 20 058 800 chacun | 17,6 M / 4,3 M / 16,8 M | **0** |
+| talon `ppc_fp32_native_slow`, tous chemins | 461 749 260 (16,8 M exceptions levées) | — | **0** |
+| `x-fp-flat`, tous chemins (ops d'origine) | 341 571 600 | — | **0** |
+
+Contre-épreuves du modèle (`fpproof-mut.sh`, 200 000 vecteurs) : les 10 mutants d'origine et 7
+nouveaux (borne basse ou haute de `frsp`, `fctiw` tronqué, 2^31 accepté, FI oublié, diviseur nul
+accepté, RN ignoré) : **17 sur 17 détectés** (9 à 650 491 divergences).
+
+**L'émetteur réel** : `tools/tcg/fpnatcmp-user.sh` construit le job `fptest` pour
+`powerpc-linux-gnu` et le fait tourner sous un `qemu-ppc` **linux-user** construit depuis une
+copie de l'arbre patché (`~/src/qemu-fpu`) : même traducteur, même op, même émetteur x86_64,
+même talon que le binaire système. Trois choses y sont neutralisées, dans la copie seulement
+(`tools/tcg/fpnatcmp-userhack.py`) : le code « système seulement » de 0008 (`x-ret-inline`, jamais allumé
+ici) et des champs de 0001/0021-0025 rangés sous `!CONFIG_USER_ONLY`, et
+**MSR[FE0] = MSR[FE1] = 0 comme sous Tiger** (linux-user les pose et force
+`fp_exceptions_enabled()`). Le mode `d` y redonne l'empreinte de Tiger (`fb3e6006e03c4f53`,
+§25.4) : le banc linux-user exécute bien les mêmes instructions de la même façon.
+
+| `fpnatcmp-user.sh qemu-ppc 65536` | instructions | référence contre `x-fp-native-cmp` | sous `x-fp-native-cmp-verify` |
+|---|---|---|---|
+| `fptest c` (frsp fctiw fctiwz fcmpo fdivs fdiv fsel, 11 états du FPSCR) | 6 206 354 | **identiques** (`e6bba64145ea9bbf`) | identique ; 8 060 929 vérifiées (2 841 840 par le chemin court), **0 divergence** |
+| `fptest` (simple) | 12 823 376 | identiques (`c2dffc9e43a020d8`) | identique ; `frsp` du programme : 0 divergence |
+| `fptest d` | 11 978 884 | identiques (`fb3e6006e03c4f53`) | identique |
+
+Contre-épreuve de l'émetteur (`tools/tcg/fpnatcmp-mut.sh`, un `qemu-ppc` par mutation,
+`fptest c 16384`) : **9 mutants sur 9 détectés**, chacun par une sortie différente **et** par
+le vérificateur — borne basse de `frsp` retirée (3 271 divergences), borne haute à 2^128
+(1 817), `fctiw` tronqué (7 385), test de plage int32 retiré (39 779), FI oublié par `fctiw(z)`
+(80 782), diviseur nul accepté (18), quotient non testé (7 976), NaN de frB accepté par
+`fcmpo` (12 009), NaN oublié par `fsel` (13 990).
+
+**Patch** : 0033 posé (`patch --fuzz=0`) sur l'instantané des douze fichiers d'avant redonne
+l'arbre de travail à l'octet ; `build_qemu_qfb.sh` le pose (section « tcg/0033 », marqueurs) et
+sonde la propriété (`check_opt x-fp-native-cmp`).
+
+### 33.4 La preuve invitée
+
+VM de dev : copie privée `disks/tiger-dev-fp.raw` de `tiger-dev.raw` (10.4.11, supprimée
+ensuite), `devloop.py` depuis le worktree, **toutes les options de production** de
+`run_tiger.sh` (`x-fast-fp x-sr-tlb x-lfs-inline x-vfp-fast x-vperm-fast x-fp-inline
+x-ret-inline x-jc-idx x-icbi-sync x-msr-nobql x-fp-native x-tb-fast x-fp-native64
+x-vmx-inline x-vfp-native`, `x-jit-near`, `x-jc-bits=14`), plus ou moins `x-fp-native-cmp`.
+Le job `fptest` (`MODE=c`, 2^18 vecteurs aléatoires par état et opération) est compilé dans
+Tiger par gcc 4.0 :
+
+| binaire, mode | `fptest c` (21 345 170 instr.) | `fptest` simple (30 124 880) | `fptest d 65536` | vérificateur |
+|---|---|---|---|---|
+| ppc64, SMP=1, sans 0033 | `67cf96efa75f9286` | `e80ec8026301ef1d` | — | — |
+| ppc64, SMP=1, `x-fp-native-cmp` + vérif. | `67cf96efa75f9286` | `e80ec8026301ef1d` | `fb3e6006e03c4f53` | 34 777 776 opérations vérifiées (12 011 755 par le chemin court), **0 divergence** |
+| ppc64, SMP=2, `x-fp-native-cmp` + vérif. | `67cf96efa75f9286` | `e80ec8026301ef1d` | — | 34 744 722 vérifiées, **0 divergence** |
+| ppc (32 bits), SMP=1, `x-fp-native-cmp` + vérif. | `67cf96efa75f9286` | — | — | 28 944 953 vérifiées, **0 divergence** |
+
+**Identiques à l'octet** avec et sans la propriété, en SMP=1 et SMP=2 ; les empreintes simple
+et double sont celles du §25.4 (inchangées depuis 0017), et celle du mode c est **la même que
+sous `qemu-ppc` linux-user** (`fpnatcmp-user.sh … 262144`, `logs/user-262144.log`) : le banc
+hôte du §33.3 voit exactement ce que voit Tiger.
+
+**Bureau et jeu sous le vérificateur** (ppc64, SMP=2, `start --gui`) :
+
+| | vérifiées | par le chemin court | divergences | détail (vérifiées / chemin court) |
+|---|---|---|---|---|
+| démarrage de Tiger jusqu'au bureau, puis arrêt | 359 007 | 313 974 | **0** | `frsp` 92 011 / 92 009, `fctiw` 44 377 / 52, `fctiwz` 181 237 / 180 757, `fdiv` 38 681, `fdivs` 2 697 |
+| bureau + **Marble Blast Gold, 120 s** (`fpgames`, `GAMES=mb DUR=120`) | **70 271 934** | 67 037 278 (95,4 %) | **0** | `frsp` 26 851 765 / 26 843 032, `fctiwz` 24 564 589 / 24 564 036, `fctiw` 12 123 084 / 8 899 614, `fdivs` 3 728 571, `fdiv` 1 666 799, `fsel` 1 337 078, `fcmpo` 48 |
+
+Soit, en jeu (Marble Blast dans la VM de dev, ~37 img/s) : **`frsp` ~0,22 M/s, `fctiwz` ~0,20 M/s,
+`fctiw` ~0,10 M/s** (73 % par le chemin court : le reste sont des valeurs hors int32 ou un FPSCR
+non amorcé), `fdivs` ~31 000/s, `fdiv` ~14 000/s, `fsel` ~11 000/s, `fcmpo` ~0. Ce sont les
+fréquences de l'inventaire (§33.1) mesurées, et non plus estimées.
+
+### 33.5 Gains
+
+Banc hôte (`fptest banc-c 20000000` sous le `qemu-ppc` du §33.3, trois tours entrelacés,
+médianes ; hôte peu chargé) :
+
+| boucle (20 M itérations) | helpers | `x-fp-native-cmp` | écart | par instruction |
+|---|---|---|---|---|
+| `frsp` (débit) | 514 ms | **156 ms** | **−70 %** | −18 ns |
+| `fctiwz` + `stfd` + `lwz` | 450 ms | **101 ms** | **−78 %** | −17 ns |
+| `fdivs` (chaîne dépendante) | 277 ms | **208 ms** | −25 % | −3,5 ns |
+| `fcmpo` + branchement | 402 ms | **265 ms** | −34 % | −7 ns |
+| `fsel` | 79 ms | 78 ms | 0 | — (helper pur) |
+
+Banc invité (`fptest banc-c 10000000` dans Tiger, ppc64 SMP=2, options de production,
+trois passes par démarrage, deux démarrages par mode entrelacés ref/cmp/ref/cmp ; même ordre
+de grandeur que le banc hôte) :
+
+| boucle (10 M itérations) | helpers | `x-fp-native-cmp` | écart |
+|---|---|---|---|
+| `frsp` | 348-354 ms | **152-153 ms** | **−57 %** |
+| `fctiwz` + `stfd` + `lwz` | 250-253 ms | **70 ms** | **−72 %** |
+| `fdivs` (chaîne) | 159-161 ms | **115-117 ms** | −28 % |
+| `fcmpo` + branchement | 238-239 ms | **163 ms** | −32 % |
+| `fsel` | 141-144 ms | 136-140 ms | ~0 |
+| témoin `fptest banc` (chaîne simple, sommets, `fcmpu`) | 202 / 1 247-1 265 / 164-168 ms | 209-212 / 1 278-1 300 / 169-171 ms | +2-3 % (bruit, non touchés) |
+
+**Attendu en jeu** : le poste visé pèse ~1,5 % du temps vCPU de DOOM 3 (§33.1) et l'op native
+en retire ~75 % : **~1 % du temps vCPU, soit ~1-1,5 ms/image sur 138** (moins sur Marble Blast et
+UT2004, ~0,5-1 %). C'est sous la dispersion d'une matrice à trois parties : il faut six
+parties par bras pour le voir.
+
+### 33.6 Ce qui reste en helper, et pourquoi
+
+- **L'AltiVec softfloat** (1,2 % sur DOOM 3, 1,4 % sur UT2004) : `vcmpgtfp`/`vcmpgefp`
+  (`float32_compare_quiet`), `vcfsx`/`vctsxs` (`int32_to_float32` + `scalbn`), replis de
+  `vmaddfp`, `vmaxfp`/`vminfp`, `vrefp`/`vrsqrtefp`. **Le plus gros poste restant**, hors de ce
+  patch (AltiVec) : `vcmp*fp` et `vcfsx` en ops vectorielles seraient la suite logique.
+- `fsqrt`, `fsqrts`, `fres`, `frsqrte` (0,02-0,03 %) : rares (la libm prend `fsqrt` avec le
+  kext `POMPPCFsqrt` depuis le 01/10 ; 8 `frsqrte` dans DOOM 3).
+- `fctiw` en arrondi autre qu'au plus proche, et tout opérande ou résultat hors des conditions
+  du §33.2 : le talon, exact par construction.
+- `mffs`, `mtfsf`, `mtfsb0/1`, `mcrfs` : rares, inchangés.
+
+### 33.7 Phase 2 : l'A/B en jeu (VM quotidienne, hôte au repos)
+
+Depuis le dépôt principal (après fusion, `FPNATIVECMP` existe dans `run_tiger.sh`), binaire
+`~/src/qemu-fp/build/qemu-system-ppc` (qemu-bundle à côté, dans `build/`) :
+
+    tools/tcg/matab.sh x86-fpcmp 6 "ref:QEMU_BIN=$HOME/src/qemu-fp/build/qemu-system-ppc" \
+        "fp:QEMU_BIN=$HOME/src/qemu-fp/build/qemu-system-ppc FPNATIVECMP=1" d3 fen
+    # une partie vérifiée (pas pour la vitesse) : bilan « fp-native-verify » du run_tiger.log,
+    # colonnes frsp..fsel = les fréquences exactes de la partie, 0 divergence attendu
+    tools/tcg/matab.sh x86-fpcmp-verif 1 \
+        "v:QEMU_BIN=$HOME/src/qemu-fp/build/qemu-system-ppc FPNATIVECMP=1 FPNCMPVERIFY=1" d3 fen
+    tools/tcg/matab.sh --restore
+
+Même binaire des deux côtés : seul `x-fp-native-cmp` change. Attendu : DOOM 3 −0,7 à −1,5 %
+(138 → ~136-137 ms/image) ; Marble Blast, UT2004 (`mb,ut fen`) dans le bruit.
+
+### 33.8 Chemins
+
+- Patch : `patches/tcg/0033-ppc-fp-native-cmp.patch` ; arbre `~/src/qemu-fp` (binaire
+  `build/`, binaire d'avant 0033 dans `bin/base/`), copie linux-user `~/src/qemu-fpu`
+  (`build-user/qemu-ppc`).
+- Outils : `tools/tcg/fpproof.{c,sh}`, `fpproof-mut.sh`, `fpnatcmp-user.sh`,
+  `fpnatcmp-mut.sh` ; job `tools/guest/jobs/fptest` (`MODE=c`, `BANCMODE=banc-c`).
+- Journaux (non versionnés) : `bench/tcg/fpcmp/` du dépôt principal — `logs/fpproof-20M.log`,
+  `logs/mut.log` (mutants de l'émetteur), `logs/user-262144.log` et `u2/` (banc linux-user),
+  `logs/bench-user.txt`, `guest/` (journaux `devloop` et `qemu.log` de chaque démarrage :
+  `v1-*`, `v2-*`, `b2*`, `desk-qemu.log`, `mb2-qemu.log`), `prof-*.txt` et `cats.py` (relevés
+  `perf` du §33.1), `seq.sh`/`vm.sh`/`start2.py` (la campagne invitée).
+- Banc linux-user : `tools/tcg/fpnatcmp-userhack.py` (la copie `~/src/qemu-fpu`).
+
+---
+
+## 34. Le flottant AltiVec restant : comparaisons et conversions natives (06/10/2026)
+
+Suite du §33, même méthode. PC x86-64, copie `~/src/qemu-fp` (référence + 0025-0029 + 0033),
+patch `patches/tcg/0034-ppc-vfp-native-cmp.patch`, propriétés `x-vfp-native-cmp` et
+`x-vfp-native-cmp-verify` (éteintes par défaut), lanceur `VFPNATIVECMP=1` / `VFPNCMPVERIFY=1`.
+
+### 34.1 Les chiffres
+
+**Parts** (relevés `perf` du §33.1, pris avant `x-vfp-native`) : le softfloat AltiVec pesait
+1,22 % du temps vCPU de DOOM 3 et 1,36 % d'UT2004 — DOOM 3 surtout dans les comparaisons
+(`float32_compare_quiet` 0,42 %, `helper_vcmpgtfp` 0,17 %, `helper_vcmpgefp` 0,04 %, plus leur
+part de `float32_unpack_canonical`), UT2004 surtout dans `vcfsx` (`int32_to_float32` 0,23 %,
+`float32_scalbn` 0,36 %, `parts64_scalbn` 0,32 %, `helper_vcfsx` 0,08 %). Marble Blast (relevé
+neuf, `perf` de 25 s en jeu dans la VM de dev, `bench/tcg/fpcmp34/ref1`) : **~0,3 %** en tout,
+Marble Blast n'est pas un jeu AltiVec (§2.2).
+
+**Fréquences** (vérificateurs, VM de dev, bureau + Marble Blast 120 s, ppc64 SMP=2, options de
+production) :
+
+| instruction | en 120 s | par seconde | par le chemin court de 0034 |
+|---|---|---|---|
+| `vcfsx` | 3 703 468 | ~31 000 | 100 % |
+| `vctsxs` | 1 202 037 | ~10 000 | 100 % |
+| `vcmpgefp` | 224 680 | ~1 900 | 100 % |
+| `vcfux` | 28 085 | ~230 | 100 % |
+| `vcmpeqfp`, `vcmpgtfp`, `vcmpbfp`, `vctuxs` | 0 | — | — |
+
+**Pourquoi `vmaddfp`/`vsubfp` quittent le chemin court de `x-vfp-native`** : le vérificateur
+de 0022 classe désormais chaque repli (première raison, dans l'ordre : porte de `vec_status`,
+opérande dénormal, opérande infini ou NaN, résultat infini, résultat minuscule ; dénormal et
+minuscule séparés selon VSCR[NJ]). Même partie de Marble Blast :
+
+| | porte | dénormal (NJ=1) | inf/NaN | minuscule (NJ=1) |
+|---|---|---|---|---|
+| `vsubfp` | 174 | **1 188 352** | 0 | **596 269** |
+| `vmaddfp` | 174 | **1 172 480** | 168 510 | 26 |
+| `vnmsubfp` | 0 | 0 | 168 510 | 56 170 |
+| `vaddfp` | 482 | 0 | 0 | 0 |
+
+**Tiger tourne avec VSCR[NJ] = 1** (mode non-Java) et ces replis sont presque tous des
+**dénormaux en entrée que NJ fait mettre à zéro** et des **résultats minuscules que NJ met à
+zéro** : ~3,3 M replis en 120 s (~28 000/s, ~42 % des `vaddfp`…`vnmsubfp` de la partie). Le
+chemin court de 0003/0022 les refuse (« un dénormal en entrée va au logiciel, qui le met à
+zéro sous NJ »). **Pas traité ici** : le reproduire exactement demande, dans l'émetteur, la mise à
+zéro des voies dénormales et le drapeau `input_denormal_flushed` à poser dans `vec_status`
+(entrées), puis la mise à zéro des résultats minuscules avec `output_denormal_flushed`,
+`underflow` et `inexact` (sorties) — chacun à prouver comme ici. Coût actuel estimé : ~150 ns
+par repli (appel, tentative à 4 voies, boucle softfloat), soit ~0,4 % d'un vCPU sur Marble
+Blast ; **la suite logique**, à chiffrer d'abord sur DOOM 3.
+
+### 34.2 La conception
+
+Huit sortes de plus pour l'op `INDEX_op_ppc_vfp` de 0022 (`PVF_CMPEQ` = 4 … `PVF_CTSXS` = 11),
+même allocation (aucun opérande TCG, `CALL_CLOBBER`), même talon hors ligne, émetteur x86_64
+seulement (`tcg_out_ppc_vfp_cmp`, VEX.128) ; modèle C ligne à ligne `vfnc_x86()` (bloc
+« vfp-native-cmp » de `int_helper.c`), qui sert au vérificateur et à la preuve hôte.
+
+| instructions | chemin court | sinon |
+|---|---|---|
+| `vcmpeqfp` `vcmpgefp` `vcmpgtfp` `vcmpbfp` | chaque voie de vA et vB ni NaN ni dénormale (`t = x << 1` : `t == 0` ou `0x01000000 ≤ t ≤ 0xff000000`, testé sans branchement par `vpminud`) : `vcmpps` (EQ_OQ, b ≤ a, b < a ; `vcmpbfp` : bit 31 = b < a, bit 30 = a < −b) ; **tout état de `vec_status`** | le helper sans Rc |
+| formes Rc | **CR6 calculé depuis vD en ops TCG** (`gen_vfnc_cr6` : toutes à un → 8, aucune → 2 ; `vcmpbfp.` : toutes nulles → 2), exactement le calcul des helpers `_dot` ; l'op n'écrit donc jamais de globale TCG | — |
+| `vcfsx` `vcfux` | porte de `x-vfp-native` (`vfp_can_use_fpu` : inexact déjà posé, arrondi au plus proche, pas de rebiais) : `vcvtdq2ps` (`vcfux` : `(b >> 16)·2^16 + (b & 0xffff)`, deux conversions exactes et une addition arrondie), puis `× 2^-uim`, exact (résultat nul ou ≥ 2^-31) | le helper |
+| `vctsxs` `vctuxs` | **toujours** : `b × 2^uim` (exact, ou ±∞ qui sature de la même façon), `vcvttps2dq`, saturation et VSCR[SAT] de `cvtsdsw`/`cvtsduw` (`vctuxs` : ≥ 2^31 par `x − 2^31`, ≤ −1 → 0 saturé), NaN → 0 sans SAT ; VSCR[SAT] = 1 écrit dans `env->vscr_sat` si une voie a saturé | — |
+
+Pourquoi c'est exact : sur des voies ni NaN ni dénormales, `float32_compare_quiet` ne lève
+aucun drapeau et la mise à zéro des entrées (NJ) ne change rien ; `int32_to_float32` sous la
+porte ne peut lever qu'inexact, déjà posé ; le helper `vct*` travaille sur une **copie** de
+`vec_status` en arrondi vers zéro (aucun drapeau ne s'échappe) et passe par le double, où le
+produit par 2^uim est exact comme en simple (un dénormal tronque à 0 avec ou sans NJ).
+
+**Porte de l'hôte** : `TCG_TARGET_HAS_ppc_vfp_cmp` (0 par défaut, x86_64 = celle de 0022) ;
+**sur arm64 la propriété ne change rien**, pendant NEON (`fcmeq`/`fcmge`/`fcmgt`, `scvtf`/`ucvtf`
+à virgule fixe, `fcvtzs`/`fcvtzu` à virgule fixe, qui saturent déjà) à écrire et prouver sur le
+M4 (`vfptest c` donne l'empreinte de référence ci-dessous).
+
+**Vérificateur** `x-vfp-native-cmp-verify` : `helper_vfn_save` (de 0022) sauve aussi VSCR[SAT] ;
+après l'op (et après CR6), `helper_vfnc_verify` — helper qui lit les globales, CR6 est donc en
+mémoire — refait le helper d'origine (`_dot` pour les formes Rc) depuis l'état sauvé et compare
+vD, `vec_status` entier, VSCR[SAT] et CR6, et vérifie que le modèle donne la même chose ; en cas
+d'écart il garde les valeurs du helper. Bilan `vfp-native-cmp-verify:` (vérifiés / chemin court
+/ divergences par instruction) et la ligne `replis` du §34.1 (avec `x-vfp-native-verify`).
+
+### 34.3 La preuve hôte
+
+**Modèle contre les helpers et le vrai softfloat** (`tools/tcg/vfpcmpproof.sh ~/src/qemu-fp
+200000` : helpers et modèle extraits **tels quels** de `int_helper.c`, liés à
+`fpu_softfloat.c.o`) : chaque instruction, chaque uim 0..31, seize états de `vec_status` (NJ,
+inexact posé ou non, `no_hardfloat`, drapeaux résiduels), catalogue (zéros signés, dénormaux,
+FLT_MIN, FLT_MAX, infinis, NaN silencieux et signalants, ±2^31 et voisins, 2^32, −1, −½, entiers
+limites) croisé puis aléatoire (dont les bords de saturation à 2^-uim près) ; vD, VSCR[SAT],
+`vec_status` entier et CR6 :
+
+| | vecteurs | chemin court | divergences |
+|---|---|---|---|
+| `vcmpeqfp`/`gefp`/`gtfp`/`bfp` | 3,25 M chacune | 1,28 M chacune | **0** |
+| `vcfux`, `vcfsx` | 102,4 M chacune | 25,6 M chacune | **0** |
+| `vctuxs`, `vctsxs` | 102,4 M chacune | 102,4 M | **0** |
+| total | **422 674 432** | 261 165 771 | **0** |
+
+Mutants du modèle (`vfpcmpproof-mut.sh`) : **8 sur 8 détectés** (dénormaux acceptés, NaN
+accepté, `vcmpgefp` strict, porte des `vcf*` retirée, moitié haute de `vcfux` fausse, saturation
+basse de `vctsxs` à −2^31 inclus, de `vctuxs` dès −½, NaN des conversions non annulé ; 12 313 à
+1 005 984 divergences).
+
+**Émetteur réel** (`tools/tcg/vfpcmp-user.sh`, le job `vfptest` mode c sous `qemu-ppc`
+linux-user de la copie `~/src/qemu-fpu`, §33.3) : référence, `x-vfp-native-cmp` et
+`x-vfp-native-cmp-verify` **identiques à l'octet** (NVEC = 262 144 : `78b16a04c80b79b7`), 6,4 M
+instructions vérifiées, **0 divergence** ; le mode d'origine de `vfptest` y donne l'empreinte de
+Tiger (`d516534e99880a90`). Mutants de l'émetteur et de la traduction (`tools/tcg/
+vfpcmp-mut.sh`) : **10 sur 10 détectés** — dénormaux acceptés par les comparaisons (80
+divergences), `vcmpgefp` strict, `vcmpbfp` contre b au lieu de −b, moitié haute de `vcfux` à
+2^15, porte des `vcf*` retirée (seul le vérificateur le voit : inexact de `vec_status`),
+`vctsxs` sans saturation haute, VSCR[SAT] jamais posé, `vctuxs` saturé dès −½, `vctuxs` ≥ 2^31
+sans le retrait de 2^31, CR6 « toutes » faux. (Un premier mutant 9, « r & ~big » retiré, était
+**équivalent** — la conversion indéfinie 0x80000000 de ces voies est absorbée par le OU — et a
+été remplacé.)
+
+**Patch** : posé avec `--fuzz=0` sur l'instantané des douze fichiers d'avant (référence +
+0029 + 0033), il redonne l'arbre à l'octet ; section « tcg/0034 » de `build_qemu_qfb.sh`.
+
+### 34.4 La preuve invitée
+
+Copie `disks/tiger-dev-fp.raw` (supprimée ensuite), options de production (+ `x-vfp-native`),
+job `vfptest` (`MODE=c` : quatre comparaisons et leurs formes Rc, quatre conversions × 32 uim,
+NJ = 0 puis 1, CR6 et VSCR[SAT] hachés ; le mode d'origine, `NVEC=262144`), compilé dans Tiger :
+
+| binaire, mode | `vfptest c` | `vfptest` (origine) | vérificateurs |
+|---|---|---|---|
+| ppc64 SMP=1, référence | `65be3233b17bc60b` | `d516534e99880a90` | — |
+| ppc64 SMP=1, `x-vfp-native-cmp` + vérif. | `65be3233b17bc60b` | `d516534e99880a90` | 103,4 M opérations, **0 divergence** |
+| ppc64 SMP=2, `x-vfp-native-cmp` + vérif. | `65be3233b17bc60b` | `d516534e99880a90` | 103,4 M, **0 divergence** |
+| ppc64 SMP=2, référence / `x-vfp-native-cmp` | `65be3233b17bc60b` / `65be3233b17bc60b` | — | — |
+
+Démarrage du bureau (SMP=2) sous les deux vérificateurs : 211 `vctsxs`, 0 divergence ; bureau +
+**Marble Blast 120 s** : 5,18 M opérations de 0034 vérifiées (toutes par le chemin court sauf
+une porte fermée au premier `vcfux`), **0 divergence**, avec les 8 M opérations de 0022 (0
+divergence) — §34.1.
+
+### 34.5 Gains
+
+Banc invité (`vfptest c 2000000`, ppc64 SMP=2, single-user, deux démarrages par mode
+entrelacés) :
+
+| boucle (2 M × 4 instructions) | référence | `x-vfp-native-cmp` | écart |
+|---|---|---|---|
+| `vcmpgtfp`/`vcmpgefp`/`vcmpeqfp` + `vsel` | 105 ms | **30 ms** | **−71 %** |
+| `vcmpbfp.` + branchement (+ `vsldoi`) | 123-126 ms | **74-75 ms** | **−40 %** |
+| `vcfsx` + `vctsxs` | 613-668 ms | **26 ms** (porte ouverte) / 298 ms (fermée) | **−96 %** / −53 % |
+| `vcfux` + `vctuxs` | 611-641 ms | **38 ms** / 292 ms | **−94 %** / −53 % |
+
+« Porte fermée » : un démarrage où rien n'a encore levé l'inexact de `vec_status` (le banc ne
+convertit que des entiers exacts) ; les `vcf*` passent alors par le helper, seuls les `vct*` sont
+natifs. Dans un jeu, le premier `vmaddfp` inexact l'ouvre pour toujours (Marble Blast :
+100 % des `vcfsx` par le chemin court). Hôte (`qemu-ppc`, `logs/vbench-user.txt`) : mêmes
+rapports (`vcmpgtfp + vsel` 265 → 77 ms, `vcfsx + vctsxs` 1 680 → 770 ms porte fermée).
+
+**Attendu en jeu** : le poste visé pesait ~0,7 % du temps vCPU de DOOM 3 (comparaisons) et
+~1-1,5 % d'UT2004 (`vcfsx`), dont l'op retire ~70-95 % : **DOOM 3 −0,5 %, UT2004 −1 %**
+(environ), Marble Blast rien de mesurable. Sous la dispersion d'une matrice à trois parties.
+
+### 34.6 Phase 2 : l'A/B en jeu (VM quotidienne, hôte au repos)
+
+    tools/tcg/matab.sh x86-vfpcmp 6 "ref:QEMU_BIN=$HOME/src/qemu-fp/build/qemu-system-ppc" \
+        "vc:QEMU_BIN=$HOME/src/qemu-fp/build/qemu-system-ppc VFPNATIVECMP=1" d3 fen
+    tools/tcg/matab.sh x86-vfpcmp-ut 6 "ref:QEMU_BIN=$HOME/src/qemu-fp/build/qemu-system-ppc" \
+        "vc:QEMU_BIN=$HOME/src/qemu-fp/build/qemu-system-ppc VFPNATIVECMP=1" ut fen
+    # une partie vérifiée de DOOM 3 : bilans « vfp-native-cmp-verify » et « replis » (NJ)
+    tools/tcg/matab.sh x86-vfpcmp-verif 1 "v:QEMU_BIN=$HOME/src/qemu-fp/build/qemu-system-ppc \
+        VFPNATIVECMP=1 VFPNCMPVERIFY=1 VFPNVERIFY=1" d3 fen
+    tools/tcg/matab.sh --restore
+
+Le binaire de `~/src/qemu-fp/build` porte 0033 **et** 0034 : les deux A/B (`FPNATIVECMP`,
+`VFPNATIVECMP`) se jouent sur le même binaire, et `FPNATIVECMP=1 VFPNATIVECMP=1` ensemble.
+
+### 34.7 Chemins
+
+- Patch : `patches/tcg/0034-ppc-vfp-native-cmp.patch` ; arbres `~/src/qemu-fp` (système) et
+  `~/src/qemu-fpu` (linux-user, `tools/tcg/fpnatcmp-userhack.py`).
+- Outils : `tools/tcg/vfpcmpproof.{c,sh}`, `vfpcmpproof-mut.sh`, `vfpcmp-user.sh`,
+  `vfpcmp-mut.sh` ; job `tools/guest/jobs/vfptest` (`MODE=c`, banc `vfptest c N`).
+- Journaux (non versionnés) : `bench/tcg/fpcmp34/` du dépôt principal — `logs/
+  vfpcmpproof-200k.log`, `logs/vmut2.log`, `logs/vuser-262144.log`, `logs/vbench-user.txt`,
+  `logs/seq34.log` et `g34/` (chaque démarrage, `qemu.log` compris : `desk`, `mb2`, `r1`, `v1`,
+  `v2`, `r2`, `c2`, `r2b`, `c2b`), `ref1/` (profil `perf` de Marble Blast).

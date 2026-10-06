@@ -12,7 +12,9 @@
 #
 #   QEMU_BIN=~/src/qemu-vit/build/qvit tools/tcg/matab.sh jc 6 \
 #       "ref:" "j14:TCG_OPTS=x-jc-bits=14"
-#   tools/tcg/matab.sh --restore        # binaire de référence, SMP=2, bureau
+#   tools/tcg/matab.sh --restore        # binaire par défaut du lanceur, SMP=2, bureau
+#   (chaque bras part avec QEMU_FAST=0 : binaire de RÉFÉRENCE build/, sauf QEMU_BIN=… ou
+#   QEMU_FAST=1 dans le bras ; docs/binaire-rapide-x86.md)
 #
 # Les variables d'un mode passent par l'environnement de run_tiger.sh ET de la
 # matrice (qui relance QEMU elle-même si l'invité gèle) : utiliser celles que
@@ -61,7 +63,7 @@ start_vm() { # start_vm JOURNAL [VAR=v …]
 
 if [ "${1:-}" = "--restore" ]; then
   stop_vm
-  start_vm "$R/.run/run_tiger-zen.log" && echo "VM quotidienne relancée (binaire de référence)"
+  start_vm "$R/.run/run_tiger-zen.log" && echo "VM quotidienne relancée (binaire par défaut du lanceur)"
   exit 0
 fi
 
@@ -88,8 +90,11 @@ for p in "${ordre[@]}"; do
   D="$OUT/$nom-$k"; mkdir -p "$D"
   echo "$(date +%H:%M:%S) $nom-$k : $vars" | tee -a "$OUT/journal.txt"
   stop_vm
+  # QEMU_FAST=0 d'abord : sans QEMU_BIN, un bras tourne sur le binaire de RÉFÉRENCE
+  # (build/), pas sur le binaire rapide que run_tiger.sh préfère sur le PC ;
+  # un bras peut le redemander ("fast:QEMU_FAST=1" ou "fast:QEMU_BIN=…").
   # shellcheck disable=SC2086
-  set -- ${QB:+QEMU_BIN=$QB} $vars
+  set -- QEMU_FAST=0 ${QB:+QEMU_BIN=$QB} $vars
   start_vm "$D/run_tiger.log" "$@" || { echo "  pas de ssh" | tee -a "$OUT/journal.txt"; continue; }
   grep -h '▶ Tiger' "$D/run_tiger.log" | tee -a "$OUT/journal.txt"
   sleep 60                                  # bureau au repos (Finder, Dock, mds)

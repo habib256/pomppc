@@ -301,8 +301,10 @@ class Hote:
         return pids
 
     def premier_plan(self, nom):
-        self.ssh("osascript -e 'tell application \"System Events\" to set frontmost of process \"%s\" to true'"
-                 % nom, delai=30)
+        """Met le jeu au premier plan ; True si System Events l'a trouvé (avant sa
+        première fenêtre, le processus peut ne pas encore lui être connu)."""
+        return self.ssh("osascript -e 'tell application \"System Events\" to set frontmost of process \"%s\" to true'"
+                        % nom, delai=30)[0] == 0
 
     def charge_hote(self):
         """Autres QEMU en marche sur l'hôte et charge moyenne : les mesures de

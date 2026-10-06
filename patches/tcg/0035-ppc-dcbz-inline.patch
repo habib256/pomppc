@@ -1,11 +1,11 @@
 diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
 --- a/target/ppc/cpu.h
 +++ b/target/ppc/cpu.h
-@@ -1502,6 +1502,14 @@
+@@ -1512,6 +1512,14 @@
      bool lmw_inline, lmw_inline_verify;
      uint64_t lmwv_n, lmwv_bad, lmwv_io;
      /*
-+     * x-dcbz-inline (POMPPC tcg/0033): dcbz with a 32-byte line as four
++     * x-dcbz-inline (POMPPC tcg/0035): dcbz with a 32-byte line as four
 +     * 8-byte stores of zero in the generated code (those of the helper's
 +     * I/O path), the reservation cleared as the helper does.
 +     * x-dcbz-inline-verify: each one re-checked (stderr summary).
@@ -19,12 +19,12 @@ diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
 diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
 --- a/target/ppc/cpu_init.c
 +++ b/target/ppc/cpu_init.c
-@@ -189,6 +189,14 @@
+@@ -209,6 +209,14 @@
      DEFINE_PROP_BOOL("x-lmw-inline", PowerPCCPU, env.lmw_inline, false),
      DEFINE_PROP_BOOL("x-lmw-inline-verify", PowerPCCPU, env.lmw_inline_verify,
                       false),
 +    /*
-+     * POMPPC tcg/0033.  x-dcbz-inline: dcbz (32-byte line) as four stores
++     * POMPPC tcg/0035.  x-dcbz-inline: dcbz (32-byte line) as four stores
 +     * of zero in the generated code.  x-dcbz-inline-verify: proof mode.
 +     * Off by default.
 +     */
@@ -54,7 +54,7 @@ diff --git a/target/ppc/mem_helper.c b/target/ppc/mem_helper.c
  }
 +
 +/*
-+ * x-dcbz-inline-verify (POMPPC tcg/0033).  After an inline dcbz of EA: the
++ * x-dcbz-inline-verify (POMPPC tcg/0035).  After an inline dcbz of EA: the
 + * line the helper would have zeroed (EA & ~(dcache_line_size - 1)) reads as
 + * zero through the TLB, and the reservation no longer covers it.  I/O pages
 + * are not re-read (counted).
@@ -93,17 +93,17 @@ diff --git a/target/ppc/translate.c b/target/ppc/translate.c
      bool tlb_precise;            /* x-tlb-precise, 32-bit hash MMU (tcg/0031) */
      bool mem_stats;              /* x-mem-stats (tcg/0031) */
      bool lmw_inline, lmw_verify; /* x-lmw-inline(-verify) (tcg/0032) */
-+    bool dcbz_inline, dcbz_verify; /* x-dcbz-inline(-verify) (tcg/0033) */
++    bool dcbz_inline, dcbz_verify; /* x-dcbz-inline(-verify) (tcg/0035) */
      bool vfp_native, vfp_nverify; /* x-vfp-native(-verify) (tcg/0022) */
+     bool vfp_native_cmp, vfpnc_verify; /* x-vfp-native-cmp(-verify), 0034 */
      const CPUPPCState *env;     /* x-vfp-native: its gate (tcg/0022) */
-     bool need_access_type;
-@@ -4621,6 +4622,34 @@
+@@ -4623,6 +4624,34 @@
      }
  #endif
  
 +    if (ctx->dcbz_inline) {
 +        /*
-+         * POMPPC tcg/0033 (x-dcbz-inline).  helper_dcbz: line = EA & ~31;
++         * POMPPC tcg/0035 (x-dcbz-inline).  helper_dcbz: line = EA & ~31;
 +         * the reservation is dropped if it covers the line (before the
 +         * access, as the helper does: also on a fault); probe_write of the
 +         * line, then memset, or four cpu_stq_mmu of zero on I/O.  A 32-byte
@@ -132,7 +132,7 @@ diff --git a/target/ppc/translate.c b/target/ppc/translate.c
      gen_helper_dcbz(tcg_env, tcgv_addr, tcg_constant_i32(ctx->mem_idx));
  }
  
-@@ -6661,6 +6690,8 @@
+@@ -6667,6 +6696,8 @@
      ctx->mem_stats = env->mem_stats;
      ctx->lmw_inline = env->lmw_inline;
      ctx->lmw_verify = env->lmw_inline && env->lmw_inline_verify;
