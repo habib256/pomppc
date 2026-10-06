@@ -153,8 +153,16 @@ l'acceptation ; les octets de BAR0 qu'ils désignent restent occupés.
 
 `STATUS/STATUS_PC` décrivent la dernière soumission terminée, pas nécessairement
 celle attendue. `ERRORS` compte les soumissions en erreur et reste **global** :
-une erreur d'un autre client peut le faire avancer. `IRQ_DONE` est de niveau,
-peut regrouper plusieurs fins ; acquitter puis relire FENCE.
+une erreur d'un autre client peut le faire avancer. Avec
+**`QGPU_CAP_CLIENT_ERRORS`** (0x00080000, 07/10/2026, sans changer la version
+ni `qgpu_abi.h`), le device tient en plus `QGPU_REG_CLIENT_ERRORS(i)`
+(0xC8 + 4·i) : les soumissions terminées en erreur dont le flux est dans la
+tranche *i* de BAR0 (découpage du kext, `QGPU_CLIENT_SLOT_BYTES`). Le plugin
+garde `ERRORS` comme déclencheur et ne relit le compteur de sa tranche que
+quand le global a bougé ; détail dans
+[protocole-v19-transport.md](protocole-v19-transport.md#erreurs-par-client-07102026).
+`IRQ_DONE` est de niveau, peut regrouper plusieurs fins ; acquitter puis
+relire FENCE.
 
 ## Objets, commandes et erreurs
 
@@ -385,6 +393,11 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_CAP_GLSL_PATHS` | `0x00004000` |
 | `QGPU_CAP_STATE_BLOCK` | `0x00008000` |
 | `QGPU_CAP_GEOM_HOST` | `0x00020000` |
+| `QGPU_CAP_FIXED4` | `0x00040000` |
+| `QGPU_CAP_CLIENT_ERRORS` | `0x00080000` |
+| `QGPU_REG_CLIENT_ERRORS_BASE` | `0xC8` |
+| `QGPU_REG_CLIENT_ERRORS(i)` | `(QGPU_REG_CLIENT_ERRORS_BASE + 4 * (i))` |
+| `QGPU_CLIENT_SLOT_BYTES(shmem, n)` | `(((shmem) / (n)) & ~0xFFFUL)` |
 | `QGPU_MAX_CTX` | `128` |
 | `QGPU_MAX_SURF` | `128` |
 | `QGPU_MAX_SURF_DIM` | `4096` |

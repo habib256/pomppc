@@ -306,6 +306,27 @@ struct QgpuPCIState {
  * ne touche l'hôte — le cœur borne tout sur la fenêtre partagée.
  */
 
+/* Bits publiés dans QGPU_REG_CAPS : ceux du cœur, plus ceux du DEVICE — la
+   file (QGPU_CAP_ASYNC, s'il a son thread) et les compteurs d'erreurs par
+   tranche (QGPU_CAP_CLIENT_ERRORS, 07/10/2026 : tenus par qgpu_run_job). */
+static uint32_t qgpu_pub_caps(QgpuPCIState *s)
+{
+    return s->core.caps | QGPU_CAP_CLIENT_ERRORS |
+           (s->thread_ok ? QGPU_CAP_ASYNC : 0);
+}
+
+/* 07/10/2026 : index de la tranche de BAR0 qui contient l'offset ABSOLU
+   `off` (découpage du kext, QGPU_CLIENT_SLOT_BYTES), ou QGPU_MAX_CLIENTS si
+   aucune (flux hors de toute tranche : il ne compte que dans le global). */
+static uint32_t qgpu_slot_of(QgpuPCIState *s, uint32_t off)
+{
+    uint64_t sz = QGPU_CLIENT_SLOT_BYTES((uint64_t)s->shmem_mb * MiB,
+                                         QGPU_MAX_CLIENTS);
+    uint64_t i = sz ? off / sz : QGPU_MAX_CLIENTS;
+
+    return i < QGPU_MAX_CLIENTS ? (uint32_t)i : QGPU_MAX_CLIENTS;
+}
+
 static void qgpu_update_irq(QgpuPCIState *s)
 {
     uint32_t pending = s->regs[QGPU_REG_IRQ >> 2] &
@@ -353,8 +374,18 @@ static void qgpu_run_job(QgpuPCIState *s, const QgpuJob *job)
     qatomic_set(&s->regs[QGPU_REG_STATUS_PC >> 2], pc);
     qatomic_set(&s->regs[QGPU_REG_STATUS >> 2], st);
     if (st != QGPU_ST_OK) {
+        /* 07/10/2026 : et le compteur de la tranche fautive
+           (QGPU_CAP_CLIENT_ERRORS) — AVANT FENCE, comme le global : une
+           barrière atteinte garantit au plugin que son compteur est à jour. */
+        uint32_t slot = job->kind == QGPU_JOB_CLIENT_RESET
+                      ? job->off : qgpu_slot_of(s, job->off);
+
         qatomic_set(&s->regs[QGPU_REG_ERRORS >> 2],
                     qatomic_read(&s->regs[QGPU_REG_ERRORS >> 2]) + 1);
+        if (slot < QGPU_MAX_CLIENTS) {
+            uint32_t r = QGPU_REG_CLIENT_ERRORS(slot) >> 2;
+            qatomic_set(&s->regs[r], qatomic_read(&s->regs[r]) + 1);
+        }
     }
     /* FENCE EN DERNIER, en release : c'est la publication. Elle ordonne le
        statut ci-dessus ET tout ce que la soumission a écrit dans BAR0 (les
@@ -742,10 +773,8 @@ static void qgpu_soft_reset(QgpuPCIState *s)
     s->regs[QGPU_REG_VERSION >> 2] = QGPU_PROTO_VERSION;
     /* core.caps et non be->cap : ce que init() a résolu à chaud (v8 : requêtes
        d'occlusion ; v10 : textures) doit atteindre l'invité. */
-    s->regs[QGPU_REG_CAPS >> 2] = s->core_ok ? s->core.caps : 0;
-    if (s->thread_ok) {
-        s->regs[QGPU_REG_CAPS >> 2] |= QGPU_CAP_ASYNC;
-    }
+    s->regs[QGPU_REG_CAPS >> 2] = s->core_ok ? qgpu_pub_caps(s)
+                                : (s->thread_ok ? QGPU_CAP_ASYNC : 0);
     s->regs[QGPU_REG_SHMEM_SIZE >> 2] = s->shmem_mb * MiB;
     s->regs[QGPU_REG_BACKEND_NAME >> 2] = qgpu_core_backend_tag(&s->core);
     s->regs[QGPU_REG_QUEUE_DEPTH >> 2] = QGPU_QUEUE_DEPTH;
@@ -828,6 +857,8 @@ static uint64_t qgpu_ctrl_read(void *opaque, hwaddr addr, unsigned size)
     case QGPU_REG_STATUS:
     case QGPU_REG_STATUS_PC:
     case QGPU_REG_ERRORS:
+    case QGPU_REG_CLIENT_ERRORS(0) ... QGPU_REG_CLIENT_ERRORS(QGPU_MAX_CLIENTS - 1):
+        /* écrits par le thread de rendu (qgpu_run_job) */
         return qatomic_read(&s->regs[addr >> 2]);
     case QGPU_REG_NOMEM:
         /* reste du 29/09 : écrit par le thread de rendu (qgpu_core_execute) */
@@ -934,8 +965,7 @@ static void qgpu_unbind_scanout(QgpuPCIState *s)
     /* Bug hunt 3 : un device cassé (GL3) garde CAPS à 0 — c'est ce qui fait
        refuser le kext ; seul un reset abouti le republie. */
     if (s->core_ok && !s->broken) {
-        s->regs[QGPU_REG_CAPS >> 2] = s->core.caps |
-            (s->thread_ok ? QGPU_CAP_ASYNC : 0);
+        s->regs[QGPU_REG_CAPS >> 2] = qgpu_pub_caps(s);
     }
 }
 
@@ -1122,8 +1152,7 @@ static bool qgpu_bind_scanout(QgpuPCIState *s, bool complain)
 #endif
     s->core.caps |= QGPU_CAP_SCANOUT;
     if (s->core_ok && !s->broken) {
-        s->regs[QGPU_REG_CAPS >> 2] = s->core.caps |
-            (s->thread_ok ? QGPU_CAP_ASYNC : 0);
+        s->regs[QGPU_REG_CAPS >> 2] = qgpu_pub_caps(s);
     }
 
     /* Q1 : dire QUEL écran, pas seulement qu'il y en a un. C'est la seule

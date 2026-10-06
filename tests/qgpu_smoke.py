@@ -61,6 +61,9 @@ REG_SUBMIT_ST, REG_ERRORS, REG_QUEUE_DEPTH = 0x40, 0x44, 0x48
 # v19 : tranches de clients possédées par le device
 REG_CLIENTS, REG_CLIENT_RESET, REG_LAYOUT = 0x80, 0x84, 0x88
 CAP_CLIENTS = 0x200
+# 07/10/2026 : erreurs par tranche de BAR0 (QGPU_CAP_CLIENT_ERRORS)
+REG_CLIENT_ERRORS = 0xC8
+CAP_CLIENT_ERRORS = 0x80000
 DOORBELL_GO, DOORBELL_ASYNC = 1, 2
 ST_OK, ST_BAD_OPCODE, ST_QUEUE_FULL = 0, 3, 10
 CAP_OCCLUSION = 0x4
@@ -349,6 +352,23 @@ def main():
     status_after = read_val(regs + REG_STATUS)
     p_after = px(8, 8)
 
+    # ── 07/10/2026 : erreurs par tranche. Tout ce qui précède est parti de la
+    # tranche 0 (offsets < 16 Mio) : son compteur doit valoir le global. Puis
+    # un flux fautif dans la tranche 1 (découpage du kext : fenêtre / 4,
+    # arrondi à la page) ne fait bouger QUE le compteur de la tranche 1.
+    shm_size = read_val(regs + REG_SHMEM_SIZE)
+    slot_bytes = ((shm_size or 0) // 4) & ~0xFFF
+    errg0 = read_val(regs + REG_ERRORS)
+    cerr0 = [read_val(regs + REG_CLIENT_ERRORS + 4 * i) for i in range(4)]
+    poke_words(shmem + slot_bytes, BAD)
+    send("%x %x l!" % (slot_bytes, regs + REG_SUBMIT_OFF))
+    send("%x %x l!" % (len(BAD) * 4, regs + REG_SUBMIT_LEN))
+    send("%x %x l!" % (DOORBELL_GO, regs + REG_DOORBELL), 1.0)
+    status_t1 = read_val(regs + REG_STATUS)
+    errg1 = read_val(regs + REG_ERRORS)
+    cerr1 = [read_val(regs + REG_CLIENT_ERRORS + 4 * i) for i in range(4)]
+    dcerr = [None if a is None or b is None else b - a for a, b in zip(cerr0, cerr1)]
+
     qemu.kill()
 
     checks = [
@@ -399,7 +419,8 @@ def main():
         # v19
         ("device v19 : QGPU_CAP_CLIENTS", ((caps or 0) & CAP_CLIENTS) != 0, True),
         ("tranches publiées", nclients, 4),
-        ("table LAYOUT : contextes par client", layout_ctx, 4),
+        # 32 depuis le 26/09 (QGPU_MAX_CTX 128 / 4 clients) ; le test disait 4
+        ("table LAYOUT : contextes par client", layout_ctx, 32),
         ("table LAYOUT : classe inconnue = 0", layout_last, 0),
         ("rejouer SCENE avant CLIENT_RESET : LIMIT", status_before, 8),
         ("CLIENT_RESET hors table : BAD_ARG", subst_bad, 4),
@@ -411,6 +432,13 @@ def main():
         ("CLIENT_RESET 0 : statut OK", status6, ST_OK),
         ("rejouer SCENE après CLIENT_RESET : OK", status_after, ST_OK),
         ("scène rejouée : triangle rouge", p_after, 0xFF0000),
+        # 07/10/2026
+        ("QGPU_CAP_CLIENT_ERRORS publié", ((caps or 0) & CAP_CLIENT_ERRORS) != 0, True),
+        ("tranche 0 : ses erreurs = le global", cerr0[0], errg0),
+        ("tranches 1-3 : aucune erreur", cerr0[1:], [0, 0, 0]),
+        ("flux fautif en tranche 1 : opcode inconnu", status_t1, ST_BAD_OPCODE),
+        ("… le global avance d'un", None if errg1 is None or errg0 is None else errg1 - errg0, 1),
+        ("… la tranche 1 seule avance", dcerr, [0, 1, 0, 0]),
     ]
     failed = 0
     for name, got, want in checks:

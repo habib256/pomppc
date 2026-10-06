@@ -3276,6 +3276,11 @@ static void run_v9(QgpuCore *c, uint8_t *shmem)
         /* v19 */
         QGPU_REG_CLIENTS, QGPU_REG_CLIENT_RESET, QGPU_REG_LAYOUT_CLASS(0),
         QGPU_REG_LAYOUT_CLASS(QGPU_REG_LAYOUT_CLASSES - 1),
+        /* 07/10/2026 : erreurs par tranche (QGPU_CAP_CLIENT_ERRORS) */
+        QGPU_REG_CLIENT_ERRORS(0), QGPU_REG_CLIENT_ERRORS(1),
+        QGPU_REG_CLIENT_ERRORS(2), QGPU_REG_CLIENT_ERRORS(QGPU_MAX_CLIENTS - 1),
+        /* reste du 29/09 */
+        QGPU_REG_NOMEM,
     };
     const unsigned n = sizeof(regs) / sizeof(regs[0]);
     unsigned i, j, bad = 0;
@@ -3306,6 +3311,38 @@ static void run_v9(QgpuCore *c, uint8_t *shmem)
           QGPU_ST_QUEUE_FULL);
     CHECK((QGPU_CAP_ASYNC & (QGPU_CAP_SOFT | QGPU_CAP_GL | QGPU_CAP_OCCLUSION)) == 0,
           "QGPU_CAP_ASYNC=0x%x disjoint des autres capacités", QGPU_CAP_ASYNC);
+    {
+        /* 07/10/2026 : QGPU_CAP_CLIENT_ERRORS est un bit à lui (ni d'un
+           backend, ni du transport), et le découpage de BAR0 que le device
+           suppose est celui du kext : (fenêtre / n) arrondie à la page. */
+        static const uint32_t others[] = {
+            QGPU_CAP_SOFT, QGPU_CAP_GL, QGPU_CAP_OCCLUSION, QGPU_CAP_ASYNC,
+            QGPU_CAP_GL14, QGPU_CAP_SCANOUT, QGPU_CAP_PROGRAMS,
+            QGPU_CAP_GEN_SIZES, QGPU_CAP_NATIVE, QGPU_CAP_CLIENTS,
+            QGPU_CAP_SURF_TEX, QGPU_CAP_TEX_READBACK, QGPU_CAP_GLSL,
+            QGPU_CAP_COMBINE3, QGPU_CAP_GLSL_PATHS, QGPU_CAP_STATE_BLOCK,
+            QGPU_CAP_GEOM_HOST, QGPU_CAP_FIXED4, 0x00010000 /* réservé v23 */
+        };
+        uint32_t all = 0;
+        unsigned k;
+        for (k = 0; k < sizeof(others) / sizeof(others[0]); k++)
+            all |= others[k];
+        CHECK((QGPU_CAP_CLIENT_ERRORS & all) == 0 &&
+              (QGPU_CAP_CLIENT_ERRORS & (QGPU_CAP_CLIENT_ERRORS - 1)) == 0,
+              "QGPU_CAP_CLIENT_ERRORS=0x%x : un bit, disjoint des autres",
+              QGPU_CAP_CLIENT_ERRORS);
+        CHECK(QGPU_REG_CLIENT_ERRORS_BASE ==
+                  QGPU_REG_LAYOUT_CLASS(QGPU_REG_LAYOUT_CLASSES - 1) + 4 &&
+              QGPU_REG_CLIENT_ERRORS(QGPU_MAX_CLIENTS - 1) < QGPU_CTRL_TOPADDR,
+              "erreurs par tranche : 0x%x..0x%x, après la table LAYOUT, sous 0x%x",
+              QGPU_REG_CLIENT_ERRORS(0), QGPU_REG_CLIENT_ERRORS(QGPU_MAX_CLIENTS - 1),
+              (unsigned)QGPU_CTRL_TOPADDR);
+        CHECK(QGPU_CLIENT_SLOT_BYTES(64u << 20, 4) == (16u << 20) &&
+              QGPU_CLIENT_SLOT_BYTES(64u << 20, 3) == 0x1555000 &&
+              QGPU_CLIENT_SLOT_BYTES(4096u * 3 + 100, 4) == 0,
+              "QGPU_CLIENT_SLOT_BYTES : 64 Mio / 4 = 16 Mio, / 3 arrondi à la "
+              "page, fenêtre trop petite = 0");
+    }
 
     /* Ordre : deux soumissions successives, la seconde relit ce que la
        première a laissé sur la surface. La file garantit cet ordre-là. */
