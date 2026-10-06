@@ -1,0 +1,544 @@
+Diagnostic temporaire (06/10/2026), NON APPLIQUÉ : le cas « sans traduction »
+de x-ret-verify (docs/tcg-g4.md §35).  Par-dessus la série jusqu'à 0035.
+POMPPC_RV_WATCH=<pc> : anneau des événements de la page de ce pc (entrée de
+code du TLB de mmu_idx 1 présente/absente et par quel chemin, entrée du cache
+de sauts de ce pc et par quel chemin, remplissages et PTE trouvée, tlbie de la
+page, de son PTEG ou de sa classe EA[16:19], mtsr de son segment, BAT, SDR1)
+et des 512 derniers tlbie (avec le nip de l'instruction) ; au cas « sans
+traduction », vidage de MSR, SDR1, SR, BAT, des PTEG primaire et secondaire et
+des anneaux.  Outil : tools/tcg/retvboot.sh.
+
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -160,6 +160,7 @@
+     for (i = 0; i < TB_JMP_PAGE_SIZE; i++) {
+         qatomic_set(&jc->array[i0 + i].tb, NULL);
+     }
++    pomppc_rv_jc_check(cpu, "jc_clear_page");
+ }
+ 
+ /**
+@@ -295,6 +296,9 @@
+ 
+     tlb_mmu_resize_locked(desc, fast, now);
+     tlb_mmu_flush_locked(desc, fast);
++    if (mmu_idx == 1) {
++        pomppc_rv_tlb_check(cpu, "vidage du mmu_idx");
++    }
+ }
+ 
+ static void tlb_mmu_init(CPUTLBDesc *desc, CPUTLBDescFast *fast, int64_t now)
+@@ -531,6 +535,9 @@
+         }
+         tlb_flush_vtlb_page_locked(cpu, midx, page);
+     }
++    if (midx == 1) {
++        pomppc_rv_tlb_check(cpu, "tlb_flush_page");
++    }
+ }
+ 
+ /**
+@@ -675,6 +682,8 @@
+         }
+     }
+     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
++    pomppc_rv_tlb_check(cpu, cls ? "retrait par classe (tlbie)" :
++                        "retrait par prédicat (segment/BAT)");
+     /*
+      * The jump cache is not checked against the TLB, and an evicted entry
+      * leaves its jump cache entries behind: drop those of @idxmap, as the
+@@ -1248,6 +1257,12 @@
+         CPUTLBEntry *tv = &desc->vtable[vidx];
+ 
+         /* Evict the old entry into the victim tlb.  */
++        if (mmu_idx == 1 && pomppc_rv_watch &&
++            (tv->addr_code & (TARGET_PAGE_MASK | TLB_INVALID_MASK)) ==
++            (pomppc_rv_watch & TARGET_PAGE_MASK)) {
++            pomppc_rv_log(cpu, "éviction de la table victime",
++                          addr_page, vidx);
++        }
+         copy_tlb_helper_locked(tv, te);
+         desc->vfulltlb[vidx] = desc->fulltlb[index];
+         tlb_n_used_entries_dec(cpu, mmu_idx);
+@@ -1297,6 +1312,9 @@
+     copy_tlb_helper_locked(te, &tn);
+     tlb_n_used_entries_inc(cpu, mmu_idx);
+     qemu_spin_unlock(&tlb->c.lock);
++    if (mmu_idx == 1) {
++        pomppc_rv_tlb_check(cpu, "tlb_set_page (remplissage ou éviction)");
++    }
+ }
+ 
+ void tlb_set_page_with_attrs(CPUState *cpu, vaddr addr,
+@@ -3034,3 +3052,5 @@
+ {
+     return (uint32_t)res;
+ }
++
++#include "retv-instr.c.inc"
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -47,6 +47,7 @@
+ #include "tb-context.h"
+ #include "tb-internal.h"
+ #include "internal-common.h"
++#include "exec/cputlb.h"
+ #if !defined(CONFIG_USER_ONLY)
+ #include "accel/tcg/iommu.h"
+ #endif
+@@ -341,7 +342,13 @@
+         return false;
+     }
+     if (phys == -2) {
+-        qatomic_inc(&rv_nophys[src]);
++        if (qatomic_fetch_inc(&rv_nophys[src]) < 4 && pomppc_rv_dump_fn) {
++            fprintf(stderr, "retv: === sans traduction : %s cpu %d pc 0x%"
++                    VADDR_PRIx " tb %p phys 0x%" PRIx64 " ===\n",
++                    rv_name[src], cpu->cpu_index, pc, (void *)tb,
++                    (uint64_t)tb_page_addr0(tb));
++            pomppc_rv_dump_fn(cpu, pc);
++        }
+     }
+     if (qatomic_fetch_inc(&rv_bad[src]) < 50) {
+         fprintf(stderr, "ret-verify: DIVERGENCE %s cpu %d pc 0x%" VADDR_PRIx
+@@ -413,6 +420,7 @@
+     tb_jmp_cache_set_idx(jc, hash, cpu_mmu_index(cpu, true)); /* tcg/0008 */
+ #endif
+     qatomic_set(&jc->array[hash].tb, tb);
++    pomppc_rv_jc_check(cpu, "insertion (tb_lookup)");
+ 
+ hit:
+     /*
+@@ -1166,6 +1174,7 @@
+                 tb_jmp_cache_set_idx(jc, h, cpu_mmu_index(cpu, true));
+ #endif
+                 qatomic_set(&jc->array[h].tb, tb);
++                pomppc_rv_jc_check(cpu, "insertion (tb_gen_code)");
+             }
+ 
+ #ifndef CONFIG_USER_ONLY
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -25,6 +25,7 @@
+ #include "exec/mmap-lock.h"
+ #include "tb-internal.h"
+ #include "exec/tb-flush.h"
++#include "exec/cputlb.h"
+ #include "qemu/cacheinfo.h"
+ #include "qemu/target-info.h"
+ #include "exec/log.h"
+@@ -640,6 +641,7 @@
+     for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
+         qatomic_set(&jc->array[i].tb, NULL);
+     }
++    pomppc_rv_jc_check(cpu, "tcg_flush_jmp_cache");
+ }
+ 
+ /*
+@@ -682,4 +684,5 @@
+         }
+         jc->log_n[k] = 0;
+     }
++    pomppc_rv_jc_check(cpu, "tcg_flush_jmp_cache_idx");
+ }
+--- a/accel/tcg/tb-maint.c
++++ b/accel/tcg/tb-maint.c
+@@ -937,6 +937,7 @@
+ 
+             if (qatomic_read(&jc->array[h].tb) == tb) {
+                 qatomic_set(&jc->array[h].tb, NULL);
++                pomppc_rv_jc_check(cpu, "invalidation du bloc");
+             }
+         }
+     }
+--- a/include/exec/cputlb.h
++++ b/include/exec/cputlb.h
+@@ -158,6 +158,15 @@
+ size_t pomppc_tlb_flush_match(CPUState *cpu, MMUIdxMap idxmap,
+                               PomppcTlbMatch match, uint64_t arg, uint16_t cls,
+                               bool jc);
++/* RETV : instrumentation temporaire (accel/tcg/retv-instr.c.inc) */
++extern uint64_t pomppc_rv_watch;
++extern void (*pomppc_rv_dump_fn)(CPUState *cpu, vaddr pc);
++void pomppc_rv_log(CPUState *cpu, const char *what, uint64_t a, uint64_t b);
++void pomppc_rv_tlbie(CPUState *cpu, uint64_t ea, uint64_t nip);
++void pomppc_rv_print(bool (*mark)(CPUState *, uint64_t), CPUState *cpu,
++                     unsigned last_tlbie);
++void pomppc_rv_tlb_check(CPUState *cpu, const char *site);
++void pomppc_rv_jc_check(CPUState *cpu, const char *site);
+ /* POMPPC tcg/0031: the jump cache entries of @page, as tlb_flush_page drops */
+ void pomppc_jc_clear_page(CPUState *cpu, vaddr page);
+ 
+--- a/target/ppc/mmu_helper.c
++++ b/target/ppc/mmu_helper.c
+@@ -40,6 +40,86 @@
+ #include "accel/tcg/cpu-ldst.h"
+ #include "qemu/timer.h"
+ #include "system/cpus.h"
++#include "accel/tcg/cpu-loop.h"
++
++/* RETV : instrumentation temporaire (accel/tcg/retv-instr.c.inc) */
++hwaddr pomppc_rv_pte(PowerPCCPU *cpu, target_ulong ea, uint32_t *pte0,
++                     uint32_t *pte1, hwaddr *pteg);
++
++static bool rv_same_pteg(CPUState *cs, uint64_t ea)
++{
++    PowerPCCPU *cpu = POWERPC_CPU(cs);
++    uint32_t p0, p1;
++    hwaddr g1, g2;
++
++    pomppc_rv_pte(cpu, pomppc_rv_watch, &p0, &p1, &g1);
++    pomppc_rv_pte(cpu, ea, &p0, &p1, &g2);
++    return g1 == g2;
++}
++
++static void rv_dump_pteg(PowerPCCPU *cpu, hwaddr g, const char *nm)
++{
++    CPUState *cs = CPU(cpu);
++    hwaddr base = cpu->env.spr[SPR_SDR1] & 0xffff0000;
++    uint32_t idx = (g - base) / 64;
++
++    fprintf(stderr, "retv: PTEG %s 0x%08" PRIx64 " (indice 0x%x)\n", nm,
++            (uint64_t)g, idx);
++    for (int i = 0; i < 8; i++) {
++        uint32_t p0 = ldl_phys(cs->as, g + i * 8);
++        uint32_t p1 = ldl_phys(cs->as, g + i * 8 + 4);
++        uint32_t vsid = (p0 >> 7) & 0xffffff, h = (p0 >> 6) & 1;
++        uint32_t api = p0 & 0x3f;
++        /* page dans le segment : API (6 bits hauts) et 10 bits du hachage */
++        uint32_t hash = h ? ~idx : idx;
++        uint32_t pg = (api << 10) | ((hash ^ vsid) & 0x3ff);
++
++        fprintf(stderr, "retv:   [%d] %08x %08x  V=%u H=%u VSID 0x%06x"
++                " page-du-segment 0x%04x RPN 0x%08x WIMG %x PP %u\n", i, p0,
++                p1, p0 >> 31, h, vsid, pg, p1 & ~0xfffu, (p1 >> 3) & 15,
++                p1 & 3);
++    }
++}
++
++static void rv_dump(CPUState *cs, vaddr pc)
++{
++    PowerPCCPU *cpu = POWERPC_CPU(cs);
++    CPUPPCState *env = &cpu->env;
++    uint32_t p0, p1;
++    hwaddr g, pte;
++    uint32_t vsid = env->sr[(pc >> 28) & 15] & 0xffffff;
++    uint32_t pgidx = (pc & 0x0fffffff) >> 12;
++
++    fprintf(stderr, "retv: msr 0x%" PRIx64 " nip 0x%" PRIx64 " sdr1 0x%"
++            PRIx64 " sr[%d] 0x%" PRIx64 " mmu_idx %d tlb_need_flush 0x%x\n",
++            (uint64_t)env->msr, (uint64_t)env->nip,
++            (uint64_t)env->spr[SPR_SDR1], (int)((pc >> 28) & 15),
++            (uint64_t)env->sr[(pc >> 28) & 15], ppc_env_mmu_index(env, true),
++            env->tlb_need_flush);
++    for (int i = 0; i < env->nb_BATs; i++) {
++        fprintf(stderr, "retv: IBAT%d %08" PRIx64 " %08" PRIx64
++                "  DBAT%d %08" PRIx64 " %08" PRIx64 "\n", i,
++                (uint64_t)env->IBAT[0][i], (uint64_t)env->IBAT[1][i], i,
++                (uint64_t)env->DBAT[0][i], (uint64_t)env->DBAT[1][i]);
++    }
++    pte = pomppc_rv_pte(cpu, pc, &p0, &p1, &g);
++    fprintf(stderr, "retv: page 0x%04x du segment, VSID 0x%06x : PTE %s"
++            " 0x%" PRIx64 " (%08x %08x)\n", pgidx, vsid,
++            pte == (hwaddr)-1 ? "ABSENTE" : "à", (uint64_t)pte, p0, p1);
++    rv_dump_pteg(cpu, g, "primaire");
++    {
++        hwaddr base = env->spr[SPR_SDR1] & 0xffff0000;
++        hwaddr mask = ((env->spr[SPR_SDR1] & 0x1ff) << 16) | 0xffc0;
++        rv_dump_pteg(cpu, base + ((~(hwaddr)(vsid ^ pgidx) * 64) & mask),
++                     "secondaire");
++    }
++    pomppc_rv_print(rv_same_pteg, cs, 96);
++}
++
++static void __attribute__((constructor)) rv_dump_init(void)
++{
++    pomppc_rv_dump_fn = rv_dump;
++}
+ 
+ /* #define FLUSH_ALL_TLBS */
+ 
+@@ -200,6 +280,7 @@
+ 
+ void helper_store_ibatu(CPUPPCState *env, uint32_t nr, target_ulong value)
+ {
++    pomppc_rv_log(env_cpu(env), "écriture IBATu", nr, value);
+     target_ulong mask;
+ 
+     dump_store_bat(env, 'I', 0, nr, value);
+@@ -227,12 +308,14 @@
+ 
+ void helper_store_ibatl(CPUPPCState *env, uint32_t nr, target_ulong value)
+ {
++    pomppc_rv_log(env_cpu(env), "écriture IBATl", nr, value);
+     dump_store_bat(env, 'I', 1, nr, value);
+     env->IBAT[1][nr] = value;
+ }
+ 
+ void helper_store_dbatu(CPUPPCState *env, uint32_t nr, target_ulong value)
+ {
++    pomppc_rv_log(env_cpu(env), "écriture DBATu", nr, value);
+     target_ulong mask;
+ 
+     dump_store_bat(env, 'D', 0, nr, value);
+@@ -260,6 +343,7 @@
+ 
+ void helper_store_dbatl(CPUPPCState *env, uint32_t nr, target_ulong value)
+ {
++    pomppc_rv_log(env_cpu(env), "écriture DBATl", nr, value);
+     dump_store_bat(env, 'D', 1, nr, value);
+     env->DBAT[1][nr] = value;
+ }
+@@ -401,6 +485,11 @@
+ 
+ void helper_store_sr(CPUPPCState *env, target_ulong srnum, target_ulong value)
+ {
++    if (pomppc_rv_watch && srnum == ((pomppc_rv_watch >> 28) & 15) &&
++        env->sr[srnum] != value) {
++        pomppc_rv_log(env_cpu(env), "mtsr (segment de la page)", srnum,
++                      value);
++    }
+     qemu_log_mask(CPU_LOG_MMU,
+             "%s: reg=%d " TARGET_FMT_lx " " TARGET_FMT_lx "\n", __func__,
+             (int)srnum, value, env->sr[srnum]);
+@@ -461,6 +550,20 @@
+ void helper_tlbie(CPUPPCState *env, target_ulong addr)
+ {
+     env->ms[PPC_MS_TLBIE] += env->mem_stats;
++    if (pomppc_rv_watch) {
++        CPUState *cs = env_cpu(env);
++        uint64_t data[8] = { 0 };
++
++        cpu_unwind_state_data(cs, GETPC(), data);
++        pomppc_rv_tlbie(cs, addr, data[0]);
++        if (((addr ^ pomppc_rv_watch) & 0x0ffff000) == 0) {
++            pomppc_rv_log(cs, "tlbie DE LA PAGE", addr, data[0]);
++        } else if (rv_same_pteg(cs, addr)) {
++            pomppc_rv_log(cs, "tlbie d'une page du PTEG", addr, data[0]);
++        } else if (((addr ^ pomppc_rv_watch) & 0xf000) == 0) {
++            pomppc_rv_log(cs, "tlbie de la classe EA[16:19]", addr, data[0]);
++        }
++    }
+     ppc_tlb_invalidate_one(env, addr);
+ }
+ 
+@@ -1910,6 +2013,15 @@
+             cpu->env.tlbp_win_ns[mmu_idx] = now;
+         }
+     }
++    if (pomppc_rv_watch &&
++        ((eaddr ^ pomppc_rv_watch) & ~(vaddr)0xfff) == 0) {
++        uint32_t p0, p1;
++        hwaddr g, pte = pomppc_rv_pte(cpu, eaddr, &p0, &p1, &g);
++
++        pomppc_rv_log(cs, mmu_idx == 1 ? "remplissage idx1 (PTE, acc)"
++                      : "remplissage autre idx (PTE, idx<<8|acc)", pte,
++                      (mmu_idx << 8) | access_type);
++    }
+     if (ppc_xlate(cpu, eaddr, access_type, &raddr,
+                   &page_size, &prot, mmu_idx, !probe)) {
+         if (cpu->env.sr_tlb) {
+--- a/target/ppc/mmu-hash32.c
++++ b/target/ppc/mmu-hash32.c
+@@ -305,6 +305,27 @@
+     return pte_offset;
+ }
+ 
++/*
++ * RETV (instrumentation temporaire) : la PTE de @ea dans la table hachée,
++ * sans effet de bord ; *pteg : adresse physique du PTEG primaire.
++ * Rend l'adresse physique de la PTE, -1 si aucune.
++ */
++hwaddr pomppc_rv_pte(PowerPCCPU *cpu, target_ulong ea, uint32_t *pte0,
++                     uint32_t *pte1, hwaddr *pteg)
++{
++    target_ulong sr = cpu->env.sr[(ea >> 28) & 15];
++    ppc_hash_pte32_t pte = { 0, 0 };
++    uint32_t vsid = sr & SR32_VSID;
++    uint32_t pgidx = (ea & ~SEGMENT_MASK_256M) >> TARGET_PAGE_BITS;
++    hwaddr off;
++
++    *pteg = ppc_hash32_hpt_base(cpu) + get_pteg_offset32(cpu, vsid ^ pgidx);
++    off = ppc_hash32_htab_lookup(cpu, sr, ea, &pte);
++    *pte0 = pte.pte0;
++    *pte1 = pte.pte1;
++    return off == -1 ? -1 : ppc_hash32_hpt_base(cpu) + off;
++}
++
+ bool ppc_hash32_xlate(PowerPCCPU *cpu, vaddr eaddr, MMUAccessType access_type,
+                       hwaddr *raddrp, int *psizep, int *protp, int mmu_idx,
+                       bool guest_visible)
+--- a/target/ppc/mmu_common.c
++++ b/target/ppc/mmu_common.c
+@@ -20,6 +20,7 @@
+ #include "qemu/osdep.h"
+ #include "qemu/units.h"
+ #include "cpu.h"
++#include "exec/cputlb.h"
+ #include "system/kvm.h"
+ #include "kvm_ppc.h"
+ #include "mmu-hash64.h"
+@@ -42,6 +43,7 @@
+     PowerPCCPU *cpu = env_archcpu(env);
+     qemu_log_mask(CPU_LOG_MMU, "%s: " TARGET_FMT_lx "\n", __func__, value);
+     assert(!cpu->env.has_hv_mode || !cpu->vhyp);
++    pomppc_rv_log(env_cpu(env), "écriture SDR1", value, env->spr[SPR_SDR1]);
+ #if defined(TARGET_PPC64)
+     if (mmu_is_64bit(env->mmu_model)) {
+         target_ulong sdr_mask = SDR_64_HTABORG | SDR_64_HTABSIZE;
+--- /dev/null
++++ b/accel/tcg/retv-instr.c.inc
+@@ -0,0 +1,153 @@
++/*
++ * RETV : instrumentation temporaire (cas « sans traduction » de
++ * x-ret-verify), incluse à la fin de cputlb.c.  POMPPC_RV_WATCH=<pc> :
++ * journal des événements de la page de ce pc (entrée de code du TLB de
++ * mmu_idx 1 présente/absente et par quel chemin, entrée du cache de sauts
++ * de ce pc présente/absente et par quel chemin, remplissages, SR/BAT/SDR1)
++ * et de tous les tlbie ; imprimé à la divergence par le crochet de la cible.
++ */
++uint64_t pomppc_rv_watch;
++void (*pomppc_rv_dump_fn)(CPUState *cpu, vaddr pc);
++static QemuSpin rv_spin;
++static uint64_t rv_seq;
++#define RV_LOG 512
++static struct RvEv {
++    uint64_t seq, ns, a, b;
++    int cpu;
++    const char *what;
++} rv_log[RV_LOG], rv_tlbie[RV_LOG];
++static unsigned rv_log_n, rv_tlbie_n;
++static int8_t rv_tlb_state[16], rv_jc_state[16];
++static int64_t rv_t0;
++
++static void __attribute__((constructor)) rv_init(void)
++{
++    const char *w = getenv("POMPPC_RV_WATCH");
++
++    qemu_spin_init(&rv_spin);
++    memset(rv_tlb_state, -1, sizeof(rv_tlb_state));
++    memset(rv_jc_state, -1, sizeof(rv_jc_state));
++    if (w) {
++        pomppc_rv_watch = strtoull(w, NULL, 0);
++    }
++}
++
++static void rv_put(struct RvEv *ring, unsigned *n, CPUState *cpu,
++                   const char *what, uint64_t a, uint64_t b)
++{
++    int64_t now = get_clock_realtime();
++
++    qemu_spin_lock(&rv_spin);
++    if (!rv_t0) {
++        rv_t0 = now;
++    }
++    ring[(*n)++ % RV_LOG] = (struct RvEv){ ++rv_seq, now - rv_t0, a, b,
++                                           cpu ? cpu->cpu_index : -1, what };
++    qemu_spin_unlock(&rv_spin);
++}
++
++void pomppc_rv_log(CPUState *cpu, const char *what, uint64_t a, uint64_t b)
++{
++    if (pomppc_rv_watch) {
++        rv_put(rv_log, &rv_log_n, cpu, what, a, b);
++    }
++}
++
++void pomppc_rv_tlbie(CPUState *cpu, uint64_t ea, uint64_t nip)
++{
++    rv_put(rv_tlbie, &rv_tlbie_n, cpu, "tlbie", ea, nip);
++}
++
++/* imprime les anneaux ; @mark(ea) : un tlbie de ce PTEG primaire */
++void pomppc_rv_print(bool (*mark)(CPUState *, uint64_t), CPUState *cpu,
++                     unsigned last_tlbie)
++{
++    qemu_spin_lock(&rv_spin);
++    fprintf(stderr, "retv: --- journal de la page (%u événements, les %u"
++            " derniers) ---\n", rv_log_n, MIN(rv_log_n, RV_LOG));
++    for (unsigned k = rv_log_n > RV_LOG ? rv_log_n - RV_LOG : 0;
++         k < rv_log_n; k++) {
++        struct RvEv *e = &rv_log[k % RV_LOG];
++        fprintf(stderr, "retv:  #%" PRIu64 " t=%.6f cpu %d %-28s 0x%"
++                PRIx64 " 0x%" PRIx64 "\n", e->seq, e->ns / 1e9, e->cpu,
++                e->what, e->a, e->b);
++    }
++    last_tlbie = MIN(last_tlbie, RV_LOG);
++    fprintf(stderr, "retv: --- %u derniers tlbie (sur %u) ; * : même PTEG"
++            " primaire que la page surveillée ---\n",
++            MIN(rv_tlbie_n, last_tlbie), rv_tlbie_n);
++    for (unsigned k = rv_tlbie_n > last_tlbie ? rv_tlbie_n - last_tlbie : 0;
++         k < rv_tlbie_n; k++) {
++        struct RvEv *e = &rv_tlbie[k % RV_LOG];
++        fprintf(stderr, "retv:  #%" PRIu64 " t=%.6f cpu %d tlbie ea 0x%08"
++                PRIx64 " nip 0x%08" PRIx64 "%s\n", e->seq, e->ns / 1e9,
++                e->cpu, e->a, e->b, mark && mark(cpu, e->a) ? " *" : "");
++    }
++    qemu_spin_unlock(&rv_spin);
++}
++
++static bool rv_tlb_has(CPUState *cpu, int idx, vaddr page)
++{
++    CPUTLBDesc *d = &cpu->neg.tlb.d[idx];
++    CPUTLBDescFast *f = cpu_tlb_fast(cpu, idx);
++
++    if (!f->table) {
++        return false;
++    }
++    if (tlb_hit_page(tlb_entry(cpu, idx, page)->addr_code, page)) {
++        return true;
++    }
++    for (int k = 0; k < CPU_VTLB_SIZE; k++) {
++        if (tlb_hit_page(d->vtable[k].addr_code, page)) {
++            return true;
++        }
++    }
++    return false;
++}
++
++/* entrée de code de la page surveillée dans le TLB de mmu_idx 1 */
++void pomppc_rv_tlb_check(CPUState *cpu, const char *site)
++{
++    vaddr page = pomppc_rv_watch & TARGET_PAGE_MASK;
++    int c = cpu->cpu_index & 15;
++    int8_t now;
++
++    if (likely(!pomppc_rv_watch)) {
++        return;
++    }
++    now = rv_tlb_has(cpu, 1, page);
++    if (now != rv_tlb_state[c]) {
++        rv_tlb_state[c] = now;
++        pomppc_rv_log(cpu, now ? "TLB code idx1 : PRÉSENTE" :
++                      "TLB code idx1 : absente", page, (uintptr_t)site);
++        fprintf(stderr, "retv: cpu %d TLB code idx1 page 0x%" VADDR_PRIx
++                " %s (%s)\n", cpu->cpu_index, page,
++                now ? "présente" : "absente", site);
++    }
++}
++
++/* entrée du cache de sauts du pc surveillé */
++void pomppc_rv_jc_check(CPUState *cpu, const char *site)
++{
++    CPUJumpCache *jc = cpu->tb_jmp_cache;
++    int c = cpu->cpu_index & 15;
++    unsigned h;
++    TranslationBlock *tb;
++    int8_t now;
++
++    if (likely(!pomppc_rv_watch) || !jc) {
++        return;
++    }
++    h = tb_jmp_cache_hash_func(pomppc_rv_watch);
++    tb = qatomic_read(&jc->array[h].tb);
++    now = tb && jc->array[h].pc == pomppc_rv_watch;
++    if (now != rv_jc_state[c]) {
++        rv_jc_state[c] = now;
++        pomppc_rv_log(cpu, now ? "cache de sauts : PRÉSENTE" :
++                      "cache de sauts : absente", (uintptr_t)tb,
++                      jc->idx[h]);
++        fprintf(stderr, "retv: cpu %d cache de sauts pc 0x%" PRIx64
++                " %s (%s) tb %p idx %d\n", cpu->cpu_index, pomppc_rv_watch,
++                now ? "présente" : "absente", site, (void *)tb, jc->idx[h]);
++    }
++}

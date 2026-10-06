@@ -93,15 +93,6 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 
 Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête.
 
-- [ ] **[TCG] `x-ret-verify` : entrée du cache de sauts « sans traduction »** — 1 cas en SMP=1
-  (`0x5610664`, `docs/tcg-g4.md` §32) et 2 cas en SMP=2 le 06/10 (partie vérifiée
-  `bench/tcg/ab/x86-ver`, cpu 0, pc `0x5605d88`, page de noyau à identité, `mmu_idx` 1),
-  tous au **démarrage** (ou redémarrage) de l'invité, jamais en jeu (0 sur 12,8 G sorties).
-  Même endroit du noyau à chaque démarrage : reproductible. Comprendre si la PTE disparaît
-  sans `tlbie` visant la page (comportement d'un 7400) ou si `x-tlb-precise` garde une
-  entrée qu'il aurait dû retirer ; fermer par l'explication et, s'il le faut, une correction
-  repassée sous les vérificateurs.
-
 - [ ] **[TCG — M4] Parité arm64 de 0031-0035** : `x-tlb-precise`, `x-lmw-inline`,
   `x-dcbz-inline` (0031, 0032, 0035) et les émetteurs aarch64 de `x-fp-native-cmp` /
   `x-vfp-native-cmp` (0033-0034, sans effet sur arm64 aujourd'hui) : preuves au même niveau

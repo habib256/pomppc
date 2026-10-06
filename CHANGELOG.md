@@ -9,6 +9,17 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Le cas « sans traduction » de `x-ret-verify` expliqué, 06/10** (`docs/tcg-g4.md` §35) :
+  ce n'est pas le noyau mais **BootX sous OpenBIOS**. Quand un PTEG est plein, le gestionnaire
+  de fautes d'OpenBIOS (`hash_page`, `tlbie` en `0xfff08a5c`) évince une PTE et ne fait
+  `tlbie` que de la page qui entre ; `x-tlb-precise` retire bien la classe du TLB mais garde
+  l'entrée du cache de sauts de la page évincée, que l'architecture permet de garder. Prouvé
+  par une instrumentation (`patches/tcg/essais/0031-retv-diag.patch`, non appliquée) et par
+  les deux bras : 768 Mo, 4 cas à chaque démarrage SMP=2 (1 en SMP=1) avec `x-tlb-precise`,
+  **0 sans**. Sans gravité : les traductions d'OpenBIOS ne changent jamais, le bloc exécuté
+  est celui que l'ISI ferait retrouver. Correction du §32.5 : un 7400 ne garderait pas cette
+  traduction (même classe), il prendrait l'ISI. Aucun patch de la série modifié.
+  `tools/tcg/retvboot.sh` démarre la VM de dev en `-snapshot` pour ces essais.
 - **Bilan de la phase 2 sur le PC, 06/10** (`docs/vitesse-doom3-x86.md` §13) : une partie
   DOOM 3 sous **tous** les vérificateurs (TLB précis, `lmw`/`stmw` et `dcbz` en ligne, flottant
   et AltiVec natifs avec leurs comparaisons, sorties) : 0 divergence sur 2,9 G accès

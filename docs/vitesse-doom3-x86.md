@@ -472,7 +472,10 @@ l'invité (ligne 26 du journal, quelques secondes après le lancement), l'autre 
 de l'invité que la matrice fait après le jeu. Même classe que le cas SMP=1 de `docs/tcg-g4.md`
 §32 (`0x5610664`, « plus de PTE ») : le même endroit du noyau au démarrage, donc reproductible,
 et **pas pendant le jeu** (0 sur ~12,8 G sorties vérifiées en jeu). Aucun effet visible ; non
-bloquant pour l'A/B, à comprendre (TODO.md).
+bloquant pour l'A/B. **Expliqué le soir même** (`docs/tcg-g4.md` §35) : la page `0x5605` n'est
+pas du noyau mais l'image de BootX ; OpenBIOS évince sa PTE sans `tlbie` de cette page, et
+`x-tlb-precise` garde l'entrée du cache de sauts (permis par l'architecture, sans effet : les
+traductions d'OpenBIOS sont fixes). 0 cas avec `x-tlb-precise` éteint.
 
 Compteurs `x-mem-stats` en jeu (dernière fenêtre de 10 s, cpu 0 / cpu 1) : `dcbz` 79 k/s et
 56 k/s, `lmw` 151 k/s et 91 k/s (`stmw` autant), ~6,5 mots par `lmw`, `tlbie` 1 200/s et

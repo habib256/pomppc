@@ -3315,7 +3315,7 @@ nulle et la réservation retirée.
 | invité, SMP=2 ppc64, toutes options de production + les trois propriétés : `tlbtest` (mprotect et fautes à l'adresse près, munmap/mmap, fork et copie sur écriture, tubes, fichier), `smctest` (A-F), `lmwtest`, `dcbztest` | **empreintes identiques** à la référence : `tlbtest` `deee3d7026183c65`, `smctest` A-F identiques, `lmwtest` `2575eafce78adf66` (la même qu'au §5.4), `dcbztest` identique hors réservation (§32.4) ; 0 erreur |
 | vérificateurs, session complète, première version (`lmw`/`stmw` de 8 registres au plus) (bureau, `tlbtest`, `smctest`, `lmwtest`, `dcbztest`, Marble Blast 150 s ; `x-tlb-precise-verify=256`, `x-lmw-inline-verify`, `x-dcbz-inline-verify`, `x-ret-verify`) | TLB : 3,4 M invalidations précises, 413 000 contrôles, **534 M accès retraduits, 0 divergence** ; `lmw`/`stmw` : **454 M contrôlés, 0** ; `dcbz` : **148 M contrôlés, 0** (65 000 sur des pages sans pointeur hôte, VRAM suivie) ; `x-ret-verify` (cache de sauts) : **2,1 G blocs vérifiés, 0 divergence** |
 | session complète refaite avec la version finale (`lmw`/`stmw` de tous les comptes), SMP=2 (`ver3`, vérification 1/64) | TLB : 2,8 M invalidations précises, 1,3 M contrôles, 1,5 G accès retraduits, **0** ; `lmw`/`stmw` 583 M, **0** ; `dcbz` 121 M, **0** ; cache de sauts 1,6 G, **0** ; mêmes empreintes |
-| SMP=1 (`qemu-system-ppc`, `target_ulong` 32 bits) : référence, puis tout + vérificateurs | empreintes de la référence SMP=1 = celles de SMP=2 ; avec les propriétés, identiques (`dcbztest` : hors réservation) ; TLB 987 M accès retraduits, **0** ; `lmw` 360 M, **0** ; `dcbz` 50 M, **0** ; `x-ret-verify` : **une** entrée du cache de sauts sur une page de noyau à identité (`0x5610664`) devenue **sans traduction** (classe « plus de PTE » : la PTE a disparu sans que ce `tlbie` ait visé cette page ; un 7400 garderait aussi sa traduction) sur 805 M vérifiés, 0 de l'autre sorte |
+| SMP=1 (`qemu-system-ppc`, `target_ulong` 32 bits) : référence, puis tout + vérificateurs | empreintes de la référence SMP=1 = celles de SMP=2 ; avec les propriétés, identiques (`dcbztest` : hors réservation) ; TLB 987 M accès retraduits, **0** ; `lmw` 360 M, **0** ; `dcbz` 50 M, **0** ; `x-ret-verify` : **une** entrée du cache de sauts sur une page à identité (`0x5610664`) devenue **sans traduction** sur 805 M vérifiés, 0 de l'autre sorte. Expliqué au §35 : c'est BootX sous OpenBIOS, dont le gestionnaire de fautes évince la PTE sans `tlbie` de cette page ; sans gravité, mais un 7400 **ne** garderait **pas** cette traduction (même classe que le `tlbie` de la page qui prend la place) |
 | démarrages du bureau sous `x-tlb-precise-verify=16` (puis `=64` avec `x-ret-verify`) | 0 divergence ; une fois (premier essai), une page d'identité d'OpenBIOS sans PTE (classe « plus de PTE », §32.2) |
 | mutants de l'émetteur réel (`~/src/qemu-memmut`, `POMPPC_MUT`) | voir 32.6 |
 | après fusion avec 0029, 0033, 0034 : série complète posée par le build sur une copie fraîche (aucun décalage ni fuzz), `~/src/qemu/build` reconstruit (06/10, 15:58) ; `tiger-dev.raw`, SMP=2, sans puis avec les trois propriétés et leurs vérificateurs | `tlbtest` `deee3d7026183c65`, `lmwtest` `2575eafce78adf66`, `dcbztest` hors réservation `e2f15e6f3ceae607` dans les deux bras (complète : `afbd3bd3…` / `b9d327c6…`, §32.4) ; TLB 238 M accès retraduits, `lmw` 321 M, `dcbz` 23 M : **0 divergence** |
@@ -3850,3 +3850,134 @@ Le binaire de `~/src/qemu-fp/build` porte 0033 **et** 0034 : les deux A/B (`FPNA
   vfpcmpproof-200k.log`, `logs/vmut2.log`, `logs/vuser-262144.log`, `logs/vbench-user.txt`,
   `logs/seq34.log` et `g34/` (chaque démarrage, `qemu.log` compris : `desk`, `mb2`, `r1`, `v1`,
   `v2`, `r2`, `c2`, `r2b`, `c2b`), `ref1/` (profil `perf` de Marble Blast).
+
+## 35. Le cas « sans traduction » de `x-ret-verify` : OpenBIOS évince une PTE (06/10/2026)
+
+Les cas « sans traduction » de `x-ret-verify` (1 en SMP=1 au §32.5, `0x5610664` ; 2 en SMP=2
+dans la partie vérifiée de `docs/vitesse-doom3-x86.md` §13.1, `0x5605d88`) : une entrée du cache
+de sauts valide pour un `pc` dont la page n'a plus ni entrée de code dans le TLB de QEMU ni PTE
+dans la table hachée. **Verdict : comportement de l'invité, sans gravité, pas un défaut de
+`x-tlb-precise`.** Ce n'est pas le noyau : c'est **BootX sous OpenBIOS**, et le gestionnaire de
+fautes d'OpenBIOS qui évince une PTE en ne faisant `tlbie` que de la page qui prend sa place.
+Mais, contrairement à ce qu'écrivait le §32.5, un 7400 **ne** garderait **pas** cette
+traduction ; `x-tlb-precise` la garde dans le cache de sauts, ce que l'architecture permet.
+
+### 35.1 Reproduction et l'expérience qui tranche
+
+Copie `~/src/qemu-retv` (= `~/src/qemu`, série 0001-0035) + l'instrumentation
+`patches/tcg/essais/0031-retv-diag.patch` (non appliquée, active seulement avec
+`POMPPC_RV_WATCH`) ; disque `tiger-dev.raw` copié, démarré sans `devloop` en `-snapshot` par
+`tools/tcg/retvboot.sh` (options de production du PC + `x-ret-verify`), arrêté après 60-150 s.
+Les cas tombent entre 10 et 25 s après le lancement.
+
+| configuration (VM de dev, single-user) | démarrages | cas « sans traduction » |
+|---|---|---|
+| 1 024 Mo, SMP=2, `x-tlb-precise` allumé / éteint | 1 / 1 | **0 / 0** |
+| 768 Mo (la RAM de la VM quotidienne avec le son), SMP=2, `x-tlb-precise` **allumé** (dont un avec tous les vérificateurs de la partie du §13.1) | 5 | **4 à chaque démarrage**, toujours les mêmes : `0xfff1c914`, `0x5605d24`, `0x5610664` (×2) |
+| 768 Mo, SMP=2, `x-tlb-precise` **éteint** | 1 | **0** |
+| 768 Mo, SMP=1, `x-tlb-precise` allumé / éteint | 1 / 1 | **1** (`0xfff1c914`) / **0** |
+
+Tous sur cpu 0, `mmu_idx` 1, source « boucle » (la recherche de la boucle principale, au retour
+d'un `rfi`). **Le cas n'existe qu'avec `x-tlb-precise`** : sans lui, l'invalidation en attente
+du `tlbie` vide tout le TLB **et** le cache de sauts au `rfi` qui suit. La dépendance à la RAM
+vient de la table hachée d'OpenBIOS, posée en haut de la RAM (`SDR1 = 0x2fe00000` à 768 Mo) :
+la suite des fautes et des évictions change avec elle. Les pages `0x5605` et `0x5610` sont dans
+l'image de BootX (`0x05600000-0x057fffff`, plan mémoire de BootX recopié dans
+`arch/ppc/qemu/ofmem.c` d'OpenBIOS) ; `0xfff1c914` est OpenBIOS lui-même (physique
+`0x2ff1c914`). Ce sont les cas du 06/10 (`0x5605d88` est dans la même page `0x5605`).
+
+### 35.2 L'histoire de la page (`0x5605d24`, SMP=2, 768 Mo)
+
+Journal de `POMPPC_RV_WATCH=0x5605d24` (numéros d'ordre globaux) :
+
+    #20193 remplissage idx1, PTE en 0x2fe08148 (PTEG primaire 0x205, emplacement 1)
+    #20194 TLB code idx1 : présente ; #20201 cache de sauts : présente (bloc 0x…7c00)
+    … BootX parcourt 0x3995000, 0x3996000 … (une faute DSI par page, OpenBIOS les pose) :
+    #20213 tlbie 0x3995000 (classe EA[16:19] de la page) → TLB : absente → remplie de nouveau
+           (la PTE est encore là) ; le cache de sauts n'est pas touché
+    … même chose pour 0x39a5000, 0x39b5000 … 0x39f5000
+    #20371 tlbie 0x3a05000, nip 0xfff08a5c   ← même PTEG primaire, même classe
+    #20372 TLB code idx1 : absente (retrait par classe)
+    #20373 sonde du vérificateur : AUCUNE PTE  → « sans traduction »
+
+Au moment du cas : MSR `0x2030` (IR, DR), aucun BAT valide, `sr[0] = 0x20000400` (VSID
+`0x400`, celui d'OpenBIOS pour le segment 0), `tlb_need_flush = 0x10` (des classes attendent une
+`sync` qu'OpenBIOS ne fait jamais). Le PTEG primaire `0x2fe08140` est **plein** : huit PTE
+valides, toutes de pages `≡ 0x205 (mod 0x400)` du segment 0 sauf une du segment 8, et
+l'emplacement 1, qui tenait `0x5605`, tient maintenant `0x3a05` (RPN `0x03a05`). Aucun `tlbie` de
+`0x5605000` depuis le remplissage, aucune écriture de SR, de BAT ni de SDR1.
+
+`0xfff08a5c` est le `tlbie r30` de `hash_page()` d'OpenBIOS (`hash_page_32` en ligne ; le binaire
+livré `patches/smp-mac99/openbios-smp-screamer.elf` est identique octet pour octet à
+`~/src/openbios-screamer/obj-ppc/openbios-qemu.elf`, dont la version non dépouillée a les
+symboles) :
+
+    fff08a4c  stwux r28,r27,r9      PTE, mot 0, dans l'emplacement choisi
+    fff08a58  stw   r31,4(r27)      mot 1
+    fff08a5c  tlbie r30             r30 = l'adresse de la NOUVELLE page
+
+Le source (`arch/ppc/qemu/ofmem.c`, `hash_page_32`) : chercher la page, sinon un emplacement
+libre, sinon « *out of slots, just evict one* » (`next_evicted_slot()`, tourniquet), écrire la
+PTE, `tlbie(ea)` de la page qui entre. **La page évincée ne reçoit ni `tlbie` ni `sync`.**
+
+Les trois autres cas suivent la même chaîne. `0x5610664` : `tlbie 0x210000` puis `0x610000`
+(même PTEG `0x210`) par `0xfff08a5c`, la PTE de `0x5610` évincée. `0xfff1c914` (segment 15,
+VSID `0x40f`, PTEG `0x313`) : `tlbie 0x4313000` évince la PTE (le TLB garde encore l'entrée),
+puis `tlbie 0x431c000`, de la classe de `0xfff1c`, retire l'entrée du TLB ; le cache de sauts la
+garde. Le second cas de `0x5610664` montre la suite : après le premier, le vérificateur rend la
+main au chemin d'origine, qui fait la faute ISI ; OpenBIOS repose la même PTE d'identité (vue au
+remplissage suivant, en `0x2fe08410`), qui est évincée de nouveau un peu plus tard.
+
+### 35.3 Pourquoi c'est sans gravité, et ce qu'en ferait un 7400
+
+- **Architecture** : `tlbie EA` n'est tenu d'invalider que les entrées qui traduisent EA ;
+  une implémentation peut en invalider davantage. Le protocole pour changer une PTE (la
+  rendre invalide, `sync`, `tlbie` de **sa** page, `tlbsync`, `sync`) n'est pas suivi par
+  OpenBIOS pour la page évincée : ce qu'en fait le processeur n'est pas fixé, garder
+  l'ancienne traduction est permis. `x-tlb-precise` retire bien du TLB toute la classe
+  (EA[16:19], plus large que celle du 7400) ; seul le cache de sauts ne perd que les pages des
+  opérandes de `tlbie` (§32.2), ce qui est la lecture stricte de l'architecture.
+- **Un 7400** invalide toute la classe de congruence EA[14:19] de l'opérande. Dans le même
+  segment, deux pages du même PTEG ont les 10 bits bas du numéro de page égaux (table de
+  64 Kio d'OpenBIOS, 1 024 PTEG), donc la même classe : le `tlbie` de `0x3a05000` retire aussi
+  `0x5605000` de l'ITLB d'un vrai 7400 (et `0x431c000` retire `0xfff1c000`, même EA[14:19]
+  `0x1c`). Le 7400 refait la recherche, ne trouve pas de PTE, prend une ISI ; OpenBIOS
+  (`isi_exception` → `hash_page`) repose la même traduction et reprend au même `pc`. QEMU sans
+  `x-tlb-precise` fait pareil (tout est vidé au `rfi`). **La phrase du §32.5 « un 7400
+  garderait aussi sa traduction » était fausse** pour ce cas ; elle reste vraie pour la
+  classe « plus de PTE » du vérificateur du TLB, dont les entrées restantes sont hors de la
+  classe des `tlbie` reçus.
+- **Pourquoi le résultat est le même** : les traductions d'OpenBIOS sont fixes (identité pour
+  la RAM de BootX, RPN = page dans les PTEG relevés ; `0xfff1c000 → 0x2ff1c000` pour son code,
+  toujours la même) et ne changent jamais pendant que ce code tourne. Le bloc que le cache de
+  sauts fournit est celui de la même page physique que l'ISI ferait retrouver ; un bloc dont le
+  code physique change est invalidé par l'écriture elle-même, indépendamment du TLB. Seule
+  différence observable : une ISI de moins, donc le tourniquet `next_evicted_slot()` d'OpenBIOS
+  décalé d'un cran, d'où d'autres évictions ensuite — toutes d'identité.
+- **L'hypothèse de `x-tlb-precise`** (`cpu.h` de 0031 : un invité qui change la PTE d'une page
+  de code l'invalide par `tlbie` de cette page ou par un balayage complet) est donc violée par
+  OpenBIOS, sans conséquence parce que ses traductions ne changent pas. Quand le noyau prend la
+  main, sa nouvelle table hachée (`mtsdr1`) vide tout le TLB de QEMU et le cache de sauts
+  (`helper_store_sdr1`) ; ensuite, **0 cas en jeu** sur ~12,8 G sorties vérifiées (§13.1) et sur
+  les 34 G du §16.4 : xnu respecte l'hypothèse (non relu dans son source ici ; c'est ce que
+  montrent les vérificateurs).
+
+### 35.4 Ce qui n'a pas été changé, et comment lire le vérificateur
+
+- **Aucun patch de la série n'a changé** : le binaire de référence n'a pas à être reconstruit.
+- Rendre le cache de sauts exact au sens du 7400 (retirer aussi les pages des entrées
+  retirées par classe) coûterait un nettoyage de pages du cache de sauts par entrée retirée, à
+  ~1 200 `tlbie` par seconde en jeu, pour ne recréer qu'une ISI qu'OpenBIOS résout à
+  l'identique : non fait.
+- `x-ret-verify` compte déjà ces cas à part dans son bilan (« sans traduction », à côté des
+  « divergences ») ; les compter hors des divergences demanderait de toucher `tcg/0008`, donc
+  de reconstruire le binaire de référence pour un changement de texte : non fait. **Règle de
+  lecture** : un « sans traduction » au démarrage dont le `pc` est dans OpenBIOS
+  (`0xfff00000-0xffffffff`) ou dans BootX (`0x05600000-0x057fffff`) est ce cas ; tout autre
+  « sans traduction » (`pc` du noyau ou d'un processus, en jeu) et toute divergence d'une autre
+  sorte restent des anomalies à instruire, avec `essais/0031-retv-diag.patch`
+  (`POMPPC_RV_WATCH=<pc>`) et `tools/tcg/retvboot.sh`.
+
+Journaux (non versionnés) : `bench/tcg/retv/` du dépôt principal — `s2-on-1`, `s2-off-1`
+(1 024 Mo), `s2-on-768`, `s2-on-768v` (avec tous les vérificateurs), `s2-off-768`, `s1-on-768`,
+`s1-off-768`, et les démarrages surveillés `w5605`, `w5610`, `wfff1`.
