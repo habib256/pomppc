@@ -73,6 +73,14 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 
 Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête.
 
+- [ ] **[TCG — M4] Finir la matrice du 06/10** : sept cellules terminées,
+  six vertes, images toutes justes ; campagne arrêtée sur demande.
+  Zenerchi mesure 6,3 ms/image pour un seuil de 6 : reproduire et comparer
+  les options TCG éteintes avant d'attribuer la cause. Reprendre UT2004,
+  Warcraft III, Colin McRae et Nexuiz. A/B DOOM 3 complet : −6,0 % sur six
+  parties par configuration. Preuves : `docs/jit-m4-2026-10-05.md` et
+  `docs/mesures/m4-20261006/`.
+
 - [ ] **[TCG] `tcg/0010` : finir la preuve** (`docs/tcg-g4.md` §17, §19.3). Fait : 0010 dans le
   binaire de référence, `x-icbi-sync` allumé, `smctest` A-F puis E × 100 à 0 erreur sur une
   copie du disque de dev. **Reste :** `smctest` E sur la VM quotidienne, et les compteurs de

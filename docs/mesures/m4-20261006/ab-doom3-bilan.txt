@@ -1,0 +1,16 @@
+m4         1   d3-fen      42.2 ms/image  fenêtre 4401..4631  charge 2.07/3.73 rouge
+m4         2   d3-fen      42.2 ms/image  fenêtre 4394..4624  charge 2.31/2.73 rouge
+m4         3   d3-fen      42.2 ms/image  fenêtre 4420..4650  charge 1.84/3.25 rouge
+m4         4   d3-fen      42.2 ms/image  fenêtre 4379..4609  charge 1.69/2.13 rouge
+m4         5   d3-fen      41.9 ms/image  fenêtre 4432..4662  charge 1.80/2.45 rouge
+m4         6   d3-fen      42.0 ms/image  fenêtre 4423..4653  charge 1.71/1.86 rouge
+ref        1   d3-fen      44.5 ms/image  fenêtre 4297..4527  charge 1.39/2.73 rouge
+ref        2   d3-fen      44.8 ms/image  fenêtre 4210..4440  charge 1.75/2.75 rouge
+ref        3   d3-fen      49.8 ms/image  fenêtre 4269..4499  charge 1.48/3.34 rouge
+ref        4   d3-fen      45.0 ms/image  fenêtre 4236..4466  charge 2.24/2.54 rouge
+ref        5   d3-fen      45.3 ms/image  fenêtre 4210..4440  charge 2.29/2.22 rouge
+ref        6   d3-fen      44.8 ms/image  fenêtre 4274..4504  charge 2.32/2.91 rouge
+
+m4         d3-fen    n=6  médiane 42.2  min..max 41.9..42.2  (0.7 % de dispersion)  charge max 3.73
+ref        d3-fen    n=6  médiane 44.9  min..max 44.5..49.8  (11.8 % de dispersion)  charge max 3.34
+d3-fen    m4 → ref : +6.4 % (médianes)

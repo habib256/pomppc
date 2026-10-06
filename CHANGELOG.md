@@ -13,11 +13,17 @@ de commit et dans `docs/`.
   sélectionné par `VFPPROOF_NATIVE=1`, 648 M vecteurs sans divergence, huit mutants
   détectés ; correction du zéro signé `vnmsubfp` et du helper lent aarch64 (0028).
   Vérification en VM SMP=1 et SMP=2, instructions et invalidations sans divergence.
-  Flottant AltiVec natif : **1 336 → 362 ms (−73 %) sur microbanc**, gain en jeu
-  non mesuré. Variantes `LMWVEC`/`JCWORD` exactes mais sans gain mesuré. À la demande de
+  Flottant AltiVec natif : **1 336 → 362 ms (−73 %) sur microbanc**.
+  Variantes `LMWVEC`/`JCWORD` exactes mais sans gain mesuré sur microbanc. À la demande de
   l’utilisateur, `VFPNATIVE`, `LMWVEC` et `JCWORD` sont allumés dans `run_tiger.sh`
   sur macOS arm64 ; chaque variable mise à `0` coupe son option. Rebuild QEMU
-  avec 0025–0028 requis.
+  avec 0025–0028 effectué sur le M4 le 05/10 à 21:12 (ppc et ppc64,
+  capacités complètes, backend GL compris). A/B DOOM 3 du 06/10, six parties
+  par bras entrelacées : **44,9 → 42,2 ms/image (−6,0 %)** pour les trois options
+  ensemble. Matrice arrêtée à la demande de l’utilisateur : **7/15 cellules
+  terminées, 6 vertes** ; les sept images sont justes, Zenerchi seul dépasse
+  le seuil de vitesse (6,3 ms/image pour 6). Bilan partiel conservé dans
+  `docs/mesures/m4-20261006/`, vérification de Zenerchi à reprendre.
   Profil des blocs et du code ARM (`hotblocks`, `jitblocks`) ; correction du
   placement RX sous `split-wx` (0027), 20/20 lancements dans la fenêtre du texte.
 
