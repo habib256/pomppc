@@ -1,0 +1,1031 @@
+diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -612,6 +612,84 @@
+     g_free(d);
+ }
+ 
++/*
++ * POMPPC tcg/0031 (x-tlb-precise).  The page an entry translates: from the
++ * first comparator that is valid (they all hold the same page).
++ */
++static inline vaddr pomppc_entry_page(CPUTLBEntry *e)
++{
++    uint64_t a;
++
++    if (!((a = e->addr_read) & TLB_INVALID_MASK) ||
++        !((a = tlb_addr_write(e)) & TLB_INVALID_MASK) ||
++        !((a = e->addr_code) & TLB_INVALID_MASK)) {
++        return a & TARGET_PAGE_MASK;
++    }
++    return -1;
++}
++
++void pomppc_jc_clear_page(CPUState *cpu, vaddr page)
++{
++    tb_jmp_cache_clear_page(cpu, page - TARGET_PAGE_SIZE);
++    tb_jmp_cache_clear_page(cpu, page);
++}
++
++size_t pomppc_tlb_flush_match(CPUState *cpu, MMUIdxMap idxmap,
++                              PomppcTlbMatch match, uint64_t arg, uint16_t cls,
++                              bool jc)
++{
++    MMUIdxMap dirty;
++    size_t dropped = 0;
++
++    assert_cpu_is_self(cpu);
++    qemu_spin_lock(&cpu->neg.tlb.c.lock);
++    /* a clean mmu_idx has no entry: flushed, nothing filled since */
++    dirty = idxmap & cpu->neg.tlb.c.dirty;
++    for (MMUIdxMap work = dirty; work; work &= work - 1) {
++        int mmu_idx = ctz32(work);
++        CPUTLBDescFast *f = cpu_tlb_fast(cpu, mmu_idx);
++        CPUTLBDesc *d = &cpu->neg.tlb.d[mmu_idx];
++        size_t n = (f->mask >> CPU_TLB_ENTRY_BITS) + 1;
++
++        /* the index of a page is its number modulo n (n >= 64) */
++        for (int c = 0; c < 16; c++) {
++            if (cls && !((cls >> c) & 1)) {
++                continue;
++            }
++            for (size_t j = c; j < n; j += 16) {
++                vaddr page = pomppc_entry_page(&f->table[j]);
++                if (page != (vaddr)-1 && match(page, arg)) {
++                    memset(&f->table[j], -1, sizeof(f->table[j]));
++                    tlb_n_used_entries_dec(cpu, mmu_idx);
++                    dropped++;
++                }
++            }
++        }
++        for (size_t j = 0; j < CPU_VTLB_SIZE; j++) {
++            vaddr page = pomppc_entry_page(&d->vtable[j]);
++            if (page != (vaddr)-1 && match(page, arg)) {
++                memset(&d->vtable[j], -1, sizeof(d->vtable[j]));
++                tlb_n_used_entries_dec(cpu, mmu_idx);
++                dropped++;
++            }
++        }
++    }
++    qemu_spin_unlock(&cpu->neg.tlb.c.lock);
++    /*
++     * The jump cache is not checked against the TLB, and an evicted entry
++     * leaves its jump cache entries behind: drop those of @idxmap, as the
++     * stock flush of those mmu_idx does (x-jc-idx: through its log).
++     */
++    if (!jc) {
++        /* the caller clears the jump cache pages it knows */
++    } else if (cpu->jc_by_idx) {
++        tcg_flush_jmp_cache_idx(cpu, idxmap);
++    } else {
++        tcg_flush_jmp_cache(cpu);
++    }
++    return dropped;
++}
++
+ void tlb_flush_page_by_mmuidx(CPUState *cpu, vaddr addr, MMUIdxMap idxmap)
+ {
+     tlb_debug("addr: %016" VADDR_PRIx " mmu_idx:%" PRIx16 "\n", addr, idxmap);
+diff --git a/include/exec/cputlb.h b/include/exec/cputlb.h
+--- a/include/exec/cputlb.h
++++ b/include/exec/cputlb.h
+@@ -138,6 +138,30 @@
+ void tlb_flush_all_cpus_synced(CPUState *src_cpu);
+ 
+ /**
++ * pomppc_tlb_flush_match: (POMPPC tcg/0031, x-tlb-precise)
++ * @cpu: the calling CPU
++ * @idxmap: MMU indexes to scan
++ * @match: predicate on the virtual page of an entry
++ * @arg: argument of @match
++ * @cls: if not 0, @match only accepts pages whose bits [TARGET_PAGE_BITS,
++ *       TARGET_PAGE_BITS + 4) are in the mask @cls: only the slots of the
++ *       main table at those indexes modulo 16 are visited
++ *
++ * @jc: also drop the jump cache entries of @idxmap, as a flush of those
++ *      mmu_idx does (they are not checked against the TLB, and may outlive
++ *      their TLB entry); false: the caller clears the pages it knows
++ *
++ * Drop every entry (main and victim tables) of @idxmap whose page @match
++ * accepts; the other entries are kept.  Returns the number dropped.
++ */
++typedef bool (*PomppcTlbMatch)(vaddr page, uint64_t arg);
++size_t pomppc_tlb_flush_match(CPUState *cpu, MMUIdxMap idxmap,
++                              PomppcTlbMatch match, uint64_t arg, uint16_t cls,
++                              bool jc);
++/* POMPPC tcg/0031: the jump cache entries of @page, as tlb_flush_page drops */
++void pomppc_jc_clear_page(CPUState *cpu, vaddr page);
++
++/**
+  * tlb_flush_page_by_mmuidx:
+  * @cpu: CPU whose TLB should be flushed
+  * @addr: virtual address of page to be flushed
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -305,6 +305,26 @@
+ 
+ typedef struct CPUArchState CPUPPCState;
+ 
++/*
++ * POMPPC tcg/0031, x-mem-stats: per-CPU counters of the memory side of the
++ * translator (dcbz, lmw/stmw, TLB fills and flushes by cause), printed on
++ * stderr every 10 s by the CPU itself.  FILL_T: host ticks
++ * (cpu_get_host_ticks) spent in the fills; the ticks elapsed over the window
++ * are printed too, so their ratio is the share of the thread.  dcbz and
++ * lmw/stmw are counted by a call the translator adds (x-mem-stats only).
++ */
++enum {
++    PPC_MS_DCBZ,
++    PPC_MS_LMW, PPC_MS_LMW_W, PPC_MS_LMW_X,
++    PPC_MS_STMW, PPC_MS_STMW_W, PPC_MS_STMW_X,
++    PPC_MS_FILL0, PPC_MS_FILL1, PPC_MS_FILL2, PPC_MS_FILL3, PPC_MS_FILL_T,
++    PPC_MS_FILL_I, PPC_MS_FILL_W, PPC_MS_FILL_PROBE,
++    PPC_MS_TLBIE, PPC_MS_FL_LOCAL, PPC_MS_FL_GLOBAL, PPC_MS_FL_SR0,
++    PPC_MS_FL_SR1, PPC_MS_BAT_FULL, PPC_MS_BAT_PAGES,
++    PPC_MS_WALL,
++    PPC_MS_N
++};
++
+ /* SPR access micro-ops generations callbacks */
+ struct ppc_spr_t {
+     const char *name;
+@@ -1343,6 +1363,8 @@
+ #define TLB_NEED_LOCAL_FLUSH   0x1
+ #define TLB_NEED_GLOBAL_FLUSH  0x2
+ #define TLB_NEED_SR_CHECK      0x4  /* segment registers changed (x-sr-tlb) */
++#define TLB_NEED_CLS_LOCAL     0x8  /* tlbie classes to drop (x-tlb-precise) */
++#define TLB_NEED_CLS_GLOBAL    0x10 /* ... on every CPU, at the next sync */
+     /*
+      * "Segment-tagged TLB" mode (x-sr-tlb property, 32-bit hash MMU only).
+      * A segment register write no longer flushes the whole softmmu TLB at
+@@ -1414,6 +1436,79 @@
+     uint32_t sr_verify;
+     uint32_t sr_verify_n;
+     uint64_t sr_verify_runs, sr_verify_entries, sr_verify_bad;
++    /*
++     * x-tlb-precise (POMPPC tcg/0031, 32-bit hash MMU): invalidations drop
++     * the TLB entries they concern instead of whole mmu_idx.
++     *  - segment registers (with x-sr-tlb): a check drops, in mmu_idx i,
++     *    the entries of the segments whose register differs from sr_snap[i]
++     *    or that were filled under another value (sr_mixed[i], one bit per
++     *    segment).  Invariant, for i in {0, 1} and each segment s:
++     *      !(sr_mixed[i] & (1 << s))  =>  every entry of mmu_idx i in
++     *      segment s was filled while env->sr[s] == sr_snap[i][s]
++     *    (a translation in segment s depends on sr[s] alone).
++     *  - tlbie: the congruence class of the 7400/7450 TLB (EA[14:19]) is
++     *    widened to EA[16:19] (16 classes); tlbie_local/global hold the
++     *    classes still to drop, here at the next context synchronisation,
++     *    on every CPU at the next sync (as TLB_NEED_LOCAL/GLOBAL_FLUSH).
++     *    The jump cache (not checked against the TLB) loses the pages of
++     *    the tlbie operands, under the 16 segments; a whole flush of its
++     *    translated mmu_idx when more than PPC_TLBIE_PAGES are pending, and
++     *    once the 16 classes have been dropped since the last one (a guest
++     *    sweeping the TLB by tlbie, as a tlbia, gets a whole flush).
++     *  - BAT writes: the entries of the BAT range, found by scanning the
++     *    TLB, instead of up to 1024 page flushes.
++     *  - TLB size: QEMU resizes a mmu_idx only when it flushes it whole,
++     *    which now seldom happens; when a mmu_idx takes more fills in 100 ms
++     *    than it has entries (below 4096 entries), it is flushed, and the
++     *    stock policy then doubles it.
++     * x-tlb-precise-verify=N: every Nth precise invalidation, re-translate
++     * each kept entry of mmu_idx 0 and 1 with each access it allows and
++     * compare the physical page (stderr summary).
++     */
++    bool tlb_precise;
++    uint16_t sr_mixed[2];
++    /* tlbie classes and pages pending here (local) and for all (global) */
++#define PPC_TLBIE_PAGES 8
++    struct PPCTlbieSet {
++        uint16_t cls;
++        uint8_t n;              /* > PPC_TLBIE_PAGES: pages overflowed */
++        uint32_t pg[PPC_TLBIE_PAGES];
++    } tlbie_local, tlbie_global;
++    uint16_t tlbie_cls_seen;    /* classes dropped since the last jc flush */
++    uint32_t tlbp_verify, tlbp_verify_n;
++    uint64_t tlbp_ops, tlbp_dropped, tlbp_runs, tlbp_entries, tlbp_bad;
++    uint64_t tlbp_sus, tlbp_resolved, tlbp_bad_nopte;
++    /*
++     * Pages filled in mmu_idx i (0, 1) and segment s since the last drop of
++     * that segment: seglog_n[i][s] > PPC_TLBP_LOG means overflowed (the drop
++     * then scans the table).  A segment drop removes those pages one by one
++     * (tlb_flush_page_by_mmuidx, which also clears their jump cache pages).
++     */
++#define PPC_TLBP_LOG 32
++    uint8_t seglog_n[2][16];
++    uint32_t seglog[2][16][PPC_TLBP_LOG];
++    /* fills per mmu_idx over 100 ms windows, to grow a thrashing TLB */
++    uint32_t tlbp_fills[4];
++    int64_t tlbp_win_ns[4];
++    uint64_t tlbp_grows, tlbp_scans;
++    /*
++     * A kept entry that no longer translates may be legitimate for a short
++     * while: the guest invalidates the PTE, then issues tlbie and sync.  It
++     * is a suspect; a divergence only if it is still there, still stale,
++     * PPC_TLBP_AGE verifications later.
++     */
++#define PPC_TLBP_SUS 32
++#define PPC_TLBP_AGE 3
++    struct {
++        uint64_t page;
++        uint64_t phys;
++        uint8_t idx, access, age, seen, used;
++    } tlbp_s[PPC_TLBP_SUS];
++    /* x-mem-stats (tcg/0031): see PPC_MS_* above */
++    bool mem_stats;
++    uint64_t ms[PPC_MS_N];
++    uint32_t ms_lmw_hist[32], ms_stmw_hist[32];
++    uint64_t ms_last;
+ #endif
+ 
+     /* Other registers */
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -174,6 +174,16 @@
+     DEFINE_PROP_BOOL("x-vfp-native", PowerPCCPU, env.vfp_native, false),
+     DEFINE_PROP_BOOL("x-vfp-native-verify", PowerPCCPU, env.vfp_native_verify,
+                      false),
++    /*
++     * POMPPC tcg/0031.  x-tlb-precise: segment register changes (with
++     * x-sr-tlb), tlbie and BAT writes drop only the TLB entries they concern
++     * (32-bit hash MMU).  x-tlb-precise-verify=N: proof mode.  Off by
++     * default.
++     */
++    DEFINE_PROP_BOOL("x-tlb-precise", PowerPCCPU, env.tlb_precise, false),
++    DEFINE_PROP_UINT32("x-tlb-precise-verify", PowerPCCPU, env.tlbp_verify, 0),
++    /* POMPPC tcg/0031: memory-side counters on stderr every 10 s */
++    DEFINE_PROP_BOOL("x-mem-stats", PowerPCCPU, env.mem_stats, false),
+     /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
+     DEFINE_PROP_UINT32("x-sr-tlb-verify", PowerPCCPU, env.sr_verify, 0),
+ };
+diff --git a/target/ppc/helper.h b/target/ppc/helper.h
+--- a/target/ppc/helper.h
++++ b/target/ppc/helper.h
+@@ -45,6 +45,7 @@
+ 
+ DEF_HELPER_3(lmw, void, env, tl, i32)
+ DEF_HELPER_FLAGS_3(stmw, TCG_CALL_NO_WG, void, env, tl, i32)
++DEF_HELPER_FLAGS_3(mem_stat, TCG_CALL_NO_RWG, void, env, tl, i32)
+ DEF_HELPER_4(lsw, void, env, tl, i32, i32)
+ DEF_HELPER_5(lswx, void, env, tl, i32, i32, i32)
+ DEF_HELPER_FLAGS_4(stsw, TCG_CALL_NO_WG, void, env, tl, i32, i32)
+diff --git a/target/ppc/helper_regs.c b/target/ppc/helper_regs.c
+--- a/target/ppc/helper_regs.c
++++ b/target/ppc/helper_regs.c
+@@ -28,6 +28,7 @@
+ #include "cpu-models.h"
+ #include "spr_common.h"
+ #include "internal.h"
++#include "exec/target_page.h"
+ 
+ /* Swap temporary saved registers with GPRs */
+ void hreg_swap_gpr_tgpr(CPUPPCState *env)
+@@ -413,13 +414,28 @@
+     if (global && (env->tlb_need_flush & TLB_NEED_GLOBAL_FLUSH)) {
+         env->tlb_need_flush &= ~TLB_NEED_GLOBAL_FLUSH;
+         env->tlb_need_flush &= ~TLB_NEED_LOCAL_FLUSH;
++        env->ms[PPC_MS_FL_GLOBAL] += env->mem_stats;
+         tlb_flush_all_cpus_synced(cs);
+         return;
+     }
+ 
++    /* x-tlb-precise: tlbie classes, on every CPU at a sync */
++    if (global && (env->tlb_need_flush & TLB_NEED_CLS_GLOBAL)) {
++        env->tlb_need_flush &= ~(TLB_NEED_CLS_GLOBAL | TLB_NEED_CLS_LOCAL);
++        env->ms[PPC_MS_FL_GLOBAL] += env->mem_stats;
++        ppc_tlbp_cls_global(env);
++        /* a local flush or a segment check may still be pending */
++    }
++    if (env->tlb_need_flush & TLB_NEED_CLS_LOCAL) {
++        env->tlb_need_flush &= ~TLB_NEED_CLS_LOCAL;
++        env->ms[PPC_MS_FL_LOCAL] += env->mem_stats;
++        ppc_tlbp_drop_local(env);
++    }
++
+     /* Then handle local ones */
+     if (env->tlb_need_flush & TLB_NEED_LOCAL_FLUSH) {
+         env->tlb_need_flush &= ~(TLB_NEED_LOCAL_FLUSH | TLB_NEED_SR_CHECK);
++        env->ms[PPC_MS_FL_LOCAL] += env->mem_stats;
+         tlb_flush(cs);
+         if (env->sr_tlb) {
+             /* every mmu_idx is empty: any segment set describes it */
+@@ -453,7 +469,9 @@
+         memcpy(env->sr_snap[i], env->sr, sizeof(env->sr_snap[i]));
+         env->sr_snap_gen[i] = env->sr_gen;
+         env->sr_snap_ok[i] = true;
++        env->sr_mixed[i] = 0;
+     }
++    memset(env->seglog_n, 0, sizeof(env->seglog_n));
+ }
+ 
+ /*
+@@ -461,14 +479,38 @@
+  * registers.  If they differ from the set the mmu_idx is tagged with, its
+  * entries become mixed: the tag is dropped and the next check flushes it.
+  */
+-void ppc_sr_tlb_fill(CPUPPCState *env, int mmu_idx)
++void ppc_sr_tlb_fill(CPUPPCState *env, int mmu_idx, vaddr eaddr)
+ {
++    if (env->tlb_precise && mmu_idx <= 1) {
++        /* x-tlb-precise: log the page in its segment (see cpu.h) */
++        int s = (eaddr >> 28) & 15;
++        unsigned n = env->seglog_n[mmu_idx][s];
++        uint32_t pg = (uint32_t)eaddr >> TARGET_PAGE_BITS;
++
++        if (n < PPC_TLBP_LOG) {
++            if (n == 0 || env->seglog[mmu_idx][s][n - 1] != pg) {
++                env->seglog[mmu_idx][s][n] = pg;
++                env->seglog_n[mmu_idx][s] = n + 1;
++            }
++        } else {
++            env->seglog_n[mmu_idx][s] = PPC_TLBP_LOG + 1;
++        }
++    }
+     if (mmu_idx > 1 || !env->sr_snap_ok[mmu_idx]) {
+         return;
+     }
+     if (env->sr_snap_gen[mmu_idx] == env->sr_gen) {
+         return;
+     }
++    if (env->tlb_precise) {
++        /* x-tlb-precise: only this segment's entries become mixed */
++        int s = (eaddr >> 28) & 15;
++
++        if (env->sr[s] != env->sr_snap[mmu_idx][s]) {
++            env->sr_mixed[mmu_idx] |= 1 << s;
++        }
++        return;
++    }
+     if (sr_snap_equal(env, mmu_idx)) {
+         env->sr_snap_gen[mmu_idx] = env->sr_gen;
+     } else {
+@@ -493,6 +535,30 @@
+         if (i > 1 || (flush & (1 << i))) {
+             continue;
+         }
++        if (env->tlb_precise && env->sr_snap_ok[i]) {
++            /* x-tlb-precise: drop the segments that changed or mixed */
++            uint16_t segs = env->sr_mixed[i];
++
++            if (env->sr_snap_gen[i] != env->sr_gen) {
++                for (int s = 0; s < 16; s++) {
++                    if (env->sr_snap[i][s] != env->sr[s]) {
++                        segs |= 1 << s;
++                    }
++                }
++            }
++            memcpy(env->sr_snap[i], env->sr, sizeof(env->sr_snap[i]));
++            env->sr_snap_gen[i] = env->sr_gen;
++            env->sr_mixed[i] = 0;
++            if (segs) {
++                if (env->mem_stats) {
++                    env->ms[PPC_MS_FL_SR0 + i]++;
++                }
++                ppc_tlbp_drop_segs(env, i, segs);
++            } else {
++                ppc_tlbp_verify_tick(env);
++            }
++            continue;
++        }
+         if (env->sr_snap_ok[i] && sr_snap_equal(env, i)) {
+             env->sr_snap_gen[i] = env->sr_gen;
+             if (env->sr_verify && !(env->tlb_need_flush &
+@@ -507,8 +573,13 @@
+         memcpy(env->sr_snap[i], env->sr, sizeof(env->sr_snap[i]));
+         env->sr_snap_gen[i] = env->sr_gen;
+         env->sr_snap_ok[i] = true;
++        env->sr_mixed[i] = 0;
+     }
+     if (flush) {
++        if (env->mem_stats) {
++            env->ms[PPC_MS_FL_SR0] += flush & 1;
++            env->ms[PPC_MS_FL_SR1] += (flush >> 1) & 1;
++        }
+         tlb_flush_by_mmuidx(env_cpu(env), flush);
+     }
+ }
+diff --git a/target/ppc/helper_regs.h b/target/ppc/helper_regs.h
+--- a/target/ppc/helper_regs.h
++++ b/target/ppc/helper_regs.h
+@@ -38,8 +38,14 @@
+ void check_tlb_flush(CPUPPCState *env, bool global);
+ void ppc_sr_tlb_check(CPUPPCState *env);
+ void ppc_sr_tlb_rebase(CPUPPCState *env);
+-void ppc_sr_tlb_fill(CPUPPCState *env, int mmu_idx);
++void ppc_sr_tlb_fill(CPUPPCState *env, int mmu_idx, vaddr eaddr);
++void ppc_tlbp_drop(CPUPPCState *env, MMUIdxMap idxmap, int kind, uint64_t arg);
++void ppc_tlbp_drop_segs(CPUPPCState *env, int idx, uint16_t segs);
++void ppc_tlbp_cls_global(CPUPPCState *env);
++void ppc_tlbp_drop_local(CPUPPCState *env);
++void ppc_tlbp_verify_tick(CPUPPCState *env);
+ void ppc_sr_tlb_verify(CPUPPCState *env, int mmu_idx);
++void ppc_mem_stats_tick(CPUPPCState *env);     /* x-mem-stats, tcg/0031 */
+ #endif
+ 
+ #endif /* HELPER_REGS_H */
+diff --git a/target/ppc/mmu_helper.c b/target/ppc/mmu_helper.c
+--- a/target/ppc/mmu_helper.c
++++ b/target/ppc/mmu_helper.c
+@@ -38,6 +38,8 @@
+ #include "mmu-booke.h"
+ #include "exec/helper-proto.h"
+ #include "accel/tcg/cpu-ldst.h"
++#include "qemu/timer.h"
++#include "system/cpus.h"
+ 
+ /* #define FLUSH_ALL_TLBS */
+ 
+@@ -155,9 +157,24 @@
+ 
+     base = BATu & ~0x0001FFFF;
+     end = base + mask + 0x00020000;
++    if (cpu_env(cs)->tlb_precise) {
++        /*
++         * x-tlb-precise: up to 64 pages, page by page (the stock loop); a
++         * larger range by a scan of the TLB instead of up to 1024 page
++         * flushes, or a whole flush beyond.
++         */
++        if (((end - base) >> TARGET_PAGE_BITS) > 64) {
++            cpu_env(cs)->ms[PPC_MS_BAT_PAGES] += cpu_env(cs)->mem_stats;
++            ppc_tlbp_drop(cpu_env(cs), (1u << NB_MMU_MODES) - 1, 2,
++                          ((uint64_t)(uint32_t)base << 32) |
++                          (uint32_t)(end - 1));
++            return;
++        }
++    }
+     if (((end - base) >> TARGET_PAGE_BITS) > 1024) {
+         /* Flushing 1024 4K pages is slower than a complete flush */
+         qemu_log_mask(CPU_LOG_MMU, "Flush all BATs\n");
++        cpu_env(cs)->ms[PPC_MS_BAT_FULL] += cpu_env(cs)->mem_stats;
+         tlb_flush(cs);
+         qemu_log_mask(CPU_LOG_MMU, "Flush done\n");
+         return;
+@@ -165,6 +182,7 @@
+     qemu_log_mask(CPU_LOG_MMU, "Flush BAT from " TARGET_FMT_lx
+                   " to " TARGET_FMT_lx " (" TARGET_FMT_lx ")\n",
+                   base, end, mask);
++    cpu_env(cs)->ms[PPC_MS_BAT_PAGES] += cpu_env(cs)->mem_stats;
+     for (page = base; page != end; page += TARGET_PAGE_SIZE) {
+         tlb_flush_page(cs, page);
+     }
+@@ -278,6 +296,8 @@
+         break;
+     case POWERPC_MMU_32B:
+         env->tlb_need_flush = 0;
++        env->tlbie_local.cls = env->tlbie_global.cls = 0;
++        env->tlbie_local.n = env->tlbie_global.n = 0;
+         tlb_flush(env_cpu(env));
+         break;
+     default:
+@@ -287,6 +307,21 @@
+     }
+ }
+ 
++/* x-tlb-precise (tcg/0031): note the class and the page of a tlbie */
++static void ppc_tlbie_set_add(struct PPCTlbieSet *s, target_ulong addr)
++{
++    uint32_t pg = (uint32_t)addr >> TARGET_PAGE_BITS;
++
++    s->cls |= 1 << (pg & 15);
++    if (s->n < PPC_TLBIE_PAGES) {
++        if (s->n == 0 || s->pg[s->n - 1] != pg) {
++            s->pg[s->n++] = pg;
++        }
++    } else {
++        s->n = PPC_TLBIE_PAGES + 1;
++    }
++}
++
+ void ppc_tlb_invalidate_one(CPUPPCState *env, target_ulong addr)
+ {
+ #if !defined(FLUSH_ALL_TLBS)
+@@ -308,6 +343,18 @@
+         ppc6xx_tlb_invalidate_virt(env, addr, 1);
+         break;
+     case POWERPC_MMU_32B:
++        if (env->tlb_precise) {
++            /*
++             * x-tlb-precise: the congruence class, widened (cpu.h), here at
++             * the next context synchronisation and, as the translator no
++             * longer sets TLB_NEED_GLOBAL_FLUSH, on every CPU at the next
++             * sync (what the stock global flush does, restricted).
++             */
++            ppc_tlbie_set_add(&env->tlbie_local, addr);
++            ppc_tlbie_set_add(&env->tlbie_global, addr);
++            env->tlb_need_flush |= TLB_NEED_CLS_LOCAL | TLB_NEED_CLS_GLOBAL;
++            break;
++        }
+         /*
+          * Actual CPUs invalidate entire congruence classes based on
+          * the geometry of their TLBs and some OSes take that into
+@@ -413,6 +460,7 @@
+ 
+ void helper_tlbie(CPUPPCState *env, target_ulong addr)
+ {
++    env->ms[PPC_MS_TLBIE] += env->mem_stats;
+     ppc_tlb_invalidate_one(env, addr);
+ }
+ 
+@@ -1434,10 +1482,297 @@
+     }
+ }
+ 
++/*
++ * x-tlb-precise (POMPPC tcg/0031).  Predicates on the virtual page of a TLB
++ * entry: kind 0, arg = mask of segments; kind 1, arg = mask of tlbie
++ * classes (EA[16:19]); kind 2, arg = first page << 32 | last byte of a BAT
++ * range.  32-bit effective addresses only (32-bit hash MMU).
++ */
++static bool tlbp_match_seg(vaddr page, uint64_t segs)
++{
++    return page <= UINT32_MAX && ((segs >> ((page >> 28) & 15)) & 1);
++}
++
++static bool tlbp_match_cls(vaddr page, uint64_t cls)
++{
++    return page <= UINT32_MAX &&
++           ((cls >> ((page >> TARGET_PAGE_BITS) & 15)) & 1);
++}
++
++static bool tlbp_match_range(vaddr page, uint64_t r)
++{
++    return page >= (r >> 32) && page <= (uint32_t)r;
++}
++
++static const PomppcTlbMatch tlbp_match[3] = {
++    tlbp_match_seg, tlbp_match_cls, tlbp_match_range,
++};
++
++/* one comparator of a kept entry, re-translated as access t */
++static void tlbp_verify_one(CPUPPCState *env, int mmu_idx, uint64_t cmp,
++                            MMUAccessType t, CPUTLBEntryFull *full)
++{
++    PowerPCCPU *cpu = env_archcpu(env);
++    hwaddr raddr;
++    int psize, prot;
++    bool ok;
++    vaddr a = cmp & TARGET_PAGE_MASK;
++
++    if (cmp & TLB_INVALID_MASK) {
++        return;
++    }
++    env->tlbp_entries++;
++    ok = ppc_xlate(cpu, a, t, &raddr, &psize, &prot, mmu_idx, false);
++    if (!ok ||
++        (raddr & TARGET_PAGE_MASK) != (full->phys_addr & TARGET_PAGE_MASK)) {
++        int k, free_k = -1;
++
++        for (k = 0; k < PPC_TLBP_SUS; k++) {
++            if (!env->tlbp_s[k].used) {
++                free_k = free_k < 0 ? k : free_k;
++            } else if (env->tlbp_s[k].page == a &&
++                       env->tlbp_s[k].idx == mmu_idx &&
++                       env->tlbp_s[k].access == t &&
++                       env->tlbp_s[k].phys == full->phys_addr) {
++                break;
++            }
++        }
++        if (k == PPC_TLBP_SUS) {
++            /* a new suspect (or no room left: judged now) */
++            if (free_k >= 0) {
++                env->tlbp_s[free_k].page = a;
++                env->tlbp_s[free_k].phys = full->phys_addr;
++                env->tlbp_s[free_k].idx = mmu_idx;
++                env->tlbp_s[free_k].access = t;
++                env->tlbp_s[free_k].age = 0;
++                env->tlbp_s[free_k].seen = 1;
++                env->tlbp_s[free_k].used = 1;
++                env->tlbp_sus++;
++                return;
++            }
++        } else {
++            env->tlbp_s[k].seen = 1;
++            if (++env->tlbp_s[k].age < PPC_TLBP_AGE) {
++                return;
++            }
++            env->tlbp_s[k].used = 0;
++        }
++        /*
++         * No translation at all: the PTE went away without a tlbie (OpenBIOS
++         * evicts its identity PTEs so); a 7400 keeps such an entry too.  A
++         * different page is the serious kind.  Both are counted.
++         */
++        env->tlbp_bad_nopte += !ok;
++        if (env->tlbp_bad++ < 20) {
++            CPUState *o;
++            uint32_t others = 0;
++            CPU_FOREACH(o) {
++                if (o != env_cpu(env)) {
++                    others |= cpu_env(o)->tlb_need_flush;
++                }
++            }
++            fprintf(stderr, "x-tlb-precise-verify: DIVERGENCE cpu %d idx %d "
++                    "access %d ea 0x%" PRIx64 " tlb 0x%" HWADDR_PRIx
++                    " now 0x%" HWADDR_PRIx " (other CPUs pending flush 0x%x)"
++                    " sr 0x%" PRIx64 " snap 0x%" PRIx64 "\n",
++                    env_cpu(env)->cpu_index, mmu_idx, t, (uint64_t)a,
++                    full->phys_addr, raddr, others,
++                    (uint64_t)env->sr[(a >> 28) & 15],
++                    (uint64_t)env->sr_snap[mmu_idx & 1][(a >> 28) & 15]);
++        }
++    }
++}
++
++static void tlbp_verify(CPUPPCState *env)
++{
++    CPUState *cs = env_cpu(env);
++
++    if (env->tlb_need_flush & (TLB_NEED_LOCAL_FLUSH | TLB_NEED_GLOBAL_FLUSH |
++                               TLB_NEED_CLS_LOCAL | TLB_NEED_SR_CHECK) ||
++        !cpu_work_list_empty(cs)) {
++        /*
++         * Stale entries are legitimate until that flush, or until the
++         * flush another CPU queued here (its tlbie, then sync) has run.
++         */
++        return;
++    }
++    for (int k = 0; k < PPC_TLBP_SUS; k++) {
++        env->tlbp_s[k].seen = 0;
++    }
++    for (int i = 0; i < 2; i++) {
++        CPUTLBDescFast *f = cpu_tlb_fast(cs, i);
++        CPUTLBDesc *d = &cs->neg.tlb.d[i];
++        size_t n = (f->mask >> CPU_TLB_ENTRY_BITS) + 1;
++
++        if (env->sr_tlb && i != ppc_env_mmu_index(env, false) &&
++            i != ppc_env_mmu_index(env, true)) {
++            continue;   /* x-sr-tlb: checked when it becomes current */
++        }
++        for (size_t j = 0; j < n + CPU_VTLB_SIZE; j++) {
++            CPUTLBEntry *e = j < n ? &f->table[j] : &d->vtable[j - n];
++            CPUTLBEntryFull *full = j < n ? &d->fulltlb[j]
++                                          : &d->vfulltlb[j - n];
++
++            tlbp_verify_one(env, i, e->addr_read, MMU_DATA_LOAD, full);
++            tlbp_verify_one(env, i, qatomic_read(&e->addr_write),
++                            MMU_DATA_STORE, full);
++            tlbp_verify_one(env, i, e->addr_code, MMU_INST_FETCH, full);
++        }
++    }
++    /* suspects of a checked mmu_idx no longer seen stale: resolved */
++    for (int k = 0; k < PPC_TLBP_SUS; k++) {
++        int i = env->tlbp_s[k].idx;
++
++        if (env->tlbp_s[k].used && !env->tlbp_s[k].seen &&
++            (!env->sr_tlb || i == ppc_env_mmu_index(env, false) ||
++             i == ppc_env_mmu_index(env, true))) {
++            env->tlbp_s[k].used = 0;
++            env->tlbp_resolved++;
++        }
++    }
++    if ((++env->tlbp_runs & 0x3ff) == 0) {
++        fprintf(stderr, "x-tlb-precise-verify: cpu %d, %" PRIu64 " precise "
++                "invalidations, %" PRIu64 " entries dropped, %" PRIu64
++                " checks, %" PRIu64 " accesses re-translated, %" PRIu64
++                " suspects (%" PRIu64 " resolved), %" PRIu64 " divergent"
++                " (%" PRIu64 " without PTE, %" PRIu64 " other page)\n",
++                cs->cpu_index, env->tlbp_ops, env->tlbp_dropped,
++                env->tlbp_runs, env->tlbp_entries, env->tlbp_sus,
++                env->tlbp_resolved, env->tlbp_bad, env->tlbp_bad_nopte,
++                env->tlbp_bad - env->tlbp_bad_nopte);
++    }
++}
++
++void ppc_tlbp_verify_tick(CPUPPCState *env)
++{
++    if (env->tlbp_verify && ++env->tlbp_verify_n >= env->tlbp_verify) {
++        env->tlbp_verify_n = 0;
++        tlbp_verify(env);
++    }
++}
++
++void ppc_tlbp_drop(CPUPPCState *env, MMUIdxMap idxmap, int kind, uint64_t arg)
++{
++    env->tlbp_ops++;
++    env->tlbp_scans++;
++    env->tlbp_dropped += pomppc_tlb_flush_match(env_cpu(env), idxmap,
++                                                tlbp_match[kind], arg, 0, true);
++    ppc_tlbp_verify_tick(env);
++}
++
++/*
++ * tlbie classes and pages: the TLB entries of mmu_idx 0 and 1 in those
++ * classes (only the slots at those indexes modulo 16 hold them); the jump
++ * cache pages of the operands under each segment, or a whole flush of its
++ * mmu_idx 0 and 1 (pages overflowed, or every class dropped since the last
++ * whole flush).
++ */
++static void ppc_tlbp_drop_tlbie(CPUPPCState *env, const struct PPCTlbieSet *s)
++{
++    CPUState *cs = env_cpu(env);
++    bool whole;
++
++    env->tlbp_ops++;
++    env->tlbie_cls_seen |= s->cls;
++    whole = s->n > PPC_TLBIE_PAGES || env->tlbie_cls_seen == 0xffff;
++    if (whole) {
++        env->tlbie_cls_seen = 0;
++    }
++    env->tlbp_dropped += pomppc_tlb_flush_match(cs, 3, tlbp_match_cls, s->cls,
++                                                s->cls, whole);
++    if (!whole) {
++        for (unsigned j = 0; j < s->n; j++) {
++            for (uint32_t seg = 0; seg < 16; seg++) {
++                vaddr pg = (s->pg[j] << TARGET_PAGE_BITS) & 0x0fffffff;
++
++                pomppc_jc_clear_page(cs, (vaddr)(seg << 28) | pg);
++            }
++        }
++    }
++    ppc_tlbp_verify_tick(env);
++}
++
++void ppc_tlbp_drop_local(CPUPPCState *env)
++{
++    struct PPCTlbieSet s = env->tlbie_local;
++
++    env->tlbie_local.cls = 0;
++    env->tlbie_local.n = 0;
++    ppc_tlbp_drop_tlbie(env, &s);
++}
++
++/*
++ * Segments @segs of mmu_idx @idx: the logged pages one by one (with their
++ * jump cache pages, as tlb_flush_page does), a scan for the overflowed
++ * segments.  Every entry of a segment was filled since its last drop, hence
++ * logged, or the log overflowed.
++ */
++void ppc_tlbp_drop_segs(CPUPPCState *env, int idx, uint16_t segs)
++{
++    CPUState *cs = env_cpu(env);
++    uint16_t over = 0;
++
++    env->tlbp_ops++;
++    for (int s = 0; s < 16; s++) {
++        unsigned n = env->seglog_n[idx][s];
++
++        if (!((segs >> s) & 1)) {
++            continue;
++        }
++        if (n > PPC_TLBP_LOG) {
++            over |= 1 << s;
++        } else {
++            for (unsigned j = 0; j < n; j++) {
++                tlb_flush_page_by_mmuidx(cs, (vaddr)env->seglog[idx][s][j]
++                                         << TARGET_PAGE_BITS, 1 << idx);
++            }
++        }
++        env->seglog_n[idx][s] = 0;
++    }
++    if (over) {
++        env->tlbp_scans++;
++        env->tlbp_dropped += pomppc_tlb_flush_match(cs, 1 << idx,
++                                                    tlbp_match_seg, over, 0,
++                                                    true);
++    }
++    ppc_tlbp_verify_tick(env);
++}
++
++static void tlbp_cls_work(CPUState *cs, run_on_cpu_data d)
++{
++    struct PPCTlbieSet *s = d.host_ptr;
++
++    ppc_tlbp_drop_tlbie(cpu_env(cs), s);
++    g_free(s);
++}
++
++/*
++ * The stock code does tlb_flush_all_cpus_synced(): every other CPU flushes
++ * at its next exit, this one in an exclusive section before it goes on.
++ * Same synchronisation, restricted to the classes and pages; one copy of
++ * the set per CPU, freed by its work.
++ */
++void ppc_tlbp_cls_global(CPUPPCState *env)
++{
++    CPUState *src = env_cpu(env), *cs;
++    struct PPCTlbieSet s = env->tlbie_global;
++
++    env->tlbie_global.cls = env->tlbie_local.cls = 0;
++    env->tlbie_global.n = env->tlbie_local.n = 0;
++    CPU_FOREACH(cs) {
++        if (cs != src) {
++            async_run_on_cpu(cs, tlbp_cls_work,
++                             RUN_ON_CPU_HOST_PTR(g_memdup2(&s, sizeof(s))));
++        }
++    }
++    async_safe_run_on_cpu(src, tlbp_cls_work,
++                          RUN_ON_CPU_HOST_PTR(g_memdup2(&s, sizeof(s))));
++}
++
+ void ppc_sr_tlb_verify(CPUPPCState *env, int mmu_idx)
+ {
+     CPUState *cs = env_cpu(env);
+-    CPUTLBDescFast *f = &cs->neg.tlb.f[mmu_idx];
++    CPUTLBDescFast *f = cpu_tlb_fast(cs, mmu_idx);
+     CPUTLBDesc *d = &cs->neg.tlb.d[mmu_idx];
+     size_t n = (f->mask >> CPU_TLB_ENTRY_BITS) + 1;
+ 
+@@ -1455,6 +1790,81 @@
+     }
+ }
+ 
++/* x-mem-stats: dcbz (arg 64), lmw (reg), stmw (reg | 32), before the op */
++void helper_mem_stat(CPUPPCState *env, target_ulong addr, uint32_t arg)
++{
++    uint32_t reg = arg & 31;
++
++    if (arg == 64) {
++        env->ms[PPC_MS_DCBZ]++;
++        return;
++    }
++    int k = arg & 32 ? PPC_MS_STMW : PPC_MS_LMW;
++    env->ms[k]++;
++    env->ms[k + 1] += 32 - reg;
++    env->ms[k + 2] += (uint32_t)-(addr | TARGET_PAGE_MASK) < (32 - reg) * 4;
++    (k == PPC_MS_LMW ? env->ms_lmw_hist : env->ms_stmw_hist)[reg]++;
++}
++
++/*
++ * x-mem-stats (POMPPC tcg/0031): print and reset this CPU's counters when
++ * 10 s of host time have gone by.  Called from the fill path.
++ */
++void ppc_mem_stats_tick(CPUPPCState *env)
++{
++    static const char *const nm[PPC_MS_N] = {
++        "dcbz", "lmw", "lmw_w", "lmw_x",
++        "stmw", "stmw_w", "stmw_x",
++        "fill0", "fill1", "fill2", "fill3", "fill_t", "fill_i", "fill_w",
++        "fill_probe", "tlbie", "fl_local", "fl_global", "fl_sr0", "fl_sr1",
++        "bat_full", "bat_pages", "wall",
++    };
++    CPUState *cs = env_cpu(env);
++    uint64_t now = cpu_get_host_ticks();
++    int64_t ns = get_clock();
++    GString *g;
++
++    if (env->ms_last == 0) {
++        env->ms_last = now;
++        env->ms[PPC_MS_WALL] = ns;
++        return;
++    }
++    if (ns - (int64_t)env->ms[PPC_MS_WALL] < 10 * NANOSECONDS_PER_SECOND) {
++        return;
++    }
++    g = g_string_new(NULL);
++    g_string_append_printf(g, "mem-stats: cpu %d s %.3f ticks %" PRIu64,
++                           cs->cpu_index,
++                           (ns - (int64_t)env->ms[PPC_MS_WALL]) / 1e9,
++                           now - env->ms_last);
++    for (int i = 0; i < PPC_MS_WALL; i++) {
++        g_string_append_printf(g, " %s %" PRIu64, nm[i], env->ms[i]);
++    }
++    g_string_append(g, " tlbsize");
++    for (int i = 0; i < 4; i++) {
++        g_string_append_printf(g, " %zu",
++            (size_t)((cpu_tlb_fast(cs, i)->mask >> CPU_TLB_ENTRY_BITS) + 1));
++    }
++    g_string_append_printf(g, " precise %" PRIu64 " scans %" PRIu64
++                           " grows %" PRIu64, env->tlbp_ops, env->tlbp_scans,
++                           env->tlbp_grows);
++    g_string_append(g, " lmwh");
++    for (int i = 0; i < 32; i++) {
++        g_string_append_printf(g, " %u", env->ms_lmw_hist[i]);
++    }
++    g_string_append(g, " stmwh");
++    for (int i = 0; i < 32; i++) {
++        g_string_append_printf(g, " %u", env->ms_stmw_hist[i]);
++    }
++    fprintf(stderr, "%s\n", g->str);
++    g_string_free(g, true);
++    memset(env->ms, 0, sizeof(env->ms));
++    memset(env->ms_lmw_hist, 0, sizeof(env->ms_lmw_hist));
++    memset(env->ms_stmw_hist, 0, sizeof(env->ms_stmw_hist));
++    env->ms_last = now;
++    env->ms[PPC_MS_WALL] = ns;
++}
++
+ bool ppc_cpu_tlb_fill(CPUState *cs, vaddr eaddr, int size,
+                       MMUAccessType access_type, int mmu_idx,
+                       bool probe, uintptr_t retaddr)
+@@ -1462,14 +1872,54 @@
+     PowerPCCPU *cpu = POWERPC_CPU(cs);
+     hwaddr raddr;
+     int page_size, prot;
++    uint64_t t0 = 0;
+ 
++    if (unlikely(cpu->env.mem_stats)) {
++        if ((cpu->env.ms[PPC_MS_FILL0 + (mmu_idx & 3)] & 1023) == 0) {
++            ppc_mem_stats_tick(&cpu->env);
++        }
++        cpu->env.ms[PPC_MS_FILL0 + (mmu_idx & 3)]++;
++        if (access_type == MMU_INST_FETCH) {
++            cpu->env.ms[PPC_MS_FILL_I]++;
++        } else if (access_type == MMU_DATA_STORE) {
++            cpu->env.ms[PPC_MS_FILL_W]++;
++        }
++        cpu->env.ms[PPC_MS_FILL_PROBE] += probe;
++        t0 = cpu_get_host_ticks();
++    }
++    if (cpu->env.tlb_precise && mmu_idx < 4 &&
++        (++cpu->env.tlbp_fills[mmu_idx] & 63) == 0) {
++        /*
++         * x-tlb-precise: the stock resize policy runs at whole flushes of a
++         * mmu_idx, which have become rare.  More fills in 100 ms than the
++         * table has entries: flush it, QEMU then doubles it (up to 4096
++         * entries here: the drops scan the table).  Resizing here is
++         * allowed: the caller re-reads its entry (cputlb.c, mmu_lookup1).
++         */
++        int64_t now = get_clock_realtime();
++
++        if (now - cpu->env.tlbp_win_ns[mmu_idx] >= 100 * SCALE_MS) {
++            size_t n = (cpu_tlb_fast(cs, mmu_idx)->mask >>
++                        CPU_TLB_ENTRY_BITS) + 1;
++
++            if (cpu->env.tlbp_fills[mmu_idx] > n && n < 4096) {
++                cpu->env.tlbp_grows++;
++                tlb_flush_by_mmuidx(cs, 1 << mmu_idx);
++            }
++            cpu->env.tlbp_fills[mmu_idx] = 0;
++            cpu->env.tlbp_win_ns[mmu_idx] = now;
++        }
++    }
+     if (ppc_xlate(cpu, eaddr, access_type, &raddr,
+                   &page_size, &prot, mmu_idx, !probe)) {
+         if (cpu->env.sr_tlb) {
+-            ppc_sr_tlb_fill(&cpu->env, mmu_idx);
++            ppc_sr_tlb_fill(&cpu->env, mmu_idx, eaddr);
+         }
+         tlb_set_page(cs, eaddr & TARGET_PAGE_MASK, raddr & TARGET_PAGE_MASK,
+                      prot, mmu_idx, 1UL << page_size);
++        if (unlikely(cpu->env.mem_stats)) {
++            cpu->env.ms[PPC_MS_FILL_T] += cpu_get_host_ticks() - t0;
++        }
+         return true;
+     }
+     if (probe) {
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -176,6 +176,8 @@
+     bool lfs_inline;
+     bool vperm_fast;
+     bool vmx_inline, vmx_verify; /* x-vmx-inline, x-vmx-verify (tcg/0021) */
++    bool tlb_precise;            /* x-tlb-precise, 32-bit hash MMU (tcg/0031) */
++    bool mem_stats;              /* x-mem-stats (tcg/0031) */
+     bool vfp_native, vfp_nverify; /* x-vfp-native(-verify) (tcg/0022) */
+     const CPUPPCState *env;     /* x-vfp-native: its gate (tcg/0022) */
+     bool need_access_type;
+@@ -2817,6 +2819,9 @@
+     t0 = tcg_temp_new();
+     t1 = tcg_constant_i32(rD(ctx->opcode));
+     gen_addr_imm_index(ctx, t0, 0);
++    if (ctx->mem_stats) {
++        gen_helper_mem_stat(tcg_env, t0, tcg_constant_i32(rD(ctx->opcode)));
++    }
+     gen_helper_lmw(tcg_env, t0, t1);
+ }
+ 
+@@ -2834,6 +2839,10 @@
+     t0 = tcg_temp_new();
+     t1 = tcg_constant_i32(rS(ctx->opcode));
+     gen_addr_imm_index(ctx, t0, 0);
++    if (ctx->mem_stats) {
++        gen_helper_mem_stat(tcg_env, t0,
++                            tcg_constant_i32(rS(ctx->opcode) | 32));
++    }
+     gen_helper_stmw(tcg_env, t0, t1);
+ }
+ 
+@@ -4539,6 +4548,9 @@
+ 
+     gen_set_access_type(ctx, ACCESS_CACHE);
+     gen_addr_reg_index(ctx, tcgv_addr);
++    if (ctx->mem_stats) {
++        gen_helper_mem_stat(tcg_env, tcgv_addr, tcg_constant_i32(64));
++    }
+ 
+ #ifdef TARGET_PPC64
+     if (ctx->excp_model == POWERPC_EXCP_970 && !(ctx->opcode & 0x00200000)) {
+@@ -6583,6 +6595,8 @@
+     ctx->env = env;
+     ctx->lazy_tlb_flush = env->mmu_model == POWERPC_MMU_32B
+         || env->mmu_model & POWERPC_MMU_64;
++    ctx->tlb_precise = env->tlb_precise && env->mmu_model == POWERPC_MMU_32B;
++    ctx->mem_stats = env->mem_stats;
+ 
+     ctx->fpu_enabled = (hflags >> HFLAGS_FP) & 1;
+     ctx->fp_inline = env->fp_inline && env->fp_prime_mask;
+diff --git a/target/ppc/translate/storage-ctrl-impl.c.inc b/target/ppc/translate/storage-ctrl-impl.c.inc
+--- a/target/ppc/translate/storage-ctrl-impl.c.inc
++++ b/target/ppc/translate/storage-ctrl-impl.c.inc
+@@ -238,7 +238,8 @@
+         gen_helper_tlbie(tcg_env, cpu_gpr[rb]);
+     }
+ 
+-    if (local) {
++    if (local || ctx->tlb_precise) {
++        /* x-tlb-precise (tcg/0031): helper_tlbie posted its classes */
+         return true;
+     }
+ 

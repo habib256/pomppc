@@ -25,6 +25,7 @@
 #   • les trois mêmes sur hôte x86-64 (op ppc_fp32, TSC, vperm) — patches/tcg/0017-0019
 #   • flottant AltiVec à 4 voies par AVX/FMA3 sur hôte x86-64 — patches/tcg/0020
 #   • AltiVec en ligne, flottant AltiVec natif, mftb sans div, JIT à 2 Gio — patches/tcg/0021-0024
+#   • TLB invalidé avec précision, lmw/stmw courts et dcbz en ligne — patches/tcg/0031-0033
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -852,6 +853,42 @@ accel/tcg/translator.c tb_jmp_cache_word
 tcg/region.c saved_addr = tcg_jit_addr
 tcg/aarch64/tcg-target.c.inc TCG_TYPE_PTR, arg
 TCG_M4_MARKERS
+  # --- 4 vicies ter. Le côté mémoire sur le PC (tcg/0031-0033), docs/tcg-g4.md §32 ---
+  # 0031 : invalidations précises du TLB (x-tlb-precise : tlbie par classe,
+  # changement de segment par pages journalisées, BAT par balayage) et compteurs
+  # (x-mem-stats) ; 0032 : lmw/stmw courts en ligne (x-lmw-inline) ; 0033 : dcbz
+  # en ligne (x-dcbz-inline). Propriétés éteintes par défaut.
+  if ! grep -q "x-tlb-precise" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : invalidations précises du TLB (x-tlb-precise)"
+    patch_strict "$ROOT/patches/tcg/0031-ppc-tlb-precise.patch"
+  fi
+  if ! grep -q "x-lmw-inline" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : lmw/stmw courts en ligne (x-lmw-inline)"
+    patch_strict "$ROOT/patches/tcg/0032-ppc-lmw-inline.patch"
+  fi
+  if ! grep -q "x-dcbz-inline" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : dcbz en ligne (x-dcbz-inline)"
+    patch_strict "$ROOT/patches/tcg/0033-ppc-dcbz-inline.patch"
+  fi
+  for f in accel/tcg/cputlb.c include/exec/cputlb.h target/ppc/cpu.h \
+           target/ppc/cpu_init.c target/ppc/helper.h target/ppc/helper_regs.c \
+           target/ppc/helper_regs.h target/ppc/mem_helper.c target/ppc/mmu_helper.c \
+           target/ppc/translate.c target/ppc/translate/storage-ctrl-impl.c.inc; do
+    rm -f "$f.orig"
+  done
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0031-0033 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG31_MARKERS'
+accel/tcg/cputlb.c pomppc_tlb_flush_match
+target/ppc/cpu_init.c x-tlb-precise
+target/ppc/mmu_helper.c ppc_tlbp_drop_segs
+target/ppc/mmu_helper.c helper_mem_stat
+target/ppc/translate.c gen_lmw_inline
+target/ppc/mem_helper.c helper_lmw_verify
+target/ppc/cpu_init.c x-dcbz-inline
+target/ppc/mem_helper.c helper_dcbz_verify
+TCG31_MARKERS
 fi
 
 # --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---
@@ -1020,6 +1057,9 @@ check_opt x-vmx-inline   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-v
 check_opt x-vfp-native   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-vfp-native=on
 check_opt x-lmw-vector   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-lmw-vector=on
 check_opt x-jc-word      qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jc-word=on
+check_opt x-tlb-precise  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-tlb-precise=on
+check_opt x-lmw-inline   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-lmw-inline=on
+check_opt x-dcbz-inline  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-dcbz-inline=on
 echo
 echo "→ $CAPS"
 

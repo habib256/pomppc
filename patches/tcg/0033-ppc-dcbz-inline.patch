@@ -1,0 +1,143 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1502,6 +1502,14 @@
+     bool lmw_inline, lmw_inline_verify;
+     uint64_t lmwv_n, lmwv_bad, lmwv_io;
+     /*
++     * x-dcbz-inline (POMPPC tcg/0033): dcbz with a 32-byte line as four
++     * 8-byte stores of zero in the generated code (those of the helper's
++     * I/O path), the reservation cleared as the helper does.
++     * x-dcbz-inline-verify: each one re-checked (stderr summary).
++     */
++    bool dcbz_inline, dcbz_inline_verify;
++    uint64_t dcbzv_n, dcbzv_bad, dcbzv_io;
++    /*
+      * A kept entry that no longer translates may be legitimate for a short
+      * while: the guest invalidates the PTE, then issues tlbie and sync.  It
+      * is a suspect; a divergence only if it is still there, still stale,
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -189,6 +189,14 @@
+     DEFINE_PROP_BOOL("x-lmw-inline", PowerPCCPU, env.lmw_inline, false),
+     DEFINE_PROP_BOOL("x-lmw-inline-verify", PowerPCCPU, env.lmw_inline_verify,
+                      false),
++    /*
++     * POMPPC tcg/0033.  x-dcbz-inline: dcbz (32-byte line) as four stores
++     * of zero in the generated code.  x-dcbz-inline-verify: proof mode.
++     * Off by default.
++     */
++    DEFINE_PROP_BOOL("x-dcbz-inline", PowerPCCPU, env.dcbz_inline, false),
++    DEFINE_PROP_BOOL("x-dcbz-inline-verify", PowerPCCPU, env.dcbz_inline_verify,
++                     false),
+     /* POMPPC tcg/0031: memory-side counters on stderr every 10 s */
+     DEFINE_PROP_BOOL("x-mem-stats", PowerPCCPU, env.mem_stats, false),
+     /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
+diff --git a/target/ppc/helper.h b/target/ppc/helper.h
+--- a/target/ppc/helper.h
++++ b/target/ppc/helper.h
+@@ -47,6 +47,7 @@
+ DEF_HELPER_FLAGS_3(stmw, TCG_CALL_NO_WG, void, env, tl, i32)
+ DEF_HELPER_FLAGS_3(mem_stat, TCG_CALL_NO_RWG, void, env, tl, i32)
+ DEF_HELPER_3(lmw_verify, void, env, tl, i32)
++DEF_HELPER_2(dcbz_verify, void, env, tl)
+ DEF_HELPER_4(lsw, void, env, tl, i32, i32)
+ DEF_HELPER_5(lswx, void, env, tl, i32, i32, i32)
+ DEF_HELPER_FLAGS_4(stsw, TCG_CALL_NO_WG, void, env, tl, i32, i32)
+diff --git a/target/ppc/mem_helper.c b/target/ppc/mem_helper.c
+--- a/target/ppc/mem_helper.c
++++ b/target/ppc/mem_helper.c
+@@ -710,3 +710,37 @@
+         lmwv_report(env);
+     }
+ }
++
++/*
++ * x-dcbz-inline-verify (POMPPC tcg/0033).  After an inline dcbz of EA: the
++ * line the helper would have zeroed (EA & ~(dcache_line_size - 1)) reads as
++ * zero through the TLB, and the reservation no longer covers it.  I/O pages
++ * are not re-read (counted).
++ */
++void helper_dcbz_verify(CPUPPCState *env, target_ulong addr)
++{
++    int size = env->dcache_line_size;
++    target_ulong line = addr & ~(target_ulong)(size - 1);
++    int mmu_idx = ppc_env_mmu_index(env, false);
++    uint8_t *host = tlb_vaddr_to_host(env, line, MMU_DATA_STORE, mmu_idx);
++    bool bad = (env->reserve_addr & ~(target_ulong)(size - 1)) == line;
++
++    if (!host) {
++        env->dcbzv_io++;
++    } else {
++        for (int i = 0; i < size; i++) {
++            bad |= host[i] != 0;
++        }
++    }
++    if (bad && env->dcbzv_bad++ < 20) {
++        fprintf(stderr, "dcbz-inline-verify: DIVERGENCE ea 0x" TARGET_FMT_lx
++                " line 0x" TARGET_FMT_lx " reserve 0x" TARGET_FMT_lx "\n",
++                addr, line, (target_ulong)env->reserve_addr);
++    }
++    if ((++env->dcbzv_n & 0x3ffff) == 0) {
++        fprintf(stderr, "dcbz-inline-verify: cpu %d, %" PRIu64 " checked, %"
++                PRIu64 " on I/O (not re-read), %" PRIu64 " divergent\n",
++                env_cpu(env)->cpu_index, env->dcbzv_n, env->dcbzv_io,
++                env->dcbzv_bad);
++    }
++}
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -179,6 +179,7 @@
+     bool tlb_precise;            /* x-tlb-precise, 32-bit hash MMU (tcg/0031) */
+     bool mem_stats;              /* x-mem-stats (tcg/0031) */
+     bool lmw_inline, lmw_verify; /* x-lmw-inline(-verify) (tcg/0032) */
++    bool dcbz_inline, dcbz_verify; /* x-dcbz-inline(-verify) (tcg/0033) */
+     bool vfp_native, vfp_nverify; /* x-vfp-native(-verify) (tcg/0022) */
+     const CPUPPCState *env;     /* x-vfp-native: its gate (tcg/0022) */
+     bool need_access_type;
+@@ -4621,6 +4622,34 @@
+     }
+ #endif
+ 
++    if (ctx->dcbz_inline) {
++        /*
++         * POMPPC tcg/0033 (x-dcbz-inline).  helper_dcbz: line = EA & ~31;
++         * the reservation is dropped if it covers the line (before the
++         * access, as the helper does: also on a fault); probe_write of the
++         * line, then memset, or four cpu_stq_mmu of zero on I/O.  A 32-byte
++         * aligned line never crosses a page: the first store faults (at the
++         * line, as a store, as the probe does) or none does.  The four
++         * stores are those of the I/O path; in RAM the bytes are the same.
++         */
++        TCGv line = tcg_temp_new();
++        TCGv t = tcg_temp_new();
++        TCGv_i64 zero = tcg_constant_i64(0);
++
++        tcg_gen_andi_tl(line, tcgv_addr, ~(target_ulong)31);
++        tcg_gen_andi_tl(t, cpu_reserve, ~(target_ulong)31);
++        tcg_gen_movcond_tl(TCG_COND_EQ, cpu_reserve, t, line,
++                           tcg_constant_tl(-1), cpu_reserve);
++        for (int i = 0; i < 32; i += 8) {
++            tcg_gen_addi_tl(t, line, i);
++            tcg_gen_qemu_st_i64(zero, t, ctx->mem_idx,
++                                DEF_MEMOP(MO_UQ | MO_UNALN));
++        }
++        if (ctx->dcbz_verify) {
++            gen_helper_dcbz_verify(tcg_env, tcgv_addr);
++        }
++        return;
++    }
+     gen_helper_dcbz(tcg_env, tcgv_addr, tcg_constant_i32(ctx->mem_idx));
+ }
+ 
+@@ -6661,6 +6690,8 @@
+     ctx->mem_stats = env->mem_stats;
+     ctx->lmw_inline = env->lmw_inline;
+     ctx->lmw_verify = env->lmw_inline && env->lmw_inline_verify;
++    ctx->dcbz_inline = env->dcbz_inline && env->dcache_line_size == 32;
++    ctx->dcbz_verify = ctx->dcbz_inline && env->dcbz_inline_verify;
+ 
+     ctx->fpu_enabled = (hflags >> HFLAGS_FP) & 1;
+     ctx->fp_inline = env->fp_inline && env->fp_prime_mask;
