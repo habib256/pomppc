@@ -97,7 +97,12 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   `x-dcbz-inline` (0031, 0032, 0035) et les émetteurs aarch64 de `x-fp-native-cmp` /
   `x-vfp-native-cmp` (0033-0034, sans effet sur arm64 aujourd'hui) : preuves au même niveau
   que sur le PC (vérificateurs, mutants, empreintes invité), puis A/B DOOM 3, Marble Blast,
-  UT2004 sur le M4 avant de les allumer là-bas (règle de parité des hôtes).
+  UT2004 sur le M4 avant de les allumer là-bas (règle de parité des hôtes). **Préparé sur le
+  PC le 06/10** (`docs/parite-arm64-0031-0035.md`) : 0031, 0032, 0035 sont génériques ; émetteurs
+  aarch64 écrits en `tcg/0037` (0033) et `0038` (0034), `0039` ajoute `x-lmw-inline-max` — encodages
+  et modèle NEON vérifiés avec le clang du NDK, **émetteur jamais exécuté, rien de prouvé** ; hors
+  du build tant que le M4 n'a pas passé `tools/tcg/m4-serie-0031-0035-proofs.sh`
+  (`prep`, `host`, `guest`, `mut`) puis l'A/B (§5 de la doc).
 
 - [ ] **[TCG — M4] Finir la matrice du 06/10** : sept cellules terminées,
   six vertes, images toutes justes ; campagne arrêtée sur demande.
