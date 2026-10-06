@@ -2951,18 +2951,30 @@ sont dans le bilan : aucun ne trie les temps.
   2 Mio, en THP, au même endroit relatif à chaque lancement, et la trace de démarrage dit déjà
   l'adresse, l'écart au texte et la forme des appels. L'état THP ne peut pas être annoncé au
   démarrage (rien n'est encore touché) : `jitcheck.py --rel32` le relit.
-- **La mesure** : toute campagne `ut-fen` lue sur la fenêtre 13..73 est à la merci de la
-  phase des relevés. Lire avec `tools/tcg/utrafales.py <campagne>` (rapport médian à contenu
-  égal, fenêtre et 74..560 ; excès dans la fenêtre). Correctifs proposés pour la matrice (non
-  faits ici : elle pilote la VM quotidienne, à valider là-bas) : appeler `premier_plan()` avant
-  la fenêtre (dès que `ut2004-bin` existe, ou depuis `cellule.sh` dans l'invité) et jamais
-  pendant ; multiplexer `tssh.sh` (`ControlMaster`, `ControlPath` court sous `.run/`).
+- **La mesure, corrigée le 06/10** (`docs/matrice-jeux.md` §5, « Mesure et rafales ») :
+  - `tools/matrice` : les jeux à fenêtre fixe la déclarent (`images_fenetre`), et
+    `plan_permis()` interdit tout `osascript` de `premier_plan()` quand l'image a est à moins
+    de 6 s au rythme courant, jusqu'à l'image b ; System Events est lancé avant le jeu (le 1er
+    appel coûtait 3 s de processeur invité) ; les deux remises au premier plan du début partent
+    dès que le processus du jeu existe, pendant le chargement ; des replis vus pendant la
+    fenêtre sont notés (`premier_plan` dans le résultat de la cellule, journal) et la remise au
+    premier plan attend la fin de la fenêtre. Tests : `tests/matrice_test.py`.
+  - `tools/guest/tssh.sh` multiplexe (`ControlMaster=auto`, socket `.run/tssh-<port>` du dépôt
+    principal, `ControlPersist` 300 s, `ServerAliveInterval` 15 s ; `TSSH_MUX=0` pour
+    l'ancien comportement). Validé sur la VM de dev (`bench/tcg/rel32-x86/tssh-mux.txt`) :
+    commande seule 0,9-2,2 s sans, **0,04 s** multiplexée ; entrée standard (300 ko aller-retour
+    identiques), `tar` par le canal, code de sortie, 10 commandes parallèles ; VM arrêtée : la
+    socket disparaît, la commande suivante échoue tout de suite (`Connection refused`), et
+    après redémarrage une nouvelle maîtresse se forme.
+  - Pour relire une campagne d'avant : `tools/tcg/utrafales.py <campagne>`.
 - **Phase 2** (VM quotidienne, binaire de référence, qui porte 0024) :
 
         tools/tcg/matab.sh x86-rel32-ut 6 "ref:" "rel:JITREL32=1" ut fen
         tools/tcg/matab.sh x86-rel32-d3 6 "ref:" "rel:JITREL32=1" d3 fen
         tools/tcg/utrafales.py bench/tcg/ab/x86-rel32-ut
 
-  Attendu : UT2004 −2 à −3 % au rapport médian 74..560, la fenêtre 13..73 restant bruitée
-  tant que la matrice n'est pas corrigée ; DOOM 3 −2 à −3 % (fenêtre de ~230 images, les
+  Attendu : UT2004 −2 à −3 %, sur la fenêtre 13..73 (désormais sans osascript) comme au
+  rapport médian 74..560 ; à vérifier dans la phase 2 : `utrafales.py` ne doit plus montrer
+  d'excès de fenêtre au-delà de ~150 ms, et aucune cellule ne doit se replier faute de premier
+  plan (colonne replis) ; DOOM 3 −2 à −3 % (fenêtre de ~230 images, les
   paquets s'y diluent). Ensuite seulement `JITREL32` à 1 dans `run_tiger.sh`.

@@ -21,7 +21,7 @@ DSO sont sauvegardés puis rendus après chaque cellule.
 """
 import re
 
-from jeu import Jeu, fenetre_fixe
+from jeu import Jeu
 
 APP = "/Users/tiger/Desktop/MarbleBlast Gold.app"
 MISSION = "marble/data/missions/beginner/gems.mis"
@@ -63,8 +63,7 @@ class MarbleBlast(Jeu):
         return 'cd "%s/Contents/MacOS" && "./MarbleBlast Gold" %s -mission %s' % (
             APP, "-fullscreen" if mode == "pe" else "-windowed", MISSION)
 
-    def fenetre(self, rows):
-        return fenetre_fixe(rows, 900, 1500)
+    images_fenetre = (900, 1500)
 
 
 JEU = MarbleBlast()

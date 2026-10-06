@@ -32,6 +32,9 @@ class Jeu:
                                 # rejouée à l'identique (Nexuiz) ; sinon fichier après la fenêtre
     defaut_connu = ""           # défaut d'image connu (TODO §6), rappelé dans le tableau
     env = {}                    # POMPPC_GL_* en plus
+    images_fenetre = None       # (a, b) quand la fenêtre de mesure est fixe et connue
+                                # d'avance : la matrice ne lance alors AUCUN osascript
+                                # (premier_plan) qui puisse tomber dedans (docs/matrice-jeux.md)
 
     def modes(self):
         return [m for m in MODES]
@@ -64,6 +67,8 @@ class Jeu:
     def fenetre(self, rows):
         """rows : {image: (elapsed_ms, fallbacks, readbacks)}. Rend (a, b), la
         fenêtre de mesure, quand l'image b est passée ; None sinon."""
+        if self.images_fenetre:
+            return fenetre_fixe(rows, *self.images_fenetre)
         return None
 
     def pendant(self, h, rows, t):

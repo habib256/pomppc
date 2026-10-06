@@ -20,6 +20,12 @@ de commit et dans `docs/`.
   (`-d out_asm`). Outils : `tools/tcg/utrafales.py` (lecture d'une campagne `ut-fen` sans
   les rafales), `tools/tcg/jitcheck.py --rel32` (placement et THP sous Linux). `JITREL32`
   reste à 0 jusqu'à l'A/B de phase 2.
+- **Matrice : plus d'osascript dans la fenêtre de mesure, ssh multiplexé** (06/10,
+  `docs/matrice-jeux.md` §5) : les jeux à fenêtre fixe la déclarent (`images_fenetre`) ;
+  `premier_plan()` part pendant le chargement, jamais à moins de 6 s de la fenêtre ni dedans
+  (replis notés, remise au premier plan après) ; System Events lancé avant le jeu.
+  `tools/guest/tssh.sh` multiplexe ses connexions (`ControlMaster`, `.run/tssh-<port>`,
+  `TSSH_MUX=0` pour revenir) : 0,04 s par commande au lieu de 0,9-2,2 s.
 - **JIT M4, 05/10** (`docs/jit-m4-2026-10-05.md`) : modèle natif NEON enfin
   sélectionné par `VFPPROOF_NATIVE=1`, 648 M vecteurs sans divergence, huit mutants
   détectés ; correction du zéro signé `vnmsubfp` et du helper lent aarch64 (0028).
