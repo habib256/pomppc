@@ -3318,6 +3318,7 @@ nulle et la réservation retirée.
 | SMP=1 (`qemu-system-ppc`, `target_ulong` 32 bits) : référence, puis tout + vérificateurs | empreintes de la référence SMP=1 = celles de SMP=2 ; avec les propriétés, identiques (`dcbztest` : hors réservation) ; TLB 987 M accès retraduits, **0** ; `lmw` 360 M, **0** ; `dcbz` 50 M, **0** ; `x-ret-verify` : **une** entrée du cache de sauts sur une page de noyau à identité (`0x5610664`) devenue **sans traduction** (classe « plus de PTE » : la PTE a disparu sans que ce `tlbie` ait visé cette page ; un 7400 garderait aussi sa traduction) sur 805 M vérifiés, 0 de l'autre sorte |
 | démarrages du bureau sous `x-tlb-precise-verify=16` (puis `=64` avec `x-ret-verify`) | 0 divergence ; une fois (premier essai), une page d'identité d'OpenBIOS sans PTE (classe « plus de PTE », §32.2) |
 | mutants de l'émetteur réel (`~/src/qemu-memmut`, `POMPPC_MUT`) | voir 32.6 |
+| après fusion avec 0029, 0033, 0034 : série complète posée par le build sur une copie fraîche (aucun décalage ni fuzz), `~/src/qemu/build` reconstruit (06/10, 15:58) ; `tiger-dev.raw`, SMP=2, sans puis avec les trois propriétés et leurs vérificateurs | `tlbtest` `deee3d7026183c65`, `lmwtest` `2575eafce78adf66`, `dcbztest` hors réservation `e2f15e6f3ceae607` dans les deux bras (complète : `afbd3bd3…` / `b9d327c6…`, §32.4) ; TLB 238 M accès retraduits, `lmw` 321 M, `dcbz` 23 M : **0 divergence** |
 
 ### 32.6 Mutants
 
