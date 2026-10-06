@@ -10,6 +10,10 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 OPTS = "FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JCBITS JITNEAR QGPU_GPU_COPY QGPU_GLSL".split()
+# Défauts propres à l'hôte (docs/vitesse-doom3-x86.md §13, docs/jit-m4-2026-10-05.md).
+HOSTOPTS = "VFPNATIVE TLBPRECISE LMWINLINE DCBZINLINE JITREL32 FPNATIVECMP VFPNATIVECMP LMWVEC JCWORD".split()
+HOST = "%s:%s" % (os.uname().sysname, os.uname().machine)
+HOSTON = {"Linux:x86_64": HOSTOPTS, "Darwin:arm64": ["VFPNATIVE", "LMWVEC", "JCWORD"]}.get(HOST, [])
 with tempfile.TemporaryDirectory(prefix="tiger launcher ") as tmp:
     root = Path(tmp)
     for name in ("run_tiger.sh", "run_frontend.sh"):
@@ -18,10 +22,10 @@ with tempfile.TemporaryDirectory(prefix="tiger launcher ") as tmp:
     binary = root / "frontend/build/pomppc"
     binary.parent.mkdir(parents=True)
     binary.write_text('#!/bin/bash\nprintf "frontend:%s\\n" "$1"\n' +
-                      "\n".join('printf "%s=%%s\\n" "$%s"' % (k, k) for k in OPTS) + "\n")
+                      "\n".join('printf "%s=%%s\\n" "${%s:-}"' % (k, k) for k in OPTS + HOSTOPTS) + "\n")
     binary.chmod(0o755)
     (root / "config.env").write_text('echo native-path\nexit 0\n')
-    env = {k: v for k, v in os.environ.items() if k not in OPTS +
+    env = {k: v for k, v in os.environ.items() if k not in OPTS + HOSTOPTS +
            ["POMPPC_FRONTEND", "DBUS_DISPLAY", "HEADLESS", "POMPPC_DISPLAY"]}
 
     def run(**extra):
@@ -32,6 +36,9 @@ with tempfile.TemporaryDirectory(prefix="tiger launcher ") as tmp:
     assert p.returncode == 0 and "frontend:" + str(root / "run_tiger.sh") in p.stdout, p
     assert all(k + "=1\n" in p.stdout for k in OPTS if k != "JCBITS"), p.stdout
     assert "JCBITS=14\n" in p.stdout, p.stdout       # 2^14 entrées de cache de sauts (tcg/0011)
+    assert all((k + "=1\n" if k in HOSTON else k + "=\n") in p.stdout for k in HOSTOPTS), (HOST, p.stdout)
+    p = run(TLBPRECISE="0", JITREL32="0")
+    assert p.returncode == 0 and "TLBPRECISE=0\n" in p.stdout and "JITREL32=0\n" in p.stdout, p
     p = run(JCBITS="12")
     assert p.returncode == 0 and "JCBITS=12\n" in p.stdout, p
     p = run(ICBISYNC="0", MSRNOBQL="0")

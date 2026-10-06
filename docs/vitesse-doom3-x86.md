@@ -504,3 +504,25 @@ courte.
 
 **Le côté mémoire est retenu** : DOOM 3 −8,5 %, Marble Blast −21 %, UT2004 −7 %, aucun
 vérificateur en défaut (§13.1).
+
+### 13.3 Les petits leviers ensemble (`x86-petits`)
+
+Par-dessus le côté mémoire, `x-jit-rel32`, `x-fp-native-cmp`, `x-vfp-native-cmp`,
+`x-lmw-vector` et `x-jc-word` ensemble, binaire de référence, 3 parties par bras :
+
+| bras | ms/image (min..max) | pas |
+|---|---|---|
+| `mem` (côté mémoire seul) | 136,5 (133,1..138,1) | — |
+| `tous` (+ les cinq) | **133,0** (132,5..133,3) | **−2,6 %** |
+
+`tous` gagne, étendue serrée (0,6 %), ses trois parties au niveau de la meilleure de `mem` :
+**tous retenus**, sans isoler `x-jit-rel32`. (Le `mem` de cette campagne, 136,5, est
+au-dessus des 132,0 de `x86-mem` : variation d'une campagne à l'autre, d'où l'entrelacement.)
+
+### 13.4 Mise par défaut (Linux x86-64)
+
+`run_tiger.sh` allume sur Linux x86-64 seulement : `TLBPRECISE LMWINLINE DCBZINLINE JITREL32
+FPNATIVECMP VFPNATIVECMP LMWVEC JCWORD` (avec `VFPNATIVE` du 04/10) ; chacun `=0` pour
+l'éteindre ; les vérificateurs restent éteints. macOS arm64 inchangé (`VFPNATIVE LMWVEC
+JCWORD` ; 0031-0035 attendent leur parité arm64). `tests/tiger_launcher_test.py` vérifie les
+défauts propres à l'hôte. Les bras `ref:` de `matab.sh` portent désormais ces défauts.

@@ -34,7 +34,8 @@
 #   VFPNATIVE=0 ./run_tiger.sh  # coupe vaddfp/vsubfp/vmaddfp/vnmsubfp par le FPU de l'hôte dans le
 #                             # code généré (x-vfp-native, tcg/0022 : allumé par défaut sur Linux
 #                             # x86-64 et sur macOS arm64 depuis le 05/10, rebuild requis) ; VFPNVERIFY=1 : mode preuve
-#   TLBPRECISE=1 LMWINLINE=1 DCBZINLINE=1 ./run_tiger.sh  # côté mémoire (tcg/0031, 0032, 0035, éteints,
+#   TLBPRECISE=0 LMWINLINE=0 DCBZINLINE=0 ./run_tiger.sh  # coupe le côté mémoire (tcg/0031, 0032, 0035,
+#                             # allumés par défaut sur Linux x86-64 depuis le 06/10, éteints ailleurs,
 #                             # docs/tcg-g4.md §32) ; TLBPVERIFY=N LMWVERIFY=1 DCBZVERIFY=1 : preuves
 #   FPINLINE=0 ./run_tiger.sh # coupe le flottant scalaire simple (fmuls, fmadds, fcmpu…) sans ses
 #                             # deux helpers dans le cas courant (x-fp-inline, tcg/0007, allumé
@@ -45,10 +46,12 @@
 #                             # (arm64 ; x86-64 avec AVX et FMA3, tcg/0017), le helper de x-fp-flat
 #                             # hors ligne sinon (x-fp-native,
 #                             # tcg/0014, allumé par défaut depuis le 01/10, docs/tcg-g4.md §22)
-#   VFPNATIVECMP=1 ./run_tiger.sh # vcmp*fp vcfsx vcfux vctsxs vctuxs par le FPU de l'hôte
-#                             # (x-vfp-native-cmp, patches/tcg/0034, x86-64 ; éteint par défaut)
-#   FPNATIVECMP=1 ./run_tiger.sh # frsp fctiw fctiwz fcmpo fdivs fdiv par le FPU de l'hôte, fsel en ops
-#                             # TCG (x-fp-native-cmp, patches/tcg/0033, x86-64 ; éteint par défaut)
+#   VFPNATIVECMP=0 ./run_tiger.sh # coupe vcmp*fp vcfsx vcfux vctsxs vctuxs par le FPU de l'hôte
+#                             # (x-vfp-native-cmp, patches/tcg/0034, x86-64 ; allumé par défaut sur
+#                             # Linux x86-64 depuis le 06/10) ; VFPNCMPVERIFY=1 : preuve
+#   FPNATIVECMP=0 ./run_tiger.sh # coupe frsp fctiw fctiwz fcmpo fdivs fdiv par le FPU de l'hôte, fsel en
+#                             # ops TCG (x-fp-native-cmp, patches/tcg/0033, x86-64 ; allumé par défaut
+#                             # sur Linux x86-64 depuis le 06/10) ; FPNCMPVERIFY=1 : preuve
 #   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
 #                             # tcg/0016, allumé par défaut, docs/tcg-g4.md §24) ; FPVERIFY=1 : preuve
 #   TBFAST=0 ./run_tiger.sh   # coupe mftb/mftbu calculés depuis le compteur de l'hôte (cntvct, 1 GHz ;
@@ -68,8 +71,11 @@
 #   JITNEAR=0 ./run_tiger.sh  # laisse macOS placer le tampon du JIT (défaut : dans la fenêtre de 4 Gio
 #                             # du texte de QEMU, x-jit-near, tcg/0006 : supprime le régime lent, docs/tcg-g4.md §14) ;
 #                             # TCG_OPTS=… propriétés brutes de l'accélérateur
-#   JITREL32=1 ./run_tiger.sh # x86-64 Linux : tampon du JIT à moins de 2 Gio du texte, appels de
-#                             # helpers directs (x-jit-rel32, tcg/0024, éteint : deux régimes sur UT2004)
+#   JITREL32=0 ./run_tiger.sh # x86-64 Linux : coupe le tampon du JIT à moins de 2 Gio du texte, appels
+#                             # de helpers directs (x-jit-rel32, tcg/0024, allumé par défaut depuis le
+#                             # 06/10 : les deux régimes d'UT2004 étaient un artefact de mesure, §31)
+#   LMWVEC=0 JCWORD=0 ./run_tiger.sh # coupe la copie lmw/stmw vectorielle (tcg/0025/0029) et le
+#                             # cache de sauts par mot (tcg/0026) ; allumés sur macOS arm64 et Linux x86-64
 #   QEMU_FAST=0 ./run_tiger.sh  # Linux x86-64 : binaire de référence build/ au lieu du binaire
 #                             # rapide build-fast/ (PGO, -O3, -march=native ; pris d'office s'il est
 #                             # là, à jour et complet ; QEMU_BIN=… prime ; docs/binaire-rapide-x86.md)
@@ -121,14 +127,22 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # M4 : VFPNATIVE, LMWVEC et JCWORD allumés à la demande de l'utilisateur après
 # les preuves SMP=1/2 (docs/jit-m4-2026-10-05.md). LMWVEC/JCWORD sans gain
 # mesuré ; chacun reste surchargeable à 0. Reconstruire QEMU avec 0025-0028.
-# Linux x86-64 (06/10/2026, docs/tcg-g4.md §30) : LMWVEC (copie SSE2, tcg/0029)
-# et JCWORD prouvés sur le PC mais PAS allumés par défaut : ils attendent l'A/B
-# en jeu de la phase 2. LMWVEC=1 / JCWORD=1 les demandent explicitement.
+# Linux x86-64 (06/10/2026, phase 2, docs/vitesse-doom3-x86.md §13) : partie
+# DOOM 3 sous tous les vérificateurs sans divergence, puis A/B en jeu : le côté
+# mémoire TLBPRECISE LMWINLINE DCBZINLINE (tcg/0031, 0032, 0035 : DOOM 3 −8,5 %,
+# Marble Blast −21 %, UT2004 −7 %) et, par-dessus, JITREL32 (tcg/0024, ses « deux
+# régimes » étaient un artefact de mesure, tcg-g4 §31) FPNATIVECMP VFPNATIVECMP
+# (tcg/0033-0034) LMWVEC (tcg/0029) JCWORD (tcg/0026) ensemble : DOOM 3 −2,6 %.
+# Tous allumés par défaut sur ce seul hôte ; chacun reste surchargeable à 0.
 for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JITNEAR FPNATIVE TBFAST FPNATIVE64 VMXINLINE; do
   export "$_opt=${!_opt:-1}"
 done
 case "$(uname -s):$(uname -m)" in
-  Linux:x86_64) export VFPNATIVE="${VFPNATIVE:-1}" ;;
+  Linux:x86_64)
+    export VFPNATIVE="${VFPNATIVE:-1}" TLBPRECISE="${TLBPRECISE:-1}" LMWINLINE="${LMWINLINE:-1}" \
+           DCBZINLINE="${DCBZINLINE:-1}" JITREL32="${JITREL32:-1}" FPNATIVECMP="${FPNATIVECMP:-1}" \
+           VFPNATIVECMP="${VFPNATIVECMP:-1}" LMWVEC="${LMWVEC:-1}" JCWORD="${JCWORD:-1}"
+    ;;
   Darwin:arm64)
     export VFPNATIVE="${VFPNATIVE:-1}" LMWVEC="${LMWVEC:-1}" JCWORD="${JCWORD:-1}"
     ;;
@@ -478,7 +492,8 @@ fi
 # patches/tcg/0033, docs/tcg-g4.md §33) --- frsp fctiw fctiwz fcmpo fdivs fdiv par
 # la même op TCG que x-fp-native (émetteur x86-64 seulement : sans effet sur arm64),
 # fsel en ops TCG. Mêmes résultats, même FPSCR au bit près. N'agit qu'avec
-# x-fast-fp. ÉTEINT par défaut (A/B en jeu à faire) : FPNATIVECMP=1 l'allume ;
+# x-fast-fp. Allumé par défaut sur Linux x86-64 depuis le 06/10 (A/B en jeu,
+# docs/vitesse-doom3-x86.md §13), éteint ailleurs : FPNATIVECMP=0 / =1 ;
 # FPNCMPVERIFY=1 ajoute le mode preuve (x-fp-native-cmp-verify, bilan sur stderr).
 if [ "${FPNATIVECMP:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-fp-native-cmp=on"; then
@@ -499,8 +514,8 @@ fi
 # patches/tcg/0034, docs/tcg-g4.md §34) --- vcmpeqfp vcmpgefp vcmpgtfp vcmpbfp
 # (et formes Rc), vcfsx vcfux vctsxs vctuxs par l'op TCG de x-vfp-native (émetteur
 # x86-64 seulement : sans effet sur arm64). Mêmes résultats, même VSCR[SAT], même
-# CR6 au bit près. N'agit qu'avec x-vfp-native (VFPNATIVE). ÉTEINT par défaut (A/B
-# en jeu à faire) : VFPNATIVECMP=1 l'allume ; VFPNCMPVERIFY=1 le vérifie.
+# CR6 au bit près. N'agit qu'avec x-vfp-native (VFPNATIVE). Allumé par défaut sur Linux
+# x86-64 depuis le 06/10, éteint ailleurs : VFPNATIVECMP=0 / =1 ; VFPNCMPVERIFY=1 le vérifie.
 if [ "${VFPNATIVECMP:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-vfp-native-cmp=on"; then
     case "$CPU_SPEC" in
@@ -596,7 +611,8 @@ done
 # LMWINLINE=1 : x-lmw-inline, lmw/stmw dont la plage tient dans une page en
 # accès mot en ligne ; DCBZINLINE=1 : x-dcbz-inline, dcbz en quatre rangements de
 # zéros ; LMWVERIFY=1 / DCBZVERIFY=1 : leurs modes preuve. MEMSTATS=1 :
-# x-mem-stats (compteurs toutes les 10 s sur stderr). Éteints par défaut.
+# x-mem-stats (compteurs toutes les 10 s sur stderr). Allumés par défaut sur Linux
+# x86-64 depuis le 06/10 (docs/vitesse-doom3-x86.md §13), éteints ailleurs ; =0 les coupe.
 for _p in "TLBPRECISE x-tlb-precise TLB-PRÉCIS" "LMWINLINE x-lmw-inline LMW-EN-LIGNE" \
           "LMWVERIFY x-lmw-inline-verify LMW-VÉRIFIÉ" "DCBZINLINE x-dcbz-inline DCBZ-EN-LIGNE" \
           "DCBZVERIFY x-dcbz-inline-verify DCBZ-VÉRIFIÉ" "MEMSTATS x-mem-stats COMPTEURS-MÉMOIRE"; do
@@ -638,10 +654,10 @@ fi
 # docs/tcg-g4.md §28) --- propriété de l'ACCÉLÉRATEUR, hôte x86-64 sous Linux
 # (ailleurs sans effet) : le noyau pose sinon le tampon à ~35 Tio du texte et
 # chaque appel de helper depuis le code généré passe par `call *[rip+pool]'. La
-# place prise est imprimée (« appels des helpers directs (rel32) »). Éteint par
-# défaut : DOOM 3 −2,3 %, mais UT2004 a deux régimes (57 ou 64-67 ms/image selon la
-# place du tampon, bench/tcg/ab/x86-ut-tcg, docs/vitesse-doom3-x86.md §12) :
-# JITREL32=1. Prime sur x-jit-near quand il réussit.
+# place prise est imprimée (« appels des helpers directs (rel32) »). Allumé par
+# défaut sur Linux x86-64 depuis le 06/10 (JITREL32=0 l'éteint) : les « deux
+# régimes » d'UT2004 du 04/10 étaient la rafale de l'osascript de la matrice dans
+# la fenêtre (docs/tcg-g4.md §31). Prime sur x-jit-near quand il réussit.
 if [ "${JITREL32:-0}" != 0 ]; then
   if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-jit-rel32=on"; then
     TCG_ACCEL="${TCG_ACCEL:-tcg},x-jit-rel32=on"
@@ -666,7 +682,7 @@ if [ -n "${JCBITS:-}" ] && [ "${JCBITS}" != 12 ]; then
   fi
 fi
 # M4 : hachage alternatif dans le même groupe de page.
-# macOS arm64 : allumé à la demande le 05/10 ; JCWORD=0 pour l’A/B.
+# macOS arm64 : allumé à la demande le 05/10 ; Linux x86-64 depuis le 06/10 ; JCWORD=0 pour l’A/B.
 if [ "${JCWORD:-0}" != 0 ]; then
   if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-jc-word=on"; then
     TCG_ACCEL="${TCG_ACCEL:-tcg},x-jc-word=on"
