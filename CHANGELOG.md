@@ -9,6 +9,20 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Binaire rapide du PC mesuré hôte au repos, matrice finale, planchers du PC, 06-07/10**
+  (`docs/vitesse-doom3-x86.md` §13.5-13.7) : A/B entrelacé DOOM 3 `d3-fen`, 3 parties par bras,
+  défauts du 06/10 : binaire de référence **122,9** ms/image (121,8..124,6), **binaire rapide
+  111,5 (108,9..112,9), −9,3 %**. Matrice avec vidage, anciens défauts du 04/10 sur le binaire
+  de référence contre binaire rapide et nouveaux défauts : **Marble Blast 20,9 → 14,9 (−29 %),
+  Zenerchi 7,6 → 5,9 (−22 %), UT2004 58,1 → 48,7 (−16 %), DOOM 3 136,3 → 111,9 (−18 %)**,
+  images justes (rejeu = VM et référence 0,00/0,00 % ; DOOM 3 0,03/0,00 % contre la VM dans
+  les deux bras, comme le 04/10). Planchers `plancher_ms_linux` : **DOOM 3 140** (il prenait
+  les 76 du M4), **Marble Blast 26 → 19**, **Zenerchi 10 → 8** ; UT2004 garde 104 (une partie).
+  L'autre session qui avait pollué le premier essai travaillait encore : une barrière avant
+  chaque partie (`MATAB_AVANT` de `matab.sh`, `tools/tcg/chargehote.py attendre`) et un relevé
+  de la charge étrangère toutes les 5 s (`chargehote.py releve`, `chargeparties.py`) ont tenu
+  ses rafales de 10 à 13 cœurs hors des 8 parties, toutes valides. La référence `d3-fen` du
+  PC attend la validation à l'œil de l'utilisateur.
 - **Le cas « sans traduction » de `x-ret-verify` expliqué, 06/10** (`docs/tcg-g4.md` §35) :
   ce n'est pas le noyau mais **BootX sous OpenBIOS**. Quand un PTEG est plein, le gestionnaire
   de fautes d'OpenBIOS (`hash_page`, `tlbie` en `0xfff08a5c`) évince une PTE et ne fait

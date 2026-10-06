@@ -158,7 +158,8 @@ identiques à celles de la référence, 0031-0035 comprises.
 ./run_tiger.sh` sans `QEMU_BIN` ni `QEMU_FAST` prend `build-fast/qemu-system-ppc64` (« binaire
 rapide (PGO, -O3, -march=native) »), avec les nouveaux défauts de Linux x86-64 dans la bannière.
 
-**A/B contre la référence : à refaire hôte au repos.** Une seule partie DOOM 3 propre sur
-`build-fast` (124,1 ms/image, `bench/tcg/ab/x86-fast-pollue/fast-1`) avant qu'une autre session
-de travail n'occupe l'hôte (`docs/vitesse-doom3-x86.md` §13.5) ; commandes de l'A/B et de la
-matrice finale au §13.7 de `docs/vitesse-doom3-x86.md`.
+**A/B contre la référence, hôte au repos** (06/10 au soir, `docs/vitesse-doom3-x86.md` §13.5,
+`bench/tcg/ab/x86-fast`) : DOOM 3 `d3-fen`, 3 parties par bras, mêmes défauts : référence
+122,9 ms/image (121,8..124,6), **binaire rapide 111,5 (108,9..112,9), −9,3 %**. Matrice finale
+avec vidage (§13.6, `x86-final`) : Marble Blast 14,9, Zenerchi 5,9, UT2004 48,7, DOOM 3 111,9,
+images justes.

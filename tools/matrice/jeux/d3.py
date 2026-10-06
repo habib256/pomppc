@@ -62,6 +62,8 @@ class Doom3(Jeu):
     famille = "ARB2, VBO, DXT"
     processus = "Doom 3 Demo"
     plancher_ms = 76          # 60,9 / 61,0 ms/image au 29/09 (tour 20260929-2344, hôte au repos)
+    plancher_ms_linux = 140   # PC, binaire rapide, défauts du 06/10 : 108,9-112,9 (4 parties, x86-fast
+                              # et x86-final, 06-07/10, hôte au repos) ×1,25 ; binaire de référence 122,9
     delai_scene = 1500
     dump_images = 20
     redemarrer_apres = False    # 29/09 : voir la docstring

@@ -310,8 +310,15 @@ McRae, Warcraft III, Nexuiz, RTCW) ne sont que sur le M4 : cinq cellules sur sei
 **Références par hôte** : une image rendue par NVIDIA n'est pas celle d'Apple ; sous Linux, le
 manifeste est `tools/matrice/references-linux.csv` et les fichiers `bench/matrice/ref-linux/`
 (le premier tour avait réécrit l'entrée `mb-fen` du manifeste du M4, remise en état). **Planchers
-par hôte** : `plancher_ms_linux` (Marble Blast 26, Zenerchi 10, UT2004 104), même règle
-(1,25 × le temps typique ; le pire observé pour UT2004, très dispersé). Le premier passage sur
+par hôte** : `plancher_ms_linux`, même règle (1,25 × le temps typique ; le pire observé pour
+UT2004, très dispersé). Revus le 07/10 sur le binaire rapide et les défauts du 06/10
+(`docs/vitesse-doom3-x86.md` §13.5-13.7, campagnes `x86-fast` et `x86-final`, hôte au repos) :
+**DOOM 3 140** (il n'en avait pas et prenait les 76 du M4 ; 4 parties, 108,9-112,9 ms/image),
+**Marble Blast 19** (26 avant ; 1 partie, 14,9), **Zenerchi 8** (10 avant ; 1 partie, 5,9,
+arrondi au-dessus), **UT2004 104 inchangé** (1 partie à 48,7 ; 1,25 × 48,7 = 61 mettrait en
+rouge les tours en fin de session ou sur le binaire de référence, 54-83 observés : à reprendre
+sur au moins trois tours complets du binaire rapide). DOOM 3 reste rouge tant que sa référence
+n'est pas validée à l'œil (`matrice.py --valider d3-fen`). Le premier passage sur
 la VM a demandé : la clé de la matrice (`.run/cmr/id_rsa`, déposée par mot de passe ; `expect`
 manque ici), `~/matrice/ut-seed.dylib` compilé dans la VM de dev (pas de gcc dans la VM
 quotidienne).

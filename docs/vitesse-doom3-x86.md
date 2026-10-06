@@ -530,48 +530,105 @@ l'éteindre ; les vérificateurs restent éteints. macOS arm64 inchangé (`VFPNA
 JCWORD` ; 0031-0035 attendent leur parité arm64). `tests/tiger_launcher_test.py` vérifie les
 défauts propres à l'hôte. Les bras `ref:` de `matab.sh` portent désormais ces défauts.
 
-### 13.5 Binaire rapide : entraîné, construit, A/B à refaire hôte au repos
+### 13.5 Binaire rapide : entraîné, construit, A/B hôte au repos (`x86-fast`, 06/10 au soir)
 
 Profil entraîné le 06/10 sur la configuration retenue (§13.4) par `tools/tcg/pgo-train.sh`, et
 `~/src/qemu/build-fast/` reconstruit avec (`docs/binaire-rapide-x86.md` §6) ; `run_tiger.sh`
 le choisit (« binaire rapide (PGO, -O3, -march=native) », les nouvelles propriétés dans la
 bannière, `x-jit-rel32` placé : vérifié VM arrêtée puis éteinte proprement).
 
-**L'A/B `x86-fast` n'a pas pu se faire** : pendant sa troisième partie, une autre session de
-travail sur le PC (projet `~/src/pom2`, 12 processus à 100 % puis des compilations par
-intermittence) a pris jusqu'à 13 cœurs. La campagne est arrêtée et rangée dans
-`bench/tcg/ab/x86-fast-pollue/` :
+**Premier essai, pollué** (`bench/tcg/ab/x86-fast-pollue/`) : pendant sa troisième partie, une
+autre session de travail sur le PC (projet `~/src/pom2`) a pris jusqu'à 13 cœurs ; parties
+`ref-1` 144,2, `fast-1` 124,1, `fast-2` 297,1 (écartée), `ref-2` arrêtée. Aucun de ces chiffres
+n'est repris.
 
-| partie | binaire | ms/image | état |
-|---|---|---|---|
-| `ref-1` | référence, nouveaux défauts | 144,2 | hôte propre d'après la matrice (charge 1,75 / 1,82, 0 autre QEMU), mais au-dessus des 133,0 de `x86-petits` pour la même configuration : douteuse |
-| `fast-1` | `build-fast`, nouveaux défauts | **124,1** | hôte propre (1,64 / 2,20) : **une partie, indication seulement** |
-| `fast-2` | `build-fast` | 297,1 | **écartée** : charge 13,5 après la mesure (autre session) |
-| `ref-2` | référence | — | arrêtée au démarrage (hôte occupé) |
+**Campagne refaite le 06/10, 22:09-23:35** (`bench/tcg/ab/x86-fast/`), même commande (§13.7),
+avec deux gardes nouvelles :
 
-Ensuite, un relevé de la charge étrangère (processeur de l'hôte hors `qemu-system`, toutes
-les 5 s) a montré un fond de bureau de ~0,6 cœur (Firefox, POM2, gnome-shell) et l'autre
-session entre 1,5 et 13 cœurs jusqu'à 21:20 ; l'utilisateur travaillant sur le PC ce soir,
-l'A/B et la matrice finale sont reportés (commandes au §13.7 et dans TODO.md).
+- un **relevé de la charge étrangère** toutes les 5 s pendant toute la campagne
+  (`tools/tcg/chargehote.py releve` : cœurs occupés d'après `/proc/stat`, moins
+  ceux des `qemu-system` ; les processus courts, compilations comprises, sont comptés),
+  `charge-releve.txt` ;
+- une **barrière avant chaque partie**, VM arrêtée (`MATAB_AVANT`, nouveau dans `matab.sh`) :
+  charge 1 min < 1, aucun `qemu-system`, étranger ≤ 1 cœur sur 20 s, sinon nouvelle sonde
+  toutes les 90 s ; une partie est écartée si l'étranger dépasse 1,5 cœur 30 s de suite
+  pendant sa fenêtre (`tools/tcg/chargeparties.py`, `parties-charge.txt`) ; la barrière est
+  `chargehote.py attendre`.
 
-### 13.6 Bilan provisoire
+L'autre session travaillait encore (compilations `cc1plus`, `playtest` et `a2run` de POM2 à
+~1 cœur, rafales de 10 à 13 cœurs pendant 15 s à 2 min, mises à jour automatiques) : la
+barrière a retenu `ref-1` 11 min et `fast-1` 23 min ; **aucune rafale n'est tombée dans une
+partie**. Pendant les parties : étranger moyen 0,06 à 0,34 cœur, pointe 1,83 (un échantillon).
 
-| jeu (`fen`) | départ 04/10 (référence, défauts) | 06/10, binaire de référence, nouveaux défauts | binaire rapide | M4 |
+| partie | binaire | ms/image | charge avant / après | étranger moy. (max) | état |
+|---|---|---|---|---|---|
+| `ref-1` | référence, défauts du 06/10 | 122,9 | 0,72 / 2,25 | 0,34 (1,83) | valide |
+| `fast-1` | `build-fast` | 111,5 | 0,52 / 1,30 | 0,12 (1,05) | valide |
+| `fast-2` | `build-fast` | 108,9 | 0,54 / 1,45 | 0,09 (0,66) | valide |
+| `ref-2` | référence | 121,8 | 0,68 / 1,21 | 0,10 (1,15) | valide |
+| `ref-3` | référence | 124,6 | 0,64 / 1,47 | 0,11 (0,96) | valide |
+| `fast-3` | `build-fast` | 112,9 | 0,54 / 1,34 | 0,06 (0,77) | valide |
+
+(la charge « après », 1,2-2,3, est celle du QEMU mesuré lui-même.)
+
+| bras | n | médiane | min..max | dispersion |
 |---|---|---|---|---|
-| DOOM 3 | 138 | ~123 estimé (−8,5 % puis −2,6 % : −10,9 % chaînés ; mesuré 132,0-133,0 dans des campagnes dont le `ref` était à 144) | 124,1 (une partie) ; 115 le 04/10 avec l'ancien profil et les anciens défauts | ~42 |
-| Marble Blast | 21 | **16,5** (−21 %, `x86-mem-mb`) | à mesurer | — |
-| Zenerchi | 7,6 | non mesuré | à mesurer | — |
-| UT2004 | 56 | **54,7** (−7 %, `x86-mem-ut` ; son `ref` à 58,9) | à mesurer | — |
+| `ref` (binaire de référence, défauts du 06/10) | 3 | 122,9 | 121,8..124,6 | 2,3 % |
+| `fast` (binaire rapide, mêmes défauts) | 3 | **111,5** | 108,9..112,9 | 3,6 % |
 
-Les pas mesurés dans une même campagne (entrelacée) sont sûrs ; les niveaux absolus
-glissent d'une campagne à l'autre (le `ref` DOOM 3 du jour est à 144, contre 138 le 04/10).
-L'écart au M4 reste ~3× sur DOOM 3 avec le binaire de référence, ~2,9× avec le binaire rapide.
+**Le binaire rapide gagne 9,3 %** sur DOOM 3 (fenêtre, sans vidage), les trois parties `fast`
+sous la meilleure `ref`. Le niveau du bras `ref` (122,9) est bien en dessous des 133,0 de
+`x86-petits` et des 144 du premier essai pour la même configuration : sans relevé de charge,
+ces campagnes du 06/10 après-midi ont pu être touchées par la même autre session (les pas mesurés
+dans une même campagne, entrelacée, restent valables ; les niveaux absolus de ce soir sont les
+seuls pris sous relevé).
 
-### 13.7 À refaire hôte au repos
+### 13.6 Matrice finale avec vidage (`x86-final`, 06/10 23:35 - 07/10 00:07)
 
-    tools/tcg/matab.sh x86-fast 3 "ref:" "fast:QEMU_BIN=$HOME/src/qemu/build-fast/qemu-system-ppc" d3 fen
-    MATAB_VIDAGE=1 tools/tcg/matab.sh x86-final 1 "ref:QEMU_FAST=0 TLBPRECISE=0 LMWINLINE=0 DCBZINLINE=0 JITREL32=0 FPNATIVECMP=0 VFPNATIVECMP=0 LMWVEC=0 JCWORD=0" "final:QEMU_BIN=$HOME/src/qemu/build-fast/qemu-system-ppc" mb,zen,ut,d3 fen
+`MATAB_VIDAGE=1`, une partie par bras, même barrière et même relevé (deux parties valides :
+étranger moyen 0,11 cœur, pointe 1,11). Bras `ref` = anciens défauts du 04/10 sur le binaire de
+référence ; bras `final` = binaire rapide et défauts du 06/10.
 
-(le bras `ref` de la matrice = l'ancien défaut du 04/10, pour l'image de référence et la vitesse
-d'avant ; toutes ces variables à 0 sont reconnues par `run_tiger.sh`). Avant chaque campagne :
-aucune autre session lourde (`top` : rien au-dessus du fond de bureau), charge < 1.
+| cellule | `ref` ms/image | `final` ms/image | pas | image (`final` ; `ref` identique) | verdict |
+|---|---|---|---|---|---|
+| `mb-fen` | 20,9 | **14,9** | −29 % | juste : rejeu/VM 0,00/0,00 %, référence 0,00/0,00 % | vert / vert |
+| `zen-fen` | 7,6 | **5,9** | −22 % | juste : 0,00/0,00 %, 0,00/0,00 % | vert / vert |
+| `ut-fen` | 58,1 | **48,7** | −16 % | juste : 0,00/0,00 %, 0,00/0,00 % | vert / vert |
+| `d3-fen` | 136,3 | **111,9** | −18 % | rejeu/VM 0,03/0,00 %, référence 0,00/0,00 % (à valider) | rouge / rouge |
+
+`d3-fen` est rouge dans les deux bras pour deux motifs qui ne viennent pas du binaire : le
+plancher (76, celui du M4 : il n'y en avait pas pour le PC) et la référence `validee=non`.
+Son écart rejeu/VM de 0,03 de moyenne (0,00 % de pixels à plus de 16) est le même dans les deux
+bras et était déjà là le 04/10 (§11) : il ne vient ni du binaire rapide ni des leviers.
+Captures (`ref-1/d3-fen/capture.png`, `final-1/d3-fen/capture.png`, images 5074 et 5079)
+comparées à la référence `bench/matrice/ref-linux/d3-fen/image.png` (image 5013 ; il n'y a pas
+de `capture.png` dans ce dossier) : même scène, justement rendue ; écart moyen 3,9 (`ref`) et
+3,2 (`final`), 8,6 et 6,8 % de pixels à plus de 16, `ref` contre `final` 2,0 / 2,9 % — de
+l'ordre de ce que 60 images de jeu déplacent (ennemi, compteur d'images). La validation à l'œil
+reste à l'utilisateur (`matrice.py --valider d3-fen`).
+
+**Planchers du PC revus** (`docs/matrice-jeux.md` §6 quater) : DOOM 3 **140** (4 parties du
+binaire rapide, 108,9-112,9), Marble Blast **19** (1 partie), Zenerchi **8** (1 partie),
+UT2004 **104 inchangé** (une partie ne suffit pas pour une cellule aussi dispersée).
+
+### 13.7 Bilan
+
+| jeu (`fen`) | départ 04/10 (référence, défauts) | 06/10, binaire de référence, nouveaux défauts | binaire rapide, nouveaux défauts | M4 |
+|---|---|---|---|---|
+| DOOM 3 | 138 (136,3 le 07/10) | **122,9** (3 parties, `x86-fast`) | **111,5** (3 parties) ; 111,9 avec vidage | ~42 |
+| Marble Blast | 21 (20,9) | 16,5 (`x86-mem-mb`) | **14,9** (1 partie, vidage) | — |
+| Zenerchi | 7,6 (7,6) | non mesuré | **5,9** (1 partie, vidage) | — |
+| UT2004 | 56 (58,1) | 54,7 (`x86-mem-ut`) | **48,7** (1 partie, vidage) | — |
+
+Du départ du 04/10 au binaire rapide avec les défauts du 06/10, mesurés dans la même campagne
+(`x86-final`) : DOOM 3 −18 %, Marble Blast −29 %, Zenerchi −22 %, UT2004 −16 %, toutes les
+images justes. L'écart au M4 reste ~2,7× sur DOOM 3.
+
+Commandes (refaites le 06/10 au soir, barrière et relevé en plus) :
+
+    MATAB_AVANT="python3 tools/tcg/chargehote.py attendre bench/tcg/ab/x86-fast/charge-releve.txt 7200" \
+      tools/tcg/matab.sh x86-fast 3 "ref:" "fast:QEMU_BIN=$HOME/src/qemu/build-fast/qemu-system-ppc" d3 fen
+    MATAB_VIDAGE=1 MATAB_AVANT=… tools/tcg/matab.sh x86-final 1 "ref:QEMU_FAST=0 TLBPRECISE=0 LMWINLINE=0 DCBZINLINE=0 JITREL32=0 FPNATIVECMP=0 VFPNATIVECMP=0 LMWVEC=0 JCWORD=0" "final:QEMU_BIN=$HOME/src/qemu/build-fast/qemu-system-ppc" mb,zen,ut,d3 fen
+
+(avec `tools/tcg/chargehote.py releve bench/tcg/ab/<campagne>/charge-releve.txt` à côté, puis
+`tools/tcg/chargeparties.py bench/tcg/ab/<campagne>` ; résultats hors dépôt comme tout `bench/`.)

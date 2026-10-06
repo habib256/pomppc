@@ -30,25 +30,14 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 
 ## Maintenant
 
-- [ ] **[TCG — PC] A/B du binaire rapide et matrice finale avec vidage, hôte au repos**
-  (`docs/vitesse-doom3-x86.md` §13.5-13.7). Le 06/10, le côté mémoire et les petits leviers
-  sont prouvés, mesurés et allumés par défaut sur Linux x86-64, `build-fast/` entraîné et
-  reconstruit ; l'A/B et la matrice ont été arrêtés par une autre session qui occupait l'hôte
-  (une seule partie propre : DOOM 3 124,1 ms/image sur `build-fast`). Avant chaque campagne :
-  rien au-dessus du fond de bureau dans `top`, charge < 1, 0 autre QEMU.
-
-      tools/tcg/matab.sh x86-fast 3 "ref:" "fast:QEMU_BIN=$HOME/src/qemu/build-fast/qemu-system-ppc" d3 fen
-      MATAB_VIDAGE=1 tools/tcg/matab.sh x86-final 1 "ref:QEMU_FAST=0 TLBPRECISE=0 LMWINLINE=0 DCBZINLINE=0 JITREL32=0 FPNATIVECMP=0 VFPNATIVECMP=0 LMWVEC=0 JCWORD=0" "final:QEMU_BIN=$HOME/src/qemu/build-fast/qemu-system-ppc" mb,zen,ut,d3 fen
-
-  **Fermeture :** bilan `x86-fast` (dispersion < 8 %), matrice `x86-final` aux images justes
-  (rejeu contre VM et référence 0,00 %), capture `d3-fen` comparée à
-  `bench/matrice/ref-linux/d3-fen/capture.png` (la référence `d3-fen` du PC est toujours
-  `validee=non` : à valider à l'œil par l'utilisateur, `matrice.py --valider d3-fen`), chiffres
-  reportés au §13 et dans CHANGELOG. **Planchers** `plancher_ms_linux` à revoir sur ce tour
-  (1,25 × le temps typique, `docs/matrice-jeux.md` §6 quater) : Marble Blast 26 → ~21 (16,5
-  mesuré), DOOM 3 n'en a pas (il prend les 76 du M4 et sort toujours rouge) → ~155 (124 sur
-  le binaire rapide), UT2004 104 (pire observé, très dispersé) et Zenerchi 10 à reprendre
-  sur les mesures du tour.
+- [ ] **[Matrice — PC] Plancher d'UT2004 sur le binaire rapide** (`docs/vitesse-doom3-x86.md`
+  §13.6, `docs/matrice-jeux.md` §6 quater). L'A/B du binaire rapide et la matrice finale avec
+  vidage sont faits hôte au repos le 06-07/10 (`x86-fast`, `x86-final`, images justes) ; les
+  planchers de DOOM 3 (140), Marble Blast (19) et Zenerchi (8) sont posés. UT2004 garde 104 :
+  une seule partie du binaire rapide (48,7 ms/image), cellule très dispersée (54-83 selon la
+  session et le vidage). **Fermeture :** au moins trois tours complets avec vidage sur le
+  binaire rapide, hôte au repos (`tools/tcg/chargehote.py`), puis 1,25 × le temps typique ou
+  le pire observé, en disant sur combien de parties il repose.
 
 - [ ] **[Outils] Endurance sur la configuration par défaut du 01/10** — banc livré le 29/09
   (`tools/endurance/`, `docs/endurance.md` : démarrages à froid, `shutdown -r`/`system_reset`
@@ -169,6 +158,13 @@ Le travail est fait ; il ne manque que l'essai ou la décision de l'utilisateur.
 - [ ] **[Plugin] Replis à retirer** : `POMPPC_GL_VERDICT=0`, `POMPPC_GL_WHITELIST=0`,
   `POMPPC_GL_TEXMEMO=0`, `POMPPC_GL_STSKIP=0`. **Reprise :** mesure en jeu par l'utilisateur ;
   ensuite retirer les options devenues inutiles et vérifier la matrice.
+- [ ] **[Matrice — PC] Valider à l'œil la référence `d3-fen` du PC** (`validee=non` depuis le
+  04/10 ; DOOM 3 sort rouge pour ce seul motif une fois sous son plancher). Images :
+  `bench/matrice/ref-linux/d3-fen/image.png` (référence, image 5013) contre
+  `bench/tcg/ab/x86-final/final-1/d3-fen/capture.png` (binaire rapide, image 5079) et
+  `…/ref-1/d3-fen/capture.png` (anciens défauts, image 5074) : même scène, écart moyen 3,2 et
+  3,9 dû aux ~60 images d'écart (`docs/vitesse-doom3-x86.md` §13.6). **Reprise :**
+  `tools/matrice/matrice.py --valider d3-fen`.
 - [ ] **[Outils] Captures, dix tours consécutifs verts** : le rendez-vous `POMPPC_GL_CAPTURE`
   remplace `dump_attente` ; premier contrôle DOOM 3/Prey fenêtre vert. Reporté le 27/09, à jouer
   sur le banc d'endurance quand l'utilisateur le demande.
