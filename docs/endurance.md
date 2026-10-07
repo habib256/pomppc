@@ -233,3 +233,146 @@ non mesuré.
 **À savoir.** `info pic` n'est pas disponible pour l'OpenPIC de mac99 dans ce QEMU
 (« Interrupt controller information not available »). L'état de la source 28 se lit donc
 par la trace ci-dessus, ou dans `vues.txt` (registres de l'OHCI côté device).
+
+## 7. PC Linux, nuit du 06 au 07/10/2026 : la configuration par défaut du 06/10
+
+**Cadre.** i7-10700F, 16 fils, 39 Go, RTX 4060 Ti (EGL/NVIDIA). Base
+`disks/tiger-endurance.qcow2`, copiée le 07/10 à 02:33 de la VM quotidienne arrêtée
+(`qemu-img check` sans erreur), **Tiger 10.4.11** (Darwin 8.11.0, xnu-792.24.17), `pmset` à 0,
+symboles dans `bench/endurance/invite-10.4.11/` (`mach_kernel` et 54 `.sym` de kexts).
+SMP=2, `HEADLESS=1` : le backend GL de qgpu a pris `gl` sur la RTX dans toutes les instances,
+sans fenêtre (`--fenetre` n'a pas servi). Banc au commit 954c452, puis 108e339 (sonde ssh) à
+partir de 03:21. Journaux dans `bench/endurance/{pc-reboot,pc-reboot-temoin,pc-jeux}/`, plus
+`charge-etrangere-0707.txt` (tools/tcg/chargehote.py) et `thermique-0707.txt`.
+
+**Les deux bras.**
+
+- **Défaut** : binaire **rapide** `build-fast/` (PGO, 06/10 19:57, sha256 4dd53b13…) et tous
+  les leviers du lanceur (TLB-PRÉCIS, LMW-EN-LIGNE, DCBZ-EN-LIGNE, JIT À 2 GIO, comparaisons
+  natives scalaires et AltiVec, LMW-STMW-VECTEUR, CACHE DE SAUTS PPC, plus les plus anciens). Le
+  binaire a dû être **imposé** (`--qemu`) : voir « Surprises ».
+- **Témoin** (`--anciens-defauts`) : binaire de référence `build/` (06/10 15:58) et les leviers
+  du 06/10 éteints (`QEMU_FAST=0 TLBPRECISE=0 LMWINLINE=0 DCBZINLINE=0 JITREL32=0
+  FPNATIVECMP=0 VFPNATIVECMP=0 LMWVEC=0 JCWORD=0`).
+
+**Déroulé.** Essai court à 02:35 (3 redémarrages, 2 parties mb et d3, sans incident), puis, de
+02:51 à 06:52, en parallèle : 3 instances de redémarrages (`shutdown -r` dans l'invité) en
+tranches alternées (défaut 02:51-03:21, témoin 03:21-04:15, défaut 04:15-05:10, témoin
+05:11-06:00, défaut 06:00-06:45), et 2 instances de jeux (mb, zen, ut, d3 à tour de rôle,
+`shutdown -r` entre deux parties, bras défaut seulement). Cinq VM ensemble : charge 1 min
+médiane 9,4 à 9,9 (maximum 16,7), charge étrangère médiane 0,04 cœur (maximum 6,5 : un
+`qgpu_replay` d'une autre session vers 04:49). Pas de tranche à froid : pas le temps.
+
+**Durées réelles.** Démarrage jusqu'au ssh, médiane **35 s** (15 à 160 s) ; un cycle de
+redémarrage complet prend environ 1 min ; environ 120 redémarrages par heure sur 3 instances en
+défaut, environ 140 en témoin. Partie : mb 150 s, zen 120 s, ut 300 s, d3 600 s, plus environ
+1 min de redémarrage, soit environ 16 parties par heure sur 2 instances.
+
+### Résultats
+
+| campagne | bras | cycles | incidents | taux | IC 95 % (Wilson) |
+|---|---|---|---|---|---|
+| `pc-reboot` | défaut | 241 démarrages (228 reboot, 13 à froid) | 4 « gel » (ssh refusé, §7.1) | 1,7 % | 0,6 – 4,2 % |
+| `pc-jeux` | défaut | 64 démarrages (59 reboot, 5 à froid) | 1 « gel » (ssh refusé, §7.1) | 1,6 % | 0,3 – 8,3 % |
+| `pc-jeux` | défaut | **62 parties** | 0 | 0 % | 0 – 5,8 % |
+| `pc-reboot-temoin` | témoin | 238 démarrages (231 reboot, 7 à froid) | 1 panique (§7.2) | 0,4 % | 0,1 – 2,3 % |
+
+Par jeu (défaut, 0 incident chacun) : DOOM 3 15 parties (IC 0 – 20,4 %), Marble Blast 16
+(0 – 19,4 %), UT2004 15 (0 – 20,4 %), Zenerchi 16 (0 – 19,4 %). Aucune panique, aucun gel,
+aucune sortie de jeu (`exit 139` compris) et aucun jeu figé en 62 parties.
+
+Paniques, tous démarrages du bras défaut : **0 sur 305** (IC 0 – 1,2 %).
+
+**Comparaison des bras, redémarrages seulement** (`endurance.py compare --depart reboot`) :
+défaut 4/228 (1,8 %, IC 0,7 – 4,4 %) contre témoin 1/231 (0,4 %, IC 0,1 – 2,4 %). Fisher
+exact bilatéral **p = 0,21** (0,37 tous départs confondus). Les intervalles se recouvrent :
+**rien ne permet de dire que le taux a bougé avec les leviers du 06/10**. Ce n'est pas non plus
+la preuve qu'il n'a pas bougé : avec environ 230 cycles par bras, on ne distinguait guère que
+5 % contre 0 %. Et les incidents des deux bras ne sont pas de la même nature (ci-dessous).
+
+### 7.1 Les cinq « gels » du bras défaut : invité vivant, sshd muet
+
+Les cinq ont la même signature : `pc-reboot` #42, #49, #83 et #202, `pc-jeux` d0022, chacun
+après un `shutdown -r`, sur trois instances différentes.
+
+- Aucun ssh en 360 s, mais le **bureau est intact** (Finder, horloge à l'heure de la collecte).
+- Les **deux vCPU sont au repos** (`_machine_idle+0x194`, EE=1, 20 relevés sur 20), sans panique
+  (`panicstr` = 0, aucun vCPU dans `panic()`).
+- Le msgbuf finit normalement (chargement de POMPPCFsqrt).
+- **La sonde** (#83, #202, d0022, à partir du commit 108e339) : la connexion au port redirigé
+  aboutit (NAT de QEMU), puis se ferme **sans bannière** ; un ssh de 90 s échoue aussi. Le port 22
+  de l'invité ne répond donc pas, alors que sa pile IP vit (`info usernet` : trafic mDNS de
+  10.0.2.15).
+- `system.log` du démarrage figé, relu après le reset : rien d'anormal ; il s'arrête au
+  chargement de POMPPCFsqrt, comme un démarrage normal (sshd, lancé à la demande par launchd,
+  n'y écrit rien).
+- Un `system_reset` rend le ssh en 45 à 85 s.
+- Charge pendant ces cycles : 10,1 à 14,4.
+
+**Ce que c'est, et ce que ce n'est pas.** Ce n'est pas une panique ni un gel du noyau. Ce n'est
+pas non plus le gel OHCI du §6, dont la signature est un vCPU qui tourne, EE coupé, dans
+`AppleUSBOHCI::FilterInterrupt`. C'est un démarrage **sans service ssh**, l'interface restant
+vivante. La cause est **inconnue** : `launchd` qui n'arme pas son socket de sshd ? un
+redémarrage à chaud dans le même QEMU ? Le banc ne voit l'invité que par ssh ; pour trancher, il
+faudrait un second canal (console série, ou un service témoin sur un autre port). Ce type
+d'incident compte bien pour un utilisateur (« le Mac démarre mais la session à distance ne
+répond pas »), mais il ne relève pas des « plantages en jeu sans cause ». Ce sont 5 cas sur 305
+démarrages du bras défaut, 0 sur 238 du témoin (Fisher p ≈ 0,07 sur ce seul type). C'est la
+piste la plus nette de la nuit, et rien de plus qu'une piste.
+
+### 7.2 La panique du bras témoin : appel par un pointeur nul pendant le démarrage
+
+`pc-reboot-temoin` #160, binaire de référence `build/`, leviers du 06/10 éteints, 20 s après
+le `shutdown -r`. Détectée alors que `panicstr` était déjà retombé à 0 : le vCPU 0 était dans
+`panic()`. Texte, relu par `kpanic.py` et sur l'écran :
+
+    panic: 0x400 - Inst access
+    Exception state: PC=0x00000000 MSR=0x40008030 DAR=0x01672000 DSISR=0x40000000
+                     LR=0x002DFED4 R1=0x11E3B9D0 XCP=0x00000010 (0x400 - Inst access)
+    IOPlatformExpert::CheckSubTree+0x12c ← CheckSubTree+0x304 (×2)
+      ← Core99PE::PMRegisterDevice+0x5c (AppleCore99PE)
+      ← IOSCSIProtocolInterface::InitializePowerManagement+0x58
+      ← IOSCSIProtocolServices::InitializePowerManagement+0x2c
+      ← IOATAPIProtocolTransport::start+0x3ec ← IOService::startCandidate ← probeCandidates
+      ← doServiceMatch ← _IOConfigThread::main
+    panic: We are hanging here...
+
+C'est un saut à l'adresse 0 depuis `CheckSubTree` pendant l'appariement IOKit du lecteur ATAPI
+(enregistrement auprès de la gestion d'énergie). Une seule occurrence en 543 démarrages des deux
+bras. Ce n'est **ni un LockTimeOut, ni le gel OHCI**, et ce n'est pas sur la configuration par
+défaut. Dossier complet dans `incidents/0160-panique/` (`kpanic.txt`, `ecran.png`, pile
+symbolisée avec les kexts).
+
+### 7.3 Ce que ça dit, et pas plus
+
+- Bras défaut (binaire rapide et leviers du 06/10) :
+  - **0 panique sur 305 démarrages** (IC 0 – 1,2 %) ;
+  - **0 incident sur 62 parties** (IC 0 – 5,8 % ; par jeu, 0 sur 15 ou 16, IC jusqu'à 20 %) ;
+  - 5 démarrages sans ssh, soit 1,6 % (IC 0,7 – 3,8 %).
+- Bras témoin : 1 panique sur 238 démarrages (0,4 %, IC 0,1 – 2,3 %), 0 démarrage sans ssh.
+- Aucun LockTimeOut et aucun `exit 139` de DOOM 3 cette nuit : le banc ne les a pas reproduits
+  en 15 parties de DOOM 3 et 543 démarrages. « Plantages en jeu sans cause » reste ouvert, sans
+  nouveau témoin.
+- La nuit ne dit pas si les leviers du 06/10 changent le taux d'incident : différence non
+  significative (p = 0,21), incidents de natures différentes d'un bras à l'autre.
+
+### 7.4 Surprises
+
+- **Le lanceur ne prend plus le binaire rapide depuis le 06/10 vers 22:07.** `scripts/qemu_fast.sh`
+  l'écarte parce que la série de patches a changé depuis sa construction (75bb094, tcg/0037-0039
+  ajoutés après 19:57) : « construit sur une autre série de patches que ce dépôt ». Il retombe
+  alors sur `build/`, qui date de 15:58, plus vieux encore et sans relevé de construction. Toute
+  session lancée depuis `main` après 22:07 tourne donc sur la référence, malgré « build-fast par
+  défaut ». Cette nuit, le bras défaut a imposé `build-fast` par `--qemu`. À faire :
+  reconstruire `build-fast` (ou `build/`) sur la série courante.
+- **Thermique.** Le paquet du processeur est resté à **97-100 °C** toute la nuit, avec une
+  fréquence moyenne vers 3,9 GHz (relevé minute par minute). Les images par partie baissent au
+  fil de la nuit (d3 : 7 517 images en 600 s à l'essai court, charge 3,5, puis une médiane de
+  3 453 sous une charge d'environ 10 et jusqu'à 1 894), même sur un QEMU tout juste relancé.
+  Charge et thermique se mêlent : ce n'est pas une mesure de vitesse.
+- **Liste `kmod` sur le 10.4.11** : la tête de liste (POMPPCFsqrt, chargé en dernier) se lit en
+  physique, le maillon suivant non. La lecture par la MMU (108e339) ne marche que si le vCPU
+  choisi est dans le contexte du noyau. Pendant la panique #160, 28 kexts ont été lus et la pile
+  est symbolisée ; pendant les « gels », un seul kext.
+- Le banc a vu la panique #160 grâce au PC dans `panic()` : `panicstr` valait déjà 0. Le banc
+  du M4 l'aurait comptée comme un gel, sans texte.

@@ -318,12 +318,23 @@ def liste_kmods(mon, sym):
     res, vus = [], set()
     while p and p not in vus and len(res) < 200:
         vus.add(p)
-        w = mots(mon, p, 42)
-        if len(w) < 42:
-            break
-        b = b"".join(x.to_bytes(4, "big") for x in w)
-        nom = b[12:76].split(b"\0", 1)[0]
-        if not nom or not all(32 <= c < 127 for c in nom):
+        nom = None
+        # en physique d'abord (V=R) ; sinon par la MMU du vCPU 0 : sur le 10.4.11
+        # la tête de liste (ndrv QEMU,VGA, chargé en dernier) est hors V=R et la
+        # lecture physique s'arrêtait au premier maillon (07/10/2026)
+        for physique, cpu in ((True, None), (False, 0), (False, 1)):
+            try:
+                w = mots(mon, p, 42, physique=physique, cpu=cpu)
+            except OSError:
+                continue
+            if len(w) < 42:
+                continue
+            b = b"".join(x.to_bytes(4, "big") for x in w)
+            n = b[12:76].split(b"\0", 1)[0]
+            if n and all(32 <= c < 127 for c in n):
+                nom = n
+                break
+        if nom is None:
             break
         adr, taille = w[37], w[38]
         res.append((nom.decode(), adr, taille, w[2]))
@@ -549,6 +560,8 @@ def rapport_incident(info, texte):
          % (info.get("kpanic_texte", "-"), info.get("kpanic_format", "-"),
             info.get("kpanic_appelant", "-")),
          "- charge de l'hôte : %s" % info.get("charge", "?"),
+         "- sonde ssh (VM en marche) : %s ; ssh de 90 s : %s"
+         % (info.get("sonde_ssh", "-"), info.get("ssh_90s", "-")),
          "- écran figé : %s ; NIP immobile : %s" % (info.get("ecran_fige"), info.get("nip_immobile")),
          "- kexts lus dans la mémoire (liste kmod) : %s" % info.get("kmods"),
          "- NIP sur 20 relevés : %s" % info.get("nip_echantillons"), ""]
@@ -764,9 +777,31 @@ def recupere_panic_log(vm, info, dossier):
                 open(os.path.join(dossier, "panic.log"), "w").write(out)
                 info["panic_log"] = out[-6000:]
             info["panic_log_redemarrage"] = "ok en %d s" % (time.time() - t0)
+            # le démarrage gelé a écrit dans system.log jusqu'au reset (sshd,
+            # DHCP, launchd) : sa fin, lue au démarrage suivant
+            code, out = vm.ssh("tail -400 /var/log/system.log 2>/dev/null", delai=60)
+            if out.strip():
+                open(os.path.join(dossier, "system.log"), "w").write(out)
             return
         time.sleep(5)
     info["panic_log_redemarrage"] = "pas de ssh en 300 s après system_reset"
+
+
+def sonde_ssh(port, delai=15):
+    """Connexion TCP brute au port redirigé : la bannière de sshd, ou ce qui manque."""
+    import socket
+    s = socket.socket()
+    s.settimeout(delai)
+    try:
+        s.connect(("127.0.0.1", port))
+        b = s.recv(200)
+        return "bannière « %s »" % b.decode("latin-1").strip() if b else "connecté, fermé sans bannière"
+    except socket.timeout:
+        return "connecté (NAT), aucune bannière en %d s" % delai
+    except OSError as e:
+        return "connexion : %s" % e
+    finally:
+        s.close()
 
 
 def incident(camp, vm, nom, etat, notes, t0, panic_log=True):
@@ -775,6 +810,17 @@ def incident(camp, vm, nom, etat, notes, t0, panic_log=True):
     notes = dict(notes, instance=vm.nom, qemu=vm.binaire or camp.args.qemu or "référence",
                  leviers=vm.leviers, charge=camp.charge_entre(t0))
     if vm.vivant():
+        # VM en marche, avant la collecte : sshd répond-il seulement ? (07/10 :
+        # deux « gels » au démarrage avec le bureau intact et les deux vCPU au
+        # repos ; la bannière dit si sshd écoute, `info usernet` l'état du NAT)
+        os.makedirs(inc, exist_ok=True)
+        notes["sonde_ssh"] = sonde_ssh(vm.port or vm.port_voulu)
+        code, _ = vm.ssh("true", delai=90)
+        notes["ssh_90s"] = "code %d" % code
+        try:
+            open(os.path.join(inc, "usernet.txt"), "w").write(hmp(vm.mon, "info usernet"))
+        except OSError:
+            pass
         info = collecte(vm.mon, inc, SYM, etat, notes)
     else:
         os.makedirs(inc, exist_ok=True)
@@ -977,6 +1023,40 @@ def rapport(dossier):
     txt = "\n".join(l) + "\n"
     open(os.path.join(dossier, "rapport.md"), "w").write(txt)
     return txt
+
+
+def fisher_bilateral(a, n1, b, n2):
+    """p bilatéral du test exact de Fisher pour a/n1 contre b/n2."""
+    from math import comb
+    k, n = a + b, n1 + n2
+    if k == 0 or k == n:
+        return 1.0
+
+    def pr(x):
+        return comb(n1, x) * comb(n2, k - x) / comb(n, k)
+    p0 = pr(a)
+    return min(1.0, sum(pr(x) for x in range(max(0, k - n2), min(k, n1) + 1)
+                        if pr(x) <= p0 * (1 + 1e-9)))
+
+
+def compare(dossiers, type_="demarrage", depart=None):
+    """Taux d'incident de plusieurs campagnes (même type de cycle), IC de Wilson,
+    et test exact de Fisher de chacune contre la première."""
+    lignes, ref = [], None
+    for d in dossiers:
+        cs = [json.loads(l) for l in open(os.path.join(d, "cycles.jsonl")) if l.strip()]
+        cs = [c for c in cs if type_cycle(c) == type_ and c["etat"] != "lancement"
+              and (depart is None or (c.get("depart") or c.get("mode")) == depart)]
+        n = len(cs)
+        k = len([c for c in cs if c["etat"] != "ok"])
+        lo, hi = wilson(k, n)
+        p = "" if ref is None else "%.3f" % fisher_bilateral(k, n, ref[0], ref[1])
+        ref = ref or (k, n)
+        lignes.append("| %s | %d / %d | %.1f %% | %.1f – %.1f %% | %s |"
+                      % (os.path.basename(d.rstrip("/")), k, n, 100 * k / n if n else 0,
+                         100 * lo, 100 * hi, p))
+    return "\n".join(["| campagne | incidents | taux | IC 95 % (Wilson) | Fisher (contre la 1re) |",
+                      "|---|---|---|---|---|"] + lignes)
 
 
 # ------------------------------------------------------------- cycles de jeu
@@ -1271,6 +1351,10 @@ def main():
                    help="accepter un backend qgpu autre que gl")
     p = sp.add_parser("rapport")
     p.add_argument("dossier")
+    p = sp.add_parser("compare", help="taux d'incident de campagnes (bras), Wilson et Fisher")
+    p.add_argument("dossiers", nargs="+")
+    p.add_argument("--type", default="demarrage", choices=("demarrage", "jeu"))
+    p.add_argument("--depart", help="seulement ces départs (froid, reboot)")
     p = sp.add_parser("collecte", help="collecte d'incident sur une VM du banc déjà lancée")
     p.add_argument("moniteur")
     p.add_argument("dossier")
@@ -1278,6 +1362,9 @@ def main():
     a = ap.parse_args()
     if a.cmd == "rapport":
         print(rapport(a.dossier))
+        return
+    if a.cmd == "compare":
+        print(compare(a.dossiers, a.type, a.depart))
         return
     SYM = Symboliseur(a.invite or INVITE)
     if a.cmd == "collecte":
