@@ -9,6 +9,17 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Mode immédiat sous programme de sommets : normale, couleur secondaire, brouillard,
+  génériques, 07/10** (`docs/protocole-v16-programmes.md` §7 bis) : `glNormal`,
+  `glSecondaryColor`, `glFogCoord` et `glVertexAttrib4fARB` entre `glBegin` et `glEnd` sous
+  programme ARB sortaient à la valeur courante de `glBegin`, et un générique de tableau
+  désactivé à la valeur de l'hôte : `geom_format` ne demandait ces attributs que pour l'état
+  fixe (éclairage, `COLOR_SUM`, `GL_FOG_COORDINATE`) ou un tableau actif. Texte précis : ce
+  qu'il lit est porté, les génériques seulement s'ils sont écrits `vertex.attrib[k]` (masque
+  `vp_attr`). Plugin seul, sans changement de protocole. Scène `vpimm` étendue (f)-(m) : 9
+  témoins faux sur 18 avant, 44/44 et écart 0 à Apple après ; `POMPPC_GL_VPIMM=0` refait les
+  9 (A/B des jeux). Job `gpu` 54 OK, 0 échec ; `tests/run-all.sh` 239 OK, 0 échec. Revue de
+  DOOM 3 et Colin McRae en jeu : reste au TODO.
 - **Binaires, paquet invité et matrice après la nuit du 06-07/10, PC, 07/10 au matin**
   (`docs/binaire-rapide-x86.md` §6, `docs/matrice-jeux.md` §6 quater) :
   `disks/prebuilt` régénéré par le job `prebuilt` sur une copie de la VM de dev (plugin de la
