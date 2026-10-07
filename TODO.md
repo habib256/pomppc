@@ -39,17 +39,20 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   binaire rapide, hôte au repos (`tools/tcg/chargehote.py`), puis 1,25 × le temps typique ou
   le pire observé, en disant sur combien de parties il repose.
 
-- [ ] **[Outils] Endurance sur la configuration par défaut du 01/10** — banc livré le 29/09
-  (`tools/endurance/`, `docs/endurance.md` : démarrages à froid, `shutdown -r`/`system_reset`
-  en série, plusieurs instances sur recouvrements qcow2, panique lue dans `panicstr`/`debug_buf`,
-  gel par ssh, captures et piles symbolisées, taux avec intervalle de Wilson). Il n'a jamais
-  tourné sur le binaire de référence reconstruit le 01/10 (A4, 0011-0016, `QGPU_GL_FLUSH`).
-  **Reste pour fermer :** une nuit sans intervention (démarrages + cycles de jeu), et une
-  vraie campagne de cycles de jeu (`jeu --jeu mb|d3|…`, éprouvés sur 2 cycles seulement ;
-  DOOM 3 sans redémarrage : `kCGLBadDisplay` après un kill).
+- [ ] **[Outils] Endurance sur la configuration par défaut** — banc livré le 29/09
+  (`tools/endurance/`, `docs/endurance.md`), porté sur Linux et joué une nuit sur le PC le 07/10
+  (`docs/endurance.md` §7 : défauts du 06/10 + binaire rapide, **0 panique sur 305 démarrages,
+  0 incident sur 62 parties** (15 par jeu, borne ~20 % par jeu), 5 « pas de ssh » après
+  `shutdown -r` ; témoin anciens défauts 1 panique « 0x400 Inst access » dans l'appariement
+  ATAPI sur 238). **Reste pour fermer :** (1) la même nuit sur le **M4** (binaire de référence
+  du 01/10, jamais éprouvé) ; (2) sur le PC, les « pas de ssh » : bureau vivant, vCPU au repos,
+  réseau vivant, port 22 muet, `system_reset` le rend, 0 sur 238 en témoin (p ≈ 0,07) — il faut
+  un second canal vers l'invité (console série, `-serial`) dans le banc pour lire l'état de
+  launchd/sshd au moment du cas ; (3) une tranche de démarrages à froid (non jouée, faute de temps).
 
 - [ ] **[Système] Plantages en jeu sans cause** — trois défauts, peut-être un seul mécanisme ;
-  le banc ci-dessus doit les faire sortir.
+  le banc ci-dessus doit les faire sortir (nuit du 07/10 sur le PC : aucun `LockTimeOut`, aucun
+  `exit 139` en 15 parties de DOOM 3 et 543 démarrages).
   - **Paniques par délai de verrou (`LockTimeOut` = 250 ms).** Le « gel au chargement de
     DOOM 3 » (26/09, 1 lancement sur ~12) est une panique : `0x268b4` = `_panic+0x254`, vCPU 1
     au repos ; sans kdp, Tiger n'en garde ni écran ni `panic.log`. Mécanisme probable : un arrêt
