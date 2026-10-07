@@ -125,6 +125,29 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   ARB 81,2 → 80,2). `tools/matrice/ab-attente.sh 6 qflush` sur hôte au repos ; éteindre si
   une cellule régresse.
 
+- [ ] **[Plugin] Vrais offsets de l'état `glPixelStorei` sur 10.4.11** (`CTX_UNPACK_*` à
+  `gctx+0x31cc..0x31e5`, et `CTX_PACK_*`) — `docs/backend-gl-unites-fixes.md`, « Scènes gltest
+  sur le PC ». Sur la VM 10.4.11 les quatre mots lisent 0 (ALIGNMENT compris, défaut GL 4) et
+  ont valu autre chose trois fois dans la session de l'utilisateur : `try_draw_pixels` a planté
+  (`mixte`, `v15`). Garde posée le 07/10 (`unpack_trusted` : hors valeurs par défaut, rendu
+  logiciel). **Épreuve :** `tools/re/diffstate.py` sur un `glPixelStorei(GL_UNPACK_*)` par
+  paramètre, en 10.4.11 ; puis `drawpack` avec ALIGNMENT 1 / ROW_LENGTH / SKIP sur le chemin
+  hôte (note `unpack non sûr` absente, image = Apple), et chercher ce qui écrivait dans les
+  anciens mots (relais, 8 × `mixte`/`v15` sans plantage n'est pas une preuve).
+
+- [ ] **[Plugin] `glMaterial` entre `glBegin` et `glEnd` (scène `matbegin`)** — défaut connu,
+  `docs/re/opengl-1.4.md` §3.3 : au chemin brut, la primitive qui change de matériau part au
+  rendu logiciel d'un autre renderer et se perd, la suivante garde l'ancien matériau ((8,48)
+  noir, (28,48) vert au lieu de rouge ; Apple seul exact). Vu sur le PC le 07/10 (nuit et
+  rejeu, toutes tailles) ; pas propre à NVIDIA. Pistes : codes 32..39 du descripteur (matériau
+  par sommet) dans `DRAW_RAW`, ou repli du lot entier. **Épreuve :** `gltest matbegin` vert et
+  `gtgeo.sh` sans régression ; puis l'ajouter au job `gpu`.
+
+- [ ] **[Outils] Après le 07/10 : `disks/prebuilt` et binaire de référence du PC** — le `gltest`
+  précompilé (04/10) rend encore les neuf faux rouges de taille et `stencil` quand on le joue
+  sans taille ; `~/src/qemu/build` (06/10) n'a pas l'hôte de `vpimm` (99e36a4), seule scène rouge
+  du job `gpu` sur ce binaire. Job `prebuilt`, puis reconstruction du binaire de référence.
+
 - [ ] **[TCG] Marble Blast sous `x-msr-nobql`** : A/B non concluant (cellule trop bruitée), à
   refaire par `tools/tcg/mbab.sh`.
 
