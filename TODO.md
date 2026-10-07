@@ -125,14 +125,6 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   ARB 81,2 → 80,2). `tools/matrice/ab-attente.sh 6 qflush` sur hôte au repos ; éteindre si
   une cellule régresse.
 
-- [ ] **[Plugin] `glMaterial` entre `glBegin` et `glEnd` (scène `matbegin`)** — défaut connu,
-  `docs/re/opengl-1.4.md` §3.3 : au chemin brut, la primitive qui change de matériau part au
-  rendu logiciel d'un autre renderer et se perd, la suivante garde l'ancien matériau ((8,48)
-  noir, (28,48) vert au lieu de rouge ; Apple seul exact). Vu sur le PC le 07/10 (nuit et
-  rejeu, toutes tailles) ; pas propre à NVIDIA. Pistes : codes 32..39 du descripteur (matériau
-  par sommet) dans `DRAW_RAW`, ou repli du lot entier. **Épreuve :** `gltest matbegin` vert et
-  `gtgeo.sh` sans régression ; puis l'ajouter au job `gpu`.
-
 - [ ] **[TCG] Marble Blast sous `x-msr-nobql`** : A/B non concluant (cellule trop bruitée), à
   refaire par `tools/tcg/mbab.sh`.
 

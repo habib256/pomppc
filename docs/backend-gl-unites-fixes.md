@@ -86,7 +86,7 @@ que par l'ajout de `vpimm`.
 | `texgen` | plugin ET Apple : 3 « motif présent » hors du tampon | OK, 1 | taille |
 | `v15` | plugin ET Apple : 8 relevés « NON TENU » (pixel hors du tampon) | plugin 17/17 tenu ; Apple 5 non tenus (référence, comme toujours) | taille (+ plantage) |
 | `stencil` | sans `GLTEST_STENCIL` : plugin ET Apple, 3 témoins faux ; avec, en 64×64 : OK, 0 | OK, 0 | variable manquante |
-| `matbegin` | plugin : (8,48) noir et (28,48) vert au lieu de rouge ; Apple OK | idem | **défaut réel**, connu |
+| `matbegin` | plugin : (8,48) noir et (28,48) vert au lieu de rouge ; Apple OK | idem | **défaut réel** — corrigé le 07/10 (`docs/re/opengl-1.4.md` §3.3) |
 
 Mêmes verdicts en single-user (`GLTEST_NOWS=1`) et en session bureau, par l'agent racine comme
 par le relais `POMPPCGuiRunner` (sans `GLTEST_NOWS`, qui y rend 10006 à toute scène) : la
@@ -94,7 +94,9 @@ session n'est pour rien dans les dix faux rouges, ni NVIDIA (Apple seul échoue 
 témoins, dans la même VM). `matbegin` est le défaut documenté dans `docs/re/opengl-1.4.md` §3.3
 (`glMaterial` entre `glBegin`/`glEnd` : `_gleForceToSoftwareTCL` sans consulter `cfg+0x7a`) ; il
 est côté invité (GLEngine, chemin brut), pas propre au PC ni à NVIDIA, et vu aussi par `gtgeo.sh`
-sur la VM de contrôle d'A4.
+sur la VM de contrôle d'A4. **Corrigé le 07/10** : le plugin honore le « T&L perdu » que
+`_gleForceToSoftwareTCL` pose dans le bloc de changements ; `matbegin` et la nouvelle scène
+`matsonde` sont dans le job `gpu`.
 
 **Corrigé dans `gltest`** : sans taille donnée, les neuf scènes ci-dessus se jouent en 256×256
 (liste `grandes`, comme `tex13`/`tex14`/`gl15`/`texlod` depuis le 24/09) et `stencil` demande

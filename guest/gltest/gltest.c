@@ -69,7 +69,7 @@
  *
  * alpharep arbfp arbvp bigstrip blendc caps clip comb combine3 combprobe cube cubeprobe depth
  * depthrt dlist drawpack entry fill fogz forkdraw fusion game gl15
- * gouraud lightprobe lit logicop matbegin matprobe mix mixte mtxprobe
+ * gouraud lightprobe lit logicop matbegin matprobe matsonde mix mixte mtxprobe
  * occl offset pixsonde pixstore polymode prims probe2 ptprobe qprobe r4 rawprim readpack
  * sepspec spin state stencil stencilprobe stipple t3dprobe tclprobe
  * tcprobe tex tex13 tex14 tex3d texcache texcross texdelmid texfmt
@@ -7314,12 +7314,12 @@ int main(int argc, char **argv)
         check("glTexCoord3f courant hors glBegin", 188, 8, 0xffffff);
         glDisable(GL_TEXTURE_2D);
     } else if (!strcmp(scene, "matbegin")) {
-        /* glMaterial ENTRE glBegin et glEnd. Au chemin brut, GLEngine bascule
-           alors la primitive vers le rendu logiciel d'un AUTRE renderer
-           (_gleForceToSoftwareTCL → _gleSwitchToNonRevertRenderer), quel que
-           soit cfg+0x7a : elle est perdue pour la surface de l'hôte. Défaut
-           connu (docs/re/opengl-1.4.md §3.3) ; exact au chemin hérité et sous
-           Apple. Éclairage ambiant seul (modèle 1,1,1) : la couleur est
+        /* glMaterial ENTRE glBegin et glEnd. Au chemin brut, GLEngine demande
+           alors le T&L logiciel pour la primitive (_gleForceToSoftwareTCL, quel
+           que soit cfg+0x7a) ; tant que le plugin gardait le T&L au dispatch
+           qui suit, la primitive était perdue et la suivante gardait l'ancien
+           matériau. Corrigé le 07/10 (docs/re/opengl-1.4.md §3.3, scène
+           matsonde). Éclairage ambiant seul (modèle 1,1,1) : la couleur est
            l'ambiante du matériau. */
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -7343,6 +7343,76 @@ int main(int argc, char **argv)
             check("glMaterial entre glBegin/glEnd", 8, 48, 0xff0000);
             check("primitive suivante", 28, 48, 0xff0000);
         }
+    } else if (!strcmp(scene, "matsonde")) {
+        /* RELEVÉ et épreuve (07/10) : que devient un glMaterial entre glBegin
+           et glEnd ? (docs/re/opengl-1.4.md §3.3) Avant d'un sommet, au milieu
+           d'une primitive, et la primitive suivante, chaque cas vérifié.
+           Une étape par glClear ; avec POMPPC_GLTRACE=<dossier> et
+           POMPPC_GLTRACE_STATE=1, chaque glClear vide le bloc d'état et les
+           objets matériau (clear-matf/clear-matb) : `tools/re/diffstate.py
+           diff <dossier> --tag clear-matf`. Le pixel (8,8) est lu avant
+           chaque glClear (ce que l'étape a dessiné). */
+        static const GLfloat lm[4] = { 1, 1, 1, 1 }, z[4] = { 0, 0, 0, 1 };
+        static const GLfloat ra[4] = { 1, 0, 0, 1 }, ga[4] = { 0, 1, 0, 1 };
+        static const GLfloat ba[4] = { 0, 0, 1, 1 }, ya[4] = { 1, 1, 0, 1 };
+        int e2;
+        glClearColor(0, 0, 0, 1);
+        glEnable(GL_LIGHTING);
+        glLightModelfv(GL_LIGHT_MODEL_AMBIENT, lm);
+        glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, z);
+        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, ga);
+        glNormal3f(0, 0, 1);
+        for (e2 = 0; e2 < 6; e2++) {
+            const char *n = "";
+            switch (e2) {
+            case 0: n = "état initial (ambiant vert)"; break;
+            case 1: n = "glBegin, glMaterial rouge, 4 sommets, glEnd";
+                glBegin(GL_QUADS);
+                glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, ra);
+                glVertex2f(0, 0); glVertex2f(16, 0); glVertex2f(16, 16); glVertex2f(0, 16);
+                glEnd();
+                break;
+            case 2: n = "glBegin, 4 sommets, glEnd (sans glMaterial)";
+                glBegin(GL_QUADS);
+                glVertex2f(0, 0); glVertex2f(16, 0); glVertex2f(16, 16); glVertex2f(0, 16);
+                glEnd();
+                break;
+            case 3: n = "glMaterial bleu hors glBegin, 4 sommets";
+                glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, ba);
+                glBegin(GL_QUADS);
+                glVertex2f(0, 0); glVertex2f(16, 0); glVertex2f(16, 16); glVertex2f(0, 16);
+                glEnd();
+                break;
+            case 4: n = "glBegin, 4 sommets, glMaterial jaune, 4 sommets, glEnd";
+                glBegin(GL_QUADS);
+                glVertex2f(0, 0); glVertex2f(16, 0); glVertex2f(16, 16); glVertex2f(0, 16);
+                glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, ya);
+                glVertex2f(20, 0); glVertex2f(36, 0); glVertex2f(36, 16); glVertex2f(20, 16);
+                glEnd();
+                break;
+            case 5: n = "glBegin, 4 sommets, glEnd (après)";
+                glBegin(GL_QUADS);
+                glVertex2f(0, 0); glVertex2f(16, 0); glVertex2f(16, 16); glVertex2f(0, 16);
+                glEnd();
+                break;
+            }
+            glFinish();
+            printf("étape %d : %s -> (8,8) = %06lx (28,8) = %06lx\n", e2, n,
+                   px(8, 8), px(28, 8));
+            {   /* attendu (rendu d'Apple, chemin hérité) */
+                static const unsigned long w8[6] = { 0, 0xff0000, 0xff0000, 0x0000ff,
+                                                     0x0000ff, 0xffff00 };
+                static const unsigned long w28[6] = { 0, 0, 0, 0, 0xffff00, 0 };
+                char what[32];
+                sprintf(what, "étape %d, premier quad", e2);
+                check(what, 8, 8, w8[e2]);
+                sprintf(what, "étape %d, second quad", e2);
+                check(what, 28, 8, w28[e2]);
+            }
+            glClear(GL_COLOR_BUFFER_BIT);
+            glFinish();
+        }
+        glDisable(GL_LIGHTING);
     } else if (!strcmp(scene, "ptprobe")) {
         /* Sonde : deux points de taille 16 au chemin hérité (POMPPC_GL_GEOM=0),
            sans puis avec atténuation (facteur 1/2 à d = 200) — le vidage des

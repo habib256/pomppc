@@ -1140,6 +1140,8 @@ static struct {
     unsigned long   n_uv_take, n_uv_units, n_uv_full;   /* UNITVD : repris, unités
                                            refaites, renvois au verdict complet */
     unsigned long   n_uv_chk_same, n_uv_chk_diff;       /* UNITVD + VERDICTCHECK */
+    int             tcllost;            /* 07/10 : POMPPC_GL_TCLLOST (défaut 1) */
+    unsigned long   n_tcllost;          /* dispatchs « T&L perdu » honorés */
     int             native_range;       /* plage de gldFlushBuffer crue (défaut) */
     PBuf           *buf_hash[BUF_HASH]; /* recherche O(1) de buf_from_vbo */
     long            rp_qid[RAWPOOL_MAX];
@@ -2428,6 +2430,11 @@ void pomppc_backend_init(void)
                 G.stskip = e && e[0] ? e[0] != '0' : STSKIP_DEFAULT;
                 e = getenv("POMPPC_GL_STATECHECK");
                 G.stcheck = e && e[0] && e[0] != '0';
+                /* 07/10 : bloc de changements +0x0c bit 0x10000000 (« T&L
+                   perdu », _gleForceToSoftwareTCL) honoré : ce dispatch rend
+                   le pilote sans T&L (geom_dispatch_locked). =0 : comme avant. */
+                e = getenv("POMPPC_GL_TCLLOST");
+                G.tcllost = e && e[0] ? e[0] != '0' : 1;
                 /* A4 (30/09) : bloc d'état — au lieu de compute_state et du
                    différentiel, les fenêtres brutes de l'état de GLEngine
                    partent dans STATE_BLOCK et le device en tire les clés
@@ -13549,6 +13556,10 @@ static const unsigned long wl_mask[CNT_BLOCK] = {
     0xffffffffUL, 0xffffffffUL, 0xffffffffUL, 0xffffffffUL, 0xffffffffUL,
     0xffffffffUL, 0xffffffffUL, 0xffffffffUL, 0xffffffffUL
 };
+/* +0x0c 0x10000000 : « verrou T&L perdu », posé par _gleForceToSoftwareTCL
+   (GLEngine 0x103c00) avant d'appeler le dispatch — 07/10, matbegin. */
+#define GLE_CHG_TCL_LOST_WORD 3
+#define GLE_CHG_TCL_LOST      0x10000000UL
 #define WL_GS_WORD 3
 #define WL_GS      0x00100000UL
 /* 30/09 — +0x0c 0x04000000 : tout glUniform* (_glUniform*_Exec) et
@@ -13856,6 +13867,16 @@ static void uv_check(PCtx *p, int ok, const TexInfo *ti, unsigned long fmt, unsi
  *           gctx+0x7580, trouve égal et saute tout le bloc, dont la relecture
  *           de cfg+0x11c. Il n'est donc nécessaire que si le descripteur a
  *           changé SANS que le verrou change. */
+/* 07/10 : « T&L perdu » honoré seulement au pipeline fixe — aucun programme
+   ARB allumé ni objet GLSL courant (lus sur gctx, sans prog_state). */
+static int tcllost_ok(PCtx *p)
+{
+    unsigned char *gc = gctx_of(p);
+    if (!gc)
+        return 0;
+    return !GC_PROG_ON(gc, 0) && !GC_PROG_ON(gc, 1) && !GLD_U32(gc, GC_GLSL_ACTIVE);
+}
+
 /* Verrou tenu, p = find_ctx(ctx) (peut être nul). Peut relâcher G.mu le temps
    d'un flush (texture_ok), comme avant. */
 static long geom_dispatch_locked(PCtx *p, const unsigned long *chg)
@@ -13867,6 +13888,35 @@ static long geom_dispatch_locked(PCtx *p, const unsigned long *chg)
         glsl_hook_ctx(p);               /* v21 : une fois par contexte */
     if (p && (!chg || !st_neutral(chg)))
         p->st_dirty = 1;                /* lot 4 : un bit que compute_state lit */
+    if (p && chg && (chg[GLE_CHG_TCL_LOST_WORD] & GLE_CHG_TCL_LOST) && G.tcllost &&
+        tcllost_ok(p)) {
+        /* 07/10 — GLEngine demande le T&L logiciel pour la primitive en cours
+           (_gleForceToSoftwareTCL : glMaterial entre glBegin et glEnd, scène
+           matbegin, docs/re/opengl-1.4.md §3.3). Il a déjà recopié les sommets
+           écrits dans SON tampon (0x100 octets par sommet) et refermé le nôtre
+           (EndPrimitiveBuffer, compte hors tampon : jeté), puis il appelle ce
+           dispatch et compare le retour à gctx+0x7580. Rendre le bit 0 posé
+           (« le pilote garde le T&L ») lui faisait relancer NOTRE Begin tout en
+           remettant son curseur gctx+0x4858 dans son tampon : la primitive
+           était perdue, et le glMaterial suivait sans être vu. Sans le bit 0,
+           il passe au T&L logiciel (_gleUpdateDispatchCodeChange) : la
+           primitive est éclairée sommet par sommet par GLEngine et rastérisée
+           par nos procédures héritées — le chemin POMPPC_GL_GEOM=0, exact. Le
+           verdict n'est pas gardé (vd_ok 0) : le dispatch suivant le refait et
+           rend le T&L. Pas sous programme (tcllost_ok) : le T&L logiciel d'un
+           programme mène à _gleBuildInterpolateFunc → exit(1)
+           (docs/re/glengine-exit-interpolateur.md) ; la primitive y reste
+           perdue, comme avant. */
+        p->geom_on = 0;
+        if (G.verdict) {
+            vd_store(p, 0, 0, 0, 0);
+            p->vd_fresh = 1;
+        }
+        if (G.n_tcllost++ < 8)
+            gl_note("TCLLOST dispatch n° %lu, image %lu : T&L rendu à GLEngine pour "
+                    "cette primitive\n", G.n_tcllost, G.n_frames);
+        return 0;
+    }
     if (G.count)                        /* lot 0 : compter seulement */
         cnt_dispatch(p, chg);
     if (p)

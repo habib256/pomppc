@@ -83,14 +83,66 @@ revenir) : GLEngine reste sur nous, et le descripteur (4 composantes par unité)
 `tcprobe` passe entièrement, et **les textures 3D et les cartes de cube passent désormais par
 le chemin brut** (`tex3d`, `cube`, `tex13` : 0 échec, aucun refus).
 
-### 3.3 Reste ouvert : `glMaterial` entre `glBegin` et `glEnd`
+### 3.3 `glMaterial` entre `glBegin` et `glEnd` (corrigé le 07/10/2026)
 
-`_glMaterialfv_Exec` appelle `_gleForceToSoftwareTCL` **sans consulter `cfg+0x7a`** (seulement
-`gctx+0x7580`, `gctx+0x4a10 ≥ 0`, `gctx+0x4664 == 0`). Au chemin brut, une primitive qui change
-de matériau en cours de route est donc perdue, et la suivante garde l'ancien matériau (scène
-`matbegin` : noir puis vert au lieu de rouge ; exact au chemin hérité et sous Apple). Défaut
-antérieur à ce lot. Pistes : les codes 32..39 du descripteur (matériau par sommet,
-`docs/re/descripteur-de-sommet.md`), qu'il faudrait porter dans `DRAW_RAW`.
+**Symptôme** (scène `matbegin`) : au chemin brut, le quad dont le matériau change après
+`glBegin` est perdu ((8,48) noir) et le suivant garde l'ancien matériau ((28,48) vert au lieu
+de rouge) ; exact au chemin hérité (`POMPPC_GL_GEOM=0`) et sous Apple. Vu sur le PC et sur la
+VM de contrôle d'A4, à toutes les tailles : défaut de l'invité, pas de l'hôte.
+
+**Lecture** (`otool -tV`, GLEngine de 10.4.11, identique à 10.4.6 pour ce qui suit) :
+
+* `_glMaterialfv_Exec` (0x32a5c, de même `_glMaterialf/i/iv_Exec`) appelle
+  `_gleForceToSoftwareTCL` (0x32aa8) si `gctx+0x7580` (T&L du pilote), si une primitive est
+  ouverte (`gctx+0x4a10 ≥ 0`) et si `gctx+0x4664 == 0` — **sans consulter `cfg+0x7a`** — puis
+  range le matériau (`_gleLightMaterialRGBAChange_FB_A`…, dans `GS+0x28c0`/`GS+0x2b00`).
+* `_gleForceToSoftwareTCL` (0x103b38) recopie les sommets déjà écrits dans son tampon interne
+  (`_gleDecomposePrimitiveVertices`, 0x100 octets par sommet, `gctx+0x4858 = gctx+0x4854 +
+  n·0x100`), referme la primitive du pilote (`gctx+0x46ec` = `EndPrimitiveBuffer`, compte
+  calculé hors de notre tampon : le plugin la jette), pose **`0x10000000` dans le mot `+0x0c`
+  du bloc de changements** (`gctx+0x31c`, « verrou T&L perdu ») puis appelle le dispatch du
+  pilote (`gctx+0x4788` → `gldUpdateDispatch`) et compare le retour à `gctx+0x7580/0x7581`.
+  Différent : `_gleUpdateDispatchCodeChange` (ou `_gleSwitchToNonRevertRenderer`) passe au
+  T&L logiciel. **Égal : rien ne change**, et il rappelle quand même la fonction de début de
+  primitive (`gctx+0x49e0[mode]`) en remettant `gctx+0x4858` sur **son** tampon interne.
+
+**Sonde** (scène `matsonde`, trace `POMPPC_GLTRACE`) : le plugin rendait toujours le bit 0
+(« le pilote garde le T&L »). On voyait donc `Begin` / `End(n 0)` (la fermeture forcée), un
+dispatch « gardé », puis un second `Begin` sur notre tampon et un `End` au compte absurde
+(`n −1090729` : curseur `0x2832d0` dans le tampon interne de GLEngine, 4 sommets au pas `0x2c`
+de notre format) — jeté : la primitive est perdue. Pire, une sonde temporaire (ambiant avant lu
+sur `GS+0x28c0` à chaque dessin) montre qu'après ce premier repli manqué **l'objet matériau de
+`gctx` ne bouge plus du tout** : il reste vert jusqu'au bout de la scène, y compris après un
+`glMaterial` bleu donné **hors** `glBegin` (`matsonde`, `POMPPC_GL_TCLLOST=0` : 6 témoins faux
+sur 12, étapes 2, 3 et 5 vertes). GLEngine croit la primitive passée au T&L logiciel et range
+les matériaux ailleurs (non relevé). D'où le second témoin de `matbegin` : (28,48) vert. (Le §3.3
+d'avant parlait d'un « autre renderer » : la trace montre que GLEngine ne change pas de renderer,
+il reste sur nous avec un curseur hors de notre tampon.)
+
+**Correction** (plugin, `geom_dispatch_locked`) : un dispatch dont le bloc porte
+`+0x0c & 0x10000000` (`GLE_CHG_TCL_LOST`) rend le pilote **sans T&L** pour ce dispatch
+(`geom_on = 0`, verdict non gardé). GLEngine passe alors au T&L logiciel : la primitive est
+éclairée sommet par sommet par GLEngine — le matériau change bien au sommet près — et
+rastérisée par nos procédures héritées, le chemin `POMPPC_GL_GEOM=0`. Le dispatch suivant
+refait le verdict et rend le T&L. **Pas sous programme** (ARB allumé ou objet GLSL courant,
+`tcllost_ok`) : le T&L logiciel d'un programme mène à `_gleBuildInterpolateFunc` → `exit(1)`
+(`glengine-exit-interpolateur.md`) ; la primitive y reste perdue, comme avant (aucun cas
+connu). `POMPPC_GL_TCLLOST=0` remet l'ancien comportement (A/B) ; la note
+(`POMPPC_GL_NOTE`) dit les huit premiers dispatchs honorés (`TCLLOST`).
+
+Les autres appelants de `_gleForceToSoftwareTCL` (`_glEndRDirty_Exec`, les
+`_gleFlush*TCLRDirtyFunc` et `_gleVPFlush*TCLRDirty`, §3.2) ne s'atteignent qu'avec
+`cfg+0x7a = 0` (`POMPPC_GL_RDIRTY=0`) ; ils passent par le même dispatch, donc par la même
+correction (hors programme) : sous `POMPPC_GL_RDIRTY=0`, `tcprobe` passe désormais (4 témoins
+faux avec `POMPPC_GL_TCLLOST=0`). `cfg+0x7a` reste à 1 (le descripteur à 4 composantes évite le
+repli, donc le chemin lent).
+
+**Épreuves** : `matbegin` juste, image identique à l'octet au rendu d'Apple (md5) dans les
+quatre modes de `gtgeo.sh`, toutes les autres scènes de `gtgeo.sh` au même md5 qu'avec
+`POMPPC_GL_TCLLOST=0` ; `matsonde` (six étapes : matériau avant le premier sommet,
+primitive suivante, matériau hors `glBegin`, matériau **au milieu** d'une liste de deux quads,
+primitive d'après) identique au rendu d'Apple et au chemin hérité, témoin par témoin. Les deux
+scènes sont dans le job `gpu`.
 
 ## 4. La taille de point maximale initiale
 
