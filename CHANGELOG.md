@@ -9,6 +9,15 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Paquet invité refait après le correctif `glPixelStore` (77f9092), PC, 07/10 08:25**
+  (`docs/matrice-jeux.md` §6 quater) : sur une nouvelle copie de la VM de dev, binaire de
+  référence reconstruit le matin, job `gpu` **54 OK, 0 échec** (`pixstore` et `vpimm` compris,
+  `qgpu_test` 0 échec, caps 0xefffe) ; job `prebuilt` → `disks/prebuilt` (ancien en
+  `bench/devloop/prebuilt-20261007-0709`), paquet `disks/pomppc-guest-20261007b.iso`. Installé
+  dans la VM quotidienne, au repos (aucune application, ~49 min sans entrée) : ancien plugin dans
+  `~/pomppc-sauvegarde-20261007b`, `install.sh`, invité redémarré ; kext `caps 0xefffe`, plugin
+  chargé (chaîne `20261004-d3x`, révision laissée en attente de l'utilisateur), `gltest pixstore`
+  et `gltest vpimm` verts dans la session.
 - **Binaires, paquet invité et matrice après la nuit du 06-07/10, PC, 07/10 au matin**
   (`docs/binaire-rapide-x86.md` §6, `docs/matrice-jeux.md` §6 quater) :
   `disks/prebuilt` régénéré par le job `prebuilt` sur une copie de la VM de dev (plugin de la

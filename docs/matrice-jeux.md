@@ -364,6 +364,10 @@ par la matrice (une fois, cf. `docs/gel-doom3-baddisplay.md`). Vitesse **peu pro
 est ~10 % au-dessus des 111,9 du tour `x86-final` (06/10) ; A/B `--sans-vidage` d'une partie par
 bras : `POMPPC_GL_VPIMM=0` 118,6, défaut 119,4 (`bench/matrice/20261007-ab-vpimm{0,1}`) — `vpimm`
 n'y est pour rien ; à remesurer hôte au repos.
+Après ce tour, le paquet a été refait avec le correctif `glPixelStore` (77f9092,
+`disks/pomppc-guest-20261007b.iso`, job `gpu` 54/54) et installé dans la VM quotidienne : le
+tour `20261007-0709` est donc antérieur au plugin installé (le correctif ne touche que
+`glPixelStorei`, `DrawPixels`/`Bitmap` et les relectures).
 
 Images justes partout où il y a une image (rejeu = VM et référence à 0,00), sauf une fois :
 
