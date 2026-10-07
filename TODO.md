@@ -68,15 +68,18 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   (relever `LockTimeOut` par le kext, ou borner les arrêts de vCPU) et série sans incident ;
   des lancements réussis ne suffisent pas.
 
-- [ ] **[Validation] Correctifs des bug hunts jamais éprouvés dans la VM** : `kextunload`
-  avec un jeu ouvert (K4, KG4, KT1), `SUBMIT` après déchargement → erreur propre,
-  `QFB=1` avec Marble Blast, GPU hôte bloqué puis rechargement du kext et
-  `system_reset` (GL3, KT4, K6), `system_reset` en SMP=2 sans relance prématurée du
-  CPU 1 (M1), son Tiger lecture/pause/arrêt/relance (S1–S7, Q3–Q7), plafond mémoire
-  `QGPU_MEM_MB=512` sous DOOM 3 (R5), `run-all.sh` par les deux chemins
-  (`docs/bug-hunt-2026-09-22.md` §11). Créneaux perdus du kext sans constante compilée :
-  vérifier que KT2 (MAGIC au démarrage), KT3 et K7 (29/09) les ferment, sinon cause.
-  **Fermeture :** une ligne de preuve par point dans `docs/bug-hunt-2026-09-29-passe4.md`.
+- [ ] **[Validation] Restes des épreuves en VM des bug hunts** (tout le reste est tenu le
+  07/10 sur le PC : `docs/bug-hunt-2026-09-29-passe4.md`, dernière section).
+  (1) **R5 sous refus réel** : avec `QGPU_MEM_MB=128`, DOOM 3 essuie 201 `NO_MEM` proprement
+  puis meurt par l'`exit()` de GLEngine (`gleBuildInterpolateFunc`, `docs/re/glengine-exit-interpolateur.md`) :
+  le repli « objet non résident → Apple » envoie des interactions ARB au rendu logiciel.
+  Piste : sous programme ARB, ne pas rendre le dessin à Apple pour une texture non résidente
+  (unité coupée, ou texture repliée en basse résolution), puis rejouer à 128 Mio (à 512 Mio
+  aucun refus n'arrive). (2) **GPU hôte bloqué** (GL3, KT4, K6, et L2 de `architecture.md`
+  §5) : ajouter au device `x-test-stall-ms` (le thread de rendu dort avant chaque job,
+  réglable par `qom-set`) et `x-test-refuse-reset`, puis bloquer, recharger le kext,
+  `system_reset`, débloquer : device « cassé » puis réparé, fenêtre qfb reliée.
+  **Fermeture :** une ligne de preuve par point dans la même section.
 
 ## Ensuite
 

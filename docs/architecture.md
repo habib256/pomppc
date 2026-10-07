@@ -11,7 +11,8 @@ dans [protocole.md](protocole.md) et les en-têtes qu'il référence.
 Les mécanismes cités décrivent le code actuel. Les écarts identifiés par
 **L1…L6** sont des limites relevées le 27/09, pas des garanties ni des
 corrections ; chacune dit son état daté (au 07/10 : L2 et L5 tiennent, L1,
-L3, L4 et L6 sont fermées dans le code, leurs épreuves en VM restent dues).
+L3, L4 et L6 sont fermées dans le code ; L4 est éprouvée en VM le 07/10, les
+autres épreuves en VM restent dues).
 La relecture statique ne remplace pas une épreuve de concurrence en VM.
 
 ## 1. Frontières et propriétaires
@@ -294,10 +295,12 @@ encore. Ce chemin n'est atteint que par un retrait à chaud, refusé
 au realize (:1363), où le thread vient de naître et n'a aucun job. Aucune
 attente non bornée ne reste donc sous BQL dans un scénario pris en charge.
 L'épreuve en VM (GPU hôte bloqué puis rechargement du kext et
-`system_reset`, GL3/KT4/KT5) est suivie par l'entrée « Correctifs des bug
-hunts jamais éprouvés dans la VM » de [TODO.md](../TODO.md) ; le device
-n'a pas de harnais natif (`qgpu-pci.c` ne se compile qu'avec QEMU), ce qui
-interdit de l'éprouver sur l'hôte seul.
+`system_reset`, GL3/KT4/KT5) est suivie par l'entrée « Restes des épreuves
+en VM des bug hunts » de [TODO.md](../TODO.md) : le 07/10, rechargement et
+`system_reset` ont été joués sans blocage, mais le blocage lui-même demande
+une propriété de test du device (`x-test-stall-ms`) ; le device n'a pas de
+harnais natif (`qgpu-pci.c` ne se compile qu'avec QEMU), ce qui interdit de
+l'éprouver sur l'hôte seul.
 
 **L4 — Arrêt du kext avec dormeurs restants.** Écrit le 27/09 :
 `POMPPCGPU::stop` attendait au plus environ une seconde ; s'il restait des
@@ -315,10 +318,14 @@ boucle se termine parce que chaque chemin gated revoit `fStopping` :
 (:828, :859), `waitDestroy` (:1075), `destroyClientObjects` (:1091),
 `submitGated` (:623), `slotGated` à l'allocation (:901) ; le plus long
 passage non interruptible est un doorbell synchrone, borné à 2 s par le
-device (patches/qgpu/qgpu-pci.c:199, :612-641). Épreuve encore à faire, en
-VM : `kextunload` pendant `WAIT_FENCE`/`SUBMIT` d'un jeu ouvert, et
-`SUBMIT` après déchargement → erreur propre ; elle est suivie par la même
-entrée « Validation » de TODO.md (K4, KG4, KT1).
+device (patches/qgpu/qgpu-pci.c:199, :612-641). **Éprouvée en VM le
+07/10/2026** (docs/bug-hunt-2026-09-29-passe4.md, dernière section) :
+`kextunload` avec Marble Blast et `guest/qgpu-test/unloadpeer` ouverts,
+dormeur en `WAIT_FENCE` sorti en 0,9 s, appel en vol refusé, module
+déchargé sans panique. Après déchargement, Tiger 10.4.11 détache le port
+de la connexion : les appels rendent `kIOReturnBadArgument` sans atteindre
+le kext (et non le `kIOReturnNotAttached` de `POMPPCGPUUserClient`), ce qui
+laisse le module se décharger malgré des clients ouverts.
 
 La migration et la sauvegarde/restauration de l'état VM sont bloquées par
 `migrate_add_blocker` lorsque qgpu est présent : les objets GL hôte ne sont
@@ -391,7 +398,7 @@ barrière et le dernier STATUS lu.
 | Objets et reset de tranche | `tests/qgpu_core_test.c` : bornes, reset, destruction, déliaison des surfaces, conservation d'une autre tranche | Les tests natifs ne traversent ni IOKit ni la file du device. |
 | Admission, barrières et transport | `tests/qgpu_smoke.py`, à lancer explicitement ; `run_a6` de `tests/qgpu_core_test.c` (07/10) : conséquences au cœur d'un nettoyage manqué, retardé ou rejoué (L2) | Injection de retard et non-réutilisation après timeout (L1/L2) : demande une propriété de test du device et la correction du kext (L2). |
 | Cohérence de rendu | `guest/gltest`, tests croisés des backends, matrice et rejeu | Transferts impossibles (L6), scénarios de panne ; rejeu et VM partagent le même moteur. |
-| Fin de session | Mécanismes de gate, busy, arrêt et fork relus dans les sources ; L3 et L4 fermées par lecture le 07/10 (resets et sortie bornés, `stop` qui attend dormeurs et appels en vol) | Mort pendant soumission, double fermeture, réouverture (L2) ; en VM, kext arrêté pendant `WAIT_FENCE`/`SUBMIT` (L4) et backend bloqué puis reset (L3), suivis par l'entrée « Validation » de TODO.md. |
+| Fin de session | Mécanismes de gate, busy, arrêt et fork relus dans les sources ; L3 et L4 fermées par lecture le 07/10 (resets et sortie bornés, `stop` qui attend dormeurs et appels en vol) | Mort pendant soumission, double fermeture, réouverture (L2) ; en VM, backend bloqué puis reset (L3), suivi par l'entrée « Restes des épreuves en VM » de TODO.md ; kext arrêté pendant `WAIT_FENCE`/`SUBMIT` (L4) éprouvé le 07/10. |
 
 Les tests natifs peuvent ignorer OpenGL s'il est indisponible : vérifier le
 backend effectivement exécuté avant de conclure. Une matrice de jeux verte

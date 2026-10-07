@@ -9,6 +9,19 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Correctifs des bug hunts éprouvés dans la VM quotidienne, PC, 07/10**
+  (`docs/bug-hunt-2026-09-29-passe4.md`, dernière section) : `kextunload` avec Marble Blast
+  et un client tenu ouvert (K4, KG4, KT1 : dormeur réveillé en 0,9 s, aucune panique, le
+  jeu repasse en rendu d'Apple), appels après déchargement refusés proprement
+  (`kIOReturnBadArgument` par IOKit sous 10.4.11), rechargement et jeu relancé en
+  asynchrone sans `LIMIT` (KT2), aucune tranche perdue après rafales et `kill -9`, `QFB=1`
+  avec Marble Blast (614 présentations sur VGA), `system_reset` SMP=2 (CPU 1 parqué jusqu'à
+  l'entrée du CPU 0 dans le noyau), son lecture/pause/arrêt/relance (silence numérique
+  exact en pause, avant et après `system_reset`), `run-all.sh` rapide et `--slow`.
+  **Échoué** : DOOM 3 sous `QGPU_MEM_MB=128` (201 `NO_MEM` propres, puis `exit()` de
+  GLEngine dans le repli logiciel) ; à 512 Mio aucun refus n'arrive. **Non éprouvable** :
+  GPU hôte bloqué (pas de propriété de test au device). Nouvel outil invité
+  `guest/qgpu-test/unloadpeer`.
 - **`tcg/0010` (code réécrit par l'autre vCPU) : preuve close, PC, 07/10**
   (`docs/tcg-g4.md` §17.4, §17.5) : `smctest` E × 100 sur la VM quotidienne (10.4.11,
   session bureau, SMP=2, binaire de référence) : 100 fois l'empreinte `aa4d72ebdba6b6eb`,
