@@ -40,10 +40,17 @@ import time
 ICI = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ICI)
 from hmp import hmp, hmp_suite, mots          # noqa: E402
+import serie                                  # noqa: E402
 from symbolise import (MAIN, WT, Symboliseur, adresses_du_texte, court,  # noqa: E402
                        lit_kextstat)
 
 BASE = os.environ.get("ENDURANCE_BASE", os.path.join(MAIN, "disks", "tiger-endurance.qcow2"))
+# Base à console série (docs/endurance.md §8) : getty sur tty.pci-serial18, l'UART
+# 16550 PCI que --serie ajoute en 0x12 (IRQ 29, seule ; en 0x11 elle partage l'IRQ 28
+# de l'OHCI et ne reçoit rien).
+BASE_SERIE = os.path.join(MAIN, "disks", "tiger-endurance-serie.qcow2")
+SERIE_DEV = "-chardev socket,id=serie0,path=%s,server=on,wait=off " \
+            "-device pci-serial,chardev=serie0,addr=0x12"
 QEMU_IMG = os.path.expanduser("~/src/qemu/build/qemu-img")
 RUN_TIGER = os.path.join(WT, "run_tiger.sh")
 TSSH = os.path.join(WT, "tools", "guest", "tssh.sh")
@@ -134,6 +141,14 @@ def binaire_qemu(args, chemin=None):
         return p
 
 
+def base_de(args):
+    """Base qcow2 de la campagne : ENDURANCE_BASE, sinon la base à console série
+    avec --serie, sinon disks/tiger-endurance.qcow2."""
+    if "ENDURANCE_BASE" in os.environ or not getattr(args, "serie", False):
+        return BASE
+    return BASE_SERIE
+
+
 def env_campagne(args):
     """Variables passées à run_tiger.sh pour toute la campagne : --env K=V et,
     avec --anciens-defauts, le bras témoin d'avant le 06/10."""
@@ -164,6 +179,7 @@ class VM:
         self.sym = SYM
         self.binaire = self.chemin_bin = None
         self.etiquette = self.leviers = self.gpu = "?"
+        self.serie = os.path.join(self.scr, "serie.sock") if getattr(args, "serie", False) else None
 
     @property
     def mon(self):
@@ -175,7 +191,7 @@ class VM:
             raise SystemExit("refus : disque quotidien")
         if os.path.exists(self.disque):
             os.remove(self.disque)
-        subprocess.run([QEMU_IMG, "create", "-q", "-f", "qcow2", "-b", BASE, "-F", "qcow2",
+        subprocess.run([QEMU_IMG, "create", "-q", "-f", "qcow2", "-b", base_de(self.args), "-F", "qcow2",
                         self.disque], check=True)
         for f in ("tiger.sshport", "tiger.mon"):
             try:
@@ -190,8 +206,16 @@ class VM:
         env.pop("POMPPC_FRONTEND", None)
         if self.args.qemu:
             env["QEMU_BIN"] = self.args.qemu.replace("qemu-system-ppc64", "qemu-system-ppc")
-        if self.args.extra:
-            env["EXTRA_ARGS"] = self.args.extra
+        extra = [self.args.extra] if self.args.extra else []
+        if self.serie:
+            # second canal (§8) : UART PCI vers un socket, getty dans la base
+            try:
+                os.remove(self.serie)
+            except OSError:
+                pass
+            extra.append(SERIE_DEV % self.serie)
+        if extra:
+            env["EXTRA_ARGS"] = " ".join(extra)
         env.update(env_campagne(self.args))
         if getattr(self.args, "fenetre", False):
             # repli : fenêtre QEMU native au lieu de -display none (le backend GL
@@ -562,6 +586,9 @@ def rapport_incident(info, texte):
          "- charge de l'hôte : %s" % info.get("charge", "?"),
          "- sonde ssh (VM en marche) : %s ; ssh de 90 s : %s"
          % (info.get("sonde_ssh", "-"), info.get("ssh_90s", "-")),
+         "- console série (VM en marche, avant tout reset) : %s" % info.get("serie", "-"),
+         "- ssh après `launchctl load` de ssh.plist par la console : %s"
+         % info.get("ssh_apres_rechargement", "-"),
          "- écran figé : %s ; NIP immobile : %s" % (info.get("ecran_fige"), info.get("nip_immobile")),
          "- kexts lus dans la mémoire (liste kmod) : %s" % info.get("kmods"),
          "- NIP sur 20 relevés : %s" % info.get("nip_echantillons"), ""]
@@ -589,7 +616,9 @@ def rapport_incident(info, texte):
     if info.get("panic_log"):
         l += ["", "## panic.log (démarrage suivant)", "", "```", info["panic_log"].strip(), "```"]
     l += ["", "Fichiers : ecran.png, kpanic.txt (texte, appelant, pile, msgbuf), registres.txt "
-          "(arrêt), registres-2.txt (3 s après `cont`), kmods.txt, panique.txt, qemu.log.", ""]
+          "(arrêt), registres-2.txt (3 s après `cont`), kmods.txt, panique.txt, qemu.log ; "
+          "avec --serie : serie.txt (relevé par la console avant tout reset), "
+          "apres-reset.txt (même relevé par ssh après `system_reset`).", ""]
     return "\n".join(l)
 
 
@@ -627,9 +656,11 @@ class Campagne:
                 self.base[t] = max(self.base.get(t, 0), int(c.get("cycle", 0)))
         self.compteurs = {}
         bras = {"env": env_campagne(args), "qemu": args.qemu, "smp": args.smp, "extra": args.extra}
+        if getattr(args, "serie", False):
+            bras["serie"] = True        # un périphérique de plus : un autre bras
         info = {"args": {k: v for k, v in vars(args).items() if k != "func"},
                 "debut": time.strftime("%Y-%m-%d %H:%M:%S"), "bras": bras,
-                "base": BASE, "worktree": WT, "invite": SYM.invite if SYM else None,
+                "base": base_de(args), "worktree": WT, "invite": SYM.invite if SYM else None,
                 "noyau": SYM.version if SYM else None, "hote": " ".join(os.uname()),
                 "qemu_binaire": binaire_qemu(args),
                 "commit": subprocess.run(["git", "-C", WT, "rev-parse", "--short", "HEAD"],
@@ -739,7 +770,11 @@ def attend_demarrage(vm, t0, delai, repos):
             if vm.repond():
                 vu_ssh = time.time()
                 code, out = vm.ssh("sysctl -n hw.ncpu; uname -v; uptime; pmset -g | grep -i sleep; "
-                                   "kextstat; ls /Library/Logs/panic.log 2>/dev/null", delai=60)
+                                   "kextstat; ls /Library/Logs/panic.log 2>/dev/null; "
+                                   # §8 : l'échec de l'IPv6 de lo0 au démarrage, que les
+                                   # « pas de ssh » ont tous ; ici, sur les démarrages sains
+                                   "echo tiger974 | sudo -S -p '' dmesg | grep in6_ifattach",
+                                   delai=60)
                 det = {"t_ssh": round(t), "sortie": out}
                 n = out.split("\n", 1)[0].strip()
                 if n.isdigit() and int(n) != vm.args.smp:
@@ -763,6 +798,15 @@ def attend_demarrage(vm, t0, delai, repos):
             time.sleep(5)
 
 
+def releve_ssh(vm):
+    """serie.RELEVE exécuté par ssh, même format que serie.txt."""
+    morceaux = []
+    for nom, cmd in serie.RELEVE:
+        code, out = vm.ssh(cmd, delai=90)
+        morceaux.append("===== %s (code %s) : %s\n%s\n" % (nom, code, cmd, out.rstrip()))
+    return "".join(morceaux)
+
+
 def recupere_panic_log(vm, info, dossier):
     """system_reset, puis /Library/Logs/panic.log au démarrage suivant."""
     try:
@@ -782,9 +826,72 @@ def recupere_panic_log(vm, info, dossier):
             code, out = vm.ssh("tail -400 /var/log/system.log 2>/dev/null", delai=60)
             if out.strip():
                 open(os.path.join(dossier, "system.log"), "w").write(out)
+            if vm.serie:
+                # le même relevé que par la console, sur le démarrage d'après (sain)
+                txt = releve_ssh(vm)
+                open(os.path.join(dossier, "apres-reset.txt"), "w").write(txt)
+                info["apres_reset"] = resume_releve(txt)
             return
         time.sleep(5)
     info["panic_log_redemarrage"] = "pas de ssh en 300 s après system_reset"
+
+
+def resume_releve(texte):
+    """Ce qui compte dans un relevé de l'invité (serie.RELEVE) pour un « pas de
+    ssh » : port 22 à l'écoute, sshd dans launchd, adresses, erreurs IPv6 du msgbuf."""
+    def section(nom):
+        m = re.search(r"^===== %s \(code [^)]*\) : .*?\n(.*?)(?=^===== |\Z)" % re.escape(nom),
+                      texte, re.M | re.S)
+        return m.group(1) if m else ""
+    net, lc, ifc, dm = (section("netstat-an"), section("launchctl"), section("ifconfig"),
+                        section("dmesg"))
+    r = {}
+    if not texte.strip() or texte.startswith("!!") or "socket série" in texte:
+        return {"releve": texte.strip()[:200]}
+    r["ecoute_22"] = sorted(set(re.findall(r"^(tcp[46]) .*\*\.22 +\*\.\* +LISTEN", net, re.M)))
+    r["sshd_dans_launchd"] = "com.openssh.sshd" in lc
+    r["lo0_ipv4"] = bool(re.search(r"^lo0:.*?\n(?:\t.*\n)*?\tinet 127\.0\.0\.1", ifc, re.M))
+    r["lo0_ipv6"] = bool(re.search(r"^lo0:.*?\n(?:\t.*\n)*?\tinet6 ::1 ", ifc, re.M))
+    r["en0_ipv4"] = (re.findall(r"^en0:.*?\n(?:\t.*\n)*?\tinet (\S+)", ifc, re.M) or [None])[0]
+    r["msgbuf_in6"] = [l.strip() for l in dm.splitlines() if "in6_" in l or "errno=" in l][:5]
+    m = re.search(r"^-- 127\.0\.0\.1:22\n(.*?)^nc=", section("port22-local"), re.M | re.S)
+    r["port22_local"] = (m.group(1).strip().splitlines() or ["rien"])[0] if m else "?"
+    return r
+
+
+def releve_serie(sock, dossier):
+    """Relevé par la console série (VM en marche) ; notes pour incident.json."""
+    t0 = time.time()
+    try:
+        statut, texte = serie.releve(sock, dossier)
+    except Exception as e:          # le second canal ne doit jamais casser la collecte
+        return {"serie": "échec du relevé : %r" % e}
+    n = {"serie": (statut or "session ouverte") + " (%.0f s)" % (time.time() - t0)}
+    if not statut:
+        n["serie_resume"] = resume_releve(texte)
+        n["serie"] += " ; " + json.dumps(n["serie_resume"], ensure_ascii=False)
+    return n
+
+
+def recharge_sshd(vm, notes):
+    """Par la console : launchctl unload/load de ssh.plist, puis la sonde. Dit si
+    le défaut est dans le service (launchd) ou en dessous (pile IP, NAT)."""
+    try:
+        c = serie.Console(vm.serie)
+        if c.connexion(60):
+            notes["ssh_apres_rechargement"] = "pas de session sur la console"
+            return
+        code, out = c.commande("sudo -k; " + serie.SUDO + "launchctl unload "
+                               "/System/Library/LaunchDaemons/ssh.plist; " + serie.SUDO +
+                               "launchctl load /System/Library/LaunchDaemons/ssh.plist; "
+                               "netstat -an | grep '\\.22 '", 60)
+        c.deconnexion()
+        c.fermer()
+    except OSError as e:
+        notes["ssh_apres_rechargement"] = "console : %s" % e
+        return
+    notes["ssh_apres_rechargement"] = "%s ; netstat : %s" % (
+        sonde_ssh(vm.port or vm.port_voulu), " | ".join(out.split()) or "rien")
 
 
 def sonde_ssh(port, delai=15):
@@ -821,7 +928,13 @@ def incident(camp, vm, nom, etat, notes, t0, panic_log=True):
             open(os.path.join(inc, "usernet.txt"), "w").write(hmp(vm.mon, "info usernet"))
         except OSError:
             pass
+        if vm.serie and etat != "panique":
+            # second canal, VM en marche, AVANT la collecte et tout reset (§8)
+            notes.update(releve_serie(vm.serie, inc))
         info = collecte(vm.mon, inc, SYM, etat, notes)
+        if vm.serie and etat == "gel" and not notes.get("sonde_ssh", "").startswith("bannière") \
+                and vm.vivant():
+            recharge_sshd(vm, info)
     else:
         os.makedirs(inc, exist_ok=True)
         info = dict(notes, motif=etat)
@@ -856,6 +969,9 @@ def res_demarrage(camp, vm, t, num, depart, etat, det, t0):
         m = re.search(r"^\s*sleep\s+(\d+)", sortie, re.M)
         if m:
             res["pmset_sleep"] = int(m.group(1))
+        m = re.search(r"in6_ifattach\S*: .*\(errno=(\d+)\)", sortie)
+        if m:
+            res["in6_lo0_errno"] = int(m.group(1))
         camp.verifie_noyau(sortie)
         journal("[%d] %s #%d : ok (%s, ssh à %s s, charge %s)"
                 % (vm.slot, t, num, depart, det.get("t_ssh"), res["charge"]["l1_max"]))
@@ -912,6 +1028,10 @@ def instance(camp, slot):
             res = res_demarrage(camp, vm, "demarrage", i, depart, etat, det, t0)
             if etat == "ok":
                 open(os.path.join(cyc, "sante.txt"), "w").write(det.get("sortie", ""))
+                if vm.serie and a.releve_sain and i % a.releve_sain == 0:
+                    # référence : le même relevé par la console sur un démarrage sain
+                    n = releve_serie(vm.serie, cyc)
+                    res["serie"] = n.get("serie_resume") or n.get("serie")
                 if a.mode == "froid" and not a.garde:
                     shutil.rmtree(cyc, ignore_errors=True)
             else:
@@ -1329,6 +1449,13 @@ def main():
         p.add_argument("--instances", type=int, default=1)
         p.add_argument("--fenetre", action="store_true",
                        help="fenêtre QEMU native (POMPPC_DISPLAY) au lieu de HEADLESS=1")
+        p.add_argument("--serie", action="store_true",
+                       help="second canal : UART PCI vers .run/endurance/<inst>/serie.sock et "
+                            "base à getty (disks/tiger-endurance-serie.qcow2) ; relevé par la "
+                            "console à chaque incident (docs/endurance.md §8)")
+        p.add_argument("--releve-sain", type=int, default=0, metavar="N",
+                       help="avec --serie : relevé par la console d'un démarrage sain sur N "
+                            "(référence pour comparer ; 0 = jamais)")
     p = sp.choices["demarrages"]
     p.add_argument("--mode", choices=("froid", "reboot", "reset"), default="froid",
                    help="froid : un QEMU neuf par démarrage ; reboot : shutdown -r dans "
@@ -1359,6 +1486,8 @@ def main():
     p.add_argument("moniteur")
     p.add_argument("dossier")
     p.add_argument("--invite")
+    p.add_argument("--serie", metavar="SOCKET",
+                   help="relevé par la console série d'abord (VM en marche), dans DOSSIER/serie.txt")
     a = ap.parse_args()
     if a.cmd == "rapport":
         print(rapport(a.dossier))
@@ -1368,12 +1497,18 @@ def main():
         return
     SYM = Symboliseur(a.invite or INVITE)
     if a.cmd == "collecte":
-        print(json.dumps(collecte(a.moniteur, a.dossier, SYM, "manuel"), indent=1, ensure_ascii=False))
+        notes = {}
+        if a.serie:
+            os.makedirs(a.dossier, exist_ok=True)
+            notes.update(releve_serie(a.serie, a.dossier))
+        print(json.dumps(collecte(a.moniteur, a.dossier, SYM, "manuel", notes), indent=1,
+                         ensure_ascii=False))
         return
-    if not os.path.exists(BASE):
-        raise SystemExit("base %s absente (voir docs/endurance.md §Préparation)" % BASE)
-    if os.access(BASE, os.W_OK):
-        journal("⚠  base %s inscriptible : chmod a-w (docs/endurance.md §2)" % BASE)
+    base = base_de(a)
+    if not os.path.exists(base):
+        raise SystemExit("base %s absente (voir docs/endurance.md §Préparation, §8)" % base)
+    if os.access(base, os.W_OK):
+        journal("⚠  base %s inscriptible : chmod a-w (docs/endurance.md §2)" % base)
     if a.cmd == "jeu":
         sys.path.insert(0, os.path.join(WT, "tools", "matrice"))
         import importlib

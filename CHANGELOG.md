@@ -54,6 +54,16 @@ de commit et dans `docs/`.
   à l'octet au rendu d'Apple dans les quatre modes, toutes les autres scènes au même md5
   qu'avant ; `POMPPC_GL_RDIRTY=0` : `tcprobe` passe aussi. `tests/run-all.sh` 239 OK, 0 échec,
   7 ignorés (aucun code hôte touché).
+- **Endurance : console série et cause des « pas de ssh », PC, 07/10** (`docs/endurance.md` §8) :
+  second canal vers l'invité par un UART 16550 PCI (`-device pci-serial,addr=0x12`,
+  Apple16X50Serial, getty sur `tty.pci-serial18` dans la nouvelle base
+  `disks/tiger-endurance-serie.qcow2`), `tools/endurance/serie.py`, `endurance.py --serie`
+  (relevé par la console avant tout reset, même relevé par ssh après `system_reset`,
+  `--releve-sain`). Campagne `pc-reboot-serie` (168 démarrages, binaire rapide du 07/10) :
+  1 « pas de ssh » reproduit et lu — lo0 sans IPv6 (`in6_ifattach_loopback` en échec),
+  `launchctl` échoue au `bind()` IPv6 de `ssh.plist` et n'ouvre pas non plus l'IPv4 ; course
+  dans l'invité, pas QEMU — et 1 panique au démarrage (§8.4), non analysée.
+
 - **Binaires, paquet invité et matrice après la nuit du 06-07/10, PC, 07/10 au matin**
   (`docs/binaire-rapide-x86.md` §6, `docs/matrice-jeux.md` §6 quater) :
   `disks/prebuilt` régénéré par le job `prebuilt` sur une copie de la VM de dev (plugin de la

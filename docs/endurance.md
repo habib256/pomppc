@@ -376,3 +376,125 @@ symbolisée avec les kexts).
   est symbolisée ; pendant les « gels », un seul kext.
 - Le banc a vu la panique #160 grâce au PC dans `panic()` : `panicstr` valait déjà 0. Le banc
   du M4 l'aurait comptée comme un gel, sans texte.
+
+## 8. PC Linux, 07/10/2026 : console série et cause des « pas de ssh »
+
+### 8.1 Le second canal : un UART 16550 sur PCI, un getty dans une base dédiée
+
+- **Le port série de mac99 ne sert pas.** L'ESCC de macio est bien dans l'arbre de l'invité
+  (`escc@13000/ch-a`), mais Tiger 10.4.11 n'y attache aucun nœud `/dev/tty.*`, et le noyau
+  n'écrit rien sur `-serial` avec `serial=3` en boot-args (seul OpenBIOS y parle). Au passage :
+  `EXTRA_ARGS` est découpé aux espaces, un `-prom-env 'boot-args=-v serial=3'` n'y passe pas.
+- **Ce qui marche : `-device pci-serial`** (UART 16550 de QEMU, classe PCI 0x0700).
+  `Apple16X50Serial.kext`, livré avec Tiger, l'apparie sur sa classe (`IOPCIClassMatch
+  0x07000000&0xFFFF0000`) et publie `/dev/tty.pci-serialNN`, NN = numéro de fente.
+  **Fente imposée `addr=0x12`** (IRQ 29, seule) : à la fente libre par défaut (0x11), l'UART
+  partageait l'**IRQ 28 de l'OHCI** et ne recevait rien (l'émission marchait, la réception non).
+  Côté hôte : `-chardev socket,id=serie0,path=…/serie.sock,server=on,wait=off`.
+- **Base `disks/tiger-endurance-serie.qcow2`** (07/10 08:39, lecture seule) : copie de
+  `tiger-endurance.qcow2` (`cp --sparse=always`, `qemu-img check` sans erreur), un démarrage
+  avec l'UART, **une seule modification** : une ligne ajoutée à `/etc/ttys` (copie d'origine en
+  `/etc/ttys.avant-serie`) —
+
+      tty.pci-serial18 "/usr/libexec/getty std.115200" vt100 on secure
+
+  puis `kill -HUP 1` (launchd relit `/etc/ttys` et lance le getty), arrêt propre par la console
+  (`shutdown -h now`), `chmod a-w`. Même noyau (10.4.11), mêmes symboles
+  (`bench/endurance/invite-10.4.11/`). L'ancienne base et la VM quotidienne n'ont pas bougé.
+- **`tools/endurance/serie.py`** : ouvre une session sur le socket (`tiger` / `tiger974`),
+  pose une invite neutre (`PS1='@> '`, `stty -echo`) et délimite chaque sortie par une marque
+  de fin. Piège : `login` coupe l'écho par un `tcsetattr(TCSAFLUSH)` **après** avoir écrit
+  « Password: » ; un mot de passe envoyé aussitôt est jeté (« Login incorrect ») — on attend
+  1,5 s. Usage manuel :
+
+      python3 tools/endurance/serie.py .run/endurance/<inst>/serie.sock 'netstat -an' 'ifconfig -a'
+      python3 tools/endurance/serie.py .run/endurance/<inst>/serie.sock --releve DOSSIER
+
+- **Dans le banc : `--serie`** (démarrages et jeux) ajoute l'UART à chaque instance
+  (`.run/endurance/<campagne>-<i>/serie.sock`) et prend la base à getty (sauf
+  `ENDURANCE_BASE`) ; c'est un autre bras (`campagne.json`). À chaque gel, **VM en marche,
+  avant la collecte et tout reset** : relevé par la console dans `serie.txt` (`date`,
+  `ifconfig -a`, `netstat -an`, `netstat -rn`, `arp -an`, `ipconfig getpacket en0`, le port 22
+  essayé de l'intérieur par `nc`, `ps`, `launchctl list`, `lsof -i`, `dmesg`, `system.log`,
+  `scutil`), trace brute dans `serie-brut.txt`, résumé dans `incident.md` (port 22 à
+  l'écoute ?, sshd dans launchd ?, IPv4/IPv6 de lo0 et en0, erreurs `in6_` du msgbuf). Si la
+  sonde n'a pas eu de bannière : `launchctl unload/load` de `ssh.plist` par la console, puis
+  nouvelle sonde (`ssh_apres_rechargement`). Après le `system_reset`, le même relevé par ssh
+  dans `apres-reset.txt`. `--releve-sain N` fait le relevé sur un démarrage sain sur N
+  (référence, rangée dans `cycles/NNNN/`). Chaque démarrage sain note aussi l'échec éventuel
+  d'`in6_ifattach` (`in6_lo0_errno` dans `cycles.jsonl`). `collecte --serie SOCKET` pour une
+  collecte à la main.
+
+### 8.2 Campagne `pc-reboot-serie` (07/10, 08:52-10:20)
+
+Bras défaut **actuel** : binaire rapide `build-fast/` reconstruit le 07/10 à 07:03 (sha256
+0bc504fa…, choisi par le lanceur lui-même, sans `--qemu`), leviers du lanceur, `--serie`, 3
+instances, `--mode reboot`, `--releve-sain 20`. Charge 1 min de l'hôte : 3 à 10 (VM quotidienne
+de l'utilisateur et un QEMU d'un autre agent en même temps). Arrêtée par `ARRET` au départ de
+l'utilisateur, avant la borne (~3 h / 400) : **168 démarrages** (161 redémarrages, 7 à froid ; rapport :
+`bench/endurance/pc-reboot-serie/rapport.md`).
+
+- **1 « pas de ssh »** (#7, instance 0, 7ᵉ démarrage), même signature que les cinq de la nuit
+  (bureau, vCPU au repos, sonde « connecté, fermé sans bannière »).
+- **1 panique** (#76), d'une autre nature, §8.4.
+- Démarrages sains : 0 échec d'`in6_ifattach` relevé (`in6_lo0_errno`) ; relevés par la
+  console tous les 20 cycles : port 22 à l'écoute en IPv4 et IPv6 (tenu par `launchd`, `lsof`),
+  `::1` sur lo0, aucun message `in6_`.
+
+### 8.3 Ce que l'invité montrait au moment du cas (#7, par la console, avant tout reset)
+
+`incidents/0007-gel/serie.txt` :
+
+- **Rien n'écoute sur le port 22**, ni en IPv4 ni en IPv6 (`netstat -an`, `lsof -i`) ; `nc` vers
+  `127.0.0.1:22` et `10.0.2.15:22` **depuis l'invité** : refusé. Le défaut n'est donc ni dans le
+  NAT de QEMU ni dans le chemin réseau : il est dans l'invité, au-dessus de la pile IP.
+- `launchctl list` contient bien **`com.openssh.sshd`**, mais `launchd` ne tient **aucun**
+  socket pour lui (sur un démarrage sain : `launchd … TCP *:22 (LISTEN)` en IPv6 puis IPv4).
+- **lo0 sans IPv6** : `inet 127.0.0.1` seulement, pas de `::1` ni de `fe80::1%lo0`. Dans le
+  msgbuf : `in6_ifattach_loopback: failed to configure the loopback address on lo0 (errno=17)`
+  (EEXIST ; les cinq cas de la nuit avaient le même message avec errno=55, ENOBUFS — relu dans
+  leurs `kpanic.txt`). `mDNSResponder` n'a que ses sockets IPv4 (`bind error … errno 49`,
+  `getsockname v6 error 9` dans `system.log`, comme dans les cas de la nuit).
+- en0 normal : 10.0.2.15 par DHCP, passerelle 10.0.2.2 dans la table ARP, IPv6 de lien et
+  `fec0::` présents (attachés plus tard), horloge juste.
+
+**Mécanisme (lu dans les sources d'Apple, xnu-792.24.17 et launchd-106).**
+
+1. Au démarrage, l'attachement IPv6 de lo0 (`in6_ifattach` → `in6_ifattach_loopback` →
+   `in6_update_ifa`) échoue ; `in6_ifattach` rend alors la main sans rien poser sur lo0.
+2. `/etc/rc` lance `launchctl load /Library/LaunchDaemons /System/Library/LaunchDaemons
+   /etc/mach_init.d` tôt, avant la configuration d'en0 : à cet instant **aucune adresse IPv6
+   n'existe** dans le système.
+3. `launchctl` crée les sockets de `ssh.plist` (`SockServiceName ssh`, sans famille) par
+   `getaddrinfo` : `::` d'abord, puis `0.0.0.0`. `in6_pcbbind()` commence par
+   `if (!in6_ifaddrs) return (EADDRNOTAVAIL);` — le `bind()` IPv6 échoue, et
+   `sock_dict_edit_entry()` fait **`return` au premier échec** : le socket IPv4 n'est jamais
+   créé. Le job est chargé sans socket : sshd ne sera jamais lancé.
+4. `system_reset` (ou un autre redémarrage) refait un démarrage où lo0 s'attache : ssh revient.
+
+Pourquoi lo0 échoue n'est pas établi : deux acteurs peuvent l'attacher (le `timeout` noyau
+`ip6_init2`, et `in6_if_up` sur ioctl `SIOCLL_START` depuis l'espace utilisateur), avec un
+test « `::1` existe-t-il ? » puis un ajout non atomiques ; EEXIST ou ENOBUFS selon le perdant.
+C'est une **course dans l'invité**, rendue visible par deux vCPU réellement parallèles (MTTCG)
+et par le minutage du binaire. **Aucune cause QEMU** : ni slirp (le NAT relaie, l'invité
+refuse lui-même), ni la carte réseau (en0 vivante, DHCP fait), ni l'horloge. Une nuance : un
+démarrage de la nuit (instance 0, 06:18:54) avait le même message `in6_` et un ssh normal ; le
+message n'est donc pas suffisant, ce qui va avec une course dont l'issue dépend du perdant.
+
+**Non vérifié :** le rechargement de `ssh.plist` par la console (`launchctl unload/load`)
+n'a pas tourné sur #7 (condition fautive, corrigée après coup) ; on s'attend à ce qu'il échoue
+tant que lo0 n'a pas d'IPv6, et réussisse une fois en0 en IPv6 (`in6_ifaddrs` non vide).
+
+**Corrections possibles (non faites).** Côté invité, pour le banc et pour la VM de
+l'utilisateur : (a) `SockFamily IPv4` dans `ssh.plist` (launchctl ne fait plus de `bind` IPv6) ;
+(b) un LaunchDaemon du paquet invité qui, une fois en0 configurée, recharge `ssh.plist` si rien
+n'écoute sur 22. Côté QEMU : rien à corriger.
+
+### 8.4 Surprise : une panique au démarrage sur le binaire du 07/10
+
+`pc-reboot-serie` #76 (instance 2), juste après le `shutdown -r` (msgbuf arrêté à « Waiting on
+… boot-uuid-media ») : **les deux vCPU dans `panic()`**, « 0x300 - Data access ». CPU 0 :
+`_kalloc_canblock+0xd4` ← `OSCollectionIterator::isValid` ← `IORegistryIterator::getNextObjectFlat`
+← `IOService::getMatchingServices` ← `is_io_service_get_matching_services` (appel MIG depuis
+l'espace utilisateur) ; CPU 1 : `IOWorkLoop::threadMain+0x68`. Une occurrence, non analysée ici :
+`incidents/0076-panique/` (`kpanic.txt`, `ecran.png`).

@@ -45,10 +45,14 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   0 incident sur 62 parties** (15 par jeu, borne ~20 % par jeu), 5 « pas de ssh » après
   `shutdown -r` ; témoin anciens défauts 1 panique « 0x400 Inst access » dans l'appariement
   ATAPI sur 238). **Reste pour fermer :** (1) la même nuit sur le **M4** (binaire de référence
-  du 01/10, jamais éprouvé) ; (2) sur le PC, les « pas de ssh » : bureau vivant, vCPU au repos,
-  réseau vivant, port 22 muet, `system_reset` le rend, 0 sur 238 en témoin (p ≈ 0,07) — il faut
-  un second canal vers l'invité (console série, `-serial`) dans le banc pour lire l'état de
-  launchd/sshd au moment du cas ; (3) une tranche de démarrages à froid (non jouée, faute de temps).
+  du 01/10, jamais éprouvé) ; (2) sur le PC, les « pas de ssh » : **cause trouvée le 07/10**
+  par la console série du banc (`--serie`, `docs/endurance.md` §8) — course dans l'invité :
+  l'IPv6 de lo0 ne s'attache pas (`in6_ifattach_loopback … errno=17/55`), `launchctl` échoue au
+  `bind()` IPv6 de `ssh.plist` et abandonne aussi l'IPv4 ; rien de QEMU. **Reste :** la
+  correction côté invité (`SockFamily IPv4` dans `ssh.plist`, ou garde qui recharge
+  `ssh.plist`), puis une série sans cas ; vérifier le rechargement par la console au prochain
+  cas ; (2 bis) la panique #76 de `pc-reboot-serie` (binaire du 07/10, deux vCPU dans `panic()`,
+  `kalloc` sous `getMatchingServices`, §8.4) ; (3) une tranche de démarrages à froid (non jouée, faute de temps).
 
 - [ ] **[Système] Plantages en jeu sans cause** — trois défauts, peut-être un seul mécanisme ;
   le banc ci-dessus doit les faire sortir (nuit du 07/10 sur le PC : aucun `LockTimeOut`, aucun
