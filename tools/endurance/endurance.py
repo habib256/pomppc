@@ -1025,6 +1025,40 @@ def rapport(dossier):
     return txt
 
 
+def fisher_bilateral(a, n1, b, n2):
+    """p bilatéral du test exact de Fisher pour a/n1 contre b/n2."""
+    from math import comb
+    k, n = a + b, n1 + n2
+    if k == 0 or k == n:
+        return 1.0
+
+    def pr(x):
+        return comb(n1, x) * comb(n2, k - x) / comb(n, k)
+    p0 = pr(a)
+    return min(1.0, sum(pr(x) for x in range(max(0, k - n2), min(k, n1) + 1)
+                        if pr(x) <= p0 * (1 + 1e-9)))
+
+
+def compare(dossiers, type_="demarrage", depart=None):
+    """Taux d'incident de plusieurs campagnes (même type de cycle), IC de Wilson,
+    et test exact de Fisher de chacune contre la première."""
+    lignes, ref = [], None
+    for d in dossiers:
+        cs = [json.loads(l) for l in open(os.path.join(d, "cycles.jsonl")) if l.strip()]
+        cs = [c for c in cs if type_cycle(c) == type_ and c["etat"] != "lancement"
+              and (depart is None or (c.get("depart") or c.get("mode")) == depart)]
+        n = len(cs)
+        k = len([c for c in cs if c["etat"] != "ok"])
+        lo, hi = wilson(k, n)
+        p = "" if ref is None else "%.3f" % fisher_bilateral(k, n, ref[0], ref[1])
+        ref = ref or (k, n)
+        lignes.append("| %s | %d / %d | %.1f %% | %.1f – %.1f %% | %s |"
+                      % (os.path.basename(d.rstrip("/")), k, n, 100 * k / n if n else 0,
+                         100 * lo, 100 * hi, p))
+    return "\n".join(["| campagne | incidents | taux | IC 95 % (Wilson) | Fisher (contre la 1re) |",
+                      "|---|---|---|---|---|"] + lignes)
+
+
 # ------------------------------------------------------------- cycles de jeu
 class HoteBanc:
     """Ce que les modules de tools/matrice/jeux attendent de l'hôte, sur une VM du banc."""
@@ -1317,6 +1351,10 @@ def main():
                    help="accepter un backend qgpu autre que gl")
     p = sp.add_parser("rapport")
     p.add_argument("dossier")
+    p = sp.add_parser("compare", help="taux d'incident de campagnes (bras), Wilson et Fisher")
+    p.add_argument("dossiers", nargs="+")
+    p.add_argument("--type", default="demarrage", choices=("demarrage", "jeu"))
+    p.add_argument("--depart", help="seulement ces départs (froid, reboot)")
     p = sp.add_parser("collecte", help="collecte d'incident sur une VM du banc déjà lancée")
     p.add_argument("moniteur")
     p.add_argument("dossier")
@@ -1324,6 +1362,9 @@ def main():
     a = ap.parse_args()
     if a.cmd == "rapport":
         print(rapport(a.dossier))
+        return
+    if a.cmd == "compare":
+        print(compare(a.dossiers, a.type, a.depart))
         return
     SYM = Symboliseur(a.invite or INVITE)
     if a.cmd == "collecte":
