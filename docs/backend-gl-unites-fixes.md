@@ -122,7 +122,7 @@ les quatre**, `ALIGNMENT` compris — le défaut GL est 4 : ce ne sont pas les m
 `glPixelStorei` sur 10.4.11. Le plantage ne s'est pas reproduit sur ces 64 appels : ce qui
 rend ces mots non nuls est inconnu (mémoire non initialisée, ou un autre état de GLEngine).
 
-**Correction (plugin)** : `unpack_trusted()` ; `try_draw_pixels`, `try_draw_ds` (profondeur,
+**Correction (plugin), remplacée le même jour** (« Cause » plus bas) : `unpack_trusted()` ; `try_draw_pixels`, `try_draw_ds` (profondeur,
 stencil) et `try_bitmap` ne prennent le chemin hôte que si `ROW_LENGTH` vaut 0 ou `w`, les deux
 `SKIP` 0 et `ALIGNMENT` 0, 1, 2 ou 4 (même pas pour une ligne serrée multiple de 4, la seule que
 ces chemins acceptent) ; sinon rendu logiciel d'Apple, exact puisque GLEngine lit, lui, le vrai
@@ -141,6 +141,46 @@ passe : pile dans `GLDriver`/`gldTessellatePolygonRGBA_SmoothTexture`).
 scène (07/10, 99e36a4) exige le correctif hôte de `qgpu-gl.c` du même commit, et
 `~/src/qemu/build/qemu-system-ppc` date du 06/10 15:58. Le « 53 OK » du même jour venait d'un
 binaire à jour. Rien à corriger dans le plugin ; QEMU de référence à reconstruire.
+
+### Cause : la mauvaise base, pas de mauvais offsets (07/10, suite)
+
+Relevé sur une copie de la VM de dev 10.4.11 (`docs/re/pixelstore.md`) : scène `gltest
+pixsonde`, un réglage `glPixelStorei` par étape, vidage du bloc d'état à chaque `glClear`
+(`POMPPC_GLTRACE_STATE`) et `tools/re/diffstate.py diff` — chaque étape bouge un seul octet,
+et les mots `UNPACK` sont exactement aux offsets du 20/09 (`0x31cc..0x31e5`)… **sur le
+contexte de GLEngine** (`gctx = GS − 0x360`). Le plugin les lisait sur `p->ctx`, le contexte
+du GLDriver : un bloc de `malloc_size` = 0x800 octets (relevé dans la session, 27 appels),
+donc 10 Kio au-delà de sa fin, dans un autre objet du tas. D'où les 0 du relevé de 64 appels,
+le 4 du 22/09 et les valeurs folles des trois plantages : ce que le tas contient là. Les mots
+`PACK` sont juste avant (`gctx+0x31b0..0x31c9`, même forme). GLEngine est le même fichier en
+10.4.6 et en 10.4.11 : une table unique.
+
+**Correction** : `GC_PACK_*` / `GC_UNPACK_*` lus sur `gctx_of(p)` par `pixstore_read()`, qui
+remplace `unpack_trusted()` : ce n'est plus une garde mais une **vérification de cohérence**
+(alignement hors {1, 2, 4, 8}, longueur ou décalage ≥ 2²⁴ : logiciel, compteur « incoherent
+glPixelStorei state(s) » de `POMPPC_GL_STATS`, note en journal ; 0 attendu, 0 relevé). Les
+restrictions qui couvraient le défaut (lignes serrées multiples de 4 pour `DrawPixels`
+couleur, stencil, `Bitmap`, `ReadPixels`) sont levées ; `ReadPixels` suit enfin
+`GL_PACK_ALIGNMENT/ROW_LENGTH/SKIP_*`. La couleur raster de `try_bitmap` (`gctx+0x4858`,
+`gctx+0x2a0`) souffrait de la même base fausse ; corrigée.
+
+**Témoin avant** : le plugin de `main` (garde comprise : les mots lus valant 0, elle laissait
+tout passer) rend la nouvelle scène `pixstore` **fausse** — profondeur relue 21 valeurs fausses
+et 14 écrites hors du rectangle de l'application, stencil 15 valeurs fausses. Le plantage
+lui-même ne s'est pas reproduit (16 + 27 exécutions de `mixte`/`v15`/`drawpack`/`pixstore` par
+le relais, garde neutralisée, tailles 64 à 512, avec et sans `POMPPC_GL_STATS`/`GLTRACE` :
+les mots lus hors du contexte valaient 0 à chaque fois) : il dépend de ce que le tas contient
+à cet endroit, qui n'est pas maîtrisé ; la lecture hors du bloc, elle, est établie.
+
+**Preuves après correction** (copie de `tiger-dev.raw`, 10.4.11, binaire de référence) :
+
+| épreuve | résultat |
+|---|---|
+| `pixstore` (64 témoins : DrawPixels ALIGNMENT 1/2/4/8, ROW_LENGTH, SKIP ; Bitmap ALIGNMENT 1/8, ROW_LENGTH 48, SKIP, LSB_FIRST ; ReadPixels PACK_ALIGNMENT 1/2/8, ROW_LENGTH 17, SKIP ; profondeur et stencil aller-retour) | vert sous le plugin et sous Apple, écart 0/255 ; 11 dessins et 6 relectures par l'hôte, 0 incohérence |
+| `drawpack`, `readpack` | verts, écart 0, `drawpack` désormais par l'hôte |
+| session bureau, relais : 8 × `mixte` + 8 × `v15` (256×256), puis `pixstore` | 16/16 sans plantage, aucune entrée CrashReporter ; `pixstore` vert, écart 0 à Apple |
+| job `gpu` (54 scènes avec `pixstore`, lot 16 bits, `qgpu_test`) | `VERDICT : 0 échec(s)` |
+| `tests/run-all.sh` | 238 OK, 0 échec |
 
 **Piège de la boucle de dev, revu ce jour** : l'agent d'une copie ancienne de `tiger-dev.raw`
 écrit l'en-tête à trois champs (`agent.sh` du 19/09) — `devloop.py run` rend alors 0 même quand
