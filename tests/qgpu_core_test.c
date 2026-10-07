@@ -8079,6 +8079,12 @@ static void run_v22(QgpuCore *c, uint8_t *shmem)
     rv2c(&v, 60, 4, .2f, .2f, .2f, .2f);
     rv2c(&v, 4, 20, .2f, .2f, .2f, .2f);
     for (u = 0; u <= 7; u += 7) {
+        if (u >= 4 && (caps & QGPU_CAP_FIXED4)) {
+            /* 07/10 : l'unité 7 n'existe qu'au pipeline programmable de
+               l'hôte (NVIDIA : 4 unités fixes) ; le plugin n'y pose rien. */
+            printf("  –    v22 unité %u : hors contrat sous QGPU_CAP_FIXED4\n", u);
+            continue;
+        }
         e.off = e.start = CMD_OFF;
         state(&e, QGPU_SK_UNIT(0) + QGPU_SK_U_ENABLE, 0);
         state(&e, QGPU_SK_UNIT(u) + QGPU_SK_U_ENABLE, 1);
@@ -8101,6 +8107,14 @@ static void run_v22(QgpuCore *c, uint8_t *shmem)
             state(&e, QGPU_SK_BLEND_SRC_RGB, 0x0302); /* SRC_ALPHA */
             state(&e, QGPU_SK_BLEND_DST_RGB, 0);
             st = v21_draw(c, &e, VF_P2C, 0);
+            if (fn == QGPU_CB_MODULATE_SUBTRACT && qgpu_gl_combine4(c)) {
+                /* NV_texture_env_combine4 n'a pas de soustraction : a0·a2 */
+                float ap = .8f * (191.0f / 255) * (1u << scale);
+                unsigned ba = (unsigned)((ap > 1 ? 1 : ap) * 255 + .5f);
+                printf("  –    v22 unité%u %s fn10 scale%u : approché en combine4 (%06x, a0·a2 = %02x)\n",
+                       u, alpha ? "alpha" : "RGB", 1u << scale, px(shmem, 8, 8), ba);
+                continue;
+            }
             CHECK(st == QGPU_ST_OK && near_px(px(shmem, 8, 8), b * 0x010101u, 3),
                   "v22 unité%u %s fn%u scale%u : %06x attendu %02x (st %u)",
                   u, alpha ? "alpha" : "RGB", fn, 1u << scale, px(shmem, 8, 8), b, st);

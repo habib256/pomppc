@@ -617,5 +617,8 @@ const uint32_t *qgpu_core_tex_px(QgpuCore *c, uint32_t tex, uint32_t face,
 
 extern const QgpuBackend qgpu_backend_soft;
 extern const QgpuBackend qgpu_backend_gl;    /* stub si non compilé avec GL */
+/* 07/10/2026 : v22 traduit en NV_texture_env_combine4 (hôte sans l'extension
+   ATI) : MODULATE_SUBTRACT y est approché. Pour les tests. */
+bool qgpu_gl_combine4(const QgpuCore *c);
 
 #endif /* QGPU_CORE_H */

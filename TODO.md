@@ -143,8 +143,13 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   démarrage frais, réglages utilisateur préservés.
 - [ ] **[Jeux] Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur
   reste blanc) ; menu principal juste au 26/09, à revoir en partie.
-- [ ] **[Jeux] UT2004 : armes noires dans la démo de test** (plus en jeu, constaté par
-  l'utilisateur le 01/10). Scène à isoler ; fermeture : image juste dans la démo.
+- [ ] **[Jeux] UT2004 : armes noires dans la démo de test — reste le M4** (constaté par
+  l'utilisateur le 01/10 sur le M4). PC corrigé le 07/10 (backend GL sans l'extension ATI
+  → `NV_texture_env_combine4`, `docs/re/ut2004-arme-noire.md`) : image juste dans la démo
+  sur un QEMU reconstruit ; reconstruire `~/src/qemu` (référence) avec ce `qgpu-gl.c`. Le M4
+  a l'extension ATI, le correctif n'y change rien : y revider toute la démo (`@1`, 450
+  images), rejouer les images ~166-195 et lire les présentoirs avec `QGPU_REPLAY_UNUSED` /
+  `QGPU_REPLAY_STATE`. Fermeture : image juste dans la démo sur le M4.
 - [ ] **[Outils] A3, suites** : Zenerchi en plein écran et Warcraft III en fenêtre (réglage à
   trouver, sinon clic par System Events) ; Colin McRae fenêtre non applicable.
 - [ ] **[Outils] Rejeu : `SURF_READBACK` d'une surface jamais liée** — corrigé le 07/10 sur le
