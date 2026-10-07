@@ -57,7 +57,9 @@
  *
  * vpimm : glBegin/glEnd sous programme de sommets ARB — vertex.texcoord[0],
  * vertex.texcoord[1] (unité sans texture), vertex.color — et tableaux
- * désactivés aux pointeurs périmés (07/10) ; référence : le rendu d'Apple.
+ * désactivés aux pointeurs périmés (07/10) ; puis vertex.normal,
+ * vertex.color.secondary, vertex.fogcoord, vertex.attrib[6], en immédiat et en
+ * tableaux désactivés (f-m) ; référence : le rendu d'Apple.
  *
  * glsl glslvs glslfs glsldp : programmes GLSL (protocole v21, DarkPlaces) —
  * glslvs a sa référence chez le rendu d'Apple (shaders de sommets émulés),
@@ -3872,6 +3874,167 @@ int main(int argc, char **argv)
             glFinish();
             check("(e) tableaux couleur courante", W / 4, H / 2, 0xFFFF00);
             check("(e) tableaux couleur courante", W - W / 4, H / 4, 0xFFFF00);
+        }
+        /* (f)…(m) (07/10, TODO « mode immédiat sous programme de sommets,
+           suites ») : les autres entrées du programme, recopiées vers
+           result.color, texture éteinte. Pour chacune : en immédiat, une
+           valeur par moitié d'écran dans le MÊME glBegin (gauche, droite) ;
+           puis en tableaux, tableau employé puis DÉSACTIVÉ, valeur courante
+           attendue partout. Les valeurs initiales et celles du tableau
+           employé diffèrent toutes de l'attendu.
+             (f) (g) vertex.normal (éclairage éteint) : glNormal3f ;
+             (h) (i) vertex.color.secondary : glSecondaryColor3f ;
+             (j) (k) vertex.fogcoord (brouillard éteint) : glFogCoordf ;
+             (l) (m) vertex.attrib[6] : glVertexAttrib4fARB(6). */
+        {
+            typedef void (*sc3_f)(GLfloat, GLfloat, GLfloat);
+            typedef void (*scp_f)(GLint, GLenum, GLsizei, const GLvoid *);
+            typedef void (*fc_f)(GLfloat);
+            typedef void (*fcp_f)(GLenum, GLsizei, const GLvoid *);
+            typedef void (*va4_f)(GLuint, GLfloat, GLfloat, GLfloat, GLfloat);
+            typedef void (*vap_f)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid *);
+            typedef void (*eva_f)(GLuint);
+            static const char *const src[4] = {
+                "!!ARBvp1.0\n"
+                "PARAM zero = { 0, 0, 0, 0 };\n"
+                "DP4 result.position.x, state.matrix.mvp.row[0], vertex.position;\n"
+                "DP4 result.position.y, state.matrix.mvp.row[1], vertex.position;\n"
+                "DP4 result.position.z, state.matrix.mvp.row[2], vertex.position;\n"
+                "DP4 result.position.w, state.matrix.mvp.row[3], vertex.position;\n"
+                "MOV result.color, vertex.normal;\n"
+                "MOV result.color.secondary, zero;\n"
+                "END\n",
+                "!!ARBvp1.0\n"
+                "PARAM zero = { 0, 0, 0, 0 };\n"
+                "DP4 result.position.x, state.matrix.mvp.row[0], vertex.position;\n"
+                "DP4 result.position.y, state.matrix.mvp.row[1], vertex.position;\n"
+                "DP4 result.position.z, state.matrix.mvp.row[2], vertex.position;\n"
+                "DP4 result.position.w, state.matrix.mvp.row[3], vertex.position;\n"
+                "MOV result.color, vertex.color.secondary;\n"
+                "MOV result.color.secondary, zero;\n"
+                "END\n",
+                "!!ARBvp1.0\n"
+                "PARAM zero = { 0, 0, 0, 0 };\n"
+                "DP4 result.position.x, state.matrix.mvp.row[0], vertex.position;\n"
+                "DP4 result.position.y, state.matrix.mvp.row[1], vertex.position;\n"
+                "DP4 result.position.z, state.matrix.mvp.row[2], vertex.position;\n"
+                "DP4 result.position.w, state.matrix.mvp.row[3], vertex.position;\n"
+                "MOV result.color, vertex.fogcoord.x;\n"
+                "MOV result.color.secondary, zero;\n"
+                "END\n",
+                "!!ARBvp1.0\n"
+                "PARAM zero = { 0, 0, 0, 0 };\n"
+                "DP4 result.position.x, state.matrix.mvp.row[0], vertex.position;\n"
+                "DP4 result.position.y, state.matrix.mvp.row[1], vertex.position;\n"
+                "DP4 result.position.z, state.matrix.mvp.row[2], vertex.position;\n"
+                "DP4 result.position.w, state.matrix.mvp.row[3], vertex.position;\n"
+                "MOV result.color, vertex.attrib[6];\n"
+                "MOV result.color.secondary, zero;\n"
+                "END\n" };
+            static const char *const nom[4] = { "normale", "secondaire", "brouillard", "attrib[6]" };
+            /* valeurs : gauche, droite (immédiat), tableau employé, courante */
+            static const GLfloat val[4][4][4] = {
+                { { 1, 0, 1, 1 }, { 0, 1, 1, 1 }, { 1, 1, 0, 1 }, { 1, 0, 0, 1 } },
+                { { 1, 0, 1, 1 }, { 0, 1, 1, 1 }, { 1, 1, 0, 1 }, { 0, 1, 0, 1 } },
+                { { 1, 0, 0, 1 }, { 0, 0, 0, 1 }, { 0, 0, 0, 1 }, { 1, 0, 0, 1 } },
+                { { 1, 0, 1, 1 }, { 0, 1, 1, 1 }, { 1, 1, 0, 1 }, { 0, 0, 1, 1 } } };
+            static const unsigned long wl[4] = { 0xFF00FF, 0xFF00FF, 0xFFFFFF, 0xFF00FF };
+            static const unsigned long wr[4] = { 0x00FFFF, 0x00FFFF, 0x000000, 0x00FFFF };
+            static const unsigned long wc[4] = { 0xFF0000, 0x00FF00, 0xFFFFFF, 0x0000FF };
+            sc3_f sc3 = (sc3_f)gl_sym("glSecondaryColor3f", "glSecondaryColor3fEXT");
+            scp_f scp = (scp_f)gl_sym("glSecondaryColorPointer", "glSecondaryColorPointerEXT");
+            fc_f fc = (fc_f)gl_sym("glFogCoordf", "glFogCoordfEXT");
+            fcp_f fcp = (fcp_f)gl_sym("glFogCoordPointer", "glFogCoordPointerEXT");
+            va4_f va4 = (va4_f)gl_sym("glVertexAttrib4fARB", "glVertexAttrib4f");
+            vap_f vap = (vap_f)gl_sym("glVertexAttribPointerARB", "glVertexAttribPointer");
+            eva_f eva = (eva_f)gl_sym("glEnableVertexAttribArrayARB", "glEnableVertexAttribArray");
+            eva_f dva = (eva_f)gl_sym("glDisableVertexAttribArrayARB", "glDisableVertexAttribArray");
+            GLuint px4[4];
+            GLfloat arr[4][4];
+            int a, h, k;
+            if (!sc3 || !scp || !fc || !fcp || !va4 || !vap || !eva || !dva) {
+                printf("FAIL entrées secondaire / brouillard / génériques absentes\n");
+                failures++;
+                return 4;
+            }
+            gen(4, px4);
+            for (a = 0; a < 4; a++) {
+                bind(ARB_VP, px4[a]);
+                str(ARB_VP, ARB_ASCII, (GLsizei)strlen(src[a]), src[a]);
+            }
+            printf("  erreur GL après les ProgramString (f-m) = 0x%x\n", (unsigned)glGetError());
+            glDisable(GL_LIGHTING);
+            glDisable(GL_FOG);
+            glDisable(0x8458 /* GL_COLOR_SUM */);
+            glColor3f(0.5f, 0.5f, 0.5f);
+            for (a = 0; a < 4; a++) {
+                char what[48];
+                bind(ARB_VP, px4[a]);
+                glEnable(ARB_VP);
+                /* immédiat : deux quads, une valeur chacun */
+                glClear(GL_COLOR_BUFFER_BIT);
+                glBegin(GL_QUADS);
+                for (h = 0; h < 2; h++) {
+                    const GLfloat *v = val[a][h];
+                    GLfloat x0 = (GLfloat)(h * W / 2), x1 = (GLfloat)((h + 1) * W / 2);
+                    for (k = 0; k < 4; k++) {
+                        if (a == 0) glNormal3f(v[0], v[1], v[2]);
+                        else if (a == 1) sc3(v[0], v[1], v[2]);
+                        else if (a == 2) fc(v[0]);
+                        else va4(6, v[0], v[1], v[2], v[3]);
+                        glVertex2f((k == 1 || k == 2) ? x1 : x0, (k >= 2) ? (GLfloat)H : 0);
+                    }
+                }
+                glEnd();
+                glFinish();
+                snprintf(what, sizeof(what), "(%c) imm %s gauche", 'f' + 2 * a, nom[a]);
+                check(what, W / 4, H / 2, wl[a]);
+                snprintf(what, sizeof(what), "(%c) imm %s droite", 'f' + 2 * a, nom[a]);
+                check(what, W - W / 4, H / 2, wr[a]);
+                /* tableaux : tableau de l'attribut employé (pipeline fixe pour
+                   les conventionnels, sous programme pour le générique), puis
+                   désactivé ; valeur courante attendue */
+                for (k = 0; k < 4; k++)
+                    memcpy(arr[k], val[a][2], sizeof(arr[k]));
+                if (a < 3)
+                    glDisable(ARB_VP);
+                glEnableClientState(GL_VERTEX_ARRAY);
+                glVertexPointer(2, GL_FLOAT, 0, vq);
+                if (a == 0) {
+                    glEnableClientState(GL_NORMAL_ARRAY);
+                    glNormalPointer(GL_FLOAT, 4 * sizeof(GLfloat), arr);
+                } else if (a == 1) {
+                    glEnableClientState(0x845E /* GL_SECONDARY_COLOR_ARRAY */);
+                    scp(3, GL_FLOAT, 4 * sizeof(GLfloat), arr);
+                } else if (a == 2) {
+                    glEnableClientState(0x8457 /* GL_FOG_COORDINATE_ARRAY */);
+                    fcp(GL_FLOAT, 4 * sizeof(GLfloat), arr);
+                } else {
+                    eva(6);
+                    vap(6, 4, GL_FLOAT, GL_FALSE, 0, arr);
+                }
+                glClear(GL_COLOR_BUFFER_BIT);
+                glDrawArrays(GL_QUADS, 0, 4);
+                if (a == 0) glDisableClientState(GL_NORMAL_ARRAY);
+                else if (a == 1) glDisableClientState(0x845E /* GL_SECONDARY_COLOR_ARRAY */);
+                else if (a == 2) glDisableClientState(0x8457 /* GL_FOG_COORDINATE_ARRAY */);
+                else dva(6);
+                glEnable(ARB_VP);
+                {
+                    const GLfloat *v = val[a][3];
+                    if (a == 0) glNormal3f(v[0], v[1], v[2]);
+                    else if (a == 1) sc3(v[0], v[1], v[2]);
+                    else if (a == 2) fc(v[0]);
+                    else va4(6, v[0], v[1], v[2], v[3]);
+                }
+                glClear(GL_COLOR_BUFFER_BIT);
+                glDrawArrays(GL_QUADS, 0, 4);
+                glDisableClientState(GL_VERTEX_ARRAY);
+                glFinish();
+                snprintf(what, sizeof(what), "(%c) tableaux %s courante", 'g' + 2 * a, nom[a]);
+                check(what, W / 4, H / 2, wc[a]);
+                check(what, W - W / 4, H / 4, wc[a]);
+            }
         }
         glDisable(ARB_VP);
         glDeleteTextures(1, &tex);
