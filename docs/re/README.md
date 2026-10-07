@@ -22,3 +22,4 @@ hors dépôt (disque USB : `pomppc/re/`).
 | `ut2004-demo.md` | premier passage UT2004 Demo (20/09/2026) : portes GPU levées, lenteur restante, **contrôle de la VM quotidienne** (AZERTY, QMP, CD) |
 | `moteur-multifil.md` | `kCGLCEMPEngine` (313) absent de Tiger 10.4.6 : GLEngine ne crée aucun fil, `CGLEnable(313)` → `kCGLBadEnumeration` (01/10) |
 | `version-extensions.md` | ce que la chaîne **tient** vraiment, fonction par fonction — d'où la version et les extensions annoncées ; table bit → extension corrigée par l'expérience |
+| `pixelstore.md` | l'état de `glPixelStorei` (`GC_PACK_*`, `GC_UNPACK_*`) dans le contexte de GLEngine, et le défaut de base (contexte du GLDriver) qui faisait planter `try_draw_pixels` (07/10) ; GLEngine identique en 10.4.6 et 10.4.11 |

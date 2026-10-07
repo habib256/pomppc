@@ -28,6 +28,19 @@ de commit et dans `docs/`.
   `references-linux.csv`, `validee=non`), images rejeu = VM (0,03 et 0,04). Vitesse peu probante
   (un QEMU d'un autre agent sur l'hôte) ; `POMPPC_GL_VPIMM=0` ne change pas DOOM 3 (118,6
   contre 119,4 sans vidage).
+- **État de `glPixelStorei` : la base était fausse, pas les offsets ; garde remplacée par une
+  vérification, 07/10** (`docs/re/pixelstore.md`, `docs/backend-gl-unites-fixes.md`, « Cause :
+  la mauvaise base ») : le plugin lisait `CTX_UNPACK_*` (`+0x31cc..0x31e5`) sur le contexte du
+  GLDriver (un bloc de 0x800 octets) au lieu du contexte de GLEngine (`gctx = GS − 0x360`) :
+  lecture ~10 Kio hors du bloc, d'où les 0 de 10.4.11, le 4 du 22/09 et le plantage de
+  `try_draw_pixels` dans la session bureau. Relevé par diff de vidages (scène `gltest
+  pixsonde`) : `GC_PACK_*` en `gctx+0x31b0..0x31c9`, `GC_UNPACK_*` en `gctx+0x31cc..0x31e5`,
+  GLEngine identique en 10.4.6 et 10.4.11. `pixstore_read()` remplace `unpack_trusted()`
+  (cohérence seulement, compteur `POMPPC_GL_STATS`, 0 relevé) ; restrictions aux lignes
+  serrées levées pour `DrawPixels`, `Bitmap` et stencil, `ReadPixels` suit `GL_PACK_*` ;
+  couleur raster de `glBitmap` lue sur `gctx`. Nouvelle scène `pixstore` (64 témoins, dans le
+  job `gpu`) : verte, écart 0 à Apple, fausse avec le plugin d'avant ; job `gpu` 54/54,
+  8 × `mixte`/`v15` par le relais sans plantage ; job `tools/guest/jobs/pixgui`.
 - **Correctifs des bug hunts éprouvés dans la VM quotidienne, PC, 07/10**
   (`docs/bug-hunt-2026-09-29-passe4.md`, dernière section) : `kextunload` avec Marble Blast
   et un client tenu ouvert (K4, KG4, KT1 : dormeur réveillé en 0,9 s, aucune panique, le
