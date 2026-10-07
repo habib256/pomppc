@@ -164,6 +164,16 @@ nomme (`"$ROOT"/patches/…`) : `753fa973f5eb57ba`, identique sur `9e67226` et s
 (`QEMU_FAST=1 ./scripts/build_qemu_qfb.sh`, profil `pgo-fast/` réutilisé) : jusque-là le
 lanceur l'écarte encore, et le dit dans sa bannière.
 
+**Reconstruction du 07/10 au matin** (`QEMU_FAST=1`, sous `systemd-run … MemoryMax=20G`,
+`build/` 07:00, `build-fast/` 07:03, anciens binaires en `*.avant-0707`) : relevé
+`serie=3d7534b0f2217d54`, `pomppc=4c3ce1f`, `complet=oui`, `march=skylake` — et non
+`753fa973…` : entre ce calcul et le dépôt du 07/10, `patches/qgpu/qgpu-gl.c` a changé
+(`vpimm`, combineurs ATI par NV combine4), et c'est bien un patch appliqué. Le dépôt donne la
+même empreinte, le lanceur reprend le binaire rapide (« binaire rapide (PGO, -O3,
+-march=native) ») ; avertissement attendu « profil pris sur une autre série »
+(`c9e8afe33871fc49`, profil du 06/10, bon). Capacités `bench/build-capabilities*.txt`
+identiques à celles du 06/10 ; `tests/run-all.sh` 240 OK, 0 échec, 5 ignorés.
+
 
 **Vérification du lanceur** (06/10, après la reconstruction) : `POMPPC_FRONTEND=native
 ./run_tiger.sh` sans `QEMU_BIN` ni `QEMU_FAST` prend `build-fast/qemu-system-ppc64` (« binaire

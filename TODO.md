@@ -140,11 +140,6 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   par sommet) dans `DRAW_RAW`, ou repli du lot entier. **Épreuve :** `gltest matbegin` vert et
   `gtgeo.sh` sans régression ; puis l'ajouter au job `gpu`.
 
-- [ ] **[Outils] Après le 07/10 : `disks/prebuilt` et binaire de référence du PC** — le `gltest`
-  précompilé (04/10) rend encore les neuf faux rouges de taille et `stencil` quand on le joue
-  sans taille ; `~/src/qemu/build` (06/10) n'a pas l'hôte de `vpimm` (99e36a4), seule scène rouge
-  du job `gpu` sur ce binaire. Job `prebuilt`, puis reconstruction du binaire de référence.
-
 - [ ] **[TCG] Marble Blast sous `x-msr-nobql`** : A/B non concluant (cellule trop bruitée), à
   refaire par `tools/tcg/mbab.sh`.
 
@@ -305,11 +300,11 @@ un travail de diagnostic dans « Ensuite », pas un blocage.
 | Élément | État |
 |---|---|
 | Protocole / ABI | GL **v22**, transport kext **v19** (`QGPU_ST_NO_MEM`, `QGPU_REG_NOMEM`, `QGPU_CAP_GLSL_PATHS`, `QGPU_CAP_STATE_BLOCK`, `QGPU_CAP_GEOM_HOST` ajoutés sans changer d'ABI) |
-| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 01/10 au soir (device A4, TCG 0010-0016, Screamer corrigé) ; précédents en `*.avant-tbfp`, `*.avant-a4` |
-| Invité quotidien | `tiger.qcow2`, kext v19, plugin `20261001-tout` (gcc-4.0 dans l'invité), SMP=2 ; `POMPPCFsqrt.kext` chargé au démarrage par `/Library/StartupItems/POMPPCFsqrt` (`kHasFsqrt` : la libm prend `fsqrt` ; `sudo sh install.sh --retirer` l'enlève) |
+| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 01/10 au soir (device A4, TCG 0010-0016, Screamer corrigé) ; précédents en `*.avant-tbfp`, `*.avant-a4`. **PC Linux** : `build/` et `build-fast/` (binaire rapide, que prend le lanceur) reconstruits le 07/10 à 07:00 avec le device de la nuit (erreurs par client, combineurs ATI par NV combine4, `vpimm`), série `3d7534b0f2217d54` ; précédents en `*.avant-0707` |
+| Invité quotidien | `tiger.qcow2`, kext v19, plugin `20261001-tout` (gcc-4.0 dans l'invité), SMP=2 (M4) ; **PC** : Tiger 10.4.11, paquet `disks/pomppc-guest-20261007.iso` (plugin de la nuit du 06-07/10, chaîne `20261004-d3x` ; ancien dans `~/pomppc-sauvegarde-20261007`), kext `caps 0xefffe` ; `POMPPCFsqrt.kext` chargé au démarrage par `/Library/StartupItems/POMPPCFsqrt` (`kHasFsqrt` : la libm prend `fsqrt` ; `sudo sh install.sh --retirer` l'enlève) |
 | TCG | `0001–0004`, `0006–0008`, `0010–0012`, `0014–0016` activés par défaut (`JCBITS=14`) ; `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0`, `RETINLINE=0`, `JCIDX=0`, `ICBISYNC=0`, `MSRNOBQL=0`, `FPNATIVE=0`, `FPNATIVE64=0`, `TBFAST=0` les désactivent ; `0013` (`FPFLAT=1`) éteint |
-| Plugin et device | `POMPPC_GL_STATEBLK`, `POMPPC_GL_RAWSANE`, `POMPPC_GL_NATSHM`, `POMPPC_GL_WLUNIF`, `POMPPC_GL_QFLUSH`, `QGPU_GL_FLUSH` allumés (`=0` éteint chacun) |
-| Tests natifs et scripts | M4 (01/10) : **190 OK, 0 échec, 4 ignorés** ; frontend ctest 3/3. PC Linux (07/10, RTX 4060 Ti, backend GL `FIXED4`) : **237 OK, 1 échec, 7 ignorés** — l'échec est le binaire rapide écarté (à reconstruire) |
+| Plugin et device | `POMPPC_GL_STATEBLK`, `POMPPC_GL_RAWSANE`, `POMPPC_GL_NATSHM`, `POMPPC_GL_WLUNIF`, `POMPPC_GL_QFLUSH`, `QGPU_GL_FLUSH`, `POMPPC_GL_VPIMM` (07/10) allumés (`=0` éteint chacun) ; `disks/prebuilt` du 07/10 (ancien : `bench/devloop/prebuilt-20261004`) |
+| Tests natifs et scripts | M4 (01/10) : **190 OK, 0 échec, 4 ignorés** ; frontend ctest 3/3. PC Linux (07/10 au matin, RTX 4060 Ti, backend GL `FIXED4`, binaires reconstruits) : **240 OK, 0 échec, 5 ignorés** ; job `gpu` : 52/53 avant reconstruction (`vpimm`, attendu), `gltest vpimm` 26/26 dans la VM quotidienne après |
 | Travaux clos | Voir `CHANGELOG.md` et `docs/bug-hunt-2026-09-29*.md` |
 | Profils | Plugin : `bench/plugin/ab2-B*/{d3,prey}-fen/mesure/sample.txt`, `bench/a4/depart/LISEZMOI.md` ; TCG : `bench/tcg/` (hors git) |
 
@@ -319,6 +314,12 @@ Une cellule verte exige une image juste (rejeu = VM et référence validée), z�
 hors rafraîchissements admis (2 par 90 images en fenêtre), et une mesure à scène fixe
 sous le seuil du jeu. Une scène `gltest` comparée au rendu d'Apple éprouve chaque notion
 nouvelle. Les modes fenêtre et plein écran sont requis quand le jeu les propose.
+
+**PC Linux, dernier tour complet : `bench/matrice/20261007-0709/tableau.md`** (binaires et paquet
+du 07/10 au matin, avec vidage) : Marble Blast 15,5 / 15,2, Zenerchi 7,4, UT2004 48,8 / 48,5
+**vertes**, images justes ; DOOM 3 123,4 / 121,5 rouge tant que `d3-fen` et `d3-pe` (créée ce
+tour) ne sont pas validées à l'œil (`matrice.py --valider`). Détail : `docs/matrice-jeux.md`
+§6 quater.
 
 **Dernier tour complet : `bench/matrice/20261001-fsqrt/<jeu>/tableau.md`** (configuration du
 01/10 plus `POMPPCFsqrt` chargé ; Nexuiz dans `nx-bis`/`nxg-bis`) : **15 vertes sur 15

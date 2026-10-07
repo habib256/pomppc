@@ -9,6 +9,25 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Binaires, paquet invité et matrice après la nuit du 06-07/10, PC, 07/10 au matin**
+  (`docs/binaire-rapide-x86.md` §6, `docs/matrice-jeux.md` §6 quater) :
+  `disks/prebuilt` régénéré par le job `prebuilt` sur une copie de la VM de dev (plugin de la
+  nuit : erreurs par client, `vpimm`, garde `unpack_trusted` ; `gltest` à 256×256 et `vpimm` ;
+  kext POMPPCGPU recompilé, octets identiques ; ancien en `bench/devloop/prebuilt-20261004`) ;
+  job `gpu` avant reconstruction 52 OK, 1 échec (`vpimm`, 7 témoins : device du 06/10, attendu).
+  Paquet `disks/pomppc-guest-20261007.iso` (`scripts/make_guest_iso.sh`) installé dans la VM
+  quotidienne par son `install.sh` (ancien plugin en `~/pomppc-sauvegarde-20261007`) : kext
+  `caps 0xefffe`, plugin chargé (`plugin 20261004-d3x qgpu v22` : la chaîne de révision n'a pas
+  été montée cette nuit), `gltest vpimm` 26/26 dans la session. QEMU reconstruit
+  (`QEMU_FAST=1`, `build/` et `build-fast/`, anciens en `*.avant-0707`) : série
+  `3d7534b0f2217d54`, le lanceur reprend le binaire rapide ; `tests/run-all.sh` 239 OK,
+  1 échec (binaire rapide écarté), 5 ignorés → **240 OK, 0 échec, 5 ignorés** (deux tests du
+  frontend désormais construits). Tour `bench/matrice/20261007-0709` avec vidage : Marble Blast
+  15,5 / 15,2, Zenerchi 7,4, UT2004 48,8 / 48,5 vertes, images justes ; DOOM 3 123,4 / 121,5
+  rouge faute de référence validée (`d3-fen`, et `d3-pe` créée par ce tour dans
+  `references-linux.csv`, `validee=non`), images rejeu = VM (0,03 et 0,04). Vitesse peu probante
+  (un QEMU d'un autre agent sur l'hôte) ; `POMPPC_GL_VPIMM=0` ne change pas DOOM 3 (118,6
+  contre 119,4 sans vidage).
 - **Correctifs des bug hunts éprouvés dans la VM quotidienne, PC, 07/10**
   (`docs/bug-hunt-2026-09-29-passe4.md`, dernière section) : `kextunload` avec Marble Blast
   et un client tenu ouvert (K4, KG4, KT1 : dormeur réveillé en 0,9 s, aucune panique, le

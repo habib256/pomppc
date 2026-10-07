@@ -349,6 +349,21 @@ quotidienne).
 | `20261003-0003` (références créées) | — (jeu non lancé, aléa) / 19,8 | 7,9 | 60,5 / 74,7 |
 | `20261003-0018` (références validées) | 20,8 / 20,0 | 7,9 | 82,8 / 83,4 |
 | `20261003-0157` (planchers du PC) | **vert** 22,0 / **vert** 21,0 | **vert** 7,8 | **vert** 82,7 / rouge (image) 59,3 |
+| `20261007-0709` (binaires et paquet du 07/10) | **vert** 15,5 / **vert** 15,2 | **vert** 7,4 | **vert** 48,8 / **vert** 48,5 |
+
+**Tour du 07/10 au matin** (`bench/matrice/20261007-0709`, commit `4c3ce1f`, VM quotidienne
+10.4.11, binaire rapide reconstruit, paquet `disks/pomppc-guest-20261007.iso` : device et plugin
+de la nuit — erreurs par client, combineurs ATI par NV combine4, `vpimm`, `unpack_trusted`).
+Images justes partout (rejeu = VM 0,00, référence 0,00 %), replis dans les admis (Marble Blast
+fenêtre 42, UT2004 fenêtre 6). DOOM 3 : 123,4 / 121,5 ms/image, rejeu = VM 0,03 / 0,04, **rouge
+faute de référence validée** : `d3-fen` (04/10) et `d3-pe`, **créée par ce tour** dans
+`references-linux.csv` (première partie plein écran de DOOM 3 sur le PC, `validee=non`) ; la
+cellule `d3-pe` note aussi « 1 client du kext restant après l'arrêt du jeu », invité redémarré
+par la matrice (une fois, cf. `docs/gel-doom3-baddisplay.md`). Vitesse **peu probante** : charge
+étrangère faible (médiane 0,09 cœur) mais un QEMU d'un autre agent (VM de dev) tournait. DOOM 3
+est ~10 % au-dessus des 111,9 du tour `x86-final` (06/10) ; A/B `--sans-vidage` d'une partie par
+bras : `POMPPC_GL_VPIMM=0` 118,6, défaut 119,4 (`bench/matrice/20261007-ab-vpimm{0,1}`) — `vpimm`
+n'y est pour rien ; à remesurer hôte au repos.
 
 Images justes partout où il y a une image (rejeu = VM et référence à 0,00), sauf une fois :
 
