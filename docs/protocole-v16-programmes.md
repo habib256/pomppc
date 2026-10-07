@@ -175,7 +175,9 @@ dans `caps_extensions`. **Sous programme, la position est demandée par le code
 tableau est actif : GLEngine déroule sinon depuis ses pointeurs résolus
 périmés (`gctx+0x48f8`, `docs/re/programmes-arb.md` §3 bis) — c'était la
 géométrie éclatée de la course, que `gltest` ne reproduisait pas (ses
-pointeurs conventionnels n'avaient jamais été posés). Le chemin **tableaux** (`RenderVertexArray`) refuse
+pointeurs conventionnels n'avaient jamais été posés) — **levé le 07/10** quand le
+texte du programme dit ce qu'il lit : la crainte ne tient pas, et le filtre
+perdait tout attribut du mode immédiat (§7). Le chemin **tableaux** (`RenderVertexArray`) refuse
 encore les génériques (il packe lui-même) ; Colin McRae ne le prend pas.
 `POMPPC_GL_PROG=0` revient à l'émulation par GLEngine.
 
@@ -226,3 +228,66 @@ Sans changer de version : capacité `QGPU_CAP_GEN_SIZES` (0x80) et clé
 le cœur complète (0, 0, 1) avant le backend. DOOM 3 / Prey : 11 mots de
 génériques par sommet au lieu de 16. Contrat, plugin et épreuves :
 `docs/protocole-v17-generiques-tailles.md`.
+
+## 7. Attributs conventionnels en mode immédiat (07/10/2026)
+
+Sans changer de version. Scène **`gltest vpimm`** : `glBegin`/`glEnd` sous un
+programme de sommets ARB, pipeline de fragments fixe (texture 2D 4×2,
+`GL_REPLACE`), comparée au rendu d'Apple (qui émule les programmes de sommets) :
+(a) `vertex.texcoord[0]` par `glTexCoord2f` à chaque sommet ; (b)
+`vertex.texcoord[1]` par `glMultiTexCoord2f` (unité 1 **sans texture**) ; (c)
+tableaux, texcoord 0 employé puis **désactivé** (pointeur résolu périmé),
+valeur courante ; (d) `vertex.color` par `glColor` dans le même `glBegin` ;
+(e) comme (c) pour la couleur.
+
+**Avant** : 24 témoins faux sur 26 sous le chemin brut (juste sous
+`POMPPC_GL_GEOM=0` et sous Apple). Le quad entier sortait au texel (0,0) (a, b,
+c) et à la couleur courante de `glBegin` (d). Trois causes :
+
+- `geom_format` (plugin) ne gardait, sous programme, un attribut conventionnel
+  que si son **tableau** était actif (§5 C, la crainte du 23/09). En mode
+  immédiat aucun tableau n'est actif : le descripteur ne demandait ni la
+  coordonnée ni la couleur, que GLEngine aurait pourtant écrites sommet par
+  sommet.
+- Sous programme ARB, `QGPU_VF_TEX(u)` ne suivait que les unités **texturées**
+  (la règle « la coordonnée suit le texte » n'existait que pour GLSL, v21), et
+  `geom_send_current` n'envoyait la coordonnée courante que sous GLSL : (c)
+  sortait au texel (0,0).
+- Le backend GL de l'hôte ne liait la coordonnée d'une unité sans texture que
+  sous GLSL (`gp`) : sous programme ARB, `vertex.texcoord[1]` (b) lisait un
+  état laissé par un autre dessin.
+
+**La crainte du 23/09 ne tient pas sur le chemin des tableaux.** Sonde de
+`geom_begin` sur (c) et (e) : les pointeurs résolus de texcoord 0 et de la
+couleur (`gctx+0x48f8+4·code`) sont **non nuls et périmés** (ceux du dessin
+précédent, tableaux désactivés depuis), le descripteur demande les codes 8 et 2
+— et GLEngine écrit bien la **valeur courante** dans chaque sommet : il teste le
+bit d'activation (`_gleSetFunctionIDFromArray`, `docs/re/descripteur-de-sommet.md`
+§4). La géométrie éclatée de Colin McRae venait de tableaux vides (§3 ter de
+`docs/re/programmes-arb.md`), pas de ces pointeurs. Même sonde : un lot
+immédiat arrive à `BeginPrimitiveBuffer` avec `*n = 0`, un lot de tableaux avec
+`*n` = le nombre de sommets — mais le descripteur est publié au dispatch, avant
+de savoir lequel viendra ; il doit donc valoir pour les deux.
+
+**Correction.**
+
+- Plugin (`geom_format`) : sous programme, quand le texte dit précisément ce
+  qu'il lit (`vp_need` valide, pas le « tout » `0x0FFFFFFF` d'un texte inconnu,
+  ni `POMPPC_GL_VPNEED=0`), **le texte décide seul** : un attribut
+  conventionnel lu est porté, tableau actif ou non (immédiat : la valeur de
+  chaque sommet ; tableaux désactivés : la valeur courante, écrite par
+  GLEngine). Le filtre par tableau actif ne sert plus que pour un texte
+  inconnu ; `POMPPC_GL_VPIMM=0` le remet partout (A/B).
+- Plugin : `QGPU_VF_TEX(u)` suit `vertex.texcoord[u]` sous programme ARB comme
+  sous GLSL ; `geom_send_current` envoie la coordonnée courante sous les deux.
+- Hôte (`patches/qgpu/qgpu-gl.c`, `gl_draw_raw`) : sous programme de sommets
+  ARB comme sous GLSL, une unité sans texture reçoit sa matrice, son tableau de
+  coordonnées s'il est porté, sinon sa valeur courante.
+
+**Épreuves** : `vpimm` 26/26 sous le chemin brut, identique au rendu d'Apple
+(job `gpu`, `gltest diff`) ; `POMPPC_GL_VPIMM=0` refait les 16 témoins faux de
+(a), (b), (d). Normale, couleur secondaire, coordonnée de brouillard et
+génériques (`glVertexAttrib*` entre `glBegin` et `glEnd`) en immédiat sous
+programme : non éprouvés (la normale suit la même règle que la couleur ; les
+deux suivantes ne sont portées que si l'état fixe les demande, les génériques
+que si leur tableau est actif).
