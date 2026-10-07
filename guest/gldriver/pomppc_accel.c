@@ -606,6 +606,9 @@ typedef struct PProg {
     int            fp_units_bad;        /* fragments : texture[u >= 4] ou cible inconnue */
     unsigned long  vp_need;             /* sommets : entrées vertex.* lues par le texte
                                            (VPN_*) ; 0 = pas encore relu */
+    unsigned long  vp_attr;             /* sommets : bit k = le texte lit vertex.attrib[k]
+                                           EN TOUTES LETTRES (07/10, mode immédiat :
+                                           geom_format porte alors QGPU_VF_GEN(k)) */
     unsigned long  ugen;                /* v21 : gldModifyPipelineProgram(masque 2) vus —
                                            un glUniform touche l'étage GLSL */
     int            orphan;              /* ctx détruit, poignée encore détenue par
@@ -8434,9 +8437,10 @@ static void text_fp_units(PProg *r, const char *s, unsigned long n)
 #define VPN_TEX(u)   (0x10UL << (u))            /* unités 0..7 : bits 4..11 */
 #define VPN_GEN(k)   (0x1000UL << (k))          /* génériques 0..15 : bits 12..27 */
 #define VPN_VALID    0x80000000UL
-static unsigned long text_vp_inputs(const char *s, unsigned long n)
+static unsigned long text_vp_inputs(const char *s, unsigned long n, unsigned long *attr)
 {
     unsigned long i, need = VPN_VALID;
+    *attr = 0;
     for (i = 0; i + 7 < n; i++) {
         unsigned long j, v = 0;
         int any = 0;
@@ -8491,7 +8495,10 @@ static unsigned long text_vp_inputs(const char *s, unsigned long n)
             else if (v == 5) need |= VPN_FOG;
             /* attrib[8+u] : le générique porte la donnée, pas le tableau
                conventionnel de texcoord u (c'est lui qui est périmé) */
-            if (v < QGPU_VF_GEN_MAX) need |= VPN_GEN(v);
+            if (v < QGPU_VF_GEN_MAX) {
+                need |= VPN_GEN(v);
+                *attr |= 1UL << v;
+            }
             continue;
         }
     }
@@ -8524,7 +8531,7 @@ static void prog_parse(PProg *r)
     if (t)
         text_fp_units(r, text, len);
     else
-        r->vp_need = text_vp_inputs(text, len);
+        r->vp_need = text_vp_inputs(text, len, &r->vp_attr);
     r->parsed_text = text;
     r->parsed_len = len;
 }
@@ -9916,6 +9923,28 @@ static unsigned long geom_format(PCtx *p)
                     if (!(lo & (1UL << (24 + u))))
                         fmt &= ~(unsigned long)QGPU_VF_TEX(u);
             }
+            /* 07/10, suites (gltest vpimm (f)-(m)) : la base ci-dessus ne
+               demande la normale que pour l'éclairage ou le texgen, la
+               couleur secondaire que pour COLOR_SUM, la coordonnée de
+               brouillard que pour GL_FOG_COORDINATE, un générique que si son
+               tableau est actif. Sous programme ces raisons ne valent plus :
+               glNormal / glSecondaryColor / glFogCoord / glVertexAttrib entre
+               glBegin et glEnd sortaient avec la valeur courante de glBegin
+               (normale (0,0,1), secondaire et générique noirs, brouillard
+               du premier sommet). Texte précis : ce qu'il lit est porté —
+               GLEngine écrit la valeur de chaque sommet, ou la courante
+               quand le tableau est désactivé (vpimm (g), (i), (k), (m)).
+               Les génériques : seulement vertex.attrib[k] en toutes lettres
+               (vp_attr), pas les alias que text_vp_inputs garde pour
+               vertex.normal / color / texcoord[u]. */
+            if (precise) {
+                if (nd & VPN_NORMAL) fmt |= QGPU_VF_NORMAL;
+                if ((nd & VPN_SEC) && G.tex14) fmt |= QGPU_VF_SEC_COLOR;
+                if (nd & VPN_FOG) fmt |= QGPU_VF_FOG;
+                for (k = 1; k < QGPU_VF_GEN_MAX; k++)
+                    if (p->vp_rec->vp_attr & (1UL << k))
+                        fmt |= QGPU_VF_GEN(k);
+            }
         }
         /* 24/09 : et seulement ce que le TEXTE du programme lit (DOOM 3 :
            tableau de texcoord 0 actif mais périmé pendant les interactions) */
@@ -10296,7 +10325,10 @@ static void geom_send_current(PCtx *p, unsigned long fmt)
     }
     /* La couleur secondaire n'est jamais portée par le sommet : la mettre dans
        le format ferait allumer GL_COLOR_SUM sur l'hôte, ce que l'état GL ne dit
-       pas. Elle passe donc toujours en valeur courante. */
+       pas. Elle passe donc toujours en valeur courante. (Sous programme de
+       sommets qui lit vertex.color.secondary, elle est portée depuis le
+       07/10 — geom_format ; la clé QGPU_SK_COLOR_SUM suit l'état GL, pas le
+       format — et la valeur courante envoyée ici ne sert pas.) */
     if (changed(p, g + GS_CUR_SECCOLOR, p->c_cur[2], 12)) {
         a[0] = QGPU_CUR_SEC_COLOR;
         p->nat_cur_ok &= ~(1UL << QGPU_CUR_SEC_COLOR);

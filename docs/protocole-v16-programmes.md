@@ -287,7 +287,53 @@ de savoir lequel viendra ; il doit donc valoir pour les deux.
 **Épreuves** : `vpimm` 26/26 sous le chemin brut, identique au rendu d'Apple
 (job `gpu`, `gltest diff`) ; `POMPPC_GL_VPIMM=0` refait les 16 témoins faux de
 (a), (b), (d). Normale, couleur secondaire, coordonnée de brouillard et
-génériques (`glVertexAttrib*` entre `glBegin` et `glEnd`) en immédiat sous
-programme : non éprouvés (la normale suit la même règle que la couleur ; les
-deux suivantes ne sont portées que si l'état fixe les demande, les génériques
-que si leur tableau est actif).
+génériques : voir §7 bis.
+
+### 7 bis. Normale, couleur secondaire, brouillard, génériques (07/10/2026)
+
+Scène **`vpimm`** étendue, témoins (f) à (m), texture éteinte, chaque programme
+recopiant son entrée vers `result.color` (et `result.color.secondary` à zéro) :
+(f) `vertex.normal`, éclairage éteint, `glNormal3f` ; (h)
+`vertex.color.secondary`, `glSecondaryColor3f` ; (j) `vertex.fogcoord`,
+brouillard éteint, `glFogCoordf` ; (l) `vertex.attrib[6]`,
+`glVertexAttrib4fARB(6, …)` — chacun une valeur par moitié d'écran dans le même
+`glBegin`. Puis (g), (i), (k), (m) : tableaux, comme (c)/(e), le tableau de
+l'attribut employé puis désactivé (pour le générique, le premier dessin se fait
+sous programme), valeur courante attendue. Le rendu d'Apple les tient tous.
+
+**Avant** : 9 témoins faux sur 18. En immédiat, les quatre entrées sortaient à
+la valeur courante de `glBegin` : normale (0, 0, 1) des deux côtés, secondaire
+et générique noirs, brouillard 0 (le côté droit, à 0, juste par hasard). En
+tableaux, (g), (i), (k) étaient justes (valeur courante par `SET_CURRENT`) ;
+(m) ne l'était pas : le protocole n'a pas de valeur courante pour un générique
+(`QGPU_CUR_*`), et l'hôte, attribut 6 désactivé, lisait la sienne.
+
+**Cause** : `geom_format` (plugin) — la base ne demande la normale que pour
+l'éclairage ou le texgen, la secondaire que pour `COLOR_SUM` hors éclairage, la
+coordonnée de brouillard que pour `GL_FOG_COORDINATE`, un générique que si son
+tableau est actif (bits du mot haut du VAO). Sous programme, le filtre du texte
+ne fait qu'enlever : rien ne rajoutait ce que le programme lit.
+
+**Correction** (plugin seul ; ni `qgpu_proto.h`, ni device, ni kext) : texte
+précis (même condition qu'au §7 : `vp_need` valide et pas « tout »,
+`POMPPC_GL_VPNEED` et `POMPPC_GL_VPIMM` non nuls), `geom_format` porte
+`QGPU_VF_NORMAL` si le texte lit `vertex.normal`, `QGPU_VF_SEC_COLOR` s'il lit
+`vertex.color.secondary` (protocole ≥ v10, `G.tex14`), `QGPU_VF_FOG` s'il lit
+`vertex.fogcoord`, et `QGPU_VF_GEN(k)` pour chaque `vertex.attrib[k]` (k ≥ 1)
+écrit **en toutes lettres** — nouveau masque `vp_attr`, relevé par
+`text_vp_inputs` : les alias que `vp_need` garde pour `vertex.normal`,
+`vertex.color`, `vertex.texcoord[u]` ne sont pas portés en générique (sur un
+hôte qui aliase, le tableau générique masquerait le conventionnel). GLEngine
+écrit dans le sommet la valeur de chaque `glNormal` / `glSecondaryColor` /
+`glFogCoord` / `glVertexAttrib`, ou, tableau désactivé, la valeur courante — y
+compris celle du générique (codes 16 + k), ce qui rend inutile une valeur
+courante de générique dans le protocole. Côté hôte, rien : `gl_draw_raw` lie
+déjà les tableaux portés ; `GL_COLOR_SUM` suit la clé `QGPU_SK_COLOR_SUM`
+(l'état GL), pas le format.
+
+**Épreuves** (PC, device du 07/10 inchangé) : `vpimm` 44/44 sous le chemin
+brut, écart à Apple 0/0 ; `POMPPC_GL_VPIMM=0` refait exactement les 9 témoins
+faux de (f)-(m) (25 en tout avec ceux de (a), (b), (d)) ; job `gpu` 54 OK,
+0 échec (TEX3 et 16 bits verts). Le filtre levé
+touche les jeux sous programme : DOOM 3 et Colin McRae à revoir en jeu (même
+A/B).
