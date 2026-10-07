@@ -9,6 +9,18 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **UT2004 : armes noires dans la démo de test, PC NVIDIA, 07/10**
+  (`docs/re/ut2004-arme-noire.md`, `docs/protocole.md` « Combineurs ATI ») : le backend GL
+  n'annonçait `QGPU_CAP_COMBINE3` qu'avec `GL_ATI_texture_env_combine3`, absent chez
+  NVIDIA ; UT2004 prenait alors son repli `REPLACE(PREVIOUS)` et les présentoirs d'armes de
+  la démo (images ~166-195) sortaient noirs. Le backend l'annonce aussi avec
+  `GL_NV_texture_env_combine4` et y traduit les fonctions ATI et les sources ZERO/ONE
+  (exact pour MODULATE_ADD et MODULATE_SIGNED_ADD, MODULATE_SUBTRACT approché). Démo
+  entière revidée sur la VM quotidienne avec un QEMU reconstruit : armes texturées, rejeu
+  `gl` = `soft`, cellule `ut-fen` juste, `gltest` sans régression. Rejoueur :
+  `QGPU_REPLAY_STATE`, `QGPU_REPLAY_TEXOUT`, `QGPU_REPLAY_UNUSED`. Reste le M4, qui a
+  l'extension ATI et où l'utilisateur avait vu le défaut le 01/10.
+
 - **`tests/run-all.sh` sur le PC : deux échecs hors binaire rapide levés, 07/10**
   (`docs/backend-gl-unites-fixes.md` « Test natif », `docs/audio-stabilite.md`) :
   `qgpu_core_test` v17 (a)/(b) exigeait les unités 5 et 6 **au pipeline fixe** du backend GL,

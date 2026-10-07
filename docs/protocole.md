@@ -65,8 +65,13 @@ flux ne changent pas ; les sources croisées 0..3 conservent leur encodage.
 Le cœur refuse les fonctions inconnues, DOT3 en alpha, les échelles invalides et
 les champs réservés (`BAD_ARG`, sans mutation). Sans `QGPU_CAP_COMBINE3`, toute
 opération ATI ou source littérale est refusée (`BACKEND`, sans mutation).
-Le backend logiciel les calcule ; le backend GL n'annonce la capacité que si
-l'hôte annonce l'extension ATI. Le plugin exige version ≥22 **et** capacité,
+Le backend logiciel les calcule ; le backend GL annonce la capacité si l'hôte a
+l'extension ATI ou, à défaut (NVIDIA, 07/10/2026), `GL_NV_texture_env_combine4` :
+une unité qui emploie une fonction ATI ou une source littérale y est posée en
+`COMBINE4_NV` (Arg0·Arg1 + Arg2·Arg3), exact pour `MODULATE_ADD`,
+`MODULATE_SIGNED_ADD`, ZERO/ONE et les fonctions ARB qui les accompagnent ;
+`MODULATE_SUBTRACT` (et `SUBTRACT`/DOT3 mêlés à une source littérale) y est
+approché sans la soustraction, dit une fois sur stderr. Le plugin exige version ≥22 **et** capacité,
 puis expose le bit 70 des extensions de GLEngine. `POMPPC_GL_COMBINE3=0`
 permet une comparaison sans annonce. Les huit unités fixes restent inchangées.
 

@@ -74,6 +74,213 @@ static uint32_t timed_execute(QgpuCore *c, uint32_t off, uint32_t len)
 
 static int cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
+/* 07/10 : QGPU_REPLAY_STATE="image:i" — juste avant le dessin i de l'image
+   (même compte que SKIPDRAW), l'état du contexte courant TEL QUE LE CŒUR LE
+   TIENT : clés hors valeur initiale, unités (texture liée, cible, taille,
+   format, moyenne ARGB du niveau de base de la face 0, environnement,
+   combineurs décodés), éclairage, matériau. Pour lire un DRAW_NATIVE, que
+   LIST ne décode pas. */
+static void dump_state(QgpuCore *c, uint32_t frame, unsigned idx)
+{
+    static const char *fn[] = { "REPLACE", "MODULATE", "ADD", "ADD_SIGNED", "INTERPOLATE",
+                                "SUBTRACT", "DOT3_RGB", "DOT3_RGBA", "MODULATE_ADD",
+                                "MODULATE_SIGNED_ADD", "MODULATE_SUBTRACT", "?", "?", "?", "?", "?" };
+    static const char *srcn[] = { "TEX", "CONST", "PRIM", "PREV", "TEX0", "TEX1", "TEX2", "TEX3" };
+    static const char *opn[] = { "c", "1-c", "a", "1-a" };
+    QgpuState init;
+    QgpuContext *x;
+    unsigned k, u;
+    if (c->cur_ctx < 0) { fprintf(stderr, "STATE image %u dessin %u : pas de contexte\n", frame, idx); return; }
+    x = &c->ctx[c->cur_ctx];
+    qgpu_state_init(&init);
+    fprintf(stderr, "STATE image %u dessin %u ctx %d : clés hors valeur initiale :", frame, idx, c->cur_ctx);
+    for (k = 0; k < QGPU_SK_COUNT; k++)
+        if (x->st.v[k] != init.v[k])
+            fprintf(stderr, " %u=%x", k, x->st.v[k]);
+    fprintf(stderr, "\n");
+    for (u = 0; u < 8; u++) {
+        uint32_t b = QGPU_SK_UNIT(u), en = x->st.v[b], id = x->st.v[b + 1], mode = x->st.v[b + 2];
+        uint32_t cb = x->st.v[QGPU_SK_COMBINE(u)], cs = x->st.v[QGPU_SK_COMBINE_SRC(u)], i;
+        fprintf(stderr, "STATE   u%u en %x tex %u env %x couleur %08x", u, en, id, mode, x->st.v[b + 3]);
+        if (id < QGPU_MAX_TEX && c->tex[id].used) {
+            QgpuTexture *t = &c->tex[id];
+            QgpuTexLevel *lv = &t->level[0][t->base_level < QGPU_MAX_TEX_LEVELS ? t->base_level : 0];
+            fprintf(stderr, " [cible %u faces %u fmt %x %ux%u niveaux %u min %x", t->target, t->nfaces,
+                    t->base_format, lv->w, lv->h, qgpu_texture_levels(t), t->min_filter);
+            if (lv->px && !lv->gpu) {
+                uint64_t s[4] = { 0, 0, 0, 0 }, n = (uint64_t)lv->w * lv->h * lv->d, j;
+                for (j = 0; j < n; j++)
+                    for (i = 0; i < 4; i++) s[i] += (lv->px[j] >> (24 - 8 * i)) & 255;
+                if (n)
+                    fprintf(stderr, " moy ARGB %u/%u/%u/%u", (unsigned)(s[0] / n), (unsigned)(s[1] / n),
+                            (unsigned)(s[2] / n), (unsigned)(s[3] / n));
+                /* QGPU_REPLAY_TEXOUT=dossier : niveau de base en PPM (RGB) et
+                   PGM (alpha), tex-<id>.ppm / tex-<id>-a.pgm */
+                if (getenv("QGPU_REPLAY_TEXOUT") && n && lv->d == 1) {
+                    char p1[512], p2[512];
+                    FILE *f1, *f2;
+                    snprintf(p1, sizeof(p1), "%s/tex-%u.ppm", getenv("QGPU_REPLAY_TEXOUT"), id);
+                    snprintf(p2, sizeof(p2), "%s/tex-%u-a.pgm", getenv("QGPU_REPLAY_TEXOUT"), id);
+                    f1 = fopen(p1, "wb");
+                    f2 = fopen(p2, "wb");
+                    if (f1 && f2) {
+                        fprintf(f1, "P6\n%u %u\n255\n", lv->w, lv->h);
+                        fprintf(f2, "P5\n%u %u\n255\n", lv->w, lv->h);
+                        for (j = 0; j < n; j++) {
+                            uint8_t rgb[3] = { lv->px[j] >> 16, lv->px[j] >> 8, lv->px[j] };
+                            fwrite(rgb, 1, 3, f1);
+                            fputc(lv->px[j] >> 24, f2);
+                        }
+                    }
+                    if (f1) fclose(f1);
+                    if (f2) fclose(f2);
+                }
+            }
+            fprintf(stderr, "]");
+        }
+        if (mode == 0x8570) {
+            fprintf(stderr, " RGB %s(", fn[cb & 15]);
+            for (i = 0; i < 3; i++) {
+                uint32_t f = (cs >> (5 * i)) & 31, lit = (cb >> (12 + 2 * i)) & 3;
+                fprintf(stderr, "%s%s.%s", i ? "," : "", lit ? (lit == 1 ? "ZERO" : "ONE") : srcn[f & 7], opn[f >> 3]);
+            }
+            fprintf(stderr, ")x%u A %s(", 1u << ((cb >> 8) & 3), fn[(cb >> 4) & 15]);
+            for (i = 0; i < 3; i++) {
+                uint32_t f = (cs >> (15 + 4 * i)) & 15, lit = (cb >> (18 + 2 * i)) & 3;
+                fprintf(stderr, "%s%s.%s", i ? "," : "", lit ? (lit == 1 ? "ZERO" : "ONE") : srcn[f & 7], (f >> 3) ? "1-a" : "a");
+            }
+            fprintf(stderr, ")x%u", 1u << ((cb >> 10) & 3));
+        }
+        fprintf(stderr, "\n");
+        for (i = 0; i < 4; i++)
+            if (x->gm.texgen[u][i].enabled)
+                fprintf(stderr, "STATE     texgen u%u coord %u mode %x\n", u, i, x->gm.texgen[u][i].mode);
+    }
+    for (k = 0; k < QGPU_MAX_LIGHTS; k++)
+        if (x->gm.light[k].enabled)
+            fprintf(stderr, "STATE   lumière %u amb %.2f %.2f %.2f diff %.2f %.2f %.2f pos %.2f %.2f %.2f %.2f att %g %g %g\n", k,
+                    x->gm.light[k].ambient[0], x->gm.light[k].ambient[1], x->gm.light[k].ambient[2],
+                    x->gm.light[k].diffuse[0], x->gm.light[k].diffuse[1], x->gm.light[k].diffuse[2],
+                    x->gm.light[k].position[0], x->gm.light[k].position[1], x->gm.light[k].position[2],
+                    x->gm.light[k].position[3], x->gm.light[k].att[0], x->gm.light[k].att[1], x->gm.light[k].att[2]);
+    fprintf(stderr, "STATE   ambiante modèle %.2f %.2f %.2f %.2f ; matériau avant amb %.2f %.2f %.2f diff %.2f %.2f %.2f %.2f spec %.2f %.2f %.2f ém %.2f %.2f %.2f brillance %.1f ; couleur courante %.2f %.2f %.2f %.2f\n",
+            x->gm.lm_ambient[0], x->gm.lm_ambient[1], x->gm.lm_ambient[2], x->gm.lm_ambient[3],
+            x->gm.mat[0].ambient[0], x->gm.mat[0].ambient[1], x->gm.mat[0].ambient[2],
+            x->gm.mat[0].diffuse[0], x->gm.mat[0].diffuse[1], x->gm.mat[0].diffuse[2], x->gm.mat[0].diffuse[3],
+            x->gm.mat[0].specular[0], x->gm.mat[0].specular[1], x->gm.mat[0].specular[2],
+            x->gm.mat[0].emission[0], x->gm.mat[0].emission[1], x->gm.mat[0].emission[2], x->gm.mat[0].shininess,
+            x->gm.cur_color[0], x->gm.cur_color[1], x->gm.cur_color[2], x->gm.cur_color[3]);
+}
+
+/* 07/10 : QGPU_REPLAY_UNUSED=1 — à chaque dessin du pipeline fixe, cherche
+   une texture LIÉE à une unité active dont la couleur n'atteint pas le
+   résultat : chaîne des unités remontée depuis la dernière, sources et
+   opérandes de GL_COMBINE (RGB et alpha séparés). Signature de l'arme noire
+   du 23/09 (peau dans l'alpha seulement, REPLACE(PREVIOUS) en RGB). Ligne
+   « UNUSED image dessin unité tex rgb/alpha » ; « rgb » = la texture ne sert
+   qu'à l'alpha. */
+static void check_unused(QgpuCore *c, uint32_t frame, unsigned idx)
+{
+    static const unsigned nargs[16] = { 1, 2, 2, 2, 3, 2, 2, 2, 3, 3, 3, 0, 0, 0, 0, 0 };
+    QgpuContext *x;
+    int u, en[8], last = -1;
+    int needc[8] = { 0 }, needa[8] = { 0 };     /* résultat de l'unité u requis */
+    int texc[8] = { 0 }, texa[8] = { 0 };       /* couleur / alpha de la texture u lus */
+    if (c->cur_ctx < 0) return;
+    x = &c->ctx[c->cur_ctx];
+    if (x->st.v[QGPU_SK_FRAGMENT_PROGRAM] || x->prg.bound[QGPU_PROG_GLSL] >= 0) return;
+    for (u = 0; u < 8; u++) {
+        en[u] = x->st.v[QGPU_SK_UNIT(u)] != 0;
+        if (en[u]) last = u;
+    }
+    if (last < 0) return;
+    needc[last] = needa[last] = 1;
+    for (u = last; u >= 0; u--) {
+        uint32_t b = QGPU_SK_UNIT(u), mode = x->st.v[b + 2], cb, cs, i;
+        int prev = u - 1;
+        if (!en[u]) continue;
+        while (prev >= 0 && !en[prev]) prev--;
+        /* une source : 0 TEX, 3 PREV, 4+n TEXn ; `alpha` : on lit son alpha */
+#define USE(src, alpha) do { unsigned s_ = (src); \
+            if (s_ == 0) { if (alpha) texa[u] = 1; else texc[u] = 1; } \
+            else if (s_ == 3) { if (prev >= 0) { if (alpha) needa[prev] = 1; else needc[prev] = 1; } } \
+            else if (s_ >= 4) { if (alpha) texa[s_ - 4] = 1; else texc[s_ - 4] = 1; } } while (0)
+        if (mode != 0x8570) {
+            if (needc[u]) { USE(0, 0); if (mode != 0x1E01) USE(3, 0); }
+            if (needa[u]) { USE(0, 1); if (mode != 0x1E01) USE(3, 1); }
+            if (needc[u] && mode == 0x2101) USE(0, 1);              /* DECAL : alpha de la texture */
+            if (needc[u] && mode == 0x0BE2) USE(0, 0);
+            continue;
+        }
+        cb = x->st.v[QGPU_SK_COMBINE(u)];
+        cs = x->st.v[QGPU_SK_COMBINE_SRC(u)];
+        if (needc[u]) {
+            for (i = 0; i < nargs[cb & 15]; i++) {
+                uint32_t f = (cs >> (5 * i)) & 31;
+                if ((cb >> (12 + 2 * i)) & 3) continue;          /* ZERO / ONE */
+                USE(f & 7, (f >> 3) >= 2);
+            }
+            /* DOT3_RGBA : l'alpha prend aussi le produit RGB */
+        }
+        if (needa[u]) {
+            if ((cb & 15) == 7) {
+                for (i = 0; i < 2; i++) {
+                    uint32_t f = (cs >> (5 * i)) & 31;
+                    if (!((cb >> (12 + 2 * i)) & 3)) USE(f & 7, (f >> 3) >= 2);
+                }
+            } else
+                for (i = 0; i < nargs[(cb >> 4) & 15]; i++) {
+                    uint32_t f = (cs >> (15 + 4 * i)) & 15;
+                    if ((cb >> (18 + 2 * i)) & 3) continue;
+                    USE(f & 7, 1);
+                }
+        }
+#undef USE
+    }
+    for (u = 0; u < 8; u++) {
+        uint32_t id = x->st.v[QGPU_SK_UNIT(u) + 1];
+        if (!en[u] || texc[u]) continue;
+        if (id >= QGPU_MAX_TEX || !c->tex[id].used || !qgpu_texture_levels(&c->tex[id])) continue;
+        fprintf(stderr, "UNUSED image %u dessin %u unité %u tex %u (%ux%u cible %u) %s\n", frame, idx, u, id,
+                c->tex[id].level[0][0].w, c->tex[id].level[0][0].h, c->tex[id].target,
+                texa[u] ? "rgb (alpha seul lu)" : "rien");
+    }
+}
+
+/* Avec QGPU_REPLAY_STATE, pour un DRAW_NATIVE indexé : couleur de sommet (code 2,
+   octets non signés) moyenne, min et max sur les sommets cités. */
+static void dump_native_colors(QgpuCore *c, const uint8_t *shmem, const uint32_t *a)
+{
+    uint32_t n = a[1], ib = a[2], io = a[3], it = a[4], na = a[6], ao = a[7], k, j;
+    const uint8_t *ix;
+    for (k = 0; k < na && k < QGPU_NATIVE_MAX_ATTRS; k++) {
+        const uint8_t *d = shmem + ao + k * QGPU_NATIVE_DESC_WORDS * 4;
+        uint32_t code = qgpu_ld32(d), b = qgpu_ld32(d + 4), off = qgpu_ld32(d + 8), pas = qgpu_ld32(d + 12);
+        uint32_t type = qgpu_ld32(d + 16);
+        const uint8_t *base;
+        uint64_t s[4] = { 0, 0, 0, 0 };
+        unsigned mn[4] = { 255, 255, 255, 255 }, mx[4] = { 0, 0, 0, 0 };
+        if (code != 2 || type != 0x1401 || it == 0)
+            continue;
+        base = b == QGPU_BUF_SHMEM ? shmem : (b < QGPU_MAX_BUF && c->buf[b].used ? c->buf[b].data : NULL);
+        ix = ib == QGPU_BUF_SHMEM ? shmem + io : (ib < QGPU_MAX_BUF && c->buf[ib].used ? c->buf[ib].data + io : NULL);
+        if (!base || !ix)
+            return;
+        for (j = 0; j < n; j++) {
+            uint32_t v = it == 1 ? qgpu_ld16(ix + 2 * j) : qgpu_ld32(ix + 4 * j), i;
+            const uint8_t *p = base + off + (size_t)v * pas;
+            for (i = 0; i < 4; i++) {
+                s[i] += p[i];
+                if (p[i] < mn[i]) mn[i] = p[i];
+                if (p[i] > mx[i]) mx[i] = p[i];
+            }
+        }
+        fprintf(stderr, "STATE   couleur de sommet (octets 0..3) moy %u/%u/%u/%u min %u/%u/%u/%u max %u/%u/%u/%u sur %u indices\n",
+                (unsigned)(s[0] / n), (unsigned)(s[1] / n), (unsigned)(s[2] / n), (unsigned)(s[3] / n),
+                mn[0], mn[1], mn[2], mn[3], mx[0], mx[1], mx[2], mx[3], n);
+    }
+}
+
 static void write_present(const uint8_t *vram, const uint32_t *a, const char *prefix,
                           unsigned n, uint32_t frame)
 {
@@ -615,6 +822,17 @@ int main(int argc, char **argv)
             if (getenv("QGPU_REPLAY_SKIPDRAW") &&
                 sscanf(getenv("QGPU_REPLAY_SKIPDRAW"), "%u:%u-%u", &sf, &si, &sj) == 3 && h.frame == sf)
                 skipping = 1;
+            unsigned stf = 0, sti = ~0u;
+            if (getenv("QGPU_REPLAY_STATE") &&
+                sscanf(getenv("QGPU_REPLAY_STATE"), "%u:%u", &stf, &sti) == 2 && h.frame == stf) {
+                if (!skipping) { si = 1; sj = 0; }         /* rien à sauter */
+                skipping = 1;
+            } else
+                sti = ~0u;
+            if (getenv("QGPU_REPLAY_UNUSED") && !skipping) {
+                si = 1; sj = 0;
+                skipping = 1;
+            }
             if (!skipping && getenv("QGPU_REPLAY_OPTIME") && first_frame != ~0u &&
                 h.frame != first_frame) {
                 uint64_t e0 = exec_ns;
@@ -669,6 +887,21 @@ int main(int argc, char **argv)
                     if (!l || q + l > h.ncmd_bytes / 4) break;
                     if (o == QGPU_OP_DRAW_RAW || o == QGPU_OP_DRAW_RAW_BUF ||
                         o == QGPU_OP_DRAW_NATIVE || o == QGPU_OP_DRAW_RAW_SANE) {
+                        if (getenv("QGPU_REPLAY_UNUSED")) {
+                            if (q > seg) st = qgpu_core_execute(&c, h.base + seg * 4, (q - seg) * 4);
+                            seg = q;
+                            check_unused(&c, h.frame, ndraw_frame);
+                        }
+                        if (ndraw_frame == sti) {
+                            if (q > seg) st = qgpu_core_execute(&c, h.base + seg * 4, (q - seg) * 4);
+                            seg = q;
+                            dump_state(&c, h.frame, sti);
+                            if (o == QGPU_OP_DRAW_NATIVE && l == QGPU_LEN_DRAW_NATIVE) {
+                                uint32_t a9[8], k9;
+                                for (k9 = 0; k9 < 8; k9++) a9[k9] = qgpu_ld32(shmem + h.base + (q + 1 + k9) * 4);
+                                dump_native_colors(&c, shmem, a9);
+                            }
+                        }
                         if (ndraw_frame >= si && ndraw_frame <= sj) {
                             if (q > seg) st = qgpu_core_execute(&c, h.base + seg * 4, (q - seg) * 4);
                             seg = q + l;

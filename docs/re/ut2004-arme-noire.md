@@ -1,5 +1,78 @@
 # UT2004 : texture diffuse perdue, reflets conservés
 
+## Démo de test, PC Linux (NVIDIA) : cause et correctif du 07/10/2026
+
+**Reproduit sur le PC.** La « démo de test » est la caméra d'introduction
+d'AS-Convoy que joue la matrice (`tools/matrice/jeux/ut.py`, graine fixe,
+image n identique d'un tour à l'autre). Le vidage `ut-fen` de la nuit
+(images 235-295) ne montre aucune arme ; un vidage de toute la démo (images
+1-450, `POMPPC_GL_DUMP_TRIGGER=@1`, réglages du jeu inchangés, rangé hors dépôt
+sous `bench/ut-arme/demo-complete/`) en montre dans le couloir des images
+~166-195 : présentoirs d'armes (pied + arme) **noirs**, dans le rejeu `gl`
+comme dans la VM. Le même dessin avec `POMPPC_GL_NATIVE=0` donne l'image à
+l'identique (le chemin DRAW_NATIVE est hors de cause).
+
+**Dessin isolé.** Image 176 : balayage `SKIPDRAW`, puis
+`QGPU_REPLAY_STATE=176:<i>` (état tenu par le cœur au dessin i, ajouté au
+rejoueur ce jour) sur les dessins de l'arme : unité 0 = carte de cube 64×64
+(`REFLECTION_MAP`) `REPLACE(TEX)`, unité 1 = peau 2D `RGB REPLACE(PREVIOUS)` /
+`A REPLACE(TEX.a)`, unité 2 = `MODULATE(PRIMARY, PREVIOUS)×2` — exactement la
+signature du 23/09 : le **repli d'UT2004 sans combineur ATI ni NV**
+(`0x461d40..0x461d90`, voir plus bas), qui garde le reflet et jette la couleur
+de la peau.
+
+**Cause.** `patches/qgpu/qgpu-gl.c` (initialisation du backend) n'annonçait
+`QGPU_CAP_COMBINE3` que si l'hôte a `GL_ATI_texture_env_combine3`. Le pilote
+NVIDIA (RTX 4060 Ti, 595.91.07) ne l'a pas — il a
+`GL_NV_texture_env_combine4`. Sur le PC le device annonçait donc
+`caps 0x6dffe` (bit `0x2000` absent), le plugin taisait l'extension ATI, et le
+jeu prenait son repli : le correctif v22 du 27/09, validé sur le M4 (Apple GL a
+l'extension ATI), n'avait jamais agi sur le PC.
+
+**Correctif (hôte).** Le backend GL annonce `QGPU_CAP_COMBINE3` avec l'extension
+ATI **ou** NV_texture_env_combine4 ; sans l'ATI, une unité qui emploie une
+fonction ATI ou une source ZERO/ONE est posée en `COMBINE4_NV`
+(`gl_combine4`, `gl_c4_channel` : `MODULATE_ADD` = a0·a2 + a1·1, `SIGNED` en
+`ADD_SIGNED`, ONE = ZERO sous opérande inverse, fonctions ARB réécrites en
+somme de deux produits). `MODULATE_SUBTRACT` n'a pas d'équivalent exact
+(approché sans la soustraction, dit une fois sur stderr) ; la démo ne l'emploie
+pas (aucun avertissement sur 450 images). Rien ne change sur un hôte qui a
+l'extension ATI (le M4). Pas de changement du plugin.
+
+**Preuves (07/10).**
+- `qgpu_core_test` : `run_v22` passe sur le backend GL de la RTX 4060 Ti
+  (MODULATE_ADD, MODULATE_SIGNED_ADD, échelles 1/2/4, RGB et alpha, ZERO/ONE et
+  inverses) ; MODULATE_SUBTRACT noté « approché » et l'unité 7 « hors contrat
+  sous FIXED4 » (4 unités fixes chez NVIDIA) ; 0 échec.
+- VM quotidienne sur un QEMU reconstruit avec ce backend (`~/src/qemu-ut`,
+  copie de la référence, seuls `qgpu-gl.c` et `qgpu-core.h` changés) : le plugin
+  voit `caps 0x6fffe` ; même vidage de toute la démo
+  (`bench/ut-arme/demo-combine4/`) : présentoirs texturés (métal, reflets),
+  rejeu `gl` ≈ rejeu `soft` (image 176 : écart moyen 0,6, 0,24 % des pixels) ;
+  173 images sur 450 changent, toutes dans les scènes à armes. Planches
+  `bench/ut-arme/avant-apres.png`, `avant-apres2.png` (avant / après / soft).
+- Matrice `ut-fen` sur ce QEMU : image **juste** (rejeu = VM 0,00, référence
+  0,00) ; vitesse non concluante (hôte chargé, 6 autres QEMU).
+- `gltest`, 82 scènes dans l'invité, binaire de référence contre binaire corrigé :
+  mêmes 70 réussites et mêmes 12 scènes en échec (préexistantes sur le PC :
+  bigstrip, clip, dlist, fusion, lit, matbegin, mixte, stencil, tcprobe,
+  texgen, v15, combine3) ; `combine3` passe de 35 échecs (« extension non
+  annoncée ») à 21, tous attendus : MODULATE_SUBTRACT approché et unité 7, hors
+  des 4 unités fixes de NVIDIA.
+
+**Détecteur.** `QGPU_REPLAY_UNUSED=1` signale, à chaque dessin du pipeline fixe,
+une texture liée dont la couleur n'atteint pas le résultat (chaîne des
+combineurs remontée, RGB et alpha séparés). Utile au M4 pour chercher la même
+signature ; il signale aussi des usages légitimes (masques d'alpha d'une passe
+spéculaire), à lire avec `QGPU_REPLAY_STATE`.
+
+**Reste.** Le M4 : l'utilisateur y a vu les armes noires dans la démo le 01/10
+alors que le M4 annonce l'extension ATI ; ce correctif n'y change rien. À
+refaire là-bas : vidage de toute la démo (`@1`, 450 images), rejeu, images
+~166-195, `QGPU_REPLAY_UNUSED` / `QGPU_REPLAY_STATE` sur les présentoirs. Sur
+le PC, le binaire de référence `~/src/qemu` doit être reconstruit avec ce
+`qgpu-gl.c` pour que la VM quotidienne en profite.
+
 ## Cause établie le 27/09/2026
 
 Le miroir du plugin est fidèle aux getters publics OpenGL **et** à l'état compilé
@@ -123,3 +196,10 @@ en refaire un : lanceur « UT2004 trace », puis `touch /tmp/pomppc-dump-on` par
 - Rejoueur : prologue (contexte, surface présentée, textures inconnues), images par
   SURF_READBACK, `QGPU_REPLAY_LIST=<image>` (dessins, combineurs, lumières, matériaux),
   `QGPU_REPLAY_SETKEY`, `QGPU_REPLAY_NOATT`, `QGPU_REPLAY_AMB`, `QGPU_REPLAY_SKIPDRAW`.
+- Rejoueur, 07/10 : `QGPU_REPLAY_STATE=<image>:<i>` (état du cœur juste avant le
+  dessin i : clés hors valeur initiale, unités avec texture, cible, taille,
+  moyenne ARGB et combineurs décodés, lumières, matériau ; couleurs de sommet
+  d'un DRAW_NATIVE indexé), `QGPU_REPLAY_TEXOUT=<dossier>` (avec STATE : niveau
+  de base des textures liées en PPM/PGM), `QGPU_REPLAY_UNUSED=1` (détecteur de
+  texture liée sans effet sur la couleur). Avec `image_min image_max` en
+  arguments, un balayage SKIPDRAW s'arrête à l'image visée.
