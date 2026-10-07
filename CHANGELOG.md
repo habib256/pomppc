@@ -9,6 +9,16 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **`tcg/0010` (code réécrit par l'autre vCPU) : preuve close, PC, 07/10**
+  (`docs/tcg-g4.md` §17.4, §17.5) : `smctest` E × 100 sur la VM quotidienne (10.4.11,
+  session bureau, SMP=2, binaire de référence) : 100 fois l'empreinte `aa4d72ebdba6b6eb`,
+  0 erreur, 189 s ; A-F une fois, empreintes du §17.4. Compteurs de
+  `patches/tcg/essais/0010-smcstat.patch` (porté sur l'arbre du 02/10, relevé périodique
+  horodaté) pendant une partie de DOOM 3 (cellule `d3-fen`, 19 min, ~15 min dans le
+  niveau) : **0 course** au démarrage, au chargement et en jeu (34 protections de page en
+  jeu, 4,2 M `icbi` tous par le chemin court). Les 5 « courses 2 » relevées après la partie
+  sont des bits `VGA` effacés par l'affichage, pas du code (compteur trop large, noté).
+  Aucun changement de code livré.
 - **Mode immédiat sous programme de sommets : coordonnées de texture et couleurs, 07/10**
   (`docs/protocole-v16-programmes.md` §7) : `glTexCoord`/`glMultiTexCoord`/`glColor` entre
   `glBegin` et `glEnd` sous un programme ARB se perdaient (quad entier au texel (0,0), à la

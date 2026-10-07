@@ -1670,6 +1670,16 @@ Non-régression : `tests/run-all.sh` 156 OK, 0 échec ; `--slow` avec le binaire
 `tools/tcg` (`lfsproof`, `fpproof`, `vfpproof`, `vpermproof`) portent sur des helpers que
 0010 ne touche pas.
 
+**VM quotidienne, PC Linux, 07/10/2026** : `disks/tiger.qcow2` (10.4.11), session bureau
+ouverte, SMP=2, binaire de référence `~/src/qemu/build` (`QEMU_FAST=0 ./run_tiger.sh`,
+0010 compris, `x-icbi-sync` et toutes les propriétés du lanceur allumées). Pas de
+compilateur dans cette VM : `smctest` compilé par le job dans une copie du disque de dev
+(`gcc -O2`, 24 252 octets, MD5 `b73c09374f0864f150888529f8623cf3`), passé par ssh, taille et
+MD5 vérifiés dans l'invité. A-F une fois : les six empreintes ci-dessus, 0 erreur (3,6 s).
+Puis `smctest -t E -r 100 1` : **100 tours, 100 fois `E aa4d72ebdba6b6eb`, 0 erreur**,
+189,3 s (1,9 s par tour, 362 s de temps utilisateur sur les deux vCPU), hôte chargé (cinq VM
+du banc d'endurance et une VM de dev d'un autre agent).
+
 Rejouer (disque de dev, SMP=2 ; les propriétés de `run_tiger.sh` dans `CPU_OPTS`) :
 
     QEMU_BIN=<build>/qemu-system-ppc SMP=2 CPU_OPTS=…,x-icbi-sync=on \
@@ -1694,7 +1704,39 @@ sous verrou alors que le test hors verrou ne l'aurait pas posé).
 **Démarrage et Marble Blast ne déclenchent aucune des trois courses** : il faut du code
 réécrit pendant que l'autre vCPU l'exécute ou le traduit (JIT multifil, `smctest`). Ce
 défaut n'explique donc pas, à lui seul, la panique AppleUSBOHCI au démarrage ni le gel de
-DOOM 3 (non mesuré sous DOOM 3, VM quotidienne). `x-icbi-sync` : 14 millions d'`icbi` au
+DOOM 3.
+
+**DOOM 3, VM quotidienne, PC Linux, 07/10/2026.** Le patch d'essai porté sur l'arbre du
+02/10 (`physical_memory_*` au lieu de `cpu_physical_memory_*`, `tb_gen_code(cpu, s)`,
+instantané du code dimensionné à 64 Kio parce que `TARGET_PAGE_SIZE` n'est plus une
+constante dans `translate-all.c`) et complété d'un relevé périodique horodaté
+(`smcstat: t=<epoch> …` toutes les `POMPPC_SMCSTAT_S` secondes, 15 par défaut ; sur
+stderr, comme le reste). Binaire : copie `~/src/qemu-smc` de `~/src/qemu` + le patch,
+lancé par `QEMU_BIN=` sur `disks/tiger.qcow2`, SMP=2, propriétés du lanceur. Partie :
+cellule `d3-fen` de la matrice (`matrice.py -j d3 -m fen --sans-vidage`), `+map
+game/demo_mars_city1`, 5 060 images en 19 min (hôte chargé : ~240 ms/image, pas de mesure de
+vitesse) ; de l'image 1 500 à la fin, 480 dessins par image, stables : le joueur immobile dans
+le niveau, ~15 min. Compteurs cumulés :
+
+| phase | protections de page | blocs sur page neuve | course 1 | course 2 | course 3 | `icbi` (chemin long / qui invalident) |
+|---|---|---|---|---|---|---|
+| démarrage du bureau (jusqu'au lancement, 05:21:33) | 10 706 | 5 353 | **0** | **0** | **0** | 5,5 M (4 / 1) |
+| lancement, chargement, cinématique (→ image 1 500, 05:25:33) | 14 770 | 7 385 | **0** | **0** | **0** | 8,4 M (4 / 1) |
+| en jeu (→ fin de la partie, 05:40:33) | 14 804 | 7 402 | **0** | **0** | **0** | 12,6 M (4 / 1) |
+| bureau après la partie, puis arrêt de l'invité | 15 668 | 7 834 | 0 | 5 | 0 | 13,6 M (9 / 1) |
+
+**Aucune des trois courses pendant une partie de DOOM 3**, chargement compris : 34
+protections de page en 15 min de jeu (le code est traduit au chargement), 4,2 M `icbi`
+pendant le jeu, tous par le chemin court, aucun qui invalide. Les 5 « courses 2 » sont
+venues après la partie (bureau au repos, puis `shutdown`), à des adresses
+`0xb0063000`-`0xb0299000`, et quatre d'entre elles dans un intervalle **sans aucune
+protection de page** : le bit `CODE` n'a donc pas pu être effacé (seul `tlb_protect_code`
+l'efface, et il est compté). Le compteur de la course 2 compte toute page vue propre sous le
+verrou, or `physical_memory_is_clean` dit « propre » dès qu'un des trois bits (`VGA`,
+`CODE`, migration) l'est : c'est l'affichage qui a relevé (et effacé) les bits `VGA` d'une
+page écrite entre les deux tests. Pas une course du code ; dans l'arbre d'origine, la
+conséquence aurait été une mise à jour d'écran manquée sur cette page, pas un bloc périmé.
+Le gel de DOOM 3 (s'il revient) n'est donc pas ce défaut. `x-icbi-sync` : 14 millions d'`icbi` au
 démarrage (le noyau synchronise chaque page de code chargée), presque tous par le chemin
 court. Banc d'`icbi` (`smctest icbi 20000000`, même VM, `x-icbi-sync` éteint → allumé) :
 
@@ -1715,6 +1757,10 @@ sur tout le démarrage et Marble Blast).
   (`probe_access` rend un pointeur écrit plus tard) ; pour PowerPC, `x-icbi-sync` suffit.
 - Chercher la cause des incidents SMP ailleurs (banc d'endurance) ; `smctest` E reste le
   test de non-régression de ce chapitre.
+- **Preuve close le 07/10/2026 (PC)** : `smctest` E × 100 à 0 erreur sur la VM quotidienne
+  (§17.4), 0 course pendant une partie de DOOM 3 (§17.5). Si le compteur de la course 2
+  resert, le restreindre au bit `CODE` (`physical_memory_get_dirty_flag(…,
+  DIRTY_MEMORY_CODE)`) : tel quel, il compte aussi les bits `VGA` effacés par l'affichage.
 
 ---
 

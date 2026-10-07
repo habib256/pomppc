@@ -101,12 +101,6 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   parties par configuration. Preuves : `docs/jit-m4-2026-10-05.md` et
   `docs/mesures/m4-20261006/`.
 
-- [ ] **[TCG] `tcg/0010` : finir la preuve** (`docs/tcg-g4.md` §17, §19.3). Fait : 0010 dans le
-  binaire de référence, `x-icbi-sync` allumé, `smctest` A-F puis E × 100 à 0 erreur sur une
-  copie du disque de dev. **Reste :** `smctest` E sur la VM quotidienne, et les compteurs de
-  `patches/tcg/essais/0010-smcstat.patch` pendant une partie de DOOM 3 (démarrage et Marble
-  Blast : 0 course).
-
 - [ ] **[Architecture] A6, reste L2 — créneau rendu malgré un nettoyage échoué**
   ([docs/architecture.md](docs/architecture.md) §5, relu le 07/10 ; L3 et L4 fermées dans le
   code, leurs épreuves sont dans l'entrée « Validation » ; L5 fermée le 07/10 par le compteur
