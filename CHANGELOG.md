@@ -9,6 +9,16 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Paquet invité `20261007c` (main 97fad0a) et revue de DOOM 3 sous programme ARB, PC, 07/10
+  09:05** : job `gpu` **56 OK, 0 échec** (`vpimm` 44/44, `pixstore`, `matbegin`, `matsonde`) ;
+  `disks/prebuilt` régénéré (ancien en `bench/devloop/prebuilt-20261007b`), paquet
+  `disks/pomppc-guest-20261007c.iso` installé dans la VM quotidienne au repos (sauvegarde
+  `~/pomppc-sauvegarde-20261007c`, invité redémarré) : `caps 0xefffe`, les quatre scènes vertes
+  en session. Tour `bench/matrice/20261007-vpimm2` (`-j d3,ut -m fen`, avec vidage) : images
+  justes (DOOM 3 rejeu = VM 0,04, référence 0,00 encore à valider ; UT2004 0,00 / 0,00), 15 et 3
+  replis, pas de plantage. Vitesse hors norme (232,7 et 167,0 ms/image) sous trois VM
+  d'endurance d'un autre agent : un A/B UT2004 sans vidage sous la même charge (défaut 60,2 puis
+  101,5 ; `POMPPC_GL_VPIMM=0 POMPPC_GL_TCLLOST=0` 56,4) l'attribue à la charge, pas au plugin.
 - **Paquet invité refait après le correctif `glPixelStore` (77f9092), PC, 07/10 08:25**
   (`docs/matrice-jeux.md` §6 quater) : sur une nouvelle copie de la VM de dev, binaire de
   référence reconstruit le matin, job `gpu` **54 OK, 0 échec** (`pixstore` et `vpimm` compris,

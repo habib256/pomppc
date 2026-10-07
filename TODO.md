@@ -161,8 +161,12 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   au rendu d'Apple ; `docs/protocole-v16-programmes.md` §7 et §7 bis : coordonnées, couleur le
   07/10 à l'aube, normale, couleur secondaire, brouillard, génériques `vertex.attrib[k]`
   l'après-midi). Le texte du programme décide désormais seul de ce qui est porté : reste à
-  revoir en jeu Colin McRae et DOOM 3 (chemin ARB), `POMPPC_GL_VPIMM=0` pour l'A/B.
-  Fermeture : jeux inchangés (images, vitesse).
+  revoir en jeu Colin McRae (M4), `POMPPC_GL_VPIMM=0` pour l'A/B. **DOOM 3 revu sur le PC
+  (07/10, paquet `20261007c`, `bench/matrice/20261007-vpimm2`)** : `d3-fen` image juste (rejeu =
+  VM 0,04, référence 0,00, à valider à l'œil comme avant), 15 replis, pas de plantage ; `ut-fen`
+  juste et validée. Vitesse non jugée (trois VM d'endurance sur l'hôte : 232,7 et 167,0 ms/image ;
+  A/B UT2004 sans vidage, même charge : défaut 60,2 puis 101,5, `VPIMM=0 TCLLOST=0` 56,4 — la
+  dispersion suit la charge). Fermeture : Colin McRae au M4, vitesse hôte au repos.
 - [ ] **[Backend GL] `gltest tex14` « λ=2 sans biais »** : défaut du GL de l'hôte macOS (le
   biais d'unité du dessin précédent reste appliqué ; un `glFlush` le corrige mais coûte).
   Décision : ne réappliquer que sur changement, ou passer le biais dans l'échantillonneur.
@@ -285,10 +289,10 @@ un travail de diagnostic dans « Ensuite », pas un blocage.
 |---|---|
 | Protocole / ABI | GL **v22**, transport kext **v19** (`QGPU_ST_NO_MEM`, `QGPU_REG_NOMEM`, `QGPU_CAP_GLSL_PATHS`, `QGPU_CAP_STATE_BLOCK`, `QGPU_CAP_GEOM_HOST` ajoutés sans changer d'ABI) |
 | QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 01/10 au soir (device A4, TCG 0010-0016, Screamer corrigé) ; précédents en `*.avant-tbfp`, `*.avant-a4`. **PC Linux** : `build/` et `build-fast/` (binaire rapide, que prend le lanceur) reconstruits le 07/10 à 07:00 avec le device de la nuit (erreurs par client, combineurs ATI par NV combine4, `vpimm`), série `3d7534b0f2217d54` ; précédents en `*.avant-0707` |
-| Invité quotidien | `tiger.qcow2`, kext v19, plugin `20261001-tout` (gcc-4.0 dans l'invité), SMP=2 (M4) ; **PC** : Tiger 10.4.11, paquet `disks/pomppc-guest-20261007b.iso` (plugin de main 77f9092 : nuit du 06-07/10 et `glPixelStore` lu sur le contexte de GLEngine, chaîne `20261004-d3x` ; précédents dans `~/pomppc-sauvegarde-20261007` et `-20261007b`), kext `caps 0xefffe` ; `POMPPCFsqrt.kext` chargé au démarrage par `/Library/StartupItems/POMPPCFsqrt` (`kHasFsqrt` : la libm prend `fsqrt` ; `sudo sh install.sh --retirer` l'enlève) |
+| Invité quotidien | `tiger.qcow2`, kext v19, plugin `20261001-tout` (gcc-4.0 dans l'invité), SMP=2 (M4) ; **PC** : Tiger 10.4.11, paquet `disks/pomppc-guest-20261007c.iso` (plugin de main 97fad0a : nuit du 06-07/10, `glPixelStore` lu sur le contexte de GLEngine, suites de `vpimm`, « T&L perdu » rendu à GLEngine ; chaîne `20261004-d3x` ; précédents dans `~/pomppc-sauvegarde-20261007`, `-20261007b`, `-20261007c`), kext `caps 0xefffe` ; `POMPPCFsqrt.kext` chargé au démarrage par `/Library/StartupItems/POMPPCFsqrt` (`kHasFsqrt` : la libm prend `fsqrt` ; `sudo sh install.sh --retirer` l'enlève) |
 | TCG | `0001–0004`, `0006–0008`, `0010–0012`, `0014–0016` activés par défaut (`JCBITS=14`) ; `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0`, `RETINLINE=0`, `JCIDX=0`, `ICBISYNC=0`, `MSRNOBQL=0`, `FPNATIVE=0`, `FPNATIVE64=0`, `TBFAST=0` les désactivent ; `0013` (`FPFLAT=1`) éteint |
-| Plugin et device | `POMPPC_GL_STATEBLK`, `POMPPC_GL_RAWSANE`, `POMPPC_GL_NATSHM`, `POMPPC_GL_WLUNIF`, `POMPPC_GL_QFLUSH`, `QGPU_GL_FLUSH`, `POMPPC_GL_VPIMM` (07/10) allumés (`=0` éteint chacun) ; `disks/prebuilt` du 07/10 08:25 (précédents : `bench/devloop/prebuilt-20261004`, `prebuilt-20261007-0709`) |
-| Tests natifs et scripts | M4 (01/10) : **190 OK, 0 échec, 4 ignorés** ; frontend ctest 3/3. PC Linux (07/10 au matin, RTX 4060 Ti, backend GL `FIXED4`, binaires reconstruits) : **240 OK, 0 échec, 5 ignorés** ; job `gpu` : **54 OK, 0 échec** (07/10 08:25, binaires reconstruits, `pixstore` comprise) ; `gltest pixstore` et `vpimm` verts dans la VM quotidienne |
+| Plugin et device | `POMPPC_GL_STATEBLK`, `POMPPC_GL_RAWSANE`, `POMPPC_GL_NATSHM`, `POMPPC_GL_WLUNIF`, `POMPPC_GL_QFLUSH`, `QGPU_GL_FLUSH`, `POMPPC_GL_VPIMM` (07/10) allumés (`=0` éteint chacun) ; `disks/prebuilt` du 07/10 09:05 (précédents : `bench/devloop/prebuilt-20261004`, `prebuilt-20261007-0709`, `prebuilt-20261007b`) |
+| Tests natifs et scripts | M4 (01/10) : **190 OK, 0 échec, 4 ignorés** ; frontend ctest 3/3. PC Linux (07/10 au matin, RTX 4060 Ti, backend GL `FIXED4`, binaires reconstruits) : **240 OK, 0 échec, 5 ignorés** ; job `gpu` : **56 OK, 0 échec** (07/10 09:05, `vpimm` 44 témoins, `pixstore`, `matbegin`, `matsonde`) ; ces quatre scènes vertes dans la VM quotidienne |
 | Travaux clos | Voir `CHANGELOG.md` et `docs/bug-hunt-2026-09-29*.md` |
 | Profils | Plugin : `bench/plugin/ab2-B*/{d3,prey}-fen/mesure/sample.txt`, `bench/a4/depart/LISEZMOI.md` ; TCG : `bench/tcg/` (hors git) |
 
