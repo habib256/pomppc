@@ -125,6 +125,12 @@ typedef struct GlState {
        sur Apple), bornées à QGPU_MAX_UNITS ; au-delà, seulement sous programme */
     int fixed_units;
     bool fixed_warned;
+    /* v22 sur un hôte sans GL_ATI_texture_env_combine3 (NVIDIA, 07/10/2026) :
+       les fonctions ATI et les sources ZERO/ONE passent par
+       GL_NV_texture_env_combine4 (gl_combine4). `has_ati3` : l'extension ATI
+       est là, rien à traduire. */
+    bool has_ati3, has_nv4;
+    bool c4_warned;
     GLint max_env[2], max_local[2];   /* limites de l'hôte, [VP, FP] */
     /* program.env est un état du contexte GL HÔTE, unique, que se partagent
        tous les contextes invités : on note à qui appartient ce qui y est. */
@@ -1769,7 +1775,13 @@ static bool gl_init(QgpuCore *c)
         goto fail;
     }
     g->renderer = (const char *)glGetString(GL_RENDERER);
-    if (gl_has_ext(g, "GL_ATI_texture_env_combine3")) {
+    /* v22 : l'extension ATI, ou à défaut NV_texture_env_combine4 qui exprime
+       MODULATE_ADD, MODULATE_SIGNED_ADD et les sources ZERO/ONE exactement
+       (gl_combine4). Sans ce bit, UT2004 prend son repli REPLACE(PREVIOUS) et
+       perd la peau des armes (docs/re/ut2004-arme-noire.md, 07/10). */
+    g->has_ati3 = gl_has_ext(g, "GL_ATI_texture_env_combine3");
+    g->has_nv4 = gl_has_ext(g, "GL_NV_texture_env_combine4");
+    if (g->has_ati3 || g->has_nv4) {
         c->caps |= QGPU_CAP_COMBINE3;
     }
     if (g->has_query) {
@@ -1894,6 +1906,15 @@ fail:
     c->caps &= ~(QGPU_CAP_COMBINE3 | QGPU_CAP_OCCLUSION | QGPU_CAP_GL14 |
                  QGPU_CAP_PROGRAMS | QGPU_CAP_GLSL | QGPU_CAP_FIXED4);
     return false;
+}
+
+/* Pour les tests (tests/qgpu_core_test.c) : vrai si ce cœur tourne sur le
+   backend GL et que v22 y passe par NV_texture_env_combine4, où
+   MODULATE_SUBTRACT, SUBTRACT et DOT3 mêlés aux fonctions ATI sont approchés. */
+bool qgpu_gl_combine4(const QgpuCore *c)
+{
+    const GlState *g = c->be && !strcmp(c->be->name, "gl") ? c->be_priv : NULL;
+    return g && !g->has_ati3 && g->has_nv4;
 }
 
 static void gl_fini(QgpuCore *c)
@@ -2436,6 +2457,146 @@ static bool gl_tex_sync(QgpuCore *c, QgpuTexture *t)
     return gl_err_ok();
 }
 
+/* GL_NV_texture_env_combine4 (07/10/2026) : sur un hôte sans
+ * GL_ATI_texture_env_combine3, une unité qui emploie une fonction ATI ou une
+ * source ZERO/ONE est posée en COMBINE4_NV, où chaque canal vaut
+ * Arg0·Arg1 + Arg2·Arg3 (ADD) ou la même chose − 0,5 (ADD_SIGNED), avec ZERO
+ * pour source ; ONE est ZERO sous l'opérande inverse. Traduction exacte :
+ *   REPLACE a0          → a0·1 + 0·0
+ *   MODULATE a0 a1      → a0·a1 + 0·0
+ *   ADD / ADD_SIGNED    → a0·1 + a1·1 (fonction ADD / ADD_SIGNED)
+ *   INTERPOLATE a0 a1 a2 → a0·a2 + a1·(inverse de a2)
+ *   MODULATE_ADD        → a0·a2 + a1·1
+ *   MODULATE_SIGNED_ADD → a0·a2 + a1·1, ADD_SIGNED
+ * SUBTRACT, MODULATE_SUBTRACT (sauf a1 nul) et DOT3 ne s'y expriment pas :
+ * approchés (soustraction omise), dit une fois sur stderr. Les échelles
+ * RGB_SCALE / ALPHA_SCALE s'appliquent comme en GL_COMBINE. */
+#define QGPU_GL_COMBINE4_NV        0x8503
+#define QGPU_GL_SOURCE3_RGB_NV     0x8583
+#define QGPU_GL_SOURCE3_ALPHA_NV   0x858B
+#define QGPU_GL_OPERAND3_RGB_NV    0x8593
+#define QGPU_GL_OPERAND3_ALPHA_NV  0x859B
+
+typedef struct { GLenum src, op; } GlC4Arg;
+
+/* Un canal (alpha = 0 : RGB). `a` : les trois arguments déjà résolus
+   (source GL, opérande GL) ; les littéraux y sont (GL_ZERO, opérande). */
+static bool gl_c4_channel(unsigned fn, int alpha, const GlC4Arg *a, GlC4Arg *o, GLenum *func)
+{
+    const GLenum dir = alpha ? GL_SRC_ALPHA : GL_SRC_COLOR;
+    const GLenum inv = alpha ? GL_ONE_MINUS_SRC_ALPHA : GL_ONE_MINUS_SRC_COLOR;
+    const GlC4Arg zero = { GL_ZERO, dir }, one = { GL_ZERO, inv };
+    GlC4Arg ia2 = a[2];
+    bool exact = true;
+    /* inverse d'un argument : SRC_x ↔ ONE_MINUS_SRC_x */
+    switch (ia2.op) {
+    case GL_SRC_COLOR:           ia2.op = GL_ONE_MINUS_SRC_COLOR; break;
+    case GL_ONE_MINUS_SRC_COLOR: ia2.op = GL_SRC_COLOR; break;
+    case GL_SRC_ALPHA:           ia2.op = GL_ONE_MINUS_SRC_ALPHA; break;
+    default:                     ia2.op = GL_SRC_ALPHA; break;
+    }
+    *func = GL_ADD;
+    switch (fn) {
+    case QGPU_CB_REPLACE:
+        o[0] = a[0]; o[1] = one; o[2] = zero; o[3] = zero;
+        break;
+    case QGPU_CB_MODULATE:
+        o[0] = a[0]; o[1] = a[1]; o[2] = zero; o[3] = zero;
+        break;
+    case QGPU_CB_ADD_SIGNED:
+        *func = GL_ADD_SIGNED;
+        /* fall through */
+    case QGPU_CB_ADD:
+        o[0] = a[0]; o[1] = one; o[2] = a[1]; o[3] = one;
+        break;
+    case QGPU_CB_INTERPOLATE:
+        o[0] = a[0]; o[1] = a[2]; o[2] = a[1]; o[3] = ia2;
+        break;
+    case QGPU_CB_MODULATE_SIGNED_ADD:
+        *func = GL_ADD_SIGNED;
+        /* fall through */
+    case QGPU_CB_MODULATE_ADD:
+        o[0] = a[0]; o[1] = a[2]; o[2] = a[1]; o[3] = one;
+        break;
+    case QGPU_CB_MODULATE_SUBTRACT:
+        /* a0·a2 − a1 : exact seulement quand a1 est nul */
+        exact = a[1].src == GL_ZERO && a[1].op == dir;
+        o[0] = a[0]; o[1] = a[2]; o[2] = zero; o[3] = zero;
+        break;
+    case QGPU_CB_SUBTRACT:
+        exact = a[1].src == GL_ZERO && a[1].op == dir;
+        o[0] = a[0]; o[1] = one; o[2] = zero; o[3] = zero;
+        break;
+    default:                            /* DOT3 : sans équivalent */
+        exact = false;
+        o[0] = a[0]; o[1] = a[1]; o[2] = zero; o[3] = zero;
+        break;
+    }
+    return exact;
+}
+
+static void gl_combine4(QgpuCore *c, const QgpuState *st, int u, const GLenum *srcs)
+{
+    static const GLenum ops_rgb[4] = {
+        GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+    };
+    static const GLenum ops_a[2] = { GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA };
+    GlState *g = c->be_priv;
+    uint32_t cb = st->v[QGPU_SK_COMBINE(u)];
+    uint32_t src = st->v[QGPU_SK_COMBINE_SRC(u)];
+    GlC4Arg ar[3], aa[3], orr[4], oa[4];
+    GLenum frgb, fa;
+    bool exact;
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        uint32_t f = (src >> (5 * i)) & 31, h = (src >> (15 + 4 * i)) & 15;
+        unsigned lr = (cb >> (12 + 2 * i)) & 3, la = (cb >> (18 + 2 * i)) & 3;
+        GLenum opr = ops_rgb[(f >> 3) & 3], opa = ops_a[(h >> 3) & 1];
+        /* littéral : valeur 0 ou 1, puis l'opérande (inverse ou non) */
+        if (lr) {
+            bool v = (lr == QGPU_CL_ONE) != (opr == GL_ONE_MINUS_SRC_COLOR ||
+                                             opr == GL_ONE_MINUS_SRC_ALPHA);
+            ar[i].src = GL_ZERO;
+            ar[i].op = v ? GL_ONE_MINUS_SRC_COLOR : GL_SRC_COLOR;
+        } else {
+            ar[i].src = srcs[f & 7];
+            ar[i].op = opr;
+        }
+        if (la) {
+            bool v = (la == QGPU_CL_ONE) != (opa == GL_ONE_MINUS_SRC_ALPHA);
+            aa[i].src = GL_ZERO;
+            aa[i].op = v ? GL_ONE_MINUS_SRC_ALPHA : GL_SRC_ALPHA;
+        } else {
+            aa[i].src = srcs[h & 7];
+            aa[i].op = opa;
+        }
+    }
+    exact = gl_c4_channel(cb & 15, 0, ar, orr, &frgb);
+    exact = gl_c4_channel((cb >> 4) & 15, 1, aa, oa, &fa) && exact;
+    if (!exact && !g->c4_warned) {
+        g->c4_warned = true;
+        fprintf(stderr, "qgpu: combineur 0x%x (unité %d) sans équivalent en "
+                "NV_texture_env_combine4 : approché (soustraction ou DOT3 omis)\n",
+                (unsigned)cb, u);
+    }
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, QGPU_GL_COMBINE4_NV);
+    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, frgb);
+    glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, fa);
+    glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, (GLfloat)(1u << ((cb >> 8) & 3)));
+    glTexEnvf(GL_TEXTURE_ENV, GL_ALPHA_SCALE, (GLfloat)(1u << ((cb >> 10) & 3)));
+    for (i = 0; i < 4; i++) {
+        GLenum sr = i < 3 ? GL_SOURCE0_RGB + i : QGPU_GL_SOURCE3_RGB_NV;
+        GLenum sa = i < 3 ? GL_SOURCE0_ALPHA + i : QGPU_GL_SOURCE3_ALPHA_NV;
+        GLenum pr = i < 3 ? GL_OPERAND0_RGB + i : QGPU_GL_OPERAND3_RGB_NV;
+        GLenum pa = i < 3 ? GL_OPERAND0_ALPHA + i : QGPU_GL_OPERAND3_ALPHA_NV;
+        glTexEnvi(GL_TEXTURE_ENV, sr, orr[i].src);
+        glTexEnvi(GL_TEXTURE_ENV, pr, orr[i].op);
+        glTexEnvi(GL_TEXTURE_ENV, sa, oa[i].src);
+        glTexEnvi(GL_TEXTURE_ENV, pa, oa[i].op);
+    }
+}
+
 /* GL_COMBINE (v5) : état empaqueté → paramètres d'environnement natifs. */
 static void gl_combine(QgpuCore *c, const QgpuState *st, int u)
 {
@@ -2460,6 +2621,12 @@ static void gl_combine(QgpuCore *c, const QgpuState *st, int u)
     uint32_t src = st->v[QGPU_SK_COMBINE_SRC(u)];
     int i;
 
+    if (!gs->has_ati3 && gs->has_nv4 &&
+        ((cb & 15) >= QGPU_CB_MODULATE_ADD || ((cb >> 4) & 15) >= QGPU_CB_MODULATE_ADD ||
+         (cb >> 12))) {
+        gl_combine4(c, st, u, srcs);
+        return;
+    }
     glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, fn[cb & 15]);
     glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, fn[(cb >> 4) & 15]);
     glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, (GLfloat)(1u << ((cb >> 8) & 3)));
@@ -3791,6 +3958,12 @@ const QgpuBackend qgpu_backend_gl = {
 #else /* ni CGL ni EGL : stub */
 
 static bool gl_stub_init(QgpuCore *c)
+{
+    (void)c;
+    return false;
+}
+
+bool qgpu_gl_combine4(const QgpuCore *c)
 {
     (void)c;
     return false;
