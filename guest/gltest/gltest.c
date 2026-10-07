@@ -51,6 +51,10 @@
  * rect rectfp : textures rectangle, pipeline fixe (et copie d'écran) et
  * programme de fragments (27/09, Colin McRae).
  *
+ * pixstore : glDrawPixels, glBitmap, glReadPixels (couleur, profondeur) sous
+ * ALIGNMENT 1/2/4/8, ROW_LENGTH, SKIP_*, LSB_FIRST ; pixsonde : relevé de
+ * l'état de glPixelStorei par diff de vidages (07/10, docs/re/pixelstore.md).
+ *
  * vpimm : glBegin/glEnd sous programme de sommets ARB — vertex.texcoord[0],
  * vertex.texcoord[1] (unité sans texture), vertex.color — et tableaux
  * désactivés aux pointeurs périmés (07/10) ; référence : le rendu d'Apple.
@@ -64,7 +68,7 @@
  * alpharep arbfp arbvp bigstrip blendc caps clip comb combine3 combprobe cube cubeprobe depth
  * depthrt dlist drawpack entry fill fogz forkdraw fusion game gl15
  * gouraud lightprobe lit logicop matbegin matprobe mix mixte mtxprobe
- * occl offset polymode prims probe2 ptprobe qprobe r4 rawprim readpack
+ * occl offset pixsonde pixstore polymode prims probe2 ptprobe qprobe r4 rawprim readpack
  * sepspec spin state stencil stencilprobe stipple t3dprobe tclprobe
  * tcprobe tex tex13 tex14 tex3d texcache texcross texdelmid texfmt
  * texgen texlod texpack texpersp texprobe texup tgprobe tri v14probe v15
@@ -1008,7 +1012,8 @@ int main(int argc, char **argv)
            qui jouait « gltest <scène> » sans taille (PC, 07/10) : Apple seul y échoue
            sur les mêmes témoins, hors du tampon (docs/backend-gl-unites-fixes.md). */
         static const char *grandes[] = { "tex13", "tex14", "gl15", "texlod",
-            "bigstrip", "clip", "dlist", "fusion", "lit", "mixte", "tcprobe", "texgen", "v15", 0 };
+            "bigstrip", "clip", "dlist", "fusion", "lit", "mixte", "tcprobe", "texgen", "v15",
+            "pixstore", 0 };
         int g;
         for (g = 0; grandes[g]; g++)
             if (!strcmp(argv[1], grandes[g])) { W = 256; H = 256; }
@@ -1025,7 +1030,7 @@ int main(int argc, char **argv)
     attrs[k++] = kCGLPFADepthSize; attrs[k++] = 16;
     /* tampon de stencil de 8 bits ; la scène stencil n'a pas de sens sans lui
        (sans GLTEST_STENCIL, Apple seul y échouait aussi : faux rouge du 07/10) */
-    if (getenv("GLTEST_STENCIL") || !strcmp(scene, "stencil")) {
+    if (getenv("GLTEST_STENCIL") || !strcmp(scene, "stencil") || !strcmp(scene, "pixstore")) {
         attrs[k++] = kCGLPFAStencilSize; attrs[k++] = 8;
     }
     if (getenv("GLTEST_RENDERER")) {
@@ -7768,6 +7773,356 @@ int main(int argc, char **argv)
                badpx, rw * rh, badguard);
         check_cond("readpack : garde de 16 octets intacte", badguard == 0);
         check_cond("readpack : 13x5 pixels relus = couleur d'effacement", badpx == 0);
+    } else if (!strcmp(scene, "pixstore")) {
+        /* État de glPixelStorei sur les chemins hôte du plugin (07/10) :
+           glDrawPixels, glBitmap, glReadPixels (couleur et profondeur) avec
+           ALIGNMENT 1/2/4/8, ROW_LENGTH, SKIP_ROWS/SKIP_PIXELS et LSB_FIRST
+           non nuls. Le plugin lisait ces mots sur le contexte du GLDriver au
+           lieu de celui de GLEngine (docs/re/pixelstore.md) : image oblique,
+           lecture ou écriture hors du tampon de l'application. Les zones de
+           remplissage de la source sont MAGENTA (un octet de remplissage lu
+           se voit), celles de la destination de glReadPixels à 0xA5 (un
+           octet écrit hors du rectangle se voit). Référence : le rendu
+           d'Apple (gltest diff) et les valeurs attendues ci-dessous. */
+        static const unsigned char rc8[8][3] = {
+            { 255, 0, 0 }, { 0, 255, 0 }, { 0, 0, 255 }, { 255, 255, 0 },
+            { 0, 255, 255 }, { 255, 128, 0 }, { 128, 0, 255 }, { 255, 255, 255 }
+        };
+        static unsigned char src[4096], dst[4096];
+        static float fsrc[64], fdst[128];
+        int al, i2, r, cc, bad, X, Y, stride;
+        glClearColor(0, 0, 0, 1);
+        glClearDepth(1.0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glDisable(GL_DEPTH_TEST);
+        /* (A) GL_RGB 13×5, ALIGNMENT 1, 2, 4, 8 */
+        for (i2 = 0; i2 < 4; i2++) {
+            al = 1 << i2;
+            stride = (13 * 3 + al - 1) / al * al;
+            memset(src, 0, sizeof(src));
+            for (r = 0; r < 5; r++)
+                for (cc = 0; cc < stride; cc++)
+                    src[r * stride + cc] = (cc % 3 == 1) ? 0 : 255;  /* magenta */
+            for (r = 0; r < 5; r++)
+                for (cc = 0; cc < 13; cc++)
+                    memcpy(src + r * stride + cc * 3, rc8[r], 3);
+            X = 8 + i2 * 40; Y = 40;
+            glPixelStorei(GL_UNPACK_ALIGNMENT, al);
+            glRasterPos2f((float)X, (float)Y);
+            glDrawPixels(13, 5, GL_RGB, GL_UNSIGNED_BYTE, src);
+        }
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        /* (B) GL_RGBA 6×4 dans une image 10 de large : ROW_LENGTH 10,
+           SKIP_ROWS 2, SKIP_PIXELS 3 */
+        for (i2 = 0; i2 < 10 * 6; i2++) {
+            src[i2 * 4] = 255; src[i2 * 4 + 1] = 0; src[i2 * 4 + 2] = 255; src[i2 * 4 + 3] = 255;
+        }
+        for (r = 0; r < 4; r++)
+            for (cc = 0; cc < 6; cc++) {
+                memcpy(src + ((2 + r) * 10 + 3 + cc) * 4, rc8[r + 4], 3);
+                src[((2 + r) * 10 + 3 + cc) * 4 + 3] = 255;
+            }
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 10);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 2);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 3);
+        glRasterPos2f(8, 80);
+        glDrawPixels(6, 4, GL_RGBA, GL_UNSIGNED_BYTE, src);
+        /* (C) GL_RGB 5×3, ALIGNMENT 2, ROW_LENGTH 7, SKIP_ROWS 1, SKIP_PIXELS 2
+           (pas = 22 octets) */
+        memset(src, 0, sizeof(src));
+        for (i2 = 0; i2 < 22 * 4; i2++)
+            src[i2] = (i2 % 22 < 21 && (i2 % 22) % 3 == 1) ? 0 : 255;
+        for (r = 0; r < 3; r++)
+            for (cc = 0; cc < 5; cc++)
+                memcpy(src + (1 + r) * 22 + (2 + cc) * 3, rc8[r + 1], 3);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 2);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 7);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 1);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 2);
+        glRasterPos2f(60, 80);
+        glDrawPixels(5, 3, GL_RGB, GL_UNSIGNED_BYTE, src);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        /* (D) glBitmap : couleur raster rouge (glColor vert APRÈS
+           glRasterPos), 9×6 en ALIGNMENT 1 puis 8 ; 40×4 dans une image de
+           48 de large, SKIP_ROWS 1, SKIP_PIXELS 3, LSB_FIRST */
+        for (i2 = 0; i2 < 2; i2++) {
+            al = i2 ? 8 : 1;
+            stride = i2 ? 8 : 2;
+            memset(src, 0xFF, sizeof(src));     /* remplissage : bits allumés */
+            for (r = 0; r < 6; r++) {
+                unsigned char b0 = 0, b1 = 0x7F;       /* bits 9..15 : hors image */
+                for (cc = 0; cc < 9; cc++)
+                    if ((cc + r) % 3 == 0) {
+                        if (cc < 8) b0 |= (unsigned char)(0x80 >> cc);
+                        else b1 |= 0x80;
+                    }
+                src[r * stride] = b0;
+                src[r * stride + 1] = b1;
+            }
+            glPixelStorei(GL_UNPACK_ALIGNMENT, al);
+            glColor3f(1, 0, 0);
+            glRasterPos2f((float)(120 + i2 * 20), 120);
+            glColor3f(0, 1, 0);
+            glBitmap(9, 6, 0, 0, 0, 0, src);
+        }
+        memset(src, 0xFF, sizeof(src));
+        for (r = 0; r < 4; r++)
+            for (cc = 0; cc < 40; cc++) {
+                int bi = 3 + cc;
+                unsigned char *byte = src + (1 + r) * 8 + bi / 8;
+                if ((cc + 2 * r) % 5 < 2) *byte |= (unsigned char)(1 << (bi & 7));
+                else *byte &= (unsigned char)~(1 << (bi & 7));
+            }
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 48);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 1);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 3);
+        glPixelStorei(GL_UNPACK_LSB_FIRST, 1);
+        glColor3f(0, 0, 1);
+        glRasterPos2f(120, 80);
+        glColor3f(1, 1, 1);
+        glBitmap(40, 4, 0, 0, 0, 0, src);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        glPixelStorei(GL_UNPACK_LSB_FIRST, 0);
+        /* (F) profondeur : glDrawPixels FLOAT 7×3, ALIGNMENT 8, ROW_LENGTH 9
+           (36 octets, arrondis à 40 : 10 flottants par ligne), SKIP_ROWS 1,
+           SKIP_PIXELS 1 ; relue plus bas par PACK_* */
+        for (i2 = 0; i2 < 64; i2++) fsrc[i2] = 0.95f;
+        for (r = 0; r < 3; r++)
+            for (cc = 0; cc < 7; cc++)
+                fsrc[(1 + r) * 10 + 1 + cc] = 0.1f + 0.2f * r + 0.05f * cc;
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 8);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 9);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 1);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 1);
+        glDepthMask(GL_TRUE);
+        glEnable(GL_DEPTH_TEST);            /* test coupé = profondeur non écrite */
+        glDepthFunc(GL_ALWAYS);
+        glRasterPos2f(200, 200);
+        glDrawPixels(7, 3, GL_DEPTH_COMPONENT, GL_FLOAT, fsrc);
+        glDisable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        glFinish();
+        /* témoins des dessins (y depuis le haut : la ligne r d'une image posée
+           en (X, Y) est à Y − 1 − r) */
+        for (i2 = 0; i2 < 4; i2++)
+            for (r = 0; r < 5; r++) {
+                char lbl[64];
+                unsigned long c = ((unsigned long)rc8[r][0] << 16) |
+                                  ((unsigned long)rc8[r][1] << 8) | rc8[r][2];
+                sprintf(lbl, "A align %d ligne %d gauche", 1 << i2, r);
+                check(lbl, 8 + i2 * 40, 40 - 1 - r, c);
+                sprintf(lbl, "A align %d ligne %d droite", 1 << i2, r);
+                check(lbl, 8 + i2 * 40 + 12, 40 - 1 - r, c);
+            }
+        check("A rien après la ligne", 8 + 13, 39, 0);
+        for (r = 0; r < 4; r++) {
+            char lbl[64];
+            unsigned long c = ((unsigned long)rc8[r + 4][0] << 16) |
+                              ((unsigned long)rc8[r + 4][1] << 8) | rc8[r + 4][2];
+            sprintf(lbl, "B ligne %d gauche", r);
+            check(lbl, 8, 80 - 1 - r, c);
+            sprintf(lbl, "B ligne %d droite", r);
+            check(lbl, 13, 80 - 1 - r, c);
+        }
+        for (r = 0; r < 3; r++) {
+            char lbl[64];
+            unsigned long c = ((unsigned long)rc8[r + 1][0] << 16) |
+                              ((unsigned long)rc8[r + 1][1] << 8) | rc8[r + 1][2];
+            sprintf(lbl, "C ligne %d gauche", r);
+            check(lbl, 60, 80 - 1 - r, c);
+            sprintf(lbl, "C ligne %d droite", r);
+            check(lbl, 64, 80 - 1 - r, c);
+        }
+        bad = 0;
+        for (i2 = 0; i2 < 2; i2++)
+            for (r = 0; r < 6; r++)
+                for (cc = 0; cc < 11; cc++) {
+                    unsigned long want = (cc < 9 && (cc + r) % 3 == 0) ? 0xFF0000 : 0;
+                    if (px(120 + i2 * 20 + cc, 120 - 1 - r) != want) bad++;
+                }
+        printf("bitmap 9x6 : %d pixel(s) faux\n", bad);
+        check_cond("D bitmap 9x6 align 1 et 8, couleur raster", bad == 0);
+        bad = 0;
+        for (r = 0; r < 4; r++)
+            for (cc = 0; cc < 42; cc++) {
+                unsigned long want = (cc < 40 && (cc + 2 * r) % 5 < 2) ? 0x0000FF : 0;
+                if (px(120 + cc, 80 - 1 - r) != want) bad++;
+            }
+        printf("bitmap 40x4 : %d pixel(s) faux\n", bad);
+        check_cond("D bitmap 40x4 ROW_LENGTH SKIP LSB_FIRST", bad == 0);
+        check("D bitmap 40x4 premier pixel", 120, 79, 0x0000FF);
+        /* (E) glReadPixels de l'image (A) align 1 : GL_RGB 13×5 en
+           PACK_ALIGNMENT 1, 2, 8, puis GL_RGBA 6×4 en ROW_LENGTH 17,
+           SKIP_ROWS 1, SKIP_PIXELS 2 */
+        for (i2 = 0; i2 < 3; i2++) {
+            int pa = i2 == 0 ? 1 : i2 == 1 ? 2 : 8, badg = 0;
+            stride = (39 + pa - 1) / pa * pa;
+            memset(dst, 0xA5, sizeof(dst));
+            glPixelStorei(GL_PACK_ALIGNMENT, pa);
+            glReadPixels(8, H - 40, 13, 5, GL_RGB, GL_UNSIGNED_BYTE, dst);
+            bad = 0;
+            for (r = 0; r < 5; r++)
+                for (cc = 0; cc < 13; cc++)
+                    if (memcmp(dst + r * stride + cc * 3, rc8[r], 3)) bad++;
+            for (r = 0; r < 5; r++)
+                for (cc = 39; cc < stride; cc++)
+                    if (dst[r * stride + cc] != 0xA5) badg++;
+            for (cc = 4 * stride + 39; cc < 4 * stride + 39 + 64; cc++)
+                if (dst[cc] != 0xA5) badg++;
+            {
+                char lbl[80];
+                printf("readpixels RGB align %d : %d pixel(s) faux, %d octet(s) hors image écrits\n",
+                       pa, bad, badg);
+                sprintf(lbl, "E ReadPixels RGB align %d", pa);
+                check_cond(lbl, bad == 0 && badg == 0);
+            }
+        }
+        glPixelStorei(GL_PACK_ALIGNMENT, 4);
+        {
+            int badg = 0;
+            memset(dst, 0xA5, sizeof(dst));
+            glPixelStorei(GL_PACK_ROW_LENGTH, 17);
+            glPixelStorei(GL_PACK_SKIP_ROWS, 1);
+            glPixelStorei(GL_PACK_SKIP_PIXELS, 2);
+            glReadPixels(8, H - 40, 6, 4, GL_RGBA, GL_UNSIGNED_BYTE, dst);
+            bad = 0;
+            for (i2 = 0; i2 < 17 * 6; i2++) {
+                int rr = i2 / 17 - 1, c2 = i2 % 17 - 2;
+                if (rr >= 0 && rr < 4 && c2 >= 0 && c2 < 6) {
+                    if (memcmp(dst + i2 * 4, rc8[rr], 3) || dst[i2 * 4 + 3] != 255) bad++;
+                } else if (dst[i2 * 4] != 0xA5 || dst[i2 * 4 + 1] != 0xA5 ||
+                           dst[i2 * 4 + 2] != 0xA5 || dst[i2 * 4 + 3] != 0xA5) badg++;
+            }
+            printf("readpixels RGBA ROW_LENGTH/SKIP : %d pixel(s) faux, %d hors image écrit(s)\n",
+                   bad, badg);
+            check_cond("E ReadPixels RGBA ROW_LENGTH 17 SKIP 1/2", bad == 0 && badg == 0);
+        }
+        /* profondeur relue : PACK_ROW_LENGTH 11, SKIP_ROWS 1, SKIP_PIXELS 2 */
+        {
+            int badg = 0;
+            for (i2 = 0; i2 < 128; i2++) fdst[i2] = -1.0f;
+            glPixelStorei(GL_PACK_ROW_LENGTH, 11);
+            glPixelStorei(GL_PACK_SKIP_ROWS, 1);
+            glPixelStorei(GL_PACK_SKIP_PIXELS, 2);
+            glReadPixels(200, H - 200, 7, 3, GL_DEPTH_COMPONENT, GL_FLOAT, fdst);
+            bad = 0;
+            for (i2 = 0; i2 < 11 * 5; i2++) {
+                int rr = i2 / 11 - 1, c2 = i2 % 11 - 2;
+                if (rr >= 0 && rr < 3 && c2 >= 0 && c2 < 7) {
+                    float want = 0.1f + 0.2f * rr + 0.05f * c2, d = fdst[i2] - want;
+                    if (d < -0.002f || d > 0.002f) {
+                        if (bad < 4) printf("  profondeur (%d,%d) = %g, attendu %g\n", rr, c2,
+                                            fdst[i2], want);
+                        bad++;
+                    }
+                } else if (fdst[i2] != -1.0f) badg++;
+            }
+            printf("profondeur : %d valeur(s) fausse(s), %d hors image écrite(s)\n", bad, badg);
+            check_cond("F DrawPixels/ReadPixels profondeur ROW_LENGTH SKIP ALIGNMENT 8",
+                       bad == 0 && badg == 0);
+        }
+        /* (G) stencil (tampon de 8 bits demandé pour cette scène) :
+           glDrawPixels STENCIL_INDEX 5×3 en ALIGNMENT 1, ROW_LENGTH 6,
+           SKIP_ROWS 1, SKIP_PIXELS 1 ; relu en PACK_ALIGNMENT 2, ROW_LENGTH 7
+           (pas de 8 octets), SKIP_ROWS 1, SKIP_PIXELS 1 */
+        {
+            GLint sbits = 0;
+            int badg = 0;
+            glGetIntegerv(GL_STENCIL_BITS, &sbits);
+            if (sbits >= 8) {
+                memset(src, 0xEE, 64);
+                for (r = 0; r < 3; r++)
+                    for (cc = 0; cc < 5; cc++)
+                        src[(1 + r) * 6 + 1 + cc] = (unsigned char)((r * 5 + cc + 1) * 7);
+                glClearStencil(0);
+                glClear(GL_STENCIL_BUFFER_BIT);
+                glStencilMask(0xFF);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 6);
+                glPixelStorei(GL_UNPACK_SKIP_ROWS, 1);
+                glPixelStorei(GL_UNPACK_SKIP_PIXELS, 1);
+                glRasterPos2f(220, 150);
+                glDrawPixels(5, 3, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, src);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+                glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+                glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+                memset(dst, 0xA5, 64);
+                glPixelStorei(GL_PACK_ALIGNMENT, 2);
+                glPixelStorei(GL_PACK_ROW_LENGTH, 7);
+                glPixelStorei(GL_PACK_SKIP_ROWS, 1);
+                glPixelStorei(GL_PACK_SKIP_PIXELS, 1);
+                glReadPixels(220, H - 150, 5, 3, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, dst);
+                bad = 0;
+                for (i2 = 0; i2 < 64; i2++) {
+                    int rr = i2 / 8 - 1, c2 = i2 % 8 - 1;
+                    if (rr >= 0 && rr < 3 && c2 >= 0 && c2 < 5) {
+                        if (dst[i2] != (unsigned char)((rr * 5 + c2 + 1) * 7)) bad++;
+                    } else if (dst[i2] != 0xA5) badg++;
+                }
+                printf("stencil : %d valeur(s) fausse(s), %d octet(s) hors image écrit(s)\n",
+                       bad, badg);
+                check_cond("G DrawPixels/ReadPixels stencil ROW_LENGTH SKIP ALIGNMENT 1/2",
+                           bad == 0 && badg == 0);
+                glPixelStorei(GL_PACK_ALIGNMENT, 4);
+            } else
+                printf("stencil : pas de tampon de stencil (%d bits), partie G sautée\n",
+                       (int)sbits);
+        }
+        glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+        glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+    } else if (!strcmp(scene, "pixsonde")) {
+        /* RELEVÉ de l'état de glPixelStorei (07/10, docs/re/pixelstore.md) :
+           un réglage par étape, puis un glDrawPixels, un glBitmap, un
+           glReadPixels et un glClear. Avec POMPPC_GLTRACE=<dossier> et
+           POMPPC_GLTRACE_STATE=1, sous le rendu d'Apple (POMPPC_GL_DISABLE=1),
+           chaque glClear vide le bloc d'état : `tools/re/diffstate.py diff
+           <dossier>` montre le mot que chaque étape a bougé. */
+        static const struct { GLenum e; GLint v; const char *n; } st[] = {
+            { 0, 0, "défaut" },
+            { GL_UNPACK_ALIGNMENT, 1, "UNPACK_ALIGNMENT 1" },
+            { GL_UNPACK_ALIGNMENT, 8, "UNPACK_ALIGNMENT 8" },
+            { GL_UNPACK_ROW_LENGTH, 17, "UNPACK_ROW_LENGTH 17" },
+            { GL_UNPACK_SKIP_ROWS, 3, "UNPACK_SKIP_ROWS 3" },
+            { GL_UNPACK_SKIP_PIXELS, 5, "UNPACK_SKIP_PIXELS 5" },
+            { GL_UNPACK_SWAP_BYTES, 1, "UNPACK_SWAP_BYTES 1" },
+            { GL_UNPACK_LSB_FIRST, 1, "UNPACK_LSB_FIRST 1" },
+            { GL_UNPACK_IMAGE_HEIGHT, 11, "UNPACK_IMAGE_HEIGHT 11" },
+            { GL_UNPACK_SKIP_IMAGES, 2, "UNPACK_SKIP_IMAGES 2" },
+            { GL_PACK_ALIGNMENT, 2, "PACK_ALIGNMENT 2" },
+            { GL_PACK_ALIGNMENT, 8, "PACK_ALIGNMENT 8" },
+            { GL_PACK_ROW_LENGTH, 19, "PACK_ROW_LENGTH 19" },
+            { GL_PACK_SKIP_ROWS, 6, "PACK_SKIP_ROWS 6" },
+            { GL_PACK_SKIP_PIXELS, 9, "PACK_SKIP_PIXELS 9" },
+            { GL_PACK_SWAP_BYTES, 1, "PACK_SWAP_BYTES 1" },
+            { GL_PACK_LSB_FIRST, 1, "PACK_LSB_FIRST 1" },
+            { GL_PACK_IMAGE_HEIGHT, 13, "PACK_IMAGE_HEIGHT 13" },
+            { GL_PACK_SKIP_IMAGES, 4, "PACK_SKIP_IMAGES 4" },
+        };
+        static unsigned char big[64 * 64 * 4], rb[64 * 64 * 4];
+        int i2;
+        for (i2 = 0; i2 < (int)(sizeof(st) / sizeof(st[0])); i2++) {
+            if (st[i2].e)
+                glPixelStorei(st[i2].e, st[i2].v);
+            printf("étape %d : %s\n", i2, st[i2].n);
+            glRasterPos2f(8, 8);
+            glDrawPixels(4, 4, GL_RGBA, GL_UNSIGNED_BYTE, big);
+            glBitmap(32, 2, 0, 0, 0, 0, big);
+            glReadPixels(0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, rb);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glFinish();
+        }
     } else if (!strcmp(scene, "drawpack")) {
         /* P2 — glDrawPixels d'une image GL_RGB de largeur IMPAIRE avec
            GL_UNPACK_ALIGNMENT = 1 (39 octets par ligne) ; le plugin codait

@@ -240,12 +240,32 @@ static void buf_raw_invalidate_from(unsigned long from);
 /* ───────────────────── dispositions relevées (Tiger 10.4.6) ─────────────────────
  * Contexte du GLDriver (argument r3 de toutes les procédures) : */
 #define CTX_GLSTATE      0x0c     /* état GL de GLEngine */
-/* glPixelStorei_Exec : UNPACK_* vivent sur gctx, pas dans gls(). */
-#define CTX_UNPACK_ROW_LENGTH  0x31cc
-#define CTX_UNPACK_SKIP_ROWS   0x31d4
-#define CTX_UNPACK_SKIP_PIXELS 0x31d8
-#define CTX_UNPACK_ALIGNMENT   0x31e0
-#define CTX_UNPACK_LSB_FIRST   0x31e5
+/* État de glPixelStorei : il vit dans le contexte de GLEngine (gctx = GS −
+ * 0x360, gctx_of()), PAS dans le contexte du GLDriver (p->ctx, argument r3 des
+ * procédures). Jusqu'au 07/10 le plugin lisait ces offsets sur p->ctx : ~10 Kio
+ * au-delà d'un bloc de 0x800 octets (malloc_size), dans le tas — 0 la plupart du
+ * temps, 4 par hasard le 22/09, et des valeurs folles dans la session bureau
+ * (pixels + 0x5d410000 → plantage de try_draw_pixels). Relevé le 07/10 sur
+ * 10.4.11 (scène gltest pixsonde, un réglage par étape, mot qui bouge dans
+ * gctx+0x3180..0x3240, plugin et rendu d'Apple identiques) : les offsets
+ * UNPACK du 20/09 étaient justes, seule la base était fausse. GLEngine est le
+ * même fichier en 10.4.6 et 10.4.11 (docs/re/pixelstore.md). */
+#define GC_PACK_ROW_LENGTH     0x31b0   /* u32, défaut 0 */
+#define GC_PACK_IMAGE_HEIGHT   0x31b4
+#define GC_PACK_SKIP_ROWS      0x31b8
+#define GC_PACK_SKIP_PIXELS    0x31bc
+#define GC_PACK_SKIP_IMAGES    0x31c0
+#define GC_PACK_ALIGNMENT      0x31c4   /* u32, défaut 4 */
+#define GC_PACK_SWAP_BYTES     0x31c8   /* u8 */
+#define GC_PACK_LSB_FIRST      0x31c9   /* u8 */
+#define GC_UNPACK_ROW_LENGTH   0x31cc
+#define GC_UNPACK_IMAGE_HEIGHT 0x31d0
+#define GC_UNPACK_SKIP_ROWS    0x31d4
+#define GC_UNPACK_SKIP_PIXELS  0x31d8
+#define GC_UNPACK_SKIP_IMAGES  0x31dc
+#define GC_UNPACK_ALIGNMENT    0x31e0
+#define GC_UNPACK_SWAP_BYTES   0x31e4   /* u8 */
+#define GC_UNPACK_LSB_FIRST    0x31e5   /* u8 */
 #define CTX_DEPTH_SCALE  0x14     /* float : valeur de profondeur 1.0 */
 #define CTX_WIDTH        0x1c     /* drawable */
 #define CTX_HEIGHT       0x20
@@ -1061,6 +1081,7 @@ static struct {
     unsigned long   n_copytex;          /* CopyTexSubImage sans relecture G4 */
     unsigned long   n_pixread;          /* ReadPixels d'un rectangle, pas du FB */
     unsigned long   n_pixdraw;          /* DrawPixels / CopyPixels / Bitmap sans repli Apple */
+    unsigned long   n_pixstore_bad;     /* état glPixelStorei incohérent (pixstore_read) : 0 attendu */
     int             hostbuf;            /* v14 : DRAW_RAW_BUF, maillages hors BAR0 */
     int             v15;                /* v15 : SURF/DEPTH xfer 16 bits par l'hôte */
     int             units;              /* v17 : unités de texture que le device tient
@@ -2078,6 +2099,9 @@ static void on_exit_stats(void)
                 G.n_dropped_fault, G.n_texblack,     /* I9 (relecture du 24/09) */
                 G.async ? "async" : "sync", G.n_waits, G.t_wait * 1000,
                 G.n_qfull, G.n_syncfall, G.n_foreign);
+    if (getenv("POMPPC_GL_STATS"))      /* 07/10 : vérification de la table GC_*PACK_* */
+        fprintf(stderr, "POMPPC GL: %lu incoherent glPixelStorei state(s) (software)\n",
+                G.n_pixstore_bad);
     if (getenv("POMPPC_GL_STATS")) {    /* 30/09 : doorbells synchrones (vCPU gelé, BQL tenu) */
         int k;
         fprintf(stderr, "POMPPC GL: synchronous doorbells:");
@@ -16225,29 +16249,84 @@ static int try_copy_tex(PCtx *p, unsigned long *a)
     return 1;
 }
 
+/* État de glPixelStorei, lu dans le contexte de GLEngine (GC_PACK_* /
+ * GC_UNPACK_*). Jusqu'au 07/10 ces mots étaient lus sur le contexte du
+ * GLDriver (mauvaise base, voir les définitions) : d'où l'alignement « 4 quand
+ * l'application a posé 1 » du 22/09, les zéros du 07/10 et le plantage de
+ * try_draw_pixels dans la session bureau (pixels + 0x5d410000). Avec la bonne
+ * base, ce sont les valeurs que l'application a posées (relevé gltest
+ * pixsonde, docs/re/pixelstore.md) ; GLEngine refuse lui-même par
+ * GL_INVALID_VALUE une longueur ou un décalage négatif et un alignement autre
+ * que 1, 2, 4, 8.
+ *
+ * pixstore_read() n'est plus une garde mais une VÉRIFICATION DE COHÉRENCE :
+ * hors de ce que GLEngine accepte (alignement hors {1,2,4,8}, longueur ou
+ * décalage ≥ 2^24, négatif vu non signé), le dessin part en logiciel, le
+ * compteur G.n_pixstore_bad (POMPPC_GL_STATS) monte et une note le dit (8 au
+ * plus). Cela ne devrait plus jamais arriver : si cela arrive, la table
+ * d'offsets est fausse pour ce GLEngine. */
+typedef struct {
+    unsigned long row_len, skip_rows, skip_px, align;
+    unsigned char swap, lsb;
+} PixStore;
+
+static int pixstore_read(PCtx *p, int pack, PixStore *s, const char *who)
+{
+    static int said;
+    const unsigned char *g = gctx_of(p);
+    if (!g)
+        return 0;
+    if (pack) {
+        s->row_len = GLD_U32(g, GC_PACK_ROW_LENGTH);
+        s->skip_rows = GLD_U32(g, GC_PACK_SKIP_ROWS);
+        s->skip_px = GLD_U32(g, GC_PACK_SKIP_PIXELS);
+        s->align = GLD_U32(g, GC_PACK_ALIGNMENT);
+        s->swap = GLD_U8(g, GC_PACK_SWAP_BYTES);
+        s->lsb = GLD_U8(g, GC_PACK_LSB_FIRST);
+    } else {
+        s->row_len = GLD_U32(g, GC_UNPACK_ROW_LENGTH);
+        s->skip_rows = GLD_U32(g, GC_UNPACK_SKIP_ROWS);
+        s->skip_px = GLD_U32(g, GC_UNPACK_SKIP_PIXELS);
+        s->align = GLD_U32(g, GC_UNPACK_ALIGNMENT);
+        s->swap = GLD_U8(g, GC_UNPACK_SWAP_BYTES);
+        s->lsb = GLD_U8(g, GC_UNPACK_LSB_FIRST);
+    }
+    if ((s->align == 1 || s->align == 2 || s->align == 4 || s->align == 8) &&
+        s->row_len < 0x1000000UL && s->skip_rows < 0x1000000UL &&
+        s->skip_px < 0x1000000UL && s->swap <= 1 && s->lsb <= 1)
+        return 1;
+    G.n_pixstore_bad++;
+    if (said < 8) {
+        said++;
+        gl_note("glPixelStorei incohérent (%s, %s) : ROW_LENGTH %lx SKIP_ROWS %lx "
+                "SKIP_PIXELS %lx ALIGNMENT %lx SWAP %x LSB %x : logiciel "
+                "(table GC_%sPACK_* fausse pour ce GLEngine ?)\n",
+                who, pack ? "PACK" : "UNPACK", s->row_len, s->skip_rows, s->skip_px,
+                s->align, s->swap, s->lsb, pack ? "" : "UN");
+    }
+    return 0;
+}
+
+/* Pas d'une ligne de l'application, en octets, pour `px` éléments de `bpp`
+ * octets (bpp 0 : bitmap, un bit par élément) : ROW_LENGTH s'il est posé,
+ * arrondi à l'alignement. */
+static unsigned long pixstore_stride(const PixStore *s, unsigned long w, unsigned long bpp)
+{
+    unsigned long px = s->row_len ? s->row_len : w;
+    unsigned long b = bpp ? px * bpp : (px + 7UL) / 8UL;
+    return (b + s->align - 1UL) & ~(s->align - 1UL);
+}
+
 /* ReadPixels (ctx, x, y, w, h, format, type, pixels) : 8 arguments, tous
  * dans r3–r10. Rectangle : RGBA/RGB octet, profondeur FLOAT, stencil octet.
  *
- * P1 — GARDE INTÉRIMAIRE SUR L'EMPAQUETAGE.
- *
- * On fabrique ici le pas de destination alors que c'est l'APPLICATION qui le
- * fixe, par GL_PACK_ALIGNMENT / GL_PACK_ROW_LENGTH / GL_PACK_SKIP_*. Les
- * offsets CTX_PACK_* ne sont PAS relevés (seuls les CTX_UNPACK_* le sont,
- * :76-80) : tant qu'ils ne le seront pas, on ne peut pas les lire, et il est
- * hors de question de les deviner.
- *
- * En attendant, on n'accepte que les cas où NOTRE pas est le PLUS PETIT
- * possible, c'est-à-dire le pas serré : w·bpp multiple de 4. Le pas réel de
- * l'application est alors ≥ au nôtre quel que soit son alignement (1, 2, 4
- * ou 8), donc on n'écrit JAMAIS au-delà de son tampon. C'était le bogue :
- * GL_RGB avec align 1 (SDL, captures d'écran) débordait de 3·(h−1) octets,
- * et le stencil, écrit serré alors que le défaut d'OpenGL est align 4,
- * décalait l'image sans que l'application ait rien réglé.
- *
- * CE QUI RESTE EXPOSÉ, et qui demande les offsets CTX_PACK_* : une image
- * OBLIQUE (pas fausse en mémoire, mais décalée) si l'application a posé
- * PACK_ALIGNMENT = 8 avec une largeur impaire en RGBA, ou un PACK_ROW_LENGTH
- * plus petit que w. Aucun de ces cas ne sort du tampon.
+ * P1 — LE PAS DE DESTINATION EST CELUI DE L'APPLICATION : GL_PACK_ALIGNMENT,
+ * GL_PACK_ROW_LENGTH et GL_PACK_SKIP_ROWS/PIXELS (pixstore_read, relevés le
+ * 07/10). Avant, faute d'offsets, on écrivait serré et seulement quand le pas
+ * serré était multiple de 4 (GL_RGB align 1 de SDL débordait de 3·(h−1)
+ * octets du tampon de l'application, et le stencil était décalé) ; ces
+ * restrictions sont levées. Restent au logiciel : ROW_LENGTH < w (lignes qui
+ * se recouvrent) et PACK_SWAP_BYTES sur des flottants.
  */
 static int try_read_pixels(PCtx *p, unsigned long *a)
 {
@@ -16256,6 +16335,7 @@ static int try_read_pixels(PCtx *p, unsigned long *a)
     unsigned char *pixels = (unsigned char *)a[7];
     unsigned long hy, off, *c, row, col, bpp, rowb, pix;
     const unsigned long *src;
+    PixStore ps;
 
     if (!G.pixops || !pixels)
         return 0;
@@ -16267,13 +16347,17 @@ static int try_read_pixels(PCtx *p, unsigned long *a)
         (unsigned long)x + (unsigned long)w > p->sw ||
         (unsigned long)y + (unsigned long)h > p->sh)
         return 0;
+    if (!pixstore_read(p, 1, &ps, "ReadPixels"))
+        return 0;
+    if (ps.row_len && ps.row_len < (unsigned long)w)
+        return 0;
     hy = p->sh - (unsigned long)y - (unsigned long)h;
     if (type == 0x1406 && fmt == 0x1902) {       /* GL_DEPTH_COMPONENT / FLOAT */
         const float *s;
-        float *dst;
-        if (p->depth == SW_NEWER)
+        if (p->depth == SW_NEWER || ps.swap)
             return 0;
-        rowb = ((unsigned long)w * 4UL + 3UL) & ~3UL;
+        rowb = pixstore_stride(&ps, (unsigned long)w, 4);
+        pixels += ps.skip_rows * rowb + ps.skip_px * 4;
         if (!arena_alloc((unsigned long)w * (unsigned long)h * 4, &off))
             return 0;
         c = reserve(p, QGPU_LEN_SURF_XFER);
@@ -16288,8 +16372,7 @@ static int try_read_pixels(PCtx *p, unsigned long *a)
         for (row = 0; row < (unsigned long)h; row++) {
             s = (const float *)(G.q.win + off +
                                 ((unsigned long)h - 1 - row) * (unsigned long)w * 4);
-            dst = (float *)(pixels + row * rowb);
-            memcpy(dst, s, (unsigned long)w * 4);
+            memcpy(pixels + row * rowb, s, (unsigned long)w * 4);
         }
         return 1;
     }
@@ -16298,8 +16381,8 @@ static int try_read_pixels(PCtx *p, unsigned long *a)
         unsigned char *d;
         if (!p->stencil || p->depth == SW_NEWER)
             return 0;
-        if ((unsigned long)w % 4UL)              /* P1 : bpp = 1 */
-            return 0;
+        rowb = pixstore_stride(&ps, (unsigned long)w, 1);
+        pixels += ps.skip_rows * rowb + ps.skip_px;
         if (!arena_alloc((unsigned long)w * (unsigned long)h * 4, &off))
             return 0;
         c = reserve(p, QGPU_LEN_SURF_XFER);
@@ -16314,7 +16397,7 @@ static int try_read_pixels(PCtx *p, unsigned long *a)
         for (row = 0; row < (unsigned long)h; row++) {
             s = (const unsigned long *)(G.q.win + off +
                                         ((unsigned long)h - 1 - row) * (unsigned long)w * 4);
-            d = pixels + row * (unsigned long)w;
+            d = pixels + row * rowb;
             for (col = 0; col < (unsigned long)w; col++)
                 d[col] = (unsigned char)s[col];
         }
@@ -16325,9 +16408,8 @@ static int try_read_pixels(PCtx *p, unsigned long *a)
     if (type != 0x1401 || (fmt != 0x1908 && fmt != 0x1907))
         return 0;
     bpp = (fmt == 0x1907) ? 3UL : 4UL;
-    if (((unsigned long)w * bpp) % 4UL)          /* P1 : GL_RGB, align 1 */
-        return 0;
-    rowb = (unsigned long)w * bpp;               /* = le pas serré, par la garde */
+    rowb = pixstore_stride(&ps, (unsigned long)w, bpp);
+    pixels += ps.skip_rows * rowb + ps.skip_px * bpp;
     if (!arena_alloc((unsigned long)w * (unsigned long)h * 4, &off))
         return 0;
     c = reserve(p, QGPU_LEN_SURF_XFER);
@@ -16558,47 +16640,14 @@ static int copy_ds_rect(PCtx *p, unsigned long sx, unsigned long sy,
 /* DrawPixels DEPTH_COMPONENT FLOAT or STENCIL_INDEX UNSIGNED_BYTE.
  * DEPTH_UPLOAD writes with GL_ALWAYS: only when the app's depth test is
  * off or ALWAYS, otherwise Apple. Same idea for stencil. */
-/* Les mots CTX_UNPACK_* ne sont PAS prouvés : relevés sur 10.4.6, ils ont
- * déjà été pris en défaut (bug hunt du 22/09 : ALIGNMENT y vaut 4 quand
- * l'application a posé 1) ; sur la VM 10.4.11 du PC les quatre mots lisent 0
- * à chaque appel (64 appels relevés le 07/10, ALIGNMENT compris, dont le
- * défaut GL est 4) : ce ne sont pas l'état de glPixelStorei. Et trois fois de
- * suite, dans la session de l'utilisateur (relais POMPPCGuiRunner), ils ne
- * valaient PAS 0 : try_draw_pixels en a tiré une adresse SOURCE hors de tout
- * tampon (pixels + 0x5d410000) et le memcpy a planté le processus
- * (EXC_BAD_ACCESS, scènes `mixte` et `v15` en 256×256, 07/10 —
- * docs/backend-gl-unites-fixes.md, « Scènes gltest sur le PC »). Tant que les
- * offsets ne sont pas relevés, une valeur autre que celle par défaut ne
- * guide AUCUNE lecture : le dessin part en logiciel, qui est exact (GLEngine
- * lit, lui, le vrai état). Le cas courant (ROW_LENGTH 0, SKIP 0) ne change pas. */
-static int unpack_trusted(PCtx *p, unsigned long w, const char *who)
-{
-    static int said;
-    unsigned long rl = GLD_U32(p->ctx, CTX_UNPACK_ROW_LENGTH);
-    unsigned long sr = GLD_U32(p->ctx, CTX_UNPACK_SKIP_ROWS);
-    unsigned long sp = GLD_U32(p->ctx, CTX_UNPACK_SKIP_PIXELS);
-    unsigned long al = GLD_U32(p->ctx, CTX_UNPACK_ALIGNMENT);
-    /* ALIGNMENT : 0 (ce qu'on lit en vrai sur 10.4.11, défaut d'OpenGL = 4,
-       donc ce mot n'est pas l'alignement), 1, 2 ou 4 donnent le même pas pour
-       une ligne serrée multiple de 4 ; 8 ou une autre valeur l'allongeraient. */
-    if ((rl == 0 || rl == w) && sr == 0 && sp == 0 &&
-        (al == 0 || al == 1 || al == 2 || al == 4))
-        return 1;
-    if (said < 8) {
-        said++;
-        gl_note("unpack non sûr (%s) : ROW_LENGTH %lx SKIP_ROWS %lx SKIP_PIXELS %lx "
-                "ALIGNMENT %lx, w %lu : logiciel\n", who, rl, sr, sp, al, w);
-    }
-    return 0;
-}
-
 static int try_draw_ds(PCtx *p, unsigned long *a)
 {
     const unsigned char *vtx = (const unsigned char *)a[1];
     unsigned long w = a[2], h = a[3], fmt = a[4], type = a[5];
     const unsigned char *pixels = (const unsigned char *)a[6];
-    unsigned long dx, dy, dhy, off, *c, x, y, align, row_px, skip_rows, skip_px, rowb;
+    unsigned long dx, dy, dhy, off, *c, x, y, row_px, skip_rows, skip_px, rowb;
     unsigned char *g;
+    PixStore ps;
 
     if (fmt != 0x1902 && fmt != 0x1901)
         return 0;
@@ -16612,7 +16661,9 @@ static int try_draw_ds(PCtx *p, unsigned long *a)
         return 1;
     if (!pixels || !vtx)
         return 0;
-    if (!unpack_trusted(p, w, "DrawPixels profondeur/stencil"))
+    if (!pixstore_read(p, 0, &ps, "DrawPixels profondeur/stencil"))
+        return 0;
+    if (fmt == 0x1902 && ps.swap)       /* flottants à retourner : rare, logiciel */
         return 0;
     if (!accel_ok(p) || !ensure_surface(p) || p->surf < 0)
         return 0;
@@ -16638,30 +16689,18 @@ static int try_draw_ds(PCtx *p, unsigned long *a)
         if (p->depth == SW_NEWER)
             sync_to_host(p, 0, 1);
     }
-    /* Finding 8 (relecture du 29/09) — POLITIQUE P2 : CTX_UNPACK_ALIGNMENT
-       n'est pas le mot que glPixelStorei écrit (mesuré le 22/09, voir
-       try_draw_pixels). Seules les lignes SERRÉES multiples de 4 ont le même
-       pas quel que soit l'alignement réel : profondeur (4 octets par pixel)
-       toujours, stencil (1 octet) si w est multiple de 4. Le reste part en
-       logiciel : exact, et plus de lecture au-delà du tampon. */
-    if (fmt == 0x1901 && (w & 3UL))
-        return 0;
+    /* Finding 8 (29/09) et P2 : le pas de la source est celui de
+       l'application (ALIGNMENT, ROW_LENGTH, SKIP_*), lu depuis le 07/10 à la
+       bonne base (pixstore_read) ; la restriction aux lignes serrées
+       multiples de 4, qui couvrait la mauvaise base, est levée. */
     if (!pix_dest(p, vtx, w, h, &dx, &dy))
         return 0;
-    align = GLD_U32(p->ctx, CTX_UNPACK_ALIGNMENT);
-    if (align != 1 && align != 2 && align != 4 && align != 8)
-        align = 4;
-    row_px = GLD_U32(p->ctx, CTX_UNPACK_ROW_LENGTH);
-    if (row_px == 0)
-        row_px = w;
+    row_px = ps.row_len ? ps.row_len : w;
     if (row_px < w)                     /* l'appli décrit moins large que le rectangle */
         return 0;
-    skip_rows = GLD_U32(p->ctx, CTX_UNPACK_SKIP_ROWS);
-    skip_px = GLD_U32(p->ctx, CTX_UNPACK_SKIP_PIXELS);
-    if (fmt == 0x1902)
-        rowb = (row_px * 4UL + align - 1UL) & ~(align - 1UL);
-    else
-        rowb = (row_px + align - 1UL) & ~(align - 1UL);
+    skip_rows = ps.skip_rows;
+    skip_px = ps.skip_px;
+    rowb = pixstore_stride(&ps, w, fmt == 0x1902 ? 4UL : 1UL);
     if (rowb == 0)
         return 0;
     if (!arena_alloc(w * h * 4, &off))
@@ -16669,7 +16708,7 @@ static int try_draw_ds(PCtx *p, unsigned long *a)
     dhy = p->sh - dy - h;
     if (fmt == 0x1902) {
         for (y = 0; y < h; y++) {
-            const float *s = (const float *)(pixels + (skip_rows + (h - 1 - y)) * rowb) + skip_px;
+            const unsigned char *s = pixels + (skip_rows + (h - 1 - y)) * rowb + skip_px * 4;
             memcpy(G.q.win + off + y * w * 4, s, w * 4);
         }
         c = reserve(p, QGPU_LEN_SURF_XFER);
@@ -16704,8 +16743,9 @@ static int try_draw_pixels(PCtx *p, unsigned long *a)
     const unsigned char *vtx = (const unsigned char *)a[1];
     unsigned long w = a[2], h = a[3], fmt = a[4], type = a[5];
     const unsigned char *pixels = (const unsigned char *)a[6];
-    unsigned long bpp, rowb, srcrow, align, row_px, skip_rows, skip_px, off, *c, y;
+    unsigned long bpp, rowb, srcrow, row_px, skip_rows, skip_px, off, *c, y;
     unsigned char *dst;
+    PixStore ps;
 
     if (try_draw_ds(p, a))
         return 1;
@@ -16717,42 +16757,26 @@ static int try_draw_pixels(PCtx *p, unsigned long *a)
         return 0;
     if (type != 0x1401 || (fmt != 0x1908 && fmt != 0x1907))
         return 0;
-    if (!unpack_trusted(p, w, "DrawPixels couleur"))
+    if (!pixstore_read(p, 0, &ps, "DrawPixels couleur"))
         return 0;
     if (p->color == SW_NEWER || !accel_ok(p) || !ensure_surface(p))
         return 0;
     if (!pix_scratch(p, w, h))
         return 0;
     bpp = (fmt == 0x1907) ? 3UL : 4UL;
-    /* MESURÉ en VM le 22/09/2026 (scène drawpack, sonde gl_note) : l'application
-       pose GL_UNPACK_ALIGNMENT = 1 et ce mot vaut encore 4 — les offsets
-       CTX_UNPACK_* ne sont pas (ou plus) ceux que _glPixelStorei_Exec écrit pour
-       DrawPixels, et lire 40 octets par ligne de 39 brouille l'image (38/0/0/24/1
-       pixels par couleur). Tant qu'ils ne sont pas relevés (diffstate sur un
-       glPixelStorei, comme pour CTX_PACK_*), le chemin hôte ne prend que les
-       images dont la ligne SERRÉE est déjà multiple de 4 : quel que soit
-       l'alignement réel (1, 2, 4 ou 8), le pas est alors le même. Les autres
-       (GL_RGB de largeur non multiple de 4) partent en logiciel : exact. */
-    if ((w * bpp) & 3UL)
-        return 0;
-    /* P2 — LA SOURCE A LE PAS DE L'APPLICATION, PAS LE NÔTRE. On lisait le
-       tampon de l'application avec un pas aligné sur 4 codé en dur, alors que
-       GL_UNPACK_ALIGNMENT / ROW_LENGTH / SKIP_* le fixent — try_draw_ds et
-       try_bitmap les lisent depuis toujours, pas ce chemin-ci. Résultat :
-       image oblique, et lecture au-delà du tampon source dès que l'application
-       pose align 1 en GL_RGB (le cas de SDL). Le pas de DESTINATION, lui, est
-       à nous : c'est l'arène. */
-    align = GLD_U32(p->ctx, CTX_UNPACK_ALIGNMENT);
-    if (align != 1 && align != 2 && align != 4 && align != 8)
-        align = 4;
-    row_px = GLD_U32(p->ctx, CTX_UNPACK_ROW_LENGTH);
-    if (row_px == 0)
-        row_px = w;
+    /* P2 — LA SOURCE A LE PAS DE L'APPLICATION, PAS LE NÔTRE :
+       GL_UNPACK_ALIGNMENT / ROW_LENGTH / SKIP_* le fixent (pixstore_read).
+       Le 22/09 (scène drawpack) l'alignement lu valait 4 quand l'application
+       avait posé 1 : la base était fausse (contexte du GLDriver au lieu de
+       celui de GLEngine), corrigé le 07/10 ; la restriction aux lignes
+       serrées multiples de 4 qui couvrait ce défaut est levée. Le pas de
+       DESTINATION, lui, est à nous : c'est l'arène. */
+    row_px = ps.row_len ? ps.row_len : w;
     if (row_px < w)
         return 0;
-    skip_rows = GLD_U32(p->ctx, CTX_UNPACK_SKIP_ROWS);
-    skip_px = GLD_U32(p->ctx, CTX_UNPACK_SKIP_PIXELS);
-    srcrow = (row_px * bpp + align - 1UL) & ~(align - 1UL);
+    skip_rows = ps.skip_rows;
+    skip_px = ps.skip_px;
+    srcrow = pixstore_stride(&ps, w, bpp);
     if (srcrow == 0)
         return 0;
     rowb = (w * bpp + 3UL) & ~3UL;      /* destination : l'arène */
@@ -16890,9 +16914,11 @@ static int try_bitmap(PCtx *p, unsigned long *a)
     unsigned long w = a[2], h = a[3];
     const unsigned char *bits = (const unsigned char *)a[6];
     unsigned char vtx2[GLD_VERTEX_SIZE];
-    unsigned long align, row_px, skip_rows, skip_px, rowb, off, x, y, *c;
+    unsigned long row_px, skip_rows, skip_px, rowb, off, x, y, *c;
     unsigned char *dst, lsb, cr, cg, cb, ca;
+    const unsigned char *gc;
     float xorig, yorig;
+    PixStore ps;
 
     if (!G.pixops || !G.v10)
         return 0;
@@ -16902,31 +16928,23 @@ static int try_bitmap(PCtx *p, unsigned long *a)
         return 0;
     if (!bits)
         return 1;
-    /* Finding 8 (relecture du 29/09) — POLITIQUE P2 (voir try_draw_pixels) :
-       l'alignement lu à CTX_UNPACK_ALIGNMENT peut valoir 4 quand l'appli a
-       posé 1 (police GLUT : glyphes de 8 px, un octet par ligne → glyphes
-       brouillés et 3·(h−1) octets lus au-delà). Seule une ligne serrée
-       multiple de 4 octets a le même pas quel que soit l'alignement réel ;
-       le reste part en logiciel. */
-    if (((w + 7UL) / 8UL) & 3UL)
+    /* Finding 8 (29/09) : l'alignement lu valait 4 quand l'appli avait posé
+       1 (police GLUT : glyphes de 8 px, un octet par ligne) — mauvaise base,
+       corrigée le 07/10 (pixstore_read) ; la restriction aux lignes de 4
+       octets est levée. */
+    if (!pixstore_read(p, 0, &ps, "Bitmap"))
         return 0;
-    if (!unpack_trusted(p, w, "Bitmap"))
-        return 0;
+    gc = gctx_of(p);
     if (p->color == SW_NEWER || !accel_ok(p) || !ensure_surface(p))
         return 0;
     if (!pix_scratch(p, w, h))
         return 0;
 
-    align = GLD_U32(p->ctx, CTX_UNPACK_ALIGNMENT);
-    if (align != 1 && align != 2 && align != 4 && align != 8)
-        align = 4;
-    row_px = GLD_U32(p->ctx, CTX_UNPACK_ROW_LENGTH);
-    if (row_px == 0)
-        row_px = w;
-    skip_rows = GLD_U32(p->ctx, CTX_UNPACK_SKIP_ROWS);
-    skip_px = GLD_U32(p->ctx, CTX_UNPACK_SKIP_PIXELS);
-    lsb = GLD_U8(p->ctx, CTX_UNPACK_LSB_FIRST);
-    rowb = ((row_px + 7UL) / 8UL + align - 1UL) & ~(align - 1UL);
+    row_px = ps.row_len ? ps.row_len : w;
+    skip_rows = ps.skip_rows;
+    skip_px = ps.skip_px;
+    lsb = ps.lsb;
+    rowb = pixstore_stride(&ps, w, 0);
     if (rowb == 0)
         return 0;
 
@@ -16938,10 +16956,10 @@ static int try_bitmap(PCtx *p, unsigned long *a)
     /* Color is captured at RasterPos into the vertex at gctx+0x4858−0x200,
      * not into the Bitmap scratch at 0x4854. Current glColor is gctx+0x2a0. */
     {
-        unsigned long rp = GLD_U32(p->ctx, 0x4858);
+        unsigned long rp = GLD_U32(gc, 0x4858);
         const float *rgba = (rp >= 0x200)
             ? (const float *)((const unsigned char *)(rp - 0x200) + V_COLOR)
-            : (const float *)((const unsigned char *)p->ctx + 0x2a0);
+            : (const float *)(gc + 0x2a0);
         cr = (unsigned char)to_u8(rgba[0]);
         cg = (unsigned char)to_u8(rgba[1]);
         cb = (unsigned char)to_u8(rgba[2]);
