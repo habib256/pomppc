@@ -9,6 +9,21 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **`glMaterial` entre `glBegin` et `glEnd` : le « T&L perdu » de GLEngine honoré, 07/10**
+  (`docs/re/opengl-1.4.md` §3.3) : `_glMaterial*_Exec` appelle `_gleForceToSoftwareTCL`, qui
+  pose `0x10000000` dans le mot `+0x0c` du bloc de changements puis appelle le dispatch ; le
+  plugin rendait toujours « T&L gardé », GLEngine relançait notre `BeginPrimitiveBuffer` avec
+  son curseur dans son propre tampon (primitive perdue) et l'objet matériau de `gctx` ne bougeait
+  plus (primitives suivantes à l'ancien matériau, même après un `glMaterial` hors `glBegin`).
+  Le dispatch qui porte ce bit rend désormais le pilote sans T&L, au pipeline fixe seulement
+  (pas sous programme : `_gleBuildInterpolateFunc` → `exit`) : la primitive est éclairée par
+  GLEngine et rastérisée par le chemin hérité ; le dispatch suivant rend le T&L.
+  `POMPPC_GL_TCLLOST=0` pour l'A/B. Nouvelle scène `gltest matsonde` (matériau avant le premier
+  sommet, au milieu d'une liste, primitive suivante, hors `glBegin`). Job `gpu` **56 OK, 0 échec**
+  (`matbegin` et `matsonde` ajoutées, `pixstore` comprise) ; `gtgeo.sh` : `matbegin` identique
+  à l'octet au rendu d'Apple dans les quatre modes, toutes les autres scènes au même md5
+  qu'avant ; `POMPPC_GL_RDIRTY=0` : `tcprobe` passe aussi. `tests/run-all.sh` 239 OK, 0 échec,
+  7 ignorés (aucun code hôte touché).
 - **Binaires, paquet invité et matrice après la nuit du 06-07/10, PC, 07/10 au matin**
   (`docs/binaire-rapide-x86.md` §6, `docs/matrice-jeux.md` §6 quater) :
   `disks/prebuilt` régénéré par le job `prebuilt` sur une copie de la VM de dev (plugin de la
