@@ -153,6 +153,17 @@ Relevé `build-fast/pomppc-build.txt` : `variante=native,nohard,lto,pgo`, `compl
 `pgo-fast/pomppc-profil.txt` du 06/10 19:55. Capacités (`bench/build-capabilities-build-fast.txt`)
 identiques à celles de la référence, 0031-0035 comprises.
 
+**Piège du 07/10 : le binaire rapide écarté sans avoir changé.** L'empreinte `serie` couvrait
+tout `patches/` (sauf `essais/` et l'OpenBIOS). L'ajout des pendants arm64 `tcg/0037-0039`
+(hors du build) et d'une ligne de `patches/README.md` l'a changée (`3237de0bcd20a983`), et le
+lanceur est retombé en silence sur la référence (« construit sur une autre série de patches »,
+vu par `tests/run-all.sh`) ; la nuit d'endurance du 07/10 a donc tourné sur `build/`. Depuis,
+`pomppc_serie_hash` ne couvre que les fichiers de `patches/` que `scripts/build_qemu_qfb.sh`
+nomme (`"$ROOT"/patches/…`) : `753fa973f5eb57ba`, identique sur `9e67226` et sur le dépôt du
+07/10. Le relevé du binaire garde l'ancienne valeur tant qu'il n'est pas reconstruit
+(`QEMU_FAST=1 ./scripts/build_qemu_qfb.sh`, profil `pgo-fast/` réutilisé) : jusque-là le
+lanceur l'écarte encore, et le dit dans sa bannière.
+
 
 **Vérification du lanceur** (06/10, après la reconstruction) : `POMPPC_FRONTEND=native
 ./run_tiger.sh` sans `QEMU_BIN` ni `QEMU_FAST` prend `build-fast/qemu-system-ppc64` (« binaire
