@@ -34,7 +34,8 @@
  *     2  pour « diff » : écart hors arêtes au-delà de GLTEST_DIFF_MAX (T1)
  *
  * Variables d'environnement : GLTEST_NOWS, GLTEST_ACCEL, GLTEST_COLOR16,
- * GLTEST_STENCIL, GLTEST_RENDERER, GLTEST_ROWPAD ;
+ * GLTEST_STENCIL (implicite pour la scène stencil), GLTEST_RENDERER,
+ * GLTEST_ROWPAD ;
  *   GLTEST_REQUIRE=<texte>   exige ce texte dans GL_RENDERER (« POMPPC »
  *                            pour prouver que c'est NOTRE plugin qui rend,
  *                            et pas le rendu logiciel d'Apple) ;
@@ -1002,8 +1003,12 @@ int main(int argc, char **argv)
     if (argc > 3) { W = atoi(argv[2]); H = atoi(argv[3]); }
     else if (argc > 1) {
         /* scènes dont les témoins dépassent 64×64 (gl15 : x jusqu'à 148, y jusqu'à 88) :
-           sans taille donnée, « gltest gl15 » se joue dans la taille qu'elles exigent */
-        static const char *grandes[] = { "tex13", "tex14", "gl15", "texlod", 0 };
+           sans taille donnée, « gltest gl15 » se joue dans la taille qu'elles exigent.
+           Les neuf de la seconde ligne ont rendu 9 faux rouges à une passe de nuit
+           qui jouait « gltest <scène> » sans taille (PC, 07/10) : Apple seul y échoue
+           sur les mêmes témoins, hors du tampon (docs/backend-gl-unites-fixes.md). */
+        static const char *grandes[] = { "tex13", "tex14", "gl15", "texlod",
+            "bigstrip", "clip", "dlist", "fusion", "lit", "mixte", "tcprobe", "texgen", "v15", 0 };
         int g;
         for (g = 0; grandes[g]; g++)
             if (!strcmp(argv[1], grandes[g])) { W = 256; H = 256; }
@@ -1018,7 +1023,9 @@ int main(int argc, char **argv)
     if (getenv("GLTEST_COLOR16")) BPP = 2;    /* couleur 16 bits : chemin v15 */
     attrs[k++] = kCGLPFAColorSize; attrs[k++] = BPP == 2 ? 16 : 32;
     attrs[k++] = kCGLPFADepthSize; attrs[k++] = 16;
-    if (getenv("GLTEST_STENCIL")) {         /* tampon de stencil de 8 bits */
+    /* tampon de stencil de 8 bits ; la scène stencil n'a pas de sens sans lui
+       (sans GLTEST_STENCIL, Apple seul y échouait aussi : faux rouge du 07/10) */
+    if (getenv("GLTEST_STENCIL") || !strcmp(scene, "stencil")) {
         attrs[k++] = kCGLPFAStencilSize; attrs[k++] = 8;
     }
     if (getenv("GLTEST_RENDERER")) {

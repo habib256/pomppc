@@ -19,6 +19,20 @@ de commit et dans `docs/`.
   jeu, 4,2 M `icbi` tous par le chemin court). Les 5 « courses 2 » relevées après la partie
   sont des bits `VGA` effacés par l'affichage, pas du code (compteur trop large, noté).
   Aucun changement de code livré.
+- **`glDrawPixels` : plus de lecture guidée par des mots d'état non prouvés, 07/10**
+  (`docs/backend-gl-unites-fixes.md`, « Scènes gltest sur le PC ») : sur la VM 10.4.11 du PC,
+  dans la session de l'utilisateur, `try_draw_pixels` a planté trois fois (`EXC_BAD_ACCESS`
+  dans `memcpy`, scènes `mixte` et `v15`) : les mots `CTX_UNPACK_*` (relevés sur 10.4.6, déjà
+  pris en défaut le 22/09) valent 0 à chaque appel relevé — `ALIGNMENT` compris, dont le défaut
+  GL est 4 — et ont valu autre chose ces trois fois-là, d'où une adresse source à
+  `pixels + 0x5d410000`. Le plugin n'accepte plus le chemin hôte de `DrawPixels` (couleur,
+  profondeur, stencil) et de `Bitmap` que si ces mots ont leur valeur par défaut ; sinon rendu
+  logiciel, exact. `gltest` : les neuf scènes dont les témoins sortent de 64×64 se jouent en
+  256×256 sans taille donnée, et la scène `stencil` demande toujours son tampon de stencil
+  (neuf faux rouges d'une passe de nuit). Job `gpu` 52/53 (seul `vpimm`, qui attend un QEMU
+  reconstruit) ; même verdict en session bureau, par l'agent racine et par le relais, sans
+  plantage du plugin. Plugin à réinstaller ; le `gltest` précompilé (`disks/prebuilt`) est à
+  régénérer.
 - **Mode immédiat sous programme de sommets : coordonnées de texture et couleurs, 07/10**
   (`docs/protocole-v16-programmes.md` §7) : `glTexCoord`/`glMultiTexCoord`/`glColor` entre
   `glBegin` et `glEnd` sous un programme ARB se perdaient (quad entier au texel (0,0), à la

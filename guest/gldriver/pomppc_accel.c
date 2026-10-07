@@ -16558,6 +16558,40 @@ static int copy_ds_rect(PCtx *p, unsigned long sx, unsigned long sy,
 /* DrawPixels DEPTH_COMPONENT FLOAT or STENCIL_INDEX UNSIGNED_BYTE.
  * DEPTH_UPLOAD writes with GL_ALWAYS: only when the app's depth test is
  * off or ALWAYS, otherwise Apple. Same idea for stencil. */
+/* Les mots CTX_UNPACK_* ne sont PAS prouvés : relevés sur 10.4.6, ils ont
+ * déjà été pris en défaut (bug hunt du 22/09 : ALIGNMENT y vaut 4 quand
+ * l'application a posé 1) ; sur la VM 10.4.11 du PC les quatre mots lisent 0
+ * à chaque appel (64 appels relevés le 07/10, ALIGNMENT compris, dont le
+ * défaut GL est 4) : ce ne sont pas l'état de glPixelStorei. Et trois fois de
+ * suite, dans la session de l'utilisateur (relais POMPPCGuiRunner), ils ne
+ * valaient PAS 0 : try_draw_pixels en a tiré une adresse SOURCE hors de tout
+ * tampon (pixels + 0x5d410000) et le memcpy a planté le processus
+ * (EXC_BAD_ACCESS, scènes `mixte` et `v15` en 256×256, 07/10 —
+ * docs/backend-gl-unites-fixes.md, « Scènes gltest sur le PC »). Tant que les
+ * offsets ne sont pas relevés, une valeur autre que celle par défaut ne
+ * guide AUCUNE lecture : le dessin part en logiciel, qui est exact (GLEngine
+ * lit, lui, le vrai état). Le cas courant (ROW_LENGTH 0, SKIP 0) ne change pas. */
+static int unpack_trusted(PCtx *p, unsigned long w, const char *who)
+{
+    static int said;
+    unsigned long rl = GLD_U32(p->ctx, CTX_UNPACK_ROW_LENGTH);
+    unsigned long sr = GLD_U32(p->ctx, CTX_UNPACK_SKIP_ROWS);
+    unsigned long sp = GLD_U32(p->ctx, CTX_UNPACK_SKIP_PIXELS);
+    unsigned long al = GLD_U32(p->ctx, CTX_UNPACK_ALIGNMENT);
+    /* ALIGNMENT : 0 (ce qu'on lit en vrai sur 10.4.11, défaut d'OpenGL = 4,
+       donc ce mot n'est pas l'alignement), 1, 2 ou 4 donnent le même pas pour
+       une ligne serrée multiple de 4 ; 8 ou une autre valeur l'allongeraient. */
+    if ((rl == 0 || rl == w) && sr == 0 && sp == 0 &&
+        (al == 0 || al == 1 || al == 2 || al == 4))
+        return 1;
+    if (said < 8) {
+        said++;
+        gl_note("unpack non sûr (%s) : ROW_LENGTH %lx SKIP_ROWS %lx SKIP_PIXELS %lx "
+                "ALIGNMENT %lx, w %lu : logiciel\n", who, rl, sr, sp, al, w);
+    }
+    return 0;
+}
+
 static int try_draw_ds(PCtx *p, unsigned long *a)
 {
     const unsigned char *vtx = (const unsigned char *)a[1];
@@ -16577,6 +16611,8 @@ static int try_draw_ds(PCtx *p, unsigned long *a)
     if (w == 0 || h == 0)
         return 1;
     if (!pixels || !vtx)
+        return 0;
+    if (!unpack_trusted(p, w, "DrawPixels profondeur/stencil"))
         return 0;
     if (!accel_ok(p) || !ensure_surface(p) || p->surf < 0)
         return 0;
@@ -16680,6 +16716,8 @@ static int try_draw_pixels(PCtx *p, unsigned long *a)
     if (!pixels || !vtx)
         return 0;
     if (type != 0x1401 || (fmt != 0x1908 && fmt != 0x1907))
+        return 0;
+    if (!unpack_trusted(p, w, "DrawPixels couleur"))
         return 0;
     if (p->color == SW_NEWER || !accel_ok(p) || !ensure_surface(p))
         return 0;
@@ -16871,6 +16909,8 @@ static int try_bitmap(PCtx *p, unsigned long *a)
        multiple de 4 octets a le même pas quel que soit l'alignement réel ;
        le reste part en logiciel. */
     if (((w + 7UL) / 8UL) & 3UL)
+        return 0;
+    if (!unpack_trusted(p, w, "Bitmap"))
         return 0;
     if (p->color == SW_NEWER || !accel_ok(p) || !ensure_surface(p))
         return 0;
