@@ -9838,26 +9838,60 @@ static unsigned long geom_format(PCtx *p)
         /* v21 : un shader de sommets GLSL lit gl_MultiTexCoord<u> que l'unité
            u ait une texture ou non (DarkPlaces : tangentes en 1..3, coordonnées
            de carte de lumière en 4) — la coordonnée suit le texte, pas
-           l'unité ; le filtre ci-dessous (tableau actif, texte) s'applique */
-        if (p->glsl_on && p->vp_rec && (p->vp_rec->vp_need & VPN_VALID))
+           l'unité. 07/10 : de même sous programme ARB (gltest vpimm (b) :
+           vertex.texcoord[1], unité 1 sans texture — la coordonnée n'était
+           jamais portée). Les filtres ci-dessous (tableau actif, texte)
+           s'appliquent. */
+        if (p->vp_rec && (p->vp_rec->vp_need & VPN_VALID))
             for (u = 0; u < QGPU_MAX_UNITS; u++)
                 if (p->vp_rec->vp_need & VPN_TEX(u))
                     fmt |= QGPU_VF_TEX(u);
         /* Colin McRae en course (sonde VA_PTRS, nuit du 23/09) : les pointeurs
            RÉSOLUS de GLEngine des tableaux conventionnels DÉSACTIVÉS restent
-           ceux du dernier usage (le HUD), et le déroulage T&L lit là plutôt
-           que de prendre la valeur courante. Sous programme, un attribut
-           conventionnel n'est donc demandé que si son tableau est ACTIF (bit
-           16 + code du mot bas) ; absent, l'hôte prend la valeur courante,
-           ce que le programme attend de vertex.color / vertex.texcoord. */
-        if (V) {
-            if (!(lo & (1UL << 18))) fmt &= ~(unsigned long)QGPU_VF_COLOR;
-            if (!(lo & (1UL << 17))) fmt &= ~(unsigned long)QGPU_VF_NORMAL;
-            if (!(lo & (1UL << 20))) fmt &= ~(unsigned long)QGPU_VF_SEC_COLOR;
-            if (!(lo & (1UL << 19))) fmt &= ~(unsigned long)QGPU_VF_FOG;
-            for (u = 0; u < QGPU_MAX_UNITS; u++)
-                if (!(lo & (1UL << (24 + u))))
-                    fmt &= ~(unsigned long)QGPU_VF_TEX(u);
+           ceux du dernier usage (le HUD), et l'on a cru que le déroulage T&L
+           les lisait plutôt que de prendre la valeur courante. Sous
+           programme, un attribut conventionnel n'était donc demandé que si son
+           tableau était ACTIF (bit 16 + code du mot bas) ; absent, l'hôte
+           prend la valeur courante (geom_send_current).
+
+           07/10 (TODO « coordonnées de texture en mode immédiat sous
+           programme de sommets », scène gltest vpimm) : ce filtre perdait TOUT
+           attribut donné entre glBegin et glEnd — en mode immédiat aucun
+           tableau n'est actif (lo = 0), GLEngine remplit pourtant le sommet
+           de NOTRE descripteur avec les valeurs de chaque glTexCoord/glColor,
+           mais le descripteur ne les demandait pas : le quad entier sortait
+           avec la valeur courante à glBegin (texel (0,0) partout, couleur du
+           dernier glColor d'avant). Et la crainte de 23/09 ne tient pas sur
+           le chemin des tableaux : vpimm (c) et (e) laissent un pointeur
+           résolu PÉRIMÉ (texcoord 0, couleur : non nuls, tableaux
+           désactivés après un dessin) et GLEngine écrit bien la valeur
+           courante dans le sommet — il teste le bit d'activation
+           (_gleSetFunctionIDFromArray, docs/re/descripteur-de-sommet.md §4).
+           (La géométrie éclatée de Colin McRae venait de tableaux vides, pas
+           de ces pointeurs : docs/re/programmes-arb.md §3 ter.)
+           Donc : quand le texte du programme dit précisément ce qu'il lit, ce
+           texte décide seul (filtre suivant) ; le filtre par tableau actif ne
+           sert plus que si le texte est inconnu (tout gardé, 0x0FFFFFFF) ou
+           sous POMPPC_GL_VPNEED=0. POMPPC_GL_VPIMM=0 le remet partout (A/B). */
+        {
+            static int vpimm = -1;
+            unsigned long nd = p->vp_rec ? p->vp_rec->vp_need : 0;
+            int precise;
+            if (vpimm < 0) {
+                const char *e = getenv("POMPPC_GL_VPIMM");
+                vpimm = (e && e[0] == '0') ? 0 : 1;
+            }
+            precise = vpimm && vpneed && (nd & VPN_VALID) &&
+                      (nd & 0x0FFFFFFFUL) != 0x0FFFFFFFUL;
+            if (V && !precise) {
+                if (!(lo & (1UL << 18))) fmt &= ~(unsigned long)QGPU_VF_COLOR;
+                if (!(lo & (1UL << 17))) fmt &= ~(unsigned long)QGPU_VF_NORMAL;
+                if (!(lo & (1UL << 20))) fmt &= ~(unsigned long)QGPU_VF_SEC_COLOR;
+                if (!(lo & (1UL << 19))) fmt &= ~(unsigned long)QGPU_VF_FOG;
+                for (u = 0; u < QGPU_MAX_UNITS; u++)
+                    if (!(lo & (1UL << (24 + u))))
+                        fmt &= ~(unsigned long)QGPU_VF_TEX(u);
+            }
         }
         /* 24/09 : et seulement ce que le TEXTE du programme lit (DOOM 3 :
            tableau de texcoord 0 actif mais périmé pendant les interactions) */
@@ -10257,8 +10291,10 @@ static void geom_send_current(PCtx *p, unsigned long fmt)
        l'unité porte une texture : l'hôte n'a jamais à prendre leur valeur
        courante. (Une unité sans texture est coupée, il ne s'y passe rien.)
        v21 : sauf sous un shader de sommets GLSL, qui lit gl_MultiTexCoord<u>
-       sans tableau — la valeur courante. */
-    if (p->glsl_on && p->vp_on && p->vp_rec) {
+       sans tableau — la valeur courante. 07/10 : sous programme ARB aussi
+       (vertex.texcoord[u] sans tableau, filtre par tableau actif quand le
+       texte est inconnu ; gltest vpimm (c) avant correction : texel (0,0)). */
+    if (p->vp_on && p->vp_rec) {
         int u;
         for (u = 0; u < QGPU_MAX_UNITS; u++) {
             if (!(p->vp_rec->vp_need & VPN_TEX(u)) || (fmt & QGPU_VF_TEX(u)))

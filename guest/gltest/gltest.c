@@ -40,7 +40,7 @@
  *                            et pas le rendu logiciel d'Apple) ;
  *   GLTEST_DIFF_MAX=<n>      seuil de « gltest diff » hors arêtes (défaut 2).
  *
- * 75 SCÈNES (par ordre alphabétique ; « diff » n'en est pas une, c'est le
+ * 76 SCÈNES (par ordre alphabétique ; « diff » n'en est pas une, c'est le
  * comparateur d'images). Neuf sont celles de la chaîne de verdict, une par
  * trou du bug hunt : alpharep (H1), texcross (H2), readpack (P1), drawpack
  * (P2), texdelmid (P10), vbocolor (P13), rawprim (S2), offset (H4), forkdraw
@@ -49,6 +49,10 @@
  *
  * rect rectfp : textures rectangle, pipeline fixe (et copie d'écran) et
  * programme de fragments (27/09, Colin McRae).
+ *
+ * vpimm : glBegin/glEnd sous programme de sommets ARB — vertex.texcoord[0],
+ * vertex.texcoord[1] (unité sans texture), vertex.color — et tableaux
+ * désactivés aux pointeurs périmés (07/10) ; référence : le rendu d'Apple.
  *
  * glsl glslvs glslfs glsldp : programmes GLSL (protocole v21, DarkPlaces) —
  * glslvs a sa référence chez le rendu d'Apple (shaders de sommets émulés),
@@ -63,7 +67,7 @@
  * sepspec spin state stencil stencilprobe stipple t3dprobe tclprobe
  * tcprobe tex tex13 tex14 tex3d texcache texcross texdelmid texfmt
  * texgen texlod texpack texpersp texprobe texup tgprobe tri v14probe v15
- * v8probe varray varrayvbo vbocolor wrapprobe xformprobe
+ * v8probe varray varrayvbo vbocolor vpimm wrapprobe xformprobe
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -3632,10 +3636,9 @@ int main(int argc, char **argv)
             printf("  vp échelle : erreur GL après ProgramString = 0x%x\n", (unsigned)glGetError());
             loc(0x8620, 0, tf);
             glEnable(0x8620);
-            /* en TABLEAUX, comme IndirectX (sous programme de sommets, le
-               plugin ne porte un attribut conventionnel que si son tableau est
-               actif : glTexCoord entre glBegin et glEnd n'y arrive pas — limite
-               connue, TODO §2) */
+            /* en TABLEAUX, comme IndirectX (glTexCoord entre glBegin et glEnd
+               sous programme de sommets se perdait jusqu'au 07/10 : c'est la
+               scène vpimm qui l'éprouve désormais) */
             {
                 GLfloat vq[4][2], tq[4][2] = { { 0, 1 }, { 1, 1 }, { 1, 0 }, { 0, 0 } };
                 vq[0][0] = 0; vq[0][1] = 0; vq[1][0] = (GLfloat)W; vq[1][1] = 0;
@@ -3693,6 +3696,173 @@ int main(int argc, char **argv)
             glDisable(GL_TEXTURE_2D);
         }
         glDeleteTextures(2, tex);
+        printf("  erreur GL finale = 0x%x\n", (unsigned)glGetError());
+        glFinish();
+    } else if (!strcmp(scene, "vpimm")) {
+        /* 07/10 (TODO « coordonnées de texture en mode immédiat sous programme
+           de sommets », vu en écrivant rectfp) : glBegin/glEnd sous un
+           programme de sommets ARB, pipeline de fragments FIXE (texture 2D
+           4×2 allumée, GL_REPLACE, GL_NEAREST). Référence : le rendu d'Apple,
+           qui émule les programmes de sommets.
+             (a) vertex.texcoord[0] → result.texcoord[0], glTexCoord2f par
+                 sommet : chaque quart de l'écran montre son texel ;
+             (b) vertex.texcoord[1] → result.texcoord[0], glMultiTexCoord2f
+                 (unité 1, SANS texture) par sommet, glTexCoord2f constant et
+                 faux (texel noir) ;
+             (c) le contraire, en TABLEAUX : tableau de texcoord 0 employé
+                 puis DÉSACTIVÉ (pointeur résolu de GLEngine périmé, cf.
+                 docs/re/programmes-arb.md §3 bis), glTexCoord2f courant →
+                 texel (2,1) cyan partout ;
+             (d) vertex.color en immédiat, texture éteinte : quad gauche
+                 rouge, quad droit vert, dans le même glBegin. */
+        typedef void (*gp_f)(GLsizei, GLuint *);
+        typedef void (*bp_f)(GLenum, GLuint);
+        typedef void (*ps_f)(GLenum, GLenum, GLsizei, const GLvoid *);
+        static const GLubyte tx[2][4][4] = {       /* rangée 0 = BAS (OpenGL) */
+            { { 255, 0, 0, 255 }, { 0, 255, 0, 255 }, { 0, 0, 255, 255 }, { 255, 255, 255, 255 } },
+            { { 255, 255, 0, 255 }, { 255, 0, 255, 255 }, { 0, 255, 255, 255 }, { 0, 0, 0, 255 } } };
+        static const unsigned long want[2][4] = {
+            { 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF },
+            { 0xFFFF00, 0xFF00FF, 0x00FFFF, 0x000000 } };
+        static const char vp_t0[] =
+            "!!ARBvp1.0\n"
+            "DP4 result.position.x, state.matrix.mvp.row[0], vertex.position;\n"
+            "DP4 result.position.y, state.matrix.mvp.row[1], vertex.position;\n"
+            "DP4 result.position.z, state.matrix.mvp.row[2], vertex.position;\n"
+            "DP4 result.position.w, state.matrix.mvp.row[3], vertex.position;\n"
+            "MOV result.texcoord[0], vertex.texcoord[0];\n"
+            "MOV result.color, vertex.color;\n"
+            "END\n";
+        static const char vp_t1[] =
+            "!!ARBvp1.0\n"
+            "DP4 result.position.x, state.matrix.mvp.row[0], vertex.position;\n"
+            "DP4 result.position.y, state.matrix.mvp.row[1], vertex.position;\n"
+            "DP4 result.position.z, state.matrix.mvp.row[2], vertex.position;\n"
+            "DP4 result.position.w, state.matrix.mvp.row[3], vertex.position;\n"
+            "MOV result.texcoord[0], vertex.texcoord[1];\n"
+            "MOV result.color, vertex.color;\n"
+            "END\n";
+        static const GLfloat junk[4][2] = { { 0.9f, 0.9f }, { 0.9f, 0.9f }, { 0.9f, 0.9f }, { 0.9f, 0.9f } };
+        static const GLfloat tq[4][2] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+        GLfloat vq[4][2];
+        GLuint tex, prog[2];
+        int i, j, pass;
+        gp_f gen = (gp_f)gl_sym("glGenProgramsARB", "glGenProgramsARB");
+        bp_f bind = (bp_f)gl_sym("glBindProgramARB", "glBindProgramARB");
+        ps_f str = (ps_f)gl_sym("glProgramStringARB", "glProgramStringARB");
+        if (!gen || !bind || !str) {
+            printf("FAIL entrées ARB_vertex_program absentes\n");
+            failures++;
+            return 4;
+        }
+        vq[0][0] = 0; vq[0][1] = 0; vq[1][0] = (GLfloat)W; vq[1][1] = 0;
+        vq[2][0] = (GLfloat)W; vq[2][1] = (GLfloat)H; vq[3][0] = 0; vq[3][1] = (GLfloat)H;
+        glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, W, 0, H, -1, 1);
+        glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+        glDisable(GL_DEPTH_TEST);
+        glClearColor(0.5f, 0.5f, 0.5f, 1);
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, tx);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glEnable(GL_TEXTURE_2D);
+        gen(2, prog);
+        bind(ARB_VP, prog[0]);
+        str(ARB_VP, ARB_ASCII, (GLsizei)strlen(vp_t0), vp_t0);
+        bind(ARB_VP, prog[1]);
+        str(ARB_VP, ARB_ASCII, (GLsizei)strlen(vp_t1), vp_t1);
+        printf("  erreur GL après les ProgramString = 0x%x\n", (unsigned)glGetError());
+        glEnable(ARB_VP);
+        /* (a) puis (b) : quad plein écran en mode immédiat */
+        for (pass = 0; pass < 2; pass++) {
+            bind(ARB_VP, prog[pass]);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glColor3f(1, 1, 1);
+            glBegin(GL_QUADS);
+            for (i = 0; i < 4; i++) {
+                if (pass == 0) {
+                    glTexCoord2f(tq[i][0], tq[i][1]);
+                } else {
+                    glTexCoord2f(0.9f, 0.9f);
+                    glMultiTexCoord2fARB(GL_TEXTURE1_ARB, tq[i][0], tq[i][1]);
+                }
+                glVertex2f(vq[i][0], vq[i][1]);
+            }
+            glEnd();
+            glFinish();
+            for (j = 0; j < 2; j++)
+                for (i = 0; i < 4; i++) {
+                    char what[48];
+                    snprintf(what, sizeof(what), "(%c) imm texcoord[%d] (%d,%d)", 'a' + pass, pass, i, j);
+                    check(what, W * i / 4 + W / 8, H - 1 - (H * j / 2 + H / 4), want[j][i]);
+                }
+        }
+        /* (c) tableaux : texcoord 0 actif pour un dessin du pipeline fixe
+           (le pointeur résolu de GLEngine y est posé), puis désactivé ; sous
+           programme, vertex.texcoord[0] vaut alors la valeur COURANTE */
+        glDisable(ARB_VP);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glVertexPointer(2, GL_FLOAT, 0, vq);
+        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+        glTexCoordPointer(2, GL_FLOAT, 0, junk);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_QUADS, 0, 4);
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+        bind(ARB_VP, prog[0]);
+        glEnable(ARB_VP);
+        glTexCoord2f(0.625f, 0.75f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_QUADS, 0, 4);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        glFinish();
+        for (j = 0; j < 2; j++)
+            for (i = 0; i < 4; i++) {
+                char what[48];
+                snprintf(what, sizeof(what), "(c) tableaux courant (%d,%d)", i, j);
+                check(what, W * i / 4 + W / 8, H - 1 - (H * j / 2 + H / 4), 0x00FFFF);
+            }
+        /* (d) couleur par sommet en immédiat, texture éteinte */
+        glDisable(GL_TEXTURE_2D);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBegin(GL_QUADS);
+        glColor3f(1, 0, 0);
+        glVertex2f(0, 0); glVertex2f((GLfloat)(W / 2), 0);
+        glVertex2f((GLfloat)(W / 2), (GLfloat)H); glVertex2f(0, (GLfloat)H);
+        glColor3f(0, 1, 0);
+        glVertex2f((GLfloat)(W / 2), 0); glVertex2f((GLfloat)W, 0);
+        glVertex2f((GLfloat)W, (GLfloat)H); glVertex2f((GLfloat)(W / 2), (GLfloat)H);
+        glEnd();
+        glFinish();
+        check("(d) imm couleur gauche", W / 4, H / 2, 0xFF0000);
+        check("(d) imm couleur droite", W - W / 4, H / 2, 0x00FF00);
+        /* (e) comme (c), pour la couleur : tableau de couleurs employé puis
+           désactivé, couleur courante jaune sous programme */
+        {
+            static const GLfloat blue4[4][4] = { { 0, 0, 1, 1 }, { 0, 0, 1, 1 }, { 0, 0, 1, 1 }, { 0, 0, 1, 1 } };
+            glDisable(ARB_VP);
+            glEnableClientState(GL_VERTEX_ARRAY);
+            glVertexPointer(2, GL_FLOAT, 0, vq);
+            glEnableClientState(GL_COLOR_ARRAY);
+            glColorPointer(4, GL_FLOAT, 0, blue4);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_QUADS, 0, 4);
+            glDisableClientState(GL_COLOR_ARRAY);
+            glEnable(ARB_VP);
+            glColor3f(1, 1, 0);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_QUADS, 0, 4);
+            glDisableClientState(GL_VERTEX_ARRAY);
+            glFinish();
+            check("(e) tableaux couleur courante", W / 4, H / 2, 0xFFFF00);
+            check("(e) tableaux couleur courante", W - W / 4, H / 4, 0xFFFF00);
+        }
+        glDisable(ARB_VP);
+        glDeleteTextures(1, &tex);
         printf("  erreur GL finale = 0x%x\n", (unsigned)glGetError());
         glFinish();
     } else if (!strcmp(scene, "arbvpvar")) {
