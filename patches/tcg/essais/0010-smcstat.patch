@@ -1,41 +1,53 @@
-diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
-index d0f1f09..ab62ee1 100644
 --- a/accel/tcg/cputlb.c
 +++ b/accel/tcg/cputlb.c
-@@ -874,10 +874,29 @@ void tlb_flush_page_bits_by_mmuidx_all_cpus_synced(CPUState *src_cpu,
-                                               idxmap, bits);
- }
+@@ -947,8 +947,43 @@
  
+ /* update the TLBs so that writes to code in the virtual page 'addr'
+    can be detected */
 +uint64_t smcstat_r1, smcstat_r2, smcstat_r3, smcstat_prot, smcstat_tb;
 +static uint64_t smcstat_n;
 +void smcstat_print(void);
++/* releve periodique (POMPPC_SMCSTAT_S secondes, 15 par defaut ; 0 : aucun) */
++static void *smcstat_thread(void *arg)
++{
++    unsigned s = (unsigned)(uintptr_t)arg;
++    for (;;) {
++        sleep(s);
++        smcstat_print();
++    }
++    return NULL;
++}
 +static void __attribute__((constructor)) smcstat_init(void)
 +{
++    const char *e = getenv("POMPPC_SMCSTAT_S");
++    unsigned s = e ? atoi(e) : 15;
++    pthread_t th;
 +    atexit(smcstat_print);
++    if (s && pthread_create(&th, NULL, smcstat_thread, (void *)(uintptr_t)s) == 0) {
++        pthread_detach(th);
++    }
 +}
 +void smcstat_print(void)
 +{
-+    fprintf(stderr, "smcstat: protections %" PRIu64 " blocs-sur-page-neuve %" PRIu64
++    fprintf(stderr, "smcstat: t=%ld protections %" PRIu64 " blocs-sur-page-neuve %" PRIu64
 +            " course1(ecrit-pendant-traduction) %" PRIu64
 +            " course2(set_dirty) %" PRIu64 " course3(remplissage) %" PRIu64 "\n",
-+            smcstat_prot, smcstat_tb, smcstat_r1, smcstat_r2, smcstat_r3);
++            (long)time(NULL), smcstat_prot, smcstat_tb, smcstat_r1, smcstat_r2, smcstat_r3);
 +}
 +
- /* update the TLBs so that writes to code in the virtual page 'addr'
-    can be detected */
  void tlb_protect_code(ram_addr_t ram_addr)
  {
 +    if ((qatomic_fetch_inc(&smcstat_n) & ((1 << 12) - 1)) == 0) {
 +        smcstat_print();
 +    }
 +    qatomic_inc(&smcstat_prot);
-     cpu_physical_memory_test_and_clear_dirty(ram_addr & TARGET_PAGE_MASK,
-                                              TARGET_PAGE_SIZE,
-                                              DIRTY_MEMORY_CODE);
-@@ -997,6 +1016,10 @@ static void tlb_set_dirty(CPUState *cpu, vaddr addr, ram_addr_t ram_addr)
+     physical_memory_test_and_clear_dirty(ram_addr & TARGET_PAGE_MASK,
+                                          TARGET_PAGE_SIZE,
+                                          DIRTY_MEMORY_CODE,
+@@ -1062,6 +1097,10 @@
      addr &= TARGET_PAGE_MASK;
      qemu_spin_lock(&cpu->neg.tlb.c.lock);
-     if (cpu_physical_memory_is_clean(ram_addr)) {
+     if (physical_memory_is_clean(ram_addr)) {
 +        if (qatomic_fetch_inc(&smcstat_r2) < 20) {
 +            fprintf(stderr, "smcstat: course2 cpu%d vaddr %" VADDR_PRIx "\n",
 +                    cpu->cpu_index, addr);
@@ -43,18 +55,18 @@ index d0f1f09..ab62ee1 100644
          qemu_spin_unlock(&cpu->neg.tlb.c.lock);
          return;
      }
-@@ -1139,6 +1162,8 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
+@@ -1204,6 +1243,8 @@
  
      wp_flags = cpu_watchpoint_address_matches(cpu, addr_page,
                                                TARGET_PAGE_SIZE);
 +    bool smc_pre = is_ram && (prot & PAGE_WRITE) && !section->readonly &&
-+        cpu_physical_memory_is_clean(iotlb);
++        physical_memory_is_clean(iotlb);
  
      index = tlb_index(cpu, mmu_idx, addr_page);
      te = tlb_entry(cpu, mmu_idx, addr_page);
-@@ -1166,6 +1191,10 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
+@@ -1231,6 +1272,10 @@
      if (is_ram && (prot & PAGE_WRITE) && !section->readonly &&
-         cpu_physical_memory_is_clean(iotlb)) {
+         physical_memory_is_clean(iotlb)) {
          write_flags |= TLB_NOTDIRTY;
 +        if (!smc_pre && qatomic_fetch_inc(&smcstat_r3) < 20) {
 +            fprintf(stderr, "smcstat: course3 cpu%d vaddr %" VADDR_PRIx "\n",
@@ -63,11 +75,9 @@ index d0f1f09..ab62ee1 100644
      }
  
      /* Note that the tlb is no longer clean.  */
-diff --git a/accel/tcg/tb-maint.c b/accel/tcg/tb-maint.c
-index f0f12d0..c74a9cb 100644
 --- a/accel/tcg/tb-maint.c
 +++ b/accel/tcg/tb-maint.c
-@@ -410,9 +410,11 @@ static void page_unlock(PageDesc *pd)
+@@ -419,9 +419,11 @@
   * notdirty path, which blocks on the page lock held here and invalidates
   * the new TB once it is linked.
   */
@@ -79,7 +89,7 @@ index f0f12d0..c74a9cb 100644
          tlb_protect_code(paddr & TARGET_PAGE_MASK);
      }
  }
-@@ -1251,6 +1253,13 @@ bool tb_invalidate_phys_line_sync(tb_page_addr_t start, tb_page_addr_t last)
+@@ -1262,6 +1264,13 @@
      PageForEachNext n;
      bool hit = false;
  
@@ -92,8 +102,8 @@ index f0f12d0..c74a9cb 100644
 +    }
      tcg_debug_assert(((start ^ last) & TARGET_PAGE_MASK) == 0);
      smp_mb();
-     if (cpu_physical_memory_get_dirty_flag(start, DIRTY_MEMORY_CODE)) {
-@@ -1260,6 +1269,10 @@ bool tb_invalidate_phys_line_sync(tb_page_addr_t start, tb_page_addr_t last)
+     if (physical_memory_get_dirty_flag(start, DIRTY_MEMORY_CODE)) {
+@@ -1271,6 +1280,10 @@
      if (!pd) {
          return false;
      }
@@ -104,31 +114,29 @@ index f0f12d0..c74a9cb 100644
      page_lock(pd);
      PAGE_FOR_EACH_TB(start, last, pd, tb, n) {
          tb_page_addr_t tb_start = tb_page_addr0(tb);
-@@ -1278,6 +1291,7 @@ bool tb_invalidate_phys_line_sync(tb_page_addr_t start, tb_page_addr_t last)
+@@ -1289,6 +1302,7 @@
      }
      page_unlock(pd);
      if (hit) {
 +        qatomic_inc(&st_hit);
          /* takes the locks of every page of the TBs found, in order */
-         tb_invalidate_phys_range(start, last);
+         tb_invalidate_phys_range(cpu, start, last);
      }
-diff --git a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
-index dd6d278..434d0aa 100644
 --- a/accel/tcg/translate-all.c
 +++ b/accel/tcg/translate-all.c
-@@ -284,6 +284,11 @@ static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
+@@ -258,6 +258,11 @@
  }
  
  /* Called with mmap_lock held for user mode emulation.  */
 +extern __thread bool smcstat_newpage;
-+static __thread uint8_t smcstat_snap[TARGET_PAGE_SIZE];
++static __thread uint8_t smcstat_snap[1 << 16];  /* >= TARGET_PAGE_SIZE (variable ici) */
 +static __thread unsigned smcstat_len;
 +extern uint64_t smcstat_r1, smcstat_tb;
 +
- TranslationBlock *tb_gen_code(CPUState *cpu,
-                               vaddr pc, uint64_t cs_base,
-                               uint32_t flags, int cflags)
-@@ -335,7 +340,12 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
+ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
+ {
+     CPUArchState *env = cpu_env(cpu);
+@@ -312,7 +317,12 @@
      tb_set_page_addr0(tb, phys_pc);
      tb_set_page_addr1(tb, -1);
      if (phys_pc != -1) {
@@ -141,7 +149,7 @@ index dd6d278..434d0aa 100644
      }
  
      tcg_ctx->gen_tb = tb;
-@@ -548,7 +558,18 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
+@@ -525,7 +535,18 @@
       * No explicit memory barrier is required -- tb_link_page() makes the
       * TB visible in a consistent state.
       */
@@ -154,7 +162,7 @@ index dd6d278..434d0aa 100644
 +            if (memcmp(smcstat_snap, host_pc, MIN(tb->size, smcstat_len)) &&
 +                qatomic_fetch_inc(&smcstat_r1) < 20) {
 +                fprintf(stderr, "smcstat: course1 cpu%d pc %" VADDR_PRIx "\n",
-+                        cpu->cpu_index, pc);
++                        cpu->cpu_index, s.pc);
 +            }
 +        }
 +    }
