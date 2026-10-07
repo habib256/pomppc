@@ -121,6 +121,13 @@ ne montre rien d'autre autour d'un lot de course : `glDisable(FP)`,
 `glDisable(VP)`, locaux, `glVertexAttribPointerARB` 0/1/2 (nouvelles adresses à
 chaque lot), `glEnable(VP)`, `glDrawElements(TRIANGLE_STRIP, n, UNSIGNED_SHORT)`.
 
+> **Réfuté sur le chemin des tableaux le 07/10/2026** (`gltest vpimm` (c) et (e),
+> `docs/protocole-v16-programmes.md` §7) : pointeurs résolus de texcoord 0 et de
+> la couleur non nuls et périmés, codes 8 et 2 demandés par le descripteur,
+> tableaux désactivés — GLEngine écrit la valeur courante. Le filtre « attribut
+> conventionnel seulement si son tableau est actif » ne sert plus que pour un
+> texte de programme inconnu : il perdait tout attribut du mode immédiat.
+
 ## 3 ter. Colin McRae en course : les tableaux sont libérés avant le déroulage
 
 > **Résolu le 26/09/2026 — l'hypothèse ci-dessous était fausse** (`cmr-var.md`). Les tableaux

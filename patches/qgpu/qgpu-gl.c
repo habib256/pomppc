@@ -3146,8 +3146,12 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
         int off_t = qgpu_vf_offset(fmt, (uint32_t)QGPU_VF_TEX(u));
         if (!tex[u]) {
             /* v21 : sous GLSL, gl_TextureMatrix[u] et gl_MultiTexCoord<u>
-               existent sans texture (DarkPlaces y passe ses tangentes) */
-            if (!gp) {
+               existent sans texture (DarkPlaces y passe ses tangentes).
+               07/10 : sous programme de sommets ARB aussi —
+               vertex.texcoord[u] d'une unité sans texture (gltest vpimm
+               (b) : sans ceci, la coordonnée portée par le sommet n'était
+               jamais liée et le programme lisait celle d'un autre dessin) */
+            if (!gp && !vp) {
                 continue;
             }
             g->ActiveTexture(GL_TEXTURE0 + u);

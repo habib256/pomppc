@@ -151,8 +151,14 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   PC (`docs/matrice-jeux.md` §5 : reproduit sur le vidage DOOM 3 fenêtre du PC privé de son
   `surfaces.txt`, 2 `NO_SURF` → 0) ; à confirmer sur le tour `20260926-2156` du M4 (rejeu sans
   `NO_SURF`, image inchangée).
-- [ ] **[Plugin] Coordonnées de texture en mode immédiat sous programme de sommets** : perdues
-  (vu en écrivant `gltest rectfp`). Scène à écrire ; fermeture : comparé au rendu d'Apple.
+- [ ] **[Plugin] Mode immédiat sous programme de sommets, suites** : coordonnées de texture
+  et couleur corrigées le 07/10 (`gltest vpimm`, `docs/protocole-v16-programmes.md` §7, juste
+  contre Apple sur le PC). Restent non éprouvés entre `glBegin`/`glEnd` sous programme : la
+  normale hors éclairage, la couleur secondaire, la coordonnée de brouillard et les génériques
+  (`glVertexAttrib*`, portés seulement si leur tableau est actif). Le filtre « tableau actif »
+  levé touche aussi Colin McRae et DOOM 3 (chemin ARB) : à revoir en jeu sur le M4
+  (`POMPPC_GL_VPIMM=0` pour l'A/B). Fermeture : `vpimm` étendue, comparée au rendu d'Apple ;
+  jeux inchangés.
 - [ ] **[Backend GL] `gltest tex14` « λ=2 sans biais »** : défaut du GL de l'hôte macOS (le
   biais d'unité du dessin précédent reste appliqué ; un `glFlush` le corrige mais coûte).
   Décision : ne réappliquer que sur changement, ou passer le biais dans l'échantillonneur.

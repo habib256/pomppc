@@ -9,6 +9,18 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Mode immédiat sous programme de sommets : coordonnées de texture et couleurs, 07/10**
+  (`docs/protocole-v16-programmes.md` §7) : `glTexCoord`/`glMultiTexCoord`/`glColor` entre
+  `glBegin` et `glEnd` sous un programme ARB se perdaient (quad entier au texel (0,0), à la
+  couleur courante de `glBegin`) : `geom_format` ne portait, sous programme, un attribut
+  conventionnel que si son **tableau** était actif — jamais en mode immédiat — et
+  `vertex.texcoord[u]` d'une unité sans texture n'était porté (plugin) ni lié (hôte) que
+  sous GLSL. Le texte du programme décide désormais seul quand il dit ce qu'il lit
+  (`POMPPC_GL_VPIMM=0` : ancien filtre) ; la crainte des pointeurs résolus périmés (23/09)
+  est réfutée sur le chemin des tableaux. Nouvelle scène **`gltest vpimm`** (26 témoins,
+  dans le job `gpu`) : 24 faux avant, 26/26 et identique au rendu d'Apple après ; job `gpu`
+  53 OK, 0 échec ; `tests/run-all.sh` inchangé (237 OK, 1 échec binaire rapide, 7 ignorés).
+  **QEMU à reconstruire** (`patches/qgpu/qgpu-gl.c`) et plugin à réinstaller.
 - **`tests/run-all.sh` sur le PC : deux échecs hors binaire rapide levés, 07/10**
   (`docs/backend-gl-unites-fixes.md` « Test natif », `docs/audio-stabilite.md`) :
   `qgpu_core_test` v17 (a)/(b) exigeait les unités 5 et 6 **au pipeline fixe** du backend GL,
