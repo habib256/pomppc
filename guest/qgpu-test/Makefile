@@ -5,7 +5,7 @@ CFLAGS  = -arch ppc -O1 -Wall
 LDLIBS  = -framework IOKit -framework CoreFoundation
 
 # Le contrat (qgpu_proto.h, qui inclut l'ABI qgpu_abi.h) vient de patches/qgpu/.
-all: qgpu_test errpeer unloadpeer
+all: qgpu_test errpeer unloadpeer slotpeer qfbmode
 
 qgpu_test: qgpu_test.c ../../patches/qgpu/qgpu_proto.h ../../patches/qgpu/qgpu_abi.h
 	$(CC) $(CFLAGS) -I../../patches/qgpu -o $@ qgpu_test.c $(LDLIBS)
@@ -18,7 +18,15 @@ errpeer: errpeer.c ../../patches/qgpu/qgpu_proto.h ../../patches/qgpu/qgpu_abi.h
 unloadpeer: unloadpeer.c ../../patches/qgpu/qgpu_proto.h ../../patches/qgpu/qgpu_abi.h
 	$(CC) $(CFLAGS) -I../../patches/qgpu -o $@ unloadpeer.c $(LDLIBS) -lpthread
 
+# 14/10/2026 : client des épreuves « GPU hôte bloqué » et A6 (jobs/stall)
+slotpeer: slotpeer.c ../../patches/qgpu/qgpu_proto.h ../../patches/qgpu/qgpu_abi.h
+	$(CC) $(CFLAGS) -I../../patches/qgpu -o $@ slotpeer.c $(LDLIBS)
+
+# 14/10/2026 : mode de POMPPCQFB changé sans WindowServer (épreuve K6/KT4)
+qfbmode: qfbmode.c
+	$(CC) $(CFLAGS) -o $@ qfbmode.c $(LDLIBS)
+
 clean:
-	rm -f qgpu_test errpeer unloadpeer out.ppm
+	rm -f qgpu_test errpeer unloadpeer slotpeer qfbmode out.ppm
 
 .PHONY: all clean

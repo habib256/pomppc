@@ -195,6 +195,16 @@ un timeout est seulement journalisé. `slotGated` efface ensuite busy et peut
 libérer le créneau malgré cet échec. Le retour réussi de la fermeture ou du
 reset ne prouve donc pas que le nettoyage a terminé.
 
+*État au 14/10/2026 : **fermée dans le kext et éprouvée en VM**
+([epreuve-gpu-bloque.md](epreuve-gpu-bloque.md)).* La correction décrite plus bas est faite :
+`destroyClientObjects` rend un `IOReturn` et la barrière visée, `slotGated` marque la tranche
+sale (`fSlotDirty`, `fSlotFence`), `allocSlot` relance d'abord un CLIENT_RESET jamais parti,
+prend une tranche propre ou dont la barrière est atteinte, sinon attend (borné) puis refuse ;
+`resetSlot` rend l'échec. Épreuve du 14/10 (propriétés `x-test-stall-ms` et
+`x-test-refuse-reset`) : client tué avec ses soumissions en file, puis premier `CTX_CREATE`
+d'un nouveau client — 4 `QGPU_ST_LIMIT` sur 5 scénarios avec le kext d'avant, 0 sur 5 avec
+celui-ci. Le texte qui suit est l'analyse du 07/10, gardée pour ses renvois.
+
 *État au 07/10/2026 : **tient encore**, telle qu'écrite.* Aucun correctif
 depuis le 27/09 n'y touche (KG3, KT3 et K7 règlent la propriété du créneau,
 pas le résultat du nettoyage). Preuves : `destroyClientObjects` est `void`
@@ -295,12 +305,15 @@ encore. Ce chemin n'est atteint que par un retrait à chaud, refusé
 au realize (:1363), où le thread vient de naître et n'a aucun job. Aucune
 attente non bornée ne reste donc sous BQL dans un scénario pris en charge.
 L'épreuve en VM (GPU hôte bloqué puis rechargement du kext et
-`system_reset`, GL3/KT4/KT5) est suivie par l'entrée « Restes des épreuves
-en VM des bug hunts » de [TODO.md](../TODO.md) : le 07/10, rechargement et
-`system_reset` ont été joués sans blocage, mais le blocage lui-même demande
-une propriété de test du device (`x-test-stall-ms`) ; le device n'a pas de
-harnais natif (`qgpu-pci.c` ne se compile qu'avec QEMU), ce qui interdit de
-l'éprouver sur l'hôte seul.
+`system_reset`, GL3/KT4/KT5) est **tenue le 14/10/2026**
+([epreuve-gpu-bloque.md](epreuve-gpu-bloque.md)) grâce à la propriété de test
+`x-test-stall-ms` : reset rendu à 5 s, device cassé (CAPS = CLIENTS = 0, kext
+refusé) puis réparé par `kextload` ou après `system_reset`, mode d'écran
+changé pendant la panne sans BQL tenu, `quit` en 5,06 s. Elle a trouvé un
+reste : la géométrie de qfb-pci abandonnée faute de drainage sur un device
+encore sain était perdue (`scanout_rebind` n'était posé que sur un device
+cassé) ; elle est désormais retentée au prochain doorbell et au reset qui
+aboutit.
 
 **L4 — Arrêt du kext avec dormeurs restants.** Écrit le 27/09 :
 `POMPPCGPU::stop` attendait au plus environ une seconde ; s'il restait des
@@ -396,9 +409,9 @@ barrière et le dernier STATUS lu.
 |---|---|---|
 | Kext indépendant des opcodes | `tests/run-all.sh` : ABI identique et absence de symboles sémantiques ; `scripts/qgpu_contract.py --check` | Ces contrôles ne prouvent pas les cycles de vie. |
 | Objets et reset de tranche | `tests/qgpu_core_test.c` : bornes, reset, destruction, déliaison des surfaces, conservation d'une autre tranche | Les tests natifs ne traversent ni IOKit ni la file du device. |
-| Admission, barrières et transport | `tests/qgpu_smoke.py`, à lancer explicitement ; `run_a6` de `tests/qgpu_core_test.c` (07/10) : conséquences au cœur d'un nettoyage manqué, retardé ou rejoué (L2) | Injection de retard et non-réutilisation après timeout (L1/L2) : demande une propriété de test du device et la correction du kext (L2). |
+| Admission, barrières et transport | `tests/qgpu_smoke.py`, à lancer explicitement ; `run_a6` de `tests/qgpu_core_test.c` (07/10) : conséquences au cœur d'un nettoyage manqué, retardé ou rejoué (L2) ; en VM (14/10), `x-test-stall-ms` / `x-test-refuse-reset` et `tools/guest/epreuve_gpu_bloque.py` : L2 fermée dans le kext, GL3/KT4/K6/KT5 tenus | Non-réutilisation de la mémoire après un timeout d'attente du plugin (L1). |
 | Cohérence de rendu | `guest/gltest`, tests croisés des backends, matrice et rejeu | Transferts impossibles (L6), scénarios de panne ; rejeu et VM partagent le même moteur. |
-| Fin de session | Mécanismes de gate, busy, arrêt et fork relus dans les sources ; L3 et L4 fermées par lecture le 07/10 (resets et sortie bornés, `stop` qui attend dormeurs et appels en vol) | Mort pendant soumission, double fermeture, réouverture (L2) ; en VM, backend bloqué puis reset (L3), suivi par l'entrée « Restes des épreuves en VM » de TODO.md ; kext arrêté pendant `WAIT_FENCE`/`SUBMIT` (L4) éprouvé le 07/10. |
+| Fin de session | Mécanismes de gate, busy, arrêt et fork relus dans les sources ; L3 et L4 fermées par lecture le 07/10 (resets et sortie bornés, `stop` qui attend dormeurs et appels en vol) | Double fermeture concurrente (L2) ; mort pendant soumission et réouverture (L2), backend bloqué puis reset (L3) éprouvés en VM le 14/10 ([epreuve-gpu-bloque.md](epreuve-gpu-bloque.md)) ; kext arrêté pendant `WAIT_FENCE`/`SUBMIT` (L4) éprouvé le 07/10. |
 
 Les tests natifs peuvent ignorer OpenGL s'il est indisponible : vérifier le
 backend effectivement exécuté avant de conclure. Une matrice de jeux verte

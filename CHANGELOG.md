@@ -9,6 +9,25 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **GPU hôte bloqué à la demande, et A6 (L2) fermée, PC, 14/10** (`docs/epreuve-gpu-bloque.md`).
+  Device : propriétés de test `x-test-stall-ms` (le thread de rendu dort avant chaque job,
+  réglable à chaud par `qom-set`, relu toutes les 10 ms) et `x-test-refuse-reset` (CLIENT_RESET
+  refusé par `QUEUE_FULL`), éteintes par défaut et sans coût ; correctif trouvé par l'épreuve :
+  une géométrie qfb abandonnée faute de drainage (device encore sain, `system_reset` avec un job
+  bloqué) était perdue pour de bon, elle est retentée au prochain doorbell et par le reset qui
+  aboutit. Kext (ABI inchangée) : `destroyClientObjects` rend son verdict, une tranche au
+  nettoyage échoué reste « sale » et `allocSlot` ne la redonne qu'après avoir relancé un
+  CLIENT_RESET jamais parti et vu sa barrière atteinte ; `resetSlot` rend l'échec. Épreuves en
+  VM (copie de la VM de dev, QEMU construit dans `~/src/qemu-stall`) : GL3, KT4, K6 et KT5
+  tenus (reset borné à 5 s, device « cassé » puis réparé par `kextload` ou après
+  `system_reset`, mode d'écran changé pendant la panne sans BQL tenu, fenêtre qfb reliée à la
+  réparation, `quit` bloqué en 5,06 s) ; A6 : client tué avec ses soumissions en file, 4
+  `QGPU_ST_LIMIT` sur 5 scénarios avec le kext d'avant, 0 sur 5 avec le nouveau (autre tranche
+  ou attente, journal qui nomme la tranche sale puis sa libération). Outils : `slotpeer`,
+  `qfbmode` (guest/qgpu-test), job `stall`, `tools/guest/epreuve_gpu_bloque.py`.
+  `tests/qgpu_smoke.py` vert sur le nouveau binaire. **À faire :** reconstruire les binaires de
+  référence (PC et M4) et installer le kext dans les VM.
+
 - **Paquet invité `20261007c` (main 97fad0a) et revue de DOOM 3 sous programme ARB, PC, 07/10
   09:05** : job `gpu` **56 OK, 0 échec** (`vpimm` 44/44, `pixstore`, `matbegin`, `matsonde`) ;
   `disks/prebuilt` régénéré (ancien en `bench/devloop/prebuilt-20261007b`), paquet

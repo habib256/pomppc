@@ -82,11 +82,24 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   le repli « objet non résident → Apple » envoie des interactions ARB au rendu logiciel.
   Piste : sous programme ARB, ne pas rendre le dessin à Apple pour une texture non résidente
   (unité coupée, ou texture repliée en basse résolution), puis rejouer à 128 Mio (à 512 Mio
-  aucun refus n'arrive). (2) **GPU hôte bloqué** (GL3, KT4, K6, et L2 de `architecture.md`
-  §5) : ajouter au device `x-test-stall-ms` (le thread de rendu dort avant chaque job,
-  réglable par `qom-set`) et `x-test-refuse-reset`, puis bloquer, recharger le kext,
-  `system_reset`, débloquer : device « cassé » puis réparé, fenêtre qfb reliée.
-  **Fermeture :** une ligne de preuve par point dans la même section.
+  aucun refus n'arrive). (2) **GPU hôte bloqué : tenu le 14/10 sur le PC**
+  (`docs/epreuve-gpu-bloque.md`, propriétés `x-test-stall-ms` et `x-test-refuse-reset` du
+  device, preuves dans `bench/stall-20261014/`) :
+  - **GL3** : GPU bloqué, job en vol, kext rechargé → « reset non terminé après 5000 ms »,
+    le kext lit CAPS = 0 et refuse de démarrer, moniteur servi (pire 5,01 s) ; débloqué,
+    `kextload` répare (`QGPUClients = 4`, `qgpu_test` vert) ; même chose par `system_reset`
+    (rendu en 7,0 s, CAPS = CLIENTS = 0 après le redémarrage jusqu'au reset suivant).
+  - **KT4** : mode de l'écran POMPPCQFB changé pendant la panne en 0,001 s, aucune réponse du
+    moniteur au-delà de 0,25 s, CAPS et CLIENTS relus à 0.
+  - **K6** : lien 1024x768 au pas 128 avant la panne, aucun lien pendant, « écran relié de
+    nouveau (qfb-pci, 640x480, pas 1280) » à la réparation ; et, après un correctif trouvé par
+    l'épreuve (géométrie qfb perdue quand le drainage échoue sur un device encore sain,
+    `system_reset` avec job bloqué), relié aussi à 1024x768 au pas 128 sans autre changement.
+  - **L2** : voir A6 (`CHANGELOG.md`) — avec le kext d'avant, 4 `QGPU_ST_LIMIT` sur 5
+    scénarios ; avec celui du dépôt, 0 sur 5, autre tranche ou attente, journal du kext qui
+    nomme la tranche sale puis sa libération. KT5 en prime : `quit` bloqué sort en 5,06 s.
+  **Reste du point (2) :** reconstruire `build/` et `build-fast/` (PC) puis le M4 avec ce
+  device, et installer le kext A6 dans les VM (paquet invité ; ABI inchangée, plugin intact).
 
 ## Ensuite
 
@@ -110,19 +123,6 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   Warcraft III, Colin McRae et Nexuiz. A/B DOOM 3 complet : −6,0 % sur six
   parties par configuration. Preuves : `docs/jit-m4-2026-10-05.md` et
   `docs/mesures/m4-20261006/`.
-
-- [ ] **[Architecture] A6, reste L2 — créneau rendu malgré un nettoyage échoué**
-  ([docs/architecture.md](docs/architecture.md) §5, relu le 07/10 ; L3 et L4 fermées dans le
-  code, leurs épreuves sont dans l'entrée « Validation » ; L5 fermée le 07/10 par le compteur
-  d'erreurs par tranche, `CHANGELOG.md`). Kext : `destroyClientObjects` rend un `IOReturn` et la barrière visée,
-  `slotGated` marque le créneau sale au lieu de le rendre, `allocSlot` ne le redonne qu'une
-  fois cette barrière atteinte et relance d'abord un CLIENT_RESET jamais parti, `resetSlot`
-  rend l'échec. `run_a6` (`tests/qgpu_core_test.c`) fixe ce que voit le cœur : nettoyage
-  manqué → `QGPU_ST_LIMIT` fatal à la première création du nouvel occupant, retardé → sans
-  effet sur les objets (FIFO), rejoué après réattribution → objets du nouveau détruits.
-  **Fermeture :** propriété de test du device (retard du thread de rendu, refus de
-  CLIENT_RESET), puis en VM : client tué pendant une soumission, file pleine, nouveau client
-  ouvert → autre créneau ou attente, jamais `QGPU_ST_LIMIT` à sa première création.
 
 - [ ] **[Métrologie] A/B de l'attente** : `QGPU_GL_FLUSH` et `POMPPC_GL_QFLUSH` ont été allumés
   le 01/10 à la demande de l'utilisateur sans l'A/B prévu (un seul tour : Nexuiz GLSL 36,1 → 35,3,

@@ -146,7 +146,15 @@ private:
                               void * a2, void * a3);
     /* Contexte gated : dort jusqu'à ce que FENCE atteigne `target`. */
     IOReturn sleepForFence(UInt32 target, UInt32 timeoutMs, UInt32 * current);
-    void     destroyClientObjects(int slot);
+    /* A6 (L2, 14/10/2026) : rend le verdict du nettoyage. kIOReturnSuccess
+       = objets détruits ET tranche plus lue (barrière atteinte). Sinon
+       `*fence` vaut la barrière du CLIENT_RESET accepté mais pas encore
+       atteint, ou 0 s'il n'a jamais été mis en file. */
+    IOReturn destroyClientObjects(int slot, UInt32 * fence);
+    /* A6 : contexte gated. Une tranche « sale » (nettoyage échoué) peut-elle
+       être redonnée ? Relance d'abord un CLIENT_RESET jamais parti, puis
+       regarde (ou attend, `mayWait`) sa barrière. */
+    bool     slotCleaned(int slot, bool mayWait);
     IOReturn waitDestroy(UInt32 target, int async);
     static bool     irqFilter(OSObject * owner, IOFilterInterruptEventSource * src);
     static void     irqAction(OSObject * owner, IOInterruptEventSource * src, int count);
@@ -185,6 +193,13 @@ private:
        même client) est noté ici ; le fil occupé rend la tranche en sortant.
        Sans cela, la tranche restait prise jusqu'au déchargement du kext. */
     POMPPCGPUUserClient * fFreePending[POMPPC_KEXT_MAX_CLIENTS];
+    /* A6 (L2) : tranche dont le nettoyage a échoué. allocSlot ne la redonne
+       qu'une fois propre : SLOT_DIRTY_UNSENT = CLIENT_RESET jamais mis en file
+       (refusé, file non drainée) — à relancer avant tout ; SLOT_DIRTY_FENCE =
+       accepté, barrière fSlotFence pas encore atteinte (FIFO : quand elle
+       l'est, objets détruits ET tranche plus lue). Sous la gate. */
+    UInt32   fSlotDirty[POMPPC_KEXT_MAX_CLIENTS];
+    UInt32   fSlotFence[POMPPC_KEXT_MAX_CLIENTS];
     /* Bug hunt 3 : appels en vol (enterCall/leaveCall), atomique. */
     volatile SInt32 fCallers;
 
