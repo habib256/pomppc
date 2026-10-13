@@ -81,7 +81,7 @@ Principes fixés une fois pour toutes :
 | `patches/qgpu/qgpu-core.[ch]` | analyse et validation du flux, contextes, surfaces, textures ; indépendant de QEMU |
 | `patches/qgpu/qgpu-soft.c` | backend logiciel de référence : pipeline OpenGL 1.x par fragment |
 | `patches/qgpu/qgpu-gl.c` | **backend OpenGL** : CGL (macOS) / EGL (Linux), FBO + profondeur par surface |
-| `patches/qgpu/qgpu-pci.c` | device QEMU ; `backend=auto\|soft\|gl`, `shmem_mb`, `trace=on` |
+| `patches/qgpu/qgpu-pci.c` | device QEMU ; `backend=auto\|soft\|gl`, `shmem_mb`, `trace=on` ; propriétés de test `x-test-stall-ms`, `x-test-refuse-reset` (`docs/epreuve-gpu-bloque.md`) |
 | `kext/POMPPCGPU/` | le kext : autant de clients que le device en publie (4), une tranche de 16 Mio chacun ; les plages d'identifiants sont celles du device, qui détruit lui-même les objets d'un client mort |
 | `guest/gldriver/` | **le plugin OpenGL** (`pomppc_gld.c` points d'entrée, `pomppc_accel.c` accélération, `pomppc_qgpu.c` client du kext, `gld_tramp.s` trampolines générés), `install.sh` |
 | `guest/gltest/` | `gltest` (hors écran, 12 scènes avec pixels témoins) et `glwin` (fenêtre GLUT) |

@@ -878,6 +878,11 @@ IOReturn POMPPCGPU::waitFenceCounted(UInt32 target, UInt32 timeoutMs, UInt32 * c
  * libre, pas la sienne : flux écrit dans l'ancienne, offsets de la nouvelle).
  */
 
+/* A6 : états de fSlotDirty */
+#define SLOT_CLEAN          0
+#define SLOT_DIRTY_UNSENT   1
+#define SLOT_DIRTY_FENCE    2
+
 #define SLOT_OP_ALLOC   0
 #define SLOT_OP_FREE    1         /* détruit les objets ET rend la tranche */
 #define SLOT_OP_RESET   2         /* détruit les objets, garde la tranche */
@@ -904,17 +909,39 @@ IOReturn POMPPCGPU::slotGated(OSObject * owner, void * a0, void *, void *, void 
             a->result = kIOReturnNotReady;
             return kIOReturnSuccess;
         }
+        /* A6 (L2) — trois passes. (1) Relancer, AVANT de redonner quoi que ce
+           soit, le CLIENT_RESET d'une tranche sale qui n'est jamais parti :
+           mis en file après la réattribution, il détruirait les objets du
+           nouvel occupant (run_a6, cas (c)). (2) Une tranche propre, ou sale
+           dont la barrière est atteinte. (3) Faute de mieux, attendre (borné)
+           la barrière d'une tranche sale ; sinon refus, comme une table
+           pleine — jamais une tranche aux objets encore vivants, dont la
+           première création finirait en QGPU_ST_LIMIT fatal. */
         for (i = 0; i < (int) self->fClientCount; i++) {
-            /* fSlotBusy : une tranche dont les objets sont encore en cours de
-               destruction n'est pas libre, même si son client est parti. */
-            if (!self->fClients[i] && !self->fSlotBusy[i]) {
-                self->fClients[i] = a->client;
-                self->fFreePending[i] = 0;
-                a->slot = i;
-                break;
+            if (!self->fClients[i] && !self->fSlotBusy[i] &&
+                self->fSlotDirty[i] == SLOT_DIRTY_UNSENT) {
+                self->slotCleaned(i, false);
             }
         }
-        if (a->slot < 0) {
+        for (i = 0; i < (int) self->fClientCount && a->slot < 0; i++) {
+            /* fSlotBusy : une tranche dont les objets sont encore en cours de
+               destruction n'est pas libre, même si son client est parti. */
+            if (!self->fClients[i] && !self->fSlotBusy[i] &&
+                self->slotCleaned(i, false)) {
+                a->slot = i;
+            }
+        }
+        for (i = 0; i < (int) self->fClientCount && a->slot < 0; i++) {
+            if (!self->fClients[i] && !self->fSlotBusy[i] &&
+                self->slotCleaned(i, true) &&
+                !self->fClients[i] && !self->fSlotBusy[i]) {
+                a->slot = i;                /* gate relâchée : revérifié */
+            }
+        }
+        if (a->slot >= 0) {
+            self->fClients[a->slot] = a->client;
+            self->fFreePending[a->slot] = 0;
+        } else {
             a->result = kIOReturnNoResources;
         }
         return kIOReturnSuccess;
@@ -942,7 +969,32 @@ IOReturn POMPPCGPU::slotGated(OSObject * owner, void * a0, void *, void *, void 
         return kIOReturnSuccess;
     }
     self->fSlotBusy[a->slot] = 1;
-    self->destroyClientObjects(a->slot);        /* peut dormir : gate relâchée */
+    {
+        UInt32   fence = 0;
+        IOReturn kr = self->destroyClientObjects(a->slot, &fence);   /* peut dormir */
+
+        if (kr == kIOReturnSuccess) {
+            self->fSlotDirty[a->slot] = SLOT_CLEAN;
+        } else {
+            /* A6 (L2) : le retour réussi d'une fermeture ou d'un reset ne
+               mentait plus que sur ce point — le nettoyage. La tranche reste
+               « sale » : allocSlot ne la redonnera qu'une fois sa barrière
+               atteinte, en relançant d'abord un CLIENT_RESET jamais parti. */
+            self->fSlotDirty[a->slot] = fence ? SLOT_DIRTY_FENCE : SLOT_DIRTY_UNSENT;
+            self->fSlotFence[a->slot] = fence;
+            if (fence) {
+                GPULog("slot %d: dirty, CLIENT_RESET queued but fence %lu not "
+                       "reached: not reused before it is\n", a->slot,
+                       (unsigned long) fence);
+            } else {
+                GPULog("slot %d: dirty, CLIENT_RESET never queued: resent before "
+                       "the slot is reused\n", a->slot);
+            }
+            /* resetSlot rend l'échec au client ; freeSlot aussi (sans
+               conséquence : le client s'en va). */
+            a->result = kr;
+        }
+    }
     self->fSlotBusy[a->slot] = 0;
     if ((a->op == SLOT_OP_FREE || self->fFreePending[a->slot] == a->client) &&
         self->fClients[a->slot] == a->client) {
@@ -1083,13 +1135,14 @@ IOReturn POMPPCGPU::waitDestroy(UInt32 target, int async)
     return kIOReturnSuccess;
 }
 
-void POMPPCGPU::destroyClientObjects(int slot)
+IOReturn POMPPCGPU::destroyClientObjects(int slot, UInt32 * fence)
 {
     UInt32 want = 0, tries = 0;
     int    async;
 
+    *fence = 0;
     if (fStopping || !fRegs) {
-        return;                     /* plus personne à qui parler */
+        return kIOReturnNotReady;   /* plus personne à qui parler */
     }
     async = (fAsync && fTimer && fGate) ? 1 : 0;
 
@@ -1106,18 +1159,74 @@ void POMPPCGPU::destroyClientObjects(int slot)
             GPULog("slot %d: device refused CLIENT_RESET (status %lu, try %lu): "
                    "objects left behind\n", slot, (unsigned long) st,
                    (unsigned long) tries);
-            return;
+            return kIOReturnNoResources;
         }
         if (waitDestroy(regRead(QGPU_REG_FENCE_SUBMITTED), async) != kIOReturnSuccess) {
             GPULog("slot %d: host did not drain in %d ms before CLIENT_RESET\n",
                    slot, DESTROY_WAIT_MS);
-            return;
+            return kIOReturnTimeout;
         }
     }
+    *fence = want;
     if (waitDestroy(want, async) != kIOReturnSuccess) {
         GPULog("slot %d: host did not finish CLIENT_RESET in %d ms\n",
                slot, DESTROY_WAIT_MS);
+        return kIOReturnTimeout;
     }
+    return kIOReturnSuccess;
+}
+
+/* A6 (L2) — contexte gated. Vrai si la tranche `slot` peut être redonnée :
+ * propre, ou sale et nettoyée maintenant. Une tranche sale dont le
+ * CLIENT_RESET n'est jamais parti le relance d'abord (une écriture, pas
+ * d'attente) ; ensuite c'est sa barrière qui décide : FIFO, quand FENCE l'a
+ * atteinte, les objets sont détruits ET plus aucune soumission de l'ancien
+ * occupant ne lit la tranche. `mayWait` : attendre cette barrière (borné par
+ * DESTROY_WAIT_MS, gate relâchée, tranche tenue par fSlotBusy). */
+bool POMPPCGPU::slotCleaned(int slot, bool mayWait)
+{
+    IOReturn kr;
+
+    if (fSlotDirty[slot] == SLOT_CLEAN) {
+        return true;
+    }
+    if (fStopping || !fRegs) {
+        return false;
+    }
+    if (fSlotDirty[slot] == SLOT_DIRTY_UNSENT) {
+        UInt32 st;
+
+        regWrite(QGPU_REG_CLIENT_RESET, (UInt32) slot);
+        st = regRead(QGPU_REG_SUBMIT_ST);
+        if (st != QGPU_ST_OK) {
+            GPULog("slot %d: dirty, CLIENT_RESET refused again (status %lu): "
+                   "slot not reused\n", slot, (unsigned long) st);
+            return false;
+        }
+        fSlotFence[slot] = regRead(QGPU_REG_FENCE_SUBMITTED);
+        fSlotDirty[slot] = SLOT_DIRTY_FENCE;
+        GPULog("slot %d: dirty, CLIENT_RESET resent (fence %lu)\n", slot,
+               (unsigned long) fSlotFence[slot]);
+    }
+    if ((SInt32) (regRead(QGPU_REG_FENCE) - fSlotFence[slot]) < 0) {
+        if (!mayWait) {
+            return false;
+        }
+        fSlotBusy[slot] = 1;
+        kr = waitDestroy(fSlotFence[slot],
+                         (fAsync && fTimer && fGate) ? 1 : 0);
+        fSlotBusy[slot] = 0;
+        if (kr != kIOReturnSuccess) {
+            GPULog("slot %d: still dirty, fence %lu not reached in %d ms: "
+                   "slot not reused\n", slot, (unsigned long) fSlotFence[slot],
+                   DESTROY_WAIT_MS);
+            return false;
+        }
+    }
+    fSlotDirty[slot] = SLOT_CLEAN;
+    GPULog("slot %d: clean again (fence %lu reached), may be reused\n", slot,
+           (unsigned long) fSlotFence[slot]);
+    return true;
 }
 
 /* v19 : lecture d'un registre pour le userland. Bornée sur le BAR, pas sur
