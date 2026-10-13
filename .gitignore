@@ -9,6 +9,8 @@ disks/*.toast
 disks/*.cdr
 disks/cdr/
 disks/prebuilt/
+disks/mac-*/
+disks/chimes/
 images/
 work/
 *.hfs
