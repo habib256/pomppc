@@ -86,6 +86,7 @@
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
+#include "qapi/visitor.h"
 #include "qemu/error-report.h"
 #include "migration/blocker.h"
 #include "ui/console.h"
@@ -277,7 +278,16 @@ struct QgpuPCIState {
     bool       q_fini;             /* … en libérant d'abord le backend */
     bool       q_reset;            /* demande de reset du cœur, par le thread */
     bool       broken;             /* GL3 : reset non terminé à l'échéance */
-    bool       scanout_rebind;     /* bug hunt 4 : lien sauté pendant la panne */
+    bool       scanout_rebind;     /* bug hunt 4 : lien sauté pendant la panne ;
+                                      14/10 : ou faute de drainage */
+    /* Propriétés de TEST (14/10/2026), réglables à chaud par qom-set : de quoi
+       éprouver en VM un GPU hôte bloqué (GL3, KT4, K6) et un nettoyage de
+       tranche refusé (L2, docs/architecture.md §5). Éteintes (0) par défaut,
+       et alors sans coût : une lecture relâchée par job, une par CLIENT_RESET.
+       Écrites par le thread principal (BQL), lues par le thread de rendu :
+       qatomic des deux côtés. Voir qgpu_test_stall. */
+    uint32_t   test_stall_ms;      /* x-test-stall-ms : sieste avant chaque job */
+    bool       test_refuse_reset;  /* x-test-refuse-reset : CLIENT_RESET refusé */
     bool       thread_ok;
     QEMUBH    *irq_bh;
     Notifier   exit_notifier;
@@ -427,6 +437,38 @@ static void qgpu_run_job(QgpuPCIState *s, const QgpuJob *job)
     }
 }
 
+/*
+ * x-test-stall-ms — un GPU hôte BLOQUÉ, à la demande. Le thread de rendu dort
+ * avant le job qu'il vient de prendre, AVEC ce job « en cours » (q_running) :
+ * exactement ce que voit le reste du device quand le pilote GL hôte ne rend
+ * plus la main au milieu d'une soumission. Doorbells synchrones abandonnés à
+ * QGPU_SYNC_WAIT_MS, file qui se remplit (QUEUE_FULL), reset borné à
+ * QGPU_RESET_WAIT_MS puis device « cassé » (GL3) : tout se joue sans toucher
+ * au backend. La valeur est relue toutes les 10 ms : un `qom-set … 0` débloque
+ * aussitôt le job en cours, et une valeur plus courte raccourcit la sieste. La
+ * demande d'arrêt du thread (sortie de QEMU) l'interrompt aussi. Rien de
+ * propre à un hôte : g_usleep et l'horloge de QEMU.
+ */
+static void qgpu_test_stall(QgpuPCIState *s, const QgpuJob *job)
+{
+    int64_t t0 = qemu_clock_get_ms(QEMU_CLOCK_REALTIME), held;
+    uint32_t ms;
+
+    while ((ms = qatomic_read(&s->test_stall_ms)) != 0 &&
+           qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - t0 < ms &&
+           !qatomic_read(&s->q_stop)) {
+        g_usleep(10 * 1000);
+    }
+    held = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - t0;
+    /* Une ligne par job retenu plus d'une seconde : de quoi dater la panne et
+       sa fin dans le journal sans noyer une sieste courte répétée. */
+    if (held >= 1000 || s->trace) {
+        fprintf(stderr, "qgpu-pci: x-test-stall-ms : job %s%x retenu %"
+                PRId64 " ms\n", job->kind == QGPU_JOB_CLIENT_RESET
+                ? "CLIENT_RESET tranche " : "flux off=0x", job->off, held);
+    }
+}
+
 static void *qgpu_render_thread(void *opaque)
 {
     QgpuPCIState *s = opaque;
@@ -466,6 +508,9 @@ static void *qgpu_render_thread(void *opaque)
         s->q_running = true;
         qemu_mutex_unlock(&s->lock);
 
+        if (unlikely(qatomic_read(&s->test_stall_ms))) {
+            qgpu_test_stall(s, &job);   /* x-test-stall-ms, éteint par défaut */
+        }
         qgpu_run_job(s, &job);          /* hors verrou, hors BQL */
 
         qemu_mutex_lock(&s->lock);
@@ -695,6 +740,16 @@ static void qgpu_client_reset(QgpuPCIState *s, uint32_t slot)
         s->regs[QGPU_REG_SUBMIT_ST >> 2] = QGPU_ST_BAD_ARG;
         return;
     }
+    if (unlikely(qatomic_read(&s->test_refuse_reset))) {
+        /* x-test-refuse-reset : le refus que le kext rencontre en vrai quand
+           la file est pleine (et après lequel il réessaie DESTROY_RETRIES
+           fois avant de laisser les objets derrière lui, L2). Rien n'est mis
+           en file, aucun compteur n'avance. */
+        s->regs[QGPU_REG_SUBMIT_ST >> 2] = QGPU_ST_QUEUE_FULL;
+        fprintf(stderr, "qgpu-pci: x-test-refuse-reset : CLIENT_RESET de la"
+                " tranche %u refusé (QUEUE_FULL)\n", slot);
+        return;
+    }
     job.off = slot;
     job.len = 0;
     job.kind = QGPU_JOB_CLIENT_RESET;
@@ -825,6 +880,12 @@ static void qgpu_soft_reset(QgpuPCIState *s)
            file est vide — le drainage est immédiat : relier maintenant. */
         s->scanout_rebind = false;
         qgpu_bind_scanout(s, false);
+        /* Une ligne, rare (une réparation après une panne) : la seule trace,
+           hors `trace=on`, que la fenêtre d'avant la panne a été remplacée. */
+        warn_report("qgpu-pci: reset abouti, écran relié de nouveau (%s,"
+                    " %ux%u, pas %u)", s->scanout.which ? s->scanout.which
+                    : "aucun", s->scanout.width, s->scanout.height,
+                    s->scanout.stride);
     }
     qemu_irq_lower(s->irq);
 }
@@ -1046,6 +1107,7 @@ static bool qgpu_bind_scanout(QgpuPCIState *s, bool complain)
                 qemu_mutex_unlock(&s->lock);
             }
             if (!drained) {
+                s->scanout_rebind = true;       /* 14/10 : retenté, voir plus bas */
                 return false;
             }
             qgpu_unbind_scanout(s);
@@ -1095,6 +1157,17 @@ static bool qgpu_bind_scanout(QgpuPCIState *s, bool complain)
                              " géométrie d'écran n'a pas pu être remise à"
                              " jour ; l'image présentée peut être décalée",
                              QGPU_SYNC_WAIT_MS);
+            /* 14/10/2026 (épreuve « GPU hôte bloqué ») : avec qfb-pci, cette
+               géométrie était perdue pour de bon — la notification est
+               consommée, qgpu_scanout_recheck ne suit que VGA, et
+               scanout_rebind n'était posé que sur un device cassé. Vu en VM :
+               system_reset avec un job bloqué, le reset de qfb-pci passe
+               AVANT celui de qgpu (device pas encore cassé), le lien garde
+               640x480 au pas 1280 quand l'écran est revenu à 1024x768 au pas
+               128, et la réparation ne relie rien. Le drapeau est maintenant
+               posé ici aussi : retenté au prochain doorbell
+               (qgpu_scanout_recheck) et par le reset qui répare le device. */
+            s->scanout_rebind = true;
             return false;
         }
     }
@@ -1188,6 +1261,19 @@ static void qgpu_scanout_recheck(QgpuPCIState *s)
     uint8_t *data = NULL;
     uint32_t stride = 0, height = 0;
 
+    if (unlikely(s->scanout_rebind)) {
+        /* Un lien abandonné faute de drainage (ou pendant une panne) : on
+           le retente ici, device sain (le doorbell d'un device cassé ne
+           vient pas jusqu'ici). qgpu_bind_scanout repose le drapeau s'il
+           échoue encore. */
+        s->scanout_rebind = false;
+        if (qgpu_bind_scanout(s, false)) {
+            warn_report("qgpu-pci: écran relié de nouveau après un lien"
+                        " abandonné (%s, %ux%u, pas %u)", s->scanout.which ?
+                        s->scanout.which : "aucun", s->scanout.width,
+                        s->scanout.height, s->scanout.stride);
+        }
+    }
     if (!s->scanout.con) {
         return;
     }
@@ -1491,12 +1577,68 @@ static const Property qgpu_pci_properties[] = {
     DEFINE_PROP_BOOL("trace", QgpuPCIState, trace, false),
 };
 
+/* Accesseurs des propriétés de test : qatomic, le thread de rendu les lit
+   sans verrou. Une ligne au journal à chaque changement sur un device vivant,
+   pour dater l'épreuve. */
+static void qgpu_get_test_stall(Object *obj, Visitor *v, const char *name,
+                                void *opaque, Error **errp)
+{
+    uint32_t val = qatomic_read(&QGPU_PCI(obj)->test_stall_ms);
+
+    visit_type_uint32(v, name, &val, errp);
+}
+
+static void qgpu_set_test_stall(Object *obj, Visitor *v, const char *name,
+                                void *opaque, Error **errp)
+{
+    QgpuPCIState *s = QGPU_PCI(obj);
+    uint32_t val;
+
+    if (!visit_type_uint32(v, name, &val, errp)) {
+        return;
+    }
+    qatomic_set(&s->test_stall_ms, val);
+    if (DEVICE(obj)->realized) {
+        fprintf(stderr, "qgpu-pci: x-test-stall-ms = %u\n", val);
+    }
+}
+
+static bool qgpu_get_test_refuse(Object *obj, Error **errp)
+{
+    return qatomic_read(&QGPU_PCI(obj)->test_refuse_reset);
+}
+
+static void qgpu_set_test_refuse(Object *obj, bool val, Error **errp)
+{
+    QgpuPCIState *s = QGPU_PCI(obj);
+
+    qatomic_set(&s->test_refuse_reset, val);
+    if (DEVICE(obj)->realized) {
+        fprintf(stderr, "qgpu-pci: x-test-refuse-reset = %s\n",
+                val ? "on" : "off");
+    }
+}
+
 static void qgpu_pci_instance_init(Object *obj)
 {
     QgpuPCIState *s = QGPU_PCI(obj);
 
     s->backend = g_strdup("auto");
     s->scanout_pref = g_strdup("auto");
+    /* Propriétés d'INSTANCE et non statiques (DEFINE_PROP_*) : une propriété
+       statique de qdev refuse d'être écrite après realize, or tout l'intérêt
+       est de bloquer et débloquer le GPU sur une VM qui tourne
+       (`qom-set /machine/peripheral/gpu0 x-test-stall-ms 600000`). La ligne
+       de commande (-device qgpu-pci,x-test-stall-ms=…) et -global les
+       acceptent de même. */
+    object_property_add(obj, "x-test-stall-ms", "uint32",
+                        qgpu_get_test_stall, qgpu_set_test_stall, NULL, NULL);
+    object_property_set_description(obj, "x-test-stall-ms",
+        "TEST : le thread de rendu dort N ms avant chaque job (0 = éteint)");
+    object_property_add_bool(obj, "x-test-refuse-reset",
+                             qgpu_get_test_refuse, qgpu_set_test_refuse);
+    object_property_set_description(obj, "x-test-refuse-reset",
+        "TEST : refuser toute écriture de CLIENT_RESET (QUEUE_FULL)");
 }
 
 static void qgpu_pci_class_init(ObjectClass *klass, const void *data)
