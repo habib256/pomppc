@@ -30,15 +30,6 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 
 ## Maintenant
 
-- [ ] **[Matrice — PC] Plancher d'UT2004 sur le binaire rapide** (`docs/vitesse-doom3-x86.md`
-  §13.6, `docs/matrice-jeux.md` §6 quater). L'A/B du binaire rapide et la matrice finale avec
-  vidage sont faits hôte au repos le 06-07/10 (`x86-fast`, `x86-final`, images justes) ; les
-  planchers de DOOM 3 (140), Marble Blast (19) et Zenerchi (8) sont posés. UT2004 garde 104 :
-  une seule partie du binaire rapide (48,7 ms/image), cellule très dispersée (54-83 selon la
-  session et le vidage). **Fermeture :** au moins trois tours complets avec vidage sur le
-  binaire rapide, hôte au repos (`tools/tcg/chargehote.py`), puis 1,25 × le temps typique ou
-  le pire observé, en disant sur combien de parties il repose.
-
 - [ ] **[Outils] Endurance sur la configuration par défaut** — banc livré le 29/09
   (`tools/endurance/`, `docs/endurance.md`), porté sur Linux et joué une nuit sur le PC le 07/10
   (`docs/endurance.md` §7 : défauts du 06/10 + binaire rapide, **0 panique sur 305 démarrages,

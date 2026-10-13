@@ -9,6 +9,12 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **PC, 13-14/10 : gardien ssh du paquet invité, plancher d'UT2004.** `POMPPCSshGarde`
+  (StartupItem) recharge `ssh.plist` quand launchd l'a chargé sans socket (lo0 sans IPv6 au
+  démarrage, `docs/endurance.md` §8.3-8.5) ; défaut reproduit à la demande et réparé dans la
+  VM. Panique #76 relue (pendant un relevé série ; kalloc.16 corrompue ; `kpanic.py` lit le
+  format de chaque CPU). Plancher Linux d'UT2004 104 → 67 (3 + 3 parties du binaire rapide,
+  fenêtre 51,1, plein écran 53,1 ms/image, `docs/matrice-jeux.md` §6 quater).
 - **Paquet invité `20261007c` (main 97fad0a) et revue de DOOM 3 sous programme ARB, PC, 07/10
   09:05** : job `gpu` **56 OK, 0 échec** (`vpimm` 44/44, `pixstore`, `matbegin`, `matsonde`) ;
   `disks/prebuilt` régénéré (ancien en `bench/devloop/prebuilt-20261007b`), paquet
