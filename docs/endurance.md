@@ -490,11 +490,66 @@ l'utilisateur : (a) `SockFamily IPv4` dans `ssh.plist` (launchctl ne fait plus d
 (b) un LaunchDaemon du paquet invité qui, une fois en0 configurée, recharge `ssh.plist` si rien
 n'écoute sur 22. Côté QEMU : rien à corriger.
 
-### 8.4 Surprise : une panique au démarrage sur le binaire du 07/10
+### 8.4 Surprise : une panique sur le binaire du 07/10, pendant un relevé par la console
 
-`pc-reboot-serie` #76 (instance 2), juste après le `shutdown -r` (msgbuf arrêté à « Waiting on
-… boot-uuid-media ») : **les deux vCPU dans `panic()`**, « 0x300 - Data access ». CPU 0 :
-`_kalloc_canblock+0xd4` ← `OSCollectionIterator::isValid` ← `IORegistryIterator::getNextObjectFlat`
-← `IOService::getMatchingServices` ← `is_io_service_get_matching_services` (appel MIG depuis
-l'espace utilisateur) ; CPU 1 : `IOWorkLoop::threadMain+0x68`. Une occurrence, non analysée ici :
-`incidents/0076-panique/` (`kpanic.txt`, `ecran.png`).
+Relu le 13/10 (`incidents/0076-panique/`, `cycles/0060/serie.txt`, désassemblage de
+`bench/endurance/invite-10.4.11/mach_kernel`). Le rapport du 07/10 disait « juste après le
+`shutdown -r` », et les deux vCPU en « Data access » : c'était faux.
+
+**Établi.**
+- **Quand :** vers 09:31, pendant le relevé sain par la console du **cycle 60** (instance 2,
+  ~2 min après le démarrage). `date`, `ifconfig`, `netstat`, `arp`, `nc` répondent, puis toutes
+  les commandes à partir de `ps` reviennent vides ; « fin du relevé en 433 s » (13-20 s pour les
+  autres). Le msgbuf va jusqu'à `POMPPCFsqrt`, l'écran montre le bureau figé à 09:31. Le banc a
+  noté le cycle 60 « ok » ; le cycle 76 n'a fait que constater la panique (ssh du `shutdown -r`
+  raté, `panic()` vu). Corrigé : le banc relève la durée du relevé (`serie_s`, `serie_suspect`
+  au-delà de 60 s) et cherche une panique juste après (`pendant_releve`).
+- **CPU 0 :** « 0x300 - Data access », DAR = `0x0d60696f` (impair, non mappé), DSISR = 0x40000000
+  (lecture, pas de traduction), dans `zalloc_canblock` (`kalloc_canblock+0xd4` est le retour du
+  `bl _zalloc_canblock`) appelé par `OSCollectionIterator::isValid` → `kalloc(4)` : zone
+  **kalloc.16**.
+- **CPU 1 :** « **0x700 - Program** » (son r24, format de `panic()`, vaut 0x311868 = cette chaîne),
+  dans un appel virtuel `eventSource->checkForWork()` de `IOWorkLoop::threadMain`.
+  `kpanic.py` réutilisait le format de CPU 0 pour tous les CPU : corrigé (format par CPU).
+- `pci-serial` est un UART en E/S programmées : il ne fait pas de DMA.
+
+**Probable.** La liste libre de kalloc.16 est corrompue : seul `lwz r0,0(r31)` du chemin rapide
+de `zalloc` fait défaut sur la base exacte d'un pointeur impair, donc `free_elements` valait
+`0x0d60696f`, écrit dans le mot 0 d'un élément libre (écriture après libération, ou élément à
+deux propriétaires). La valeur ressemble à un curseur d'octets du noyau (page de `kernel_map`
+rendue), pas à un mot de descripteur DMA (OHCI, DBDMA). Une seule corruption de tas explique les
+deux CPU (objet IOKit à vtable écrasée → appel sauvage → 0x700), même classe de symptôme que la
+panique du bras témoin (§7.2). Le relevé par la console est fortement suspect comme déclencheur
+(1 relevé sur 9 ; ~1 % du temps invité ; p ≈ 0,01 a posteriori) : getty, IRQ 29 et workloop
+d'`Apple16X50Serial` actifs.
+
+**Inconnu.** Le PC exact des deux fautes (savearea non lu, pas de vidage mémoire), l'auteur de
+l'écriture, invité (course SMP dans `Apple16X50Serial`) ou émulateur (cohérence des TLB entre
+vCPU sous MTTCG : `x-sr-tlb`, `x-tlb-precise`).
+
+**Épreuves, par coût :** (1) lire le savearea de la trappe d'origine (r28 de `trap()` à
+`r1_panic+0x70`, `save_srr0` à `ssp+0x180`) et ajouter un `pmemsave` de la RAM à la collecte
+d'une panique ; (2) reproduction accélérée : stress de la console série (`--releve-sain 1`) avec
+`ioreg -l`/`kextstat` en boucle ; (3) une fois un taux connu, A/B par ~30 essais : relevé par ssh
+au lieu de la console, SMP=1, **`-accel tcg,thread=single`** (le plus discriminant : MTTCG ou
+invité), `x-sr-tlb=off`, leviers témoins puis vérificateurs.
+
+### 8.5 Gardien ssh du paquet invité (13/10)
+
+Correction (b) du §8.3, sans toucher à `ssh.plist` d'Apple : l'élément de démarrage
+`POMPPCSshGarde` (`guest/package/StartupItems/`, posé par `install.sh`, `Requires Network`)
+tourne en tâche de fond ~2 min ; si `com.openssh.sshd` est chargé et que rien n'écoute sur 22, il
+attend une adresse IPv6 puis fait `launchctl unload/load` de `ssh.plist`. Trace : syslog et
+`/var/run/POMPPCSshGarde` (vidé à chaque démarrage), relevée par le banc sur chaque démarrage
+sain (`sshgarde` dans `cycles.jsonl`).
+
+**Épreuve dans la VM (13/10, base `disks/tiger-endurance-garde.qcow2`)** : toutes les adresses
+IPv6 retirées, `launchctl load ssh.plist` → `bind(): Can't assign requested address`, sshd chargé,
+port 22 fermé : **le défaut du §8.3 reproduit à la demande**. Gardien lancé : il attend tant
+qu'aucune IPv6 n'existe, puis, `::1` rendu, recharge et le port 22 écoute (IPv4 et IPv6). Ce qui
+était « non vérifié » au §8.3 l'est donc : le rechargement échoue sans IPv6 et réussit avec.
+
+**Base `disks/tiger-endurance-garde.qcow2`** (13/10, lecture seule) : copie de
+`tiger-endurance-serie.qcow2` + `/Library/StartupItems/POMPPCSshGarde`, arrêt propre. Série à
+jouer : `ENDURANCE_BASE=disks/tiger-endurance-garde.qcow2`, `--serie` (console pour les
+incidents) **sans** `--releve-sain` (§8.4 : le relevé périodique est suspect).

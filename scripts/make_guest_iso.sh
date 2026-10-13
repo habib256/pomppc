@@ -33,6 +33,7 @@ cp -R "$PRE/POMPPCGPU.kext" "$PRE/GLDriver-POMPPC.bundle" "$PRE/POMPPCFsqrt.kext
 mkdir -p "$STAGE/StartupItems/POMPPCFsqrt" "$STAGE/tools"
 cp "$ROOT/kext/POMPPCFsqrt/StartupItem/POMPPCFsqrt" \
    "$ROOT/kext/POMPPCFsqrt/StartupItem/StartupParameters.plist" "$STAGE/StartupItems/POMPPCFsqrt/"
+cp -R "$ROOT/guest/package/StartupItems/POMPPCSshGarde" "$STAGE/StartupItems/"
 for t in gltest glwin accelprobe; do [ -f "$PRE/$t" ] && cp "$PRE/$t" "$STAGE/tools/"; done
 cat > "$STAGE/README.txt" <<EOF
 POMPPC guest package $(head -1 "$PRE/VERSION") — Mac OS X 10.4 Tiger (PowerPC)

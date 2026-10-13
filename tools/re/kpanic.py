@@ -284,17 +284,20 @@ def main():
         print("CPU %d dans panic (%08x) ; arguments à r1+0x%x, format dans r%d (%s)"
               % (n, p, off_args, reg_fmt, origine))
         args = mots(cmd, r1 + off_args, 7, virt=True)
-        if not fmt and gpr.get(reg_fmt):
-            # panic() remet panicstr à 0 au retour de Debugger(), AVANT la
-            # boucle finale ; le format reste dans r24 (mr r24,r3 au prologue du 10.4.6)
+        # le format de CE CPU : panic() remet panicstr à 0 au retour de Debugger(),
+        # AVANT la boucle finale, mais le garde dans r24 (mr r24,r3 au prologue) ;
+        # chaque CPU a le sien (#76 : CPU 0 « 0x300 - Data access », CPU 1
+        # « 0x700 - Program ») — panicstr ne sert que de repli
+        fmt_cpu = fmt
+        if gpr.get(reg_fmt):
             b = bytearray()
             for w in mots(cmd, gpr[reg_fmt], 64, virt=True):
                 b += w.to_bytes(4, "big")
-            fmt = texte(bytes(b))
-            print("  format (r%d = %08x) « %s »" % (reg_fmt, gpr[reg_fmt], fmt.rstrip()))
+            fmt_cpu = texte(bytes(b)) or fmt
+            print("  format (r%d = %08x) « %s »" % (reg_fmt, gpr[reg_fmt], (fmt_cpu or "").rstrip()))
         print("CPU %d dans panic : arguments %s" % (n, " ".join("%08x" % a for a in args)))
-        if fmt and args:
-            print("  texte : %s" % formater(cmd, fmt, args).rstrip())
+        if fmt_cpu and args:
+            print("  texte : %s" % formater(cmd, fmt_cpu, args).rstrip())
         print("  pile (chaîne arrière) :")
         f = r1
         for _ in range(24):

@@ -773,7 +773,9 @@ def attend_demarrage(vm, t0, delai, repos):
                                    "kextstat; ls /Library/Logs/panic.log 2>/dev/null; "
                                    # §8 : l'échec de l'IPv6 de lo0 au démarrage, que les
                                    # « pas de ssh » ont tous ; ici, sur les démarrages sains
-                                   "echo tiger974 | sudo -S -p '' dmesg | grep in6_ifattach",
+                                   "echo tiger974 | sudo -S -p '' dmesg | grep in6_ifattach; "
+                                   # rattrapages du gardien du paquet invité (§8.5)
+                                   "sed 's/^/sshgarde: /' /var/run/POMPPCSshGarde 2>/dev/null",
                                    delai=60)
                 det = {"t_ssh": round(t), "sortie": out}
                 n = out.split("\n", 1)[0].strip()
@@ -972,6 +974,9 @@ def res_demarrage(camp, vm, t, num, depart, etat, det, t0):
         m = re.search(r"in6_ifattach\S*: .*\(errno=(\d+)\)", sortie)
         if m:
             res["in6_lo0_errno"] = int(m.group(1))
+        garde = re.findall(r"^sshgarde: (.*)$", sortie, re.M)
+        if garde:
+            res["sshgarde"] = garde
         camp.verifie_noyau(sortie)
         journal("[%d] %s #%d : ok (%s, ssh à %s s, charge %s)"
                 % (vm.slot, t, num, depart, det.get("t_ssh"), res["charge"]["l1_max"]))
@@ -1030,11 +1035,23 @@ def instance(camp, slot):
                 open(os.path.join(cyc, "sante.txt"), "w").write(det.get("sortie", ""))
                 if vm.serie and a.releve_sain and i % a.releve_sain == 0:
                     # référence : le même relevé par la console sur un démarrage sain
+                    tr = time.time()
                     n = releve_serie(vm.serie, cyc)
                     res["serie"] = n.get("serie_resume") or n.get("serie")
-                if a.mode == "froid" and not a.garde:
+                    res["serie_s"] = round(time.time() - tr)
+                    # #76 (§8.4) : la panique est tombée PENDANT un relevé sain (433 s
+                    # au lieu de 13-20, commandes vides), et le cycle était noté « ok »
+                    if res["serie_s"] > 60:
+                        res["serie_suspect"] = True
+                    if not vm.vivant() or vm.panique_en_cours():
+                        if vm.vivant():
+                            time.sleep(5)       # laisse finir le texte de la panique
+                        etat = "panique" if vm.vivant() else "qemu-mort"
+                        res = res_demarrage(camp, vm, "demarrage", i, depart, etat,
+                                            {"t": round(time.time() - t0), "pendant_releve": True}, t0)
+                if etat == "ok" and a.mode == "froid" and not a.garde:
                     shutil.rmtree(cyc, ignore_errors=True)
-            else:
+            if etat != "ok":
                 vm.quitte()
                 vivante = False
             camp.note(res)

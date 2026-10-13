@@ -48,11 +48,14 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   du 01/10, jamais éprouvé) ; (2) sur le PC, les « pas de ssh » : **cause trouvée le 07/10**
   par la console série du banc (`--serie`, `docs/endurance.md` §8) — course dans l'invité :
   l'IPv6 de lo0 ne s'attache pas (`in6_ifattach_loopback … errno=17/55`), `launchctl` échoue au
-  `bind()` IPv6 de `ssh.plist` et abandonne aussi l'IPv4 ; rien de QEMU. **Reste :** la
-  correction côté invité (`SockFamily IPv4` dans `ssh.plist`, ou garde qui recharge
-  `ssh.plist`), puis une série sans cas ; vérifier le rechargement par la console au prochain
-  cas ; (2 bis) la panique #76 de `pc-reboot-serie` (binaire du 07/10, deux vCPU dans `panic()`,
-  `kalloc` sous `getMatchingServices`, §8.4) ; (3) une tranche de démarrages à froid (non jouée, faute de temps).
+  `bind()` IPv6 de `ssh.plist` et abandonne aussi l'IPv4 ; rien de QEMU. **Correction faite le 13/10**
+  (`docs/endurance.md` §8.5) : gardien `POMPPCSshGarde` du paquet invité (recharge `ssh.plist`
+  une fois une IPv6 présente) ; défaut reproduit à la demande dans la VM et réparé par le
+  gardien. **Reste :** la série sans cas sur la base `tiger-endurance-garde.qcow2` (sans
+  `--releve-sain`) ; (2 bis) la panique #76 : relue le 13/10 (§8.4) — tombée **pendant un
+  relevé par la console**, liste libre de kalloc.16 corrompue (probable), CPU 1 en 0x700 ;
+  suite : savearea + `pmemsave` à la collecte, reproduction par stress de la console, puis A/B
+  `-accel tcg,thread=single` ; (3) une tranche de démarrages à froid (non jouée, faute de temps).
 
 - [ ] **[Système] Plantages en jeu sans cause** — trois défauts, peut-être un seul mécanisme ;
   le banc ci-dessus doit les faire sortir (nuit du 07/10 sur le PC : aucun `LockTimeOut`, aucun

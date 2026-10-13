@@ -1,0 +1,51 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
+# Élément de démarrage : rend ssh quand launchd l'a chargé sans socket (docs/endurance.md §8.3).
+# Course de Tiger au démarrage : si l'IPv6 de lo0 ne s'attache pas, aucune adresse IPv6
+# n'existe quand /etc/rc fait `launchctl load` ; le bind() IPv6 de ssh.plist échoue et
+# launchctl abandonne aussi l'IPv4 — com.openssh.sshd est chargé, rien n'écoute sur 22.
+# Ici, en tâche de fond : si « Session à distance » est active et que rien n'écoute sur 22,
+# attendre une adresse IPv6 (en0 configurée), puis recharger ssh.plist. ssh.plist n'est pas
+# modifié. Journal : syslog (« POMPPCSshGarde ») et /var/run/POMPPCSshGarde (ce démarrage).
+
+. /etc/rc.common
+
+PLIST=/System/Library/LaunchDaemons/ssh.plist
+
+ecoute22 () { netstat -an -p tcp | grep -q '[.:]22 .*LISTEN'; }
+journal () { logger -t POMPPCSshGarde "$1"; echo "$1" >> /var/run/POMPPCSshGarde; }
+
+garde ()
+{
+    i=0
+    while [ $i -lt 40 ]; do                 # ~ 2 min
+        launchctl list | grep -q '^com\.openssh\.sshd$' || return 0   # ssh éteint : rien à faire
+        ecoute22 && { [ $i -gt 0 ] && journal "port 22 à l'écoute"; return 0; }
+        if ifconfig -a | grep -q 'inet6 '; then
+            journal "com.openssh.sshd chargé sans socket : rechargement de ssh.plist"
+            launchctl unload "$PLIST"
+            launchctl load "$PLIST"
+        fi
+        sleep 3
+        i=$((i + 1))
+    done
+    journal "port 22 toujours fermé après 2 min"
+}
+
+StartService ()
+{
+    garde </dev/null >/dev/null 2>&1 &
+}
+
+StopService ()
+{
+    return 0
+}
+
+RestartService ()
+{
+    StartService
+}
+
+RunService "$1"

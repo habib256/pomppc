@@ -11,6 +11,8 @@
 #   GLDriver-POMPPC.bundle  → /System/Library/Extensions  (OpenGL plugin, renders on the host GPU)
 #   POMPPCFsqrt.kext        → /System/Library/Extensions  (advertises fsqrt: faster libm sqrt)
 #   StartupItems/POMPPCFsqrt → /Library/StartupItems      (loads POMPPCFsqrt at boot)
+#   StartupItems/POMPPCSshGarde → /Library/StartupItems   (reloads ssh.plist when launchd
+#                             loaded it without sockets: docs/endurance.md §8.3)
 #
 # Nothing of Apple's is modified: without the qgpu-pci device there is no accelerator, so
 # OpenGL.framework never loads the plugin. Same steps as guest/gldriver/install.sh and
@@ -19,6 +21,7 @@ set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 EXT=/System/Library/Extensions
 SI=/Library/StartupItems/POMPPCFsqrt
+SG=/Library/StartupItems/POMPPCSshGarde
 RES=/System/Library/Frameworks/OpenGL.framework/Versions/A/Resources
 
 if [ "$(id -u)" != 0 ]; then
@@ -28,7 +31,7 @@ fi
 if [ "$1" = "--remove" ]; then
   kextunload -b net.pomppc.POMPPCGPU 2>/dev/null || true
   kextunload -b net.pomppc.POMPPCFsqrt 2>/dev/null || true
-  rm -rf "$EXT/POMPPCGPU.kext" "$EXT/GLDriver-POMPPC.bundle" "$EXT/POMPPCFsqrt.kext" "$SI" \
+  rm -rf "$EXT/POMPPCGPU.kext" "$EXT/GLDriver-POMPPC.bundle" "$EXT/POMPPCFsqrt.kext" "$SI" "$SG" \
          "$RES/GLDriver-POMPPC.bundle" "$RES/GLDriverPOMPPC.bundle"
   rm -f /System/Library/Extensions.mkext /System/Library/Extensions.kextcache
   touch "$EXT"
@@ -36,7 +39,8 @@ if [ "$1" = "--remove" ]; then
   exit 0
 fi
 
-for f in POMPPCGPU.kext GLDriver-POMPPC.bundle POMPPCFsqrt.kext StartupItems/POMPPCFsqrt; do
+for f in POMPPCGPU.kext GLDriver-POMPPC.bundle POMPPCFsqrt.kext StartupItems/POMPPCFsqrt \
+         StartupItems/POMPPCSshGarde; do
   [ -e "$HERE/$f" ] || { echo "missing $HERE/$f: incomplete CD"; exit 1; }
 done
 echo "POMPPC guest package $(head -1 "$HERE/VERSION" 2>/dev/null)"
@@ -59,6 +63,8 @@ sed "/<key>com.apple.kernel<\/key>/{n;s|<string>[^<]*</string>|<string>$(uname -
 chmod 644 "$EXT/POMPPCFsqrt.kext/Contents/Info.plist"
 put "$HERE/StartupItems/POMPPCFsqrt" "$SI"
 chmod 644 "$SI/StartupParameters.plist"
+put "$HERE/StartupItems/POMPPCSshGarde" "$SG"
+chmod 644 "$SG/StartupParameters.plist"
 rm -f /System/Library/Extensions.mkext /System/Library/Extensions.kextcache
 touch "$EXT"
 echo "installed. Reboot, then check:"
