@@ -9,6 +9,14 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Paquet invité `20261014` (main dcac35f), PC, 14/10 06:28** : `disks/prebuilt` régénéré dans
+  la VM de dev (ancien en `bench/devloop/prebuilt-20261007c`) — plugin `20261014-r5` (pagination
+  des textures), kext POMPPCGPU A6 L2 (ABI inchangée), gltest ; ISO
+  `disks/pomppc-guest-20261014.iso` avec en plus le StartupItem `POMPPCSshGarde`. Job `gpu` :
+  **55 OK, 1 échec** (`tex14`, « point atténué : dehors » allumé) — même échec avec le plugin
+  d'avant et en `EGL_PLATFORM=x11` : vient de l'hôte (pilote NVIDIA 595.99 d'Ubuntu 26.04 ; un
+  programme EGL natif atténue pourtant juste), à l'étude. **Pas encore installé** dans la VM
+  quotidienne.
 - **PC, 13-14/10 : gardien ssh du paquet invité, plancher d'UT2004.** `POMPPCSshGarde`
   (StartupItem) recharge `ssh.plist` quand launchd l'a chargé sans socket (lo0 sans IPv6 au
   démarrage, `docs/endurance.md` §8.3-8.5) ; défaut reproduit à la demande et réparé dans la
