@@ -129,7 +129,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261004-d3x"
+#define POMPPC_PLUGIN_REV "20261014-r5"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -235,6 +235,8 @@ static void flush(void);
 static void drain_all(void);
 static long submit_probe(void);       /* reste du 29/09 : sonde de SURF_CREATE */
 static unsigned long nomem_poll(void); /* 3e passe : ligne de base à l'ouverture */
+static unsigned long tex_resident_bytes(void);              /* R5 : pagination */
+static void tex_budget_learn(unsigned long held, const char *why);
 static void buf_raw_invalidate_from(unsigned long from);
 
 /* ───────────────────── dispositions relevées (Tiger 10.4.6) ─────────────────────
@@ -701,6 +703,16 @@ typedef struct PTex {                   /* texture du GLDriver suivie par le plu
     unsigned long  nomem_until;         /* reste du 29/09 : l'hôte a refusé sa mémoire
                                            (QGPU_ST_NO_MEM) — rendue par Apple jusqu'à
                                            cette image, puis nouvel essai */
+    int            copy_dst;            /* R5 (14/10) : destination de COPY_TEX depuis
+                                           sa dernière définition par l'invité — ses
+                                           niveaux invité ne disent rien (souvent pas
+                                           même alloués : _currentRender de DOOM 3) ;
+                                           perdue sur l'hôte, elle repart NOIRE au lieu
+                                           d'être relue (faute, CrashReporter) */
+    unsigned long  host_bytes;          /* R5 (14/10) : octets que l'hôte tient pour
+                                           elle (niveaux en 32 bits, comme le cœur
+                                           les compte), estimés au téléversement ;
+                                           valent tant que qtex >= 0 (tex_paging) */
     /* 3e passe (bug hunt du 29/09) — PERTE CIBLÉE. up_seq : numéro de la
        dernière soumission qui a porté l'image de la texture (TEX_IMAGE3,
        blanc, COPY_TEX, SURF_TEX) ; invalidate_mirrors_from ne remet à zéro
@@ -998,6 +1010,20 @@ static struct {
     unsigned long   n_posts_lost;
     unsigned long   nomem_until;
     unsigned long   n_nomem;
+    /* R5 (14/10) — PAGINATION DES TEXTURES sous le plafond (POMPPC_GL_TEXPAGE,
+       défaut 1). tex_budget : octets de textures que l'hôte a montré pouvoir
+       tenir, appris au premier refus (0 = rien appris, pas de limite) ;
+       avant chaque téléversement, les textures les moins récemment servies
+       sont évincées pour rester dessous — comme un pilote qui pagine sa VRAM.
+       Un objet refusé n'est plus rendu à Apple : sous programme ARB, le rendu
+       logiciel de GLEngine sortait par exit() (gleBuildInterpolateFunc). */
+    int             texpage;
+    unsigned long   tex_budget;
+    unsigned long   held, held_frame;   /* tex_resident_bytes, recompté une fois par
+                                           image (held_frame = image + 1), tenu à
+                                           jour entre deux par nos évictions et nos
+                                           téléversements */
+    unsigned long   n_page_evict, page_evict_kb, n_page_learn, n_page_retry;
     unsigned long  *cmd;                /* = win */
     unsigned long   ncmd;
     unsigned long   vtx;                /* octets utilisés depuis VTX_OFF */
@@ -1044,6 +1070,7 @@ static struct {
     PCtx           *list;
     PTex           *textures;
     uint64_t        tex_clock;
+    uint64_t        tex_clock_frame;    /* R5 : tex_clock au début de l'image (evict_lru) */
     unsigned long   n_texevictions;
     /* statistiques */
     unsigned long   n_tris, n_clears, n_submits, n_uploads, n_readbacks, n_fallback;
@@ -1717,6 +1744,11 @@ static void sync_frame(void)
             sync_name[2], G.n_sync[2], G.t_sync[2] * 1000,
             sync_name[3], G.n_sync[3], G.t_sync[3] * 1000,
             G.n_async, G.t_async * 1000);
+    if (G.texpage && G.tex_budget)       /* R5 : compteurs cumulés depuis le début */
+        gl_note("TEXPAGE image %lu : budget %lu Kio, tenu %lu Kio, %lu évictions (%lu Kio), "
+                "%lu téléversements de niveaux, %lu reprises, %lu NO_MEM nommés\n",
+                G.n_frames, G.tex_budget >> 10, tex_resident_bytes() >> 10, G.n_page_evict,
+                G.page_evict_kb, G.n_texuploads, G.n_page_retry, G.n_nomem);
     for (k = 0; k < SYNC_N; k++) {
         G.n_sync_all[k] += G.n_sync[k];
         G.t_sync_all[k] += G.t_sync[k];
@@ -1752,6 +1784,7 @@ static void stats_frame(void *ctx)
         t0 = now_s();
     }
     G.n_frames++;
+    G.tex_clock_frame = G.tex_clock;    /* R5 : ce qui suit sert à cette image */
     trace_frame(ctx);
     async_rearm();
     if (G.lazy && G.n_frames % 500 == 0)
@@ -2080,6 +2113,11 @@ static void on_exit_stats(void)
     if (getenv("POMPPC_GL_STATS")) {
         int k;
         fprintf(stderr, "POMPPC GL: texture cache: %lu evictions\n", G.n_texevictions);
+        if (G.texpage)
+            fprintf(stderr, "POMPPC GL: texture paging: budget %lu KiB (%lu learned), "
+                    "%lu evictions (%lu KiB), %lu retries, %lu NO_MEM\n",
+                    G.tex_budget >> 10, G.n_page_learn, G.n_page_evict,
+                    G.page_evict_kb, G.n_page_retry, G.n_nomem);
         for (k = 0; k < NO_COUNT; k++)
             if (no_count[k])
                 fprintf(stderr, "POMPPC GL: reject %s: %lu (first: %s)\n",
@@ -2518,6 +2556,11 @@ void pomppc_backend_init(void)
                 }
                 e = getenv("POMPPC_GL_DISPONE");
                 G.dispone = e && e[0] ? e[0] != '0' : DISPONE_DEFAULT;
+                /* R5 (14/10) : pagination des textures sous le plafond
+                   mémoire de l'hôte (tex_make_room). =0 : l'ancien repli
+                   « objet refusé → Apple pendant NOMEM_BACKOFF images ». */
+                e = getenv("POMPPC_GL_TEXPAGE");
+                G.texpage = e && e[0] ? e[0] != '0' : 1;
                 e = getenv("POMPPC_GL_UNITVD");
                 G.unitvd = (e && e[0] ? e[0] != '0' : UNITVD_DEFAULT) &&
                            G.verdict && G.wl && G.texmemo;
@@ -2546,11 +2589,11 @@ void pomppc_backend_init(void)
             gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d lazyapple=%d "
                     "native=%d (plages %d) count=%d verdict=%d verdictcheck=%d whitelist=%d "
                     "texmemo=%d stskip=%d statecheck=%d wlunif=%d stateblk=%d "
-                    "rawsane=%d natshm=%d idxlazy=%d idxvec=%d dispone=%d unitvd=%d\n",
+                    "rawsane=%d natshm=%d idxlazy=%d idxvec=%d dispone=%d unitvd=%d texpage=%d\n",
                     G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range,
                     G.count, G.verdict, G.vcheck, G.wl, G.texmemo, G.stskip, G.stcheck,
                     G.wlunif, G.stblk + G.stblk_check, G.rawsane, G.natshm,
-                    G.idxlazy, G.idxvec, G.dispone, G.unitvd);
+                    G.idxlazy, G.idxvec, G.dispone, G.unitvd, G.texpage);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
                        " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
@@ -3417,6 +3460,25 @@ static void nomem_seen(unsigned long pc, unsigned long seq)
     case QGPU_OP_SURF_TEX:
         for (t = G.textures; t; t = t->next)
             if (t->qtex == id) {
+                /* R5 : ce que nos textures tenaient, sans elle, est au plus
+                   ce que l'hôte peut tenir */
+                unsigned long held = tex_resident_bytes();
+                if (G.tex_budget && held <= G.tex_budget) {
+                    /* Elle avait été évincée pour tenir dans le budget :
+                       l'écart vient d'ailleurs (tampons, réserves, mipmaps
+                       de l'hôte), d'une taille inconnue. Sans elle, on
+                       retranchait sa taille entière — 11 Mio d'un coup à
+                       128 Mio (DOOM 3), et 4 Mio retéléversés à chaque
+                       image ensuite. Un quart, 1 Mio au moins. */
+                    unsigned long step = t->host_bytes / 4;
+                    if (step < (1UL << 20))
+                        step = 1UL << 20;
+                    tex_budget_learn(G.tex_budget > step ? G.tex_budget - step : 0,
+                                     "texture refusée dans le budget");
+                } else {
+                    tex_budget_learn(held > t->host_bytes ? held - t->host_bytes : 0,
+                                     "texture refusée");
+                }
                 t->nomem_until = until;
                 t->dirty = 1;           /* niveau absent ou à l'ancienne taille */
                 t->lost_gen++;          /* 3e passe : upload_texture ne la redit pas propre */
@@ -3438,6 +3500,12 @@ static void nomem_seen(unsigned long pc, unsigned long seq)
         /* Le tampon n'existe pas sur l'hôte : son identifiant est libre (le
            cœur accepte un BUF_CREATE neuf dessus). */
         buf_nomem(id, until);
+        /* R5 : les textures lui laissent sa taille (BUF_CREATE [id, size]) ;
+           un BUF_SUBDATA refusé vise un tampon déjà refusé : rien à apprendre */
+        if (op == QGPU_OP_BUF_CREATE && pc + 2 < CMD_WORDS) {
+            unsigned long held = tex_resident_bytes(), sz = G.cmd[pc + 2];
+            tex_budget_learn(held > sz ? held - sz : 0, "tampon refusé");
+        }
         break;
     case QGPU_OP_SURF_CREATE:           /* sondé par ensure_surface ; filet */
         for (p = G.list; p; p = p->next)
@@ -3564,7 +3632,11 @@ static void check_errors(unsigned long errors, unsigned long seq, const Half *do
             posts_lost(&G.h[i]);
     pomppc_log("POMPPC: QGPU_REG_ERRORS %lu → %lu", G.errors, errors);
     qgpu_peek(&G.q, &e2, &status, &pc);
-    nomem_poll();                       /* reste du 29/09 : pression mémoire ? */
+    /* reste du 29/09 : pression mémoire ? R5 : refus en asynchrone, objets
+       inconnus — le budget part d'un seizième sous ce que nous tenions, la
+       fenêtre synchrone nommera les refus suivants (nomem_seen). */
+    if (nomem_poll())
+        tex_budget_learn(tex_resident_bytes() / 16 * 15, "refus asynchrone");
     /* Note (POMPPC_GL_NOTE) : une soumission asynchrone terminée en erreur
        est une série de dessins PERDUE (mur qui disparaît une image) — 22/09. */
     gl_note("ERRORS %lu -> %lu : statut %lu commande %lu, image %lu\n",
@@ -4020,15 +4092,76 @@ static long alloc_id(unsigned long *used, unsigned long base, unsigned long n)
 
 static void *unit_drvtex(PCtx *p, int u, unsigned long *mask);
 
-static long alloc_tex_id(PCtx *p)
+/* Évince la texture résidente la moins récemment servie (LRU) : TEX_DESTROY
+ * écrit, identifiant rendu À L'APPELANT (son bit reste pris). -1 : aucune
+ * victime. Extrait d'alloc_tex_id le 14/10 (R5) : la pagination sous le
+ * plafond mémoire (tex_make_room) évince par le même choix.
+ * Protect every effective unit, including units not uploaded yet. A
+ * texture bound by another context may be evicted: that context will
+ * reload it when drawn again. Guest storage remains owned by GLEngine.
+ * `keep` (R5) : la texture en cours de téléversement, jamais victime. */
+static long evict_lru(PCtx *p, const PTex *keep, unsigned long *bytes)
 {
-    unsigned long i;
-    PTex *t, *victim = NULL;
+    PTex *t, *victim = NULL, *mru = NULL;
     PCtx *ctx;
     void *protected[IMG_UNITS];
     unsigned long mask, *c;
     long id;
     int u;
+
+    for (u = 0; u < IMG_UNITS; u++)
+        protected[u] = u < SCAN_N(p) ? unit_drvtex(p, u, &mask) : 0;
+    for (t = G.textures; t; t = t->next) {
+        /* P15 : une texture remplie par COPY_TEX n'existe QUE sur l'hôte — le
+           niveau de l'invité n'a jamais été mis à jour. L'évincer perdrait son
+           contenu, et le rechargement depuis l'invité remettrait l'ANCIEN
+           (reflets et ombres périmés). Elle n'est jamais une victime. */
+        if (t->qtex < 0 || t->host_only || t == keep ||
+            (victim && t->last_use >= victim->last_use &&
+             (!bytes || (mru && t->last_use <= mru->last_use))))
+            continue;
+        for (u = 0; u < IMG_UNITS; u++)
+            if (protected[u] == t->drvtex)
+                break;
+        if (u < IMG_UNITS)
+            continue;
+        if (!victim || t->last_use < victim->last_use)
+            victim = t;
+        if (bytes && (!mru || t->last_use > mru->last_use))
+            mru = t;
+    }
+    if (!victim)
+        return -1;
+    /* R5 (14/10) : sous pression (bytes non nul : tex_make_room), si même la
+       plus ancienne a servi à CETTE image, l'image entière ne tient pas dans
+       le budget — le LRU évincerait alors chaque texture avant son retour
+       (accès cyclique : tout repart à chaque image, vu à 42 Mio : 60 Mio
+       retéléversés par image). On prend alors la PLUS récente : le début de
+       l'image reste résident, seule la queue tourne. */
+    if (bytes && mru && victim->last_use > G.tex_clock_frame)
+        victim = mru;
+    id = victim->qtex;
+    if (bytes)
+        *bytes = victim->host_bytes;    /* R5 : ce que l'hôte va rendre */
+    victim->host_bytes = 0;
+    victim->qtex = -1;                  /* morte AVANT reserve() : plus personne
+                                           ne peut la choisir comme victime */
+    victim->dirty = 1;
+    victim->prm_valid = 0;
+    VD_BUMP();                          /* lot 2 */
+    victim->host_only = 0;
+    c = reserve(p, QGPU_LEN_TEX);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_DESTROY, QGPU_LEN_TEX);
+    c[1] = id;
+    for (ctx = G.list; ctx; ctx = ctx->next)
+        ctx->st_valid = 0;
+    return id;
+}
+
+static long alloc_tex_id(PCtx *p)
+{
+    unsigned long i, *c;
+    long id;
     /* Finding 10 (relecture du 29/09) : les textures détruites sans contexte
        vivant partent maintenant, sous le contexte p. reserve() peut relâcher
        G.mu : le bit zombie est retiré AVANT, le bit tex_used après que la
@@ -4060,40 +4193,9 @@ static long alloc_tex_id(PCtx *p)
      * CREATE dans le flux. reserve() peut encore relâcher G.mu (F9) : la
      * victime est marquée morte AVANT, et les appelants revalident leur
      * PTex au retour (tex_id_reserve). */
-    /* Protect every effective unit, including units not uploaded yet. A
-     * texture bound by another context may be evicted: that context will
-     * reload it when drawn again. Guest storage remains owned by GLEngine. */
-    for (u = 0; u < IMG_UNITS; u++)
-        protected[u] = u < SCAN_N(p) ? unit_drvtex(p, u, &mask) : 0;
-    for (t = G.textures; t; t = t->next) {
-        /* P15 : une texture remplie par COPY_TEX n'existe QUE sur l'hôte — le
-           niveau de l'invité n'a jamais été mis à jour. L'évincer perdrait son
-           contenu, et le rechargement depuis l'invité remettrait l'ANCIEN
-           (reflets et ombres périmés). Elle n'est jamais une victime. */
-        if (t->qtex < 0 || t->host_only ||
-            (victim && t->last_use >= victim->last_use))
-            continue;
-        for (u = 0; u < IMG_UNITS; u++)
-            if (protected[u] == t->drvtex)
-                break;
-        if (u == IMG_UNITS)
-            victim = t;
-    }
-    if (!victim)
-        return -1;
-    id = victim->qtex;
-    victim->qtex = -1;                  /* morte AVANT reserve() : plus personne
-                                           ne peut la choisir comme victime */
-    victim->dirty = 1;
-    victim->prm_valid = 0;
-    VD_BUMP();                          /* lot 2 */
-    victim->host_only = 0;
-    c = reserve(p, QGPU_LEN_TEX);
-    c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_DESTROY, QGPU_LEN_TEX);
-    c[1] = id;
-    for (ctx = G.list; ctx; ctx = ctx->next)
-        ctx->st_valid = 0;
-    G.n_texevictions++;
+    id = evict_lru(p, NULL, NULL);
+    if (id >= 0)
+        G.n_texevictions++;
     return id;                          /* bitmap bit stays allocated */
 }
 
@@ -4261,8 +4363,10 @@ void pomppc_texture_changed(void *drvtex, int levels)
         t->cp_frame = 0;                /* lot 1 : complétude à relire */
         t->hook_gen++;                  /* mémoire par texture */
     }
-    if (t && levels)
+    if (t && levels) {
         t->dirty = 1;
+        t->copy_dst = 0;                /* R5 : l'invité redonne des niveaux */
+    }
     pthread_mutex_unlock(&G.mu);
 }
 
@@ -4780,6 +4884,118 @@ static void tex_level_depth(const PTex *t, int l, unsigned long *d, unsigned lon
     *imgh = U16(pl, PL_IMGH);
 }
 
+/* ─── R5 (14/10/2026) : PAGINATION DES TEXTURES sous le plafond de l'hôte ───
+ *
+ * Avec QGPU_MEM_MB=128 (96 Mio par tranche), DOOM 3 essuyait 201 NO_MEM au
+ * chargement de Mars City ; chaque texture refusée partait ensuite chez Apple
+ * (NO_TEX_NOMEM) et, sous programme ARB, le rendu logiciel de GLEngine
+ * découpait les interactions jusqu'à l'exit() de gleBuildInterpolateFunc
+ * (docs/re/glengine-exit-interpolateur.md). Un vrai pilote ne rend pas le
+ * dessin au logiciel quand sa VRAM est pleine : il évince. Ici de même :
+ *  - tex_host_est : ce que le cœur alloue pour la texture (chaque niveau de
+ *    chaque face en 32 bits par texel, S3TC décompressé : tex_alloc_level) ;
+ *  - G.tex_budget : appris au refus (tex_budget_learn) — les octets de
+ *    textures que l'hôte tenait quand il a dit non ;
+ *  - tex_make_room : avant un téléversement qui ferait dépasser le budget,
+ *    TEX_DESTROY des textures les moins récemment servies (evict_lru, mêmes
+ *    protections que l'éviction par identifiants : unités du dessin, textures
+ *    « hôte seulement »). Le flux est FIFO : les dessins déjà écrits qui les
+ *    échantillonnaient passent avant ; l'invité garde les niveaux, la texture
+ *    revient au prochain dessin qui la lie.
+ * Ce qui reste refusé malgré tout (rien à évincer) est dessiné par l'hôte
+ * avec l'unité coupée (texture incomplète, comme en OpenGL), jamais rendu à
+ * Apple. POMPPC_GL_TEXPAGE=0 : l'ancien repli, pour comparer. */
+static unsigned long tex_host_est(const PTex *t)
+{
+    const unsigned char *dt = t->drvtex;
+    unsigned long n = 0;
+    int l, f;
+
+    if (tex_is_cube(t)) {
+        for (f = 0; f < 6; f++)
+            for (l = 0; l < DT_LEVELS; l++) {
+                const unsigned char *e = cube_level(dt, f, l);
+                n += (unsigned long)U16(e, PL_W) * U16(e, PL_H) * 4;
+            }
+        return n;
+    }
+    for (l = 0; l < DT_LEVELS; l++) {
+        const unsigned char *lv = dt + DT_LEVEL0 + l * DT_LEVEL_SIZE;
+        unsigned long w = (unsigned short)S16(lv, LV_W), h = (unsigned short)S16(lv, LV_H);
+        unsigned long d = 1, imgh;
+        if (!w || !h)
+            continue;
+        if (l > 0 && tex_is_rect(t))
+            break;
+        if (tex_is_3d(t))
+            tex_level_depth(t, l, &d, &imgh);
+        n += w * h * (d ? d : 1) * 4;
+    }
+    return n;
+}
+
+/* Octets de textures tenus par l'hôte, selon nos estimations. */
+static unsigned long tex_resident_bytes(void)
+{
+    const PTex *t;
+    unsigned long n = 0;
+    for (t = G.textures; t; t = t->next)
+        if (t->qtex >= 0)
+            n += t->host_bytes;
+    return n;
+}
+
+#define TEX_BUDGET_MIN (8UL << 20)      /* plancher : ne jamais tout jeter */
+
+/* L'hôte vient de refuser de la mémoire alors que nos textures en tenaient
+   `held` octets (sans l'objet refusé) : c'est au plus ce qu'il tient. */
+static void tex_budget_learn(unsigned long held, const char *why)
+{
+    if (!G.texpage)
+        return;
+    if (held < TEX_BUDGET_MIN)
+        held = TEX_BUDGET_MIN;
+    if (G.tex_budget && held >= G.tex_budget)
+        return;
+    G.tex_budget = held;
+    G.n_page_learn++;
+    gl_note("TEXPAGE budget %lu Kio (%s), image %lu\n", held >> 10, why, G.n_frames);
+}
+
+/* Évince (LRU) jusqu'à ce que `need` octets de plus tiennent dans le budget —
+   ou, budget inconnu, jusqu'à `force` octets rendus (sondes de surface et de
+   programme refusées). `keep` n'est jamais victime. reserve() peut relâcher
+   G.mu : l'appelant revalide sa texture. Rend les octets libérés. */
+static unsigned long tex_make_room(PCtx *p, const PTex *keep, unsigned long need,
+                                   unsigned long force)
+{
+    unsigned long held, freed = 0;
+
+    if (!G.texpage || (!G.tex_budget && !force))
+        return 0;
+    if (G.held_frame != G.n_frames + 1) {
+        G.held = tex_resident_bytes();  /* une marche de la liste par image */
+        G.held_frame = G.n_frames + 1;
+    }
+    held = G.held;
+    for (;;) {
+        unsigned long vb = 0;
+        long id;
+        if (force ? freed >= force : held + need <= G.tex_budget)
+            break;
+        id = evict_lru(p, keep, &vb);
+        if (id < 0)
+            break;                      /* plus rien d'évinçable */
+        free_tex_id(id);                /* TEX_DESTROY déjà dans le flux */
+        freed += vb;
+        held = held > vb ? held - vb : 0;
+        G.n_page_evict++;
+        G.page_evict_kb += vb >> 10;
+    }
+    G.held = held + need;               /* l'appelant va prendre `need` */
+    return freed;
+}
+
 /* Empreinte du niveau 0 : pointeur, taille, format, et un échantillon des
  * texels. WC3 remplit l'atlas de polices EN PLACE (même pointeur, mêmes
  * dimensions) : sans les octets, on ne reremplissait jamais et le texte
@@ -4815,7 +5031,7 @@ static unsigned long tex_lv0_sig(const PTex *t)
        (glTexImage2D, glTexSubImage2D) passe par les crochets, qui posent
        dirty : on ne perd que le remplissage en place d'une mémoire cliente,
        sans objet pour une cible de copie. */
-    if (d && w && h && !upload_blank && !t->host_only) {
+    if (d && w && h && !upload_blank && !t->host_only && !(G.texpage && t->copy_dst)) {
         crash_hook_fresh();             /* Prey : gestionnaires avant la 1re image */
         if (sigsetjmp(sig_jmp, 0) != 0) {
             sig_jmp_on = 0;             /* niveau illisible (24/09, DOOM 3) */
@@ -4911,6 +5127,8 @@ static int texture_uploadable(PTex *t)
 
 static int texture_uploadable_full(PTex *t)
 {
+    /* R5 : une destination de COPY_TEX repart noire (upload_texture) */
+    int blank = upload_blank || (G.texpage && t->copy_dst);
     unsigned char *dt = t->drvtex;
     unsigned long base = GLD_U32(dt, DT_BASE_FORMAT);
     unsigned long sid;
@@ -4922,7 +5140,7 @@ static int texture_uploadable_full(PTex *t)
         PCtx *src = surf_source(sid);
         /* 3e passe : SURF_TEX refusé par le plafond (nomem_seen) — Apple
            jusqu'à l'échéance, comme une texture ordinaire */
-        if (t->nomem_until > G.n_frames)
+        if (!G.texpage && t->nomem_until > G.n_frames)
             return no(NO_TEX_NOMEM, (unsigned long)t->qtex, t->nomem_until);
         if (!src || src->qctx < 0) {
             /* 3e passe : l'hôte tient la dernière image — voir upload_surftex */
@@ -4937,7 +5155,11 @@ static int texture_uploadable_full(PTex *t)
     /* Reste du 29/09 : l'hôte a refusé sa mémoire (ou toute allocation
        nouvelle en période de pression) — rendue par Apple, nouvel essai à
        l'échéance. */
-    if (t->nomem_until > G.n_frames || (t->qtex < 0 && G.nomem_until > G.n_frames))
+    /* R5 (14/10) : sous pagination (G.texpage), plus de repli — le
+       téléversement évince ce qu'il faut (tex_make_room), et ce que l'hôte
+       refuserait encore est dessiné unité coupée, jamais par Apple. */
+    if (!G.texpage &&
+        (t->nomem_until > G.n_frames || (t->qtex < 0 && G.nomem_until > G.n_frames)))
         return no(NO_TEX_NOMEM, (unsigned long)t->qtex, t->nomem_until);
     if (!GLD_U32(dt, DT_PARAMS) || !base_format_ok(base))
         return no(NO_TEX_BASE, base, 0);
@@ -5015,8 +5237,8 @@ static int texture_uploadable_full(PTex *t)
                 d > QGPU_MAX_TEX_3D_DIM || imgh < h)
                 return no(NO_TEX_SIZE, w, (h << 16) | d);
         }
-        if ((!GLD_U32(lv, LV_DATA) && !upload_blank) ||
-            (!upload_blank &&
+        if ((!GLD_U32(lv, LV_DATA) && !blank) ||
+            (!blank &&
              (G.v10 ? S16(lv, LV_ROWPIX) < (short)w : S16(lv, LV_ROWPIX) != (short)w)) ||
             !level_convertible(U16(lv, LV_FORMAT), U16(lv, LV_TYPE)) ||
             !depth_pair_ok(host_base(base), U16(lv, LV_FORMAT)) ||
@@ -5028,7 +5250,24 @@ static int texture_uploadable_full(PTex *t)
 }
 
 /* Téléverse les niveaux et les paramètres de t si besoin ; 0 = logiciel. */
+static int upload_texture_levels(PCtx *p, PTex *t);
+/* R5 (14/10) : une destination de COPY_TEX perdue par l'hôte (refus NO_MEM,
+   invalidation) repart NOIRE, comme à sa création par try_copy_tex : relire
+   ses niveaux invité faisait faute (1024×512 de _currentRender, DOOM 3 à
+   128 Mio) — la faute est rattrapée, mais CrashReporter ouvre « a quitté
+   inopinément » par-dessus la fenêtre, et toute la présentation directe
+   tombait (Swap60 chez Apple à chaque image). La copie suivante la remplit. */
 static int upload_texture(PCtx *p, PTex *t)
+{
+    int blank = upload_blank, r;
+    if (G.texpage && t->copy_dst && !t->host_only && (t->dirty || t->qtex < 0))
+        upload_blank = 1;
+    r = upload_texture_levels(p, t);
+    upload_blank = blank;
+    return r;
+}
+
+static int upload_texture_levels(PCtx *p, PTex *t)
 {
     unsigned char *dt = t->drvtex;
     unsigned char *gp = (unsigned char *)GLD_U32(dt, DT_PARAMS);
@@ -5039,7 +5278,7 @@ static int upload_texture(PCtx *p, PTex *t)
         QGPU_TP_MAX_LEVEL, QGPU_TP_BORDER_COLOR, QGPU_TP_LOD_BIAS, QGPU_TP_COMPARE_MODE,
         QGPU_TP_COMPARE_FUNC, QGPU_TP_DEPTH_MODE };
     int l, k, t3 = tex_is_3d(t), rect = tex_is_rect(t);
-    unsigned long sid, lost0;
+    unsigned long sid, lost0, est;
 
     if (tex_surface(t, &sid))
         return upload_surftex(p, t, sid);   /* v20 */
@@ -5063,6 +5302,17 @@ static int upload_texture(PCtx *p, PTex *t)
                   ((unsigned long)(unsigned short)S16(lv0, LV_W) << 16) |
                   (unsigned short)S16(lv0, LV_H));
     }
+    /* R5 (14/10) : pagination — ce que l'hôte va devoir allouer tient-il
+       dans le budget appris ? Sinon, évincer d'abord (tex_make_room). Même
+       taille qu'avant : le cœur réutilise les niveaux, rien à prendre. */
+    est = (t->qtex < 0 || t->dirty) ? tex_host_est(t) : t->host_bytes;
+    if (G.texpage && G.tex_budget && (t->qtex < 0 || (t->dirty && est != t->host_bytes))) {
+        void *drvtex = t->drvtex;
+        unsigned long epoch = tex_del_epoch;
+        tex_make_room(p, t, est, 0);
+        if (tex_del_epoch != epoch && find_tex(drvtex) != t)
+            return no(NO_TEX_ID, 1, 0); /* détruite par un autre fil pendant reserve() */
+    }
     if (t->qtex < 0) {
         int three = t3 || tex_is_cube(t) || rect;
         int r = tex_id_reserve(p, t, three ? QGPU_LEN_TEX_CREATE3 : QGPU_LEN_TEX, &c);
@@ -5081,6 +5331,8 @@ static int upload_texture(PCtx *p, PTex *t)
             t->prm_valid = 0;
         }
     }
+    if (t->dirty)
+        t->host_bytes = est;            /* R5 : ce que l'hôte tiendra */
     t->last_use = ++G.tex_clock;
     /* 3e passe (bug hunt du 29/09) : chaque niveau fait arena_alloc, qui peut
        vider le flux ; la soumission peut alors rendre NO_MEM pour CETTE
@@ -5773,7 +6025,7 @@ static int ensure_surface(PCtx *p)
 {
     unsigned long w = GLD_U32(p->ctx, CTX_WIDTH), h = GLD_U32(p->ctx, CTX_HEIGHT);
     unsigned long *c;
-    int want_stencil;
+    int want_stencil, surf_retry = 0;
 
     if (p->qctx < 0 || w == 0 || h == 0 || w > QGPU_MAX_SURF_DIM || h > QGPU_MAX_SURF_DIM)
         return 0;
@@ -5786,9 +6038,10 @@ static int ensure_surface(PCtx *p)
         return 1;
     /* reste du 29/09 : plafond mémoire hôte — pas de nouvelle surface avant
        l'échéance ; le contexte est rendu par Apple en attendant. */
-    if (p->nomem_until > G.n_frames || G.nomem_until > G.n_frames)
+    if (!G.texpage && (p->nomem_until > G.n_frames || G.nomem_until > G.n_frames))
         return 0;
     destroy_surface(p);
+retry_surf:
     p->surf = alloc_id(&G.surf_used, G.q.surf_base, QGPU_CLIENT_SURF_IDS);
     if (p->surf < 0)
         return 0;
@@ -5817,6 +6070,17 @@ static int ensure_surface(PCtx *p)
             gl_note("SURF_CREATE %ld (%lux%lu) refusé : statut %ld\n", p->surf, w, h, st);
             p->surf = -1;
             if (st == QGPU_ST_NO_MEM) {
+                /* R5 (14/10) : sous pagination, des textures cèdent la
+                   place (couleur + profondeur, 8 octets par pixel) et la
+                   surface est redemandée une fois — un contexte rendu par
+                   Apple, c'est tout son rendu au logiciel. */
+                if (G.texpage && !surf_retry) {
+                    surf_retry = 1;
+                    G.n_page_retry++;
+                    tex_budget_learn(tex_resident_bytes() / 16 * 15, "surface refusée");
+                    if (tex_make_room(p, NULL, 0, w * h * 8))
+                        goto retry_surf;
+                }
                 p->nomem_until = G.n_frames + NOMEM_BACKOFF;
                 G.nomem_until = p->nomem_until;
             } else {
@@ -7539,6 +7803,11 @@ static int rp_create(PCtx *p)
     c[2] = RAWPOOL_BYTES;
     st = submit_probe();
     if (st == QGPU_ST_NO_MEM) {
+        /* R5 (14/10) : PAS d'éviction de textures pour une réserve de plus —
+           essayé : à 128 Mio DOOM 3 en demandait deux autres (16 Mio
+           chacune), le budget des textures tombait de 77 à 42 Mio et chaque
+           image en retéléversait 60 Mio. L'empaquetage est rendu par l'hôte
+           aussi ; ce n'est pas un repli logiciel. */
         /* 3e passe : NO_MEM n'alloue rien (le cœur l'assure) — l'identifiant
            est libre, et une pression mémoire PASSAGÈRE ne doit pas couper
            DRAW_NATIVE pour toute la session. Nouvel essai après l'échéance. */
@@ -8660,7 +8929,7 @@ static int prog_ensure(PCtx *p, PProg *r)
 {
     const char *text;
     unsigned long len, off, sum, *c;
-    int t, created;
+    int t, created, prog_retry = 0;
     long st;
 
     if (!r->obj)
@@ -8687,8 +8956,9 @@ static int prog_ensure(PCtx *p, PProg *r)
     /* 3e passe : pression mémoire de l'hôte — pas de nouveau texte avant
        l'échéance (le programme reste au rendu d'Apple d'ici là, sans être
        déclaré refusé). */
-    if (G.nomem_until > G.n_frames)
+    if (!G.texpage && G.nomem_until > G.n_frames)
         return 0;
+retry_prog:
     flush();                            /* tout ce qui précède part d'abord */
     created = 0;
     if (r->id < 0) {
@@ -8727,6 +8997,17 @@ static int prog_ensure(PCtx *p, PProg *r)
         r->text_sent = 0;
         r->len_sent = r->sum_sent = 0;
         r->refused = 0;
+        /* R5 (14/10) : sous pagination, des textures cèdent la place et le
+           texte repart une fois — un programme ARB rendu à Apple, c'est le
+           T&L logiciel de GLEngine et son exit() sur les interactions. Le
+           cœur compte le texte et ses tables : 1 Mio au moins. */
+        if (G.texpage && !prog_retry) {
+            prog_retry = 1;
+            G.n_page_retry++;
+            tex_budget_learn(tex_resident_bytes() / 16 * 15, "programme refusé");
+            if (tex_make_room(p, NULL, 0, len * 8 > (1UL << 20) ? len * 8 : 1UL << 20))
+                goto retry_prog;
+        }
         G.nomem_until = G.n_frames + NOMEM_BACKOFF;
         gl_note("PROG cible %04lx : %lu octets refusés par le plafond mémoire hôte, "
                 "nouvel essai à l'image %lu\n", r->target, len, G.nomem_until);
@@ -15131,6 +15412,15 @@ static int upload_surftex(PCtx *p, PTex *t, unsigned long sid)
                     gw, gh, src->sw, src->sh, (long)src->qctx, G.n_frames);
         }
     }
+    if (G.texpage && G.tex_budget && (t->qtex < 0 || !t->surf_copied)) {
+        /* R5 : la copie de la surface prend sw × sh × 4 sur l'hôte */
+        void *drvtex = t->drvtex;
+        unsigned long epoch = tex_del_epoch;
+        tex_make_room(p, t, src->sw * src->sh * 4, 0);
+        if (tex_del_epoch != epoch && find_tex(drvtex) != t)
+            return no(NO_TEX_ID, 1, 0);
+    }
+    t->host_bytes = src->sw * src->sh * 4;
     if (t->qtex < 0) {
         int r = tex_id_reserve(p, t, QGPU_LEN_TEX_CREATE3, &c);   /* finding 4 */
         if (!r)
@@ -16309,6 +16599,7 @@ static int try_copy_tex(PCtx *p, unsigned long *a)
        l'empreinte diffère au dessin suivant et la texture repart de
        l'invité, ce qui est juste (la texture hôte est perdue). */
     t->host_only = 1;
+    t->copy_dst = 1;                    /* R5 */
     t->cp_frame = 0;                    /* tex_cp : le niveau existe sur l'hôte (27/09) */
     VD_BUMP();                          /* lot 2 */
     t->lv0_sig = tex_lv0_sig(t);
