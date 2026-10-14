@@ -24,8 +24,10 @@ de commit et dans `docs/`.
   la VM de dev (ancien en `bench/devloop/prebuilt-20261007c`) — plugin `20261014-r5` (pagination
   des textures), kext POMPPCGPU A6 L2 (ABI inchangée), gltest ; ISO
   `disks/pomppc-guest-20261014.iso` avec en plus le StartupItem `POMPPCSshGarde`. Job `gpu` : 55/56 au premier passage (`tex14`), qui tournait en fait sur
-  llvmpipe (entrée ci-dessus) ; sur la RTX, **56/56** (job 1791947001974). **Pas encore installé** dans la VM
-  quotidienne.
+  llvmpipe (entrée ci-dessus) ; sur la RTX, **56/56** (job 1791947001974). **Installé** dans la VM quotidienne le 14/10 à 07:50
+  (sauvegarde `~/pomppc-sauvegarde-20261014` dans l'invité, redémarré) : kexts chargés, caps
+  983038, ssh à l'écoute ; matrice `20261014-0752` mb et ut en fenêtre vertes, images justes
+  (16,4 et 50,3 ms/image).
 - **PC, 13-14/10 : gardien ssh du paquet invité, plancher d'UT2004.** `POMPPCSshGarde`
   (StartupItem) recharge `ssh.plist` quand launchd l'a chargé sans socket (lo0 sans IPv6 au
   démarrage, `docs/endurance.md` §8.3-8.5) ; défaut reproduit à la demande et réparé dans la
