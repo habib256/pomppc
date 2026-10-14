@@ -553,3 +553,30 @@ qu'aucune IPv6 n'existe, puis, `::1` rendu, recharge et le port 22 écoute (IPv4
 `tiger-endurance-serie.qcow2` + `/Library/StartupItems/POMPPCSshGarde`, arrêt propre. Série à
 jouer : `ENDURANCE_BASE=disks/tiger-endurance-garde.qcow2`, `--serie` (console pour les
 incidents) **sans** `--releve-sain` (§8.4 : le relevé périodique est suspect).
+
+### 8.6 Campagne `pc-reboot-garde` (14/10, 00:14-04:10, base au gardien)
+
+Base `tiger-endurance-garde.qcow2` (§8.5), binaire rapide du 07/10 (sha256 0bc504fa…), défauts
+du lanceur, `--serie` sans `--releve-sain`, 3 instances, `--mode reboot`, **450 démarrages**
+(445 redémarrages, 5 à froid). Hôte : Ubuntu 26.04 (noyau 7.0), charge 1 min médiane 8,1, max
+15 (deux agents travaillaient en même temps). Rapport : `bench/endurance/pc-reboot-garde/rapport.md`.
+
+- **0 « pas de ssh »** (6 sur 473 avant : nuit du 07/10 et `pc-reboot-serie`). Mais le gardien
+  n'a **jamais** eu à agir (aucune ligne `sshgarde`), et aucun échec d'`in6_ifattach` n'est relevé
+  sur les 448 démarrages sains : la course de lo0 ne s'est pas produite cette nuit. Ce zéro ne
+  prouve donc pas le gardien (sa preuve reste l'épreuve en VM du §8.5) ; il dit que la course a
+  été plus rare ici (hôte, noyau ou minutage différents).
+- **#98, vraie panique** (01:00, instance 1, ~20 s après le `shutdown -r`) : **la même que #160 du
+  bras témoin (§7.2)** — « 0x400 - Inst access », saut à 0 depuis
+  `IOPlatformExpert::CheckSubTree+0x12c` ← `CheckSubTree+0x304` (×2) ← kexts ←
+  `IOService::startCandidate` ← `probeCandidates` ← `doServiceMatch` ← `_IOConfigThread::main`.
+  Ce défaut n'est donc **pas propre aux anciens défauts** : 1 sur 450 sur la configuration par
+  défaut. Deux occurrences en ~1 400 démarrages des deux bras, toujours à l'appariement IOKit
+  du démarrage.
+- **#411, fausse panique du banc** : `panicstr` lu non nul 57 s après le `shutdown -r` (noyau
+  pas encore installé, mémoire encore à BootX) ; aucun vCPU dans `panic()`, `panicstr` à 0 à la
+  collecte, bureau sain, ssh vivant. Corrigé : `panicstr` doit pointer dans le noyau, vers un
+  texte imprimable, et garder sa valeur 2 s plus tard (`panicstr_valide`).
+
+Taux de la configuration par défaut sur le PC (07/10 nuit + `pc-reboot-serie` + cette série,
+binaire rapide) : paniques vraies 2 sur 923 (#76, #98), gels « pas de ssh » 6 sur 923.

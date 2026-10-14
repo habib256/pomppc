@@ -154,6 +154,16 @@ export QGPU_GPU_COPY="${QGPU_GPU_COPY:-1}" QGPU_GLSL="${QGPU_GLSL:-1}"
 # par défaut depuis le 01/10/2026 avec la soumission anticipée des requêtes du
 # plugin (POMPPC_GL_QFLUSH) ; QGPU_GL_FLUSH=0 l'éteint.
 export QGPU_GL_FLUSH="${QGPU_GL_FLUSH:-1}"
+# Backend gl de qgpu sous Linux : eglGetDisplay(EGL_DEFAULT_DISPLAY). Sous la session
+# Wayland d'Ubuntu 26.04 (14/10/2026), glvnd y donne Mesa et donc LLVMPIPE (rendu sur le
+# CPU, 16 fils qui volent la place des vCPU), l'EGL de NVIDIA échouant sur la plateforme
+# de la session. EGL_PLATFORM=device : la plateforme « device » (sans fenêtre), où NVIDIA
+# s'initialise (RTX 4060 Ti) ; sans effet sur l'affichage GTK, qui choisit sa plateforme
+# lui-même. EGL_PLATFORM= (vide) rend l'ancien choix.
+if [ "$(uname -s)" = Linux ]; then
+  export EGL_PLATFORM="${EGL_PLATFORM-device}"
+  [ -n "$EGL_PLATFORM" ] || unset EGL_PLATFORM
+fi
 
 # Avant le verrou disque : ImGui relance CE script avec DBUS_DISPLAY=1.
 # Cette garde évite la récursion et laisse les outils sans fenêtre inchangés.

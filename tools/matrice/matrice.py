@@ -40,6 +40,11 @@ import subprocess
 import sys
 import time
 
+# Rejeu natif (qgpu_replay : même backend gl que QEMU) sous Linux : la plateforme EGL
+# « device », sinon la session Wayland donne llvmpipe (14/10/2026, voir run_tiger.sh).
+if sys.platform.startswith("linux"):
+    os.environ.setdefault("EGL_PLATFORM", "device")
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hote import Hote, MAIN, WT, VMEnPause, journal   # noqa: E402
 from jeu import NOM_MODE, MODES                    # noqa: E402

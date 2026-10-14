@@ -42,8 +42,10 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   `bind()` IPv6 de `ssh.plist` et abandonne aussi l'IPv4 ; rien de QEMU. **Correction faite le 13/10**
   (`docs/endurance.md` §8.5) : gardien `POMPPCSshGarde` du paquet invité (recharge `ssh.plist`
   une fois une IPv6 présente) ; défaut reproduit à la demande dans la VM et réparé par le
-  gardien. **Reste :** la série sans cas sur la base `tiger-endurance-garde.qcow2` (sans
-  `--releve-sain`) ; (2 bis) la panique #76 : relue le 13/10 (§8.4) — tombée **pendant un
+  gardien. Série `pc-reboot-garde` (14/10, §8.6) : 450 démarrages, 0 « pas de ssh », mais la course
+  ne s'est pas produite (gardien jamais sollicité) : **reste** à voir le gardien agir sur un vrai
+  cas (série plus longue, ou hôte chargé comme le 07/10) ; la panique `CheckSubTree` de #160
+  revient sur la configuration par défaut (#98, 1 sur 450) ; (2 bis) la panique #76 : relue le 13/10 (§8.4) — tombée **pendant un
   relevé par la console**, liste libre de kalloc.16 corrompue (probable), CPU 1 en 0x700 ;
   suite : savearea + `pmemsave` à la collecte, reproduction par stress de la console, puis A/B
   `-accel tcg,thread=single` ; (3) une tranche de démarrages à froid (non jouée, faute de temps).

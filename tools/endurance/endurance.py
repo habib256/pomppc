@@ -302,12 +302,30 @@ class VM:
         except OSError:
             return None
 
+    def panicstr_valide(self):
+        """panicstr non nul ET plausible : 14/10 (pc-reboot-garde #411), un mot non nul
+        lu 57 s après un `shutdown -r`, noyau pas encore installé (la mémoire à cette
+        adresse appartient encore à BootX) : fausse panique, bureau sain ensuite. On
+        exige un pointeur du noyau (V=R, bas de la mémoire), vers un texte imprimable,
+        et la même valeur relue 2 s plus tard."""
+        p = self.mot_noyau("panicstr")
+        if not p or not (0x1000 <= p < 0x10000000):
+            return False
+        try:
+            t = chaine(self.mon, p, 64)
+        except OSError:
+            return False
+        if not t or any(not (c.isprintable() or c in "\t\n") for c in t):
+            return False
+        time.sleep(2)
+        return self.mot_noyau("panicstr") == p
+
     def panique_en_cours(self):
         """panic() a été appelé : panicstr != 0 (lu dans la mémoire de
         l'invité), OU un vCPU tourne dans panic(). panic() remet panicstr à 0
         au retour de Debugger(), AVANT sa boucle finale (`b .`, tools/re/kpanic.py) :
         le seul panicstr laissait passer une panique pour un gel."""
-        if self.mot_noyau("panicstr"):
+        if self.panicstr_valide():
             return True
         if self.sym.panic:
             lo, hi = self.sym.panic
