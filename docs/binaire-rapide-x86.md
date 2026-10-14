@@ -184,3 +184,20 @@ rapide (PGO, -O3, -march=native) »), avec les nouveaux défauts de Linux x86-64
 122,9 ms/image (121,8..124,6), **binaire rapide 111,5 (108,9..112,9), −9,3 %**. Matrice finale
 avec vidage (§13.6, `x86-final`) : Marble Blast 14,9, Zenerchi 5,9, UT2004 48,7, DOOM 3 111,9,
 images justes.
+
+## Reconstruction sous Ubuntu 26.04 (14/10/2026)
+
+Après la mise à niveau (GCC 15.2, Python 3.14, en-têtes `-dev` réinstallés : glib, gtk3, sdl2,
+pulse, epoxy, gbm, slirp, jpeg, udev, zstd, numa, sndio ; `fdt` par le sous-projet `dtc`) :
+`build/` reconstruit (`bench/build-qemu-pc-20261014.log`, capacités toutes vues), `build-fast/`
+par `tools/tcg/pgo-train.sh` (profil neuf, 1348 `.gcda`, `use` en 11 min, 2 Gio au plus ;
+`serie=e6c1110c795eedcd`, `march=skylake`). `tests/run-all.sh` : **245 OK, 0 échec**. Le backend
+gl n'est sur la RTX qu'avec `EGL_PLATFORM=device` (`run_tiger.sh`, `devloop.py`, `matrice.py`,
+`run-all.sh`) : sous la session Wayland, l'EGL par défaut est llvmpipe.
+
+Matrice avec vidage sur le nouveau `build-fast/` (`bench/tcg/ab/x86-gcc15-mat`) : **images
+justes**, toutes sous leur plancher — Marble Blast 16,8, Zenerchi 6,6, UT2004 53,2, DOOM 3 127,4
+ms/image (rouge seulement pour la référence non validée). **Vitesse non concluante** : prise
+sous une charge de 3 à 4 (constructions emscripten/`node` d'autres projets en continu) ; l'A/B
+DOOM 3 `x86-gcc15-ab` a été arrêté par la barrière après 2 h sans repos. À refaire hôte au
+repos avant de comparer aux 111,9 ms/image du 06/10.
