@@ -9,6 +9,17 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **`tex14` expliqué, PC, 14/10 : le job `gpu` tournait sur llvmpipe.** Les deux exécutions en
+  échec (55/56) ont `QGPUCaps` = 720894, sans `QGPU_CAP_FIXED4` (0x40000) que le backend gl pose
+  sur NVIDIA : leur VM était partie sans `EGL_PLATFORM=device`, que `devloop.py` ne posait pas,
+  et Mesa llvmpipe rendait. Mesa mesure la distance d'atténuation des points sur **|z œil|**
+  (point à z = 0 : taille bornée à `POINT_SIZE_MAX` = 64), d'où « dehors (+5) » allumé ;
+  reproduit à volonté (VM sans `EGL_PLATFORM` : même échec, mêmes caps). L'essai
+  `EGL_PLATFORM=x11` n'avait pas tourné (frappe de `start` perdue, `TIMEOUT`, `last` périmé).
+  Sur la RTX (pilote 595.99) : `tex14` juste, job complet **56/56**. `devloop.py` pose
+  désormais `EGL_PLATFORM=device` sous Linux, dit sur quel GL rend qgpu (⚠ sinon), attend une
+  vraie console avant de taper, et signale `last` périmé après un `TIMEOUT`
+  (`docs/gpu-3d-tiger.md` §5.1). Device et plugin inchangés.
 - **Paquet invité `20261014` (main dcac35f), PC, 14/10 06:28** : `disks/prebuilt` régénéré dans
   la VM de dev (ancien en `bench/devloop/prebuilt-20261007c`) — plugin `20261014-r5` (pagination
   des textures), kext POMPPCGPU A6 L2 (ABI inchangée), gltest ; ISO

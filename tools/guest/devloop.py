@@ -401,25 +401,88 @@ def vm_args(gui, cdroms=()):
             *shlex.split(os.environ.get("QEMU_EXTRA", ""))]
 
 
+def qemu_env():
+    """Environnement de QEMU. Sous Linux, EGL_PLATFORM=device par défaut, comme
+    run_tiger.sh et la matrice : sous la session Wayland d'Ubuntu 26.04, le
+    backend gl de qgpu tombait sinon sur Mesa LLVMPIPE. Le 14/10/2026 le job
+    `gpu` a ainsi tourné sur llvmpipe et donné tex14 « point atténué : dehors »
+    allumé (Mesa prend |z œil| pour la distance d'atténuation : z = 0 donne une
+    taille infinie, bornée à POINT_SIZE_MAX), pris à tort pour un défaut du
+    pilote NVIDIA. EGL_PLATFORM= (vide) rend l'ancien choix."""
+    env = dict(os.environ)
+    if sys.platform.startswith("linux"):
+        env.setdefault("EGL_PLATFORM", "device")
+        if not env["EGL_PLATFORM"]:
+            del env["EGL_PLATFORM"]
+    return env
+
+
+def gl_backend_report(path):
+    """Dit sur quel GL de l'hôte rend qgpu et crie si ce n'est pas le GPU visé :
+    un job `gpu` y donne des écarts qui ne sont pas ceux du GPU.
+
+    Le device n'écrit le nom du rendu que dans la ligne « qgpu: backend gl : 4
+    unités … QGPU_CAP_FIXED4 (RENDU) », c'est-à-dire sur NVIDIA (4 unités au
+    pipeline fixe). Sous Linux, son absence avec le backend gl veut dire un
+    GL à 8 unités : Mesa, donc llvmpipe sur ce PC (le job `gpu` le montre
+    aussi : « QGPUCaps » sans le bit 0x40000). Sur le M4 (Apple, 8 unités), la
+    ligne manque normalement : rien à dire."""
+    try:
+        txt = open(path, errors="replace").read()
+    except OSError:
+        return
+    for line in txt.splitlines():
+        if line.startswith("qgpu: backend gl") or "llvmpipe" in line.lower():
+            print(line)
+    low = txt.lower()
+    soft = any(s in low for s in ("llvmpipe", "softpipe", "software rasterizer"))
+    if (not soft and sys.platform.startswith("linux")
+            and os.environ.get("GPU_BACKEND", "auto") in ("auto", "gl")
+            and "qgpu: backend gl : " not in txt and "qgpu" in low):
+        soft = True
+    if soft:
+        # EGL_PLATFORM de la VM qui tourne (celui de CE processus peut différer)
+        plat = "?"
+        try:
+            pid = open(os.path.join(STATE, "qemu.pid")).read().strip()
+            env = open("/proc/%s/environ" % pid, "rb").read().split(b"\0")
+            plat = next((e[13:].decode() for e in env if e.startswith(b"EGL_PLATFORM=")),
+                        "(non posé)")
+        except (OSError, ValueError):
+            pass
+        print("⚠ qgpu ne rend PAS sur le GPU NVIDIA de l'hôte (EGL_PLATFORM de la VM : %s ; "
+              "llvmpipe ?) : les verdicts du job gpu ne valent pas pour lui" % plat)
+
+
 def boot_vm(gui, cdroms=()):
     os.makedirs(STATE, exist_ok=True)
     if os.path.exists(QMP):
         os.remove(QMP)
     log = open(os.path.join(STATE, "qemu.log"), "wb")
     p = subprocess.Popen(vm_args(gui, cdroms), stdin=subprocess.DEVNULL, stdout=log,
-                         stderr=log, start_new_session=True)
+                         stderr=log, start_new_session=True, env=qemu_env())
     open(os.path.join(STATE, "qemu.pid"), "w").write(str(p.pid))
     time.sleep(3)
     return p, Qmp()
 
 
-def wait_stable(q, first=35, still=15, name="boot.png"):
-    """Attend un écran immobile `still` secondes (single-user : l'invite)."""
+# PNG de l'écran gris à la pomme (démarrage) : ≈ 6,6 Ko ; la console
+# single-user (texte blanc sur noir) dépasse 15 Ko. Sur ce PC, le 14/10/2026,
+# le gris est resté plus de 15 s immobile : `start` y a cru l'invite arrivée,
+# a tapé dans le vide et dit « agent lancé » ; le job suivant expirait (et un
+# essai EGL_PLATFORM=x11 a ainsi passé pour fait alors qu'il n'avait pas tourné).
+BOOT_GREY_MAX = 10000
+
+
+def wait_stable(q, first=35, still=15, name="boot.png", min_png=0):
+    """Attend un écran immobile `still` secondes (single-user : l'invite).
+    `min_png` : un écran immobile dont le PNG est plus petit ne compte pas
+    (l'écran gris du démarrage)."""
     time.sleep(first)
     prev, same, n = None, time.time(), 0
     while True:
         s = shot(q, os.path.join(STATE, name)); n += 1
-        if s == prev and time.time() - same >= still:
+        if s == prev and time.time() - same >= still and len(s) > min_png:
             return
         if s != prev:
             prev, same = s, time.time()
@@ -644,13 +707,15 @@ def start(gui=False):
             raise SystemExit("QEMU a fermé la connexion pendant le démarrage "
                              "(code %s) ; voir %s/qemu.log" % (p.poll(), STATE))
         print("bureau stable (pid %d) ; capture %s/boot.png" % (p.pid, STATE))
+        gl_backend_report(os.path.join(STATE, "qemu.log"))
         return
-    wait_stable(q)
+    wait_stable(q, min_png=BOOT_GREY_MAX)
     type_text(q, "mount -uw /\n"); time.sleep(4)
     type_text(q, "sh /pomppc/agent.sh %d %d\n" % boxes)
     time.sleep(5)
     shot(q, os.path.join(STATE, "agent.png"))
     print("VM prête (pid %d), agent lancé ; capture %s/agent.png" % (p.pid, STATE))
+    gl_backend_report(os.path.join(STATE, "qemu.log"))
 
 
 def run(folder, timeout):
@@ -709,6 +774,7 @@ def run(folder, timeout):
                 log = os.path.join(dest, "out", "log.txt")
                 print(open(log, errors="replace").read() if os.path.exists(log) else "(pas de log)")
                 print("→ %s/out" % dest)
+                gl_backend_report(os.path.join(STATE, "qemu.log"))
                 if len(hdr) == 3:
                     print("⚠ agent sans code de sortie (en-tête à 3 champs) : "
                           "rc supposé 0, relancer `devloop.py prepare`")
@@ -724,6 +790,10 @@ def run(folder, timeout):
         print("TIMEOUT après %d s (capture impossible : %s)" % (timeout, exc))
     print("⚠ le job tourne toujours dans l'invité : l'agent ne sait pas "
           "l'interrompre (T14)")
+    # 14/10/2026 : une frappe perdue au `start` (agent jamais lancé) finit ici,
+    # et bench/devloop/last désigne toujours le job PRÉCÉDENT — lu comme le
+    # résultat de celui-ci, il a fait croire à un échec reproduit.
+    print("⚠ %s/last désigne encore le job précédent, pas celui-ci" % STATE)
     return 124
 
 
