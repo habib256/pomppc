@@ -89,6 +89,12 @@ présentation directe tombait (un Swap60 chez Apple par image) — elle repart d
   sous gdb (`bench/r5/qemu-crash-*.log`). **Reproduit avec l'ancien plugin `20261007c` à
   512 Mio** (`bench/r5/qemu-crash-512-ancien-gdb.log`) : ce n'est pas la pagination. Pas
   reproduit par `qgpu_replay` sous ASan (vidage rejoué puis `qgpu_core_client_reset`).
+  **14/10, backend rendu à la RTX (`EGL_PLATFORM=device`) : pas reproduit** — deux cellules
+  `d3-fen` avec vidage (`bench/tcg/ab/x86-d3-rtx`, binaire rapide, plugin `20261007c`), QEMU
+  vivant à la fin des deux, 111,6 et 112,6 ms/image (111,9 le 06/10), images justes. Le défaut
+  est attaché à Mesa/llvmpipe ; un double `DeleteProgramsARB` de notre côté que NVIDIA
+  tolérerait n'est pas exclu (ASan propre sur le rejeu va contre). Rouvrir s'il revient sur
+  NVIDIA.
 - **Le backend GL de qgpu tourne sur llvmpipe** dans ces VM : 16 fils `llvmpipe-N` dans le
   processus QEMU, `libgallium` dans la pile ; `eglGetDisplay(EGL_DEFAULT_DISPLAY)` sous la
   session Wayland d'Ubuntu 26.04 ne prend pas l'EGL de NVIDIA (« pci id … driver (null) »,

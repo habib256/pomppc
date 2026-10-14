@@ -79,9 +79,9 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   bout de la cellule, image juste (rejeu/VM 0,00 %) ; témoin `POMPPC_GL_TEXPAGE=0` : `exit` de
   `gleBuildInterpolateFunc` à l'image 288 ; à 512 Mio rien ne bouge (0 `NOMEM`, image juste).
   Ligne de preuve : `docs/bug-hunt-2026-09-29-passe4.md`, dernière section. Mis au jour en
-  route (à traiter à part) : QEMU meurt par `double free` (Mesa, `DeleteProgramsARB` sous
+  route (à traiter à part) : QEMU mourait par `double free` (Mesa, `DeleteProgramsARB` sous
   `qgpu_core_client_reset`) à la fin de toute cellule DOOM 3 avec vidage, ancien plugin
-  compris ; le backend GL tournait sur llvmpipe (corrigé le 14/10 : `EGL_PLATFORM=device`, `run_tiger.sh`) et QEMU ne se reconstruit plus (`glib-2.0`
+  compris — sur llvmpipe seulement : 0 sur 2 sur la RTX le 14/10 (`docs/pagination-textures.md` §4) ; le backend GL tournait sur llvmpipe (corrigé le 14/10 : `EGL_PLATFORM=device`, `run_tiger.sh`) et QEMU ne se reconstruit plus (`glib-2.0`
   absent) depuis Ubuntu 26.04 (`docs/pagination-textures.md` §4). (2) **GPU hôte bloqué : tenu le 14/10 sur le PC**
   (`docs/epreuve-gpu-bloque.md`, propriétés `x-test-stall-ms` et `x-test-refuse-reset` du
   device, preuves dans `bench/stall-20261014/`) :
