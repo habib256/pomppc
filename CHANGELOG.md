@@ -13,8 +13,10 @@ de commit et dans `docs/`.
   (StartupItem) recharge `ssh.plist` quand launchd l'a chargé sans socket (lo0 sans IPv6 au
   démarrage, `docs/endurance.md` §8.3-8.5) ; défaut reproduit à la demande et réparé dans la
   VM. Panique #76 relue (pendant un relevé série ; kalloc.16 corrompue ; `kpanic.py` lit le
-  format de chaque CPU). Plancher Linux d'UT2004 104 → 67 (3 + 3 parties du binaire rapide,
-  fenêtre 51,1, plein écran 53,1 ms/image, `docs/matrice-jeux.md` §6 quater).
+  format de chaque CPU). Plancher Linux d'UT2004 104 → 63 (3 + 3 parties du binaire rapide sur
+  la RTX, fenêtre 49,6, plein écran 47,4 ms/image, `docs/matrice-jeux.md` §6 quater). Backend gl
+  de qgpu : sous la session Wayland d'Ubuntu 26.04 il tombait sur llvmpipe ; `EGL_PLATFORM=device`
+  dans `run_tiger.sh` et `matrice.py` lui rend la RTX.
 - **GPU hôte bloqué à la demande, et A6 (L2) fermée, PC, 14/10** (`docs/epreuve-gpu-bloque.md`).
   Device : propriétés de test `x-test-stall-ms` (le thread de rendu dort avant chaque job,
   réglable à chaud par `qom-set`, relu toutes les 10 ms) et `x-test-refuse-reset` (CLIENT_RESET

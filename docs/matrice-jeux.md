@@ -338,12 +338,16 @@ UT2004, très dispersé). Revus le 07/10 sur le binaire rapide et les défauts d
 **Marble Blast 19** (26 avant ; 1 partie, 14,9), **Zenerchi 8** (10 avant ; 1 partie, 5,9,
 arrondi au-dessus), **UT2004 104 inchangé** (1 partie à 48,7 ; 1,25 × 48,7 = 61 mettrait en
 rouge les tours en fin de session ou sur le binaire de référence, 54-83 observés : à reprendre
-sur au moins trois tours complets du binaire rapide). **UT2004 posé à 67 le 14/10**
-(campagnes `x86-ut-plancher` et `x86-ut-plancher-pe`, binaire rapide du 07/10, défauts du 06/10,
-vidage, barrière `chargehote.py`, PC passé à Ubuntu 26.04 la veille) : fenêtre 51,1 / 51,8 /
-50,2, plein écran 52,5 / 53,1 / 53,1 ms/image, images justes, dispersion 3 % et 1 % ;
-1,25 × 53,1 = 66,4. Le binaire de référence (58,1 le 06/10) y passe ; les 83 du 03/10 venaient
-d'un hôte chargé. DOOM 3 reste rouge tant que sa référence
+sur au moins trois tours complets du binaire rapide). **UT2004 posé à 63 le 14/10**
+(campagnes `x86-ut-plancher-rtx-fen` et `-pe`, binaire rapide du 07/10, défauts du 06/10,
+vidage, barrière `chargehote.py`, PC passé à Ubuntu 26.04 la veille, backend gl sur la RTX
+vérifié dans chaque `run_tiger.log`) : fenêtre 48,4 / 50,0 / 49,6, plein écran 47,4 / 47,1 /
+48,1 ms/image, images justes, dispersion 3 % et 2 % ; 1,25 × 50,0 = 62,5. Le binaire de
+référence (58,1 le 06/10) y passe ; les 83 du 03/10 venaient d'un hôte chargé. **Piège :** un
+premier jeu de 3 + 3 parties la même nuit (`x86-ut-plancher`, `-pe` : 51,1 et 53,1) tournait
+sur **llvmpipe** — sous la session Wayland d'Ubuntu 26.04, `eglGetDisplay(EGL_DEFAULT_DISPLAY)`
+donne Mesa ; corrigé par `EGL_PLATFORM=device` (`run_tiger.sh`). Écart faible (UT2004 est
+limité par l'émulation), mais toute mesure du 13-14/10 avant 9479434 est sur llvmpipe. DOOM 3 reste rouge tant que sa référence
 n'est pas validée à l'œil (`matrice.py --valider d3-fen`). Le premier passage sur
 la VM a demandé : la clé de la matrice (`.run/cmr/id_rsa`, déposée par mot de passe ; `expect`
 manque ici), `~/matrice/ut-seed.dylib` compilé dans la VM de dev (pas de gcc dans la VM

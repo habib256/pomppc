@@ -33,10 +33,10 @@ class UT2004(Jeu):
     famille = "tableaux, VBO, S3TC"
     processus = "ut2004-bin"
     plancher_ms = 36          # 26,9 / 29,3 ms/image au 29/09 (tour 20260929-2344)
-    plancher_ms_linux = 67    # PC, binaire rapide, défauts du 06/10, vidage, hôte au repos
-                              # (14/10, Ubuntu 26.04) : fenêtre 50,2-51,8, plein écran
-                              # 52,5-53,1 sur 3+3 parties ; 1,25 × 53,1. Avant : 104
-                              # (58,5-83,4 au 03/10, binaire de référence, hôte chargé)
+    plancher_ms_linux = 63    # PC, binaire rapide, défauts du 06/10, vidage, hôte au repos,
+                              # backend sur la RTX (14/10, Ubuntu 26.04, EGL_PLATFORM=device) :
+                              # fenêtre 48,4-50,0, plein écran 47,1-48,1 sur 3+3 parties ;
+                              # 1,25 × 50,0. Avant : 104 (58,5-83,4 au 03/10, hôte chargé)
     delai_scene = 900
     dump_images = 60
 
