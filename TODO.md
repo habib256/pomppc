@@ -73,12 +73,16 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 
 - [ ] **[Validation] Restes des épreuves en VM des bug hunts** (tout le reste est tenu le
   07/10 sur le PC : `docs/bug-hunt-2026-09-29-passe4.md`, dernière section).
-  (1) **R5 sous refus réel** : avec `QGPU_MEM_MB=128`, DOOM 3 essuie 201 `NO_MEM` proprement
-  puis meurt par l'`exit()` de GLEngine (`gleBuildInterpolateFunc`, `docs/re/glengine-exit-interpolateur.md`) :
-  le repli « objet non résident → Apple » envoie des interactions ARB au rendu logiciel.
-  Piste : sous programme ARB, ne pas rendre le dessin à Apple pour une texture non résidente
-  (unité coupée, ou texture repliée en basse résolution), puis rejouer à 128 Mio (à 512 Mio
-  aucun refus n'arrive). (2) **GPU hôte bloqué : tenu le 14/10 sur le PC**
+  (1) ~~**R5 sous refus réel**~~ **tenu le 14/10** : pagination des textures dans le plugin
+  (`20261014-r5`, `docs/pagination-textures.md`) — plus aucun dessin rendu à Apple pour la
+  mémoire ; à 128 Mio DOOM 3 essuie 833 refus, apprend un budget de 78,5 Mio et joue jusqu'au
+  bout de la cellule, image juste (rejeu/VM 0,00 %) ; témoin `POMPPC_GL_TEXPAGE=0` : `exit` de
+  `gleBuildInterpolateFunc` à l'image 288 ; à 512 Mio rien ne bouge (0 `NOMEM`, image juste).
+  Ligne de preuve : `docs/bug-hunt-2026-09-29-passe4.md`, dernière section. Mis au jour en
+  route (à traiter à part) : QEMU meurt par `double free` (Mesa, `DeleteProgramsARB` sous
+  `qgpu_core_client_reset`) à la fin de toute cellule DOOM 3 avec vidage, ancien plugin
+  compris ; le backend GL tournait sur llvmpipe (corrigé le 14/10 : `EGL_PLATFORM=device`, `run_tiger.sh`) et QEMU ne se reconstruit plus (`glib-2.0`
+  absent) depuis Ubuntu 26.04 (`docs/pagination-textures.md` §4). (2) **GPU hôte bloqué : tenu le 14/10 sur le PC**
   (`docs/epreuve-gpu-bloque.md`, propriétés `x-test-stall-ms` et `x-test-refuse-reset` du
   device, preuves dans `bench/stall-20261014/`) :
   - **GL3** : GPU bloqué, job en vol, kext rechargé → « reset non terminé après 5000 ms »,
