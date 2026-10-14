@@ -359,7 +359,11 @@ if command -v cc >/dev/null 2>&1; then
   QGPU_BIN="${TMPDIR:-/tmp}/qgpu_core_test.$$"
   case "$(uname -s)" in
     Darwin) QGPU_LIBS=(-framework OpenGL) ;;
-    *)      QGPU_LIBS=(); pkg-config --exists egl gl 2>/dev/null && QGPU_LIBS=($(pkg-config --libs egl gl)) ;;
+    *)      QGPU_LIBS=(); pkg-config --exists egl gl 2>/dev/null && QGPU_LIBS=($(pkg-config --libs egl gl))
+            # même plateforme EGL que run_tiger.sh : sous la session Wayland d'Ubuntu 26.04,
+            # l'EGL par défaut est llvmpipe, qui mesure l'atténuation des points sur |z| et
+            # fait échouer « atténuation c·d² » (14/10/2026, comme tex14 du job gpu)
+            export EGL_PLATFORM="${EGL_PLATFORM-device}" ;;
   esac
   if cc -std=gnu11 -O1 -pthread -I patches/qgpu tests/qgpu_core_test.c \
         patches/qgpu/qgpu-core.c patches/qgpu/qgpu-soft.c patches/qgpu/qgpu-gl.c \
