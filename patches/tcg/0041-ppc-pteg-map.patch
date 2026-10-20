@@ -1,0 +1,162 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1532,6 +1532,13 @@ struct CPUArchState {
+         uint64_t phys;
+         uint8_t idx, access, age, seen, used;
+     } tlbp_s[PPC_TLBP_SUS];
++    /*
++     * x-pteg-map (POMPPC tcg/0041): the hash32 PTEG search reads the group
++     * through one host pointer instead of a ldl_phys per word.
++     * x-pteg-map-verify: every search re-done the stock way and compared.
++     */
++    bool pteg_map, pteg_map_verify;
++    uint64_t ptegm_slow, ptegv_n, ptegv_bad, ptegv_race;
+     /* x-mem-stats (tcg/0031): see PPC_MS_* above */
+     bool mem_stats;
+     uint64_t ms[PPC_MS_N];
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -227,6 +227,14 @@ static const Property powerpc_cpu_properties[] = {
+     DEFINE_PROP_BOOL("x-dirty-skip", PowerPCCPU, parent_obj.dirty_skip, false),
+     DEFINE_PROP_BOOL("x-dirty-skip-verify", PowerPCCPU,
+                      parent_obj.dirty_skip_verify, false),
++    /*
++     * POMPPC tcg/0041.  x-pteg-map: the hash32 page-table search reads each
++     * PTEG through one translated host pointer (same words, same order).
++     * x-pteg-map-verify: proof mode.  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-pteg-map", PowerPCCPU, env.pteg_map, false),
++    DEFINE_PROP_BOOL("x-pteg-map-verify", PowerPCCPU, env.pteg_map_verify,
++                     false),
+     /* POMPPC tcg/0031: memory-side counters on stderr every 10 s */
+     DEFINE_PROP_BOOL("x-mem-stats", PowerPCCPU, env.mem_stats, false),
+     /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
+diff --git a/target/ppc/mmu-hash32.c b/target/ppc/mmu-hash32.c
+--- a/target/ppc/mmu-hash32.c
++++ b/target/ppc/mmu-hash32.c
+@@ -247,6 +247,92 @@ static hwaddr ppc_hash32_pteg_search(PowerPCCPU *cpu, hwaddr pteg_off,
+     return -1;
+ }
+ 
++/*
++ * POMPPC tcg/0041 (x-pteg-map).  The same search with the PTEG translated
++ * once: one address_space_translate for its 64 bytes instead of one per
++ * word (up to 16 here, 32 for both groups), then the words read from the
++ * host pointer, in the same order, with the same barrier.  ldl_phys on RAM
++ * is exactly ldl_be_p on that pointer (address_space_ldm_internal); a PTEG
++ * that is not directly accessible RAM (never under Mac OS X: the table is
++ * in RAM) falls back to the stock search.  R and C are still set by
++ * stb_phys, which keeps the dirty tracking of the page.
++ */
++static hwaddr ppc_hash32_pteg_search_map(PowerPCCPU *cpu, hwaddr pteg_off,
++                                         bool secondary, target_ulong ptem,
++                                         ppc_hash_pte32_t *pte)
++{
++    hwaddr addr = ppc_hash32_hpt_base(cpu) + pteg_off;
++    hwaddr xlat, len = HASH_PTEG_SIZE_32;
++    MemoryRegion *mr;
++    const uint8_t *p;
++    uint32_t pte0, pte1;
++
++    RCU_READ_LOCK_GUARD();
++    mr = address_space_translate(CPU(cpu)->as, addr, &xlat, &len, false,
++                                 MEMTXATTRS_UNSPECIFIED);
++    if (len < HASH_PTEG_SIZE_32 ||
++        !memory_access_is_direct(mr, false, MEMTXATTRS_UNSPECIFIED)) {
++        cpu->env.ptegm_slow++;
++        return ppc_hash32_pteg_search(cpu, pteg_off, secondary, ptem, pte);
++    }
++    p = qemu_map_ram_ptr(mr->ram_block, xlat);
++    for (int i = 0; i < HPTES_PER_GROUP; i++) {
++        pte0 = ldl_be_p(p + i * HASH_PTE_SIZE_32);
++        /* pte0 holds the valid bit and is read first, as above */
++        smp_rmb();
++        pte1 = ldl_be_p(p + i * HASH_PTE_SIZE_32 + HASH_PTE_SIZE_32 / 2);
++
++        if ((pte0 & HPTE32_V_VALID)
++            && (secondary == !!(pte0 & HPTE32_V_SECONDARY))
++            && HPTE32_V_COMPARE(pte0, ptem)) {
++            pte->pte0 = pte0;
++            pte->pte1 = pte1;
++            return pteg_off + i * HASH_PTE_SIZE_32;
++        }
++    }
++    return -1;
++}
++
++/*
++ * x-pteg-map-verify: the stock search done again and compared.  The guest
++ * may change the group between the two reads (another CPU writing a PTE):
++ * a mismatch is a divergence only if a second mapped search still
++ * disagrees with the stock one.
++ */
++static hwaddr ppc_hash32_pteg_search_verify(PowerPCCPU *cpu, hwaddr pteg_off,
++                                            bool secondary, target_ulong ptem,
++                                            ppc_hash_pte32_t *pte)
++{
++    CPUPPCState *env = &cpu->env;
++    ppc_hash_pte32_t a = { 0 }, b = { 0 };
++    hwaddr oa, ob;
++
++    oa = ppc_hash32_pteg_search_map(cpu, pteg_off, secondary, ptem, &a);
++    ob = ppc_hash32_pteg_search(cpu, pteg_off, secondary, ptem, &b);
++    env->ptegv_n++;
++    if (oa != ob || (oa != -1 && (a.pte0 != b.pte0 || a.pte1 != b.pte1))) {
++        oa = ppc_hash32_pteg_search_map(cpu, pteg_off, secondary, ptem, &a);
++        if (oa != ob || (oa != -1 && (a.pte0 != b.pte0 || a.pte1 != b.pte1))) {
++            env->ptegv_bad++;
++            fprintf(stderr, "x-pteg-map-verify: cpu %d DIVERGENCE pteg 0x%"
++                    HWADDR_PRIx " sec %d ptem 0x%x : map 0x%" HWADDR_PRIx
++                    " %08x %08x, stock 0x%" HWADDR_PRIx " %08x %08x\n",
++                    CPU(cpu)->cpu_index, pteg_off, secondary, (uint32_t)ptem,
++                    oa, a.pte0, a.pte1, ob, b.pte0, b.pte1);
++        } else {
++            env->ptegv_race++;
++        }
++    }
++    if ((env->ptegv_n & ((1u << 22) - 1)) == 0) {
++        fprintf(stderr, "x-pteg-map-verify: cpu %d %" PRIu64 " searches, %"
++                PRIu64 " divergences, %" PRIu64 " races, %" PRIu64
++                " not RAM\n", CPU(cpu)->cpu_index, env->ptegv_n,
++                env->ptegv_bad, env->ptegv_race, env->ptegm_slow);
++    }
++    *pte = b;
++    return ob;
++}
++
+ static void ppc_hash32_set_r(PowerPCCPU *cpu, hwaddr pte_offset, uint32_t pte1)
+ {
+     target_ulong base = ppc_hash32_hpt_base(cpu);
+@@ -272,6 +358,12 @@ static hwaddr ppc_hash32_htab_lookup(PowerPCCPU *cpu,
+     hwaddr pteg_off, pte_offset;
+     hwaddr hash;
+     uint32_t vsid, pgidx, ptem;
++    /* POMPPC tcg/0041 (x-pteg-map, x-pteg-map-verify) */
++    hwaddr (*search)(PowerPCCPU *, hwaddr, bool, target_ulong,
++                     ppc_hash_pte32_t *) =
++        cpu->env.pteg_map_verify ? ppc_hash32_pteg_search_verify :
++        cpu->env.pteg_map ? ppc_hash32_pteg_search_map :
++        ppc_hash32_pteg_search;
+ 
+     vsid = sr & SR32_VSID;
+     pgidx = (eaddr & ~SEGMENT_MASK_256M) >> TARGET_PAGE_BITS;
+@@ -291,7 +383,7 @@ static hwaddr ppc_hash32_htab_lookup(PowerPCCPU *cpu,
+             ppc_hash32_hpt_base(cpu), ppc_hash32_hpt_mask(cpu),
+             vsid, ptem, hash);
+     pteg_off = get_pteg_offset32(cpu, hash);
+-    pte_offset = ppc_hash32_pteg_search(cpu, pteg_off, 0, ptem, pte);
++    pte_offset = search(cpu, pteg_off, 0, ptem, pte);
+     if (pte_offset == -1) {
+         /* Secondary PTEG lookup */
+         qemu_log_mask(CPU_LOG_MMU, "1 htab=" HWADDR_FMT_plx "/" HWADDR_FMT_plx
+@@ -299,7 +391,7 @@ static hwaddr ppc_hash32_htab_lookup(PowerPCCPU *cpu,
+                 " hash=" HWADDR_FMT_plx "\n", ppc_hash32_hpt_base(cpu),
+                 ppc_hash32_hpt_mask(cpu), vsid, ptem, ~hash);
+         pteg_off = get_pteg_offset32(cpu, ~hash);
+-        pte_offset = ppc_hash32_pteg_search(cpu, pteg_off, 1, ptem, pte);
++        pte_offset = search(cpu, pteg_off, 1, ptem, pte);
+     }
+ 
+     return pte_offset;

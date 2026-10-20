@@ -30,7 +30,7 @@
 #   • frsp fctiw fctiwz fcmpo fdivs fdiv natifs, fsel en ops TCG (x-fp-native-cmp) — patches/tcg/0033
 #   • vcmp*fp, vcfsx/vcfux, vctsxs/vctuxs natifs (x-vfp-native-cmp)  — patches/tcg/0034
 #   • TLB invalidé avec précision, lmw/stmw et dcbz en ligne — patches/tcg/0031, 0032, 0035
-#   • tlb_reset_dirty sans parcours inutile — patches/tcg/0040
+#   • tlb_reset_dirty sans parcours inutile, PTEG par pointeur — patches/tcg/0040, 0041
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -951,7 +951,7 @@ target/ppc/mem_helper.c helper_lmw_verify
 target/ppc/cpu_init.c x-dcbz-inline
 target/ppc/mem_helper.c helper_dcbz_verify
 TCG31_MARKERS
-  # --- tcg/0040 : helpers côté hôte, docs/tcg-g4.md §36 ---
+  # --- tcg/0040-0041 : helpers côté hôte, docs/tcg-g4.md §36 ---
   # 0040 : x-dirty-skip (tlb_reset_dirty ne visite que les entrées qui peuvent
   # avoir à changer, rien quand aucune ne peut) ; 0041 : x-pteg-map
   # (recherche de PTEG par un pointeur hôte) ; 0042 : compteurs de ratés du TLB
@@ -961,6 +961,10 @@ TCG31_MARKERS
     echo "▶ patch TCG : tlb_reset_dirty sans parcours inutile (x-dirty-skip)"
     patch_strict "$ROOT/patches/tcg/0040-tcg-dirty-skip.patch"
   fi
+  if ! grep -q "x-pteg-map" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : PTEG par pointeur hôte (x-pteg-map)"
+    patch_strict "$ROOT/patches/tcg/0041-ppc-pteg-map.patch"
+  fi
   for f in accel/tcg/cputlb.c accel/tcg/cpu-exec.c include/hw/core/cpu.h \
            target/ppc/cpu.h target/ppc/cpu_init.c target/ppc/mmu_helper.c \
            target/ppc/mmu-hash32.c; do
@@ -968,10 +972,12 @@ TCG31_MARKERS
   done
   while read -r f m; do
     grep -q "$m" "$f" || {
-      echo "⚠ patch tcg 0040 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+      echo "⚠ patch tcg 0040-0041 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
   done <<'TCG40_MARKERS'
 accel/tcg/cputlb.c pomppc_reset_dirty
 target/ppc/cpu_init.c x-dirty-skip-verify
+target/ppc/mmu-hash32.c ppc_hash32_pteg_search_map
+target/ppc/cpu_init.c x-pteg-map-verify
 TCG40_MARKERS
 fi
 
@@ -1227,6 +1233,7 @@ check_opt x-tlb-precise  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-t
 check_opt x-lmw-inline   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-lmw-inline=on
 check_opt x-dcbz-inline  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-dcbz-inline=on
 check_opt x-dirty-skip   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-dirty-skip=on
+check_opt x-pteg-map     qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-pteg-map=on
 echo
 echo "→ $CAPS"
 

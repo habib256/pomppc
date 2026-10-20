@@ -4049,6 +4049,7 @@ valent pour arm64 tels quels, à reconstruire et mesurer sur le M4) :
 | patch | propriété | lanceur | preuve |
 |---|---|---|---|
 | `0040-tcg-dirty-skip` | `x-dirty-skip`, `x-dirty-skip-verify` (CPU) | `DIRTYSKIP=1`, `DIRTYSKIPVERIFY=1` | parcours d'origine derrière, « rien à changer » |
+| `0041-ppc-pteg-map` | `x-pteg-map`, `x-pteg-map-verify` (CPU) | `PTEGMAP=1`, `PTEGMAPVERIFY=1` | recherche d'origine refaite et comparée |
 
 ### 36.1 `tcg/0040` : `tlb_reset_dirty` sans parcours inutile (`x-dirty-skip`)
 
@@ -4102,4 +4103,22 @@ retenue, 7 sessions, **155 648 appels vérifiés, 0 divergence** (les deux premi
 106 496, 0) ; une troisième tranche est apparue en jeu (`pci.2:0f.0/qgpu.shmem`, la mémoire
 partagée du GPU paravirtuel), sans `dw_over`. Empreintes invitées inchangées (§36.4). Mutants :
 §36.7.
+
+### 36.2 `tcg/0041` : la PTEG lue par un pointeur hôte (`x-pteg-map`)
+
+`ppc_hash32_pteg_search` lisait chaque PTE par deux `ldl_phys` (jusqu'à 16 par groupe, 32 avec
+le groupe secondaire), chacun refaisant `address_space_translate` sous RCU. Sous `x-pteg-map`,
+le groupe (64 octets alignés) est traduit **une fois** ; s'il est en RAM accessible directement
+(`memory_access_is_direct`, toujours le cas sous Mac OS X), les mots sont lus par `ldl_be_p` sur
+le pointeur hôte, **dans le même ordre**, `pte0` puis `smp_rmb()` puis `pte1` — exactement ce
+que fait `address_space_ldm_internal` pour un `ldl_phys` en RAM. Sinon (groupe hors RAM),
+la recherche d'origine (`pteg_slow` dans `x-mem-stats`). R et C restent posés par `stb_phys`, qui
+garde le suivi des pages sales. `x-pteg-map-verify` : chaque recherche refaite à l'ancienne et
+comparée (offset, `pte0`, `pte1`) ; un écart est d'abord une **course** (un autre CPU écrit la
+PTE entre les deux lectures) et ne devient divergence que si une seconde lecture par le pointeur
+contredit encore la recherche d'origine.
+
+Preuve (sessions `ver2`, `ver3`, SMP=2, avec `x-tlb-precise-verify=256`, qui retraduit chaque
+entrée gardée et fait donc beaucoup de recherches) : **1,38 G recherches comparées (au
+dernier bilan imprimé, toutes les 2^22), 0 divergence**, 8 courses résolues, 0 groupe hors RAM.
 
