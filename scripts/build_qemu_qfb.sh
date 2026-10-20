@@ -31,6 +31,7 @@
 #   • vcmp*fp, vcfsx/vcfux, vctsxs/vctuxs natifs (x-vfp-native-cmp)  — patches/tcg/0034
 #   • TLB invalidé avec précision, lmw/stmw et dcbz en ligne — patches/tcg/0031, 0032, 0035
 #   • tlb_reset_dirty sans parcours inutile, PTEG par pointeur, compteurs de ratés, cache de sauts à 2 voies — patches/tcg/0040-0043
+#   • flottant simple : opérandes connus, FPRF paresseux, stfs court — patches/tcg/0045-0047
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -993,6 +994,35 @@ accel/tcg/cpu-exec.c rv_found_stat
 accel/tcg/cpu-exec.c tb_jmp_cache_fill
 accel/tcg/tb-maint.c tb_jmp_cache_2way
 TCG40_MARKERS
+  # --- tcg/0045-0047 : le flottant simple sans ses contrôles redondants, docs/tcg-g4.md §37-39 ---
+  # 0045 : opérandes connus valides et porte du FPSCR connue ouverte dans un bloc
+  # (x-fp-known) ; 0046 : FPRF et FI calculés à la lecture du FPSCR (x-fprf-lazy) ;
+  # 0047 : stfs court d'une valeur connue (x-stfs-known). Émetteurs x86_64 et aarch64
+  # (ce dernier écrit sur le PC, jamais construit). Propriétés éteintes par défaut.
+  if ! grep -q "x-fp-known" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : opérandes flottants connus valides (x-fp-known)"
+    patch_strict "$ROOT/patches/tcg/0045-ppc-fp-known.patch"
+  fi
+  if ! grep -q "x-fprf-lazy" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : FPRF paresseux (x-fprf-lazy)"
+    patch_strict "$ROOT/patches/tcg/0046-ppc-fprf-lazy.patch"
+  fi
+  if ! grep -q "x-stfs-known" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : stfs court d'une valeur connue (x-stfs-known)"
+    patch_strict "$ROOT/patches/tcg/0047-ppc-stfs-known.patch"
+  fi
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0045-0047 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG45_MARKERS'
+target/ppc/translate/fp-impl.c.inc fpk_scan
+target/ppc/fpu_helper.c fpk_exit
+tcg/x86_64/tcg-target.c.inc PFP_K_G
+target/ppc/cpu.h ppc_fprf_flush
+target/ppc/excp_helper.c ppc_fprf_flush
+tcg/x86_64/tcg-target.c.inc PFP_L
+target/ppc/translate/fp-impl.c.inc gen_stfs_known
+TCG45_MARKERS
 fi
 
 # --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---
@@ -1249,6 +1279,9 @@ check_opt x-dcbz-inline  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-d
 check_opt x-dirty-skip   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-dirty-skip=on
 check_opt x-pteg-map     qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-pteg-map=on
 check_opt x-jc-2way      qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jc-2way=on
+check_opt x-fp-known    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fp-known=on
+check_opt x-fprf-lazy   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fprf-lazy=on
+check_opt x-stfs-known  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-stfs-known=on
 echo
 echo "→ $CAPS"
 

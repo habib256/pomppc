@@ -1,0 +1,102 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index 14c6756..daedac2 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1633,6 +1633,12 @@ struct CPUArchState {
+      * ppc_fprf_flush() first); docs/tcg-g4.md section 37.
+      */
+     bool fprf_lazy;
++    /*
++     * x-stfs-known (POMPPC tcg/0047, needs x-fp-known): stfs of an FPR known
++     * to hold a float32 zero or normal stores bits 63:62 || 58:29 of it,
++     * without the denormal path of SINGLE(); docs/tcg-g4.md section 38.
++     */
++    bool stfs_known;
+     uint64_t fprf_src;
+     uint64_t fpn_src_old;       /* x-fp-verify: fprf_src before the op */
+     uint32_t fpn_sel;           /* x-fp-verify: selector of the checked op */
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index 34514d0..667d05f 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -131,6 +131,13 @@ static const Property powerpc_cpu_properties[] = {
+      * x-fp-native.  Off by default.
+      */
+     DEFINE_PROP_BOOL("x-fprf-lazy", PowerPCCPU, env.fprf_lazy, false),
++    /*
++     * POMPPC tcg/0047: stfs of an FPR that x-fp-known knows to hold a
++     * float32 zero or normal stores it by one shift and one deposit instead
++     * of the whole SINGLE() conversion.  Bit-exact.  Needs x-fp-known.  Off
++     * by default.
++     */
++    DEFINE_PROP_BOOL("x-stfs-known", PowerPCCPU, env.stfs_known, false),
+     /*
+      * POMPPC tcg/0008.  x-ret-inline: the jump-cache probe of
+      * helper_lookup_tb_ptr done in the generated code at every indirect
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+index 74c9422..143db17 100644
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -220,6 +220,7 @@ struct DisasContext {
+      */
+     bool fprf_lazy;
+     bool fprf_maybe;
++    bool stfs_known;            /* x-stfs-known (tcg/0047) */
+     bool ret_inline, ret_verify; /* x-ret-inline, x-ret-verify (tcg/0008) */
+     bool altivec_enabled;
+     bool vsx_enabled;
+@@ -6765,6 +6766,7 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+     ctx->fprf_lazy = env->fprf_lazy && ctx->fp_native;
+     ctx->fprf_maybe = true;
+     fpr_novsr = ctx->fprf_lazy && !(ctx->insns_flags2 & PPC2_VSX);
++    ctx->stfs_known = env->stfs_known && ctx->fp_known;
+     ctx->ret_inline = env->ret_inline;
+     ctx->ret_verify = cs->ret_verify;
+     ctx->spe_enabled = (hflags >> HFLAGS_SPE) & 1;
+diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c.inc
+index d1727ca..56c88a9 100644
+--- a/target/ppc/translate/fp-impl.c.inc
++++ b/target/ppc/translate/fp-impl.c.inc
+@@ -1808,6 +1808,31 @@ static inline void gen_qemu_st32fiw(DisasContext *ctx, TCGv_i64 arg1, TCGv arg2)
+ GEN_STXF(stfiw, st32fiw, 0x17, 0x1E, PPC_FLOAT_STFIWX);
+ 
+ /*            Floating-point Load/Store Instructions                         */
++/*
++ * x-stfs-known (POMPPC tcg/0047, docs/tcg-g4.md section 38): frS is known
++ * to hold a float32 zero or normal (x-fp-known: written in this TB by an
++ * INDEX_op_ppc_fp32 short path, FPK_R or'ed into it, which leaves the TB
++ * otherwise).  SINGLE() of the ISA then is bits 63:62 || 58:29 of frS:
++ * exponent > 896, or a zero (whose denormal path gives the sign alone, the
++ * same bits).  Returns false (the whole conversion) when it is not known.
++ */
++static bool gen_stfs_known(DisasContext *ctx, int rs, TCGv_i64 src, TCGv addr)
++{
++    TCGv_i64 v, t;
++
++    if (!ctx->stfs_known || !((ctx->fpk_valid >> rs) & 1)) {
++        return false;
++    }
++    fpk_rely(ctx->fpk_prod[rs], FPK_R);
++    v = tcg_temp_new_i64();
++    t = tcg_temp_new_i64();
++    tcg_gen_shri_i64(v, src, 29);
++    tcg_gen_shri_i64(t, src, 62);
++    tcg_gen_deposit_i64(v, v, t, 30, 2);
++    tcg_gen_qemu_st_i64(v, addr, ctx->mem_idx, DEF_MEMOP(MO_UL));
++    return true;
++}
++
+ static bool do_lsfpsd(DisasContext *ctx, int rt, int ra, TCGv displ,
+                       bool update, bool store, bool single)
+ {
+@@ -1825,7 +1850,9 @@ static bool do_lsfpsd(DisasContext *ctx, int rt, int ra, TCGv displ,
+     if (store) {
+         get_fpr(t0, rt);
+         if (single) {
+-            gen_qemu_st32fs(ctx, t0, ea);
++            if (!gen_stfs_known(ctx, rt, t0, ea)) {
++                gen_qemu_st32fs(ctx, t0, ea);
++            }
+         } else {
+             gen_qemu_st64_i64(ctx, t0, ea);
+         }

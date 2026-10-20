@@ -4278,3 +4278,352 @@ Après fusion, `DIRTYSKIP=1 PTEGMAP=1 JC2WAY=1` font la même chose. Le binaire 
 
 Journaux (non versionnés) : `bench/tcg/helpers-2010/` du dépôt principal (`ver2`, `ver3`,
 `jc-*`, `ab-*`, `mut-d1`, `mut-d3` : `qemu.log`, bancs invités, rapports `perf`, temps des fils).
+---
+
+## 37. Le flottant simple sans ses contrôles redondants (1) : `tcg/0045` (`x-fp-known`)
+
+20/10/2026, PC (i7-10700F). Copie isolée `~/src/qemu-fp2` (rsync de `~/src/qemu`, un commit git
+par levier : `base`, 0045, 0046, 0047), binaires `~/src/qemu-fp2/bin/fp2/` (et `bin/base/`,
+l'arbre d'avant) ; VM de dev `disks/tiger-dev-fp2.raw` (SSH 2252, toutes les options de
+production de `run_tiger.sh`, SMP=2) ; banc linux-user `~/src/qemu-fp2u`
+(`tools/tcg/fpnatcmp-userhack.py`, plus trois neutralisations pour 0031-0035 : déclaration de
+`pomppc_jc_scan_stat`, fin du bloc système de `cpu.h`, bouchon `helper_mem_stat`). Deux autres
+agents construisaient et jouaient sur l'hôte (charge 3-4) : **les temps sont indicatifs**.
+
+### 37.1 Le constat
+
+Session du 20/10 (DOOM 3, profil hôte) : 84,7 % du temps vCPU dans le code généré, surtout du
+flottant simple scalaire. Un `fmuls` y fait ~70 instructions x86, dont 5 calculent
+(`vcvtsd2ss` ×2, `vmulss`, `vcvtss2sd`, `vmovq`) ; le reste, relu dans le journal
+`-d out_asm` : porte du FPSCR (4 instructions et un rechargement du FPSCR), test de chaque
+opérande (`fpi_zon`, ~10 instructions chacun), test du résultat (~12), FPRF et FI (~14), drapeaux
+softfloat (1 rangement), frT et la moitié basse du VSR (2 rangements), synchronisation du FPSCR.
+
+Sur les blocs de DOOM 3 de ce journal (234 blocs, 2 881 instructions, relevé statique,
+`knownsim.py` de la session) : **38 % des opérandes** des ops natives viennent d'un chemin
+court du même bloc, la porte a **déjà été franchie dans 92 %** des cas, et **58 % des `stfs`**
+rangent un tel résultat. Ce sont les trois leviers.
+
+### 37.2 La conception
+
+Un résultat du chemin court de `fmuls`, `fmadds`/`fmsubs`/`fnmadds`/`fnmsubs`, `fdivs`, `frsp`
+est un simple nul ou normal (`fpi_zon()` : zéro, ou FLT_MIN ≤ |r| < ∞ arrondi en simple) ; celui
+de `fadds`/`fsubs` aussi, sauf une somme minuscule non nulle (exacte, donc acceptée par leur
+chemin court). Un opérande `fpi_zon()` passe tous les tests d'opérande : `fpi_zon` (simple),
+`fpi_zon64` (double), la plage de `frsp`, « pas de NaN » de `fcmpu`/`fcmpo`. Et la porte (XX = 1,
+XE = OE = UE = 0, RN = 00) **ne se referme que par une écriture explicite du FPSCR** (`mtfsf`,
+`mtfsfi`, `mtfsb0/1`, `mcrfs` : `ppc_store_fpscr`) : les séquences d'origine ne font que poser
+des bits d'exception, dont XX.
+
+**Invariant** (au début de chaque instruction du bloc en cours de traduction) : tout FPR de
+`ctx->fpk_valid` contient, chaque fois que le code généré arrive là, un `fpi_zon()` ; si
+`ctx->fpk_gate` ≥ 1 la porte est ouverte (≥ 2 : RN = 00 compris).
+
+- **Producteurs** : une op native de la liste ci-dessus met frT dans l'ensemble et retient son
+  `TCGOp` ; une op qui a testé la porte elle-même en devient la garante (niveau 1 pour `fcmpu`,
+  `fcmpo`, `fctiwz`, 2 sinon).
+- **Consommateurs** : une op native dont un opérande est dans l'ensemble reçoit `FPK_A/B/C` dans
+  son sélecteur (l'émetteur ne teste plus cet opérande), `FPK_G` si la porte est connue (plus de
+  porte), et **or'e `FPK_R` (`FPK_X`, `FPK_XRN`) dans le sélecteur du producteur** : c'est encore
+  un argument de son `TCGOp`, le code n'est émis qu'une fois le bloc entier traduit.
+- **Chemin lent d'un producteur** : `ppc_fp32_native_slow()` fait la séquence d'origine (ou son
+  chemin court en C), dont le résultat peut être n'importe quoi. Avec `FPK_R` et un résultat non
+  `fpi_zon()`, ou `FPK_X` et une porte fermée **après** l'instruction, il **quitte le bloc** :
+  `fpk_exit()` écrit ce que le code généré aurait écrit (frT et la moitié basse de son VSR, le
+  champ CR de `fcmpu`, le FPSCR, CR1 si Rc = 1 — `FPK_RC`), `cpu_restore_state()` (nip de
+  l'instruction), `nip + 4`, `cpu_loop_exit()`. L'op a `TCG_OPF_SIDE_EFFECTS` : les globales ont
+  été synchronisées avant elle, exactement comme pour l'exception FP différée que ce même talon
+  sait déjà lever. La suite du bloc ne s'exécute donc jamais sans la garantie.
+- **`fadds`/`fsubs` avec `FPK_R`** : l'émetteur ajoute au chemin court « r nul ou
+  |r| ≥ FLT_MIN » (une somme minuscule part au talon, qui la calcule et quitte le bloc).
+- **Toute autre instruction** passe par `fpk_scan()` sur les ops TCG qu'elle a émises : un
+  rangement dans la zone des VSR 0-31 d'`env` retire ce FPR, une écriture de `cpu_fpscr` retire
+  la porte, **un appel de helper, une étiquette, un branchement retirent tout** (règle
+  aveugle : un helper peut écrire un FPR ou le FPSCR en C). `fmr`/`fneg`/`fabs` ne propagent rien
+  (gain nul sur le relevé de DOOM 3).
+- Coupé avec icount (sortir après une instruction la compterait deux fois), sur un CPU avec VSX
+  (helpers qui écrivent les VSR en C) et dans un bloc instrumenté par un greffon TCG (qui peut
+  écrire des registres entre deux instructions).
+
+Sélecteur de `INDEX_op_ppc_fp32` : `op | frT << 8 | FPK_A 1<<16 | FPK_B | FPK_C | FPK_G 1<<19 |
+FPK_R | FPK_X | FPK_XRN | FPK_RC 1<<23` (`internal.h`, vérifiés à la compilation contre les
+valeurs des émetteurs). **Émetteur x86_64** : chaque test retiré l'est par un `if` sur le bit ;
+**émetteur aarch64** : idem (avec `FPK_A`/`FPK_C` il calcule encore `a << 1`/`c << 1` pour le test
+« produit nul » du résultat) — **écrit sur le PC, compilé par le clang 18 du NDK
+(`tools/tcg/a64syntax.sh`, qui ignore maintenant `-fzero-init-padding-bits` de GCC 15), jamais
+exécuté** ; il n'emploie que des encodeurs déjà prouvés sur le M4 (`pfp_*`, `tcg_out_*`).
+
+Propriété `x-fp-known` (n'agit qu'avec `x-fp-native`), `FPKNOWN=1 ./run_tiger.sh`, sondée par
+`build_qemu_qfb.sh` ; vérifiée par `x-fp-verify` (qui ne voit pas l'op qui quitte le bloc : le
+talon vient d'y faire la séquence d'origine) et compteur `x-fp-known : N sorties de bloc` dans
+son bilan.
+
+### 37.3 La preuve
+
+**Hôte, modèle et talon** (`tools/tcg/fpproof.sh ~/src/qemu-fp2 4000000`, graine 0x5eed,
+`-DFPPROOF_KNOWN`) :
+
+| épreuve | vecteurs | divergences |
+|---|---|---|
+| contrats d'origine (chemins courts, `x-fp-flat`, talon) | 125 749 260 (62 136 545 courts ; talon : 7 420 854 exceptions) | **0** |
+| porte monotone dans la séquence d'origine (XX jamais ôté, XE OE UE RN intacts) | 118 328 406 | **0** |
+| résultats des chemins courts producteurs `fpi_zon()` | 20 645 507 (dont 30 731 sommes minuscules, comptées à part) | **0** |
+| talon avec `FPK_R` / `FPK_X` / `FPK_X\|FPK_XRN` : sort exactement quand il faut, frT, moitié VSR, FPSCR, CR, nip + 4 | sorties 49 674 570 / 20 317 001 / 29 797 894, sans sortie 60 579 041 / 98 011 405 / 88 530 512 | **0** |
+
+Contre-épreuves du talon (`FLATMUT`, 50 000 vecteurs) : sortie `FPK_R` oubliée (17 281 477
+divergences), `nip + 8` (53 811 926), moitié VSR non écrite (53 658 263), `FPK_XRN` ignoré
+(6 848 485) : **4 sur 4**.
+
+**Banc linux-user** (`fptest`, le vrai traducteur, le vrai émetteur x86_64) — les modes
+d'origine n'ont qu'une instruction flottante par bloc (opérandes par `lfd`) : d'où le **mode
+`k`** de `fptest`, nouveau : des programmes aléatoires en ligne droite (8 à 48 instructions, un
+bloc) écrits dans un tampon exécutable, dont les résultats servent d'opérandes aux suivants —
+arithmétique simple (formes Rc comprises), double, `fdivs`, `frsp`, `fctiw(z)`, `fcmpu`/`fcmpo`,
+`fmr`/`fneg`/`fabs`/`fnabs`, `fsel`, `lfs`/`lfd`, `stfs`/`stfd`, `mffs`, `mtfsf`, `mtfsfi`,
+`mtfsb0/1`, `mcrfs` ; entrées surtout normales à exposant large (produits qui débordent ou
+sous-débordent en chaîne), voisines de FLT_MIN (différences dénormales exactes), et le catalogue
+de `c` ; cinq états du FPSCR ; f1-f8, la zone des `stfs`/`stfd`, FPSCR et CR hachés.
+
+| `fptest` linux-user | référence (`x-fp-native…`) | avec 0045 (et 0046, 0047) | sous `x-fp-verify` |
+|---|---|---|---|
+| `k 32768 3` (1 310 720 exécutions) | `c51ff7ebd59c27a9` | identique | identique, 17 170 433 ops vérifiées, **0 divergence** |
+| simple, `d`, `c` (65 536) | `c2dffc9e43a020d8`, `fb3e6006e03c4f53`, `e6bba64145ea9bbf` | identiques | identiques, 0 divergence |
+
+Mutants de 0045 (`mut.sh` : une copie mutée de l'arbre linux-user par mutant, `fptest k 4096`
+contre la référence, avec et sans vérificateur) :
+
+| mutant | lignes d'empreinte différentes | divergences du vérificateur |
+|---|---|---|
+| sortie `FPK_R` retirée du talon | 6 (toutes) | 13 333 |
+| sortie `FPK_X` retirée | 6 | 567 277 |
+| rangement dans un FPR ignoré par `fpk_scan` | 6 | 432 |
+| appel de helper ignoré | 6 | 112 950 |
+| doubles comptés producteurs | 6 | 2 929 |
+| `fctiw(z)` comptés producteurs | 6 | 575 |
+| porte : RN jamais exigé (niveau 1 partout) | 6 | 95 985 |
+| `FPK_R`/`FPK_X` jamais posés sur le producteur | 6 | 548 151 |
+| sortie sans écrire frT | 6 | 0 (l'op qui sort n'est pas vérifiée) |
+| sortie sans `nip + 4` | — | boucle sans fin (l'instruction se refait) |
+| test « somme minuscule » retiré | **0** | 0 |
+| sortie sans écrire le FPSCR | **0** | 0 |
+
+Les deux derniers sont **équivalents sous 0045 seule** : une somme minuscule (un dénormal simple,
+exact) que l'op suivante prend sans test donne, par le FPU de l'hôte sans DAZ ni FTZ, les mêmes
+résultat et drapeaux que softfloat (le test du résultat renvoie ensuite les petits au talon) ;
+et le FPSCR que la sortie n'écrit pas est réécrit par l'op qui dépendait du producteur. Ils
+deviennent observables avec `stfs` court (0047, §39.2 : **attrapés**, 4 et 2 lignes).
+
+**Invité** (VM de dev, SMP=2, toutes les options de production) : `fptest` simple, `d 65536`,
+`c 65536`, `k 4096`, `k 4096 7` — empreintes `e80ec8026301ef1d`, `fb3e6006e03c4f53`,
+`e6bba64145ea9bbf` (celles des §25.4 et §33.4), `3f42ddddb092415b`, `4181b7cf885c6e34` —
+**identiques** sans les leviers, avec les trois, et avec les trois sous `x-fp-verify` +
+`x-fp-native-cmp-verify` : suite + Marble Blast 120 s, **1 384 231 028 opérations vérifiées
+(1 334 561 830 par le chemin court), 0 divergence**, 12 562 065 sorties de bloc (le mode `k` en
+provoque des millions) ; Marble Blast seul (chauffe 110 s + 120 s) : 1 333 839 396 vérifiées,
+0 divergence, **5 217 694 sorties de bloc, 0,39 % des opérations**.
+
+### 37.4 Ce que coûte une sortie de bloc
+
+`fptest banc-x` (nouveau : `fmuls` dont le `fadds` suivant lit le résultat, produit normal puis
+dénormal) dans la VM : produit dénormal (talon à chaque tour) 354-405 ms pour 2 M sans 0045,
+605-637 avec : **~130 ns par sortie** (restauration de l'état, `cpu_loop_exit`, recherche du bloc
+suivant). Sur Marble Blast, 21 000 sorties/s environ : ~0,3 % d'un vCPU. Un bloc chaud dont un
+producteur sortirait à chaque passage perdrait plus qu'il ne gagne : pas de soupape ici (compter
+les sorties par bloc et le retraduire sans `x-fp-known`) ; le bilan du vérificateur donne le
+nombre en jeu.
+
+### 37.5 Taille du code et banc
+
+Taille (octets x86 par instruction) mesurée sur **les blocs mêmes de DOOM 3** du journal de la
+session (`tools/tcg/tbreplay.py` les extrait, `tools/tcg/tbreplay.c` les fait retraduire par le
+`qemu-ppc` linux-user, `-d in_asm,out_asm`, `tools/tcg/tcgsize.py --starts` découpe aux
+marqueurs d'instruction) : même émetteur que le binaire système ; `lfs`/`stfs` y sont plus
+courts (pas de TLB logiciel). Tableau complet au §39.3.
+
+| | base | 0045 |
+|---|---|---|
+| `fmuls` | 287,6 | 226,6 |
+| `fmadds` | 324,9 | 252,5 |
+| `fmsubs` | 385,1 | 317,1 |
+| `fadds` | 200,2 | 180,7 |
+| moyenne des 1 308 instructions | 154,7 | 135,5 |
+
+Banc invité (`fptest banc 10000000`, VM de dev, médianes de 3 tours, hôte chargé) : voir §39.4.
+
+## 38. Le flottant simple sans ses contrôles redondants (2) : `tcg/0046` (`x-fprf-lazy`)
+
+### 38.1 Pourquoi pas « FPRF en globale TCG »
+
+L'idée de départ — FPRF dans une globale TCG à part, que la liveness supprime quand une op
+suivante l'écrase — ne rend rien ici : `INDEX_op_ppc_fp32` a `TCG_OPF_SIDE_EFFECTS` (son talon
+peut lever une exception FP différée, `cpu_restore_state` veut les globales en mémoire), donc
+**toute globale sale est rangée avant chaque op** et aucun calcul de FPRF n'est mort ; et le
+calcul est dans l'op, pas en ops TCG que la liveness pourrait retirer. Ce qui marche : ne plus
+**calculer** FPRF du tout dans le chemin court, mais **ranger le résultat** (un `mov` de 7
+octets) et calculer FPRF à la lecture du FPSCR.
+
+### 38.2 La conception
+
+`env->fprf_src` : `PPC_FPRF_NONE` (= 1, le plus petit dénormal double, jamais un résultat de
+chemin court, qui est nul ou normal) quand `env->fpscr` porte le FPSCR complet ; sinon **FPRF =
+classe de `fprf_src` et FI = 1** (`ppc_fpscr_get()`, `ppc_fprf_of()` : la table de
+`helper_compute_fprf_float64`). Le chemin court de l'op rend nf = FPSCR inchangé et range r dans
+`fprf_src` ; `fctiw(z)` rend FPSCR | FI sans toucher `fprf_src` (FPRF inchangé) ; `fcmpu`/`fcmpo`
+calculent C = FPSCR[16] si `fprf_src` = NONE, sinon `fprf_src == −0` (la seule classe à C = 1
+parmi les zéros et les normaux), FPCC = CR, FI = 1, et rangent NONE — **sauf** quand la
+traduction sait `fprf_src` à NONE (un `fcmpu` ou un vidage depuis la dernière op arithmétique
+du bloc) : forme d'origine.
+
+Lecteurs du FPSCR (`ppc_fprf_flush()` d'abord, ou `ppc_fpscr_get()`) :
+
+- **Traduction** : avant toute instruction des opcodes 59 et 63 qui n'est pas une op native
+  (`mffs`, `mcrfs`, `mtfsf`, `mtfsfi`, `mtfsb0/1`, `fsqrt`, `fres`… : `fprf_needs_flush()`),
+  `helper_fprf_flush` (sans `TCG_CALL_NO_WG` : TCG relit `cpu_fpscr`) ; une seule fois par suite
+  sans op native entre deux (`ctx->fprf_maybe`). `fmr`, `fneg`, `fabs`, `fnabs`, `fcpsgn`, `fsel` ne
+  lisent pas le FPSCR (Rc = 1 lit FPSCR[0:3], hors de l'état paresseux).
+- **Talon** de l'op : vidage d'abord, puis séquence d'origine sur le FPSCR complet (rend un nf
+  complet, `fprf_src` reste NONE).
+- **Entrée de toute interruption** (`powerpc_excp`) : ce que lit le gestionnaire, un hypercall
+  ou la bascule nested-HV.
+- `helper_store_fpscr`, `helper_fpscr_clrbit/setbit` (vidage, défense en profondeur : la
+  traduction a déjà vidé), `ppc_store_fpscr` (pose NONE), migration (`cpu_pre_save` vide,
+  `cpu_post_load` pose NONE), gdbstub, `info registers`, vidage ELF, cadres de signal de
+  linux-user, `spapr_nested`, `spapr_fadump` (lecture par `ppc_fpscr_get`), reset (NONE).
+- `x-fp-verify` compare les FPSCR architecturaux (la traduction range l'état paresseux d'avant
+  l'op dans `env->fpn_src_old`).
+
+Sur un CPU sans VSX, `set_fpr()` ne range plus 0 dans le double mot 1 du VSR : jamais lu (ni
+instruction VSX, ni registre VSX de gdbstub, ni sous-section `cpu/vsx` de la migration) et jamais
+écrit que par ce rangement de 0 — il vaut 0 depuis l'objet CPU mis à zéro : rangement mort.
+
+Op TCG : `DEF(ppc_fp32, 2, 4, 4, …)`, quatrième constante = décalage de `fprf_src` dans `env` ;
+bit `FPK_L` (1 << 24) du sélecteur. Émetteurs x86_64 et aarch64 (sur aarch64 le rangement de r
+est après le `cbnz` vers le talon : le chemin rapide y calcule tout sans branchement). Propriété
+`x-fprf-lazy`, `FPRFLAZY=1`.
+
+### 38.3 La preuve
+
+- `fpproof.sh … 4000000` : `ppc_fprf_of` contre `helper_compute_fprf_float64` sur **369 130 180**
+  valeurs (opérandes et résultats), l'identité `lazy(f, r) = fpi_fpscr_arith(lazy(f, s), r)` pour
+  quatre états paresseux d'avant (NONE, +0, −0, normal) sur **200 667 076** chemins courts, la
+  formule de `fcmpu` paresseux sur **28 502 892** : **0 divergence**.
+- Banc linux-user : mêmes empreintes (§37.3), le mode `k` contenant `mffs`, `mcrfs`, `mtfsf`…
+- Mutants (`mut.sh`, `fptest k 4096`, `x-fprf-lazy` seul) : r non rangé (9 lignes, 667 962
+  divergences), aucun vidage avant `mffs` & co. (8 lignes ; le vérificateur ne voit pas `mffs`),
+  talon sans vidage (6, 162 128), C de +0 au lieu de −0 (6, 2 141), `fcmpu` sans NONE (6,
+  73 282), classe de −0 fausse (6, 9 870), `fcmpu` jamais paresseux (6, 20 685), suivi statique
+  faux (8, 21 238) : **8 sur 8**.
+- Invité : empreintes et vérificateur du §37.3 (les trois leviers ensemble).
+
+### 38.4 Taille
+
+| | base | 0046 | 0045 + 0046 |
+|---|---|---|---|
+| `fmuls` | 287,6 | 243,3 | 183,8 |
+| `fmadds` | 324,9 | 283,1 | 210,9 |
+| `fadds` | 200,2 | 166,6 | 147,1 |
+| `frsp` | 162,2 | 120,5 | 110,8 |
+| moyenne | 154,7 | 139,6 | 121,1 |
+
+`fcmpu` paresseux coûte ~56 octets de plus quand l'état n'est pas connu vide (relire
+`fprf_src`, ranger NONE).
+
+## 39. Le flottant simple sans ses contrôles redondants (3) : `tcg/0047` (`x-stfs-known`), gains, A/B
+
+### 39.1 La conception
+
+`stfs` (et `stfsu`, `stfsx`, `stfsux`) d'un FPR que `x-fp-known` sait `fpi_zon()` : SINGLE() de
+l'ISA vaut alors les bits 63:62 ‖ 58:29 du double (exposant > 896, ou zéro, dont la branche
+dénormale rend le signe seul : les mêmes bits) — **un décalage, un dépôt** (`shri`, `shri`,
+`deposit` puis le rangement 32 bits) au lieu des 13 ops de la conversion sans branchement de
+`x-lfs-inline` (ou de l'appel de `helper_tosingle`). `stfs` est un consommateur : il or'e
+`FPK_R` dans le producteur. `lfs` n'a rien à savoir (sa valeur vient de la mémoire) : inchangé.
+Propriété `x-stfs-known` (n'agit qu'avec `x-fp-known`), `STFSKNOWN=1`. Aucun émetteur touché.
+
+### 39.2 La preuve
+
+- `fpproof.sh` : **les 2^32 motifs simples** — `fpi_zon(DOUBLE(w))` ⇔ w nul ou normal
+  (4 261 412 866 motifs), et pour eux la forme courte = `helper_tosingle()` = w : **0
+  divergence**.
+- Mutants (`fptest k 4096`, `x-fp-known` + `x-stfs-known`) : forme courte sans condition (6
+  lignes d'empreinte), `FPK_R` non posé par `stfs` (6), dépôt faux (6) : **3 sur 3** (le
+  vérificateur ne voit pas les rangements : l'empreinte hache la zone des `stfs`). Avec `stfs`
+  court, les deux mutants équivalents de 0045 sont **attrapés** : test « somme minuscule » retiré
+  (4 lignes), sortie de bloc sans FPSCR (2 lignes).
+
+### 39.3 Taille du code (blocs de DOOM 3 retraduits)
+
+`tools/tcg/tcgsize.py --starts`, octets x86 par instruction, 1 308 instructions des 127 blocs
+distincts du journal de la session (linux-user : `lfs`/`stfs` sans TLB logiciel ; dans le binaire
+système chacun porte ~50 octets de plus, que les leviers ne touchent pas) :
+
+| instruction | base | 0045 | 0046 | 0045 + 0046 | les trois |
+|---|---|---|---|---|---|
+| `fmuls` | 287,6 | 226,6 | 243,3 | 183,8 | **176,9 (−38 %)** |
+| `fmadds` | 324,9 | 252,5 | 283,1 | 210,9 | **202,8 (−38 %)** |
+| `fmsubs` | 385,1 | 317,1 | 335,1 | 267,1 | 259,3 |
+| `fnmsubs` | 361,2 | 298,6 | 315,1 | 252,6 | 245,6 |
+| `fadds` | 200,2 | 180,7 | 166,6 | 147,1 | 152,2 |
+| `fsubs` | 244,5 | 240,4 | 201,1 | 196,9 | 191,2 |
+| `frsp` | 162,2 | 152,9 | 120,5 | 110,8 | 104,4 |
+| `stfs` | 128,1 | 127,3 | 128,1 | 127,3 | **76,0 (−41 %)** |
+| `lfs` | 102,9 | 102,9 | 102,9 | 102,9 | 97,7 |
+| **moyenne** | 154,7 | 135,5 | 139,6 | 121,1 | **107,8 (−30 %)** |
+
+### 39.4 Banc invité (VM de dev, indicatif)
+
+`fptest banc 10000000` (chaîne `fmadds fmuls fmsubs fadds`, sommets 4×4, « min/max » qui est
+`fsubs`+`fsel`, §22.8), SMP=2, toutes les options de production, un démarrage par réglage,
+médianes de 3 tours ; hôte chargé par deux autres agents (même réglage, deux démarrages :
+jusqu'à ±15 %) :
+
+| réglage | chaîne | sommets | min/max |
+|---|---|---|---|
+| aucun (3 démarrages) | 236 / 209 / 178 | 1 326 / 1 256 / 1 058 | 185 / 180 / 150 |
+| 0045 | 185 | 1 001 | 154 |
+| 0046 | 167 | 913 | 129 |
+| 0045 + 0047 | 177 | 942 | 146 |
+| **les trois** (3 démarrages) | 191 / 180 / 174 | **853 / 820 / 773** | 151 / 139 / 132 |
+
+Soit, médiane contre médiane : **sommets −35 %, min/max −23 %, chaîne −14 %** (la chaîne est
+bornée par la latence du calcul, les tests retirés étaient hors du chemin critique). Le banc
+linux-user (`qemu-ppc`, sans TLB logiciel ni rangements de VSR coûteux) ne bouge presque pas : le
+gain est dans les accès à `env` et les rangements, que le binaire système paie plus.
+
+### 39.5 L'A/B à jouer (VM quotidienne, hôte au repos)
+
+Binaire `~/src/qemu-fp2/bin/fp2/qemu-system-ppc` (+ `ppc64`, `qemu-bundle` à côté) : la
+référence (0001-0035) + 0045-0047, **construit en -O2 (`build/`), pas le binaire rapide** :
+même binaire des deux côtés, seules les propriétés changent. Avant fusion (`run_tiger.sh` du
+dépôt principal ne connaît pas encore les drapeaux) :
+
+    tools/tcg/matab.sh x86-fp2 3 "ref:QEMU_BIN=$HOME/src/qemu-fp2/bin/fp2/qemu-system-ppc" \
+        "fp2:QEMU_BIN=$HOME/src/qemu-fp2/bin/fp2/qemu-system-ppc CPU_OPTS=x-fp-known=on,x-fprf-lazy=on,x-stfs-known=on" d3 fen
+    # une partie vérifiée (pas pour la vitesse) : bilan « fp-native-verify » du run_tiger.log,
+    # 0 divergence attendu, et « x-fp-known : N sorties de bloc » (le taux de DOOM 3)
+    tools/tcg/matab.sh x86-fp2-verif 1 "v:QEMU_BIN=$HOME/src/qemu-fp2/bin/fp2/qemu-system-ppc CPU_OPTS=x-fp-known=on,x-fprf-lazy=on,x-stfs-known=on,x-fp-verify=on,x-fp-native-cmp-verify=on" d3 fen
+    tools/tcg/matab.sh --restore
+
+Après fusion : `"ref:QEMU_BIN=… FPKNOWN=0 FPRFLAZY=0 STFSKNOWN=0"` contre
+`"fp2:QEMU_BIN=… FPKNOWN=1 FPRFLAZY=1 STFSKNOWN=1"`. Attendu : de l'ordre de quelques ms/image
+(le flottant simple scalaire et ses `lfs`/`stfs` ne sont qu'une partie des 84,7 % de code
+généré) ; à confirmer par six parties par bras avant de les allumer par défaut (règle des
+patches TCG).
+
+### 39.6 Ce qui reste ouvert
+
+- **L'A/B DOOM 3** ci-dessus, et le taux de sorties de bloc de DOOM 3 (partie vérifiée).
+- **Pendant arm64** : émetteur aarch64 écrit et compilé par le clang du NDK, **jamais
+  exécuté** : sur le M4, construire, `fptest k`/`s`/`d`/`c` contre la référence, mutants de
+  l'émetteur (porte sautée, opérande non testé, somme minuscule acceptée, `fprf_src` rangé avant
+  le `cbnz`…), puis l'A/B.
+- **Soupape** pour un bloc dont un producteur sortirait à chaque passage (~130 ns par sortie) :
+  compter les sorties par bloc et le retraduire sans `x-fp-known`. Non fait (0,39 % des
+  opérations de Marble Blast sortent).
+- Restent par op : la synchronisation du FPSCR (un rangement, et son rechargement, l'op étant
+  `CALL_CLOBBER`), les drapeaux softfloat (un rangement), le test du résultat. Sortir le FPSCR
+  des globales TCG pendant le flottant natif ôterait les deux premiers mais touche toute la
+  traduction du flottant (`cpu_fpscr` est lu par ~20 chemins) : non fait.
+- `run-all.sh` avec ce binaire : 242 verts, 1 rouge attendu (« binaire rapide écarté :
+  construit sur une autre série de patches » : la série a changé, `build-fast/` sera à refaire
+  après fusion).

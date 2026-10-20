@@ -112,6 +112,13 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   §36.6 sur la VM quotidienne, hôte au repos, puis le binaire rapide avec la série ; pistes
   ouvertes : groupe de page du cache de sauts, 16 384 entrées en `mmu_idx` 0 (§36.7) ; parité
   arm64 (C commun) à reconstruire et prouver sur le M4.
+- [ ] **[TCG — PC] Flottant simple sans contrôles redondants (0045-0047)** : `x-fp-known`,
+  `x-fprf-lazy`, `x-stfs-known` (éteints par défaut, `FPKNOWN`, `FPRFLAZY`, `STFSKNOWN`),
+  prouvés le 20/10 sur le PC (`fpproof`, mode `k` de `fptest` en linux-user et dans la VM de
+  dev, 27 mutants, Marble Blast vérifié : 0 divergence) ; `fmuls`/`fmadds` −38 % d'octets,
+  banc invité sommets −35 %. **Reste** : l'A/B DOOM 3 et une partie vérifiée sur la VM
+  quotidienne (`docs/tcg-g4.md` §39.5, binaire `~/src/qemu-fp2/bin/fp2/`), puis le pendant
+  arm64 (écrit, jamais exécuté) sur le M4.
 
 - [ ] **[TCG — M4] Parité arm64 de 0031-0035** : `x-tlb-precise`, `x-lmw-inline`,
   `x-dcbz-inline` (0031, 0032, 0035) et les émetteurs aarch64 de `x-fp-native-cmp` /
