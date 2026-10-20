@@ -4027,3 +4027,254 @@ remplissage suivant, en `0x2fe08410`), qui est évincée de nouveau un peu plus 
 Journaux (non versionnés) : `bench/tcg/retv/` du dépôt principal — `s2-on-1`, `s2-off-1`
 (1 024 Mo), `s2-on-768`, `s2-on-768v` (avec tous les vérificateurs), `s2-off-768`, `s1-on-768`,
 `s1-off-768`, et les démarrages surveillés `w5605`, `w5610`, `wfff1`.
+
+## 36. Les helpers côté hôte sur le PC : `tcg/0040` à `0043` (20/10/2026)
+
+PC Linux x86-64 (i7-10700F, Ubuntu 26.04, GCC 15). Copie isolée `~/src/qemu-tcg` (= `~/src/qemu`
+du 20/10, série jusqu'à 0035, `build/` en -O2 ; les arbres `~/src/qemu/build*` n'ont pas été
+touchés). VM de dev **privée** `disks/tiger-dev-tcg.raw` (copie de `tiger-dev.raw`, 10.4.11,
+bureau, SMP=2 ppc64, toutes les options de production de `run_tiger.sh` sous Linux, `x-fast-fp`
+compris), pilotée par `devloop.py` depuis le worktree ; l'hôte était partagé (VM quotidienne de
+la session principale, autre agent sur le plugin) : les **comptes** se comparent, les temps
+restent **indicatifs**. Point de départ, le profil DOOM 3 du 20/10 (binaire rapide,
+`bench/tcg/ab/x86-depart-2010/fast-{1,2}/d3-fen/perf-hote-mesure.data`, `tools/re/perfpart.py`) :
+code généré 84,7 % du temps vCPU, recherche de blocs 4,9 % (`helper_lookup_tb_ptr` 4,3 %),
+softmmu 3,7 % (`tlb_set_page_full` 0,95, `ppc_xlate` 0,72, `victim_tlb_hit` 0,62,
+`get_page_addr_code_hostp` 0,57) ; fil de la boucle principale (8 % d'un cœur) :
+`tlb_reset_dirty_range_all` **23,5 %**.
+
+Patches (tous éteints par défaut, code **commun** aux deux hôtes : aucun émetteur touché, ils
+valent pour arm64 tels quels, à reconstruire et mesurer sur le M4) :
+
+| patch | propriété | lanceur | preuve |
+|---|---|---|---|
+| `0040-tcg-dirty-skip` | `x-dirty-skip`, `x-dirty-skip-verify` (CPU) | `DIRTYSKIP=1`, `DIRTYSKIPVERIFY=1` | parcours d'origine derrière, « rien à changer » |
+| `0041-ppc-pteg-map` | `x-pteg-map`, `x-pteg-map-verify` (CPU) | `PTEGMAP=1`, `PTEGMAPVERIFY=1` | recherche d'origine refaite et comparée |
+| `0042-tcg-miss-stats` | (aucune : sous `x-mem-stats` et `x-ret-verify`) | `MEMSTATS=1`, `RETVERIFY=1` | — (mesure) |
+| `0043-tcg-jc-2way` | `x-jc-2way` (accélérateur) | `JC2WAY=1` | `x-ret-verify`, empreintes invitées |
+
+### 36.1 `tcg/0040` : `tlb_reset_dirty` sans parcours inutile (`x-dirty-skip`)
+
+**Le poste.** Les écrans (`vga.c` ~1696, `qfb-pci.c` ~436) effacent les bits sales de leur VRAM
+~30 fois par seconde par `memory_region_snapshot_and_clear_dirty`, qui appelle
+`physical_memory_dirty_bits_cleared` **sans condition** (contrairement à
+`physical_memory_test_and_clear_dirty`, qui ne le fait que si un bit était posé) ; et
+`tlb_reset_dirty` parcourt alors, pour **chaque** CPU et sous son verrou de TLB, toutes les
+entrées des **22** `mmu_idx` (table et victimes) pour remettre `TLB_NOTDIRTY` aux entrées
+inscriptibles qui pointent dans la plage : ~35 000 entrées par CPU et par appel avec les tables
+du jeu (8 192 en `mmu_idx` 0, 16 384 en 1). La même fonction sert aussi à `tlb_protect_code`
+(une page de RAM qui reçoit du code traduit).
+
+**La conception.** Par CPU (`CPUTLBCommon.dw`, sous `tlb.c.lock`), une **sur-approximation**
+des entrées que `tlb_reset_dirty` peut avoir à changer, c'est-à-dire celles dont le côté
+écriture n'a ni `TLB_INVALID_MASK`, ni `TLB_NOTDIRTY`, ni `TLB_MMIO`, ni `TLB_DISCARD_WRITE` :
+
+- une **tranche par RAMBlock** (4 au plus ; au-delà, ou bloc inconnu, le `mmu_idx` est marqué
+  `dw_over` et parcouru entier) : la plage hôte `[lo, hi)` couverte, les `mmu_idx` concernés,
+  et par `mmu_idx` une **carte de bits** (16 384 bits) des indices de table où sont ces entrées ;
+- elles ne naissent qu'à deux endroits, qui les inscrivent : `tlb_set_page_full` (entrée posée
+  sans `TLB_NOTDIRTY`) et `tlb_set_dirty` (le drapeau retiré après une écriture) ;
+- une entrée de la page P est **toujours** à l'indice `tlb_index(P)` de sa table ou dans les
+  victimes de son `mmu_idx` (les échanges avec les victimes gardent l'indice ; un
+  redimensionnement vide la table) : visiter les indices marqués (modulo la taille de table)
+  et les 8 victimes suffit ;
+- un vidage complet d'un `mmu_idx` efface ses marques ; un `tlb_reset_dirty` qui couvre toute
+  la plage d'une tranche la vide (toutes ses entrées portent maintenant `TLB_NOTDIRTY`).
+
+`tlb_reset_dirty` ne visite donc que les entrées marquées des tranches qui rencontrent la plage,
+et **rien** quand aucune ne la rencontre. Le test d'une entrée lit `addr_write` d'abord et ne
+lit les drapeaux lents (`full->slow_flags`) que si l'entrée en annonce (`TLB_FORCE_SLOW`).
+Les compteurs (`x-mem-stats`) : appels, appels sautés, `mmu_idx` parcourus entiers, entrées
+visitées. `x-dirty-skip-verify` : après chaque appel, le parcours **d'origine** complet ; toute
+entrée qu'il change encore est une divergence (stderr), avec un bilan toutes les 1 024
+vérifications et l'état des tranches.
+
+Trois versions ont tourné : la première ne restreignait qu'aux `mmu_idx` (≈ 3 parcours entiers
+par appel en jeu : les grosses tables restaient), la deuxième une liste de 256 indices par
+tranche (débordée sans cesse : le serveur de fenêtres remplit des centaines de pages de VRAM
+entre deux effacements), la troisième, retenue, la carte de bits.
+
+**Mesures (VM de dev, Marble Blast et bureau, par CPU).** Tranches observées :
+`ppc_core99.ram` (RAM, `mmu_idx` 0, 1, 3, ~7 000-11 500 marques) et
+`pci.2:0e.0/vga.vram` (VRAM, `mmu_idx` 0-1, ~770 marques, la VRAM entière du bureau), `dw_over`
+nul. Un effacement de VRAM visite ~800 entrées au lieu de ~35 000 (**÷ 40**) ; un
+`tlb_protect_code` (une page de RAM) en visite 7 000-11 500 au lieu de ~35 000 (÷ 3 à 5).
+
+**Preuve.** `x-dirty-skip-verify`, SMP=2, bureau, bancs invités et Marble Blast : version
+retenue, 7 sessions, **155 648 appels vérifiés, 0 divergence** (les deux premières versions :
+106 496, 0) ; une troisième tranche est apparue en jeu (`pci.2:0f.0/qgpu.shmem`, la mémoire
+partagée du GPU paravirtuel), sans `dw_over`. Empreintes invitées inchangées (§36.4). Mutants :
+§36.7.
+
+### 36.2 `tcg/0041` : la PTEG lue par un pointeur hôte (`x-pteg-map`)
+
+`ppc_hash32_pteg_search` lisait chaque PTE par deux `ldl_phys` (jusqu'à 16 par groupe, 32 avec
+le groupe secondaire), chacun refaisant `address_space_translate` sous RCU. Sous `x-pteg-map`,
+le groupe (64 octets alignés) est traduit **une fois** ; s'il est en RAM accessible directement
+(`memory_access_is_direct`, toujours le cas sous Mac OS X), les mots sont lus par `ldl_be_p` sur
+le pointeur hôte, **dans le même ordre**, `pte0` puis `smp_rmb()` puis `pte1` — exactement ce
+que fait `address_space_ldm_internal` pour un `ldl_phys` en RAM. Sinon (groupe hors RAM),
+la recherche d'origine (`pteg_slow` dans `x-mem-stats`). R et C restent posés par `stb_phys`, qui
+garde le suivi des pages sales. `x-pteg-map-verify` : chaque recherche refaite à l'ancienne et
+comparée (offset, `pte0`, `pte1`) ; un écart est d'abord une **course** (un autre CPU écrit la
+PTE entre les deux lectures) et ne devient divergence que si une seconde lecture par le pointeur
+contredit encore la recherche d'origine.
+
+Preuve (sessions `ver2`, `ver3`, SMP=2, avec `x-tlb-precise-verify=256`, qui retraduit chaque
+entrée gardée et fait donc beaucoup de recherches) : **1,38 G recherches comparées (au
+dernier bilan imprimé, toutes les 2^22), 0 divergence**, 8 courses résolues, 0 groupe hors RAM.
+
+### 36.3 `tcg/0042` : mesurer avant d'agir (ratés du TLB et du cache de sauts)
+
+**TLB.** Sous `x-mem-stats`, par CPU et pour les `mmu_idx` 0 à 3, la ligne `mem-stats` porte
+maintenant `missI remplissages évictions déjà-vues victimes` (remis à zéro à chaque fenêtre de
+10 s) : une **éviction** est un remplissage qui pousse une entrée valide d'une autre page vers
+les victimes ; la page qui sort alors des victimes est notée dans une table d'ombre (16 384
+pages par `mmu_idx`, à correspondance directe, vidée avec le `mmu_idx`, la page retirée d'un
+`tlb_flush_page`) ; un remplissage d'une page de cette table est **déjà vue** : un raté de
+conflit ou de capacité, qu'une table plus grande ou associative aurait évité ; le reste est
+froid (première fois, ou après un vidage). Sessions `ver2` et `ver3` (bureau, bancs invités,
+Marble Blast, SMP=2, deux CPU additionnés) :
+
+| `mmu_idx` | taille | remplissages | déjà vues | succès des victimes |
+|---|---|---|---|---|
+| 0 (utilisateur, données) | 8 192 | 17,9 M / 13,6 M | **27 % / 19 %** | 73 M / 50 M (**3,7 à 4,1 par remplissage**) |
+| 1 (noyau, données) | 16 384 | 18,9 M / 16,4 M | 1 % / 6 % | 0,1 à 0,2 par remplissage |
+| 3 | 4 096 | 0,6 M / 0,4 M | 33 % / 19 % | ~5 par remplissage |
+
+Les ratés évitables ne **dominent pas** les remplissages (un quart au plus en `mmu_idx` 0 ; les
+autres sont froids, surtout après les invalidations de `x-tlb-precise`) : la table n'a **pas**
+été agrandie. Ce qui frappe, ce sont les **succès des victimes** en `mmu_idx` 0, quatre par
+remplissage (~110 000/s et par CPU en jeu) : la table à correspondance directe se renvoie des
+pages en ping-pong par le TLB victime, chacun un échange de deux entrées sous le verrou
+(`victim_tlb_hit` 0,62 % du temps vCPU sur DOOM 3). Piste ouverte : 16 384 entrées en `mmu_idx` 0
+(le plafond de croissance de `x-tlb-precise`, `mmu_helper.c`, est à 4 096 avant doublement), à
+peser contre le coût des balayages par classe de `tlbie`.
+
+**Cache de sauts.** `x-ret-verify` classait déjà ses ratés (entrée vidée, autre pc, autres
+drapeaux) ; 0042 ajoute, parmi eux, ceux dont le bloc **existait** dans la table de hachage
+(la case était vide, **ou tenait un autre bloc vivant** — un conflit —, ou le même pc sous
+d'autres drapeaux). Cinq sessions de même protocole (bureau puis Marble Blast 110 + 120 s, SMP=2,
+tous les réglages de production, `x-jc-word` compris, cumul depuis le démarrage) :
+
+| configuration | recherches | ratés jusqu'à la table de hachage | dont conflit, bloc existant | appels du helper (ratés en ligne) |
+|---|---|---|---|---|
+| 2^14 entrées, 1 voie (production) | 3,126 G | 272,5 M (**8,7 %**) | 190,3 M | 249,1 M (8,0 %) |
+| **2^16** entrées, 1 voie (`x-jc-bits=16`) | 2,855 G | 227,0 M (7,9 %) | 160,1 M | 206,5 M (7,2 %) |
+| 2^14, 2 voies, seconde sonde en ligne, déplacement sans condition | 3,032 G | 210,4 M (6,9 %) | 126,6 M | 177,1 M (5,8 %) |
+| 2^14, 2 voies, seconde sonde en ligne, entrées chez elles protégées | 2,734 G | 166,5 M (6,1 %) | 89,2 M | 147,9 M (5,4 %) |
+| 2^14, 2 voies, **sonde en ligne à une voie** + remontée (0043 retenu) | 2,925 G | 178,0 M (**6,1 %**) | 100,8 M | 239,0 M (8,2 %) |
+
+Les conflits dominent les ratés (70 %). Quadrupler la table n'y change presque rien : ce n'est
+pas la capacité, c'est le **groupe de page** — chaque page virtuelle n'a que 64 cases
+(`TB_JMP_PAGE_BITS` = 6, fixé par la taille d'origine 2^12), quelle que soit la taille totale,
+et une page de code chaude en a besoin de plus. Deux voies dans le même groupe retirent la
+moitié des conflits et 30 % des passages par la table de hachage (`qht_lookup_custom`,
+`tb_lookup_cmp`). La version retenue (§36.4) garde la sonde en ligne à une voie : les appels du
+helper ne baissent pas, mais un succès en seconde voie y coûte deux comparaisons au lieu d'une
+recherche dans la table de hachage.
+
+### 36.4 `tcg/0043` : le cache de sauts à deux voies (`x-jc-2way`)
+
+Un pc est cherché en case h (`tb_jmp_cache_hash_func`, inchangée : `jcwordproof.py` refait
+573 440 cas sans écart sur l'arbre patché), puis en case **h ^ 1** — même groupe de page, puisque
+le bit 0 est dans `TB_JMP_ADDR_MASK` : `tb_jmp_cache_clear_page` (les deux pages du groupe) et le
+journal par `mmu_idx` de `x-jc-idx` restent exacts sans changement.
+
+- `tb_lookup` (boucle principale et `helper_lookup_tb_ptr`) : mêmes comparaisons sur la seconde
+  case (pc, `cs_base`, `flags`, `cflags`), et `x-ret-verify` vérifie aussi ce qu'elle rend ; un
+  succès en h ^ 1 est **remonté** en h (échange des deux cases, chacune avec son `mmu_idx`,
+  réinscrit au journal de `x-jc-idx`), là où la sonde en ligne le trouvera la fois suivante ;
+- la sonde en ligne de `x-ret-inline` reste **à une voie**, octet pour octet celle d'avant : la
+  première version émettait la seconde sonde en ligne aussi (la même suite de tests sur
+  l'offset ^ 16) ; elle était exacte mais ralentissait le chemin des **succès** —
+  `jctest` 34 → 46-54 ns par appel aux pas de 64 et 256 octets, où aucune case n'entre en
+  conflit, `tlbtest banc` (tube, mmap, fork) +15 à +25 %, dans deux bras entrelacés avec la
+  référence ; le coût n'a pas été localisé (étiquettes et temporaires `TEMP_TB` vivants à travers
+  les deux sondes, code plus gros à chaque sortie indirecte) ;
+- remplissage (`tb_jmp_cache_fill`, après un raté ou une traduction) : le nouveau bloc va en h,
+  l'occupant valide de h passe en h ^ 1 avec son `mmu_idx`, **sauf** si h ^ 1 tient une entrée
+  valide qui est chez elle (son hachage vaut h ^ 1) : une entrée chez elle n'est jamais chassée
+  par le trop-plein de sa voisine ;
+- invalidation d'un bloc (`tb_jmp_cache_inval_tb`) : les deux cases. Un bloc invalidé pendant
+  qu'il est déplacé porte déjà `CF_INVALID` et ne passe plus jamais la comparaison de `cflags`
+  (ni dans `tb_lookup`, ni en ligne), où qu'il soit.
+
+Propriété de l'accélérateur, comme `x-jc-word` : figée avant le premier CPU.
+
+Preuves (sessions `ver3`, `jc-2wayb`, `jc-2wayd`, `jc-2waye` : les trois variantes) : empreintes
+invitées identiques (`tlbtest` `deee3d7026183c65`, `lmwtest` `2575eafce78adf66`, `dcbztest` hors
+réservation `e2f15e6f3ceae607`, `smctest` A-F sans erreur) ; `x-ret-verify` : de 2,4 à 3,3 G
+blocs vérifiés par session, **0 divergence**, 0 « sans traduction » ; la version retenue :
+3,26 G puis 2,75 G vérifiés, dont 93 M et 84 M trouvés en seconde voie, **0 divergence**.
+
+### 36.5 Gains indicatifs (VM de dev, hôte partagé)
+
+Bras entrelacés, une session par bras (bureau, SMP=2, options de production, sans compteurs
+ni vérificateurs, même binaire `~/src/qemu-tcg/build`) : bancs invités `jctest` (appel indirect
+de 1 024 fonctions aux pas de 16, 64, 256 octets ; médiane de 6 passes), `tlbtest banc` (tube,
+mmap, fork), puis Marble Blast (110 s de chauffe, 120 s mesurées, 23 fenêtres de 5 s).
+L'hôte portait la VM quotidienne et l'agent du plugin : Marble Blast varie de ±15 % d'un bras de
+référence à l'autre (35,8 à 51,8 img/s), il ne départage rien ici.
+
+| bras | `jctest` 16 / 64 / 256 octets (ns/appel) | `tlbtest banc` tube / mmap / fork (ms) |
+|---|---|---|
+| référence (7 bras) | 94,7-104,9 / 33,2-37,0 / 35,7-40,6 | 432-584 / 976-1 242 / 471-741 |
+| 0040 + 0041 (2 bras) | 94,8 ; 102,2 / 32,6 ; 34,4 / 35,8 ; 38,2 | 462 ; 508 / 924 ; 1 011 / 461 ; 560 |
+| 0043 première version (sonde en ligne à 2 voies, 2 bras) | 121,2 ; 119,5 / **49,1 ; 46,3** / **52,4 ; 47,8** | 556 ; 544 / 1 123 ; 1 165 / 601 ; 553 |
+| 0043 retenu (2 bras) | 101,8 ; 102,8 / 32,9 ; 33,4 / 36,7 ; 37,6 | 385 ; 487 / 940 ; 1 045 / 484 ; 539 |
+
+Profil `perf` (20 s de Marble Blast par bras, part de tous les échantillons du processus) :
+avec 0041, `address_space_ldm_internal` (0,52-0,60 %, les `ldl_phys` des PTEG) disparaît au
+profit de `ppc_hash32_pteg_search_map` (0,44-0,46 %) ; la recherche de blocs (`qht_lookup_custom`,
+`tb_lookup`, `tb_lookup_cmp`, `helper_lookup_tb_ptr`) passait de 10,8-11,0 % à 9,0-9,2 % avec la
+première version de 0043 (le gain de 0043 retenu sur ce poste reste à mesurer en jeu).
+`tlb_reset_dirty` n'apparaît pas dans les profils de la VM de dev : `devloop` n'y a qu'un écran
+VGA rafraîchi ~7 fois par seconde (contre ~33 pour `qfb` + VGA sous `run_tiger.sh`) ; son poste
+se jugera sur le fil principal en jeu (23,5 % du fil sur DOOM 3, §36 en tête). Ce que les
+compteurs disent déjà : ÷ 40 entrées visitées par effacement de VRAM, verrou de TLB des vCPU
+tenu d'autant moins longtemps.
+
+### 36.6 Phase 2 : l'A/B en jeu (VM quotidienne, hôte au repos)
+
+Un seul binaire (`~/src/qemu-tcg/build`, série jusqu'à 0043, -O2 : la comparaison se fait entre
+bras, pas avec le binaire rapide) ; les propriétés passent par `CPU_OPTS`/`TCG_OPTS`, que le
+`run_tiger.sh` du dépôt principal connaît déjà :
+
+    QEMU_BIN=$HOME/src/qemu-tcg/build/qemu-system-ppc tools/tcg/matab.sh x86-helpers 6 \
+        "ref:" "hlp:CPU_OPTS=x-dirty-skip=on,x-pteg-map=on TCG_OPTS=x-jc-2way=on" d3 fen
+    # poste par poste : "dp:CPU_OPTS=x-dirty-skip=on,x-pteg-map=on" et "jc:TCG_OPTS=x-jc-2way=on" ;
+    # une partie vérifiée : "ver:CPU_OPTS=x-dirty-skip=on,x-dirty-skip-verify=on,x-pteg-map=on,\
+    #   x-pteg-map-verify=on RETVERIFY=1 MEMSTATS=1 TCG_OPTS=x-jc-2way=on"
+    # avec MATRICE_OPTS="--sample-hote 30" et EXTRA_ARGS=-perfmap pour le fil principal
+
+Après fusion, `DIRTYSKIP=1 PTEGMAP=1 JC2WAY=1` font la même chose. Le binaire rapide
+(`QEMU_FAST`, PGO) est à reconstruire avec la série : la série change d'empreinte, `run-all.sh`
+écarte d'ici là `build-fast/` de `~/src/qemu` (le seul échec de `run-all.sh` avec ce binaire,
+242 OK / 1 / 7 ignorés).
+
+### 36.7 Hôtes, et ce qui reste ouvert
+
+- **Parité arm64** : les quatre patches sont du C commun (`accel/tcg`, `target/ppc`) et
+  n'émettent aucune instruction hôte (la version retenue de 0043 ne touche plus `translator.c`) :
+  ils valent tels quels sur le M4, où il faut les reconstruire et refaire les preuves
+  (`DIRTYSKIPVERIFY`, `PTEGMAPVERIFY`, `RETVERIFY`, empreintes) et la mesure.
+- Mutants de 0040 (binaires à part, `x-dirty-skip-verify`, SMP=2, bureau et Marble Blast) : une
+  marque posée un indice à côté → **675 divergences** ; l'oubli de l'inscription dans
+  `tlb_set_dirty` → **non détecté** sous ce banc : la tranche de VRAM n'est jamais entièrement
+  couverte par un effacement (la VRAM marquée dépasse la zone affichée), les marques des
+  remplissages restent et couvrent les mêmes indices. Défense gardée par construction (c'est un
+  des deux seuls points où naissent ces entrées).
+- **TLB utilisateur** (§36.3) : les ratés de conflit ne dominent pas, mais les succès des
+  victimes (4 par remplissage en `mmu_idx` 0) disent une table trop petite ou mal associée
+  pour le jeu ; essai à faire : 16 384 entrées en `mmu_idx` 0.
+- **Cache de sauts** : le vrai levier est la taille du groupe de page (64 cases par page
+  virtuelle) ; un groupe de 128 ou 256 cases (`TB_JMP_PAGE_BITS` réglable, prix : deux fois plus
+  de cases effacées par `tlb_flush_page`) devrait retirer l'essentiel des 70 % de ratés de
+  conflit, en ligne comme hors ligne. La seconde sonde en ligne est à revoir sous cet angle
+  (et son surcoût à localiser, par le désassemblage du code émis).
+- Le plafond du fil principal et le verrou de TLB (`tlb_reset_dirty_range_all` 23,5 %) se
+  mesurent en jeu, sur la VM quotidienne (§36.6).
+
+Journaux (non versionnés) : `bench/tcg/helpers-2010/` du dépôt principal (`ver2`, `ver3`,
+`jc-*`, `ab-*`, `mut-d1`, `mut-d3` : `qemu.log`, bancs invités, rapports `perf`, temps des fils).

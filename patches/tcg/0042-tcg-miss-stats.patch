@@ -1,0 +1,229 @@
+diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -231,6 +231,13 @@ static uint64_t rv_nophys[RV_N], rv_jc_drop, rv_jc_skip, rv_total;
+ static uint64_t rv_jc_scan;     /* tcg/0011: log overflowed, whole table scanned */
+ /* misses: entry dropped (same pc, no tb), other pc (conflict), same pc other flags/cflags */
+ static uint64_t rv_m_drop, rv_m_other, rv_m_flags;
++/*
++ * POMPPC tcg/0042: misses whose TB was then found in the hash table, by
++ * what the slot held: nothing (dropped or never filled), another live TB
++ * (a conflict: a second way would have kept both), the same pc under other
++ * flags
++ */
++static uint64_t rv_f_drop, rv_f_other, rv_f_flags;
+ static bool rv_atexit;
+ 
+ static void rv_report(void)
+@@ -247,10 +254,13 @@ static void rv_report(void)
+     fprintf(stderr, " vidages du cache de sauts (%u entrées) : %" PRIu64
+             " faits, %" PRIu64 " évités, %" PRIu64 " parcours complets ;"
+             " ratés : %" PRIu64 " entrée vidée, %" PRIu64 " autre pc, %"
+-            PRIu64 " autres drapeaux\n", TB_JMP_CACHE_SIZE,
++            PRIu64 " autres drapeaux ; bloc trouvé ensuite (case vide, conflit, drapeaux) : %" PRIu64
++            " / %" PRIu64 " / %" PRIu64 "\n", TB_JMP_CACHE_SIZE,
+             qatomic_read(&rv_jc_drop), qatomic_read(&rv_jc_skip),
+             qatomic_read(&rv_jc_scan), qatomic_read(&rv_m_drop),
+-            qatomic_read(&rv_m_other), qatomic_read(&rv_m_flags));
++            qatomic_read(&rv_m_other), qatomic_read(&rv_m_flags),
++            qatomic_read(&rv_f_drop), qatomic_read(&rv_f_other),
++            qatomic_read(&rv_f_flags));
+ }
+ 
+ static void rv_start(void)
+@@ -277,11 +287,18 @@ void pomppc_jc_scan_stat(CPUState *cpu)
+     }
+ }
+ 
+-static void rv_miss_stat(int src, TranslationBlock *tb, vaddr epc, vaddr pc)
++static int rv_miss_stat(int src, TranslationBlock *tb, vaddr epc, vaddr pc)
+ {
+     rv_start();
+     qatomic_inc(&rv_miss[src]);
+     qatomic_inc(epc != pc ? &rv_m_other : tb == NULL ? &rv_m_drop : &rv_m_flags);
++    /* tcg/0042: empty slot, another live TB (conflict), same pc other flags */
++    return tb == NULL ? 0 : epc != pc ? 1 : 2;
++}
++
++static void rv_found_stat(int kind)
++{
++    qatomic_inc(kind == 1 ? &rv_f_other : kind == 0 ? &rv_f_drop : &rv_f_flags);
+ }
+ 
+ /* tb_lookup_cmp() without guest exceptions (second page probed nofault) */
+@@ -376,6 +393,7 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s,
+     TranslationBlock *tb;
+     CPUJumpCache *jc;
+     uint32_t hash;
++    int kind = -1;
+ 
+     /* we should never be trying to look up an INVALID tb */
+     tcg_debug_assert(!(s.cflags & CF_INVALID));
+@@ -398,7 +416,7 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s,
+     }
+ #ifndef CONFIG_USER_ONLY
+     if (unlikely(cpu->ret_verify)) {
+-        rv_miss_stat(src, tb, jc->array[hash].pc, s.pc);
++        kind = rv_miss_stat(src, tb, jc->array[hash].pc, s.pc);
+     }
+  miss:
+ #endif
+@@ -407,6 +425,11 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s,
+     if (tb == NULL) {
+         return NULL;
+     }
++#ifndef CONFIG_USER_ONLY
++    if (unlikely(kind >= 0)) {
++        rv_found_stat(kind);
++    }
++#endif
+ 
+     jc->array[hash].pc = s.pc;
+ #ifndef CONFIG_USER_ONLY
+diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -296,6 +296,12 @@ static void tlb_flush_one_mmuidx_locked(CPUState *cpu, int mmu_idx,
+     tlb_mmu_resize_locked(desc, fast, now);
+     tlb_mmu_flush_locked(desc, fast);
+ 
++    /* POMPPC tcg/0042: the evicted pages of this mmu_idx are gone too */
++    if (unlikely(cpu->neg.tlb.c.ms_shadow) && mmu_idx < 4) {
++        memset(cpu->neg.tlb.c.ms_shadow + mmu_idx * POMPPC_MS_SHADOW, 0,
++               POMPPC_MS_SHADOW * sizeof(uint32_t));
++    }
++
+     /* POMPPC tcg/0040 (x-dirty-skip): mmu_idx empty, its entries gone */
+     if (cpu->dirty_skip) {
+         CPUTLBCommon *c = &cpu->neg.tlb.c;
+@@ -546,6 +552,15 @@ static void tlb_flush_page_locked(CPUState *cpu, int midx, vaddr page)
+             tlb_n_used_entries_dec(cpu, midx);
+         }
+         tlb_flush_vtlb_page_locked(cpu, midx, page);
++        /* POMPPC tcg/0042: a flushed page is no longer an evicted one */
++        if (unlikely(cpu->neg.tlb.c.ms_shadow) && midx < 4) {
++            uint32_t *sh = cpu->neg.tlb.c.ms_shadow + midx * POMPPC_MS_SHADOW +
++                ((page >> TARGET_PAGE_BITS) & (POMPPC_MS_SHADOW - 1));
++
++            if (*sh == (uint32_t)(page >> TARGET_PAGE_BITS) + 1) {
++                *sh = 0;
++            }
++        }
+     }
+ }
+ 
+@@ -1507,6 +1522,26 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
+     /* Make sure there's no cached translation for the new page.  */
+     tlb_flush_vtlb_page_locked(cpu, mmu_idx, addr_page);
+ 
++    /*
++     * POMPPC tcg/0042 (x-mem-stats): count the fill, and whether it brings
++     * back a page an eviction had pushed out.
++     */
++    if (unlikely(cpu->tlb_miss_stats) && mmu_idx < 4) {
++        CPUTLBCommon *c = &tlb->c;
++        uint32_t *sh;
++
++        if (!c->ms_shadow) {
++            c->ms_shadow = g_new0(uint32_t, 4 * POMPPC_MS_SHADOW);
++        }
++        sh = c->ms_shadow + mmu_idx * POMPPC_MS_SHADOW +
++             ((addr_page >> TARGET_PAGE_BITS) & (POMPPC_MS_SHADOW - 1));
++        c->ms_fill[mmu_idx]++;
++        if (*sh == (uint32_t)(addr_page >> TARGET_PAGE_BITS) + 1) {
++            c->ms_seen[mmu_idx]++;
++            *sh = 0;
++        }
++    }
++
+     /*
+      * Only evict the old entry to the victim tlb if it's for a
+      * different page; otherwise just overwrite the stale data.
+@@ -1515,6 +1550,19 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
+         unsigned vidx = desc->vindex++ % CPU_VTLB_SIZE;
+         CPUTLBEntry *tv = &desc->vtable[vidx];
+ 
++        /* POMPPC tcg/0042: the page leaving the victim TLB is evicted */
++        if (unlikely(tlb->c.ms_shadow) && mmu_idx < 4) {
++            vaddr old = pomppc_entry_page(tv);
++
++            tlb->c.ms_evict[mmu_idx]++;
++            if (old != -1) {
++                tlb->c.ms_shadow[mmu_idx * POMPPC_MS_SHADOW +
++                                 ((old >> TARGET_PAGE_BITS) &
++                                  (POMPPC_MS_SHADOW - 1))] =
++                    (uint32_t)(old >> TARGET_PAGE_BITS) + 1;
++            }
++        }
++
+         /* Evict the old entry into the victim tlb.  */
+         copy_tlb_helper_locked(tv, te);
+         desc->vfulltlb[vidx] = desc->fulltlb[index];
+@@ -1718,6 +1766,9 @@ static bool victim_tlb_hit(CPUState *cpu, size_t mmu_idx, size_t index,
+             CPUTLBEntryFull *f2 = &cpu->neg.tlb.d[mmu_idx].vfulltlb[vidx];
+             CPUTLBEntryFull tmpf;
+             tmpf = *f1; *f1 = *f2; *f2 = tmpf;
++            if (unlikely(cpu->tlb_miss_stats) && mmu_idx < 4) {
++                cpu->neg.tlb.c.ms_vhit[mmu_idx]++;     /* POMPPC tcg/0042 */
++            }
+             return true;
+         }
+     }
+diff --git a/include/hw/core/cpu.h b/include/hw/core/cpu.h
+--- a/include/hw/core/cpu.h
++++ b/include/hw/core/cpu.h
+@@ -349,6 +349,17 @@ typedef struct CPUTLBCommon {
+      * entries visited, verify
+      */
+     uint64_t dw_calls, dw_skip, dw_idx, dw_ent, dw_vchk, dw_vbad;
++    /*
++     * POMPPC tcg/0042 (x-mem-stats on ppc): misses of mmu_idx 0-3.  fill:
++     * entries installed; evict: a valid entry of another page pushed to the
++     * victim TLB by the fill; seen: a fill of a page that an eviction had
++     * pushed out (ms_shadow, direct-mapped, POMPPC_MS_SHADOW per mmu_idx,
++     * cleared by flushes): a conflict or capacity miss, which a bigger or
++     * more associative table would have avoided; vhit: victim TLB hits.
++     */
++#define POMPPC_MS_SHADOW 16384
++    uint64_t ms_fill[4], ms_evict[4], ms_seen[4], ms_vhit[4];
++    uint32_t *ms_shadow;
+ } CPUTLBCommon;
+ 
+ /*
+@@ -570,6 +581,8 @@ struct CPUState {
+      */
+     bool dirty_skip;
+     bool dirty_skip_verify;
++    /* POMPPC tcg/0042: count the TLB misses (tlb.c.ms_*), x-mem-stats */
++    bool tlb_miss_stats;
+ 
+     GArray *gdb_regs;
+     int gdb_num_regs;
+diff --git a/target/ppc/mmu_helper.c b/target/ppc/mmu_helper.c
+--- a/target/ppc/mmu_helper.c
++++ b/target/ppc/mmu_helper.c
+@@ -1852,6 +1852,16 @@ void ppc_mem_stats_tick(CPUPPCState *env)
+                            " dirty_idx %" PRIu64 " dirty_ent %" PRIu64,
+                            cs->neg.tlb.c.dw_calls, cs->neg.tlb.c.dw_skip,
+                            cs->neg.tlb.c.dw_idx, cs->neg.tlb.c.dw_ent);
++    /* POMPPC tcg/0042: misses of mmu_idx 0-3, then reset with the window */
++    for (int i = 0; i < 4; i++) {
++        CPUTLBCommon *c = &cs->neg.tlb.c;
++
++        g_string_append_printf(g, " miss%d %" PRIu64 " %" PRIu64 " %" PRIu64
++                               " %" PRIu64, i, c->ms_fill[i], c->ms_evict[i],
++                               c->ms_seen[i], c->ms_vhit[i]);
++        c->ms_fill[i] = c->ms_evict[i] = c->ms_seen[i] = c->ms_vhit[i] = 0;
++    }
++    g_string_append_printf(g, " pteg_slow %" PRIu64, env->ptegm_slow);
+     g_string_append(g, " lmwh");
+     for (int i = 0; i < 32; i++) {
+         g_string_append_printf(g, " %u", env->ms_lmw_hist[i]);
+@@ -1879,6 +1889,7 @@ bool ppc_cpu_tlb_fill(CPUState *cs, vaddr eaddr, int size,
+     uint64_t t0 = 0;
+ 
+     if (unlikely(cpu->env.mem_stats)) {
++        cs->tlb_miss_stats = true;      /* POMPPC tcg/0042 */
+         if ((cpu->env.ms[PPC_MS_FILL0 + (mmu_idx & 3)] & 1023) == 0) {
+             ppc_mem_stats_tick(&cpu->env);
+         }
