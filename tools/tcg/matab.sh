@@ -105,7 +105,14 @@ for p in "${ordre[@]}"; do
   set -- QEMU_FAST=0 ${QB:+QEMU_BIN=$QB} $vars
   start_vm "$D/run_tiger.log" "$@" || { echo "  pas de ssh" | tee -a "$OUT/journal.txt"; continue; }
   grep -h '▶ Tiger' "$D/run_tiger.log" | tee -a "$OUT/journal.txt"
-  sleep 60                                  # bureau au repos (Finder, Dock, mds)
+  # bureau au repos (Finder, Dock, mds) : on attend que le QEMU retombe sous 0,25 cœur
+  # (au plus 60 s, l'ancienne attente fixe) ; MATAB_REPOS=fixe rend les 60 s d'avant
+  qpid=$(pgrep -f "qemu-system.*disks/tiger.qcow2" | head -1)
+  if [ "${MATAB_REPOS:-}" = fixe ] || [ -z "$qpid" ]; then
+    sleep 60
+  else
+    python3 "$WT/tools/tcg/chargehote.py" invite "$qpid" "$OUT/charge-invite.txt" 60 | tee -a "$OUT/journal.txt"
+  fi
   # 30/09 : une variable POMPPC_GL_* du mode vise le plugin, donc le JEU dans
   # l'invité : elle passe aussi en --env à la matrice (sans effet sur QEMU)
   genv=()
