@@ -74,6 +74,8 @@
 #   JITREL32=0 ./run_tiger.sh # x86-64 Linux : coupe le tampon du JIT à moins de 2 Gio du texte, appels
 #                             # de helpers directs (x-jit-rel32, tcg/0024, allumé par défaut depuis le
 #                             # 06/10 : les deux régimes d'UT2004 étaient un artefact de mesure, §31)
+#   DIRTYSKIP=1 ./run_tiger.sh # tlb_reset_dirty sans parcours inutile (tcg/0040, éteint par
+#                             # défaut, docs/tcg-g4.md §36) ; DIRTYSKIPVERIFY=1 : preuve
 #   LMWVEC=0 JCWORD=0 ./run_tiger.sh # coupe la copie lmw/stmw vectorielle (tcg/0025/0029) et le
 #                             # cache de sauts par mot (tcg/0026) ; allumés sur macOS arm64 et Linux x86-64
 #   QEMU_FAST=0 ./run_tiger.sh  # Linux x86-64 : binaire de référence build/ au lieu du binaire
@@ -633,6 +635,26 @@ for _p in "TLBPRECISE x-tlb-precise TLB-PRÉCIS" "LMWINLINE x-lmw-inline LMW-EN-
       MODE="$MODE + $3"
     else
       echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0031, 0032, 0035)." >&2
+      MODE="$MODE + $3 DEMANDÉ MAIS INDISPONIBLE"
+    fi
+  fi
+done
+# --- Helpers côté hôte (patches/tcg/0040, 0041, docs/tcg-g4.md §36) ---
+# DIRTYSKIP=1 : x-dirty-skip, quand un écran efface les bits sales de sa VRAM
+# (~33 fois/s), le parcours du TLB qui remet TLB_NOTDIRTY ne visite que les
+# entrées qui peuvent avoir à changer, et rien quand aucune ne peut ;
+# DIRTYSKIPVERIFY=1 : mode preuve (parcours complet derrière, qui ne doit rien
+# trouver). PTEGMAP=1 : x-pteg-map, la recherche dans la table des pages (MMU
+# 32 bits à hachage) lit chaque PTEG par un seul pointeur hôte ; PTEGMAPVERIFY=1 :
+# mode preuve (recherche d'origine refaite et comparée). Éteints par défaut.
+for _p in "DIRTYSKIP x-dirty-skip SALE-SAUTÉ" "DIRTYSKIPVERIFY x-dirty-skip-verify SALE-VÉRIFIÉ"; do
+  set -- $_p
+  if [ "${!1:-0}" != 0 ]; then
+    if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "$2=on"; then
+      CPU_SPEC="$CPU_SPEC,$2=on"
+      MODE="$MODE + $3"
+    else
+      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0040, 0041)." >&2
       MODE="$MODE + $3 DEMANDÉ MAIS INDISPONIBLE"
     fi
   fi

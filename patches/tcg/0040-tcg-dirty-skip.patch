@@ -1,0 +1,431 @@
+diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -295,6 +295,22 @@ static void tlb_flush_one_mmuidx_locked(CPUState *cpu, int mmu_idx,
+ 
+     tlb_mmu_resize_locked(desc, fast, now);
+     tlb_mmu_flush_locked(desc, fast);
++
++    /* POMPPC tcg/0040 (x-dirty-skip): mmu_idx empty, its entries gone */
++    if (cpu->dirty_skip) {
++        CPUTLBCommon *c = &cpu->neg.tlb.c;
++
++        c->dw_over &= ~(1u << mmu_idx);
++        for (int k = 0; k < POMPPC_DW_SLOTS; k++) {
++            if (c->dw[k].idx & (1u << mmu_idx)) {
++                c->dw[k].idx &= ~(1u << mmu_idx);
++                bitmap_zero(c->dw[k].bm[mmu_idx], POMPPC_DW_BITS);
++            }
++            if (c->dw[k].idx == 0) {
++                c->dw[k].rb = NULL;
++            }
++        }
++    }
+ }
+ 
+ static void tlb_mmu_init(CPUTLBDesc *desc, CPUTLBDescFast *fast, int64_t now)
+@@ -979,6 +995,95 @@ void tlb_unprotect_code(ram_addr_t ram_addr)
+  *
+  * Called with tlb_c.lock held.
+  */
++/*
++ * POMPPC tcg/0040 (x-dirty-skip): record, with tlb_c.lock held, that an
++ * entry of mmu_idx whose write side tlb_reset_dirty() may change maps the
++ * host page at @host, in RAM block @rb (NULL if unknown: dw_over), at
++ * @index of the table of mmu_idx (or in its victim TLB).
++ */
++static void pomppc_dw_slot_add(struct PomppcDwSlot *s, int mmu_idx,
++                               unsigned index)
++{
++    if (unlikely(!s->bm[mmu_idx])) {
++        s->bm[mmu_idx] = bitmap_new(POMPPC_DW_BITS);
++    }
++    s->idx |= 1u << mmu_idx;
++    set_bit(index & (POMPPC_DW_BITS - 1), s->bm[mmu_idx]);
++}
++
++static void pomppc_dw_note(CPUState *cpu, int mmu_idx, uintptr_t host,
++                           RAMBlock *rb, unsigned index)
++{
++    CPUTLBCommon *c = &cpu->neg.tlb.c;
++    struct PomppcDwSlot *s, *free_slot = NULL;
++
++    host &= TARGET_PAGE_MASK;
++    if (rb) {
++        for (int k = 0; k < POMPPC_DW_SLOTS; k++) {
++            s = &c->dw[k];
++            if (s->rb == rb) {
++                s->lo = MIN(s->lo, host);
++                s->hi = MAX(s->hi, host + TARGET_PAGE_SIZE);
++                pomppc_dw_slot_add(s, mmu_idx, index);
++                return;
++            }
++            if (!s->rb && !free_slot) {
++                free_slot = s;
++            }
++        }
++        if (free_slot) {
++            free_slot->rb = rb;
++            free_slot->lo = host;
++            free_slot->hi = host + TARGET_PAGE_SIZE;
++            pomppc_dw_slot_add(free_slot, mmu_idx, index);
++            return;
++        }
++    }
++    c->dw_over |= 1u << mmu_idx;
++}
++
++/* the RAM block holding @host: a slot's block when one does, else a lookup */
++static RAMBlock *pomppc_dw_block(CPUState *cpu, uintptr_t host)
++{
++    CPUTLBCommon *c = &cpu->neg.tlb.c;
++    ram_addr_t ofs;
++
++    for (int k = 0; k < POMPPC_DW_SLOTS; k++) {
++        RAMBlock *rb = c->dw[k].rb;
++
++        if (rb && host - (uintptr_t)qemu_ram_get_host_addr(rb) <
++                  qemu_ram_get_max_length(rb)) {
++            return rb;
++        }
++    }
++    return qemu_ram_block_from_host((void *)host, false, &ofs);
++}
++
++/*
++ * The stock test of tlb_reset_dirty_range_locked, the entry read first:
++ * the slow flags (TLB_MMIO, TLB_DISCARD_WRITE) are read only when the
++ * entry says it has some (TLB_FORCE_SLOW).  Returns true if it changed it.
++ */
++static inline bool pomppc_reset_dirty_one(CPUTLBEntryFull *full,
++                                          CPUTLBEntry *ent,
++                                          uintptr_t start, uintptr_t length)
++{
++    const uintptr_t addr = ent->addr_write;
++
++    if (addr & (TLB_INVALID_MASK | TLB_NOTDIRTY)) {
++        return false;
++    }
++    if ((addr & TLB_FORCE_SLOW) &&
++        (full->slow_flags[MMU_DATA_STORE] & (TLB_MMIO | TLB_DISCARD_WRITE))) {
++        return false;
++    }
++    if (((addr & TARGET_PAGE_MASK) + ent->addend - start) < length) {
++        qatomic_set(&ent->addr_write, addr | TLB_NOTDIRTY);
++        return true;
++    }
++    return false;
++}
++
+ static void tlb_reset_dirty_range_locked(CPUTLBEntryFull *full, CPUTLBEntry *ent,
+                                          uintptr_t start, uintptr_t length)
+ {
+@@ -1008,10 +1113,163 @@ static inline void copy_tlb_helper_locked(CPUTLBEntry *d, const CPUTLBEntry *s)
+  * We must take tlb_c.lock to avoid racing with another vCPU update. The only
+  * thing actually updated is the target TLB entry ->addr_write flags.
+  */
++/*
++ * POMPPC tcg/0040 (x-dirty-skip).  The display devices clear the dirty
++ * bits of their frame buffer about 30 times a second
++ * (memory_region_snapshot_and_clear_dirty), and each time every TLB entry
++ * of the 22 mmu_idx of every CPU was scanned, under its TLB lock.  Only
++ * the entries that may have to change are visited (tlb.c.dw: the listed
++ * table slots and the victim TLBs of their mmu_idx; a whole mmu_idx when
++ * its list overflowed), and none when no recorded range meets
++ * [start, start + length).  A slot whose
++ * range lies within it is then empty: all its entries now carry
++ * TLB_NOTDIRTY.  x-dirty-skip-verify: the stock scan follows, and any entry
++ * it would still change is a divergence (stderr).
++ */
++static void pomppc_reset_dirty(CPUState *cpu, uintptr_t start,
++                               uintptr_t length)
++{
++    CPUTLBCommon *c = &cpu->neg.tlb.c;
++    MMUIdxMap scan, vict = 0, work;
++    uintptr_t end = start + length;
++    bool hit = false;
++
++    qemu_spin_lock(&c->lock);
++    /* mmu_idx scanned whole: entries of unknown blocks */
++    scan = c->dw_over;
++    for (int k = 0; k < POMPPC_DW_SLOTS; k++) {
++        struct PomppcDwSlot *s = &c->dw[k];
++
++        if (s->idx && s->lo < end && start < s->hi) {
++            vict |= s->idx;
++            hit = true;
++        }
++    }
++    c->dw_calls++;
++    if (!hit && !scan) {
++        c->dw_skip++;
++    }
++    /* the marked entries, then the victim TLBs of their mmu_idx */
++    for (int k = 0; k < POMPPC_DW_SLOTS; k++) {
++        struct PomppcDwSlot *s = &c->dw[k];
++
++        if (!(s->idx && s->lo < end && start < s->hi)) {
++            continue;
++        }
++        for (work = s->idx & ~scan; work; work &= work - 1) {
++            int mmu_idx = ctz32(work);
++            CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
++            CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
++            unsigned int n = tlb_n_entries(fast);
++            unsigned long j = find_first_bit(s->bm[mmu_idx], POMPPC_DW_BITS);
++
++            for (; j < POMPPC_DW_BITS;
++                 j = find_next_bit(s->bm[mmu_idx], POMPPC_DW_BITS, j + 1)) {
++                for (unsigned int i = j; i < n; i += POMPPC_DW_BITS) {
++                    c->dw_ent++;
++                    pomppc_reset_dirty_one(&desc->fulltlb[i], &fast->table[i],
++                                           start, length);
++                }
++            }
++        }
++    }
++    for (work = vict & ~scan; work; work &= work - 1) {
++        CPUTLBDesc *desc = &cpu->neg.tlb.d[ctz32(work)];
++
++        for (unsigned int i = 0; i < CPU_VTLB_SIZE; i++) {
++            pomppc_reset_dirty_one(&desc->vfulltlb[i], &desc->vtable[i],
++                                   start, length);
++        }
++    }
++    for (work = scan; work; work &= work - 1) {
++        int mmu_idx = ctz32(work);
++        CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
++        CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
++        unsigned int n = tlb_n_entries(fast);
++
++        c->dw_idx++;
++        for (unsigned int i = 0; i < n; i++) {
++            pomppc_reset_dirty_one(&desc->fulltlb[i], &fast->table[i],
++                                   start, length);
++        }
++        for (unsigned int i = 0; i < CPU_VTLB_SIZE; i++) {
++            pomppc_reset_dirty_one(&desc->vfulltlb[i], &desc->vtable[i],
++                                   start, length);
++        }
++    }
++    for (int k = 0; k < POMPPC_DW_SLOTS; k++) {
++        struct PomppcDwSlot *s = &c->dw[k];
++
++        if (s->idx && start <= s->lo && s->hi <= end) {
++            for (work = s->idx; work; work &= work - 1) {
++                bitmap_zero(s->bm[ctz32(work)], POMPPC_DW_BITS);
++            }
++            s->rb = NULL;
++            s->idx = 0;
++        }
++    }
++    if (unlikely(cpu->dirty_skip_verify)) {
++        uint64_t bad = 0;
++
++        for (int mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
++            CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
++            CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
++            unsigned int n = tlb_n_entries(fast);
++
++            for (unsigned int i = 0; i < n; i++) {
++                bad += pomppc_reset_dirty_one(&desc->fulltlb[i],
++                                              &fast->table[i], start, length);
++            }
++            for (unsigned int i = 0; i < CPU_VTLB_SIZE; i++) {
++                bad += pomppc_reset_dirty_one(&desc->vfulltlb[i],
++                                              &desc->vtable[i], start, length);
++            }
++        }
++        c->dw_vchk++;
++        if (bad) {
++            c->dw_vbad += bad;
++            fprintf(stderr, "x-dirty-skip-verify: cpu %d DIVERGENCE %" PRIu64
++                    " entries left to reset in [%p, +0x%zx), scanned 0x%x\n",
++                    cpu->cpu_index, bad, (void *)start, (size_t)length, scan);
++        }
++        if ((c->dw_vchk & 1023) == 0) {
++            fprintf(stderr, "x-dirty-skip-verify: cpu %d %" PRIu64 " checks, %"
++                    PRIu64 " divergences, %" PRIu64 " calls %" PRIu64
++                    " skipped %" PRIu64 " mmu_idx scanned %" PRIu64
++                    " marked entries\n",
++                    cpu->cpu_index, c->dw_vchk, c->dw_vbad, c->dw_calls,
++                    c->dw_skip, c->dw_idx, c->dw_ent);
++            /* the slots: block, mmu_idx, marks */
++            fprintf(stderr, "x-dirty-skip-verify: cpu %d over 0x%x",
++                    cpu->cpu_index, c->dw_over);
++            for (int k = 0; k < POMPPC_DW_SLOTS; k++) {
++                struct PomppcDwSlot *s = &c->dw[k];
++
++                if (s->rb) {
++                    unsigned long m = 0;
++
++                    for (work = s->idx; work; work &= work - 1) {
++                        m += bitmap_count_one(s->bm[ctz32(work)],
++                                              POMPPC_DW_BITS);
++                    }
++                    fprintf(stderr, " [%s idx 0x%x marks %lu]",
++                            qemu_ram_get_idstr(s->rb), s->idx, m);
++                }
++            }
++            fprintf(stderr, "\n");
++        }
++    }
++    qemu_spin_unlock(&c->lock);
++}
++
+ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
+ {
+     int mmu_idx;
+ 
++    if (cpu->dirty_skip) {
++        pomppc_reset_dirty(cpu, start, length);
++        return;
++    }
+     qemu_spin_lock(&cpu->neg.tlb.c.lock);
+     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+         CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
+@@ -1033,11 +1291,19 @@ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
+ }
+ 
+ /* Called with tlb_c.lock held */
+-static inline void tlb_set_dirty1_locked(CPUTLBEntry *tlb_entry,
++static inline void tlb_set_dirty1_locked(CPUState *cpu, int mmu_idx,
++                                         CPUTLBEntry *tlb_entry,
+                                          vaddr addr)
+ {
+     if (tlb_entry->addr_write == (addr | TLB_NOTDIRTY)) {
+         tlb_entry->addr_write = addr;
++        /* POMPPC tcg/0040 (x-dirty-skip): now one tlb_reset_dirty changes */
++        if (cpu->dirty_skip) {
++            uintptr_t host = addr + tlb_entry->addend;
++
++            pomppc_dw_note(cpu, mmu_idx, host, pomppc_dw_block(cpu, host),
++                           tlb_index(cpu, mmu_idx, addr));
++        }
+     }
+ }
+ 
+@@ -1066,13 +1332,15 @@ static void tlb_set_dirty(CPUState *cpu, vaddr addr, ram_addr_t ram_addr)
+         return;
+     }
+     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+-        tlb_set_dirty1_locked(tlb_entry(cpu, mmu_idx, addr), addr);
++        tlb_set_dirty1_locked(cpu, mmu_idx, tlb_entry(cpu, mmu_idx, addr),
++                              addr);
+     }
+ 
+     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+         int k;
+         for (k = 0; k < CPU_VTLB_SIZE; k++) {
+-            tlb_set_dirty1_locked(&cpu->neg.tlb.d[mmu_idx].vtable[k], addr);
++            tlb_set_dirty1_locked(cpu, mmu_idx,
++                                  &cpu->neg.tlb.d[mmu_idx].vtable[k], addr);
+         }
+     }
+     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+@@ -1294,6 +1562,13 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
+     tlb_set_compare(full, &tn, addr_page, write_flags,
+                     MMU_DATA_STORE, prot & PAGE_WRITE);
+ 
++    /* POMPPC tcg/0040 (x-dirty-skip): an entry tlb_reset_dirty may change */
++    if (cpu->dirty_skip && (prot & PAGE_WRITE) &&
++        !(write_flags & (TLB_INVALID_MASK | TLB_NOTDIRTY |
++                         TLB_MMIO | TLB_DISCARD_WRITE))) {
++        pomppc_dw_note(cpu, mmu_idx, addend, section->mr->ram_block, index);
++    }
++
+     copy_tlb_helper_locked(te, &tn);
+     tlb_n_used_entries_inc(cpu, mmu_idx);
+     qemu_spin_unlock(&tlb->c.lock);
+diff --git a/include/hw/core/cpu.h b/include/hw/core/cpu.h
+--- a/include/hw/core/cpu.h
++++ b/include/hw/core/cpu.h
+@@ -316,6 +316,39 @@ typedef struct CPUTLBCommon {
+     size_t full_flush_count;
+     size_t part_flush_count;
+     size_t elide_flush_count;
++    /*
++     * POMPPC tcg/0040 (x-dirty-skip).  An over-approximation of the entries
++     * tlb_reset_dirty() may have to change, i.e. those whose write side has
++     * none of TLB_INVALID_MASK, TLB_NOTDIRTY, TLB_MMIO, TLB_DISCARD_WRITE.
++     * Invariant, with tlb_c.lock held: every such entry of mmu_idx i (table
++     * or victim) has its host page in [lo, hi) of a slot whose idx has bit
++     * i, or bit i is set in dw_over.  Entries become such only in
++     * tlb_set_page_full() and tlb_set_dirty(), which record them; a whole
++     * flush of mmu_idx i clears bit i everywhere; tlb_reset_dirty() empties
++     * a slot whose range it has entirely reset.  One slot per RAMBlock, so
++     * the guest RAM and a frame buffer never share a range.  Within a slot,
++     * bm[i] (allocated on first use, POMPPC_DW_BITS bits) marks where the
++     * entries of mmu_idx i are: bit (index mod POMPPC_DW_BITS) for an entry
++     * at table index `index'.  An entry for page P is always at index
++     * tlb_index(P) of its table or in its victim TLB (a resize flushes the
++     * table), so the indices of the set bits, modulo the table size, and
++     * the victim TLB hold them all.  bm[i] is all zero when bit i of idx is
++     * clear.
++     */
++#define POMPPC_DW_SLOTS 4
++#define POMPPC_DW_BITS 16384
++    struct PomppcDwSlot {
++        RAMBlock *rb;
++        uintptr_t lo, hi;
++        MMUIdxMap idx;
++        unsigned long *bm[NB_MMU_MODES];
++    } dw[POMPPC_DW_SLOTS];
++    MMUIdxMap dw_over;
++    /*
++     * x-dirty-skip counters: calls, skipped, mmu_idx scanned whole, marked
++     * entries visited, verify
++     */
++    uint64_t dw_calls, dw_skip, dw_idx, dw_ent, dw_vchk, dw_vbad;
+ } CPUTLBCommon;
+ 
+ /*
+@@ -529,6 +562,14 @@ struct CPUState {
+      */
+     bool jc_by_idx;
+     bool ret_verify;
++    /*
++     * POMPPC tcg/0040.  dirty_skip (x-dirty-skip): tlb_reset_dirty() only
++     * scans the mmu_idx that may hold an entry to change (tlb.c.dw), and
++     * nothing when none may.  dirty_skip_verify: proof mode, a full stock
++     * scan after it must find nothing left to change.
++     */
++    bool dirty_skip;
++    bool dirty_skip_verify;
+ 
+     GArray *gdb_regs;
+     int gdb_num_regs;
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -217,6 +217,16 @@ static const Property powerpc_cpu_properties[] = {
+     DEFINE_PROP_BOOL("x-dcbz-inline", PowerPCCPU, env.dcbz_inline, false),
+     DEFINE_PROP_BOOL("x-dcbz-inline-verify", PowerPCCPU, env.dcbz_inline_verify,
+                      false),
++    /*
++     * POMPPC tcg/0040.  x-dirty-skip: when a display clears the dirty bits
++     * of its frame buffer, the TLB scan that sets TLB_NOTDIRTY back only
++     * visits the mmu_idx that may hold an entry to change, and nothing when
++     * none may (accel/tcg/cputlb.c, pomppc_reset_dirty).
++     * x-dirty-skip-verify: proof mode.  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-dirty-skip", PowerPCCPU, parent_obj.dirty_skip, false),
++    DEFINE_PROP_BOOL("x-dirty-skip-verify", PowerPCCPU,
++                     parent_obj.dirty_skip_verify, false),
+     /* POMPPC tcg/0031: memory-side counters on stderr every 10 s */
+     DEFINE_PROP_BOOL("x-mem-stats", PowerPCCPU, env.mem_stats, false),
+     /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
+diff --git a/target/ppc/mmu_helper.c b/target/ppc/mmu_helper.c
+--- a/target/ppc/mmu_helper.c
++++ b/target/ppc/mmu_helper.c
+@@ -1848,6 +1848,10 @@ void ppc_mem_stats_tick(CPUPPCState *env)
+     g_string_append_printf(g, " precise %" PRIu64 " scans %" PRIu64
+                            " grows %" PRIu64, env->tlbp_ops, env->tlbp_scans,
+                            env->tlbp_grows);
++    g_string_append_printf(g, " dirty_calls %" PRIu64 " dirty_skip %" PRIu64
++                           " dirty_idx %" PRIu64 " dirty_ent %" PRIu64,
++                           cs->neg.tlb.c.dw_calls, cs->neg.tlb.c.dw_skip,
++                           cs->neg.tlb.c.dw_idx, cs->neg.tlb.c.dw_ent);
+     g_string_append(g, " lmwh");
+     for (int i = 0; i < 32; i++) {
+         g_string_append_printf(g, " %u", env->ms_lmw_hist[i]);

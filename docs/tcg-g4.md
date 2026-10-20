@@ -4027,3 +4027,79 @@ remplissage suivant, en `0x2fe08410`), qui est évincée de nouveau un peu plus 
 Journaux (non versionnés) : `bench/tcg/retv/` du dépôt principal — `s2-on-1`, `s2-off-1`
 (1 024 Mo), `s2-on-768`, `s2-on-768v` (avec tous les vérificateurs), `s2-off-768`, `s1-on-768`,
 `s1-off-768`, et les démarrages surveillés `w5605`, `w5610`, `wfff1`.
+
+## 36. Les helpers côté hôte sur le PC : `tcg/0040` à `0043` (20/10/2026)
+
+PC Linux x86-64 (i7-10700F, Ubuntu 26.04, GCC 15). Copie isolée `~/src/qemu-tcg` (= `~/src/qemu`
+du 20/10, série jusqu'à 0035, `build/` en -O2 ; les arbres `~/src/qemu/build*` n'ont pas été
+touchés). VM de dev **privée** `disks/tiger-dev-tcg.raw` (copie de `tiger-dev.raw`, 10.4.11,
+bureau, SMP=2 ppc64, toutes les options de production de `run_tiger.sh` sous Linux, `x-fast-fp`
+compris), pilotée par `devloop.py` depuis le worktree ; l'hôte était partagé (VM quotidienne de
+la session principale, autre agent sur le plugin) : les **comptes** se comparent, les temps
+restent **indicatifs**. Point de départ, le profil DOOM 3 du 20/10 (binaire rapide,
+`bench/tcg/ab/x86-depart-2010/fast-{1,2}/d3-fen/perf-hote-mesure.data`, `tools/re/perfpart.py`) :
+code généré 84,7 % du temps vCPU, recherche de blocs 4,9 % (`helper_lookup_tb_ptr` 4,3 %),
+softmmu 3,7 % (`tlb_set_page_full` 0,95, `ppc_xlate` 0,72, `victim_tlb_hit` 0,62,
+`get_page_addr_code_hostp` 0,57) ; fil de la boucle principale (8 % d'un cœur) :
+`tlb_reset_dirty_range_all` **23,5 %**.
+
+Patches (tous éteints par défaut, code **commun** aux deux hôtes : aucun émetteur touché, ils
+valent pour arm64 tels quels, à reconstruire et mesurer sur le M4) :
+
+| patch | propriété | lanceur | preuve |
+|---|---|---|---|
+| `0040-tcg-dirty-skip` | `x-dirty-skip`, `x-dirty-skip-verify` (CPU) | `DIRTYSKIP=1`, `DIRTYSKIPVERIFY=1` | parcours d'origine derrière, « rien à changer » |
+
+### 36.1 `tcg/0040` : `tlb_reset_dirty` sans parcours inutile (`x-dirty-skip`)
+
+**Le poste.** Les écrans (`vga.c` ~1696, `qfb-pci.c` ~436) effacent les bits sales de leur VRAM
+~30 fois par seconde par `memory_region_snapshot_and_clear_dirty`, qui appelle
+`physical_memory_dirty_bits_cleared` **sans condition** (contrairement à
+`physical_memory_test_and_clear_dirty`, qui ne le fait que si un bit était posé) ; et
+`tlb_reset_dirty` parcourt alors, pour **chaque** CPU et sous son verrou de TLB, toutes les
+entrées des **22** `mmu_idx` (table et victimes) pour remettre `TLB_NOTDIRTY` aux entrées
+inscriptibles qui pointent dans la plage : ~35 000 entrées par CPU et par appel avec les tables
+du jeu (8 192 en `mmu_idx` 0, 16 384 en 1). La même fonction sert aussi à `tlb_protect_code`
+(une page de RAM qui reçoit du code traduit).
+
+**La conception.** Par CPU (`CPUTLBCommon.dw`, sous `tlb.c.lock`), une **sur-approximation**
+des entrées que `tlb_reset_dirty` peut avoir à changer, c'est-à-dire celles dont le côté
+écriture n'a ni `TLB_INVALID_MASK`, ni `TLB_NOTDIRTY`, ni `TLB_MMIO`, ni `TLB_DISCARD_WRITE` :
+
+- une **tranche par RAMBlock** (4 au plus ; au-delà, ou bloc inconnu, le `mmu_idx` est marqué
+  `dw_over` et parcouru entier) : la plage hôte `[lo, hi)` couverte, les `mmu_idx` concernés,
+  et par `mmu_idx` une **carte de bits** (16 384 bits) des indices de table où sont ces entrées ;
+- elles ne naissent qu'à deux endroits, qui les inscrivent : `tlb_set_page_full` (entrée posée
+  sans `TLB_NOTDIRTY`) et `tlb_set_dirty` (le drapeau retiré après une écriture) ;
+- une entrée de la page P est **toujours** à l'indice `tlb_index(P)` de sa table ou dans les
+  victimes de son `mmu_idx` (les échanges avec les victimes gardent l'indice ; un
+  redimensionnement vide la table) : visiter les indices marqués (modulo la taille de table)
+  et les 8 victimes suffit ;
+- un vidage complet d'un `mmu_idx` efface ses marques ; un `tlb_reset_dirty` qui couvre toute
+  la plage d'une tranche la vide (toutes ses entrées portent maintenant `TLB_NOTDIRTY`).
+
+`tlb_reset_dirty` ne visite donc que les entrées marquées des tranches qui rencontrent la plage,
+et **rien** quand aucune ne la rencontre. Le test d'une entrée lit `addr_write` d'abord et ne
+lit les drapeaux lents (`full->slow_flags`) que si l'entrée en annonce (`TLB_FORCE_SLOW`).
+Les compteurs (`x-mem-stats`) : appels, appels sautés, `mmu_idx` parcourus entiers, entrées
+visitées. `x-dirty-skip-verify` : après chaque appel, le parcours **d'origine** complet ; toute
+entrée qu'il change encore est une divergence (stderr), avec un bilan toutes les 1 024
+vérifications et l'état des tranches.
+
+Trois versions ont tourné : la première ne restreignait qu'aux `mmu_idx` (≈ 3 parcours entiers
+par appel en jeu : les grosses tables restaient), la deuxième une liste de 256 indices par
+tranche (débordée sans cesse : le serveur de fenêtres remplit des centaines de pages de VRAM
+entre deux effacements), la troisième, retenue, la carte de bits.
+
+**Mesures (VM de dev, Marble Blast et bureau, par CPU).** Tranches observées :
+`ppc_core99.ram` (RAM, `mmu_idx` 0, 1, 3, ~7 000-11 500 marques) et
+`pci.2:0e.0/vga.vram` (VRAM, `mmu_idx` 0-1, ~770 marques, la VRAM entière du bureau), `dw_over`
+nul. Un effacement de VRAM visite ~800 entrées au lieu de ~35 000 (**÷ 40**) ; un
+`tlb_protect_code` (une page de RAM) en visite 7 000-11 500 au lieu de ~35 000 (÷ 3 à 5).
+
+**Preuve.** `x-dirty-skip-verify`, SMP=2, bureau, bancs invités et Marble Blast : version
+retenue, 7 sessions, **155 648 appels vérifiés, 0 divergence** (les deux premières versions :
+106 496, 0) ; une troisième tranche est apparue en jeu (`pci.2:0f.0/qgpu.shmem`, la mémoire
+partagée du GPU paravirtuel), sans `dw_over`. Empreintes invitées inchangées (§36.4). Mutants :
+§36.7.
+
