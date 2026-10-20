@@ -580,3 +580,26 @@ du lanceur, `--serie` sans `--releve-sain`, 3 instances, `--mode reboot`, **450 
 
 Taux de la configuration par défaut sur le PC (07/10 nuit + `pc-reboot-serie` + cette série,
 binaire rapide) : paniques vraies 2 sur 923 (#76, #98), gels « pas de ssh » 6 sur 923.
+
+### 8.7 Conserver la RAM avant tout redémarrage (20/10)
+
+La collecte écrit désormais `ram.bin` **juste après `stop` et les registres**, avant la
+capture d'écran et `kpanic.py`, puis avant tout `cont` ou reset. `info mtree` donne la plage
+exacte de `ppc_core99.ram` ; `pmemsave` ne parcourt que cette RAM, sans lire les périphériques.
+Le fichier brut commence à l'adresse physique 0 : un décalage dans le fichier est donc une
+adresse physique de l'invité. Taille habituelle : 768 Mio pour 768 Mio de RAM configurée.
+`mtree.txt` conserve la carte ; `memoire.json` et `incident.json` donnent la taille attendue,
+la taille écrite, la durée et le verdict `complet`. Un vidage incomplet reste signalé comme
+tel ; espace insuffisant (RAM + 64 Mio de marge), plage inconnue ou erreur HMP ne bloquent
+pas les autres diagnostics. Un `ram.bin` préexistant est préservé, sans écrasement.
+
+**Preuve locale :** `python3 tests/endurance_memory_test.py` — transfert réel de 32 Mio
+sur QEMU système mac99, CPU arrêté sans Tiger ni disque ; taille exacte et motif chargé en
+RAM relu à son adresse physique, chemin avec espaces et guillemets. Les tests couvrent aussi
+le disque plein, le transfert tronqué, l'erreur/délai HMP et la poursuite de la collecte après
+un échec de capture d'écran. Cela valide le transfert, pas une reproduction de panique.
+
+**Reste du §8.4 :** décoder le savearea de la trappe depuis le noyau exact de l'incident,
+puis accélérer la reproduction par stress série. Les décalages du 10.4.11 cités au §8.4
+ne sont pas encore appliqués automatiquement aux autres noyaux ; le vidage conserve les
+données pour cette analyse hors ligne.

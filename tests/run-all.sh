@@ -55,6 +55,7 @@ done
 if python3 tests/frame_report_test.py; then ok "frame-time report"; else ko "frame-time report"; fi
 if python3 tests/flyby_report_test.py; then ok "fixed-step flyby report"; else ko "fixed-step flyby report"; fi
 if python3 tests/matrice_test.py >/dev/null; then ok "matrice de jeux : règles de scène, ppmcmp"; else ko "matrice de jeux (python3 tests/matrice_test.py)"; fi
+if python3 tests/endurance_memory_test.py; then ok "endurance : collecte RAM"; else ko "endurance : collecte RAM"; fi
 if python3 tests/tiger_launcher_test.py; then ok "lanceur Tiger ImGuiDock"; else ko "lanceur Tiger ImGuiDock"; fi
 if python3 tests/chime_extract_test.py; then ok "extraction carillon G4"; else ko "extraction carillon G4"; fi
 if python3 tests/screamer_audio_test.py; then ok "Screamer et profil audio stable"; else ko "Screamer et profil audio stable"; fi

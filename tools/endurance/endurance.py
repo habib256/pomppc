@@ -41,6 +41,7 @@ ICI = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ICI)
 from hmp import hmp, hmp_suite, mots          # noqa: E402
 import serie                                  # noqa: E402
+import memoire                                # noqa: E402
 from symbolise import (MAIN, WT, Symboliseur, adresses_du_texte, court,  # noqa: E402
                        lit_kextstat)
 
@@ -439,7 +440,9 @@ def collecte(vm_mon, dossier, sym, motif, notes=None):
     info = {"motif": motif, "date": datetime.datetime.now().isoformat(timespec="seconds")}
     if notes:
         info.update(notes)
-    ecr = lambda n, t: open(os.path.join(dossier, n), "w").write(t)  # noqa: E731
+    def ecr(n, t):
+        with open(os.path.join(dossier, n), "w") as f:
+            f.write(t)
     texte = ""
     try:
         hmp(vm_mon, "stop")
@@ -450,6 +453,11 @@ def collecte(vm_mon, dossier, sym, motif, notes=None):
     try:
         regs1 = hmp(vm_mon, "info registers -a")
         ecr("registres.txt", regs1)
+        # Garder les preuves avant les diagnostics plus fragiles (capture
+        # d'écran, symbolisation) et avant tout cont/reset. Le noyau et ses
+        # saveareas pourront être relus hors ligne même si la suite échoue.
+        info["memoire"] = memoire.capture(vm_mon, dossier)
+        ecr("memoire.json", json.dumps(info["memoire"], indent=1, ensure_ascii=False))
         ppm = os.path.join(dossier, "ecran.ppm")
         hmp(vm_mon, "screendump %s" % ppm)
         for _ in range(30):
@@ -610,6 +618,12 @@ def rapport_incident(info, texte):
          "- écran figé : %s ; NIP immobile : %s" % (info.get("ecran_fige"), info.get("nip_immobile")),
          "- kexts lus dans la mémoire (liste kmod) : %s" % info.get("kmods"),
          "- NIP sur 20 relevés : %s" % info.get("nip_echantillons"), ""]
+    if "memoire" in info:
+        m = info["memoire"]
+        l.append("- RAM physique : %s ; %s/%s octets ; %s"
+                 % ("complète (ram.bin)" if m["complet"] else "NON collectée complètement",
+                    m.get("octets_ecrits", "?"), m.get("octets_attendus", "?"),
+                    m.get("erreur", "%.3f s" % m["duree_s"])))
     if info.get("erreur_collecte"):
         l.append("- ⚠ collecte incomplète : %s" % info["erreur_collecte"])
     l.append("## vCPU")
@@ -633,7 +647,8 @@ def rapport_incident(info, texte):
         l.extend("- %s" % x for x in info["panique_symbolisee"])
     if info.get("panic_log"):
         l += ["", "## panic.log (démarrage suivant)", "", "```", info["panic_log"].strip(), "```"]
-    l += ["", "Fichiers : ecran.png, kpanic.txt (texte, appelant, pile, msgbuf), registres.txt "
+    l += ["", "Fichiers : ram.bin (RAM physique, si collecte complète), memoire.json, mtree.txt, "
+          "ecran.png, kpanic.txt (texte, appelant, pile, msgbuf), registres.txt "
           "(arrêt), registres-2.txt (3 s après `cont`), kmods.txt, panique.txt, qemu.log ; "
           "avec --serie : serie.txt (relevé par la console avant tout reset), "
           "apres-reset.txt (même relevé par ssh après `system_reset`).", ""]

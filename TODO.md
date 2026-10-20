@@ -47,7 +47,8 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   cas (série plus longue, ou hôte chargé comme le 07/10) ; la panique `CheckSubTree` de #160
   revient sur la configuration par défaut (#98, 1 sur 450) ; (2 bis) la panique #76 : relue le 13/10 (§8.4) — tombée **pendant un
   relevé par la console**, liste libre de kalloc.16 corrompue (probable), CPU 1 en 0x700 ;
-  suite : savearea + `pmemsave` à la collecte, reproduction par stress de la console, puis A/B
+  suite : savearea (décodage restant) ; **`pmemsave` ajouté à la collecte le 20/10**
+  (`docs/endurance.md` §8.7, transfert éprouvé sur QEMU sans invité), reproduction par stress de la console, puis A/B
   `-accel tcg,thread=single` ; (3) une tranche de démarrages à froid (non jouée, faute de temps).
 
 - [ ] **[Système] Plantages en jeu sans cause** — trois défauts, peut-être un seul mécanisme ;

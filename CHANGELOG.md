@@ -9,6 +9,13 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Collecte d'endurance : RAM physique conservée, 20/10.** `ram.bin` est écrit dès l'arrêt
+  de la VM, avant les diagnostics et tout redémarrage, pour permettre l'analyse du savearea
+  et du tas des paniques rares (§8.4 de `docs/endurance.md`). Plage issue de `info mtree`,
+  espace libre et taille écrite vérifiés, échec documenté sans interrompre les diagnostics.
+  Test de transfert réel sur QEMU mac99 sans Tiger, avec motif mémoire relu et cas d'erreur.
+  Décodage du savearea et reproduction de la panique encore à faire.
+
 - **`tex14` expliqué, PC, 14/10 : le job `gpu` tournait sur llvmpipe.** Les deux exécutions en
   échec (55/56) ont `QGPUCaps` = 720894, sans `QGPU_CAP_FIXED4` (0x40000) que le backend gl pose
   sur NVIDIA : leur VM était partie sans `EGL_PLATFORM=device`, que `devloop.py` ne posait pas,
