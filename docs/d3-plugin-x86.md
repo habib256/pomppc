@@ -248,3 +248,62 @@ Gain total attendu sur le PC : **~6-12 ms/image sur ~150 (4-8 %)**, estimation �
   recopié deux fois.
 - `+set r_useIndexBuffers 1` dans DOOM 3 (§1) : rien à écrire, à mesurer.
 - Attente de l'hôte (4,6 ms/image sur le PC) : côté QEMU (`nat_conv_attr`, TODO « [Cœur] »).
+
+## 9. Levier D — une soumission par image : `POMPPC_GL_ZONES` (20/10/2026)
+
+**Constat (profil du 20/10, `bench/tcg/ab/x86-depart-2010/fast-{1,2}/d3-fen`).** Le fil
+principal de DOOM 3 attend l'hôte **5,5 ms/image** (`wait_half_ex` → `qgpu_wait` →
+`mach_msg_trap`) alors que le fil de rendu de l'hôte n'est occupé qu'à 19 % : 3,55 ms dans
+`present_direct` (attente de la moitié précédente à l'échange) et 2,0 ms dans les `flush`
+de `geom_draw_native`. La note dit **8 doorbells asynchrones par image**, exactement
+(4 000 par 500 images), et `frames.csv` ~5,4 ms/image d'attente.
+
+**Cause (vidages des 7/10 et du 4/10, `tools/re/dumpvidages.py`).** 7 des 8 soumissions
+d'une image partent parce que la **zone des indices** (256 Kio par moitié) est pleine :
+DOOM 3 recopie ~1,8 Mio d'indices 32 bits clients par image (un seul dessin en prend
+jusqu'à 190 Kio), alors que le flux n'en fait que ~410 Kio, les sommets ~80 Kio et l'arène
+~0,7 Mio sur les 6 Mio de la moitié. La 8e est l'échange. Or la v9 n'avait prévu **qu'une**
+soumission par image : l'attente de l'échange devait porter sur l'image n−1, déjà finie.
+Avec 8, `present_direct` attend la soumission qui vient de partir — la plus lourde de
+l'image (≈ 500 dessins d'interaction) —, et chaque `switch_half` attend celle d'avant :
+c'est de la latence (doorbell → fil hôte → barrière → kext), pas de la charge.
+
+**Ce que fait le levier** (plugin seul, ni protocole ni kext) :
+
+- `ZONES=1` : dans `geom_draw_native`, des indices clients qui ne tiennent plus dans leur
+  zone vont dans **l'arène** de la même moitié si elle a la place (`QGPU_BUF_SHMEM`, offset
+  absolu dans la tranche, comme la zone des indices). La place se constate verrou tenu, au
+  même endroit que pour la zone des indices : aucun vidage ne peut s'intercaler entre les
+  descripteurs, les indices et la commande. Un dessin dont les indices dépassent 256 Kio,
+  qui retombait sur l'empaquetage, part en natif.
+- `ZONES=2` : en plus, **flux de 512 Kio** au lieu de 256 (DOOM 3 en écrit ~410 Kio par
+  image) ; sommets et indices glissent de 256 Kio, tailles inchangées, l'arène passe de 6 à
+  5,75 Mio (encore 1280×1024×4 en un transfert ; la disposition n'est prise que si la
+  moitié garde 5 Mio d'arène). La disposition est fixée une fois, à l'ouverture
+  (`G.zl_cmd_bytes` ; `CMD_WORDS`, `VTX_OFF`… deviennent des lectures de `G`).
+- `ZONES_FORCE=1` (épreuve) : TOUS les indices clients natifs passent par l'arène.
+
+Attendu pour DOOM 3 : **1 soumission par image** (+ les sondes et relectures rares), plus
+d'attente à l'échange ni au changement de moitié (l'image n−1 a eu toute la construction de
+l'image n pour finir), ~6 appels au kext de moins par image. Gain attendu ~5-6 ms/image de
+plugin, ~7 ms/image d'image (règle du §3.1 de `vitesse-doom3-x86.md`), **à mesurer**.
+
+**Compteurs.** Ligne `VIDAGE image N` de la note (toutes les 500 images) : vidages par
+image et, par ligne de l'appelant (`L<ligne>` pour `flush()`, `W<ligne>` pour un
+`wait_half()` direct), le remplissage moyen du flux, de l'arène et des sommets au vidage,
+les barrières réellement attendues, leur temps, et l'âge de la soumission attendue au début
+de l'attente (latence vue = âge + attente) ; puis les dessins aux indices dans l'arène.
+Ligne `ZONES` au bilan d'un contexte (gltest). `zones=` en tête de note.
+
+**Preuves (VM de dev, RTX, 20/10).** Job `plugmd5` (nouveau : les scènes gltest dans
+plusieurs modes, md5 comparés à l'octet) : **65 scènes × 4 modes (`ZONES=0`, 1, 2, 2 +
+`ZONES_FORCE=1`), 0 écart** ; job `gpu` avec `ZONES_DEFAULT 2` : **56 OK, 0 échec**
+(`qgpu_test` 0). Scène `d3idx`
+(nouvelle) : le régime de DOOM 3 — sommets en VBO, indices 32 bits clients, 2 000 dessins
+avec une matrice chacun, 12 Mio d'indices, mélange alpha — **53 soumissions sous ZONES=0, 7
+sous ZONES=1, 8 sous ZONES=2**, image identique à l'octet dans les quatre modes.
+
+**Reste à faire (VM quotidienne, en série, hôte au repos)** : DOOM 3 sous `ZONES=2` avec
+vidage (rejeu = VM, `dumpvidages.py` doit dire ~1 soumission par image), ligne `VIDAGE`, et
+A/B entrelacé contre `ZONES=0` ; UT2004 et Marble Blast (aucune régression). Défaut à passer
+à 2 (`ZONES_DEFAULT`) si l'A/B gagne.

@@ -129,7 +129,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261014-r5"
+#define POMPPC_PLUGIN_REV "20261020-zones"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -141,6 +141,11 @@
 #define IDXVEC_DEFAULT  1
 #define DISPONE_DEFAULT 1
 #define UNITVD_DEFAULT  1
+/* 20/10/2026 (docs/d3-plugin-x86.md §9) : zones de la moitié. 0 = disposition
+   d'avant ; 1 = indices débordant dans l'arène ; 2 = 1 + flux de 512 Kio. */
+#ifndef ZONES_DEFAULT
+#define ZONES_DEFAULT   0
+#endif
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -231,7 +236,12 @@ static volatile unsigned long pack_fault_addr, pack_fault_n;
 static volatile unsigned long dbg_vtx_i, dbg_vtx_n, dbg_vmin, dbg_words, dbg_fmt;
 static const void *volatile dbg_plan;
 static const unsigned char *volatile dbg_vao;
-static void flush(void);
+/* 20/10/2026 — CAUSE DES VIDAGES : chaque flush() et chaque wait_half() direct
+   est compté par numéro de ligne de l'appelant (VD_*, ligne VIDAGE de la note). */
+static void flush_at(int line);
+static void wait_half_at(int i, int line);
+#define flush()       flush_at(__LINE__)
+#define wait_half(i)  wait_half_at((i), __LINE__)
 static void drain_all(void);
 static long submit_probe(void);       /* reste du 29/09 : sonde de SURF_CREATE */
 static unsigned long nomem_poll(void); /* 3e passe : ligne de base à l'ouverture */
@@ -532,9 +542,16 @@ static void buf_raw_invalidate_from(unsigned long from);
  * SEULE l'arène est adressée en absolu (G.q.win + off), parce que ses copies
  * différées survivent au changement de moitié. */
 #define HALVES      2
-#define CMD_WORDS   (0x40000 / 4)       /* flux : 256 Kio */
-#define VTX_OFF     0x40000             /* sommets : jusqu'à 1,5 Mio */
-#define VTX_END     0x200000
+/* 20/10/2026 — POMPPC_GL_ZONES=2 : flux de 512 Kio au lieu de 256 (DOOM 3 en
+   écrit ~410 Kio par image) ; tout ce qui suit glisse d'autant, tailles des
+   sommets et des indices inchangées, l'arène perd 256 Kio. La disposition est
+   fixée UNE fois à l'ouverture (G.zl_cmd_bytes), avant toute soumission. */
+#define CMD_BYTES_DEF   0x40000
+#define CMD_BYTES_BIG   0x80000
+#define CMD_WORDS_MAX   (CMD_BYTES_BIG / 4)
+#define CMD_WORDS   (G.zl_cmd_bytes / 4)    /* flux : 256 Kio (512 sous ZONES=2) */
+#define VTX_OFF     (G.zl_cmd_bytes)        /* sommets : jusqu'à 1,5 Mio */
+#define VTX_END     (G.zl_cmd_bytes + 0x1C0000)
 /* Les indices de la FUSION (v7 indexée) vivent en HAUT de la zone des sommets :
    ils naissent et meurent avec elle (même vidage, même remise à zéro), et le
    cœur les veut dans la fenêtre partagée comme les sommets. 256 Kio = 131 072
@@ -542,7 +559,7 @@ static void buf_raw_invalidate_from(unsigned long from);
 #define IDX_SIZE    0x40000
 #define IDX_OFF     (VTX_END - IDX_SIZE)
 #define VTX_LIMIT   IDX_OFF             /* les sommets s'arrêtent là */
-#define ARENA_OFF   0x200000            /* transferts : le reste de la moitié */
+#define ARENA_OFF   VTX_END             /* transferts : le reste de la moitié */
 #define MAX_POST    16
 /* Place de flux que arena_alloc garantit en plus de l'arène : de quoi écrire la
    commande qui désignera l'arène SANS que reserve() vide le flux entre les
@@ -1042,6 +1059,15 @@ static struct {
     unsigned long   raw_nidx;           /* indices déjà écrits pour cette série */
     unsigned long   raw_lots;           /* lots recollés dans cette série */
     unsigned long   idx;                /* octets d'indices pris depuis IDX_OFF */
+    /* 20/10/2026 — POMPPC_GL_ZONES (docs/d3-plugin-x86.md §9) : 1 = les indices
+       clients d'un DRAW_NATIVE qui ne tiennent plus dans la zone des indices
+       vont dans l'arène au lieu de vider le flux ; 2 = en plus, flux de 512 Kio.
+       zl_cmd_bytes : taille du flux, donc début des sommets (disposition). */
+    int             zones;
+    int             zones_force;        /* POMPPC_GL_ZONES_FORCE=1 (épreuve) : TOUS
+                                           les indices clients natifs dans l'arène */
+    unsigned long   zl_cmd_bytes;
+    unsigned long   n_idxspill, idxspill_bytes;
     /* F2 : tampons rendus par BeginPrimitiveBuffer et pas encore refermés. Le
        DÉTAIL est dans la PCtx (pend_*) ; ici on ne garde que le COMPTE, parce
        que c'est la seule chose dont le flux ait besoin : tant qu'il n'est pas
@@ -1723,6 +1749,80 @@ static void sync_count(int why, double dt)
     G.t_sync[why] += dt;
 }
 
+/* 20/10/2026 — CAUSE DES VIDAGES ET DES ATTENTES (ligne VIDAGE de la note).
+ * Le profil du 20/10 (DOOM 3, PC) montrait 8 doorbells asynchrones par image
+ * et ~5,4 ms/image d'attente de barrière alors que le fil de rendu de l'hôte
+ * n'est occupé qu'à 19 % : on attend la LATENCE de la moitié précédente. Chaque
+ * flush() est rangé par ligne de l'appelant (> 0), chaque wait_half() direct
+ * par la sienne (< 0) ; une attente réelle (moitié encore en vol) est imputée
+ * à l'opération en cours, avec l'âge de la soumission attendue quand on
+ * commence à l'attendre (latence vue = âge + attente). Coût : quelques
+ * additions par vidage, rien par dessin. */
+#define VD_MAX 48
+static struct {
+    int           line[VD_MAX];         /* > 0 flush, < 0 wait_half direct */
+    unsigned long n[VD_MAX], nw[VD_MAX];
+    double        tw[VD_MAX], age[VD_MAX];
+    unsigned long cmdw[VD_MAX], arena[VD_MAX], vtx[VD_MAX];
+    int           cur;                  /* entrée de l'opération en cours, -1 */
+    double        tsub[HALVES];         /* heure de la soumission de chaque moitié */
+    unsigned long nsub_empty;           /* flush sans rien à soumettre */
+} FL = { .cur = -1 };
+
+static int fl_slot(int line)
+{
+    int k;
+    for (k = 0; k < VD_MAX; k++) {
+        if (FL.line[k] == line)
+            return k;
+        if (!FL.line[k]) {
+            FL.line[k] = line;
+            return k;
+        }
+    }
+    return VD_MAX - 1;                  /* table pleine : tout le reste ici */
+}
+
+static void fl_frame(void)
+{
+    char buf[3072];
+    int k, n = 0;
+    unsigned long tot = 0, totw = 0;
+    double tw = 0;
+    for (k = 0; k < VD_MAX && FL.line[k]; k++) {
+        tot += FL.line[k] > 0 ? FL.n[k] : 0;
+        totw += FL.nw[k];
+        tw += FL.tw[k];
+    }
+    for (k = 0; k < VD_MAX && FL.line[k]; k++) {
+        if (!FL.n[k] && !FL.nw[k])
+            continue;
+        if (n < (int)sizeof(buf) - 200)
+            n += snprintf(buf + n, sizeof(buf) - n,
+                          " | %s%d x%lu (flux %lu mots, arène %lu Kio, sommets %lu Kio)"
+                          " attentes %lu %.2f ms âge %.2f ms",
+                          FL.line[k] > 0 ? "L" : "W", FL.line[k] > 0 ? FL.line[k] : -FL.line[k],
+                          FL.n[k],
+                          FL.n[k] ? FL.cmdw[k] / FL.n[k] : 0,
+                          FL.n[k] ? (FL.arena[k] / FL.n[k]) >> 10 : 0,
+                          FL.n[k] ? (FL.vtx[k] / FL.n[k]) >> 10 : 0,
+                          FL.nw[k], FL.tw[k] * 1000,
+                          FL.nw[k] ? FL.age[k] * 1000 / FL.nw[k] : 0.0);
+    }
+    buf[n] = 0;
+    gl_note("VIDAGE image %lu (%d images) : %lu vidages (%.2f/image, %lu vides), "
+            "%lu barrières attendues, %.2f ms (%.3f ms/image) ; zones %d, %lu dessins aux "
+            "indices dans l'arène (%lu Kio, cumul)%s\n",
+            G.n_frames, CNT_PERIOD, tot, (double)tot / CNT_PERIOD, FL.nsub_empty,
+            totw, tw * 1000, tw * 1000 / CNT_PERIOD, G.zones, G.n_idxspill,
+            G.idxspill_bytes >> 10, buf);
+    for (k = 0; k < VD_MAX; k++) {
+        FL.n[k] = FL.nw[k] = FL.cmdw[k] = FL.arena[k] = FL.vtx[k] = 0;
+        FL.tw[k] = FL.age[k] = 0;
+    }
+    FL.nsub_empty = 0;
+}
+
 /* Ligne SYNC de la note, toutes les CNT_PERIOD images (stats_frame). */
 static void sync_frame(void)
 {
@@ -1744,6 +1844,7 @@ static void sync_frame(void)
             sync_name[2], G.n_sync[2], G.t_sync[2] * 1000,
             sync_name[3], G.n_sync[3], G.t_sync[3] * 1000,
             G.n_async, G.t_async * 1000);
+    fl_frame();
     if (G.texpage && G.tex_budget)       /* R5 : compteurs cumulés depuis le début */
         gl_note("TEXPAGE image %lu : budget %lu Kio, tenu %lu Kio, %lu évictions (%lu Kio), "
                 "%lu téléversements de niveaux, %lu reprises, %lu NO_MEM nommés\n",
@@ -2340,7 +2441,20 @@ void pomppc_backend_init(void)
             G.win   = G.q.win;
             G.base  = G.q.base;
             G.cmd   = (unsigned long *)G.win;
+            G.zl_cmd_bytes = CMD_BYTES_DEF;
             async_switch();
+            {   /* 20/10/2026 : ZONES, fixé avant la première soumission */
+                const char *e = getenv("POMPPC_GL_ZONES");
+                G.zones = e && e[0] ? (int)(e[0] - '0') : ZONES_DEFAULT;
+                if (G.zones < 0 || G.zones > 2)
+                    G.zones = ZONES_DEFAULT;
+                e = getenv("POMPPC_GL_ZONES_FORCE");
+                G.zones_force = G.zones && e && e[0] == '1';
+                /* flux élargi seulement si la moitié garde une arène d'au
+                   moins 5 Mio (1280×1024×4 en un transfert) */
+                if (G.zones >= 2 && G.half >= CMD_BYTES_BIG + 0x1C0000 + 0x500000)
+                    G.zl_cmd_bytes = CMD_BYTES_BIG;
+            }
             /* Le chemin brut demande un device v7 : sur un device plus ancien,
                les clés de géométrie n'existent pas et les envoyer ferait
                refuser toutes les soumissions (vu en vrai au passage en v6). */
@@ -2589,11 +2703,13 @@ void pomppc_backend_init(void)
             gl_note("plugin " POMPPC_PLUGIN_REV " qgpu v%lu caps 0x%lx v10=%d lazyapple=%d "
                     "native=%d (plages %d) count=%d verdict=%d verdictcheck=%d whitelist=%d "
                     "texmemo=%d stskip=%d statecheck=%d wlunif=%d stateblk=%d "
-                    "rawsane=%d natshm=%d idxlazy=%d idxvec=%d dispone=%d unitvd=%d texpage=%d\n",
+                    "rawsane=%d natshm=%d idxlazy=%d idxvec=%d dispone=%d unitvd=%d texpage=%d "
+                    "zones=%d (flux %lu Kio)\n",
                     G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range,
                     G.count, G.verdict, G.vcheck, G.wl, G.texmemo, G.stskip, G.stcheck,
                     G.wlunif, G.stblk + G.stblk_check, G.rawsane, G.natshm,
-                    G.idxlazy, G.idxvec, G.dispone, G.unitvd, G.texpage);
+                    G.idxlazy, G.idxvec, G.dispone, G.unitvd, G.texpage,
+                    G.zones, G.zl_cmd_bytes >> 10);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
                        " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
@@ -2615,7 +2731,6 @@ void pomppc_backend_init(void)
 
 /* ───────────────────────────── flux de commandes ───────────────────────────── */
 
-static void flush(void);
 
 static void close_run(void)
 {
@@ -3299,6 +3414,10 @@ static void wait_half_ex(int i, int unlock)
     {
         double t = now_s();
         fence = h->fence;
+        if (FL.cur >= 0) {
+            FL.nw[FL.cur]++;
+            FL.age[FL.cur] += t - FL.tsub[i];
+        }
         for (;;) {
             if (unlock) {
                 h->waiting = 1;
@@ -3346,6 +3465,8 @@ static void wait_half_ex(int i, int unlock)
            h->post sont donc encore ceux de NOTRE soumission. */
         G.t_wait += now_s() - t;
         G.n_waits++;
+        if (FL.cur >= 0)
+            FL.tw[FL.cur] += now_s() - t;
         G.wait_miss = 0;
         /* 3e passe — relectures d'une soumission ASYNCHRONE : rien ne disait
            si elle s'était arrêtée avant elles (arène indéterminée, recopiée
@@ -3372,9 +3493,13 @@ done:
     guards_resume(&gp);
 }
 
-static void wait_half(int i)
+static void wait_half_at(int i, int line)
 {
+    int save = FL.cur;
+    FL.cur = fl_slot(-line);
+    FL.n[FL.cur]++;
     wait_half_ex(i, 1);
+    FL.cur = save;
 }
 
 /* ── détection d'erreur en asynchrone ────────────────────────────────────────
@@ -3943,6 +4068,7 @@ static void submit_cur(void)
         h->fence = fence;
         h->busy = 1;
         h->seq = seq;
+        FL.tsub[G.cur] = now_s();
         check_errors(errors, seq, 0);
         return;
     }
@@ -4002,7 +4128,7 @@ static void stream_dead(void)
     G.dead = 1;
     for (p = G.list; p; p = p->next)
         p->broken = 1;
-    static unsigned long dead_cmd[CMD_WORDS];
+    static unsigned long dead_cmd[CMD_WORDS_MAX];
     G.cmd = dead_cmd;                   /* toujours : le flux ne touche plus BAR0 */
     G.dead_buf = (unsigned char *)calloc(1, G.half);
     if (G.dead_buf)
@@ -4030,7 +4156,22 @@ static void switch_half(void)
     wait_half(G.cur);
 }
 
-static void flush(void)
+static void flush_locked(void);
+static void flush_at(int line)
+{
+    int save = FL.cur;
+    FL.cur = fl_slot(line);
+    FL.n[FL.cur]++;
+    FL.cmdw[FL.cur] += G.ncmd;
+    FL.arena[FL.cur] += G.arena;
+    FL.vtx[FL.cur] += G.vtx;
+    if (!G.ncmd)
+        FL.nsub_empty++;
+    flush_locked();
+    FL.cur = save;
+}
+
+static void flush_locked(void)
 {
     stream_ready();                     /* F9 : tout est relu après */
     if (G.dead) {                       /* L1 : rien ne part plus, rien ne bouge */
@@ -12662,6 +12803,7 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
     unsigned long boff[QGPU_NATTR_MAX], cbytes = 0, vbase = 0;
     int nd = 0, nn = 0, j, k, ib = -1, seen_vbo = 0, cn, w, ncl = 0, nblk = 0;
     int fwhy = 0;                       /* A4 : ligne du repli (note) */
+    int ispill = 0;                     /* ZONES : indices dans l'arène */
     unsigned long isz = 0, ioff_b = 0, itype_h = QGPU_IDX_NONE, ibuf = QGPU_BUF_SHMEM;
     unsigned long ioff = 0, aoff, dbytes, ibytes, nverts, *c, *dst;
     unsigned long a[QGPU_LEN_SET_CURRENT - 1];
@@ -12875,13 +13017,22 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
        attendu la fin d'une attente d'un autre fil (F9) avant d'écrire dans
        la moitié courante. Avant le test : G.ncmd, G.vtx, G.idx relus après. */
     stream_ready();
+    /* ZONES (20/10) : des indices qui ne tiennent plus dans leur zone vont
+       dans l'arène de la même moitié, si elle a la place — même soumission,
+       aucun vidage entre eux et la commande (la place est constatée ici,
+       verrou tenu, comme pour la zone des indices). DOOM 3 recopie ~1,8 Mio
+       d'indices 32 bits par image : 256 Kio de zone, c'était 7 vidages. */
+    ispill = ibytes && G.zones && (G.zones_force || ((G.idx + 3) & ~3UL) + ibytes > IDX_SIZE) &&
+             ARENA_OFF + G.arena + ((ibytes + 3) & ~3UL) <= G.half;
     if (G.ncmd + QGPU_LEN_DRAW_NATIVE + QGPU_LEN_DRAW_RAW + 2 * QGPU_LEN_CTX + 8 > CMD_WORDS ||
         VTX_OFF + G.vtx + dbytes > VTX_LIMIT ||
-        (ibytes && ((G.idx + 3) & ~3UL) + ibytes > IDX_SIZE))
+        (ibytes && !ispill && ((G.idx + 3) & ~3UL) + ibytes > IDX_SIZE))
         flush();
+    ispill = ibytes && G.zones && (G.zones_force || ((G.idx + 3) & ~3UL) + ibytes > IDX_SIZE) &&
+             ARENA_OFF + G.arena + ((ibytes + 3) & ~3UL) <= G.half;
     if (G.ncmd + QGPU_LEN_DRAW_NATIVE + QGPU_LEN_DRAW_RAW + 2 * QGPU_LEN_CTX + 8 > CMD_WORDS ||
         VTX_OFF + G.vtx + dbytes > VTX_LIMIT ||
-        (ibytes && ((G.idx + 3) & ~3UL) + ibytes > IDX_SIZE))
+        (ibytes && !ispill && ((G.idx + 3) & ~3UL) + ibytes > IDX_SIZE))
         { fwhy = __LINE__; goto fall; }
     /* un vidage ci-dessus a pu rendre un refus de l'hôte (broken_all) :
        DRAW_NATIVE coupé, ou le contexte perdu */
@@ -12928,8 +13079,18 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
         ioff = nb[ib].b->rp_off + ioff_b;
     } else if (nidx) {
         unsigned char *di;
-        G.idx = (G.idx + 3) & ~3UL;
-        di = G.win + IDX_OFF + G.idx;
+        unsigned long irel;             /* offset dans la moitié courante */
+        if (ispill) {
+            irel = ARENA_OFF + G.arena;
+            G.arena += (ibytes + 3) & ~3UL;
+            G.n_idxspill++;
+            G.idxspill_bytes += ibytes;
+        } else {
+            G.idx = (G.idx + 3) & ~3UL;
+            irel = IDX_OFF + G.idx;
+            G.idx += ibytes;
+        }
+        di = G.win + irel;
         if (isz == 1) {                 /* le contrat ne connaît pas u8 */
             const unsigned char *s8 = (const unsigned char *)indices;
             unsigned short *d16 = (unsigned short *)di;
@@ -12940,8 +13101,7 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
             memcpy(di, indices, ibytes);    /* grand-boutiste tel quel */
         }
         ibuf = QGPU_BUF_SHMEM;
-        ioff = G.base + IDX_OFF + G.idx;
-        G.idx += ibytes;
+        ioff = G.base + irel;
     }
     if (G.bound != p) {
         c = G.cmd + G.ncmd;
@@ -13193,6 +13353,10 @@ static void d3x_note(const char *why, unsigned long frame)
             G.n_vec_chk, G.n_vec_diff, G.dispone, G.n_hook_skip, G.n_hook_full,
             G.unitvd, G.n_uv_take, G.n_uv_units, G.n_uv_full, G.n_uv_chk_same,
             G.n_uv_chk_diff);
+    gl_note("ZONES %s %lu : zones %d (forcé %d, flux %lu Kio), %lu dessins aux indices "
+            "dans l'arène (%lu Kio), %lu soumissions, %lu barrières attendues (%.2f ms)\n",
+            why, frame, G.zones, G.zones_force, G.zl_cmd_bytes >> 10, G.n_idxspill,
+            G.idxspill_bytes >> 10, G.n_submits, G.n_waits, G.t_wait * 1000);
 }
 
 /* À chaque échange (stats_frame, verrou tenu). */
