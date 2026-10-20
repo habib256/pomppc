@@ -142,9 +142,11 @@
 #define DISPONE_DEFAULT 1
 #define UNITVD_DEFAULT  1
 /* 20/10/2026 (docs/d3-plugin-x86.md §9) : zones de la moitié. 0 = disposition
-   d'avant ; 1 = indices débordant dans l'arène ; 2 = 1 + flux de 512 Kio. */
+   d'avant ; 1 = indices débordant dans l'arène ; 2 = 1 + flux de 512 Kio.
+   Défaut 1 depuis le 20/10 au soir (A/B hôte au repos : DOOM 3 −6,1 %, mieux
+   que 2 ; UT2004 et Marble Blast neutres). */
 #ifndef ZONES_DEFAULT
-#define ZONES_DEFAULT   0
+#define ZONES_DEFAULT   1
 #endif
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);

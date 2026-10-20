@@ -52,13 +52,13 @@
 #   FPNATIVECMP=0 ./run_tiger.sh # coupe frsp fctiw fctiwz fcmpo fdivs fdiv par le FPU de l'hôte, fsel en
 #                             # ops TCG (x-fp-native-cmp, patches/tcg/0033, x86-64 ; allumé par défaut
 #                             # sur Linux x86-64 depuis le 06/10) ; FPNCMPVERIFY=1 : preuve
-#   FPKNOWN=1 ./run_tiger.sh  # dans un bloc, omet les tests d'opérande et la porte du FPSCR que
+#   FPKNOWN=0 ./run_tiger.sh  # coupe : dans un bloc, omettre les tests d'opérande et la porte du FPSCR que
 #                             # l'op de x-fp-native n'a plus à refaire (x-fp-known, patches/tcg/0045,
-#                             # éteint par défaut, docs/tcg-g4.md §37) ; FPVERIFY=1 : preuve
-#   FPRFLAZY=1 ./run_tiger.sh # FPRF et FI calculés à la lecture du FPSCR, pas à chaque opération
-#                             # (x-fprf-lazy, patches/tcg/0046, éteint par défaut, §38)
-#   STFSKNOWN=1 ./run_tiger.sh # stfs d'une valeur connue (x-fp-known) sans la conversion complète
-#                             # (x-stfs-known, patches/tcg/0047, éteint par défaut, §39)
+#                             # allumé sur Linux x86-64 depuis le 20/10, docs/tcg-g4.md §37) ; FPVERIFY=1 : preuve
+#   FPRFLAZY=0 ./run_tiger.sh # coupe : FPRF et FI calculés à la lecture du FPSCR, pas à chaque opération
+#                             # (x-fprf-lazy, patches/tcg/0046, allumé sur Linux x86-64 depuis le 20/10, §38)
+#   STFSKNOWN=0 ./run_tiger.sh # coupe : stfs d'une valeur connue (x-fp-known) sans la conversion complète
+#                             # (x-stfs-known, patches/tcg/0047, allumé sur Linux x86-64 depuis le 20/10, §39)
 #   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
 #                             # tcg/0016, allumé par défaut, docs/tcg-g4.md §24) ; FPVERIFY=1 : preuve
 #   TBFAST=0 ./run_tiger.sh   # coupe mftb/mftbu calculés depuis le compteur de l'hôte (cntvct, 1 GHz ;
@@ -81,8 +81,8 @@
 #   JITREL32=0 ./run_tiger.sh # x86-64 Linux : coupe le tampon du JIT à moins de 2 Gio du texte, appels
 #                             # de helpers directs (x-jit-rel32, tcg/0024, allumé par défaut depuis le
 #                             # 06/10 : les deux régimes d'UT2004 étaient un artefact de mesure, §31)
-#   DIRTYSKIP=1 PTEGMAP=1 ./run_tiger.sh # helpers côté hôte (tcg/0040, 0041, éteints par
-#                             # défaut, docs/tcg-g4.md §36) ; DIRTYSKIPVERIFY=1 PTEGMAPVERIFY=1 : preuves
+#   DIRTYSKIP=0 PTEGMAP=0 JC2WAY=0 ./run_tiger.sh # coupe les helpers côté hôte (tcg/0040, 0041, allumés sur Linux x86-64
+#                             # depuis le 20/10, docs/tcg-g4.md §36) ; DIRTYSKIPVERIFY=1 PTEGMAPVERIFY=1 : preuves
 #   LMWVEC=0 JCWORD=0 ./run_tiger.sh # coupe la copie lmw/stmw vectorielle (tcg/0025/0029) et le
 #                             # cache de sauts par mot (tcg/0026) ; allumés sur macOS arm64 et Linux x86-64
 #   QEMU_FAST=0 ./run_tiger.sh  # Linux x86-64 : binaire de référence build/ au lieu du binaire
@@ -143,6 +143,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # régimes » étaient un artefact de mesure, tcg-g4 §31) FPNATIVECMP VFPNATIVECMP
 # (tcg/0033-0034) LMWVEC (tcg/0029) JCWORD (tcg/0026) ensemble : DOOM 3 −2,6 %.
 # Tous allumés par défaut sur ce seul hôte ; chacun reste surchargeable à 0.
+# Depuis le 20/10/2026 (docs/tcg-g4.md §36-§39, hôte au repos, binaire -O2 des deux
+# côtés) : DIRTYSKIP PTEGMAP JC2WAY (tcg/0040, 0041, 0043 : DOOM 3 −4,4 %) et
+# FPKNOWN FPRFLAZY STFSKNOWN (tcg/0045-0047 : DOOM 3 −6,3 %), sur Linux x86-64 seul :
+# l'émetteur aarch64 de 0045-0047 n'a jamais tourné, 0040-0043 restent à prouver sur le M4.
 for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JITNEAR FPNATIVE TBFAST FPNATIVE64 VMXINLINE; do
   export "$_opt=${!_opt:-1}"
 done
@@ -150,7 +154,9 @@ case "$(uname -s):$(uname -m)" in
   Linux:x86_64)
     export VFPNATIVE="${VFPNATIVE:-1}" TLBPRECISE="${TLBPRECISE:-1}" LMWINLINE="${LMWINLINE:-1}" \
            DCBZINLINE="${DCBZINLINE:-1}" JITREL32="${JITREL32:-1}" FPNATIVECMP="${FPNATIVECMP:-1}" \
-           VFPNATIVECMP="${VFPNATIVECMP:-1}" LMWVEC="${LMWVEC:-1}" JCWORD="${JCWORD:-1}"
+           VFPNATIVECMP="${VFPNATIVECMP:-1}" LMWVEC="${LMWVEC:-1}" JCWORD="${JCWORD:-1}" \
+           DIRTYSKIP="${DIRTYSKIP:-1}" PTEGMAP="${PTEGMAP:-1}" JC2WAY="${JC2WAY:-1}" \
+           FPKNOWN="${FPKNOWN:-1}" FPRFLAZY="${FPRFLAZY:-1}" STFSKNOWN="${STFSKNOWN:-1}"
     ;;
   Darwin:arm64)
     export VFPNATIVE="${VFPNATIVE:-1}" LMWVEC="${LMWVEC:-1}" JCWORD="${JCWORD:-1}"
@@ -534,7 +540,7 @@ fi
 # instruction précédente du bloc garantit flottant simple nul ou normal (résultat de son
 # chemin court), ni la porte du FPSCR déjà franchie ; l'instruction qui garantit quitte le
 # bloc quand son chemin lent rompt la garantie. Mêmes résultats au bit près. N'agit
-# qu'avec x-fp-native. Éteint par défaut : FPKNOWN=1 ; FPVERIFY=1 le vérifie.
+# qu'avec x-fp-native. Allumé par défaut sur Linux x86-64 (20/10) ; FPVERIFY=1 le vérifie.
 if [ "${FPKNOWN:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-fp-known=on"; then
     case "$CPU_SPEC" in
@@ -550,7 +556,7 @@ fi
 # --- FPRF paresseux (x-fprf-lazy, patches/tcg/0046, docs/tcg-g4.md §38) --- le chemin
 # court de x-fp-native range son résultat au lieu de calculer FPSCR[FPRF] et FI ; mffs,
 # mtfsf…, les helpers, gdbstub, la migration et les interruptions voient le FPSCR complet.
-# Mêmes résultats au bit près. N'agit qu'avec x-fp-native. Éteint par défaut : FPRFLAZY=1.
+# Mêmes résultats au bit près. N'agit qu'avec x-fp-native. Allumé par défaut sur Linux x86-64 (20/10).
 if [ "${FPRFLAZY:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-fprf-lazy=on"; then
     case "$CPU_SPEC" in
@@ -565,7 +571,7 @@ if [ "${FPRFLAZY:-0}" != 0 ]; then
 fi
 # --- stfs court (x-stfs-known, patches/tcg/0047, docs/tcg-g4.md §39) --- stfs d'un
 # registre que x-fp-known sait flottant simple nul ou normal : un décalage et un dépôt au
-# lieu de la conversion SINGLE() entière. N'agit qu'avec x-fp-known. Éteint : STFSKNOWN=1.
+# lieu de la conversion SINGLE() entière. N'agit qu'avec x-fp-known. Allumé sur Linux x86-64 (20/10).
 if [ "${STFSKNOWN:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-stfs-known=on"; then
     case "$CPU_SPEC" in
@@ -702,7 +708,7 @@ done
 # DIRTYSKIPVERIFY=1 : mode preuve (parcours complet derrière, qui ne doit rien
 # trouver). PTEGMAP=1 : x-pteg-map, la recherche dans la table des pages (MMU
 # 32 bits à hachage) lit chaque PTEG par un seul pointeur hôte ; PTEGMAPVERIFY=1 :
-# mode preuve (recherche d'origine refaite et comparée). Éteints par défaut.
+# mode preuve (recherche d'origine refaite et comparée). Allumés sur Linux x86-64 (20/10).
 for _p in "DIRTYSKIP x-dirty-skip SALE-SAUTÉ" "DIRTYSKIPVERIFY x-dirty-skip-verify SALE-VÉRIFIÉ" \
           "PTEGMAP x-pteg-map PTEG-POINTEUR" "PTEGMAPVERIFY x-pteg-map-verify PTEG-VÉRIFIÉ"; do
   set -- $_p
@@ -782,7 +788,7 @@ if [ "${JCWORD:-0}" != 0 ]; then
   fi
 fi
 # JC2WAY=1 : x-jc-2way (tcg/0043, propriété de l'accélérateur, docs/tcg-g4.md §36),
-# cache de sauts à deux voies (case h puis h^1, même groupe de page). Éteint par défaut.
+# cache de sauts à deux voies (case h puis h^1, même groupe de page). Allumé sur Linux x86-64 (20/10).
 if [ "${JC2WAY:-0}" != 0 ]; then
   if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-jc-2way=on"; then
     TCG_ACCEL="${TCG_ACCEL:-tcg},x-jc-2way=on"
