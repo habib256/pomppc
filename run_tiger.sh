@@ -55,6 +55,8 @@
 #   FPKNOWN=1 ./run_tiger.sh  # dans un bloc, omet les tests d'opérande et la porte du FPSCR que
 #                             # l'op de x-fp-native n'a plus à refaire (x-fp-known, patches/tcg/0045,
 #                             # éteint par défaut, docs/tcg-g4.md §36) ; FPVERIFY=1 : preuve
+#   FPRFLAZY=1 ./run_tiger.sh # FPRF et FI calculés à la lecture du FPSCR, pas à chaque opération
+#                             # (x-fprf-lazy, patches/tcg/0046, éteint par défaut, §37)
 #   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
 #                             # tcg/0016, allumé par défaut, docs/tcg-g4.md §24) ; FPVERIFY=1 : preuve
 #   TBFAST=0 ./run_tiger.sh   # coupe mftb/mftbu calculés depuis le compteur de l'hôte (cntvct, 1 GHz ;
@@ -539,6 +541,22 @@ if [ "${FPKNOWN:-0}" != 0 ]; then
   else
     echo "⚠  FPKNOWN=1 demandé mais ce QEMU n'a pas la propriété 'x-fp-known' (patches/tcg/0045)." >&2
     MODE="$MODE + flottant connu DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+# --- FPRF paresseux (x-fprf-lazy, patches/tcg/0046, docs/tcg-g4.md §37) --- le chemin
+# court de x-fp-native range son résultat au lieu de calculer FPSCR[FPRF] et FI ; mffs,
+# mtfsf…, les helpers, gdbstub, la migration et les interruptions voient le FPSCR complet.
+# Mêmes résultats au bit près. N'agit qu'avec x-fp-native. Éteint par défaut : FPRFLAZY=1.
+if [ "${FPRFLAZY:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-fprf-lazy=on"; then
+    case "$CPU_SPEC" in
+      *x-fp-native=on*) CPU_SPEC="$CPU_SPEC,x-fprf-lazy=on"; MODE="$MODE + FPRF-PARESSEUX" ;;
+      *) echo "⚠  FPRFLAZY=1 sans x-fp-native : x-fprf-lazy n'agit qu'avec lui (FPNATIVE=1)." >&2
+         MODE="$MODE + FPRF paresseux SANS EFFET" ;;
+    esac
+  else
+    echo "⚠  FPRFLAZY=1 demandé mais ce QEMU n'a pas la propriété 'x-fprf-lazy' (patches/tcg/0046)." >&2
+    MODE="$MODE + FPRF paresseux DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
 # --- Comparaisons et conversions AltiVec par le FPU de l'hôte (x-vfp-native-cmp,

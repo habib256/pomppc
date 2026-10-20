@@ -960,6 +960,10 @@ TCG31_MARKERS
     echo "▶ patch TCG : opérandes flottants connus valides (x-fp-known)"
     patch_strict "$ROOT/patches/tcg/0045-ppc-fp-known.patch"
   fi
+  if ! grep -q "x-fprf-lazy" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : FPRF paresseux (x-fprf-lazy)"
+    patch_strict "$ROOT/patches/tcg/0046-ppc-fprf-lazy.patch"
+  fi
   while read -r f m; do
     grep -q "$m" "$f" || {
       echo "⚠ patch tcg 0045-0047 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
@@ -967,6 +971,9 @@ TCG31_MARKERS
 target/ppc/translate/fp-impl.c.inc fpk_scan
 target/ppc/fpu_helper.c fpk_exit
 tcg/x86_64/tcg-target.c.inc PFP_K_G
+target/ppc/cpu.h ppc_fprf_flush
+target/ppc/excp_helper.c ppc_fprf_flush
+tcg/x86_64/tcg-target.c.inc PFP_L
 TCG45_MARKERS
 fi
 
@@ -1222,6 +1229,7 @@ check_opt x-tlb-precise  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-t
 check_opt x-lmw-inline   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-lmw-inline=on
 check_opt x-dcbz-inline  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-dcbz-inline=on
 check_opt x-fp-known    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fp-known=on
+check_opt x-fprf-lazy   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fprf-lazy=on
 echo
 echo "→ $CAPS"
 

@@ -4199,3 +4199,81 @@ courts (pas de TLB logiciel). Tableau complet au §38.3.
 | moyenne des 1 308 instructions | 154,7 | 135,5 |
 
 Banc invité (`fptest banc 10000000`, VM de dev, médianes de 3 tours, hôte chargé) : voir §38.4.
+
+## 37. Le flottant simple sans ses contrôles redondants (2) : `tcg/0046` (`x-fprf-lazy`)
+
+### 37.1 Pourquoi pas « FPRF en globale TCG »
+
+L'idée de départ — FPRF dans une globale TCG à part, que la liveness supprime quand une op
+suivante l'écrase — ne rend rien ici : `INDEX_op_ppc_fp32` a `TCG_OPF_SIDE_EFFECTS` (son talon
+peut lever une exception FP différée, `cpu_restore_state` veut les globales en mémoire), donc
+**toute globale sale est rangée avant chaque op** et aucun calcul de FPRF n'est mort ; et le
+calcul est dans l'op, pas en ops TCG que la liveness pourrait retirer. Ce qui marche : ne plus
+**calculer** FPRF du tout dans le chemin court, mais **ranger le résultat** (un `mov` de 7
+octets) et calculer FPRF à la lecture du FPSCR.
+
+### 37.2 La conception
+
+`env->fprf_src` : `PPC_FPRF_NONE` (= 1, le plus petit dénormal double, jamais un résultat de
+chemin court, qui est nul ou normal) quand `env->fpscr` porte le FPSCR complet ; sinon **FPRF =
+classe de `fprf_src` et FI = 1** (`ppc_fpscr_get()`, `ppc_fprf_of()` : la table de
+`helper_compute_fprf_float64`). Le chemin court de l'op rend nf = FPSCR inchangé et range r dans
+`fprf_src` ; `fctiw(z)` rend FPSCR | FI sans toucher `fprf_src` (FPRF inchangé) ; `fcmpu`/`fcmpo`
+calculent C = FPSCR[16] si `fprf_src` = NONE, sinon `fprf_src == −0` (la seule classe à C = 1
+parmi les zéros et les normaux), FPCC = CR, FI = 1, et rangent NONE — **sauf** quand la
+traduction sait `fprf_src` à NONE (un `fcmpu` ou un vidage depuis la dernière op arithmétique
+du bloc) : forme d'origine.
+
+Lecteurs du FPSCR (`ppc_fprf_flush()` d'abord, ou `ppc_fpscr_get()`) :
+
+- **Traduction** : avant toute instruction des opcodes 59 et 63 qui n'est pas une op native
+  (`mffs`, `mcrfs`, `mtfsf`, `mtfsfi`, `mtfsb0/1`, `fsqrt`, `fres`… : `fprf_needs_flush()`),
+  `helper_fprf_flush` (sans `TCG_CALL_NO_WG` : TCG relit `cpu_fpscr`) ; une seule fois par suite
+  sans op native entre deux (`ctx->fprf_maybe`). `fmr`, `fneg`, `fabs`, `fnabs`, `fcpsgn`, `fsel` ne
+  lisent pas le FPSCR (Rc = 1 lit FPSCR[0:3], hors de l'état paresseux).
+- **Talon** de l'op : vidage d'abord, puis séquence d'origine sur le FPSCR complet (rend un nf
+  complet, `fprf_src` reste NONE).
+- **Entrée de toute interruption** (`powerpc_excp`) : ce que lit le gestionnaire, un hypercall
+  ou la bascule nested-HV.
+- `helper_store_fpscr`, `helper_fpscr_clrbit/setbit` (vidage, défense en profondeur : la
+  traduction a déjà vidé), `ppc_store_fpscr` (pose NONE), migration (`cpu_pre_save` vide,
+  `cpu_post_load` pose NONE), gdbstub, `info registers`, vidage ELF, cadres de signal de
+  linux-user, `spapr_nested`, `spapr_fadump` (lecture par `ppc_fpscr_get`), reset (NONE).
+- `x-fp-verify` compare les FPSCR architecturaux (la traduction range l'état paresseux d'avant
+  l'op dans `env->fpn_src_old`).
+
+Sur un CPU sans VSX, `set_fpr()` ne range plus 0 dans le double mot 1 du VSR : jamais lu (ni
+instruction VSX, ni registre VSX de gdbstub, ni sous-section `cpu/vsx` de la migration) et jamais
+écrit que par ce rangement de 0 — il vaut 0 depuis l'objet CPU mis à zéro : rangement mort.
+
+Op TCG : `DEF(ppc_fp32, 2, 4, 4, …)`, quatrième constante = décalage de `fprf_src` dans `env` ;
+bit `FPK_L` (1 << 24) du sélecteur. Émetteurs x86_64 et aarch64 (sur aarch64 le rangement de r
+est après le `cbnz` vers le talon : le chemin rapide y calcule tout sans branchement). Propriété
+`x-fprf-lazy`, `FPRFLAZY=1`.
+
+### 37.3 La preuve
+
+- `fpproof.sh … 4000000` : `ppc_fprf_of` contre `helper_compute_fprf_float64` sur **369 130 180**
+  valeurs (opérandes et résultats), l'identité `lazy(f, r) = fpi_fpscr_arith(lazy(f, s), r)` pour
+  quatre états paresseux d'avant (NONE, +0, −0, normal) sur **200 667 076** chemins courts, la
+  formule de `fcmpu` paresseux sur **28 502 892** : **0 divergence**.
+- Banc linux-user : mêmes empreintes (§36.3), le mode `k` contenant `mffs`, `mcrfs`, `mtfsf`…
+- Mutants (`mut.sh`, `fptest k 4096`, `x-fprf-lazy` seul) : r non rangé (9 lignes, 667 962
+  divergences), aucun vidage avant `mffs` & co. (8 lignes ; le vérificateur ne voit pas `mffs`),
+  talon sans vidage (6, 162 128), C de +0 au lieu de −0 (6, 2 141), `fcmpu` sans NONE (6,
+  73 282), classe de −0 fausse (6, 9 870), `fcmpu` jamais paresseux (6, 20 685), suivi statique
+  faux (8, 21 238) : **8 sur 8**.
+- Invité : empreintes et vérificateur du §36.3 (les trois leviers ensemble).
+
+### 37.4 Taille
+
+| | base | 0046 | 0045 + 0046 |
+|---|---|---|---|
+| `fmuls` | 287,6 | 243,3 | 183,8 |
+| `fmadds` | 324,9 | 283,1 | 210,9 |
+| `fadds` | 200,2 | 166,6 | 147,1 |
+| `frsp` | 162,2 | 120,5 | 110,8 |
+| moyenne | 154,7 | 139,6 | 121,1 |
+
+`fcmpu` paresseux coûte ~56 octets de plus quand l'état n'est pas connu vide (relire
+`fprf_src`, ranger NONE).
