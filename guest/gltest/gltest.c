@@ -1987,6 +1987,88 @@ int main(int argc, char **argv)
         check("quad B (glDrawElements) vert", (int)(48 * sx), (int)(32 * sy), 0x00FF00);
         check("entre les deux quads : fond", (int)(32 * sx), (int)(32 * sy), 0x0000FF);
         check("au-dessus des quads : fond", (int)(32 * sx), (int)(8 * sy), 0x0000FF);
+    } else if (!strcmp(scene, "d3idx")) {
+        /* 20/10/2026 — le régime de DOOM 3 (docs/d3-plugin-x86.md §9) : sommets
+           dans un VBO, INDICES 32 BITS EN MÉMOIRE CLIENTE, beaucoup de dessins
+           avec une matrice chacun. ~3 Mio d'indices et ~300 Kio de flux par
+           passe : plus que la zone des indices (256 Kio) et que le flux
+           (256 Kio) d'une moitié, donc vidages en cours de passe — ou, sous
+           POMPPC_GL_ZONES, indices dans l'arène et flux de 512 Kio. Mélange
+           alpha : chaque dessin compte dans l'image, que l'on compare À
+           L'OCTET entre les modes du plugin (job plugmd5). */
+        typedef void (*GenBuffersFn)(GLsizei, GLuint *);
+        typedef void (*BindBufferFn)(GLenum, GLuint);
+        typedef void (*BufferDataFn)(GLenum, long, const GLvoid *, GLenum);
+        typedef void (*DeleteBuffersFn)(GLsizei, const GLuint *);
+        GenBuffersFn gen_buffers = (GenBuffersFn)gl_sym("glGenBuffers", "glGenBuffersARB");
+        BindBufferFn bind_buffer = (BindBufferFn)gl_sym("glBindBuffer", "glBindBufferARB");
+        BufferDataFn buffer_data = (BufferDataFn)gl_sym("glBufferData", "glBufferDataARB");
+        DeleteBuffersFn delete_buffers = (DeleteBuffersFn)gl_sym("glDeleteBuffers", "glDeleteBuffersARB");
+        enum { GN = 64, NQ = GN * GN, QPD = 256, NDRAW = 2000 };
+        static float vb[(GN + 1) * (GN + 1) * 8];      /* xyz, rgba, pad : 32 octets */
+        static GLuint ix[NQ * 6];
+        GLuint vbo;
+        unsigned long hsh = 2166136261UL;
+        int i, j, d;
+        if (!gen_buffers || !bind_buffer || !buffer_data || !delete_buffers) {
+            fprintf(stderr, "VBO entry points unavailable\n");
+            return 4;
+        }
+        for (j = 0; j <= GN; j++)
+            for (i = 0; i <= GN; i++) {
+                float *v = vb + (j * (GN + 1) + i) * 8;
+                hsh = (hsh ^ (unsigned long)(i * 131 + j)) * 16777619UL;
+                v[0] = -1.0f + 2.0f * i / GN;
+                v[1] = -1.0f + 2.0f * j / GN;
+                v[2] = 0.0f;
+                v[3] = (float)(hsh & 255) / 255.0f;
+                v[4] = (float)((hsh >> 8) & 255) / 255.0f;
+                v[5] = (float)((hsh >> 16) & 255) / 255.0f;
+                v[6] = 0.25f;
+                v[7] = 0.0f;
+            }
+        for (j = 0; j < GN; j++)
+            for (i = 0; i < GN; i++) {
+                GLuint a = (GLuint)(j * (GN + 1) + i), *q = ix + (j * GN + i) * 6;
+                q[0] = a; q[1] = a + 1; q[2] = a + GN + 2;
+                q[3] = a; q[4] = a + GN + 2; q[5] = a + GN + 1;
+            }
+        glMatrixMode(GL_PROJECTION); glLoadIdentity();
+        glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        gen_buffers(1, &vbo);
+        bind_buffer(0x8892, vbo);
+        buffer_data(0x8892, sizeof(vb), vb, 0x88E4);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glEnableClientState(GL_COLOR_ARRAY);
+        glVertexPointer(3, GL_FLOAT, 32, (const GLvoid *)0);
+        glColorPointer(4, GL_FLOAT, 32, (const GLvoid *)12);
+        for (d = 0; d < NDRAW; d++) {
+            int first = (d * 1237) % (NQ - QPD);
+            glLoadIdentity();
+            glTranslatef((float)((d * 7) % 13 - 6) / 256.0f,
+                         (float)((d * 11) % 17 - 8) / 256.0f, 0.0f);
+            glDrawElements(GL_TRIANGLES, QPD * 6, GL_UNSIGNED_INT, ix + first * 6);
+        }
+        glDisableClientState(GL_COLOR_ARRAY);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        bind_buffer(0x8892, 0);
+        delete_buffers(1, &vbo);
+        glDisable(GL_BLEND);
+        glFinish();
+        {   /* témoin grossier : quelque chose a été dessiné au centre */
+            unsigned char pc[4] = { 0, 0, 0, 0 };
+            glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pc);
+            if (!pc[0] && !pc[1] && !pc[2]) {
+                printf("  FAIL d3idx : centre noir, rien de dessiné\n");
+                failures++;
+            } else
+                printf("  ok   d3idx : centre %02x%02x%02x\n", pc[0], pc[1], pc[2]);
+        }
     } else if (!strcmp(scene, "r4")) {
         /* Relevé R4 du lot 3 du verdict unique (docs/re/bloc-changements-r4.md) :
            quel bit du bloc de changements gctx+0x310 pose chaque appel GL.
