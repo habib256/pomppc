@@ -725,6 +725,17 @@ if [ "${JCWORD:-0}" != 0 ]; then
     MODE="$MODE + CACHE DE SAUTS PPC DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
+# JC2WAY=1 : x-jc-2way (tcg/0043, propriété de l'accélérateur, docs/tcg-g4.md §36),
+# cache de sauts à deux voies (case h puis h^1, même groupe de page). Éteint par défaut.
+if [ "${JC2WAY:-0}" != 0 ]; then
+  if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-jc-2way=on"; then
+    TCG_ACCEL="${TCG_ACCEL:-tcg},x-jc-2way=on"
+    MODE="$MODE + CACHE DE SAUTS 2 VOIES"
+  else
+    echo "⚠ JC2WAY=1 demandé mais ce QEMU n'a pas x-jc-2way (tcg/0043)." >&2
+    MODE="$MODE + CACHE DE SAUTS 2 VOIES DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
 
 [ -n "${TCG_OPTS:-}" ] && TCG_ACCEL="${TCG_ACCEL:-tcg},${TCG_OPTS#,}"
 [ -n "${TCG_ACCEL:-}" ] && EXTRA+=(-accel "$TCG_ACCEL")

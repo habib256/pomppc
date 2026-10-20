@@ -1,0 +1,221 @@
+diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -238,6 +238,7 @@ static uint64_t rv_m_drop, rv_m_other, rv_m_flags;
+  * flags
+  */
+ static uint64_t rv_f_drop, rv_f_other, rv_f_flags;
++static uint64_t rv_w2;          /* tcg/0043: hits in the second way */
+ static bool rv_atexit;
+ 
+ static void rv_report(void)
+@@ -261,6 +262,10 @@ static void rv_report(void)
+             qatomic_read(&rv_m_other), qatomic_read(&rv_m_flags),
+             qatomic_read(&rv_f_drop), qatomic_read(&rv_f_other),
+             qatomic_read(&rv_f_flags));
++    if (tb_jmp_cache_2way) {
++        fprintf(stderr, "ret-verify: x-jc-2way : %" PRIu64 " trouvés dans la"
++                " seconde voie (boucle et helper)\n", qatomic_read(&rv_w2));
++    }
+ }
+ 
+ static void rv_start(void)
+@@ -373,6 +378,41 @@ static bool ret_verify_tb(CPUState *cpu, TranslationBlock *tb,
+ }
+ #endif
+ 
++/*
++ * POMPPC tcg/0043: fill slot @h of the jump cache with @tb for @pc.  With
++ * x-jc-2way, a valid previous occupant of h moves to h ^ 1 (same page
++ * group), with its mmu_idx (logged there for x-jc-idx), unless h ^ 1 holds
++ * a valid entry whose own slot it is: an entry at home is never pushed out
++ * by another slot's overflow, so a pattern without conflict in the one-way
++ * cache keeps all its hits.  A TB invalidated meanwhile by another thread
++ * carries CF_INVALID and never matches again, wherever it sits
++ * (tb_jmp_cache_inval_tb clears both ways).
++ */
++static inline void tb_jmp_cache_fill(CPUState *cpu, CPUJumpCache *jc,
++                                     uint32_t h, vaddr pc,
++                                     TranslationBlock *tb)
++{
++#ifndef CONFIG_USER_ONLY
++    if (tb_jmp_cache_2way) {
++        TranslationBlock *old = qatomic_read(&jc->array[h].tb);
++        TranslationBlock *nb = qatomic_read(&jc->array[h ^ 1].tb);
++
++        if (old && old != tb && !(tb_cflags(old) & CF_INVALID) &&
++            (!nb || (tb_cflags(nb) & CF_INVALID) ||
++             tb_jmp_cache_hash_func(jc->array[h ^ 1].pc) != (h ^ 1))) {
++            jc->array[h ^ 1].pc = jc->array[h].pc;
++            tb_jmp_cache_set_idx(jc, h ^ 1, jc->idx[h]);
++            qatomic_set(&jc->array[h ^ 1].tb, old);
++        }
++    }
++#endif
++    jc->array[h].pc = pc;
++#ifndef CONFIG_USER_ONLY
++    tb_jmp_cache_set_idx(jc, h, cpu_mmu_index(cpu, true)); /* tcg/0008 */
++#endif
++    qatomic_set(&jc->array[h].tb, tb);
++}
++
+ /**
+  * tb_lookup:
+  * @cpu: CPU that will execute the returned translation block
+@@ -414,6 +454,46 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s,
+ #endif
+         goto hit;
+     }
++    if (tb_jmp_cache_2way) {
++        /* POMPPC tcg/0043 (x-jc-2way): the same test on slot hash ^ 1 */
++        TranslationBlock *tb2 = qatomic_read(&jc->array[hash ^ 1].tb);
++
++        if (tb2 &&
++            jc->array[hash ^ 1].pc == s.pc &&
++            tb2->cs_base == s.cs_base &&
++            tb2->flags == s.flags &&
++            tb_cflags(tb2) == s.cflags) {
++#ifndef CONFIG_USER_ONLY
++            if (unlikely(cpu->ret_verify)) {
++                if (!ret_verify_tb(cpu, tb2, s, src)) {
++                    goto miss;
++                }
++                qatomic_inc(&rv_w2);
++            }
++            /*
++             * Promote it to slot hash, where the inline probe of
++             * x-ret-inline (one way only) finds it next time; the occupant
++             * of hash takes its place.  Both keep their mmu_idx (logged
++             * again for x-jc-idx).  A TB invalidated meanwhile carries
++             * CF_INVALID and never matches, wherever it lands.
++             */
++            {
++                TranslationBlock *t1 = qatomic_read(&jc->array[hash].tb);
++                vaddr pc1 = jc->array[hash].pc;
++                int i1 = jc->idx[hash], i2 = jc->idx[hash ^ 1];
++
++                jc->array[hash].pc = s.pc;
++                tb_jmp_cache_set_idx(jc, hash, i2);
++                qatomic_set(&jc->array[hash].tb, tb2);
++                jc->array[hash ^ 1].pc = pc1;
++                tb_jmp_cache_set_idx(jc, hash ^ 1, i1);
++                qatomic_set(&jc->array[hash ^ 1].tb, t1);
++            }
++#endif
++            tb = tb2;
++            goto hit;
++        }
++    }
+ #ifndef CONFIG_USER_ONLY
+     if (unlikely(cpu->ret_verify)) {
+         kind = rv_miss_stat(src, tb, jc->array[hash].pc, s.pc);
+@@ -431,11 +511,7 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s,
+     }
+ #endif
+ 
+-    jc->array[hash].pc = s.pc;
+-#ifndef CONFIG_USER_ONLY
+-    tb_jmp_cache_set_idx(jc, hash, cpu_mmu_index(cpu, true)); /* tcg/0008 */
+-#endif
+-    qatomic_set(&jc->array[hash].tb, tb);
++    tb_jmp_cache_fill(cpu, jc, hash, s.pc, tb);
+ 
+ hit:
+     /*
+@@ -1184,11 +1260,7 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+                  */
+                 h = tb_jmp_cache_hash_func(s.pc);
+                 jc = cpu->tb_jmp_cache;
+-                jc->array[h].pc = s.pc;
+-#ifndef CONFIG_USER_ONLY
+-                tb_jmp_cache_set_idx(jc, h, cpu_mmu_index(cpu, true));
+-#endif
+-                qatomic_set(&jc->array[h].tb, tb);
++                tb_jmp_cache_fill(cpu, jc, h, s.pc, tb);  /* tcg/0043 */
+             }
+ 
+ #ifndef CONFIG_USER_ONLY
+diff --git a/accel/tcg/tb-jmp-cache.h b/accel/tcg/tb-jmp-cache.h
+--- a/accel/tcg/tb-jmp-cache.h
++++ b/accel/tcg/tb-jmp-cache.h
+@@ -25,6 +25,17 @@
+ #define TB_JMP_CACHE_MAX (1 << TB_JMP_CACHE_MAX_BITS)
+ extern unsigned tb_jmp_cache_bits;
+ extern bool tb_jmp_cache_word; /* fixed before CPU realize, x-jc-word */
++/*
++ * POMPPC tcg/0043 (x-jc-2way, accelerator property, fixed before CPU
++ * realize): a pc is looked for in slot h then in slot h ^ 1, which is in
++ * the same page group (tb_jmp_cache_clear_page and the per-mmu_idx log of
++ * x-jc-idx stay exact); a new entry goes to h and the previous occupant of
++ * h moves to h ^ 1 unless an entry at home sits there; a hit in h ^ 1 is
++ * swapped into h.  The inline probe of x-ret-inline checks h only (an
++ * inline second probe slowed the hit path down): the second way is looked
++ * at by tb_lookup, from helper_lookup_tb_ptr, before the hash table.
++ */
++extern bool tb_jmp_cache_2way;
+ extern bool tb_jmp_cache_bits_frozen;
+ #define TB_JMP_CACHE_SIZE (1u << tb_jmp_cache_bits)
+ 
+diff --git a/accel/tcg/tb-maint.c b/accel/tcg/tb-maint.c
+--- a/accel/tcg/tb-maint.c
++++ b/accel/tcg/tb-maint.c
+@@ -938,6 +938,11 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
+             if (qatomic_read(&jc->array[h].tb) == tb) {
+                 qatomic_set(&jc->array[h].tb, NULL);
+             }
++            /* POMPPC tcg/0043 (x-jc-2way): the second way */
++            if (tb_jmp_cache_2way &&
++                qatomic_read(&jc->array[h ^ 1].tb) == tb) {
++                qatomic_set(&jc->array[h ^ 1].tb, NULL);
++            }
+         }
+     }
+ }
+diff --git a/accel/tcg/tcg-all.c b/accel/tcg/tcg-all.c
+--- a/accel/tcg/tcg-all.c
++++ b/accel/tcg/tcg-all.c
+@@ -325,6 +325,20 @@ static void tcg_set_jc_word(Object *obj, bool value, Error **errp)
+     tb_jmp_cache_word = value;
+ }
+ 
++static bool tcg_get_jc_2way(Object *obj, Error **errp)
++{
++    return tb_jmp_cache_2way;
++}
++
++static void tcg_set_jc_2way(Object *obj, bool value, Error **errp)
++{
++    if (tb_jmp_cache_bits_frozen && value != tb_jmp_cache_2way) {
++        error_setg(errp, "x-jc-2way cannot change once a CPU exists");
++        return;
++    }
++    tb_jmp_cache_2way = value;
++}
++
+ static bool tcg_get_one_insn_per_tb(Object *obj, Error **errp)
+ {
+     TCGState *s = TCG_STATE(obj);
+@@ -381,6 +395,12 @@ static void tcg_accel_class_init(ObjectClass *oc, const void *data)
+     object_class_property_set_description(oc, "x-jc-word",
+         "Hash word-aligned PCs within the existing page bucket (POMPPC)");
+ 
++    object_class_property_add_bool(oc, "x-jc-2way",
++        tcg_get_jc_2way, tcg_set_jc_2way);
++    object_class_property_set_description(oc, "x-jc-2way",
++        "Two-way jump cache: slot h then h^1 in the same page group "
++        "(POMPPC tcg/0043)");
++
+     object_class_property_add(oc, "x-jc-bits", "uint32",
+         tcg_get_jc_bits, tcg_set_jc_bits, NULL, NULL);
+     object_class_property_set_description(oc, "x-jc-bits",
+diff --git a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -626,6 +626,7 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
+ /* POMPPC tcg/0011: size of the jump cache (x-jc-bits), see tb-jmp-cache.h */
+ unsigned tb_jmp_cache_bits = TB_JMP_CACHE_BITS;
+ bool tb_jmp_cache_word;
++bool tb_jmp_cache_2way;         /* POMPPC tcg/0043 */
+ bool tb_jmp_cache_bits_frozen;
+ 
+ void tcg_flush_jmp_cache(CPUState *cpu)

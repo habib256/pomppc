@@ -30,7 +30,7 @@
 #   • frsp fctiw fctiwz fcmpo fdivs fdiv natifs, fsel en ops TCG (x-fp-native-cmp) — patches/tcg/0033
 #   • vcmp*fp, vcfsx/vcfux, vctsxs/vctuxs natifs (x-vfp-native-cmp)  — patches/tcg/0034
 #   • TLB invalidé avec précision, lmw/stmw et dcbz en ligne — patches/tcg/0031, 0032, 0035
-#   • tlb_reset_dirty sans parcours inutile, PTEG par pointeur, compteurs de ratés — patches/tcg/0040-0042
+#   • tlb_reset_dirty sans parcours inutile, PTEG par pointeur, compteurs de ratés, cache de sauts à 2 voies — patches/tcg/0040-0043
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -969,14 +969,20 @@ TCG31_MARKERS
     echo "▶ patch TCG : compteurs de ratés du TLB et du cache de sauts"
     patch_strict "$ROOT/patches/tcg/0042-tcg-miss-stats.patch"
   fi
+  # 0043 : cache de sauts à deux voies (x-jc-2way, propriété de l'accélérateur)
+  if ! grep -q "x-jc-2way" accel/tcg/tcg-all.c; then
+    echo "▶ patch TCG : cache de sauts à deux voies (x-jc-2way)"
+    patch_strict "$ROOT/patches/tcg/0043-tcg-jc-2way.patch"
+  fi
   for f in accel/tcg/cputlb.c accel/tcg/cpu-exec.c include/hw/core/cpu.h \
            target/ppc/cpu.h target/ppc/cpu_init.c target/ppc/mmu_helper.c \
-           target/ppc/mmu-hash32.c; do
+           target/ppc/mmu-hash32.c accel/tcg/tb-jmp-cache.h accel/tcg/tb-maint.c \
+           accel/tcg/tcg-all.c accel/tcg/translate-all.c; do
     rm -f "$f.orig"
   done
   while read -r f m; do
     grep -q "$m" "$f" || {
-      echo "⚠ patch tcg 0040-0042 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+      echo "⚠ patch tcg 0040-0043 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
   done <<'TCG40_MARKERS'
 accel/tcg/cputlb.c pomppc_reset_dirty
 target/ppc/cpu_init.c x-dirty-skip-verify
@@ -984,6 +990,8 @@ target/ppc/mmu-hash32.c ppc_hash32_pteg_search_map
 target/ppc/cpu_init.c x-pteg-map-verify
 accel/tcg/cputlb.c ms_seen
 accel/tcg/cpu-exec.c rv_found_stat
+accel/tcg/cpu-exec.c tb_jmp_cache_fill
+accel/tcg/tb-maint.c tb_jmp_cache_2way
 TCG40_MARKERS
 fi
 
@@ -1240,6 +1248,7 @@ check_opt x-lmw-inline   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-l
 check_opt x-dcbz-inline  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-dcbz-inline=on
 check_opt x-dirty-skip   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-dirty-skip=on
 check_opt x-pteg-map     qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-pteg-map=on
+check_opt x-jc-2way      qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jc-2way=on
 echo
 echo "→ $CAPS"
 

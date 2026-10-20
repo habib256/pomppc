@@ -105,6 +105,13 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 
 Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête.
 
+- [ ] **[TCG — PC] A/B en jeu des helpers côté hôte (0040-0043)** : `x-dirty-skip`, `x-pteg-map`,
+  `x-jc-2way` prouvés en VM de dev le 20/10 (vérificateurs à 0, empreintes, mutants ;
+  `docs/tcg-g4.md` §36), gain indicatif seulement (hôte partagé). À faire : l'A/B DOOM 3 de
+  §36.6 sur la VM quotidienne, hôte au repos, puis le binaire rapide avec la série ; pistes
+  ouvertes : groupe de page du cache de sauts, 16 384 entrées en `mmu_idx` 0 (§36.7) ; parité
+  arm64 (C commun) à reconstruire et prouver sur le M4.
+
 - [ ] **[TCG — M4] Parité arm64 de 0031-0035** : `x-tlb-precise`, `x-lmw-inline`,
   `x-dcbz-inline` (0031, 0032, 0035) et les émetteurs aarch64 de `x-fp-native-cmp` /
   `x-vfp-native-cmp` (0033-0034, sans effet sur arm64 aujourd'hui) : preuves au même niveau
