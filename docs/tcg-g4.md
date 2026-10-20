@@ -4050,6 +4050,7 @@ valent pour arm64 tels quels, à reconstruire et mesurer sur le M4) :
 |---|---|---|---|
 | `0040-tcg-dirty-skip` | `x-dirty-skip`, `x-dirty-skip-verify` (CPU) | `DIRTYSKIP=1`, `DIRTYSKIPVERIFY=1` | parcours d'origine derrière, « rien à changer » |
 | `0041-ppc-pteg-map` | `x-pteg-map`, `x-pteg-map-verify` (CPU) | `PTEGMAP=1`, `PTEGMAPVERIFY=1` | recherche d'origine refaite et comparée |
+| `0042-tcg-miss-stats` | (aucune : sous `x-mem-stats` et `x-ret-verify`) | `MEMSTATS=1`, `RETVERIFY=1` | — (mesure) |
 
 ### 36.1 `tcg/0040` : `tlb_reset_dirty` sans parcours inutile (`x-dirty-skip`)
 
@@ -4121,4 +4122,54 @@ contredit encore la recherche d'origine.
 Preuve (sessions `ver2`, `ver3`, SMP=2, avec `x-tlb-precise-verify=256`, qui retraduit chaque
 entrée gardée et fait donc beaucoup de recherches) : **1,38 G recherches comparées (au
 dernier bilan imprimé, toutes les 2^22), 0 divergence**, 8 courses résolues, 0 groupe hors RAM.
+
+### 36.3 `tcg/0042` : mesurer avant d'agir (ratés du TLB et du cache de sauts)
+
+**TLB.** Sous `x-mem-stats`, par CPU et pour les `mmu_idx` 0 à 3, la ligne `mem-stats` porte
+maintenant `missI remplissages évictions déjà-vues victimes` (remis à zéro à chaque fenêtre de
+10 s) : une **éviction** est un remplissage qui pousse une entrée valide d'une autre page vers
+les victimes ; la page qui sort alors des victimes est notée dans une table d'ombre (16 384
+pages par `mmu_idx`, à correspondance directe, vidée avec le `mmu_idx`, la page retirée d'un
+`tlb_flush_page`) ; un remplissage d'une page de cette table est **déjà vue** : un raté de
+conflit ou de capacité, qu'une table plus grande ou associative aurait évité ; le reste est
+froid (première fois, ou après un vidage). Sessions `ver2` et `ver3` (bureau, bancs invités,
+Marble Blast, SMP=2, deux CPU additionnés) :
+
+| `mmu_idx` | taille | remplissages | déjà vues | succès des victimes |
+|---|---|---|---|---|
+| 0 (utilisateur, données) | 8 192 | 17,9 M / 13,6 M | **27 % / 19 %** | 73 M / 50 M (**3,7 à 4,1 par remplissage**) |
+| 1 (noyau, données) | 16 384 | 18,9 M / 16,4 M | 1 % / 6 % | 0,1 à 0,2 par remplissage |
+| 3 | 4 096 | 0,6 M / 0,4 M | 33 % / 19 % | ~5 par remplissage |
+
+Les ratés évitables ne **dominent pas** les remplissages (un quart au plus en `mmu_idx` 0 ; les
+autres sont froids, surtout après les invalidations de `x-tlb-precise`) : la table n'a **pas**
+été agrandie. Ce qui frappe, ce sont les **succès des victimes** en `mmu_idx` 0, quatre par
+remplissage (~110 000/s et par CPU en jeu) : la table à correspondance directe se renvoie des
+pages en ping-pong par le TLB victime, chacun un échange de deux entrées sous le verrou
+(`victim_tlb_hit` 0,62 % du temps vCPU sur DOOM 3). Piste ouverte : 16 384 entrées en `mmu_idx` 0
+(le plafond de croissance de `x-tlb-precise`, `mmu_helper.c`, est à 4 096 avant doublement), à
+peser contre le coût des balayages par classe de `tlbie`.
+
+**Cache de sauts.** `x-ret-verify` classait déjà ses ratés (entrée vidée, autre pc, autres
+drapeaux) ; 0042 ajoute, parmi eux, ceux dont le bloc **existait** dans la table de hachage
+(la case était vide, **ou tenait un autre bloc vivant** — un conflit —, ou le même pc sous
+d'autres drapeaux). Cinq sessions de même protocole (bureau puis Marble Blast 110 + 120 s, SMP=2,
+tous les réglages de production, `x-jc-word` compris, cumul depuis le démarrage) :
+
+| configuration | recherches | ratés jusqu'à la table de hachage | dont conflit, bloc existant | appels du helper (ratés en ligne) |
+|---|---|---|---|---|
+| 2^14 entrées, 1 voie (production) | 3,126 G | 272,5 M (**8,7 %**) | 190,3 M | 249,1 M (8,0 %) |
+| **2^16** entrées, 1 voie (`x-jc-bits=16`) | 2,855 G | 227,0 M (7,9 %) | 160,1 M | 206,5 M (7,2 %) |
+| 2^14, 2 voies, seconde sonde en ligne, déplacement sans condition | 3,032 G | 210,4 M (6,9 %) | 126,6 M | 177,1 M (5,8 %) |
+| 2^14, 2 voies, seconde sonde en ligne, entrées chez elles protégées | 2,734 G | 166,5 M (6,1 %) | 89,2 M | 147,9 M (5,4 %) |
+| 2^14, 2 voies, **sonde en ligne à une voie** + remontée (0043 retenu) | 2,925 G | 178,0 M (**6,1 %**) | 100,8 M | 239,0 M (8,2 %) |
+
+Les conflits dominent les ratés (70 %). Quadrupler la table n'y change presque rien : ce n'est
+pas la capacité, c'est le **groupe de page** — chaque page virtuelle n'a que 64 cases
+(`TB_JMP_PAGE_BITS` = 6, fixé par la taille d'origine 2^12), quelle que soit la taille totale,
+et une page de code chaude en a besoin de plus. Deux voies dans le même groupe retirent la
+moitié des conflits et 30 % des passages par la table de hachage (`qht_lookup_custom`,
+`tb_lookup_cmp`). La version retenue (§36.4) garde la sonde en ligne à une voie : les appels du
+helper ne baissent pas, mais un succès en seconde voie y coûte deux comparaisons au lieu d'une
+recherche dans la table de hachage.
 
