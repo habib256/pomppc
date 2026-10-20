@@ -202,6 +202,13 @@ void pomppc_geom_context(void *ctx, void *cfg);
    pomppc_hook_procs puis pomppc_geom_dispatch. */
 long pomppc_hook_and_dispatch(void *ctx, void **procs, const unsigned long *chg,
                               int apple_called);
+/* 21/10 (POMPPC_GL_DISPLOCK, docs/d3-plugin-x86.md §10) : le gldUpdateDispatch
+   courant — transmission paresseuse prise, pas de 0x80 — sous UN verrou
+   (pomppc_lazy_update puis pomppc_hook_and_dispatch, sans relâcher G.mu
+   entre les deux). Rend 1 si traité (*ret : retour d'Apple gardé, *bits :
+   ceux du verdict) ; 0 : rien n'a été fait, l'appelant fait comme avant. */
+int  pomppc_update_dispatch_fast(void *ctx, void **procs, unsigned long *chg,
+                                 long *ret, long *bits);
 
 /* pomppc_vec.c (compilé avec -faltivec) : min et max d'indices non signés
    (POMPPC_GL_IDXVEC). Rend 1 et remplit *mn, *mx (n >= 1). */

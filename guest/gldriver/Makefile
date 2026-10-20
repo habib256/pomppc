@@ -11,7 +11,7 @@ CC      = /usr/bin/gcc-4.0
 # rien à l'exécution et rend un plantage lisible dans gdb ou un rapport de
 # CrashReporter.
 CFLAGS  = -arch ppc -isysroot $(SDK) -O2 -Wall -Wno-unused-parameter -fno-common \
-          -fno-strict-aliasing -g
+          -fno-strict-aliasing -g $(EXTRA_CFLAGS)
 LDFLAGS = -arch ppc -isysroot $(SDK) -bundle
 LIBS    = -framework IOKit -framework CoreFoundation
 

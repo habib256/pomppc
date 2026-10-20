@@ -129,7 +129,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261020-zones"
+#define POMPPC_PLUGIN_REV "20261021-d3p"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -148,6 +148,46 @@
 #ifndef ZONES_DEFAULT
 #define ZONES_DEFAULT   1
 #endif
+/* 21/10/2026 (docs/d3-plugin-x86.md §10) : le fil de DOOM 3 dans le plugin.
+   HOTINLINE (compilation) : petits utilitaires chauds déclarés inline — gcc
+   4.0 à -O2 n'inline que ce qui est déclaré tel (relevé d'instructions :
+   gls, gctx_of, unit_mask, wl_extra… ~10 % du plugin en appels). Même calcul,
+   sans arithmétique flottante déplacée (clamp01 et put_f ne font que
+   comparer, to_u8 garde son expression). -DHOTINLINE_DEFAULT=0 rend l'ancien
+   code. Les cinq autres sont des variables (POMPPC_GL_*), éteintes par
+   défaut : DISPFAST (dispatch), PROGMEMO (programmes), MTXDIRTY (matrices),
+   STUNIT (clés d'unités), DISPLOCK (un verrou par dispatch). */
+#ifndef HOTINLINE_DEFAULT
+#define HOTINLINE_DEFAULT 1
+#endif
+#if HOTINLINE_DEFAULT
+#define HOT static inline
+#else
+#define HOT static
+#endif
+#ifndef DISPFAST_DEFAULT
+#define DISPFAST_DEFAULT 0
+#endif
+#ifndef PROGMEMO_DEFAULT
+#define PROGMEMO_DEFAULT 0
+#endif
+#ifndef MTXDIRTY_DEFAULT
+#define MTXDIRTY_DEFAULT 0
+#endif
+#ifndef STUNIT_DEFAULT
+#define STUNIT_DEFAULT 0
+#endif
+#ifndef DISPLOCK_DEFAULT
+#define DISPLOCK_DEFAULT 0
+#endif
+/* MTXDIRTY : bits du mot +0x08 du bloc de changements (relevés R4/R5,
+   docs/re/bloc-changements-r4.md) — fenêtre et plage de profondeur 0x1,
+   projection 0x8, modèle-vue 0x10, matrices (et cibles) de texture
+   0x00ff0000, sans répartition par unité supposée. */
+#define MD_VIEWPORT  0x00000001UL
+#define MD_PROJ      0x00000008UL
+#define MD_MODELVIEW 0x00000010UL
+#define MD_TEXMAT    0x00ff0000UL
 static void gl_note(const char *fmt, ...);
 static void crash_hook_install(void);
 static void crash_hook_check(void);
@@ -210,7 +250,7 @@ static unsigned long tex_del_epoch;     /* mémoire des unités : pomppc_texture
 #define THR_WIN 0x8000UL
 static pthread_t thr_last;
 static unsigned long thr_sp;            /* 0 : rien de retenu */
-static pthread_t self_thr(void)
+HOT pthread_t self_thr(void)
 {
     unsigned long sp = (unsigned long)&sp;
     if (thr_sp && sp <= thr_sp + THR_WIN && sp + THR_WIN >= thr_sp)
@@ -919,6 +959,15 @@ typedef struct PCtx {
     int            vd_ok;
     TexInfo        vd_ti;
     unsigned long  vd_fmt, vd_gs;
+    /* 21/10 (docs/d3-plugin-x86.md §10) */
+    unsigned long  md_bits;             /* MTXDIRTY : bits +0x08 (fenêtre, projection,
+                                           modèle-vue) reçus depuis la dernière comparaison */
+    unsigned long  md_tex;              /* MTXDIRTY : unités dont la matrice de texture
+                                           est à comparer (bit u) */
+    unsigned long  pm_gen[2];           /* PROGMEMO : génération de la table, objet de
+                                           GLEngine et réponse de pprog_find, par étage */
+    const unsigned char *pm_obj[2];
+    struct PProg  *pm_rec[2];
     unsigned long  vd_key[VKEY_WORDS];
     unsigned long  vd_units[40];        /* lot 3, sous COUNT : table des unités
                                            (8 × 5 cibles) au rangement */
@@ -936,7 +985,7 @@ static int prog_sync(PCtx *p);
 #define UNIT_LIM(p) (SCAN_N(p) > GL_MAX_TEXUNITS ? SCAN_N(p) : \
                      (us_fp(p) ? G.units : G.fixed_units))
 static const struct PProg *us_fp(PCtx *p);      /* programme de fragments en vigueur */
-static unsigned char *gctx_of(PCtx *p);          /* sonde v16 dans close_raw */
+HOT unsigned char *gctx_of(PCtx *p);          /* sonde v16 dans close_raw */
 
 static void cube_probe(PCtx *p, const TexInfo *ti, const char *where);
 static void draw_probe(PCtx *p, const TexInfo *ti);
@@ -1195,6 +1244,27 @@ static struct {
     unsigned long   n_uv_take, n_uv_units, n_uv_full;   /* UNITVD : repris, unités
                                            refaites, renvois au verdict complet */
     unsigned long   n_uv_chk_same, n_uv_chk_diff;       /* UNITVD + VERDICTCHECK */
+    /* 21/10 (docs/d3-plugin-x86.md §10) */
+    int             dispfast;           /* POMPPC_GL_DISPFAST : bloc classé en une passe,
+                                           clé du verdict par unité reprise au rangement */
+    int             progmemo;           /* POMPPC_GL_PROGMEMO : pprog_find mémorisé
+                                           (génération de la table des programmes) */
+    int             mtxdirty;           /* POMPPC_GL_MTXDIRTY : matrices et fenêtre
+                                           comparées seulement si le bloc les a
+                                           signalées ; 2 = contrôle (comparées toujours,
+                                           écarts comptés) */
+    int             displock;           /* POMPPC_GL_DISPLOCK : gldUpdateDispatch courant
+                                           sous un seul verrou */
+    unsigned long   n_dl_fast;          /* DISPLOCK : dispatches pris */
+    int             stunit;             /* POMPPC_GL_STUNIT : clés chaudes refaites pour
+                                           les seules unités dont le verdict a bougé ;
+                                           2 = contrôle */
+    unsigned long   n_df_key, n_df_key_chk, n_df_key_diff;  /* DISPFAST : clés reprises */
+    unsigned long   n_pm_hit, n_pm_miss;                    /* PROGMEMO */
+    unsigned long   n_md_skip, n_md_cmp, n_md_chk_diff;     /* MTXDIRTY : comparaisons
+                                           sautées, faites ; contrôle : changements
+                                           que le bloc n'avait pas signalés */
+    unsigned long   n_su_part, n_su_units, n_su_chk, n_su_chk_diff; /* STUNIT */
     int             tcllost;            /* 07/10 : POMPPC_GL_TCLLOST (défaut 1) */
     unsigned long   n_tcllost;          /* dispatchs « T&L perdu » honorés */
     int             native_range;       /* plage de gldFlushBuffer crue (défaut) */
@@ -1423,7 +1493,7 @@ static int no(int why, unsigned long a, unsigned long b)
 }
 
 static const char *direct_why(void);
-static int geom_switch(void);
+HOT int geom_switch(void);
 static void async_rearm(void);
 static unsigned long fbits(float f);
 /* Requêtes d'occlusion : coupées si l'hôte ne les tient pas (le refus arrive
@@ -2004,7 +2074,7 @@ static void stats_frame(void *ctx)
 
 /* ────────────────────────────── utilitaires ────────────────────────────── */
 
-static float clamp01(float v)
+HOT float clamp01(float v)
 {
     return !(v > 0.0f) ? 0.0f : v > 1.0f ? 1.0f : v;
 }
@@ -2138,18 +2208,18 @@ static int raw_fix_nan(void)
     return 0;
 }
 
-static unsigned long to_u8(float v)
+HOT unsigned long to_u8(float v)
 {
     v = clamp01(v);
     return (unsigned long)(v * 255.0f + 0.5f);
 }
 
-static unsigned char *gls(PCtx *p)
+HOT unsigned char *gls(PCtx *p)
 {
     return (unsigned char *)GLD_U32(p->ctx, CTX_GLSTATE);
 }
 
-static unsigned char *sw_color(PCtx *p)
+HOT unsigned char *sw_color(PCtx *p)
 {
     unsigned long slot = GLD_U32(p->ctx, CTX_DRAWSLOT);
     return slot ? (unsigned char *)GLD_U32(slot, 0) : 0;
@@ -2680,6 +2750,23 @@ void pomppc_backend_init(void)
                 e = getenv("POMPPC_GL_UNITVD");
                 G.unitvd = (e && e[0] ? e[0] != '0' : UNITVD_DEFAULT) &&
                            G.verdict && G.wl && G.texmemo;
+                /* 21/10 (docs/d3-plugin-x86.md §10) */
+                e = getenv("POMPPC_GL_DISPFAST");
+                G.dispfast = G.verdict ? (e && e[0] ? (int)(e[0] - '0') : DISPFAST_DEFAULT) : 0;
+                if (G.dispfast < 0 || G.dispfast > 2)
+                    G.dispfast = 0;
+                e = getenv("POMPPC_GL_PROGMEMO");
+                G.progmemo = e && e[0] ? e[0] != '0' : PROGMEMO_DEFAULT;
+                e = getenv("POMPPC_GL_MTXDIRTY");
+                G.mtxdirty = e && e[0] ? (int)(e[0] - '0') : MTXDIRTY_DEFAULT;
+                if (G.mtxdirty < 0 || G.mtxdirty > 2)
+                    G.mtxdirty = 0;
+                e = getenv("POMPPC_GL_DISPLOCK");
+                G.displock = e && e[0] ? e[0] != '0' : DISPLOCK_DEFAULT;
+                e = getenv("POMPPC_GL_STUNIT");
+                G.stunit = e && e[0] ? (int)(e[0] - '0') : STUNIT_DEFAULT;
+                if (G.stunit < 0 || G.stunit > 2)
+                    G.stunit = 0;
             }
             G.pixtex = -1;
             G.pixtex_w = G.pixtex_h = 0;
@@ -2706,12 +2793,18 @@ void pomppc_backend_init(void)
                     "native=%d (plages %d) count=%d verdict=%d verdictcheck=%d whitelist=%d "
                     "texmemo=%d stskip=%d statecheck=%d wlunif=%d stateblk=%d "
                     "rawsane=%d natshm=%d idxlazy=%d idxvec=%d dispone=%d unitvd=%d texpage=%d "
-                    "zones=%d (flux %lu Kio)\n",
+                    "zones=%d (flux %lu Kio) dispfast=%d progmemo=%d mtxdirty=%d stunit=%d "
+                    "displock=%d hotinline=%d\n",
                     G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range,
                     G.count, G.verdict, G.vcheck, G.wl, G.texmemo, G.stskip, G.stcheck,
                     G.wlunif, G.stblk + G.stblk_check, G.rawsane, G.natshm,
                     G.idxlazy, G.idxvec, G.dispone, G.unitvd, G.texpage,
-                    G.zones, G.zl_cmd_bytes >> 10);
+                    G.zones, G.zl_cmd_bytes >> 10, G.dispfast, G.progmemo, G.mtxdirty,
+                    G.stunit, G.displock, HOTINLINE_DEFAULT);
+            /* 21/10 : adresse d'un symbole exporté, pour nommer les blocs d'un
+               profil d'instructions (greffon TCG hotblocks, tools/re/hotplug.py) */
+            gl_note("plugin : pomppc_geom_dispatch à 0x%08lx\n",
+                    (unsigned long)&pomppc_geom_dispatch);
             pomppc_log("POMPPC: qgpu actif (tranche %lu à 0x%lx, %lu Mio, v%lu, caps 0x%lx,"
                        " chemin brut %s, pipeline fixe v8 %s, textures %s, soumission %s%s%s%s%s%s%s%s%s)\n",
                        G.q.index, G.q.base, G.q.size >> 20, G.q.version, G.q.caps,
@@ -3009,6 +3102,8 @@ static void invalidate_mirrors_from(unsigned long from)
     for (p = G.list; p; p = p->next) {
         p->st_valid = 0;
         p->g_sent = 0;
+        p->md_bits = ~0UL;              /* 21/10 (MTXDIRTY) : tout à comparer */
+        p->md_tex = 0xffUL;
         p->c_pstip_valid = 0;
         p->c_lmask = 0;
         memset(p->c_mtx, 0, sizeof(p->c_mtx));
@@ -4985,9 +5080,15 @@ static int tex_base_ok(const void *drvtex)
  * vidage de l'état hôte). */
 #define CP_COMPLETE 1U
 #define CP_BASE     2U
-static unsigned int tex_cp(PTex *t)
+static unsigned int tex_cp_fill(PTex *t);
+/* HOTINLINE : le cas courant (déjà relevé cette image) en ligne */
+HOT unsigned int tex_cp(PTex *t)
 {
-    if (t->cp_frame != G.n_frames + 1) {
+    return t->cp_frame == G.n_frames + 1 ? t->cp : tex_cp_fill(t);
+}
+static unsigned int tex_cp_fill(PTex *t)
+{
+    {
         /* v20 : une texture de surface est complète par construction (un
            niveau, sans mipmaps) ; son image vient de l'hôte (SURF_TEX). */
         t->surf = tex_surface(t, &t->surf_sid);
@@ -5836,7 +5937,7 @@ static void target_probe(PCtx *p, int u, unsigned long mask, unsigned long units
  * priorité d'OpenGL (cube > 3D > rectangle > 2D > 1D) : le bit 1<<k de
  * TU_ENABLE correspond à l'emplacement k (relevé, docs/re/textures-3d.md).
  * -1 : la cible effective n'est pas tenue (cube, rectangle ; 3D sans l'hôte). */
-static int unit_slot(unsigned long m)
+HOT int unit_slot(unsigned long m)
 {
     if (m & 1)
         return G.cube ? 0 : -1;                     /* carte de cube (v10) */
@@ -5851,7 +5952,7 @@ static int unit_slot(unsigned long m)
  * fragments actif, la cible que le TEXTE échantillonne (texture[u], 2D…) :
  * Direct3D n'allume jamais GL_TEXTURE_2D, et sous programme glEnable ne
  * compte pas. Une unité que le texte ne lit pas est coupée. */
-static unsigned long unit_mask(PCtx *p, int u)
+HOT unsigned long unit_mask(PCtx *p, int u)
 {
     if (G.prog && p->fp_on && p->fp_rec && !p->fp_rec->refused)
         return u < IMG_UNITS ? p->fp_rec->fp_unit[u] : 0;
@@ -5899,7 +6000,7 @@ static unsigned long us_seq;            /* un par verdict ouvert */
 static int us_now;                      /* un verdict est ouvert */
 /* tex_del_epoch : déclaré avec vd_epoch */
 
-static const PProg *us_fp(PCtx *p)
+HOT const PProg *us_fp(PCtx *p)
 {
     return (G.prog && p->fp_on && p->fp_rec && !p->fp_rec->refused) ? p->fp_rec : 0;
 }
@@ -7226,6 +7327,186 @@ static const int *hot_list(int *n)
     return hot;
 }
 
+/* ── 21/10 (POMPPC_GL_STUNIT, docs/d3-plugin-x86.md §10) ──
+ * Quand le verdict `ti` diffère de la dernière série (hot_ti), la voie
+ * d'avant refait les clés de TOUTES les unités (state_units, 8 + 8) et
+ * compare toute la liste chaude ; DOOM 3 ne relie que 1 à 3 unités par
+ * interaction. Ici : seules les unités dont le TexUnit a changé sont
+ * refaites, et seules leurs clés (et celles des programmes) sont comparées,
+ * DANS L'ORDRE de la liste chaude — même flux. Une unité dont le TexUnit
+ * n'a pas changé (même époque des textures) redonnerait les clés de la
+ * série précédente, déjà dans p->st : c'est l'hypothèse même de la reprise
+ * « verdict identique » (hot_ti), restreinte à l'unité. STUNIT=2 : la voie
+ * complète est jouée aussi, et toute différence d'envoi est comptée
+ * (n_su_chk_diff) ; c'est la complète qui part. */
+#define SU_KEYS 6
+static int su_n[IMG_UNITS], su_idx[IMG_UNITS][SU_KEYS], su_prog[2], su_nprog = -1, su_bad;
+
+static void su_init(void)
+{
+    const int *hot;
+    int n, i, u;
+    if (su_nprog >= 0)
+        return;
+    hot = hot_list(&n);
+    su_nprog = 0;
+    for (i = 0; i < n; i++) {
+        int k = hot[i], found = -1;
+        if (k == QGPU_SK_VERTEX_PROGRAM || k == QGPU_SK_FRAGMENT_PROGRAM) {
+            if (su_nprog < 2)
+                su_prog[su_nprog++] = i;
+            else
+                su_bad = 1;
+            continue;
+        }
+        for (u = 0; u < IMG_UNITS && found < 0; u++) {
+            int kb = QGPU_SK_UNIT(u);
+            if (k == kb + QGPU_SK_U_ENABLE || k == kb + QGPU_SK_U_BIND ||
+                k == kb + QGPU_SK_U_ENV_MODE || k == kb + QGPU_SK_U_ENV_COLOR ||
+                (u < QGPU_MAX_UNITS && (k == QGPU_SK_COMBINE(u) || k == QGPU_SK_COMBINE_SRC(u))))
+                found = u;
+        }
+        if (found >= 0 && su_n[found] < SU_KEYS)
+            su_idx[found][su_n[found]++] = i;
+        else
+            su_bad = 1;                 /* clé chaude inattendue : levier coupé */
+    }
+}
+
+/* Les clés de l'unité u, exactement comme state_units (st_valid supposé). */
+static void state_unit_one(PCtx *p, const TexInfo *ti, int u, unsigned long *v)
+{
+    const TexUnit *tu = &ti->u[u];
+    int kb = QGPU_SK_UNIT(u);
+    if (u < QGPU_MAX_UNITS) {
+        v[kb + QGPU_SK_U_ENABLE] = tu->t != 0;
+        v[kb + QGPU_SK_U_BIND] = p->st[kb + QGPU_SK_U_BIND];
+        v[kb + QGPU_SK_U_ENV_MODE] = p->st[kb + QGPU_SK_U_ENV_MODE];
+        v[kb + QGPU_SK_U_ENV_COLOR] = p->st[kb + QGPU_SK_U_ENV_COLOR];
+        v[QGPU_SK_COMBINE(u)] = p->st[QGPU_SK_COMBINE(u)];
+        v[QGPU_SK_COMBINE_SRC(u)] = p->st[QGPU_SK_COMBINE_SRC(u)];
+        if (tu->t) {
+            v[kb + QGPU_SK_U_BIND] = tu->t->qtex;
+            v[kb + QGPU_SK_U_ENV_MODE] = tu->env_mode;
+            v[kb + QGPU_SK_U_ENV_COLOR] = tu->env_color;
+            v[QGPU_SK_COMBINE(u)] = tu->combine;
+            v[QGPU_SK_COMBINE_SRC(u)] = tu->combine_src;
+        }
+    } else {
+        v[kb + QGPU_SK_U_ENABLE] = tu->t != 0;
+        v[kb + QGPU_SK_U_BIND] = tu->t ? (unsigned long)tu->t->qtex : p->st[kb + QGPU_SK_U_BIND];
+        v[kb + QGPU_SK_U_ENV_MODE] = 0x2100;
+        v[kb + QGPU_SK_U_ENV_COLOR] = 0;
+    }
+}
+
+/* TexUnit égaux (cinq mots, sans bourrage : même réponse que memcmp). */
+HOT int tu_same(const TexUnit *a, const TexUnit *b)
+{
+    return a->t == b->t && a->env_mode == b->env_mode && a->env_color == b->env_color &&
+           a->combine == b->combine && a->combine_src == b->combine_src;
+}
+
+/* Unités dont le TexUnit diffère (bit u). */
+static unsigned long su_diff(const TexInfo *a, const TexInfo *b)
+{
+    unsigned long m = 0;
+    int u;
+    for (u = 0; u < IMG_UNITS; u++)
+        if (!tu_same(&a->u[u], &b->u[u]))
+            m |= 1UL << u;
+    return m;
+}
+
+/* Série partielle (chm : unités changées) : rend 1 si elle a eu lieu (sinon
+   la voie complète suit). */
+#define SU_HW ((IMG_UNITS * SU_KEYS + 2 + 31) / 32)
+static int su_partial(PCtx *p, const TexInfo *tk, unsigned long *v, unsigned long chm)
+{
+    unsigned long hm[SU_HW];            /* positions de la liste chaude à comparer */
+    int u, j, w, nu = 0;
+    const int *hot;
+    unsigned long *c;
+    su_init();
+    if (su_bad)
+        return 0;
+    hot = hot_list(&j);
+    for (w = 0; w < SU_HW; w++)
+        hm[w] = 0;
+    for (u = 0; u < IMG_UNITS; u++) {
+        if (!(chm & (1UL << u)))
+            continue;
+        p->hot_ti.u[u] = tk->u[u];
+        if (!su_n[u])
+            continue;                   /* unité hors des plages : aucune clé */
+        state_unit_one(p, tk, u, v);
+        for (j = 0; j < su_n[u]; j++)
+            hm[su_idx[u][j] >> 5] |= 0x80000000UL >> (su_idx[u][j] & 31);
+        nu++;
+    }
+    if (su_nprog) {
+        state_progs(p, v);
+        for (j = 0; j < su_nprog; j++)
+            hm[su_prog[j] >> 5] |= 0x80000000UL >> (su_prog[j] & 31);
+    }
+    for (w = 0; w < SU_HW; w++)         /* ordre de la liste chaude */
+      while (hm[w]) {
+        int b = __builtin_clz(hm[w]), k = hot[w * 32 + b];
+        hm[w] &= ~(0x80000000UL >> b);
+        if (p->st[k] == v[k])
+            continue;
+        c = reserve(p, QGPU_LEN_SET_STATE);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
+        c[1] = k;
+        c[2] = v[k];
+        p->st[k] = v[k];
+        STC.hot++;
+      }
+    G.n_su_part++;
+    G.n_su_units += nu;
+    return 1;
+}
+
+/* STUNIT=2 : ce que la série partielle enverrait, comparé à la complète
+   (sans rien envoyer ni toucher). 1 = identique. */
+static int su_check(PCtx *p, const TexInfo *ti, const TexInfo *tk)
+{
+    unsigned long v[QGPU_SK_COUNT], w[QGPU_SK_COUNT];
+    unsigned char sent_p[QGPU_SK_COUNT];
+    const int *hot;
+    int n, i, u, j, d = 0;
+    su_init();
+    if (su_bad)
+        return 1;
+    hot = hot_list(&n);
+    memset(sent_p, 0, sizeof(sent_p));
+    for (u = 0; u < IMG_UNITS; u++) {
+        if (!su_n[u] || tu_same(&tk->u[u], &p->hot_ti.u[u]))
+            continue;
+        state_unit_one(p, tk, u, v);
+        for (j = 0; j < su_n[u]; j++) {
+            int k = hot[su_idx[u][j]];
+            if (p->st[k] != v[k])
+                sent_p[k] = 1;
+        }
+    }
+    state_progs(p, v);
+    for (j = 0; j < su_nprog; j++) {
+        int k = hot[su_prog[j]];
+        if (p->st[k] != v[k])
+            sent_p[k] = 1;
+    }
+    state_units(p, ti, w);
+    state_progs(p, w);
+    for (i = 0; i < n; i++) {
+        int k = hot[i];
+        int sent_f = p->st[k] != w[k];
+        if (sent_f != sent_p[k] || (sent_f && v[k] != w[k]))
+            d++;
+    }
+    return d == 0;
+}
+
 static void send_state_blk(PCtx *p, const TexInfo *ti, int raw)
 {
     unsigned long v[QGPU_SK_COUNT], w[QGPU_SK_COUNT], *c, fl;
@@ -7270,7 +7551,13 @@ static void send_state_blk(PCtx *p, const TexInfo *ti, int raw)
     {
         static const TexInfo ti_zero;
         const TexInfo *tk = ti ? ti : &ti_zero;
-        int same = valid && p->hot_valid && p->hot_epoch == vd_epoch &&
+        /* 21/10 (STUNIT) : unités changées relevées une fois, mot à mot ;
+           « même verdict » = aucune unité changée (= le memcmp d'avant) */
+        int part = G.stunit == 1 && valid && p->hot_valid && p->hot_epoch == vd_epoch &&
+                   !G.stblk_check;
+        unsigned long chm = part ? su_diff(tk, &p->hot_ti) : 0;
+        int same = part ? chm == 0 :
+                   valid && p->hot_valid && p->hot_epoch == vd_epoch &&
                    !memcmp(tk, &p->hot_ti, sizeof(TexInfo));
         if (same && !G.stblk_check) {
             STC.hot_skip++;
@@ -7287,8 +7574,16 @@ static void send_state_blk(PCtx *p, const TexInfo *ti, int raw)
                     STC.hot++;
                 }
             }
+        } else if (part && su_partial(p, tk, v, chm)) {
+            /* 21/10 : STUNIT, série partielle faite */
         } else {
             int sent = 0;
+            if (G.stunit == 2 && valid && p->hot_valid && p->hot_epoch == vd_epoch &&
+                !G.stblk_check) {
+                G.n_su_chk++;
+                if (!su_check(p, ti, tk))
+                    G.n_su_chk_diff++;
+            }
             state_units(p, ti, v);
             state_progs(p, v);
             hot = hot_list(&nhot);
@@ -8403,6 +8698,33 @@ static PProg *pprog_find(void *ctx, const unsigned char *obj)
     return 0;
 }
 
+/* 21/10 (POMPPC_GL_PROGMEMO, docs/d3-plugin-x86.md §10) : pprog_find ne
+ * dépend que des couples (ctx, obj) de la table ; ils ne changent qu'à
+ * pp_create, pp_destroy et à la mort d'un contexte (entrées orphelines), qui
+ * font avancer pprog_gen. prog_state demande la même chose plusieurs fois
+ * par dessin (clé du verdict au dispatch et au dessin, prog_sync,
+ * texture_ok) : la réponse est gardée par étage, pour la génération, le
+ * contexte et l'objet de GLEngine. pprog_gen part de 1 : un PCtx neuf
+ * (pm_gen à 0) ne la croit jamais. */
+static unsigned long pprog_gen = 1;
+static PProg *pprog_find_p(PCtx *p, int t, const unsigned char *obj)
+{
+    PProg *r;
+    if (!G.progmemo)
+        return pprog_find(p->ctx, obj);
+    if (p->pm_gen[t] == pprog_gen && p->pm_obj[t] == obj &&
+        (!p->pm_rec[t] || p->pm_rec[t]->ctx == p->ctx)) {
+        G.n_pm_hit++;
+        return p->pm_rec[t];
+    }
+    G.n_pm_miss++;
+    r = pprog_find(p->ctx, obj);
+    p->pm_gen[t] = pprog_gen;
+    p->pm_obj[t] = obj;
+    p->pm_rec[t] = r;
+    return r;
+}
+
 static void gprog_stage_gone(PProg *r);   /* v21 */
 
 /* L'objet hôte meurt : PROG_DESTROY si le contexte qgpu vit encore, et les
@@ -8443,6 +8765,7 @@ static long pp_create(void *ctx, unsigned long *handle, void *desc)
     for (i = 0; i < PPROG_MAX && (pprog[i].ctx || pprog[i].orphan); i++)
         ;
     if (i < PPROG_MAX) {
+        pprog_gen++;                    /* 21/10 : PROGMEMO */
         memset(&pprog[i], 0, sizeof(pprog[i]));
         pprog[i].ctx = ctx;
         pprog[i].obj = desc ? (unsigned char *)desc - 0x4c8 : 0;
@@ -8488,6 +8811,7 @@ static long pp_destroy(void *ctx, unsigned long handle)
         if (!r->orphan)                 /* orphelin : plus rien côté hôte */
             pprog_release(r);
         memset(r, 0, sizeof(*r));
+        pprog_gen++;                    /* 21/10 : PROGMEMO */
     }
     pthread_mutex_unlock(&G.mu);
     return ((pp_destroy_fn)pomppc_real[GLD_DestroyPipelineProgram])(ctx, handle);
@@ -8613,7 +8937,7 @@ static unsigned long fbits(float f)
 /* Recopie n flottants dans des mots de commande, en bornant ce que le cœur
  * refuse (NaN, infini, |v| > 1e9) : un seul mot fautif ferait rejeter toute la
  * soumission, donc on préfère une valeur nulle à un flux perdu. */
-static void put_f(unsigned long *dst, const float *src, int n)
+HOT void put_f(unsigned long *dst, const float *src, int n)
 {
     int i;
     for (i = 0; i < n; i++) {
@@ -8624,7 +8948,7 @@ static void put_f(unsigned long *dst, const float *src, int n)
     }
 }
 
-static unsigned char *gctx_of(PCtx *p)
+HOT unsigned char *gctx_of(PCtx *p)
 {
     unsigned char *g = gls(p);
     return g ? g - GS_LOW : 0;
@@ -8632,7 +8956,7 @@ static unsigned char *gctx_of(PCtx *p)
 
 /* POMPPC_GL_GEOM : 0 coupé, 1 activé (défaut), 2 activé avec un format de
  * sommet fixe et large (pour mesurer le coût de la republication). */
-static int geom_switch(void)
+HOT int geom_switch(void)
 {
     static int v = -1;
     if (v < 0) {
@@ -8648,7 +8972,7 @@ static int geom_switch(void)
  * cfg+0x11c, 2 forcé GeForce3 (descripteur nul). Le mixte n'est pas le
  * défaut : un DrawElements mal packé ressemble à de la géométrie cassée
  * (Colin McRae, comme le début d'UT2004). */
-static int array_switch(void)
+HOT int array_switch(void)
 {
     static int v = -1;
     if (v < 0) {
@@ -8661,7 +8985,7 @@ static int array_switch(void)
 }
 
 /* Bit 16+a du masque 64 bits (haut en VA_EN_HI, bas en VA_EN_LO). */
-static int va_enabled(const unsigned char *V, int a)
+HOT int va_enabled(const unsigned char *V, int a)
 {
     if (!V || a < 0 || a > 31)
         return 0;
@@ -8704,7 +9028,7 @@ static int geom_va_on(PCtx *p)
 /* Le bloc source a-t-il bougé depuis le dernier envoi ? C'est le test chaud :
  * il tourne à chaque BeginPrimitiveBuffer, et Marble Blast en fait un millier
  * par image. On compare les octets de GLEngine, sans rien fabriquer. */
-static int changed(PCtx *p, const void *src, void *cache, unsigned long n)
+HOT int changed(PCtx *p, const void *src, void *cache, unsigned long n)
 {
     if (p->g_sent && !memcmp(cache, src, n))
         return 0;
@@ -8979,7 +9303,7 @@ static void prog_state(PCtx *p)
         PProg *r;
         if (!GC_PROG_ON(gc, t) || !obj)
             continue;
-        r = pprog_find(p->ctx, obj);
+        r = pprog_find_p(p, t, obj);
         if (r)
             prog_parse(r);
         if (t) { p->fp_on = 1; p->fp_rec = r; } else { p->vp_on = 1; p->vp_rec = r; }
@@ -10271,12 +10595,25 @@ static unsigned long geom_format(PCtx *p)
        éclairage — éclairée, c'est l'éclairage de l'hôte qui la fournit. */
     if (G.tex14 && GLD_U8(g, GS_COLOR_SUM) && !lighting)
         fmt |= QGPU_VF_SEC_COLOR;
-    for (u = 0; u < QGPU_MAX_UNITS; u++)
-        if (unit_textured(p, u)) {
-            fmt |= QGPU_VF_TEX(u);
-            if (texgen_needs_normal(p, u))
-                normal = 1;
+    {
+        /* 21/10 (DISPFAST) : le relevé pris une fois — unit_textured le
+           reprend à chaque unité (us_get, qui n'en refait aucun ici : rien ne
+           change entre deux unités) */
+        UScan *sc = G.dispfast && !G.vcheck ? us_get(p) : 0;
+        for (u = 0; u < QGPU_MAX_UNITS; u++) {
+            int tx;
+            if (sc) {
+                PTex *t = sc->on ? us_tex(sc, u) : 0;
+                tx = t ? tex_cp(t) != 0 : 0;
+            } else
+                tx = unit_textured(p, u);
+            if (tx) {
+                fmt |= QGPU_VF_TEX(u);
+                if (texgen_needs_normal(p, u))
+                    normal = 1;
+            }
         }
+    }
     if (normal)
         fmt |= QGPU_VF_NORMAL;
     /* v16 : attributs génériques 1..7 actifs (mot haut du masque du VAO, bit k
@@ -10567,21 +10904,56 @@ static float spot_cutoff_deg(float c)
     return (float)a;
 }
 
+/* 21/10 (POMPPC_GL_MTXDIRTY, docs/d3-plugin-x86.md §10) : faut-il comparer
+ * le bloc que garde `bit` ? Sans le levier, ou avant le premier envoi (ou
+ * après une remise à zéro des miroirs) : toujours. Sinon, seulement si un
+ * dispatch a signalé ce changement depuis la dernière comparaison — GLEngine
+ * pose le bit du mot +0x08 à chaque glLoadMatrix, glMultMatrix, glPopMatrix,
+ * glViewport… avant le dessin qui le suit. Une comparaison faite laisse le
+ * cache égal à l'état courant : tant qu'aucun bit n'arrive, elle redirait
+ * « inchangé ». Sous MTXDIRTY=2 la comparaison a lieu quand même, et un
+ * changement non signalé est compté (n_md_chk_diff) puis envoyé. */
+HOT int md_want(PCtx *p, unsigned long dirty)
+{
+    if (!G.mtxdirty || !p->g_sent || dirty) {
+        G.n_md_cmp += G.mtxdirty != 0;
+        return 1;
+    }
+    G.n_md_skip++;
+    return 0;
+}
+
+static int md_changed(PCtx *p, int want, const void *src, void *cache, unsigned long n)
+{
+    int c;
+    if (want)
+        return changed(p, src, cache, n);
+    if (G.mtxdirty < 2)
+        return 0;
+    c = changed(p, src, cache, n);      /* contrôle */
+    if (c)
+        G.n_md_chk_diff++;
+    return c;
+}
+
 static void geom_send_matrices(PCtx *p, unsigned long fmt)
 {
     unsigned char *g = gls(p);
     unsigned long a[QGPU_LEN_SET_MATRIX - 1];
-    int u;
+    int u, w;
 
     /* Comparer les 64 octets de la matrice coûte moins que d'exploiter le
        masque « matrice modifiée » (GS+0x4d48), qui ne dit rien des matrices de
-       texture d'une unité qui vient de s'allumer. */
-    if (changed(p, g + GS_MAT_MODELVIEW, p->c_mtx[QGPU_MTX_MODELVIEW], 64)) {
+       texture d'une unité qui vient de s'allumer. (21/10 : MTXDIRTY suit, lui,
+       les bits du bloc de changements, par unité pour les textures.) */
+    w = md_want(p, p->md_bits & MD_MODELVIEW);
+    if (md_changed(p, w, g + GS_MAT_MODELVIEW, p->c_mtx[QGPU_MTX_MODELVIEW], 64)) {
         a[0] = QGPU_MTX_MODELVIEW;
         put_f(a + 1, (const float *)(g + GS_MAT_MODELVIEW), 16);
         send_cmd(p, QGPU_OP_SET_MATRIX, QGPU_LEN_SET_MATRIX, a);
     }
-    if (changed(p, g + GS_MAT_PROJ, p->c_mtx[QGPU_MTX_PROJECTION], 64)) {
+    w = md_want(p, p->md_bits & MD_PROJ);
+    if (md_changed(p, w, g + GS_MAT_PROJ, p->c_mtx[QGPU_MTX_PROJECTION], 64)) {
         a[0] = QGPU_MTX_PROJECTION;
         put_f(a + 1, (const float *)(g + GS_MAT_PROJ), 16);
         send_cmd(p, QGPU_OP_SET_MATRIX, QGPU_LEN_SET_MATRIX, a);
@@ -10590,7 +10962,9 @@ static void geom_send_matrices(PCtx *p, unsigned long fmt)
         /* v21 : un shader de sommets GLSL lit gl_TextureMatrix[u] sans texture */
         if (!(fmt & QGPU_VF_TEX(u)) && !(p->glsl_on && p->vp_on))
             continue;
-        if (!changed(p, g + GS_MAT_TEXTURE(u), p->c_mtx[QGPU_MTX_TEXTURE0 + u], 64))
+        w = md_want(p, p->md_tex & (1UL << u));
+        p->md_tex &= ~(1UL << u);
+        if (!md_changed(p, w, g + GS_MAT_TEXTURE(u), p->c_mtx[QGPU_MTX_TEXTURE0 + u], 64))
             continue;
         a[0] = QGPU_MTX_TEXTURE0 + u;
         put_f(a + 1, (const float *)(g + GS_MAT_TEXTURE(u)), 16);
@@ -10801,11 +11175,12 @@ static void geom_send_viewport(PCtx *p)
     unsigned char *g = gls(p);
     unsigned long a[QGPU_LEN_VIEWPORT - 1];
     unsigned long d[QGPU_LEN_DEPTH_RANGE - 1];
+    int w = md_want(p, p->md_bits & MD_VIEWPORT);   /* 21/10 : MTXDIRTY */
 
     /* GS+0x1840 est le viewport GL tel quel : origine en BAS à gauche, ce que
        DRAW_RAW attend (la couture avec le repère de surface est faite par
        l'hôte, protocole v7 §1). */
-    if (changed(p, g + GS_VIEWPORT, p->c_vp, 16)) {
+    if (md_changed(p, w, g + GS_VIEWPORT, p->c_vp, 16)) {
         a[0] = (unsigned long)I32(g, GS_VIEWPORT);
         a[1] = (unsigned long)I32(g, GS_VIEWPORT + 4);
         a[2] = (unsigned long)I32(g, GS_VIEWPORT + 8);
@@ -10814,7 +11189,7 @@ static void geom_send_viewport(PCtx *p)
         if ((long)a[3] < 0) a[3] = 0;
         send_cmd(p, QGPU_OP_VIEWPORT, QGPU_LEN_VIEWPORT, a);
     }
-    if (changed(p, g + GS_DEPTH_NEAR_F, p->c_dr, 8)) {
+    if (md_changed(p, w, g + GS_DEPTH_NEAR_F, p->c_dr, 8)) {
         d[0] = fbits(clamp01(GLD_F32(g, GS_DEPTH_NEAR_F)));
         d[1] = fbits(clamp01(GLD_F32(g, GS_DEPTH_NEAR_F + 4)));
         send_cmd(p, QGPU_OP_DEPTH_RANGE, QGPU_LEN_DEPTH_RANGE, d);
@@ -10832,6 +11207,7 @@ static void geom_send_all(PCtx *p, unsigned long fmt)
     geom_send_clip(p);
     geom_send_current(p, fmt);
     p->g_sent = 1;
+    p->md_bits = 0;                     /* 21/10 : fenêtre, projection, modèle-vue comparées */
 }
 
 /* ─────────────────────── les deux procédures de GLEngine ─────────────────────── */
@@ -11748,7 +12124,7 @@ static void geom_end(void *ctx, long flag, short mode, long n)
 
 static unsigned char vb_scratch[VA_ALLOC_CAP * 0x34];
 
-static int va_bpc(unsigned type, int stored)
+HOT int va_bpc(unsigned type, int stored)
 {
     if (stored > 0)
         return stored;
@@ -13256,7 +13632,33 @@ static void vd_key_of(PCtx *p, unsigned long *k)
 
 /* Range le verdict (dispatch, ou dessin qui a recalculé). La clé est prise
    APRÈS le calcul : texture_ok a pu téléverser (et faire avancer l'époque). */
+static void vd_store_k(PCtx *p, int ok, const TexInfo *ti, unsigned long fmt, unsigned long gs,
+                       const unsigned long *key);
 static void vd_store(PCtx *p, int ok, const TexInfo *ti, unsigned long fmt, unsigned long gs)
+{
+    vd_store_k(p, ok, ti, fmt, gs, 0);
+}
+
+/* 21/10 (DISPFAST) : les mots de tête de la clé, ceux que le plugin lui-même
+   peut faire bouger pendant un verdict (téléversement, vidage, perte du
+   contexte) ; le reste est lu dans GLEngine et dans les programmes, que le
+   verdict ne touche pas — c'est le fil de l'application qui est dans le
+   plugin, verrou tenu. */
+#define VKEY_HEAD 7
+static void vd_key_head(PCtx *p, unsigned long *k)
+{
+    k[0] = G.n_frames;
+    k[1] = vd_epoch;
+    k[2] = (unsigned long)G.state;
+    k[3] = (p->broken ? 1UL : 0) | (p->geom_lost ? 2UL : 0);
+    k[4] = (unsigned long)p->qctx;
+    k[5] = (unsigned long)p->cfg;
+    k[6] = (unsigned long)gls(p);
+}
+
+/* key : la clé déjà calculée pour ce verdict (DISPFAST), ou 0 : la calculer. */
+static void vd_store_k(PCtx *p, int ok, const TexInfo *ti, unsigned long fmt, unsigned long gs,
+                       const unsigned long *key)
 {
     p->vd_ok = ok ? 1 : 0;
     if (ok) {
@@ -13267,7 +13669,21 @@ static void vd_store(PCtx *p, int ok, const TexInfo *ti, unsigned long fmt, unsi
         memset(&p->vd_ti, 0, sizeof(p->vd_ti));
         p->vd_fmt = p->vd_gs = 0;
     }
-    vd_key_of(p, p->vd_key);
+    if (key) {
+        memcpy(p->vd_key, key, sizeof(p->vd_key));
+        G.n_df_key++;
+        if (G.dispfast >= 2) {          /* contrôle : la clé recalculée */
+            unsigned long k2[VKEY_WORDS];
+            vd_key_of(p, k2);
+            G.n_df_key_chk++;
+            if (memcmp(k2, p->vd_key, sizeof(k2)) != 0) {
+                G.n_df_key_diff++;
+                memcpy(p->vd_key, k2, sizeof(k2));
+            }
+        }
+    } else {
+        vd_key_of(p, p->vd_key);
+    }
     p->vd_valid = 1;
     if (G.count) {                      /* lot 3 : piste des unités */
         unsigned long units = p->ctx ? GLD_U32(p->ctx, CTX_TEXUNITS) : 0;
@@ -13355,6 +13771,15 @@ static void d3x_note(const char *why, unsigned long frame)
             G.n_vec_chk, G.n_vec_diff, G.dispone, G.n_hook_skip, G.n_hook_full,
             G.unitvd, G.n_uv_take, G.n_uv_units, G.n_uv_full, G.n_uv_chk_same,
             G.n_uv_chk_diff);
+    if (G.dispfast || G.progmemo || G.mtxdirty || G.stunit || G.displock)
+        gl_note("D3P %s %lu : dispfast %d, %lu clés reprises (contrôle %lu, %lu écarts) | "
+                "progmemo %d, %lu reprises, %lu recherches | mtxdirty %d, %lu comparaisons "
+                "sautées, %lu faites, %lu écarts | stunit %d, %lu séries partielles "
+                "(%lu unités), contrôle %lu, %lu écarts | displock %d, %lu dispatches\n",
+                why, frame, G.dispfast, G.n_df_key, G.n_df_key_chk, G.n_df_key_diff,
+                G.progmemo, G.n_pm_hit, G.n_pm_miss, G.mtxdirty, G.n_md_skip, G.n_md_cmp,
+                G.n_md_chk_diff, G.stunit, G.n_su_part, G.n_su_units, G.n_su_chk,
+                G.n_su_chk_diff, G.displock, G.n_dl_fast);
     gl_note("ZONES %s %lu : zones %d (forcé %d, flux %lu Kio), %lu dessins aux indices "
             "dans l'arène (%lu Kio), %lu soumissions, %lu barrières attendues (%.2f ms)\n",
             why, frame, G.zones, G.zones_force, G.zl_cmd_bytes >> 10, G.n_idxspill,
@@ -14046,7 +14471,7 @@ static const unsigned long st_mask[CNT_BLOCK] = {
 };
 
 /* Bits admis en plus sous G.wlunif (30/09), pour le mot k. */
-static unsigned long wl_extra(int k)
+HOT unsigned long wl_extra(int k)
 {
     return k == WL_UNIF_WORD && G.wlunif ? WL_UNIF : 0;
 }
@@ -14067,6 +14492,36 @@ static int wl_neutral(const unsigned long *c)
         if (c[k] & ~(wl_mask[k] | wl_extra(k)))
             return 0;
     return 1;
+}
+
+/* 21/10 (POMPPC_GL_DISPFAST, docs/d3-plugin-x86.md §10) : le bloc classé en
+   UNE passe — st_neutral, wl_neutral, et la condition de bloc d'uv_take
+   (hors bits neutres, seulement des bits d'unité : +0x04 bits 0..7, et rien
+   d'autre dans ce mot). Mêmes réponses, mot par mot ; un mot nul est neutre
+   pour les trois. */
+#define DF_ST 1
+#define DF_WL 2
+#define DF_UV 4
+static int df_classify(const unsigned long *c)
+{
+    unsigned long ex = G.wlunif ? WL_UNIF : 0;
+    int k, st = 1, wl = 1, uv = 1;
+    for (k = 0; k < CNT_BLOCK; k++) {
+        unsigned long v = c[k], e;
+        if (!v)
+            continue;
+        e = k == WL_UNIF_WORD ? ex : 0;
+        if (v & ~(st_mask[k] | e))
+            st = 0;
+        if (v & ~(wl_mask[k] | e)) {
+            wl = 0;
+            if (k != 1)
+                uv = 0;
+        }
+    }
+    if (!(c[1] & 0xffUL) || (c[1] & ~0xffUL))
+        uv = 0;
+    return (st ? DF_ST : 0) | (wl ? DF_WL : 0) | (uv ? DF_UV : 0);
 }
 
 /* R4 : POMPPC_GL_BLOCKDUMP, sur stderr (gltest l'entrelace avec ses propres
@@ -14129,7 +14584,7 @@ static long geom_dispatch_publish(PCtx *p, unsigned long fmt)
 
 /* Lot 3 : le verdict gardé vaut-il pour ce dispatch ? 1 = oui (bloc neutre,
    verdict ok gardé, clé identique). Compte la raison du refus. */
-static int wl_take(PCtx *p, const unsigned long *chg)
+static int wl_take(PCtx *p, const unsigned long *chg, int cls)
 {
     unsigned long vk[VKEY_WORDS];
     if (!G.wl || !chg)
@@ -14138,7 +14593,7 @@ static int wl_take(PCtx *p, const unsigned long *chg)
         VD.wl_none++;
         return 0;
     }
-    if (!wl_neutral(chg)) {
+    if (cls >= 0 ? !(cls & DF_WL) : !wl_neutral(chg)) {
         VD.wl_blk++;
         if (G.count && !G.wlunif && (chg[WL_UNIF_WORD] & WL_UNIF)) {
             /* 30/09 : ce que WLUNIF=1 admettrait (bloc seulement) */
@@ -14207,9 +14662,9 @@ static struct {
 } UVC;
 
 static int uv_take(PCtx *p, const unsigned long *chg, TexInfo *ti,
-                   unsigned long *fmt, unsigned long *gs)
+                   unsigned long *fmt, unsigned long *gs, int cls, unsigned long *vk)
 {
-    unsigned long umask, vk[VKEY_WORDS];
+    unsigned long umask;
     unsigned char *g, *V;
     UScan *sc;
     int u, k, n = SCAN_N(p), any = 0;
@@ -14217,11 +14672,16 @@ static int uv_take(PCtx *p, const unsigned long *chg, TexInfo *ti,
     if (!p->vd_valid || !p->vd_ok || n > QGPU_MAX_UNITS || !chg)
         return 0;
     umask = chg[1] & 0xffUL;
-    if (!umask || (chg[1] & ~0xffUL))
-        return 0;
-    for (k = 0; k < CNT_BLOCK; k++)
-        if (k != 1 && (chg[k] & ~(wl_mask[k] | wl_extra(k))))
+    if (cls >= 0) {                     /* DISPFAST : classé une fois */
+        if (!(cls & DF_UV))
             return 0;
+    } else {
+        if (!umask || (chg[1] & ~0xffUL))
+            return 0;
+        for (k = 0; k < CNT_BLOCK; k++)
+            if (k != 1 && (chg[k] & ~(wl_mask[k] | wl_extra(k))))
+                return 0;
+    }
     vd_key_of(p, vk);                   /* appelle prog_state, comme texture_ok */
     if (memcmp(vk, p->vd_key, sizeof(vk)) != 0)
         return 0;
@@ -14330,10 +14790,17 @@ static long geom_dispatch_locked(PCtx *p, const unsigned long *chg)
 {
     long bits = 0;
     int wl = 0;
+    int cls = (G.dispfast && chg) ? df_classify(chg) : -1;   /* 21/10 */
 
+    if (p && G.mtxdirty) {              /* 21/10 : matrices signalées depuis l'envoi */
+        unsigned long w2 = chg ? chg[2] : ~0UL;
+        p->md_bits |= w2 & (MD_VIEWPORT | MD_PROJ | MD_MODELVIEW);
+        if (w2 & MD_TEXMAT)
+            p->md_tex = 0xffUL;
+    }
     if (p && !p->glsl_hooked)
         glsl_hook_ctx(p);               /* v21 : une fois par contexte */
-    if (p && (!chg || !st_neutral(chg)))
+    if (p && (!chg || !(cls >= 0 ? (cls & DF_ST) : st_neutral(chg))))
         p->st_dirty = 1;                /* lot 4 : un bit que compute_state lit */
     if (p && chg && (chg[GLE_CHG_TCL_LOST_WORD] & GLE_CHG_TCL_LOST) && G.tcllost &&
         tcllost_ok(p)) {
@@ -14367,7 +14834,7 @@ static long geom_dispatch_locked(PCtx *p, const unsigned long *chg)
     if (G.count)                        /* lot 0 : compter seulement */
         cnt_dispatch(p, chg);
     if (p)
-        wl = wl_take(p, chg);
+        wl = wl_take(p, chg, cls);
     if (G.bd_on && bd_in())
         bd_dispatch(chg, wl ? "neutre, verdict gardé" : "recalculé");
     if (wl && (chg[WL_GS_WORD] & WL_GS)) {
@@ -14390,13 +14857,21 @@ static long geom_dispatch_locked(PCtx *p, const unsigned long *chg)
     if (!wl && p && G.unitvd && chg) {
         /* 03/10 : verdict refait pour les seules unités désignées */
         TexInfo ti;
-        unsigned long fmt, gs;
-        if (uv_take(p, chg, &ti, &fmt, &gs)) {
+        unsigned long fmt, gs, vk[VKEY_WORDS];
+        if (uv_take(p, chg, &ti, &fmt, &gs, cls, vk)) {
             if (!G.vcheck) {
                 G.n_uv_take++;
                 if (G.count)
                     cnt_keep(p, 1, &ti, fmt);
-                vd_store(p, 1, &ti, fmt, gs);
+                if (cls >= 0) {
+                    /* DISPFAST : la clé d'uv_take vaut encore si sa tête n'a
+                       pas bougé (rien d'autre n'a pu changer depuis) */
+                    unsigned long h[VKEY_HEAD];
+                    vd_key_head(p, h);
+                    vd_store_k(p, 1, &ti, fmt, gs,
+                               memcmp(h, vk, sizeof(h)) == 0 ? vk : 0);
+                } else
+                    vd_store(p, 1, &ti, fmt, gs);
                 p->vd_fresh = 1;
                 return geom_dispatch_publish(p, fmt);
             }
@@ -17757,19 +18232,31 @@ static long geom_dispatch_locked(PCtx *p, const unsigned long *chg);
 
 static int install_final;               /* install_for figée (G.state connu) */
 
+static long hook_and_dispatch_locked(PCtx *p, void **procs, const unsigned long *chg,
+                                     int apple_called);
+
 long pomppc_hook_and_dispatch(void *ctx, void **procs, const unsigned long *chg,
                               int apple_called)
 {
-    PCtx *p;
-    long bits = 0;
-    int k;
+    long bits;
 
     if (!G.dispone) {
         pomppc_hook_procs(ctx, procs);
         return pomppc_geom_dispatch(ctx, chg);
     }
     pthread_mutex_lock(&G.mu);
-    p = find_ctx(ctx);
+    bits = hook_and_dispatch_locked(find_ctx(ctx), procs, chg, apple_called);
+    pthread_mutex_unlock(&G.mu);
+    return bits;
+}
+
+/* Verrou tenu, p = find_ctx(ctx) (peut être nul). */
+static long hook_and_dispatch_locked(PCtx *p, void **procs, const unsigned long *chg,
+                                     int apple_called)
+{
+    long bits = 0;
+    int k;
+
     if (p) {
         int same = !apple_called && install_final && procs && p->hook_snap_procs == procs;
         for (k = 0; same && k < PROC_COUNT; k++)
@@ -17793,7 +18280,6 @@ long pomppc_hook_and_dispatch(void *ctx, void **procs, const unsigned long *chg,
         bits = geom_dispatch_locked(p, chg);
         UVC.pending = 0;
     }
-    pthread_mutex_unlock(&G.mu);
     return bits;
 }
 
@@ -17897,6 +18383,37 @@ int pomppc_lazy_update(void *ctx, void **procs, unsigned long *chg, long *ret)
         G.n_lazy_defer++;
         *ret = p->lazy_ret;
     }
+    pthread_mutex_unlock(&G.mu);
+    return 1;
+}
+
+/* 21/10 (POMPPC_GL_DISPLOCK) : pomppc_lazy_update (branche différée : pas de
+ * 0x80) puis pomppc_hook_and_dispatch (Apple non appelé), sans relâcher G.mu
+ * entre les deux — un couple verrou/déverrou et un find_ctx de moins par
+ * dispatch (~1 300 par image dans DOOM 3, où pthread_mutex_* et __spin_*
+ * pèsent ~3 ms/image sur le PC). Hors de ce cas, 0 et rien de fait. */
+int pomppc_update_dispatch_fast(void *ctx, void **procs, unsigned long *chg,
+                                long *ret, long *bits)
+{
+    PCtx *p;
+    int k;
+    if (!G.displock || !G.dispone || !G.lazy || G.state <= 0 || !chg || !procs ||
+        (chg[0] & 0x80))
+        return 0;
+    pthread_mutex_lock(&G.mu);
+    p = find_ctx(ctx);
+    if (!p || !p->procs) {
+        pthread_mutex_unlock(&G.mu);
+        return 0;                       /* pomppc_lazy_update rendrait 0 : comme avant */
+    }
+    for (k = 0; k < LAZY_WORDS; k++)
+        p->lazy_m[k] |= chg[k];
+    p->lazy_pending = 1;
+    p->procs = procs;
+    G.n_lazy_defer++;
+    *ret = p->lazy_ret;
+    G.n_dl_fast++;
+    *bits = hook_and_dispatch_locked(p, procs, chg, 0);
     pthread_mutex_unlock(&G.mu);
     return 1;
 }
@@ -18011,6 +18528,7 @@ void pomppc_context_destroyed(void *ctx)
            poignée d'Apple jusqu'au gldDestroyPipelineProgram. */
         {
             int k;
+            pprog_gen++;                /* 21/10 : PROGMEMO */
             for (k = 0; k < PPROG_MAX; k++)
                 if (pprog[k].ctx == ctx) {
                     unsigned long apple = pprog[k].apple;

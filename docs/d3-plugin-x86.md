@@ -307,3 +307,143 @@ sous ZONES=1, 8 sous ZONES=2**, image identique à l'octet dans les quatre modes
 vidage (rejeu = VM, `dumpvidages.py` doit dire ~1 soumission par image), ligne `VIDAGE`, et
 A/B entrelacé contre `ZONES=0` ; UT2004 et Marble Blast (aucune régression). Défaut à passer
 à 2 (`ZONES_DEFAULT`) si l'A/B gagne.
+
+## 10. Le fil de DOOM 3 dans le plugin, compté à l'instruction (21/10/2026)
+
+Révision `20261021-d3p`. Point de départ : 101,3 ms/image (d3-fen, binaire rapide, `ZONES=1`).
+Profil `sample` de l'invité du 21/10 (VM quotidienne, 1 742 échantillons du fil principal,
+`bench/tcg/ab/x86-prof-2110/apres-1/d3-fen/mesure/sample.txt` du dépôt principal, à
+101,1 ms/image) : `gldUpdateDispatch` 13,3 ms/image inclusif (dont `geom_dispatch_locked`
+1,7 propre, `us_get` 1,3, `geom_ok` 1,0, `vd_key_of` 0,9, `texture_unit_ok` 0,8,
+`geom_format` 0,75, `geom_dispatch_publish` 0,7), `geom_draw_client` 17,8 (3,0 propre ;
+`geom_draw_native` 4,8, `geom_send_all` 2,3, `send_state` 2,3, `prog_sync` 1,5), `memcmp` 1,5
+propre (appelants : `changed()` de `geom_send_all`, `prog_sync`, la clé du verdict,
+`send_state`), `pthread_mutex_*` + `__spin_*` ~3,4, `prog_state` 1,3. Rien n'atteint 5 % :
+le plugin est un coût réparti.
+
+### 10.1 L'outil : profil d'instructions exact (greffon TCG `hotblocks`)
+
+Un `sample` à 1 ms ne sépare pas des postes de 0,3 ms. Ici : le greffon TCG
+`tools/tcg/hotblocks.c` (compteur par bloc traduit) gagne l'option `snap=FICHIER` — un
+`touch` côté hôte écrit un instantané cumulé `<out>.<n>` — et une case par (adresse, taille) :
+le démarrage de Tiger épuisait les 262 144 cases et les blocs du plugin n'étaient plus comptés.
+Le job `plugprof` (`BUILD=1` : kext, plugin, `gltest` en `/tmp/gltest-prof`, `nm` du plugin ;
+sinon la scène seule) est encadré par deux instantanés ; `tools/re/hotplug.py AVANT APRÈS
+NM NOTE [N] [--par K]` nomme les blocs (le plugin écrit en tête de note l'adresse de
+`pomppc_geom_dispatch`, d'où le décalage de chargement) et donne les instructions invitées
+exécutées par fonction, sans échantillonnage. À part : `libSystem` (`memcmp`…, adresses
+fixes de Tiger), la page commune (`memcpy`), les appels par talon (`__picsymbolstub1`,
+`llvm-objdump --macho --indirect-symbols`) ; `llvm-objdump-21 --macho -d` désassemble le
+plugin pour annoter un bloc chaud instruction par instruction.
+
+```
+QEMU_EXTRA="-plugin $PWD/tools/tcg/libhotblocks.so,out=$H/hb.csv,snap=$H/go" \
+  DEVDISK=…/tiger-dev-plugin.raw python3 tools/guest/devloop.py start
+touch $H/go ; devloop.py run <job plugprof> ; touch $H/go
+python3 tools/re/hotplug.py $H/hb.csv.1 $H/hb.csv.2 nm.txt note-1.txt 40 --par 2120
+```
+
+(`QEMU_SRC=~/src/qemu bash tools/tcg/build.sh hotblocks` construit le greffon.)
+
+Scène **`d3inter`** (nouvelle, `gltest`) : la boucle ARB2 d'idTech 4 réduite — par lumière,
+volumes d'ombre (programme de sommets seul, faces alternées, couleur masquée) puis
+interactions (programmes de sommets et de fragments, unités 1, 4, 5 reliées à chaque
+surface, unités 0, 2, 3, 6 par lumière, env de sommets et de fragments, pointeurs génériques
+dans un VBO, indices 32 bits clients, une matrice par entité), précédées d'un remplissage
+au pipeline fixe qui relie l'unité 0 à chaque surface ; mélange additif (image comparée à
+l'octet). 2 120 dessins, 2 124 dispatches : 1 626 refaits par unité, 31 complets, le reste
+court-circuité (DOOM 3 : 410 / 148 / 736 par image — la scène charge plus le verdict par
+unité ; c'est un banc, pas un DOOM 3).
+
+Profil de `d3inter` avant ce lot : **15 174 instructions du plugin par dessin**, plus
+~1 400 dans `memcmp` (21 appels par dessin) et ~300 dans `pthread_mutex_*` (3 couples par
+dessin). Premiers postes : `send_state` + `state_units` 2 000, `geom_draw_client` 1 000,
+`geom_dispatch_locked` 920, `geom_draw_native` 835, `geom_format` 640, `vd_key_of` 530,
+`prog_state` + `prog_parse` + `pprog_find` ~790, `geom_send_all` 475, `us_get` + `us_fill`
+810, le crochetage sauté de DISPONE 320 (36 cases comparées) ; et **~10 % en appels de petits
+utilitaires** (`wl_extra` 280, `to_u8` 220, `put_f` 215, `unit_mask` 195, `gctx_of` 180,
+`us_fp`, `tex_cp`, `gls`, `va_enabled`, `unit_slot`…) : gcc 4.0 à `-O2` n'inline pas une
+fonction statique qui n'est pas déclarée `inline`.
+
+### 10.2 Les leviers
+
+Tous exacts par construction, chacun derrière une variable (éteinte par défaut,
+`*_DEFAULT 0`), sauf HOTINLINE (compilation, allumé). Aucun ne touche `qgpu_proto.h` ni
+`qgpu_abi.h` : ni QEMU ni kext à reconstruire. Gains : instructions par dessin de `d3inter`,
+chaque levier seul.
+
+| levier | variable | ce qu'il fait | gain |
+|---|---|---|---|
+| HOTINLINE | défaut **1** ; `-DHOTINLINE_DEFAULT=0` l'éteint | `static inline` (macro `HOT`) sur 16 utilitaires chauds — `gls`, `gctx_of`, `sw_color`, `unit_slot`, `unit_mask`, `us_fp`, `va_enabled`, `va_bpc`, `wl_extra`, `array_switch`, `geom_switch`, `self_thr`, `changed`, `put_f`, `clamp01`, `to_u8` — et le cas courant de `tex_cp` (déjà relevé cette image ; le relevé passe dans `tex_cp_fill`). Aucune arithmétique flottante déplacée (`clamp01`, `put_f` comparent ; `to_u8` garde son expression) | plugin −1 200 (−7,9 %) |
+| 1. dispatch | `POMPPC_GL_DISPFAST=1` (2 = contrôle) | bloc classé en **une** passe (`df_classify` : `st_neutral`, `wl_neutral` et la condition de bloc d'`uv_take`, `wl_extra` sorti de la boucle) ; dans le verdict par unité, la clé calculée par `uv_take` est reprise par `vd_store_k` si ses 7 mots de tête (image, époque des textures, état du device, contexte perdu, `qctx`, `cfg`, état GL) n'ont pas bougé — le reste est lu dans GLEngine et dans les programmes, que le verdict ne touche pas (fil de l'application, verrou tenu) ; `geom_format` prend le relevé des unités une fois au lieu d'un `us_get` par unité | plugin −1 020 |
+| 2. programmes | `POMPPC_GL_PROGMEMO=1` | `prog_state` (4 à 5 fois par dessin : clé au dispatch et au dessin, `prog_sync`, `texture_ok`) cherchait chaque fois l'objet programme dans les 256 entrées de `pprog` ; la réponse est gardée par étage pour (génération de la table, objet GLEngine) — `pprog_gen` avance à `pp_create`, `pp_destroy` et à la mort d'un contexte, seuls lieux où un couple (ctx, obj) change. `prog_parse` est toujours appelé | plugin −150 (3 programmes dans la scène ; DOOM 3 en a davantage, plus loin dans la table) |
+| 3. matrices | `POMPPC_GL_MTXDIRTY=1` (2 = contrôle) | `geom_send_all` ne compare modèle-vue, projection, matrices de texture et fenêtre/plage de profondeur (64 + 64 + 64·u + 16 + 8 octets, à chaque dessin) que si un dispatch a signalé leur bit du mot +0x08 depuis la dernière comparaison (`md_bits` ; textures : `md_tex`, un bit par unité, posé pour toutes à chaque bit 0x00ff0000, effacé à la comparaison de l'unité — une unité qui s'allume plus tard compare encore) ; tout à comparer après `invalidate_mirrors_from` et avant le premier envoi. Une comparaison faite laisse le cache égal à l'état : sans bit, elle redirait « inchangé » | `memcmp` −300 |
+| 4. état | `POMPPC_GL_STUNIT=1` (2 = contrôle) | dans `send_state_blk`, quand le verdict diffère de la dernière série : unités changées relevées mot à mot (`su_diff`, remplace le `memcmp` de 320 octets), clés refaites pour ces seules unités (`state_unit_one`), comparées dans l'ordre de la liste chaude (masque de positions parcouru par `cntlzw`) : même flux que la voie complète. Une unité au `TexUnit` inchangé (même époque) redonnerait les clés déjà dans `p->st` — l'hypothèse de la reprise « même verdict » d'avant, restreinte à l'unité | plugin −560, page commune −115 |
+| 5. verrou | `POMPPC_GL_DISPLOCK=1` | `gldUpdateDispatch` courant (transmission paresseuse prise, pas de 0x80, DISPONE allumé) : `pomppc_lazy_update` puis crochetage et verdict sous **un** verrou (`pomppc_update_dispatch_fast`, `hook_and_dispatch_locked`) — un couple `pthread_mutex_lock/unlock` (atomiques `lwarx`/`stwcx.`, chers sous TCG) et un `find_ctx` de moins par dispatch | −160 (davantage en temps : `pthread_mutex_*` + `__spin_*` ~3,4 ms/image dans le `sample` de DOOM 3, pour 3 couples par dessin) |
+
+**Tout allumé, `d3inter`** : plugin **15 174 → 12 205** instructions par dessin (−19,6 %,
+dont HOTINLINE −1 200 et les variables −1 820), `memcmp` 21 → 17 appels par dessin ;
+plugin + `libSystem` + page commune 26 650 → 23 045 (−3 600 par dessin ; dans ce qui reste,
+~7 000 sont l'écriture de l'image et des journaux par `gltest`, hors plugin). Pour DOOM 3,
+ordre de grandeur seulement : le plugin y pèse ~37 ms/image, dont ~25 dans ce que ces leviers
+touchent ; −15 à −20 % de ce poste ferait **~4 à 7 ms/image** (dont ~1 ms de verrous), ×1,3
+sur l'image — à mesurer, la répartition des dispatches de DOOM 3 n'est pas celle de la scène.
+
+### 10.3 Preuves (VM de dev `tiger-dev-plugin.raw`, RTX, 21/10)
+
+- `plugmd5`, **66 scènes** (les 65 d'avant + `d3inter`), images comparées à l'octet :
+  modes `ref`, `all` (`DISPFAST PROGMEMO MTXDIRTY STUNIT`), `chk` (mêmes leviers en
+  contrôle + `VERDICTCHECK=1`), `dfpm`, `mdsu` : **0 écart** ; puis `ref`, `dl`
+  (`DISPLOCK`), `all` (les cinq), `chk2` (`DISPFAST=2 MTXDIRTY=2 STUNIT=2 PROGMEMO=1
+  DISPLOCK=1`, sans `VERDICTCHECK` qui détourne le verdict par unité) : **0 écart**.
+  Compteurs de contrôle (ligne `D3P` de la note) sur l'ensemble des scènes : 2 639 clés
+  reprises recalculées, **0 écart** ; 19 260 comparaisons de matrices sautées, **0
+  changement non signalé** par le bloc ; 3 263 séries d'unités partielles comparées à la
+  complète, **0 écart** ; 6 222 dispatches sous un verrou. (Les scènes `arbvp`…`glsldp`
+  rendent 1 dans tous les modes, défaut compris : témoins pensés pour 64×64, pas un écart.)
+- HOTINLINE : `plugmd5` (66 scènes) avec un plugin compilé `-DHOTINLINE_DEFAULT=0`
+  (`EXTRA_CFLAGS`, nouveau dans le `Makefile`) : md5 **identiques** au plugin inliné.
+- Job `gpu` : défaut **56 OK, 0 échec** (`qgpu_test` 0) ; les cinq leviers allumés
+  (variables exportées au job) **56 OK, 0 échec**.
+- Rejeu : sans objet — aucun levier ne change le flux (`STUNIT` garde l'ordre des
+  `SET_STATE`, les autres ne touchent pas aux commandes émises).
+
+### 10.4 A/B sur la VM quotidienne (à jouer)
+
+Installer le plugin `20261021-d3p` (bundle construit dans la VM de dev :
+`bench/d3plug-2110/GLDriver-POMPPC-20261021.bundle.tar` du worktree), d'abord une partie
+sous contrôle :
+
+```
+tools/tcg/matab.sh d3p-chk 1 "chk:QEMU_FAST=1 POMPPC_GL_DISPFAST=2 POMPPC_GL_PROGMEMO=1 POMPPC_GL_MTXDIRTY=2 POMPPC_GL_STUNIT=2 POMPPC_GL_DISPLOCK=1" d3 fen
+```
+
+(ligne `D3P image N` de la note toutes les 500 images : écarts à 0), puis l'A/B :
+
+```
+tools/tcg/matab.sh d3p 3 "ref:QEMU_FAST=1" "x:QEMU_FAST=1 POMPPC_GL_DISPFAST=1 POMPPC_GL_PROGMEMO=1 POMPPC_GL_MTXDIRTY=1 POMPPC_GL_STUNIT=1 POMPPC_GL_DISPLOCK=1" d3 fen
+```
+
+Les deux bras ont HOTINLINE (compilé) ; son effet seul se lit en échangeant le bundle
+(`GLDriver-POMPPC-20261021-sansinline.bundle.tar`, même source, `-DHOTINLINE_DEFAULT=0`).
+Puis UT2004 et Marble Blast (MTXDIRTY et DISPLOCK les touchent aussi). Défauts à passer à 1
+levier par levier.
+
+### 10.5 Ce qui reste
+
+- **Verdicts complets de DOOM 3** (~148 par image, `geom_ok` + `texture_ok` ~1,6 ms) : les
+  changements de programmes (ombres ↔ interactions), dont le bit du bloc n'est pas neutre et
+  qui changent la clé. Piste : deux verdicts gardés (le courant et le précédent, avec le OU
+  des blocs reçus depuis) — l'interaction suivante repartirait du verdict d'interaction
+  précédent, par unités. Gain estimé ~0,5 ms/image (toutes les unités restent à refaire), non
+  construit.
+- **`geom_draw_client`** (3 ms propre dans DOOM 3) : boucles sur les 13 + 16 + 8 + 16
+  attributs possibles à chaque dessin (plan et sources) ; un parcours des seuls bits du format
+  (`cntlzw`) les réduirait.
+- **Recopie des indices** (`__memcpy` 2,9 ms/image, ~1,8 Mio) et **levier 5** (indices en VBO
+  d'éléments, `r_useIndexBuffers 1`) : regardé, pas construit. Servir par `DRAW_NATIVE` un VBO
+  d'éléments réécrit à chaque image supprimerait le balayage, pas la recopie (les
+  `BUF_SUBDATA` du jeu la feraient à la place de la zone des indices) ; le repli `NATSHM` de
+  `vitesse-doom3-x86.md` §5.6 (miroir d'éléments sale à chaque image) est à comprendre
+  d'abord.
+- Le crochetage sauté de DISPONE compare encore 36 cases par dispatch (~320 instructions).

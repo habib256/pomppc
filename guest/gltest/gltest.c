@@ -2069,6 +2069,244 @@ int main(int argc, char **argv)
             } else
                 printf("  ok   d3idx : centre %02x%02x%02x\n", pc[0], pc[1], pc[2]);
         }
+    } else if (!strcmp(scene, "d3inter")) {
+        /* 21/10/2026 — le fil de DOOM 3 vu par le plugin (docs/d3-plugin-x86.md
+           §10) : la boucle de rendu ARB2 d'idTech 4, réduite. Par « lumière » :
+           volumes d'ombre (programme de sommets seul, faces alternées,
+           couleur masquée), puis interactions (programmes de sommets et de
+           fragments, unités 1, 4, 5 reliées à CHAQUE surface, env de sommets
+           et de fragments, pointeurs génériques dans un VBO, indices 32 bits
+           clients, une matrice par entité). Avant les lumières, un
+           remplissage au pipeline fixe qui relie l'unité 0 à chaque surface.
+           Mêmes motifs de blocs que DOOM 3 (docs/re/bloc-changements-r4.md
+           §4) : court-circuités, refaits par unité, complets. Mélange
+           additif : chaque dessin compte dans l'image, comparée À L'OCTET
+           entre les modes du plugin (job plugmd5). GLTEST_D3FR=n : n images
+           (défaut 2). */
+        typedef void (*GenBuffersFn)(GLsizei, GLuint *);
+        typedef void (*BindBufferFn)(GLenum, GLuint);
+        typedef void (*BufferDataFn)(GLenum, long, const GLvoid *, GLenum);
+        typedef void (*DeleteBuffersFn)(GLsizei, const GLuint *);
+        typedef void (*gp_f)(GLsizei, GLuint *);
+        typedef void (*bp_f)(GLenum, GLuint);
+        typedef void (*ps_f)(GLenum, GLenum, GLsizei, const GLvoid *);
+        typedef void (*pe_f)(GLenum, GLuint, const GLfloat *);
+        typedef void (*va_f)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid *);
+        typedef void (*ea_f)(GLuint);
+        typedef void (*at_f)(GLenum);
+        GenBuffersFn gen_buffers = (GenBuffersFn)gl_sym("glGenBuffers", "glGenBuffersARB");
+        BindBufferFn bind_buffer = (BindBufferFn)gl_sym("glBindBuffer", "glBindBufferARB");
+        BufferDataFn buffer_data = (BufferDataFn)gl_sym("glBufferData", "glBufferDataARB");
+        DeleteBuffersFn delete_buffers = (DeleteBuffersFn)gl_sym("glDeleteBuffers", "glDeleteBuffersARB");
+        gp_f gen = (gp_f)gl_sym("glGenProgramsARB", "glGenProgramsARB");
+        bp_f bind = (bp_f)gl_sym("glBindProgramARB", "glBindProgramARB");
+        ps_f str = (ps_f)gl_sym("glProgramStringARB", "glProgramStringARB");
+        pe_f env = (pe_f)gl_sym("glProgramEnvParameter4fvARB", "glProgramEnvParameter4fvARB");
+        va_f vap = (va_f)gl_sym("glVertexAttribPointerARB", "glVertexAttribPointerARB");
+        ea_f eva = (ea_f)gl_sym("glEnableVertexAttribArrayARB", "glEnableVertexAttribArrayARB");
+        ea_f dva = (ea_f)gl_sym("glDisableVertexAttribArrayARB", "glDisableVertexAttribArrayARB");
+        at_f act = (at_f)gl_sym("glActiveTexture", "glActiveTextureARB");
+        static const char vp_inter[] =
+            "!!ARBvp1.0\n"
+            "OPTION ARB_position_invariant;\n"
+            "MOV result.texcoord[0], vertex.attrib[8];\n"
+            "MAD result.texcoord[1], vertex.attrib[8], program.env[4], program.env[5];\n"
+            "MOV result.texcoord[2], vertex.attrib[9];\n"
+            "MOV result.color, program.env[6];\n"
+            "END\n";
+        static const char fp_inter[] =
+            "!!ARBfp1.0\n"
+            "TEMP a, b, c, d, e;\n"
+            "TEX a, fragment.texcoord[0], texture[1], 2D;\n"
+            "TEX b, fragment.texcoord[1], texture[4], 2D;\n"
+            "TEX c, fragment.texcoord[0], texture[5], 2D;\n"
+            "TEX d, fragment.texcoord[2], texture[2], 2D;\n"
+            "TEX e, fragment.texcoord[1], texture[3], 2D;\n"
+            "MUL a, a, b;\n"
+            "MAD a, c, program.env[1], a;\n"
+            "MUL a, a, d;\n"
+            "MUL a, a, e;\n"
+            "MUL result.color, a, program.env[0];\n"
+            "END\n";
+        static const char vp_shadow[] =
+            "!!ARBvp1.0\n"
+            "OPTION ARB_position_invariant;\n"
+            "MOV result.color, program.env[7];\n"
+            "END\n";
+        enum { GN = 48, NQ = GN * GN, QPD = 24, NL = 6, NSH = 40, NIN = 120, NFILL = 100,
+               NTEX = 8, VW = 16 };
+        static float vb[(GN + 1) * (GN + 1) * VW];      /* 64 octets par sommet */
+        static GLuint ix[NQ * 6];
+        static GLubyte tx[NTEX][4 * 4 * 4];
+        GLuint vbo, tex[NTEX], prog[3];
+        unsigned long hsh = 2166136261UL;
+        int i, j, d, l, s, fr, nfr = getenv("GLTEST_D3FR") ? atoi(getenv("GLTEST_D3FR")) : 2;
+        if (!gen_buffers || !bind_buffer || !buffer_data || !delete_buffers || !gen || !bind ||
+            !str || !env || !vap || !eva || !dva || !act) {
+            fprintf(stderr, "entrées VBO / ARB / multitexture absentes\n");
+            return 4;
+        }
+        for (j = 0; j <= GN; j++)
+            for (i = 0; i <= GN; i++) {
+                float *v = vb + (j * (GN + 1) + i) * VW;
+                hsh = (hsh ^ (unsigned long)(i * 131 + j)) * 16777619UL;
+                v[0] = -1.0f + 2.0f * i / GN;
+                v[1] = -1.0f + 2.0f * j / GN;
+                v[2] = 0.0f;
+                v[3] = (float)i / GN;                   /* st */
+                v[4] = (float)j / GN;
+                v[5] = (float)(hsh & 255) / 255.0f;     /* « tangente » */
+                v[6] = (float)((hsh >> 8) & 255) / 255.0f;
+                v[7] = (float)((hsh >> 16) & 255) / 255.0f;
+                v[8] = 1.0f;
+                for (d = 9; d < VW; d++)
+                    v[d] = 0.0f;
+            }
+        for (j = 0; j < GN; j++)
+            for (i = 0; i < GN; i++) {
+                GLuint a = (GLuint)(j * (GN + 1) + i), *q = ix + (j * GN + i) * 6;
+                q[0] = a; q[1] = a + 1; q[2] = a + GN + 2;
+                q[3] = a; q[4] = a + GN + 2; q[5] = a + GN + 1;
+            }
+        for (s = 0; s < NTEX; s++)
+            for (i = 0; i < 16; i++) {
+                hsh = (hsh ^ (unsigned long)(s * 977 + i)) * 16777619UL;
+                tx[s][i * 4 + 0] = (GLubyte)(64 + (hsh & 127));
+                tx[s][i * 4 + 1] = (GLubyte)(64 + ((hsh >> 8) & 127));
+                tx[s][i * 4 + 2] = (GLubyte)(64 + ((hsh >> 16) & 127));
+                tx[s][i * 4 + 3] = 255;
+            }
+        glGenTextures(NTEX, tex);
+        for (s = 0; s < NTEX; s++) {
+            glBindTexture(GL_TEXTURE_2D, tex[s]);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, tx[s]);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+        gen(3, prog);
+        bind(0x8620, prog[0]);
+        str(0x8620, 0x8875, (GLsizei)strlen(vp_inter), vp_inter);
+        bind(0x8804, prog[1]);
+        str(0x8804, 0x8875, (GLsizei)strlen(fp_inter), fp_inter);
+        bind(0x8620, prog[2]);
+        str(0x8620, 0x8875, (GLsizei)strlen(vp_shadow), vp_shadow);
+        printf("  programmes : erreur GL 0x%x\n", (unsigned)glGetError());
+        glMatrixMode(GL_PROJECTION); glLoadIdentity();
+        glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
+        glClearColor(0, 0, 0, 1);
+        glDisable(GL_DEPTH_TEST);
+        gen_buffers(1, &vbo);
+        bind_buffer(0x8892, vbo);
+        buffer_data(0x8892, sizeof(vb), vb, 0x88E4);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glVertexPointer(3, GL_FLOAT, VW * 4, (const GLvoid *)0);
+        for (fr = 0; fr < nfr; fr++) {
+            GLfloat m[16];
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDisable(GL_BLEND);
+            /* remplissage : pipeline fixe, unité 0 reliée à chaque surface */
+            act(0x84C0);
+            glEnable(GL_TEXTURE_2D);
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+            glTexCoordPointer(2, GL_FLOAT, VW * 4, (const GLvoid *)12);
+            glColor4f(0.25f, 0.25f, 0.25f, 1.0f);
+            for (d = 0; d < NFILL; d++) {
+                int first = (d * 1237 + fr * 31) % (NQ - QPD);
+                glBindTexture(GL_TEXTURE_2D, tex[(d * 5) % NTEX]);
+                memset(m, 0, sizeof(m));
+                m[0] = m[5] = m[10] = m[15] = 1.0f;
+                m[12] = (float)((d * 7) % 13 - 6) / 64.0f;
+                m[13] = (float)((d * 11) % 17 - 8) / 64.0f;
+                glLoadMatrixf(m);
+                glDrawElements(GL_TRIANGLES, QPD * 6, GL_UNSIGNED_INT, ix + first * 6);
+            }
+            glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+            glDisable(GL_TEXTURE_2D);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_ONE, GL_ONE);
+            for (l = 0; l < NL; l++) {
+                GLfloat lc[4], ec[4];
+                glEnable(GL_SCISSOR_TEST);
+                glScissor((l * 37) % (W / 2), (l * 53) % (H / 2), W / 2 + 8 * l, H / 2 + 5 * l);
+                /* volumes d'ombre : programme de sommets seul, couleur masquée */
+                glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                glEnable(GL_CULL_FACE);
+                bind(0x8620, prog[2]);
+                glEnable(0x8620);
+                lc[0] = lc[1] = lc[2] = 0.0f; lc[3] = 1.0f;
+                env(0x8620, 7, lc);
+                for (s = 0; s < NSH; s++) {
+                    int first = (s * 733 + l * 97 + fr * 13) % (NQ - QPD);
+                    glCullFace((s & 1) ? GL_FRONT : GL_BACK);
+                    if (s % 4 == 0) {
+                        memset(m, 0, sizeof(m));
+                        m[0] = m[5] = m[10] = m[15] = 1.0f;
+                        m[12] = (float)((s * 3 + l) % 9 - 4) / 64.0f;
+                        glLoadMatrixf(m);
+                    }
+                    glDrawElements(GL_TRIANGLES, QPD * 6, GL_UNSIGNED_INT, ix + first * 6);
+                }
+                glDisable(GL_CULL_FACE);
+                glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                /* interactions */
+                bind(0x8620, prog[0]);
+                bind(0x8804, prog[1]);
+                glEnable(0x8804);
+                act(0x84C0); glBindTexture(GL_TEXTURE_2D, tex[l % NTEX]);
+                act(0x84C2); glBindTexture(GL_TEXTURE_2D, tex[(l + 1) % NTEX]);
+                act(0x84C3); glBindTexture(GL_TEXTURE_2D, tex[(l + 2) % NTEX]);
+                act(0x84C6); glBindTexture(GL_TEXTURE_2D, tex[(l + 3) % NTEX]);
+                eva(8);
+                eva(9);
+                for (s = 0; s < NIN; s++) {
+                    int first = (s * 1009 + l * 59 + fr * 7) % (NQ - QPD);
+                    if (s % 5 == 0) {
+                        memset(m, 0, sizeof(m));
+                        m[0] = m[5] = m[10] = m[15] = 1.0f;
+                        m[12] = (float)((s * 7 + l) % 13 - 6) / 64.0f;
+                        m[13] = (float)((s * 3 + l) % 11 - 5) / 64.0f;
+                        glLoadMatrixf(m);
+                    }
+                    lc[0] = 1.0f + 0.125f * (s % 3); lc[1] = 0.5f; lc[2] = 0.25f; lc[3] = 0.0f;
+                    env(0x8620, 4, lc);
+                    env(0x8620, 5, lc + 1);
+                    ec[0] = 0.03f * (l + 1); ec[1] = 0.02f; ec[2] = 0.04f; ec[3] = 1.0f;
+                    env(0x8620, 6, ec);
+                    ec[0] = 0.05f; ec[1] = 0.03f * (s % 4); ec[2] = 0.02f; ec[3] = 1.0f;
+                    env(0x8804, 0, ec);
+                    env(0x8804, 1, lc);
+                    act(0x84C1); glBindTexture(GL_TEXTURE_2D, tex[(s * 3 + l) % NTEX]);
+                    act(0x84C4); glBindTexture(GL_TEXTURE_2D, tex[(s * 5 + 1) % NTEX]);
+                    act(0x84C5); glBindTexture(GL_TEXTURE_2D, tex[(s * 7 + 2) % NTEX]);
+                    vap(8, 2, GL_FLOAT, GL_FALSE, VW * 4, (const GLvoid *)12);
+                    vap(9, 3, GL_FLOAT, GL_FALSE, VW * 4, (const GLvoid *)20);
+                    glDrawElements(GL_TRIANGLES, QPD * 6, GL_UNSIGNED_INT, ix + first * 6);
+                }
+                dva(9);
+                dva(8);
+                glDisable(0x8804);
+                glDisable(0x8620);
+                glDisable(GL_SCISSOR_TEST);
+            }
+            act(0x84C0);
+            glFlush();
+        }
+        glDisableClientState(GL_VERTEX_ARRAY);
+        bind_buffer(0x8892, 0);
+        delete_buffers(1, &vbo);
+        glDisable(GL_BLEND);
+        glFinish();
+        {   /* témoin grossier : quelque chose a été dessiné */
+            unsigned char pc[4] = { 0, 0, 0, 0 };
+            glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pc);
+            if (!pc[0] && !pc[1] && !pc[2]) {
+                printf("  FAIL d3inter : centre noir, rien de dessiné\n");
+                failures++;
+            } else
+                printf("  ok   d3inter : centre %02x%02x%02x\n", pc[0], pc[1], pc[2]);
+        }
+        glDeleteTextures(NTEX, tex);
     } else if (!strcmp(scene, "r4")) {
         /* Relevé R4 du lot 3 du verdict unique (docs/re/bloc-changements-r4.md) :
            quel bit du bloc de changements gctx+0x310 pose chaque appel GL.

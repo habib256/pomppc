@@ -617,6 +617,20 @@ long gldUpdateDispatch(long a, long b, long c, long d, long e, long f, long g, l
     /* 0x80 : le tampon de dessin change (gldSetDrawBufferPtrs chez Apple) */
     int buf = c && (*(unsigned long *)c & 0x80);
     int apple = 1;                      /* le GLDriver d'Apple a-t-il récrit la table ? */
+    {
+        /* 21/10 (POMPPC_GL_DISPLOCK) : le cas courant sous un seul verrou ;
+           mêmes effets, mêmes lignes de trace que ci-dessous */
+        long bits;
+        if (!buf && pomppc_update_dispatch_fast((void *)a, (void **)b, (unsigned long *)c,
+                                                &r, &bits)) {
+            if (trace_on)
+                pomppc_log("gldUpdateDispatch(%08lx %08lx changes %08lx) -> %ld%s\n", a, b,
+                           c ? *(unsigned long *)c : 0, r, " (gardé)");
+            if (bits && trace_on)
+                pomppc_log("  géométrie brute : +%ld\n", bits);
+            return r | bits;
+        }
+    }
     if (pomppc_lazy_update((void *)a, (void **)b, (unsigned long *)c, &r)) {
         /* Transmission paresseuse : Apple n'est appelé que sous 0x80 ; sinon
            les changements sont cumulés et lui seront transmis juste avant
