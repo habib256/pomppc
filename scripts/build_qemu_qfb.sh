@@ -30,6 +30,7 @@
 #   • frsp fctiw fctiwz fcmpo fdivs fdiv natifs, fsel en ops TCG (x-fp-native-cmp) — patches/tcg/0033
 #   • vcmp*fp, vcfsx/vcfux, vctsxs/vctuxs natifs (x-vfp-native-cmp)  — patches/tcg/0034
 #   • TLB invalidé avec précision, lmw/stmw et dcbz en ligne — patches/tcg/0031, 0032, 0035
+#   • flottant simple : opérandes connus, FPRF paresseux, stfs court — patches/tcg/0045-0047
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -950,6 +951,23 @@ target/ppc/mem_helper.c helper_lmw_verify
 target/ppc/cpu_init.c x-dcbz-inline
 target/ppc/mem_helper.c helper_dcbz_verify
 TCG31_MARKERS
+  # --- tcg/0045-0047 : le flottant simple sans ses contrôles redondants, docs/tcg-g4.md §36-38 ---
+  # 0045 : opérandes connus valides et porte du FPSCR connue ouverte dans un bloc
+  # (x-fp-known) ; 0046 : FPRF et FI calculés à la lecture du FPSCR (x-fprf-lazy) ;
+  # 0047 : stfs court d'une valeur connue (x-stfs-known). Émetteurs x86_64 et aarch64
+  # (ce dernier écrit sur le PC, jamais construit). Propriétés éteintes par défaut.
+  if ! grep -q "x-fp-known" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : opérandes flottants connus valides (x-fp-known)"
+    patch_strict "$ROOT/patches/tcg/0045-ppc-fp-known.patch"
+  fi
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0045-0047 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG45_MARKERS'
+target/ppc/translate/fp-impl.c.inc fpk_scan
+target/ppc/fpu_helper.c fpk_exit
+tcg/x86_64/tcg-target.c.inc PFP_K_G
+TCG45_MARKERS
 fi
 
 # --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---
@@ -1203,6 +1221,7 @@ check_opt x-vfp-native-cmp qemu_cpu_has_prop "${BIN}64"   "mac99,via=pmu" g4 x-v
 check_opt x-tlb-precise  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-tlb-precise=on
 check_opt x-lmw-inline   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-lmw-inline=on
 check_opt x-dcbz-inline  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-dcbz-inline=on
+check_opt x-fp-known    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fp-known=on
 echo
 echo "→ $CAPS"
 

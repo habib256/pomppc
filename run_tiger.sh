@@ -52,6 +52,9 @@
 #   FPNATIVECMP=0 ./run_tiger.sh # coupe frsp fctiw fctiwz fcmpo fdivs fdiv par le FPU de l'hôte, fsel en
 #                             # ops TCG (x-fp-native-cmp, patches/tcg/0033, x86-64 ; allumé par défaut
 #                             # sur Linux x86-64 depuis le 06/10) ; FPNCMPVERIFY=1 : preuve
+#   FPKNOWN=1 ./run_tiger.sh  # dans un bloc, omet les tests d'opérande et la porte du FPSCR que
+#                             # l'op de x-fp-native n'a plus à refaire (x-fp-known, patches/tcg/0045,
+#                             # éteint par défaut, docs/tcg-g4.md §36) ; FPVERIFY=1 : preuve
 #   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
 #                             # tcg/0016, allumé par défaut, docs/tcg-g4.md §24) ; FPVERIFY=1 : preuve
 #   TBFAST=0 ./run_tiger.sh   # coupe mftb/mftbu calculés depuis le compteur de l'hôte (cntvct, 1 GHz ;
@@ -518,6 +521,24 @@ if [ "${FPNATIVECMP:-0}" != 0 ]; then
   else
     echo "⚠  FPNATIVECMP=1 demandé mais ce QEMU n'a pas la propriété 'x-fp-native-cmp' (patches/tcg/0033)." >&2
     MODE="$MODE + comparaisons-conversions natives DEMANDÉES MAIS INDISPONIBLES"
+  fi
+fi
+# --- Opérandes flottants connus (x-fp-known, patches/tcg/0045, docs/tcg-g4.md §36) ---
+# Dans un bloc de traduction, l'op de x-fp-native n'y teste plus un opérande qu'une
+# instruction précédente du bloc garantit flottant simple nul ou normal (résultat de son
+# chemin court), ni la porte du FPSCR déjà franchie ; l'instruction qui garantit quitte le
+# bloc quand son chemin lent rompt la garantie. Mêmes résultats au bit près. N'agit
+# qu'avec x-fp-native. Éteint par défaut : FPKNOWN=1 ; FPVERIFY=1 le vérifie.
+if [ "${FPKNOWN:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-fp-known=on"; then
+    case "$CPU_SPEC" in
+      *x-fp-native=on*) CPU_SPEC="$CPU_SPEC,x-fp-known=on"; MODE="$MODE + FLOTTANT-CONNU" ;;
+      *) echo "⚠  FPKNOWN=1 sans x-fp-native : x-fp-known n'agit qu'avec lui (FPNATIVE=1)." >&2
+         MODE="$MODE + flottant connu SANS EFFET" ;;
+    esac
+  else
+    echo "⚠  FPKNOWN=1 demandé mais ce QEMU n'a pas la propriété 'x-fp-known' (patches/tcg/0045)." >&2
+    MODE="$MODE + flottant connu DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
 # --- Comparaisons et conversions AltiVec par le FPU de l'hôte (x-vfp-native-cmp,

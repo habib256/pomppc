@@ -45,6 +45,10 @@ grep -q "helper_fp32_flat" "$SRC/target/ppc/fpu_helper.c" && DFLAT="-DFPPROOF_FL
 grep -q "ppc_fp32_native_slow" "$SRC/target/ppc/fpu_helper.c" && DFLAT="$DFLAT -DFPPROOF_NATIVE"
 # x-fp-native-cmp (patches/tcg/0033, §33) : frsp fctiw fctiwz fcmpo fdivs fdiv
 grep -q "fpi_short" "$OUT/fpproof-fast.h" && DFLAT="$DFLAT -DFPPROOF_NCMP"
+# x-fp-known, x-fprf-lazy, x-stfs-known (patches/tcg/0045-0047, §36-38)
+grep -q "fpk_exit" "$SRC/target/ppc/fpu_helper.c" && DFLAT="$DFLAT -DFPPROOF_KNOWN"
+grep -q "ppc_fprf_flush" "$SRC/target/ppc/cpu.h" && DFLAT="$DFLAT -DFPPROOF_LAZY"
+grep -q "gen_stfs_known" "$SRC/target/ppc/translate/fp-impl.c.inc" && DFLAT="$DFLAT -DFPPROOF_STFS"
 FLAGS="$(python3 - "$B/compile_commands.json" <<'PY'
 import json, shlex, sys
 for e in json.load(open(sys.argv[1])):

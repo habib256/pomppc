@@ -39,6 +39,27 @@
  * jamais (la remise à zéro de l'instruction suivante l'efface) : même règle
  * que le vérificateur (docs/tcg-g4.md §25.1).
  *
+ * tcg/0045-0047 (-DFPPROOF_KNOWN quand l'arbre a x-fp-known, -DFPPROOF_LAZY
+ * avec x-fprf-lazy, -DFPPROOF_STFS avec x-stfs-known ; docs/tcg-g4.md
+ * §36-38) :
+ *   - porte monotone : sur TOUS les vecteurs, la séquence d'origine ne fait
+ *     que poser XX, jamais l'ôter, ni toucher XE, OE, UE, RN ;
+ *   - producteurs : le résultat d'un chemin court de fmuls, fmadds & co.,
+ *     fdivs, frsp est fpi_zon() ; celui de fadds/fsubs aussi, sauf somme
+ *     minuscule non nulle (comptée : c'est le test que FPK_R ajoute) ;
+ *   - sortie de bloc du talon : ppc_fp32_native_slow avec FPK_R, FPK_X,
+ *     FPK_X|FPK_XRN quitte le bloc (cpu_loop_exit) exactement quand le
+ *     résultat d'origine n'est pas fpi_zon() / la porte est fermée après,
+ *     et laisse alors frT, la moitié VSR, le FPSCR et nip + 4 comme le code
+ *     généré l'aurait fait ; sinon il rend la séquence d'origine ;
+ *   - FPRF paresseux : ppc_fprf_of(x) = la classe de
+ *     helper_compute_fprf_float64(x) pour chaque opérande et résultat ;
+ *     ppc_fpscr_lazy(f, r) = fpi_fpscr_arith(lazy(f, s), r) pour tout état
+ *     paresseux s d'avant ; la formule de fcmpu/fcmpo paresseux de
+ *     l'émetteur (C = FPSCR[16] ou fprf_src == -0) ;
+ *   - stfs court : sur les 2^32 motifs simples, ceux que fpi_zon() accepte
+ *     (une fois DOUBLE()) donnent bits 63:62 || 58:29 = helper_tosingle().
+ *
  * Usage : fpproof N [graine]  (N vecteurs aléatoires par opération et par
  * famille de FPSCR ; plus le catalogue croisé).
  */
@@ -77,6 +98,17 @@ ObjectClass *object_class_dynamic_cast_assert(ObjectClass *c, const char *t,
 
 static jmp_buf jb;
 static int raised, raised_code;
+#ifdef FPPROOF_KNOWN
+/* tcg/0045 : la sortie de bloc du talon (fpk_exit) */
+static jmp_buf jb_exit;
+static int exited;
+bool cpu_restore_state(CPUState *c, uintptr_t host_pc) { return true; }
+void cpu_loop_exit(CPUState *c)
+{
+    exited = 1;
+    longjmp(jb_exit, 1);
+}
+#endif
 void raise_exception_err_ra(CPUPPCState *env, uint32_t exception,
                             uint32_t error_code, uintptr_t raddr)
 {
@@ -109,6 +141,11 @@ static void env_setup(uint64_t fpscr, uint64_t msr)
     cpu->parent_obj.exception_index = -1;
     env->error_code = 0;
     raised = 0;
+#ifdef FPPROOF_KNOWN
+    env->nip = 0x1000;
+    *cpu_vsrl_ptr(env, 7) = 0x1234;    /* FRT, défini plus bas */
+    exited = 0;
+#endif
 }
 
 /* drapeaux comparés : tous sauf input_denormal_used (voir l'en-tête) */
@@ -470,6 +507,52 @@ static const char *names[FPI_NOPS] = {
 #endif
 };
 
+#ifdef FPPROOF_KNOWN
+static uint64_t n_gate, n_gate_bad, n_kprod, n_ktiny, n_kbad;
+static uint64_t n_exit[3], n_stay[3], n_exit_bad, n_lazy, n_lazy_bad;
+static uint64_t n_cmpl, n_cmpl_bad, n_fprf, n_fprf_bad;
+
+static bool k_producer(int op)
+{
+    return op < FPI_CMPU
+#ifdef FPPROOF_NCMP
+        || op == FPI_FRSP || op == FPI_DIVS
+#endif
+        ;
+}
+
+#ifdef FPPROOF_LAZY
+/* ppc_fprf_of() contre helper_compute_fprf_float64() */
+static void check_fprf(uint64_t x)
+{
+    target_ulong save = env->fpscr;
+
+    env->fpscr = 0;
+    helper_compute_fprf_float64(env, x);
+    n_fprf++;
+    if (((env->fpscr >> FPSCR_FPRF) & 0x1f) != ppc_fprf_of(x) &&
+        n_fprf_bad++ < 20) {
+        printf("DIVERGENCE classe %016" PRIx64 " : %x / %x\n", x,
+               (unsigned)((env->fpscr >> FPSCR_FPRF) & 0x1f), ppc_fprf_of(x));
+    }
+    env->fpscr = save;
+}
+
+/* un état paresseux d'avant : rien, +0, -0, un normal au hasard */
+static uint64_t k_src(int k)
+{
+    switch (k) {
+    case 0: return PPC_FPRF_NONE;
+    case 1: return 0;
+    case 2: return 1ull << 63;
+    default: return (rnd() & 0x800fffffe0000000ull) |
+                    (uint64_t)(0x381 + rnd() % 0xfe) << 52;
+    }
+}
+#endif /* FPPROOF_LAZY */
+
+#endif
+
 static void check_arith(int op, uint64_t a, uint64_t b, uint64_t c,
                         uint64_t fpscr, uint64_t msr)
 {
@@ -506,6 +589,36 @@ static void check_arith(int op, uint64_t a, uint64_t b, uint64_t c,
         return;
     }
     n_fast[op]++;
+#ifdef FPPROOF_KNOWN
+    if (k_producer(op)) {
+        n_kprod++;
+        if (!fpi_zon(r)) {
+            if ((op == FPI_ADD || op == FPI_SUB) && (r << 1) != 0 &&
+                (r << 1) < (0x381ull << 53)) {
+                n_ktiny++;              /* somme minuscule : FPK_R la teste */
+            } else if (n_kbad++ < 20) {
+                printf("DIVERGENCE producteur %s a=%016" PRIx64 " b=%016"
+                       PRIx64 " c=%016" PRIx64 " : %016" PRIx64 "\n",
+                       names[op], a, b, c, r);
+            }
+        }
+    }
+#ifdef FPPROOF_LAZY
+    if (!IS_CVT(op)) {
+        for (int k = 0; k < 4; k++) {
+            uint64_t s0 = k_src(k);
+            /* FPRF et FI d'avant n'y sont pour rien : n'importe quel s0 */
+            n_lazy++;
+            if (ppc_fpscr_lazy(fpscr, r) !=
+                    fpi_fpscr_arith(ppc_fpscr_lazy(fpscr, s0), r) &&
+                n_lazy_bad++ < 20) {
+                printf("DIVERGENCE paresseux %s r=%016" PRIx64 " fpscr=%08"
+                       PRIx64 "\n", names[op], r, fpscr);
+            }
+        }
+    }
+#endif
+#endif
     ref_arith(op, a, b, c, &ref);
     if (ref.r != r || ref.fpscr != nf ||
         ref.flags != float_flag_inexact || ref.excp != -1 || ref.raised) {
@@ -534,6 +647,22 @@ static void check_fcmpu(int op, uint64_t a, uint64_t b, uint64_t fpscr,
         return;
     }
     n_fast[op]++;
+#ifdef FPPROOF_LAZY
+    /* l'émetteur paresseux : C = FPSCR[16] ou fprf_src == -0, FPCC, FI */
+    for (int k = 0; k < 4; k++) {
+        uint64_t s0 = k_src(k);
+        uint64_t cbit = s0 == PPC_FPRF_NONE ? (fpscr >> 16) & 1
+                                            : s0 == 1ull << 63;
+        uint64_t nfl = (fpscr & ~(uint64_t)(0x1f000 | FP_FI)) | cbit << 16 |
+                       (uint64_t)cr << 12 | FP_FI;
+        n_cmpl++;
+        if (nfl != fpi_fpscr_fcmpu(ppc_fpscr_lazy(fpscr, s0), cr) &&
+            n_cmpl_bad++ < 20) {
+            printf("DIVERGENCE fcmpu paresseux s=%016" PRIx64 " fpscr=%08"
+                   PRIx64 "\n", s0, fpscr);
+        }
+    }
+#endif
     ref_fcmpu(op, a, b, &ref);
     if (ref.cr != cr || ref.fpscr != fpi_fpscr_fcmpu(fpscr, cr) ||
         (ref.flags & FLAGMASK) != float_flag_inexact || ref.excp != -1 ||
@@ -547,9 +676,92 @@ static void check_fcmpu(int op, uint64_t a, uint64_t b, uint64_t fpscr,
     }
 }
 
+#ifdef FPPROOF_KNOWN
+/*
+ * Tous les vecteurs : porte monotone dans la séquence d'origine ; le talon
+ * avec FPK_R / FPK_X / FPK_X|FPK_XRN contre elle.
+ */
+static void check_known(int op, uint64_t a, uint64_t b, uint64_t c,
+                        uint64_t fpscr, uint64_t msr)
+{
+    static const uint32_t fl[3] = { FPK_R, FPK_X, FPK_X | FPK_XRN };
+    Out ref;
+    uint64_t g0;
+    bool cmp = is_cmp(op);
+
+    env_setup(fpscr, msr);
+    g0 = env->fpscr;
+    if (cmp) {
+        ref_fcmpu(op, a, b, &ref);
+    } else {
+        ref_arith(op, a, b, c, &ref);
+    }
+#ifdef FPPROOF_LAZY
+    check_fprf(a);
+    check_fprf(b);
+    if (!cmp) {
+        check_fprf(ref.r);
+    }
+#endif
+    if (!ref.raised) {
+        n_gate++;
+        if ((((ref.fpscr ^ g0) & (FP_XE | FP_OE | FP_UE | FP_RN)) ||
+             ((g0 & FP_XX) && !(ref.fpscr & FP_XX))) && n_gate_bad++ < 20) {
+            printf("DIVERGENCE porte %s a=%016" PRIx64 " b=%016" PRIx64
+                   " : %08" PRIx64 " -> %08" PRIx64 "\n", names[op], a, b,
+                   g0, ref.fpscr);
+        }
+    }
+    for (int k = 0; k < 3; k++) {
+        uint32_t sel = op | (cmp ? 3 : FRT) << 8 | fl[k];
+        uint64_t gm = FP_XX | FP_XE | FP_OE | FP_UE |
+                      (fl[k] & FPK_XRN ? FP_RN : 0);
+        bool want, bad = false;
+        Int128 ret = int128_zero();
+
+        if (cmp && k == 0) {
+            continue;                   /* fcmpu n'écrit pas de FPR */
+        }
+        want = !ref.raised &&
+               ((fl[k] & FPK_R) ? !fpi_zon(ref.r) : (ref.fpscr & gm) != FP_XX);
+        env_setup(fpscr, msr);
+        *cpu_fpr_ptr(env, FRT) = FPR_POISON;
+        env->crf[3] = 0xf;
+        if (setjmp(jb) == 0) {
+            if (setjmp(jb_exit) == 0) {
+                ret = ppc_fp32_native_slow(env, a, b, c, sel, 0);
+            }
+        }
+        if (raised) {
+            bad = !ref.raised || exited;
+        } else if (exited) {
+            n_exit[k]++;
+            bad = !want || env->fpscr != ref.fpscr || env->nip != 0x1004 ||
+                  (cmp ? env->crf[3] != ref.cr
+                       : *cpu_fpr_ptr(env, FRT) != ref.r ||
+                         *cpu_vsrl_ptr(env, FRT) != 0);
+        } else {
+            n_stay[k]++;
+            bad = want || int128_gethi(ret) != ref.fpscr ||
+                  (cmp ? int128_getlo(ret) != ref.cr
+                       : int128_getlo(ret) != ref.r);
+        }
+        if (bad && n_exit_bad++ < 20) {
+            printf("DIVERGENCE sortie %s sel %x a=%016" PRIx64 " b=%016" PRIx64
+                   " c=%016" PRIx64 " fpscr=%08" PRIx64 " : sorti %d levée %d "
+                   "voulu %d ; réf %016" PRIx64 " %08" PRIx64 "\n", names[op],
+                   sel, a, b, c, fpscr, exited, raised, want, ref.r, ref.fpscr);
+        }
+    }
+}
+#endif
+
 static void check_any(int op, uint64_t a, uint64_t b, uint64_t c,
                       uint64_t fpscr, uint64_t msr)
 {
+#ifdef FPPROOF_KNOWN
+    check_known(op, a, b, c, fpscr, msr);
+#endif
 #ifdef FPPROOF_FLAT
     if (op <= FPI_DNMSUB) {         /* x-fp-flat : les ops d'origine */
         check_flat(op, a, b, c, fpscr, msr, 0);
@@ -658,6 +870,51 @@ int main(int argc, char **argv)
             check_any(op, a, b, c, f, msr);
         }
     }
+#ifdef FPPROOF_STFS
+    {
+        /* tcg/0047 : stfs court, les 2^32 motifs simples */
+        uint64_t nz = 0, nbad = 0, nzon = 0;
+        uint32_t w = 0;
+        do {
+            uint64_t x = d_of_f(w);
+            unsigned e = (w >> 23) & 0xff;
+            bool zon = fpi_zon(x);
+            if (zon != ((e >= 1 && e <= 254) || (w << 1) == 0)) {
+                nbad++;
+            }
+            if (zon) {
+                uint32_t sh = (uint32_t)(((x >> 29) & 0x3fffffff) |
+                                         (x >> 62) << 30);
+                nzon++;
+                if (sh != helper_tosingle(x) || sh != w) {
+                    nbad++;
+                }
+            }
+            nz++;
+        } while (++w != 0);
+        printf("stfs court : %" PRIu64 " motifs, %" PRIu64 " zéros ou normaux,"
+               " %" PRIu64 " divergences\n", nz, nzon, nbad);
+        tot_bad += nbad;
+    }
+#endif
+#ifdef FPPROOF_KNOWN
+    printf("porte monotone : %" PRIu64 " séquences d'origine, %" PRIu64
+           " divergences\n", n_gate, n_gate_bad);
+    printf("producteurs : %" PRIu64 " chemins courts, %" PRIu64 " sommes "
+           "minuscules, %" PRIu64 " divergences\n", n_kprod, n_ktiny, n_kbad);
+    printf("talon x-fp-known : sorties R/X/XRN %" PRIu64 "/%" PRIu64 "/%" PRIu64
+           ", sans sortie %" PRIu64 "/%" PRIu64 "/%" PRIu64 ", %" PRIu64
+           " divergences\n", n_exit[0], n_exit[1], n_exit[2], n_stay[0],
+           n_stay[1], n_stay[2], n_exit_bad);
+    tot_bad += n_gate_bad + n_kbad + n_exit_bad;
+#endif
+#ifdef FPPROOF_LAZY
+    printf("FPRF paresseux : classes %" PRIu64 " (%" PRIu64 " div.), "
+           "arithmétique %" PRIu64 " (%" PRIu64 " div.), fcmpu %" PRIu64
+           " (%" PRIu64 " div.)\n", n_fprf, n_fprf_bad, n_lazy, n_lazy_bad,
+           n_cmpl, n_cmpl_bad);
+    tot_bad += n_fprf_bad + n_lazy_bad + n_cmpl_bad;
+#endif
     for (op = 0; op < FPI_NOPS; op++) {
         if (n_fast[op] + n_slow[op] == 0) {
             continue;

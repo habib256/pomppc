@@ -7,7 +7,8 @@
 #   mkdir /tmp/j && cp tools/guest/jobs/fptest/* /tmp/j && devloop.py run /tmp/j
 # env.sh a cote (facultatif) : NRAND=n vecteurs aleatoires par (etat, op)
 # (defaut 2^18), BANC=N (bancs de N iterations au lieu de l'equivalence),
-# MODE=d|c (formes double, tcg/0016 ; comparaisons et conversions, tcg/0033),
+# MODE=d|c|k (formes double, tcg/0016 ; comparaisons et conversions, tcg/0033 ;
+# programmes aleatoires en ligne droite, tcg/0045-0047 : NRAND = programmes),
 # BANCMODE=banc|banc-d|banc-c (defaut banc).
 # Sortie : out/fptest.txt ; comparer les deux modes par `diff`.
 [ -f ./env.sh ] && . ./env.sh

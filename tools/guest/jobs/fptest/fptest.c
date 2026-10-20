@@ -38,6 +38,11 @@
  *                             +-2^31, de FLT_MAX + 1/2 ulp, de FLT_MIN ; CR
  *                             de fcmpo
  *   fptest banc-c N           bancs de ces instructions (latence et debit)
+ *   fptest k [NPROG [GRAINE]] programmes aleatoires en ligne droite (tcg/0045-
+ *                             0047 : operandes connus valides, FPRF paresseux,
+ *                             stfs court) ; defaut 4096 programmes x 8 x 5
+ *   fptest banc-x N           cout d'une sortie de bloc de x-fp-known (fmuls
+ *                             normal puis denormal, relu par fadds)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -502,6 +507,223 @@ static void banc_c(long n)
     printf("banc-c : fsel %ld %.0f ms (%g)\n", n, now_ms() - t0, acc);
 }
 
+/*
+ * Banc de la sortie de bloc de x-fp-known (tcg/0045) : fmuls dont le
+ * resultat sert d'operande au fadds suivant, dans le meme bloc. Produit
+ * normal (chemin court), puis denormal (chemin lent a chaque iteration :
+ * avec x-fp-known, le bloc est quitte apres le fmuls a chaque fois).
+ */
+static void banc_x(long n)
+{
+    volatile float va = 1e-20f, vc = 1e-20f, vn = 0.5f;
+    double a = va, c = vc, nn = vn, one = 1.0, t, u, acc = 0, t0;
+    long i;
+
+    setfpscr(0);
+    t = 1.0 / (double)va;               /* inexact : pose XX */
+    t0 = now_ms();
+    for (i = 0; i < n; i++) {
+        __asm__ __volatile__("fmuls %0,%2,%3\n\tfadds %1,%0,%4"
+                             : "=&f"(t), "=f"(u) : "f"(nn), "f"(nn), "f"(one));
+        acc += u;
+    }
+    printf("banc-x : produit normal %ld %.0f ms (%g)\n", n, now_ms() - t0, acc);
+    t0 = now_ms();
+    for (i = 0; i < n; i++) {
+        __asm__ __volatile__("fmuls %0,%2,%3\n\tfadds %1,%0,%4"
+                             : "=&f"(t), "=f"(u) : "f"(a), "f"(c), "f"(one));
+        acc += u;
+    }
+    printf("banc-x : produit denormal %ld %.0f ms (%g)\n", n, now_ms() - t0, acc);
+}
+
+
+/*
+ * ---- mode k (tcg/0045-0047) : programmes aleatoires en ligne droite ----
+ * Les modes ci-dessus n'executent qu'une instruction flottante par bloc de
+ * traduction : les operandes arrivent toujours par lfd/lfs. Ce mode ecrit
+ * dans un tampon executable des suites aleatoires de 8 a 48 instructions
+ * (un seul bloc de traduction, sauf page franchie) sur f1-f8 : arithmetique
+ * simple (dont formes Rc), double, fdivs, frsp, fctiw(z), fcmpu/fcmpo, fmr,
+ * fneg, fabs, fnabs, fsel, lfs/lfd, stfs/stfd, mffs, mtfsf, mtfsfi, mtfsb0/1,
+ * mcrfs. Les resultats d'une instruction servent d'operandes aux suivantes :
+ * c'est ce que suivent x-fp-known (operandes connus valides, porte connue
+ * ouverte), x-fprf-lazy (FPRF paresseux) et x-stfs-known (tcg/0045-0047).
+ * Valeurs d'entree surtout normales simples (exposants larges : produits qui
+ * debordent ou sous-debordent en chaine), le reste du catalogue c. Sortie :
+ * f1-f8, la zone des stfs/stfd, FPSCR et CR (champs 1 et 6) hachés.
+ */
+#include <sys/mman.h>
+#ifndef MAP_ANON
+#define MAP_ANON MAP_ANONYMOUS
+#endif
+static u32 *kbuf;
+static unsigned kn;
+static void kput(u32 w) { kbuf[kn++] = w; }
+#define KA(op, t, a, b, c, xo, rc) \
+    ((u32)(op) << 26 | (t) << 21 | (a) << 16 | (b) << 11 | (c) << 6 | (xo) << 1 | (rc))
+#define KX(op, t, a, b, xo, rc) \
+    ((u32)(op) << 26 | (t) << 21 | (a) << 16 | (b) << 11 | (xo) << 1 | (rc))
+#define KD(op, t, a, d) ((u32)(op) << 26 | (t) << 21 | (a) << 16 | ((d) & 0xffff))
+
+static unsigned kreg(void) { return 1 + (unsigned)(rnd() % 8); }
+
+/* une instruction au hasard ; r3 = entrees, r4 = sorties */
+static void kinsn(void)
+{
+    u64 x = rnd();
+    unsigned w = (unsigned)(x % 1000), t = kreg(), a = kreg(), b = kreg(), c = kreg();
+    unsigned rc = ((x >> 12) & 31) == 0;
+    static const unsigned xs[7] = { 21, 20, 25, 29, 28, 31, 30 };
+    static const unsigned xd[5] = { 21, 20, 25, 29, 30 };
+    static const unsigned bits[16] = { 0, 3, 4, 6, 6, 14, 15, 16, 19, 24, 25, 26, 27, 28, 30, 31 };
+
+    if (w < 450) {                               /* simple : fadds .. fnmsubs */
+        unsigned xo = xs[(x >> 20) % 7];
+        kput(KA(59, t, a, xo == 25 ? 0 : b, (xo == 21 || xo == 20) ? 0 : c, xo, rc));
+    } else if (w < 500) {                        /* double */
+        unsigned xo = xd[(x >> 20) % 5];
+        kput(KA(63, t, a, xo == 25 ? 0 : b, (xo == 21 || xo == 20) ? 0 : c, xo, rc));
+    } else if (w < 530) {
+        kput(KA(59, t, a, b, 0, 18, rc));        /* fdivs */
+    } else if (w < 540) {
+        kput(KA(63, t, a, b, 0, 18, rc));        /* fdiv */
+    } else if (w < 570) {
+        kput(KX(63, t, 0, b, 12, rc));           /* frsp */
+    } else if (w < 585) {
+        kput(KX(63, t, 0, b, (x >> 20) & 1 ? 15 : 14, rc));  /* fctiw(z) */
+    } else if (w < 625) {
+        kput(KX(63, 1 << 2, a, b, (x >> 20) & 1 ? 32 : 0, 0)); /* fcmpu/fcmpo cr1 */
+    } else if (w < 685) {
+        static const unsigned xm[4] = { 72, 40, 264, 136 };    /* fmr fneg fabs fnabs */
+        kput(KX(63, t, 0, b, xm[(x >> 20) & 3], rc));
+    } else if (w < 705) {
+        kput(KA(63, t, a, b, c, 23, rc));        /* fsel */
+    } else if (w < 755) {
+        kput(KD(48, t, 3, 192 + 4 * ((x >> 20) % 16)));        /* lfs */
+    } else if (w < 785) {
+        kput(KD(50, t, 3, 8 * (8 + (x >> 20) % 16)));          /* lfd */
+    } else if (w < 845) {
+        kput(KD(52, t, 4, 128 + 4 * ((x >> 20) % 32)));        /* stfs */
+    } else if (w < 875) {
+        kput(KD(54, t, 4, 256 + 8 * ((x >> 20) % 16)));        /* stfd */
+    } else if (w < 895) {
+        kput(KX(63, t, 0, 0, 583, rc));          /* mffs */
+    } else if (w < 915) {
+        kput((u32)63 << 26 | (u32)((x >> 20) & 0xff) << 17 | b << 11 | 711 << 1 | rc); /* mtfsf */
+    } else if (w < 930) {
+        kput((u32)63 << 26 | (u32)((x >> 20) & 7) << 23 | (u32)((x >> 24) & 15) << 12 |
+             134 << 1);                                          /* mtfsfi */
+    } else if (w < 960) {
+        kput(KX(63, bits[(x >> 20) & 15], 0, 0, (x >> 24) & 1 ? 38 : 70, 0)); /* mtfsb1/0 */
+    } else {
+        kput((u32)63 << 26 | 6u << 23 | (u32)((x >> 20) & 7) << 18 | 64 << 1); /* mcrfs cr6 */
+    }
+}
+
+static void kgen(unsigned len)
+{
+    unsigned i;
+    kn = 0;
+    for (i = 1; i <= 8; i++) {
+        kput(KD(50, i, 3, 8 * (i - 1)));         /* lfd fi, in[i - 1] */
+    }
+    for (i = 0; i < len; i++) {
+        kinsn();
+    }
+    for (i = 1; i <= 8; i++) {
+        kput(KD(54, i, 4, 8 * (i - 1)));         /* stfd fi, out[i - 1] */
+    }
+    kput(KX(63, 0, 0, 0, 583, 0));               /* mffs f0 */
+    kput(KD(54, 0, 4, 64));                      /* stfd f0, out[8] */
+    kput(KX(31, 5, 0, 0, 19, 0));                /* mfcr r5 */
+    kput(KD(36, 5, 4, 72));                      /* stw r5, out + 72 */
+    kput(0x4e800020);                            /* blr */
+    for (i = 0; i < kn; i += 8) {
+        __asm__ __volatile__("dcbst 0,%0" : : "r"(kbuf + i) : "memory");
+    }
+    __asm__ __volatile__("sync" : : : "memory");
+    for (i = 0; i < kn; i += 8) {
+        __asm__ __volatile__("icbi 0,%0" : : "r"(kbuf + i) : "memory");
+    }
+    __asm__ __volatile__("sync\n\tisync" : : : "memory");
+}
+
+/*
+ * entree : normale simple a exposant large (5/8), voisine de FLT_MIN (1/8 :
+ * leurs differences sont des denormaux exacts), le catalogue c sinon
+ */
+static u64 kval(void)
+{
+    u64 x = rnd();
+    if ((x & 7) < 2) {
+        return bits_d(rnd_operand_c());
+    }
+    if ((x & 7) == 2) {
+        return bits_d(ld_s(((u32)(x >> 32) & 0x807fffff) |
+                           (u32)(1 + ((x >> 8) & 1)) << 23));
+    }
+    return bits_d(ld_s(((u32)(x >> 32) & 0x807fffff) |
+                       (u32)(0x7f - 64 + ((x >> 8) % 129)) << 23));
+}
+
+static u64 kseed;
+
+static void kmode(long nprog)
+{
+    static u64 kin[24 + 8];
+    static u64 kout[48];
+    static const u32 kph[5] = { 0, XX, XX | 1, XX | 0x40, 0 };
+    void (*fn)(u64 *, u64 *);
+    long p;
+    int ph, v, i;
+    u64 n = 0;
+
+    kbuf = mmap(0, 65536, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (kbuf == MAP_FAILED) {
+        perror("mmap");
+        exit(1);
+    }
+    fn = (void (*)(u64 *, u64 *))(void *)kbuf;
+    for (ph = 0; ph < 5; ph++) {
+        phash = 1469598103934665603ULL;
+        rs = 0x9e3779b97f4a7c15ULL + ph * 977 + kseed * 0x100000001b3ULL;
+        for (p = 0; p < nprog; p++) {
+            kgen(8 + (unsigned)(rnd() % 41));
+            for (v = 0; v < 8; v++) {
+                u32 f0 = ph == 4 ? ((u32)rnd() & 0x9ffff0ffu & ~0x00000800u) : kph[ph];
+                u32 *ks = (u32 *)(kin + 24);
+                for (i = 0; i < 24; i++) {
+                    kin[i] = kval();
+                }
+                for (i = 0; i < 16; i++) {
+                    ks[i] = ((u32)rnd() & 0x807fffffu) |
+                            (u32)(0x7f - 64 + rnd() % 129) << 23;
+                    if ((rnd() & 7) == 0) {
+                        ks[i] = (u32)rnd();     /* denormaux, NaN, infinis */
+                    }
+                }
+                memset(kout, 0x5a, sizeof(kout));
+                setfpscr(f0);
+                fn(kin, kout);
+                ((u32 *)kout)[18] &= 0x0f0000f0u;   /* CR : champs 1 et 6 */
+                h(kout, sizeof(kout));
+                for (i = 0; i < (int)sizeof(kout); i++) {
+                    phash ^= ((unsigned char *)kout)[i];
+                    phash *= 1099511628211ULL;
+                }
+                if (p == 0 && v == 0) {
+                    printf("  P%d prog0 : fpscr %08x -> %08x f1 %016llx\n", ph, f0,
+                           (u32)kout[8], kout[0]);
+                }
+                n++;
+            }
+        }
+        printf("K%d %8llu executions  empreinte %016llx\n", ph, n, phash);
+    }
+    printf("total %llu programmes ; empreinte %016llx\n", n, fnv);
+}
+
 int main(int argc, char **argv)
 {
     long nrand = 1L << 18;
@@ -520,8 +742,19 @@ int main(int argc, char **argv)
         banc_d(atol(argv[2]));
         return 0;
     }
+    if (argc > 2 && !strcmp(argv[1], "banc-x")) {
+        banc_x(atol(argv[2]));
+        return 0;
+    }
     if (argc > 2 && !strcmp(argv[1], "banc-c")) {
         banc_c(atol(argv[2]));
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "k")) {
+        build_cat();
+        build_catc();
+        kseed = argc > 3 ? strtoull(argv[3], 0, 0) : 0;
+        kmode(argc > 2 ? atol(argv[2]) : 4096);
         return 0;
     }
     if (argc > 1 && !strcmp(argv[1], "d")) {
