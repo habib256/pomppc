@@ -4277,3 +4277,103 @@ est après le `cbnz` vers le talon : le chemin rapide y calcule tout sans branch
 
 `fcmpu` paresseux coûte ~56 octets de plus quand l'état n'est pas connu vide (relire
 `fprf_src`, ranger NONE).
+
+## 38. Le flottant simple sans ses contrôles redondants (3) : `tcg/0047` (`x-stfs-known`), gains, A/B
+
+### 38.1 La conception
+
+`stfs` (et `stfsu`, `stfsx`, `stfsux`) d'un FPR que `x-fp-known` sait `fpi_zon()` : SINGLE() de
+l'ISA vaut alors les bits 63:62 ‖ 58:29 du double (exposant > 896, ou zéro, dont la branche
+dénormale rend le signe seul : les mêmes bits) — **un décalage, un dépôt** (`shri`, `shri`,
+`deposit` puis le rangement 32 bits) au lieu des 13 ops de la conversion sans branchement de
+`x-lfs-inline` (ou de l'appel de `helper_tosingle`). `stfs` est un consommateur : il or'e
+`FPK_R` dans le producteur. `lfs` n'a rien à savoir (sa valeur vient de la mémoire) : inchangé.
+Propriété `x-stfs-known` (n'agit qu'avec `x-fp-known`), `STFSKNOWN=1`. Aucun émetteur touché.
+
+### 38.2 La preuve
+
+- `fpproof.sh` : **les 2^32 motifs simples** — `fpi_zon(DOUBLE(w))` ⇔ w nul ou normal
+  (4 261 412 866 motifs), et pour eux la forme courte = `helper_tosingle()` = w : **0
+  divergence**.
+- Mutants (`fptest k 4096`, `x-fp-known` + `x-stfs-known`) : forme courte sans condition (6
+  lignes d'empreinte), `FPK_R` non posé par `stfs` (6), dépôt faux (6) : **3 sur 3** (le
+  vérificateur ne voit pas les rangements : l'empreinte hache la zone des `stfs`). Avec `stfs`
+  court, les deux mutants équivalents de 0045 sont **attrapés** : test « somme minuscule » retiré
+  (4 lignes), sortie de bloc sans FPSCR (2 lignes).
+
+### 38.3 Taille du code (blocs de DOOM 3 retraduits)
+
+`tools/tcg/tcgsize.py --starts`, octets x86 par instruction, 1 308 instructions des 127 blocs
+distincts du journal de la session (linux-user : `lfs`/`stfs` sans TLB logiciel ; dans le binaire
+système chacun porte ~50 octets de plus, que les leviers ne touchent pas) :
+
+| instruction | base | 0045 | 0046 | 0045 + 0046 | les trois |
+|---|---|---|---|---|---|
+| `fmuls` | 287,6 | 226,6 | 243,3 | 183,8 | **176,9 (−38 %)** |
+| `fmadds` | 324,9 | 252,5 | 283,1 | 210,9 | **202,8 (−38 %)** |
+| `fmsubs` | 385,1 | 317,1 | 335,1 | 267,1 | 259,3 |
+| `fnmsubs` | 361,2 | 298,6 | 315,1 | 252,6 | 245,6 |
+| `fadds` | 200,2 | 180,7 | 166,6 | 147,1 | 152,2 |
+| `fsubs` | 244,5 | 240,4 | 201,1 | 196,9 | 191,2 |
+| `frsp` | 162,2 | 152,9 | 120,5 | 110,8 | 104,4 |
+| `stfs` | 128,1 | 127,3 | 128,1 | 127,3 | **76,0 (−41 %)** |
+| `lfs` | 102,9 | 102,9 | 102,9 | 102,9 | 97,7 |
+| **moyenne** | 154,7 | 135,5 | 139,6 | 121,1 | **107,8 (−30 %)** |
+
+### 38.4 Banc invité (VM de dev, indicatif)
+
+`fptest banc 10000000` (chaîne `fmadds fmuls fmsubs fadds`, sommets 4×4, « min/max » qui est
+`fsubs`+`fsel`, §22.8), SMP=2, toutes les options de production, un démarrage par réglage,
+médianes de 3 tours ; hôte chargé par deux autres agents (même réglage, deux démarrages :
+jusqu'à ±15 %) :
+
+| réglage | chaîne | sommets | min/max |
+|---|---|---|---|
+| aucun (3 démarrages) | 236 / 209 / 178 | 1 326 / 1 256 / 1 058 | 185 / 180 / 150 |
+| 0045 | 185 | 1 001 | 154 |
+| 0046 | 167 | 913 | 129 |
+| 0045 + 0047 | 177 | 942 | 146 |
+| **les trois** (3 démarrages) | 191 / 180 / 174 | **853 / 820 / 773** | 151 / 139 / 132 |
+
+Soit, médiane contre médiane : **sommets −35 %, min/max −23 %, chaîne −14 %** (la chaîne est
+bornée par la latence du calcul, les tests retirés étaient hors du chemin critique). Le banc
+linux-user (`qemu-ppc`, sans TLB logiciel ni rangements de VSR coûteux) ne bouge presque pas : le
+gain est dans les accès à `env` et les rangements, que le binaire système paie plus.
+
+### 38.5 L'A/B à jouer (VM quotidienne, hôte au repos)
+
+Binaire `~/src/qemu-fp2/bin/fp2/qemu-system-ppc` (+ `ppc64`, `qemu-bundle` à côté) : la
+référence (0001-0035) + 0045-0047, **construit en -O2 (`build/`), pas le binaire rapide** :
+même binaire des deux côtés, seules les propriétés changent. Avant fusion (`run_tiger.sh` du
+dépôt principal ne connaît pas encore les drapeaux) :
+
+    tools/tcg/matab.sh x86-fp2 3 "ref:QEMU_BIN=$HOME/src/qemu-fp2/bin/fp2/qemu-system-ppc" \
+        "fp2:QEMU_BIN=$HOME/src/qemu-fp2/bin/fp2/qemu-system-ppc CPU_OPTS=x-fp-known=on,x-fprf-lazy=on,x-stfs-known=on" d3 fen
+    # une partie vérifiée (pas pour la vitesse) : bilan « fp-native-verify » du run_tiger.log,
+    # 0 divergence attendu, et « x-fp-known : N sorties de bloc » (le taux de DOOM 3)
+    tools/tcg/matab.sh x86-fp2-verif 1 "v:QEMU_BIN=$HOME/src/qemu-fp2/bin/fp2/qemu-system-ppc CPU_OPTS=x-fp-known=on,x-fprf-lazy=on,x-stfs-known=on,x-fp-verify=on,x-fp-native-cmp-verify=on" d3 fen
+    tools/tcg/matab.sh --restore
+
+Après fusion : `"ref:QEMU_BIN=… FPKNOWN=0 FPRFLAZY=0 STFSKNOWN=0"` contre
+`"fp2:QEMU_BIN=… FPKNOWN=1 FPRFLAZY=1 STFSKNOWN=1"`. Attendu : de l'ordre de quelques ms/image
+(le flottant simple scalaire et ses `lfs`/`stfs` ne sont qu'une partie des 84,7 % de code
+généré) ; à confirmer par six parties par bras avant de les allumer par défaut (règle des
+patches TCG).
+
+### 38.6 Ce qui reste ouvert
+
+- **L'A/B DOOM 3** ci-dessus, et le taux de sorties de bloc de DOOM 3 (partie vérifiée).
+- **Pendant arm64** : émetteur aarch64 écrit et compilé par le clang du NDK, **jamais
+  exécuté** : sur le M4, construire, `fptest k`/`s`/`d`/`c` contre la référence, mutants de
+  l'émetteur (porte sautée, opérande non testé, somme minuscule acceptée, `fprf_src` rangé avant
+  le `cbnz`…), puis l'A/B.
+- **Soupape** pour un bloc dont un producteur sortirait à chaque passage (~130 ns par sortie) :
+  compter les sorties par bloc et le retraduire sans `x-fp-known`. Non fait (0,39 % des
+  opérations de Marble Blast sortent).
+- Restent par op : la synchronisation du FPSCR (un rangement, et son rechargement, l'op étant
+  `CALL_CLOBBER`), les drapeaux softfloat (un rangement), le test du résultat. Sortir le FPSCR
+  des globales TCG pendant le flottant natif ôterait les deux premiers mais touche toute la
+  traduction du flottant (`cpu_fpscr` est lu par ~20 chemins) : non fait.
+- `run-all.sh` avec ce binaire : 242 verts, 1 rouge attendu (« binaire rapide écarté :
+  construit sur une autre série de patches » : la série a changé, `build-fast/` sera à refaire
+  après fusion).

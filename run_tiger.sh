@@ -57,6 +57,8 @@
 #                             # éteint par défaut, docs/tcg-g4.md §36) ; FPVERIFY=1 : preuve
 #   FPRFLAZY=1 ./run_tiger.sh # FPRF et FI calculés à la lecture du FPSCR, pas à chaque opération
 #                             # (x-fprf-lazy, patches/tcg/0046, éteint par défaut, §37)
+#   STFSKNOWN=1 ./run_tiger.sh # stfs d'une valeur connue (x-fp-known) sans la conversion complète
+#                             # (x-stfs-known, patches/tcg/0047, éteint par défaut, §38)
 #   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
 #                             # tcg/0016, allumé par défaut, docs/tcg-g4.md §24) ; FPVERIFY=1 : preuve
 #   TBFAST=0 ./run_tiger.sh   # coupe mftb/mftbu calculés depuis le compteur de l'hôte (cntvct, 1 GHz ;
@@ -557,6 +559,21 @@ if [ "${FPRFLAZY:-0}" != 0 ]; then
   else
     echo "⚠  FPRFLAZY=1 demandé mais ce QEMU n'a pas la propriété 'x-fprf-lazy' (patches/tcg/0046)." >&2
     MODE="$MODE + FPRF paresseux DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+# --- stfs court (x-stfs-known, patches/tcg/0047, docs/tcg-g4.md §38) --- stfs d'un
+# registre que x-fp-known sait flottant simple nul ou normal : un décalage et un dépôt au
+# lieu de la conversion SINGLE() entière. N'agit qu'avec x-fp-known. Éteint : STFSKNOWN=1.
+if [ "${STFSKNOWN:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-stfs-known=on"; then
+    case "$CPU_SPEC" in
+      *x-fp-known=on*) CPU_SPEC="$CPU_SPEC,x-stfs-known=on"; MODE="$MODE + STFS-COURT" ;;
+      *) echo "⚠  STFSKNOWN=1 sans x-fp-known : x-stfs-known n'agit qu'avec lui (FPKNOWN=1)." >&2
+         MODE="$MODE + stfs court SANS EFFET" ;;
+    esac
+  else
+    echo "⚠  STFSKNOWN=1 demandé mais ce QEMU n'a pas la propriété 'x-stfs-known' (patches/tcg/0047)." >&2
+    MODE="$MODE + stfs court DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
 # --- Comparaisons et conversions AltiVec par le FPU de l'hôte (x-vfp-native-cmp,
