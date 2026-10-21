@@ -367,8 +367,8 @@ fonction statique qui n'est pas déclarée `inline`.
 
 ### 10.2 Les leviers
 
-Tous exacts par construction, chacun derrière une variable (éteinte par défaut,
-`*_DEFAULT 0`), sauf HOTINLINE (compilation, allumé). Aucun ne touche `qgpu_proto.h` ni
+Tous exacts par construction, chacun derrière une variable (allumée par défaut depuis le
+21/10, `*_DEFAULT 1`, après l'A/B du §10.5 ; `=0` la coupe), sauf HOTINLINE (compilation, allumé). Aucun ne touche `qgpu_proto.h` ni
 `qgpu_abi.h` : ni QEMU ni kext à reconstruire. Gains : instructions par dessin de `d3inter`,
 chaque levier seul.
 
@@ -447,3 +447,18 @@ levier par levier.
   `vitesse-doom3-x86.md` §5.6 (miroir d'éléments sale à chaque image) est à comprendre
   d'abord.
 - Le crochetage sauté de DISPONE compare encore 36 cases par dispatch (~320 instructions).
+
+### 10.5 Résultats (VM quotidienne, PC, 21/10, hôte au repos, binaire rapide PGO)
+
+Contrôle (`d3p-chk`, 2 500 images de DOOM 3) : `dispfast 2` 84 197 clés reprises, `mtxdirty 2`
+1 201 504 comparaisons sautées, `stunit 2` 129 133 séries contrôlées, **0 écart** partout.
+A/B en fenêtre, 3 parties par bras, plugin `20261021-d3p` (HOTINLINE dans les deux bras),
+médianes en ms/image :
+
+| jeu | sans les 5 variables | avec | écart |
+|---|---|---|---|
+| DOOM 3 (`d3p-d3`) | 99,3 | 95,5 | **−3,8 %** |
+| UT2004 (`d3p-ut`) | 46,2 | 46,7 | +1,1 % (dispersion 6-7 %) : neutre |
+| Marble Blast (`d3p-mb`) | 14,4 | 13,6 | **−5,6 %** |
+
+Les cinq variables passent à 1 par défaut (révision suivante du plugin).

@@ -154,9 +154,11 @@
    gls, gctx_of, unit_mask, wl_extra… ~10 % du plugin en appels). Même calcul,
    sans arithmétique flottante déplacée (clamp01 et put_f ne font que
    comparer, to_u8 garde son expression). -DHOTINLINE_DEFAULT=0 rend l'ancien
-   code. Les cinq autres sont des variables (POMPPC_GL_*), éteintes par
-   défaut : DISPFAST (dispatch), PROGMEMO (programmes), MTXDIRTY (matrices),
-   STUNIT (clés d'unités), DISPLOCK (un verrou par dispatch). */
+   code. Les cinq autres sont des variables (POMPPC_GL_*), allumées par
+   défaut depuis le 21/10 (A/B hôte au repos : DOOM 3 −3,8 %, Marble Blast
+   −5,6 %, UT2004 neutre ; contrôle à 2 sans écart) : DISPFAST (dispatch),
+   PROGMEMO (programmes), MTXDIRTY (matrices), STUNIT (clés d'unités),
+   DISPLOCK (un verrou par dispatch). =0 les coupe un par un. */
 #ifndef HOTINLINE_DEFAULT
 #define HOTINLINE_DEFAULT 1
 #endif
@@ -166,19 +168,19 @@
 #define HOT static
 #endif
 #ifndef DISPFAST_DEFAULT
-#define DISPFAST_DEFAULT 0
+#define DISPFAST_DEFAULT 1
 #endif
 #ifndef PROGMEMO_DEFAULT
-#define PROGMEMO_DEFAULT 0
+#define PROGMEMO_DEFAULT 1
 #endif
 #ifndef MTXDIRTY_DEFAULT
-#define MTXDIRTY_DEFAULT 0
+#define MTXDIRTY_DEFAULT 1
 #endif
 #ifndef STUNIT_DEFAULT
-#define STUNIT_DEFAULT 0
+#define STUNIT_DEFAULT 1
 #endif
 #ifndef DISPLOCK_DEFAULT
-#define DISPLOCK_DEFAULT 0
+#define DISPLOCK_DEFAULT 1
 #endif
 /* MTXDIRTY : bits du mot +0x08 du bloc de changements (relevés R4/R5,
    docs/re/bloc-changements-r4.md) — fenêtre et plage de profondeur 0x1,
