@@ -59,7 +59,7 @@
 #                             # (x-fprf-lazy, patches/tcg/0046, allumé sur Linux x86-64 depuis le 20/10, §38)
 #   STFSKNOWN=0 ./run_tiger.sh # coupe : stfs d'une valeur connue (x-fp-known) sans la conversion complète
 #                             # (x-stfs-known, patches/tcg/0047, allumé sur Linux x86-64 depuis le 20/10, §39)
-#   TIER2=4096 ./run_tiger.sh # second niveau sans compilateur : traces d'une page (x-tier2, patches/tcg/0048,
+#   TIER2=4096 ./run_tiger.sh # DÉFECTUEUX au 21/10 (docs/plan-traducteur-rapide.md §9.x) — traces d'une page (x-tier2, patches/tcg/0048,
 #                             # éteint par défaut ; TIER2VERIFY=64 rejoue une trace sur 64 contre ses TB)
 #   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
 #                             # tcg/0016, allumé par défaut, docs/tcg-g4.md §24) ; FPVERIFY=1 : preuve

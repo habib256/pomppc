@@ -428,3 +428,16 @@ réglage** : à confirmer en entrelacé (et sur DOOM 3, commande 3 du §8.5).
 4. Pendant arm64 : construire et prouver sur le M4.
 5. Leviers suivants du même niveau : traverser les retours appariés (`bl` … `blr` dans la
    trace), traces sur deux pages, soupape pour les traces dont une sortie latérale est chaude.
+
+### 9.x Défaut trouvé sur la VM quotidienne (21/10, 15 h) — `x-tier2` NE DOIT PAS être allumé
+
+Partie `t2-d3-verif` (binaire rapide reconstruit avec 0048, `TIER2=4096 TIER2VERIFY=64`) : Tiger ne
+démarre pas le bureau (console texte, `open`/`osascript` : « On-demand launch of the Window
+Server is allowed for root user only »). Le vérificateur note **31 divergences**, dont 28 sur la
+trace `0xa66cc` (noyau, boucle de copie, 139 instructions, sortie `0xa67c8`) : « écriture en
+trop : accès 58/58 … memop 0x12 » — la trace fait une écriture de plus que les blocs d'origine
+(fin de boucle ou sortie latérale mal placée) ; 2 sur `0xffff88d4` (page commune) et 2 sur une
+adresse aberrante `0x4672616d` (« Fram » en ASCII : clé de trace lue dans une mémoire qui n'en est
+pas une). QEMU coupé au moniteur ; au redémarrage par défaut, HFS a retiré 2 fichiers orphelins,
+bureau revenu. Journal : `bench/tcg/t2/d3-verif-2110/run_tiger.log`. Le gain de −8,5 % du banc
+t2bench n'est pas valable tant que ce défaut n'est pas corrigé.
