@@ -1,5 +1,5 @@
 diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
-index c1f0423..947b9e7 100644
+index c1f0423..0f6a3ff 100644
 --- a/accel/tcg/cpu-exec.c
 +++ b/accel/tcg/cpu-exec.c
 @@ -31,6 +31,7 @@
@@ -30,7 +30,7 @@ index c1f0423..947b9e7 100644
  
      if (qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC)) {
          log_cpu_exec(s.pc, cpu, tb);
-@@ -686,6 +693,400 @@ const void *HELPER(lookup_tb_ptr_check)(CPUArchState *env, void *ptb)
+@@ -686,6 +693,478 @@ const void *HELPER(lookup_tb_ptr_check)(CPUArchState *env, void *ptb)
      return HELPER(lookup_tb_ptr)(env);
  }
  
@@ -58,7 +58,7 @@ index c1f0423..947b9e7 100644
 +enum {
 +    T2S_ASK, T2S_FORM, T2S_DROP, T2S_SHORT, T2S_TBS, T2S_INSNS, T2S_GONE,
 +    T2S_VRUN, T2S_VOK, T2S_VBAD, T2S_VSKIP, T2S_VEXC, T2S_VNOLOG, T2S_VACC,
-+    T2S_N
++    T2S_CUT, T2S_LCUT, T2S_N
 +};
 +static uint64_t t2_g[T2S_N];
 +static bool t2_atexit_done;
@@ -71,18 +71,19 @@ index c1f0423..947b9e7 100644
 +    fprintf(stderr, "x-tier2 : %" PRIu64 " demandes, %" PRIu64 " traces "
 +            "(%" PRIu64 " blocs, %" PRIu64 " instructions invité), %" PRIu64
 +            " écartées (contexte changé ou bloc invalidé), %" PRIu64
-+            " sans suite chaînée\n",
++            " sans suite chaînée, %" PRIu64 " raccourcies (coupées par TCG)\n",
 +            t2_g[T2S_ASK], t2_g[T2S_FORM], t2_g[T2S_TBS], t2_g[T2S_INSNS],
-+            t2_g[T2S_DROP] + t2_g[T2S_GONE], t2_g[T2S_SHORT]);
++            t2_g[T2S_DROP] + t2_g[T2S_GONE], t2_g[T2S_SHORT], t2_g[T2S_CUT]);
 +    if (t2_g[T2S_VRUN]) {
 +        fprintf(stderr, "x-tier2-verify : %" PRIu64 " traces vérifiées, "
 +                "%" PRIu64 " identiques, %" PRIu64 " DIVERGENCES, %" PRIu64
 +                " non vérifiables (atomique, base de temps, journal plein), "
-+                "%" PRIu64 " exceptions, %" PRIu64 " sans copie journalisée ; "
-+                "%" PRIu64 " accès rejoués\n",
++                "%" PRIu64 " exceptions, %" PRIu64 " sans copie journalisée "
++                "(%" PRIu64 " copies coupées par TCG) ; %" PRIu64
++                " accès rejoués\n",
 +                t2_g[T2S_VRUN], t2_g[T2S_VOK], t2_g[T2S_VBAD],
 +                t2_g[T2S_VSKIP], t2_g[T2S_VEXC], t2_g[T2S_VNOLOG],
-+                t2_g[T2S_VACC]);
++                t2_g[T2S_LCUT], t2_g[T2S_VACC]);
 +    }
 +}
 +
@@ -184,12 +185,41 @@ index c1f0423..947b9e7 100644
 +    }
 +}
 +
++/*
++ * Something the log cannot stand for: an atomic, the time base, or a guest
++ * access the log does not see (t2_foreign_access).  In the logged run (the
++ * real one) it is done and the check is given up; in the replay it must
++ * not be done at all (memory would be touched twice, a store with the
++ * registers of the entry): the replay is abandoned, the cleanup of
++ * cpu_exec puts back the state the trace left.
++ */
++static void t2_unverif(CPUState *cpu)
++{
++    T2Log *l = cpu->t2_log;
++
++    if (l && cpu->t2_vrun) {
++        l->unverif = true;
++        if (cpu->t2_vrun == 2) {
++            cpu_loop_exit(cpu);
++        }
++    }
++}
++
 +void HELPER(t2_unverif)(CPUArchState *env)
 +{
-+    T2Log *l = env_cpu(env)->t2_log;
++    t2_unverif(env_cpu(env));
++}
 +
-+    if (l) {
-+        l->unverif = true;
++void t2_foreign_access(CPUState *cpu)
++{
++    /* POMPPC_T2_MUTANT=3: the defect of 21/10 (tools/tcg/t2proof.sh) */
++    static int mutant = -1;
++
++    if (mutant < 0) {
++        mutant = getenv("POMPPC_T2_MUTANT") ? atoi(getenv("POMPPC_T2_MUTANT")) : 0;
++    }
++    if (mutant != 3) {
++        t2_unverif(cpu);
 +    }
 +}
 +
@@ -404,18 +434,66 @@ index c1f0423..947b9e7 100644
 +    s.pc = a->pc;
 +    mmap_lock();
 +    tb_phys_invalidate(a, -1);
-+    cpu->t2_path = &path;
-+    cur = tb_gen_code(cpu, s);
-+    cpu->t2_path = NULL;
++    for (;;) {
++        int k, sum;
++
++        cpu->t2_path = &path;
++        cur = tb_gen_code(cpu, s);
++        cpu->t2_path = NULL;
++        if (cur->t2_state != T2_TRACE) {
++            break;
++        }
++        for (k = 0, sum = seen[0]->icount;
++             k < path.n && sum + seen[k + 1]->icount <= cur->icount; k++) {
++            sum += seen[k + 1]->icount;
++        }
++        if (sum == cur->icount) {
++            /*
++             * The trace ends where a TB of its path ends: all of it, or it
++             * stopped where TB k stopped (an instruction that ends a TB
++             * without a branch: isync, mtmsr...).  Checkable as it is.
++             */
++            path.n = k;
++            insns = sum;
++            break;
++        }
++        /*
++         * TCG cut the trace inside one of its TBs: tb_gen_code halves
++         * max_insns when a TB runs out of temps or of host code space.
++         * Such a trace runs correctly, but the replay of x-tier2-verify
++         * (whole TBs) cannot stop where it ends: translate it again with
++         * the TBs of the path that fit.  Cut inside its first TB (only the
++         * logged copy could be, normally): kept as is, not checked.
++         */
++        qatomic_add(&t2_g[T2S_CUT], 1);
++        if (k == 0) {
++            insns = -1;
++            break;
++        }
++        tb_phys_invalidate(cur, -1);
++        path.n = k;
++        insns = sum;
++    }
 +    mmap_unlock();
-+    if (cur->t2_state == T2_TRACE && cpu->t2_verify) {
++    /*
++     * x-tier2-verify: the logged copy must be the same path, of the same
++     * length (its access logging uses more temps and code: if TCG cuts it
++     * shorter than the trace, it is thrown away and the trace is not
++     * checked).
++     */
++    if (cur->t2_state == T2_TRACE && cpu->t2_verify && cur->icount == insns) {
 +        TCGTBCPUState sl = s;
++        TranslationBlock *lt;
 +
 +        sl.cflags |= CF_T2_LOG | T2_VFLAGS;
 +        mmap_lock();
 +        cpu->t2_path = &path;
-+        tb_gen_code(cpu, sl);
++        lt = tb_gen_code(cpu, sl);
 +        cpu->t2_path = NULL;
++        if (lt->t2_state == T2_TRACE && lt->icount != cur->icount) {
++            tb_phys_invalidate(lt, -1);
++            qatomic_add(&t2_g[T2S_LCUT], 1);
++        }
 +        mmap_unlock();
 +    }
 +    if (cur->t2_state == T2_TRACE) {
@@ -431,7 +509,7 @@ index c1f0423..947b9e7 100644
  /* Return the current PC from CPU, which may be cached in TB. */
  static vaddr log_pc(CPUState *cpu, const TranslationBlock *tb)
  {
-@@ -795,6 +1196,23 @@ static void cpu_exec_longjmp_cleanup(CPUState *cpu)
+@@ -795,6 +1274,23 @@ static void cpu_exec_longjmp_cleanup(CPUState *cpu)
  {
      /* Non-buggy compilers preserve this; assert the correct value. */
      g_assert(cpu == current_cpu);
@@ -446,7 +524,7 @@ index c1f0423..947b9e7 100644
 +        bool replay = cpu->t2_vrun == 2;
 +
 +        cpu->t2_vrun = 0;
-+        qatomic_add(&t2_g[T2S_VEXC], 1);
++        qatomic_add(&t2_g[replay && l->unverif ? T2S_VSKIP : T2S_VEXC], 1);
 +        if (replay) {
 +            cpu->t2_regs(cpu, l->e1, 1, NULL, 0);
 +            cpu->exception_index = -1;
@@ -455,7 +533,7 @@ index c1f0423..947b9e7 100644
  
  #ifdef CONFIG_USER_ONLY
      clear_helper_retaddr();
-@@ -1245,6 +1663,11 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+@@ -1245,6 +1741,11 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                  break;
              }
  
@@ -467,7 +545,7 @@ index c1f0423..947b9e7 100644
              tb = tb_lookup(cpu, s, 0);
              if (tb == NULL) {
                  CPUJumpCache *jc;
-@@ -1274,6 +1697,18 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+@@ -1274,6 +1775,18 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                  last_tb = NULL;
              }
  #endif
@@ -486,6 +564,126 @@ index c1f0423..947b9e7 100644
              /* See if we can patch the calling TB. */
              if (last_tb) {
                  tb_add_jump(last_tb, tb_exit, tb);
+diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+index 2433dda..4b1dace 100644
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -1813,6 +1813,9 @@ static int probe_access_internal(CPUState *cpu, vaddr addr,
+     int flags = TLB_FLAGS_MASK & ~TLB_FORCE_SLOW;
+     CPUTLBEntryFull *full;
+ 
++    if (access_type != MMU_INST_FETCH) {
++        t2_check_foreign(cpu);          /* POMPPC tcg/0048 */
++    }
+     if (!tlb_hit_page(tlb_addr, page_addr)) {
+         if (!victim_tlb_hit(cpu, mmu_idx, index, access_type, page_addr)) {
+             if (!tlb_fill_align(cpu, addr, access_type, mmu_idx,
+diff --git a/accel/tcg/internal-common.h b/accel/tcg/internal-common.h
+index 4913913..7e2e656 100644
+--- a/accel/tcg/internal-common.h
++++ b/accel/tcg/internal-common.h
+@@ -48,6 +48,17 @@ static inline bool cpu_plugin_mem_cbs_enabled(const CPUState *cpu)
+ }
+ 
+ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s);
++/*
++ * POMPPC tcg/0048 (x-tier2-verify): a guest access that the verifier does
++ * not log (a helper's own cpu_ld/st or probe), seen while a check runs.
++ */
++void t2_foreign_access(CPUState *cpu);
++static inline void t2_check_foreign(CPUState *cpu)
++{
++    if (unlikely(cpu->t2_vrun)) {
++        t2_foreign_access(cpu);
++    }
++}
+ void page_init(void);
+ void tb_htable_init(void);
+ void tb_reset_jump(TranslationBlock *tb, int n);
+diff --git a/accel/tcg/ldst_common.c.inc b/accel/tcg/ldst_common.c.inc
+index 57f3e06..8d156d6 100644
+--- a/accel/tcg/ldst_common.c.inc
++++ b/accel/tcg/ldst_common.c.inc
+@@ -139,6 +139,7 @@ uint8_t cpu_ldb_mmu(CPUArchState *env, vaddr addr, MemOpIdx oi, uintptr_t ra)
+ {
+     uint8_t ret;
+ 
++    t2_check_foreign(env_cpu(env));   /* POMPPC tcg/0048 */
+     tcg_debug_assert((get_memop(oi) & MO_SIZE) == MO_UB);
+     ret = do_ld1_mmu(env_cpu(env), addr, oi, ra, MMU_DATA_LOAD);
+     plugin_load_cb(env, addr, ret, 0, oi);
+@@ -150,6 +151,7 @@ uint16_t cpu_ldw_mmu(CPUArchState *env, vaddr addr,
+ {
+     uint16_t ret;
+ 
++    t2_check_foreign(env_cpu(env));   /* POMPPC tcg/0048 */
+     tcg_debug_assert((get_memop(oi) & MO_SIZE) == MO_16);
+     ret = do_ld2_mmu(env_cpu(env), addr, oi, ra, MMU_DATA_LOAD);
+     plugin_load_cb(env, addr, ret, 0, oi);
+@@ -161,6 +163,7 @@ uint32_t cpu_ldl_mmu(CPUArchState *env, vaddr addr,
+ {
+     uint32_t ret;
+ 
++    t2_check_foreign(env_cpu(env));   /* POMPPC tcg/0048 */
+     tcg_debug_assert((get_memop(oi) & MO_SIZE) == MO_32);
+     ret = do_ld4_mmu(env_cpu(env), addr, oi, ra, MMU_DATA_LOAD);
+     plugin_load_cb(env, addr, ret, 0, oi);
+@@ -172,6 +175,7 @@ uint64_t cpu_ldq_mmu(CPUArchState *env, vaddr addr,
+ {
+     uint64_t ret;
+ 
++    t2_check_foreign(env_cpu(env));   /* POMPPC tcg/0048 */
+     tcg_debug_assert((get_memop(oi) & MO_SIZE) == MO_64);
+     ret = do_ld8_mmu(env_cpu(env), addr, oi, ra, MMU_DATA_LOAD);
+     plugin_load_cb(env, addr, ret, 0, oi);
+@@ -183,6 +187,7 @@ Int128 cpu_ld16_mmu(CPUArchState *env, vaddr addr,
+ {
+     Int128 ret;
+ 
++    t2_check_foreign(env_cpu(env));   /* POMPPC tcg/0048 */
+     tcg_debug_assert((get_memop(oi) & MO_SIZE) == MO_128);
+     ret = do_ld16_mmu(env_cpu(env), addr, oi, ra);
+     plugin_load_cb(env, addr, int128_getlo(ret), int128_gethi(ret), oi);
+@@ -208,6 +213,7 @@ static void plugin_store_cb(CPUArchState *env, vaddr addr,
+ void cpu_stb_mmu(CPUArchState *env, vaddr addr, uint8_t val,
+                  MemOpIdx oi, uintptr_t retaddr)
+ {
++    t2_check_foreign(env_cpu(env));   /* POMPPC tcg/0048 */
+     helper_stb_mmu(env, addr, val, oi, retaddr);
+     plugin_store_cb(env, addr, val, 0, oi);
+ }
+@@ -215,6 +221,7 @@ void cpu_stb_mmu(CPUArchState *env, vaddr addr, uint8_t val,
+ void cpu_stw_mmu(CPUArchState *env, vaddr addr, uint16_t val,
+                  MemOpIdx oi, uintptr_t retaddr)
+ {
++    t2_check_foreign(env_cpu(env));   /* POMPPC tcg/0048 */
+     tcg_debug_assert((get_memop(oi) & MO_SIZE) == MO_16);
+     do_st2_mmu(env_cpu(env), addr, val, oi, retaddr);
+     plugin_store_cb(env, addr, val, 0, oi);
+@@ -223,6 +230,7 @@ void cpu_stw_mmu(CPUArchState *env, vaddr addr, uint16_t val,
+ void cpu_stl_mmu(CPUArchState *env, vaddr addr, uint32_t val,
+                     MemOpIdx oi, uintptr_t retaddr)
+ {
++    t2_check_foreign(env_cpu(env));   /* POMPPC tcg/0048 */
+     tcg_debug_assert((get_memop(oi) & MO_SIZE) == MO_32);
+     do_st4_mmu(env_cpu(env), addr, val, oi, retaddr);
+     plugin_store_cb(env, addr, val, 0, oi);
+@@ -231,6 +239,7 @@ void cpu_stl_mmu(CPUArchState *env, vaddr addr, uint32_t val,
+ void cpu_stq_mmu(CPUArchState *env, vaddr addr, uint64_t val,
+                  MemOpIdx oi, uintptr_t retaddr)
+ {
++    t2_check_foreign(env_cpu(env));   /* POMPPC tcg/0048 */
+     tcg_debug_assert((get_memop(oi) & MO_SIZE) == MO_64);
+     do_st8_mmu(env_cpu(env), addr, val, oi, retaddr);
+     plugin_store_cb(env, addr, val, 0, oi);
+@@ -239,6 +248,7 @@ void cpu_stq_mmu(CPUArchState *env, vaddr addr, uint64_t val,
+ void cpu_st16_mmu(CPUArchState *env, vaddr addr, Int128 val,
+                   MemOpIdx oi, uintptr_t retaddr)
+ {
++    t2_check_foreign(env_cpu(env));   /* POMPPC tcg/0048 */
+     tcg_debug_assert((get_memop(oi) & MO_SIZE) == MO_128);
+     do_st16_mmu(env_cpu(env), addr, val, oi, retaddr);
+     plugin_store_cb(env, addr, int128_getlo(val), int128_gethi(val), oi);
 diff --git a/accel/tcg/tb-maint.c b/accel/tcg/tb-maint.c
 index 12ff53d..362b5ca 100644
 --- a/accel/tcg/tb-maint.c
@@ -937,7 +1135,7 @@ index 610097b..6f10743 100644
          error_propagate(errp, local_err);
          return;
 diff --git a/target/ppc/translate.c b/target/ppc/translate.c
-index 143db17..9104833 100644
+index 143db17..93afabd 100644
 --- a/target/ppc/translate.c
 +++ b/target/ppc/translate.c
 @@ -222,6 +222,18 @@ struct DisasContext {
@@ -1047,7 +1245,7 @@ index 143db17..9104833 100644
  /* b ba bl bla */
  static void gen_b(DisasContext *ctx)
  {
-@@ -3839,10 +3896,107 @@ static void gen_b(DisasContext *ctx)
+@@ -3839,10 +3896,110 @@ static void gen_b(DisasContext *ctx)
      } else {
          gen_update_branch_history(ctx, ctx->cia, NULL, BHRB_TYPE_OTHER);
      }
@@ -1133,15 +1331,18 @@ index 143db17..9104833 100644
 +    gen_update_branch_history(ctx, ctx->cia, NULL,
 +                              BHRB_TYPE_OTHER | BHRB_TYPE_COND);
 +    if (slot == 0) {
-+        /* POMPPC_T2_MUTANT=1: wrong side exit, to prove x-tier2-verify sees it */
++        /*
++         * POMPPC_T2_MUTANT=1: wrong side exit (one branch in two), =2: every
++         * one, to prove x-tier2-verify sees it (tools/tcg/t2proof.sh)
++         */
 +        static int mutant = -1;
 +
 +        if (mutant < 0) {
 +            mutant = getenv("POMPPC_T2_MUTANT") ? atoi(getenv("POMPPC_T2_MUTANT")) : 0;
 +        }
 +        side = t2_side_exit(ctx, next);
-+        tcg_gen_brcondi_i32(mutant == 1 && (ctx->cia & 0x40) ? TCG_COND_NE
-+                                                              : TCG_COND_EQ,
++        tcg_gen_brcondi_i32((mutant == 1 && (ctx->cia & 0x40)) || mutant == 2
++                            ? TCG_COND_NE : TCG_COND_EQ,
 +                            taken, 0, side);
 +        ctx->base.pc_next = target;
 +    } else {
@@ -1155,7 +1356,7 @@ index 143db17..9104833 100644
  #define BCOND_IM  0
  #define BCOND_LR  1
  #define BCOND_CTR 2
-@@ -3969,6 +4123,9 @@ static void gen_bcond(DisasContext *ctx, int type)
+@@ -3969,6 +4126,9 @@ static void gen_bcond(DisasContext *ctx, int type)
  
  static void gen_bc(DisasContext *ctx)
  {
@@ -1165,7 +1366,7 @@ index 143db17..9104833 100644
      gen_bcond(ctx, BCOND_IM);
  }
  
-@@ -6769,6 +6926,8 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+@@ -6769,6 +6929,8 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
      ctx->stfs_known = env->stfs_known && ctx->fp_known;
      ctx->ret_inline = env->ret_inline;
      ctx->ret_verify = cs->ret_verify;
@@ -1174,7 +1375,7 @@ index 143db17..9104833 100644
      ctx->spe_enabled = (hflags >> HFLAGS_SPE) & 1;
      ctx->altivec_enabled = (hflags >> HFLAGS_VR) & 1;
      ctx->vsx_enabled = (hflags >> HFLAGS_VSX) & 1;
-@@ -6854,13 +7013,17 @@ static void ppc_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
+@@ -6854,13 +7016,17 @@ static void ppc_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
          fpk_scan(ctx, ctx->base.insn_start);
      }
  
@@ -1195,7 +1396,7 @@ index 143db17..9104833 100644
  {
      DisasContext *ctx = container_of(dcbase, DisasContext, base);
      DisasJumpType is_jmp = ctx->base.is_jmp;
-@@ -6906,6 +7069,7 @@ static void ppc_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
+@@ -6906,6 +7072,7 @@ static void ppc_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
              tcg_gen_goto_tb(0);
              gen_update_nip(ctx, nip);
              tcg_gen_exit_tb(ctx->base.tb, 0);
@@ -1203,7 +1404,7 @@ index 143db17..9104833 100644
              break;
          }
          /* fall through */
-@@ -6917,7 +7081,7 @@ static void ppc_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
+@@ -6917,7 +7084,7 @@ static void ppc_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
           * tcg_gen_lookup_and_goto_ptr will exit the TB if
           * CF_NO_GOTO_PTR is set. Count insns now.
           */
@@ -1212,7 +1413,7 @@ index 143db17..9104833 100644
              pmu_count_insns(ctx);
          }
  
-@@ -6937,6 +7101,36 @@ static void ppc_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
+@@ -6937,6 +7104,36 @@ static void ppc_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
      }
  }
  
@@ -1250,7 +1451,7 @@ index 143db17..9104833 100644
      .init_disas_context = ppc_tr_init_disas_context,
      .tb_start           = ppc_tr_tb_start,
 diff --git a/tcg/tcg-op-ldst.c b/tcg/tcg-op-ldst.c
-index 22211cc..ab2c6f4 100644
+index 22211cc..36a048a 100644
 --- a/tcg/tcg-op-ldst.c
 +++ b/tcg/tcg-op-ldst.c
 @@ -33,6 +33,7 @@
@@ -1303,7 +1504,7 @@ index 22211cc..ab2c6f4 100644
  static void tcg_gen_qemu_ld_i32_int(TCGv_i32 val, TCGTemp *addr,
                                      TCGArg idx, MemOp memop)
  {
-@@ -288,6 +324,19 @@ void tcg_gen_qemu_ld_i32_chk(TCGv_i32 val, TCGTemp *addr, TCGArg idx,
+@@ -288,6 +324,21 @@ void tcg_gen_qemu_ld_i32_chk(TCGv_i32 val, TCGTemp *addr, TCGArg idx,
  {
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);
      tcg_debug_assert((memop & MO_SIZE) <= MO_32);
@@ -1318,12 +1519,14 @@ index 22211cc..ab2c6f4 100644
 +            tcg_gen_extu_i32_i64(v, val);
 +            t2_log(a, v, memop, 0);
 +        }
++        tcg_temp_free_i64(a);       /* EBB temps: a long trace must not */
++        tcg_temp_free_i64(v);       /* run out of them (TB cut short) */
 +        return;
 +    }
      tcg_gen_qemu_ld_i32_int(val, addr, idx, memop);
  }
  
-@@ -334,6 +383,18 @@ void tcg_gen_qemu_st_i32_chk(TCGv_i32 val, TCGTemp *addr, TCGArg idx,
+@@ -334,6 +385,20 @@ void tcg_gen_qemu_st_i32_chk(TCGv_i32 val, TCGTemp *addr, TCGArg idx,
  {
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);
      tcg_debug_assert((memop & MO_SIZE) <= MO_32);
@@ -1337,12 +1540,14 @@ index 22211cc..ab2c6f4 100644
 +            tcg_gen_qemu_st_i32_int(val, addr, idx, memop);
 +            t2_log(a, v, memop, 1);
 +        }
++        tcg_temp_free_i64(a);
++        tcg_temp_free_i64(v);
 +        return;
 +    }
      tcg_gen_qemu_st_i32_int(val, addr, idx, memop);
  }
  
-@@ -391,6 +452,17 @@ void tcg_gen_qemu_ld_i64_chk(TCGv_i64 val, TCGTemp *addr, TCGArg idx,
+@@ -391,6 +456,18 @@ void tcg_gen_qemu_ld_i64_chk(TCGv_i64 val, TCGTemp *addr, TCGArg idx,
  {
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);
      tcg_debug_assert((memop & MO_SIZE) <= MO_64);
@@ -1355,12 +1560,13 @@ index 22211cc..ab2c6f4 100644
 +            tcg_gen_qemu_ld_i64_int(val, addr, idx, memop);
 +            t2_log(a, val, memop, 0);
 +        }
++        tcg_temp_free_i64(a);
 +        return;
 +    }
      tcg_gen_qemu_ld_i64_int(val, addr, idx, memop);
  }
  
-@@ -440,6 +512,20 @@ void tcg_gen_qemu_st_i64_chk(TCGv_i64 val, TCGTemp *addr, TCGArg idx,
+@@ -440,6 +517,22 @@ void tcg_gen_qemu_st_i64_chk(TCGv_i64 val, TCGTemp *addr, TCGArg idx,
  {
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);
      tcg_debug_assert((memop & MO_SIZE) <= MO_64);
@@ -1375,13 +1581,15 @@ index 22211cc..ab2c6f4 100644
 +            tcg_gen_mov_i64(v, val);
 +            tcg_gen_qemu_st_i64_int(val, addr, idx, memop);
 +            t2_log(a, v, memop, 1);
++            tcg_temp_free_i64(v);
 +        }
++        tcg_temp_free_i64(a);
 +        return;
 +    }
      tcg_gen_qemu_st_i64_int(val, addr, idx, memop);
  }
  
-@@ -644,6 +730,21 @@ void tcg_gen_qemu_ld_i128_chk(TCGv_i128 val, TCGTemp *addr, TCGArg idx,
+@@ -644,6 +737,22 @@ void tcg_gen_qemu_ld_i128_chk(TCGv_i128 val, TCGTemp *addr, TCGArg idx,
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);
      tcg_debug_assert((memop & MO_SIZE) == MO_128);
      tcg_debug_assert((memop & MO_SIGN) == 0);
@@ -1398,12 +1606,13 @@ index 22211cc..ab2c6f4 100644
 +            t2_log(a, TCGV128_LOW(val), memop, 0);
 +            t2_log(a, TCGV128_HIGH(val), memop | T2_HI, 0);
 +        }
++        tcg_temp_free_i64(a);
 +        return;
 +    }
      tcg_gen_qemu_ld_i128_int(val, addr, idx, memop);
  }
  
-@@ -757,6 +858,25 @@ void tcg_gen_qemu_st_i128_chk(TCGv_i128 val, TCGTemp *addr, TCGArg idx,
+@@ -757,6 +866,28 @@ void tcg_gen_qemu_st_i128_chk(TCGv_i128 val, TCGTemp *addr, TCGArg idx,
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);
      tcg_debug_assert((memop & MO_SIZE) == MO_128);
      tcg_debug_assert((memop & MO_SIGN) == 0);
@@ -1423,13 +1632,16 @@ index 22211cc..ab2c6f4 100644
 +            tcg_gen_qemu_st_i128_int(val, addr, idx, memop);
 +            t2_log(a, lo, memop, 1);
 +            t2_log(a, hi, memop | T2_HI, 1);
++            tcg_temp_free_i64(lo);
++            tcg_temp_free_i64(hi);
 +        }
++        tcg_temp_free_i64(a);
 +        return;
 +    }
      tcg_gen_qemu_st_i128_int(val, addr, idx, memop);
  }
  
-@@ -873,6 +993,7 @@ void tcg_gen_nonatomic_cmpxchg_i32_chk(TCGv_i32 retv, TCGTemp *addr,
+@@ -873,6 +1004,7 @@ void tcg_gen_nonatomic_cmpxchg_i32_chk(TCGv_i32 retv, TCGTemp *addr,
                                         TCGType addr_type)
  {
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);
@@ -1437,7 +1649,7 @@ index 22211cc..ab2c6f4 100644
      tcg_debug_assert((memop & MO_SIZE) <= MO_32);
      tcg_gen_nonatomic_cmpxchg_i32_int(retv, addr, cmpv, newv, idx, memop);
  }
-@@ -910,6 +1031,7 @@ void tcg_gen_atomic_cmpxchg_i32_chk(TCGv_i32 retv, TCGTemp *addr,
+@@ -910,6 +1042,7 @@ void tcg_gen_atomic_cmpxchg_i32_chk(TCGv_i32 retv, TCGTemp *addr,
                                      TCGType addr_type)
  {
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);
@@ -1445,7 +1657,7 @@ index 22211cc..ab2c6f4 100644
      tcg_debug_assert((memop & MO_SIZE) <= MO_32);
      tcg_gen_atomic_cmpxchg_i32_int(retv, addr, cmpv, newv, idx, memop);
  }
-@@ -944,6 +1066,7 @@ void tcg_gen_nonatomic_cmpxchg_i64_chk(TCGv_i64 retv, TCGTemp *addr,
+@@ -944,6 +1077,7 @@ void tcg_gen_nonatomic_cmpxchg_i64_chk(TCGv_i64 retv, TCGTemp *addr,
                                         TCGType addr_type)
  {
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);
@@ -1453,7 +1665,7 @@ index 22211cc..ab2c6f4 100644
      tcg_debug_assert((memop & MO_SIZE) <= MO_64);
      tcg_gen_nonatomic_cmpxchg_i64_int(retv, addr, cmpv, newv, idx, memop);
  }
-@@ -1004,6 +1127,7 @@ void tcg_gen_atomic_cmpxchg_i64_chk(TCGv_i64 retv, TCGTemp *addr,
+@@ -1004,6 +1138,7 @@ void tcg_gen_atomic_cmpxchg_i64_chk(TCGv_i64 retv, TCGTemp *addr,
                                      TCGArg idx, MemOp memop, TCGType addr_type)
  {
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);
@@ -1461,7 +1673,7 @@ index 22211cc..ab2c6f4 100644
      tcg_debug_assert((memop & MO_SIZE) <= MO_64);
      tcg_gen_atomic_cmpxchg_i64_int(retv, addr, cmpv, newv, idx, memop);
  }
-@@ -1047,6 +1171,7 @@ void tcg_gen_nonatomic_cmpxchg_i128_chk(TCGv_i128 retv, TCGTemp *addr,
+@@ -1047,6 +1182,7 @@ void tcg_gen_nonatomic_cmpxchg_i128_chk(TCGv_i128 retv, TCGTemp *addr,
                                          TCGType addr_type)
  {
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);
@@ -1469,7 +1681,7 @@ index 22211cc..ab2c6f4 100644
      tcg_debug_assert((memop & (MO_SIZE | MO_SIGN)) == MO_128);
      tcg_gen_nonatomic_cmpxchg_i128_int(retv, addr, cmpv, newv, idx, memop);
  }
-@@ -1088,6 +1213,7 @@ void tcg_gen_atomic_cmpxchg_i128_chk(TCGv_i128 retv, TCGTemp *addr,
+@@ -1088,6 +1224,7 @@ void tcg_gen_atomic_cmpxchg_i128_chk(TCGv_i128 retv, TCGTemp *addr,
                                       TCGType addr_type)
  {
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);
@@ -1477,7 +1689,7 @@ index 22211cc..ab2c6f4 100644
      tcg_debug_assert((memop & (MO_SIZE | MO_SIGN)) == MO_128);
      tcg_gen_atomic_cmpxchg_i128_int(retv, addr, cmpv, newv, idx, memop);
  }
-@@ -1242,6 +1368,7 @@ void tcg_gen_atomic_##NAME##_i32_chk(TCGv_i32 ret, TCGTemp *addr,       \
+@@ -1242,6 +1379,7 @@ void tcg_gen_atomic_##NAME##_i32_chk(TCGv_i32 ret, TCGTemp *addr,       \
                                       MemOp memop, TCGType addr_type)    \
  {                                                                       \
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);                  \
@@ -1485,7 +1697,7 @@ index 22211cc..ab2c6f4 100644
      tcg_debug_assert((memop & MO_SIZE) <= MO_32);                       \
      if (tcg_ctx->gen_tb->cflags & CF_PARALLEL) {                        \
          do_atomic_op_i32(ret, addr, val, idx, memop, table_##NAME);     \
-@@ -1255,6 +1382,7 @@ void tcg_gen_atomic_##NAME##_i64_chk(TCGv_i64 ret, TCGTemp *addr,       \
+@@ -1255,6 +1393,7 @@ void tcg_gen_atomic_##NAME##_i64_chk(TCGv_i64 ret, TCGTemp *addr,       \
                                       MemOp memop, TCGType addr_type)    \
  {                                                                       \
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);                  \
@@ -1493,7 +1705,7 @@ index 22211cc..ab2c6f4 100644
      tcg_debug_assert((memop & MO_SIZE) <= MO_64);                       \
      if (tcg_ctx->gen_tb->cflags & CF_PARALLEL) {                        \
          do_atomic_op_i64(ret, addr, val, idx, memop, table_##NAME);     \
-@@ -1268,6 +1396,7 @@ void tcg_gen_atomic_##NAME##_i128_chk(TCGv_i128 ret, TCGTemp *addr,     \
+@@ -1268,6 +1407,7 @@ void tcg_gen_atomic_##NAME##_i128_chk(TCGv_i128 ret, TCGTemp *addr,     \
                                        MemOp memop, TCGType addr_type)   \
  {                                                                       \
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);                  \
@@ -1501,7 +1713,7 @@ index 22211cc..ab2c6f4 100644
      tcg_debug_assert((memop & MO_SIZE) == MO_128);                      \
      if (tcg_ctx->gen_tb->cflags & CF_PARALLEL) {                        \
          do_atomic_op_i128(ret, addr, val, idx, memop, table_##NAME);    \
-@@ -1292,6 +1421,7 @@ void tcg_gen_atomic_##NAME##_i32_chk(TCGv_i32 ret, TCGTemp *addr,       \
+@@ -1292,6 +1432,7 @@ void tcg_gen_atomic_##NAME##_i32_chk(TCGv_i32 ret, TCGTemp *addr,       \
                                       MemOp memop, TCGType addr_type)    \
  {                                                                       \
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);                  \
@@ -1509,7 +1721,7 @@ index 22211cc..ab2c6f4 100644
      tcg_debug_assert((memop & MO_SIZE) <= MO_32);                       \
      if (tcg_ctx->gen_tb->cflags & CF_PARALLEL) {                        \
          do_atomic_op_i32(ret, addr, val, idx, memop, table_##NAME);     \
-@@ -1305,6 +1435,7 @@ void tcg_gen_atomic_##NAME##_i64_chk(TCGv_i64 ret, TCGTemp *addr,       \
+@@ -1305,6 +1446,7 @@ void tcg_gen_atomic_##NAME##_i64_chk(TCGv_i64 ret, TCGTemp *addr,       \
                                       MemOp memop, TCGType addr_type)    \
  {                                                                       \
      tcg_debug_assert(addr_type == tcg_ctx->addr_type);                  \
