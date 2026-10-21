@@ -447,3 +447,115 @@ levier par levier.
   `vitesse-doom3-x86.md` §5.6 (miroir d'éléments sale à chaque image) est à comprendre
   d'abord.
 - Le crochetage sauté de DISPONE compare encore 36 cases par dispatch (~320 instructions).
+
+## 11. Second lot : verdicts gardés, attributs par bits, table sans boucle, réserves rendues (21/10/2026)
+
+Révision `20261021-d3q`. Base : `main` à `933fbe9` (révision `d3p`), **les cinq variables du
+§10 allumées dans toutes les mesures** (`DISPFAST PROGMEMO MTXDIRTY STUNIT DISPLOCK` = 1, ci-dessous
+« P5 ») ; leurs `*_DEFAULT` ne sont pas touchés ici. Les quatre pistes restées ouvertes au §10.5,
+chacune derrière une variable éteinte par défaut (`*_DEFAULT 0`), exactes par construction, avec un
+mode contrôle (`=2`) sauf RPEVICT. Aucune ne touche `qgpu_proto.h` ni `qgpu_abi.h` : ni QEMU ni
+kext à reconstruire (pas de question de parité arm64 / x86-64 : plugin invité seul).
+
+### 11.1 Les leviers
+
+| levier | variable | ce qu'il fait |
+|---|---|---|
+| verdicts gardés | `POMPPC_GL_VD2=1` (2 = contrôle) | En plus du verdict courant, 3 verdicts bons de la même image (`PCtx.v2`). Au moment du verdict complet, un emplacement est repris si sa clé (`vd_key_of`) est celle de l'état courant et si les blocs reçus depuis son rangement ne portent que des bits neutres de la liste blanche, des bits d'unité (+0x04 0..7) et la liaison / l'allumage des programmes (+0x0c `0x400000` / `0x1000000` : ce qu'ils changent pour le verdict, la clé le porte — objets courants, ce que le plugin en sait, étage de sommets). Reprise comme UNITVD : rastérisation, domaine des programmes, unités signalées refaites, autres unités vérifiées sur le relevé, `geom_format` et `va_gen_sizes` toujours refaits ; un verdict sans unité texturée n'est repris que si le texturage est toujours éteint. Suivi en O(1) par dispatch : numéro de dispatch, numéro du dernier bloc inadmissible (classé par `df_classify`, bit `DF_V2`), OU des bits d'unité dans les 3 emplacements. Pas sous `VERDICTCHECK`. |
+| attributs par bits | `POMPPC_GL_ATTRBITS=1` (2 = contrôle) | Les boucles « pour chaque unité / générique / attribut » du dessin et du format parcourent les seuls bits présents (`cntlzw`, ordre croissant = ordre des boucles) ou deviennent une opération sur le mot : `va_sources_ok` (13 + 16 tours), `va_plan_build` (8 + 15), `va_gen_sizes` (15), `geom_format` (génériques, `vp_need`, filtres par tableau actif, et unités sans objet sans appeler `us_tex`). Contrôle : les deux écritures calculées, comparées (plan octet pour octet). |
+| table sans boucle | `POMPPC_GL_DISPCMP=1` (2 = contrôle) | Le crochetage sauté de DISPONE compare la table de 36 cases à sa photographie par OU des différences, 4 paquets de 9 sans boucle (`dc_same`), au lieu de 36 tours de 7 instructions. Même réponse, case pour case. |
+| réserves rendues | `POMPPC_GL_RPEVICT=1` | Indices en VBO (§10.5, `r_useIndexBuffers 1`). Cause du repli `NATSHM` de `vitesse-doom3-x86.md` §5.6 (note de `bench/tcg/ab/x86-c1/ib-1` : 8 réserves de 16 Mio créées en 2 500 images, puis `raw_ensure` échoue) : idTech 4 recycle ses objets tampons d'indices avec des tailles qui varient et une tranche de miroir ne rapetissait jamais. Ici : une tranche réallouée plus petite (glBufferData) est reprise à la nouvelle taille ; quand plus rien ne tient, les tranches des tampons non lus depuis 2, puis 1, puis 0 soumission (`G.sub_seq`) sont rendues une à une jusqu'à ce que la demande tienne — jamais celles du dessin en préparation (`rp_draw`). Les dessins déjà émis qui lisaient une tranche rendue la précèdent dans le flux (même argument que `buf_destroy`). Le tampon repris plus tard reçoit une tranche neuve, toute sale. |
+
+Scène **`rpevict`** (nouvelle, `gltest`) : 12 tampons d'indices refaits par glBufferData à 2..11
+Mio à chaque « image » (8 images, `CGLFlushDrawable` entre deux), un petit morceau lu par dessin
+(96 dessins), mélange additif.
+
+### 11.2 Mesures (instructions par dessin, `plugprof`, binaire final)
+
+`d3inter` (2 120 dessins), plugin seul, P5 allumé partout :
+
+| bras | plugin / dessin | écart |
+|---|---|---|
+| P5 (référence) | 12 292 | — |
+| + VD2 | 12 334 | **+42** (20 verdicts complets sur 31 repris, 70 unités refaites, 0 gain net : voir 11.4) |
+| + ATTRBITS | 11 326 | **−966 (−7,9 %)** |
+| + DISPCMP | 12 188 | **−104** (2 123 dispatches : ~−104 par dispatch) |
+| + RPEVICT | 12 308 | +16 (rien à rendre ici ; marquage des tampons du dessin) |
+| + ATTRBITS + DISPCMP + RPEVICT | 11 238 | **−1 054 (−8,6 %)** |
+| + les quatre | 11 280 | −1 012 (−8,2 %) |
+
+Scène `rpevict` (96 dessins) : sans RPEVICT, **22 dessins retombent sur l'empaquetage** (`NATSHM
+repli` à `raw_ensure`, 8 réserves pleines) ; avec, **0** (4 tranches rendues, 22 Mio) — plugin
+32 640 → 10 258 instructions par dessin, plugin + `libSystem` + page commune 224 k → 199 k (le reste
+est le glBufferData de GLEngine). Même image à l'octet.
+
+Prix des variables éteintes : le binaire `d3q` sous P5 seul fait 12 292 contre 12 205 pour `d3p`
+(+87 par dessin, +0,7 % : tests des variables et inlining de gcc 4.0 un peu déplacé), à comparer
+aux −1 054 qu'elles rendent allumées.
+
+Pour DOOM 3, ordre de grandeur : ATTRBITS touche `geom_draw_client` (3,0 ms propres) et
+`geom_format` ; DISPCMP ~1 300 dispatches par image × ~100 instructions. Ensemble ~1,1 M
+instructions par image de moins, **~1 à 2 ms/image** — à mesurer (§11.4). RPEVICT n'agit qu'avec
+`r_useIndexBuffers 1` : il rend ce réglage jouable (plus de repli), le gain attendu est la recopie
+des indices statiques (`__memcpy` 2,9 ms/image) et leur balayage, **à mesurer**.
+
+### 11.3 Preuves (VM de dev `tiger-dev-plugin.raw`, RTX, 21/10)
+
+- `plugmd5`, **67 scènes** (les 66 d'avant + `rpevict`), images comparées à l'octet, deux
+  séries sur le binaire final : `ref` (P5), `all` (P5 + les quatre), `chk` (P5 + `VD2=2
+  ATTRBITS=2 DISPCMP=2 RPEVICT=1`), `vchk` (P5 + les quatre + `VERDICTCHECK=1`), `def` (rien) :
+  **0 écart** ; `ref`, `vd2`, `ab`, `dc`, `rpe` (chaque levier seul sur P5), `off` (les quatre
+  sans P5) : **0 écart**. (Les scènes `arbvp`…`glsldp` rendent 1 partout, défaut compris, comme
+  au §10.3.)
+- Compteurs de contrôle (ligne `D3Q` de la note, sommés sur les 67 scènes du mode `chk`) :
+  VD2 34 reprises recalculées en complet, **0 écart** (et le classement `DF_V2` contrôlé contre
+  `v2_blk_bad` à chaque dispatch, 0 écart) ; ATTRBITS 15 594 comparaisons, **0 écart** ;
+  DISPCMP 6 319 comparaisons, **0 écart**. RPEVICT : 0 dessin retombé (22 sans).
+  Avant la dernière retouche (VD2 coupé sous `VERDICTCHECK`), le mode `vchk` avait repris 2 877
+  verdicts par VD2 sur l'ensemble des scènes : images identiques à l'octet aussi.
+- Job `gpu` : défaut **56 OK, 0 échec** (`qgpu_test` 0) ; P5 + les quatre exportés **56 OK, 0
+  échec**.
+- Rejeu : sans objet pour VD2, ATTRBITS, DISPCMP (aucune commande changée) ; RPEVICT change
+  l'emplacement des miroirs dans les réserves (offsets des `BUF_SUBDATA` et descripteurs),
+  pas leur contenu.
+
+### 11.4 A/B sur la VM quotidienne (à jouer)
+
+Bundle : `bench/d3plug-2110/GLDriver-POMPPC-20261021-d3q.bundle.tar` du worktree (variables
+éteintes par défaut, les cinq du §10 comprises : elles sont passées explicitement). D'abord une
+partie sous contrôle (ligne `D3Q image N` toutes les 500 images : écarts à 0) :
+
+```
+P5="POMPPC_GL_DISPFAST=1 POMPPC_GL_PROGMEMO=1 POMPPC_GL_MTXDIRTY=1 POMPPC_GL_STUNIT=1 POMPPC_GL_DISPLOCK=1"
+tools/tcg/matab.sh d3q-chk 1 "chk:QEMU_FAST=1 $P5 POMPPC_GL_VD2=2 POMPPC_GL_ATTRBITS=2 POMPPC_GL_DISPCMP=2" d3 fen
+```
+
+puis l'A/B des deux leviers sûrs, puis VD2 seul (attendu neutre ; à garder éteint s'il ne gagne pas) :
+
+```
+tools/tcg/matab.sh d3q 3 "ref:QEMU_FAST=1 $P5" "x:QEMU_FAST=1 $P5 POMPPC_GL_ATTRBITS=1 POMPPC_GL_DISPCMP=1" d3 fen
+tools/tcg/matab.sh d3q-vd2 3 "ref:QEMU_FAST=1 $P5 POMPPC_GL_ATTRBITS=1 POMPPC_GL_DISPCMP=1" "vd2:QEMU_FAST=1 $P5 POMPPC_GL_ATTRBITS=1 POMPPC_GL_DISPCMP=1 POMPPC_GL_VD2=1" d3 fen
+```
+
+et les indices en VBO (le réglage du jeu passe par `D3_SET`, `tools/matrice/jeux/d3.py`) :
+
+```
+tools/tcg/matab.sh d3q-ib 3 "ref:QEMU_FAST=1 $P5 POMPPC_GL_ATTRBITS=1 POMPPC_GL_DISPCMP=1" "ib:QEMU_FAST=1 $P5 POMPPC_GL_ATTRBITS=1 POMPPC_GL_DISPCMP=1 POMPPC_GL_RPEVICT=1 D3_SET=r_useIndexBuffers=1" d3 fen
+```
+
+(dans le bras `ib`, la note doit dire 0 `NATSHM repli` et des tranches rendues dans `D3Q`). Puis
+UT2004 et Marble Blast (ATTRBITS et DISPCMP les touchent aussi). Défauts à passer à 1 levier par
+levier.
+
+### 11.5 Ce qui reste
+
+- **VD2** ne rapporte rien sur `d3inter` : un verdict complet n'y coûte guère plus qu'une reprise
+  (clé, rastérisation, format et tailles refaits ; ~3,5 unités sur 8 à refaire). DOOM 3 fait
+  ~11 % de verdicts complets (148 sur ~1 300 dispatches) contre 1,5 % ici : gain possible
+  ~0,1-0,3 ms/image, à trancher par l'A/B ; sinon le retirer.
+- **Clé du verdict au dessin** : `vd_key_of` (~380 instructions) refaite à chaque dessin pour
+  savoir si le verdict du dispatch tient — la moitié de son coût est déjà dans le dispatch.
+- **`us_fill`** (~520 instructions par dessin dans `d3inter`) et `send_state` (~1 280) restent
+  les premiers postes du plugin.
+- **Indices clients** (`r_useIndexBuffers 0`, le défaut) : la recopie (~1,8 Mio par image) reste ;
+  RPEVICT ouvre la voie VBO, à mesurer en jeu.

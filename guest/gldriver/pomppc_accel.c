@@ -129,7 +129,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261021-d3p"
+#define POMPPC_PLUGIN_REV "20261021-d3q"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -180,6 +180,26 @@
 #ifndef DISPLOCK_DEFAULT
 #define DISPLOCK_DEFAULT 0
 #endif
+/* 21/10/2026, second lot (docs/d3-plugin-x86.md §11) : quatre variables
+   POMPPC_GL_*, éteintes par défaut, chacune exacte par construction.
+   VD2 (verdicts complets : verdicts gardés en plus du courant, repris par
+   unités), ATTRBITS (boucles d'attributs du dessin : seuls les bits du
+   format), DISPCMP (crochetage sauté : table comparée sans boucle),
+   RPEVICT (réserves de miroirs pleines : tranches des VBO non lus depuis
+   une image rendues avant de renoncer au natif). */
+#ifndef VD2_DEFAULT
+#define VD2_DEFAULT 0
+#endif
+#ifndef ATTRBITS_DEFAULT
+#define ATTRBITS_DEFAULT 0
+#endif
+#ifndef DISPCMP_DEFAULT
+#define DISPCMP_DEFAULT 0
+#endif
+#ifndef RPEVICT_DEFAULT
+#define RPEVICT_DEFAULT 0
+#endif
+#define VD2_N 3                         /* verdicts gardés en plus du courant (3 : v2_accumulate est déroulé) */
 /* MTXDIRTY : bits du mot +0x08 du bloc de changements (relevés R4/R5,
    docs/re/bloc-changements-r4.md) — fenêtre et plage de profondeur 0x1,
    projection 0x8, modèle-vue 0x10, matrices (et cibles) de texture
@@ -971,7 +991,24 @@ typedef struct PCtx {
     unsigned long  vd_key[VKEY_WORDS];
     unsigned long  vd_units[40];        /* lot 3, sous COUNT : table des unités
                                            (8 × 5 cibles) au rangement */
+    /* 21/10, second lot (POMPPC_GL_VD2, §11) : verdicts bons gardés en plus
+       du courant. Ce que les blocs ont signalé depuis le rangement d'un
+       emplacement se lit sur des numéros de dispatch : v2_seq avance à
+       chaque dispatch, v2_bad_seq est celui du dernier bloc portant un bit
+       que la reprise ne sait pas refaire : un emplacement rangé au dispatch
+       s vaut tant que v2_bad_seq < s. Ses unités à refaire (bits d'unité
+       +0x04 0..7 reçus depuis) sont dans um, que chaque dispatch complète
+       (OU sur les VD2_N emplacements, vivants ou non). */
+    struct V2Slot {
+        int            valid;
+        unsigned long  seq, um;
+        unsigned long  key[VKEY_WORDS];
+        TexInfo        ti;
+        unsigned long  fmt, gs;
+    } v2[VD2_N];
+    unsigned long  v2_seq, v2_bad_seq;
 } PCtx;
+typedef struct V2Slot V2Slot;
 
 /* v16 : définies avec la synchronisation des programmes, plus bas ; texture_ok
    et unit_mask (avant) en dépendent. */
@@ -1265,6 +1302,17 @@ static struct {
                                            sautées, faites ; contrôle : changements
                                            que le bloc n'avait pas signalés */
     unsigned long   n_su_part, n_su_units, n_su_chk, n_su_chk_diff; /* STUNIT */
+    /* 21/10, second lot (§11) */
+    int             vd2;                /* POMPPC_GL_VD2 : verdicts gardés ; 2 = contrôle */
+    int             attrbits;           /* POMPPC_GL_ATTRBITS : bits du format ; 2 = contrôle */
+    int             dispcmp;            /* POMPPC_GL_DISPCMP : table sans boucle ; 2 = contrôle */
+    int             rpevict;            /* POMPPC_GL_RPEVICT : tranches rendues */
+    unsigned long   n_v2_take, n_v2_units, n_v2_try, n_v2_hit, n_v2_push;
+    unsigned long   n_v2_chk_same, n_v2_chk_diff;
+    unsigned long   n_ab_chk, n_ab_diff;
+    unsigned long   n_dc_chk, n_dc_diff;
+    unsigned long   n_rpe_pass, n_rpe_evict, n_rpe_bytes, n_rpe_ok, n_rpe_fail;
+    unsigned long   rp_draw_id;         /* RPEVICT : un par geom_draw_native */
     int             tcllost;            /* 07/10 : POMPPC_GL_TCLLOST (défaut 1) */
     unsigned long   n_tcllost;          /* dispatchs « T&L perdu » honorés */
     int             native_range;       /* plage de gldFlushBuffer crue (défaut) */
@@ -2767,6 +2815,21 @@ void pomppc_backend_init(void)
                 G.stunit = e && e[0] ? (int)(e[0] - '0') : STUNIT_DEFAULT;
                 if (G.stunit < 0 || G.stunit > 2)
                     G.stunit = 0;
+                /* 21/10, second lot (§11) */
+                e = getenv("POMPPC_GL_VD2");
+                G.vd2 = G.unitvd ? (e && e[0] ? (int)(e[0] - '0') : VD2_DEFAULT) : 0;
+                if (G.vd2 < 0 || G.vd2 > 2)
+                    G.vd2 = 0;
+                e = getenv("POMPPC_GL_ATTRBITS");
+                G.attrbits = e && e[0] ? (int)(e[0] - '0') : ATTRBITS_DEFAULT;
+                if (G.attrbits < 0 || G.attrbits > 2)
+                    G.attrbits = 0;
+                e = getenv("POMPPC_GL_DISPCMP");
+                G.dispcmp = e && e[0] ? (int)(e[0] - '0') : DISPCMP_DEFAULT;
+                if (G.dispcmp < 0 || G.dispcmp > 2)
+                    G.dispcmp = 0;
+                e = getenv("POMPPC_GL_RPEVICT");
+                G.rpevict = e && e[0] ? e[0] != '0' : RPEVICT_DEFAULT;
             }
             G.pixtex = -1;
             G.pixtex_w = G.pixtex_h = 0;
@@ -2794,13 +2857,14 @@ void pomppc_backend_init(void)
                     "texmemo=%d stskip=%d statecheck=%d wlunif=%d stateblk=%d "
                     "rawsane=%d natshm=%d idxlazy=%d idxvec=%d dispone=%d unitvd=%d texpage=%d "
                     "zones=%d (flux %lu Kio) dispfast=%d progmemo=%d mtxdirty=%d stunit=%d "
-                    "displock=%d hotinline=%d\n",
+                    "displock=%d hotinline=%d vd2=%d attrbits=%d dispcmp=%d rpevict=%d\n",
                     G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range,
                     G.count, G.verdict, G.vcheck, G.wl, G.texmemo, G.stskip, G.stcheck,
                     G.wlunif, G.stblk + G.stblk_check, G.rawsane, G.natshm,
                     G.idxlazy, G.idxvec, G.dispone, G.unitvd, G.texpage,
                     G.zones, G.zl_cmd_bytes >> 10, G.dispfast, G.progmemo, G.mtxdirty,
-                    G.stunit, G.displock, HOTINLINE_DEFAULT);
+                    G.stunit, G.displock, HOTINLINE_DEFAULT, G.vd2, G.attrbits, G.dispcmp,
+                    G.rpevict);
             /* 21/10 : adresse d'un symbole exporté, pour nommer les blocs d'un
                profil d'instructions (greffon TCG hotblocks, tools/re/hotplug.py) */
             gl_note("plugin : pomppc_geom_dispatch à 0x%08lx\n",
@@ -8047,6 +8111,11 @@ struct PBuf {
     unsigned long   rp_off, rp_cap;
     int             rp_failed;          /* plus de place : ne réessayer qu'après */
     unsigned long   rp_fail_gen;        /*   une libération (G.rp_gen) */
+    unsigned long   rp_use;             /* RPEVICT (21/10) : soumission (G.sub_seq) du
+                                           dernier raw_ensure */
+    unsigned long   rp_draw;            /* RPEVICT : dessin natif (G.rp_draw_id) du
+                                           dernier raw_ensure */
+    unsigned long   rp_fail_sub;        /* RPEVICT : soumission du dernier échec */
     unsigned long   raw_base;           /* vbo+0x30 au dernier ajustement */
     unsigned long   nomem_until;        /* reste du 29/09 : BUF_CREATE refusé (plafond
                                            hôte) — empaquetage jusqu'à cette image */
@@ -8276,10 +8345,78 @@ static int rp_create(PCtx *p)
 
 /* Le miroir de b tient-il `size` octets ? Sinon une tranche neuve (contenu à
    recopier en entier). 0 = pas de place : repli sur l'empaquetage. */
+/* 21/10, second lot (POMPPC_GL_RPEVICT, docs/d3-plugin-x86.md §11) — les
+ * réserves (8 × 16 Mio) se remplissaient sous DOOM 3 `r_useIndexBuffers 1` :
+ * idTech 4 recycle ses objets tampons d'indices d'une image à l'autre avec
+ * des tailles qui varient, une tranche ne rapetisse jamais, et au bout de
+ * ~2 500 images raw_ensure n'en trouvait plus (NATSHM repli : empaquetage,
+ * +8 % par image, vitesse-doom3-x86.md §5.6). Ici, avant de renoncer, les
+ * tranches des tampons qu'aucun dessin n'a lus depuis `age` soumissions
+ * (G.sub_seq : ~1 par image sous ZONES) sont rendues à leur réserve
+ * (d'abord age 2, puis 1, puis 0 en dernier recours : un tampon déjà lu par
+ * le flux en cours — ses dessins émis précèdent toute recopie dans la
+ * tranche), mais jamais un tampon du dessin en cours de préparation
+ * (rp_draw : un vidage pendant sa recopie peut avoir fait avancer
+ * G.sub_seq). Une tranche réallouée plus petite (glBufferData) est
+ * reprise à la nouvelle taille (raw_ensure). Le tampon repris
+ * plus tard reçoit une tranche neuve, tout sale (rd_all), comme un tampon
+ * neuf ; les dessins déjà émis qui lisaient la tranche la précèdent dans le
+ * flux, comme pour buf_destroy. */
+static int rp_take_any(unsigned long cap, unsigned long *off)
+{
+    int k;
+    for (k = 0; k < G.rp_n; k++)
+        if (rp_take(k, cap, off))
+            return k;
+    return -1;
+}
+
+static int rp_evict_take(PBuf *self, unsigned long cap, unsigned long *off)
+{
+    unsigned long age;
+    PBuf *b;
+    int k, pass;
+    for (pass = 0; pass < 3; pass++) {
+        age = 2 - pass;
+        G.n_rpe_pass++;
+        /* une tranche à la fois, réessai après chacune : rien de plus que
+           ce que la demande exige */
+        for (b = G.bufs; b; b = b->next) {
+            if (b == self || b->rp < 0 || b->rp_use + age > G.sub_seq ||
+                b->rp_draw == G.rp_draw_id)
+                continue;
+            rp_release(b->rp, b->rp_off, b->rp_cap);
+            G.n_rpe_bytes += b->rp_cap;
+            G.n_rpe_evict++;
+            b->rp = -1;
+            b->rp_cap = 0;
+            rd_all(b);
+            if ((k = rp_take_any(cap, off)) >= 0) {
+                G.n_rpe_ok++;
+                return k;
+            }
+        }
+    }
+    G.n_rpe_fail++;
+    return -1;
+}
+
 static int raw_ensure(PCtx *p, PBuf *b, unsigned long size, unsigned long base)
 {
     unsigned long cap, off;
     int k;
+    b->rp_use = G.sub_seq;              /* RPEVICT : lu par ce flux, ce dessin */
+    b->rp_draw = G.rp_draw_id;
+    if (G.rpevict && b->rp >= 0 && b->raw_base != base &&
+        b->rp_cap > ((size + RAW_ALIGN - 1) & ~(RAW_ALIGN - 1))) {
+        /* RPEVICT : réallouée (glBufferData) plus petite — tout est à
+           recopier de toute façon (rd_all) : une tranche à la nouvelle
+           taille plutôt que la plus grande jamais vue (sans quoi les
+           tampons recyclés d'idTech 4 gardent chacun leur maximum) */
+        rp_release(b->rp, b->rp_off, b->rp_cap);
+        b->rp = -1;
+        b->rp_cap = 0;
+    }
     if (b->rp >= 0 && b->rp_cap >= size) {
         if (b->raw_base != base) {      /* réallouée par glBufferData */
             b->raw_base = base;
@@ -8287,7 +8424,8 @@ static int raw_ensure(PCtx *p, PBuf *b, unsigned long size, unsigned long base)
         }
         return 1;
     }
-    if (b->rp_failed && b->rp_fail_gen == G.rp_gen)
+    if (b->rp_failed && b->rp_fail_gen == G.rp_gen &&
+        (!G.rpevict || b->rp_fail_sub == G.sub_seq))
         return 0;
     if (b->rp >= 0) {
         rp_release(b->rp, b->rp_off, b->rp_cap);
@@ -8299,7 +8437,23 @@ static int raw_ensure(PCtx *p, PBuf *b, unsigned long size, unsigned long base)
     for (k = 0; k < G.rp_n; k++)
         if (rp_take(k, cap, &off))
             break;
-    if (k == G.rp_n) {
+    if (k == G.rp_n && G.rpevict) {
+        /* RPEVICT : une réserve de plus si possible, sinon des tranches
+           rendues (même sous pression mémoire : rien de neuf chez l'hôte) */
+        k = rp_create(p);
+        if (k >= 0 && !rp_take(k, cap, &off))
+            k = -1;
+        if (k < 0)
+            k = rp_evict_take(b, cap, &off);
+        if (k < 0) {
+            if (G.nomem_until > G.n_frames)
+                return 0;
+            b->rp_failed = 1;
+            b->rp_fail_gen = G.rp_gen;
+            b->rp_fail_sub = G.sub_seq;
+            return 0;
+        }
+    } else if (k == G.rp_n) {
         k = rp_create(p);
         if (k < 0 && G.nomem_until > G.n_frames)
             return 0;                   /* 3e passe : pression mémoire, nouvel essai à l'échéance */
@@ -10563,7 +10717,7 @@ static int geom_ok(PCtx *p)
  * scène sans éclairage recevait la normale COURANTE, donc constante — et
  * l'image entière de la case SPHERE_MAP était fausse (vu en vrai, scène
  * « texgen » : écart 166/255 sur toute la case). */
-static int texgen_needs_normal(PCtx *p, int u)
+HOT int texgen_needs_normal(PCtx *p, int u)
 {
     const unsigned char *tg = gls(p) + GS_TEXGEN(u);
     int c;
@@ -10576,12 +10730,48 @@ static int texgen_needs_normal(PCtx *p, int u)
     return 0;
 }
 
+/* 21/10, second lot (POMPPC_GL_ATTRBITS, §11) : les boucles « pour chaque
+   unité / chaque générique dont le bit est (ou n'est pas) là » en une
+   opération sur le mot. ab_tex_of : bit u (0..7) -> QGPU_VF_TEX(u) ;
+   ab_gen_of : bit k (1..15) -> QGPU_VF_GEN(k) (le générique 0 n'y est
+   jamais : les boucles partent de 1). */
+HOT unsigned long ab_tex_of(unsigned long m)
+{
+    return ((m & 0xfUL) << 6) | ((m & 0xf0UL) << 22);
+}
+HOT unsigned long ab_gen_of(unsigned long m)
+{
+    return (m & 0xfffeUL) << 10;
+}
+
+static int ab_in_chk;                   /* ATTRBITS=2 : la seconde écriture est en cours */
+static unsigned long geom_format(PCtx *p);
+static unsigned long geom_format_chk(PCtx *p)
+{
+    unsigned long f0, f1;               /* contrôle : les deux écritures */
+    ab_in_chk = 1;
+    f0 = geom_format(p);
+    G.attrbits = 1;
+    f1 = geom_format(p);
+    G.attrbits = 2;
+    ab_in_chk = 0;
+    G.n_ab_chk++;
+    if (f1 != f0)
+        G.n_ab_diff++;
+    return f0;
+}
+
 static unsigned long geom_format(PCtx *p)
 {
-    unsigned char *g = gls(p);
+    unsigned char *g;
     unsigned long fmt = QGPU_VF_POS(4);
-    int u, lighting = GLD_U8(g, GS_LIGHTING) != 0, normal = lighting;
+    int u, lighting, normal;
 
+    if (G.attrbits == 2 && !ab_in_chk)  /* 21/10, second lot : contrôle */
+        return geom_format_chk(p);
+    g = gls(p);
+    lighting = GLD_U8(g, GS_LIGHTING) != 0;
+    normal = lighting;
     /* Toujours la couleur : les glyphes WC3 sont des quads colorés. Sans ça,
        éclairage allumé et COLOR_MATERIAL éteint → l'hôte n'éclairerait que le
        matériau (souvent alpha 0 : gazon invisible). compute_geom_state pose
@@ -10600,6 +10790,19 @@ static unsigned long geom_format(PCtx *p)
            reprend à chaque unité (us_get, qui n'en refait aucun ici : rien ne
            change entre deux unités) */
         UScan *sc = G.dispfast && !G.vcheck ? us_get(p) : 0;
+        if (sc && G.attrbits == 1) {
+            /* 21/10, second lot (ATTRBITS) : texturage éteint, aucune unité ;
+               sinon us_tex sans l'appel quand le relevé répond déjà (PTex
+               connu, ou unité sans objet) */
+            for (u = 0; sc->on && u < QGPU_MAX_UNITS; u++) {
+                PTex *t = sc->t[u] ? sc->t[u] : sc->dt[u] ? us_tex(sc, u) : 0;
+                if (t && tex_cp(t) != 0) {
+                    fmt |= QGPU_VF_TEX(u);
+                    if (texgen_needs_normal(p, u))
+                        normal = 1;
+                }
+            }
+        } else
         for (u = 0; u < QGPU_MAX_UNITS; u++) {
             int tx;
             if (sc) {
@@ -10631,6 +10834,9 @@ static unsigned long geom_format(PCtx *p)
             const char *e = getenv("POMPPC_GL_VPNEED");
             vpneed = (e && e[0] == '0') ? 0 : 1;
         }
+        if (G.attrbits == 1)            /* 21/10, second lot : en un mot */
+            fmt |= ab_gen_of(hi);
+        else
         for (k = 1; k < QGPU_VF_GEN_MAX; k++)
             if (hi & (1UL << k))
                 fmt |= QGPU_VF_GEN(k);
@@ -10641,7 +10847,9 @@ static unsigned long geom_format(PCtx *p)
            vertex.texcoord[1], unité 1 sans texture — la coordonnée n'était
            jamais portée). Les filtres ci-dessous (tableau actif, texte)
            s'appliquent. */
-        if (p->vp_rec && (p->vp_rec->vp_need & VPN_VALID))
+        if (p->vp_rec && (p->vp_rec->vp_need & VPN_VALID) && G.attrbits == 1)
+            fmt |= ab_tex_of(p->vp_rec->vp_need >> 4);
+        else if (p->vp_rec && (p->vp_rec->vp_need & VPN_VALID))
             for (u = 0; u < QGPU_MAX_UNITS; u++)
                 if (p->vp_rec->vp_need & VPN_TEX(u))
                     fmt |= QGPU_VF_TEX(u);
@@ -10687,6 +10895,9 @@ static unsigned long geom_format(PCtx *p)
                 if (!(lo & (1UL << 17))) fmt &= ~(unsigned long)QGPU_VF_NORMAL;
                 if (!(lo & (1UL << 20))) fmt &= ~(unsigned long)QGPU_VF_SEC_COLOR;
                 if (!(lo & (1UL << 19))) fmt &= ~(unsigned long)QGPU_VF_FOG;
+                if (G.attrbits == 1)
+                    fmt &= ~ab_tex_of(~(lo >> 24));
+                else
                 for (u = 0; u < QGPU_MAX_UNITS; u++)
                     if (!(lo & (1UL << (24 + u))))
                         fmt &= ~(unsigned long)QGPU_VF_TEX(u);
@@ -10709,6 +10920,9 @@ static unsigned long geom_format(PCtx *p)
                 if (nd & VPN_NORMAL) fmt |= QGPU_VF_NORMAL;
                 if ((nd & VPN_SEC) && G.tex14) fmt |= QGPU_VF_SEC_COLOR;
                 if (nd & VPN_FOG) fmt |= QGPU_VF_FOG;
+                if (G.attrbits == 1)
+                    fmt |= ab_gen_of(p->vp_rec->vp_attr);
+                else
                 for (k = 1; k < QGPU_VF_GEN_MAX; k++)
                     if (p->vp_rec->vp_attr & (1UL << k))
                         fmt |= QGPU_VF_GEN(k);
@@ -10722,12 +10936,17 @@ static unsigned long geom_format(PCtx *p)
             if (!(need & VPN_NORMAL)) fmt &= ~(unsigned long)QGPU_VF_NORMAL;
             if (!(need & VPN_SEC))    fmt &= ~(unsigned long)QGPU_VF_SEC_COLOR;
             if (!(need & VPN_FOG))    fmt &= ~(unsigned long)QGPU_VF_FOG;
+            if (G.attrbits == 1) {
+                fmt &= ~ab_tex_of(~(need >> 4));
+                fmt &= ~ab_gen_of(~(need >> 12));
+            } else {
             for (u = 0; u < QGPU_MAX_UNITS; u++)
                 if (!(need & VPN_TEX(u)))
                     fmt &= ~(unsigned long)QGPU_VF_TEX(u);
             for (k = 1; k < QGPU_VF_GEN_MAX; k++)
                 if (!(need & VPN_GEN(k)))
                     fmt &= ~(unsigned long)QGPU_VF_GEN(k);
+            }
         }
     }
     if (geom_switch() >= 2) {           /* format fixe et large : mesure */
@@ -12374,9 +12593,9 @@ static void va_probe(PCtx *p, const unsigned char *V, unsigned long fmt,
     }
 }
 
-static int va_sources_ok(PCtx *p, const unsigned char *V, unsigned long fmt)
+/* La boucle d'origine : premier emplacement dont la source ne va pas, ou -1. */
+static inline int va_bad_loop(PCtx *p, const unsigned char *V, unsigned long fmt)
 {
-    static int probed_first, probed_bad;
     int i, bad = -1;
     for (i = 0; i < VA_FMT_N; i++) {
         int s = va_fmt_slot[i];
@@ -12407,6 +12626,90 @@ static int va_sources_ok(PCtx *p, const unsigned char *V, unsigned long fmt)
             }
         }
     }
+    return bad;
+}
+
+/* 21/10, second lot (POMPPC_GL_ATTRBITS, §11) : bits du format parcourus du
+   plus faible au plus fort — même ordre que les boucles : position, puis
+   normale, couleur, secondaire, brouillard (bits 2..5), unités 0..3 (bits
+   6..9) et 4..7 (bits 26..29) ; génériques 1..15 (bits 11..25) — un
+   emplacement par bit présent ET tableau actif, au lieu des 13 + 16 + 8 + 16
+   tours de chaque dessin. */
+HOT int ab_ctz(unsigned long m)         /* m non nul */
+{
+    return 31 - __builtin_clz(m & -m);
+}
+/* bit du format -> emplacement du descripteur (va_fmt_bit, va_fmt_slot) */
+static const signed char ab_slot_of_bit[32] = {
+    0, -1, 1, 2, 4, 3, 8, 9, 10, 11, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 12, 13, 14, 15, -1, -1
+};
+#define AB_CONV_MASK (QGPU_VF_NORMAL | QGPU_VF_COLOR | QGPU_VF_SEC_COLOR | QGPU_VF_FOG | QGPU_VF_TEX_MASK)
+/* unités 0..7 du format, en un masque de 8 bits */
+HOT unsigned long ab_tex_bits(unsigned long fmt)
+{
+    return ((fmt >> 6) & 0xfUL) | ((fmt >> 22) & 0xf0UL);
+}
+
+static __attribute__((noinline)) int va_bad_bits(PCtx *p, const unsigned char *V, unsigned long fmt)
+{
+    unsigned long m, en_lo, en_hi;
+    const unsigned char *ent;
+    int s, i;
+    if (!V)
+        return -1;                      /* va_enabled rend 0 partout : rien n'est lu */
+    en_lo = GLD_U32(V, VA_EN_LO) >> 16; /* emplacements 0..15 */
+    en_hi = GLD_U32(V, VA_EN_HI);       /* emplacements 16..31 */
+    /* bit 0 : la position (les bits 0..1 du format sont sa taille) */
+    for (m = (fmt & AB_CONV_MASK) | 1UL; m; m &= m - 1) {
+        i = ab_ctz(m);
+        s = ab_slot_of_bit[i];
+        if (!((en_lo >> s) & 1))
+            continue;
+        ent = VA_SLOT(V, s);
+        if (!va_src(p, V, s) || (int)GLD_U32(ent, 4) <= 0 ||
+            va_bpc(U16(ent, 8), ent[0xc]) <= 0)
+            return s;
+    }
+    if (G.prog && p->vp_on) {
+        if (!(en_lo & 1) && (en_hi & 1)) {      /* générique 0 en position */
+            ent = VA_SLOT(V, 16);
+            if (!va_src(p, V, 16) || (int)GLD_U32(ent, 4) <= 0 ||
+                va_bpc(U16(ent, 8) & 0x7fff, ent[0xc]) <= 0)
+                return 16;
+        }
+        for (m = ((fmt & QGPU_VF_GEN_MASK) >> 10) & en_hi & 0xfffeUL; m; m &= m - 1) {
+            i = ab_ctz(m);
+            ent = VA_SLOT(V, 16 + i);
+            if (!va_src(p, V, 16 + i) || (int)GLD_U32(ent, 4) <= 0 ||
+                va_bpc(U16(ent, 8) & 0x7fff, ent[0xc]) <= 0)
+                return 16 + i;
+        }
+    }
+    return -1;
+}
+
+/* ATTRBITS=2 : la réponse par les bits comparée à celle de la boucle (b0,
+   qui fait foi). Hors ligne : le dessin garde une seule copie de la boucle. */
+static __attribute__((noinline)) int va_bad_ctl(PCtx *p, const unsigned char *V,
+                                                unsigned long fmt, int b0)
+{
+    G.n_ab_chk++;
+    if (va_bad_bits(p, V, fmt) != b0)
+        G.n_ab_diff++;
+    return b0;
+}
+
+static int va_sources_ok(PCtx *p, const unsigned char *V, unsigned long fmt)
+{
+    static int probed_first, probed_bad;
+    int bad;
+    if (G.attrbits == 1)
+        bad = va_bad_bits(p, V, fmt);
+    else
+        bad = va_bad_loop(p, V, fmt);
+    if (G.attrbits == 2)                /* contrôle : la boucle fait foi */
+        bad = va_bad_ctl(p, V, fmt, bad);
     if (!probed_first) {
         probed_first = 1;
         va_probe(p, V, fmt, "premier dessin", bad);
@@ -12493,6 +12796,22 @@ constant:
  * code 0). Mêmes conditions que va_plan_attr : un tableau que le plan
  * remplacerait par la valeur courante reste à 4 composantes. 0 sans
  * G.gensizes (tout à 4, le fil d'avant). */
+static unsigned long va_gen_sizes(PCtx *p, const unsigned char *V, unsigned long fmt);
+static unsigned long va_gen_sizes_chk(PCtx *p, const unsigned char *V, unsigned long fmt)
+{
+    unsigned long g0, g1;               /* contrôle d'ATTRBITS */
+    ab_in_chk = 1;
+    g0 = va_gen_sizes(p, V, fmt);
+    G.attrbits = 1;
+    g1 = va_gen_sizes(p, V, fmt);
+    G.attrbits = 2;
+    ab_in_chk = 0;
+    G.n_ab_chk++;
+    if (g1 != g0)
+        G.n_ab_diff++;
+    return g0;
+}
+
 static unsigned long va_gen_sizes(PCtx *p, const unsigned char *V, unsigned long fmt)
 {
     unsigned long gs = 0, n;
@@ -12501,6 +12820,23 @@ static unsigned long va_gen_sizes(PCtx *p, const unsigned char *V, unsigned long
 
     if (!G.gensizes || !V || !(fmt & QGPU_VF_GEN_MASK))
         return 0;
+    if (G.attrbits == 2 && !ab_in_chk)
+        return va_gen_sizes_chk(p, V, fmt);
+    if (G.attrbits == 1) {
+        /* 21/10, second lot (ATTRBITS) : génériques du format à tableau
+           actif seulement, dans l'ordre croissant */
+        unsigned long m = ((fmt & QGPU_VF_GEN_MASK) >> 10) & GLD_U32(V, VA_EN_HI) & 0xfffeUL;
+        for (; m; m &= m - 1) {
+            k = ab_ctz(m);
+            ent = VA_SLOT(V, 16 + k);
+            n = U16(ent, 0xa);
+            if (n < 1 || n > 3 || (long)GLD_U32(ent, 4) <= 0 ||
+                va_bpc(U16(ent, 8) & 0x7fff, ent[0xc]) <= 0 || !va_src(p, V, 16 + k))
+                continue;
+            gs |= QGPU_GS(k, n);
+        }
+        return gs;
+    }
     for (k = 1; k < QGPU_VF_GEN_MAX; k++) {
         if (!(fmt & QGPU_VF_GEN(k)) || !va_enabled(V, 16 + k))
             continue;
@@ -12514,7 +12850,25 @@ static unsigned long va_gen_sizes(PCtx *p, const unsigned char *V, unsigned long
     return gs;
 }
 
-static void va_plan_build(VaPlan *pl, PCtx *p, const unsigned char *V, unsigned long fmt,
+/* 21/10, second lot (ATTRBITS) : unités et génériques du plan par les seuls
+   bits présents, dans l'ordre croissant — mêmes attributs, même ordre. */
+static __attribute__((noinline)) void va_plan_tail_bits(VaPlan *pl, PCtx *p,
+                                                        const unsigned char *V,
+                                                        unsigned long fmt, unsigned long gs)
+{
+    unsigned long m;
+    int u;
+    for (m = ab_tex_bits(fmt); m; m &= m - 1) {
+        u = ab_ctz(m);
+        va_plan_attr(&pl->a[pl->n++], p, V, 8 + u, 4, 1.0f);
+    }
+    for (m = ((fmt & QGPU_VF_GEN_MASK) >> 10) & 0xfffeUL; m; m &= m - 1) {
+        u = ab_ctz(m);
+        va_plan_attr(&pl->a[pl->n++], p, V, 16 + u, QGPU_GS_COUNT(gs, u), 1.0f);
+    }
+}
+
+static inline void va_plan_build(VaPlan *pl, PCtx *p, const unsigned char *V, unsigned long fmt,
                           unsigned long gs)
 {
     int n = QGPU_VF_POS_COUNT(fmt), u;
@@ -12527,6 +12881,10 @@ static void va_plan_build(VaPlan *pl, PCtx *p, const unsigned char *V, unsigned 
     if (fmt & QGPU_VF_COLOR)     va_plan_attr(&pl->a[pl->n++], p, V, 2, 4, 1.0f);
     if (fmt & QGPU_VF_SEC_COLOR) va_plan_attr(&pl->a[pl->n++], p, V, 4, 3, 0.0f);
     if (fmt & QGPU_VF_FOG)       va_plan_attr(&pl->a[pl->n++], p, V, 3, 1, 0.0f);
+    if (G.attrbits == 1) {
+        va_plan_tail_bits(pl, p, V, fmt, gs);
+        return;
+    }
     for (u = 0; u < QGPU_MAX_UNITS; u++)
         if (fmt & QGPU_VF_TEX(u))
             va_plan_attr(&pl->a[pl->n++], p, V, 8 + u, 4, 1.0f);
@@ -12535,6 +12893,22 @@ static void va_plan_build(VaPlan *pl, PCtx *p, const unsigned char *V, unsigned 
     for (u = 1; u < QGPU_VF_GEN_MAX; u++)
         if (fmt & QGPU_VF_GEN(u))
             va_plan_attr(&pl->a[pl->n++], p, V, 16 + u, QGPU_GS_COUNT(gs, u), 1.0f);
+}
+
+/* ATTRBITS=2 : le plan par les bits, comparé octet pour octet au plan des
+   boucles (va_plan_attr remet chaque attribut à 0 : octets de bourrage
+   compris). Hors ligne, comme va_bad_ctl. */
+static __attribute__((noinline)) void va_plan_ctl(const VaPlan *pl, PCtx *p,
+                                                  const unsigned char *V,
+                                                  unsigned long fmt, unsigned long gs)
+{
+    static VaPlan plan2;
+    G.attrbits = 1;
+    va_plan_build(&plan2, p, V, fmt, gs);
+    G.attrbits = 2;
+    G.n_ab_chk++;
+    if (plan2.n != pl->n || memcmp(plan2.a, pl->a, sizeof(pl->a[0]) * pl->n) != 0)
+        G.n_ab_diff++;
 }
 
 static void va_pack_planned(float *dst, const VaPlan *pl, unsigned long i)
@@ -13188,6 +13562,7 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
 
     if (!G.native || !V || !pl || pl->n < 1 || pl->n > QGPU_NATTR_MAX)
         return -1;
+    G.rp_draw_id++;                     /* RPEVICT : les tranches de CE dessin */
     if (lazy) {
         /* IDXLAZY : plage inutile si tous les miroirs lus sont propres ;
            sinon, le balayage d'avant (et ses refus, par l'appelant) */
@@ -13349,6 +13724,9 @@ static int geom_draw_native(PCtx *p, const unsigned char *V, const VaPlan *pl,
     /* 3. Miroirs : tranche, puis recopie de ce qui est sale ET lu. Peut vider
           le flux (arène, nouvelle réserve) : rien n'est encore écrit pour CE
           dessin. Un échec laisse des recopies justes et rend la main. */
+    if (G.rpevict)                      /* RPEVICT : aucun tampon de CE dessin rendu */
+        for (k = 0; k < nn; k++)
+            nb[k].b->rp_draw = G.rp_draw_id;
     for (k = 0; k < nn; k++)
         if (!raw_ensure(p, nb[k].b, nb[k].size, nb[k].base) || !G.native ||
             !raw_sync(p, nb[k].b, nb[k].base, nb[k].size, nb[k].lo, nb[k].hi))
@@ -13780,6 +14158,16 @@ static void d3x_note(const char *why, unsigned long frame)
                 G.progmemo, G.n_pm_hit, G.n_pm_miss, G.mtxdirty, G.n_md_skip, G.n_md_cmp,
                 G.n_md_chk_diff, G.stunit, G.n_su_part, G.n_su_units, G.n_su_chk,
                 G.n_su_chk_diff, G.displock, G.n_dl_fast);
+    if (G.vd2 || G.attrbits || G.dispcmp || G.rpevict)
+        gl_note("D3Q %s %lu : vd2 %d, %lu essais, %lu clés trouvées, %lu repris (%lu unités "
+                "refaites), %lu rangés, contrôle %lu identiques, %lu écarts | attrbits %d, "
+                "contrôle %lu, %lu écarts | dispcmp %d, contrôle %lu, %lu écarts | rpevict %d, "
+                "%lu passes, %lu tranches rendues (%lu Kio), %lu tranches obtenues ensuite, "
+                "%lu échecs ; %lu dessins natifs retombés sur l'empaquetage\n",
+                why, frame, G.vd2, G.n_v2_try, G.n_v2_hit, G.n_v2_take, G.n_v2_units,
+                G.n_v2_push, G.n_v2_chk_same, G.n_v2_chk_diff, G.attrbits, G.n_ab_chk,
+                G.n_ab_diff, G.dispcmp, G.n_dc_chk, G.n_dc_diff, G.rpevict, G.n_rpe_pass,
+                G.n_rpe_evict, G.n_rpe_bytes >> 10, G.n_rpe_ok, G.n_rpe_fail, G.n_native_fall);
     gl_note("ZONES %s %lu : zones %d (forcé %d, flux %lu Kio), %lu dessins aux indices "
             "dans l'arène (%lu Kio), %lu soumissions, %lu barrières attendues (%.2f ms)\n",
             why, frame, G.zones, G.zones_force, G.zl_cmd_bytes >> 10, G.n_idxspill,
@@ -14067,6 +14455,8 @@ static int geom_draw_client_unsafe(PCtx *p, long indexed, unsigned long mode,
     /* I5 (relecture du 24/09) : le plan d'abord — la clé et la propreté des
        VBO en dérivent (générique 0 en position, génériques, unités 4..7) */
     va_plan_build(&plan, p, V, fmt, gs);
+    if (G.attrbits == 2)                /* 21/10, second lot : contrôle d'ATTRBITS */
+        va_plan_ctl(&plan, p, V, fmt, gs);
     /* v18 : tout le plan dans des VBO → DRAW_NATIVE, sans empaquetage */
     if (G.native) {
         int nr = geom_draw_native(p, V, &plan, mode, first, count,
@@ -14502,10 +14892,12 @@ static int wl_neutral(const unsigned long *c)
 #define DF_ST 1
 #define DF_WL 2
 #define DF_UV 4
+#define DF_V2 8                         /* 21/10, second lot : !v2_blk_bad (VD2) */
+#define V2_PROG 0x01400000UL            /* +0x0c : liaison 0x400000, allumage 0x1000000 */
 static int df_classify(const unsigned long *c)
 {
     unsigned long ex = G.wlunif ? WL_UNIF : 0;
-    int k, st = 1, wl = 1, uv = 1;
+    int k, st = 1, wl = 1, uv = 1, v2 = 1;
     for (k = 0; k < CNT_BLOCK; k++) {
         unsigned long v = c[k], e;
         if (!v)
@@ -14517,11 +14909,15 @@ static int df_classify(const unsigned long *c)
             wl = 0;
             if (k != 1)
                 uv = 0;
+            /* VD2 : en plus, les bits d'unité et la liaison des programmes */
+            if (k == 1 ? (v & ~(wl_mask[1] | 0xffUL)) != 0 :
+                k == WL_UNIF_WORD ? (v & ~(wl_mask[k] | e | V2_PROG)) != 0 : 1)
+                v2 = 0;
         }
     }
     if (!(c[1] & 0xffUL) || (c[1] & ~0xffUL))
         uv = 0;
-    return (st ? DF_ST : 0) | (wl ? DF_WL : 0) | (uv ? DF_UV : 0);
+    return (st ? DF_ST : 0) | (wl ? DF_WL : 0) | (uv ? DF_UV : 0) | (v2 ? DF_V2 : 0);
 }
 
 /* R4 : POMPPC_GL_BLOCKDUMP, sur stderr (gltest l'entrelace avec ses propres
@@ -14736,12 +15132,14 @@ static int uv_take(PCtx *p, const unsigned long *chg, TexInfo *ti,
     return 1;
 }
 
+static void v2_check(int ok, const TexInfo *ti, unsigned long fmt, unsigned long gs);
 /* VERDICTCHECK : le verdict complet qu'on vient de calculer, comparé à celui
    par unité (UVC). Appelé avant chaque vd_store du dispatch. */
 static void uv_check(PCtx *p, int ok, const TexInfo *ti, unsigned long fmt, unsigned long gs)
 {
     unsigned long s0[QGPU_MAX_UNITS][5], s1[QGPU_MAX_UNITS][5], du = 0;
     int u;
+    v2_check(ok, ti, fmt, gs);          /* 21/10, second lot : VD2=2 */
     if (!UVC.pending)
         return;
     UVC.pending = 0;
@@ -14768,6 +15166,253 @@ static void uv_check(PCtx *p, int ok, const TexInfo *ti, unsigned long fmt, unsi
     (void)p;
 }
 
+/* ─────────── 21/10, second lot : verdicts gardés (POMPPC_GL_VD2) ───────────
+ * docs/d3-plugin-x86.md §11. DOOM 3 refait ~148 verdicts complets par image :
+ * le passage des volumes d'ombre (programme de sommets seul, texturage
+ * éteint) aux interactions (deux programmes, unités 1, 4, 5 reliées) et
+ * retour, lumière après lumière. Le bit de liaison des programmes n'est pas
+ * neutre (la clé change) : ni le verdict gardé (lot 3) ni le verdict par
+ * unité (UNITVD) ne le reprennent. Ici, en plus du verdict courant, VD2_N
+ * verdicts bons de la même image sont gardés, chacun avec le OU de ce que
+ * les blocs ont signalé depuis son rangement (v2_accumulate, à chaque
+ * dispatch). Au moment du verdict complet, un emplacement est repris si :
+ *   — sa clé est celle de l'état courant (objets programmes courants, ce que
+ *     le plugin en sait, étage de sommets, VAO et ses masques, drawable,
+ *     époque des textures, image…) ;
+ *   — les blocs reçus depuis ne portent que des bits neutres de la liste
+ *     blanche, des bits d'unité (+0x04 0..7) et la liaison ou l'allumage des
+ *     programmes (+0x0c 0x400000 / 0x1000000 : ce qu'ils changent pour le
+ *     verdict, la clé le porte ; l'allumage pose aussi +0x00 0x800000,
+ *     admis sous WL_R0) ;
+ * et la reprise refait comme UNITVD : rastérisation (geom_raster_ok),
+ * domaine des programmes (prog_domain_ok), unités signalées depuis
+ * (geom_texture_unit_ok, texture_unit_ok), autres unités vérifiées sur le
+ * relevé (même objet de GLEngine), geom_format et va_gen_sizes TOUJOURS
+ * refaits. Un verdict sans aucune unité texturée n'est repris que si le
+ * texturage est toujours éteint (texture_ok et geom_texture_ok rendent
+ * alors « rien » sans lire les unités). Sous VD2=2 la reprise est calculée,
+ * le complet aussi, et les deux comparés (V2C, lignes VD2 de la note). */
+static struct {
+    int            pending;
+    int            ok;
+    TexInfo        ti;
+    unsigned long  fmt, gs;
+    unsigned long  told;
+} V2C;
+
+/* 1 = le bloc porte un bit que la reprise n'admet pas (bloc absent : 1). */
+static int v2_blk_bad(const unsigned long *c)
+{
+    unsigned long ex = G.wlunif ? WL_UNIF : 0;
+    int k;
+    if (!c)
+        return 1;
+    for (k = 0; k < CNT_BLOCK; k++) {
+        unsigned long v = c[k], a;
+        if (!v)
+            continue;
+        a = wl_mask[k];
+        if (k == 1)
+            a |= 0xffUL;
+        else if (k == WL_UNIF_WORD)
+            a |= ex | V2_PROG;
+        if (v & ~a)
+            return 1;
+    }
+    return 0;
+}
+
+/* Classé une fois (DISPFAST : df_classify, cls >= 0), sinon v2_blk_bad. */
+static int v2_bad(const unsigned long *chg, int cls)
+{
+    if (cls >= 0 && chg) {
+        int b = !(cls & DF_V2);
+        if (G.vd2 == 2 && b != v2_blk_bad(chg))     /* contrôle du classement */
+            G.n_v2_chk_diff++;
+        return b;
+    }
+    return v2_blk_bad(chg);
+}
+
+/* À chaque dispatch, avant tout (une dizaine d'instructions) : le numéro
+   du dispatch, et ce que son bloc signale. */
+static void v2_accumulate(PCtx *p, const unsigned long *chg, int cls)
+{
+    unsigned long seq = ++p->v2_seq, um;
+    int u;
+    if (!seq) {                         /* tour complet du compteur : tout oublier */
+        for (u = 0; u < VD2_N; u++)
+            p->v2[u].valid = 0;
+        p->v2_bad_seq = 0;
+        seq = p->v2_seq = 1;
+    }
+    if (v2_bad(chg, cls)) {
+        p->v2_bad_seq = seq;
+        return;
+    }
+    um = chg[1] & 0xffUL;
+    if (um) {                           /* VD2_N = 3, sans boucle */
+        p->v2[0].um |= um;
+        p->v2[1].um |= um;
+        p->v2[2].um |= um;
+    }
+}
+
+/* Emplacement encore utilisable : rangé dans cette image, aucun bloc
+   inadmissible depuis. */
+HOT int v2_alive(const PCtx *p, const V2Slot *v)
+{
+    return v->valid && v->key[0] == G.n_frames && p->v2_bad_seq < v->seq;
+}
+
+/* L'emplacement à écraser : libre ou mort, sinon le plus ancien. */
+static V2Slot *v2_victim(PCtx *p)
+{
+    V2Slot *best = &p->v2[0];
+    int s;
+    for (s = 0; s < VD2_N; s++) {
+        V2Slot *v = &p->v2[s];
+        if (!v2_alive(p, v))
+            return v;
+        if (v->seq < best->seq)
+            best = v;
+    }
+    return best;
+}
+
+/* Le verdict courant (valable jusqu'au bloc de CE dispatch, qui dit ce qui a
+   bougé depuis le dispatch précédent) gardé dans v, avant d'être remplacé ;
+   son numéro est celui de ce dispatch, déjà versé par v2_accumulate. */
+static void v2_push_cur(PCtx *p, V2Slot *v, const unsigned long *chg, int cls)
+{
+    if (!p->vd_valid || !p->vd_ok || p->vd_key[0] != G.n_frames || v2_bad(chg, cls))
+        return;
+    v->valid = 1;
+    v->seq = p->v2_seq;
+    v->um = chg[1] & 0xffUL;            /* le bloc de ce dispatch compte */
+    memcpy(v->key, p->vd_key, sizeof(v->key));
+    v->ti = p->vd_ti;
+    v->fmt = p->vd_fmt;
+    v->gs = p->vd_gs;
+    G.n_v2_push++;
+}
+
+/* La reprise (voir plus haut). 1 = verdict bon dans ti, fmt, gs ; *slot =
+   l'emplacement repris ; vk = la clé de l'état courant. */
+static int v2_take(PCtx *p, TexInfo *ti, unsigned long *fmt, unsigned long *gs,
+                   unsigned long *vk, int *slot)
+{
+    unsigned long umask = 0;
+    unsigned char *g, *V;
+    UScan *sc;
+    V2Slot *v = 0;
+    int s, u, n = SCAN_N(p), any = 0;
+
+    if (n > QGPU_MAX_UNITS)
+        return 0;
+    for (s = 0; s < VD2_N; s++)
+        if (v2_alive(p, &p->v2[s]))
+            break;
+    if (s == VD2_N)
+        return 0;                       /* rien de vivant : pas même la clé */
+    G.n_v2_try++;
+    vd_key_of(p, vk);                   /* appelle prog_state */
+    for (s = 0; s < VD2_N; s++) {
+        v = &p->v2[s];
+        if (v2_alive(p, v) && memcmp(vk, v->key, sizeof(v->key)) == 0)
+            break;
+    }
+    if (s == VD2_N)
+        return 0;
+    G.n_v2_hit++;
+    if (!geom_raster_ok(p) || !prog_domain_ok(p))
+        return 0;
+    for (u = 0; u < n; u++)
+        if (v->ti.u[u].t)
+            any = 1;
+    umask = v->um;
+    us_open();
+    sc = us_get(p);
+    if (!sc) {
+        us_close();
+        return 0;
+    }
+    if (!any) {
+        /* rien de texturé au rangement : repris seulement si le texturage
+           est toujours éteint (geom_texture_ok et texture_ok s'arrêtent là) */
+        if (sc->on) {
+            us_close();
+            return 0;
+        }
+        *ti = v->ti;
+    } else {
+        if (!sc->on) {
+            us_close();
+            return 0;
+        }
+        for (u = UNIT_LIM(p); u < n; u++)
+            if (sc->mask[u]) {
+                us_close();
+                return 0;               /* le complet refusera (NO_TEX_UNITS) */
+            }
+        *ti = v->ti;
+        for (u = 0; u < n; u++) {
+            const PTex *t0 = v->ti.u[u].t;
+            if (!(umask & (1UL << u))) {
+                if (t0 ? (!sc->mask[u] || sc->dt[u] != t0->drvtex) : sc->mask[u] != 0) {
+                    us_close();
+                    return 0;
+                }
+                continue;
+            }
+            if (!geom_texture_unit_ok(p, sc, u) || !texture_unit_ok(p, u, &ti->u[u])) {
+                us_close();
+                return 0;
+            }
+            G.n_v2_units++;
+        }
+    }
+    *fmt = geom_format(p);              /* sous le relevé, comme le complet */
+    us_close();
+    if (QGPU_VF_WORDS(*fmt) * 4 > GLD_VERTEX_SIZE)
+        return 0;
+    g = gls(p);
+    V = g ? (unsigned char *)GLD_U32(g, GS_VAO) : 0;
+    *gs = va_gen_sizes(p, V, *fmt);
+    *slot = s;
+    return 1;
+}
+
+/* VD2=2 : le verdict complet comparé à la reprise (V2C). */
+static void v2_check(int ok, const TexInfo *ti, unsigned long fmt, unsigned long gs)
+{
+    unsigned long s0[QGPU_MAX_UNITS][5], s1[QGPU_MAX_UNITS][5], du = 0;
+    int u;
+    if (!V2C.pending)
+        return;
+    V2C.pending = 0;
+    ok = ok ? 1 : 0;
+    if (ok) {
+        cnt_ti_sig(ti, s1);
+        cnt_ti_sig(&V2C.ti, s0);
+        for (u = 0; u < QGPU_MAX_UNITS; u++)
+            if (memcmp(s0[u], s1[u], sizeof(s0[u])) != 0)
+                du |= 1UL << u;
+    }
+    if (ok == V2C.ok && (!ok || (fmt == V2C.fmt && gs == V2C.gs && !du))) {
+        G.n_v2_chk_same++;
+        return;
+    }
+    G.n_v2_chk_diff++;
+    if (V2C.told < VD_TOLD) {
+        V2C.told++;
+        gl_note("VD2 écart, image %lu : ok %d -> %d, format %08lx -> %08lx, "
+                "génériques %08lx -> %08lx, unités différentes 0x%02lx\n",
+                G.n_frames, V2C.ok, ok, V2C.fmt, ok ? fmt : 0UL, V2C.gs,
+                ok ? gs : 0UL, du);
+    }
+}
+
 /* Bits à ajouter au retour de gldInitDispatch / gldUpdateDispatch :
  *   bit 0 : « le pilote fait la transformation et l'éclairage » ;
  *   bit 1 : « refais le chemin » — sans lui, GLEngine compare (retour & 3) à
@@ -14791,6 +15436,9 @@ static long geom_dispatch_locked(PCtx *p, const unsigned long *chg)
     long bits = 0;
     int wl = 0;
     int cls = (G.dispfast && chg) ? df_classify(chg) : -1;   /* 21/10 */
+
+    if (p && G.vd2)                     /* 21/10, second lot : VD2 */
+        v2_accumulate(p, chg, cls);
 
     if (p && G.mtxdirty) {              /* 21/10 : matrices signalées depuis l'envoi */
         unsigned long w2 = chg ? chg[2] : ~0UL;
@@ -14883,6 +15531,40 @@ static long geom_dispatch_locked(PCtx *p, const unsigned long *chg)
         } else {
             G.n_uv_full++;
         }
+    }
+    if (p && G.vd2 && chg && !UVC.pending && !G.vcheck) {
+        /* 21/10, second lot (§11) : un verdict gardé de la même image ? Le
+           courant est gardé à son tour (dans l'emplacement repris, sinon
+           le plus ancien) avant d'être remplacé. Pas sous VERDICTCHECK, qui
+           veut le complet partout (VD2=2 est le contrôle de VD2). */
+        TexInfo ti;
+        unsigned long fmt, gs, vk[VKEY_WORDS];
+        int s = -1;
+        {
+            if (v2_take(p, &ti, &fmt, &gs, vk, &s)) {
+                if (G.vd2 == 1) {
+                    G.n_v2_take++;
+                    if (G.count)
+                        cnt_keep(p, 1, &ti, fmt);
+                    v2_push_cur(p, &p->v2[s], chg, cls);
+                    if (G.dispfast) {
+                        unsigned long h[VKEY_HEAD];
+                        vd_key_head(p, h);
+                        vd_store_k(p, 1, &ti, fmt, gs,
+                                   memcmp(h, vk, sizeof(h)) == 0 ? vk : 0);
+                    } else
+                        vd_store(p, 1, &ti, fmt, gs);
+                    p->vd_fresh = 1;
+                    return geom_dispatch_publish(p, fmt);
+                }
+                V2C.pending = 1;        /* contrôle : le complet suit, comparé */
+                V2C.ok = 1;
+                V2C.ti = ti;
+                V2C.fmt = fmt;
+                V2C.gs = gs;
+            }
+        }
+        v2_push_cur(p, v2_victim(p), chg, cls);
     }
     us_open();                          /* mémoire des unités, le temps du verdict */
     if (p && geom_ok(p)) {
@@ -14982,6 +15664,7 @@ long pomppc_geom_dispatch(void *ctx, const unsigned long *chg)
     pthread_mutex_lock(&G.mu);
     bits = geom_dispatch_locked(find_ctx(ctx), chg);
     UVC.pending = 0;                    /* jamais d'un dispatch à l'autre */
+    V2C.pending = 0;
     pthread_mutex_unlock(&G.mu);
     return bits;
 }
@@ -18250,6 +18933,35 @@ long pomppc_hook_and_dispatch(void *ctx, void **procs, const unsigned long *chg,
     return bits;
 }
 
+/* 21/10, second lot (POMPPC_GL_DISPCMP, §11) : la table comparée à la
+   photographie par OU des différences, quatre paquets de neuf cases sans
+   boucle (36 × 7 instructions de boucle → 36 × 4), sortie au premier paquet
+   qui diffère. 1 = identiques, case pour case. */
+#define DC9(o) ((x[(o)] ^ y[(o)]) | (x[(o) + 1] ^ y[(o) + 1]) | (x[(o) + 2] ^ y[(o) + 2]) | \
+                (x[(o) + 3] ^ y[(o) + 3]) | (x[(o) + 4] ^ y[(o) + 4]) | (x[(o) + 5] ^ y[(o) + 5]) | \
+                (x[(o) + 6] ^ y[(o) + 6]) | (x[(o) + 7] ^ y[(o) + 7]) | (x[(o) + 8] ^ y[(o) + 8]))
+/* la comparaison d'origine, case par case */
+static inline int dc_loop(void *const *a, void *const *b)
+{
+    int k;
+    for (k = 0; k < PROC_COUNT; k++)
+        if (a[k] != b[k])
+            return 0;
+    return 1;
+}
+
+static int dc_same(void *const *a, void *const *b)
+{
+    const unsigned long *x = (const unsigned long *)a, *y = (const unsigned long *)b;
+    int k;
+    if (PROC_COUNT == 36)               /* (énumération : pas de #if) */
+        return !(DC9(0) || DC9(9) || DC9(18) || DC9(27));
+    for (k = 0; k < PROC_COUNT; k++)
+        if (x[k] != y[k])
+            return 0;
+    return 1;
+}
+
 /* Verrou tenu, p = find_ctx(ctx) (peut être nul). */
 static long hook_and_dispatch_locked(PCtx *p, void **procs, const unsigned long *chg,
                                      int apple_called)
@@ -18259,9 +18971,21 @@ static long hook_and_dispatch_locked(PCtx *p, void **procs, const unsigned long 
 
     if (p) {
         int same = !apple_called && install_final && procs && p->hook_snap_procs == procs;
-        for (k = 0; same && k < PROC_COUNT; k++)
-            if (procs[k] != p->hook_snap[k])
-                same = 0;
+        if (G.dispcmp && same) {
+            /* 21/10, second lot (DISPCMP) : même comparaison, sans boucle */
+            int s1 = dc_same(procs, p->hook_snap);
+            if (G.dispcmp == 2) {       /* contrôle : la boucle d'origine */
+                int s0 = dc_loop(procs, p->hook_snap);
+                G.n_dc_chk++;
+                if (s0 != s1) {
+                    G.n_dc_diff++;
+                    s1 = s0;
+                }
+            }
+            same = s1;
+        } else if (same) {
+            same = dc_loop(procs, p->hook_snap);
+        }
         if (same) {
             p->procs = procs;
             G.n_hook_skip++;
@@ -18279,6 +19003,7 @@ static long hook_and_dispatch_locked(PCtx *p, void **procs, const unsigned long 
     if (G.v7) {
         bits = geom_dispatch_locked(p, chg);
         UVC.pending = 0;
+        V2C.pending = 0;
     }
     return bits;
 }
