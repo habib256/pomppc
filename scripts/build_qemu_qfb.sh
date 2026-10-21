@@ -1043,6 +1043,7 @@ accel/tcg/cpu-exec.c t2_verify
 accel/tcg/translator.c translator_t2_continue
 accel/tcg/tb-maint.c T2_TRACE
 tcg/tcg-op-ldst.c t2_mark_atomic
+accel/tcg/cputlb.c t2_check_foreign
 target/ppc/translate.c t2_gen_bc
 target/ppc/cpu_init.c ppc_t2_regs
 TCG48_MARKERS

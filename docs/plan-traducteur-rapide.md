@@ -384,6 +384,9 @@ gain de la phase 1 sur DOOM 3.
   périphériques) et compare tous les registres (`ppc_t2_regs` : GPR, CR, XER, LR, CTR, nip,
   MSR, réservation, FPSCR, VSR, VSCR, statuts flottants, SPR) ; atomiques et base de temps : non
   vérifiables. Dans ce mode les traces ne sont ni chaînées ni dans le cache de sauts.
+  Un accès invité que le journal ne voit pas (celui d'un helper : `cpu_ld*/st*_mmu`,
+  `probe_access*` — lswx/stswx, lmw/stmw hors page, dcbz par helper…) rend la trace non
+  vérifiable et n'est **jamais rejoué** (§9.5).
 - **parité des hôtes** : code commun (`accel/tcg`, `tcg/tcg-op-ldst.c`) et frontal PowerPC
   seulement, **aucun émetteur touché** : le même patch vaut pour arm64 ; il reste à le
   construire et le prouver sur le M4 (même niveau de preuve).
@@ -422,14 +425,15 @@ réglage** : à confirmer en entrelacé (et sur DOOM 3, commande 3 du §8.5).
 
 ### 9.4 Ce qui reste
 
-1. Une partie vérifiée complète sur Tiger avec le binaire final, et comprendre verif3.
+1. ~~Une partie vérifiée complète sur Tiger avec le binaire final, et comprendre verif3.~~
+   Fait le 21/10 (§9.5) ; reste la partie vérifiée DOOM 3 sur la VM quotidienne.
 2. A/B entrelacé sur la VM de dev, puis DOOM 3 sur la VM quotidienne (§8.5).
 3. Arêtes et code x86 de DOOM 3 (§8.5, 1 et 2) pour trancher la phase 2.
 4. Pendant arm64 : construire et prouver sur le M4.
 5. Leviers suivants du même niveau : traverser les retours appariés (`bl` … `blr` dans la
    trace), traces sur deux pages, soupape pour les traces dont une sortie latérale est chaude.
 
-### 9.x Défaut trouvé sur la VM quotidienne (21/10, 15 h) — `x-tier2` NE DOIT PAS être allumé
+### 9.x Défaut trouvé sur la VM quotidienne (21/10, 15 h) — corrigé au §9.5
 
 Partie `t2-d3-verif` (binaire rapide reconstruit avec 0048, `TIER2=4096 TIER2VERIFY=64`) : Tiger ne
 démarre pas le bureau (console texte, `open`/`osascript` : « On-demand launch of the Window
@@ -439,5 +443,130 @@ trop : accès 58/58 … memop 0x12 » — la trace fait une écriture de plus qu
 (fin de boucle ou sortie latérale mal placée) ; 2 sur `0xffff88d4` (page commune) et 2 sur une
 adresse aberrante `0x4672616d` (« Fram » en ASCII : clé de trace lue dans une mémoire qui n'en est
 pas une). QEMU coupé au moniteur ; au redémarrage par défaut, HFS a retiré 2 fichiers orphelins,
-bureau revenu. Journal : `bench/tcg/t2/d3-verif-2110/run_tiger.log`. Le gain de −8,5 % du banc
-t2bench n'est pas valable tant que ce défaut n'est pas corrigé.
+bureau revenu. Journal : `bench/tcg/t2/d3-verif-2110/run_tiger.log`. (Cause et correctif : §9.5.)
+
+### 9.5 Partie vérifiée de Tiger : le bureau ne venait pas (21/10, corrigé)
+
+**Symptôme** (VM quotidienne, `TIER2=4096 TIER2VERIFY=64`,
+`bench/tcg/t2/d3-verif-2110/run_tiger.log`) : pas de bureau, 31 divergences — 28 « écriture en
+trop : accès 58/58 … memop 0x12 » sur la trace noyau 0xa66cc, 2 « registres : r6 trace
+0x4672616d » sur la page commune 0xffff88d4 (`0x4672616d` n'est pas une clé : c'est « Fram »,
+le contenu de r6). Reproduit sur la VM de dev (même noyau, binaire de `qemu-t2` sans
+changement) : arrêt au journal de démarrage après loginwindow, 4 divergences r6 à
+0xffff88d4, 26 « écriture en trop » sur une trace d'une bibliothèque (0x91b4e8c8), aucune
+réponse de l'agent (extinction forcée).
+
+**Causes : deux défauts du vérificateur, aucun des traces elles-mêmes.**
+
+1. *Accès hors journal rejoués* — la cause du bureau absent. Le journal n'accroche que les
+   accès émis par `tcg_gen_qemu_ld/st` ; ceux d'un helper (`cpu_ld*/st*_mmu`, `probe_access`)
+   lui échappent. 0xffff88d4 est l'en-tête du `bcopy` de la page commune : `mtxer` ;
+   `lswx r6,0,r4` ; `stswx r6,0,r12` (helpers `helper_lswx`/`helper_stsw`). Le rejeu des TB
+   d'origine, parti des registres de l'entrée, refaisait ces accès **en vrai** : `lswx`
+   relisait une source que la trace avait déjà réécrite (copie qui se recouvre : r6 « ks/D »
+   au lieu de « Fram »), et `stswx` **réécrivait la mémoire de l'invité** avec ces octets,
+   après la trace. Une copie de chaîne sur 64 rejouée faux : chemins de fichiers abîmés,
+   bureau jamais lancé. (Même risque pour lmw/stmw hors page, dcbz par helper, et tout
+   helper qui touche la mémoire.)
+2. *Copie journalisée coupée par TCG* — les « écriture en trop ». 0xa66cc est un bloc droit
+   de 139 instructions (copie d'un état de thread 32 → 64 bits : `lwz` ; `stw 0` ; `stw`, en
+   boucle déroulée). Les accroches du journal prenaient deux temporaires TCG par accès sans
+   les rendre ; à plus de 512 (`TCG_MAX_TEMPS`) `tb_gen_code` recommence avec moitié moins
+   d'instructions : la copie journalisée s'arrêtait à 0xa67c8 (63 instructions), au milieu
+   du bloc, alors que le rejeu joue des TB entiers et écrivait au-delà. Exécution juste (la
+   copie s'arrête proprement), vérification fausse ; idem pour une trace elle-même trop
+   longue pour les temporaires.
+
+**Correctif** (`tcg/0048`, toujours sans émetteur, rien quand `x-tier2=0`) :
+
+- `accel/tcg/ldst_common.c.inc` (`cpu_ld*/st*_mmu`) et `cputlb.c` (`probe_access_internal`,
+  hors lecture d'instructions) appellent `t2_check_foreign` : si une vérification est en
+  cours (`cpu->t2_vrun`), dans le passage journalisé (le vrai) l'accès est fait et la trace
+  déclarée non vérifiable ; dans le rejeu il n'est **pas** fait : `cpu_loop_exit`, le
+  nettoyage de `cpu_exec` remet l'état laissé par la trace. Même chose pour atomiques et base
+  de temps (`helper_t2_unverif`), qui ne s'exécutent plus jamais dans un rejeu ;
+- `tcg-op-ldst.c` : les temporaires des accroches sont rendus ;
+- `t2_form` : une trace coupée par TCG **au milieu d'un TB** est retraduite avec les TB du
+  chemin qui tiennent (« raccourcies » au bilan) ; une trace qui s'arrête là où s'arrête un
+  de ses TB (isync, mtmsr…) est gardée telle quelle et vérifiable ; une copie journalisée
+  plus courte que sa trace est jetée (« copies coupées », la trace n'est pas vérifiée) ;
+- mutants : `POMPPC_T2_MUTANT=2` (toutes les sorties latérales « pris » à l'envers),
+  `POMPPC_T2_MUTANT=3` (le garde des accès hors journal coupé : le défaut du 21/10).
+
+**Non-régression** : `tools/tcg/t2proof.sh QEMU_BIN` — banc nu `tools/tcg/t2proof.S`
+(`-M mac99 -bios`, mode réel, 1 vCPU, ~10 s par passe) : une trace qui fait glisser un
+tampon sur lui-même avec lswx/stswx et réécrit la source, un bloc droit de 144 accès, une
+trace de ~300 instructions. Passes ref / t2 / verif (`x-tier2-verify=1`) / mutant 2 /
+mutant 3.
+
+| binaire | somme ref / t2 / verif | verif | mutant 2 | mutant 3 |
+|---|---|---|---|---|
+| avant (qemu-t2, 20b3c5d) | 0x9780e5cd / 0x9780e5cd / **0x3bb2c16a** | **48 958 divergences** (r6), invité altéré | — | — |
+| après | 0x9780e5cd ×3 | 0 divergence, 32 641 identiques, 16 319 non vérifiables, 1 raccourcie | attrapé (lecture en trop) | attrapé (r6, somme 0x3bb2c16a) |
+
+**Preuves** (binaire `~/src/qemu-t2fix/build`, branche `t2fix` d51fb1e de `qemu-t2`) :
+
+- OpenBIOS SMP (2 vCPU, `x-tier2=64,x-tier2-verify=2`, 120 s) : 77,7 millions de traces
+  vérifiées, **0 divergence** (211 traces, 0 raccourcie).
+- Tiger, VM de dev **au bureau** (`start --gui`, 2 vCPU, MTTCG, toutes les options de
+  production, `x-tier2=4096,x-tier2-verify=64`), session de **28 min 30 s** (15:51 → 16:20) :
+  démarrage, jeux (Zenerchi, Marble Blast Gold en deux réglages, 150 s chacun, deux fois),
+  job t2bench (compilation du kext, du plugin et de gltest dans l'invité ; ses passes
+  gltest ne tournent pas en mode bureau), extinction propre : **163,9 millions de traces
+  vérifiées, 0 divergence**, 154,2 M identiques, 9,5 M non vérifiables, 1,6 M sans copie
+  journalisée (169 copies coupées), 911 traces raccourcies, 885 M accès rejoués
+  (`bench/tcg/t2/t2fix-verif-gui/`).
+- t2bench en single-user vérifié (`t2dev.sh t2fix-verif-su x-tier2=4096,x-tier2-verify=64`) :
+  3 passes, md5 identique, 66,2 M traces vérifiées, **0 divergence**.
+- verif3 (§9.2) : son enlisement est très probablement le même défaut 1 (invité altéré par un
+  rejeu), pas une lenteur.
+
+**Banc entrelacé 3 contre 3** (après la correction ; VM de dev single-user, `t2dev.sh`,
+binaire `qemu-t2fix` -O2, t2bench FR=150, 3 passes par démarrage, ordre base/t2 ×3,
+`bench/tcg/t2/t2fix-ab-*`) :
+
+| réglage | démarrage 1 | démarrage 2 | démarrage 3 | médiane des 9 passes |
+|---|---|---|---|---|
+| `x-tier2=0` | 8,51 / 8,72 / 8,57 | 8,51 / 8,23 / 8,43 | 8,79 / 8,26 / 8,11 | 8,51 s |
+| `x-tier2=4096` | 7,88 / 7,62 / 7,73 | 7,75 / 7,56 / 7,73 | 8,80 / 8,03 / 8,16 | **7,75 s (−8,9 %)** |
+
+md5 identique partout (`7ff741d6…`, FR=150 ; le `ff0b952c…` du §9.3 est à FR=300).
+~35 000 traces par démarrage, ~100 raccourcies. Le gain du §9.3 (−8,5 %, un démarrage par
+réglage) tient en entrelacé.
+
+**Commandes pour la VM quotidienne** (binaire `~/src/qemu-t2fix/build`, même série + 0048
+corrigé) :
+
+    # 1. partie vérifiée DOOM 3 (pas pour la vitesse) : 0 DIVERGENCE attendu dans run_tiger.log
+    QEMU_BIN=$HOME/src/qemu-t2fix/build/qemu-system-ppc tools/tcg/matab.sh t2-d3-verif 1 \
+      "v:TIER2=4096 TIER2VERIFY=64" d3 fen
+    # 2. A/B entrelacé des traces
+    QEMU_BIN=$HOME/src/qemu-t2fix/build/qemu-system-ppc tools/tcg/matab.sh t2-d3-ab 3 \
+      "ref:TIER2=0" "t2:TIER2=4096" d3 fen
+    tools/tcg/matab.sh --restore
+
+Un arbre où l'ancien 0048 est déjà appliqué est refusé par `scripts/build_qemu_qfb.sh`
+(marqueur `t2_check_foreign`) : repartir d'un arbre propre.
+
+### 9.6 DOOM 3 sur la VM quotidienne (21/10, soir) : juste, mais plus lent
+
+Binaire `~/src/qemu-t2fix/build` (-O2, série + 0048 corrigé, sans PGO), mêmes options de
+production dans les deux bras, hôte au repos (barrière `chargehote.py attendre`).
+
+- **Partie vérifiée** (`bench/tcg/ab/t2fix-d3-verif`, `TIER2=4096 TIER2VERIFY=64`) : bureau
+  présent, **218,7 millions de traces vérifiées, 0 divergence** (208,2 M identiques, 10,3 M non
+  vérifiables, 5,9 M sans copie journalisée dont 162 coupées, 1 090 raccourcies). Pas de
+  mesure de vitesse : la scène n'est pas atteinte en 1 515 s (image 3003), le rejeu d'une
+  trace sur 64 ralentit trop le jeu.
+- **A/B entrelacé 3 contre 3** (`bench/tcg/ab/t2fix-d3-ab`, `d3-fen`) :
+
+| réglage | parties (ms/image) | médiane |
+|---|---|---|
+| `TIER2=0` | 101,1 / 98,8 / 100,5 | 100,5 |
+| `TIER2=4096` | 103,8 / 104,0 / 103,6 | **103,8 (+3,3 %)** |
+
+Les trois parties `TIER2` sont plus lentes que les trois de référence. ~44 000 traces par
+partie (3,5 blocs, 18,5 instructions en moyenne), dont près de la moitié (~21 000) sans suite
+chaînée. **Le gain de t2bench (−8,9 %) ne se retrouve pas en jeu** : `x-tier2` reste éteint par
+défaut et n'est pas à allumer sur DOOM 3. Les arêtes de DOOM 3 (§8.5) décident de la suite
+(traces sur plusieurs pages, phase 2, ou arrêt pour ce jeu).
