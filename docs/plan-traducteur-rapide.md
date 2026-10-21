@@ -570,3 +570,32 @@ partie (3,5 blocs, 18,5 instructions en moyenne), dont près de la moitié (~21 
 chaînée. **Le gain de t2bench (−8,9 %) ne se retrouve pas en jeu** : `x-tier2` reste éteint par
 défaut et n'est pas à allumer sur DOOM 3. Les arêtes de DOOM 3 (§8.5) décident de la suite
 (traces sur plusieurs pages, phase 2, ou arrêt pour ce jeu).
+
+### 9.7 Arêtes de DOOM 3 (21/10, soir) : la porte de la phase 2
+
+Greffon `tools/tcg/libtbedges.so` sur le binaire rapide (`bench/tcg/t2/d3-edges`, instantanés
+toutes les 30 s ; `regions.py` sur r9 − r8, temps pris du profil hôte `x86-hprof-2110`). Le
+greffon a planté vers l'image 2353 (segfault **dans libtbedges.so**, pas dans QEMU ; défaut du
+greffon non cherché) : les arêtes sont celles des ~5 premières minutes de jeu, avant la scène
+mesurée.
+
+- 70 529 blocs exécutés, 6,6 instructions par bloc ; transitions : direct 87,3 %, bclr 8,2 %,
+  bcctr 2,1 % ; sorties indirectes prédites par 1/2/3 cibles : 76 / 89 / 93 %.
+- Régions sur arêtes (≤ 1024 instructions, ≤ 4 pages, ≤ 128 blocs), poids = temps vCPU :
+
+| N régions | part du vCPU | instr. moy. | pages moy. | transitions internes |
+|---|---|---|---|---|
+| 50 | 39,2 % | 302 | 3,40 | 50,2 % |
+| 200 | 62,4 % | 193 | 2,98 | 76,9 % |
+| 1000 | **76,5 %** | 94 | 2,39 | 87,5 % |
+
+**Porte de couverture passée sur les vraies arêtes** (≥ 70 % dans ≤ 1000 régions ; plafond du
+code généré 83,7 %). Les traces de la phase 1 (3,5 blocs, 18 instructions, une page) sont bien
+plus courtes que ces régions (~14 blocs, 94 instructions, 2,4 pages) et ne retirent que les
+sauts entre blocs : d'où le +3,3 % du §9.6. Le gain du §8.3 (registres gardés, TLB sorti des
+boucles) ne peut venir que d'une région **compilée** (phase 2) ; centre ×1,25-1,3, soit DOOM 3
+vers ~75 ms/image, pas 50.
+
+Contrôle du binaire rapide reconstruit avec 0048 corrigé (`bench/tcg/ab/fast-2110b`, 3
+parties, non entrelacé) : 92,3 / 96,9 / 92,6 ms/image, médiane **92,6** (95,5 le matin) : pas de
+régression du garde `t2_check_foreign` x-tier2 éteint.
