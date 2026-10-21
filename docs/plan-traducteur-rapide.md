@@ -1,6 +1,6 @@
 # Plan — un traducteur PowerPC beaucoup plus optimisé (second niveau de TCG)
 
-État : **plan**, rédigé le 25/09/2026, **mis de côté par l'utilisateur (« on essaiera plus tard »)**. Rien n'est commencé. Point de départ :
+État : rédigé le 25/09/2026, mis de côté, **relancé le 21/10/2026** : phase 0 (mesures, §8) et phase 1 (traces sans compilateur, §9). Point de départ :
 `docs/tcg-g4.md` (relevés, profils, patches `x-sr-tlb` et flottants).
 
 ---
@@ -252,3 +252,179 @@ mesures favorables en main.
 - Pas d'accélération matérielle (KVM PowerPC) : aucun hôte n'a de G4.
 - Les chantiers de niveau 1 et 2 (flottants, AltiVec, retours prédits, verrou
   global) continuent en parallèle : ils profitent aussi au niveau 2.
+
+---
+
+## 8. Phase 0 : mesures du 21/10
+
+PC Linux x86-64 (i7-10700F), binaire rapide PGO, défauts du 20/10. Sources : le profil hôte DOOM 3
+du 21/10 (`bench/tcg/ab/x86-hprof-2110/fast-1/d3-fen/perf-hote-mesure.data`, carte
+`/tmp/perf-547754.map`, 30 s, 32 928 échantillons des fils vCPU), et les blocs DOOM 3 retraduits
+du journal de la session flottante (`tcglog.txt`, 127 blocs, §37.5 de `docs/tcg-g4.md`).
+
+### 8.1 Les outils
+
+- `tools/tcg/tbedges.c` (greffon TCG) : par bloc (adresse, page physique, longueur) exécutions,
+  instructions, mot de la dernière instruction ; par arête bloc → bloc (même vCPU) nombre de
+  passages, toutes transitions comprises (chaînées, cache de sauts, boucle). Instantanés
+  `snap=` ou en anneau `interval=S,keep=K` (en-tête `t_wall`). Coûte un appel par bloc : forme,
+  jamais vitesse. Construction : `QEMU_SRC=~/src/qemu tools/tcg/build.sh tbedges`.
+- `tools/tcg/regions.py` : `--perf DATA --map PERFMAP` range chaque échantillon dans son bloc
+  (la carte `-perfmap` a une ligne par instruction invité : découpage en blocs et octets de code
+  hôte par instruction) ; parts des N blocs / fenêtres les plus chauds, **sans biais
+  d'échantillonnage** (classement sur une moitié des échantillons, part mesurée sur l'autre) ;
+  `--tb PREFIXE [--tb-base]` ou `--ring PREFIXE --t0 --t1` forme les régions sur les arêtes du
+  greffon (graines par poids décroissant, croissance en largeur, boucles comprises, bornes
+  `--max-insns 1024 --max-pages 4 --max-blocks 128`) et donne la part des 50/200/1000 régions,
+  les transitions restées dans une région et la prédictibilité des sorties indirectes.
+- `tools/tcg/codeanat.py JOURNAL [--perf --map]` : anatomie du code x86 émis (capstone), par
+  instruction invité : rechargements/rangements de `CPUPPCState`, état négatif (sortie, TLB),
+  chemin court du TLB, sauts, calcul.
+
+### 8.2 Chiffres (DOOM 3, scène fixe)
+
+| mesure | valeur |
+|---|---|
+| code généré | **83,7 %** du temps vCPU (helpers 16,3 %) |
+| traductions dans la carte | 1 061 447 |
+| code hôte par instruction invité, pondéré par le temps | **105 octets** (médiane 92), soit **~22 instructions x86** (4,74 o/instruction) |
+| bloc moyen pondéré | 17,2 instructions invité |
+
+| N plus chauds | blocs (TB) | fenêtres 256 o | fenêtres 1 Kio | pages 4 Kio |
+|---|---|---|---|---|
+| 50 | 17,0 % | 24,4 % | 34,8 % | 49,2 % |
+| 200 | 28,9 % | 45,0 % | 61,4 % | 75,0 % |
+| 1000 | 48,5 % | **72,1 %** | **81,1 %** | **82,8 %** |
+
+(part du temps vCPU total, sans biais ; le plafond est 83,7 %, le code généré.)
+
+Anatomie (127 blocs DOOM 3, plutôt flottants) : 32,9 instructions x86 par instruction invité —
+rechargements de registres 3,7 %, rangements 5,9 %, état négatif 3,9 %, TLB 7,7 %, sauts
+10,5 %, calcul 65,9 %. Par classe : flottant 63 instructions hôte, chargement/rangement 31,
+comparaison 17, entier 2,8. Le « calcul » du flottant est la sémantique PowerPC (porte du FPSCR,
+drapeaux, conversions), pas des allers-retours.
+
+### 8.3 Plafond
+
+Ce qu'une région compilée (niveau 2 complet, LLVM) retirerait du code couvert : 80 % des
+rechargements, 70 % des rangements (registres gardés, rangés aux sorties), la moitié de l'état
+négatif et des sauts (une seule tête, pas de sortie entre blocs, recherches prédites), 30 % du
+TLB (vérifications sorties des boucles), 20 % du calcul (CR/XER morts, sélection d'instructions) :
+**~30 % des instructions hôte** du code couvert, de l'ordre de 20 à 35 % de son temps (les
+accès à `env` retirés sont bon marché). Code couvert : ~0,85 × 83,7 % ≈ 71 % du vCPU (1000
+régions d'une page). Soit **−15 à −25 % de temps vCPU**, ×1,17 à ×1,33 sur le processeur émulé,
+amplifié par les tics de DOOM 3 (§3.1 de `docs/vitesse-doom3-x86.md`, ~×1,15) : **×1,2 à ×1,4
+sur l'image, centre ×1,25-1,3**. Borne absolue (code couvert gratuit) : ×3 et plus.
+
+### 8.4 Décision de la porte
+
+- **≥ 70 % du temps vCPU dans ≤ 1000 régions : oui** (approximation par fenêtres : 72 % en
+  256 o, 81 % en 1 Kio, 83 % en pages ; des régions formées sur les arêtes couvrent au moins
+  autant que des fenêtres contiguës de même taille). La mesure sur arêtes de DOOM 3 reste à
+  jouer (§8.5, commande 1).
+- **Plafond > ×1,3 sur l'image : à la limite** — haut de fourchette ×1,4, centre ×1,25-1,3.
+
+**Go pour la phase 1** (bon marché, sans compilateur, et qui donne une mesure réelle du gain
+« frontières de blocs ») ; **la phase 2 (LLVM) reste conditionnée** aux arêtes de DOOM 3 et au
+gain de la phase 1 sur DOOM 3.
+
+### 8.5 Commandes pour la session principale (VM quotidienne, DOOM 3)
+
+    W=~/src/pomppc/.claude/worktrees/agent-t2-phase0   # ou le dépôt après fusion
+    # 1. arêtes (greffon tbedges, instantanés toutes les 30 s ; mesure de forme, jeu ralenti)
+    mkdir -p ~/src/pomppc/bench/tcg/t2/d3-edges
+    EXTRA_ARGS="-plugin $W/tools/tcg/libtbedges.so,out=$HOME/src/pomppc/bench/tcg/t2/d3-edges/e,interval=30,keep=16" \
+      tools/tcg/matab.sh t2-d3-edges 1 "edges:QEMU_FAST=1" d3 fen
+    python3 $W/tools/tcg/regions.py --ring ~/src/pomppc/bench/tcg/t2/d3-edges/e \
+      --perf bench/tcg/ab/x86-hprof-2110/fast-1/d3-fen/perf-hote-mesure.data --map /tmp/perf-547754.map
+    # 2. code x86 des 400 blocs les plus chauds + nouveau profil
+    EXTRA_ARGS="-perfmap -d in_asm,out_asm -dfilter $(cat ~/src/pomppc/bench/tcg/t2/d3-dfilter.txt) -D $HOME/src/pomppc/bench/tcg/t2/d3-asm.log" \
+      MATRICE_OPTS="--sample-hote 30" tools/tcg/matab.sh t2-d3-asm 1 "asm:QEMU_FAST=1" d3 fen
+    python3 $W/tools/tcg/codeanat.py ~/src/pomppc/bench/tcg/t2/d3-asm.log --perf <perf-hote-mesure.data> --map /tmp/perf-<pid>.map --top 20
+    # 3. A/B des traces (phase 1), même binaire -O2 des deux côtés
+    QEMU_BIN=$HOME/src/qemu-t2/build/qemu-system-ppc tools/tcg/matab.sh t2-d3-ab 3 \
+      "ref:CPU_OPTS=x-tier2=0" "t2:CPU_OPTS=x-tier2=4096" d3 fen
+    # 4. une partie vérifiée (pas pour la vitesse) : bilan « x-tier2-verify » dans run_tiger.log
+    QEMU_BIN=$HOME/src/qemu-t2/build/qemu-system-ppc tools/tcg/matab.sh t2-d3-verif 1 \
+      "v:CPU_OPTS=x-tier2=4096,x-tier2-verify=64" d3 fen
+    tools/tcg/matab.sh --restore
+
+(Après fusion : `TIER2=4096` / `TIER2VERIFY=64` au lieu de `CPU_OPTS`.)
+
+## 9. Phase 1 : traces sans compilateur (`tcg/0048`, `x-tier2`), 21/10
+
+### 9.1 Ce qui est fait
+
+`patches/tcg/0048-tcg-tier2.patch` (appliqué par `scripts/build_qemu_qfb.sh`, sondé
+`x-tier2` dans les capacités, `TIER2=N` dans `run_tiger.sh`, **éteint par défaut**) :
+
+- **chaleur** : chaque TB compte ses exécutions en tête (6 instructions hôte) ; à la N-ième,
+  `helper_t2_hot` le note et demande une sortie de chaîne ;
+- **formation** (`t2_form`, boucle d'exécution, fil du vCPU) : on suit les sorties directes
+  chaînées par TCG (`jmp_dest[0]` pris / `[1]` non pris, le successeur le plus exécuté), dans la
+  page du bloc chaud, sans revisiter un bloc (une boucle se referme sur la tête), ≤ 16 blocs,
+  ≤ 384 instructions ;
+- **traduction** : le chemin retraduit en UN TB (« trace ») ; le frontal PowerPC continue à
+  travers `b`/`bl`/`bc` du chemin (condition en une valeur, un `brcond` vers la sortie latérale,
+  aucune étiquette sur le chemin : TCG garde les registres invité d'un bloc à l'autre), sorties
+  latérales émises après la dernière instruction (emplacement `goto_tb` libre, sinon cache de
+  sauts) ;
+- **installation / invalidation** : le bloc chaud est invalidé, la trace prend sa clé (même pc,
+  drapeaux, cflags) ; elle couvre toute sa page pour l'invalidation ; `tb_flush` oublie la
+  demande en cours ;
+- **pas de fil de compilation** : la retraduction TCG coûte des dizaines de µs, elle est faite
+  dans le fil du vCPU (écart au plan §3.1, assumé pour un niveau sans compilateur) ;
+- **retours prédits** : non refaits ici — `x-ret-inline` (0008) sonde déjà le cache de sauts en
+  ligne à chaque `blr`/`bctr`, `x-jc-2way` (0043) en double la capacité ; une trace ne traverse
+  pas encore un `blr` (même pas un retour apparié à un `bl` de la trace) ;
+- **vérificateur** `x-tier2-verify=N` : une entrée de trace sur N exécute sa copie
+  « journalisée » (chaque accès invité noté, accroché dans `tcg-op-ldst.c` ; une marque à chaque
+  entrée de bloc du chemin), remet les registres de l'entrée, rejoue les TB d'origine (lectures
+  servies par le journal, écritures comparées, mémoire intacte, aucun second accès aux
+  périphériques) et compare tous les registres (`ppc_t2_regs` : GPR, CR, XER, LR, CTR, nip,
+  MSR, réservation, FPSCR, VSR, VSCR, statuts flottants, SPR) ; atomiques et base de temps : non
+  vérifiables. Dans ce mode les traces ne sont ni chaînées ni dans le cache de sauts.
+- **parité des hôtes** : code commun (`accel/tcg`, `tcg/tcg-op-ldst.c`) et frontal PowerPC
+  seulement, **aucun émetteur touché** : le même patch vaut pour arm64 ; il reste à le
+  construire et le prouver sur le M4 (même niveau de preuve).
+
+### 9.2 Preuves
+
+- Mutant (sortie latérale à l'envers sur une trace sur deux, `POMPPC_T2_MUTANT=1`) :
+  **attrapé** dès la première trace touchée (« lecture en trop »).
+- Ce que le vérificateur a trouvé en route : un **vrai défaut** (le compteur d'instructions PMU
+  d'une sortie latérale comptait toute la trace) et trois défauts du vérificateur lui-même
+  (`hflags` non recalculés après restauration, marque d'entrée posée avant la sortie latérale,
+  fin de trace en bout de page) ; plus un défaut amont croisé : `gen_lookup_and_goto_ptr` lisait
+  `CF_NO_GOTO_PTR` dans `tb->flags` au lieu des cflags (corrigé, sans effet hors de ce mode).
+- OpenBIOS SMP (2 vCPU, `x-tier2=64`, `x-tier2-verify=2`) : **6,1 millions de traces
+  vérifiées, 0 divergence**.
+- Tiger (VM de dev, `x-tier2=4096`, `x-tier2-verify=16`) : démarre et joue le banc, image
+  identique ; avec le binaire d'avant les deux dernières corrections : 272 millions de traces
+  vérifiées, divergences d'une seule classe (artefact de fin de page, corrigé) ; **le binaire
+  final n'a pas encore fait de partie vérifiée complète sur Tiger** (une partie vérifiée
+  intermédiaire, verif3, s'est enlisée — job jamais rendu en 30 min, 835 millions de traces
+  vérifiées, 10 divergences du même artefact ; cause de l'enlisement non établie : lenteur du
+  mode ou défaut).
+
+### 9.3 Banc (VM de dev, `t2bench` : gltest d3inter, 300 images, plugin + GLEngine + kext)
+
+Même binaire `~/src/qemu-t2/build` (-O2, série + 0048), toutes les options de production :
+
+| réglage | passes (s) | médiane |
+|---|---|---|
+| `x-tier2=0` (base2) | 17,04 / 17,42 / 17,05 | 17,05 |
+| `x-tier2=4096` (t2a) | 15,65 / 15,60 / 15,52 | **15,60 (−8,5 %)** |
+
+md5 de l'image identique (`ff0b952c…`). 35 176 traces formées (133 013 blocs, 3,8 blocs et 16,7
+instructions par trace en moyenne), 18 916 demandes sans successeur chaîné. **Un démarrage par
+réglage** : à confirmer en entrelacé (et sur DOOM 3, commande 3 du §8.5).
+
+### 9.4 Ce qui reste
+
+1. Une partie vérifiée complète sur Tiger avec le binaire final, et comprendre verif3.
+2. A/B entrelacé sur la VM de dev, puis DOOM 3 sur la VM quotidienne (§8.5).
+3. Arêtes et code x86 de DOOM 3 (§8.5, 1 et 2) pour trancher la phase 2.
+4. Pendant arm64 : construire et prouver sur le M4.
+5. Leviers suivants du même niveau : traverser les retours appariés (`bl` … `blr` dans la
+   trace), traces sur deux pages, soupape pour les traces dont une sortie latérale est chaude.

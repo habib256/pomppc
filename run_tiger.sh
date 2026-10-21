@@ -59,6 +59,8 @@
 #                             # (x-fprf-lazy, patches/tcg/0046, allumé sur Linux x86-64 depuis le 20/10, §38)
 #   STFSKNOWN=0 ./run_tiger.sh # coupe : stfs d'une valeur connue (x-fp-known) sans la conversion complète
 #                             # (x-stfs-known, patches/tcg/0047, allumé sur Linux x86-64 depuis le 20/10, §39)
+#   TIER2=4096 ./run_tiger.sh # second niveau sans compilateur : traces d'une page (x-tier2, patches/tcg/0048,
+#                             # éteint par défaut ; TIER2VERIFY=64 rejoue une trace sur 64 contre ses TB)
 #   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
 #                             # tcg/0016, allumé par défaut, docs/tcg-g4.md §24) ; FPVERIFY=1 : preuve
 #   TBFAST=0 ./run_tiger.sh   # coupe mftb/mftbu calculés depuis le compteur de l'hôte (cntvct, 1 GHz ;
@@ -582,6 +584,23 @@ if [ "${STFSKNOWN:-0}" != 0 ]; then
   else
     echo "⚠  STFSKNOWN=1 demandé mais ce QEMU n'a pas la propriété 'x-stfs-known' (patches/tcg/0047)." >&2
     MODE="$MODE + stfs court DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+# --- Second niveau sans compilateur (x-tier2, patches/tcg/0048, docs/plan-traducteur-rapide.md) ---
+# TIER2=N : un TB exécuté N fois est retraduit avec les TB chaînés les plus chauds de sa page
+# qui le suivent, en une seule trace (un prologue, registres gardés d'un TB à l'autre).
+# TIER2TBS=K : au plus K TB après le premier (défaut 16). TIER2VERIFY=N : une entrée de trace
+# sur N rejouée contre ses TB (bilan « x-tier2-verify » à la sortie de QEMU). Éteint par défaut.
+if [ "${TIER2:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-tier2=$TIER2"; then
+    CPU_SPEC="$CPU_SPEC,x-tier2=$TIER2"; MODE="$MODE + TRACES($TIER2)"
+    [ -n "${TIER2TBS:-}" ] && CPU_SPEC="$CPU_SPEC,x-tier2-tbs=$TIER2TBS"
+    if [ "${TIER2VERIFY:-0}" != 0 ]; then
+      CPU_SPEC="$CPU_SPEC,x-tier2-verify=$TIER2VERIFY"; MODE="$MODE (VÉRIFIÉES 1/$TIER2VERIFY)"
+    fi
+  else
+    echo "⚠  TIER2=$TIER2 demandé mais ce QEMU n'a pas la propriété 'x-tier2' (patches/tcg/0048)." >&2
+    MODE="$MODE + traces DEMANDÉES MAIS INDISPONIBLES"
   fi
 fi
 # --- Comparaisons et conversions AltiVec par le FPU de l'hôte (x-vfp-native-cmp,
