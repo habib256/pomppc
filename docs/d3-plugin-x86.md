@@ -462,3 +462,26 @@ médianes en ms/image :
 | Marble Blast (`d3p-mb`) | 14,4 | 13,6 | **−5,6 %** |
 
 Les cinq variables passent à 1 par défaut (révision suivante du plugin).
+
+### 10.6 Second lot (`20261021-d3q`, branche `worktree-agent-aa31ed80daea05ba3`, 4a6d7a9) : non fusionné
+
+VD2 (verdicts mémorisés), ATTRBITS (boucles d'attributs), DISPCMP (DISPONE sans boucle) et
+RPEVICT (tranches de miroir rendues, pour `r_useIndexBuffers 1`) sont exacts (plugmd5 67 scènes,
+contrôle `d3q-chk` sur 5 000 images de DOOM 3 : 0 écart) et retirent jusqu'à 1 054 instructions
+par dessin sur `d3inter`, mais **ne gagnent rien en jeu** (A/B hôte au repos, 3 parties par bras,
+médianes en ms/image, référence = les cinq leviers du §10 allumés) :
+
+| A/B | référence | levier | écart |
+|---|---|---|---|
+| ATTRBITS + DISPCMP, DOOM 3 (`d3q`) | 97,1 | 98,4 | +1,3 % |
+| idem, UT2004 (`d3q-ut`) | 45,5 | 45,8 | +0,7 % |
+| idem, Marble Blast (`d3q-mb`) | 13,9 | 14,0 | +0,7 % |
+| VD2, DOOM 3 (`d3q-vd2`) | 96,8 | 97,4 | +0,6 % |
+| RPEVICT + `r_useIndexBuffers 1`, DOOM 3 (`d3q-ib`) | 96,4 | 99,3 | +3,0 % |
+
+Sous RPEVICT, la note de DOOM 3 montre 0 passe et 0 dessin retombé sur l'empaquetage : dans cette
+scène, le repli NATSHM ne se produit pas, et `r_useIndexBuffers 1` coûte par lui-même (comme au
+§5.6 de `vitesse-doom3-x86.md`). Le binaire `d3q` coûte aussi +87 instructions par dessin variables
+éteintes. Leçon : sous ce seuil (~1 000 instructions par dessin, ~1 % du plugin dans DOOM 3), le
+compte à l'instruction de `d3inter` ne prédit plus le temps de jeu ; le prochain levier du plugin
+doit viser un poste mesuré dans le `sample` de DOOM 3 lui-même.

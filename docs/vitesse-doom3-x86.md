@@ -632,3 +632,36 @@ Commandes (refaites le 06/10 au soir, barrière et relevé en plus) :
 
 (avec `tools/tcg/chargehote.py releve bench/tcg/ab/<campagne>/charge-releve.txt` à côté, puis
 `tools/tcg/chargeparties.py bench/tcg/ab/<campagne>` ; résultats hors dépôt comme tout `bench/`.)
+
+## 14. Profil de l'hôte au 21/10 (`bench/tcg/ab/x86-hprof-2110`)
+
+Binaire rapide PGO, défauts du 20/10 (0040-0047), plugin `20261021-d3p` leviers allumés ;
+`perf record` 30 s après la fenêtre (`MATRICE_OPTS="--sample-hote 30"`, `EXTRA_ARGS=-perfmap`),
+`tools/re/perfpart.py --ms 108` (cellule à 108 ms/image : une VM de dev tournait à côté, la
+répartition reste valable). Fils vCPU : 56 + 54 % d'un cœur, 118,7 ms de vCPU par image.
+
+| poste (fils vCPU) | 03/10 (§4) | 21/10 |
+|---|---|---|
+| code généré (JIT) | 68,3 % | **83,8 %** |
+| softmmu | 11,2 % | 4,5 % |
+| recherche de blocs | 5,0 % | 4,0 % (`tb_lookup` 2,85 %, la plus lourde des fonctions) |
+| AltiVec | 5,3 % | 1,9 % (`helper_VPERM_FAST` 1,55 %) |
+| flottant | 3,3 % | 0,4 % |
+| lmw/stmw, base de temps, boucle, noyau, verrous… | 6,8 % | 5,4 % |
+
+Les helpers ne pèsent plus que 16 % du temps vCPU, aucun au-delà de 3 % : **ce poste est
+épuisé**. Le code généré se répartit par région de l'invité : DOOM 3 ~45 % (texte du jeu ; plus
+2,9 % de code chargé au-dessus du texte, 0x2a0000-0x4c0000, sans symboles), 0x08xxxxxx
+(bibliothèques chargées, dont le plugin) 18,8 %, 0x0axxxxxx 7,5 %, 0x07 4,1 %, libSystem 3,7 %,
+page commune 2,8 %. Fonctions du jeu les plus lourdes (part du temps vCPU) :
+`idSIMD_AltiVec::DeriveTangents` 3,1 %, `R_LocalPointToGlobal` 1,7 %, `idSIMD_AltiVec::Dot` 1,6 %,
+`PushVolumeIntoTree_r` 1,4 %, `DrawStretchPic` 1,1 %, `idSIMD_Generic::MinMax` 0,95 %, Vorbis
+(`mdct_*`, `vorbis_*`) ~3,5 %. Le reste est plat. (Piège : le dernier symbole du texte,
+`___cmpdi2`, ramasse tout le code chargé au-dessus si l'on attribue par `nm -n` sans borne.)
+
+Boucle principale de QEMU : 5 % d'un cœur (38 % le 03/10). Fil de rendu qgpu : 25 % d'un cœur
+(pilote NVIDIA 41 %, `do_draw_native` 13 %), le jeu ne l'attend pas.
+
+Conséquence : ce qui reste côté hôte, c'est la **qualité du code généré** (sur tout le jeu,
+sans point chaud), donc le traducteur de second niveau (`docs/plan-traducteur-rapide.md`) ;
+côté invité, le plugin (agent en cours, `docs/d3-plugin-x86.md` §11) et les tics du jeu (§3.1).
