@@ -1,0 +1,1519 @@
+diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+index c1f0423..947b9e7 100644
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -31,6 +31,7 @@
+ #include "exec/page-protection.h"
+ #include "exec/mmap-lock.h"
+ #include "exec/translation-block.h"
++#include "exec/translator.h"     /* POMPPC tcg/0048: T2Path */
+ #include "tcg/tcg.h"
+ #include "qemu/atomic.h"
+ #include "qemu/rcu.h"
+@@ -510,6 +511,9 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s,
+         rv_found_stat(kind);
+     }
+ #endif
++    if (unlikely(cpu->t2_verify) && tb->t2_state == T2_TRACE) {
++        return tb;      /* POMPPC tcg/0048: never in the jump cache */
++    }
+ 
+     tb_jmp_cache_fill(cpu, jc, hash, s.pc, tb);
+ 
+@@ -656,6 +660,9 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
+     if (tb == NULL) {
+         return tcg_code_gen_epilogue;
+     }
++    if (unlikely(cpu->t2_verify) && tb->t2_state == T2_TRACE) {
++        return tcg_code_gen_epilogue;   /* POMPPC tcg/0048 */
++    }
+ 
+     if (qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC)) {
+         log_cpu_exec(s.pc, cpu, tb);
+@@ -686,6 +693,400 @@ const void *HELPER(lookup_tb_ptr_check)(CPUArchState *env, void *ptb)
+     return HELPER(lookup_tb_ptr)(env);
+ }
+ 
++/*
++ * POMPPC tcg/0048 (x-tier2): second level, without a compiler.
++ *
++ * A TB counts its executions (gen_t2_counter); at the x-tier2-th one,
++ * helper_t2_hot() records it in cpu->t2_pending and requests an exit, so
++ * that the main loop sees it within a TB or two.  There, t2_form() follows
++ * the direct exits that TCG chained (jmp_dest[0]: branch taken or
++ * unconditional, jmp_dest[1]: fall through), the more executed successor
++ * first, while it stays in the page of the hot TB, until it would revisit
++ * a TB, run out of chained successors or pass T2 limits; then it throws
++ * the hot TB away and translates the path again as ONE TB, a "trace"
++ * (TB->t2_state = T2_TRACE): the target's translator does not stop at the
++ * branches of the path (translator_t2_continue) and turns their other side
++ * into a side exit.  Same TCG ops as the TBs it is made of, one prologue,
++ * guest registers kept in host registers across the former TB boundaries
++ * (TCG syncs them at each side exit), no goto_tb between them.  The trace
++ * replaces the hot TB in the hash table (same pc, flags, cflags): chained
++ * callers are unlinked by the invalidation and chain to it next time;
++ * code modification and tb_flush throw it away like any TB (it covers
++ * its whole page for invalidation).
++ */
++enum {
++    T2S_ASK, T2S_FORM, T2S_DROP, T2S_SHORT, T2S_TBS, T2S_INSNS, T2S_GONE,
++    T2S_VRUN, T2S_VOK, T2S_VBAD, T2S_VSKIP, T2S_VEXC, T2S_VNOLOG, T2S_VACC,
++    T2S_N
++};
++static uint64_t t2_g[T2S_N];
++static bool t2_atexit_done;
++
++static void t2_report(void)
++{
++    if (!t2_g[T2S_ASK]) {
++        return;
++    }
++    fprintf(stderr, "x-tier2 : %" PRIu64 " demandes, %" PRIu64 " traces "
++            "(%" PRIu64 " blocs, %" PRIu64 " instructions invité), %" PRIu64
++            " écartées (contexte changé ou bloc invalidé), %" PRIu64
++            " sans suite chaînée\n",
++            t2_g[T2S_ASK], t2_g[T2S_FORM], t2_g[T2S_TBS], t2_g[T2S_INSNS],
++            t2_g[T2S_DROP] + t2_g[T2S_GONE], t2_g[T2S_SHORT]);
++    if (t2_g[T2S_VRUN]) {
++        fprintf(stderr, "x-tier2-verify : %" PRIu64 " traces vérifiées, "
++                "%" PRIu64 " identiques, %" PRIu64 " DIVERGENCES, %" PRIu64
++                " non vérifiables (atomique, base de temps, journal plein), "
++                "%" PRIu64 " exceptions, %" PRIu64 " sans copie journalisée ; "
++                "%" PRIu64 " accès rejoués\n",
++                t2_g[T2S_VRUN], t2_g[T2S_VOK], t2_g[T2S_VBAD],
++                t2_g[T2S_VSKIP], t2_g[T2S_VEXC], t2_g[T2S_VNOLOG],
++                t2_g[T2S_VACC]);
++    }
++}
++
++/*
++ * x-tier2-verify=N: one trace entry in N is checked.  The trace is run in
++ * its "log" copy (same path, CF_T2_LOG: every guest access logged, no
++ * chaining, no exit check): that run is the real one.  Then the registers
++ * go back to the entry state and the TBs the trace was made of are run in
++ * their "replay" copies (CF_T2_REPLAY: loads return the logged values in
++ * order, stores are compared with the log and not done) until the log is
++ * consumed and the guest pc is where the trace left; the registers must
++ * then be those the trace left, which are put back.  Traces are neither
++ * chained to nor put in the jump cache in this mode, so that every entry
++ * goes through the main loop.
++ */
++#define T2_LOG_MAX 4096
++typedef struct T2Log {
++    uint32_t n, pos;
++    bool overflow, unverif, diverged;
++    char why[160];
++    struct {
++        uint64_t addr, val;
++        uint32_t memop, st;
++    } e[T2_LOG_MAX];
++    void *e0, *e1;
++} T2Log;
++
++void HELPER(t2_log)(CPUArchState *env, uint64_t addr, uint64_t val,
++                    uint32_t memop, uint32_t st)
++{
++    T2Log *l = env_cpu(env)->t2_log;
++
++    if (!l || !env_cpu(env)->t2_vrun) {
++        return;
++    }
++    if (l->n >= T2_LOG_MAX) {
++        l->overflow = true;
++        return;
++    }
++    l->e[l->n].addr = addr;
++    l->e[l->n].val = val;
++    l->e[l->n].memop = memop;
++    l->e[l->n].st = st;
++    l->n++;
++}
++
++static void t2_diverge(T2Log *l, const char *what, uint64_t addr,
++                       uint64_t val, uint32_t memop)
++{
++    if (!l->diverged) {
++        l->diverged = true;
++        snprintf(l->why, sizeof(l->why),
++                 "%s : accès %u/%u adresse 0x%" PRIx64 " valeur 0x%" PRIx64
++                 " memop 0x%x", what, l->pos, l->n, addr, val, memop);
++    }
++}
++
++uint64_t HELPER(t2_rld)(CPUArchState *env, uint64_t addr, uint32_t memop)
++{
++    T2Log *l = env_cpu(env)->t2_log;
++
++    if (l->pos >= l->n) {
++        t2_diverge(l, "lecture en trop", addr, 0, memop);
++        return 0;
++    }
++    if (l->e[l->pos].st || l->e[l->pos].addr != addr ||
++        l->e[l->pos].memop != memop) {
++        t2_diverge(l, "lecture différente", addr, 0, memop);
++    }
++    return l->e[l->pos++].val;
++}
++
++void HELPER(t2_rst)(CPUArchState *env, uint64_t addr, uint64_t val,
++                    uint32_t memop)
++{
++    T2Log *l = env_cpu(env)->t2_log;
++
++    if (l->pos >= l->n) {
++        t2_diverge(l, "écriture en trop", addr, val, memop);
++        return;
++    }
++    if (!l->e[l->pos].st || l->e[l->pos].addr != addr ||
++        l->e[l->pos].memop != memop || l->e[l->pos].val != val) {
++        t2_diverge(l, "écriture différente", addr, val, memop);
++    }
++    l->pos++;
++}
++
++/* replay: a TB of the path starts; consume the trace's marker for it */
++void HELPER(t2_rmark)(CPUArchState *env, uint64_t pc)
++{
++    T2Log *l = env_cpu(env)->t2_log;
++
++    /* (the head TB of the trace has no marker: a mismatch is left alone,
++     * and a wrong path shows as an unconsumed log at the end) */
++    if (l->pos < l->n && l->e[l->pos].memop == T2_MARK &&
++        l->e[l->pos].addr == pc) {
++        l->pos++;
++    }
++}
++
++void HELPER(t2_unverif)(CPUArchState *env)
++{
++    T2Log *l = env_cpu(env)->t2_log;
++
++    if (l) {
++        l->unverif = true;
++    }
++}
++
++#define T2_VFLAGS (CF_NOIRQ | CF_NO_GOTO_TB | CF_NO_GOTO_PTR)
++
++static TranslationBlock *QEMU_DISABLE_CFI
++t2_exec_one(CPUState *cpu, TranslationBlock *tb)
++{
++    uintptr_t ret;
++
++    qemu_thread_jit_execute();
++    ret = tcg_qemu_tb_exec(cpu_env(cpu), tb->tc.ptr);
++    cpu->neg.can_do_io = true;
++    return tcg_splitwx_to_rw((void *)(ret & ~TB_EXIT_MASK));
++}
++
++/* Returns false if the trace was not run (the caller runs it). */
++static bool t2_verify(CPUState *cpu, TCGTBCPUState s, TranslationBlock *trace)
++{
++#ifndef CONFIG_USER_ONLY
++    T2Log *l = cpu->t2_log;
++    TCGTBCPUState sl = s;
++    TranslationBlock *lt;
++    vaddr end_pc;
++    char why[160];
++    int steps;
++    static int nreport;
++    vaddr rpc[8];
++
++    if (!cpu->t2_regs) {
++        return false;
++    }
++    if (!l) {
++        l = cpu->t2_log = g_new0(T2Log, 1);
++        l->e0 = g_malloc0(cpu->t2_regs_size);
++        l->e1 = g_malloc0(cpu->t2_regs_size);
++    }
++    sl.cflags |= CF_T2_LOG | T2_VFLAGS;
++    lt = tb_htable_lookup(cpu, sl);
++    if (!lt || lt->t2_state != T2_TRACE) {
++        qatomic_add(&t2_g[T2S_VNOLOG], 1);
++        return false;
++    }
++    qatomic_add(&t2_g[T2S_VRUN], 1);
++    cpu->t2_regs(cpu, l->e0, 0, NULL, 0);
++    l->n = l->pos = 0;
++    l->overflow = l->unverif = l->diverged = false;
++    cpu->t2_vrun = 1;                   /* an exception here is real */
++    t2_exec_one(cpu, lt);
++    cpu->t2_vrun = 0;
++    end_pc = cpu->cc->tcg_ops->get_tb_cpu_state(cpu).pc;
++    cpu->t2_regs(cpu, l->e1, 0, NULL, 0);
++    if (l->overflow || l->unverif) {
++        qatomic_add(&t2_g[T2S_VSKIP], 1);
++        return true;
++    }
++
++    /* replay the TBs the trace was made of, from the entry state */
++    cpu->t2_regs(cpu, l->e0, 1, NULL, 0);
++    l->pos = 0;
++    for (steps = 0; steps < T2_MAX_PATH + 8; steps++) {
++        TCGTBCPUState sr = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
++        TranslationBlock *rt;
++
++        if (steps && l->pos == l->n && sr.pc == end_pc) {
++            break;
++        }
++        if (steps < 8) {
++            rpc[steps] = sr.pc;
++        }
++        if (sr.flags != s.flags || l->diverged) {
++            t2_diverge(l, "contexte changé", sr.pc, 0, 0);
++            break;
++        }
++        sr.cflags = curr_cflags(cpu) | CF_T2_REPLAY | T2_VFLAGS;
++        rt = tb_htable_lookup(cpu, sr);
++        if (!rt) {
++            mmap_lock();
++            rt = tb_gen_code(cpu, sr);
++            mmap_unlock();
++        }
++        cpu->t2_vrun = 2;
++        t2_exec_one(cpu, rt);
++        cpu->t2_vrun = 0;
++    }
++    if (!l->diverged && steps == T2_MAX_PATH + 8) {
++        t2_diverge(l, "pas de fin", end_pc, 0, 0);
++    }
++    if (!l->diverged && l->pos != l->n) {
++        t2_diverge(l, "accès manquants", 0, 0, 0);
++    }
++    qatomic_add(&t2_g[T2S_VACC], l->pos);
++    if (!l->diverged && cpu->t2_regs(cpu, l->e1, 2, why, sizeof(why))) {
++        l->diverged = true;
++        snprintf(l->why, sizeof(l->why), "registres : %s", why);
++    }
++    if (l->diverged) {
++        qatomic_add(&t2_g[T2S_VBAD], 1);
++        if (qatomic_fetch_inc(&nreport) < 30) {
++            fprintf(stderr, "x-tier2-verify : DIVERGENCE trace 0x%" VADDR_PRIx
++                    " (%u instructions, sortie 0x%" VADDR_PRIx ") : %s ; blocs",
++                    trace->pc, trace->icount, end_pc, l->why);
++            for (int k = 0; k < steps && k < 8; k++) {
++                fprintf(stderr, " 0x%" VADDR_PRIx, rpc[k]);
++            }
++            fprintf(stderr, " ; journal");
++            for (uint32_t k = 0; k < l->n && k < 24; k++) {
++                fprintf(stderr, " %c%" PRIx64, l->e[k].memop == T2_MARK ? '>' :
++                        l->e[k].st ? 'w' : 'r', l->e[k].addr);
++            }
++            fprintf(stderr, "\n");
++        }
++    } else {
++        qatomic_add(&t2_g[T2S_VOK], 1);
++    }
++    cpu->t2_regs(cpu, l->e1, 1, NULL, 0);      /* the real state */
++    return true;
++#else
++    return false;
++#endif
++}
++
++void HELPER(t2_hot)(CPUArchState *env, void *ptb)
++{
++    CPUState *cpu = env_cpu(env);
++    TranslationBlock *tb = ptb;
++
++    if (tb->t2_state != T2_NONE || cpu->t2_pending) {
++        return;
++    }
++    tb->t2_state = T2_ASKED;
++    cpu->t2_pending = tb;
++    qatomic_add(&t2_g[T2S_ASK], 1);
++    if (!qatomic_xchg(&t2_atexit_done, true)) {
++        atexit(t2_report);
++    }
++    /* leave the chain at the next TB start (cleared by cpu_handle_interrupt) */
++    qatomic_set(&cpu->neg.icount_decr.u16.high, -1);
++}
++
++#define T2_MAX_INSNS 384
++
++static TranslationBlock *t2_dest(TranslationBlock *tb, int n)
++{
++    return (TranslationBlock *)(qatomic_read(&tb->jmp_dest[n]) & ~(uintptr_t)1);
++}
++
++static void t2_form(CPUState *cpu)
++{
++#ifndef CONFIG_USER_ONLY
++    TranslationBlock *a = cpu->t2_pending, *cur, *seen[T2_MAX_PATH + 1];
++    TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
++    T2Path path = { .n = 0 };
++    int nseen = 0, insns = 0;
++    vaddr page;
++
++    cpu->t2_pending = NULL;
++    s.cflags = curr_cflags(cpu);
++    /*
++     * Translate in the context the TB was hot in: same flags (MSR, mode)
++     * and the same physical page for its pc under the current MMU state.
++     */
++    if ((tb_cflags(a) & CF_INVALID) || a->flags != s.flags ||
++        a->cs_base != s.cs_base || tb_cflags(a) != s.cflags ||
++        (tb_cflags(a) & CF_PCREL) || tb_page_addr1(a) != -1 ||
++        get_page_addr_code(cpu_env(cpu), a->pc) != tb_page_addr0(a)) {
++        qatomic_add(&t2_g[T2S_DROP], 1);
++        return;
++    }
++    page = a->pc & TARGET_PAGE_MASK;
++    cur = a;
++    seen[nseen++] = a;
++    insns = a->icount;
++    while (path.n < T2_MAX_PATH && path.n < cpu->t2_maxtb) {
++        TranslationBlock *d0 = t2_dest(cur, 0), *d1 = t2_dest(cur, 1);
++        TranslationBlock *nx;
++        int slot, i;
++
++        if (d0 && (!d1 || d0->t2_count >= d1->t2_count)) {
++            nx = d0;
++            slot = 0;
++        } else if (d1) {
++            nx = d1;
++            slot = 1;
++        } else {
++            break;
++        }
++        if ((nx->pc & TARGET_PAGE_MASK) != page || nx->flags != a->flags ||
++            nx->cs_base != a->cs_base || tb_cflags(nx) != s.cflags ||
++            tb_page_addr1(nx) != -1 || nx->t2_state == T2_TRACE ||
++            insns + nx->icount > T2_MAX_INSNS) {
++            break;
++        }
++        for (i = 0; i < nseen && seen[i] != nx; i++) {
++        }
++        if (i < nseen) {
++            break;              /* back to a TB of the path: a loop exit */
++        }
++        path.e[path.n].end = cur->pc + cur->size;
++        path.e[path.n].next = nx->pc;
++        path.e[path.n].slot = slot;
++        path.n++;
++        seen[nseen++] = nx;
++        insns += nx->icount;
++        cur = nx;
++    }
++    if (path.n == 0) {
++        qatomic_add(&t2_g[T2S_SHORT], 1);
++        return;
++    }
++
++    s.pc = a->pc;
++    mmap_lock();
++    tb_phys_invalidate(a, -1);
++    cpu->t2_path = &path;
++    cur = tb_gen_code(cpu, s);
++    cpu->t2_path = NULL;
++    mmap_unlock();
++    if (cur->t2_state == T2_TRACE && cpu->t2_verify) {
++        TCGTBCPUState sl = s;
++
++        sl.cflags |= CF_T2_LOG | T2_VFLAGS;
++        mmap_lock();
++        cpu->t2_path = &path;
++        tb_gen_code(cpu, sl);
++        cpu->t2_path = NULL;
++        mmap_unlock();
++    }
++    if (cur->t2_state == T2_TRACE) {
++        qatomic_add(&t2_g[T2S_FORM], 1);
++        qatomic_add(&t2_g[T2S_TBS], path.n + 1);
++        qatomic_add(&t2_g[T2S_INSNS], cur->icount);
++    } else {
++        qatomic_add(&t2_g[T2S_GONE], 1);
++    }
++#endif
++}
++
+ /* Return the current PC from CPU, which may be cached in TB. */
+ static vaddr log_pc(CPUState *cpu, const TranslationBlock *tb)
+ {
+@@ -795,6 +1196,23 @@ static void cpu_exec_longjmp_cleanup(CPUState *cpu)
+ {
+     /* Non-buggy compilers preserve this; assert the correct value. */
+     g_assert(cpu == current_cpu);
++    cpu->t2_path = NULL;        /* POMPPC tcg/0048: a trace cut short */
++    if (cpu->t2_vrun) {
++        /*
++         * x-tier2-verify: an exception in the logged run of a trace is
++         * real (state restored from that TB); one in the replay cannot
++         * come from the guest's own path: put back the trace's result.
++         */
++        T2Log *l = cpu->t2_log;
++        bool replay = cpu->t2_vrun == 2;
++
++        cpu->t2_vrun = 0;
++        qatomic_add(&t2_g[T2S_VEXC], 1);
++        if (replay) {
++            cpu->t2_regs(cpu, l->e1, 1, NULL, 0);
++            cpu->exception_index = -1;
++        }
++    }
+ 
+ #ifdef CONFIG_USER_ONLY
+     clear_helper_retaddr();
+@@ -1245,6 +1663,11 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+                 break;
+             }
+ 
++            if (unlikely(cpu->t2_pending)) {
++                t2_form(cpu);           /* POMPPC tcg/0048 */
++                last_tb = NULL;
++            }
++
+             tb = tb_lookup(cpu, s, 0);
+             if (tb == NULL) {
+                 CPUJumpCache *jc;
+@@ -1274,6 +1697,18 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+                 last_tb = NULL;
+             }
+ #endif
++            /*
++             * POMPPC tcg/0048, x-tier2-verify: traces are entered through
++             * this loop only, one entry in N is checked.
++             */
++            if (unlikely(cpu->t2_verify) && tb->t2_state == T2_TRACE) {
++                last_tb = NULL;
++                if (++cpu->t2_vcount % cpu->t2_verify == 0 &&
++                    t2_verify(cpu, s, tb)) {
++                    continue;
++                }
++            }
++
+             /* See if we can patch the calling TB. */
+             if (last_tb) {
+                 tb_add_jump(last_tb, tb_exit, tb);
+diff --git a/accel/tcg/tb-maint.c b/accel/tcg/tb-maint.c
+index 12ff53d..362b5ca 100644
+--- a/accel/tcg/tb-maint.c
++++ b/accel/tcg/tb-maint.c
+@@ -808,6 +808,7 @@ void tb_flush__exclusive_or_serial(void)
+ 
+     CPU_FOREACH(cpu) {
+         tcg_flush_jmp_cache(cpu);
++        cpu->t2_pending = NULL;         /* POMPPC tcg/0048 */
+     }
+ 
+     qht_reset_size(&tb_ctx.htable, CODE_GEN_HTABLE_SIZE);
+@@ -1166,6 +1167,10 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
+         /* NOTE: this is subtle as a TB may span two physical pages */
+         tb_start = tb_page_addr0(tb);
+         tb_last = tb_start + tb->size - 1;
++        if (tb->t2_state == T2_TRACE) {
++            /* POMPPC tcg/0048: a trace covers its whole (single) page */
++            tb_start &= TARGET_PAGE_MASK;
++        }
+         if (n == 0) {
+             tb_last = MIN(tb_last, tb_start | ~TARGET_PAGE_MASK);
+         } else {
+@@ -1281,6 +1286,9 @@ bool tb_invalidate_phys_line_sync(CPUState *cpu, tb_page_addr_t start,
+         tb_page_addr_t tb_start = tb_page_addr0(tb);
+         tb_page_addr_t tb_last = tb_start + tb->size - 1;
+ 
++        if (tb->t2_state == T2_TRACE) {
++            tb_start &= TARGET_PAGE_MASK;   /* POMPPC tcg/0048 */
++        }
+         if (n == 0) {
+             tb_last = MIN(tb_last, tb_start | ~TARGET_PAGE_MASK);
+         } else {
+diff --git a/accel/tcg/tcg-runtime.h b/accel/tcg/tcg-runtime.h
+index 13eb965..922e2b1 100644
+--- a/accel/tcg/tcg-runtime.h
++++ b/accel/tcg/tcg-runtime.h
+@@ -21,6 +21,12 @@ DEF_HELPER_FLAGS_1(ctpop_i32, TCG_CALL_NO_RWG_SE, i32, i32)
+ DEF_HELPER_FLAGS_1(ctpop_i64, TCG_CALL_NO_RWG_SE, i64, i64)
+ 
+ DEF_HELPER_FLAGS_1(lookup_tb_ptr, TCG_CALL_NO_WG_SE, cptr, env)
++DEF_HELPER_FLAGS_2(t2_hot, TCG_CALL_NO_RWG, void, env, ptr)
++DEF_HELPER_FLAGS_5(t2_log, TCG_CALL_NO_RWG, void, env, i64, i64, i32, i32)
++DEF_HELPER_FLAGS_3(t2_rld, TCG_CALL_NO_RWG, i64, env, i64, i32)
++DEF_HELPER_FLAGS_4(t2_rst, TCG_CALL_NO_RWG, void, env, i64, i64, i32)
++DEF_HELPER_FLAGS_1(t2_unverif, TCG_CALL_NO_RWG, void, env)
++DEF_HELPER_FLAGS_2(t2_rmark, TCG_CALL_NO_RWG, void, env, i64)
+ DEF_HELPER_FLAGS_2(lookup_tb_ptr_check, TCG_CALL_NO_WG_SE, cptr, env, ptr)
+ 
+ DEF_HELPER_FLAGS_1(exit_atomic, TCG_CALL_NO_WG, noreturn, env)
+diff --git a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
+index e0d25c9..f6066f0 100644
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -309,6 +309,8 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
+     tb->cs_base = s.cs_base;
+     tb->flags = s.flags;
+     tb->cflags = s.cflags;
++    tb->t2_count = 0;           /* POMPPC tcg/0048 */
++    tb->t2_state = T2_NONE;
+     tb_set_page_addr0(tb, phys_pc);
+     tb_set_page_addr1(tb, -1);
+     if (phys_pc != -1) {
+diff --git a/accel/tcg/translator.c b/accel/tcg/translator.c
+index de5957c..ebb4440 100644
+--- a/accel/tcg/translator.c
++++ b/accel/tcg/translator.c
+@@ -106,6 +106,67 @@ static void gen_tb_end(const TranslationBlock *tb, uint32_t cflags,
+     }
+ }
+ 
++/*
++ * POMPPC tcg/0048 (x-tier2): the TB counts its executions and, on the
++ * t2_thresh-th one, asks the main loop for a trace (helper_t2_hot, which
++ * also requests an exit so that the loop sees it soon).  Not in a trace,
++ * nor with plugins, single-step, icount or a forced instruction count.
++ */
++static void gen_t2_counter(DisasContextBase *db, CPUState *cpu, uint32_t cflags)
++{
++    TranslationBlock *tb = db->tb;
++    TCGv_ptr p;
++    TCGv_i32 c;
++    TCGLabel *skip;
++
++    if (!cpu->t2_thresh || db->t2_path || db->plugin_enabled ||
++        (cflags & (CF_COUNT_MASK | CF_SINGLE_STEP | CF_USE_ICOUNT |
++                   CF_NO_GOTO_TB | CF_NOIRQ | CF_MEMI_ONLY))) {
++        return;
++    }
++    p = tcg_constant_ptr(&tb->t2_count);
++    c = tcg_temp_new_i32();
++    skip = gen_new_label();
++    tcg_gen_ld_i32(c, p, 0);
++    tcg_gen_addi_i32(c, c, 1);
++    tcg_gen_st_i32(c, p, 0);
++    tcg_gen_brcondi_i32(TCG_COND_NE, c, cpu->t2_thresh, skip);
++    gen_helper_t2_hot(tcg_env, tcg_constant_ptr(tb));
++    gen_set_label(skip);
++}
++
++bool translator_t2_continue(DisasContextBase *db, vaddr end, vaddr dest,
++                            int slot)
++{
++    const T2Path *p = db->t2_path;
++
++    if (!p) {
++        return false;
++    }
++    for (int i = 0; i < p->n; i++) {
++        if (!(db->t2_used & (1u << i)) && p->e[i].end == end &&
++            p->e[i].next == dest && p->e[i].slot == slot &&
++            translator_is_same_page(db, dest)) {
++            db->t2_used |= 1u << i;
++            return true;
++        }
++    }
++    return false;
++}
++
++/*
++ * x-tier2-verify: the path goes on into the TB at @dest (called by the
++ * target where its code continues, after the side exit's branch): the logged
++ * copy of a trace notes it, the replay of the TBs consumes it.
++ */
++void translator_t2_enter(DisasContextBase *db, vaddr dest)
++{
++    if (tcg_ctx->t2_mode == 1) {
++        gen_helper_t2_log(tcg_env, tcg_constant_i64(dest), tcg_constant_i64(0),
++                          tcg_constant_i32(T2_MARK), tcg_constant_i32(2));
++    }
++}
++
+ bool translator_is_same_page(const DisasContextBase *db, vaddr addr)
+ {
+     return ((addr ^ db->pc_first) & TARGET_PAGE_MASK) == 0;
+@@ -147,6 +208,12 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
+     db->record_start = 0;
+     db->record_len = 0;
+     db->code_mmuidx = cpu_mmu_index(cpu, true);
++    db->t2_path = cpu->t2_path;          /* POMPPC tcg/0048 */
++    db->t2_used = 0;
++    tcg_ctx->t2_mode = (cflags & CF_T2_LOG) ? 1 : (cflags & CF_T2_REPLAY) ? 2 : 0;
++    if (db->t2_path) {
++        tb->t2_state = T2_TRACE;
++    }
+ 
+     ops->init_disas_context(db, cpu);
+     tcg_debug_assert(db->is_jmp == DISAS_NEXT);  /* no early exit */
+@@ -158,6 +225,10 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
+ 
+     plugin_enabled = plugin_gen_tb_start(cpu, db);
+     db->plugin_enabled = plugin_enabled;
++    gen_t2_counter(db, cpu, cflags);     /* POMPPC tcg/0048 */
++    if (tcg_ctx->t2_mode == 2) {
++        gen_helper_t2_rmark(tcg_env, tcg_constant_i64(pc));
++    }
+ 
+     while (true) {
+         *max_insns = ++db->num_insns;
+@@ -228,6 +299,14 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
+     /* May be used by disas_log or plugin callbacks. */
+     tb->size = db->pc_next - db->pc_first;
+     tb->icount = db->num_insns;
++    if (db->t2_path) {
++        /*
++         * POMPPC tcg/0048: a trace jumps back and forth inside its page;
++         * for invalidation it covers the page from pc_first to its end
++         * (tb-maint.c widens it down to the page start).
++         */
++        tb->size = TARGET_PAGE_SIZE - (db->pc_first & ~TARGET_PAGE_MASK);
++    }
+ 
+     if (plugin_enabled) {
+         plugin_gen_tb_end(cpu, db->num_insns);
+diff --git a/include/exec/translation-block.h b/include/exec/translation-block.h
+index 7d8832a..8685120 100644
+--- a/include/exec/translation-block.h
++++ b/include/exec/translation-block.h
+@@ -85,6 +85,8 @@ struct TranslationBlock {
+ #define CF_PCREL         0x00020000 /* Opcodes in TB are PC-relative */
+ #define CF_BP_PAGE       0x00040000 /* Breakpoint present in code page */
+ #define CF_STEP_ATOMIC   0x00080000 /* Running in cpu_exec_step_atomic */
++#define CF_T2_LOG        0x00100000 /* POMPPC tcg/0048: verify, log accesses */
++#define CF_T2_REPLAY     0x00200000 /* POMPPC tcg/0048: verify, replay them */
+ #define CF_CLUSTER_MASK  0xff000000 /* Top 8 bits are cluster ID */
+ #define CF_CLUSTER_SHIFT 24
+ 
+@@ -96,6 +98,19 @@ struct TranslationBlock {
+     uint16_t size;
+     uint16_t icount;
+ 
++    /*
++     * POMPPC tcg/0048 (x-tier2): executions counted by the TB itself
++     * (t2_count, approximate under MTTCG) and its tier-2 state:
++     * T2_NONE, T2_ASKED (a trace was requested from it), T2_TRACE (the TB
++     * is a trace: several TBs of one page concatenated along their hottest
++     * path).  A trace covers its whole page for invalidation.
++     */
++    uint32_t t2_count;
++    uint8_t t2_state;
++#define T2_NONE  0
++#define T2_ASKED 1
++#define T2_TRACE 2
++
+     struct tb_tc tc;
+ 
+     /*
+diff --git a/include/exec/translator.h b/include/exec/translator.h
+index 2b2fcd3..7495232 100644
+--- a/include/exec/translator.h
++++ b/include/exec/translator.h
+@@ -89,8 +89,36 @@ struct DisasContextBase {
+     int record_start;
+     int record_len;
+     uint8_t record[32];
++
++    /* POMPPC tcg/0048 (x-tier2): the path of the trace being translated */
++    const struct T2Path *t2_path;
++    uint32_t t2_used;           /* bit i: record i of the path consumed */
+ };
+ 
++/*
++ * POMPPC tcg/0048 (x-tier2).  A trace is translated like one TB that does
++ * not stop at the direct branches of its path: record i says that the TB
++ * ending at guest address @end (pc after its last instruction) continues,
++ * by its exit slot @slot (0: branch taken / unconditional, 1: fall
++ * through), at @next.  The target asks translator_t2_continue() at each
++ * direct branch; on true it goes on translating at @next and makes the
++ * other side of the branch a side exit.
++ */
++#define T2_MAX_PATH 24
++#define T2_MARK 0xffffffffu     /* x-tier2-verify: log entry "TB entered" */
++typedef struct T2Path {
++    int n;
++    struct {
++        vaddr end;
++        vaddr next;
++        int slot;
++    } e[T2_MAX_PATH];
++} T2Path;
++
++bool translator_t2_continue(DisasContextBase *db, vaddr end, vaddr dest,
++                            int slot);
++void translator_t2_enter(DisasContextBase *db, vaddr dest);
++
+ /**
+  * TranslatorOps:
+  * @init_disas_context:
+diff --git a/include/hw/core/cpu.h b/include/hw/core/cpu.h
+index 4aba21b..f792005 100644
+--- a/include/hw/core/cpu.h
++++ b/include/hw/core/cpu.h
+@@ -583,6 +583,31 @@ struct CPUState {
+     bool dirty_skip_verify;
+     /* POMPPC tcg/0042: count the TLB misses (tlb.c.ms_*), x-mem-stats */
+     bool tlb_miss_stats;
++    /*
++     * POMPPC tcg/0048.  t2_thresh (x-tier2=N, 0 = off, else a power of two):
++     * a TB executed N times asks for a trace (accel/tcg/tier2.c);
++     * t2_verify (x-tier2-verify=N): one trace execution in N is checked
++     * against the TBs it was made of.  t2_pending: the TB that asked, picked
++     * up by the main loop; t2_path: the path being translated (translator
++     * only); t2_stat: counters printed at exit.
++     */
++    uint32_t t2_thresh;
++    uint32_t t2_verify;
++    uint32_t t2_maxtb;
++    void *t2_pending;
++    const struct T2Path *t2_path;
++    /*
++     * x-tier2-verify: the log of guest accesses of a checked trace, the
++     * number of trace entries seen, a flag set while a check runs, and the
++     * target hook that saves (op 0), restores (op 1) or compares (op 2,
++     * returns true and names the first difference) the guest registers.
++     */
++    struct T2Log *t2_log;
++    uint32_t t2_vcount;
++    uint8_t t2_vrun;            /* 1: logged run, 2: replay */
++    bool (*t2_regs)(struct CPUState *cs, void *buf, int op, char *why,
++                    size_t whylen);
++    size_t t2_regs_size;
+ 
+     GArray *gdb_regs;
+     int gdb_num_regs;
+diff --git a/include/tcg/tcg.h b/include/tcg/tcg.h
+index 7669dc1..ebe64e8 100644
+--- a/include/tcg/tcg.h
++++ b/include/tcg/tcg.h
+@@ -389,6 +389,12 @@ struct TCGContext {
+     struct TCGLabelPoolData *pool_labels;
+ 
+     TCGLabel *exitreq_label;
++    /*
++     * POMPPC tcg/0048 (x-tier2-verify): 1 = log every guest access of the
++     * TB being translated (helper_t2_log), 2 = replay them (loads return the
++     * logged values, stores are compared and not done).
++     */
++    int t2_mode;
+ 
+ #ifdef CONFIG_PLUGIN
+     /*
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index 610097b..6f10743 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -255,6 +255,16 @@ static const Property powerpc_cpu_properties[] = {
+      * PTEG through one translated host pointer (same words, same order).
+      * x-pteg-map-verify: proof mode.  Off by default.
+      */
++    /*
++     * POMPPC tcg/0048.  x-tier2=N: a TB executed N times is translated
++     * again, with the hottest chained TBs of its page that follow it, as one
++     * trace (accel/tcg/cpu-exec.c, t2_form).  x-tier2-tbs: at most that many
++     * TBs after the first.  x-tier2-verify=N: proof mode.  Off (0) by
++     * default.
++     */
++    DEFINE_PROP_UINT32("x-tier2", PowerPCCPU, parent_obj.t2_thresh, 0),
++    DEFINE_PROP_UINT32("x-tier2-tbs", PowerPCCPU, parent_obj.t2_maxtb, 16),
++    DEFINE_PROP_UINT32("x-tier2-verify", PowerPCCPU, parent_obj.t2_verify, 0),
+     DEFINE_PROP_BOOL("x-pteg-map", PowerPCCPU, env.pteg_map, false),
+     DEFINE_PROP_BOOL("x-pteg-map-verify", PowerPCCPU, env.pteg_map_verify,
+                      false),
+@@ -7206,6 +7216,118 @@ static void ppc_vfn_gate_init(CPUPPCState *env)
+ }
+ /* vfp-native-gate: fin */
+ 
++/*
++ * POMPPC tcg/0048 (x-tier2-verify): the guest registers a trace may change,
++ * saved (op 0), restored (op 1) or compared (op 2: true and the first
++ * difference named in @why) for the check of a trace against its TBs.
++ */
++#define T2_CORE_START offsetof(CPUPPCState, gpr)
++#define T2_CORE_END   offsetof(CPUPPCState, has_smt_siblings)
++typedef struct PPCT2Regs {
++    uint8_t core[T2_CORE_END - T2_CORE_START];
++    target_ulong fpscr;
++    uint64_t fprf_src;
++    float_status fp_status, vec_status;
++    uint32_t vscr;
++    ppc_vsr_t vscr_sat;
++    ppc_vsr_t vsr[64];
++    target_ulong spr[1024];
++} PPCT2Regs;
++
++static bool ppc_t2_regs(CPUState *cs, void *buf, int op, char *why,
++                        size_t whylen)
++{
++    CPUPPCState *env = cpu_env(cs);
++    PPCT2Regs *r = buf;
++    uint8_t *core = (uint8_t *)env + T2_CORE_START;
++    CPUPPCState *o;
++    int i;
++
++    switch (op) {
++    case 0:
++        memcpy(r->core, core, sizeof(r->core));
++        r->fpscr = env->fpscr;
++        r->fprf_src = env->fprf_src;
++        r->fp_status = env->fp_status;
++        r->vec_status = env->vec_status;
++        r->vscr = env->vscr;
++        r->vscr_sat = env->vscr_sat;
++        memcpy(r->vsr, env->vsr, sizeof(r->vsr));
++        memcpy(r->spr, env->spr, sizeof(r->spr));
++        return false;
++    case 1:
++        memcpy(core, r->core, sizeof(r->core));
++        env->fpscr = r->fpscr;
++        env->fprf_src = r->fprf_src;
++        env->fp_status = r->fp_status;
++        env->vec_status = r->vec_status;
++        env->vscr = r->vscr;
++        env->vscr_sat = r->vscr_sat;
++        memcpy(env->vsr, r->vsr, sizeof(r->vsr));
++        memcpy(env->spr, r->spr, sizeof(r->spr));
++        hreg_compute_hflags(env);       /* MSR may differ (rfi, mtmsr) */
++        return false;
++    }
++    /* compare: r = what the trace left, env = what its TBs left */
++    o = (CPUPPCState *)((uint8_t *)r->core - T2_CORE_START);
++    for (i = 0; i < 32; i++) {
++        if (o->gpr[i] != env->gpr[i]) {
++            snprintf(why, whylen, "r%d trace 0x" TARGET_FMT_lx " blocs 0x"
++                     TARGET_FMT_lx, i, o->gpr[i], env->gpr[i]);
++            return true;
++        }
++    }
++    for (i = 0; i < 8; i++) {
++        if (o->crf[i] != env->crf[i]) {
++            snprintf(why, whylen, "cr%d trace %x blocs %x", i, o->crf[i],
++                     env->crf[i]);
++            return true;
++        }
++    }
++#define T2_CMP(f) \
++    if (o->f != env->f) { \
++        snprintf(why, whylen, #f " trace 0x%" PRIx64 " blocs 0x%" PRIx64, \
++                 (uint64_t)o->f, (uint64_t)env->f); \
++        return true; \
++    }
++    T2_CMP(lr) T2_CMP(ctr) T2_CMP(xer) T2_CMP(so) T2_CMP(ov) T2_CMP(ca)
++    T2_CMP(ov32) T2_CMP(ca32) T2_CMP(nip) T2_CMP(msr) T2_CMP(reserve_addr)
++    T2_CMP(reserve_val)
++#undef T2_CMP
++    if (memcmp(r->core, core, sizeof(r->core))) {
++        snprintf(why, whylen, "autre champ du début de CPUPPCState");
++        return true;
++    }
++    if (r->fpscr != env->fpscr || r->fprf_src != env->fprf_src) {
++        snprintf(why, whylen, "fpscr trace 0x" TARGET_FMT_lx "/%" PRIx64
++                 " blocs 0x" TARGET_FMT_lx "/%" PRIx64, r->fpscr, r->fprf_src,
++                 env->fpscr, env->fprf_src);
++        return true;
++    }
++    for (i = 0; i < 64; i++) {
++        if (memcmp(&r->vsr[i], &env->vsr[i], sizeof(r->vsr[i]))) {
++            snprintf(why, whylen, "vsr%d (%s%d)", i, i < 32 ? "f" : "v",
++                     i & 31);
++            return true;
++        }
++    }
++    if (memcmp(&r->fp_status, &env->fp_status, sizeof(r->fp_status)) ||
++        memcmp(&r->vec_status, &env->vec_status, sizeof(r->vec_status)) ||
++        r->vscr != env->vscr ||
++        memcmp(&r->vscr_sat, &env->vscr_sat, sizeof(r->vscr_sat))) {
++        snprintf(why, whylen, "fp_status/vec_status/vscr");
++        return true;
++    }
++    for (i = 0; i < 1024; i++) {
++        if (r->spr[i] != env->spr[i]) {
++            snprintf(why, whylen, "spr %d trace 0x" TARGET_FMT_lx " blocs 0x"
++                     TARGET_FMT_lx, i, r->spr[i], env->spr[i]);
++            return true;
++        }
++    }
++    return false;
++}
++
+ static void ppc_cpu_realize(DeviceState *dev, Error **errp)
+ {
+     CPUState *cs = CPU(dev);
+@@ -7238,6 +7360,8 @@ static void ppc_cpu_realize(DeviceState *dev, Error **errp)
+ #endif
+ 
+     cpu_exec_realizefn(cs, &local_err);
++    cs->t2_regs = ppc_t2_regs;          /* POMPPC tcg/0048 */
++    cs->t2_regs_size = sizeof(PPCT2Regs);
+     if (local_err != NULL) {
+         error_propagate(errp, local_err);
+         return;
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+index 143db17..9104833 100644
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -222,6 +222,18 @@ struct DisasContext {
+     bool fprf_maybe;
+     bool stfs_known;            /* x-stfs-known (tcg/0047) */
+     bool ret_inline, ret_verify; /* x-ret-inline, x-ret-verify (tcg/0008) */
++    /*
++     * x-tier2 (tcg/0048): side exits of the trace being translated (the
++     * other side of each branch of its path), emitted after its last
++     * instruction; t2_slots: goto_tb slots already used.
++     */
++    struct {
++        TCGLabel *label;
++        target_ulong dest;
++        int num_insns;          /* at the branch: what pmu_count_insns counts */
++    } t2_exit[T2_MAX_PATH];
++    int t2_nexit;
++    unsigned t2_slots;
+     bool altivec_enabled;
+     bool vsx_enabled;
+     bool spe_enabled;
+@@ -739,6 +751,9 @@ void spr_write_ureg(DisasContext *ctx, int sprn, int gprn)
+ void spr_read_decr(DisasContext *ctx, int gprn, int sprn)
+ {
+     translator_io_start(&ctx->base);
++    if (tcg_ctx->t2_mode) {
++        gen_helper_t2_unverif(tcg_env);     /* tcg/0048: time differs */
++    }
+     gen_helper_load_decr(cpu_gpr[gprn], tcg_env);
+ }
+ 
+@@ -754,12 +769,18 @@ void spr_write_decr(DisasContext *ctx, int sprn, int gprn)
+ void spr_read_tbl(DisasContext *ctx, int gprn, int sprn)
+ {
+     translator_io_start(&ctx->base);
++    if (tcg_ctx->t2_mode) {
++        gen_helper_t2_unverif(tcg_env);     /* tcg/0048: time differs */
++    }
+     gen_helper_load_tbl(cpu_gpr[gprn], tcg_env);
+ }
+ 
+ void spr_read_tbu(DisasContext *ctx, int gprn, int sprn)
+ {
+     translator_io_start(&ctx->base);
++    if (tcg_ctx->t2_mode) {
++        gen_helper_t2_unverif(tcg_env);     /* tcg/0048: time differs */
++    }
+     gen_helper_load_tbu(cpu_gpr[gprn], tcg_env);
+ }
+ 
+@@ -3786,7 +3807,7 @@ static void gen_lookup_and_goto_ptr(DisasContext *ctx)
+          * tcg_gen_lookup_and_goto_ptr will exit the TB if
+          * CF_NO_GOTO_PTR is set. Count insns now.
+          */
+-        if (ctx->base.tb->flags & CF_NO_GOTO_PTR) {
++        if (tb_cflags(ctx->base.tb) & CF_NO_GOTO_PTR) {   /* tcg/0048: cflags, not flags */
+             pmu_count_insns(ctx);
+         }
+ 
+@@ -3806,6 +3827,7 @@ static void gen_goto_tb(DisasContext *ctx, unsigned tb_slot_idx,
+         tcg_gen_goto_tb(tb_slot_idx);
+         tcg_gen_movi_tl(cpu_nip, dest & ~3);
+         tcg_gen_exit_tb(ctx->base.tb, tb_slot_idx);
++        ctx->t2_slots |= 1u << tb_slot_idx;     /* tcg/0048 */
+     } else {
+         tcg_gen_movi_tl(cpu_nip, dest & ~3);
+         gen_lookup_and_goto_ptr(ctx);
+@@ -3820,6 +3842,41 @@ static inline void gen_setlr(DisasContext *ctx, target_ulong nip)
+     tcg_gen_movi_tl(cpu_lr, nip);
+ }
+ 
++/*
++ * POMPPC tcg/0048 (x-tier2): in a trace, does the path go on at @dest by
++ * exit @slot of this branch?  If so, translation continues there.
++ */
++static bool t2_continue(DisasContext *ctx, int slot, target_ulong dest)
++{
++    if (NARROW_MODE(ctx)) {
++        dest = (uint32_t)dest;
++    }
++    dest &= ~3;
++    if (!ctx->base.t2_path || ctx->singlestep_flags ||
++        ctx->t2_nexit >= T2_MAX_PATH ||
++        !translator_t2_continue(&ctx->base, ctx->base.pc_next, dest, slot)) {
++        return false;
++    }
++    ctx->base.pc_next = dest;
++    translator_t2_enter(&ctx->base, dest);
++    return true;
++}
++
++/* tcg/0048: the other side of a branch of the trace, emitted at its end */
++static TCGLabel *t2_side_exit(DisasContext *ctx, target_ulong dest)
++{
++    TCGLabel *l = gen_new_label();
++
++    if (NARROW_MODE(ctx)) {
++        dest = (uint32_t)dest;
++    }
++    ctx->t2_exit[ctx->t2_nexit].label = l;
++    ctx->t2_exit[ctx->t2_nexit].dest = dest;
++    ctx->t2_exit[ctx->t2_nexit].num_insns = ctx->base.num_insns;
++    ctx->t2_nexit++;
++    return l;
++}
++
+ /* b ba bl bla */
+ static void gen_b(DisasContext *ctx)
+ {
+@@ -3839,10 +3896,107 @@ static void gen_b(DisasContext *ctx)
+     } else {
+         gen_update_branch_history(ctx, ctx->cia, NULL, BHRB_TYPE_OTHER);
+     }
++    if (t2_continue(ctx, 0, target)) {
++        return;                 /* tcg/0048: the trace goes on at target */
++    }
+     gen_goto_tb(ctx, 0, target);
+     ctx->base.is_jmp = DISAS_NORETURN;
+ }
+ 
++/*
++ * tcg/0048: bc (immediate target) inside a trace whose path goes on by one
++ * of its sides: the branch condition as one value, one brcond to the side
++ * exit, and no label on the path (a label would make TCG reload every
++ * guest register after it).
++ */
++static bool t2_gen_bc(DisasContext *ctx)
++{
++    uint32_t bo = BO(ctx->opcode);
++    target_ulong li = (target_long)((int16_t)(BD(ctx->opcode)));
++    target_ulong target = AA(ctx->opcode) ? li : ctx->cia + li;
++    target_ulong next = ctx->base.pc_next;
++    int slot;
++    TCGv_i32 taken;
++    TCGLabel *side;
++
++    if (NARROW_MODE(ctx)) {
++        target = (uint32_t)target;
++    }
++    target &= ~3;
++    if (!ctx->base.t2_path || ctx->singlestep_flags ||
++        ctx->t2_nexit >= T2_MAX_PATH) {
++        return false;
++    }
++    if ((bo & 0x14) == 0x14) {
++        /* branch always */
++        if (!translator_t2_continue(&ctx->base, next, target, 0)) {
++            return false;
++        }
++        if (LK(ctx->opcode)) {
++            gen_setlr(ctx, next);
++        }
++        ctx->base.pc_next = target;
++        translator_t2_enter(&ctx->base, target);
++        return true;
++    }
++    if (translator_t2_continue(&ctx->base, next, target, 0)) {
++        slot = 0;
++    } else if (translator_t2_continue(&ctx->base, next, next, 1)) {
++        slot = 1;
++    } else {
++        return false;
++    }
++    if (LK(ctx->opcode)) {
++        gen_setlr(ctx, next);
++    }
++    taken = tcg_temp_new_i32();
++    tcg_gen_movi_i32(taken, 1);
++    if ((bo & 0x4) == 0) {
++        /* decrement CTR, taken when CTR != 0 (bo & 2: when CTR == 0) */
++        TCGv ctr = tcg_temp_new();
++        TCGv_i32 c = tcg_temp_new_i32();
++
++        tcg_gen_subi_tl(cpu_ctr, cpu_ctr, 1);
++        if (NARROW_MODE(ctx)) {
++            tcg_gen_ext32u_tl(ctr, cpu_ctr);
++        } else {
++            tcg_gen_mov_tl(ctr, cpu_ctr);
++        }
++        tcg_gen_setcondi_tl(bo & 0x2 ? TCG_COND_EQ : TCG_COND_NE, ctr, ctr, 0);
++        tcg_gen_trunc_tl_i32(c, ctr);
++        tcg_gen_and_i32(taken, taken, c);
++    }
++    if ((bo & 0x10) == 0) {
++        uint32_t bi = BI(ctx->opcode);
++        uint32_t mask = 0x08 >> (bi & 0x03);
++        TCGv_i32 c = tcg_temp_new_i32();
++
++        tcg_gen_andi_i32(c, cpu_crf[bi >> 2], mask);
++        tcg_gen_setcondi_i32(bo & 0x8 ? TCG_COND_NE : TCG_COND_EQ, c, c, 0);
++        tcg_gen_and_i32(taken, taken, c);
++    }
++    gen_update_branch_history(ctx, ctx->cia, NULL,
++                              BHRB_TYPE_OTHER | BHRB_TYPE_COND);
++    if (slot == 0) {
++        /* POMPPC_T2_MUTANT=1: wrong side exit, to prove x-tier2-verify sees it */
++        static int mutant = -1;
++
++        if (mutant < 0) {
++            mutant = getenv("POMPPC_T2_MUTANT") ? atoi(getenv("POMPPC_T2_MUTANT")) : 0;
++        }
++        side = t2_side_exit(ctx, next);
++        tcg_gen_brcondi_i32(mutant == 1 && (ctx->cia & 0x40) ? TCG_COND_NE
++                                                              : TCG_COND_EQ,
++                            taken, 0, side);
++        ctx->base.pc_next = target;
++    } else {
++        side = t2_side_exit(ctx, target);
++        tcg_gen_brcondi_i32(TCG_COND_NE, taken, 0, side);
++    }
++    translator_t2_enter(&ctx->base, ctx->base.pc_next);
++    return true;
++}
++
+ #define BCOND_IM  0
+ #define BCOND_LR  1
+ #define BCOND_CTR 2
+@@ -3969,6 +4123,9 @@ static void gen_bcond(DisasContext *ctx, int type)
+ 
+ static void gen_bc(DisasContext *ctx)
+ {
++    if (t2_gen_bc(ctx)) {
++        return;                 /* tcg/0048: inside a trace */
++    }
+     gen_bcond(ctx, BCOND_IM);
+ }
+ 
+@@ -6769,6 +6926,8 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+     ctx->stfs_known = env->stfs_known && ctx->fp_known;
+     ctx->ret_inline = env->ret_inline;
+     ctx->ret_verify = cs->ret_verify;
++    ctx->t2_nexit = 0;          /* tcg/0048 */
++    ctx->t2_slots = 0;
+     ctx->spe_enabled = (hflags >> HFLAGS_SPE) & 1;
+     ctx->altivec_enabled = (hflags >> HFLAGS_VR) & 1;
+     ctx->vsx_enabled = (hflags >> HFLAGS_VSX) & 1;
+@@ -6854,13 +7013,17 @@ static void ppc_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
+         fpk_scan(ctx, ctx->base.insn_start);
+     }
+ 
+-    /* End the TB when crossing a page boundary. */
+-    if (ctx->base.is_jmp == DISAS_NEXT && !(pc & ~TARGET_PAGE_MASK)) {
++    /*
++     * End the TB when crossing a page boundary.  (tcg/0048: a trace that
++     * went on at a branch target has its next pc in pc_next.)
++     */
++    if (ctx->base.is_jmp == DISAS_NEXT && ctx->base.pc_next == pc &&
++        !(pc & ~TARGET_PAGE_MASK)) {
+         ctx->base.is_jmp = DISAS_TOO_MANY;
+     }
+ }
+ 
+-static void ppc_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
++static void ppc_tr_tb_stop_main(DisasContextBase *dcbase, CPUState *cs)
+ {
+     DisasContext *ctx = container_of(dcbase, DisasContext, base);
+     DisasJumpType is_jmp = ctx->base.is_jmp;
+@@ -6906,6 +7069,7 @@ static void ppc_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
+             tcg_gen_goto_tb(0);
+             gen_update_nip(ctx, nip);
+             tcg_gen_exit_tb(ctx->base.tb, 0);
++            ctx->t2_slots |= 1;         /* tcg/0048 */
+             break;
+         }
+         /* fall through */
+@@ -6917,7 +7081,7 @@ static void ppc_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
+          * tcg_gen_lookup_and_goto_ptr will exit the TB if
+          * CF_NO_GOTO_PTR is set. Count insns now.
+          */
+-        if (ctx->base.tb->flags & CF_NO_GOTO_PTR) {
++        if (tb_cflags(ctx->base.tb) & CF_NO_GOTO_PTR) {   /* tcg/0048: cflags, not flags */
+             pmu_count_insns(ctx);
+         }
+ 
+@@ -6937,6 +7101,36 @@ static void ppc_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
+     }
+ }
+ 
++/*
++ * tcg/0048 (x-tier2): after the last exit of a trace, its side exits: a
++ * goto_tb slot left free by the last instruction, else the jump-cache
++ * lookup (x-ret-inline probe or helper_lookup_tb_ptr).  Each is reached
++ * by a brcond, where TCG has synced the guest registers to memory.
++ */
++static void ppc_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
++{
++    DisasContext *ctx = container_of(dcbase, DisasContext, base);
++
++    int num_insns = ctx->base.num_insns;
++
++    ppc_tr_tb_stop_main(dcbase, cs);
++    for (int i = 0; i < ctx->t2_nexit; i++) {
++        target_ulong dest = ctx->t2_exit[i].dest;
++        int slot = !(ctx->t2_slots & 1) ? 0 : !(ctx->t2_slots & 2) ? 1 : -1;
++
++        /* the PMU counts the instructions run before this exit (G4 PMC) */
++        ctx->base.num_insns = ctx->t2_exit[i].num_insns;
++        gen_set_label(ctx->t2_exit[i].label);
++        if (slot >= 0) {
++            gen_goto_tb(ctx, slot, dest);
++        } else {
++            tcg_gen_movi_tl(cpu_nip, dest & ~3);
++            gen_lookup_and_goto_ptr(ctx);
++        }
++    }
++    ctx->base.num_insns = num_insns;
++}
++
+ static const TranslatorOps ppc_tr_ops = {
+     .init_disas_context = ppc_tr_init_disas_context,
+     .tb_start           = ppc_tr_tb_start,
+diff --git a/tcg/tcg-op-ldst.c b/tcg/tcg-op-ldst.c
+index 22211cc..ab2c6f4 100644
+--- a/tcg/tcg-op-ldst.c
++++ b/tcg/tcg-op-ldst.c
+@@ -33,6 +33,7 @@
+ #include "tcg-internal.h"
+ #include "tcg-has.h"
+ #include "tcg-target-mo.h"
++#include "exec/helper-gen-common.h"   /* POMPPC tcg/0048 */
+ 
+ static void check_max_alignment(unsigned a_bits)
+ {
+@@ -238,6 +239,41 @@ plugin_gen_mem_callbacks_i128(TCGv_i128 val,
+ #endif
+ }
+ 
++
++/*
++ * POMPPC tcg/0048 (x-tier2-verify).  tcg_ctx->t2_mode 1: after each guest
++ * access, log (address, value, memop) through helper_t2_log; 2: replace it
++ * by helper_t2_rld (loads: the logged value) or helper_t2_rst (stores:
++ * compared with the log, memory untouched).  Values are those seen at this
++ * interface (after the load's extension and byte swap, before the store's).
++ */
++#define T2_HI (1u << 30)        /* memop flag: second half of a 128-bit access */
++
++static TCGv_i64 t2_addr64(TCGTemp *addr)
++{
++    TCGv_i64 a = tcg_temp_ebb_new_i64();
++
++    if (tcg_ctx->addr_type == TCG_TYPE_I32) {
++        tcg_gen_extu_i32_i64(a, temp_tcgv_i32(addr));
++    } else {
++        tcg_gen_mov_i64(a, temp_tcgv_i64(addr));
++    }
++    return a;
++}
++
++static void t2_log(TCGv_i64 a, TCGv_i64 v, uint32_t memop, int st)
++{
++    gen_helper_t2_log(tcg_env, a, v, tcg_constant_i32(memop),
++                      tcg_constant_i32(st));
++}
++
++static void t2_mark_atomic(void)
++{
++    if (unlikely(tcg_ctx->t2_mode)) {
++        gen_helper_t2_unverif(tcg_env);
++    }
++}
++
+ static void tcg_gen_qemu_ld_i32_int(TCGv_i32 val, TCGTemp *addr,
+                                     TCGArg idx, MemOp memop)
+ {
+@@ -288,6 +324,19 @@ void tcg_gen_qemu_ld_i32_chk(TCGv_i32 val, TCGTemp *addr, TCGArg idx,
+ {
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);
+     tcg_debug_assert((memop & MO_SIZE) <= MO_32);
++    if (unlikely(tcg_ctx->t2_mode)) {
++        TCGv_i64 a = t2_addr64(addr), v = tcg_temp_ebb_new_i64();
++
++        if (tcg_ctx->t2_mode == 2) {
++            gen_helper_t2_rld(v, tcg_env, a, tcg_constant_i32(memop));
++            tcg_gen_extrl_i64_i32(val, v);
++        } else {
++            tcg_gen_qemu_ld_i32_int(val, addr, idx, memop);
++            tcg_gen_extu_i32_i64(v, val);
++            t2_log(a, v, memop, 0);
++        }
++        return;
++    }
+     tcg_gen_qemu_ld_i32_int(val, addr, idx, memop);
+ }
+ 
+@@ -334,6 +383,18 @@ void tcg_gen_qemu_st_i32_chk(TCGv_i32 val, TCGTemp *addr, TCGArg idx,
+ {
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);
+     tcg_debug_assert((memop & MO_SIZE) <= MO_32);
++    if (unlikely(tcg_ctx->t2_mode)) {
++        TCGv_i64 a = t2_addr64(addr), v = tcg_temp_ebb_new_i64();
++
++        tcg_gen_extu_i32_i64(v, val);
++        if (tcg_ctx->t2_mode == 2) {
++            gen_helper_t2_rst(tcg_env, a, v, tcg_constant_i32(memop));
++        } else {
++            tcg_gen_qemu_st_i32_int(val, addr, idx, memop);
++            t2_log(a, v, memop, 1);
++        }
++        return;
++    }
+     tcg_gen_qemu_st_i32_int(val, addr, idx, memop);
+ }
+ 
+@@ -391,6 +452,17 @@ void tcg_gen_qemu_ld_i64_chk(TCGv_i64 val, TCGTemp *addr, TCGArg idx,
+ {
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);
+     tcg_debug_assert((memop & MO_SIZE) <= MO_64);
++    if (unlikely(tcg_ctx->t2_mode)) {
++        TCGv_i64 a = t2_addr64(addr);
++
++        if (tcg_ctx->t2_mode == 2) {
++            gen_helper_t2_rld(val, tcg_env, a, tcg_constant_i32(memop));
++        } else {
++            tcg_gen_qemu_ld_i64_int(val, addr, idx, memop);
++            t2_log(a, val, memop, 0);
++        }
++        return;
++    }
+     tcg_gen_qemu_ld_i64_int(val, addr, idx, memop);
+ }
+ 
+@@ -440,6 +512,20 @@ void tcg_gen_qemu_st_i64_chk(TCGv_i64 val, TCGTemp *addr, TCGArg idx,
+ {
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);
+     tcg_debug_assert((memop & MO_SIZE) <= MO_64);
++    if (unlikely(tcg_ctx->t2_mode)) {
++        TCGv_i64 a = t2_addr64(addr);
++
++        if (tcg_ctx->t2_mode == 2) {
++            gen_helper_t2_rst(tcg_env, a, val, tcg_constant_i32(memop));
++        } else {
++            TCGv_i64 v = tcg_temp_ebb_new_i64();
++
++            tcg_gen_mov_i64(v, val);
++            tcg_gen_qemu_st_i64_int(val, addr, idx, memop);
++            t2_log(a, v, memop, 1);
++        }
++        return;
++    }
+     tcg_gen_qemu_st_i64_int(val, addr, idx, memop);
+ }
+ 
+@@ -644,6 +730,21 @@ void tcg_gen_qemu_ld_i128_chk(TCGv_i128 val, TCGTemp *addr, TCGArg idx,
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);
+     tcg_debug_assert((memop & MO_SIZE) == MO_128);
+     tcg_debug_assert((memop & MO_SIGN) == 0);
++    if (unlikely(tcg_ctx->t2_mode)) {
++        TCGv_i64 a = t2_addr64(addr);
++
++        if (tcg_ctx->t2_mode == 2) {
++            gen_helper_t2_rld(TCGV128_LOW(val), tcg_env, a,
++                              tcg_constant_i32(memop));
++            gen_helper_t2_rld(TCGV128_HIGH(val), tcg_env, a,
++                              tcg_constant_i32(memop | T2_HI));
++        } else {
++            tcg_gen_qemu_ld_i128_int(val, addr, idx, memop);
++            t2_log(a, TCGV128_LOW(val), memop, 0);
++            t2_log(a, TCGV128_HIGH(val), memop | T2_HI, 0);
++        }
++        return;
++    }
+     tcg_gen_qemu_ld_i128_int(val, addr, idx, memop);
+ }
+ 
+@@ -757,6 +858,25 @@ void tcg_gen_qemu_st_i128_chk(TCGv_i128 val, TCGTemp *addr, TCGArg idx,
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);
+     tcg_debug_assert((memop & MO_SIZE) == MO_128);
+     tcg_debug_assert((memop & MO_SIGN) == 0);
++    if (unlikely(tcg_ctx->t2_mode)) {
++        TCGv_i64 a = t2_addr64(addr);
++
++        if (tcg_ctx->t2_mode == 2) {
++            gen_helper_t2_rst(tcg_env, a, TCGV128_LOW(val),
++                              tcg_constant_i32(memop));
++            gen_helper_t2_rst(tcg_env, a, TCGV128_HIGH(val),
++                              tcg_constant_i32(memop | T2_HI));
++        } else {
++            TCGv_i64 lo = tcg_temp_ebb_new_i64(), hi = tcg_temp_ebb_new_i64();
++
++            tcg_gen_mov_i64(lo, TCGV128_LOW(val));
++            tcg_gen_mov_i64(hi, TCGV128_HIGH(val));
++            tcg_gen_qemu_st_i128_int(val, addr, idx, memop);
++            t2_log(a, lo, memop, 1);
++            t2_log(a, hi, memop | T2_HI, 1);
++        }
++        return;
++    }
+     tcg_gen_qemu_st_i128_int(val, addr, idx, memop);
+ }
+ 
+@@ -873,6 +993,7 @@ void tcg_gen_nonatomic_cmpxchg_i32_chk(TCGv_i32 retv, TCGTemp *addr,
+                                        TCGType addr_type)
+ {
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);
++    t2_mark_atomic();
+     tcg_debug_assert((memop & MO_SIZE) <= MO_32);
+     tcg_gen_nonatomic_cmpxchg_i32_int(retv, addr, cmpv, newv, idx, memop);
+ }
+@@ -910,6 +1031,7 @@ void tcg_gen_atomic_cmpxchg_i32_chk(TCGv_i32 retv, TCGTemp *addr,
+                                     TCGType addr_type)
+ {
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);
++    t2_mark_atomic();
+     tcg_debug_assert((memop & MO_SIZE) <= MO_32);
+     tcg_gen_atomic_cmpxchg_i32_int(retv, addr, cmpv, newv, idx, memop);
+ }
+@@ -944,6 +1066,7 @@ void tcg_gen_nonatomic_cmpxchg_i64_chk(TCGv_i64 retv, TCGTemp *addr,
+                                        TCGType addr_type)
+ {
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);
++    t2_mark_atomic();
+     tcg_debug_assert((memop & MO_SIZE) <= MO_64);
+     tcg_gen_nonatomic_cmpxchg_i64_int(retv, addr, cmpv, newv, idx, memop);
+ }
+@@ -1004,6 +1127,7 @@ void tcg_gen_atomic_cmpxchg_i64_chk(TCGv_i64 retv, TCGTemp *addr,
+                                     TCGArg idx, MemOp memop, TCGType addr_type)
+ {
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);
++    t2_mark_atomic();
+     tcg_debug_assert((memop & MO_SIZE) <= MO_64);
+     tcg_gen_atomic_cmpxchg_i64_int(retv, addr, cmpv, newv, idx, memop);
+ }
+@@ -1047,6 +1171,7 @@ void tcg_gen_nonatomic_cmpxchg_i128_chk(TCGv_i128 retv, TCGTemp *addr,
+                                         TCGType addr_type)
+ {
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);
++    t2_mark_atomic();
+     tcg_debug_assert((memop & (MO_SIZE | MO_SIGN)) == MO_128);
+     tcg_gen_nonatomic_cmpxchg_i128_int(retv, addr, cmpv, newv, idx, memop);
+ }
+@@ -1088,6 +1213,7 @@ void tcg_gen_atomic_cmpxchg_i128_chk(TCGv_i128 retv, TCGTemp *addr,
+                                      TCGType addr_type)
+ {
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);
++    t2_mark_atomic();
+     tcg_debug_assert((memop & (MO_SIZE | MO_SIGN)) == MO_128);
+     tcg_gen_atomic_cmpxchg_i128_int(retv, addr, cmpv, newv, idx, memop);
+ }
+@@ -1242,6 +1368,7 @@ void tcg_gen_atomic_##NAME##_i32_chk(TCGv_i32 ret, TCGTemp *addr,       \
+                                      MemOp memop, TCGType addr_type)    \
+ {                                                                       \
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);                  \
++    t2_mark_atomic();                                                   \
+     tcg_debug_assert((memop & MO_SIZE) <= MO_32);                       \
+     if (tcg_ctx->gen_tb->cflags & CF_PARALLEL) {                        \
+         do_atomic_op_i32(ret, addr, val, idx, memop, table_##NAME);     \
+@@ -1255,6 +1382,7 @@ void tcg_gen_atomic_##NAME##_i64_chk(TCGv_i64 ret, TCGTemp *addr,       \
+                                      MemOp memop, TCGType addr_type)    \
+ {                                                                       \
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);                  \
++    t2_mark_atomic();                                                   \
+     tcg_debug_assert((memop & MO_SIZE) <= MO_64);                       \
+     if (tcg_ctx->gen_tb->cflags & CF_PARALLEL) {                        \
+         do_atomic_op_i64(ret, addr, val, idx, memop, table_##NAME);     \
+@@ -1268,6 +1396,7 @@ void tcg_gen_atomic_##NAME##_i128_chk(TCGv_i128 ret, TCGTemp *addr,     \
+                                       MemOp memop, TCGType addr_type)   \
+ {                                                                       \
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);                  \
++    t2_mark_atomic();                                                   \
+     tcg_debug_assert((memop & MO_SIZE) == MO_128);                      \
+     if (tcg_ctx->gen_tb->cflags & CF_PARALLEL) {                        \
+         do_atomic_op_i128(ret, addr, val, idx, memop, table_##NAME);    \
+@@ -1292,6 +1421,7 @@ void tcg_gen_atomic_##NAME##_i32_chk(TCGv_i32 ret, TCGTemp *addr,       \
+                                      MemOp memop, TCGType addr_type)    \
+ {                                                                       \
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);                  \
++    t2_mark_atomic();                                                   \
+     tcg_debug_assert((memop & MO_SIZE) <= MO_32);                       \
+     if (tcg_ctx->gen_tb->cflags & CF_PARALLEL) {                        \
+         do_atomic_op_i32(ret, addr, val, idx, memop, table_##NAME);     \
+@@ -1305,6 +1435,7 @@ void tcg_gen_atomic_##NAME##_i64_chk(TCGv_i64 ret, TCGTemp *addr,       \
+                                      MemOp memop, TCGType addr_type)    \
+ {                                                                       \
+     tcg_debug_assert(addr_type == tcg_ctx->addr_type);                  \
++    t2_mark_atomic();                                                   \
+     tcg_debug_assert((memop & MO_SIZE) <= MO_64);                       \
+     if (tcg_ctx->gen_tb->cflags & CF_PARALLEL) {                        \
+         do_atomic_op_i64(ret, addr, val, idx, memop, table_##NAME);     \

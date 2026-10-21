@@ -1,19 +1,19 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 VERHILLE Arnaud
-# t2dev.sh ÉTIQUETTE [PROPS_CPU_EN_PLUS] — une partie de Marble Blast (job tcgmb) sur la VM de
-# DÉVELOPPEMENT, PC Linux, toutes les options de production de run_tiger.sh (Linux x86-64) plus
+# t2dev.sh ÉTIQUETTE [PROPS_CPU_EN_PLUS] — le banc t2bench (scène gltest d3inter : plugin,
+# GLEngine, kext) sur la VM de DÉVELOPPEMENT en single-user, PC Linux, toutes les options de production de run_tiger.sh (Linux x86-64) plus
 # PROPS_CPU_EN_PLUS (p. ex. x-tier2=4096), pour le traducteur de second niveau
 # (docs/plan-traducteur-rapide.md). Jamais la VM quotidienne.
 #
 #   DEVDISK=~/src/pomppc/disks/tiger-dev-plugin.raw QEMU_BIN=~/src/qemu-t2/build/qemu-system-ppc \
 #       tools/tcg/t2dev.sh t2a x-tier2=4096
 #
-# Variables : PERF=S (perf record de S s du QEMU, après la chauffe ; -perfmap posé), PERFAT=S
-# (secondes après le début du job, défaut 150), PLUGIN=… (greffon TCG), QEXTRA=… (arguments
-# QEMU), DUR (défaut 120), WARM (défaut 1), NPASS (défaut 1).
+# Variables : PERF=S (perf record de S s du QEMU ; -perfmap posé), PERFAT=S (secondes après le
+# début du job, défaut 240), PLUGIN=… (greffon TCG), QEXTRA=… (arguments QEMU), FR (images par
+# passe, défaut 150), REPS (passes, défaut 3).
 # Sorties : bench/tcg/t2/<ÉTIQUETTE>/ (dépôt principal) : qemu.log (stderr : bilans x-tier2),
-# mb-*.txt (bilans POMPPC_GL_STATS, tools/tcg/mbpair.py), perf.data + perf-<pid>.map, run.log.
+# job.log (lignes « passe k … s md5 … »), perf.data + perf-<pid>.map, run.log.
 set -u
 WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 R="$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')"
@@ -44,30 +44,28 @@ echo "=== $TAG : ${EXTRA:-(rien de plus)} $(date +%H:%M:%S) ; QEMU $QB" | tee "$
 uptime >> "$OUT/run.log"
 DEVDISK="$DISK" QEMU_BIN="$QB" SMP=2 CPU_OPTS="$CPU${EXTRA:+,$EXTRA}" TCG_OPTS="$TCG" \
   EGL_PLATFORM=device QEMU_EXTRA="$QX" \
-  python3 tools/guest/devloop.py start --gui 2>&1 | tail -3 | tee -a "$OUT/run.log"
+  python3 tools/guest/devloop.py start 2>&1 | tail -3 | tee -a "$OUT/run.log"
 PID=$(cat bench/devloop/qemu.pid)
 J="$OUT/job"; rm -rf "$J"
-sh tools/guest/jobs/stage.sh tcgmb "$J" > /dev/null && rm -rf "$J/src"
-printf 'TAG=%s\nNPASS=%s\nDUR=%s\nWARM=%s\n' "$TAG" "${NPASS:-1}" "${DUR:-120}" "${WARM:-1}" > "$J/env.sh"
+sh tools/guest/jobs/stage.sh t2bench "$J" > /dev/null
+printf 'FR=%s\nREPS=%s\n' "${FR:-150}" "${REPS:-3}" > "$J/env.sh"
 if [ -n "${PERF:-}" ]; then
-  ( sleep "${PERFAT:-150}"; perf record -F 999 -p "$PID" -o "$OUT/perf.data" -- sleep "$PERF" \
+  ( sleep "${PERFAT:-240}"; perf record -F 999 -p "$PID" -o "$OUT/perf.data" -- sleep "$PERF" \
       > "$OUT/perf.log" 2>&1 ) &
 fi
-DEVDISK="$DISK" python3 tools/guest/devloop.py run "$J" --timeout $(( 700 + ${NPASS:-1} * (${DUR:-120} + 120) )) \
+DEVDISK="$DISK" python3 tools/guest/devloop.py run "$J" --timeout "${TIMEOUT:-2400}" \
   > "$OUT/job.log" 2>&1
 echo "job : code $?" | tee -a "$OUT/run.log"
 wait
 cp -f "/tmp/perf-$PID.map" "$OUT/" 2>/dev/null
 d=$(sed -n 's/^→ //p' "$OUT/job.log" | tail -1)
-[ -n "$d" ] && [ -d "$d" ] && cp -f "$d"/mb-*.txt "$d"/*.log "$OUT/" 2>/dev/null
-DEVDISK="$DISK" python3 tools/guest/devloop.py shutdown --gui >> "$OUT/run.log" 2>&1
+[ -n "$d" ] && [ -d "$d" ] && cp -rf "$d" "$OUT/out" 2>/dev/null
+DEVDISK="$DISK" python3 tools/guest/devloop.py shutdown >> "$OUT/run.log" 2>&1
 for i in $(seq 1 60); do kill -0 "$PID" 2>/dev/null || break; sleep 2; done
 if kill -0 "$PID" 2>/dev/null; then
-  echo "⚠ QEMU encore vivant après shutdown --gui : devloop.py stop" | tee -a "$OUT/run.log"
+  echo "⚠ QEMU encore vivant après shutdown : devloop.py stop" | tee -a "$OUT/run.log"
   DEVDISK="$DISK" python3 tools/guest/devloop.py stop >> "$OUT/run.log" 2>&1
 fi
 cp -f bench/devloop/qemu.log "$OUT/qemu.log" 2>/dev/null
 grep -a 'x-tier2' "$OUT/qemu.log" | tee -a "$OUT/run.log"
-for f in "$OUT"/mb-*.txt; do
-  [ -f "$f" ] && echo "$(basename "$f") : $(grep -c fps "$f") fenêtres" | tee -a "$OUT/run.log"
-done
+grep -a '^passe' "$OUT/job.log" | tee -a "$OUT/run.log"
