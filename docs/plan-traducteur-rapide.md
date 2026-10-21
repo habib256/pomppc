@@ -1,6 +1,6 @@
 # Plan — un traducteur PowerPC beaucoup plus optimisé (second niveau de TCG)
 
-État : **plan**, rédigé le 25/09/2026, **mis de côté par l'utilisateur (« on essaiera plus tard »)**. Rien n'est commencé. Point de départ :
+État : rédigé le 25/09/2026, mis de côté, **relancé le 21/10/2026** : phase 0 (mesures, §8) et phase 1 (traces sans compilateur, §9). Point de départ :
 `docs/tcg-g4.md` (relevés, profils, patches `x-sr-tlb` et flottants).
 
 ---

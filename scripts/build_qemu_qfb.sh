@@ -32,6 +32,7 @@
 #   • TLB invalidé avec précision, lmw/stmw et dcbz en ligne — patches/tcg/0031, 0032, 0035
 #   • tlb_reset_dirty sans parcours inutile, PTEG par pointeur, compteurs de ratés, cache de sauts à 2 voies — patches/tcg/0040-0043
 #   • flottant simple : opérandes connus, FPRF paresseux, stfs court — patches/tcg/0045-0047
+#   • second niveau sans compilateur : traces d'une page (x-tier2) — patches/tcg/0048
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -1023,6 +1024,28 @@ target/ppc/excp_helper.c ppc_fprf_flush
 tcg/x86_64/tcg-target.c.inc PFP_L
 target/ppc/translate/fp-impl.c.inc gen_stfs_known
 TCG45_MARKERS
+  # --- tcg/0048 : second niveau sans compilateur (x-tier2), docs/plan-traducteur-rapide.md ---
+  # Un TB exécuté N fois est retraduit, avec les TB chaînés les plus chauds de sa page qui le
+  # suivent, en une seule « trace » (accel/tcg/cpu-exec.c t2_form, branchements du chemin
+  # continués par target/ppc/translate.c) ; x-tier2-verify=N rejoue une entrée sur N contre
+  # ses TB (journal des accès). Code commun + frontal PowerPC : rien dans les émetteurs.
+  # Propriétés éteintes par défaut.
+  if ! grep -q "x-tier2" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : second niveau sans compilateur (x-tier2)"
+    patch_strict "$ROOT/patches/tcg/0048-tcg-tier2.patch"
+  fi
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0048 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG48_MARKERS'
+accel/tcg/cpu-exec.c t2_form
+accel/tcg/cpu-exec.c t2_verify
+accel/tcg/translator.c translator_t2_continue
+accel/tcg/tb-maint.c T2_TRACE
+tcg/tcg-op-ldst.c t2_mark_atomic
+target/ppc/translate.c t2_gen_bc
+target/ppc/cpu_init.c ppc_t2_regs
+TCG48_MARKERS
 fi
 
 # --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---
@@ -1272,6 +1295,7 @@ check_opt x-vfp-native   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-v
 check_opt x-lmw-vector   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-lmw-vector=on
 check_opt x-jc-word      qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jc-word=on
 check_opt x-fp-native-cmp qemu_cpu_has_prop "${BIN}64"    "mac99,via=pmu" g4 x-fp-native-cmp=on
+check_opt x-tier2        qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-tier2=4096
 check_opt x-vfp-native-cmp qemu_cpu_has_prop "${BIN}64"   "mac99,via=pmu" g4 x-vfp-native-cmp=on
 check_opt x-tlb-precise  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-tlb-precise=on
 check_opt x-lmw-inline   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-lmw-inline=on
