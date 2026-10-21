@@ -1,0 +1,3853 @@
+POMPPC tcg/0049 (x-tier3) : régions compilées par LLVM — ESSAI de la phase 2 du second
+niveau (docs/plan-traducteur-rapide.md §10). Éteint par défaut (x-tier3=0).
+
+Là où x-tier2 (tcg/0048) formerait une trace, x-tier3=N forme une région de TB chauds
+(boucles, plusieurs pages, retours des appels de la région), en capture les ops TCG
+(tcg/tier3-capture.c.inc), la compile en une fonction par LLVM ORC dans un fil à part
+(tcg/tier3.c : registres invités gardés d'un TB à l'autre, rangés aux sorties, chemin rapide
+du TLB en ligne, accès invités volatils) et l'installe derrière un TB d'entrée
+(accel/tcg/tier3-exec.c.inc, translator.c gen_t3_stub). x-tier2-verify vérifie aussi les
+régions (copie journalisée de la région, rejeu des TB d'origine). Invalidation : liens vers
+les TB des blocs et le TB d'entrée, code comparé à l'installation, tb_flush. Seuil x-tier2 lu
+comme un débit (compteurs remis à zéro chaque seconde avec x-tier3).
+
+Change aussi 0048 : compteurs d'exécution hors du TranslationBlock (table par vCPU,
+CPUState.t2_ctrs ; +80 % sur t2bench quand le compteur était à côté du code), journal du
+vérificateur sur la taille de l'accès seule, PMC5 non comparé.
+
+LLVM est optionnel (tcg/meson.build : llvm-config ; sans lui tier3-stub.c, rien ne compile).
+Aucun émetteur touché ; non construit sur arm64.
+
+Variables (essais) : POMPPC_T3_SYNC (compilation dans le vCPU), POMPPC_T3_ANY (régions sans
+boucle), POMPPC_T3_STATS (couverture, sorties), POMPPC_T3_LOG, POMPPC_T3_DUMP (IR dans /tmp),
+POMPPC_T3_PASSES, POMPPC_T3_MUTANT=1/2 (preuves), POMPPC_T3_NOFORM / NOINSTALL / NOEPOCH
+(bras de contrôle).
+
+diff -ruN a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -511,8 +511,8 @@
+         rv_found_stat(kind);
+     }
+ #endif
+-    if (unlikely(cpu->t2_verify) && tb->t2_state == T2_TRACE) {
+-        return tb;      /* POMPPC tcg/0048: never in the jump cache */
++    if (unlikely(cpu->t2_verify) && tb->t2_state >= T2_TRACE) {
++        return tb;      /* POMPPC tcg/0048, 0049: never in the jump cache */
+     }
+ 
+     tb_jmp_cache_fill(cpu, jc, hash, s.pc, tb);
+@@ -660,8 +660,8 @@
+     if (tb == NULL) {
+         return tcg_code_gen_epilogue;
+     }
+-    if (unlikely(cpu->t2_verify) && tb->t2_state == T2_TRACE) {
+-        return tcg_code_gen_epilogue;   /* POMPPC tcg/0048 */
++    if (unlikely(cpu->t2_verify) && tb->t2_state >= T2_TRACE) {
++        return tcg_code_gen_epilogue;   /* POMPPC tcg/0048, 0049 */
+     }
+ 
+     if (qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC)) {
+@@ -758,7 +758,7 @@
+  * chained to nor put in the jump cache in this mode, so that every entry
+  * goes through the main loop.
+  */
+-#define T2_LOG_MAX 4096
++#define T2_LOG_MAX 16384   /* POMPPC tcg/0049: regions loop (was 4096) */
+ typedef struct T2Log {
+     uint32_t n, pos;
+     bool overflow, unverif, diverged;
+@@ -1057,7 +1057,7 @@
+         TranslationBlock *nx;
+         int slot, i;
+ 
+-        if (d0 && (!d1 || d0->t2_count >= d1->t2_count)) {
++        if (d0 && (!d1 || tb_t2_count(cpu, d0) >= tb_t2_count(cpu, d1))) {
+             nx = d0;
+             slot = 0;
+         } else if (d1) {
+@@ -1165,6 +1165,8 @@
+ #endif
+ }
+ 
++#include "tier3-exec.c.inc"         /* POMPPC tcg/0049 */
++
+ /* Return the current PC from CPU, which may be cached in TB. */
+ static vaddr log_pc(CPUState *cpu, const TranslationBlock *tb)
+ {
+@@ -1275,6 +1277,9 @@
+     /* Non-buggy compilers preserve this; assert the correct value. */
+     g_assert(cpu == current_cpu);
+     cpu->t2_path = NULL;        /* POMPPC tcg/0048: a trace cut short */
++    cpu->t3_active = false;     /* POMPPC tcg/0049 */
++    cpu->t3_install = NULL;
++    t3_capture_set(NULL);
+     if (cpu->t2_vrun) {
+         /*
+          * x-tier2-verify: an exception in the logged run of a trace is
+@@ -1741,8 +1746,23 @@
+                 break;
+             }
+ 
++            if (unlikely(cpu->t3_kill)) {
++                t3_kill_stub(cpu);      /* POMPPC tcg/0049 */
++                last_tb = NULL;
++            }
++            if (unlikely(cpu->t3_max)) {
++                t3_epoch();             /* POMPPC tcg/0049 */
++                if (unlikely(qatomic_read(&cpu->t3_ready))) {
++                    t3_install_ready(cpu);
++                    last_tb = NULL;
++                }
++            }
+             if (unlikely(cpu->t2_pending)) {
+-                t2_form(cpu);           /* POMPPC tcg/0048 */
++                if (cpu->t3_max) {
++                    t3_form(cpu);       /* POMPPC tcg/0049 */
++                } else {
++                    t2_form(cpu);       /* POMPPC tcg/0048 */
++                }
+                 last_tb = NULL;
+             }
+ 
+@@ -1786,6 +1806,13 @@
+                     continue;
+                 }
+             }
++            if (unlikely(cpu->t2_verify) && tb->t2_state == T3_STUB) {
++                last_tb = NULL;         /* POMPPC tcg/0049 */
++                if (++cpu->t2_vcount % cpu->t2_verify == 0 &&
++                    t3_verify(cpu, s, tb)) {
++                    continue;
++                }
++            }
+ 
+             /* See if we can patch the calling TB. */
+             if (last_tb) {
+@@ -1819,6 +1846,10 @@
+ 
+     /* replay_interrupt may need current_cpu */
+     current_cpu = cpu;
++    /* POMPPC tcg/0049: this vCPU's x-tier2 counters, before any TB runs */
++    if (unlikely(cpu->t2_thresh && !cpu->t2_ctrs)) {
++        cpu->t2_ctrs = g_new0(uint32_t, T2_NCTR);
++    }
+ 
+     if (cpu_handle_halt(cpu)) {
+         return EXCP_HALTED;
+diff -ruN a/accel/tcg/internal-common.h b/accel/tcg/internal-common.h
+--- a/accel/tcg/internal-common.h
++++ b/accel/tcg/internal-common.h
+@@ -59,6 +59,9 @@
+         t2_foreign_access(cpu);
+     }
+ }
++/* POMPPC tcg/0049 (x-tier3): a TB of a region goes, all TBs go */
++void t3_tb_invalidated(TranslationBlock *tb);
++void t3_flush(void);
+ void page_init(void);
+ void tb_htable_init(void);
+ void tb_reset_jump(TranslationBlock *tb, int n);
+diff -ruN a/accel/tcg/tb-maint.c b/accel/tcg/tb-maint.c
+--- a/accel/tcg/tb-maint.c
++++ b/accel/tcg/tb-maint.c
+@@ -810,6 +810,7 @@
+         tcg_flush_jmp_cache(cpu);
+         cpu->t2_pending = NULL;         /* POMPPC tcg/0048 */
+     }
++    t3_flush();                         /* POMPPC tcg/0049 */
+ 
+     qht_reset_size(&tb_ctx.htable, CODE_GEN_HTABLE_SIZE);
+     tb_remove_all();
+@@ -966,6 +967,9 @@
+     qemu_spin_lock(&tb->jmp_lock);
+     qatomic_set(&tb->cflags, tb->cflags | CF_INVALID);
+     qemu_spin_unlock(&tb->jmp_lock);
++    if (unlikely(tb->t3_link)) {
++        t3_tb_invalidated(tb);          /* POMPPC tcg/0049 */
++    }
+ 
+     /* remove the TB from the hash list */
+     phys_pc = tb_page_addr0(tb);
+diff -ruN a/accel/tcg/tcg-runtime.h b/accel/tcg/tcg-runtime.h
+--- a/accel/tcg/tcg-runtime.h
++++ b/accel/tcg/tcg-runtime.h
+@@ -27,6 +27,7 @@
+ DEF_HELPER_FLAGS_4(t2_rst, TCG_CALL_NO_RWG, void, env, i64, i64, i32)
+ DEF_HELPER_FLAGS_1(t2_unverif, TCG_CALL_NO_RWG, void, env)
+ DEF_HELPER_FLAGS_2(t2_rmark, TCG_CALL_NO_RWG, void, env, i64)
++DEF_HELPER_FLAGS_2(t3_run, 0, cptr, env, ptr)
+ DEF_HELPER_FLAGS_2(lookup_tb_ptr_check, TCG_CALL_NO_WG_SE, cptr, env, ptr)
+ 
+ DEF_HELPER_FLAGS_1(exit_atomic, TCG_CALL_NO_WG, noreturn, env)
+diff -ruN a/accel/tcg/tier3-exec.c.inc b/accel/tcg/tier3-exec.c.inc
+--- a/accel/tcg/tier3-exec.c.inc
++++ b/accel/tcg/tier3-exec.c.inc
+@@ -0,0 +1,935 @@
++/*
++ * POMPPC tcg/0049 (x-tier3=N): compiled regions, formed where x-tier2
++ * would form a trace (docs/plan-traducteur-rapide.md section 10).
++ * Included by cpu-exec.c.
++ *
++ * t3_form(): from the hot TB, the region grows breadth first along the
++ * exits seen in the captured ops (constant nip of a goto_tb or of a lookup,
++ * same page or not) and the returns of its calls (constant link register),
++ * through TBs that exist, are hot (count >= x-tier2 / 16), stay in one
++ * page each and whose ops can all be compiled; at most T3_MAX_BLOCKS TBs,
++ * 1024 instructions, 8 pages.  The region is compiled (tcg/tier3.c), then
++ * the hot TB is replaced by an entry TB (translator.c, gen_t3_stub) that
++ * calls it.
++ *
++ * Invalidation: the region is linked to the tier-1 TB of each of its
++ * blocks and to its entry TB; when one of them is invalidated (its code
++ * changed, tb_flush) the region is dead: its entry TB and its back edges
++ * see it and leave.  At install the guest code of every block is compared
++ * with the bytes it was compiled from (after the links are made, so that
++ * any later change kills the region).  Cross-page edges check at run time
++ * that the virtual page still maps the same host page (code TLB entry).
++ */
++#include "tcg/tier3.h"
++#include "accel/tcg/probe.h"
++
++typedef struct T3Link {
++    T3Region *r;
++    struct T3Link *next, *all;
++} T3Link;
++
++static QemuSpin t3_spin;
++static T3Link *t3_links_all;
++static T3Region *t3_regions;
++static unsigned t3_nreg, t3_ndead;
++static double t3_t0;                    /* first request (s) */
++static int64_t t3_epoch_next;           /* next reset of the TB counters */
++
++/*
++ * x-tier3: hotness is a rate.  Every second the execution counts of all TBs
++ * are cleared, so that x-tier2 = N means "N executions within one second":
++ * only the code hot NOW forms regions, not the code that added up to N
++ * executions since the boot.
++ */
++static uint64_t t3_tier1_insns;        /* (POMPPC_T3_STATS) counted so far */
++
++static gboolean t3_reset_tb(gpointer key, gpointer value, gpointer data)
++{
++    TranslationBlock *tb = value;
++
++    if (tb->t2_state != T3_STUB) {
++        CPUState *c;
++        CPU_FOREACH(c) {
++            t3_tier1_insns += (uint64_t)tb_t2_count(c, tb) * tb->icount;
++        }
++    }
++    return FALSE;
++}
++
++static void t3_epoch(void)
++{
++    static int noepoch = -1;
++    int64_t now;
++
++    if (noepoch < 0) {
++        noepoch = getenv("POMPPC_T3_NOEPOCH") != NULL;
++    }
++    if (noepoch) {
++        return;
++    }
++    now = get_clock();
++
++    if (now >= qatomic_read(&t3_epoch_next)) {
++        CPUState *c;
++
++        qatomic_set(&t3_epoch_next, now + NANOSECONDS_PER_SECOND);
++        if (getenv("POMPPC_T3_STATS")) {
++            tcg_tb_foreach(t3_reset_tb, NULL);   /* tier-1 count, then clear */
++        }
++        CPU_FOREACH(c) {
++            if (c->t2_ctrs) {
++                memset(c->t2_ctrs, 0, T2_NCTR * sizeof(uint32_t));
++            }
++        }
++    }
++}
++
++static void t3_kill(T3Region *r)
++{
++    if (!qatomic_xchg(&r->dead, 1)) {
++        qatomic_inc(&t3_ndead);
++    }
++}
++
++enum {
++    T3S_ASK, T3S_FORM, T3S_BLOCKS, T3S_INSNS, T3S_FULL, T3S_DROP, T3S_FAIL,
++    T3S_DEAD0, T3S_SMALL, T3S_PAGES, T3S_CODE, T3S_EXC,
++    T3S_BADSTUB, T3S_BADCODE, T3S_BADTB, T3S_INVAL, T3S_FLUSHK, T3S_MEMBER,
++    T3S_N
++};
++static uint64_t t3_g[T3S_N];
++static double t3_ms_total, t3_ms_max;
++static bool t3_atexit_done;
++
++#define T3_NREJ 32
++static struct { const char *why; uint64_t n; } t3_rej[T3_NREJ];
++
++static void t3_reject(const char *why)
++{
++    qemu_spin_lock(&t3_spin);
++    for (int i = 0; i < T3_NREJ; i++) {
++        if (!t3_rej[i].why || !strcmp(t3_rej[i].why, why)) {
++            t3_rej[i].why = why;
++            t3_rej[i].n++;
++            break;
++        }
++    }
++    qemu_spin_unlock(&t3_spin);
++}
++
++static gboolean t3_sum_tb(gpointer key, gpointer value, gpointer data)
++{
++    const TranslationBlock *tb = value;
++    uint64_t *sum = data;
++
++    if (tb->t2_state != T3_STUB) {
++        CPUState *c;
++        CPU_FOREACH(c) {
++            sum[0] += (uint64_t)tb_t2_count(c, tb) * tb->icount;
++        }
++    }
++    return FALSE;
++}
++
++static void t3_report(void)
++{
++    uint64_t entries = 0, insns = 0, dead = 0, code = 0, nb = 0;
++
++    if (!t3_g[T3S_ASK]) {
++        return;
++    }
++    for (T3Region *r = t3_regions; r; r = r->next) {
++        entries += r->entries;
++        insns += r->insns;
++        dead += r->dead;
++        code += r->code_size;
++        nb++;
++    }
++    fprintf(stderr, "x-tier3 : %" PRIu64 " demandes, %" PRIu64 " régions "
++            "(%" PRIu64 " blocs, %" PRIu64 " instructions invité, %" PRIu64
++            " pages hors tête), %" PRIu64 " écartées, %" PRIu64
++            " échecs de compilation, %" PRIu64 " sans boucle, budget plein %"
++            PRIu64 ", %" PRIu64 " mortes (dont %" PRIu64 " à l'installation)\n",
++            t3_g[T3S_ASK], t3_g[T3S_FORM], t3_g[T3S_BLOCKS], t3_g[T3S_INSNS],
++            t3_g[T3S_PAGES], t3_g[T3S_DROP], t3_g[T3S_FAIL], t3_g[T3S_SMALL],
++            t3_g[T3S_FULL], dead, t3_g[T3S_DEAD0]);
++    fprintf(stderr, "x-tier3 : morts à l'installation : TB d'entrée %" PRIu64
++            ", code changé %" PRIu64 ", TB invalidé %" PRIu64 " ; après : TB "
++            "invalidé %" PRIu64 " ; têtes déjà dans une région : %" PRIu64 "\n",
++            t3_g[T3S_BADSTUB], t3_g[T3S_BADCODE], t3_g[T3S_BADTB],
++            t3_g[T3S_INVAL], t3_g[T3S_MEMBER]);
++    fprintf(stderr, "x-tier3 : compilation %.1f ms au total, %.2f ms en "
++            "moyenne, %.1f ms au plus ; %" PRIu64 " octets de code ; %" PRIu64
++            " entrées dans les régions\n", t3_ms_total,
++            t3_g[T3S_FORM] ? t3_ms_total / t3_g[T3S_FORM] : 0.0, t3_ms_max,
++            code, entries);
++    if (insns) {
++        uint64_t sum[1] = { 0 };
++
++        tcg_tb_foreach(t3_sum_tb, sum);
++        sum[0] += t3_tier1_insns;
++        fprintf(stderr, "x-tier3 : couverture %" PRIu64 " instructions dans "
++                "les régions, %" PRIu64 " hors régions (TB comptés) : %.1f %%\n",
++                insns, sum[0], 100.0 * insns / (insns + sum[0]));
++    }
++    if (getenv("POMPPC_T3_STATS")) {
++        static const char *xn[T3X_N] = {
++            "boucle principale", "demande de sortie (tête de TB)",
++            "arête arrière (sortie demandée, région morte)", "page changée",
++            "branchement direct hors région", "branchement calculé",
++            "retour prédit manqué", "goto_ptr",
++        };
++        uint64_t tot = 0;
++        for (int k = 0; k < T3X_N; k++) {
++            tot += t3_exit_stats[k];
++        }
++        for (int k = 0; k < T3X_N; k++) {
++            fprintf(stderr, "x-tier3 : sorties %-46s %12" PRIu64 " (%.1f %%)\n",
++                    xn[k], t3_exit_stats[k],
++                    tot ? 100.0 * t3_exit_stats[k] / tot : 0.0);
++        }
++    }
++    if (getenv("POMPPC_T3_STATS")) {
++        /* the 20 regions with the most entries */
++        T3Region **v = g_new(T3Region *, nb ? nb : 1);
++        int n = 0;
++
++        for (T3Region *r = t3_regions; r; r = r->next) {
++            v[n++] = r;
++        }
++        for (int i = 0; i < n && i < 20; i++) {
++            int best = i;
++            for (int j = i + 1; j < n; j++) {
++                if (v[j]->entries > v[best]->entries) {
++                    best = j;
++                }
++            }
++            T3Region *t = v[best];
++            v[best] = v[i];
++            v[i] = t;
++            fprintf(stderr, "x-tier3 : #%d région %u 0x%" PRIx64 " %d blocs "
++                    "%" PRIu64 " entrées %" PRIu64 " instr. (%.1f par entrée)%s\n",
++                    i, t->id, t->pc, t->nb, t->entries, t->insns,
++                    t->entries ? (double)t->insns / t->entries : 0.0,
++                    t->dead ? " morte" : "");
++        }
++        g_free(v);
++    }
++    for (int i = 0; i < T3_NREJ && t3_rej[i].why; i++) {
++        fprintf(stderr, "x-tier3 : bloc écarté (%s) : %" PRIu64 "\n",
++                t3_rej[i].why, t3_rej[i].n);
++    }
++}
++
++static void t3_link_tb(TranslationBlock *tb, T3Region *r)
++{
++    T3Link *l = g_new(T3Link, 1);
++
++    l->r = r;
++    qemu_spin_lock(&t3_spin);
++    l->next = tb->t3_link;
++    tb->t3_link = l;
++    l->all = t3_links_all;
++    t3_links_all = l;
++    qemu_spin_unlock(&t3_spin);
++}
++
++void t3_tb_invalidated(TranslationBlock *tb)
++{
++    qemu_spin_lock(&t3_spin);
++    for (T3Link *l = tb->t3_link; l; l = l->next) {
++        if (!l->r->dead) {
++            static int nlog;
++            qatomic_add(&t3_g[T3S_INVAL], 1);
++            if (getenv("POMPPC_T3_LOG") && qatomic_fetch_inc(&nlog) < 40) {
++                fprintf(stderr, "x-tier3 : région %u 0x%" PRIx64 " morte : TB 0x%"
++                        VADDR_PRIx " (page 0x%" PRIx64 ") invalidé%s\n", l->r->id,
++                        l->r->pc, tb->pc, (uint64_t)tb_page_addr0(tb),
++                        tb == l->r->stub ? " (TB d'entrée)" : "");
++            }
++        }
++        t3_kill(l->r);
++    }
++    tb->t3_link = NULL;
++    qemu_spin_unlock(&t3_spin);
++}
++
++/* tb_flush: exclusive, every TB goes */
++void t3_flush(void)
++{
++    T3Link *l, *n;
++
++    qemu_spin_lock(&t3_spin);
++    for (T3Region *r = t3_regions; r; r = r->next) {
++        t3_kill(r);
++        r->stub = NULL;
++        for (int i = 0; i < r->nb; i++) {
++            r->tb[i] = NULL;
++        }
++        if (r->xcache) {
++            memset(r->xcache, 0, sizeof(void *) * T3_XCACHE);
++        }
++    }
++    for (l = t3_links_all; l; l = n) {
++        n = l->all;
++        g_free(l);
++    }
++    t3_links_all = NULL;
++    qemu_spin_unlock(&t3_spin);
++}
++
++const void *HELPER(t3_run)(CPUArchState *env, void *pr)
++{
++    T3Region *r = pr;
++    CPUState *cpu = env_cpu(env);
++    const void *p;
++
++    if (unlikely(qatomic_read(&r->dead))) {
++        /* the main loop throws its entry TB away: a new TB can get hot */
++        if (!cpu->t3_kill) {
++            cpu->t3_kill = r;
++            qatomic_set(&cpu->neg.icount_decr.u16.high, -1);
++        }
++        return NULL;
++    }
++    r->entries++;
++    cpu->t3_active = true;
++    p = r->fn(env);
++    cpu->t3_active = false;
++    return p;
++}
++
++static void t3_kill_stub(CPUState *cpu)
++{
++    T3Region *r = cpu->t3_kill;
++    TranslationBlock *stub;
++
++    cpu->t3_kill = NULL;
++    qemu_spin_lock(&t3_spin);
++    stub = r->stub;
++    r->stub = NULL;
++    qemu_spin_unlock(&t3_spin);
++    if (stub && stub->t3_region == r && !(tb_cflags(stub) & CF_INVALID)) {
++        mmap_lock();
++        tb_phys_invalidate(stub, -1);
++        mmap_unlock();
++    }
++}
++
++/*
++ * A direct exit of a region to a TB of the same page (as goto_tb chains):
++ * as helper_lookup_tb_ptr, and the TB is kept in *slot, which the region
++ * checks next time (same pc, same cflags: not invalid) instead of a lookup.
++ */
++const void *t3_chain(void *penv, void **slot)
++{
++    CPUArchState *env = penv;
++    CPUState *cpu = env_cpu(env);
++    TranslationBlock *tb;
++    TCGTBCPUState s;
++
++    cpu->neg.can_do_io = true;
++    s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
++    s.cflags = curr_cflags(cpu);
++    if (check_for_breakpoints(cpu, s.pc, &s.cflags)) {
++        cpu_loop_exit(cpu);
++    }
++    tb = tb_lookup(cpu, s, 1);
++    if (tb == NULL) {
++        return tcg_code_gen_epilogue;
++    }
++    if (unlikely(cpu->t2_verify) && tb->t2_state >= T2_TRACE) {
++        return tcg_code_gen_epilogue;
++    }
++    if (s.cflags == curr_cflags(cpu)) {
++        qatomic_set(slot, tb);
++    }
++    return tb->tc.ptr;
++}
++
++/* the guest code of a block, copied at capture (install check) */
++typedef struct T3Code {
++    uint8_t *host;
++    uint8_t *copy;
++    uint32_t size;
++} T3Code;
++
++static TranslationBlock *t3_capture_tb(CPUState *cpu, TCGTBCPUState s,
++                                       T3Block *b)
++{
++    TranslationBlock *ct;
++
++    s.cflags |= CF_T3_CAP;
++    mmap_lock();
++    t3_capture_set(b);
++    ct = tb_gen_code(cpu, s);
++    t3_capture_set(NULL);
++    if (ct) {
++        tb_phys_invalidate(ct, -1);
++    }
++    mmap_unlock();
++    return ct;
++}
++
++static void t3_region_free(T3Region *r, T3Code *code)
++{
++    for (int i = 0; i < r->nb; i++) {
++        t3_block_free(r->b[i]);
++        g_free(code[i].copy);
++    }
++    g_free(r->xcache);
++    g_free(r);
++}
++
++/* does the region loop (a cycle among its blocks)? */
++static bool t3_has_cycle(T3Region *r)
++{
++    uint64_t reach[T3_MAX_BLOCKS] = { 0 };   /* reach[k]: successors of k */
++    bool changed = true;
++
++    for (int k = 0; k < r->nb; k++) {
++        T3Block *b = r->b[k];
++        for (int j = 0; j < r->nb; j++) {
++            for (int i = 0; i < b->nexit; i++) {
++                if (b->exit_pc[i] == r->b[j]->pc) {
++                    reach[k] |= 1ull << j;
++                }
++            }
++            if (b->indirect && r->ret_target[j]) {
++                reach[k] |= 1ull << j;
++            }
++        }
++    }
++    while (changed) {
++        changed = false;
++        for (int k = 0; k < r->nb; k++) {
++            uint64_t n = reach[k];
++            for (int j = 0; j < r->nb; j++) {
++                if (reach[k] >> j & 1) {
++                    n |= reach[j];
++                }
++            }
++            changed |= n != reach[k];
++            reach[k] = n;
++        }
++    }
++    for (int k = 0; k < r->nb; k++) {
++        if (reach[k] >> k & 1) {
++            return true;
++        }
++    }
++    return false;
++}
++
++/*
++ * The compile thread: regions formed by the vCPUs are compiled here, so that
++ * a vCPU never waits for LLVM; the vCPU that formed a region installs it
++ * (t3_install_ready, from its main loop).
++ */
++static QemuMutex t3_qlock;
++static QemuCond t3_qcond;
++static T3Region *t3_qhead, **t3_qtail = &t3_qhead;
++static int t3_qlen;
++static bool t3_thread_started;
++static QemuThread t3_thread;
++
++static void t3_region_free2(T3Region *r)
++{
++    T3Code *code = r->priv;
++
++    for (int i = 0; i < r->nb; i++) {
++        t3_block_free(r->b[i]);
++        if (code) {
++            g_free(code[i].copy);
++        }
++    }
++    g_free(code);
++    g_free(r->xcache);
++    g_free(r);
++}
++
++static void *t3_compile_thread(void *arg)
++{
++    rcu_register_thread();
++    for (;;) {
++        T3Region *r;
++        CPUState *cpu;
++
++        qemu_mutex_lock(&t3_qlock);
++        while (!t3_qhead) {
++            qemu_cond_wait(&t3_qcond, &t3_qlock);
++        }
++        r = t3_qhead;
++        t3_qhead = r->qnext;
++        if (!t3_qhead) {
++            t3_qtail = &t3_qhead;
++        }
++        t3_qlen--;
++        qemu_mutex_unlock(&t3_qlock);
++
++        r->compiled = t3_compile(r, r->with_log, r->why, sizeof(r->why));
++        cpu = r->cpu;
++        qemu_spin_lock(&t3_spin);
++        r->qnext = cpu->t3_ready;
++        cpu->t3_ready = r;
++        qemu_spin_unlock(&t3_spin);
++        qatomic_set(&cpu->neg.icount_decr.u16.high, -1);
++    }
++    return NULL;
++}
++
++static void t3_queue_push(T3Region *r)
++{
++    qemu_mutex_lock(&t3_qlock);
++    if (!t3_thread_started) {
++        t3_thread_started = true;
++        qemu_cond_init(&t3_qcond);
++        qemu_thread_create(&t3_thread, "t3-llvm", t3_compile_thread, NULL,
++                           QEMU_THREAD_DETACHED);
++    }
++    if (t3_qlen >= 16) {
++        /* LLVM behind: forget this one, its TB stays asked (no new request) */
++        qemu_mutex_unlock(&t3_qlock);
++        qatomic_add(&t3_g[T3S_DROP], 1);
++        t3_region_free2(r);
++        return;
++    }
++    r->qnext = NULL;
++    *t3_qtail = r;
++    t3_qtail = &r->qnext;
++    t3_qlen++;
++    qemu_cond_signal(&t3_qcond);
++    qemu_mutex_unlock(&t3_qlock);
++}
++
++/*
++ * Install a compiled region (vCPU thread): links first, then the entry TB,
++ * then the code check.  The vCPU must be in the context the region was
++ * formed in (TB flags, same physical page for its head): if not, later.
++ */
++static bool t3_install(CPUState *cpu, T3Region *r)
++{
++    TranslationBlock *a = r->head, *stub;
++    T3Code *code = r->priv;
++    TCGTBCPUState s;
++    bool bad;
++
++    if (!r->compiled) {
++        static int nfail;
++        qatomic_add(&t3_g[T3S_FAIL], 1);
++        if (qatomic_fetch_inc(&nfail) < 10) {
++            fprintf(stderr, "x-tier3 : région 0x%" PRIx64 " non compilée : %s\n",
++                    r->pc, r->why);
++        }
++        t3_region_free2(r);
++        return true;
++    }
++    if (qatomic_read(&tb_ctx.tb_flush_count) != r->flush_count ||
++        (tb_cflags(a) & CF_INVALID) || qatomic_read(&a->t3_link) ||
++        qatomic_read(&t3_nreg) - qatomic_read(&t3_ndead) >= cpu->t3_max) {
++        qatomic_add(&t3_g[T3S_DROP], 1);
++        t3_region_free2(r);
++        return true;
++    }
++    s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
++    {
++        CPUTLBEntryFull *full;
++        void *ph = NULL;
++
++        if (s.flags == r->flags) {
++            /* (never fault here: probe the head page first) */
++            probe_access_full(cpu_env(cpu), r->pc, 1, MMU_INST_FETCH,
++                              r->code_mmu_idx, true, &ph, &full, 0);
++        }
++        if (!ph) {
++            s.flags = ~r->flags;        /* not now */
++        }
++    }
++    if (s.flags != r->flags || s.cs_base != r->cs_base ||
++        curr_cflags(cpu) != r->cflags ||
++        get_page_addr_code(cpu_env(cpu), r->pc) != tb_page_addr0(a)) {
++        if (++r->tries > 100000) {
++            qatomic_add(&t3_g[T3S_DROP], 1);
++            t3_region_free2(r);
++            return true;
++        }
++        return false;           /* another context: try again later */
++    }
++    t3_ms_total += r->compile_ms;
++    t3_ms_max = MAX(t3_ms_max, r->compile_ms);
++    if (getenv("POMPPC_T3_NOINSTALL")) {
++        /* control: everything but the installation */
++        qatomic_add(&t3_g[T3S_DROP], 1);
++        t3_region_free2(r);
++        return true;
++    }
++
++    for (int k = 1; k < r->nb; k++) {
++        t3_link_tb(r->tb[k], r);
++    }
++    mmap_lock();
++    tb_phys_invalidate(a, -1);
++    cpu->t3_install = r;
++    s.pc = r->pc;
++    s.cflags = r->cflags;
++    stub = tb_gen_code(cpu, s);
++    cpu->t3_install = NULL;
++    mmap_unlock();
++    bad = !stub || stub->t2_state != T3_STUB || stub->t3_region != r;
++    if (bad) {
++        qatomic_add(&t3_g[T3S_BADSTUB], 1);
++    }
++    if (!bad) {
++        t3_link_tb(stub, r);
++        r->stub = stub;
++    }
++    for (int k = 0; k < r->nb; k++) {
++        if (memcmp(code[k].host, code[k].copy, code[k].size) != 0) {
++            qatomic_add(&t3_g[T3S_BADCODE], 1);
++            bad = true;
++        }
++        if (k > 0 && (tb_cflags((TranslationBlock *)r->tb[k]) & CF_INVALID)) {
++            qatomic_add(&t3_g[T3S_BADTB], 1);
++            bad = true;
++        }
++        g_free(code[k].copy);
++        code[k].copy = NULL;
++    }
++    g_free(code);
++    r->priv = NULL;
++    if (bad) {
++        t3_kill(r);
++        qatomic_add(&t3_g[T3S_DEAD0], 1);
++    }
++    r->id = qatomic_fetch_inc(&t3_nreg);
++    qemu_spin_lock(&t3_spin);
++    r->next = t3_regions;
++    t3_regions = r;
++    qemu_spin_unlock(&t3_spin);
++    qatomic_add(&t3_g[T3S_FORM], 1);
++    qatomic_add(&t3_g[T3S_BLOCKS], r->nb);
++    qatomic_add(&t3_g[T3S_INSNS], r->ninsns);
++    qatomic_add(&t3_g[T3S_PAGES], r->npages - 1);
++    if (getenv("POMPPC_T3_LOG")) {
++        fprintf(stderr, "x-tier3 : région %u 0x%" PRIx64 " : %d blocs, %d "
++                "instructions, %d pages, %.2f ms, %zu octets, à %.1f s\n", r->id,
++                r->pc, r->nb, r->ninsns, r->npages, r->compile_ms, r->code_size,
++                get_clock_realtime() / 1e9 - t3_t0);
++        if (atoi(getenv("POMPPC_T3_LOG")) > 1) {
++            for (int k = 0; k < r->nb; k++) {
++                fprintf(stderr, "   bloc %d 0x%" PRIx64 " %u instr.%s\n", k,
++                        r->b[k]->pc, r->b[k]->icount,
++                        r->ret_target[k] ? " (retour)" : "");
++            }
++        }
++    }
++    return true;
++}
++
++static void t3_install_ready(CPUState *cpu)
++{
++    T3Region *list, *r, *keep = NULL;
++
++    qemu_spin_lock(&t3_spin);
++    list = cpu->t3_ready;
++    cpu->t3_ready = NULL;
++    qemu_spin_unlock(&t3_spin);
++    while ((r = list)) {
++        list = r->qnext;
++        if (!t3_install(cpu, r)) {
++            r->qnext = keep;
++            keep = r;
++        }
++    }
++    if (keep) {
++        qemu_spin_lock(&t3_spin);
++        for (r = keep; r->qnext; r = r->qnext) {
++        }
++        r->qnext = cpu->t3_ready;
++        cpu->t3_ready = keep;
++        qemu_spin_unlock(&t3_spin);
++    }
++}
++
++static void t3_form(CPUState *cpu)
++{
++#ifndef CONFIG_USER_ONLY
++    TranslationBlock *a = cpu->t2_pending;
++    CPUArchState *env = cpu_env(cpu);
++    TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
++    T3Code code[T3_MAX_BLOCKS];
++    T3Region *r;
++    uint32_t min_count = MAX(cpu->t2_thresh / 16, 1);
++    int insns = 0, npages = 1;
++    uint64_t pages[8];
++    cpu->t2_pending = NULL;
++    qatomic_add(&t3_g[T3S_ASK], 1);
++    if (!t3_t0) {
++        t3_t0 = get_clock_realtime() / 1e9;
++    }
++    if (getenv("POMPPC_T3_NOFORM")) {
++        return;                 /* control: counters and epochs only */
++    }
++    if (!qatomic_xchg(&t3_atexit_done, true)) {
++        atexit(t3_report);
++    }
++    /* x-tier3=N: at most N live regions */
++    if (qatomic_read(&t3_nreg) - qatomic_read(&t3_ndead) >= cpu->t3_max) {
++        qatomic_add(&t3_g[T3S_FULL], 1);
++        return;
++    }
++    s.cflags = curr_cflags(cpu);
++    /*
++     * A TB that is a block of a live region does not become the head of
++     * another: installing it would invalidate the TB, i.e. kill the region
++     * it belongs to (regions killing each other in turn).
++     */
++    if (qatomic_read(&a->t3_link)) {
++        qatomic_add(&t3_g[T3S_MEMBER], 1);
++        return;
++    }
++    if ((tb_cflags(a) & CF_INVALID) || a->flags != s.flags ||
++        a->cs_base != s.cs_base || tb_cflags(a) != s.cflags ||
++        (tb_cflags(a) & CF_PCREL) || tb_page_addr1(a) != -1 ||
++        get_page_addr_code(env, a->pc) != tb_page_addr0(a)) {
++        qatomic_add(&t3_g[T3S_DROP], 1);
++        return;
++    }
++    r = g_new0(T3Region, 1);
++    r->pc = a->pc;
++    r->flags = s.flags;
++    r->cflags = s.cflags;
++    r->cs_base = s.cs_base;
++    r->code_mmu_idx = cpu_mmu_index(cpu, true);
++    r->addr_type = tcg_ctx->addr_type;
++    r->xcache = g_new0(void *, T3_XCACHE);
++    pages[0] = a->pc & TARGET_PAGE_MASK;
++
++    /* breadth first from the hot TB */
++    for (int q = -1; q < r->nb; q++) {
++        uint64_t cand[16];
++        bool is_ret[16];
++        int nc = 0;
++
++        if (q < 0) {
++            cand[nc] = a->pc;
++            is_ret[nc++] = false;
++        } else {
++            T3Block *qb = r->b[q];
++            for (int i = 0; i < qb->nexit && nc < 16; i++) {
++                cand[nc] = qb->exit_pc[i];
++                is_ret[nc++] = false;
++            }
++            for (int i = 0; i < qb->nlr && nc < 16; i++) {
++                cand[nc] = qb->lr_pc[i];
++                is_ret[nc++] = true;
++            }
++        }
++        for (int c = 0; c < nc && r->nb < T3_MAX_BLOCKS; c++) {
++            TCGTBCPUState sc = s;
++            TranslationBlock *t, *ct;
++            T3Block *b;
++            void *host;
++            uint64_t page = cand[c] & TARGET_PAGE_MASK;
++            int k, p;
++
++            for (k = 0; k < r->nb && r->b[k]->pc != cand[c]; k++) {
++            }
++            if (k < r->nb) {
++                if (is_ret[c]) {
++                    r->ret_target[k] = true;
++                }
++                continue;
++            }
++            sc.pc = cand[c];
++            t = q < 0 ? a : tb_htable_lookup(cpu, sc);
++            if (!t || (tb_cflags(t) & CF_INVALID) || tb_page_addr1(t) != -1 ||
++                t->t2_state == T2_TRACE || t->t2_state == T3_STUB ||
++                (q >= 0 && tb_t2_count(cpu, t) < min_count) ||
++                insns + t->icount > 1024) {
++                continue;
++            }
++            for (p = 0; p < npages && pages[p] != page; p++) {
++            }
++            if (p == npages && npages == 8) {
++                continue;
++            }
++            {
++                /* never fault here: probe first (the page may be unmapped) */
++                CPUTLBEntryFull *full;
++                void *ph = NULL;
++
++                probe_access_full(env, cand[c], 1, MMU_INST_FETCH,
++                                  r->code_mmu_idx, true, &ph, &full, 0);
++                if (!ph || get_page_addr_code_hostp(env, cand[c], &host) !=
++                    tb_page_addr0(t) || !host) {
++                    continue;
++                }
++            }
++            b = g_new0(T3Block, 1);
++            ct = t3_capture_tb(cpu, sc, b);
++            if (!b->reject && (!ct || b->icount != t->icount ||
++                               b->pc != cand[c])) {
++                b->reject = "capture différente du TB";
++            }
++            if (b->reject) {
++                t3_reject(b->reject);
++                t3_block_free(b);
++                if (q < 0) {
++                    g_free(r->xcache);
++                    g_free(r);
++                    return;
++                }
++                continue;
++            }
++            if (p == npages) {
++                pages[npages++] = page;
++            }
++            k = r->nb++;
++            r->b[k] = b;
++            r->tb[k] = t;
++            r->page[k] = page;
++            r->addend[k] = (uintptr_t)host - cand[c];
++            r->ret_target[k] = is_ret[c];
++            code[k].host = host;
++            code[k].size = t->size;
++            code[k].copy = g_memdup2(host, t->size);
++            insns += t->icount;
++        }
++    }
++    /*
++     * A region pays an entry (helper call, guest registers loaded) and an
++     * exit (registers stored, next TB looked up): it gains only if it runs
++     * long, i.e. if it loops.  POMPPC_T3_ANY=1 takes any region.
++     */
++    if (!t3_has_cycle(r) && !getenv("POMPPC_T3_ANY")) {
++        qatomic_add(&t3_g[T3S_SMALL], 1);
++        t3_region_free(r, code);
++        return;
++    }
++
++    r->priv = g_memdup2(code, sizeof(T3Code) * r->nb);
++    r->head = a;
++    r->cpu = cpu;
++    r->flush_count = qatomic_read(&tb_ctx.tb_flush_count);
++    r->ninsns = insns;
++    r->npages = npages;
++    r->with_log = cpu->t2_verify != 0;
++    if (getenv("POMPPC_T3_SYNC")) {
++        /* compile here, in the vCPU thread (the vCPU waits) */
++        r->compiled = t3_compile(r, r->with_log, r->why, sizeof(r->why));
++        t3_install(cpu, r);
++    } else {
++        t3_queue_push(r);
++    }
++#endif
++}
++
++/* x-tier2-verify on a region: its logged copy, then its TBs replayed */
++#define T3_REPLAY_MAX 4096
++
++static bool t3_verify(CPUState *cpu, TCGTBCPUState s, TranslationBlock *stub)
++{
++#ifndef CONFIG_USER_ONLY
++    T3Region *r = stub->t3_region;
++    T2Log *l = cpu->t2_log;
++    vaddr end_pc;
++    char why[160];
++    int steps;
++    static int nreport;
++    vaddr rpc[8];
++
++    if (!cpu->t2_regs || !r || !r->fn_log || qatomic_read(&r->dead)) {
++        return false;
++    }
++    if (!l) {
++        l = cpu->t2_log = g_new0(T2Log, 1);
++        l->e0 = g_malloc0(cpu->t2_regs_size);
++        l->e1 = g_malloc0(cpu->t2_regs_size);
++    }
++    qatomic_add(&t2_g[T2S_VRUN], 1);
++    cpu->t2_regs(cpu, l->e0, 0, NULL, 0);
++    l->n = l->pos = 0;
++    l->overflow = l->unverif = l->diverged = false;
++    cpu->t2_vrun = 1;                   /* an exception here is real */
++    cpu->t3_active = true;
++    r->entries++;
++    r->fn_log(cpu_env(cpu));
++    cpu->t3_active = false;
++    cpu->t2_vrun = 0;
++    end_pc = cpu->cc->tcg_ops->get_tb_cpu_state(cpu).pc;
++    cpu->t2_regs(cpu, l->e1, 0, NULL, 0);
++    if (l->overflow || l->unverif) {
++        qatomic_add(&t2_g[T2S_VSKIP], 1);
++        return true;
++    }
++
++    cpu->t2_regs(cpu, l->e0, 1, NULL, 0);
++    l->pos = 0;
++    for (steps = 0; steps < T3_REPLAY_MAX; steps++) {
++        TCGTBCPUState sr = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
++        TranslationBlock *rt;
++
++        if (steps && l->pos == l->n && sr.pc == end_pc) {
++            break;
++        }
++        if (steps < 8) {
++            rpc[steps] = sr.pc;
++        }
++        if (sr.flags != s.flags || l->diverged) {
++            t2_diverge(l, "contexte changé", sr.pc, 0, 0);
++            break;
++        }
++        sr.cflags = curr_cflags(cpu) | CF_T2_REPLAY | T2_VFLAGS;
++        rt = tb_htable_lookup(cpu, sr);
++        if (!rt) {
++            mmap_lock();
++            rt = tb_gen_code(cpu, sr);
++            mmap_unlock();
++        }
++        cpu->t2_vrun = 2;
++        t2_exec_one(cpu, rt);
++        cpu->t2_vrun = 0;
++    }
++    if (!l->diverged && steps == T3_REPLAY_MAX) {
++        t2_diverge(l, "pas de fin", end_pc, 0, 0);
++    }
++    if (!l->diverged && l->pos != l->n) {
++        t2_diverge(l, "accès manquants", 0, 0, 0);
++    }
++    qatomic_add(&t2_g[T2S_VACC], l->pos);
++    if (!l->diverged && cpu->t2_regs(cpu, l->e1, 2, why, sizeof(why))) {
++        l->diverged = true;
++        snprintf(l->why, sizeof(l->why), "registres : %s", why);
++    }
++    if (l->diverged) {
++        qatomic_add(&t2_g[T2S_VBAD], 1);
++        if (qatomic_fetch_inc(&nreport) < 30) {
++            fprintf(stderr, "x-tier3-verify : DIVERGENCE région %u 0x%" PRIx64
++                    " (%d blocs, sortie 0x%" VADDR_PRIx ") : %s ; blocs",
++                    r->id, r->pc, r->nb, end_pc, l->why);
++            for (int k = 0; k < steps && k < 8; k++) {
++                fprintf(stderr, " 0x%" VADDR_PRIx, rpc[k]);
++            }
++            fprintf(stderr, " ; journal");
++            for (uint32_t k = 0; k < l->n && k < 24; k++) {
++                fprintf(stderr, " %c%" PRIx64, l->e[k].memop == T2_MARK ? '>' :
++                        l->e[k].st ? 'w' : 'r', l->e[k].addr);
++            }
++            fprintf(stderr, "\n");
++        }
++    } else {
++        qatomic_add(&t2_g[T2S_VOK], 1);
++    }
++    cpu->t2_regs(cpu, l->e1, 1, NULL, 0);      /* the real state */
++    return true;
++#else
++    return false;
++#endif
++}
++
++static void __attribute__((constructor)) t3_exec_init(void)
++{
++    qemu_spin_init(&t3_spin);
++    qemu_mutex_init(&t3_qlock);
++}
+diff -ruN a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -212,6 +212,17 @@
+             return true;
+         }
+     }
++    /*
++     * POMPPC tcg/0049 (x-tier3): a helper called by a compiled region (not
++     * in the TCG buffer); the region stored the guest pc of the calling
++     * instruction in t3_pc, the rest of env is up to date as for TCG.
++     */
++    if (cpu->t3_active && host_pc) {
++        uint64_t data[INSN_START_WORDS] = { cpu->t3_pc };
++
++        cpu->cc->tcg_ops->restore_state_to_opc(cpu, NULL, data);
++        return true;
++    }
+     return false;
+ }
+ 
+@@ -257,6 +268,32 @@
+     return tcg_gen_code(tcg_ctx, tb, pc);
+ }
+ 
++/*
++ * POMPPC tcg/0049: the execution counters of x-tier2 (gen_t2_counter): an
++ * index into a table of each vCPU (CPUState.t2_ctrs), reused round robin.
++ * A counter in the TranslationBlock, next to its code, cost +80 % on
++ * t2bench (a store near code: the host's self-modifying-code check clears
++ * its pipeline), one table shared by the vCPUs +32 % (the lines of the hot
++ * TBs bounced between their caches).
++ */
++static unsigned t2_nctr;
++
++static uint32_t t2_ctr_alloc(void)
++{
++    CPUState *c;
++    uint32_t i;
++
++    do {
++        i = qatomic_fetch_inc(&t2_nctr) & (T2_NCTR - 1);
++    } while (!i);
++    CPU_FOREACH(c) {
++        if (c->t2_ctrs) {
++            qatomic_set(&c->t2_ctrs[i], 0);
++        }
++    }
++    return i;
++}
++
+ /* Called with mmap_lock held for user mode emulation.  */
+ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
+ {
+@@ -309,8 +346,10 @@
+     tb->cs_base = s.cs_base;
+     tb->flags = s.flags;
+     tb->cflags = s.cflags;
+-    tb->t2_count = 0;           /* POMPPC tcg/0048 */
++    tb->t2_idx = cpu->t2_thresh ? t2_ctr_alloc() : 0;       /* tcg/0048-0049 */
+     tb->t2_state = T2_NONE;
++    tb->t3_link = NULL;         /* POMPPC tcg/0049 */
++    tb->t3_region = NULL;
+     tb_set_page_addr0(tb, phys_pc);
+     tb_set_page_addr1(tb, -1);
+     if (phys_pc != -1) {
+diff -ruN a/accel/tcg/translator.c b/accel/tcg/translator.c
+--- a/accel/tcg/translator.c
++++ b/accel/tcg/translator.c
+@@ -120,21 +120,46 @@
+     TCGLabel *skip;
+ 
+     if (!cpu->t2_thresh || db->t2_path || db->plugin_enabled ||
++        cpu->t3_install || (cflags & CF_T3_CAP) ||     /* tcg/0049 */
+         (cflags & (CF_COUNT_MASK | CF_SINGLE_STEP | CF_USE_ICOUNT |
+                    CF_NO_GOTO_TB | CF_NOIRQ | CF_MEMI_ONLY))) {
+         return;
+     }
+-    p = tcg_constant_ptr(&tb->t2_count);
++    if (!tb->t2_idx) {
++        return;
++    }
++    /* tcg/0049: this vCPU's table, away from the TB */
++    p = tcg_temp_new_ptr();
++    tcg_gen_ld_ptr(p, tcg_env, offsetof(CPUState, t2_ctrs) - sizeof(CPUState));
+     c = tcg_temp_new_i32();
+     skip = gen_new_label();
+-    tcg_gen_ld_i32(c, p, 0);
++    tcg_gen_ld_i32(c, p, tb->t2_idx * 4);
+     tcg_gen_addi_i32(c, c, 1);
+-    tcg_gen_st_i32(c, p, 0);
++    tcg_gen_st_i32(c, p, tb->t2_idx * 4);
+     tcg_gen_brcondi_i32(TCG_COND_NE, c, cpu->t2_thresh, skip);
+     gen_helper_t2_hot(tcg_env, tcg_constant_ptr(tb));
+     gen_set_label(skip);
+ }
+ 
++/*
++ * POMPPC tcg/0049 (x-tier3): the entry TB of a compiled region.  It calls
++ * the region (helper_t3_run) and jumps where the region left; a region
++ * thrown away (code changed) returns NULL and the TB goes on as the plain
++ * translation that follows.
++ */
++static void gen_t3_stub(DisasContextBase *db, CPUState *cpu)
++{
++    TCGv_ptr p = tcg_temp_new_ptr();
++    TCGLabel *body = gen_new_label();
++
++    db->tb->t2_state = T3_STUB;
++    db->tb->t3_region = cpu->t3_install;
++    gen_helper_t3_run(p, tcg_env, tcg_constant_ptr(cpu->t3_install));
++    tcg_gen_brcondi_ptr(TCG_COND_EQ, p, 0, body);
++    tcg_gen_goto_ptr(p);
++    gen_set_label(body);
++}
++
+ bool translator_t2_continue(DisasContextBase *db, vaddr end, vaddr dest,
+                             int slot)
+ {
+@@ -226,6 +251,9 @@
+     plugin_enabled = plugin_gen_tb_start(cpu, db);
+     db->plugin_enabled = plugin_enabled;
+     gen_t2_counter(db, cpu, cflags);     /* POMPPC tcg/0048 */
++    if (cpu->t3_install) {
++        gen_t3_stub(db, cpu);           /* POMPPC tcg/0049 */
++    }
+     if (tcg_ctx->t2_mode == 2) {
+         gen_helper_t2_rmark(tcg_env, tcg_constant_i64(pc));
+     }
+diff -ruN a/include/exec/translation-block.h b/include/exec/translation-block.h
+--- a/include/exec/translation-block.h
++++ b/include/exec/translation-block.h
+@@ -87,6 +87,7 @@
+ #define CF_STEP_ATOMIC   0x00080000 /* Running in cpu_exec_step_atomic */
+ #define CF_T2_LOG        0x00100000 /* POMPPC tcg/0048: verify, log accesses */
+ #define CF_T2_REPLAY     0x00200000 /* POMPPC tcg/0048: verify, replay them */
++#define CF_T3_CAP        0x00400000 /* POMPPC tcg/0049: ops captured for a region */
+ #define CF_CLUSTER_MASK  0xff000000 /* Top 8 bits are cluster ID */
+ #define CF_CLUSTER_SHIFT 24
+ 
+@@ -105,11 +106,22 @@
+      * is a trace: several TBs of one page concatenated along their hottest
+      * path).  A trace covers its whole page for invalidation.
+      */
+-    uint32_t t2_count;
++    /*
++     * POMPPC tcg/0049: the counter lives away from the TB, in a table of
++     * each vCPU (CPUState.t2_ctrs[t2_idx], see translate-all.c): a store
++     * next to translated code made the host clear its pipeline (self-
++     * modifying code), and one counter shared by the vCPUs bounced between
++     * their caches: +80 % then +32 % on t2bench.  t2_idx 0: not counted.
++     */
++    uint32_t t2_idx;
+     uint8_t t2_state;
+ #define T2_NONE  0
+ #define T2_ASKED 1
+ #define T2_TRACE 2
++#define T3_STUB  3   /* POMPPC tcg/0049: enters a compiled region */
++    /* POMPPC tcg/0049 (x-tier3): the regions this TB belongs to */
++    struct T3Link *t3_link;
++    void *t3_region;            /* T3_STUB: its region */
+ 
+     struct tb_tc tc;
+ 
+@@ -235,4 +247,13 @@
+                                   tb_page_addr_t last);
+ #endif
+ 
++/* POMPPC tcg/0048-0049: executions counted for x-tier2 (0 if none) */
++#define T2_NCTR (1u << 20)
++static inline uint32_t tb_t2_count(const CPUState *cpu,
++                                   const TranslationBlock *tb)
++{
++    return tb->t2_idx && cpu->t2_ctrs ? qatomic_read(&cpu->t2_ctrs[tb->t2_idx])
++                                      : 0;
++}
++
+ #endif /* EXEC_TRANSLATION_BLOCK_H */
+diff -ruN a/include/hw/core/cpu.h b/include/hw/core/cpu.h
+--- a/include/hw/core/cpu.h
++++ b/include/hw/core/cpu.h
+@@ -608,6 +608,21 @@
+     bool (*t2_regs)(struct CPUState *cs, void *buf, int op, char *why,
+                     size_t whylen);
+     size_t t2_regs_size;
++    /*
++     * POMPPC tcg/0049 (x-tier3=N, docs/plan-traducteur-rapide.md section 10):
++     * at most N compiled regions (0 = off), formed where x-tier2 would form
++     * a trace.  t3_install: the region whose entry TB the translator is
++     * generating; t3_pc: guest pc of the instruction of a region that calls
++     * a helper or a slow path (cpu_restore_state, region code is not in the
++     * TCG buffer); t3_active: region code is running.
++     */
++    uint32_t t3_max;
++    uint32_t *t2_ctrs;          /* this vCPU's execution counters (x-tier2) */
++    void *t3_install;
++    uint64_t t3_pc;
++    bool t3_active;
++    void *t3_kill;              /* a dead region whose entry TB must go */
++    void *t3_ready;             /* regions compiled, to install (list) */
+ 
+     GArray *gdb_regs;
+     int gdb_num_regs;
+diff -ruN a/include/tcg/perf.h b/include/tcg/perf.h
+--- a/include/tcg/perf.h
++++ b/include/tcg/perf.h
+@@ -16,6 +16,8 @@
+ 
+ /* Add information about TCG prologue to profiler maps. */
+ void perf_report_prologue(const void *start, size_t size);
++/* POMPPC tcg/0049: a named range (compiled region). */
++void perf_report_named(const void *start, size_t size, const char *name);
+ 
+ /* Add information about JITted guest code to profiler maps. */
+ void perf_report_code(uint64_t guest_pc, TranslationBlock *tb,
+@@ -36,6 +38,11 @@
+ {
+ }
+ 
++static inline void perf_report_named(const void *start, size_t size,
++                                     const char *name)
++{
++}
++
+ static inline void perf_report_code(uint64_t guest_pc, TranslationBlock *tb,
+                                     const void *start)
+ {
+diff -ruN a/include/tcg/tier3.h b/include/tcg/tier3.h
+--- a/include/tcg/tier3.h
++++ b/include/tcg/tier3.h
+@@ -0,0 +1,145 @@
++/*
++ * POMPPC tcg/0049 (x-tier3): compiled regions, the second level of the
++ * fast translator (docs/plan-traducteur-rapide.md, section 10).
++ *
++ * A region is a set of hot TBs linked by their hot exits (direct branches,
++ * same page or not, and returns of the calls it contains).  The TCG ops of
++ * each TB, exactly as TCG would translate them, are captured (tcg.c,
++ * t3_capture) into a small copy that outlives the translation, then the
++ * whole region is compiled by LLVM (tcg/tier3.c) into ONE host function,
++ * where the TB exits that lead to another TB of the region become plain
++ * branches: the guest registers stay in host registers from one TB to the
++ * next and are written back to env at the region exits, before the helpers
++ * that read them and on the slow path of the memory accesses only.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#ifndef TCG_TIER3_H
++#define TCG_TIER3_H
++
++/* the kind of a captured argument */
++enum {
++    T3A_TEMP,           /* EBB or TB temp: idx */
++    T3A_GLOBAL,         /* env-based global: idx, v = offset in env */
++    T3A_CONST,          /* constant: v */
++    T3A_ENV,            /* the env pointer (TEMP_FIXED) */
++    T3A_RAW,            /* constant argument of the op: v */
++    T3A_LABEL,          /* label: idx = label id */
++};
++
++typedef struct T3Arg {
++    int64_t v;
++    uint32_t idx;
++    uint8_t kind;
++    uint8_t type;       /* TCGType of a temp */
++} T3Arg;
++
++typedef struct T3Op {
++    uint16_t opc;
++    uint8_t p1, p2;     /* param1/param2 of the TCGOp */
++    uint8_t nargs;
++    uint8_t align;      /* qemu_ld/st: alignment bits of the fast path */
++    uint8_t headcheck;  /* the ld of icount_decr made by gen_tb_start */
++    uint32_t a;         /* first argument in T3Block.args */
++    uint64_t pc;        /* guest pc of the instruction (last insn_start) */
++} T3Op;
++
++#define T3_MAX_GLOBALS 256
++
++typedef struct T3Block {
++    uint64_t pc;
++    uint32_t icount;
++    int nops, nargs, nlabels;
++    T3Op *ops;
++    T3Arg *args;
++    const char *reject;         /* non-NULL: cannot be compiled, why */
++    /* direct exits seen at capture (constant nip at an exit) */
++    int nexit;
++    uint64_t exit_pc[8];
++    /* constants written to the link register (bl): candidate returns */
++    int nlr;
++    uint64_t lr_pc[4];
++    bool indirect;              /* an exit with a computed nip */
++} T3Block;
++
++/* globals seen by the captures: type and offset in env, by index */
++typedef struct T3Global {
++    intptr_t ofs;
++    uint8_t type;
++    bool known;
++} T3Global;
++extern T3Global t3_globals[T3_MAX_GLOBALS];
++
++/*
++ * What the target tells the region compiler (set at CPU realize):
++ * offsets in env of the pc (PowerPC nip), the link register and the TB
++ * flags (hflags), the TCG global index of nip and lr.
++ */
++typedef struct T3Target {
++    intptr_t pc_ofs, lr_ofs, flags_ofs;
++    int pc_size;                /* 4 or 8 */
++} T3Target;
++extern T3Target t3_target;
++
++#define T3_MAX_BLOCKS 64
++
++typedef struct T3Region {
++    uint64_t pc;
++    uint32_t flags, cflags;
++    uint64_t cs_base;
++    int nb;
++    T3Block *b[T3_MAX_BLOCKS];
++    void *tb[T3_MAX_BLOCKS];        /* the tier-1 TBs (TranslationBlock *) */
++    uint64_t page[T3_MAX_BLOCKS];   /* virtual page of block i */
++    uintptr_t addend[T3_MAX_BLOCKS];/* host - virtual address of that page */
++    bool ret_target[T3_MAX_BLOCKS]; /* reached by a predicted return */
++    int code_mmu_idx;
++    int addr_type;                  /* TCGType of guest addresses */
++    int dead;                       /* set when a TB of the region goes */
++    void *stub;                     /* TranslationBlock that enters it */
++    const void *(*fn)(void *env);
++    const void *(*fn_log)(void *env);   /* x-tier2-verify copy */
++    void **xcache;                  /* direct exits: TB last seen (chaining) */
++    int nxcache;
++    /* formation → (compile thread) → install */
++    void *priv;                     /* T3Code[]: code copies (install check) */
++    void *head;                     /* the hot TB the region replaces */
++    void *cpu;                      /* the vCPU that formed it, installs it */
++    unsigned flush_count;           /* tb_flush count at formation */
++    int ninsns, npages, tries;
++    bool with_log, compiled;
++    char why[160];
++    struct T3Region *qnext;
++    uint64_t insns;                 /* guest instructions run in it (stats) */
++    uint64_t entries;
++    unsigned id;
++    size_t code_size;
++    double compile_ms;
++    struct T3Region *next;
++} T3Region;
++
++/* region exits by kind (POMPPC_T3_STATS) */
++enum {
++    T3X_MAIN,       /* exit_tb 0: back to the main loop */
++    T3X_REQ,        /* head check of a TB (exit request) */
++    T3X_CHK,        /* back edge: exit request or region dead */
++    T3X_PAGE,       /* cross-page edge: the page maps elsewhere */
++    T3X_DIRECT,     /* direct branch out of the region */
++    T3X_INDIRECT,   /* computed branch (blr, bctr), no prediction */
++    T3X_RETMISS,    /* computed branch, predicted returns missed */
++    T3X_GOTOPTR,    /* other goto_ptr */
++    T3X_N
++};
++extern uint64_t t3_exit_stats[T3X_N];
++
++/* accel/tcg: a direct exit of a region, TB looked up and kept in *slot */
++const void *t3_chain(void *env, void **slot);
++#define T3_XCACHE 256
++
++/* tcg/tier3.c */
++bool t3_compile(T3Region *r, bool with_log, char *why, size_t whylen);
++void t3_block_free(T3Block *b);
++/* tcg.c: capture of the next translation into *b (NULL: none) */
++void t3_capture_set(T3Block *b);
++
++#endif
+diff -ruN a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -20,6 +20,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "tcg/tier3.h"            /* POMPPC tcg/0049 */
+ #include "disas/dis-asm.h"
+ #include "gdbstub/helpers.h"
+ #include "system/cpus.h"
+@@ -265,6 +266,14 @@
+     DEFINE_PROP_UINT32("x-tier2", PowerPCCPU, parent_obj.t2_thresh, 0),
+     DEFINE_PROP_UINT32("x-tier2-tbs", PowerPCCPU, parent_obj.t2_maxtb, 16),
+     DEFINE_PROP_UINT32("x-tier2-verify", PowerPCCPU, parent_obj.t2_verify, 0),
++    /*
++     * POMPPC tcg/0049.  x-tier3=N: where x-tier2 would form a trace, form
++     * instead a region of hot TBs (several pages, loops, returns) compiled
++     * by LLVM into one host function, at most N regions (tcg/tier3.c,
++     * docs/plan-traducteur-rapide.md section 10).  x-tier2-verify checks
++     * them.  Off (0) by default; needs x-tier2 (the threshold).
++     */
++    DEFINE_PROP_UINT32("x-tier3", PowerPCCPU, parent_obj.t3_max, 0),
+     DEFINE_PROP_BOOL("x-pteg-map", PowerPCCPU, env.pteg_map, false),
+     DEFINE_PROP_BOOL("x-pteg-map-verify", PowerPCCPU, env.pteg_map_verify,
+                      false),
+@@ -7319,6 +7328,15 @@
+         return true;
+     }
+     for (i = 0; i < 1024; i++) {
++        /*
++         * POMPPC tcg/0049: PMC5 (ppc64 builds) counts the instructions of a
++         * TB that ends in a lookup only under CF_NO_GOTO_PTR, which the
++         * replay uses and the TBs do not (target/ppc/translate.c,
++         * pmu_count_insns): not comparable.
++         */
++        if (i == SPR_POWER_PMC5) {
++            continue;
++        }
+         if (r->spr[i] != env->spr[i]) {
+             snprintf(why, whylen, "spr %d trace 0x" TARGET_FMT_lx " blocs 0x"
+                      TARGET_FMT_lx, i, r->spr[i], env->spr[i]);
+@@ -7361,6 +7379,10 @@
+ 
+     cpu_exec_realizefn(cs, &local_err);
+     cs->t2_regs = ppc_t2_regs;          /* POMPPC tcg/0048 */
++    t3_target.pc_ofs = offsetof(CPUPPCState, nip);     /* POMPPC tcg/0049 */
++    t3_target.lr_ofs = offsetof(CPUPPCState, lr);
++    t3_target.flags_ofs = offsetof(CPUPPCState, hflags);
++    t3_target.pc_size = sizeof(target_ulong);
+     cs->t2_regs_size = sizeof(PPCT2Regs);
+     if (local_err != NULL) {
+         error_propagate(errp, local_err);
+diff -ruN a/target/ppc/translate.c b/target/ppc/translate.c
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -6927,7 +6927,9 @@
+     ctx->fprf_maybe = true;
+     fpr_novsr = ctx->fprf_lazy && !(ctx->insns_flags2 & PPC2_VSX);
+     ctx->stfs_known = env->stfs_known && ctx->fp_known;
+-    ctx->ret_inline = env->ret_inline;
++    /* tcg/0049: a region capture wants the plain lookup at indirect exits */
++    ctx->ret_inline = env->ret_inline &&
++                      !(tb_cflags(ctx->base.tb) & CF_T3_CAP);
+     ctx->ret_verify = cs->ret_verify;
+     ctx->t2_nexit = 0;          /* tcg/0048 */
+     ctx->t2_slots = 0;
+diff -ruN a/tcg/meson.build b/tcg/meson.build
+--- a/tcg/meson.build
++++ b/tcg/meson.build
+@@ -29,3 +29,20 @@
+ 
+ user_ss.add_all(tcg_ss)
+ system_ss.add_all(tcg_ss)
++
++# POMPPC tcg/0049 (x-tier3): the region compiler needs LLVM (C API, ORC);
++# without llvm-config the property is there but no region compiles.
++llvm_t3_cfg = find_program('llvm-config', 'llvm-config-21', 'llvm-config-20',
++                           'llvm-config-19', 'llvm-config-18',
++                           '/opt/homebrew/opt/llvm/bin/llvm-config',
++                           required: false)
++if llvm_t3_cfg.found()
++  llvm_t3 = declare_dependency(
++    compile_args: run_command(llvm_t3_cfg, '--cflags',
++                              check: true).stdout().split(),
++    link_args: run_command(llvm_t3_cfg, '--ldflags', '--libs',
++                           check: true).stdout().split())
++  system_ss.add(llvm_t3, files('tier3.c'))
++else
++  system_ss.add(files('tier3-stub.c'))
++endif
+diff -ruN a/tcg/perf.c b/tcg/perf.c
+--- a/tcg/perf.c
++++ b/tcg/perf.c
+@@ -233,6 +233,15 @@
+     fwrite(&header, sizeof(header), 1, jitdump);
+ }
+ 
++/* POMPPC tcg/0049: code of a compiled region (x-tier3) */
++void perf_report_named(const void *start, size_t size, const char *name)
++{
++    if (perfmap) {
++        fprintf(perfmap, "%"PRIxPTR" %zx %s\n", (uintptr_t)start, size, name);
++        fflush(perfmap);
++    }
++}
++
+ void perf_report_prologue(const void *start, size_t size)
+ {
+     if (perfmap) {
+diff -ruN a/tcg/tcg.c b/tcg/tcg.c
+--- a/tcg/tcg.c
++++ b/tcg/tcg.c
+@@ -6634,6 +6634,8 @@
+     tcg_out_helper_load_common_args(s, ldst, parm, info, next_arg);
+ }
+ 
++#include "tier3-capture.c.inc"     /* POMPPC tcg/0049 */
++
+ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
+ {
+     int i, num_insns;
+@@ -6673,6 +6675,9 @@
+     tcg_optimize(s);
+ 
+     reachable_code_pass(s);
++    if (unlikely(t3_cap)) {
++        t3_capture(s, t3_cap);          /* POMPPC tcg/0049 */
++    }
+     liveness_pass_0(s);
+     liveness_pass_1(s);
+ 
+diff -ruN a/tcg/tcg-op-ldst.c b/tcg/tcg-op-ldst.c
+--- a/tcg/tcg-op-ldst.c
++++ b/tcg/tcg-op-ldst.c
+@@ -263,7 +263,8 @@
+ 
+ static void t2_log(TCGv_i64 a, TCGv_i64 v, uint32_t memop, int st)
+ {
+-    gen_helper_t2_log(tcg_env, a, v, tcg_constant_i32(memop),
++    /* POMPPC tcg/0049: the size only (a region logs the canonical memop) */
++    gen_helper_t2_log(tcg_env, a, v, tcg_constant_i32(memop & (MO_SIZE | T2_HI)),
+                       tcg_constant_i32(st));
+ }
+ 
+@@ -328,7 +329,7 @@
+         TCGv_i64 a = t2_addr64(addr), v = tcg_temp_ebb_new_i64();
+ 
+         if (tcg_ctx->t2_mode == 2) {
+-            gen_helper_t2_rld(v, tcg_env, a, tcg_constant_i32(memop));
++            gen_helper_t2_rld(v, tcg_env, a, tcg_constant_i32(memop & MO_SIZE));
+             tcg_gen_extrl_i64_i32(val, v);
+         } else {
+             tcg_gen_qemu_ld_i32_int(val, addr, idx, memop);
+@@ -390,7 +391,7 @@
+ 
+         tcg_gen_extu_i32_i64(v, val);
+         if (tcg_ctx->t2_mode == 2) {
+-            gen_helper_t2_rst(tcg_env, a, v, tcg_constant_i32(memop));
++            gen_helper_t2_rst(tcg_env, a, v, tcg_constant_i32(memop & MO_SIZE));
+         } else {
+             tcg_gen_qemu_st_i32_int(val, addr, idx, memop);
+             t2_log(a, v, memop, 1);
+@@ -460,7 +461,7 @@
+         TCGv_i64 a = t2_addr64(addr);
+ 
+         if (tcg_ctx->t2_mode == 2) {
+-            gen_helper_t2_rld(val, tcg_env, a, tcg_constant_i32(memop));
++            gen_helper_t2_rld(val, tcg_env, a, tcg_constant_i32(memop & MO_SIZE));
+         } else {
+             tcg_gen_qemu_ld_i64_int(val, addr, idx, memop);
+             t2_log(a, val, memop, 0);
+@@ -521,7 +522,7 @@
+         TCGv_i64 a = t2_addr64(addr);
+ 
+         if (tcg_ctx->t2_mode == 2) {
+-            gen_helper_t2_rst(tcg_env, a, val, tcg_constant_i32(memop));
++            gen_helper_t2_rst(tcg_env, a, val, tcg_constant_i32(memop & MO_SIZE));
+         } else {
+             TCGv_i64 v = tcg_temp_ebb_new_i64();
+ 
+@@ -742,9 +743,9 @@
+ 
+         if (tcg_ctx->t2_mode == 2) {
+             gen_helper_t2_rld(TCGV128_LOW(val), tcg_env, a,
+-                              tcg_constant_i32(memop));
++                              tcg_constant_i32(memop & MO_SIZE));
+             gen_helper_t2_rld(TCGV128_HIGH(val), tcg_env, a,
+-                              tcg_constant_i32(memop | T2_HI));
++                              tcg_constant_i32((memop & MO_SIZE) | T2_HI));
+         } else {
+             tcg_gen_qemu_ld_i128_int(val, addr, idx, memop);
+             t2_log(a, TCGV128_LOW(val), memop, 0);
+@@ -871,9 +872,9 @@
+ 
+         if (tcg_ctx->t2_mode == 2) {
+             gen_helper_t2_rst(tcg_env, a, TCGV128_LOW(val),
+-                              tcg_constant_i32(memop));
++                              tcg_constant_i32(memop & MO_SIZE));
+             gen_helper_t2_rst(tcg_env, a, TCGV128_HIGH(val),
+-                              tcg_constant_i32(memop | T2_HI));
++                              tcg_constant_i32((memop & MO_SIZE) | T2_HI));
+         } else {
+             TCGv_i64 lo = tcg_temp_ebb_new_i64(), hi = tcg_temp_ebb_new_i64();
+ 
+diff -ruN a/tcg/tier3.c b/tcg/tier3.c
+--- a/tcg/tier3.c
++++ b/tcg/tier3.c
+@@ -0,0 +1,1763 @@
++/*
++ * POMPPC tcg/0049 (x-tier3): the region compiler.  The captured TCG ops of
++ * the TBs of a region (include/tcg/tier3.h) become ONE LLVM function
++ *
++ *     const void *region(CPUArchState *env)
++ *
++ * which returns the host code to jump to (a TB, or the epilogue to go back
++ * to the main loop), like the goto_ptr of a TB.  Every TCG op is translated
++ * one for one; what changes is what TCG does between TBs and around its
++ * ops:
++ *
++ *  - the TB exits that go to another TB of the region (constant nip of a
++ *    goto_tb or of a lookup, or a return predicted from a bl of the region)
++ *    are branches; the exits that leave call helper_lookup_tb_ptr and
++ *    return its result;
++ *  - the guest registers (TCG globals) live in LLVM values (allocas that
++ *    mem2reg promotes); they are written back to env, those that may be
++ *    dirty only (a dataflow over the region), before a helper that reads
++ *    globals, on the slow path of a guest access, and at the region exits;
++ *    reloaded after a helper that writes globals;
++ *  - the head check of each TB (icount_decr) is kept only on the back edges
++ *    of the region (with the "region dead" flag), the guest access fast
++ *    path (softmmu TLB) is inlined, the slow path calls helper_*_mmu;
++ *  - where TCG would restore the guest pc from the host return address of
++ *    a helper that raises (cpu_restore_state), the region stores the pc of
++ *    the instruction in cpu->t3_pc first (accel/tcg/translate-all.c).
++ *
++ * A TB whose ops are not all translated here (vector ops, ppc_fp32, ...)
++ * is not taken in a region (tier3-capture.c.inc says why).
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "qemu/timer.h"
++#include "qemu/thread.h"
++#include "hw/core/cpu.h"
++#include "exec/translation-block.h"
++#include "exec/target_page.h"
++#include "exec/tlb-common.h"
++#include "exec/memopidx.h"
++#include "tcg/tcg.h"
++#include "tcg/tcg-mo.h"
++#include "tcg/tcg-ldst.h"
++#include "tcg/helper-info.h"
++#include "tcg/tier3.h"
++#include "exec/helper-proto-common.h"
++#include "exec/translator.h"            /* T2_MARK */
++#include "tcg-internal.h"
++#include "tcg/perf.h"
++
++#include <llvm-c/Analysis.h>
++#include <llvm-c/Core.h>
++#include <llvm-c/Error.h>
++#include <llvm-c/LLJIT.h>
++#include <llvm-c/Orc.h>
++#include <llvm-c/OrcEE.h>
++#include <llvm-c/Target.h>
++#include <llvm-c/TargetMachine.h>
++#include <llvm-c/Transforms/PassBuilder.h>
++
++#define T3_NWORDS (T3_MAX_GLOBALS / 64)
++typedef struct { uint64_t w[T3_NWORDS]; } T3Set;
++
++static inline void set_add(T3Set *s, int i) { s->w[i >> 6] |= 1ull << (i & 63); }
++static inline bool set_has(const T3Set *s, int i) { return s->w[i >> 6] >> (i & 63) & 1; }
++static inline void set_clear(T3Set *s) { memset(s, 0, sizeof(*s)); }
++static inline bool set_union(T3Set *d, const T3Set *s)
++{
++    bool ch = false;
++    for (int i = 0; i < T3_NWORDS; i++) {
++        uint64_t n = d->w[i] | s->w[i];
++        ch |= n != d->w[i];
++        d->w[i] = n;
++    }
++    return ch;
++}
++
++/* exits of a segment */
++enum {
++    SX_FALL,        /* falls into the next segment */
++    SX_BR,          /* br label */
++    SX_BRCOND,      /* brcond: label or next */
++    SX_MAIN,        /* exit_tb 0: back to the main loop */
++    SX_REQ,         /* exit_tb TB_EXIT_REQUESTED: head check */
++    SX_CHAIN,       /* exit_tb tb|n (goto_tb not chained): nip known or not */
++    SX_LOOKUP,      /* call lookup_tb_ptr + goto_ptr */
++    SX_GOTOPTR,     /* other goto_ptr */
++    SX_NORET,       /* noreturn helper */
++};
++
++#define T3_MAX_SUCC 72
++
++typedef struct Seg {
++    int blk, s, e;          /* ops [s, e) of block blk */
++    int kind;
++    int label;              /* SX_BR / SX_BRCOND target label */
++    bool nip_known;         /* SX_CHAIN / SX_LOOKUP: nip constant at the exit */
++    uint64_t nip;
++    int nsucc;
++    int succ[T3_MAX_SUCC];  /* successor segments (dataflow) */
++    T3Set in;
++    LLVMBasicBlockRef bb;
++} Seg;
++
++typedef struct Gen {
++    LLVMContextRef C;
++    LLVMModuleRef M;
++    LLVMBuilderRef B, BA;
++    LLVMValueRef F, env;
++    LLVMTypeRef i1, i8, i16, i32, i64, ptr, vt;
++    T3Region *r;
++    bool log;
++    T3Set used, written;
++    LLVMValueRef gval[T3_MAX_GLOBALS];
++    GHashTable *temps;
++    LLVMValueRef carry, budget;
++    Seg *seg;
++    int nseg, segcap;
++    int *entry;                 /* first segment of each block */
++    int **labseg;               /* [block][label] -> segment */
++    LLVMBasicBlockRef chk[T3_MAX_BLOCKS], pgb[T3_MAX_BLOCKS], pgc[T3_MAX_BLOCKS];
++    LLVMBasicBlockRef entry_bb;
++    const char *err;
++    int mutant;                 /* POMPPC_T3_MUTANT (tools/tcg/t3proof.sh) */
++} Gen;
++
++static QemuMutex t3_jit_lock;
++static LLVMOrcLLJITRef t3_jit;
++static LLVMTargetMachineRef t3_tm;
++static bool t3_jit_ok;
++static unsigned t3_nmod;
++
++/* ---- code ranges (perf map, statistics), Linux: our own memory manager */
++#ifdef __linux__
++#include <sys/mman.h>
++#define T3_ARENA (256u << 20)
++static uint8_t *t3_arena;
++static size_t t3_arena_used;
++static size_t t3_last_code;
++
++static uint8_t *t3_alloc(uintptr_t size, unsigned align)
++{
++    size_t p;
++
++    if (align < 16) {
++        align = 16;
++    }
++    p = ROUND_UP(t3_arena_used, align);
++    if (p + size > T3_ARENA) {
++        return NULL;
++    }
++    t3_arena_used = p + size;
++    return t3_arena + p;
++}
++
++static struct { uint8_t *p; uintptr_t size; } t3_sec[8];
++static int t3_nsec;
++
++static uint8_t *t3_mm_code(void *opaque, uintptr_t size, unsigned align,
++                           unsigned id, const char *name)
++{
++    uint8_t *p = t3_alloc(size, align);
++
++    t3_last_code += size;
++    if (t3_nsec < 8) {
++        t3_sec[t3_nsec].p = p;
++        t3_sec[t3_nsec++].size = size;
++    }
++    return p;
++}
++
++static uint8_t *t3_mm_data(void *opaque, uintptr_t size, unsigned align,
++                           unsigned id, const char *name, LLVMBool ro)
++{
++    return t3_alloc(size, align);
++}
++
++static LLVMBool t3_mm_finalize(void *opaque, char **err)
++{
++    return 0;
++}
++
++static void t3_mm_destroy(void *opaque) { }
++static void *t3_mm_ctx(void *opaque) { return NULL; }
++static void t3_mm_term(void *opaque) { }
++
++static LLVMOrcObjectLayerRef t3_layer(void *ctx, LLVMOrcExecutionSessionRef es,
++                                      const char *triple)
++{
++    return LLVMOrcCreateRTDyldObjectLinkingLayerWithMCJITMemoryManagerLikeCallbacks(
++        es, NULL, t3_mm_ctx, t3_mm_term, t3_mm_code, t3_mm_data,
++        t3_mm_finalize, t3_mm_destroy);
++}
++#endif
++
++static bool t3_jit_init(char *why, size_t whylen)
++{
++    static bool done;
++    LLVMErrorRef e;
++    LLVMOrcLLJITBuilderRef jb;
++    char *triple, *err = NULL;
++    LLVMTargetRef T;
++
++    if (done) {
++        return t3_jit_ok;
++    }
++    done = true;
++    LLVMInitializeNativeTarget();
++    LLVMInitializeNativeAsmPrinter();
++    jb = LLVMOrcCreateLLJITBuilder();
++#ifdef __linux__
++    t3_arena = mmap(NULL, T3_ARENA, PROT_READ | PROT_WRITE | PROT_EXEC,
++                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++    if (t3_arena == MAP_FAILED) {
++        snprintf(why, whylen, "mmap de l'arène");
++        return false;
++    }
++    LLVMOrcLLJITBuilderSetObjectLinkingLayerCreator(jb, t3_layer, NULL);
++#endif
++    e = LLVMOrcCreateLLJIT(&t3_jit, jb);
++    if (e) {
++        char *m = LLVMGetErrorMessage(e);
++        snprintf(why, whylen, "LLJIT : %s", m);
++        LLVMDisposeErrorMessage(m);
++        return false;
++    }
++    {
++        /* the libcalls LLVM may emit (128-bit division...) from the process */
++        LLVMOrcDefinitionGeneratorRef gen;
++        e = LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess(
++                &gen, LLVMOrcLLJITGetGlobalPrefix(t3_jit), NULL, NULL);
++        if (e) {
++            char *m = LLVMGetErrorMessage(e);
++            snprintf(why, whylen, "symboles du processus : %s", m);
++            LLVMDisposeErrorMessage(m);
++            return false;
++        }
++        LLVMOrcJITDylibAddGenerator(LLVMOrcLLJITGetMainJITDylib(t3_jit), gen);
++    }
++    triple = LLVMGetDefaultTargetTriple();
++    if (LLVMGetTargetFromTriple(triple, &T, &err)) {
++        snprintf(why, whylen, "cible : %s", err);
++        return false;
++    }
++    t3_tm = LLVMCreateTargetMachine(T, triple, LLVMGetHostCPUName(),
++                                    LLVMGetHostCPUFeatures(),
++                                    LLVMCodeGenLevelDefault, LLVMRelocDefault,
++                                    LLVMCodeModelJITDefault);
++    t3_jit_ok = true;
++    return true;
++}
++
++/* ---- helpers of IR building */
++
++static LLVMTypeRef ty(Gen *g, int type)
++{
++    return type == TCG_TYPE_I32 ? g->i32 : g->i64;
++}
++
++static LLVMValueRef cint(LLVMTypeRef t, uint64_t v)
++{
++    return LLVMConstInt(t, v, 0);
++}
++
++static LLVMValueRef envp(Gen *g, intptr_t ofs)
++{
++    LLVMValueRef idx = cint(g->i64, ofs);
++    return LLVMBuildGEP2(g->B, g->i8, g->env, &idx, 1, "");
++}
++
++static LLVMValueRef absp(Gen *g, const void *p)
++{
++    return LLVMConstIntToPtr(cint(g->i64, (uintptr_t)p), g->ptr);
++}
++
++static LLVMValueRef load(Gen *g, LLVMTypeRef t, LLVMValueRef p)
++{
++    LLVMValueRef v = LLVMBuildLoad2(g->B, t, p, "");
++    LLVMSetAlignment(v, 1);
++    return v;
++}
++
++static void store(Gen *g, LLVMValueRef v, LLVMValueRef p)
++{
++    LLVMValueRef s = LLVMBuildStore(g->B, v, p);
++    LLVMSetAlignment(s, 1);
++}
++
++static LLVMValueRef temp_slot(Gen *g, T3Arg *a)
++{
++    gpointer key = GUINT_TO_POINTER((a->idx << 2) | (a->type & 3));
++    LLVMValueRef s = g_hash_table_lookup(g->temps, key);
++
++    if (!s) {
++        s = LLVMBuildAlloca(g->BA, ty(g, a->type), "t");
++        g_hash_table_insert(g->temps, key, s);
++    }
++    return s;
++}
++
++static LLVMValueRef get(Gen *g, T3Arg *a)
++{
++    switch (a->kind) {
++    case T3A_CONST:
++        return cint(ty(g, a->type), a->v);
++    case T3A_ENV:
++        return LLVMBuildPtrToInt(g->B, g->env, g->i64, "");
++    case T3A_GLOBAL:
++        return LLVMBuildLoad2(g->B, ty(g, t3_globals[a->idx].type),
++                              g->gval[a->idx], "");
++    case T3A_TEMP:
++        return LLVMBuildLoad2(g->B, ty(g, a->type), temp_slot(g, a), "");
++    default:
++        g->err = "argument non valeur";
++        return cint(g->i64, 0);
++    }
++}
++
++static void set(Gen *g, T3Arg *a, LLVMValueRef v)
++{
++    LLVMTypeRef want = a->kind == T3A_GLOBAL ? ty(g, t3_globals[a->idx].type)
++                                             : ty(g, a->type);
++    if (LLVMTypeOf(v) != want) {
++        v = LLVMBuildZExtOrBitCast(g->B, v, want, "");  /* (i1 results) */
++    }
++    switch (a->kind) {
++    case T3A_GLOBAL:
++        LLVMBuildStore(g->B, v, g->gval[a->idx]);
++        break;
++    case T3A_TEMP:
++        LLVMBuildStore(g->B, v, temp_slot(g, a));
++        break;
++    default:
++        g->err = "écriture d'un non-temp";
++        break;
++    }
++}
++
++static LLVMValueRef intrin(Gen *g, const char *name, LLVMTypeRef t,
++                           LLVMValueRef *args, int n)
++{
++    unsigned id = LLVMLookupIntrinsicID(name, strlen(name));
++    LLVMValueRef f = LLVMGetIntrinsicDeclaration(g->M, id, &t, 1);
++    LLVMTypeRef ft = LLVMIntrinsicGetType(g->C, id, &t, 1);
++
++    return LLVMBuildCall2(g->B, ft, f, args, n, "");
++}
++
++static LLVMValueRef call_abs(Gen *g, LLVMTypeRef ret, const void *fn,
++                             LLVMValueRef *args, LLVMTypeRef *types, int n)
++{
++    LLVMTypeRef ft = LLVMFunctionType(ret, types, n, 0);
++    LLVMValueRef c = LLVMBuildCall2(g->B, ft, absp(g, fn), args, n, "");
++    return c;
++}
++
++/* store the dirty globals of @d to env */
++static void gsync_m(Gen *g, const T3Set *d, bool exit)
++{
++    bool skip = exit && g->mutant == 2;     /* mutant: one global lost */
++
++    for (int i = 0; i < T3_MAX_GLOBALS; i++) {
++        if (set_has(d, i) && set_has(&g->written, i)) {
++            if (skip) {
++                skip = false;
++                continue;
++            }
++            LLVMValueRef v = LLVMBuildLoad2(g->B, ty(g, t3_globals[i].type),
++                                            g->gval[i], "");
++            store(g, v, envp(g, t3_globals[i].ofs));
++        }
++    }
++}
++
++static void gsync(Gen *g, const T3Set *d)
++{
++    gsync_m(g, d, false);
++}
++
++static void reload(Gen *g)
++{
++    for (int i = 0; i < T3_MAX_GLOBALS; i++) {
++        if (set_has(&g->used, i)) {
++            LLVMTypeRef t = ty(g, t3_globals[i].type);
++            LLVMBuildStore(g->B, load(g, t, envp(g, t3_globals[i].ofs)),
++                           g->gval[i]);
++        }
++    }
++}
++
++static void store_pc_env(Gen *g, uint64_t pc)
++{
++    LLVMTypeRef t = t3_target.pc_size == 4 ? g->i32 : g->i64;
++    store(g, cint(t, pc), envp(g, t3_target.pc_ofs));
++}
++
++static void store_t3_pc(Gen *g, uint64_t pc)
++{
++    store(g, cint(g->i64, pc),
++          envp(g, offsetof(CPUState, t3_pc) - sizeof(CPUState)));
++}
++
++static void ret_epilogue(Gen *g)
++{
++    LLVMBuildRet(g->B, absp(g, tcg_code_gen_epilogue));
++}
++
++/* POMPPC_T3_STATS: region exits by kind */
++uint64_t t3_exit_stats[T3X_N];
++static void stat_exit(Gen *g, int k)
++{
++    if (getenv("POMPPC_T3_STATS")) {
++        LLVMValueRef p = absp(g, &t3_exit_stats[k]);
++        LLVMValueRef v = LLVMBuildLoad2(g->B, g->i64, p, "");
++        LLVMBuildStore(g->B, LLVMBuildAdd(g->B, v, cint(g->i64, 1), ""), p);
++    }
++}
++
++static LLVMValueRef call_lookup(Gen *g)
++{
++    LLVMValueRef a = g->env;
++    LLVMTypeRef t = g->ptr;
++    return call_abs(g, g->ptr, (const void *)helper_lookup_tb_ptr, &a, &t, 1);
++}
++
++/* ---- segmentation and dataflow */
++
++static int new_seg(Gen *g, int blk, int s)
++{
++    Seg *x;
++
++    if (g->nseg == g->segcap) {
++        g->segcap = g->segcap ? g->segcap * 2 : 64;
++        g->seg = g_renew(Seg, g->seg, g->segcap);
++    }
++    x = &g->seg[g->nseg];
++    memset(x, 0, sizeof(*x));
++    x->blk = blk;
++    x->s = x->e = s;
++    x->kind = SX_FALL;
++    x->label = -1;
++    return g->nseg++;
++}
++
++static int member_of(T3Region *r, uint64_t pc)
++{
++    for (int i = 0; i < r->nb; i++) {
++        if (r->b[i]->pc == pc) {
++            return i;
++        }
++    }
++    return -1;
++}
++
++static bool is_lookup_call(T3Block *b, T3Op *o)
++{
++    const TCGHelperInfo *info;
++
++    if (o->opc != INDEX_op_call) {
++        return false;
++    }
++    info = (const void *)(uintptr_t)b->args[o->a + o->nargs - 1].v;
++    return !strcmp(info->name, "lookup_tb_ptr");
++}
++
++static unsigned call_flags(T3Block *b, T3Op *o)
++{
++    const TCGHelperInfo *info = (const void *)(uintptr_t)b->args[o->a + o->nargs - 1].v;
++    return info->flags;
++}
++
++static bool nip_write(T3Block *b, T3Op *o, bool *known, uint64_t *val)
++{
++    const TCGOpDef *def = &tcg_op_defs[o->opc];
++    int nb_o = o->opc == INDEX_op_call ? o->p2 : def->nb_oargs;
++
++    for (int i = 0; i < nb_o; i++) {
++        T3Arg *d = &b->args[o->a + i];
++        if (d->kind == T3A_GLOBAL && d->v == t3_target.pc_ofs) {
++            if (o->opc == INDEX_op_mov && b->args[o->a + 1].kind == T3A_CONST) {
++                *known = true;
++                *val = b->args[o->a + 1].v;
++                if (t3_target.pc_size == 4) {
++                    *val = (uint32_t)*val;
++                }
++            } else {
++                *known = false;
++            }
++            return true;
++        }
++    }
++    return false;
++}
++
++static void segment(Gen *g)
++{
++    T3Region *r = g->r;
++
++    g->entry = g_new0(int, r->nb);
++    g->labseg = g_new0(int *, r->nb);
++    for (int k = 0; k < r->nb; k++) {
++        T3Block *b = r->b[k];
++        int cur = new_seg(g, k, 0);
++        bool known = false;
++        uint64_t nip = 0;
++
++        g->entry[k] = cur;
++        g->labseg[k] = g_new(int, b->nlabels + 1);
++        for (int i = 0; i <= b->nlabels; i++) {
++            g->labseg[k][i] = -1;
++        }
++        for (int i = 0; i < b->nops; i++) {
++            T3Op *o = &b->ops[i];
++            Seg *s;
++
++            if (o->opc == INDEX_op_set_label) {
++                if (g->seg[cur].s != i) {
++                    g->seg[cur].e = i;
++                    cur = new_seg(g, k, i);
++                }
++                g->labseg[k][b->args[o->a].idx] = cur;
++                known = false;
++            }
++            nip_write(b, o, &known, &nip);
++            s = &g->seg[cur];
++            s->e = i + 1;
++            switch (o->opc) {
++            case INDEX_op_br:
++                s->kind = SX_BR;
++                s->label = b->args[o->a].idx;
++                break;
++            case INDEX_op_brcond:
++                s->kind = SX_BRCOND;
++                s->label = b->args[o->a + 3].idx;
++                break;
++            case INDEX_op_exit_tb: {
++                uintptr_t v = b->args[o->a].v;
++                s->kind = v == 0 ? SX_MAIN :
++                          (v & TB_EXIT_MASK) == TB_EXIT_REQUESTED ? SX_REQ :
++                          SX_CHAIN;
++                s->nip_known = known;
++                s->nip = nip;
++                break;
++            }
++            case INDEX_op_goto_ptr:
++                s->kind = SX_GOTOPTR;
++                break;
++            case INDEX_op_call:
++                if (is_lookup_call(b, o) && i + 1 < b->nops &&
++                    b->ops[i + 1].opc == INDEX_op_goto_ptr) {
++                    s->kind = SX_LOOKUP;
++                    s->nip_known = known;
++                    s->nip = nip;
++                    s->e = i + 2;
++                    i++;
++                } else if (call_flags(b, o) & TCG_CALL_NO_RETURN) {
++                    s->kind = SX_NORET;
++                } else {
++                    continue;
++                }
++                break;
++            default:
++                continue;
++            }
++            /* the segment ends here; what follows starts a new one */
++            if (i + 1 < b->nops) {
++                cur = new_seg(g, k, i + 1);
++            }
++        }
++    }
++}
++
++/* internal destinations of an exit segment: (block, cross-page) pairs */
++static int exit_targets(Gen *g, Seg *s, int *dst)
++{
++    T3Region *r = g->r;
++    int n = 0, j;
++
++    if (s->kind != SX_CHAIN && s->kind != SX_LOOKUP) {
++        return 0;
++    }
++    if (s->nip_known) {
++        j = member_of(r, s->nip);
++        if (j >= 0) {
++            dst[n++] = j;
++        }
++        return n;
++    }
++    for (j = 0; j < r->nb; j++) {
++        if (r->ret_target[j]) {
++            dst[n++] = j;
++        }
++    }
++    return n;
++}
++
++static void link_succ(Gen *g)
++{
++    for (int i = 0; i < g->nseg; i++) {
++        Seg *s = &g->seg[i];
++        int dst[T3_MAX_BLOCKS], n;
++
++        switch (s->kind) {
++        case SX_FALL:
++            if (i + 1 < g->nseg && g->seg[i + 1].blk == s->blk) {
++                s->succ[s->nsucc++] = i + 1;
++            }
++            break;
++        case SX_BRCOND:
++            if (i + 1 < g->nseg && g->seg[i + 1].blk == s->blk) {
++                s->succ[s->nsucc++] = i + 1;
++            }
++            /* fall through */
++        case SX_BR: {
++            int t = s->label >= 0 ? g->labseg[s->blk][s->label] : -1;
++            if (t < 0) {
++                g->err = "étiquette absente";
++                return;
++            }
++            s->succ[s->nsucc++] = t;
++            break;
++        }
++        default:
++            n = exit_targets(g, s, dst);
++            for (int k = 0; k < n && s->nsucc < T3_MAX_SUCC; k++) {
++                s->succ[s->nsucc++] = g->entry[dst[k]];
++            }
++            break;
++        }
++    }
++}
++
++/* the effect of op @o on the dirty set */
++static void transfer_op(Gen *g, T3Block *b, T3Op *o, T3Set *d)
++{
++    const TCGOpDef *def = &tcg_op_defs[o->opc];
++
++    if (o->opc == INDEX_op_call) {
++        unsigned fl = call_flags(b, o);
++        int no = o->p2;
++
++        if (is_lookup_call(b, o)) {
++            return;             /* an exit: handled by its segment */
++        }
++        if (!(fl & TCG_CALL_NO_READ_GLOBALS)) {
++            set_clear(d);       /* synced */
++        }
++        for (int i = 0; i < no; i++) {
++            T3Arg *a = &b->args[o->a + i];
++            if (a->kind == T3A_GLOBAL) {
++                set_add(d, a->idx);
++            }
++        }
++        return;
++    }
++    for (int i = 0; i < def->nb_oargs; i++) {
++        T3Arg *a = &b->args[o->a + i];
++        if (a->kind == T3A_GLOBAL) {
++            set_add(d, a->idx);
++        }
++    }
++}
++
++static void dataflow(Gen *g)
++{
++    bool changed = true;
++    int iter = 0;
++
++    while (changed && iter++ < 1000) {
++        changed = false;
++        for (int i = 0; i < g->nseg; i++) {
++            Seg *s = &g->seg[i];
++            T3Block *b = g->r->b[s->blk];
++            T3Set d = s->in;
++
++            for (int k = s->s; k < s->e; k++) {
++                transfer_op(g, b, &b->ops[k], &d);
++            }
++            for (int k = 0; k < s->nsucc; k++) {
++                changed |= set_union(&g->seg[s->succ[k]].in, &d);
++            }
++        }
++    }
++}
++
++/* conditional branch, @t very likely */
++static void likely_br(Gen *g, LLVMValueRef c, LLVMBasicBlockRef t,
++                      LLVMBasicBlockRef f)
++{
++    LLVMValueRef br = LLVMBuildCondBr(g->B, c, t, f);
++    const char *n = "branch_weights";
++    LLVMMetadataRef md[3] = {
++        LLVMMDStringInContext2(g->C, n, strlen(n)),
++        LLVMValueAsMetadata(cint(g->i32, 4000)),
++        LLVMValueAsMetadata(cint(g->i32, 1)),
++    };
++    LLVMSetMetadata(br, LLVMGetMDKindIDInContext(g->C, "prof", 4),
++                    LLVMMetadataAsValue(g->C, LLVMMDNodeInContext2(g->C, md, 3)));
++}
++
++/* ---- the edge into block j: page check, then head check on back edges */
++
++static LLVMBasicBlockRef bb_new(Gen *g, const char *name)
++{
++    return LLVMAppendBasicBlockInContext(g->C, g->F, name);
++}
++
++static void exit_to_main_at(Gen *g, const T3Set *d, uint64_t pc, int kind)
++{
++    stat_exit(g, kind);
++    gsync(g, d);
++    store_pc_env(g, pc);
++    ret_epilogue(g);
++}
++
++static LLVMBasicBlockRef head_check(Gen *g, int j)
++{
++    LLVMBasicBlockRef save = LLVMGetInsertBlock(g->B);
++    LLVMBasicBlockRef c, x;
++    LLVMValueRef v, dead, cond;
++
++    if (g->chk[j]) {
++        return g->chk[j];
++    }
++    c = g->chk[j] = bb_new(g, "chk");
++    x = bb_new(g, "chkx");
++    LLVMPositionBuilderAtEnd(g->B, c);
++    v = LLVMBuildLoad2(g->B, g->i32,
++                       envp(g, offsetof(CPUState, neg.icount_decr.u32) -
++                               sizeof(CPUState)), "");
++    LLVMSetVolatile(v, 1);
++    dead = LLVMBuildLoad2(g->B, g->i32, absp(g, &g->r->dead), "");
++    LLVMSetVolatile(dead, 1);
++    cond = LLVMBuildOr(g->B,
++                       LLVMBuildICmp(g->B, LLVMIntSLT, v, cint(g->i32, 0), ""),
++                       LLVMBuildICmp(g->B, LLVMIntNE, dead, cint(g->i32, 0), ""),
++                       "");
++    if (g->log) {
++        /* x-tier2-verify copy: at most 16 back edges per run */
++        LLVMValueRef n = LLVMBuildLoad2(g->B, g->i32, g->budget, "");
++        n = LLVMBuildSub(g->B, n, cint(g->i32, 1), "");
++        LLVMBuildStore(g->B, n, g->budget);
++        cond = LLVMBuildOr(g->B, cond,
++                           LLVMBuildICmp(g->B, LLVMIntSLT, n, cint(g->i32, 0), ""),
++                           "");
++    }
++    likely_br(g, LLVMBuildNot(g->B, cond, ""), g->seg[g->entry[j]].bb, x);
++    LLVMPositionBuilderAtEnd(g->B, x);
++    exit_to_main_at(g, &g->seg[g->entry[j]].in, g->r->b[j]->pc, T3X_CHK);
++    LLVMPositionBuilderAtEnd(g->B, save);
++    return c;
++}
++
++static LLVMBasicBlockRef page_check(Gen *g, int j, bool back)
++{
++    LLVMBasicBlockRef save = LLVMGetInsertBlock(g->B);
++    LLVMBasicBlockRef *slot = back ? &g->pgc[j] : &g->pgb[j];
++    LLVMBasicBlockRef c, x, next;
++    T3Region *r = g->r;
++    uint64_t page = r->page[j];
++    int fi = mmuidx_to_fast_index(r->code_mmu_idx);
++    intptr_t fast = offsetof(CPUNegativeOffsetState, tlb.f[fi]) -
++                    sizeof(CPUNegativeOffsetState);
++    LLVMValueRef mask, table, idx, ent, cmp, add, ok;
++
++    if (*slot) {
++        return *slot;
++    }
++    next = back ? head_check(g, j) : g->seg[g->entry[j]].bb;
++    c = *slot = bb_new(g, "pg");
++    x = bb_new(g, "pgx");
++    LLVMPositionBuilderAtEnd(g->B, c);
++    mask = load(g, g->i64, envp(g, fast + offsetof(CPUTLBDescFast, mask)));
++    table = load(g, g->i64, envp(g, fast + offsetof(CPUTLBDescFast, table)));
++    idx = LLVMBuildAnd(g->B, cint(g->i64, page >> (TARGET_PAGE_BITS -
++                                                  CPU_TLB_ENTRY_BITS)),
++                       mask, "");
++    ent = LLVMBuildAdd(g->B, table, idx, "");
++    cmp = load(g, g->i64, LLVMBuildIntToPtr(g->B,
++              LLVMBuildAdd(g->B, ent, cint(g->i64, offsetof(CPUTLBEntry, addr_code)), ""),
++              g->ptr, ""));
++    add = load(g, g->i64, LLVMBuildIntToPtr(g->B,
++              LLVMBuildAdd(g->B, ent, cint(g->i64, offsetof(CPUTLBEntry, addend)), ""),
++              g->ptr, ""));
++    ok = LLVMBuildAnd(g->B,
++                      LLVMBuildICmp(g->B, LLVMIntEQ, cmp, cint(g->i64, page), ""),
++                      LLVMBuildICmp(g->B, LLVMIntEQ, add, cint(g->i64, r->addend[j]), ""),
++                      "");
++    likely_br(g, ok, next, x);
++    LLVMPositionBuilderAtEnd(g->B, x);
++    exit_to_main_at(g, &g->seg[g->entry[j]].in, r->b[j]->pc, T3X_PAGE);
++    LLVMPositionBuilderAtEnd(g->B, save);
++    return c;
++}
++
++static LLVMBasicBlockRef edge_to(Gen *g, int from, int j)
++{
++    T3Region *r = g->r;
++    bool back = j <= from;
++
++    if (r->page[j] != r->page[from]) {
++        return page_check(g, j, back);
++    }
++    return back ? head_check(g, j) : g->seg[g->entry[j]].bb;
++}
++
++/* ---- guest accesses */
++
++static const void *ld_helper(MemOp mop)
++{
++    switch (mop & MO_SIZE) {
++    case MO_8:  return (const void *)helper_ldub_mmu;
++    case MO_16: return (const void *)helper_lduw_mmu;
++    case MO_32: return (const void *)helper_ldul_mmu;
++    default:    return (const void *)helper_ldq_mmu;
++    }
++}
++
++static const void *st_helper(MemOp mop)
++{
++    switch (mop & MO_SIZE) {
++    case MO_8:  return (const void *)helper_stb_mmu;
++    case MO_16: return (const void *)helper_stw_mmu;
++    case MO_32: return (const void *)helper_stl_mmu;
++    default:    return (const void *)helper_stq_mmu;
++    }
++}
++
++static LLVMTypeRef size_ty(Gen *g, MemOp mop)
++{
++    switch (mop & MO_SIZE) {
++    case MO_8:  return g->i8;
++    case MO_16: return g->i16;
++    case MO_32: return g->i32;
++    default:    return g->i64;
++    }
++}
++
++static void gen_qemu_ldst(Gen *g, T3Block *b, T3Op *o, const T3Set *d, bool is_ld)
++{
++    T3Arg *val = &b->args[o->a], *addr = &b->args[o->a + 1];
++    MemOpIdx oi = b->args[o->a + 2].v;
++    MemOp mop = get_memop(oi);
++    unsigned s_bits = mop & MO_SIZE;
++    unsigned s_mask = (1u << s_bits) - 1, a_mask = (1u << o->align) - 1;
++    int fi = mmuidx_to_fast_index(get_mmuidx(oi));
++    intptr_t fast = offsetof(CPUNegativeOffsetState, tlb.f[fi]) -
++                    sizeof(CPUNegativeOffsetState);
++    LLVMTypeRef T = ty(g, o->p1), ST = size_ty(g, mop);
++    bool a32 = g->r->addr_type == TCG_TYPE_I32;
++    LLVMValueRef av = get(g, addr), a64, mask, table, idx, ent, cmp, c, hit;
++    LLVMValueRef v = NULL, sv = NULL;
++    LLVMBasicBlockRef fastbb = bb_new(g, "f"), slowbb = bb_new(g, "s"),
++                      join = bb_new(g, "j");
++    int cmp_ofs = is_ld ? offsetof(CPUTLBEntry, addr_read)
++                        : offsetof(CPUTLBEntry, addr_write);
++
++    a64 = a32 ? LLVMBuildZExt(g->B, av, g->i64, "") : av;
++    if (!is_ld) {
++        sv = get(g, val);
++    }
++    mask = load(g, g->i64, envp(g, fast + offsetof(CPUTLBDescFast, mask)));
++    table = load(g, g->i64, envp(g, fast + offsetof(CPUTLBDescFast, table)));
++    idx = LLVMBuildAnd(g->B,
++                       LLVMBuildLShr(g->B, a64, cint(g->i64, TARGET_PAGE_BITS -
++                                                         CPU_TLB_ENTRY_BITS), ""),
++                       mask, "");
++    ent = LLVMBuildAdd(g->B, table, idx, "");
++    if (a32) {
++        uint32_t tm = (uint32_t)(TARGET_PAGE_MASK | a_mask);
++        c = av;
++        if (a_mask < s_mask) {
++            c = LLVMBuildAdd(g->B, c, cint(g->i32, s_mask - a_mask), "");
++        }
++        c = LLVMBuildAnd(g->B, c, cint(g->i32, tm), "");
++        cmp = load(g, g->i32, LLVMBuildIntToPtr(g->B,
++                  LLVMBuildAdd(g->B, ent, cint(g->i64, cmp_ofs + (HOST_BIG_ENDIAN ? 4 : 0)), ""),
++                  g->ptr, ""));
++    } else {
++        uint64_t tm = (uint64_t)(TARGET_PAGE_MASK | a_mask);
++        c = av;
++        if (a_mask < s_mask) {
++            c = LLVMBuildAdd(g->B, c, cint(g->i64, s_mask - a_mask), "");
++        }
++        c = LLVMBuildAnd(g->B, c, cint(g->i64, tm), "");
++        cmp = load(g, g->i64, LLVMBuildIntToPtr(g->B,
++                  LLVMBuildAdd(g->B, ent, cint(g->i64, cmp_ofs), ""), g->ptr, ""));
++    }
++    hit = LLVMBuildICmp(g->B, LLVMIntEQ, cmp, c, "");
++    likely_br(g, hit, fastbb, slowbb);
++
++    /* fast path */
++    LLVMPositionBuilderAtEnd(g->B, fastbb);
++    {
++        LLVMValueRef addend = load(g, g->i64, LLVMBuildIntToPtr(g->B,
++                LLVMBuildAdd(g->B, ent, cint(g->i64, offsetof(CPUTLBEntry, addend)), ""),
++                g->ptr, ""));
++        LLVMValueRef host = LLVMBuildIntToPtr(g->B,
++                                              LLVMBuildAdd(g->B, a64, addend, ""),
++                                              g->ptr, "");
++        if (is_ld) {
++            /*
++             * volatile: every guest access is made, in program order, as
++             * TCG makes them (another vCPU or a device may see each one)
++             */
++            v = load(g, ST, host);
++            LLVMSetVolatile(v, 1);
++            if ((mop & MO_BSWAP) && s_bits > MO_8) {
++                v = intrin(g, "llvm.bswap", ST, &v, 1);
++            }
++            if (ST != T) {
++                v = (mop & MO_SIGN) ? LLVMBuildSExt(g->B, v, T, "")
++                                    : LLVMBuildZExt(g->B, v, T, "");
++            }
++            set(g, val, v);
++        } else {
++            LLVMValueRef x = ST != T ? LLVMBuildTrunc(g->B, sv, ST, "") : sv;
++            if ((mop & MO_BSWAP) && s_bits > MO_8) {
++                x = intrin(g, "llvm.bswap", ST, &x, 1);
++            }
++            LLVMValueRef st = LLVMBuildStore(g->B, x, host);
++            LLVMSetVolatile(st, 1);
++            LLVMSetAlignment(st, 1);
++        }
++        LLVMBuildBr(g->B, join);
++    }
++
++    /* slow path: as TCG, env up to date but nip (cpu->t3_pc), and I/O allowed */
++    LLVMPositionBuilderAtEnd(g->B, slowbb);
++    gsync(g, d);
++    store_t3_pc(g, o->pc);
++    store(g, cint(g->i8, 1), envp(g, offsetof(CPUState, neg.can_do_io) -
++                                     sizeof(CPUState)));
++    if (is_ld) {
++        LLVMValueRef args[4] = { g->env, a64, cint(g->i32, oi), cint(g->i64, 1) };
++        LLVMTypeRef ts[4] = { g->ptr, g->i64, g->i32, g->i64 };
++        LLVMValueRef r = call_abs(g, g->i64, ld_helper(mop), args, ts, 4);
++        LLVMValueRef x = LLVMBuildTrunc(g->B, r, ST, "");
++        if (ST != T) {
++            x = (mop & MO_SIGN) ? LLVMBuildSExt(g->B, x, T, "")
++                                : LLVMBuildZExt(g->B, x, T, "");
++        }
++        set(g, val, x);
++    } else {
++        bool q = s_bits == MO_64;
++        LLVMValueRef x = q || o->p1 == TCG_TYPE_I32 ? sv
++                         : LLVMBuildTrunc(g->B, sv, g->i32, "");
++        LLVMValueRef args[5] = { g->env, a64, x, cint(g->i32, oi), cint(g->i64, 1) };
++        LLVMTypeRef ts[5] = { g->ptr, g->i64, q ? g->i64 : g->i32, g->i32, g->i64 };
++        call_abs(g, g->vt, st_helper(mop), args, ts, 5);
++    }
++    LLVMBuildBr(g->B, join);
++
++    LLVMPositionBuilderAtEnd(g->B, join);
++    if (g->log) {
++        LLVMValueRef lv = is_ld ? get(g, val) : sv;
++        LLVMValueRef args[5], r;
++        LLVMTypeRef ts[5] = { g->ptr, g->i64, g->i64, g->i32, g->i32 };
++
++        r = LLVMTypeOf(lv) == g->i64 ? lv : LLVMBuildZExt(g->B, lv, g->i64, "");
++        args[0] = g->env;
++        args[1] = a64;
++        args[2] = r;
++        args[3] = cint(g->i32, mop & MO_SIZE);
++        args[4] = cint(g->i32, !is_ld);
++        call_abs(g, g->vt, (const void *)helper_t2_log, args, ts, 5);
++    }
++}
++
++/* ---- ops */
++
++static LLVMValueRef cmpv(Gen *g, int cond, LLVMValueRef a, LLVMValueRef b)
++{
++    LLVMIntPredicate p;
++
++    switch (cond) {
++    case TCG_COND_ALWAYS: return cint(g->i1, 1);
++    case TCG_COND_NEVER:  return cint(g->i1, 0);
++    case TCG_COND_TSTEQ:
++        return LLVMBuildICmp(g->B, LLVMIntEQ, LLVMBuildAnd(g->B, a, b, ""),
++                             cint(LLVMTypeOf(a), 0), "");
++    case TCG_COND_TSTNE:
++        return LLVMBuildICmp(g->B, LLVMIntNE, LLVMBuildAnd(g->B, a, b, ""),
++                             cint(LLVMTypeOf(a), 0), "");
++    case TCG_COND_EQ:  p = LLVMIntEQ; break;
++    case TCG_COND_NE:  p = LLVMIntNE; break;
++    case TCG_COND_LT:  p = LLVMIntSLT; break;
++    case TCG_COND_GE:  p = LLVMIntSGE; break;
++    case TCG_COND_GT:  p = LLVMIntSGT; break;
++    case TCG_COND_LE:  p = LLVMIntSLE; break;
++    case TCG_COND_LTU: p = LLVMIntULT; break;
++    case TCG_COND_GEU: p = LLVMIntUGE; break;
++    case TCG_COND_GTU: p = LLVMIntUGT; break;
++    case TCG_COND_LEU: p = LLVMIntULE; break;
++    default:
++        g->err = "condition";
++        return cint(g->i1, 0);
++    }
++    return LLVMBuildICmp(g->B, p, a, b, "");
++}
++
++static uint64_t lomask(int len)
++{
++    return len >= 64 ? ~0ull : (1ull << len) - 1;
++}
++
++static void gen_carry(Gen *g, T3Block *b, T3Op *o, bool sub, bool cin, int c1,
++                      bool cout)
++{
++    T3Arg *A = &b->args[o->a];
++    LLVMTypeRef T = ty(g, o->p1);
++    int bits = o->p1 == TCG_TYPE_I32 ? 32 : 64;
++    LLVMTypeRef W = LLVMIntTypeInContext(g->C, bits + 1);
++    LLVMValueRef x = LLVMBuildZExt(g->B, get(g, &A[1]), W, "");
++    LLVMValueRef y = LLVMBuildZExt(g->B, get(g, &A[2]), W, "");
++    LLVMValueRef k, s;
++
++    if (cin) {
++        k = LLVMBuildZExt(g->B, LLVMBuildLoad2(g->B, g->i1, g->carry, ""), W, "");
++    } else {
++        k = cint(W, c1);
++    }
++    if (sub) {
++        s = LLVMBuildSub(g->B, LLVMBuildSub(g->B, x, y, ""), k, "");
++    } else {
++        s = LLVMBuildAdd(g->B, LLVMBuildAdd(g->B, x, y, ""), k, "");
++    }
++    set(g, &A[0], LLVMBuildTrunc(g->B, s, T, ""));
++    if (cout) {
++        LLVMValueRef c = LLVMBuildTrunc(g->B,
++                                        LLVMBuildLShr(g->B, s, cint(W, bits), ""),
++                                        g->i1, "");
++        LLVMBuildStore(g->B, c, g->carry);
++    }
++}
++
++static void gen_call(Gen *g, T3Block *b, T3Op *o, T3Set *d)
++{
++    int no = o->p2, ni = o->p1;
++    const void *fn = (const void *)(uintptr_t)b->args[o->a + no + ni].v;
++    const TCGHelperInfo *info = (const void *)(uintptr_t)b->args[o->a + no + ni + 1].v;
++    unsigned fl = info->flags;
++    LLVMValueRef args[16];
++    LLVMTypeRef ts[16], rt;
++    LLVMValueRef r;
++
++    if (ni > 16) {
++        g->err = "appel à trop d'arguments";
++        return;
++    }
++    switch (info->typemask & 7) {
++    case 0: case 1: rt = g->vt; break;
++    case 2: case 3: rt = g->i32; break;
++    case 4: case 5: case 6: rt = g->i64; break;
++    default:
++        g->err = "appel : type de retour";
++        return;
++    }
++    if (!(fl & TCG_CALL_NO_READ_GLOBALS)) {
++        gsync(g, d);
++        set_clear(d);
++        store_t3_pc(g, o->pc);
++    }
++    for (int i = 0; i < ni; i++) {
++        T3Arg *a = &b->args[o->a + no + i];
++        if (a->kind == T3A_ENV) {
++            args[i] = g->env;
++            ts[i] = g->ptr;
++        } else {
++            args[i] = get(g, a);
++            ts[i] = LLVMTypeOf(args[i]);
++        }
++    }
++    r = call_abs(g, rt, fn, args, ts, ni);
++    if (fl & TCG_CALL_NO_RETURN) {
++        LLVMBuildUnreachable(g->B);
++        return;
++    }
++    /*
++     * (TCG_CALL_NO_READ_GLOBALS implies TCG_CALL_NO_WRITE_GLOBALS.)  The
++     * reload first: the output may be a global (call sraw, r3, ...).
++     */
++    if (!(fl & (TCG_CALL_NO_WRITE_GLOBALS | TCG_CALL_NO_READ_GLOBALS))) {
++        reload(g);
++    }
++    if (no) {
++        set(g, &b->args[o->a], r);
++    }
++    for (int i = 0; i < no; i++) {
++        T3Arg *a = &b->args[o->a + i];
++        if (a->kind == T3A_GLOBAL) {
++            set_add(d, a->idx);
++        }
++    }
++}
++
++static LLVMValueRef host_ptr(Gen *g, T3Arg *base, intptr_t ofs)
++{
++    if (base->kind == T3A_ENV) {
++        return envp(g, ofs);
++    }
++    return LLVMBuildIntToPtr(g->B,
++                             LLVMBuildAdd(g->B, get(g, base), cint(g->i64, ofs), ""),
++                             g->ptr, "");
++}
++
++/* one op; false when it ended the LLVM block */
++static void gen_op(Gen *g, T3Block *b, T3Op *o, T3Set *d)
++{
++    T3Arg *A = &b->args[o->a];
++    LLVMBuilderRef B = g->B;
++    LLVMTypeRef T = ty(g, o->p1);
++    int bits = o->p1 == TCG_TYPE_I32 ? 32 : 64;
++    LLVMValueRef x, y, z;
++
++#define IN(n) get(g, &A[n])
++#define OUT(n, v) set(g, &A[n], (v))
++    switch (o->opc) {
++    case INDEX_op_mov:
++        OUT(0, IN(1));
++        break;
++    case INDEX_op_add: OUT(0, LLVMBuildAdd(B, IN(1), IN(2), "")); break;
++    case INDEX_op_sub: OUT(0, LLVMBuildSub(B, IN(1), IN(2), "")); break;
++    case INDEX_op_mul: OUT(0, LLVMBuildMul(B, IN(1), IN(2), "")); break;
++    case INDEX_op_and: OUT(0, LLVMBuildAnd(B, IN(1), IN(2), "")); break;
++    case INDEX_op_or:  OUT(0, LLVMBuildOr(B, IN(1), IN(2), "")); break;
++    case INDEX_op_xor: OUT(0, LLVMBuildXor(B, IN(1), IN(2), "")); break;
++    case INDEX_op_andc: OUT(0, LLVMBuildAnd(B, IN(1), LLVMBuildNot(B, IN(2), ""), "")); break;
++    case INDEX_op_orc:  OUT(0, LLVMBuildOr(B, IN(1), LLVMBuildNot(B, IN(2), ""), "")); break;
++    case INDEX_op_eqv:  OUT(0, LLVMBuildNot(B, LLVMBuildXor(B, IN(1), IN(2), ""), "")); break;
++    case INDEX_op_nand: OUT(0, LLVMBuildNot(B, LLVMBuildAnd(B, IN(1), IN(2), ""), "")); break;
++    case INDEX_op_nor:  OUT(0, LLVMBuildNot(B, LLVMBuildOr(B, IN(1), IN(2), ""), "")); break;
++    case INDEX_op_not:  OUT(0, LLVMBuildNot(B, IN(1), "")); break;
++    case INDEX_op_neg:  OUT(0, LLVMBuildNeg(B, IN(1), "")); break;
++    case INDEX_op_shl:
++        OUT(0, LLVMBuildShl(B, IN(1), LLVMBuildAnd(B, IN(2), cint(T, bits - 1), ""), ""));
++        break;
++    case INDEX_op_shr:
++        OUT(0, LLVMBuildLShr(B, IN(1), LLVMBuildAnd(B, IN(2), cint(T, bits - 1), ""), ""));
++        break;
++    case INDEX_op_sar:
++        OUT(0, LLVMBuildAShr(B, IN(1), LLVMBuildAnd(B, IN(2), cint(T, bits - 1), ""), ""));
++        break;
++    case INDEX_op_rotl: {
++        LLVMValueRef a[3] = { IN(1), IN(1), IN(2) };
++        OUT(0, intrin(g, "llvm.fshl", T, a, 3));
++        break;
++    }
++    case INDEX_op_rotr: {
++        LLVMValueRef a[3] = { IN(1), IN(1), IN(2) };
++        OUT(0, intrin(g, "llvm.fshr", T, a, 3));
++        break;
++    }
++    case INDEX_op_extract2: {
++        LLVMValueRef a[3] = { IN(2), IN(1), cint(T, A[3].v) };
++        OUT(0, intrin(g, "llvm.fshr", T, a, 3));
++        break;
++    }
++    case INDEX_op_bswap16:
++    case INDEX_op_bswap32: {
++        LLVMTypeRef N = o->opc == INDEX_op_bswap16 ? g->i16 : g->i32;
++        int fl = A[2].v;
++        x = LLVMBuildTruncOrBitCast(B, IN(1), N, "");
++        x = intrin(g, "llvm.bswap", N, &x, 1);
++        if (N != T) {
++            x = (fl & TCG_BSWAP_OS) ? LLVMBuildSExt(B, x, T, "")
++                                    : LLVMBuildZExt(B, x, T, "");
++        }
++        OUT(0, x);
++        break;
++    }
++    case INDEX_op_bswap64:
++        x = IN(1);
++        OUT(0, intrin(g, "llvm.bswap", T, &x, 1));
++        break;
++    case INDEX_op_clz:
++    case INDEX_op_ctz: {
++        LLVMValueRef a[2] = { IN(1), cint(g->i1, 1) };
++        y = intrin(g, o->opc == INDEX_op_clz ? "llvm.ctlz" : "llvm.cttz", T, a, 2);
++        z = LLVMBuildICmp(B, LLVMIntEQ, a[0], cint(T, 0), "");
++        OUT(0, LLVMBuildSelect(B, z, IN(2), y, ""));
++        break;
++    }
++    case INDEX_op_ctpop:
++        x = IN(1);
++        OUT(0, intrin(g, "llvm.ctpop", T, &x, 1));
++        break;
++    case INDEX_op_deposit: {
++        int pos = A[3].v, len = A[4].v;
++        uint64_t m = lomask(len) << pos;
++        if (bits == 32) {
++            m = (uint32_t)m;
++        }
++        x = LLVMBuildAnd(B, IN(1), cint(T, ~m), "");
++        y = LLVMBuildAnd(B, LLVMBuildShl(B, IN(2), cint(T, pos), ""), cint(T, m), "");
++        OUT(0, LLVMBuildOr(B, x, y, ""));
++        break;
++    }
++    case INDEX_op_extract: {
++        int pos = A[2].v, len = A[3].v;
++        x = LLVMBuildLShr(B, IN(1), cint(T, pos), "");
++        if (pos + len < bits) {
++            x = LLVMBuildAnd(B, x, cint(T, lomask(len)), "");
++        }
++        OUT(0, x);
++        break;
++    }
++    case INDEX_op_sextract: {
++        int pos = A[2].v, len = A[3].v;
++        x = LLVMBuildShl(B, IN(1), cint(T, bits - pos - len), "");
++        OUT(0, LLVMBuildAShr(B, x, cint(T, bits - len), ""));
++        break;
++    }
++    case INDEX_op_divs: OUT(0, LLVMBuildSDiv(B, IN(1), IN(2), "")); break;
++    case INDEX_op_divu: OUT(0, LLVMBuildUDiv(B, IN(1), IN(2), "")); break;
++    case INDEX_op_rems: OUT(0, LLVMBuildSRem(B, IN(1), IN(2), "")); break;
++    case INDEX_op_remu: OUT(0, LLVMBuildURem(B, IN(1), IN(2), "")); break;
++    case INDEX_op_mulu2:
++    case INDEX_op_muls2:
++    case INDEX_op_muluh:
++    case INDEX_op_mulsh: {
++        LLVMTypeRef W = LLVMIntTypeInContext(g->C, bits * 2);
++        bool sg = o->opc == INDEX_op_muls2 || o->opc == INDEX_op_mulsh;
++        bool two = o->opc == INDEX_op_mulu2 || o->opc == INDEX_op_muls2;
++        int ia = two ? 2 : 1;
++        LLVMValueRef p;
++        x = sg ? LLVMBuildSExt(B, IN(ia), W, "") : LLVMBuildZExt(B, IN(ia), W, "");
++        y = sg ? LLVMBuildSExt(B, IN(ia + 1), W, "") : LLVMBuildZExt(B, IN(ia + 1), W, "");
++        p = LLVMBuildMul(B, x, y, "");
++        z = LLVMBuildTrunc(B, LLVMBuildLShr(B, p, cint(W, bits), ""), T, "");
++        if (two) {
++            OUT(0, LLVMBuildTrunc(B, p, T, ""));
++            OUT(1, z);
++        } else {
++            OUT(0, z);
++        }
++        break;
++    }
++    case INDEX_op_divu2:
++    case INDEX_op_divs2: {
++        /* (q, r) = (ah:al) / b, the quotient fits (the frontend checks) */
++        LLVMTypeRef W = LLVMIntTypeInContext(g->C, bits * 2);
++        bool sg = o->opc == INDEX_op_divs2;
++        LLVMValueRef n, dv;
++        n = LLVMBuildOr(B, LLVMBuildShl(B, sg ? LLVMBuildSExt(B, IN(3), W, "")
++                                              : LLVMBuildZExt(B, IN(3), W, ""),
++                                        cint(W, bits), ""),
++                        LLVMBuildZExt(B, IN(2), W, ""), "");
++        dv = sg ? LLVMBuildSExt(B, IN(4), W, "") : LLVMBuildZExt(B, IN(4), W, "");
++        OUT(0, LLVMBuildTrunc(B, sg ? LLVMBuildSDiv(B, n, dv, "")
++                                    : LLVMBuildUDiv(B, n, dv, ""), T, ""));
++        OUT(1, LLVMBuildTrunc(B, sg ? LLVMBuildSRem(B, n, dv, "")
++                                    : LLVMBuildURem(B, n, dv, ""), T, ""));
++        break;
++    }
++    case INDEX_op_setcond:
++        OUT(0, LLVMBuildZExt(B, cmpv(g, A[3].v, IN(1), IN(2)), T, ""));
++        break;
++    case INDEX_op_negsetcond:
++        OUT(0, LLVMBuildSExt(B, cmpv(g, A[3].v, IN(1), IN(2)), T, ""));
++        break;
++    case INDEX_op_movcond:
++        OUT(0, LLVMBuildSelect(B, cmpv(g, A[5].v, IN(1), IN(2)), IN(3), IN(4), ""));
++        break;
++    case INDEX_op_ext_i32_i64:
++        OUT(0, LLVMBuildSExt(B, IN(1), g->i64, ""));
++        break;
++    case INDEX_op_extu_i32_i64:
++        OUT(0, LLVMBuildZExt(B, IN(1), g->i64, ""));
++        break;
++    case INDEX_op_extrl_i64_i32:
++        OUT(0, LLVMBuildTrunc(B, IN(1), g->i32, ""));
++        break;
++    case INDEX_op_extrh_i64_i32:
++        OUT(0, LLVMBuildTrunc(B, LLVMBuildLShr(B, IN(1), cint(g->i64, 32), ""),
++                              g->i32, ""));
++        break;
++    case INDEX_op_addco:  gen_carry(g, b, o, false, false, 0, true); break;
++    case INDEX_op_addc1o: gen_carry(g, b, o, false, false, 1, true); break;
++    case INDEX_op_addci:  gen_carry(g, b, o, false, true, 0, false); break;
++    case INDEX_op_addcio: gen_carry(g, b, o, false, true, 0, true); break;
++    case INDEX_op_subbo:  gen_carry(g, b, o, true, false, 0, true); break;
++    case INDEX_op_subb1o: gen_carry(g, b, o, true, false, 1, true); break;
++    case INDEX_op_subbi:  gen_carry(g, b, o, true, true, 0, false); break;
++    case INDEX_op_subbio: gen_carry(g, b, o, true, true, 0, true); break;
++    case INDEX_op_ld8u: case INDEX_op_ld8s: case INDEX_op_ld16u:
++    case INDEX_op_ld16s: case INDEX_op_ld32u: case INDEX_op_ld32s:
++    case INDEX_op_ld: {
++        LLVMTypeRef N;
++        bool sg = o->opc == INDEX_op_ld8s || o->opc == INDEX_op_ld16s ||
++                  o->opc == INDEX_op_ld32s;
++        if (o->headcheck) {
++            OUT(0, cint(T, 0));     /* only on the back edges (head_check) */
++            break;
++        }
++        switch (o->opc) {
++        case INDEX_op_ld8u: case INDEX_op_ld8s: N = g->i8; break;
++        case INDEX_op_ld16u: case INDEX_op_ld16s: N = g->i16; break;
++        case INDEX_op_ld32u: case INDEX_op_ld32s: N = g->i32; break;
++        default: N = T; break;
++        }
++        x = load(g, N, host_ptr(g, &A[1], A[2].v));
++        if (N != T) {
++            x = sg ? LLVMBuildSExt(B, x, T, "") : LLVMBuildZExt(B, x, T, "");
++        }
++        OUT(0, x);
++        break;
++    }
++    case INDEX_op_st8: case INDEX_op_st16: case INDEX_op_st32:
++    case INDEX_op_st: {
++        LLVMTypeRef N;
++        switch (o->opc) {
++        case INDEX_op_st8: N = g->i8; break;
++        case INDEX_op_st16: N = g->i16; break;
++        case INDEX_op_st32: N = g->i32; break;
++        default: N = T; break;
++        }
++        x = IN(0);
++        if (N != T) {
++            x = LLVMBuildTrunc(B, x, N, "");
++        }
++        store(g, x, host_ptr(g, &A[1], A[2].v));
++        break;
++    }
++    case INDEX_op_qemu_ld:
++        gen_qemu_ldst(g, b, o, d, true);
++        break;
++    case INDEX_op_qemu_st:
++        gen_qemu_ldst(g, b, o, d, false);
++        break;
++    case INDEX_op_mb:
++        LLVMBuildFence(B, (A[0].v & TCG_MO_ST_LD) ?
++                       LLVMAtomicOrderingSequentiallyConsistent :
++                       LLVMAtomicOrderingAcquireRelease, 0, "");
++        break;
++    case INDEX_op_call:
++        gen_call(g, b, o, d);
++        break;
++    case INDEX_op_goto_tb:
++    case INDEX_op_set_label:
++    case INDEX_op_insn_start:
++    case INDEX_op_discard:
++        break;
++    default:
++        g->err = tcg_op_defs[o->opc].name;
++        break;
++    }
++#undef IN
++#undef OUT
++    /* dirty set: outputs of non-call ops */
++    if (o->opc != INDEX_op_call) {
++        const TCGOpDef *def = &tcg_op_defs[o->opc];
++        for (int i = 0; i < def->nb_oargs; i++) {
++            if (A[i].kind == T3A_GLOBAL) {
++                set_add(d, A[i].idx);
++            }
++        }
++    }
++}
++
++/* the exit of segment @si, with dirty set @d */
++static void gen_exit(Gen *g, int si, T3Set *d)
++{
++    Seg *s = &g->seg[si];
++    T3Block *b = g->r->b[s->blk];
++    int dst[T3_MAX_BLOCKS], n;
++
++    switch (s->kind) {
++    case SX_FALL:
++        if (si + 1 < g->nseg && g->seg[si + 1].blk == s->blk) {
++            LLVMBuildBr(g->B, g->seg[si + 1].bb);
++        } else {
++            LLVMBuildUnreachable(g->B);
++        }
++        return;
++    case SX_BR:
++        LLVMBuildBr(g->B, g->seg[g->labseg[s->blk][s->label]].bb);
++        return;
++    case SX_BRCOND: {
++        T3Op *o = &b->ops[s->e - 1];
++        T3Arg *A = &b->args[o->a];
++        int cond = A[2].v;
++        LLVMValueRef c;
++        LLVMBasicBlockRef nx;
++
++        if (g->mutant == 1 && s->blk == 0) {
++            cond ^= 1;          /* mutant: the branches of the head reversed */
++        }
++        c = cmpv(g, cond, get(g, &A[0]), get(g, &A[1]));
++        if (si + 1 < g->nseg && g->seg[si + 1].blk == s->blk) {
++            nx = g->seg[si + 1].bb;
++        } else {
++            g->err = "brcond sans suite";
++            return;
++        }
++        LLVMBuildCondBr(g->B, c, g->seg[g->labseg[s->blk][s->label]].bb, nx);
++        return;
++    }
++    case SX_MAIN:
++        stat_exit(g, T3X_MAIN);
++        gsync_m(g, d, true);
++        ret_epilogue(g);
++        return;
++    case SX_REQ:
++        exit_to_main_at(g, d, b->pc, T3X_REQ);
++        return;
++    case SX_GOTOPTR: {
++        T3Op *o = &b->ops[s->e - 1];
++        LLVMValueRef p = get(g, &b->args[o->a]);
++        stat_exit(g, T3X_GOTOPTR);
++        gsync(g, d);
++        LLVMBuildRet(g->B, LLVMBuildIntToPtr(g->B, p, g->ptr, ""));
++        return;
++    }
++    case SX_NORET:
++        return;                 /* unreachable already there */
++    case SX_CHAIN:
++    case SX_LOOKUP:
++        break;
++    }
++    n = exit_targets(g, s, dst);
++    if (s->nip_known && n == 1) {
++        LLVMBuildBr(g->B, edge_to(g, s->blk, dst[0]));
++        return;
++    }
++    if (n > 0) {
++        /* predicted returns: compare nip with the return points */
++        T3Arg nipa = { .kind = T3A_GLOBAL };
++        LLVMValueRef nipv, sw;
++        LLVMBasicBlockRef dflt = bb_new(g, "ind");
++        int gi = -1;
++
++        for (int i = 0; i < T3_MAX_GLOBALS; i++) {
++            if (t3_globals[i].known && t3_globals[i].ofs == t3_target.pc_ofs) {
++                gi = i;
++            }
++        }
++        if (gi < 0 || !set_has(&g->used, gi)) {
++            g->err = "nip inconnu";
++            return;
++        }
++        nipa.idx = gi;
++        nipa.type = t3_globals[gi].type;
++        nipv = get(g, &nipa);
++        sw = LLVMBuildSwitch(g->B, nipv, dflt, n);
++        for (int k = 0; k < n; k++) {
++            LLVMAddCase(sw, cint(LLVMTypeOf(nipv), g->r->b[dst[k]]->pc),
++                        edge_to(g, s->blk, dst[k]));
++        }
++        LLVMPositionBuilderAtEnd(g->B, dflt);
++    }
++    /* leave: sync, lookup the next TB */
++    stat_exit(g, s->nip_known ? T3X_DIRECT : n ? T3X_RETMISS : T3X_INDIRECT);
++    gsync_m(g, d, true);
++    if (s->nip_known && (s->nip & TARGET_PAGE_MASK) == g->r->page[s->blk] &&
++        g->r->xcache && g->r->nxcache < T3_XCACHE && !g->mutant) {
++        /*
++         * a direct exit in the page of its block (where a TB would chain by
++         * goto_tb): the TB seen last time, if still valid, without lookup
++         */
++        void **slot = &g->r->xcache[g->r->nxcache++];
++        LLVMBasicBlockRef hit = bb_new(g, "xh"), chk = bb_new(g, "xc"),
++                          miss = bb_new(g, "xm");
++        LLVMValueRef tb = load(g, g->i64, absp(g, slot)), pc, cf, ok;
++
++        LLVMBuildCondBr(g->B, LLVMBuildICmp(g->B, LLVMIntNE, tb, cint(g->i64, 0), ""),
++                        chk, miss);
++        LLVMPositionBuilderAtEnd(g->B, chk);
++        pc = load(g, g->i64, LLVMBuildIntToPtr(g->B,
++                 LLVMBuildAdd(g->B, tb, cint(g->i64, offsetof(TranslationBlock, pc)), ""),
++                 g->ptr, ""));
++        cf = load(g, g->i32, LLVMBuildIntToPtr(g->B,
++                 LLVMBuildAdd(g->B, tb, cint(g->i64, offsetof(TranslationBlock, cflags)), ""),
++                 g->ptr, ""));
++        LLVMSetVolatile(cf, 1);
++        ok = LLVMBuildAnd(g->B,
++                          LLVMBuildICmp(g->B, LLVMIntEQ, pc, cint(g->i64, s->nip), ""),
++                          LLVMBuildICmp(g->B, LLVMIntEQ, cf, cint(g->i32, g->r->cflags), ""),
++                          "");
++        likely_br(g, ok, hit, miss);
++        LLVMPositionBuilderAtEnd(g->B, hit);
++        LLVMBuildRet(g->B, load(g, g->ptr, LLVMBuildIntToPtr(g->B,
++                 LLVMBuildAdd(g->B, tb, cint(g->i64, offsetof(TranslationBlock, tc.ptr)), ""),
++                 g->ptr, "")));
++        LLVMPositionBuilderAtEnd(g->B, miss);
++        {
++            LLVMValueRef args[2] = { g->env, absp(g, slot) };
++            LLVMTypeRef ts[2] = { g->ptr, g->ptr };
++            LLVMBuildRet(g->B, call_abs(g, g->ptr, (const void *)t3_chain, args, ts, 2));
++        }
++        return;
++    }
++    LLVMBuildRet(g->B, call_lookup(g));
++}
++
++static void gen_seg(Gen *g, int si)
++{
++    Seg *s = &g->seg[si];
++    T3Block *b = g->r->b[s->blk];
++    T3Set d = s->in;
++    int end = s->e;
++
++    LLVMPositionBuilderAtEnd(g->B, s->bb);
++    if (si == g->entry[s->blk]) {
++        if (g->log) {
++            LLVMValueRef args[5] = { g->env, cint(g->i64, b->pc), cint(g->i64, 0),
++                                     cint(g->i32, T2_MARK), cint(g->i32, 2) };
++            LLVMTypeRef ts[5] = { g->ptr, g->i64, g->i64, g->i32, g->i32 };
++            call_abs(g, g->vt, (const void *)helper_t2_log, args, ts, 5);
++        }
++        if (getenv("POMPPC_T3_STATS")) {
++            LLVMValueRef p = absp(g, &g->r->insns);
++            LLVMValueRef v = LLVMBuildLoad2(g->B, g->i64, p, "");
++            LLVMBuildStore(g->B, LLVMBuildAdd(g->B, v, cint(g->i64, b->icount), ""), p);
++        }
++    }
++    switch (s->kind) {
++    case SX_BR: case SX_BRCOND: case SX_MAIN: case SX_REQ: case SX_CHAIN:
++    case SX_GOTOPTR:
++        end = s->e - 1;         /* the last op is the exit */
++        break;
++    case SX_LOOKUP:
++        end = s->e - 2;         /* call lookup_tb_ptr; goto_ptr */
++        break;
++    default:
++        break;
++    }
++    for (int k = s->s; k < end && !g->err; k++) {
++        gen_op(g, b, &b->ops[k], &d);
++    }
++    if (s->kind == SX_NORET) {
++        return;                 /* gen_call put the unreachable */
++    }
++    if (!g->err) {
++        gen_exit(g, si, &d);
++    }
++}
++
++static void collect_used(Gen *g)
++{
++    T3Region *r = g->r;
++
++    for (int k = 0; k < r->nb; k++) {
++        T3Block *b = r->b[k];
++        for (int i = 0; i < b->nops; i++) {
++            T3Op *o = &b->ops[i];
++            int no = o->opc == INDEX_op_call ? o->p2 : tcg_op_defs[o->opc].nb_oargs;
++            for (int j = 0; j < o->nargs; j++) {
++                T3Arg *a = &b->args[o->a + j];
++                if (a->kind == T3A_GLOBAL) {
++                    set_add(&g->used, a->idx);
++                    if (j < no) {
++                        set_add(&g->written, a->idx);
++                    }
++                }
++            }
++        }
++    }
++    /* nip: always (exits store it, predicted returns read it) */
++    for (int i = 0; i < T3_MAX_GLOBALS; i++) {
++        if (t3_globals[i].known && t3_globals[i].ofs == t3_target.pc_ofs) {
++            set_add(&g->used, i);
++        }
++    }
++}
++
++static LLVMValueRef gen_function(Gen *g, const char *name)
++{
++    LLVMTypeRef ft = LLVMFunctionType(g->ptr, &g->ptr, 1, 0);
++    LLVMBasicBlockRef first;
++
++    g->F = LLVMAddFunction(g->M, name, ft);
++    g->env = LLVMGetParam(g->F, 0);
++    g->entry_bb = bb_new(g, "entry");
++    LLVMPositionBuilderAtEnd(g->BA, g->entry_bb);
++    g->temps = g_hash_table_new(NULL, NULL);
++    memset(g->gval, 0, sizeof(g->gval));
++    memset(g->chk, 0, sizeof(g->chk));
++    memset(g->pgb, 0, sizeof(g->pgb));
++    memset(g->pgc, 0, sizeof(g->pgc));
++    for (int i = 0; i < T3_MAX_GLOBALS; i++) {
++        if (set_has(&g->used, i)) {
++            g->gval[i] = LLVMBuildAlloca(g->BA, ty(g, t3_globals[i].type), "g");
++        }
++    }
++    g->carry = LLVMBuildAlloca(g->BA, g->i1, "carry");
++    g->budget = LLVMBuildAlloca(g->BA, g->i32, "budget");
++    for (int i = 0; i < g->nseg; i++) {
++        g->seg[i].bb = bb_new(g, "s");
++    }
++    /* the loads of the entry come after all the allocas (made lazily) */
++    first = bb_new(g, "load");
++    LLVMPositionBuilderAtEnd(g->B, first);
++    reload(g);
++    LLVMBuildStore(g->B, cint(g->i32, 16), g->budget);
++    LLVMBuildBr(g->B, g->seg[g->entry[0]].bb);
++    for (int i = 0; i < g->nseg && !g->err; i++) {
++        gen_seg(g, i);
++    }
++    /* the allocas block falls into the loads */
++    LLVMPositionBuilderAtEnd(g->BA, g->entry_bb);
++    LLVMBuildBr(g->BA, first);
++    g_hash_table_destroy(g->temps);
++    return g->F;
++}
++
++bool t3_compile(T3Region *r, bool with_log, char *why, size_t whylen)
++{
++    Gen gg = { 0 }, *g = &gg;
++    char name[2][32];
++    LLVMErrorRef e;
++    LLVMOrcThreadSafeContextRef tsc;
++    LLVMOrcThreadSafeModuleRef tsm;
++    LLVMOrcExecutorAddress addr;
++    LLVMPassBuilderOptionsRef po;
++    int64_t t0 = get_clock();
++    size_t code0;
++    bool ok = false;
++
++    qemu_mutex_lock(&t3_jit_lock);
++    if (!t3_jit_init(why, whylen)) {
++        goto out;
++    }
++    g->r = r;
++    if (getenv("POMPPC_T3_MUTANT") && (t3_nmod & 1)) {
++        g->mutant = atoi(getenv("POMPPC_T3_MUTANT"));
++    }
++    g->C = LLVMContextCreate();
++    snprintf(name[0], sizeof(name[0]), "t3r%u", t3_nmod);
++    snprintf(name[1], sizeof(name[1]), "t3l%u", t3_nmod);
++    t3_nmod++;
++    g->M = LLVMModuleCreateWithNameInContext(name[0], g->C);
++    g->B = LLVMCreateBuilderInContext(g->C);
++    g->BA = LLVMCreateBuilderInContext(g->C);
++    g->i1 = LLVMInt1TypeInContext(g->C);
++    g->i8 = LLVMInt8TypeInContext(g->C);
++    g->i16 = LLVMInt16TypeInContext(g->C);
++    g->i32 = LLVMInt32TypeInContext(g->C);
++    g->i64 = LLVMInt64TypeInContext(g->C);
++    g->ptr = LLVMPointerTypeInContext(g->C, 0);
++    g->vt = LLVMVoidTypeInContext(g->C);
++
++    collect_used(g);
++    segment(g);
++    link_succ(g);
++    if (g->err) {
++        snprintf(why, whylen, "%s", g->err);
++        goto fail;
++    }
++    dataflow(g);
++    for (int v = 0; v < (with_log ? 2 : 1); v++) {
++        g->log = v == 1;
++        gen_function(g, name[v]);
++        if (g->err) {
++            snprintf(why, whylen, "%s", g->err);
++            goto fail;
++        }
++    }
++    {
++        char *msg = NULL;
++        if (LLVMVerifyModule(g->M, LLVMReturnStatusAction, &msg)) {
++            if (getenv("POMPPC_T3_DUMP")) {
++                LLVMDumpModule(g->M);
++            }
++            snprintf(why, whylen, "IR invalide : %.120s", msg ? msg : "?");
++            LLVMDisposeMessage(msg);
++            goto fail;
++        }
++        LLVMDisposeMessage(msg);
++    }
++    if (getenv("POMPPC_T3_DUMP")) {
++        char fn[64];
++        snprintf(fn, sizeof(fn), "/tmp/t3-%u-pre.ll", t3_nmod - 1);
++        LLVMPrintModuleToFile(g->M, fn, NULL);
++    }
++    po = LLVMCreatePassBuilderOptions();
++    e = LLVMRunPasses(g->M, getenv("POMPPC_T3_PASSES") ? getenv("POMPPC_T3_PASSES")
++                                                       : "default<O2>", t3_tm, po);
++    LLVMDisposePassBuilderOptions(po);
++    if (e) {
++        char *m = LLVMGetErrorMessage(e);
++        snprintf(why, whylen, "passes : %s", m);
++        LLVMDisposeErrorMessage(m);
++        goto fail;
++    }
++    if (getenv("POMPPC_T3_DUMP")) {
++        char fn[64];
++        snprintf(fn, sizeof(fn), "/tmp/t3-%u.ll", t3_nmod - 1);
++        LLVMPrintModuleToFile(g->M, fn, NULL);
++    }
++    LLVMDisposeBuilder(g->B);
++    LLVMDisposeBuilder(g->BA);
++    g->B = g->BA = NULL;
++    tsc = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(g->C);
++    tsm = LLVMOrcCreateNewThreadSafeModule(g->M, tsc);
++    g->M = NULL;
++    g->C = NULL;
++#ifdef __linux__
++    code0 = t3_last_code;
++    t3_nsec = 0;
++#else
++    code0 = 0;
++#endif
++    e = LLVMOrcLLJITAddLLVMIRModule(t3_jit, LLVMOrcLLJITGetMainJITDylib(t3_jit), tsm);
++    LLVMOrcDisposeThreadSafeContext(tsc);
++    if (e) {
++        char *m = LLVMGetErrorMessage(e);
++        snprintf(why, whylen, "ajout : %s", m);
++        LLVMDisposeErrorMessage(m);
++        goto out;
++    }
++    for (int v = 0; v < (with_log ? 2 : 1); v++) {
++        e = LLVMOrcLLJITLookup(t3_jit, &addr, name[v]);
++        if (e) {
++            char *m = LLVMGetErrorMessage(e);
++            snprintf(why, whylen, "recherche : %s", m);
++            LLVMDisposeErrorMessage(m);
++            goto out;
++        }
++        if (v == 0) {
++            r->fn = (void *)(uintptr_t)addr;
++        } else {
++            r->fn_log = (void *)(uintptr_t)addr;
++        }
++    }
++#ifdef __linux__
++    r->code_size = t3_last_code - code0;
++    for (int i = 0; i < t3_nsec; i++) {
++        char nm[64];
++        snprintf(nm, sizeof(nm), "t3-%u-0x%" PRIx64, t3_nmod - 1, r->pc);
++        perf_report_named(t3_sec[i].p, t3_sec[i].size, nm);
++    }
++#endif
++    ok = true;
++    goto out;
++
++fail:
++    if (g->B) {
++        LLVMDisposeBuilder(g->B);
++        LLVMDisposeBuilder(g->BA);
++    }
++    if (g->M) {
++        LLVMDisposeModule(g->M);
++    }
++    if (g->C) {
++        LLVMContextDispose(g->C);
++    }
++out:
++    for (int k = 0; g->labseg && k < r->nb; k++) {
++        g_free(g->labseg[k]);
++    }
++    g_free(g->labseg);
++    g_free(g->entry);
++    g_free(g->seg);
++    r->compile_ms = (get_clock() - t0) / 1e6;
++    qemu_mutex_unlock(&t3_jit_lock);
++    return ok;
++}
++
++static void __attribute__((constructor)) t3_init_lock(void)
++{
++    qemu_mutex_init(&t3_jit_lock);
++}
+diff -ruN a/tcg/tier3-capture.c.inc b/tcg/tier3-capture.c.inc
+--- a/tcg/tier3-capture.c.inc
++++ b/tcg/tier3-capture.c.inc
+@@ -0,0 +1,362 @@
++/*
++ * POMPPC tcg/0049 (x-tier3): capture of the TCG ops of one translation,
++ * after tcg_optimize() and the unreachable code pass, into a T3Block that
++ * the region compiler (tcg/tier3.c) turns into LLVM IR.  Included by tcg.c
++ * (it needs the op definitions, the temps and the backend's alignment
++ * rules).  The capture does not change the translation: the TB is then
++ * generated as usual (and thrown away by the caller).
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "tcg/tier3.h"
++
++T3Global t3_globals[T3_MAX_GLOBALS];
++T3Target t3_target;
++static __thread T3Block *t3_cap;
++
++void t3_capture_set(T3Block *b)
++{
++    t3_cap = b;
++}
++
++void t3_block_free(T3Block *b)
++{
++    if (b) {
++        g_free(b->ops);
++        g_free(b->args);
++        g_free(b);
++    }
++}
++
++/* the host's atomicity of the fast path, as its prepare_host_addr() */
++#if defined(__x86_64__)
++#define T3_HOST_ATOM MO_ATOM_WITHIN16
++#elif defined(__aarch64__)
++#define T3_HOST_ATOM (have_lse2 ? MO_ATOM_WITHIN16 : MO_ATOM_IFALIGN)
++#else
++#define T3_HOST_ATOM MO_ATOM_IFALIGN
++#endif
++
++static T3Arg *t3_new_arg(T3Block *b, int *cap)
++{
++    if (b->nargs == *cap) {
++        *cap = *cap ? *cap * 2 : 256;
++        b->args = g_renew(T3Arg, b->args, *cap);
++    }
++    return &b->args[b->nargs++];
++}
++
++static bool t3_cap_temp(TCGContext *s, T3Block *b, int *cap, TCGArg a)
++{
++    TCGTemp *ts = arg_temp(a);
++    T3Arg *r = t3_new_arg(b, cap);
++    size_t idx = temp_idx(ts);
++
++    memset(r, 0, sizeof(*r));
++    r->idx = idx;
++    r->type = ts->base_type;
++    if (ts->base_type != TCG_TYPE_I32 && ts->base_type != TCG_TYPE_I64) {
++        b->reject = "temp i128/vecteur";
++        return false;
++    }
++    switch (ts->kind) {
++    case TEMP_CONST:
++        r->kind = T3A_CONST;
++        r->v = ts->val;
++        return true;
++    case TEMP_FIXED:
++        if (ts == tcgv_ptr_temp(tcg_env)) {
++            r->kind = T3A_ENV;
++            return true;
++        }
++        b->reject = "registre fixe";
++        return false;
++    case TEMP_GLOBAL:
++        if (ts->indirect_reg || ts->mem_base != tcgv_ptr_temp(tcg_env) ||
++            idx >= T3_MAX_GLOBALS) {
++            b->reject = "global indirect";
++            return false;
++        }
++        r->kind = T3A_GLOBAL;
++        r->v = ts->mem_offset;
++        if (!t3_globals[idx].known) {
++            t3_globals[idx].ofs = ts->mem_offset;
++            t3_globals[idx].type = ts->base_type;
++            qatomic_set(&t3_globals[idx].known, true);
++        }
++        return true;
++    case TEMP_EBB:
++    case TEMP_TB:
++        r->kind = T3A_TEMP;
++        return true;
++    default:
++        b->reject = "temp inconnu";
++        return false;
++    }
++}
++
++static void t3_cap_raw(T3Block *b, int *cap, int64_t v, int kind)
++{
++    T3Arg *r = t3_new_arg(b, cap);
++
++    memset(r, 0, sizeof(*r));
++    r->kind = kind;
++    r->v = v;
++    if (kind == T3A_LABEL) {
++        r->idx = arg_label(v)->id;
++    }
++}
++
++/* does [ofs, ofs + size) of env overlap a TCG global?  (TCG would read
++ * the memory copy, which a region keeps stale longer) */
++static bool t3_env_aliases_global(TCGContext *s, intptr_t ofs, int size)
++{
++    for (int i = 0; i < s->nb_globals; i++) {
++        TCGTemp *ts = &s->temps[i];
++        int gsize = ts->base_type == TCG_TYPE_I32 ? 4 : 8;
++
++        if (ts->kind != TEMP_GLOBAL || ts->mem_base != tcgv_ptr_temp(tcg_env)) {
++            continue;
++        }
++        if (ofs < ts->mem_offset + gsize && ts->mem_offset < ofs + size) {
++            return true;
++        }
++    }
++    return false;
++}
++
++static int t3_ldst_size(TCGOpcode opc, TCGType type)
++{
++    switch (opc) {
++    case INDEX_op_ld8u: case INDEX_op_ld8s: case INDEX_op_st8:
++        return 1;
++    case INDEX_op_ld16u: case INDEX_op_ld16s: case INDEX_op_st16:
++        return 2;
++    case INDEX_op_ld32u: case INDEX_op_ld32s: case INDEX_op_st32:
++        return 4;
++    default:
++        return type == TCG_TYPE_I32 ? 4 : 8;
++    }
++}
++
++static void t3_add_pc(uint64_t *v, int *n, int max, uint64_t pc)
++{
++    for (int i = 0; i < *n; i++) {
++        if (v[i] == pc) {
++            return;
++        }
++    }
++    if (*n < max) {
++        v[(*n)++] = pc;
++    }
++}
++
++static void t3_capture(TCGContext *s, T3Block *b)
++{
++    TCGOp *op;
++    int cap_ops = 0, cap_args = 0;
++    uint64_t pc = 0;
++    bool seen_insn = false, nip_known = false;
++    uint64_t nip_val = 0;
++    intptr_t icount_ofs = offsetof(CPUState, neg.icount_decr.u32) -
++                          sizeof(CPUState);
++
++    g_free(b->ops);
++    g_free(b->args);
++    b->ops = NULL;
++    b->args = NULL;
++    b->nops = b->nargs = b->nlabels = 0;
++    b->reject = NULL;
++    b->icount = 0;
++    b->nexit = b->nlr = 0;
++    b->indirect = false;
++
++    QTAILQ_FOREACH(op, &s->ops, link) {
++        TCGOpcode opc = op->opc;
++        const TCGOpDef *def = &tcg_op_defs[opc];
++        int nb_o = def->nb_oargs, nb_i = def->nb_iargs, nb_c = def->nb_cargs;
++        T3Op *t;
++        int i;
++
++        if (opc == INDEX_op_insn_start) {
++            pc = tcg_get_insn_start_param(op, 0);
++            if (!seen_insn) {
++                b->pc = pc;
++            }
++            seen_insn = true;
++            b->icount++;
++            continue;
++        }
++        if (opc == INDEX_op_discard) {
++            continue;
++        }
++        switch (opc) {
++        case INDEX_op_plugin_cb:
++        case INDEX_op_plugin_mem_cb:
++        case INDEX_op_qemu_ld2:
++        case INDEX_op_qemu_st2:
++        case INDEX_op_ppc_fp32:         /* POMPPC 0014: not translated (yet) */
++        case INDEX_op_ppc_vfp:          /* POMPPC 0022 */
++            b->reject = def->name;
++            return;
++        default:
++            break;
++        }
++        if (def->flags & TCG_OPF_VECTOR) {
++            b->reject = "vecteur";
++            return;
++        }
++        if (opc >= INDEX_op_last_generic && opc != INDEX_op_call) {
++            b->reject = def->name;      /* ppc_fp32, ppc_vfp, host ops */
++            return;
++        }
++        if (b->nops == cap_ops) {
++            cap_ops = cap_ops ? cap_ops * 2 : 128;
++            b->ops = g_renew(T3Op, b->ops, cap_ops);
++        }
++        t = &b->ops[b->nops++];
++        memset(t, 0, sizeof(*t));
++        t->opc = opc;
++        t->p1 = op->param1;
++        t->p2 = op->param2;
++        t->a = b->nargs;
++        t->pc = pc;
++
++        if (opc == INDEX_op_call) {
++            const TCGHelperInfo *info = tcg_call_info(op);
++            int no = TCGOP_CALLO(op), ni = TCGOP_CALLI(op);
++
++            if (no > 1 || info->out_kind != TCG_CALL_RET_NORMAL) {
++                b->reject = "appel à résultat i128";
++                return;
++            }
++            for (i = 0; i < ni; i++) {
++                if (info->in[i].kind == TCG_CALL_ARG_BY_REF ||
++                    info->in[i].kind == TCG_CALL_ARG_BY_REF_N) {
++                    b->reject = "appel à argument i128";
++                    return;
++                }
++            }
++            if (!strcmp(info->name, "lookup_tb_ptr_check")) {
++                b->reject = "lookup_tb_ptr_check";
++                return;
++            }
++            for (i = 0; i < no + ni; i++) {
++                if (!t3_cap_temp(s, b, &cap_args, op->args[i])) {
++                    return;
++                }
++            }
++            t3_cap_raw(b, &cap_args, (int64_t)(uintptr_t)tcg_call_func(op),
++                       T3A_RAW);
++            t3_cap_raw(b, &cap_args, (int64_t)(uintptr_t)info, T3A_RAW);
++            t->nargs = no + ni + 2;
++            if (!strcmp(info->name, "lookup_tb_ptr")) {
++                if (nip_known) {
++                    t3_add_pc(b->exit_pc, &b->nexit, 8, nip_val);
++                } else {
++                    b->indirect = true;
++                }
++            }
++            continue;
++        }
++
++        for (i = 0; i < nb_o + nb_i; i++) {
++            if (!t3_cap_temp(s, b, &cap_args, op->args[i])) {
++                return;
++            }
++        }
++        for (i = 0; i < nb_c; i++) {
++            TCGArg c = op->args[nb_o + nb_i + i];
++            bool lab = (opc == INDEX_op_br || opc == INDEX_op_set_label) ||
++                       (opc == INDEX_op_brcond && i == 1);
++
++            t3_cap_raw(b, &cap_args, c, lab ? T3A_LABEL : T3A_RAW);
++            if (lab && b->args[b->nargs - 1].idx + 1 > b->nlabels) {
++                b->nlabels = b->args[b->nargs - 1].idx + 1;
++            }
++        }
++        t->nargs = nb_o + nb_i + nb_c;
++
++        switch (opc) {
++        case INDEX_op_qemu_ld:
++        case INDEX_op_qemu_st: {
++            MemOpIdx oi = op->args[nb_o + nb_i];
++            MemOp mop = get_memop(oi);
++
++            t->align = atom_and_align_for_opc(s, mop, T3_HOST_ATOM,
++                                              (mop & MO_SIZE) == MO_128).align;
++            if ((mop & MO_SIZE) > MO_64) {
++                b->reject = "accès 128 bits";
++                return;
++            }
++            break;
++        }
++        case INDEX_op_ld8u: case INDEX_op_ld8s: case INDEX_op_ld16u:
++        case INDEX_op_ld16s: case INDEX_op_ld32u: case INDEX_op_ld32s:
++        case INDEX_op_ld:
++        case INDEX_op_st8: case INDEX_op_st16: case INDEX_op_st32:
++        case INDEX_op_st: {
++            T3Arg *base = &b->args[t->a + 1];
++            intptr_t ofs = b->args[t->a + 2].v;
++            int size = t3_ldst_size(opc, op->param1);
++
++            if (base->kind == T3A_ENV) {
++                if (!seen_insn && opc == INDEX_op_ld && ofs == icount_ofs &&
++                    op->param1 == TCG_TYPE_I32) {
++                    t->headcheck = 1;
++                } else if (t3_env_aliases_global(s, ofs, size)) {
++                    b->reject = "accès à env qui recouvre un global";
++                    return;
++                }
++            }
++            break;
++        }
++        case INDEX_op_set_label:
++            nip_known = false;
++            break;
++        case INDEX_op_mov: {
++            T3Arg *d = &b->args[t->a], *src = &b->args[t->a + 1];
++
++            if (d->kind == T3A_GLOBAL && d->v == t3_target.pc_ofs) {
++                nip_known = src->kind == T3A_CONST;
++                nip_val = src->v;
++                if (t3_target.pc_size == 4) {
++                    nip_val = (uint32_t)nip_val;
++                }
++            } else if (d->kind == T3A_GLOBAL && d->v == t3_target.lr_ofs &&
++                       src->kind == T3A_CONST) {
++                uint64_t v = src->v;
++
++                if (t3_target.pc_size == 4) {
++                    v = (uint32_t)v;
++                }
++                t3_add_pc(b->lr_pc, &b->nlr, 4, v);
++            }
++            break;
++        }
++        case INDEX_op_exit_tb: {
++            uintptr_t v = op->args[0];
++
++            if (v != 0 && (v & TB_EXIT_MASK) != TB_EXIT_REQUESTED) {
++                if (nip_known) {
++                    t3_add_pc(b->exit_pc, &b->nexit, 8, nip_val);
++                } else {
++                    b->indirect = true;
++                }
++            }
++            break;
++        }
++        default:
++            break;
++        }
++        /* any other write to nip makes it unknown */
++        for (i = 0; i < nb_o; i++) {
++            T3Arg *d = &b->args[t->a + i];
++
++            if (opc != INDEX_op_mov && d->kind == T3A_GLOBAL &&
++                d->v == t3_target.pc_ofs) {
++                nip_known = false;
++            }
++        }
++    }
++}
+diff -ruN a/tcg/tier3-stub.c b/tcg/tier3-stub.c
+--- a/tcg/tier3-stub.c
++++ b/tcg/tier3-stub.c
+@@ -0,0 +1,14 @@
++/*
++ * POMPPC tcg/0049 (x-tier3): QEMU built without LLVM, no region compiles.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "tcg/tier3.h"
++
++bool t3_compile(T3Region *r, bool with_log, char *why, size_t whylen)
++{
++    snprintf(why, whylen, "QEMU construit sans LLVM (llvm-config absent)");
++    return false;
++}
++
++uint64_t t3_exit_stats[T3X_N];

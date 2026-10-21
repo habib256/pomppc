@@ -33,6 +33,7 @@
 #   • tlb_reset_dirty sans parcours inutile, PTEG par pointeur, compteurs de ratés, cache de sauts à 2 voies — patches/tcg/0040-0043
 #   • flottant simple : opérandes connus, FPRF paresseux, stfs court — patches/tcg/0045-0047
 #   • second niveau sans compilateur : traces d'une page (x-tier2) — patches/tcg/0048
+#   • régions compilées par LLVM (x-tier3, essai, LLVM optionnel) — patches/tcg/0049
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -1047,6 +1048,33 @@ accel/tcg/cputlb.c t2_check_foreign
 target/ppc/translate.c t2_gen_bc
 target/ppc/cpu_init.c ppc_t2_regs
 TCG48_MARKERS
+  # --- tcg/0049 : régions compilées par LLVM (x-tier3), docs/plan-traducteur-rapide.md §10 ---
+  # Là où x-tier2 formerait une trace : une région de TB chauds (boucles, plusieurs pages,
+  # retours d'appel), ops TCG capturées (tcg/tier3-capture.c.inc) et compilées par LLVM ORC
+  # en une fonction (tcg/tier3.c), dans un fil à part ; registres invités gardés d'un TB à
+  # l'autre, rangés aux sorties ; x-tier2-verify vérifie les régions. Dépendance LLVM
+  # OPTIONNELLE (llvm-config, paquet llvm-21-dev sur le PC, Homebrew llvm sur le Mac) : sans
+  # elle la propriété existe mais rien ne compile. ESSAI : éteint par défaut, plus lent que
+  # TCG sur t2bench (§10).
+  if ! grep -q "x-tier3" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : régions compilées par LLVM (x-tier3, essai)"
+    patch_strict "$ROOT/patches/tcg/0049-tcg-tier3-llvm.patch"
+  fi
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0049 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG49_MARKERS'
+accel/tcg/tier3-exec.c.inc t3_form
+accel/tcg/tier3-exec.c.inc t3_verify
+accel/tcg/cpu-exec.c t3_install_ready
+accel/tcg/translator.c gen_t3_stub
+accel/tcg/translate-all.c t3_active
+accel/tcg/tb-maint.c t3_tb_invalidated
+tcg/tcg.c t3_capture
+tcg/tier3.c t3_compile
+tcg/meson.build llvm_t3_cfg
+target/ppc/cpu_init.c x-tier3
+TCG49_MARKERS
 fi
 
 # --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---
@@ -1297,6 +1325,7 @@ check_opt x-lmw-vector   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-l
 check_opt x-jc-word      qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jc-word=on
 check_opt x-fp-native-cmp qemu_cpu_has_prop "${BIN}64"    "mac99,via=pmu" g4 x-fp-native-cmp=on
 check_opt x-tier2        qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-tier2=4096
+check_opt x-tier3        qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-tier3=50
 check_opt x-vfp-native-cmp qemu_cpu_has_prop "${BIN}64"   "mac99,via=pmu" g4 x-vfp-native-cmp=on
 check_opt x-tlb-precise  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-tlb-precise=on
 check_opt x-lmw-inline   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-lmw-inline=on

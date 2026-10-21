@@ -1,0 +1,179 @@
+ESSAI NEUTRE (22/10/2026) : POMPPC_T2_RETIRE=1, un TB chaud sans trace retraduit sans compteur.
+t2bench entrelacé 3x3 : x-tier2=4096 -8,5 %, + retrait -8,1 % (bench/tcg/t2/t2ret2.bilan). Sur base + 0048 + 0049.
+docs/plan-traducteur-rapide.md §10.5.
+
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -717,7 +717,7 @@
+ enum {
+     T2S_ASK, T2S_FORM, T2S_DROP, T2S_SHORT, T2S_TBS, T2S_INSNS, T2S_GONE,
+     T2S_VRUN, T2S_VOK, T2S_VBAD, T2S_VSKIP, T2S_VEXC, T2S_VNOLOG, T2S_VACC,
+-    T2S_CUT, T2S_LCUT, T2S_N
++    T2S_CUT, T2S_LCUT, T2S_RETIRE, T2S_N
+ };
+ static uint64_t t2_g[T2S_N];
+ static bool t2_atexit_done;
+@@ -730,9 +730,11 @@
+     fprintf(stderr, "x-tier2 : %" PRIu64 " demandes, %" PRIu64 " traces "
+             "(%" PRIu64 " blocs, %" PRIu64 " instructions invité), %" PRIu64
+             " écartées (contexte changé ou bloc invalidé), %" PRIu64
+-            " sans suite chaînée, %" PRIu64 " raccourcies (coupées par TCG)\n",
++            " sans suite chaînée (dont %" PRIu64 " retirés), %" PRIu64
++            " raccourcies (coupées par TCG)\n",
+             t2_g[T2S_ASK], t2_g[T2S_FORM], t2_g[T2S_TBS], t2_g[T2S_INSNS],
+-            t2_g[T2S_DROP] + t2_g[T2S_GONE], t2_g[T2S_SHORT], t2_g[T2S_CUT]);
++            t2_g[T2S_DROP] + t2_g[T2S_GONE], t2_g[T2S_SHORT],
++            t2_g[T2S_RETIRE], t2_g[T2S_CUT]);
+     if (t2_g[T2S_VRUN]) {
+         fprintf(stderr, "x-tier2-verify : %" PRIu64 " traces vérifiées, "
+                 "%" PRIu64 " identiques, %" PRIu64 " DIVERGENCES, %" PRIu64
+@@ -1087,6 +1089,14 @@
+     }
+     if (path.n == 0) {
+         qatomic_add(&t2_g[T2S_SHORT], 1);
++        if (t2_retire_on) {
++            /* no trace from it: translated again without its counter */
++            t2_retire(tb_page_addr0(a));
++            qatomic_add(&t2_g[T2S_RETIRE], 1);
++            mmap_lock();
++            tb_phys_invalidate(a, -1);
++            mmap_unlock();
++        }
+         return;
+     }
+ 
+--- a/accel/tcg/internal-common.h
++++ b/accel/tcg/internal-common.h
+@@ -59,6 +59,15 @@
+         t2_foreign_access(cpu);
+     }
+ }
++/*
++ * POMPPC (x-tier2, POMPPC_T2_RETIRE): the physical pcs of the TBs that got
++ * hot without giving a trace; translated again without their counter.
++ */
++void t2_retire(tb_page_addr_t phys_pc);
++bool t2_retired(tb_page_addr_t phys_pc);
++void t2_retire_flush(void);
++extern bool t2_retire_on;
++
+ /* POMPPC tcg/0049 (x-tier3): a TB of a region goes, all TBs go */
+ void t3_tb_invalidated(TranslationBlock *tb);
+ void t3_flush(void);
+--- a/accel/tcg/tb-maint.c
++++ b/accel/tcg/tb-maint.c
+@@ -811,6 +811,7 @@
+         cpu->t2_pending = NULL;         /* POMPPC tcg/0048 */
+     }
+     t3_flush();                         /* POMPPC tcg/0049 */
++    t2_retire_flush();                  /* POMPPC_T2_RETIRE */
+ 
+     qht_reset_size(&tb_ctx.htable, CODE_GEN_HTABLE_SIZE);
+     tb_remove_all();
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -278,6 +278,63 @@
+  */
+ static unsigned t2_nctr;
+ 
++/*
++ * POMPPC_T2_RETIRE=1: a TB that got hot and gave no trace (t2_form: no
++ * chained successor) would count its executions for ever, 6 host
++ * instructions at its head: +17 % on t2bench when all TBs count.  Its
++ * physical pc is noted and the TB translated again without its counter
++ * (T2_DONE).  Forgotten at tb_flush; a page whose code changes keeps its
++ * notes (a missed trace at worst, never a wrong one).
++ */
++bool t2_retire_on;
++static GHashTable *t2_retire_set;
++static QemuSpin t2_retire_spin;
++
++static void __attribute__((constructor)) t2_retire_init(void)
++{
++    t2_retire_on = getenv("POMPPC_T2_RETIRE") &&
++                   strcmp(getenv("POMPPC_T2_RETIRE"), "0");
++    qemu_spin_init(&t2_retire_spin);
++    t2_retire_set = g_hash_table_new(g_int64_hash, g_int64_equal);
++}
++
++void t2_retire(tb_page_addr_t phys_pc)
++{
++    int64_t *k = g_new(int64_t, 1);
++
++    *k = phys_pc;
++    qemu_spin_lock(&t2_retire_spin);
++    if (!g_hash_table_add(t2_retire_set, k)) {
++        k = NULL;
++    }
++    qemu_spin_unlock(&t2_retire_spin);
++    g_free(k);
++}
++
++bool t2_retired(tb_page_addr_t phys_pc)
++{
++    int64_t k = phys_pc;
++    bool r;
++
++    qemu_spin_lock(&t2_retire_spin);
++    r = g_hash_table_contains(t2_retire_set, &k);
++    qemu_spin_unlock(&t2_retire_spin);
++    return r;
++}
++
++static gboolean t2_retire_free(gpointer k, gpointer v, gpointer d)
++{
++    g_free(k);
++    return TRUE;
++}
++
++void t2_retire_flush(void)
++{
++    qemu_spin_lock(&t2_retire_spin);
++    g_hash_table_foreach_remove(t2_retire_set, t2_retire_free, NULL);
++    qemu_spin_unlock(&t2_retire_spin);
++}
++
+ static uint32_t t2_ctr_alloc(void)
+ {
+     CPUState *c;
+@@ -348,6 +405,9 @@
+     tb->cflags = s.cflags;
+     tb->t2_idx = cpu->t2_thresh ? t2_ctr_alloc() : 0;       /* tcg/0048-0049 */
+     tb->t2_state = T2_NONE;
++    if (tb->t2_idx && t2_retire_on && t2_retired(phys_pc)) {
++        tb->t2_state = T2_DONE;         /* no counter (gen_t2_counter) */
++    }
+     tb->t3_link = NULL;         /* POMPPC tcg/0049 */
+     tb->t3_region = NULL;
+     tb_set_page_addr0(tb, phys_pc);
+--- a/accel/tcg/translator.c
++++ b/accel/tcg/translator.c
+@@ -125,7 +125,7 @@
+                    CF_NO_GOTO_TB | CF_NOIRQ | CF_MEMI_ONLY))) {
+         return;
+     }
+-    if (!tb->t2_idx) {
++    if (!tb->t2_idx || tb->t2_state == T2_DONE) {
+         return;
+     }
+     /* tcg/0049: this vCPU's table, away from the TB */
+--- a/include/exec/translation-block.h
++++ b/include/exec/translation-block.h
+@@ -119,6 +119,7 @@
+ #define T2_ASKED 1
+ #define T2_TRACE 2
+ #define T3_STUB  3   /* POMPPC tcg/0049: enters a compiled region */
++#define T2_DONE  4   /* POMPPC: hot, no trace from it: not counted any more */
+     /* POMPPC tcg/0049 (x-tier3): the regions this TB belongs to */
+     struct T3Link *t3_link;
+     void *t3_region;            /* T3_STUB: its region */
+@@ -252,6 +253,9 @@
+ static inline uint32_t tb_t2_count(const CPUState *cpu,
+                                    const TranslationBlock *tb)
+ {
++    if (tb->t2_state == T2_DONE) {
++        return cpu->t2_thresh;          /* it was hot */
++    }
+     return tb->t2_idx && cpu->t2_ctrs ? qatomic_read(&cpu->t2_ctrs[tb->t2_idx])
+                                       : 0;
+ }

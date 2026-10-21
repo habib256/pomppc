@@ -61,6 +61,10 @@
 #                             # (x-stfs-known, patches/tcg/0047, allumé sur Linux x86-64 depuis le 20/10, §39)
 #   TIER2=4096 ./run_tiger.sh # juste mais +3,3 % sur DOOM 3 (docs/plan-traducteur-rapide.md §9.6) — traces d'une page (x-tier2, patches/tcg/0048,
 #                             # éteint par défaut ; TIER2VERIFY=64 rejoue une trace sur 64 contre ses TB)
+#   TIER3=200 ./run_tiger.sh # ESSAI : régions compilées par LLVM (x-tier3, patches/tcg/0049,
+#                             # docs/plan-traducteur-rapide.md §10), au plus 200 vivantes, seuil TIER2
+#                             # (exécutions par seconde, défaut 131072) ; plus lent que TCG sur t2bench.
+#                             # TIER2VERIFY=64 les vérifie. Éteint par défaut.
 #   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
 #                             # tcg/0016, allumé par défaut, docs/tcg-g4.md §24) ; FPVERIFY=1 : preuve
 #   TBFAST=0 ./run_tiger.sh   # coupe mftb/mftbu calculés depuis le compteur de l'hôte (cntvct, 1 GHz ;
@@ -601,6 +605,25 @@ if [ "${TIER2:-0}" != 0 ]; then
   else
     echo "⚠  TIER2=$TIER2 demandé mais ce QEMU n'a pas la propriété 'x-tier2' (patches/tcg/0048)." >&2
     MODE="$MODE + traces DEMANDÉES MAIS INDISPONIBLES"
+  fi
+fi
+# --- Régions compilées par LLVM (x-tier3, patches/tcg/0049, docs/plan-traducteur-rapide.md §10) ---
+# TIER3=N : là où x-tier2 formerait une trace, une région de TB chauds (boucles, plusieurs pages,
+# retours d'appel) compilée par LLVM dans un fil à part, au plus N régions vivantes. Le seuil
+# est TIER2 (exécutions d'un TB par seconde ; 131072 si TIER2 n'est pas donné). TIER2VERIFY=N
+# vérifie aussi les régions. ESSAI éteint par défaut (§10 : plus lent que TCG sur t2bench).
+if [ "${TIER3:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-tier3=$TIER3"; then
+    if [ "${TIER2:-0}" = 0 ]; then
+      CPU_SPEC="$CPU_SPEC,x-tier2=131072"
+      if [ "${TIER2VERIFY:-0}" != 0 ]; then
+        CPU_SPEC="$CPU_SPEC,x-tier2-verify=$TIER2VERIFY"; MODE="$MODE (VÉRIFIÉES 1/$TIER2VERIFY)"
+      fi
+    fi
+    CPU_SPEC="$CPU_SPEC,x-tier3=$TIER3"; MODE="$MODE + RÉGIONS LLVM($TIER3)"
+  else
+    echo "⚠  TIER3=$TIER3 demandé mais ce QEMU n'a pas la propriété 'x-tier3' (patches/tcg/0049)." >&2
+    MODE="$MODE + régions DEMANDÉES MAIS INDISPONIBLES"
   fi
 fi
 # --- Comparaisons et conversions AltiVec par le FPU de l'hôte (x-vfp-native-cmp,

@@ -599,3 +599,135 @@ vers ~75 ms/image, pas 50.
 Contrôle du binaire rapide reconstruit avec 0048 corrigé (`bench/tcg/ab/fast-2110b`, 3
 parties, non entrelacé) : 92,3 / 96,9 / 92,6 ms/image, médiane **92,6** (95,5 le matin) : pas de
 régression du garde `t2_check_foreign` x-tier2 éteint.
+
+## 10. Phase 2, essai : régions compilées par LLVM (`tcg/0049`, `x-tier3`), 21-22/10
+
+### 10.1 Ce qui est fait
+
+`patches/tcg/0049-tcg-tier3-llvm.patch` (arbre `~/src/qemu-t3`, base `~/src/qemu-t3-base` =
+série + 0048 ; `TIER3=N` dans `run_tiger.sh` ; **éteint par défaut**) :
+
+- **formation** (`accel/tcg/tier3-exec.c.inc`, `t3_form`) : là où 0048 formerait une trace, une
+  région de TB chauds en largeur le long des sorties vues dans les ops capturées (nip constant
+  d'un `goto_tb` ou d'une recherche, même page ou non) et des retours des `bl` de la région ;
+  ≤ 64 TB, 1024 instructions, 8 pages ; une région sans boucle est écartée (sauf
+  `POMPPC_T3_ANY`). Seuil `x-tier2` lu comme un **débit** : compteurs remis à zéro chaque seconde ;
+- **compilation** (`tcg/tier3.c`, LLVM 21 ORC par l'API C, `default<O2>`, fil à part) : les ops
+  TCG capturées après `tcg_optimize` (`tcg/tier3-capture.c.inc`) traduites une pour une ; sorties
+  vers un TB de la région = branchements ; registres invités en valeurs LLVM, rangés seulement
+  s'ils sont sales (flot de données) avant un helper, au chemin lent et aux sorties ; chemin
+  rapide du TLB en ligne ; accès invités volatils ; `cpu->t3_pc` pour `cpu_restore_state` ;
+  retours prédits par un `switch` sur le nip ; TB refusé s'il contient une op non traduite
+  (vecteurs, `ppc_fp32`) ;
+- **installation** : le TB chaud remplacé par un TB d'entrée (`gen_t3_stub`) qui appelle
+  `helper_t3_run` ; invalidation par liens vers les TB des blocs, code comparé à l'installation,
+  `tb_flush` ; garde de la page aux arêtes inter-pages ;
+- **preuve** : `x-tier2-verify` étendu aux régions (copie journalisée, rejeu des TB d'origine) ;
+- **change aussi 0048** : compteurs d'exécution sortis du `TranslationBlock` vers une table par
+  vCPU (`CPUState.t2_ctrs`). À côté du code, la rangée du compteur déclenchait la détection de
+  code automodifié de l'hôte : +80 % sur t2bench ; table partagée entre vCPU : +32 %.
+- LLVM optionnel (`llvm-config`, sinon `tcg/tier3-stub.c`) ; aucun émetteur touché, mais non
+  construit sur arm64.
+
+### 10.2 Preuves
+
+- `tools/tcg/t3proof.sh` (banc nu `t3proof.S` : boucles imbriquées, appel/retour d'une autre
+  page, exception précise dans une boucle, code modifié, accès hors journal) : **CONFORME**,
+  trois mutants attrapés (branchements inversés, registre sale oublié aux sorties, garde hors
+  journal coupé). Rejoué le 22/10 au matin.
+- Tiger single-user (`t3-verif-su2`, 2000 régions) : 19,1 M entrées vérifiées, **0 divergence**.
+- Tiger au bureau + banc (`t3-verif-gui`, 254 régions) : 18,8 M vérifiées, **0 divergence**.
+- md5 de l'image de t2bench identique dans tous les bras.
+
+### 10.3 Banc (t2bench, VM de dev, entrelacé 3 × 3, `bench/tcg/t2/t3ab.bilan`)
+
+| bras | médiane | écart |
+|---|---|---|
+| `x-tier2=0` | 8,50 s | — |
+| `x-tier2=4096` (traces) | 7,79 s | **−8,4 %** |
+| `x-tier2=131072,x-tier3=200` + `POMPPC_T3_NOFORM` (témoin : compteurs + époques) | 9,96 s | +17,1 % |
+| `x-tier2=131072,x-tier3=200` (régions) | 10,02 s | **+17,8 %** |
+
+Couverture (`POMPPC_T3_STATS`, 102 régions) : **21,9 %** des instructions dans les régions ;
+avec 1952 régions, 92,9 %, mais plus lent (15,6 s) : la compilation coûte **150 ms par région en
+moyenne** (de 25 à 580 ms selon les essais, jusqu'à 16 s pour une région), 550 s de processeur
+pour 1952 régions.
+
+Sorties des régions : branchement calculé **58,2 %**, retour prédit manqué **39,8 %**, direct
+hors région 1,4 %. Les deux régions les plus entrées (0xfff086b0, 0xfff0e360 : 1,5 G entrées)
+font **6 et 9 instructions par entrée**. Les régions de t2bench sont entrées et quittées comme
+des TB : chaque entrée paie l'appel de `helper_t3_run`, et chaque sortie paie le rangement des
+registres sales et une recherche (`helper_lookup_tb_ptr`). Ce que les registres gardés
+rapportent dans la région ne couvre pas ce surcoût.
+
+### 10.4 Le coût des compteurs (22/10, `bench/tcg/t2/t3cnt.bilan`, entrelacé 2 × 3)
+
+| bras | médiane | écart |
+|---|---|---|
+| `x-tier2=0` | 7,91 s | — |
+| `x-tier2=2000000000` (compteurs qui ne se déclenchent jamais) | 9,25 s | **+17,0 %** |
+| témoin `x-tier3` (compteurs + époques) | 9,53 s | +20,6 % |
+
+Le compteur ajoute 6 instructions en tête de chaque TB (charger la table, `inc`, ranger,
+comparer, sauter), plus l'appel du helper en ligne, soit ~40 octets de code par TB. Cela coûte
+**17 %** quand tous les TB comptent. Le témoin de 10.3 ne mesurait donc pas « l'infrastructure
+de la phase 2 », mais surtout ce compteur. Les régions ne font pas mieux que lui (+0,6 %), alors
+qu'elles retirent le compteur du code qu'elles couvrent.
+
+Conséquence pour la phase 1 : dans 0048, un TB chaud qui ne donne pas de trace (« sans suite
+chaînée » : 18 916 sur 35 176 demandes au §9.3) **compte à vie**. Sur DOOM 3, le compteur
+d'origine était en plus rangé à côté du code (le +80 % ci-dessus). C'est un suspect sérieux pour
+le +3,3 % du §9.6.
+
+### 10.5 Retirer le compteur d'un TB chaud sans trace (22/10, neutre)
+
+Essai `patches/tcg/essais/0049b-t2-retire.patch` (`POMPPC_T2_RETIRE=1`) : quand `t2_form` ne
+trouve pas de suite, le pc physique du TB est noté, puis le TB est invalidé. Il est retraduit sans
+compteur (`T2_DONE`), et son compte se lit comme le seuil, pour que les traces voisines le voient
+chaud. `t2proof.sh` reste CONFORME. t2bench, entrelacé 3 × 3 (`bench/tcg/t2/t2ret2.bilan`) :
+
+| bras | médiane | écart |
+|---|---|---|
+| `x-tier2=0` | 7,97 s | — |
+| `x-tier2=4096` | 7,29 s | −8,5 % |
+| `x-tier2=4096` + retrait (73 003 TB retirés) | 7,32 s | −8,1 % |
+
+Une fois les traces formées, le code chaud qui compte encore pèse peu : le +17 % de 10.4 vient
+d'un régime où **tous** les TB comptent (époques de `x-tier3`). Le retrait n'est pas gardé dans
+0049. (Une première série, `t2ret.bilan`, avait tourné par erreur sur l'ancien
+`qemu-system-ppc64` : `run_tiger.sh` lance la cible ppc64, il faut reconstruire les deux.)
+
+### 10.6 Verdict
+
+**Pas de gain des régions compilées dans cette forme**, alors que les preuves passent
+(0 divergence). Ce qui manque n'est pas l'optimiseur : LLVM garde bien les registres. Le
+problème est la **forme des régions et le prix de leurs frontières** :
+
+1. sur t2bench, 98 % des sorties sont des branchements calculés ou des retours vers un appelant
+   hors région, et les régions chaudes font 6 à 9 instructions par entrée ;
+2. chaque entrée passe par un TB d'entrée et `helper_t3_run`, et chaque sortie range l'état puis
+   fait une recherche : une région ne se chaîne ni à une autre ni à un TB ;
+3. les compteurs à débit (époques) coûtent 17-20 % s'ils restent dans tout le code ;
+4. la compilation (150 ms par région, `O2`) limite le nombre de régions utiles.
+
+Pour qu'une phase 2 rapporte, il faudrait des régions chaînées entre elles et aux TB comme des
+`goto_tb`, une entrée directe sans helper, des caches de cibles en ligne pour `bctr`/`blr` à
+l'intérieur de la région, et une détection des points chauds sans compteur dans le code (par
+échantillonnage). C'est le gros du travail des phases 3-4, sans garantie : le plafond de DOOM 3
+reste ×1,25-1,3 (§9.7).
+
+DOOM 3 n'a pas été mesuré avec 0049. Ses arêtes sont plus favorables (87 % de transitions
+directes, régions de ~14 blocs, §9.7). Le binaire `~/src/qemu-t3` porte aussi les compteurs en
+table, ce qui permettrait de savoir si le +3,3 % des traces sur DOOM 3 (§9.6) venait du compteur
+rangé à côté du code.
+
+### 10.7 Commandes pour la VM quotidienne (non jouées)
+
+    # A/B DOOM 3, même binaire -O2 (base + 0048 + 0049) : témoin, traces, régions
+    QEMU_BIN=$HOME/src/qemu-t3/build/qemu-system-ppc tools/tcg/matab.sh t3-d3-ab 3 \
+      "ref:CPU_OPTS=x-tier2=0" "t2:CPU_OPTS=x-tier2=4096" \
+      "t3:CPU_OPTS=x-tier2=131072,x-tier3=200" d3 fen
+    # partie vérifiée (pas pour la vitesse) : bilans x-tier2-verify / x-tier3 dans run_tiger.log
+    QEMU_BIN=$HOME/src/qemu-t3/build/qemu-system-ppc tools/tcg/matab.sh t3-d3-verif 1 \
+      "v:CPU_OPTS=x-tier2=131072,x-tier3=200,x-tier2-verify=64" d3 fen
+    tools/tcg/matab.sh --restore
