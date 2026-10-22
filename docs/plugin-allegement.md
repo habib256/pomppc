@@ -6,6 +6,9 @@ fil du jeu, dans le G4 émulé. Consigne de l'utilisateur : **ce qui est fait do
 l'émulation, pas seulement à DOOM 3**. Le plugin est du code invité PowerPC : un gain y vaut
 sur les deux hôtes (PC et M4) sans travail de parité.
 
+**Statut (22/10) : leviers A et B construits, A/B fait sur la VM quotidienne, six leviers
+allumés par défaut dans le plugin `20261022-abon` (PRESENTQ reste éteint) : §6.**
+
 ## 1. Profil des quatre jeux de la matrice du PC
 
 `sample` de 20 s du jeu dans l'invité, VM quotidienne, binaire rapide, plugin `20261021-d3p`
@@ -64,10 +67,11 @@ visibles dans ces profils.
 - **A. Chemin Begin/End** : reprendre au Begin ce que le dispatch a déjà décidé
   (verdict, unités, format, programmes, état, matrices) quand les blocs reçus depuis le dernier
   Begin n'y touchent pas, sur le modèle de DISPFAST, STUNIT et MTXDIRTY au dispatch. Mesure :
-  Marble Blast, Zen. **Construit le 22/10 : §3.**
+  Marble Blast, Zen. **Construit le 22/10 : §3 ; allumé par défaut : §6.**
 - **B. Échange de l'image** : vérifications de fenêtre moins chères (ou déclenchées par un
   changement), attente de la moitié précédente, coût fixe par image de `stats_frame` et
-  `pomppc_proc_pre`. Mesure : Zen, Marble Blast. **Construit le 22/10 : §4.**
+  `pomppc_proc_pre`. Mesure : Zen, Marble Blast. **Construit le 22/10 : §4 ; allumé par
+  défaut (sauf PRESENTQ) : §6.**
 - Plus tard : attente de l'hôte (C), verrous (D).
 
 ## 3. Levier A : le chemin Begin/End (22/10, révision `20261022-beg`)
@@ -380,3 +384,72 @@ Preuves (VM de dev `tiger-dev-plugin.raw`, binaire rapide, SMP 2, RTX) :
   `pop` 0 relevé mauvais, plein écran juste ; contrôles WINSEED (147 et 132) et DISPSEED (449
   et 404) 0 écart, SWAPLITE 0 écart. Les 4 échecs du job sont les 4 `move` (premier
   déplacement, défaut du relevé déjà vu sans levier au §4.4).
+
+## 6. A/B sur la VM quotidienne et allumage (22/10, révision `20261022-abon`)
+
+VM quotidienne, binaire rapide, bundle `20261022-ab` (§5), médianes en ms/image.
+
+**A seul** (`bench/tcg/ab/beg-*`, 3 parties par bras) :
+
+| jeu | ref | BEGINVD + LIGHTDIRTY |
+|---|---|---|
+| Marble Blast | 13,2 | 10,9 (BEGINVD seul 11,1) |
+| Zen | 5,4 | 5,1 |
+| UT2004 | 43,2 | 44,2 |
+| DOOM 3 | 93,4 | 95,2 (bruit : les parties se recouvrent) |
+
+Contrôle sur Marble Blast (`beg-chk`) : 418 440 contrôles BEG, 0 écart ; LIGHTDIRTY 0 écart ;
+STUNIT 0 écart.
+
+**B seul** (`bench/tcg/ab/plugB-*`, 3 parties par bras) :
+
+| jeu | ref | WINSEED TEXDEFER DISPSEED SWAPLITE | + PRESENTQ |
+|---|---|---|---|
+| Marble Blast | 13,2 | 12,6 | 12,4 |
+| Zen | 5,4 | 5,1 | 5,1 |
+| UT2004 | 43,0 | 42,3 | |
+| DOOM 3 | 92,2 | 92,5 | |
+
+Contrôle sur Marble Blast : 0 écart WINSEED, DISPSEED, SWAPLITE. Zen en plein écran n'est pas
+mesurable par la matrice (la case du menu Options est dans `prefs.dat`, chiffré).
+
+**A+B** (`bench/tcg/ab/ab-*`, 5 parties par bras, les six leviers sans PRESENTQ) :
+
+| jeu | ref | A+B | écart |
+|---|---|---|---|
+| Marble Blast | 13,1 (parties 12,7-13,3) | 10,1 (parties 9,8-10,6) | **−23 %** |
+| Zen | 5,4 | 5,0 | −7 % |
+| UT2004 fenêtre | 42,7 | 41,8 | −2 % |
+| UT2004 plein écran | 44,0 | 43,0 | −2 % |
+| DOOM 3 | 93,5 | 93,1 | neutre |
+
+Contrôle sur UT2004 en plein écran (`ab-chk-utpe`) : tous les compteurs à 0 écart.
+
+**Décision** : BEGINVD, LIGHTDIRTY, WINSEED, TEXDEFER, DISPSEED et SWAPLITE allumés par défaut
+(`*_DEFAULT 1`, révision `20261022-abon`) ; chaque variable à `=0` éteint son levier, `=2`
+garde le contrôle ; BEGINVD reste soumis au verdict unique (`POMPPC_GL_VERDICT`). PRESENTQ
+reste éteint : neutre dans la VM de dev, à peine mieux sur Marble Blast, non tranché.
+
+Pièges notés en route :
+
+- `plugmd5` lancé en session graphique (`devloop.py start --gui`) est un **faux vert** :
+  `GLTEST_NOWS` y rend `CGLChoosePixelFormat` 10006, toutes les scènes sortent rc=2 sans
+  image, et le job compte 0 écart. Le lancer en single-user.
+- Le job `gpu` ne lit pas `env.sh` : pour exporter des variables, ajouter `. ./env.sh` à la
+  copie préparée.
+
+Preuves aux nouveaux défauts (VM de dev `tiger-dev-plugin.raw`, aucune variable posée) :
+bundle `bench/plug-ab-2210/GLDriver-POMPPC-20261022-abon.bundle.tar`, md5
+`c16990df7088c6b44adc6c659f82fc21`.
+
+- `plugmd5` en single-user, 68 scènes, `off` (les six variables à `=0`, référence) contre
+  `def` (rien) : **0 écart** (60 scènes rc=0, `arbvp`…`glsldp` rc=1 dans les deux modes).
+  Sans variable, la note montre les leviers actifs : `ECHANGE : texdefer=1 swaplite=1
+  dispseed=1 presentq=0 winseed=1`, lignes `BEG … beginvd 1 … lightdirty 1` (2 170 verdicts
+  repris au glBegin, 6 refaits ; 595 vidages évités) ; sous `off`, aucune ligne BEG et
+  `texdefer=0 swaplite=0 dispseed=0 winseed=0`.
+- Job `gpu` aux défauts : **56 OK, 0 échec** (`qgpu_test` 0).
+- `swapwin` en session graphique, `TEXDEL=1`, `fen move cover pop fs`, modes `def` et `off` :
+  aucun plantage ; `cover`, `pop`, `fs` justes ; aux défauts `ECHANGE image 500 : texdefer 500
+  vidages évités … winseed 49 reprises` (cover). Les 2 échecs du job sont les deux `move`
+  (défaut du relevé, identique sous `off`).

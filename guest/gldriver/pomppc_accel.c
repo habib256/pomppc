@@ -129,7 +129,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261022-ab"
+#define POMPPC_PLUGIN_REV "20261022-abon"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -183,14 +183,16 @@
 #define DISPLOCK_DEFAULT 1
 #endif
 /* 22/10/2026 (docs/plugin-allegement.md §3) : BEGINVD, verdict du glBegin
-   repris du dispatch (clé du lot 2) ; 2 = contrôle. Éteint d'abord. */
+   repris du dispatch (clé du lot 2) ; 2 = contrôle. */
 #ifndef BEGINVD_DEFAULT
-#define BEGINVD_DEFAULT 0
+/* allumé le 22/10 après l'A/B de bench/tcg/ab/ab-* (docs/plugin-allegement.md §6) */
+#define BEGINVD_DEFAULT 1
 #endif
 /* 22/10/2026 : LIGHTDIRTY, lumières comparées au dessin seulement si un
    dispatch a signalé glLight (+0x0c 0x4) depuis ; 2 = contrôle. */
 #ifndef LIGHTDIRTY_DEFAULT
-#define LIGHTDIRTY_DEFAULT 0
+/* allumé le 22/10 après l'A/B de bench/tcg/ab/ab-* (docs/plugin-allegement.md §6) */
+#define LIGHTDIRTY_DEFAULT 1
 #endif
 /* +0x0c du bloc de changements, lumière i : bit 2 + 2i pour ses paramètres
    (glLightfv, glLightf), bit 3 + 2i pour son allumage (relevé R4,
@@ -1382,7 +1384,8 @@ static void crash_hook_fresh(void)
 }
 
 /* ─────────── 22/10/2026 — levier B : alléger l'échange de chaque image ───────────
- * (docs/plugin-allegement.md §3). Variables éteintes par défaut :
+ * (docs/plugin-allegement.md §4). Variables allumées par défaut le 22/10
+ * (§6), sauf PRESENTQ ; =0 éteint chacune :
  *
  *   POMPPC_GL_TEXDEFER=1  la destruction d'une texture (TEX_DESTROY) ne vide
  *       plus le flux : elle part avec la soumission suivante, dans l'ordre du
@@ -1415,19 +1418,23 @@ static void crash_hook_fresh(void)
  *   image — il devait demander plus tôt, donc plus souvent — pour un gain que
  *   WINSEED obtient sans fil. Commit 01984aa.) */
 #ifndef TEXDEFER_DEFAULT
-#define TEXDEFER_DEFAULT 0
+/* allumé le 22/10 après l'A/B de bench/tcg/ab/ab-* (docs/plugin-allegement.md §6) */
+#define TEXDEFER_DEFAULT 1
 #endif
 #ifndef SWAPLITE_DEFAULT
-#define SWAPLITE_DEFAULT 0
+/* allumé le 22/10 après l'A/B de bench/tcg/ab/ab-* (docs/plugin-allegement.md §6) */
+#define SWAPLITE_DEFAULT 1
 #endif
 #ifndef DISPSEED_DEFAULT
-#define DISPSEED_DEFAULT 0
+/* allumé le 22/10 après l'A/B de bench/tcg/ab/ab-* (docs/plugin-allegement.md §6) */
+#define DISPSEED_DEFAULT 1
 #endif
 #ifndef PRESENTQ_DEFAULT
 #define PRESENTQ_DEFAULT 0
 #endif
 #ifndef WINSEED_DEFAULT
-#define WINSEED_DEFAULT 0
+/* allumé le 22/10 après l'A/B de bench/tcg/ab/ab-* (docs/plugin-allegement.md §6) */
+#define WINSEED_DEFAULT 1
 #endif
 static struct {
     int            init, texdefer, lite;
