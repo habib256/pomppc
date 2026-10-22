@@ -6317,6 +6317,376 @@ int main(int argc, char **argv)
                    (a & 255) > 200 ? "ok  " : "FAIL", a);
             if (!((a & 255) > 200)) failures++;
         }
+    } else if (!strcmp(scene, "mbimm")) {
+        /* 22/10/2026 — le fil de Marble Blast vu par le plugin
+           (docs/plugin-allegement.md §3) : une image du Torque Game Engine en
+           mode immédiat, réduite. ~36 glBegin par image, presque chacun
+           précédé d'un changement d'état (donc d'un gldUpdateDispatch) : ciel
+           (unité 0 seule, profondeur masquée), intérieurs (unité 0 changée à
+           chaque surface, carte de lumière en unité 1, deux surfaces de suite
+           sans changement d'état sur quatre), bille (éclairage,
+           COLOR_MATERIAL, une matrice, six rubans consécutifs), ombre
+           translucide (mélange, sans texture), puis l'interface en
+           projection orthogonale : atlas de police RÉÉCRIT (glTexSubImage2D)
+           entre deux lignes de texte sans nouvelle liaison, et à la première
+           image une texture liée AVANT d'avoir une image, dessinée, puis
+           définie (glTexImage2D) et redessinée — le cas P11 du plugin.
+           Image comparée À L'OCTET entre les modes du plugin (job plugmd5).
+           GLTEST_MBFR=n : n images (défaut 3). */
+        static const float cs8[9][2] = {   /* cos, sin de k·45° */
+            { 1, 0 }, { 0.70710678f, 0.70710678f }, { 0, 1 }, { -0.70710678f, 0.70710678f },
+            { -1, 0 }, { -0.70710678f, -0.70710678f }, { 0, -1 }, { 0.70710678f, -0.70710678f },
+            { 1, 0 } };
+        static const float lpos[4] = { 0.3f, 1.0f, 0.6f, 0 };
+        static const float fogc[4] = { 0.55f, 0.6f, 0.75f, 1 };
+        unsigned char img[32 * 32 * 3], lmi[16 * 16], atl[64 * 64 * 2], gly[8 * 8 * 2];
+        GLuint sky, tx[3], lm[2], atlas, late = 0, marble;
+        int x, y, f, s, k, frames = getenv("GLTEST_MBFR") ? atoi(getenv("GLTEST_MBFR")) : 3;
+        glGenTextures(1, &sky);
+        glGenTextures(3, tx);
+        glGenTextures(2, lm);
+        glGenTextures(1, &atlas);
+        glGenTextures(1, &marble);
+        for (y = 0; y < 32; y++)
+            for (x = 0; x < 32; x++) {
+                img[(y * 32 + x) * 3] = (unsigned char)(90 + 2 * y);
+                img[(y * 32 + x) * 3 + 1] = (unsigned char)(120 + 3 * y);
+                img[(y * 32 + x) * 3 + 2] = (unsigned char)(200 + x);
+            }
+        glBindTexture(GL_TEXTURE_2D, sky);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 32, 32, 0, GL_RGB, GL_UNSIGNED_BYTE, img);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        for (s = 0; s < 3; s++) {
+            for (y = 0; y < 32; y++)
+                for (x = 0; x < 32; x++) {
+                    int on = ((x / (4 << s)) + (y / 4)) & 1;
+                    img[(y * 32 + x) * 3] = (unsigned char)(on ? 220 - 60 * s : 70);
+                    img[(y * 32 + x) * 3 + 1] = (unsigned char)(on ? 120 + 50 * s : 60 + 20 * s);
+                    img[(y * 32 + x) * 3 + 2] = (unsigned char)(on ? 60 + 70 * s : 90);
+                }
+            glBindTexture(GL_TEXTURE_2D, tx[s]);
+            gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGB, 32, 32, GL_RGB, GL_UNSIGNED_BYTE, img);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+        for (s = 0; s < 2; s++) {
+            for (y = 0; y < 16; y++)
+                for (x = 0; x < 16; x++)
+                    lmi[y * 16 + x] = (unsigned char)(s ? 250 - 9 * x : 100 + 8 * x + 3 * y);
+            glBindTexture(GL_TEXTURE_2D, lm[s]);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, 16, 16, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, lmi);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        }
+        for (y = 0; y < 16; y++)
+            for (x = 0; x < 16; x++) {
+                img[(y * 16 + x) * 3] = (unsigned char)(((x ^ y) & 4) ? 240 : 40);
+                img[(y * 16 + x) * 3 + 1] = (unsigned char)(80 + 8 * y);
+                img[(y * 16 + x) * 3 + 2] = (unsigned char)(250 - 6 * x);
+            }
+        glBindTexture(GL_TEXTURE_2D, marble);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 16, 16, 0, GL_RGB, GL_UNSIGNED_BYTE, img);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        for (y = 0; y < 64; y++)              /* atlas : 8×8 cases de glyphes */
+            for (x = 0; x < 64; x++) {
+                int gx = x & 7, gy = y & 7, c = (x >> 3) + (y >> 3) * 8;
+                int on = gx > 0 && gy > 0 && ((gx + gy + c) % 3 != 0);
+                atl[(y * 64 + x) * 2] = 255;
+                atl[(y * 64 + x) * 2 + 1] = (unsigned char)(on ? 255 : 0);
+            }
+        glBindTexture(GL_TEXTURE_2D, atlas);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE_ALPHA, 64, 64, 0, GL_LUMINANCE_ALPHA,
+                     GL_UNSIGNED_BYTE, atl);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glFogi(GL_FOG_MODE, GL_LINEAR);
+        glFogf(GL_FOG_START, 4.0f);
+        glFogf(GL_FOG_END, 40.0f);
+        glFogfv(GL_FOG_COLOR, fogc);
+        glLightfv(GL_LIGHT0, GL_POSITION, lpos);
+        glEnable(GL_LIGHT0);
+        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+        glMatrixMode(GL_PROJECTION); glLoadIdentity();
+        gluPerspective(65, (double)W / H, 0.5, 80);
+        glMatrixMode(GL_MODELVIEW);
+        for (f = 0; f < frames; f++) {
+            glClearColor(fogc[0], fogc[1], fogc[2], 1);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            glLoadIdentity();
+            glTranslatef(0.1f * f, -0.5f, -2.0f - 0.25f * f);
+            /* ciel : unité 0 seule, profondeur ni testée ni écrite */
+            glDisable(GL_DEPTH_TEST);
+            glDepthMask(GL_FALSE);
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, sky);
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+            glBegin(GL_QUADS);
+            glTexCoord2f(0, 0); glVertex3f(-60, 30, -50);
+            glTexCoord2f(1, 0); glVertex3f(60, 30, -50);
+            glTexCoord2f(1, 1); glVertex3f(60, -5, -50);
+            glTexCoord2f(0, 1); glVertex3f(-60, -5, -50);
+            glEnd();
+            /* intérieurs : base en unité 0, carte de lumière en unité 1 */
+            glEnable(GL_DEPTH_TEST);
+            glDepthMask(GL_TRUE);
+            glEnable(GL_FOG);
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+            glActiveTextureARB(GL_TEXTURE1_ARB);
+            glEnable(GL_TEXTURE_2D);
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+            glActiveTextureARB(GL_TEXTURE0_ARB);
+            for (s = 0; s < 16; s++) {
+                float x0 = -4.0f + (s % 4) * 2.0f, z0 = -2.0f - (s / 4) * 3.0f;
+                int rep = (s % 4 == 3) ? 2 : 1, r;
+                glBindTexture(GL_TEXTURE_2D, tx[(s * 5 + f) % 3]);
+                if (s % 3 == 0) {
+                    glActiveTextureARB(GL_TEXTURE1_ARB);
+                    glBindTexture(GL_TEXTURE_2D, lm[(s / 3) & 1]);
+                    glActiveTextureARB(GL_TEXTURE0_ARB);
+                }
+                for (r = 0; r < rep; r++) {     /* deux de suite : pas de dispatch entre */
+                    float yb = -1.0f + 0.9f * r;
+                    glColor3ub((unsigned char)(255 - 20 * r), 255, (unsigned char)(230 + 10 * (s & 1)));
+                    glBegin(GL_TRIANGLE_FAN);
+                    glMultiTexCoord2fARB(GL_TEXTURE1_ARB, 0, 0); glTexCoord2f(0, 0);
+                    glVertex3f(x0, yb, z0);
+                    glMultiTexCoord2fARB(GL_TEXTURE1_ARB, 1, 0); glTexCoord2f(2, 0);
+                    glVertex3f(x0 + 1.8f, yb, z0);
+                    glMultiTexCoord2fARB(GL_TEXTURE1_ARB, 1, 1); glTexCoord2f(2, 2);
+                    glVertex3f(x0 + 1.8f, yb + 0.6f, z0 - 2.5f);
+                    glMultiTexCoord2fARB(GL_TEXTURE1_ARB, 0, 1); glTexCoord2f(0, 2);
+                    glVertex3f(x0, yb + 0.6f, z0 - 2.5f);
+                    glEnd();
+                }
+            }
+            glActiveTextureARB(GL_TEXTURE1_ARB);
+            glDisable(GL_TEXTURE_2D);
+            glActiveTextureARB(GL_TEXTURE0_ARB);
+            /* bille : éclairée, une matrice, six rubans de suite ; la lumière
+               est reposée (éclairage encore éteint) une image sur deux, sa
+               couleur change à chaque fois */
+            if (f & 1) {
+                float dif[4];
+                dif[0] = 1.0f; dif[1] = 0.6f + 0.1f * (f & 3); dif[2] = 0.5f; dif[3] = 1;
+                glLightfv(GL_LIGHT0, GL_POSITION, lpos);
+                glLightfv(GL_LIGHT0, GL_DIFFUSE, dif);
+            }
+            glEnable(GL_LIGHTING);
+            glEnable(GL_COLOR_MATERIAL);
+            glBindTexture(GL_TEXTURE_2D, marble);
+            glPushMatrix();
+            glTranslatef(0.3f - 0.1f * f, -0.4f, -4.0f);
+            glRotatef(25.0f * f, 0.3f, 1, 0);
+            glScalef(0.6f, 0.6f, 0.6f);
+            glColor3ub(255, 240, 220);
+            for (s = 0; s < 6; s++) {
+                float r0 = cs8[s + 1][1], r1 = cs8[s + 2][1];
+                float y0 = cs8[s + 1][0], y1 = cs8[s + 2][0];
+                if (s >= 3) { r0 = cs8[s - 2][1]; r1 = cs8[s - 1][1]; y0 = -cs8[s - 2][0]; y1 = -cs8[s - 1][0]; }
+                glBegin(GL_TRIANGLE_STRIP);
+                for (k = 0; k <= 8; k++) {
+                    float cx = cs8[k][0], sz = cs8[k][1];
+                    glNormal3f(r0 * cx, y0, r0 * sz);
+                    glTexCoord2f(k / 8.0f, s / 6.0f);
+                    glVertex3f(r0 * cx, y0, r0 * sz);
+                    glNormal3f(r1 * cx, y1, r1 * sz);
+                    glTexCoord2f(k / 8.0f, (s + 1) / 6.0f);
+                    glVertex3f(r1 * cx, y1, r1 * sz);
+                }
+                glEnd();
+            }
+            glPopMatrix();
+            glDisable(GL_COLOR_MATERIAL);
+            glDisable(GL_LIGHTING);
+            /* ombre translucide, sans texture */
+            glDisable(GL_TEXTURE_2D);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glColor4f(0, 0, 0, 0.4f);
+            glBegin(GL_QUADS);
+            glVertex3f(-0.4f, -0.99f, -3.6f); glVertex3f(1.0f, -0.99f, -3.6f);
+            glVertex3f(1.0f, -0.99f, -4.6f); glVertex3f(-0.4f, -0.99f, -4.6f);
+            glEnd();
+            glDisable(GL_FOG);
+            /* interface : projection orthogonale, atlas de police */
+            glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
+            glOrtho(0, W, H, 0, -1, 1);
+            glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+            glDisable(GL_DEPTH_TEST);
+            glEnable(GL_TEXTURE_2D);
+            glEnable(GL_ALPHA_TEST);
+            glAlphaFunc(GL_GREATER, 0.1f);
+            glBindTexture(GL_TEXTURE_2D, atlas);
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+            for (s = 0; s < 4; s++) {
+                float gy = 4.0f + 14.0f * s;
+                if (s > 0) {
+                    /* glyphe réécrit dans l'atlas entre deux lignes (pas de liaison) */
+                    for (k = 0; k < 64; k++) {
+                        gly[k * 2] = (unsigned char)(150 + 25 * s);
+                        gly[k * 2 + 1] = (unsigned char)((((k >> 3) + (k & 7) + s + f) & 1) ? 255 : 0);
+                    }
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, 8 * s, 0, 8, 8, GL_LUMINANCE_ALPHA,
+                                    GL_UNSIGNED_BYTE, gly);
+                }
+                glColor3ub((unsigned char)(255 - 40 * s), 255, (unsigned char)(80 * s));
+                glBegin(GL_QUADS);
+                for (k = 0; k < 12; k++) {
+                    int c = (k * 7 + s * 3 + f) & 63;
+                    float u0 = (c & 7) / 8.0f, v0 = (c >> 3) / 8.0f, gx = 4.0f + 10.0f * k;
+                    glTexCoord2f(u0, v0); glVertex2f(gx, gy);
+                    glTexCoord2f(u0 + 0.125f, v0); glVertex2f(gx + 9, gy);
+                    glTexCoord2f(u0 + 0.125f, v0 + 0.125f); glVertex2f(gx + 9, gy + 12);
+                    glTexCoord2f(u0, v0 + 0.125f); glVertex2f(gx, gy + 12);
+                }
+                glEnd();
+            }
+            if (f == 0) {
+                /* P11 : texture liée sans image (unité coupée), dessinée, puis
+                   définie entre deux glBegin sans nouvelle liaison */
+                glGenTextures(1, &late);
+                glBindTexture(GL_TEXTURE_2D, late);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glColor3ub(255, 128, 64);
+                glBegin(GL_QUADS);
+                glTexCoord2f(0, 0); glVertex2f(4, 64);
+                glTexCoord2f(1, 0); glVertex2f(60, 64);
+                glTexCoord2f(1, 1); glVertex2f(60, 80);
+                glTexCoord2f(0, 1); glVertex2f(4, 80);
+                glEnd();
+                for (k = 0; k < 64; k++) {
+                    gly[k * 2] = (unsigned char)(k * 4);
+                    gly[k * 2 + 1] = (unsigned char)((k & 9) ? 255 : 0);
+                }
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE_ALPHA, 8, 8, 0, GL_LUMINANCE_ALPHA,
+                             GL_UNSIGNED_BYTE, gly);
+                glBegin(GL_QUADS);
+                glTexCoord2f(0, 0); glVertex2f(64, 64);
+                glTexCoord2f(1, 0); glVertex2f(120, 64);
+                glTexCoord2f(1, 1); glVertex2f(120, 80);
+                glTexCoord2f(0, 1); glVertex2f(64, 80);
+                glEnd();
+            }
+            glDisable(GL_ALPHA_TEST);
+            glDisable(GL_BLEND);
+            glMatrixMode(GL_PROJECTION); glPopMatrix();
+            glMatrixMode(GL_MODELVIEW); glPopMatrix();
+            glFlush();
+        }
+        glFinish();
+        check_cond("mbimm : image dessinée (non uniforme)", distinct_colors(24) >= 24);
+        glDeleteTextures(1, &sky);
+        glDeleteTextures(3, tx);
+        glDeleteTextures(2, lm);
+        glDeleteTextures(1, &atlas);
+        glDeleteTextures(1, &marble);
+        if (late)
+            glDeleteTextures(1, &late);
+    } else if (!strcmp(scene, "litdirty")) {
+        /* 22/10/2026 — POMPPC_GL_LIGHTDIRTY (docs/plugin-allegement.md §3) :
+           toutes les façons de changer une lumière entre deux dessins éclairés,
+           chacune suivie d'un dessin (glBegin, et une fois glDrawArrays) —
+           glLightfv / glLightf directs, éclairage éteint pendant le changement,
+           glPushAttrib(GL_LIGHTING_BIT) / glPopAttrib qui RESTAURE la lumière,
+           liste d'affichage, modèle-vue changée sans glLight (la position reste
+           celle du glLight), lumière allumée ou éteinte, modèle d'éclairage et
+           matériau. Image comparée À L'OCTET entre les modes du plugin. */
+        static const float p0[4] = { 0.4f, 0.8f, 1.0f, 0 }, p1[4] = { -0.5f, 0.3f, 0.6f, 1 };
+        static const float red[4] = { 1, 0.3f, 0.2f, 1 }, grn[4] = { 0.2f, 1, 0.3f, 1 };
+        static const float blu[4] = { 0.3f, 0.4f, 1, 1 }, wht[4] = { 1, 1, 1, 1 };
+        static const float amb[4] = { 0.3f, 0.2f, 0.1f, 1 }, mat[4] = { 0.9f, 0.7f, 0.5f, 1 };
+        static const float sd[3] = { 0.4f, -0.2f, -1 };
+        static float va[8 * 3], na[8 * 3];
+        GLuint dl;
+        int step, k;
+        glMatrixMode(GL_PROJECTION); glLoadIdentity();
+        glFrustum(-1, 1, -1, 1, 1, 20);
+        glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+        glClearColor(0.1f, 0.1f, 0.15f, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glLightfv(GL_LIGHT0, GL_POSITION, p0);
+        glLightfv(GL_LIGHT0, GL_DIFFUSE, wht);
+        glLightfv(GL_LIGHT1, GL_DIFFUSE, blu);
+        glEnable(GL_LIGHT0);
+        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, mat);
+        glEnable(GL_LIGHTING);
+        dl = glGenLists(1);
+        glNewList(dl, GL_COMPILE);
+        glLightfv(GL_LIGHT1, GL_POSITION, p1);
+        glLightfv(GL_LIGHT1, GL_SPOT_DIRECTION, sd);
+        glLightf(GL_LIGHT1, GL_SPOT_CUTOFF, 40.0f);
+        glLightf(GL_LIGHT1, GL_SPOT_EXPONENT, 4.0f);
+        glEndList();
+        for (step = 0; step < 20; step++) {
+            float cx = -0.8f + 0.4f * (step % 5), cy = 0.75f - 0.5f * (step / 5);
+            if (getenv("GLTEST_STEPS")) {   /* entrelacé avec POMPPC_GL_BLOCKDUMP */
+                fprintf(stderr, "PAS %d\n", step);
+                fflush(stderr);
+            }
+            switch (step) {
+            case 1: glLightfv(GL_LIGHT0, GL_DIFFUSE, red); break;
+            case 2: glPushAttrib(GL_LIGHTING_BIT); glLightfv(GL_LIGHT0, GL_DIFFUSE, grn); break;
+            case 3: glPopAttrib(); break;                   /* rouge revient */
+            case 4: glCallList(dl); glEnable(GL_LIGHT1); break;
+            case 5: glDisable(GL_LIGHTING);
+                    glLightfv(GL_LIGHT0, GL_SPECULAR, grn);
+                    glLightf(GL_LIGHT0, GL_LINEAR_ATTENUATION, 0.3f);
+                    glEnable(GL_LIGHTING); break;
+            case 6: glRotatef(25, 0, 1, 0); break;          /* sans glLight */
+            case 7: glLoadIdentity(); glDisable(GL_LIGHT0); break;
+            case 8: glEnable(GL_LIGHT0); glLightModelfv(GL_LIGHT_MODEL_AMBIENT, amb); break;
+            case 9: glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, blu); break;
+            case 10: glPushAttrib(GL_ENABLE_BIT); glDisable(GL_LIGHT1); break;
+            case 11: glPopAttrib(); break;
+            case 12: glRotatef(-30, 1, 0, 0); glLightfv(GL_LIGHT0, GL_POSITION, p0);
+                     glLoadIdentity(); break;               /* position prise tournée */
+            case 13: glPushAttrib(GL_LIGHTING_BIT); glLightfv(GL_LIGHT1, GL_DIFFUSE, red);
+                     glPopAttrib(); break;                  /* changé puis restauré sans dessin */
+            case 14: glLightf(GL_LIGHT1, GL_QUADRATIC_ATTENUATION, 0.2f); break;
+            /* lumières 2 et 7 : un bit de paramètres et un d'allumage par
+               lumière dans +0x0c (relevé de cette scène, 22/10) */
+            case 16: glLightfv(GL_LIGHT2, GL_POSITION, p1); glLightfv(GL_LIGHT2, GL_DIFFUSE, grn);
+                     glEnable(GL_LIGHT2); break;
+            case 17: glLightfv(GL_LIGHT2, GL_DIFFUSE, red); break;
+            case 18: glLightfv(GL_LIGHT7, GL_DIFFUSE, blu); glEnable(GL_LIGHT7); break;
+            case 19: glLightf(GL_LIGHT7, GL_CONSTANT_ATTENUATION, 0.5f); break;
+            default: break;
+            }
+            if (step == 15) {                               /* tableaux : geom_draw_client */
+                glLightfv(GL_LIGHT0, GL_DIFFUSE, grn);
+                for (k = 0; k < 4; k++) {
+                    va[k * 3] = cx + ((k == 1 || k == 2) ? 0.15f : -0.15f);
+                    va[k * 3 + 1] = cy + (k >= 2 ? 0.2f : -0.2f);
+                    va[k * 3 + 2] = -2.0f;
+                    na[k * 3] = 0.3f * (k & 1); na[k * 3 + 1] = 0.2f; na[k * 3 + 2] = 1;
+                }
+                glEnableClientState(GL_VERTEX_ARRAY);
+                glEnableClientState(GL_NORMAL_ARRAY);
+                glVertexPointer(3, GL_FLOAT, 0, va);
+                glNormalPointer(GL_FLOAT, 0, na);
+                glDrawArrays(GL_QUADS, 0, 4);
+                glDisableClientState(GL_NORMAL_ARRAY);
+                glDisableClientState(GL_VERTEX_ARRAY);
+                continue;
+            }
+            glBegin(GL_TRIANGLE_STRIP);
+            for (k = 0; k < 4; k++) {
+                glNormal3f(0.3f * (k & 1) - 0.15f, 0.25f * (k >> 1) - 0.1f, 1);
+                glVertex3f(cx + (k & 1 ? 0.15f : -0.15f), cy + (k & 2 ? 0.2f : -0.2f), -2.0f);
+            }
+            glEnd();
+        }
+        glDisable(GL_LIGHT2);
+        glDisable(GL_LIGHT7);
+        glDisable(GL_LIGHTING);
+        glDeleteLists(dl, 1);
+        glFinish();
+        check_cond("litdirty : vingt cases éclairées (image non uniforme)", distinct_colors(12) >= 12);
     } else if (!strcmp(scene, "fusion")) {
         /* BEAUCOUP de primitives COURTES et CONSÉCUTIVES : c'est exactement ce
            que Marble Blast envoie (7,7 sommets par dessin), et ce que le plugin

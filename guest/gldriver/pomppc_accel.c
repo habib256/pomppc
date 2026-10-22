@@ -129,7 +129,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261021-d3p"
+#define POMPPC_PLUGIN_REV "20261022-beg"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -182,6 +182,22 @@
 #ifndef DISPLOCK_DEFAULT
 #define DISPLOCK_DEFAULT 1
 #endif
+/* 22/10/2026 (docs/plugin-allegement.md §3) : BEGINVD, verdict du glBegin
+   repris du dispatch (clé du lot 2) ; 2 = contrôle. Éteint d'abord. */
+#ifndef BEGINVD_DEFAULT
+#define BEGINVD_DEFAULT 0
+#endif
+/* 22/10/2026 : LIGHTDIRTY, lumières comparées au dessin seulement si un
+   dispatch a signalé glLight (+0x0c 0x4) depuis ; 2 = contrôle. */
+#ifndef LIGHTDIRTY_DEFAULT
+#define LIGHTDIRTY_DEFAULT 0
+#endif
+/* +0x0c du bloc de changements, lumière i : bit 2 + 2i pour ses paramètres
+   (glLightfv, glLightf), bit 3 + 2i pour son allumage (relevé R4,
+   docs/re/bloc-changements-r4.md §2, complété le 22/10 par la scène
+   litdirty : 0x4/0x8 lumière 0, 0x10/0x20 lumière 1…, 0x40000 au-delà est
+   GL_COLOR_MATERIAL). */
+#define LD_LIGHTS    0x0003fffcUL
 /* MTXDIRTY : bits du mot +0x08 du bloc de changements (relevés R4/R5,
    docs/re/bloc-changements-r4.md) — fenêtre et plage de profondeur 0x1,
    projection 0x8, modèle-vue 0x10, matrices (et cibles) de texture
@@ -966,6 +982,11 @@ typedef struct PCtx {
                                            modèle-vue) reçus depuis la dernière comparaison */
     unsigned long  md_tex;              /* MTXDIRTY : unités dont la matrice de texture
                                            est à comparer (bit u) */
+    int            vd_norm;             /* 22/10 (BEGINVD) : unités coupées de vd_ti
+                                           remises à zéro (bv_norm) */
+    unsigned long  md_light;            /* 22/10 (LIGHTDIRTY) : lumières (bit i) dont un
+                                           glLight a été signalé depuis leur dernière
+                                           comparaison */
     unsigned long  pm_gen[2];           /* PROGMEMO : génération de la table, objet de
                                            GLEngine et réponse de pprog_find, par étage */
     const unsigned char *pm_obj[2];
@@ -1267,6 +1288,15 @@ static struct {
                                            sautées, faites ; contrôle : changements
                                            que le bloc n'avait pas signalés */
     unsigned long   n_su_part, n_su_units, n_su_chk, n_su_chk_diff; /* STUNIT */
+    int             beginvd;            /* 22/10 : POMPPC_GL_BEGINVD, verdict du glBegin
+                                           repris ; 2 = contrôle */
+    unsigned long   n_bv_take, n_bv_full, n_bv_chk, n_bv_diff;  /* BEGINVD : repris,
+                                           refaits (clé changée ou sans verdict ok) ;
+                                           contrôle : comparés, écarts */
+    int             lightdirty;         /* 22/10 : POMPPC_GL_LIGHTDIRTY ; 2 = contrôle */
+    unsigned long   n_ld_skip, n_ld_cmp, n_ld_chk_diff;    /* LIGHTDIRTY : séries de
+                                           comparaisons des lumières sautées, faites ;
+                                           contrôle : changements non signalés */
     int             tcllost;            /* 07/10 : POMPPC_GL_TCLLOST (défaut 1) */
     unsigned long   n_tcllost;          /* dispatchs « T&L perdu » honorés */
     int             native_range;       /* plage de gldFlushBuffer crue (défaut) */
@@ -2769,6 +2799,15 @@ void pomppc_backend_init(void)
                 G.stunit = e && e[0] ? (int)(e[0] - '0') : STUNIT_DEFAULT;
                 if (G.stunit < 0 || G.stunit > 2)
                     G.stunit = 0;
+                /* 22/10 (docs/plugin-allegement.md §3) */
+                e = getenv("POMPPC_GL_BEGINVD");
+                G.beginvd = G.verdict ? (e && e[0] ? (int)(e[0] - '0') : BEGINVD_DEFAULT) : 0;
+                if (G.beginvd < 0 || G.beginvd > 2)
+                    G.beginvd = 0;
+                e = getenv("POMPPC_GL_LIGHTDIRTY");
+                G.lightdirty = e && e[0] ? (int)(e[0] - '0') : LIGHTDIRTY_DEFAULT;
+                if (G.lightdirty < 0 || G.lightdirty > 2)
+                    G.lightdirty = 0;
             }
             G.pixtex = -1;
             G.pixtex_w = G.pixtex_h = 0;
@@ -3106,6 +3145,7 @@ static void invalidate_mirrors_from(unsigned long from)
         p->g_sent = 0;
         p->md_bits = ~0UL;              /* 21/10 (MTXDIRTY) : tout à comparer */
         p->md_tex = 0xffUL;
+        p->md_light = 0xffUL;           /* 22/10 (LIGHTDIRTY) */
         p->c_pstip_valid = 0;
         p->c_lmask = 0;
         memset(p->c_mtx, 0, sizeof(p->c_mtx));
@@ -10974,6 +11014,8 @@ static void geom_send_matrices(PCtx *p, unsigned long fmt)
     }
 }
 
+static int bd_in(void);
+
 static void geom_send_lights(PCtx *p)
 {
     unsigned char *g = gls(p);
@@ -10981,15 +11023,50 @@ static void geom_send_lights(PCtx *p)
     unsigned long a[QGPU_LEN_SET_LIGHT - 1];
     unsigned long m[QGPU_LEN_SET_MATERIAL - 1];
     int i, f, remask = !p->g_sent || mask != p->c_lmask;
+    /* 22/10 (POMPPC_GL_LIGHTDIRTY, docs/plugin-allegement.md §3) : les 0x60
+       octets d'une lumière ne changent que par glLight (ou une restauration :
+       glPopAttrib, qui pose tout le bloc), que GLEngine signale au dispatch
+       qui précède le dessin — bit 2 + 2i (paramètres) ou 3 + 2i (allumage)
+       de +0x0c pour la lumière i, LD_LIGHTS ; la position et la direction y
+       sont déjà en coordonnées œil (fixées au glLight, pas recalculées quand
+       la modèle-vue bouge). Sans bit depuis sa dernière comparaison, le
+       cache c_light[i] est égal à l'état : la comparaison redirait
+       « inchangé ». Tout à comparer après invalidate_mirrors_from (g_sent,
+       md_light) et avant le premier envoi. Les matériaux (que
+       GL_COLOR_MATERIAL réécrit au glColor, sans dispatch), le masque des
+       lumières allumées et le modèle d'éclairage restent comparés à chaque
+       fois. LIGHTDIRTY=2 : comparées toujours, un changement non signalé est
+       compté puis envoyé. */
+    unsigned long lw = 0xffUL;          /* lumières à comparer (bit i) */
     float v;
 
+    if (G.lightdirty) {
+        if (p->g_sent)
+            lw = p->md_light;
+        p->md_light = 0;
+    }
     p->c_lmask = mask;
     /* [i, actif, ambiante4, diffuse4, spéculaire4, position4, spot3, exposant,
        coupure, atténuations3] — 26 mots, la plus longue commande du protocole. */
     for (i = 0; i < QGPU_MAX_LIGHTS; i++) {
         const unsigned char *l = g + GS_LIGHT(i);
         int on = (mask >> i) & 1;
-        int moved = changed(p, l, p->c_light[i], 0x60);
+        int want = (lw >> i) & 1;
+        int moved;
+        if (G.lightdirty) {
+            if (want)
+                G.n_ld_cmp++;
+            else
+                G.n_ld_skip++;
+        }
+        moved = (want || G.lightdirty >= 2) ? changed(p, l, p->c_light[i], 0x60) : 0;
+        if (moved && !want) {
+            G.n_ld_chk_diff++;          /* contrôle : glLight non signalé */
+            if (G.bd_on && bd_in()) {   /* relevé R4 : entrelacé avec les blocs */
+                fprintf(stderr, "LIGHTDIRTY lumière %d changée sans bit\n", i);
+                fflush(stderr);
+            }
+        }
         if (!moved && !remask)
             continue;
         if (!on && !remask && !p->glsl_on)
@@ -11372,12 +11449,112 @@ static void draw_probe(PCtx *p, const TexInfo *ti)
     gl_note("%s\n", buf);
 }
 
+/* ─────────── 22/10 : verdict du Begin repris (POMPPC_GL_BEGINVD) ───────────
+ * docs/plugin-allegement.md §3. Marble Blast (mode immédiat) : geom_begin
+ * faisait 21,9 % du fil du jeu, dont le verdict refait à CHAQUE glBegin —
+ * geom_ok (rastérisation, étage de sommets, programmes, génériques, toutes
+ * les unités), texture_ok (toutes les unités, hors de la mémoire des unités :
+ * texturing_on, unit_drvtex, find_tex et upload_texture par unité) et
+ * geom_format —, alors que le gldUpdateDispatch qui précède presque chaque
+ * glBegin vient de le calculer (ou de le reprendre : liste blanche, verdict
+ * par unité) et de le ranger dans le PCtx avec sa clé (vd_store, lot 2).
+ *
+ * Pourquoi c'est exact : le verdict ne lit que (a) l'état GL que GLEngine
+ * signale par un gldUpdateDispatch avant tout dessin qui le suit — et ce
+ * dispatch refait ou reprend le verdict rangé selon ce que son bloc a
+ * changé (df_classify : neutre → gardé, unités seules → uv_take, sinon
+ * complet) ; et (b) ce qui bouge SANS dispatch, que porte la clé
+ * (vd_key_of) : l'image (mémoires « une fois par image » de
+ * texture_uploadable et upload_texture), l'époque des textures (vd_epoch :
+ * texture créée, détruite, modifiée, salie — un glTexImage ou un
+ * glTexSubImage entre deux glBegin, l'atlas de police WC3 de P11 —,
+ * téléversée, évincée, état hôte perdu), l'état du plugin et du contexte
+ * (geom_lost, posé par un refus du Begin, en fait partie), le VAO et ses
+ * masques, la table des unités, le drawable, l'étage de sommets et les
+ * programmes. Clé identique, verdict ok : geom_ok et texture_ok rendraient
+ * 1, avec les mêmes unités (le téléversement que texture_ok ferait est déjà
+ * fait : une texture à retéléverser a fait avancer l'époque), et
+ * geom_format le même format. C'est la reprise que geom_draw_client fait
+ * depuis le lot 2 (contrôlée par VERDICTCHECK), appliquée au Begin. Une clé
+ * changée, ou un verdict rangé « non », refont la voie complète, refus et
+ * geom_lost compris. Ce qui suit le verdict (prog_sync, état, matrices,
+ * courant) est inchangé, à deux allègements près, exacts eux aussi :
+ *   — les unités coupées du verdict repris sont remises à zéro (bv_norm),
+ *     une fois par verdict rangé : une unité au t nul n'a pas d'autre champ
+ *     défini (texture_ok ne pose que t, uv_take garde ceux de l'unité
+ *     d'avant) ; seuls tu_same / memcmp de send_state_blk les lisent (« même
+ *     série que la dernière ? »), et les clés d'une unité coupée ne dépendent
+ *     que de t (state_units, state_unit_one) — ces restes faisaient refaire
+ *     pour rien des séries d'unités dont les clés sont déjà dans p->st
+ *     (mbimm : 82 séries de 372 unités → 55 de 73) ;
+ *   — sync_to_host n'est appelé que si la couleur ou la profondeur sont plus
+ *     récentes chez l'invité : sinon il ne fait que lire l'heure deux fois
+ *     (sous POMPPC_GL_STATS, 3 % de geom_begin dans Marble Blast).
+ *
+ * BEGINVD=2 : contrôle — la voie complète est toujours faite et c'est elle
+ * qui sert ; quand la reprise aurait eu lieu, son résultat est comparé
+ * (ok, format, unités : PTex, environnement, combinaison ; et le recalcul
+ * ne doit avoir touché aucune texture). Ligne BEG de la note. */
+static void vd_key_of(PCtx *p, unsigned long *k);
+
+static int bv_same(PCtx *p)
+{
+    unsigned long vk[VKEY_WORDS];
+    int i;
+    if (!G.verdict || !p->vd_valid || !p->vd_ok)
+        return 0;
+    vd_key_of(p, vk);                   /* appelle prog_state, comme geom_ok */
+    for (i = 0; i < VKEY_WORDS; i++)    /* = memcmp, sans l'appel par talon */
+        if (vk[i] != p->vd_key[i])
+            return 0;
+    return 1;
+}
+
+static void bv_norm(PCtx *p)
+{
+    int u;
+    if (p->vd_norm)
+        return;
+    for (u = 0; u < IMG_UNITS; u++)
+        if (!p->vd_ti.u[u].t) {
+            p->vd_ti.u[u].env_mode = p->vd_ti.u[u].env_color = 0;
+            p->vd_ti.u[u].combine = p->vd_ti.u[u].combine_src = 0;
+        }
+    p->vd_norm = 1;
+}
+
+#define BV_TOLD 16
+static void bv_check(PCtx *p, int ok, const TexInfo *ti, unsigned long fmt, int bumped)
+{
+    unsigned long du = 0;
+    int u;
+    static unsigned long told;
+    G.n_bv_chk++;
+    if (ok)
+        for (u = 0; u < IMG_UNITS; u++) {
+            const TexUnit *a = &ti->u[u], *b = &p->vd_ti.u[u];
+            if (a->t != b->t || (a->t && (a->env_mode != b->env_mode ||
+                                          a->env_color != b->env_color ||
+                                          a->combine != b->combine ||
+                                          a->combine_src != b->combine_src)))
+                du |= 1UL << u;
+        }
+    if (ok && fmt == p->vd_fmt && !du && !bumped)
+        return;
+    G.n_bv_diff++;
+    if (told++ < BV_TOLD)
+        gl_note("BEG écart, image %lu : ok 1 -> %d, format %08lx -> %08lx, unités "
+                "différentes 0x%04lx%s\n", G.n_frames, ok, p->vd_fmt, ok ? fmt : 0UL, du,
+                bumped ? ", le recalcul a touché une texture" : "");
+}
+
 static void *geom_begin(void *ctx, short mode, unsigned long *n)
 {
     PCtx *p;
     TexInfo ti;
     unsigned char *gc;
-    unsigned long words, slots;
+    unsigned long words, slots, ep0;
+    int bv;
 
     if (pomppc_tracing())
         pomppc_log("  géométrie : Begin(mode %d, n %lu)\n", mode, n ? *n : 0);
@@ -11390,24 +11567,49 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
        celui d'un autre contexte (autre fil), dont la place réservée n'était
        alors jamais rendue et dont le geom_end ne reconnaissait plus rien. */
     pend_close(p, 1);
-    if (!p || !geom_ok(p) || !ensure_surface(p)) {
-        if (p) {
+    /* 22/10 (POMPPC_GL_BEGINVD, docs/plugin-allegement.md §3) : le verdict
+       rangé (dispatch, ou dessin de tableaux qui l'a refait) vaut-il encore ?
+       Même clé que la reprise du lot 2 au dessin de tableaux. */
+    bv = p && G.beginvd ? bv_same(p) : 0;
+    ep0 = vd_epoch;
+    if (bv && G.beginvd == 1) {
+        /* repris : ni geom_ok, ni texture_ok, ni geom_format (plus bas) */
+        G.n_bv_take++;
+        if (!ensure_surface(p)) {
             no(NO_G_LATE, (unsigned long)(unsigned short)mode, p->geom_on);
             p->geom_lost = 1;           /* exact à partir du prochain dispatch */
             G.n_geomdrop++;
-        }
-        goto refuse;
-    }
-    /* Texture pas encore téléversable (atlas de police WC3 : TexImage après
-       le dispatch, ou premier lot avant intern). Un flush libère l'arène ;
-       si ça échoue encore, on jette CE lot sans tuer le T&L — le suivant
-       (menu animé, HUD) reprendra le chemin brut avec la texture prête. */
-    if (!texture_ok(p, &ti)) {
-        flush();
-        if (!texture_ok(p, &ti)) {
-            no(NO_G_LATE, (unsigned long)(unsigned short)mode, p->geom_on);
-            G.n_geomdrop++;
             goto refuse;
+        }
+        bv_norm(p);
+        ti = p->vd_ti;
+    } else {
+        int vok = p && geom_ok(p);
+        if (p && G.beginvd && !bv)
+            G.n_bv_full++;
+        if (!vok || !ensure_surface(p)) {
+            if (bv && !vok)             /* contrôle : la reprise aurait dit oui */
+                bv_check(p, 0, 0, 0, vd_epoch != ep0);
+            if (p) {
+                no(NO_G_LATE, (unsigned long)(unsigned short)mode, p->geom_on);
+                p->geom_lost = 1;       /* exact à partir du prochain dispatch */
+                G.n_geomdrop++;
+            }
+            goto refuse;
+        }
+        /* Texture pas encore téléversable (atlas de police WC3 : TexImage après
+           le dispatch, ou premier lot avant intern). Un flush libère l'arène ;
+           si ça échoue encore, on jette CE lot sans tuer le T&L — le suivant
+           (menu animé, HUD) reprendra le chemin brut avec la texture prête. */
+        if (!texture_ok(p, &ti)) {
+            flush();
+            if (!texture_ok(p, &ti)) {
+                if (bv)
+                    bv_check(p, 0, 0, 0, vd_epoch != ep0);
+                no(NO_G_LATE, (unsigned long)(unsigned short)mode, p->geom_on);
+                G.n_geomdrop++;
+                goto refuse;
+            }
         }
     }
     /* Ce que GLEngine a VRAIMENT retenu : si le pas ou le descripteur ne sont
@@ -11443,7 +11645,14 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
        d'Apple est exact — et on demande la republication au prochain
        dispatch. Cause probable du texte disparu par le chemin brut. */
     {
-        unsigned long now_fmt = geom_format(p);
+        unsigned long now_fmt;
+        if (bv && G.beginvd == 1) {
+            now_fmt = p->vd_fmt;        /* BEGINVD : format du verdict repris */
+        } else {
+            now_fmt = geom_format(p);
+            if (bv)                     /* BEGINVD=2 : la reprise aurait-elle dit pareil ? */
+                bv_check(p, 1, &ti, now_fmt, vd_epoch != ep0);
+        }
         if (now_fmt != p->geom_fmt) {
             no(NO_G_LATE, now_fmt, p->geom_fmt);
             p->desc_dirty = 1;
@@ -11507,7 +11716,12 @@ static void *geom_begin(void *ctx, short mode, unsigned long *n)
         }
     }
     check_draw_buffer(p);
-    sync_to_host(p, 1, GLD_U8(gls(p), GS_DEPTH_TEST) || stencil_active(p));
+    /* 22/10 (BEGINVD) : sync_to_host ne fait rien d'autre, quand ni la couleur
+       ni la profondeur ne sont plus récentes chez l'invité, que prendre l'heure
+       deux fois sous POMPPC_GL_STATS (gettimeofday : 3 % de geom_begin dans le
+       sample de Marble Blast) */
+    if (!G.beginvd || p->color == SW_NEWER || p->depth == SW_NEWER)
+        sync_to_host(p, 1, GLD_U8(gls(p), GS_DEPTH_TEST) || stencil_active(p));
     send_state(p, &ti, 1);
     /* génériques de GLEngine : 4 flottants chacun (descripteur, DESC_ENT) */
     if (gs_stale(p, p->geom_fmt, 0))
@@ -13665,6 +13879,7 @@ static void vd_store_k(PCtx *p, int ok, const TexInfo *ti, unsigned long fmt, un
     p->vd_ok = ok ? 1 : 0;
     if (ok) {
         p->vd_ti = *ti;
+        p->vd_norm = 0;                 /* 22/10 (BEGINVD) : unités coupées à remettre à zéro */
         p->vd_fmt = fmt;
         p->vd_gs = gs;
     } else {
@@ -13782,6 +13997,12 @@ static void d3x_note(const char *why, unsigned long frame)
                 G.progmemo, G.n_pm_hit, G.n_pm_miss, G.mtxdirty, G.n_md_skip, G.n_md_cmp,
                 G.n_md_chk_diff, G.stunit, G.n_su_part, G.n_su_units, G.n_su_chk,
                 G.n_su_chk_diff, G.displock, G.n_dl_fast);
+    if (G.beginvd || G.lightdirty)      /* 22/10 (docs/plugin-allegement.md §3) */
+        gl_note("BEG %s %lu : beginvd %d, %lu verdicts repris au glBegin, %lu refaits ; "
+                "contrôle %lu, %lu écarts | lightdirty %d, %lu comparaisons des lumières "
+                "sautées, %lu faites, %lu écarts\n", why, frame, G.beginvd, G.n_bv_take,
+                G.n_bv_full, G.n_bv_chk, G.n_bv_diff, G.lightdirty, G.n_ld_skip,
+                G.n_ld_cmp, G.n_ld_chk_diff);
     gl_note("ZONES %s %lu : zones %d (forcé %d, flux %lu Kio), %lu dessins aux indices "
             "dans l'arène (%lu Kio), %lu soumissions, %lu barrières attendues (%.2f ms)\n",
             why, frame, G.zones, G.zones_force, G.zl_cmd_bytes >> 10, G.n_idxspill,
@@ -14799,6 +15020,13 @@ static long geom_dispatch_locked(PCtx *p, const unsigned long *chg)
         p->md_bits |= w2 & (MD_VIEWPORT | MD_PROJ | MD_MODELVIEW);
         if (w2 & MD_TEXMAT)
             p->md_tex = 0xffUL;
+    }
+    if (p && G.lightdirty) {            /* 22/10 : glLight signalé (LIGHTDIRTY) */
+        unsigned long w3 = chg ? chg[3] & LD_LIGHTS : LD_LIGHTS;
+        int i;
+        for (i = 0; w3; i++, w3 >>= 2)
+            if (w3 & (3UL << 2))
+                p->md_light |= 1UL << i;
     }
     if (p && !p->glsl_hooked)
         glsl_hook_ctx(p);               /* v21 : une fois par contexte */
