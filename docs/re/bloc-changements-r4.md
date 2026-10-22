@@ -83,6 +83,7 @@ pose rien que GLEngine juge utile au pilote — le dessin suivant part sans `gld
 | `00000002` | `glEnable/Disable(GL_LIGHTING)` |
 | `00000004` | `glLightfv` |
 | `00000008` | `glEnable/Disable(GL_LIGHT0)` |
+| `4 << 2i`, `8 << 2i` | (22/10, scène `litdirty`) lumière *i* : paramètres (`glLightfv`, `glLightf`, y compris par une liste d'affichage) et allumage — `10`/`20` lumière 1, `40`/`80` lumière 2… `10000`/`20000` lumière 7 ; `glPopAttrib` pose tout le bloc |
 | `00040000` | `glEnable/Disable(GL_COLOR_MATERIAL)` |
 | **`00100000`** | **tableaux salis** (posé par GLEngine lui-même au dessin, 0xa7b40) : `glVertexPointer`, `glTexCoordPointer`, `glColorPointer`, `glVertexAttribPointerARB` (même VBO et même décalage compris), `glEnable/DisableClientState`, `glEnable/DisableVertexAttribArrayARB`, `glBufferDataARB` / `glBufferSubDataARB` d'un VBO en service |
 | `00400000` | `glBindProgramARB(GL_VERTEX_PROGRAM_ARB)` (même le programme déjà lié), `glProgramLocalParameter` de sommets, extinction du programme de sommets |
