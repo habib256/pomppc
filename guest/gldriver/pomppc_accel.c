@@ -129,7 +129,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261022-beg"
+#define POMPPC_PLUGIN_REV "20261022-ab"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -813,6 +813,14 @@ typedef struct TexInfo {                /* textures à appliquer pour le dessin 
 } TexInfo;
 
 #define VKEY_WORDS 34                   /* lot 2 : mots de la clé du verdict */
+/* 22/10 (WINSEED) : ce que la vérification de fenêtre lit de la PCtx et de D. */
+typedef struct {
+    long          cid, wid, sid;
+    unsigned long sw, sh;               /* taille du drawable */
+    unsigned long dw, dh;               /* taille de l'écran (D.w, D.h) */
+} WinReq;
+#define WS_INV 4                        /* WINSEED : fenêtres invisibles suivies */
+
 typedef struct PCtx {
     struct PCtx   *next;
     void          *ctx;                 /* contexte du GLDriver d'Apple */
@@ -948,6 +956,15 @@ typedef struct PCtx {
     int            hid;                 /* drawable = fenêtre absente de l'écran */
     unsigned long  hid_wid;             /*   fenêtre évaluée */
     unsigned long  hid_checked_at;      /*   image de l'évaluation (0 : jamais) */
+    /* ── 22/10, WINSEED : graines du WindowServer à la dernière vérification
+       complète de la fenêtre (winseed_ok) et de « fenêtre cachée » ── */
+    int            ws_valid, ws_chk_next, ws_vok, hs_vok;
+    unsigned long  ws_chk;              /* d_checked_at posé par cette vérification */
+    unsigned long  ws_geo, ws_vis;
+    WinReq         ws_q;
+    long           ws_ninv, ws_inv[WS_INV];
+    int            hs_valid;
+    unsigned long  hs_geo, hs_vis;
     /* ── transmission paresseuse au GLDriver d'Apple (POMPPC_GL_LAZYAPPLE,
        docs/re/dispatch-paresseux.md) : masques de changement de GLEngine
        cumulés depuis le dernier gldUpdateDispatch transmis ── */
@@ -1364,6 +1381,75 @@ static void crash_hook_fresh(void)
         crash_hook_check();
 }
 
+/* ─────────── 22/10/2026 — levier B : alléger l'échange de chaque image ───────────
+ * (docs/plugin-allegement.md §3). Variables éteintes par défaut :
+ *
+ *   POMPPC_GL_TEXDEFER=1  la destruction d'une texture (TEX_DESTROY) ne vide
+ *       plus le flux : elle part avec la soumission suivante, dans l'ordre du
+ *       flux. Le vidage qui suivait datait du mode synchrone (18749d3) ; en
+ *       asynchrone il faisait une soumission de plus au milieu de l'image
+ *       (Marble Blast : 0,67 par image, ligne VIDAGE L4581) et donc une
+ *       attente de l'hôte au changement de moitié suivant (W4255,
+ *       ~0,4 ms/image).
+ *   POMPPC_GL_SWAPLITE=1  coût fixe du bilan par image : la ligne de
+ *       frames.csv (POMPPC_GL_FRAMES) écrite sans fprintf (formatage à la main,
+ *       même texte), la boucle des textures de surface sautée tant qu'aucune
+ *       n'existe. =2 : contrôle — la ligne est aussi formatée par snprintf,
+ *       comparée, et c'est celle de snprintf qui part (écarts comptés).
+ *   POMPPC_GL_DISPSEED=1  les six lectures CoreGraphics de l'écran (Q6) ne
+ *       sont refaites que si CGSDisplayChangedSeed ou
+ *       CGSDisplayMappingChangedSeed ont bougé (voir direct_target). =2 :
+ *       contrôle.
+ *   POMPPC_GL_PRESENTQ=1  présentation par l'hôte (SURF_PRESENT) : l'image n
+ *       est mise en file AVANT d'attendre la n−1 ; l'attente se fait au
+ *       changement de moitié qui suit, sur la même barrière. L'hôte a l'image
+ *       n en file quand il finit la n−1, au lieu d'attendre que le G4 se
+ *       réveille, vérifie l'écran et soumette (present_direct).
+ *   POMPPC_GL_WINSEED=1  la vérification de fenêtre (et « fenêtre cachée »)
+ *       n'est refaite en entier que si la géométrie des fenêtres ou la région
+ *       visible de la nôtre ont bougé (graines du WindowServer, winseed_ok) ;
+ *       sinon, seuls l'alpha des fenêtres invisibles qui nous touchaient et le
+ *       curseur sont revus. =2 : contrôle.
+ *   (Un fil veilleur, SWAPWIN, qui faisait ces vérifications à la place du
+ *   fil du jeu, a été essayé le 22/10 puis retiré : +8 % d'instructions par
+ *   image — il devait demander plus tôt, donc plus souvent — pour un gain que
+ *   WINSEED obtient sans fil. Commit 01984aa.) */
+#ifndef TEXDEFER_DEFAULT
+#define TEXDEFER_DEFAULT 0
+#endif
+#ifndef SWAPLITE_DEFAULT
+#define SWAPLITE_DEFAULT 0
+#endif
+#ifndef DISPSEED_DEFAULT
+#define DISPSEED_DEFAULT 0
+#endif
+#ifndef PRESENTQ_DEFAULT
+#define PRESENTQ_DEFAULT 0
+#endif
+#ifndef WINSEED_DEFAULT
+#define WINSEED_DEFAULT 0
+#endif
+static struct {
+    int            init, texdefer, lite;
+    int            any_surftex;         /* SWAPLITE : une texture de surface a existé */
+    /* compteurs (ligne ECHANGE, cumulés) */
+    unsigned long  n_defer;             /* TEXDEFER : vidages évités */
+    unsigned long  n_fast, n_fast_diff; /* SWAPLITE : lignes formatées / écarts (=2) */
+    unsigned long  n_surf_skip;
+    /* DISPSEED : base, pas, profondeur et taille de l'écran gardés tant que
+       les graines de CoreGraphics n'ont pas bougé */
+    int            dseed, ds_valid, presentq;
+    unsigned long  ds1, ds2, ds_at;
+    unsigned long  n_ds_skip, n_ds_chk, n_ds_diff;
+    unsigned long  n_pq;                /* PRESENTQ : présentations mises en file sans attente */
+    int            wseed;               /* WINSEED */
+    unsigned long  n_ws_skip, n_ws_full, n_ws_chk, n_ws_diff;
+    unsigned long  n_hs_skip, n_hs_chk, n_hs_diff;
+} SW;
+static void sw_frame(void);
+static void sw_line(int total);
+static void sw_init(void);
+
 static double now_s(void)
 {
     struct timeval tv;
@@ -1537,6 +1623,102 @@ static int qry_off;
  * device query. These are application swap intervals, not GPU completion
  * times; filter by context when a process has several drawables. */
 static FILE *frame_file;
+
+/* ── 22/10, SWAPLITE : la ligne de frames.csv sans fprintf ──
+   vfprintf et ses quatre %.3f (__dtoa, en grands entiers) faisaient ~1 % du
+   fil de Zen à chaque image. Même texte, formaté à la main ; =2 le compare à
+   snprintf. */
+/* 32 bits : la division 64 bits de gcc 4.0 (__udivdi3, __umoddi3) coûtait à
+   elle seule plus que ce qu'on retirait (hotblocks, 22/10) */
+static char *fx_ul(char *o, unsigned long v)
+{
+    char t[12];
+    int n = 0;
+    do {
+        t[n++] = (char)('0' + (int)(v % 10));
+        v /= 10;
+    } while (v);
+    while (n)
+        *o++ = t[--n];
+    return o;
+}
+
+static char *fx_ptr(char *o, const void *ptr)      /* %p de Darwin : 0x%lx */
+{
+    static const char hx[] = "0123456789abcdef";
+    unsigned long v = (unsigned long)ptr;
+    char t[12];
+    int n = 0;
+    *o++ = '0';
+    *o++ = 'x';
+    do {
+        t[n++] = hx[v & 15];
+        v >>= 4;
+    } while (v);
+    while (n)
+        *o++ = t[--n];
+    return o;
+}
+
+/* %.3f d'un double positif, arrondi comme printf : au plus près de la valeur
+   EXACTE, égalité au pair. d = ip + fr, fr exact (d − ⌊d⌋) ; p = fr × 1000
+   arrondi ; e = fr × 1000 − p, exact par fmsub (l'erreur d'un produit est
+   représentable) ; la partie fractionnaire exacte de fr × 1000 est r + e,
+   comparée à 1/2 sans arrondi (r − 1/2 est exact : Sterbenz pour r ≥ 1/4, et
+   pour p ≥ 1 r est un multiple de 2^-52). La parité de l'égalité est celle de
+   q (1000 est pair). *ok = 0 hors du domaine (négatif, NaN, ≥ 2^32) :
+   l'appelant reprend snprintf. */
+static char *fx_fix3(char *o, double d, int *ok)
+{
+    double fr, p, e, r, t;
+    unsigned long ip, q, f;
+    if (!(d >= 0.0) || d >= 4294967295.0) {
+        *ok = 0;
+        return o;
+    }
+    ip = (unsigned long)d;              /* troncature = partie entière (d ≥ 0) */
+    fr = d - (double)ip;
+    p = fr * 1000.0;
+    __asm__("fmsub %0,%1,%2,%3" : "=f"(e) : "f"(fr), "f"(1000.0), "f"(p));
+    q = (unsigned long)(long)p;         /* 0 ≤ p ≤ 1000 */
+    r = p - (double)(long)q;
+    if (p >= 0.25) {
+        t = r - 0.5;
+        if (t > -e || (t == -e && (q & 1)))
+            q++;
+    }
+    if (q >= 1000) {
+        q -= 1000;
+        ip++;
+    }
+    o = fx_ul(o, ip);
+    f = q;
+    *o++ = '.';
+    *o++ = (char)('0' + (int)(f / 100));
+    *o++ = (char)('0' + (int)(f / 10 % 10));
+    *o++ = (char)('0' + (int)(f % 10));
+    return o;
+}
+
+/* La ligne d'une image dans b (au moins 192 octets) ; rend sa longueur, 0 si
+   une valeur sort du domaine de fx_fix3. */
+static int fx_frame_line(char *b, void *ctx, double el)
+{
+    char *o = b;
+    int ok = 1;
+    o = fx_ul(o, G.n_frames); *o++ = ',';
+    o = fx_ptr(o, ctx); *o++ = ',';
+    o = fx_fix3(o, el, &ok); *o++ = ',';
+    o = fx_ul(o, G.n_rawverts); *o++ = ',';
+    o = fx_ul(o, G.n_rawdraws); *o++ = ',';
+    o = fx_ul(o, G.n_fallback); *o++ = ',';
+    o = fx_ul(o, G.n_readbacks); *o++ = ',';
+    o = fx_fix3(o, G.t_submit * 1000, &ok); *o++ = ',';
+    o = fx_fix3(o, G.t_wait * 1000, &ok); *o++ = ',';
+    o = fx_fix3(o, G.t_copy * 1000, &ok); *o++ = '\n';
+    return ok ? (int)(o - b) : 0;
+}
+
 static void trace_frame(void *ctx)
 {
     static int init;
@@ -1557,6 +1739,31 @@ static void trace_frame(void *ctx)
     }
     if (!frame_file) return;
     tick = mach_absolute_time();
+    if (SW.lite) {
+        char b[192], ref[192];
+        double el = (double)(tick - start) * tb.numer / tb.denom / 1e6;
+        int n = fx_frame_line(b, ctx, el), nr;
+        if (n && SW.lite == 1) {
+            fwrite(b, 1, n, frame_file);
+            SW.n_fast++;
+        } else {
+            nr = snprintf(ref, sizeof(ref), "%lu,%p,%.3f,%lu,%lu,%lu,%lu,%.3f,%.3f,%.3f\n",
+                          G.n_frames, ctx, el, G.n_rawverts, G.n_rawdraws, G.n_fallback,
+                          G.n_readbacks, G.t_submit * 1000, G.t_wait * 1000,
+                          G.t_copy * 1000);
+            if (n) {
+                SW.n_fast++;
+                if (n != nr || memcmp(b, ref, n) != 0) {
+                    SW.n_fast_diff++;
+                    if (SW.n_fast_diff <= 4)
+                        gl_note("SWAPLITE contrôle : « %.*s » au lieu de « %.*s »\n",
+                                n - 1, b, nr > 0 ? nr - 1 : 0, ref);
+                }
+            }
+            if (nr > 0)
+                fwrite(ref, 1, nr < (int)sizeof(ref) ? nr : (int)sizeof(ref) - 1, frame_file);
+        }
+    } else
     fprintf(frame_file, "%lu,%p,%.3f,%lu,%lu,%lu,%lu,%.3f,%.3f,%.3f\n",
             G.n_frames, ctx, (double)(tick - start) * tb.numer / tb.denom / 1e6,
             G.n_rawverts, G.n_rawdraws, G.n_fallback, G.n_readbacks,
@@ -2001,6 +2208,7 @@ static void stats_frame(void *ctx)
     if (G.verdict)
         vd_frame();
     sync_frame();                       /* 30/09 : lignes SYNC (note) */
+    sw_frame();                         /* 22/10 : ligne ECHANGE (levier B) */
     qry_frame(0);                       /* 30/09 : lignes QRY (note, §7 attente) */
     if (!path)
         return;
@@ -4618,7 +4826,14 @@ void pomppc_texture_deleted(void *drvtex)
                 c = reserve(bp, QGPU_LEN_TEX);
                 c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_DESTROY, QGPU_LEN_TEX);
                 c[1] = t->qtex;
-                flush();
+                /* 22/10, TEXDEFER : la destruction part avec la soumission
+                   suivante. Le flux est ordonné : ce qui l'emploie la précède,
+                   un TEX_CREATE qui reprendrait l'identifiant la suit. */
+                sw_init();
+                if (SW.texdefer)
+                    SW.n_defer++;
+                else
+                    flush();
                 G.tex_used[i / 32] &= ~(1UL << (i % 32));
             } else if (i < QGPU_CLIENT_TEX_IDS) {
                 /* finding 10 : ni rendu ni détruit — à détruire plus tard */
@@ -5134,6 +5349,8 @@ static unsigned int tex_cp_fill(PTex *t)
         /* v20 : une texture de surface est complète par construction (un
            niveau, sans mipmaps) ; son image vient de l'hôte (SURF_TEX). */
         t->surf = tex_surface(t, &t->surf_sid);
+        if (t->surf)
+            SW.any_surftex = 1;         /* 22/10, SWAPLITE */
         if (t->surf)
             t->cp = CP_COMPLETE | CP_BASE;
         else
@@ -6051,6 +6268,17 @@ static void us_fill(PCtx *p, UScan *s)
 {
     unsigned long units = GLD_U32(p->ctx, CTX_TEXUNITS);
     int u;
+    /* 22/10 — UTILISATION APRÈS LIBÉRATION. us_del était remis à l'époque
+       courante à chaque unité parcourue, même quand l'unité n'avait pas de
+       texture (rien relu) : le couple (us_dt, us_t) d'avant une destruction y
+       survivait, déclaré frais. GLEngine redonne volontiers la même adresse à
+       la texture suivante (créer, employer, détruire à chaque image :
+       swapbench SWB_TEXDEL=1, défaut de 20261021-d3p) : même `dt`, PTex
+       libéré repris, tex_cp_fill → tex_surface sur la mémoire rendue (SIGBUS
+       dans gldUpdateDispatch, aussi sans aucun levier ; POMPPC_GL_TEXMEMO=0
+       l'évitait). Une mémoire d'une époque passée est maintenant effacée pour
+       toute unité qui n'est pas relue. */
+    int stale = s == &US && p->us_del != tex_del_epoch;
     s->p = p;
     s->seq = us_seq;
     s->del = tex_del_epoch;
@@ -6061,6 +6289,10 @@ static void us_fill(PCtx *p, UScan *s)
         s->mask[u] = 0;
         s->dt[u] = 0;
         s->t[u] = 0;
+        if (stale) {
+            p->us_dt[u] = 0;
+            p->us_t[u] = 0;
+        }
     }
     for (u = 0; u < SCAN_N(p); u++) {
         unsigned long m = unit_mask(p, u);
@@ -6083,6 +6315,9 @@ static void us_fill(PCtx *p, UScan *s)
                 p->us_dt[u] = dt;
                 p->us_t[u] = t;
             }
+        } else if (stale) {
+            p->us_dt[u] = 0;            /* 22/10 : voir plus haut */
+            p->us_t[u] = 0;
         }
         s->mask[u] = m;
         s->dt[u] = dt;
@@ -16161,7 +16396,14 @@ static struct {
     long          (*window_alpha)(long cid, long wid, float *alpha);
     void         *(*best_mode)(unsigned long, unsigned long, unsigned long, unsigned long, int *);
     int           (*switch_mode)(unsigned long, void *);
+    /* 22/10, DISPSEED : graines de la mémoire partagée du WindowServer */
+    unsigned long (*disp_seed)(void);
+    unsigned long (*map_seed)(void);
+    /* 22/10, WINSEED */
+    unsigned long (*geo_seed)(void);
+    long          (*vis_seed)(long cid, long wid, unsigned long *seed);
 } D;
+
 
 /* ─────────────── v20 : rendu vers texture (Colin McRae, 27/09/2026) ───────────────
  *
@@ -16358,9 +16600,20 @@ static void surftex_swapped(PCtx *p)
     p->swap_gen++;
     if (!G.surftex || !sid)
         return;
+    /* SWAPLITE : aucune texture de surface n'a jamais existé (any_surftex est
+       posé là où t->surf l'est) — la boucle sur toutes les textures ne
+       trouverait rien. =2 la fait quand même et compte ce qu'elle trouve. */
+    if (SW.lite && !SW.any_surftex) {
+        SW.n_surf_skip++;
+        if (SW.lite == 1)
+            return;
+    }
     for (t = G.textures; t; t = t->next)
-        if (t->surf && t->surf_sid == sid && t->qtex >= 0)
+        if (t->surf && t->surf_sid == sid && t->qtex >= 0) {
+            if (SW.lite == 2 && !SW.any_surftex)
+                SW.n_fast_diff++;
             surftex_copy(p, t, p);
+        }
 }
 
 
@@ -16463,10 +16716,11 @@ static void dump_readback_textures(PCtx *p)
 /* Le drawable de p est-il une fenêtre absente de l'écran (jamais montrée,
  * comme les cibles de rendu d'IndirectX) ? Réévalué toutes les
  * DIRECT_RECHECK images, ou quand la fenêtre change. Verrou tenu. */
+static int drawable_hidden_full(PCtx *p, long cid, long wid);
 static int drawable_hidden(PCtx *p)
 {
     unsigned char *gd;
-    long cid, wid, list[96], n = 0, i;
+    long cid, wid;
     if (!G.hidden || p->fullscreen_buf)
         return 0;
     gd = (unsigned char *)GLD_U32(p->ctx, 4);
@@ -16480,11 +16734,54 @@ static int drawable_hidden(PCtx *p)
         G.n_frames - p->hid_checked_at < DIRECT_RECHECK)
         return p->hid;
     direct_init_once();
+    {   /* 22/10, WINSEED (voir winseed_ok) : la présence de notre fenêtre dans
+           la liste ne change pas sans que sa région visible ou la géométrie
+           des fenêtres ne bougent */
+        unsigned long g = 0, v = 0;
+        int vok = 0, prev = p->hid, hcmp = 0;
+        if (SW.wseed && D.geo_seed && D.vis_seed) {
+            g = D.geo_seed();
+            vok = D.vis_seed(cid, wid, &v) == 0;
+            if (p->hs_valid && p->hid_checked_at && (unsigned long)wid == p->hid_wid &&
+                g == p->hs_geo && (p->hs_vok ? vok && v == p->hs_vis : !vok)) {
+                if (SW.wseed == 1) {
+                    SW.n_hs_skip++;
+                    p->hid_checked_at = G.n_frames ? G.n_frames : 1;
+                    return p->hid;
+                }
+                hcmp = 1;
+            }
+        }
+        if (SW.wseed) {
+            int r = drawable_hidden_full(p, cid, wid);
+            p->hs_valid = r >= 0;
+            p->hs_geo = g;
+            p->hs_vis = v;
+            p->hs_vok = vok;
+            if (hcmp) {
+                SW.n_hs_chk++;
+                if (p->hid != prev)
+                    SW.n_hs_diff++;
+            }
+            return p->hid;
+        }
+    }
+    drawable_hidden_full(p, cid, wid);
+    return p->hid;
+}
+
+/* Corps de drawable_hidden jusqu'au 22/10 (la liste, puis le relevé). Rend
+   -1 si la liste n'a pas pu être lue (verdict « visible » par défaut). */
+static int drawable_hidden_full(PCtx *p, long cid, long wid)
+{
+    long list[96], n = 0, i;
+    int got = 0;
     p->hid = 0;
     if (D.onscreen_list && D.onscreen_list(cid, 0, 96, list, &n) == 0 && n > 0 && n <= 96) {
         for (i = 0; i < n && list[i] != wid; i++)
             ;
         p->hid = i == n;
+        got = 1;
     }
     if (p->hid != 0 && !p->hid_checked_at)
         gl_note("drawable caché : %p fenêtre %lx %lux%lu (%ld fenêtres à l'écran)\n",
@@ -16492,7 +16789,7 @@ static int drawable_hidden(PCtx *p)
                 GLD_U32(p->ctx, CTX_HEIGHT), n);
     p->hid_wid = (unsigned long)wid;
     p->hid_checked_at = G.n_frames ? G.n_frames : 1;
-    return p->hid;
+    return got ? p->hid : -1;
 }
 
 /* P5 — LE JOURNAL D'APPOINT, DERRIÈRE UNE VARIABLE D'ENVIRONNEMENT.
@@ -16805,6 +17102,10 @@ static void direct_init(void)
     D.window_alpha    = dlsym(RTLD_DEFAULT, "CGSGetWindowAlpha");
     D.best_mode       = dlsym(RTLD_DEFAULT, "CGDisplayBestModeForParameters");
     D.switch_mode     = dlsym(RTLD_DEFAULT, "CGDisplaySwitchToMode");
+    D.disp_seed       = dlsym(RTLD_DEFAULT, "CGSDisplayChangedSeed");
+    D.map_seed        = dlsym(RTLD_DEFAULT, "CGSDisplayMappingChangedSeed");
+    D.geo_seed        = dlsym(RTLD_DEFAULT, "CGSGeometrySeed");
+    D.vis_seed        = dlsym(RTLD_DEFAULT, "CGSWindowVisibleRegionSeed");
     if (!D.main_display || !D.base_address || !D.bytes_per_row || !D.bits_per_pixel ||
         !D.pixels_wide || !D.pixels_high || !D.menubar_visible || !D.front_process ||
         !D.current_process || !D.same_process) {
@@ -16946,17 +17247,174 @@ static int rects_touch(long ax, long ay, long aw, long ah, const CgRect *r)
  * dessiné dedans ? (Le curseur de la VGA de QEMU est composé en logiciel par
  * le WindowServer dans la mémoire vidéo : écrire par-dessus l'effacerait.)
  * Remplit p->d_x / p->d_y (F7). */
+/* 22/10 (WINSEED) : ce que win_eval a vu, pour reprendre son verdict sans
+   le refaire. inv : les fenêtres au-dessus de nous qui TOUCHENT notre
+   rectangle mais qu'on a laissées passer parce qu'invisibles (alpha < 0,004)
+   — les seules dont un changement sans géométrie (alpha) changerait le
+   verdict ; ninv = -1 au-delà de WS_INV. cursor : le refus vient du curseur. */
+typedef struct {
+    long ninv, inv[WS_INV];
+    int  cursor;
+} WinSeen;
+static int win_eval(const WinReq *q, long *d_x, long *d_y, char *why, size_t whyn,
+                    long *list, long *nlist);
+static int win_eval_seen(const WinReq *q, long *d_x, long *d_y, char *why, size_t whyn,
+                         long *list, long *nlist, WinSeen *seen);
+static int cursor_moving(long cid, long x, long y, unsigned long w, unsigned long h,
+                         char *why, size_t whyn);
+static int winseed_ok(PCtx *p, const WinReq *q, long *list, long *n);
+
 static int direct_window_ok(PCtx *p)
 {
     unsigned char *gd = (unsigned char *)GLD_U32(p->ctx, 4);
-    long cid, wid, sid, list[96], n = 0, i;
-    CgRect wr, sr, o;
-    CgPoint cur;
+    WinReq q;
+    long list[96], n = 0;
+    int ok;
 
-#define WHY(...) (snprintf(D.why, sizeof(D.why), __VA_ARGS__), 0)
-    if (!D.windowed || !gd)
-        return WHY("window: SPI missing or no drawable");
-    cid = GLD_U32(gd, GD_CID); wid = GLD_U32(gd, GD_WID); sid = GLD_U32(gd, GD_SID);
+    if (!D.windowed || !gd) {
+        snprintf(D.why, sizeof(D.why), "window: SPI missing or no drawable");
+        return 0;
+    }
+    q.cid = GLD_U32(gd, GD_CID); q.wid = GLD_U32(gd, GD_WID); q.sid = GLD_U32(gd, GD_SID);
+    q.sw = p->sw; q.sh = p->sh; q.dw = D.w; q.dh = D.h;
+    if (SW.wseed && D.geo_seed && D.vis_seed)
+        ok = winseed_ok(p, &q, list, &n);
+    else
+        ok = win_eval(&q, &p->d_x, &p->d_y, D.why, sizeof(D.why), list, &n);
+    return ok;
+}
+
+/* ── 22/10/2026, WINSEED : reprendre le verdict de fenêtre tant que rien n'a
+ * bougé, d'après les graines du WindowServer ─────────────────────────────
+ *
+ * Une vérification complète (win_eval) coûte, dans la VM de dev, ~1,6 million
+ * d'instructions invitées (hotblocks : ~30 allers-retours Mach, la moitié
+ * côté WindowServer) — 15 % d'une image de swapbench, à DIRECT_RECHECK près.
+ * Deux graines lues sans message disent si ce qu'elle a vu peut avoir changé :
+ *   — CGSWindowVisibleRegionSeed(cid, wid) : la région visible de NOTRE
+ *     fenêtre (déplacement, taille, fenêtre opaque posée ou retirée dessus,
+ *     mise à l'écran ou retrait) ; c'est par elle que les surfaces de
+ *     CoreGraphics savent qu'il faut recalculer leur découpe ;
+ *   — CGSGeometrySeed() : la géométrie de toutes les fenêtres (mot de la
+ *     mémoire partagée du WindowServer).
+ * (La première n'existe que si la fenêtre a sa mémoire partagée dans le
+ * processus : refusée — 1010 — pour une fenêtre GLUT de la VM de dev, la
+ * seconde vaut alors seule. Mise à l'épreuve par swapbench move, cover et
+ * pop — déplacement, recouvrement, mise devant/derrière, retrait — sous =2.)
+ * Graines inchangées depuis une vérification complète RÉUSSIE (même
+ * drawable, même écran — DISPSEED/Q6 relisent l'écran à part) : la liste des
+ * fenêtres et leurs rectangles sont ceux d'alors. Ne restent à revoir que ce
+ * qui change sans géométrie : l'alpha des fenêtres invisibles qui touchaient
+ * (WinSeen.inv, d'ordinaire aucune) et le curseur (cursor_moving, comme
+ * avant). Le processus au premier plan reste demandé par direct_target. Un
+ * refus n'est jamais repris : la vérification suivante est complète.
+ * =2 : contrôle — la vérification complète est faite quand même et comparée
+ * (ligne ECHANGE, « winseed »). drawable_hidden suit la même règle. */
+static int winseed_ok(PCtx *p, const WinReq *q, long *list, long *n)
+{
+    unsigned long g = D.geo_seed(), v = 0;
+    int vok = D.vis_seed(q->cid, q->wid, &v) == 0, ok, k, gated;
+    WinSeen seen;
+    long x = p->d_x, y = p->d_y;
+
+    /* la graine de région n'existe que si la fenêtre a sa mémoire partagée
+       dans ce processus (1010, kCGErrorInvalidOperation, pour une fenêtre GLUT
+       de la VM de dev) : sans elle, la géométrie seule */
+    gated = p->ws_valid && p->ws_chk == p->d_checked_at && p->d_checked_at &&
+            g == p->ws_geo && (p->ws_vok ? vok && v == p->ws_vis : !vok) && p->ws_ninv >= 0 &&
+            q->cid == p->ws_q.cid && q->wid == p->ws_q.wid && q->sid == p->ws_q.sid &&
+            q->sw == p->ws_q.sw && q->sh == p->ws_q.sh && q->dw == p->ws_q.dw &&
+            q->dh == p->ws_q.dh;
+    {
+        static int told, told_v;
+        if (!vok && told_v < 1) {
+            long (*defconn)(void) = dlsym(RTLD_DEFAULT, "_CGSDefaultConnection");
+            told_v++;
+            gl_note("WINSEED : graine de région refusée (%ld) pour cid %lx wid %lx "
+                    "(connexion par défaut %lx)\n", D.vis_seed(q->cid, q->wid, &v),
+                    q->cid, q->wid, defconn ? defconn() : -1L);
+        }
+        if (!gated && p->ws_valid && told < 6) {
+            told++;
+            gl_note("WINSEED : complète, image %lu (graine de région %d %lx/%lx, géométrie "
+                    "%lx/%lx, vérification %lu/%lu, invisibles %ld)\n", G.n_frames, vok, v,
+                    p->ws_vis, g, p->ws_geo, p->ws_chk, p->d_checked_at, p->ws_ninv);
+        }
+    }
+    if (gated && SW.wseed == 1) {
+        /* la géométrie n'a pas bougé : alpha des invisibles, puis curseur */
+        int alpha_ok = 1;
+        for (k = 0; k < p->ws_ninv && alpha_ok; k++)
+            if (!window_invisible(q->cid, p->ws_inv[k])) {
+                snprintf(D.why, sizeof(D.why), "covered by window %lx (alpha %g)",
+                         p->ws_inv[k], window_alpha(q->cid, p->ws_inv[k]));
+                alpha_ok = 0;
+            }
+        ok = alpha_ok &&
+             !cursor_moving(q->cid, p->d_x, p->d_y, q->sw, q->sh, D.why, sizeof(D.why));
+        if (ok)
+            D.why[0] = 0;
+        SW.n_ws_skip++;
+        /* un refus par l'alpha : complète la prochaine fois ; par le curseur
+           seul, la géométrie tient toujours */
+        p->ws_valid = alpha_ok;
+        p->ws_chk_next = 1;
+        return ok;
+    }
+    ok = win_eval_seen(q, &p->d_x, &p->d_y, D.why, sizeof(D.why), list, n, &seen);
+    if (gated) {
+        /* =2 : la reprise aurait-elle dit pareil ? (curseur compris : même
+           code, même état — c'est la vérification complète qui l'a lu) */
+        int g_ok = 1;
+        for (k = 0; k < p->ws_ninv && g_ok; k++)
+            if (!window_invisible(q->cid, p->ws_inv[k]))
+                g_ok = 0;
+        if (g_ok && seen.cursor)
+            g_ok = 0;
+        SW.n_ws_chk++;
+        if (g_ok != ok || (ok && (x != p->d_x || y != p->d_y))) {
+            SW.n_ws_diff++;
+            if (SW.n_ws_diff <= 8)
+                gl_note("WINSEED contrôle : écart image %lu (graines %lx %lx) : complète %d en "
+                        "%ld,%ld (%s), reprise %d en %ld,%ld\n", G.n_frames, g, v, ok,
+                        p->d_x, p->d_y, D.why, g_ok, x, y);
+        }
+    }
+    SW.n_ws_full++;
+    p->ws_valid = ok || seen.cursor;
+    p->ws_geo = g;
+    p->ws_vis = v;
+    p->ws_vok = vok;
+    p->ws_q = *q;
+    p->ws_ninv = seen.ninv;
+    for (k = 0; k < seen.ninv && k < WS_INV; k++)
+        p->ws_inv[k] = seen.inv[k];
+    p->ws_chk_next = 1;
+    return ok;
+}
+
+/* La vérification elle-même (corps de direct_window_ok jusqu'au 22/10, à
+   l'identique : seules les sources changent — WinReq au lieu de p et D, et
+   `why`). Rend aussi la liste des fenêtres à l'écran quand elle a été lue
+   (*nlist > 0). */
+static int win_eval(const WinReq *q, long *d_x, long *d_y, char *why, size_t whyn,
+                    long *list, long *nlist)
+{
+    return win_eval_seen(q, d_x, d_y, why, whyn, list, nlist, 0);
+}
+
+static int win_eval_seen(const WinReq *q, long *d_x, long *d_y, char *why, size_t whyn,
+                         long *list, long *nlist, WinSeen *seen)
+{
+    long cid = q->cid, wid = q->wid, sid = q->sid, n = 0, i;
+    CgRect wr, sr, o;
+
+    *nlist = 0;
+    if (seen) {
+        seen->ninv = 0;
+        seen->cursor = 0;
+    }
+#define WHY(...) (snprintf(why, whyn, __VA_ARGS__), 0)
     {
         long e1 = D.window_bounds(cid, wid, &wr), e2 = D.surface_bounds(cid, wid, sid, &sr);
         if (!e1 && e2 && D.surface_list) {
@@ -16966,7 +17424,7 @@ static int direct_window_ok(PCtx *p)
             if (D.surface_list(cid, wid, 16, sl, &sn) == 0 && sn > 0 && sn <= 16)
                 for (k = 0; k < sn && e2; k++)
                     if (D.surface_bounds(cid, wid, sl[k], &sr) == 0 &&
-                        (unsigned long)sr.w == p->sw && (unsigned long)sr.h == p->sh)
+                        (unsigned long)sr.w == q->sw && (unsigned long)sr.h == q->sh)
                         e2 = 0;
             if (e2)
                 return WHY("surface not found: %ld surfaces, first %lx (wid %lx sid %lx)",
@@ -16976,45 +17434,122 @@ static int direct_window_ok(PCtx *p)
             return WHY("bounds refused: window %ld, surface %ld (cid %lx wid %lx sid %lx)",
                        e1, e2, cid, wid, sid);
     }
-    if ((unsigned long)sr.w != p->sw || (unsigned long)sr.h != p->sh)
+    if ((unsigned long)sr.w != q->sw || (unsigned long)sr.h != q->sh)
         return WHY("surface %gx%g at %g,%g != drawable %lux%lu", sr.w, sr.h, sr.x, sr.y,
-                   p->sw, p->sh);
-    p->d_x = (long)(wr.x + sr.x);       /* F7 : le rectangle est CELUI DE p */
-    p->d_y = (long)(wr.y + sr.y);
-    if (p->d_x < 0 || p->d_y < 0 || p->d_x + p->sw > D.w || p->d_y + p->sh > D.h)
-        return WHY("off-screen (%ld,%ld)", p->d_x, p->d_y);
+                   q->sw, q->sh);
+    *d_x = (long)(wr.x + sr.x);       /* F7 : le rectangle est CELUI DE p */
+    *d_y = (long)(wr.y + sr.y);
+    if (*d_x < 0 || *d_y < 0 || *d_x + q->sw > q->dw || *d_y + q->sh > q->dh)
+        return WHY("off-screen (%ld,%ld)", *d_x, *d_y);
     /* fenêtres à l'écran, de l'avant vers l'arrière : rien au-dessus ne doit toucher */
     if (D.onscreen_list(cid, 0, 96, list, &n) != 0 || n <= 0 || n > 96)
         return WHY("window list refused (n %ld)", n);
+    *nlist = n;
     for (i = 0; i < n && list[i] != wid; i++)
         if (D.window_bounds(cid, list[i], &o) == 0 &&
             /* Une fenêtre qui couvre tout l'écran devant une application au
                premier plan est un voile transparent du système (vu en vrai :
                rang 0, 1024x768) : une vraie fenêtre plein écran d'une autre
                application nous aurait ôté le premier plan. */
-            !(o.x <= 0 && o.y <= 0 && o.w >= (float)D.w && o.h >= (float)D.h) &&
+            !(o.x <= 0 && o.y <= 0 && o.w >= (float)q->dw && o.h >= (float)q->dh) &&
             /* Le Dock gare ses tuiles de travail (128x128 au plus, vides) dans
                le coin 0,0 de l'écran, au niveau du Dock (vu en vrai : 13 fenêtres). */
             !(o.x == 0 && o.y == 0 && o.w <= 128 && o.h <= 128) &&
-            rects_touch(p->d_x, p->d_y, p->sw, p->sh, &o) && !window_invisible(cid, list[i]))
-            return WHY("covered by window %lx (%g,%g %gx%g), rank %ld/%ld, alpha %g",
-                       list[i], o.x, o.y, o.w, o.h, i, n, window_alpha(cid, list[i]));
+            rects_touch(*d_x, *d_y, q->sw, q->sh, &o)) {
+            if (!window_invisible(cid, list[i]))
+                return WHY("covered by window %lx (%g,%g %gx%g), rank %ld/%ld, alpha %g",
+                           list[i], o.x, o.y, o.w, o.h, i, n, window_alpha(cid, list[i]));
+            if (seen) {                 /* WINSEED : alpha à revoir à chaque reprise */
+                if (seen->ninv >= 0 && seen->ninv < WS_INV)
+                    seen->inv[seen->ninv++] = list[i];
+                else
+                    seen->ninv = -1;
+            }
+        }
     if (i == n)
         return WHY("window %lx missing from list (%ld windows)", wid, n);
-    /* Curseur visible dans la surface : écrire par-dessus l'efface jusqu'à son
-       prochain mouvement. Tant qu'il BOUGE (menus, interface), chemin normal ;
-       immobile d'une vérification à l'autre (jeu qui le ramène au centre à
-       chaque image, comme Marble Blast, ou souris au repos), voie directe. */
+    if (cursor_moving(cid, *d_x, *d_y, q->sw, q->sh, why, whyn)) {
+        if (seen)
+            seen->cursor = 1;
+        return 0;
+    }
+    why[0] = 0;
+    return 1;
+#undef WHY
+}
+
+/* Curseur visible dans la surface : écrire par-dessus l'efface jusqu'à son
+   prochain mouvement. Tant qu'il BOUGE (menus, interface), chemin normal ;
+   immobile d'une vérification à l'autre (jeu qui le ramène au centre à
+   chaque image, comme Marble Blast, ou souris au repos), voie directe.
+   (Fin de win_eval jusqu'au 22/10, sortie telle quelle pour WINSEED.) */
+static int cursor_moving(long cid, long x, long y, unsigned long w, unsigned long h,
+                         char *why, size_t whyn)
+{
+    CgPoint cur;
+    CgRect o;
     if (!D.over_cursor && D.cursor_visible() && D.cursor_location(cid, &cur) == 0) {
         int still = cur.x == D.cur_x && cur.y == D.cur_y;
         D.cur_x = cur.x; D.cur_y = cur.y;
         o.x = cur.x - 32; o.y = cur.y - 32; o.w = 64; o.h = 64;
-        if (!still && rects_touch(p->d_x, p->d_y, p->sw, p->sh, &o))
-            return WHY("cursor moving in surface (%g,%g)", cur.x, cur.y);
+        if (!still && rects_touch(x, y, w, h, &o)) {
+            snprintf(why, whyn, "cursor moving in surface (%g,%g)", cur.x, cur.y);
+            return 1;
+        }
     }
-    D.why[0] = 0;
-    return 1;
-#undef WHY
+    return 0;
+}
+
+/* Les variables du levier B, lues une fois (verrou tenu : premier
+   échange ou première destruction de texture). Ligne ECHANGE en tête. */
+static void sw_init(void)
+{
+    const char *e;
+    if (SW.init)
+        return;
+    SW.init = 1;
+    e = getenv("POMPPC_GL_TEXDEFER");
+    SW.texdefer = e && e[0] ? e[0] != '0' : TEXDEFER_DEFAULT;
+    e = getenv("POMPPC_GL_SWAPLITE");
+    SW.lite = e && e[0] ? (int)(e[0] - '0') : SWAPLITE_DEFAULT;
+    if (SW.lite < 0 || SW.lite > 2)
+        SW.lite = 0;
+    e = getenv("POMPPC_GL_DISPSEED");
+    SW.dseed = e && e[0] ? (int)(e[0] - '0') : DISPSEED_DEFAULT;
+    if (SW.dseed < 0 || SW.dseed > 2)
+        SW.dseed = 0;
+    e = getenv("POMPPC_GL_PRESENTQ");
+    SW.presentq = e && e[0] ? e[0] != '0' : PRESENTQ_DEFAULT;
+    e = getenv("POMPPC_GL_WINSEED");
+    SW.wseed = e && e[0] ? (int)(e[0] - '0') : WINSEED_DEFAULT;
+    if (SW.wseed < 0 || SW.wseed > 2)
+        SW.wseed = 0;
+    gl_note("ECHANGE : texdefer=%d swaplite=%d dispseed=%d presentq=%d winseed=%d "
+            "(recheck %d)\n", SW.texdefer, SW.lite, SW.dseed, SW.presentq, SW.wseed,
+            DIRECT_RECHECK);
+}
+
+/* Ligne ECHANGE de la note, toutes les CNT_PERIOD images (stats_frame) et
+   à la destruction d'un contexte (`total`), seulement si un des leviers est
+   allumé. Compteurs cumulés. */
+static void sw_line(int total)
+{
+    if (!SW.init || !(SW.texdefer || SW.lite || SW.dseed || SW.presentq || SW.wseed))
+        return;
+    gl_note("ECHANGE %s %lu : texdefer %lu vidages évités ; swaplite %lu lignes, %lu écarts, "
+            "%lu boucles de surfaces sautées ; dispseed %lu lectures d'écran sautées, contrôle "
+            "%lu, %lu écarts ; presentq %lu ; winseed %lu reprises, %lu complètes, contrôle %lu, "
+            "%lu écarts, cachés %lu repris, contrôle %lu, %lu écarts\n",
+            total ? "contexte détruit, image" : "image", G.n_frames, SW.n_defer,
+            SW.n_fast, SW.n_fast_diff, SW.n_surf_skip, SW.n_ds_skip, SW.n_ds_chk,
+            SW.n_ds_diff, SW.n_pq, SW.n_ws_skip, SW.n_ws_full, SW.n_ws_chk, SW.n_ws_diff,
+            SW.n_hs_skip, SW.n_hs_chk, SW.n_hs_diff);
+}
+
+static void sw_frame(void)
+{
+    if (G.n_frames % CNT_PERIOD == 0)
+        sw_line(0);
 }
 
 /* Mémoire vidéo où présenter p, ou 0 (échange normal). Verrou tenu. */
@@ -17027,6 +17562,7 @@ static void direct_invalidate(void)
         q->d_ok = 0;
         q->d_checked_at = 0;
     }
+    SW.ds_valid = 0;                    /* DISPSEED : écran à relire */
 }
 
 static unsigned char *direct_target(PCtx *p, unsigned long *rowbytes)
@@ -17048,23 +17584,68 @@ static unsigned char *direct_target(PCtx *p, unsigned long *rowbytes)
        structure déjà en mémoire ; ce sont les vérifications COÛTEUSES (liste
        des fenêtres, processus au premier plan) qui restent à la cadence de
        DIRECT_RECHECK. */
-    did = D.main_display();
-    base = D.base_address(did);
-    rb   = D.bytes_per_row(did);
-    bpp  = D.bits_per_pixel(did);
-    dw   = D.pixels_wide(did);
-    dh   = D.pixels_high(did);
-    if (!base || !dw || !dh || (bpp != 32 && bpp != 16) ||
-        rb < dw * (bpp == 16 ? 2 : 4)) {
-        snprintf(D.why, sizeof(D.why), "display %lu-bit, %lux%lu pitch %lu", bpp, dw, dh, rb);
-        direct_invalidate();
-        return 0;
+    /* 22/10, DISPSEED : ces six appels ne sont pas gratuits — chacun refait
+       updateAllDisplayInfoAsNeeded, dont bindDisplayMapping alloue et compare
+       une région par écran à chaque appel (1,7 % du fil de Zen). CoreGraphics
+       ne rafraîchit lui-même ses données d'écran que lorsque
+       CGSDisplayChangedSeed ou CGSDisplayMappingChangedSeed (deux mots de la
+       mémoire partagée du WindowServer, lus sans message) ont bougé. Graines
+       inchangées depuis la dernière lecture : on reprend les valeurs de D.
+       Seulement quand l'HÔTE écrit l'image (G.scanout : il borne SURF_PRESENT
+       sur la fenêtre visible et refuse un autre pas, Q3) — jamais pour la voie
+       où le G4 recopie lui-même en mémoire vidéo ; relu de toute façon toutes
+       les DIRECT_RECHECK images ; et une lecture n'est retenue que si les
+       graines n'ont pas bougé PENDANT (relues après). =2 : relit quand même
+       et compare (ligne ECHANGE). */
+    {
+        unsigned long s1 = 0, s2 = 0;
+        int cmp = 0;
+        if (SW.dseed && G.scanout && D.disp_seed && D.map_seed) {
+            s1 = D.disp_seed();
+            s2 = D.map_seed();
+            if (SW.ds_valid && s1 == SW.ds1 && s2 == SW.ds2 &&
+                G.n_frames - SW.ds_at < DIRECT_RECHECK) {
+                if (SW.dseed == 1) {
+                    SW.n_ds_skip++;
+                    goto display_known;
+                }
+                cmp = 1;
+            }
+        }
+        did = D.main_display();
+        base = D.base_address(did);
+        rb   = D.bytes_per_row(did);
+        bpp  = D.bits_per_pixel(did);
+        dw   = D.pixels_wide(did);
+        dh   = D.pixels_high(did);
+        if (cmp) {
+            SW.n_ds_chk++;
+            if (base != D.base || rb != D.rowbytes || bpp != D.bpp || dw != D.w || dh != D.h) {
+                SW.n_ds_diff++;
+                gl_note("DISPSEED contrôle : écart image %lu (graines %lx %lx) : %p %lu %lu "
+                        "%lux%lu au lieu de %p %lu %lu %lux%lu\n", G.n_frames, s1, s2,
+                        base, rb, bpp, dw, dh, D.base, D.rowbytes, D.bpp, D.w, D.h);
+            }
+        }
+        if (!base || !dw || !dh || (bpp != 32 && bpp != 16) ||
+            rb < dw * (bpp == 16 ? 2 : 4)) {
+            snprintf(D.why, sizeof(D.why), "display %lu-bit, %lux%lu pitch %lu", bpp, dw, dh, rb);
+            direct_invalidate();
+            return 0;
+        }
+        if (base != D.base || rb != D.rowbytes || bpp != D.bpp ||
+            dw != D.w || dh != D.h) {
+            D.base = base; D.rowbytes = rb; D.bpp = bpp; D.w = dw; D.h = dh;
+            direct_invalidate();        /* le mode a changé : tout revérifier */
+        }
+        if (SW.dseed && G.scanout && D.disp_seed && D.map_seed && !cmp) {
+            SW.ds_valid = D.disp_seed() == s1 && D.map_seed() == s2;
+            SW.ds1 = s1;
+            SW.ds2 = s2;
+            SW.ds_at = G.n_frames;
+        }
     }
-    if (base != D.base || rb != D.rowbytes || bpp != D.bpp ||
-        dw != D.w || dh != D.h) {
-        D.base = base; D.rowbytes = rb; D.bpp = bpp; D.w = dw; D.h = dh;
-        direct_invalidate();            /* le mode a changé : tout revérifier */
-    }
+display_known:
     /* F7 : le verdict et le rectangle sont PAR CONTEXTE — partagés, l'image de
        B partait dans le rectangle de A. */
     if (!p->d_checked_at || G.n_frames - p->d_checked_at >= DIRECT_RECHECK) {
@@ -17091,6 +17672,10 @@ static unsigned char *direct_target(PCtx *p, unsigned long *rowbytes)
                        p->sw, p->sh, p->d_x, p->d_y, D.w, D.h);
         p->d_ok = ok;
         p->d_checked_at = G.n_frames ? G.n_frames : 1;
+        if (p->ws_chk_next) {           /* WINSEED : la vérification qui vaut */
+            p->ws_chk = p->d_checked_at;
+            p->ws_chk_next = 0;
+        }
     }
     if (!p->d_ok)
         return 0;
@@ -17247,8 +17832,16 @@ static int present_direct(PCtx *p)
     unsigned long rowbytes, w, h;
     if (G.state <= 0 || p->broken || p->surf < 0 || p->color == SW_NEWER)
         return 0;
-    /* L'image PRÉCÉDENTE part maintenant en mémoire vidéo. */
-    wait_half(G.cur ^ 1);
+    /* L'image PRÉCÉDENTE part maintenant en mémoire vidéo. 22/10, PRESENTQ :
+       quand l'hôte écrit lui-même l'image (SURF_PRESENT), rien ici n'a besoin
+       que la n−1 soit finie — l'attendre avant de soumettre la n laissait
+       l'hôte sans travail pendant direct_target et la soumission. La même
+       barrière est attendue par switch_half, juste après la soumission (et
+       toute voie qui relit le tampon attend ce qu'il lui faut). */
+    if (SW.presentq && G.scanout)
+        SW.n_pq++;
+    else
+        wait_half(G.cur ^ 1);
     vram = direct_target(p, &rowbytes);
     if (!vram)
         return 0;
@@ -18293,8 +18886,10 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
     /* Une image = un échange (0x60). Les vidages 0x58/0x5c (glFlush, glFinish)
        n'en sont pas : Marble Blast en fait un par image, et les compter doublait
        le débit affiché (vu en vrai). */
-    if (slot == PROC_Swap60)
+    if (slot == PROC_Swap60) {
+        sw_init();                      /* 22/10 : levier B */
         stats_frame(p->ctx);
+    }
     /* v20 : l'échange change le tampon avant — textures de surface ; un
        drawable caché s'arrête là (son image n'existe que sur l'hôte). */
     if (slot == PROC_Swap60 && G.state > 0 && !p->broken)
@@ -18732,6 +19327,7 @@ void pomppc_context_destroyed(void *ctx)
        de décrocher la PCtx : stream_ready() peut relâcher le verrou. */
     stream_ready();
     vd_total("contexte détruit");       /* lot 2 */
+    sw_line(1);                         /* 22/10 : levier B */
     for (pp = &G.list; *pp; pp = &(*pp)->next) {
         if ((*pp)->ctx != ctx)
             continue;
