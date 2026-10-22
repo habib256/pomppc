@@ -4,12 +4,13 @@
 # swapwin — l'ÉCHANGE dans la session graphique (devloop.py start --gui), sous
 # plusieurs modes du plugin (22/10/2026, levier B : docs/plugin-allegement.md §3).
 # swapbench (guest/gltest/swapbench.c) : fenêtre (fen), fenêtre déplacée
-# (move), fenêtres qui se recouvrent (cover), plein écran CGL (fs). Chaque
+# (move), fenêtres qui se recouvrent (cover), seconde fenêtre mise devant,
+# derrière, retirée (pop), plein écran CGL (fs). Chaque
 # passe sous POMPPC_GL_NOTE et POMPPC_GL_FRAMES (l'usage réel : la trace est
 # allumée par les lanceurs « trace » et la matrice).
 #
-#   MODES="ref: win:POMPPC_GL_SWAPWIN=1"  (« nom:VAR=v,VAR=v »)
-#   TESTS="fen move cover fs" ; N=600 ; SIZE="320 240" ; FSSIZE="800 600" ; REPS=1
+#   MODES="ref: ws:POMPPC_GL_WINSEED=1"  (« nom:VAR=v,VAR=v »)
+#   TESTS="fen move cover pop fs" ; N=600 ; SIZE="320 240" ; FSSIZE="800 600" ; REPS=1
 #   WORK=k : travail simulé par image (swapbench, SWB_WORK) ; TEXDEL=1 : une texture
 #   détruite par image (SWB_TEXDEL) ; QUIET=1 : sans la ligne ECHANGE
 #   BUILD=0 : garder le kext et le plugin déjà en place
@@ -40,7 +41,7 @@ else
     { tail -15 $OUT/swapbench-build.txt; exit 1; }
   cp swapbench /tmp/swapbench-prof
 fi
-chmod 777 $OUT   # les passes tournent sous l’utilisateur de la session
+chmod 777 $OUT   # les passes tournent sous l'utilisateur de la session
 r=0
 while [ $r -lt $REPS ]; do
   r=$((r + 1))

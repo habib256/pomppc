@@ -797,8 +797,7 @@ typedef struct TexInfo {                /* textures à appliquer pour le dessin 
 } TexInfo;
 
 #define VKEY_WORDS 34                   /* lot 2 : mots de la clé du verdict */
-/* 22/10 (SWAPWIN, WINSEED) : ce que la vérification de fenêtre lit de la PCtx
-   et de D, relevé verrou tenu — le veilleur ne touche ni à l'une ni à l'autre. */
+/* 22/10 (WINSEED) : ce que la vérification de fenêtre lit de la PCtx et de D. */
 typedef struct {
     long          cid, wid, sid;
     unsigned long sw, sh;               /* taille du drawable */
@@ -1353,22 +1352,8 @@ static void crash_hook_fresh(void)
 }
 
 /* ─────────── 22/10/2026 — levier B : alléger l'échange de chaque image ───────────
- * (docs/plugin-allegement.md §3). Trois variables, éteintes par défaut :
+ * (docs/plugin-allegement.md §3). Variables éteintes par défaut :
  *
- *   POMPPC_GL_SWAPWIN=1  les vérifications COÛTEUSES de la présentation directe
- *       (processus au premier plan, rectangles de notre fenêtre et de chaque
- *       fenêtre au-dessus, liste des fenêtres, curseur ; fenêtre cachée) —
- *       des allers-retours Mach au WindowServer, ~3 ms toutes les
- *       DIRECT_RECHECK images dans Marble Blast — sont faites par un FIL
- *       VEILLEUR, plus par le fil du jeu. Le verdict garde la même borne
- *       d'âge : il est daté de l'image où il a été DEMANDÉ (relevé fait après,
- *       donc plus frais), et le fil du jeu refait la vérification lui-même,
- *       comme avant, dès qu'il a DIRECT_RECHECK images. La demande part
- *       SW_LEAD images avant l'échéance. Ce qui reste relu à chaque image
- *       (base, pas, profondeur et taille de l'écran : Q6) ne change pas.
- *       =2 : contrôle — le veilleur travaille, le fil du jeu garde la voie
- *       complète et compare chaque verdict qu'il refait au dernier du
- *       veilleur (ligne ECHANGE de la note).
  *   POMPPC_GL_TEXDEFER=1  la destruction d'une texture (TEX_DESTROY) ne vide
  *       plus le flux : elle part avec la soumission suivante, dans l'ordre du
  *       flux. Le vidage qui suivait datait du mode synchrone (18749d3) ; en
@@ -1394,10 +1379,11 @@ static void crash_hook_fresh(void)
  *       n'est refaite en entier que si la géométrie des fenêtres ou la région
  *       visible de la nôtre ont bougé (graines du WindowServer, winseed_ok) ;
  *       sinon, seuls l'alpha des fenêtres invisibles qui nous touchaient et le
- *       curseur sont revus. =2 : contrôle. Prend le pas sur SWAPWIN. */
-#ifndef SWAPWIN_DEFAULT
-#define SWAPWIN_DEFAULT  0
-#endif
+ *       curseur sont revus. =2 : contrôle.
+ *   (Un fil veilleur, SWAPWIN, qui faisait ces vérifications à la place du
+ *   fil du jeu, a été essayé le 22/10 puis retiré : +8 % d'instructions par
+ *   image — il devait demander plus tôt, donc plus souvent — pour un gain que
+ *   WINSEED obtient sans fil. Commit 01984aa.) */
 #ifndef TEXDEFER_DEFAULT
 #define TEXDEFER_DEFAULT 0
 #endif
@@ -1413,19 +1399,10 @@ static void crash_hook_fresh(void)
 #ifndef WINSEED_DEFAULT
 #define WINSEED_DEFAULT 0
 #endif
-#define SW_LEAD    3                    /* images d'avance de la demande au veilleur,
-                                           au départ ; ajustée (SW.lead) d'après le
-                                           temps de réponse vu, entre 2 et
-                                           DIRECT_RECHECK − 2 */
-#define SW_SLOTS   4                    /* contextes suivis en même temps */
 static struct {
-    int            init, win, texdefer, lite;
-    int            lead;                /* SWAPWIN : avance de la demande (images) */
-    unsigned long  gen;                 /* direct_invalidate : verdicts en vol caducs */
+    int            init, texdefer, lite;
     int            any_surftex;         /* SWAPLITE : une texture de surface a existé */
     /* compteurs (ligne ECHANGE, cumulés) */
-    unsigned long  n_post, n_applied, n_stale, n_sync_dir, n_sync_hid;
-    unsigned long  n_chk, n_chk_diff, n_chk_hid, n_chk_hid_diff;
     unsigned long  n_defer;             /* TEXDEFER : vidages évités */
     unsigned long  n_fast, n_fast_diff; /* SWAPLITE : lignes formatées / écarts (=2) */
     unsigned long  n_surf_skip;
@@ -1439,12 +1416,9 @@ static struct {
     unsigned long  n_ws_skip, n_ws_full, n_ws_chk, n_ws_diff;
     unsigned long  n_hs_skip, n_hs_chk, n_hs_diff;
 } SW;
-static void ww_check(PCtx *p, int what);
 static void sw_frame(void);
 static void sw_line(int total);
 static void sw_init(void);
-static void ww_stop(void);
-static void ww_tick(PCtx *p);
 
 static double now_s(void)
 {
@@ -2608,7 +2582,6 @@ void pomppc_backend_fini(void)
         pomppc_log("POMPPC: plugin déchargé, tranche %lu rendue\n", G.q.index);
     }
     G.state = -1;
-    ww_stop();                          /* 22/10, SWAPWIN : son code va disparaître */
     crash_hook_remove();                /* reste du 29/09 : NSUnLinkModule suit */
     pthread_mutex_unlock(&G.mu);
 }
@@ -16586,11 +16559,8 @@ static int drawable_hidden_full(PCtx *p, long cid, long wid)
         gl_note("drawable caché : %p fenêtre %lx %lux%lu (%ld fenêtres à l'écran)\n",
                 p->ctx, (unsigned long)wid, GLD_U32(p->ctx, CTX_WIDTH),
                 GLD_U32(p->ctx, CTX_HEIGHT), n);
-    if (SW.win == 1 && p->hid_checked_at && (unsigned long)wid == p->hid_wid)
-        SW.n_sync_hid++;                /* SWAPWIN : le veilleur n'était pas revenu */
     p->hid_wid = (unsigned long)wid;
     p->hid_checked_at = G.n_frames ? G.n_frames : 1;
-    ww_check(p, 1);                     /* SWAPWIN=2 */
     return got ? p->hid : -1;
 }
 
@@ -16815,7 +16785,6 @@ static void crash_hook_remove(void)
 static void pomppc_accel_unload(void) __attribute__((destructor));
 static void pomppc_accel_unload(void)
 {
-    ww_stop();                          /* 22/10, SWAPWIN */
     crash_hook_remove();
 }
 
@@ -17050,9 +17019,6 @@ static int rects_touch(long ax, long ay, long aw, long ah, const CgRect *r)
  * dessiné dedans ? (Le curseur de la VGA de QEMU est composé en logiciel par
  * le WindowServer dans la mémoire vidéo : écrire par-dessus l'effacerait.)
  * Remplit p->d_x / p->d_y (F7). */
-/* État du curseur (D.cur_x/cur_y) : à celui qui évalue — le fil du jeu ou le
-   veilleur, jamais les deux à la fois. */
-static pthread_mutex_t win_eval_mu = PTHREAD_MUTEX_INITIALIZER;
 /* 22/10 (WINSEED) : ce que win_eval a vu, pour reprendre son verdict sans
    le refaire. inv : les fenêtres au-dessus de nous qui TOUCHENT notre
    rectangle mais qu'on a laissées passer parce qu'invisibles (alpha < 0,004)
@@ -17083,12 +17049,10 @@ static int direct_window_ok(PCtx *p)
     }
     q.cid = GLD_U32(gd, GD_CID); q.wid = GLD_U32(gd, GD_WID); q.sid = GLD_U32(gd, GD_SID);
     q.sw = p->sw; q.sh = p->sh; q.dw = D.w; q.dh = D.h;
-    pthread_mutex_lock(&win_eval_mu);
     if (SW.wseed && D.geo_seed && D.vis_seed)
         ok = winseed_ok(p, &q, list, &n);
     else
         ok = win_eval(&q, &p->d_x, &p->d_y, D.why, sizeof(D.why), list, &n);
-    pthread_mutex_unlock(&win_eval_mu);
     return ok;
 }
 
@@ -17204,7 +17168,7 @@ static int winseed_ok(PCtx *p, const WinReq *q, long *list, long *n)
 /* La vérification elle-même (corps de direct_window_ok jusqu'au 22/10, à
    l'identique : seules les sources changent — WinReq au lieu de p et D, et
    `why`). Rend aussi la liste des fenêtres à l'écran quand elle a été lue
-   (*nlist > 0), pour la question « fenêtre cachée » du veilleur. */
+   (*nlist > 0). */
 static int win_eval(const WinReq *q, long *d_x, long *d_y, char *why, size_t whyn,
                     long *list, long *nlist)
 {
@@ -17308,314 +17272,7 @@ static int cursor_moving(long cid, long x, long y, unsigned long w, unsigned lon
     return 0;
 }
 
-/* ───────── 22/10/2026 — SWAPWIN : le veilleur de fenêtres ─────────
- *
- * Un fil à nous, créé à la première demande, qui fait pour le fil du jeu ce
- * que direct_target et drawable_hidden faisaient toutes les DIRECT_RECHECK
- * images : processus au premier plan, puis plein écran (décidé avec la barre
- * des menus relevée par le fil du jeu, HIToolbox) ou win_eval ; et la question
- * « fenêtre absente de la liste » avec la MÊME liste. Rien de ce qu'il fait
- * n'écrit dans G, D ou une PCtx : il travaille sur un relevé (WwSlot), et le
- * fil du jeu reprend le verdict, verrou tenu, à l'échange suivant (ww_tick) :
- *   — s'il est daté (image de la demande) d'APRÈS le verdict courant ;
- *   — si la génération de D n'a pas bougé (direct_invalidate : mode d'écran,
- *     attachement) ;
- *   — si le drawable est le même (connexion, fenêtre, surface, taille).
- * La demande part à SW_LEAD images de l'échéance ; si le verdict n'est pas
- * revenu à l'échéance, le fil du jeu vérifie lui-même (n_sync_dir) : l'âge
- * d'un verdict ne dépasse donc jamais DIRECT_RECHECK images, comme avant.
- * Ordre des verrous : G.mu → WW.mu, G.mu → win_eval_mu ; le veilleur ne
- * prend jamais G.mu. */
-typedef struct {
-    int           state;                /* 0 libre, 1 demandée, 2 en cours, 3 faite */
-    void         *ctx;                  /* clé : le contexte demandeur */
-    unsigned long frame, gen;           /* image de la demande, génération de D */
-    int           want_dir, full_cand, want_hid;
-    WinReq        q;
-    int           ok, why_set, hid, hid_valid;
-    long          x, y;
-    char          why[96];
-} WwSlot;
-static struct {
-    pthread_mutex_t mu;
-    pthread_cond_t  cv;
-    pthread_t       thr;
-    int             started, quit;
-    pid_t           pid;
-    WwSlot          s[SW_SLOTS];
-    WwSlot          last[SW_SLOTS];     /* =2 : dernier verdict du veilleur par contexte */
-} WW = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER };
-
-/* La vérification du veilleur (hors de tout verrou de G). */
-static void ww_eval(WwSlot *j)
-{
-    Psn front, me;
-    unsigned char same = 0;
-    long list[96], n = 0, i;
-    int ok;
-
-    j->why_set = 0;
-    j->hid_valid = 0;
-    j->why[0] = 0;
-    pthread_mutex_lock(&win_eval_mu);
-    if (j->want_dir) {
-        ok = D.front_process(&front) == 0 && D.current_process(&me) == 0 &&
-             D.same_process(&front, &me, &same) == 0 && same;
-        if (!ok) {
-            snprintf(j->why, sizeof(j->why), "not frontmost");
-            j->why_set = 1;
-        }
-        if (ok && j->full_cand) {
-            j->x = j->y = 0;
-            ok = 1;
-        } else {
-            if (ok) {
-                j->why_set = 1;
-                if (!D.windowed) {
-                    snprintf(j->why, sizeof(j->why), "window: SPI missing or no drawable");
-                    ok = 0;
-                } else {
-                    ok = win_eval(&j->q, &j->x, &j->y, j->why, sizeof(j->why), list, &n);
-                }
-            }
-            if (ok)
-                ok = 2;                 /* en fenêtre */
-        }
-        j->ok = ok;
-    }
-    if (j->want_hid) {
-        /* drawable_hidden, avec la liste de win_eval si elle a été lue */
-        if (n <= 0 && !(D.onscreen_list && D.onscreen_list(j->q.cid, 0, 96, list, &n) == 0 &&
-                        n > 0 && n <= 96))
-            n = 0;
-        j->hid = 0;
-        if (n > 0) {
-            for (i = 0; i < n && list[i] != j->q.wid; i++)
-                ;
-            j->hid = i == n;
-        }
-        j->hid_valid = 1;
-    }
-    pthread_mutex_unlock(&win_eval_mu);
-}
-
-static void *ww_main(void *arg)
-{
-    pthread_mutex_lock(&WW.mu);
-    for (;;) {
-        WwSlot *j = 0, work;
-        int k;
-        while (!WW.quit) {
-            for (k = 0; k < SW_SLOTS && !j; k++)
-                if (WW.s[k].state == 1)
-                    j = &WW.s[k];
-            if (j)
-                break;
-            pthread_cond_wait(&WW.cv, &WW.mu);
-        }
-        if (WW.quit)
-            break;
-        j->state = 2;                   /* personne d'autre n'y touche (ww_tick) */
-        work = *j;
-        pthread_mutex_unlock(&WW.mu);
-        ww_eval(&work);
-        pthread_mutex_lock(&WW.mu);
-        j->ok = work.ok; j->x = work.x; j->y = work.y;
-        j->why_set = work.why_set;
-        memcpy(j->why, work.why, sizeof(j->why));
-        j->hid = work.hid; j->hid_valid = work.hid_valid;
-        j->state = 3;
-    }
-    pthread_mutex_unlock(&WW.mu);
-    return arg;
-}
-
-/* Arrêt du veilleur (déchargement du plugin : son code va disparaître). Le
-   veilleur ne prend jamais G.mu : on peut l'attendre verrou tenu. Pas dans
-   l'enfant d'un fork (le fil n'y existe pas). */
-static void ww_stop(void)
-{
-    if (!WW.started || WW.pid != getpid())
-        return;
-    pthread_mutex_lock(&WW.mu);
-    WW.quit = 1;
-    pthread_cond_broadcast(&WW.cv);
-    pthread_mutex_unlock(&WW.mu);
-    pthread_join(WW.thr, 0);
-    WW.started = 0;
-}
-
-/* Le verdict du veilleur s'applique-t-il encore à p ? WW.mu et G.mu tenus. */
-static int ww_same_drawable(PCtx *p, const WwSlot *s)
-{
-    unsigned char *gd = (unsigned char *)GLD_U32(p->ctx, 4);
-    return gd && s->gen == SW.gen && (long)GLD_U32(gd, GD_CID) == s->q.cid &&
-           (long)GLD_U32(gd, GD_WID) == s->q.wid && (long)GLD_U32(gd, GD_SID) == s->q.sid &&
-           p->sw == s->q.sw && p->sh == s->q.sh;
-}
-
-/* SWAPWIN=1 : reprendre le verdict fait. WW.mu et G.mu tenus. */
-static void ww_apply(PCtx *p, const WwSlot *s)
-{
-    if (!ww_same_drawable(p, s)) {
-        SW.n_stale++;
-        return;
-    }
-    if (s->want_dir && p->d_checked_at && s->frame > p->d_checked_at) {
-        if (s->ok != p->d_ok)
-            pomppc_log("POMPPC: présentation directe %s (%lux%lu en %ld,%ld ; écran %lux%lu)\n",
-                       s->ok == 1 ? "plein écran" : s->ok ? "en fenêtre" : "coupée",
-                       p->sw, p->sh, s->ok ? s->x : p->d_x, s->ok ? s->y : p->d_y,
-                       D.w, D.h);
-        if (s->ok) {
-            p->d_x = s->x;
-            p->d_y = s->y;
-        }
-        p->d_ok = s->ok;
-        p->d_checked_at = s->frame;
-        if (s->why_set)
-            memcpy(D.why, s->why, sizeof(D.why));
-        SW.n_applied++;
-    }
-    if (s->hid_valid && p->hid_checked_at && s->frame > p->hid_checked_at &&
-        (unsigned long)s->q.wid == p->hid_wid) {
-        p->hid = s->hid;
-        p->hid_checked_at = s->frame;
-    }
-}
-
-/* À chaque échange (0x60), verrou tenu : reprend ce que le veilleur a fait
-   pour p, et lui demande la vérification suivante quand elle approche. */
-static void ww_tick(PCtx *p)
-{
-    unsigned char *gd;
-    unsigned long n = G.n_frames;
-    WwSlot *mine = 0, *fr = 0;
-    int k, want_dir, want_hid;
-
-    if (!SW.win || G.state <= 0 || p->broken || !p->ctx)
-        return;
-    gd = (unsigned char *)GLD_U32(p->ctx, 4);
-    pthread_mutex_lock(&WW.mu);
-    for (k = 0; k < SW_SLOTS; k++) {
-        WwSlot *s = &WW.s[k];
-        if (s->state == 0) {
-            if (!fr)
-                fr = s;
-            continue;
-        }
-        if (s->ctx != p->ctx) {
-            /* contexte disparu ou muet : l'emplacement est rendu */
-            if (s->state == 3 && n - s->frame > 4 * DIRECT_RECHECK)
-                s->state = 0;
-            continue;
-        }
-        if (s->state != 3) {
-            mine = s;                   /* demandée ou en cours */
-            continue;
-        }
-        {   /* temps de réponse vu (en images) : la demande suivante part
-               assez tôt pour revenir avant l'échéance */
-            unsigned long lat = n - s->frame;
-            int lead = (int)(lat < DIRECT_RECHECK ? lat : DIRECT_RECHECK) + 1;
-            SW.lead = lead < 2 ? 2 : lead > DIRECT_RECHECK - 2 ? DIRECT_RECHECK - 2 : lead;
-        }
-        if (SW.win == 1) {
-            ww_apply(p, s);
-        } else {
-            /* =2 : gardé pour la comparaison (direct_target, drawable_hidden) */
-            int m, slot = -1;
-            for (m = 0; m < SW_SLOTS && slot < 0; m++)
-                if (WW.last[m].ctx == p->ctx)
-                    slot = m;
-            for (m = 0; m < SW_SLOTS && slot < 0; m++)
-                if (!WW.last[m].ctx)
-                    slot = m;
-            WW.last[slot < 0 ? 0 : slot] = *s;
-        }
-        s->state = 0;
-        if (!fr)
-            fr = s;
-    }
-    if (!mine && fr && gd) {
-        unsigned long da = n - p->d_checked_at, ha = n - p->hid_checked_at;
-        long wid = GLD_U32(gd, GD_WID);
-        unsigned long from = DIRECT_RECHECK - (unsigned long)SW.lead;
-        want_dir = D.init && D.enabled && p->surf >= 0 && p->color != SW_NEWER &&
-                   p->d_checked_at && da >= from && da < DIRECT_RECHECK;
-        want_hid = G.hidden && !p->fullscreen_buf && wid && p->hid_checked_at &&
-                   (unsigned long)wid == p->hid_wid && ha >= from && ha < DIRECT_RECHECK;
-        if (want_dir || want_hid) {
-            memset(fr, 0, sizeof(*fr));
-            fr->ctx = p->ctx;
-            fr->frame = n;
-            fr->gen = SW.gen;
-            fr->want_dir = want_dir;
-            fr->want_hid = want_hid;
-            fr->q.cid = GLD_U32(gd, GD_CID);
-            fr->q.wid = wid;
-            fr->q.sid = GLD_U32(gd, GD_SID);
-            fr->q.sw = p->sw; fr->q.sh = p->sh;
-            fr->q.dw = D.w; fr->q.dh = D.h;
-            /* barre des menus (HIToolbox) relevée ici, par le fil du jeu */
-            fr->full_cand = want_dir && p->sw == D.w && p->sh == D.h &&
-                            (!D.menubar_visible || !D.menubar_visible() || p->fullscreen_buf);
-            if (!WW.started) {
-                WW.quit = 0;
-                if (pthread_create(&WW.thr, 0, ww_main, 0) == 0) {
-                    WW.started = 1;
-                    WW.pid = getpid();
-                } else {
-                    SW.win = 0;         /* pas de fil : voie d'avant */
-                    pomppc_log("POMPPC: SWAPWIN : fil veilleur refusé, vérifications "
-                               "faites par le fil du jeu\n");
-                }
-            }
-            if (WW.started) {
-                fr->state = 1;
-                SW.n_post++;
-                pthread_cond_signal(&WW.cv);
-            }
-        }
-    }
-    pthread_mutex_unlock(&WW.mu);
-}
-
-/* SWAPWIN=2 : le verdict que le fil du jeu vient de refaire, comparé au
-   dernier du veilleur pour p (s'il date de moins de DIRECT_RECHECK images et
-   vaut pour le même drawable). `what` : 0 présentation, 1 fenêtre cachée. */
-static void ww_check(PCtx *p, int what)
-{
-    int m;
-    if (SW.win != 2)
-        return;
-    pthread_mutex_lock(&WW.mu);
-    for (m = 0; m < SW_SLOTS; m++) {
-        WwSlot *s = &WW.last[m];
-        if (s->ctx != p->ctx || G.n_frames - s->frame >= DIRECT_RECHECK ||
-            !ww_same_drawable(p, s))
-            continue;
-        if (what == 0 && s->want_dir) {
-            int diff = s->ok != p->d_ok || (s->ok && (s->x != p->d_x || s->y != p->d_y));
-            SW.n_chk++;
-            if (diff) {
-                SW.n_chk_diff++;
-                if (SW.n_chk_diff <= 8)
-                    gl_note("ECHANGE contrôle : écart image %lu (veilleur image %lu : %d en "
-                            "%ld,%ld ; fil du jeu : %d en %ld,%ld)\n", G.n_frames, s->frame,
-                            s->ok, s->x, s->y, p->d_ok, p->d_x, p->d_y);
-            }
-        }
-        if (what == 1 && s->hid_valid) {
-            SW.n_chk_hid++;
-            if (s->hid != p->hid)
-                SW.n_chk_hid_diff++;
-        }
-    }
-    pthread_mutex_unlock(&WW.mu);
-}
-
-/* Les trois variables du levier B, lues une fois (verrou tenu : premier
+/* Les variables du levier B, lues une fois (verrou tenu : premier
    échange ou première destruction de texture). Ligne ECHANGE en tête. */
 static void sw_init(void)
 {
@@ -17623,10 +17280,6 @@ static void sw_init(void)
     if (SW.init)
         return;
     SW.init = 1;
-    e = getenv("POMPPC_GL_SWAPWIN");
-    SW.win = e && e[0] ? (int)(e[0] - '0') : SWAPWIN_DEFAULT;
-    if (SW.win < 0 || SW.win > 2)
-        SW.win = 0;
     e = getenv("POMPPC_GL_TEXDEFER");
     SW.texdefer = e && e[0] ? e[0] != '0' : TEXDEFER_DEFAULT;
     e = getenv("POMPPC_GL_SWAPLITE");
@@ -17643,14 +17296,9 @@ static void sw_init(void)
     SW.wseed = e && e[0] ? (int)(e[0] - '0') : WINSEED_DEFAULT;
     if (SW.wseed < 0 || SW.wseed > 2)
         SW.wseed = 0;
-    if (SW.wseed && SW.win) {
-        gl_note("ECHANGE : WINSEED prend le pas sur SWAPWIN (veilleur coupé)\n");
-        SW.win = 0;
-    }
-    SW.lead = SW_LEAD;
-    gl_note("ECHANGE : swapwin=%d texdefer=%d swaplite=%d dispseed=%d presentq=%d winseed=%d "
-            "(recheck %d, avance %d)\n", SW.win, SW.texdefer, SW.lite, SW.dseed, SW.presentq,
-            SW.wseed, DIRECT_RECHECK, SW_LEAD);
+    gl_note("ECHANGE : texdefer=%d swaplite=%d dispseed=%d presentq=%d winseed=%d "
+            "(recheck %d)\n", SW.texdefer, SW.lite, SW.dseed, SW.presentq, SW.wseed,
+            DIRECT_RECHECK);
 }
 
 /* Ligne ECHANGE de la note, toutes les CNT_PERIOD images (stats_frame) et
@@ -17658,18 +17306,13 @@ static void sw_init(void)
    allumé. Compteurs cumulés. */
 static void sw_line(int total)
 {
-    if (!SW.init || !(SW.win || SW.texdefer || SW.lite || SW.dseed || SW.presentq || SW.wseed))
+    if (!SW.init || !(SW.texdefer || SW.lite || SW.dseed || SW.presentq || SW.wseed))
         return;
-    gl_note("ECHANGE %s %lu : veilleur (avance %d) %lu demandes, %lu verdicts repris, %lu caducs, "
-            "vérifiés par le fil du jeu %lu (présentation) + %lu (caché) ; contrôle %lu "
-            "comparés, %lu écarts, cachés %lu comparés, %lu écarts ; texdefer %lu vidages "
-            "évités ; swaplite %lu lignes, %lu écarts, %lu boucles de surfaces sautées ; "
-            "dispseed %lu lectures d'écran sautées, contrôle %lu, %lu écarts ; presentq %lu ; "
-            "winseed %lu reprises, %lu complètes, contrôle %lu, %lu écarts, cachés %lu repris, "
-            "contrôle %lu, %lu écarts\n",
-            total ? "contexte détruit, image" : "image", G.n_frames, SW.lead, SW.n_post,
-            SW.n_applied, SW.n_stale, SW.n_sync_dir, SW.n_sync_hid,
-            SW.n_chk, SW.n_chk_diff, SW.n_chk_hid, SW.n_chk_hid_diff, SW.n_defer,
+    gl_note("ECHANGE %s %lu : texdefer %lu vidages évités ; swaplite %lu lignes, %lu écarts, "
+            "%lu boucles de surfaces sautées ; dispseed %lu lectures d'écran sautées, contrôle "
+            "%lu, %lu écarts ; presentq %lu ; winseed %lu reprises, %lu complètes, contrôle %lu, "
+            "%lu écarts, cachés %lu repris, contrôle %lu, %lu écarts\n",
+            total ? "contexte détruit, image" : "image", G.n_frames, SW.n_defer,
             SW.n_fast, SW.n_fast_diff, SW.n_surf_skip, SW.n_ds_skip, SW.n_ds_chk,
             SW.n_ds_diff, SW.n_pq, SW.n_ws_skip, SW.n_ws_full, SW.n_ws_chk, SW.n_ws_diff,
             SW.n_hs_skip, SW.n_hs_chk, SW.n_hs_diff);
@@ -17691,7 +17334,6 @@ static void direct_invalidate(void)
         q->d_ok = 0;
         q->d_checked_at = 0;
     }
-    SW.gen++;                           /* SWAPWIN : verdicts en vol caducs */
     SW.ds_valid = 0;                    /* DISPSEED : écran à relire */
 }
 
@@ -17800,15 +17442,12 @@ display_known:
             pomppc_log("POMPPC: présentation directe %s (%lux%lu en %ld,%ld ; écran %lux%lu)\n",
                        ok == 1 ? "plein écran" : ok ? "en fenêtre" : "coupée",
                        p->sw, p->sh, p->d_x, p->d_y, D.w, D.h);
-        if (SW.win == 1 && p->d_checked_at)
-            SW.n_sync_dir++;            /* SWAPWIN : le veilleur n'était pas revenu */
         p->d_ok = ok;
         p->d_checked_at = G.n_frames ? G.n_frames : 1;
         if (p->ws_chk_next) {           /* WINSEED : la vérification qui vaut */
             p->ws_chk = p->d_checked_at;
             p->ws_chk_next = 0;
         }
-        ww_check(p, 0);                 /* SWAPWIN=2 */
     }
     if (!p->d_ok)
         return 0;
@@ -19022,7 +18661,6 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
     if (slot == PROC_Swap60) {
         sw_init();                      /* 22/10 : levier B */
         stats_frame(p->ctx);
-        ww_tick(p);                     /* SWAPWIN : verdict du veilleur */
     }
     /* v20 : l'échange change le tampon avant — textures de surface ; un
        drawable caché s'arrête là (son image n'existe que sur l'hôte). */
