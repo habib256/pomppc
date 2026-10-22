@@ -1015,7 +1015,7 @@ int main(int argc, char **argv)
            sur les mêmes témoins, hors du tampon (docs/backend-gl-unites-fixes.md). */
         static const char *grandes[] = { "tex13", "tex14", "gl15", "texlod",
             "bigstrip", "clip", "dlist", "fusion", "lit", "mixte", "tcprobe", "texgen", "v15",
-            "pixstore", 0 };
+            "pixstore", "uvwide", 0 };
         int g;
         for (g = 0; grandes[g]; g++)
             if (!strcmp(argv[1], grandes[g])) { W = 256; H = 256; }
@@ -6687,6 +6687,246 @@ int main(int argc, char **argv)
         glDeleteLists(dl, 1);
         glFinish();
         check_cond("litdirty : vingt cases éclairées (image non uniforme)", distinct_colors(12) >= 12);
+    } else if (!strcmp(scene, "uvwide")) {
+        /* 23/10/2026 — POMPPC_GL_UVWIDE (docs/plugin-allegement.md §7) : le
+           verdict par unité élargi. Trois unités texturées (unité 2 en
+           GL_COMBINE), puis une suite de pas qui ne changent chacun qu'une
+           chose entre deux dessins texturés : environnement de texture de
+           chaque unité (mode, couleur, chaque paramètre du combinateur),
+           biais de LOD, brouillard (allumage, paramètres, source de la
+           coordonnée), COLOR_SUM, éclairage (allumage, lumières, matériau,
+           COLOR_MATERIAL, modèle), texgen des unités 0 et 1, matrice de
+           texture, unité 3 allumée puis éteinte, texturage entièrement éteint
+           (brouillard et éclairage changés sans texture), environnement d'une
+           unité éteinte, rallumage depuis « rien de texturé », dessins par
+           tableaux. Sous GLTEST_STEPS, « PAS n quoi » sur stderr, entrelacé
+           avec POMPPC_GL_BLOCKDUMP : c'est le relevé des bits du bloc. Image
+           comparée À L'OCTET entre les modes du plugin (job plugmd5). */
+        static const float c0[4] = { 0.9f, 0.3f, 0.2f, 1 }, c1[4] = { 0.2f, 0.8f, 0.4f, 0.5f };
+        static const float c2[4] = { 0.3f, 0.4f, 1, 0.75f }, c3[4] = { 0.6f, 0.6f, 0.1f, 1 };
+        static const float fogc[4] = { 0.7f, 0.65f, 0.5f, 1 }, fogc2[4] = { 0.2f, 0.3f, 0.6f, 1 };
+        static const float lpos[4] = { 0.2f, 0.4f, 1, 0 }, lpos1[4] = { -0.6f, 0.2f, 1, 0 };
+        static const float ldif[4] = { 1, 0.8f, 0.6f, 1 }, lamb[4] = { 0.3f, 0.2f, 0.4f, 1 };
+        static const float mat[4] = { 0.8f, 0.9f, 0.5f, 1 };
+        static const float plane_s[4] = { 0.05f, 0, 0, 0 }, plane_t[4] = { 0, 0.05f, 0, 0 };
+        static const float plane_s2[4] = { 0.02f, 0.03f, 0, 0.1f };
+        unsigned char ti0[16 * 16 * 3], ti1[16 * 16], ti2[16 * 16 * 4], ti3[8 * 8 * 3];
+        static float va[4 * 3], ca[4 * 4], ta0[4 * 2], ta1[4 * 2];
+        GLuint tx[5];
+        int x, y, step, k, nsteps = 56;
+        const int cols = 8, rows = 7;
+        float cw = (float)W / cols, ch = (float)H / rows;
+        for (y = 0; y < 16; y++)
+            for (x = 0; x < 16; x++) {
+                int on = ((x >> 2) + (y >> 2)) & 1;
+                ti0[(y * 16 + x) * 3] = (unsigned char)(on ? 230 : 60 + 8 * x);
+                ti0[(y * 16 + x) * 3 + 1] = (unsigned char)(on ? 180 : 40 + 10 * y);
+                ti0[(y * 16 + x) * 3 + 2] = (unsigned char)(on ? 90 : 200);
+                ti1[y * 16 + x] = (unsigned char)(120 + 8 * x - 3 * y);
+                ti2[(y * 16 + x) * 4] = (unsigned char)((y & 2) ? 250 : 30);
+                ti2[(y * 16 + x) * 4 + 1] = (unsigned char)(100 + 9 * y);
+                ti2[(y * 16 + x) * 4 + 2] = (unsigned char)((x & 4) ? 220 : 50);
+                ti2[(y * 16 + x) * 4 + 3] = (unsigned char)(60 + 12 * x);
+            }
+        for (y = 0; y < 8; y++)
+            for (x = 0; x < 8; x++) {
+                ti3[(y * 8 + x) * 3] = (unsigned char)(40 * (x & 3));
+                ti3[(y * 8 + x) * 3 + 1] = (unsigned char)(250 - 20 * y);
+                ti3[(y * 8 + x) * 3 + 2] = (unsigned char)((x ^ y) & 1 ? 255 : 0);
+            }
+        glGenTextures(5, tx);
+        glBindTexture(GL_TEXTURE_2D, tx[0]);
+        gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGB, 16, 16, GL_RGB, GL_UNSIGNED_BYTE, ti0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glBindTexture(GL_TEXTURE_2D, tx[1]);
+        gluBuild2DMipmaps(GL_TEXTURE_2D, GL_LUMINANCE, 16, 16, GL_LUMINANCE, GL_UNSIGNED_BYTE, ti1);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, tx[2]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, ti2);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glBindTexture(GL_TEXTURE_2D, tx[3]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 8, 8, 0, GL_RGB, GL_UNSIGNED_BYTE, ti3);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glBindTexture(GL_TEXTURE_2D, tx[4]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 8, 8, 0, GL_RGB, GL_UNSIGNED_BYTE, ti0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        /* unités 0 (MODULATE), 1 (MODULATE, carte de luminance), 2 (COMBINE) */
+        glBindTexture(GL_TEXTURE_2D, tx[0]);
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        glActiveTextureARB(GL_TEXTURE1_ARB);
+        glBindTexture(GL_TEXTURE_2D, tx[1]);
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        glActiveTextureARB(GL_TEXTURE2_ARB);
+        glBindTexture(GL_TEXTURE_2D, tx[2]);
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+        glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_INTERPOLATE);
+        glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_TEXTURE);
+        glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE1_RGB, GL_PREVIOUS);
+        glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE2_RGB, GL_CONSTANT);
+        glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND2_RGB, GL_SRC_COLOR);
+        glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_REPLACE);
+        glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_ALPHA, GL_PREVIOUS);
+        glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, c2);
+        glActiveTextureARB(GL_TEXTURE3_ARB);
+        glBindTexture(GL_TEXTURE_2D, tx[3]);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_DECAL);
+        glActiveTextureARB(GL_TEXTURE0_ARB);
+        glFogi(GL_FOG_MODE, GL_LINEAR);
+        glFogf(GL_FOG_START, 0.0f);
+        glFogf(GL_FOG_END, 1.5f);
+        glFogfv(GL_FOG_COLOR, fogc);
+        glLightfv(GL_LIGHT0, GL_POSITION, lpos);
+        glLightfv(GL_LIGHT1, GL_POSITION, lpos1);
+        glLightfv(GL_LIGHT1, GL_DIFFUSE, c3);
+        glEnable(GL_LIGHT0);
+        glClearColor(0.1f, 0.12f, 0.15f, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        for (step = 0; step < nsteps; step++) {
+            float x0 = (step % cols) * cw + 2, y0 = (step / cols) * ch + 2;
+            float x1 = x0 + cw - 4, y1 = y0 + ch - 4;
+            const char *what = "rien (témoin)";
+            int arrays = 0;
+#define UVW_ACT(u) glActiveTextureARB(GL_TEXTURE0_ARB + (u))
+            switch (step) {
+            case 1: what = "u0 ENV_COLOR (MODULATE)"; glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, c0); break;
+            case 2: what = "u0 ENV_MODE BLEND"; glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_BLEND); break;
+            case 3: what = "u0 ENV_COLOR (BLEND)"; glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, c1); break;
+            case 4: what = "u1 ENV_COLOR"; UVW_ACT(1); glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, c3); UVW_ACT(0); break;
+            case 5: what = "u1 ENV_MODE ADD"; UVW_ACT(1); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_ADD); UVW_ACT(0); break;
+            case 6: what = "u2 ENV_COLOR (constante du combinateur)"; UVW_ACT(2); glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, c0); UVW_ACT(0); break;
+            case 7: what = "u2 COMBINE_RGB MODULATE"; UVW_ACT(2); glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_MODULATE); UVW_ACT(0); break;
+            case 8: what = "u2 SOURCE1_RGB CONSTANT"; UVW_ACT(2); glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE1_RGB, GL_CONSTANT); UVW_ACT(0); break;
+            case 9: what = "u2 OPERAND0_RGB ONE_MINUS_SRC_COLOR"; UVW_ACT(2); glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_RGB, GL_ONE_MINUS_SRC_COLOR); UVW_ACT(0); break;
+            case 10: what = "u2 RGB_SCALE 2"; UVW_ACT(2); glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, 2.0f); UVW_ACT(0); break;
+            case 11: what = "u2 COMBINE_ALPHA MODULATE, ALPHA_SCALE 2"; UVW_ACT(2); glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_MODULATE);
+                     glTexEnvf(GL_TEXTURE_ENV, GL_ALPHA_SCALE, 2.0f); UVW_ACT(0); break;
+            case 12: what = "u1 LOD_BIAS 2"; UVW_ACT(1); glTexEnvf(0x8500, 0x8501, 2.0f); UVW_ACT(0); break;
+            case 13: what = "u0 LOD_BIAS 1"; glTexEnvf(0x8500, 0x8501, 1.0f); break;
+            case 14: what = "glEnable FOG"; glEnable(GL_FOG); break;
+            case 15: what = "glFogi MODE EXP, glFogf DENSITY"; glFogi(GL_FOG_MODE, GL_EXP); glFogf(GL_FOG_DENSITY, 1.2f); break;
+            case 16: what = "glFogfv COLOR"; glFogfv(GL_FOG_COLOR, fogc2); break;
+            case 17: what = "glFogi MODE LINEAR, START, END"; glFogi(GL_FOG_MODE, GL_LINEAR); glFogf(GL_FOG_START, 0.2f); glFogf(GL_FOG_END, 1.0f); break;
+            case 18: what = "glFogi COORDINATE_SOURCE FOG_COORDINATE"; glFogi(GL_FOG_COORDINATE_SOURCE_EXT, GL_FOG_COORDINATE_EXT); break;
+            case 19: what = "glFogi COORDINATE_SOURCE FRAGMENT_DEPTH"; glFogi(GL_FOG_COORDINATE_SOURCE_EXT, GL_FRAGMENT_DEPTH_EXT); break;
+            case 20: what = "glDisable FOG"; glDisable(GL_FOG); break;
+            case 21: what = "glEnable COLOR_SUM"; glEnable(0x8458); break;
+            case 22: what = "glDisable COLOR_SUM"; glDisable(0x8458); break;
+            case 23: what = "glEnable LIGHTING"; glEnable(GL_LIGHTING); break;
+            case 24: what = "glLightfv LIGHT0 DIFFUSE"; glLightfv(GL_LIGHT0, GL_DIFFUSE, ldif); break;
+            case 25: what = "glEnable LIGHT1"; glEnable(GL_LIGHT1); break;
+            case 26: what = "glMaterialfv"; glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, mat); break;
+            case 27: what = "glEnable COLOR_MATERIAL"; glEnable(GL_COLOR_MATERIAL); break;
+            case 28: what = "glColorMaterial FRONT DIFFUSE"; glColorMaterial(GL_FRONT, GL_DIFFUSE); break;
+            case 29: what = "glLightModelfv AMBIENT"; glLightModelfv(GL_LIGHT_MODEL_AMBIENT, lamb); break;
+            case 30: what = "glDisable COLOR_MATERIAL, glDisable LIGHTING"; glDisable(GL_COLOR_MATERIAL); glDisable(GL_LIGHTING); break;
+            case 31: what = "u0 texgen S,T OBJECT_LINEAR";
+                     glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR); glTexGenfv(GL_S, GL_OBJECT_PLANE, plane_s);
+                     glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR); glTexGenfv(GL_T, GL_OBJECT_PLANE, plane_t);
+                     glEnable(GL_TEXTURE_GEN_S); glEnable(GL_TEXTURE_GEN_T); break;
+            case 32: what = "u1 texgen S,T SPHERE_MAP"; UVW_ACT(1);
+                     glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_SPHERE_MAP); glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, GL_SPHERE_MAP);
+                     glEnable(GL_TEXTURE_GEN_S); glEnable(GL_TEXTURE_GEN_T); UVW_ACT(0); break;
+            case 33: what = "u0 glTexGenfv OBJECT_PLANE"; glTexGenfv(GL_S, GL_OBJECT_PLANE, plane_s2); break;
+            case 34: what = "u0 et u1 texgen éteints"; glDisable(GL_TEXTURE_GEN_S); glDisable(GL_TEXTURE_GEN_T);
+                     UVW_ACT(1); glDisable(GL_TEXTURE_GEN_S); glDisable(GL_TEXTURE_GEN_T); UVW_ACT(0); break;
+            case 35: what = "u1 matrice de texture"; UVW_ACT(1); glMatrixMode(GL_TEXTURE); glLoadIdentity();
+                     glScalef(2.0f, 1.5f, 1); glMatrixMode(GL_MODELVIEW); UVW_ACT(0); break;
+            case 36: what = "u3 glEnable TEXTURE_2D"; UVW_ACT(3); glEnable(GL_TEXTURE_2D); UVW_ACT(0); break;
+            case 37: what = "u3 ENV_MODE MODULATE, ENV_COLOR"; UVW_ACT(3); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+                     glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, c1); UVW_ACT(0); break;
+            case 38: what = "u3 glDisable TEXTURE_2D"; UVW_ACT(3); glDisable(GL_TEXTURE_2D); UVW_ACT(0); break;
+            case 39: what = "u0 ENV_COLOR + modèle-vue (motif d'UT2004)"; glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, c2);
+                     glTranslatef(1, 0, 0); break;
+            case 40: what = "u1 ENV_COLOR + glFogfv COLOR + glLightfv"; UVW_ACT(1); glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, c0); UVW_ACT(0);
+                     glFogfv(GL_FOG_COLOR, fogc); glLightfv(GL_LIGHT1, GL_DIFFUSE, ldif); glLoadIdentity(); break;
+            case 41: what = "texturage éteint (u0, u1, u2)"; glDisable(GL_TEXTURE_2D); UVW_ACT(1); glDisable(GL_TEXTURE_2D);
+                     UVW_ACT(2); glDisable(GL_TEXTURE_2D); UVW_ACT(0); break;
+            case 42: what = "sans texture : glEnable FOG"; glEnable(GL_FOG); break;
+            case 43: what = "sans texture : glEnable LIGHTING, glLightfv"; glEnable(GL_LIGHTING); glLightfv(GL_LIGHT0, GL_DIFFUSE, c3); break;
+            case 44: what = "sans texture : glDisable LIGHTING, FOG"; glDisable(GL_LIGHTING); glDisable(GL_FOG); break;
+            case 45: what = "sans texture : u1 ENV_COLOR (unité éteinte)"; UVW_ACT(1); glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, c2); UVW_ACT(0); break;
+            case 46: what = "u0 rallumée (depuis rien de texturé)"; glEnable(GL_TEXTURE_2D); break;
+            case 47: what = "u1 ENV_MODE BLEND (unité éteinte), u0 allumée"; UVW_ACT(1); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_BLEND); UVW_ACT(0); break;
+            case 48: what = "u1 et u2 rallumées"; UVW_ACT(1); glEnable(GL_TEXTURE_2D); UVW_ACT(2); glEnable(GL_TEXTURE_2D); UVW_ACT(0); break;
+            case 49: what = "tableaux : u2 ENV_COLOR"; UVW_ACT(2); glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, c3); UVW_ACT(0); arrays = 1; break;
+            case 50: what = "tableaux : glEnable FOG"; glEnable(GL_FOG); arrays = 1; break;
+            case 51: what = "tableaux : u1 LOD_BIAS 0, glDisable FOG"; UVW_ACT(1); glTexEnvf(0x8500, 0x8501, 0.0f); UVW_ACT(0); glDisable(GL_FOG); arrays = 1; break;
+            case 52: what = "u0 glTexSubImage2D + u1 ENV_COLOR"; glTexSubImage2D(GL_TEXTURE_2D, 0, 4, 4, 4, 4, GL_RGB, GL_UNSIGNED_BYTE, ti3);
+                     UVW_ACT(1); glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, c1); UVW_ACT(0); break;
+            case 53: what = "u2 autre texture + LOD_BIAS"; UVW_ACT(2); glBindTexture(GL_TEXTURE_2D, tx[4]); glTexEnvf(0x8500, 0x8501, 0.5f); UVW_ACT(0); break;
+            case 54: what = "u0 ENV_MODE REPLACE + glMaterialfv"; glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+                     glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, c3); break;
+            default: break;
+            }
+#undef UVW_ACT
+            if (getenv("GLTEST_STEPS")) {   /* entrelacé avec POMPPC_GL_BLOCKDUMP */
+                fprintf(stderr, "PAS %d %s\n", step, what);
+                fflush(stderr);
+            }
+            if (arrays) {
+                for (k = 0; k < 4; k++) {
+                    va[k * 3] = (k == 1 || k == 2) ? x1 : x0;
+                    va[k * 3 + 1] = k >= 2 ? y1 : y0;
+                    va[k * 3 + 2] = -0.5f;
+                    ca[k * 4] = 0.5f + 0.15f * k; ca[k * 4 + 1] = 0.9f - 0.1f * k;
+                    ca[k * 4 + 2] = 0.6f; ca[k * 4 + 3] = 1;
+                    ta0[k * 2] = (k == 1 || k == 2) ? 1.0f : 0.0f; ta0[k * 2 + 1] = k >= 2 ? 1.0f : 0.0f;
+                    ta1[k * 2] = ta0[k * 2] * 2; ta1[k * 2 + 1] = ta0[k * 2 + 1] * 2;
+                }
+                glEnableClientState(GL_VERTEX_ARRAY);
+                glEnableClientState(GL_COLOR_ARRAY);
+                glVertexPointer(3, GL_FLOAT, 0, va);
+                glColorPointer(4, GL_FLOAT, 0, ca);
+                for (k = 0; k < 3; k++) {
+                    glClientActiveTextureARB(GL_TEXTURE0_ARB + k);
+                    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+                    glTexCoordPointer(2, GL_FLOAT, 0, k == 1 ? ta1 : ta0);
+                }
+                glDrawArrays(GL_QUADS, 0, 4);
+                for (k = 2; k >= 0; k--) {
+                    glClientActiveTextureARB(GL_TEXTURE0_ARB + k);
+                    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+                }
+                glDisableClientState(GL_COLOR_ARRAY);
+                glDisableClientState(GL_VERTEX_ARRAY);
+                continue;
+            }
+            glBegin(GL_QUADS);
+            for (k = 0; k < 4; k++) {
+                float s = (k == 1 || k == 2) ? 1.0f : 0.0f, t = k >= 2 ? 1.0f : 0.0f;
+                float sc[3];
+                sc[0] = 0.3f * s; sc[1] = 0.2f * t; sc[2] = 0.25f;
+                glColor4f(0.55f + 0.4f * s, 0.95f - 0.3f * t, 0.5f + 0.2f * k, 1);
+                glSecondaryColor3fvEXT(sc);
+                glFogCoordfEXT(0.2f + 0.25f * k);
+                glNormal3f(0.4f * s - 0.2f, 0.3f * t - 0.15f, 1);
+                glMultiTexCoord2fARB(GL_TEXTURE0_ARB, s, t);
+                glMultiTexCoord2fARB(GL_TEXTURE1_ARB, 2 * s, 2 * t);
+                glMultiTexCoord2fARB(GL_TEXTURE2_ARB, s, 1 - t);
+                glMultiTexCoord2fARB(GL_TEXTURE3_ARB, 1 - s, t);
+                glVertex3f(s ? x1 : x0, t ? y1 : y0, -0.5f);
+            }
+            glEnd();
+        }
+        for (k = 3; k >= 0; k--) {
+            glActiveTextureARB(GL_TEXTURE0_ARB + k);
+            glDisable(GL_TEXTURE_2D);
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+            glTexEnvf(0x8500, 0x8501, 0.0f);
+            glMatrixMode(GL_TEXTURE); glLoadIdentity(); glMatrixMode(GL_MODELVIEW);
+        }
+        glDisable(GL_LIGHT1);
+        glDeleteTextures(5, tx);
+        glFinish();
+        check_cond("uvwide : cinquante-six cases dessinées (image non uniforme)", distinct_colors(48) >= 48);
     } else if (!strcmp(scene, "fusion")) {
         /* BEAUCOUP de primitives COURTES et CONSÉCUTIVES : c'est exactement ce
            que Marble Blast envoie (7,7 sommets par dessin), et ce que le plugin
