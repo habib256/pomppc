@@ -721,7 +721,7 @@ directes, régions de ~14 blocs, §9.7). Le binaire `~/src/qemu-t3` porte aussi 
 table, ce qui permettrait de savoir si le +3,3 % des traces sur DOOM 3 (§9.6) venait du compteur
 rangé à côté du code.
 
-### 10.7 Commandes pour la VM quotidienne (non jouées)
+### 10.7 Commandes pour la VM quotidienne (jouées le 22/10, §10.8)
 
     # A/B DOOM 3, même binaire -O2 (base + 0048 + 0049) : témoin, traces, régions
     QEMU_BIN=$HOME/src/qemu-t3/build/qemu-system-ppc tools/tcg/matab.sh t3-d3-ab 3 \
@@ -731,3 +731,29 @@ rangé à côté du code.
     QEMU_BIN=$HOME/src/qemu-t3/build/qemu-system-ppc tools/tcg/matab.sh t3-d3-verif 1 \
       "v:CPU_OPTS=x-tier2=131072,x-tier3=200,x-tier2-verify=64" d3 fen
     tools/tcg/matab.sh --restore
+
+### 10.8 DOOM 3 sur la VM quotidienne (22/10, matin) : la phase 2 s'arrête là
+
+`bench/tcg/ab/t3-d3-ab` (même binaire -O2 `~/src/qemu-t3`, base + 0048 + 0049, 3 parties par
+bras entrelacées, barrière `chargehote.py attendre`) :
+
+| bras | médiane (ms/image) | min..max | écart |
+|---|---|---|---|
+| `x-tier2=0` | 99,4 | 98,8..99,4 | — |
+| `x-tier2=4096` (traces) | 102,1 | 101,8..107,6 | **+2,7 %** |
+| `x-tier2=131072,x-tier3=200` (régions) | 116,9 | 116,6..117,6 | **+17,6 %** |
+
+Régions : 243 formées (2495 blocs, 12 596 instructions), 685 M entrées, compilation 79 ms en
+moyenne (19 s en tout). Traces : 36 719.
+
+- **Les traces perdent toujours sur DOOM 3**, compteurs en table compris : le +3,3 % du §9.6
+  ne venait donc pas du compteur rangé à côté du code.
+- **Les régions LLVM perdent 17,6 %**, comme sur t2bench : le coût de leurs frontières (entrée par
+  helper, sorties par recherche) et des compteurs à débit dépasse ce qu'elles rapportent, même
+  avec des arêtes à 87 % directes.
+
+**Décision proposée** : arrêter ici le second niveau sous cette forme (phases 1 et 2 éteintes,
+0048 gardé éteint, 0049 laissé sur sa branche, non fusionné). Le reprendre demanderait de refaire
+les frontières : chaînage direct entre régions, entrée sans helper, caches de cibles en ligne,
+chaleur par échantillonnage (§10.6). C'est le travail des phases 3-4, pour un plafond de
+×1,25-1,3 qui ne mène pas à 50 ms/image.
