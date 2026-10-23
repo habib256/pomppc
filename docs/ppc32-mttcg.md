@@ -384,3 +384,83 @@ Fichiers : `patches/tcg/0049-ppc-pmu-real.patch`, `patches/tcg/0050-ppc-mttcg-32
 `tools/tcg/ppc32mtsum.py`, `tools/tcg/pmc5count.py`. Arbre QEMU : `~/src/qemu-ppc32mt`
 (`build-base` = série du 21/10, `build-mt` = + 0049-0050, `-O3 -march=native` sans LTO ;
 `p32comme64/` = dossier de liens du §7).
+
+## 10. Endurance de MTTCG 32 bits (VM de dev, 23/10)
+
+`build-mt/qemu-system-ppc`, SMP=2, `PPC32MT=1` (`tcg,thread=multi`), toutes les options de
+production (`-cpu g4,x-fast-fp=on,…,x-pteg-map=on`, `x-jit-near`, `x-jit-rel32`, `x-jc-bits=14`,
+`x-jc-word`, `x-jc-2way`), disque `disks/tiger-dev-ppc32.raw` (10.4.11, bureau par ouverture
+de session automatique), sans son (`SND=none`), `-display none`. Tout dans l'enclos de l'A/B en
+cours sur la VM quotidienne : `taskset -c 6,7,14,15 nice -n 19` (deux cœurs physiques).
+
+### 10.1 Pourquoi pas `endurance.py`, et `tools/endurance/devdemarrages.py`
+
+`tools/endurance/endurance.py` interroge l'invité par **ssh** avec la clé du banc
+(`.run/cmr/id_rsa`). Essai `essai-p32` (un démarrage à froid, recouvrement qcow2 posé sur le
+raw de dev : `endurance.py` sait désormais le faire, voir plus bas) : bureau intact à l'écran,
+vCPU au repos (`machine_idle`), sshd répond (`SSH-1.99-OpenSSH_4.5`) mais refuse la clé
+(code 255) : le disque de dev n'a pas la clé du banc dans `~tiger/.ssh/authorized_keys`. Ce
+« gel » est un faux positif de l'outil, pas de l'invité ; il n'est pas compté. On n'a pas
+modifié le compte de l'invité.
+
+D'où `tools/endurance/devdemarrages.py` : même logique de cycles, mais l'invité est interrogé
+par **l'agent de devloop** (StartupItem `POMPPCAgent`, boîtes aux lettres sur le disque) :
+
+- départ à froid (`devloop.py start --gui`) tous les `--froid-tous` cycles, sinon
+  redémarrage dans le même QEMU (job de l'agent : `shutdown -r now` en tâche de fond) — le
+  chemin du gel AppleUSBOHCI (`docs/endurance.md` §6) ;
+- sondes de 45 s (un identifiant de job neuf à chaque essai : l'agent fraîchement démarré
+  ignore le job resté dans la boîte) jusqu'au bureau complet — `WindowServer`, `Finder`,
+  `Dock`, `SystemUIServer` —, `hw.ncpu` = 2 et `hostinfo` « Processors active: 0 1 » ; une
+  seconde sonde `--repos` (20) s plus tard ;
+- moniteur HMP ajouté par `QEMU_EXTRA` : panique vue par `panicstr` ou un vCPU dans `panic()`
+  (symboles `bench/endurance/invite-10.4.11`), collecte d'incident de `endurance.py`
+  (registres, RAM, écran, `kpanic.py`) ; gel = pas de bureau au bout de `--delai` (600) s.
+
+`endurance.py` a gagné, sans rien changer à ses défauts : `ENDURANCE_BANC` et
+`ENDURANCE_RUNDIR` (journaux et instances hors du `.run/` du dépôt principal), une base
+`.raw` (recouvrement `-F raw`) et, pour une base inscriptible, un `flock` **partagé** sur
+`<base>.lock` pendant la campagne (devloop prend ce verrou en exclusif : il ne peut plus écrire
+la base sous les recouvrements).
+
+### 10.2 Démarrages répétés : 52 sur 52
+
+| campagne | départs | résultat | durée (médiane / max) | bureau atteint (médiane / max) |
+|---|---|---|---|---|
+| `essai` | 1 froid + 1 reboot | 2 ok | 112 / 99 s | 88 / 75 s |
+| `p32-a` (12:24-13:54) | 10 froids + 40 reboots | **50 ok** | froid 132 / 142 s ; reboot 101 / 115 s | froid 110 / 118 s ; reboot 77 / 91 s |
+
+À chaque cycle : 2 processeurs (`hw.ncpu` 2, « Processors active: 0 1 »), bureau complet,
+aucun `panic.log`, rien dans `dmesg` sur `USBOHCI`, `panic` ou `LockTimeOut`. **0 gel, 0
+panique sur 52 démarrages** (IC 95 % de Wilson : 0-6,9 %). Témoin ppc64 : le PC a 2 paniques et
+6 « pas de ssh » sur 923 démarrages en ppc64 (`docs/endurance.md` §8.6, ≈ 0,9 %), et le gel
+AppleUSBOHCI est corrigé depuis le 29/09 (`patches/openpic/0001`, 0 sur 253). Aucun gel n'étant
+apparu, le témoin ppc64 sur ce disque n'a pas été rejoué (règle de la mission : seulement si le
+gel apparaît). 52 démarrages ne mesurent pas un taux de 1 % : ils excluent un défaut grossier
+propre à MTTCG 32 bits (≥ 6 %), pas un défaut rare.
+
+Journaux (non versionnés) : `bench/endurance-dev/{essai,p32-a}/` (`cycles.jsonl`,
+`rapport.md`), `bench/endurance-dev/p32-a.out`.
+
+### 10.3 Longue charge : 1 h, 0 erreur
+
+Job `mtcharge` (`tools/guest/jobs/mtcharge/`, `tools/tcg/ppc32mt-bench.sh charge-p32
+mtcharge`, single-user, SMP=2 MTTCG, 14:06-15:07) : pendant 3 600 s, en même temps, deux fils
+de `gcc -O2 -faltivec -c` (chaque objet comparé au premier par md5), `atomtest` en boucle
+(`lwarx`/`stwcx.`, verrou + `sync`, voisins ; 2 × 1 000 000 incréments, total exact exigé) et
+la scène gltest `d3inter` (plugin + GLEngine + kext, 60 images toutes les 20 s, md5 de l'image
+comparé au premier).
+
+| fil | tours | erreurs |
+|---|---|---|
+| `gcc` (regbench.c) | 3 617 | 0 |
+| `gcc` (vfptest.c) | 807 | 0 |
+| `atomtest` | 7 578 (×3 épreuves) | 0 |
+| gltest `d3inter` | 118 | 0 (md5 `587c064f…` constant) |
+
+Charge de l'invité ~4,0 tout du long (relevés toutes les 10 min), QEMU à ~180 % d'un cœur hôte ;
+7 361 s de CPU, 54,9 T instructions hôte. Arrêt propre (`halt`, volume démonté) ensuite.
+L'agent de ce disque écrit l'en-tête à trois champs (code de sortie non rendu) : le verdict est
+la ligne `charge bilan OK` du job. Journal : `bench/ppc32mt/charge-p32/`.
+
+**Verdict endurance : critère tenu** (0 gel ou panique, rien de plus que le témoin ppc64).

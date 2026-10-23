@@ -91,6 +91,13 @@ gcc -O2 -Wall -o atomtest atomtest.c > "$OUT/atomtest-build.txt" 2>&1
 cat "$OUT/atomtest.txt"
 EOF
       ;;
+    mtcharge)
+      # longue charge (docs/ppc32-mttcg.md §10) : TIMEOUT > DUREE
+      sh tools/guest/jobs/stage.sh mtcharge "$J" > /dev/null
+      cp tools/guest/jobs/regime/regbench.c tools/guest/jobs/vfptest/vfptest.c \
+         tools/guest/jobs/mtbench/atomtest.c "$J/"
+      printf 'DUREE=%s\nATOMN=%s\nGLFR=%s\nGLPAUSE=%s\n' "${DUREE:-3600}" "${ATOMN:-1000000}" \
+        "${GLFR:-60}" "${GLPAUSE:-20}" > "$J/env.sh" ;;
     t2bench)
       sh tools/guest/jobs/stage.sh t2bench "$J" > /dev/null
       printf 'FR=%s\nREPS=%s\n' "${FR:-150}" "${REPS:-3}" > "$J/env.sh" ;;
@@ -107,7 +114,7 @@ EOF
   echo "job $JOB : code $rc, $(python3 -c "print('%.1f' % ($t1 - $t0))") s" | tee -a "$OUT/run.log"
   d=$(sed -n 's/^→ //p' "$OUT/$JOB.log" | tail -1)
   [ -n "$d" ] && [ -d "$d" ] && { rm -rf "$OUT/$JOB-out"; cp -rf "$d" "$OUT/$JOB-out"; }
-  grep -a '^mt \|^passe\|^atom\|^ncpu' "$OUT/$JOB.log" | tee -a "$OUT/run.log" > /dev/null
+  grep -a '^mt \|^passe\|^atom\|^ncpu\|^charge\|^releve' "$OUT/$JOB.log" | tee -a "$OUT/run.log" > /dev/null
   grep -v '^#' "$OUT/$JOB.perf" | sed '/^$/d' | sed "s/^/perf $JOB /" >> "$OUT/run.log"
 done
 
