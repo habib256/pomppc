@@ -129,7 +129,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261023-uvw"
+#define POMPPC_PLUGIN_REV "20261023-uvwon"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -201,7 +201,8 @@
    (brouillard, éclairage, texgen, biais de LOD) ; 2 = contrôle (le complet est
    refait et comparé). Soumis à UNITVD (donc au verdict unique). */
 #ifndef UVWIDE_DEFAULT
-#define UVWIDE_DEFAULT 0
+/* allumé le 23/10 après l'A/B de bench/tcg/ab/uvw-* (docs/plugin-allegement.md §7.7) */
+#define UVWIDE_DEFAULT 1
 #endif
 /* +0x0c du bloc de changements, lumière i : bit 2 + 2i pour ses paramètres
    (glLightfv, glLightf), bit 3 + 2i pour son allumage (relevé R4,

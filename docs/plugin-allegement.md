@@ -9,8 +9,9 @@ sur les deux hôtes (PC et M4) sans travail de parité.
 **Statut (22/10) : leviers A et B construits, A/B fait sur la VM quotidienne, six leviers
 allumés par défaut dans le plugin `20261022-abon` (PRESENTQ reste éteint) : §6.**
 
-**23/10 : levier E (verdict par unité élargi, `POMPPC_GL_UVWIDE`) construit et prouvé sur la
-VM de dev, éteint par défaut, A/B des quatre jeux à jouer : §7.**
+**23/10 : levier E (verdict par unité élargi, `POMPPC_GL_UVWIDE`) construit, prouvé sur la
+VM de dev, A/B des quatre jeux joué (UT2004 −1,6 %, DOOM 3 −1,4 %, mb et zen neutres) et
+allumé par défaut dans le plugin `20261023-uvwon` : §7.**
 
 ## 1. Profil des quatre jeux de la matrice du PC
 
@@ -463,8 +464,8 @@ bundle `bench/plug-ab-2210/GLDriver-POMPPC-20261022-abon.bundle.tar`, md5
 
 ## 7. Levier E : verdict par unité élargi (23/10, révision `20261023-uvw`)
 
-Branche `worktree-agent-a245ab1fae021e4d6`. Une variable, **éteinte par défaut**
-(`UVWIDE_DEFAULT 0`) : `POMPPC_GL_UVWIDE=1` l'allume, `=2` contrôle. Elle n'agit que sous
+Branche `worktree-agent-a245ab1fae021e4d6`. Une variable, éteinte par défaut à la construction
+(`UVWIDE_DEFAULT 0`, **allumée le 23/10 : §7.7**) : `POMPPC_GL_UVWIDE=1` l'allume, `=2` contrôle. Elle n'agit que sous
 `UNITVD`, donc sous le verdict unique. Compteurs sur une ligne `UVW` de la note, toutes les
 500 images et à la destruction du contexte. Ni `qgpu_proto.h` ni `qgpu_abi.h` ne changent :
 QEMU et le kext restent tels quels.
@@ -673,3 +674,41 @@ Ce qu'il faut regarder :
 - les ms/image d'UT2004 en plein écran (`ut pe`), si UT2004 gagne en fenêtre.
 
 Décision : `UVWIDE_DEFAULT 1` si aucun des quatre jeux ne perd.
+
+### 7.7 A/B sur la VM quotidienne et allumage (23/10, révision `20261023-uvwon`)
+
+VM quotidienne, binaire rapide, bundle `20261023-uvw` (§7.5). Les campagnes sont dans
+`bench/tcg/ab/uvw-*` du dépôt principal : 3 parties par bras, médianes en ms/image.
+
+Contrôles `UVWIDE=2`, à **0 écart** :
+
+- UT2004 : 150 518 reprises élargies contrôlées identiques ;
+- Zen : 189 306 identiques.
+
+| jeu | ref | `UVWIDE=1` | écart | dispatches repris / complets (bras `e`) |
+|---|---|---|---|---|
+| Marble Blast | 9,9 | 9,9 | neutre | 101 752 / 3 000 |
+| Zen | 5,1 | 5,1 | neutre | 190 023 / 8 002 |
+| UT2004 | 42,5 | 41,8 | **−1,6 %** | 167 095 / 1 515 |
+| DOOM 3 | 93,0 | 91,7 | **−1,4 %** | 1 087 946 / 187 020 |
+
+Avant le levier, UT2004 et Zen ne reprenaient presque aucun verdict par unité :
+1 et 0 repris, pour 223 586 et 342 400 complets.
+
+**Décision** (validée par l'utilisateur) : `UVWIDE_DEFAULT 1`, révision `20261023-uvwon`.
+`POMPPC_GL_UVWIDE=0` éteint le levier ; `=2` garde le contrôle. Le levier reste soumis à
+`UNITVD`, donc au verdict unique.
+
+Preuves aux nouveaux défauts (VM de dev `tiger-dev-plugin.raw`, aucune variable posée) :
+
+- `plugmd5` en single-user, 69 scènes, `off` (`UVWIDE=0`) contre `def` (rien) : **0 écart**.
+  61 scènes sortent rc=0 ; `arbvp`…`glsldp` sortent rc=1 dans les deux modes.
+- Sans variable, la note montre `plugin 20261023-uvwon … uvwide=1` dans les 69 scènes, et
+  une ligne `UVW`. Les compteurs sont ceux de `uvw` au §7.5 : 189 reprises élargies,
+  2 688 reprises par unité, 200 complets au lieu de 389. Sous `off`, l'en-tête dit
+  `uvwide=0` et la note n'a aucune ligne `UVW`.
+- Job `gpu` aux défauts : **56 OK, 0 échec** (`qgpu_test` 0).
+- Bundle :
+  - fichier : `bench/uvwide-2310/GLDriver-POMPPC-20261023-uvwon.bundle.tar` du worktree ;
+  - md5 du tar : `653d846c2eafe43a13401ddd31d6947d` ;
+  - md5 du binaire : `6ec91119da790f95f4acecace80cd40f`.
