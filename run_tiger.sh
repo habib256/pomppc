@@ -164,6 +164,10 @@ case "$(uname -s):$(uname -m)" in
            VFPNATIVECMP="${VFPNATIVECMP:-1}" LMWVEC="${LMWVEC:-1}" JCWORD="${JCWORD:-1}" \
            DIRTYSKIP="${DIRTYSKIP:-1}" PTEGMAP="${PTEGMAP:-1}" JC2WAY="${JC2WAY:-1}" \
            FPKNOWN="${FPKNOWN:-1}" FPRFLAZY="${FPRFLAZY:-1}" STFSKNOWN="${STFSKNOWN:-1}"
+    # Depuis le 23/10/2026 (docs/ppc32-mttcg.md §13) : SMP sur qemu-system-ppc en MTTCG
+    # (tcg/0050) au lieu de ppc64 — binaires rapides, DOOM 3 −7,7 %, UT2004 −5 %, mb −7 %,
+    # zen −6 % ; sondé, repli sur ppc64 si le binaire n'a pas le patch. Pas encore sur le M4.
+    export PPC32MT="${PPC32MT:-1}"
     ;;
   Darwin:arm64)
     export VFPNATIVE="${VFPNATIVE:-1}" LMWVEC="${LMWVEC:-1}" JCWORD="${JCWORD:-1}"
