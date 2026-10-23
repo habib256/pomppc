@@ -350,11 +350,13 @@ change sur les deux hôtes en même temps.
 1. **L'A/B en jeu** sur la VM quotidienne (§7), les 4 jeux, fenêtre et plein écran, et une
    partie DOOM 3 vérifiée. Marble Blast n'a pas été joué sur la VM de dev (jobs `games`/
    `fpgames` non lancés : la VM de dev n'a pas servi aux jeux ici).
-2. **Le binaire rapide** entraîné aussi sur la cible 32 bits (§8) avant toute conclusion sur
-   `build-fast`.
+2. ~~Le binaire rapide entraîné sur la cible 32 bits~~ : fait le 23/10 (§11),
+   `build-fast-mt`, −5 à −9 % contre le binaire rapide quotidien sur la VM de dev ; reste
+   l'A/B en jeu des binaires rapides (§12).
 3. **Parité arm64** : construire et prouver 0049-0050 sur le M4 (§8).
-4. Endurance : une longue session et des redémarrages (`shutdown -r`) en `PPC32MT=1` ; le gel
-   AppleUSBOHCI du 29/09 (`docs/endurance.md` §6) n'a été chassé que sur ppc64.
+4. ~~Endurance~~ : faite le 23/10 sur la VM de dev (§10) : 52 démarrages sur 52 (40
+   `shutdown -r`), 1 h de charge sans erreur. Reste une longue session de jeu en `PPC32MT=1`
+   sur la VM quotidienne (l'A/B des §7 et §12 en tient lieu en partie).
 5. Si les jeux confirment : `PPC32MT=1` par défaut (et `x-pmu-real` devient sans objet en
    SMP=2 ; il reste utile au seul cas ppc64). Les deux binaires resteraient construits : le
    ppc64 sert encore de témoin.
@@ -372,6 +374,10 @@ Risques :
 - La bannière du lanceur actuel annoncera « ppc64 » pendant l'A/B par dossier de liens : c'est
   le chemin du binaire qui fait foi.
 - Un `build-fast` pris avec un profil PGO ppc64 seul fausserait la comparaison (§8).
+- Le profil de `build-fast-mt` vient des bancs de la VM de dev, pas des jeux (§11.2) : en jeu,
+  il peut valoir moins que celui de `build-fast` ; ne pas l'adopter sans l'A/B du §12.
+- `devdemarrages.py` ne voit que ce que voit l'agent (processus, `hostinfo`) : un bureau gelé
+  avec un agent vivant passerait pour sain si les processus restent présents.
 
 Journaux (non versionnés) : `bench/ppc32mt/` du worktree — `g1-*` (porte SMP=1), `p2-ref`,
 `p2-ver`, `p2-ver64` (preuves), `b2-*` (banc SMP=2), `g2-p32`, `g2-p64` (`gpu`, `plugmd5`),
@@ -464,3 +470,122 @@ L'agent de ce disque écrit l'en-tête à trois champs (code de sortie non rendu
 la ligne `charge bilan OK` du job. Journal : `bench/ppc32mt/charge-p32/`.
 
 **Verdict endurance : critère tenu** (0 gel ou panique, rien de plus que le témoin ppc64).
+
+## 11. Binaire rapide (LTO + PGO) de la cible 32 bits : `build-fast-mt`
+
+### 11.1 Construction et profil
+
+`~/src/qemu-ppc32mt/build-fast-mt/` (même arbre que `build-mt`, série 0049-0050 comprise,
+`serie=70b6801aa3c0ec49`), `QEMU_OPT=native,nohard,lto,pgo` (`-O3` par `-Doptimization=3`,
+`-march=native` = skylake, LTO, PGO) ; profil `~/src/qemu-ppc32mt/pgo-fast-mt/` (1 255 `.gcda`,
+`pomppc-profil.txt`). `build-mt` et `build-base` n'ont pas été touchés (le script recopie
+seulement `screamer.c`, `qfb-pci.c` et `qgpu-*.c` dans les sources, contenu identique).
+
+    W="taskset -c 6,7,14,15 nice -n 19"
+    export QEMU_SRC=~/src/qemu-ppc32mt QEMU_FAST_BUILD=build-fast-mt PGO_WRAP="$W" \
+           PGO_MEM=20G PGO_SWAP=2G LTO_JOBS=4 JOBS=4 \
+           DEVDISK=~/src/pomppc/disks/tiger-dev-ppc32.raw TIMEOUT=5400
+    $W tools/tcg/pgo-train.sh --etapes gen                               # 14 min, 1,7 Gio max
+    $W tools/tcg/pgo-train.sh --etapes jouer --banc dev --cible ppc32mt  # 30 min
+    $W tools/tcg/pgo-train.sh --etapes use                               # 13 min, 1,3 Gio max
+
+Ce qui a changé dans les outils (défauts inchangés) :
+
+- `scripts/build_qemu_qfb.sh` : `QEMU_FAST_BUILD` (dossier du binaire rapide, défaut
+  `build-fast`) ; profil par défaut `<arbre>/pgo-<nom sans « build- »>`.
+- `tools/tcg/pgo-train.sh` : `QEMU_FAST_BUILD`, `PGO_WRAP` (préfixe de tout ce qui est lancé),
+  `PGO_SWAP` ; **`--cible ppc64|ppc32mt|les-deux`** pour la matrice (bras `PPC32MT=1` ; les
+  `.gcda` des deux cibles s'additionnent) ; **`--banc dev`** : la partie d'entraînement se
+  joue sur une VM de dev (`DEVDISK`, refus de `tiger.qcow2`) : un bureau (`devloop start
+  --gui`, `PGO_GUI` = 120 s, arrêt propre), puis un démarrage single-user avec `PGO_JOBS`
+  (défaut `plugmd5 gpu suite mtbench t2bench`) par `tools/tcg/ppc32mt-bench.sh`, SMP=2,
+  options de production, pour chaque cible demandée.
+
+Partie d'entraînement (`bench/ppc32mt/pgo-train-20261023-1533-ppc32mt/`), binaire
+instrumenté, SMP=2 MTTCG : bureau (1 256 `.gcda` déjà au premier arrêt : QEMU quitte de
+lui-même sur `shutdown -h`), `plugmd5` **66 scènes, 0 écart**, `gpu` **0 échec**, `suite`
+(`atomtest` OK), `mtbench`, `t2bench` (image `7ff741d6…`). L'instrumenté est ~2,5 fois plus lent
+(`plugmd5` : 340 s, 1 082 G instructions contre 742 G).
+
+**Le profil couvre la cible lancée** : `target/ppc/*` et tout ce que meson compile pour
+`qemu-system-ppc` ont leur profil ; le `qemu-system-ppc64` de `build-fast-mt` n'a que celui du
+code commun (pour lui, `--cible les-deux`).
+
+### 11.2 Mesure : p64 rapide actuel contre p32 rapide
+
+VM de dev, single-user, SMP=2, options de production, `tools/tcg/ppc32mt-bench.sh … mtbench
+t2bench`, trois bras entrelacés `f64 f32 m32 | m32 f32 f64` (16:18-17:30) :
+
+- **f64** : `~/src/qemu/build-fast/qemu-system-ppc64`, le binaire rapide quotidien (LTO+PGO
+  entraîné sur les 4 jeux, série `19f435fc…` du 21/10, lu seulement), MTTCG ppc64 ;
+- **f32** : `build-fast-mt/qemu-system-ppc`, `PPC32MT=1` ;
+- **m32** : `build-mt/qemu-system-ppc`, `PPC32MT=1` (`-O3 -march=native`, sans LTO ni PGO).
+
+| SMP=2 (médianes de 2 démarrages) | f64 (rapide actuel) | **f32 (p32 rapide)** | m32 (`build-mt`) |
+|---|---|---|---|
+| `mtbench`, somme des noyaux (ms) | 36 200 | **34 290 (−5,3 %)** | 38 333 (+5,9 %) |
+| … `sys` / `ctx` / `gcc` / `par2` | 2 282 / 1 723 / 4 632 / 11 553 | 2 055 / 1 518 / 4 232 / 10 921 (−9,9 / −11,9 / −8,6 / −5,5 %) | 2 397 / 1 882 / 4 436 / 13 053 |
+| … `call` / `mem` / `vfp` / `lmw` | 455 / 2 719 / 11 218 / 957 | 421 / 2 678 / 10 871 / 959 | 427 / 3 612 / 10 927 / 958 |
+| `mtbench`, instructions hôte | 1 742 G | **1 625 G (−6,7 %)** | 1 867 G |
+| `mtbench`, cycles hôte | 777 G | **739 G (−4,9 %)** | 841 G |
+| `t2bench`, temps (médiane des passes) | 7,62 s | **6,91 s (−9,3 %)** | 7,37 s |
+| `t2bench`, instructions hôte | 788 G | **733 G (−6,9 %)** | 774 G |
+| `t2bench`, cycles hôte | 385 G | **354 G (−8,0 %)** | 378 G |
+
+Images de `t2bench` identiques dans les trois bras (`7ff741d6…`), `atomtest` exact partout.
+Gain du binaire rapide sur la cible 32 bits (f32 contre m32) : −10,5 % de temps `mtbench`,
+−12 % de cycles ; −6,3 % de temps `t2bench`.
+
+Lecture et réserves :
+
+- **f32 bat le binaire rapide quotidien de 5 à 9 %** de temps, 5 à 8 % de cycles hôte : le gain
+  de la cible 32 bits du §5 (−5 à −7 %) se retrouve entier sur les binaires rapides.
+- **Biais en faveur de f32** : son profil a été pris sur `mtbench` et `t2bench` eux-mêmes (plus
+  `plugmd5`, `gpu`, `suite` et un bureau), celui de f64 sur les jeux. Sur ces bancs, une part de
+  l'écart vient de là ; c'est pour cela que **le verdict est l'A/B en jeu** (§12), où le biais
+  joue dans l'autre sens (f64 a été entraîné sur les jeux mêmes).
+- f64 est sur la série du 21/10 (sans 0048-0050) ; les options de production sont les mêmes.
+- Le `mem` de m32 (3 612 ms contre ~2 700) est le prix du binaire sans LTO/PGO, pas de la cible.
+
+Journaux : `bench/ppc32mt/bf-{f64,f32,m32}-{a,b}/` ; résumé :
+`python3 tools/tcg/ppc32mtsum.py --ref bf-f64 --cmp bf-f32 bench/ppc32mt/bf-f64-* bench/ppc32mt/bf-f32-*`.
+
+## 12. A/B en jeu des binaires rapides (pour la session principale)
+
+`matab.sh` lance le `run_tiger.sh` du dépôt principal, qui ne connaît pas `PPC32MT` tant que
+cette branche n'est pas fusionnée : même astuce qu'au §7, un dossier de liens où
+`qemu-system-ppc64` **est** le binaire 32 bits rapide (déjà créé) :
+
+    ~/src/qemu-ppc32mt/p32rapide/qemu-system-ppc   -> ~/src/qemu-ppc32mt/build-fast-mt/qemu-system-ppc
+    ~/src/qemu-ppc32mt/p32rapide/qemu-system-ppc64 -> ~/src/qemu-ppc32mt/build-fast-mt/qemu-system-ppc  (sic)
+
+Le bras `f64` impose le binaire rapide quotidien par `QEMU_BIN` (sinon `matab.sh` part en
+`QEMU_FAST=0`, la référence) ; en SMP=2 le lanceur prend son `…64`.
+
+    F64=$HOME/src/qemu/build-fast/qemu-system-ppc
+    F32=$HOME/src/qemu-ppc32mt/p32rapide/qemu-system-ppc
+    cd ~/src/pomppc
+    # 1. fenêtre, 4 jeux, 3 parties par bras et par jeu, entrelacées
+    for j in mb zen ut d3; do
+      tools/tcg/matab.sh p32fast-$j 3 "f64:QEMU_BIN=$F64" "f32:QEMU_BIN=$F32" $j fen
+    done
+    for j in mb zen ut d3; do python3 tools/tcg/matabsum.py bench/tcg/ab/p32fast-$j; done
+    # 2. plein écran (règle du projet), au moins d3 et ut
+    for j in d3 ut; do
+      tools/tcg/matab.sh p32fast-$j-pe 2 "f64:QEMU_BIN=$F64" "f32:QEMU_BIN=$F32" $j pe
+    done
+    # 3. une partie DOOM 3 sous les vérificateurs (bilans dans run_tiger.log, pas pour la vitesse)
+    tools/tcg/matab.sh p32fast-d3-verif 1 \
+        "v:QEMU_BIN=$F32 CPU_OPTS=x-vfp-native-verify=on,x-vmx-verify=on,x-ret-verify=on,x-tb-verify=on" d3 fen
+    tools/tcg/matab.sh --restore
+
+Contrôles dans chaque `run_tiger.log` du bras `f32` : `binaire : …/p32rapide/qemu-system-ppc64`,
+pas d'avertissement « Guest not yet converted to MTTCG », `hw.ncpu` = 2 dans l'invité ; la
+bannière dit « ppc64 » (c'est le chemin qui fait foi). Métrique : CPU de QEMU, temps d'image
+(`docs/vitesse-doom3-x86.md`). Une régression d'image ou un gel arrête tout.
+
+**Après fusion**, sans dossier de liens :
+`"f64:QEMU_BIN=$F64" "f32:QEMU_BIN=$HOME/src/qemu-ppc32mt/build-fast-mt/qemu-system-ppc PPC32MT=1"`.
+Si `PPC32MT=1` devient le défaut, reconstruire `~/src/qemu/build-fast` avec 0049-0050 et un
+profil `--cible ppc32mt` (ou `les-deux`) entraîné **sur les jeux** (`--banc matrice`, VM
+quotidienne, hôte au repos), puis refaire cet A/B contre lui.
