@@ -1046,6 +1046,28 @@ tcg/tcg-op-ldst.c t2_mark_atomic
 target/ppc/translate.c t2_gen_bc
 target/ppc/cpu_init.c ppc_t2_regs
 TCG48_MARKERS
+  # --- tcg/0049-0050 : le G4 sur la cible 32 bits en MTTCG, docs/ppc32-mttcg.md ---
+  # 0049 : x-pmu-real, le modèle de PMU POWER8 ne compte que sur un CPU qui en a les
+  # registres (un G4 sur qemu-system-ppc64 n'ajoute plus num_insns à un PMC5 fantôme à
+  # chaque sortie de bloc) ; propriété éteinte par défaut, sans effet sur qemu-system-ppc.
+  # 0050 : mttcg_supported pour la cible 32 bits aussi (le lanceur ne s'en sert que
+  # derrière PPC32MT=1, et force thread=single en SMP=1).
+  if ! grep -q "x-pmu-real" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : PMU POWER8 seulement sur les CPU qui l'ont (x-pmu-real)"
+    patch_strict "$ROOT/patches/tcg/0049-ppc-pmu-real.patch"
+  fi
+  if ! grep -q "POMPPC tcg/0050" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : MTTCG sur la cible ppc 32 bits"
+    patch_strict "$ROOT/patches/tcg/0050-ppc-mttcg-32.patch"
+  fi
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0049-0050 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG49_MARKERS'
+target/ppc/power8-pmu.c env->pmu_real
+target/ppc/cpu.h bool pmu_real
+target/ppc/cpu_init.c .mttcg_supported = true
+TCG49_MARKERS
 fi
 
 # --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---
@@ -1306,6 +1328,9 @@ check_opt x-jc-2way      qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jc-2
 check_opt x-fp-known    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fp-known=on
 check_opt x-fprf-lazy   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fprf-lazy=on
 check_opt x-stfs-known  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-stfs-known=on
+check_opt x-pmu-real    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-pmu-real=on
+# MTTCG sur la cible 32 bits (tcg/0050) : sondé sur qemu-system-ppc lui-même
+check_opt mttcg-ppc32   qemu_ppc32_mttcg_ok "$BIN"       "mac99,via=pmu" 2
 echo
 echo "→ $CAPS"
 

@@ -55,7 +55,9 @@ pomppc_fast_ok() {
   st="$(dirname "$b")/pomppc-build.txt"
   POMPPC_FAST_WHY=""
   [ -x "$b" ] || { POMPPC_FAST_WHY="$b absent"; return 1; }
-  if [ "$n" -ge 2 ]; then
+  if [ "$n" -ge 2 ] && [ "${PPC32MT:-0}" != 0 ]; then
+    run="$b"                        # PPC32MT=1 : SMP sur la cible 32 bits (docs/ppc32-mttcg.md)
+  elif [ "$n" -ge 2 ]; then
     [ -x "${b}64" ] || { POMPPC_FAST_WHY="${b}64 absent (SMP $n)"; return 1; }
     run="${b}64"
   else
@@ -99,7 +101,10 @@ pomppc_fast_ok() {
     { POMPPC_FAST_WHY="pas de Screamer dans $m ($run)"; return 1; }
   qemu_has_device "$run" qgpu-pci >/dev/null 2>&1 ||
     { POMPPC_FAST_WHY="pas de qgpu-pci ($run)"; return 1; }
-  if [ "$n" -ge 2 ]; then
+  if [ "$n" -ge 2 ] && [ "${PPC32MT:-0}" != 0 ]; then
+    qemu_ppc32_mttcg_ok "$run" "$m" "$n" >/dev/null 2>&1 ||
+      { POMPPC_FAST_WHY="PPC32MT=1 : $run ne déclare pas MTTCG (patches/tcg/0050)"; return 1; }
+  elif [ "$n" -ge 2 ]; then
     qemu_machine_smp_ok "$run" "$m" "$n" >/dev/null 2>&1 ||
       { POMPPC_FAST_WHY="-smp $n refusé ($run)"; return 1; }
   fi

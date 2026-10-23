@@ -59,6 +59,11 @@
 #                             # (x-fprf-lazy, patches/tcg/0046, allumé sur Linux x86-64 depuis le 20/10, §38)
 #   STFSKNOWN=0 ./run_tiger.sh # coupe : stfs d'une valeur connue (x-fp-known) sans la conversion complète
 #                             # (x-stfs-known, patches/tcg/0047, allumé sur Linux x86-64 depuis le 20/10, §39)
+#   PPC32MT=1 ./run_tiger.sh  # SMP >= 2 sur qemu-system-ppc (cible 32 bits, celle du G4) en MTTCG au lieu
+#                             # de qemu-system-ppc64 (patches/tcg/0050, docs/ppc32-mttcg.md ; éteint par
+#                             # défaut, sondé : sans le patch, repli sur ppc64 avec un avertissement)
+#   PMUREAL=1 ./run_tiger.sh  # ppc64 : le PMU POWER8 ne compte plus sur un G4 (PMC5 fantôme à chaque
+#                             # sortie de bloc, x-pmu-real, patches/tcg/0049 ; éteint par défaut)
 #   TIER2=4096 ./run_tiger.sh # DÉFECTUEUX au 21/10 (docs/plan-traducteur-rapide.md §9.x) — traces d'une page (x-tier2, patches/tcg/0048,
 #                             # éteint par défaut ; TIER2VERIFY=64 rejoue une trace sur 64 contre ses TB)
 #   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
@@ -267,7 +272,23 @@ EXTRA+=(-bios "$UNI_OBIOS")
 # CPUs 2 ». ⚠ -smp >= 2 exige aussi via=pmu (sans PMU, pas de device 'gpio',
 # donc pas de ligne de reset du CPU1) : la garde est explicite.
 SMP_TAG=""
-if [ "$SMP_N" -ge 2 ]; then
+# PPC32MT=1 (docs/ppc32-mttcg.md, patches/tcg/0050) : SMP sur qemu-system-ppc lui-même,
+# en MTTCG, si ce binaire déclare MTTCG pour la cible 32 bits (sondé : sans le patch il
+# démarrerait en prévenant « Guest not yet converted to MTTCG »). Sinon, repli sur ppc64.
+PPC32MT_ON=0
+if [ "$SMP_N" -ge 2 ] && [ "${PPC32MT:-0}" != 0 ]; then
+  case "$MACHINE" in *via=pmu*) ;; *) SMP_N=1; SMP_TAG=" (via=pmu absent)" ;; esac
+fi
+if [ "$SMP_N" -ge 2 ] && [ "${PPC32MT:-0}" != 0 ]; then
+  m32_rc=0; qemu_ppc32_mttcg_ok "$QEMU_BIN" "$MACHINE" "$SMP_N" || m32_rc=$?
+  if [ "$m32_rc" = 0 ]; then
+    PPC32MT_ON=1
+  else
+    echo "⚠  PPC32MT=1 demandé mais $QEMU_BIN ne déclare pas MTTCG (patches/tcg/0050) :" >&2
+    echo "   SMP sur qemu-system-ppc64 comme d'habitude." >&2
+  fi
+fi
+if [ "$SMP_N" -ge 2 ] && [ "$PPC32MT_ON" = 0 ]; then
   [ -x "$QEMU_BIN64" ] || { echo "⚠  SMP demandé mais $QEMU_BIN64 introuvable." >&2; exit 1; }
   case "$MACHINE" in
     *via=pmu*) ;;
@@ -276,7 +297,7 @@ if [ "$SMP_N" -ge 2 ]; then
        SMP_N=1; SMP_TAG=" (via=pmu absent)" ;;
   esac
 fi
-if [ "$SMP_N" -ge 2 ]; then
+if [ "$SMP_N" -ge 2 ] && [ "$PPC32MT_ON" = 0 ]; then
   smp_rc=0; qemu_machine_smp_ok "$QEMU_BIN64" "$MACHINE" "$SMP_N" || smp_rc=$?
   case "$smp_rc" in
     0) ;;
@@ -287,12 +308,19 @@ if [ "$SMP_N" -ge 2 ]; then
     *) echo "⚠  sondage SMP impossible sur $QEMU_BIN64 : on tente quand même." >&2 ;;
   esac
 fi
-if [ "$SMP_N" -ge 2 ]; then
+if [ "$SMP_N" -ge 2 ] && [ "$PPC32MT_ON" = 1 ]; then
+  BIN="$QEMU_BIN"
+  TCG_ACCEL="tcg,thread=multi"
+  MODE="SMP ${SMP_N} cœurs (MTTCG, ppc 32 bits)"
+elif [ "$SMP_N" -ge 2 ]; then
   BIN="$QEMU_BIN64"
   TCG_ACCEL="tcg,thread=multi"
   MODE="SMP ${SMP_N} cœurs (MTTCG, ppc64)"
 else
   BIN="$QEMU_BIN"
+  # Mono-cœur : le tourniquet d'origine, dit explicitement. Un qemu-system-ppc qui
+  # déclare MTTCG (patches/tcg/0050) le choisirait sinon par défaut (« auto »).
+  TCG_ACCEL="tcg,thread=single"
   MODE="mono-cœur${SMP_TAG}"
 fi
 
@@ -728,15 +756,19 @@ done
 # trouver). PTEGMAP=1 : x-pteg-map, la recherche dans la table des pages (MMU
 # 32 bits à hachage) lit chaque PTEG par un seul pointeur hôte ; PTEGMAPVERIFY=1 :
 # mode preuve (recherche d'origine refaite et comparée). Allumés sur Linux x86-64 (20/10).
+# PMUREAL=1 : x-pmu-real (patches/tcg/0049, docs/ppc32-mttcg.md), le modèle de PMU POWER8
+# de qemu-system-ppc64 ne compte que sur un CPU qui en a les registres : un G4 n'ajoute
+# plus num_insns à un PMC5 fantôme à chaque sortie de bloc. Sans effet sur qemu-system-ppc.
 for _p in "DIRTYSKIP x-dirty-skip SALE-SAUTÉ" "DIRTYSKIPVERIFY x-dirty-skip-verify SALE-VÉRIFIÉ" \
-          "PTEGMAP x-pteg-map PTEG-POINTEUR" "PTEGMAPVERIFY x-pteg-map-verify PTEG-VÉRIFIÉ"; do
+          "PTEGMAP x-pteg-map PTEG-POINTEUR" "PTEGMAPVERIFY x-pteg-map-verify PTEG-VÉRIFIÉ" \
+          "PMUREAL x-pmu-real PMU-RÉEL"; do
   set -- $_p
   if [ "${!1:-0}" != 0 ]; then
     if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "$2=on"; then
       CPU_SPEC="$CPU_SPEC,$2=on"
       MODE="$MODE + $3"
     else
-      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0040, 0041)." >&2
+      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0040, 0041, 0049)." >&2
       MODE="$MODE + $3 DEMANDÉ MAIS INDISPONIBLE"
     fi
   fi
