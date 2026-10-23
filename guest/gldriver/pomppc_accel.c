@@ -129,7 +129,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261022-abon"
+#define POMPPC_PLUGIN_REV "20261023-uvwon"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -193,6 +193,16 @@
 #ifndef LIGHTDIRTY_DEFAULT
 /* allumé le 22/10 après l'A/B de bench/tcg/ab/ab-* (docs/plugin-allegement.md §6) */
 #define LIGHTDIRTY_DEFAULT 1
+#endif
+/* 23/10/2026 (docs/plugin-allegement.md §7, levier E) : UVWIDE, verdict par
+   unité élargi — le dispatch reprend aussi le verdict quand le bloc porte des
+   bits d'environnement de texture par unité (+0x10), d'allumage ou de matrice
+   de texture (+0x08 0x00ff0000), ou des bits qui n'agissent que sur le format
+   (brouillard, éclairage, texgen, biais de LOD) ; 2 = contrôle (le complet est
+   refait et comparé). Soumis à UNITVD (donc au verdict unique). */
+#ifndef UVWIDE_DEFAULT
+/* allumé le 23/10 après l'A/B de bench/tcg/ab/uvw-* (docs/plugin-allegement.md §7.7) */
+#define UVWIDE_DEFAULT 1
 #endif
 /* +0x0c du bloc de changements, lumière i : bit 2 + 2i pour ses paramètres
    (glLightfv, glLightf), bit 3 + 2i pour son allumage (relevé R4,
@@ -1286,6 +1296,14 @@ static struct {
     unsigned long   n_uv_take, n_uv_units, n_uv_full;   /* UNITVD : repris, unités
                                            refaites, renvois au verdict complet */
     unsigned long   n_uv_chk_same, n_uv_chk_diff;       /* UNITVD + VERDICTCHECK */
+    int             uvwide;             /* 23/10 : POMPPC_GL_UVWIDE (verdict par unité
+                                           élargi) ; 2 = contrôle */
+    unsigned long   n_uvw_take, n_uvw_units, n_uvw_off, n_uvw_nounit;  /* UVWIDE :
+                                           reprises que seul l'élargissement permet,
+                                           unités refaites dans ces reprises, dont
+                                           texturage éteint, dont aucune unité
+                                           désignée */
+    unsigned long   n_uvw_chk_same, n_uvw_chk_diff;     /* UVWIDE=2 (ou VERDICTCHECK) */
     /* 21/10 (docs/d3-plugin-x86.md §10) */
     int             dispfast;           /* POMPPC_GL_DISPFAST : bloc classé en une passe,
                                            clé du verdict par unité reprise au rangement */
@@ -2997,6 +3015,11 @@ void pomppc_backend_init(void)
                 e = getenv("POMPPC_GL_UNITVD");
                 G.unitvd = (e && e[0] ? e[0] != '0' : UNITVD_DEFAULT) &&
                            G.verdict && G.wl && G.texmemo;
+                /* 23/10 (docs/plugin-allegement.md §7) */
+                e = getenv("POMPPC_GL_UVWIDE");
+                G.uvwide = G.unitvd ? (e && e[0] ? (int)(e[0] - '0') : UVWIDE_DEFAULT) : 0;
+                if (G.uvwide < 0 || G.uvwide > 2)
+                    G.uvwide = 0;
                 /* 21/10 (docs/d3-plugin-x86.md §10) */
                 e = getenv("POMPPC_GL_DISPFAST");
                 G.dispfast = G.verdict ? (e && e[0] ? (int)(e[0] - '0') : DISPFAST_DEFAULT) : 0;
@@ -3050,13 +3073,13 @@ void pomppc_backend_init(void)
                     "texmemo=%d stskip=%d statecheck=%d wlunif=%d stateblk=%d "
                     "rawsane=%d natshm=%d idxlazy=%d idxvec=%d dispone=%d unitvd=%d texpage=%d "
                     "zones=%d (flux %lu Kio) dispfast=%d progmemo=%d mtxdirty=%d stunit=%d "
-                    "displock=%d hotinline=%d\n",
+                    "displock=%d hotinline=%d uvwide=%d\n",
                     G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range,
                     G.count, G.verdict, G.vcheck, G.wl, G.texmemo, G.stskip, G.stcheck,
                     G.wlunif, G.stblk + G.stblk_check, G.rawsane, G.natshm,
                     G.idxlazy, G.idxvec, G.dispone, G.unitvd, G.texpage,
                     G.zones, G.zl_cmd_bytes >> 10, G.dispfast, G.progmemo, G.mtxdirty,
-                    G.stunit, G.displock, HOTINLINE_DEFAULT);
+                    G.stunit, G.displock, HOTINLINE_DEFAULT, G.uvwide);
             /* 21/10 : adresse d'un symbole exporté, pour nommer les blocs d'un
                profil d'instructions (greffon TCG hotblocks, tools/re/hotplug.py) */
             gl_note("plugin : pomppc_geom_dispatch à 0x%08lx\n",
@@ -14230,6 +14253,12 @@ static void d3x_note(const char *why, unsigned long frame)
             G.n_vec_chk, G.n_vec_diff, G.dispone, G.n_hook_skip, G.n_hook_full,
             G.unitvd, G.n_uv_take, G.n_uv_units, G.n_uv_full, G.n_uv_chk_same,
             G.n_uv_chk_diff);
+    if (G.uvwide)                       /* 23/10 (docs/plugin-allegement.md §7) */
+        gl_note("UVW %s %lu : uvwide %d, %lu reprises élargies (%lu unités refaites, "
+                "%lu texturage éteint, %lu sans unité désignée) ; contrôle %lu "
+                "identiques, %lu écarts\n", why, frame, G.uvwide, G.n_uvw_take,
+                G.n_uvw_units, G.n_uvw_off, G.n_uvw_nounit, G.n_uvw_chk_same,
+                G.n_uvw_chk_diff);
     if (G.dispfast || G.progmemo || G.mtxdirty || G.stunit || G.displock)
         gl_note("D3P %s %lu : dispfast %d, %lu clés reprises (contrôle %lu, %lu écarts) | "
                 "progmemo %d, %lu reprises, %lu recherches | mtxdirty %d, %lu comparaisons "
@@ -14959,18 +14988,83 @@ static int wl_neutral(const unsigned long *c)
     return 1;
 }
 
+/* 23/10/2026 — UVWIDE, verdict par unité élargi (docs/plugin-allegement.md
+ * §7, relevé de la scène gltest « uvwide » sous POMPPC_GL_BLOCKDUMP). Ce que
+ * uv_take admet EN PLUS de wl_mask, mot par mot (+0x00..+0x10 ; les mots
+ * suivants sont déjà entiers dans wl_mask). Deux sortes de bits :
+ *
+ * Bits d'UNITÉ — l'unité u est refaite (geom_texture_unit_ok et
+ * texture_unit_ok relisent sa cible allumée, sa texture, son mode, sa couleur
+ * d'environnement TU_ENV_COLOR et son combinateur : tout ce que TexUnit garde) :
+ *   +0x04 bit u            liaison, paramètres, image de la texture liée
+ *   +0x08 0x00010000 << u  allumage d'une cible de l'unité, matrice de texture
+ *   +0x10 bit u            glTexEnv(GL_TEXTURE_ENV_MODE)
+ *   +0x10 0x00000100 << u  glTexEnv(GL_TEXTURE_ENV_COLOR)
+ *   +0x10 0x01000000 << u  paramètres du combinateur (GL_COMBINE_*, sources,
+ *                          opérandes, échelles)
+ *
+ * Bits de FORMAT seul — l'état qu'ils signalent n'est lu, dans le verdict, que
+ * par geom_format (refait à chaque reprise, va_gen_sizes avec lui si le format
+ * bouge) ; ni geom_ok, ni texture_ok, ni va_gen_sizes, ni vd_key_of ne le
+ * lisent, et accel_ok_for n'est appelé par le verdict qu'au chemin brut
+ * (geom_raster_ok, raw = 1 : le test du brouillard GL_NICEST y est sauté) :
+ *   +0x00 0x00000800       glFog* (paramètres, mode, source de la coordonnée),
+ *                          glEnable(GL_COLOR_SUM) — GS_FOG_COORD_SRC et
+ *                          GS_COLOR_SUM dans geom_format
+ *   +0x00 0x00001000       glEnable/Disable(GL_FOG) — GS_FOG dans geom_format
+ *   +0x04 0x00010000 << u  texgen de l'unité u (allumage, mode, plans) —
+ *                          texgen_needs_normal dans geom_format
+ *   +0x0c 0x0007ffff       matériau et modèle d'éclairage 0x1, éclairage 0x2
+ *                          (GS_LIGHTING dans geom_format), lumières 0..7
+ *                          (4 << 2i, 8 << 2i), GL_COLOR_MATERIAL 0x40000
+ *   +0x10 0x00010000 << u  biais de LOD de l'unité (TU_LOD_BIAS : compute_state
+ *                          seul)
+ *
+ * Aucun de ces bits de format n'est dans st_mask (sauf +0x04 0x10000, texgen
+ * de l'unité 0, et +0x0c 0xc, que compute_state ne lit pas) : st_dirty est posé
+ * par geom_dispatch_locked comme avant, indépendamment du verdict. Les autres
+ * bits de +0x08 (0x01000000 plan de coupe, 0x40000000 normalisation…) et de
+ * +0x0c (0x00080000 et au-delà : programmes, « T&L perdu ») restent non
+ * neutres. */
+#define UVW_WORDS 5
+static const unsigned long uvw_mask[UVW_WORDS] = {
+    0x00001800UL,   /* +0x00 : brouillard, COLOR_SUM (format) */
+    0x00ff00ffUL,   /* +0x04 : unités 0x00ff ; texgen 0x00ff0000 (format) */
+    0x00ff0000UL,   /* +0x08 : allumage et matrice de texture (unités) */
+    0x0007ffffUL,   /* +0x0c : éclairage, lumières, matériau (format) */
+    0xffffffffUL    /* +0x10 : mode, couleur, combinateur (unités) ; LOD (état) */
+};
+
+/* Unités désignées par le bloc (UVWIDE) : celles à refaire. */
+HOT unsigned long uvw_units(const unsigned long *c)
+{
+    return (c[1] | (c[2] >> 16) | c[4] | (c[4] >> 8) | (c[4] >> 24)) & 0xffUL;
+}
+
+/* Condition de bloc d'UVWIDE, mot par mot (df_classify la refait en une passe). */
+static int uvw_block_ok(const unsigned long *c)
+{
+    int k;
+    for (k = 0; k < CNT_BLOCK; k++)
+        if (c[k] & ~(wl_mask[k] | wl_extra(k) | (k < UVW_WORDS ? uvw_mask[k] : 0)))
+            return 0;
+    return 1;
+}
+
 /* 21/10 (POMPPC_GL_DISPFAST, docs/d3-plugin-x86.md §10) : le bloc classé en
    UNE passe — st_neutral, wl_neutral, et la condition de bloc d'uv_take
    (hors bits neutres, seulement des bits d'unité : +0x04 bits 0..7, et rien
    d'autre dans ce mot). Mêmes réponses, mot par mot ; un mot nul est neutre
-   pour les trois. */
+   pour les trois. 23/10 : DF_UVW, la condition élargie (uvw_block_ok), sous
+   UVWIDE seulement. */
 #define DF_ST 1
 #define DF_WL 2
 #define DF_UV 4
+#define DF_UVW 8
 static int df_classify(const unsigned long *c)
 {
     unsigned long ex = G.wlunif ? WL_UNIF : 0;
-    int k, st = 1, wl = 1, uv = 1;
+    int k, st = 1, wl = 1, uv = 1, uw = G.uvwide != 0;
     for (k = 0; k < CNT_BLOCK; k++) {
         unsigned long v = c[k], e;
         if (!v)
@@ -14982,11 +15076,13 @@ static int df_classify(const unsigned long *c)
             wl = 0;
             if (k != 1)
                 uv = 0;
+            if (uw && (k >= UVW_WORDS || (v & ~(wl_mask[k] | e | uvw_mask[k]))))
+                uw = 0;
         }
     }
     if (!(c[1] & 0xffUL) || (c[1] & ~0xffUL))
         uv = 0;
-    return (st ? DF_ST : 0) | (wl ? DF_WL : 0) | (uv ? DF_UV : 0);
+    return (st ? DF_ST : 0) | (wl ? DF_WL : 0) | (uv ? DF_UV : 0) | (uw ? DF_UVW : 0);
 }
 
 /* R4 : POMPPC_GL_BLOCKDUMP, sur stderr (gltest l'entrelace avec ses propres
@@ -15120,11 +15216,17 @@ static int wl_take(PCtx *p, const unsigned long *chg, int cls)
  * aussi et comparé (lignes UNITVD de la note). */
 static struct {
     int            pending;             /* contrôle : un résultat attend la comparaison */
+    int            wide;                /* 23/10 : reprise que seul UVWIDE permet */
     int            ok;
     TexInfo        ti;
     unsigned long  fmt, gs;
     unsigned long  told;
 } UVC;
+
+/* 23/10 (UVWIDE) : la dernière reprise d'uv_take ne tient que par
+   l'élargissement (bloc hors de l'ancienne condition, aucune unité texturée au
+   verdict gardé, ou texturage éteint). */
+static int uvw_last;
 
 static int uv_take(PCtx *p, const unsigned long *chg, TexInfo *ti,
                    unsigned long *fmt, unsigned long *gs, int cls, unsigned long *vk)
@@ -15132,21 +15234,26 @@ static int uv_take(PCtx *p, const unsigned long *chg, TexInfo *ti,
     unsigned long umask;
     unsigned char *g, *V;
     UScan *sc;
-    int u, k, n = SCAN_N(p), any = 0;
+    int u, k, n = SCAN_N(p), any = 0, narrow, off = 0;
 
+    uvw_last = 0;
     if (!p->vd_valid || !p->vd_ok || n > QGPU_MAX_UNITS || !chg)
         return 0;
-    umask = chg[1] & 0xffUL;
     if (cls >= 0) {                     /* DISPFAST : classé une fois */
-        if (!(cls & DF_UV))
+        narrow = (cls & DF_UV) != 0;
+        if (!narrow && !(G.uvwide && (cls & DF_UVW)))
             return 0;
     } else {
-        if (!umask || (chg[1] & ~0xffUL))
-            return 0;
-        for (k = 0; k < CNT_BLOCK; k++)
+        narrow = (chg[1] & 0xffUL) && !(chg[1] & ~0xffUL);
+        for (k = 0; narrow && k < CNT_BLOCK; k++)
             if (k != 1 && (chg[k] & ~(wl_mask[k] | wl_extra(k))))
-                return 0;
+                narrow = 0;
+        if (!narrow && !(G.uvwide && uvw_block_ok(chg)))
+            return 0;
     }
+    /* sous l'ancienne condition, uvw_units(chg) == chg[1] & 0xff (+0x08 et
+       +0x10 n'y portent aucun bit d'unité) */
+    umask = G.uvwide ? uvw_units(chg) : chg[1] & 0xffUL;
     vd_key_of(p, vk);                   /* appelle prog_state, comme texture_ok */
     if (memcmp(vk, p->vd_key, sizeof(vk)) != 0)
         return 0;
@@ -15155,33 +15262,45 @@ static int uv_take(PCtx *p, const unsigned long *chg, TexInfo *ti,
     for (u = 0; u < n; u++)
         if (p->vd_ti.u[u].t)
             any = 1;
-    if (!any)
+    if (!any && !G.uvwide)
         return 0;                       /* texturage éteint (ou unités vides) avant */
     us_open();
     sc = us_get(p);
-    if (!sc || !sc->on) {
+    if (!sc || (!sc->on && !G.uvwide)) {
         us_close();
         return 0;
     }
-    for (u = UNIT_LIM(p); u < n; u++)
-        if (sc->mask[u]) {
-            us_close();
-            return 0;                   /* le complet refusera (NO_TEX_UNITS) */
-        }
-    *ti = p->vd_ti;
-    for (u = 0; u < n; u++) {
-        const PTex *t0 = p->vd_ti.u[u].t;
-        if (!(umask & (1UL << u))) {
-            /* gardée : même objet de GLEngine qu'au verdict gardé */
-            if (t0 ? (!sc->mask[u] || sc->dt[u] != t0->drvtex) : sc->mask[u] != 0) {
+    if (!sc->on) {
+        /* 23/10 (UVWIDE) : texturage éteint MAINTENANT. Le complet rendrait
+           ok sans aucune unité : geom_texture_ok et texture_ok s'arrêtent à
+           texturing_on (même relevé), le reste de geom_ok tient par la clé et
+           le bloc, comme pour toute reprise. */
+        memset(ti, 0, sizeof(*ti));
+        off = 1;
+    } else {
+        for (u = UNIT_LIM(p); u < n; u++)
+            if (sc->mask[u]) {
+                us_close();
+                return 0;               /* le complet refusera (NO_TEX_UNITS) */
+            }
+        /* (UVWIDE, aucune unité texturée au verdict gardé : les unités non
+           désignées doivent être coupées — même test qu'en dessous ; les
+           désignées sont refaites comme le complet les ferait) */
+        *ti = p->vd_ti;
+        for (u = 0; u < n; u++) {
+            const PTex *t0 = p->vd_ti.u[u].t;
+            if (!(umask & (1UL << u))) {
+                /* gardée : même objet de GLEngine qu'au verdict gardé */
+                if (t0 ? (!sc->mask[u] || sc->dt[u] != t0->drvtex) : sc->mask[u] != 0) {
+                    us_close();
+                    return 0;
+                }
+                continue;
+            }
+            if (!geom_texture_unit_ok(p, sc, u) || !texture_unit_ok(p, u, &ti->u[u])) {
                 us_close();
                 return 0;
             }
-            continue;
-        }
-        if (!geom_texture_unit_ok(p, sc, u) || !texture_unit_ok(p, u, &ti->u[u])) {
-            us_close();
-            return 0;
         }
     }
     *fmt = geom_format(p);              /* sous le relevé, comme le complet */
@@ -15195,9 +15314,19 @@ static int uv_take(PCtx *p, const unsigned long *chg, TexInfo *ti,
     } else {
         *gs = p->vd_gs;
     }
+    uvw_last = !narrow || !any || off;
     for (k = 0; k < QGPU_MAX_UNITS; k++)
-        if (umask & (1UL << k))
+        if (!off && (umask & (1UL << k))) {
             G.n_uv_units++;
+            if (uvw_last)
+                G.n_uvw_units++;
+        }
+    if (uvw_last) {
+        if (off)
+            G.n_uvw_off++;
+        if (!umask)
+            G.n_uvw_nounit++;
+    }
     return 1;
 }
 
@@ -15219,14 +15348,21 @@ static void uv_check(PCtx *p, int ok, const TexInfo *ti, unsigned long fmt, unsi
                 du |= 1UL << u;
     }
     if (ok == UVC.ok && (!ok || (fmt == UVC.fmt && gs == UVC.gs && !du))) {
-        G.n_uv_chk_same++;
+        if (UVC.wide)
+            G.n_uvw_chk_same++;
+        else
+            G.n_uv_chk_same++;
         return;
     }
-    G.n_uv_chk_diff++;
+    if (UVC.wide)
+        G.n_uvw_chk_diff++;
+    else
+        G.n_uv_chk_diff++;
     if (UVC.told < VD_TOLD) {
         UVC.told++;
-        gl_note("UNITVD écart, image %lu : ok %d -> %d, format %08lx -> %08lx, "
+        gl_note("%s écart, image %lu : ok %d -> %d, format %08lx -> %08lx, "
                 "génériques %08lx -> %08lx, unités différentes 0x%02lx\n",
+                UVC.wide ? "UVWIDE" : "UNITVD",
                 G.n_frames, UVC.ok, ok, UVC.fmt, ok ? fmt : 0UL, UVC.gs,
                 ok ? gs : 0UL, du);
     }
@@ -15331,8 +15467,12 @@ static long geom_dispatch_locked(PCtx *p, const unsigned long *chg)
         TexInfo ti;
         unsigned long fmt, gs, vk[VKEY_WORDS];
         if (uv_take(p, chg, &ti, &fmt, &gs, cls, vk)) {
-            if (!G.vcheck) {
+            /* 23/10 : UVWIDE=2, une reprise élargie est contrôlée (le
+               complet suit, comparé) au lieu d'être prise */
+            if (!G.vcheck && !(uvw_last && G.uvwide >= 2)) {
                 G.n_uv_take++;
+                if (uvw_last)
+                    G.n_uvw_take++;
                 if (G.count)
                     cnt_keep(p, 1, &ti, fmt);
                 if (cls >= 0) {
@@ -15348,6 +15488,7 @@ static long geom_dispatch_locked(PCtx *p, const unsigned long *chg)
                 return geom_dispatch_publish(p, fmt);
             }
             UVC.pending = 1;            /* contrôle : le complet suit, comparé */
+            UVC.wide = uvw_last;
             UVC.ok = 1;
             UVC.ti = ti;
             UVC.fmt = fmt;

@@ -63,6 +63,7 @@ pose rien que GLEngine juge utile au pilote — le dessin suivant part sans `gld
 |---|---|
 | `0000000n` (bit *u*) | **`glBindTexture` sur l'unité *u*** (même la texture déjà liée, même unité éteinte, même sous programme), `glTexParameteri`, `glTexImage2D`, `glTexSubImage2D` de la texture liée ; avec `+08 1<<(16+u)` : `glEnable/Disable(GL_TEXTURE_2D / CUBE_MAP)` |
 | `00010000` | `glEnable/Disable(GL_TEXTURE_GEN_S)`, `glTexGeni` (unité 0) |
+| `00010000 << u` | (23/10, scène `uvwide`) texgen de l'unité *u* : allumage, `glTexGeni`, `glTexGenfv` (plan) — `00020000` unité 1, `00030000` les deux |
 
 ### +0x08 — transformation
 
@@ -84,7 +85,7 @@ pose rien que GLEngine juge utile au pilote — le dessin suivant part sans `gld
 | `00000004` | `glLightfv` |
 | `00000008` | `glEnable/Disable(GL_LIGHT0)` |
 | `4 << 2i`, `8 << 2i` | (22/10, scène `litdirty`) lumière *i* : paramètres (`glLightfv`, `glLightf`, y compris par une liste d'affichage) et allumage — `10`/`20` lumière 1, `40`/`80` lumière 2… `10000`/`20000` lumière 7 ; `glPopAttrib` pose tout le bloc |
-| `00040000` | `glEnable/Disable(GL_COLOR_MATERIAL)` |
+| `00040000` | `glEnable/Disable(GL_COLOR_MATERIAL)` ; avec `00000001` : `glColorMaterial` (23/10) |
 | **`00100000`** | **tableaux salis** (posé par GLEngine lui-même au dessin, 0xa7b40) : `glVertexPointer`, `glTexCoordPointer`, `glColorPointer`, `glVertexAttribPointerARB` (même VBO et même décalage compris), `glEnable/DisableClientState`, `glEnable/DisableVertexAttribArrayARB`, `glBufferDataARB` / `glBufferSubDataARB` d'un VBO en service |
 | `00400000` | `glBindProgramARB(GL_VERTEX_PROGRAM_ARB)` (même le programme déjà lié), `glProgramLocalParameter` de sommets, extinction du programme de sommets |
 | **`00800000`** | **`glProgramEnvParameter`** de sommets et de fragments, `glLoadMatrixf` sous programme (matrices suivies), liaison et `local` de sommets |
@@ -95,6 +96,16 @@ pose rien que GLEngine juge utile au pilote — le dessin suivant part sans `gld
 
 `glTexEnvi(GL_TEXTURE_ENV_MODE)` pose le bit de l'unité ; `glTexEnvfv(GL_TEXTURE_ENV_COLOR)`
 `00000100` ; les paramètres du combinateur (`GL_COMBINE_RGB`…) `01000000`.
+
+Relevé complété le 23/10 (scène `gltest uvwide`, unités 0 à 3, `POMPPC_GL_BLOCKDUMP`) — le
+mot entier est par unité, quatre octets de huit bits :
+
+| bit | appels |
+|---|---|
+| `00000001 << u` | `glTexEnvi(GL_TEXTURE_ENV_MODE)` de l'unité *u* |
+| `00000100 << u` | `glTexEnvfv(GL_TEXTURE_ENV_COLOR)` de l'unité *u* (`200` unité 1, `400` unité 2, `800` unité 3) |
+| `00010000 << u` | `glTexEnvf(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS)` de l'unité *u* |
+| `01000000 << u` | **tout** paramètre du combinateur de l'unité *u* : `GL_COMBINE_RGB`, `GL_COMBINE_ALPHA`, `GL_SOURCEn_*`, `GL_OPERANDn_*`, `GL_RGB_SCALE`, `GL_ALPHA_SCALE` (`04000000` unité 2) |
 
 ### +0x14 à +0x48 — valeurs de paramètres
 
@@ -139,6 +150,14 @@ Quatre classes de bits, dans `wl_mask` (`guest/gldriver/pomppc_accel.c`) :
    étages actifs, unités échantillonnées de l'étage de fragments, entrées de sommet du
    programme et empreinte de liaison) est dans la clé ; un sampler déplacé change la clé
    (et pose `+04 1 << u`). Les valeurs d'uniforms partent au dessin (`prog_sync`).
+
+5. **Verdict par unité élargi** (23/10, `POMPPC_GL_UVWIDE`, `docs/plugin-allegement.md` §7) :
+   pas neutres pour la liste blanche, mais admis par `uv_take`. Bits d'unité (l'unité est
+   refaite) : `+04` bit *u*, `+08 00010000 << u`, `+10` octets 0, 1 et 3 (mode, couleur,
+   combinateur). Bits de format seul (`geom_format` refait) : `+00 00000800 | 00001000`
+   (brouillard, `COLOR_SUM`), `+04 00010000 << u` (texgen), `+0c 0007ffff` (éclairage,
+   lumières, matériau, `COLOR_MATERIAL`), `+10 00010000 << u` (biais de LOD, lu par
+   `compute_state` seul).
 
 Tout le reste **n'est pas neutre** et fait recalculer : unités (`+04`), allumage des cibles et
 matrices de texture (`+08` bits 16-23), environnement de texture (`+10`), éclairage,

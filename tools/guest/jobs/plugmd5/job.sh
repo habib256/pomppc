@@ -18,7 +18,7 @@ SCENES=${SCENES:-"tri gouraud depth fill prims tex texfmt texpack texpersp comb 
   stencil depthrt varray varrayvbo game lit texgen clip fogz bigstrip dlist mixte fusion blendc logicop
   polymode stipple occl caps entry v15 tex3d texlod sepspec cube tex13 tex14 tcprobe gl15 texcache
   alpharep texcross readpack drawpack texdelmid vbocolor rawprim offset forkdraw vpimm pixstore
-  matbegin matsonde arbvp arbfp arbvp0 arbvp0vbo arbvpvar glsl glslvs glsldp d3idx d3inter mbimm litdirty"}
+  matbegin matsonde arbvp arbfp arbvp0 arbvp0vbo arbvpvar glsl glslvs glsldp d3idx d3inter mbimm litdirty uvwide"}
 MODES=${MODES:-"ref:"}
 echo "== kext"; kext_load
 echo "== plugin"; plugin_install

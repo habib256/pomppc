@@ -9,6 +9,10 @@ sur les deux hôtes (PC et M4) sans travail de parité.
 **Statut (22/10) : leviers A et B construits, A/B fait sur la VM quotidienne, six leviers
 allumés par défaut dans le plugin `20261022-abon` (PRESENTQ reste éteint) : §6.**
 
+**23/10 : levier E (verdict par unité élargi, `POMPPC_GL_UVWIDE`) construit, prouvé sur la
+VM de dev, A/B des quatre jeux joué (UT2004 −1,6 %, DOOM 3 −1,4 %, mb et zen neutres) et
+allumé par défaut dans le plugin `20261023-uvwon` : §7.**
+
 ## 1. Profil des quatre jeux de la matrice du PC
 
 `sample` de 20 s du jeu dans l'invité, VM quotidienne, binaire rapide, plugin `20261021-d3p`
@@ -72,7 +76,11 @@ visibles dans ces profils.
   changement), attente de la moitié précédente, coût fixe par image de `stats_frame` et
   `pomppc_proc_pre`. Mesure : Zen, Marble Blast. **Construit le 22/10 : §4 ; allumé par
   défaut (sauf PRESENTQ) : §6.**
-- Plus tard : attente de l'hôte (C), verrous (D).
+- Plus tard : attente de l'hôte (C), verrous (D). Au profil du 22-23/10 aux six leviers,
+  ils sont devenus petits (≤ 3 % et ~1,5 %).
+- **E. Verdict par unité élargi** (23/10) : le verdict complet refait au dispatch est le
+  poste commun le plus lourd (`geom_dispatch_locked` 5 à 10 % du fil du jeu). **Construit :
+  §7.**
 
 ## 3. Levier A : le chemin Begin/End (22/10, révision `20261022-beg`)
 
@@ -453,3 +461,254 @@ bundle `bench/plug-ab-2210/GLDriver-POMPPC-20261022-abon.bundle.tar`, md5
   aucun plantage ; `cover`, `pop`, `fs` justes ; aux défauts `ECHANGE image 500 : texdefer 500
   vidages évités … winseed 49 reprises` (cover). Les 2 échecs du job sont les deux `move`
   (défaut du relevé, identique sous `off`).
+
+## 7. Levier E : verdict par unité élargi (23/10, révision `20261023-uvw`)
+
+Branche `worktree-agent-a245ab1fae021e4d6`. Une variable, éteinte par défaut à la construction
+(`UVWIDE_DEFAULT 0`, **allumée le 23/10 : §7.7**) : `POMPPC_GL_UVWIDE=1` l'allume, `=2` contrôle. Elle n'agit que sous
+`UNITVD`, donc sous le verdict unique. Compteurs sur une ligne `UVW` de la note, toutes les
+500 images et à la destruction du contexte. Ni `qgpu_proto.h` ni `qgpu_abi.h` ne changent :
+QEMU et le kext restent tels quels.
+
+### 7.1 Pourquoi
+
+Profil invité neuf des quatre jeux aux six leviers (`bench/tcg/ab/gprof-2210b-*`). Les leviers
+C (attente de l'hôte, ≤ 3 %) et D (verrous, ~1,5 %) sont devenus petits. Le poste commun le
+plus lourd est le verdict complet refait au dispatch : `geom_dispatch_locked` fait 5,2 % du
+fil du jeu dans Zen, 10,2 % dans UT2004, 8,8 % dans DOOM 3 et 4,8 % dans Marble Blast.
+
+La note d'UT2004 dit `verdict par unité (unitvd 1) 1 repris, 223 586 complets`, celle de Zen
+`0 repris, 342 400 complets`. `uv_take` (le verdict refait pour les seules unités désignées,
+`docs/d3-plugin-x86.md` §3) ne reprenait le verdict que si le bloc ne portait, hors de la
+liste blanche, que des bits d'unité de `+0x04`. Or le relevé `POMPPC_GL_BLOCKDUMP=600:2`
+d'UT2004 (`bench/tcg/ab/bdump-2210-ut`) montre surtout `+08=00000010 +10=00000100
++14=00000001 +48=00000001` : `glTexEnvfv(GL_TEXTURE_ENV_COLOR)` de l'unité 0, plus la
+modèle-vue. Viennent ensuite le brouillard (`+00 00000800`), le texgen et la matrice de
+texture (`+04`/`+08 0x10000 << u`), l'éclairage (`+0c` 0x1, 0x155, 0x403fd), puis le mode, la
+couleur et le combinateur de chaque unité (`+10`).
+
+Simulation sur ce relevé (487 dispatches, 2 neutres pour la liste blanche) :
+
+- l'ancienne condition reprenait 0 dispatch sur 485 ;
+- la condition élargie en reprend **481 (99,2 %)** ;
+- les 4 restants portent `+00 00000010` (`glClearDepth`, non admis).
+
+### 7.2 Les bits admis, et qui les lit
+
+Le relevé est vérifié sur les unités 0 à 3 par la nouvelle scène `gltest uvwide`, sous
+`POMPPC_GL_BLOCKDUMP` et `GLTEST_STEPS=1` (`docs/re/bloc-changements-r4.md` §2, complété).
+Pour chaque bit, on a cherché qui lit l'état dans `geom_ok`, `geom_raster_ok`, `accel_ok_for`,
+`geom_texture_ok`, `texture_ok`, `texture_unit_ok`, `geom_texture_unit_ok`, `geom_format`,
+`va_gen_sizes` et `vd_key_of`.
+
+**Bits d'unité.** Ils désignent l'unité *u*, qui est refaite par `geom_texture_unit_ok` et
+`texture_unit_ok`. Ces deux fonctions relisent la cible allumée (`unit_mask`), la texture,
+`TU_ENV_MODE`, `TU_ENV_COLOR` et le combinateur (`combine_ok`) : tout ce que garde `TexUnit`.
+
+| mot | bits | appels |
+|---|---|---|
+| `+0x04` | `1 << u` | liaison, paramètres, image de la texture liée (l'ancienne condition) |
+| `+0x08` | `0x10000 << u` | allumage d'une cible de l'unité, matrice de texture |
+| `+0x10` | `1 << u` | `glTexEnv(GL_TEXTURE_ENV_MODE)` |
+| `+0x10` | `0x100 << u` | `glTexEnv(GL_TEXTURE_ENV_COLOR)` |
+| `+0x10` | `0x1000000 << u` | tout paramètre du combinateur (`COMBINE_*`, `SOURCEn_*`, `OPERANDn_*`, `RGB_SCALE`, `ALPHA_SCALE`) |
+
+**Bits de format seul.** Dans le verdict, l'état qu'ils signalent n'est lu que par
+`geom_format`, que la reprise refait toujours (et `va_gen_sizes` aussi si le format bouge).
+`accel_ok_for` n'est appelé par le verdict qu'au chemin brut (`geom_raster_ok`, `raw = 1`) :
+le test du brouillard `GL_NICEST` y est sauté. Le dessin non brut l'appelle lui-même.
+
+| mot | bits | appels | lecteur dans le verdict |
+|---|---|---|---|
+| `+0x00` | `0x800` | `glFog*` (mode, densité, couleur, début, fin, source de la coordonnée), `glEnable/Disable(GL_COLOR_SUM)` ; avec `0x800000` : allumage de l'éclairage | `geom_format` (`GS_FOG_COORD_SRC`, `GS_COLOR_SUM`) |
+| `+0x00` | `0x1000` | `glEnable/Disable(GL_FOG)` | `geom_format` (`GS_FOG`) |
+| `+0x04` | `0x10000 << u` | texgen de l'unité *u* (allumage, `glTexGeni`, `glTexGenfv`) | `geom_format` (`texgen_needs_normal`) |
+| `+0x0c` | `0x1` | `glMaterialfv`, `glLightModel*`, `glColorMaterial` (avec `0x40000`) | aucun |
+| `+0x0c` | `0x2` | `glEnable/Disable(GL_LIGHTING)` (avec `+00 0x800800`, `+08 0x10`) | `geom_format` (`GS_LIGHTING`) |
+| `+0x0c` | `4 << 2i`, `8 << 2i` (jusqu'à `0x3fffc`) | lumière *i* : paramètres, allumage | aucun |
+| `+0x0c` | `0x40000` | `glEnable/Disable(GL_COLOR_MATERIAL)` | aucun |
+| `+0x10` | `0x10000 << u` | `glTexEnvf(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS)` | aucun : seul `compute_state` lit `TU_LOD_BIAS` |
+
+Masques (`uvw_mask` dans `pomppc_accel.c`), en plus de `wl_mask` :
+
+- `+00 0x00001800` ;
+- `+04 0x00ff00ff` ;
+- `+08 0x00ff0000` ;
+- `+0c 0x0007ffff` ;
+- `+10 0xffffffff` (les quatre octets ci-dessus).
+
+Unités désignées : `(+04 | +08 >> 16 | +10 | +10 >> 8 | +10 >> 24) & 0xff`. Tout le reste
+n'est toujours pas neutre, notamment :
+
+- `+08 0x01000000` (plan de coupe) et `0x40000000` (normalisation) ;
+- `+0c 0x00080000` et au-delà (programmes, « T&L perdu ») ;
+- `+00 0x10` (`glClearDepth`), `0x80` (tampon de dessin), `0x200000` (`glPixelStorei`).
+
+**L'état envoyé.** `st_dirty` est posé par `geom_dispatch_locked` avant le verdict, d'après
+`st_mask` seul, comme avant. Les bits de brouillard, d'éclairage, de texgen (sauf l'unité 0)
+et de biais de LOD n'y sont pas : `compute_state` est refait. `LIGHTDIRTY` et `MTXDIRTY` lisent
+le bloc en tête de dispatch, eux aussi indépendamment du verdict. Les clés d'unités
+(`STUNIT`, `su_diff`) suivent le `TexInfo` rangé, qui porte la nouvelle couleur ou le nouveau
+mode de l'unité refaite.
+
+### 7.3 Deux cas de plus, démontrés
+
+- **Aucune unité désignée** (`umask == 0` : le bloc ne porte que des bits de format, par
+  exemple `glFog` ou `glLight` entre deux dessins). Toutes les unités sont gardées, après le
+  même contrôle qu'avant : même objet de GLEngine (`us_get`) qu'au verdict rangé, unité
+  coupée restée coupée.
+- **Texturage éteint au relevé** (`!sc->on`). Le complet rend « ok » sans aucune unité :
+  `geom_texture_ok` et `texture_ok` s'arrêtent à `texturing_on`, qui lit le même relevé. La
+  reprise rend un `TexInfo` nul, sans regarder les unités. Avant, `uv_take` renvoyait au
+  complet. Le cas « aucune unité texturée au verdict gardé » (`!any`) est repris lui aussi :
+  les unités non désignées doivent être coupées (même test), les désignées sont refaites
+  comme le complet les ferait.
+
+Sous `UVWIDE=0`, `uv_take` est inchangé : même condition de bloc et mêmes refus `!any` et
+`!sc->on`. `df_classify` (`DISPFAST`) calcule la condition élargie dans la même passe (bit
+`DF_UVW`), avec la même réponse que `uvw_block_ok` mot à mot. Le mode `chknd` des preuves
+couvre le chemin sans `DISPFAST`.
+
+### 7.4 Compteurs
+
+Ligne `UVW … : uvwide N, R reprises élargies (U unités refaites, E texturage éteint, Z sans
+unité désignée) ; contrôle S identiques, D écarts`. Une reprise est « élargie » si l'ancienne
+condition l'aurait refusée : bloc hors de l'ancienne condition, `!any` ou `!sc->on`. Les
+reprises qui tenaient déjà restent comptées sur la ligne `D3X`.
+
+Sous `UVWIDE=2`, chaque reprise élargie est calculée puis **non prise** : le verdict complet
+suit et sert, et il est comparé à la reprise (ok, format, tailles des génériques, unités).
+Sous `VERDICTCHECK=1`, les reprises élargies vont aussi dans ces compteurs, et un écart est
+noté `UVWIDE écart`.
+
+### 7.5 Preuves (VM de dev `tiger-dev-plugin.raw`, binaire rapide, SMP 2, RTX)
+
+- **Relevé** : scène `uvwide` (nouvelle, 56 cases, une par pas), `GLTEST_STEPS=1
+  POMPPC_GL_BLOCKDUMP=0:1000000`. Chaque bit du §7.2 a été vu sur les unités 0 à 3. Il n'y
+  a aucune surprise : le mot `+0x10` est entièrement par unité ; le texgen de l'unité 1 pose
+  `+04 00020000` ; `glColorMaterial` pose `+0c 00040001`.
+- **`plugmd5` en single-user**, **69 scènes** (les 68 du §3.4 et `uvwide`), images comparées
+  à l'octet, six modes :
+
+  | mode | variables |
+  |---|---|
+  | `off` | défauts, `UVWIDE` éteint |
+  | `uvw` | `UVWIDE=1` |
+  | `chk` | `UVWIDE=2` |
+  | `chknd` | `UVWIDE=2 DISPFAST=0` : condition de bloc sans `df_classify` |
+  | `vchk` | `UVWIDE=1 VERDICTCHECK=1` |
+  | `all2` | `UVWIDE=1`, avec `BEGINVD`, `STUNIT`, `LIGHTDIRTY`, `MTXDIRTY` et `DISPFAST` à 2 : les lecteurs du verdict rangé sous contrôle |
+
+  Résultat : **0 écart**. 61 scènes sortent rc=0 ; `arbvp`…`glsldp` sortent rc=1 dans les six
+  modes, comme au §3.4.
+- **Compteurs sur l'ensemble des scènes** :
+
+  | compteur | `off` | `uvw` |
+  |---|---|---|
+  | verdicts repris par unité | 2 499 | 2 688 |
+  | dont reprises élargies | — | 189 (99 unités refaites, 83 texturage éteint, 87 sans unité désignée) |
+  | verdicts complets | 389 | 200 |
+
+  Contrôles, tous à **0 écart** :
+
+  - `chk` et `chknd` : 189 reprises élargies contrôlées. Les deux chemins de classement
+    donnent les mêmes comptes.
+  - `vchk` : 189 reprises élargies, 2 499 reprises par unité, 4 135 reprises du dessin et
+    2 792 dispatches court-circuités contrôlés.
+  - `all2` : `BEGINVD` 1 458 contrôles, `STUNIT` 2 912, clés `DISPFAST` 2 324, `MTXDIRTY` et
+    `LIGHTDIRTY`.
+- **La scène `uvwide` seule** : 55 de ses 58 dispatches sont repris sous `UVWIDE=1`, contre
+  0 sans le levier. Ce sont 55 reprises élargies : 26 unités refaites, 6 avec le texturage
+  éteint, 28 sans unité désignée. Sous `=2`, les 55 sont contrôlées, 0 écart. Sur la scène
+  `r4`, ce sont 51 reprises élargies sous `UVWIDE=1`, et 51 contrôlées sans écart sous `=2`.
+- **Job `gpu`** :
+  - aux défauts : **56 OK, 0 échec** (`qgpu_test` 0) ;
+  - `UVWIDE=1` exporté, avec `uvwide`, `mbimm` et `litdirty` en plus : **59 OK, 0 échec**.
+    Le job ne lit pas `env.sh` : la ligne `. ./env.sh` a été ajoutée à la copie préparée.
+  - Écart hors arêtes au rendu d'Apple : 1/255 pour `uvwide`, 0 pour `mbimm`, 1 pour
+    `litdirty`.
+  - Les références d'Apple en échec (`entry`, `v15`, `texlod`…) sont les mêmes dans les deux
+    passes.
+- **Bundle** : construit dans la VM de dev, aux défauts (`UVWIDE_DEFAULT 0`). Le binaire est
+  identique dans les deux constructions (md5 du binaire `a1097d67afb9e4baaa4ae51ca1e3656e`).
+  - fichier : `bench/uvwide-2310/GLDriver-POMPPC-20261023-uvw.bundle.tar` du worktree ;
+  - md5 du tar : `4b3b72507063e6c164acf159c525a767`.
+
+### 7.6 A/B à jouer sur la VM quotidienne
+
+Installer le bundle (VM quotidienne démarrée) :
+
+```
+cat /home/gistarcade/src/pomppc/.claude/worktrees/agent-a245ab1fae021e4d6/bench/uvwide-2310/GLDriver-POMPPC-20261023-uvw.bundle.tar | tools/guest/tssh.sh \
+  "cat > /tmp/uvw.tar && cd /tmp && rm -rf GLDriver-POMPPC.bundle && tar xf uvw.tar && \
+   echo tiger974 | sudo -S sh -c 'rm -rf /System/Library/Extensions/GLDriver-POMPPC.bundle && \
+   cp -R /tmp/GLDriver-POMPPC.bundle /System/Library/Extensions/ && \
+   chown -R root:wheel /System/Library/Extensions/GLDriver-POMPPC.bundle && \
+   chmod -R 755 /System/Library/Extensions/GLDriver-POMPPC.bundle'"
+```
+
+D'abord une partie sous contrôle par jeu. Attendu sur la ligne `UVW` de la note : `contrôle
+N identiques, 0 écarts` avec N grand. Rien d'autre ne change ; les six leviers restent à leur
+défaut, allumé :
+
+```
+tools/tcg/matab.sh uvw-chk-ut  1 "chk:QEMU_FAST=1 POMPPC_GL_UVWIDE=2" ut fen
+tools/tcg/matab.sh uvw-chk-zen 1 "chk:QEMU_FAST=1 POMPPC_GL_UVWIDE=2" zen fen
+```
+
+Puis l'A/B, 3 parties par bras. `ref` est le bundle aux défauts (`UVWIDE=0`, les six leviers
+allumés) ; `e` est le même bundle avec le levier E :
+
+```
+tools/tcg/matab.sh uvw-mb  3 "ref:QEMU_FAST=1" "e:QEMU_FAST=1 POMPPC_GL_UVWIDE=1" mb fen
+tools/tcg/matab.sh uvw-zen 3 "ref:QEMU_FAST=1" "e:QEMU_FAST=1 POMPPC_GL_UVWIDE=1" zen fen
+tools/tcg/matab.sh uvw-ut  3 "ref:QEMU_FAST=1" "e:QEMU_FAST=1 POMPPC_GL_UVWIDE=1" ut fen
+tools/tcg/matab.sh uvw-d3  3 "ref:QEMU_FAST=1" "e:QEMU_FAST=1 POMPPC_GL_UVWIDE=1" d3 fen
+```
+
+Ce qu'il faut regarder :
+
+- les ms/image de `bilan.txt` ;
+- les lignes `D3X`/`UVW` de la note du bras `e` : part des dispatches repris contre
+  complets ;
+- les ms/image d'UT2004 en plein écran (`ut pe`), si UT2004 gagne en fenêtre.
+
+Décision : `UVWIDE_DEFAULT 1` si aucun des quatre jeux ne perd.
+
+### 7.7 A/B sur la VM quotidienne et allumage (23/10, révision `20261023-uvwon`)
+
+VM quotidienne, binaire rapide, bundle `20261023-uvw` (§7.5). Les campagnes sont dans
+`bench/tcg/ab/uvw-*` du dépôt principal : 3 parties par bras, médianes en ms/image.
+
+Contrôles `UVWIDE=2`, à **0 écart** :
+
+- UT2004 : 150 518 reprises élargies contrôlées identiques ;
+- Zen : 189 306 identiques.
+
+| jeu | ref | `UVWIDE=1` | écart | dispatches repris / complets (bras `e`) |
+|---|---|---|---|---|
+| Marble Blast | 9,9 | 9,9 | neutre | 101 752 / 3 000 |
+| Zen | 5,1 | 5,1 | neutre | 190 023 / 8 002 |
+| UT2004 | 42,5 | 41,8 | **−1,6 %** | 167 095 / 1 515 |
+| DOOM 3 | 93,0 | 91,7 | **−1,4 %** | 1 087 946 / 187 020 |
+
+Avant le levier, UT2004 et Zen ne reprenaient presque aucun verdict par unité :
+1 et 0 repris, pour 223 586 et 342 400 complets.
+
+**Décision** (validée par l'utilisateur) : `UVWIDE_DEFAULT 1`, révision `20261023-uvwon`.
+`POMPPC_GL_UVWIDE=0` éteint le levier ; `=2` garde le contrôle. Le levier reste soumis à
+`UNITVD`, donc au verdict unique.
+
+Preuves aux nouveaux défauts (VM de dev `tiger-dev-plugin.raw`, aucune variable posée) :
+
+- `plugmd5` en single-user, 69 scènes, `off` (`UVWIDE=0`) contre `def` (rien) : **0 écart**.
+  61 scènes sortent rc=0 ; `arbvp`…`glsldp` sortent rc=1 dans les deux modes.
+- Sans variable, la note montre `plugin 20261023-uvwon … uvwide=1` dans les 69 scènes, et
+  une ligne `UVW`. Les compteurs sont ceux de `uvw` au §7.5 : 189 reprises élargies,
+  2 688 reprises par unité, 200 complets au lieu de 389. Sous `off`, l'en-tête dit
+  `uvwide=0` et la note n'a aucune ligne `UVW`.
+- Job `gpu` aux défauts : **56 OK, 0 échec** (`qgpu_test` 0).
+- Bundle :
+  - fichier : `bench/uvwide-2310/GLDriver-POMPPC-20261023-uvwon.bundle.tar` du worktree ;
+  - md5 du tar : `653d846c2eafe43a13401ddd31d6947d` ;
+  - md5 du binaire : `6ec91119da790f95f4acecace80cd40f`.
