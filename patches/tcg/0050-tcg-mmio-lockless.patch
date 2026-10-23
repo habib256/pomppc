@@ -1,0 +1,29 @@
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -2444,6 +2444,14 @@
+     section = io_prepare(&mr_offset, cpu, full, addr, ra);
+     mr = section->mr;
+ 
++    /* POMPPC tcg/0050 : une région de device déclarée sans BQL
++       (memory_region_enable_lockless_io) est servie sans le prendre, comme
++       le fait déjà address_space_rw (prepare_mmio_access). La région des
++       accès non assignés, sans device, garde le BQL. */
++    if (mr->lockless_io && mr->dev) {
++        return int_ld_mmio_beN(cpu, full, ret_be, addr, size, mmu_idx,
++                               type, ra, mr, mr_offset);
++    }
+     BQL_LOCK_GUARD();
+     return int_ld_mmio_beN(cpu, full, ret_be, addr, size, mmu_idx,
+                            type, ra, mr, mr_offset);
+@@ -2958,6 +2966,11 @@
+     section = io_prepare(&mr_offset, cpu, full, addr, ra);
+     mr = section->mr;
+ 
++    /* POMPPC tcg/0050 : voir do_ld_mmio_beN. */
++    if (mr->lockless_io && mr->dev) {
++        return int_st_mmio_leN(cpu, full, val_le, addr, size, mmu_idx,
++                               ra, mr, mr_offset);
++    }
+     BQL_LOCK_GUARD();
+     return int_st_mmio_leN(cpu, full, val_le, addr, size, mmu_idx,
+                            ra, mr, mr_offset);

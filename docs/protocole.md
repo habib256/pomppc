@@ -132,6 +132,16 @@ device, en FIFO après les soumissions en vol. Un reset global draine l'exécuti
 courante, abandonne les soumissions en attente et remet les compteurs à zéro.
 Les objets de rendu hôte ne sont pas persistés comme un état GL migrable.
 
+Expérimental (23/10/2026, phase 0 du plugin hôte, `docs/plan-plugin-hote.md` §5) :
+sous `-device qgpu-pci,x-hostcall=on` (éteint par défaut), le device publie une
+**page d'appel** en BAR2 (4 Kio de MMIO, `QGPU_CAP_HOSTCALL`) que le kext projette
+par `IOConnectMapMemory(QGPU_UC_MEM_CALL)`. L'écriture, à `QGPU_HC_REG_CALL`, de
+l'offset absolu d'un bloc d'appel de BAR0 exécute l'appel dans le fil du vCPU,
+sans BQL (`patches/tcg/0050`), avant que l'écriture ne rende la main ; les adresses
+du bloc sont des adresses **virtuelles** du processus invité courant, traduites
+par la MMU du vCPU (`QGPU_HC_*` dans `qgpu_proto.h`). Sans BAR2, le kext refuse ce
+type de mémoire et rien d'autre ne change.
+
 ## Soumission et barrières
 
 Une commande commence par `opcode << 16 | longueur`, longueur en **mots de
@@ -376,6 +386,10 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_UC_READ_REG` | `5` |
 | `QGPU_UC_METHOD_COUNT` | `6` |
 | `QGPU_UC_MEM_SHMEM` | `0` |
+| `QGPU_UC_MEM_CALL` | `1` |
+| `QGPU_CAP_HOSTCALL` | `0x00100000` |
+| `QGPU_CALL_BAR_SIZE` | `4096` |
+| `QGPU_HC_REG_CALL` | `0x00` |
 
 ### qgpu_proto.h
 
@@ -932,3 +946,21 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_SB_F_UNITS8` | `0x1000` |
 | `QGPU_SB_F_GLSL` | `0x2000` |
 | `QGPU_SB_F_ALL` | `0x3F0F` |
+| `QGPU_HC_NOP` | `0` |
+| `QGPU_HC_READ_VA` | `1` |
+| `QGPU_HC_CMP_LIST` | `2` |
+| `QGPU_HC_ST_OK` | `0` |
+| `QGPU_HC_ST_FALLBACK` | `1` |
+| `QGPU_HC_ST_BAD` | `2` |
+| `QGPU_HC_ST_NOCPU` | `3` |
+| `QGPU_HC_OFF_OP` | `0x00` |
+| `QGPU_HC_OFF_ST` | `0x04` |
+| `QGPU_HC_OFF_A0` | `0x08` |
+| `QGPU_HC_OFF_A1` | `0x0c` |
+| `QGPU_HC_OFF_A2` | `0x10` |
+| `QGPU_HC_OFF_A3` | `0x14` |
+| `QGPU_HC_OFF_PAGES` | `0x18` |
+| `QGPU_HC_OFF_NS` | `0x1c` |
+| `QGPU_HC_OFF_LIST` | `0x20` |
+| `QGPU_HC_LIST_MAX` | `32` |
+| `QGPU_HC_BLOCK_BYTES` | `(QGPU_HC_OFF_LIST + 12 * QGPU_HC_LIST_MAX)` |

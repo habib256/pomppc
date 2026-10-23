@@ -30,6 +30,9 @@ typedef struct QgpuClient {
     /* 07/10/2026 : QGPU_REG_CLIENT_ERRORS(index) si le device le tient
        (QGPU_CAP_CLIENT_ERRORS) ET découpe BAR0 comme notre kext ; 0 sinon. */
     unsigned long  cerr_reg;
+    /* 23/10/2026 : page d'appel synchrone (BAR2, QGPU_CAP_HOSTCALL), projetée
+       par qgpu_map_call ; 0 sinon. Phase 0 du plugin hôte. */
+    volatile unsigned long *call;
 } QgpuClient;
 
 /* 0 si le device est utilisable ; sinon un message dans *why. Vérifie, dans
@@ -41,6 +44,10 @@ int  qgpu_open(QgpuClient *q, const char **why);
    -1 si le kext ne sait pas (d'avant la v19) ou refuse l'offset. */
 int  qgpu_read_reg(QgpuClient *q, unsigned long offset, unsigned long *value);
 void qgpu_close(QgpuClient *q);
+/* 23/10/2026 : projette la page d'appel (QGPU_UC_MEM_CALL) dans q->call. 0 si
+   faite ; -1 si le device ne l'a pas (x-hostcall éteint) ou si le kext ne
+   connaît pas ce type de mémoire — rien n'est alors changé. */
+int  qgpu_map_call(QgpuClient *q);
 /* Après fork() SANS exec, dans l'ENFANT seulement : oublier le port Mach et la
    tranche mappée SANS un seul appel au noyau. Fermer le user client ici
    détruirait les objets du PÈRE (c'est le même user client), et écrire dans la

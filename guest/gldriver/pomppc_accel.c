@@ -129,7 +129,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261022-abon"
+#define POMPPC_PLUGIN_REV "20261023-hc0"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -1366,6 +1366,13 @@ static struct {
                                            compute_state (wl_extra, st_neutral) */
     unsigned long   bd_a, bd_n;         /* R4 : POMPPC_GL_BLOCKDUMP=a[:n], images [a, a+n) */
     int             bd_on;
+    /* 23/10/2026 : phase 0 du plugin hôte (POMPPC_GL_HOSTCALL, éteint) — la
+       page d'appel est projetée, un bloc d'appel et une zone de lecture sont
+       pris en haut de la tranche (HC_RESERVE octets retirés de G.q.size). */
+    int             hc;                 /* 0 éteint, 1 mesure, 2 + contrôle de lecture */
+    unsigned char  *hc_blk;             /* bloc d'appel (adresse invitée) */
+    unsigned long   hc_abs;             /* … son offset absolu dans BAR0 */
+    const char     *hc_why;
 } G = { PTHREAD_MUTEX_INITIALIZER };
 
 /* Appelée juste avant d'armer une garde de faute (sig_jmp, pack_jmp,
@@ -2705,6 +2712,242 @@ int pomppc_accel_enabled(void)
  * tranche assez grande pour deux moitiés utilisables. Une seule manque et on
  * reste en synchrone, exactement comme avant : le mode asynchrone n'est pas un
  * repli, c'est un supplément. */
+/* ─────────── 23/10/2026 : phase 0 du plugin hôte (POMPPC_GL_HOSTCALL) ───────────
+ * docs/plan-plugin-hote.md §3 et §5. MESURE, pas un levier : le plugin fait
+ * tout ce qu'il faisait, et en plus, à chaque geom_send_all, la même série de
+ * comparaisons d'état (celles de geom_send_all, sans les sauts de MTXDIRTY et
+ * LIGHTDIRTY) deux fois : en C invité (memcmp) puis en C natif par la page
+ * d'appel (QGPU_HC_CMP_LIST, qui lit GLEngine et le PCtx par adresses
+ * virtuelles). Les deux masques de différences doivent être égaux ; les deux
+ * temps sont cumulés. HOSTCALL=2 y ajoute un contrôle de lecture : l'état de
+ * GLEngine (0x4240 octets, cinq pages) et le PCtx lus par QGPU_HC_READ_VA,
+ * comparés octet à octet à ce que lit l'invité. POMPPC_GL_HOSTCALL_REPS=n
+ * répète chaque mesure n fois (temps par passe = cumul / n). Ligne HCALL de
+ * la note, à la destruction du contexte. Sans page d'appel (device sans
+ * x-hostcall, kext plus ancien) : rien n'est changé. */
+#define HC_RESERVE  0x20000UL           /* bloc d'appel + zone de lecture */
+#define HC_DATA     0x1000UL            /* zone de lecture : du bloc + 4 Kio … */
+#define HC_N        25                  /* entrées de la liste */
+#define HC_RD_BEFORE 0x240UL            /* l'état lu commence à g − 0x240 (courant) */
+#define HC_RD_LEN   0x4240UL
+
+static void hc_setup(void)
+{
+    const char *e = getenv("POMPPC_GL_HOSTCALL");
+    G.hc = e && e[0] ? (int)(e[0] - '0') : 0;
+    if (G.hc <= 0 || G.hc > 2) {
+        G.hc = 0;
+        G.hc_why = "POMPPC_GL_HOSTCALL éteint";
+        return;
+    }
+    if (!(G.q.caps & QGPU_CAP_HOSTCALL)) {
+        G.hc = 0;
+        G.hc_why = "device sans QGPU_CAP_HOSTCALL (x-hostcall=off)";
+        return;
+    }
+    if (G.q.size < 4 * HC_RESERVE || qgpu_map_call(&G.q) != 0) {
+        G.hc = 0;
+        G.hc_why = "page d'appel non projetée (kext ?)";
+        return;
+    }
+    G.q.size -= HC_RESERVE;             /* le haut de la tranche nous revient */
+    G.hc_blk = G.q.win + G.q.size;
+    G.hc_abs = G.q.base + G.q.size;
+    G.hc_why = "page d'appel projetée";
+}
+
+typedef struct { const unsigned char *src; const void *cache; unsigned long len; } HcEnt;
+static struct {
+    PCtx           *p;
+    unsigned char  *g;
+    HcEnt           e[HC_N];
+    unsigned long   reps;
+    unsigned long   n, n_mismatch, n_fall, n_bad, n_diff, bytes, pages;
+    unsigned long   n_rd, n_rd_bad, n_rd_fall;
+    unsigned long long t_guest, t_native, t_rd_native, t_rd_guest;
+    unsigned long long ns, rd_ns;       /* durée du gestionnaire (ns de l'hôte) */
+    unsigned char  *rd_copy;
+} HC;
+
+static void hc_ent(int i, const void *src, const void *cache, unsigned long len)
+{
+    unsigned long *l = (unsigned long *)(G.hc_blk + QGPU_HC_OFF_LIST) + 3 * i;
+    HC.e[i].src = (const unsigned char *)src;
+    HC.e[i].cache = cache;
+    HC.e[i].len = len;
+    l[0] = (unsigned long)src;          /* l'invité est big-endian : tel quel */
+    l[1] = (unsigned long)cache;
+    l[2] = len;
+}
+
+/* La liste ne dépend que de (PCtx, état de GLEngine) : refaite seulement
+   quand l'un des deux change. Ordre = celui de geom_send_all. */
+static void hc_build(PCtx *p, unsigned char *g)
+{
+    int i;
+    hc_ent(0, g + GS_VIEWPORT, p->c_vp, 16);
+    hc_ent(1, g + GS_DEPTH_NEAR_F, p->c_dr, 8);
+    hc_ent(2, g + GS_MAT_MODELVIEW, p->c_mtx[QGPU_MTX_MODELVIEW], 64);
+    hc_ent(3, g + GS_MAT_PROJ, p->c_mtx[QGPU_MTX_PROJECTION], 64);
+    for (i = 0; i < QGPU_MAX_UNITS; i++)
+        hc_ent(4 + i, g + GS_MAT_TEXTURE(i), p->c_mtx[QGPU_MTX_TEXTURE0 + i], 64);
+    for (i = 0; i < QGPU_MAX_LIGHTS; i++)
+        hc_ent(12 + i, g + GS_LIGHT(i), p->c_light[i], 0x60);
+    hc_ent(20, g + GS_CLIP_MASK, p->c_clip, 4 + QGPU_MAX_CLIP_PLANES * 16);
+    hc_ent(21, g + GS_CUR_COLOR, p->c_cur[0], 16);
+    hc_ent(22, g + GS_CUR_NORMAL, p->c_cur[1], 12);
+    hc_ent(23, g + GS_CUR_SECCOLOR, p->c_cur[2], 12);
+    hc_ent(24, g + GS_CUR_FOGCOORD, p->c_cur[3], 4);
+    HC.p = p;
+    HC.g = g;
+}
+
+/* Les entrées que geom_send_all comparerait pour ce format. */
+static unsigned long hc_mask(PCtx *p, unsigned char *g, unsigned long fmt)
+{
+    unsigned long m = 0xfUL | (1UL << 20) | (1UL << 23);
+    int u;
+    for (u = 0; u < QGPU_MAX_UNITS; u++)
+        if ((fmt & QGPU_VF_TEX(u)) || (p->glsl_on && p->vp_on))
+            m |= 1UL << (4 + u);
+    if (GLD_U8(g, GS_LIGHTING) || p->glsl_on)
+        m |= 0xffUL << 12;
+    if (!(fmt & QGPU_VF_COLOR))
+        m |= 1UL << 21;
+    if (!(fmt & QGPU_VF_NORMAL))
+        m |= 1UL << 22;
+    if (!(fmt & QGPU_VF_FOG))
+        m |= 1UL << 24;
+    return m;
+}
+
+/* La version invitée : ce que fait changed() (memcmp(cache, source)), sans
+   la recopie. */
+static unsigned long hc_cmp_guest(unsigned long mask)
+{
+    unsigned long d = 0;
+    int i;
+    for (i = 0; i < HC_N; i++)
+        if (((mask >> i) & 1) && memcmp(HC.e[i].cache, HC.e[i].src, HC.e[i].len))
+            d |= 1UL << i;
+    return d;
+}
+
+static void hc_gsa_probe(PCtx *p, unsigned long fmt)
+{
+    volatile unsigned long *b = (volatile unsigned long *)G.hc_blk;
+    unsigned char *g = gls(p);
+    unsigned long mask, dg = 0, dn = 0, st = 0, k, i;
+    uint64_t t0, t1, t2;
+
+    if (!g)
+        return;
+    if (!HC.reps) {
+        const char *e = getenv("POMPPC_GL_HOSTCALL_REPS");
+        HC.reps = e && *e ? strtoul(e, 0, 10) : 1;
+        if (HC.reps < 1 || HC.reps > 1000)
+            HC.reps = 1;
+    }
+    if (HC.p != p || HC.g != g)
+        hc_build(p, g);
+    mask = hc_mask(p, g, fmt);
+    t0 = mach_absolute_time();
+    for (k = 0; k < HC.reps; k++)
+        dg = hc_cmp_guest(mask);
+    t1 = mach_absolute_time();
+    for (k = 0; k < HC.reps; k++) {
+        b[QGPU_HC_OFF_OP / 4] = QGPU_HC_CMP_LIST;
+        b[QGPU_HC_OFF_A0 / 4] = HC_N;
+        b[QGPU_HC_OFF_A1 / 4] = mask;
+        *G.q.call = G.hc_abs;           /* l'appel : rendu quand le stw rend */
+        st = b[QGPU_HC_OFF_ST / 4];
+    }
+    t2 = mach_absolute_time();
+    dn = b[QGPU_HC_OFF_A2 / 4];
+    HC.n++;
+    HC.t_guest += t1 - t0;
+    HC.t_native += t2 - t1;
+    HC.pages += b[QGPU_HC_OFF_PAGES / 4];
+    HC.ns += b[QGPU_HC_OFF_NS / 4];     /* gestionnaire, dernière passe */
+    if (st == QGPU_HC_ST_FALLBACK)
+        HC.n_fall++;
+    else if (st != QGPU_HC_ST_OK)
+        HC.n_bad++;
+    else {
+        HC.bytes += b[QGPU_HC_OFF_A3 / 4];
+        if (dn)
+            HC.n_diff++;
+        if (dn != dg && HC.n_mismatch++ < 5)
+            gl_note("HCALL écart, image %lu : masque %08lx, invité %08lx, natif %08lx\n",
+                    G.n_frames, mask, dg, dn);
+    }
+    if (G.hc < 2)
+        return;
+    /* Contrôle de lecture : l'état de GLEngine (courant + bloc, 5 pages) et le
+       PCtx, lus par l'hôte, égaux à l'octet près à ce que lit l'invité. */
+    if (!HC.rd_copy)
+        HC.rd_copy = malloc(HC_RD_LEN);
+    for (i = 0; i < 2; i++) {
+        const unsigned char *src = i ? (const unsigned char *)p : g - HC_RD_BEFORE;
+        unsigned long len = i ? sizeof(*p) : HC_RD_LEN;
+        unsigned char *dst = G.hc_blk + HC_DATA;
+        if (len > HC_RESERVE - HC_DATA)
+            len = HC_RESERVE - HC_DATA;
+        t0 = mach_absolute_time();
+        b[QGPU_HC_OFF_OP / 4] = QGPU_HC_READ_VA;
+        b[QGPU_HC_OFF_A0 / 4] = (unsigned long)src;
+        b[QGPU_HC_OFF_A1 / 4] = len;
+        b[QGPU_HC_OFF_A2 / 4] = G.hc_abs + HC_DATA;
+        *G.q.call = G.hc_abs;
+        st = b[QGPU_HC_OFF_ST / 4];
+        t1 = mach_absolute_time();
+        if (HC.rd_copy && len <= HC_RD_LEN)
+            memcpy(HC.rd_copy, src, len);
+        t2 = mach_absolute_time();
+        HC.n_rd++;
+        if (!i) {
+            HC.t_rd_native += t1 - t0;
+            HC.t_rd_guest += t2 - t1;
+            HC.rd_ns += b[QGPU_HC_OFF_NS / 4];
+        }
+        if (st == QGPU_HC_ST_FALLBACK)
+            HC.n_rd_fall++;
+        else if (st != QGPU_HC_ST_OK || memcmp(dst, src, len)) {
+            if (HC.n_rd_bad++ < 5)
+                gl_note("HCALL lecture fausse, image %lu : %s %08lx +%lx, statut %lu\n",
+                        G.n_frames, i ? "PCtx" : "GLEngine", (unsigned long)src, len, st);
+        }
+    }
+}
+
+static void hc_note(const char *why)
+{
+    mach_timebase_info_data_t tb;
+    double us;
+    if (!G.hc) {
+        if (getenv("POMPPC_GL_HOSTCALL"))
+            gl_note("HCALL %s : éteint (%s)\n", why, G.hc_why ? G.hc_why : "?");
+        return;
+    }
+    mach_timebase_info(&tb);
+    us = (double)tb.numer / tb.denom / 1000.0;  /* µs par tic */
+    gl_note("HCALL %s (image %lu) : hostcall %d, %lu comparaisons x%lu (%lu avec un écart), "
+            "%lu octets/appel, %.2f pages traduites/appel | invité %.3f µs, natif %.3f µs "
+            "(x%.1f ; gestionnaire %.3f µs) | écarts %lu, replis %lu, refus %lu | lecture : "
+            "%lu (%lu fausses, %lu replis), état de GLEngine %lu o : natif %.3f µs "
+            "(gestionnaire %.3f µs), memcpy invité %.3f µs\n",
+            why, G.n_frames, G.hc, HC.n, HC.reps, HC.n_diff,
+            HC.n ? HC.bytes / HC.n : 0UL, HC.n ? (double)HC.pages / HC.n : 0.0,
+            HC.n ? HC.t_guest * us / HC.n / HC.reps : 0.0,
+            HC.n ? HC.t_native * us / HC.n / HC.reps : 0.0,
+            HC.t_native ? (double)HC.t_guest / HC.t_native : 0.0,
+            HC.n ? HC.ns / 1000.0 / HC.n : 0.0,
+            HC.n_mismatch, HC.n_fall, HC.n_bad, HC.n_rd, HC.n_rd_bad, HC.n_rd_fall,
+            HC_RD_LEN, HC.n_rd ? HC.t_rd_native * us / (HC.n_rd / 2) : 0.0,
+            HC.n_rd ? HC.rd_ns / 1000.0 / (HC.n_rd / 2) : 0.0,
+            HC.n_rd ? HC.t_rd_guest * us / (HC.n_rd / 2) : 0.0);
+}
+
 static void async_switch(void)
 {
     const char *e = getenv("POMPPC_GL_ASYNC");
@@ -2751,6 +2994,7 @@ void pomppc_backend_init(void)
             G.state = 1;
             owner_pid = getpid();       /* reste du 29/09 : fork avant atfork */
             crash_hook_install();       /* 24/09 : journal du plantage avant Quit() */
+            hc_setup();                 /* 23/10 : POMPPC_GL_HOSTCALL (éteint) */
             /* Une seule moitié par défaut : le mode synchrone garde alors
                exactement la disposition et le comportement d'avant la v9. */
             G.nhalf = 1;
@@ -11520,6 +11764,8 @@ static void geom_send_viewport(PCtx *p)
 /* Tout l'état géométrique, en n'envoyant que ce qui a changé. */
 static void geom_send_all(PCtx *p, unsigned long fmt)
 {
+    if (G.hc)                           /* 23/10 : phase 0 du plugin hôte (mesure) */
+        hc_gsa_probe(p, fmt);
     geom_send_viewport(p);
     geom_send_matrices(p, fmt);
     if (GLD_U8(gls(p), GS_LIGHTING) || p->glsl_on)     /* v21 : gl_LightSource */
@@ -14322,6 +14568,7 @@ static void vd_total(const char *why)
                 why, G.n_frames, G.n_rawsane, G.n_natshm_draws, G.n_natshm_bytes >> 10,
                 G.n_natshm_fall);
     d3x_note(why, G.n_frames);          /* 03/10 : bilan cumulé (gltest) */
+    hc_note(why);                       /* 23/10 : phase 0 du plugin hôte */
     if (G.stblk)                        /* A4 : preuve que la voie a servi */
         gl_note("STATEBLK total (%s, image %lu) : %lu blocs (contrôle %d), unités : "
                 "%lu écarts\n", why, G.n_frames, STC.blk_all + STC.blk, G.stblk_check,

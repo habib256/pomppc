@@ -39,6 +39,7 @@ int qgpu_open(QgpuClient *q, const char **why)
     q->conn = 0;
     q->win = 0;
     q->cerr_reg = 0;
+    q->call = 0;
     if (IOMasterPort(MACH_PORT_NULL, &master) != KERN_SUCCESS) {
         *why = "IOMasterPort";
         return -1;
@@ -138,8 +139,29 @@ fail:
     return -1;
 }
 
+int qgpu_map_call(QgpuClient *q)
+{
+    vm_address_t addr = 0;
+    vm_size_t len = 0;
+    kern_return_t kr;
+
+    q->call = 0;
+    if (!q->conn || !(q->caps & QGPU_CAP_HOSTCALL))
+        return -1;
+    kr = IOConnectMapMemory(q->conn, QGPU_UC_MEM_CALL, mach_task_self(),
+                            &addr, &len, kIOMapAnywhere | kIOMapInhibitCache);
+    if (kr != KERN_SUCCESS || !addr || len < QGPU_CALL_BAR_SIZE)
+        return -1;
+    q->call = (volatile unsigned long *)addr;
+    return 0;
+}
+
 void qgpu_close(QgpuClient *q)
 {
+    if (q->call)
+        IOConnectUnmapMemory(q->conn, QGPU_UC_MEM_CALL, mach_task_self(),
+                             (vm_address_t)q->call);
+    q->call = 0;
     if (q->win)
         IOConnectUnmapMemory(q->conn, QGPU_UC_MEM_SHMEM, mach_task_self(),
                              (vm_address_t)q->win);
@@ -170,6 +192,7 @@ void qgpu_forget(QgpuClient *q)
     q->version = 0;
     q->caps = 0;
     q->cerr_reg = 0;
+    q->call = 0;
 }
 
 long qgpu_submit(QgpuClient *q, unsigned long off, unsigned long len, unsigned long *pc)

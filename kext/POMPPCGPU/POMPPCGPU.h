@@ -123,6 +123,7 @@ public:
        être retirée du work loop) ni de parler à un device peut-être disparu. */
     void     forgetSlot(int slot, POMPPCGPUUserClient * client);
     IODeviceMemory * slotRange(int slot);                    /* retenu par l'appelant */
+    IODeviceMemory * callRange(void);                        /* 23/10 : BAR2, retenu ; 0 si absente */
     /* `len` porte les drapeaux POMPPC_SUB_* dans ses bits hauts (voir plus haut). */
     IOReturn submit(int slot, POMPPCGPUUserClient * client, UInt32 off, UInt32 len,
                     UInt32 * fence, UInt32 * status, UInt32 * statusPC);
@@ -170,6 +171,7 @@ private:
     IOPCIDevice *     fPCI;
     IODeviceMemory *  fShmemRange;
     IODeviceMemory *  fRegsRange;
+    IODeviceMemory *  fCallRange;   /* 23/10/2026 : page d'appel (BAR2), 0 sans x-hostcall */
     IOMemoryMap *     fRegsMap;
     volatile UInt32 * fRegs;
 

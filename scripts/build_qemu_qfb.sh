@@ -33,6 +33,7 @@
 #   • tlb_reset_dirty sans parcours inutile, PTEG par pointeur, compteurs de ratés, cache de sauts à 2 voies — patches/tcg/0040-0043
 #   • flottant simple : opérandes connus, FPRF paresseux, stfs court — patches/tcg/0045-0047
 #   • second niveau sans compilateur : traces d'une page (x-tier2) — patches/tcg/0048
+#   • MMIO sans BQL sous TCG pour les régions lockless (page d'appel qgpu) — patches/tcg/0050
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -1047,6 +1048,16 @@ accel/tcg/cputlb.c t2_check_foreign
 target/ppc/translate.c t2_gen_bc
 target/ppc/cpu_init.c ppc_t2_regs
 TCG48_MARKERS
+  # --- tcg/0050 : MMIO sans BQL sous TCG (page d'appel de qgpu, x-hostcall) ---
+  # cputlb.c prenait le BQL pour TOUT accès MMIO d'un bloc traduit, même sur une
+  # région déclarée memory_region_enable_lockless_io (seul address_space_rw
+  # l'honorait). Une région de device ainsi déclarée est maintenant servie sans
+  # lui. Sur mac99, la seule est qgpu.call (qgpu-pci,x-hostcall=on, éteint par
+  # défaut) : rien d'autre ne change. docs/plan-plugin-hote.md §5.
+  if ! grep -q "POMPPC tcg/0050" accel/tcg/cputlb.c; then
+    echo "▶ patch TCG : MMIO sans BQL pour les régions lockless (tcg/0050)"
+    patch_strict "$ROOT/patches/tcg/0050-tcg-mmio-lockless.patch"
+  fi
 fi
 
 # --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---

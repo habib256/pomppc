@@ -2093,4 +2093,50 @@
 #define QGPU_SB_F_GLSL          0x2000  /* unités d'image 8..15 (v21) */
 #define QGPU_SB_F_ALL           0x3F0F
 
+/* ── Appel synchrone par la page d'appel (QGPU_CAP_HOSTCALL, 23/10/2026) ─────
+ *
+ *   Phase 0 du plugin hôte (docs/plan-plugin-hote.md §3) : des MESURES, pas
+ *   encore un levier. Le transport (BAR2, QGPU_HC_REG_CALL, propriété
+ *   x-hostcall) est dans qgpu_abi.h. Bloc d'appel, mots de 32 bits
+ *   big-endian, à un offset absolu de BAR0 :
+ *
+ *     +0x00 op       QGPU_HC_*
+ *     +0x04 statut   QGPU_HC_ST_* (écrit par le device, en dernier)
+ *     +0x08 a0  +0x0c a1  +0x10 a2  +0x14 a3   arguments / résultats
+ *     +0x18 pages    traductions VA → hôte faites pendant l'appel (hors cache)
+ *     +0x1c ns       durée du gestionnaire, en ns de l'hôte (mesure)
+ *     +0x20 …        liste (QGPU_HC_CMP_LIST)
+ *
+ *   Toute adresse VIRTUELLE est celle du processus invité COURANT, traduite
+ *   par la MMU du vCPU qui écrit la page (TLB de TCG, rempli au besoin par la
+ *   table de hachage, sans faute) : l'état lu est exactement celui que
+ *   l'invité aurait lu à cet instant. Une page absente ou non RAM rend
+ *   QGPU_HC_ST_FALLBACK : l'invité fait alors le travail lui-même. */
+#define QGPU_HC_NOP             0   /* rien : coût d'un appel vide */
+#define QGPU_HC_READ_VA         1   /* a0 = va, a1 = longueur, a2 = offset absolu
+                                       de destination dans BAR0 ;
+                                       sortie a3 = octets copiés */
+#define QGPU_HC_CMP_LIST        2   /* a0 = n (≤ QGPU_HC_LIST_MAX), a1 = masque des
+                                       entrées à comparer ; liste à +0x20 de n
+                                       triplets (va source, va du cache, longueur) ;
+                                       sortie a2 = masque des entrées DIFFÉRENTES
+                                       (memcmp ≠ 0), a3 = octets comparés.
+                                       Comparaison seule : rien n'est écrit chez
+                                       l'invité (le cache n'est pas mis à jour) */
+#define QGPU_HC_ST_OK           0
+#define QGPU_HC_ST_FALLBACK     1   /* page absente : repli, faire dans l'invité */
+#define QGPU_HC_ST_BAD          2   /* opération ou argument invalide */
+#define QGPU_HC_ST_NOCPU        3   /* pas de vCPU TCG courant (ne doit pas arriver) */
+#define QGPU_HC_OFF_OP          0x00
+#define QGPU_HC_OFF_ST          0x04
+#define QGPU_HC_OFF_A0          0x08
+#define QGPU_HC_OFF_A1          0x0c
+#define QGPU_HC_OFF_A2          0x10
+#define QGPU_HC_OFF_A3          0x14
+#define QGPU_HC_OFF_PAGES       0x18
+#define QGPU_HC_OFF_NS          0x1c
+#define QGPU_HC_OFF_LIST        0x20
+#define QGPU_HC_LIST_MAX        32
+#define QGPU_HC_BLOCK_BYTES     (QGPU_HC_OFF_LIST + 12 * QGPU_HC_LIST_MAX)
+
 #endif /* QGPU_PROTO_H */

@@ -240,6 +240,26 @@
 #define QGPU_UC_METHOD_COUNT    6
 
 #define QGPU_UC_MEM_SHMEM       0   /* IOConnectMapMemory : la tranche du client */
+/* 23/10/2026 — page d'appel (phase 0 du plugin hôte, docs/plan-plugin-hote.md).
+ * IOConnectMapMemory de ce type projette BAR2 (QGPU_CALL_BAR_SIZE octets de
+ * MMIO, la même page pour tous les clients) dans le processus. Un device sans
+ * BAR2 (propriété x-hostcall éteinte, le défaut) ou un kext plus ancien
+ * refusent : c'est la sonde, et le plugin reste alors exactement ce qu'il est. */
+#define QGPU_UC_MEM_CALL        1
+
+/* ── Page d'appel synchrone (BAR2, 23/10/2026) ───────────────────────────────
+ *
+ *   Le device ne la publie que sous la propriété x-hostcall=on (éteinte par
+ *   défaut), et pose alors QGPU_CAP_HOSTCALL. Une écriture 32 bits, à
+ *   QGPU_HC_REG_CALL, de l'offset ABSOLU dans BAR0 d'un bloc d'appel (multiple
+ *   de 4) exécute l'appel DANS LE FIL DU vCPU, avant que l'écriture ne rende
+ *   la main, et sans le BQL quand QEMU le permet (patches/tcg/0050) : au
+ *   retour du `stw`, le statut et les résultats sont dans le bloc. Le bloc lui
+ *   même (opération, statut, arguments) est défini dans qgpu_proto.h : le
+ *   kext ne fait que projeter la page. La lecture de la page rend 0. */
+#define QGPU_CAP_HOSTCALL       0x00100000
+#define QGPU_CALL_BAR_SIZE      4096
+#define QGPU_HC_REG_CALL        0x00
 
 /* ── v9 : drapeaux passés DANS `len` à QGPU_UC_SUBMIT ────────────────────────
  *

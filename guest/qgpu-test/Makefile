@@ -5,7 +5,7 @@ CFLAGS  = -arch ppc -O1 -Wall
 LDLIBS  = -framework IOKit -framework CoreFoundation
 
 # Le contrat (qgpu_proto.h, qui inclut l'ABI qgpu_abi.h) vient de patches/qgpu/.
-all: qgpu_test errpeer unloadpeer slotpeer qfbmode
+all: qgpu_test errpeer unloadpeer slotpeer qfbmode hcbench
 
 qgpu_test: qgpu_test.c ../../patches/qgpu/qgpu_proto.h ../../patches/qgpu/qgpu_abi.h
 	$(CC) $(CFLAGS) -I../../patches/qgpu -o $@ qgpu_test.c $(LDLIBS)
@@ -26,7 +26,11 @@ slotpeer: slotpeer.c ../../patches/qgpu/qgpu_proto.h ../../patches/qgpu/qgpu_abi
 qfbmode: qfbmode.c
 	$(CC) $(CFLAGS) -o $@ qfbmode.c $(LDLIBS)
 
+# 23/10/2026 : micro-banc de la page d'appel (phase 0 du plugin hôte, jobs/hostcall)
+hcbench: hcbench.c ../../patches/qgpu/qgpu_proto.h ../../patches/qgpu/qgpu_abi.h
+	$(CC) $(CFLAGS) -O2 -I../../patches/qgpu -o $@ hcbench.c $(LDLIBS)
+
 clean:
-	rm -f qgpu_test errpeer unloadpeer slotpeer qfbmode out.ppm
+	rm -f qgpu_test errpeer unloadpeer slotpeer qfbmode hcbench out.ppm
 
 .PHONY: all clean

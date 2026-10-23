@@ -102,6 +102,15 @@ bool POMPPCGPU::start(IOService * provider)
     }
     fShmemRange->retain();
     fRegsRange->retain();
+    /* 23/10/2026 : page d'appel synchrone, FACULTATIVE (device lancé avec
+       x-hostcall=on). Sans elle, QGPU_UC_MEM_CALL est refusé et rien d'autre
+       ne change. */
+    fCallRange = fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress2);
+    if (fCallRange && fCallRange->getLength() >= QGPU_CALL_BAR_SIZE) {
+        fCallRange->retain();
+    } else {
+        fCallRange = 0;
+    }
 
     fRegsMap = fRegsRange->map();
     if (!fRegsMap) {
@@ -230,6 +239,7 @@ bool POMPPCGPU::start(IOService * provider)
     setProperty("QGPUSlotSize",  (unsigned long long) fSlotSize, 32);
     setProperty("QGPUClients",   (unsigned long long) fClientCount, 32);   /* v19 */
     setProperty("QGPUAsync",     (unsigned long long) fAsync, 32);
+    setProperty("QGPUCallPage",  (unsigned long long) (fCallRange ? 1 : 0), 32);   /* 23/10 */
     {
         UInt32 tag = regRead(QGPU_REG_BACKEND_NAME);
         char   name[5];
@@ -330,6 +340,7 @@ void POMPPCGPU::free(void)
     if (fRegsMap)    { fRegsMap->release();    fRegsMap = 0; }
     if (fRegsRange)  { fRegsRange->release();  fRegsRange = 0; }
     if (fShmemRange) { fShmemRange->release(); fShmemRange = 0; }
+    if (fCallRange)  { fCallRange->release();  fCallRange = 0; }
     super::free();
 }
 
@@ -1086,6 +1097,17 @@ void POMPPCGPU::forgetSlot(int slot, POMPPCGPUUserClient * client)
     OSCompareAndSwap((UInt32) client, 0, (UInt32 *) &fFreePending[slot]);
 }
 
+/* 23/10/2026 : page d'appel. Rendue RETENUE, comme slotRange :
+   IOUserClient::mapClientMemory relâche le descripteur après le mapping. */
+IODeviceMemory * POMPPCGPU::callRange(void)
+{
+    if (!fCallRange) {
+        return 0;
+    }
+    fCallRange->retain();
+    return fCallRange;
+}
+
 IODeviceMemory * POMPPCGPU::slotRange(int slot)
 {
     if (slot < 0 || (UInt32) slot >= fClientCount) {
@@ -1403,6 +1425,18 @@ IOReturn POMPPCGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits * op
     POMPPCGPU *      owner = fOwner;
     int              slot  = fSlot;
 
+    if (type == QGPU_UC_MEM_CALL && owner && slot >= 0) {
+        /* 23/10/2026 : la page d'appel, la même pour tous les clients (elle
+           ne garde aucun état : l'appelant y écrit l'offset d'un bloc de SA
+           tranche). Sans BAR2 : refus, c'est la sonde du plugin. */
+        range = owner->callRange();
+        if (!range) {
+            return kIOReturnUnsupported;
+        }
+        *memory  = range;
+        *options = kIOMapInhibitCache;
+        return kIOReturnSuccess;
+    }
     if (type != QGPU_UC_MEM_SHMEM || !owner || slot < 0) {
         return kIOReturnBadArgument;
     }

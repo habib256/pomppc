@@ -68,7 +68,11 @@
  * figée, statut OK, aucun message (rapport du 22/09/2026, §8.3, Q1).
  *
  *   -device qgpu-pci[,shmem_mb=64][,backend=auto|soft|gl][,trace=on]
- *                   [,scanout=auto|qfb|vga|none]
+ *                   [,scanout=auto|qfb|vga|none][,x-hostcall=on]
+ *
+ * x-hostcall (23/10/2026, éteint par défaut) : BAR2, page d'appel synchrone
+ * servie dans le fil du vCPU sans BQL — phase 0 du plugin hôte, voir
+ * qgpu_hc_write et docs/plan-plugin-hote.md.
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  */
@@ -93,6 +97,12 @@
 #include "ui/surface.h"
 #include "qom/object.h"
 #include "system/system.h"
+#include "system/tcg.h"
+#include "hw/core/cpu.h"
+#ifdef CONFIG_TCG
+#include "accel/tcg/probe.h"
+#include "accel/tcg/cpu-mmu-index.h"
+#endif
 
 #include "qgpu-core.h"
 
@@ -294,6 +304,14 @@ struct QgpuPCIState {
     Notifier   machine_done;       /* v13 : lier l'écran une fois tous les devices nés */
     QgpuScanout scanout;           /* cible de SURF_PRESENT (v16) */
     Error     *mig_blocker;        /* D3 : la 3D ne survit pas à loadvm */
+    /* 23/10/2026 : page d'appel (x-hostcall). Compteurs en qatomic : la page
+       est servie sans BQL, par n'importe quel vCPU. */
+    bool         hostcall;
+    bool         hostcall_bql;     /* x-hostcall-bql : mesure AVEC le BQL */
+    MemoryRegion mem_call;
+    uint64_t     hc_calls;
+    uint64_t     hc_fallbacks;
+    uint64_t     hc_bad;
 };
 
 /*
@@ -322,7 +340,8 @@ struct QgpuPCIState {
 static uint32_t qgpu_pub_caps(QgpuPCIState *s)
 {
     return s->core.caps | QGPU_CAP_CLIENT_ERRORS |
-           (s->thread_ok ? QGPU_CAP_ASYNC : 0);
+           (s->thread_ok ? QGPU_CAP_ASYNC : 0) |
+           (s->hostcall ? QGPU_CAP_HOSTCALL : 0);
 }
 
 /* 07/10/2026 : index de la tranche de BAR0 qui contient l'offset ABSOLU
@@ -989,6 +1008,219 @@ static const MemoryRegionOps qgpu_ctrl_ops = {
     .impl.max_access_size = 4,
 };
 
+/* ═══════════════ Page d'appel synchrone (x-hostcall, 23/10/2026) ═══════════════
+ *
+ * Phase 0 du plugin hôte (docs/plan-plugin-hote.md §3) : mesurer ce que coûte
+ * un appel du plugin invité vers du C natif, et ce que coûte, depuis ce C, la
+ * lecture de la mémoire VIRTUELLE du processus invité courant.
+ *
+ * L'écriture de QGPU_HC_REG_CALL arrive ici dans le fil du vCPU qui a exécuté
+ * le `stw`, au milieu de son bloc traduit : current_cpu est ce vCPU, son
+ * état (MSR, segments, SDR1) est celui de l'instruction, et son TLB de TCG est
+ * exactement ce que le processus invité voit. La région est déclarée sans BQL
+ * (memory_region_enable_lockless_io) ; sous TCG, c'est patches/tcg/0050 qui
+ * fait que cputlb.c ne le prend pas quand même. Tout ce que touche l'appel :
+ * BAR0 (de la RAM, le bloc appartient à l'appelant), la RAM invitée par les
+ * pointeurs du TLB, et trois compteurs atomiques. Aucun état partagé du
+ * device, ni la file, ni le cœur : deux vCPU peuvent appeler en même temps.
+ *
+ * Traduction : tlb_vaddr_to_host, la voie de probe_access sans faute — entrée
+ * du TLB si elle y est, sinon parcours de la table de hachage par le
+ * tlb_fill de la cible (en mode sonde : jamais d'exception), et NULL si la
+ * page est absente, protégée ou n'est pas de la RAM. Un petit cache de pages
+ * (8 entrées) vit le temps d'UN appel : rien ne peut changer la traduction
+ * pendant l'appel (le vCPU est ici), et rien n'est gardé d'un appel à l'autre,
+ * donc aucune invalidation à suivre (changement de processus, de segment,
+ * tlbie) : c'est le TLB de TCG, qui les suit déjà, qui est consulté. */
+#define QGPU_HC_PAGE    4096u
+#define QGPU_HC_CACHE   8
+
+typedef struct QgpuHcXlate {
+    CPUState *cs;
+    int       mmu_idx;
+    unsigned  n, next;
+    uint32_t  walks;
+    struct { uint32_t pg; uint8_t *host; } c[QGPU_HC_CACHE];
+} QgpuHcXlate;
+
+#ifdef CONFIG_TCG
+static uint8_t *qgpu_hc_host(QgpuHcXlate *x, uint32_t va)
+{
+    uint32_t pg = va & ~(QGPU_HC_PAGE - 1);
+    uint8_t *h;
+    unsigned i;
+
+    for (i = 0; i < x->n; i++) {
+        if (x->c[i].pg == pg) {
+            return x->c[i].host + (va - pg);
+        }
+    }
+    x->walks++;
+    h = tlb_vaddr_to_host(cpu_env(x->cs), pg, MMU_DATA_LOAD, x->mmu_idx);
+    if (!h) {
+        return NULL;
+    }
+    i = x->n < QGPU_HC_CACHE ? x->n++ : (x->next++ % QGPU_HC_CACHE);
+    x->c[i].pg = pg;
+    x->c[i].host = h;
+    return h + (va - pg);
+}
+
+/* Copie [va, va+len) vers dst ; rend le nombre d'octets copiés (< len : page
+   absente à va + rendu). */
+static uint32_t qgpu_hc_read(QgpuHcXlate *x, uint32_t va, uint8_t *dst,
+                             uint32_t len)
+{
+    uint32_t done = 0;
+
+    while (done < len) {
+        uint32_t a = va + done;
+        uint32_t n = MIN(len - done, QGPU_HC_PAGE - (a & (QGPU_HC_PAGE - 1)));
+        uint8_t *h = qgpu_hc_host(x, a);
+
+        if (!h) {
+            break;
+        }
+        memcpy(dst + done, h, n);
+        done += n;
+    }
+    return done;
+}
+
+/* memcmp de deux zones virtuelles : 0 égales, 1 différentes, -1 repli. */
+static int qgpu_hc_cmp(QgpuHcXlate *x, uint32_t a, uint32_t b, uint32_t len)
+{
+    uint32_t done = 0;
+
+    while (done < len) {
+        uint32_t pa = a + done, pb = b + done;
+        uint32_t n = MIN(len - done,
+                         MIN(QGPU_HC_PAGE - (pa & (QGPU_HC_PAGE - 1)),
+                             QGPU_HC_PAGE - (pb & (QGPU_HC_PAGE - 1))));
+        uint8_t *ha = qgpu_hc_host(x, pa), *hb = qgpu_hc_host(x, pb);
+
+        if (!ha || !hb) {
+            return -1;
+        }
+        if (memcmp(ha, hb, n)) {
+            return 1;
+        }
+        done += n;
+    }
+    return 0;
+}
+#endif
+
+static void qgpu_hc_call(QgpuPCIState *s, uint32_t off)
+{
+    uint64_t size = (uint64_t)s->shmem_mb * MiB;
+    uint32_t st = QGPU_HC_ST_OK;
+    int64_t t0 = get_clock();           /* mesure : durée du gestionnaire */
+    uint8_t *blk;
+    QgpuHcXlate x;
+
+    if ((off & 3) || off > size - QGPU_HC_BLOCK_BYTES) {
+        qatomic_inc(&s->hc_bad);
+        return;                         /* pas de bloc où répondre */
+    }
+    blk = s->shmem + off;
+    qatomic_inc(&s->hc_calls);
+#ifdef CONFIG_TCG
+    if (!current_cpu || !tcg_enabled()) {
+        stl_be_p(blk + QGPU_HC_OFF_ST, QGPU_HC_ST_NOCPU);
+        return;
+    }
+    x.cs = current_cpu;
+    x.mmu_idx = cpu_mmu_index(current_cpu, false);
+    x.n = x.next = x.walks = 0;
+    switch (ldl_be_p(blk + QGPU_HC_OFF_OP)) {
+    case QGPU_HC_NOP:
+        break;
+    case QGPU_HC_READ_VA: {
+        uint32_t va = ldl_be_p(blk + QGPU_HC_OFF_A0);
+        uint32_t len = ldl_be_p(blk + QGPU_HC_OFF_A1);
+        uint32_t dst = ldl_be_p(blk + QGPU_HC_OFF_A2);
+        uint32_t done;
+
+        if (len > size || dst > size - len) {
+            st = QGPU_HC_ST_BAD;
+            break;
+        }
+        done = qgpu_hc_read(&x, va, s->shmem + dst, len);
+        stl_be_p(blk + QGPU_HC_OFF_A3, done);
+        if (done < len) {
+            st = QGPU_HC_ST_FALLBACK;
+        }
+        break;
+    }
+    case QGPU_HC_CMP_LIST: {
+        uint32_t n = ldl_be_p(blk + QGPU_HC_OFF_A0);
+        uint32_t mask = ldl_be_p(blk + QGPU_HC_OFF_A1);
+        uint32_t diff = 0, bytes = 0, i;
+
+        if (n > QGPU_HC_LIST_MAX) {
+            st = QGPU_HC_ST_BAD;
+            break;
+        }
+        for (i = 0; i < n; i++) {
+            const uint8_t *e = blk + QGPU_HC_OFF_LIST + 12 * i;
+            uint32_t len;
+            int r;
+
+            if (!(mask & (1u << i))) {
+                continue;
+            }
+            len = ldl_be_p(e + 8);
+            r = qgpu_hc_cmp(&x, ldl_be_p(e), ldl_be_p(e + 4), len);
+            if (r < 0) {
+                st = QGPU_HC_ST_FALLBACK;
+                break;
+            }
+            diff |= (uint32_t)r << i;
+            bytes += len;
+        }
+        stl_be_p(blk + QGPU_HC_OFF_A2, diff);
+        stl_be_p(blk + QGPU_HC_OFF_A3, bytes);
+        break;
+    }
+    default:
+        st = QGPU_HC_ST_BAD;
+        break;
+    }
+    stl_be_p(blk + QGPU_HC_OFF_PAGES, x.walks);
+    stl_be_p(blk + QGPU_HC_OFF_NS, (uint32_t)(get_clock() - t0));
+    if (st == QGPU_HC_ST_FALLBACK) {
+        qatomic_inc(&s->hc_fallbacks);
+    }
+    stl_be_p(blk + QGPU_HC_OFF_ST, st);
+#else
+    (void)x;
+    (void)st;
+    stl_be_p(blk + QGPU_HC_OFF_ST, QGPU_HC_ST_NOCPU);
+#endif
+}
+
+static uint64_t qgpu_hc_read_reg(void *opaque, hwaddr addr, unsigned size)
+{
+    return 0;
+}
+
+static void qgpu_hc_write(void *opaque, hwaddr addr, uint64_t val,
+                          unsigned size)
+{
+    if (addr == QGPU_HC_REG_CALL) {
+        qgpu_hc_call(opaque, (uint32_t)val);
+    }
+}
+
+static const MemoryRegionOps qgpu_call_ops = {
+    .read = qgpu_hc_read_reg,
+    .write = qgpu_hc_write,
+    .endianness = DEVICE_BIG_ENDIAN,
+    .impl.min_access_size = 4,
+    .impl.max_access_size = 4,
+};
+
 static void qgpu_pci_set_irq(void *opaque, int n, int level)
 {
     pci_set_irq(PCI_DEVICE(opaque), level);
@@ -1411,6 +1643,16 @@ static void qgpu_pci_realize(PCIDevice *dev, Error **errp)
 
     pci_register_bar(dev, 0, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->mem_shmem);
     pci_register_bar(dev, 1, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->mem_ctrl);
+    if (s->hostcall) {
+        /* 23/10/2026 : page d'appel, BAR2. Absente par défaut : le PCI vu par
+           l'invité est alors exactement celui d'avant. */
+        memory_region_init_io(&s->mem_call, OBJECT(dev), &qgpu_call_ops, s,
+                              "qgpu.call", QGPU_CALL_BAR_SIZE);
+        if (!s->hostcall_bql) {
+            memory_region_enable_lockless_io(&s->mem_call);
+        }
+        pci_register_bar(dev, 2, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->mem_call);
+    }
 
     pci_conf[PCI_INTERRUPT_PIN] = 1; /* INTA */
     s->irq = qemu_allocate_irq(qgpu_pci_set_irq, s, 0);
@@ -1575,6 +1817,10 @@ static const Property qgpu_pci_properties[] = {
        fichier que build_qemu_qfb.sh recopie tel quel. */
     DEFINE_PROP_STRING("scanout", QgpuPCIState, scanout_pref),
     DEFINE_PROP_BOOL("trace", QgpuPCIState, trace, false),
+    /* 23/10/2026 : page d'appel synchrone (BAR2), phase 0 du plugin hôte */
+    DEFINE_PROP_BOOL("x-hostcall", QgpuPCIState, hostcall, false),
+    /* … et, pour la mesure seulement, la même page servie SOUS le BQL */
+    DEFINE_PROP_BOOL("x-hostcall-bql", QgpuPCIState, hostcall_bql, false),
 };
 
 /* Accesseurs des propriétés de test : qatomic, le thread de rendu les lit
