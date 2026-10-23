@@ -1,0 +1,58 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index 161ad80..b33f1a4 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1683,6 +1683,15 @@ struct CPUArchState {
+     bool tb_fast;
+     bool tb_verify;
+     uint32_t irq_seq;
++    /*
++     * x-pmu-real (POMPPC tcg/0049): the POWER8 PMU model (power8-pmu.c)
++     * counts only on a CPU that has its registers (SPR_POWER_MMCR0
++     * registered).  Without them (G4, 74xx: MMCR0/PMC1-6 are other SPRs),
++     * MMCR0 reads 0 instead of its reset value MMCR0[FC], PMC5 "counts" and
++     * every TB end of a qemu-system-ppc64 adds num_insns to a slot the
++     * guest cannot read.  No effect on qemu-system-ppc (no PMU code).
++     */
++    bool pmu_real;
+ 
+     /* Internal devices resources */
+     ppc_tb_t *tb_env;      /* Time base and decrementer */
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index 6f10743..ec02fef 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -268,6 +268,13 @@ static const Property powerpc_cpu_properties[] = {
+     DEFINE_PROP_BOOL("x-pteg-map", PowerPCCPU, env.pteg_map, false),
+     DEFINE_PROP_BOOL("x-pteg-map-verify", PowerPCCPU, env.pteg_map_verify,
+                      false),
++    /*
++     * POMPPC tcg/0049.  x-pmu-real: the POWER8 PMU counts instructions and
++     * cycles only on a CPU that has the Book3S PMU registers; a G4 no
++     * longer adds num_insns to a phantom PMC5 at every TB end
++     * (qemu-system-ppc64 only).  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-pmu-real", PowerPCCPU, env.pmu_real, false),
+     /* POMPPC tcg/0031: memory-side counters on stderr every 10 s */
+     DEFINE_PROP_BOOL("x-mem-stats", PowerPCCPU, env.mem_stats, false),
+     /* proof mode for x-sr-tlb: see ppc_sr_tlb_verify() */
+diff --git a/target/ppc/power8-pmu.c b/target/ppc/power8-pmu.c
+index 2a7a5b4..8d1539b 100644
+--- a/target/ppc/power8-pmu.c
++++ b/target/ppc/power8-pmu.c
+@@ -44,6 +44,15 @@ static void pmu_update_summaries(CPUPPCState *env)
+     if (mmcr0 & MMCR0_FC) {
+         goto out;
+     }
++    /*
++     * POMPPC tcg/0049 (x-pmu-real): no Book3S PMU registers, no counting.
++     * A CPU that has them resets MMCR0 to MMCR0[FC]; one that has not
++     * (G4) reads 0 here, which said "PMC5-6 count": HFLAGS_INSN_CNT set,
++     * and a PMC5 += num_insns in memory at every TB end.
++     */
++    if (env->pmu_real && !env->spr_cb[SPR_POWER_MMCR0].name) {
++        goto out;
++    }
+ 
+     if (!(mmcr0 & MMCR0_FC14) && mmcr1 != 0) {
+         target_ulong sel;

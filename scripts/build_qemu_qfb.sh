@@ -33,6 +33,7 @@
 #   • tlb_reset_dirty sans parcours inutile, PTEG par pointeur, compteurs de ratés, cache de sauts à 2 voies — patches/tcg/0040-0043
 #   • flottant simple : opérandes connus, FPRF paresseux, stfs court — patches/tcg/0045-0047
 #   • second niveau sans compilateur : traces d'une page (x-tier2) — patches/tcg/0048
+#   • PMU POWER8 seulement sur les CPU qui l'ont (x-pmu-real), MTTCG sur la cible 32 bits — patches/tcg/0049, 0050
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -1047,6 +1048,28 @@ accel/tcg/cputlb.c t2_check_foreign
 target/ppc/translate.c t2_gen_bc
 target/ppc/cpu_init.c ppc_t2_regs
 TCG48_MARKERS
+  # --- tcg/0049-0050 : le G4 sur la cible 32 bits en MTTCG, docs/ppc32-mttcg.md ---
+  # 0049 : x-pmu-real, le modèle de PMU POWER8 ne compte que sur un CPU qui en a les
+  # registres (un G4 sur qemu-system-ppc64 n'ajoute plus num_insns à un PMC5 fantôme à
+  # chaque sortie de bloc) ; propriété éteinte par défaut, sans effet sur qemu-system-ppc.
+  # 0050 : mttcg_supported pour la cible 32 bits aussi (le lanceur ne s'en sert que
+  # derrière PPC32MT=1, et force thread=single en SMP=1).
+  if ! grep -q "x-pmu-real" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : PMU POWER8 seulement sur les CPU qui l'ont (x-pmu-real)"
+    patch_strict "$ROOT/patches/tcg/0049-ppc-pmu-real.patch"
+  fi
+  if ! grep -q "POMPPC tcg/0050" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : MTTCG sur la cible ppc 32 bits"
+    patch_strict "$ROOT/patches/tcg/0050-ppc-mttcg-32.patch"
+  fi
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0049-0050 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG49_MARKERS'
+target/ppc/power8-pmu.c env->pmu_real
+target/ppc/cpu.h bool pmu_real
+target/ppc/cpu_init.c .mttcg_supported = true
+TCG49_MARKERS
 fi
 
 # --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---
@@ -1091,6 +1114,10 @@ grep -q "x-abs-margin" hw/usb/dev-hid.c || {
 #   PGO_DIR         profil de build-fast, défaut <arbre>/pgo-fast (stable :
 #                   tools/tcg/pgo-train.sh l'écrit, l'archive et sait importer
 #                   celui d'un arbre voisin en renommant les .gcda)
+#   QEMU_FAST_BUILD dossier de build du binaire rapide, défaut build-fast ; un
+#                   autre nom (build-fast-mt, docs/ppc32-mttcg.md §11) construit un
+#                   second binaire rapide dans le même arbre, profil par défaut
+#                   <arbre>/pgo-<nom sans « build- »> (pgo-fast-mt)
 # Une seule édition de liens LTO à la fois sur la machine : refus si un lto1
 # tourne déjà (QEMU_FAST_FORCE=1 pour passer outre). Construire sous plafond
 # mémoire (systemd-run --user --scope -p MemoryMax=20G -p MemorySwapMax=1G
@@ -1108,11 +1135,13 @@ case "${QEMU_FAST:-0}" in
     if [ "$QEMU_FAST" = 1 ]; then
       FAST_AFTER=1                  # build/ d'abord, build-fast/ en fin de script
     else
-      PGO_DIR="${PGO_DIR:-$SRC/pgo-fast}"
+      _fastb="${QEMU_FAST_BUILD:-build-fast}"
+      case "$_fastb" in build|*/*|'') echo "⚠ QEMU_FAST_BUILD=$_fastb : un nom de dossier, jamais build" >&2; exit 1 ;; esac
+      PGO_DIR="${PGO_DIR:-$SRC/pgo-${_fastb#build-}}"
       # Les .gcda portent le chemin de l'objet, '/' → '#' : seuls ceux de
       # <arbre>/build-fast servent. Un profil d'un autre arbre, non renommé,
       # serait ignoré EN SILENCE (-Wno-missing-profile) : refus.
-      _mangled="$(printf '%s' "$SRC/build-fast" | tr / '#')#"
+      _mangled="$(printf '%s' "$SRC/$_fastb" | tr / '#')#"
       _ngcda="$(find "$PGO_DIR" -maxdepth 1 -name "${_mangled}*.gcda" 2>/dev/null | wc -l)"
       _nall="$(find "$PGO_DIR" -maxdepth 1 -name '*.gcda' 2>/dev/null | wc -l)"
       case "${QEMU_FAST_PGO:-auto}" in
@@ -1120,7 +1149,7 @@ case "${QEMU_FAST:-0}" in
         non) _pgo="" ;;
         auto|use)
           if [ "$_nall" -gt 0 ] && [ "$_ngcda" -eq 0 ]; then
-            echo "⚠ $PGO_DIR a $_nall .gcda, aucun pour $SRC/build-fast : profil d'un autre" >&2
+            echo "⚠ $PGO_DIR a $_nall .gcda, aucun pour $SRC/$_fastb : profil d'un autre" >&2
             echo "  arbre ou d'un autre dossier de build. tools/tcg/pgo-train.sh --importer" >&2
             echo "  les renomme ; QEMU_FAST_PGO=non construit sans profil." >&2
             exit 1
@@ -1143,7 +1172,7 @@ case "${QEMU_FAST:-0}" in
         *) echo "⚠ QEMU_FAST_PGO attendu : auto, use, gen ou non" >&2; exit 1 ;;
       esac
       QEMU_OPT="native,nohard,lto${_pgo:+,$_pgo}"
-      QEMU_BUILD=build-fast
+      QEMU_BUILD="$_fastb"
     fi ;;
   *) echo "⚠ QEMU_FAST attendu : 1 ou only" >&2; exit 1 ;;
 esac
@@ -1307,6 +1336,9 @@ check_opt x-jc-2way      qemu_tcg_has_prop  "${BIN}64"    "mac99,via=pmu" x-jc-2
 check_opt x-fp-known    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fp-known=on
 check_opt x-fprf-lazy   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fprf-lazy=on
 check_opt x-stfs-known  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-stfs-known=on
+check_opt x-pmu-real    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-pmu-real=on
+# MTTCG sur la cible 32 bits (tcg/0050) : sondé sur qemu-system-ppc lui-même
+check_opt mttcg-ppc32   qemu_ppc32_mttcg_ok "$BIN"       "mac99,via=pmu" 2
 echo
 echo "→ $CAPS"
 

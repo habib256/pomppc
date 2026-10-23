@@ -241,6 +241,22 @@ qemu_machine_smp_ok() { # <bin> <machine> <n>
   return $_SMP_RC
 }
 
+# La cible 32 bits déclare-t-elle MTTCG (patches/tcg/0050, docs/ppc32-mttcg.md) ?
+# Un qemu-system-ppc sans le patch DÉMARRE avec -accel tcg,thread=multi, mais avec
+# l'avertissement « Guest not yet converted to MTTCG » : le critère est donc
+# « démarre ET ne prévient pas », sur la machine et le -smp du lanceur.
+# Codes : 0 = déclaré, 1 = non déclaré ou -smp refusé, 2 = sondage impossible.
+qemu_ppc32_mttcg_ok() { # <bin> <machine> <n>
+  if _caps_boot "$1" -M "$2" -smp "$3" -accel tcg,thread=multi; then
+    grep -q "not yet converted to MTTCG" <<< "$_CAPS_BOOT_OUT" && return 1
+    return 0
+  elif _caps_boot "$1" -M "$2" -smp 1; then
+    return 1
+  fi
+  echo "caps: sondage MTTCG de '$1' échoué" >&2
+  return 2
+}
+
 # Le device qgpu-pci accepte-t-il ces options sur ce binaire ?
 # Ex. : qemu_qgpu_device_ok "$BIN" "$MACHINE" "scanout=qfb"
 # Codes : 0 = accepté, 1 = refusé, 2 = sondage impossible.

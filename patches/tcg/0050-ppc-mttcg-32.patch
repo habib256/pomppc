@@ -1,0 +1,25 @@
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index ec02fef..87e4476 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -7961,7 +7961,19 @@ static const struct SysemuCPUOps ppc_sysemu_ops = {
+ #include "accel/tcg/cpu-ops.h"
+ 
+ static const TCGCPUOps ppc_tcg_ops = {
+-  .mttcg_supported = TARGET_LONG_BITS == 64,
++  /*
++   * POMPPC tcg/0050: the 32-bit target as well (docs/ppc32-mttcg.md).  Its
++   * front end is the ppc64 one with 32-bit registers: stwcx./sthcx./stbcx.
++   * by tcg_gen_atomic_cmpxchg, sync/lwsync/eieio/isync by tcg_gen_mb, the
++   * POWER9 atomics serialised under CF_PARALLEL, the same guest memory
++   * order (0: every ordering is an explicit barrier), the same MMU and TLB
++   * flush code for a 32-bit hash MMU; and a 32-bit guest is never larger
++   * than the host.  Upstream only ever enabled (and tested) ppc64.  With
++   * the flag, "-accel tcg,thread=multi" no longer warns and the default
++   * "auto" picks MTTCG: launchers that want the old round robin at -smp 1
++   * say thread=single.
++   */
++  .mttcg_supported = true,
+   .guest_default_memory_order = 0,
+   .initialize = ppc_translate_init,
+   .translate_code = ppc_translate_code,

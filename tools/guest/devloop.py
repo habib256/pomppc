@@ -27,7 +27,8 @@ Xcode Tools, par exemple).
 
 Variables d'environnement :
     QEMU_BIN   binaire QEMU (défaut ~/src/qemu/build/qemu-system-ppc ; en SMP>1
-               le même nom suffixé « 64 »)
+               le même nom suffixé « 64 », sauf PPC32MT=1 : qemu-system-ppc en
+               MTTCG, docs/ppc32-mttcg.md)
     CPU_OPTS   options ajoutées au modèle de CPU. `-cpu g4` devient
                `-cpu g4,$CPU_OPTS` — p. ex. CPU_OPTS=x-fast-fp=on pour le mode
                « flottant rapide ». Vide (défaut) = `-cpu g4` inchangé.
@@ -355,9 +356,14 @@ def tablet_device(qemu):
 def vm_args(gui, cdroms=()):
     """Ligne de commande QEMU de la VM de dev (single-user sauf `gui`)."""
     smp = int(os.environ.get("SMP", "1"))
-    qemu = QEMU + "64" if smp > 1 else QEMU
+    # PPC32MT=1 : SMP sur qemu-system-ppc lui-même, en MTTCG (tcg/0050,
+    # docs/ppc32-mttcg.md) ; sinon SMP>1 prend le voisin ppc64.
+    ppc32mt = os.environ.get("PPC32MT", "") not in ("", "0")
+    qemu = QEMU + "64" if smp > 1 and not ppc32mt else QEMU
     # TCG_OPTS : propriétés de l'accélérateur (p. ex. x-jit-near=on, docs/tcg-g4.md §14)
-    accel = ",".join(x for x in ("thread=multi" if smp > 1 else "",
+    # SMP=1 : tourniquet dit explicitement (un qemu-system-ppc qui déclare MTTCG,
+    # tcg/0050, le prendrait sinon par défaut, même pour un seul vCPU)
+    accel = ",".join(x for x in ("thread=multi" if smp > 1 else "thread=single",
                                  os.environ.get("TCG_OPTS", "").strip(",")) if x)
     extra = ["-accel", "tcg," + accel] if accel else []
     ram = "1024"

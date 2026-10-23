@@ -55,8 +55,11 @@ SERIE_DEV = "-chardev socket,id=serie0,path=%s,server=on,wait=off " \
 QEMU_IMG = os.path.expanduser("~/src/qemu/build/qemu-img")
 RUN_TIGER = os.path.join(WT, "run_tiger.sh")
 TSSH = os.path.join(WT, "tools", "guest", "tssh.sh")
-BANC = os.path.join(MAIN, "bench", "endurance")
-RUNDIR = os.path.join(MAIN, ".run", "endurance")
+# ENDURANCE_BANC / ENDURANCE_RUNDIR : un banc lancé par un agent de worktree garde
+# ses journaux et ses instances chez lui (docs/ppc32-mttcg.md §10), sans toucher au
+# .run/ du dépôt principal ; défauts inchangés.
+BANC = os.environ.get("ENDURANCE_BANC") or os.path.join(MAIN, "bench", "endurance")
+RUNDIR = os.environ.get("ENDURANCE_RUNDIR") or os.path.join(MAIN, ".run", "endurance")
 QUOTIDIEN = os.path.join(MAIN, "disks", "tiger.qcow2")
 KPANIC = os.path.join(WT, "tools", "re", "kpanic.py")
 # Le bras témoin « anciens défauts » (avant le 06/10/2026 sur le PC) : binaire de
@@ -150,6 +153,32 @@ def base_de(args):
     return BASE_SERIE
 
 
+def format_base(base):
+    """Format de la base : « raw » pour un disque de dev (.raw, docs/ppc32-mttcg.md
+    §10 : le recouvrement qcow2 se pose aussi bien sur une image brute), sinon qcow2."""
+    return "raw" if base.endswith(".raw") else "qcow2"
+
+
+_VERROU_BASE = None
+
+
+def verrou_base(base):
+    """Une base INSCRIPTIBLE (disque de dev brut) : flock PARTAGÉ sur <base>.lock pour
+    toute la campagne. devloop.py prend ce verrou en exclusif : il refusera donc
+    d'écrire la base sous les recouvrements. Jamais de suppression du verrou."""
+    global _VERROU_BASE
+    if not os.access(base, os.W_OK):
+        return
+    import fcntl
+    f = open(base + ".lock", "a+")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError:
+        f.seek(0)
+        raise SystemExit("base %s tenue par un autre outil (%s) : abandon" % (base, f.read().strip()))
+    _VERROU_BASE = f
+
+
 def env_campagne(args):
     """Variables passées à run_tiger.sh pour toute la campagne : --env K=V et,
     avec --anciens-defauts, le bras témoin d'avant le 06/10."""
@@ -192,8 +221,8 @@ class VM:
             raise SystemExit("refus : disque quotidien")
         if os.path.exists(self.disque):
             os.remove(self.disque)
-        subprocess.run([QEMU_IMG, "create", "-q", "-f", "qcow2", "-b", base_de(self.args), "-F", "qcow2",
-                        self.disque], check=True)
+        subprocess.run([QEMU_IMG, "create", "-q", "-f", "qcow2", "-b", base_de(self.args),
+                        "-F", format_base(base_de(self.args)), self.disque], check=True)
         for f in ("tiger.sshport", "tiger.mon"):
             try:
                 os.remove(os.path.join(self.scr, f))
@@ -1558,7 +1587,9 @@ def main():
     if not os.path.exists(base):
         raise SystemExit("base %s absente (voir docs/endurance.md §Préparation, §8)" % base)
     if os.access(base, os.W_OK):
-        journal("⚠  base %s inscriptible : chmod a-w (docs/endurance.md §2)" % base)
+        journal("⚠  base %s inscriptible : chmod a-w (docs/endurance.md §2) ; verrou partagé "
+                "sur %s.lock pendant la campagne" % (base, base))
+        verrou_base(base)
     if a.cmd == "jeu":
         sys.path.insert(0, os.path.join(WT, "tools", "matrice"))
         import importlib
