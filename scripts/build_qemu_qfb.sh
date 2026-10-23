@@ -33,6 +33,7 @@
 #   • tlb_reset_dirty sans parcours inutile, PTEG par pointeur, compteurs de ratés, cache de sauts à 2 voies — patches/tcg/0040-0043
 #   • flottant simple : opérandes connus, FPRF paresseux, stfs court — patches/tcg/0045-0047
 #   • second niveau sans compilateur : traces d'une page (x-tier2) — patches/tcg/0048
+#   • PMU POWER8 seulement sur les CPU qui l'ont (x-pmu-real), MTTCG sur la cible 32 bits — patches/tcg/0049, 0050
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
