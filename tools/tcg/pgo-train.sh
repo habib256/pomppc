@@ -21,8 +21,23 @@
 #                       voisin, .gcda renommés pour <arbre>/build-fast (--de <préfixe>
 #                       si la devinette se trompe), puis --etapes use
 #
-# Environnement : QEMU_SRC (défaut ~/src/qemu), PGO_DIR (défaut $QEMU_SRC/pgo-fast),
-# PGO_MEM (plafond mémoire des constructions, défaut 20G ; swap 1G), LTO_JOBS (6).
+# Cible entraînée (docs/ppc32-mttcg.md §11) : le profil doit couvrir le binaire
+# réellement lancé. --cible ppc64 (défaut : la matrice en SMP=2 sur qemu-system-ppc64,
+# comme toujours), ppc32mt (bras PPC32MT=1 : qemu-system-ppc en MTTCG ; run_tiger.sh
+# du dépôt principal doit connaître PPC32MT), les-deux (un bras par cible, les .gcda
+# s'additionnent).
+# --banc dev : la partie se joue sur une VM de DÉVELOPPEMENT (DEVDISK=<raw>, jamais la
+# VM quotidienne) par tools/tcg/ppc32mt-bench.sh : un démarrage du bureau
+# (devloop start --gui, PGO_GUI s de bureau, défaut 120), puis un démarrage
+# single-user avec les jobs PGO_JOBS (défaut « plugmd5 gpu suite mtbench t2bench »),
+# SMP=2, toutes les options de production, pour chaque cible demandée. Les .gcda
+# s'écrivent quand l'invité s'éteint (halt) et que QEMU quitte de lui-même.
+#
+# Environnement : QEMU_SRC (défaut ~/src/qemu), QEMU_FAST_BUILD (dossier de build,
+# défaut build-fast ; p. ex. build-fast-mt), PGO_DIR (défaut $QEMU_SRC/pgo-fast, ou
+# $QEMU_SRC/pgo-<QEMU_FAST_BUILD sans « build- »>), PGO_MEM (plafond mémoire des
+# constructions, défaut 20G ; swap 1G), LTO_JOBS (6), JOBS (ninja, défaut nproc),
+# PGO_WRAP (préfixe de toutes les commandes lancées, p. ex. « taskset -c 6,7 nice -n 19 »).
 # Les constructions tournent en nice -n 10 sous systemd-run --user --scope -p
 # MemoryMax : deux liaisons LTO+PGO simultanées ont gelé le PC le 03/10 ; sous
 # plafond, le noyau tue la construction au lieu de geler la machine.
@@ -36,7 +51,13 @@ WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 R="$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')"
 R="${R:-$WT}"
 SRC="${QEMU_SRC:-$HOME/src/qemu}"
-PGO_DIR="${PGO_DIR:-$SRC/pgo-fast}"
+FASTB="${QEMU_FAST_BUILD:-build-fast}"
+PGO_DIR="${PGO_DIR:-$SRC/pgo-${FASTB#build-}}"
+CIBLE=ppc64; BANC=matrice
+read -r -a WRAP <<< "${PGO_WRAP:-}"
+# Options de production (Linux x86-64), celles de tools/tcg/ppc32mt-bench.sh : bureau du --banc dev
+PGO_CPU="${PGO_CPU:-x-fast-fp=on,x-sr-tlb=on,x-lfs-inline=on,x-vfp-fast=on,x-vperm-fast=on,x-vmx-inline=on,x-vfp-native=on,x-lmw-vector=on,x-fp-inline=on,x-fp-native=on,x-fp-native64=on,x-fp-native-cmp=on,x-fp-known=on,x-fprf-lazy=on,x-stfs-known=on,x-vfp-native-cmp=on,x-tb-fast=on,x-ret-inline=on,x-jc-idx=on,x-icbi-sync=on,x-msr-nobql=on,x-tlb-precise=on,x-lmw-inline=on,x-dcbz-inline=on,x-dirty-skip=on,x-pteg-map=on}"
+PGO_TCG="${PGO_TCG:-x-jit-near=on,x-jit-rel32=on,x-jc-bits=14,x-jc-word=on,x-jc-2way=on}"
 MEM="${PGO_MEM:-20G}"
 DRY=""; FORCE=""; PARTIES=1; JEUX="mb,zen,ut,d3"; MODE=fen; ETAPES=""
 IMPORT=""; DE=""
@@ -50,6 +71,8 @@ while [ $# -gt 0 ]; do
     --etapes)   ETAPES="$2"; shift ;;
     --importer) IMPORT="$2"; shift ;;
     --de)       DE="$2"; shift ;;
+    --cible)    CIBLE="$2"; shift ;;
+    --banc)     BANC="$2"; shift ;;
     -h|--help)  sed -n '4,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "option inconnue : $1 (--help)" >&2; exit 2 ;;
   esac
@@ -59,11 +82,13 @@ done
 # importé remplace la partie ; --etapes use pour reconstruire dans la foulée).
 [ -n "$ETAPES" ] || [ -n "$IMPORT" ] || ETAPES="gen,jouer,use"
 STAMP="$(date +%Y%m%d-%H%M)"
-LOGS="$R/bench/vitesse/pgo-fast/$STAMP"
-FAST="$SRC/build-fast/qemu-system-ppc"
+LOGS="$R/bench/vitesse/pgo-${FASTB#build-}/$STAMP"
+FAST="$SRC/$FASTB/qemu-system-ppc"
 
 say() { echo "▶ $*"; }
 die() { echo "⚠ $*" >&2; exit 1; }
+case "$CIBLE" in ppc64|ppc32mt|les-deux) ;; *) die "--cible : ppc64, ppc32mt ou les-deux" ;; esac
+case "$BANC" in matrice|dev) ;; *) die "--banc : matrice ou dev" ;; esac
 run() { # run <cmd…> : exécute, ou montre seulement en --dry-run
   if [ -n "$DRY" ]; then printf '  +'; printf ' %q' "$@"; echo; else "$@"; fi
 }
@@ -102,17 +127,18 @@ fi
 
 BUILD_WRAP=(nice -n 10)
 if command -v systemd-run >/dev/null 2>&1; then
-  BUILD_WRAP=(systemd-run --user --scope --quiet -p "MemoryMax=$MEM" -p MemorySwapMax=1G
+  BUILD_WRAP=(systemd-run --user --scope --quiet -p "MemoryMax=$MEM" -p "MemorySwapMax=${PGO_SWAP:-1G}"
               nice -n 10)
 else
   echo "  ⚠ systemd-run absent : construction SANS plafond mémoire (nice seulement)" >&2
 fi
 build() { # build <gen|use>
-  say "construction build-fast/ ($1) — $SRC, plafond $MEM, journal $LOGS/build-$1.log"
+  say "construction $FASTB/ ($1) — $SRC, plafond $MEM, journal $LOGS/build-$1.log"
   run mkdir -p "$LOGS"
   if [ -n "$DRY" ]; then
     run "${BUILD_WRAP[@]}" env QEMU_SRC="$SRC" QEMU_FAST=only QEMU_FAST_PGO="$1" \
-      PGO_DIR="$PGO_DIR" LTO_JOBS="${LTO_JOBS:-6}" bash "$WT/scripts/build_qemu_qfb.sh"
+      QEMU_FAST_BUILD="$FASTB" PGO_DIR="$PGO_DIR" LTO_JOBS="${LTO_JOBS:-6}" \
+      ${WRAP[@]+"${WRAP[@]}"} bash "$WT/scripts/build_qemu_qfb.sh"
     return 0
   fi
   local t0=$SECONDS rc=0 unit="pomppc-fast-$1-$$" wrap=("${BUILD_WRAP[@]}") sampler="" peak
@@ -132,8 +158,8 @@ build() { # build <gen|use>
     sampler=$!
   fi
   "${wrap[@]}" env QEMU_SRC="$SRC" QEMU_FAST=only QEMU_FAST_PGO="$1" \
-      PGO_DIR="$PGO_DIR" LTO_JOBS="${LTO_JOBS:-6}" \
-      /usr/bin/time -v bash "$WT/scripts/build_qemu_qfb.sh" > "$LOGS/build-$1.log" 2>&1 || rc=$?
+      QEMU_FAST_BUILD="$FASTB" PGO_DIR="$PGO_DIR" LTO_JOBS="${LTO_JOBS:-6}" \
+      ${WRAP[@]+"${WRAP[@]}"} /usr/bin/time -v bash "$WT/scripts/build_qemu_qfb.sh" > "$LOGS/build-$1.log" 2>&1 || rc=$?
   [ -z "$sampler" ] || { kill "$sampler" 2>/dev/null; wait "$sampler" 2>/dev/null || true; }
   grep -E '^(✔|⚠)|Maximum resident|Elapsed' "$LOGS/build-$1.log" | sed 's/^/  /' || true
   peak="$(cat "$LOGS/peak-$1.txt" 2>/dev/null || true)"
@@ -156,7 +182,7 @@ if [ -n "$IMPORT" ]; then
   else
     case "$DE" in '#'*) ;; *) DE="$(mangle "${DE%/}")" ;; esac
   fi
-  TO="$(mangle "$SRC/build-fast")"
+  TO="$(mangle "$SRC/$FASTB")"
   say "import de $IMPORT : « $DE » → « $TO »"
   archive_profile
   n=0; skip=0
@@ -192,23 +218,60 @@ fi
 if has jouer; then
   [ -x "$FAST" ] || [ -n "$DRY" ] || die "$FAST absent : étape gen d'abord"
   if [ -z "$DRY" ]; then
-    grep -q '^variante=.*pgo-gen' "$SRC/build-fast/pomppc-build.txt" 2>/dev/null ||
+    grep -q '^variante=.*pgo-gen' "$SRC/$FASTB/pomppc-build.txt" 2>/dev/null ||
       die "$FAST n'est pas l'instrumenté (pgo-gen) : étape gen d'abord"
   fi
-  [ -f "$R/disks/tiger.qcow2" ] || [ -n "$DRY" ] || die "VM quotidienne absente ($R/disks/tiger.qcow2)"
-  [ -f "$R/disks/tiger.qcow2" ] || echo "  (VM quotidienne absente : $R/disks/tiger.qcow2)"
   C="pgo-train-$STAMP"
-  say "partie d'entraînement : $JEUX $MODE, $PARTIES partie(s) → $R/bench/tcg/ab/$C"
-  run env -u QEMU_BIN "$WT/tools/tcg/matab.sh" "$C" "$PARTIES" "train:QEMU_BIN=$FAST" "$JEUX" "$MODE"
+  if [ "$BANC" = matrice ]; then
+    [ -f "$R/disks/tiger.qcow2" ] || [ -n "$DRY" ] || die "VM quotidienne absente ($R/disks/tiger.qcow2)"
+    [ -f "$R/disks/tiger.qcow2" ] || echo "  (VM quotidienne absente : $R/disks/tiger.qcow2)"
+    case "$CIBLE" in
+      ppc64)    BRAS=("train:QEMU_BIN=$FAST") ;;
+      ppc32mt)  BRAS=("train:QEMU_BIN=$FAST PPC32MT=1") ;;
+      les-deux) BRAS=("train64:QEMU_BIN=$FAST" "train32:QEMU_BIN=$FAST PPC32MT=1") ;;
+    esac
+    say "partie d'entraînement ($CIBLE) : $JEUX $MODE, $PARTIES partie(s) → $R/bench/tcg/ab/$C"
+    run env -u QEMU_BIN ${WRAP[@]+"${WRAP[@]}"} "$WT/tools/tcg/matab.sh" "$C" "$PARTIES" "${BRAS[@]}" "$JEUX" "$MODE"
+    QUOI="$R/bench/tcg/ab/$C"
+  else
+    # VM de développement : jamais la VM quotidienne (DEVDISK est un raw de dev).
+    [ -n "${DEVDISK:-}" ] || die "--banc dev : DEVDISK=<raw de dev> requis"
+    case "$(realpath -m "$DEVDISK")" in */tiger.qcow2) die "DEVDISK ne peut pas être la VM quotidienne" ;; esac
+    [ -f "$WT/bench/devloop/mailbox.json" ] || [ -n "$DRY" ] ||
+      die "$WT/bench/devloop/mailbox.json absent (le copier du dépôt principal)"
+    case "$CIBLE" in ppc64) CIBLES="ppc64" ;; ppc32mt) CIBLES="ppc32mt" ;; *) CIBLES="ppc32mt ppc64" ;; esac
+    for c in $CIBLES; do
+      p32=""; [ "$c" = ppc32mt ] && p32=1
+      say "entraînement $c sur la VM de dev ($DEVDISK) : bureau ${PGO_GUI:-120} s"
+      if [ -n "$DRY" ]; then
+        run env DEVDISK="$DEVDISK" QEMU_BIN="$FAST" SMP=2 PPC32MT="$p32" SND=none \
+          python3 "$WT/tools/guest/devloop.py" start --gui
+      else
+        # bureau : WindowServer, Quartz, qgpu (présentation) ; arrêt propre = .gcda
+        env DEVDISK="$DEVDISK" QEMU_BIN="$FAST" SMP=2 PPC32MT="$p32" SND=none SSH_PORT=0 \
+          CPU_OPTS="$PGO_CPU" TCG_OPTS="$PGO_TCG" ${WRAP[@]+"${WRAP[@]}"} \
+          python3 "$WT/tools/guest/devloop.py" start --gui || die "bureau de la VM de dev ($c) : échec"
+        sleep "${PGO_GUI:-120}"
+        env DEVDISK="$DEVDISK" python3 "$WT/tools/guest/devloop.py" shutdown --gui
+      fi
+      say "entraînement $c : jobs ${PGO_JOBS:-plugmd5 gpu suite mtbench t2bench}"
+      run env DEVDISK="$DEVDISK" QEMU_BIN="$FAST" SMP=2 PPC32MT="$p32" REPS="${PGO_REPS:-1}" \
+        ${WRAP[@]+"${WRAP[@]}"} "$WT/tools/tcg/ppc32mt-bench.sh" "$C-$c" ${PGO_JOBS:-plugmd5 gpu suite mtbench t2bench}
+    done
+    QUOI="$WT/bench/ppc32mt/$C-*"
+  fi
   if [ -z "$DRY" ]; then
     n="$(ngcda)"
     # 03/10 : 1 356 .gcda pour 25 min de DOOM 3 ; quelques dizaines = QEMU n'a pas
     # quitté proprement ou n'a presque pas tourné.
-    [ "$n" -ge 500 ] || die "seulement $n .gcda dans $PGO_DIR : partie ratée ? (bench/tcg/ab/$C)"
+    [ "$n" -ge 500 ] || die "seulement $n .gcda dans $PGO_DIR : partie ratée ? ($QUOI)"
     { echo "# profil entraîné par tools/tcg/pgo-train.sh"
       echo "date=$(date "+%Y-%m-%dT%H:%M:%S%z")"
-      echo "campagne=$R/bench/tcg/ab/$C"
-      echo "jeux=$JEUX $MODE, $PARTIES partie(s)"
+      echo "campagne=$QUOI"
+      echo "cible=$CIBLE"
+      echo "banc=$BANC"
+      if [ "$BANC" = dev ]; then echo "jeux=VM de dev $DEVDISK : bureau ${PGO_GUI:-120} s + ${PGO_JOBS:-plugmd5 gpu suite mtbench t2bench}"
+      else echo "jeux=$JEUX $MODE, $PARTIES partie(s)"; fi
       echo "binaire=$FAST"
       echo "serie=$(serie_hash)"
       echo "pomppc=$(git -C "$WT" rev-parse --short HEAD 2>/dev/null)"

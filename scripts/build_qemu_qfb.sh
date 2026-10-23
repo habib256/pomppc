@@ -1113,6 +1113,10 @@ grep -q "x-abs-margin" hw/usb/dev-hid.c || {
 #   PGO_DIR         profil de build-fast, défaut <arbre>/pgo-fast (stable :
 #                   tools/tcg/pgo-train.sh l'écrit, l'archive et sait importer
 #                   celui d'un arbre voisin en renommant les .gcda)
+#   QEMU_FAST_BUILD dossier de build du binaire rapide, défaut build-fast ; un
+#                   autre nom (build-fast-mt, docs/ppc32-mttcg.md §11) construit un
+#                   second binaire rapide dans le même arbre, profil par défaut
+#                   <arbre>/pgo-<nom sans « build- »> (pgo-fast-mt)
 # Une seule édition de liens LTO à la fois sur la machine : refus si un lto1
 # tourne déjà (QEMU_FAST_FORCE=1 pour passer outre). Construire sous plafond
 # mémoire (systemd-run --user --scope -p MemoryMax=20G -p MemorySwapMax=1G
@@ -1130,11 +1134,13 @@ case "${QEMU_FAST:-0}" in
     if [ "$QEMU_FAST" = 1 ]; then
       FAST_AFTER=1                  # build/ d'abord, build-fast/ en fin de script
     else
-      PGO_DIR="${PGO_DIR:-$SRC/pgo-fast}"
+      _fastb="${QEMU_FAST_BUILD:-build-fast}"
+      case "$_fastb" in build|*/*|'') echo "⚠ QEMU_FAST_BUILD=$_fastb : un nom de dossier, jamais build" >&2; exit 1 ;; esac
+      PGO_DIR="${PGO_DIR:-$SRC/pgo-${_fastb#build-}}"
       # Les .gcda portent le chemin de l'objet, '/' → '#' : seuls ceux de
       # <arbre>/build-fast servent. Un profil d'un autre arbre, non renommé,
       # serait ignoré EN SILENCE (-Wno-missing-profile) : refus.
-      _mangled="$(printf '%s' "$SRC/build-fast" | tr / '#')#"
+      _mangled="$(printf '%s' "$SRC/$_fastb" | tr / '#')#"
       _ngcda="$(find "$PGO_DIR" -maxdepth 1 -name "${_mangled}*.gcda" 2>/dev/null | wc -l)"
       _nall="$(find "$PGO_DIR" -maxdepth 1 -name '*.gcda' 2>/dev/null | wc -l)"
       case "${QEMU_FAST_PGO:-auto}" in
@@ -1142,7 +1148,7 @@ case "${QEMU_FAST:-0}" in
         non) _pgo="" ;;
         auto|use)
           if [ "$_nall" -gt 0 ] && [ "$_ngcda" -eq 0 ]; then
-            echo "⚠ $PGO_DIR a $_nall .gcda, aucun pour $SRC/build-fast : profil d'un autre" >&2
+            echo "⚠ $PGO_DIR a $_nall .gcda, aucun pour $SRC/$_fastb : profil d'un autre" >&2
             echo "  arbre ou d'un autre dossier de build. tools/tcg/pgo-train.sh --importer" >&2
             echo "  les renomme ; QEMU_FAST_PGO=non construit sans profil." >&2
             exit 1
@@ -1165,7 +1171,7 @@ case "${QEMU_FAST:-0}" in
         *) echo "⚠ QEMU_FAST_PGO attendu : auto, use, gen ou non" >&2; exit 1 ;;
       esac
       QEMU_OPT="native,nohard,lto${_pgo:+,$_pgo}"
-      QEMU_BUILD=build-fast
+      QEMU_BUILD="$_fastb"
     fi ;;
   *) echo "⚠ QEMU_FAST attendu : 1 ou only" >&2; exit 1 ;;
 esac
