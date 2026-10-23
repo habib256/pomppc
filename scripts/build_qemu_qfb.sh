@@ -34,6 +34,7 @@
 #   • flottant simple : opérandes connus, FPRF paresseux, stfs court — patches/tcg/0045-0047
 #   • second niveau sans compilateur : traces d'une page (x-tier2) — patches/tcg/0048
 #   • PMU POWER8 seulement sur les CPU qui l'ont (x-pmu-real), MTTCG sur la cible 32 bits — patches/tcg/0049, 0050
+#   • tête de bloc allégée : can_do_io déduit, goto_tb avant après la vérification (x-tb-head) — patches/tcg/0051
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -1070,6 +1071,25 @@ target/ppc/power8-pmu.c env->pmu_real
 target/ppc/cpu.h bool pmu_real
 target/ppc/cpu_init.c .mttcg_supported = true
 TCG49_MARKERS
+  # --- tcg/0051 : tête de bloc allégée (x-tb-head, propriété de l'accélérateur, éteinte
+  # par défaut), docs/anatomie-ppc32.md : plus de stores de can_do_io (déduit de l'adresse
+  # de retour dans io_prepare), goto_tb vers un pc plus haut chaîné après la vérification
+  # d'interruption. Code commun (accel/tcg, tcg/tcg.c), aucun émetteur touché.
+  if ! grep -q "POMPPC tcg/0051" accel/tcg/translator.c; then
+    echo "▶ patch TCG : tête de bloc allégée (x-tb-head)"
+    patch_strict "$ROOT/patches/tcg/0051-tcg-tb-head.patch"
+  fi
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0051 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG51_MARKERS'
+accel/tcg/tcg-all.c x-tb-head
+accel/tcg/translate-all.c cpu_io_last_insn
+accel/tcg/cputlb.c TB_HEAD_VERIFY
+accel/tcg/cpu-exec.c tbh_report
+tcg/tcg.c tb_head_off
+include/exec/translation-block.h head_skip
+TCG51_MARKERS
 fi
 
 # --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---
@@ -1337,6 +1357,7 @@ check_opt x-fp-known    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fp
 check_opt x-fprf-lazy   qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-fprf-lazy=on
 check_opt x-stfs-known  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-stfs-known=on
 check_opt x-pmu-real    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-pmu-real=on
+check_opt x-tb-head     qemu_tcg_has_prop  "$BIN"        "mac99,via=pmu" x-tb-head=3
 # MTTCG sur la cible 32 bits (tcg/0050) : sondé sur qemu-system-ppc lui-même
 check_opt mttcg-ppc32   qemu_ppc32_mttcg_ok "$BIN"       "mac99,via=pmu" 2
 echo

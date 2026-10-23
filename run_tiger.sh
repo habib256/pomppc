@@ -90,6 +90,10 @@
 #                             # 06/10 : les deux régimes d'UT2004 étaient un artefact de mesure, §31)
 #   DIRTYSKIP=0 PTEGMAP=0 JC2WAY=0 ./run_tiger.sh # coupe les helpers côté hôte (tcg/0040, 0041, allumés sur Linux x86-64
 #                             # depuis le 20/10, docs/tcg-g4.md §36) ; DIRTYSKIPVERIFY=1 PTEGMAPVERIFY=1 : preuves
+#   TBHEAD=3 ./run_tiger.sh   # tête de bloc allégée (x-tb-head, tcg/0051, docs/anatomie-ppc32.md) :
+#                             # 1 = can_do_io déduit de l'adresse de retour (plus de stores), 2 = goto_tb
+#                             # vers l'avant chaîné après la vérification d'interruption, 3 = les deux ;
+#                             # éteint par défaut ; TBHEAD=7 : preuve (stores gardés, valeur comparée)
 #   LMWVEC=0 JCWORD=0 ./run_tiger.sh # coupe la copie lmw/stmw vectorielle (tcg/0025/0029) et le
 #                             # cache de sauts par mot (tcg/0026) ; allumés sur macOS arm64 et Linux x86-64
 #   QEMU_FAST=0 ./run_tiger.sh  # Linux x86-64 : binaire de référence build/ au lieu du binaire
@@ -851,6 +855,18 @@ if [ "${JC2WAY:-0}" != 0 ]; then
   else
     echo "⚠ JC2WAY=1 demandé mais ce QEMU n'a pas x-jc-2way (tcg/0043)." >&2
     MODE="$MODE + CACHE DE SAUTS 2 VOIES DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+
+# TBHEAD=N : x-tb-head (tcg/0051, propriété de l'accélérateur, docs/anatomie-ppc32.md),
+# tête de bloc allégée. Éteint par défaut (0).
+if [ "${TBHEAD:-0}" != 0 ]; then
+  if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-tb-head=${TBHEAD}"; then
+    TCG_ACCEL="${TCG_ACCEL:-tcg},x-tb-head=${TBHEAD}"
+    MODE="$MODE + TÊTE DE BLOC ALLÉGÉE ($TBHEAD)"
+  else
+    echo "⚠ TBHEAD=$TBHEAD demandé mais ce QEMU n'a pas x-tb-head (tcg/0051)." >&2
+    MODE="$MODE + TÊTE DE BLOC ALLÉGÉE DEMANDÉE MAIS INDISPONIBLE"
   fi
 fi
 

@@ -17,6 +17,10 @@
 # Variables : SMP (défaut 1), PPC32MT=1 (SMP sur qemu-system-ppc ; sinon ppc64),
 # CPU_EXTRA (propriétés de CPU en plus, p. ex. les vérificateurs), TCG_EXTRA,
 # QEXTRA (arguments QEMU), FR/REPS (t2bench), REPS/ATOMN (mtbench), TIMEOUT.
+# PERFREC=<événements> (p. ex. instructions:u) : en plus, `perf record` échantillonné
+# (période PERFPER, défaut 200003, options en plus PERFOPT, p. ex. -b pour les LBR)
+# pendant chaque job, dans <job>.data — pour
+# l'anatomie du code émis (tools/tcg/codeanat32.py, docs/anatomie-ppc32.md).
 # Sorties : bench/ppc32mt/<ÉTIQUETTE>/ du worktree : run.log, qemu.log,
 # <job>.log (sortie du job), <job>.perf (perf stat), <job>-out/.
 set -u
@@ -106,11 +110,18 @@ EOF
   esac
   perf stat -x, -e instructions:u,cycles:u,task-clock -p "$PID" -o "$OUT/$JOB.perf" &
   PP=$!
+  PR=
+  if [ -n "${PERFREC:-}" ]; then
+    perf record -q -e "$PERFREC" -c "${PERFPER:-200003}" ${PERFOPT:-} -p "$PID" -o "$OUT/$JOB.data" \
+      > "$OUT/$JOB.record.log" 2>&1 &
+    PR=$!
+  fi
   t0=$(date +%s.%N)
   DEVDISK="$DISK" python3 "$DL" run "$J" --timeout "${TIMEOUT:-2400}" > "$OUT/$JOB.log" 2>&1
   rc=$?
   t1=$(date +%s.%N)
   kill -INT "$PP" 2>/dev/null; wait "$PP" 2>/dev/null
+  [ -n "$PR" ] && { kill -INT "$PR" 2>/dev/null; wait "$PR" 2>/dev/null; }
   echo "job $JOB : code $rc, $(python3 -c "print('%.1f' % ($t1 - $t0))") s" | tee -a "$OUT/run.log"
   d=$(sed -n 's/^→ //p' "$OUT/$JOB.log" | tail -1)
   [ -n "$d" ] && [ -d "$d" ] && { rm -rf "$OUT/$JOB-out"; cp -rf "$d" "$OUT/$JOB-out"; }

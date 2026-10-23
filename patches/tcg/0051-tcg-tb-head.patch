@@ -1,0 +1,391 @@
+diff --git a/include/tcg/tcg.h b/include/tcg/tcg.h
+--- a/include/tcg/tcg.h
++++ b/include/tcg/tcg.h
+@@ -390,6 +390,13 @@
+ 
+     TCGLabel *exitreq_label;
+     /*
++     * POMPPC tcg/0051 (x-tb-head): the brcond of the exit-request check at
++     * the head of the TB being translated, and the code offset right after
++     * it (0: none).  A forward goto_tb may enter there (tb->head_skip).
++     */
++    TCGOp *tb_head_op;
++    unsigned tb_head_off;
++    /*
+      * POMPPC tcg/0048 (x-tier2-verify): 1 = log every guest access of the
+      * TB being translated (helper_t2_log), 2 = replay them (loads return the
+      * logged values, stores are compared and not done).
+diff --git a/include/exec/translation-block.h b/include/exec/translation-block.h
+--- a/include/exec/translation-block.h
++++ b/include/exec/translation-block.h
+@@ -107,6 +107,18 @@
+      */
+     uint32_t t2_count;
+     uint8_t t2_state;
++    /*
++     * POMPPC tcg/0051 (x-tb-head, bit TB_HEAD_FWD): code offset just after
++     * the exit-request check of the prologue, 0 if none.  A goto_tb from a
++     * TB of lower pc is chained there (docs/anatomie-ppc32.md).
++     */
++    uint8_t head_skip;
++    /*
++     * POMPPC tcg/0051 (x-tb-head, TB_HEAD_CDIO): code offset where the last
++     * guest insn of the TB starts (0 for a one-insn TB): an I/O access that
++     * returns at or after it is made by the last insn.
++     */
++    uint16_t last_insn_off;
+ #define T2_NONE  0
+ #define T2_ASKED 1
+ #define T2_TRACE 2
+diff --git a/accel/tcg/internal-common.h b/accel/tcg/internal-common.h
+--- a/accel/tcg/internal-common.h
++++ b/accel/tcg/internal-common.h
+@@ -155,6 +155,45 @@
+ G_NORETURN void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr);
+ #endif /* CONFIG_USER_ONLY */
+ 
++/*
++ * POMPPC tcg/0051 (x-tb-head, accelerator property, fixed before the first
++ * CPU; forced to 0 under icount).  A lighter TB head
++ * (docs/anatomie-ppc32.md):
++ *   TB_HEAD_CDIO  no can_do_io stores in the TBs (two byte stores per TB):
++ *                 io_prepare() derives it from the return address instead,
++ *                 true exactly when the access is made by the last guest
++ *                 insn of its TB (or from outside any TB), i.e. the value the
++ *                 stores would have left.
++ *   TB_HEAD_FWD   a goto_tb towards a TB of HIGHER pc is chained past the
++ *                 target's exit-request check (icount_decr, 3 host insns).
++ *                 Every cycle of chained TBs contains an edge to a lower or
++ *                 equal pc, which still checks; indirect entries (goto_ptr,
++ *                 inline jump cache) and the main loop enter at tc.ptr.
++ *                 Pending interrupts and exit requests are seen at most one
++ *                 forward chain later.
++ *   TB_HEAD_VERIFY  (épreuve) the stores are kept and every I/O access
++ *                 compares the derived value with the stored one.
++ */
++#define TB_HEAD_CDIO   1u
++#define TB_HEAD_FWD    2u
++#define TB_HEAD_VERIFY 4u   /* keep the stores, compare with the derived value */
++extern unsigned tcg_tb_head;
++extern int tcg_tb_head_mutant;      /* POMPPC_TBHEAD_MUTANT, épreuves */
++#ifndef CONFIG_USER_ONLY
++bool cpu_io_last_insn(CPUState *cpu, uintptr_t retaddr);
++#endif
++void pomppc_tb_head_stat(int what);
++void pomppc_tb_head_bad(CPUState *cpu, uintptr_t retaddr, bool derived);
++#define TBH_IO_LAST   0
++#define TBH_IO_MID    1
++#define TBH_IO_OUT    2
++#define TBH_IO_NOFIND 3
++#define TBH_LINK_FWD  4
++#define TBH_LINK_BACK 5
++#define TBH_VERIFY_OK 6
++#define TBH_VERIFY_BAD 7
++#define TBH_N         8
++
+ void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr);
+ void tb_set_jmp_target(TranslationBlock *tb, int n, uintptr_t addr);
+ 
+diff --git a/accel/tcg/tcg-all.c b/accel/tcg/tcg-all.c
+--- a/accel/tcg/tcg-all.c
++++ b/accel/tcg/tcg-all.c
+@@ -339,6 +339,33 @@
+     tb_jmp_cache_2way = value;
+ }
+ 
++static void tcg_get_tb_head(Object *obj, Visitor *v, const char *name,
++                            void *opaque, Error **errp)
++{
++    uint32_t value = tcg_tb_head;
++
++    visit_type_uint32(v, name, &value, errp);
++}
++
++static void tcg_set_tb_head(Object *obj, Visitor *v, const char *name,
++                            void *opaque, Error **errp)
++{
++    uint32_t value;
++
++    if (!visit_type_uint32(v, name, &value, errp)) {
++        return;
++    }
++    if (value > (TB_HEAD_CDIO | TB_HEAD_FWD | TB_HEAD_VERIFY)) {
++        error_setg(errp, "x-tb-head must be between 0 and 7");
++        return;
++    }
++    if (tb_jmp_cache_bits_frozen && value != tcg_tb_head) {
++        error_setg(errp, "x-tb-head cannot change once a CPU exists");
++        return;
++    }
++    tcg_tb_head = value;
++}
++
+ static bool tcg_get_one_insn_per_tb(Object *obj, Error **errp)
+ {
+     TCGState *s = TCG_STATE(obj);
+@@ -401,6 +428,14 @@
+         "Two-way jump cache: slot h then h^1 in the same page group "
+         "(POMPPC tcg/0043)");
+ 
++    object_class_property_add(oc, "x-tb-head", "uint32",
++        tcg_get_tb_head, tcg_set_tb_head, NULL, NULL);
++    object_class_property_set_description(oc, "x-tb-head",
++        "Lighter TB head: 1 = can_do_io derived from the return address "
++        "instead of stored, 2 = forward goto_tb enters past the exit "
++        "check, 3 = both, +4 = keep the stores and verify the derived "
++        "can_do_io (POMPPC tcg/0051, docs/anatomie-ppc32.md)");
++
+     object_class_property_add(oc, "x-jc-bits", "uint32",
+         tcg_get_jc_bits, tcg_set_jc_bits, NULL, NULL);
+     object_class_property_set_description(oc, "x-jc-bits",
+diff --git a/accel/tcg/translator.c b/accel/tcg/translator.c
+--- a/accel/tcg/translator.c
++++ b/accel/tcg/translator.c
+@@ -27,6 +27,10 @@
+ static void set_can_do_io(DisasContextBase *db, bool val)
+ {
+     QEMU_BUILD_BUG_ON(sizeof_field(CPUState, neg.can_do_io) != 1);
++    if ((tcg_tb_head & (TB_HEAD_CDIO | TB_HEAD_VERIFY)) == TB_HEAD_CDIO) {
++        /* POMPPC tcg/0051: derived from the return address in io_prepare */
++        return;
++    }
+     tcg_gen_st8_i32(tcg_constant_i32(val), tcg_env,
+                     offsetof(CPUState, neg.can_do_io) - sizeof(CPUState));
+ }
+@@ -77,6 +81,15 @@
+     } else {
+         tcg_ctx->exitreq_label = gen_new_label();
+         tcg_gen_brcondi_i32(TCG_COND_LT, count, 0, tcg_ctx->exitreq_label);
++        /*
++         * POMPPC tcg/0051 (x-tb-head, TB_HEAD_FWD): a forward goto_tb may
++         * enter right after this check.  The brcond ends a TCG basic block:
++         * nothing is live in host registers there, as at tc.ptr.
++         */
++        if ((tcg_tb_head & TB_HEAD_FWD) &&
++            !(cflags & (CF_USE_ICOUNT | CF_PCREL))) {
++            tcg_ctx->tb_head_op = tcg_last_op();
++        }
+     }
+ 
+     if (cflags & CF_USE_ICOUNT) {
+diff --git a/tcg/tcg.c b/tcg/tcg.c
+--- a/tcg/tcg.c
++++ b/tcg/tcg.c
+@@ -1981,6 +1981,7 @@
+     }
+ 
+     s->nb_ops = 0;
++    s->tb_head_op = NULL;               /* POMPPC tcg/0051 */
+     s->nb_labels = 0;
+     s->current_frame_offset = s->frame_start;
+ 
+@@ -6731,6 +6732,7 @@
+ 
+     tcg_out_tb_start(s);
+ 
++    s->tb_head_off = 0;                 /* POMPPC tcg/0051 */
+     num_insns = -1;
+     s->carry_live = false;
+     QTAILQ_FOREACH(op, &s->ops, link) {
+@@ -6812,6 +6814,10 @@
+             tcg_reg_alloc_op(s, op);
+             break;
+         }
++        /* POMPPC tcg/0051 (x-tb-head): code offset after the exit check */
++        if (unlikely(op == s->tb_head_op)) {
++            s->tb_head_off = tcg_current_code_size(s);
++        }
+         /* Test for (pending) buffer overflow.  The assumption is that any
+            one operation beginning below the high water mark cannot overrun
+            the buffer completely.  Thus we can test for overflow after
+diff --git a/accel/tcg/translate-all.c b/accel/tcg/translate-all.c
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -397,6 +397,10 @@
+         goto buffer_overflow;
+     }
+     tb->tc.size = gen_code_size;
++    /* POMPPC tcg/0051 (x-tb-head): where a forward goto_tb may enter */
++    tb->head_skip = tcg_ctx->tb_head_off < 256 ? tcg_ctx->tb_head_off : 0;
++    tb->last_insn_off = tb->icount > 1 ?
++        tcg_ctx->gen_insn_end_off[tb->icount - 2] : 0;
+ 
+     /*
+      * For CF_PCREL, attribute all executions of the generated code
+@@ -574,6 +578,40 @@
+  *
+  * Called by softmmu_template.h, with iothread mutex not held.
+  */
++/*
++ * POMPPC tcg/0051 (x-tb-head, TB_HEAD_CDIO): the value can_do_io would have
++ * when an I/O access returns to retaddr.  The TB stores false before its
++ * first insn (if it has more than one) and true before its last one; outside
++ * of a TB, cpu_exec leaves it true.  So: true unless retaddr is in a TB, at
++ * an insn that is not its last.  A retaddr inside a TB but outside of its
++ * insns (none is known: the slow paths pass the return address of the fast
++ * path) counts as "can do": the recompile would not find the insn either.
++ */
++bool cpu_io_last_insn(CPUState *cpu, uintptr_t retaddr)
++{
++    TranslationBlock *tb;
++    uintptr_t off;
++    bool last;
++
++    if (!retaddr) {
++        pomppc_tb_head_stat(TBH_IO_OUT);
++        return true;
++    }
++    tb = tcg_tb_lookup(retaddr);
++    if (!tb) {
++        pomppc_tb_head_stat(TBH_IO_OUT);
++        return true;
++    }
++    /* as cpu_unwind_data_from_tb: the insn whose code contains retaddr - 2 */
++    off = retaddr - GETPC_ADJ - (uintptr_t)tb->tc.ptr;
++    last = off >= tb->last_insn_off;
++    if (unlikely(tcg_tb_head_mutant == 2)) {
++        last = off < tb->last_insn_off;     /* épreuve : la règle à l'envers */
++    }
++    pomppc_tb_head_stat(last ? TBH_IO_LAST : TBH_IO_MID);
++    return last;
++}
++
+ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
+ {
+     TranslationBlock *tb;
+@@ -630,6 +668,8 @@
+ bool tb_jmp_cache_word;
+ bool tb_jmp_cache_2way;         /* POMPPC tcg/0043 */
+ bool tb_jmp_cache_bits_frozen;
++unsigned tcg_tb_head;                   /* POMPPC tcg/0051 (x-tb-head) */
++int tcg_tb_head_mutant;
+ 
+ void tcg_flush_jmp_cache(CPUState *cpu)
+ {
+diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -1718,8 +1718,20 @@
+     section = full->section;
+     mr_offset = full->xlat_offset + addr;
+     cpu->mem_io_pc = retaddr;
+-    if (!cpu->neg.can_do_io) {
+-        cpu_io_recompile(cpu, retaddr);
++    if (unlikely(tcg_tb_head & TB_HEAD_VERIFY)) {
++        /* POMPPC tcg/0051, épreuve : la valeur déduite contre la rangée */
++        bool d = cpu_io_last_insn(cpu, retaddr);
++        if (d != cpu->neg.can_do_io) {
++            pomppc_tb_head_bad(cpu, retaddr, d);
++        } else {
++            pomppc_tb_head_stat(TBH_VERIFY_OK);
++        }
++        if (!cpu->neg.can_do_io) {
++            cpu_io_recompile(cpu, retaddr);
++        }
++    } else if ((tcg_tb_head & TB_HEAD_CDIO) ? !cpu_io_last_insn(cpu, retaddr)
++                                            : !cpu->neg.can_do_io) {
++        cpu_io_recompile(cpu, retaddr);     /* POMPPC tcg/0051 */
+     }
+ 
+     *out_offset = mr_offset;
+diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -19,6 +19,7 @@
+ 
+ #include "qemu/osdep.h"
+ #include "qemu/qemu-print.h"
++#include "qemu/error-report.h"
+ #include "qapi/error.h"
+ #include "qapi/type-helpers.h"
+ #include "hw/core/cpu.h"
+@@ -269,6 +270,50 @@
+     }
+ }
+ 
++/* POMPPC tcg/0051 (x-tb-head): counters, printed at exit */
++static uint64_t tbh_count[TBH_N];
++static bool tbh_atexit;
++
++static void tbh_report(void)
++{
++    fprintf(stderr, "tb-head: x-tb-head=%u ; accès d'E/S : %" PRIu64
++            " par la dernière instruction de leur bloc, %" PRIu64
++            " au milieu (recompilés), %" PRIu64 " hors bloc, %" PRIu64
++            " instruction introuvable ; chaînages : %" PRIu64
++            " vers l'avant (après la vérification), %" PRIu64
++            " vers l'arrière ; vérification : %" PRIu64 " identiques, %"
++            PRIu64 " DIVERGENCES\n", tcg_tb_head,
++            qatomic_read(&tbh_count[TBH_IO_LAST]),
++            qatomic_read(&tbh_count[TBH_IO_MID]),
++            qatomic_read(&tbh_count[TBH_IO_OUT]),
++            qatomic_read(&tbh_count[TBH_IO_NOFIND]),
++            qatomic_read(&tbh_count[TBH_LINK_FWD]),
++            qatomic_read(&tbh_count[TBH_LINK_BACK]),
++            qatomic_read(&tbh_count[TBH_VERIFY_OK]),
++            qatomic_read(&tbh_count[TBH_VERIFY_BAD]));
++}
++
++void pomppc_tb_head_bad(CPUState *cpu, uintptr_t retaddr, bool derived)
++{
++    pomppc_tb_head_stat(TBH_VERIFY_BAD);
++    if (qatomic_read(&tbh_count[TBH_VERIFY_BAD]) <= 8) {
++        TranslationBlock *tb = retaddr ? tcg_tb_lookup(retaddr) : NULL;
++        fprintf(stderr, "tb-head: DIVERGENCE cpu %d : can_do_io rangé %d,"
++                " déduit %d, retaddr %p, bloc pc 0x%" VADDR_PRIx
++                " (%u instructions)\n", cpu->cpu_index, cpu->neg.can_do_io,
++                derived, (void *)retaddr, tb ? tb->pc : 0,
++                tb ? tb->icount : 0);
++    }
++}
++
++void pomppc_tb_head_stat(int what)
++{
++    if (!qatomic_read(&tbh_atexit) && !qatomic_xchg(&tbh_atexit, true)) {
++        atexit(tbh_report);
++    }
++    qatomic_inc(&tbh_count[what]);
++}
++
+ static void rv_start(void)
+ {
+     if (!qatomic_read(&rv_atexit)) {
+@@ -1413,8 +1458,18 @@
+         goto out_unlock_next;
+     }
+ 
+-    /* patch the native jump address */
+-    tb_set_jmp_target(tb, n, (uintptr_t)tb_next->tc.ptr);
++    /*
++     * patch the native jump address.  POMPPC tcg/0051 (x-tb-head,
++     * TB_HEAD_FWD): towards a higher pc, past the exit-request check.
++     */
++    if ((tcg_tb_head & TB_HEAD_FWD) && tb_next->head_skip) {
++        bool fwd = tb_next->pc > tb->pc || tcg_tb_head_mutant == 1;
++        tb_set_jmp_target(tb, n, (uintptr_t)tb_next->tc.ptr +
++                          (fwd ? tb_next->head_skip : 0));
++        pomppc_tb_head_stat(fwd ? TBH_LINK_FWD : TBH_LINK_BACK);
++    } else {
++        tb_set_jmp_target(tb, n, (uintptr_t)tb_next->tc.ptr);
++    }
+ 
+     /* add in TB jmp list */
+     tb->jmp_list_next[n] = tb_next->jmp_list_head;
+@@ -1862,6 +1917,17 @@
+     }
+ 
+     tb_jmp_cache_bits_frozen = true;          /* POMPPC tcg/0011 */
++    if (tcg_tb_head && icount_enabled()) {    /* POMPPC tcg/0051 */
++        warn_report("x-tb-head ignoré avec icount");
++        tcg_tb_head = 0;
++    }
++    if (tcg_tb_head && getenv("POMPPC_TBHEAD_MUTANT")) {
++        /*
++         * épreuves (tools/tcg/tbhproof.sh) : 1 = toute arête chaînée après la
++         * vérification, 2 = la règle de can_do_io à l'envers
++         */
++        tcg_tb_head_mutant = atoi(getenv("POMPPC_TBHEAD_MUTANT"));
++    }
+     cpu->tb_jmp_cache = g_new0(CPUJumpCache, 1);
+     tlb_init(cpu);
+ #ifndef CONFIG_USER_ONLY
