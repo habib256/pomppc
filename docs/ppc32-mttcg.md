@@ -589,3 +589,31 @@ bannière dit « ppc64 » (c'est le chemin qui fait foi). Métrique : CPU de QEM
 Si `PPC32MT=1` devient le défaut, reconstruire `~/src/qemu/build-fast` avec 0049-0050 et un
 profil `--cible ppc32mt` (ou `les-deux`) entraîné **sur les jeux** (`--banc matrice`, VM
 quotidienne, hôte au repos), puis refaire cet A/B contre lui.
+
+## 13. A/B en jeu sur la VM quotidienne, binaires rapides (23/10, 16 h 55 - 19 h)
+
+`bench/ppc32mt-2310/chaine-fast.sh`, hôte au repos (le premier A/B `p32mt-*`, joué avec la VM de
+l'agent d'endurance à côté, est **écarté** : dispersion 8-24 %). f64 = `~/src/qemu/build-fast`
+(ppc64, binaire quotidien), f32 = `~/src/qemu-ppc32mt/build-fast-mt` (ppc 32 bits en MTTCG, PGO
+entraîné sur la cible 32 bits) ; SMP=2, 3 parties par bras en fenêtre, 2 en plein écran.
+
+| jeu (ms/image, médianes) | f64 | f32 | écart |
+|---|---|---|---|
+| DOOM 3, fenêtre | 94,9 | **87,6** | **−7,7 %** (les 3 parties f32 sous les 3 f64) |
+| UT2004, fenêtre | 42,7 | **40,5** | −5,1 % |
+| Marble Blast, fenêtre | 10,0 | **9,3** | −7,0 % |
+| Zen, fenêtre | 5,1 | **4,8** | −5,9 % |
+| DOOM 3, plein écran | 92,8 | **89,0** | −4,1 % |
+| UT2004, plein écran | 46,6 | **40,8** | −12,4 % |
+
+Dispersion 0,7-5,9 % par bras. Partie DOOM 3 vérifiée sur f32 (`x-vfp-native-verify`,
+`x-vmx-verify`, `x-ret-verify`, `x-tb-verify`, 202,7 ms/image) : 2 094 757 866 opérations VFP,
+2 324 819 440 permutations et 159 726 832 rangements VMX, 376 193 171 lectures de la base de
+temps, **0 divergence** ; `x-ret-verify` : 8,1 G blocs en ligne, 0 divergence, et **un** cas
+« sans traduction » au démarrage (`pc 0x5605d88`, BootX), la classe connue du §35 de `tcg-g4.md`.
+
+**Verdict : le G4 sur la cible 32 bits gagne sur les quatre jeux, en fenêtre comme en plein
+écran.** Fusionné éteint (`PPC32MT=1`). Pour le défaut sur Linux x86-64 : reconstruire la
+référence `~/src/qemu` avec 0049-0050 (VM quotidienne arrêtée), entraîner `build-fast` sur les
+jeux (`pgo-train.sh --banc matrice --cible ppc32mt`), puis `PPC32MT` à 1 par défaut ; parité
+arm64 sur le M4 (construction, `atomtest`, preuves du §30.5) avant de l'allumer là-bas.
