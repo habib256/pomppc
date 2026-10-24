@@ -107,12 +107,12 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête.
 
 - [ ] **[TCG — M4] Séance de parité du 25/10 au soir** (`docs/parite-m4-2510.md`) : 0049-0050
-  (MTTCG 32 bits), série 0031-0039, 0045-0047, 0051, 0040-0043, dans cet ordre, puis A/B et
-  défauts sur `Darwin:arm64`. Sur le PC, tout cela est prouvé et allumé : 0040-0047 le 20-21/10,
+  (MTTCG 32 bits), série 0031-0039, 0045-0047, 0051, 0052, 0040-0043, dans cet ordre, puis A/B
+  et défauts sur `Darwin:arm64`. Sur le PC, tout cela est prouvé et allumé : 0040-0047 le 20-21/10,
   0049-0050 le 23/10, 0051 le 24/10 (DOOM 3 à 79,3 ms/image).
-- [ ] **[TCG — PC] 0052 TLB par base, 0053 AltiVec flottant connu** : agents en cours le 24/10 ;
-  la partie vérifiée et l'A/B en jeu sont à jouer en série par la session principale
-  (`docs/vitesse-doom3-x86.md` §16-§17).
+- [x] **[TCG — PC] 0052 TLB par base, 0053 AltiVec flottant connu** (25/10) : 0052 fusionné et
+  allumé (DOOM 3 −2,2 %) ; 0053 juste mais neutre en jeu, non fusionné (`archive/0053-vfp-known`).
+  Rangements de 0052 (piste par compteur de génération, §41.7) : ouvert.
 
 - [ ] **[TCG — M4] Parité arm64 de 0031-0035** : `x-tlb-precise`, `x-lmw-inline`,
   `x-dcbz-inline` (0031, 0032, 0035) et les émetteurs aarch64 de `x-fp-native-cmp` /

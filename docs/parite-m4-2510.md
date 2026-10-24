@@ -17,9 +17,10 @@ Tout le reste ci-dessous est éteint sur le M4.
 | 0051 | `lfs` producteur (`LFSKNOWN`) : DOOM 3 −9,5 % | émetteur aarch64 (`fcvt d, s`, `ccmp`) | **écrit, jamais exécuté** | `fpproof.sh -DFPPROOF_LFSK`, `lfskuser.sh … l 0 100000000` et `cmp` avec un `qemu-ppc` linux-user du M4, `lfsk-mut.py` à porter sur aarch64 (§40.7) |
 | 0031-0035, 0037-0039 | `TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP` | 0033-0034 : émetteurs `tcg/0037`, `0038` | **écrits, jamais exécutés** | `tools/tcg/m4-serie-0031-0035-proofs.sh prep host guest mut` (`docs/parite-arm64-0031-0035.md` §5) |
 | 0040-0043 | `DIRTYSKIP PTEGMAP JC2WAY` : DOOM 3 −4,4 % | aucun (C commun) | à construire | vérificateurs, empreintes (`docs/tcg-g4.md` §36.7) |
-| 0052, 0053 | TLB par base, AltiVec flottant connu | émetteurs aarch64 | en cours sur le PC (agents) | seulement s'ils sont fusionnés d'ici là |
+| 0052 | TLB par base (`TLBBASE`, qemu-system-ppc seul) : DOOM 3 −2,2 % | émetteur aarch64 (chemin court des chargements couverts) | **écrit, jamais exécuté** (7 encodages relus) | `tlbbproof` (modèle aarch64), job `tlbbtest` dans la VM, `tlbbnu.S`, `tlbb-mut.py` / `tlbbnu-mut.sh` à porter sur aarch64, partie vérifiée `x-tlb-base-verify` (`docs/tcg-g4.md` §41.3, §41.7) |
+| 0053 | AltiVec flottant connu | — | **non fusionné** (juste, neutre en jeu sur le PC ; `archive/0053-vfp-known`) | rien à faire |
 
-Pour 0045-0047, 0051 et 0052-0053, la chaîne 0045 → 0051 dépend de 0033 (`ppc_fp32` et le
+Pour 0045-0047 et 0051, la chaîne 0045 → 0051 dépend de 0033 (`ppc_fp32` et le
 talon). **0037 doit donc passer avant**, c'est-à-dire la série 0031-0039.
 
 ## 2. L'ordre de la séance
@@ -38,11 +39,14 @@ talon). **0037 doit donc passer avant**, c'est-à-dire la série 0031-0039.
    mutants, puis une partie vérifiée de Marble Blast.
 4. **0051.** Lancer `fpproof` en variante LFSK, `lfskuser.sh` (2^32 mots), les mutants
    aarch64, puis une partie DOOM 3 vérifiée (`x-fp-verify`).
-5. **0040-0043.** Vérificateurs et empreintes.
-6. **A/B en jeu**, VM quotidienne du M4 au repos :
+5. **0052.** Lancer `tlbbproof`, le job `tlbbtest` (ref contre tlbb, même empreinte), `tlbbnu`, les mutants
+   aarch64, puis une partie vérifiée (`x-tlb-base-verify`). Rien à faire sur qemu-system-ppc64 :
+   0052 n'agit qu'avec `PPC32MT=1`, donc après l'étape 1.
+6. **0040-0043.** Vérificateurs et empreintes.
+7. **A/B en jeu**, VM quotidienne du M4 au repos :
    - d'abord la série entière contre le binaire actuel, sur DOOM 3, UT2004 et Marble Blast ;
    - puis, si l'écart total déçoit, levier par levier.
-7. **Allumer** sur `Darwin:arm64` ce qui est prouvé et gagnant. Reconstruire `build-fast` avec
+8. **Allumer** sur `Darwin:arm64` ce qui est prouvé et gagnant. Reconstruire `build-fast` avec
    un profil PGO pris sur les jeux (`pgo-train.sh --cible ppc32mt`). Noter les chiffres dans la
    doc de chaque patch.
 
@@ -58,3 +62,12 @@ suffit à elle-même.
   pareil.
 - `perf` n'existe pas sous macOS. Les bancs du PC qui s'en servent (`ppc32mt-bench.sh`) sont à
   adapter, ou à remplacer par `tools/tcg/jit-m4-proof.sh` avec `PPC32MT=1`.
+
+## 4. État du PC au départ (25/10, nuit)
+
+- Dépôt : `main` poussé. Les essais non fusionnés sont sous les étiquettes `archive/*` (plugin vers
+  l'hôte, lot d3q, régions LLVM, 0053).
+- Défauts sur Linux x86-64 : ceux du 21/10, plus `PPC32MT`, `LFSKNOWN` et `TLBBASE`.
+- DOOM 3 sur le PC : 79,3 ms/image avec 0051, avant 0052. Le point avec 0052 est au §41.6 bis de
+  `docs/tcg-g4.md`.
+- Sur le M4, commencer par `git pull`, puis l'étape 0 ci-dessus.
