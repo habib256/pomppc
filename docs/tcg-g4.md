@@ -4967,6 +4967,9 @@ Le gain en temps rejoint presque celui en instructions (~−20 % du code des blo
 le code retiré (conversion entière et tests d'opérande) était sur le chemin critique.
 **Allumé par défaut sur Linux x86-64** (`LFSKNOWN=1`, 24/10) ; la référence `~/src/qemu` et
 `build-fast` sont reconstruits avec 0051 (`bench/lfsk-2410/chaine-defaut.sh`).
+Binaire final (`build-fast`, PGO pris sur les 4 jeux en ppc32mt avec `x-lfs-known`), contre le
+rapide de l'agent (PGO de la VM de dev), `x-lfs-known` des deux côtés : DOOM 3 82,0 → **79,3**
+(−3,3 %, `lfsk-final-d3`). **Point de DOOM 3 au 24/10 au soir : 79,3 ms/image en fenêtre.**
 
 ### 40.7 Ce qui reste ouvert
 
