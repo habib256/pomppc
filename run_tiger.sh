@@ -171,6 +171,10 @@ case "$(uname -s):$(uname -m)" in
     # (tcg/0050) au lieu de ppc64 — binaires rapides, DOOM 3 −7,7 %, UT2004 −5 %, mb −7 %,
     # zen −6 % ; sondé, repli sur ppc64 si le binaire n'a pas le patch. Pas encore sur le M4.
     export PPC32MT="${PPC32MT:-1}"
+    # Depuis le 24/10/2026 (docs/tcg-g4.md §40) : LFSKNOWN (tcg/0051, lfs producteur de
+    # x-fp-known) — partie DOOM 3 vérifiée 0 divergence, DOOM 3 −9,5 %, UT2004 −2 %.
+    # L'émetteur aarch64 n'a jamais tourné : pas encore sur le M4.
+    export LFSKNOWN="${LFSKNOWN:-1}"
     ;;
   Darwin:arm64)
     export VFPNATIVE="${VFPNATIVE:-1}" LMWVEC="${LMWVEC:-1}" JCWORD="${JCWORD:-1}"
