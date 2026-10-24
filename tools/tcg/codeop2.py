@@ -5,11 +5,21 @@
 invité (tools/tcg/tbreplay.c, deux réglages) comparés poste par poste, chaque bloc pondéré par
 le temps perf de son adresse dans la partie d'origine (tools/tcg/codeop.py, même poids pour
 les deux) : instructions x86 par instruction invité, par opcode et en tout, sur les blocs
-présents dans les deux journaux. docs/tcg-g4.md §40.5."""
+présents dans les deux journaux. docs/tcg-g4.md §40.5. VMX=1 dans l'environnement : les
+instructions AltiVec par nom (vmaddfp, vperm…, tools/tcg/vfpksim.py) au lieu de « vmx »
+(docs/tcg-g4.md §42)."""
 import sys, collections
 sys.path.insert(0, __file__.rsplit('/', 1)[0])
 import codeanat as C
-from codeop import name
+from codeop import name as name0
+import os
+
+
+def name(w):
+    if w >> 26 == 4 and os.environ.get('VMX'):
+        import vfpksim
+        return vfpksim.decode(w)[0] or 'vmx'
+    return name0(w)
 from capstone import Cs, CS_ARCH_X86, CS_MODE_64
 
 

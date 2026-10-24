@@ -68,6 +68,13 @@ CASES = [
     ("0x1e270000", 0, 2, None, None, "fmov s0, w2"),
     ("0x1e22c000", 0, 0, None, None, "fcvt d0, s0"),
     ("0x9e660000", 7, 0, None, None, "fmov x7, d0"),
+    # --- tcg/0053 (x-vfp-known, NON exécuté : les registres nouveaux de l'émetteur — sans
+    # test d'opérande le masque est u = V18 ; porte connue : cbnz sur PVF_T1 = X10) ---
+    ("PVF_NOT16B", 18, 18, None, None, "mvn v18.16b, v18.16b"),
+    ("PVF_UMAXV4S", 18, 18, None, None, "umaxv s18, v18.4s"),
+    ("PVF_UMOVWS0", 10, 18, None, None, "mov w10, v18.s[0]"),
+    ("0xb5000000", 10, 0, None, None, "cbnz x10, ."),
+    ("0xb5000000", 9, 0, None, None, "cbnz x9, ."),
 ]
 
 

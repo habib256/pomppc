@@ -4987,3 +4987,359 @@ rapide de l'agent (PGO de la VM de dev), `x-lfs-known` des deux côtés : DOOM 3
   émettre la conversion entière hors ligne au lieu de l'appel ; non fait).
 - Les opérandes venus d'un `lfd` restent testés (un double quelconque n'est pas `fpi_zon()`) ;
   `fmr`/`fneg`/`fabs` ne propagent toujours rien.
+
+## 42. L'AltiVec flottant sans ses contrôles redondants : `tcg/0053` (`x-vfp-known`)
+
+24/10/2026, PC (i7-10700F). Copie isolée `~/src/qemu-vfpk` (rsync de `~/src/qemu`, série
+0001-0051 ; commits `base` puis `tcg/0053`), binaire -O2 `~/src/qemu-vfpk/build/qemu-system-ppc` ;
+banc linux-user `~/src/qemu-vfpku` (`fpnatcmp-userhack.py`, qui imprime maintenant aussi le
+bilan final de `x-vfp-native-verify` et de `x-vfp-known` à la sortie) ; VM de dev
+`disks/tiger-dev-vfpk.raw` (copie de `tiger-dev.raw`, 10.4.11, SSH 2282), SMP=2 en MTTCG sur
+`qemu-system-ppc`, toutes les options de production de `run_tiger.sh` (`x-lfs-known` compris).
+Un autre agent construisait et faisait tourner sa VM en même temps (`tcg/0052`, §41), la VM
+quotidienne était hors de portée : **les temps sont indicatifs**.
+
+### 42.1 Le constat
+
+`docs/vitesse-doom3-x86.md` §17 : l'AltiVec flottant fait ~10 % du code x86 exécuté par les
+blocs chauds de DOOM 3 ; un `vmaddfp` y fait 54 instructions x86 dont une seule calcule
+(`vfmadd231ps`). Le reste (le `vmaddfp` 0x26f010 du bloc 0x26f000, tel quel) :
+
+| poste | instructions | ce que c'est |
+|---|---|---|
+| porte | 12 | deux fenêtres de 64 bits de `vec_status` (`env+0xad2c` & 0x3070010 = 0x10, `env+0xad30` & 2^32 = 0) : `mov`, `mov`/`movabs`, `and`, `mov`, `cmp`, `jne` chacune |
+| opérandes | 3 × 6, + 2 `vpbroadcastq` + `vpxor` | `pvf_zon()` sur vA, vB, vC : nul ou normal, voie par voie |
+| calcul | 3 `vmovdqa` + 3 `vpaddd` + `vfmadd231ps` | |
+| exemption, résultat | 4 + 2 `vpbroadcastq` + 6 | produit nul ; FLT_MIN < \|r\| < ∞ |
+| décision, rangement | `vmovmskps`, `cmp`, `jne`, `vmovdqa` | |
+
+**Ce que la porte teste vraiment.** Ce n'est ni le VSCR ni le MSR : c'est
+`vfp_can_use_fpu(&env->vec_status)` (`int_helper.c`) — `!no_hardfloat`, drapeau *inexact* déjà
+posé, arrondi au plus proche, ni `rebias_overflow` ni `rebias_underflow` — mise en masques et
+valeurs sur les deux fenêtres par `ppc_vfn_gate_init()` (§28.4). Or :
+- l'arrondi de `vec_status` n'est posé qu'à l'initialisation (AltiVec arrondit toujours au plus
+  proche), `no_hardfloat` à la réalisation (`x-fast-fp`), les deux `rebias` jamais ;
+- VSCR[NJ] (`mtvscr`, `ppc_store_vscr()`) ne touche que `flush_to_zero` et
+  `flush_inputs_to_zero`, **hors de la porte** ;
+- MSR[VEC] est une donnée de traduction (`altivec_enabled`, `hflags`) ; `mtmsr` finit le bloc ;
+- le seul champ de la porte qui bouge à l'exécution est donc le drapeau *inexact*, et
+  softfloat ne fait que **l'ajouter** (`float_raise`) : aucune fonction appelée par les helpers
+  AltiVec ne le retire (les seuls `set_float_exception_flags`/`set_float_rounding_mode` sur
+  `vec_status` sont à l'initialisation ; `vct*` et `vrfi*` travaillent sur une copie).
+La porte, une fois ouverte, le reste jusqu'au prochain `reset` (ou la remise de
+`vec_status` par un vérificateur sur divergence, ou un chargement d'état) ; elle n'est fermée
+qu'au démarrage, tant qu'aucune opération AltiVec inexacte n'a eu lieu. Un helper peut
+cependant la laisser **fermée** derrière une instruction qui l'a trouvée fermée (résultat
+exact) : d'où le garant et la sortie `X` ci-dessous, comme `FPK_X` au §37.2.
+
+Mesuré (nouveau `tools/tcg/vfpksim.py`, simulation statique sur le journal
+`bench/tcg/t2/d3-asm-2410.log`, blocs pondérés par le profil `x86-asm-2410`) :
+
+| règles | porte connue | opérandes connus |
+|---|---|---|
+| producteurs seuls, tout appel de helper tue | 75,1 % | 15,3 % |
+| + liste blanche de helpers (`vperm`, `vmaxfp`, `vminfp`, `vrefp`, `vrsqrtefp`, `vrfi*` : vD seul) | **93,3 %** | 24,0 % |
+| + propagation (`vmrghw`, `vmrglw`, `vspltw`, `vsldoi` par mots, `vor vD,vA,vA`, zéros) | 93,3 % | **33,3 %** |
+
+`vperm` est un **appel** (`helper_VPERM_FAST`, §10) : sans liste blanche, chaque `vperm` du bloc
+(18,4 % des portes) referme tout. Les opérandes : 33,9 % viennent d'avant le bloc, 23,9 %
+d'un producteur flottant du même bloc, 10,7 % d'un `vperm`, 7,9 % d'un `vsldoi`, 8,5 % de
+`vmrghw`/`vmrglw`, 4,5 % de `vspltw`, 5,4 % de `lvx`. `vcmp*fp` : 3 % des opérations
+flottantes AltiVec pondérées ; `vcf*`, `vct*` : 0 (non traités, §42.2).
+
+### 42.2 La conception
+
+**Invariant** (au début de chaque instruction du bloc en cours de traduction) : tout AVR de
+`ctx->vfpk_valid` contient, chaque fois que le code généré arrive là, un simple nul ou normal
+**dans chacune de ses quatre voies** (`vfp_zon()` : exposant 1..254, ou ±0 — exactement ce
+qu'accepte le test d'opérande de l'émetteur) ; si `ctx->vfpk_gate`, la porte est ouverte.
+
+- **Producteurs** : l'op `INDEX_op_ppc_vfp` de `vaddfp`, `vsubfp`, `vmaddfp`, `vnmsubfp`.
+  Son chemin court n'écrit que des voies nulles ou normales : test de résultat
+  (FLT_MIN < |r| < ∞), ou voie exemptée — deux opérandes nuls (add/sub : ±0), produit nul
+  (FMA : r = b, nul ou normal, ou ±0) ; `vnmsubfp` nie après. Et il n'écrit rien dans
+  `vec_status`. vD entre dans l'ensemble, l'op en est le producteur (`vfpk_prod[vD]`) ; une
+  op qui a testé la porte elle-même en devient la garante (`vfpk_gate_prod`).
+- **Consommateurs** : les mêmes ops. Un opérande connu reçoit `PPC_VFPK_A/B/C` dans le
+  sélecteur (l'émetteur omet son test), la porte connue `PPC_VFPK_G` ; ils or'ent
+  `PPC_VFPK_R` (resp. `PPC_VFPK_X`) dans le sélecteur de leurs producteurs (resp. du garant),
+  encore argument de leur `TCGOp`. **La décision chemin court / helper ne change pas** : les
+  tests omis passeraient (lemmes L1-L3, §42.3).
+- **Talon d'un producteur** : le helper d'origine, hors ligne, peut écrire n'importe quoi et
+  laisser la porte fermée. Avec `R` ou `X`, le talon appelle ensuite
+  `ppc_vfpk_check(env, sélecteur, adresse de retour, déplacement de vD)` : avec `R` et une voie
+  de vD qui n'est pas `vfp_zon()`, ou `X` et la porte fermée, **sortie de bloc** —
+  l'instruction est complète (le helper a écrit vD et `vec_status` dans `env`), donc
+  `cpu_restore_state()`, `nip + 4`, `cpu_loop_exit()`, comme `fpk_exit()` (§37.2), sans rien
+  à recopier. Sans `R` ni `X`, le talon est celui d'avant (un seul appel).
+- **Les globales avant une op qui peut sortir** : `INDEX_op_ppc_vfp` n'était pas une op à
+  effets de bord (§28.4 : « un appel qui ne touche aucune globale ») ; une globale sale (un GPR,
+  le CR) pouvait rester dans un registre de l'hôte à travers elle. Avec `R` ou `X`, la
+  vivacité la traite comme une op à effets de bord (`la_global_sync`, `tcg.c`), et
+  l'allocateur vérifie que tout est rangé (`sync_globals`). Les autres ops `ppc_vfp` ne
+  changent pas (même code qu'avant, à l'octet, quand `x-vfp-known` est éteint).
+- **Propagation** (après l'instruction, si elle n'a rien appelé ni étiqueté) : `vmrghw`,
+  `vmrglw` (vA et vB connus), `vspltw` (vB), `vsldoi` par 0, 4, 8, 12 octets (vA, et vB si le
+  décalage n'est pas nul), `vor vD,vA,vA` (vA) déplacent des voies entières : vD connu, ses
+  producteurs sont ceux des sources (au plus 4, sinon pas de propagation). `vxor vD,vA,vA` et
+  `vspltis[bhw] vD,0` écrivent des zéros : vD connu, sans producteur. `vperm` ne propage rien
+  (un octet de contrôle quelconque fabrique n'importe quel mot).
+- **Toute autre instruction** passe par `vfpk_scan()` sur les ops TCG qu'elle a émises : un
+  rangement (`st8/16/32`, `st`, `st_vec`, taille exacte) dans la zone des AVR d'`env` retire
+  les AVR touchés, dans `vec_status` retire la porte ; un rangement par une autre base
+  qu'`env`, un appel de helper, une étiquette, un branchement retirent tout — sauf les
+  helpers de la **liste blanche** (`helper_VPERM`, `helper_VPERM_FAST`, `vmaxfp`, `vminfp`,
+  `vrefp`, `vrsqrtefp`, `vrfin/m/p/z`, appelés par une instruction de l'opcode 4 : n'écrivent
+  que `*r` = vD et n'ajoutent que des drapeaux à `vec_status`), qui ne retirent que vD. Les
+  ops `ppc_fp32` (FPR, FPSCR, `fp_status`, CR ; peuvent sortir du bloc) ne retirent rien ; les
+  autres sortes de `ppc_vfp` (`vcmp*fp`, `vcf*`, `vct*` de 0034 : vD, VSCR[SAT], drapeaux
+  ajoutés) retirent vD. `qemu_ld/st` (mémoire de l'invité ; une faute sort du bloc) ne retirent
+  rien, ni une op à effets de bord inconnue qui n'appelle rien (choix de 0045 : une op
+  nouvelle qui écrirait les AVR d'`env` par-derrière devra être ajoutée ici, comme
+  `ppc_fp32` et `ppc_vfp` ; c'est le cas de `qemu_ld_tlbb0/1` de 0052, qui ne les écrivent pas).
+- **`mtvscr`** est un helper hors liste : il retire tout (il ne pourrait pourtant fermer la
+  porte, et ne change pas le caractère nul ou normal d'un AVR — règle aveugle, comme 0045).
+- **Coupé** avec icount, sur un CPU avec VSX (helpers qui écrivent les VSR, donc les AVR, en
+  C), et dans un bloc instrumenté par un greffon TCG (`plugin_enabled`, relu à chaque op).
+- **Non traités** : `vcmp*fp` en consommateurs (3 % des ops pondérées, leur test
+  « ni NaN ni dénormal » est plus faible), `vcf*` en producteurs (0 dans DOOM 3).
+- **Rechargement des AVR depuis `env`** : laissé. L'op est un pseudo-appel `CALL_CLOBBER`
+  (tous les XMM sont à elle) ; garder un résultat dans un registre d'une op à l'autre voudrait
+  faire de `ppc_vfp` une vraie op vectorielle TCG à opérandes `V128`. Gain en instructions :
+  le seul `vmovdqa` par opérande venu d'un producteur (24 % des opérandes, ~0,7 instruction par
+  op flottante AltiVec, ~0,1 % du code) ; en latence, la réexpédition rangement → chargement
+  (~5 cycles) sur une chaîne dépendante. Pas ici.
+
+Sélecteur de `INDEX_op_ppc_vfp` (`args[0]`, `include/tcg/tcg-op-common.h`) : `kind |
+PPC_VFPK_A 1<<8 | B | C | G 1<<11 | R 1<<12 | X 1<<13` ; `args[12]` (nouveau, 13 arguments) :
+`ppc_vfpk_check`, posé avec `R`/`X`. **Émetteur x86_64** : chaque test retiré l'est par un `if`
+sur son bit ; sans aucun test d'opérande, ni les deux `vpbroadcastq` des bornes d'opérande, ni
+le `vpand` final (le masque du résultat va directement à `vmovmskps`) ; `vpaddd tb` omis pour
+une FMA dont vB est connu (vB n'entre pas dans l'exemption) ; tous les tests présents (bits à
+0) : **la séquence d'avant, instruction pour instruction**. **Émetteur aarch64** : idem (`cbnz`
+sur le masque seul quand la porte est connue ; talon : `x0-x3` puis l'appel) — **écrit sur le
+PC, compilé par le clang 18 du NDK (`tools/tcg/a64syntax.sh` : `tcg/tcg.c` et `int_helper.c`
+passent), ses mots nouveaux relus contre l'assembleur de clang (`a64enc-check.py`, cinq cas
+tcg/0053 : OK), jamais exécuté**.
+
+Propriété `x-vfp-known` (n'agit qu'avec `x-vfp-native`), `VFPKNOWN=1 ./run_tiger.sh` (éteint),
+sondée par `build_qemu_qfb.sh` sur `qemu-system-ppc` ; vérifiée par `x-vfp-native-verify`
+(qui ne voit pas l'op qui quitte le bloc : son talon vient de faire le helper), bilan
+`x-vfp-known : N talons relus, M sorties de bloc (vD r, porte p)` à sa suite.
+
+### 42.3 La preuve
+
+**Hôte, les lemmes sur les 2^32 mots** (`tools/tcg/vfpkproof.c`, `cc -O2 -mavx -mfma`, 8 min) :
+
+| lemme | épreuve | écarts |
+|---|---|---|
+| L1 : test d'opérande x86_64 = test aarch64 = `vfp_zon()` du talon (un opérande connu passerait le test omis) | 4 294 967 296 mots (4 261 412 866 nuls ou normaux) | **0** |
+| L2 : test de résultat (x86_64 = aarch64) ⇒ `vfp_zon()` (le chemin court produit des voies connues) | 4 261 412 862 mots acceptés | **0** |
+| L3 : voies exemptées — somme de deux zéros ; `vfmadd`/`vfmsub` (puis négation) d'un produit nul (a = ±0, c parmi 10 nuls et normaux de bord, et l'inverse) et de **tout** b nul ou normal ⇒ `vfp_zon()` | 306 821 726 360 voies | **0** |
+
+La porte elle-même n'a pas de lemme nouveau : son test est celui de 0022 (§28.4, `vfpproof.sh`),
+le talon la relit par `vfp_can_use_fpu()`, la fonction même dont les masques sont tirés.
+
+**Le vrai émetteur, banc linux-user** (`tools/tcg/vfpkuser.sh Q cmp 4096` : bras ref = options
+de production d'AltiVec et du flottant, vfpk = + `x-vfp-known`, ver = + `x-vfp-native-verify` +
+`x-vfp-native-cmp-verify`). Trois modes nouveaux de `vfptest` (`tools/guest/jobs/vfptest`) :
+- **`k`** : programmes aléatoires en ligne droite (8 à 48 instructions, un bloc) écrits dans un
+  tampon exécutable, sur v1-v8 : les quatre opérations (opérandes souvent égaux), les
+  propagateurs (et leurs formes qui ne propagent pas : `vor` quelconque, `vxor` quelconque,
+  `vsldoi` par 1-3, 5-7… octets, `vspltis` non nul), les helpers de la liste blanche, `vcmp*fp(.)`,
+  `vcf*`, `vct*`, `lvx`, `stvx`, entiers (`vadduwm`, `vand`, `vslw`, `vsubuwm`), `mtvscr`/`mfvscr`,
+  `fadds`/`fmuls`, `b .+4`, `addi r7` (une globale sale avant une sortie de bloc) ; entrées :
+  normales à exposants larges, voisines de FLT_MIN, zéros, grands (débordements en chaîne),
+  dénormaux, catalogue ; trois phases (NJ = 0, 1, au hasard) ; v1-v8, VSCR, CR6, r7 et la zone
+  des `stvx` hachés ;
+- **`kx`** : les mêmes sur des valeurs exactes et sans rien qui pose *inexact* : la porte de
+  `vec_status` reste **fermée** au début de chaque processus — le seul moyen de faire sortir des
+  blocs par la porte (`X`) ;
+- **`kp`** : un bloc fixe — deux producteurs `vmaddfp` dont le second déborde souvent, fusionnés
+  (`vmrghw`, `vmrglw`, `vsldoi 8`, `vspltw`) et consommés par des `vmaddfp` dont l'autre facteur
+  a des voies nulles (voie exemptée : un infini pris à tort pour connu y donnerait le NaN de
+  l'hôte), consommateurs tirés au hasard (un bloc sur quatre ne lit le second producteur
+  qu'en seconde source).
+Le programme marque tous les VR dans VRSAVE le temps du bloc, et `kp` met à zéro les VR qu'un
+consommateur non tiré laisserait : sans cela Tiger, qui ne sauve à la préemption que les VR de
+VRSAVE, perdait des registres — empreintes instables dans la VM d'un démarrage à l'autre, **dans
+les trois bras, ref compris** (premier passage du 24/10, écarté), sans rapport avec 0053 ; les
+modes d'origine, compilés par gcc, n'ont rien eu.
+
+| mode (`vfpkuser.sh … cmp 4096`) | empreinte ref = vfpk = ver | vérificateur | `x-vfp-known` (talons relus / sorties : vD, porte) |
+|---|---|---|---|
+| `k 4096 0` (98 304 programmes) | `82857a5fc8efb203` | 992 848 vérifiées, **0** | 392 976 / 164 208 : 164 208, 0 |
+| `k 4096 7` | `109c5e1f7a53a80a` | 988 748, **0** | 390 525 / 163 516 : 163 516, 0 |
+| `kx 1024 0` / `kx 1024 7` | `e0496dced2925c81` / `0d8893908f438e65` | 380 185 / 379 122, **0** | sorties porte 12 / 147 |
+| `kp 65536 0` / `kp 65536 7` | `eb89652f855c4c8a` / `571a4f4a803640ea` | 516 458 / 515 724, **0** | 106 134 / 105 972 sorties (vD) |
+| d'origine (NVEC 65 536) | `2baee26a93ecb88c` | 1 036 288, **0** | 137 077 talons, 0 sortie |
+| `c` (0034) | `7fa1f7bd6d5fe064` | — | 0 |
+| `kx` × 16 processus neufs (`vfpkuser.sh Q kx 16 256`) | 16/16 identiques | 1 505 913, **0** | 124 719 sorties, dont **1 470 par la porte** |
+
+**Mutants** (`tools/tcg/vfpk-mut.py ~/src/qemu-vfpku` : une substitution, `ninja qemu-ppc`, le
+fichier rendu ; `vfptest k 512`, `kx 256`, `kp 16384`, sans puis sous vérificateur, contre
+l'empreinte non mutée ; « lignes » : lignes d'empreinte différentes sur 4, 4, 3) :
+
+| mutant | k / kx / kp : lignes | vérificateur (k / kx / kp) | verdict |
+|---|---|---|---|
+| le talon n'appelle pas la vérification | 4 / 4 / 3 | 588 / 269 / 10 536 | **attrapé** |
+| la vérification ne sort jamais pour vD | 4 / 4 / 3 | 588 / 268 / 10 536 | **attrapé** |
+| sortie sans `nip + 4` | délai dépassé (l'instruction se refait sans fin) | — | **attrapé** |
+| globales non rangées avant une op qui peut sortir (`la_global_sync` retiré) | 4 / 4 / 0 (r7) | 0 | **attrapé** (par la sortie seule) |
+| l'émetteur omet le test de vB quand vA est connu | 4 / 4 / 2 | 193 / 135 / 17 | **attrapé** |
+| `R` jamais posé sur le producteur | 4 / 4 / 3 | 588 / 268 / 10 536 | **attrapé** |
+| `vsldoi` propage à tout décalage | 3 / 3 / 0 | 3 / 14 / 0 | **attrapé** |
+| `vor` propage même si vA ≠ vB | 3 / 3 / 0 | 3 / 5 / 0 | **attrapé** |
+| `vxor` donne un zéro même si vA ≠ vB | 4 / 4 / 0 | 36 / 90 / 0 | **attrapé** |
+| `vspltis*` donne un zéro pour toute constante | 3 / 3 / 0 | 48 / 47 / 0 | **attrapé** |
+| `vspltw` : source vA (le champ UIM) au lieu de vB | 2 / 0 / 0 | 0 | **attrapé** |
+| propagation : un seul producteur gardé | 0 / 0 / 3 | 0 / 0 / 2 903 | **attrapé** (par `kp`) |
+| un rangement dans `env` ne retire rien | 4 / 4 / 0 | 38 / 99 / 0 | **attrapé** |
+| un helper de la liste ne retire pas vD | 4 / 4 / 0 | 37 / 55 / 0 | **attrapé** |
+| `vcmp*fp`, `vcf*`, `vct*` ne retirent pas vD | 4 / 0 / 0 | 0 (*) | **attrapé** |
+| la vérification ne sort jamais pour la porte | 0 | 0 / **1** / 0 | attrapé par le vérificateur seul |
+| l'émetteur ne teste jamais la porte | 0 | 0 / **1** / **1** | attrapé par le vérificateur seul |
+| `X` jamais posé sur le garant | 0 | 0 / **1** / 0 | attrapé par le vérificateur seul |
+| test de vD laxiste (dénormaux acceptés) | 0 | 0 | équivalent |
+| tout appel de helper ne retire que vD | 0 | 0 | équivalent sur ce banc |
+
+(*) sous `x-vfp-native-cmp-verify`, l'appel du vérificateur après chaque `vcmp*fp` retire tout
+lui-même : le mutant n'y a plus d'effet. Les vérificateurs **réduisent** la couverture de
+`x-vfp-known` (chaque appel retire tout) : d'où les deux bras.
+
+**Les trois mutants de la porte** ne se voient que par le vérificateur, et c'est attendu : la
+porte ne garde que le drapeau *inexact* de `vec_status`, qu'aucune instruction de l'invité ne
+lit ; un chemin court pris porte fermée donne le même vD, il oublie seulement de poser
+*inexact* — ce que `x-vfp-native-verify`, qui compare le `vec_status` entier, voit (une fois :
+la porte ne se ferme qu'en début de processus `kx`).
+**Les deux non attrapés sont équivalents** : un vD de producteur ne peut être dénormal que
+si NJ = 0 (NJ = 1 : le helper rend zéro), NJ ne change pas dans le bloc (`mtvscr` retire tout),
+et à NJ = 0 le FPU de l'hôte (ni DAZ ni FTZ) calcule sur un opérande dénormal exactement ce
+que fait softfloat (vu : ~1 600 sorties de moins, 0 écart, 0 divergence) ; un infini ou un NaN,
+eux, restent sortis. Et tous les helpers qu'appellent ces programmes n'écrivent que vD (la
+liste blanche est une garde, pas une nécessité ici). **15 mutants attrapés par les résultats
+sur 15 qui en changent un, 3 par le vérificateur, 2 équivalents.**
+
+**Invité** (VM de dev, SMP=2, `qemu-system-ppc` en MTTCG, toutes les options de production,
+`tools/tcg/vfpkdev.sh`) :
+- modes d'origine (NVEC = 2^20) et `c` (2^18) : empreintes `2b7635b801b1d1eb` et
+  `2b1b440674aff477` **identiques** dans les bras ref, vfpk et vérifié ; `k 8192` et
+  `k 4096 7` (VRSAVE marqué) : `d50f7b67a418f6b2` et `9b2b96a19d7cf00a`, **identiques** dans
+  les trois bras (bras vérifié : 12 385 848 opérations vérifiées, **0 divergence**, 595 744
+  sorties de bloc) ; `kp 65536` graines 0 et 7 : `eb89652f855c4c8a` et
+  `571a4f4a803640ea`, **identiques** dans les trois bras **et à celles du banc linux-user**
+  (bras vérifié : 1 032 182 opérations, **0 divergence**, 212 106 sorties de bloc) ;
+- **bras vérifié** (`x-vfp-known` + `x-vfp-native-verify` + `x-vfp-native-cmp-verify`, bureau,
+  `vfptest`, puis Zenerchi et Marble Blast 120 s chacun, job `fpgames`) : **53 539 107
+  opérations vérifiées, 0 divergence** ; `vfp-native-cmp-verify` 0 divergence ;
+  `x-vfp-known : 10 951 874 talons relus, 1 370 242 sorties de bloc (vD 1 369 568, porte 674)`
+  (les sorties par la porte : au démarrage, avant la première opération inexacte — le bilan
+  du premier rapport en compte 4 sur les 4 premiers talons) ;
+- **jeux seuls sous vérificateur** (démarrage, bureau, Zenerchi puis Marble Blast, chauffe
+  110 s + 120 s chacun, ~12 min) : **33 747 316 opérations vérifiées, 0 divergence** ;
+  `x-vfp-known : 8 819 318 talons relus, 346 485 sorties de bloc (vD 345 831, porte 654)`,
+  soit ~1 % des opérations et ~500 sorties par seconde (~130 ns chacune, §37.4 : moins de
+  0,01 % d'un vCPU) ;
+- **tous les vérificateurs** (+ `x-vmx-verify`, `x-ret-verify`, `x-tb-verify`, `x-fp-verify`,
+  `x-fp-native-cmp-verify` ; `vfptest k`, Zenerchi, Marble Blast 60 s) : **0 divergence
+  partout** — 15 729 991 opérations VFP, 64 854 210 permutations et 16 488 058 rangements VMX,
+  6 593 341 631 opérations flottantes scalaires, 2,27 G blocs `x-ret-verify` en ligne ;
+  `x-vfp-known` : 112 425 sorties (porte 654).
+- **DOOM 3** : pas sur la VM de dev ; la partie vérifiée est la première commande du §42.6.
+
+### 42.4 Taille du code (blocs de DOOM 3 retraduits)
+
+`tools/tcg/vfpksize.sh` (modèle `lfsksize.sh`, §40.4) sur `bench/tcg/t2/d3-asm-2410.log`
+(1 083 blocs ; 4 perdus des deux côtés, les mêmes qu'au §40.4), options de production du
+flottant **et d'AltiVec** (`x-lfs-known` compris). Le bras ref donne exactement les chiffres du
+bras lfsk du §40.4 (66,3 octets par instruction, 907 622 octets de chemins lents) : **éteint,
+`x-vfp-known` ne change pas un octet**.
+
+| | ref | vfpk |
+|---|---|---|
+| AltiVec (`int/4` de `tcgsize.py`), octets par instruction | 106,7 | **81,1 (−24 %)** |
+| moyenne des 10 988 instructions | 66,3 | **63,3 (−4,5 %)** |
+| chemins lents (hors ligne) | 907 622 o | 990 905 o (+9 % : l'appel de la vérification dans les talons obligés, froid) |
+
+**Instructions x86 exécutées par instruction invité**, blocs pondérés par le temps de la partie
+profilée du 24/10 (`VMX=1 tools/tcg/codeop2.py`, nouveau réglage : les instructions AltiVec
+par nom ; 435 blocs communs) :
+
+| opcode | part des instr. invité | ref | vfpk | écart |
+|---|---|---|---|---|
+| `vmaddfp` | 2,8 % | 54,0 | **39,1** | −28 % |
+| `vaddfp` | 1,2 % | 45,1 | **22,5** | −50 % |
+| `vsubfp` | 0,2 % | 45,0 | 27,9 | −38 % |
+| `vnmsubfp` | 0,1 % | 56,0 | 38,7 | −31 % |
+| `vperm`, `vsldoi`, `vmrg[hl]w`, `vspltw`, `lvx`, `stvx`, flottant scalaire | — | inchangé | inchangé | 0 |
+| AltiVec en tout | 13,3 % | 21,3 | 15,8 | −26 % |
+| **tout** | 100 % | 16,35 | **15,61** | **−4,5 %** |
+
+Ramené au binaire système (le TLB logiciel des chargements en plus, ~17,8 instructions x86 par
+instruction invité depuis 0051) : ≈ **−4 %** des instructions des blocs chauds de DOOM 3, plus
+que l'estimation du §17 de `vitesse-doom3-x86.md` (−2,5 %) : la liste blanche (`vperm`) et la
+propagation y comptent. Le `vmaddfp` du §42.1 perd sa porte (12 instructions) ; un
+`vaddfp` dont les deux opérandes sont connus garde 22 instructions sur 45.
+
+### 42.5 Banc (indicatif)
+
+Banc linux-user (`vfpkuser.sh Q banc 20000000`, `vfptest` banc : 20 M × (2 `vmaddfp` +
+`vaddfp` + `vsubfp`) dépendants dans une boucle, et 20 M × 4 `vperm` en témoin), bras
+alternés, trois tours :
+
+| | ref | vfpk |
+|---|---|---|
+| chaîne flottante (ms) | 235 / 237 / 219 | **171 / 170 / 179 (−25 %)** |
+| `vperm` (témoin, ms) | 216 / 229 / 203 | 214 / 211 / 207 |
+
+Dans la VM de dev (`vfpkdev.sh banc-<bras>-<k>`, un tour par démarrage, ref, vfpk, ref,
+vfpk) les mêmes bancs varient de ±30 % d'un démarrage à l'autre, témoin compris (l'hôte faisait
+tourner les mutants et l'autre agent sa VM) : rien à en tirer. `t2bench` d3inter : 17,3-19,7 s
+pour 150 images dans les quatre démarrages (bruit), **même md5**
+(`7ff741d695d60c212dc0ca4b761a0acc`) partout. C'est l'A/B DOOM 3, hôte au repos, qui dira.
+Binaire rapide de l'arbre (PGO) : en cours d'entraînement à l'écriture de ces lignes (§42.6).
+
+### 42.6 L'A/B à jouer (VM quotidienne, hôte au repos)
+
+Binaire `~/src/qemu-vfpk/build/qemu-system-ppc` (série 0001-0051 + 0053, -O2) : même binaire des
+deux côtés, seule la propriété change. Avant fusion (`run_tiger.sh` du dépôt principal ne
+connaît pas `VFPKNOWN`) :
+
+    B=$HOME/src/qemu-vfpk/build/qemu-system-ppc
+    # une partie vérifiée d'abord (pas pour la vitesse) : bilans « vfp-native-verify » et
+    # « x-vfp-known : N talons relus, M sorties de bloc » du run_tiger.log, 0 divergence attendu
+    tools/tcg/matab.sh x86-vfpk-verif 1 "v:QEMU_BIN=$B CPU_OPTS=x-vfp-known=on,x-vfp-native-verify=on,x-vfp-native-cmp-verify=on" d3 fen
+    tools/tcg/matab.sh x86-vfpk 3 "ref:QEMU_BIN=$B" "vfpk:QEMU_BIN=$B CPU_OPTS=x-vfp-known=on" d3 fen
+    tools/tcg/matab.sh x86-vfpk-ut 3 "ref:QEMU_BIN=$B" "vfpk:QEMU_BIN=$B CPU_OPTS=x-vfp-known=on" ut fen
+    tools/tcg/matab.sh --restore
+
+Après fusion : `"ref:QEMU_BIN=$B VFPKNOWN=0"` contre `"vfpk:QEMU_BIN=$B VFPKNOWN=1"`. Six
+parties par bras avant de l'allumer par défaut. Le taux de sorties de bloc de DOOM 3 (bilan de
+la partie vérifiée) dira s'il faut une soupape (§37.4 : ~130 ns par sortie). Le même A/B sur le
+binaire rapide de l'arbre (`build-fast-mt`, PGO pris sur la VM de dev avec
+`x-vfp-known`) :
+
+    F=$HOME/src/qemu-vfpk/build-fast-mt/qemu-system-ppc
+    tools/tcg/matab.sh x86-vfpk-rapide 3 "ref:QEMU_BIN=$F" "vfpk:QEMU_BIN=$F CPU_OPTS=x-vfp-known=on" d3 fen
+    tools/tcg/matab.sh --restore
+
+**Ordre avec 0052** (§41, autre agent, en parallèle) : les deux patches touchent `tcg-opc.h`,
+`tcg.c`, `translate.c`, `cpu.h`, `cpu_init.c` et les deux émetteurs ; 0053 est fait sur la série
+0001-0051 et s'appliquera après 0052 au prix, peut-être, d'un rafraîchissement de contexte.
+Sémantiquement ils se composent : les `qemu_ld_tlbb0/1` de 0052 (effets de bord, pas d'appel,
+n'écrivent pas les AVR) ne retirent rien dans `vfpk_scan()` (§42.2).
+
+### 42.7 Ce qui reste ouvert
+
+- **Pendant arm64** : émetteur aarch64 écrit, compilé (`a64syntax.sh`), mots nouveaux relus
+  (`a64enc-check.py`), **jamais exécuté**. Sur le M4 : construire, `vfpkproof.c` n'a de sens que
+  sur x86 (FMA3) — y porter L3 en NEON (`vfmaq_f32`) —, `vfpkuser.sh … cmp` et `kx` avec un
+  `qemu-ppc` linux-user du M4, `vfpk-mut.py` (mutants à porter sur l'émetteur aarch64 : `cbnz`
+  sur `PVF_G` quand la porte est connue — registre jamais posé —, masque `ok` au lieu de `u`
+  sans test d'opérande…), puis l'A/B.
+- `vcmp*fp` consommateurs, `vcf*` producteurs (3 % / 0 % des opérations pondérées de DOOM 3).
+- Le rechargement des AVR depuis `env` (§42.2) et le test de résultat (~10 instructions, la
+  seule garantie du producteur) restent.
+- Les vérificateurs coupent la connaissance à chaque appel : une partie vérifiée sous-estime
+  la couverture de `x-vfp-known` (un vérificateur `NO_RWG` « transparent » à `vfpk_scan` la
+  rendrait entière ; non fait).

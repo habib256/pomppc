@@ -751,3 +751,9 @@ Sur les opérations flottantes AltiVec des blocs chauds, pondérées par le temp
   voie par voie si leurs entrées l'ont), `lvx` 5,0 %, inconnu 34,2 %.
 
 Estimation : **~−2,5 % du code x86**. Levier `x-vfp-known`, confié à un agent le 24/10.
+
+Fait le 24/10 : `tcg/0053` (`x-vfp-known`, `docs/tcg-g4.md` §42, éteint, `VFPKNOWN=1`) — porte
+connue après la première opération et liste blanche de helpers (`vperm`…), opérandes connus par
+producteur ou propagation ; sur les blocs de DOOM 3 retraduits, `vmaddfp` 54 → 39, `vaddfp` 45 → 22,5
+instructions x86, **−4,5 % du code exécuté** (≈ −4 % ramené au binaire système) ; 0 divergence
+sous les vérificateurs (VM de dev, jeux) ; A/B DOOM 3 à jouer (§42.6).

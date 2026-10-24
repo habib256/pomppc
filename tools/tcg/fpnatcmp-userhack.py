@@ -98,4 +98,17 @@ ed('target/ppc/fpu_helper.c',
    "    if (qatomic_read(&fpn_atexit)) {\n        fprintf(stderr, \"FINAL \");\n"
    "        fpn_report();\n    }\n}\n\n"
    "void helper_fpn_verify(CPUPPCState *env, uint64_t a, uint64_t b, uint64_t c,")
+# bilan final de x-vfp-native-verify et de x-vfp-known (tcg/0053), s'ils sont là
+p = os.path.join(Q, 'target/ppc/int_helper.c')
+if 'ppc_vfpk_check' in open(p).read():
+    ed('linux-user/exit.c', "void ppc_fpn_report_user(void);\n\n",
+       "void ppc_fpn_report_user(void);\nvoid ppc_vfn_report_user(void);       /* tcg/0053 */\n\n")
+    ed('linux-user/exit.c', "{\n    ppc_fpn_report_user();\n",
+       "{\n    ppc_fpn_report_user();\n    ppc_vfn_report_user();\n")
+    ed('target/ppc/int_helper.c', "void helper_vfn_save(CPUPPCState *env, uint32_t regs)\n",
+       "/* user hack (banc linux-user, tcg/0053) : bilan final, appelé par preexit_cleanup */\n"
+       "void ppc_vfn_report_user(void);\nvoid ppc_vfn_report_user(void)\n{\n"
+       "    fprintf(stderr, \"FINAL \");\n    if (qatomic_read(&vfn_atexit)) {\n"
+       "        vfn_report();\n    } else {\n        vfpk_report();\n    }\n}\n\n"
+       "void helper_vfn_save(CPUPPCState *env, uint32_t regs)\n")
 print('ok')

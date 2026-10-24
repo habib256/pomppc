@@ -35,6 +35,7 @@
 #   • second niveau sans compilateur : traces d'une page (x-tier2) — patches/tcg/0048
 #   • PMU POWER8 seulement sur les CPU qui l'ont (x-pmu-real), MTTCG sur la cible 32 bits — patches/tcg/0049, 0050
 #   • lfs producteur de x-fp-known, conversion par l'hôte (x-lfs-known) — patches/tcg/0051
+#   • AltiVec flottant sans ses contrôles redondants dans un bloc (x-vfp-known) — patches/tcg/0053
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -1089,6 +1090,24 @@ target/ppc/fpu_helper.c lfsk_slow_path
 tcg/x86_64/tcg-target.c.inc PFP_LFS
 tcg/aarch64/tcg-target.c.inc PFP_LFS
 TCG51_MARKERS
+  # --- tcg/0053 : AltiVec flottant connu (x-vfp-known), docs/tcg-g4.md §42 ---
+  # Dans un bloc, les tests d'opérande et la porte de vaddfp/vsubfp/vmaddfp/vnmsubfp que garantit
+  # une instruction précédente sont omis ; le producteur sort du bloc (talon) si la garantie
+  # tombe. Émetteur aarch64 écrit, jamais exécuté. Propriété éteinte par défaut.
+  if ! grep -q "x-vfp-known" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : AltiVec flottant connu (x-vfp-known)"
+    patch_strict "$ROOT/patches/tcg/0053-ppc-vfp-known.patch"
+  fi
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0053 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG53_MARKERS'
+target/ppc/translate/vmx-impl.c.inc vfpk_scan
+target/ppc/int_helper.c ppc_vfpk_check
+include/tcg/tcg-op-common.h PPC_VFPK_EXITS
+tcg/x86_64/tcg-target.c.inc PPC_VFPK_EXITS
+tcg/aarch64/tcg-target.c.inc PPC_VFPK_EXITS
+TCG53_MARKERS
 fi
 
 # --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---
@@ -1358,6 +1377,8 @@ check_opt x-stfs-known  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-st
 check_opt x-pmu-real    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-pmu-real=on
 # tcg/0051 : sondé sur la cible 32 bits, celle du jeu depuis PPC32MT
 check_opt x-lfs-known   qemu_cpu_has_prop  "$BIN"        "mac99,via=pmu" g4 x-lfs-known=on
+# tcg/0053 : idem
+check_opt x-vfp-known   qemu_cpu_has_prop  "$BIN"        "mac99,via=pmu" g4 x-vfp-known=on
 # MTTCG sur la cible 32 bits (tcg/0050) : sondé sur qemu-system-ppc lui-même
 check_opt mttcg-ppc32   qemu_ppc32_mttcg_ok "$BIN"       "mac99,via=pmu" 2
 echo

@@ -62,6 +62,10 @@
 #   LFSKNOWN=1 ./run_tiger.sh # lfs converti par l'hôte quand le mot est un simple nul ou normal, et producteur
 #                             # de x-fp-known (x-lfs-known, patches/tcg/0051, docs/tcg-g4.md §40 ; éteint
 #                             # par défaut, A/B en jeu à faire ; n'agit qu'avec FPKNOWN=1)
+#   VFPKNOWN=1 ./run_tiger.sh # dans un bloc, vaddfp/vsubfp/vmaddfp/vnmsubfp sans les tests d'opérande et la
+#                             # porte déjà garantis par une instruction précédente du bloc (x-vfp-known,
+#                             # patches/tcg/0053, docs/tcg-g4.md §42 ; éteint par défaut, A/B en jeu à faire ;
+#                             # n'agit qu'avec VFPNATIVE=1)
 #   PPC32MT=1 ./run_tiger.sh  # SMP >= 2 sur qemu-system-ppc (cible 32 bits, celle du G4) en MTTCG au lieu
 #                             # de qemu-system-ppc64 (patches/tcg/0050, docs/ppc32-mttcg.md ; éteint par
 #                             # défaut, sondé : sans le patch, repli sur ppc64 avec un avertissement)
@@ -639,6 +643,23 @@ if [ "${LFSKNOWN:-0}" != 0 ]; then
   else
     echo "⚠  LFSKNOWN=1 demandé mais ce QEMU n'a pas la propriété 'x-lfs-known' (patches/tcg/0051)." >&2
     MODE="$MODE + lfs connu DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+# --- AltiVec flottant connu (x-vfp-known, patches/tcg/0053, docs/tcg-g4.md §42) --- dans un bloc,
+# un opérande de vaddfp/vsubfp/vmaddfp/vnmsubfp que produit une de ces opérations (ou qu'en recopient
+# vmrghw, vmrglw, vspltw, vsldoi par mots, vor vD,vA,vA) n'est plus testé, ni la porte déjà franchie ;
+# le producteur sort du bloc si son talon n'a pas tenu la promesse. Mêmes résultats au bit près.
+# N'agit qu'avec x-vfp-native. Éteint par défaut.
+if [ "${VFPKNOWN:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-vfp-known=on"; then
+    case "$CPU_SPEC" in
+      *x-vfp-native=on*) CPU_SPEC="$CPU_SPEC,x-vfp-known=on"; MODE="$MODE + VFP-CONNU" ;;
+      *) echo "⚠  VFPKNOWN=1 sans x-vfp-native : x-vfp-known n'agit qu'avec lui (VFPNATIVE=1)." >&2
+         MODE="$MODE + AltiVec connu SANS EFFET" ;;
+    esac
+  else
+    echo "⚠  VFPKNOWN=1 demandé mais ce QEMU n'a pas la propriété 'x-vfp-known' (patches/tcg/0053)." >&2
+    MODE="$MODE + AltiVec connu DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
 # --- Second niveau sans compilateur (x-tier2, patches/tcg/0048, docs/plan-traducteur-rapide.md) ---
