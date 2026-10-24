@@ -729,3 +729,25 @@ inchangée, avec un accès antérieur **de même nature** dans le bloc. Le déta
 registres sera faible. Un accès couvert ferait `t = ea − page0 ; t ≤ 0x1000 − taille` (exact, y
 compris pour les accès à cheval) puis l'accès par l'adend gardé, soit ~4 instructions au lieu de
 ~10. Estimation : **~−5 % du code x86**. Levier `x-tlb-base`, confié à un agent le 24/10.
+
+## 17. Porte du « flottant AltiVec connu » (24/10)
+
+Même anatomie (§15). Les opérations flottantes AltiVec font ~79 % du code x86 d'AltiVec (~10 % de
+tout le code) :
+- `vmaddfp` : 52 % du code AltiVec, 54 instructions x86 par instruction ;
+- `vaddfp` et `vsubfp` : 45 chacune ;
+- `vnmsubfp` : 56.
+
+Dans un `vmaddfp`, une seule instruction calcule (`vfmadd231ps`). Le reste :
+- la porte (VSCR, MSR), ~10 instructions refaites à chaque instruction ;
+- trois tests d'opérande (~6 chacun) et un chargement en double ;
+- le test du résultat (~10), puis `vmovmskps` et le rangement.
+
+Sur les opérations flottantes AltiVec des blocs chauds, pondérées par le temps :
+- **93,3 % ne sont pas la première de leur bloc** : la porte, tenue pour connue après la première
+  (comme `fpk_gate` de 0045), économiserait ~10 instructions sur chacune ;
+- origine des opérandes : producteur flottant AltiVec du même bloc 24,1 %, autre instruction
+  AltiVec 36,7 % (permutations, fusions, `vsldoi` et `vspltw` gardent le caractère « nul ou normal »
+  voie par voie si leurs entrées l'ont), `lvx` 5,0 %, inconnu 34,2 %.
+
+Estimation : **~−2,5 % du code x86**. Levier `x-vfp-known`, confié à un agent le 24/10.
