@@ -62,6 +62,9 @@
 #   LFSKNOWN=1 ./run_tiger.sh # lfs converti par l'hôte quand le mot est un simple nul ou normal, et producteur
 #                             # de x-fp-known (x-lfs-known, patches/tcg/0051, docs/tcg-g4.md §40 ; éteint
 #                             # par défaut, A/B en jeu à faire ; n'agit qu'avec FPKNOWN=1)
+#   TLBBASE=1 ./run_tiger.sh  # chargements en forme D sur une base déjà vérifiée dans le bloc sans refaire le
+#                             # chemin court du TLB logiciel (x-tlb-base, patches/tcg/0052, docs/tcg-g4.md §41 ;
+#                             # éteint par défaut, A/B en jeu à faire ; cible 32 bits seulement, PPC32MT=1)
 #   PPC32MT=1 ./run_tiger.sh  # SMP >= 2 sur qemu-system-ppc (cible 32 bits, celle du G4) en MTTCG au lieu
 #                             # de qemu-system-ppc64 (patches/tcg/0050, docs/ppc32-mttcg.md ; éteint par
 #                             # défaut, sondé : sans le patch, repli sur ppc64 avec un avertissement)
@@ -639,6 +642,23 @@ if [ "${LFSKNOWN:-0}" != 0 ]; then
   else
     echo "⚠  LFSKNOWN=1 demandé mais ce QEMU n'a pas la propriété 'x-lfs-known' (patches/tcg/0051)." >&2
     MODE="$MODE + lfs connu DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+# --- TLB logiciel une fois par base (x-tlb-base, patches/tcg/0052, docs/tcg-g4.md §41) --- lbz lhz
+# lha lwz lfs lfd (et formes u) : sur une base dont un chargement antérieur du bloc a vérifié la page,
+# un test (l'adresse tient dans cette page) puis l'accès par l'addend gardé ; sinon le chemin complet.
+# Chargements seulement. N'agit que sur qemu-system-ppc (adresses 32 bits : PPC32MT=1 en SMP). Éteint
+# par défaut. Preuve : CPU_OPTS=x-tlb-base-verify=on (bilan « tlb-base-verify » à la sortie de QEMU).
+if [ "${TLBBASE:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-tlb-base=on"; then
+    CPU_SPEC="$CPU_SPEC,x-tlb-base=on"; MODE="$MODE + TLB-PAR-BASE"
+    case "$BIN" in
+      *ppc64) echo "⚠  TLBBASE=1 sur qemu-system-ppc64 : sans effet (adresses 64 bits ; PPC32MT=1)." >&2
+              MODE="$MODE SANS EFFET (ppc64)" ;;
+    esac
+  else
+    echo "⚠  TLBBASE=1 demandé mais ce QEMU n'a pas la propriété 'x-tlb-base' (patches/tcg/0052, qemu-system-ppc)." >&2
+    MODE="$MODE + TLB par base DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
 # --- Second niveau sans compilateur (x-tier2, patches/tcg/0048, docs/plan-traducteur-rapide.md) ---

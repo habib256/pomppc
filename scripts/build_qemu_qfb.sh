@@ -35,6 +35,7 @@
 #   • second niveau sans compilateur : traces d'une page (x-tier2) — patches/tcg/0048
 #   • PMU POWER8 seulement sur les CPU qui l'ont (x-pmu-real), MTTCG sur la cible 32 bits — patches/tcg/0049, 0050
 #   • lfs producteur de x-fp-known, conversion par l'hôte (x-lfs-known) — patches/tcg/0051
+#   • le TLB logiciel une fois par base des chargements en forme D (x-tlb-base) — patches/tcg/0052
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -1089,6 +1090,25 @@ target/ppc/fpu_helper.c lfsk_slow_path
 tcg/x86_64/tcg-target.c.inc PFP_LFS
 tcg/aarch64/tcg-target.c.inc PFP_LFS
 TCG51_MARKERS
+  # --- tcg/0052 : le TLB logiciel une fois par base (x-tlb-base), docs/tcg-g4.md §41 ---
+  # lbz lhz lha lwz lfs lfd (et formes u) sur une base dont un chargement antérieur du bloc a
+  # vérifié la page : ea − page ≤ 0x1000 − taille (non signé) puis l'accès par l'addend gardé,
+  # sinon le chemin complet hors ligne (ops qemu_ld_tlbb0/1, émetteurs x86_64 et aarch64,
+  # ce dernier jamais exécuté). Chargements seulement. Propriété éteinte par défaut.
+  if ! grep -q "x-tlb-base" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : le TLB logiciel une fois par base (x-tlb-base)"
+    patch_strict "$ROOT/patches/tcg/0052-tcg-tlb-base.patch"
+  fi
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0052 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG52_MARKERS'
+include/tcg/tcg-opc.h qemu_ld_tlbb1
+tcg/tcg-op-ldst.c tcg_tlbb_arm
+target/ppc/translate.c tlbb_scan
+tcg/x86_64/tcg-target.c.inc tcg_out_qemu_ld_tlbb
+tcg/aarch64/tcg-target.c.inc tcg_out_qemu_ld_tlbb
+TCG52_MARKERS
 fi
 
 # --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---
@@ -1358,6 +1378,8 @@ check_opt x-stfs-known  qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-st
 check_opt x-pmu-real    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-pmu-real=on
 # tcg/0051 : sondé sur la cible 32 bits, celle du jeu depuis PPC32MT
 check_opt x-lfs-known   qemu_cpu_has_prop  "$BIN"        "mac99,via=pmu" g4 x-lfs-known=on
+# tcg/0052 : sur la cible 32 bits seulement (adresses invitées de 32 bits)
+check_opt x-tlb-base    qemu_cpu_has_prop  "$BIN"        "mac99,via=pmu" g4 x-tlb-base=on
 # MTTCG sur la cible 32 bits (tcg/0050) : sondé sur qemu-system-ppc lui-même
 check_opt mttcg-ppc32   qemu_ppc32_mttcg_ok "$BIN"       "mac99,via=pmu" 2
 echo

@@ -1,0 +1,1055 @@
+diff --git a/include/tcg/tcg-op-common.h b/include/tcg/tcg-op-common.h
+index 8e89dea..1052d63 100644
+--- a/include/tcg/tcg-op-common.h
++++ b/include/tcg/tcg-op-common.h
+@@ -65,6 +65,28 @@ bool tcg_ppc_fp_cmp_supported(void);
+ void tcg_gen_ppc_fp32(TCGv_i64 r, TCGv_i64 nf, TCGv_i64 a, TCGv_i64 b,
+                       TCGv_i64 c, TCGv_i64 fpscr, unsigned sel,
+                       const void *slow, uint64_t flags_st, intptr_t lazy_ofs);
++/*
++ * POMPPC tcg/0052 (x-tlb-base): a "base" -- guest loads that share one TLB
++ * check, see INDEX_op_qemu_ld_tlbb0/1 in tcg-opc.h.  The translator keeps
++ * one per (base register, mmu_idx), zeroed when it starts; arms it before
++ * a load (tcg_tlbb_arm), disarms it after (tcg_tlbb_arm(NULL)), and kills
++ * it (tcg_tlbb_kill) when the base register is written, at a call, a label
++ * or a branch, and at the end of the TB.  The first eligible load through
++ * a base is a plain qemu_ld, kept in @first; the second one promotes it
++ * into a qemu_ld_tlbb0 (two EBB temps: negp, adend) and is a
++ * qemu_ld_tlbb1, and so are the next ones.  Eligible: system mode,
++ * 32-bit guest addresses, 1 to 8 bytes, MO_UNALN, no plugin.
++ */
++typedef struct TCGTlbBase {
++    TCGOp *first;               /* qemu_ld (or qemu_ld_tlbb0 once promoted) */
++    TCGv_i64 negp, adend;       /* NULL until promoted */
++    unsigned nb_covered;        /* qemu_ld_tlbb1 emitted through it */
++} TCGTlbBase;
++bool tcg_tlbb_supported(void);
++void tcg_tlbb_arm(TCGTlbBase *b);
++void tcg_tlbb_kill(TCGTlbBase *b);
++/* @op is an INDEX_op_call to @func */
++bool tcg_op_is_call_to(TCGOp *op, const void *func);
+ /* POMPPC tcg/0022: see INDEX_op_ppc_vfp in tcg-opc.h */
+ bool tcg_ppc_vfp_supported(void);
+ bool tcg_ppc_vfp_cmp_supported(void);      /* POMPPC tcg/0034 */
+diff --git a/include/tcg/tcg-opc.h b/include/tcg/tcg-opc.h
+index 827a22e..f574274 100644
+--- a/include/tcg/tcg-opc.h
++++ b/include/tcg/tcg-opc.h
+@@ -122,6 +122,22 @@ DEF(qemu_ld, 1, 1, 1, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_INT)
+ DEF(qemu_st, 0, 2, 1, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_INT)
+ DEF(qemu_ld2, 2, 1, 1, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_INT)
+ DEF(qemu_st2, 0, 3, 1, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_INT)
++/*
++ * POMPPC tcg/0052 (x-tlb-base): a guest load whose TLB check is shared by
++ * the loads that follow it on the same base (tcg-op-ldst.c, tcg_tlbb_*()).
++ * qemu_ld_tlbb0 is qemu_ld that also outputs negp = -page (the guest page
++ * its fast path checked, 64-bit; 0x1000 when it took the slow path: no
++ * address is then covered) and adend, the TLB addend of that page.
++ * qemu_ld_tlbb1 takes them: when ea + negp <= page size - access size
++ * (unsigned 64-bit: the whole access lies in that page), the access is
++ * [ea + adend] with no TLB lookup; otherwise, out of line, the whole
++ * qemu_ld (TLB lookup, slow path).  Only emitted when the backend has
++ * TCG_TARGET_QEMU_LD_TLBB_IMPL, in system mode, for an unaligned (MO_UNALN)
++ * load of 1 to 8 bytes.  Outputs, then inputs: tlbb0 data, negp, adend,
++ * addr; tlbb1 data, addr, negp, adend; and the MemOpIdx.
++ */
++DEF(qemu_ld_tlbb0, 3, 1, 1, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_INT)
++DEF(qemu_ld_tlbb1, 1, 3, 1, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_INT)
+ 
+ /*
+  * POMPPC tcg/0014 (x-fp-native): a PowerPC scalar single-precision
+diff --git a/include/tcg/tcg.h b/include/tcg/tcg.h
+index ebe64e8..3db1b2c 100644
+--- a/include/tcg/tcg.h
++++ b/include/tcg/tcg.h
+@@ -395,6 +395,11 @@ struct TCGContext {
+      * logged values, stores are compared and not done).
+      */
+     int t2_mode;
++    /*
++     * POMPPC tcg/0052 (x-tlb-base): the base the next guest load goes
++     * through (tcg_tlbb_arm(), tcg-op-ldst.c), NULL for none.
++     */
++    struct TCGTlbBase *tlbb_req;
+ 
+ #ifdef CONFIG_PLUGIN
+     /*
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index cafd371..1737a0b 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1652,6 +1652,15 @@ struct CPUArchState {
+      * and is a producer of x-fp-known; docs/tcg-g4.md section 40.
+      */
+     bool lfs_known;
++    /*
++     * x-tlb-base (POMPPC tcg/0052): a D-form load (lbz lhz lha lwz lfs lfd
++     * and update forms) on a base register unchanged since an earlier
++     * D-form load through it in the TB reuses that load's TLB check when it
++     * lies in the same page (INDEX_op_qemu_ld_tlbb0/1); docs/tcg-g4.md
++     * section 41.  x-tlb-base-verify: each covered load is checked against
++     * the TLB (helper_tlbb_verify).
++     */
++    bool tlb_base, tlb_base_verify;
+     uint64_t fprf_src;
+     uint64_t fpn_src_old;       /* x-fp-verify: fprf_src before the op */
+     uint32_t fpn_sel;           /* x-fp-verify: selector of the checked op */
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index 2b68386..08bfb81 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -146,6 +146,18 @@ static const Property powerpc_cpu_properties[] = {
+      * x-fp-known.  Off by default.
+      */
+     DEFINE_PROP_BOOL("x-lfs-known", PowerPCCPU, env.lfs_known, false),
++    /*
++     * POMPPC tcg/0052: a D-form load (lbz, lhz, lha, lwz, lfs, lfd, update
++     * forms) whose base register is unchanged since an earlier D-form load
++     * through it in the TB, with no call, label or branch in between, does
++     * not redo the softmmu TLB lookup when it lies in the page that load
++     * checked: one unsigned compare, then the access by the TLB addend kept
++     * from it.  Loads only.  Off by default.  x-tlb-base-verify checks every
++     * covered load against the TLB (summary on stderr at exit).
++     */
++    DEFINE_PROP_BOOL("x-tlb-base", PowerPCCPU, env.tlb_base, false),
++    DEFINE_PROP_BOOL("x-tlb-base-verify", PowerPCCPU, env.tlb_base_verify,
++                     false),
+     /*
+      * POMPPC tcg/0008.  x-ret-inline: the jump-cache probe of
+      * helper_lookup_tb_ptr done in the generated code at every indirect
+diff --git a/target/ppc/helper.h b/target/ppc/helper.h
+index f340cb3..bc3b9c5 100644
+--- a/target/ppc/helper.h
++++ b/target/ppc/helper.h
+@@ -112,6 +112,7 @@ DEF_HELPER_7(fpn_verify, void, env, i64, i64, i64, i64, i64, i64)
+ /* x-fp-native-cmp (POMPPC tcg/0033): x-fp-native-cmp-verify of fsel */
+ DEF_HELPER_FLAGS_5(fpnc_fsel, TCG_CALL_NO_RWG, void, env, i64, i64, i64, i64)
+ DEF_HELPER_FLAGS_3(fpn_lfs, TCG_CALL_NO_RWG, void, env, i64, i64)
++DEF_HELPER_FLAGS_5(tlbb_verify, TCG_CALL_NO_RWG, void, env, tl, i64, i64, i32)
+ DEF_HELPER_3(store_fpscr, void, env, i64, i32)
+ DEF_HELPER_2(fpscr_clrbit, void, env, i32)
+ DEF_HELPER_1(fprf_flush, void, env)          /* tcg/0046 */
+diff --git a/target/ppc/mem_helper.c b/target/ppc/mem_helper.c
+index 4fa793f..e9d2191 100644
+--- a/target/ppc/mem_helper.c
++++ b/target/ppc/mem_helper.c
+@@ -481,6 +481,66 @@ STVE(STVEWX, cpu_stl_be_data_ra, bswap32, u32)
+  * above would have stored, same expression, against the value stored.
+  * Summary on stderr every 2^26 checks and at exit.
+  */
++/*
++ * x-tlb-base-verify (POMPPC tcg/0052, docs/tcg-g4.md section 41): after
++ * each load that went through qemu_ld_tlbb1.  When its test passed
++ * (ea + negp <= page size - size: the access was [ea + adend], no TLB
++ * lookup), the TLB is probed for ea (without fault, nor fill when the
++ * entry is there) and must give a RAM page with no flag at host address
++ * ea + adend.  "Absent": the probe found no readable translation (the
++ * guest changed its page table without tlbie since the first load, which
++ * the architecture lets the TLB keep): counted, not compared.  Summary on
++ * stderr every 2^26 checks and at exit.
++ */
++static uint64_t tlbbv_ok, tlbbv_bad, tlbbv_gone, tlbbv_full;
++static bool tlbbv_atexit;
++
++static void tlbbv_report(void)
++{
++    fprintf(stderr, "tlb-base-verify: %" PRIu64 " chargements couverts "
++            "vérifiés, %" PRIu64 " divergences, %" PRIu64 " absents ; %"
++            PRIu64 " par le chemin complet (adresse hors de la page)\n",
++            qatomic_read(&tlbbv_ok) + qatomic_read(&tlbbv_bad),
++            qatomic_read(&tlbbv_bad), qatomic_read(&tlbbv_gone),
++            qatomic_read(&tlbbv_full));
++}
++
++void helper_tlbb_verify(CPUPPCState *env, target_ulong ea, uint64_t negp,
++                        uint64_t adend, uint32_t desc)
++{
++    unsigned size = desc & 0xff;
++    int mmu_idx = desc >> 8;
++    void *host = NULL;
++    int flags;
++
++    if (!qatomic_read(&tlbbv_atexit)) {
++        qatomic_set(&tlbbv_atexit, true);
++        atexit(tlbbv_report);
++    }
++    if ((uint64_t)ea + negp > TARGET_PAGE_SIZE - size) {
++        qatomic_inc(&tlbbv_full);
++        return;
++    }
++    flags = probe_access_flags(env, ea, 0, MMU_DATA_LOAD, mmu_idx, true,
++                               &host, 0);
++    if (flags & TLB_INVALID_MASK) {
++        qatomic_inc(&tlbbv_gone);
++    } else if (flags || host != (void *)(uintptr_t)((uint64_t)ea + adend)) {
++        if (qatomic_fetch_inc(&tlbbv_bad) < 20) {
++            fprintf(stderr, "tlb-base-verify: DIVERGENCE nip 0x%08" PRIx64
++                    " ea 0x%08" PRIx64 " taille %u idx %d : drapeaux 0x%x,"
++                    " hôte %p au lieu de %p\n", (uint64_t)env->nip,
++                    (uint64_t)ea, size, mmu_idx, flags, host,
++                    (void *)(uintptr_t)((uint64_t)ea + adend));
++        }
++    } else {
++        qatomic_inc(&tlbbv_ok);
++    }
++    if (((qatomic_read(&tlbbv_ok) + 1) & ((1u << 26) - 1)) == 0) {
++        tlbbv_report();
++    }
++}
++
+ static uint64_t vmxv_n[2], vmxv_bad[2];
+ static bool vmxv_atexit;
+ 
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+index 93a165a..b11debb 100644
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -222,6 +222,13 @@ struct DisasContext {
+     bool fprf_maybe;
+     bool stfs_known;            /* x-stfs-known (tcg/0047) */
+     bool lfs_known;             /* x-lfs-known (tcg/0051) */
++    /*
++     * x-tlb-base (tcg/0052): one TLB base per base register of a D-form
++     * load (tlbb[0]: rA = 0, absolute addresses), all for ctx->mem_idx
++     * (tlbb_*() below).
++     */
++    bool tlb_base, tlbb_verify;
++    TCGTlbBase tlbb[32];
+     bool ret_inline, ret_verify; /* x-ret-inline, x-ret-verify (tcg/0008) */
+     /*
+      * x-tier2 (tcg/0048): side exits of the trace being translated (the
+@@ -2641,6 +2648,119 @@ static inline void gen_align_no_le(DisasContext *ctx)
+                       (ctx->opcode & 0x03FF0000) | POWERPC_EXCP_ALIGN_LE);
+ }
+ 
++/*
++ * x-tlb-base (POMPPC tcg/0052, docs/tcg-g4.md section 41).  A D-form load
++ * on base rA goes through ctx->tlbb[rA] (TCGTlbBase, tcg-op-ldst.c): the
++ * first one is a plain qemu_ld, the next ones check that their address
++ * lies in the page the first one checked, and then skip the TLB lookup.
++ * Exact for any address (the test is on the address itself, not on rA):
++ * killing a base when rA is written only keeps the test likely to pass.
++ * What the cache must not outlive is the validity of the kept TLB addend:
++ * within a TB this vCPU's TLB only changes in its own thread -- in a helper
++ * (tlbie, mtsr, mtmsr, SDR1, BAT...: any call kills every base, but the
++ * checkers below), or in the slow path of another access (tlb_fill: a
++ * replaced or evicted entry, whose mapping stays valid); flushes requested
++ * by other threads or by memory map changes run between TBs.  Labels and
++ * branches kill every base (the two EBB temps of a promoted base die
++ * there), the end of the TB as well.
++ */
++static void tlbb_kill_all(DisasContext *ctx)
++{
++    for (int r = 0; r < 32; r++) {
++        if (ctx->tlbb[r].first) {
++            tcg_tlbb_kill(&ctx->tlbb[r]);
++        }
++    }
++}
++
++/* the checkers that touch neither the TLB nor the MMU state */
++static bool tlbb_call_ok(TCGOp *op)
++{
++    return tcg_op_is_call_to(op, helper_tlbb_verify) ||
++           tcg_op_is_call_to(op, helper_fpn_verify) ||
++           tcg_op_is_call_to(op, helper_fpn_lfs) ||
++           tcg_op_is_call_to(op, helper_vfn_save) ||
++           tcg_op_is_call_to(op, helper_vfn_verify) ||
++           tcg_op_is_call_to(op, helper_vfnc_verify);
++}
++
++/* after each instruction: what it did to the bases (as fpk_scan()) */
++static void tlbb_scan(DisasContext *ctx, TCGOp *start)
++{
++    const int lo = offsetof(CPUPPCState, gpr[0]);
++    const int hi = offsetof(CPUPPCState, gpr[32]);
++    TCGOp *op;
++
++    for (op = QTAILQ_NEXT(start, link); op; op = QTAILQ_NEXT(op, link)) {
++        const TCGOpDef *def = &tcg_op_defs[op->opc];
++
++        switch (op->opc) {
++        case INDEX_op_insn_start:
++            return;
++        case INDEX_op_call:
++            if (!tlbb_call_ok(op)) {
++                tlbb_kill_all(ctx);
++            }
++            break;
++        case INDEX_op_st8:
++        case INDEX_op_st16:
++        case INDEX_op_st32:
++        case INDEX_op_st:
++        case INDEX_op_st_vec:
++            /* a GPR written behind its global: every base */
++            if (op->args[1] == tcgv_ptr_arg(tcg_env)) {
++                int o = (int)op->args[2];
++                if (o + 32 > lo && o < hi) {
++                    tlbb_kill_all(ctx);
++                }
++            }
++            break;
++        default:
++            if (def->flags & (TCG_OPF_BB_END | TCG_OPF_COND_BRANCH)) {
++                tlbb_kill_all(ctx);
++                break;
++            }
++            for (int i = 0; i < def->nb_oargs; i++) {
++                for (int r = 1; r < 32; r++) {
++                    if (op->args[i] == temp_arg(tcgv_tl_temp(cpu_gpr[r])) &&
++                        ctx->tlbb[r].first) {
++                        tcg_tlbb_kill(&ctx->tlbb[r]);
++                    }
++                }
++            }
++            break;
++        }
++    }
++}
++
++/* before the load of a D-form instruction: its base, or NULL */
++static TCGTlbBase *tlbb_arm(DisasContext *ctx, int ra, TCGv displ)
++{
++    TCGTlbBase *b;
++
++    if (!ctx->tlb_base || tcgv_tl_temp(displ)->kind != TEMP_CONST) {
++        return NULL;
++    }
++    b = &ctx->tlbb[ra];
++    tcg_tlbb_arm(b);
++    return b;
++}
++
++/*
++ * after it: disarmed (the load may not have taken it); x-tlb-base-verify
++ * on a covered load
++ */
++static void tlbb_done(DisasContext *ctx, TCGTlbBase *b, unsigned covered,
++                      TCGv ea, MemOp mop)
++{
++    tcg_tlbb_arm(NULL);
++    if (b && ctx->tlbb_verify && b->nb_covered != covered) {
++        gen_helper_tlbb_verify(tcg_env, ea, b->negp, b->adend,
++                               tcg_constant_i32(memop_size(mop) |
++                                                ctx->mem_idx << 8));
++    }
++}
++
+ /* EA <- {(ra == 0) ? 0 : GPR[ra]} + displ */
+ static TCGv do_ea_calc(DisasContext *ctx, int ra, TCGv displ)
+ {
+@@ -6929,6 +7049,11 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+     fpr_novsr = ctx->fprf_lazy && !(ctx->insns_flags2 & PPC2_VSX);
+     ctx->stfs_known = env->stfs_known && ctx->fp_known;
+     ctx->lfs_known = env->lfs_known && ctx->fp_known;
++    /* x-tlb-base (tcg/0052): no TCG plugin (its memory callbacks) */
++    ctx->tlb_base = env->tlb_base && tcg_tlbb_supported() &&
++                    !ctx->base.plugin_enabled;
++    ctx->tlbb_verify = ctx->tlb_base && env->tlb_base_verify;
++    memset(ctx->tlbb, 0, sizeof(ctx->tlbb));
+     ctx->ret_inline = env->ret_inline;
+     ctx->ret_verify = cs->ret_verify;
+     ctx->t2_nexit = 0;          /* tcg/0048 */
+@@ -7017,6 +7142,9 @@ static void ppc_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
+     if (ctx->fp_known && !ctx->fpk_handled) {
+         fpk_scan(ctx, ctx->base.insn_start);
+     }
++    if (ctx->tlb_base) {
++        tlbb_scan(ctx, ctx->base.insn_start);
++    }
+ 
+     /*
+      * End the TB when crossing a page boundary.  (tcg/0048: a trace that
+diff --git a/target/ppc/translate/fixedpoint-impl.c.inc b/target/ppc/translate/fixedpoint-impl.c.inc
+index fa0191e..17dbb8c 100644
+--- a/target/ppc/translate/fixedpoint-impl.c.inc
++++ b/target/ppc/translate/fixedpoint-impl.c.inc
+@@ -37,7 +37,12 @@ static bool do_ldst(DisasContext *ctx, int rt, int ra, TCGv displ, bool update,
+     if (store) {
+         tcg_gen_qemu_st_tl(cpu_gpr[rt], ea, ctx->mem_idx, mop);
+     } else {
++        /* x-tlb-base (tcg/0052) */
++        TCGTlbBase *b = tlbb_arm(ctx, ra, displ);
++        unsigned n = b ? b->nb_covered : 0;
++
+         tcg_gen_qemu_ld_tl(cpu_gpr[rt], ea, ctx->mem_idx, mop);
++        tlbb_done(ctx, b, n, ea, mop);
+     }
+     if (update) {
+         tcg_gen_mov_tl(cpu_gpr[ra], ea);
+diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c.inc
+index bbef6c8..5b15161 100644
+--- a/target/ppc/translate/fp-impl.c.inc
++++ b/target/ppc/translate/fp-impl.c.inc
+@@ -1904,13 +1904,20 @@ static bool do_lsfpsd(DisasContext *ctx, int rt, int ra, TCGv displ,
+             gen_qemu_st64_i64(ctx, t0, ea);
+         }
+     } else {
++        /* x-tlb-base (tcg/0052): the first guest load below */
++        TCGTlbBase *b = tlbb_arm(ctx, ra, displ);
++        unsigned n = b ? b->nb_covered : 0;
++
+         if (single) {
+             if (gen_lfs_known(ctx, rt, ra, ea, update)) {
++                tlbb_done(ctx, b, n, ea, DEF_MEMOP(MO_UL));
+                 return true;
+             }
+             gen_qemu_ld32fs(ctx, t0, ea);
++            tlbb_done(ctx, b, n, ea, DEF_MEMOP(MO_UL));
+         } else {
+             gen_qemu_ld64_i64(ctx, t0, ea);
++            tlbb_done(ctx, b, n, ea, DEF_MEMOP(MO_UQ));
+         }
+         set_fpr(rt, t0);
+     }
+diff --git a/tcg/aarch64/tcg-target-con-set.h b/tcg/aarch64/tcg-target-con-set.h
+index fc0f066..99e57d7 100644
+--- a/tcg/aarch64/tcg-target-con-set.h
++++ b/tcg/aarch64/tcg-target-con-set.h
+@@ -15,6 +15,8 @@ C_O0_I2(rz, r)
+ C_O0_I2(w, r)
+ C_O0_I3(rz, rz, r)
+ C_O1_I1(r, r)
++C_O1_N2_I1(r, r, r, r)
++C_O1_I3(r, r, r, r)
+ C_O1_I1(w, r)
+ C_O1_I1(w, w)
+ C_O1_I1(w, wr)
+diff --git a/tcg/aarch64/tcg-target-has.h b/tcg/aarch64/tcg-target-has.h
+index 039d906..d88b0ba 100644
+--- a/tcg/aarch64/tcg-target-has.h
++++ b/tcg/aarch64/tcg-target-has.h
+@@ -31,6 +31,7 @@
+ #define TCG_TARGET_PPC_FP32_IMPL        1   /* POMPPC tcg/0017 */
+ #define TCG_TARGET_HAS_ppc_vfp          1   /* POMPPC tcg/0022 */
+ #define TCG_TARGET_PPC_VFP_IMPL         1   /* POMPPC tcg/0022 */
++#define TCG_TARGET_QEMU_LD_TLBB_IMPL    1   /* POMPPC tcg/0052 */
+ 
+ #define TCG_TARGET_HAS_v64              1
+ #define TCG_TARGET_HAS_v128             1
+diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
+index 16ee116..5bb1cf0 100644
+--- a/tcg/aarch64/tcg-target.c.inc
++++ b/tcg/aarch64/tcg-target.c.inc
+@@ -1620,6 +1620,10 @@ static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
+     tcg_out_ld_helper_args(s, lb, &ldst_helper_param);
+     tcg_out_call_int(s, qemu_ld_helpers[opc & MO_SIZE]);
+     tcg_out_ld_helper_ret(s, lb, false, &ldst_helper_param);
++    if (lb->tlbb_kind == 1) {
++        /* POMPPC tcg/0052: qemu_ld_tlbb0 off its fast path covers nothing */
++        tcg_out_movi(s, TCG_TYPE_I32, lb->tlbb_negp, TARGET_PAGE_SIZE);
++    }
+     tcg_out_goto(s, lb->raddr);
+     return true;
+ }
+@@ -1647,9 +1651,9 @@ static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
+  * In both cases, return a TCGLabelQemuLdst structure if the slow path
+  * is required and fill in @h with the host address for the fast path.
+  */
+-static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
+-                                           TCGReg addr_reg, MemOpIdx oi,
+-                                           bool is_ld)
++static TCGLabelQemuLdst *prepare_host_addr_ix(TCGContext *s, HostAddress *h,
++                                              TCGReg addr_reg, MemOpIdx oi,
++                                              bool is_ld, TCGReg ix)
+ {
+     TCGType addr_type = s->addr_type;
+     TCGLabelQemuLdst *ldst = NULL;
+@@ -1694,7 +1698,7 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
+         tcg_out_ld(s, addr_type, TCG_REG_TMP0, TCG_REG_TMP1,
+                    is_ld ? offsetof(CPUTLBEntry, addr_read)
+                          : offsetof(CPUTLBEntry, addr_write));
+-        tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_TMP1, TCG_REG_TMP1,
++        tcg_out_ld(s, TCG_TYPE_PTR, ix, TCG_REG_TMP1,
+                    offsetof(CPUTLBEntry, addend));
+ 
+         /*
+@@ -1723,7 +1727,7 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
+         ldst->label_ptr[0] = s->code_ptr;
+         tcg_out_insn(s, bcond_imm, B_C, TCG_COND_NE, 0);
+ 
+-        h->base = TCG_REG_TMP1;
++        h->base = ix;
+         h->index = addr_reg;
+         h->index_ext = addr_type;
+     } else {
+@@ -1757,6 +1761,13 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
+     return ldst;
+ }
+ 
++static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
++                                           TCGReg addr_reg, MemOpIdx oi,
++                                           bool is_ld)
++{
++    return prepare_host_addr_ix(s, h, addr_reg, oi, is_ld, TCG_REG_TMP1);
++}
++
+ static void tcg_out_qemu_ld_direct(TCGContext *s, MemOp memop, TCGType ext,
+                                    TCGReg data_r, HostAddress h)
+ {
+@@ -1835,6 +1846,101 @@ static void tgen_qemu_ld(TCGContext *s, TCGType data_type, TCGReg data_reg,
+     }
+ }
+ 
++/*
++ * POMPPC tcg/0052 (x-tlb-base): INDEX_op_qemu_ld_tlbb0/1, see tcg-opc.h and
++ * the x86_64 emitter.  WRITTEN ON THE PC, compiled by tools/tcg/a64syntax.sh
++ * and its encodings read back by tools/tcg/a64enc-check.py, NEVER RUN
++ * (docs/tcg-g4.md section 41): to be proven on the M4.
++ *
++ * tlbb0: the qemu_ld fast path with the addend loaded into adend (before
++ * the compare, as stock does into TMP1), then negp = -TMP2 (the page,
++ * zero-extended by the 32-bit ANDI, equal to the comparator on a hit):
++ *
++ *     ldp  tmp0, tmp1, [env, #mask_table]
++ *     and  tmp0, tmp0, addr, lsr #shift ; add tmp1, tmp1, tmp0
++ *     ldr  wtmp0, [tmp1, #cmp] ; ldr adend, [tmp1, #addend]
++ *     add  wtmp2, waddr, #size - 1 ; and wtmp2, wtmp2, #PAGE_MASK
++ *     cmp  wtmp0, wtmp2 ; b.ne slow
++ *     neg  negp, tmp2                      ; sub negp, xzr, tmp2
++ *     ldr  data, [adend, waddr, uxtw]
++ *
++ * tlbb1:
++ *
++ *     add  tmp0, negp, waddr, uxtw         ; ea - page, 64-bit
++ *     cmp  tmp0, #PAGE_SIZE - size         ; subs xzr, tmp0, #imm12
++ *     b.hi ool
++ *     ldr  data, [adend, waddr, uxtw]
++ *   raddr:
++ */
++static void tcg_out_qemu_ld_tlbb(TCGContext *s, TCGType type,
++                                 const TCGArg *args, bool covered)
++{
++    MemOpIdx oi = args[4];
++    MemOp mop = get_memop(oi);
++    TCGLabelQemuLdst *l;
++    HostAddress h;
++
++    tcg_debug_assert(tcg_use_softmmu);
++    tcg_debug_assert(s->addr_type == TCG_TYPE_I32);
++    tcg_debug_assert(memop_alignment_bits(mop) == 0);
++    tcg_debug_assert((mop & MO_SIZE) <= MO_64);
++    if (!covered) {
++        TCGReg data = args[0], negp = args[1], adend = args[2];
++        TCGReg addr = args[3];
++
++        l = prepare_host_addr_ix(s, &h, addr, oi, true, adend);
++        tcg_out_insn(s, addsub_shift, SUB, TCG_TYPE_I64, negp,
++                     TCG_REG_XZR, TCG_REG_TMP2);
++        tcg_out_qemu_ld_direct(s, mop, type, data, h);
++        l->tlbb_kind = 1;
++        l->tlbb_negp = negp;
++    } else {
++        TCGReg data = args[0], addr = args[1], negp = args[2];
++        TCGReg adend = args[3];
++
++        tcg_out_insn(s, addsub_ext, ADD, TCG_TYPE_I64, TCG_REG_TMP0,
++                     negp, addr, MO_32, 0);
++        tcg_out_insn(s, addsub_imm, SUBSI, TCG_TYPE_I64, TCG_REG_XZR,
++                     TCG_REG_TMP0, TARGET_PAGE_SIZE - memop_size(mop));
++        l = new_ldst_label(s);
++        l->is_ld = true;
++        l->oi = oi;
++        l->addr_reg = addr;
++        l->tlbb_kind = 2;
++        l->label_ptr[0] = s->code_ptr;
++        tcg_out_insn(s, bcond_imm, B_C, TCG_COND_GTU, 0);
++        h.base = adend;
++        h.index = addr;
++        h.index_ext = TCG_TYPE_I32;
++        h.aa = atom_and_align_for_opc(s, mop, have_lse2 ? MO_ATOM_WITHIN16
++                                                         : MO_ATOM_IFALIGN,
++                                      false);
++        tcg_out_qemu_ld_direct(s, mop, type, data, h);
++    }
++    l->type = type;
++    l->datalo_reg = args[0];
++    l->raddr = tcg_splitwx_to_rx(s->code_ptr);
++}
++
++/* the out-of-line part of a qemu_ld_tlbb1: the whole qemu_ld */
++static bool tcg_out_qemu_ld_tlbb_slow_path(TCGContext *s,
++                                           TCGLabelQemuLdst *l)
++{
++    TCGLabelQemuLdst *ld;
++    HostAddress h;
++
++    if (!reloc_pc19(l->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
++        return false;
++    }
++    ld = prepare_host_addr(s, &h, l->addr_reg, l->oi, true);
++    tcg_out_qemu_ld_direct(s, get_memop(l->oi), l->type, l->datalo_reg, h);
++    ld->type = l->type;
++    ld->datalo_reg = l->datalo_reg;
++    ld->raddr = l->raddr;
++    tcg_out_goto(s, l->raddr);
++    return true;
++}
++
+ /*
+  * POMPPC tcg/0014 (x-fp-native): INDEX_op_ppc_fp32.
+  *
+@@ -4078,6 +4184,10 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
+     switch (op) {
+     case INDEX_op_ppc_fp32:                     /* POMPPC tcg/0014 */
+         return C_N2_I4(r, r, r, r, r, r);
++    case INDEX_op_qemu_ld_tlbb0:                /* POMPPC tcg/0052 */
++        return C_O1_N2_I1(r, r, r, r);
++    case INDEX_op_qemu_ld_tlbb1:
++        return C_O1_I3(r, r, r, r);
+ 
+     case INDEX_op_add_vec:
+     case INDEX_op_sub_vec:
+diff --git a/tcg/optimize.c b/tcg/optimize.c
+index fa2a1ac..da06ecf 100644
+--- a/tcg/optimize.c
++++ b/tcg/optimize.c
+@@ -3218,6 +3218,10 @@ void tcg_optimize(TCGContext *s)
+         case INDEX_op_qemu_st2:
+             done = fold_qemu_st(&ctx, op);
+             break;
++        case INDEX_op_qemu_ld_tlbb0:    /* POMPPC tcg/0052: data, negp, adend */
++        case INDEX_op_qemu_ld_tlbb1:
++            done = fold_qemu_ld_2reg(&ctx, op);
++            break;
+         case INDEX_op_ppc_fp32:
+             /*
+              * POMPPC tcg/0014: its slow path writes env (FPR, flags).
+diff --git a/tcg/tcg-has.h b/tcg/tcg-has.h
+index c155654..9c6a41b 100644
+--- a/tcg/tcg-has.h
++++ b/tcg/tcg-has.h
+@@ -74,5 +74,9 @@
+ #ifndef TCG_TARGET_PPC_VFP_IMPL
+ #define TCG_TARGET_PPC_VFP_IMPL         0
+ #endif
++/* POMPPC tcg/0052: INDEX_op_qemu_ld_tlbb0/1 (x-tlb-base), build time */
++#ifndef TCG_TARGET_QEMU_LD_TLBB_IMPL
++#define TCG_TARGET_QEMU_LD_TLBB_IMPL    0
++#endif
+ 
+ #endif
+diff --git a/tcg/tcg-op-ldst.c b/tcg/tcg-op-ldst.c
+index 36a048a..bc652eb 100644
+--- a/tcg/tcg-op-ldst.c
++++ b/tcg/tcg-op-ldst.c
+@@ -110,6 +110,76 @@ static void gen_ld_i64(TCGv_i64 v, TCGTemp *addr, MemOpIdx oi)
+     gen_ldst1(INDEX_op_qemu_ld, TCG_TYPE_I64, tcgv_i64_temp(v), addr, oi);
+ }
+ 
++/*
++ * POMPPC tcg/0052 (x-tlb-base): see TCGTlbBase in tcg-op-common.h and
++ * INDEX_op_qemu_ld_tlbb0/1 in tcg-opc.h.
++ */
++bool tcg_tlbb_supported(void)
++{
++    return TCG_TARGET_QEMU_LD_TLBB_IMPL && tcg_use_softmmu &&
++           tcg_ctx->addr_type == TCG_TYPE_I32;
++}
++
++void tcg_tlbb_arm(TCGTlbBase *b)
++{
++    tcg_ctx->tlbb_req = b;
++}
++
++void tcg_tlbb_kill(TCGTlbBase *b)
++{
++    if (b->negp) {
++        tcg_temp_free_i64(b->negp);
++        tcg_temp_free_i64(b->adend);
++    }
++    memset(b, 0, sizeof(*b));
++}
++
++bool tcg_op_is_call_to(TCGOp *op, const void *func)
++{
++    return op->opc == INDEX_op_call && tcg_call_func(op) == func;
++}
++
++/* the load of a tcg_gen_qemu_ld_*: qemu_ld, or through the armed base */
++static void gen_ld1(TCGType type, TCGTemp *v, TCGTemp *addr, MemOpIdx oi)
++{
++    TCGTlbBase *b = tcg_ctx->tlbb_req;
++    MemOp mop = get_memop(oi);
++    TCGOp *op, *f;
++
++    tcg_ctx->tlbb_req = NULL;
++    if (b == NULL || !tcg_tlbb_supported() ||
++        memop_alignment_bits(mop) != 0 || (mop & MO_SIZE) > MO_64) {
++        gen_ldst1(INDEX_op_qemu_ld, type, v, addr, oi);
++        return;
++    }
++    if (b->first == NULL) {
++        gen_ldst1(INDEX_op_qemu_ld, type, v, addr, oi);
++        b->first = tcg_last_op();
++        return;
++    }
++    if (b->negp == NULL) {
++        /* promote the first load: qemu_ld data, addr, oi */
++        f = b->first;
++        tcg_debug_assert(f->opc == INDEX_op_qemu_ld);
++        b->negp = tcg_temp_ebb_new_i64();
++        b->adend = tcg_temp_ebb_new_i64();
++        op = tcg_op_insert_after(tcg_ctx, f, INDEX_op_qemu_ld_tlbb0,
++                                 TCGOP_TYPE(f), 5);
++        op->args[0] = f->args[0];
++        op->args[1] = tcgv_i64_arg(b->negp);
++        op->args[2] = tcgv_i64_arg(b->adend);
++        op->args[3] = f->args[1];
++        op->args[4] = f->args[2];
++        TCGOP_FLAGS(op) = TCGOP_FLAGS(f);
++        tcg_op_remove(tcg_ctx, f);
++        b->first = op;
++    }
++    op = tcg_gen_op5(INDEX_op_qemu_ld_tlbb1, type, temp_arg(v), temp_arg(addr),
++                     tcgv_i64_arg(b->negp), tcgv_i64_arg(b->adend), oi);
++    TCGOP_FLAGS(op) = mop & MO_SIZE;
++    b->nb_covered++;
++}
++
+ static void gen_st_i64(TCGv_i64 v, TCGTemp *addr, MemOpIdx oi)
+ {
+     gen_ldst1(INDEX_op_qemu_st, TCG_TYPE_I64, tcgv_i64_temp(v), addr, oi);
+@@ -297,7 +367,7 @@ static void tcg_gen_qemu_ld_i32_int(TCGv_i32 val, TCGTemp *addr,
+ 
+     addr_new = tci_extend_addr(addr);
+     copy_addr = plugin_maybe_preserve_addr(addr);
+-    gen_ldst1(INDEX_op_qemu_ld, TCG_TYPE_I32, tcgv_i32_temp(val), addr_new, oi);
++    gen_ld1(TCG_TYPE_I32, tcgv_i32_temp(val), addr_new, oi);
+ 
+     if ((orig_memop ^ memop) & MO_BSWAP) {
+         switch (orig_memop & MO_SIZE) {
+@@ -425,7 +495,7 @@ static void tcg_gen_qemu_ld_i64_int(TCGv_i64 val, TCGTemp *addr,
+ 
+     addr_new = tci_extend_addr(addr);
+     copy_addr = plugin_maybe_preserve_addr(addr);
+-    gen_ld_i64(val, addr_new, oi);
++    gen_ld1(TCG_TYPE_I64, tcgv_i64_temp(val), addr_new, oi);
+ 
+     if ((orig_memop ^ memop) & MO_BSWAP) {
+         int flags = (orig_memop & MO_SIGN
+diff --git a/tcg/tcg.c b/tcg/tcg.c
+index 109267d..6cfc85c 100644
+--- a/tcg/tcg.c
++++ b/tcg/tcg.c
+@@ -81,6 +81,13 @@ static bool tcg_out_ppc_fp32_slow_path(TCGContext *s, TCGLabelQemuLdst *l);
+ static void tcg_out_ppc_vfp(TCGContext *s, const TCGArg *args);
+ static bool tcg_out_ppc_vfp_slow_path(TCGContext *s, TCGLabelQemuLdst *l);
+ #endif
++#if TCG_TARGET_QEMU_LD_TLBB_IMPL
++/* POMPPC tcg/0052: INDEX_op_qemu_ld_tlbb0 (covered = false), tlbb1 */
++static void tcg_out_qemu_ld_tlbb(TCGContext *s, TCGType type,
++                                 const TCGArg *args, bool covered);
++static bool tcg_out_qemu_ld_tlbb_slow_path(TCGContext *s,
++                                           TCGLabelQemuLdst *l);
++#endif
+ 
+ /* The CIE and FDE header definitions will be common to all hosts.  */
+ typedef struct {
+@@ -125,6 +132,13 @@ struct TCGLabelQemuLdst {
+     /* POMPPC tcg/0022: slow path of a ppc_vfp op (fp_sel = kind, fp_slow) */
+     bool is_ppc_vfp;
+     intptr_t vfp_off[4];        /* env offsets of vD, vA, vB, vC */
++    /*
++     * POMPPC tcg/0052 (x-tlb-base): 1 = slow path of a qemu_ld_tlbb0, which
++     * also sets tlbb_negp to TARGET_PAGE_SIZE (nothing covered); 2 = out of
++     * line part of a qemu_ld_tlbb1 (address not covered): the whole qemu_ld.
++     */
++    int tlbb_kind;
++    TCGReg tlbb_negp;
+     QSIMPLEQ_ENTRY(TCGLabelQemuLdst) next;
+ };
+ 
+@@ -797,6 +811,14 @@ static int tcg_out_ldst_finalize(TCGContext *s)
+                 return -2;
+             }
+         } else
++#endif
++#if TCG_TARGET_QEMU_LD_TLBB_IMPL
++        if (lb->tlbb_kind == 2) {
++            /* may append a qemu_ld slow path: visited later by this loop */
++            if (!tcg_out_qemu_ld_tlbb_slow_path(s, lb)) {
++                return -2;
++            }
++        } else
+ #endif
+         if (lb->is_ld
+             ? !tcg_out_qemu_ld_slow_path(s, lb)
+@@ -881,6 +903,7 @@ static int tcg_out_pool_finalize(TCGContext *s)
+ #define C_N1_I2(O1, I1, I2)             C_PFX3(c_n1_i2_, O1, I1, I2),
+ #define C_N1O1_I1(O1, O2, I1)           C_PFX3(c_n1o1_i1_, O1, O2, I1),
+ #define C_N2_I1(O1, O2, I1)             C_PFX3(c_n2_i1_, O1, O2, I1),
++#define C_O1_N2_I1(O1, O2, O3, I1)      C_PFX4(c_o1_n2_i1_, O1, O2, O3, I1),
+ 
+ #define C_O2_I1(O1, O2, I1)             C_PFX3(c_o2_i1_, O1, O2, I1),
+ #define C_O2_I2(O1, O2, I1, I2)         C_PFX4(c_o2_i2_, O1, O2, I1, I2),
+@@ -908,6 +931,7 @@ static TCGConstraintSetIndex tcg_target_op_def(TCGOpcode, TCGType, unsigned);
+ #undef C_N1_I2
+ #undef C_N1O1_I1
+ #undef C_N2_I1
++#undef C_O1_N2_I1
+ #undef C_O2_I1
+ #undef C_O2_I2
+ #undef C_O2_I3
+@@ -935,6 +959,7 @@ typedef struct TCGConstraintSet {
+ #define C_N1_I2(O1, I1, I2)             { 1, 2, { "&" #O1, #I1, #I2 } },
+ #define C_N1O1_I1(O1, O2, I1)           { 2, 1, { "&" #O1, #O2, #I1 } },
+ #define C_N2_I1(O1, O2, I1)             { 2, 1, { "&" #O1, "&" #O2, #I1 } },
++#define C_O1_N2_I1(O1, O2, O3, I1)      { 3, 1, { #O1, "&" #O2, "&" #O3, #I1 } },
+ 
+ #define C_O2_I1(O1, O2, I1)             { 2, 1, { #O1, #O2, #I1 } },
+ #define C_O2_I2(O1, O2, I1, I2)         { 2, 2, { #O1, #O2, #I1, #I2 } },
+@@ -958,6 +983,7 @@ static const TCGConstraintSet constraint_sets[] = {
+ #undef C_N1_I2
+ #undef C_N1O1_I1
+ #undef C_N2_I1
++#undef C_O1_N2_I1
+ #undef C_O2_I1
+ #undef C_O2_I2
+ #undef C_O2_I3
+@@ -980,6 +1006,7 @@ static const TCGConstraintSet constraint_sets[] = {
+ #define C_N1_I2(O1, I1, I2)             C_PFX3(c_n1_i2_, O1, I1, I2)
+ #define C_N1O1_I1(O1, O2, I1)           C_PFX3(c_n1o1_i1_, O1, O2, I1)
+ #define C_N2_I1(O1, O2, I1)             C_PFX3(c_n2_i1_, O1, O2, I1)
++#define C_O1_N2_I1(O1, O2, O3, I1)      C_PFX4(c_o1_n2_i1_, O1, O2, O3, I1)
+ 
+ #define C_O2_I1(O1, O2, I1)             C_PFX3(c_o2_i1_, O1, O2, I1)
+ #define C_O2_I2(O1, O2, I1, I2)         C_PFX4(c_o2_i2_, O1, O2, I1, I2)
+@@ -2405,6 +2432,10 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
+         return TCG_TARGET_HAS_ppc_fp32 && type == TCG_TYPE_I64;
+     case INDEX_op_ppc_vfp:                          /* POMPPC tcg/0022 */
+         return TCG_TARGET_HAS_ppc_vfp;
++    case INDEX_op_qemu_ld_tlbb0:                    /* POMPPC tcg/0052 */
++    case INDEX_op_qemu_ld_tlbb1:
++        return TCG_TARGET_QEMU_LD_TLBB_IMPL && tcg_use_softmmu &&
++               type <= TCG_TYPE_REG;
+ 
+     case INDEX_op_add:
+     case INDEX_op_and:
+@@ -2966,6 +2997,8 @@ void tcg_dump_ops(TCGContext *s, FILE *f, bool have_prefs)
+             case INDEX_op_qemu_st:
+             case INDEX_op_qemu_ld2:
+             case INDEX_op_qemu_st2:
++            case INDEX_op_qemu_ld_tlbb0:            /* POMPPC tcg/0052 */
++            case INDEX_op_qemu_ld_tlbb1:
+                 {
+                     const char *s_al, *s_tlb, *s_op, *s_at;
+                     MemOpIdx oi = op->args[k++];
+@@ -5826,6 +5859,13 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
+         break;
+ 
+ #if TCG_TARGET_PPC_FP32_IMPL
++#if TCG_TARGET_QEMU_LD_TLBB_IMPL
++    case INDEX_op_qemu_ld_tlbb0:                    /* POMPPC tcg/0052 */
++    case INDEX_op_qemu_ld_tlbb1:
++        tcg_out_qemu_ld_tlbb(s, type, new_args,
++                             op->opc == INDEX_op_qemu_ld_tlbb1);
++        break;
++#endif
+     case INDEX_op_ppc_fp32:                         /* POMPPC tcg/0014 */
+         tcg_out_ppc_fp32(s, new_args);
+         break;
+diff --git a/tcg/x86_64/tcg-target-con-set.h b/tcg/x86_64/tcg-target-con-set.h
+index d694f9b..b9bc12d 100644
+--- a/tcg/x86_64/tcg-target-con-set.h
++++ b/tcg/x86_64/tcg-target-con-set.h
+@@ -55,6 +55,8 @@ C_O1_I4(x, x, x, xO, x)
+ C_O1_I4(r, r, reT, r, 0)
+ C_O1_I4(r, r, r, ri, ri)
+ C_O2_I1(r, r, L)
++C_O1_N2_I1(r, L, L, L)
++C_O1_I3(r, L, L, L)
+ C_O2_I2(a, d, a, r)
+ C_O2_I2(r, r, L, L)
+ C_O2_I3(a, d, 0, 1, r)
+diff --git a/tcg/x86_64/tcg-target-has.h b/tcg/x86_64/tcg-target-has.h
+index 1a8b993..4b6225d 100644
+--- a/tcg/x86_64/tcg-target-has.h
++++ b/tcg/x86_64/tcg-target-has.h
+@@ -50,6 +50,8 @@
+ #define TCG_TARGET_HAS_ppc_vfp          (have_avx1 && (cpuinfo & CPUINFO_FMA))
+ #define TCG_TARGET_HAS_ppc_vfp_cmp      TCG_TARGET_HAS_ppc_vfp /* tcg/0034 */
+ #endif
++/* POMPPC tcg/0052: INDEX_op_qemu_ld_tlbb0/1 (x-tlb-base) */
++#define TCG_TARGET_QEMU_LD_TLBB_IMPL    1
+ 
+ /* We do not support older SSE systems, only beginning with AVX1.  */
+ #define TCG_TARGET_HAS_v64              have_avx1
+diff --git a/tcg/x86_64/tcg-target.c.inc b/tcg/x86_64/tcg-target.c.inc
+index 3fd3392..d85f8c1 100644
+--- a/tcg/x86_64/tcg-target.c.inc
++++ b/tcg/x86_64/tcg-target.c.inc
+@@ -1849,6 +1849,10 @@ static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
+     tcg_out_ld_helper_args(s, l, &ldst_helper_param);
+     tcg_out_branch(s, 1, qemu_ld_helpers[opc & MO_SIZE]);
+     tcg_out_ld_helper_ret(s, l, false, &ldst_helper_param);
++    if (l->tlbb_kind == 1) {
++        /* POMPPC tcg/0052: qemu_ld_tlbb0 off its fast path covers nothing */
++        tcg_out_movi(s, TCG_TYPE_I32, l->tlbb_negp, TARGET_PAGE_SIZE);
++    }
+ 
+     tcg_out_jmp(s, l->raddr);
+     return true;
+@@ -2874,8 +2878,9 @@ static inline int setup_guest_base_seg(void)
+  * In both cases, return a TCGLabelQemuLdst structure if the slow path
+  * is required and fill in @h with the host address for the fast path.
+  */
+-static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
+-                                           TCGReg addr, MemOpIdx oi, bool is_ld)
++static TCGLabelQemuLdst *prepare_host_addr_ix(TCGContext *s, HostAddress *h,
++                                              TCGReg addr, MemOpIdx oi,
++                                              bool is_ld, TCGReg ix)
+ {
+     TCGLabelQemuLdst *ldst = NULL;
+     MemOp opc = get_memop(oi);
+@@ -2883,7 +2888,7 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
+     unsigned a_mask;
+ 
+     if (tcg_use_softmmu) {
+-        h->index = TCG_REG_L0;
++        h->index = ix;
+         h->ofs = 0;
+         h->seg = 0;
+     } else {
+@@ -2951,7 +2956,7 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
+         s->code_ptr += 4;
+ 
+         /* TLB Hit.  */
+-        tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_L0, TCG_REG_L0,
++        tcg_out_ld(s, TCG_TYPE_PTR, ix, TCG_REG_L0,
+                    offsetof(CPUTLBEntry, addend));
+     } else if (a_mask) {
+         int jcc;
+@@ -2971,6 +2976,12 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
+     return ldst;
+ }
+ 
++static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
++                                           TCGReg addr, MemOpIdx oi, bool is_ld)
++{
++    return prepare_host_addr_ix(s, h, addr, oi, is_ld, TCG_REG_L0);
++}
++
+ static void tcg_out_qemu_ld_direct(TCGContext *s, TCGReg datalo, TCGReg datahi,
+                                    HostAddress h, TCGType type, MemOp memop)
+ {
+@@ -3154,6 +3165,108 @@ static const TCGOutOpQemuLdSt2 outop_qemu_ld2 = {
+     .out = tgen_qemu_ld2,
+ };
+ 
++/*
++ * POMPPC tcg/0052 (x-tlb-base): INDEX_op_qemu_ld_tlbb0/1, see tcg-opc.h.
++ *
++ * tlbb0 (data, negp, adend <- addr): the qemu_ld fast path, with the TLB
++ * addend loaded into adend instead of L0, and negp = -L1: on a hit, L1 is
++ * the address of the page (addr + size - 1 masked by TARGET_PAGE_MASK,
++ * a_mask = 0 here, equal to the comparator: the access does not cross).
++ * negp and adend are "new register" outputs (not addr); they are written
++ * before the access, which writes data (that may be L0, L1 or addr) last.
++ * The slow path sets negp to TARGET_PAGE_SIZE: ea + 0x1000 > 0x1000 - size
++ * for every 32-bit or 64-bit ea below 2^64 - 2^12.
++ *
++ *     mov  L0, addr ; shr ; and [env mask] ; add [env table]
++ *     lea  L1, [addr + size - 1] ; and L1, PAGE_MASK ; cmp L1, [L0 + cmp]
++ *     jne  slow
++ *     mov  adend, [L0 + addend]
++ *     mov  negp, L1 ; neg negp
++ *     mov  data, [addr + adend]
++ *
++ * tlbb1 (data <- addr, negp, adend):
++ *
++ *     lea  L0, [negp + addr]       ; 64-bit: ea - page, addr zero-extended
++ *     cmp  L0, PAGE_SIZE - size    ; unsigned: ea .. ea + size - 1 in page
++ *     ja   ool
++ *     mov  data, [addr + adend]
++ *   raddr:
++ *
++ *   ool: the whole qemu_ld (prepare_host_addr: TLB lookup, its own slow
++ *     path), data, jmp raddr.
++ *
++ * addr: a 32-bit guest address is zero-extended in its register, as for
++ * the fast path of qemu_ld ([addr + L0]).
++ */
++static void tcg_out_qemu_ld_tlbb(TCGContext *s, TCGType type,
++                                 const TCGArg *args, bool covered)
++{
++    MemOpIdx oi = args[4];
++    MemOp mop = get_memop(oi);
++    TCGLabelQemuLdst *l;
++    HostAddress h;
++
++    tcg_debug_assert(tcg_use_softmmu);
++    tcg_debug_assert(memop_alignment_bits(mop) == 0);
++    tcg_debug_assert((mop & MO_SIZE) <= MO_64);
++    if (!covered) {
++        TCGReg data = args[0], negp = args[1], adend = args[2];
++        TCGReg addr = args[3];
++
++        l = prepare_host_addr_ix(s, &h, addr, oi, true, adend);
++        tcg_out_mov(s, TCG_TYPE_I64, negp, TCG_REG_L1);
++        tcg_out_modrm(s, OPC_GRP3_Ev + P_REXW, EXT3_NEG, negp);
++        tcg_out_qemu_ld_direct(s, data, -1, h, type, mop);
++        l->tlbb_kind = 1;
++        l->tlbb_negp = negp;
++    } else {
++        TCGReg data = args[0], addr = args[1], negp = args[2];
++        TCGReg adend = args[3];
++
++        tcg_out_modrm_sib_offset(s, OPC_LEA + P_REXW, TCG_REG_L0,
++                                 negp, addr, 0, 0);
++        tgen_arithi(s, ARITH_CMP + P_REXW, TCG_REG_L0,
++                    TARGET_PAGE_SIZE - memop_size(mop), 0);
++        l = new_ldst_label(s);
++        l->is_ld = true;
++        l->oi = oi;
++        l->addr_reg = addr;
++        l->tlbb_kind = 2;
++        tcg_out_opc(s, OPC_JCC_long + JCC_JA, 0, 0, 0);
++        l->label_ptr[0] = s->code_ptr;
++        s->code_ptr += 4;
++        h.base = addr;
++        h.index = adend;
++        h.ofs = 0;
++        h.seg = 0;
++        h.aa = atom_and_align_for_opc(s, mop, MO_ATOM_WITHIN16, false);
++        tcg_out_qemu_ld_direct(s, data, -1, h, type, mop);
++    }
++    l->type = type;
++    l->datalo_reg = args[0];
++    l->datahi_reg = -1;
++    l->raddr = tcg_splitwx_to_rx(s->code_ptr);
++}
++
++/* the out-of-line part of a qemu_ld_tlbb1: the whole qemu_ld */
++static bool tcg_out_qemu_ld_tlbb_slow_path(TCGContext *s,
++                                           TCGLabelQemuLdst *l)
++{
++    TCGLabelQemuLdst *ld;
++    HostAddress h;
++
++    tcg_patch32(l->label_ptr[0], s->code_ptr - l->label_ptr[0] - 4);
++    ld = prepare_host_addr(s, &h, l->addr_reg, l->oi, true);
++    tcg_out_qemu_ld_direct(s, l->datalo_reg, -1, h, l->type,
++                           get_memop(l->oi));
++    ld->type = l->type;
++    ld->datalo_reg = l->datalo_reg;
++    ld->datahi_reg = -1;
++    ld->raddr = l->raddr;
++    tcg_out_jmp(s, l->raddr);
++    return true;
++}
++
+ static void tcg_out_qemu_st_direct(TCGContext *s, TCGReg datalo, TCGReg datahi,
+                                    HostAddress h, MemOp memop)
+ {
+@@ -4798,6 +4911,10 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
+     case INDEX_op_ppc_fp32:                     /* POMPPC tcg/0017 */
+         return C_N2_I4(r, r, r, r, r, r);
+ #endif
++    case INDEX_op_qemu_ld_tlbb0:                /* POMPPC tcg/0052 */
++        return C_O1_N2_I1(r, L, L, L);
++    case INDEX_op_qemu_ld_tlbb1:
++        return C_O1_I3(r, L, L, L);
+ 
+     case INDEX_op_ld_vec:
+     case INDEX_op_dupm_vec:
