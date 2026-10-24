@@ -1,0 +1,383 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+index b33f1a4..cafd371 100644
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1646,6 +1646,12 @@ struct CPUArchState {
+      * without the denormal path of SINGLE(); docs/tcg-g4.md section 38.
+      */
+     bool stfs_known;
++    /*
++     * x-lfs-known (POMPPC tcg/0051, needs x-fp-known): lfs (and lfsx, lfsu,
++     * lfsux) converts by the host when the word is a float32 zero or normal
++     * and is a producer of x-fp-known; docs/tcg-g4.md section 40.
++     */
++    bool lfs_known;
+     uint64_t fprf_src;
+     uint64_t fpn_src_old;       /* x-fp-verify: fprf_src before the op */
+     uint32_t fpn_sel;           /* x-fp-verify: selector of the checked op */
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+index 87e4476..2b68386 100644
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -138,6 +138,14 @@ static const Property powerpc_cpu_properties[] = {
+      * by default.
+      */
+     DEFINE_PROP_BOOL("x-stfs-known", PowerPCCPU, env.stfs_known, false),
++    /*
++     * POMPPC tcg/0051: lfs, lfsx, lfsu, lfsux convert the loaded word by
++     * the host FPU when it is a float32 zero or normal (else out of line:
++     * DOUBLE() of the ISA, and the block is left if a later instruction
++     * relied on it), and become producers of x-fp-known.  Bit-exact.  Needs
++     * x-fp-known.  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-lfs-known", PowerPCCPU, env.lfs_known, false),
+     /*
+      * POMPPC tcg/0008.  x-ret-inline: the jump-cache probe of
+      * helper_lookup_tb_ptr done in the generated code at every indirect
+diff --git a/target/ppc/fpu_helper.c b/target/ppc/fpu_helper.c
+index a68e5e9..ac07159 100644
+--- a/target/ppc/fpu_helper.c
++++ b/target/ppc/fpu_helper.c
+@@ -4153,7 +4153,7 @@ static inline uint64_t fpi_fpscr_op(uint64_t fpscr, uint64_t r, uint32_t op)
+ static const char *const fpi_names[FPI_NOPS] = {
+     "fadds", "fsubs", "fmuls", "fmadds", "fmsubs", "fnmadds", "fnmsubs",
+     "fcmpu", "fadd", "fsub", "fmul", "fmadd", "fmsub", "fnmadd", "fnmsub",
+-    "frsp", "fctiw", "fctiwz", "fcmpo", "fdivs", "fdiv", "fsel",
++    "frsp", "fctiw", "fctiwz", "fcmpo", "fdivs", "fdiv", "fsel", "lfs",
+ };
+ static uint64_t fpv_ok[FPI_NOPS], fpv_bad[FPI_NOPS];
+ static uint64_t fpv_slow_gate[FPI_NOPS], fpv_slow_opnd[FPI_NOPS];
+@@ -4535,6 +4535,8 @@ Int128 helper_fcmpu_flat(CPUPPCState *env, uint64_t a, uint64_t b,
+  * the globals were synced before it, as for a deferred FP exception.
+  */
+ static uint64_t fpk_exits;
++/* tcg/0051: words that went out of line, and the TB exits among them */
++static uint64_t lfsk_slow, lfsk_exits;
+ 
+ static G_NORETURN void fpk_exit(CPUPPCState *env, uint32_t sel, uint64_t r,
+                                 uint64_t nf, uintptr_t ra)
+@@ -4553,6 +4555,9 @@ static G_NORETURN void fpk_exit(CPUPPCState *env, uint32_t sel, uint64_t r,
+         env->crf[1] = (uint32_t)nf >> 28;
+     }
+     qatomic_inc(&fpk_exits);
++    if (op == FPI_LFS) {
++        qatomic_inc(&lfsk_exits);               /* tcg/0051 */
++    }
+     cpu_restore_state(cs, ra);
+     env->nip += 4;
+ #ifdef TARGET_PPC64
+@@ -4564,12 +4569,37 @@ static G_NORETURN void fpk_exit(CPUPPCState *env, uint32_t sel, uint64_t r,
+     cpu_loop_exit(cs);
+ }
+ 
++/*
++ * x-lfs-known (POMPPC tcg/0051, docs/tcg-g4.md section 40): the out-of-line
++ * path of an lfs whose word w is not a float32 zero or normal (denormal,
++ * infinity, NaN).  DOUBLE() of the ISA (the sNaN stays signalling, which the
++ * host conversion would quiet); with FPK_R a later instruction of the TB
++ * relies on frT being fpi_zon(), which it is not: complete the lfs (frT and
++ * doubleword 1 of its VSR; the update form wrote rA before the op) and leave
++ * the TB.  No FPSCR bit is read or written: nf is the FPSCR as it stands.
++ */
++static Int128 lfsk_slow_path(CPUPPCState *env, uint64_t w, uint32_t sel,
++                             uintptr_t ra)
++{
++    uint64_t r = helper_todouble((uint32_t)w);
++
++    qatomic_inc(&lfsk_slow);
++    if ((sel & FPK_R) && !fpi_zon(r)) {
++        fpk_exit(env, sel, r, env->fpscr, ra);
++    }
++    return int128_make128(r, env->fpscr);
++}
++
+ Int128 ppc_fp32_native_slow(CPUPPCState *env, uint64_t a, uint64_t b,
+                             uint64_t c, uint32_t sel, uintptr_t ra)
+ {
+     uint32_t op = sel & 0xff, frt = (sel >> 8) & 0xff;
+     Int128 ret;
+ 
++    if (op == FPI_LFS) {
++        return lfsk_slow_path(env, a, sel, ra);
++    }
++
+     /*
+      * tcg/0046 (x-fprf-lazy): the original sequence, and the C short path,
+      * work on the architected FPSCR and return it whole (fprf_src stays
+@@ -4630,6 +4660,10 @@ static void fpn_report(void)
+     /* tcg/0045: TBs left after an instruction that broke a guarantee */
+     fprintf(stderr, " ; x-fp-known : %" PRIu64 " sorties de bloc",
+             qatomic_read(&fpk_exits));
++    /* tcg/0051 */
++    fprintf(stderr, " ; x-lfs-known : %" PRIu64 " mots hors ligne, %" PRIu64
++            " sorties de bloc", qatomic_read(&lfsk_slow),
++            qatomic_read(&lfsk_exits));
+     fprintf(stderr, "\n");
+ }
+ 
+@@ -4724,6 +4758,35 @@ void helper_fpn_verify(CPUPPCState *env, uint64_t a, uint64_t b, uint64_t c,
+     }
+ }
+ 
++/*
++ * x-fp-verify with x-lfs-known (POMPPC tcg/0051): after each lfs by the host
++ * op, its result compared with helper_todouble() of the word.  "fast": the
++ * word is a float32 zero or normal (the short path's own decision is not
++ * seen here: the exhaustive proof covers it).
++ */
++void helper_fpn_lfs(CPUPPCState *env, uint64_t w, uint64_t r)
++{
++    uint64_t ref = helper_todouble((uint32_t)w);
++    bool good = ref == r;
++
++    if (!qatomic_read(&fpn_atexit)) {
++        qatomic_set(&fpn_atexit, true);
++        atexit(fpn_report);
++    }
++    if (!good) {
++        fprintf(stderr, "fp-native-verify: DIVERGENCE lfs w=%08" PRIx32
++                " : natif %016" PRIx64 ", helper %016" PRIx64 "\n",
++                (uint32_t)w, r, ref);
++    }
++    qatomic_inc(good ? &fpn_ok[FPI_LFS] : &fpn_bad[FPI_LFS]);
++    if (fpi_zon(ref)) {
++        qatomic_inc(&fpn_fast[FPI_LFS]);
++    }
++    if ((qatomic_fetch_inc(&fpn_total) & ((1u << 24) - 1)) == 0) {
++        fpn_report();
++    }
++}
++
+ /*
+  * x-fp-native-cmp-verify (POMPPC tcg/0033): fsel is translated to TCG ops
+  * (three movcond); each result is compared with helper_FSEL().  fsel reads
+diff --git a/target/ppc/helper.h b/target/ppc/helper.h
+index df1345c..f340cb3 100644
+--- a/target/ppc/helper.h
++++ b/target/ppc/helper.h
+@@ -111,6 +111,7 @@ DEF_HELPER_FLAGS_5(fcmpu_flat, TCG_CALL_NO_WG, i128, env, i64, i64, i64, i32)
+ DEF_HELPER_7(fpn_verify, void, env, i64, i64, i64, i64, i64, i64)
+ /* x-fp-native-cmp (POMPPC tcg/0033): x-fp-native-cmp-verify of fsel */
+ DEF_HELPER_FLAGS_5(fpnc_fsel, TCG_CALL_NO_RWG, void, env, i64, i64, i64, i64)
++DEF_HELPER_FLAGS_3(fpn_lfs, TCG_CALL_NO_RWG, void, env, i64, i64)
+ DEF_HELPER_3(store_fpscr, void, env, i64, i32)
+ DEF_HELPER_2(fpscr_clrbit, void, env, i32)
+ DEF_HELPER_1(fprf_flush, void, env)          /* tcg/0046 */
+diff --git a/target/ppc/internal.h b/target/ppc/internal.h
+index 3ddb539..ae5de35 100644
+--- a/target/ppc/internal.h
++++ b/target/ppc/internal.h
+@@ -302,6 +302,12 @@ enum {
+      * verifier's counters of fsel, which is plain TCG ops.
+      */
+     FPI_FRSP, FPI_FCTIW, FPI_FCTIWZ, FPI_CMPO, FPI_DIVS, FPI_DDIV, FPI_FSEL,
++    /*
++     * x-lfs-known (POMPPC tcg/0051): lfs and its x/u/ux forms, the DOUBLE()
++     * of the loaded word by the host when it is a float32 zero or normal
++     * (frA = the word, zero-extended; no FPSCR read or written)
++     */
++    FPI_LFS,
+     FPI_NOPS
+ };
+ #define FPI_IS_D(op) ((op) >= FPI_DADD && (op) <= FPI_DNMSUB)
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+index 93afabd..93a165a 100644
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -221,6 +221,7 @@ struct DisasContext {
+     bool fprf_lazy;
+     bool fprf_maybe;
+     bool stfs_known;            /* x-stfs-known (tcg/0047) */
++    bool lfs_known;             /* x-lfs-known (tcg/0051) */
+     bool ret_inline, ret_verify; /* x-ret-inline, x-ret-verify (tcg/0008) */
+     /*
+      * x-tier2 (tcg/0048): side exits of the trace being translated (the
+@@ -6927,6 +6928,7 @@ static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+     ctx->fprf_maybe = true;
+     fpr_novsr = ctx->fprf_lazy && !(ctx->insns_flags2 & PPC2_VSX);
+     ctx->stfs_known = env->stfs_known && ctx->fp_known;
++    ctx->lfs_known = env->lfs_known && ctx->fp_known;
+     ctx->ret_inline = env->ret_inline;
+     ctx->ret_verify = cs->ret_verify;
+     ctx->t2_nexit = 0;          /* tcg/0048 */
+diff --git a/target/ppc/translate/fp-impl.c.inc b/target/ppc/translate/fp-impl.c.inc
+index 56c88a9..bbef6c8 100644
+--- a/target/ppc/translate/fp-impl.c.inc
++++ b/target/ppc/translate/fp-impl.c.inc
+@@ -416,6 +416,8 @@ QEMU_BUILD_BUG_ON(FPI_CMPU != 7 || FPI_DADD != 8 || FPI_DNMSUB != 14);
+ /* tcg/0033: the x-fp-native-cmp selectors (PFP_FRSP.. in tcg/x86_64) */
+ QEMU_BUILD_BUG_ON(FPI_FRSP != 15 || FPI_FCTIW != 16 || FPI_FCTIWZ != 17 ||
+                   FPI_CMPO != 18 || FPI_DIVS != 19 || FPI_DDIV != 20);
++/* tcg/0051: PFP_LFS of the host emitters */
++QEMU_BUILD_BUG_ON(FPI_LFS != 22);
+ 
+ /* tcg/0045: the selector bits the host op hard-codes (PFP_K_* there) */
+ QEMU_BUILD_BUG_ON(FPK_A != 1u << 16 || FPK_B != 1u << 17 || FPK_C != 1u << 18 ||
+@@ -1833,6 +1835,51 @@ static bool gen_stfs_known(DisasContext *ctx, int rs, TCGv_i64 src, TCGv addr)
+     return true;
+ }
+ 
++/*
++ * x-lfs-known (POMPPC tcg/0051, docs/tcg-g4.md section 40): lfs as a
++ * producer of x-fp-known.  The same guest load (memop, mmu_idx, fault at the
++ * same place); then INDEX_op_ppc_fp32 with FPI_LFS takes the word (frA,
++ * zero-extended; frB, frC and the FPSCR input are the same temp, unused; nf
++ * is dead): a float32 zero or normal is converted by the host (vcvtss2sd,
++ * fcvt d, s: exact for these), anything else goes out of line to DOUBLE()
++ * of the ISA, which leaves the TB after the lfs when FPK_R was or'ed into
++ * the selector by a consumer (lfsk_slow_path()).  frT then holds fpi_zon()
++ * whenever the rest of the TB runs: it enters fpk_valid, this op its
++ * producer.  The update form writes rA before the op, so that the TB exit
++ * finds it done (the op syncs the globals; nothing can fault after the
++ * load).  The instruction is handled: fpk_scan() would drop everything at
++ * the op (and at the verifier's helper, which writes no FPR nor FPSCR); the
++ * FPSCR is not touched, so the gate state stays as it is.
++ */
++static bool gen_lfs_known(DisasContext *ctx, int rt, int ra, TCGv ea,
++                          bool update)
++{
++    TCGv_i64 w, r, nf;
++    TCGOp *top;
++
++    if (!ctx->lfs_known || ctx->base.plugin_enabled) {
++        return false;
++    }
++    w = tcg_temp_new_i64();
++    r = tcg_temp_new_i64();
++    nf = tcg_temp_new_i64();
++    tcg_gen_qemu_ld_i64(w, ea, ctx->mem_idx, DEF_MEMOP(MO_UL));
++    if (update) {
++        tcg_gen_mov_tl(cpu_gpr[ra], ea);
++    }
++    tcg_gen_ppc_fp32(r, nf, w, w, w, w, FPI_LFS | rt << 8,
++                     ppc_fp32_native_slow, 0, 0);
++    top = tcg_last_op();
++    if (ctx->fp_verify) {
++        gen_helper_fpn_lfs(tcg_env, w, r);
++    }
++    set_fpr(rt, r);
++    ctx->fpk_valid |= 1u << rt;
++    ctx->fpk_prod[rt] = top;
++    ctx->fpk_handled = true;
++    return true;
++}
++
+ static bool do_lsfpsd(DisasContext *ctx, int rt, int ra, TCGv displ,
+                       bool update, bool store, bool single)
+ {
+@@ -1858,6 +1905,9 @@ static bool do_lsfpsd(DisasContext *ctx, int rt, int ra, TCGv displ,
+         }
+     } else {
+         if (single) {
++            if (gen_lfs_known(ctx, rt, ra, ea, update)) {
++                return true;
++            }
+             gen_qemu_ld32fs(ctx, t0, ea);
+         } else {
+             gen_qemu_ld64_i64(ctx, t0, ea);
+diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
+index 41088a0..16ee116 100644
+--- a/tcg/aarch64/tcg-target.c.inc
++++ b/tcg/aarch64/tcg-target.c.inc
+@@ -1857,7 +1857,8 @@ static void tgen_qemu_ld(TCGContext *s, TCGType data_type, TCGReg data_reg,
+ 
+ enum { PFP_ADD, PFP_SUB, PFP_MUL, PFP_MADD, PFP_MSUB, PFP_NMADD, PFP_NMSUB,
+        PFP_CMPU,
+-       PFP_D = 8 };    /* tcg/0016: PFP_D + PFP_ADD..PFP_NMSUB, double forms */
++       PFP_D = 8,      /* tcg/0016: PFP_D + PFP_ADD..PFP_NMSUB, double forms */
++       PFP_LFS = 22 }; /* POMPPC tcg/0051 (x-lfs-known), FPI_LFS */
+ /*
+  * POMPPC tcg/0045 (x-fp-known): selector bits above op | frT << 8 (FPK_* of
+  * target/ppc/internal.h): operand known to be a float32 zero or normal
+@@ -2049,6 +2050,45 @@ static void tcg_out_ppc_fp32(TCGContext *s, const TCGArg *args)
+     ta = pfp_scratch(&used);
+     t = pfp_scratch(&used);
+ 
++    if (op == PFP_LFS) {
++        /*
++         * POMPPC tcg/0051 (x-lfs-known): xa = the loaded word w,
++         * zero-extended.  e = w[30:23]; a normal has e - 1 <u 254; else
++         * (e = 0 or 255) only a zero (w << 1 == 0, 32 bits) stays inline:
++         * ccmp gives Z for a normal, (w << 1) == 0 otherwise, one b.ne to
++         * the stub (DOUBLE() of the ISA, the TB exit with FPK_R).  Zero or
++         * normal: fcvt d, s, exact (FPCR at its default, no flag).  No
++         * gate, no FPSCR, no soft-float flags: nf is dead.  NOT BUILT on
++         * the x86 host where it was written (24/10/2026): compiled by the
++         * NDK clang (tools/tcg/a64syntax.sh), encodings checked by
++         * llvm-objdump, never run (docs/tcg-g4.md section 40).
++         */
++        tcg_out32(s, 0x53000000 | 23 << 16 | 30 << 10 | xa << 5 | t);
++                                                /* ubfx wt, wa, #23, #8 */
++        tcg_out32(s, 0x51000000 | 1 << 10 | t << 5 | t);   /* sub #1 */
++        tcg_out32(s, 0x7100001f | 254 << 10 | t << 5);     /* cmp #254 */
++        tcg_out32(s, 0x53000000 | 31 << 16 | 30 << 10 | xa << 5 | ta);
++                                                /* lsl wta, wa, #1 */
++        tcg_out32(s, 0x7a400800 | PFP_HS << 12 | ta << 5 | 4);
++                                    /* ccmp wta, #0, #4 (Z), hs */
++        l = new_ldst_label(s);
++        l->is_ppc_fp32 = true;
++        l->fp_sel = sel;
++        l->fp_in[0] = xa;
++        l->fp_in[1] = xb;
++        l->fp_in[2] = xc;
++        l->fp_out[0] = xr;
++        l->fp_out[1] = xnf;
++        l->fp_slow = (const void *)args[7];
++        l->label_ptr[0] = s->code_ptr;
++        tcg_out32(s, 0x54000000 | PFP_NE);              /* b.ne stub */
++        tcg_out32(s, 0x1e270000 | xa << 5 | 0);         /* fmov s0, wa */
++        pfp_fcvt_ds(s, 0, 0);                           /* fcvt d0, s0 */
++        pfp_fmov_xd(s, xr, 0);                          /* fmov xr, d0 */
++        l->raddr = tcg_splitwx_to_rx(s->code_ptr);
++        return;
++    }
++
+     /* the gate: XX = 1, XE = OE = UE = 0 (and RN = 00 but for fcmpu) */
+     if (sel & PFP_K_G) {
+         tcg_out_movi(s, TCG_TYPE_I64, bad, 0);          /* tcg/0045 */
+diff --git a/tcg/x86_64/tcg-target.c.inc b/tcg/x86_64/tcg-target.c.inc
+index f60586e..3fd3392 100644
+--- a/tcg/x86_64/tcg-target.c.inc
++++ b/tcg/x86_64/tcg-target.c.inc
+@@ -1904,6 +1904,7 @@ enum { PFP_ADD, PFP_SUB, PFP_MUL, PFP_MADD, PFP_MSUB, PFP_NMADD, PFP_NMSUB,
+        PFP_D = 8,       /* PFP_D + PFP_ADD..PFP_NMSUB: the double forms */
+        /* POMPPC tcg/0033 (x-fp-native-cmp) */
+        PFP_FRSP = 15, PFP_FCTIW, PFP_FCTIWZ, PFP_CMPO, PFP_DIVS, PFP_DDIV,
++       PFP_LFS = 22,            /* POMPPC tcg/0051 (x-lfs-known) */
+        PFP_B_DIV = 0x40 };      /* base operation of PFP_DIVS/PFP_DDIV */
+ 
+ /*
+@@ -2099,6 +2100,33 @@ static void tcg_out_ppc_fp32(TCGContext *s, const TCGArg *args)
+     t = pfp_scratch(&used);
+     u = pfp_scratch(&used);
+ 
++    if (op == PFP_LFS) {
++        /*
++         * POMPPC tcg/0051 (x-lfs-known): xa = the loaded word w,
++         * zero-extended.  t = (w << 1) - 0x01000000 on 32 bits (the sign
++         * dropped): a normal gives [0, 0xfdfffffe], a zero 0xff000000; an
++         * infinity or a NaN [0xfe000000, 0xfefffffe], a denormal
++         * [0xff000002, 0xfffffffe].  Zero or normal: vcvtss2sd, exact (no
++         * MXCSR flag either); else the stub (DOUBLE() of the ISA, and the
++         * TB exit with FPK_R).  No gate, no FPSCR, no soft-float flags: nf
++         * is dead.
++         */
++        tcg_insn_unit *ok;
++
++        tcg_out_modrm_sib_offset(s, OPC_LEA, t, -1, xa, 1, -0x01000000);
++        tgen_arithi(s, ARITH_CMP, t, (int32_t)0xfe000000, 0);
++        ok = pfp_jshort(s, JCC_JB);
++        tgen_arithi(s, ARITH_CMP, t, (int32_t)0xff000000, 0);
++        pfp_jslow(s, l, JCC_JNE);
++        pfp_here(s, ok);
++        tcg_out_vex_modrm(s, OPC_MOVD_VyEy, TCG_REG_XMM0, 0, xa);
++        tcg_out_vex_modrm(s, PFP_VCVTSS2SD, TCG_REG_XMM0, TCG_REG_XMM0,
++                          TCG_REG_XMM0);
++        pfp_movq_rx(s, xr, TCG_REG_XMM0);
++        l->raddr = tcg_splitwx_to_rx(s->code_ptr);
++        return;
++    }
++
+     /*
+      * the gate: XX = 1, XE = OE = UE = 0 (and RN = 00 but for fcmpu, and
+      * tcg/0033 fcmpo and fctiwz)

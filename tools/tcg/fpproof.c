@@ -60,6 +60,19 @@
  *   - stfs court : sur les 2^32 motifs simples, ceux que fpi_zon() accepte
  *     (une fois DOUBLE()) donnent bits 63:62 || 58:29 = helper_tosingle().
  *
+ * tcg/0051 (-DFPPROOF_LFSK quand l'arbre a x-lfs-known, docs/tcg-g4.md §40),
+ * sur les 2^32 mots w :
+ *   - le test de l'émetteur x86_64 ((w << 1) - 0x01000000 sur 32 bits <u
+ *     0xfe000000, ou = 0xff000000) et celui de l'émetteur aarch64 (e - 1 <u
+ *     254, ou w << 1 = 0) acceptent exactement les w dont DOUBLE() est
+ *     fpi_zon() ;
+ *   - pour ceux-là, la conversion de l'hôte (cvtss2sd) = helper_todouble(),
+ *     sans aucun drapeau d'exception de l'hôte ;
+ *   - pour les autres, le talon de l'objet (ppc_fp32_native_slow, FPI_LFS)
+ *     rend helper_todouble() sans FPK_R et quitte le bloc avec FPK_R (frT,
+ *     moitié VSR, FPSCR inchangé, nip + 4) ; un mot sur 4096 accepté passe
+ *     aussi par le talon, qui ne doit pas sortir.
+ *
  * Usage : fpproof N [graine]  (N vecteurs aléatoires par opération et par
  * famille de FPSCR ; plus le catalogue croisé).
  */
@@ -71,6 +84,7 @@
 #include <float.h>
 #include <math.h>
 #include <setjmp.h>
+#include <fenv.h>
 
 #define helper_fp32_fast model_fp32_fast
 #include "fpproof-fast.h"
@@ -894,6 +908,73 @@ int main(int argc, char **argv)
         } while (++w != 0);
         printf("stfs court : %" PRIu64 " motifs, %" PRIu64 " zéros ou normaux,"
                " %" PRIu64 " divergences\n", nz, nzon, nbad);
+        tot_bad += nbad;
+    }
+#endif
+#ifdef FPPROOF_LFSK
+    {
+        /* tcg/0051 : lfs connu, les 2^32 mots */
+        uint64_t nz = 0, nfast = 0, nslow = 0, nexit = 0, nstay = 0, nbad = 0;
+        uint32_t w = 0;
+        do {
+            uint64_t ref = helper_todouble(w);
+            bool zon = fpi_zon(ref);
+            uint32_t t = 2u * w - 0x01000000u;          /* émetteur x86_64 */
+            bool fx = t < 0xfe000000u || t == 0xff000000u;
+            uint32_t e = (w >> 23) & 0xff;               /* émetteur aarch64 */
+            bool fa = (uint32_t)(e - 1) < 254 || (uint32_t)(w << 1) == 0;
+            bool bad = fx != zon || fa != zon;
+
+            if (zon) {
+                volatile float vf;
+                double d;
+                uint64_t u;
+                memcpy((void *)&vf, &w, 4);
+                feclearexcept(FE_ALL_EXCEPT);
+                d = vf;                                  /* cvtss2sd */
+                bad |= fetestexcept(FE_ALL_EXCEPT) != 0;
+                memcpy(&u, &d, 8);
+                bad |= u != ref;
+                nfast++;
+            }
+            if (!zon || (w & 4095) == 0) {
+                for (int k = 0; k < 2; k++) {
+                    uint32_t sel = FPI_LFS | FRT << 8 | (k ? FPK_R : 0);
+                    uint64_t f0 = (w & 1) ? FP_XX : FP_XX | FP_VX | FP_FX | 1;
+                    Int128 ret = int128_zero();
+
+                    env_setup(f0, 0);
+                    f0 = env->fpscr;
+                    *cpu_fpr_ptr(env, FRT) = FPR_POISON;
+                    *cpu_vsrl_ptr(env, FRT) = FPR_POISON;
+                    env->nip = 0x1000;
+                    exited = 0;
+                    if (setjmp(jb_exit) == 0) {
+                        ret = ppc_fp32_native_slow(env, w, w, w, sel, 0);
+                    }
+                    if (exited) {
+                        nexit++;
+                        bad |= !k || zon || *cpu_fpr_ptr(env, FRT) != ref ||
+                               *cpu_vsrl_ptr(env, FRT) != 0 ||
+                               env->fpscr != f0 || env->nip != 0x1004;
+                    } else {
+                        nstay++;
+                        bad |= (k && !zon) || int128_getlo(ret) != ref ||
+                               int128_gethi(ret) != f0 ||
+                               *cpu_fpr_ptr(env, FRT) != FPR_POISON ||
+                               env->fpscr != f0;
+                    }
+                }
+                nslow++;
+            }
+            if (bad && nbad++ < 20) {
+                printf("DIVERGENCE lfs w=%08x : x86 %d a64 %d zon %d\n", w, fx, fa, zon);
+            }
+            nz++;
+        } while (++w != 0);
+        printf("lfs connu : %" PRIu64 " mots, %" PRIu64 " par l'hôte, %" PRIu64
+               " au talon (sorties %" PRIu64 ", sans sortie %" PRIu64 "), %"
+               PRIu64 " divergences\n", nz, nfast, nslow, nexit, nstay, nbad);
         tot_bad += nbad;
     }
 #endif

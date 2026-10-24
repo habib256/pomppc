@@ -59,6 +59,9 @@
 #                             # (x-fprf-lazy, patches/tcg/0046, allumé sur Linux x86-64 depuis le 20/10, §38)
 #   STFSKNOWN=0 ./run_tiger.sh # coupe : stfs d'une valeur connue (x-fp-known) sans la conversion complète
 #                             # (x-stfs-known, patches/tcg/0047, allumé sur Linux x86-64 depuis le 20/10, §39)
+#   LFSKNOWN=1 ./run_tiger.sh # lfs converti par l'hôte quand le mot est un simple nul ou normal, et producteur
+#                             # de x-fp-known (x-lfs-known, patches/tcg/0051, docs/tcg-g4.md §40 ; éteint
+#                             # par défaut, A/B en jeu à faire ; n'agit qu'avec FPKNOWN=1)
 #   PPC32MT=1 ./run_tiger.sh  # SMP >= 2 sur qemu-system-ppc (cible 32 bits, celle du G4) en MTTCG au lieu
 #                             # de qemu-system-ppc64 (patches/tcg/0050, docs/ppc32-mttcg.md ; éteint par
 #                             # défaut, sondé : sans le patch, repli sur ppc64 avec un avertissement)
@@ -616,6 +619,22 @@ if [ "${STFSKNOWN:-0}" != 0 ]; then
   else
     echo "⚠  STFSKNOWN=1 demandé mais ce QEMU n'a pas la propriété 'x-stfs-known' (patches/tcg/0047)." >&2
     MODE="$MODE + stfs court DEMANDÉ MAIS INDISPONIBLE"
+  fi
+fi
+# --- lfs producteur (x-lfs-known, patches/tcg/0051, docs/tcg-g4.md §40) --- lfs, lfsx, lfsu,
+# lfsux : un simple nul ou normal converti par l'hôte, le reste au talon (DOUBLE() de l'ISA, sortie
+# de bloc si une instruction suivante s'en est servie) ; frT entre dans les opérandes connus de
+# x-fp-known. Mêmes résultats au bit près. N'agit qu'avec x-fp-known. Éteint par défaut.
+if [ "${LFSKNOWN:-0}" != 0 ]; then
+  if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-lfs-known=on"; then
+    case "$CPU_SPEC" in
+      *x-fp-known=on*) CPU_SPEC="$CPU_SPEC,x-lfs-known=on"; MODE="$MODE + LFS-CONNU" ;;
+      *) echo "⚠  LFSKNOWN=1 sans x-fp-known : x-lfs-known n'agit qu'avec lui (FPKNOWN=1)." >&2
+         MODE="$MODE + lfs connu SANS EFFET" ;;
+    esac
+  else
+    echo "⚠  LFSKNOWN=1 demandé mais ce QEMU n'a pas la propriété 'x-lfs-known' (patches/tcg/0051)." >&2
+    MODE="$MODE + lfs connu DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
 # --- Second niveau sans compilateur (x-tier2, patches/tcg/0048, docs/plan-traducteur-rapide.md) ---

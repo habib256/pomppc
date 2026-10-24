@@ -14,7 +14,11 @@
  * SIGBUS) ou boucle (SIGALRM), le gestionnaire revient ici par siglongjmp.
  *
  *   powerpc-linux-gnu-gcc -O1 -static -fno-stack-protector -o tbreplay.ppc tbreplay.c
- *   qemu-ppc -cpu g4,... -d in_asm,out_asm -D log tbreplay.ppc blocs.bin
+ *   qemu-ppc -cpu g4,... -d in_asm,out_asm -D log tbreplay.ppc blocs.bin [SAUT [N]]
+ * SAUT : les SAUT premiers blocs ne sont pas exécutés (un bloc qui écrit dans
+ * les données de tbreplay peut le faire tomber : tools/tcg/lfsksize.sh relance
+ * alors après lui ; TBREPLAY_V=1 nomme chaque bloc sur stderr). N : au plus N
+ * blocs exécutés (lfsksize.sh : un bloc par processus, sous `timeout`).
  * Format de blocs.bin : suite de (u32 adresse, u32 n, n mots), gros-boutiste.
  */
 #include <setjmp.h>
@@ -23,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 typedef unsigned int u32;
@@ -61,7 +66,7 @@ int main(int argc, char **argv)
 {
     FILE *f;
     u32 hdr[2], *w;
-    long n = 0;
+    long n = 0, skip, lim;
     struct sigaction sa;
 
     if (argc < 2 || !(f = fopen(argv[1], "rb"))) {
@@ -87,6 +92,8 @@ int main(int argc, char **argv)
     sigaction(SIGALRM, &sa, 0);
     __asm__ __volatile__("mr %0,2\n\tmr %1,13" : "=r"(saved_r2), "=r"(saved_r13));
     w = malloc(4 * 65536);
+    skip = argc > 2 ? atol(argv[2]) : 0;
+    lim = argc > 3 ? atol(argv[3]) : -1;
     while (fread(hdr, 4, 2, f) == 2) {
         /* volatile : relus après siglongjmp */
         volatile u32 a = hdr[0], k = hdr[1], pg = a & ~4095u,
@@ -94,6 +101,15 @@ int main(int argc, char **argv)
         if (k > 65536 || fread(w, 4, k, f) != k) {
             break;
         }
+        if (skip > 0) {
+            skip--;
+            n++;
+            continue;
+        }
+        if (lim == 0) {
+            break;
+        }
+        lim--;
         if (mmap((void *)pg, end - pg, PROT_READ | PROT_WRITE | PROT_EXEC,
                  MAP_FIXED | MAP_ANONYMOUS | MAP_PRIVATE, -1, 0) == MAP_FAILED) {
             continue;
@@ -105,11 +121,19 @@ int main(int argc, char **argv)
             fprintf(stderr, "bloc %08x (%u mots)\n", a, k);
         }
         if (sigsetjmp(jb, 1) == 0) {
-            alarm(1);
+            /*
+             * 50 ms (au lieu d'alarm(1) : un bloc qui finit par blr boucle
+             * dans ret_stub jusqu'au signal ; 1 083 blocs = 18 min par bras)
+             */
+            struct itimerval it = { { 0, 0 }, { 0, 50000 } };
+            setitimer(ITIMER_REAL, &it, 0);
             run_at(a, data + (1 << 19), ret_stub);
         }
         __asm__ __volatile__("mr 2,%0\n\tmr 13,%1" : : "r"(saved_r2), "r"(saved_r13));
-        alarm(0);
+        {
+            struct itimerval z = { { 0, 0 }, { 0, 0 } };
+            setitimer(ITIMER_REAL, &z, 0);
+        }
         munmap((void *)pg, end - pg);
         n++;
     }
