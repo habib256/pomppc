@@ -729,3 +729,11 @@ inchangée, avec un accès antérieur **de même nature** dans le bloc. Le déta
 registres sera faible. Un accès couvert ferait `t = ea − page0 ; t ≤ 0x1000 − taille` (exact, y
 compris pour les accès à cheval) puis l'accès par l'adend gardé, soit ~4 instructions au lieu de
 ~10. Estimation : **~−5 % du code x86**. Levier `x-tlb-base`, confié à un agent le 24/10.
+
+**Écrit le 24/10 : `tcg/0052` (`x-tlb-base`, éteint, `TLBBASE=1`), `docs/tcg-g4.md` §41** —
+chargements seulement (les rangements laissés : un autre vCPU peut repasser une page en
+« notdirty » pendant le bloc) ; test exhaustif du test de couverture (120,7 G cas), mutants,
+VM de dev sous les vérificateurs (2,2 G chargements couverts vérifiés, 0 divergence) ; sur les
+mêmes blocs retraduits **en mode système** (essai `tbreplay-sys`), 72 % des chargements en forme
+D couverts, `lfs` 20,3 → 16,7 instructions x86, tout le code **−3,4 %** ; VM de dev : banc dédié
+−19 à −22 %, d3inter dans le bruit d'un démarrage à l'autre. A/B en jeu à faire (§41.6).
