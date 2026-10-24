@@ -9,7 +9,9 @@ construite dans build-user/. Pour chaque mutant : une substitution dans un fichi
 `ninja qemu-ppc`, le binaire rangé dans build-user/mut-<nom>, le fichier rendu par
 `git checkout`. Puis, bras lfsk (tools/tcg/lfskuser.sh « un ») :
   - fptest l sur les quatre plages des cas spéciaux (zéros et dénormaux des deux signes,
-    infinis et NaN des deux signes, avec les normaux voisins) : écarts comptés ;
+    infinis et NaN des deux signes, avec les normaux voisins) : écarts comptés, et (sous
+    x-fp-verify, bilan final du banc linux-user) mots hors ligne et sorties de bloc contre
+    l'attendu exact (4 et 3 par mot anormal : le classement du vrai émetteur) ;
   - fptest k 4096 (graines 0 et 7) contre l'empreinte du binaire non muté, et sous
     x-fp-verify : divergences du vérificateur.
 Sortie : une ligne par mutant. Variables : OUT (dossier, défaut $TMPDIR/lfskmut), NP (tranches
@@ -101,6 +103,8 @@ def apply(m):
     return f
 
 
+# les 33 554 430 mots anormaux (dénormaux et infinis, NaN des deux signes) et leurs voisins
+NANORM = 33554430
 RANGES = [('0', '1000000'), ('7f000000', '80000000'), ('80000000', '81000000'),
           ('ff000000', '100000000')]
 
@@ -108,13 +112,21 @@ RANGES = [('0', '1000000'), ('7f000000', '80000000'), ('80000000', '81000000'),
 def test(q, tag):
     env = dict(os.environ, OUT=os.path.join(OUT, tag))
     os.makedirs(env['OUT'], exist_ok=True)
-    ecarts = 0
+    ecarts, hl, so, div = 0, 0, 0, 0
+    envl = dict(env, OPTS='x-fp-verify=on')
     for lo, hi in RANGES:
         r = run(['nice', '-n', '19', 'bash', os.path.join(HERE, 'lfskuser.sh'), q, 'un', 'l', lo, hi],
-                env=env, timeout=3600)
+                env=envl, timeout=3600)
         m = re.search(r'(\d+) ecarts', r.stdout)
         ecarts += int(m.group(1)) if m else 10**9
-    ks, div = [], 0
+        div += r.stderr.count('DIVERGENCE')
+        # bilan final (preexit_cleanup du banc linux-user) : le classement exact du vrai
+        # émetteur — chaque mot anormal hors ligne quatre fois, trois sorties de bloc
+        f = [l for l in r.stderr.splitlines() if l.startswith('FINAL') and 'x-lfs-known' in l]
+        m = re.search(r'x-lfs-known : (\d+) mots hors ligne, (\d+) sorties', f[-1]) if f else None
+        hl += int(m.group(1)) if m else 10**12
+        so += int(m.group(2)) if m else 10**12
+    ks = []
     for seed in ('0', '7'):
         r = run(['nice', '-n', '19', 'bash', os.path.join(HERE, 'lfskuser.sh'), q, 'un', 'k', '4096', seed],
                 env=env, timeout=3600)
@@ -127,7 +139,7 @@ def test(q, tag):
         if last:
             m = re.search(r'x-lfs-known : (\d+) mots hors ligne, (\d+) sorties', last[-1])
             ks.append('lfsk %s/%s' % m.groups() if m else '')
-    return ecarts, ks, div
+    return ecarts, ks, div, (hl, so)
 
 
 def main():
@@ -136,22 +148,25 @@ def main():
     ref_q = os.path.join(TREE, 'build-user', 'mut-aucun')
     if not os.path.exists(ref_q):
         build('aucun')
-    e0, k0, d0 = test(ref_q, 'aucun')
-    print('aucun              : mode l %d écarts ; k : %s ; vérificateur %d divergences' %
-          (e0, ' | '.join(x.strip().splitlines()[-1] if x.strip() else '' for x in k0), d0), flush=True)
+    e0, k0, d0, c0 = test(ref_q, 'aucun')
+    print('aucun              : mode l %d écarts, hors ligne/sorties %d/%d (attendu %d/%d) ; k : %s ; '
+          'vérificateur %d divergences' % (e0, c0[0], c0[1], 4 * NANORM, 3 * NANORM,
+          ' | '.join(x.strip().splitlines()[-1] if x.strip() else '' for x in k0), d0), flush=True)
     for m in names:
         f = apply(m)
         try:
             q = build(m)
         finally:
             run(['git', '-C', TREE, 'checkout', '--', f])
-        e, k, d = test(q, m)
+        e, k, d, c = test(q, m)
         kdiff = sum(1 for a, b in zip(k0[0::2], k[0::2])
                     for x, y in zip(a.splitlines(), b.splitlines()) if x != y)
+        cnt = c != (4 * NANORM, 3 * NANORM)
         caught = e > 0 or kdiff > 0 or d > 0
-        print('%-18s : mode l %d écarts ; k : %d lignes d\'empreinte différentes ; vérificateur %d '
-              'divergences ; %s -> %s' % (m, e, kdiff, d, ' '.join(k[1::2]),
-                                         'ATTRAPÉ' if caught else 'non attrapé'), flush=True)
+        print('%-18s : mode l %d écarts, hors ligne/sorties %d/%d ; k : %d lignes d\'empreinte '
+              'différentes ; vérificateur %d divergences ; k %s -> %s' %
+              (m, e, c[0], c[1], kdiff, d, ' '.join(k[1::2]),
+               'ATTRAPÉ' if caught else 'vu au compteur seul' if cnt else 'non attrapé'), flush=True)
     build('aucun')
 
 

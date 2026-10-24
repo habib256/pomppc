@@ -70,4 +70,32 @@ for c in ("vfn_n", "vfnc_total"):
     s = s.replace("if ((qatomic_fetch_inc(&%s) & ((1u << 26) - 1)) == 0) {" % c,
                   "if ((qatomic_fetch_inc(&%s) & ((1u << 16) - 1)) == 0) {" % c)
 open(p, 'w').write(s)
+# --- série jusqu'à 0050 (tcg/0051, docs/tcg-g4.md §40) : configurer avec --disable-werror ---
+# fin du bloc système de cpu.h : déplacée par 0031-0043 après ms_last
+ed('target/ppc/cpu.h',
+   "    uint64_t ms_last;\n#endif\n\n    /* Other registers */",
+   "    uint64_t ms_last;\n/* user hack: fin déplacée */\n\n    /* Other registers */")
+# pomppc_jc_scan_stat (tcg/0011) appelée par translate-all.c en mode utilisateur aussi
+ed('accel/tcg/internal-common.h',
+   "void pomppc_jc_scan_stat(CPUState *cpu);       /* tcg/0011 */\n#endif\n",
+   "#endif\nvoid pomppc_jc_scan_stat(CPUState *cpu);       /* tcg/0011, user hack */\n")
+# helper_mem_stat (tcg/0031) : défini dans mmu_helper.c, absent du mode utilisateur
+p = os.path.join(Q, 'target/ppc/user_only_helper.c')
+s = open(p).read()
+if 'helper_mem_stat' not in s:
+    open(p, 'a').write('\n/* user hack (banc linux-user, tcg/0031) */\n'
+                       '#include "exec/helper-proto.h"\n'
+                       'void helper_mem_stat(CPUPPCState *env, target_ulong addr, uint32_t arg) { }\n')
+# bilan final de x-fp-verify à la sortie (compteurs exacts de x-lfs-known, lfsk-mut.py)
+ed('linux-user/exit.c', "void preexit_cleanup(CPUArchState *env, int code)\n{\n",
+   "/* user hack (banc linux-user, tcg/0051) : bilan final de x-fp-verify */\n"
+   "void ppc_fpn_report_user(void);\n\n"
+   "void preexit_cleanup(CPUArchState *env, int code)\n{\n    ppc_fpn_report_user();\n")
+ed('target/ppc/fpu_helper.c',
+   "void helper_fpn_verify(CPUPPCState *env, uint64_t a, uint64_t b, uint64_t c,",
+   "/* user hack (banc linux-user, tcg/0051) : bilan final, appelé par preexit_cleanup */\n"
+   "void ppc_fpn_report_user(void);\nvoid ppc_fpn_report_user(void)\n{\n"
+   "    if (qatomic_read(&fpn_atexit)) {\n        fprintf(stderr, \"FINAL \");\n"
+   "        fpn_report();\n    }\n}\n\n"
+   "void helper_fpn_verify(CPUPPCState *env, uint64_t a, uint64_t b, uint64_t c,")
 print('ok')

@@ -17,6 +17,8 @@ python3 "$HERE/tbreplay.py" "$J" "$OUT/blocs.bin"
 powerpc-linux-gnu-gcc -O1 -static -fno-stack-protector -o "$OUT/tbreplay.ppc" "$HERE/tbreplay.c" || exit 2
 REF="g4,x-fast-fp=on,x-lfs-inline=on,x-fp-inline=on,x-fp-native=on,x-fp-native64=on"
 REF="$REF,x-fp-native-cmp=on,x-fp-known=on,x-fprf-lazy=on,x-stfs-known=on"
+# AltiVec comme en production (sans eux, vmx coûte 4,9 instructions x86 au lieu de ~21)
+REF="$REF,x-vfp-fast=on,x-vperm-fast=on,x-vmx-inline=on,x-vfp-native=on,x-vfp-native-cmp=on,x-lmw-vector=on"
 NB=$(python3 -c "import struct,sys
 d=open(sys.argv[1],'rb').read(); i=n=0
 while i < len(d):

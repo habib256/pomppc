@@ -708,3 +708,9 @@ porte sur les instructions x86 des blocs chauds :
 - environ −16 par `lfs`, soit ~2,7 par instruction invité ;
 - environ −10 par opérande flottant venu d'un `lfs`, soit ~1,6 ;
 - en tout **~−19 %**. En temps, on peut en attendre moitié moins.
+
+**Écrit le 24/10 : `tcg/0051` (`x-lfs-known`, éteint, `LFSKNOWN=1`), `docs/tcg-g4.md` §40** — prouvé
+sur les 2^32 mots (modèle des deux émetteurs, talon, et le vrai émetteur x86_64 en linux-user),
+mutants, Zenerchi et Marble Blast vérifiés sans divergence (4 sorties de bloc par million de
+`lfs`) ; sur ces mêmes blocs retraduits, `lfs` 26,9 → 11,3 instructions x86, tout le code
+−26 % (linux-user, sans TLB), **≈ −20 %** ramené au binaire système. A/B en jeu à faire (§40.6).

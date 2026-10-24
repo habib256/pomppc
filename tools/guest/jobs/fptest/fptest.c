@@ -739,9 +739,11 @@ static void kmode(long nprog)
  *   lfs f1,0(r3) ; stfd f1,0(r4)           (talon sans sortie de bloc)
  *   stfs f1,8(r4)                          consommateurs : stfs court (0047),
  *   fcmpu cr1,f1,f1                        fcmpu sans test de NaN,
- *   frsp f2,f1 ; stfd f2,16(r4)            frsp sans test de plage,
- *   fmuls f3,f1,f1 ; stfd f3,24(r4)        fmuls, fadds sans test d'operande
+ *   fmuls f3,f1,f1 ; stfd f3,24(r4)        fmuls, fadds sans test d'operande,
  *   fadds f4,f1,f1 ; stfd f4,32(r4)
+ *   frsp f2,f1 ; stfd f2,16(r4)            frsp sans test de plage, et le FPSCR
+ *   mffs f9 ; stfd f9,88(r4)               juste apres lui (FPRF, FI : un infini
+ *                                          pris pour connu s'y verrait)
  *   addi r7,r3,-4 ; lfsu f6,4(r7)          forme mise a jour : r7 = r3 meme si
  *   stfs f6,64(r4) ; subf r8,r3,r7         le bloc est quitte apres lfsu
  *   stw r8,72(r4)
@@ -787,12 +789,14 @@ static void lgen(int ref)
     kput(KD(54, 1, 4, 0));
     kput(KD(52, 1, 4, 8));
     kput(KX(63, 1 << 2, 1, 1, 0, 0));                /* fcmpu cr1,f1,f1 */
-    kput(KX(63, 2, 0, 1, 12, 0));                    /* frsp f2,f1 */
-    kput(KD(54, 2, 4, 16));
     kput(KA(59, 3, 1, 0, 1, 25, 0));                 /* fmuls f3,f1,f1 */
     kput(KD(54, 3, 4, 24));
     kput(KA(59, 4, 1, 1, 0, 21, 0));                 /* fadds f4,f1,f1 */
     kput(KD(54, 4, 4, 32));
+    kput(KX(63, 2, 0, 1, 12, 0));                    /* frsp f2,f1 */
+    kput(KD(54, 2, 4, 16));
+    kput(KX(63, 9, 0, 0, 583, 0));                   /* mffs f9 : FPRF, FI de frsp */
+    kput(KD(54, 9, 4, 88));
     if (ref) {
         kput(KD(14, 7, 3, 0));                       /* addi r7,r3,0 */
         kput(KD(50, 6, 3, 8));
