@@ -5297,7 +5297,12 @@ vfpk) les mêmes bancs varient de ±30 % d'un démarrage à l'autre, témoin com
 tourner les mutants et l'autre agent sa VM) : rien à en tirer. `t2bench` d3inter : 17,3-19,7 s
 pour 150 images dans les quatre démarrages (bruit), **même md5**
 (`7ff741d695d60c212dc0ca4b761a0acc`) partout. C'est l'A/B DOOM 3, hôte au repos, qui dira.
-Binaire rapide de l'arbre (PGO) : en cours d'entraînement à l'écriture de ces lignes (§42.6).
+**Binaire rapide de l'arbre** (`~/src/qemu-vfpk/build-fast-mt/qemu-system-ppc` : -O3
+-march=native, LTO, PGO ; `pgo-train.sh --cible ppc32mt --banc dev`, profil pris sur cette VM de
+dev seulement — bureau 120 s puis `plugmd5 gpu suite mtbench t2bench`, 1 255 `.gcda`, options
+de production, `x-lfs-known` **et `x-vfp-known`** pendant l'entraînement). Pendant
+l'entraînement, `x-vfp-known` allumé : **`plugmd5` : 69 scènes, 0 écart** ; **`gpu` : 56 OK,
+0 échec**. Pas de banc de vitesse ici (hôte chargé, charge 16) : c'est l'A/B du §42.6.
 
 ### 42.6 L'A/B à jouer (VM quotidienne, hôte au repos)
 
