@@ -49,6 +49,8 @@ grep -q "fpi_short" "$OUT/fpproof-fast.h" && DFLAT="$DFLAT -DFPPROOF_NCMP"
 grep -q "fpk_exit" "$SRC/target/ppc/fpu_helper.c" && DFLAT="$DFLAT -DFPPROOF_KNOWN"
 grep -q "ppc_fprf_flush" "$SRC/target/ppc/cpu.h" && DFLAT="$DFLAT -DFPPROOF_LAZY"
 grep -q "gen_stfs_known" "$SRC/target/ppc/translate/fp-impl.c.inc" && DFLAT="$DFLAT -DFPPROOF_STFS"
+# x-lfs-known (patches/tcg/0051, §40)
+grep -q "lfsk_slow_path" "$SRC/target/ppc/fpu_helper.c" && DFLAT="$DFLAT -DFPPROOF_LFSK"
 FLAGS="$(python3 - "$B/compile_commands.json" <<'PY'
 import json, shlex, sys
 for e in json.load(open(sys.argv[1])):

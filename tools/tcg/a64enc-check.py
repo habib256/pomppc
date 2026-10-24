@@ -58,6 +58,16 @@ CASES = [
     ("PVF_UCVTF4S", 3, 1, None, None, "ucvtf v3.4s, v1.4s"),
     ("PVF_FCVTZS4S", 3, 2, None, None, "fcvtzs v3.4s, v2.4s"),
     ("PVF_FCVTZU4S", 3, 2, None, None, "fcvtzu v3.4s, v2.4s"),
+    # --- tcg/0051 (x-lfs-known, NON exécuté : mots bruts de l'émetteur, PFP_LFS) ---
+    ("0x53000000 | 23 << 16 | 30 << 10", 9, 2, None, None, "ubfx w9, w2, #23, #8"),
+    ("0x51000000 | 1 << 10", 9, 9, None, None, "sub w9, w9, #1"),
+    ("0x7100001f | 254 << 10", 0, 9, None, None, "cmp w9, #254"),
+    ("0x53000000 | 31 << 16 | 30 << 10", 10, 2, None, None, "lsl w10, w2, #1"),
+    ("0x7a400800 | 2 << 12 | 4", 0, 10, None, None, "ccmp w10, #0, #4, hs"),
+    ("0x54000000 | 1", 0, 0, None, None, "b.ne ."),
+    ("0x1e270000", 0, 2, None, None, "fmov s0, w2"),
+    ("0x1e22c000", 0, 0, None, None, "fcvt d0, s0"),
+    ("0x9e660000", 7, 0, None, None, "fmov x7, d0"),
 ]
 
 

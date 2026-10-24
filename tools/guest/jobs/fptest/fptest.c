@@ -43,6 +43,14 @@
  *                             stfs court) ; defaut 4096 programmes x 8 x 5
  *   fptest banc-x N           cout d'une sortie de bloc de x-fp-known (fmuls
  *                             normal puis denormal, relu par fadds)
+ *   fptest l LO HI            lfs producteur (tcg/0051, x-lfs-known) : chaque
+ *                             mot w de [LO, HI) (hexadecimal, HI = 100000000
+ *                             pour les 2^32), lfs/lfsu/lfsx suivis de
+ *                             consommateurs dans le meme bloc, contre DOUBLE()
+ *                             calcule en entiers et contre le meme bloc ou lfd
+ *                             remplace lfs (rien de connu)
+ *   fptest banc-l N           lfs + fmadds (produits scalaires, sommets 4x4
+ *                             lus en memoire a chaque passe)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -724,6 +732,206 @@ static void kmode(long nprog)
     printf("total %llu programmes ; empreinte %016llx\n", n, fnv);
 }
 
+/*
+ * ---- mode l (tcg/0051) : lfs producteur de x-fp-known, mot par mot ----
+ * Bloc A (un bloc de traduction, ecrit dans kbuf) :
+ *   lfs f5,0(r3) ; stfd f5,56(r4)          lfs dont personne ne se sert
+ *   lfs f1,0(r3) ; stfd f1,0(r4)           (talon sans sortie de bloc)
+ *   stfs f1,8(r4)                          consommateurs : stfs court (0047),
+ *   fcmpu cr1,f1,f1                        fcmpu sans test de NaN,
+ *   fmuls f3,f1,f1 ; stfd f3,24(r4)        fmuls, fadds sans test d'operande,
+ *   fadds f4,f1,f1 ; stfd f4,32(r4)
+ *   frsp f2,f1 ; stfd f2,16(r4)            frsp sans test de plage, et le FPSCR
+ *   mffs f9 ; stfd f9,88(r4)               juste apres lui (FPRF, FI : un infini
+ *                                          pris pour connu s'y verrait)
+ *   addi r7,r3,-4 ; lfsu f6,4(r7)          forme mise a jour : r7 = r3 meme si
+ *   stfs f6,64(r4) ; subf r8,r3,r7         le bloc est quitte apres lfsu
+ *   stw r8,72(r4)
+ *   li r9,0 ; lfsx f7,r3,r9                forme indexee
+ *   fmuls f8,f7,f7 ; stfd f8,80(r4)
+ *   mffs f0 ; stfd f0,40(r4) ; mfcr r5 ; stw r5,48(r4) ; blr
+ * Bloc B : le meme, chaque lfs/lfsu/lfsx remplace par lfd de DOUBLE(w)
+ * calcule en entiers (8(r3)) : lfd n'est pas producteur, tout y est teste.
+ * FPSCR = XX avant chacun. Ecart si A != B (CR : champ 1), si A.f1 ou A.f5
+ * != DOUBLE(w), si A.stfs != w.
+ */
+static u64 todouble_ref(u32 w)
+{
+    u32 a = w & 0x7fffffffu;
+    u64 r = (u64)(w >> 31) << 63;
+    if (a >= 0x00800000u) {
+        if (((w >> 23) & 0xff) == 0xff) {
+            r |= (u64)0x7ff << 52 | (u64)(w & 0x7fffff) << 29;
+        } else {
+            r |= (u64)((w >> 30) & 3) << 62 | (u64)((((w >> 30) & 1) ^ 1) * 7) << 59 |
+                 (u64)(w & 0x3fffffffu) << 29;
+        }
+    } else if (a) {
+        int s = 0;
+        while (!(a & 0x00800000u)) {
+            a <<= 1;
+            s++;
+        }
+        r |= (u64)(0x381 - s) << 52 | (u64)(a & 0x7fffff) << 29;
+    }
+    return r;
+}
+
+static void lgen(int ref)
+{
+    unsigned i;
+    u32 ld = ref ? 50 : 48;                          /* lfd / lfs */
+    int dl = ref ? 8 : 0;
+
+    kput(KD(ld, 5, 3, dl));
+    kput(KD(54, 5, 4, 56));
+    kput(KD(ld, 1, 3, dl));
+    kput(KD(54, 1, 4, 0));
+    kput(KD(52, 1, 4, 8));
+    kput(KX(63, 1 << 2, 1, 1, 0, 0));                /* fcmpu cr1,f1,f1 */
+    kput(KA(59, 3, 1, 0, 1, 25, 0));                 /* fmuls f3,f1,f1 */
+    kput(KD(54, 3, 4, 24));
+    kput(KA(59, 4, 1, 1, 0, 21, 0));                 /* fadds f4,f1,f1 */
+    kput(KD(54, 4, 4, 32));
+    kput(KX(63, 2, 0, 1, 12, 0));                    /* frsp f2,f1 */
+    kput(KD(54, 2, 4, 16));
+    kput(KX(63, 9, 0, 0, 583, 0));                   /* mffs f9 : FPRF, FI de frsp */
+    kput(KD(54, 9, 4, 88));
+    if (ref) {
+        kput(KD(14, 7, 3, 0));                       /* addi r7,r3,0 */
+        kput(KD(50, 6, 3, 8));
+    } else {
+        kput(KD(14, 7, 3, -4));                      /* addi r7,r3,-4 */
+        kput(KD(49, 6, 7, 4));                       /* lfsu f6,4(r7) */
+    }
+    kput(KD(52, 6, 4, 64));
+    kput(KX(31, 8, 3, 7, 40, 0));                    /* subf r8,r3,r7 */
+    kput(KD(36, 8, 4, 72));
+    kput(KD(14, 9, 0, 0));                           /* li r9,0 */
+    if (ref) {
+        kput(KD(50, 7, 3, 8));
+    } else {
+        kput(KX(31, 7, 3, 9, 535, 0));               /* lfsx f7,r3,r9 */
+    }
+    kput(KA(59, 8, 7, 0, 7, 25, 0));                 /* fmuls f8,f7,f7 */
+    kput(KD(54, 8, 4, 80));
+    kput(KX(63, 0, 0, 0, 583, 0));                   /* mffs f0 */
+    kput(KD(54, 0, 4, 40));
+    kput(KX(31, 5, 0, 0, 19, 0));                    /* mfcr r5 */
+    kput(KD(36, 5, 4, 48));
+    kput(0x4e800020);                                /* blr */
+    while (kn & 7) {
+        kput(0x60000000);                            /* nop : prochain bloc aligne */
+    }
+    (void)i;
+}
+
+static void kflush(void)
+{
+    unsigned i;
+    for (i = 0; i < kn; i += 8) {
+        __asm__ __volatile__("dcbst 0,%0" : : "r"(kbuf + i) : "memory");
+    }
+    __asm__ __volatile__("sync" : : : "memory");
+    for (i = 0; i < kn; i += 8) {
+        __asm__ __volatile__("icbi 0,%0" : : "r"(kbuf + i) : "memory");
+    }
+    __asm__ __volatile__("sync\n\tisync" : : : "memory");
+}
+
+static void lmode(u64 lo, u64 hi)
+{
+    static u32 lin[4] __attribute__((aligned(8)));
+    static u64 oa[12], ob[12];
+    void (*fa)(u32 *, u64 *), (*fb)(u32 *, u64 *);
+    unsigned ofs_b;
+    u64 x, n = 0, bad = 0, nzon = 0;
+    u64 lh = 1469598103934665603ULL;
+    int i;
+
+    kbuf = mmap(0, 65536, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (kbuf == MAP_FAILED) {
+        perror("mmap");
+        exit(1);
+    }
+    kn = 0;
+    lgen(0);
+    ofs_b = kn;
+    lgen(1);
+    kflush();
+    fa = (void (*)(u32 *, u64 *))(void *)kbuf;
+    fb = (void (*)(u32 *, u64 *))(void *)(kbuf + ofs_b);
+    for (x = lo; x < hi; x++) {
+        u32 w = (u32)x;
+        u64 ref = todouble_ref(w);
+        int e = 0;
+        lin[0] = w;
+        memcpy(&lin[2], &ref, 8);
+        memset(oa, 0x5a, sizeof(oa));
+        memset(ob, 0x5a, sizeof(ob));
+        setfpscr(XX);
+        fa(lin, oa);
+        setfpscr(XX);
+        fb(lin, ob);
+        ((u32 *)oa)[12] &= 0x0f000000u;              /* CR : champ 1 */
+        ((u32 *)ob)[12] &= 0x0f000000u;
+        if (memcmp(oa, ob, sizeof(oa))) e |= 1;
+        if (oa[0] != ref || oa[7] != ref) e |= 2;
+        if ((u32)(oa[1] >> 32) != w || (u32)(oa[8] >> 32) != w) e |= 4;
+        if (((u32 *)oa)[18] != 0) e |= 8;            /* r7 - r3 apres lfsu */
+        if (e) {
+            if (bad < 16) {
+                printf("  ECART %d w=%08x ref %016llx :", e, w, ref);
+                for (i = 0; i < 11; i++) {
+                    printf(" %016llx/%016llx", oa[i], ob[i]);
+                }
+                printf("\n");
+            }
+            bad++;
+        }
+        if ((w & 0x7f800000u) && (w & 0x7f800000u) != 0x7f800000u) nzon++;
+        else if (!(w & 0x7fffffffu)) nzon++;
+        for (i = 0; i < (int)sizeof(oa); i++) {
+            lh ^= ((unsigned char *)oa)[i];
+            lh *= 1099511628211ULL;
+        }
+        n++;
+    }
+    printf("L [%08llx, %09llx) %llu mots (%llu nuls ou normaux), %llu ecarts, empreinte %016llx\n",
+           lo, hi, n, nzon, bad, lh);
+}
+
+/* banc-l : lfs + fmadds, comme les produits scalaires de DOOM 3 */
+static float lv[4096], lm[16];
+static void banc_l(long n)
+{
+    volatile float three = 3.0f;
+    double t0;
+    float acc = 0;
+    long p, np;
+    int j;
+
+    setfpscr(0);
+    for (j = 0; j < 4096; j++) {
+        lv[j] = (float)(j + 1) / three;
+    }
+    for (j = 0; j < 16; j++) {
+        lm[j] = (float)(16 - j) / three;
+    }
+    np = n / 1024;
+    t0 = now_ms();
+    for (p = 0; p < np; p++) {
+        const float *v = lv + ((p & 3) << 10);
+        for (j = 0; j < 1024; j += 4) {
+            acc += v[j] * lm[j & 15] + v[j + 1] * lm[(j + 1) & 15] +
+                   v[j + 2] * lm[(j + 2) & 15] + v[j + 3] * lm[(j + 3) & 15];
+        }
+        lm[p & 15] *= 0.999f;
+    }
+    printf("banc-l : produits %ld x 4 %.0f ms (%g)\n", np * 1024 / 4, now_ms() - t0,
+           (double)acc);
+}
+
 int main(int argc, char **argv)
 {
     long nrand = 1L << 18;
@@ -748,6 +956,14 @@ int main(int argc, char **argv)
     }
     if (argc > 2 && !strcmp(argv[1], "banc-c")) {
         banc_c(atol(argv[2]));
+        return 0;
+    }
+    if (argc > 3 && !strcmp(argv[1], "l")) {
+        lmode(strtoull(argv[2], 0, 16), strtoull(argv[3], 0, 16));
+        return 0;
+    }
+    if (argc > 2 && !strcmp(argv[1], "banc-l")) {
+        banc_l(atol(argv[2]));
         return 0;
     }
     if (argc > 1 && !strcmp(argv[1], "k")) {

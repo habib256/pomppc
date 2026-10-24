@@ -4627,3 +4627,341 @@ patches TCG).
 - `run-all.sh` avec ce binaire : 242 verts, 1 rouge attendu (« binaire rapide écarté :
   construit sur une autre série de patches » : la série a changé, `build-fast/` sera à refaire
   après fusion).
+## 40. Le flottant simple sans ses contrôles redondants (4) : `lfs` producteur, `tcg/0051` (`x-lfs-known`)
+
+24/10/2026, PC (i7-10700F). Copie isolée `~/src/qemu-lfsk` (rsync de `~/src/qemu`, série
+0001-0050 ; commits `base` puis `tcg/0051`), binaire de référence -O2 `~/src/qemu-lfsk/build/`
+(`qemu-system-ppc` et `ppc64`) ; banc linux-user `~/src/qemu-lfsku` (`fpnatcmp-userhack.py`,
+§40.3) ; VM de dev `disks/tiger-dev-lfsk.raw` (copie de
+`tiger-dev.raw`, 10.4.11), SMP=2 en MTTCG sur `qemu-system-ppc` (`PPC32MT=1`), toutes les
+options de production de `run_tiger.sh`. La VM quotidienne tournait pendant ce travail (session
+principale) : **les temps sont indicatifs**.
+
+### 40.1 Le constat
+
+`docs/vitesse-doom3-x86.md` §15 (binaire quotidien, cible 32 bits, 431 blocs les plus chauds de
+DOOM 3) : `lfs` (et `lfsx`) fait **23,4 % du code x86 exécuté**, 32,8 instructions x86 par `lfs`,
+dont ~23 pour la conversion DOUBLE sans branchement de `x-lfs-inline` (§8 : `lzcnt`, `shlx`,
+trois `cmov`…) ; et **38,3 %** des lectures d'opérande des opérations flottantes viennent d'un
+`lfs` du même bloc, donc sont testées (`fpi_zon`, ~10 instructions) : `x-fp-known` ne compte pas
+`lfs` parmi ses producteurs (§39.1, « sa valeur vient de la mémoire »).
+
+### 40.2 La conception
+
+Un `lfs` dont le mot w est un simple nul ou normal a DOUBLE(w) = la conversion IEEE simple →
+double de l'hôte, exacte (`vcvtss2sd`, `fcvt d, s` : pas d'arrondi, pas de dénormal, pas de NaN
+à calmer, aucun drapeau), et ce double est `fpi_zon()`. Les autres (dénormaux, infinis, NaN :
+2 × 2^24 − 2 mots sur 2^32) sont rares et vont hors ligne.
+
+- **Le chargement ne change pas** : même `tcg_gen_qemu_ld_i64(…, MO_UL)` que `x-lfs-inline`,
+  même `mmu_idx`, la faute tombe au même endroit (avant tout le reste).
+- **Puis `INDEX_op_ppc_fp32` avec `FPI_LFS` (= 22)** plutôt qu'une op sœur : le talon hors ligne,
+  la convention d'appel de `ppc_fp32_native_slow`, le sélecteur dans `args[6]` (que
+  `fpk_rely()` or'e déjà), `TCG_OPF_SIDE_EFFECTS` (globales rangées avant l'op, ce que la sortie
+  de bloc exige) existent sur les deux hôtes ; rien dans le code commun de TCG. frA = le mot
+  (étendu par des zéros) ; frB, frC et l'entrée FPSCR reçoivent le même temporaire (inutilisé,
+  aucune copie : la contrainte est `r` partout), nf est une sortie morte ; pas de porte, pas de
+  FPSCR lu ni écrit, pas de drapeaux softfloat, pas de `fprf_src`.
+- **Émetteur x86_64** : `t = (w << 1) − 0x01000000` sur 32 bits, en un seul
+  `lea t, [w*2 − 0x01000000]` (le signe tombe) ; un normal donne [0, 0xfdfffffe], un zéro
+  0xff000000, un infini ou un NaN [0xfe000000, 0xfefffffe], un dénormal [0xff000002,
+  0xfffffffe]. `cmp t, 0xfe000000 ; jb ok ; cmp t, 0xff000000 ; jne talon ; ok: vmovd xmm0, w ;
+  vcvtss2sd ; vmovq frT`. Six instructions sur le chemin d'un normal (dont un saut court
+  pris), huit pour un zéro, au lieu des ~22 de la conversion entière (§40.4).
+- **Émetteur aarch64** : `ubfx e, w, #23, #8 ; sub e, e, #1 ; cmp e, #254` (normal : e − 1 <u
+  254) ; `lsl t, w, #1 ; ccmp t, #0, #4, hs` (anormal : Z si t = 0 ; normal : Z forcé) ;
+  `b.ne talon ; fmov s0, w ; fcvt d0, s0 ; fmov frT, d0` — un seul branchement (le `cbnz` de
+  l'op est remplacé par un `b.cond`, que `reloc_pc19()` corrige pareil). **Écrit sur le PC,
+  compilé par le clang 18 du NDK (`tools/tcg/a64syntax.sh`), ses neuf mots relus contre
+  l'assembleur de clang (`tools/tcg/a64enc-check.py`, cas tcg/0051 ajoutés : 9 OK),
+  jamais exécuté.**
+- **Talon** (`lfsk_slow_path()`, appelé par `ppc_fp32_native_slow()` avant le vidage FPRF de
+  0046, qui n'a rien à voir ici) : r = `helper_todouble(w)` (le sNaN reste signalant, ce que
+  la conversion de l'hôte ne ferait pas) ; avec `FPK_R` (un consommateur s'est servi de frT),
+  r n'étant pas `fpi_zon()`, **`fpk_exit()`** : frT et la moitié VSR, le FPSCR tel quel,
+  `cpu_restore_state`, nip + 4, `cpu_loop_exit` — exactement la sortie des producteurs de 0045.
+  **Sans `FPK_R`, pas de sortie** : un `lfs` dont personne ne se sert ne paie que l'appel pour
+  ses mots anormaux.
+- **Forme mise à jour** (`lfsu`, `lfsux`) : rA = EA est écrit **avant** l'op (après le
+  chargement, qui seul peut fauter) : l'op range les globales avant elle, la sortie de bloc
+  trouve donc rA à jour ; frT et rA ne se recouvrent pas (FPR, GPR).
+- **Traduction** (`gen_lfs_known()`, `fp-impl.c.inc`) : frT entre dans `ctx->fpk_valid`, l'op
+  en est le producteur (`fpk_prod[frT]`) ; l'instruction est « traitée » (`fpk_handled`) :
+  `fpk_scan()` tuerait tout en voyant l'op (règle aveugle des helpers), or l'op n'écrit que frT
+  et le FPSCR n'est pas touché (la porte reste ce qu'elle était), et le seul helper possible est
+  celui du vérificateur (`TCG_CALL_NO_RWG`). L'invariant du §37.2 tient : au début de
+  l'instruction suivante, frT est `fpi_zon()` chaque fois que le code y arrive (chemin court :
+  par construction ; talon avec `FPK_R` : on n'y arrive pas).
+- **Cas coupés** : ceux de `x-fp-known` (icount, VSX, greffon TCG : `ctx->base.plugin_enabled`
+  est relu à chaque `lfs`) ; hors d'eux, `x-lfs-inline` comme avant.
+- `x-fp-verify` compare chaque `lfs` de l'op à `helper_todouble(w)` (`helper_fpn_lfs`, compteurs
+  `lfs` du bilan, « court » = mot nul ou normal) ; le bilan donne aussi `x-lfs-known : N mots
+  hors ligne, M sorties de bloc`.
+
+Propriété `x-lfs-known` (n'agit qu'avec `x-fp-known`), `LFSKNOWN=1 ./run_tiger.sh` (éteint),
+sondée par `build_qemu_qfb.sh` sur `qemu-system-ppc`.
+
+### 40.3 La preuve
+
+**Hôte, les 2^32 mots** (`tools/tcg/fpproof.sh ~/src/qemu-lfsk 4000000`, `-DFPPROOF_LFSK`
+nouveau ; le reste de l'épreuve rejoué tel quel) : le test de l'émetteur x86_64 et celui de
+l'émetteur aarch64 (modèles C des deux séquences ci-dessus) acceptent **exactement** les w dont
+DOUBLE(w) est `fpi_zon()` ; pour eux la conversion de l'hôte (`cvtss2sd`) = `helper_todouble()`
+sans aucun drapeau (`fetestexcept`) ; pour les autres, le talon **de l'objet construit**
+(`ppc_fp32_native_slow`, `FPI_LFS`) rend `helper_todouble()` sans `FPK_R` et sort avec `FPK_R`
+(frT, moitié VSR = 0, FPSCR inchangé, nip + 4) ; un mot accepté sur 4096 passe aussi par le
+talon, qui ne doit pas sortir :
+
+| épreuve | mots | divergences |
+|---|---|---|
+| test x86_64 = test aarch64 = `fpi_zon(DOUBLE(w))` ; conversion de l'hôte = `helper_todouble` | 4 294 967 296 (4 261 412 866 nuls ou normaux) | **0** |
+| talon : sorties avec `FPK_R` / sans sortie (sans `FPK_R`, et mots acceptés) | 33 554 430 / 35 635 202 | **0** |
+| le reste de `fpproof` (contrats, porte, producteurs, talon de 0045, FPRF paresseux, stfs court) | comme aux §37.3, §38.3, §39.2 | **0** |
+
+**Le vrai émetteur, les 2^32 mots** (banc linux-user `~/src/qemu-lfsku`, `qemu-ppc` statique ;
+`fpnatcmp-userhack.py`, qui porte maintenant les neutralisations qu'il faut pour 0031-0050 —
+fin du bloc système de `cpu.h` déplacée, `pomppc_jc_scan_stat` déclarée hors
+`#ifndef CONFIG_USER_ONLY`, bouchon `helper_mem_stat` — et le bilan final du vérificateur à la
+sortie (`preexit_cleanup`) ; `configure --target-list=ppc-linux-user --static --disable-werror`). Nouveau **mode `l`** de `fptest` : pour chaque
+mot w, un bloc écrit dans un tampon exécutable — `lfs f5` jamais lu (talon sans sortie), `lfs f1`
+puis ses consommateurs `stfs` court (0047), `fcmpu cr1,f1,f1` (sans test de NaN), `fmuls`,
+`fadds` (sans test d'opérande), `frsp` (sans test de plage) et le FPSCR relu juste après lui
+(`mffs` : FPRF et FI de `frsp`), `lfsu` (r7 relu après : la sortie de bloc doit l'avoir mis à
+jour) et `lfsx` suivis d'un consommateur, `mffs`, `mfcr` — contre le même
+bloc où chaque `lfs` est un `lfd` de DOUBLE(w) calculé en entiers (rien de connu, tout testé),
+FPSCR = XX avant chacun ; écart si A ≠ B (CR : champ 1), si f1 ou f5 ≠ DOUBLE(w), si un `stfs`
+≠ w, si r7 ≠ EA (`tools/tcg/lfskuser.sh Q l 0 100000000 16`, seize tranches) :
+
+| bras (options de production du flottant) | mots | écarts | temps (bloc d'origine / renforcé) |
+|---|---|---|---|
+| ref (sans `x-lfs-known`) | 4 294 967 296 | **0** | 610 s / 860 s |
+| lfsk | 4 294 967 296 | **0** | 626 s / 677 s |
+
+et les seize empreintes (sorties du bloc A hachées par tranche) **identiques** entre les deux
+bras. Deux passes : la première avec `frsp` avant `fmuls` et le FPSCR relu en fin de bloc
+seulement ; la seconde avec le bloc ci-dessus, renforcé après le mutant « infinis » (§ suivant :
+le FPSCR de `frsp` n'était vu qu'écrasé par les opérations suivantes).
+
+**`fptest` contre la référence** (`lfskuser.sh Q cmp 32768` : bras ref, lfsk, lfsk +
+`x-fp-verify` + `x-fp-native-cmp-verify`) :
+
+| mode | empreinte (ref = lfsk = vérifié) | vérificateur |
+|---|---|---|
+| `k 32768 0` (1 310 720 programmes) | `da7eea0cd0fadea0` | 45 678 593 vérifiées, **0 divergence** ; `lfs` 29 066 318 ; 22 868 mots hors ligne, 750 sorties de bloc |
+| `k 32768 7` | `fce74b67a47e9777` | 45 744 129, **0** ; 22 748 hors ligne, 692 sorties |
+| simple 65 536 | `c2dffc9e43a020d8` | 29 884 417, **0** |
+| `d 65536` | `fb3e6006e03c4f53` | 12 779 521, **0** |
+| `c 65536` | `e6bba64145ea9bbf` | 18 808 833, **0** |
+
+(les empreintes simple, `d`, `c` sont celles du §37.3 : `x-lfs-known` n'y change rien.)
+
+**Mutants** (`tools/tcg/lfsk-mut.py ~/src/qemu-lfsku` : une substitution, `ninja qemu-ppc`, le
+fichier rendu ; mode `l` sur les quatre plages des cas spéciaux — [0, 0x01000000),
+[0x7f000000, 0x80000000), [0x80000000, 0x81000000), [0xff000000, 2^32) —, `fptest k 4096`
+graines 0 et 7 contre l'empreinte non mutée, et sous le vérificateur) :
+
+Le mode `l` tourne sous `x-fp-verify`, et le banc linux-user imprime le bilan du vérificateur à
+la sortie (`preexit_cleanup`) : les compteurs « mots hors ligne » et
+« sorties de bloc » y sont **exacts**, et l'attendu l'est aussi — chaque mot anormal des quatre
+plages (33 554 430) passe hors ligne quatre fois (f5, f1, f6, f7) et sort trois fois (f5 n'est
+pas lu) : 134 217 720 / 100 663 290. C'est le classement **du vrai émetteur**, mot par mot.
+
+| mutant | mode `l` : écarts | hors ligne / sorties | `k` : lignes différentes | vérificateur | verdict |
+|---|---|---|---|---|---|
+| aucun | 0 | 134 217 720 / 100 663 290 (= l'attendu) | — | 0 | — |
+| test de classement retiré (tout par l'hôte) | 33 554 428 | 0 / 0 | 12 | 50 333 332 | **attrapé** |
+| dénormaux acceptés (`jb` au second test) | 16 777 214 | 67 108 864 / 50 331 648 | 6 | 0 | **attrapé** |
+| `lea` faux (−0x00800000) | 8 388 610 | — / 75 497 460 | 2 | 2 | **attrapé** |
+| le talon ne sort jamais | 33 554 428 | — / 0 | 6 | 25 165 827 | **attrapé** |
+| la sortie n'écrit pas frT | 33 554 430 | = | 12 | 0 | **attrapé** |
+| talon par la conversion de l'hôte (sNaN calmé) | 8 388 606 | = | 12 | 8 390 254 | **attrapé** |
+| `lfsu` : rA écrit après l'op | 33 554 430 (r7) | = | 0 | 0 | **attrapé** |
+| producteur perdu (un `lfs` qui récrit un FPR connu garde l'ancien producteur) | 0 | = | 2 | 3 | **attrapé** |
+| infinis acceptés (`jbe` au premier test) | 0 | 134 217 712 / 100 663 284 | 0 | 0 | vu au compteur seul |
+| le zéro part au talon | 0 | 134 217 728 / = | 0 | 0 | vu au compteur seul |
+| le talon sort toujours (même sans `FPK_R`) | 0 | = / 134 217 720 | 0 | 0 | vu au compteur seul |
+| `lfs` jamais producteur | 0 | = / 0 | 0 | 0 | vu au compteur seul |
+
+Les quatre derniers sont **équivalents pour les résultats** : le zéro au talon, la sortie
+systématique, `lfs` non producteur ne coûtent que du temps ; et un infini pris pour « nul ou
+normal » ne trompe aucun consommateur d'aujourd'hui — `stfs` court (exposant > 896 : exact),
+`fcmpu`/`fcmpo` (un infini n'est pas un NaN), `frsp` (inf → inf, classe FPRF de la table de
+0046), et `fmuls`/`fadds`/`fmadds`…, `fdivs`, `fctiw(z)` (le test du **résultat** renvoie au
+talon) — le mode `l` a été renforcé pour le voir (FPSCR relu juste après `frsp`) et ne le voit
+toujours pas : il n'y a rien à voir. Le contrat (`fpi_zon()`) est pourtant tenu au mot près, et
+c'est le compteur exact du bilan qui le montre sur le vrai émetteur (deux mots, ±inf, quatre
+`lfs` chacun : −8 hors ligne, −6 sorties). **8 attrapés par les résultats sur 8 qui changent un
+résultat, et les 4 autres vus au compteur.**
+
+**Invité** (VM de dev, SMP=2, `qemu-system-ppc` en MTTCG, toutes les options de production,
+`x-lfs-known` + `x-fp-verify` + `x-fp-native-cmp-verify` + `x-vfp-native-verify`,
+`tools/tcg/lfskdev.sh`) :
+
+- `fptest` simple, `d`, `c` (65 536), `k 4096`, `k 4096 7` : empreintes `c2dffc9e43a020d8`,
+  `fb3e6006e03c4f53`, `e6bba64145ea9bbf`, `3f42ddddb092415b`, `4181b7cf885c6e34` — **celles du
+  §37.3** (sans 0051) ; mode `l` sur [0x7f7f0000, 0x80810000) (16,9 M mots : infinis, NaN,
+  dénormaux négatifs et leurs voisins ; bloc d'origine du mode `l`, avant son renforcement) :
+  0 écart, empreinte `b55536fa447ef9fa` = celle du bras ref linux-user sur la même plage. Vérificateur : **257 628 877 opérations vérifiées, 0
+  divergence**, dont 44 779 086 `lfs` ; `x-lfs-known : 67 273 370 mots hors ligne, 50 331 793
+  sorties de bloc` (le mode `l` en fait l'essentiel : quatre `lfs` par mot anormal, trois lus).
+- **Bureau, Zenerchi puis Marble Blast** (job `fpgames`, chauffe et mesure de chacun, ~10 min de
+  jeu) : **10 531 314 171 opérations vérifiées, 0 divergence**, dont **5 341 739 789 `lfs`**
+  (5 341 739 702 nuls ou normaux : 87 mots anormaux lus sans consommateur) ; `x-lfs-known :
+  23 502 mots hors ligne, 23 415 sorties de bloc` (une sortie ne passe pas par le vérificateur :
+  23 415 + 87 = 23 502), soit **4 sorties par million de `lfs`**, ~40 par seconde de jeu
+  (~130 ns chacune, §37.4 : rien). `x-vfp-native-verify` : 43 049 424 vérifiées, 0 divergence.
+- **DOOM 3** : pas sur la VM de dev (le jeu n'y est pas installé, et la VM quotidienne est hors
+  de portée de ce travail) : la partie vérifiée est la première commande du §40.6.
+
+### 40.4 Taille du code (blocs de DOOM 3 retraduits)
+
+Journal `bench/tcg/t2/d3-asm-2410.log` (1 083 blocs du binaire quotidien, §15 de
+`docs/vitesse-doom3-x86.md`) retraduit par le `qemu-ppc` linux-user (`tools/tcg/lfsksize.sh` :
+`tbreplay` et `tcgsize.py --starts` ; options du flottant **et d'AltiVec** de production ; `lfs`,
+`stfs`, `lwz` sans TLB logiciel, que le levier ne touche pas). `tbreplay` a été rendu robuste à
+l'occasion : minuterie de 50 ms au lieu d'`alarm(1)` (un bloc qui finit par `blr` tourne dans
+`ret_stub` jusqu'au signal : 1 083 blocs = 18 min par bras) et rejeu par paquets de 25 blocs
+sous `timeout`, un paquet qui tombe étant refait bloc par bloc (4 blocs sur 1 083 font tomber
+`tbreplay` dans les deux bras : ils écrivent dans ses données ; perdus, les mêmes des deux côtés).
+
+Le `lfs` lui-même (désassemblé, bloc 0x13ca00 de DOOM 3 ; avant : la conversion entière, ~22
+instructions, et une sauvegarde de registre sur la pile en prime) :
+
+        movbe r10d, [r12]                  ; le chargement, inchangé
+        lea   eax, [r10*2 - 0x1000000]
+        cmp   eax, 0xfe000000
+        jb    ok
+        cmp   eax, 0xff000000
+        jne   talon
+    ok: vmovd xmm0, r10d
+        vcvtss2sd xmm0, xmm0, xmm0
+        vmovq r11, xmm0
+        mov   [rbp + 0xa918], r11          ; frT
+
+**Octets par instruction** (`tcgsize.py`) :
+
+| instruction | ref | lfsk |
+|---|---|---|
+| `lfs` | 107,0 | **56,3 (−47 %)** |
+| `lfsx` | 117,4 | 61,5 |
+| `lfsu` | 117,8 | 61,8 |
+| `fmadds` | 228,7 | **173,4 (−24 %)** |
+| `fmuls` | 201,6 | 168,8 (−16 %) |
+| `fmsubs` | 209,0 | 183,3 |
+| `fadds` | 173,8 | 139,6 (−20 %) |
+| `fsubs` | 171,5 | 142,3 (−17 %) |
+| `stfs` | 73,2 | 58,4 (−20 % : le `stfs` court de 0047 s'applique maintenant aux valeurs lues par `lfs`) |
+| `stfsx` | 90,5 | 51,7 |
+| **moyenne des ~11 000 instructions** | 81,4 | **66,3 (−19 %)** |
+| chemins lents (hors ligne) | 623 393 o | 907 622 o (+46 % : un talon par `lfs`, froid) |
+
+**Instructions x86 exécutées par instruction invité**, chaque bloc pondéré par son temps dans
+la partie profilée du 24/10 (`perf-hote-mesure.data` de `x86-asm-2410`, nouveau
+`tools/tcg/codeop2.py` : les deux journaux, mêmes poids, 434 blocs communs) :
+
+| opcode | part des instr. invité | ref | lfsk | écart |
+|---|---|---|---|---|
+| `lfs` | 20,3 % | 26,9 | **11,3** | −58 % |
+| `lfsx` | 1,2 % | 28,0 | 11,9 | −58 % |
+| `stfs` | 10,0 % | 14,7 | 12,5 | −15 % |
+| `fmuls` | 6,6 % | 45,6 | 38,1 | −17 % |
+| `fmadds` | 6,1 % | 51,2 | 36,8 | −28 % |
+| `fadds` | 3,8 % | 39,3 | 28,7 | −27 % |
+| `fsubs` | 2,5 % | 40,0 | 29,1 | −27 % |
+| `fmsubs` | 1,3 % | 50,9 | 45,4 | −11 % |
+| AltiVec, `lwz`, `frsp` | 17,2 % | inchangé | inchangé | 0 |
+| **tout** | 100 % | 22,12 | **16,35** | **−26,1 %** |
+
+Ramené au binaire système (le TLB logiciel des chargements, que le levier ne touche pas, et les
+parts du §15 : 22,2 instructions x86 par instruction invité, `lfs` 15,8 %, `lfsx` 1,8 %…) :
+−4,4 instructions x86 par instruction invité, **≈ −20 %** sur les blocs chauds de DOOM 3 —
+l'estimation du §15 (−19 %). En temps, moins : ces instructions retirées sont surtout hors du
+chemin critique (la conversion entière et les tests ne retardaient pas le calcul).
+
+### 40.5 Banc invité (VM de dev, indicatif)
+
+`tools/tcg/lfskdev.sh banc-<bras>-<k>` : SMP=2 en MTTCG sur `qemu-system-ppc`, toutes les options
+de production, même binaire -O2 des deux côtés ; bras alternés ref, lfsk, ref, lfsk (un démarrage
+chacun) ; médianes de 3 tours par démarrage (ms ; d3inter : s pour 150 images). La VM quotidienne
+de la session principale et les mutants linux-user (`nice 19`) tournaient : indicatif.
+
+| démarrage | `banc-l` (`lfs` + `fmadds`, 5 M × 4) | sommets 4×4 (10 M × 16) | min/max (`fcmpu`) | chaîne (sans `lfs`) | `t2bench` d3inter (plugin + GLEngine) |
+|---|---|---|---|---|---|
+| ref 1 | 175 | 668 | 126 | 171 | 7,97 |
+| lfsk 1 | **117** | **507** | 111 | 166 | 7,79 |
+| ref 2 | 177 | 669 | 130 | 171 | 8,04 |
+| lfsk 2 | **126** | **505** | 113 | 167 | 8,15 |
+| écart | **−31 %** | **−24 %** | −12 % | −2 % | −1 % (bruit : ±2 % d'un démarrage à l'autre) |
+
+Les bancs qui lisent leurs opérandes par `lfs` (produits scalaires, sommets) gagnent un quart à un
+tiers ; la chaîne, dont les opérandes restent dans les registres, ne bouge pas (attendu). La
+scène d3inter, elle, ne bouge pas au-delà du bruit : le plugin GL y passe surtout son temps hors
+du flottant simple scalaire (et le jeu lui-même n'y est pas) — c'est l'A/B DOOM 3 qui dira.
+L'image de d3inter a le **même md5** (`7ff741d695d60c212dc0ca4b761a0acc`) dans les quatre
+démarrages (12 passes) : le rendu n'est pas touché (0051 ne touche à rien côté rendu). Et
+pendant l'entraînement PGO ci-dessous (binaire rapide, `x-lfs-known` allumé), **`plugmd5` : 69
+scènes, 0 écart** ; **`gpu` : 56 OK, 0 échec** (les 10 scènes « en échec sous le rendu d'Apple
+seul » sont les mêmes qu'à l'entraînement du 23/10, référence non comptée).
+
+**Binaire rapide de l'arbre** (`~/src/qemu-lfsk/build-fast-mt/qemu-system-ppc` : -O3
+-march=native, LTO, PGO ; `tools/tcg/pgo-train.sh --cible ppc32mt --banc dev`, profil pris sur
+cette VM de dev seulement — bureau 120 s puis `plugmd5 gpu suite mtbench t2bench`, 1 255 `.gcda`,
+options de production **et `x-lfs-known`** pendant l'entraînement, `CPU_EXTRA`/`PGO_CPU`), même
+protocole, mêmes réserves :
+
+| démarrage | `banc-l` | sommets | min/max | chaîne | d3inter |
+|---|---|---|---|---|---|
+| ref 1 | 177 | 649 | 123 | 168 | 7,16 |
+| lfsk 1 | **116** | **503** | 110 | 166 | 7,03 |
+| ref 2 | 182 | 645 | 122 | 167 | 7,15 |
+| lfsk 2 | **114** | **503** | 109 | 167 | 7,28 |
+| écart | **−36 %** | **−22 %** | −11 % | 0 | 0 (bruit) |
+
+Même md5 de d3inter partout. Le binaire rapide gagne ~11 % sur d3inter contre le -O2 (7,15
+contre 8,0 s), rien sur les bancs du flottant (le code généré est le même) : le levier et le
+binaire se cumulent.
+
+### 40.6 L'A/B à jouer (VM quotidienne, hôte au repos)
+
+Binaire `~/src/qemu-lfsk/build/qemu-system-ppc` (et `ppc64`, `qemu-bundle` à côté) : la série
+du 24/10 (0001-0050) + 0051, **construit en -O2 (`build/`), pas le binaire rapide** : même
+binaire des deux côtés, seule la propriété change (`FPKNOWN` est allumé par défaut sur Linux
+x86-64, `x-lfs-known` n'agit qu'avec lui). Avant fusion (`run_tiger.sh` du dépôt principal ne
+connaît pas `LFSKNOWN`) :
+
+    B=$HOME/src/qemu-lfsk/build/qemu-system-ppc
+    # une partie vérifiée d'abord (pas pour la vitesse) : bilan « fp-native-verify » du
+    # run_tiger.log, 0 divergence attendu, compteurs « lfs » et « x-lfs-known : N mots hors
+    # ligne, M sorties de bloc » (le taux de DOOM 3)
+    tools/tcg/matab.sh x86-lfsk-verif 1 "v:QEMU_BIN=$B CPU_OPTS=x-lfs-known=on,x-fp-verify=on,x-fp-native-cmp-verify=on" d3 fen
+    tools/tcg/matab.sh x86-lfsk 3 "ref:QEMU_BIN=$B" "lfsk:QEMU_BIN=$B CPU_OPTS=x-lfs-known=on" d3 fen
+    tools/tcg/matab.sh x86-lfsk-ut 3 "ref:QEMU_BIN=$B" "lfsk:QEMU_BIN=$B CPU_OPTS=x-lfs-known=on" ut fen
+    tools/tcg/matab.sh --restore
+
+Après fusion : `"ref:QEMU_BIN=$B LFSKNOWN=0"` contre `"lfsk:QEMU_BIN=$B LFSKNOWN=1"`. Six
+parties par bras avant de l'allumer par défaut (règle des patches TCG). Le même A/B sur le
+binaire rapide de l'arbre (§40.5 ; profil pris sur la VM de dev, pas sur les jeux : à reprendre
+par `pgo-train.sh --cible ppc32mt` sur les jeux avant d'en faire le binaire quotidien) :
+
+    F=$HOME/src/qemu-lfsk/build-fast-mt/qemu-system-ppc
+    tools/tcg/matab.sh x86-lfsk-rapide 3 "ref:QEMU_BIN=$F" "lfsk:QEMU_BIN=$F CPU_OPTS=x-lfs-known=on" d3 fen
+    tools/tcg/matab.sh --restore
+
+### 40.7 Ce qui reste ouvert
+
+- **L'A/B DOOM 3** (§40.6) et sa partie vérifiée (taux de sorties de bloc de DOOM 3 ; ici,
+  Zenerchi et Marble Blast : 4 par million de `lfs`).
+- **Pendant arm64** : émetteur aarch64 écrit, compilé par le clang du NDK, encodages relus
+  (`a64enc-check.py`), **jamais exécuté** : sur le M4, construire, `fpproof.sh` (le modèle
+  aarch64 y est prouvé sur les 2^32 mots, pas son exécution), `lfskuser.sh … l 0 100000000` et
+  `cmp` avec un `qemu-ppc` linux-user du M4, `lfsk-mut.py` (mutants à porter sur l'émetteur
+  aarch64 : `b.ne` → `b`, `ccmp` sans condition, `cmp #254` → `#255`…), puis l'A/B. `fcvt d, s`
+  sous FPCR par défaut (FZ = 0) est exacte sur les nuls et les normaux, et le talon garde les
+  dénormaux même si FIZ (FEAT_AFP du M4) était posé.
+- **Mots anormaux sans consommateur** : ils paient l'appel du talon (au lieu des ~22
+  instructions en ligne) ; 87 sur 5,3 milliards de `lfs` dans Zenerchi et Marble Blast. Un jeu
+  qui copierait des données non flottantes par `lfs`/`stfs` le paierait à chaque mot : le
+  compteur « mots hors ligne » du vérificateur le dirait (soupape possible : sans `FPK_R`,
+  émettre la conversion entière hors ligne au lieu de l'appel ; non fait).
+- Les opérandes venus d'un `lfd` restent testés (un double quelconque n'est pas `fpi_zon()`) ;
+  `fmr`/`fneg`/`fabs` ne propagent toujours rien.
