@@ -617,3 +617,23 @@ temps, **0 divergence** ; `x-ret-verify` : 8,1 G blocs en ligne, 0 divergence, e
 référence `~/src/qemu` avec 0049-0050 (VM quotidienne arrêtée), entraîner `build-fast` sur les
 jeux (`pgo-train.sh --banc matrice --cible ppc32mt`), puis `PPC32MT` à 1 par défaut ; parité
 arm64 sur le M4 (construction, `atomtest`, preuves du §30.5) avant de l'allumer là-bas.
+
+## 14. A/B du binaire rapide final (24/10, `bench/ppc32mt-2310/chaine-final.sh`)
+
+Hôte au repos, SMP=2, `PPC32MT=1` (défaut). bancs = `~/src/qemu-ppc32mt/build-fast-mt` (PGO pris
+sur les bancs de la VM de dev, celui du §13) ; jeux = `~/src/qemu/build-fast` (PGO pris sur les 4
+jeux en ppc32mt, `pgo-train-20261023-1910`, binaire quotidien). 3 parties par bras en fenêtre, 2
+en plein écran ; campagnes `bench/tcg/ab/p32final-*`.
+
+| jeu (ms/image, médianes) | bancs | jeux | écart |
+|---|---|---|---|
+| DOOM 3, fenêtre | 89,1 | **86,5** | −2,9 % (dispersion 3,3 / 6,1 %) |
+| UT2004, fenêtre | 39,6 | **39,1** | −1,3 % |
+| Marble Blast, fenêtre | 9,2 | **9,1** | −1,1 % |
+| Zen, fenêtre | 4,9 | **4,8** | −2,0 % |
+| DOOM 3, plein écran | **87,8** | 89,5 | +1,9 % (dispersion 2,1 / 1,7 %) |
+
+**Verdict :** le profil pris sur les jeux vaut au moins celui des bancs. En fenêtre, il gagne
+sur les quatre jeux, mais les écarts restent dans la dispersion ; en plein écran, DOOM 3 est
+dans le bruit. On garde `build-fast` comme binaire quotidien. **Point de DOOM 3 au 24/10 :
+86,5 ms/image en fenêtre** (cible 50). Il reste la parité arm64 sur le M4 (§8).
