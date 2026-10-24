@@ -4947,10 +4947,29 @@ par `pgo-train.sh --cible ppc32mt` sur les jeux avant d'en faire le binaire quot
     tools/tcg/matab.sh x86-lfsk-rapide 3 "ref:QEMU_BIN=$F" "lfsk:QEMU_BIN=$F CPU_OPTS=x-lfs-known=on" d3 fen
     tools/tcg/matab.sh --restore
 
+### 40.6 bis Résultats en jeu (24/10, `bench/lfsk-2410/chaine-ab.sh`, hôte au repos)
+
+**Partie DOOM 3 vérifiée** (`x86-lfsk-verif`, binaire -O2 de l'arbre 0051, `x-lfs-known`,
+`x-fp-verify`, `x-fp-native-cmp-verify`, 313,5 ms/image) :
+- 35 249 479 844 opérations flottantes vérifiées, dont **19 138 428 060 `lfs`**, **0 divergence** ;
+- `x-lfs-known` : 1 418 847 mots hors ligne et 1 415 791 sorties de bloc, soit 7,4 par 100 M
+  de `lfs` (négligeable) ; `x-fp-known` : 222 M sorties de bloc.
+
+**A/B** (même binaire des deux côtés, 3 parties par bras, fenêtre) :
+
+| | ref | lfsk | écart |
+|---|---|---|---|
+| DOOM 3, binaire -O2 | 94,4 | **85,7** | **−9,2 %** (les 3 parties lfsk sous les 3 ref) |
+| DOOM 3, binaire rapide (`build-fast-mt`, PGO de la VM de dev) | 88,7 | **80,3** | **−9,5 %** (dispersion 2,9 / 0,7 %) |
+| UT2004, binaire -O2 | 41,7 | **40,9** | −2,0 % |
+
+Le gain en temps rejoint presque celui en instructions (~−20 % du code des blocs chauds, §40.4) :
+le code retiré (conversion entière et tests d'opérande) était sur le chemin critique.
+**Allumé par défaut sur Linux x86-64** (`LFSKNOWN=1`, 24/10) ; la référence `~/src/qemu` et
+`build-fast` sont reconstruits avec 0051 (`bench/lfsk-2410/chaine-defaut.sh`).
+
 ### 40.7 Ce qui reste ouvert
 
-- **L'A/B DOOM 3** (§40.6) et sa partie vérifiée (taux de sorties de bloc de DOOM 3 ; ici,
-  Zenerchi et Marble Blast : 4 par million de `lfs`).
 - **Pendant arm64** : émetteur aarch64 écrit, compilé par le clang du NDK, encodages relus
   (`a64enc-check.py`), **jamais exécuté** : sur le M4, construire, `fpproof.sh` (le modèle
   aarch64 y est prouvé sur les 2^32 mots, pas son exécution), `lfskuser.sh … l 0 100000000` et
