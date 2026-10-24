@@ -730,6 +730,17 @@ registres sera faible. Un accès couvert ferait `t = ea − page0 ; t ≤ 0x1000
 compris pour les accès à cheval) puis l'accès par l'adend gardé, soit ~4 instructions au lieu de
 ~10. Estimation : **~−5 % du code x86**. Levier `x-tlb-base`, confié à un agent le 24/10.
 
+**Écrit le 24/10 : `tcg/0052` (`x-tlb-base`, éteint, `TLBBASE=1`), `docs/tcg-g4.md` §41** —
+chargements seulement (les rangements laissés : un autre vCPU peut repasser une page en
+« notdirty » pendant le bloc) ; test exhaustif du test de couverture (120,7 G cas), mutants,
+VM de dev sous les vérificateurs (2,2 G chargements couverts vérifiés, 0 divergence) ; sur les
+mêmes blocs retraduits **en mode système** (essai `tbreplay-sys`), 72 % des chargements en forme
+D couverts, `lfs` 20,3 → 16,7 instructions x86, tout le code **−3,4 %** ; VM de dev : banc dédié
+−19 à −22 %, d3inter dans le bruit d'un démarrage à l'autre. A/B en jeu (25/10, `bench/tlbb-vfpk-2410`) :
+DOOM 3 −1,9 % (-O2) et **−2,2 %** (rapide, 82,0 → 80,2), UT2004 +2,2 % (dans le bruit, dispersion
+6,8 %) ; partie DOOM 3 vérifiée : 17,3 G chargements couverts, 0 divergence, 1,3 % par le chemin
+complet. **Allumé par défaut sur Linux x86-64.**
+
 ## 17. Porte du « flottant AltiVec connu » (24/10)
 
 Même anatomie (§15). Les opérations flottantes AltiVec font ~79 % du code x86 d'AltiVec (~10 % de
@@ -751,3 +762,14 @@ Sur les opérations flottantes AltiVec des blocs chauds, pondérées par le temp
   voie par voie si leurs entrées l'ont), `lvx` 5,0 %, inconnu 34,2 %.
 
 Estimation : **~−2,5 % du code x86**. Levier `x-vfp-known`, confié à un agent le 24/10.
+
+**Résultat le 25/10 : `tcg/0053` (`x-vfp-known`) juste mais sans gain en jeu, NON fusionné.**
+L'agent l'a écrit et prouvé (§42 de `docs/tcg-g4.md` sur l'étiquette `archive/0053-vfp-known`) :
+- preuves : lemmes sur les 2^32 mots, 20 mutants, VM de dev sous les vérificateurs ;
+- taille : `vaddfp` 45 → 22,5 instructions x86, `vmaddfp` 54 → 39, tout le code −4,5 %.
+
+Partie DOOM 3 vérifiée : 1,5 G opérations, 0 divergence ; 2,39 M sorties de bloc.
+L'A/B est neutre ou contraire : DOOM 3 +1,9 % (-O2) et −0,5 % (rapide), UT2004 +2,0 %. Hypothèse, non mesurée : le code
+retiré n'était pas sur le chemin critique (contrôles par voie recouverts par la latence de la FMA et
+des rangements). Le patch s'applique par-dessus 0052 dans `~/src/qemu-combo` (deux
+conflits de contexte résolus).

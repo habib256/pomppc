@@ -4987,3 +4987,507 @@ rapide de l'agent (PGO de la VM de dev), `x-lfs-known` des deux côtés : DOOM 3
   émettre la conversion entière hors ligne au lieu de l'appel ; non fait).
 - Les opérandes venus d'un `lfd` restent testés (un double quelconque n'est pas `fpi_zon()`) ;
   `fmr`/`fneg`/`fabs` ne propagent toujours rien.
+
+## 41. Le TLB logiciel une fois par base : `tcg/0052` (`x-tlb-base`)
+
+24/10/2026, PC (i7-10700F). Copie isolée `~/src/qemu-tlbb` (rsync de `~/src/qemu`, série
+0001-0051 ; branche `tcg-0052-tlb-base` : `base` 27ace04, `tcg/0052` 910640b, l'essai
+`tbreplay-sys` 4b4ce73 puis son `revert` d14f1d5, §41.4), binaire -O2
+`~/src/qemu-tlbb/build/qemu-system-ppc` ; copie des mutants `~/src/qemu-tlbbm` ; VM de dev
+`disks/tiger-dev-tlbb.raw` (copie de `tiger-dev.raw`, 10.4.11), SMP=2 en MTTCG sur
+`qemu-system-ppc`, toutes les options de production de `run_tiger.sh` (`x-lfs-known` compris),
+port SSH 2272 (`tools/tcg/tlbbdev.sh`). La VM quotidienne tournait pendant ce travail (session
+principale), et la VM de dev d'un autre agent aussi : **les temps sont indicatifs**.
+
+### 41.1 Le constat
+
+`docs/vitesse-doom3-x86.md` §16 (outil `tools/tcg/tlbbase.py`, blocs chauds de DOOM 3 pondérés
+par le temps) : le chemin court du TLB logiciel coûte ~10 instructions x86 par accès
+
+        mov  rdi, ea ; shr rdi, 7 ; and edi, [rbp - 0x40] ; add rdi, [rbp - 0x38]
+        lea  esi, [ea + taille - 1] ; and esi, 0xfffff000 ; cmp esi, [rdi] ; jne lent
+        mov  rdi, [rdi + 0x18]                       ; l'addend de l'entrée
+        movbe r, [ea + rdi]                           ; l'accès
+
+et les chargements/rangements font 44 % des instructions invité. 47,8 % des accès sont en forme D
+sur une base GPR inchangée, avec un accès antérieur de même nature dans le bloc ; 70 % du temps
+se passe dans des blocs qui ont au plus une telle paire. Exemple : le bloc 0x13c9e0 (`lfs
+f13,16(r3) ; lfs f9,4(r4) ; lfs f11,0(r4) ; lfs f0,0(r3) ; lfs f3,8(r3)`…).
+
+### 41.2 La conception
+
+**Le test porte sur l'adresse, pas sur la base.** Un premier chargement d'une base passe par
+le chemin TLB normal ; sur un succès, il garde la page qu'il a vérifiée, `page0`, et l'addend de
+son entrée, `adend` (pointeur hôte de la page moins son adresse invitée). Un chargement suivant
+fait
+
+        t = ea − page0        (non signé, 64 bits)
+        t ≤ 0x1000 − taille   →  accès direct [ea + adend]
+        sinon                 →  le chemin TLB complet, hors ligne
+
+`t ≤ 0x1000 − taille` dit exactement « les octets ea .. ea + taille − 1 sont tous dans la page
+`page0` » : un accès à cheval sur deux pages, ou dans une autre page, prend le chemin complet.
+Le test ne dépend pas de ce que vaut la base : **qu'elle soit inchangée n'est qu'une prévision**
+(l'adresse a toutes les chances d'être dans la même page), jamais une condition de justesse. Le
+cache peut donc vivre plus longtemps que la base sans fausser un résultat ; ce qui borne sa vie,
+c'est **la validité de `adend`** (ci-dessous).
+
+**Ce que garde le premier chargement** : non pas `page0` mais `negp = −page0` (64 bits), pour
+que le test soit un seul `lea` à deux registres. Sur un succès du TLB, le registre de comparaison
+du chemin court vaut déjà `page0` (`(ea + taille − 1) & 0xfffff000`, égal au comparateur de
+l'entrée : un accès qui chevauche n'est pas un succès) ; le premier chargement ajoute donc
+`mov negp, L1 ; neg negp`, et charge l'addend dans son registre de sortie au lieu de L0. Quand
+il passe par le chemin lent (raté du TLB, MMIO, page surveillée, à cheval…), le talon pose
+`negp = 0x1000` après l'appel : pour toute adresse 32 bits, `ea + 0x1000 > 0x1000 − taille`,
+**rien n'est couvert** (ce « poison » suppose des adresses invitées de 32 bits : la propriété
+n'agit que sur `qemu-system-ppc`, `tcg_tlbb_supported()`).
+
+**Deux ops TCG** (`include/tcg/tcg-opc.h`, communes aux hôtes, émises seulement si le backend
+a `TCG_TARGET_QEMU_LD_TLBB_IMPL`, en mode système, pour un chargement de 1 à 8 octets sans
+alignement exigé — toutes les formes D du G4) :
+
+- `qemu_ld_tlbb0 data, negp, adend ← addr` : `qemu_ld` qui sort aussi `negp` et `adend`
+  (contrainte x86_64 `C_O1_N2_I1(r, L, L, L)` : les deux sorties en registres « nouveaux »,
+  hors L0/L1, écrites avant l'accès, qui écrit `data` en dernier) ;
+- `qemu_ld_tlbb1 data ← addr, negp, adend` (`C_O1_I3(r, L, L, L)`) :
+
+        lea  rdi, [negp + ea]          ; 64 bits : l'adresse 32 bits est zéro-étendue
+        cmp  rdi, 0x1000 − taille      ; imm32
+        ja   hors_ligne
+        movbe r, [ea + adend]
+      retour:
+      hors_ligne:                      ; le qemu_ld entier : chemin court du TLB et son
+        (prepare_host_addr, accès)     ; propre talon (une étiquette de plus dans la
+        jmp retour                     ; liste des chemins lents, visitée par la boucle)
+
+  4 instructions au lieu de ~10. Un accès qui sort de la page ne paie que les trois premières
+  en plus du chemin normal : une pile à cheval sur deux pages ne passe pas au helper.
+
+Les deux ops sont `TCG_OPF_CALL_CLOBBER` comme `qemu_ld` (leurs chemins lents appellent le
+helper) : `negp` et `adend` sont des temporaires de TCG ordinaires (EBB), que l'allocateur garde
+dans les registres préservés de l'hôte (rbx, r12-r15 : `la_cross_call` les y oriente) ou range
+sur la pile et recharge. **Rien de spécial à garder à travers le chemin lent d'un autre accès** :
+c'est TCG qui le fait, comme pour n'importe quelle valeur vivante.
+
+**Le frontal** (`target/ppc/translate.c`, `tlbb_*()`) tient une base par registre de base des
+formes D (`ctx->tlbb[ra]`, `tlbb[0]` : rA = 0, adresses absolues), toutes pour `ctx->mem_idx`.
+Avant le chargement d'une forme D (`do_ldst` : `lbz lhz lha lwz` et formes u ; `do_lsfpsd` :
+`lfs lfd` et formes u, `x-lfs-known` compris), il arme la base (`tcg_tlbb_arm`), que le
+`qemu_ld` suivant de `tcg-op-ldst.c` prend : le premier est un `qemu_ld` ordinaire, retenu ; le
+deuxième le **promeut** en `qemu_ld_tlbb0` (op insérée à sa place, deux temporaires EBB) et
+devient `qemu_ld_tlbb1`, comme les suivants. Une base qui n'a qu'un chargement ne coûte donc
+rien. Après chaque instruction, `tlbb_scan()` (comme `fpk_scan()` de 0045) relit ses ops TCG :
+
+- **écriture du registre de base** (toute op qui sort la globale `cpu_gpr[r]`, `discard`
+  compris ; forme mise à jour comprise, après son propre chargement) : la base `r` meurt —
+  prévision seulement (ci-dessus) ;
+- **tout appel de helper**, sauf ceux des vérificateurs du flottant et le sien
+  (`fpn_verify`, `fpn_lfs`, `vfn_save`, `vfn_verify`, `vfnc_verify`, `tlbb_verify` : ils
+  remettent l'état qu'ils touchent, ni TLB ni MMU) : toutes les bases meurent ;
+- **étiquette, branchement** (`TCG_OPF_BB_END`, `TCG_OPF_COND_BRANCH`) : toutes (les
+  temporaires EBB meurent à l'étiquette) ; la fin du bloc aussi ;
+- **un rangement TCG dans `env->gpr[]`** (une GPR écrite derrière sa globale) : toutes.
+
+Les ops `ppc_fp32` (0014-0051) et `ppc_vfp` (0022) ne tuent rien : leurs chemins lents
+n'appellent que les séquences flottantes d'origine (ou quittent le bloc), qui ne touchent ni
+au TLB ni à la traduction.
+
+**Validité de l'`adend` gardé.** Dans un bloc, ce qui pourrait changer la traduction de `page0`
+ou rendre son `adend` faux :
+
+| événement | où | ce qu'il fait au cache |
+|---|---|---|
+| `tlbie`, `tlbia`, `mtsr(in)`, `mtmsr`, `mtspr` SDR1/BAT/DABR, `isync`/`sync` (vidage paresseux, `x-sr-tlb`, `x-tlb-precise`) | helpers de ce vCPU | appel : toutes les bases meurent |
+| `tlb_fill` dans le chemin lent d'un autre accès du bloc | ce vCPU | l'entrée de `page0` peut être remplacée ou évincée (TLB victime) : **la correspondance reste vraie** — l'`adend` est une fonction de (page invitée → page de RAM), qui ne change qu'avec la table des pages (or une PTE changée sans `tlbie` peut être gardée par le TLB, c'est l'architecture) ou la carte mémoire (ci-dessous) ; `x-sr-tlb` ne vide rien au remplissage (§3.2) |
+| vidage demandé par un autre vCPU (`tlb_flush_*_all_cpus_synced`, `tlbie` diffusé) | `async_run_on_cpu` | exécuté entre deux blocs, quand le vCPU quitte `cpu_exec` : dans le bloc, le TLB d'origine sert aussi ses anciennes entrées — **même fenêtre** |
+| changement de la carte mémoire (BAR PCI, région désactivée), même causé par une écriture MMIO de ce vCPU dans le bloc | `tcg_commit` → `async_run_on_cpu(tcg_commit_cpu)` | vidage différé entre deux blocs ; la RAM libérée ne l'est qu'après la période RCU (le vCPU est dans une section critique RCU pendant tout `cpu_exec`) — même fenêtre |
+| point d'arrêt mémoire (gdbstub) | VM arrêtée | le vCPU est hors du bloc |
+| page MMIO, ROM, surveillée, invalide (`TLB_MMIO`, `TLB_WATCHPOINT`, `TLB_INVALID_MASK`…) | drapeaux de l'entrée, par page | le premier chargement a eu un succès du chemin court : la page n'en avait aucun ; s'il en avait, chemin lent, poison, rien de couvert. Un accès MMIO dans un bloc le fait d'ailleurs retraduire en blocs d'une instruction (`cpu_io_recompile`, vu au §41.3) |
+| `x-dirty-skip`, `notdirty` (code traduit, mémoire vidéo) | `addr_write` seulement | ne concerne pas les chargements |
+
+**Les rangements ne sont pas traités.** Un autre vCPU peut remettre une page en « notdirty »
+pendant le bloc : en traduisant du code de cette page (`tlb_protect_code` →
+`tlb_reset_dirty`, qui pose `TLB_NOTDIRTY` dans les entrées de **tous** les vCPU, sans attendre
+la fin de leurs blocs), ou par le suivi des pages sales de l'affichage
+(`memory_region_snapshot_and_clear_dirty`, fil principal, 60 fois par seconde). Un pointeur
+d'écriture gardé contournerait alors la détection du code modifié ou la marque « sale » : la
+fenêtre, qui dans QEMU d'origine va de la lecture du comparateur au rangement (quelques
+nanosecondes), irait jusqu'à la fin du bloc. Une écriture de la mémoire vidéo manquée resterait
+à l'écran jusqu'à la suivante dans la même page. Pas prouvé sûr, donc laissé (une piste au §41.7).
+
+**Hors du périmètre** : les formes indexées (`lwzx`, `lfsx`… : la base est une paire de
+registres, l'accès qui se répète sur la même paire est rare), `lmw`/`stmw`, AltiVec, et
+`qemu-system-ppc64` (adresses 64 bits : le poison n'y est plus exact). Pas de greffon TCG
+(`ctx->base.plugin_enabled` : ses rappels mémoire).
+
+**Émetteur aarch64** (parité, `tcg/aarch64/tcg-target.c.inc`) :
+
+        ; tlbb0 : l'addend chargé dans adend (avant la comparaison, comme le stock le
+        ; charge dans TMP1), puis
+        neg  negp, x30                         ; x30 = TMP2 = la page (and 32 bits)
+        ldr  data, [adend, waddr, uxtw]
+        ; tlbb1 :
+        add  x16, negp, waddr, uxtw            ; ea − page0, 64 bits
+        cmp  x16, #(0x1000 − taille)           ; imm12
+        b.hi hors_ligne                        ; reloc_pc19, comme les talons
+        ldr  data, [adend, waddr, uxtw]
+
+Écrit sur le PC, compilé par le clang 18 du NDK (`tools/tcg/a64syntax.sh`, `tcg/tcg.c`), les
+mots nouveaux relus contre l'assembleur de clang (`tools/tcg/a64enc-check.py`, sept cas
+tcg/0052 : `neg`, `add … uxtw`, trois `cmp`, `b.hi`, le `mov w, #0x1000` du poison : **7 OK** ;
+les 14 « écarts » restants sont les constantes de 0037/0038, absentes des arbres du PC, comme
+dans `~/src/qemu-lfsk`), **jamais exécuté**.
+
+**Vérificateur** (`x-tlb-base-verify`) : après chaque chargement passé par `qemu_ld_tlbb1`, un
+helper (`helper_tlbb_verify`, exempté du `tlbb_scan`) refait le test ; quand il passe (l'accès a
+été direct), il sonde le TLB pour `ea` (`probe_access_flags`, sans faute) : il doit rendre une
+page de RAM sans drapeau, à l'adresse hôte `ea + adend`. « Absent » : plus de traduction lisible
+(PTE changée sans `tlbie`, permis), compté à part. Bilan sur stderr (« tlb-base-verify : N
+chargements couverts vérifiés, D divergences, A absents ; F par le chemin complet »).
+
+Propriété `x-tlb-base` (éteinte), `TLBBASE=1 ./run_tiger.sh`, sondée par `build_qemu_qfb.sh`
+sur `qemu-system-ppc`.
+
+### 41.3 La preuve
+
+**Le test de couverture, exhaustif** (`tools/tcg/tlbbproof.c`, modèles C des deux émetteurs :
+`negp` posé par le premier chargement — succès du TLB ssi le registre de comparaison vaut la
+page de `ea0`, `neg` x86_64 / `sub xzr` aarch64 —, le test du chargement couvert — `lea` 64 bits
+et `cmp` imm32 étendu + `ja` ; `add … uxtw` et `subs #imm12` + `b.hi` —, le poison) contre
+l'attendu « `[ea, ea + taille − 1]` dans la page vérifiée, jamais après le chemin lent » :
+
+| épreuve | cas | écarts |
+|---|---|---|
+| premier chargement : tout `ea0` de trois fenêtres de 16 Kio autour de bords de page (dont 0 / 2^32), tailles 1, 2, 4, 8 : succès ⇔ l'accès ne chevauche pas, et alors `negp = −page(ea0)` des deux côtés | 196 608 | **0** |
+| couverture : 6 pages fixes (0, 0x1000, 0x7ffff000, 0x80000000, 0xffffe000, 0xfffff000) × les 2^32 adresses × 4 tailles, et le poison × 2^32 × 4 | 120 259 280 896 | **0** |
+| 4 096 pages tirées au hasard × 0x7000 adresses (de page − 0x3000 à page + 0x4000) × 4 tailles | 469 762 048 (dont 67 162 046 accès directs) | **0** |
+
+(cinq minutes et demie ; `cc -O2 tools/tcg/tlbbproof.c && ./a.out 4096`.)
+
+**Le vrai émetteur, vu de l'invité** (`tools/guest/jobs/tlbbtest`, VM de dev, SMP=2 en MTTCG,
+toutes les options de production). Zone de quatre pages : [−0x1000, 0) et [0x2000, 0x3000)
+`PROT_NONE`, [0, 0x2000) deux pages d'un fichier mappées dans l'ordre 3, 1 (deux `mmap`
+`MAP_FIXED` : la page physique qui suit n'est pas la suivante), motif connu par octet ; chaque
+essai est un bloc écrit dans un tampon exécutable (un seul bloc de traduction) :
+
+- mode 1 : un premier chargement A d'une base r3 (formes non mises à jour, 4 déplacements),
+  puis B et B' de la même base, **toutes formes** (`lbz lhz lha lwz lfs lfd`, `lbzu lhau lwzu
+  lfsu lfdu`), à des déplacements de −9 à +9 autour de **chaque bord de page vu de la base**
+  (27 positions de la base, dont 0xff8-0x1004 et 0x1ff0-0x1fff) : dans la page, à cheval, dans
+  la page suivante, dans une page `PROT_NONE` ;
+- mode 2 : A, `addi r3,r3,X` (X de −0x1000 à +0x1004), B ;
+- mode 3 : six bases à la fois, A puis deux B chacune, entrelacés (plus de paires que de
+  registres préservés de l'hôte : débordements sur la pile de TCG) ;
+- mode 4 : A, `stmw` (`x-lmw-inline` : un branchement et deux étiquettes TCG au milieu du
+  bloc), B.
+
+Attendu calculé en C : la valeur (`lfs`/`lfd` relus par `stfs`/`stfd`, exacts), ou une faute à
+l'instruction même (`srr0` du contexte du signal) si l'accès touche une page `PROT_NONE` ;
+chaque faute (instruction, DAR) entre aussi dans l'empreinte.
+
+| bras | essais | fautes attendues et vues | erreurs | empreinte | vérificateur |
+|---|---|---|---|---|---|
+| ref | 519 984 | 309 224 | **0** | `028069d6e50d8d0b` | — |
+| tlbb (`x-tlb-base` + `x-tlb-base-verify`) | 519 984 | 309 224 | **0** | `028069d6e50d8d0b` | 520 831 728 chargements couverts vérifiés (le démarrage et le job), **0 divergence**, 0 absent |
+
+**Le mode superviseur, sans système** (`tools/tcg/tlbbnu.S` + `tlbbnu.sh` : chargé en RAM par
+`-device loader`, OpenBIOS ne tourne pas ; données traduites par BAT et par une table hachée
+posée par le programme ; résultats lus au moniteur) — ce que l'espace utilisateur ne peut pas
+faire. Avant T1, T2, T4, T5, T7, T8, un bloc à part lit la base : le premier chargement du bloc
+testé a un succès du TLB, la base est posée.
+
+| test | ce qu'il fait | ref | tlbb |
+|---|---|---|---|
+| T1 | `lwz` par DBAT0 (→ A) ; `mtspr` DBAT0L (→ B) et DBAT0U (valeur changée : `helper_store_dbatu` vide les pages du BAT, en ligne, **sans étiquette**) ; `lwz 4`, `lwz 8` → B | B | B |
+| T2 | `lwz` par PTE (→ A) ; `stw` de la PTE (→ B), `tlbie`, `sync` ; `lwz` → B | B | B |
+| T3 | registre d'adresse de configuration PCI d'Uni-North (MMIO) : `stw`, puis `lwz`, `lwz`, `lhz`, `lbz` sur la même base | identiques | identiques |
+| T4 | base 0x3001fff8 : RAM (DBAT3) puis la page MMIO voisine (DBAT2) : `lwz 0`, `lwz 4` (couvert), `lwz 8` (MMIO), `lwz −4096` | A, A, registre, A | idem |
+| T5 | bord de page, RAM des deux côtés, pages physiques non contiguës : `lwz 0xff8` (premier), `lwz 0xffc`, `lbz 0xfff` (couverts), `lwz 0xffd`, `lhz 0xfff` (à cheval), `lwz 0x1000` | 20 mots | = ref |
+| T6 | boucle de 4 tours : bloc t6 (`lwz 0`, `lwz 4`) puis bloc t6b (DBAT0 → B) : au 2e tour le premier rate le TLB | A, A, puis B, B ×3 | = ref |
+| T7 | dans un bloc : paire 1 (`lwz 0`, `lwz 4` : base posée sur A), `mtspr` DBAT0L/U (→ B, vidage), paire 2 : premier par le chemin lent, puis couvert (les temporaires libérés de la paire 1 repris dans les mêmes registres de l'hôte) | A, A, B, B | = ref |
+| T8 | paire (base posée), `stwcx.` (en SMP=1 : un branchement et une étiquette TCG, **aucun** helper), `lwz 8` | B, B, B | = ref |
+
+**35 mots, 0 écart** dans les deux bras ; vérificateur : les chargements couverts directs
+vérifiés, 0 divergence. Deux constats : un accès MMIO fait retraduire son bloc en blocs d'une
+instruction (`cpu_io_recompile`) — aucun chargement couvert n'atteint jamais une page MMIO par
+le chemin direct, le poison suffit au reste ; et après un vidage (T1, T2), le premier chargement
+rate le TLB, pose le poison, et ses suivants du même bloc prennent le chemin complet.
+
+**Mutants** (`tools/tcg/tlbb-mut.py ~/src/qemu-tlbbm` : une substitution dans la copie des
+mutants, `ninja qemu-system-ppc`, le fichier rendu ; puis `tlbbnu.sh` et la VM de dev avec
+`x-tlb-base` + `x-tlb-base-verify`, job `tlbbtest` (420 s au plus, la référence en met 80) :
+
+| mutant | `tlbbtest` (VM) | vérificateur | `tlbbnu` (35 mots) | verdict |
+|---|---|---|---|---|
+| aucun | 0 erreur, `028069d6e50d8d0b` | 0 divergence | 0 écart | — |
+| borne + 1 (`cmp … 0x1000 − taille + 1`) | VM figée : le job n'est jamais pris (le noyau et l'agent lisent avec la même erreur) | 66,6 M vérifiés, 0 (son propre test est juste : l'accès à cheval accepté y compte comme « chemin complet ») | T5 : 2 (`lwz 0xffd`, `lhz 0xfff` à cheval) | **attrapé** |
+| borne sans la taille (`cmp … 0xfff`) | VM figée | 67,0 M, 0 | T5 : 2 | **attrapé** |
+| test retiré (`ja` jamais pris) | VM figée | — (QEMU ne sort pas) | le programme ne finit pas | **attrapé** |
+| sans poison (le chemin lent du premier ne pose pas `negp`) | 0 erreur, = ref | 585,7 M, 0 | T7 : 1 (`B[1]` lu dans A : `negp` et `adend` de la paire 1, mêmes registres) | **attrapé** (`tlbbnu`) |
+| page + 1 (`negp − 0x1000`) | VM figée | 4 601 vérifiés, **153 divergences** | T5 : `lwz 0x1000` lu dans B | **attrapé** |
+| `adend` = pointeur de l'entrée du TLB | VM figée | — | ne finit pas | **attrapé** |
+| hors ligne vide (retour sans le chargement) | VM figée | 6, 0 | 8 écarts (T1, T2, T5, T6, T7) | **attrapé** |
+| frontal : la base survit aux étiquettes | 0 erreur, = ref | 588,9 M, 0 | T8 : **TCG s'arrête** (`temp_load: code should not be reached` : temporaire EBB mort à l'étiquette) | **attrapé** (`tlbbnu`) |
+| frontal : la base survit aux appels | 0 erreur, = ref (aucun helper de l'espace utilisateur ne change la traduction en cours de bloc) | 553,9 M, 0 | T1, T7 : 4 (A lu au lieu de B après `mtspr` DBAT) | **attrapé** (`tlbbnu`) |
+| frontal : la base survit à l'écriture de son registre | 0 erreur, = ref | 698,3 M vérifiés, 0 ; **714,3 M par le chemin complet** (1,5 M sans le mutant) | 0 | **équivalent, prévu** (le test porte sur l'adresse) : la règle n'est qu'une prévision, mais elle évite un chemin complet sur deux |
+
+« VM figée » : le démarrage single-user aboutit (le mutant agit déjà pendant le démarrage), mais le
+job n'aboutit pas en 420 s (la référence en met 80) et `halt` n'éteint pas la VM. **9 attrapés sur
+9 qui changent un résultat** — 6 par la VM, 3 par `tlbbnu` seul (poison, étiquettes, appels :
+l'espace utilisateur ne les voit pas) — et le dixième équivalent, comme prévu, avec son coût
+mesuré.
+
+**VM de dev sous les vérificateurs** (`tools/tcg/tlbbdev.sh`, single-user, SMP=2 en MTTCG,
+toutes les options de production, `x-tlb-base` + `x-tlb-base-verify` + `x-fp-verify`,
+`x-fp-native-cmp-verify`, `x-vfp-native-verify`, `x-vfp-native-cmp-verify`, `x-ret-verify`,
+`x-tb-verify`, `x-tlb-precise-verify=256`, `x-sr-tlb-verify=64`, `x-pteg-map-verify`,
+`x-dirty-skip-verify` ; jobs `tlbbtest`, `tlbtest`, la suite de `ppc32mt-bench.sh` (`vfptest
+vmxtest lmwtest tbtest smctest jctest` + `atomtest`), `fptest k 4096`), puis le même démarrage
+sans `x-tlb-base` :
+
+| | tlbb | ref |
+|---|---|---|
+| `tlb-base-verify` | **2 204 599 258** chargements couverts vérifiés, **0 divergence**, 0 absent ; 3 201 289 par le chemin complet (0,15 %) | — |
+| `fp-native-verify` | 24 809 030, **0** (dont 11 047 778 `lfs`) | 22 575 404, 0 |
+| `vfp-native-verify` | 34 066 432, **0** | 34 066 432, 0 |
+| `tb-verify` | 887 572 180 lectures, 0 positif | 889 713 999, 0 |
+| `x-tlb-precise-verify` | 457 497 386 + 241 456 927 accès retraduits, **0** | 0 |
+| `x-pteg-map-verify`, `x-dirty-skip-verify` | 0, 0 | 0, 0 |
+| `x-sr-tlb-verify=64` | n'imprime qu'au 1 024e contrôle gardé : pas atteint | idem |
+| `ret-verify` | 2 + 6 + 6 « divergences », **toutes « sans traduction »** (la classe d'OpenBIOS/BootX du §35) | **les mêmes** 2 + 6 + 6 |
+| `tlbbtest`, `tlbtest`, `fptest k 4096` | `028069d6e50d8d0b`, `deee3d7026183c65`, `3f42ddddb092415b` (§37.3) | idem |
+| `vfptest`, `vmxtest`, `lmwtest`, `smctest` | `bc13e93c39e62602`, `c24e3d31d479381b`, `2575eafce78adf66`, F `7308784105b8fd59` / 0 erreur (les références de `docs/ppc32-mttcg.md` §4) | idem |
+| `atomtest` (`lwarx`/`stwcx.`, deux fils) | A, B, C exacts (8 000 000) | idem |
+
+**Bureau, jeux, rendu** (deuxième VM de dev en parallèle, copie `tiger-dev-tlbb2.raw`, port
+2273) :
+
+- **Bureau sous les vérificateurs lourds** (`x-tlb-base-verify`, `x-fp-verify`,
+  `x-fp-native-cmp-verify`, `x-vfp-native-verify`, `x-ret-verify`, `x-tb-verify`) : le bureau
+  démarre ; `fpgames` et `plugmd5` n'aboutissent pas dans l'heure sous `x-fp-verify` sur cet
+  hôte chargé (VM arrêtée au bout de 2 h 15) : **2 530 899 254** chargements couverts vérifiés,
+  **0 divergence** ; `fp-native-verify` 7,3 M, 0 ; `tb-verify` 0 positif ; `ret-verify` : les
+  mêmes 2 + 6 + 6 « sans traduction ».
+- **Jeux sous `x-tlb-base` et son vérificateur seul** (`fpgames`, 120 s par jeu) : Marble Blast
+  joue sa démo (12 images/s, image correcte), Zenerchi va jusqu'à son écran d'accueil (il décode
+  ses musiques Ogg d'abord) ; **8 933 790 406** chargements couverts vérifiés, **0 divergence**,
+  0 absent. Mais **425 157 074 par le chemin complet (4,8 %)**, contre 0,15-0,6 % sans jeu : le
+  moteur de Marble Blast lit souvent, sur une même base, des deux côtés d'un bord de page (ces
+  accès paient le test, 3 instructions, en plus du chemin normal). Le taux de DOOM 3 sortira de
+  la partie vérifiée du §41.6.
+- **`plugmd5` et `gpu`** (VM de dev single-user, même binaire, ref puis `x-tlb-base` +
+  `x-tlb-base-verify`) : 69 scènes, **les mêmes md5 scène par scène** dans les deux bras (61
+  rendues, les 8 scènes ARB/GLSL en `rc=1` des deux côtés) ; `gpu` : 0 échec des deux côtés ;
+  3 469 392 825 chargements couverts vérifiés, 0 divergence. (Au bureau, sur la seconde copie,
+  `gpu` échoue dans les deux bras, ref compris : son environnement, pas le levier.) Pendant
+  l'entraînement PGO (§41.5, binaire instrumenté, `x-tlb-base`) : `plugmd5` 69 scènes 0 écart,
+  `gpu` 0 échec, d3inter md5 `7ff741d695d60c212dc0ca4b761a0acc`.
+
+**Endurance** (`tools/endurance/devdemarrages.py --nom tlbb -n 20 --froid-tous 5`, seconde VM
+de dev, bureau complet, SMP=2 en MTTCG, options de production + `x-tlb-base` +
+`x-tlb-base-verify`) : **20 démarrages sur 20** (4 à froid, 16 redémarrages dans le même QEMU),
+bureau complet et deux processeurs à chaque cycle, durée médiane 103 s (max 156 s : le premier, à
+froid). Le dernier QEMU (un départ à froid et quatre redémarrages) : 1 133 218 079 chargements
+couverts vérifiés, 0 divergence (les bilans des QEMU précédents sont écrasés au départ suivant).
+
+### 41.4 Taille du code (blocs de DOOM 3 retraduits en mode système)
+
+Le TLB logiciel n'existe pas en linux-user : `lfsksize.sh` (§40.4) ne le voit pas. D'où l'essai
+**`tbreplay-sys`** (`patches/tcg/essais/0052-tbreplay-sys.patch`, non appliqué : commit puis
+`revert` dans `~/src/qemu-tlbb`) : avec `POMPPC_TBREPLAY_SYS=blocs.bin`, au premier `cpu_exec`
+du `qemu-system-ppc`, chaque bloc du journal est posé en RAM, une IBAT met ses 128 Kio à son
+adresse, MSR du jeu (PR, IR, DR, FP, VR, FE0, FE1), `tb_gen_code`, jamais exécuté ; les autres
+vCPU attendent ; puis QEMU sort. `tools/tcg/tlbbsize.sh` le joue sur les 1 158 blocs du
+journal `bench/tcg/t2/d3-asm-2410.log` (`tbreplay.py --tous` : aussi ceux au-dessus de
+0x10000000, GLEngine, libSystem), options de production du CPU **et du TCG** (`x-jit-rel32`…),
+cible 32 bits en MTTCG, bras ref puis tlbb : 1 158 blocs traduits, 0 perdu, les mêmes
+découpages des deux côtés à 3 blocs près (40 instructions contre 39 ; `codeop2.py` ne compare
+que les blocs identiques).
+
+Le bloc 0x13c9e0 : 2 `qemu_ld_tlbb0` (r3 et r4) et 20 `qemu_ld_tlbb1`. Un `lfs` couvert :
+
+        lea   rdi, [r13 + rbx]             ; negp de r3 (r13) + ea
+        cmp   rdi, 0xffc
+        ja    hors_ligne
+        movbe r10d, [rbx + r14]            ; adend de r3 (r14)
+        lea   eax, [r10*2 - 0x1000000]     ; x-lfs-known (§40), inchangé
+        …
+
+et, quand les registres préservés manquent (la paire de r4, sortie dans r10/r11), deux
+rechargements de la pile en plus (`mov r15, [rsp + 0x80] ; mov r10, [rsp + 0x88]`).
+
+**Ce qui est couvert** (`tools/tcg/tlbbcover.py` : un chargement porte le test de couverture,
+pose une base, ou ni l'un ni l'autre ; chaque bloc pondéré par son temps dans la partie profilée
+du 24/10, `perf-hote-mesure.data` de `x86-asm-2410`) :
+
+| accès (pondérés) | part |
+|---|---|
+| chargements couverts (`qemu_ld_tlbb1`) | **37,2 %** |
+| premiers d'une base promue (`qemu_ld_tlbb0`) | 8,4 % |
+| chargements seuls (`qemu_ld`) | 6,3 % |
+| indexés, `lmw`/`stmw` | 15,6 %, 0,7 % |
+| rangements | 31,9 % |
+
+72 % des chargements en forme D sont couverts. (La porte de `tlbbase.py`, sur un découpage un
+peu différent — indexés et AltiVec 20,0 % des accès au lieu de 15,6 % ici, rA = 0 laissé de
+côté —, comptait 28,7 % d'accès couverts : le levier fait au moins ce qu'elle annonçait.)
+
+**Instructions x86 exécutées par instruction invité** (`tools/tcg/codeop2.py`, mêmes poids,
+429 blocs pondérés communs) :
+
+| opcode | part des instr. invité | ref | tlbb | écart |
+|---|---|---|---|---|
+| `lfs` | 19,4 % | 20,3 | **16,7** | **−17,6 %** |
+| `lwz` | 3,4 % | 13,4 | 12,0 | −10,6 % |
+| `lbz`, `lfd` | 0,3 %, 0,2 % | 12,1, 13,0 | 9,9, 9,8 | −18 %, −25 % |
+| `lfsx` (indexé) | 1,0 % | 20,9 | 21,0 | 0 |
+| `stfs`, `stw`, `fmuls` | 10,2 %, 3,9 %, 6,5 % | 22,4, 11,8, 37,6 | 22,5, 11,9, 37,9 | +0,6 à +0,8 % (débordements) |
+| **tout** | 100 % | 20,62 | **19,91** | **−3,4 %** |
+
+Octets en ligne par instruction (`tcgsize.py --starts`) : 87,2 → 86,4 (−1 %) ; `lfs` 92,4 →
+87,5, `lwz` 58,2 → 54,9. Peu d'octets en moins (le `ja` hors ligne fait 6 octets, les
+débordements 8 chacun), mais ~6 instructions de moins par chargement couvert sur le chemin
+exécuté. Chemins lents : 335 422 → 402 946 octets (+20 %, froids : un chemin complet de plus
+par chargement couvert). L'estimation du §16 (−5 %) comptait aussi les rangements (19,1 % des
+accès couverts) : chargements seuls, **−3,4 %**.
+
+**La mort de la base à son écriture est la bonne prévision** : le mutant `base-ecrite` (la base
+survit à l'écriture de son registre, §41.3) donne autant d'accès par le chemin complet que
+d'accès directs dans la VM de dev (714 M contre 698 M ; 1,5 M contre 521 M avec la règle) ; et
+sur les blocs de DOOM 3, garder la base à travers `addi rA,rA,imm` et les formes u ne gagnerait
+que 0,3 point de couverture (`tlbbase.py` modifié).
+
+### 41.5 Banc invité (VM de dev, indicatif)
+
+`tools/tcg/tlbbdev.sh banc-<bras>-<k>` (single-user, SMP=2 en MTTCG, options de production,
+même binaire -O2 des deux côtés ; bras alternés ref, tlbb, ref, tlbb) : `tlbbtest banc` (une
+structure lue par 8 `lwz` et 8 `lfs` sur une base : 14 chargements couverts sur 16 ; 3 M
+appels), `fptest banc-l` (`lfs` + `fmadds`), `fptest banc` (chaîne, sommets 4×4, `fcmpu`),
+`t2bench` (d3inter : plugin + GLEngine, 150 images) ; `tools/tcg/tlbbbanc.py`. Un premier tour
+(démarrages 1-2), joué pendant que l'hôte avait une charge de 12 à 16 (les mutants d'un autre
+agent restés en boucle), est **écarté** (d3inter y prenait 19 s au lieu de 8, dispersion
+au-delà de l'effet). Second tour, charge 2 (la VM quotidienne et ma seconde VM de dev) :
+
+| démarrage | `tlbbtest banc` (ms) | `banc-l` | sommets | chaîne | `fcmpu` | d3inter (s) |
+|---|---|---|---|---|---|---|
+| ref 3 | 88 / 85 / 87 | 29 / 29 / 29 | 504 / 516 / 545 | 168 / 167 / 169 | 110 / 111 / 118 | 8,70 / 8,26 / 8,11 |
+| tlbb 3 | **66 / 65 / 69** | 29 / 30 / 31 | 535 / 531 / 529 | 176 / 172 / 174 | 115 / 116 / 115 | 8,01 / 8,20 / 8,42 |
+| ref 4 | 83 / 79 / 81 | 29 / 29 / 29 | 533 / 506 / 511 | 170 / 166 / 168 | 111 / 111 / 112 | 8,56 / 8,77 / 8,71 |
+| tlbb 4 | **66 / 71 / 66** | 28 / 28 / 28 | 503 / 500 / 502 | 167 / 167 / 167 | 114 / 110 / 116 | 8,19 / 7,94 / 8,10 |
+| médianes | 84 → **66 (−21 %)** | 29 → 28,5 | 514 → 516 | 168 → 170 | 111 → 115 | 8,63 → **8,15 (−5,6 %)** |
+
+Le banc fait pour le levier gagne un cinquième ; `banc-l`, sommets, chaîne et `fcmpu` ne
+bougent pas (boucles serrées compilées par gcc : peu de chargements par base et par bloc, ou
+des formes indexées) ; la scène d3inter — du code de la famille de DOOM 3 (plugin, GLEngine) —
+gagne 5,6 % en médiane à ce tour (mais voir le troisième, ci-dessous). Même md5 de d3inter dans
+tous les démarrages (`7ff741d695d60c212dc0ca4b761a0acc`, celui du §40.5) : le rendu n'est pas
+touché.
+
+**Binaire rapide de l'arbre** (`~/src/qemu-tlbb/build-fast-mt/qemu-system-ppc` : -O3
+-march=native, LTO, PGO ; `pgo-train.sh --cible ppc32mt --banc dev --force`, profil pris sur la
+VM de dev seulement — bureau 120 s puis `plugmd5 gpu suite mtbench t2bench`, 1 255 `.gcda`,
+options de production + `x-lfs-known` + `x-tlb-base` pendant l'entraînement (`PGO_CPU`,
+`CPU_EXTRA`) ; construit depuis l'arbre sans l'essai). Troisième tour, hôte presque au repos
+(charge 1,3 : la VM quotidienne seule), `tlbbtest banc` et d3inter en 5 passes, les deux
+binaires, bras alternés :
+
+| démarrage | `tlbbtest banc` (ms) | d3inter (s) |
+|---|---|---|
+| -O2 ref 5 / tlbb 5 | 80 / 80 / 80 — **65 / 65 / 65** | 7,72 / 7,62 / 7,80 / 7,71 / 7,67 — 8,00 / 8,03 / 7,99 / 7,95 / 7,96 |
+| -O2 ref 6 / tlbb 6 | 83 / 80 / 80 — **65 / 65 / 70** | 7,54 / 7,69 / 7,68 / 7,79 / 7,75 — 7,80 / 7,72 / 7,71 / 7,87 / 8,05 |
+| rapide ref 3 / tlbb 3 | 81 / 77 / 76 — **62 / 62 / 62** | 7,62 / 7,55 / 7,55 / 7,49 / 7,71 — 7,27 / 7,16 / 7,08 / 7,12 / 7,01 |
+| rapide ref 4 / tlbb 4 | 82 / 82 / 78 — **62 / 62 / 62** | 7,02 / 7,05 / 7,24 / 7,13 / 7,06 — 7,15 / 7,01 / 7,02 / 6,97 / 7,02 |
+| médianes -O2 | 80 → **65 (−19 %)** | 7,70 → 7,95 (+3,3 %) |
+| médianes rapide | 79,5 → **62 (−22 %)** | 7,37 → 7,05 (−4,3 %) |
+
+Le banc du levier gagne 19 à 22 % à chaque démarrage. **d3inter ne tranche pas** : −5,6 % au
+second tour (-O2), +3,3 % au troisième (-O2), −4,3 % au troisième (rapide), et +5,5 % pour le
+rapide au second tour joué pendant l'endurance (écarté) — l'écart d'un démarrage à l'autre
+(jusqu'à 7 % entre deux démarrages du même bras, rapide ref 3 et 4) couvre l'effet attendu
+(quelques %). Le code généré est le même pour les deux binaires ; c'est l'A/B en jeu, hôte au
+repos, plusieurs parties par bras, qui dira.
+
+(Les bancs -O2 ont tourné sur le binaire qui portait encore l'essai, inerte sans sa variable
+— un `getenv` à chaque entrée dans `cpu_exec`, dans les deux bras.)
+
+**Binaires finaux** (l'arbre sans l'essai : `build/` reconstruit à la fin, `build-fast-mt`) :
+`tlbbnu` 35 mots, 0 écart (les deux) ; `tlbbtest` = ref (`028069d6e50d8d0b`), 518 396 940 et
+514 350 642 chargements couverts vérifiés, 0 divergence.
+
+### 41.6 L'A/B à jouer (VM quotidienne, hôte au repos)
+
+Binaire `~/src/qemu-tlbb/build/qemu-system-ppc` : la série du 24/10 (0001-0051) + 0052,
+**construit en -O2**, même binaire des deux côtés, seule la propriété change. Avant fusion
+(`run_tiger.sh` du dépôt principal ne connaît pas `TLBBASE`) :
+
+    B=$HOME/src/qemu-tlbb/build/qemu-system-ppc
+    # une partie vérifiée d'abord (pas pour la vitesse) : bilan « tlb-base-verify » du
+    # run_tiger.log, 0 divergence attendu (et le taux « par le chemin complet » de DOOM 3)
+    tools/tcg/matab.sh x86-tlbb-verif 1 "v:QEMU_BIN=$B CPU_OPTS=x-tlb-base=on,x-tlb-base-verify=on" d3 fen
+    tools/tcg/matab.sh x86-tlbb 3 "ref:QEMU_BIN=$B" "tlbb:QEMU_BIN=$B CPU_OPTS=x-tlb-base=on" d3 fen
+    tools/tcg/matab.sh x86-tlbb-ut 3 "ref:QEMU_BIN=$B" "tlbb:QEMU_BIN=$B CPU_OPTS=x-tlb-base=on" ut fen
+    tools/tcg/matab.sh --restore
+
+Après fusion : `"ref:QEMU_BIN=$B TLBBASE=0"` contre `"tlbb:QEMU_BIN=$B TLBBASE=1"` (`PPC32MT=1`,
+le défaut sur Linux x86-64 : la propriété n'agit que sur `qemu-system-ppc`). Six parties par
+bras avant de l'allumer par défaut. Le même A/B sur le binaire rapide de l'arbre (§41.5 ; profil
+pris sur la VM de dev, pas sur les jeux) :
+
+    F=$HOME/src/qemu-tlbb/build-fast-mt/qemu-system-ppc
+    tools/tcg/matab.sh x86-tlbb-rapide 3 "ref:QEMU_BIN=$F" "tlbb:QEMU_BIN=$F CPU_OPTS=x-tlb-base=on" d3 fen
+    tools/tcg/matab.sh --restore
+
+Attendu : −3,4 % des instructions x86 des blocs chauds de DOOM 3 (§41.4) ; en temps, de l'ordre
+de −2 à −5 % (le chemin court du TLB enchaîne trois lectures dépendantes — masque et table
+dans `env`, puis l'entrée — que le chargement couvert n'a plus ; d3inter, du code de la même
+famille, entre −5,6 % et +3,3 % selon le tour au §41.5 : dans le bruit). Le taux « par le chemin
+complet » de la partie vérifiée dira si DOOM 3
+ressemble plutôt au bureau (0,2-0,6 %) ou à Marble Blast (4,8 %).
+
+### 41.6 bis Résultats en jeu (24-25/10, `bench/tlbb-vfpk-2410/chaine-ab.sh`, hôte au repos)
+
+**Partie DOOM 3 vérifiée** (`x86-tlbb-verif`, `x-tlb-base`, `x-tlb-base-verify`, 181,1 ms/image) :
+**17 337 953 939 chargements couverts vérifiés, 0 divergence**, 0 absent ; 222 193 452 par le
+chemin complet (adresse hors de la page), soit 1,3 % (Marble Blast : 4,8 %).
+
+**A/B** (même binaire des deux côtés, 3 parties par bras, fenêtre) :
+
+| | ref | tlbb | écart |
+|---|---|---|---|
+| DOOM 3, binaire -O2 | 85,3 | **83,7** | −1,9 % (dispersion 2,5 / 8,0 %) |
+| DOOM 3, binaire rapide (`build-fast-mt`, PGO de la VM de dev) | 82,0 | **80,2** | **−2,2 %** (dispersion 2,3 / 0,2 % ; les 3 tlbb sous les 3 ref) |
+| UT2004, binaire -O2 | 40,4 | 41,3 | +2,2 % (dispersion 1,5 / 6,8 % : minimums 40,0 / 39,8, bruit) |
+
+Gain modeste et répété sur DOOM 3, en accord avec −3,4 % d'instructions (§41.4) ; UT2004 dans le
+bruit. **Allumé par défaut sur Linux x86-64** (`TLBBASE=1`, 25/10).
+
+### 41.7 Ce qui reste ouvert
+
+- **Pendant arm64** : émetteur aarch64 écrit, compilé par le clang du NDK, encodages relus
+  (`a64enc-check.py`, 7 OK), **jamais exécuté** : sur le M4, construire, `tlbbproof` (le modèle
+  aarch64 y est déjà prouvé), `tlbbtest` et `tlbbnu.sh` (il lui faut un assembleur PowerPC —
+  `powerpc-linux-gnu-as` sur le PC — ou le `.bin` assemblé ici), les mutants à porter (`b.hi` →
+  `b.ls`, `cmp #(0x1000 − taille) + 1`, poison retiré, `neg` retiré…), puis l'A/B.
+- **Les rangements** (19,1 % des accès couverts, l'autre moitié de l'estimation du §16) : il
+  faudrait que la remise en « notdirty » par un autre fil se voie en cours de bloc. Piste : un
+  compteur de génération par vCPU, incrémenté par `tlb_reset_dirty*()` (et tout ce qui repose
+  un drapeau sur `addr_write`) **avant** de poser les drapeaux ; le premier rangement le lit
+  avant sa comparaison du TLB et le range dans les bits hauts de `negp` (`negp = −page −
+  gen << 32`) ; un rangement couvert fait `t = ea + negp + [env + gen]` : une génération qui a
+  bougé donne `t ≥ 2^32 > 0x1000 − taille`, chemin complet — un chargement de plus que pour les
+  chargements, et la fenêtre redevient celle de QEMU d'origine (lecture du compteur, puis
+  rangement). Non fait : `cputlb.c` touché, `x-dirty-skip` (0040) à reprendre, et sa preuve
+  (code réécrit par l'autre vCPU, `smctest` ; affichage) à écrire.
+- **Le déplacement plié** (x86_64 seulement) : `lea rdi, [negp + base + d]` et `movbe r, [base +
+  adend + d]` sur la base et le déplacement, sans calculer `ea` (le test sur la valeur 64 bits
+  non repliée reste exact : une adresse qui déborde de 2^32 ou passe sous 0 donne `t ≥ 0x1000`) ;
+  une instruction de moins par chargement couvert quand `ea` ne sert qu'à lui (~−0,6 % du code),
+  au prix d'une op qui porte la base et le déplacement, et d'un `ea` recalculé hors ligne.
+- **Débordements** : une base promue prend deux registres préservés ; au-delà de deux paires
+  vivantes (r3 et r4 du bloc 0x13c9e0), la deuxième paire est rangée sur la pile et rechargée à
+  chaque chargement couvert (2 instructions de plus, toujours moins que le TLB). Garder `negp`
+  et `adend` dans `env` (deux emplacements par base, `[rbp + x]`) n'en prendrait aucun.
+- **Les formes indexées** (15,6 % des accès), `lmw`/`stmw` (déjà à part, 0032), AltiVec
+  (`lvx`) : hors périmètre.
+- `qemu-system-ppc64` : la propriété y est sans effet (adresses 64 bits, poison inexact) ;
+  `run_tiger.sh` le dit (`TLBBASE=1` sans `PPC32MT=1` en SMP).

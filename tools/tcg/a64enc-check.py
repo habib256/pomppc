@@ -68,6 +68,16 @@ CASES = [
     ("0x1e270000", 0, 2, None, None, "fmov s0, w2"),
     ("0x1e22c000", 0, 0, None, None, "fcvt d0, s0"),
     ("0x9e660000", 7, 0, None, None, "fmov x7, d0"),
+    # --- tcg/0052 (x-tlb-base, NON exécuté : formules des tcg_out_insn_*() de l'émetteur,
+    # Iaddsub_* | ext << 31 | rm << 16 (| opt << 13) | imm << 10 | rn << 5 | rd ;
+    # TMP0 = x16, TMP2 = x30, XZR = 31) ---
+    ("0x4b000000 | 1 << 31", 5, 31, 30, None, "neg x5, x30"),                  # tlbb0 : negp
+    ("0x0b200000 | 1 << 31 | 2 << 13", 16, 5, 7, None, "add x16, x5, w7, uxtw"),  # tlbb1
+    ("0x71000000 | 1 << 31 | 0xffc << 10", 31, 16, None, None, "cmp x16, #0xffc"),
+    ("0x71000000 | 1 << 31 | 0xfff << 10", 31, 16, None, None, "cmp x16, #0xfff"),
+    ("0x71000000 | 1 << 31 | 0xff8 << 10", 31, 16, None, None, "cmp x16, #0xff8"),
+    ("0x54000000 | 8", 0, 0, None, None, "b.hi ."),                            # COND_HI
+    ("0x52800000 | 0x1000 << 5", 5, 0, None, None, "mov w5, #0x1000"),          # poison
 ]
 
 
