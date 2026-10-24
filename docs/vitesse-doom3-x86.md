@@ -714,3 +714,18 @@ sur les 2^32 mots (modèle des deux émetteurs, talon, et le vrai émetteur x86_
 mutants, Zenerchi et Marble Blast vérifiés sans divergence (4 sorties de bloc par million de
 `lfs`) ; sur ces mêmes blocs retraduits, `lfs` 26,9 → 11,3 instructions x86, tout le code
 −26 % (linux-user, sans TLB), **≈ −20 %** ramené au binaire système. A/B en jeu à faire (§40.6).
+
+## 16. Porte du « TLB par base » (24/10, `tools/tcg/tlbbase.py`)
+
+Après `x-lfs-known`, le chemin court du TLB est le premier poste restant des chargements/rangements :
+~7-8 instructions x86 (« neg + tlb ») par accès, pour 44 % des instructions invité (§15). Sur les
+mêmes blocs chauds, pondérés par le temps : **47,8 % des accès** sont en forme D sur une base
+inchangée, avec un accès antérieur **de même nature** dans le bloc. Le détail :
+- chargements couverts 28,7 %, premiers 23,1 % ;
+- rangements couverts 19,1 %, premiers 7,8 % ;
+- indexés 20,0 %, `lmw`/`stmw` 1,3 %.
+
+70 % du temps se passe dans des blocs qui ont au plus une paire (base, nature) : la pression de
+registres sera faible. Un accès couvert ferait `t = ea − page0 ; t ≤ 0x1000 − taille` (exact, y
+compris pour les accès à cheval) puis l'accès par l'adend gardé, soit ~4 instructions au lieu de
+~10. Estimation : **~−5 % du code x86**. Levier `x-tlb-base`, confié à un agent le 24/10.
