@@ -463,7 +463,7 @@ médianes en ms/image :
 
 Les cinq variables passent à 1 par défaut (révision suivante du plugin).
 
-### 10.6 Second lot (`20261021-d3q`, branche `worktree-agent-aa31ed80daea05ba3`, 4a6d7a9) : non fusionné
+### 10.6 Second lot (`20261021-d3q`, branche `worktree-agent-aa31ed80daea05ba3`, étiquette `archive/plugin-d3q`, 4a6d7a9) : non fusionné
 
 VD2 (verdicts mémorisés), ATTRBITS (boucles d'attributs), DISPCMP (DISPONE sans boucle) et
 RPEVICT (tranches de miroir rendues, pour `r_useIndexBuffers 1`) sont exacts (plugmd5 67 scènes,

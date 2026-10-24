@@ -58,3 +58,4 @@ guest/gldriver/qgpu_abi.h
 /lib/
 /share/
 /dist/
+tools/tcg/*.so

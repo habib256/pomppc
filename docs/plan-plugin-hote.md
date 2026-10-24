@@ -90,7 +90,7 @@ jeux. Phase 2 : le dessin des tableaux (plan, indices, `send_state`).
 que le code invité, non (×0,6 à ×1,5 sur le travail réel, ×3,3 sur 17 Kio d'état, ×13,6
 seulement pour une copie de 64 Kio d'un seul tenant).** Comme prévu au §3, le projet s'arrête
 là sous cette forme ; ce qui est construit reste éteint par défaut (branche
-`worktree-agent-a7bf31d231ad94544`, non fusionnée).
+`worktree-agent-a7bf31d231ad94544`, étiquette `archive/plugin-hote-phase0`, non fusionnée).
 
 ### 5.1 Ce qui a été construit (tout éteint par défaut)
 
