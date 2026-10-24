@@ -665,3 +665,46 @@ Boucle principale de QEMU : 5 % d'un cœur (38 % le 03/10). Fil de rendu qgpu : 
 Conséquence : ce qui reste côté hôte, c'est la **qualité du code généré** (sur tout le jeu,
 sans point chaud), donc le traducteur de second niveau (`docs/plan-traducteur-rapide.md`) ;
 côté invité, le plugin (agent en cours, `docs/d3-plugin-x86.md` §11) et les tics du jeu (§3.1).
+
+## 15. Profil et anatomie au 24/10 : ppc32mt, binaire quotidien (`x86-hprof-2410`, `x86-asm-2410`)
+
+Binaire `~/src/qemu/build-fast` (cible 32 bits en MTTCG, PGO pris sur les jeux), défauts du
+24/10. Cellule DOOM 3 à 92,6 ms/image sous `-perfmap` et `perf` (86,5 sans), hôte au repos.
+
+**Profil** (`tools/re/perfpart.py`) : fils vCPU 1,09 cœur, 101 ms de vCPU par image. Code généré
+**80,8 %**, softmmu 6,1 % (éparpillé : aucune fonction au-delà de 0,6 %), recherche de blocs 3,9 %,
+AltiVec 2,0 %, flottant 1,0 %. Profil plat : les 400 blocs les plus chauds font 39,9 % du vCPU, les
+1000 plus chauds 49 % (sans biais).
+
+**Anatomie** des 431 blocs les plus chauds (38,4 % du vCPU), `-d in_asm,out_asm -dfilter` sur ces
+blocs (`bench/tcg/t2/d3-dfilter-2410.txt`, journal `bench/tcg/t2/d3-asm-2410.log`) :
+22,2 instructions x86 par instruction invité. `tools/tcg/codeop.py` les répartit par opcode (part
+du code x86 exécuté) :
+
+| opcode | part des instr. invité | x86 par instr. | part du code x86 | dont calcul |
+|---|---|---|---|---|
+| `lfs` (+ `lfsx` 1,8 %) | 15,8 % | 32,8 | **23,4 %** | 23,2 |
+| AltiVec | 13,2 % | 21,3 | 12,7 % | 14,4 |
+| `fmuls` | 4,4 % | 42,9 | 8,4 % | 29,0 |
+| `stfs` | 7,8 % | 23,6 | 8,3 % | 14,0 |
+| `fadds`, `fsubs`, `fmadds`, `fmsubs` | 10,4 % | 39-47 | 19,7 % | 26-32 |
+| `lwz`, `stw`, `lvx`, `stvx` | 14,3 % | 12-15 | 8,9 % | 2-4 |
+| `lmw`, `stmw` | 0,6 % | 122-134 | 3,2 % | 34 |
+
+**Le `lfs` est le premier poste du code généré de DOOM 3** : la conversion DOUBLE de `x-lfs-inline`
+(13 ops sans branchement, §8 de `docs/tcg-g4.md`) y fait ~23 instructions x86 (`lzcnt`, `shlx`,
+trois `cmov`…), plus le TLB.
+
+**D'où viennent les opérandes du flottant** (`tools/tcg/fpsrc.py`, même pondération) : sur les
+lectures d'opérande des opérations flottantes, **38,3 % viennent d'un `lfs` du même bloc**,
+25,7 % d'un producteur de `x-fp-known` (test déjà retiré), 16,3 % d'ailleurs (inconnu).
+`x-fp-known` ne fait pas de `lfs` un producteur (§39.1 : « sa valeur vient de la mémoire ») :
+ces opérandes sont donc testés (`fpi_zon`, ~10 instructions chacun).
+
+**Levier proposé (`x-lfs-known`)** : un `lfs` qui convertit par l'hôte (`vcvtss2sd`, `fcvt`) quand
+le mot chargé est un simple nul ou normal, et qui part sinon au talon (conversion DOUBLE exacte,
+sortie de bloc si un consommateur s'en est servi, comme les producteurs de 0045). L'estimation
+porte sur les instructions x86 des blocs chauds :
+- environ −16 par `lfs`, soit ~2,7 par instruction invité ;
+- environ −10 par opérande flottant venu d'un `lfs`, soit ~1,6 ;
+- en tout **~−19 %**. En temps, on peut en attendre moitié moins.
