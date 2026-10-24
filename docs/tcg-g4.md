@@ -4898,8 +4898,28 @@ tiers ; la chaîne, dont les opérandes restent dans les registres, ne bouge pas
 scène d3inter, elle, ne bouge pas au-delà du bruit : le plugin GL y passe surtout son temps hors
 du flottant simple scalaire (et le jeu lui-même n'y est pas) — c'est l'A/B DOOM 3 qui dira.
 L'image de d3inter a le **même md5** (`7ff741d695d60c212dc0ca4b761a0acc`) dans les quatre
-démarrages (12 passes) : le rendu n'est pas touché (0051 ne touche à rien côté rendu ; pas de
-`plugmd5`/`gpu` refaits pour autant).
+démarrages (12 passes) : le rendu n'est pas touché (0051 ne touche à rien côté rendu). Et
+pendant l'entraînement PGO ci-dessous (binaire rapide, `x-lfs-known` allumé), **`plugmd5` : 69
+scènes, 0 écart** ; **`gpu` : 56 OK, 0 échec** (les 10 scènes « en échec sous le rendu d'Apple
+seul » sont les mêmes qu'à l'entraînement du 23/10, référence non comptée).
+
+**Binaire rapide de l'arbre** (`~/src/qemu-lfsk/build-fast-mt/qemu-system-ppc` : -O3
+-march=native, LTO, PGO ; `tools/tcg/pgo-train.sh --cible ppc32mt --banc dev`, profil pris sur
+cette VM de dev seulement — bureau 120 s puis `plugmd5 gpu suite mtbench t2bench`, 1 255 `.gcda`,
+options de production **et `x-lfs-known`** pendant l'entraînement, `CPU_EXTRA`/`PGO_CPU`), même
+protocole, mêmes réserves :
+
+| démarrage | `banc-l` | sommets | min/max | chaîne | d3inter |
+|---|---|---|---|---|---|
+| ref 1 | 177 | 649 | 123 | 168 | 7,16 |
+| lfsk 1 | **116** | **503** | 110 | 166 | 7,03 |
+| ref 2 | 182 | 645 | 122 | 167 | 7,15 |
+| lfsk 2 | **114** | **503** | 109 | 167 | 7,28 |
+| écart | **−36 %** | **−22 %** | −11 % | 0 | 0 (bruit) |
+
+Même md5 de d3inter partout. Le binaire rapide gagne ~11 % sur d3inter contre le -O2 (7,15
+contre 8,0 s), rien sur les bancs du flottant (le code généré est le même) : le levier et le
+binaire se cumulent.
 
 ### 40.6 L'A/B à jouer (VM quotidienne, hôte au repos)
 
@@ -4919,8 +4939,13 @@ connaît pas `LFSKNOWN`) :
     tools/tcg/matab.sh --restore
 
 Après fusion : `"ref:QEMU_BIN=$B LFSKNOWN=0"` contre `"lfsk:QEMU_BIN=$B LFSKNOWN=1"`. Six
-parties par bras avant de l'allumer par défaut (règle des patches TCG), puis le binaire rapide
-(`build-fast-mt`, profil PGO à reprendre : le code émis change).
+parties par bras avant de l'allumer par défaut (règle des patches TCG). Le même A/B sur le
+binaire rapide de l'arbre (§40.5 ; profil pris sur la VM de dev, pas sur les jeux : à reprendre
+par `pgo-train.sh --cible ppc32mt` sur les jeux avant d'en faire le binaire quotidien) :
+
+    F=$HOME/src/qemu-lfsk/build-fast-mt/qemu-system-ppc
+    tools/tcg/matab.sh x86-lfsk-rapide 3 "ref:QEMU_BIN=$F" "lfsk:QEMU_BIN=$F CPU_OPTS=x-lfs-known=on" d3 fen
+    tools/tcg/matab.sh --restore
 
 ### 40.7 Ce qui reste ouvert
 
