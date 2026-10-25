@@ -676,6 +676,8 @@ static u64 kval(void)
 }
 
 static u64 kseed;
+/* mode kd : vidage de la phase 0 (programmes, entrées, sorties) pour localiser un écart */
+static int kdump;
 
 static void kmode(long nprog)
 {
@@ -698,6 +700,13 @@ static void kmode(long nprog)
         rs = 0x9e3779b97f4a7c15ULL + ph * 977 + kseed * 0x100000001b3ULL;
         for (p = 0; p < nprog; p++) {
             kgen(8 + (unsigned)(rnd() % 41));
+            if (kdump) {
+                printf("P %ld", p);
+                for (i = 0; i < (int)kn; i++) {
+                    printf(" %08x", kbuf[i]);
+                }
+                printf("\n");
+            }
             for (v = 0; v < 8; v++) {
                 u32 f0 = ph == 4 ? ((u32)rnd() & 0x9ffff0ffu & ~0x00000800u) : kph[ph];
                 u32 *ks = (u32 *)(kin + 24);
@@ -715,6 +724,17 @@ static void kmode(long nprog)
                 setfpscr(f0);
                 fn(kin, kout);
                 ((u32 *)kout)[18] &= 0x0f0000f0u;   /* CR : champs 1 et 6 */
+                if (kdump) {
+                    printf("E %ld %d %08x I", p, v, f0);
+                    for (i = 0; i < 32; i++) {
+                        printf(" %016llx", kin[i]);
+                    }
+                    printf(" O");
+                    for (i = 0; i < 48; i++) {
+                        printf(" %016llx", kout[i]);
+                    }
+                    printf("\n");
+                }
                 h(kout, sizeof(kout));
                 for (i = 0; i < (int)sizeof(kout); i++) {
                     phash ^= ((unsigned char *)kout)[i];
@@ -728,6 +748,9 @@ static void kmode(long nprog)
             }
         }
         printf("K%d %8llu executions  empreinte %016llx\n", ph, n, phash);
+        if (kdump) {
+            break;
+        }
     }
     printf("total %llu programmes ; empreinte %016llx\n", n, fnv);
 }
@@ -966,7 +989,8 @@ int main(int argc, char **argv)
         banc_l(atol(argv[2]));
         return 0;
     }
-    if (argc > 1 && !strcmp(argv[1], "k")) {
+    if (argc > 1 && (!strcmp(argv[1], "k") || !strcmp(argv[1], "kd"))) {
+        kdump = argv[1][1] == 'd';
         build_cat();
         build_catc();
         kseed = argc > 3 ? strtoull(argv[3], 0, 0) : 0;

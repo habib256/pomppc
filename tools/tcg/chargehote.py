@@ -20,16 +20,47 @@ une autre session occupait l'hôte ; docs/vitesse-doom3-x86.md §13.5).
   chargehote.py invite PID JOURNAL [MAX_S] : attend que le QEMU PID soit au repos (bureau de
                                     l'invité retombé : < 0,25 cœur sur 10 s), au plus MAX_S (60) ;
                                     remplace l'attente fixe de 60 s de matab.sh."""
-import os, sys, time
+import os, subprocess, sys, time
 
 HZ = os.sysconf("SC_CLK_TCK")
+# macOS (M4, docs/parite-m4-2510.md) : pas de /proc. Temps CPU cumulé de chaque processus par
+# `ps` ; le total est leur somme, qui manque les processus nés et morts entre deux relevés
+# (une compilation courte compte moins que sous Linux). Unité partout : la seconde de CPU.
+PROC = os.path.isdir("/proc")
+
+def _secondes(t):
+    # cputime de ps : [jj-][hh:]mm:ss[.cc]
+    j = 0
+    if "-" in t:
+        j, t = t.split("-", 1)
+    v = 0.0
+    for x in t.split(":"):
+        v = v * 60 + float(x.replace(",", "."))
+    return int(j) * 86400 + v
+
+def _ps():
+    d = {}
+    out = subprocess.run(["ps", "-A", "-o", "pid=,cputime=,comm="], capture_output=True,
+                         text=True).stdout
+    for l in out.splitlines():
+        f = l.split(None, 2)
+        if len(f) == 3:
+            try:
+                d[int(f[0])] = (os.path.basename(f[2].strip()), _secondes(f[1]))
+            except ValueError:
+                pass
+    return d
 
 def total():
+    if not PROC:
+        return sum(t for _, t in _ps().values())
     f = open("/proc/stat").readline().split()[1:]
     v = list(map(int, f))
-    return sum(v[:3]) + sum(v[5:8])   # user nice system + irq softirq steal
+    return (sum(v[:3]) + sum(v[5:8])) / HZ   # user nice system + irq softirq steal
 
 def procs():
+    if not PROC:
+        return _ps()
     d = {}
     for p in os.listdir("/proc"):
         if not p.isdigit():
@@ -38,7 +69,7 @@ def procs():
             s = open("/proc/%s/stat" % p).read()
             comm = s[s.index("(") + 1:s.rindex(")")]
             f = s[s.rindex(")") + 2:].split()
-            d[int(p)] = (comm, int(f[11]) + int(f[12]))
+            d[int(p)] = (comm, (int(f[11]) + int(f[12])) / HZ)
         except Exception:
             pass
     return d
@@ -47,7 +78,7 @@ def echantillon(dt):
     t0, p0, w0 = total(), procs(), time.time()
     time.sleep(dt)
     t1, p1, w1 = total(), procs(), time.time()
-    el = (w1 - w0) * HZ
+    el = w1 - w0
     tot = (t1 - t0) / el
     q = 0.0; autres = []
     for pid, (c, t) in p1.items():
@@ -80,13 +111,11 @@ elif mode == "invite":
     deb = time.time()
 
     def cpu():
-        f = open("/proc/%d/stat" % pid).read()
-        f = f[f.rindex(")") + 2:].split()
-        return int(f[11]) + int(f[12])
+        return procs().get(pid, ("", 0.0))[1]
     while time.time() - deb < mx:
         a = cpu()
         time.sleep(10)
-        c = (cpu() - a) / HZ / 10
+        c = (cpu() - a) / 10
         out.write("INVITE %s qemu %.2f cœur\n" % (time.strftime("%H:%M:%S"), c))
         if c < 0.25:
             break

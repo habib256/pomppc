@@ -26,13 +26,29 @@ FPRF de l'op est sorti tel quel dans pfp_fprf() (frsp s'en sert aussi).
 Propriété x-fp-native-cmp éteinte par défaut ; run_tiger.sh ne l'allume pas sur
 macOS arm64.
 
-diff --git a/tcg/aarch64/tcg-target-has.h b/tcg/aarch64/tcg-target-has.h
+Reposé sur le M4 le 25/10/2026 (docs/parite-m4-2510.md) : écrit le 06/10 contre
+l'arbre à 0035, il ne s'appliquait plus après 0045-0052. Il se pose désormais
+APRÈS 0052, et reprend dans l'émetteur aarch64 ce que x86_64 a reçu entre-temps :
+  - tcg/0045 : porte connue (PFP_K_G) ; frB connu (PFP_K_B) non testé par frsp
+    ni fctiw(z) ; fdivs/fdiv passent par la branche arithmétique, qui gère déjà
+    PFP_K_A/B et PFP_K_R ;
+  - tcg/0046 (PFP_L) : frsp laisse FPRF/FI à fprf_src (xnf = xf, fprf_src = r) ;
+    fcmpo pose fprf_src = PPC_FPRF_NONE comme fcmpu ; fctiw(z) ne touche PAS
+    fprf_src (la sortie commune de l'aarch64 l'écrivait pour tout op paresseux) ;
+  - PFP_LFS (0051, 22) garde son numéro, PFP_B_DIV = 0x40 ne heurte rien.
+  - fdivs/fdiv : t = frB << 1 RECALCULÉ avant le test du diviseur nul (comme
+    pfp_shl1 sur x86_64). Le 0037 d'origine prenait le t laissé par pfp_zon(),
+    qui ne tourne plus quand frB est connu (PFP_K_B) : un diviseur nul (un
+    « nul ou normal » connu) prenait le chemin court. Trouvé sur le M4 par les
+    empreintes du mode k de fptest sous x-fp-known (docs/parite-m4-2510.md §5.4).
+Construit et éprouvé sur le M4 : voir docs/parite-m4-2510.md.
+
 --- a/tcg/aarch64/tcg-target-has.h
 +++ b/tcg/aarch64/tcg-target-has.h
-@@ -31,6 +31,12 @@
- #define TCG_TARGET_PPC_FP32_IMPL        1   /* POMPPC tcg/0017 */
+@@ -32,6 +32,12 @@
  #define TCG_TARGET_HAS_ppc_vfp          1   /* POMPPC tcg/0022 */
  #define TCG_TARGET_PPC_VFP_IMPL         1   /* POMPPC tcg/0022 */
+ #define TCG_TARGET_QEMU_LD_TLBB_IMPL    1   /* POMPPC tcg/0052 */
 +/*
 + * POMPPC tcg/0037 (x-fp-native-cmp): the selectors of tcg/0033 in the
 + * aarch64 emitter of ppc_fp32.  Written on the x86 PC, NOT RUN, NOT
@@ -42,26 +58,25 @@ diff --git a/tcg/aarch64/tcg-target-has.h b/tcg/aarch64/tcg-target-has.h
  
  #define TCG_TARGET_HAS_v64              1
  #define TCG_TARGET_HAS_v128             1
-diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
 --- a/tcg/aarch64/tcg-target.c.inc
 +++ b/tcg/aarch64/tcg-target.c.inc
-@@ -1857,7 +1857,14 @@
- 
+@@ -1964,7 +1964,14 @@
  enum { PFP_ADD, PFP_SUB, PFP_MUL, PFP_MADD, PFP_MSUB, PFP_NMADD, PFP_NMSUB,
         PFP_CMPU,
--       PFP_D = 8 };    /* tcg/0016: PFP_D + PFP_ADD..PFP_NMSUB, double forms */
-+       PFP_D = 8,      /* tcg/0016: PFP_D + PFP_ADD..PFP_NMSUB, double forms */
+        PFP_D = 8,      /* tcg/0016: PFP_D + PFP_ADD..PFP_NMSUB, double forms */
+-       PFP_LFS = 22 }; /* POMPPC tcg/0051 (x-lfs-known), FPI_LFS */
 +       /*
 +        * POMPPC tcg/0037 (x-fp-native-cmp, the selectors of tcg/0033, same
 +        * numbering as FPI_FRSP.. of target/ppc/internal.h and PFP_FRSP.. of
 +        * tcg/x86_64).  Written on the x86 PC: NOT RUN, NOT PROVEN.
 +        */
 +       PFP_FRSP = 15, PFP_FCTIW, PFP_FCTIWZ, PFP_CMPO, PFP_DIVS, PFP_DDIV,
++       PFP_LFS = 22,   /* POMPPC tcg/0051 (x-lfs-known), FPI_LFS */
 +       PFP_B_DIV = 0x40 };     /* base operation of PFP_DIVS/PFP_DDIV */
- enum { PFP_EQ = 0, PFP_NE = 1, PFP_HS = 2, PFP_LO = 3, PFP_HI = 8,
-        PFP_LS = 9, PFP_GE = 10, PFP_LT = 11, PFP_GT = 12 };
- 
-@@ -1945,6 +1952,16 @@
+ /*
+  * POMPPC tcg/0045 (x-fp-known): selector bits above op | frT << 8 (FPK_* of
+  * target/ppc/internal.h): operand known to be a float32 zero or normal
+@@ -2074,6 +2081,16 @@
  #define PFP_FSUBS       0x1e203800
  #define PFP_FMULS       0x1e200800
  #define PFP_FTYPE_D     0x00400000      /* ftype = 01: double */
@@ -78,10 +93,12 @@ diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
  
  /* dbl: the double-precision form (ftype 01) of the same instruction */
  static void pfp_fneg(TCGContext *s, unsigned d, unsigned n, bool dbl)
-@@ -2004,6 +2021,27 @@
+@@ -2131,6 +2148,27 @@
+     pfp_cmp(s, u, k2);
+     pfp_ccmpi(s, t, 0, 4, PFP_HS);      /* hs: t == 0 ? ; else Z */
      pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_EQ);        /* !Z: bad + 1 */
- }
- 
++}
++
 +/*
 + * fpi_fpscr_arith(): FPRF of r (+-zero, +-normal), FI = 1; tr = r << 1.
 + * Moved out of tcg_out_ppc_fp32() unchanged by tcg/0037 (frsp uses it too).
@@ -101,43 +118,49 @@ diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
 +                     ~(uint64_t)(0x1f000 | PFP_FI));
 +    pfp_rrr(s, PFP_ORRX, xnf, xnf, TCG_REG_TMP2, 12);
 +    tcg_out_logicali(s, Ilogic_imm_ORRI, TCG_TYPE_I64, xnf, xnf, PFP_FI);
-+}
-+
+ }
+ 
  static void tcg_out_ppc_fp32(TCGContext *s, const TCGArg *args)
- {
-     TCGReg xr = args[0], xnf = args[1];
-@@ -2025,13 +2063,60 @@
-     ta = pfp_scratch(&used);
-     t = pfp_scratch(&used);
+@@ -2195,18 +2233,77 @@
+         return;
+     }
  
 -    /* the gate: XX = 1, XE = OE = UE = 0 (and RN = 00 but for fcmpu) */
 +    /*
 +     * the gate: XX = 1, XE = OE = UE = 0 (and RN = 00 but for fcmpu, and
 +     * tcg/0037 fcmpo and fctiwz: FPI_NO_RN() of target/ppc/internal.h)
 +     */
-     tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP0,
--                 PFP_XX | PFP_TRAPS | (op == PFP_CMPU ? 0 : 3));
-+                 PFP_XX | PFP_TRAPS |
-+                 (op == PFP_CMPU || op == PFP_CMPO || op == PFP_FCTIWZ ? 0 : 3));
-     pfp_rrr(s, PFP_ANDX, bad, xf, TCG_REG_TMP0, 0);
-     tcg_out_logicali(s, Ilogic_imm_EORI, TCG_TYPE_I64, bad, bad, PFP_XX);
+     if (sel & PFP_K_G) {
+         tcg_out_movi(s, TCG_TYPE_I64, bad, 0);          /* tcg/0045 */
+     } else {
+         tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP0,
+-                     PFP_XX | PFP_TRAPS | (op == PFP_CMPU ? 0 : 3));
++                     PFP_XX | PFP_TRAPS |
++                     (op == PFP_CMPU || op == PFP_CMPO || op == PFP_FCTIWZ
++                      ? 0 : 3));
+         pfp_rrr(s, PFP_ANDX, bad, xf, TCG_REG_TMP0, 0);
+         tcg_out_logicali(s, Ilogic_imm_EORI, TCG_TYPE_I64, bad, bad, PFP_XX);
+     }
  
 -    if (op == PFP_CMPU) {
 +    if (op == PFP_FCTIW || op == PFP_FCTIWZ) {
-+        /*
+         /*
 +         * tcg/0037 (NOT RUN), fpi_fcti(): frB a double zero or normal
 +         * (fpi_zon64(), as the double forms of tcg/0016: no NaN, no
-+         * infinity, no denormal reaches the conversion); the 64-bit
-+         * conversion, to nearest even (fcvtns; the gate has RN = 00) or
-+         * toward zero (fcvtzs), must fit an int32: it then is the
-+         * sign-extended int32 the helpers return.  |x| >= 2^63 saturates to
-+         * INT64_MIN/MAX, never an int32.  FI = 1, FPRF untouched
-+         * (fpi_fpscr_op() of FPI_IS_CVT()).
++         * infinity, no denormal reaches the conversion; tcg/0045: not
++         * tested when known to be a float32 one); the 64-bit conversion, to
++         * nearest even (fcvtns; the gate has RN = 00) or toward zero
++         * (fcvtzs), must fit an int32: it then is the sign-extended int32
++         * the helpers return.  |x| >= 2^63 saturates to INT64_MIN/MAX, never
++         * an int32.  FI = 1, FPRF untouched (fpi_fpscr_op() of FPI_IS_CVT();
++         * tcg/0046: fprf_src untouched too, see the short path below).
 +         */
-+        k1 = pfp_scratch(&used);
-+        tcg_out_movi(s, TCG_TYPE_I64, k1, 1ull << 53);
-+        tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP1, 0x7feull << 53);
-+        pfp_zon64(s, bad, t, xb, k1, TCG_REG_TMP1, TCG_REG_TMP2);
++        if (!(sel & PFP_K_B)) {
++            k1 = pfp_scratch(&used);
++            tcg_out_movi(s, TCG_TYPE_I64, k1, 1ull << 53);
++            tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP1, 0x7feull << 53);
++            pfp_zon64(s, bad, t, xb, k1, TCG_REG_TMP1, TCG_REG_TMP2);
++        }
 +        pfp_fmov_dx(s, 0, xb);
 +        tcg_out32(s, (op == PFP_FCTIWZ ? PFP_FCVTZS_XD : PFP_FCVTNS_XD) |
 +                  0 << 5 | xr);
@@ -150,29 +173,38 @@ diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
 +         * tcg/0037 (NOT RUN), fpi_frsp(): t = |frB| << 1 zero, or in
 +         * [FPI_FRSP_LO, FPI_FRSP_HI) = [FLT_MIN << 1, (FLT_MAX + 1/2 ulp)
 +         * << 1): the test of pfp_zon64() with k1 = FPI_FRSP_LO and k2 =
-+         * FPI_FRSP_HI - FPI_FRSP_LO.  Then fcvt s, d (FPCR: to nearest,
-+         * no FZ, as tcg/0014 already assumes) and fcvt d, s; FPRF, FI.
++         * FPI_FRSP_HI - FPI_FRSP_LO (tcg/0045: a float32 zero or normal is
++         * in range, not tested).  Then fcvt s, d (FPCR: to nearest, no FZ,
++         * as tcg/0014 already assumes) and fcvt d, s; FPRF, FI.
 +         */
-+        k1 = pfp_scratch(&used);
 +        tr = pfp_scratch(&used);
-+        tcg_out_movi(s, TCG_TYPE_I64, k1, 0x381ull << 53);
-+        tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP1,
-+                     (0x47effffff0000000ull << 1) - (0x381ull << 53));
-+        pfp_zon64(s, bad, t, xb, k1, TCG_REG_TMP1, TCG_REG_TMP2);
++        if (!(sel & PFP_K_B)) {
++            k1 = pfp_scratch(&used);
++            tcg_out_movi(s, TCG_TYPE_I64, k1, 0x381ull << 53);
++            tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP1,
++                         (0x47effffff0000000ull << 1) - (0x381ull << 53));
++            pfp_zon64(s, bad, t, xb, k1, TCG_REG_TMP1, TCG_REG_TMP2);
++        }
 +        pfp_fmov_dx(s, 0, xb);
 +        pfp_fcvt_sd(s, 0, 0);
 +        pfp_fcvt_ds(s, 0, 0);
 +        pfp_fmov_xd(s, xr, 0);
-+        pfp_lsl(s, tr, xr, 1);
-+        pfp_fprf(s, xr, tr, xnf, xf);
++        if (lazy) {
++            /* tcg/0046: FPRF and FI from env->fprf_src (stored below) */
++            tcg_out_mov(s, TCG_TYPE_I64, xnf, xf);
++        } else {
++            pfp_lsl(s, tr, xr, 1);
++            pfp_fprf(s, xr, tr, xnf, xf);
++        }
 +    } else if (op == PFP_CMPU || op == PFP_CMPO) {
 +        /* tcg/0037: fcmpo without a NaN is fcmpu (same code as on x86_64) */
-         /*
++        /*
           * fpi_fcmpu(): no NaN (magnitude > 0x7ff0...), then a signed
           * comparison of sign-magnitude turned into two's complement.
-@@ -2061,11 +2146,13 @@
-         pfp_rrr(s, PFP_ORRX, xnf, xnf, xr, 12);
-         tcg_out_logicali(s, Ilogic_imm_ORRI, TCG_TYPE_I64, xnf, xnf, PFP_FI);
+          */
+@@ -2265,11 +2362,13 @@
+                              PFP_FI);
+         }
      } else {
 -        bool dbl = op >= PFP_D;
 -        unsigned base = dbl ? op - PFP_D : op;
@@ -187,19 +219,24 @@ diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
  
          k1 = pfp_scratch(&used);
          tr = pfp_scratch(&used);
-@@ -2096,6 +2183,11 @@
+@@ -2312,6 +2411,16 @@
                  pfp_zon(s, bad, tc, xc, k1, TCG_REG_TMP1, u);
              }
          }
 +        if (base == PFP_B_DIV) {
-+            /* tcg/0037: a zero divisor (t = frB << 1): ZX or VXZDZ, helpers */
++            /*
++             * tcg/0037: a zero divisor: ZX or VXZDZ, helpers.  t = frB << 1
++             * recomputed: with PFP_K_B (tcg/0045) pfp_zon() did not run, and
++             * a float32 "zero or normal" frB may be a zero
++             */
++            pfp_lsl(s, t, xb, 1);
 +            pfp_cmpi(s, t, 0);
 +            pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_NE);
 +        }
  
          /*
           * the operation, float32 as helper_fp32_fast() (fpi_fp32()), or
-@@ -2127,6 +2219,9 @@
+@@ -2343,6 +2452,9 @@
          case PFP_MUL:
              pfp_f3(s, PFP_FMULS | ft, 3, 0, 2);
              break;
@@ -209,7 +246,7 @@ diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
          case PFP_MADD:
              pfp_fmadd(s, 3, 0, 2, 1, dbl);              /* a * c + b */
              break;
-@@ -2165,9 +2260,14 @@
+@@ -2385,9 +2497,14 @@
                  pfp_cs(s, PFP_CSINC, bad, bad, bad, PFP_EQ);
              }
          } else {
@@ -226,9 +263,9 @@ diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
              pfp_cs(s, PFP_CSINC, t, TCG_REG_XZR, TCG_REG_XZR, PFP_NE);
              pfp_cmp(s, tr, k1);
              pfp_ccmp(s, tr, k3, 2, PFP_HI);
-@@ -2176,18 +2276,7 @@
+@@ -2401,18 +2518,7 @@
+             goto pfp_done;
          }
- 
          /* fpi_fpscr_arith(): FPRF of r (+-zero, +-normal), FI = 1 */
 -        pfp_lsr(s, TCG_REG_TMP0, xr, 63);                       /* neg */
 -        pfp_lsl(s, TCG_REG_TMP1, TCG_REG_TMP0, 4);
@@ -244,5 +281,21 @@ diff --git a/tcg/aarch64/tcg-target.c.inc b/tcg/aarch64/tcg-target.c.inc
 -        tcg_out_logicali(s, Ilogic_imm_ORRI, TCG_TYPE_I64, xnf, xnf, PFP_FI);
 +        pfp_fprf(s, xr, tr, xnf, xf);
      }
+  pfp_done:
  
-     /* any test failed: the helper, out of line */
+@@ -2432,9 +2538,12 @@
+     /* short path: soft-float exception flags = inexact (primed) */
+     tcg_out_movi(s, TCG_TYPE_I32, t, fst >> 32);
+     tcg_out_ldst(s, Ildst_imm_STRH, t, TCG_AREG0, (uint32_t)fst, 1);
+-    if (lazy) {
+-        /* tcg/0046: fprf_src = r, or PPC_FPRF_NONE after fcmpu */
+-        if (op == PFP_CMPU) {
++    if (lazy && op != PFP_FCTIW && op != PFP_FCTIWZ) {
++        /*
++         * tcg/0046: fprf_src = r, or PPC_FPRF_NONE after fcmpu (tcg/0037:
++         * and fcmpo; fctiw(z) leave it as it is, as on x86_64)
++         */
++        if (op == PFP_CMPU || op == PFP_CMPO) {
+             tcg_out_movi(s, TCG_TYPE_I64, t, 1);
+             tcg_out_st(s, TCG_TYPE_I64, t, TCG_AREG0, lofs);
+         } else {
