@@ -5461,6 +5461,14 @@ chemin complet (adresse hors de la page), soit 1,3 % (Marble Blast : 4,8 %).
 Gain modeste et répété sur DOOM 3, en accord avec −3,4 % d'instructions (§41.4) ; UT2004 dans le
 bruit. **Allumé par défaut sur Linux x86-64** (`TLBBASE=1`, 25/10).
 
+**Binaire quotidien reconstruit avec 0052** (`build-fast`, PGO pris sur les 4 jeux ; le premier
+entraînement avait perdu DOOM 3, replis à chaque image après la scène, il a été refait). Même séance,
+3 parties par binaire (`x86-3bin-d3`) : quotidien **79,0**, rapide de l'arbre 0051 sans 0052 79,7,
+rapide de l'arbre 0052 80,0. **Point de DOOM 3 au 25/10 au matin : 79,0 ms/image en fenêtre ;
+UT2004 41,0.** Piège : deux séries prises dans la foulée de l'entraînement PGO, invité redémarré,
+ont donné 87,5 puis 85,4 avec ce même binaire. Cause non établie ; ne pas mesurer juste après
+`pgo-train.sh` dans la même chaîne.
+
 ### 41.7 Ce qui reste ouvert
 
 - **Pendant arm64** : émetteur aarch64 écrit, compilé par le clang du NDK, encodages relus

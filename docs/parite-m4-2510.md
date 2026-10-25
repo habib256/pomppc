@@ -26,7 +26,7 @@ talon). **0037 doit donc passer avant**, c'est-à-dire la série 0031-0039.
 ## 2. L'ordre de la séance
 
 0. **Préparer.** Arrêter la VM quotidienne du M4, puis reconstruire `~/src/qemu` avec toute la
-   série (`scripts/build_qemu_qfb.sh` applique 0031-0051 et sonde chaque propriété). Garder le
+   série (`scripts/build_qemu_qfb.sh` applique 0031-0052 et sonde chaque propriété). Garder le
    binaire actuel pour l'A/B. Construire aussi le `qemu-ppc` linux-user de banc
    (`tools/tcg/fpnatcmp-userhack.py`, avec ses neutralisations pour 0031-0050). Préparer une copie
    du disque de dev.
@@ -40,8 +40,8 @@ talon). **0037 doit donc passer avant**, c'est-à-dire la série 0031-0039.
 4. **0051.** Lancer `fpproof` en variante LFSK, `lfskuser.sh` (2^32 mots), les mutants
    aarch64, puis une partie DOOM 3 vérifiée (`x-fp-verify`).
 5. **0052.** Lancer `tlbbproof`, le job `tlbbtest` (ref contre tlbb, même empreinte), `tlbbnu`, les mutants
-   aarch64, puis une partie vérifiée (`x-tlb-base-verify`). Rien à faire sur qemu-system-ppc64 :
-   0052 n'agit qu'avec `PPC32MT=1`, donc après l'étape 1.
+   aarch64, puis une partie vérifiée (`x-tlb-base-verify`). 0052 n'agit que sur qemu-system-ppc,
+   donc avec `PPC32MT=1` : il passe après l'étape 1.
 6. **0040-0043.** Vérificateurs et empreintes.
 7. **A/B en jeu**, VM quotidienne du M4 au repos :
    - d'abord la série entière contre le binaire actuel, sur DOOM 3, UT2004 et Marble Blast ;
@@ -68,6 +68,6 @@ suffit à elle-même.
 - Dépôt : `main` poussé. Les essais non fusionnés sont sous les étiquettes `archive/*` (plugin vers
   l'hôte, lot d3q, régions LLVM, 0053).
 - Défauts sur Linux x86-64 : ceux du 21/10, plus `PPC32MT`, `LFSKNOWN` et `TLBBASE`.
-- DOOM 3 sur le PC : 79,3 ms/image avec 0051, avant 0052. Le point avec 0052 est au §41.6 bis de
-  `docs/tcg-g4.md`.
+- DOOM 3 sur le PC : 79,0 ms/image en fenêtre (UT2004 41,0), binaire quotidien avec 0052 (§41.6 bis
+  de `docs/tcg-g4.md`).
 - Sur le M4, commencer par `git pull`, puis l'étape 0 ci-dessus.
