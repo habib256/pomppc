@@ -297,3 +297,19 @@ autant par `vcfsx`, rend exactement les résultats des helpers ; vérificateurs 
 **Mutant n° 20 : DÉTECTÉ** (40 divergences). Bilan des mutants de la série 0031-0039 :
 **21 sur 21**. (Le compteur « chemin court » de `vfp-native-cmp-verify` est une prédiction du
 vérificateur, pas le chemin pris : il ne change pas sous `x-vfp-native-cmp-slow`.)
+
+### 5.10 Matrice complète sous les nouveaux défauts (26/10, images vérifiées)
+
+Les A/B du §5.7 tournaient sans vidage : aucune image n'y était jugée. Tours complets de la
+matrice (`tools/matrice/matrice.py`, VM quotidienne, binaire `~/src/qemu`) :
+
+- `20261026-0713` (série allumée) : 15 cellules vertes, images justes (0,00 contre la VM et la
+  référence validée) ; **rouges : Colin McRae et Warcraft III en plein écran**.
+- Bissection (`bench/m4-ab-2510/wc3cmr.sh`) : avec les 14 leviers éteints, Colin McRae est vert,
+  Warcraft III reste rouge. **Colin McRae** : sa règle de fenêtre (`tools/matrice/jeux/cmr.py`)
+  exigeait plus de 15 ms/échange, la course tourne désormais à 12,8 (le jeu d'avant le départ à
+  6) : seuil abaissé à 10. **Warcraft III** : aucune image produite, leviers ou non — défaut
+  indépendant de la série, apparu après le 02/10 (dernier vert), diagnostic à part.
+- `20261026-0900`, après le correctif d'éclairage des spots du GL d'Apple
+  (`docs/re/ut2004-arme-noire.md`) : **16 cellules vertes sur 17 automatisées**, images justes
+  partout ; Colin McRae 38,8 ms/image (49,2 leviers éteints, −21 %) ; seul Warcraft III rouge.

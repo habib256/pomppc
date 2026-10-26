@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "qgpu-core.h"
+#include "qgpu-light.h"
 
 #if defined(__APPLE__)
 #  define QGPU_GL_CGL 1
@@ -190,6 +191,14 @@ typedef struct GlState {
     /* 30/09 (docs/backend-gl-attente.md) : glFlush à la fin de chaque
        soumission (QGPU_GL_FLUSH=1 ; éteint par défaut, voir gl_init). */
     bool       flush_end;
+    /* 26/10 (qgpu-light.h) : éclairage fixe calculé ici, par sommet, pour un
+       dessin qui allume une lumière spot — le GL d'Apple sur Metal y retranche
+       aux points hors du cône l'éclairage des autres lumières (UT2004).
+       QGPU_GL_CPULIGHT=0 rend ces dessins à l'hôte. `cl_buf` : couleur (4) +
+       secondaire (3) + bourrage par sommet, grandi à la demande. */
+    bool       cpu_light, cl_two_said;
+    GLfloat   *cl_buf;
+    uint32_t   cl_cap;
 } GlState;
 
 static bool gl_query_sync(QgpuCore *c);
@@ -1867,6 +1876,18 @@ static bool gl_init(QgpuCore *c)
             fprintf(stderr, "qgpu: QGPU_GL_FLUSH=1 : glFlush en fin de soumission\n");
         }
     }
+    /* 26/10 : éclairage des dessins à spot calculé ici (qgpu-light.h) sur le GL
+       d'Apple, dont l'éclairage fixe les assombrit à tort (docs/re/ut2004-arme-noire.md) ;
+       QGPU_GL_CPULIGHT=0/1 l'impose sur tout hôte. */
+    {
+        const char *e = getenv("QGPU_GL_CPULIGHT");
+        g->cpu_light = e ? strcmp(e, "0") != 0
+                         : (g->renderer && strstr(g->renderer, "Apple") != NULL);
+        if (g->cpu_light) {
+            fprintf(stderr, "qgpu: backend gl : éclairage des dessins à spot calculé "
+                    "par le device (%s)\n", g->renderer ? g->renderer : "?");
+        }
+    }
     if (c->trace) {
         fprintf(stderr, "qgpu: backend gl : %s / %s (fbo %s, rectangle %s)\n",
                 g->renderer ? g->renderer : "?",
@@ -1934,6 +1955,7 @@ static void gl_fini(QgpuCore *c)
 #endif
     free(g->glsl_fbuf);
     free(g->glsl_ibuf);
+    free(g->cl_buf);
     free(g);
     c->be_priv = NULL;
 }
@@ -3289,6 +3311,66 @@ static bool gl_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
         glEnable(GL_COLOR_SUM);
     } else {
         glDisable(GL_COLOR_SUM);
+    }
+    /* 26/10 : éclairage fixe d'un dessin à spot calculé ici (qgpu-light.h, la
+       formule du backend soft), l'hôte dessinant éclairage éteint avec ces
+       couleurs : le GL d'Apple sur Metal, dès qu'une lumière spot est allumée,
+       retire aux points hors de son cône l'éclairage des AUTRES lumières
+       (UT2004 : cargaison du convoi et présentoirs d'armes noirs,
+       docs/re/ut2004-arme-noire.md). Ni programme ni GLSL (ils éclairent
+       eux-mêmes) ; l'éclairage des deux faces reste à l'hôte, qui ne saurait
+       plus choisir la couleur de la face arrière. Le texgen, le brouillard et
+       les unités ne dépendent pas de l'éclairage : ils restent à l'hôte. */
+    if (g->cpu_light && st->v[QGPU_SK_LIGHTING] && !vp && !gp) {
+        bool spot = false;
+        for (u = 0; u < QGPU_MAX_LIGHTS; u++) {
+            spot |= gm->light[u].enabled && gm->light[u].spot_cutoff != 180.0f;
+        }
+        if (spot && st->v[QGPU_SK_TWO_SIDE]) {
+            if (!g->cl_two_said) {
+                g->cl_two_said = true;
+                fprintf(stderr, "qgpu: lumière spot sous éclairage des deux faces : "
+                        "laissée à l'hôte (rendu possiblement assombri)\n");
+            }
+            spot = false;
+        }
+        if (spot && nverts > g->cl_cap) {
+            GLfloat *nb = realloc(g->cl_buf, (size_t)nverts * 8 * sizeof(GLfloat));
+            if (nb) {
+                g->cl_buf = nb;
+                g->cl_cap = nverts;
+            } else {
+                spot = false;
+            }
+        }
+        if (spot) {
+            QgpuLightCfg L;
+            uint32_t pos_n = QGPU_VF_POS_COUNT(fmt), i;
+            ql_cfg(&L, st, gm);
+            for (i = 0; i < nverts; i++) {
+                const float *src = verts + (size_t)i * words;
+                float obj[4], eye[4], neye[3];
+                obj[0] = src[0];
+                obj[1] = src[1];
+                obj[2] = pos_n >= 3 ? src[2] : 0.0f;
+                obj[3] = pos_n >= 4 ? src[3] : 1.0f;
+                ql_mat_vec4(gm->mtx[QGPU_MTX_MODELVIEW], obj, eye);
+                ql_normal(&L, off_n >= 0 ? src + off_n : gm->cur_normal, neye);
+                ql_face(&L, eye, neye, off_c >= 0 ? src + off_c : gm->cur_color, 0,
+                        g->cl_buf + (size_t)i * 8, g->cl_buf + (size_t)i * 8 + 4);
+            }
+            glDisable(GL_LIGHTING);
+            glEnableClientState(GL_COLOR_ARRAY);
+            glColorPointer(4, GL_FLOAT, 8 * sizeof(GLfloat), g->cl_buf);
+            glEnableClientState(GL_SECONDARY_COLOR_ARRAY);
+            g->SecondaryColorPointer(3, GL_FLOAT, 8 * sizeof(GLfloat), g->cl_buf + 4);
+            /* éclairage allumé, GL ajoute la spéculaire séparée ; éteint, COLOR_SUM le fait */
+            if (L.sep_spec) {
+                glEnable(GL_COLOR_SUM);
+            } else {
+                glDisable(GL_COLOR_SUM);
+            }
+        }
     }
     /* v10 : paramètres de point (le cœur a refusé tout autre réglage que
        l'initial si l'hôte ne les a pas) */

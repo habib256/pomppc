@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "qgpu-core.h"
+#include "qgpu-light.h"
 
 /* v7 : format de sommet INTERNE du chemin brut. C'est celui du protocole
    (8 mots + 4 par unité de texture) allongé de trois mots de couleur
@@ -1464,6 +1465,7 @@ typedef struct Geo {
     int      sec_off;          /* mot de la couleur secondaire, ou -1 */
     float    vx, vy, vw, vh, dn, df;
     SoftAux  aux;              /* v8 : pointillés et requête d'occlusion */
+    QgpuLightCfg lc;           /* éclairage (qgpu-light.h) */
 } Geo;
 
 /* m est en ORDRE COLONNE : m[4c + r] est la ligne r, colonne c. */
@@ -1527,109 +1529,12 @@ static void xform_normal(const float *inv3, const float *n, float *o)
     o[2] = inv3[2] * n[0] + inv3[5] * n[1] + inv3[8] * n[2];
 }
 
-/* Éclairage d'OpenGL 1.x, formule de la spécification, pour UNE face.
-   `nrm` est déjà retournée quand on éclaire la face arrière. */
+/* Éclairage d'OpenGL 1.x pour UNE face : qgpu-light.h (commun au backend gl
+   depuis le 26/10/2026). `nrm` est déjà retournée quand on éclaire la face arrière. */
 static void light_face(const Geo *G, const float *eye, const float *nrm,
                        const float *vcol, int face, float *col, float *sec)
 {
-    const QgpuGeom *gm = G->gm;
-    const QgpuMaterial *m = &gm->mat[face];
-    float amb[4], dif[4], spc[4], emi[4], shin = m->shininess;
-    float acc[3], sacc[3];
-    float pe[3], vpe[3];
-    bool cm = G->color_material && (face == 0 ? G->cm_front : G->cm_back);
-    int i, k;
-
-    memcpy(amb, m->ambient, sizeof(amb));
-    memcpy(dif, m->diffuse, sizeof(dif));
-    memcpy(spc, m->specular, sizeof(spc));
-    memcpy(emi, m->emission, sizeof(emi));
-    if (cm) {
-        switch (G->cm_mode) {
-        case 0x1600: memcpy(emi, vcol, sizeof(emi)); break;      /* GL_EMISSION */
-        case 0x1200: memcpy(amb, vcol, sizeof(amb)); break;      /* GL_AMBIENT */
-        case 0x1201: memcpy(dif, vcol, sizeof(dif)); break;      /* GL_DIFFUSE */
-        case 0x1202: memcpy(spc, vcol, sizeof(spc)); break;      /* GL_SPECULAR */
-        default:                                                 /* AMBIENT_AND_DIFFUSE */
-            memcpy(amb, vcol, sizeof(amb));
-            memcpy(dif, vcol, sizeof(dif));
-            break;
-        }
-    }
-    for (k = 0; k < 3; k++) {
-        pe[k] = (eye[3] != 0.0f) ? eye[k] / eye[3] : eye[k];
-        acc[k] = emi[k] + amb[k] * gm->lm_ambient[k];
-        sacc[k] = 0.0f;
-    }
-    if (G->local_viewer) {
-        vpe[0] = -pe[0]; vpe[1] = -pe[1]; vpe[2] = -pe[2];
-        vnorm3(vpe);
-    } else {
-        vpe[0] = 0.0f; vpe[1] = 0.0f; vpe[2] = 1.0f;
-    }
-    for (i = 0; i < QGPU_MAX_LIGHTS; i++) {
-        const QgpuLight *l = &gm->light[i];
-        float vp[3], att = 1.0f, spot = 1.0f, ndotvp, f;
-        if (!l->enabled) {
-            continue;
-        }
-        if (l->position[3] != 0.0f) {
-            float d, den;
-            for (k = 0; k < 3; k++) {
-                vp[k] = l->position[k] / l->position[3] - pe[k];
-            }
-            d = sqrtf(vdot3(vp, vp));
-            if (d > 0.0f) {
-                vp[0] /= d; vp[1] /= d; vp[2] /= d;
-            }
-            den = l->att[0] + l->att[1] * d + l->att[2] * d * d;
-            att = (den > 0.0f) ? 1.0f / den : 1.0f;
-            if (l->spot_cutoff != 180.0f) {
-                float sd[3], cosang;
-                memcpy(sd, l->spot_dir, sizeof(sd));
-                vnorm3(sd);
-                /* angle entre la direction lumière → sommet et l'axe du spot */
-                cosang = -vdot3(vp, sd);
-                if (cosang <= 0.0f ||
-                    cosang < cosf(l->spot_cutoff * 3.14159265358979f / 180.0f)) {
-                    spot = 0.0f;
-                } else {
-                    spot = powf(cosang, l->spot_exp);
-                }
-            }
-        } else {
-            memcpy(vp, l->position, 3 * sizeof(float));
-            vnorm3(vp);                       /* lumière directionnelle */
-        }
-        f = att * spot;
-        for (k = 0; k < 3; k++) {
-            acc[k] += f * amb[k] * l->ambient[k];
-        }
-        ndotvp = vdot3(nrm, vp);
-        if (ndotvp > 0.0f) {
-            float h[3], ndoth, sf;
-            for (k = 0; k < 3; k++) {
-                acc[k] += f * ndotvp * dif[k] * l->diffuse[k];
-                h[k] = vp[k] + vpe[k];
-            }
-            vnorm3(h);
-            ndoth = vdot3(nrm, h);
-            sf = (ndoth > 0.0f) ? powf(ndoth, shin) : 0.0f;
-            for (k = 0; k < 3; k++) {
-                float v = f * sf * spc[k] * l->specular[k];
-                if (G->sep_spec) {
-                    sacc[k] += v;
-                } else {
-                    acc[k] += v;
-                }
-            }
-        }
-    }
-    for (k = 0; k < 3; k++) {
-        col[k] = clamp01(acc[k]);
-        sec[k] = clamp01(sacc[k]);
-    }
-    col[3] = clamp01(dif[3]);                 /* GL : l'alpha vient de la diffuse */
+    ql_face(&G->lc, eye, nrm, vcol, face, col, sec);
 }
 
 /* Génération des coordonnées d'une unité, les cinq modes d'OpenGL 1.3. */
@@ -2170,6 +2075,7 @@ static bool soft_draw_raw(QgpuCore *c, QgpuSurface *s, const QgpuState *st,
     G.cm_back = st->v[QGPU_SK_COLOR_MAT_FACE] != 0x0404;       /* pas GL_FRONT seul */
     G.cm_mode = st->v[QGPU_SK_COLOR_MAT_MODE];
     G.fog_mode = st->v[QGPU_SK_FOG_MODE];
+    ql_cfg(&G.lc, st, gm);
     G.flat = st->v[QGPU_SK_SHADE_MODEL] == 0x1D00;
     /* La couleur secondaire ne coûte son étage que si elle peut être non nulle :
        spéculaire séparée de l'éclairage (toujours ajoutée), ou GL_COLOR_SUM

@@ -80,10 +80,16 @@ def echantillon(dt):
     t1, p1, w1 = total(), procs(), time.time()
     el = w1 - w0
     tot = (t1 - t0) / el
+    if not PROC:
+        # macOS : la différence des sommes perd les processus morts entre les deux
+        # relevés (total négatif) ; seuls ceux présents aux deux comptent
+        tot = 0.0
     q = 0.0; autres = []
     for pid, (c, t) in p1.items():
         if pid in p0 and p0[pid][0] == c:
-            x = (t - p0[pid][1]) / el
+            x = max(0.0, (t - p0[pid][1]) / el)
+            if not PROC:
+                tot += x
             if c.startswith("qemu-system"):
                 q += x
             elif x > 0.02:
