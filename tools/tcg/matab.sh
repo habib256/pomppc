@@ -56,16 +56,18 @@ wait_ssh() {
   return 1
 }
 
-start_vm() { # start_vm JOURNAL [VAR=v …]
+start_vm() { # start_vm JOURNAL [VAR=v …]  (les parties : fenêtre QEMU native, comme la matrice)
   local log=$1; shift
-  ( cd "$R" && env POMPPC_FRONTEND=native "$@" nohup ./run_tiger.sh > "$log" 2>&1 & )
+  ( cd "$R" && env POMPPC_FRONTEND="${MATAB_FRONTEND:-native}" "$@" nohup ./run_tiger.sh > "$log" 2>&1 & )
   sleep 20
   wait_ssh || { python3 "$WT/tools/tcg/hmp.py" "$(mon)" system_reset >/dev/null 2>&1; wait_ssh; }
 }
 
 if [ "${1:-}" = "--restore" ]; then
   stop_vm
-  start_vm "$R/.run/run_tiger-zen.log" && echo "VM quotidienne relancée (binaire par défaut du lanceur)"
+  # rendue comme ./run_tiger.sh la lance : ImGuiDock (demande de l'utilisateur, 26/10)
+  MATAB_FRONTEND=imgui start_vm "$R/.run/run_tiger-zen.log" &&
+    echo "VM quotidienne relancée dans ImGuiDock (binaire et défauts du lanceur)"
   exit 0
 fi
 
