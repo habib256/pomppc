@@ -1422,7 +1422,8 @@ if [ "$BDIR" != build ]; then
       *,pgo,*|*,pgo-gen,*) echo "pgo_dir=$PGO_DIR"
                            echo "gcda=$(find "$PGO_DIR" -maxdepth 1 -name '*.gcda' 2>/dev/null | wc -l)" ;;
     esac
-    echo "cpu=$(sed -n 's/^model name[[:space:]]*: *//p' /proc/cpuinfo 2>/dev/null | head -1)"
+    echo "cpu=$({ sed -n 's/^model name[[:space:]]*: *//p' /proc/cpuinfo 2>/dev/null
+                 sysctl -n machdep.cpu.brand_string 2>/dev/null; } | head -1)"
     echo "march=$(${CC:-cc} -march=native -Q --help=target 2>/dev/null | awk '$1=="-march=" {print $2; exit}')"
     echo "serie=$(pomppc_serie_hash "$ROOT/patches")"
     echo "pomppc=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)"

@@ -189,3 +189,92 @@ Vérificateurs (premier passage, hors `fdiv(s)`) : `x-tlb-base-verify` **31,4 G 
 Après correction (`bench/ppc32mt/m4-fpk-ver2/`) : `x-fp-verify` **60,2 G opérations, 0 divergence**
 (dont `lfs` 17,2 G, `frsp` 8,6 G, `fdivs` 1,15 M, `fdiv` 3,23 M) ; `x-tlb-base-verify` **31,4 G
 chargements couverts, 0 divergence**.
+
+### 5.5 Mutants des émetteurs aarch64 de 0045-0052
+
+`tools/tcg/m4-fpk-mut.sh` (nouveau ; pendant M4 de `mut.sh`, `lfsk-mut.py`, `tlbb-mut.py` du PC) :
+une mutation d'une ligne à la fois dans `~/src/qemu-arm64-mut`, reconstruite, un démarrage SMP=2
+MTTCG leviers **et** vérificateurs allumés, `fptest k 1024`, `c 16384`, `l` sur
+[0x7f000000, 0x80800000) (exposants 254-255, −0, dénormaux négatifs), `tlbbtest 2000` ;
+détecté si une sortie diffère de la référence non mutée ou si un vérificateur diverge.
+Bilan `bench/m4-fpk-mut/2510/bilan.txt` : **13 détectés sur 14**.
+
+| n° | mutant | détecté par |
+|---|---|---|
+| 1-5 | 0045 : porte jamais testée ; frA, frB jamais testés ; somme minuscule acceptée ; NaN de frA de `fcmpu` | empreintes `k` (et `c`), vérificateur (sauf n° 4 : `k` seul, `stfs` court — le « mutant équivalent sous 0045 seule » du PC) |
+| 6-8 | 0046 : `fprf_src` jamais rangé ; `fcmpu` sans `NONE` ; `fctiw(z)` qui écrase `fprf_src` | `k`, `c` (et `l` pour le n° 6), vérificateur |
+| 9 | la correction de 0037 retirée | vérificateur (22 lignes ; `k 1024` trop court pour l'empreinte, `k 4096` l'avait vu, §5.4) |
+| 10-11 | 0051 : exposant 255 pris pour normal ; `ccmp` sur la mauvaise condition | toutes les sorties, vérificateur |
+| 12 | 0052 : borne de page d'un octet de trop | toutes les sorties |
+| 13 | 0052 : comparaison signée | l'invité ne démarre plus (vCPU dans une boucle du code généré ; piles `mut13-sample.txt`), arrêté au bout d'1 h |
+| 14 | 0052 : index de 64 bits au lieu de 32 | **non détecté : équivalent en pratique sur arm64** — toute op 32 bits y écrit un registre `w`, ce qui met à zéro les 32 bits hauts : l'adresse invitée arrive toujours étendue par des zéros. L'extension explicite reste juste par construction (elle protège d'un producteur 64 bits futur) |
+
+### 5.6 Étape 6 (0040-0043), démarrages et partie DOOM 3 vérifiée : configuration candidate entière
+
+Binaire quotidien `~/src/qemu` reconstruit avec 0037-0039 (`build_qemu_qfb.sh` les pose désormais
+après 0052 ; émetteur aarch64 identique à celui des preuves). Configuration candidate = défauts
+actuels du M4 + `PPC32MT TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIRTYSKIP
+PTEGMAP JC2WAY FPKNOWN FPRFLAZY STFSKNOWN LFSKNOWN TLBBASE` (`bench/m4-ab-2510/chaine.sh`).
+
+- **Suite JIT, VM de dev, sous tous les vérificateurs** (`bench/ppc32mt/m4-final-ver/`) : empreintes
+  du §5.2, `atomtest` exact, **aucune divergence** (`tlb-base` 1,55 G chargements, `lmw-inline`,
+  `dcbz-inline`, `tlb-precise`, `fp-native`, `vmx`, `tb`, `ret` ; `x-jc-2way` : 79 M blocs trouvés
+  dans la seconde voie).
+- **20 démarrages du bureau** au calme (`m4-final-p32`) : **20 ok sur 20** (4 froids, 16 reboots,
+  bureau en 76-78 s par reboot). L'incident du §5.2, pris sous charge ~96, ne s'est pas reproduit.
+- **Partie DOOM 3 vérifiée** (VM quotidienne, `bench/tcg/ab/m4-final-verif/`, 292,7 ms/image sous les
+  vérificateurs) : `x-fp-verify` **39,6 G opérations, 0 divergence** (dont 21,0 G `lfs`) ;
+  `x-tlb-base-verify` **18,7 G chargements couverts, 0** ; `x-pteg-map-verify` 1,25 G recherches,
+  0 (2 courses) ; `x-dirty-skip-verify` 89 088 contrôles, 0 ; `x-tlb-precise-verify` 1,22 G accès
+  retraduits, 0 (67 suspects, tous résolus) ; `x-ret-verify` 10,8 G en ligne : **une seule
+  divergence, la classe du §35 de `tcg-g4.md`** (au démarrage, cpu 0, `mmu_idx` 1, `pc 0xfff1dd28`
+  dans OpenBIOS, comptée aussi « sans traduction » : OpenBIOS évince une PTE sans `tlbie`, que
+  `x-tlb-precise` ne voit pas ; le PC en a 14 de la même classe). `x-fp-known` 142 M sorties de
+  bloc, `x-lfs-known` 1,3 M mots hors ligne.
+
+### 5.7 A/B en jeu : la série entière contre les défauts d'avant
+
+VM quotidienne, fenêtre, binaire quotidien `~/src/qemu` (même binaire des deux côtés), 6 parties par
+bras entrelacées (`tools/tcg/matab.sh`), **hôte au repos** : chaque partie attend
+`tools/tcg/chargehote.py attendre` (porté sur macOS : temps CPU des processus par `ps`, faute de
+`/proc`). Bras `ref` = défauts d'avant (`VFPNATIVE LMWVEC JCWORD`), bras `tout` = la configuration
+candidate du §5.6.
+
+| jeu | ref (ms/image, min..max) | tout | écart | |
+|---|---|---|---|---|
+| DOOM 3 (`m4-serie-d3b`) | 42,3 (41,8..42,5) | **32,2** (31,8..32,3) | **−23,9 %** | les 6 `tout` sous les 6 `ref` |
+| UT2004 (`m4-serie-ut`) | 25,0 (24,7..25,4) | **20,3** (19,9..20,7) | **−18,6 %** | idem |
+| Marble Blast (`m4-serie-mb`) | 8,8 (8,8..9,5) | **6,8** (6,7..7,1) | **−22,7 %** | idem |
+
+(Verdicts « rouges » partout : tour sans vidage, l'image n'est pas comparée ; vitesse et replis
+seulement.) Gain plus fort que la somme du PC (§1) : sur le M4, les leviers partaient tous éteints.
+
+**Premier passage DOOM 3 invalide** (`m4-serie-d3`, « −58,6 % », 17,5 ms/image à dispersion nulle) :
+la règle de fenêtre de `tools/matrice/jeux/d3.py` (`fin_cinematique`) lit le niveau du jeu sur les
+400 dernières images à partir de l'image 5000. La cinématique tourne au plafond du moteur
+(~17,5 ms/image) ; avec la série, le chargement plus court a poussé le début du niveau au-delà de
+l'image 5000, les 400 images lues étaient encore dans la cinématique, la fenêtre y est tombée et la
+partie s'est arrêtée avant le niveau. Règle durcie : le niveau doit être au moins 1,25 fois plus lent
+que la cinématique (images 1500..2100), sinon on attend ; rejouée sur les parties enregistrées, elle
+redonne la fenêtre de `ref` (T = 4661) et n'en trouve plus dans la cinématique de `tout`.
+
+### 5.8 Défauts sur `Darwin:arm64` (26/10)
+
+**Allumés** dans `run_tiger.sh` : `PPC32MT TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP
+DIRTYSKIP PTEGMAP JC2WAY FPKNOWN FPRFLAZY STFSKNOWN LFSKNOWN TLBBASE` (chacun surchargeable à 0),
+en plus de `VFPNATIVE LMWVEC JCWORD`. Les deux hôtes ont désormais les mêmes défauts, sauf
+`JITREL32` (propre à x86-64). **Garde** : sans tcg/0037-0039 dans le binaire (sondé par
+`x-lmw-inline-max`, que 0039 apporte avec eux), ces défauts tourneraient sur arm64 sans l'émetteur
+de 0033, combinaison jamais éprouvée : le lanceur les laisse alors éteints et demande de
+reconstruire (seules les variables allumées par défaut, jamais un réglage explicite).
+
+Non fait, et pourquoi :
+- **binaire rapide (PGO)** : `build-fast` n'est choisi que sur Linux x86-64 (`scripts/qemu_fast.sh`) ;
+  le M4 tourne sur le binaire de référence, il n'y a rien à reconstruire ici ;
+- **0053** : non fusionné (rien à faire, §1) ;
+- le **trou de couverture** du talon de `vcf*` (§5.3) reste ouvert sur les deux hôtes.
+
+Rangements faits en passant : `tools/tcg/a64syntax.sh` et `tools/tcg/m4-fpk-mut.sh` ne passaient
+pas `bash -n` avec le bash 3.2 de macOS (une apostrophe dans un heredoc placé dans `$(…)`, ou dans
+`${…:?…}`) ; `tests/tiger_launcher_test.py` connaît les nouveaux défauts et ne bute plus sur le
+processeur de l'hôte sous macOS (`pomppc_fast_cpu` lit `sysctl`). `tests/run-all.sh` : 283 OK, 0 échec.

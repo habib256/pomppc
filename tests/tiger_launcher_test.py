@@ -10,10 +10,13 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 OPTS = "FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JCBITS JITNEAR QGPU_GPU_COPY QGPU_GLSL".split()
-# Défauts propres à l'hôte (docs/vitesse-doom3-x86.md §13, docs/jit-m4-2026-10-05.md).
-HOSTOPTS = "VFPNATIVE TLBPRECISE LMWINLINE DCBZINLINE JITREL32 FPNATIVECMP VFPNATIVECMP LMWVEC JCWORD".split()
+# Défauts propres à l'hôte (docs/vitesse-doom3-x86.md §13, docs/jit-m4-2026-10-05.md ; série du
+# PC sur le M4 depuis le 26/10, docs/parite-m4-2510.md : tout sauf JITREL32).
+HOSTOPTS = ("VFPNATIVE TLBPRECISE LMWINLINE DCBZINLINE JITREL32 FPNATIVECMP VFPNATIVECMP LMWVEC JCWORD "
+            "DIRTYSKIP PTEGMAP JC2WAY FPKNOWN FPRFLAZY STFSKNOWN PPC32MT LFSKNOWN TLBBASE").split()
 HOST = "%s:%s" % (os.uname().sysname, os.uname().machine)
-HOSTON = {"Linux:x86_64": HOSTOPTS, "Darwin:arm64": ["VFPNATIVE", "LMWVEC", "JCWORD"]}.get(HOST, [])
+HOSTON = {"Linux:x86_64": HOSTOPTS,
+          "Darwin:arm64": [k for k in HOSTOPTS if k != "JITREL32"]}.get(HOST, [])
 with tempfile.TemporaryDirectory(prefix="tiger launcher ") as tmp:
     root = Path(tmp)
     for name in ("run_tiger.sh", "run_frontend.sh"):

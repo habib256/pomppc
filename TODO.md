@@ -106,24 +106,20 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 
 Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête.
 
-- [ ] **[TCG — M4] Séance de parité du 25/10 au soir** (`docs/parite-m4-2510.md`) : 0049-0050
-  (MTTCG 32 bits), série 0031-0039, 0045-0047, 0051, 0052, 0040-0043, dans cet ordre, puis A/B
-  et défauts sur `Darwin:arm64`. Sur le PC, tout cela est prouvé et allumé : 0040-0047 le 20-21/10,
-  0049-0050 le 23/10, 0051 le 24/10 (DOOM 3 à 79,3 ms/image).
+- [x] **[TCG — M4] Séance de parité du 25-26/10** (`docs/parite-m4-2510.md` §5) : 0049-0050, série
+  0031-0039, 0045-0047, 0051, 0052, 0040-0043 prouvés sur le M4 au niveau du PC (disque de dev
+  10.4.11), **tous allumés sur `Darwin:arm64`** après A/B, hôte au repos : DOOM 3 −23,9 %
+  (42,3 → 32,2 ms/image), UT2004 −18,6 %, Marble Blast −22,7 %. **0037 corrigé** en route (diviseur
+  nul sous `PFP_K_B`) ; 0037-0039 posés par `build_qemu_qfb.sh` après 0052. Restent ouverts : le
+  talon de `vcf*` jamais couvert (§5.3, les deux hôtes) ; le mutant n° 14 de 0052, équivalent sur
+  arm64 (§5.5).
 - [x] **[TCG — PC] 0052 TLB par base, 0053 AltiVec flottant connu** (25/10) : 0052 fusionné et
   allumé (DOOM 3 −2,2 %) ; 0053 juste mais neutre en jeu, non fusionné (`archive/0053-vfp-known`).
   Rangements de 0052 (piste par compteur de génération, §41.7) : ouvert.
 
-- [ ] **[TCG — M4] Parité arm64 de 0031-0035** : `x-tlb-precise`, `x-lmw-inline`,
-  `x-dcbz-inline` (0031, 0032, 0035) et les émetteurs aarch64 de `x-fp-native-cmp` /
-  `x-vfp-native-cmp` (0033-0034, sans effet sur arm64 aujourd'hui) : preuves au même niveau
-  que sur le PC (vérificateurs, mutants, empreintes invité), puis A/B DOOM 3, Marble Blast,
-  UT2004 sur le M4 avant de les allumer là-bas (règle de parité des hôtes). **Préparé sur le
-  PC le 06/10** (`docs/parite-arm64-0031-0035.md`) : 0031, 0032, 0035 sont génériques ; émetteurs
-  aarch64 écrits en `tcg/0037` (0033) et `0038` (0034), `0039` ajoute `x-lmw-inline-max` — encodages
-  et modèle NEON vérifiés avec le clang du NDK, **émetteur jamais exécuté, rien de prouvé** ; hors
-  du build tant que le M4 n'a pas passé `tools/tcg/m4-serie-0031-0035-proofs.sh`
-  (`prep`, `host`, `guest`, `mut`) puis l'A/B (§5 de la doc).
+- [x] **[TCG — M4] Parité arm64 de 0031-0035** : faite le 25/10 (`docs/parite-m4-2510.md` §5.3) ;
+  `m4-serie-0031-0035-proofs.sh` `host`, `guest`, `mut` sur une copie de l'arbre (`prep` est caduc :
+  `build_qemu_qfb.sh` pose désormais 0037-0039 lui-même).
 
 - [ ] **[TCG — M4] Finir la matrice du 06/10** : sept cellules terminées,
   six vertes, images toutes justes ; campagne arrêtée sur demande.

@@ -159,7 +159,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Depuis le 20/10/2026 (docs/tcg-g4.md §36-§39, hôte au repos, binaire -O2 des deux
 # côtés) : DIRTYSKIP PTEGMAP JC2WAY (tcg/0040, 0041, 0043 : DOOM 3 −4,4 %) et
 # FPKNOWN FPRFLAZY STFSKNOWN (tcg/0045-0047 : DOOM 3 −6,3 %), sur Linux x86-64 seul :
-# l'émetteur aarch64 de 0045-0047 n'a jamais tourné, 0040-0043 restent à prouver sur le M4.
+# sur le M4 aussi depuis le 26/10 (Darwin:arm64 ci-dessous, docs/parite-m4-2510.md).
 for _opt in FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JITNEAR FPNATIVE TBFAST FPNATIVE64 VMXINLINE; do
   export "$_opt=${!_opt:-1}"
 done
@@ -172,19 +172,30 @@ case "$(uname -s):$(uname -m)" in
            FPKNOWN="${FPKNOWN:-1}" FPRFLAZY="${FPRFLAZY:-1}" STFSKNOWN="${STFSKNOWN:-1}"
     # Depuis le 23/10/2026 (docs/ppc32-mttcg.md §13) : SMP sur qemu-system-ppc en MTTCG
     # (tcg/0050) au lieu de ppc64 — binaires rapides, DOOM 3 −7,7 %, UT2004 −5 %, mb −7 %,
-    # zen −6 % ; sondé, repli sur ppc64 si le binaire n'a pas le patch. Pas encore sur le M4.
+    # zen −6 % ; sondé, repli sur ppc64 si le binaire n'a pas le patch. Sur le M4 depuis le 26/10.
     export PPC32MT="${PPC32MT:-1}"
     # Depuis le 24/10/2026 (docs/tcg-g4.md §40) : LFSKNOWN (tcg/0051, lfs producteur de
     # x-fp-known) — partie DOOM 3 vérifiée 0 divergence, DOOM 3 −9,5 %, UT2004 −2 %.
-    # L'émetteur aarch64 n'a jamais tourné : pas encore sur le M4.
+    # Émetteur aarch64 prouvé le 25/10 : sur le M4 aussi depuis le 26/10.
     export LFSKNOWN="${LFSKNOWN:-1}"
     # Depuis le 25/10/2026 (docs/tcg-g4.md §41.6 bis) : TLBBASE (tcg/0052, TLB vérifié une fois
     # par base de chargement et par bloc ; qemu-system-ppc seul) — partie DOOM 3 vérifiée
-    # 0 divergence, DOOM 3 −2,2 % (rapide). Émetteur aarch64 jamais exécuté : pas sur le M4.
+    # 0 divergence, DOOM 3 −2,2 % (rapide). Sur le M4 depuis le 26/10.
     export TLBBASE="${TLBBASE:-1}"
     ;;
   Darwin:arm64)
     export VFPNATIVE="${VFPNATIVE:-1}" LMWVEC="${LMWVEC:-1}" JCWORD="${JCWORD:-1}"
+    # Depuis le 26/10/2026 (parité M4, docs/parite-m4-2510.md §5) : la série du PC, prouvée sur
+    # le M4 au même niveau (vérificateurs, mutants des émetteurs aarch64, empreintes invitées,
+    # partie DOOM 3 vérifiée) puis A/B en jeu, hôte au repos, 6 parties par bras : DOOM 3 −23,9 %,
+    # UT2004 −18,6 %, Marble Blast −22,7 %. Exige tcg/0037-0039 dans le binaire : sondé plus bas
+    # (_M4_AUTO : les variables allumées ici faute de réglage explicite, seules éteintes si le
+    # binaire est antérieur à 0037).
+    _M4_AUTO=""
+    for _v in PPC32MT TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIRTYSKIP PTEGMAP \
+              JC2WAY FPKNOWN FPRFLAZY STFSKNOWN LFSKNOWN TLBBASE; do
+      [ -n "${!_v:-}" ] || { export "$_v=1"; _M4_AUTO="$_M4_AUTO $_v"; }
+    done
     ;;
 esac
 # x-jc-bits (tcg/0011) : 2^14 entrées de cache de sauts (12 = QEMU d'origine).
@@ -252,6 +263,14 @@ UNI_OBIOS="$ROOT/patches/smp-mac99/openbios-smp-screamer.elf"
 # complet ; QEMU_FAST=0 force la référence, QEMU_BIN=… prime. docs/binaire-rapide-x86.md
 source "$ROOT/scripts/qemu_fast.sh"
 pomppc_pick_qemu "$SMP_N" || exit 1
+# Parité M4 (docs/parite-m4-2510.md) : sans tcg/0037-0039, x-fp-known et la suite tourneraient
+# sur arm64 sans l'émetteur de 0033, combinaison jamais éprouvée. x-lmw-inline-max (0039,
+# posé avec 0037-0038 par build_qemu_qfb.sh) en est le témoin dans le binaire.
+if [ -n "${_M4_AUTO:-}" ] && ! qemu_cpu_has_prop "$QEMU_BIN" "$MACHINE" g4 "x-lmw-inline-max=8"; then
+  echo "⚠  $QEMU_BIN est antérieur à tcg/0037-0039 (parité M4) : série du 26/10 laissée éteinte" >&2
+  echo "   (reconstruire : ./scripts/build_qemu_qfb.sh)." >&2
+  for _v in $_M4_AUTO; do export "$_v=0"; done
+fi
 QEMU_BIN64="${QEMU_BIN}64"                # qemu-system-ppc -> qemu-system-ppc64
 
 # --- Verrou disque ---
