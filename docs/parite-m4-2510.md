@@ -278,3 +278,22 @@ Rangements faits en passant : `tools/tcg/a64syntax.sh` et `tools/tcg/m4-fpk-mut.
 pas `bash -n` avec le bash 3.2 de macOS (une apostrophe dans un heredoc placé dans `$(…)`, ou dans
 `${…:?…}`) ; `tests/tiger_launcher_test.py` connaît les nouveaux défauts et ne bute plus sur le
 processeur de l'hôte sous macOS (`pomppc_fast_cpu` lit `sysctl`). `tests/run-all.sh` : 283 OK, 0 échec.
+
+### 5.9 Le talon de `vcf*` couvert : `tcg/0054` (26/10)
+
+Le trou du §5.3 (mutant n° 20 non détecté, talon de `vcf*` jamais pris) est comblé par
+`patches/tcg/0054-ppc-vfnc-slow.patch` : propriété de test `x-vfp-native-cmp-slow` (éteinte par
+défaut, n'agit qu'avec `x-vfp-native-cmp`) qui donne au frontal, pour `vcfux`/`vcfsx`, la fenêtre
+de porte masque 1 / valeur 2 — `(fenêtre & 1) == 2` ne tient jamais, chaque `vcf*` passe par le
+talon. Aucun émetteur touché (x86_64 et aarch64 testent déjà « (fenêtre & masque) == valeur »
+pour chaque fenêtre de masque non nul) : la couverture vaut pour les deux hôtes.
+`m4-serie-0031-0035-proofs.sh` : démarrage `slo` de plus dans `guest` (vérificateurs + talon
+forcé), troisième champ facultatif des mutants (propriétés de CPU du mutant ; le n° 20 force le
+talon), `MUT_ONLY` pour rejouer des mutants choisis, `prep` réduit à copie + construction.
+
+Épreuve (`bench/m4-serie/p54-2610/`, SMP=2) : `ref`, `nat`, `ver`, `slo` donnent **les mêmes
+empreintes** (celles du PC) — le talon de `vcf*`, désormais exécuté 8,4 M fois par `vcfux` et
+autant par `vcfsx`, rend exactement les résultats des helpers ; vérificateurs à 0 divergence.
+**Mutant n° 20 : DÉTECTÉ** (40 divergences). Bilan des mutants de la série 0031-0039 :
+**21 sur 21**. (Le compteur « chemin court » de `vfp-native-cmp-verify` est une prédiction du
+vérificateur, pas le chemin pris : il ne change pas sous `x-vfp-native-cmp-slow`.)

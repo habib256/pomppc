@@ -1,0 +1,89 @@
+POMPPC tcg/0054 — x-vfp-native-cmp-slow : le talon de vcfux/vcfsx forcé (propriété de test)
+
+La porte de vcf* (x-vfp-native-cmp, tcg/0034 et 0038) est celle de x-vfp-native : le drapeau
+inexact de vec_status doit être déjà posé. Il l'est dès la première opération vectorielle
+inexacte après le démarrage, et l'invité ne peut pas le remettre à zéro : le talon de vcf*
+(helper_vcf*(env, &vD, &vB, uim)) n'était jamais pris (2 fois sur 8,4 M vcfux dans la suite),
+et le mutant « uim oublié dans le talon » passait inaperçu sur le M4 (docs/parite-m4-2510.md
+§5.3), le même trou existant sur le PC.
+
+x-vfp-native-cmp-slow (éteinte par défaut, n'agit qu'avec x-vfp-native-cmp) donne au frontal,
+pour vcfux/vcfsx, la fenêtre de porte masque 1 / valeur 2 : (fenêtre & 1) == 2 ne tient
+jamais, chaque vcf* passe par le talon. Aucun émetteur n'est touché : x86_64 et aarch64
+testent déjà « (fenêtre & masque) == valeur » pour chaque fenêtre de masque non nul.
+Usage : preuves et mutants (tools/tcg/m4-serie-0031-0035-proofs.sh, empreinte vfptest c
+identique à la référence).
+
+--- a/target/ppc/cpu.h
++++ b/target/ppc/cpu.h
+@@ -1433,6 +1433,11 @@
+      */
+     bool vfp_native_cmp;
+     bool vfp_native_cmp_verify;
++    /*
++     * POMPPC tcg/0054 (x-vfp-native-cmp-slow, test only): the gate of vcfux/vcfsx
++     * always closed, every one by the out-of-line stub (docs/parite-m4-2510.md).
++     */
++    bool vfp_native_cmp_slow;
+     ppc_vsr_t vfnc_sat;
+     bool sr_snap_ok[2];
+     uint32_t sr_gen;
+--- a/target/ppc/cpu_init.c
++++ b/target/ppc/cpu_init.c
+@@ -228,6 +228,13 @@
+     DEFINE_PROP_BOOL("x-vfp-native-cmp-verify", PowerPCCPU,
+                      env.vfp_native_cmp_verify, false),
+     /*
++     * POMPPC tcg/0054, test only: vcfux/vcfsx always by the stub of
++     * x-vfp-native-cmp (whose gate, the inexact flag of vec_status, is
++     * almost never closed in a guest: the stub was never covered).
++     */
++    DEFINE_PROP_BOOL("x-vfp-native-cmp-slow", PowerPCCPU,
++                     env.vfp_native_cmp_slow, false),
++    /*
+      * POMPPC tcg/0022.  x-vfp-native: vaddfp/vsubfp/vmaddfp/vnmsubfp by the
+      * host FPU in the generated code (TCG op ppc_vfp: x86_64 with AVX and
+      * FMA3, aarch64), the original helper out of line when the short path
+--- a/target/ppc/translate.c
++++ b/target/ppc/translate.c
+@@ -183,6 +183,7 @@
+     bool dcbz_inline, dcbz_verify; /* x-dcbz-inline(-verify) (tcg/0035) */
+     bool vfp_native, vfp_nverify; /* x-vfp-native(-verify) (tcg/0022) */
+     bool vfp_native_cmp, vfpnc_verify; /* x-vfp-native-cmp(-verify), 0034 */
++    bool vfpnc_slow;                   /* x-vfp-native-cmp-slow, 0054 */
+     const CPUPPCState *env;     /* x-vfp-native: its gate (tcg/0022) */
+     bool need_access_type;
+     int mem_idx;
+@@ -7011,6 +7012,7 @@
+     ctx->vfp_native_cmp = ctx->vfp_native && env->vfp_native_cmp &&
+                           tcg_ppc_vfp_cmp_supported();
+     ctx->vfpnc_verify = ctx->vfp_native_cmp && env->vfp_native_cmp_verify;
++    ctx->vfpnc_slow = ctx->vfp_native_cmp && env->vfp_native_cmp_slow;
+     ctx->env = env;
+     ctx->lazy_tlb_flush = env->mmu_model == POWERPC_MMU_32B
+         || env->mmu_model & POWERPC_MMU_64;
+--- a/target/ppc/translate/vmx-impl.c.inc
++++ b/target/ppc/translate/vmx-impl.c.inc
+@@ -1559,6 +1559,11 @@
+     intptr_t vs = offsetof(CPUPPCState, vec_status);
+     bool cf = kind == PVF_CFUX || kind == PVF_CFSX;
+     bool ct = kind == PVF_CTUXS || kind == PVF_CTSXS;
++    /*
++     * tcg/0054 (x-vfp-native-cmp-slow): a value outside the mask, so
++     * (window & mask) == value never holds and every vcf* takes the stub
++     */
++    bool slow = cf && ctx->vfpnc_slow;
+ 
+     if (ctx->vfpnc_verify) {
+         gen_helper_vfn_save(tcg_env, tcg_constant_i32(ra | rb << 8 | ra << 16));
+@@ -1573,8 +1578,8 @@
+                     avr_full_offset(rb), kind <= PVF_CMPB ? 0 : uim, helper,
+                     ct ? offsetof(CPUPPCState, vscr_sat) :
+                          vs + env->vfn_gate_ofs[0],
+-                    cf ? env->vfn_gate_mask[0] : 0,
+-                    cf ? env->vfn_gate_val[0] : 0,
++                    slow ? 1 : cf ? env->vfn_gate_mask[0] : 0,
++                    slow ? 2 : cf ? env->vfn_gate_val[0] : 0,
+                     vs + env->vfn_gate_ofs[1], cf ? env->vfn_gate_mask[1] : 0,
+                     cf ? env->vfn_gate_val[1] : 0);
+     if (rc) {

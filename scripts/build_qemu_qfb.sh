@@ -37,6 +37,7 @@
 #   • lfs producteur de x-fp-known, conversion par l'hôte (x-lfs-known) — patches/tcg/0051
 #   • le TLB logiciel une fois par base des chargements en forme D (x-tlb-base) — patches/tcg/0052
 #   • parité arm64 de 0033-0034, plafond de lmw/stmw en ligne — patches/tcg/0037-0039 (après 0052)
+#   • talon de vcf* forcé pour les preuves (x-vfp-native-cmp-slow) — patches/tcg/0054
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -1123,6 +1124,11 @@ TCG52_MARKERS
   if ! grep -q "x-lmw-inline-max" target/ppc/cpu_init.c; then
     echo "▶ patch TCG : plafond de lmw/stmw en ligne (x-lmw-inline-max, tcg/0039)"
     patch_strict "$ROOT/patches/tcg/0039-ppc-lmw-inline-max.patch"
+  fi
+  # tcg/0054 : x-vfp-native-cmp-slow, le talon de vcf* forcé (propriété de test, les deux hôtes)
+  if ! grep -q "x-vfp-native-cmp-slow" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : talon de vcf* forcé pour les preuves (x-vfp-native-cmp-slow, tcg/0054)"
+    patch_strict "$ROOT/patches/tcg/0054-ppc-vfnc-slow.patch"
   fi
   find tcg target -name '*.orig' -delete
   while read -r f m; do

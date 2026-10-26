@@ -9,10 +9,9 @@
 # PC x86-64 seulement : premier vrai passage sur le M4.
 #
 # Étapes (dans cet ordre ; `all` = host guest) :
-#   prep   copie ~/src/qemu (série 0001-0035 posée par build_qemu_qfb.sh) dans
-#          ARM64_SRC (défaut ~/src/qemu-arm64, refusée si elle existe), y pose
-#          tcg/0037-0039 (--forward, aucun .rej toléré) et la construit par
-#          build_qemu_qfb.sh (QEMU_SRC=ARM64_SRC).
+#   prep   copie ~/src/qemu dans ARM64_SRC (défaut ~/src/qemu-arm64, refusée si elle
+#          existe) et la construit par build_qemu_qfb.sh (QEMU_SRC=ARM64_SRC), qui pose
+#          lui-même tcg/0037-0039 et 0054 depuis le 26/10 (docs/parite-m4-2510.md).
 #   host   sans VM : encodages A64 (a64enc-check.py), modèle NEON de 0038 contre
 #          la référence x86 du PC (vfncxcheck.sh), modèle et talon de 0033
 #          contre softfloat (fpproof.sh + mutants), modèle de 0034/0038 contre
@@ -34,7 +33,7 @@
 # (défaut bench/m4-serie/<date>), DEVDISK (étapes guest et mut), SMPS (défaut
 # « 2 1 » : ppc64 SMP=2 puis ppc SMP=1), FPN (vecteurs de fpproof, défaut
 # 2000000 ; le PC a fait 20000000), VFN (vfpcmpproof, défaut 200000),
-# MUT_SRC, MUT_N (défaut 16384).
+# MUT_SRC, MUT_N (défaut 16384), MUT_ONLY (numéros des mutants à jouer, défaut tous).
 # Aucune mesure de vitesse ici : l'A/B se fait ensuite par matab.sh (doc §6).
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,20 +61,13 @@ bin64() { echo "$ARM64_SRC/build/qemu-system-ppc64"; }
 
 # ---------------------------------------------------------------- prep
 do_prep() {
-  local p
   [ -e "$ARM64_SRC" ] && { echo "⚠ $ARM64_SRC existe déjà : prep refusé (le retirer ou ARM64_SRC=…)"; return 1; }
   grep -q 'x-dcbz-inline' "$HOME/src/qemu/target/ppc/cpu_init.c" || {
     echo "⚠ ~/src/qemu n'a pas la série jusqu'à 0035 : lancer d'abord ./scripts/build_qemu_qfb.sh"; return 1; }
   echo "▶ copie ~/src/qemu → $ARM64_SRC (sans build*)"
   rsync -a --exclude='build*' "$HOME/src/qemu/" "$ARM64_SRC/" || return 1
-  for p in "$ROOT"/patches/tcg/0037-*.patch "$ROOT"/patches/tcg/0038-*.patch \
-           "$ROOT"/patches/tcg/0039-*.patch; do
-    echo "▶ $(basename "$p")"
-    ( cd "$ARM64_SRC" && find . -name '*.rej' -delete &&
-      patch -p1 --forward --fuzz=0 < "$p" ) || { echo "⚠ REJETÉ : $p"; return 1; }
-    [ -z "$(cd "$ARM64_SRC" && find . -name '*.rej' -print -quit)" ] || {
-      echo "⚠ .rej après $p"; return 1; }
-  done
+  # depuis le 26/10, build_qemu_qfb.sh pose lui-même 0037-0039 et 0054 (après 0052) : plus rien
+  # à patcher ici, la copie et la construction suffisent
   echo "▶ construction (build_qemu_qfb.sh, QEMU_SRC=$ARM64_SRC)"
   QEMU_SRC="$ARM64_SRC" bash "$ROOT/scripts/build_qemu_qfb.sh" > "$OUT/prep-build.log" 2>&1 || {
     echo "⚠ construction ratée : $OUT/prep-build.log"
@@ -117,6 +109,7 @@ DL="$ROOT/tools/guest/devloop.py"
 BASE="x-fast-fp=on,x-sr-tlb=on,x-lfs-inline=on,x-vfp-fast=on,x-vperm-fast=on,x-fp-inline=on,x-ret-inline=on,x-jc-idx=on,x-icbi-sync=on,x-msr-nobql=on,x-fp-native=on,x-fp-native64=on,x-tb-fast=on,x-vmx-inline=on,x-vfp-native=on,x-lmw-vector=on"
 TCGB="x-jit-near=on,x-jc-bits=14,x-jc-word=on"
 NAT="x-fp-native-cmp=on,x-vfp-native-cmp=on,x-tlb-precise=on,x-lmw-inline=on,x-dcbz-inline=on"
+SLOW="x-vfp-native-cmp-slow=on"   # tcg/0054 : chaque vcf* par le talon
 VER="$NAT,x-fp-native-cmp-verify=on,x-vfp-native-cmp-verify=on,x-vfp-native-verify=on,x-tlb-precise-verify=256,x-lmw-inline-verify=on,x-dcbz-inline-verify=on"
 active=0
 cleanup() { [ "$active" = 1 ] && python3 "$DL" shutdown > "$OUT/shutdown.log" 2>&1; return 0; }
@@ -217,7 +210,7 @@ fingerprint() { # fingerprint <fichier> <banc> : la ligne d'empreinte qui compte
 }
 
 do_guest() {
-  local smp b arm f t ref nat ver pcr job
+  local smp b arm f t ref nat ver slo pcr job
   : "${DEVDISK:?DEVDISK : copie raw DÉDIÉE de la VM de dev requise}"
   export DEVDISK
   if [ -f "$ROOT/bench/devloop/qemu.pid" ] && kill -0 "$(cat "$ROOT/bench/devloop/qemu.pid")" 2>/dev/null; then
@@ -226,23 +219,25 @@ do_guest() {
   job="$OUT/suite-job"; guest_job "$job" 0
   for smp in $SMPS; do
     b="$(bin32)"   # devloop prend le voisin « 64 » quand SMP > 1
-    for arm in ref nat ver; do
+    # slo (tcg/0054) : les vérificateurs, et chaque vcf* par le talon (x-vfp-native-cmp-slow)
+    for arm in ref nat ver slo; do
       echo "=== invité SMP=$smp, $arm"
-      case "$arm" in ref) o="" ;; nat) o="$NAT" ;; ver) o="$VER" ;; esac
+      case "$arm" in ref) o="" ;; nat) o="$NAT" ;; ver) o="$VER" ;; slo) o="$VER,$SLOW" ;; esac
       boot "$smp" "$o" "$b" || { echo "    démarrage raté"; rc=1; finish "smp$smp-$arm"; continue; }
       python3 "$DL" run "$job" --timeout "${GUEST_TIMEOUT:-3600}" > "$OUT/smp$smp-$arm-run.log" 2>&1 || {
         echo "    job en erreur (voir smp$smp-$arm-run.log)"; rc=1; }
       rm -rf "$OUT/smp$smp-$arm"; cp -R "$ROOT/bench/devloop/last/out" "$OUT/smp$smp-$arm"
       finish "smp$smp-$arm"
     done
-    printf '    %-10s %-18s %-18s %-18s %s\n' banc ref nat ver "PC (indicatif)"
+    printf '    %-10s %-18s %-18s %-18s %-18s %s\n' banc ref nat ver slo "PC (indicatif)"
     for t in fptest-c fptest-s fptest-d vfptest-c vfptest-o tlbtest lmwtest dcbztest smctest; do
       ref="$(fingerprint "$OUT/smp$smp-ref/$t.txt" "$t" 2>/dev/null)"
       nat="$(fingerprint "$OUT/smp$smp-nat/$t.txt" "$t" 2>/dev/null)"
       ver="$(fingerprint "$OUT/smp$smp-ver/$t.txt" "$t" 2>/dev/null)"
+      slo="$(fingerprint "$OUT/smp$smp-slo/$t.txt" "$t" 2>/dev/null)"
       pcr="$(pc_ref "$t")"
-      printf '    %-10s %-18s %-18s %-18s %s' "$t" "${ref:-?}" "${nat:-?}" "${ver:-?}" "$pcr"
-      if [ -z "$ref" ] || [ "$ref" != "$nat" ] || [ "$ref" != "$ver" ]; then
+      printf '    %-10s %-18s %-18s %-18s %-18s %s' "$t" "${ref:-?}" "${nat:-?}" "${ver:-?}" "${slo:-?}" "$pcr"
+      if [ -z "$ref" ] || [ "$ref" != "$nat" ] || [ "$ref" != "$ver" ] || [ "$ref" != "$slo" ]; then
         echo "   ⚠ DIFFÈRE"; rc=1
       elif [ "$pcr" != "-" ] && [ "$pcr" != "$ref" ]; then
         echo "   (≠ PC : à expliquer, paramètres ?)"
@@ -255,13 +250,17 @@ do_guest() {
              > "$OUT/smp$smp-$arm-$t.diff" 2>&1 || echo "    $t ($arm) : texte différent, voir smp$smp-$arm-$t.diff (dcbztest : la réservation, §32.4)"
       done
     done
+    grep -E 'vfp-native-cmp-verify:' "$OUT/smp$smp-slo-qemu.log" | tail -1 | sed 's/^/      slo : /'
+    if grep -q 'DIVERGENCE' "$OUT/smp$smp-slo-qemu.log"; then
+      echo "    ⚠ DIVERGENCE sous le talon forcé (smp$smp-slo-qemu.log)"; rc=1
+    fi
     f="$OUT/smp$smp-ver-qemu.log"
     echo "    vérificateurs (smp$smp-ver-qemu.log) :"
     grep -E 'fp-native-verify: [0-9]|vfp-native-cmp-verify:|vfp-native-verify:|lmw-inline-verify: cpu|dcbz-inline-verify: cpu|x-tlb-precise-verify.*divergent|ret-verify' "$f" | tail -12 | sed 's/^/      /'
     if grep -q 'DIVERGENCE' "$f"; then
       echo "    ⚠ DIVERGENCE dans $f :"; grep 'DIVERGENCE' "$f" | head -5 | sed 's/^/      /'; rc=1
     fi
-    for arm in nat ver; do
+    for arm in nat ver slo; do
       if grep -q -i -E 'not found|is not a valid' "$OUT/smp$smp-$arm-qemu.log" 2>/dev/null; then
         echo "    ⚠ propriété refusée au démarrage (smp$smp-$arm-qemu.log)"; rc=1
       fi
@@ -315,7 +314,8 @@ tcg/aarch64/tcg-target.c.inc|s|pvf_dup(s, k1, 0xbf800000);                 /\* -
 # 19. vctsxs par fcvtzu
 tcg/aarch64/tcg-target.c.inc|s/pvf_2(s, PVF_FCVTZS4S, r, x);/pvf_2(s, PVF_FCVTZU4S, r, x);/
 # 20. talon de vcf* : uim oublié (helper_vcf*(env, &vD, &vB, 0))
-tcg/aarch64/tcg-target.c.inc|s/tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X3, l->vfp_off\[3\]);/tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X3, 0);/
+#     (talon forcé par x-vfp-native-cmp-slow, tcg/0054 : sinon jamais pris, porte presque toujours ouverte)
+tcg/aarch64/tcg-target.c.inc|s/tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X3, l->vfp_off\[3\]);/tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X3, 0);/|x-vfp-native-cmp-slow=on
 # 21. CR6 : « toutes les voies » faux (traduction)
 target/ppc/translate/vmx-impl.c.inc|s/tcg_gen_setcondi_i64(TCG_COND_EQ, u, u, -1);/tcg_gen_setcondi_i64(TCG_COND_NE, u, u, -1);/
 MUT
@@ -323,7 +323,7 @@ MUT
 [ -n "${MUT_LIST:-}" ] && { mutants_a64; exit 0; }   # pour la relecture des motifs
 
 do_mut() {
-  local f m n=0 det=0 job ndiv b32 j
+  local f m x n=0 det=0 joues=0 job ndiv b32 j
   : "${DEVDISK:?DEVDISK requis}"; : "${MUT_SRC:?MUT_SRC : copie CONSTRUITE, jamais ARM64_SRC}"
   export DEVDISK
   [ "$(cd "$MUT_SRC" && pwd)" != "$(cd "$ARM64_SRC" && pwd)" ] || { echo "⚠ MUT_SRC = ARM64_SRC : refusé"; return 1; }
@@ -338,10 +338,14 @@ do_mut() {
   rm -rf "$OUT/mut-ref"; cp -R "$ROOT/bench/devloop/last/out" "$OUT/mut-ref"; finish mut-ref
   grep -q DIVERGENCE "$OUT/mut-ref-qemu.log" && { echo "⚠ la référence des mutants diverge déjà"; return 1; }
   # fd 3 : devloop.py ne doit pas lire la liste sur l'entrée standard
-  while IFS='|' read -r f m <&3; do
+  # f|m[|x] : x = propriétés de CPU de plus pour ce mutant (le talon forcé du n° 20)
+  while IFS='|' read -r f m x <&3; do
     [ -z "$f" ] && continue
     case "$f" in \#*) echo "$f"; continue ;; esac
     n=$((n + 1))
+    # MUT_ONLY="20 …" : seulement ces numéros (rejouer un mutant après un correctif)
+    if [ -n "${MUT_ONLY:-}" ] && ! [[ " $MUT_ONLY " == *" $n "* ]]; then continue; fi
+    joues=$((joues + 1))
     cp "$MUT_SRC/$f" "$OUT/orig"
     sed -i.bak -e "$m" "$MUT_SRC/$f"; rm -f "$MUT_SRC/$f.bak"
     if cmp -s "$MUT_SRC/$f" "$OUT/orig"; then
@@ -350,7 +354,7 @@ do_mut() {
     if ! ( cd "$MUT_SRC/build" && ninja qemu-system-ppc qemu-system-ppc64 > "$OUT/mut$n.build" 2>&1 ); then
       echo "mut$n : construction ratée"; cp "$OUT/orig" "$MUT_SRC/$f"; continue
     fi
-    if boot 2 "$VER" "$b32"; then
+    if boot 2 "$VER${x:+,$x}" "$b32"; then
       python3 "$DL" run "$job" --timeout 1800 > /dev/null 2>&1
       rm -rf "$OUT/mut$n"; cp -R "$ROOT/bench/devloop/last/out" "$OUT/mut$n"
     fi
@@ -369,7 +373,7 @@ do_mut() {
   done 3< <(mutants_a64)
   ( cd "$MUT_SRC/build" && ninja qemu-system-ppc qemu-system-ppc64 > /dev/null 2>&1 ) &&
     echo "arbre des mutants rendu intact et reconstruit"
-  echo "$det mutants détectés sur $n"
+  echo "$det mutants détectés sur $joues joués ($n dans la liste)"
 }
 
 [ $# -gt 0 ] || { sed -n '4,40p' "$0"; exit 2; }
