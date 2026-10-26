@@ -11,7 +11,7 @@
 // built once with DockBuilder, then saved in .run/imgui.ini). The guest image
 // is always drawn at the largest rectangle keeping the scanout's aspect ratio
 // (black bands, never stretched), unless a fixed zoom is picked in Vue.
-// Vue ▸ Plein écran (Ctrl+Cmd+F or F11 to enter/leave; Escape goes to the guest)
+// Vue ▸ Plein écran (Alt+Enter, Ctrl+Cmd+F or F11 to enter/leave; Escape goes to the guest)
 // puts the host window on its monitor at native size with only the guest
 // shown. Pointer input is mapped on the rectangle actually drawn.
 #include <GLFW/glfw3.h>
@@ -476,9 +476,10 @@ int main(int argc, char** argv) {
     // Plein écran hôte : la fenêtre GLFW passe sur son moniteur à la
     // résolution native ; on retient la géométrie fenêtrée pour y revenir.
     bool fullscreen = false;
-    // Plein écran retenu à l'arrêt : rétabli par la bascule habituelle, après
-    // la première image (hors frame ImGui, comme Ctrl+Cmd+F).
-    bool toggleFullscreen = fe.fullscreen;
+    // Toujours en fenêtre au démarrage (demande de l'utilisateur, 26/10) :
+    // Alt+Entrée bascule ensuite. Le plein écran retenu à l'arrêt n'est plus
+    // rétabli (fe.fullscreen reste écrit, pour l'information seulement).
+    bool toggleFullscreen = false;
     int winX = 0, winY = 0, winW = 1280, winH = 900;
     glfwGetWindowPos(window, &winX, &winY);
     glfwGetWindowSize(window, &winW, &winH);
@@ -616,6 +617,7 @@ int main(int argc, char** argv) {
         for (ImGuiKey k : ks) {
             if (k == ImGuiKey_LeftCtrl) pio.AddKeyEvent(ImGuiMod_Ctrl, down);
             if (k == ImGuiKey_LeftSuper) pio.AddKeyEvent(ImGuiMod_Super, down);
+            if (k == ImGuiKey_LeftAlt) pio.AddKeyEvent(ImGuiMod_Alt, down);
             pio.AddKeyEvent(k, down);
         }
     };
@@ -651,9 +653,11 @@ int main(int argc, char** argv) {
             } else {
                 pio.AddMouseButtonEvent(0, false);
             }
-        } else if (st.op == "fs" || st.op == "f11" || st.op == "esc" || st.op == "enter") {
+        } else if (st.op == "fs" || st.op == "f11" || st.op == "esc" || st.op == "enter" ||
+                   st.op == "altenter") {
             bool down = (probePhase == 0);
             if (st.op == "fs") probeKeys({ImGuiKey_LeftCtrl, ImGuiKey_LeftSuper, ImGuiKey_F}, down);
+            else if (st.op == "altenter") probeKeys({ImGuiKey_LeftAlt, ImGuiKey_Enter}, down);
             else if (st.op == "f11") probeKeys({ImGuiKey_F11}, down);
             else if (st.op == "esc") probeKeys({ImGuiKey_Escape}, down);
             else probeKeys({ImGuiKey_Enter}, down);
@@ -709,17 +713,23 @@ int main(int argc, char** argv) {
         ImGuiIO& io = ImGui::GetIO();
 
         // ── Raccourcis plein écran (avalés : jamais transmis à l'invité) ──
-        // Ctrl+Cmd+F comme macOS, F11. Échap reste une touche de l'invité,
-        // notamment pour les menus des jeux, même en plein écran capturé.
+        // Alt+Entrée (comme les jeux sous Windows), Ctrl+Cmd+F comme macOS, F11.
+        // Échap reste une touche de l'invité, notamment pour les menus des
+        // jeux, même en plein écran capturé.
         bool swallow[kKeyCount] = {};
         auto swallowKey = [&](ImGuiKey k) {
             for (int i = 0; i < kKeyCount; ++i) if (kKeys[i].k == k) swallow[i] = true;
         };
-        if (ImGui::IsKeyPressed(ImGuiKey_F11, false) ||
+        const bool altEnter = io.KeyAlt && !io.KeyCtrl && !io.KeySuper &&
+            (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+             ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false));
+        if (altEnter || ImGui::IsKeyPressed(ImGuiKey_F11, false) ||
             (io.KeyCtrl && io.KeySuper && ImGui::IsKeyPressed(ImGuiKey_F, false))) {
             toggleFullscreen = true;
             swallowKey(ImGuiKey_F11);
             swallowKey(ImGuiKey_F);
+            swallowKey(ImGuiKey_Enter);
+            swallowKey(ImGuiKey_KeypadEnter);
         }
         int w = 0, h = 0, dy0 = 0, dy1 = 0;
         bool resized = false;
@@ -859,7 +869,7 @@ int main(int argc, char** argv) {
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Vue")) {
-                if (ImGui::MenuItem("Plein écran", "Ctrl+Cmd+F, F11"))
+                if (ImGui::MenuItem("Plein écran", "Alt+Entrée, F11"))
                     toggleFullscreen = true;
                 ImGui::Separator();
                 if (ImGui::MenuItem("Ajuster à la fenêtre", nullptr, fitView)) fitView = true;

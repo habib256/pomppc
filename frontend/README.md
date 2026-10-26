@@ -127,10 +127,11 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
 - The guest is always drawn at the largest rectangle with **its own aspect ratio**, centred,
   black bands around it — never stretched (**Vue ▸ Ajuster à la fenêtre**, the default).
   **Vue ▸ 50/100/150/200 %** still fixes the size in window mode (scrollbars if larger).
-- **Vue ▸ Plein écran**, **Ctrl+Cmd+F** or **F11**: the host window goes to its monitor at
+- **Vue ▸ Plein écran**, **Alt+Enter**, **Ctrl+Cmd+F** or **F11**: the host window goes to its monitor at
   native size (`glfwSetWindowMonitor`), menus and panels hidden, guest only, 4:3 guest on a
-  16:9 screen = 1440×1080 between two 240-px bands on 1920×1080. **Same shortcut (F11 or Ctrl+Cmd+F)**
-  goes back to the window at its previous size and position. These keys are not sent to the
+  16:9 screen = 1440×1080 between two 240-px bands on 1920×1080. **Same shortcut (Alt+Enter, F11 or Ctrl+Cmd+F)**
+  goes back to the window at its previous size and position. ImGuiDock always starts in a
+  window (since 26/10/2026, the full screen of the previous session is not restored). These keys are not sent to the
   guest. **Escape is always forwarded to the guest**, including in full screen,
   so games can open their menus without releasing capture. On macOS, GLFW's own *Window ▸ Enter Full Screen*
   (which owns Ctrl+Cmd+F and opens a Spaces full screen) is unbound, and the window's native
@@ -170,7 +171,7 @@ f11; wait 2; shot /tmp/win.png; quit" ./build/pomppc ../run_os9.sh
 
 Steps: `wait <s>`, `move|click <x> <y>` (window points),
 `guestmove <x> <y>` (fractions 0–1 of the drawn guest view, without clicks),
-`fs` (Ctrl+Cmd+F), `f11`, `esc`,
+`fs` (Ctrl+Cmd+F), `altenter`, `f11`, `esc`,
 `type <a-z 0-9 space .>`, `enter`, `shot <png>`, `quit`.
 
 The headless probe defaults to the *other* guest, and always runs `-snapshot`:
