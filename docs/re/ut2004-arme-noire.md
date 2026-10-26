@@ -1,5 +1,55 @@
 # UT2004 : texture diffuse perdue, reflets conservés
 
+## M4 (GL d'Apple sur Metal) : cause et correctif du 26/10/2026
+
+**Le défaut du M4 n'est pas celui du PC.** Constaté par l'utilisateur (armes noires sur le M4,
+pas sur le PC). Vidage `ut-fen` de la matrice depuis l'image 1 (`--env
+POMPPC_GL_DUMP_TRIGGER=@1 --env POMPPC_GL_DUMP_FRAMES=450`), rejoué sur le M4 : dès l'image 72
+de l'introduction, la **cargaison du convoi** (missiles verts) et des panneaux muraux sont
+**noirs en `gl`, texturés en `soft`** (6,2 % des pixels à plus de 16 d'écart). Le plugin et le
+cœur sont donc hors de cause (même vidage, même cœur) : c'est le backend `gl` sur cet hôte.
+
+**Isolé pas à pas** (rejeu, `QGPU_REPLAY_SKIPDRAW` dessin par dessin, `QGPU_REPLAY_STATE`, puis
+une copie expérimentale de `qgpu-gl.c` à réglages `QGPU_X_*`) :
+- le dessin fautif (n° 293 de l'image 72) n'a ni fonction ATI ni texture inutile : unité 0
+  `MODULATE(TEX, PRIMARY)×2`, unité 1 texture de détail ; la couleur PRIMAIRE est noire ;
+- éclairage éteint : les missiles reparaissent (l'éclairage est en cause) ; atténuation forcée à
+  1, `GL_NORMALIZE` forcé, deux faces, `COLOR_MATERIAL` éteint : **aucun effet** ;
+- une lumière à la fois : les lumières 0, 1, 3 éclairent, les quatre ensemble = noir ; **sans la
+  lumière 2, l'image est juste** (zone de mesure 209 752 contre 208 720 en `soft`). La lumière 2
+  est la seule **spot** (cône de 45°, exposant 2) ; toute coupure ≠ 180° donne le noir ;
+- **reproduit hors de QEMU** (programme CGL de 80 lignes, profil legacy, « Apple M4 / 2.1
+  Metal - 91.7 ») : une lumière ponctuelle éclaire un carré à 120 ; on ajoute une lumière spot
+  dont le cône n'atteint pas le carré : **68** (devrait rester 120), quel que soit son numéro
+  (1, 3 ou 7), son exposant, `LOCAL_VIEWER`, la longueur de sa direction. Spot dans le champ :
+  juste.
+
+**Cause : l'éclairage fixe du GL d'Apple, dès qu'une lumière spot est allumée, retire aux points
+hors de son cône une part de l'éclairage des AUTRES lumières** (jusqu'au noir dans UT2004).
+NVIDIA et le backend `soft` suivent la spécification.
+
+**Correctif (hôte, `patches/qgpu`)** : l'éclairage par sommet d'OpenGL 1.x du backend `soft`
+sort dans `qgpu-light.h` (mêmes opérations : rendu `soft` identique au bit sur les 136 images du
+vidage). Le backend `gl`, pour un dessin du pipeline fixe éclairé (ni programme ni GLSL) dont
+une lumière est un spot, calcule les couleurs par sommet avec ce code et dessine éclairage éteint
+avec ces couleurs (et la secondaire si la spéculaire est séparée) ; texgen, brouillard et unités
+restent à l'hôte. Allumé sur le GL d'Apple (renderer « Apple »), `QGPU_GL_CPULIGHT=0/1`
+l'impose ; l'éclairage des deux faces reste à l'hôte (dit une fois sur stderr). Rien ne change
+sur le PC.
+
+**Preuves.** Rejeu des 136 images : écart `gl`/`soft` ≤ 0,63 % (6,2 % avant), aucune au-dessus
+de 1 % ; image 72 : cargaison texturée. `qgpu_core_test` : cas « spot hors champ : la diffuse de
+l'autre lumière reste (204) » ajouté au test d'éclairage de `run_v7` — juste en `soft` et en
+`gl` ; avec `QGPU_GL_CPULIGHT=0` il échoue en `gl` sur le M4 (`000000`). En jeu : voir la
+matrice du jour (`docs/parite-m4-2510.md`).
+
+**Toute la démo** (vidage 1-451, `matrice.py --tenir 120`, option ajoutée ce jour ; rangé hors
+dépôt sous `bench/matrice/20261026-0853/ut-fen/`), `gl` contre `soft` : **62 images sur 445 à
+plus de 1 % de pixels écartés avant, 24 après** ; les 24 restantes (images 206-210, 375-396)
+sont des écarts de filtrage et de bord (grille fine du plafond, poussière au sol) que `gl` et
+`soft` ont toujours, rien de noirci. Les **présentoirs d'armes** (images ~166-195, le défaut du
+PC) sont **justes sur le M4 même sans ce correctif** : l'hôte Apple a l'extension ATI.
+
 ## Démo de test, PC Linux (NVIDIA) : cause et correctif du 07/10/2026
 
 **Reproduit sur le PC.** La « démo de test » est la caméra d'introduction

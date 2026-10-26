@@ -1536,6 +1536,29 @@ static void run_v7(QgpuCore *c, uint8_t *shmem)
     CHECK(st == QGPU_ST_OK && near_rgb(p, 0xCC0000),
           "(f) diffuse directionnelle sur face inclinée (204 attendu) : %06x (st %u)",
           p, st);
+    /* 26/10 : une lumière SPOT dont le cône n'atteint pas le triangle n'enlève
+       rien aux autres. Le GL d'Apple sur Metal retranchait aux points hors du
+       cône l'éclairage des autres lumières (UT2004, docs/re/ut2004-arme-noire.md) :
+       le backend gl éclaire ces dessins lui-même (qgpu-light.h). Spot en
+       (0, 0, 10), tourné vers +z, cône de 45° : le triangle (z = 0) est derrière. */
+    {
+        static const float spot_pos[4] = { 0.0f, 0.0f, 10.0f, 1.0f };
+        static const float spot_away[3] = { 0.0f, 0.0f, 1.0f };
+        e.off = e.start = CMD_OFF;
+        set_light(&e, 1, 1, black4, white4, black4, spot_pos, spot_away, 2.0f, 45.0f,
+                  1.0f, 0.0f, 0.0f);
+        clear_cmd(&e, QGPU_CLEAR_COLOR, 0xFF000000, 1.0f);
+        draw_raw(&e, QGPU_PRIM_MODE_TRIANGLES, 3, VF_P3 | QGPU_VF_NORMAL, 3,
+                 QGPU_IDX_NONE, 0);
+        set_light(&e, 1, 0, black4, white4, black4, spot_pos, spot_away, 2.0f, 45.0f,
+                  1.0f, 0.0f, 0.0f);
+        readback_cmd(&e, 2);
+        st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        p = px(shmem, 20, 20);
+        CHECK(st == QGPU_ST_OK && near_rgb(p, 0xCC0000),
+              "(f) spot hors champ : la diffuse de l'autre lumière reste (204 attendu) : "
+              "%06x (st %u)", p, st);
+    }
 
     /* Normalisation : modèle-vue diag(1,1,0.5) → l'inverse-transposée est
        diag(1,1,2), la normale devient (0, 0.6, 1.6) (n·VP = 1.6, saturé à 255)

@@ -81,7 +81,8 @@ def construit_outils():
     cibles = {
         "qgpu_replay": ([os.path.join(WT, "tests", "qgpu_replay.c")] +
                         [os.path.join(q, f) for f in ("qgpu-core.c", "qgpu-soft.c", "qgpu-gl.c",
-                                                      "qgpu_proto.h", "qgpu-core.h")],
+                                                      "qgpu_proto.h", "qgpu-core.h",
+                                                      "qgpu-light.h")],
                         ["cc", "-std=gnu11", "-O1", "-pthread", "-w", "-I", q,
                          os.path.join(WT, "tests", "qgpu_replay.c"),
                          os.path.join(q, "qgpu-core.c"), os.path.join(q, "qgpu-soft.c"),
@@ -380,6 +381,7 @@ def plan_permis(images, rows, marge_s=6.0):
 class Cellule:
     env_extra = {}              # --env K=V (A/B d'un drapeau du plugin)
     sample_s = 0                # --sample N : `sample` du jeu dans l'invité après la fenêtre
+    tenir_s = 0                 # --tenir S : le jeu continue S s après la fenêtre (vidage long)
     sample_hote_s = 0           # --sample-hote N : `sample` du QEMU (hôte) juste avant
 
     def __init__(self, h, jeu, mode, tour, vidage=True):
@@ -555,6 +557,11 @@ class Cellule:
                     h.ssh("cd /tmp && sample %d %d -file %s/sample.txt >/dev/null 2>&1; true"
                           % (pids[0], self.sample_s, self.gd), delai=120 + 4 * self.sample_s)
                     journal("sample %d s pris" % self.sample_s)
+            if self.tenir_s:
+                # 26/10 : un vidage déclenché tôt (POMPPC_GL_DUMP_TRIGGER=@1) au-delà de la
+                # fenêtre (UT2004 : présentoirs d'armes vers les images 166-195)
+                journal("le jeu continue %d s (--tenir)" % self.tenir_s)
+                time.sleep(self.tenir_s)
             # vidage déclenché puis capture figée pendant le vidage
             if not self.vidage:
                 raise Fini()
@@ -849,11 +856,15 @@ def main():
     ap.add_argument("--sample", type=int, default=0, metavar="S",
                     help="`sample` du jeu dans l'invité pendant S s, la fenêtre de mesure passée "
                          "(sample.txt dans le dossier de la cellule)")
+    ap.add_argument("--tenir", type=int, default=0, metavar="S",
+                    help="le jeu continue S s une fois la fenêtre de mesure passée (vidage long, "
+                         "avec --env POMPPC_GL_DUMP_TRIGGER=@1 --env POMPPC_GL_DUMP_FRAMES=N)")
     a = ap.parse_args()
     for kv in a.env:
         k, _, v = kv.partition("=")
         Cellule.env_extra[k] = v
     Cellule.sample_s = a.sample
+    Cellule.tenir_s = a.tenir
     Cellule.sample_hote_s = a.sample_hote
     jeux = charge_jeux()
     ordre = [k for k in ORDRE if k in jeux] + sorted(k for k in jeux if k not in ORDRE)
