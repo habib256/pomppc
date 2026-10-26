@@ -48,7 +48,7 @@ for e in json.load(open(cc)):
             # GCC 15 (Ubuntu 26.04) : options que le clang 18 du NDK ignore
             if x.startswith('-fzero-init-padding-bits'):
                 continue
-            # en-têtes système de l'hôte x86-64 : seuls ceux de glib restent
+            # en-têtes système de la machine x86-64 : seuls ceux de glib restent
             if x.startswith('-I/usr/') and 'glib-2.0' not in x:
                 continue
             x = x.replace('host/include/x86_64', 'host/include/aarch64').replace('tcg/x86_64', 'tcg/aarch64')

@@ -44,7 +44,12 @@ pomppc_serie_hash() { # pomppc_serie_hash <dossier patches>
   } | while read -r f; do cat "$f"; done | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16
 }
 
-pomppc_fast_cpu() { sed -n 's/^model name[[:space:]]*: *//p' /proc/cpuinfo 2>/dev/null | head -1; }
+# le processeur de cet hôte : /proc/cpuinfo (Linux), sinon sysctl (macOS, où le test du lanceur
+# simule un hôte Linux et ne voyait jamais l'écart de processeur)
+pomppc_fast_cpu() {
+  { sed -n 's/^model name[[:space:]]*: *//p' /proc/cpuinfo 2>/dev/null
+    sysctl -n machdep.cpu.brand_string 2>/dev/null; } | head -1
+}
 
 pomppc_fast_ver() { "$1" --version 2>/dev/null | sed -n '1s/.*version \([0-9][0-9.]*\).*/\1/p'; }
 

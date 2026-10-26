@@ -36,6 +36,7 @@
 #   • PMU POWER8 seulement sur les CPU qui l'ont (x-pmu-real), MTTCG sur la cible 32 bits — patches/tcg/0049, 0050
 #   • lfs producteur de x-fp-known, conversion par l'hôte (x-lfs-known) — patches/tcg/0051
 #   • le TLB logiciel une fois par base des chargements en forme D (x-tlb-base) — patches/tcg/0052
+#   • parité arm64 de 0033-0034, plafond de lmw/stmw en ligne — patches/tcg/0037-0039 (après 0052)
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -1109,6 +1110,30 @@ target/ppc/translate.c tlbb_scan
 tcg/x86_64/tcg-target.c.inc tcg_out_qemu_ld_tlbb
 tcg/aarch64/tcg-target.c.inc tcg_out_qemu_ld_tlbb
 TCG52_MARKERS
+  # --- tcg/0037-0039 : parité arm64 de 0033, 0034 et x-lmw-inline-max (docs/parite-m4-2510.md) ---
+  # 0037 : émetteur aarch64 des sélecteurs de 0033 (frsp fctiw fctiwz fcmpo fdivs fdiv) ;
+  # 0038 : émetteur aarch64 de 0034 (vcmp*fp, vcf*, vct*s) ; 0039 : x-lmw-inline-max.
+  # Écrits le 06/10 contre l'arbre à 0035 ; 0037 reposé APRÈS 0052 et prouvé sur le M4 le 25/10
+  # (dont la correction du diviseur nul sous PFP_K_B). Sans effet sur un hôte x86-64.
+  if ! grep -q "TCG_TARGET_HAS_ppc_fp_cmp       1" tcg/aarch64/tcg-target-has.h; then
+    echo "▶ patch TCG : émetteurs arm64 de x-fp-native-cmp et x-vfp-native-cmp (tcg/0037, 0038)"
+    patch_strict "$ROOT/patches/tcg/0037-tcg-fp-native-cmp-arm64.patch"
+    patch_strict "$ROOT/patches/tcg/0038-tcg-vfp-native-cmp-arm64.patch"
+  fi
+  if ! grep -q "x-lmw-inline-max" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : plafond de lmw/stmw en ligne (x-lmw-inline-max, tcg/0039)"
+    patch_strict "$ROOT/patches/tcg/0039-ppc-lmw-inline-max.patch"
+  fi
+  find tcg target -name '*.orig' -delete
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0037-0039 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG37_MARKERS'
+tcg/aarch64/tcg-target-has.h TCG_TARGET_HAS_ppc_vfp_cmp
+tcg/aarch64/tcg-target.c.inc PFP_FCVTZS_XD
+tcg/aarch64/tcg-target.c.inc pfp_lsl(s, t, xb, 1)
+target/ppc/cpu_init.c x-lmw-inline-max
+TCG37_MARKERS
 fi
 
 # --- 4 undevicies. Tablette USB pour Tiger 10.4.11 (x-abs-margin) ---
@@ -1397,7 +1422,8 @@ if [ "$BDIR" != build ]; then
       *,pgo,*|*,pgo-gen,*) echo "pgo_dir=$PGO_DIR"
                            echo "gcda=$(find "$PGO_DIR" -maxdepth 1 -name '*.gcda' 2>/dev/null | wc -l)" ;;
     esac
-    echo "cpu=$(sed -n 's/^model name[[:space:]]*: *//p' /proc/cpuinfo 2>/dev/null | head -1)"
+    echo "cpu=$({ sed -n 's/^model name[[:space:]]*: *//p' /proc/cpuinfo 2>/dev/null
+                 sysctl -n machdep.cpu.brand_string 2>/dev/null; } | head -1)"
     echo "march=$(${CC:-cc} -march=native -Q --help=target 2>/dev/null | awk '$1=="-march=" {print $2; exit}')"
     echo "serie=$(pomppc_serie_hash "$ROOT/patches")"
     echo "pomppc=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)"

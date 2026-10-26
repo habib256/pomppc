@@ -15,10 +15,12 @@
 # suite (vfptest vmxtest lmwtest tbtest smctest jctest + atomtest), ou tout autre
 # nom de tools/guest/jobs/ (stage.sh).
 # Variables : SMP (défaut 1), PPC32MT=1 (SMP sur qemu-system-ppc ; sinon ppc64),
+# CPU_BASE / TCG_BASE (remplacent les options de production du PC, p. ex. celles du M4),
 # CPU_EXTRA (propriétés de CPU en plus, p. ex. les vérificateurs), TCG_EXTRA,
 # QEXTRA (arguments QEMU), FR/REPS (t2bench), REPS/ATOMN (mtbench), TIMEOUT.
 # Sorties : bench/ppc32mt/<ÉTIQUETTE>/ du worktree : run.log, qemu.log,
 # <job>.log (sortie du job), <job>.perf (perf stat), <job>-out/.
+# macOS (M4, docs/parite-m4-2510.md) : pas de perf, seulement le temps de chaque job.
 set -u
 WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$WT"
@@ -29,13 +31,14 @@ QB="${QEMU_BIN:?QEMU_BIN requis}"
 export SMP="${SMP:-1}" PPC32MT="${PPC32MT:-}"
 OUT="$WT/bench/ppc32mt/$TAG"; mkdir -p "$OUT"
 DL="$WT/tools/guest/devloop.py"
-CPU="x-fast-fp=on,x-sr-tlb=on,x-lfs-inline=on,x-vfp-fast=on,x-vperm-fast=on,x-vmx-inline=on,x-vfp-native=on,x-lmw-vector=on,x-fp-inline=on,x-fp-native=on,x-fp-native64=on,x-fp-native-cmp=on,x-fp-known=on,x-fprf-lazy=on,x-stfs-known=on,x-vfp-native-cmp=on,x-tb-fast=on,x-ret-inline=on,x-jc-idx=on,x-icbi-sync=on,x-msr-nobql=on,x-tlb-precise=on,x-lmw-inline=on,x-dcbz-inline=on,x-dirty-skip=on,x-pteg-map=on"
-TCG="x-jit-near=on,x-jit-rel32=on,x-jc-bits=14,x-jc-word=on,x-jc-2way=on"
+CPU="${CPU_BASE:-x-fast-fp=on,x-sr-tlb=on,x-lfs-inline=on,x-vfp-fast=on,x-vperm-fast=on,x-vmx-inline=on,x-vfp-native=on,x-lmw-vector=on,x-fp-inline=on,x-fp-native=on,x-fp-native64=on,x-fp-native-cmp=on,x-fp-known=on,x-fprf-lazy=on,x-stfs-known=on,x-vfp-native-cmp=on,x-tb-fast=on,x-ret-inline=on,x-jc-idx=on,x-icbi-sync=on,x-msr-nobql=on,x-tlb-precise=on,x-lmw-inline=on,x-dcbz-inline=on,x-dirty-skip=on,x-pteg-map=on}"
+TCG="${TCG_BASE:-x-jit-near=on,x-jit-rel32=on,x-jc-bits=14,x-jc-word=on,x-jc-2way=on}"
 [ -n "${CPU_EXTRA:-}" ] && CPU="$CPU,$CPU_EXTRA"
 [ -n "${TCG_EXTRA:-}" ] && TCG="$TCG,$TCG_EXTRA"
 
-if fuser "$DISK" >/dev/null 2>&1; then
-  echo "⚠ $DISK est tenu par un autre processus (fuser) : abandon"; fuser -v "$DISK"; exit 1
+# lsof et pas fuser : celui de macOS rend 0 même quand personne ne tient le fichier
+if [ -n "$(lsof -t "$DISK" 2>/dev/null)" ]; then
+  echo "⚠ $DISK est tenu par un autre processus : abandon"; lsof "$DISK"; exit 1
 fi
 [ -f bench/devloop/mailbox.json ] || { echo "⚠ bench/devloop/mailbox.json absent (le copier du dépôt)"; exit 1; }
 python3 - "$DISK" <<'PY'
@@ -53,7 +56,7 @@ DEVDISK="$DISK" QEMU_BIN="$QB" CPU_OPTS="$CPU" TCG_OPTS="$TCG" SSH_PORT=0 \
   EGL_PLATFORM=device QEMU_EXTRA="${QEXTRA:-}" \
   python3 "$DL" start 2>&1 | tail -3 | tee -a "$OUT/run.log"
 PID=$(cat bench/devloop/qemu.pid)
-echo "pid $PID : $(tr '\0' ' ' < /proc/$PID/cmdline | cut -c1-200)" >> "$OUT/run.log"
+echo "pid $PID : $(ps -o command= -p "$PID" | cut -c1-200)" >> "$OUT/run.log"
 
 # Sonde de l'agent (devloop start perd parfois sa frappe : docs/tcg-g4.md §30.5)
 PROBE="$OUT/probe-job"; mkdir -p "$PROBE"
@@ -98,24 +101,36 @@ EOF
          tools/guest/jobs/mtbench/atomtest.c "$J/"
       printf 'DUREE=%s\nATOMN=%s\nGLFR=%s\nGLPAUSE=%s\n' "${DUREE:-3600}" "${ATOMN:-1000000}" \
         "${GLFR:-60}" "${GLPAUSE:-20}" > "$J/env.sh" ;;
+    fpk-suite)
+      # preuves invitées de 0045-0047, 0051, 0052 (docs/parite-m4-2510.md §5)
+      sh tools/guest/jobs/stage.sh fpk-suite "$J" > /dev/null
+      cp tools/guest/jobs/fptest/fptest.c tools/guest/jobs/tlbbtest/tlbbtest.c "$J/"
+      [ -n "${NK:-}${LFIN:-}${N:-}" ] &&
+        printf 'NK=%s\nLFIN=%s\nN=%s\n' "${NK:-4096}" "${LFIN:-100000000}" "${N:-20000}" > "$J/env.sh" ;;
     t2bench)
       sh tools/guest/jobs/stage.sh t2bench "$J" > /dev/null
       printf 'FR=%s\nREPS=%s\n' "${FR:-150}" "${REPS:-3}" > "$J/env.sh" ;;
     *)
-      sh tools/guest/jobs/stage.sh "$JOB" "$J" > /dev/null ;;
+      # les sources C du job, et JOBENV (lignes VAR=valeur séparées par « ; ») en env.sh
+      sh tools/guest/jobs/stage.sh "$JOB" "$J" > /dev/null
+      cp tools/guest/jobs/"$JOB"/*.c "$J/" 2>/dev/null
+      [ -n "${JOBENV:-}" ] && printf '%s\n' "$JOBENV" | tr ';' '\n' > "$J/env.sh" ;;
   esac
-  perf stat -x, -e instructions:u,cycles:u,task-clock -p "$PID" -o "$OUT/$JOB.perf" &
-  PP=$!
-  t0=$(date +%s.%N)
+  PP=
+  if command -v perf >/dev/null; then
+    perf stat -x, -e instructions:u,cycles:u,task-clock -p "$PID" -o "$OUT/$JOB.perf" &
+    PP=$!
+  fi
+  t0=$(python3 -c 'import time; print(time.time())')
   DEVDISK="$DISK" python3 "$DL" run "$J" --timeout "${TIMEOUT:-2400}" > "$OUT/$JOB.log" 2>&1
   rc=$?
-  t1=$(date +%s.%N)
-  kill -INT "$PP" 2>/dev/null; wait "$PP" 2>/dev/null
+  t1=$(python3 -c 'import time; print(time.time())')
+  [ -n "$PP" ] && { kill -INT "$PP" 2>/dev/null; wait "$PP" 2>/dev/null; }
   echo "job $JOB : code $rc, $(python3 -c "print('%.1f' % ($t1 - $t0))") s" | tee -a "$OUT/run.log"
   d=$(sed -n 's/^→ //p' "$OUT/$JOB.log" | tail -1)
   [ -n "$d" ] && [ -d "$d" ] && { rm -rf "$OUT/$JOB-out"; cp -rf "$d" "$OUT/$JOB-out"; }
   grep -a '^mt \|^passe\|^atom\|^ncpu\|^charge\|^releve' "$OUT/$JOB.log" | tee -a "$OUT/run.log" > /dev/null
-  grep -v '^#' "$OUT/$JOB.perf" | sed '/^$/d' | sed "s/^/perf $JOB /" >> "$OUT/run.log"
+  [ -f "$OUT/$JOB.perf" ] && grep -v '^#' "$OUT/$JOB.perf" | sed '/^$/d' | sed "s/^/perf $JOB /" >> "$OUT/run.log"
 done
 
 DEVDISK="$DISK" python3 "$DL" shutdown >> "$OUT/run.log" 2>&1

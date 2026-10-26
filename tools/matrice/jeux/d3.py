@@ -42,7 +42,17 @@ def fin_cinematique(rows):
     if z < 5000:
         return None
     a0 = min(x for x in rows if x >= z - 400)
-    s = 0.8 * (rows[z][0] - rows[a0][0]) / (z - a0)
+    niveau = (rows[z][0] - rows[a0][0]) / (z - a0)
+    # 26/10 (M4, docs/parite-m4-2510.md §5.7) : la cinématique tourne au plafond du moteur
+    # (~17,5 ms/image) ; un chargement plus rapide pousse le niveau au-delà de l'image 5000,
+    # et les 400 dernières images, encore dans la cinématique, donnaient un faux niveau
+    # (fenêtre dans la cinématique, partie arrêtée avant le niveau). Le niveau doit être
+    # nettement plus lent que la cinématique (1500..2100) ; sinon on attend.
+    if all(x in rows for x in (1500, 2100)):
+        cine = (rows[2100][0] - rows[1500][0]) / 600
+        if niveau < 1.25 * cine:
+            return None
+    s = 0.8 * niveau
     for f in sorted(rows):
         a = f - 600
         if a < 1500 or any(x not in rows for x in (a, a + 200, a + 400)):
