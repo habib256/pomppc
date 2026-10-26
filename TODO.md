@@ -110,9 +110,9 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   0031-0039, 0045-0047, 0051, 0052, 0040-0043 prouvés sur le M4 au niveau du PC (disque de dev
   10.4.11), **tous allumés sur `Darwin:arm64`** après A/B, hôte au repos : DOOM 3 −23,9 %
   (42,3 → 32,2 ms/image), UT2004 −18,6 %, Marble Blast −22,7 %. **0037 corrigé** en route (diviseur
-  nul sous `PFP_K_B`) ; 0037-0039 posés par `build_qemu_qfb.sh` après 0052. Restent ouverts : le
-  talon de `vcf*` jamais couvert (§5.3, les deux hôtes) ; le mutant n° 14 de 0052, équivalent sur
-  arm64 (§5.5).
+  nul sous `PFP_K_B`) ; 0037-0039 posés par `build_qemu_qfb.sh` après 0052. Talon de `vcf*`
+  couvert le 26/10 par `tcg/0054` (`x-vfp-native-cmp-slow`, les deux hôtes ; mutants 21/21, §5.9).
+  Reste : le mutant n° 14 de 0052, équivalent sur arm64 (§5.5), rien à faire.
 - [x] **[TCG — PC] 0052 TLB par base, 0053 AltiVec flottant connu** (25/10) : 0052 fusionné et
   allumé (DOOM 3 −2,2 %) ; 0053 juste mais neutre en jeu, non fusionné (`archive/0053-vfp-known`).
   Rangements de 0052 (piste par compteur de génération, §41.7) : ouvert.
