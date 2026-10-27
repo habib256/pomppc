@@ -119,6 +119,16 @@ const char *pomppc_proc_name(int slot)
     return (slot >= 0 && slot < PROC_COUNT) ? n[slot] : "?";
 }
 
+/* POMPPC_GL_T3DDUMP lu une fois (A5) : le getenv de Darwin 8 balaie environ à
+   chaque appel, et gldCreateTextureLevel le payait à chaque niveau de texture. */
+static int t3d_dump(void)
+{
+    static int on = -1;
+    if (on < 0)
+        on = getenv("POMPPC_GL_T3DDUMP") != 0;
+    return on;
+}
+
 static void dump_vertices(const char *tag, const unsigned char *v, unsigned long n)
 {
     unsigned long i;
@@ -253,7 +263,7 @@ static void trace_proc(int id, unsigned long *a)
             pomppc_dump("swap-depth", (void *)GLD_U32(ctx, 0x88), w * h * 4);
         if (GLD_U32(ctx, 0x74))
             pomppc_dump("swap-color", (void *)GLD_U32(ctx, 0x74), w * h * 4);
-        if (getenv("POMPPC_GL_T3DDUMP")) {
+        if (t3d_dump()) {
             /* Sonde des cibles de texture (docs/re/textures-3d.md) : état GL
                entier, table des textures liées de l'unité 0 (5 cibles), et
                chaque objet texture lié avec ses paramètres et ses données. */
@@ -691,7 +701,7 @@ long gldDeleteTexture(long a, long b, long c, long d, long e, long f, long g, lo
 long gldCreateTextureLevel(long a, long b, long c, long d, long e, long f, long g, long h)
 {
     long r;
-    if (getenv("POMPPC_GL_T3DDUMP")) {
+    if (t3d_dump()) {
         /* Sonde (docs/re/textures-3d.md) : arguments bruts, et 0x80 octets
            derrière chacun qui ressemble à un pointeur. */
         long v[8] = { a, b, c, d, e, f, g, h };
