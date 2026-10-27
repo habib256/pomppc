@@ -42,7 +42,7 @@ sys.path.insert(0, ICI)
 from hmp import hmp, hmp_suite, mots          # noqa: E402
 import serie                                  # noqa: E402
 import memoire                                # noqa: E402
-from symbolise import (MAIN, WT, Symboliseur, adresses_du_texte, court,  # noqa: E402
+from symbolise import (INVITE, MAIN, WT, Symboliseur, adresses_du_texte, court,  # noqa: E402
                        lit_kextstat)
 
 BASE = os.environ.get("ENDURANCE_BASE", os.path.join(MAIN, "disks", "tiger-endurance.qcow2"))
