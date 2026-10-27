@@ -773,3 +773,65 @@ L'A/B est neutre ou contraire : DOOM 3 +1,9 % (-O2) et −0,5 % (rapide), UT2004
 retiré n'était pas sur le chemin critique (contrôles par voie recouverts par la latence de la FMA et
 des rangements). Le patch s'applique par-dessus 0052 dans `~/src/qemu-combo` (deux
 conflits de contexte résolus).
+
+## 18. Profil en temps réel du 27/10 : l'attente mémoire, pas le compte d'instructions
+
+Le binaire rapide a été reconstruit le 27/10 avec 0037-0039, 0054, 0055 et l'éclairage des spots, PGO pris sur les jeux. DOOM 3 sur hôte au repos : 77,6 / 80,0 / 80,9, **médiane 80,0 ms/image** (`bench/tcg/ab/fast-2710-d3`). C'est le niveau du 25/10 (79,0).
+
+Le contrôle des quatre jeux en fenêtre avec vidage (`fast-2710-controle`) donne des images toutes justes. Sa vitesse ne compte pas : une construction tournait à côté.
+
+### 18.1 Plafond de « l'opérande connu partout » (`fpk-ceil-2710`)
+
+Mesure faite dans l'arbre `~/src/qemu-ceil` avec `patches/diag/0001`. `POMPPC_FPK_CEIL` tient pour connus tous les opérandes de `x-fp-known`, d'où qu'ils viennent (`1`), puis aussi la porte FPSCR (`2`). C'est faux par construction : c'est la borne haute d'un levier qui ferait vivre « connu » au-delà du bloc.
+
+| bras (binaire -O2, sans PGO) | parties | médiane | écart |
+|---|---|---|---|
+| `ref` | 88,1 / 88,9 / 86,5 | 88,1 | — |
+| `c1` (opérandes) | 86,5 / 88,0 / 86,2 | 86,5 | −1,8 % |
+| `c2` (+ porte) | 83,2 / 85,0 / 85,3 | 85,0 | −3,5 % |
+
+Même sans aucun test, le gain est d'au plus environ 3,5 %. Les tests sont donc hors du chemin critique, comme les contrôles retirés par 0053 (§17). **Levier écarté.**
+
+### 18.2 Auto-profileur (`perf` bloqué : `perf_event_paranoid` = 4)
+
+`POMPPC_SELFPROF` (`patches/diag/0001`) fait noter à chaque fil vCPU le `rip` interrompu, 1 000 fois par seconde de temps CPU, pendant les 30 s de `--sample-hote`. Le même tour pose `-perfmap -d in_asm,out_asm -dfilter` sur les blocs chauds (`bench/tcg/t2/d3-dfilter-2410.txt`). `tools/tcg/selfprof.py` rend alors chaque échantillon à son instruction x86, à l'instruction invitée et à l'opcode qui l'ont produite.
+
+Résultats dans `bench/tcg/ab/x86-sp-2710/selfprof.txt` : 31 591 échantillons, soit 1,05 cœur de vCPU.
+
+**Où va le temps :**
+- **code généré : 79,7 %** ;
+- fonctions de QEMU : 18,6 %, dont environ 4,7 % de recherche de blocs (`qht_lookup_custom`, `tb_lookup`, `helper_lookup_tb_ptr`…), environ 4,5 % de softmmu hors ligne et 1,7 % pour `vperm` ;
+- ailleurs : 1,6 %.
+
+**Code généré, en temps et non en compte d'instructions.** Sur les échantillons couverts par le journal (46 % du code généré) :
+
+| poste | part du temps | à comparer : part du code x86 (§15, 27/10) |
+|---|---|---|
+| accès mémoire (`lfs`, `lwz`, `lvx`, `stfs`, `stw`, `lmw`/`stmw`, formes x) | **≈ 42 %** | ≈ 40 % |
+| arithmétique flottante scalaire (`fmadds`, `fmuls`, `fadds`, `fsubs`, `fmsubs`, `fcmpu`) | ≈ 24 % | ≈ 26 % |
+| AltiVec (`vmx`) | 7,4 % | 13,5 % |
+| branchements (`bclr`, `bc`, `bcctr`, `b`) | ≈ 10 % | ≈ 6 % |
+
+**Les instructions interrompues sont celles qui attendent un chargement :**
+- le `mov [rbp+X], reg` qui range dans l'état le résultat d'un `lwz` (8 % de `lwz` sur la seule instruction n° 17) ;
+- le `lea R, [R*2 - 0x1000000]` qui suit le chargement d'un `lfs` ;
+- le chargement de l'adend du TLB logiciel (`mov R, [R+0x18]`) ;
+- les `vmovq` entre registres généraux et XMM, autour des conversions.
+
+Le temps est donc surtout de **la latence mémoire** des données de l'invité. Ce n'est pas du code en trop, ce qui explique que retirer des instructions hors du chemin critique ne rapporte presque rien (§17, §18.1). C'est aussi une explication plausible, non prouvée, du rapport d'environ 2,5 avec le M4 : ses caches sont bien plus gros (16 Mio de L2) que ceux de l'i7-10700F (256 Kio de L2 par cœur).
+
+### 18.3 Le TLB logiciel tient dans les caches (`tlbhuge-2710`)
+
+`POMPPC_TLB_LOG` : sous DOOM 3, la table du TLB rapide ne dépasse jamais **8 192 entrées (256 Kio)**. Elle est redimensionnée 92 à 332 fois par partie. Le bras « pages énormes », réservé aux tables de 2 Mio et plus, n'a donc jamais servi : **les deux bras exécutaient le même code**.
+
+Le bilan donne pourtant `huge` 88,2 contre `ref` 90,7 (−2,8 %), les trois parties d'un bras sous les trois de l'autre. **C'est le bruit de fond réel de l'A/B à trois parties** : dérive de l'hôte, ou disposition mémoire changée par l'environnement. Désormais, un gain inférieur à environ 3 % sur trois parties par bras ne prouve rien ; il faut six parties ou plus, ou un bras témoin identique.
+
+### 18.4 Ce qui reste pour 50 ms
+
+Le chemin vers 50 ms/image, soit −37 %, ne passe plus par le retrait d'instructions isolées.
+- **Moins d'accès mémoire par instruction invitée.**
+  - Les registres de l'invité (GPR, FPR) passent par `env` à chaque bloc.
+  - Chaque `lwz` range son résultat dans `env` et le relit souvent juste après, et le chargement attendu bloque ce rangement.
+  - Garder les registres dans des registres de l'hôte au-delà d'une instruction, en allocation par bloc, relève du traducteur de second niveau, qui a déjà échoué sous la forme des traces (§9 du plan).
+- **Recherche de blocs et sorties indirectes** (environ 5 % hors du code, plus `bclr`/`bcctr` dans le code).
+- **Un profil `perf` avec les compteurs matériels** (ratés L1/L2/LLC par bloc, `perf mem`) pour confirmer l'attente mémoire. Il faut `kernel.perf_event_paranoid=1`.

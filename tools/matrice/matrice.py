@@ -533,7 +533,15 @@ class Cellule:
                 if q:
                     # à la racine de la cellule : le rapatriement remplace <sous>/
                     os.makedirs(self.dir, exist_ok=True)
-                    if sys.platform == "darwin":
+                    sp = os.environ.get("POMPPC_SELFPROF")
+                    if sp:
+                        # auto-profileur de QEMU (sans perf, docs/vitesse-doom3-x86.md §18) :
+                        # les fils vCPU notent leur rip tant que <préfixe>.on existe
+                        open(sp + ".on", "w").close()
+                        time.sleep(self.sample_hote_s)
+                        os.unlink(sp + ".on")
+                        time.sleep(2)
+                    elif sys.platform == "darwin":
                         subprocess.run(["sample", q[0], str(self.sample_hote_s), "-file",
                                         os.path.join(self.dir, "sample-hote-%s.txt" % self.sous)],
                                        capture_output=True)

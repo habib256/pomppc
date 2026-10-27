@@ -1,0 +1,246 @@
+--- a/accel/tcg/tcg-accel-ops-mttcg.c	2026-10-20 11:48:09.150769197 +0400
++++ b/accel/tcg/tcg-accel-ops-mttcg.c	2026-10-27 23:44:33.136090001 +0400
+@@ -63,6 +63,113 @@
+  * current CPUState for a given thread.
+  */
+ 
++/*
++ * POMPPC auto-profileur (diagnostic, 27/10/2026, sans perf) : POMPPC_SELFPROF=PREFIXE.
++ * Chaque fil vCPU arme un minuteur sur son temps CPU (1 kHz, SIGPROF) ; le gestionnaire
++ * note le rip interrompu tant que le fichier PREFIXE.on existe (sondé par un fil toutes
++ * les 200 ms). À l'effacement du fichier, les rip sont écrits dans PREFIXE.<tid>.bin
++ * (u64 petit-boutiens).
++ */
++#include <signal.h>
++#include <time.h>
++#include <ucontext.h>
++#define SP_MAX 4
++#define SP_N (1 << 21)
++static const char *sp_prefix;
++static int sp_on;
++static struct { pid_t tid; uint64_t *buf; unsigned n; } sp_thr[SP_MAX];
++static unsigned sp_nthr;
++static __thread int sp_idx = -1;
++
++static void sp_handler(int sig, siginfo_t *si, void *ucv)
++{
++    ucontext_t *uc = ucv;
++    int i = sp_idx;
++    if (i < 0 || !qatomic_read(&sp_on)) {
++        return;
++    }
++    unsigned n = sp_thr[i].n;
++    if (n < SP_N) {
++        sp_thr[i].buf[n] = uc->uc_mcontext.gregs[REG_RIP];
++        sp_thr[i].n = n + 1;
++    }
++}
++
++static void *sp_poller(void *arg)
++{
++    g_autofree char *on = g_strdup_printf("%s.on", sp_prefix);
++    for (;;) {
++        bool f = access(on, F_OK) == 0;
++        if (f && !sp_on) {
++            for (unsigned i = 0; i < sp_nthr; i++) {
++                sp_thr[i].n = 0;
++            }
++            qatomic_set(&sp_on, 1);
++        } else if (!f && sp_on) {
++            qatomic_set(&sp_on, 0);
++            g_usleep(10000);
++            for (unsigned i = 0; i < sp_nthr; i++) {
++                g_autofree char *fn = g_strdup_printf("%s.%d.bin", sp_prefix,
++                                                      (int)sp_thr[i].tid);
++                FILE *fp = fopen(fn, "wb");
++                if (fp) {
++                    fwrite(sp_thr[i].buf, 8, sp_thr[i].n, fp);
++                    fclose(fp);
++                }
++            }
++        }
++        g_usleep(200000);
++    }
++    return NULL;
++}
++
++static void sp_thread_start(void)
++{
++    static QemuMutex lock;
++    static bool init;
++    struct sigevent sev = { 0 };
++    struct itimerspec its = { { 0, 1000000 }, { 0, 1000000 } };
++    timer_t t;
++
++    if (!sp_prefix) {
++        sp_prefix = getenv("POMPPC_SELFPROF");
++        if (!sp_prefix || !*sp_prefix) {
++            sp_prefix = "";
++        }
++    }
++    if (!*sp_prefix) {
++        return;
++    }
++    if (!qatomic_xchg(&init, true)) {
++        struct sigaction sa = { 0 };
++        QemuThread th;
++        qemu_mutex_init(&lock);
++        sa.sa_sigaction = sp_handler;
++        sa.sa_flags = SA_SIGINFO | SA_RESTART;
++        sigemptyset(&sa.sa_mask);
++        sigaction(SIGPROF, &sa, NULL);
++        qemu_thread_create(&th, "selfprof", sp_poller, NULL, QEMU_THREAD_DETACHED);
++    }
++    if (sp_nthr >= SP_MAX) {
++        return;
++    }
++    {
++        sigset_t ss;
++        sigemptyset(&ss);
++        sigaddset(&ss, SIGPROF);
++        pthread_sigmask(SIG_UNBLOCK, &ss, NULL);   /* qemu_thread_create bloque tout */
++    }
++    sp_thr[sp_nthr].tid = qemu_get_thread_id();
++    sp_thr[sp_nthr].buf = g_new0(uint64_t, SP_N);
++    sp_idx = sp_nthr++;
++    sev.sigev_notify = SIGEV_THREAD_ID;
++    sev.sigev_signo = SIGPROF;
++    sev._sigev_un._tid = qemu_get_thread_id();
++    if (timer_create(CLOCK_THREAD_CPUTIME_ID, &sev, &t) == 0) {
++        timer_settime(t, 0, &its, NULL);
++    }
++}
++
+ static void *mttcg_cpu_thread_fn(void *arg)
+ {
+     MttcgForceRcuNotifier force_rcu;
+@@ -84,6 +191,7 @@
+     cpu->neg.can_do_io = true;
+     current_cpu = cpu;
+     cpu_thread_signal_created(cpu);
++    sp_thread_start();
+     qemu_guest_random_seed_thread_part2(cpu->random_seed);
+ 
+     do {
+--- a/accel/tcg/cputlb.c	2026-10-21 18:25:00.962751387 +0400
++++ b/accel/tcg/cputlb.c	2026-10-27 23:54:03.756775651 +0400
+@@ -18,6 +18,9 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/units.h"
++#include "qemu/madvise.h"
++#include "qemu/memalign.h"
+ #include "qemu/main-loop.h"
+ #include "qemu/target-info.h"
+ #include "accel/tcg/cpu-loop.h"
+@@ -202,6 +205,37 @@
+  * high), since otherwise we are likely to have a significant amount of
+  * conflict misses.
+  */
++/* POMPPC mesure (27/10) : table du TLB rapide en pages énormes, journal des tailles */
++static int pomppc_tlb_env(const char *n)
++{
++    const char *e = getenv(n);
++    return e ? atoi(e) : 0;
++}
++
++static CPUTLBEntry *pomppc_tlb_alloc(size_t n, int mmu_hint)
++{
++    static int huge = -1, logt = -1;
++    size_t sz = n * sizeof(CPUTLBEntry);
++    void *p;
++
++    if (huge < 0) {
++        huge = pomppc_tlb_env("POMPPC_TLB_HUGE");
++        logt = pomppc_tlb_env("POMPPC_TLB_LOG");
++    }
++    if (logt) {
++        fprintf(stderr, "pomppc-tlb: table %zu entrées (%zu Kio)\n", n, sz >> 10);
++    }
++    if (huge && sz >= 2 * MiB) {
++        p = qemu_try_memalign(2 * MiB, sz);
++        if (p) {
++            qemu_madvise(p, sz, QEMU_MADV_HUGEPAGE);
++        }
++    } else {
++        p = qemu_try_memalign(64, sz);
++    }
++    return p;
++}
++
+ static void tlb_mmu_resize_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast,
+                                   int64_t now)
+ {
+@@ -246,13 +280,13 @@
+         return;
+     }
+ 
+-    g_free(fast->table);
++    qemu_vfree(fast->table);
+     g_free(desc->fulltlb);
+ 
+     tlb_window_reset(desc, now, 0);
+     /* desc->n_used_entries is cleared by the caller */
+     fast->mask = (new_size - 1) << CPU_TLB_ENTRY_BITS;
+-    fast->table = g_try_new(CPUTLBEntry, new_size);
++    fast->table = pomppc_tlb_alloc(new_size, 0);
+     desc->fulltlb = g_try_new(CPUTLBEntryFull, new_size);
+ 
+     /*
+@@ -270,9 +304,9 @@
+         new_size = MAX(new_size >> 1, 1 << CPU_TLB_DYN_MIN_BITS);
+         fast->mask = (new_size - 1) << CPU_TLB_ENTRY_BITS;
+ 
+-        g_free(fast->table);
++        qemu_vfree(fast->table);
+         g_free(desc->fulltlb);
+-        fast->table = g_try_new(CPUTLBEntry, new_size);
++        fast->table = pomppc_tlb_alloc(new_size, 0);
+         desc->fulltlb = g_try_new(CPUTLBEntryFull, new_size);
+     }
+ }
+@@ -326,7 +360,8 @@
+     tlb_window_reset(desc, now, 0);
+     desc->n_used_entries = 0;
+     fast->mask = (n_entries - 1) << CPU_TLB_ENTRY_BITS;
+-    fast->table = g_new(CPUTLBEntry, n_entries);
++    fast->table = pomppc_tlb_alloc(n_entries, 0);
++    g_assert(fast->table);
+     desc->fulltlb = g_new(CPUTLBEntryFull, n_entries);
+     tlb_mmu_flush_locked(desc, fast);
+ }
+@@ -365,7 +400,7 @@
+         CPUTLBDesc *desc = &cpu->neg.tlb.d[i];
+         CPUTLBDescFast *fast = cpu_tlb_fast(cpu, i);
+ 
+-        g_free(fast->table);
++        qemu_vfree(fast->table);
+         g_free(desc->fulltlb);
+     }
+ }
+--- a/target/ppc/translate/fp-impl.c.inc	2026-10-25 02:21:13.325516827 +0400
++++ b/target/ppc/translate/fp-impl.c.inc	2026-10-27 22:37:08.046502295 +0400
+@@ -583,6 +583,22 @@
+     if (!ctx->fp_known || ctx->base.plugin_enabled) {
+         return 0;
+     }
++    /* MESURE SEULEMENT (plafond, 27/10) : tout tenu pour connu, sans preuve */
++    {
++        static int ceil = -1;
++        if (ceil < 0) {
++            const char *e = getenv("POMPPC_FPK_CEIL");
++            ceil = e ? atoi(e) : 0;
++        }
++        if (ceil) {
++            k = (fra >= 0 ? FPK_A : 0) | (frb >= 0 ? FPK_B : 0) |
++                (frc >= 0 ? FPK_C : 0);
++            if (ceil >= 2) {
++                k |= FPK_G;
++            }
++            return k;
++        }
++    }
+     for (int i = 0; i < 3; i++) {
+         int n = regs[i];
+         if (n >= 0 && (ctx->fpk_valid >> n) & 1) {
