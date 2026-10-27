@@ -36,8 +36,19 @@ class Warcraft3(Jeu):
                 "/Users/tiger/Library/Preferences/Warcraft III Preferences"]
 
     def preparer(self, h, mode):
-        h.ssh("[ -d '/Volumes/Warcraft III' ] || hdiutil attach -readonly -noverify "
-              "'%s/Warcraft III.toast' >/dev/null" % W3, delai=120)
+        # CD hybride Toast : l'autofsck de Tiger 10.4.11 demande confirmation
+        # même en lecture seule (-noverify ne désactive que les checksums).
+        # Une réponse négative borne aussi toute autre question de hdiutil :
+        # sur stdin fermé, il répétait sa question jusqu'au timeout SSH.
+        code, sortie = h.ssh(
+            "[ -d '/Volumes/Warcraft III' ] || "
+            "{ printf 'n\\n' | hdiutil attach -readonly -noverify -noautofsck "
+            "'%s/Warcraft III.toast' 2>&1; }; "
+            "r=$?; [ \"$r\" -eq 0 ] && [ -d '/Volumes/Warcraft III' ]" % W3,
+            delai=120)
+        if code:
+            raise RuntimeError("CD Warcraft III non monté (code %s) : %s" %
+                               (code, sortie[-2000:].strip()))
 
     def nettoyer(self, h, mode):
         h.ssh("hdiutil detach '/Volumes/Warcraft III' >/dev/null 2>&1; true", delai=60)

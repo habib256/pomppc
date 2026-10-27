@@ -100,6 +100,9 @@ own**. No Apple ROM is needed: OpenBIOS boots Tiger. Nothing of Apple's is distr
 Each launcher documents its variables in its header (`head -70 run_tiger.sh`): `GPU=0`,
 `FASTFP=0`, `NET=0`, `SNAPSHOT=1` (throw-away disk), `QFB=1` (second monitor), and more.
 Mac OS 9.2.2 runs with `./run_os9.sh` (single core, no 3D).
+Experimental CPU profiles from Tiger are available with
+`OS9_PROFILE=complet SNAPSHOT=1 ./run_os9.sh disk`; the default remains the
+standard `g4` profile. Scope and evidence: [OS 9 CPU profiles](docs/os9-optimisations-cpu.md).
 
 **Compatibility.** Tested with Tiger **10.4.6**, the build whose `OpenGL.framework` was
 reverse-engineered (`docs/re/`). Other 10.4.x updates are untested; the plugin reads

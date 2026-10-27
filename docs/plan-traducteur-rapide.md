@@ -430,6 +430,7 @@ réglage** : à confirmer en entrelacé (et sur DOOM 3, commande 3 du §8.5).
 2. A/B entrelacé sur la VM de dev, puis DOOM 3 sur la VM quotidienne (§8.5).
 3. Arêtes et code x86 de DOOM 3 (§8.5, 1 et 2) pour trancher la phase 2.
 4. Pendant arm64 : construire et prouver sur le M4.
+   Séance commencée le 26/10 : voir §9.8 (condition split-wx et correction du vérificateur).
 5. Leviers suivants du même niveau : traverser les retours appariés (`bl` … `blr` dans la
    trace), traces sur deux pages, soupape pour les traces dont une sortie latérale est chaude.
 
@@ -599,3 +600,134 @@ vers ~75 ms/image, pas 50.
 Contrôle du binaire rapide reconstruit avec 0048 corrigé (`bench/tcg/ab/fast-2110b`, 3
 parties, non entrelacé) : 92,3 / 96,9 / 92,6 ms/image, médiane **92,6** (95,5 le matin) : pas de
 régression du garde `t2_check_foreign` x-tier2 éteint.
+
+### 9.8 Pendant M4 (26/10) : split-wx et rejeu exact des instructions
+
+Le binaire quotidien contient déjà `0048` corrigé. Le banc `t2proof.sh` est désormais
+exécutable sur macOS : `t2proof-assemble.py` conserve les outils GNU sur Linux et emploie
+l'assembleur PowerPC de Tiger par `tools/guest/tssh.sh` sur le M4. Adaptation de syntaxe
+uniquement (`%r`/`%f`, répétitions constantes), liaison des branches, extraction de `__text`
+d'un exécutable Mach-O sans relocations. `T2PROOF_ROM` permet de réutiliser la ROM et
+`T2PROOF_OUT=/tmp/…` conserve les journaux ; l'arrêt d'un processus de banc bloqué est borné.
+
+**Premier défaut, avant toute instruction invitée :** `gen_t2_counter` écrit dans l'en-tête
+du TB. Sur le M4, ce TB appartient à `MAP_JIT`, protégé en écriture pendant l'exécution :
+le vCPU boucle sur le store du compteur (échantillon et code émis dans
+`bench/tcg/t2/m4-proof-2610/`). La même ROM termine avec `split-wx=on`, dont la vue RW permet
+ces écritures. Le lanceur choisit désormais ce mode quand `x-tier2` est demandé sur
+`Darwin:arm64` (réglage `TIER2` ou `CPU_OPTS`), et refuse un `split-wx=off` explicite.
+Le banc applique la même condition. `x-tier2` reste éteint par défaut.
+
+**Deuxième défaut, trouvé par Marble Blast :** image juste, mais 3 349 divergences du
+vérificateur pendant la session initiale. Cas lu dans `gleMultMatrixf` de GLEngine
+(`0x258b604`, trace de 37 instructions, sortie `0x258b698`) : le rejeu reconstruit un TB
+plus long, poursuit au-delà de la sortie de la trace et signale une écriture en trop.
+Les temporaires ajoutés ou supprimés par la journalisation changent les limites de TB.
+Une simple borne à l'adresse de sortie ne suffit pas : une boucle sans mémoire peut
+revisiter cette adresse avant sa dernière itération.
+
+**`tcg/0055-tcg-tier2-replay-insn.patch`**, commun aux deux hôtes, ne touche que le mode
+de preuve : la copie journalisée compte les instructions effectivement exécutées dans
+`CPUState`, hors des pages JIT ; le rejeu exécute exactement ce nombre d'instructions,
+une par TB, avant de comparer le journal et les registres. Le compteur est adressé par
+`tcg_env` (les TB sont partagés entre vCPU), avec un temporaire réutilisé pour ne pas
+épuiser les temporaires TCG. L'ancienne décision d'arrêt « journal consommé et PC égale à
+la sortie » est supprimée. Les accès hors journal restent interdits au rejeu.
+Le comparateur des écritures ne compare que les bits réellement stockés : un `stfs`
+de 32 bits peut avoir des bits hauts différents dans son temporaire i64 selon que la
+conversion est connue dans la trace ou refaite dans le rejeu. Ils ne font pas partie
+de la mémoire invitée écrite. Une phase `-0` du banc nu couvre ce cas.
+
+Preuves natives et mutants : `bench/tcg/t2/m4-proof-2610/proof-zero-final.log`, ROM enrichie
+d'une boucle sans mémoire et d'un calcul flottant droit inspiré de `gleMultMatrixf`, porte
+native amorcée par `1/3`, puis `lfs`/`stfs` de `-0`. Réf. / traces / vérificateur :
+**`0x9780e5cd` identique**, 52 733 traces vérifiées (36 414 identiques, 16 319 non vérifiables),
+**0 divergence**, 2 traces
+raccourcies, **0 copie journalisée coupée**. Mutants 2 et 3 détectés, sommes respectives
+`0xc9fcf362` et `0x3bb2c16a`. Cibles `qemu-system-ppc` et `qemu-system-ppc64` reconstruites.
+
+**SMP OpenBIOS** (`openbios-final.log`, 2 vCPU, `x-tier2=64,x-tier2-verify=2`) :
+438 088 739 traces vérifiées, 438 034 963 identiques, **0 divergence**, 53 770 exceptions,
+6 non vérifiables, aucune copie journalisée manquante ou coupée.
+
+**Tiger et Marble Blast vérifiés** (instantané jetable 10.4.11, 2 vCPU, défauts M4 +
+`TIER2=4096 TIER2VERIFY=64`, `tiger-store.log`) : **32 589 157 traces vérifiées,
+0 divergence**, 29 652 257 identiques, 2 893 798 non vérifiables, 43 102 exceptions,
+116 577 sans copie journalisée (28 copies coupées). Partie complète avec vidage dans
+`bench/tcg/t2/m4-mb-final-2610/` : image juste contre la VM et la référence validée
+**0,00 / 0,00 %**, 20 replis de rafraîchissement de fenêtre (22 admis). Rouge uniquement
+pour la vitesse sous vérificateur (50,9 ms/image, seuil ordinaire 13) : **ce temps n'est
+pas un A/B**. Aucun disque quotidien modifié par les sessions de diagnostic.
+
+`tests/run-all.sh` : **283 OK, 0 échec, 6 ignorés**. Application de 0055 éprouvée sur une
+copie de l'arbre avant patch, scripts acceptés par le bash de macOS.
+
+DOOM 3 vérifié et A/B M4 terminés au §9.9 : les traces restent éteintes après mesure.
+Pour isoler le coût de `x-tier2`, garder `split-wx=on` dans
+les deux bras ; comparer aussi au défaut MAP_JIT avant toute activation.
+Le correctif de preuve est du code commun ; sa réexécution native sur le PC reste à faire.
+
+### 9.9 DOOM 3 et A/B M4 (26/10, suite)
+
+Premier passage quotidien (`bench/tcg/ab/m4-t2-d3-verifie-2610/`, 2 vCPU,
+`TIER2=4096 TIER2VERIFY=64`) : **257 458 862 traces vérifiées, 0 divergence**,
+252 368 722 identiques, 5 016 304 non vérifiables, 73 836 exceptions, 4 248 640 sans
+copie journalisée (103 copies coupées). La cellule expire à 1 504 s, image 5 571,
+sans fenêtre reconnue : pas de mesure ni de preuve d'image pour ce passage. Les compteurs
+`raw_draws` n'incluent pas la voie native VBO active et la sortie du jeu reste tamponnée :
+leurs zéros et les derniers messages de chargement ne prouvent pas un chargement bloqué.
+La pile invitée du passage suivant et l'écran montrent le niveau déjà atteint.
+
+Rejeu à `TIER2VERIFY=256` (`bench/tcg/ab/m4-t2-d3-verifie256-2610/`) : **35 993 633 traces
+vérifiées, 0 divergence**, 34 897 465 identiques, 1 079 486 non vérifiables,
+16 682 exceptions, 441 834 sans copie journalisée (110 copies coupées). La règle de
+fenêtre habituelle suppose une cadence normale : à 1/64, sa tranche témoin 1500..2100
+vaut 287,98 ms/image et les 400 dernières images 288,61, donc son critère de rapport
+1,25 ne passe pas ; à 1/256, le niveau est déjà observé avant son plancher de 5000 images.
+Elle n'est pas utilisée comme preuve de scène sous vérificateur. Niveau Mars City Hangar
+observé à l'écran, joueur immobile ; vidage et capture
+synchronisés à l'image **3128**, analysés par les mêmes outils de la matrice dans
+`bench/tcg/t2/m4-d3-image-2610/d3-fen/` : **20 présentations, 0 erreur de rejeu,
+écart capture 0,00 / 0,00 %, référence validée 0,00 / 0,00 %** (`preuve.json`). La partie
+est ensuite arrêtée volontairement et les réglages restaurés par la matrice : sa ligne
+rouge « jeu quitté avant la scène » décrit l'absence de fenêtre automatique, pas un
+plantage ni un défaut d'image. Aucun temps sous vérificateur n'est pris pour un A/B.
+
+La preuve CPU et l'image acquises, A/B
+entrelacé sur le même binaire de référence : défaut MAP_JIT (`TIER2=0`), split-wx seul
+(`TIER2=0 TCG_OPTS=split-wx=on`), traces (`TIER2=4096 TCG_OPTS=split-wx=on`). Trois
+parties par configuration, ordre ABC/CBA/ABC, hôte au repos avant chaque partie et
+charge enregistrée pendant la campagne. Le coût du mode mémoire et celui des traces
+sont ainsi mesurés séparément. Les traces restent éteintes par défaut pendant cette évaluation.
+
+**Résultats** (`bench/tcg/ab/m4-t2-d3-ab-2610/`, DOOM 3 en fenêtre, 2 vCPU, même
+binaire de référence reconstruit avec 0055, sans PGO ; dépôt `e6a2dcc` + modifications
+locales décrites ci-dessus) :
+
+| configuration | parties (ms/image) | médiane | écart au défaut |
+|---|---|---|---|
+| MAP_JIT, `TIER2=0` (défaut) | 33,343 / 32,086 / 32,066 | **32,086** | — |
+| `split-wx=on`, `TIER2=0` | 32,325 / 32,184 / 31,941 | **32,184** | +0,31 % |
+| `split-wx=on`, `TIER2=4096` | 34,376 / 33,929 / 33,818 | **33,929** | **+5,74 %** |
+
+Les traces coûtent **+5,42 % contre split-wx seul**. Leurs trois parties sont plus lentes
+que les trois parties MAP_JIT et que les trois parties split-wx sans traces. Split-wx
+seul est neutre au niveau du bruit observé (plages qui se recouvrent) : aucun changement
+du mode mémoire par défaut. `x-tier2` reste **éteint sur le M4**, comme sur le PC (§9.6).
+Le levier ne passe pas la porte de gain sur DOOM 3.
+
+Validation des neuf mesures : pas d'autre QEMU ; relevé étranger au plus **0,77 cœur**
+pendant les fenêtres mesurées élargies de dix secondes de chaque côté. Les bornes sont
+reconstruites à partir de `frames.csv` et de l'heure de sortie du jeu ; les pointes
+d'indexation observées hors fenêtre ne servent pas à exclure arbitrairement une partie.
+`analyse-charge.json` conserve les neuf fenêtres et leurs relevés ;
+`bench/tcg/t2/m4-suite-2610/validation-finale.json` confirme le binaire inchangé et le
+placement RX dans la fenêtre de 4 Gio du texte. Les lignes rouges de ces tours sans
+vidage signifient « vitesse et replis seulement » ; la preuve d'image est celle du
+passage vérifié ci-dessus. Aucune divergence CPU signalée sur les passages de preuve.
+
+Environ 38 400 à 39 600 traces formées par partie, 3,5 blocs et 18,4–18,7 instructions
+par trace : même ordre de grandeur que le PC. L'absence de gain est mesurée avec les
+traces effectivement actives. VM quotidienne rendue dans ImGuiDock avec les défauts
+habituels. Le pendant M4 de 0048 est clos ; **reste la réexécution native de 0055 sur
+le PC**, correction de preuve commune aux deux hôtes.

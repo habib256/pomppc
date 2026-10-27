@@ -121,6 +121,76 @@ topb:
         addi    %r2, %r2, 1
         bdnz    topb
 
+        /* Une boucle pure peut revisiter sa PC de sortie sans aucun
+         * accès mémoire : ne pas arrêter le rejeu une itération trop tôt. */
+        li      %r5, 1024
+        mtctr   %r5
+        b       count_loop
+count_loop:
+        addi    %r2, %r2, 1
+        bdnz    count_loop
+
+        /* 3. Calcul flottant droit : comme gleMultMatrixf, le nombre de
+         * temporaires coupe différemment les TB ordinaires et ceux du
+         * rejeu. Celui-ci ne doit pas dépasser la sortie de la trace.
+         * Mémoire distincte : la somme historique ci-dessous ne change pas.
+         */
+        b       fp_start
+        .org    0x1000
+fp_start:
+        li      %r3, 0x2040            /* MSR[FP], mode réel */
+        mtmsr   %r3
+        isync
+        lis     %r3, 0x23
+        lis     %r4, 0x24
+        lis     %r5, 0x25
+        lis     %r20, 0x3f80           /* float 1.0 */
+        .set    i, 0
+        .rept   16
+        stw     %r20, i*4(%r3)
+        stw     %r20, i*4(%r4)
+        .set    i, i+1
+        .endr
+        lis     %r20, 0x4040           /* 3.0 : 1/3 amorce le drapeau inexact */
+        stw     %r20, 4(%r3)
+        lfs     %f0, 0(%r3)
+        lfs     %f1, 4(%r3)
+        fdivs   %f2, %f0, %f1
+        li      %r24, 1024
+fp_loop:
+        .set    i, 0
+        .rept   16
+        lfs     %f0, 0(%r4)
+        lfs     %f13, 0(%r3)
+        lfs     %f10, 4(%r4)
+        fmuls   %f13, %f13, %f0
+        lfs     %f11, 4(%r3)
+        lfs     %f9, 8(%r4)
+        lfs     %f12, 8(%r3)
+        fmadds  %f11, %f11, %f10, %f13
+        lfs     %f0, 12(%r3)
+        lfs     %f13, 12(%r4)
+        fmadds  %f12, %f12, %f9, %f11
+        fmadds  %f0, %f0, %f13, %f12
+        stfs    %f0, i*4(%r5)
+        .set    i, i+1
+        .endr
+        addic.  %r24, %r24, -1
+        bne     fp_loop
+        /* -0 : stfs-known porte des bits hauts dans le temporaire i64,
+         * la conversion complète du rejeu ne garde que le mot écrit.
+         * Le journal doit comparer les 32 bits réellement stockés. */
+        lis     %r20, 0x8000
+        stw     %r20, 0(%r3)
+        li      %r24, 1024
+zero_loop:
+        addi    %r2, %r2, 1
+        b       zero_store
+zero_store:
+        lfs     %f0, 0(%r3)
+        stfs    %f0, 64(%r5)
+        addic.  %r24, %r24, -1
+        bne     zero_loop
         /* somme : buf (72 o) et dst (224 mots) */
         li      %r7, 0
         li      %r5, 18

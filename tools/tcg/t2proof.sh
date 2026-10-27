@@ -8,6 +8,11 @@
 # était coupée par TCG (docs/plan-traducteur-rapide.md §9.5).
 #
 #   tools/tcg/t2proof.sh ~/src/qemu-t2fix/build/qemu-system-ppc
+# Sur macOS, l'assemblage passe par tools/guest/tssh.sh (Tiger démarré).
+# T2PROOF_ROM=… réutilise une ROM déjà assemblée ; T2PROOF_OUT=/tmp/… garde
+# les journaux (chemin court pour les sockets Unix). T2PROOF_CPU=… ajoute
+# des propriétés CPU ; activer x-fast-fp et les leviers natifs pour la phase
+# flottante de régression. Le M4 emploie split-wx, comme run_tiger.sh.
 #
 # Passes : ref (x-tier2=0), t2 (x-tier2=64), verif (x-tier2=64,x-tier2-verify=1),
 # mutant (POMPPC_T2_MUTANT=2 : toutes les sorties latérales « pris » à l'envers,
@@ -20,21 +25,31 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QB="${1:?QEMU_BIN requis}"
-OUT="$(mktemp -d)"
-trap 'rm -rf "$OUT"' EXIT
-powerpc-linux-gnu-as -mregnames -many -o "$OUT/t2proof.o" "$HERE/t2proof.S" || exit 2
-powerpc-linux-gnu-objcopy -O binary "$OUT/t2proof.o" "$OUT/t2proof.bin" || exit 2
+ACCEL=tcg,x-jit-near=on
+# Le compteur de chaleur écrit dans l'en-tête du TB : MAP_JIT interdit
+# ces écritures depuis le code exécuté. La vue RW de split-wx les permet.
+case "$(uname -s):$(uname -m)" in Darwin:arm64) ACCEL="$ACCEL,split-wx=on" ;; esac
+OUT="${T2PROOF_OUT:-$(mktemp -d)}"
+mkdir -p "$OUT"
+[ -n "${T2PROOF_OUT:-}" ] || trap 'rm -rf "$OUT"' EXIT
+if [ -n "${T2PROOF_ROM:-}" ]; then
+    cp "$T2PROOF_ROM" "$OUT/t2proof.bin" || exit 2
+else
+    python3 "$HERE/t2proof-assemble.py" "$OUT/t2proof.bin" || exit 2
+fi
 
 run() {   # run NOM PROPS_CPU [ENV...] → somme sur stdout, bilan dans $OUT/NOM.err
     local name=$1 props=$2; shift 2
     local sock="$OUT/$name.sock"
-    env "$@" "$QB" -M mac99 -cpu "g4${props:+,$props}" -m 256 -smp 1 \
+    env "$@" "$QB" -M mac99 -cpu "g4${props:+,$props}${T2PROOF_CPU:+,$T2PROOF_CPU}" -m 256 -smp 1 \
+        -accel "$ACCEL" \
         -bios "$OUT/t2proof.bin" -display none -serial none -parallel none \
         -nodefaults -audio none -monitor "unix:$sock,server=on,wait=off" \
         > "$OUT/$name.out" 2> "$OUT/$name.err" &
     local pid=$! sum="" t
     for t in $(seq 1 600); do
         sleep 0.5
+        kill -0 $pid 2>/dev/null || break
         [ -S "$sock" ] || continue
         local r
         r=$(python3 "$HERE/hmp.py" "$sock" "xp /2wx 0x3000" 2>/dev/null | tail -1)
@@ -44,7 +59,20 @@ run() {   # run NOM PROPS_CPU [ENV...] → somme sur stdout, bilan dans $OUT/NOM
         fi
         kill -0 $pid 2>/dev/null || break
     done
-    python3 "$HERE/hmp.py" "$sock" "quit" > /dev/null 2>&1
+    python3 - "$HERE/hmp.py" "$sock" <<'PY' > /dev/null 2>&1
+import subprocess, sys
+try:
+    subprocess.run([sys.executable, sys.argv[1], sys.argv[2], "quit"], timeout=5)
+except subprocess.TimeoutExpired:
+    pass
+PY
+    # Un vCPU bloqué dans le code émis peut ignorer quit et SIGTERM.
+    # Ne jamais laisser ce processus de banc derrière nous.
+    for t in $(seq 1 20); do
+        kill -0 $pid 2>/dev/null || break
+        sleep 0.1
+    done
+    kill -0 $pid 2>/dev/null && kill -KILL $pid 2>/dev/null
     wait $pid 2>/dev/null
     echo "${sum:-AUCUNE}"
 }

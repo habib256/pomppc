@@ -70,7 +70,7 @@
 #                             # défaut, sondé : sans le patch, repli sur ppc64 avec un avertissement)
 #   PMUREAL=1 ./run_tiger.sh  # ppc64 : le PMU POWER8 ne compte plus sur un G4 (PMC5 fantôme à chaque
 #                             # sortie de bloc, x-pmu-real, patches/tcg/0049 ; éteint par défaut)
-#   TIER2=4096 ./run_tiger.sh # juste mais +3,3 % sur DOOM 3 (docs/plan-traducteur-rapide.md §9.6) — traces d'une page (x-tier2, patches/tcg/0048,
+#   TIER2=4096 ./run_tiger.sh # DOOM 3 +3,3 % PC, +5,7 % M4 (docs/plan-traducteur-rapide.md §9.6, §9.9) — traces d'une page (x-tier2, patches/tcg/0048,
 #                             # éteint par défaut ; TIER2VERIFY=64 rejoue une trace sur 64 contre ses TB)
 #   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
 #                             # tcg/0016, allumé par défaut, docs/tcg-g4.md §24) ; FPVERIFY=1 : preuve
@@ -921,6 +921,28 @@ if [ "${JC2WAY:-0}" != 0 ]; then
 fi
 
 [ -n "${TCG_OPTS:-}" ] && TCG_ACCEL="${TCG_ACCEL:-tcg},${TCG_OPTS#,}"
+# tcg/0048 écrit son compteur dans l'en-tête du TB. Sur le M4, MAP_JIT
+# protège ces pages pendant l'exécution : employer une vue RW distincte.
+# Lire les options finales, y compris CPU_OPTS, et respecter un refus
+# explicite de split-wx en arrêtant le lancement avant de bloquer le vCPU.
+# BEGIN TIER2 JIT GUARD
+if [ "$(uname -s):$(uname -m)" = Darwin:arm64 ]; then
+  _t2=0; _split=
+  _ifs=$IFS; IFS=,
+  for _o in $CPU_SPEC; do case "$_o" in x-tier2=*) _t2=${_o#*=} ;; esac; done
+  for _o in ${TCG_ACCEL:-tcg}; do case "$_o" in split-wx=*) _split=${_o#*=} ;; esac; done
+  IFS=$_ifs
+  if [ "$_t2" != 0 ]; then
+    case "$_split" in
+      off|no|false|0)
+        echo "⚠ x-tier2 sur Darwin:arm64 exige split-wx=on (compteurs dans les pages JIT)." >&2
+        exit 2 ;;
+      on|yes|true|1) ;;
+      *) TCG_ACCEL="${TCG_ACCEL:-tcg},split-wx=on" ;;
+    esac
+  fi
+fi
+# END TIER2 JIT GUARD
 [ -n "${TCG_ACCEL:-}" ] && EXTRA+=(-accel "$TCG_ACCEL")
 
 # --- Affichage ---
