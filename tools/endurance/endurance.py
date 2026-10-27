@@ -107,7 +107,10 @@ def en_png(ppm, png):
 
 def autres_qemu():
     """QEMU mac99 en marche sur l'hôte (les nôtres compris)."""
-    ps = subprocess.run(["ps", "-Ao", "comm=,args="], capture_output=True, text=True).stdout
+    # macOS tronque « comm » à 16 caractères : un chemin absolu de QEMU
+    # devient /Users/... et ne commence plus par qemu. ucomm fournit le nom
+    # de l'exécutable sur les deux hôtes ; sa troncature garde ce préfixe.
+    ps = subprocess.run(["ps", "-Ao", "ucomm=,args="], capture_output=True, text=True).stdout
     n = 0
     for l in ps.splitlines():
         p = l.split(None, 1)

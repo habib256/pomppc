@@ -17,6 +17,7 @@ import matrice  # noqa: E402
 import d3  # noqa: E402
 import prey  # noqa: E402
 import mb  # noqa: E402
+import wc3  # noqa: E402
 
 echecs = 0
 
@@ -35,6 +36,26 @@ def serie(durees, fb=0):
         t += d
         l.append("%d,0x1,%.3f,0,%d,%d,0,0,0,0" % (i, t, i * 10, fb))
     return "\n".join(l) + "\n"
+
+
+# Un CD absent doit arrêter la préparation, pas lancer un jeu sans images.
+# Exécuter la commande sur un volume absent vérifie aussi que la dernière
+# commande shell ne masque pas un montage raté (hdiutil peut rendre zéro).
+class CDAbsent:
+    def ssh(self, cmd, delai):
+        with tempfile.TemporaryDirectory() as d:
+            cmd = cmd.replace("/Volumes/Warcraft III", os.path.join(d, "absent"))
+            p = subprocess.run(["bash", "-c", "hdiutil() { return 0; }; " + cmd],
+                               capture_output=True, text=True)
+        return p.returncode, p.stdout
+
+
+try:
+    wc3.JEU.preparer(CDAbsent(), "pe")
+except RuntimeError as e:
+    verifie("CD Warcraft III non monté" in str(e), "diagnostic du CD absent")
+else:
+    verifie(False, "CD absent refusé avant le lancement du jeu")
 
 
 # frames.csv : lignes incomplètes ignorées, compteurs lus

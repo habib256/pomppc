@@ -313,3 +313,69 @@ matrice (`tools/matrice/matrice.py`, VM quotidienne, binaire `~/src/qemu`) :
 - `20261026-0900`, après le correctif d'éclairage des spots du GL d'Apple
   (`docs/re/ut2004-arme-noire.md`) : **16 cellules vertes sur 17 automatisées**, images justes
   partout ; Colin McRae 38,8 ms/image (49,2 leviers éteints, −21 %) ; seul Warcraft III rouge.
+
+### 5.11 Warcraft III : dernier rouge levé (26/10, soir)
+
+Le diagnostic `bench/m4-ab-2510/wc3-diag/attach.txt` révèle une boucle de confirmation de
+`hdiutil` (« image disque peut-être corrompue »), répétée jusqu'à remplir **31,9 Go** de journal.
+Le CD hybride Toast est reconnu (`UDTO`, partitions Apple/ISO9660 et HFS), mais l'autofsck de
+Tiger 10.4.11 demande confirmation même avec `-readonly -noverify` : `-noverify` ne coupe
+que la vérification des checksums. Le CD n'était pas monté ; le jeu n'avait pas de CD.
+
+`tools/matrice/jeux/wc3.py` ajoute `-noautofsck`, conserve la lecture seule, fournit une réponse
+négative pour toute autre question et vérifie le code de retour **et** la présence du volume
+avant de lancer le jeu. Un montage raté rend désormais un diagnostic explicite. Test de
+non-régression dans `tests/matrice_test.py` : même un `hdiutil` qui rend zéro sans monter de
+volume doit arrêter la préparation ; suite hors VM **OK**.
+
+Rejeu complet de la cellule après démontage du CD (`bench/matrice/m4-wc3-suite-2610/`, VM
+quotidienne, tous les nouveaux défauts M4) : **Warcraft III plein écran VERT**, **12,7 ms/image**
+(plancher 22), **0 repli**, image juste contre la VM **0,00 / 0,00 %** et référence validée
+**0,00 / 0,00 %**. Menu et textes inspectés sur la capture synchronisée. Avec les 16 cellules
+vertes du tour `20261026-0900`, les **17/17 cellules automatisées sont couvertes** sous les
+nouveaux défauts ; ce bilan combine ce tour et le rejeu ciblé, ce n'est pas un nouveau tour
+complet des 17 cellules. Aucun correctif CPU ou GPU supplémentaire n'a été nécessaire.
+
+### 5.12 Suite : les traces expérimentales `0048` (26/10, soir)
+
+Le lot de production ci-dessus est clos. Le pendant arm64 encore ouvert du plan du
+traducteur (`docs/plan-traducteur-rapide.md` §9.8) a été attaqué : banc nu et mutants
+portés sur macOS, condition `split-wx=on` trouvée et prise en charge par le lanceur,
+deux défauts du vérificateur corrigés dans `tcg/0055` (rejeu au-delà de la sortie de
+trace ; comparaison des bits hauts non écrits des stores étroits). Code commun aux
+deux hôtes, aucun émetteur modifié.
+
+Banc nu : 52 733 traces vérifiées, 0 divergence, deux mutants détectés. OpenBIOS SMP :
+438,1 M traces vérifiées, 0 divergence. Tiger + partie Marble Blast complète : **32,6 M
+traces vérifiées, 0 divergence**, image exacte contre capture et référence. Suite du
+dépôt : 283 OK, 0 échec. Journaux et détails : §9.8 du plan du traducteur.
+
+DOOM 3 vérifié à son tour (`docs/plan-traducteur-rapide.md` §9.9) : 257,5 M traces
+à 1/64 puis 36,0 M à 1/256, aucune divergence ; image synchronisée du niveau Mars City
+Hangar exacte à l'image 3128. La règle de fenêtre habituelle n'est pas employée pour
+ce passage ralenti par le vérificateur ; aucun temps de ce passage n'est pris pour un A/B.
+
+A/B M4 terminé : neuf parties entrelacées, trois par configuration. Médianes DOOM 3 :
+MAP_JIT **32,086 ms/image**, split-wx seul **32,184**, traces **33,929** : **+5,74 %**
+contre le défaut, **+5,42 %** contre split-wx seul. Toutes les parties avec traces sont
+plus lentes que les témoins. Neuf fenêtres de mesure sans autre QEMU et sous 0,77 cœur
+de charge étrangère (marge de dix secondes comprise). Split-wx seul est neutre dans le
+bruit observé. Défauts conservés, VM rendue dans ImGuiDock.
+
+Le pendant M4 de 0048 est clos, `x-tier2` reste **éteint par défaut**. La réexécution
+native des preuves de `0055` sur le PC reste à faire ; détails et données au §9.9 du
+plan du traducteur.
+
+### 5.13 Endurance des nouveaux défauts (27/10)
+
+Première tranche sur deux instances isolées, Tiger 10.4.11, même binaire du
+26/10, tous les défauts de production et traces expérimentales éteintes :
+**78 démarrages sains** (24 froids, 54 reboots internes), **16 cycles de jeux
+sains**, quatre chacun pour Marble Blast, Zenerchi, UT2004 et DOOM 3. Aucun gel,
+panique ou arrêt inattendu de jeu. Base en lecture seule vérifiée avant et après,
+VM quotidienne restaurée dans ImGuiDock. Détails, limites statistiques et
+journaux : `docs/endurance.md` §9. Une nuit plus longue reste à faire.
+
+Ce résultat porte sur les réglages du banc. La validation des résolutions reste
+ouverte : ralentissements importants signalés dans Colin McRae en 1980 × 1024,
+à rechercher aussi sur les autres jeux et résolutions (`TODO.md`, rubrique Jeux).

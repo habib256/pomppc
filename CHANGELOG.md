@@ -9,6 +9,30 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Profils CPU OS 9 expérimentaux, 27/10.** `OS9_PROFILE=memoire|flottant|complet|verifie`
+  reprend les optimisations CPU de Tiger, un seul cœur, périphériques classiques.
+  Sept passages DOOM II : écran fixe exact et PCM présent ; profil vérifié : 1,06 milliard
+  d'opérations flottantes et 3,27 milliards de chargements, aucune divergence. Barrack
+  contrôlé en partie sur témoin et complet. Défaut `g4` conservé ; AltiVec et gains en jeu
+  à compléter. `docs/os9-optimisations-cpu.md` ; suite du dépôt : 287 OK, 0 échec.
+
+- **Endurance M4, 27/10.** Nouveaux défauts sur Tiger 10.4.11 isolé : **78 démarrages
+  sains** (24 froids, 54 reboots), **16 cycles de jeux sains**, quatre par jeu. Aucun
+  incident ; une nuit plus longue reste à jouer. Compteur QEMU du banc corrigé sur macOS
+  (`ps ucomm`, au lieu du chemin tronqué de `comm`). Base vérifiée avant/après, VM
+  quotidienne restaurée dans ImGuiDock. `docs/endurance.md` §9.
+
+- **Traces expérimentales sur le M4, preuves du 26/10.** Banc nu et mutants portés sur
+  macOS ; `split-wx=on` choisi quand `x-tier2` est demandé, pour permettre les écritures
+  de ses compteurs. `tcg/0055` corrige le vérificateur : rejeu du nombre exact d'instructions
+  exécutées et comparaison des seules données écrites par les stores étroits. Marble Blast
+  passe de 3 349 divergences à zéro (32,6 M traces vérifiées), image exacte. DOOM 3 :
+  293,5 M contrôles sans divergence et image synchronisée du niveau exacte. A/B M4
+  entrelacé 3×3 : **traces +5,74 %**, 33,929 contre 32,086 ms/image au défaut ; elles
+  restent éteintes. Split-wx seul neutre, défaut mémoire conservé. Preuves natives PC
+  de 0055 encore à rejouer. `docs/plan-traducteur-rapide.md` §9.8–9.9 ; suite du dépôt :
+  283 OK, 0 échec.
+
 - **Collecte d'endurance : RAM physique conservée, 20/10.** `ram.bin` est écrit dès l'arrêt
   de la VM, avant les diagnostics et tout redémarrage, pour permettre l'analyse du savearea
   et du tas des paniques rares (§8.4 de `docs/endurance.md`). Plage issue de `info mtree`,

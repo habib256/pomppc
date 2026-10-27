@@ -35,8 +35,11 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   (`docs/endurance.md` §7 : défauts du 06/10 + binaire rapide, **0 panique sur 305 démarrages,
   0 incident sur 62 parties** (15 par jeu, borne ~20 % par jeu), 5 « pas de ssh » après
   `shutdown -r` ; témoin anciens défauts 1 panique « 0x400 Inst access » dans l'appariement
-  ATAPI sur 238). **Reste pour fermer :** (1) la même nuit sur le **M4** (binaire de référence
-  du 01/10, jamais éprouvé) ; (2) sur le PC, les « pas de ssh » : **cause trouvée le 07/10**
+  ATAPI sur 238). **Reste pour fermer :** (1) une nuit sur le **M4** avec les nouveaux défauts
+  (build de référence du 26/10 ; première tranche terminée le 27/10 : **78 démarrages sains**,
+  dont 24 froids et 54 reboots, **16 cycles de jeux sains**, quatre par jeu ; Tiger 10.4.11
+  isolé, gardien SSH absent, `docs/endurance.md` §9 ; reste une série plus longue) ;
+  (2) sur le PC, les « pas de ssh » : **cause trouvée le 07/10**
   par la console série du banc (`--serie`, `docs/endurance.md` §8) — course dans l'invité :
   l'IPv6 de lo0 ne s'attache pas (`in6_ifattach_loopback … errno=17/55`), `launchctl` échoue au
   `bind()` IPv6 de `ssh.plist` et abandonne aussi l'IPv4 ; rien de QEMU. **Correction faite le 13/10**
@@ -49,7 +52,8 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   relevé par la console**, liste libre de kalloc.16 corrompue (probable), CPU 1 en 0x700 ;
   suite : savearea (décodage restant) ; **`pmemsave` ajouté à la collecte le 20/10**
   (`docs/endurance.md` §8.7, transfert éprouvé sur QEMU sans invité), reproduction par stress de la console, puis A/B
-  `-accel tcg,thread=single` ; (3) une tranche de démarrages à froid (non jouée, faute de temps).
+  `-accel tcg,thread=single` ; (3) une tranche de démarrages à froid sur le PC (M4 couvert
+  par la tranche du 27/10, ci-dessus).
 
 - [ ] **[Système] Plantages en jeu sans cause** — trois défauts, peut-être un seul mécanisme ;
   le banc ci-dessus doit les faire sortir (nuit du 07/10 sur le PC : aucun `LockTimeOut`, aucun
@@ -71,6 +75,14 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   appelant, pile). **Fermeture :** texte d'une vraie occurrence lu, cause établie, correction
   (relever `LockTimeOut` par le kext, ou borner les arrêts de vCPU) et série sans incident ;
   des lancements réussis ne suffisent pas.
+
+- [ ] **[Jeux] Performances selon la résolution** — les jeux fonctionnent très bien dans
+  l'ensemble, mais pas dans toutes les résolutions : gros ralentissements signalés par
+  l'utilisateur dans **Colin McRae en 1980 × 1024** (27/10). Étendre les essais aux autres
+  résolutions, jeux et modes fenêtre/plein écran ; ne pas limiter le diagnostic à Colin
+  McRae. Relever les temps d'image et les éventuels replis de rendu sur une même scène pour
+  comprendre les chutes de vitesse. Les cellules déjà vertes aux résolutions de la matrice
+  ne valent pas validation de toutes les résolutions.
 
 - [ ] **[Validation] Restes des épreuves en VM des bug hunts** (tout le reste est tenu le
   07/10 sur le PC : `docs/bug-hunt-2026-09-29-passe4.md`, dernière section).
@@ -104,6 +116,12 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 
 ## Ensuite
 
+- [ ] **[OS 9] Mesurer les gains CPU et élargir les essais** — profils expérimentaux livrés
+  le 27/10, défaut `g4` conservé. Sept passages DOOM II avec image fixe exacte et PCM présent,
+  plus Barrack en partie sur témoin et complet ; vérificateurs sans divergence
+  (`docs/os9-optimisations-cpu.md`). Reste : A/B de vitesse sur une charge reproductible,
+  autres jeux et application AltiVec (très peu exercé par cette première tranche).
+
 Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête.
 
 - [x] **[TCG — M4] Séance de parité du 25-26/10** (`docs/parite-m4-2510.md` §5) : 0049-0050, série
@@ -121,13 +139,31 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   `m4-serie-0031-0035-proofs.sh` `host`, `guest`, `mut` sur une copie de l'arbre (`prep` est caduc :
   `build_qemu_qfb.sh` pose désormais 0037-0039 lui-même).
 
-- [ ] **[TCG — M4] Finir la matrice du 06/10** : sept cellules terminées,
-  six vertes, images toutes justes ; campagne arrêtée sur demande.
-  Zenerchi mesure 6,3 ms/image pour un seuil de 6 : reproduire et comparer
-  les options TCG éteintes avant d'attribuer la cause. Reprendre UT2004,
-  Warcraft III, Colin McRae et Nexuiz. A/B DOOM 3 complet : −6,0 % sur six
-  parties par configuration. Preuves : `docs/jit-m4-2026-10-05.md` et
-  `docs/mesures/m4-20261006/`.
+- [x] **[TCG — M4] Finir la matrice du 06/10** : 17/17 cellules automatisées couvertes
+  sous les nouveaux défauts (`docs/parite-m4-2510.md` §5.10–5.11 : tour à 16/17 puis
+  rejeu Warcraft III vert, images justes). Le dernier rouge venait du montage du CD,
+  corrigé avec `-noautofsck` et un contrôle explicite du volume.
+
+- [x] **[TCG — M4] Traces `0048`, pendant arm64** : séance du 26/10
+  (`docs/plan-traducteur-rapide.md` §9.8). Condition de lancement trouvée : `split-wx=on`
+  pour les compteurs dans les pages JIT ; choix automatique par le lanceur quand
+  `x-tier2` est demandé. Banc nu et mutants portés. `0055` corrige le rejeu de TB dont
+  la longueur change sous journalisation : compte exact des instructions, référence
+  rejouée une instruction par TB ; comparaison des stores à leur largeur réelle.
+  Banc nu et mutants verts, OpenBIOS SMP 438,1 M traces vérifiées sans divergence,
+  Tiger + Marble Blast 32,6 M sans divergence, image exacte. DOOM 3 vérifié à son tour
+  (§9.9 : 293,5 M contrôles, zéro divergence, image synchronisée exacte).
+  A/B entrelacé 3×3 DOOM 3 (§9.9), hôte au repos : 32,086 ms/image au défaut,
+  32,184 split-wx seul, 33,929 avec traces (**+5,74 %**, les trois parties avec traces
+  au-dessus de tous les témoins). **Éteint par défaut**, comme sur le PC ; mode mémoire
+  par défaut conservé, VM rendue dans ImGuiDock.
+
+- [ ] **[TCG — PC] Réexécuter les preuves de `0055`** : correction commune du vérificateur
+  des traces, prouvée sur le M4 au §9.8–9.9. Reconstruire QEMU, jouer `t2proof.sh` avec
+  les leviers FP natifs (`x-fast-fp`, `x-lfs-inline`, `x-fp-native`, `x-fp-known`,
+  `x-fprf-lazy`, `x-stfs-known`, `x-lfs-known`), puis une session Tiger vérifiée.
+  Le mode de preuve doit comparer les stores à leur largeur réelle et terminer le
+  rejeu au compte exact d'instructions. Aucune activation de `x-tier2` prévue sur le PC.
 
 - [ ] **[Métrologie] A/B de l'attente** : `QGPU_GL_FLUSH` et `POMPPC_GL_QFLUSH` ont été allumés
   le 01/10 à la demande de l'utilisateur sans l'A/B prévu (un seul tour : Nexuiz GLSL 36,1 → 35,3,

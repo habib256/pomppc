@@ -18,6 +18,8 @@
 #   (manette USB auto-passthrough si branchée + accessible ; NOPAD=1 pour couper)
 #   NOSOUND=1 ./run_os9.sh  # coupe l'audio (repli sur l'OpenBIOS stock)
 #   SNAPSHOT=1 ./run_os9.sh # disque jetable (writes annulés -> boot toujours propre)
+#   OS9_PROFILE=complet SNAPSHOT=1 ./run_os9.sh disk # optimisations CPU expérimentales
+#   OS9_PROFILE=reference|memoire|flottant|complet|verifie (défaut : reference)
 #
 # Piloté par le frontend ImGui : DBUS_DISPLAY=1 (sortie -display dbus,p2p=on) et
 # QMP_SOCK=<chemin> (socket QMP). POMPPC_SCRATCH déplace .run/ (socket moniteur).
@@ -31,6 +33,7 @@ source "$ROOT/config.env"
 [ -n "$USER_RES" ] && RES="$USER_RES"
 source "$ROOT/scripts/hostcompat.sh"
 source "$ROOT/scripts/caps.sh"
+source "$ROOT/scripts/os9_cpu.sh"
 
 # OS9_DISK / OS9_CD viennent de config.env (surchargeables par l'environnement).
 RAM=512
@@ -69,11 +72,11 @@ MON=$(host_mon_path "$MON")
 host_publish_vm os9 "$MON" 0
 [ -f "$OS9_DISK" ] || qemu-img create -f qcow2 "$OS9_DISK" "$OS9_DISK_SIZE" >/dev/null
 
-# --- SON via le build UNIFIÉ (QEMU 9.2 + device Screamer porté + OpenBIOS fusionné) ---
+# --- SON via le build de référence (version dans config.env, Screamer + OpenBIOS fusionné) ---
 # Un seul binaire pour OS 9 ET Tiger. Deux moitiés nécessaires : l'OpenBIOS fusionné
-# publie le nœud audio (il faut le passer explicitement, l'OpenBIOS stock du 9.2 ne
-# l'a pas), et le binaire QEMU doit avoir la classe 'screamer'. Cette dernière n'est
-# PAS produite par scripts/build_qemu_qfb.sh -> NOSOUND=1 avec ce build.
+# publie le nœud audio (il faut le passer explicitement, l'OpenBIOS stock ne
+# l'a pas), et le binaire QEMU doit avoir la classe 'screamer', produite par
+# scripts/build_qemu_qfb.sh avec les patchs audio du dépôt.
 BIN="$QEMU_BIN"
 UNI_OBIOS="$ROOT/patches/smp-mac99/openbios-smp-screamer.elf"
 BIOS_ARGS=()
@@ -202,7 +205,8 @@ QMP_ARGS=()
 # SNAPSHOT=1 : disque jetable (writes annulés → boot toujours propre).
 SNAP_ARGS=(); [ -n "${SNAPSHOT:-}" ] && SNAP_ARGS=(-snapshot)
 
-exec "$BIN" -M "mac99,via=$VIA" -cpu g4 -m "$RAM" -smp 1 \
+echo "  CPU OS9 : profil=$OS9_PROFILE cpu=$CPU_SPEC accel=$TCG_ACCEL"
+exec "$BIN" -M "mac99,via=$VIA" -cpu "$CPU_SPEC" -accel "$TCG_ACCEL" -m "$RAM" -smp 1 \
   -display "$DISP" -g "$RES" ${BIOS_ARGS[@]+"${BIOS_ARGS[@]}"} ${SNAP_ARGS[@]+"${SNAP_ARGS[@]}"} \
   ${DRIVES[@]+"${DRIVES[@]}"} -nic none ${AUDIO[@]+"${AUDIO[@]}"} ${TABLET_DEV[@]+"${TABLET_DEV[@]}"} ${VIRTIO_ARGS[@]+"${VIRTIO_ARGS[@]}"} ${PAD_ARGS[@]+"${PAD_ARGS[@]}"} \
   -prom-env 'auto-boot?=true' -prom-env "boot-device=$BOOTDEV" ${BOOTCMD_ARGS[@]+"${BOOTCMD_ARGS[@]}"} \

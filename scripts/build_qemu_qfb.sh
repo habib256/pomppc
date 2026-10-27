@@ -38,6 +38,7 @@
 #   • le TLB logiciel une fois par base des chargements en forme D (x-tlb-base) — patches/tcg/0052
 #   • parité arm64 de 0033-0034, plafond de lmw/stmw en ligne — patches/tcg/0037-0039 (après 0052)
 #   • talon de vcf* forcé pour les preuves (x-vfp-native-cmp-slow) — patches/tcg/0054
+#   • rejeu des traces instruction par instruction (x-tier2-verify) — patches/tcg/0055
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -1130,6 +1131,14 @@ TCG52_MARKERS
     echo "▶ patch TCG : talon de vcf* forcé pour les preuves (x-vfp-native-cmp-slow, tcg/0054)"
     patch_strict "$ROOT/patches/tcg/0054-ppc-vfnc-slow.patch"
   fi
+  # tcg/0055 : compter le chemin exact et rejouer une instruction par TB.
+  if ! grep -q "replay the exact executed instruction count" accel/tcg/cpu-exec.c; then
+    echo "▶ patch TCG : rejeu exact des instructions de trace (tcg/0055)"
+    patch_strict "$ROOT/patches/tcg/0055-tcg-tier2-replay-insn.patch"
+  fi
+  grep -q 'cpu->t2_vinsns' accel/tcg/translator.c &&
+    grep -q 'uint32_t t2_vinsns' include/hw/core/cpu.h || {
+      echo "⚠ patch tcg 0055 incomplet (compteur des instructions absent)" >&2; exit 1; }
   find tcg target -name '*.orig' -delete
   while read -r f m; do
     grep -q "$m" "$f" || {

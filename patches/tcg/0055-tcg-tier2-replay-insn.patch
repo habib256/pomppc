@@ -1,0 +1,64 @@
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -826,0 +827,7 @@
++    /* POMPPC tcg/0055: compare only the bits the guest store writes.
++     * A 32-bit store from an i64 temporary may carry arbitrary high bits
++     * (e.g. stfs-known vs the full conversion in a one-instruction TB).
++     */
++    unsigned bits = 8u << (memop & MO_SIZE);
++    uint64_t mask = bits < 64 ? (UINT64_MAX >> (64 - bits)) : UINT64_MAX;
++
+@@ -828 +835 @@
+-        l->e[l->pos].memop != memop || l->e[l->pos].val != val) {
++        l->e[l->pos].memop != memop || ((l->e[l->pos].val ^ val) & mask)) {
+@@ -907,0 +915 @@
++    uint32_t insns;
+@@ -928,0 +937 @@
++    cpu->t2_vinsns = 0;                 /* POMPPC tcg/0055 */
+@@ -931,0 +941 @@
++    insns = cpu->t2_vinsns;
+@@ -942 +952,2 @@
+-    for (steps = 0; steps < T2_MAX_PATH + 8; steps++) {
++    /* POMPPC tcg/0055: replay the exact executed instruction count. */
++    for (steps = 0; steps < MIN(insns, TCG_MAX_INSNS); steps++) {
+@@ -946,3 +956,0 @@
+-        if (steps && l->pos == l->n && sr.pc == end_pc) {
+-            break;
+-        }
+@@ -956 +964,6 @@
+-        sr.cflags = curr_cflags(cpu) | CF_T2_REPLAY | T2_VFLAGS;
++        /* Replay TB lengths differ under logging: one instruction per
++         * TB avoids overrunning the trace. The count also disambiguates
++         * pure loops revisiting end_pc before their final iteration.
++         */
++        sr.cflags = (curr_cflags(cpu) & ~CF_COUNT_MASK) |
++                    CF_T2_REPLAY | T2_VFLAGS | 1;
+@@ -967 +980 @@
+-    if (!l->diverged && steps == T2_MAX_PATH + 8) {
++    if (!l->diverged && (!insns || steps != insns)) {
+--- a/accel/tcg/translator.c
++++ b/accel/tcg/translator.c
+@@ -193,0 +194 @@
++    TCGv_i32 t2_count = NULL;
+@@ -232,0 +234,3 @@
++    if (tcg_ctx->t2_mode == 1) {
++        t2_count = tcg_temp_new_i32();
++    }
+@@ -243,0 +248,13 @@
++        }
++
++        /* POMPPC tcg/0055: count the exact executed instructions.
++         * CPUState is writable outside MAP_JIT. Use the runtime env:
++         * translated TBs are shared between vCPUs. Reuse one temporary
++         * rather than exhausting TCG temps with instruction ordinals.
++         */
++        if (tcg_ctx->t2_mode == 1) {
++            ptrdiff_t offset = (char *)&cpu->t2_vinsns - (char *)cpu_env(cpu);
++
++            tcg_gen_ld_i32(t2_count, tcg_env, offset);
++            tcg_gen_addi_i32(t2_count, t2_count, 1);
++            tcg_gen_st_i32(t2_count, tcg_env, offset);
+--- a/include/hw/core/cpu.h
++++ b/include/hw/core/cpu.h
+@@ -606,0 +607 @@
++    uint32_t t2_vinsns;         /* tcg/0055: executed instructions of the logged trace */

@@ -603,3 +603,77 @@ un échec de capture d'écran. Cela valide le transfert, pas une reproduction de
 puis accélérer la reproduction par stress série. Les décalages du 10.4.11 cités au §8.4
 ne sont pas encore appliqués automatiquement aux autres noyaux ; le vidage conserve les
 données pour cette analyse hors ligne.
+
+## 9. M4 : nouveaux défauts, Tiger 10.4.11 (27/10/2026)
+
+Première tranche après la parité M4 (§5 de `docs/parite-m4-2510.md`) :
+20 démarrages à froid, 40 démarrages de campagne `reboot`, puis 16 cycles de jeux
+`mb,zen,ut,d3`, deux instances. Les deux premiers démarrages de la campagne
+`reboot` sont froids ; ils ne comptent pas comme des `shutdown -r`.
+
+Base **distincte** `disks/tiger-endurance-m4-1011-2710.qcow2`, clone APFS de la VM
+quotidienne **arrêtée proprement**, vérifiée sans erreur par `qemu-img check`,
+puis mise en lecture seule. L'ancienne base Tiger 10.4.6 n'est pas remplacée.
+Symboles du noyau 8.11.0 et des kexts chargés conservés dans
+`bench/endurance/invite-m4-1011-2710/`. Veille système et disque désactivée.
+Le gardien `POMPPCSshGarde` est **absent** de cette base : cette tranche éprouve
+cet état, sans mélanger avec une installation du gardien.
+
+Configuration : QEMU 11.1.2 de référence, SHA256
+`890442d11254d510480d5555a69e9b79f3d00807e17307de22802a40c528b20c`,
+SMP 2, 768 Mio, tous les défauts de production, `x-tier2` éteint, backend GL Apple
+M4, sans fenêtre et audio muet. Ce profil du banc ne couvre pas encore le son
+ni les manipulations dans ImGuiDock. Chaque instance écrit dans son propre
+recouvrement qcow2 ; la base et le disque quotidien ne reçoivent pas ces écritures.
+
+Pilotage et préparation : `bench/endurance/m4-2710/suite.py`, métadonnées dans
+`base.json` et `invite.txt`. Journaux par campagne : `m4-2710-froids`,
+`m4-2710-reboots`, `m4-2710-jeux`, sous `bench/endurance/`.
+
+Le compteur de QEMU du banc utilisait `ps comm`, tronqué au milieu du chemin
+absolu sur macOS : les valeurs `qemu_max=0` de la campagne froide sont fausses.
+Le champ `ucomm` corrige le relevé pour les campagnes suivantes. La charge
+`l1` et les verdicts de santé des invités restent indépendants de ce compteur.
+Cette première tranche ne ferme pas l'objectif d'une nuit complète sur le M4.
+
+Résultats des démarrages (05:38–06:04, heure locale) :
+
+| Campagne | Froids | Reboots internes | Incidents | SSH médian (min–max) |
+|---|---:|---:|---:|---|
+| `m4-2710-froids` | 20 | 0 | 0/20 | 15 s (15–15) |
+| `m4-2710-reboots` | 2 | 38 | 0/40 | 20 s (15–21) |
+
+**60 démarrages sains**, dont 22 froids et 38 `shutdown -r`. La campagne froide
+recrée QEMU et le recouvrement à chaque cycle ; la campagne reboot conserve
+chacune de ses deux instances. Charge hôte sur une minute : maximum 3,6 puis
+3,4. Ce zéro sur 60 garde une borne supérieure de Wilson à 95 % de **6,0 %** :
+il ne suffit pas à exclure les paniques rares déjà vues sur le PC.
+
+Campagne de jeux terminée à 06:58 (durées observées, contrôle toutes les dix
+secondes ; lancement et chargement compris) :
+
+| Jeu | Cycles sains | Durée par cycle | Images par cycle |
+|---|---:|---|---|
+| Marble Blast | 4/4 | 150–157 s | 15 818–19 099 |
+| Zenerchi | 4/4 | 129–131 s | 22 098–25 543 |
+| UT2004 | 4/4 | 305–310 s | 8 185–8 851 |
+| DOOM 3 | 4/4 | 603–608 s | 17 471–18 492 |
+
+**0 incident sur 16 cycles**, sans sortie inattendue ni arrêt des présentations.
+Le banc observe les jeux, puis les arrête volontairement entre les cycles.
+Captures dans `bench/endurance/m4-2710/captures/` : Marble Blast en niveau et
+DOOM 3 dans Mars City Hangar, HUD visible. Ces contrôles d'endurance ne refont
+pas la comparaison d'images de la matrice et ne mesurent pas la vitesse : deux
+VM tournent en parallèle, charge hôte maximale 4,7.
+
+Les 18 démarrages de cette campagne (2 froids, 16 reboots, y compris après les
+deux derniers jeux) sont également sains, SSH médian 20 s, maximum 35 s.
+**Total des trois campagnes : 78 démarrages, 24 froids et 54 reboots internes,
+aucun incident.** Borne supérieure de Wilson à 95 % : 4,7 % pour les démarrages,
+19,4 % pour les jeux réunis, **49,0 % par jeu** (quatre cycles seulement).
+
+`bench/endurance/m4-2710/validation-finale.json` vérifie les effectifs, les quatre
+cycles par jeu, les verdicts, le backend GL et l'identité du binaire, inchangée.
+Base toujours en lecture seule, nouveau `qemu-img check` sans erreur. Toutes les
+instances d'endurance sont arrêtées ; Tiger quotidien restauré dans ImGuiDock,
+SSH de nouveau disponible. Une nuit plus longue reste à jouer sur le M4.

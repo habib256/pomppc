@@ -71,6 +71,27 @@ for settings, tablet in (({}, False), ({"DBUS_DISPLAY": "1"}, True),
     assert p.returncode == 0 and ("usb-tablet,id=pointer0" in p.stdout) == tablet, (settings, p)
 print("tablette Tiger : défaut ImGuiDock, mode natif et TABLET=0/1 OK")
 
+# Le compteur de 0048 ne peut pas écrire dans MAP_JIT sur le M4.
+# Tester le vrai bloc du lanceur, options finales (CPU_OPTS incluses).
+guard = source.split("# BEGIN TIER2 JIT GUARD", 1)[1].split("# END TIER2 JIT GUARD", 1)[0]
+for host, cpu_spec, accel, rc, wanted in (
+        ("Darwin:arm64", "g4,x-tier2=64", "tcg", 0, "tcg,split-wx=on"),
+        ("Darwin:arm64", "g4,x-tier2=64", "tcg,split-wx=off", 2, ""),
+        ("Darwin:arm64", "g4,x-tier2=64", "tcg,split-wx=on", 0, "tcg,split-wx=on"),
+        ("Darwin:arm64", "g4,x-tier2=64,x-tier2=0", "tcg,split-wx=off", 0, "tcg,split-wx=off"),
+        ("Darwin:arm64", "g4", "tcg", 0, "tcg"),
+        ("Linux:x86_64", "g4,x-tier2=64", "tcg", 0, "tcg")):
+    system, arch = host.split(":")
+    script = ('uname() { case "$1" in -s) echo "$SYSTEM" ;; -m) echo "$ARCH" ;; esac; };\n'
+              + guard + '\nprintf "%s" "$TCG_ACCEL"')
+    p = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                       env=dict(os.environ, SYSTEM=system, ARCH=arch,
+                                CPU_SPEC=cpu_spec, TCG_ACCEL=accel), timeout=5)
+    assert p.returncode == rc and (rc or p.stdout == wanted), (host, cpu_spec, accel, p)
+    if rc:
+        assert "exige split-wx=on" in p.stderr, p
+print("tier2 M4 : split-wx automatique, refus explicite et autres configurations OK")
+
 # Binaire rapide du PC (scripts/qemu_fast.sh, docs/binaire-rapide-x86.md) : le choix
 # de build-fast/ selon présence, relevé, version, processeur, série et capacités,
 # QEMU_FAST et QEMU_BIN — sans lancer QEMU (faux binaires, sondes de caps.sh simulées).
