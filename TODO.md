@@ -158,12 +158,9 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   au-dessus de tous les témoins). **Éteint par défaut**, comme sur le PC ; mode mémoire
   par défaut conservé, VM rendue dans ImGuiDock.
 
-- [ ] **[TCG — PC] Réexécuter les preuves de `0055`** : correction commune du vérificateur
-  des traces, prouvée sur le M4 au §9.8–9.9. Reconstruire QEMU, jouer `t2proof.sh` avec
-  les leviers FP natifs (`x-fast-fp`, `x-lfs-inline`, `x-fp-native`, `x-fp-known`,
-  `x-fprf-lazy`, `x-stfs-known`, `x-lfs-known`), puis une session Tiger vérifiée.
-  Le mode de preuve doit comparer les stores à leur largeur réelle et terminer le
-  rejeu au compte exact d'instructions. Aucune activation de `x-tier2` prévue sur le PC.
+- [x] **[TCG — PC] Preuves de `0055`** (27/10, `docs/plan-traducteur-rapide.md` §9.10) :
+  `t2proof.sh` conforme avec et sans les leviers FP natifs (0 divergence, mutants vus) ;
+  Tiger + Marble Blast vérifiés, 26,5 M traces, 0 divergence, image juste. `x-tier2` éteint.
 
 - [ ] **[Métrologie] A/B de l'attente** : `QGPU_GL_FLUSH` et `POMPPC_GL_QFLUSH` ont été allumés
   le 01/10 à la demande de l'utilisateur sans l'A/B prévu (un seul tour : Nexuiz GLSL 36,1 → 35,3,

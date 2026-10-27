@@ -731,3 +731,30 @@ par trace : même ordre de grandeur que le PC. L'absence de gain est mesurée av
 traces effectivement actives. VM quotidienne rendue dans ImGuiDock avec les défauts
 habituels. Le pendant M4 de 0048 est clos ; **reste la réexécution native de 0055 sur
 le PC**, correction de preuve commune aux deux hôtes.
+
+### 9.10 Preuves de `0055` sur le PC (27/10)
+
+Référence `~/src/qemu/build` reconstruite par `build_qemu_qfb.sh` : 0037-0039, 0054 et 0055
+s'appliquent après 0052 sur l'hôte x86-64.
+
+**Banc nu** `tools/tcg/t2proof.sh`, **conforme** dans les deux configurations :
+- défauts du banc : somme `0x9780e5cd` en réf., traces et vérificateur. 49 920 traces vérifiées,
+  dont 33 601 identiques et 16 319 non vérifiables (lswx/stswx), **0 divergence**. 6 traces raccourcies.
+- `T2PROOF_CPU` avec `x-fast-fp`, `x-lfs-inline`, `x-fp-native`, `x-fp-known`, `x-fprf-lazy`,
+  `x-stfs-known` et `x-lfs-known` : même somme. 53 756 traces vérifiées (37 437 identiques), **0 divergence**.
+- mutants 2 et 3 attrapés dans les deux cas (4 et 30 lignes `DIVERGENCE`).
+
+Correction du banc. Sur le PC, l'invité déraillé par le mutant 2 ne finit pas et il est tué
+par `kill -KILL`. Le bilan « traces vérifiées », écrit seulement à la sortie, manquait donc, et
+le verdict déclarait le mutant « non attrapé » malgré les lignes `DIVERGENCE`. Le verdict compte
+désormais ces lignes quand le bilan manque. Le banc refuse aussi un `T2PROOF_OUT` de plus de
+80 caractères, car la socket du moniteur est limitée à 108 octets.
+
+**Tiger et Marble Blast vérifiés** sur la VM quotidienne (`bench/tcg/ab/t2v-mb-2710/`) :
+- configuration : défauts du PC, binaire de référence, `TIER2=4096 TIER2VERIFY=64`, 2 vCPU ;
+- **26 496 208 traces vérifiées, 0 divergence**, dont 24 284 625 identiques et 2 168 568 non vérifiables ;
+- 43 015 exceptions, 107 788 sans copie journalisée (35 coupées) ;
+- image juste : **0,00 / 0,00 %** contre la VM et contre la référence validée, 20 replis (admis).
+
+La cellule est rouge seulement pour la vitesse sous vérificateur (54,6 ms/image), qui n'est pas
+une mesure. `x-tier2` reste éteint sur le PC.

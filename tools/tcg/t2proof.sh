@@ -31,6 +31,7 @@ ACCEL=tcg,x-jit-near=on
 case "$(uname -s):$(uname -m)" in Darwin:arm64) ACCEL="$ACCEL,split-wx=on" ;; esac
 OUT="${T2PROOF_OUT:-$(mktemp -d)}"
 mkdir -p "$OUT"
+[ ${#OUT} -le 80 ] || { echo "T2PROOF_OUT trop long pour les sockets Unix (≤ 80 caractères) : $OUT" >&2; exit 2; }
 [ -n "${T2PROOF_OUT:-}" ] || trap 'rm -rf "$OUT"' EXIT
 if [ -n "${T2PROOF_ROM:-}" ]; then
     cp "$T2PROOF_ROM" "$OUT/t2proof.bin" || exit 2
@@ -98,9 +99,14 @@ vrun=$(echo "$vline" | awk '{print $3}')
 vbad=$(echo "$vline" | sed -n 's/.* \([0-9]*\) DIVERGENCES.*/\1/p')
 [ "${vrun:-0}" -gt 0 ] || { echo "ÉCHEC : aucune trace vérifiée"; fail=1; }
 [ "${vbad:-1}" = 0 ] || { echo "ÉCHEC : $vbad divergence(s) en verif"; fail=1; }
-mbad=$(grep -a "traces vérifiées" "$OUT/mutant.err" | sed -n 's/.* \([0-9]*\) DIVERGENCES.*/\1/p')
+# Le bilan « traces vérifiées » n'est écrit qu'à la sortie : un invité déraillé par le mutant
+# peut ne jamais finir et être tué (kill -KILL ci-dessus). Compter alors les lignes DIVERGENCE.
+mdiv() { local n; n=$(grep -a "traces vérifiées" "$1" | sed -n 's/.* \([0-9]*\) DIVERGENCES.*/\1/p')
+         [ -n "$n" ] && [ "$n" != 0 ] && { echo "$n"; return; }
+         grep -ac "DIVERGENCE trace" "$1"; }
+mbad=$(mdiv "$OUT/mutant.err")
 [ "${mbad:-0}" -gt 0 ] || { echo "ÉCHEC : le mutant 2 (sorties latérales à l'envers) n'est pas attrapé"; fail=1; }
-m3bad=$(grep -a "traces vérifiées" "$OUT/mutant3.err" | sed -n 's/.* \([0-9]*\) DIVERGENCES.*/\1/p')
+m3bad=$(mdiv "$OUT/mutant3.err")
 if [ "${m3bad:-0}" = 0 ] && [ "$MUT3" = "$REF" ]; then
     echo "ÉCHEC : le mutant 3 (accès hors journal rejoués, défaut du 21/10) passe inaperçu"; fail=1
 fi
