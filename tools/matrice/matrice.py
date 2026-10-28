@@ -534,7 +534,14 @@ class Cellule:
                     # à la racine de la cellule : le rapatriement remplace <sous>/
                     os.makedirs(self.dir, exist_ok=True)
                     sp = os.environ.get("POMPPC_SELFPROF")
-                    if sp:
+                    pc = os.environ.get("POMPPC_PERF_CMD")
+                    if pc:
+                        # commande libre (compteurs matériels, perf stat -M…) : PID, OUT
+                        # (racine de la cellule), S (durée) dans l'environnement
+                        subprocess.run(["bash", "-c", pc], capture_output=True,
+                                       env=dict(os.environ, PID=q[0], OUT=self.dir,
+                                                S=str(self.sample_hote_s)))
+                    elif sp:
                         # auto-profileur de QEMU (sans perf, docs/vitesse-doom3-x86.md §18) :
                         # les fils vCPU notent leur rip tant que <préfixe>.on existe
                         open(sp + ".on", "w").close()

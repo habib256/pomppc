@@ -835,3 +835,45 @@ Le chemin vers 50 ms/image, soit −37 %, ne passe plus par le retrait d'instruc
   - Garder les registres dans des registres de l'hôte au-delà d'une instruction, en allocation par bloc, relève du traducteur de second niveau, qui a déjà échoué sous la forme des traces (§9 du plan).
 - **Recherche de blocs et sorties indirectes** (environ 5 % hors du code, plus `bclr`/`bcctr` dans le code).
 - **Un profil `perf` avec les compteurs matériels** (ratés L1/L2/LLC par bloc, `perf mem`) pour confirmer l'attente mémoire. Il faut `kernel.perf_event_paranoid=1`.
+
+## 19. Profil aux compteurs matériels (28/10, `bench/tcg/ab/x86-hw-2810`)
+
+`perf_event_paranoid=1` rendu par l'utilisateur. Binaire rapide du 27/10, DOOM 3 en fenêtre
+(81,7 ms/image, hôte au repos), `-perfmap`, 45 s après la fenêtre par
+`POMPPC_PERF_CMD=tools/tcg/perfhw.sh` (nouveau crochet de `matrice.py --sample-hote`) :
+15 s de `perf stat -M TopdownL1..3`, 15 s de compteurs, 15 s de `perf record` PEBS.
+Compteurs du processus entier (le rendu NVIDIA y pèse 10 % des cycles).
+
+**Le goulot n'est pas la mémoire des données, c'est le chargement des instructions.**
+
+| TMA (créneaux) | part |
+|---|---:|
+| retiring | 43,6 % |
+| **frontend bound** | **40,6 %** (fetch latency 26,3 : **cache d'instructions 18,4**, iTLB 5,5, resteers 7,3 ; fetch bandwidth 14,3, décodeur MITE 14,3, DSB 1,7) |
+| memory bound (L1 6,3, L3 5,4, DRAM 5,5) | ≈ 13 % |
+| mauvaise spéculation | faible (190 M branches ratées sur 24,5 G) |
+
+IPC 1,8 ; 1,17 G défauts L1i contre 0,70 G défauts L1d en 15 s. §18.2 (« le temps du code
+généré attend la mémoire ») se corrige : l'instruction interrompue est celle qui attend d'être
+*chargée* autant que celle qui attend sa donnée.
+
+Empreinte du code chaud : 90 % du temps JIT sur 23 000 instructions invitées =
+**2,3 Mio de x86 (≈ 100 octets par instruction PowerPC)**, étalés sur 28 000 lignes de 64 o,
+1 700 pages de 4 Kio et 34 pages de 2 Mio (THP effectif sur le tampon JIT, vérifié dans
+`smaps`). Le code ne tient ni dans le L1i (32 Kio) ni dans le cache d'µops ; le moteur
+retombe sur le décodeur legacy. La retraduction est négligeable en jeu (`tb_gen_code` absent).
+
+Composition des octets des 1 119 blocs chauds du journal du 27/10 (pondérée par le temps) :
+corps 62,6 %, **chemins lents softmmu 25,7 %** (rangés après chaque bloc, donc mêlés au code
+chaud), vérification TLB en ligne 10,0 % (≈ 9 instructions, 40-55 o par accès), sorties et
+têtes ≈ 2 %. Une sortie vers une autre page (pas de `goto_tb` entre pages) coûte ≈ 170 o de
+recherche en ligne. Flottant simple : 150-200 o par opération.
+
+Leviers qui en découlent, par coût croissant :
+1. **Chemins lents dans une zone froide** séparée du tampon (−26 % d'octets chauds, densité
+   des lignes) ;
+2. vérification TLB plus compacte (appel partagé par registre, au lieu de 9 instructions en ligne) ;
+3. **mémoire directe (« fastmem »)** : accès invités sans vérification TLB, par un espace
+   virtuel hôte réservé et projeté au remplissage du TLB, avec un gestionnaire de fautes. Ce
+   levier supprime à la fois les chemins lents et la vérification (≈ 35 % des octets) et
+   environ 9 instructions par accès, mais c'est un chantier.
