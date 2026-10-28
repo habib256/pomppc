@@ -677,3 +677,23 @@ cycles par jeu, les verdicts, le backend GL et l'identité du binaire, inchangé
 Base toujours en lecture seule, nouveau `qemu-img check` sans erreur. Toutes les
 instances d'endurance sont arrêtées ; Tiger quotidien restauré dans ImGuiDock,
 SSH de nouveau disponible. Une nuit plus longue reste à jouer sur le M4.
+
+## 10. PC Linux, nuit du 27 au 28/10/2026 : nouveaux défauts, base 2810
+
+Binaire rapide PGO du 27/10 (`build-fast`, sha256 `ad46927a679d68ac`, série 0001-0055),
+défauts du lanceur (MTTCG 32 bits, SMP 2, tous les leviers allumés par défaut : fp-known,
+lfs-known, tlb-base…), Tiger 10.4.11. Base `disks/tiger-endurance-2810.qcow2` : copie de la
+VM quotidienne arrêtée proprement, `qemu-img check` sans erreur, en lecture seule ; chaque
+instance tourne sur son propre recouvrement. Deux instances en parallèle, `--invite
+bench/endurance/invite-10.4.11`.
+
+| Campagne | Démarrages | Incidents | Borne haute (Wilson 95 %) | SSH médian (max) | Charge hôte max |
+|---|---:|---:|---:|---|---:|
+| `pc-froid-2810` (`--mode froid`) | 400 | 0 | 1,0 % | 15 s (30 s) | 2,8 |
+| `pc-reboot-2810` (`--mode reboot`) | 283 (2 froids, 281 reboots) | 0 | 1,3 % | 20 s (35 s) | 3,5 |
+
+**683 démarrages, 0 gel, 0 panique, 0 « pas de ssh »** (borne haute réunie : 0,6 %). La
+seconde campagne a été arrêtée à 05:50 (SIGINT : les instances finissent leur cycle) pour
+libérer l'hôte au profil aux compteurs matériels, au lieu de 07:00. La tranche de démarrages à
+froid demandée au point (3) du TODO est faite. La course IPv6 de `ssh.plist` (§8) ne s'est
+pas manifestée : le banc ne note pas l'action du gardien, et aucun démarrage n'a dépassé 35 s.

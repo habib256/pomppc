@@ -52,8 +52,9 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   relevé par la console**, liste libre de kalloc.16 corrompue (probable), CPU 1 en 0x700 ;
   suite : savearea (décodage restant) ; **`pmemsave` ajouté à la collecte le 20/10**
   (`docs/endurance.md` §8.7, transfert éprouvé sur QEMU sans invité), reproduction par stress de la console, puis A/B
-  `-accel tcg,thread=single` ; (3) une tranche de démarrages à froid sur le PC (M4 couvert
-  par la tranche du 27/10, ci-dessus).
+  `-accel tcg,thread=single` ; (3) ~~une tranche de démarrages à froid sur le PC~~ **faite la nuit
+  du 27-28/10** (`docs/endurance.md` §10 : binaire rapide du 27/10, 400 froids + 283 reboots,
+  **0 incident sur 683**, borne 0,6 %).
 
 - [ ] **[Système] Plantages en jeu sans cause** — trois défauts, peut-être un seul mécanisme ;
   le banc ci-dessus doit les faire sortir (nuit du 07/10 sur le PC : aucun `LockTimeOut`, aucun
