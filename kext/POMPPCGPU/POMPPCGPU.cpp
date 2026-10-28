@@ -353,6 +353,13 @@ void POMPPCGPU::publishAccelerator(void)
         return;
     }
     fAccel->setProperty("IOGLBundleName", POMPPC_GL_BUNDLE_NAME);
+    /* Quartz Extreme (28/10, P0) : seulement si la personnalité le demande.
+       CoreGraphics lit 4 octets (IORegistryEntryGetProperty) : un OSNumber
+       de 32 bits les rend gros-boutistes. */
+    if (getProperty("POMPPCQuartzExtreme") == kOSBooleanTrue) {
+        fAccel->setProperty("AccelCaps", 1ULL, 32);
+        GPULog("accelerator: AccelCaps = 1 (Quartz Extreme demandé)\n");
+    }
     if (!fAccel->attach(this)) {
         fAccel->release();
         fAccel = 0;

@@ -5,6 +5,7 @@
 #
 #   sudo sh install.sh            # compile et installe kext + plugin OpenGL
 #   sudo sh install.sh --remove   # retire les deux
+#   sudo QE=1 sh install.sh       # idem, avec Quartz Extreme demandé (essai)
 #
 # À lancer depuis une copie de l'arborescence du dépôt (le CD de
 # scripts/make_kext_iso.sh, ou /pomppc) : ../../kext/POMPPCGPU et
@@ -56,6 +57,18 @@ fi
 kextunload -b net.pomppc.POMPPCGPU 2>/dev/null || true
 rm -rf "$EXT/POMPPCGPU.kext"
 cp -R "$KEXT" "$EXT/"
+# QE=1 : la personnalité demande Quartz Extreme (AccelCaps sur l'accélérateur,
+# docs/quartz-extreme.md) ; sans lui, toujours éteint, même sur un kext
+# installé avant avec QE=1.
+if [ "${QE:-0}" = 1 ]; then
+  Q=true; echo "  Quartz Extreme demandé (QE=1)"
+else
+  Q=false
+fi
+sed -e "/<key>POMPPCQuartzExtreme<\/key>/{n;s/<[a-z]*\/>/<$Q\/>/;}" \
+  "$EXT/POMPPCGPU.kext/Contents/Info.plist" > /tmp/pomppc-kext-info.plist &&
+  cat /tmp/pomppc-kext-info.plist > "$EXT/POMPPCGPU.kext/Contents/Info.plist"
+rm -f /tmp/pomppc-kext-info.plist
 chown -R root:wheel "$EXT/POMPPCGPU.kext"
 chmod -R 755 "$EXT/POMPPCGPU.kext"
 rm -f /System/Library/Extensions.mkext /System/Library/Extensions.kextcache

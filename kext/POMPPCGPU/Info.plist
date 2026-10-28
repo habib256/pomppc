@@ -49,6 +49,8 @@
 			<string>POMPPCGPUUserClient</string>
 			<key>IOProbeScore</key>
 			<integer>60000</integer>
+			<key>POMPPCQuartzExtreme</key>
+			<false/>
 		</dict>
 	</dict>
 </dict>

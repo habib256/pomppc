@@ -57,8 +57,11 @@
  *   son ABI, et le nub refuse toute ouverture tant qu'il n'y a pas de surfaces
  *   (tâche 4.4).
  *
- *   Il ne publie PAS AccelCaps : le WindowServer tente Quartz Extreme dès que
- *   ce masque est non nul (CGXGLDisplayContextInitialize, CoreGraphics). */
+ *   AccelCaps n'est publié que si la personnalité porte POMPPCQuartzExtreme à
+ *   vrai (install.sh QE=1, chantier Quartz Extreme, docs/quartz-extreme.md) :
+ *   le WindowServer tente Quartz Extreme dès que ce masque est non nul
+ *   (CGXGLDisplayContextInitialize, CoreGraphics) — il ne passe alors même
+ *   plus par la liste d'autorisation de _isAccelUsable. */
 #define POMPPC_GL_BUNDLE_NAME   "GLDriver-POMPPC"
 
 class POMPPCAccelerator : public IOAccelerator
