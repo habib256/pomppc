@@ -904,7 +904,13 @@ A/B entrelacé, arbre de mesure `~/src/qemu-ceil` (-O2, sans PGO), hôte au repo
 Preuve d'image (`cold-2810-preuve*`, avec vidage) : mêmes verdicts dans les deux bras.
 **Une partie cmr du bras cold a gelé l'invité** (`cold-2810-vit-cmr/cold-2`, plus de ssh vers
 11:04 en course, image 40649) ; QEMU a été fermé ensuite sans erreur (pas d'autopsie). Lecture
-du code sans faille trouvée. Chasse au gel et mesure resserrée en cours (`cold-2810-cmr2`).
+du code sans faille trouvée.
+
+Chasse au gel `cold-2810-cmr2` (arrêtée à mi-course le 28/10 à 13:25, départ de l'utilisateur) :
+deux parties cold de plus **sans gel** (46,4 et 47,9 ms/image), ref 50,0 et 49,1, binaire rapide
+PGO du 28/10 (sans zone froide) 44,9 et 47,5. Le gel reste un cas sur 4 parties cmr cold, jamais
+vu sur les 15 autres parties cold. **À reprendre :** finir la chasse (≥ 6 parties cmr par bras),
+puis décider ; profil croisé des 5 jeux préparé (`bench/cold-2810/chaine5.sh`, non lancé).
 
 ## 21. La mémoire directe (« fastmem ») écartée sur chiffres (28/10)
 
