@@ -905,3 +905,26 @@ Preuve d'image (`cold-2810-preuve*`, avec vidage) : mêmes verdicts dans les deu
 **Une partie cmr du bras cold a gelé l'invité** (`cold-2810-vit-cmr/cold-2`, plus de ssh vers
 11:04 en course, image 40649) ; QEMU a été fermé ensuite sans erreur (pas d'autopsie). Lecture
 du code sans faille trouvée. Chasse au gel et mesure resserrée en cours (`cold-2810-cmr2`).
+
+## 21. La mémoire directe (« fastmem ») écartée sur chiffres (28/10)
+
+Levier 3 du §19 ; chiffrage sans chantier, à partir des compteurs `x-mem-stats` en partie DOOM 3
+(`bench/tcg/ab/x86-ver/ver-1/run_tiger.log`, fenêtres de 10 s, cpu 0 / cpu 1) :
+
+| événement | cpu 0 | cpu 1 | ce qu'il coûterait en mémoire directe |
+|---|---:|---:|---|
+| remplissages du TLB (`fill0+1+3`) | 28,8 k/s | 20,8 k/s | un `mmap(MAP_FIXED)` de la page + une faute mineure au premier accès, ≈ 2-3 µs |
+| `tlbie` | 1 200/s | 550/s | un `munmap` + une invalidation inter-cœurs (les deux fils vCPU partagent l'espace) |
+| vidages au changement de segment (`fl_sr0+fl_sr1`) | 2 200/s | 1 900/s | démapper une fenêtre entière, ou une fenêtre par jeu de segments |
+
+Coût : ≈ 29 k × 2,5 µs ≈ **7 % d'un vCPU pour les seuls remplissages** (aujourd'hui `fill_t` :
+0,8 % des cycles), plus les invalidations. Gain plafond : la vérification TLB en ligne
+(≈ 9 instructions par accès), au plus ≈ 15 % du vCPU. Net ≤ 5 %, pour un gestionnaire de
+fautes dans le code généré, la reprise d'état sur faute, le MMIO, les pages sales et le code
+automodifiant sous MTTCG. Mac OS X traduit tout l'espace utilisateur par la table de pages
+(pas par les BAT, comme les jeux GameCube de Dolphin), d'où ce taux de remplissage. **Écarté.**
+
+Le levier 2 (vérification TLB compacte, ≈ 10 % des octets chauds) l'est aussi par
+extrapolation du §20 : retirer 26 % des octets chauds y rapporte 0 à 4 %.
+**Le goulot « frontend » du §19 est donc peu sensible à la taille du code** ; la suite vise
+le nombre d'instructions exécutées et les helpers, sur un profil croisé des cinq jeux.
