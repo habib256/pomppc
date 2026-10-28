@@ -1608,18 +1608,42 @@ OSDefineMetaClassAndStructors(POMPPCAccelerator, IOAccelerator)
 IOReturn POMPPCAccelerator::newUserClient(task_t owningTask, void * securityID,
                                           UInt32 type, IOUserClient ** handler)
 {
-    /* Quartz Extreme : le client 2D du plugin GA, seul accepté. */
+    /* Quartz Extreme : le client 2D du plugin GA, et (P2, exploration) le
+       client de surface. */
     POMPPCGPU *      gpu;
     IOFramebuffer *  fb;
     POMPPCGAClient * client;
 
-    if (type != POMPPC_GA_CLIENT_TYPE) {
+    if (type != POMPPC_GA_CLIENT_TYPE && type != kIOAccelSurfaceClientType) {
         return kIOReturnUnsupported;
     }
     gpu = OSDynamicCast(POMPPCGPU, getProvider());
-    fb  = gpu ? gpu->linkedFramebuffer() : 0;
+    if (!gpu || !gpu->quartzExtreme()) {
+        return kIOReturnUnsupported;    /* hors mode QE : comme avant */
+    }
+    fb  = gpu->linkedFramebuffer();
     if (!fb) {
         return kIOReturnNotReady;
+    }
+    if (type == kIOAccelSurfaceClientType) {
+        POMPPCSurfaceClient * sc = new POMPPCSurfaceClient;
+        if (!sc || !sc->initWithFramebuffer(owningTask, fb)) {
+            if (sc) sc->release();
+            fb->release();
+            return kIOReturnNoMemory;
+        }
+        fb->release();
+        if (!sc->attach(this)) {
+            sc->release();
+            return kIOReturnError;
+        }
+        if (!sc->start(this)) {
+            sc->detach(this);
+            sc->release();
+            return kIOReturnError;
+        }
+        *handler = sc;
+        return kIOReturnSuccess;
     }
     client = new POMPPCGAClient;
     if (!client || !client->initWithFramebuffer(owningTask, fb)) {
@@ -1641,6 +1665,205 @@ IOReturn POMPPCAccelerator::newUserClient(task_t owningTask, void * securityID,
     }
     *handler = client;
     return kIOReturnSuccess;
+}
+
+#undef super
+#define super IOUserClient
+OSDefineMetaClassAndStructors(POMPPCSurfaceClient, IOUserClient)
+
+bool POMPPCSurfaceClient::initWithFramebuffer(task_t owningTask, IOFramebuffer * fb)
+{
+    IODeviceMemory * vram;
+
+    if (!super::initWithTask(owningTask, 0, kIOAccelSurfaceClientType)) {
+        return false;
+    }
+    fTask = owningTask;
+    fFB = fb;
+    fFB->retain();
+    vram = fFB->getApertureRange(kIOFBSystemAperture);
+    if (vram) {
+        fMap = vram->map(fTask, 0, kIOMapAnywhere);
+        vram->release();
+    }
+    return fMap != 0;
+}
+
+void POMPPCSurfaceClient::free(void)
+{
+    if (fMap) {
+        fMap->release();
+        fMap = 0;
+    }
+    if (fFB) {
+        fFB->release();
+        fFB = 0;
+    }
+    super::free();
+}
+
+IOReturn POMPPCSurfaceClient::clientClose(void)
+{
+    GPULog("surface %ld fermée (mode %lx, %d,%d %dx%d)\n", (long) fID,
+           (unsigned long) fMode, fBounds.x, fBounds.y, fBounds.w, fBounds.h);
+    terminate();
+    return kIOReturnSuccess;
+}
+
+/* Exploration : les 6 premiers appels de chaque méthode au journal. */
+void POMPPCSurfaceClient::note(UInt32 index)
+{
+    if (index < kIOAccelNumSurfaceMethods && fCalls[index]++ < 6) {
+        GPULog("surface %ld : méthode %lu (%d,%d %dx%d)\n", (long) fID,
+               (unsigned long) index, fBounds.x, fBounds.y, fBounds.w, fBounds.h);
+    }
+}
+
+IOExternalMethod * POMPPCSurfaceClient::getTargetAndMethodForIndex(IOService ** target,
+                                                                   UInt32 index)
+{
+/* taille de structure variable : 0xffffffff pour IOUserClient de xnu-792
+   (la constante kIOUCVariableStructureSize n'est pas dans le SDK 10.4) */
+#ifndef kIOUCVariableStructureSize
+#define kIOUCVariableStructureSize 0xffffffff
+#endif
+#define SM(f, kind, a, b) { 0, (IOMethod) &POMPPCSurfaceClient::f, kind, a, b }
+    static const IOExternalMethod methods[kIOAccelNumSurfaceMethods] = {
+        SM(sLock,            kIOUCScalarIStructO, 1, sizeof(IOAccelSurfaceInformation)), /* ReadLockOptions */
+        SM(sUnlock,          kIOUCScalarIScalarO, 1, 0),                                 /* ReadUnlockOptions */
+        SM(sGetState,        kIOUCScalarIScalarO, 0, 1),                                 /* GetState */
+        SM(sLock,            kIOUCScalarIStructO, 1, sizeof(IOAccelSurfaceInformation)), /* WriteLockOptions */
+        SM(sUnlock,          kIOUCScalarIScalarO, 1, 0),                                 /* WriteUnlockOptions */
+        SM(sRead,            kIOUCStructIStructO, sizeof(IOAccelSurfaceReadData), 0),     /* Read */
+        SM(sSetShapeBacking, kIOUCScalarIStructI, 4, kIOUCVariableStructureSize),        /* SetShapeBacking */
+        SM(sSetIDMode,       kIOUCScalarIScalarO, 2, 0),                                 /* SetIDMode */
+        SM(sSetScale,        kIOUCScalarIStructI, 1, kIOUCVariableStructureSize),        /* SetScale */
+        SM(sSetShape,        kIOUCScalarIStructI, 2, kIOUCVariableStructureSize),        /* SetShape */
+        SM(sFlush,           kIOUCScalarIScalarO, 2, 0),                                 /* Flush */
+        SM(sNop,             kIOUCScalarIScalarO, 0, 0),                                 /* QueryLock */
+        SM(sLock0,           kIOUCScalarIStructO, 0, sizeof(IOAccelSurfaceInformation)), /* ReadLock */
+        SM(sNop,             kIOUCScalarIScalarO, 0, 0),                                 /* ReadUnlock */
+        SM(sLock0,           kIOUCScalarIStructO, 0, sizeof(IOAccelSurfaceInformation)), /* WriteLock */
+        SM(sNop,             kIOUCScalarIScalarO, 0, 0),                                 /* WriteUnlock */
+        SM(sControl,         kIOUCScalarIScalarO, 2, 1),                                 /* Control */
+        SM(sSetShapeBackingLen, kIOUCScalarIStructI, 5, kIOUCVariableStructureSize),     /* SetShapeBackingAndLength */
+    };
+#undef SM
+    if (index >= kIOAccelNumSurfaceMethods) {
+        return 0;
+    }
+    note(index);
+    *target = this;
+    return (IOExternalMethod *) &methods[index];
+}
+
+/* La surface est la VRAM au rectangle de sa forme. */
+IOReturn POMPPCSurfaceClient::sLock(UInt32 options, IOAccelSurfaceInformation * info,
+                                    IOByteCount * size)
+{
+    return sLock0(info, size);
+}
+
+IOReturn POMPPCSurfaceClient::sLock0(IOAccelSurfaceInformation * info, IOByteCount * size)
+{
+    IODisplayModeID    mode;
+    IOIndex            depth;
+    IOPixelInformation pix;
+
+    if (!fMap || *size < sizeof(*info)) {
+        return kIOReturnBadArgument;
+    }
+    bzero(&pix, sizeof(pix));
+    if (fFB->getCurrentDisplayMode(&mode, &depth) != kIOReturnSuccess ||
+        fFB->getPixelInformation(mode, depth, kIOFBSystemAperture, &pix) != kIOReturnSuccess) {
+        return kIOReturnNotReady;
+    }
+    bzero(info, sizeof(*info));
+    info->address[0]  = (vm_address_t) (fMap->getVirtualAddress() +
+                                         fBounds.y * pix.bytesPerRow +
+                                         fBounds.x * (pix.bitsPerPixel / 8));
+    info->rowBytes    = pix.bytesPerRow;
+    info->width       = fBounds.w;
+    info->height      = fBounds.h;
+    info->pixelFormat = fMode & kIOAccelSurfaceModeColorDepthBits;
+    *size = sizeof(*info);
+    return kIOReturnSuccess;
+}
+
+IOReturn POMPPCSurfaceClient::sUnlock(UInt32 options)
+{
+    return kIOReturnSuccess;
+}
+
+IOReturn POMPPCSurfaceClient::sNop(void)
+{
+    return kIOReturnSuccess;
+}
+
+IOReturn POMPPCSurfaceClient::sGetState(UInt32 * state)
+{
+    *state = kIOAccelSurfaceStateIdleBit;
+    return kIOReturnSuccess;
+}
+
+IOReturn POMPPCSurfaceClient::sRead(IOAccelSurfaceReadData * in, void * out,
+                                    IOByteCount inSize, IOByteCount * outSize)
+{
+    return kIOReturnUnsupported;
+}
+
+IOReturn POMPPCSurfaceClient::sSetIDMode(UInt32 id, UInt32 mode)
+{
+    fID = id;
+    fMode = mode;
+    GPULog("surface %ld créée, mode %lx\n", (long) id, (unsigned long) mode);
+    return kIOReturnSuccess;
+}
+
+IOReturn POMPPCSurfaceClient::shape(IOAccelDeviceRegion * rgn, IOByteCount size)
+{
+    if (!rgn || size < sizeof(IOAccelDeviceRegion) ||
+        size < IOACCEL_SIZEOF_DEVICE_REGION(rgn)) {
+        return kIOReturnBadArgument;
+    }
+    fBounds = rgn->bounds;
+    return kIOReturnSuccess;
+}
+
+IOReturn POMPPCSurfaceClient::sSetShape(UInt32 options, UInt32 fbIndex,
+                                        IOAccelDeviceRegion * rgn, IOByteCount size)
+{
+    return shape(rgn, size);
+}
+
+IOReturn POMPPCSurfaceClient::sSetShapeBacking(UInt32 options, UInt32 fbIndex, UInt32 addr,
+                                               UInt32 rowBytes, IOAccelDeviceRegion * rgn,
+                                               IOByteCount size)
+{
+    return shape(rgn, size);
+}
+
+IOReturn POMPPCSurfaceClient::sSetShapeBackingLen(UInt32 options, UInt32 fbIndex, UInt32 addr,
+                                                  UInt32 rowBytes, UInt32 len,
+                                                  IOAccelDeviceRegion * rgn, IOByteCount size)
+{
+    return shape(rgn, size);
+}
+
+IOReturn POMPPCSurfaceClient::sSetScale(UInt32 options, void * scaling, IOByteCount size)
+{
+    return kIOReturnSuccess;
+}
+
+/* La surface EST l'écran : rien à recopier. */
+IOReturn POMPPCSurfaceClient::sFlush(UInt32 fbMask, UInt32 options)
+{
+    return kIOReturnSuccess;
+}
+
+IOReturn POMPPCSurfaceClient::sControl(UInt32 selector, UInt32 arg, UInt32 * result)
+{
+    return kIOReturnUnsupported;
 }
 
 #undef super

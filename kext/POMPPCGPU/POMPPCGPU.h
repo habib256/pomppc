@@ -91,6 +91,52 @@ public:
                                    UInt32 type, IOUserClient ** handler);
 };
 
+/* Quartz Extreme, P2 (exploration) : client IOAccelSurface du nub
+   (kIOAccelSurfaceClientType = 0, méthodes de IOAccelSurfaceConnect.h). La
+   surface est la VRAM du framebuffer elle-même, au rectangle de sa forme :
+   les verrous rendent cette adresse dans la tâche cliente. */
+#include <IOKit/graphics/IOAccelSurfaceConnect.h>
+
+class POMPPCSurfaceClient : public IOUserClient
+{
+    OSDeclareDefaultStructors(POMPPCSurfaceClient)
+
+public:
+    bool             initWithFramebuffer(task_t owningTask, IOFramebuffer * fb);
+    virtual void     free(void);
+    virtual IOReturn clientClose(void);
+    virtual IOExternalMethod * getTargetAndMethodForIndex(IOService ** target,
+                                                          UInt32 index);
+    IOReturn sLock(UInt32 options, IOAccelSurfaceInformation * info, IOByteCount * size);
+    IOReturn sLock0(IOAccelSurfaceInformation * info, IOByteCount * size);
+    IOReturn sUnlock(UInt32 options);
+    IOReturn sNop(void);
+    IOReturn sGetState(UInt32 * state);
+    IOReturn sRead(IOAccelSurfaceReadData * in, void * out, IOByteCount inSize,
+                   IOByteCount * outSize);
+    IOReturn sSetIDMode(UInt32 id, UInt32 mode);
+    IOReturn sSetShape(UInt32 options, UInt32 fbIndex, IOAccelDeviceRegion * rgn,
+                       IOByteCount size);
+    IOReturn sSetShapeBacking(UInt32 options, UInt32 fbIndex, UInt32 addr, UInt32 rowBytes,
+                              IOAccelDeviceRegion * rgn, IOByteCount size);
+    IOReturn sSetShapeBackingLen(UInt32 options, UInt32 fbIndex, UInt32 addr,
+                                 UInt32 rowBytes, UInt32 len, IOAccelDeviceRegion * rgn,
+                                 IOByteCount size);
+    IOReturn sSetScale(UInt32 options, void * scaling, IOByteCount size);
+    IOReturn sFlush(UInt32 fbMask, UInt32 options);
+    IOReturn sControl(UInt32 selector, UInt32 arg, UInt32 * result);
+
+private:
+    void     note(UInt32 index);
+    IOReturn shape(IOAccelDeviceRegion * rgn, IOByteCount size);
+    IOFramebuffer * fFB;            /* retenu */
+    IOMemoryMap *   fMap;           /* VRAM dans la tâche cliente */
+    task_t          fTask;
+    UInt32          fID, fMode;
+    IOAccelBounds   fBounds;
+    UInt32          fCalls[kIOAccelNumSurfaceMethods];
+};
+
 class POMPPCGAClient : public IOUserClient
 {
     OSDeclareDefaultStructors(POMPPCGAClient)
@@ -165,6 +211,7 @@ public:
     IODeviceMemory * slotRange(int slot);                    /* retenu par l'appelant */
     IOFramebuffer *  linkedFramebuffer(void);                /* QE : le premier lié, retenu */
     void             removeGAPlugin(IOService * fb);
+    bool             quartzExtreme(void)      { return fQE; }
     /* `len` porte les drapeaux POMPPC_SUB_* dans ses bits hauts (voir plus haut). */
     IOReturn submit(int slot, POMPPCGPUUserClient * client, UInt32 off, UInt32 len,
                     UInt32 * fence, UInt32 * status, UInt32 * statusPC);

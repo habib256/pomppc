@@ -636,7 +636,14 @@ long gldAttachDrawable(long a, long b, long c, long d, long e, long f, long g, l
     long r;
     pomppc_lazy_flush((void *)a);       /* avant que les tampons changent */
     pomppc_before_buffers_change((void *)a);
-    r = b == 54 ? pomppc_attach_fullscreen((void *)a) : FWD8(GLD_AttachDrawable);
+    /* 28/10 (Quartz Extreme) : dans le WindowServer, la surface de l'écran
+       (type 80) ne passe jamais par le GLDriver d'Apple — son
+       glsAssignDrawable appellerait CGSGetSurfaceBounds, donc le serveur,
+       c'est-à-dire lui-même (interblocage). Elle est attachée en plein écran. */
+    if (b == 54 || (b == 80 && pomppc_ws_process()))
+        r = pomppc_attach_fullscreen((void *)a);
+    else
+        r = FWD8(GLD_AttachDrawable);
     pomppc_log("gldAttachDrawable(%08lx %08lx %08lx %08lx) -> %ld\n", a, b, c, d, r);
     pomppc_drawable_attached((void *)a, b, r);
     return r;

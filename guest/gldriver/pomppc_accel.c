@@ -88,6 +88,8 @@
 #include <setjmp.h>
 #include <sys/ucontext.h>
 #include <mach-o/dyld.h>
+#include <crt_externs.h>
+#include <IOKit/IOKitLib.h>
 
 #include "qgpu_proto.h"
 #include "pomppc_gld.h"
@@ -17346,9 +17348,99 @@ static void direct_init_once(void)
     pthread_once(&direct_once, direct_init);
 }
 
+/* ─── 28/10, Quartz Extreme : le plugin dans le WindowServer ───────────────
+ * Le compositeur du WindowServer attache la surface de l'écran (type 80) à son
+ * contexte. Les fonctions CoreGraphics « client » (CGMainDisplayID,
+ * CGDisplayBaseAddress…, et glsAssignDrawable d'Apple → CGSGetSurfaceBounds)
+ * y ouvrent une connexion au serveur, c'est-à-dire à lui-même, qui attend
+ * déjà : interblocage (relevé par `sample`, docs/quartz-extreme.md). Ici,
+ * l'écran est lu dans le client 2D du nub (le même que le plugin GA :
+ * géométrie et VRAM mappée), et la surface est attachée comme un plein
+ * écran (tampon arrière logiciel, présentation par l'hôte). */
+#define WS_GA_CLIENT_TYPE 0x504F4741UL  /* POMPPC_GA_CLIENT_TYPE, kext/POMPPCGPU/POMPPCGPU.h */
+static struct {
+    int            known, is_ws, open;
+    io_connect_t   conn;
+    unsigned char *vram;
+    unsigned long  w, h, rb, bpp;
+} WS;
+
+int pomppc_ws_process(void)
+{
+    if (!WS.known) {
+        char **av = *_NSGetArgv();
+        const char *nm = (av && av[0]) ? av[0] : "", *sl = strrchr(nm, '/');
+        WS.is_ws = !strcmp(sl ? sl + 1 : nm, "WindowServer");
+        WS.known = 1;
+    }
+    return WS.is_ws;
+}
+
+static int ws_open(void)
+{
+    io_service_t accel;
+    vm_address_t addr = 0;
+    vm_size_t size = 0;
+    UInt32 w = 0, h = 0, rb = 0, bpp = 0;
+    if (WS.open)
+        return WS.open > 0;
+    WS.open = -1;
+    accel = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("POMPPCAccelerator"));
+    if (!accel)
+        return 0;
+    if (IOServiceOpen(accel, mach_task_self(), WS_GA_CLIENT_TYPE, &WS.conn) != KERN_SUCCESS) {
+        IOObjectRelease(accel);
+        return 0;
+    }
+    IOObjectRelease(accel);
+    if (IOConnectMapMemory(WS.conn, 0, mach_task_self(), &addr, &size, kIOMapAnywhere) != KERN_SUCCESS ||
+        IOConnectMethodScalarIScalarO(WS.conn, 0, 0, 4, &w, &h, &rb, &bpp) != KERN_SUCCESS)
+        return 0;
+    WS.vram = (unsigned char *)addr;
+    WS.w = w; WS.h = h; WS.rb = rb; WS.bpp = bpp;
+    WS.open = 1;
+    pomppc_log("POMPPC: WindowServer, écran par le nub : %lux%lu, %lu octets/ligne, %lu bpp, "
+               "VRAM %p\n", WS.w, WS.h, WS.rb, WS.bpp, WS.vram);
+    return 1;
+}
+
+static unsigned long ws_main_display(void) { return 1; }
+static void *ws_base_address(unsigned long d) { return WS.vram; }
+static unsigned long ws_bytes_per_row(unsigned long d) { return WS.rb; }
+static unsigned long ws_bits_per_pixel(unsigned long d) { return WS.bpp; }
+static unsigned long ws_pixels_wide(unsigned long d) { return WS.w; }
+static unsigned long ws_pixels_high(unsigned long d) { return WS.h; }
+static unsigned char ws_menubar_visible(void) { return 0; }
+static short ws_process_psn(Psn *p) { p->hi = 0; p->lo = 1; return 0; }
+static short ws_same_process(const Psn *a, const Psn *b, unsigned char *same)
+{
+    *same = 1;
+    return 0;
+}
+
 static void direct_init(void)
 {
     const char *e = getenv("POMPPC_GL_DIRECT");
+    if (pomppc_ws_process()) {
+        /* WindowServer : écran par le nub, rien de CoreGraphics (voir WS) */
+        D.enabled = ws_open();
+        D.windowed = 0;
+        D.over_cursor = 1;
+        D.main_display    = ws_main_display;
+        D.base_address    = ws_base_address;
+        D.bytes_per_row   = ws_bytes_per_row;
+        D.bits_per_pixel  = ws_bits_per_pixel;
+        D.pixels_wide     = ws_pixels_wide;
+        D.pixels_high     = ws_pixels_high;
+        D.menubar_visible = ws_menubar_visible;
+        D.front_process   = ws_process_psn;
+        D.current_process = ws_process_psn;
+        D.same_process    = ws_same_process;
+        if (!D.enabled)
+            pomppc_log("POMPPC: WindowServer sans client 2D du nub : présentation directe coupée\n");
+        D.init = 1;
+        return;
+    }
     D.enabled = !(e && e[0] == '0');
     D.windowed = !(e && e[0] == 'f');   /* POMPPC_GL_DIRECT=f : plein écran seulement */
     D.over_cursor = e && e[0] == 'c';   /* =c : même avec un curseur en mouvement */
