@@ -100,7 +100,7 @@ Les portes, dans l'ordre où le WindowServer les franchit :
 |---|---|---|
 | **P0** | Le kext publie `AccelCaps = 1` si la personnalité porte `POMPPCQuartzExtreme` (`install.sh QE=1`), éteint par défaut. Sur le disque de dev : journal du WindowServer (« Accel caps », repli éventuel), journal du plugin dans le WindowServer, `CGDisplayUsesOpenGLAcceleration`. | ce que le WindowServer demande, et où il s'arrête |
 | **P0 bis** | Plugin GA `POMPPCGA.plugin` (CFPlugIn, `IOGraphicsAcceleratorInterface`) : blitters de copie et de remplissage en VRAM, d'abord par le processeur de l'invité ; `IOCFPlugInTypes` posé sur le framebuffer par le kext en mode QE. | drapeaux d'écran posés sans gdb, `AttachDrawable` du compositeur |
-| P1 | Le bureau composé par le plugin vers le scanout (le contexte du WindowServer est un plein écran : `SURF_PRESENT`), sans application GL. | bureau identique à celui sans Quartz Extreme (captures), défilement et ombres justes |
+| **P1 (en cours)** | Le bureau composé par le plugin vers le scanout (le contexte du WindowServer est un plein écran : `SURF_PRESENT`), sans application GL. | bureau identique à celui sans Quartz Extreme (captures), défilement et ombres justes |
 | P2 | Fenêtres des applications GL sous Quartz Extreme : surfaces partagées entre processus, client `kIOAccelSurfaceClientType` du nub (aujourd'hui refusé). | matrice en fenêtre verte avec Quartz Extreme |
 | P3 | Vitesse (WindowServer, jeux en fenêtre : l'attente du WindowServer mesurée dans les jeux), endurance, allumage par défaut. | A/B sur la matrice entière, endurance |
 
@@ -108,6 +108,36 @@ Les portes, dans l'ordre où le WindowServer les franchit :
 
 - **28/10** : relevé statique ci-dessus. P0 codé : `kext/POMPPCGPU/POMPPCGPU.cpp`
   (`publishAccelerator`), `Info.plist`, `guest/gldriver/install.sh` (`QE=1`).
+- **29/10, 0 h 15** : **Quartz Extreme engagé.** Informations Système affiche « Quartz
+  Extreme : géré » et « Core Image : géré », sans gdb. Le WindowServer compose par notre
+  plugin (`CGXGLAccelCompositeLayer` → `gleBeginPrimitive` → `geom_begin`), et la première
+  image composée arrive à l'écran. Session ouverte, Dock et Finder présents. Ce qu'il a
+  fallu, dans l'ordre :
+  1. le client `IOAccelSurface` du nub (`POMPPCSurfaceClient`, mode QE seulement). Surface
+     d'écran id 1, mode `0x24`, forme à l'écran. Version d'exploration : la surface est la
+     VRAM au rectangle de sa forme ;
+  2. dans le WindowServer, **pas de glsAssignDrawable d'Apple** : il appelle
+     `CGSGetSurfaceBounds`, donc le serveur, donc lui-même (interblocage, relevé par
+     `sample`). La surface d'écran (type `0x50` = 80) est attachée en plein écran
+     (`pomppc_attach_fullscreen`), et l'écran est lu dans le client 2D du nub (`WS.*`,
+     `pomppc_ws_process`) au lieu de `CGMainDisplayID`/`CGDisplay*` ;
+  3. `pomppc_drawable_attached` traite 80 comme 54. Sinon il libérait le tampon arrière
+     que GLEngine venait de recevoir : faute de lecture dans `sync_to_host`, puis reprise
+     d'erreur du WindowServer par `setjmp` avec `G.mu` resté pris, et interblocage au
+     `fork` suivant (`atfork_prepare`). Trouvé en notant la ligne du dernier verrou ;
+  4. le compositeur est à **tampon unique** : il appelle `glFinish`/`glFlush`, jamais
+     d'échange. Présentation au `Swap58`/`Swap5c` du contexte plein écran du WindowServer.
+     Il rattache la surface avant chaque passe : le tampon est gardé à taille égale.
+
+  **Reste faux** (photo du 29/10) : couleurs jaune et violet en colonnes alternées, et
+  géométrie agrandie d'environ ×2 vers le bas à gauche. Textures du compositeur (trace
+  `TEX_IMAGE3`) : tuiles **rectangle 256×256**, `GL_BGRA` +
+  `UNSIGNED_INT_8_8_8_8_REV` (rangée de 4 096 octets) et **`GL_BGRA` +
+  `UNSIGNED_SHORT_1_5_5_5_REV`** (`0x8366`, rangée de 2 048 octets), qu'aucun jeu
+  n'emploie, plus une texture `GL_ALPHA`. Suspects : la conversion 1555 REV du cœur,
+  et la projection ou le viewport du contexte. Outil à faire : vidage des images du
+  WindowServer (`POMPPC_GL_DUMP` n'a pas d'environnement là ; repli par fichier comme
+  `/var/tmp/pomppc-gltrace`), puis rejeu natif.
 - **28/10, nuit** : **P0 bis fait.** `guest/ga/` (`POMPPCGA.plugin`) : blitters de copie et
   de remplissage exécutés par le processeur de l'invité, sur la VRAM du framebuffer mappée
   par le client 2D du nub (`POMPPC_GA_CLIENT_TYPE`, `POMPPCGAClient` du kext). Le kext pose

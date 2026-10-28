@@ -6011,6 +6011,11 @@ static int upload_texture_levels(PCtx *p, PTex *t)
                 c[4] = w; c[5] = h; c[6] = dep; c[7] = host_base(base); c[8] = fmt; c[9] = type;
                 c[10] = G.q.base + off; c[11] = row; c[12] = t3 ? img : 0;
                 G.n_texuploads++;
+                /* 28/10 (Quartz Extreme) : format des textures du compositeur */
+                if (pomppc_tracing() && pomppc_ws_process() && G.n_texuploads < 64)
+                    pomppc_log("  TEX_IMAGE3 tex %ld %s niveau %lu %lux%lu base %x "
+                               "format %x type %x rangée %lu octets\n", t->qtex,
+                               t3 ? "3D" : rect ? "rect" : "2D", l, w, h, base, fmt, type, row);
                 continue;
             }
             if (!arena_alloc(w * h * 4, &off))
@@ -17533,7 +17538,16 @@ long pomppc_attach_fullscreen(void *ctx)
     }
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
-    buf = p ? calloc(h, w * 4) : NULL;
+    /* 28/10 (Quartz Extreme) : le WindowServer rattache la surface de l'écran
+       avant CHAQUE passe de composition ; à taille égale on garde le tampon
+       (et son contenu : le compositeur ne redessine que les zones changées). */
+    if (p && p->fullscreen_buf && p->fullscreen_w == w && p->fullscreen_h == h &&
+        pomppc_ws_process()) {
+        buf = p->fullscreen_buf;
+        p->fullscreen_buf = NULL;       /* repris plus bas, sans free */
+    } else {
+        buf = p ? calloc(h, w * 4) : NULL;
+    }
     if (!buf) {
         pthread_mutex_unlock(&G.mu);
         return 10016; /* kCGLBadAlloc */
@@ -19273,6 +19287,16 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
         pthread_mutex_unlock(&G.mu);
         return direct_noop;
     }
+    /* 28/10 (Quartz Extreme) : le contexte du compositeur est à tampon
+       unique — le WindowServer dessine puis appelle glFinish (5c) ou glFlush
+       (58), jamais d'échange : c'est là que l'image doit partir à l'écran. */
+    if ((slot == PROC_Swap58 || slot == PROC_Swap5c) && p->fullscreen_buf &&
+        pomppc_ws_process()) {
+        if (!present_direct(p))
+            present_sw_fullscreen(p);
+        pthread_mutex_unlock(&G.mu);
+        return direct_noop;
+    }
     /* glFlush / glFinish d'un contexte qui présente directement : l'application
        attend la fin du dessin, pas une copie dans le tampon invité (l'image
        part en mémoire vidéo à l'échange). Marble Blast fait un glFinish par
@@ -19819,6 +19843,12 @@ void pomppc_after_draw_buffer_change(void *ctx)
 void pomppc_drawable_attached(void *ctx, long kind, long result)
 {
     PCtx *p;
+    /* 28/10 (Quartz Extreme) : la surface d'écran du WindowServer (80) est
+       attachée en plein écran (pomppc_attach_fullscreen) : même règle que 54,
+       sinon on libérait ici le tampon arrière que GLEngine vient de recevoir
+       (faute de lecture dans sync_to_host, relevée dans le WindowServer). */
+    if (kind == 80 && pomppc_ws_process())
+        kind = 54;
     gl_note("attach kind %ld -> %ld ctx %lux%lu bits %lu\n", kind, result,
             ctx ? GLD_U32(ctx, CTX_WIDTH) : 0, ctx ? GLD_U32(ctx, CTX_HEIGHT) : 0,
             ctx ? GLD_U32(ctx, CTX_COLOR_BITS) : 0);

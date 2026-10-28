@@ -293,8 +293,10 @@ Dans l'ordre des gains estimés. Profil du 01/10 et lecture : `docs/vitesse-prof
 
 ### Divers
 
-- [ ] **[Système] Quartz Extreme et Core Image** sur `tiger-dev.raw` : surfaces hôte pour le
-  WindowServer, plus de quatre clients (`docs/roadmap-opengl15.md`).
+- [ ] **[Système] Quartz Extreme et Core Image** : **engagé le 29/10** dans une VM jetable
+  (`docs/quartz-extreme.md`). « QE / CI : géré », composition par notre plugin, mais image
+  fausse (textures 1555 REV, projection). Éteint par défaut (`install.sh QE=1`). Reste : P1
+  (bureau juste), P2 (fenêtres GL sous QE), P3 (vitesse, endurance, allumage).
 - [ ] **[Frontend] Frontend F1, restes non joués** : la vraie touche Ctrl+Cmd+F, écran Retina,
   plusieurs moniteurs.
 - [ ] **[Son] Arrêt de la boucle principale de 186 ms** en fin de cinématique de DOOM 3

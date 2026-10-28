@@ -81,7 +81,7 @@ Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). 
 `perf_event_paranoid` ≤ 1, que l'utilisateur règle à la main ; la valeur revient à 4 à chaque
 redémarrage.
 
-## 3. Mac M4 : état au 28/10/2026, 21 h 30
+## 3. Mac M4 : état au 29/10/2026, 0 h 20
 
 **Défauts sur Darwin:arm64** : depuis le 26/10 (`550b2a8`), la série du PC est allumée et
 prouvée : `PPC32MT TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIRTYSKIP PTEGMAP
@@ -124,13 +124,24 @@ démarrages à froid, 200 reboots, puis 40 cycles de jeux (mb, zen, ut, d3), 2 i
 5 h. Un incident n'arrête pas la nuit. Effectifs dans `bench/endurance/m4-2810/bilan.json` ;
 à la fin, la VM quotidienne est relancée sous ImGuiDock.
 
+**Quartz Extreme (chantier ouvert le 28/10, `docs/quartz-extreme.md`)** : engagé dans une
+VM jetable (`SNAPSHOT=1`, kext installé avec `QE=1`). Informations Système affiche « QE / CI :
+géré », le WindowServer compose par notre plugin, et la première image composée arrive à
+l'écran, avec des couleurs et une géométrie fausses : textures 1555 REV et projection à
+examiner. **Éteint par défaut** (personnalité `POMPPCQuartzExtreme` à faux) : le disque
+quotidien n'est pas touché. Nouveau : `guest/ga/` (plugin GA), clients 2D et surface du nub
+(mode QE seulement), mode WindowServer du plugin.
+
 **À faire sur le M4, dans l'ordre**
 1. Dépouiller la nuit d'endurance (`endurance.py rapport`, Wilson) et l'écrire dans
    `docs/endurance.md` §11.
-2. Parité de **tcg/0055** (rejeu des traces, outil de preuve prouvé sur le PC le 27/10 :
+2. Quartz Extreme P1 : un outil de vidage des images du WindowServer, puis le rejeu natif.
+   Corriger les textures 1555 REV et la projection, jusqu'au bureau identique à celui sans
+   QE. Ensuite P2 : les fenêtres GL sous QE.
+3. Parité de **tcg/0055** (rejeu des traces, outil de preuve prouvé sur le PC le 27/10 :
    `c92dacc`). À faire seulement si les traces de second niveau reprennent ; elles sont
    arrêtées depuis le 22/10.
-3. Parité de **tcg/0056** seulement si le PC l'allume. Il faudra alors un saut long vers le
+4. Parité de **tcg/0056** seulement si le PC l'allume. Il faudra alors un saut long vers le
    chemin lent sur aarch64 : le `b.cond` imm19 n'a qu'1 Mio de portée, pour une région de
    64 Mio.
 
