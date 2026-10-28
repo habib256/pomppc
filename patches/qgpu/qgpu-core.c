@@ -1760,6 +1760,7 @@ bool qgpu_core_init(QgpuCore *c, const char *backend,
             c->caps |= QGPU_CAP_SURF_TEX;
         }
         c->caps |= QGPU_CAP_TEX_READBACK;   /* v20 : copie des niveaux dans le cœur */
+        c->caps |= QGPU_CAP_TEX_READBACK_ROWS;  /* 28/10 : par bandes de lignes */
         /* A4 : le bloc d'état est traduit par le cœur, quel que soit le
            backend ; QGPU_STATE_BLOCK=0 le retire (A/B, invité sur l'ancienne
            voie). */
@@ -4678,11 +4679,16 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         /* v20 (outil) : niveau de texture → BAR0, pour le vidage autonome */
         QgpuTexture *t;
         QgpuTexLevel *lv;
-        uint32_t lvl = a[2], off = a[3], max = a[4], n, i;
-        int face;
+        uint32_t lvl = a[2], off = a[3], max = a[4], n, i, y0 = 0, rows = 0;
+        int face, win;
         uint8_t *dst;
 
-        WANT(QGPU_LEN_TEX_READBACK);
+        /* 28/10 : longueur 8 = fenêtre de lignes [y0, y0 + rows) */
+        if (nargs != QGPU_LEN_TEX_READBACK - 1 &&
+            nargs != QGPU_LEN_TEX_READBACK_ROWS - 1) {
+            return QGPU_ST_BAD_ARG;
+        }
+        win = nargs == QGPU_LEN_TEX_READBACK_ROWS - 1;
         if (!(c->caps & QGPU_CAP_TEX_READBACK)) {
             return QGPU_ST_BAD_OPCODE;
         }
@@ -4702,6 +4708,14 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         if (lv->px && lv->fmt == 0x1902) {
             return QGPU_ST_BAD_ARG;                  /* profondeur : pas de mots ARGB */
         }
+        if (win && n) {
+            y0 = a[5];
+            rows = a[6];
+            if (lv->d != 1 || y0 > lv->h || rows > lv->h - y0) {
+                return QGPU_ST_BAD_ARG;
+            }
+            n = lv->w * rows;
+        }
         if ((off & 3) || (uint64_t)16 + (uint64_t)n * 4 > max) {
             return QGPU_ST_BAD_ARG;
         }
@@ -4709,12 +4723,12 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             return QGPU_ST_OOB;
         }
         dst = c->shmem + off;
-        qgpu_st32(dst, n ? lv->w : 0);
-        qgpu_st32(dst + 4, n ? lv->h : 0);
-        qgpu_st32(dst + 8, n ? lv->d : 0);
-        qgpu_st32(dst + 12, n ? lv->fmt : 0);
+        qgpu_st32(dst, lv->px ? lv->w : 0);      /* fenêtre vide : l'en-tête quand même */
+        qgpu_st32(dst + 4, lv->px ? lv->h : 0);
+        qgpu_st32(dst + 8, lv->px ? lv->d : 0);
+        qgpu_st32(dst + 12, lv->px ? lv->fmt : 0);
         for (i = 0; i < n; i++) {
-            qgpu_st32(dst + 16 + (size_t)i * 4, lv->px[i]);
+            qgpu_st32(dst + 16 + (size_t)i * 4, lv->px[(size_t)y0 * lv->w + i]);
         }
         return QGPU_ST_OK;
     }

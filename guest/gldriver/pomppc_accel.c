@@ -16771,26 +16771,75 @@ static void surftex_swapped(PCtx *p)
  * et l'image qu'il produit est celle de la VM (carrosserie de Colin McRae,
  * reflet rendu vers texture pendant le chargement). Outil seulement : jamais
  * sans déclencheur. Verrou tenu. */
-static void dump_readback_textures(PCtx *p)
+/* 28/10 : lignes de `ligne` octets qui tiennent dans l'arène de transfert
+ * (la moitié moins le flux et les sommets), `entete` octets réservés en tête ;
+ * au plus h. Une cible de 1920×1080 (7,9 Mio) n'y tient pas d'un bloc : sans
+ * bandes, sa relecture était sautée sans un mot et le rejeu de Colin McRae
+ * perdait le reflet de la carrosserie. */
+static unsigned long dump_band_rows(unsigned long ligne, unsigned long h, unsigned long entete)
 {
-    PTex *t;
-    int n = 0;
-    G.dump_rb_pending = 0;
-    for (t = G.textures; t; t = t->next) {
-        unsigned long off, off2, *c, max, w, h, d, base, tgt;
-        unsigned char *copy;
-        if (!t->dump_rb)
-            continue;
-        t->dump_rb = 0;
-        if (t->qtex < 0 || tex_is_cube(t) || tex_is_3d(t))
-            continue;
-        tgt = tex_is_rect(t) ? QGPU_TT_RECTANGLE : QGPU_TT_2D;
+    unsigned long room, r;
+    if (!ligne || G.half < ARENA_OFF + 64 + entete)
+        return 0;
+    room = G.half - ARENA_OFF - 64 - entete;
+    r = room / ligne;
+    return r < h ? r : h;
+}
+
+/* Le niveau 0 relu (w×h mots ARGB) renvoyé dans le flux : d'un bloc s'il
+ * tient dans l'arène (comme avant le 28/10), sinon défini sans données puis
+ * rempli par bandes de TEX_SUBIMAGE. Verrou tenu. */
+static int dump_upload_level(PCtx *p, PTex *t, unsigned long tgt, unsigned long w,
+                             unsigned long h, unsigned long base, const unsigned char *img)
+{
+    unsigned long rows = dump_band_rows(w * 4, h, 0), y, nb, off, *c;
+    if (!rows)
+        return 0;
+    if (rows >= h) {
+        if (!arena_alloc(w * h * 4, &off))
+            return 0;
+        memcpy(G.q.win + off, img, w * h * 4);
+    }
+    c = reserve(p, QGPU_LEN_TEX_IMAGE3);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3);
+    c[1] = t->qtex; c[2] = tgt; c[3] = 0;
+    c[4] = w; c[5] = h; c[6] = 1; c[7] = base; c[8] = 0x80E1; c[9] = 0x8367;
+    c[10] = rows >= h ? G.q.base + off : QGPU_TEX_NO_DATA; c[11] = w * 4; c[12] = 0;
+    if (rows >= h)
+        return 1;
+    for (y = 0; y < h; y += nb) {
+        nb = h - y < rows ? h - y : rows;
+        if (!arena_alloc(w * nb * 4, &off))
+            return 0;
+        memcpy(G.q.win + off, img + y * w * 4, w * nb * 4);
+        c = reserve(p, QGPU_LEN_TEX_SUBIMAGE);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_SUBIMAGE, QGPU_LEN_TEX_SUBIMAGE);
+        c[1] = t->qtex; c[2] = tgt; c[3] = 0;
+        c[4] = 0; c[5] = y; c[6] = 0;
+        c[7] = w; c[8] = nb; c[9] = 1;
+        c[10] = 0x80E1; c[11] = 0x8367;
+        c[12] = G.q.base + off; c[13] = w * 4; c[14] = 0;
+    }
+    return 1;
+}
+
+/* Relit le niveau 0 de t (TEX_READBACK, synchrone) dans un tampon malloc
+ * de w×h mots ARGB ; 0 si refusé. Par bandes de lignes si le device le sait
+ * (QGPU_CAP_TEX_READBACK_ROWS), sinon d'un bloc borné par l'arène. */
+static unsigned char *dump_read_level(PCtx *p, PTex *t, unsigned long tgt, unsigned long *pw,
+                                      unsigned long *ph, unsigned long *pbase)
+{
+    unsigned long off, *c, w, h, d, base, max, rows, y, nb;
+    unsigned char *img;
+
+    if (!(G.q.caps & QGPU_CAP_TEX_READBACK_ROWS)) {
         max = 16 + (unsigned long)QGPU_MAX_TEX_DIM * 1024UL * 4UL;     /* 2048 × 1024 au plus */
         if (!arena_fits(max))
             max = G.half - ARENA_OFF - 64;
         flush();
         if (!arena_alloc(max, &off))
-            continue;
+            return 0;
+        memset(G.q.win + off, 0, 16);
         c = reserve(p, QGPU_LEN_TEX_READBACK);
         c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_READBACK, QGPU_LEN_TEX_READBACK);
         c[1] = t->qtex; c[2] = tgt; c[3] = 0; c[4] = G.q.base + off; c[5] = max;
@@ -16801,63 +16850,129 @@ static void dump_readback_textures(PCtx *p)
         d = GLD_U32(G.q.win + off, 8);
         base = GLD_U32(G.q.win + off, 12);
         if (!w || !h || d != 1 || 16 + w * h * 4 > max)
+            return 0;
+        img = malloc(w * h * 4);
+        if (!img)
+            return 0;
+        memcpy(img, G.q.win + off + 16, w * h * 4);
+        *pw = w; *ph = h; *pbase = base;
+        return img;
+    }
+    /* en-tête seul (lignes = 0) : la taille du niveau */
+    flush();
+    if (!arena_alloc(16, &off))
+        return 0;
+    memset(G.q.win + off, 0, 16);
+    c = reserve(p, QGPU_LEN_TEX_READBACK_ROWS);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_READBACK, QGPU_LEN_TEX_READBACK_ROWS);
+    c[1] = t->qtex; c[2] = tgt; c[3] = 0; c[4] = G.q.base + off; c[5] = 16;
+    c[6] = 0; c[7] = 0;
+    flush();
+    drain_all();
+    w = GLD_U32(G.q.win + off, 0);
+    h = GLD_U32(G.q.win + off, 4);
+    d = GLD_U32(G.q.win + off, 8);
+    base = GLD_U32(G.q.win + off, 12);
+    rows = dump_band_rows(w * 4, h, 16);
+    if (!w || !h || d != 1 || !rows)
+        return 0;
+    img = malloc(w * h * 4);
+    if (!img)
+        return 0;
+    for (y = 0; y < h; y += nb) {
+        nb = h - y < rows ? h - y : rows;
+        flush();
+        if (!arena_alloc(16 + w * nb * 4, &off))
+            break;
+        memset(G.q.win + off, 0, 16);
+        c = reserve(p, QGPU_LEN_TEX_READBACK_ROWS);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_READBACK, QGPU_LEN_TEX_READBACK_ROWS);
+        c[1] = t->qtex; c[2] = tgt; c[3] = 0; c[4] = G.q.base + off; c[5] = 16 + w * nb * 4;
+        c[6] = y; c[7] = nb;
+        flush();
+        drain_all();
+        if (GLD_U32(G.q.win + off, 0) != w || GLD_U32(G.q.win + off, 4) != h)
+            break;                      /* refusé : en-tête resté nul */
+        memcpy(img + y * w * 4, G.q.win + off + 16, w * nb * 4);
+    }
+    if (y < h) {
+        free(img);
+        return 0;
+    }
+    *pw = w; *ph = h; *pbase = base;
+    return img;
+}
+
+static void dump_readback_textures(PCtx *p)
+{
+    PTex *t;
+    int n = 0, nt = 0;
+    G.dump_rb_pending = 0;
+    for (t = G.textures; t; t = t->next) {
+        unsigned long w, h, base, tgt;
+        unsigned char *img;
+        if (!t->dump_rb)
             continue;
-        copy = malloc(w * h * 4);
-        if (!copy)
+        t->dump_rb = 0;
+        if (t->qtex < 0 || tex_is_cube(t) || tex_is_3d(t))
             continue;
-        memcpy(copy, G.q.win + off + 16, w * h * 4);
-        if (arena_alloc(w * h * 4, &off2)) {
-            memcpy(G.q.win + off2, copy, w * h * 4);
-            c = reserve(p, QGPU_LEN_TEX_IMAGE3);
-            c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_IMAGE3, QGPU_LEN_TEX_IMAGE3);
-            c[1] = t->qtex; c[2] = tgt; c[3] = 0;
-            c[4] = w; c[5] = h; c[6] = 1; c[7] = base; c[8] = 0x80E1; c[9] = 0x8367;
-            c[10] = G.q.base + off2; c[11] = w * 4; c[12] = 0;
+        nt++;
+        tgt = tex_is_rect(t) ? QGPU_TT_RECTANGLE : QGPU_TT_2D;
+        img = dump_read_level(p, t, tgt, &w, &h, &base);
+        if (!img)
+            continue;
+        if (dump_upload_level(p, t, tgt, w, h, base, img))
             n++;
-        }
-        free(copy);
+        free(img);
     }
     /* La COULEUR des surfaces aussi : une cible de rendu d'IndirectX n'efface
        que sa profondeur à chaque image (CLEAR 2), ce qui n'est pas redessiné
        garde l'image d'avant — le rejeu, parti d'une surface noire, ne l'a pas
        (reflet de la carrosserie, lu dans la cible 800×600). Relue ici
        (SURF_READBACK) et réécrite (SURF_UPLOAD) dans le vidage : sans effet
-       sur la VM, l'état exact pour le rejeu. */
+       sur la VM, l'état exact pour le rejeu. 28/10 : par bandes de lignes
+       (une cible de 1920×1080 ne tient pas dans l'arène). */
     {
         PCtx *q;
-        int ns = 0;
+        int ns = 0, nq = 0;
         for (q = G.list; q; q = q->next) {
-            unsigned long off, off2, *c, w = q->sw, h = q->sh, sz = q->sw * q->sh * 4;
+            unsigned long off, off2, *c, w = q->sw, h = q->sh, rows, y, nb, sz;
             unsigned char *copy;
-            if (q->qctx < 0 || q->surf < 0 || q->color == SW_NEWER || !w || !h ||
-                !arena_fits(sz))
+            if (q->qctx < 0 || q->surf < 0 || q->color == SW_NEWER || !w || !h)
                 continue;
-            flush();
-            if (!arena_alloc(sz, &off))
+            nq++;
+            rows = dump_band_rows(w * 4, h, 0);
+            if (!rows || !(copy = malloc(w * rows * 4)))
                 continue;
-            c = reserve(q, QGPU_LEN_SURF_XFER);
-            c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER);
-            c[1] = q->surf; c[2] = G.q.base + off; c[3] = w * 4;
-            c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
-            flush();
-            drain_all();
-            copy = malloc(sz);
-            if (!copy)
-                continue;
-            memcpy(copy, G.q.win + off, sz);
-            if (arena_alloc(sz, &off2)) {
+            for (y = 0; y < h; y += nb) {
+                nb = h - y < rows ? h - y : rows;
+                sz = w * nb * 4;
+                flush();
+                if (!arena_alloc(sz, &off))
+                    break;
+                c = reserve(q, QGPU_LEN_SURF_XFER);
+                c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_READBACK, QGPU_LEN_SURF_XFER);
+                c[1] = q->surf; c[2] = G.q.base + off; c[3] = w * 4;
+                c[4] = 0; c[5] = y; c[6] = w; c[7] = nb;
+                flush();
+                drain_all();
+                memcpy(copy, G.q.win + off, sz);
+                if (!arena_alloc(sz, &off2))
+                    break;
                 memcpy(G.q.win + off2, copy, sz);
                 c = reserve(q, QGPU_LEN_SURF_XFER);
                 c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_UPLOAD, QGPU_LEN_SURF_XFER);
                 c[1] = q->surf; c[2] = G.q.base + off2; c[3] = w * 4;
-                c[4] = 0; c[5] = 0; c[6] = w; c[7] = h;
-                ns++;
+                c[4] = 0; c[5] = y; c[6] = w; c[7] = nb;
             }
             free(copy);
+            if (y >= h)
+                ns++;
         }
         flush();
-        gl_note("vidage : %d texture(s) hôte et %d surface(s) relue(s) et renvoyée(s), image %lu\n",
-                n, ns, G.n_frames);
+        gl_note("vidage : %d/%d texture(s) hôte et %d/%d surface(s) relue(s) et renvoyée(s), "
+                "image %lu%s\n", n, nt, ns, nq, G.n_frames,
+                (G.q.caps & QGPU_CAP_TEX_READBACK_ROWS) ? " (par bandes)" : "");
     }
 }
 

@@ -3344,7 +3344,8 @@ static void run_v9(QgpuCore *c, uint8_t *shmem)
             QGPU_CAP_GEN_SIZES, QGPU_CAP_NATIVE, QGPU_CAP_CLIENTS,
             QGPU_CAP_SURF_TEX, QGPU_CAP_TEX_READBACK, QGPU_CAP_GLSL,
             QGPU_CAP_COMBINE3, QGPU_CAP_GLSL_PATHS, QGPU_CAP_STATE_BLOCK,
-            QGPU_CAP_GEOM_HOST, QGPU_CAP_FIXED4, 0x00010000 /* réservé v23 */
+            QGPU_CAP_GEOM_HOST, QGPU_CAP_FIXED4, 0x00010000 /* réservé v23 */,
+            QGPU_CAP_TEX_READBACK_ROWS
         };
         uint32_t all = 0;
         unsigned k;
@@ -6110,6 +6111,33 @@ static void run_v20(QgpuCore *c, uint8_t *shmem)
     s2 = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
     CHECK(s1 == QGPU_ST_BAD_ARG && s2 == QGPU_ST_OK && qgpu_ld32(shmem + RB_OFF) == 0,
           "TEX_READBACK : taille max trop petite refusée (%u), niveau absent 0×0 (%u)", s1, s2);
+
+    /* 28/10 : fenêtre de lignes (vidage par bandes) — lignes 6..7 seules,
+       en-tête du niveau entier ; lignes = 0 : l'en-tête seul ; hors du niveau
+       refusé */
+    CHECK(c->caps & QGPU_CAP_TEX_READBACK_ROWS, "TEX_READBACK par lignes annoncé (caps 0x%x)", c->caps);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_READBACK, QGPU_LEN_TEX_READBACK_ROWS));
+    emit(&e, 50); emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, RB_OFF); emit(&e, 16 + 2 * 16 * 4);
+    emit(&e, 6); emit(&e, 2);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_OK && qgpu_ld32(shmem + RB_OFF) == 16 && qgpu_ld32(shmem + RB_OFF + 4) == 8 &&
+          (qgpu_ld32(shmem + RB_OFF + 16 + 1 * 16 * 4) & 0xFFFFFF) == 0xFF0000,
+          "TEX_READBACK lignes 6..7 : en-tête %u×%u, ligne 7 %06x (st %u)",
+          qgpu_ld32(shmem + RB_OFF), qgpu_ld32(shmem + RB_OFF + 4),
+          qgpu_ld32(shmem + RB_OFF + 16 + 1 * 16 * 4) & 0xFFFFFF, st);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_READBACK, QGPU_LEN_TEX_READBACK_ROWS));
+    emit(&e, 50); emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, RB_OFF); emit(&e, 16);
+    emit(&e, 0); emit(&e, 0);
+    s1 = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_READBACK, QGPU_LEN_TEX_READBACK_ROWS));
+    emit(&e, 50); emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, RB_OFF); emit(&e, 4096);
+    emit(&e, 7); emit(&e, 2);
+    s2 = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(s1 == QGPU_ST_OK && qgpu_ld32(shmem + RB_OFF + 4) == 8 && s2 == QGPU_ST_BAD_ARG,
+          "TEX_READBACK : en-tête seul (%u), fenêtre hors du niveau refusée (%u)", s1, s2);
 
     /* 27/09 : cibles échantillonnées par un programme de fragments, par unité
        (une unité lue sans texture rend la texture 0, pas la dernière liée) */

@@ -280,6 +280,14 @@
    asynchrone, comme DÉCLENCHEUR, et ne relit SON compteur que quand le global
    a bougé. docs/protocole-v19-transport.md, « Erreurs par client ». */
 #define QGPU_CAP_CLIENT_ERRORS  0x00080000
+/* 28/10/2026 : TEX_READBACK accepte aussi la longueur
+   QGPU_LEN_TEX_READBACK_ROWS : une FENÊTRE DE LIGNES [y0, y0 + lignes) du
+   niveau. Le vidage autonome relit ainsi par bandes une texture plus grande
+   que l'arène de transfert de l'invité (Colin McRae en 1920×1080 : 7,9 Mio
+   par cible). Annoncé par le CŒUR avec QGPU_CAP_TEX_READBACK. Sans ce bit :
+   BAD_ARG (longueur inconnue) ; l'invité ne l'émet pas. Ajouté sans changer
+   QGPU_PROTO_VERSION (même règle que QGPU_CAP_GEN_SIZES). */
+#define QGPU_CAP_TEX_READBACK_ROWS 0x00100000
 #define QGPU_REG_CLIENT_ERRORS_BASE 0xC8  /* après QGPU_REG_LAYOUT (0x88..0xC4) */
 #define QGPU_REG_CLIENT_ERRORS(i)   (QGPU_REG_CLIENT_ERRORS_BASE + 4 * (i))
 /* Taille d'une tranche de BAR0 : la fenêtre partagée en `n` parts égales,
@@ -469,6 +477,7 @@
 #define QGPU_LEN_COPY_TEX       11          /* v13 */
 #define QGPU_LEN_SURF_TEX       5           /* v20 */
 #define QGPU_LEN_TEX_READBACK   6           /* v20 */
+#define QGPU_LEN_TEX_READBACK_ROWS 8        /* 28/10 : + y0, lignes */
 #define QGPU_LEN_BUF_CREATE     3           /* v14 */
 #define QGPU_LEN_BUF            2           /* v14 DESTROY */
 #define QGPU_LEN_BUF_SUBDATA    5           /* v14 */
@@ -1622,6 +1631,13 @@
  *   profondeur : QGPU_ST_BAD_ARG ; hors de la fenêtre : QGPU_ST_OOB. Sert au
  *   vidage autonome (outil), jamais au rendu. Sans QGPU_CAP_TEX_READBACK :
  *   BAD_OPCODE.
+ *
+ *   Longueur QGPU_LEN_TEX_READBACK_ROWS (QGPU_CAP_TEX_READBACK_ROWS) :
+ *   [tex, cible d'image, niveau, off, max, y0, lignes]. L'en-tête est le même
+ *   (taille ENTIÈRE du niveau) ; suivent seulement les w·lignes texels des
+ *   lignes y0..y0+lignes-1. lignes = 0 : l'en-tête seul (taille du niveau).
+ *   Niveau 3D (d > 1) ou fenêtre hors du niveau : QGPU_ST_BAD_ARG ; niveau
+ *   non défini : en-tête nul, quelle que soit la fenêtre.
  */
 
 /* ── v14 : tampons hôte (maillages statiques hors de BAR0) ───────────────────

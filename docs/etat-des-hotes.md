@@ -71,38 +71,49 @@ qgpu de Colin McRae.
 5. Faire valider à l'œil par l'utilisateur les références `bench/matrice/ref-linux/cmr-pe` et
    `d3-fen` (`matrice.py --valider`).
 
+6. **Venu du M4 le 28/10** : `qgpu_proto.h` a changé (TEX_READBACK par bandes). Reconstruire
+   `build-fast` et `build`, puis le plugin de l'invité (`.run/cmr/cycle.sh NORUN=1` ou
+   l'équivalent du PC). Ensuite, rejouer d3-pe et cmr-pe : à 1920×1080, le vidage n'était
+   pas complet avant.
+
 **Propres au PC** : `patches/diag/` (auto-profileur, plafonds), `tools/tcg/perfhw.sh` (compteurs
 Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). `perf` exige
 `perf_event_paranoid` ≤ 1, que l'utilisateur règle à la main ; la valeur revient à 4 à chaque
 redémarrage.
 
-## 3. Mac M4 : état au 27/10/2026, 8 h (dernier commit venu du M4 : `07eefa5`)
+## 3. Mac M4 : état au 28/10/2026, 19 h (séance en cours : matrice entière à suivre)
 
 **Défauts sur Darwin:arm64** : depuis le 26/10 (`550b2a8`), la série du PC est allumée et
 prouvée : `PPC32MT TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIRTYSKIP PTEGMAP
 JC2WAY FPKNOWN FPRFLAZY STFSKNOWN LFSKNOWN TLBBASE`. A/B : DOOM 3 −23,9 %, UT2004 −18,6 %,
 Marble Blast −22,7 %. Garde : un binaire sans tcg/0037-0039 les laisse éteints.
 
-**Fait les 25, 26 et 27/10** (`docs/parite-m4-2510.md` §5)
-- Preuves des étapes 1 à 6 de la parité. tcg/0037 a été reposé après 0052 et corrigé.
-- Disque de dev en 10.4.11 : `disks/tiger-dev-m4-1011.raw`.
-- UT2004 sur le M4 : l'éclairage spot du GL d'Apple est calculé par qgpu (`5f25498`).
-- Matrice `20261026-0900` : 16 vertes sur 17. Warcraft III est rouge, indépendamment de la
-  série.
-- Suite du M4 validée et profils CPU OS 9 éprouvés (`07eefa5`). `run-all.sh` : 283 OK.
+**Fait le 28/10**
+- `~/src/qemu` reconstruit (ALIAS de cmr, tcg/0056 compilé, `x-tcg-cold` sans effet sur
+  arm64).
+- **Cellule cmr-pe rejouée** : le pilotage du PC marche sur le M4 (course mesurée,
+  43,7 ms/image pour un plancher de 88). Elle était d'abord **rouge** : sous ImGuiDock, le jeu
+  prend 1920×1080, et le vidage autonome ne relisait pas une cible de 7,9 Mio, plus grande que
+  l'arène de transfert de l'invité. La relecture était sautée sans un mot, et le reflet de la
+  carrosserie manquait au rejeu.
+  **Corrigé** : relecture par bandes de lignes. Côté protocole, `QGPU_CAP_TEX_READBACK_ROWS`
+  (0x00100000) donne à TEX_READBACK une longueur 8 avec la fenêtre `y0, lignes`, sans changer
+  `QGPU_PROTO_VERSION`. Côté plugin, les surfaces passent par SURF_READBACK/UPLOAD en bandes,
+  les textures par TEX_IMAGE3 sans données puis des bandes de TEX_SUBIMAGE. Tour
+  `20261028-1848` : **vert**, image 0,00/0,00 %. Reste 1 texture hôte sur 3 non relue
+  (texture 54, unité 1), sans effet sur l'image mesurée, à comprendre.
+- Note : `matab.sh --restore` lance la VM sous ImGuiDock, et les parties de `matab.sh` sous le
+  frontal natif. La résolution des jeux en plein écran en dépend (1920×1080 contre 1024×768 le
+  26/10).
 
-**À faire sur le M4 à la prochaine séance, dans l'ordre**
-1. `git pull`, puis **reconstruire `~/src/qemu`** : qgpu a changé (ALIAS de cmr, sans effet
-   attendu sur le GL d'Apple qui les acceptait déjà) et 0056 entre dans `build_qemu_qfb.sh`. Sur
-   arm64, `x-tcg-cold` est sans effet et l'annonce.
-2. **Rejouer la cellule cmr** (`matrice.py -j cmr -m pe`). `cmr.py` a changé sur le PC :
-   détection du titre blanc, alerte « Low-end machine », fenêtre après le chargement. Vérifier
-   que le pilotage marche encore sur le M4 et que la course est mesurée.
-3. Matrice entière sous les défauts actuels, pour vérifier que rien n'a bougé depuis le 26/10.
-4. Parité de **tcg/0055** (rejeu des traces, outil de preuve prouvé sur le PC le 27/10 :
+**À faire sur le M4, dans l'ordre**
+1. Matrice entière sous les défauts actuels, pour vérifier que rien n'a bougé depuis le 26/10.
+2. Texture 54 de cmr-pe : pourquoi la relecture échoue-t-elle (niveau tenu par le GPU ?
+   `tex_cpu`).
+3. Parité de **tcg/0055** (rejeu des traces, outil de preuve prouvé sur le PC le 27/10 :
    `c92dacc`). À faire seulement si les traces de second niveau reprennent ; elles sont
    arrêtées depuis le 22/10.
-5. Parité de **tcg/0056** seulement si le PC l'allume. Il faudra alors un saut long vers le
+4. Parité de **tcg/0056** seulement si le PC l'allume. Il faudra alors un saut long vers le
    chemin lent sur aarch64 : le `b.cond` imm19 n'a qu'1 Mio de portée, pour une région de
    64 Mio.
 

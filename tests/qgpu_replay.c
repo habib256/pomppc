@@ -414,7 +414,8 @@ int main(int argc, char **argv)
                 uint32_t hd = qgpu_ld32(cmd + q * 4), o = QGPU_CMD_OP(hd), l = QGPU_CMD_LEN(hd);
                 if (!l || q + l > ncb / 4) break;
                 if ((o == QGPU_OP_SURF_TEX && l == QGPU_LEN_SURF_TEX) ||
-                    (o == QGPU_OP_TEX_READBACK && l == QGPU_LEN_TEX_READBACK)) {
+                    (o == QGPU_OP_TEX_READBACK && (l == QGPU_LEN_TEX_READBACK ||
+                                                    l == QGPU_LEN_TEX_READBACK_ROWS))) {
                     uint32_t id = qgpu_ld32(cmd + (q + 1) * 4);
                     if (id < QGPU_MAX_TEX && !tex_hint[id])
                         tex_hint[id] = qgpu_ld32(cmd + (q + 2) * 4);
