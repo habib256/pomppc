@@ -16858,11 +16858,12 @@ static unsigned char *dump_read_level(PCtx *p, PTex *t, unsigned long tgt, unsig
         *pw = w; *ph = h; *pbase = base;
         return img;
     }
-    /* en-tête seul (lignes = 0) : la taille du niveau */
+    /* en-tête seul (lignes = 0) : la taille du niveau ; 0xFF… = refusé (un
+       niveau non défini rend, lui, un en-tête nul) */
     flush();
     if (!arena_alloc(16, &off))
         return 0;
-    memset(G.q.win + off, 0, 16);
+    memset(G.q.win + off, 0xFF, 16);
     c = reserve(p, QGPU_LEN_TEX_READBACK_ROWS);
     c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_READBACK, QGPU_LEN_TEX_READBACK_ROWS);
     c[1] = t->qtex; c[2] = tgt; c[3] = 0; c[4] = G.q.base + off; c[5] = 16;
@@ -16873,7 +16874,8 @@ static unsigned char *dump_read_level(PCtx *p, PTex *t, unsigned long tgt, unsig
     h = GLD_U32(G.q.win + off, 4);
     d = GLD_U32(G.q.win + off, 8);
     base = GLD_U32(G.q.win + off, 12);
-    rows = dump_band_rows(w * 4, h, 16);
+    *pw = w;                            /* 0 : niveau non défini sur l'hôte, rien à relire */
+    rows = w == 0xFFFFFFFFUL ? 0 : dump_band_rows(w * 4, h, 16);
     if (!w || !h || d != 1 || !rows)
         return 0;
     img = malloc(w * h * 4);
@@ -16906,7 +16908,7 @@ static unsigned char *dump_read_level(PCtx *p, PTex *t, unsigned long tgt, unsig
 static void dump_readback_textures(PCtx *p)
 {
     PTex *t;
-    int n = 0, nt = 0;
+    int n = 0, nt = 0, nv = 0;
     G.dump_rb_pending = 0;
     for (t = G.textures; t; t = t->next) {
         unsigned long w, h, base, tgt;
@@ -16918,9 +16920,13 @@ static void dump_readback_textures(PCtx *p)
             continue;
         nt++;
         tgt = tex_is_rect(t) ? QGPU_TT_RECTANGLE : QGPU_TT_2D;
+        w = 1;
         img = dump_read_level(p, t, tgt, &w, &h, &base);
-        if (!img)
+        if (!img) {
+            if (!w)
+                nv++;                   /* sans image sur l'hôte : pas un échec */
             continue;
+        }
         if (dump_upload_level(p, t, tgt, w, h, base, img))
             n++;
         free(img);
@@ -16970,8 +16976,8 @@ static void dump_readback_textures(PCtx *p)
                 ns++;
         }
         flush();
-        gl_note("vidage : %d/%d texture(s) hôte et %d/%d surface(s) relue(s) et renvoyée(s), "
-                "image %lu%s\n", n, nt, ns, nq, G.n_frames,
+        gl_note("vidage : %d/%d texture(s) hôte (%d sans image) et %d/%d surface(s) relue(s) "
+                "et renvoyée(s), image %lu%s\n", n, nt - nv, nv, ns, nq, G.n_frames,
                 (G.q.caps & QGPU_CAP_TEX_READBACK_ROWS) ? " (par bandes)" : "");
     }
 }

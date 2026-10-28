@@ -81,7 +81,7 @@ Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). 
 `perf_event_paranoid` ≤ 1, que l'utilisateur règle à la main ; la valeur revient à 4 à chaque
 redémarrage.
 
-## 3. Mac M4 : état au 28/10/2026, 19 h 25
+## 3. Mac M4 : état au 28/10/2026, 21 h 30
 
 **Défauts sur Darwin:arm64** : depuis le 26/10 (`550b2a8`), la série du PC est allumée et
 prouvée : `PPC32MT TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIRTYSKIP PTEGMAP
@@ -100,8 +100,13 @@ Marble Blast −22,7 %. Garde : un binaire sans tcg/0037-0039 les laisse éteint
   (0x00100000) donne à TEX_READBACK une longueur 8 avec la fenêtre `y0, lignes`, sans changer
   `QGPU_PROTO_VERSION`. Côté plugin, les surfaces passent par SURF_READBACK/UPLOAD en bandes,
   les textures par TEX_IMAGE3 sans données puis des bandes de TEX_SUBIMAGE. Tour
-  `20261028-1848` : **vert**, image 0,00/0,00 %. Reste 1 texture hôte sur 3 non relue
-  (texture 54, unité 1), sans effet sur l'image mesurée, à comprendre.
+  `20261028-1848` : **vert**, image 0,00/0,00 %.
+- « 2/3 textures relues » expliqué : la texture 120 n'a **aucune image sur l'hôte** (en-tête
+  0×0, jamais liée ni copiée dans le vidage). La note la compte maintenant à part : « 2/2 (1
+  sans image) ». Un refus du device se distingue d'un niveau vide par un en-tête prérempli à
+  0xFF. L'avertissement du rejeu sur la texture 54 vise la 1ʳᵉ image du vidage : elle commence
+  au milieu d'une image et précède le renvoi de la texture (limite connue depuis le 27/09). La
+  matrice compare une image plus loin. Tour `20261028-2113` : vert, 43,6 ms/image.
 - **Matrice entière `20261028-1854` (commit `403593e`) : 17 cellules vertes sur 17**, dont
   Warcraft III, rouge le 26/10. Les 4 autres cellules ne sont pas automatisées. Toutes vont plus
   vite que le 26/10 : mb −14 à −16 %, d3 −10 %, prey −6 à −20 %, ut −2 à −5 %, nx −9 %. Seul
@@ -113,12 +118,10 @@ Marble Blast −22,7 %. Garde : un binaire sans tcg/0037-0039 les laisse éteint
   26/10).
 
 **À faire sur le M4, dans l'ordre**
-1. Texture 54 de cmr-pe : pourquoi la relecture échoue-t-elle (niveau tenu par le GPU ?
-   `tex_cpu`).
-2. Parité de **tcg/0055** (rejeu des traces, outil de preuve prouvé sur le PC le 27/10 :
+1. Parité de **tcg/0055** (rejeu des traces, outil de preuve prouvé sur le PC le 27/10 :
    `c92dacc`). À faire seulement si les traces de second niveau reprennent ; elles sont
    arrêtées depuis le 22/10.
-3. Parité de **tcg/0056** seulement si le PC l'allume. Il faudra alors un saut long vers le
+2. Parité de **tcg/0056** seulement si le PC l'allume. Il faudra alors un saut long vers le
    chemin lent sur aarch64 : le `b.cond` imm19 n'a qu'1 Mio de portée, pour une région de
    64 Mio.
 
