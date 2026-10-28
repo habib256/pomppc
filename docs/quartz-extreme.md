@@ -50,11 +50,56 @@ surfaces GL), composées par `_CGXGLAccelCompositeLayer`.
 Ce que notre plugin donne déjà : mémoire vidéo de 64 Mio (`pomppc_patch_renderer_info`),
 format 32 bits xRGB, identifiant de renderer propre.
 
+## 1 bis. Ce que l'expérience a montré (28/10, VM jetable `SNAPSHOT=1`, kext `QE=1`)
+
+Outil : gdb de l'invité attaché au WindowServer (`/tmp/wsprobe.sh` : on lit dans un point
+d'arrêt, puis `detach` dans ses commandes. Un `INT` sans point atteint détache par la suite
+du script. Un script qui échoue après un `INT` **tue le WindowServer**, que loginwindow
+relance). Trace du plugin dans le WindowServer : `/var/tmp/pomppc-gltrace` contient un
+dossier, et chaque processus écrit dans `<dossier>/<nom>-<pid>/trace.txt`
+(`pomppc_tracing`).
+
+Les portes, dans l'ordre où le WindowServer les franchit :
+
+1. **`AccelCaps` seul ne suffit pas.** `_CGXAcquireDisplayDeviceSurface` (0x903a6dfc)
+   n'essaie le compositeur GL (`_CGXGLAccelForDisplayDevice`) que si les drapeaux d'écran
+   `dev+8→+0xac` (lus `lwbrx`) portent **0x80 et 0x08**, puis l'octet **`+0xe9`**. Le bit
+   `0x2000` de `__CGSDebugOptionFlags` y mène aussi directement.
+2. Ces drapeaux viennent de `__MPSetDisplayFlags` (0x9037ccb0). Elle pose `0x58` si le
+   champ `+0xa0` du pilote d'écran porte `0x20`, et `0x80` si **`IOAccelRevision` > 1**
+   **sur le framebuffer**. Le kext pose désormais `IOAccelRevision = 2` en mode QE.
+3. `+0xa0 |= 0x60` n'est posé par `_CGXMappedDisplayStart` que si
+   **`IOPSAllocateBlitEngine`** (IOKit) réussit. Cette fonction charge par
+   `IOCreatePlugInInterfaceForService` un **plugin GA** (CFPlugIn de type
+   `ACCF0000-0000-0000-0000-000a2789904e`, interface `IOGraphicsAcceleratorInterface`,
+   `IOKit/graphics/IOGraphicsInterface.h`). Elle appelle `SetDestination` (+0x50), puis
+   `GetBlitter` (+0x54), types et sources (1, 0), (0, 0x6000), puis, facultatifs, (4, 0x1000)
+   et (1, 0x2000). C'est ce que font `ATIRadeonGA.plugin` et `GeForceGA.plugin` du système.
+   **Sans plugin GA, pas de Quartz Extreme.** Nous n'en avons pas : c'est le prochain
+   morceau.
+4. **Drapeaux forcés par gdb** (`+0xac = 0xde` gros-boutiste inversé, `+0xa0 |= 0x60`,
+   `+0xe9 = 1`) : le WindowServer charge GLEngine, puis **notre plugin** (tranche qgpu 0).
+   Il s'arrêtait ensuite à `_cglsChoosePixelFormat`, la liste des formats revenant vide :
+   - la liste du WindowServer (`_attribs.0` = `80, 20 8, 21 8, 22 8, 12 0, 13 0`) est en
+     attributs **GLI**, que GLEngine passe tels quels : `gliChoosePixelFormat` n'a que deux
+     arguments ;
+   - le GLDriver logiciel d'Apple (`switch` de 91 cas de `_gldChoosePixelFormat`) exige
+     **4** (RGBA, sinon aucun format) et **53** ou un masque d'écrans (84). Il met **4
+     tampons auxiliaires** par défaut (`+0x22`, attribut 7), alors que le compositeur
+     n'accepte que `+0x22 == 0` ;
+   - corrigé dans `pomppc_translate_attribs` : 20..22 portent une valeur, et pour une liste
+     du WindowServer (80) on ajoute 4, 53 et `7 0`.
+5. Avec ces corrections, **`_cglsCreateContext` réussit**, par `gldCreateContext` de notre
+   plugin. Informations Système affiche alors « **Core Image : géré** ». Le bureau reste
+   juste. Aucun `AttachDrawable` ni dessin pour autant : les drapeaux n'étaient forcés
+   qu'à la main. La suite passe par le plugin GA.
+
 ## 2. Plan
 
 | Étape | Contenu | Preuve |
 |---|---|---|
 | **P0** | Le kext publie `AccelCaps = 1` si la personnalité porte `POMPPCQuartzExtreme` (`install.sh QE=1`), éteint par défaut. Sur le disque de dev : journal du WindowServer (« Accel caps », repli éventuel), journal du plugin dans le WindowServer, `CGDisplayUsesOpenGLAcceleration`. | ce que le WindowServer demande, et où il s'arrête |
+| **P0 bis** | Plugin GA `POMPPCGA.plugin` (CFPlugIn, `IOGraphicsAcceleratorInterface`) : blitters de copie et de remplissage en VRAM, d'abord par le processeur de l'invité ; `IOCFPlugInTypes` posé sur le framebuffer par le kext en mode QE. | drapeaux d'écran posés sans gdb, `AttachDrawable` du compositeur |
 | P1 | Le bureau composé par le plugin vers le scanout (le contexte du WindowServer est un plein écran : `SURF_PRESENT`), sans application GL. | bureau identique à celui sans Quartz Extreme (captures), défilement et ombres justes |
 | P2 | Fenêtres des applications GL sous Quartz Extreme : surfaces partagées entre processus, client `kIOAccelSurfaceClientType` du nub (aujourd'hui refusé). | matrice en fenêtre verte avec Quartz Extreme |
 | P3 | Vitesse (WindowServer, jeux en fenêtre : l'attente du WindowServer mesurée dans les jeux), endurance, allumage par défaut. | A/B sur la matrice entière, endurance |
@@ -62,5 +107,8 @@ format 32 bits xRGB, identifiant de renderer propre.
 ## 3. Journal
 
 - **28/10** : relevé statique ci-dessus. P0 codé : `kext/POMPPCGPU/POMPPCGPU.cpp`
-  (`publishAccelerator`), `Info.plist`, `guest/gldriver/install.sh` (`QE=1`). Il n'a pas
-  encore été essayé dans l'invité : la nuit d'endurance du M4 occupait l'hôte.
+  (`publishAccelerator`), `Info.plist`, `guest/gldriver/install.sh` (`QE=1`).
+- **28/10, soir** : essais dans une VM jetable (§1 bis), en parallèle de la nuit
+  d'endurance. `IOAccelRevision = 2` est posé sur le framebuffer en mode QE, et les
+  attributs du WindowServer sont corrigés dans le plugin. Contexte GL du compositeur créé
+  (drapeaux forcés). Prochaine étape : le **plugin GA** (P0 bis).

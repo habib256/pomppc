@@ -226,6 +226,7 @@ private:
     IOLock *                       fFBLock;       /* protège fLinkedFBs */
     OSArray *                      fLinkedFBs;    /* framebuffers désignant fAccel */
     UInt32                         fNextFBIndex;  /* repli d'IOAccelIndex (Q16) */
+    bool                           fQE;           /* Quartz Extreme demandé (AccelCaps) */
 };
 
 class POMPPCGPUUserClient : public IOUserClient

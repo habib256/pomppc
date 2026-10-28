@@ -25,6 +25,8 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <mach-o/dyld.h>
+#include <crt_externs.h>
+#include <sys/stat.h>
 
 #include "pomppc_gld.h"
 
@@ -54,7 +56,28 @@ int pomppc_tracing(void)
 {
     if (trace_on < 0) {
         const char *d = getenv("POMPPC_GLTRACE");
+        char ws[256];
         trace_on = 0;
+        /* 28/10 (Quartz Extreme) : le WindowServer n'a pas d'environnement à
+           nous. Sans POMPPC_GLTRACE, /var/tmp/pomppc-gltrace (une ligne : un
+           dossier) trace chaque processus dans <dossier>/<nom>-<pid>/. */
+        if (!d || !*d) {
+            FILE *f = fopen("/var/tmp/pomppc-gltrace", "r");
+            if (f) {
+                char base[200];
+                if (fgets(base, sizeof(base), f)) {
+                    char **av = *_NSGetArgv();
+                    const char *nm = (av && av[0]) ? av[0] : "?";
+                    const char *sl = strrchr(nm, '/');
+                    base[strcspn(base, "\r\n")] = 0;
+                    snprintf(ws, sizeof(ws), "%s/%s-%d", base, sl ? sl + 1 : nm, (int)getpid());
+                    mkdir(base, 0777);
+                    mkdir(ws, 0777);
+                    d = ws;
+                }
+                fclose(f);
+            }
+        }
         if (d && *d) {
             char p[300];
             snprintf(trace_dir, sizeof(trace_dir), "%s", d);
@@ -486,7 +509,9 @@ long gldGetRendererInfo(unsigned char *info, long mask, long c, long d, long e, 
 long gldChoosePixelFormat(long a, long b, long c, long d, long e, long f, long g, long h)
 {
     long r;
-    pomppc_log("gldChoosePixelFormat(%08lx %08lx %08lx %08lx %08lx)\n", a, b, c, d, e);
+    /* gliChoosePixelFormat (GLEngine) ne passe que a et b : le reste est
+       ce qui traînait dans les registres (relevé du 28/10) */
+    pomppc_log("gldChoosePixelFormat(%08lx %08lx)\n", a, b);
     if (b) {
         const long *at = (const long *)b;
         int i;
@@ -507,6 +532,21 @@ long gldChoosePixelFormat(long a, long b, long c, long d, long e, long f, long g
     if (r == 0 && a)
         pomppc_patch_pixel_list(*(void **)a);
     pomppc_log("  -> %ld\n", r);
+    /* 28/10 (Quartz Extreme) : chaque format rendu, 0x34 octets — le
+       compositeur du WindowServer en lit +08, +10, +18, +1c, +22 et +30 */
+    if (r == 0 && a && pomppc_tracing()) {
+        const unsigned char *pf = *(const unsigned char **)a;
+        int n;
+        for (n = 0; pf && n < 16; pf = (const unsigned char *)GLD_U32(pf, 0), n++) {
+            int k;
+            pomppc_log("  pf %d @%08lx :", n, (unsigned long)pf);
+            for (k = 0; k < 0x34; k += 4)
+                pomppc_log(" %08lx", GLD_U32(pf, k));
+            pomppc_log("\n");
+        }
+        if (!*(void **)a)
+            pomppc_log("  aucun format\n");
+    }
     return r;
 }
 

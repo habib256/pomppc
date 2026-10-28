@@ -356,7 +356,8 @@ void POMPPCGPU::publishAccelerator(void)
     /* Quartz Extreme (28/10, P0) : seulement si la personnalité le demande.
        CoreGraphics lit 4 octets (IORegistryEntryGetProperty) : un OSNumber
        de 32 bits les rend gros-boutistes. */
-    if (getProperty("POMPPCQuartzExtreme") == kOSBooleanTrue) {
+    fQE = getProperty("POMPPCQuartzExtreme") == kOSBooleanTrue;
+    if (fQE) {
         fAccel->setProperty("AccelCaps", 1ULL, 32);
         GPULog("accelerator: AccelCaps = 1 (Quartz Extreme demandé)\n");
     }
@@ -459,6 +460,13 @@ void POMPPCGPU::linkFramebuffer(IOService * fb)
     }
     index = OSNumber::withNumber((unsigned long long) n, 32);
     fb->setProperty(kIOAccelTypesKey, fAccelPath);
+    /* Quartz Extreme : _MPSetDisplayFlags (CoreGraphics) ne pose le drapeau
+       d'écran 0x80, sans lequel _CGXAcquireDisplayDeviceSurface ne tente
+       jamais le compositeur GL, que si IOAccelRevision > 1 SUR LE
+       FRAMEBUFFER (les pilotes ATI et NVIDIA y mettent 2). */
+    if (fQE) {
+        fb->setProperty(kIOAccelRevisionKey, 2ULL, 32);
+    }
     if (index) {
         fb->setProperty(kIOAccelIndexKey, index);
         index->release();
@@ -489,6 +497,7 @@ void POMPPCGPU::unlinkFramebuffer(IOService * fb)
         if (cur && fAccelPath && cur->isEqualTo(fAccelPath)) {
             fb->removeProperty(kIOAccelTypesKey);
             fb->removeProperty(kIOAccelIndexKey);
+            fb->removeProperty(kIOAccelRevisionKey);
         }
         fLinkedFBs->removeObject(i);
         GPULog("framebuffer %s unbound (terminated)\n", fb->getName());
@@ -520,6 +529,7 @@ void POMPPCGPU::unpublishAccelerator(void)
             if (cur && fAccelPath && cur->isEqualTo(fAccelPath)) {
                 fb->removeProperty(kIOAccelTypesKey);
                 fb->removeProperty(kIOAccelIndexKey);
+                fb->removeProperty(kIOAccelRevisionKey);
             }
         }
         fLinkedFBs->release();

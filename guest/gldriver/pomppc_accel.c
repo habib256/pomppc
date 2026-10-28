@@ -19836,6 +19836,14 @@ static int attr_has_value(long a)
     case 15: /* AGL_ACCUM_GREEN_SIZE */
     case 16: /* AGL_ACCUM_BLUE_SIZE */
     case 17: /* AGL_ACCUM_ALPHA_SIZE */
+    /* 28/10 (Quartz Extreme) : le WindowServer passe à GLEngine la liste
+       _attribs.0 de CoreGraphics, { 80, 20 8, 21 8, 22 8, 12 0, 13 0 } :
+       20..22 sont les tailles rouge, vert, bleu du GLI, avec une valeur (le
+       GLDriver d'Apple les lit ainsi). Lues sans valeur, la liste traduite
+       arrivait décalée. */
+    case 20:
+    case 21:
+    case 22:
     case 50: /* AGL_PIXEL_SIZE */
     case 55: /* kCGLPFASampleBuffers */
     case 56: /* kCGLPFASamples */
@@ -19907,10 +19915,18 @@ void pomppc_patch_renderer_info(unsigned char *info)
 /* Copie traduite pour le GLDriver d'Apple ; 0 si la liste est trop longue. */
 int pomppc_translate_attribs(const long *a, long *out, int max)
 {
-    int i, n = 0;
+    int i, n = 0, rgba = 0, kind = 0, ws = 0, aux = 0;
     for (i = 0; a[i]; i++) {
-        if (n + 3 > max)
+        if (n + 5 > max)
             return 0;
+        if (a[i] == 4)
+            rgba = 1;
+        if (a[i] == 53)
+            kind = 1;
+        if (a[i] == 80)
+            ws = 1;
+        if (a[i] == 7)
+            aux = 1;
         if (a[i] == CGL_ACCELERATED_ATTR ||
             a[i] == CGL_FULLSCREEN_ATTR ||
             a[i] == CGL_NORECOVERY_ATTR)
@@ -19925,6 +19941,25 @@ int pomppc_translate_attribs(const long *a, long *out, int max)
             long attr = a[i];
             out[n++] = promote_pf_value(attr, a[i + 1]);
             i++;
+        }
+    }
+    /* 28/10 (Quartz Extreme) : la liste du WindowServer (_attribs.0 de
+       CoreGraphics, attributs GLI { 80, 20 8, 21 8, 22 8, 12 0, 13 0 }) est
+       faite pour un pilote de carte. Le GLDriver logiciel d'Apple ne rend
+       AUCUN format sans 4 (mode RGBA, r14 de son gldChoosePixelFormat) ni
+       sans 53 ou un masque d'écrans (r15 / 84) ; les applications passent
+       toujours 4 et 53, CGL les ajoute. Et le compositeur n'accepte qu'un
+       format sans tampon auxiliaire (+0x22 == 0), que le GLDriver logiciel
+       met à 4 par défaut (gldInitPixelFormat) : 7 0. On les ajoute ici, au
+       WindowServer seulement. */
+    if (ws) {
+        if (!rgba)
+            out[n++] = 4;
+        if (!kind)
+            out[n++] = 53;
+        if (!aux) {
+            out[n++] = 7;
+            out[n++] = 0;
         }
     }
     out[n] = 0;
