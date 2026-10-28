@@ -957,6 +957,68 @@ static char *gl_prog_flip_fp(const char *src, size_t len, int env_idx)
     return out;
 }
 
+/* 28/10 : « ALIAS x = fragment.color.primary; » — un ALIAS vers une LIAISON et
+   non vers une variable déclarée. La grammaire ARB ne l'admet pas (NVIDIA :
+   « undefined variable binding in ALIAS statement »), le compilateur d'Apple
+   si : Colin McRae (BurntShad.arp, Horizon.arp) quittait en entrant en course.
+   Réécrit en ATTRIB (fragment.*, vertex.*) ou PARAM (state.*, program.*), hors
+   commentaires. NULL s'il n'y a rien à réécrire (ou mémoire manquante). */
+static char *gl_prog_fix_alias(const char *src, size_t len)
+{
+    char *out = NULL;
+    size_t i = 0, o = 0;
+    bool com = false;
+
+    while (i < len) {
+        char ch = src[i];
+        if (com) {
+            com = ch != '\n';
+        } else if (ch == '#') {
+            com = true;
+        } else if (len - i > 5 && memcmp(src + i, "ALIAS", 5) == 0 &&
+                   (i == 0 || !ident_char(src[i - 1])) && !ident_char(src[i + 5])) {
+            const char *eq = memchr(src + i, '=', len - i);
+            const char *semi = memchr(src + i, ';', len - i);
+            const char *kw = NULL;
+            if (eq && semi && eq < semi) {
+                const char *r = eq + 1;
+                while (r < semi && (*r == ' ' || *r == '\t' || *r == '\n' || *r == '\r')) {
+                    r++;
+                }
+                if ((semi - r > 9 && memcmp(r, "fragment.", 9) == 0) ||
+                    (semi - r > 7 && memcmp(r, "vertex.", 7) == 0)) {
+                    kw = "ATTRIB";
+                } else if ((semi - r > 6 && memcmp(r, "state.", 6) == 0) ||
+                           (semi - r > 8 && memcmp(r, "program.", 8) == 0)) {
+                    kw = "PARAM";
+                }
+            }
+            if (kw) {
+                if (!out) {
+                    out = malloc(len + len / 5 + 8);    /* +1 octet par ALIAS au plus */
+                    if (!out) {
+                        return NULL;
+                    }
+                    memcpy(out, src, i);
+                    o = i;
+                }
+                memcpy(out + o, kw, strlen(kw));
+                o += strlen(kw);
+                i += 5;
+                continue;
+            }
+        }
+        if (out) {
+            out[o++] = ch;
+        }
+        i++;
+    }
+    if (out) {
+        out[o] = '\0';
+    }
+    return out;
+}
+
 /* Compile `text` dans l'objet lié ; rend false et explique sur stderr si le
    compilateur de l'hôte refuse. */
 static bool gl_prog_compile(GlState *g, GLenum target, const char *text, size_t len,
@@ -971,6 +1033,24 @@ static bool gl_prog_compile(GlState *g, GLenum target, const char *text, size_t 
     glGetIntegerv(GL_PROGRAM_ERROR_POSITION_ARB, &pos);
     fprintf(stderr, "qgpu: programme %s refusé par l'hôte à l'octet %d : %s\n",
             what, (int)pos, (const char *)glGetString(GL_PROGRAM_ERROR_STRING_ARB));
+    {
+        /* 28/10 : le texte d'un programme refusé, une fois par texte distinct
+           (empreinte FNV-1a sur 64 entrées), pour corriger la traduction */
+        static uint64_t vus[64];
+        static unsigned nvus;
+        uint64_t hsh = 0xcbf29ce484222325ull;
+        unsigned k;
+        for (size_t i = 0; i < len; i++) {
+            hsh = (hsh ^ (unsigned char)text[i]) * 0x100000001b3ull;
+        }
+        for (k = 0; k < nvus && vus[k] != hsh; k++) {
+        }
+        if (k == nvus && nvus < 64) {
+            vus[nvus++] = hsh;
+            fprintf(stderr, "qgpu: texte du programme refusé (%zu octets) :\n%.*s\n"
+                    "qgpu: fin du texte\n", len, (int)len, text);
+        }
+    }
     gl_err_flush();
     return false;
 }
@@ -981,7 +1061,9 @@ static bool gl_prog_string(QgpuCore *c, QgpuProgram *p)
     GlProgram *gp = p->priv;
     GLenum target = p->target == QGPU_PT_VERTEX ? GL_VERTEX_PROGRAM_ARB
                                                 : GL_FRAGMENT_PROGRAM_ARB;
-    char *flipped = NULL;
+    char *flipped = NULL, *fixed;
+    const char *text = p->text;
+    size_t len = p->len;
     bool ok;
 
     if (!g->has_prog || !gl_make_current(g)) {
@@ -995,12 +1077,17 @@ static bool gl_prog_string(QgpuCore *c, QgpuProgram *p)
         g->GenProgramsARB(1, &gp->id);
         p->priv = gp;
     }
+    fixed = gl_prog_fix_alias(p->text, p->len);
+    if (fixed) {
+        text = fixed;
+        len = strlen(fixed);
+    }
     g->BindProgramARB(target, gp->id);
     gp->pos_invariant = (target == GL_FRAGMENT_PROGRAM_ARB) ||
-                        strstr(p->text, "ARB_position_invariant") != NULL;
+                        strstr(text, "ARB_position_invariant") != NULL;
     gp->uses_fpos = false;
-    if (target == GL_FRAGMENT_PROGRAM_ARB && memmem(p->text, p->len, "fragment.position", 17)) {
-        flipped = gl_prog_flip_fp(p->text, p->len, g->max_env[QGPU_PROG_FP] - 1);
+    if (target == GL_FRAGMENT_PROGRAM_ARB && memmem(text, len, "fragment.position", 17)) {
+        flipped = gl_prog_flip_fp(text, len, g->max_env[QGPU_PROG_FP] - 1);
         ok = flipped && gl_prog_compile(g, target, flipped, strlen(flipped),
                                         "de fragments (fragment.position retourné)");
         if (!ok && c->trace && flipped) {
@@ -1010,10 +1097,10 @@ static bool gl_prog_string(QgpuCore *c, QgpuProgram *p)
         flipped = NULL;
         gp->uses_fpos = ok;
     } else if (gp->pos_invariant) {
-        ok = gl_prog_compile(g, target, p->text, p->len,
+        ok = gl_prog_compile(g, target, text, len,
                              target == GL_VERTEX_PROGRAM_ARB ? "de sommets" : "de fragments");
     } else {
-        flipped = gl_prog_flip(p->text, p->len);
+        flipped = gl_prog_flip(text, len);
         ok = flipped && gl_prog_compile(g, target, flipped, strlen(flipped),
                                         "de sommets (retourné)");
         if (!ok && c->trace && flipped) {
@@ -1022,6 +1109,7 @@ static bool gl_prog_string(QgpuCore *c, QgpuProgram *p)
         free(flipped);
     }
     g->BindProgramARB(target, 0);
+    free(fixed);
     return ok;
 }
 

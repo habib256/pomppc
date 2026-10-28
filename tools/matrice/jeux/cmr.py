@@ -75,6 +75,19 @@ class ColinMcRae(Jeu):
     def commande(self, mode):
         return 'cd "%s/Contents/MacOS" && "./Colin McRae Rally Mac"' % APP
 
+    def blanc(self, h):
+        """Part des pixels presque blancs à l'écran (l'écran titre en a ~90 %)."""
+        p = "/tmp/matrice-cmr-%d.ppm" % os.getpid()
+        if not h.capture(p):
+            return 0.0
+        try:
+            from PIL import Image
+            im = Image.open(p).convert("L").resize((160, 120))
+            px = list(im.getdata())
+            return sum(1 for v in px if v > 230) / len(px)
+        finally:
+            os.remove(p)
+
     def teintes(self, h):
         p = "/tmp/matrice-cmr-%d.ppm" % os.getpid()
         if not h.capture(p):
@@ -89,13 +102,24 @@ class ColinMcRae(Jeu):
         return any(i - 1 in rows and rows[i][0] - rows[i - 1][0] > 500
                    for i in rows if i > self.n0)
 
+    def cap(self, h, t, quoi):
+        """MATRICE_CMR_CAPTURES=dossier : une capture par touche (diagnostic des menus)."""
+        d = os.environ.get("MATRICE_CMR_CAPTURES")
+        if d:
+            os.makedirs(d, exist_ok=True)
+            h.capture(os.path.join(d, "%04d-%s.ppm" % (t, quoi)))
+
     def pendant(self, h, rows, t):
+        if os.environ.get("MATRICE_CMR_CAPTURES") and t >= getattr(self, "cap_t", 0):
+            self.cap_t = t + 10
+            self.cap(h, t, self.etat)
         if self.etat == "course":
             # une Entrée perdue (tombée pendant une transition : 27/09, arrêt sur
             # NATIONALITÉ) : sans chargement 40 s après la dernière touche, on en
             # renvoie une, au plus 4 fois (en trop, l'Entrée des menus reste sur COURSE)
             if (t >= self.suivant + 40 and self.relances < 4 and rows
                     and not self.charge(rows)):
+                self.cap(h, t, "avant-relance")
                 h.hmp("sendkey ret 300")
                 self.relances += 1
                 self.suivant, self.n0 = t, max(rows)
@@ -103,14 +127,33 @@ class ColinMcRae(Jeu):
         if t < self.suivant:
             return
         if self.etat == "jouer":        # « Jouer » du dialogue d'options
+            # 28/10 (PC) : une alerte « Low-end machine detected » précède le dialogue
+            # sur un hôte lent et prend la première Entrée ; tant que le jeu n'a fait
+            # aucun échange GL, il est encore dans ces dialogues : Entrée de nouveau
+            # (au plus 3 ; le script d'interface de Tiger ne voit pas ces fenêtres)
+            if rows or self.touche >= 3:
+                self.etat, self.touche, self.suivant = "titre", 0, t + 20
+                return
             h.ssh("osascript -e 'tell application \"System Events\" to tell process \"%s\" to set "
                   "frontmost to true' -e 'delay 1' -e 'tell application \"System Events\" to "
                   "keystroke return'" % self.processus, delai=30)
-            self.etat, self.suivant = "titre", t + 30
+            self.touche += 1
+            self.suivant = t + 12
         elif self.etat == "titre":
-            if self.teintes(h) >= 50:
-                self.etat, self.touche, self.suivant = "menus", 0, t + 3
-        elif self.etat == "menus":
+            # 28/10 (PC) : l'écran titre (« Appuyez sur ENTRÉE pour jouer », fond blanc)
+            # ne reste que quelques secondes avant le film de démonstration, et une
+            # Entrée sur ce film fait quitter le jeu (exit 1) : on le guette toutes les
+            # 2 s (au plus 60 s) et la première Entrée part dès qu'il est là. Le seuil
+            # de 50 teintes d'avant le prenait au film ou aux logos selon l'hôte.
+            for _ in range(30):
+                if self.blanc(h) >= 0.6:
+                    self.etat, self.touche, self.suivant = "menus", 0, t
+                    break
+                time.sleep(2)
+            else:
+                return
+        if self.etat == "menus" and t >= self.suivant:
+            self.cap(h, t, "avant-touche%d" % self.touche)
             h.hmp("sendkey ret 300")
             self.suivant = t + TOUCHES[self.touche]
             self.touche += 1
@@ -121,10 +164,17 @@ class ColinMcRae(Jeu):
         if self.n0 is None or not rows:
             return None
         z = max(rows)
+        # 28/10 (PC) : le menu NATIONALITÉ tourne à ~14 ms/échange, au-dessus du seuil
+        # de 10 réglé sur le M4 ; la course ne vient qu'après sa pause de chargement
+        # (> 500 ms entre deux échanges), on ne cherche donc qu'après la première
+        charge = [i for i in rows if i > self.n0 and i - 1 in rows
+                  and rows[i][0] - rows[i - 1][0] > 500]
+        if not charge:
+            return None
 
         def ms(i, j):
             return (rows[j][0] - rows[i][0]) / (j - i)
-        for x in range(self.n0, z - 600, 50):
+        for x in range(min(charge), z - 600, 50):
             if any(i not in rows for i in (x, x + 300, x + 600)):
                 continue
             s1, s2 = ms(x, x + 300), ms(x + 300, x + 600)
