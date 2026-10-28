@@ -466,6 +466,18 @@ void POMPPCGPU::linkFramebuffer(IOService * fb)
        FRAMEBUFFER (les pilotes ATI et NVIDIA y mettent 2). */
     if (fQE) {
         fb->setProperty(kIOAccelRevisionKey, 2ULL, 32);
+        /* … et _CGXMappedDisplayStart ne pose 0x60 (d'où 0x58) que si
+           IOPSAllocateBlitEngine charge un plugin GA : on désigne le nôtre,
+           sauf si le framebuffer en a déjà un. */
+        if (!fb->getProperty(kIOCFPlugInTypesKey)) {
+            OSDictionary * types = OSDictionary::withCapacity(1);
+            OSString *     path  = OSString::withCString(POMPPC_GA_PLUGIN);
+            if (types && path && types->setObject(POMPPC_GA_TYPE_UUID, path)) {
+                fb->setProperty(kIOCFPlugInTypesKey, types);
+            }
+            if (types) types->release();
+            if (path)  path->release();
+        }
     }
     if (index) {
         fb->setProperty(kIOAccelIndexKey, index);
@@ -475,6 +487,36 @@ void POMPPCGPU::linkFramebuffer(IOService * fb)
     IOLockUnlock(fFBLock);
     GPULog("framebuffer %s bound to accelerator (index %lu)\n", fb->getName(),
            (unsigned long) n);
+}
+
+/* Retire IOCFPlugInTypes du framebuffer s'il désigne notre plugin GA. */
+void POMPPCGPU::removeGAPlugin(IOService * fb)
+{
+    OSDictionary * types = OSDynamicCast(OSDictionary, fb->getProperty(kIOCFPlugInTypesKey));
+    OSString *     path  = types ? OSDynamicCast(OSString, types->getObject(POMPPC_GA_TYPE_UUID)) : 0;
+
+    if (path && path->isEqualTo(POMPPC_GA_PLUGIN)) {
+        fb->removeProperty(kIOCFPlugInTypesKey);
+    }
+}
+
+/* Quartz Extreme : le framebuffer du plugin GA (le premier lié), retenu. */
+IOFramebuffer * POMPPCGPU::linkedFramebuffer(void)
+{
+    IOFramebuffer * fb = 0;
+
+    if (!fFBLock) {
+        return 0;
+    }
+    IOLockLock(fFBLock);
+    if (fLinkedFBs && fLinkedFBs->getCount()) {
+        fb = OSDynamicCast(IOFramebuffer, fLinkedFBs->getObject(0));
+        if (fb) {
+            fb->retain();
+        }
+    }
+    IOLockUnlock(fFBLock);
+    return fb;
 }
 
 /* Un framebuffer qui s'en va : lui rendre ses propriétés et le lâcher. Appelé
@@ -498,6 +540,7 @@ void POMPPCGPU::unlinkFramebuffer(IOService * fb)
             fb->removeProperty(kIOAccelTypesKey);
             fb->removeProperty(kIOAccelIndexKey);
             fb->removeProperty(kIOAccelRevisionKey);
+            removeGAPlugin(fb);
         }
         fLinkedFBs->removeObject(i);
         GPULog("framebuffer %s unbound (terminated)\n", fb->getName());
@@ -530,6 +573,7 @@ void POMPPCGPU::unpublishAccelerator(void)
                 fb->removeProperty(kIOAccelTypesKey);
                 fb->removeProperty(kIOAccelIndexKey);
                 fb->removeProperty(kIOAccelRevisionKey);
+                removeGAPlugin(fb);
             }
         }
         fLinkedFBs->release();
@@ -1564,5 +1608,127 @@ OSDefineMetaClassAndStructors(POMPPCAccelerator, IOAccelerator)
 IOReturn POMPPCAccelerator::newUserClient(task_t owningTask, void * securityID,
                                           UInt32 type, IOUserClient ** handler)
 {
-    return kIOReturnUnsupported;
+    /* Quartz Extreme : le client 2D du plugin GA, seul accepté. */
+    POMPPCGPU *      gpu;
+    IOFramebuffer *  fb;
+    POMPPCGAClient * client;
+
+    if (type != POMPPC_GA_CLIENT_TYPE) {
+        return kIOReturnUnsupported;
+    }
+    gpu = OSDynamicCast(POMPPCGPU, getProvider());
+    fb  = gpu ? gpu->linkedFramebuffer() : 0;
+    if (!fb) {
+        return kIOReturnNotReady;
+    }
+    client = new POMPPCGAClient;
+    if (!client || !client->initWithFramebuffer(owningTask, fb)) {
+        if (client) {
+            client->release();
+        }
+        fb->release();
+        return kIOReturnNoMemory;
+    }
+    fb->release();                      /* initWithFramebuffer l'a retenu */
+    if (!client->attach(this)) {
+        client->release();
+        return kIOReturnError;
+    }
+    if (!client->start(this)) {
+        client->detach(this);
+        client->release();
+        return kIOReturnError;
+    }
+    *handler = client;
+    return kIOReturnSuccess;
+}
+
+#undef super
+#define super IOUserClient
+OSDefineMetaClassAndStructors(POMPPCGAClient, IOUserClient)
+
+bool POMPPCGAClient::initWithFramebuffer(task_t owningTask, IOFramebuffer * fb)
+{
+    if (!super::initWithTask(owningTask, 0, POMPPC_GA_CLIENT_TYPE)) {
+        return false;
+    }
+    fFB = fb;
+    fFB->retain();
+    return true;
+}
+
+void POMPPCGAClient::free(void)
+{
+    if (fFB) {
+        fFB->release();
+        fFB = 0;
+    }
+    super::free();
+}
+
+IOReturn POMPPCGAClient::clientClose(void)
+{
+    terminate();
+    return kIOReturnSuccess;
+}
+
+/* La VRAM du framebuffer, ouverture système : celle où le WindowServer
+   dessine. getApertureRange rend un objet neuf (retenu), que
+   IOUserClient::mapClientMemory relâche après le mapping. */
+IOReturn POMPPCGAClient::clientMemoryForType(UInt32 type, IOOptionBits * options,
+                                             IOMemoryDescriptor ** memory)
+{
+    IODeviceMemory * vram;
+
+    if (type != POMPPC_GA_MEM_VRAM || !fFB) {
+        return kIOReturnBadArgument;
+    }
+    vram = fFB->getApertureRange(kIOFBSystemAperture);
+    if (!vram) {
+        return kIOReturnNoMemory;
+    }
+    *memory  = vram;
+    *options = 0;
+    return kIOReturnSuccess;
+}
+
+IOExternalMethod * POMPPCGAClient::getTargetAndMethodForIndex(IOService ** target,
+                                                              UInt32 index)
+{
+    static const IOExternalMethod methods[1] = {
+        { 0, (IOMethod) &POMPPCGAClient::gaGetInfo, kIOUCScalarIScalarO, 0, 4 },
+    };
+
+    if (index != POMPPC_GA_GET_INFO) {
+        return 0;
+    }
+    *target = this;
+    return (IOExternalMethod *) &methods[0];
+}
+
+IOReturn POMPPCGAClient::gaGetInfo(UInt32 * width, UInt32 * height, UInt32 * rowBytes,
+                                   UInt32 * bitsPerPixel, void *, void *)
+{
+    IODisplayModeID    mode;
+    IOIndex            depth;
+    IOPixelInformation info;
+    IOReturn           r;
+
+    if (!fFB) {
+        return kIOReturnNotAttached;
+    }
+    r = fFB->getCurrentDisplayMode(&mode, &depth);
+    if (r != kIOReturnSuccess) {
+        return r;
+    }
+    bzero(&info, sizeof(info));
+    r = fFB->getPixelInformation(mode, depth, kIOFBSystemAperture, &info);
+    if (r != kIOReturnSuccess) {
+        return r;
+    }
+    *width        = info.activeWidth;
+    *height       = info.activeHeight;
+    *rowBytes     = info.bytesPerRow;
+    *bitsPerPixel = info.bitsPerPixel;
+    return kIOReturnSuccess;
 }

@@ -33,6 +33,8 @@
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/graphics/IOAccelerator.h>
 #include <IOKit/graphics/IOGraphicsInterfaceTypes.h>   /* kIOAccelTypesKey… */
+#include <IOKit/graphics/IOFramebuffer.h>
+#include <IOKit/IOKitKeys.h>                         /* kIOCFPlugInTypesKey */
 #include <IOKit/pci/IOPCIDevice.h>
 
 #include "qgpu_abi.h"
@@ -64,6 +66,22 @@
  *   plus par la liste d'autorisation de _isAccelUsable. */
 #define POMPPC_GL_BUNDLE_NAME   "GLDriver-POMPPC"
 
+/* ── Quartz Extreme : le plugin GA (POMPPCGA.plugin, guest/ga/) ──────────────
+ *
+ *   _CGXMappedDisplayStart (CoreGraphics) ne marque l'écran « accélérable »
+ *   que si IOPSAllocateBlitEngine (IOKit) charge un plugin GA pour le
+ *   framebuffer : IOCFPlugInTypes du framebuffer, type
+ *   ACCF0000-0000-0000-0000-000a2789904e (docs/quartz-extreme.md §1 bis). En
+ *   mode QE, le kext pose cette propriété ; le plugin ouvre alors le nub avec
+ *   le type ci-dessous pour mapper la VRAM du framebuffer (mémoire 0) et en
+ *   lire la géométrie (méthode 0 : largeur, hauteur, octets par ligne, bits
+ *   par pixel). Les copies et remplissages sont faits par le plugin. */
+#define POMPPC_GA_CLIENT_TYPE   0x504F4741UL    /* 'POGA' */
+#define POMPPC_GA_MEM_VRAM      0
+#define POMPPC_GA_GET_INFO      0
+#define POMPPC_GA_PLUGIN        "POMPPCGA.plugin"
+#define POMPPC_GA_TYPE_UUID     "ACCF0000-0000-0000-0000-000a2789904e"
+
 class POMPPCAccelerator : public IOAccelerator
 {
     OSDeclareDefaultStructors(POMPPCAccelerator)
@@ -71,6 +89,25 @@ class POMPPCAccelerator : public IOAccelerator
 public:
     virtual IOReturn newUserClient(task_t owningTask, void * securityID,
                                    UInt32 type, IOUserClient ** handler);
+};
+
+class POMPPCGAClient : public IOUserClient
+{
+    OSDeclareDefaultStructors(POMPPCGAClient)
+
+public:
+    bool             initWithFramebuffer(task_t owningTask, IOFramebuffer * fb);
+    virtual void     free(void);
+    virtual IOReturn clientClose(void);
+    virtual IOExternalMethod * getTargetAndMethodForIndex(IOService ** target,
+                                                          UInt32 index);
+    virtual IOReturn clientMemoryForType(UInt32 type, IOOptionBits * options,
+                                         IOMemoryDescriptor ** memory);
+    IOReturn gaGetInfo(UInt32 * width, UInt32 * height, UInt32 * rowBytes,
+                       UInt32 * bitsPerPixel, void *, void *);
+
+private:
+    IOFramebuffer * fFB;            /* retenu */
 };
 
 /* Les drapeaux POMPPC_SUB_* passés dans `len` de QGPU_UC_SUBMIT sont définis
@@ -126,6 +163,8 @@ public:
        être retirée du work loop) ni de parler à un device peut-être disparu. */
     void     forgetSlot(int slot, POMPPCGPUUserClient * client);
     IODeviceMemory * slotRange(int slot);                    /* retenu par l'appelant */
+    IOFramebuffer *  linkedFramebuffer(void);                /* QE : le premier lié, retenu */
+    void             removeGAPlugin(IOService * fb);
     /* `len` porte les drapeaux POMPPC_SUB_* dans ses bits hauts (voir plus haut). */
     IOReturn submit(int slot, POMPPCGPUUserClient * client, UInt32 off, UInt32 len,
                     UInt32 * fence, UInt32 * status, UInt32 * statusPC);

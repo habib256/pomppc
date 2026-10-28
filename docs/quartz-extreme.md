@@ -108,6 +108,16 @@ Les portes, dans l'ordre où le WindowServer les franchit :
 
 - **28/10** : relevé statique ci-dessus. P0 codé : `kext/POMPPCGPU/POMPPCGPU.cpp`
   (`publishAccelerator`), `Info.plist`, `guest/gldriver/install.sh` (`QE=1`).
+- **28/10, nuit** : **P0 bis fait.** `guest/ga/` (`POMPPCGA.plugin`) : blitters de copie et
+  de remplissage exécutés par le processeur de l'invité, sur la VRAM du framebuffer mappée
+  par le client 2D du nub (`POMPPC_GA_CLIENT_TYPE`, `POMPPCGAClient` du kext). Le kext pose
+  `IOCFPlugInTypes` sur le framebuffer en mode QE. Vérifié **sans gdb** : le WindowServer
+  charge le plugin (VRAM `0xb0015000`, 1024×768×32), obtient les deux blitters, et les
+  drapeaux d'écran valent `0xd7` (`0x80`, `0x40`, `0x10` posés). **Porte suivante** :
+  `_MPAccessSurfaceForDisplayDevice` (0x903a864c) appelle `IOAccelCreateSurface(nub, id,
+  0x24 = fenêtré | 8888)`. Le nub refuse le client de surface, et le WindowServer efface
+  alors `0x08` : il faut le **client `IOAccelSurface`** (méthodes de
+  `IOAccelSurfaceConnect.h`), donc P2 avant P1.
 - **28/10, soir** : essais dans une VM jetable (§1 bis), en parallèle de la nuit
   d'endurance. `IOAccelRevision = 2` est posé sur le framebuffer en mode QE, et les
   attributs du WindowServer sont corrigés dans le plugin. Contexte GL du compositeur créé

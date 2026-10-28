@@ -34,7 +34,7 @@ RES=/System/Library/Frameworks/OpenGL.framework/Versions/A/Resources
 
 if [ "$1" = "--remove" ]; then
   kextunload -b net.pomppc.POMPPCGPU 2>/dev/null || true
-  rm -rf "$EXT/POMPPCGPU.kext" "$EXT/GLDriver-POMPPC.bundle" \
+  rm -rf "$EXT/POMPPCGPU.kext" "$EXT/GLDriver-POMPPC.bundle" "$EXT/POMPPCGA.plugin" \
          "$RES/GLDriver-POMPPC.bundle" "$RES/GLDriverPOMPPC.bundle"
   touch "$EXT"
   echo "retiré ; redémarrer pour oublier le renderer"
@@ -91,6 +91,19 @@ rm -rf "$RES/GLDriver-POMPPC.bundle" "$RES/GLDriverPOMPPC.bundle" "$EXT/GLDriver
 cp -R "$BUNDLE" "$EXT/"
 chown -R root:wheel "$EXT/GLDriver-POMPPC.bundle"
 chmod -R 755 "$EXT/GLDriver-POMPPC.bundle"
+
+# Plugin GA (Quartz Extreme, docs/quartz-extreme.md) : chargé par
+# IOPSAllocateBlitEngine seulement si le kext l'a désigné (QE=1) ; installé
+# toujours, sans effet sinon.
+GASRC=$HERE/../ga
+if [ -z "$PREBUILT" ] && [ -x /usr/bin/gcc-4.0 ] && [ -d "$GASRC" ]; then
+  echo "▶ plugin GA"
+  ( cd "$GASRC" && make clean >/dev/null && make )
+  rm -rf "$EXT/POMPPCGA.plugin"
+  cp -R "$GASRC/POMPPCGA.plugin" "$EXT/"
+  chown -R root:wheel "$EXT/POMPPCGA.plugin"
+  chmod -R 755 "$EXT/POMPPCGA.plugin"
+fi
 
 echo "✔ installé. Redémarrer, puis vérifier : kextstat | grep -i pomppc ;"
 echo "  ioreg -c POMPPCAccelerator -w 0 (IOGLBundleName) et"
