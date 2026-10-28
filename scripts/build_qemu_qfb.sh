@@ -39,6 +39,7 @@
 #   • parité arm64 de 0033-0034, plafond de lmw/stmw en ligne — patches/tcg/0037-0039 (après 0052)
 #   • talon de vcf* forcé pour les preuves (x-vfp-native-cmp-slow) — patches/tcg/0054
 #   • rejeu des traces instruction par instruction (x-tier2-verify) — patches/tcg/0055
+#   • chemins lents en zone froide de la région (x-tcg-cold) — patches/tcg/0056
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -1135,6 +1136,11 @@ TCG52_MARKERS
   if ! grep -q "replay the exact executed instruction count" accel/tcg/cpu-exec.c; then
     echo "▶ patch TCG : rejeu exact des instructions de trace (tcg/0055)"
     patch_strict "$ROOT/patches/tcg/0055-tcg-tier2-replay-insn.patch"
+  fi
+  # tcg/0056 : x-tcg-cold, les chemins lents dans le dernier quart de la région.
+  if ! grep -q "x-tcg-cold" accel/tcg/tcg-all.c; then
+    echo "▶ patch TCG : chemins lents en zone froide (x-tcg-cold, tcg/0056)"
+    patch_strict "$ROOT/patches/tcg/0056-tcg-cold-slow-paths.patch"
   fi
   grep -q 'cpu->t2_vinsns' accel/tcg/translator.c &&
     grep -q 'uint32_t t2_vinsns' include/hw/core/cpu.h || {

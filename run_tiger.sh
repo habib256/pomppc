@@ -883,6 +883,21 @@ if [ "${JITREL32:-0}" != 0 ]; then
     MODE="$MODE + JIT à 2 Gio du texte DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
+# --- Chemins lents en zone froide (x-tcg-cold, patches/tcg/0056,
+# docs/vitesse-doom3-x86.md §20) --- propriété de l'ACCÉLÉRATEUR, hôte x86-64 :
+# les chemins lents de qemu_ld/st et les talons de ppc_fp32/ppc_vfp dans le
+# dernier quart de chaque région, pour serrer les corps des TB (cache
+# d'instructions, §19). Éteint par défaut (TCGCOLD=1 l'allume) : A/B du 28/10
+# +2 à +4 % sur mb/zen/ut, neutre sur d3/cmr, un gel de cmr à expliquer.
+if [ "${TCGCOLD:-0}" != 0 ]; then
+  if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-tcg-cold=on"; then
+    TCG_ACCEL="${TCG_ACCEL:-tcg},x-tcg-cold=on"
+    MODE="$MODE + CHEMINS LENTS EN ZONE FROIDE"
+  else
+    echo "⚠  TCGCOLD=1 demandé mais ce QEMU n'a pas la propriété 'x-tcg-cold' (patches/tcg/0056)." >&2
+    MODE="$MODE + zone froide DEMANDÉE MAIS INDISPONIBLE"
+  fi
+fi
 # --- Taille du cache de sauts (x-jc-bits, patches/tcg/0011, docs/tcg-g4.md §18)
 # --- propriété de l'ACCÉLÉRATEUR (les blocs sont partagés entre vCPU et la
 # sonde en ligne de x-ret-inline fige le hachage dans le code généré). 12 =

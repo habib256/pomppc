@@ -877,3 +877,31 @@ Leviers qui en découlent, par coût croissant :
    virtuel hôte réservé et projeté au remplissage du TLB, avec un gestionnaire de fautes. Ce
    levier supprime à la fois les chemins lents et la vérification (≈ 35 % des octets) et
    environ 9 instructions par accès, mais c'est un chantier.
+
+## 20. Chemins lents en zone froide (28/10, `patches/tcg/0056`, `x-tcg-cold`)
+
+Premier levier du §19. `tcg_region_assign` réserve le dernier quart de chaque région (64 Mio
+par fil sous MTTCG) aux chemins lents ; `tcg_gen_code` y émet `tcg_out_ldst_finalize`
+(qemu_ld/st, talons de ppc_fp32/ppc_vfp), qui rejoignent le corps par des sauts rel32 et lui
+passent son adresse de retour (`l->raddr`) : `tb->tc.size` ne couvre plus que le corps, et
+`tcg_tb_lookup` retrouve toujours le bloc. Zone froide pleine : `-1`, `code_gen_ptr` porté au
+seuil, `tcg_tb_alloc` passe à la région suivante (ou au vidage). Propriété d'accélérateur
+`x-tcg-cold` (hôte x86-64 ; sur arm64 le `b.cond` imm19 vers le chemin lent n'a qu'1 Mio de
+portée : sans effet, parité à faire par un saut long), `TCGCOLD=1` dans `run_tiger.sh`.
+**Éteint par défaut.**
+
+A/B entrelacé, arbre de mesure `~/src/qemu-ceil` (-O2, sans PGO), hôte au repos
+(« cold → ref » positif = la zone froide est plus rapide) :
+
+| jeu | parties par bras | ref (médiane ms/image) | cold | écart |
+|---|---:|---:|---:|---:|
+| Marble Blast, fenêtre | 3 | 9,6 | 9,3 | +3,2 % |
+| UT2004, fenêtre | 3 | 43,1 | 41,4 | +4,1 % |
+| Zen, fenêtre | 3 | 5,3 | 5,2 | +1,9 % |
+| DOOM 3, fenêtre | 4 | 89,6 | 89,0 | +0,7 % (bruit) |
+| Colin McRae, plein écran | 3 / 2 | 47,3 | 47,8 | −1,0 % (dispersion 11 %) |
+
+Preuve d'image (`cold-2810-preuve*`, avec vidage) : mêmes verdicts dans les deux bras.
+**Une partie cmr du bras cold a gelé l'invité** (`cold-2810-vit-cmr/cold-2`, plus de ssh vers
+11:04 en course, image 40649) ; QEMU a été fermé ensuite sans erreur (pas d'autopsie). Lecture
+du code sans faille trouvée. Chasse au gel et mesure resserrée en cours (`cold-2810-cmr2`).

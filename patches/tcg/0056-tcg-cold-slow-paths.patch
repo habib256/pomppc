@@ -1,0 +1,172 @@
+diff --git a/include/tcg/startup.h b/include/tcg/startup.h
+--- a/include/tcg/startup.h
++++ b/include/tcg/startup.h
+@@ -51,6 +51,13 @@
+  * helpers par `call rel32' et non `call *[rip+pool]' (docs/tcg-g4.md §28).
+  */
+ extern bool tcg_jit_rel32;
++/*
++ * POMPPC tcg/0056 (x-tcg-cold) : les chemins lents (qemu_ld/st, talons de
++ * ppc_fp32/ppc_vfp) dans le dernier quart de chaque région, loin des corps
++ * des TB.  Hôte x86_64 seulement (ailleurs, les sauts conditionnels vers le
++ * chemin lent n'ont pas la portée : éteint avec un avertissement).
++ */
++extern bool tcg_cold_split;
+ 
+ /**
+  * tcg_register_thread: Register this thread with the TCG runtime
+diff --git a/include/tcg/tcg.h b/include/tcg/tcg.h
+--- a/include/tcg/tcg.h
++++ b/include/tcg/tcg.h
+@@ -380,6 +380,12 @@
+ 
+     /* Threshold to flush the translated code buffer.  */
+     void *code_gen_highwater;
++    /*
++     * POMPPC tcg/0056: cold zone of the current region (the qemu_ld/st and
++     * ppc_fp32/ppc_vfp slow paths), NULL when off
++     */
++    void *code_cold_ptr;
++    void *code_cold_highwater;
+ 
+     /* Track which vCPU triggers events */
+     CPUState *cpu;                      /* *_trans */
+diff --git a/accel/tcg/tcg-all.c b/accel/tcg/tcg-all.c
+--- a/accel/tcg/tcg-all.c
++++ b/accel/tcg/tcg-all.c
+@@ -259,6 +259,17 @@
+     tcg_jit_rel32 = value;
+ }
+ 
++/* POMPPC tcg/0056 */
++static bool tcg_get_cold(Object *obj, Error **errp)
++{
++    return tcg_cold_split;
++}
++
++static void tcg_set_cold(Object *obj, bool value, Error **errp)
++{
++    tcg_cold_split = value;
++}
++
+ static void tcg_set_jit_near(Object *obj, bool value, Error **errp)
+ {
+     tcg_jit_near = value;
+@@ -384,6 +395,12 @@
+         "x86_64 Linux: place the jit buffer within 2 GiB of QEMU's text, "
+         "so that helper calls are direct (POMPPC, docs/tcg-g4.md 28)");
+ 
++    object_class_property_add_bool(oc, "x-tcg-cold",
++        tcg_get_cold, tcg_set_cold);
++    object_class_property_set_description(oc, "x-tcg-cold",
++        "x86_64: put the slow paths in the last quarter of each region, "
++        "away from the TB bodies (POMPPC tcg/0056)");
++
+     object_class_property_add_bool(oc, "x-jit-near",
+         tcg_get_jit_near, tcg_set_jit_near);
+     object_class_property_set_description(oc, "x-jit-near",
+diff --git a/tcg/region.c b/tcg/region.c
+--- a/tcg/region.c
++++ b/tcg/region.c
+@@ -354,6 +354,8 @@
+     *pend = end;
+ }
+ 
++bool tcg_cold_split;
++
+ static void tcg_region_assign(TCGContext *s, size_t curr_region)
+ {
+     void *start, *end;
+@@ -364,6 +366,19 @@
+     s->code_gen_ptr = start;
+     s->code_gen_buffer_size = end - start;
+     s->code_gen_highwater = end - TCG_HIGHWATER;
++    s->code_cold_ptr = NULL;
++    s->code_cold_highwater = NULL;
++    if (tcg_cold_split) {
++        /*
++         * POMPPC tcg/0056: the last quarter of the region takes the slow
++         * paths, so that the bodies of the TBs are packed together
++         */
++        void *cold = (void *)QEMU_ALIGN_DOWN((uintptr_t)start
++                                             + (end - start) / 4 * 3, 64);
++        s->code_gen_highwater = cold - TCG_HIGHWATER;
++        s->code_cold_ptr = cold;
++        s->code_cold_highwater = end - TCG_HIGHWATER;
++    }
+ }
+ 
+ static bool tcg_region_alloc__locked(TCGContext *s)
+@@ -429,6 +444,8 @@
+         s->code_gen_ptr = NULL;
+         s->code_gen_buffer_size = 0;
+         s->code_gen_highwater = NULL;
++        s->code_cold_ptr = NULL;
++        s->code_cold_highwater = NULL;
+     }
+ }
+ 
+@@ -962,6 +979,16 @@
+  */
+ void tcg_region_init(size_t tb_size, int splitwx, unsigned max_threads)
+ {
++#if defined(__x86_64__)
++    if (tcg_cold_split) {
++        fprintf(stderr, "tcg: chemins lents en zone froide (x-tcg-cold, tcg/0056)\n");
++    }
++#else
++    if (tcg_cold_split) {
++        fprintf(stderr, "tcg: x-tcg-cold sans effet sur cet hôte (tcg/0056)\n");
++        tcg_cold_split = false;
++    }
++#endif
+     const size_t page_size = qemu_real_host_page_size();
+     size_t region_size;
+     int have_prot, need_prot;
+diff --git a/tcg/tcg.c b/tcg/tcg.c
+--- a/tcg/tcg.c
++++ b/tcg/tcg.c
+@@ -6870,9 +6870,40 @@
+     s->gen_insn_end_off[num_insns] = tcg_current_code_size(s);
+ 
+     /* Generate TB finalization at the end of block */
+-    i = tcg_out_ldst_finalize(s);
+-    if (i < 0) {
+-        return i;
++    if (s->code_cold_ptr && !QSIMPLEQ_EMPTY(&s->ldst_labels)) {
++        /*
++         * POMPPC tcg/0056: the slow paths go to the cold zone of the
++         * region.  They reach the body by rel32 jumps and pass it as the
++         * return address, so the TB keeps only its body (tb->tc.size).
++         */
++        tcg_insn_unit *hot = s->code_ptr;
++        void *hot_highwater = s->code_gen_highwater;
++        tcg_insn_unit *cold = s->code_cold_ptr;
++
++        s->code_ptr = cold;
++        s->code_gen_highwater = s->code_cold_highwater;
++        i = tcg_out_ldst_finalize(s);
++        cold = s->code_ptr;
++        s->code_ptr = hot;
++        s->code_gen_highwater = hot_highwater;
++        if (i == -1) {
++            /* cold zone full: tcg_tb_alloc must move to a new region */
++            qatomic_set(&s->code_gen_ptr, hot_highwater);
++        }
++        if (i < 0) {
++            return i;
++        }
++#ifndef CONFIG_TCG_INTERPRETER
++        flush_idcache_range((uintptr_t)tcg_splitwx_to_rx(s->code_cold_ptr),
++                            (uintptr_t)s->code_cold_ptr,
++                            tcg_ptr_byte_diff(cold, s->code_cold_ptr));
++#endif
++        s->code_cold_ptr = cold;
++    } else {
++        i = tcg_out_ldst_finalize(s);
++        if (i < 0) {
++            return i;
++        }
+     }
+     i = tcg_out_pool_finalize(s);
+     if (i < 0) {
