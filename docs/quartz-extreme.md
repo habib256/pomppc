@@ -147,6 +147,19 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
 
 ## 3. Journal
 
+- **29/10, 17 h** : **P3, Flush asynchrone dans le noyau** (`0e26278`). Le kext soumet la
+  présentation du Flush sans attendre l'hôte (deux moitiés de la zone de 4 Kio, barrière
+  attendue avant de réécrire une moitié). Il reste synchrone quand le curseur logiciel est
+  visible sur la fenêtre (relevé : le WindowServer ne le masque pas autour du Flush ; Marble
+  Blast le laisse visible, Zenerchi et DOOM 3 le cachent), ou avec `POMPPCQESync` dans la
+  personnalité. Le d3-fen à 17,7 ms du matin était un artefact (fenêtre de mesure dans la
+  cinématique) : la matrice attend maintenant un palier du niveau. A/B au repos, même VM,
+  tours `qe13a` (asynchrone) et `qe13b` (synchrone), ms/image : mb 6,7 / 6,4, zen 3,3 / 3,3,
+  **d3 31,6 / 36,4 (−13 %)**, ut 24,3 / 24,5, nx 49,5 / 49,8. QE éteint (`0936`) : mb 6,2,
+  zen 3,2, d3 28,3, ut 19,5, nx 46,9. Reste en fenêtre : ut +25 %, d3 +12 %, mb +8 %.
+  Piège de mesure : un frontal ImGuiDock resté ouvert sans VM (60 % d'un cœur) doublait
+  tous les temps en fenêtre.
+
 - **29/10, 12 h** : **P3, A/B et endurance.**
   1. Avis au WindowServer cadencés à 60 Hz au plus (`POMPPC_GL_QE_HZ`) : au-delà, le
      compositeur n'en montre pas plus et chaque avis lui coûte un Flush.
