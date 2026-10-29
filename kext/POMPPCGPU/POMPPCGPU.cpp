@@ -27,6 +27,8 @@
    de l'échange) au lieu de la surface que le jeu redessine déjà */
 #define QGPU_OP_TEX_PRESENT     0x0023
 #define QGPU_CAP_TEX_PRESENT    0x00200000
+/* 29/10 : l'hôte recommande Quartz Extreme (qgpu_proto.h) */
+#define QGPU_CAP_QE_DEFAULT     0x00400000
 
 /* v9 : période du chien de garde des attentes de barrière, et donc résolution
    du délai maximal de QGPU_UC_WAIT_FENCE. 10 ms : assez fin pour un délai qui
@@ -368,13 +370,23 @@ void POMPPCGPU::publishAccelerator(void)
         return;
     }
     fAccel->setProperty("IOGLBundleName", POMPPC_GL_BUNDLE_NAME);
-    /* Quartz Extreme (28/10, P0) : seulement si la personnalité le demande.
+    /* Quartz Extreme (28/10, P0) : la personnalité le force (vrai ou faux,
+       install.sh QE=1 / QE=0) ; sinon (« auto », le défaut depuis le 29/10)
+       il suit l'hôte (QGPU_CAP_QE_DEFAULT, posé là où QE est prouvé).
        CoreGraphics lit 4 octets (IORegistryEntryGetProperty) : un OSNumber
        de 32 bits les rend gros-boutistes. */
-    fQE = getProperty("POMPPCQuartzExtreme") == kOSBooleanTrue;
+    {
+        OSObject * q = getProperty("POMPPCQuartzExtreme");
+        if (q == kOSBooleanTrue || q == kOSBooleanFalse) {
+            fQE = q == kOSBooleanTrue;
+        } else {
+            fQE = (fCaps & QGPU_CAP_QE_DEFAULT) != 0;
+        }
+    }
     if (fQE) {
         fAccel->setProperty("AccelCaps", 1ULL, 32);
-        GPULog("accelerator: AccelCaps = 1 (Quartz Extreme demandé)\n");
+        GPULog("accelerator: AccelCaps = 1 (Quartz Extreme %s)\n",
+               getProperty("POMPPCQuartzExtreme") == kOSBooleanTrue ? "demandé" : "recommandé par l'hôte");
     }
     if (!fAccel->attach(this)) {
         fAccel->release();

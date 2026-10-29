@@ -255,6 +255,7 @@ struct QgpuPCIState {
     char *scanout_pref;            /* propriété : auto | qfb | vga | none */
     int  scanout_mode;             /* QGPU_SCANOUT_*, résolu au realize */
     bool trace;
+    bool qe;                       /* propriété : QGPU_CAP_QE_DEFAULT (29/10) */
 
     uint32_t regs[QGPU_NUM_REGS];
     qemu_irq irq;
@@ -318,11 +319,13 @@ struct QgpuPCIState {
 
 /* Bits publiés dans QGPU_REG_CAPS : ceux du cœur, plus ceux du DEVICE — la
    file (QGPU_CAP_ASYNC, s'il a son thread) et les compteurs d'erreurs par
-   tranche (QGPU_CAP_CLIENT_ERRORS, 07/10/2026 : tenus par qgpu_run_job). */
+   tranche (QGPU_CAP_CLIENT_ERRORS, 07/10/2026 : tenus par qgpu_run_job), et
+   la recommandation de Quartz Extreme (propriété `qe`, 29/10). */
 static uint32_t qgpu_pub_caps(QgpuPCIState *s)
 {
     return s->core.caps | QGPU_CAP_CLIENT_ERRORS |
-           (s->thread_ok ? QGPU_CAP_ASYNC : 0);
+           (s->thread_ok ? QGPU_CAP_ASYNC : 0) |
+           (s->qe ? QGPU_CAP_QE_DEFAULT : 0);
 }
 
 /* 07/10/2026 : index de la tranche de BAR0 qui contient l'offset ABSOLU
@@ -1575,6 +1578,7 @@ static const Property qgpu_pci_properties[] = {
        fichier que build_qemu_qfb.sh recopie tel quel. */
     DEFINE_PROP_STRING("scanout", QgpuPCIState, scanout_pref),
     DEFINE_PROP_BOOL("trace", QgpuPCIState, trace, false),
+    DEFINE_PROP_BOOL("qe", QgpuPCIState, qe, false),
 };
 
 /* Accesseurs des propriétés de test : qatomic, le thread de rendu les lit

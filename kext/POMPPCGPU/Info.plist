@@ -50,7 +50,7 @@
 			<key>IOProbeScore</key>
 			<integer>60000</integer>
 			<key>POMPPCQuartzExtreme</key>
-			<false/>
+			<string>auto</string>
 		</dict>
 	</dict>
 </dict>

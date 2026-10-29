@@ -143,9 +143,35 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
 | **P0 bis** | Plugin GA `POMPPCGA.plugin` (CFPlugIn, `IOGraphicsAcceleratorInterface`) : blitters de copie et de remplissage en VRAM, d'abord par le processeur de l'invité ; `IOCFPlugInTypes` posé sur le framebuffer par le kext en mode QE. | drapeaux d'écran posés sans gdb, `AttachDrawable` du compositeur |
 | **P1 (bureau juste, 29/10)** | Le bureau composé par le plugin vers le scanout (le contexte du WindowServer est un plein écran : `SURF_PRESENT`), sans application GL. | bureau identique à celui sans Quartz Extreme (captures), défilement et ombres justes |
 | **P2 (29/10)** | Fenêtres des applications GL sous Quartz Extreme : surface accélérée liée par le plugin, présentée par le noyau au Flush, texture d'export pour le compositeur. | matrice en fenêtre verte avec Quartz Extreme |
-| **P3 (29/10, défaut en attente)** | Vitesse (WindowServer, jeux en fenêtre : l'attente du WindowServer mesurée dans les jeux), endurance, allumage par défaut. Fait : TEX_PRESENT, avis asynchrone cadencé, A/B, endurance M4 sans incident ; défaut éteint tant que les fenêtres coûtent et que le PC n'a pas validé. | A/B sur la matrice entière, endurance |
+| **P3 (29/10)** | Vitesse (WindowServer, jeux en fenêtre), endurance, allumage par défaut. Fait : TEX_PRESENT, présentation directe par le noyau, A/B (QE au niveau d'éteint ou mieux), endurance M4 sans incident ; **allumé par défaut sur le M4** (`QGPU_CAP_QE_DEFAULT`), le PC après sa preuve. | A/B sur la matrice entière, endurance |
 
 ## 3. Journal
+
+- **29/10, 19 h 30** : **P3 fini : chemin direct, et allumé par défaut sur le M4.**
+  1. **Le jeu présente lui-même** son échange par le noyau (méthode 5 du client 2D,
+     `0ba5221`) : le kext garde la région visible de chaque surface à `SetShape` et
+     présente l'instantané (TEX_PRESENT, soumission asynchrone) sans passer par le
+     WindowServer. Repli vers l'avis `CGSFlushSurface` si le curseur est visible sur la
+     fenêtre (le WindowServer le redessine alors) ; `POMPPC_GL_QE_DIRECT=0` rend l'ancien
+     chemin.
+  2. **Plus d'avis au WindowServer sur ce chemin.** Pour une fenêtre qui n'est pas au
+     premier plan, `CGSFlushSurface` lui fait peindre le fond blanc de la fenêtre au lieu
+     du Flush noyau : DOOM 3 clignotait au chargement derrière le Terminal (un avis par
+     seconde), et restait blanc avec l'ancien chemin (captures toutes les 0,15 s). C'est
+     aussi l'écran blanc de Marble Blast signalé l'après-midi.
+  3. **A/B au repos, même VM, 3 passes par bras** (ms/image, en fenêtre) : QE éteint mb 6,4,
+     zen 3,5, d3 29,8, ut 19,9 ; QE asynchrone par le WindowServer 6,2 / 3,55 / 31,6 /
+     21,2 ; **QE direct 6,1-6,3 / 2,9-3,1 / 28,8-29,7 / 19,6-19,7**. Les « +16 à +25 % »
+     du matin venaient d'une passe unique (UT : fenêtre de 60 images) et d'un frontal
+     ImGuiDock orphelin qui chargeait l'hôte. Matrice entière (`20261029-1842`) : tout vert
+     sauf cmr-pe (49 replis comptés après la fenêtre, jusqu'à la fin du jeu ; rejouée seule :
+     vert, 0 repli, 45,0 ms/image).
+  4. **Allumage par défaut, sur le M4 seulement** (règle de parité) : capacité
+     `QGPU_CAP_QE_DEFAULT` (propriété `qe` du device), posée par `run_tiger.sh` sur
+     Darwin:arm64 (`QE=0` l'éteint, `QE=1` la pose ailleurs). La personnalité du kext
+     vaut « auto » par défaut (`install.sh` sans `QE`) et suit ce bit ; `QE=1` / `QE=0` à
+     l'installation forcent. Sur le PC, rien ne change tant qu'il n'a pas fait sa preuve
+     (matrice entière et tranche d'endurance avec `QE=1`).
 
 - **29/10, 17 h** : **P3, Flush asynchrone dans le noyau** (`0e26278`). Le kext soumet la
   présentation du Flush sans attendre l'hôte (deux moitiés de la zone de 4 Kio, barrière

@@ -1103,6 +1103,21 @@ if [ "${GPU:-1}" != 0 ]; then
       esac
     fi
     [ -n "${GPU_TRACE:-}" ] && GPU_OPTS="$GPU_OPTS,trace=on"
+    # Quartz Extreme (29/10, docs/quartz-extreme.md) : recommandé par l'hôte là où
+    # il est prouvé (Darwin:arm64) ; le kext en personnalité « auto » le suit.
+    # QE=0 l'éteint, QE=1 le demande sur un autre hôte. Sondé : un qgpu-pci sans
+    # la propriété (QEMU d'avant le 29/10) le laisse éteint, avec un mot.
+    QE_HOST=0
+    if [ "$(uname -s):$(uname -m)" = Darwin:arm64 ]; then QE_HOST=1; fi
+    case "${QE:-}" in 0) QE_HOST=0 ;; 1) QE_HOST=1 ;; esac
+    if [ "$QE_HOST" = 1 ]; then
+      if qemu_qgpu_device_ok "$BIN" "$MACHINE" "qe=on"; then
+        GPU_OPTS="$GPU_OPTS,qe=on"
+      else
+        echo "⚠  Quartz Extreme : ce qgpu-pci n'a pas la propriété 'qe' — éteint." >&2
+        echo "   Reconstruis-le : ./scripts/build_qemu_qfb.sh" >&2
+      fi
+    fi
     GPU_ARGS=(-device "qgpu-pci,id=gpu0,$GPU_OPTS")
     GPU_ON=1
     if [ -n "$GPU_BE" ]; then

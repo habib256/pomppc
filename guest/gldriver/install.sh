@@ -5,7 +5,8 @@
 #
 #   sudo sh install.sh            # compile et installe kext + plugin OpenGL
 #   sudo sh install.sh --remove   # retire les deux
-#   sudo QE=1 sh install.sh       # idem, avec Quartz Extreme demandé (essai)
+#   sudo QE=1 sh install.sh       # idem, Quartz Extreme forcé (QE=0 : éteint ;
+#                                 # sans QE : suit l'hôte, docs/quartz-extreme.md)
 #
 # À lancer depuis une copie de l'arborescence du dépôt (le CD de
 # scripts/make_kext_iso.sh, ou /pomppc) : ../../kext/POMPPCGPU et
@@ -57,15 +58,15 @@ fi
 kextunload -b net.pomppc.POMPPCGPU 2>/dev/null || true
 rm -rf "$EXT/POMPPCGPU.kext"
 cp -R "$KEXT" "$EXT/"
-# QE=1 : la personnalité demande Quartz Extreme (AccelCaps sur l'accélérateur,
-# docs/quartz-extreme.md) ; sans lui, toujours éteint, même sur un kext
-# installé avant avec QE=1.
-if [ "${QE:-0}" = 1 ]; then
-  Q=true; echo "  Quartz Extreme demandé (QE=1)"
-else
-  Q=false
-fi
-sed -e "/<key>POMPPCQuartzExtreme<\/key>/{n;s/<[a-z]*\/>/<$Q\/>/;}" \
+# Quartz Extreme (docs/quartz-extreme.md) : sans QE, la personnalité dit
+# « auto » et le kext suit l'hôte (QGPU_CAP_QE_DEFAULT, posé par run_tiger.sh
+# là où QE est prouvé) ; QE=1 le force, QE=0 l'éteint.
+case "${QE:-}" in
+  1) V='<true\/>'; echo "  Quartz Extreme forcé (QE=1)" ;;
+  0) V='<false\/>'; echo "  Quartz Extreme éteint (QE=0)" ;;
+  *) V='<string>auto<\/string>'; echo "  Quartz Extreme : suit l'hôte" ;;
+esac
+sed -e "/<key>POMPPCQuartzExtreme<\/key>/{n;s/<[a-z]*\/>/$V/;s/<string>[a-z]*<\/string>/$V/;}" \
   "$EXT/POMPPCGPU.kext/Contents/Info.plist" > /tmp/pomppc-kext-info.plist &&
   cat /tmp/pomppc-kext-info.plist > "$EXT/POMPPCGPU.kext/Contents/Info.plist"
 rm -f /tmp/pomppc-kext-info.plist

@@ -60,7 +60,8 @@
  *   (tâche 4.4).
  *
  *   AccelCaps n'est publié que si la personnalité porte POMPPCQuartzExtreme à
- *   vrai (install.sh QE=1, chantier Quartz Extreme, docs/quartz-extreme.md) :
+ *   vrai (install.sh QE=1), ou à « auto » (le défaut depuis le 29/10) quand
+ *   l'hôte le recommande (QGPU_CAP_QE_DEFAULT ; docs/quartz-extreme.md) :
  *   le WindowServer tente Quartz Extreme dès que ce masque est non nul
  *   (CGXGLDisplayContextInitialize, CoreGraphics) — il ne passe alors même
  *   plus par la liste d'autorisation de _isAccelUsable. */

@@ -296,6 +296,12 @@
    surface, qu'il redessine déjà : le jeu n'attend plus le WindowServer.
    Ajouté sans changer QGPU_PROTO_VERSION (même règle que GEN_SIZES). */
 #define QGPU_CAP_TEX_PRESENT    0x00200000
+/* 29/10 (Quartz Extreme P3) : l'HÔTE recommande Quartz Extreme (propriété
+   `qe` du device, posée par run_tiger.sh là où QE est prouvé : Darwin:arm64
+   au 29/10). Le kext en personnalité « auto » (le défaut d'install.sh) publie
+   alors AccelCaps ; QE=1 / QE=0 à l'installation forcent. Bit du DEVICE, pas
+   du cœur ; ajouté sans changer QGPU_PROTO_VERSION. */
+#define QGPU_CAP_QE_DEFAULT     0x00400000
 #define QGPU_REG_CLIENT_ERRORS_BASE 0xC8  /* après QGPU_REG_LAYOUT (0x88..0xC4) */
 #define QGPU_REG_CLIENT_ERRORS(i)   (QGPU_REG_CLIENT_ERRORS_BASE + 4 * (i))
 /* Taille d'une tranche de BAR0 : la fenêtre partagée en `n` parts égales,

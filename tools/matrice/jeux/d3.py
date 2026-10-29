@@ -54,7 +54,9 @@ def fin_cinematique(rows):
     # est la tranche de 200 images la plus rapide parmi celles qui rendent (> 5 ms/image).
     tr = [(rows[x + 200][0] - rows[x][0]) / 200 for x in range(1500, z - 600, 100)
           if x in rows and x + 200 in rows]
-    tr = [v for v in tr if v > 5]
+    # stables seulement (à 15 % de la suivante) : une tranche à cheval sur le chargement
+    # et la cinématique (~6 ms/image) passait pour la cinématique (29/10, d3-fen à 17,6)
+    tr = [v for v, w in zip(tr, tr[1:]) if v > 5 and abs(w - v) <= 0.15 * v]
     if tr:
         cine = min(tr)
         if niveau < 1.25 * cine:
