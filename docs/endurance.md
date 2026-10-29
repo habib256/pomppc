@@ -697,3 +697,37 @@ seconde campagne a été arrêtée à 05:50 (SIGINT : les instances finissent le
 libérer l'hôte au profil aux compteurs matériels, au lieu de 07:00. La tranche de démarrages à
 froid demandée au point (3) du TODO est faite. La course IPv6 de `ssh.plist` (§8) ne s'est
 pas manifestée : le banc ne note pas l'action du gardien, et aucun démarrage n'a dépassé 35 s.
+
+## 11. M4, nuit du 28 au 29/10/2026 : nouveaux défauts, base 1011-2710
+
+La nuit complète que le §9 laissait à jouer. Même base isolée qu'au §9
+(`disks/tiger-endurance-m4-1011-2710.qcow2`, en lecture seule, gardien `POMPPCSshGarde`
+absent), mêmes symboles (`bench/endurance/invite-m4-1011-2710`). Binaire de référence
+reconstruit le 28/10 à 18:45 (`~/src/qemu/build/qemu-system-ppc`, sha256
+`621ae07fcb1dd3ec`, TEX_READBACK par bandes compris), défauts du lanceur, SMP 2, 768 Mio,
+backend GL Apple, sans fenêtre, audio muet. Deux instances, chacune sur son recouvrement.
+Pilotage : `bench/endurance/m4-2810/suite.py` (non versionné, comme tout `bench/`) : il
+arrête proprement la VM quotidienne, enchaîne les trois campagnes, vérifie la base par
+`qemu-img check` (sans erreur) et relance Tiger quotidien dans ImGuiDock à la fin.
+
+| Campagne | Horaires | Démarrages | Incidents | Borne haute (Wilson 95 %) | SSH médian (min–max) | Charge hôte max |
+|---|---|---:|---:|---:|---|---:|
+| `m4-2810-froids` (`--mode froid`) | 21:21–22:00 | 100 | 0 | 3,7 % | 15 s (15–15) | 3,7 |
+| `m4-2810-reboots` (`--mode reboot`) | 22:00–23:24 | 200 (2 froids, 198 reboots) | 0 | 1,9 % | 20 s (15–30) | 4,1 |
+| `m4-2810-jeux` (`mb,zen,ut,d3`) | 23:24–01:32 | 42 (2 froids, 40 reboots) | 0 | 8,4 % | 20 s (15–35) | 5,6 |
+
+| Jeu | Cycles sains | Images par cycle (médiane) |
+|---|---:|---:|
+| DOOM 3 | 10/10 | 18 189 |
+| Marble Blast | 10/10 | 18 047 |
+| UT2004 | 10/10 | 8 754 |
+| Zenerchi | 10/10 | 30 546 |
+
+**342 démarrages (104 froids, 238 `shutdown -r`) et 40 cycles de jeu, aucun gel, aucune
+panique, aucun « pas de ssh »**. Bornes hautes réunies : **1,1 %** pour les démarrages,
+8,8 % pour les jeux, 27,8 % par jeu. Avec le §9, le M4 cumule 420 démarrages et 56 cycles
+de jeu sans incident (borne haute 0,9 % et 6,4 %).
+
+Réserve : de 23:50 à 00:20 environ, une VM jetable de mise au point de Quartz Extreme
+(`SNAPSHOT=1`) tournait en parallèle ; c'est elle qui porte la charge hôte à 5,6 pendant les
+jeux. Elle n'ajoute pas d'incident, mais les durées de cette tranche ne sont pas comparables.

@@ -166,6 +166,7 @@ void pomppc_context_destroyed(void *ctx);
 void pomppc_drawable_attached(void *ctx, long kind, long result);
 long pomppc_attach_fullscreen(void *ctx);
 int  pomppc_ws_process(void);        /* 28/10 : ce processus est-il le WindowServer ? */
+void pomppc_ws_region(void *ctx, const unsigned long *desc);  /* 29/10 : zone de la surface d'écran */
 void pomppc_before_buffers_change(void *ctx);
 void pomppc_after_draw_buffer_change(void *ctx);
 void pomppc_texture_created(void *drvtex);

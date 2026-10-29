@@ -79,8 +79,16 @@
 #define POMPPC_GA_CLIENT_TYPE   0x504F4741UL    /* 'POGA' */
 #define POMPPC_GA_MEM_VRAM      0
 #define POMPPC_GA_GET_INFO      0
+/* Méthode 1 (29/10) : rectangle de la forme de la surface `id` [x, y, l, h],
+   tel que posé par IOAccelSetSurfaceShape. Le compositeur du WindowServer
+   dessine chaque zone sale dans un viewport (0, 0, l, h) : c'est la forme de
+   la surface d'écran qui la place, et le plugin GL l'applique. */
+#define POMPPC_GA_SURF_BOUNDS   1
+#define POMPPC_MAX_SURF_IDS     16
 #define POMPPC_GA_PLUGIN        "POMPPCGA.plugin"
 #define POMPPC_GA_TYPE_UUID     "ACCF0000-0000-0000-0000-000a2789904e"
+
+#include <IOKit/graphics/IOAccelSurfaceConnect.h>
 
 class POMPPCAccelerator : public IOAccelerator
 {
@@ -89,13 +97,18 @@ class POMPPCAccelerator : public IOAccelerator
 public:
     virtual IOReturn newUserClient(task_t owningTask, void * securityID,
                                    UInt32 type, IOUserClient ** handler);
+    void             setSurfaceBounds(UInt32 id, const IOAccelBounds * b);
+    bool             surfaceBounds(UInt32 id, IOAccelBounds * b);
+
+private:
+    IOAccelBounds    fSurfBounds[POMPPC_MAX_SURF_IDS];
+    bool             fSurfKnown[POMPPC_MAX_SURF_IDS];
 };
 
 /* Quartz Extreme, P2 (exploration) : client IOAccelSurface du nub
    (kIOAccelSurfaceClientType = 0, méthodes de IOAccelSurfaceConnect.h). La
    surface est la VRAM du framebuffer elle-même, au rectangle de sa forme :
    les verrous rendent cette adresse dans la tâche cliente. */
-#include <IOKit/graphics/IOAccelSurfaceConnect.h>
 
 class POMPPCSurfaceClient : public IOUserClient
 {
@@ -151,6 +164,7 @@ public:
                                          IOMemoryDescriptor ** memory);
     IOReturn gaGetInfo(UInt32 * width, UInt32 * height, UInt32 * rowBytes,
                        UInt32 * bitsPerPixel, void *, void *);
+    IOReturn gaSurfBounds(UInt32 id, UInt32 * x, UInt32 * y, UInt32 * w, UInt32 * h, void *);
 
 private:
     IOFramebuffer * fFB;            /* retenu */

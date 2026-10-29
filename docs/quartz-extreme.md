@@ -100,12 +100,38 @@ Les portes, dans l'ordre où le WindowServer les franchit :
 |---|---|---|
 | **P0** | Le kext publie `AccelCaps = 1` si la personnalité porte `POMPPCQuartzExtreme` (`install.sh QE=1`), éteint par défaut. Sur le disque de dev : journal du WindowServer (« Accel caps », repli éventuel), journal du plugin dans le WindowServer, `CGDisplayUsesOpenGLAcceleration`. | ce que le WindowServer demande, et où il s'arrête |
 | **P0 bis** | Plugin GA `POMPPCGA.plugin` (CFPlugIn, `IOGraphicsAcceleratorInterface`) : blitters de copie et de remplissage en VRAM, d'abord par le processeur de l'invité ; `IOCFPlugInTypes` posé sur le framebuffer par le kext en mode QE. | drapeaux d'écran posés sans gdb, `AttachDrawable` du compositeur |
-| **P1 (en cours)** | Le bureau composé par le plugin vers le scanout (le contexte du WindowServer est un plein écran : `SURF_PRESENT`), sans application GL. | bureau identique à celui sans Quartz Extreme (captures), défilement et ombres justes |
+| **P1 (bureau juste, 29/10)** | Le bureau composé par le plugin vers le scanout (le contexte du WindowServer est un plein écran : `SURF_PRESENT`), sans application GL. | bureau identique à celui sans Quartz Extreme (captures), défilement et ombres justes |
 | P2 | Fenêtres des applications GL sous Quartz Extreme : surfaces partagées entre processus, client `kIOAccelSurfaceClientType` du nub (aujourd'hui refusé). | matrice en fenêtre verte avec Quartz Extreme |
 | P3 | Vitesse (WindowServer, jeux en fenêtre : l'attente du WindowServer mesurée dans les jeux), endurance, allumage par défaut. | A/B sur la matrice entière, endurance |
 
 ## 3. Journal
 
+- **29/10, 6 h** : **bureau juste sous Quartz Extreme** (VM jetable, `QE=1`). Barre des
+  menus, icônes et libellés, Dock, ombres, effet Génie et vignette du Dock, fenêtre GL
+  (`glwin`, pixels témoins bons) composée par-dessus le Terminal. Trois causes, trouvées
+  par un **vidage du WindowServer rejoué en natif** :
+  1. **outil** : `/var/tmp/pomppc-env` (lignes `POMPPC_*=valeur`) pose les variables du
+     plugin dans le WindowServer au chargement (`ws_env`) ; une passe du compositeur
+     compte pour une image (`stats_frame` au `glFinish`/`glFlush`). Le vidage
+     (`POMPPC_GL_DUMP`, `_TRIGGER`, `_FRAMES`) marche alors comme pour un jeu ;
+  2. **profondeur** : le rejeu donnait des couleurs justes, l'écran non. La session
+     repasse l'écran en **milliers de couleurs** après le démarrage du WindowServer.
+     Le plugin GL et le plugin GA gardaient les 32 bpp lus au démarrage : l'image partait
+     en XRGB8888 dans un écran 1555 (pixel `FF4A 8C42` lu `f8d050` puis `181010` : les
+     colonnes jaunes et violettes, l'image doublée). Géométrie relue au nub à chaque
+     vérification d'écran (`ws_main_display`) et à chaque blit (`ga_geometry`) ;
+  3. **zone de la surface** : le compositeur attache l'écran (`_CGXGLAccelAccess`,
+     descripteur `{0, 0, id de surface}`) puis dessine chaque zone sale dans
+     `glViewport(0, 0, l, h)` (passes de 52×281, 57×318, 44×41 au vidage). Sur une carte,
+     c'est la **forme de la surface** (`IOAccelSetSurfaceShape`) qui place cette zone à
+     l'écran. Le kext garde le rectangle de chaque surface (`setSurfaceBounds`) et le rend
+     au client 2D (méthode 1, `POMPPC_GA_SURF_BOUNDS`). Le plugin
+     (`pomppc_ws_region`) décale viewport et ciseaux de l'origine de la zone, borne tout
+     dessin et tout effacement à la zone, et ne présente qu'elle.
+
+  Au passage, la surface rattachée à chaque passe gardait sa relecture complète puis son
+  renvoi complet (2 × 3 Mio par passe) : le tampon gardé reste « hôte plus récent »
+  (`ws_kept`). Reste pour P1 : comparaison chiffrée au bureau sans QE, vitesse d'une passe.
 - **28/10** : relevé statique ci-dessus. P0 codé : `kext/POMPPCGPU/POMPPCGPU.cpp`
   (`publishAccelerator`), `Info.plist`, `guest/gldriver/install.sh` (`QE=1`).
 - **29/10, 0 h 15** : **Quartz Extreme engagé.** Informations Système affiche « Quartz

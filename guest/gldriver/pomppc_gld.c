@@ -634,13 +634,22 @@ long gldDestroyContext(long a, long b, long c, long d, long e, long f, long g, l
 long gldAttachDrawable(long a, long b, long c, long d, long e, long f, long g, long h)
 {
     long r;
+    int ws = b == 80 && pomppc_ws_process();
     pomppc_lazy_flush((void *)a);       /* avant que les tampons changent */
-    pomppc_before_buffers_change((void *)a);
+    /* 29/10 : la surface d'écran du WindowServer garde son tampon d'une passe
+       à l'autre, l'image reste sur l'hôte : pas de relecture */
+    if (!ws)
+        pomppc_before_buffers_change((void *)a);
     /* 28/10 (Quartz Extreme) : dans le WindowServer, la surface de l'écran
        (type 80) ne passe jamais par le GLDriver d'Apple — son
        glsAssignDrawable appellerait CGSGetSurfaceBounds, donc le serveur,
-       c'est-à-dire lui-même (interblocage). Elle est attachée en plein écran. */
-    if (b == 54 || (b == 80 && pomppc_ws_process()))
+       c'est-à-dire lui-même (interblocage). Elle est attachée en plein écran,
+       à la zone de sa forme (pomppc_ws_region). */
+    if (ws) {
+        r = pomppc_attach_fullscreen((void *)a);
+        if (r >= 0 && r <= 3)
+            pomppc_ws_region((void *)a, (const unsigned long *)c);
+    } else if (b == 54)
         r = pomppc_attach_fullscreen((void *)a);
     else
         r = FWD8(GLD_AttachDrawable);

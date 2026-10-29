@@ -880,6 +880,13 @@ typedef struct PCtx {
     unsigned long  us_del;
     unsigned char *fullscreen_buf;      /* owned software back buffer for CGL fullscreen */
     unsigned long  fullscreen_w, fullscreen_h;
+    /* 29/10 (Quartz Extreme) : zone de la surface d'écran du WindowServer. Le
+       compositeur dessine chaque zone sale dans un viewport (0, 0, l, h) ; la
+       forme de la surface (IOAccelSetSurfaceShape, relue au nub) la place à
+       l'écran. ws_ox/ws_oy : origine en repère GL (bas à gauche). */
+    int            ws_rgn, ws_kept;
+    long           ws_ox, ws_oy;
+    unsigned long  ws_bx, ws_by, ws_bw, ws_bh;
     int            stencil;             /* la surface hôte a un stencil ; sa fraîcheur est
                                            celle de la profondeur (même mot côté invité) */
     int            sten_used;           /* le contexte s'est VRAIMENT servi du stencil */
@@ -6835,14 +6842,18 @@ static void queue_present(PCtx *p, unsigned long dest_off, unsigned long stride,
                           unsigned long fmt)
 {
     unsigned long *c;
-    unsigned long w = p->sw, h = p->sh;
+    unsigned long w = p->sw, h = p->sh, x = 0, y = 0;
+    if (p->ws_rgn) {                    /* Quartz Extreme : la zone seulement */
+        x = p->ws_bx; y = p->ws_by; w = p->ws_bw; h = p->ws_bh;
+        dest_off += y * stride + x * (fmt == QGPU_PF_RGB1555 ? 2 : 4);
+    }
     c = reserve(p, QGPU_LEN_SURF_PRESENT);
     c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_PRESENT, QGPU_LEN_SURF_PRESENT);
     c[1] = p->surf;
     c[2] = dest_off;
     c[3] = stride;
-    c[4] = 0;
-    c[5] = 0;
+    c[4] = x;
+    c[5] = y;
     c[6] = w;
     c[7] = h;
     c[8] = fmt;
@@ -7264,6 +7275,23 @@ static void compute_state(PCtx *p, const TexInfo *ti, unsigned long *v, int raw)
     v[QGPU_SK_ALPHA_TEST] = GLD_U8(g, GS_ALPHA_TEST) != 0;
     v[QGPU_SK_ALPHA_FUNC] = v[QGPU_SK_ALPHA_TEST] ? U16(g, GS_ALPHA_FUNC) : 0x0207;
     v[QGPU_SK_ALPHA_REF] = v[QGPU_SK_ALPHA_TEST] ? GLD_U32(g, GS_ALPHA_REF) : 0;
+    if (p->ws_rgn) {
+        /* Quartz Extreme : le drawable est la zone de la surface d'écran — les
+           ciseaux du compositeur y sont relatifs, et rien ne déborde (un
+           effacement sans ciseaux n'efface que la zone, comme sur la carte) */
+        long rx = p->ws_ox, ry = p->ws_oy, rw = (long)p->ws_bw, rh = (long)p->ws_bh;
+        if (scissor) {
+            long x1 = sx + rx, y1 = sy + ry, x2 = x1 + sw, y2 = y1 + sh;
+            if (x1 < rx) x1 = rx;
+            if (y1 < ry) y1 = ry;
+            if (x2 > rx + rw) x2 = rx + rw;
+            if (y2 > ry + rh) y2 = ry + rh;
+            sx = x1; sy = y1; sw = x2 - x1; sh = y2 - y1;
+        } else {
+            sx = rx; sy = ry; sw = rw; sh = rh;
+        }
+        scissor = 1;
+    }
     if (scissor) {
         /* GL : origine en bas à gauche ; qgpu : en haut à gauche. Borné à la surface. */
         if (sx < 0) { sw += sx; sx = 0; }
@@ -11532,8 +11560,8 @@ static void geom_send_viewport(PCtx *p)
        DRAW_RAW attend (la couture avec le repère de surface est faite par
        l'hôte, protocole v7 §1). */
     if (md_changed(p, w, g + GS_VIEWPORT, p->c_vp, 16)) {
-        a[0] = (unsigned long)I32(g, GS_VIEWPORT);
-        a[1] = (unsigned long)I32(g, GS_VIEWPORT + 4);
+        a[0] = (unsigned long)(I32(g, GS_VIEWPORT) + (p->ws_rgn ? p->ws_ox : 0));
+        a[1] = (unsigned long)(I32(g, GS_VIEWPORT + 4) + (p->ws_rgn ? p->ws_oy : 0));
         a[2] = (unsigned long)I32(g, GS_VIEWPORT + 8);
         a[3] = (unsigned long)I32(g, GS_VIEWPORT + 12);
         if ((long)a[2] < 0) a[2] = 0;
@@ -17367,7 +17395,7 @@ static struct {
     int            known, is_ws, open;
     io_connect_t   conn;
     unsigned char *vram;
-    unsigned long  w, h, rb, bpp;
+    unsigned long  w, h, rb, bpp, size;
 } WS;
 
 int pomppc_ws_process(void)
@@ -17379,6 +17407,26 @@ int pomppc_ws_process(void)
         WS.known = 1;
     }
     return WS.is_ws;
+}
+
+/* 29/10 (Quartz Extreme) : le WindowServer n'a pas d'environnement à nous.
+   Dans ce processus seulement, /var/tmp/pomppc-env (lignes NOM=valeur) pose
+   les variables POMPPC_* au chargement du plugin : vidage (POMPPC_GL_DUMP,
+   _FRAMES, _TRIGGER), bilan, etc. */
+static void __attribute__((constructor)) ws_env(void)
+{
+    char l[512], *eq;
+    FILE *f;
+    if (!pomppc_ws_process() || !(f = fopen("/var/tmp/pomppc-env", "r")))
+        return;
+    while (fgets(l, sizeof(l), f)) {
+        l[strcspn(l, "\r\n")] = 0;
+        if (strncmp(l, "POMPPC_", 7) || !(eq = strchr(l, '=')))
+            continue;
+        *eq = 0;
+        setenv(l, eq + 1, 1);
+    }
+    fclose(f);
 }
 
 static int ws_open(void)
@@ -17402,6 +17450,7 @@ static int ws_open(void)
         IOConnectMethodScalarIScalarO(WS.conn, 0, 0, 4, &w, &h, &rb, &bpp) != KERN_SUCCESS)
         return 0;
     WS.vram = (unsigned char *)addr;
+    WS.size = size;
     WS.w = w; WS.h = h; WS.rb = rb; WS.bpp = bpp;
     WS.open = 1;
     pomppc_log("POMPPC: WindowServer, écran par le nub : %lux%lu, %lu octets/ligne, %lu bpp, "
@@ -17409,7 +17458,22 @@ static int ws_open(void)
     return 1;
 }
 
-static unsigned long ws_main_display(void) { return 1; }
+/* 29/10 : le mode change après le démarrage du WindowServer (la session
+   remet sa profondeur : milliers de couleurs) — relu à chaque vérification de
+   l'écran. Avec 32 bpp gardés, l'image partait en XRGB8888 dans un écran 16
+   bits : colonnes jaunes et violettes, image doublée. */
+static unsigned long ws_main_display(void)
+{
+    UInt32 w = 0, h = 0, rb = 0, bpp = 0;
+    if (IOConnectMethodScalarIScalarO(WS.conn, 0, 0, 4, &w, &h, &rb, &bpp) == KERN_SUCCESS &&
+        (unsigned long)rb * h <= WS.size &&
+        (w != WS.w || h != WS.h || rb != WS.rb || bpp != WS.bpp)) {
+        pomppc_log("POMPPC: WindowServer, l'écran change : %lux%lu, %lu octets/ligne, %lu bpp\n",
+                   (unsigned long)w, (unsigned long)h, (unsigned long)rb, (unsigned long)bpp);
+        WS.w = w; WS.h = h; WS.rb = rb; WS.bpp = bpp;
+    }
+    return 1;
+}
 static void *ws_base_address(unsigned long d) { return WS.vram; }
 static unsigned long ws_bytes_per_row(unsigned long d) { return WS.rb; }
 static unsigned long ws_bits_per_pixel(unsigned long d) { return WS.bpp; }
@@ -17421,6 +17485,42 @@ static short ws_same_process(const Psn *a, const Psn *b, unsigned char *same)
 {
     *same = 1;
     return 0;
+}
+
+/* Zone de la surface d'écran attachée (desc = {0, 0, id de surface},
+   _CGXGLAccelAccess de CoreGraphics), relue au nub. Hors zone connue : tout
+   l'écran, comme avant. */
+void pomppc_ws_region(void *ctx, const unsigned long *desc)
+{
+    UInt32 x = 0, y = 0, w = 0, h = 0;
+    int ok;
+    PCtx *p;
+    ok = desc && WS.open > 0 && desc[2] < 16 &&
+         IOConnectMethodScalarIScalarO(WS.conn, 1, 1, 4, desc[2], &x, &y, &w, &h) == KERN_SUCCESS;
+    pthread_mutex_lock(&G.mu);
+    p = find_ctx(ctx);
+    if (p && p->fullscreen_buf) {
+        long bx = (SInt32)x, by = (SInt32)y, bw = (SInt32)w, bh = (SInt32)h;
+        long sw = (long)p->fullscreen_w, sh = (long)p->fullscreen_h;
+        if (bx < 0) { bw += bx; bx = 0; }
+        if (by < 0) { bh += by; by = 0; }
+        if (bw > sw - bx) bw = sw - bx;
+        if (bh > sh - by) bh = sh - by;
+        ok = ok && bw > 0 && bh > 0 && !(bx == 0 && by == 0 && bw == sw && bh == sh);
+        if (!ok) {
+            bx = by = 0; bw = sw; bh = sh;
+        }
+        if (ok != p->ws_rgn || (unsigned long)bx != p->ws_bx || (unsigned long)by != p->ws_by ||
+            (unsigned long)bw != p->ws_bw || (unsigned long)bh != p->ws_bh) {
+            p->ws_rgn = ok;
+            p->ws_bx = bx; p->ws_by = by; p->ws_bw = bw; p->ws_bh = bh;
+            p->ws_ox = bx;
+            p->ws_oy = sh - (by + bh);
+            p->md_bits |= MD_VIEWPORT;          /* viewport à renvoyer, décalé */
+            memset(p->c_vp, 0xFF, sizeof(p->c_vp));
+        }
+    }
+    pthread_mutex_unlock(&G.mu);
 }
 
 static void direct_init(void)
@@ -17545,6 +17645,7 @@ long pomppc_attach_fullscreen(void *ctx)
         pomppc_ws_process()) {
         buf = p->fullscreen_buf;
         p->fullscreen_buf = NULL;       /* repris plus bas, sans free */
+        p->ws_kept = 1;
     } else {
         buf = p ? calloc(h, w * 4) : NULL;
     }
@@ -19292,6 +19393,7 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
        (58), jamais d'échange : c'est là que l'image doit partir à l'écran. */
     if ((slot == PROC_Swap58 || slot == PROC_Swap5c) && p->fullscreen_buf &&
         pomppc_ws_process()) {
+        stats_frame(p->ctx);            /* une passe du compositeur = une image */
         if (!present_direct(p))
             present_sw_fullscreen(p);
         pthread_mutex_unlock(&G.mu);
@@ -19878,6 +19980,16 @@ void pomppc_drawable_attached(void *ctx, long kind, long result)
         free(p->fullscreen_buf);
         p->fullscreen_buf = NULL;
         direct_invalidate();            /* F7/Q6 : plus aucun verdict n'est valable */
+    }
+    /* Quartz Extreme : même tampon rattaché pour la passe suivante — l'image
+       est sur l'hôte et y reste. Sans ceci, chaque passe relisait puis
+       renvoyait tout l'écran (2 × 3 Mio). */
+    if (p && p->ws_kept) {
+        p->ws_kept = 0;
+        if (p->surf >= 0 && GLD_U32(ctx, CTX_WIDTH) == p->sw && GLD_U32(ctx, CTX_HEIGHT) == p->sh) {
+            pthread_mutex_unlock(&G.mu);
+            return;
+        }
     }
     if (p && p->surf >= 0) {
         check_draw_buffer(p);

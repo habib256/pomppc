@@ -1667,6 +1667,23 @@ IOReturn POMPPCAccelerator::newUserClient(task_t owningTask, void * securityID,
     return kIOReturnSuccess;
 }
 
+void POMPPCAccelerator::setSurfaceBounds(UInt32 id, const IOAccelBounds * b)
+{
+    if (id < POMPPC_MAX_SURF_IDS) {
+        fSurfBounds[id] = *b;
+        fSurfKnown[id] = true;
+    }
+}
+
+bool POMPPCAccelerator::surfaceBounds(UInt32 id, IOAccelBounds * b)
+{
+    if (id >= POMPPC_MAX_SURF_IDS || !fSurfKnown[id]) {
+        return false;
+    }
+    *b = fSurfBounds[id];
+    return true;
+}
+
 #undef super
 #define super IOUserClient
 OSDefineMetaClassAndStructors(POMPPCSurfaceClient, IOUserClient)
@@ -1827,6 +1844,12 @@ IOReturn POMPPCSurfaceClient::shape(IOAccelDeviceRegion * rgn, IOByteCount size)
         return kIOReturnBadArgument;
     }
     fBounds = rgn->bounds;
+    {
+        POMPPCAccelerator * accel = OSDynamicCast(POMPPCAccelerator, getProvider());
+        if (accel) {
+            accel->setSurfaceBounds(fID, &fBounds);
+        }
+    }
     return kIOReturnSuccess;
 }
 
@@ -1918,15 +1941,32 @@ IOReturn POMPPCGAClient::clientMemoryForType(UInt32 type, IOOptionBits * options
 IOExternalMethod * POMPPCGAClient::getTargetAndMethodForIndex(IOService ** target,
                                                               UInt32 index)
 {
-    static const IOExternalMethod methods[1] = {
+    static const IOExternalMethod methods[2] = {
         { 0, (IOMethod) &POMPPCGAClient::gaGetInfo, kIOUCScalarIScalarO, 0, 4 },
+        { 0, (IOMethod) &POMPPCGAClient::gaSurfBounds, kIOUCScalarIScalarO, 1, 4 },
     };
 
-    if (index != POMPPC_GA_GET_INFO) {
+    if (index > POMPPC_GA_SURF_BOUNDS) {
         return 0;
     }
     *target = this;
-    return (IOExternalMethod *) &methods[0];
+    return (IOExternalMethod *) &methods[index];
+}
+
+IOReturn POMPPCGAClient::gaSurfBounds(UInt32 id, UInt32 * x, UInt32 * y, UInt32 * w,
+                                      UInt32 * h, void *)
+{
+    POMPPCAccelerator * accel = OSDynamicCast(POMPPCAccelerator, getProvider());
+    IOAccelBounds       b;
+
+    if (!accel || !accel->surfaceBounds(id, &b)) {
+        return kIOReturnNotFound;
+    }
+    *x = (UInt32) (SInt32) b.x;
+    *y = (UInt32) (SInt32) b.y;
+    *w = (UInt32) (SInt32) b.w;
+    *h = (UInt32) (SInt32) b.h;
+    return kIOReturnSuccess;
 }
 
 IOReturn POMPPCGAClient::gaGetInfo(UInt32 * width, UInt32 * height, UInt32 * rowBytes,

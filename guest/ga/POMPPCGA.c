@@ -212,7 +212,11 @@ static IOReturn ga_copy(void *self, IOOptionBits options, IOBlitType type,
 {
     GA *g = self;
     IOBlitCopyRectangles *op = (IOBlitCopyRectangles *)operation;
-    UInt32 bypp = g->bpp / 8, i;
+    UInt32 bypp, i;
+
+    if (ga_geometry(g) != kIOReturnSuccess)    /* le mode a pu changer (29/10) */
+        return kIOReturnNotReady;
+    bypp = g->bpp / 8;
 
     for (i = 0; i < op->count; i++) {
         IOBlitCopyRectangle r = op->rects[i];
@@ -248,6 +252,9 @@ static IOReturn ga_fill(void *self, IOOptionBits options, IOBlitType type,
     GA *g = self;
     IOBlitRectangles *op = (IOBlitRectangles *)operation;
     UInt32 color = (UInt32)(unsigned long)source, i;
+
+    if (ga_geometry(g) != kIOReturnSuccess)
+        return kIOReturnNotReady;
 
     for (i = 0; i < op->count; i++) {
         SInt32 x = op->rects[i].x, y = op->rects[i].y, w = op->rects[i].width;
