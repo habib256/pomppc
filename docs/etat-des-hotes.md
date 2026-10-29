@@ -75,13 +75,18 @@ qgpu de Colin McRae.
    `build-fast` et `build`, puis le plugin de l'invité (`.run/cmr/cycle.sh NORUN=1` ou
    l'équivalent du PC). Ensuite, rejouer d3-pe et cmr-pe : à 1920×1080, le vidage n'était
    pas complet avant.
+7. **Venu du M4 le 29/10** : le kext et le plugin ont changé (Quartz Extreme P1 et P2,
+   `docs/quartz-extreme.md`). Ce qui joue hors QE : le plugin réserve désormais les
+   **4 derniers Kio de sa tranche** (présentations du noyau), et chaque moitié perd 4 Kio
+   d'arène. Réinstaller kext et plugin dans l'invité du PC, sans `QE=1`, puis repasser la
+   matrice. Rien ne change dans `patches/`, donc QEMU n'est pas à reconstruire.
 
 **Propres au PC** : `patches/diag/` (auto-profileur, plafonds), `tools/tcg/perfhw.sh` (compteurs
 Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). `perf` exige
 `perf_event_paranoid` ≤ 1, que l'utilisateur règle à la main ; la valeur revient à 4 à chaque
 redémarrage.
 
-## 3. Mac M4 : état au 29/10/2026, 0 h 20
+## 3. Mac M4 : état au 29/10/2026, 8 h 30
 
 **Défauts sur Darwin:arm64** : depuis le 26/10 (`550b2a8`), la série du PC est allumée et
 prouvée : `PPC32MT TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIRTYSKIP PTEGMAP
@@ -117,27 +122,39 @@ Marble Blast −22,7 %. Garde : un binaire sans tcg/0037-0039 les laisse éteint
   frontal natif. La résolution des jeux en plein écran en dépend (1920×1080 contre 1024×768 le
   26/10).
 
-**En cours depuis le 28/10, 21 h 21** : nuit d'endurance (TODO « Maintenant », endurance
-(1)), `bench/endurance/m4-2810/suite.py`. Elle reprend la base isolée du 27/10
-(`tiger-endurance-m4-1011-2710.qcow2`, en lecture seule) avec le binaire du 28/10 : 100
-démarrages à froid, 200 reboots, puis 40 cycles de jeux (mb, zen, ut, d3), 2 instances, 4 à
-5 h. Un incident n'arrête pas la nuit. Effectifs dans `bench/endurance/m4-2810/bilan.json` ;
-à la fin, la VM quotidienne est relancée sous ImGuiDock.
+**Nuit d'endurance du 28 au 29/10 (`docs/endurance.md` §11)** : 342 démarrages (104
+froids, 238 reboots) et 40 cycles de jeu (mb, zen, ut, d3), **aucun incident**. Borne haute
+de Wilson à 95 % : 1,1 % pour les démarrages, 8,8 % pour les jeux. La VM quotidienne a été
+relancée à la fin, puis arrêtée le 29/10 à 5 h 33 pour les essais de Quartz Extreme.
 
-**Quartz Extreme (chantier ouvert le 28/10, `docs/quartz-extreme.md`)** : engagé dans une
-VM jetable (`SNAPSHOT=1`, kext installé avec `QE=1`). Informations Système affiche « QE / CI :
-géré », le WindowServer compose par notre plugin, et la première image composée arrive à
-l'écran, avec des couleurs et une géométrie fausses : textures 1555 REV et projection à
-examiner. **Éteint par défaut** (personnalité `POMPPCQuartzExtreme` à faux) : le disque
-quotidien n'est pas touché. Nouveau : `guest/ga/` (plugin GA), clients 2D et surface du nub
-(mode QE seulement), mode WindowServer du plugin.
+**Quartz Extreme, 29/10 (`docs/quartz-extreme.md` §1 ter et journal)** : dans une VM jetable
+(`SNAPSHOT=1`, `QE=1`). **Éteint par défaut**, le disque quotidien n'est pas touché.
+- **P1 fait** : bureau juste sous QE (menus, icônes, Dock, ombres, Génie). Trois causes :
+  profondeur relue (la session repasse en milliers de couleurs), zone de la surface d'écran
+  (forme `SetShape`) appliquée au viewport, aux ciseaux et à la présentation, présentation
+  synchrone (curseur logiciel). Outil : `/var/tmp/pomppc-env` passe les variables `POMPPC_*`
+  au WindowServer (vidage, notes).
+- **P2 fait** : les fenêtres GL des jeux passent par l'hôte. Le plugin lie la fenêtre en
+  surface accélérée (`glcBindSurface`). Au `Flush` du WindowServer, le kext présente la
+  surface hôte du jeu dans sa région visible. Le compositeur lie la texture d'export pour ses
+  transformations. Matrice en fenêtre sous QE : **mb vert 8,5 ms/image, zen vert 5,6**
+  (6,2 et 3,5 hors QE).
+- Côté matrice, les clients du kext sont comptés au-delà de ceux d'avant le jeu, car le
+  WindowServer garde sa tranche sous QE.
+- En cours à 8 h 22 : **matrice entière sous QE** (`.run/matrice-qe8.log`, VM jetable,
+  `MATRICE_MON=.run/mon-46062.sock TSSH_PORT=2222`).
+- Piège : les traces du plugin (`POMPPC_GLTRACE`, vidages de tampons) ont **rempli le disque
+  de l'invité** (16 Go). Les effacer après usage.
 
 **À faire sur le M4, dans l'ordre**
-1. Dépouiller la nuit d'endurance (`endurance.py rapport`, Wilson) et l'écrire dans
-   `docs/endurance.md` §11.
-2. Quartz Extreme P1 : un outil de vidage des images du WindowServer, puis le rejeu natif.
-   Corriger les textures 1555 REV et la projection, jusqu'au bureau identique à celui sans
-   QE. Ensuite P2 : les fenêtres GL sous QE.
+1. Quartz Extreme P3 :
+   - la vitesse : l'aller-retour synchrone par échange (jeu → WindowServer → noyau) coûte
+     environ 2 ms/image en fenêtre. Piste : une présentation asynchrone quand le curseur
+     n'est pas sur la fenêtre ;
+   - puis A/B sur la matrice entière, endurance avec QE, et allumage par défaut.
+2. Étude des émulateurs voisins (PowerEmu, ppc-osx-vgpu) : QoS « interactive » du fil vCPU
+   sur macOS, attente en ns (kqueue) dans la boucle principale, permutations AltiVec en
+   ligne (TBL/TBX). À mesurer en A/B, licence à vérifier fichier par fichier.
 3. Parité de **tcg/0055** (rejeu des traces, outil de preuve prouvé sur le PC le 27/10 :
    `c92dacc`). À faire seulement si les traces de second niveau reprennent ; elles sont
    arrêtées depuis le 22/10.
