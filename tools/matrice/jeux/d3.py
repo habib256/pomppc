@@ -48,10 +48,28 @@ def fin_cinematique(rows):
     # et les 400 dernières images, encore dans la cinématique, donnaient un faux niveau
     # (fenêtre dans la cinématique, partie arrêtée avant le niveau). Le niveau doit être
     # nettement plus lent que la cinématique (1500..2100) ; sinon on attend.
-    if all(x in rows for x in (1500, 2100)):
-        cine = (rows[2100][0] - rows[1500][0]) / 600
+    # 29/10 (Quartz Extreme) : l'écran de chargement n'attend plus la présentation et
+    # compte des centaines d'images à moins d'1 ms ; 1500..2100 tombait dans le chargement
+    # (150 ms/image), et un « niveau » encore dans la cinématique passait. La cinématique
+    # est la tranche de 200 images la plus rapide parmi celles qui rendent (> 5 ms/image).
+    tr = [(rows[x + 200][0] - rows[x][0]) / 200 for x in range(1500, z - 600, 100)
+          if x in rows and x + 200 in rows]
+    tr = [v for v in tr if v > 5]
+    if tr:
+        cine = min(tr)
         if niveau < 1.25 * cine:
             return None
+    # 29/10 : et le niveau doit être un PALIER — les tranches de 200 images des 2000
+    # dernières à 10 % de lui (une seule exception). Sous Quartz Extreme, la fin de la
+    # cinématique et l'arrivée dans le niveau passent par 21-45 ms/image avant le niveau
+    # (51) : sans palier, la fenêtre s'y posait.
+    hors = 0
+    for x in range(z - 2000, z - 199, 200):
+        if x not in rows or x + 200 not in rows:
+            return None
+        hors += abs((rows[x + 200][0] - rows[x][0]) / 200 - niveau) > 0.1 * niveau
+    if hors > 1:                # une tranche hors palier admise (relevé ssh, vidage)
+        return None
     s = 0.8 * niveau
     for f in sorted(rows):
         a = f - 600

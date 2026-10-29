@@ -11,6 +11,7 @@
 #include <libkern/OSAtomic.h>
 
 #include "POMPPCGPU.h"
+#include <IOKit/graphics/IOFramebufferShared.h>
 
 #define GPULog(fmt, args...) IOLog("POMPPCGPU: " fmt, ## args)
 
@@ -735,6 +736,7 @@ struct KernelSubmitArgs {
     UInt32 off, nwords;
     const UInt32 * cmds;
     UInt32 status;
+    UInt32 async, fence;
 };
 
 IOReturn POMPPCGPU::kernelSubmitGated(OSObject * owner, void * a0, void *, void *, void *)
@@ -747,6 +749,7 @@ IOReturn POMPPCGPU::kernelSubmitGated(OSObject * owner, void * a0, void *, void 
     if (self->fStopping || !self->fShmemMap) {
         return kIOReturnNotReady;
     }
+    a->fence = 0;
     dst = (volatile UInt32 *) (self->fShmemMap->getVirtualAddress() + a->off);
     for (i = 0; i < a->nwords; i++) {
         dst[i] = a->cmds[i];            /* gros-boutiste, comme le flux du plugin */
@@ -754,6 +757,15 @@ IOReturn POMPPCGPU::kernelSubmitGated(OSObject * owner, void * a0, void *, void 
     OSSynchronizeIO();
     self->regWrite(QGPU_REG_SUBMIT_OFF, a->off);
     self->regWrite(QGPU_REG_SUBMIT_LEN, a->nwords * 4);
+    if (a->async && self->fAsync) {
+        self->regWrite(QGPU_REG_DOORBELL, QGPU_DOORBELL_GO | QGPU_DOORBELL_ASYNC);
+        a->status = self->regRead(QGPU_REG_SUBMIT_ST);
+        if (a->status != QGPU_ST_QUEUE_FULL) {
+            a->fence = self->regRead(QGPU_REG_FENCE_SUBMITTED);
+            return kIOReturnSuccess;
+        }
+        /* file pleine : rien n'est parti, la même zone part en synchrone */
+    }
     self->regWrite(QGPU_REG_DOORBELL, QGPU_DOORBELL_GO);   /* synchrone */
     (void) self->regRead(QGPU_REG_FENCE);
     a->status = self->regRead(QGPU_REG_STATUS);
@@ -761,7 +773,7 @@ IOReturn POMPPCGPU::kernelSubmitGated(OSObject * owner, void * a0, void *, void 
 }
 
 IOReturn POMPPCGPU::kernelSubmit(UInt32 off, const UInt32 * cmds, UInt32 nwords,
-                                 UInt32 * status)
+                                 UInt32 * status, UInt32 * fence)
 {
     KernelSubmitArgs a;
     IOReturn         kr;
@@ -770,7 +782,8 @@ IOReturn POMPPCGPU::kernelSubmit(UInt32 off, const UInt32 * cmds, UInt32 nwords,
     /* la zone doit être une fin de tranche réservée (POMPPC_QE_CMD_BYTES) */
     if ((off & 3) || nwords == 0 || nwords * 4 > POMPPC_QE_CMD_BYTES ||
         off >= fShmemSize || nwords * 4 > fShmemSize - off ||
-        (off % fSlotSize) < fSlotSize - POMPPC_QE_CMD_BYTES) {
+        (off % fSlotSize) < fSlotSize - POMPPC_QE_CMD_BYTES ||
+        nwords * 4 > fSlotSize - (off % fSlotSize)) {
         return kIOReturnBadArgument;
     }
     if (!fShmemMap) {
@@ -780,12 +793,26 @@ IOReturn POMPPCGPU::kernelSubmit(UInt32 off, const UInt32 * cmds, UInt32 nwords,
         }
     }
     a.off = off; a.nwords = nwords; a.cmds = cmds; a.status = QGPU_ST_BACKEND;
+    a.async = fence != 0; a.fence = 0;
     if (!enterCall()) {
         return kIOReturnNotReady;
+    }
+    /* P3 : la zone n'est réécrite qu'une fois lue par l'hôte — la dernière
+       soumission (asynchrone) qui l'a portée doit être finie. Hors gate,
+       comme waitFence ; l'hôte en retard de deux Flush, c'est rare. */
+    if (fence && *fence) {
+        UInt32 cur = 0;
+        if (waitFenceCounted(*fence, 1000, &cur) != kIOReturnSuccess) {
+            leaveCall();
+            return kIOReturnTimeout;
+        }
     }
     kr = fGate->runAction(&POMPPCGPU::kernelSubmitGated, &a);
     leaveCall();
     *status = a.status;
+    if (fence) {
+        *fence = a.fence;
+    }
     return kr;
 }
 
@@ -1805,13 +1832,45 @@ IOReturn POMPPCAccelerator::lookupSurface(UInt32 sid, UInt32 * tex, UInt32 * w, 
     return kIOReturnNotFound;
 }
 
+/* P3 : accès à l'état du curseur logiciel d'IOFramebuffer (StdFBShmem_t,
+   membre protégé `priv`). */
+class POMPPCFBPeek : public IOFramebuffer
+{
+public:
+    static StdFBShmem_t * shmem(IOFramebuffer * fb) { return ((POMPPCFBPeek *) fb)->priv; }
+};
+
+/* Le curseur est-il visible sur l'un des rectangles (coordonnées d'écran) ?
+   Dans le doute (pas d'état), oui. */
+static bool cursorOver(IOFramebuffer * fb, const IOAccelBounds * rects, UInt32 nrects)
+{
+    StdFBShmem_t * sh = POMPPCFBPeek::shmem(fb);
+    UInt32         i;
+
+    if (!sh) {
+        return true;
+    }
+    /* relevé du 29/10 : le WindowServer ne masque pas le curseur autour du
+       Flush (cursorShow 0 pendant Marble Blast, curseur au centre de sa
+       fenêtre) ; un jeu qui le cache le met à 1 (Zenerchi, DOOM 3) */
+    if (sh->cursorShow != 0 || sh->cursorObscured) {
+        return false;
+    }
+    for (i = 0; i < nrects; i++) {
+        if (sh->cursorRect.maxx > rects[i].x && sh->cursorRect.minx < rects[i].x + rects[i].w &&
+            sh->cursorRect.maxy > rects[i].y && sh->cursorRect.miny < rects[i].y + rects[i].h) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Flush d'une surface exportée (IOAccelFlushSurfaceOnFramebuffers du
    WindowServer, après le CGSFlushSurface du jeu) : sur une carte, le noyau
    recopie la surface à l'écran dans sa région visible ; le compositeur ne la
    reprend (texture de surface) que pour la transformer. Ici, un SURF_PRESENT
-   de la surface hôte du jeu par rectangle visible, soumis en synchrone dans la
-   zone de commandes de sa tranche : à ce moment le WindowServer a retiré son
-   curseur logiciel, et l'image du jeu est déjà en file avant nous. */
+   (TEX_PRESENT : son instantané) par rectangle visible, soumis dans la zone
+   de commandes de sa tranche, après l'image du jeu déjà en file. */
 IOReturn POMPPCAccelerator::flushSurface(UInt32 sid, IOFramebuffer * fb,
                                          const IOAccelBounds * bounds,
                                          const IOAccelBounds * rects, UInt32 nrects)
@@ -1885,7 +1944,38 @@ IOReturn POMPPCAccelerator::flushSurface(UInt32 sid, IOFramebuffer * fb,
         cmds[i] = QGPU_CMD_HDR(op, QGPU_LEN_SURF_PRESENT);
         cmds[i + 1] = src;
     }
-    gpu->kernelSubmit(e->cmdoff, cmds, n, &st);
+    /* P3 : asynchrone — le WindowServer ne garde plus un vCPU dans QEMU le
+       temps que l'hôte vide la file du jeu. Deux moitiés de la zone en
+       alternance ; synchrone si le curseur logiciel (dessiné par
+       IOFramebuffer, VGA de QEMU sans curseur matériel) est visible sur la
+       région : le WindowServer le retire pendant le Flush et le remet après,
+       une présentation encore en vol l'écraserait. */
+    {
+        bool   async = gpu->getProperty("POMPPCQESync") != kOSBooleanTrue &&
+                       !cursorOver(fb, rects, nrects);
+        UInt32 half = async ? (e->half & 1) : 0;
+        UInt32 fence = async ? e->qfence[half] : 0;
+        if (async && n * 4 > POMPPC_QE_CMD_BYTES / 2) {
+            async = false; half = 0; fence = 0;
+        }
+        if (!async) {
+            /* la moitié 0 peut encore être lue par une soumission en file */
+            UInt32 cur;
+            int    j;
+            for (j = 0; j < 2; j++) {
+                if (e->qfence[j]) {
+                    gpu->waitFence(e->qfence[j], 1000, &cur);
+                }
+            }
+            e->qfence[0] = e->qfence[1] = 0;
+        }
+        gpu->kernelSubmit(e->cmdoff + half * (POMPPC_QE_CMD_BYTES / 2), cmds, n, &st,
+                          async ? &fence : 0);
+        if (async) {
+            e->qfence[half] = fence;
+            e->half = half + 1;
+        }
+    }
     if (st != QGPU_ST_OK && fFlushErrs++ < 8) {
         GPULog("flush : surface %lx, présentation refusée par l'hôte (statut %lu)\n",
                (unsigned long) sid, (unsigned long) st);

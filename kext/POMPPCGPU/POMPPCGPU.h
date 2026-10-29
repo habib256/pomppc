@@ -106,6 +106,8 @@ struct POMPPCExport {
     UInt32 surf, cmdoff;            /* surface hôte du jeu, zone de commandes (absolue) */
     SInt32 x, y;                    /* position à l'écran au dernier Flush */
     bool   pos;
+    UInt32 half;                    /* P3 : moitié de la zone à écrire au prochain Flush */
+    UInt32 qfence[2];               /* barrière de la dernière soumission de chaque moitié */
     void * owner;                   /* client 2D qui a publié */
 };
 #define POMPPC_GA_PLUGIN        "POMPPCGA.plugin"
@@ -266,10 +268,14 @@ public:
     void             removeGAPlugin(IOService * fb);
     bool             quartzExtreme(void)      { return fQE; }
     /* `len` porte les drapeaux POMPPC_SUB_* dans ses bits hauts (voir plus haut). */
-    /* 29/10 (QE, P2) : soumission SYNCHRONE du noyau, `nwords` mots écrits
-       à l'offset absolu `off` de la fenêtre partagée (zone réservée par le
-       client, fin de sa tranche). Rend le statut de l'hôte. */
-    IOReturn kernelSubmit(UInt32 off, const UInt32 * cmds, UInt32 nwords, UInt32 * status);
+    /* 29/10 (QE, P2) : soumission du noyau, `nwords` mots écrits à l'offset
+       absolu `off` de la fenêtre partagée (zone réservée par le client, fin
+       de sa tranche). Synchrone : rend le statut de l'hôte. P3 : `*fence`
+       non nul en entrée = asynchrone si l'hôte a fini la soumission de cette
+       barrière (sinon la zone est encore lue : synchrone) ; en sortie, la
+       barrière de CETTE soumission (0 si elle a été synchrone). */
+    IOReturn kernelSubmit(UInt32 off, const UInt32 * cmds, UInt32 nwords, UInt32 * status,
+                          UInt32 * fence = 0);
     IOReturn submit(int slot, POMPPCGPUUserClient * client, UInt32 off, UInt32 len,
                     UInt32 * fence, UInt32 * status, UInt32 * statusPC);
     IOReturn waitFence(UInt32 target, UInt32 timeoutMs, UInt32 * current);
