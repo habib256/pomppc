@@ -17720,10 +17720,22 @@ static struct {
 
 static void *qn_main(void *arg)
 {
+    /* Cadence : au plus un avis par 1/60 s (POMPPC_GL_QE_HZ, 0 = sans
+       limite). Un écran n'en montre pas plus, et chaque avis coûte au
+       WindowServer, sur le G4 émulé, un message et un Flush noyau : Zenerchi
+       à 300 img/s le payait 300 fois. Les avis arrivés entre-temps fusionnent. */
+    const char *e = getenv("POMPPC_GL_QE_HZ");
+    double gap = 1.0 / 60.0, last = 0.0;
     (void)arg;
+    if (e && *e)
+        gap = atoi(e) > 0 ? 1.0 / atoi(e) : 0.0;
     for (;;) {
         unsigned long cid, wid, sid;
         long rect[4], h;
+        double t = now_s();
+        if (gap > 0.0 && t - last < gap)
+            usleep((useconds_t)((gap - (t - last)) * 1e6));
+        last = now_s();
         pthread_mutex_lock(&QN.m);
         while (!QN.pending)
             pthread_cond_wait(&QN.cv, &QN.m);

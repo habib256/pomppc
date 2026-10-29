@@ -147,6 +147,28 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
 
 ## 3. Journal
 
+- **29/10, 9 h 30** : **P3, vitesse.** Sous P2, le jeu attendait dans `CGSFlushSurface` que
+  le noyau ait présenté, donc que l'hôte ait fini son image : aucun recouvrement entre deux
+  images (mb-fen 8,9 ms contre 6,2 hors QE). Trois changements :
+  1. `QGPU_OP_TEX_PRESENT` (`QGPU_CAP_TEX_PRESENT`, sans changer la version) : le kext
+     présente au Flush la **texture d'export**, instantané copié à l'échange, au lieu de la
+     surface vivante que le jeu redessine déjà. Lecture par un FBO dans le backend GL
+     (`tex_readback`) : `glGetTexImage` (`tex_fetch`) coûtait environ 8 ms par image de
+     320×240 sur le GL d'Apple ;
+  2. l'avis au WindowServer part d'un **fil à part** (`qn_post`), et un avis en retard est
+     remplacé par le suivant : une image peut sauter, aucune ne se déchire.
+     `POMPPC_GL_QE_ASYNC=0` rend l'ancien. Synchrone pendant un vidage de preuve ;
+  3. fenêtres hors de l'écran (cibles cachées d'IndirectX) : ni copie ni avis
+     (`qe_hidden`). Leurs textures de surface retrouvent leur source par `qe_sid` :
+     Colin McRae plantait chez Apple (`glrPolyRGB000`) faute de source.
+
+  `glwin` : 1 128 img/s (789 en présentation directe hors QE). **Matrice entière sous QE
+  (`20261029-0905`) : 16 cellules vertes sur 16 automatisées**. En plein écran, la vitesse
+  est celle de la référence (−4 à +3 %). En fenêtre, il reste +6 à +26 % : mb +10 %,
+  zen +23 %, d3 +15 %, ut +26 %, nx +6 %, nxg +8 %. prey-fen (7,1 ms) mesure la boucle de
+  son écran de chargement, qui n'attend plus la présentation : ce n'est pas un gain de
+  rendu.
+
 - **29/10, 8 h** : **P2, fenêtres GL des applications par l'hôte.** Ce qui marche, dans
   l'ordre où le relevé (§1 ter) l'a dicté :
   1. le plugin reçoit `glcBindSurface` et `glcDoNonSimpleFlush` de GLEngine
