@@ -759,3 +759,31 @@ compris), défauts du lanceur, SMP 2, 768 Mio, sans fenêtre. Deux instances. Sy
 larges (tranche courte) : elle montre que QE n'introduit pas de défaut grossier, pas un taux
 fin. Le SSH plus lent au froid (75 s à chaque cycle, contre 15 s au §11) n'est pas
 expliqué : à mesurer à part avant de comparer des durées entre ces bases.
+
+## 13. M4, 29/10/2026 soir : Quartz Extreme par défaut, chemin direct (base m4-qed-2910)
+
+Tranche de contrôle du défaut final de Quartz Extreme (`docs/quartz-extreme.md`, P3) : le jeu
+présente son échange par le noyau sans passer par le WindowServer. Base
+`disks/tiger-endurance-m4-qed-2910.qcow2` : clone du disque quotidien, kext et plugin du commit
+`c792464` installés sans `QE` (personnalité « auto »), QE allumé par l'hôte (`qe=on`, posé par
+`run_tiger.sh` sur Darwin:arm64), lecture seule, `qemu-img check` sans erreur avant et après.
+QEMU reconstruit le 29/10 à 19 h (`QGPU_CAP_QE_DEFAULT`), défauts du lanceur, SMP 2, 768 Mio,
+sans fenêtre, deux instances. Pilotage : `bench/endurance/m4-2910-qed/suite.py` (non versionné).
+
+| Campagne | Démarrages | Incidents | Borne haute (Wilson 95 %) | SSH médian (min–max) | Charge hôte max |
+|---|---:|---:|---:|---|---:|
+| `m4-2910-qed-reboots` (`--mode reboot`) | 30 | 0 | 11,4 % | 20 s (15–21) | 3,3 |
+| `m4-2910-qed-jeux` (`mb,zen,ut,d3`, en fenêtre) | 18 (2 froids, 16 reboots) | 0 | 17,6 % | 20 s (15–35) | 4,4 |
+
+| Jeu | Cycles sains | Images par cycle (médiane) |
+|---|---:|---:|
+| DOOM 3 | 4/4 | 22 519 |
+| Marble Blast | 4/4 | 21 887 |
+| UT2004 | 4/4 | 9 513 |
+| Zenerchi | 4/4 | 40 961 |
+
+**48 démarrages et 16 cycles de jeu, aucun gel, aucune panique.** Avec le §12, Quartz
+Extreme cumule sur le M4 156 démarrages et 32 cycles de jeu en fenêtre sans incident. Plus
+d'images par cycle qu'au §12 (Zenerchi 40 961 contre 35 468, DOOM 3 22 519 contre 20 763) :
+le jeu n'attend plus le WindowServer. La VM quotidienne a reçu le même kext et le même plugin
+le 29/10 à 21 h (QE actif, « recommandé par l'hôte »).

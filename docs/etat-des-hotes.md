@@ -83,7 +83,7 @@ qgpu de Colin McRae.
    réserve les 4 derniers Kio de sa tranche (chaque moitié perd 4 Kio d'arène). Pour la
    parité : VM jetable avec `QE=1 ./run_tiger.sh` (pose `qe=on`), matrice entière et A/B en
    fenêtre (3 passes par bras, la passe unique d'UT est trop bruitée), tranche d'endurance
-   comme au §12 de `docs/endurance.md` ; ensuite ajouter `Linux:x86_64` au test
+   comme au §13 de `docs/endurance.md` ; ensuite ajouter `Linux:x86_64` au test
    d'hôte de `run_tiger.sh`.
 
 **Propres au PC** : `patches/diag/` (auto-profileur, plafonds), `tools/tcg/perfhw.sh` (compteurs
@@ -91,7 +91,7 @@ Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). 
 `perf_event_paranoid` ≤ 1, que l'utilisateur règle à la main ; la valeur revient à 4 à chaque
 redémarrage.
 
-## 3. Mac M4 : état au 29/10/2026, 20 h
+## 3. Mac M4 : état au 29/10/2026, 21 h 10
 
 **Défauts sur Darwin:arm64** : depuis le 26/10 (`550b2a8`), la série du PC est allumée et
 prouvée : `PPC32MT TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIRTYSKIP PTEGMAP
@@ -153,10 +153,10 @@ relancée à la fin, puis arrêtée le 29/10 à 5 h 33 pour les essais de Quartz
   chargement, Marble Blast restait blanc). A/B au repos, même VM, 3 passes, en fenêtre :
   QE au niveau de QE éteint ou mieux (mb 6,1-6,3 contre 6,4, zen 2,9-3,1 contre 3,5, d3
   28,8-29,7 contre 29,8, ut 19,6-19,7 contre 19,9 ms/image). Matrice entière verte
-  (cmr-pe rejouée seule). Endurance : §12 de `docs/endurance.md` (ancien chemin, aucun
-  incident) ; tranche du chemin direct (`bench/endurance/m4-2910-qed`) en cours à 20 h 20 :
-  30 reboots sur 30 et 4 cycles de jeu sur 16 sains, la VM quotidienne sera relancée à la fin
-  puis recevra le kext et le plugin (personnalité « auto »).
+  (cmr-pe rejouée seule). Endurance : §12 (ancien chemin) et §13 (chemin direct) de
+  `docs/endurance.md`, aucun incident (156 démarrages, 32 cycles de jeu en fenêtre). **La VM
+  quotidienne a QE depuis le 29/10, 21 h** (kext et plugin `c792464`, personnalité
+  « auto »).
 - Défaut : `run_tiger.sh` pose `qe=on` sur Darwin:arm64 (`QE=0 ./run_tiger.sh` l'éteint) ;
   le kext en personnalité « auto » le suit. **QEMU reconstruit le 29/10 (19 h)**.
 - Pièges de mesure : un frontal ImGuiDock resté ouvert après l'arrêt de sa VM tourne à
