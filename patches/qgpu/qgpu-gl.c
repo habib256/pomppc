@@ -147,6 +147,7 @@ typedef struct GlState {
     void (*CopyTexSubImage3D)(GLenum, GLint, GLint, GLint, GLint, GLint, GLint,
                               GLsizei, GLsizei);
     GLuint   flip_fbo, flip_tex;
+    GLuint   trb_fbo;                  /* 29/10 : lecture de texture (TEX_PRESENT) */
     uint32_t flip_w, flip_h;
     /* v21 : programmes GLSL (OpenGL 2.0). `has_glsl` = QGPU_CAP_GLSL annoncé ;
        les attributs génériques passent par les entrées de la v16 (has_prog). */
@@ -3735,6 +3736,37 @@ static bool gl_tex_fetch(QgpuCore *c, QgpuTexture *t, uint32_t face, uint32_t lv
     return gl_err_ok();
 }
 
+/* 29/10 (TEX_PRESENT) : niveau 0 d'une texture 2D ou RECTANGLE relu par un
+   FBO — glReadPixels, comme une surface. glGetTexImage (tex_fetch) coûtait
+   environ 8 ms par image de 320×240 sur le GL d'Apple (M4), et laissait le
+   niveau tenu par le CPU. Ligne 0 = ligne 0 de la texture (le haut, SURF_TEX). */
+static bool gl_tex_readback(QgpuCore *c, QgpuTexture *t, uint32_t x, uint32_t y,
+                            uint32_t w, uint32_t h, uint32_t *dst)
+{
+    GlState *g = c->be_priv;
+    GlTexture *gt = t->priv;
+    bool ok;
+
+    if (!gt || !gl_make_current(g) ||
+        (gt->target != GL_TEXTURE_2D && gt->target != GL_TEXTURE_RECTANGLE_ARB)) {
+        return false;
+    }
+    if (!g->trb_fbo) {
+        g->GenFramebuffers(1, &g->trb_fbo);
+    }
+    g->BindFramebuffer(GL_FRAMEBUFFER, g->trb_fbo);
+    g->FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, gt->target, gt->id, 0);
+    ok = g->CheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    if (ok) {
+        glPixelStorei(GL_PACK_ALIGNMENT, 4);
+        glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+        glReadPixels(x, y, w, h, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, dst);
+    }
+    g->FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, gt->target, 0, 0);
+    g->BindFramebuffer(GL_FRAMEBUFFER, 0);
+    return gl_err_ok() && ok;
+}
+
 static bool gl_readback(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y,
                         uint32_t w, uint32_t h, uint32_t *dst)
 {
@@ -4126,6 +4158,7 @@ const QgpuBackend qgpu_backend_gl = {
     .glsl_link      = gl_glsl_link,        /* v21 */
     .tex_copy       = gl_tex_copy,         /* 27/09 : copie GPU */
     .tex_fetch      = gl_tex_fetch,
+    .tex_readback   = gl_tex_readback,
     .submit_end     = gl_submit_end,       /* 30/09 : glFlush de fin de soumission */
 };
 

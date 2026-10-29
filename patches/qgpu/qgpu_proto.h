@@ -288,6 +288,14 @@
    BAD_ARG (longueur inconnue) ; l'invité ne l'émet pas. Ajouté sans changer
    QGPU_PROTO_VERSION (même règle que QGPU_CAP_GEN_SIZES). */
 #define QGPU_CAP_TEX_READBACK_ROWS 0x00100000
+/* 29/10 (Quartz Extreme P3) : QGPU_OP_TEX_PRESENT — niveau 0 d'une texture
+   2D ou RECTANGLE (ligne 0 = haut, l'orientation de SURF_TEX) vers la VRAM de
+   scanout, mêmes arguments et mêmes contrôles que SURF_PRESENT, la texture à
+   la place de la surface. Le kext présente ainsi, au Flush du WindowServer,
+   l'INSTANTANÉ qu'un jeu en fenêtre a copié à son échange (SURF_TEX) — pas sa
+   surface, qu'il redessine déjà : le jeu n'attend plus le WindowServer.
+   Ajouté sans changer QGPU_PROTO_VERSION (même règle que GEN_SIZES). */
+#define QGPU_CAP_TEX_PRESENT    0x00200000
 #define QGPU_REG_CLIENT_ERRORS_BASE 0xC8  /* après QGPU_REG_LAYOUT (0x88..0xC4) */
 #define QGPU_REG_CLIENT_ERRORS(i)   (QGPU_REG_CLIENT_ERRORS_BASE + 4 * (i))
 /* Taille d'une tranche de BAR0 : la fenêtre partagée en `n` parts égales,
@@ -384,6 +392,7 @@
 #define QGPU_OP_DEPTH_UPLOAD    0x0016  /* v2, idem, BAR0 → hôte */
 #define QGPU_OP_STENCIL_READBACK 0x0017 /* v6, idem, valeurs de stencil, cf. ci-dessous */
 #define QGPU_OP_STENCIL_UPLOAD  0x0018  /* v6, idem, BAR0 → hôte */
+#define QGPU_OP_TEX_PRESENT     0x0023  /* QGPU_CAP_TEX_PRESENT, [tex, off, stride, x, y, w, h, format] */
 #define QGPU_OP_SURF_PRESENT    0x0019  /* v13, [surf, off, stride, x, y, w, h, format]
                                            hôte → VRAM de scanout, cf. section v13 */
 #define QGPU_OP_COPY_TEX        0x001A  /* v13, [tex, cible, niveau, x, y, z,
@@ -474,6 +483,7 @@
 #define QGPU_LEN_SURF_XFER      8
 #define QGPU_LEN_SURF_XFER_PF   9           /* v15 : + format (QGPU_PF_* / QGPU_DF_*) */
 #define QGPU_LEN_SURF_PRESENT   9           /* v13 */
+#define QGPU_LEN_TEX_PRESENT    9           /* 29/10, QGPU_CAP_TEX_PRESENT */
 #define QGPU_LEN_COPY_TEX       11          /* v13 */
 #define QGPU_LEN_SURF_TEX       5           /* v20 */
 #define QGPU_LEN_TEX_READBACK   6           /* v20 */

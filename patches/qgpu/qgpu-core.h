@@ -434,6 +434,11 @@ typedef struct QgpuBackend {
                      uint32_t lvl, uint32_t x, uint32_t y, uint32_t z,
                      uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, bool flip);
     bool (*tex_fetch)(QgpuCore *c, QgpuTexture *t, uint32_t face, uint32_t lvl);
+    /* 29/10 (TEX_PRESENT, facultatif) : rectangle du niveau 0 d'une texture
+       2D/RECTANGLE en mots xRGB, ligne 0 = ligne y de la texture, SANS changer
+       l'état du niveau. Absent ou false : le cœur passe par tex_fetch. */
+    bool (*tex_readback)(QgpuCore *c, QgpuTexture *t, uint32_t x, uint32_t y,
+                         uint32_t w, uint32_t h, uint32_t *dst);
     /* 30/09 (attente de l'invité, docs/backend-gl-attente.md ; facultatif) :
        fin d'une soumission, appelé par qgpu_core_submit_end APRÈS la
        publication de sa barrière. Le backend GL y confie au GPU ce qu'il a

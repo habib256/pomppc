@@ -22,6 +22,10 @@
 #define QGPU_PF_XRGB8888        0
 #define QGPU_PF_RGB1555         1
 #define QGPU_CMD_HDR(op, len)   (((UInt32) (op) << 16) | ((UInt32) (len) & 0xFFFF))
+/* 29/10 (P3) : TEX_PRESENT, mêmes arguments, la texture d'export (instantané
+   de l'échange) au lieu de la surface que le jeu redessine déjà */
+#define QGPU_OP_TEX_PRESENT     0x0023
+#define QGPU_CAP_TEX_PRESENT    0x00200000
 
 /* v9 : période du chien de garde des attentes de barrière, et donc résolution
    du délai maximal de QGPU_UC_WAIT_FENCE. 10 ms : assez fin pour un délai qui
@@ -1818,7 +1822,7 @@ IOReturn POMPPCAccelerator::flushSurface(UInt32 sid, IOFramebuffer * fb,
     IOIndex            depth;
     IOPixelInformation pix;
     UInt32             cmds[POMPPC_MAX_RECTS * QGPU_LEN_SURF_PRESENT], n = 0, i, bypp, fmt;
-    UInt32             st = 0;
+    UInt32             st = 0, op, src;
     int                k;
 
     for (k = 0; k < POMPPC_MAX_EXPORTS; k++) {
@@ -1872,6 +1876,14 @@ IOReturn POMPPCAccelerator::flushSurface(UInt32 sid, IOFramebuffer * fb,
     }
     if (!n) {
         return kIOReturnSuccess;
+    }
+    /* l'instantané si l'hôte sait le présenter (le jeu n'attend alors plus) */
+    op = (gpu->caps() & QGPU_CAP_TEX_PRESENT) && e->tex != 0xffffffffUL ? QGPU_OP_TEX_PRESENT
+                                                                       : QGPU_OP_SURF_PRESENT;
+    src = op == QGPU_OP_TEX_PRESENT ? e->tex : e->surf;
+    for (i = 0; i < n; i += QGPU_LEN_SURF_PRESENT) {
+        cmds[i] = QGPU_CMD_HDR(op, QGPU_LEN_SURF_PRESENT);
+        cmds[i + 1] = src;
     }
     gpu->kernelSubmit(e->cmdoff, cmds, n, &st);
     if (st != QGPU_ST_OK && fFlushErrs++ < 8) {

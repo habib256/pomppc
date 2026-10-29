@@ -3345,7 +3345,7 @@ static void run_v9(QgpuCore *c, uint8_t *shmem)
             QGPU_CAP_SURF_TEX, QGPU_CAP_TEX_READBACK, QGPU_CAP_GLSL,
             QGPU_CAP_COMBINE3, QGPU_CAP_GLSL_PATHS, QGPU_CAP_STATE_BLOCK,
             QGPU_CAP_GEOM_HOST, QGPU_CAP_FIXED4, 0x00010000 /* réservé v23 */,
-            QGPU_CAP_TEX_READBACK_ROWS
+            QGPU_CAP_TEX_READBACK_ROWS, QGPU_CAP_TEX_PRESENT
         };
         uint32_t all = 0;
         unsigned k;
@@ -4758,6 +4758,33 @@ static void run_v13(QgpuCore *c, uint8_t *shmem)
     CHECK(st == QGPU_ST_OK && p == 0xFF0000,
           "PRESENT au bon pas avec géométrie : st %u pixel %06x", st, p);
     qgpu_core_set_scanout_geom(c, 0, 0, 0, 0);
+
+    /* 29/10 (QE P3) : TEX_PRESENT — la surface rouge copiée (SURF_TEX) dans
+       une texture rectangle, présentée en 1555 depuis la texture ; texture
+       absente refusée */
+    CHECK(c->caps & QGPU_CAP_TEX_PRESENT, "TEX_PRESENT annoncé (caps 0x%x)", c->caps);
+    CHECK(QGPU_OP_TEX_PRESENT == 0x0023 && QGPU_LEN_TEX_PRESENT == 9,
+          "TEX_PRESENT opcode 0x%x longueur %d", QGPU_OP_TEX_PRESENT, QGPU_LEN_TEX_PRESENT);
+    memset(fb, 0, (size_t)FB_W * FB_W * 4);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3)); emit(&e, 41);
+    emit(&e, QGPU_TT_RECTANGLE);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX));
+    emit(&e, 41); emit(&e, QGPU_TT_RECTANGLE); emit(&e, 0); emit(&e, 1);
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_PRESENT, QGPU_LEN_TEX_PRESENT));
+    emit(&e, 41); emit(&e, 0); emit(&e, FB_PITCH16);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_PF_RGB1555);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    pix = (uint16_t)(((uint16_t)fb[20 * FB_PITCH16 + 10 * 2] << 8) |
+                     fb[20 * FB_PITCH16 + 10 * 2 + 1]);
+    CHECK(st == QGPU_ST_OK && pix == 0x7C00,
+          "TEX_PRESENT 1555 depuis la copie de la surface : st %u pixel %04x", st, pix);
+    e.off = e.start = CMD_OFF;
+    emit(&e, QGPU_CMD_HDR(QGPU_OP_TEX_PRESENT, QGPU_LEN_TEX_PRESENT));
+    emit(&e, 42); emit(&e, 0); emit(&e, FB_PITCH16);
+    emit(&e, 0); emit(&e, 0); emit(&e, W); emit(&e, H); emit(&e, QGPU_PF_RGB1555);
+    st = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+    CHECK(st == QGPU_ST_BAD_ARG, "TEX_PRESENT d'une texture absente : st %u", st);
 
     /* COPY_TEX : surface rouge → texture noire, puis REPLACE. */
     {

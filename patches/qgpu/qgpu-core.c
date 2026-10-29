@@ -1761,6 +1761,7 @@ bool qgpu_core_init(QgpuCore *c, const char *backend,
         }
         c->caps |= QGPU_CAP_TEX_READBACK;   /* v20 : copie des niveaux dans le cœur */
         c->caps |= QGPU_CAP_TEX_READBACK_ROWS;  /* 28/10 : par bandes de lignes */
+        c->caps |= QGPU_CAP_TEX_PRESENT;        /* 29/10 : niveau du cœur vers le scanout */
         /* A4 : le bloc d'état est traduit par le cœur, quel que soit le
            backend ; QGPU_STATE_BLOCK=0 le retire (A/B, invité sur l'ancienne
            voie). */
@@ -3710,16 +3711,42 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         return QGPU_ST_OK;
     }
 
-    case QGPU_OP_SURF_PRESENT: {
-        uint32_t off, stride, x, y, w, h, fmt, bpp, row, i;
+    case QGPU_OP_SURF_PRESENT:
+    case QGPU_OP_TEX_PRESENT: {
+        /* 29/10 : TEX_PRESENT, même chose depuis le niveau 0 d'une texture
+           2D ou RECTANGLE (ligne 0 = haut) au lieu d'une surface */
+        uint32_t off, stride, x, y, w, h, fmt, bpp, row, i, sw, sh;
         uint64_t rowbytes, total, t0;
+        QgpuTexLevel *tlv = NULL;
         WANT(QGPU_LEN_SURF_PRESENT);
         if (!c->scanout || c->scanout_size == 0) {
             return QGPU_ST_BAD_ARG;
         }
-        s = surf_lookup(c, a[0]);
-        if (!s) {
-            return QGPU_ST_NO_SURF;
+        if (op == QGPU_OP_TEX_PRESENT) {
+            QgpuTexture *t;
+            if (!(c->caps & QGPU_CAP_TEX_PRESENT)) {
+                return QGPU_ST_BAD_OPCODE;
+            }
+            if (a[0] >= QGPU_MAX_TEX || !c->tex[a[0]].used) {
+                return QGPU_ST_BAD_ARG;
+            }
+            t = &c->tex[a[0]];
+            if (t->target != QGPU_TT_2D && t->target != QGPU_TT_RECTANGLE) {
+                return QGPU_ST_BAD_ARG;
+            }
+            tlv = &t->level[0][0];
+            if (!tlv->px || tlv->d != 1 || tlv->fmt == 0x1902) {
+                return QGPU_ST_BAD_ARG;
+            }
+            sw = tlv->w;
+            sh = tlv->h;
+        } else {
+            s = surf_lookup(c, a[0]);
+            if (!s) {
+                return QGPU_ST_NO_SURF;
+            }
+            sw = s->width;
+            sh = s->height;
         }
         off = a[1]; stride = a[2]; x = a[3]; y = a[4];
         w = a[5]; h = a[6]; fmt = a[7];
@@ -3727,8 +3754,8 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
             return QGPU_ST_BAD_ARG;
         }
         bpp = (fmt == QGPU_PF_RGB1555) ? 2u : 4u;
-        if (w == 0 || h == 0 || x > s->width || y > s->height ||
-            w > s->width - x || h > s->height - y) {
+        if (w == 0 || h == 0 || x > sw || y > sh ||
+            w > sw - x || h > sh - y) {
             return QGPU_ST_BAD_ARG;
         }
         if (stride < (uint64_t)w * bpp) {
@@ -3788,7 +3815,18 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
                 return QGPU_ST_OK;
             }
         }
-        if (!c->be->readback(c, s, x, y, w, h, c->pbuf)) {
+        if (tlv && tlv->gpu && c->be->tex_readback &&
+            c->be->tex_readback(c, &c->tex[a[0]], x, y, w, h, c->pbuf)) {
+            /* lu sur le GPU, niveau inchangé */
+        } else if (tlv) {
+            if (!tex_cpu(c, &c->tex[a[0]], 0, 0)) {
+                return QGPU_ST_BACKEND;
+            }
+            for (row = 0; row < h; row++) {
+                memcpy(c->pbuf + (size_t)row * w, tlv->px + (size_t)(y + row) * sw + x,
+                       (size_t)w * 4);
+            }
+        } else if (!c->be->readback(c, s, x, y, w, h, c->pbuf)) {
             return QGPU_ST_BACKEND;
         }
         for (row = 0; row < h; row++) {
@@ -5399,7 +5437,7 @@ static bool known_op(uint32_t op)
     case QGPU_OP_NOP: case QGPU_OP_CTX_CREATE: case QGPU_OP_CTX_DESTROY:
     case QGPU_OP_CTX_BIND: case QGPU_OP_SURF_CREATE: case QGPU_OP_SURF_DESTROY:
     case QGPU_OP_SURF_BIND: case QGPU_OP_SURF_READBACK: case QGPU_OP_SURF_UPLOAD:
-    case QGPU_OP_SURF_PRESENT: case QGPU_OP_COPY_TEX:
+    case QGPU_OP_SURF_PRESENT: case QGPU_OP_COPY_TEX: case QGPU_OP_TEX_PRESENT:
     case QGPU_OP_SURF_TEX: case QGPU_OP_TEX_READBACK:   /* v20 */
     case QGPU_OP_BUF_CREATE: case QGPU_OP_BUF_DESTROY: case QGPU_OP_BUF_SUBDATA:
     case QGPU_OP_DEPTH_READBACK: case QGPU_OP_DEPTH_UPLOAD:

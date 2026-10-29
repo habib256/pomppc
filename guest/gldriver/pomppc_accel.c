@@ -16653,7 +16653,11 @@ static PCtx *surf_source(unsigned long sid)
         return 0;
     for (q = G.list; q; q = q->next) {
         unsigned char *gd = (unsigned char *)GLD_U32(q->ctx, 4);
-        if (gd && GLD_U32(gd, GD_TSID) == sid)
+        /* 29/10 (QE) : une fenêtre liée en surface accélérée est attachée à un
+           tampon privé, son drawable n'a plus de surface CGS — c'est qe_sid
+           qui la nomme (cibles de rendu cachées d'IndirectX, Colin McRae :
+           sans ceci, repli chez Apple et plantage dans glrPolyRGB000) */
+        if ((gd && GLD_U32(gd, GD_TSID) == sid) || (q->qe_sid && q->qe_sid == sid))
             return q;
     }
     {
@@ -16870,7 +16874,7 @@ created:
 static void surftex_swapped(PCtx *p)
 {
     unsigned char *gd = (unsigned char *)GLD_U32(p->ctx, 4);
-    unsigned long sid = gd ? GLD_U32(gd, GD_TSID) : 0;
+    unsigned long sid = p->qe_sid ? p->qe_sid : gd ? GLD_U32(gd, GD_TSID) : 0;
     PTex *t;
     p->swap_gen++;
     if (!G.surftex || !sid)
@@ -17698,6 +17702,86 @@ long pomppc_qe_attach(void *ctx, const unsigned long *desc)
     }
     pthread_mutex_unlock(&G.mu);
     return result;
+}
+
+/* 29/10 (P3) : avis au WindowServer depuis un fil à part. Le kext présente
+   alors l'INSTANTANÉ de l'échange (texture d'export, TEX_PRESENT), pas la
+   surface que le jeu redessine déjà : le jeu n'attend plus l'aller-retour
+   jeu → WindowServer → noyau (qui attend l'hôte). Un avis en retard est
+   remplacé par le suivant : une image peut sauter, aucune ne se déchire. */
+static struct {
+    pthread_mutex_t m;
+    pthread_cond_t  cv;
+    pid_t           pid;                /* fil vivant dans CE processus (fork) */
+    int             pending;
+    unsigned long   cid, wid, sid, n_post, n_merged;
+    long            rect[4], h;
+} QN = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER };
+
+static void *qn_main(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        unsigned long cid, wid, sid;
+        long rect[4], h;
+        pthread_mutex_lock(&QN.m);
+        while (!QN.pending)
+            pthread_cond_wait(&QN.cv, &QN.m);
+        cid = QN.cid; wid = QN.wid; sid = QN.sid; h = QN.h;
+        memcpy(rect, QN.rect, sizeof(rect));
+        QN.pending = 0;
+        pthread_mutex_unlock(&QN.m);
+        QA.notify(cid, wid, sid, rect, h);
+    }
+    return 0;
+}
+
+/* 1 si l'avis est confié au fil (sinon : avis synchrone, comme avant). */
+static int qn_post(unsigned long cid, unsigned long wid, unsigned long sid,
+                   unsigned long w, unsigned long h)
+{
+    static int off = -1;
+    if (off < 0) {
+        const char *e = getenv("POMPPC_GL_QE_ASYNC");
+        off = e && e[0] == '0';
+    }
+    if (off || !(G.q.caps & QGPU_CAP_TEX_PRESENT) || dump_first_frame != ~0UL)
+        return 0;
+    pthread_mutex_lock(&QN.m);
+    if (QN.pid != getpid()) {
+        pthread_t th;
+        pthread_attr_t at;
+        pthread_attr_init(&at);
+        pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+        if (pthread_create(&th, &at, qn_main, 0) != 0) {
+            pthread_attr_destroy(&at);
+            pthread_mutex_unlock(&QN.m);
+            return 0;
+        }
+        pthread_attr_destroy(&at);
+        QN.pid = getpid();
+        QN.pending = 0;
+    }
+    QN.n_merged += QN.pending;
+    QN.n_post++;
+    QN.cid = cid; QN.wid = wid; QN.sid = sid; QN.h = (long)h;
+    QN.rect[0] = 0; QN.rect[1] = 0; QN.rect[2] = (long)w; QN.rect[3] = (long)h;
+    QN.pending = 1;
+    pthread_cond_signal(&QN.cv);
+    pthread_mutex_unlock(&QN.m);
+    return 1;
+}
+
+/* Fenêtre QE absente de la liste des fenêtres à l'écran (revue toutes les
+   DIRECT_RECHECK images, comme drawable_hidden). */
+static int drawable_hidden_full(PCtx *p, long cid, long wid);
+static int qe_hidden(PCtx *p)
+{
+    if (p->hid_checked_at && p->hid_wid == p->qe_wid &&
+        G.n_frames - p->hid_checked_at < DIRECT_RECHECK)
+        return p->hid;
+    direct_init_once();
+    return drawable_hidden_full(p, (long)p->qe_cid, (long)p->qe_wid) == 1;
 }
 
 /* Échange d'une fenêtre QE (verrou tenu) : 1 si l'image est partie. */
@@ -19694,8 +19778,22 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
         pthread_mutex_unlock(&G.mu);
         return direct_noop;
     }
+    /* QE : fenêtre hors de l'écran (cible cachée d'IndirectX) — personne ne
+       la compose ; son image reste sur l'hôte pour ses textures de surface */
+    if (slot == PROC_Swap60 && p->qe_sid && G.state > 0 && !p->broken &&
+        p->color != SW_NEWER && qe_hidden(p)) {
+        if (G.ncmd)
+            flush();
+        G.n_hidden_swaps++;
+        pthread_mutex_unlock(&G.mu);
+        return direct_noop;
+    }
     if (slot == PROC_Swap60 && p->qe_sid && present_qe(p)) {
         unsigned long cid = p->qe_cid, wid = p->qe_wid, sid = p->qe_sid;
+        if (qn_post(cid, wid, sid, p->sw, p->sh)) {
+            pthread_mutex_unlock(&G.mu);
+            return direct_noop;
+        }
         /* toute la surface, en repère GL : glcDoNonSimpleFlush en fait une
            région (sans rectangle, le serveur ne recompose pas une surface
            accélérée : vu au vidage, texture liée une seule fois) */
