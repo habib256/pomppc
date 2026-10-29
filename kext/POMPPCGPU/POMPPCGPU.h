@@ -95,6 +95,11 @@
 /* Méthode 4 : [sid] → [x, y] de la surface au dernier Flush (preuve de la
    matrice : le jeu ne connaît pas la position de sa fenêtre à l'écran). */
 #define POMPPC_GA_SURF_POS      4
+/* Méthode 5 (29/10, P3) : [sid] → présentation par le noyau dans la région
+   visible gardée au dernier SetShape, sans passer par le WindowServer.
+   kIOReturnBusy : curseur visible sur la fenêtre ou région inconnue — le jeu
+   avise alors le WindowServer, qui fera le Flush comme avant. */
+#define POMPPC_GA_PRESENT       5
 #define POMPPC_MAX_EXPORTS      32
 #define POMPPC_MAX_RECTS        16
 /* Zone de commandes du client (fin de sa tranche), écrite par le kext au
@@ -132,8 +137,27 @@ public:
                                    UInt32 * seq);
     void             dropExports(void * owner);
     IOReturn         surfacePos(UInt32 sid, UInt32 * x, UInt32 * y);
+    void             setSurfaceShape(void * client, UInt32 sid, IOFramebuffer * fb,
+                                     const IOAccelBounds * bounds,
+                                     const IOAccelBounds * rects, UInt32 nrects);
+    void             dropSurfaceShape(void * client);
+    IOReturn         presentSurface(UInt32 sid);
+    virtual void     free(void);
 
 private:
+    IOReturn         flushSurfaceLocked(UInt32 sid, IOFramebuffer * fb,
+                                        const IOAccelBounds * bounds,
+                                        const IOAccelBounds * rects, UInt32 nrects,
+                                        bool direct);
+    IOLock *         lock(void);
+    struct Shape {
+        void *          client;         /* client de surface qui l'a posée (0 : libre) */
+        UInt32          sid, nrects;
+        IOFramebuffer * fb;             /* retenu par ce client tant qu'il vit */
+        IOAccelBounds   bounds, rects[POMPPC_MAX_RECTS];
+    };
+    Shape            fShapes[POMPPC_MAX_EXPORTS];
+    IOLock *         fLock;
     POMPPCExport     fExports[POMPPC_MAX_EXPORTS];
     UInt32           fExportSeq;
     UInt32           fFlushErrs;
@@ -206,6 +230,7 @@ public:
     IOReturn gaExport(UInt32 sid, UInt32 tex, UInt32 w, UInt32 h, UInt32 surf, UInt32 cmdoff);
     IOReturn gaLookup(UInt32 sid, UInt32 * tex, UInt32 * w, UInt32 * h, UInt32 * seq, void *);
     IOReturn gaSurfPos(UInt32 sid, UInt32 * x, UInt32 * y, void *, void *, void *);
+    IOReturn gaPresent(UInt32 sid, void *, void *, void *, void *, void *);
 
 private:
     IOFramebuffer * fFB;            /* retenu */

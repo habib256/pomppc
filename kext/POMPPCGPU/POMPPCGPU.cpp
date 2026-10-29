@@ -1871,9 +1871,124 @@ static bool cursorOver(IOFramebuffer * fb, const IOAccelBounds * rects, UInt32 n
    reprend (texture de surface) que pour la transformer. Ici, un SURF_PRESENT
    (TEX_PRESENT : son instantané) par rectangle visible, soumis dans la zone
    de commandes de sa tranche, après l'image du jeu déjà en file. */
+IOLock * POMPPCAccelerator::lock(void)
+{
+    if (!fLock) {
+        IOLock * l = IOLockAlloc();
+        if (l && !OSCompareAndSwap(0, (UInt32) l, (UInt32 *) &fLock)) {
+            IOLockFree(l);
+        }
+    }
+    return fLock;
+}
+
+void POMPPCAccelerator::free(void)
+{
+    if (fLock) {
+        IOLockFree(fLock);
+        fLock = 0;
+    }
+    super::free();
+}
+
 IOReturn POMPPCAccelerator::flushSurface(UInt32 sid, IOFramebuffer * fb,
                                          const IOAccelBounds * bounds,
                                          const IOAccelBounds * rects, UInt32 nrects)
+{
+    IOLock * l = lock();
+    IOReturn r;
+
+    if (!l) {
+        return kIOReturnNoMemory;
+    }
+    IOLockLock(l);
+    r = flushSurfaceLocked(sid, fb, bounds, rects, nrects, false);
+    IOLockUnlock(l);
+    return r;
+}
+
+/* Région visible d'une surface, gardée à chaque SetShape (méthode 5). */
+void POMPPCAccelerator::setSurfaceShape(void * client, UInt32 sid, IOFramebuffer * fb,
+                                        const IOAccelBounds * bounds,
+                                        const IOAccelBounds * rects, UInt32 nrects)
+{
+    IOLock * l = lock();
+    Shape *  free_s = 0;
+    Shape *  sh = 0;
+    int      i;
+
+    if (!l) {
+        return;
+    }
+    IOLockLock(l);
+    for (i = 0; i < POMPPC_MAX_EXPORTS; i++) {
+        if (fShapes[i].client == client) {
+            sh = &fShapes[i];
+            break;
+        }
+        if (!fShapes[i].client && !free_s) {
+            free_s = &fShapes[i];
+        }
+    }
+    if (!sh) {
+        sh = free_s;
+    }
+    if (sh) {
+        sh->client = client;
+        sh->sid = sid;
+        sh->fb = fb;
+        sh->bounds = *bounds;
+        sh->nrects = nrects < POMPPC_MAX_RECTS ? nrects : POMPPC_MAX_RECTS;
+        bcopy(rects, sh->rects, sh->nrects * sizeof(IOAccelBounds));
+    }
+    IOLockUnlock(l);
+}
+
+void POMPPCAccelerator::dropSurfaceShape(void * client)
+{
+    IOLock * l = lock();
+    int      i;
+
+    if (!l) {
+        return;
+    }
+    IOLockLock(l);
+    for (i = 0; i < POMPPC_MAX_EXPORTS; i++) {
+        if (fShapes[i].client == client) {
+            fShapes[i].client = 0;
+            fShapes[i].fb = 0;
+        }
+    }
+    IOLockUnlock(l);
+}
+
+/* Méthode 5 : le jeu présente son échange lui-même (P3) — un appel noyau au
+   lieu de jeu → WindowServer → noyau à chaque image. */
+IOReturn POMPPCAccelerator::presentSurface(UInt32 sid)
+{
+    IOLock * l = lock();
+    IOReturn r = kIOReturnBusy;
+    int      i;
+
+    if (!l) {
+        return kIOReturnNoMemory;
+    }
+    IOLockLock(l);
+    for (i = 0; i < POMPPC_MAX_EXPORTS; i++) {
+        Shape * sh = &fShapes[i];
+        if (sh->client && sh->sid == sid && sh->fb && sh->nrects) {
+            r = flushSurfaceLocked(sid, sh->fb, &sh->bounds, sh->rects, sh->nrects, true);
+            break;
+        }
+    }
+    IOLockUnlock(l);
+    return r;
+}
+
+IOReturn POMPPCAccelerator::flushSurfaceLocked(UInt32 sid, IOFramebuffer * fb,
+                                               const IOAccelBounds * bounds,
+                                               const IOAccelBounds * rects, UInt32 nrects,
+                                               bool direct)
 {
     POMPPCGPU *        gpu = OSDynamicCast(POMPPCGPU, getProvider());
     POMPPCExport *     e = 0;
@@ -1953,6 +2068,9 @@ IOReturn POMPPCAccelerator::flushSurface(UInt32 sid, IOFramebuffer * fb,
     {
         bool   async = gpu->getProperty("POMPPCQESync") != kOSBooleanTrue &&
                        !cursorOver(fb, rects, nrects);
+        if (direct && !async) {
+            return kIOReturnBusy;       /* le jeu passera par le WindowServer */
+        }
         UInt32 half = async ? (e->half & 1) : 0;
         UInt32 fence = async ? e->qfence[half] : 0;
         if (async && n * 4 > POMPPC_QE_CMD_BYTES / 2) {
@@ -2057,6 +2175,10 @@ void POMPPCSurfaceClient::free(void)
 
 IOReturn POMPPCSurfaceClient::clientClose(void)
 {
+    POMPPCAccelerator * accel = OSDynamicCast(POMPPCAccelerator, getProvider());
+    if (accel) {
+        accel->dropSurfaceShape(this);
+    }
     GPULog("surface %ld fermée (mode %lx, %d,%d %dx%d)\n", (long) fID,
            (unsigned long) fMode, fBounds.x, fBounds.y, fBounds.w, fBounds.h);
     terminate();
@@ -2186,6 +2308,7 @@ IOReturn POMPPCSurfaceClient::shape(IOAccelDeviceRegion * rgn, IOByteCount size)
         POMPPCAccelerator * accel = OSDynamicCast(POMPPCAccelerator, getProvider());
         if (accel) {
             accel->setSurfaceBounds(fID, &fBounds);
+            accel->setSurfaceShape(this, fID, fFB, &fBounds, fRects, fNRects);
         }
     }
     return kIOReturnSuccess;
@@ -2229,6 +2352,8 @@ IOReturn POMPPCSurfaceClient::sFlush(UInt32 fbMask, UInt32 options)
 
 IOReturn POMPPCSurfaceClient::sControl(UInt32 selector, UInt32 arg, UInt32 * result)
 {
+    /* vu le 29/10 : le WindowServer appelle Control(1, 1) sur les surfaces
+       des jeux ; y répondre ne change rien au rendu */
     return kIOReturnUnsupported;
 }
 
@@ -2288,15 +2413,16 @@ IOReturn POMPPCGAClient::clientMemoryForType(UInt32 type, IOOptionBits * options
 IOExternalMethod * POMPPCGAClient::getTargetAndMethodForIndex(IOService ** target,
                                                               UInt32 index)
 {
-    static const IOExternalMethod methods[5] = {
+    static const IOExternalMethod methods[6] = {
         { 0, (IOMethod) &POMPPCGAClient::gaGetInfo, kIOUCScalarIScalarO, 0, 4 },
         { 0, (IOMethod) &POMPPCGAClient::gaSurfBounds, kIOUCScalarIScalarO, 1, 4 },
         { 0, (IOMethod) &POMPPCGAClient::gaExport, kIOUCScalarIScalarO, 6, 0 },
         { 0, (IOMethod) &POMPPCGAClient::gaLookup, kIOUCScalarIScalarO, 1, 4 },
         { 0, (IOMethod) &POMPPCGAClient::gaSurfPos, kIOUCScalarIScalarO, 1, 2 },
+        { 0, (IOMethod) &POMPPCGAClient::gaPresent, kIOUCScalarIScalarO, 1, 0 },
     };
 
-    if (index > POMPPC_GA_SURF_POS) {
+    if (index > POMPPC_GA_PRESENT) {
         return 0;
     }
     *target = this;
@@ -2321,6 +2447,12 @@ IOReturn POMPPCGAClient::gaSurfPos(UInt32 sid, UInt32 * x, UInt32 * y, void *, v
 {
     POMPPCAccelerator * accel = OSDynamicCast(POMPPCAccelerator, getProvider());
     return accel ? accel->surfacePos(sid, x, y) : kIOReturnNotAttached;
+}
+
+IOReturn POMPPCGAClient::gaPresent(UInt32 sid, void *, void *, void *, void *, void *)
+{
+    POMPPCAccelerator * accel = OSDynamicCast(POMPPCAccelerator, getProvider());
+    return accel ? accel->presentSurface(sid) : kIOReturnNotAttached;
 }
 
 IOReturn POMPPCGAClient::gaSurfBounds(UInt32 id, UInt32 * x, UInt32 * y, UInt32 * w,

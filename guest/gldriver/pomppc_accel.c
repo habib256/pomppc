@@ -17784,6 +17784,29 @@ static int qn_post(unsigned long cid, unsigned long wid, unsigned long sid,
     return 1;
 }
 
+/* 29/10 (P3) : présentation par le noyau sans le WindowServer (méthode 5
+   du kext, région visible du dernier SetShape) — un appel au lieu de jeu →
+   WindowServer → noyau à chaque image. 1 si fait ; 0 : avis comme avant
+   (curseur sur la fenêtre, région inconnue, vidage de preuve, kext ancien,
+   POMPPC_GL_QE_DIRECT=0). Appelé hors de G.mu. */
+static int qa_present(unsigned long sid)
+{
+    static int off = -1;
+    kern_return_t kr;
+    if (off < 0) {
+        const char *e = getenv("POMPPC_GL_QE_DIRECT");
+        off = e && e[0] == '0';
+    }
+    if (off || dump_first_frame != ~0UL || !qa_open())
+        return 0;
+    kr = IOConnectMethodScalarIScalarO(QA.conn, 5, 1, 0, (UInt32)sid);
+    if (kr == KERN_SUCCESS)
+        return 1;
+    if (kr != kIOReturnBusy)
+        off = 1;                        /* kext sans méthode 5 : plus d'essai */
+    return 0;
+}
+
 /* Fenêtre QE absente de la liste des fenêtres à l'écran (revue toutes les
    DIRECT_RECHECK images, comme drawable_hidden). */
 static int drawable_hidden_full(PCtx *p, long cid, long wid);
@@ -19802,17 +19825,23 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
     }
     if (slot == PROC_Swap60 && p->qe_sid && present_qe(p)) {
         unsigned long cid = p->qe_cid, wid = p->qe_wid, sid = p->qe_sid;
-        if (qn_post(cid, wid, sid, p->sw, p->sh)) {
-            pthread_mutex_unlock(&G.mu);
+        unsigned long sw = p->sw, sh = p->sh;
+        pthread_mutex_unlock(&G.mu);
+        /* Sans avis au WindowServer : pour une fenêtre qui n'est pas au
+           premier plan, CGSFlushSurface lui fait peindre le fond de la
+           fenêtre (blanc) au lieu du Flush noyau — DOOM 3 clignotait au
+           chargement derrière le Terminal avec un avis par seconde, et
+           restait blanc avec l'ancien chemin (relevé du 29/10). */
+        if (qa_present(sid))
             return direct_noop;
-        }
+        if (qn_post(cid, wid, sid, sw, sh))
+            return direct_noop;
         /* toute la surface, en repère GL : glcDoNonSimpleFlush en fait une
            région (sans rectangle, le serveur ne recompose pas une surface
            accélérée : vu au vidage, texture liée une seule fois) */
         long rect[4];
-        long hh = (long)p->sh;
-        rect[0] = 0; rect[1] = 0; rect[2] = (long)p->sw; rect[3] = hh;
-        pthread_mutex_unlock(&G.mu);
+        long hh = (long)sh;
+        rect[0] = 0; rect[1] = 0; rect[2] = (long)sw; rect[3] = hh;
         {
             long e = QA.notify(cid, wid, sid, rect, hh);   /* CGSFlushSurface : le WindowServer recompose */
             static unsigned long nerr, nall;
