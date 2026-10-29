@@ -75,20 +75,23 @@ qgpu de Colin McRae.
    `build-fast` et `build`, puis le plugin de l'invité (`.run/cmr/cycle.sh NORUN=1` ou
    l'équivalent du PC). Ensuite, rejouer d3-pe et cmr-pe : à 1920×1080, le vidage n'était
    pas complet avant.
-7. **Venu du M4 le 29/10** : le kext et le plugin ont changé (Quartz Extreme P1 à P3,
-   `docs/quartz-extreme.md`), et `patches/qgpu/qgpu_proto.h` aussi (`QGPU_OP_TEX_PRESENT`,
-   capacité `QGPU_CAP_TEX_PRESENT`, version inchangée) : **reconstruire QEMU**, puis
-   réinstaller kext et plugin dans l'invité, sans `QE=1`, et repasser la matrice. Hors QE, le
-   plugin réserve les **4 derniers Kio de sa tranche** (présentations du noyau) : chaque
-   moitié perd 4 Kio d'arène. Ensuite, pour la parité de QE : VM jetable avec `QE=1`, matrice
-   entière et tranche d'endurance comme au §12 de `docs/endurance.md`.
+7. **Venu du M4 le 29/10** : Quartz Extreme (P1 à P3, `docs/quartz-extreme.md`).
+   `patches/qgpu/` a changé (`QGPU_OP_TEX_PRESENT`, `QGPU_CAP_QE_DEFAULT` et la propriété
+   `qe` du device, version inchangée) : **reconstruire QEMU**, puis réinstaller kext et
+   plugin (`install.sh` sans `QE` : personnalité « auto »). Sur le PC, `run_tiger.sh` ne
+   pose pas `qe=on` : **QE reste éteint**, rien ne change pour les jeux. Hors QE, le plugin
+   réserve les 4 derniers Kio de sa tranche (chaque moitié perd 4 Kio d'arène). Pour la
+   parité : VM jetable avec `QE=1 ./run_tiger.sh` (pose `qe=on`), matrice entière et A/B en
+   fenêtre (3 passes par bras, la passe unique d'UT est trop bruitée), tranche d'endurance
+   comme au §12 de `docs/endurance.md` ; ensuite ajouter `Linux:x86_64` au test
+   d'hôte de `run_tiger.sh`.
 
 **Propres au PC** : `patches/diag/` (auto-profileur, plafonds), `tools/tcg/perfhw.sh` (compteurs
 Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). `perf` exige
 `perf_event_paranoid` ≤ 1, que l'utilisateur règle à la main ; la valeur revient à 4 à chaque
 redémarrage.
 
-## 3. Mac M4 : état au 29/10/2026, 12 h 15
+## 3. Mac M4 : état au 29/10/2026, 20 h
 
 **Défauts sur Darwin:arm64** : depuis le 26/10 (`550b2a8`), la série du PC est allumée et
 prouvée : `PPC32MT TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIRTYSKIP PTEGMAP
@@ -143,22 +146,29 @@ relancée à la fin, puis arrêtée le 29/10 à 5 h 33 pour les essais de Quartz
   (6,2 et 3,5 hors QE).
 - Côté matrice, les clients du kext sont comptés au-delà de ceux d'avant le jeu, car le
   WindowServer garde sa tranche sous QE.
-- **P3 (vitesse, endurance) fait, défaut en attente** : TEX_PRESENT (le kext présente
-  l'instantané de l'échange), avis au WindowServer sur un fil à part et cadencés à 60 Hz.
-  A/B au même binaire, matrice entière QE éteint (`20261029-0936`) contre allumé
-  (`20261029-0905`) : **16 vertes sur 16 des deux côtés**. Plein écran neutre ; en fenêtre
-  mb +5 %, zen +16 %, ut +20 %, nx +5 %, d3 −37 % (une passe, à confirmer). Endurance QE
-  (`docs/endurance.md` §12) : 30 froids, 60 reboots, 16 cycles de jeu en fenêtre, aucun
-  incident. **QE reste éteint par défaut** : coût en fenêtre et pas encore validé sur le PC.
-- La VM quotidienne tourne sous ImGuiDock (relancée par la suite d'endurance, sans QE).
+- **P3 fait, QE allumé par défaut sur le M4** (`c792464`). Le jeu présente lui-même son
+  échange par le noyau (méthode 5 du client 2D, région visible gardée à `SetShape`,
+  TEX_PRESENT asynchrone), sans avis au WindowServer : pour une fenêtre qui n'est pas au
+  premier plan, `CGSFlushSurface` lui faisait peindre le fond blanc (DOOM 3 clignotait au
+  chargement, Marble Blast restait blanc). A/B au repos, même VM, 3 passes, en fenêtre :
+  QE au niveau de QE éteint ou mieux (mb 6,1-6,3 contre 6,4, zen 2,9-3,1 contre 3,5, d3
+  28,8-29,7 contre 29,8, ut 19,6-19,7 contre 19,9 ms/image). Matrice entière verte
+  (cmr-pe rejouée seule). Endurance : §12 de `docs/endurance.md` (ancien chemin, aucun
+  incident) ; tranche du chemin direct (`bench/endurance/m4-2910-qed`) en cours à 20 h 20 :
+  30 reboots sur 30 et 4 cycles de jeu sur 16 sains, la VM quotidienne sera relancée à la fin
+  puis recevra le kext et le plugin (personnalité « auto »).
+- Défaut : `run_tiger.sh` pose `qe=on` sur Darwin:arm64 (`QE=0 ./run_tiger.sh` l'éteint) ;
+  le kext en personnalité « auto » le suit. **QEMU reconstruit le 29/10 (19 h)**.
+- Pièges de mesure : un frontal ImGuiDock resté ouvert après l'arrêt de sa VM tourne à
+  60 % d'un cœur et double les temps en fenêtre ; la fenêtre de mesure d'UT (60 images)
+  demande 3 passes.
 - Piège : les traces du plugin (`POMPPC_GLTRACE`, vidages de tampons) ont **rempli le disque
   de l'invité** (16 Go). Les effacer après usage.
 
 **À faire sur le M4, dans l'ordre**
-1. Quartz Extreme, avant l'allumage par défaut : réduire le coût par image en fenêtre
-   (copie SURF_TEX + avis, ut +20 %, zen +16 %), seconde passe de d3-fen, puis décision de
-   l'utilisateur. L'allumage = personnalité `POMPPCQuartzExtreme` à vrai, `QE=0` pour
-   éteindre, seulement après validation sur le PC.
+1. Quartz Extreme : le défaut « blanc » d'une fenêtre GL qui n'est pas au premier plan
+   reste sur le repli (curseur visible sur la fenêtre → avis au WindowServer). Piste : le
+   curseur redessiné par le noyau après la présentation, pour se passer du repli.
 2. Étude des émulateurs voisins (PowerEmu, ppc-osx-vgpu) : QoS « interactive » du fil vCPU
    sur macOS, attente en ns (kqueue) dans la boucle principale, permutations AltiVec en
    ligne (TBL/TBX). À mesurer en A/B, licence à vérifier fichier par fichier.
