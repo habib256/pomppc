@@ -1853,14 +1853,14 @@ public:
 };
 
 /* Le curseur est-il visible sur l'un des rectangles (coordonnées d'écran) ?
-   Dans le doute (pas d'état), oui. */
+   Sans état partagé (pas encore de WindowServer), non : rien à retirer. */
 static bool cursorOver(IOFramebuffer * fb, const IOAccelBounds * rects, UInt32 nrects)
 {
     StdFBShmem_t * sh = POMPPCFBPeek::shmem(fb);
     UInt32         i;
 
     if (!sh) {
-        return true;
+        return false;
     }
     /* relevé du 29/10 : le WindowServer ne masque pas le curseur autour du
        Flush (cursorShow 0 pendant Marble Blast, curseur au centre de sa
@@ -2073,16 +2073,15 @@ IOReturn POMPPCAccelerator::flushSurfaceLocked(UInt32 sid, IOFramebuffer * fb,
     }
     /* P3 : asynchrone — le WindowServer ne garde plus un vCPU dans QEMU le
        temps que l'hôte vide la file du jeu. Deux moitiés de la zone en
-       alternance ; synchrone si le curseur logiciel (dessiné par
-       IOFramebuffer, VGA de QEMU sans curseur matériel) est visible sur la
-       région : le WindowServer le retire pendant le Flush et le remet après,
-       une présentation encore en vol l'écraserait. */
+       alternance. Curseur logiciel (dessiné par IOFramebuffer, VGA de QEMU
+       sans curseur matériel) visible sur la région : personne ne le retire
+       autour du Flush (relevé du 29/10), la présentation l'écrasait et son
+       fond sauvé devenait périmé. On le retire (hideCursor rend son fond),
+       on présente en SYNCHRONE, puis showCursor sauve le nouveau fond et le
+       redessine. */
     {
-        bool   async = gpu->getProperty("POMPPCQESync") != kOSBooleanTrue &&
-                       !cursorOver(fb, rects, nrects);
-        if (direct && !async) {
-            return kIOReturnBusy;       /* le jeu passera par le WindowServer */
-        }
+        bool   cursor = cursorOver(fb, rects, nrects);
+        bool   async = gpu->getProperty("POMPPCQESync") != kOSBooleanTrue && !cursor;
         UInt32 half = async ? (e->half & 1) : 0;
         UInt32 fence = async ? e->qfence[half] : 0;
         if (async && n * 4 > POMPPC_QE_CMD_BYTES / 2) {
@@ -2099,11 +2098,21 @@ IOReturn POMPPCAccelerator::flushSurfaceLocked(UInt32 sid, IOFramebuffer * fb,
             }
             e->qfence[0] = e->qfence[1] = 0;
         }
+        if (cursor) {
+            fb->hideCursor();
+        }
         gpu->kernelSubmit(e->cmdoff + half * (POMPPC_QE_CMD_BYTES / 2), cmds, n, &st,
                           async ? &fence : 0);
         if (async) {
             e->qfence[half] = fence;
             e->half = half + 1;
+        }
+        if (cursor) {
+            StdFBShmem_t * sh = POMPPCFBPeek::shmem(fb);
+            if (sh) {
+                IOGPoint loc = sh->cursorLoc;
+                fb->showCursor(&loc, sh->frame);
+            }
         }
     }
     if (st != QGPU_ST_OK && fFlushErrs++ < 8) {

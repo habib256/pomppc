@@ -17786,9 +17786,10 @@ static int qn_post(unsigned long cid, unsigned long wid, unsigned long sid,
 
 /* 29/10 (P3) : présentation par le noyau sans le WindowServer (méthode 5
    du kext, région visible du dernier SetShape) — un appel au lieu de jeu →
-   WindowServer → noyau à chaque image. 1 si fait ; 0 : avis comme avant
-   (curseur sur la fenêtre, région inconnue, vidage de preuve, kext ancien,
-   POMPPC_GL_QE_DIRECT=0). Appelé hors de G.mu. */
+   WindowServer → noyau à chaque image (curseur sur la fenêtre : le kext le
+   retire et le remet). 1 si fait ; 0 : avis comme avant (région inconnue,
+   vidage de preuve, kext ancien, POMPPC_GL_QE_DIRECT=0). Appelé hors de
+   G.mu. */
 static int qa_present(unsigned long sid)
 {
     static int off = -1;

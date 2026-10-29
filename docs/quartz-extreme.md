@@ -147,6 +147,15 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
 
 ## 3. Journal
 
+- **29/10, 21 h 15** : **curseur sur une fenêtre GL.** Le chemin direct renvoyait au
+  WindowServer quand le curseur logiciel était visible sur la fenêtre ; pour une fenêtre qui
+  n'est pas au premier plan, l'avis la faisait peindre en blanc. Le kext retire maintenant le
+  curseur (`IOFramebuffer::hideCursor`, qui rend son fond), présente en synchrone, puis le
+  remet (`showCursor`, qui sauve le nouveau fond) : plus de repli, plus de fond périmé sous le
+  curseur (l'ancien Flush l'écrasait aussi). Vérifié : Marble Blast derrière le Terminal,
+  curseur sur sa fenêtre, image juste, curseur dessiné, aucune traînée en le déplaçant ;
+  matrice mb-fen 6,1, zen-fen 3,1, d3-fen 30,7 ms/image, vertes.
+
 - **29/10, 19 h 30** : **P3 fini : chemin direct, et allumé par défaut sur le M4.**
   1. **Le jeu présente lui-même** son échange par le noyau (méthode 5 du client 2D,
      `0ba5221`) : le kext garde la région visible de chaque surface à `SetShape` et

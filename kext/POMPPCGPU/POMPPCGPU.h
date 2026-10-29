@@ -98,8 +98,9 @@
 #define POMPPC_GA_SURF_POS      4
 /* Méthode 5 (29/10, P3) : [sid] → présentation par le noyau dans la région
    visible gardée au dernier SetShape, sans passer par le WindowServer.
-   kIOReturnBusy : curseur visible sur la fenêtre ou région inconnue — le jeu
-   avise alors le WindowServer, qui fera le Flush comme avant. */
+   Curseur visible sur la fenêtre : retiré, présentation synchrone, remis.
+   kIOReturnBusy : région inconnue (pas encore de SetShape) — le jeu avise
+   alors le WindowServer, qui fera le Flush comme avant. */
 #define POMPPC_GA_PRESENT       5
 #define POMPPC_MAX_EXPORTS      32
 #define POMPPC_MAX_RECTS        16

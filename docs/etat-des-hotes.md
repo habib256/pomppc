@@ -166,16 +166,13 @@ relancée à la fin, puis arrêtée le 29/10 à 5 h 33 pour les essais de Quartz
   de l'invité** (16 Go). Les effacer après usage.
 
 **À faire sur le M4, dans l'ordre**
-1. Quartz Extreme : le défaut « blanc » d'une fenêtre GL qui n'est pas au premier plan
-   reste sur le repli (curseur visible sur la fenêtre → avis au WindowServer). Piste : le
-   curseur redessiné par le noyau après la présentation, pour se passer du repli.
-2. Étude des émulateurs voisins (PowerEmu, ppc-osx-vgpu) : QoS « interactive » du fil vCPU
+1. Étude des émulateurs voisins (PowerEmu, ppc-osx-vgpu) : QoS « interactive » du fil vCPU
    sur macOS, attente en ns (kqueue) dans la boucle principale, permutations AltiVec en
    ligne (TBL/TBX). À mesurer en A/B, licence à vérifier fichier par fichier.
-3. Parité de **tcg/0055** (rejeu des traces, outil de preuve prouvé sur le PC le 27/10 :
+2. Parité de **tcg/0055** (rejeu des traces, outil de preuve prouvé sur le PC le 27/10 :
    `c92dacc`). À faire seulement si les traces de second niveau reprennent ; elles sont
    arrêtées depuis le 22/10.
-4. Parité de **tcg/0056** seulement si le PC l'allume. Il faudra alors un saut long vers le
+3. Parité de **tcg/0056** seulement si le PC l'allume. Il faudra alors un saut long vers le
    chemin lent sur aarch64 : le `b.cond` imm19 n'a qu'1 Mio de portée, pour une région de
    64 Mio.
 
