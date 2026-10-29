@@ -243,6 +243,25 @@ Une mesure A/B exige un hôte au repos (aucune autre VM, charge relevée avant e
 Dans l'ordre des gains estimés. Profil du 01/10 et lecture : `docs/vitesse-profil-2026-10-01.md`
 (moteur multifil d'Apple absent : `docs/re/moteur-multifil.md`).
 
+- [ ] **[Émulateurs voisins] À reprendre de PowerEmu / ppcosxkvm / ppc-osx-vgpu** (étude du
+  29/10 : dépôts lus, rien exécuté ; leurs chiffres sont annoncés, non vérifiés ; code QEMU en
+  GPL v2 ou ultérieure, en-tête à vérifier fichier par fichier ; scripts en GPL-2.0 seule, à
+  ne pas reprendre tels quels). Par intérêt décroissant :
+  1. **[M4] Fil du vCPU en QoS « interactive »** (`pthread_set_qos_class_self_np`
+     `QOS_CLASS_USER_INTERACTIVE`) : une ligne ; facteur 3 annoncé sur une boucle de mesure
+     (macOS ne relègue plus QEMU sur les cœurs lents). A/B sur le M4 au repos.
+  2. **[M4] Attente en nanosecondes** : `g_poll` arrondit à la milliseconde (une attente de
+     50 µs dure 1,26 ms) ; minuterie kqueue à la place. Son, minuteries, frontal.
+  3. **[TCG] `vperm` traduit en ligne** : NEON TBL/TBX sur arm64, PSHUFB sur le PC (~6× moins
+     cher annoncé) ; `x-vperm-fast` reste un appel de helper. Futur tcg/0057, preuve par
+     `x-*-verify`.
+  4. **[Preuve] Banc nu flottant et AltiVec** (211 200 cas comparés à softfloat, sans démarrer
+     Tiger), en complément des modes `x-*-verify`.
+  5. **[qgpu] Cache disque des shaders traduits** sur l'hôte (68 ms à froid contre 40 µs à
+     chaud chez eux).
+  6. **[Leopard, plus tard] Correctif de la fenêtre PCI d'OpenBIOS** (BAR au-delà de
+     `0x90000000`), utile à la VRAM de qgpu.
+
 - [ ] **[TCG] `x-fp-native64` (tcg/0016) et `x-tb-fast` (tcg/0015) allumés par défaut le 01/10**
   sans tour de matrice, à la demande de l'utilisateur (prouvés exacts, A/B Prey −1,7 %, DOOM 3
   −0,6 %, Nexuiz −0,8 % ; `docs/tcg-g4.md` §23-§24). **Reste :** l'essai de l'utilisateur, puis
