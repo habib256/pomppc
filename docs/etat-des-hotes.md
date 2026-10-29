@@ -91,7 +91,7 @@ Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). 
 `perf_event_paranoid` ≤ 1, que l'utilisateur règle à la main ; la valeur revient à 4 à chaque
 redémarrage.
 
-## 3. Mac M4 : état au 29/10/2026, 21 h 10
+## 3. Mac M4 : état au 29/10/2026, 21 h 30
 
 **Défauts sur Darwin:arm64** : depuis le 26/10 (`550b2a8`), la série du PC est allumée et
 prouvée : `PPC32MT TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIRTYSKIP PTEGMAP
@@ -155,8 +155,8 @@ relancée à la fin, puis arrêtée le 29/10 à 5 h 33 pour les essais de Quartz
   28,8-29,7 contre 29,8, ut 19,6-19,7 contre 19,9 ms/image). Matrice entière verte
   (cmr-pe rejouée seule). Endurance : §12 (ancien chemin) et §13 (chemin direct) de
   `docs/endurance.md`, aucun incident (156 démarrages, 32 cycles de jeu en fenêtre). **La VM
-  quotidienne a QE depuis le 29/10, 21 h** (kext et plugin `c792464`, personnalité
-  « auto »).
+  quotidienne a QE depuis le 29/10, 21 h** (kext et plugin `71f9f76`, curseur compris, personnalité
+  « auto », installés à 21 h 25).
 - Défaut : `run_tiger.sh` pose `qe=on` sur Darwin:arm64 (`QE=0 ./run_tiger.sh` l'éteint) ;
   le kext en personnalité « auto » le suit. **QEMU reconstruit le 29/10 (19 h)**.
 - Pièges de mesure : un frontal ImGuiDock resté ouvert après l'arrêt de sa VM tourne à
