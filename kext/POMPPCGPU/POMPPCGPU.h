@@ -92,6 +92,9 @@
    entrée meurt avec le client 2D qui l'a publiée. */
 #define POMPPC_GA_EXPORT        2
 #define POMPPC_GA_LOOKUP        3
+/* Méthode 4 : [sid] → [x, y] de la surface au dernier Flush (preuve de la
+   matrice : le jeu ne connaît pas la position de sa fenêtre à l'écran). */
+#define POMPPC_GA_SURF_POS      4
 #define POMPPC_MAX_EXPORTS      32
 #define POMPPC_MAX_RECTS        16
 /* Zone de commandes du client (fin de sa tranche), écrite par le kext au
@@ -101,6 +104,8 @@
 struct POMPPCExport {
     UInt32 sid, tex, w, h, seq;
     UInt32 surf, cmdoff;            /* surface hôte du jeu, zone de commandes (absolue) */
+    SInt32 x, y;                    /* position à l'écran au dernier Flush */
+    bool   pos;
     void * owner;                   /* client 2D qui a publié */
 };
 #define POMPPC_GA_PLUGIN        "POMPPCGA.plugin"
@@ -124,6 +129,7 @@ public:
     IOReturn         lookupSurface(UInt32 sid, UInt32 * tex, UInt32 * w, UInt32 * h,
                                    UInt32 * seq);
     void             dropExports(void * owner);
+    IOReturn         surfacePos(UInt32 sid, UInt32 * x, UInt32 * y);
 
 private:
     POMPPCExport     fExports[POMPPC_MAX_EXPORTS];
@@ -197,6 +203,7 @@ public:
     IOReturn gaSurfBounds(UInt32 id, UInt32 * x, UInt32 * y, UInt32 * w, UInt32 * h, void *);
     IOReturn gaExport(UInt32 sid, UInt32 tex, UInt32 w, UInt32 h, UInt32 surf, UInt32 cmdoff);
     IOReturn gaLookup(UInt32 sid, UInt32 * tex, UInt32 * w, UInt32 * h, UInt32 * seq, void *);
+    IOReturn gaSurfPos(UInt32 sid, UInt32 * x, UInt32 * y, void *, void *, void *);
 
 private:
     IOFramebuffer * fFB;            /* retenu */

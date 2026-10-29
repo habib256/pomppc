@@ -1778,6 +1778,7 @@ IOReturn POMPPCAccelerator::exportSurface(void * owner, UInt32 sid, UInt32 tex, 
     free_e->sid = sid;
     free_e->tex = tex; free_e->w = w; free_e->h = h;
     free_e->surf = surf; free_e->cmdoff = cmdoff;
+    free_e->pos = false;
     free_e->seq = ++fExportSeq;
     free_e->owner = owner;
     GPULog("export : surface %lx -> texture hôte %lu (%lux%lu)\n", (unsigned long) sid,
@@ -1829,6 +1830,9 @@ IOReturn POMPPCAccelerator::flushSurface(UInt32 sid, IOFramebuffer * fb,
     if (!gpu || !e || !e->cmdoff || !fb) {
         return kIOReturnSuccess;        /* pas pour nous : comme avant, rien */
     }
+    e->x = bounds->x;
+    e->y = bounds->y;
+    e->pos = true;
     bzero(&pix, sizeof(pix));
     if (fb->getCurrentDisplayMode(&mode, &depth) != kIOReturnSuccess ||
         fb->getPixelInformation(mode, depth, kIOFBSystemAperture, &pix) != kIOReturnSuccess) {
@@ -1875,6 +1879,21 @@ IOReturn POMPPCAccelerator::flushSurface(UInt32 sid, IOFramebuffer * fb,
                (unsigned long) sid, (unsigned long) st);
     }
     return kIOReturnSuccess;
+}
+
+IOReturn POMPPCAccelerator::surfacePos(UInt32 sid, UInt32 * x, UInt32 * y)
+{
+    int i;
+
+    for (i = 0; i < POMPPC_MAX_EXPORTS; i++) {
+        POMPPCExport * e = &fExports[i];
+        if (e->owner && e->sid == sid && e->pos) {
+            *x = (UInt32) e->x;
+            *y = (UInt32) e->y;
+            return kIOReturnSuccess;
+        }
+    }
+    return kIOReturnNotFound;
 }
 
 void POMPPCAccelerator::dropExports(void * owner)
@@ -2167,14 +2186,15 @@ IOReturn POMPPCGAClient::clientMemoryForType(UInt32 type, IOOptionBits * options
 IOExternalMethod * POMPPCGAClient::getTargetAndMethodForIndex(IOService ** target,
                                                               UInt32 index)
 {
-    static const IOExternalMethod methods[4] = {
+    static const IOExternalMethod methods[5] = {
         { 0, (IOMethod) &POMPPCGAClient::gaGetInfo, kIOUCScalarIScalarO, 0, 4 },
         { 0, (IOMethod) &POMPPCGAClient::gaSurfBounds, kIOUCScalarIScalarO, 1, 4 },
         { 0, (IOMethod) &POMPPCGAClient::gaExport, kIOUCScalarIScalarO, 6, 0 },
         { 0, (IOMethod) &POMPPCGAClient::gaLookup, kIOUCScalarIScalarO, 1, 4 },
+        { 0, (IOMethod) &POMPPCGAClient::gaSurfPos, kIOUCScalarIScalarO, 1, 2 },
     };
 
-    if (index > POMPPC_GA_LOOKUP) {
+    if (index > POMPPC_GA_SURF_POS) {
         return 0;
     }
     *target = this;
@@ -2193,6 +2213,12 @@ IOReturn POMPPCGAClient::gaLookup(UInt32 sid, UInt32 * tex, UInt32 * w, UInt32 *
 {
     POMPPCAccelerator * accel = OSDynamicCast(POMPPCAccelerator, getProvider());
     return accel ? accel->lookupSurface(sid, tex, w, h, seq) : kIOReturnNotAttached;
+}
+
+IOReturn POMPPCGAClient::gaSurfPos(UInt32 sid, UInt32 * x, UInt32 * y, void *, void *, void *)
+{
+    POMPPCAccelerator * accel = OSDynamicCast(POMPPCAccelerator, getProvider());
+    return accel ? accel->surfacePos(sid, x, y) : kIOReturnNotAttached;
 }
 
 IOReturn POMPPCGAClient::gaSurfBounds(UInt32 id, UInt32 * x, UInt32 * y, UInt32 * w,

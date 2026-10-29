@@ -142,10 +142,44 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
 | **P0** | Le kext publie `AccelCaps = 1` si la personnalité porte `POMPPCQuartzExtreme` (`install.sh QE=1`), éteint par défaut. Sur le disque de dev : journal du WindowServer (« Accel caps », repli éventuel), journal du plugin dans le WindowServer, `CGDisplayUsesOpenGLAcceleration`. | ce que le WindowServer demande, et où il s'arrête |
 | **P0 bis** | Plugin GA `POMPPCGA.plugin` (CFPlugIn, `IOGraphicsAcceleratorInterface`) : blitters de copie et de remplissage en VRAM, d'abord par le processeur de l'invité ; `IOCFPlugInTypes` posé sur le framebuffer par le kext en mode QE. | drapeaux d'écran posés sans gdb, `AttachDrawable` du compositeur |
 | **P1 (bureau juste, 29/10)** | Le bureau composé par le plugin vers le scanout (le contexte du WindowServer est un plein écran : `SURF_PRESENT`), sans application GL. | bureau identique à celui sans Quartz Extreme (captures), défilement et ombres justes |
-| P2 | Fenêtres des applications GL sous Quartz Extreme : surfaces partagées entre processus, client `kIOAccelSurfaceClientType` du nub (aujourd'hui refusé). | matrice en fenêtre verte avec Quartz Extreme |
+| **P2 (29/10)** | Fenêtres des applications GL sous Quartz Extreme : surface accélérée liée par le plugin, présentée par le noyau au Flush, texture d'export pour le compositeur. | matrice en fenêtre verte avec Quartz Extreme |
 | P3 | Vitesse (WindowServer, jeux en fenêtre : l'attente du WindowServer mesurée dans les jeux), endurance, allumage par défaut. | A/B sur la matrice entière, endurance |
 
 ## 3. Journal
+
+- **29/10, 8 h** : **P2, fenêtres GL des applications par l'hôte.** Ce qui marche, dans
+  l'ordre où le relevé (§1 ter) l'a dicté :
+  1. le plugin reçoit `glcBindSurface` et `glcDoNonSimpleFlush` de GLEngine
+     (`gldInitializeLibrary`, arguments 5 et 4 ; le service est cherché dans la liste
+     d'OpenGL.framework, l'argument 3 n'en est pas l'index). À l'attache d'une fenêtre
+     (type 80, descripteur `{cid, wid, sid}`), il lie la surface en type 2
+     (`pomppc_qe_attach`, mode `0x24`) puis rend dans un tampon privé (descripteur 53,
+     comme le plein écran, `attach_buffer`). Le pas du contexte est recalé : sous un
+     bureau en milliers de couleurs, Apple tirait 2 w pixels par ligne des w × 4 octets
+     (Marble Blast plantait dans `upload_bands`) ;
+  2. à l'échange (`present_qe`), une copie GPU de la surface hôte vers une texture
+     d'export (`SURF_TEX`), publiée au kext (méthode 2 du client 2D : `sid`, texture,
+     taille, surface hôte, zone de commandes), puis `glcDoNonSimpleFlush` ;
+  3. **le WindowServer ne recompose pas une surface accélérée à chaque vidage** (vidage :
+     la texture du jeu liée une seule fois, à l'apparition) : il appelle
+     `IOAccelFlushSurfaceOnFramebuffers`, et c'est le **noyau** qui recopie la surface à
+     l'écran, dans sa région visible (méthodes 10 et 16 du client de surface, relevées au
+     journal du kext). `POMPPCSurfaceClient::sFlush` le fait : un `SURF_PRESENT` de la
+     surface hôte du jeu par rectangle visible (région gardée à `SetShape`), écrit dans
+     4 Kio réservés en fin de tranche du jeu et soumis en synchrone (`kernelSubmit`). Le
+     curseur logiciel est retiré à ce moment-là, et l'image du jeu est déjà en file ;
+  4. le compositeur, lui, lie la texture d'export quand il transforme la fenêtre
+     (apparition, Génie) : `cglsSetInteger(997)` marque la texture comme `aglSurfaceTexture`
+     (GLEngine traite 997 à 999 de même), `upload_remote_surftex` la sert par
+     `ws_lookup` (méthode 3), jamais Apple (qui lirait la surface comme de la VRAM).
+
+  `glwin` : image juste, animation et image témoin, 346 img/s (80 par le chemin d'Apple,
+  789 en présentation directe hors QE). Matrice en fenêtre sous QE : Marble Blast
+  9,6 ms/image (plancher 13), Zenerchi 5,5 (plancher 6), contre 6,2 et 3,5 hors QE.
+  L'écart est l'aller-retour synchrone par échange (jeu → WindowServer → noyau, qui attend
+  l'image du jeu sur l'hôte) : premier chantier de P3. Preuve d'image de la matrice :
+  pendant un vidage seulement, le jeu écrit aussi la présentation dans son flux (position
+  au dernier Flush, méthode 4), et `capture_presented` suit le Flush.
 
 - **29/10, 6 h** : **bureau juste sous Quartz Extreme** (VM jetable, `QE=1`). Barre des
   menus, icônes et libellés, Dock, ombres, effet Génie et vignette du Dock, fenêtre GL

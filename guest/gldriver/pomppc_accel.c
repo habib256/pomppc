@@ -6717,6 +6717,17 @@ static int upload_bands(PCtx *p, int kind, const unsigned char *src, unsigned lo
                         unsigned long bpp)
 {
     unsigned long w = p->sw, h = p->sh, y0, n, rows = band_rows(w * bpp), off, y, x, *c;
+    /* 29/10 (QE, P2) : tampon privé plus petit que la surface (fenêtre
+       agrandie sans rattachement) — ne jamais lire au-delà ; vu en vrai,
+       Marble Blast en fenêtre 800×600 lu en 1024×768 */
+    if (p->fullscreen_buf && kind == 0 &&
+        (w > p->fullscreen_w || h > p->fullscreen_h || srow > p->fullscreen_w * 4)) {
+        static int told;
+        if (told++ < 4)
+            pomppc_log("POMPPC: tampon privé %lux%lu, surface %lux%lu au pas %lu : copie refusée\n",
+                       p->fullscreen_w, p->fullscreen_h, w, h, srow);
+        return 1;
+    }
     float inv = (kind == 1 && bpp == 4) ? 1.0f / GLD_F32(p->ctx, CTX_DEPTH_SCALE) : 0.0f;
     for (y0 = 0; y0 < h; y0 += n) {
         n = h - y0 < rows ? h - y0 : rows;
@@ -17726,6 +17737,28 @@ static int present_qe(PCtx *p)
     c[2] = QGPU_TT_RECTANGLE;
     c[3] = 0;
     c[4] = p->surf;
+    /* Preuve (matrice), pendant un vidage seulement : la présentation que le
+       kext fera au Flush, écrite aussi dans NOTRE flux (mêmes pixels, même
+       place) — le rejeu natif en tire l'image à comparer à la capture. */
+    if (dump_first_frame != ~0UL && G.scanout && qa_open()) {
+        UInt32 x = 0, y = 0;
+        if (IOConnectMethodScalarIScalarO(QA.conn, 4, 1, 2, (UInt32)p->qe_sid, &x, &y) == KERN_SUCCESS) {
+            unsigned long did = D.main_display ? D.main_display() : 0;
+            unsigned long rb = did ? D.bytes_per_row(did) : 0, bpp = did ? D.bits_per_pixel(did) : 0;
+            unsigned long sw = did ? D.pixels_wide(did) : 0, sh = did ? D.pixels_high(did) : 0;
+            if ((bpp == 16 || bpp == 32) && (long)x >= 0 && (long)y >= 0 &&
+                x + p->sw <= sw && y + p->sh <= sh) {
+                c = reserve(p, QGPU_LEN_SURF_PRESENT);
+                c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_PRESENT, QGPU_LEN_SURF_PRESENT);
+                c[1] = p->surf;
+                c[2] = y * rb + x * (bpp / 8);
+                c[3] = rb;
+                c[4] = 0; c[5] = 0;
+                c[6] = p->sw; c[7] = p->sh;
+                c[8] = bpp == 16 ? QGPU_PF_RGB1555 : QGPU_PF_XRGB8888;
+            }
+        }
+    }
     flush();                            /* soumise AVANT que le WindowServer compose */
     if (!p->qe_pub || p->qe_pw != p->sw || p->qe_ph != p->sh ||
         p->qe_psurf != (unsigned long)p->surf) {
@@ -17963,7 +17996,14 @@ static long attach_buffer(void *ctx, unsigned long w, unsigned long h)
            le pixel format. Aligner le contexte sur le tampon réel. */
         if (GLD_U32(ctx, CTX_COLOR_BITS) == 16)
             GLD_U32(ctx, CTX_COLOR_BITS) = 32;
-        pomppc_log("POMPPC: fullscreen drawable %lux%lu, software back buffer\n", w, h);
+        /* 29/10 : et le pas — Apple l'a tiré des w × 4 octets du descripteur
+           selon un format 16 bits (2 w pixels : Marble Blast en fenêtre sous
+           QE, bureau en milliers de couleurs, lu au double du tampon) */
+        if (GLD_U32(ctx, CTX_ROWPIX) != w)
+            GLD_U32(ctx, CTX_ROWPIX) = w;
+        pomppc_log("POMPPC: fullscreen drawable %lux%lu, software back buffer (contexte %lux%lu, "
+                   "%lu px/ligne)\n", w, h, GLD_U32(ctx, CTX_WIDTH), GLD_U32(ctx, CTX_HEIGHT),
+                   GLD_U32(ctx, CTX_ROWPIX));
         gl_note("fullscreen attach ok %lux%lu ctx-bits now %lu\n",
                 w, h, GLD_U32(ctx, CTX_COLOR_BITS));
     } else {
@@ -19670,6 +19710,10 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
             if (e && pomppc_tracing() && nerr++ < 20)
                 pomppc_log("POMPPC: QE CGSFlushSurface -> %ld (échange %lu)\n", e, nall);
         }
+        /* preuve : l'image est à l'écran (Flush du noyau fait) */
+        pthread_mutex_lock(&G.mu);
+        capture_presented();
+        pthread_mutex_unlock(&G.mu);
         return direct_noop;
     }
     if (slot == PROC_Swap60 && present_direct(p)) {
