@@ -143,9 +143,26 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
 | **P0 bis** | Plugin GA `POMPPCGA.plugin` (CFPlugIn, `IOGraphicsAcceleratorInterface`) : blitters de copie et de remplissage en VRAM, d'abord par le processeur de l'invité ; `IOCFPlugInTypes` posé sur le framebuffer par le kext en mode QE. | drapeaux d'écran posés sans gdb, `AttachDrawable` du compositeur |
 | **P1 (bureau juste, 29/10)** | Le bureau composé par le plugin vers le scanout (le contexte du WindowServer est un plein écran : `SURF_PRESENT`), sans application GL. | bureau identique à celui sans Quartz Extreme (captures), défilement et ombres justes |
 | **P2 (29/10)** | Fenêtres des applications GL sous Quartz Extreme : surface accélérée liée par le plugin, présentée par le noyau au Flush, texture d'export pour le compositeur. | matrice en fenêtre verte avec Quartz Extreme |
-| P3 | Vitesse (WindowServer, jeux en fenêtre : l'attente du WindowServer mesurée dans les jeux), endurance, allumage par défaut. | A/B sur la matrice entière, endurance |
+| **P3 (29/10, défaut en attente)** | Vitesse (WindowServer, jeux en fenêtre : l'attente du WindowServer mesurée dans les jeux), endurance, allumage par défaut. Fait : TEX_PRESENT, avis asynchrone cadencé, A/B, endurance M4 sans incident ; défaut éteint tant que les fenêtres coûtent et que le PC n'a pas validé. | A/B sur la matrice entière, endurance |
 
 ## 3. Journal
+
+- **29/10, 12 h** : **P3, A/B et endurance.**
+  1. Avis au WindowServer cadencés à 60 Hz au plus (`POMPPC_GL_QE_HZ`) : au-delà, le
+     compositeur n'en montre pas plus et chaque avis lui coûte un Flush.
+  2. **A/B au même binaire et au même disque**, matrice entière QE éteint (`20261029-0936`,
+     16 vertes) contre QE allumé (`20261029-0905`, 16 vertes) puis fenêtres cadencées
+     (ms/image, QE contre sans) : mb-fen 6,5 / 6,2 (+5 %), zen-fen 3,7 / 3,2 (+16 %),
+     ut-fen 23,5 / 19,5 (+20 %), nx-fen 49,4 / 46,9 (+5 %), d3-fen 17,7 / 28,3 (−37 %, une
+     seule passe, à confirmer). Plein écran neutre (−4 à +3 %). prey-fen ne compte pas
+     (boucle de l'écran de chargement).
+  3. **Endurance avec QE** (`docs/endurance.md` §12) : 30 démarrages froids, 60 reboots,
+     16 cycles de jeu en fenêtre (mb, zen, ut, d3), **aucun incident**.
+
+  **Allumage par défaut : pas encore.** QE est sûr (endurance, matrice entière verte),
+  mais il coûte en fenêtre (ut +20 %, zen +16 %) et n'a jamais tourné sur le PC (parité).
+  Reste avant de l'allumer : le coût par image en fenêtre (copie SURF_TEX + avis), une
+  seconde passe de d3-fen, la matrice et l'endurance sur le PC.
 
 - **29/10, 9 h 30** : **P3, vitesse.** Sous P2, le jeu attendait dans `CGSFlushSurface` que
   le noyau ait présenté, donc que l'hôte ait fini son image : aucun recouvrement entre deux

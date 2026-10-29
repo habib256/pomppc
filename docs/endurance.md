@@ -731,3 +731,31 @@ de jeu sans incident (borne haute 0,9 % et 6,4 %).
 Réserve : de 23:50 à 00:20 environ, une VM jetable de mise au point de Quartz Extreme
 (`SNAPSHOT=1`) tournait en parallèle ; c'est elle qui porte la charge hôte à 5,6 pendant les
 jeux. Elle n'ajoute pas d'incident, mais les durées de cette tranche ne sont pas comparables.
+
+## 12. M4, 29/10/2026 : Quartz Extreme allumé (base m4-qe-2910)
+
+Tranche courte pour P3 de Quartz Extreme (`docs/quartz-extreme.md`). Base
+`disks/tiger-endurance-m4-qe-2910.qcow2` : clone du disque quotidien, kext et plugin du
+commit `2439f3a` installés avec `QE=1`, en lecture seule, `qemu-img check` sans erreur avant
+et après. Binaire de référence du 29/10 08:58 (sha256 `ee87ad8e67fb6b27`, TEX_PRESENT
+compris), défauts du lanceur, SMP 2, 768 Mio, sans fenêtre. Deux instances. Symboles
+`bench/endurance/invite-m4-1011-2710`. Pilotage : `bench/endurance/m4-2910-qe/suite.py`
+(non versionné), qui relance la VM quotidienne sous ImGuiDock à la fin.
+
+| Campagne | Démarrages | Incidents | Borne haute (Wilson 95 %) | SSH médian | Charge hôte max |
+|---|---:|---:|---:|---|---:|
+| `m4-2910-qe-froids` (`--mode froid`) | 30 | 0 | 11,4 % | 75 s | 5,6 |
+| `m4-2910-qe-reboots` (`--mode reboot`) | 60 (2 froids, 58 reboots) | 0 | 6,0 % | 35 s | 3,4 |
+| `m4-2910-qe-jeux` (`mb,zen,ut,d3`, en fenêtre) | 18 (2 froids, 16 reboots) | 0 | 19,4 % | 20 s | 4,5 |
+
+| Jeu | Cycles sains | Images par cycle (médiane) |
+|---|---:|---:|
+| DOOM 3 | 4/4 | 20 763 |
+| Marble Blast | 4/4 | 22 233 |
+| UT2004 | 4/4 | 8 061 |
+| Zenerchi | 4/4 | 35 468 |
+
+**108 démarrages et 16 cycles de jeu sous QE, aucun gel, aucune panique.** Les bornes sont
+larges (tranche courte) : elle montre que QE n'introduit pas de défaut grossier, pas un taux
+fin. Le SSH plus lent au froid (75 s à chaque cycle, contre 15 s au §11) n'est pas
+expliqué : à mesurer à part avant de comparer des durées entre ces bases.

@@ -75,18 +75,20 @@ qgpu de Colin McRae.
    `build-fast` et `build`, puis le plugin de l'invité (`.run/cmr/cycle.sh NORUN=1` ou
    l'équivalent du PC). Ensuite, rejouer d3-pe et cmr-pe : à 1920×1080, le vidage n'était
    pas complet avant.
-7. **Venu du M4 le 29/10** : le kext et le plugin ont changé (Quartz Extreme P1 et P2,
-   `docs/quartz-extreme.md`). Ce qui joue hors QE : le plugin réserve désormais les
-   **4 derniers Kio de sa tranche** (présentations du noyau), et chaque moitié perd 4 Kio
-   d'arène. Réinstaller kext et plugin dans l'invité du PC, sans `QE=1`, puis repasser la
-   matrice. Rien ne change dans `patches/`, donc QEMU n'est pas à reconstruire.
+7. **Venu du M4 le 29/10** : le kext et le plugin ont changé (Quartz Extreme P1 à P3,
+   `docs/quartz-extreme.md`), et `patches/qgpu/qgpu_proto.h` aussi (`QGPU_OP_TEX_PRESENT`,
+   capacité `QGPU_CAP_TEX_PRESENT`, version inchangée) : **reconstruire QEMU**, puis
+   réinstaller kext et plugin dans l'invité, sans `QE=1`, et repasser la matrice. Hors QE, le
+   plugin réserve les **4 derniers Kio de sa tranche** (présentations du noyau) : chaque
+   moitié perd 4 Kio d'arène. Ensuite, pour la parité de QE : VM jetable avec `QE=1`, matrice
+   entière et tranche d'endurance comme au §12 de `docs/endurance.md`.
 
 **Propres au PC** : `patches/diag/` (auto-profileur, plafonds), `tools/tcg/perfhw.sh` (compteurs
 Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). `perf` exige
 `perf_event_paranoid` ≤ 1, que l'utilisateur règle à la main ; la valeur revient à 4 à chaque
 redémarrage.
 
-## 3. Mac M4 : état au 29/10/2026, 8 h 30
+## 3. Mac M4 : état au 29/10/2026, 12 h 15
 
 **Défauts sur Darwin:arm64** : depuis le 26/10 (`550b2a8`), la série du PC est allumée et
 prouvée : `PPC32MT TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIRTYSKIP PTEGMAP
@@ -141,17 +143,22 @@ relancée à la fin, puis arrêtée le 29/10 à 5 h 33 pour les essais de Quartz
   (6,2 et 3,5 hors QE).
 - Côté matrice, les clients du kext sont comptés au-delà de ceux d'avant le jeu, car le
   WindowServer garde sa tranche sous QE.
-- En cours à 8 h 22 : **matrice entière sous QE** (`.run/matrice-qe8.log`, VM jetable,
-  `MATRICE_MON=.run/mon-46062.sock TSSH_PORT=2222`).
+- **P3 (vitesse, endurance) fait, défaut en attente** : TEX_PRESENT (le kext présente
+  l'instantané de l'échange), avis au WindowServer sur un fil à part et cadencés à 60 Hz.
+  A/B au même binaire, matrice entière QE éteint (`20261029-0936`) contre allumé
+  (`20261029-0905`) : **16 vertes sur 16 des deux côtés**. Plein écran neutre ; en fenêtre
+  mb +5 %, zen +16 %, ut +20 %, nx +5 %, d3 −37 % (une passe, à confirmer). Endurance QE
+  (`docs/endurance.md` §12) : 30 froids, 60 reboots, 16 cycles de jeu en fenêtre, aucun
+  incident. **QE reste éteint par défaut** : coût en fenêtre et pas encore validé sur le PC.
+- La VM quotidienne tourne sous ImGuiDock (relancée par la suite d'endurance, sans QE).
 - Piège : les traces du plugin (`POMPPC_GLTRACE`, vidages de tampons) ont **rempli le disque
   de l'invité** (16 Go). Les effacer après usage.
 
 **À faire sur le M4, dans l'ordre**
-1. Quartz Extreme P3 :
-   - la vitesse : l'aller-retour synchrone par échange (jeu → WindowServer → noyau) coûte
-     environ 2 ms/image en fenêtre. Piste : une présentation asynchrone quand le curseur
-     n'est pas sur la fenêtre ;
-   - puis A/B sur la matrice entière, endurance avec QE, et allumage par défaut.
+1. Quartz Extreme, avant l'allumage par défaut : réduire le coût par image en fenêtre
+   (copie SURF_TEX + avis, ut +20 %, zen +16 %), seconde passe de d3-fen, puis décision de
+   l'utilisateur. L'allumage = personnalité `POMPPCQuartzExtreme` à vrai, `QE=0` pour
+   éteindre, seulement après validation sur le PC.
 2. Étude des émulateurs voisins (PowerEmu, ppc-osx-vgpu) : QoS « interactive » du fil vCPU
    sur macOS, attente en ns (kqueue) dans la boucle principale, permutations AltiVec en
    ligne (TBL/TBX). À mesurer en A/B, licence à vérifier fichier par fichier.
