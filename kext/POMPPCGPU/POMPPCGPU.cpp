@@ -14,6 +14,15 @@
 
 #define GPULog(fmt, args...) IOLog("POMPPCGPU: " fmt, ## args)
 
+/* 29/10 (QE, P2) : la seule commande que le kext écrit lui-même. Copies de
+   qgpu_proto.h (v13, figées), pour garder la règle : le kext ne dépend que de
+   qgpu_abi.h. */
+#define QGPU_OP_SURF_PRESENT    0x0019
+#define QGPU_LEN_SURF_PRESENT   9
+#define QGPU_PF_XRGB8888        0
+#define QGPU_PF_RGB1555         1
+#define QGPU_CMD_HDR(op, len)   (((UInt32) (op) << 16) | ((UInt32) (len) & 0xFFFF))
+
 /* v9 : période du chien de garde des attentes de barrière, et donc résolution
    du délai maximal de QGPU_UC_WAIT_FENCE. 10 ms : assez fin pour un délai qui
    se compte en secondes, assez gros pour ne rien coûter quand personne
@@ -329,6 +338,7 @@ void POMPPCGPU::free(void)
     if (fWorkLoop)   { fWorkLoop->release();   fWorkLoop = 0; }
     if (fRegsMap)    { fRegsMap->release();    fRegsMap = 0; }
     if (fRegsRange)  { fRegsRange->release();  fRegsRange = 0; }
+    if (fShmemMap) { fShmemMap->release(); fShmemMap = 0; }
     if (fShmemRange) { fShmemRange->release(); fShmemRange = 0; }
     super::free();
 }
@@ -715,6 +725,64 @@ IOReturn POMPPCGPU::submitGated(OSObject * owner, void * a0, void *, void *, voi
         a->statusPC = self->regRead(QGPU_REG_STATUS_PC);
     }
     return kIOReturnSuccess;
+}
+
+struct KernelSubmitArgs {
+    UInt32 off, nwords;
+    const UInt32 * cmds;
+    UInt32 status;
+};
+
+IOReturn POMPPCGPU::kernelSubmitGated(OSObject * owner, void * a0, void *, void *, void *)
+{
+    POMPPCGPU *        self = (POMPPCGPU *) owner;
+    KernelSubmitArgs * a = (KernelSubmitArgs *) a0;
+    volatile UInt32 *  dst;
+    UInt32             i;
+
+    if (self->fStopping || !self->fShmemMap) {
+        return kIOReturnNotReady;
+    }
+    dst = (volatile UInt32 *) (self->fShmemMap->getVirtualAddress() + a->off);
+    for (i = 0; i < a->nwords; i++) {
+        dst[i] = a->cmds[i];            /* gros-boutiste, comme le flux du plugin */
+    }
+    OSSynchronizeIO();
+    self->regWrite(QGPU_REG_SUBMIT_OFF, a->off);
+    self->regWrite(QGPU_REG_SUBMIT_LEN, a->nwords * 4);
+    self->regWrite(QGPU_REG_DOORBELL, QGPU_DOORBELL_GO);   /* synchrone */
+    (void) self->regRead(QGPU_REG_FENCE);
+    a->status = self->regRead(QGPU_REG_STATUS);
+    return kIOReturnSuccess;
+}
+
+IOReturn POMPPCGPU::kernelSubmit(UInt32 off, const UInt32 * cmds, UInt32 nwords,
+                                 UInt32 * status)
+{
+    KernelSubmitArgs a;
+    IOReturn         kr;
+
+    *status = QGPU_ST_BACKEND;
+    /* la zone doit être une fin de tranche réservée (POMPPC_QE_CMD_BYTES) */
+    if ((off & 3) || nwords == 0 || nwords * 4 > POMPPC_QE_CMD_BYTES ||
+        off >= fShmemSize || nwords * 4 > fShmemSize - off ||
+        (off % fSlotSize) < fSlotSize - POMPPC_QE_CMD_BYTES) {
+        return kIOReturnBadArgument;
+    }
+    if (!fShmemMap) {
+        fShmemMap = fShmemRange->map();
+        if (!fShmemMap) {
+            return kIOReturnNoMemory;
+        }
+    }
+    a.off = off; a.nwords = nwords; a.cmds = cmds; a.status = QGPU_ST_BACKEND;
+    if (!enterCall()) {
+        return kIOReturnNotReady;
+    }
+    kr = fGate->runAction(&POMPPCGPU::kernelSubmitGated, &a);
+    leaveCall();
+    *status = a.status;
+    return kr;
 }
 
 IOReturn POMPPCGPU::submit(int slot, POMPPCGPUUserClient * client, UInt32 off, UInt32 len,
@@ -1675,6 +1743,153 @@ void POMPPCAccelerator::setSurfaceBounds(UInt32 id, const IOAccelBounds * b)
     }
 }
 
+/* Export d'une fenêtre GL (P2). Sans verrou : un éditeur par entrée (le jeu
+   qui l'a publiée), un lecteur (le WindowServer) ; une lecture qui croise une
+   mise à jour rend au pire une taille ou une texture d'une image d'avance. */
+IOReturn POMPPCAccelerator::exportSurface(void * owner, UInt32 sid, UInt32 tex, UInt32 w,
+                                          UInt32 h, UInt32 surf, UInt32 cmdoff)
+{
+    POMPPCExport * free_e = 0;
+    int            i;
+
+    for (i = 0; i < POMPPC_MAX_EXPORTS; i++) {
+        POMPPCExport * e = &fExports[i];
+        if (e->owner && e->sid == sid) {
+            if (tex == 0xffffffffUL) {
+                e->owner = 0;
+                return kIOReturnSuccess;
+            }
+            e->owner = owner;
+            e->tex = tex; e->w = w; e->h = h;
+            e->surf = surf; e->cmdoff = cmdoff;
+            e->seq = ++fExportSeq;
+            return kIOReturnSuccess;
+        }
+        if (!e->owner && !free_e) {
+            free_e = e;
+        }
+    }
+    if (tex == 0xffffffffUL) {
+        return kIOReturnSuccess;
+    }
+    if (!free_e) {
+        return kIOReturnNoSpace;
+    }
+    free_e->sid = sid;
+    free_e->tex = tex; free_e->w = w; free_e->h = h;
+    free_e->surf = surf; free_e->cmdoff = cmdoff;
+    free_e->seq = ++fExportSeq;
+    free_e->owner = owner;
+    GPULog("export : surface %lx -> texture hôte %lu (%lux%lu)\n", (unsigned long) sid,
+           (unsigned long) tex, (unsigned long) w, (unsigned long) h);
+    return kIOReturnSuccess;
+}
+
+IOReturn POMPPCAccelerator::lookupSurface(UInt32 sid, UInt32 * tex, UInt32 * w, UInt32 * h,
+                                          UInt32 * seq)
+{
+    int i;
+
+    for (i = 0; i < POMPPC_MAX_EXPORTS; i++) {
+        POMPPCExport * e = &fExports[i];
+        if (e->owner && e->sid == sid) {
+            *tex = e->tex; *w = e->w; *h = e->h; *seq = e->seq;
+            return kIOReturnSuccess;
+        }
+    }
+    return kIOReturnNotFound;
+}
+
+/* Flush d'une surface exportée (IOAccelFlushSurfaceOnFramebuffers du
+   WindowServer, après le CGSFlushSurface du jeu) : sur une carte, le noyau
+   recopie la surface à l'écran dans sa région visible ; le compositeur ne la
+   reprend (texture de surface) que pour la transformer. Ici, un SURF_PRESENT
+   de la surface hôte du jeu par rectangle visible, soumis en synchrone dans la
+   zone de commandes de sa tranche : à ce moment le WindowServer a retiré son
+   curseur logiciel, et l'image du jeu est déjà en file avant nous. */
+IOReturn POMPPCAccelerator::flushSurface(UInt32 sid, IOFramebuffer * fb,
+                                         const IOAccelBounds * bounds,
+                                         const IOAccelBounds * rects, UInt32 nrects)
+{
+    POMPPCGPU *        gpu = OSDynamicCast(POMPPCGPU, getProvider());
+    POMPPCExport *     e = 0;
+    IODisplayModeID    mode;
+    IOIndex            depth;
+    IOPixelInformation pix;
+    UInt32             cmds[POMPPC_MAX_RECTS * QGPU_LEN_SURF_PRESENT], n = 0, i, bypp, fmt;
+    UInt32             st = 0;
+    int                k;
+
+    for (k = 0; k < POMPPC_MAX_EXPORTS; k++) {
+        if (fExports[k].owner && fExports[k].sid == sid) {
+            e = &fExports[k];
+            break;
+        }
+    }
+    if (!gpu || !e || !e->cmdoff || !fb) {
+        return kIOReturnSuccess;        /* pas pour nous : comme avant, rien */
+    }
+    bzero(&pix, sizeof(pix));
+    if (fb->getCurrentDisplayMode(&mode, &depth) != kIOReturnSuccess ||
+        fb->getPixelInformation(mode, depth, kIOFBSystemAperture, &pix) != kIOReturnSuccess) {
+        return kIOReturnSuccess;
+    }
+    if (pix.bitsPerPixel == 32) {
+        bypp = 4; fmt = QGPU_PF_XRGB8888;
+    } else if (pix.bitsPerPixel == 16) {
+        bypp = 2; fmt = QGPU_PF_RGB1555;
+    } else {
+        return kIOReturnSuccess;
+    }
+    for (i = 0; i < nrects && n + QGPU_LEN_SURF_PRESENT <= sizeof(cmds) / 4; i++) {
+        SInt32 x0 = rects[i].x, y0 = rects[i].y;
+        SInt32 x1 = x0 + rects[i].w, y1 = y0 + rects[i].h;
+        /* bornée à la surface (taille publiée) et à l'écran */
+        if (x0 < bounds->x) x0 = bounds->x;
+        if (y0 < bounds->y) y0 = bounds->y;
+        if (x1 > bounds->x + (SInt32) e->w) x1 = bounds->x + (SInt32) e->w;
+        if (y1 > bounds->y + (SInt32) e->h) y1 = bounds->y + (SInt32) e->h;
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > (SInt32) pix.activeWidth) x1 = (SInt32) pix.activeWidth;
+        if (y1 > (SInt32) pix.activeHeight) y1 = (SInt32) pix.activeHeight;
+        if (x1 <= x0 || y1 <= y0) {
+            continue;
+        }
+        cmds[n++] = QGPU_CMD_HDR(QGPU_OP_SURF_PRESENT, QGPU_LEN_SURF_PRESENT);
+        cmds[n++] = e->surf;
+        cmds[n++] = (UInt32) y0 * pix.bytesPerRow + (UInt32) x0 * bypp;
+        cmds[n++] = pix.bytesPerRow;
+        cmds[n++] = (UInt32) (x0 - bounds->x);
+        cmds[n++] = (UInt32) (y0 - bounds->y);
+        cmds[n++] = (UInt32) (x1 - x0);
+        cmds[n++] = (UInt32) (y1 - y0);
+        cmds[n++] = fmt;
+    }
+    if (!n) {
+        return kIOReturnSuccess;
+    }
+    gpu->kernelSubmit(e->cmdoff, cmds, n, &st);
+    if (st != QGPU_ST_OK && fFlushErrs++ < 8) {
+        GPULog("flush : surface %lx, présentation refusée par l'hôte (statut %lu)\n",
+               (unsigned long) sid, (unsigned long) st);
+    }
+    return kIOReturnSuccess;
+}
+
+void POMPPCAccelerator::dropExports(void * owner)
+{
+    int i;
+
+    for (i = 0; i < POMPPC_MAX_EXPORTS; i++) {
+        if (fExports[i].owner == owner) {
+            GPULog("export : surface %lx retirée (client fermé)\n",
+                   (unsigned long) fExports[i].sid);
+            fExports[i].owner = 0;
+        }
+    }
+}
+
 bool POMPPCAccelerator::surfaceBounds(UInt32 id, IOAccelBounds * b)
 {
     if (id >= POMPPC_MAX_SURF_IDS || !fSurfKnown[id]) {
@@ -1844,6 +2059,8 @@ IOReturn POMPPCSurfaceClient::shape(IOAccelDeviceRegion * rgn, IOByteCount size)
         return kIOReturnBadArgument;
     }
     fBounds = rgn->bounds;
+    fNRects = rgn->num_rects < POMPPC_MAX_RECTS ? rgn->num_rects : POMPPC_MAX_RECTS;
+    bcopy(&rgn->rect[0], &fRects[0], fNRects * sizeof(IOAccelBounds));
     {
         POMPPCAccelerator * accel = OSDynamicCast(POMPPCAccelerator, getProvider());
         if (accel) {
@@ -1878,9 +2095,14 @@ IOReturn POMPPCSurfaceClient::sSetScale(UInt32 options, void * scaling, IOByteCo
     return kIOReturnSuccess;
 }
 
-/* La surface EST l'écran : rien à recopier. */
+/* Surface d'écran : rien à recopier. Fenêtre GL exportée par un jeu (P2) :
+   présentée dans sa région visible (POMPPCAccelerator::flushSurface). */
 IOReturn POMPPCSurfaceClient::sFlush(UInt32 fbMask, UInt32 options)
 {
+    POMPPCAccelerator * accel = OSDynamicCast(POMPPCAccelerator, getProvider());
+    if (accel && fID > 1) {
+        accel->flushSurface(fID, fFB, &fBounds, fRects, fNRects);
+    }
     return kIOReturnSuccess;
 }
 
@@ -1914,6 +2136,10 @@ void POMPPCGAClient::free(void)
 
 IOReturn POMPPCGAClient::clientClose(void)
 {
+    POMPPCAccelerator * accel = OSDynamicCast(POMPPCAccelerator, getProvider());
+    if (accel) {
+        accel->dropExports(this);
+    }
     terminate();
     return kIOReturnSuccess;
 }
@@ -1941,16 +2167,32 @@ IOReturn POMPPCGAClient::clientMemoryForType(UInt32 type, IOOptionBits * options
 IOExternalMethod * POMPPCGAClient::getTargetAndMethodForIndex(IOService ** target,
                                                               UInt32 index)
 {
-    static const IOExternalMethod methods[2] = {
+    static const IOExternalMethod methods[4] = {
         { 0, (IOMethod) &POMPPCGAClient::gaGetInfo, kIOUCScalarIScalarO, 0, 4 },
         { 0, (IOMethod) &POMPPCGAClient::gaSurfBounds, kIOUCScalarIScalarO, 1, 4 },
+        { 0, (IOMethod) &POMPPCGAClient::gaExport, kIOUCScalarIScalarO, 6, 0 },
+        { 0, (IOMethod) &POMPPCGAClient::gaLookup, kIOUCScalarIScalarO, 1, 4 },
     };
 
-    if (index > POMPPC_GA_SURF_BOUNDS) {
+    if (index > POMPPC_GA_LOOKUP) {
         return 0;
     }
     *target = this;
     return (IOExternalMethod *) &methods[index];
+}
+
+IOReturn POMPPCGAClient::gaExport(UInt32 sid, UInt32 tex, UInt32 w, UInt32 h, UInt32 surf,
+                                  UInt32 cmdoff)
+{
+    POMPPCAccelerator * accel = OSDynamicCast(POMPPCAccelerator, getProvider());
+    return accel ? accel->exportSurface(this, sid, tex, w, h, surf, cmdoff) : kIOReturnNotAttached;
+}
+
+IOReturn POMPPCGAClient::gaLookup(UInt32 sid, UInt32 * tex, UInt32 * w, UInt32 * h,
+                                  UInt32 * seq, void *)
+{
+    POMPPCAccelerator * accel = OSDynamicCast(POMPPCAccelerator, getProvider());
+    return accel ? accel->lookupSurface(sid, tex, w, h, seq) : kIOReturnNotAttached;
 }
 
 IOReturn POMPPCGAClient::gaSurfBounds(UInt32 id, UInt32 * x, UInt32 * y, UInt32 * w,

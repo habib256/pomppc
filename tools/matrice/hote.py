@@ -284,7 +284,7 @@ class Hote:
                          stderr=subprocess.STDOUT)
         return True
 
-    def clients_kext(self):
+    def clients_kext(self, brut=False):
         """Nombre de clients ouverts du kext POMPPCGPU (une tranche chacun,
         quatre au plus). Hors jeu, il doit être nul : un client qui reste
         après l'arrêt du jeu est une tranche perdue — et quatre tranches
@@ -292,9 +292,12 @@ class Hote:
         None si ioreg ne répond pas."""
         out = self.sortie("ioreg -w0 -c POMPPCGPUUserClient | grep -c 'POMPPCGPUUserClient '; true")
         try:
-            return int(out.strip().splitlines()[-1])
+            n = int(out.strip().splitlines()[-1])
         except (ValueError, IndexError):
             return None
+        # 29/10 (Quartz Extreme) : le WindowServer garde sa tranche ; ce qui
+        # compte, ce sont les clients en plus de ceux d'avant le jeu
+        return n if brut else max(0, n - getattr(self, "kext_base", 0))
 
     def processus(self, nom):
         """pids des processus dont le nom (ps -c) vaut `nom`."""

@@ -85,6 +85,24 @@
    la surface d'écran qui la place, et le plugin GL l'applique. */
 #define POMPPC_GA_SURF_BOUNDS   1
 #define POMPPC_MAX_SURF_IDS     16
+/* Méthodes 2 et 3 (29/10, P2) : export d'une fenêtre GL d'application. Le jeu
+   publie [sid, texture hôte, largeur, hauteur] (texture 0xffffffff : retrait) ;
+   le WindowServer cherche [sid] → [texture, largeur, hauteur, numéro]. Les
+   identifiants hôte sont communs à toutes les tranches (un seul cœur). Une
+   entrée meurt avec le client 2D qui l'a publiée. */
+#define POMPPC_GA_EXPORT        2
+#define POMPPC_GA_LOOKUP        3
+#define POMPPC_MAX_EXPORTS      32
+#define POMPPC_MAX_RECTS        16
+/* Zone de commandes du client (fin de sa tranche), écrite par le kext au
+   Flush d'une surface exportée : un SURF_PRESENT par rectangle visible. */
+#define POMPPC_QE_CMD_BYTES     4096
+
+struct POMPPCExport {
+    UInt32 sid, tex, w, h, seq;
+    UInt32 surf, cmdoff;            /* surface hôte du jeu, zone de commandes (absolue) */
+    void * owner;                   /* client 2D qui a publié */
+};
 #define POMPPC_GA_PLUGIN        "POMPPCGA.plugin"
 #define POMPPC_GA_TYPE_UUID     "ACCF0000-0000-0000-0000-000a2789904e"
 
@@ -99,8 +117,18 @@ public:
                                    UInt32 type, IOUserClient ** handler);
     void             setSurfaceBounds(UInt32 id, const IOAccelBounds * b);
     bool             surfaceBounds(UInt32 id, IOAccelBounds * b);
+    IOReturn         exportSurface(void * owner, UInt32 sid, UInt32 tex, UInt32 w, UInt32 h,
+                                   UInt32 surf, UInt32 cmdoff);
+    IOReturn         flushSurface(UInt32 sid, IOFramebuffer * fb, const IOAccelBounds * bounds,
+                                  const IOAccelBounds * rects, UInt32 nrects);
+    IOReturn         lookupSurface(UInt32 sid, UInt32 * tex, UInt32 * w, UInt32 * h,
+                                   UInt32 * seq);
+    void             dropExports(void * owner);
 
 private:
+    POMPPCExport     fExports[POMPPC_MAX_EXPORTS];
+    UInt32           fExportSeq;
+    UInt32           fFlushErrs;
     IOAccelBounds    fSurfBounds[POMPPC_MAX_SURF_IDS];
     bool             fSurfKnown[POMPPC_MAX_SURF_IDS];
 };
@@ -147,6 +175,8 @@ private:
     task_t          fTask;
     UInt32          fID, fMode;
     IOAccelBounds   fBounds;
+    IOAccelBounds   fRects[POMPPC_MAX_RECTS];   /* région visible (forme), P2 */
+    UInt32          fNRects;
     UInt32          fCalls[kIOAccelNumSurfaceMethods];
 };
 
@@ -165,6 +195,8 @@ public:
     IOReturn gaGetInfo(UInt32 * width, UInt32 * height, UInt32 * rowBytes,
                        UInt32 * bitsPerPixel, void *, void *);
     IOReturn gaSurfBounds(UInt32 id, UInt32 * x, UInt32 * y, UInt32 * w, UInt32 * h, void *);
+    IOReturn gaExport(UInt32 sid, UInt32 tex, UInt32 w, UInt32 h, UInt32 surf, UInt32 cmdoff);
+    IOReturn gaLookup(UInt32 sid, UInt32 * tex, UInt32 * w, UInt32 * h, UInt32 * seq, void *);
 
 private:
     IOFramebuffer * fFB;            /* retenu */
@@ -227,6 +259,10 @@ public:
     void             removeGAPlugin(IOService * fb);
     bool             quartzExtreme(void)      { return fQE; }
     /* `len` porte les drapeaux POMPPC_SUB_* dans ses bits hauts (voir plus haut). */
+    /* 29/10 (QE, P2) : soumission SYNCHRONE du noyau, `nwords` mots écrits
+       à l'offset absolu `off` de la fenêtre partagée (zone réservée par le
+       client, fin de sa tranche). Rend le statut de l'hôte. */
+    IOReturn kernelSubmit(UInt32 off, const UInt32 * cmds, UInt32 nwords, UInt32 * status);
     IOReturn submit(int slot, POMPPCGPUUserClient * client, UInt32 off, UInt32 len,
                     UInt32 * fence, UInt32 * status, UInt32 * statusPC);
     IOReturn waitFence(UInt32 target, UInt32 timeoutMs, UInt32 * current);
@@ -241,6 +277,8 @@ private:
         OSSynchronizeIO();
     }
 
+    static IOReturn kernelSubmitGated(OSObject * owner, void * a0, void * a1,
+                                      void * a2, void * a3);
     static IOReturn submitGated(OSObject * owner, void * a0, void * a1,
                                 void * a2, void * a3);
     static IOReturn waitGated(OSObject * owner, void * a0, void * a1,
@@ -272,6 +310,7 @@ private:
 
     IOPCIDevice *     fPCI;
     IODeviceMemory *  fShmemRange;
+    IOMemoryMap *     fShmemMap;          /* QE P2 : écriture noyau des présentations */
     IODeviceMemory *  fRegsRange;
     IOMemoryMap *     fRegsMap;
     volatile UInt32 * fRegs;

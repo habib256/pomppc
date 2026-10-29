@@ -616,6 +616,7 @@ static void buf_raw_invalidate_from(unsigned long from);
  * SEULE l'arène est adressée en absolu (G.q.win + off), parce que ses copies
  * différées survivent au changement de moitié. */
 #define HALVES      2
+#define QE_CMD_BYTES 4096               /* 29/10 : fin de tranche réservée (QE, P2) */
 /* 20/10/2026 — POMPPC_GL_ZONES=2 : flux de 512 Kio au lieu de 256 (DOOM 3 en
    écrit ~410 Kio par image) ; tout ce qui suit glisse d'autant, tailles des
    sommets et des indices inchangées, l'arène perd 256 Kio. La disposition est
@@ -787,6 +788,10 @@ typedef struct PTex {                   /* texture du GLDriver suivie par le plu
        son image est le tampon avant du drawable d'un autre contexte, rendu par
        l'hôte ; elle n'a aucun niveau côté invité. */
     int            surf;                /* 1 : texture de surface (vu par tex_cp) */
+    int            remote;              /* 29/10 (QE, P2) : dans le WindowServer, surface
+                                           d'un AUTRE processus — l'unité lie la texture
+                                           d'export du jeu (remote_qtex), pas qtex */
+    long           remote_qtex;
     unsigned long  surf_sid;            /*   surface CGS du drawable source */
     unsigned long  surf_gen;            /*   swap_gen de la source à la dernière copie */
     int            surf_copied;         /*   au moins un SURF_TEX émis depuis la création */
@@ -885,6 +890,12 @@ typedef struct PCtx {
        forme de la surface (IOAccelSetSurfaceShape, relue au nub) la place à
        l'écran. ws_ox/ws_oy : origine en repère GL (bas à gauche). */
     int            ws_rgn, ws_kept;
+    /* 29/10 (QE, P2) : fenêtre liée en surface accélérée (glcBindSurface) ;
+       chaque échange copie la surface hôte dans la texture d'export qe_tex,
+       publiée au kext sous qe_sid pour le WindowServer */
+    unsigned long  qe_cid, qe_wid, qe_sid, qe_pw, qe_ph, qe_psurf;
+    long           qe_tex;
+    int            qe_tex_ok, qe_pub;
     long           ws_ox, ws_oy;
     unsigned long  ws_bx, ws_by, ws_bw, ws_bh;
     int            stencil;             /* la surface hôte a un stencil ; sa fraîcheur est
@@ -1266,6 +1277,7 @@ static struct {
                                            présentation ni repli ; POMPPC_GL_HIDDEN=0 */
     unsigned long   n_surftex;          /* SURF_TEX émis */
     unsigned long   n_surftex_sw;       /* source plus récente côté invité : non copiée */
+    unsigned long   qe_cmdoff;          /* 29/10 : zone réservée en fin de tranche (absolue) */
     unsigned long   n_hidden_swaps;     /* échanges de drawables cachés gardés sur l'hôte */
     int             dump_rb_pending;    /* vidage autonome : textures hôte à relire */
     unsigned long   buf_used[(QGPU_CLIENT_BUF_IDS + 31) / 32];
@@ -2778,6 +2790,14 @@ void pomppc_backend_init(void)
             G.state = 1;
             owner_pid = getpid();       /* reste du 29/09 : fork avant atfork */
             crash_hook_install();       /* 24/09 : journal du plantage avant Quit() */
+            /* 29/10 (Quartz Extreme, P2) : les 4 derniers Kio de la tranche
+               sont à l'écart des moitiés — le kext y écrit les présentations
+               d'une fenêtre exportée au Flush du WindowServer (QE_CMD_BYTES,
+               POMPPC_QE_CMD_BYTES du kext). Les moitiés y perdent 4 Kio d'arène. */
+            if (G.q.size > 2 * QE_CMD_BYTES) {
+                G.q.size -= QE_CMD_BYTES;
+                G.qe_cmdoff = G.q.base + G.q.size;
+            }
             /* Une seule moitié par défaut : le mode synchrone garde alors
                exactement la disposition et le comportement d'avant la v9. */
             G.nhalf = 1;
@@ -5684,6 +5704,11 @@ static int texture_uploadable_full(PTex *t)
            jusqu'à l'échéance, comme une texture ordinaire */
         if (!G.texpage && t->nomem_until > G.n_frames)
             return no(NO_TEX_NOMEM, (unsigned long)t->qtex, t->nomem_until);
+        /* 29/10 (QE, P2) : dans le WindowServer, la source est dans un autre
+           processus — toujours servie par l'hôte (upload_remote_surftex) ;
+           jamais par Apple, qui lirait la surface comme de la VRAM */
+        if (!src && pomppc_ws_process())
+            return 1;
         if (!src || src->qctx < 0) {
             /* 3e passe : l'hôte tient la dernière image — voir upload_surftex */
             if (t->qtex >= 0 && t->surf_copied)
@@ -5824,6 +5849,7 @@ static int upload_texture_levels(PCtx *p, PTex *t)
 
     if (tex_surface(t, &sid))
         return upload_surftex(p, t, sid);   /* v20 */
+    t->remote = 0;                      /* redevenue ordinaire : sa propre image */
     if (t->qtex >= 0 && !t->dirty && t->prm_valid && t->up_frame == G.n_frames + 1 &&
         gp && t->up_psig == tex_prm_sig(gp))
         return 1;                       /* déjà synchronisée à cette image (24/09),
@@ -7218,7 +7244,7 @@ static void state_units(PCtx *p, const TexInfo *ti, unsigned long *v)
         v[QGPU_SK_COMBINE_SRC(u)] = p->st_valid ? p->st[QGPU_SK_COMBINE_SRC(u)]
                                                 : QGPU_COMBINE_SRC_DEFAULT;
         if (tu && tu->t) {
-            v[kb + QGPU_SK_U_BIND] = tu->t->qtex;
+            v[kb + QGPU_SK_U_BIND] = tu->t->remote ? tu->t->remote_qtex : tu->t->qtex;
             v[kb + QGPU_SK_U_ENV_MODE] = tu->env_mode;
             v[kb + QGPU_SK_U_ENV_COLOR] = tu->env_color;
             v[QGPU_SK_COMBINE(u)] = tu->combine;
@@ -16555,6 +16581,7 @@ typedef struct { float x, y; } CgPoint;
    bien partagées — et relues à chaque image (Q6). */
 static struct {
     int            init, enabled, windowed, over_cursor;
+    int            qe;                  /* 29/10 : écran composé par Quartz Extreme */
     char           why[96];             /* pourquoi la voie directe est coupée */
     unsigned char *base;
     unsigned long  rowbytes, w, h, bpp;
@@ -16669,6 +16696,57 @@ static void surftex_copy(PCtx *p, PTex *t, PCtx *src)
     G.n_surftex++;
 }
 
+/* 29/10 (Quartz Extreme, P2) : dans le WindowServer, la texture de surface
+   d'une fenêtre GL (cglsSetInteger 997, _CGXGLCreateSurfaceTextureReference)
+   vise une surface d'un autre processus. Le jeu publie au kext la texture hôte
+   où il copie chaque image (ws_lookup) ; l'unité la lie directement — les
+   identifiants hôte sont communs aux tranches. Sans export (pas encore, ou jeu
+   parti), la texture propre, vide, reste liée : jamais le rendu d'Apple, qui
+   lirait le pointeur 0xdeadbeef du compositeur. */
+static int ws_lookup(unsigned long sid, unsigned long *tex, unsigned long *w,
+                     unsigned long *h, unsigned long *seq);
+
+static int upload_remote_surftex(PCtx *p, PTex *t, unsigned long sid)
+{
+    unsigned long tex, w, h, seq, *c;
+    int rect = tex_is_rect(t);
+    if (t->qtex < 0) {
+        int r = tex_id_reserve(p, t, QGPU_LEN_TEX_CREATE3, &c);
+        if (!r)
+            return no(NO_TEX_ID, 0, 0);
+        if (r == 1) {
+            c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3);
+            c[1] = t->qtex;
+            c[2] = rect ? QGPU_TT_RECTANGLE : QGPU_TT_2D;
+            VD_BUMP();
+        }
+        t->prm_valid = 0;
+    }
+    t->host_only = 1;
+    t->dirty = 0;
+    t->last_use = ++G.tex_clock;
+    if (ws_lookup(sid, &tex, &w, &h, &seq)) {
+        if (!t->remote || t->remote_qtex != (long)tex) {
+            static int told;
+            if (told < 16) {
+                told++;
+                pomppc_log("POMPPC: SURFTEX distante : tex %p sid %lx -> texture du jeu %lu "
+                           "(%lux%lu), qtex propre %ld\n", t->drvtex, sid, tex, w, h,
+                           (long)t->qtex);
+            }
+        }
+        t->remote = 1;
+        t->remote_qtex = (long)tex;
+    } else {
+        static int told;
+        if (told < 8) {
+            told++;
+            pomppc_log("POMPPC: SURFTEX distante : sid %lx sans export (texture vide)\n", sid);
+        }
+    }
+    return 1;
+}
+
 /* upload_texture d'une texture de surface : objet hôte, paramètres, image. */
 static int upload_surftex(PCtx *p, PTex *t, unsigned long sid)
 {
@@ -16679,6 +16757,9 @@ static int upload_surftex(PCtx *p, PTex *t, unsigned long sid)
     int rect = tex_is_rect(t), k;
     PCtx *src = surf_source(sid);
 
+    t->remote = 0;
+    if (!src && pomppc_ws_process())
+        return upload_remote_surftex(p, t, sid);
     if (!src || src->qctx < 0) {
         /* 3e passe : source disparue (contexte cible détruit, drawable
            détaché) alors que la texture est encore échantillonnée — l'hôte
@@ -17487,6 +17568,177 @@ static short ws_same_process(const Psn *a, const Psn *b, unsigned char *same)
     return 0;
 }
 
+static int ws_lookup(unsigned long sid, unsigned long *tex, unsigned long *w,
+                     unsigned long *h, unsigned long *seq)
+{
+    UInt32 a = 0, b = 0, c = 0, d = 0;
+    if (WS.open <= 0 ||
+        IOConnectMethodScalarIScalarO(WS.conn, 3, 1, 4, (UInt32)sid, &a, &b, &c, &d) != KERN_SUCCESS)
+        return 0;
+    *tex = a; *w = b; *h = c; *seq = d;
+    return 1;
+}
+
+/* ── 29/10, Quartz Extreme P2 : fenêtres GL des applications ────────────────
+ * docs/quartz-extreme.md §1 ter. GLEngine passe au GLDriver les services
+ * d'OpenGL.framework : glcBindSurface (lier une surface en type 2,
+ * « accélérée » : le WindowServer en crée l'IOAccelSurface et la compose par
+ * une texture de surface, cglsSetInteger 997) et glcDoNonSimpleFlush (prévenir
+ * le WindowServer qu'elle a changé). Notre plugin les emploie comme un
+ * GLDriver de carte : la fenêtre est rendue dans un tampon privé (descripteur
+ * 53) et sur sa surface hôte ; à l'échange, une copie GPU vers la texture
+ * d'export, que le WindowServer lie directement. */
+static struct {
+    long (*bind)(unsigned long cid, unsigned long wid, unsigned long sid,
+                 unsigned long mode, unsigned long service);
+    long (*notify)(unsigned long cid, unsigned long wid, unsigned long sid,
+                  const long *rect, long h);
+    const unsigned long *services;      /* liste d'OpenGL.framework (_glc_io_data + 4) */
+    unsigned long service;              /* celui que glcBindSurface a reconnu */
+    io_connect_t  conn;
+    int           open;                 /* 0 inconnu, 1 ouvert, -1 refusé */
+} QA;
+
+void pomppc_set_glc(unsigned long services, unsigned long index, unsigned long flush,
+                    unsigned long bind)
+{
+    QA.notify = (void *)flush;
+    QA.bind = (void *)bind;
+    QA.services = (const unsigned long *)services;
+    (void)index;                        /* pas l'index du service (vu : 1 pour un seul) */
+}
+
+static int qa_open(void)
+{
+    io_service_t accel;
+    if (QA.open)
+        return QA.open > 0;
+    QA.open = -1;
+    accel = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("POMPPCAccelerator"));
+    if (!accel)
+        return 0;
+    if (IOServiceOpen(accel, mach_task_self(), WS_GA_CLIENT_TYPE, &QA.conn) == KERN_SUCCESS)
+        QA.open = 1;
+    IOObjectRelease(accel);
+    return QA.open > 0;
+}
+
+/* Publication au kext : texture d'export (compositeur), surface hôte et zone
+   de commandes (présentation au Flush). tex 0xffffffff : retrait. */
+static void qa_export(unsigned long sid, unsigned long tex, unsigned long w, unsigned long h,
+                      unsigned long surf)
+{
+    UInt32 none;
+    if (qa_open())
+        IOConnectMethodScalarIScalarO(QA.conn, 2, 6, 0, (UInt32)sid, (UInt32)tex, (UInt32)w,
+                                      (UInt32)h, (UInt32)surf, (UInt32)G.qe_cmdoff, &none);
+}
+
+typedef struct { float x, y, w, h; } QaRect;
+static long attach_buffer(void *ctx, unsigned long w, unsigned long h);
+
+/* gldAttachDrawable d'une fenêtre (type 80) dans une application sous QE :
+   -1 si ce n'est pas pour nous (Apple attache comme avant). */
+long pomppc_qe_attach(void *ctx, const unsigned long *desc)
+{
+    long (*bounds)(unsigned long, unsigned long, unsigned long, QaRect *);
+    unsigned long cid, wid, sid, w, h;
+    QaRect r;
+    long result;
+    PCtx *p;
+    if (pomppc_ws_process() || !QA.bind || !QA.notify || !desc || G.state <= 0)
+        return -1;
+    direct_init_once();
+    if (!D.qe)
+        return -1;
+    cid = desc[0]; wid = desc[1]; sid = desc[2];
+    bounds = dlsym(RTLD_DEFAULT, "CGSGetSurfaceBounds");
+    if (!cid || !wid || !sid || !bounds || bounds(cid, wid, sid, &r) != 0)
+        return -1;
+    w = (unsigned long)r.w;
+    h = (unsigned long)r.h;
+    if (!w || !h || w > 4096 || h > 4096)
+        return -1;
+    /* glcBindSurface cherche le service parmi ceux d'OpenGL.framework (sinon
+       0xe00002bc) : on essaie la liste, puis on garde celui qui marche */
+    result = QA.service ? QA.bind(cid, wid, sid, 0x24, QA.service) : -1;   /* fenêtré | 8888 */
+    if (result != 0 && QA.services) {
+        int i;
+        for (i = 0; i < 8 && QA.services[i]; i++) {
+            result = QA.bind(cid, wid, sid, 0x24, QA.services[i]);
+            if (result == 0) {
+                QA.service = QA.services[i];
+                break;
+            }
+        }
+    }
+    pomppc_log("POMPPC: QE, fenêtre %lx surface %lx %lux%lu liée en surface accélérée -> %ld\n",
+               wid, sid, w, h, result);
+    if (result != 0)
+        return -1;
+    result = attach_buffer(ctx, w, h);
+    pthread_mutex_lock(&G.mu);
+    p = find_ctx(ctx);
+    if (p && result >= 0 && result <= 3) {
+        if (p->qe_pub && p->qe_sid != sid)
+            qa_export(p->qe_sid, 0xffffffffUL, 0, 0, 0);
+        p->qe_cid = cid; p->qe_wid = wid; p->qe_sid = sid;
+        p->qe_pub = 0;
+    }
+    pthread_mutex_unlock(&G.mu);
+    return result;
+}
+
+/* Échange d'une fenêtre QE (verrou tenu) : 1 si l'image est partie. */
+static int present_qe(PCtx *p)
+{
+    unsigned long *c;
+    static unsigned long nq;
+    if (pomppc_tracing() && (p->color != HOST_NEWER || ++nq % 500 == 1))
+        pomppc_log("POMPPC: QE échange %lu : couleur %d surf %ld %lux%lu tex %ld\n", nq,
+                   (int)p->color, (long)p->surf, p->sw, p->sh, p->qe_tex_ok ? p->qe_tex : -1L);
+    if (G.state <= 0 || p->broken || !ensure_surface(p))
+        return 0;
+    if (p->color == SW_NEWER)
+        sync_to_host(p, 1, 0);          /* un repli d'Apple a dessiné dans l'invité */
+    if (!p->qe_tex_ok) {
+        static const unsigned long keys[4] = {
+            QGPU_TP_MIN_FILTER, QGPU_TP_MAG_FILTER, QGPU_TP_WRAP_S, QGPU_TP_WRAP_T };
+        static const unsigned long vals[4] = { 0x2600, 0x2600, 0x812F, 0x812F };
+        int k;
+        p->qe_tex = alloc_tex_id(p);
+        if (p->qe_tex < 0)
+            return 0;
+        c = reserve(p, QGPU_LEN_TEX_CREATE3);
+        c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_CREATE3, QGPU_LEN_TEX_CREATE3);
+        c[1] = p->qe_tex;
+        c[2] = QGPU_TT_RECTANGLE;
+        for (k = 0; k < 4; k++) {
+            c = reserve(p, QGPU_LEN_TEX_PARAM);
+            c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_PARAM, QGPU_LEN_TEX_PARAM);
+            c[1] = p->qe_tex; c[2] = keys[k]; c[3] = vals[k];
+        }
+        p->qe_tex_ok = 1;
+    }
+    c = reserve(p, QGPU_LEN_SURF_TEX);
+    c[0] = QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX);
+    c[1] = p->qe_tex;
+    c[2] = QGPU_TT_RECTANGLE;
+    c[3] = 0;
+    c[4] = p->surf;
+    flush();                            /* soumise AVANT que le WindowServer compose */
+    if (!p->qe_pub || p->qe_pw != p->sw || p->qe_ph != p->sh ||
+        p->qe_psurf != (unsigned long)p->surf) {
+        qa_export(p->qe_sid, p->qe_tex, p->sw, p->sh, p->surf);
+        p->qe_pub = 1;
+        p->qe_pw = p->sw;
+        p->qe_ph = p->sh;
+        p->qe_psurf = p->surf;
+    }
+    G.n_direct++;
+    return 1;
+}
+
 /* Zone de la surface d'écran attachée (desc = {0, 0, id de surface},
    _CGXGLAccelAccess de CoreGraphics), relue au nub. Hors zone connue : tout
    l'écran, comme avant. */
@@ -17549,6 +17801,19 @@ static void direct_init(void)
     D.enabled = !(e && e[0] == '0');
     D.windowed = !(e && e[0] == 'f');   /* POMPPC_GL_DIRECT=f : plein écran seulement */
     D.over_cursor = e && e[0] == 'c';   /* =c : même avec un curseur en mouvement */
+    {   /* 29/10 : sous Quartz Extreme, l'écran appartient au compositeur — il
+           redessine la zone de la fenêtre avec sa propre copie, et une image
+           écrite directement en VRAM clignotait (bas de Marble Blast, vu en
+           vrai). En fenêtre, l'image passe donc par l'échange d'Apple. */
+        unsigned long (*uses_gl)(unsigned long) = dlsym(RTLD_DEFAULT, "CGDisplayUsesOpenGLAcceleration");
+        unsigned long (*main_id)(void) = dlsym(RTLD_DEFAULT, "CGMainDisplayID");
+        if (uses_gl && main_id && (uses_gl(main_id()) & 0xff))
+            D.qe = 1;
+        if (D.windowed && D.qe) {
+            D.windowed = 0;
+            pomppc_log("POMPPC: Quartz Extreme actif : présentation directe en plein écran seulement\n");
+        }
+    }
     D.main_display    = dlsym(RTLD_DEFAULT, "CGMainDisplayID");
     D.base_address    = dlsym(RTLD_DEFAULT, "CGDisplayBaseAddress");
     D.bytes_per_row   = dlsym(RTLD_DEFAULT, "CGDisplayBytesPerRow");
@@ -17611,12 +17876,11 @@ static int display_switch_32(unsigned long did)
  * scanout. Apple still owns depth/stencil and all its drawable bookkeeping.
  * ctx+e1 is the double-buffer flag: temporarily clear its offscreen veto;
  * the public pixel format and context keep their double-buffer semantics. */
+static long attach_buffer(void *ctx, unsigned long w, unsigned long h);
+
 long pomppc_attach_fullscreen(void *ctx)
 {
-    PCtx *p;
-    unsigned long did, w, h, bits, desc[4];
-    unsigned char *buf, double_buffer;
-    long result;
+    unsigned long did, w, h, bits;
     direct_init_once();                 /* F5 : hors G.mu, mais une seule fois */
     if (!D.main_display || !D.pixels_wide || !D.pixels_high ||
         !D.bits_per_pixel || !D.base_address || !D.bytes_per_row)
@@ -17636,6 +17900,18 @@ long pomppc_attach_fullscreen(void *ctx)
         gl_note("fullscreen attach %lux%lu display %lu ctx-bits %lu\n",
                 w, h, dbpp, bits);
     }
+    return attach_buffer(ctx, w, h);
+}
+
+/* Tampon logiciel privé w × h attaché au contexte (descripteur 53 d'Apple :
+   hors écran, sans CGS) : plein écran, surface d'écran du WindowServer et
+   (29/10, P2) fenêtre liée en surface accélérée sous Quartz Extreme. */
+static long attach_buffer(void *ctx, unsigned long w, unsigned long h)
+{
+    PCtx *p;
+    unsigned long desc[4];
+    unsigned char *buf, double_buffer;
+    long result;
     pthread_mutex_lock(&G.mu);
     p = find_ctx(ctx);
     /* 28/10 (Quartz Extreme) : le WindowServer rattache la surface de l'écran
@@ -19378,6 +19654,24 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
         pthread_mutex_unlock(&G.mu);
         return direct_noop;
     }
+    if (slot == PROC_Swap60 && p->qe_sid && present_qe(p)) {
+        unsigned long cid = p->qe_cid, wid = p->qe_wid, sid = p->qe_sid;
+        /* toute la surface, en repère GL : glcDoNonSimpleFlush en fait une
+           région (sans rectangle, le serveur ne recompose pas une surface
+           accélérée : vu au vidage, texture liée une seule fois) */
+        long rect[4];
+        long hh = (long)p->sh;
+        rect[0] = 0; rect[1] = 0; rect[2] = (long)p->sw; rect[3] = hh;
+        pthread_mutex_unlock(&G.mu);
+        {
+            long e = QA.notify(cid, wid, sid, rect, hh);   /* CGSFlushSurface : le WindowServer recompose */
+            static unsigned long nerr, nall;
+            nall++;
+            if (e && pomppc_tracing() && nerr++ < 20)
+                pomppc_log("POMPPC: QE CGSFlushSurface -> %ld (échange %lu)\n", e, nall);
+        }
+        return direct_noop;
+    }
     if (slot == PROC_Swap60 && present_direct(p)) {
         capture_presented();
         pthread_mutex_unlock(&G.mu);
@@ -19396,6 +19690,12 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
         stats_frame(p->ctx);            /* une passe du compositeur = une image */
         if (!present_direct(p))
             present_sw_fullscreen(p);
+        /* 29/10 : glFinish du compositeur = image À L'ÉCRAN. Le WindowServer
+           retire son curseur logiciel (VGA de QEMU sans curseur matériel)
+           autour de la passe, puis le remet : une présentation encore en vol
+           l'écrasait ensuite (curseur qui clignote, carrés de pixels périmés
+           laissés au fond quand il bouge). */
+        drain_all();
         pthread_mutex_unlock(&G.mu);
         return direct_noop;
     }
@@ -19820,6 +20120,8 @@ void pomppc_context_destroyed(void *ctx)
             continue;
         p = *pp;
         *pp = p->next;
+        if (p->qe_pub)                  /* QE P2 : la fenêtre n'est plus servie */
+            qa_export(p->qe_sid, 0xffffffffUL, 0, 0, 0);
         /* P7 — LES TRAMPOLINES D'ABORD. gldDestroyContext nous appelle AVANT le
            destructeur d'Apple, et seul gldUpdateDispatch désinstallait nos
            procédures : la table de GLEngine pointait encore sur elles alors

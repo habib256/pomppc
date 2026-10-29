@@ -460,6 +460,8 @@ class Cellule:
         rows = {}
         a = b = None
         en_pause = False
+        # clients du kext d'avant le jeu (le WindowServer en a un sous Quartz Extreme)
+        h.kext_base = h.clients_kext(brut=True) or 0
         try:
             j.preparer(h, self.mode)
             h.depose(self.cellule_sh(), G + "/cellule.sh")

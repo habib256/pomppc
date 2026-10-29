@@ -94,6 +94,47 @@ Les portes, dans l'ordre où le WindowServer les franchit :
    juste. Aucun `AttachDrawable` ni dessin pour autant : les drapeaux n'étaient forcés
    qu'à la main. La suite passe par le plugin GA.
 
+## 1 ter. Fenêtres GL des applications (relevé du 29/10, P2 étape 1)
+
+Aujourd'hui, sous QE, une fenêtre GL passe par le magasin logiciel : AppKit
+(`-[NSSurface _createSurface]`) lie la surface en **type 1** (`CGSBindSurface`). Le
+GLDriver logiciel d'Apple y écrit, et le compositeur la téléverse
+(`_CGXGLCreateSurfaceTexture`). Le journal du kext le confirme : aucune `IOAccelSurface`
+d'application, seulement celle de l'écran (id 1). D'où 16 à 17 ms/image pour Marble Blast
+et Zenerchi en fenêtre, contre 6,3 et 3,6 ms avec la présentation directe, coupée sous QE.
+
+Le chemin des cartes :
+
+1. GLEngine charge le GLDriver par `gldInitializeLibrary(services, index_fb, n,
+   doNonSimpleFlush, bindSurface)` (`_glepValidatePlugin`). Les deux derniers sont
+   `_glcDoNonSimpleFlush` et `_glcBindSurface` d'OpenGL.framework (`_glcInitializePlugin`).
+2. Le GLDriver matériel lie lui-même la surface de la fenêtre : `glcBindSurface(cid, wid,
+   sid, mode, service)` appelle `CGSBindSurface(cid, wid, sid, 2, mode, écran)`. Le
+   WindowServer (`_CGXBindSurface`, type 2) crée alors l'`IOAccelSurface` `sid` sur
+   l'accélérateur de l'écran (client de surface de notre kext). Le pilote NVIDIA, lui,
+   rend dans cette surface par son noyau (`io_connect_method_*`).
+3. À l'échange, `glcDoNonSimpleFlush(cid, wid, sid, rect|0, h)` → `CGSFlushSurface` :
+   le WindowServer recompose.
+4. Le compositeur fait de la surface une texture **sans données** :
+   `_CGXGLCreateSurfaceTextureReference` crée une texture `GL_TEXTURE_RECTANGLE` dont le
+   pointeur vaut `0xdeadbeef`, puis appelle `cglsSetInteger(ctx, 997, {sid, 0x84F5,
+   GL_RGBA|GL_RGB, l, h, type, 0x400|œil, 0})`. Le type vaut `0x8367` en 8888 et `0x8366`
+   en 1555. Le GLDriver logiciel d'Apple ne connaît pas 997 (`gldSetInteger` →
+   `0x271a`) : le compositeur détruit la texture et retombe sur le magasin.
+
+Sur l'hôte, toutes les tranches partagent un cœur, un contexte GL et un fil de rendu, et
+les identifiants de surface et de texture ne sont pas vérifiés par tranche
+(`qgpu-core.c`, tranches v19). La tranche du WindowServer peut donc lire une texture du
+jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le protocole** :
+
+- jeu : liaison en type 2 par `bindSurface`, rendu sur sa surface hôte comme aujourd'hui.
+  À l'échange, `SURF_TEX` vers une texture d'export (une copie GPU, au lieu de la relecture
+  vers l'invité), publication `sid → texture` au kext, puis `doNonSimpleFlush` ;
+- kext : table d'export par `sid` (méthodes 2 et 3 du client 2D), purgée à la fermeture
+  du client qui a publié ;
+- WindowServer : `gldSetInteger(997)` marque la texture rectangle liée ; au dessin,
+  c'est la texture d'export du jeu qui est liée sur l'hôte.
+
 ## 2. Plan
 
 | Étape | Contenu | Preuve |

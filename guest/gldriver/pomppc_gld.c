@@ -465,6 +465,11 @@ long gldInitializeLibrary(long a, long b, long c, long d, long e, long f, long g
                a, b, c, d, e, (int)getpid(),
                second_copy ? " : second exemplaire du plugin, inactif" : "");
     r = FWD8(GLD_InitializeLibrary);
+    /* 29/10 (Quartz Extreme, P2) : services d'OpenGL.framework passés par
+       GLEngine (_glepValidatePlugin) — d = glcDoNonSimpleFlush,
+       e = glcBindSurface, a[c] = service de notre accélérateur */
+    if (!second_copy)
+        pomppc_set_glc((unsigned long)a, (unsigned long)c, (unsigned long)d, (unsigned long)e);
     if (!second_copy) {
         gld_live = 1;
         pthread_once(&owner_once, owner_mark);
@@ -651,6 +656,8 @@ long gldAttachDrawable(long a, long b, long c, long d, long e, long f, long g, l
             pomppc_ws_region((void *)a, (const unsigned long *)c);
     } else if (b == 54)
         r = pomppc_attach_fullscreen((void *)a);
+    else if (b == 80 && (r = pomppc_qe_attach((void *)a, (const unsigned long *)c)) != -1)
+        b = 54;                         /* QE P2 : tampon privé, comme le plein écran */
     else
         r = FWD8(GLD_AttachDrawable);
     pomppc_log("gldAttachDrawable(%08lx %08lx %08lx %08lx) -> %ld\n", a, b, c, d, r);
