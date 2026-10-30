@@ -7238,6 +7238,16 @@ static int point_att_default(const unsigned char *g)
     return att[0] == 1.0f && att[1] == 0.0f && att[2] == 0.0f;
 }
 
+/* Texture hôte à lier pour t. Dans le WindowServer, une texture de surface
+ * d'un autre processus (QE) se lie à la texture d'EXPORT du jeu, jamais à sa
+ * propre qtex, vide : un identifiant recyclé y montrait du blanc, du noir ou
+ * l'image d'un ancien jeu sous les ombres et dans les fenêtres GL qui ne sont
+ * pas au premier plan (30/10). Toutes les liaisons passent par ici. */
+static unsigned long tex_bind_id(const PTex *t)
+{
+    return t->remote ? (unsigned long)t->remote_qtex : (unsigned long)t->qtex;
+}
+
 /* Clés des unités de texture (liaison, environnement, combinaison), tirées du
  * verdict `ti` : partie de compute_state que le lot 4 refait toujours. */
 static void state_units(PCtx *p, const TexInfo *ti, unsigned long *v)
@@ -7255,7 +7265,7 @@ static void state_units(PCtx *p, const TexInfo *ti, unsigned long *v)
         v[QGPU_SK_COMBINE_SRC(u)] = p->st_valid ? p->st[QGPU_SK_COMBINE_SRC(u)]
                                                 : QGPU_COMBINE_SRC_DEFAULT;
         if (tu && tu->t) {
-            v[kb + QGPU_SK_U_BIND] = tu->t->remote ? tu->t->remote_qtex : tu->t->qtex;
+            v[kb + QGPU_SK_U_BIND] = tex_bind_id(tu->t);
             v[kb + QGPU_SK_U_ENV_MODE] = tu->env_mode;
             v[kb + QGPU_SK_U_ENV_COLOR] = tu->env_color;
             v[QGPU_SK_COMBINE(u)] = tu->combine;
@@ -7267,7 +7277,7 @@ static void state_units(PCtx *p, const TexInfo *ti, unsigned long *v)
         const TexUnit *tu = ti ? &ti->u[u] : 0;
         kb = QGPU_SK_UNIT(u);
         v[kb + QGPU_SK_U_ENABLE] = tu && tu->t;
-        v[kb + QGPU_SK_U_BIND] = tu && tu->t ? (unsigned long)tu->t->qtex
+        v[kb + QGPU_SK_U_BIND] = tu && tu->t ? tex_bind_id(tu->t)
                                              : p->st_valid ? p->st[kb + QGPU_SK_U_BIND] : 0;
         v[kb + QGPU_SK_U_ENV_MODE] = 0x2100;
         v[kb + QGPU_SK_U_ENV_COLOR] = 0;
@@ -7765,7 +7775,7 @@ static void state_unit_one(PCtx *p, const TexInfo *ti, int u, unsigned long *v)
         v[QGPU_SK_COMBINE(u)] = p->st[QGPU_SK_COMBINE(u)];
         v[QGPU_SK_COMBINE_SRC(u)] = p->st[QGPU_SK_COMBINE_SRC(u)];
         if (tu->t) {
-            v[kb + QGPU_SK_U_BIND] = tu->t->qtex;
+            v[kb + QGPU_SK_U_BIND] = tex_bind_id(tu->t);
             v[kb + QGPU_SK_U_ENV_MODE] = tu->env_mode;
             v[kb + QGPU_SK_U_ENV_COLOR] = tu->env_color;
             v[QGPU_SK_COMBINE(u)] = tu->combine;
@@ -7773,7 +7783,7 @@ static void state_unit_one(PCtx *p, const TexInfo *ti, int u, unsigned long *v)
         }
     } else {
         v[kb + QGPU_SK_U_ENABLE] = tu->t != 0;
-        v[kb + QGPU_SK_U_BIND] = tu->t ? (unsigned long)tu->t->qtex : p->st[kb + QGPU_SK_U_BIND];
+        v[kb + QGPU_SK_U_BIND] = tu->t ? tex_bind_id(tu->t) : p->st[kb + QGPU_SK_U_BIND];
         v[kb + QGPU_SK_U_ENV_MODE] = 0x2100;
         v[kb + QGPU_SK_U_ENV_COLOR] = 0;
     }
@@ -11753,35 +11763,53 @@ static void cube_probe(PCtx *p, const TexInfo *ti, const char *where)
     }
 }
 
-/* Lot 11 : après le déclencheur du vidage, une ligne par décision de
-   texturage (≤ 200) — unités, textures hôte et tailles, environnement,
+/* 30/10 (QE) : draw_probe dans le WindowServer tant que /var/tmp/ws-probe
+   existe (relu une fois par image) ; journal POMPPC_GL_NOTE, posé par
+   /var/tmp/pomppc-env. */
+static int ws_probe_on(void)
+{
+    static unsigned long seen = ~0UL;
+    static int on;
+    if (!pomppc_ws_process())
+        return 0;
+    if (seen != G.n_frames) {
+        seen = G.n_frames;
+        on = access("/var/tmp/ws-probe", F_OK) == 0;
+    }
+    return on;
+}
+
+/* Lot 11 : après le déclencheur du vidage (ou /var/tmp/ws-probe dans le
+   WindowServer), une ligne par décision de texturage (≤ 600) — unités, textures hôte et tailles, environnement,
    combineur, mélange, éclairage — pour retrouver les dessins de l'arme. */
 static void draw_probe(PCtx *p, const TexInfo *ti)
 {
     static int lines;
     unsigned char *g = gls(p);
-    char buf[400];
+    char buf[600];
     int at = 0, u;
-    if (dump_trigger() != 1)
+    if (dump_trigger() != 1 && !ws_probe_on())
         return;
-    if (lines >= 200 || !g)
+    if (lines >= 600 || !g)
         return;
     lines++;
-    at += snprintf(buf + at, sizeof(buf) - at, "DESSIN image %lu light %d blend %d %04x/%04x alpha %d :",
+    at += snprintf(buf + at, sizeof(buf) - at, "DESSIN image %lu light %d blend %d %04x/%04x alpha %d %04x %g zone %d %ld,%ld :",
                    G.n_frames, GLD_U8(g, GS_LIGHTING) != 0, GLD_U8(g, GS_BLEND) != 0,
                    (unsigned)U16(g, GS_BLEND_SRC_RGB), (unsigned)U16(g, GS_BLEND_DST_RGB),
-                   GLD_U8(g, GS_ALPHA_TEST) != 0);
+                   GLD_U8(g, GS_ALPHA_TEST) != 0, (unsigned)U16(g, GS_ALPHA_FUNC),
+                   (double)*(const float *)(g + GS_ALPHA_REF), p->ws_rgn, p->ws_ox, p->ws_oy);
     for (u = 0; u < QGPU_MAX_UNITS && at < (int)sizeof(buf) - 80; u++) {
         unsigned char *us = g + GS_TEXUNIT0 + u * GS_TEXUNIT_SIZE;
         unsigned long m = GLD_U32(us, TU_ENABLE) & 0x1f;
         const PTex *t = ti->u[u].t;
         if (!m)
             continue;
-        at += snprintf(buf + at, sizeof(buf) - at, " u%d[m%02lx tex %ld %dx%d env %04lx cb %08lx src %08lx]",
-                       u, m, t ? t->qtex : -1L,
+        at += snprintf(buf + at, sizeof(buf) - at, " u%d[m%02lx tex %ld%s %dx%d env %04lx/%08lx cb %08lx src %08lx]",
+                       u, m, t ? (t->remote ? t->remote_qtex : t->qtex) : -1L,
+                       t && t->remote ? "(export)" : "",
                        t ? (int)(short)U16((unsigned char *)t->drvtex + DT_LEVEL0, LV_W) : 0,
                        t ? (int)(short)U16((unsigned char *)t->drvtex + DT_LEVEL0, LV_H) : 0,
-                       ti->u[u].env_mode, ti->u[u].combine, ti->u[u].combine_src);
+                       ti->u[u].env_mode, ti->u[u].env_color, ti->u[u].combine, ti->u[u].combine_src);
     }
     gl_note("%s\n", buf);
 }

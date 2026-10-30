@@ -85,13 +85,36 @@ qgpu de Colin McRae.
    fenêtre (3 passes par bras, la passe unique d'UT est trop bruitée), tranche d'endurance
    comme au §13 de `docs/endurance.md` ; ensuite ajouter `Linux:x86_64` au test
    d'hôte de `run_tiger.sh`.
+8. **Venu du M4 le 30/10** : correctif du plugin pour Quartz Extreme (`tex_bind_id`,
+   ombre sur une fenêtre GL). Il ne touche ni le protocole ni le kext : il suffit de
+   reconstruire et réinstaller le plugin de l'invité. Il n'a d'effet que si QE est allumé
+   (`QE=1`). Les patches `tcg/0057` et `tcg/0058` sont propres à macOS (le PC peut les
+   compiler, ils n'y font rien).
 
 **Propres au PC** : `patches/diag/` (auto-profileur, plafonds), `tools/tcg/perfhw.sh` (compteurs
 Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). `perf` exige
 `perf_event_paranoid` ≤ 1, que l'utilisateur règle à la main ; la valeur revient à 4 à chaque
 redémarrage.
 
-## 3. Mac M4 : état au 29/10/2026, 21 h 30
+## 3. Mac M4 : état au 30/10/2026, 8 h 30
+
+**Fait le 30/10**
+- **Émulateurs voisins, A/B au repos** (`docs/tcg-g4.md` §42, 4 parties par bras, mb zen ut
+  d3 en fenêtre). `tcg/0057` `x-vcpu-qos` (`VCPUQOS=1`, fils des vCPU en QoS interactive) :
+  **neutre**. `tcg/0058` `POMPPC_POLL_NS` (`POLLNS=1`, attente de la boucle principale à la
+  microseconde par `select`) : zen **−18 %** mais ut **+6,6 %**. Les deux sont **éteints**
+  par défaut, compilés dans `~/src/qemu`. Le PC n'est pas concerné : le code est propre à
+  macOS.
+- **Bug QE corrigé : bande blanche, noire ou « ancien jeu » sous l'ombre d'une fenêtre posée
+  sur un jeu en fenêtre** (signalé par l'utilisateur). Dans le WindowServer, le chemin
+  rapide des clés d'état liait la texture de surface vide au lieu de la texture d'export du
+  jeu. Correctif : `tex_bind_id` dans le plugin, sans changer le protocole, ni QEMU, ni le
+  kext. Vérifié en VM jetable sur Zenerchi, Marble Blast et DOOM 3 ; matrice mb/zen/d3 en
+  fenêtre dans `bench/matrice/qe-ombre-3010`. Coins noirs de DOOM 3 et Prey : la fenêtre
+  est `NSBackingStoreRetained` (relevé sous gdb), comme sur un vrai Mac ; pas un bug.
+  **Le plugin corrigé est installé dans la VM quotidienne** (voir plus bas).
+
+## 3 bis. Mac M4 : état au 29/10/2026, 21 h 30
 
 **Défauts sur Darwin:arm64** : depuis le 26/10 (`550b2a8`), la série du PC est allumée et
 prouvée : `PPC32MT TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIRTYSKIP PTEGMAP
@@ -166,9 +189,9 @@ relancée à la fin, puis arrêtée le 29/10 à 5 h 33 pour les essais de Quartz
   de l'invité** (16 Go). Les effacer après usage.
 
 **À faire sur le M4, dans l'ordre**
-1. Étude des émulateurs voisins (PowerEmu, ppc-osx-vgpu) : QoS « interactive » du fil vCPU
-   sur macOS, attente en ns (kqueue) dans la boucle principale, permutations AltiVec en
-   ligne (TBL/TBX). À mesurer en A/B, licence à vérifier fichier par fichier.
+1. Émulateurs voisins : QoS et attente à la microseconde mesurées le 30/10 (éteintes).
+   Reste `vperm` en ligne (TBL/TBX), gain plafonné vers 0,3 % : en dernier. Suite possible
+   de 0058 : `select` pour les délais courts seulement, profil d'UT.
 2. Parité de **tcg/0055** (rejeu des traces, outil de preuve prouvé sur le PC le 27/10 :
    `c92dacc`). À faire seulement si les traces de second niveau reprennent ; elles sont
    arrêtées depuis le 22/10.

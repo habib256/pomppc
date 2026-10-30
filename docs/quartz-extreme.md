@@ -147,6 +147,32 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
 
 ## 3. Journal
 
+- **30/10, 8 h** : **CORRIGÉ : bande blanche, noire ou « ancien jeu » sous l'ombre d'une fenêtre
+  posée sur une fenêtre GL.** Cause : dans le WindowServer, la texture de surface d'une
+  fenêtre GL (descripteur 997) doit se lier à la **texture d'export du jeu**
+  (`remote_qtex`, trouvée par `ws_lookup`). `state_units` le faisait, mais pas sa variante
+  du chemin rapide des clés chaudes (`state_unit_one`), ni les unités d'image 8 à 15 : elles
+  liaient la `qtex` **propre** du WindowServer, créée vide. Sur l'hôte, cet identifiant
+  recyclé montrait ce qui traînait dans la texture : blanc (Zenerchi), noir (Marble Blast),
+  image d'un ancien jeu (DOOM 3). Le compositeur dessine la surface **sous** les ombres des
+  autres fenêtres (la région `SetShape` du chemin direct les exclut). Correctif : une seule
+  fonction `tex_bind_id` pour toutes les liaisons. Vérifié en VM jetable, Terminal posé sur
+  la fenêtre : Zenerchi, Marble Blast et DOOM 3 montrent le jeu sous l'ombre, avec son
+  dégradé (luminance de 37 à environ 100 sur 20 pixels sous le Terminal).
+  Enquête : sondes `gl_note` dans le WindowServer (`/var/tmp/pomppc-env`), puis
+  `draw_probe` branché sur `/var/tmp/ws-probe` (le fichier présent, une ligne par dessin
+  texturé du compositeur, avec la zone, le test d'alpha et la marque `(export)`), vidage du
+  WindowServer rejoué en natif. Fausses pistes écartées : l'alpha de la texture d'export
+  (le combineur du compositeur prend l'alpha des sommets × la constante, jamais celui de la
+  texture), le test d'alpha (`GL_GREATER 0`, sans effet une fois coupé), `Read` (méthode 5
+  du client de surface, jamais appelée).
+  **Coins noirs de DOOM 3 et Prey : pas un bug de POMPPC.** Sous gdb, `CreateGameWindow`
+  appelle `-[NSWindow initWithContentRect:styleMask:backing:defer:screen:]` avec
+  `styleMask = 1` (titre seul, d'où l'absence de boutons) et `backing = 0`
+  (`NSBackingStoreRetained`). Une fenêtre « retained » n'a pas de canal alpha et se compose
+  opaque : ses coins arrondis sortent noirs sur un vrai Mac aussi. Les deux jeux idTech 4
+  partagent ce code ; UT2004, Marble Blast et Zenerchi ont des coins justes.
+
 - **30/10, 6 h 05** : **BUG OUVERT : bande blanche à la place d'une ombre sur une fenêtre GL**
   (signalé par l'utilisateur, capture : Terminal au-dessus de Zenerchi en fenêtre, VM de la
   matrice, QE allumé par défaut). Sous l'ombre portée du Terminal (une bande d'environ 15 px à

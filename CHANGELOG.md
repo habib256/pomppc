@@ -9,6 +9,18 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Quartz Extreme, ombre sur une fenêtre GL, 30/10 (M4).** Sous l'ombre d'une fenêtre posée
+  sur un jeu en fenêtre, le compositeur montrait du blanc (Zenerchi), du noir (Marble
+  Blast) ou l'image d'un ancien jeu (DOOM 3). Il liait sa propre texture de surface, vide,
+  au lieu de la texture d'export du jeu sur le chemin rapide des clés d'état. Toutes les
+  liaisons passent maintenant par `tex_bind_id`, et le jeu apparaît sous l'ombre avec son
+  dégradé. Les coins noirs des fenêtres de DOOM 3 et Prey viennent du jeu lui-même
+  (`NSBackingStoreRetained`, sans alpha), comme sur un vrai Mac. `docs/quartz-extreme.md`.
+
+- **Émulateurs voisins, 30/10 (M4).** `tcg/0057` (`VCPUQOS=1`, fils des vCPU en QoS
+  interactive) neutre au repos ; `tcg/0058` (`POLLNS=1`, attente à la microseconde) :
+  Zenerchi −18 %, UT2004 +6,6 %. Les deux restent éteints. `docs/tcg-g4.md` §42.
+
 - **Profils CPU OS 9 expérimentaux, 27/10.** `OS9_PROFILE=memoire|flottant|complet|verifie`
   reprend les optimisations CPU de Tiger, un seul cœur, périphériques classiques.
   Sept passages DOOM II : écran fixe exact et PCM présent ; profil vérifié : 1,06 milliard
