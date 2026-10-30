@@ -183,12 +183,22 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
      recouvert est réparée à l'image suivante). `POMPPCQECursorSync` dans la personnalité
      rend l'ancien comportement. mb-pe sous QE : **11,1 ms, vert, image juste** ; curseur net
      sur la capture.
-  6. **cmr-pe** : vrai plein écran 800×600, sans curseur, le WindowServer au repos (1 %).
-     Profil des commutations (`perf -e context-switches -g`) : les vCPU s'endorment à 70 % sur
-     le BQL, la boucle principale se réveille environ 3 600 fois par seconde — **à
-     l'identique sans QE**, où une partie sous `perf` mesure aussi 54,7 ms. Les rattachements
-     de fenêtres cachées d'IndirectX (complets sous QE) tombent après la course, hors de la
-     fenêtre de mesure. L'écart du 4 est donc à reprendre sur plus de parties.
+  6. **A/B avec ce kext** (`qe2-pc-*`) : mb-pe **−7,5 %** (9,3 → 8,6), mb-fen **−13,3 %**
+     (9,0 → 7,8), zen-fen −2,1 % (4,7 → 4,6), **cmr-pe +34,4 %** (43,9 → 59,0, 5 parties par
+     bras ; le kext n'y change rien : pas de curseur).
+  7. **Cause de cmr-pe : les fenêtres cachées d'IndirectX.** Vrai plein écran 800×600, sans
+     curseur, le WindowServer au repos (1 %). Dans la fenêtre de mesure, les contextes de
+     rendu vers texture (fenêtres cachées 2d, 400×300, et 2e, 200×150) font 291 relectures
+     sous QE contre 0 sans QE, et l'attente du plugin par image triple (1,4 contre 0,5 ms).
+     IndirectX rattache à chaque image la même fenêtre cachée ; hors QE, le GLDriver d'Apple
+     rend 0 et le raccourci v20 garde l'image sur l'hôte. Sous QE, chaque rattachement
+     relisait l'image (`pomppc_before_buffers_change`, synchrone : le GPU NVIDIA est attendu),
+     allouait un tampon neuf et repassait par `glsAssignDrawable`. Sur le M4, une relecture
+     coûte peu (+3 % le 29/10). **Correctif (plugin)** : `pomppc_qe_same`, même contexte,
+     même fenêtre (cid, wid, sid) jugée cachée, tampon privé à la taille du contexte : le
+     rattachement rend 0 sans rien toucher. cmr-pe sous QE : **47,1 ms**, image juste
+     (0,00 % contre la VM et la référence). (Fausse piste écartée : la contention du BQL
+     relevée par `perf -e context-switches -g`, identique avec et sans QE.)
 
 - **30/10, 8 h** : **CORRIGÉ : bande blanche, noire ou « ancien jeu » sous l'ombre d'une fenêtre
   posée sur une fenêtre GL.** Cause : dans le WindowServer, la texture de surface d'une

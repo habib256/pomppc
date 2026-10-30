@@ -17732,6 +17732,32 @@ long pomppc_qe_attach(void *ctx, const unsigned long *desc)
     return result;
 }
 
+/* 30/10 (PC) : le pendant QE du raccourci v20 de pomppc_drawable_attached.
+   IndirectX (Colin McRae) rattache à chaque image la même fenêtre cachée à
+   ses contextes de rendu vers texture. Hors QE, le GLDriver d'Apple rend 0
+   et l'image reste sur l'hôte ; sous QE, chaque rattachement relisait
+   l'image (pomppc_before_buffers_change, synchrone), allouait un tampon neuf
+   et repassait par glsAssignDrawable : cmr-pe +30 % sur le PC, où une
+   relecture attend le GPU (+3 % sur le M4). Même contexte, même fenêtre
+   (cid, wid, sid) jugée cachée, tampon privé à la taille du contexte : 1,
+   l'attachement est sans objet. */
+int pomppc_qe_same(void *ctx, const unsigned long *desc)
+{
+    PCtx *p;
+    int same = 0;
+    if (pomppc_ws_process() || !desc || !ctx || G.state <= 0)
+        return 0;
+    pthread_mutex_lock(&G.mu);
+    p = find_ctx(ctx);
+    if (p && p->qe_sid && p->fullscreen_buf && p->surf >= 0 &&
+        p->qe_cid == desc[0] && p->qe_wid == desc[1] && p->qe_sid == desc[2] &&
+        p->hid && p->hid_wid == p->qe_wid &&
+        GLD_U32(ctx, CTX_WIDTH) == p->fullscreen_w && GLD_U32(ctx, CTX_HEIGHT) == p->fullscreen_h)
+        same = 1;
+    pthread_mutex_unlock(&G.mu);
+    return same;
+}
+
 /* 29/10 (P3) : avis au WindowServer depuis un fil à part. Le kext présente
    alors l'INSTANTANÉ de l'échange (texture d'export, TEX_PRESENT), pas la
    surface que le jeu redessine déjà : le jeu n'attend plus l'aller-retour

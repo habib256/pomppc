@@ -640,6 +640,13 @@ long gldAttachDrawable(long a, long b, long c, long d, long e, long f, long g, l
 {
     long r;
     int ws = b == 80 && pomppc_ws_process();
+    /* 30/10 : sous QE, même fenêtre cachée rattachée (IndirectX) : rien ne
+       change, ni relecture ni nouveau tampon (pomppc_qe_same) */
+    if (b == 80 && !ws && pomppc_qe_same((void *)a, (const unsigned long *)c)) {
+        pomppc_log("gldAttachDrawable(%08lx %08lx %08lx %08lx) -> 0 (QE, même fenêtre cachée)\n",
+                   a, b, c, d);
+        return 0;
+    }
     pomppc_lazy_flush((void *)a);       /* avant que les tampons changent */
     /* 29/10 : la surface d'écran du WindowServer garde son tampon d'une passe
        à l'autre, l'image reste sur l'hôte : pas de relecture */
