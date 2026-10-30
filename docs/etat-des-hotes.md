@@ -57,6 +57,25 @@ qgpu de Colin McRae.
   autres parties avec zone froide n'a gelé (§20).
 - Mémoire directe (« fastmem ») et vérification TLB compacte **écartées** sur chiffres (§21).
 
+**En arrivant sur le PC (préparé sur le M4 le 30/10, 11 h 30)** : le PC a pris trois retards
+de livraison depuis le M4 (points 6, 7 et 8 ci-dessous). Les rattraper d'un bloc **avant**
+les points 1 à 5, sinon les mesures se font sur un binaire et un plugin périmés.
+- a. `git pull`, puis `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh` : reconstruit `build/` puis
+  `build-fast/` (PGO). Les nouveautés de `patches/qgpu/` (bandes de TEX_READBACK le 28/10,
+  `QGPU_OP_TEX_PRESENT`, `QGPU_CAP_QE_DEFAULT` et la propriété `qe` le 29/10) y entrent. Les
+  patches `tcg/0057` et `tcg/0058` s'appliquent aussi, mais leur code est sous `__APPLE__` :
+  rien ne change sur Linux. Vérifier que le build ne se plaint pas de leur application.
+- b. Reconstruire et réinstaller le **kext** et le **plugin** de l'invité (`install.sh` sans
+  `QE`, personnalité « auto »), puis redémarrer l'invité. Le plugin porte le correctif
+  `tex_bind_id` du 30/10.
+- c. Sans QE (le défaut du PC) : matrice entière sur `build-fast`, pour vérifier que rien n'a
+  régressé ; rejouer d3-pe et cmr-pe à 1920×1080, car le vidage y est maintenant complet.
+- d. Ensuite seulement : la parité QE (point 7), avec, en VM jetable sous `QE=1`, la
+  vérification de l'ombre d'un Terminal posé sur Zenerchi, Marble Blast et DOOM 3 en fenêtre.
+  Le jeu doit apparaître sous l'ombre en dégradé, sans bande blanche ni noire. La méthode et
+  les outils de sonde du WindowServer sont décrits dans `docs/quartz-extreme.md`, au journal
+  du 30/10.
+
 **À faire sur le PC, dans l'ordre**
 1. Comprendre pourquoi `tools/tcg/matab.sh --restore` a relancé la VM quotidienne sur
    `build/` au lieu de `build-fast/` le 28/10 à 13 h 40.
@@ -96,7 +115,7 @@ Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). 
 `perf_event_paranoid` ≤ 1, que l'utilisateur règle à la main ; la valeur revient à 4 à chaque
 redémarrage.
 
-## 3. Mac M4 : état au 30/10/2026, 8 h 30
+## 3. Mac M4 : état au 30/10/2026, 11 h 30
 
 **Fait le 30/10**
 - **Émulateurs voisins, A/B au repos** (`docs/tcg-g4.md` §42, 4 parties par bras, mb zen ut
@@ -113,6 +132,10 @@ redémarrage.
   fenêtre dans `bench/matrice/qe-ombre-3010`. Coins noirs de DOOM 3 et Prey : la fenêtre
   est `NSBackingStoreRetained` (relevé sous gdb), comme sur un vrai Mac ; pas un bug.
   **Le plugin corrigé est installé dans la VM quotidienne** (voir plus bas).
+- **Fin de séance, 11 h 30** : la VM jetable est arrêtée et `git` est propre. La VM
+  quotidienne a été relancée par `matab.sh --restore`, puis s'est fermée ; aucune VM ne tourne.
+  Elle repart avec `./run_tiger.sh`. La suite est préparée pour le PC (section 2, « En arrivant
+  sur le PC »).
 
 ## 3 bis. Mac M4 : état au 29/10/2026, 21 h 30
 
