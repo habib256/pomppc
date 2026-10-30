@@ -47,7 +47,7 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   limitée à la zone d'ombre, ou composition depuis la texture d'export). Détails :
   `docs/quartz-extreme.md`, journal du 30/10. **6 h 23** : sous Marble Blast, la même bande
   est **noire**. La couleur suit le contenu initial du tampon invité de la surface, ce qui
-  conforte la piste. **6 h 40, DOOM 3** : la bande garde la trace d'anciens jeux, donc la
+  conforte la piste. **6 h 25, DOOM 3** : la bande garde la trace d'anciens jeux, donc la
   source est une mémoire qui persiste (VRAM de l'écran sous la fenêtre, ou tampon de
   `SetShapeBacking`) ; le kext refuse `Read` (`sRead`, `kIOReturnUnsupported`).
 - [ ] **[Outils] Endurance sur la configuration par défaut** — banc livré le 29/09
