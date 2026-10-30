@@ -34,7 +34,7 @@ Au début d'une séance :
 - Les commits vont sur `main` puis sont poussés. Un essai non retenu est rangé sous une
   étiquette `archive/*`.
 
-## 2. PC x86-64 : état au 30/10/2026, 22 h 15
+## 2. PC x86-64 : état au 30/10/2026, 23 h 35
 
 **Quartz Extreme est allumé par défaut sur le PC depuis le 30/10 au soir.** `run_tiger.sh`
 pose `qe=on` sur Linux:x86_64 ; `QE=0` l'éteint. Le détail est dans
@@ -55,21 +55,16 @@ pose `qe=on` sur Linux:x86_64 ; `QE=0` l'éteint. Le détail est dans
 - Endurance sous QE (`docs/endurance.md` §14) : 30 démarrages et 16 cycles de jeu, 0
   incident. Matrice de contrôle avec QE par défaut (`pc-qedefaut-3010`) : images justes, 0
   repli.
-- **vperm en PSHUFB** (`patches/tcg/0059-ppc-vperm-inline.patch`, `VPERMINLINE=1`,
-  `VPERMVERIFY=1` dans `run_tiger.sh`) : patch écrit, **pas encore nommé dans
-  `build_qemu_qfb.sh` ni construit**. Le nommer change l'empreinte de série, et
-  `run_tiger.sh` refuse alors `build-fast` tant qu'il n'est pas reconstruit.
+- **vperm en PSHUFB** (`tcg/0059`, `VPERMINLINE=1`) : construit dans `build/` et
+  `build-fast/` (22 h 15). Exact : 2,56 milliards de vperm vérifiés, 0 divergence. Neutre à
+  l'A/B (d3 −0,1 %, mb +2,4 %, ut +0,3 %) : **éteint par défaut** (`docs/tcg-g4.md` §43).
+- Fin de séance, 23 h 35 : aucune VM ne tourne. La VM quotidienne repart avec
+  `QEMU_FAST=1 ./run_tiger.sh` (QE allumé).
 
 **Vitesse** : DOOM 3 78-80 ms/image sur le binaire rapide ; Colin McRae environ 44,5
 ms/image en plein écran. Journal : `docs/vitesse-doom3-x86.md`.
 
 **À faire sur le PC, dans l'ordre**
-0. vperm en PSHUFB (tcg/0059) :
-   - nommer le patch dans `build_qemu_qfb.sh`, puis lancer
-     `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh` ;
-   - preuve avec `VPERMVERIFY=1` (0 divergence sur vfptest et sur une partie de DOOM 3) ;
-   - A/B `VPERMINLINE`, 3 parties par bras sur d3, mb et ut ;
-   - l'allumer seulement s'il gagne, puis repasser la matrice.
 1. Comprendre pourquoi `tools/tcg/matab.sh --restore` a relancé la VM quotidienne sur
    `build/` au lieu de `build-fast/` le 28/10 à 13 h 40.
 2. Finir la chasse au gel de cmr sous `x-tcg-cold` : au moins 6 parties cmr par bras, ref
@@ -217,7 +212,9 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
   - vérifier que le curseur reste net sur un jeu en plein écran ;
   - une petite tranche d'endurance.
 
-  À venir aussi : la parité de `tcg/0059` (vperm, TBL sur arm64) quand le PC l'aura prouvé.
+  `tcg/0059` (vperm en ligne) est neutre sur le PC : sa version arm64 (TBL) n'est pas
+  prioritaire. Sur le M4, vérifier que la série se compile toujours (l'opcode générique
+  n'y est jamais émis) ; rien ne change sans `VPERMINLINE=1`.
 
 - **Avant de quitter un hôte** : arrêter les campagnes en cours, remettre la VM quotidienne
   (`tools/tcg/matab.sh --restore`), mettre à jour cette page, puis commit et push.

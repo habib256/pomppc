@@ -5555,3 +5555,33 @@ réveille plus souvent et prend le verrou global plus souvent, en concurrence av
 (non vérifié). Règle de la vitesse générique : **éteint par défaut**. Pistes : ne prendre
 `select` que pour les délais courts, ou seulement le reste sous la milliseconde ; profiler UT
 (`sample`) pour vérifier la piste du verrou.
+
+## 43. vperm en une opération vectorielle : `tcg/0059` (`x-vperm-inline`), PC x86-64, 30/10
+
+**Idée.** `vperm` passe aujourd'hui par un helper (`x-vperm-fast`, table, allumé depuis le
+25/09). `tcg/0059` le traduit en opérations vectorielles de l'hôte : un opcode TCG générique
+`ppc_vperm_vec` que chaque back-end développe à sa façon. Sur x86, il devient deux `PSHUFB`.
+Le sélecteur `i = andc(0x1f, c) + 0x70` met le bit 7 des octets venant de vB. `PSHUFB`
+prend vB, puis `i ^ 0x80` retourne la sélection pour vA, et un `OR` réunit les deux.
+`x-vperm-verify` sauve les trois opérandes, recalcule par `helper_VPERM`, compte et
+corrige les divergences. Sans back-end (arm64 pour l'instant), l'opcode n'est pas proposé
+et le helper reste.
+
+**Preuve.** VM quotidienne avec `VPERMINLINE=1 VPERMVERIFY=1`, une partie de mb, d3 et ut en
+fenêtre (`bench/matrice/pc-vpermverif-3010`) : **2 559 937 398 vperm vérifiés, 0
+divergence**.
+
+**A/B au repos**, 3 parties par bras, `VPERMINLINE=0` contre `1`
+(`bench/tcg/ab/vperm-pc-*`). Les valeurs sont en ms/image (médianes) :
+
+| Cellule | Éteint | Allumé | Écart | Dispersion |
+|---|---:|---:|---:|---|
+| d3-fen | 79,4 | 79,3 | −0,1 % | 5,3 / 7,4 % |
+| mb-fen | 8,2 | 8,4 | +2,4 % | 7,3 / 4,8 % |
+| ut-fen | 37,3 | 37,4 | +0,3 % | 4,8 / 12,6 % |
+
+**Neutre : éteint par défaut**, gardé dans la série (`VPERMINLINE=1` pour l'essayer). vperm
+est exact et fréquent (environ 2,5 milliards en trois parties). La table de `x-vperm-fast`
+coûte déjà peu ; ce qui reste à gagner ne dépasse pas le bruit d'une partie. La version
+arm64 (TBL) n'est pas prioritaire tant qu'aucun jeu ne montre `helper_VPERM_FAST` haut dans
+un profil.

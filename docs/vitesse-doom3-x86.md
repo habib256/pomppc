@@ -934,3 +934,9 @@ Le levier 2 (vérification TLB compacte, ≈ 10 % des octets chauds) l'est aussi
 extrapolation du §20 : retirer 26 % des octets chauds y rapporte 0 à 4 %.
 **Le goulot « frontend » du §19 est donc peu sensible à la taille du code** ; la suite vise
 le nombre d'instructions exécutées et les helpers, sur un profil croisé des cinq jeux.
+
+## 22. vperm en PSHUFB (30/10, `patches/tcg/0059`, `x-vperm-inline`)
+
+Exact (2,56 milliards de vperm vérifiés sur mb, d3 et ut, 0 divergence), mais neutre : d3-fen
+79,4 → 79,3 ms, mb-fen +2,4 %, ut-fen +0,3 % (3 parties par bras, au repos). **Éteint par
+défaut.** Détail : `docs/tcg-g4.md` §43.

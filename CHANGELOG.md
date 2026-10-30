@@ -9,6 +9,10 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **vperm en PSHUFB, 30/10 (PC).** `tcg/0059` (`VPERMINLINE=1`, `VPERMVERIFY=1`) traduit
+  `vperm` en deux `PSHUFB`. Exact : 2,56 milliards vérifiés, 0 divergence. Neutre en vitesse
+  (d3 −0,1 %, mb +2,4 %, ut +0,3 %) : éteint par défaut. `docs/tcg-g4.md` §43.
+
 - **Quartz Extreme allumé sur le PC x86-64, 30/10.** Parité avec le M4 : ombre juste sur
   Marble Blast et DOOM 3, matrice et A/B au repos. Deux lenteurs propres au PC ont été
   corrigées. Le **kext** présente en asynchrone la région moins un curseur immobile, au lieu

@@ -42,6 +42,7 @@
 #   • chemins lents en zone froide de la région (x-tcg-cold) — patches/tcg/0056
 #   • fils des vCPU en QoS « user-interactive » sur macOS (x-vcpu-qos) — patches/tcg/0057
 #   • attente de la boucle principale à la microseconde sur macOS (POMPPC_POLL_NS) — patches/tcg/0058
+#   • vperm en ligne, PSHUFB sur x86 (x-vperm-inline, x-vperm-verify) — patches/tcg/0059
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -1153,6 +1154,11 @@ TCG52_MARKERS
   if ! grep -q "POMPPC_POLL_NS" util/qemu-timer.c; then
     echo "▶ patch : attente à la microseconde sur macOS (POMPPC_POLL_NS, tcg/0058)"
     patch_strict "$ROOT/patches/tcg/0058-poll-ns-macos.patch"
+  fi
+  # tcg/0059 : x-vperm-inline, vperm en une opération vectorielle (PSHUFB sur x86).
+  if ! grep -q "x-vperm-inline" target/ppc/cpu_init.c; then
+    echo "▶ patch TCG : vperm en ligne (x-vperm-inline, tcg/0059)"
+    patch_strict "$ROOT/patches/tcg/0059-ppc-vperm-inline.patch"
   fi
   grep -q 'cpu->t2_vinsns' accel/tcg/translator.c &&
     grep -q 'uint32_t t2_vinsns' include/hw/core/cpu.h || {
