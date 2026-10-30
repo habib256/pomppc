@@ -9,6 +9,16 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Quartz Extreme allumé sur le PC x86-64, 30/10.** Parité avec le M4 : ombre juste sur
+  Marble Blast et DOOM 3, matrice et A/B au repos. Deux lenteurs propres au PC ont été
+  corrigées. Le **kext** présente en asynchrone la région moins un curseur immobile, au lieu
+  de tout présenter en synchrone (Marble Blast plein écran 15,2 → 8,6 ms, −7,5 % contre sans
+  QE). Le **plugin** ne relit plus, et ne réassigne plus, une fenêtre cachée qu'on rattache
+  à l'identique (Colin McRae 59,0 → 44,5 ms). Endurance : 48 démarrages et 16 cycles de jeu
+  sans incident. `run_tiger.sh` pose `qe=on` sur Linux x86-64 ; `QE=0` l'éteint. Le plugin
+  GA est construit par le job `prebuilt`, pour les VM sans gcc. `docs/quartz-extreme.md`,
+  `docs/endurance.md` §14.
+
 - **Quartz Extreme, ombre sur une fenêtre GL, 30/10 (M4).** Sous l'ombre d'une fenêtre posée
   sur un jeu en fenêtre, le compositeur montrait du blanc (Zenerchi), du noir (Marble
   Blast) ou l'image d'un ancien jeu (DOOM 3). Il liait sa propre texture de surface, vide,

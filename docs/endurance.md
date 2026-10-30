@@ -787,3 +787,28 @@ Extreme cumule sur le M4 156 démarrages et 32 cycles de jeu en fenêtre sans in
 d'images par cycle qu'au §12 (Zenerchi 40 961 contre 35 468, DOOM 3 22 519 contre 20 763) :
 le jeu n'attend plus le WindowServer. La VM quotidienne a reçu le même kext et le même plugin
 le 29/10 à 21 h (QE actif, « recommandé par l'hôte »).
+
+## 14. PC Linux, 30/10/2026 soir : Quartz Extreme (base pc-qe-3010)
+
+Tranche de contrôle de Quartz Extreme sur le PC x86-64, avant de l'allumer par défaut
+(`docs/quartz-extreme.md`, journal du 30/10). Base `disks/tiger-endurance-pc-qe-3010.qcow2` :
+clone du disque quotidien du PC, kext (curseur contourné) et plugin (`pomppc_qe_same`) du
+commit `f01d2d7`, plugin GA, installés depuis le job `prebuilt` ; lecture seule, `qemu-img check`
+sans erreur avant et après. `QE=1 QEMU_FAST=1` (binaire rapide du 30/10, 13 h 14), défauts du
+lanceur, SMP 2, 768 Mio, deux instances. Pilotage : `bench/endurance/pc-qe-3010.sh` (non versionné).
+
+| Campagne | Démarrages | Incidents | Borne haute (Wilson 95 %) | SSH médian (min–max) | Charge hôte max |
+|---|---:|---:|---:|---|---:|
+| `pc-3010-qe-reboots` (`--mode reboot`) | 30 | 0 | 11,4 % | 20 s (20–45) | 3,3 |
+| `pc-3010-qe-jeux` (`mb,zen,ut,d3`, en fenêtre) | 18 (2 froids, 16 reboots) | 0 | 17,6 % | 20 s (15–51) | 4,3 |
+
+| Jeu | Cycles sains | Images par cycle (médiane) |
+|---|---:|---:|
+| DOOM 3 | 4/4 | 9 224 |
+| Marble Blast | 4/4 | 17 674 |
+| UT2004 | 4/4 | 4 499 |
+| Zenerchi | 4/4 | 22 977 |
+
+**48 démarrages et 16 cycles de jeu, aucun gel, aucune panique** : même niveau de preuve que
+le §13 du M4. Moins d'images par cycle que sur le M4 : le PC émule plus lentement
+(`docs/vitesse-doom3-x86.md`). QE est allumé par défaut sur Linux x86-64 le 30/10 au soir.

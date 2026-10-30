@@ -1,0 +1,342 @@
+diff --git a/include/tcg/tcg-opc.h b/include/tcg/tcg-opc.h
+--- a/include/tcg/tcg-opc.h	2026-10-30 19:44:42.573162500 +0400
++++ b/include/tcg/tcg-opc.h	2026-10-30 19:45:34.913255506 +0400
+@@ -221,6 +221,13 @@
+ 
+ DEF(bitsel_vec, 1, 3, 0, TCG_OPF_VECTOR)
+ DEF(cmpsel_vec, 1, 4, 1, TCG_OPF_VECTOR)
++/*
++ * POMPPC tcg/0059: AltiVec vperm, little-endian host vector order (bytes
++ * reversed): r.u8[j] = k < 16 ? b.u8[k] : a.u8[k - 16], k = ~c.u8[j] & 31.
++ * Only through tcg_gen_ppc_vperm_vec, which the backend expands (x86_64:
++ * pshufb); a backend without it answers 0 to tcg_can_emit_vec_op.
++ */
++DEF(ppc_vperm_vec, 1, 3, 0, TCG_OPF_VECTOR)
+ 
+ DEF(last_generic, 0, 0, 0, TCG_OPF_NOT_PRESENT)
+ 
+diff --git a/include/tcg/tcg-op-common.h b/include/tcg/tcg-op-common.h
+--- a/include/tcg/tcg-op-common.h	2026-10-30 19:44:42.579819339 +0400
++++ b/include/tcg/tcg-op-common.h	2026-10-30 19:45:34.913377652 +0400
+@@ -523,6 +523,8 @@
+ void tcg_gen_cmp_vec(TCGCond cond, unsigned vece, TCGv_vec r,
+                      TCGv_vec a, TCGv_vec b);
+ 
++/* POMPPC tcg/0059: false (nothing emitted) if the backend cannot */
++bool tcg_gen_ppc_vperm_vec(TCGv_vec r, TCGv_vec a, TCGv_vec b, TCGv_vec c);
+ void tcg_gen_bitsel_vec(unsigned vece, TCGv_vec r, TCGv_vec a,
+                         TCGv_vec b, TCGv_vec c);
+ void tcg_gen_cmpsel_vec(TCGCond cond, unsigned vece, TCGv_vec r,
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+--- a/target/ppc/cpu.h	2026-10-30 19:44:42.613603666 +0400
++++ b/target/ppc/cpu.h	2026-10-30 19:45:34.915593603 +0400
+@@ -1404,6 +1404,15 @@
+     bool vmx_verify;
+     ppc_avr_t vmxv_in[2];       /* x-vmx-verify: the operands, saved */
+     /*
++     * x-vperm-inline (POMPPC tcg/0059): vperm as inline host vector ops
++     * (x86_64: two pshufb) when the TCG backend has them, else the helper
++     * (translator only).  x-vperm-verify: proof mode, each one re-done by
++     * helper_VPERM on the saved operands and compared.
++     */
++    bool vperm_inline;
++    bool vperm_verify;
++    ppc_avr_t vpv_in[3];        /* x-vperm-verify: vA, vB, vC, saved */
++    /*
+      * x-vfp-native (POMPPC tcg/0022, needs x-vfp-fast and a TCG backend
+      * with INDEX_op_ppc_vfp: x86_64 with AVX and FMA3, aarch64):
+      * vaddfp/vsubfp/vmaddfp/vnmsubfp done by the host FPU in the generated
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+--- a/target/ppc/cpu_init.c	2026-10-30 19:44:42.620234497 +0400
++++ b/target/ppc/cpu_init.c	2026-10-30 19:45:34.916477143 +0400
+@@ -217,6 +217,14 @@
+     DEFINE_PROP_BOOL("x-vmx-inline", PowerPCCPU, env.vmx_inline, false),
+     DEFINE_PROP_BOOL("x-vmx-verify", PowerPCCPU, env.vmx_verify, false),
+     /*
++     * POMPPC tcg/0059.  x-vperm-inline: vperm as inline host vector ops
++     * where the TCG backend has them (x86_64), else the helper; same bytes.
++     * x-vperm-verify: proof mode, each one re-done by helper_VPERM and
++     * compared (stderr summary).  Off by default.
++     */
++    DEFINE_PROP_BOOL("x-vperm-inline", PowerPCCPU, env.vperm_inline, false),
++    DEFINE_PROP_BOOL("x-vperm-verify", PowerPCCPU, env.vperm_verify, false),
++    /*
+      * POMPPC tcg/0034.  x-vfp-native-cmp: vcmpeqfp/vcmpgefp/vcmpgtfp/
+      * vcmpbfp (and their Rc forms), vcfsx/vcfux, vctsxs/vctuxs by the same
+      * op as x-vfp-native (x86_64 hosts with AVX and FMA3; no effect
+diff --git a/target/ppc/helper.h b/target/ppc/helper.h
+--- a/target/ppc/helper.h	2026-10-30 19:44:42.641371523 +0400
++++ b/target/ppc/helper.h	2026-10-30 19:45:34.917305868 +0400
+@@ -276,6 +276,7 @@
+ DEF_HELPER_FLAGS_4(VMSUMMBM, TCG_CALL_NO_RWG, void, avr, avr, avr, avr)
+ DEF_HELPER_FLAGS_4(VPERM, TCG_CALL_NO_RWG, void, avr, avr, avr, avr)
+ DEF_HELPER_FLAGS_4(VPERM_FAST, TCG_CALL_NO_RWG, void, avr, avr, avr, avr)
++DEF_HELPER_FLAGS_2(vperm_verify, TCG_CALL_NO_RWG, void, env, i32) /* tcg/0059 */
+ DEF_HELPER_FLAGS_4(VPERMR, TCG_CALL_NO_RWG, void, avr, avr, avr, avr)
+ DEF_HELPER_4(vpkshss, void, env, avr, avr, avr)
+ DEF_HELPER_4(vpkshus, void, env, avr, avr, avr)
+diff --git a/target/ppc/int_helper.c b/target/ppc/int_helper.c
+--- a/target/ppc/int_helper.c	2026-10-30 19:44:42.648730745 +0400
++++ b/target/ppc/int_helper.c	2026-10-30 19:45:34.917996096 +0400
+@@ -2002,6 +2002,45 @@
+ }
+ #endif
+ 
++/*
++ * POMPPC tcg/0059, x-vperm-verify: each vperm that x-vperm-inline translated
++ * re-done by helper_VPERM on the operands saved before the inline ops
++ * (env->vpv_in) and compared; on a divergence vD gets the helper's value.
++ * Summary on stderr every 2^26 checks and at exit.
++ */
++static uint64_t vpv_n, vpv_bad;
++static bool vpv_atexit;
++
++static void vpv_report(void)
++{
++    fprintf(stderr, "vperm-verify: %" PRIu64 " vperm vérifiés, %" PRIu64
++            " divergences\n", qatomic_read(&vpv_n), qatomic_read(&vpv_bad));
++}
++
++void helper_vperm_verify(CPUPPCState *env, uint32_t rd)
++{
++    ppc_avr_t ref, *r = cpu_avr_ptr(env, rd & 31);
++    bool bad;
++
++    helper_VPERM(&ref, &env->vpv_in[0], &env->vpv_in[1], &env->vpv_in[2]);
++    bad = ref.VsrD(0) != r->VsrD(0) || ref.VsrD(1) != r->VsrD(1);
++    if (!qatomic_read(&vpv_atexit)) {
++        qatomic_set(&vpv_atexit, true);
++        atexit(vpv_report);
++    }
++    if (bad) {
++        if (qatomic_fetch_inc(&vpv_bad) < 20) {
++            fprintf(stderr, "vperm-verify: v%u: en ligne %016" PRIx64 "%016"
++                    PRIx64 ", helper %016" PRIx64 "%016" PRIx64 "\n",
++                    rd & 31, r->VsrD(0), r->VsrD(1), ref.VsrD(0), ref.VsrD(1));
++        }
++        *r = ref;
++    }
++    if ((qatomic_fetch_inc(&vpv_n) & ((1u << 26) - 1)) == 0) {
++        vpv_report();
++    }
++}
++
+ void helper_VPERM_FAST(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
+ {
+ #if defined(__aarch64__) && !HOST_BIG_ENDIAN
+diff --git a/target/ppc/translate/vmx-impl.c.inc b/target/ppc/translate/vmx-impl.c.inc
+--- a/target/ppc/translate/vmx-impl.c.inc	2026-10-30 19:44:42.634350932 +0400
++++ b/target/ppc/translate/vmx-impl.c.inc	2026-10-30 19:45:34.917664433 +0400
+@@ -2650,10 +2650,51 @@
+ TRANS_FLAGS2(ALTIVEC_207, VSUBEUQM, do_va_helper, gen_helper_VSUBEUQM)
+ TRANS_FLAGS2(ALTIVEC_207, VSUBECUQ, do_va_helper, gen_helper_VSUBECUQ)
+ 
++/*
++ * x-vperm-inline (POMPPC tcg/0059): vperm as host vector ops, the three
++ * operands read before vD is written (vD may be any of them).  False when
++ * the TCG backend has no ppc_vperm_vec (the caller then uses the helper).
++ * x-vperm-verify: the operands saved, helper_vperm_verify compares.
++ */
++static bool do_vperm_inline(DisasContext *ctx, arg_VPERM *a)
++{
++    TCGv_vec va, vb, vc, vr;
++
++    if (!tcg_can_emit_vec_op(INDEX_op_ppc_vperm_vec, TCG_TYPE_V128, MO_8)) {
++        return false;
++    }
++    va = tcg_temp_new_vec(TCG_TYPE_V128);
++    vb = tcg_temp_new_vec(TCG_TYPE_V128);
++    vc = tcg_temp_new_vec(TCG_TYPE_V128);
++    vr = tcg_temp_new_vec(TCG_TYPE_V128);
++    tcg_gen_ld_vec(va, tcg_env, avr_full_offset(a->vra));
++    tcg_gen_ld_vec(vb, tcg_env, avr_full_offset(a->vrb));
++    tcg_gen_ld_vec(vc, tcg_env, avr_full_offset(a->rc));
++    if (ctx->vperm_verify) {
++        tcg_gen_st_vec(va, tcg_env, offsetof(CPUPPCState, vpv_in[0]));
++        tcg_gen_st_vec(vb, tcg_env, offsetof(CPUPPCState, vpv_in[1]));
++        tcg_gen_st_vec(vc, tcg_env, offsetof(CPUPPCState, vpv_in[2]));
++    }
++    if (!tcg_gen_ppc_vperm_vec(vr, va, vb, vc)) {
++        g_assert_not_reached();         /* tcg_can_emit_vec_op said yes */
++    }
++    tcg_gen_st_vec(vr, tcg_env, avr_full_offset(a->vrt));
++    if (ctx->vperm_verify) {
++        gen_helper_vperm_verify(tcg_env, tcg_constant_i32(a->vrt));
++    }
++    return true;
++}
++
+ /* x-vperm-fast: the same bytes through helper_VPERM_FAST (int_helper.c) */
+ static bool trans_VPERM(DisasContext *ctx, arg_VPERM *a)
+ {
+     REQUIRE_INSNS_FLAGS(ctx, ALTIVEC);
++    if (ctx->vperm_inline) {
++        REQUIRE_VECTOR(ctx);
++        if (do_vperm_inline(ctx, a)) {
++            return true;
++        }
++    }
+     return do_va_helper(ctx, a, ctx->vperm_fast ? gen_helper_VPERM_FAST
+                                                 : gen_helper_VPERM);
+ }
+diff --git a/target/ppc/translate.c b/target/ppc/translate.c
+--- a/target/ppc/translate.c	2026-10-30 19:44:42.626317662 +0400
++++ b/target/ppc/translate.c	2026-10-30 19:45:34.917157783 +0400
+@@ -176,6 +176,7 @@
+     bool lfs_inline;
+     bool vperm_fast;
+     bool vmx_inline, vmx_verify; /* x-vmx-inline, x-vmx-verify (tcg/0021) */
++    bool vperm_inline, vperm_verify; /* x-vperm-inline, -verify (tcg/0059) */
+     bool tlb_precise;            /* x-tlb-precise, 32-bit hash MMU (tcg/0031) */
+     bool mem_stats;              /* x-mem-stats (tcg/0031) */
+     bool lmw_inline, lmw_verify; /* x-lmw-inline(-verify) (tcg/0032) */
+@@ -7005,6 +7006,8 @@
+     ctx->vperm_fast = env->vperm_fast;
+     ctx->vmx_inline = env->vmx_inline;
+     ctx->vmx_verify = env->vmx_inline && env->vmx_verify;
++    ctx->vperm_inline = env->vperm_inline;
++    ctx->vperm_verify = env->vperm_inline && env->vperm_verify;
+     ctx->vfp_native = env->vfp_native && env->vfp_fast &&
+                       env->vfn_gate_ok && tcg_ppc_vfp_supported();
+     ctx->vfp_nverify = ctx->vfp_native && env->vfp_native_verify;
+diff --git a/tcg/tcg.c b/tcg/tcg.c
+--- a/tcg/tcg.c	2026-10-30 19:44:42.592402529 +0400
++++ b/tcg/tcg.c	2026-10-30 19:45:34.913846407 +0400
+@@ -2531,6 +2531,9 @@
+         return has_type && TCG_TARGET_HAS_bitsel_vec;
+     case INDEX_op_cmpsel_vec:
+         return has_type && TCG_TARGET_HAS_cmpsel_vec;
++    case INDEX_op_ppc_vperm_vec:
++        /* POMPPC tcg/0059: only through tcg_gen_ppc_vperm_vec, expanded */
++        return false;
+ 
+     default:
+         if (op < INDEX_op_last_generic) {
+diff --git a/tcg/tcg-op-vec.c b/tcg/tcg-op-vec.c
+--- a/tcg/tcg-op-vec.c	2026-10-30 19:44:42.586083344 +0400
++++ b/tcg/tcg-op-vec.c	2026-10-30 19:45:34.913435135 +0400
+@@ -754,6 +754,38 @@
+     }
+ }
+ 
++/*
++ * POMPPC tcg/0059: AltiVec vperm (see INDEX_op_ppc_vperm_vec).  No generic
++ * expansion: false, with nothing emitted, when the backend has none; the
++ * front end then keeps its helper.
++ */
++bool tcg_gen_ppc_vperm_vec(TCGv_vec r, TCGv_vec a, TCGv_vec b, TCGv_vec c)
++{
++    TCGTemp *rt = tcgv_vec_temp(r);
++    TCGTemp *at = tcgv_vec_temp(a);
++    TCGTemp *bt = tcgv_vec_temp(b);
++    TCGTemp *ct = tcgv_vec_temp(c);
++    TCGType type = rt->base_type;
++    int can;
++
++    tcg_debug_assert(at->base_type >= type);
++    tcg_debug_assert(bt->base_type >= type);
++    tcg_debug_assert(ct->base_type >= type);
++    can = tcg_can_emit_vec_op(INDEX_op_ppc_vperm_vec, type, MO_8);
++    if (can > 0) {
++        vec_gen_4(INDEX_op_ppc_vperm_vec, type, MO_8,
++                  temp_arg(rt), temp_arg(at), temp_arg(bt), temp_arg(ct));
++    } else if (can < 0) {
++        const TCGOpcode *hold_list = tcg_swap_vecop_list(NULL);
++        tcg_expand_vec_op(INDEX_op_ppc_vperm_vec, type, MO_8,
++                          temp_arg(rt), temp_arg(at), temp_arg(bt), temp_arg(ct));
++        tcg_swap_vecop_list(hold_list);
++    } else {
++        return false;
++    }
++    return true;
++}
++
+ void tcg_gen_cmpsel_vec(TCGCond cond, unsigned vece, TCGv_vec r,
+                         TCGv_vec a, TCGv_vec b, TCGv_vec c, TCGv_vec d)
+ {
+diff --git a/tcg/x86_64/tcg-target.c.inc b/tcg/x86_64/tcg-target.c.inc
+--- a/tcg/x86_64/tcg-target.c.inc	2026-10-30 19:44:42.606713369 +0400
++++ b/tcg/x86_64/tcg-target.c.inc	2026-10-30 19:45:34.915304961 +0400
+@@ -4747,6 +4747,9 @@
+     case INDEX_op_x86_packus_vec:
+         insn = packus_insn[vece];
+         goto gen_simd;
++    case INDEX_op_x86_pshufb_vec:               /* POMPPC tcg/0059 */
++        insn = OPC_PSHUFB;
++        goto gen_simd;
+     case INDEX_op_x86_vpshldv_vec:
+         insn = vpshldv_insn[vece];
+         a1 = a2;
+@@ -4960,6 +4963,7 @@
+     case INDEX_op_x86_punpckh_vec:
+     case INDEX_op_x86_vpshldi_vec:
+     case INDEX_op_x86_vgf2p8affineqb_vec:
++    case INDEX_op_x86_pshufb_vec:
+         return C_O1_I2(x, x, x);
+ 
+     case INDEX_op_abs_vec:
+@@ -4989,6 +4993,8 @@
+ int tcg_can_emit_vec_op(TCGOpcode opc, TCGType type, unsigned vece)
+ {
+     switch (opc) {
++    case INDEX_op_ppc_vperm_vec:                /* POMPPC tcg/0059 */
++        return type == TCG_TYPE_V128 && vece == MO_8 ? -1 : 0;
+     case INDEX_op_add_vec:
+     case INDEX_op_sub_vec:
+     case INDEX_op_and_vec:
+@@ -5429,6 +5435,34 @@
+     vec_gen_6(INDEX_op_cmpsel_vec, type, vece, a0, a1, a2, a3, a4, cond);
+ }
+ 
++/*
++ * POMPPC tcg/0059: AltiVec vperm in six ops instead of a helper call.
++ * k = ~c & 31 selects byte k of b (k < 16) or k - 16 of a.  pshufb takes the
++ * low four bits of each index and gives 0 where bit 7 is set: with
++ * i = k + 0x70 (0x70..0x8f), pshufb(b, i) is b[k] for k < 16 and 0 after;
++ * i ^ 0x80 (0xf0..0xff, 0x00..0x0f) does the opposite for a.  Both halves
++ * then combine with an or.  Same bytes as helper_VPERM_FAST (tcg/0019).
++ */
++static void expand_vec_ppc_vperm(TCGType type, TCGv_vec r, TCGv_vec a,
++                                 TCGv_vec b, TCGv_vec c)
++{
++    TCGv_vec i = tcg_temp_new_vec(type);
++    TCGv_vec ta = tcg_temp_new_vec(type);
++    TCGv_vec tb = tcg_temp_new_vec(type);
++
++    tcg_gen_andc_vec(MO_8, i, tcg_constant_vec(type, MO_8, 0x1f), c);
++    tcg_gen_add_vec(MO_8, i, i, tcg_constant_vec(type, MO_8, 0x70));
++    vec_gen_3(INDEX_op_x86_pshufb_vec, type, MO_8,
++              tcgv_vec_arg(tb), tcgv_vec_arg(b), tcgv_vec_arg(i));
++    tcg_gen_xor_vec(MO_8, i, i, tcg_constant_vec(type, MO_8, 0x80));
++    vec_gen_3(INDEX_op_x86_pshufb_vec, type, MO_8,
++              tcgv_vec_arg(ta), tcgv_vec_arg(a), tcgv_vec_arg(i));
++    tcg_gen_or_vec(MO_8, r, ta, tb);
++    tcg_temp_free_vec(i);
++    tcg_temp_free_vec(ta);
++    tcg_temp_free_vec(tb);
++}
++
+ void tcg_expand_vec_op(TCGOpcode opc, TCGType type, unsigned vece,
+                        TCGArg a0, ...)
+ {
+@@ -5487,6 +5521,12 @@
+         expand_vec_cmpsel(type, vece, a0, a1, a2, a3, a4, a5);
+         break;
+ 
++    case INDEX_op_ppc_vperm_vec:                /* POMPPC tcg/0059 */
++        a3 = va_arg(va, TCGArg);
++        expand_vec_ppc_vperm(type, v0, v1, temp_tcgv_vec(arg_temp(a2)),
++                             temp_tcgv_vec(arg_temp(a3)));
++        break;
++
+     default:
+         break;
+     }
+diff --git a/tcg/x86_64/tcg-target-opc.h.inc b/tcg/x86_64/tcg-target-opc.h.inc
+--- a/tcg/x86_64/tcg-target-opc.h.inc	2026-10-30 19:44:42.599903237 +0400
++++ b/tcg/x86_64/tcg-target-opc.h.inc	2026-10-30 19:45:34.913941306 +0400
+@@ -36,3 +36,4 @@
+ DEF(x86_vpshldv_vec, 1, 3, 0, TCG_OPF_VECTOR)
+ DEF(x86_vpshrdv_vec, 1, 3, 0, TCG_OPF_VECTOR)
+ DEF(x86_vgf2p8affineqb_vec, 1, 2, 1, TCG_OPF_VECTOR)
++DEF(x86_pshufb_vec, 1, 2, 0, TCG_OPF_VECTOR)    /* POMPPC tcg/0059 */

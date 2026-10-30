@@ -459,6 +459,21 @@ for _p in "VFPFAST x-vfp-fast VFP-4-VOIES" "VPERMFAST x-vperm-fast VPERM-TABLE";
     fi
   fi
 done
+# --- vperm en opcodes vectoriels de l'hôte (x-vperm-inline, patches/tcg/0059 : deux
+# pshufb sur x86-64 ; sans l'opcode, le helper reste) --- mêmes octets. Éteint par
+# défaut (30/10) : VPERMINLINE=1 l'allume, VPERMVERIFY=1 ajoute le mode preuve.
+for _p in "VPERMINLINE x-vperm-inline VPERM-EN-LIGNE" "VPERMVERIFY x-vperm-verify VPERM-VÉRIFIÉ"; do
+  set -- $_p
+  if [ "${!1:-0}" != 0 ]; then
+    if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "$2=on"; then
+      CPU_SPEC="$CPU_SPEC,$2=on"
+      MODE="$MODE + $3"
+    else
+      echo "⚠  $1=1 demandé mais ce QEMU n'a pas la propriété '$2' (patches/tcg/0059)." >&2
+      MODE="$MODE + $3 DEMANDÉ MAIS INDISPONIBLE"
+    fi
+  fi
+done
 # --- AltiVec en ligne (x-vmx-inline, patches/tcg/0021) et flottant AltiVec par
 # le FPU de l'hôte dans le code généré (x-vfp-native, patches/tcg/0022),
 # docs/tcg-g4.md §28 --- mêmes résultats au bit près que les helpers. Allumés par
@@ -1127,11 +1142,12 @@ if [ "${GPU:-1}" != 0 ]; then
     fi
     [ -n "${GPU_TRACE:-}" ] && GPU_OPTS="$GPU_OPTS,trace=on"
     # Quartz Extreme (29/10, docs/quartz-extreme.md) : recommandé par l'hôte là où
-    # il est prouvé (Darwin:arm64) ; le kext en personnalité « auto » le suit.
+    # il est prouvé (Darwin:arm64 le 29/10, Linux:x86_64 le 30/10) ; le kext en
+    # personnalité « auto » le suit.
     # QE=0 l'éteint, QE=1 le demande sur un autre hôte. Sondé : un qgpu-pci sans
     # la propriété (QEMU d'avant le 29/10) le laisse éteint, avec un mot.
     QE_HOST=0
-    if [ "$(uname -s):$(uname -m)" = Darwin:arm64 ]; then QE_HOST=1; fi
+    case "$(uname -s):$(uname -m)" in Darwin:arm64|Linux:x86_64) QE_HOST=1 ;; esac
     case "${QE:-}" in 0) QE_HOST=0 ;; 1) QE_HOST=1 ;; esac
     if [ "$QE_HOST" = 1 ]; then
       if qemu_qgpu_device_ok "$BIN" "$MACHINE" "qe=on"; then

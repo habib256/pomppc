@@ -34,49 +34,42 @@ Au début d'une séance :
 - Les commits vont sur `main` puis sont poussés. Un essai non retenu est rangé sous une
   étiquette `archive/*`.
 
-## 2. PC x86-64 : état au 28/10/2026, 13 h 45
+## 2. PC x86-64 : état au 30/10/2026, 22 h 15
 
-**Défauts sur Linux x86-64** : toute la série 0031-0052, avec `PPC32MT`, `LFSKNOWN` et
-`TLBBASE`. Le binaire rapide PGO a été reconstruit le 28/10 à 12 h 36 et contient le correctif
-qgpu de Colin McRae.
+**Quartz Extreme est allumé par défaut sur le PC depuis le 30/10 au soir.** `run_tiger.sh`
+pose `qe=on` sur Linux:x86_64 ; `QE=0` l'éteint. Le détail est dans
+`docs/quartz-extreme.md` (journal du 30/10, points 1 à 8).
 
-**Vitesse** : DOOM 3 entre 79 et 82 ms/image en fenêtre sur le binaire rapide ; Colin McRae
-44,9-47,5 ms/image en plein écran. Journal détaillé : `docs/vitesse-doom3-x86.md`, §1 à §21.
+**Fait le 30/10**
+- Livraisons du M4 rattrapées (points a à d de l'ancien bloc « En arrivant ») :
+  `build/` et `build-fast/` reconstruits à 13 h 14. Le profil PGO vient d'une série
+  antérieure et **reste à réentraîner**. Kext, plugin et plugin GA sont installés dans la VM
+  quotidienne depuis le job `prebuilt` de la VM de dev, car la VM quotidienne n'a pas
+  gcc-4.0.
+- Matrice sans QE sans régression (`pc-sansqe-3010`). Ombre vérifiée sous QE sur mb et d3.
+- Deux correctifs QE propres au PC :
+  - kext : curseur contourné en présentation asynchrone (`805f504`), mb-pe −7,5 % contre
+    sans QE ;
+  - plugin : `pomppc_qe_same`, la fenêtre cachée d'IndirectX (`f01d2d7`), cmr-pe au niveau
+    de sans QE.
+- Endurance sous QE (`docs/endurance.md` §14) : 30 démarrages et 16 cycles de jeu, 0
+  incident. Matrice de contrôle avec QE par défaut (`pc-qedefaut-3010`) : images justes, 0
+  repli.
+- **vperm en PSHUFB** (`patches/tcg/0059-ppc-vperm-inline.patch`, `VPERMINLINE=1`,
+  `VPERMVERIFY=1` dans `run_tiger.sh`) : patch écrit, **pas encore nommé dans
+  `build_qemu_qfb.sh` ni construit**. Le nommer change l'empreinte de série, et
+  `run_tiger.sh` refuse alors `build-fast` tant qu'il n'est pas reconstruit.
 
-**Fait les 27 et 28/10**
-- Endurance : 683 démarrages sans incident (`docs/endurance.md` §10).
-- Profil aux compteurs matériels (§19) : DOOM 3 est limité par le **chargement des
-  instructions** (frontend 40,6 %).
-- **Colin McRae marche sur le PC** (commit `5c2ea82`). Le pilote NVIDIA refusait
-  `ALIAS x = fragment.color.primary;` dans deux programmes ARB. qgpu réécrit désormais ces
-  `ALIAS` en `ATTRIB`/`PARAM` (`patches/qgpu/qgpu-gl.c`, `gl_prog_fix_alias`). Le pilotage des
-  menus de `tools/matrice/jeux/cmr.py` a été rendu robuste à un hôte lent.
-- **tcg/0056 `x-tcg-cold`** (`TCGCOLD=1`), qui range les chemins lents en zone froide :
-  **éteint par défaut**. Gain de +2 à +4 % sur mb, zen et ut, neutre sur d3 et cmr.
-  **Une partie cmr a gelé** l'invité sur 4 parties cmr avec la zone froide, et aucune des 15
-  autres parties avec zone froide n'a gelé (§20).
-- Mémoire directe (« fastmem ») et vérification TLB compacte **écartées** sur chiffres (§21).
-
-**En arrivant sur le PC (préparé sur le M4 le 30/10, 11 h 30)** : le PC a pris trois retards
-de livraison depuis le M4 (points 6, 7 et 8 ci-dessous). Les rattraper d'un bloc **avant**
-les points 1 à 5, sinon les mesures se font sur un binaire et un plugin périmés.
-- a. `git pull`, puis `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh` : reconstruit `build/` puis
-  `build-fast/` (PGO). Les nouveautés de `patches/qgpu/` (bandes de TEX_READBACK le 28/10,
-  `QGPU_OP_TEX_PRESENT`, `QGPU_CAP_QE_DEFAULT` et la propriété `qe` le 29/10) y entrent. Les
-  patches `tcg/0057` et `tcg/0058` s'appliquent aussi, mais leur code est sous `__APPLE__` :
-  rien ne change sur Linux. Vérifier que le build ne se plaint pas de leur application.
-- b. Reconstruire et réinstaller le **kext** et le **plugin** de l'invité (`install.sh` sans
-  `QE`, personnalité « auto »), puis redémarrer l'invité. Le plugin porte le correctif
-  `tex_bind_id` du 30/10.
-- c. Sans QE (le défaut du PC) : matrice entière sur `build-fast`, pour vérifier que rien n'a
-  régressé ; rejouer d3-pe et cmr-pe à 1920×1080, car le vidage y est maintenant complet.
-- d. Ensuite seulement : la parité QE (point 7), avec, en VM jetable sous `QE=1`, la
-  vérification de l'ombre d'un Terminal posé sur Zenerchi, Marble Blast et DOOM 3 en fenêtre.
-  Le jeu doit apparaître sous l'ombre en dégradé, sans bande blanche ni noire. La méthode et
-  les outils de sonde du WindowServer sont décrits dans `docs/quartz-extreme.md`, au journal
-  du 30/10.
+**Vitesse** : DOOM 3 78-80 ms/image sur le binaire rapide ; Colin McRae environ 44,5
+ms/image en plein écran. Journal : `docs/vitesse-doom3-x86.md`.
 
 **À faire sur le PC, dans l'ordre**
+0. vperm en PSHUFB (tcg/0059) :
+   - nommer le patch dans `build_qemu_qfb.sh`, puis lancer
+     `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh` ;
+   - preuve avec `VPERMVERIFY=1` (0 divergence sur vfptest et sur une partie de DOOM 3) ;
+   - A/B `VPERMINLINE`, 3 parties par bras sur d3, mb et ut ;
+   - l'allumer seulement s'il gagne, puis repasser la matrice.
 1. Comprendre pourquoi `tools/tcg/matab.sh --restore` a relancé la VM quotidienne sur
    `build/` au lieu de `build-fast/` le 28/10 à 13 h 40.
 2. Finir la chasse au gel de cmr sous `x-tcg-cold` : au moins 6 parties cmr par bras, ref
@@ -90,25 +83,9 @@ les points 1 à 5, sinon les mesures se font sur un binaire et un plugin périm�
 5. Faire valider à l'œil par l'utilisateur les références `bench/matrice/ref-linux/cmr-pe` et
    `d3-fen` (`matrice.py --valider`).
 
-6. **Venu du M4 le 28/10** : `qgpu_proto.h` a changé (TEX_READBACK par bandes). Reconstruire
-   `build-fast` et `build`, puis le plugin de l'invité (`.run/cmr/cycle.sh NORUN=1` ou
-   l'équivalent du PC). Ensuite, rejouer d3-pe et cmr-pe : à 1920×1080, le vidage n'était
-   pas complet avant.
-7. **Venu du M4 le 29/10** : Quartz Extreme (P1 à P3, `docs/quartz-extreme.md`).
-   `patches/qgpu/` a changé (`QGPU_OP_TEX_PRESENT`, `QGPU_CAP_QE_DEFAULT` et la propriété
-   `qe` du device, version inchangée) : **reconstruire QEMU**, puis réinstaller kext et
-   plugin (`install.sh` sans `QE` : personnalité « auto »). Sur le PC, `run_tiger.sh` ne
-   pose pas `qe=on` : **QE reste éteint**, rien ne change pour les jeux. Hors QE, le plugin
-   réserve les 4 derniers Kio de sa tranche (chaque moitié perd 4 Kio d'arène). Pour la
-   parité : VM jetable avec `QE=1 ./run_tiger.sh` (pose `qe=on`), matrice entière et A/B en
-   fenêtre (3 passes par bras, la passe unique d'UT est trop bruitée), tranche d'endurance
-   comme au §13 de `docs/endurance.md` ; ensuite ajouter `Linux:x86_64` au test
-   d'hôte de `run_tiger.sh`.
-8. **Venu du M4 le 30/10** : correctif du plugin pour Quartz Extreme (`tex_bind_id`,
-   ombre sur une fenêtre GL). Il ne touche ni le protocole ni le kext : il suffit de
-   reconstruire et réinstaller le plugin de l'invité. Il n'a d'effet que si QE est allumé
-   (`QE=1`). Les patches `tcg/0057` et `tcg/0058` sont propres à macOS (le PC peut les
-   compiler, ils n'y font rien).
+6. Points 6 à 8 de la version précédente (livraisons du M4 du 28 au 30/10 : bandes de
+   TEX_READBACK, Quartz Extreme, `tex_bind_id`) : **faits le 30/10**.
+7. Réentraîner le profil PGO de `build-fast` sur la série actuelle.
 
 **Propres au PC** : `patches/diag/` (auto-profileur, plafonds), `tools/tcg/perfhw.sh` (compteurs
 Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). `perf` exige
@@ -228,6 +205,19 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
 `references.csv`).
 
 ## 4. À faire en passant d'un hôte à l'autre
+
+- **Venu du PC le 30/10 (pour le M4)**. Deux correctifs QE de l'invité sont à installer,
+  sans changer le protocole ni QEMU :
+  - kext : `805f504`, présentation asynchrone autour d'un curseur immobile ;
+  - plugin : `f01d2d7`, `pomppc_qe_same`.
+
+  Réinstaller kext et plugin (`install.sh` sans `QE`), puis redémarrer l'invité. Ensuite :
+  - A/B au repos sur mb-pe, mb-fen et cmr-pe, avec l'ancien kext et plugin contre les
+    nouveaux ;
+  - vérifier que le curseur reste net sur un jeu en plein écran ;
+  - une petite tranche d'endurance.
+
+  À venir aussi : la parité de `tcg/0059` (vperm, TBL sur arm64) quand le PC l'aura prouvé.
 
 - **Avant de quitter un hôte** : arrêter les campagnes en cours, remettre la VM quotidienne
   (`tools/tcg/matab.sh --restore`), mettre à jour cette page, puis commit et push.
