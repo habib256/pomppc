@@ -171,6 +171,14 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
   qui garde son contenu initial (fond de fenêtre, ou effacement fait par Apple) ; il ne prend
   ni la texture d'export ni l'image de l'hôte. L'hypothèse est confortée, et la voie de
   correction serait de remplir ce tampon, au moins dans les rectangles hors `SetShape`.
+  **6 h 40, DOOM 3** : la bande garde même **la trace d'anciens jeux**. La source est donc une
+  mémoire qui persiste d'un jeu à l'autre, et non un tampon neuf par fenêtre : soit la VRAM
+  de l'écran à la position de la fenêtre (ce que rendent `ReadLock`/`WriteLock` du kext,
+  `sLock0`), soit le tampon de forme passé par `SetShapeBacking`. Le chemin direct ne remplit
+  ni l'une ni l'autre. Lecture du kext : `Read` (méthode 5 du client de surface, `sRead`) rend
+  `kIOReturnUnsupported`. Premier contrôle : `surface N : méthode …` dans le journal de
+  l'invité (les 6 premiers appels de chaque méthode y sont notés), avec une ombre posée sur
+  le jeu.
 
 - **29/10, 21 h 15** : **curseur sur une fenêtre GL.** Le chemin direct renvoyait au
   WindowServer quand le curseur logiciel était visible sur la fenêtre ; pour une fenêtre qui
