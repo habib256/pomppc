@@ -147,6 +147,25 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
 
 ## 3. Journal
 
+- **30/10, 6 h 05** : **BUG OUVERT : bande blanche à la place d'une ombre sur une fenêtre GL**
+  (signalé par l'utilisateur, capture : Terminal au-dessus de Zenerchi en fenêtre, VM de la
+  matrice, QE allumé par défaut). Sous l'ombre portée du Terminal (une bande d'environ 15 px à
+  droite et en dessous), la fenêtre du jeu est blanche au lieu de montrer le jeu assombri.
+  Lecture du code (`present_qe`, `qa_present`) : sur le chemin direct, le kext présente
+  l'image dans la région visible de `SetShape`. Cette région exclut le rectangle de l'ombre,
+  que le WindowServer se réserve pour y mélanger l'ombre et le contenu de la fenêtre dessous.
+  Chaque échange copie bien l'image dans la texture d'export (`SURF_TEX`), mais le
+  WindowServer compose la zone d'ombre depuis une autre source, blanche. Hypothèse : le tampon
+  de la surface côté invité, jamais rempli puisque l'image ne vit que sur l'hôte. Le
+  compositeur ne lierait la texture d'export que pour ses transformations (Génie). C'est
+  vraisemblablement le même blanc que celui de l'avis `CGSFlushSurface` pour une fenêtre qui
+  n'est pas au premier plan (P3, point 2 du 29/10, 19 h 30). À faire : reproduire, comparer
+  avec `POMPPC_GL_QE_DIRECT=0`, tracer la source lue par le WindowServer (lock et lecture de
+  la surface, ou liaison de texture), corriger. Deux voies : relire l'image dans le tampon
+  invité, limitée aux rectangles hors `SetShape` de la fenêtre ; ou faire composer le
+  WindowServer depuis la texture d'export. Ensuite, recontrôler l'avis pour les fenêtres qui
+  ne sont pas au premier plan.
+
 - **29/10, 21 h 15** : **curseur sur une fenêtre GL.** Le chemin direct renvoyait au
   WindowServer quand le curseur logiciel était visible sur la fenêtre ; pour une fenêtre qui
   n'est pas au premier plan, l'avis la faisait peindre en blanc. Le kext retire maintenant le

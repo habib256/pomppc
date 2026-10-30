@@ -33,6 +33,19 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 
 ## Maintenant
 
+- [ ] **[Bug QE, M4] Bande blanche à la place de l'ombre d'une fenêtre posée sur une fenêtre GL**
+  (signalé par l'utilisateur le 30/10 à 6 h 05, capture : Terminal au-dessus de Zenerchi en
+  fenêtre). Quartz Extreme est allumé par défaut sur le M4, donc le défaut se voit au quotidien.
+  Sous l'ombre du Terminal (à droite et en dessous), la fenêtre du jeu est **blanche**, alors
+  qu'elle devrait montrer le jeu assombri. Piste : le kext ne présente le jeu que dans la région
+  visible de `SetShape`, qui exclut le rectangle de l'ombre ; le WindowServer compose cette
+  zone lui-même, depuis une source blanche (probablement le tampon de la surface côté invité,
+  jamais rempli, et non la texture d'export). C'est sans doute le même blanc que celui de
+  l'avis `CGSFlushSurface` pour une fenêtre qui n'est pas au premier plan (P3). Étapes :
+  reproduire (VM jetable, zen en fenêtre, Terminal par-dessus), comparer avec
+  `POMPPC_GL_QE_DIRECT=0`, tracer la source que lit le WindowServer, corriger (relecture
+  limitée à la zone d'ombre, ou composition depuis la texture d'export). Détails :
+  `docs/quartz-extreme.md`, journal du 30/10.
 - [ ] **[Outils] Endurance sur la configuration par défaut** — banc livré le 29/09
   (`tools/endurance/`, `docs/endurance.md`), porté sur Linux et joué une nuit sur le PC le 07/10
   (`docs/endurance.md` §7 : défauts du 06/10 + binaire rapide, **0 panique sur 305 démarrages,
