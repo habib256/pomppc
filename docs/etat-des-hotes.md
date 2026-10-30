@@ -34,7 +34,7 @@ Au début d'une séance :
 - Les commits vont sur `main` puis sont poussés. Un essai non retenu est rangé sous une
   étiquette `archive/*`.
 
-## 2. PC x86-64 : état au 30/10/2026, 23 h 35
+## 2. PC x86-64 : état au 30/10/2026, 23 h 45
 
 **Quartz Extreme est allumé par défaut sur le PC depuis le 30/10 au soir.** `run_tiger.sh`
 pose `qe=on` sur Linux:x86_64 ; `QE=0` l'éteint. Le détail est dans
@@ -75,8 +75,8 @@ ms/image en plein écran. Journal : `docs/vitesse-doom3-x86.md`.
    tous les jeux.
 4. Fixer `plancher_ms_linux` de cmr dans `tools/matrice/jeux/cmr.py` : il vaut encore 88, la
    valeur du M4, alors que le PC mesure environ 46.
-5. Faire valider à l'œil par l'utilisateur les références `bench/matrice/ref-linux/cmr-pe` et
-   `d3-fen` (`matrice.py --valider`).
+5. ~~Valider les références cmr-pe, d3-fen et d3-pe~~ : validées à l'œil par l'utilisateur le
+   30/10 à 23 h 45 ; la matrice `pc-qedefaut-3010` est entièrement verte.
 
 6. Points 6 à 8 de la version précédente (livraisons du M4 du 28 au 30/10 : bandes de
    TEX_READBACK, Quartz Extreme, `tex_bind_id`) : **faits le 30/10**.
