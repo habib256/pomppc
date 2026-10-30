@@ -33,6 +33,16 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
 
 ## Maintenant
 
+- [ ] **[Bug affichage] Coins du haut NOIRS sur les fenêtres de DOOM 3 et Prey** (signalé par
+  l'utilisateur le 30/10 à 6 h 30). Les coins arrondis de la barre de titre devraient laisser
+  voir ce qui est derrière (bureau, Terminal) ; ils sont noirs. Ce n'est **pas** dû à QE : les
+  captures de la matrice du 28/10 (`bench/matrice/20261028-1854/{d3,prey}-fen/capture.png`,
+  sans QE) le montrent déjà. Terminal, Marble Blast, Zenerchi et UT2004 ont des coins justes.
+  Seuls les deux jeux idTech 4 sont touchés, ceux dont la barre de titre est grise, unie et sans
+  boutons (un autre type de fenêtre). Le noir vient de pixels transparents composés comme
+  opaques. À faire : relever dans l'invité le type et les attributs de la fenêtre (Cocoa ou
+  Carbon, opaque, forme), vérifier si notre plugin GL écrit dans ces coins, puis comparer avec
+  le comportement d'un vrai Mac.
 - [ ] **[Bug QE, M4] Bande blanche à la place de l'ombre d'une fenêtre posée sur une fenêtre GL**
   (signalé par l'utilisateur le 30/10 à 6 h 05, capture : Terminal au-dessus de Zenerchi en
   fenêtre). Quartz Extreme est allumé par défaut sur le M4, donc le défaut se voit au quotidien.
