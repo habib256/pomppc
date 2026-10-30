@@ -1,0 +1,119 @@
+POMPPC tcg/0058 : attente de la boucle principale à la microseconde sur macOS
+
+macOS n'a pas ppoll : qemu_poll_ns retombe sur g_poll, qui arrondit le délai à
+la milliseconde supérieure. Les minuteries tirées par la boucle principale
+(décrémenteur de l'invité, son, frontal) partent donc jusqu'à 1 ms en retard.
+Le g_poll de glib sur macOS est déjà une émulation par select() ; avec
+POMPPC_POLL_NS=1 (run_tiger.sh : POLLNS=1), qemu_poll_ns fait la même avec le
+délai en microsecondes et les mêmes revents (IN, OUT, PRI). Repli sur g_poll
+si un descripteur dépasse FD_SETSIZE. Idée reprise de PowerEmu (TODO.md,
+émulateurs voisins) ; code écrit ici.
+
+diff --git a/util/qemu-timer.c b/util/qemu-timer.c
+--- a/util/qemu-timer.c
++++ b/util/qemu-timer.c
+@@ -319,7 +319,89 @@
+     /* To avoid overflow problems, limit this to 2^31, i.e. approx 25 days */
+     return MIN(ms, INT32_MAX);
+ }
++
++
++#if !defined(CONFIG_PPOLL) && defined(__APPLE__)
++/*
++ * POMPPC tcg/0058 (POMPPC_POLL_NS=1) : macOS n'a pas ppoll, et g_poll arrondit
++ * le délai à la milliseconde supérieure : une minuterie de l'invité (le
++ * décrémenteur, tiré par la boucle principale) qui tombe dans 50 us part
++ * après 1 ms.  Le g_poll de glib sur macOS est déjà une émulation par
++ * select() (poll y refuse certains périphériques) : on fait la même, avec le
++ * délai en microsecondes, et les mêmes revents (IN, OUT, PRI ; ni HUP ni
++ * ERR, comme glib).  Repli sur g_poll (-2) si un descripteur dépasse
++ * FD_SETSIZE.
++ */
++static bool qemu_poll_ns_select_on(void)
++{
++    static int on = -1;
++
++    if (on < 0) {
++        const char *e = getenv("POMPPC_POLL_NS");
++        on = e && *e && strcmp(e, "0");
++    }
++    return on;
++}
++
++static int qemu_poll_ns_select(GPollFD *fds, guint nfds, int64_t timeout)
++{
++    fd_set rd, wr, ex;
++    struct timeval tv;
++    int maxfd = -1;
++    int r;
++
++    FD_ZERO(&rd);
++    FD_ZERO(&wr);
++    FD_ZERO(&ex);
++    for (guint i = 0; i < nfds; i++) {
++        int fd = fds[i].fd;
++
++        fds[i].revents = 0;
++        if (fd < 0) {
++            continue;
++        }
++        if (fd >= FD_SETSIZE) {
++            return -2;
++        }
++        if (fds[i].events & G_IO_IN) {
++            FD_SET(fd, &rd);
++        }
++        if (fds[i].events & G_IO_OUT) {
++            FD_SET(fd, &wr);
++        }
++        if (fds[i].events & G_IO_PRI) {
++            FD_SET(fd, &ex);
++        }
++        maxfd = MAX(maxfd, fd);
++    }
++    timeout = DIV_ROUND_UP(timeout, SCALE_US);
++    tv.tv_sec = MIN(timeout / 1000000, INT32_MAX);
++    tv.tv_usec = timeout % 1000000;
++    r = select(maxfd + 1, &rd, &wr, &ex, &tv);
++    if (r <= 0) {
++        return r;
++    }
++    r = 0;
++    for (guint i = 0; i < nfds; i++) {
++        int fd = fds[i].fd;
+ 
++        if (fd < 0) {
++            continue;
++        }
++        if (FD_ISSET(fd, &rd)) {
++            fds[i].revents |= G_IO_IN;
++        }
++        if (FD_ISSET(fd, &wr)) {
++            fds[i].revents |= G_IO_OUT;
++        }
++        if (FD_ISSET(fd, &ex)) {
++            fds[i].revents |= G_IO_PRI;
++        }
++        r += fds[i].revents != 0;
++    }
++    return r;
++}
++#endif
+ 
+ /* qemu implementation of g_poll which uses a nanosecond timeout but is
+  * otherwise identical to g_poll
+@@ -343,6 +425,14 @@
+         return ppoll((struct pollfd *)fds, nfds, &ts, NULL);
+     }
+ #else
++#ifdef __APPLE__
++    if (timeout > 0 && qemu_poll_ns_select_on()) {
++        int r = qemu_poll_ns_select(fds, nfds, timeout);
++        if (r != -2) {
++            return r;
++        }
++    }
++#endif
+     return g_poll(fds, nfds, qemu_timeout_ns_to_ms(timeout));
+ #endif
+ }

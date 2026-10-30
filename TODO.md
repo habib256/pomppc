@@ -274,6 +274,10 @@ Dans l'ordre des gains estimés. Profil du 01/10 et lecture : `docs/vitesse-prof
   29/10 : dépôts lus, rien exécuté ; leurs chiffres sont annoncés, non vérifiés ; code QEMU en
   GPL v2 ou ultérieure, en-tête à vérifier fichier par fichier ; scripts en GPL-2.0 seule, à
   ne pas reprendre tels quels). Par intérêt décroissant :
+  0. **Fait le 30/10 (`docs/tcg-g4.md` §42)** : la QoS des vCPU (`tcg/0057`, `VCPUQOS=1`) est
+     **neutre** au repos ; l'attente à la microseconde (`tcg/0058`, `POLLNS=1`) fait zen −18 %
+     mais ut +6,6 %. Les deux restent éteintes. Suite possible de 0058 : `select` pour les
+     délais courts seulement, profil d'UT.
   1. **[M4] Fil du vCPU en QoS « interactive »** (`pthread_set_qos_class_self_np`
      `QOS_CLASS_USER_INTERACTIVE`) : une ligne ; facteur 3 annoncé sur une boucle de mesure
      (macOS ne relègue plus QEMU sur les cœurs lents). A/B sur le M4 au repos.

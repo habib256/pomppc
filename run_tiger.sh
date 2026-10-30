@@ -898,6 +898,29 @@ if [ "${TCGCOLD:-0}" != 0 ]; then
     MODE="$MODE + zone froide DEMANDÉE MAIS INDISPONIBLE"
   fi
 fi
+# --- Fils des vCPU en QoS « user-interactive » (x-vcpu-qos, patches/tcg/0057)
+# --- propriété de l'ACCÉLÉRATEUR, macOS seulement (sans effet ailleurs) :
+# l'ordonnanceur ne relègue plus les vCPU sur les cœurs lents. Repris de
+# PowerEmu (TODO.md, émulateurs voisins). Éteint par défaut (VCPUQOS=1
+# l'allume) tant que l'A/B n'est pas fait.
+if [ "${VCPUQOS:-0}" != 0 ]; then
+  if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-vcpu-qos=on"; then
+    TCG_ACCEL="${TCG_ACCEL:-tcg},x-vcpu-qos=on"
+    MODE="$MODE + vCPU EN QOS INTERACTIVE"
+  else
+    echo "⚠  VCPUQOS=1 demandé mais ce QEMU n'a pas la propriété 'x-vcpu-qos' (patches/tcg/0057)." >&2
+    MODE="$MODE + QoS interactive DEMANDÉE MAIS INDISPONIBLE"
+  fi
+fi
+# --- Attente de la boucle principale à la microseconde (patches/tcg/0058) ---
+# macOS n'a pas ppoll : g_poll arrondit le délai à la milliseconde supérieure,
+# et les minuteries de l'invité partent jusqu'à 1 ms en retard. POLLNS=1 passe
+# POMPPC_POLL_NS=1 à QEMU (select à la microseconde). Éteint par défaut tant
+# que l'A/B n'est pas fait ; un QEMU sans 0058 ignore la variable.
+if [ "${POLLNS:-0}" != 0 ]; then
+  export POMPPC_POLL_NS=1
+  MODE="$MODE + ATTENTE À LA MICROSECONDE"
+fi
 # --- Taille du cache de sauts (x-jc-bits, patches/tcg/0011, docs/tcg-g4.md §18)
 # --- propriété de l'ACCÉLÉRATEUR (les blocs sont partagés entre vCPU et la
 # sonde en ligne de x-ret-inline fige le hachage dans le code généré). 12 =

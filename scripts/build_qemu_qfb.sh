@@ -40,6 +40,8 @@
 #   • talon de vcf* forcé pour les preuves (x-vfp-native-cmp-slow) — patches/tcg/0054
 #   • rejeu des traces instruction par instruction (x-tier2-verify) — patches/tcg/0055
 #   • chemins lents en zone froide de la région (x-tcg-cold) — patches/tcg/0056
+#   • fils des vCPU en QoS « user-interactive » sur macOS (x-vcpu-qos) — patches/tcg/0057
+#   • attente de la boucle principale à la microseconde sur macOS (POMPPC_POLL_NS) — patches/tcg/0058
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -1141,6 +1143,16 @@ TCG52_MARKERS
   if ! grep -q "x-tcg-cold" accel/tcg/tcg-all.c; then
     echo "▶ patch TCG : chemins lents en zone froide (x-tcg-cold, tcg/0056)"
     patch_strict "$ROOT/patches/tcg/0056-tcg-cold-slow-paths.patch"
+  fi
+  # tcg/0057 : x-vcpu-qos, les fils des vCPU en QoS « user-interactive » (macOS).
+  if ! grep -q "x-vcpu-qos" accel/tcg/tcg-all.c; then
+    echo "▶ patch TCG : vCPU en QoS interactive (x-vcpu-qos, tcg/0057)"
+    patch_strict "$ROOT/patches/tcg/0057-tcg-vcpu-qos.patch"
+  fi
+  # tcg/0058 : POMPPC_POLL_NS, attente de la boucle principale à la microseconde (macOS).
+  if ! grep -q "POMPPC_POLL_NS" util/qemu-timer.c; then
+    echo "▶ patch : attente à la microseconde sur macOS (POMPPC_POLL_NS, tcg/0058)"
+    patch_strict "$ROOT/patches/tcg/0058-poll-ns-macos.patch"
   fi
   grep -q 'cpu->t2_vinsns' accel/tcg/translator.c &&
     grep -q 'uint32_t t2_vinsns' include/hw/core/cpu.h || {

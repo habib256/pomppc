@@ -5499,3 +5499,59 @@ ont donné 87,5 puis 85,4 avec ce même binaire. Cause non établie ; ne pas mes
   (`lvx`) : hors périmètre.
 - `qemu-system-ppc64` : la propriété y est sans effet (adresses 64 bits, poison inexact) ;
   `run_tiger.sh` le dit (`TLBBASE=1` sans `PPC32MT=1` en SMP).
+
+## 42. Émulateurs voisins (1) : QoS des vCPU (`tcg/0057`) et attente à la microseconde (`tcg/0058`), M4
+
+Deux idées reprises de l'étude de PowerEmu du 29/10 (`TODO.md`, émulateurs voisins). Le code
+est écrit ici, rien n'est copié. Les deux sont propres à macOS et sans effet ailleurs.
+
+**`tcg/0057`, `x-vcpu-qos`** (propriété de l'accélérateur, `VCPUQOS=1`) : chaque fil de vCPU
+(MTTCG et round-robin) appelle `pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE)`
+juste après `tcg_register_thread`. PowerEmu annonce un facteur 3 sur une boucle de mesure :
+macOS ne relègue plus le fil sur les cœurs d'efficacité.
+
+A/B `bench/tcg/ab/m4-qos-3010` : VM quotidienne, fenêtre, QE allumé (défaut), 4 parties par
+bras entrelacées, hôte au repos avant chaque partie (`chargehote.py attendre`). Les parties 1
+et 2 des deux bras ont tourné avec le frontal ImGuiDock de la VM quotidienne resté ouvert
+(~5 % d'un cœur), fermé ensuite par l'utilisateur.
+
+| jeu | ref (ms/image, médiane, min..max) | qos | écart |
+|---|---|---|---|
+| mb | 6,1 (6,1..6,2) | 6,1 (6,1..6,1) | 0 |
+| zen | 2,8 (2,6..3,0) | 3,0 (2,8..3,2) | +5 %, dans la dispersion (13-14 %) |
+| d3 | 28,9 (28,8..29,2) | 29,3 (28,9..29,8) | +1,4 % |
+| ut | 19,8 (19,6..20,0) | 19,6 (19,3..20,0) | −1 % |
+
+**Neutre** : sur un hôte au repos, l'ordonnanceur place déjà les vCPU chargés sur les cœurs de
+performance. Le facteur 3 de PowerEmu vise un fil qui dort souvent ou un hôte chargé, ce que la
+matrice ne mesure pas. **Éteint par défaut** ; le patch reste, pour un hôte chargé (compilation
+en parallèle, autre application au premier plan).
+
+**`tcg/0058`, `POMPPC_POLL_NS`** (`POLLNS=1`) : macOS n'a pas `ppoll`, donc `qemu_poll_ns`
+retombe sur `g_poll`, qui arrondit le délai à la milliseconde **supérieure**. Les minuteries
+tirées par la boucle principale (décrémenteur de l'invité sur `QEMU_CLOCK_VIRTUAL`, son,
+frontal) partent donc jusqu'à 1 ms en retard. Le `g_poll` de glib sur macOS est lui-même une
+émulation par `select()` (le `poll` de macOS refuse certains périphériques). Avec
+`POMPPC_POLL_NS=1`, `qemu_poll_ns` fait la même chose avec le délai en microsecondes et
+rend les mêmes `revents` (IN, OUT, PRI ; ni HUP ni ERR, comme glib). Il retombe sur `g_poll`
+pour un délai nul ou infini, ou si un descripteur dépasse `FD_SETSIZE`. `sample` sur une VM au
+bureau : 1663 échantillons sur 1673 dans le nouveau `select`. Un premier jet finissait par
+`poll(…, 0)` pour avoir HUP et ERR ; il a été écarté, car il aurait changé la sémantique sur
+les descripteurs que `poll` refuse (POLLNVAL).
+
+A/B `bench/tcg/ab/m4-pollns-3010` (même protocole que `m4-qos-3010`, sans frontal orphelin,
+aucune partie perdue) :
+
+| jeu | ref (ms/image, médiane, min..max) | pollns | écart |
+|---|---|---|---|
+| zen | 2,8 (2,8..2,9) | **2,3** (2,3..2,3) | **−18 %**, les 4 parties sous les 4 de ref |
+| ut | 19,6 (19,2..19,6) | 20,9 (20,4..21,8) | **+6,6 %**, les 4 au-dessus des 4 de ref |
+| d3 | 29,0 (28,4..29,4) | 29,1 (29,0..29,2) | neutre |
+| mb | 6,1 (6,1..6,2) | 6,1 (6,0..6,1) | neutre |
+
+Les deux écarts sont réels, mais **de sens opposés**. Zenerchi, rythmé par ses attentes,
+profite d'un réveil à l'heure. UT2004 y perd, sans doute parce que la boucle principale se
+réveille plus souvent et prend le verrou global plus souvent, en concurrence avec les vCPU
+(non vérifié). Règle de la vitesse générique : **éteint par défaut**. Pistes : ne prendre
+`select` que pour les délais courts, ou seulement le reste sous la milliseconde ; profiler UT
+(`sample`) pour vérifier la piste du verrou.

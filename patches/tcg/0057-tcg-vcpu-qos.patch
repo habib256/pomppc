@@ -1,0 +1,108 @@
+POMPPC tcg/0057 : fils des vCPU en QoS « user-interactive » sur macOS (x-vcpu-qos)
+
+Propriété de l'accélérateur TCG, éteinte par défaut. Allumée, chaque fil de
+vCPU (MTTCG et round-robin) appelle pthread_set_qos_class_self_np(
+QOS_CLASS_USER_INTERACTIVE) après tcg_register_thread : l'ordonnanceur de
+macOS ne le relègue plus sur les cœurs d'efficacité. Sans effet hors macOS.
+Idée reprise de PowerEmu (TODO.md, émulateurs voisins, étude du 29/10) ; code
+écrit ici. run_tiger.sh : VCPUQOS=1.
+
+diff --git a/include/tcg/startup.h b/include/tcg/startup.h
+--- a/include/tcg/startup.h
++++ b/include/tcg/startup.h
+@@ -58,6 +58,13 @@
+  * chemin lent n'ont pas la portée : éteint avec un avertissement).
+  */
+ extern bool tcg_cold_split;
++/*
++ * POMPPC tcg/0057 (x-vcpu-qos) : sur macOS, les fils des vCPU se mettent en
++ * QoS « user-interactive », pour que l'ordonnanceur ne les relègue pas sur
++ * les cœurs lents.  Sans effet ailleurs.
++ */
++extern bool tcg_vcpu_qos;
++void tcg_vcpu_qos_apply(void);
+ 
+ /**
+  * tcg_register_thread: Register this thread with the TCG runtime
+diff --git a/accel/tcg/tcg-all.c b/accel/tcg/tcg-all.c
+--- a/accel/tcg/tcg-all.c
++++ b/accel/tcg/tcg-all.c
+@@ -38,6 +38,9 @@
+ #include "qemu/target-info.h"
+ #ifndef CONFIG_USER_ONLY
+ #include "hw/core/boards.h"
++#ifdef __APPLE__
++#include <pthread/qos.h>
++#endif
+ #include "exec/tb-flush.h"
+ #include "system/runstate.h"
+ #endif
+@@ -268,6 +271,33 @@
+ static void tcg_set_cold(Object *obj, bool value, Error **errp)
+ {
+     tcg_cold_split = value;
++}
++
++/* POMPPC tcg/0057 */
++bool tcg_vcpu_qos;
++
++static bool tcg_get_vcpu_qos(Object *obj, Error **errp)
++{
++    return tcg_vcpu_qos;
++}
++
++static void tcg_set_vcpu_qos(Object *obj, bool value, Error **errp)
++{
++    tcg_vcpu_qos = value;
++}
++
++void tcg_vcpu_qos_apply(void)
++{
++    if (!tcg_vcpu_qos) {
++        return;
++    }
++#ifdef __APPLE__
++    int r = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
++    if (r) {
++        warn_report("x-vcpu-qos: pthread_set_qos_class_self_np: %s",
++                    strerror(r));
++    }
++#endif
+ }
+ 
+ static void tcg_set_jit_near(Object *obj, bool value, Error **errp)
+@@ -401,6 +431,12 @@
+         "x86_64: put the slow paths in the last quarter of each region, "
+         "away from the TB bodies (POMPPC tcg/0056)");
+ 
++    object_class_property_add_bool(oc, "x-vcpu-qos",
++        tcg_get_vcpu_qos, tcg_set_vcpu_qos);
++    object_class_property_set_description(oc, "x-vcpu-qos",
++        "macOS: run the vCPU threads at the user-interactive QoS class, "
++        "so that they stay on the performance cores (POMPPC tcg/0057)");
++
+     object_class_property_add_bool(oc, "x-jit-near",
+         tcg_get_jit_near, tcg_set_jit_near);
+     object_class_property_set_description(oc, "x-jit-near",
+diff --git a/accel/tcg/tcg-accel-ops-mttcg.c b/accel/tcg/tcg-accel-ops-mttcg.c
+--- a/accel/tcg/tcg-accel-ops-mttcg.c
++++ b/accel/tcg/tcg-accel-ops-mttcg.c
+@@ -76,6 +76,7 @@
+     force_rcu.cpu = cpu;
+     rcu_add_force_rcu_notifier(&force_rcu.notifier);
+     tcg_register_thread();
++    tcg_vcpu_qos_apply();
+ 
+     bql_lock();
+     qemu_thread_get_self(cpu->thread);
+diff --git a/accel/tcg/tcg-accel-ops-rr.c b/accel/tcg/tcg-accel-ops-rr.c
+--- a/accel/tcg/tcg-accel-ops-rr.c
++++ b/accel/tcg/tcg-accel-ops-rr.c
+@@ -188,6 +188,7 @@
+     force_rcu.notify = rr_force_rcu;
+     rcu_add_force_rcu_notifier(&force_rcu);
+     tcg_register_thread();
++    tcg_vcpu_qos_apply();
+ 
+     bql_lock();
+     qemu_thread_get_self(cpu->thread);
