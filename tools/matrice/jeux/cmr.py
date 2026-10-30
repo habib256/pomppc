@@ -55,6 +55,8 @@ class ColinMcRae(Jeu):
     famille = "ARB via IndirectX, rendu vers texture"
     processus = "Colin McRae Rally Mac"
     plancher_ms = 88          # 70,7 ms/image du jeu au 29/09 (tour 20260929-2344, 3 échanges par image)
+    plancher_ms_linux = 60    # PC, binaire rapide, plein écran : 44,5-47,5 (28/10 cold-2810-cmr2 fast,
+                              # 30/10 pc-qedefaut-3010, QE allumé) ×1,25 ; arbre -O2 qemu-ceil 49,1-50,0
     echanges_par_image = 3
     delai_scene = 900
     dump_images = 30            # 10 images du jeu

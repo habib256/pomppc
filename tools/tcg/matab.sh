@@ -65,9 +65,20 @@ start_vm() { # start_vm JOURNAL [VAR=v …]  (les parties : fenêtre QEMU native
 
 if [ "${1:-}" = "--restore" ]; then
   stop_vm
+  # 31/10 : le binaire et les leviers d'un bras (QEMU_BIN, QEMU_FAST, TCGCOLD…) hérités de
+  # l'appelant ne doivent pas suivre la VM quotidienne ; le binaire lancé est affiché.
+  # (28/10 13 h 40 : chaine4.sh tué en pleine partie ref-3, la VM qemu-ceil/build/ de la
+  # partie est restée allumée et le --restore final n'a jamais tourné.)
+  unset QEMU_BIN QEMU_FAST USER_QEMU_BIN TCG_OPTS CPU_OPTS EXTRA_ARGS TCGCOLD
   # rendue comme ./run_tiger.sh la lance : ImGuiDock (demande de l'utilisateur, 26/10)
   MATAB_FRONTEND=imgui start_vm "$R/.run/run_tiger-zen.log" &&
     echo "VM quotidienne relancée dans ImGuiDock (binaire et défauts du lanceur)"
+  b=$(grep -a -o '▶ Tiger (QEMU [^)]*)' "$R/.run/run_tiger-zen.log" | tail -1)
+  echo "  ${b:-binaire non relevé (voir .run/run_tiger-zen.log)}"
+  case "$(uname -sm):$b" in
+    "Linux x86_64:"*rapide*|Darwin*) ;;
+    *) echo "⚠  la VM quotidienne ne tourne pas sur le binaire rapide : voir les ⚠ de .run/run_tiger-zen.log" ;;
+  esac
   exit 0
 fi
 
