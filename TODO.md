@@ -45,7 +45,9 @@ les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
   reproduire (VM jetable, zen en fenêtre, Terminal par-dessus), comparer avec
   `POMPPC_GL_QE_DIRECT=0`, tracer la source que lit le WindowServer, corriger (relecture
   limitée à la zone d'ombre, ou composition depuis la texture d'export). Détails :
-  `docs/quartz-extreme.md`, journal du 30/10.
+  `docs/quartz-extreme.md`, journal du 30/10. **6 h 23** : sous Marble Blast, la même bande
+  est **noire**. La couleur suit le contenu initial du tampon invité de la surface, ce qui
+  conforte la piste.
 - [ ] **[Outils] Endurance sur la configuration par défaut** — banc livré le 29/09
   (`tools/endurance/`, `docs/endurance.md`), porté sur Linux et joué une nuit sur le PC le 07/10
   (`docs/endurance.md` §7 : défauts du 06/10 + binaire rapide, **0 panique sur 305 démarrages,

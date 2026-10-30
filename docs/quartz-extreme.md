@@ -165,6 +165,12 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
   invité, limitée aux rectangles hors `SetShape` de la fenêtre ; ou faire composer le
   WindowServer depuis la texture d'export. Ensuite, recontrôler l'avis pour les fenêtres qui
   ne sont pas au premier plan.
+  **6 h 23, deuxième capture (Marble Blast sous le Terminal)** : même bande, mais **noire**.
+  La couleur dépend du jeu (Zenerchi blanc, Marble Blast noir), et aucun dégradé d'ombre ne
+  se voit. Le WindowServer recopie donc dans cette zone le **tampon invité de la surface**,
+  qui garde son contenu initial (fond de fenêtre, ou effacement fait par Apple) ; il ne prend
+  ni la texture d'export ni l'image de l'hôte. L'hypothèse est confortée, et la voie de
+  correction serait de remplir ce tampon, au moins dans les rectangles hors `SetShape`.
 
 - **29/10, 21 h 15** : **curseur sur une fenêtre GL.** Le chemin direct renvoyait au
   WindowServer quand le curseur logiciel était visible sur la fenêtre ; pour une fenêtre qui
