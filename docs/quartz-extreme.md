@@ -143,9 +143,52 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
 | **P0 bis** | Plugin GA `POMPPCGA.plugin` (CFPlugIn, `IOGraphicsAcceleratorInterface`) : blitters de copie et de remplissage en VRAM, d'abord par le processeur de l'invité ; `IOCFPlugInTypes` posé sur le framebuffer par le kext en mode QE. | drapeaux d'écran posés sans gdb, `AttachDrawable` du compositeur |
 | **P1 (bureau juste, 29/10)** | Le bureau composé par le plugin vers le scanout (le contexte du WindowServer est un plein écran : `SURF_PRESENT`), sans application GL. | bureau identique à celui sans Quartz Extreme (captures), défilement et ombres justes |
 | **P2 (29/10)** | Fenêtres des applications GL sous Quartz Extreme : surface accélérée liée par le plugin, présentée par le noyau au Flush, texture d'export pour le compositeur. | matrice en fenêtre verte avec Quartz Extreme |
-| **P3 (29/10)** | Vitesse (WindowServer, jeux en fenêtre), endurance, allumage par défaut. Fait : TEX_PRESENT, présentation directe par le noyau, A/B (QE au niveau d'éteint ou mieux), endurance M4 sans incident ; **allumé par défaut sur le M4** (`QGPU_CAP_QE_DEFAULT`), le PC après sa preuve. | A/B sur la matrice entière, endurance |
+| **P3 (29/10)** | Vitesse (WindowServer, jeux en fenêtre), endurance, allumage par défaut. Fait : TEX_PRESENT, présentation directe par le noyau, A/B (QE au niveau d'éteint ou mieux), endurance M4 sans incident ; **allumé par défaut sur le M4** (`QGPU_CAP_QE_DEFAULT`), le PC après sa preuve (en cours le 30/10, journal). | A/B sur la matrice entière, endurance |
 
 ## 3. Journal
+
+- **30/10, PC x86-64 (13 h-19 h) : parité de Quartz Extreme.**
+  1. **Construction et installation.** `build/` et `build-fast/` reconstruits (profil PGO
+     pris sur une autre série : les fichiers de `tcg/0057`-`0058` sont compilés sans profil,
+     sans effet sur un A/B au même binaire). La VM quotidienne du PC **n'a pas de gcc-4.0** :
+     kext, plugin et plugin GA viennent du job `prebuilt` de la VM de dev, qui ne construisait
+     pas le plugin GA. Le job le construit maintenant, `stage.sh` emporte `guest/ga`, et
+     `install.sh` installe le GA déjà compilé quand gcc manque. Le code QE de l'hôte
+     (`TEX_PRESENT`, FBO de relecture) est du GL commun : rien à porter pour EGL/NVIDIA.
+     Sous `QE=1` : « Quartz Extreme: Supported », `IOCFPlugInTypes` posé sur le framebuffer.
+  2. **Ombre sur une fenêtre GL** (Terminal posé sur le jeu, `osascript`, capture au
+     moniteur) : Marble Blast et DOOM 3 montrent le jeu sous l'ombre, en dégradé (d3 : 21 à 49
+     sur 10 px ; mb : 40 à 230 sur 15 px). Zenerchi n'est pas un bon témoin sur le PC : son
+     disque le met en 800×600 plein écran, avec ou sans QE. Une fois, la toute première
+     activation du Terminal après le passage de Zenerchi (800×600 puis 1024×768) a laissé
+     Marble Blast peint par-dessus le Terminal ; ce n'est pas reproduit en 4 essais
+     (activation, déplacement, DOOM 3 neuf).
+  3. **Matrice entière sans QE** (`pc-sansqe-3010`) : rien n'a régressé (mb, zen, ut verts ;
+     d3 et cmr justes, références encore à valider à l'œil). **Sous QE** (`pc-qe-3010`) : le
+     fenêtré tient, mais mb-pe sort rouge (« rejeu sans présentation ») à 16 ms contre 9.
+  4. **A/B au repos, 3 parties par bras, QE=0 contre QE=1** (`bench/tcg/ab/qe-pc-*`) : ut-fen
+     −0,5 %, d3-fen +3,8 %, **mb-pe +61,7 %** (9,4 → 15,2 ms), **cmr-pe +28 %** (44,6 → 57,1,
+     dispersion 49 % sous QE).
+  5. **Cause de mb-pe : le curseur.** Le « plein écran » de Marble Blast (`-fullscreen`) est
+     une fenêtre de la taille de l'écran (type 80) ; sans QE, la présentation directe du
+     plugin l'écrase, barre de titre et curseur compris. Sous QE, elle est liée en surface
+     accélérée et présentée par le noyau ; Marble Blast laisse le curseur visible au milieu,
+     donc **chaque** présentation était synchrone (retrait du curseur, image, remise) : le
+     vCPU restait dans QEMU le temps de l'image sur le GPU de l'hôte et de sa relecture
+     (vCPU à 30-40 % sur l'hôte, plugin sans attente). **Correctif (kext seul, protocole
+     inchangé)** : curseur immobile depuis sa dernière remise, la présentation contourne son
+     rectangle (4 bandes au plus par rectangle visible) et part en asynchrone ; une sur
+     `POMPPC_QE_CURSOR_REFRESH + 1` (9) reste synchrone pour rafraîchir le fond sous la flèche,
+     et un curseur déplacé repasse par le synchrone (une soumission en vol qui l'aurait
+     recouvert est réparée à l'image suivante). `POMPPCQECursorSync` dans la personnalité
+     rend l'ancien comportement. mb-pe sous QE : **11,1 ms, vert, image juste** ; curseur net
+     sur la capture.
+  6. **cmr-pe** : vrai plein écran 800×600, sans curseur, le WindowServer au repos (1 %).
+     Profil des commutations (`perf -e context-switches -g`) : les vCPU s'endorment à 70 % sur
+     le BQL, la boucle principale se réveille environ 3 600 fois par seconde — **à
+     l'identique sans QE**, où une partie sous `perf` mesure aussi 54,7 ms. Les rattachements
+     de fenêtres cachées d'IndirectX (complets sous QE) tombent après la course, hors de la
+     fenêtre de mesure. L'écart du 4 est donc à reprendre sur plus de parties.
 
 - **30/10, 8 h** : **CORRIGÉ : bande blanche, noire ou « ancien jeu » sous l'ombre d'une fenêtre
   posée sur une fenêtre GL.** Cause : dans le WindowServer, la texture de surface d'une

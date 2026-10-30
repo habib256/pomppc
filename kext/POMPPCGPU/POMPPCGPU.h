@@ -32,6 +32,7 @@
 #include <IOKit/IOUserClient.h>
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/graphics/IOAccelerator.h>
+#include <IOKit/graphics/IOGraphicsTypes.h>          /* IOGBounds */
 #include <IOKit/graphics/IOGraphicsInterfaceTypes.h>   /* kIOAccelTypesKey… */
 #include <IOKit/graphics/IOFramebuffer.h>
 #include <IOKit/IOKitKeys.h>                         /* kIOCFPlugInTypesKey */
@@ -98,7 +99,8 @@
 #define POMPPC_GA_SURF_POS      4
 /* Méthode 5 (29/10, P3) : [sid] → présentation par le noyau dans la région
    visible gardée au dernier SetShape, sans passer par le WindowServer.
-   Curseur visible sur la fenêtre : retiré, présentation synchrone, remis.
+   Curseur visible sur la fenêtre : retiré, présentation synchrone, remis ;
+   30/10, curseur immobile : région moins le rectangle du curseur, asynchrone.
    kIOReturnBusy : région inconnue (pas encore de SetShape) — le jeu avise
    alors le WindowServer, qui fera le Flush comme avant. */
 #define POMPPC_GA_PRESENT       5
@@ -107,6 +109,10 @@
 /* Zone de commandes du client (fin de sa tranche), écrite par le kext au
    Flush d'une surface exportée : un SURF_PRESENT par rectangle visible. */
 #define POMPPC_QE_CMD_BYTES     4096
+/* 30/10 : curseur immobile sur une fenêtre de jeu — la présentation contourne
+   son rectangle, asynchrone ; une sur POMPPC_QE_CURSOR_REFRESH + 1 reste
+   synchrone (retrait, image, remise) pour rafraîchir le fond sous la flèche. */
+#define POMPPC_QE_CURSOR_REFRESH 8
 
 struct POMPPCExport {
     UInt32 sid, tex, w, h, seq;
@@ -115,6 +121,8 @@ struct POMPPCExport {
     bool   pos;
     UInt32 half;                    /* P3 : moitié de la zone à écrire au prochain Flush */
     UInt32 qfence[2];               /* barrière de la dernière soumission de chaque moitié */
+    IOGBounds cur;                  /* 30/10 : rectangle du curseur à la dernière remise */
+    UInt32 carved;                  /* présentations qui l'ont contourné depuis */
     void * owner;                   /* client 2D qui a publié */
 };
 #define POMPPC_GA_PLUGIN        "POMPPCGA.plugin"

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 VERHILLE Arnaud
 # Binaires prêts à installer, pour un Tiger SANS Xcode Tools : kext, plugin
-# OpenGL, gltest, glwin et accelprobe, compilés ici puis rapportés dans out/prebuilt.
+# OpenGL, plugin GA (Quartz Extreme, 30/10), gltest, glwin et accelprobe, compilés ici puis rapportés dans out/prebuilt.
 # scripts/make_kext_iso.sh les grave sur le CD (disks/prebuilt), et
 # guest/gldriver/install.sh les installe quand gcc-4.0 manque.
 . ./lib.sh
@@ -11,11 +11,14 @@ P=$OUT/prebuilt; mkdir -p $P
   { tail -15 $OUT/kext-build.txt; exit 1; }
 ( cd $SRC/guest/gldriver && make clean >/dev/null 2>&1; make > $OUT/plugin-build.txt 2>&1 ) ||
   { tail -15 $OUT/plugin-build.txt; exit 1; }
+( cd $SRC/guest/ga && make clean >/dev/null 2>&1; make > $OUT/ga-build.txt 2>&1 ) ||
+  { tail -15 $OUT/ga-build.txt; exit 1; }
 gltest_build || exit 1
 ( cd $SRC/guest/gltest &&
   /usr/bin/gcc-4.0 -arch ppc -O1 -isysroot $SDK -o glwin glwin.c -framework GLUT -framework OpenGL &&
   /usr/bin/gcc-4.0 -arch ppc -O1 -isysroot $SDK -o accelprobe accelprobe.c -framework IOKit \
     -framework CoreFoundation -framework OpenGL -framework ApplicationServices ) || exit 1
-cp -R $SRC/kext/POMPPCGPU/POMPPCGPU.kext $SRC/guest/gldriver/GLDriver-POMPPC.bundle $P/
+cp -R $SRC/kext/POMPPCGPU/POMPPCGPU.kext $SRC/guest/gldriver/GLDriver-POMPPC.bundle \
+      $SRC/guest/ga/POMPPCGA.plugin $P/
 cp $SRC/guest/gltest/gltest $SRC/guest/gltest/glwin $SRC/guest/gltest/accelprobe $P/
 ls -lR $P | head -30

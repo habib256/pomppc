@@ -1822,6 +1822,7 @@ IOReturn POMPPCAccelerator::exportSurface(void * owner, UInt32 sid, UInt32 tex, 
     free_e->tex = tex; free_e->w = w; free_e->h = h;
     free_e->surf = surf; free_e->cmdoff = cmdoff;
     free_e->pos = false;
+    free_e->carved = POMPPC_QE_CURSOR_REFRESH;   /* 1re image sous le curseur : synchrone */
     free_e->seq = ++fExportSeq;
     free_e->owner = owner;
     GPULog("export : surface %lx -> texture hôte %lu (%lux%lu)\n", (unsigned long) sid,
@@ -1997,6 +1998,50 @@ IOReturn POMPPCAccelerator::presentSurface(UInt32 sid)
     return r;
 }
 
+/* 30/10 : rectangle visible en coordonnées d'écran, bornes exclues à droite et en bas. */
+struct POMPPCQERect {
+    SInt32 x0, y0, x1, y1;
+};
+
+/* Morceaux de présentation : 4 au plus par rectangle visible, et pas plus que
+   n'en tient une moitié de la zone de commandes (soumission asynchrone). */
+#define POMPPC_QE_MAX_PIECES (POMPPC_QE_CMD_BYTES / 2 / (QGPU_LEN_SURF_PRESENT * 4))
+
+/* r moins le rectangle c (curseur), en au plus 4 bandes ; 0 si c le couvre
+   entièrement, -1 si `room` ne suffit pas. */
+static int carveRect(const POMPPCQERect * r, const IOGBounds * c, POMPPCQERect * out, int room)
+{
+    POMPPCQERect m[4];
+    int          k = 0, i;
+    SInt32       cy0, cy1;
+
+    if (c->maxx <= r->x0 || c->minx >= r->x1 || c->maxy <= r->y0 || c->miny >= r->y1) {
+        m[k++] = *r;
+    } else {
+        cy0 = c->miny > r->y0 ? c->miny : r->y0;
+        cy1 = c->maxy < r->y1 ? c->maxy : r->y1;
+        if (c->miny > r->y0) {
+            m[k].x0 = r->x0; m[k].y0 = r->y0; m[k].x1 = r->x1; m[k].y1 = c->miny; k++;
+        }
+        if (c->maxy < r->y1) {
+            m[k].x0 = r->x0; m[k].y0 = c->maxy; m[k].x1 = r->x1; m[k].y1 = r->y1; k++;
+        }
+        if (c->minx > r->x0) {
+            m[k].x0 = r->x0; m[k].y0 = cy0; m[k].x1 = c->minx; m[k].y1 = cy1; k++;
+        }
+        if (c->maxx < r->x1) {
+            m[k].x0 = c->maxx; m[k].y0 = cy0; m[k].x1 = r->x1; m[k].y1 = cy1; k++;
+        }
+    }
+    if (k > room) {
+        return -1;
+    }
+    for (i = 0; i < k; i++) {
+        out[i] = m[i];
+    }
+    return k;
+}
+
 IOReturn POMPPCAccelerator::flushSurfaceLocked(UInt32 sid, IOFramebuffer * fb,
                                                const IOAccelBounds * bounds,
                                                const IOAccelBounds * rects, UInt32 nrects,
@@ -2007,8 +2052,12 @@ IOReturn POMPPCAccelerator::flushSurfaceLocked(UInt32 sid, IOFramebuffer * fb,
     IODisplayModeID    mode;
     IOIndex            depth;
     IOPixelInformation pix;
-    UInt32             cmds[POMPPC_MAX_RECTS * QGPU_LEN_SURF_PRESENT], n = 0, i, bypp, fmt;
-    UInt32             st = 0, op, src;
+    POMPPCQERect       vis[POMPPC_MAX_RECTS], pieces[POMPPC_QE_MAX_PIECES];
+    const POMPPCQERect * pr;
+    UInt32             cmds[POMPPC_QE_MAX_PIECES * QGPU_LEN_SURF_PRESENT], n = 0, i, bypp, fmt;
+    UInt32             nvis = 0, npr, st = 0, op, src;
+    StdFBShmem_t *     sh;
+    bool               cursor, carve = false, sync;
     int                k;
 
     for (k = 0; k < POMPPC_MAX_EXPORTS; k++) {
@@ -2035,7 +2084,7 @@ IOReturn POMPPCAccelerator::flushSurfaceLocked(UInt32 sid, IOFramebuffer * fb,
     } else {
         return kIOReturnSuccess;
     }
-    for (i = 0; i < nrects && n + QGPU_LEN_SURF_PRESENT <= sizeof(cmds) / 4; i++) {
+    for (i = 0; i < nrects; i++) {
         SInt32 x0 = rects[i].x, y0 = rects[i].y;
         SInt32 x1 = x0 + rects[i].w, y1 = y0 + rects[i].h;
         /* bornée à la surface (taille publiée) et à l'écran */
@@ -2050,26 +2099,11 @@ IOReturn POMPPCAccelerator::flushSurfaceLocked(UInt32 sid, IOFramebuffer * fb,
         if (x1 <= x0 || y1 <= y0) {
             continue;
         }
-        cmds[n++] = QGPU_CMD_HDR(QGPU_OP_SURF_PRESENT, QGPU_LEN_SURF_PRESENT);
-        cmds[n++] = e->surf;
-        cmds[n++] = (UInt32) y0 * pix.bytesPerRow + (UInt32) x0 * bypp;
-        cmds[n++] = pix.bytesPerRow;
-        cmds[n++] = (UInt32) (x0 - bounds->x);
-        cmds[n++] = (UInt32) (y0 - bounds->y);
-        cmds[n++] = (UInt32) (x1 - x0);
-        cmds[n++] = (UInt32) (y1 - y0);
-        cmds[n++] = fmt;
+        vis[nvis].x0 = x0; vis[nvis].y0 = y0; vis[nvis].x1 = x1; vis[nvis].y1 = y1;
+        nvis++;
     }
-    if (!n) {
+    if (!nvis) {
         return kIOReturnSuccess;
-    }
-    /* l'instantané si l'hôte sait le présenter (le jeu n'attend alors plus) */
-    op = (gpu->caps() & QGPU_CAP_TEX_PRESENT) && e->tex != 0xffffffffUL ? QGPU_OP_TEX_PRESENT
-                                                                       : QGPU_OP_SURF_PRESENT;
-    src = op == QGPU_OP_TEX_PRESENT ? e->tex : e->surf;
-    for (i = 0; i < n; i += QGPU_LEN_SURF_PRESENT) {
-        cmds[i] = QGPU_CMD_HDR(op, QGPU_LEN_SURF_PRESENT);
-        cmds[i + 1] = src;
     }
     /* P3 : asynchrone — le WindowServer ne garde plus un vCPU dans QEMU le
        temps que l'hôte vide la file du jeu. Deux moitiés de la zone en
@@ -2078,10 +2112,66 @@ IOReturn POMPPCAccelerator::flushSurfaceLocked(UInt32 sid, IOFramebuffer * fb,
        autour du Flush (relevé du 29/10), la présentation l'écrasait et son
        fond sauvé devenait périmé. On le retire (hideCursor rend son fond),
        on présente en SYNCHRONE, puis showCursor sauve le nouveau fond et le
-       redessine. */
+       redessine.
+       30/10 (PC) : ce synchrone tient le vCPU tout le temps de l'image sur le
+       GPU de l'hôte et de sa relecture — Marble Blast, qui laisse le curseur
+       au milieu de l'écran, passait de 9,4 à 15,2 ms/image en plein écran
+       sous QE. Quand le jeu présente lui-même (`direct`) et que le curseur
+       n'a pas bougé depuis sa dernière remise, l'image contourne son
+       rectangle et part en asynchrone : le curseur reste dessiné, seul le
+       fond sous la flèche date (rafraîchi par une présentation synchrone sur
+       POMPPC_QE_CURSOR_REFRESH + 1). Un curseur déplacé repasse par le
+       synchrone : une soumission en vol qui l'a recouvert est ainsi réparée
+       à l'image suivante. POMPPCQESync ou POMPPCQECursorSync : l'ancien
+       comportement. */
+    sh = POMPPCFBPeek::shmem(fb);
+    cursor = cursorOver(fb, rects, nrects);
+    sync = gpu->getProperty("POMPPCQESync") == kOSBooleanTrue;
+    if (cursor && direct && sh && !sync &&
+        gpu->getProperty("POMPPCQECursorSync") != kOSBooleanTrue &&
+        e->carved < POMPPC_QE_CURSOR_REFRESH &&
+        bcmp(&sh->cursorRect, &e->cur, sizeof(IOGBounds)) == 0) {
+        int m;
+        carve = true;
+        npr = 0;
+        for (i = 0; i < nvis; i++) {
+            m = carveRect(&vis[i], &sh->cursorRect, &pieces[npr],
+                          (int) (POMPPC_QE_MAX_PIECES - npr));
+            if (m < 0) {
+                carve = false;          /* trop de morceaux : le synchrone d'avant */
+                break;
+            }
+            npr += (UInt32) m;
+        }
+    }
+    if (carve) {
+        pr = pieces;
+        if (!npr) {
+            e->carved++;                /* le curseur couvre tout ce qui est visible */
+            return kIOReturnSuccess;
+        }
+    } else {
+        pr = vis;
+        npr = nvis;
+    }
+    /* l'instantané si l'hôte sait le présenter (le jeu n'attend alors plus) */
+    op = (gpu->caps() & QGPU_CAP_TEX_PRESENT) && e->tex != 0xffffffffUL ? QGPU_OP_TEX_PRESENT
+                                                                       : QGPU_OP_SURF_PRESENT;
+    src = op == QGPU_OP_TEX_PRESENT ? e->tex : e->surf;
+    for (i = 0; i < npr && n + QGPU_LEN_SURF_PRESENT <= sizeof(cmds) / 4; i++) {
+        cmds[n++] = QGPU_CMD_HDR(op, QGPU_LEN_SURF_PRESENT);
+        cmds[n++] = src;
+        cmds[n++] = (UInt32) pr[i].y0 * pix.bytesPerRow + (UInt32) pr[i].x0 * bypp;
+        cmds[n++] = pix.bytesPerRow;
+        cmds[n++] = (UInt32) (pr[i].x0 - bounds->x);
+        cmds[n++] = (UInt32) (pr[i].y0 - bounds->y);
+        cmds[n++] = (UInt32) (pr[i].x1 - pr[i].x0);
+        cmds[n++] = (UInt32) (pr[i].y1 - pr[i].y0);
+        cmds[n++] = fmt;
+    }
     {
-        bool   cursor = cursorOver(fb, rects, nrects);
-        bool   async = gpu->getProperty("POMPPCQESync") != kOSBooleanTrue && !cursor;
+        bool   hide = cursor && !carve;
+        bool   async = !sync && !hide;
         UInt32 half = async ? (e->half & 1) : 0;
         UInt32 fence = async ? e->qfence[half] : 0;
         if (async && n * 4 > POMPPC_QE_CMD_BYTES / 2) {
@@ -2098,7 +2188,7 @@ IOReturn POMPPCAccelerator::flushSurfaceLocked(UInt32 sid, IOFramebuffer * fb,
             }
             e->qfence[0] = e->qfence[1] = 0;
         }
-        if (cursor) {
+        if (hide) {
             fb->hideCursor();
         }
         gpu->kernelSubmit(e->cmdoff + half * (POMPPC_QE_CMD_BYTES / 2), cmds, n, &st,
@@ -2107,12 +2197,17 @@ IOReturn POMPPCAccelerator::flushSurfaceLocked(UInt32 sid, IOFramebuffer * fb,
             e->qfence[half] = fence;
             e->half = half + 1;
         }
-        if (cursor) {
-            StdFBShmem_t * sh = POMPPCFBPeek::shmem(fb);
-            if (sh) {
-                IOGPoint loc = sh->cursorLoc;
-                fb->showCursor(&loc, sh->frame);
-            }
+        if (hide && sh) {
+            IOGPoint loc = sh->cursorLoc;
+            fb->showCursor(&loc, sh->frame);
+        }
+        if (carve) {
+            e->carved++;
+        } else if (hide && sh) {
+            e->cur = sh->cursorRect;    /* fond neuf sous la flèche, à cette place */
+            e->carved = 0;
+        } else {
+            e->carved = POMPPC_QE_CURSOR_REFRESH;
         }
     }
     if (st != QGPU_ST_OK && fFlushErrs++ < 8) {

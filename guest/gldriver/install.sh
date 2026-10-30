@@ -95,13 +95,20 @@ chmod -R 755 "$EXT/GLDriver-POMPPC.bundle"
 
 # Plugin GA (Quartz Extreme, docs/quartz-extreme.md) : chargé par
 # IOPSAllocateBlitEngine seulement si le kext l'a désigné (QE=1) ; installé
-# toujours, sans effet sinon.
-GASRC=$HERE/../ga
+# toujours, sans effet sinon. Sans gcc-4.0 (VM quotidienne du PC), celui des
+# binaires déjà compilés (job prebuilt, depuis le 30/10).
+GASRC=$HERE/../ga; GA=
 if [ -z "$PREBUILT" ] && [ -x /usr/bin/gcc-4.0 ] && [ -d "$GASRC" ]; then
   echo "▶ plugin GA"
   ( cd "$GASRC" && make clean >/dev/null && make )
+  GA="$GASRC/POMPPCGA.plugin"
+elif [ -d "$PRE/POMPPCGA.plugin" ]; then
+  echo "▶ plugin GA (déjà compilé)"
+  GA="$PRE/POMPPCGA.plugin"
+fi
+if [ -n "$GA" ]; then
   rm -rf "$EXT/POMPPCGA.plugin"
-  cp -R "$GASRC/POMPPCGA.plugin" "$EXT/"
+  cp -R "$GA" "$EXT/"
   chown -R root:wheel "$EXT/POMPPCGA.plugin"
   chmod -R 755 "$EXT/POMPPCGA.plugin"
 fi
