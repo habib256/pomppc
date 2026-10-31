@@ -1,0 +1,48 @@
+diff --git a/target/ppc/cpu.h b/target/ppc/cpu.h
+--- a/target/ppc/cpu.h	2026-10-31 15:05:50.525521777 +0400
++++ b/target/ppc/cpu.h	2026-10-31 15:05:50.538055695 +0400
+@@ -1713,6 +1713,12 @@
+      */
+     bool tb_fast;
+     bool tb_verify;
++    /*
++     * POMPPC tcg/0061, x-bat-skip: an upper BAT with neither Vs nor Vp
++     * translates nothing, so no TLB entry can come from it -- the write
++     * that leaves or enters it flushes only the range of the valid value.
++     */
++    bool bat_skip;
+     uint32_t irq_seq;
+     /*
+      * x-pmu-real (POMPPC tcg/0049): the POWER8 PMU model (power8-pmu.c)
+diff --git a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+--- a/target/ppc/cpu_init.c	2026-10-31 15:05:50.527314178 +0400
++++ b/target/ppc/cpu_init.c	2026-10-31 15:05:50.538818645 +0400
+@@ -197,6 +197,14 @@
+     DEFINE_PROP_BOOL("x-tb-fast", PowerPCCPU, env.tb_fast, false),
+     DEFINE_PROP_BOOL("x-tb-verify", PowerPCCPU, env.tb_verify, false),
+     /*
++     * POMPPC tcg/0061.  x-bat-skip: writing an upper BAT skips the flush of
++     * the range of an invalid value (Vs = Vp = 0), old or new.  Mac OS X's
++     * bcopy_physvir_32 sets DBAT0/1 then clears them, ~150 times a second
++     * in OpenGL games: half of its flushes, and those of EA 0-0x1ffff.
++     * Off by default.
++     */
++    DEFINE_PROP_BOOL("x-bat-skip", PowerPCCPU, env.bat_skip, false),
++    /*
+      * AltiVec vaddfp/vsubfp/vmaddfp/vnmsubfp: the four lanes at once on the
+      * host FPU when softfloat's hardfloat path would take each of them
+      * (needs x-fast-fp to ever apply).  Off by default.
+diff --git a/target/ppc/mmu_helper.c b/target/ppc/mmu_helper.c
+--- a/target/ppc/mmu_helper.c	2026-10-31 15:05:50.528924884 +0400
++++ b/target/ppc/mmu_helper.c	2026-10-31 15:05:50.538983852 +0400
+@@ -155,6 +155,10 @@
+     CPUState *cs = env_cpu(env);
+     target_ulong base, end, page;
+ 
++    /* POMPPC tcg/0061: neither Vs nor Vp, nothing was translated by it */
++    if (env->bat_skip && !(BATu & 3)) {
++        return;
++    }
+     base = BATu & ~0x0001FFFF;
+     end = base + mask + 0x00020000;
+     if (cpu_env(cs)->tlb_precise) {

@@ -125,3 +125,44 @@ l'ancien plugin (échecs connus inchangés : `clip` 1, `matbegin` 2, `tex14` 1 ;
 - Coordonnées de texture en mode immédiat sous programme de sommets : perdues (limite ancienne,
   vue en écrivant `rectfp` ; la scène passe par des tableaux).
 - Mode fenêtre : le jeu n'en a pas (dialogue d'options : résolution, couleurs, FSAA).
+
+## 7. Les reflets trop blancs de la carrosserie (31/10/2026)
+
+Remarque de l'utilisateur (PC) : « les reflets sortent trop blancs » sur la voiture. **Cause : le
+cœur qgpu de l'hôte, pas le TCG ni le plugin.** Corrigé dans `patches/qgpu/qgpu-core.c`
+(`unit_texture_bound`) ; `build/` et `build-fast/` du PC reconstruits.
+
+**Ce que dessine la carrosserie** [E, rejeu natif du vidage de la cellule `cmr-pe`, programmes
+sortis par `QGPU_REPLAY_PROGS`] : `Car_Ext.arp`, en deux variantes engendrées par IndirectX
+selon la texture de l'unité 1 — programme `texture[1], 2D` (carte d'environnement 64×64 DXT1,
+texture du jeu 1030) ou `texture[1], RECT` (cible de rendu ; `tex_factor1` = `program.local[1]`
+du programme de sommets vaut alors **256 256**, les coordonnées en texels d'une cible 256×256).
+Le terme `MAD r0.rgb, t1, r1.a, r0` ajoute la carte à la peinture. En éteignant ce seul terme
+dans le texte du programme (vidage recopié et modifié à longueur égale), la carrosserie redevient
+bleue ; seul, il est presque blanc avec des bandes noires.
+
+**Ce que le jeu lie** [E, `gltrap` avec `POMPPC_GLTRAP_BINDS=1` (nouveau : unité active par
+`glActiveTextureARB`, que le jeu appelle et que `gltrap` ne suivait pas), cellule `cmr-trace2-3110`
+du 31/10] : sous la variante RECT (programme 18 du jeu), unité 1 = texture rectangle **105**, que
+rien ne remplit (aucun `aglSurfaceTexture` : les trois de la partie visent les cibles 800×600,
+400×300 et 200×150 ; aucune copie). La sonde du plugin (`POMPPC_GL_UNITPROBE=1`) le confirme
+depuis GLEngine : `UNITE coupée u1 masque 4 fp 1 … niv0 0x0 données 00000000 (GLEngine 0x0
+00000000)`. Texture incomplète : sur un vrai Mac, elle se lit en noir, **pas de reflet ajouté**.
+Le jeu se juge lent (`ValLowMachine`/`ValLowConfig` remis à 1 à chaque lancement même effacés) et
+ne rend sans doute pas cette carte ; c'est le comportement d'un vrai Tiger sur un vrai PowerPC,
+gardé tel quel (consigne de l'utilisateur).
+
+**Le défaut** : sous programme de fragments, le plugin allume une unité d'après la cible que le
+TEXTE échantillonne (`unit_mask`) et l'**éteint** quand la texture n'a pas d'image, en gardant
+son `QGPU_SK_U_BIND` d'avant. `unit_texture_bound` du cœur prenait ce `BIND` sans regarder
+`QGPU_SK_U_ENABLE` (« Direct3D n'allume rien », vrai pour `glEnable`, pas pour l'allumage du
+plugin) : la carrosserie lisait la texture du dessin précédent — le **masque d'ombres et de
+lumière de la piste** (1078, cible 800×600, presque blanc, lu sur son coin 256×256) après la
+piste, ou la carte 2D d'une autre voiture. D'où le blanc. Relevé sur l'hôte (sonde de rejeu
+temporaire) : 1 280 dessins `Car_Ext`/`Car_Lights` RECT ainsi servis dans un vidage de 30 images.
+
+**Épreuves** : rejeu du vidage corrigé : seule la voiture change (7 % des pixels de l'image,
+tous sur la carrosserie) ; les références validées du PC rejouées avec le cœur corrigé : d3-fen,
+d3-pe, mb-fen, mb-pe, ut-fen, ut-pe, zen-fen **0,00 %** ; cmr-pe 5,00 / 7,53 % (le faux reflet).
+Ancienne référence gardée dans `bench/matrice/ref-linux/cmr-pe.faux-reflet-2810/`, nouvelle
+référence prise le 31/10 (à valider à l'œil). Le M4 : même `qgpu-core.c`, à reconstruire.

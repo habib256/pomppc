@@ -2146,10 +2146,21 @@ static QgpuTexture *unit_texture(QgpuCore *c, const QgpuState *st, int u)
 }
 
 /* v16 : sous un programme de fragments, texture[u] est la texture LIÉE à
-   l'unité, que l'unité soit allumée ou non (Direct3D n'allume rien). */
+   l'unité, quel que soit glEnable (Direct3D n'allume rien) : le plugin en
+   tient compte et allume l'unité d'après la cible que le TEXTE échantillonne
+   (unit_mask). Une unité qu'il laisse ÉTEINTE n'a pas de texture utilisable
+   pour ce dessin (texture sans image : incomplète, du noir), et son BIND est
+   celui d'un dessin précédent, gardé tel quel. 31/10 : le prendre faisait
+   lire à la carrosserie de Colin McRae (Car_Ext, texture[1] RECT, texture 105
+   jamais remplie) le masque d'ombres de la piste ou la carte d'un autre
+   dessin : reflets trop blancs. */
 static QgpuTexture *unit_texture_bound(QgpuCore *c, const QgpuState *st, int u)
 {
-    QgpuTexture *t = &c->tex[st->v[QGPU_SK_UNIT(u) + QGPU_SK_U_BIND]];
+    QgpuTexture *t;
+    if (!st->v[QGPU_SK_UNIT(u) + QGPU_SK_U_ENABLE]) {
+        return NULL;
+    }
+    t = &c->tex[st->v[QGPU_SK_UNIT(u) + QGPU_SK_U_BIND]];
     return qgpu_texture_levels(t) ? t : NULL;
 }
 

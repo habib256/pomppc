@@ -306,10 +306,23 @@ static void my_glDisableClientState(GLenum a)
 { if (win()) lg("glDisableClientState(%x)\n", a); glDisableClientState(a); }
 static void my_glClientActiveTexture(GLenum u)
 { if (win()) lg("glClientActiveTexture(%x)\n", u); glClientActiveTexture(u); }
+/* 31/10 : POMPPC_GLTRAP_BINDS=1 — unité active et liaisons de textures journalisées
+   depuis le lancement, hors fenêtre (reflet de la carrosserie de Colin McRae :
+   quelle texture rectangle le jeu laisse sur l'unité 1). Le jeu appelle la
+   variante ARB de glActiveTexture. */
+static int binds(void)
+{
+    static int on = -1;
+    if (on < 0)
+        on = getenv("POMPPC_GLTRAP_BINDS") != 0;
+    return on;
+}
 static void my_glActiveTexture(GLenum u)
-{ if (win()) lg("glActiveTexture(%x)\n", u); glActiveTexture(u); }
+{ if (win() || binds()) lg("glActiveTexture(%x)\n", u); glActiveTexture(u); }
+static void my_glActiveTextureARB(GLenum u)
+{ if (win() || binds()) lg("glActiveTextureARB(%x)\n", u); glActiveTextureARB(u); }
 static void my_glBindTexture(GLenum t, GLuint id)
-{ if (win()) lg("glBindTexture(%x, %u)\n", t, (unsigned)id); glBindTexture(t, id); }
+{ if (win() || binds()) lg("glBindTexture(%x, %u)\n", t, (unsigned)id); glBindTexture(t, id); }
 static void my_glBindBufferARB(GLenum t, GLuint id)
 { if (win()) lg("glBindBufferARB(%x, %u)\n", t, (unsigned)id); if (t == GL_ARRAY_BUFFER_ARB) cur_abuf = id; else if (t == GL_ELEMENT_ARRAY_BUFFER_ARB) cur_ebuf = id; glBindBufferARB(t, id); }
 static void my_glLockArraysEXT(GLint first, GLsizei count)
@@ -571,6 +584,7 @@ __attribute__((used)) static const interpose_t interposers[]
     { (const void *)my_glClientActiveTexture, (const void *)glClientActiveTexture },
     { (const void *)my_glActiveTexture, (const void *)glActiveTexture },
     { (const void *)my_glBindTexture, (const void *)glBindTexture },
+    { (const void *)my_glActiveTextureARB, (const void *)glActiveTextureARB },
     { (const void *)my_glBindBufferARB, (const void *)glBindBufferARB },
     { (const void *)my_glLockArraysEXT, (const void *)glLockArraysEXT },
     { (const void *)my_glUnlockArraysEXT, (const void *)glUnlockArraysEXT },

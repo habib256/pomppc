@@ -34,7 +34,30 @@ Au début d'une séance :
 - Les commits vont sur `main` puis sont poussés. Un essai non retenu est rangé sous une
   étiquette `archive/*`.
 
-## 2. PC x86-64 : état au 31/10/2026, 13 h 15
+## 2. PC x86-64 : état au 31/10/2026, 17 h
+
+**Fait le 31/10, après-midi** (`docs/re/cmr-rendu-vers-texture.md` §7)
+- cmr, « reflets trop blancs » sur la voiture (remarque de l'utilisateur) : **défaut du cœur qgpu
+  de l'hôte**, corrigé (`patches/qgpu/qgpu-core.c`, `unit_texture_bound` respecte l'unité éteinte
+  par le plugin sous programme de fragments). La carrosserie lisait le masque d'ombres de la
+  piste à la place d'une carte de reflet que le jeu ne remplit jamais (texture 105, vide aussi
+  pour GLEngine) : **plus de reflet sur la carrosserie**, comme sur un vrai Tiger/PowerPC qui
+  se juge lent (consigne de l'utilisateur : se comporter comme le vrai matériel). `build/` et
+  `build-fast/` reconstruits. Références du PC rejouées : toutes à 0,00 % sauf cmr-pe.
+  **Nouvelle référence cmr-pe prise (tour `cmr-nouvref-3110`), À VALIDER à l'œil** ; l'ancienne
+  dans `bench/matrice/ref-linux/cmr-pe.faux-reflet-2810/`.
+- `gltrap` : `POMPPC_GLTRAP_BINDS=1` (unité active et liaisons depuis le lancement ; le jeu
+  appelle `glActiveTextureARB`). Compilé dans la VM de dev, déposé dans
+  `/Users/tiger/gltrap/` de la VM quotidienne.
+- BAT (point 1) : relevé fait, les écritures viennent de `bcopy_physvir_32` du noyau (DBAT0/1
+  posés puis effacés, ~150 fois/s). `patches/tcg/0061-ppc-bat-skip.patch` (`x-bat-skip` : pas
+  de vidage pour la plage d'un BAT invalide, la moitié des vidages dont ceux de EA 0-0x1ffff)
+  **écrit, ni construit ni mesuré**, non nommé dans `build_qemu_qfb.sh`.
+- `~/src/qemu/build-fast-pgo2810/` effacé.
+- La VM quotidienne a été arrêtée à 16 h 42 par la fenêtre ImGuiDock (fermée ?) pendant le
+  redémarrage de fin de cellule ; campagne multi-résolutions de cmr
+  (`bench/tcg/ab/cmr-resolutions.sh`, demande de l'utilisateur) **pas encore jouée**.
+
 
 **Fait le 31/10, matin** (`docs/tcg-g4.md` §44, `docs/vitesse-doom3-x86.md` §24)
 - Point 1, recherche de blocs : `tcg/0060` (`x-jc-clear-exact`, `x-jc-page-bits`), patch écrit,
@@ -82,15 +105,17 @@ Au début d'une séance :
 ms/image en plein écran. Journal : `docs/vitesse-doom3-x86.md`.
 
 **À faire sur le PC, dans l'ordre**
-1. `do_invalidate_BAT` (2,4 % sur cmr) : relevé `MEMSTATS=1` sur cmr (`bat_pages`, `bat_full`),
-   puis comprendre pourquoi l'invité réécrit ses BAT si souvent.
+0. Faire valider la nouvelle référence cmr-pe (`matrice.py --valider cmr-pe`) ; jouer cmr à
+   plusieurs résolutions et profondeurs (`bench/tcg/ab/cmr-resolutions.sh`, demande de
+   l'utilisateur), un tour complet de la matrice avec le cœur corrigé.
+1. `do_invalidate_BAT` : construire et mesurer `tcg/0061` (`x-bat-skip`) à l'A/B au repos.
 2. Recherche de blocs, suite de 0060 : un effacement exact moins cher (journal des pages par
    groupe), et comprendre la perte d'Entrées de cmr sous x8 avant tout nouvel essai.
 3. Base de temps en ligne (`mftb` sans helper) : gain attendu modeste (−2,4 % mesuré pour le
    passage helper lent → rapide).
 4. Les « sans traduction » de fin de session (`tcg-g4.md` §44).
-5. Effacer `~/src/qemu/build-fast-pgo2810/` (A/B du profil jugé neutre le 31/10) et
-   `~/src/qemu-jcp/` quand 0060 sera tranché.
+5. Effacer `~/src/qemu-jcp/` quand 0060 et 0061 seront tranchés (il porte aussi le relevé
+   des écritures de BAT, essai non versé).
 
 **Propres au PC** : `patches/diag/` (auto-profileur, plafonds), `tools/tcg/perfhw.sh` (compteurs
 Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). `perf` exige
@@ -210,6 +235,11 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
 `references.csv`).
 
 ## 4. À faire en passant d'un hôte à l'autre
+
+- **Venu du PC le 31/10 (pour le M4)** : `patches/qgpu/qgpu-core.c` a changé (reflets de la
+  carrosserie de cmr, `docs/re/cmr-rendu-vers-texture.md` §7) : **reconstruire QEMU**, puis
+  rejouer cmr-pe ; la référence du M4 contient sans doute le faux reflet (à reprendre et faire
+  valider). Ni le protocole ni le plugin ne changent.
 
 - **Venu du PC le 30/10 (pour le M4)**. Deux correctifs QE de l'invité sont à installer,
   sans changer le protocole ni QEMU :
