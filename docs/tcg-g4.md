@@ -5678,3 +5678,50 @@ le bras de production) : `x-ret-verify` en compte de 0 à 28 par partie, toutes 
 pc du noyau en bas de mémoire (`0x3d60` à `0x2ace20`, phys = pc, `mmu_idx` 1), sur un seul vCPU,
 toutes après le dernier rapport périodique : pendant l'arrêt de l'invité qui suit la partie
 (`shutdown -h` de `matab.sh`). Hors de la classe OpenBIOS/BootX du §35.
+
+## 45. Vidages de BAT sautés pour un BAT invalide : `tcg/0061` (`x-bat-skip`), PC x86-64, 31/10 soir
+
+**Le patch.** `do_invalidate_BAT` revient tout de suite quand la valeur haute passée n'a ni Vs ni
+Vp : un tel BAT ne traduit rien, donc aucune entrée du TLB n'en vient. `bcopy_physvir_32` du noyau
+pose DBAT0/1 (blocs de 128 Kio) puis les efface, ~150 fois/s dans les jeux : la moitié de ses vidages
+sont sautés, dont ceux de EA 0-0x1ffff (deuxième appel, valeur 0). Propriété du CPU, éteinte par
+défaut. Construit dans `~/src/qemu-bat/build-x` (copie des sources de `~/src/qemu`, série de
+production + 0061, -O2 comme `qemu-jcp/build-x`) ; **non nommé** dans `build_qemu_qfb.sh`.
+
+**A/B au repos** (`bench/tcg/ab/bat-3110-ab`, `-ab-cmr`, chaîne `bench/tcg/ab/bat-ab-chaine.sh`,
+même binaire, 3 parties par bras, ordre entrelacé, `chargehote.py attendre`), médianes en ms/image :
+
+| cellule | ref | `x-bat-skip` | écart |
+|---|---:|---:|---:|
+| d3-fen | 86,3 | 85,6 | −0,8 % (dispersion ~6 %) |
+| mb-fen | 9,2 | 9,3 | +1 % |
+| zen-fen | 5,1 | 5,1 | 0 |
+| ut-fen | 42,3 | 39,4 | **−6,9 %** (2 parties sur 3 sous les 3 de ref, la 3ᵉ à 42,5) |
+| cmr-pe | 49,1 | 47,5 | −3,3 % (chevauchement) |
+
+Piste, pas une preuve : le gain d'ut et de cmr est de l'ordre de la dispersion.
+
+**Preuve, vérificateur du TLB précis** (`x-tlb-precise-verify=16`, celui qui attrape le mutant T5
+« petite plage de BAT oubliée », §32.6 ; `bench/tcg/ab/bat-verif-chaine.sh`) :
+- session mb, zen, ut, d3 en fenêtre (`bat-3110-verif`) : 34 G accès retraduits, **0 divergence** ;
+- session cmr plein écran (`bat-3110-verif-cmr`) : **1 356 divergences, toutes « sans PTE »** (0
+  « autre page »), en **une seule rafale** au milieu de la session (40 lignes entre deux rapports
+  périodiques, rien avant ni après), cpu 0 et 1, `idx 1`, pages d'identité du noyau
+  `0x2c0000`-`0x2e9000`, segment 0 (`sr 0x60000000`), entrée du TLB = ea, traduction actuelle
+  aucune ;
+- témoin sans `x-bat-skip`, même session cmr (`bat-3110-temoin-cmr`, `bat-verif-temoin.sh`) :
+  25 G accès retraduits, **0 divergence**, mais la course n'est pas atteinte en 906 s (le
+  vérificateur ralentit tout) : le témoin n'a pas joué la même chose.
+
+Cause non comprise. Le seul vidage que 0061 retire sur ce chemin est celui de EA 0-0x1ffff (et
+celui de l'ancienne plage d'un BAT invalide) ; aucun lien évident avec des pages en `0x2c0000`.
+Ce n'est pas une grande page : ppc entre toujours des pages de 4 Kio (`tlb_set_page`,
+`mmu_helper.c`). Remarque en passant, défaut d'origine de QEMU : `helper_store_[id]batu` vide
+l'**ancien** BAT avec le masque de la **nouvelle** valeur ; effacer un BAT de plus de 128 Kio par
+une écriture de 0 ne vide que ses premiers 128 Kio. Les BAT de `bcopy_physvir_32` font 128 Kio
+(masque 0) et ne sont pas touchés ; les effacements à 0 de DBAT2/3 et IBAT0-3 (`0x92338`,
+`0xa0994`) pourraient l'être, si le micrologiciel y laisse de grands blocs.
+
+**Décision** : `tcg/0061` reste **éteint** et non nommé (empreinte inchangée). Suite : reproduire
+la rafale (cmr sous vérificateur avec `x-bat-skip`, plusieurs sessions), journaliser les écritures
+de BAT autour d'elle, et trancher le défaut du masque d'origine.

@@ -34,7 +34,23 @@ Au début d'une séance :
 - Les commits vont sur `main` puis sont poussés. Un essai non retenu est rangé sous une
   étiquette `archive/*`.
 
-## 2. PC x86-64 : état au 31/10/2026, 17 h
+## 2. PC x86-64 : état au 31/10/2026, 23 h
+
+**Fait le 31/10, soir** (`docs/tcg-g4.md` §45)
+- `tcg/0061` (`x-bat-skip`) construit dans `~/src/qemu-bat/build-x` (série + 0061, -O2) et mesuré
+  à l'A/B au repos (3 parties par bras) : ut −6,9 %, cmr −3,3 %, d3 −0,8 %, mb +1 %, zen 0. Sous
+  le vérificateur du TLB précis : 0 divergence sur mb/zen/ut/d3, mais **une rafale de 1 356
+  divergences « sans PTE »** sur cmr (pages d'identité du noyau `0x2c0000`-`0x2e9000`) ; témoin
+  sans 0061 propre mais course non atteinte. **Éteint, non nommé**, cause à comprendre.
+  Défaut d'origine de QEMU relevé : l'ancien BAT est vidé avec le masque de la nouvelle valeur.
+- cmr à plusieurs résolutions (`bench/tcg/ab/cmr-res-3110/`, sous ImGuiDock, avec vidage) :
+  rejeux identiques partout (0,00 %), captures propres (`<mode>/capture.png`, **à regarder**).
+  640×480×32 44,3 ; 800×600×16 (réglage du jeu) **84,1** ; 1024×768×32 45,4 ; 1280×1024×32 48,3
+  (le jeu retombe en 640×480) ; 1920×1080×16 **94,2** ms/image. **Le 16 bits coûte ×2 sous
+  ImGuiDock** ; le même 800×600×16 fait 47,5 sous le frontal natif de l'A/B : piste à instruire
+  (chemin 16 bits du frontal ?).
+- Fin de séance : VM quotidienne relancée par `matab.sh --restore` (binaire rapide).
+
 
 **Fait le 31/10, après-midi** (`docs/re/cmr-rendu-vers-texture.md` §7)
 - cmr, « reflets trop blancs » sur la voiture (remarque de l'utilisateur) : **défaut du cœur qgpu
@@ -105,17 +121,20 @@ Au début d'une séance :
 ms/image en plein écran. Journal : `docs/vitesse-doom3-x86.md`.
 
 **À faire sur le PC, dans l'ordre**
-0. Faire valider la nouvelle référence cmr-pe (`matrice.py --valider cmr-pe`) ; jouer cmr à
-   plusieurs résolutions et profondeurs (`bench/tcg/ab/cmr-resolutions.sh`, demande de
-   l'utilisateur), un tour complet de la matrice avec le cœur corrigé.
-1. `do_invalidate_BAT` : construire et mesurer `tcg/0061` (`x-bat-skip`) à l'A/B au repos.
-2. Recherche de blocs, suite de 0060 : un effacement exact moins cher (journal des pages par
+0. Faire valider la nouvelle référence cmr-pe (`matrice.py --valider cmr-pe`) et regarder les
+   captures de `bench/tcg/ab/cmr-res-3110/` ; un tour complet de la matrice avec le cœur corrigé.
+1. cmr en 16 bits ×2 plus lent sous ImGuiDock (84-94 contre 44-48 ms/image en 32 bits) : le
+   mesurer sous le frontal natif à la même résolution, puis trouver le poste (frontal, cœur qgpu).
+2. `tcg/0061` : reproduire la rafale de divergences de cmr sous vérificateur (plusieurs sessions,
+   avec et sans `x-bat-skip`), journaliser les écritures de BAT autour d'elle ; trancher le
+   masque d'origine de `helper_store_[id]batu`. Pas d'allumage avant.
+3. Recherche de blocs, suite de 0060 : un effacement exact moins cher (journal des pages par
    groupe), et comprendre la perte d'Entrées de cmr sous x8 avant tout nouvel essai.
-3. Base de temps en ligne (`mftb` sans helper) : gain attendu modeste (−2,4 % mesuré pour le
+4. Base de temps en ligne (`mftb` sans helper) : gain attendu modeste (−2,4 % mesuré pour le
    passage helper lent → rapide).
-4. Les « sans traduction » de fin de session (`tcg-g4.md` §44).
-5. Effacer `~/src/qemu-jcp/` quand 0060 et 0061 seront tranchés (il porte aussi le relevé
-   des écritures de BAT, essai non versé).
+5. Les « sans traduction » de fin de session (`tcg-g4.md` §44) : peut-être parents de la rafale
+   du §45.
+6. Effacer `~/src/qemu-jcp/` et `~/src/qemu-bat/` quand 0060 et 0061 seront tranchés.
 
 **Propres au PC** : `patches/diag/` (auto-profileur, plafonds), `tools/tcg/perfhw.sh` (compteurs
 Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). `perf` exige
