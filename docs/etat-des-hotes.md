@@ -34,53 +34,44 @@ Au début d'une séance :
 - Les commits vont sur `main` puis sont poussés. Un essai non retenu est rangé sous une
   étiquette `archive/*`.
 
-## 2. PC x86-64 : état au 30/10/2026, 23 h 45
+## 2. PC x86-64 : état au 31/10/2026, 5 h 30
 
-**Quartz Extreme est allumé par défaut sur le PC depuis le 30/10 au soir.** `run_tiger.sh`
-pose `qe=on` sur Linux:x86_64 ; `QE=0` l'éteint. Le détail est dans
-`docs/quartz-extreme.md` (journal du 30/10, points 1 à 8).
+**Défauts du PC** : Quartz Extreme (depuis le 30/10 au soir, `QE=0` l'éteint) et **zone froide
+`x-tcg-cold`** (tcg/0056, depuis le 31/10, `TCGCOLD=0` l'éteint).
 
-**Fait le 30/10**
-- Livraisons du M4 rattrapées (points a à d de l'ancien bloc « En arrivant ») :
-  `build/` et `build-fast/` reconstruits à 13 h 14. Le profil PGO vient d'une série
-  antérieure et **reste à réentraîner**. Kext, plugin et plugin GA sont installés dans la VM
-  quotidienne depuis le job `prebuilt` de la VM de dev, car la VM quotidienne n'a pas
-  gcc-4.0.
-- Matrice sans QE sans régression (`pc-sansqe-3010`). Ombre vérifiée sous QE sur mb et d3.
-- Deux correctifs QE propres au PC :
-  - kext : curseur contourné en présentation asynchrone (`805f504`), mb-pe −7,5 % contre
-    sans QE ;
-  - plugin : `pomppc_qe_same`, la fenêtre cachée d'IndirectX (`f01d2d7`), cmr-pe au niveau
-    de sans QE.
-- Endurance sous QE (`docs/endurance.md` §14) : 30 démarrages et 16 cycles de jeu, 0
-  incident. Matrice de contrôle avec QE par défaut (`pc-qedefaut-3010`) : images justes, 0
-  repli.
-- **vperm en PSHUFB** (`tcg/0059`, `VPERMINLINE=1`) : construit dans `build/` et
-  `build-fast/` (22 h 15). Exact : 2,56 milliards de vperm vérifiés, 0 divergence. Neutre à
-  l'A/B (d3 −0,1 %, mb +2,4 %, ut +0,3 %) : **éteint par défaut** (`docs/tcg-g4.md` §43).
-- Fin de séance, 23 h 35 : aucune VM ne tourne. La VM quotidienne repart avec
-  `QEMU_FAST=1 ./run_tiger.sh` (QE allumé).
+**Fait dans la nuit du 30 au 31/10** (`docs/vitesse-doom3-x86.md` §23, `docs/endurance.md` §15)
+- Point 1, `matab.sh --restore` sur `build/` le 28/10 : `chaine4.sh` avait été tué pendant la
+  partie `ref-3`, lancée avec `QEMU_BIN=~/src/qemu-ceil/build`. Cette VM est restée allumée, et
+  le `--restore` final n'a jamais tourné. Le choix du binaire est juste. `--restore` retire
+  maintenant les variables de binaire héritées et affiche le binaire lancé (`6510319`).
+- Point 2, chasse au gel de cmr : 6 parties par bras sur `build-fast/`, aucun gel (cold 43,4
+  contre ref 44,3 ms/image). A/B de la matrice : d3 −1,8 %, mb −1,2 %, zen −2,2 %, cmr −2,2 %,
+  ut neutre. **Allumé par défaut.** Avec la zone froide, cmr compte 20 parties pilotées et 1 gel
+  (le 28/10), aucun dans les 17 suivantes. Endurance : 10 démarrages et 8 cycles de jeu, 0
+  incident.
+- Point 3, profil croisé des 5 jeux (§23). Postes communs : la **recherche de blocs** (`qht`,
+  `lookup_tb_ptr` : 10 % mb, 13,7 % zen, 6,1 % cmr, 3-4 % d3/ut) et la **base de temps** (`mftb`
+  13,8 % sur ut, 1-3 % ailleurs).
+- Point 4 : `plancher_ms_linux` de cmr fixé à 60 (binaire rapide 44,5-47,5 ×1,25).
+- Point 7 : profil PGO de `build-fast/` réentraîné le 31/10 (cible ppc32mt, zone froide, 1 255
+  `.gcda`, construction à 2 h 43). Ancien binaire gardé dans `~/src/qemu/build-fast-pgo2810/`
+  (à effacer une fois l'A/B jugé). A/B neuf contre ancien, au repos : mb, zen, ut à −0,6 à
+  −1,4 % ; cmr neutre (+0,3 %) ; d3 +1,0 % (80,4 contre 79,6, 4
+  parties par bras, dans la dispersion). Neutre en tout : le nouveau profil est gardé (il suit la
+  série et les défauts du jour).
+- Fin de séance : VM quotidienne relancée par `matab.sh --restore` sur le binaire rapide (QE et
+  zone froide).
 
-**Vitesse** : DOOM 3 78-80 ms/image sur le binaire rapide ; Colin McRae environ 44,5
+**Vitesse** : DOOM 3 environ 77-80 ms/image sur le binaire rapide, Colin McRae environ 43,5
 ms/image en plein écran. Journal : `docs/vitesse-doom3-x86.md`.
 
 **À faire sur le PC, dans l'ordre**
-1. Comprendre pourquoi `tools/tcg/matab.sh --restore` a relancé la VM quotidienne sur
-   `build/` au lieu de `build-fast/` le 28/10 à 13 h 40.
-2. Finir la chasse au gel de cmr sous `x-tcg-cold` : au moins 6 parties cmr par bras, ref
-   contre cold, sur l'arbre `~/src/qemu-ceil` (modèle : `bench/cold-2810/chaine4.sh`). Allumer
-   par défaut seulement si aucun gel n'apparaît et si la matrice entière gagne.
-3. Profil croisé des 5 jeux, `perf` et `-perfmap` sur le binaire rapide (modèle :
-   `bench/cold-2810/chaine5.sh` ; retirer l'attente de l'ancien pid). But : des postes communs à
-   tous les jeux.
-4. Fixer `plancher_ms_linux` de cmr dans `tools/matrice/jeux/cmr.py` : il vaut encore 88, la
-   valeur du M4, alors que le PC mesure environ 46.
-5. ~~Valider les références cmr-pe, d3-fen et d3-pe~~ : validées à l'œil par l'utilisateur le
-   30/10 à 23 h 45 ; la matrice `pc-qedefaut-3010` est entièrement verte.
-
-6. Points 6 à 8 de la version précédente (livraisons du M4 du 28 au 30/10 : bandes de
-   TEX_READBACK, Quartz Extreme, `tex_bind_id`) : **faits le 30/10**.
-7. Réentraîner le profil PGO de `build-fast` sur la série actuelle.
+1. Recherche de blocs (§23) : mesurer le taux d'échec du cache de sauts sous mb et zen, puis
+   essayer un cache plus grand ou mieux indexé devant `qht_lookup_custom`. C'est le seul poste
+   commun aux 5 jeux.
+2. Base de temps en ligne (`mftb` sans helper) : 13,8 % du vCPU sur UT2004.
+3. `do_invalidate_BAT` (2,4 % sur cmr) : comprendre pourquoi l'invité réécrit ses BAT si souvent.
+4. Effacer `~/src/qemu/build-fast-pgo2810/` une fois l'A/B du profil jugé.
 
 **Propres au PC** : `patches/diag/` (auto-profileur, plafonds), `tools/tcg/perfhw.sh` (compteurs
 Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). `perf` exige
@@ -190,7 +181,7 @@ relancée à la fin, puis arrêtée le 29/10 à 5 h 33 pour les essais de Quartz
 2. Parité de **tcg/0055** (rejeu des traces, outil de preuve prouvé sur le PC le 27/10 :
    `c92dacc`). À faire seulement si les traces de second niveau reprennent ; elles sont
    arrêtées depuis le 22/10.
-3. Parité de **tcg/0056** seulement si le PC l'allume. Il faudra alors un saut long vers le
+3. Parité de **tcg/0056** : **le PC l'a allumé le 31/10** (§4). Il faudra alors un saut long vers le
    chemin lent sur aarch64 : le `b.cond` imm19 n'a qu'1 Mio de portée, pour une région de
    64 Mio.
 
@@ -211,6 +202,11 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
     nouveaux ;
   - vérifier que le curseur reste net sur un jeu en plein écran ;
   - une petite tranche d'endurance.
+
+  **Zone froide** (`tcg/0056`, `x-tcg-cold`) : allumée sur le PC le 31/10 (−1 à −2 % sur 4 jeux
+  sur 5). Sur arm64, elle est sans effet tant que le chemin lent n'a pas de saut long : le
+  `b.cond` imm19 ne porte qu'à 1 Mio. C'est la parité à écrire avant de l'allumer sur le M4
+  (rang 3 de la liste du M4).
 
   `tcg/0059` (vperm en ligne) est neutre sur le PC : sa version arm64 (TBL) n'est pas
   prioritaire. Sur le M4, vérifier que la série se compile toujours (l'opcode générique

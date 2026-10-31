@@ -182,6 +182,12 @@ case "$(uname -s):$(uname -m)" in
     # par base de chargement et par bloc ; qemu-system-ppc seul) — partie DOOM 3 vérifiée
     # 0 divergence, DOOM 3 −2,2 % (rapide). Sur le M4 depuis le 26/10.
     export TLBBASE="${TLBBASE:-1}"
+    # Depuis le 31/10/2026 (docs/vitesse-doom3-x86.md §23) : TCGCOLD (tcg/0056, chemins lents
+    # en zone froide, hôte x86-64 seul) — binaire rapide, A/B au repos : cmr-pe −2,2 % sur 6
+    # parties par bras sans gel, d3 −1,8 %, mb −1,2 %, zen −2,2 %, ut neutre. Sur le M4 : sans
+    # effet (b.cond imm19), parité par un saut long à faire. _COLD_AUTO : allumé faute de
+    # réglage explicite, éteint sans un mot si le binaire n'a pas la propriété.
+    [ -n "${TCGCOLD:-}" ] || { export TCGCOLD=1; _COLD_AUTO=1; }
     ;;
   Darwin:arm64)
     export VFPNATIVE="${VFPNATIVE:-1}" LMWVEC="${LMWVEC:-1}" JCWORD="${JCWORD:-1}"
@@ -902,12 +908,15 @@ fi
 # docs/vitesse-doom3-x86.md §20) --- propriété de l'ACCÉLÉRATEUR, hôte x86-64 :
 # les chemins lents de qemu_ld/st et les talons de ppc_fp32/ppc_vfp dans le
 # dernier quart de chaque région, pour serrer les corps des TB (cache
-# d'instructions, §19). Éteint par défaut (TCGCOLD=1 l'allume) : A/B du 28/10
-# +2 à +4 % sur mb/zen/ut, neutre sur d3/cmr, un gel de cmr à expliquer.
+# d'instructions, §19). Allumé par défaut sur Linux x86-64 depuis le 31/10 (§23 ;
+# TCGCOLD=0 l'éteint) ; le gel de cmr du 28/10 (1 partie sur 4) n'est pas revenu en
+# 9 parties de plus ni à l'endurance.
 if [ "${TCGCOLD:-0}" != 0 ]; then
   if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-tcg-cold=on"; then
     TCG_ACCEL="${TCG_ACCEL:-tcg},x-tcg-cold=on"
     MODE="$MODE + CHEMINS LENTS EN ZONE FROIDE"
+  elif [ -n "${_COLD_AUTO:-}" ]; then
+    :                                # défaut de l'hôte, binaire antérieur à tcg/0056
   else
     echo "⚠  TCGCOLD=1 demandé mais ce QEMU n'a pas la propriété 'x-tcg-cold' (patches/tcg/0056)." >&2
     MODE="$MODE + zone froide DEMANDÉE MAIS INDISPONIBLE"

@@ -812,3 +812,28 @@ lanceur, SMP 2, 768 Mio, deux instances. Pilotage : `bench/endurance/pc-qe-3010.
 **48 démarrages et 16 cycles de jeu, aucun gel, aucune panique** : même niveau de preuve que
 le §13 du M4. Moins d'images par cycle que sur le M4 : le PC émule plus lentement
 (`docs/vitesse-doom3-x86.md`). QE est allumé par défaut sur Linux x86-64 le 30/10 au soir.
+
+## 15. PC Linux, 31/10/2026 matin : zone froide par défaut (base pc-qe-3010)
+
+Tranche de contrôle de `x-tcg-cold` (tcg/0056, `docs/vitesse-doom3-x86.md` §23), allumé par
+défaut sur Linux x86-64 le 31/10. Même base que le §14 (`disks/tiger-endurance-pc-qe-3010.qcow2`,
+lecture seule, `qemu-img check` propre avant et après), `QEMU_FAST=1` : binaire rapide reconstruit
+le 31/10 à 2 h 43 (profil PGO réentraîné, zone froide comprise), défauts du lanceur (QE, zone
+froide), SMP 2, deux instances. Pilotage : `bench/cold-3110/chaine4.sh` (non versionné).
+
+| Campagne | Démarrages | Incidents | Borne haute (Wilson 95 %) | SSH médian (min–max) | Charge hôte max |
+|---|---:|---:|---:|---|---:|
+| `pc-3110-cold-jeux` (`mb,zen,ut,d3`, en fenêtre) | 10 (2 froids, 8 reboots) | 0 | 27,8 % | 20 s (15–35) | 4,1 |
+
+| Jeu | Cycles sains | Images par cycle (médiane) |
+|---|---:|---:|
+| DOOM 3 | 2/2 | 10 211 |
+| Marble Blast | 2/2 | 18 715 |
+| UT2004 | 2/2 | 4 540 |
+| Zenerchi | 2/2 | 23 112 |
+
+Colin McRae, où la zone froide avait gelé l'invité une fois le 28/10, n'est pas piloté par
+l'endurance : il reste dans ses menus. Il a donc été rejoué par la matrice, **en course**. Avec la
+zone froide, il compte 20 parties pilotées, dont 6 cold de la chasse et 8 de l'A/B du profil PGO,
+zone froide dans les deux bras. Bilan : **1 gel en 20 parties, aucun dans les 17 qui ont suivi
+le gel**.

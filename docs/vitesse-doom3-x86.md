@@ -940,3 +940,66 @@ le nombre d'instructions exécutées et les helpers, sur un profil croisé des c
 Exact (2,56 milliards de vperm vérifiés sur mb, d3 et ut, 0 divergence), mais neutre : d3-fen
 79,4 → 79,3 ms, mb-fen +2,4 %, ut-fen +0,3 % (3 parties par bras, au repos). **Éteint par
 défaut.** Détail : `docs/tcg-g4.md` §43.
+
+## 23. Zone froide allumée, profil croisé des 5 jeux (nuit du 30 au 31/10)
+
+**Chasse au gel de cmr** (`bench/tcg/ab/cold-3110-cmr`) : binaire quotidien `build-fast/` (PGO
+du 28/10, Quartz Extreme) dans les deux bras, et non plus l'arbre `qemu-ceil` du 28/10, antérieur
+à QE. Hôte au repos, 6 parties par bras en plein écran, ordre entrelacé :
+
+| bras | ms/image (6 parties) | médiane | gel |
+|---|---|---:|---:|
+| ref | 45,0 44,3 45,8 43,8 43,1 44,4 | 44,3 | 0 |
+| cold (`TCGCOLD=1`) | 42,6 43,1 43,9 43,9 43,7 42,2 | 43,4 | 0 |
+
+Le gel du 28/10 (1 partie cold sur 4, `cold-2810-vit-cmr/cold-2`) ne revient pas. Bilan cmr
+avec zone froide : 1 gel en 12 parties pilotées (6 le 28/10, preuve comprise, et 6 le 31/10), 0 dans
+les 9 qui ont suivi le gel.
+Vérifié au passage : les bras cold du 28/10 (`POMPPC_TCG_COLD=1` dans `chaine3.sh`) avaient
+bien la zone froide (QEMU l'annonce sur stderr).
+
+**A/B de la matrice** (`bench/tcg/ab/cold-3110-mat`, `build-fast/`, 3 parties par bras, au
+repos), écart cold contre ref :
+
+| cellule | ref | cold | écart |
+|---|---:|---:|---:|
+| mb-fen | 8,1 | 8,0 | −1,2 % |
+| zen-fen | 4,6 | 4,5 | −2,2 % |
+| ut-fen | 37,5 | 37,6 | +0,3 % (bruit) |
+| d3-fen | 77,9 | 76,5 | −1,8 % |
+| cmr-pe | 44,3 | 43,4 | −2,2 % |
+
+Gain petit mais de même signe sur 4 jeux sur 5, ut neutre. **`TCGCOLD` est allumé par défaut sur
+Linux x86-64 depuis le 31/10** (`run_tiger.sh`, `TCGCOLD=0` l'éteint ; un binaire sans tcg/0056
+le laisse éteint sans avertissement). Sans effet sur arm64 (`b.cond` imm19) : la parité demande
+un saut long vers le chemin lent, notée pour le M4.
+
+**Profil croisé** (`bench/tcg/ab/xprof-3110-*`, `build-fast/`, `perf` 30 s et `-perfmap`,
+`tools/re/perfpart.py`), part du temps vCPU occupé :
+
+| poste | mb | zen | ut | d3 | cmr |
+|---|---:|---:|---:|---:|---:|
+| code généré | 74,2 | 59,7 | 68,4 | 85,8 | 80,7 |
+| recherche de blocs (`qht_lookup_custom`, `lookup_tb_ptr`, `get_page_addr_code_hostp`) | **10,0** | **13,7** | 3,3 | 3,7 | **6,1** |
+| base de temps (`mftb` : `helper_load_tbu/tbl`) | 1,3 | 3,2 | **13,8** | 0,8 | 0,9 |
+| boucle d'exécution | 2,4 | 3,5 | 4,4 | 0,9 | 2,5 |
+| softmmu | 4,3 | 4,2 | 2,0 | 2,1 | 2,3 |
+| AltiVec | 0,4 | 1,5 | 0,5 | 2,3 | 0,3 |
+| fils vCPU, cœurs occupés | 1,03 | 1,03 | 1,90 | 1,06 | 1,11 |
+
+Postes communs, hors code généré :
+- **la recherche de blocs** est le seul poste présent dans tous les jeux, avec `qht_lookup_custom`
+  en tête des fonctions sur mb (5,7 %), zen (8,3 %) et cmr (2,8 %). Le cache de sauts manque, et
+  la recherche passe alors par la table de hachage. Piste générique : un cache de sauts plus
+  grand ou par vCPU au niveau de `helper_lookup_tb_ptr`, avant de descendre au `qht`.
+- **la base de temps** pèse surtout sur UT2004 (7,97 % `helper_load_tbu` et 5,85 %
+  `helper_load_tbl`), mais on la trouve dans les 5 jeux. Piste : `mftbu`/`mftb` lus en ligne
+  dans le code généré, sans helper.
+- `do_invalidate_BAT` : 2,4 % sur cmr et 0,75 % sur mb. Les invalidations BAT de l'invité
+  valent un examen.
+
+**Profil PGO réentraîné** (31/10, `tools/tcg/pgo-train.sh --cible ppc32mt`, défauts du jour
+dont la zone froide, 1 255 `.gcda`). A/B contre le profil du 28/10 (`pgo-3110-ab`, `-cmr`, `-d3`,
+au repos), écart neuf contre ancien : mb −0,6 %, zen −1,1 %, ut −1,4 % (2 parties par bras),
+cmr-pe +0,3 % (4), d3-fen +1,0 % (4 ; une partie à 93,8 dans `pgo-3110-ab`, non revenue).
+**Neutre** : le nouveau profil est gardé. L'ancien binaire est dans `~/src/qemu/build-fast-pgo2810/`.
