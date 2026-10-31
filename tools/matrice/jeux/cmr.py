@@ -47,6 +47,9 @@ PPMCMP = os.path.join(MAIN, "bench", "matrice", "bin", "ppmcmp")
 
 # attente (s) après chaque Entrée tenue, depuis l'écran titre jusqu'à COURSE
 TOUCHES = [25, 10, 10, 10, 10, 8, 8, 8, 0]
+# sommets bruts par échange en course (HUD et voiture : 2 056-2 173 selon la voiture) ;
+# la transition d'avant la course en fait au plus 1 281
+SOMMETS_COURSE = 1700
 
 
 class ColinMcRae(Jeu):
@@ -55,8 +58,9 @@ class ColinMcRae(Jeu):
     famille = "ARB via IndirectX, rendu vers texture"
     processus = "Colin McRae Rally Mac"
     plancher_ms = 88          # 70,7 ms/image du jeu au 29/09 (tour 20260929-2344, 3 échanges par image)
-    plancher_ms_linux = 60    # PC, binaire rapide, plein écran : 44,5-47,5 (28/10 cold-2810-cmr2 fast,
-                              # 30/10 pc-qedefaut-3010, QE allumé) ×1,25 ; arbre -O2 qemu-ceil 49,1-50,0
+    plancher_ms_linux = 105   # PC, binaire rapide, plein écran, EN COURSE : 79,9-84,3 (31/10,
+                              # cmr-course-0111) ×1,25 ; les 44-48 d'avant (28-31/10) mesuraient la
+                              # transition d'avant la course (voir fenetre)
     echanges_par_image = 3
     delai_scene = 900
     dump_images = 30            # 10 images du jeu
@@ -176,11 +180,21 @@ class ColinMcRae(Jeu):
 
         def ms(i, j):
             return (rows[j][0] - rows[i][0]) / (j - i)
+
+        def sommets(i, j):
+            return (rows[j][4] - rows[i][4]) / (j - i)
         for x in range(min(charge), z - 600, 50):
             if any(i not in rows for i in (x, x + 300, x + 600)):
                 continue
             s1, s2 = ms(x, x + 300), ms(x + 300, x + 600)
             if min(s1, s2) < 10 or abs(s1 - s2) > 0.1 * max(s1, s2):
+                continue
+            # 01/11 (PC) : entre le premier chargement et la course, une transition
+            # (~1 281 sommets par échange, puis 2) tourne à 12-16 ms/échange sur le PC,
+            # au-dessus du seuil de 10, et le PC la mesurait depuis le 28/10 au lieu de
+            # la course (2 109-2 173 sommets, ~28 ms/échange). Les sommets sont comptés
+            # dans l'invité : le critère ne dépend pas de la vitesse de l'hôte.
+            if min(sommets(x, x + 300), sommets(x + 300, x + 600)) < SOMMETS_COURSE:
                 continue
             if any(i + 1 in rows and i in rows and rows[i + 1][0] - rows[i][0] > 500
                    for i in range(x, x + 600)):

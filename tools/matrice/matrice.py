@@ -115,13 +115,14 @@ def charge_jeux():
 
 
 def lit_frames(txt):
-    """frames.csv -> {image: (elapsed_ms, fallbacks, readbacks, dessins)} (compteurs cumulés)."""
+    """frames.csv -> {image: (elapsed_ms, fallbacks, readbacks, dessins, sommets)} (compteurs
+    cumulés ; sommets = raw_vertices, compté dans l'invité, donc le même sur tous les hôtes)."""
     rows = {}
     for l in txt.splitlines():
         p = l.split(",")
         if len(p) >= 7 and p[0].isdigit():
             try:
-                rows[int(p[0])] = (float(p[2]), int(p[5]), int(p[6]), int(p[4]))
+                rows[int(p[0])] = (float(p[2]), int(p[5]), int(p[6]), int(p[4]), int(p[3]))
             except ValueError:
                 pass
     return rows
