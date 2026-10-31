@@ -5585,3 +5585,96 @@ est exact et fréquent (environ 2,5 milliards en trois parties). La table de `x-
 coûte déjà peu ; ce qui reste à gagner ne dépasse pas le bruit d'une partie. La version
 arm64 (TBL) n'est pas prioritaire tant qu'aucun jeu ne montre `helper_VPERM_FAST` haut dans
 un profil.
+
+## 44. Le cache de sauts vidé page par page : `tcg/0060` (`x-jc-clear-exact`, `x-jc-page-bits`), PC x86-64, 31/10
+
+**Point de départ.** Le profil croisé du 31/10 (`vitesse-doom3-x86.md` §23) met la recherche de
+blocs (`qht_lookup_custom`, `lookup_tb_ptr`) dans les 5 jeux, jusqu'à 13,7 % du vCPU sur zen. La
+piste du §36.7 était la taille du groupe de page : 64 cases par page virtuelle, quelle que soit
+la taille de la table.
+
+**Le patch.** Deux propriétés de l'accélérateur, figées avant le premier CPU comme `x-jc-bits`, et
+éteintes par défaut (sans elles, le comportement est octet pour octet celui d'avant) :
+- `x-jc-page-bits` (6 à 9) : 2^n cases par groupe de page. Le hachage C (`tb-hash.h`) et sa
+  copie en ligne (`translator.c`) suivent la valeur. Le plafond de 9 vient du hachage par mot,
+  qui demande `TARGET_PAGE_BITS − 3`.
+- `x-jc-clear-exact` : un vidage de page (`tlb_flush_page`, les balayages de `x-tlb-precise`,
+  les vidages par plage) n'efface plus ses **deux groupes entiers**. Il efface seulement les
+  blocs qui peuvent toucher la page : pc sur la page, ou sur la précédente avec un bloc qui
+  déborde dedans (`tb->size`). Les blocs des autres pages qui partagent ces groupes restent.
+- Sous `x-ret-verify`, la ligne `ret-verify: effacements de page` compte les vidages de page,
+  les entrées valides visitées et celles d'autres pages.
+
+**Preuves.** `tools/tcg/jcwordproof.py` (étendu aux groupes de 6 à 9 bits) : hachage C = TCG
+émis sur 2 293 760 cas, et les 1 024 instructions d'une page couvrent tout leur groupe.
+`x-ret-verify` sur toutes les parties ci-dessous : aucune divergence d'une autre classe que
+« sans traduction » (voir plus bas).
+Correct par construction : un vidage de la page virtuelle V ne change la traduction d'aucune
+autre page ; les seules entrées gardées sont des blocs dont aucun octet n'est sur V.
+
+**Mesure des ratés** (mode preuve, VM quotidienne, une partie par bras, cumul depuis le démarrage,
+`tools/tcg/jcmiss.py`, `bench/tcg/ab/jcp-3110-ver-*` puis `jcx-3110-ver-*`). Part des recherches
+du cache de sauts :
+
+| jeu | bras | appels du helper | ratés jusqu'au `qht` | dont conflit | dont case vide |
+|---|---|---:|---:|---:|---:|
+| mb | 64 cases (production) | 5,9 % / 7,9 % | 3,9 % / 5,8 % | 40,2 M / 34,2 M | 33,6 M / 31,8 M |
+| mb | 256 cases | 5,7 % | 5,2 % | 8,1 M | 55,7 M |
+| mb | 512 cases | 6,4 % | 6,2 % | 6,3 M | 65,7 M |
+| mb | exact, 64 cases | 6,6 % | 4,5 % | 36,4 M | 17,8 M |
+| mb | **exact, 256 cases** | **3,5 %** | **2,7 %** | 9,7 M | 19,5 M |
+| zen | 64 cases (production) | 7,7 % / 7,6 % | 6,4 % / 6,3 % | 33,9 M / 34,1 M | 38,0 M / 38,6 M |
+| zen | 256 cases | 6,1 % | 5,7 % | 6,7 M | 58,4 M |
+| zen | 512 cases | 6,5 % | 6,5 % | 5,5 M | 68,4 M |
+| zen | exact, 64 cases | 6,8 % | 5,4 % | 37,1 M | 24,9 M |
+| zen | **exact, 256 cases** | **4,0 %** | **3,3 %** | 8,4 M | 26,6 M |
+
+(Deux valeurs : les deux campagnes, `jcp` puis `jcx`.) Agrandir les groupes **seuls** est pire :
+les conflits baissent, mais chaque vidage de page efface deux fois 256 ou 512 cases, et les cases
+vides l'emportent. La cause est le **vidage** : environ 20 millions de vidages de page par session
+de 3 minutes (≈ 110 000/s), dont 93 % des entrées valides effacées appartenaient à **d'autres
+pages** (mb : 20,8 M sur 22,5 M ; zen : 20,3 M sur 21,8 M). L'effacement exact garde ces
+entrées ; il visite en échange plus d'entrées valides par vidage (14 avec 64 cases, 60 avec 256).
+
+**A/B au repos** (`bench/tcg/ab/jcx-3110-ab`, `-ab-cmr`, binaire `-O2` unique
+`~/src/qemu-jcp/build-x`, 3 parties par bras, ordre entrelacé, `chargehote.py attendre`),
+médianes en ms/image :
+
+| cellule | ref | exact, 64 cases | exact, 256 cases |
+|---|---:|---:|---:|
+| d3-fen | 84,1 | 82,6 (−1,8 %) | **80,2 (−4,6 %)** |
+| mb-fen | 9,2 | 9,0 (−2,2 %) | 8,9 (−3,3 %) |
+| ut-fen | 41,4 | 39,8 (−3,9 %) | 40,7 (−1,7 %) |
+| zen-fen | 4,9 | 4,9 | 4,8 (−2,0 %) |
+| cmr-pe | 47,2 | 46,8 (−0,8 %) | **48,5 (+2,8 %)**, dispersion 5,8 % |
+
+Gain net sur d3 (les 3 parties x8 sont toutes sous les 3 de ref), petit ailleurs, et **perte sur
+cmr** avec 256 cases. Le coût de l'effacement exact (lire 128 ou 512 cases à chaque vidage, ~110 000
+vidages par seconde) mange une part du gain selon le jeu.
+
+**Preuve d'image sur cmr** (31/10 midi ; l'utilisateur voyait des couleurs, flous et reflets
+« bizarres » pendant la campagne). Tours avec vidage (`MATAB_VIDAGE=1`,
+`bench/tcg/ab/cmr-couleurs-3110`, `cmr-couleurs2-3110`) :
+- binaire de production (`build-fast/`) : **vert, image identique à la référence validée** (0,00 %),
+  après un premier essai gelé au lancement (aucune image GL en 948 s, tué) ;
+- binaire de test sans réglage : **vert, 0,00 %** ;
+- x8 (exact, 256 cases) : **rouge deux fois sur deux, scène non atteinte**. Le jeu tourne (69 000 et
+  80 000 échanges) mais le pilote perd des Entrées dans les transitions : à t = 158 s le jeu est sur
+  DÉFIS au lieu d'ÉTAPES (`cmr-couleurs2-3110-cap/x8`, une capture toutes les 10 s), puis reste
+  sur ÉTAPES sans lancer la course. Les menus capturés ont leurs couleurs normales. Les trois
+  parties x8 sans vidage de l'A/B avaient atteint la course.
+
+Les couleurs vues par l'utilisateur ne sont donc **pas** reproduites sur le binaire de production.
+Pour x8, aucune image de course n'a été comparée.
+
+**Décision** : `tcg/0060` reste **éteint** et n'est **pas nommé** dans `build_qemu_qfb.sh`
+(empreinte de la série inchangée). Le patch, `jcwordproof.py` étendu et `tools/tcg/jcmiss.py` sont
+gardés. Suite possible : un effacement exact moins cher (un journal des pages présentes par groupe,
+pour ne lire les cases qu'à coup sûr), et comprendre la perte d'Entrées de cmr sous x8 avant tout
+nouvel essai.
+
+**Divergences « sans traduction » en fin de session** (anomalie à instruire, présente aussi dans
+le bras de production) : `x-ret-verify` en compte de 0 à 28 par partie, toutes « sans traduction »,
+pc du noyau en bas de mémoire (`0x3d60` à `0x2ace20`, phys = pc, `mmu_idx` 1), sur un seul vCPU,
+toutes après le dernier rapport périodique : pendant l'arrêt de l'invité qui suit la partie
+(`shutdown -h` de `matab.sh`). Hors de la classe OpenBIOS/BootX du §35.

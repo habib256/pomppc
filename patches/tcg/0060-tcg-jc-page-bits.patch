@@ -1,0 +1,250 @@
+--- a/accel/tcg/tb-jmp-cache.h
++++ b/accel/tcg/tb-jmp-cache.h
+@@ -37,6 +37,27 @@
+  */
+ extern bool tb_jmp_cache_2way;
+ extern bool tb_jmp_cache_bits_frozen;
++/*
++ * POMPPC tcg/0060 (x-jc-page-bits, accelerator property, fixed before CPU
++ * realize): log2 of the slots of a page group (tb-hash.h), 6 (stock) to 9.
++ * All the TBs of a guest page share one group whatever the size of the
++ * table: a hot code page with more TBs than slots conflicts with itself.
++ * Bigger groups mean fewer of them, and tlb_flush_page clears two of them.
++ */
++#define TB_JMP_PAGE_MIN_BITS (TB_JMP_CACHE_BITS / 2)
++#define TB_JMP_PAGE_MAX_BITS 9  /* the word hash needs TARGET_PAGE_BITS - 3 */
++extern unsigned tb_jmp_page_bits;
++/*
++ * POMPPC tcg/0060 (x-jc-clear-exact, accelerator property, fixed before CPU
++ * realize): a page flush clears, in the two page groups it visits, only the
++ * entries of a TB that may overlap the page (pc on the page, or on the
++ * previous one and crossing into it) instead of both groups whole; the
++ * entries of other pages that share the groups stay.  Under x-ret-verify
++ * pomppc_jc_clr counts, per page flush: the valid entries cleared, and among
++ * them those of other pages (kept by x-jc-clear-exact).
++ */
++extern bool tb_jmp_cache_clear_exact;
++extern uint64_t pomppc_jc_clr[3];   /* page flushes, cleared, other pages */
+ #define TB_JMP_CACHE_SIZE (1u << tb_jmp_cache_bits)
+ 
+ /*
+--- a/accel/tcg/tb-hash.h
++++ b/accel/tcg/tb-hash.h
+@@ -31,7 +31,12 @@
+ /* Only the bottom TB_JMP_PAGE_BITS of the jump cache hash bits vary for
+    addresses on the same page.  The top bits are the same.  This allows
+    TLB invalidation to quickly clear a subset of the hash table.  */
+-#define TB_JMP_PAGE_BITS (TB_JMP_CACHE_BITS / 2)
++/*
++ * POMPPC tcg/0060 (x-jc-page-bits): the number of slots of a page group,
++ * 2^6 (stock: TB_JMP_CACHE_BITS / 2) to 2^9, is chosen at start-up like
++ * x-jc-bits; the hash below and its inline copy (translator.c) follow it.
++ */
++#define TB_JMP_PAGE_BITS (tb_jmp_page_bits)
+ #define TB_JMP_PAGE_SIZE (1 << TB_JMP_PAGE_BITS)
+ #define TB_JMP_ADDR_MASK (TB_JMP_PAGE_SIZE - 1)
+ #define TB_JMP_PAGE_MASK (TB_JMP_CACHE_SIZE - TB_JMP_PAGE_SIZE)
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -630,6 +630,9 @@
+ bool tb_jmp_cache_word;
+ bool tb_jmp_cache_2way;         /* POMPPC tcg/0043 */
+ bool tb_jmp_cache_bits_frozen;
++unsigned tb_jmp_page_bits = TB_JMP_PAGE_MIN_BITS;    /* POMPPC tcg/0060 */
++bool tb_jmp_cache_clear_exact;                      /* POMPPC tcg/0060 */
++uint64_t pomppc_jc_clr[3];
+ 
+ void tcg_flush_jmp_cache(CPUState *cpu)
+ {
+--- a/accel/tcg/tcg-all.c
++++ b/accel/tcg/tcg-all.c
+@@ -352,6 +352,49 @@
+     tb_jmp_cache_bits = value;
+ }
+ 
++/* POMPPC tcg/0060: x-jc-page-bits, slots of a page group (tb-jmp-cache.h) */
++static void tcg_get_jc_page_bits(Object *obj, Visitor *v, const char *name,
++                                 void *opaque, Error **errp)
++{
++    uint32_t value = tb_jmp_page_bits;
++
++    visit_type_uint32(v, name, &value, errp);
++}
++
++static void tcg_set_jc_page_bits(Object *obj, Visitor *v, const char *name,
++                                 void *opaque, Error **errp)
++{
++    uint32_t value;
++
++    if (!visit_type_uint32(v, name, &value, errp)) {
++        return;
++    }
++    if (value < TB_JMP_PAGE_MIN_BITS || value > TB_JMP_PAGE_MAX_BITS) {
++        error_setg(errp, "x-jc-page-bits must be between %d and %d",
++                   TB_JMP_PAGE_MIN_BITS, TB_JMP_PAGE_MAX_BITS);
++        return;
++    }
++    if (tb_jmp_cache_bits_frozen && value != tb_jmp_page_bits) {
++        error_setg(errp, "x-jc-page-bits cannot change once a CPU exists");
++        return;
++    }
++    tb_jmp_page_bits = value;
++}
++
++static bool tcg_get_jc_clear_exact(Object *obj, Error **errp)
++{
++    return tb_jmp_cache_clear_exact;
++}
++
++static void tcg_set_jc_clear_exact(Object *obj, bool value, Error **errp)
++{
++    if (tb_jmp_cache_bits_frozen && value != tb_jmp_cache_clear_exact) {
++        error_setg(errp, "x-jc-clear-exact cannot change once a CPU exists");
++        return;
++    }
++    tb_jmp_cache_clear_exact = value;
++}
++
+ static bool tcg_get_jc_word(Object *obj, Error **errp)
+ {
+     return tb_jmp_cache_word;
+@@ -460,6 +503,18 @@
+         "log2 of the number of jump-cache entries per CPU, 12 (stock) "
+         "to 16 (POMPPC tcg/0011, docs/tcg-g4.md 18)");
+ 
++    object_class_property_add(oc, "x-jc-page-bits", "uint32",
++        tcg_get_jc_page_bits, tcg_set_jc_page_bits, NULL, NULL);
++    object_class_property_set_description(oc, "x-jc-page-bits",
++        "log2 of the jump-cache slots of a guest page group, 6 (stock) "
++        "to 9, below x-jc-bits (POMPPC tcg/0060)");
++
++    object_class_property_add_bool(oc, "x-jc-clear-exact",
++        tcg_get_jc_clear_exact, tcg_set_jc_clear_exact);
++    object_class_property_set_description(oc, "x-jc-clear-exact",
++        "A page flush drops only the jump-cache entries of TBs that may "
++        "overlap the page, not its two page groups whole (POMPPC tcg/0060)");
++
+     object_class_property_add(oc, "x-jit-addr", "uint64",
+         tcg_get_jit_addr, tcg_set_jit_addr, NULL, NULL);
+     object_class_property_set_description(oc, "x-jit-addr",
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -162,6 +162,57 @@
+     }
+ }
+ 
++/*
++ * POMPPC tcg/0060: drop the jump cache entries of any TB that may overlap
++ * @page (pc on it, or on the previous page and crossing into it).  Stock
++ * clears the two page groups whole (x-jc-clear-exact off).  Only the owning
++ * CPU writes its entries, as in tb_jmp_cache_clear_page.
++ */
++static void tb_jmp_cache_clear_tb_page(CPUState *cpu, vaddr page)
++{
++    CPUJumpCache *jc = cpu->tb_jmp_cache;
++    vaddr prev = page - TARGET_PAGE_SIZE;
++    bool exact = tb_jmp_cache_clear_exact;
++    bool count = cpu->ret_verify;
++    uint64_t n = 0, other = 0;
++
++    if (unlikely(!jc)) {
++        return;
++    }
++    if (!exact && !count) {
++        tb_jmp_cache_clear_page(cpu, prev);
++        tb_jmp_cache_clear_page(cpu, page);
++        return;
++    }
++    for (int g = 0; g < 2; g++) {
++        vaddr p = g ? page : prev;
++        unsigned i0 = tb_jmp_cache_hash_page(p);
++
++        for (unsigned i = i0; i < i0 + TB_JMP_PAGE_SIZE; i++) {
++            TranslationBlock *tb = qatomic_read(&jc->array[i].tb);
++            vaddr pc = jc->array[i].pc;
++            bool hit;
++
++            if (!tb) {
++                continue;
++            }
++            hit = (pc & TARGET_PAGE_MASK) == page ||
++                  ((pc & TARGET_PAGE_MASK) == prev &&
++                   ((pc + tb->size - 1) & TARGET_PAGE_MASK) != prev);
++            n++;
++            other += !hit;
++            if (hit || !exact) {
++                qatomic_set(&jc->array[i].tb, NULL);
++            }
++        }
++    }
++    if (count) {
++        qatomic_inc(&pomppc_jc_clr[0]);
++        qatomic_add(&pomppc_jc_clr[1], n);
++        qatomic_add(&pomppc_jc_clr[2], other);
++    }
++}
++
+ /**
+  * tlb_mmu_resize_locked() - perform TLB resize bookkeeping; resize if necessary
+  * @desc: The CPUTLBDesc portion of the TLB
+@@ -595,8 +646,7 @@
+      * Discard jump cache entries for any tb which might potentially
+      * overlap the flushed page, which includes the previous.
+      */
+-    tb_jmp_cache_clear_page(cpu, addr - TARGET_PAGE_SIZE);
+-    tb_jmp_cache_clear_page(cpu, addr);
++    tb_jmp_cache_clear_tb_page(cpu, addr);      /* POMPPC tcg/0060 */
+ }
+ 
+ /**
+@@ -661,8 +711,7 @@
+ 
+ void pomppc_jc_clear_page(CPUState *cpu, vaddr page)
+ {
+-    tb_jmp_cache_clear_page(cpu, page - TARGET_PAGE_SIZE);
+-    tb_jmp_cache_clear_page(cpu, page);
++    tb_jmp_cache_clear_tb_page(cpu, page);      /* POMPPC tcg/0060 */
+ }
+ 
+ size_t pomppc_tlb_flush_match(CPUState *cpu, MMUIdxMap idxmap,
+@@ -872,6 +921,14 @@
+      * Discard jump cache entries for any tb which might potentially
+      * overlap the flushed pages, which includes the previous.
+      */
++    if (tb_jmp_cache_clear_exact) {
++        /* POMPPC tcg/0060: each page with the TBs crossing into it */
++        for (vaddr i = 0, n = d.len / TARGET_PAGE_SIZE; i < n; i++) {
++            tb_jmp_cache_clear_tb_page(cpu, d.addr);
++            d.addr += TARGET_PAGE_SIZE;
++        }
++        return;
++    }
+     d.addr -= TARGET_PAGE_SIZE;
+     for (vaddr i = 0, n = d.len / TARGET_PAGE_SIZE + 1; i < n; i++) {
+         tb_jmp_cache_clear_page(cpu, d.addr);
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -253,16 +253,22 @@
+                 qatomic_read(&rv_bad[i]), qatomic_read(&rv_race[i]),
+                 qatomic_read(&rv_nophys[i]));
+     }
+-    fprintf(stderr, " vidages du cache de sauts (%u entrées) : %" PRIu64
++    fprintf(stderr, " vidages du cache de sauts (%u entrées, %u par page) : %" PRIu64
+             " faits, %" PRIu64 " évités, %" PRIu64 " parcours complets ;"
+             " ratés : %" PRIu64 " entrée vidée, %" PRIu64 " autre pc, %"
+             PRIu64 " autres drapeaux ; bloc trouvé ensuite (case vide, conflit, drapeaux) : %" PRIu64
+             " / %" PRIu64 " / %" PRIu64 "\n", TB_JMP_CACHE_SIZE,
++            1u << tb_jmp_page_bits,
+             qatomic_read(&rv_jc_drop), qatomic_read(&rv_jc_skip),
+             qatomic_read(&rv_jc_scan), qatomic_read(&rv_m_drop),
+             qatomic_read(&rv_m_other), qatomic_read(&rv_m_flags),
+             qatomic_read(&rv_f_drop), qatomic_read(&rv_f_other),
+             qatomic_read(&rv_f_flags));
++    fprintf(stderr, "ret-verify: effacements de page%s : %" PRIu64 " ; %" PRIu64
++            " entrées valides visitées, dont %" PRIu64 " d'autres pages\n",
++            tb_jmp_cache_clear_exact ? " (exacts, x-jc-clear-exact)" : "",
++            qatomic_read(&pomppc_jc_clr[0]), qatomic_read(&pomppc_jc_clr[1]),
++            qatomic_read(&pomppc_jc_clr[2]));
+     if (tb_jmp_cache_2way) {
+         fprintf(stderr, "ret-verify: x-jc-2way : %" PRIu64 " trouvés dans la"
+                 " seconde voie (boucle et helper)\n", qatomic_read(&rv_w2));

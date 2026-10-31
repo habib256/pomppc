@@ -34,7 +34,23 @@ Au début d'une séance :
 - Les commits vont sur `main` puis sont poussés. Un essai non retenu est rangé sous une
   étiquette `archive/*`.
 
-## 2. PC x86-64 : état au 31/10/2026, 5 h 30
+## 2. PC x86-64 : état au 31/10/2026, 13 h 15
+
+**Fait le 31/10, matin** (`docs/tcg-g4.md` §44, `docs/vitesse-doom3-x86.md` §24)
+- Point 1, recherche de blocs : `tcg/0060` (`x-jc-clear-exact`, `x-jc-page-bits`), patch écrit,
+  **non nommé** dans `build_qemu_qfb.sh` (empreinte inchangée), construit à part dans
+  `~/src/qemu-jcp/build-x` (-O2). Les ratés viennent des vidages de page de `x-tlb-precise`
+  (~110 000/s, 93 % des cases effacées sont d'autres pages). Effacement exact + 256 cases :
+  ratés jusqu'au `qht` ÷ 2 ; A/B d3 −4,6 %, mb −3,3 %, zen −2 %, ut −1,7 %, **cmr +2,8 %**, et
+  deux tours cmr avec vidage sans course (Entrées perdues dans les menus). **Éteint.**
+- Point 2, base de temps : sur ut, `mftb` vient surtout de la boucle au repos du noyau ;
+  `TBFAST=0` coûte +2,4 % sur ut-fen. Le `mftb` en ligne reste possible, avec un gain modeste.
+- cmr, « couleurs, flous, reflets bizarres » signalés par l'utilisateur pendant la campagne :
+  tour avec preuve d'image du binaire de production **vert, identique à la référence validée**
+  (0,00 %) ; non reproduit. Un premier essai a gelé au lancement (aucune image GL).
+- Anomalie à instruire : `x-ret-verify` relève des « sans traduction » sur du noyau en bas de
+  mémoire, à l'arrêt de l'invité, aussi sur le binaire de production (`tcg-g4.md` §44).
+
 
 **Défauts du PC** : Quartz Extreme (depuis le 30/10 au soir, `QE=0` l'éteint) et **zone froide
 `x-tcg-cold`** (tcg/0056, depuis le 31/10, `TCGCOLD=0` l'éteint).
@@ -66,12 +82,15 @@ Au début d'une séance :
 ms/image en plein écran. Journal : `docs/vitesse-doom3-x86.md`.
 
 **À faire sur le PC, dans l'ordre**
-1. Recherche de blocs (§23) : mesurer le taux d'échec du cache de sauts sous mb et zen, puis
-   essayer un cache plus grand ou mieux indexé devant `qht_lookup_custom`. C'est le seul poste
-   commun aux 5 jeux.
-2. Base de temps en ligne (`mftb` sans helper) : 13,8 % du vCPU sur UT2004.
-3. `do_invalidate_BAT` (2,4 % sur cmr) : comprendre pourquoi l'invité réécrit ses BAT si souvent.
-4. Effacer `~/src/qemu/build-fast-pgo2810/` une fois l'A/B du profil jugé.
+1. `do_invalidate_BAT` (2,4 % sur cmr) : relevé `MEMSTATS=1` sur cmr (`bat_pages`, `bat_full`),
+   puis comprendre pourquoi l'invité réécrit ses BAT si souvent.
+2. Recherche de blocs, suite de 0060 : un effacement exact moins cher (journal des pages par
+   groupe), et comprendre la perte d'Entrées de cmr sous x8 avant tout nouvel essai.
+3. Base de temps en ligne (`mftb` sans helper) : gain attendu modeste (−2,4 % mesuré pour le
+   passage helper lent → rapide).
+4. Les « sans traduction » de fin de session (`tcg-g4.md` §44).
+5. Effacer `~/src/qemu/build-fast-pgo2810/` (A/B du profil jugé neutre le 31/10) et
+   `~/src/qemu-jcp/` quand 0060 sera tranché.
 
 **Propres au PC** : `patches/diag/` (auto-profileur, plafonds), `tools/tcg/perfhw.sh` (compteurs
 Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). `perf` exige

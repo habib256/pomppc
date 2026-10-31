@@ -1003,3 +1003,20 @@ dont la zone froide, 1 255 `.gcda`). A/B contre le profil du 28/10 (`pgo-3110-ab
 au repos), écart neuf contre ancien : mb −0,6 %, zen −1,1 %, ut −1,4 % (2 parties par bras),
 cmr-pe +0,3 % (4), d3-fen +1,0 % (4 ; une partie à 93,8 dans `pgo-3110-ab`, non revenue).
 **Neutre** : le nouveau profil est gardé. L'ancien binaire est dans `~/src/qemu/build-fast-pgo2810/`.
+
+## 24. Cache de sauts et base de temps (31/10, matin)
+
+**Cache de sauts** : `tcg/0060` (`x-jc-clear-exact`, `x-jc-page-bits`), détail dans `tcg-g4.md`
+§44. La recherche de blocs vient surtout des **vidages de page** de `x-tlb-precise` (~110 000/s,
+dont 93 % des cases effacées appartenaient à d'autres pages), pas de la taille des groupes. Avec
+l'effacement exact et 256 cases : ratés jusqu'au `qht` divisés par deux (mb 5,8 → 2,7 %, zen 6,3
+→ 3,3 %) ; A/B au repos (binaire -O2) d3 −4,6 %, mb −3,3 %, zen −2,0 %, ut −1,7 %, mais cmr
++2,8 %, et deux tours cmr avec vidage n'atteignent pas la course. **Éteint.**
+
+**Base de temps** : sur UT2004, les blocs les plus chauds sont `_mach_absolute_time` et la boucle
+au repos du noyau, juste avant `_idle_thread` (0x33f3c-0x33fd0 : `ml_set_interrupts_enabled`,
+`mach_absolute_time`, `timer_event`). Ce sont les 13,8 % de `mftb` du profil croisé. A/B au repos
+(`bench/tcg/ab/tb-3110-ut`, binaire rapide, 3 parties par bras) : `TBFAST=0` 37,8 contre 36,9
+ms/image : le `mftb` rapide vaut **−2,4 %** sur ut. Sa vitesse compte donc un peu. Un `mftb` en
+ligne (sans helper) peut encore gagner, mais pas les 13,8 % du profil, dont une grande part est
+une attente active.
