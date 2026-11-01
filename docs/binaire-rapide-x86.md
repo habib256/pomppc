@@ -16,7 +16,10 @@ reconstruits** (`etat-des-hotes.md` §2).
 La compilation de QEMU est le plus gros levier mesuré sur le PC, sans une ligne de code de
 l'émulateur (`docs/vitesse-doom3-x86.md` §5.5, §9, §11) : `-O3 -march=native`, sans les
 durcissements de QEMU, LTO et PGO font passer DOOM 3 de ~150 à **115 ms/image (−23 %)**, et les
-trois autres jeux de la matrice gagnent 18-19 %, images justes. Jusqu'ici ce binaire restait une
+trois autres jeux de la matrice gagnent 18-19 %, images justes. (01/11 : ces −23 % cumulent la
+compilation **et** `x-jit-rel32`, `x-vmx-inline` + `x-vfp-native` et un lot du plugin ; la
+compilation seule en vaut ~13 % (`vitesse-doom3-x86.md` §9), et l'A/B à défauts égaux du 06/10
+donne au binaire rapide **−9,3 %** sur DOOM 3 (§6).) Jusqu'ici ce binaire restait une
 « variante » (`QEMU_OPT`) dans un arbre séparé (`~/src/qemu-d3tcg/build-pgo3`), que le lanceur
 ne prenait que par `QEMU_BIN=…`. Il devient le binaire quotidien du PC :
 
@@ -74,11 +77,12 @@ Sur Linux x86-64 (`scripts/qemu_fast.sh`, appelé avant tout sondage) :
 1. `QEMU_BIN=…` explicite prime toujours (« binaire imposé (QEMU_BIN) ») ;
 2. `QEMU_FAST=0` : binaire de référence, sans rien sonder ;
 3. sinon `QEMU_FAST_BIN` (`config.env`, défaut `~/src/qemu/build-fast/qemu-system-ppc`, et son
-   `…64` dès SMP ≥ 2) est pris s'il passe **tous** ces contrôles : relevé présent et
+   `…64` dès SMP ≥ 2, sauf avec `PPC32MT=1` où `qemu-system-ppc` reste lancé) est pris s'il passe **tous** ces contrôles : relevé présent et
    `complet=oui` ; pas l'instrumenté (`pgo-gen`) ; construit sur **ce** processeur (un binaire
    `-march=native` meurt sur SIGILL ailleurs) ; même empreinte de série que les `patches/` du
    dépôt (sinon la référence a été reconstruite sans lui) ; QEMU `POMPPC_QEMU_VERSION` ;
-   Screamer, `qgpu-pci` et `-smp N` sondés sur le binaire qui sera lancé ;
+   Screamer, `qgpu-pci` et `-smp N` (MTTCG de `tcg/0050` avec `PPC32MT=1`) sondés sur le
+   binaire qui sera lancé ;
 4. écarté ⇒ avertissement et binaire de référence ; avec `QEMU_FAST=1`, refus net.
 
 La bannière dit lequel : `▶ Tiger (QEMU 11.1.2, binaire rapide (PGO, -O3, -march=native)) : …`
@@ -132,6 +136,15 @@ fichiers changés sont compilés sans profil, le gain s'effrite.
 
 Sans cette reconstruction, le lanceur écarte `build-fast/` (« autre série de patches ») et
 retombe sur la référence : jamais un binaire rapide en retard sur la série en silence.
+
+Ce que couvre l'empreinte (`pomppc_serie_hash`, `scripts/qemu_fast.sh`) : le contenu entier,
+commentaires compris, des fichiers de `patches/` que `scripts/build_qemu_qfb.sh` nomme par
+`"$ROOT"/patches/…` ou `"$ROOT/patches/…"`. N'y entrent pas : `build_qemu_qfb.sh` lui-même (ses
+commentaires, mais aussi ce qu'il insère sans patch et ses options de `configure`),
+`scripts/caps.sh`, `config.env`, l'OpenBIOS (`.elf`) et les fichiers de `patches/` qu'il ne nomme
+pas (`tcg/0060-0063`, `diag/`, `essais/`…). Un changement de `build_qemu_qfb.sh` qui modifie le
+binaire sans toucher à un patch nommé ne déclasse donc pas `build-fast/` : le reconstruire à la
+main.
 
 ## 6. Mesures
 

@@ -45,28 +45,53 @@
 #   • vperm en ligne, PSHUFB sur x86 (x-vperm-inline, x-vperm-verify) — patches/tcg/0059
 #   • tête de bloc allégée : can_do_io déduit, goto_tb avant après la vérification (x-tb-head) — patches/tcg/0064
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
-#   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
+#   • slirp (réseau user-mode) et le son de l'hôte (PulseAudio et ALSA sous Linux,
+#     CoreAudio sous macOS), exigés explicitement
+#
+# Ordre d'application (celui du code ci-dessous) : smp-mac99, openpic, constantes
+# GPIO (sans patch), screamer, qfb, qgpu, fastfp 0001 puis 0002, la série tcg dans
+# l'ordre de la liste (0033-0034 avant 0031, 0032, 0035 ; 0037-0039 après 0052),
+# usbhid en dernier. tcg/fixes/0003 et fixes/0022 ne servent qu'à un arbre qui
+# portait déjà 0003 ou 0022 avant leur correction (un arbre neuf l'a d'emblée).
+# Les fichiers de patches/ que ce script ne nomme pas (tcg/0060-0063, diag/,
+# 01-timebase, 02-jmpcache, essais/, les patches d'OpenBIOS) ne sont pas
+# appliqués : patches/README.md, « Présents, non appliqués ».
 #
 #   ./scripts/build_qemu_qfb.sh              # build dans ~/src/qemu
 #   QEMU_SRC=/chemin ./scripts/build_qemu_qfb.sh
+#   QEMU_TAG=v… ./scripts/build_qemu_qfb.sh     # autre tag (défaut : v + POMPPC_QEMU_VERSION)
 #   RECONFIGURE=1 ./scripts/build_qemu_qfb.sh   # force un ../configure
 #   PYTHON=/chemin/python3 ./scripts/build_qemu_qfb.sh   # Python pour configure
 #   CONFIGURE_EXTRA="--disable-sdl" …                    # options de configure en plus
 #                                    (la publication macOS, scripts/package_release_macos.sh)
+#   JOBS=N                           # parallélisme de ninja (défaut : nombre de cœurs)
+#   NO_TCG=1, NO_FASTFP2=1           # sur un arbre PROPRE : sans la série tcg, sans fastfp/0002
+#   QEMU_OPT=…, QEMU_BUILD=…, PGO_DIR=…, LTO_JOBS=…   # variantes de compilation (§ 5 plus bas)
 #
-# macOS : affichage Cocoa et son CoreAudio au lieu de GTK/SDL et PulseAudio.
-# Le configure de QEMU 11.1 exige un Python ≥ 3.9 avec « tomli » (ou ≥ 3.11) et
-# « distlib » : sur macOS, un venv suffit (python3 -m venv v && v/bin/pip
-# install distlib tomli ; PYTHON=v/bin/python3).
+# Prérequis par hôte (configure s'arrête si l'un manque) :
+#   Linux : en-têtes -dev de glib, pixman, gtk3, sdl2, PulseAudio, ALSA, libslirp,
+#           et EGL + GL (pkg-config egl, gl) pour le backend GL de qgpu
+#           (optionnel, patches/qgpu/0003 ; macOS : OpenGL.framework) ; ninja.
+#           Relevé du 14/10 sous Ubuntu 26.04 : docs/binaire-rapide-x86.md.
+#   macOS : Homebrew glib, pixman, libslirp, ninja, pkg-config ; le binaire du M4
+#           (02/10) lie aussi gnutls, libpng, jpeg-turbo, zstd et libusb, pris
+#           d'office s'ils sont là. Pas de --enable-sdl sur macOS (auto-détecté).
+# Le configure de QEMU 11.1 exige un Python ≥ 3.9 avec « tomli » (inutile à
+# partir de 3.11, qui a tomllib) et « distlib » (à défaut, celui que pip embarque) :
+# sur macOS, un venv suffit (python3 -m venv v && v/bin/pip install distlib tomli ;
+# PYTHON=v/bin/python3).
 #
 # Le binaire produit (build/qemu-system-ppc et ...ppc64) est à l'emplacement que
 # config.env attend par défaut. TOUT est dans ce dépôt : aucun fork tiers n'est
 # récupéré au build, seul l'amont qemu-project est cloné.
 #
-# Le script se termine par une VÉRIFICATION DE CAPACITÉS (screamer, qfb-pci,
-# slirp, audio pa) et écrit le résultat dans bench/build-capabilities.txt. Les
-# lanceurs sondent le binaire de la même façon : un build incomplet dégrade
-# proprement au lieu de mentir.
+# Le script se termine par une VÉRIFICATION DE CAPACITÉS (§ 6 : screamer, qfb-pci,
+# qgpu-pci et son écran, x-abs-margin, slirp, son de l'hôte — pa sous Linux,
+# coreaudio sous macOS —, SMP mac99, x-fast-fp sur les deux binaires ; puis, en
+# optionnel, le backend GL et les propriétés de la série tcg) et écrit le résultat
+# dans bench/build-capabilities.txt (bench/build-capabilities-<dossier>.txt pour une
+# variante). Les lanceurs sondent le binaire de la même façon : un build incomplet
+# dégrade proprement au lieu de mentir.
 #
 # Binaire RAPIDE du PC (Linux x86-64, docs/binaire-rapide-x86.md) : en plus de
 # build/, ~/src/qemu/build-fast/ en -O3 -march=native, LTO et PGO, que

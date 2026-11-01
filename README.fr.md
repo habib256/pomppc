@@ -102,10 +102,15 @@ protocole** — sous programme ARB, un repli vers Apple tue le jeu
    `$HOME/src/qemu/build/qemu-system-ppc` ; `QEMU_BIN=` force un binaire. Le paquet distro
    suffit à la baseline (`scripts/`), pas aux lanceurs quotidiens. Sur un PC Linux x86-64,
    `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh` construit en plus `~/src/qemu/build-fast/`
-   (`-O3 -march=native`, LTO, PGO : ~20 % plus rapide en jeu), que `run_tiger.sh` préfère
+   (`-O3 -march=native`, LTO, PGO : ~10 % plus rapide sur DOOM 3 que la référence à réglages
+   égaux), que `run_tiger.sh` préfère
    alors (`QEMU_FAST=0` pour la référence) : [docs/binaire-rapide-x86.md](docs/binaire-rapide-x86.md).
-   Le `configure` de QEMU veut Python ≥ 3.9 avec `tomli` et `distlib` ; sur macOS un venv
-   suffit (`PYTHON=venv/bin/python3 ./scripts/build_qemu_qfb.sh`).
+   Le `configure` de QEMU veut Python ≥ 3.9 avec `tomli` (intégré sous le nom `tomllib` à
+   partir de 3.11) et `distlib` ; sur macOS un venv suffit
+   (`PYTHON=venv/bin/python3 ./scripts/build_qemu_qfb.sh`). Prérequis par hôte (en-têtes
+   Linux, formules Homebrew) : en-tête de `scripts/build_qemu_qfb.sh`. Le frontal ImGui
+   (`frontend/`) se construit de lui-même au premier lancement (`run_frontend.sh` : `setup.sh`
+   puis `cmake`).
 2. **Un média d'installation Tiger PPC que vous possédez**, dans `images/` (gitignoré), nommé
    dans `config.env` (`INSTALL_MEDIA`). ISO tel quel ; un DMG compressé doit être converti
    (`hdiutil convert in.dmg -format UDTO -o out`, puis renommer `out.cdr` en `.iso` ; ou `dmg2img`). Aucune ROM Apple : OpenBIOS suffit.
