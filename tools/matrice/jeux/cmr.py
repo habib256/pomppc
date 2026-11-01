@@ -8,8 +8,10 @@ Scène fixe : le départ de la spéciale ESP 1 Selardu en contre la montre
 le chrono tourne, personne ne la conduit) ; la voiture tirée au sort
 change (Impreza, 206, Golf), pas le décor. Chemin (27/09,
 docs/re/cmr-rendu-vers-texture.md) : « Jouer » du dialogue d'options (Entrée
-par osascript, jeu au premier plan), écran titre (attendu à >= 50 teintes à
-l'écran), puis Entrées TENUES par le moniteur (`sendkey ret 300` : l'Entrée
+par osascript, jeu au premier plan ; 28/10 : renvoyée, au plus 3 fois, tant
+qu'aucun échange GL n'est vu), écran titre (28/10 : guetté toutes les 2 s, au
+plus 60 s, à >= 60 % de pixels presque blancs ; avant, >= 50 teintes), puis
+Entrées TENUES par le moniteur (`sendkey ret 300` : l'Entrée
 d'osascript ne passe pas les menus) : titre → film → MENU → DÉFIS → CONTRE LA
 MONTRE → ÉTAPES → joueurs → nom → ÉTAPES (course) → COURSE, puis ~70 s de
 chargement. Une Entrée peut se perdre dans une transition : sans pause de
@@ -22,7 +24,7 @@ Fenêtre de mesure : après la touche COURSE et la première pause de
 chargement, la première tranche de 600 échanges régulière (deux moitiés à
 10 % près, > 10 ms/échange : le survol d'avant le départ tourne plus vite),
 sans pause de chargement (> 500 ms) et EN COURSE : au moins SOMMETS_COURSE
-(1 700) sommets bruts par échange dans chaque moitié (01/11, 6054367 : la
+(1 700) sommets bruts par échange dans chaque moitié (31/10, 6054367 : la
 transition d'avant la course en fait au plus 1 281 et passait les autres
 critères sur le PC).
 Seuil abaissé de 18 à 15 le 01/10 : avec POMPPC_GL_NATSHM la course tourne à
@@ -100,6 +102,8 @@ class ColinMcRae(Jeu):
             os.remove(p)
 
     def teintes(self, h):
+        """Nombre de teintes à l'écran (ppmcmp -s). Plus appelée depuis le 28/10
+        (l'écran titre se reconnaît par blanc())."""
         p = "/tmp/matrice-cmr-%d.ppm" % os.getpid()
         if not h.capture(p):
             return 0

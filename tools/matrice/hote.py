@@ -224,8 +224,9 @@ class Hote:
 
     # ---------------------------------------------------------- invité
     def redemarre(self):
-        """Redémarre l'invité (après DOOM 3 : kCGLBadDisplay) ; panique
-        AppleUSBOHCI au démarrage (~1/10) : system_reset et on réessaie."""
+        """Redémarre l'invité (après Colin McRae, un client du kext resté ouvert
+        ou un gel ; plus après DOOM 3 depuis le 29/09) ; panique AppleUSBOHCI au
+        démarrage (~1/10) : system_reset et on réessaie."""
         journal("redémarrage de l'invité")
         if self.repond():
             self.ssh("echo tiger974 | sudo -S shutdown -r now", delai=30)

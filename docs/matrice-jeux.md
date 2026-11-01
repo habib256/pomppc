@@ -39,7 +39,8 @@ tools/matrice/matrice.py --deux-passes       # mesure puis preuve séparées (pl
 tools/matrice/matrice.py --sans-vidage       # vitesse et replis seuls
 tools/matrice/matrice.py -j d3 -m fen --sans-vidage --env POMPPC_GL_STSKIP=0 --sample 10
                                              # A/B d'un drapeau du plugin, `sample` de 10 s dans
-                                             # l'invité après la fenêtre (sample.txt de la cellule ;
+                                             # l'invité après la fenêtre (sample.txt de la cellule,
+                                             # sous mesure/ ou invite/ ;
                                              # tools/re/sampleplug.py le résume), --sortie DOSSIER
 tools/matrice/matrice.py --liste             # jeux et modes connus
 tools/matrice/matrice.py --valider d3-pe     # référence d'image vue et validée à l'œil
@@ -78,11 +79,13 @@ Un jeu est **vert** dans un mode quand les trois preuves y sont (`TODO.md`, « M
    - **validée à l'œil** : la référence a été regardée une fois et déclarée juste
      (`--valider`). Une image non vide ni unie est aussi exigée (écart-type, teintes).
 2. **Zéro repli** : le compteur `fallbacks` de `frames.csv` ne bouge pas de la fenêtre de
-   mesure à la fin du vidage, sur les deux lancements. **En fenêtre**, le plugin rend
+   mesure à la fin du vidage (sur les deux lancements avec `--deux-passes`). **En fenêtre**, le plugin rend
    volontairement un échange sur 90 à Apple (`DIRECT_REFRESH`, rafraîchissement de la mémoire
    de la fenêtre côté WindowServer) : 2 replis par tranche de 90 images sont admis.
 3. **Vitesse** : ms/image sur la fenêtre de mesure de la scène fixe, sous le **plancher** du
-   jeu (une garde contre la régression, ~1,3 × la mesure du 26/09).
+   jeu (une garde contre la régression : `plancher_ms`, ~1,25 × la mesure du tour
+   `20260929-2344` sur le M4, Zenerchi du 30/09 ; `plancher_ms_linux` sur le PC, §6 quater ; ~1,3 × la mesure
+   du 26/09 au début). Un jeu sans plancher n'a pas de verdict de vitesse.
 
 ## 2. Déroulé d'une cellule
 
@@ -158,7 +161,7 @@ UT2004 est déterministe (pas de simulation fixé), les autres non.
 | Prey Demo | `r_mode 3` | `r_mode 5` | `+loadGame Auto___Fuite_____toute_vitesse` : L+300..L+600 après le chargement |
 | UT2004 Demo | `StartupFullscreen=False` | `-fullscreen`, 1024×768 | caméra d'intro d'AS-Convoy, pas fixé à 0,2 s (`seed.c`), images 13..73 |
 | Warcraft III | **non automatisé** | défaut (800×600, changement de mode) | menu principal, images 1200..1700 ; CD monté depuis `Warcraft III.toast` |
-| Colin McRae 2005 | **non automatisé** (pas de mode fenêtre) | défaut (800×600, changement de mode ; 01/11 : en fait la résolution du bureau, 1920×1080 sous ImGuiDock pour la référence du M4) | départ d'ESP 1 Selardu en contre la montre, voiture arrêtée (personne ne la conduit : en course, le chrono tourne, la voiture reste sur la ligne) : 600 échanges réguliers après la touche COURSE (3 échanges par image du jeu) ; depuis le 31/10 (`6054367`), seulement des tranches **en course** (≥ 1 700 sommets bruts par échange, `SOMMETS_COURSE` de `jeux/cmr.py`) |
+| Colin McRae 2005 | **non automatisé** (pas de mode fenêtre) | défaut (800×600, changement de mode ; 01/11 : en fait la résolution du bureau, 1920×1080 sous ImGuiDock pour la référence du M4) | départ d'ESP 1 Selardu en contre la montre, voiture arrêtée (personne ne la conduit : en course, le chrono tourne, la voiture reste sur la ligne) : 600 échanges réguliers (deux moitiés à 10 % près, > 10 ms/échange, sans pause > 500 ms) après la touche COURSE et la première pause de chargement (3 échanges par image du jeu) ; depuis le 31/10 (`6054367`), seulement des tranches **en course** (≥ 1 700 sommets bruts par échange, `SOMMETS_COURSE` de `jeux/cmr.py`) |
 | Nexuiz 2.5.2 (DarkPlaces) | `+vid_fullscreen 0`, 800×600 | `+vid_fullscreen 1`, 1024×768 | `-benchmark demos/demo1` (timedemo, déterministe) : images 120..600, vidage à l'image fixe 870 |
 | Nexuiz 2.5.2 (GLSL, `nxg`) | `+r_glsl 1`, comme `nx` | `+r_glsl 1`, comme `nx` | même démo et mêmes fenêtres que `nx` ; automatisé depuis le protocole v21 (27/09, `jeux/nx.py`) — avant, GLSL coupé par le jeu faute de `GL_ARB_fragment_shader` |
 | RTCW | **non automatisé** | **non automatisé** | — |
@@ -187,10 +190,13 @@ Détails par jeu dans l'en-tête de chaque module. Points durs :
   (aucun réglage connu, `LaunchCFMApp` ne passe pas d'arguments) ; Colin McRae en fenêtre
   (le dialogue d'options n'offre que résolution, couleurs, FSAA) ; RTCW (absent du disque
   quotidien).
-- **Colin McRae** (27/09) : « Jouer » du dialogue d'options par osascript, puis écran titre
-  attendu (capture à ≥ 50 teintes), puis **Entrées tenues par le moniteur** (`sendkey ret
+- **Colin McRae** (27/09) : « Jouer » du dialogue d'options par osascript (28/10 : renvoyé, au
+  plus 3 fois, tant qu'aucun échange GL n'est vu — une alerte « Low-end machine detected » peut
+  prendre la première Entrée), puis écran titre attendu (capture à ≥ 50 teintes ; 28/10 : ≥ 60 %
+  de pixels presque blancs, guetté toutes les 2 s pendant 60 s au plus, une Entrée sur le film
+  qui suit fait quitter le jeu), puis **Entrées tenues par le moniteur** (`sendkey ret
   300` : l'Entrée d'osascript ne passe pas les menus) jusqu'à COURSE ; une Entrée perdue dans
-  une transition est renvoyée (pas de pause de chargement 40 s après la dernière). ms/image
+  une transition est renvoyée (pas de pause de chargement 40 s après la dernière ; au plus 4). ms/image
   = ms par échange × `echanges_par_image` (3 : plein écran + deux échanges de la cible
   cachée 800×600). La voiture change d'un tour à l'autre (tirage du jeu), pas le décor.
   Arrêt `sudo killall -9`, invité redémarré après.
@@ -256,7 +262,8 @@ une liste d'instances (profils d'un même jeu, Nexuiz).
   de synchronisation.
 - **Reprendre un tour** : `--reprendre bench/matrice/<tour> -j … -m …` rejoue la sélection et
   garde les autres cellules du tour. Un tour interrompu laisse au pire un jeu en marche et des
-  réglages sauvegardés : le tour suivant arrête le jeu (redémarre l'invité si c'est DOOM 3),
+  réglages sauvegardés : le tour suivant arrête le jeu (redémarre l'invité si c'est Colin McRae
+  ou si un client du kext reste ouvert ; DOOM 3 jusqu'au 29/09),
   rend les réglages et démonte le CD de Warcraft III avant de commencer.
 - **Marble Blast en fenêtre** : utiliser les deux fichiers de préférences réglés par le
   module ; une fenêtre 1024×768 sur le bureau 1024×768 perd sa présentation directe.
@@ -352,7 +359,9 @@ sur **llvmpipe** — sous la session Wayland d'Ubuntu 26.04, `eglGetDisplay(EGL_
 donne Mesa ; corrigé par `EGL_PLATFORM=device` (`run_tiger.sh`). Écart faible (UT2004 est
 limité par l'émulation), mais toute mesure du 13-14/10 avant 9479434 est sur llvmpipe. DOOM 3 reste rouge tant que sa référence
 n'est pas validée à l'œil (`matrice.py --valider d3-fen`) (01/11 : validée le 30/10 avec d3-pe,
-`a89515b`). Le premier passage sur
+`a89515b`). (01/11 : Colin McRae a aussi son plancher du PC, 105 ms/image depuis le 31/10 :
+79,9-84,3 en course × 1,25, `jeux/cmr.py` ; Prey, Warcraft III et Nexuiz n'en ont pas et prennent
+celui du M4.) Le premier passage sur
 la VM a demandé : la clé de la matrice (`.run/cmr/id_rsa`, déposée par mot de passe ; `expect`
 manque ici), `~/matrice/ut-seed.dylib` compilé dans la VM de dev (pas de gcc dans la VM
 quotidienne).

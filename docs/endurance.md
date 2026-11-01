@@ -120,7 +120,8 @@ dans `bench/endurance/invite-10.4.11/mach_kernel`, `invite-syms.sh` dans
   (`demarrages` : garde les dossiers des cycles réussis).
 
 - `--mode froid` lance un QEMU neuf sur un disque neuf à chaque démarrage. `--mode reboot`
-  fait `shutdown -r now` dans l'invité, dans le même QEMU, comme la matrice après DOOM 3.
+  fait `shutdown -r now` dans l'invité, dans le même QEMU, comme la matrice après DOOM 3
+  (01/11 : depuis le 29/09, après Colin McRae ou un client du kext resté ouvert).
   `--mode reset` passe par `system_reset` au moniteur.
 - Un démarrage est **ok** quand le ssh répond, que `hw.ncpu` vaut `--smp` et que l'invité
   répond encore `--repos` secondes (20 par défaut) plus tard. C'est une **panique** dès que

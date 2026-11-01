@@ -65,14 +65,15 @@ class Jeu:
 
     # --- scène fixe
     def fenetre(self, rows):
-        """rows : {image: (elapsed_ms, fallbacks, readbacks)}. Rend (a, b), la
-        fenêtre de mesure, quand l'image b est passée ; None sinon."""
+        """rows : {image: (elapsed_ms, fallbacks, readbacks, dessins, sommets)}
+        (compteurs cumulés, matrice.lit_frames). Rend (a, b), la fenêtre de
+        mesure, quand l'image b est passée ; None sinon."""
         if self.images_fenetre:
             return fenetre_fixe(rows, *self.images_fenetre)
         return None
 
     def pendant(self, h, rows, t):
-        """Appelé à chaque relevé (toutes les ~5 s) : touches, remise au premier plan."""
+        """Appelé à chaque relevé (toutes les ~10 s, plus le ssh) : touches, remise au premier plan."""
 
     # --- arrêt
     def arreter(self, h):

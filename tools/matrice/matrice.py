@@ -15,7 +15,8 @@ docs/archive/todo-par-domaines-2026-09-27.md) :
      references-linux.csv sur le PC, validée à l'œil une fois) doit redonner
      l'image de référence ;
   2. zéro repli : `fallbacks` de frames.csv constant de la fenêtre de mesure à
-     la fin du vidage ;
+     la fin du vidage (en fenêtre, 2 replis admis par tranche de 90 images :
+     rafraîchissement DIRECT_REFRESH, voir Cellule.mesures) ;
   3. vitesse : ms/image sur la fenêtre de mesure de la scène fixe, sous le
      plancher du jeu (plancher_ms, plancher_ms_linux sur le PC : tools/matrice/jeux/).
 
@@ -877,7 +878,7 @@ def main():
                          "(sample-hote-<mesure|invite>.txt à la racine de la cellule)")
     ap.add_argument("--sample", type=int, default=0, metavar="S",
                     help="`sample` du jeu dans l'invité pendant S s, la fenêtre de mesure passée "
-                         "(sample.txt dans le dossier de la cellule)")
+                         "(sample.txt dans <cellule>/invite/, ou mesure/ avec --sans-vidage)")
     ap.add_argument("--tenir", type=int, default=0, metavar="S",
                     help="le jeu continue S s une fois la fenêtre de mesure passée (vidage long, "
                          "avec --env POMPPC_GL_DUMP_TRIGGER=@1 --env POMPPC_GL_DUMP_FRAMES=N)")
