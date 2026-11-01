@@ -14,7 +14,7 @@
 #   tel que réglé, mb16 = Marble Blast forcé en « 800 600 16 » (prefs.cs),
 #   ut = Unreal Tournament 2004 Demo (bureau). ut n'est pas dans le défaut :
 #   le job historique n'a pas la démo.
-#   DUR=60
+#   DUR=80 (secondes par jeu)
 . ./lib.sh
 . ./guilib.sh
 GAMES=${GAMES:-"zen mb mb16"}

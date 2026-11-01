@@ -3,8 +3,9 @@
 # Copyright (c) 2026 VERHILLE Arnaud
 # Diagnostic du chargement du plugin par GLEngine (variantes de GL_RESOURCES).
 #
-# A, B, C sont des variantes CONNUES POUR ÉCHOUER sur ce 10.4.6 (GL_RESOURCES
-# ne marche pas, kCGLBadCodeModule) : elles sont informatives et ne comptent
+# A, B, C sont des variantes CONNUES POUR ÉCHOUER sur le 10.4.6 du 19/09/2026
+# (GL_RESOURCES n'y marchait pas, kCGLBadCodeModule ; non revérifié depuis le
+# passage de la VM de dev en 10.4.11) : elles sont informatives et ne comptent
 # pas. D — le plugin posé dans le Resources du système — est le chemin de
 # secours réellement utilisé en single-user : celui-là doit rendre par POMPPC
 # (GLTEST_REQUIRE, bug hunt T5), et son échec rougit le job (T6).

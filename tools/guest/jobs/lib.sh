@@ -27,7 +27,8 @@ kext_load() {
 
 # plugin compilé et installé dans /System/Library/Extensions : GLEngine l'y
 # charge par l'IOGLBundleName de l'accélérateur que publie le kext (tâche 4.2,
-# docs/re/accelerateur-iokit.md). (GL_RESOURCES ne marche pas sur ce 10.4.6 :
+# docs/re/accelerateur-iokit.md). (GL_RESOURCES ne marchait pas sur le 10.4.6 de la
+# VM de dev, passée en 10.4.11 depuis :
 # gpu-3d-tiger.md §5.1.)
 plugin_install() {
   ( cd $SRC/guest/gldriver && make > $OUT/plugin-build.txt 2>&1 ) ||

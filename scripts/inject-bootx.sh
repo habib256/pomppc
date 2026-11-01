@@ -3,7 +3,8 @@
 # Copyright (c) 2026 VERHILLE Arnaud
 # Réinjecte BootX (extrait du CD d'install) dans le volume système de tiger.qcow2.
 # Le boot échoue parce que /System/Library/CoreServices/BootX manque sur le disque installé.
-# Nécessite root (qemu-nbd + montage HFS+ en écriture). À lancer: sudo bash scripts/inject-bootx.sh
+# Nécessite root (qemu-nbd + montage HFS+ en écriture) : hôte Linux seulement (modprobe nbd/hfsplus).
+# À lancer: sudo bash scripts/inject-bootx.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

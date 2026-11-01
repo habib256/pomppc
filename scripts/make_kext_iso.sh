@@ -5,8 +5,8 @@
 # programme de test invité (guest/qgpu-test) sur un CD ISO, à monter dans
 # l'invité Tiger pour les y compiler (l'hôte n'a pas de toolchain
 # ppc-apple-darwin8). Arborescence du CD : kext/{POMPPCQFB,POMPPCGPU},
-# guest/{qgpu-test,gldriver,gltest,net}, et prebuilt/ (kext, plugin, gltest,
-# glwin déjà compilés) si disks/prebuilt existe.
+# guest/{qgpu-test,gldriver,gltest,net}, et prebuilt/ (kext, plugin OpenGL,
+# plugin GA, gltest, glwin, accelprobe déjà compilés) si disks/prebuilt existe.
 #
 #   ./scripts/make_kext_iso.sh
 #   GPU=1 ./run_tiger.sh     # (re)grave l'ISO si besoin et l'insère lui-même

@@ -42,14 +42,16 @@ Cinq améliorations qui ne sont pas encore des chantiers : chacune avec le gain 
 et la preuve qui la fermerait. L'ordre est celui que je recommande ; rien n'est lancé sans
 décision. Une piste retenue monte dans « Maintenant » (au plus trois chantiers).
 
-1. **Mesurer ce que l'utilisateur voit : ImGuiDock contre GTK.** Tous les A/B passent sous le
-   frontal GTK (`matab.sh`) ; l'utilisateur joue sous ImGuiDock (`-display dbus,p2p=on`, images
+1. **Mesurer ce que l'utilisateur voit : ImGuiDock contre le frontal natif.** Tous les A/B passent
+   sous le frontal natif de QEMU (`matab.sh` : GTK sur le PC, Cocoa sur le M4) ; l'utilisateur
+   joue sous ImGuiDock (`-display dbus,p2p=on`, images
    poussées par D-Bus puis texture, `frontend/README.md`). Ce coût n'a jamais été mesuré et il
    croît avec la résolution (3 Mo par image en 1024×768×32, 8 Mo en 1920×1080) : c'est un
    suspect des « gros ralentissements en 1920×1080 » de cmr. Travail : A/B des cinq cellules
    sous les deux frontaux à scène égale ; si écart, scanout en mémoire partagée (memfd ou
    dmabuf, prévus par `org.qemu.Display1`) et rectangles sales seulement. **Fermeture :** écart
-   ImGuiDock − GTK < 2 % sur la matrice, cmr 1920×1080 remesuré. Coût : une journée. Gain :
+   ImGuiDock − frontal natif < 2 % sur la matrice, cmr 1920×1080 remesuré. Coût : une journée.
+   Gain :
    tout l'écart mesuré, sur les deux hôtes, dans l'usage réel.
 2. **Régime de compilation du plugin de l'invité.** Le plugin fait 11-28 % du vCPU selon le jeu :
    10 % de mieux sur lui vaut 1-3 % sur chaque jeu, sur les deux hôtes, sans portage. Leviers :
@@ -98,7 +100,8 @@ L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
 
 ## Maintenant
 
-Ordre du 01/11 : la prochaine séance est sur le M4, son chantier passe en tête ; le plugin est
+Ordre du 01/11 : la séance de l'après-midi est sur le M4, son chantier passe en tête (même ordre
+que `docs/etat-des-hotes.md` §4) ; le plugin est
 commun ; les leviers du JIT x86 attendent le retour sur le PC.
 
 - [ ] **[TCG — M4] Mesurer le M4 avant de l'optimiser, puis rattraper le PC.** Le M4 n'a pas
@@ -106,7 +109,8 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
   1. **Rattrapage** (01/11, en partie fait) : `~/src/qemu` reconstruit ; kext, plugin et GA
      compilés et installés dans la VM quotidienne, invité redémarré ; mb et d3 fen/pe vertes ;
      cmr-pe : le M4 mesurait déjà la course, référence reprise (faux reflet), **à valider à
-     l'œil**. Restent : la bande sous l'ombre à l'œil, l'A/B `m4-bundle-0111` (PACKBITS et avis
+     l'œil**. Restent : la bande sous l'ombre et le curseur net en plein écran à
+     l'œil, l'A/B `m4-bundle-0111` (PACKBITS et avis
      d'ombre, en attente de la fin de Time Machine). Détail : `docs/etat-des-hotes.md` §3-§4.
   2. **Profil croisé des 5 jeux** (`sample` du processus QEMU, fils vCPU et `qgpu-render`,
      comme `tools/re/perfpart.py` sur le PC) : part du JIT, recherche de blocs, `mftb`,
@@ -116,6 +120,7 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
      variante `select` pour les seuls délais sous la milliseconde, profil d'UT (verrou).
   4. Parité de la zone froide (`tcg/0056`, saut long aarch64) en dernier : gain PC de 1-2 %
      sur un goulot L1i propre au PC.
+  5. Une tranche d'endurance avec le kext du 01/11, puis `etat-des-hotes.md`.
   **Fermeture :** doc de profil M4, PACKBITS mesuré, A/B de chaque levier, `etat-des-hotes.md`.
 
 - [ ] **[Plugin — les deux hôtes] Alléger le plugin de l'invité, suite de PACKBITS**
@@ -127,8 +132,9 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
   `prog_params_arena`/`prog_state` 1,4 ; dans libSystem, le bloc `0x90131200` fait 1,8 % sur
   cmr et 0,7 % sur d3/mb (à identifier : `memcpy`, verrou ?). Méthode du §2 : un levier par
   variable `POMPPC_GL_*`, mode `=2` de contrôle, `plugmd5` 0 écart, A/B des cinq jeux sur le
-  PC ; le M4 a le bundle depuis le 01/11 (VM quotidienne), A/B PACKBITS `m4-bundle-0111` lancé
-  (gain attendu 1-4 %). S'y rattache l'**avis borné** des surfaces non simples (QE, 01/11) : le
+  PC ; le M4 a le bundle depuis le 01/11 (VM quotidienne), A/B PACKBITS `m4-bundle-0111` lancé,
+  en attente de la fin de Time Machine (gain attendu 1-4 %). S'y rattache l'**avis borné** des
+  surfaces non simples (QE, 01/11) : le
   coût de l'avis d'ombre (mb-fen +6 % quand une fenêtre est posée sur le jeu, la matrice y pose
   toujours son Terminal) vient d'un avis sur toute la surface ; le kext connaît le rectangle
   englobant de la partie non visible : le renvoyer par la méthode 6 et n'aviser que lui, puis
@@ -143,21 +149,21 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
      `exit 138`). **Ancien binaire remis**, nouveau gardé dans `~/src/qemu/build-fast-pgo0111cmr/` :
      recontrôle cmr 3 parties au repos strict, et entraînement de cmr sur un binaire qui
      atteint la course (l'instrumenté n'y arrive pas en 901 s).
-  2. **Recherche de blocs** (mb 10 %, zen 14 %, cmr 6 %) : `tcg/0060` x8 (effacement exact, 256
+  2. **`tcg/0063` `x-dbat-lite`** : témoin cmr sous `TLBPVERIFY=16 RETVERIFY=1` **sans** 0063,
+     pour savoir si la panique de délai de verrou du 01/11 vient des vérificateurs ; puis
+     rejouer l'A/B en fenêtre à 3 parties (2 parties : d3 −3 %, mb −2,2 %, ut +3,7 %).
+  3. **Recherche de blocs** (mb 10 %, zen 14 %, cmr 6 %) : `tcg/0060` x8 (effacement exact, 256
      cases) gagne mb −8,7 % et ut −1,9 % mais **cmr +4,2 %** en course, seule perte propre à
      cmr qui reste inexpliquée. À instruire : compter ce que coûte le parcours exact sous les
      ~2 000 écritures de BAT par seconde de cmr (32 pages chacune), puis essayer **x8 +
      `tcg/0063`** (plus de vidage du cache de sauts sur un DBAT) ; l'un sans l'autre a été
      mesuré, pas les deux.
-  3. **Base de temps** : `helper_load_tbu/tbl` 14 % du vCPU sur ut, 3 % sur zen. D'abord
+  4. **Base de temps** : `helper_load_tbu/tbl` 14 % du vCPU sur ut, 3 % sur zen. D'abord
      identifier la boucle chaude du noyau `0x33f3c-0x33fec` (11,7 % du vCPU d'ut, près de
      `_idle_thread` : `mach_absolute_time`, `timer_event`) : si c'est une attente active du
      noyau, le levier est d'endormir le fil hôte (ut occupe 1,9 cœur) plutôt que d'accélérer
      `mftb` ; sinon `mftb` en ligne (sans helper), gain modeste (−2,4 % mesuré pour helper
      lent → rapide).
-  4. **`tcg/0063` `x-dbat-lite`** : témoin cmr sous `TLBPVERIFY=16 RETVERIFY=1` **sans** 0063,
-     pour savoir si la panique de délai de verrou du 01/11 vient des vérificateurs ; puis
-     rejouer l'A/B en fenêtre à 3 parties (2 parties : d3 −3 %, mb −2,2 %, ut +3,7 %).
   **Fermeture de chaque levier :** preuve, A/B des cinq jeux, allumé ou archivé avec le chiffre.
 
 ## Ensuite
@@ -335,7 +341,7 @@ Ne pas rouvrir sans fait nouveau ; la mesure est dans la doc citée.
 | `tcg/0059` `vperm` en PSHUFB | exact, neutre | §43 |
 | `tcg/0060` x8 tel quel | cmr +4,2 % en course | §46 (voir « Maintenant » pour x8 + 0063) |
 | `tcg/0061` `x-bat-skip` | neutre partout en course, rafale non expliquée | §46 |
-| `tcg/0063` `x-dbat-lite` tel quel | cmr neutre, ut +3,7 % | §47 (témoin à jouer) |
+| `tcg/0063` `x-dbat-lite` tel quel | cmr neutre, ut +3,7 % | §47 (témoin sous vérificateurs et x8 + 0063 : voir « Maintenant ») |
 | Appel MMIO synchrone « plugin vers l'hôte » | natif ×0,6-1,5 sur le travail réel | `plan-plugin-hote.md` (code sous `archive/plugin-hote-phase0`) |
 | 3-4 vCPU | 0 gain sur les jeux | Bloqué |
 
@@ -384,7 +390,7 @@ corrigé du 31/10 reste à faire.
 | Prey | vert | vert | 50,5 / 49,5 | changements de mode, combat |
 | UT2004 | vert | vert | 25,0 / 25,4 | — |
 | Warcraft III | non automatisé | vert | — / 15,4 | fenêtre, texte des menus |
-| Colin McRae | non applicable | vert | — / 48,1 | mesure **en course** sur les deux hôtes ; 1920×1080 |
+| Colin McRae | non applicable | vert | — / 48,1 | 1920×1080 (ralentissements signalés, « Ensuite ») ; mesuré **en course** sur les deux hôtes |
 | Nexuiz ARB (`+r_glsl 0`) | vert | vert | 72,4 / 72,8 | tableaux clients déroulés (suites A4) |
 | Nexuiz GLSL (`+r_glsl 1`) | vert | vert | 33,4 / 33,5 | attente des requêtes d'occlusion |
 | RTCW | non automatisé | non automatisé | — / — | réinstallation puis diagnostic |
@@ -442,7 +448,7 @@ plan ; DOOM 3 se mesure en parties réelles (`timedemo` refusé par la démo).
 | Protocole (v7 → v22 ; les volets A4 `protocole-v23-*` sont entrés en capacités, sans v23) | `docs/protocole-v*.md` |
 | Backend GL et attente de l'invité | `docs/backend-gl-attente.md` |
 | Son | `docs/audio-stabilite.md` |
-| Traducteur de second niveau (plan mis de côté) | `docs/plan-traducteur-rapide.md` |
+| Traducteur de second niveau (arrêté sur chiffres le 22/10) | `docs/plan-traducteur-rapide.md` |
 | Bug hunts (22/09, 29/09 passes 1-4) | `docs/bug-hunt-2026-09-*.md` |
 | Feuille de route de fond (OpenGL 1.5, QE, Core Image) | `docs/roadmap-opengl15.md` |
 | Références externes (kext Tiger, IOGraphics, virtio-gpu) | `docs/references-ingenierie.md` |

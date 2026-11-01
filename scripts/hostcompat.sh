@@ -3,7 +3,8 @@
 # Copyright (c) 2026 VERHILLE Arnaud
 # hostcompat.sh — ce qui diffère entre un hôte Linux et un hôte macOS.
 #
-# Sourcé par run_tiger.sh, run_os9.sh et scripts/boot.sh. Les lanceurs ont été
+# Sourcé par run_tiger.sh, run_os9.sh, scripts/{boot,measure-boot,profile-boot,
+# tiger_audio}.sh et des bancs de tools/tcg/ et tools/matrice/. Les lanceurs ont été
 # écrits sous Linux ; sous macOS il n'y a ni flock(1), ni setsid(1), ni GTK
 # (le QEMU construit par scripts/build_qemu_qfb.sh y a Cocoa), ni PulseAudio
 # (CoreAudio). Sans ce fichier, `flock` introuvable se lisait « verrou déjà

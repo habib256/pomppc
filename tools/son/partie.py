@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 VERHILLE Arnaud
-"""Une partie de DOOM 3 (ou Prey) pour le relevé du son.
-usage : partie.py <étiquette> <durée_s> [fs] [jeu=d3|prey]
+"""Une partie de DOOM 3 (ou Prey, ou Marble Blast) pour le relevé du son.
+usage : partie.py <étiquette> <durée_s> [fs] [d3|prey|mb] [proc=<nom du processus>]
+(mots nus : d3 par défaut ; chemins du dépôt écrits en dur, ceux du M4)
 Lance ~/son/<jeu>.command dans l'invité, remet le jeu au premier plan tant
 qu'il se replie, le laisse tourner <durée_s> secondes après le lancement, le
 tue, rapatrie frames.csv / stdout.txt / log.txt dans .run/son/<étiquette>/."""

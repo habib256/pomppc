@@ -2,7 +2,7 @@
 /* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * dcbztest.c - dcbz et lmw/stmw courts dans l'invite : preuve de
- * x-dcbz-inline (patches/tcg/0033) et banc de x-lmw-inline (patches/tcg/0032),
+ * x-dcbz-inline (patches/tcg/0035) et banc de x-lmw-inline (patches/tcg/0032),
  * docs/tcg-g4.md section 32.
  *   1. dcbz a chaque decalage 0..63 d'un tampon a motif : la ligne de 32
  *      octets qui contient EA est mise a zero, rien autour ; EA aligne ou non,

@@ -3,7 +3,8 @@
 # Copyright (c) 2026 VERHILLE Arnaud
 """Bilan d'une partie : secondes où l'invité envoie du son (rms > 0), trames
 nulles et trous >= 10 ms dans ces secondes, silence inséré, tampons hôte vides.
-usage : bilan.py diag.log t0 t1   (t0/t1 : horloge murale en s, bornes de la partie)"""
+usage : bilan.py diag.log t0 t1   (t0/t1 : horloge murale en s, bornes de la partie)
+        bilan.py diag.log run:<dossier> d0 d1   (d0/d1 relatifs au <dossier>/t0)"""
 import sys
 
 path = sys.argv[1]

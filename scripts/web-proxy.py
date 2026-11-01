@@ -14,18 +14,18 @@ l'invité, et lève les trois verrous :
   JavaScript  selon le MODE du site (réglable de la barre en tête de page,
               ou de http://pomppc/) :
                 sansjs  les scripts sont retirés, <noscript> déplié : le site
-                        tel qu'il se lit sans JavaScript (défaut) ;
+                        tel qu'il se lit sans JavaScript ;
                 rendu   Chrome, sans affichage, sur l'hôte, exécute la page ;
                         l'invité reçoit le document qui en résulte, sans
                         scripts ;
                 brut    la page telle quelle (scripts compris) ;
                 auto    sansjs, et rendu si la page sort vide ou demande
-                        JavaScript (appris par site) ;
+                        JavaScript (appris par site) ; c'est le défaut ;
   formats     images WebP, AVIF et SVG converties en JPEG ou PNG, grandes
               images réduites ; ce que Safari 2 afficherait à tort (attribut
               hidden, <template>, SVG en ligne, bannières de cookies) retiré.
 
-    python3 scripts/web-proxy.py [--port 8080] [--parent-pid PID]
+    python3 scripts/web-proxy.py [--port 8080] [--parent-pid PID]   # port : WEB_PROXY_PORT
 
 Dans l'invité (QEMU en réseau utilisateur), l'hôte est 10.0.2.2 :
     Préférences Système → Réseau → Proxys → Proxy web (HTTP) : 10.0.2.2, port 8080
@@ -41,7 +41,7 @@ Dépendances FACULTATIVES, détectées au démarrage : BeautifulSoup + lxml
 Google Chrome ou Chromium (mode rendu). Sans elles : bibliothèque standard
 seulement, et le relais se contente de TLS et de la réécriture des liens.
 Réglages persistants : ~/.config/pomppc/web-proxy.json. Mode par défaut :
-POMPPC_WEB_MODE (auto).
+POMPPC_WEB_MODE (auto) ; largeur maximale des images : POMPPC_WEB_WIDTH (1024).
 """
 import argparse
 import gzip

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 VERHILLE Arnaud
-"""perfpart.py PERF.DATA [--ms X] [--images-par-s N] [--top K] — répartition, par poste,
+"""perfpart.py PERF.DATA [--ms X] [--top K (30)] — répartition, par poste,
 d'un `perf record -p <QEMU>` pris sous Linux (matrice.py --sample-hote, QEMU lancé
 avec EXTRA_ARGS="-perfmap -name Tiger,debug-threads=on" pour nommer le code JIT et
 les fils). Le pendant Linux de tools/tcg/threadbusy.py et samplesum.py du M4.

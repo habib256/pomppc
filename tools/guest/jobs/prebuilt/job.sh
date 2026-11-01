@@ -3,7 +3,8 @@
 # Copyright (c) 2026 VERHILLE Arnaud
 # Binaires prêts à installer, pour un Tiger SANS Xcode Tools : kext, plugin
 # OpenGL, plugin GA (Quartz Extreme, 30/10), gltest, glwin et accelprobe, compilés ici puis rapportés dans out/prebuilt.
-# scripts/make_kext_iso.sh les grave sur le CD (disks/prebuilt), et
+# Rangés dans disks/prebuilt, scripts/make_kext_iso.sh et scripts/make_guest_iso.sh les
+# gravent sur le CD, et
 # guest/gldriver/install.sh les installe quand gcc-4.0 manque.
 . ./lib.sh
 P=$OUT/prebuilt; mkdir -p $P

@@ -16,7 +16,8 @@ lecture humaine, et le verdict écrit par verify.sh se relit ensuite dans
 /pomppc/result.txt du disque (cf. --read-result, macOS seulement).
 
 Prérequis côté disque : les Xcode Tools (gcc 4.0) et /pomppc/ (sources +
-verify.sh) injectés — voir docs/gpu-3d-tiger.md § « Vérification dans l'invité ».
+verify.sh) injectés — voir --inject ci-dessous et docs/gpu-3d-tiger.md §5 « Vérification »
+(la boucle d'aujourd'hui est tools/guest/devloop.py, §5.1).
 
     python3 scripts/verify-kext-in-guest.py            # disque persistant
     SNAPSHOT=1 python3 scripts/verify-kext-in-guest.py # writes jetés (pas de result.txt)

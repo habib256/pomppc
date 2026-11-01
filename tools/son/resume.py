@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 VERHILLE Arnaud
-"""Résumé compact du journal SCREAMER_DIAG : une ligne par seconde utile."""
+"""Résumé compact du journal SCREAMER_DIAG : une ligne par seconde utile.
+usage : resume.py diag.log [t0] [-a]   (t0 : origine des temps ; -a : toutes les secondes)"""
 import sys, re
 
 path = sys.argv[1]

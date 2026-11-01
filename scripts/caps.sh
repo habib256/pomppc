@@ -3,7 +3,8 @@
 # Copyright (c) 2026 VERHILLE Arnaud
 # caps.sh — sondage des capacités réelles d'un binaire QEMU.
 #
-# Sourcé par les lanceurs (run_tiger.sh, run_os9.sh) et par scripts/build_qemu_qfb.sh.
+# Sourcé par les lanceurs (run_tiger.sh, run_os9.sh), par scripts/build_qemu_qfb.sh,
+# scripts/qemu_fast.sh, scripts/measure-boot.sh et tests/run-all.sh.
 # Règle du dépôt :
 #
 #   UN LANCEUR N'ANNONCE JAMAIS UNE CAPACITÉ QUE LE BINAIRE N'A PAS.
@@ -16,11 +17,15 @@
 #
 # API :
 #   qemu_has_device     <bin> <nom>            # le TYPE QOM est-il enregistré ?
+#   qemu_dev_has_prop   <bin> <device> <prop>  # propriété d'un device instanciable ?
 #   qemu_machine_has    <bin> <machine> <nom>  # le device est-il INSTANCIÉ ?
 #   qemu_has_netdev     <bin> <nom>            # -netdev help    (user = slirp)
 #   qemu_has_audiodev   <bin> <nom>            # -audiodev help  (pa, alsa…)
 #   qemu_cpu_has_fastfp <bin> <machine> <cpu>  # propriété de CPU x-fast-fp ?
+#   qemu_cpu_has_prop   <bin> <machine> <cpu> <prop=val>  # -cpu <cpu>,<prop=val> accepté ?
+#   qemu_tcg_has_prop   <bin> <machine> <prop=val>        # -accel tcg,<prop=val> accepté ?
 #   qemu_machine_smp_ok <bin> <machine> <n>    # la machine accepte-t-elle -smp n ?
+#   qemu_qgpu_has_scanout   <bin> <machine>            # qgpu a-t-il une cible de présentation ?
 #   qemu_qgpu_has_backend   <bin> <machine> <backend>  # backend de rendu hôte utilisable ?
 #   qemu_qgpu_backend_taken <bin> <machine> <backend>  # … et lequel est réellement pris
 #   qemu_qgpu_device_ok <bin> <machine> <options>      # -device qgpu-pci,<options> accepté ?
@@ -38,7 +43,8 @@
 # présent. Un premier jet de ce fichier s'y est fait piéger. `-M none` suffit
 # (les types QOM sont enregistrés indépendamment de la machine) : ~100 ms.
 #
-# Les trois sondages sont mémoïsés par binaire : les appeler en boucle est gratuit.
+# Les trois listes de _caps_load (types, netdev, audiodev) sont mémoïsées par binaire :
+# appeler qemu_has_device/netdev/audiodev en boucle est gratuit.
 #
 # ⚠ Jamais `printf … | grep -q` ici : les appelants tournent sous `set -o
 # pipefail`, grep -q s'arrête au premier résultat, printf prend SIGPIPE et le

@@ -9,8 +9,8 @@
 # passe sous POMPPC_GL_NOTE et POMPPC_GL_FRAMES (l'usage réel : la trace est
 # allumée par les lanceurs « trace » et la matrice).
 #
-#   MODES="ref: ws:POMPPC_GL_WINSEED=1"  (« nom:VAR=v,VAR=v »)
-#   TESTS="fen move cover pop fs" ; N=600 ; SIZE="320 240" ; FSSIZE="800 600" ; REPS=1
+#   MODES="ref: ws:POMPPC_GL_WINSEED=1"  (« nom:VAR=v,VAR=v » ; défaut "ref:")
+#   TESTS="fen move cover fs" (défaut ; pop sur demande) ; N=600 ; SIZE="320 240" ; FSSIZE="800 600" ; REPS=1
 #   WORK=k : travail simulé par image (swapbench, SWB_WORK) ; TEXDEL=1 : une texture
 #   détruite par image (SWB_TEXDEL) ; QUIET=1 : sans la ligne ECHANGE
 #   BUILD=0 : garder le kext et le plugin déjà en place

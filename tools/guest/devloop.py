@@ -13,15 +13,15 @@ Pas de reboot, pas de conversion d'image : une itération = le temps du job.
     devloop.py start              # boote la VM en single-user et lance l'agent (frappe)
     devloop.py start --gui        # boote le bureau : agent lancé par un StartupItem,
                                   # jobs graphiques relayés par POMPPCGuiRunner (gui.sh)
-    devloop.py run DOSSIER [--timeout S]   # exécute DOSSIER/job.sh, rapatrie out/
+    devloop.py run DOSSIER [--timeout S]   # exécute DOSSIER/job.sh, rapatrie out/ (S : 900)
     devloop.py shot [FICHIER.png] # capture d'écran
     devloop.py type "texte\\n"     # frappe au clavier
     devloop.py click X Y [LxH]    # clic souris (LxH = résolution courante)
-    devloop.py shutdown [--gui]   # ARRÊT SÛR (single-user, ou bureau) : voir plus bas
+    devloop.py shutdown [--gui] [--wait S]  # ARRÊT SÛR (single-user, ou bureau) : voir plus bas
     devloop.py stop               # coupe le courant — n'utiliser qu'en dernier recours
 
-Disque : $DEVDISK (raw), par défaut le tiger-dev.raw du scratchpad n'est pas
-connu du dépôt : il faut le passer explicitement. CDROM=image[:image…] ajoute
+Disque : $DEVDISK (raw), sans défaut : le dépôt ne connaît pas l'image de dev
+(tiger-dev.raw), il faut la passer explicitement. CDROM=image[:image…] ajoute
 des lecteurs en lecture seule au démarrage (le DVD de Tiger pour installer les
 Xcode Tools, par exemple).
 
@@ -38,7 +38,8 @@ Variables d'environnement :
                    lui que `screendump device=` désigne, pour ne jamais capturer
                    l'écran d'un AUTRE device (QFB) par hasard. Vide = écran de
                    la machine, sans identifiant, et capture de l'écran primaire.
-    TABLET_MARGIN  marge de la usb-tablet en % (défaut 15 : Tiger 10.4.11 en
+    TABLET_MARGIN  marge de la usb-tablet en % (défaut : <image>.tablet-margin
+                   s'il existe, comme run_tiger.sh, sinon 15 : Tiger 10.4.11 en
                    retire 7,5 % à chaque bout, patches/usbhid/0001) ; 0 pour
                    un invité 10.4.10 ou plus ancien
     TCG_OPTS    propriétés de l'accélérateur TCG (p. ex. x-jit-near=on, docs/tcg-g4.md §14)

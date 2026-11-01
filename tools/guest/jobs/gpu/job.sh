@@ -8,7 +8,8 @@
 # joué scène par scène sous le plugin et sous le rendu d'Apple
 # (POMPPC_GL_DISABLE=1), images comparées.
 #
-# Pourquoi installer le plugin : GL_RESOURCES ne marche pas sur ce 10.4.6 —
+# Pourquoi installer le plugin : GL_RESOURCES ne marchait pas sur le 10.4.6 de la
+# VM de dev (passée en 10.4.11 depuis, non revérifié) —
 # même une copie complète des bundles du système y donne kCGLBadCodeModule
 # (10015) à tout choix de pixel format (vu en vrai, job diag du 19/09/2026).
 #

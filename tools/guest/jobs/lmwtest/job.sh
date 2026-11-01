@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 VERHILLE Arnaud
-# lmwtest - equivalence lmw/stmw helper <-> en ligne (patches/tcg/0002-ppc-lmw-inline).
+# lmwtest - equivalence lmw/stmw helper <-> en ligne (patches/tcg/0032-ppc-lmw-inline).
 # Copier lmwtest.c a cote de job.sh (tools/tcg/mbab.sh ne sert pas ici) :
 #   mkdir /tmp/j && cp tools/guest/jobs/lmwtest/* /tmp/j && devloop.py run /tmp/j
 # -mdynamic-no-pic : le code PIC de Darwin reserve r31, que les tests doivent clobber.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 VERHILLE Arnaud
-# tssh.sh — ssh vers le Tiger quotidien (sshd OpenSSH 3.x : algorithmes anciens).
+# tssh.sh — ssh vers le Tiger quotidien (sshd OpenSSH 4.5p1 de 10.4.11 : algorithmes anciens).
 #   tools/guest/tssh.sh "commande"        clé privée (hors dépôt)
 #   tools/guest/tssh.sh -p "commande"     mot de passe, par expect (tssh.exp)
 # Clé : $TSSH_KEY, sinon <dépôt principal>/.run/cmr/id_rsa (jamais versionnée).
@@ -18,13 +18,14 @@ OPTS=(-p "$PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o 
       -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa
       -o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1
       -o Ciphers=+aes128-cbc,3des-cbc -o MACs=+hmac-sha1 -o ConnectTimeout=10)
-# Multiplexage (docs/matrice-jeux.md, « Mesure et rafales ») : une connexion
+# Multiplexage (docs/matrice-jeux.md §5, « Mesure et rafales ») : une connexion
 # maîtresse par port, réutilisée ControlPersist s ; chaque commande suivante ne
 # refait ni l'échange de clés ni l'authentification (2,2 s → 0,09 s vu de
 # l'hôte). OpenSSH 4.5p1 de Tiger accepte plusieurs sessions par connexion.
 # Socket sous .run/ du dépôt principal (chemin court : ≤ 108 octets avec le
 # suffixe que ssh ajoute) ; ServerAlive tue une maîtresse dont la VM est morte
-# ou en pause. TSSH_MUX=0 : une connexion par commande, comme avant.
+# ou en pause. TSSH_MUX=0 : une connexion par commande, comme avant ;
+# TSSH_PERSIST=s : durée de vie de la maîtresse (300 par défaut).
 if [ "${TSSH_MUX:-1}" != 0 ]; then
   RUN="${MAIN:-$D/../..}/.run"
   if mkdir -p "$RUN" 2>/dev/null && [ ${#RUN} -lt 70 ]; then

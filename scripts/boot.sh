@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 VERHILLE Arnaud
 # Boot headless du système installé, avec socket moniteur. Chronométré.
-# Usage: scripts/boot.sh   (tourne en arrière-plan via setsid)
+# Usage: scripts/boot.sh   (tourne en arrière-plan via host_detach : setsid s'il existe)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/config.env"
@@ -23,7 +23,7 @@ date +%s > "$ROOT/bench/.run-start"
 # Boot par chemin explicite vers BootX (le bless \\:tbxi ne fonctionne pas ici).
 BOOTDEV='hd:10,\System\Library\CoreServices\BootX'
 
-# Mode d'affichage. DÉFAUT = fenêtre (c'est TON Mac).
+# Mode d'affichage. DÉFAUT = fenêtre (HOST_DISPLAY : cocoa sur macOS, gtk sous Linux).
 # Headless = mode de test pour l'assistant (Claude), pour ne pas encombrer le bureau hôte:
 #   POMPPC_DISPLAY=none scripts/boot.sh
 DISP="${POMPPC_DISPLAY:-$HOST_DISPLAY}"

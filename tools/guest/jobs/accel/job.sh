@@ -20,7 +20,8 @@
 # dans la session (T4), qu'il ne faut donc plus perdre dans un tube.
 # fullscreen.c, que personne ne lançait (T20), tourne dans le mode bureau.
 #
-#   SCENES="tri tex" : scènes gltest jouées dans la session (mode bureau)
+#   SCENES="tri tex" : scènes gltest jouées dans la session (mode bureau ;
+#              défaut "tri tex lit caps")
 #   NOLOAD=1 : garder le kext et le plugin INSTALLÉS (job install, puis
 #              redémarrage) — c'est alors l'état vu par le WindowServer au boot
 #   NOFULLSCREEN=1 : sauter fullscreen ; FSRES="1024 768" : sa résolution

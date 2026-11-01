@@ -20,6 +20,7 @@ Les fonctions que le plugin réimplémente en C sont exclues des exports
 générés (liste C_OVERRIDES) : leur symbole vient de pomppc_gld.c.
 
     python3 tools/gld/gen_tramp.py > guest/gldriver/gld_tramp.s
+    python3 tools/gld/gen_tramp.py --names     # noms des points d'entrée, un par ligne
 """
 import sys
 

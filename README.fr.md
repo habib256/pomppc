@@ -8,7 +8,7 @@ le GPU de l'hôte. Rien d'Apple n'est modifié dans l'invité : un plugin, un ke
 Tableau de bord : **`TODO.md`**. Historique : **`CHANGELOG.md`**. Conception et relevés :
 `docs/`.
 
-## Où en est le projet (couches au 01/11/2026 ; jeux au 24/09/2026)
+## Où en est le projet (au 01/11/2026)
 
 L'état courant détaillé (vitesse, matrice, défauts allumés, binaires de chaque hôte) est dans
 `TODO.md` et `docs/etat-des-hotes.md`.
@@ -24,19 +24,36 @@ L'état courant détaillé (vitesse, matrice, défauts allumés, binaires de cha
 | Vitesse du G4 émulé | série `patches/tcg/` (allumée par hôte dans `run_tiger.sh`) ; binaire rapide PGO sur le PC (`docs/binaire-rapide-x86.md`) |
 | Bureau accéléré (Quartz Extreme) | allumé par défaut sur les deux hôtes (M4 depuis le 29/10, PC depuis le 30/10 ; `QE=0` l'éteint), `docs/quartz-extreme.md` ; Core Image non fait |
 
-Jeux, sur le disque quotidien, **au 24/09/2026** (dépassé : depuis, la matrice est verte sur
-les deux hôtes, la géométrie de Colin McRae est corrigée, l'arme d'UT2004 sur le PC ; tableau
-courant dans `TODO.md`, « Matrice de jeux ») — trois preuves visées : image juste, zéro repli,
-mesure :
+Jeux : chacun est vérifié par une matrice automatique (`tools/matrice/`, `docs/matrice-jeux.md`) :
+les images affichées par l'invité sont vidées, **rejouées nativement sur l'hôte et comparées au
+pixel** à l'écran de la VM et à une référence validée à l'œil ; le plugin ne doit pas se replier
+sur le rendu logiciel d'Apple. Tour du 01/10/2026, hôte Apple Silicon, invité Tiger 10.4.6,
+15 cellules automatisées vertes sur 15 (tour `bench/matrice/20261001-tout`, celui de la publication
+0.1.0 ; profils du jour dans `docs/vitesse-profil-2026-10-01.md`, sur d'autres tours) :
 
-| Jeu | Chemin GL | État |
+| Jeu | Chemin GL | ms/image (≈ img/s) |
 |---|---|---|
-| Marble Blast Gold, Zenerchi | pipeline fixe | justes, ~88 et ~50 img/s |
-| DOOM 3 Demo | programmes ARB, VBO, 7 unités, DXT | **image parfaite**, ~22 img/s |
-| Prey Demo | programmes ARB, VBO, DXT5 | image juste, lent (117 ms/image) |
-| UT2004 Demo | tableaux, VBO, S3TC | jouable ~20 img/s, arme en main noire |
-| Warcraft III, Colin McRae | tableaux ; ARB via IndirectX | jouable, texte des menus ; géométrie éclatée en course |
-| Return to Castle Wolfenstein | idTech3 | pas encore lancé avec succès |
+| Zenerchi | pipeline fixe | 4,3 (≈ 230) |
+| Marble Blast Gold | pipeline fixe | 8,9-10,3 (≈ 100) |
+| Warcraft III | tableaux de sommets (plein écran) | 15,6 (≈ 64) |
+| UT2004 Demo | VBO, S3TC | 25,3 (≈ 40) |
+| Nexuiz 2.5.2, rendu GLSL | GLSL | 35,3 (≈ 28) |
+| Colin McRae Rally 2005 | programmes ARB (plein écran) | 47,8 (≈ 21) |
+| DOOM 3 Demo | programmes ARB, VBO, 7 unités, DXT | 56,6 (≈ 18) |
+| Prey Demo | programmes ARB, VBO, DXT5 | 59,1 (≈ 17) |
+| Nexuiz 2.5.2, rendu ARB | programmes ARB | 80,2 (≈ 12) |
+
+Temps moyen sur la fenêtre de mesure, cellule en fenêtre (plein écran pour Warcraft III et Colin
+McRae, qui n'ont que lui ; les deux pour Marble Blast) ; les deux modes diffèrent de 2 % au plus
+ailleurs. Return to Castle
+Wolfenstein n'a pas encore été lancé avec succès.
+
+Ces temps ont baissé depuis (série TCG et allègement du plugin allumés par défaut sur les deux
+hôtes). Au 01/11/2026, hôte au repos, ms/image, M4 / PC x86-64 : DOOM 3 en fenêtre 29 / 78-80,
+UT2004 en fenêtre 19,6 / 40, Marble Blast en fenêtre 6,1 / 8,3, Zenerchi en fenêtre 2,8 / 4,6,
+Colin McRae en plein écran **en course** 42 / 82. Dernier tour complet de la matrice sur le M4 :
+17 vertes sur 17 (28/10/2026) ; tableau courant dans `TODO.md`. La version Linux x86-64 n'est
+pas publiée tant que sa vitesse n'est pas acceptable (cible : DOOM 3 à 50 ms/image).
 
 Ce qui borne tout : le PowerPC est émulé (pas de virtualisation PPC sur ARM ni x86). Le projet
 consiste donc à **enlever du travail au G4 émulé** : géométrie, textures, présentation, et
@@ -47,7 +64,9 @@ maintenant les tampons de sommets sont lus et convertis par l'hôte.
 - **QEMU 11.1.2 amont + patches** (`patches/`, appliqués par `scripts/build_qemu_qfb.sh`, qui
   vérifie chaque capacité sur le binaire produit) : SMP mac99, Screamer, `qfb-pci`,
   `qgpu-pci`, flottant rapide `x-fast-fp`. Le firmware OpenBIOS SMP est livré en binaire
-  (`patches/smp-mac99/openbios-smp-screamer.elf`), non reproductible aujourd'hui.
+  (`patches/smp-mac99/openbios-smp-screamer.elf`) ; sa source exacte (commit OpenBIOS de base
+  plus un diff, recompilé à l'identique à l'octet) est
+  `patches/smp-mac99/openbios-smp-screamer-source.patch`.
 - **GPU 3D en trois couches**, contrat en deux en-têtes (`patches/qgpu/`) : `qgpu_abi.h`, le
   **transport** (registres, doorbell, tranches de clients — la seule chose que le kext connaît,
   copie identique vérifiée par le harnais) et `qgpu_proto.h`, la **sémantique** (opcodes, clés,
@@ -85,19 +104,33 @@ protocole** — sous programme ARB, un repli vers Apple tue le jeu
    `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh` construit en plus `~/src/qemu/build-fast/`
    (`-O3 -march=native`, LTO, PGO : ~20 % plus rapide en jeu), que `run_tiger.sh` préfère
    alors (`QEMU_FAST=0` pour la référence) : [docs/binaire-rapide-x86.md](docs/binaire-rapide-x86.md).
+   Le `configure` de QEMU veut Python ≥ 3.9 avec `tomli` et `distlib` ; sur macOS un venv
+   suffit (`PYTHON=venv/bin/python3 ./scripts/build_qemu_qfb.sh`).
 2. **Un média d'installation Tiger PPC que vous possédez**, dans `images/` (gitignoré), nommé
    dans `config.env` (`INSTALL_MEDIA`). ISO tel quel ; un DMG compressé doit être converti
-   (`dmg2img`, ou `hdiutil convert -format UDRO`). Aucune ROM Apple : OpenBIOS suffit.
+   (`hdiutil convert in.dmg -format UDTO -o out`, puis renommer `out.cdr` en `.iso` ; ou `dmg2img`). Aucune ROM Apple : OpenBIOS suffit.
    **Compatibilité** : testé avec Tiger **10.4.6**, la version dont `OpenGL.framework` a été
    relevé (`docs/re/`), et **10.4.11**, celle des VM quotidiennes des deux hôtes depuis octobre
    2026. Les autres 10.4.x ne sont pas éprouvées : le plugin lit les structures internes de
    GLEngine.
 3. Pour OS 9 : le CD 9.2.2 dans `disks/os9-install.iso`, ou `OS9_CD=… ./run_os9.sh install`.
 
+### Paquet publié (macOS sur Apple Silicon)
+
+Sans construire : l'archive `pomppc-<version>-macos-arm64.tar.xz` des
+[publications](https://github.com/habib256/pomppc/releases) demande **macOS 26 (Tahoe) ou
+plus récent** (les bibliothèques Homebrew embarquées sont construites pour lui). C'est le dépôt
+au tag de la publication, plus `bin/` (`qemu-system-ppc`, `qemu-system-ppc64`, `qemu-img`
+patchés, frontal `pomppc`), `lib/`, `share/qemu/` et `pomppc-guest.iso` (paquet de l'invité) ;
+`config.env` prend `bin/` de lui-même. Binaires signés ad hoc, non notariés :
+`xattr -dr com.apple.quarantine .` après extraction. Puis le média Tiger et l'installation
+comme ci-dessous. L'archive se produit par `scripts/package_release_macos.sh`
+(`scripts/package_release_linux.sh` pour Linux x86-64, non publié).
+
 ### Installer Tiger
 
 ```bash
-scripts/00-create-disk.sh   # crée disks/tiger.qcow2
+scripts/00-create-disk.sh   # crée disks/tiger.qcow2 (16 Go, alloué à la demande)
 scripts/10-install.sh       # boote le média, installe
 scripts/20-run.sh           # boote le disque installé, chronomètre
 ```
@@ -112,8 +145,13 @@ Deux pièges, durement acquis :
 
 ### Installer le GPU 3D dans l'invité
 
-`./run_tiger.sh` grave un CD `POMPPCSRC` avec les sources du kext et du plugin. Une fois, dans
-Tiger (gcc 4.0 des Xcode Tools requis) :
+Avec le paquet publié (`pomppc-guest.iso` à la racine), `./run_tiger.sh` insère le CD
+`POMPPC_GUEST` de binaires construits par le gcc 4.0 de Tiger ; une fois, dans Tiger,
+`sudo sh /Volumes/POMPPC_GUEST/install.sh` (Xcode inutile ; `--remove` désinstalle), puis
+redémarrer. Une application OpenGL annonce alors `GL_RENDERER = "POMPPC qgpu (OpenGL host GPU)"`.
+
+Depuis le dépôt, `./run_tiger.sh` grave un CD `POMPPCSRC` avec les sources du kext et du plugin.
+Une fois, dans Tiger (gcc 4.0 des Xcode Tools 2.5 requis, SDK 10.4u) :
 
 ```sh
 cp -R /Volumes/POMPPCSRC /tmp/src && sudo sh /tmp/src/guest/gldriver/install.sh
@@ -128,7 +166,8 @@ d'un autre `qgpu_proto.h` (`docs/protocole-v19-transport.md`).
 
 Le son Tiger sur macOS utilise un [profil audio stable](docs/audio-stabilite.md)
 (réserve doublée, timer 5 ms). `POMPPC_AUDIO_PROFILE=default` rétablit les anciens
-réglages. Dans ImGuiDock : souris absolue en fenêtre, relative capturée en plein écran.
+réglages. Dans ImGuiDock : départ en fenêtre, Alt+Entrée (ou F11, Ctrl+Cmd+F) bascule en plein écran ;
+souris absolue en fenêtre, relative capturée en plein écran.
 
 ```bash
 ./run_tiger.sh              # Tiger : 2 cœurs MTTCG + son + flottant rapide + GPU qgpu + réseau
@@ -137,7 +176,8 @@ GPU=0 ./run_tiger.sh        # sans GPU paravirtuel ; GPU_BACKEND=soft|gl force l
 FASTFP=0 ./run_tiger.sh     # flottant exact
 QFB=1 ./run_tiger.sh        # + écran QFB en second moniteur
 NET=0 ./run_tiger.sh        # sans réseau
-./run_os9.sh [install]      # Mac OS 9
+./run_os9.sh [install]      # Mac OS 9 (un cœur, sans 3D)
+OS9_PROFILE=complet SNAPSHOT=1 ./run_os9.sh disk  # OS 9 : profils CPU expérimentaux (docs/os9-optimisations-cpu.md)
 ./run_frontend.sh           # frontend ImGui (affichage QEMU par D-Bus)
 POMPPC_FRONTEND=native ./run_tiger.sh  # fenêtre QEMU native, sans ImGuiDock
 ```
@@ -214,7 +254,7 @@ conservée : le self % du profil localise, il ne valide pas. En jeu, la mesure e
 | `patches/` | patches QEMU et firmware ; `patches/README.md` dit ce qui est appliqué et ce qui est là pour référence |
 | `patches/qgpu/` | device `qgpu-pci`, cœur, backends soft et GL, contrat `qgpu_proto.h` |
 | `patches/qfb/`, `patches/screamer/`, `patches/fastfp/`, `patches/smp-mac99/` | écran QFB, audio, flottant rapide, SMP |
-| `kext/POMPPCGPU/`, `kext/POMPPCQFB/` | kexts Tiger : transport du GPU paravirtuel ; framebuffer QFB |
+| `kext/POMPPCGPU/`, `kext/POMPPCQFB/`, `kext/POMPPCFsqrt/` | kexts Tiger : transport du GPU paravirtuel ; framebuffer QFB ; `fsqrt` |
 | `guest/gldriver/` | plugin OpenGL de Tiger et son installateur (`guest/gldriver/README.md`) |
 | `guest/gltest/`, `guest/qgpu-test/`, `guest/fpbench/` | programmes de test à compiler dans l'invité |
 | `guest/net/` | réglage du proxy web dans l'invité |
@@ -242,3 +282,21 @@ conservée : le self % du profil localise, il ne valide pas. En jeu, la mesure e
 | `docs/gpu-tiger-4060ti.md` | étude GPU 2D : passthrough impossible, paravirtualisation |
 | `docs/references-ingenierie.md` | documents externes (kext Tiger, IOGraphics, virtio-gpu) |
 | `docs/archive/` | anciens tableaux de bord |
+
+## Licences
+
+- Code propre à POMPPC (lanceurs, kexts, plugin OpenGL, frontal, outils, tests, documentation) :
+  **GPL-3.0-or-later**, voir [LICENSE](LICENSE).
+- Code compilé dans QEMU (`patches/qgpu/`, `patches/qfb/` et la série de patches contre QEMU) :
+  **GPL-2.0-or-later**, comme QEMU, voir [LICENSES/GPL-2.0.txt](LICENSES/GPL-2.0.txt) ;
+  `qgpu_abi.h`, partagé avec le kext, aussi.
+- Le device Screamer (`patches/screamer/`) est de Mark Cave-Ayland, **MIT** ; les changements de
+  POMPPC suivent la même licence.
+- `patches/smp-mac99/openbios-smp-screamer.elf` est OpenBIOS (GPL-2.0), source exacte dans
+  `patches/smp-mac99/openbios-smp-screamer-source.patch`.
+- L'interface de registres `qfb` vient de [mac_qfb_driver](https://github.com/SolraBizna/mac_qfb_driver)
+  de Solra Bizna ; le SMP s'appuie sur le travail `mac99` de BALATON Zoltan.
+
+Les archives publiées contiennent aussi les bibliothèques tierces embarquées, avec leurs licences
+dans `THIRD-PARTY-LICENSES/`. Aucun logiciel Apple n'est distribué : il faut sa propre copie du
+système.

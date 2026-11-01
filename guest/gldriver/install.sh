@@ -3,8 +3,8 @@
 # Copyright (c) 2026 VERHILLE Arnaud
 # install.sh — installe (ou retire) le GPU paravirtuel dans le système Tiger.
 #
-#   sudo sh install.sh            # compile et installe kext + plugin OpenGL
-#   sudo sh install.sh --remove   # retire les deux
+#   sudo sh install.sh            # compile et installe kext + plugin OpenGL + plugin GA
+#   sudo sh install.sh --remove   # retire les trois
 #   sudo QE=1 sh install.sh       # idem, Quartz Extreme forcé (QE=0 : éteint ;
 #                                 # sans QE : suit l'hôte, docs/quartz-extreme.md)
 #
@@ -23,6 +23,9 @@
 #            charge alors comme le pilote d'une carte, AVANT le GLDriver
 #            d'Apple (docs/re/accelerateur-iokit.md). Sans le device, pas
 #            d'accélérateur, donc pas de plugin : rien d'Apple n'est modifié.
+#   GA     → /System/Library/Extensions/POMPPCGA.plugin (Quartz Extreme), compilé
+#            depuis ../ga s'il est là (pas sur le CD de make_kext_iso.sh), sinon
+#            pris dans ../../prebuilt.
 #
 # Les installations d'avant la tâche 4.2 posaient le plugin dans le dossier
 # Resources d'OpenGL.framework : cette copie est retirée (sinon GLEngine
@@ -94,7 +97,7 @@ chown -R root:wheel "$EXT/GLDriver-POMPPC.bundle"
 chmod -R 755 "$EXT/GLDriver-POMPPC.bundle"
 
 # Plugin GA (Quartz Extreme, docs/quartz-extreme.md) : chargé par
-# IOPSAllocateBlitEngine seulement si le kext l'a désigné (QE=1) ; installé
+# IOPSAllocateBlitEngine seulement si le kext l'a désigné (QE actif) ; installé
 # toujours, sans effet sinon. Sans gcc-4.0 (VM quotidienne du PC), celui des
 # binaires déjà compilés (job prebuilt, depuis le 30/10).
 GASRC=$HERE/../ga; GA=

@@ -32,8 +32,17 @@ must not fall back to Apple's software renderer. Run of 2026-10-01, Apple Silico
 | Prey Demo | ARB programs, VBOs, DXT5 | 59.1 (≈ 17) |
 | Nexuiz 2.5.2, ARB renderer | ARB programs | 80.2 (≈ 12) |
 
-Mean frame time over the measured window, windowed and full-screen modes alike. Return to
+Mean frame time over the measured window, from matrix run `bench/matrice/20261001-tout` (the
+0.1.0 release): windowed cell (full screen for Warcraft III and Colin McRae, which only have
+that mode; both for Marble Blast); elsewhere the two modes differ by 2 % at most. Return to
 Castle Wolfenstein has not been made to work yet.
+
+These times have dropped since (TCG series and lighter guest plugin enabled by default on both
+hosts). On 01/11/2026, idle host, ms/frame, Apple Silicon M4 / Linux x86-64 PC: DOOM 3 windowed
+29 / 78–80, UT2004 windowed 19.6 / 40, Marble Blast windowed 6.1 / 8.3, Zenerchi windowed
+2.8 / 4.6, Colin McRae full screen *during the race* 42 / 82. Last full matrix run on Apple Silicon: 17/17 green (28/10/2026);
+current table in `TODO.md`. The Linux x86-64 build is not released until its speed is
+acceptable (target: DOOM 3 at 50 ms/frame).
 
 **The limit is the CPU.** The G4 is emulated (there is no PowerPC virtualization on ARM or
 x86), so the whole project is about taking work *away* from the emulated CPU: geometry,
@@ -85,8 +94,12 @@ own**. No Apple ROM is needed: OpenBIOS boots Tiger. Nothing of Apple's is distr
    ```
 
    Two cores (MTTCG), Screamer sound, fast FPU, paravirtual GPU, user-mode network; the
-   window is the ImGui front end. `POMPPC_FRONTEND=native ./run_tiger.sh` uses QEMU's own
-   Cocoa window instead.
+   window is the ImGui front end (starts windowed; Alt+Enter, F11 or Ctrl+Cmd+F toggles full
+   screen; absolute mouse in a window, captured relative mouse in full screen).
+   `POMPPC_FRONTEND=native ./run_tiger.sh` uses QEMU's own Cocoa window instead. With sound
+   on, guest RAM is capped at 768 MB (the Screamer needs less than 1 GB); on macOS sound uses
+   a [steadier audio profile](docs/audio-stabilite.md) (`POMPPC_AUDIO_PROFILE=default` restores
+   QEMU's settings).
 
 5. Install the 3D driver **once**, inside Tiger: the `POMPPC_GUEST` CD is already inserted.
    Open Terminal and type
@@ -101,7 +114,8 @@ own**. No Apple ROM is needed: OpenBIOS boots Tiger. Nothing of Apple's is distr
 
 Each launcher documents its variables in its header (`head -160 run_tiger.sh`): `GPU=0`,
 `FASTFP=0`, `NET=0`, `SNAPSHOT=1` (throw-away disk), `QFB=1` (second monitor), and more.
-Mac OS 9.2.2 runs with `./run_os9.sh` (single core, no 3D).
+Mac OS 9.2.2 runs with `./run_os9.sh` (single core, no 3D); `./run_os9.sh install` installs it
+from the 9.2.2 CD in `disks/os9-install.iso` (or `OS9_CD=`).
 Experimental CPU profiles from Tiger are available with
 `OS9_PROFILE=complet SNAPSHOT=1 ./run_os9.sh disk`; the default remains the
 standard `g4` profile. Scope and evidence: [OS 9 CPU profiles](docs/os9-optimisations-cpu.md).
@@ -155,8 +169,9 @@ On a Linux x86-64 PC, `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh` also builds `~/s
   3. **Device `qgpu-pci`** (`patches/qgpu/`): validates and decodes everything
      (`qgpu-core.c`), renders with the host's OpenGL (CGL on macOS, EGL on Linux), and ships a
      software reference rasterizer (`qgpu-soft.c`) so the protocol can be tested without a VM.
-- **Verification**: native tests of the device core (`tests/qgpu_core_test.c`, software and
-  GL backends), native replay of command dumps captured in the VM (`tests/qgpu_replay.c`),
+- **Verification**: native tests of the device core (`tests/qgpu_core_test.c`: 1,440 cases,
+  660 software and 780 GL including DarkPlaces' GLSL permutations; 0 failures on the M4,
+  01/11/2026), native replay of command dumps captured in the VM (`tests/qgpu_replay.c`),
   guest scenes compared with Apple's renderer, and the game matrix above.
 
 The project's rule: **no fallback, extend the protocol**. Under ARB programs a fallback to

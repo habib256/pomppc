@@ -7,7 +7,7 @@
 # ~/cmr.command), p. ex. POMPPC_GL_CMRPROBE=60 ou POMPPC_GL_VAR=0.
 #   tools/guest/cycle.sh              tout
 #   NORUN=1 tools/guest/cycle.sh      plugin seul : transfert, compilation (gcc-4.0), installation
-#   NOBUILD=1 / DUMP=1 / RACE_WAIT=s / SHOT_DIR=…
+#   NOBUILD=1 / DUMP=1 / RACE_WAIT=s (60) / SHOT_DIR=… / KILLGAME=1 (killgame.py au lieu de kill -9)
 # Déplacé de .run/cmr/ (A5 scripts, 26/09/2026). Les sources viennent du dépôt où vit ce
 # script (worktree compris) ; journaux et captures dans <dépôt principal>/.run/cmr/.
 set -u

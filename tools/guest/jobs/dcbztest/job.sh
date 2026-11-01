@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 VERHILLE Arnaud
 # dcbztest - dcbz et lmw/stmw courts : helpers d'origine <-> traduction en
-# ligne (patches/tcg/0032 x-lmw-inline, 0033 x-dcbz-inline, docs/tcg-g4.md
+# ligne (patches/tcg/0032 x-lmw-inline, 0035 x-dcbz-inline, docs/tcg-g4.md
 # section 32). Empreinte FNV identique dans tous les modes, puis les bancs.
 #   tools/guest/jobs/stage.sh dcbztest /tmp/j && cp tools/guest/jobs/dcbztest/dcbztest.c /tmp/j
 #   devloop.py run /tmp/j

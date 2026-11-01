@@ -14,7 +14,7 @@ de commit et dans `docs/`.
   `docs/anatomie-ppc32.md`, outils `tools/tcg/codeanat32.py`, `tbhproof.*`), écrit le 23-24/10
   sur une branche sous le numéro 0051, renuméroté 0064 à la fusion. Propriété de l'accélérateur,
   **éteinte par défaut** (`TBHEAD=1|2|3`, `7` = preuve) ; l'empreinte de la série change : binaires
-  à reconstruire sur les deux hôtes. Mesuré sur banc (−5,0 / −3,1 % d'instructions, −2 % de
+  à reconstruire (M4 fait le 01/11, `~/src/qemu/build` sur `a0e028e` ; PC à faire). Mesuré sur banc (−5,0 / −3,1 % d'instructions, −2 % de
   cycles), pas encore en jeu.
 - **Quartz Extreme : plus d'image ancienne du jeu sous l'ombre d'une fenêtre posée sur un jeu
   en fenêtre, 01/11 (PC).** Sur le chemin direct, le jeu présentait par le noyau sans aviser le
@@ -22,16 +22,20 @@ de commit et dans `docs/`.
   (`POMPPC_GA_PRESENT2`, dit si la surface est « non simple ») ; plugin `20261101-ombre` : avis
   cadencé (`POMPPC_GL_QE_NONSIMPLE_HZ`, 20) par le fil des avis, qui garde le dernier en
   attente. Protocole qgpu et QEMU inchangés ; **le kext change : réinstaller et redémarrer
-  l'invité sur les deux hôtes.** Coût seulement sous une fenêtre posée : mb-fen +6,2 %, d3
+  l'invité sur les deux hôtes** (fait le 01/11 sur le PC et sur le M4). Coût seulement sous une fenêtre posée : mb-fen +6,2 %, d3
   +0,9 % (`4033e94`). `docs/quartz-extreme.md`, journal du 01/11.
 - **Frontal ImGuiDock : fin du double curseur, 01/11 (PC).** Le curseur de l'hôte est masqué
   au-dessus de l'image de l'invité en souris absolue (Tiger dessine le sien dans le framebuffer) ;
   il revient hors de l'image, en pause et VM arrêtée (`wantsHiddenHostCursor`, `PointerPolicy.h`,
   testé dans `pointer_test`). Signalé par l'utilisateur ; à voir à l'œil au prochain `run_tiger.sh`.
+- **`pgo-train.sh` : cible `ppc32mt` par défaut, 01/11 (PC, `cf6cf61`).** C'est la cible de
+  production des deux hôtes ; le bras `ppc64` pose `PPC32MT=0` (avant, le défaut « ppc64 »
+  héritait du `PPC32MT=1` de `run_tiger.sh`). Les profils déjà construits ne changent pas.
+  `docs/binaire-rapide-x86.md` §7.
 - **Plugin `20261101-packbits` : `POMPPC_GL_PACKBITS` allumé, 01/11 (PC ; ajouté au journal le
   01/11 d'après `fd5990d`).** Bornage des flottants sur leurs bits, octets non signés par table ;
   plugmd5 69 scènes 0 écart ; A/B au repos d3 −3,9 %, ut −4,5 %, zen −4,2 %, mb −1,2 %, cmr en
-  course −3,5 %. Code de l'invité : le M4 le reçoit avec le bundle. `docs/plugin-allegement.md` §8.
+  course −3,5 %. Code de l'invité : sur le M4 depuis le 01/11 (plugin `20261101-ombre`). `docs/plugin-allegement.md` §8.
 - **Matrice : Colin McRae mesuré en course, 31/10 (PC, `6054367`).** Fenêtre de mesure à
   ≥ 1 700 sommets bruts par échange, comptés dans l'invité : depuis le 28/10 le PC mesurait la
   transition d'avant la course (44-48 ms/image) au lieu de la course (82,1 ms/image) ;
@@ -63,13 +67,18 @@ de commit et dans `docs/`.
   Blast) ou l'image d'un ancien jeu (DOOM 3). Il liait sa propre texture de surface, vide,
   au lieu de la texture d'export du jeu sur le chemin rapide des clés d'état. Toutes les
   liaisons passent maintenant par `tex_bind_id`, et le jeu apparaît sous l'ombre avec son
-  dégradé. Les coins noirs des fenêtres de DOOM 3 et Prey viennent du jeu lui-même
+  dégradé (une seconde cause, l'ancien jeu sous DOOM 3, est corrigée le 01/11 : entrée plus
+  haut). Les coins noirs des fenêtres de DOOM 3 et Prey viennent du jeu lui-même
   (`NSBackingStoreRetained`, sans alpha), comme sur un vrai Mac. `docs/quartz-extreme.md`.
 
 - **Émulateurs voisins, 30/10 (M4).** `tcg/0057` (`VCPUQOS=1`, fils des vCPU en QoS
   interactive) neutre au repos ; `tcg/0058` (`POLLNS=1`, attente à la microseconde) :
   Zenerchi −18 %, UT2004 +6,6 %. Les deux restent éteints. `docs/tcg-g4.md` §42.
 
+- **Quartz Extreme : curseur visible sur une fenêtre GL, 29/10 (M4, `71f9f76`).** Le kext retire
+  le curseur (`hideCursor`), présente en synchrone, puis le remet, au lieu de renvoyer au
+  WindowServer (dont l'avis peignait en blanc une fenêtre qui n'est pas au premier plan).
+  Matrice mb/zen/d3 en fenêtre vertes. `docs/quartz-extreme.md`.
 - **Quartz Extreme allumé par défaut sur le M4, 29/10 (`c792464`).** `QGPU_CAP_QE_DEFAULT`
   (propriété `qe` du device, posée par `run_tiger.sh` ; `QE=0` l'éteint), kext en personnalité
   « auto » (`install.sh` sans `QE`). Le jeu présente son échange par le noyau (méthode 5).
@@ -81,6 +90,9 @@ de commit et dans `docs/`.
 - **PC, 28/10 : endurance et Colin McRae.** Nuit du 27-28/10 : 683 démarrages (400 à froid, 283
   en campagne `reboot` dont 281 reboots), 0 incident (`9d1c921`, `docs/endurance.md` §10). Colin McRae ne quitte plus en entrant
   en course : qgpu réécrit les `ALIAS` des programmes ARB, refusés par NVIDIA (`5c2ea82`).
+- **Auto-profileur sans `perf`, 28/10 (PC, `c1105f7`).** `patches/diag`, `tools/tcg/selfprof.py`,
+  `POMPPC_SELFPROF` dans la matrice : part du code généré, de l'attente mémoire et des aides par
+  jeu. `docs/vitesse-doom3-x86.md` §18.
 
 - **Profils CPU OS 9 expérimentaux, 27/10.** `OS9_PROFILE=memoire|flottant|complet|verifie`
   reprend les optimisations CPU de Tiger, un seul cœur, périphériques classiques.
@@ -91,7 +103,7 @@ de commit et dans `docs/`.
 
 - **Endurance M4, 27/10.** Nouveaux défauts sur Tiger 10.4.11 isolé : **78 démarrages
   sains** (24 froids, 54 reboots), **16 cycles de jeux sains**, quatre par jeu. Aucun
-  incident ; une nuit plus longue reste à jouer. Compteur QEMU du banc corrigé sur macOS
+  incident ; la nuit plus longue a été jouée le 28-29/10 (entrée plus haut). Compteur QEMU du banc corrigé sur macOS
   (`ps ucomm`, au lieu du chemin tronqué de `comm`). Base vérifiée avant/après, VM
   quotidienne restaurée dans ImGuiDock. `docs/endurance.md` §9.
 
@@ -103,9 +115,19 @@ de commit et dans `docs/`.
   293,5 M contrôles sans divergence et image synchronisée du niveau exacte. A/B M4
   entrelacé 3×3 : **traces +5,74 %**, 33,929 contre 32,086 ms/image au défaut ; elles
   restent éteintes. Split-wx seul neutre, défaut mémoire conservé. Preuves natives PC
-  de 0055 encore à rejouer. `docs/plan-traducteur-rapide.md` §9.8–9.9 ; suite du dépôt :
+  de 0055 jouées le 27/10 (`c92dacc` : t2proof conforme, Tiger et Marble Blast à 0 divergence). `docs/plan-traducteur-rapide.md` §9.8–9.9 ; suite du dépôt :
   283 OK, 0 échec.
 
+- **UT2004 sur le M4 : éclairage des spots calculé par le device, 26/10 (`5f25498`).** Sur le GL
+  d'Apple (Metal), une lumière spot allumée retirait aux points hors de son cône l'éclairage des
+  autres lumières (cargaison et objets noirs). Pour un dessin fixe éclairé portant un spot,
+  `qgpu-gl.c` calcule les couleurs par sommet (`qgpu-light.h`, l'éclairage du backend soft ;
+  `QGPU_GL_CPULIGHT=0/1`) ; rejeu de la démo : 62 images faussées sur 445 avant, 24 après (écarts
+  de filtrage). QEMU change, pas le protocole. `docs/re/ut2004-arme-noire.md`.
+- **ImGuiDock démarre toujours en fenêtre, 26/10 (`d91581a`).** Le plein écran de la session
+  précédente n'est plus rétabli ; Alt+Entrée bascule fenêtre ↔ plein écran comme F11 et
+  Ctrl+Cmd+F, sans être transmis à l'invité. `matab.sh --restore` relance la VM dans ImGuiDock.
+  `frontend/README.md`.
 - **Parité M4 : la série du PC allumée sur Darwin:arm64, 26/10 (`550b2a8`).** `PPC32MT TLBPRECISE
   LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIRTYSKIP PTEGMAP JC2WAY FPKNOWN FPRFLAZY STFSKNOWN
   LFSKNOWN TLBBASE` ; A/B 6 parties par bras : DOOM 3 −23,9 %, UT2004 −18,6 %, Marble Blast

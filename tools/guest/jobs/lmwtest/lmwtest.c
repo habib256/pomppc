@@ -2,7 +2,7 @@
 /* Copyright (c) 2026 VERHILLE Arnaud */
 /*
  * lmwtest.c - equivalence de lmw/stmw entre le helper de QEMU et la traduction
- * en ligne (propriete x-lmw-inline, patches/tcg/0002, docs/tcg-g4.md).
+ * en ligne (propriete x-lmw-inline, patches/tcg/0032, docs/tcg-g4.md).
  *
  * Execute les VRAIES instructions dans l'invite Tiger et imprime tout ce qui
  * est observable :
