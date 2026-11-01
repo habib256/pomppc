@@ -79,7 +79,7 @@ de commit et dans `docs/`.
   1920×1080 vert ; matrice entière `20261028-1854` 17/17 vertes (`17903f5`) ; nuit d'endurance :
   342 démarrages et 40 cycles de jeu, aucun incident (`docs/endurance.md` §11).
 - **PC, 28/10 : endurance et Colin McRae.** Nuit du 27-28/10 : 683 démarrages (400 à froid, 283
-  reboots), 0 incident (`9d1c921`, `docs/endurance.md` §10). Colin McRae ne quitte plus en entrant
+  en campagne `reboot` dont 281 reboots), 0 incident (`9d1c921`, `docs/endurance.md` §10). Colin McRae ne quitte plus en entrant
   en course : qgpu réécrit les `ALIAS` des programmes ARB, refusés par NVIDIA (`5c2ea82`).
 
 - **Profils CPU OS 9 expérimentaux, 27/10.** `OS9_PROFILE=memoire|flottant|complet|verifie`

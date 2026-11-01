@@ -4,7 +4,8 @@
 
 Non automatisé : le jeu n'est plus sur le disque quotidien au 26/09/2026
 (~/rtcw.command vise ~/Desktop/Wolfenstein, absent ; seules ses préférences
-restent) ; et il quittait après 8 s sans rien dessiner (TODO §6).
+restent) ; et il quittait après 8 s sans rien dessiner (TODO §6, archivé :
+docs/archive/todo-par-domaines-2026-09-27.md).
 """
 from jeu import Jeu
 

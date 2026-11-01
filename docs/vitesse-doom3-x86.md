@@ -21,8 +21,10 @@ les leviers de l'hôte. Preuves : `bench/vitesse/d3-x86/` et `bench/tcg/ab/x86-*
   `tcg/0050-ppc-mttcg-32`), `x-lfs-known` (0051), `x-tlb-base` (0052), la zone froide
   `x-tcg-cold` (0056, depuis le 31/10, §23) ; plugin `POMPPC_GL_PACKBITS` (§25).
 - **Éteints** : `x-tier2` (0048), `x-vperm-inline` (0059, §22), tcg/0057-0058 (macOS seul),
-  tcg/0060 (x8, §24-§25), 0061 (abandonné), 0062 (diagnostic), 0063 (`tcg-g4.md` §47) ; ni
-  0060-0063 ni rien d'autre au-delà de 0059 n'est nommé dans `scripts/build_qemu_qfb.sh`.
+  tcg/0060 (x8, §24-§25), 0061 (abandonné), 0062 (diagnostic), 0063 (`tcg-g4.md` §47) ; 0060-0063
+  ne sont pas nommés dans `scripts/build_qemu_qfb.sh`. `tcg/0064` `x-tb-head` y est nommé depuis
+  le 01/11 (`a0e028e`), éteint par défaut (`TBHEAD=N`) ; l'empreinte de la série a changé :
+  `build/` et `build-fast/` sont à reconstruire avant toute mesure.
 - **Suite** : `docs/etat-des-hotes.md` §2 (« À faire sur le PC »), pas les listes « pour la
   suite » des sections datées.
 

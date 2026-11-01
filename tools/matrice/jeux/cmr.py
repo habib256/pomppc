@@ -4,7 +4,8 @@
 rendu vers texture (aglSurfaceTexture, textures rectangle).
 
 Scène fixe : le départ de la spéciale ESP 1 Selardu en contre la montre
-(temps clair, matin), voiture arrêtée sur la ligne ; la voiture tirée au sort
+(temps clair, matin), voiture arrêtée sur la ligne (en course aussi :
+le chrono tourne, personne ne la conduit) ; la voiture tirée au sort
 change (Impreza, 206, Golf), pas le décor. Chemin (27/09,
 docs/re/cmr-rendu-vers-texture.md) : « Jouer » du dialogue d'options (Entrée
 par osascript, jeu au premier plan), écran titre (attendu à >= 50 teintes à

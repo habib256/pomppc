@@ -30,7 +30,7 @@ class Jeu:
     capture_delay = 2           # échanges depuis le début du vidage avant le rendez-vous
     dump_image = None           # vidage à une image FIXE (POMPPC_GL_DUMP_TRIGGER=@n) : scène
                                 # rejouée à l'identique (Nexuiz) ; sinon fichier après la fenêtre
-    defaut_connu = ""           # défaut d'image connu (TODO §6), rappelé dans le tableau
+    defaut_connu = ""           # défaut d'image connu (TODO §6, archivé), rappelé dans le tableau
     env = {}                    # POMPPC_GL_* en plus
     images_fenetre = None       # (a, b) quand la fenêtre de mesure est fixe et connue
                                 # d'avance : la matrice ne lance alors AUCUN osascript

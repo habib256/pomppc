@@ -3,7 +3,7 @@
 Un outil qui enchaîne seul des démarrages de Tiger, et en option des cycles de lancement
 et d'arrêt d'un jeu. Il détecte les paniques et les gels, range un dossier par incident
 et calcule le taux de chaque type d'incident avec son intervalle de confiance.
-Premier client : la « panique AppleUSBOHCI au démarrage SMP=2 » (§4).
+Premier client : la « panique AppleUSBOHCI au démarrage SMP=2 » (§6).
 
 ## 1. Ce qu'il ne touche jamais
 
@@ -48,7 +48,7 @@ Ce qui changeait sous Linux, et ce que le banc fait désormais :
   symbolisé. `symbolise.py` et `tools/re/kpanic.py` lisent maintenant la table de symboles
   en Python (`tools/re/machonm.py -n`, même sortie que `nm -n` d'Apple) ; `nm` reste le repli.
 - **Un dossier de symboles par noyau.** La VM du PC est en 10.4.11 (Darwin 8.11.0) ; le banc
-  du M4 a pris le 10.4.6. `--invite DOSSIER` ou `ENDURANCE_INVITE` (défaut
+  du M4 a pris le 10.4.6 (01/11 : le M4 a aussi une base 10.4.11 depuis le 27/10, §9). `--invite DOSSIER` ou `ENDURANCE_INVITE` (défaut
   `bench/endurance/invite/`) ; au premier démarrage, le banc compare `uname -v` de l'invité
   au noyau des symboles et **arrête la campagne** s'ils diffèrent. `kpanic.py` compare de
   même la chaîne `version` en mémoire à celle du fichier et refuse un faux noyau (la copie
@@ -839,7 +839,9 @@ froide), SMP 2, deux instances. Pilotage : `bench/cold-3110/chaine4.sh` (non ver
 | Zenerchi | 2/2 | 23 112 |
 
 Colin McRae, où la zone froide avait gelé l'invité une fois le 28/10, n'est pas piloté par
-l'endurance : il reste dans ses menus. Il a donc été rejoué par la matrice, **en course**. Avec la
+l'endurance : il reste dans ses menus. Il a donc été rejoué par la matrice, **en course** (01/11 :
+la fenêtre de mesure de ces parties tombait sur la transition d'avant la course,
+`vitesse-doom3-x86.md` §25 ; le décompte des gels n'en dépend pas). Avec la
 zone froide, il compte 20 parties pilotées, dont 6 cold de la chasse et 8 de l'A/B du profil PGO,
 zone froide dans les deux bras. Bilan : **1 gel en 20 parties, aucun dans les 17 qui ont suivi
 le gel**.

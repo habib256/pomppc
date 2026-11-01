@@ -423,7 +423,7 @@ Lecture :
 **Rien n'a été lancé sur la VM quotidienne** : à faire avec l'accord de l'utilisateur, hôte au
 repos. `tools/tcg/matab.sh` lance le `run_tiger.sh` du dépôt principal, qui ne connaît pas
 `TBHEAD` tant que cette branche n'est pas fusionnée ; mais il transmet `TCG_OPTS` tel quel à
-l'accélérateur, et `PPC32MT=1` y est déjà le défaut sur Linux x86-64 : les deux bras prennent
+l'accélérateur (01/11 : fusionné, `run_tiger.sh` connaît `TBHEAD=N`), et `PPC32MT=1` y est déjà le défaut sur Linux x86-64 : les deux bras prennent
 **le même binaire** (`~/src/qemu-anat/build-mt`, série 0001-0051, `-O3 -march=native` sans
 LTO ni PGO) et ne diffèrent que par la propriété.
 
@@ -497,7 +497,7 @@ sur le binaire rapide reconstruit (`QEMU_FAST=1`), le profil PGO repris avec `TB
 
 ## 9. Fichiers et relevés
 
-- `patches/tcg/0064-tcg-tb-head.patch` (appliqué après 0050 par `scripts/build_qemu_qfb.sh`,
+- `patches/tcg/0064-tcg-tb-head.patch` (appliqué après 0059, dernier de la série, par `scripts/build_qemu_qfb.sh`,
   marqueurs vérifiés, capacité `x-tb-head`), `run_tiger.sh` (`TBHEAD=N`, éteint par défaut).
 - `tools/tcg/codeanat32.py` (anatomie pondérée par PEBS, répartition dans le bloc, leviers,
   LBR), `tools/tcg/ppc32mt-bench.sh` (`PERFREC`, `PERFPER`, `PERFOPT` : `perf record`

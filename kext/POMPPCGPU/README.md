@@ -82,8 +82,8 @@ pose sur `Darwin:arm64` et `Linux:x86_64`). En mode QE, le kext :
   `POMPPCQECursorSync` dans la personnalité rendent le synchrone d'avant.
 
 Ces ajouts ne touchent pas `qgpu_abi.h`, mais changent le kext : réinstaller **et redémarrer**
-l'invité. Au 01/11, le PC a le kext du 01/11 (méthode 6) ; le M4 a encore celui du 30/10, que
-le plugin `20261101-ombre` sait remplacer par la méthode 5.
+l'invité. Au 01/11, les deux hôtes ont le kext du 01/11 (méthode 6 ; le M4 depuis 16 h 57) ;
+face à un kext plus ancien, le plugin `20261101-ombre` se replie sur la méthode 5.
 
 ## v9 : le doorbell asynchrone
 
@@ -178,8 +178,8 @@ tout avec un verdict dans `/pomppc/result.txt` (piloté depuis l'hôte par
 
 ## État
 
-**01/11/2026** : kext du 01/11 (Quartz Extreme, méthode 6 du client 2D) installé sur le PC ;
-le M4 garde celui du 30/10 jusqu'à sa prochaine séance. L'ABI de transport est toujours celle de
+**01/11/2026** : kext du 01/11 (Quartz Extreme, méthode 6 du client 2D) installé sur les deux
+hôtes (PC le matin, M4 à 16 h 57). L'ABI de transport est toujours celle de
 la v19.
 
 **v19 (24/09/2026)** : kext reconstruit contre `qgpu_abi.h` seul, chargé au démarrage

@@ -34,7 +34,7 @@ Au début d'une séance :
 - Les commits vont sur `main` puis sont poussés. Un essai non retenu est rangé sous une
   étiquette `archive/*`.
 
-## 2. PC x86-64 : état au 01/11/2026, 13 h 45 (VM quotidienne sur le binaire rapide avec le kext et le plugin du 01/11 ; un A/B PRESENTQ tourne)
+## 2. PC x86-64 : état au 01/11/2026, 14 h 30 (aucune VM ne tourne : A/B PRESENTQ raté et arrêté à 14 h 20 ; `build/` et `build-fast/` à reconstruire depuis `tcg/0064`)
 
 **Fait le 01/11** (matinée close vers 12 h ; l'après-midi : `pgo-train.sh` et PRESENTQ, fin de
 cette liste ; la séance suivante se fait sur le M4)
@@ -61,7 +61,7 @@ cette liste ; la séance suivante se fait sur le M4)
   « ppc64 » héritait du `PPC32MT=1` de `run_tiger.sh` et entraînait en fait ppc32mt ; le bras
   ppc64 pose maintenant `PPC32MT=0`. Les profils déjà construits ne changent pas.
 - **`POMPPC_GL_PRESENTQ` rouvert** (demande de l'utilisateur) : A/B au repos en plein écran
-  lancé à 13 h 28 (`bench/tcg/ab/presentq-0111-{cmr,mb,ut}`, 3 parties par bras), **en cours** ;
+  lancé à 13 h 28 (`bench/tcg/ab/presentq-0111-{cmr,mb,ut}`, 3 parties par bras) ;
   verdict et suite dans `TODO.md` (« Ensuite », PRESENTQ). Code de l'invité : s'il est allumé,
   le M4 le reçoit avec le bundle. **A/B RATÉ, à rejouer entièrement au retour sur le PC** :
   les 5 parties jouées (13 h 28-14 h 17) ont toutes fini « pas de ssh » parce que le binaire
@@ -139,8 +139,10 @@ cette liste ; la séance suivante se fait sur le M4)
 soir, `QE=0` l'éteint) et la série TCG jusqu'à `tcg/0056`, dont la **zone froide `x-tcg-cold`**
 (depuis le 31/10, `TCGCOLD=0` l'éteint). Plugin `20261101-ombre` (PACKBITS, UVWIDE et leviers
 A+B allumés, avis d'ombre à 20 Hz), kext du 01/11. `tcg/0057`-`0059` sont compilés et
-éteints ; `tcg/0060`-`0063` sont éteints et **non nommés** dans `build_qemu_qfb.sh` (arbre de
-mesure `~/src/qemu-nuit`). Binaire rapide : profil PGO du 31/10 (2 bis).
+éteints ; `tcg/0064` (`x-tb-head`, `TBHEAD=N`) est nommé depuis le 01/11 et éteint ;
+`tcg/0060`-`0063` sont éteints et **non nommés** dans `build_qemu_qfb.sh` (arbre de
+mesure `~/src/qemu-nuit`). Binaire rapide : profil PGO du 31/10 (2 bis), construit avant
+`tcg/0064` : refusé par le lanceur jusqu'à sa reconstruction.
 
 **Propres au PC** : `patches/diag/` (auto-profileur, plafonds), `tools/tcg/perfhw.sh` (compteurs
 Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). `perf` exige
@@ -155,7 +157,8 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
 - **Binaire rapide en production** : profil PGO réentraîné dans la nuit du 30 au 31/10 (cible
   ppc32mt, zone froide, 1 255 `.gcda`, construction à 2 h 43). A/B neuf contre ancien neutre en
   tout (mb, zen, ut −0,6 à −1,4 % ; cmr +0,3 % ; d3 +1,0 %, dans la dispersion) : c'est le
-  `build-fast/` d'aujourd'hui (`vitesse-doom3-x86.md` §23). `~/src/qemu/build-fast-pgo2810/` est
+  profil du `build-fast/` d'aujourd'hui (`vitesse-doom3-x86.md` §23), reconstruit avec lui le
+  31/10 à 16 h 04 après le correctif des reflets (`binaire-rapide-x86.md` §7). `~/src/qemu/build-fast-pgo2810/` est
   effacé.
 - **Zone froide allumée** (31/10, `80aae4e`, `vitesse-doom3-x86.md` §23, `endurance.md` §15) :
   6 parties par bras sans gel de cmr ; A/B d3 −1,8 %, mb −1,2 %, zen −2,2 %, cmr −2,2 %, ut

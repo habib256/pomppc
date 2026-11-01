@@ -19,7 +19,8 @@ reste trop lente pour être publiée (règle du 20/10). Vitesse au 01/11, ms/ima
 | Zenerchi, fenêtre | 4,6 | 2,8 | ×1,6 |
 | Colin McRae, plein écran, **en course** | 82 | 42 (01/11, 1920×1080, mesuré sous Time Machine) | — |
 
-Cible du PC : DOOM 3 à 50 ms/image (`docs/vitesse-doom3-x86.md`, départ 111,5 le 02/10).
+Cible du PC : DOOM 3 à 50 ms/image (`docs/vitesse-doom3-x86.md` : 148,7 au premier relevé du 03/10, §2 ; 111,5 avec le
+binaire rapide le 06/10, §13).
 
 **Ce que les profils ont établi** (`docs/vitesse-doom3-x86.md` §18-§25, `docs/tcg-g4.md` §44-§47) :
 - Sur le PC, le goulot du code généré est le **chargement des instructions** (frontend bound
@@ -360,7 +361,7 @@ L'état exact de chaque hôte (binaires, défauts allumés, plugin installé, VM
 | Défauts TCG | PC : série jusqu'à `0056` (zone froide) ; M4 : série du PC jusqu'à `0052` (avec `0037`-`0039`) ; `0057`-`0059` et `0064` compilés, éteints sur les deux hôtes (PC : `0064` à reconstruire) ; `0060`-`0063` éteints, non nommés |
 | Invité | Tiger 10.4.11 ; PC : kext du 01/11 (méthode 6, surface non simple) et plugin `20261101-ombre` (`disks/prebuilt`) ; M4 : les mêmes depuis le 01/11 à 16 h 57 (VM quotidienne, compilés dans l'invité, redémarrée ; anciens dans `/var/tmp/avant-0111/` de l'invité) |
 | Matrice | PC : `references-linux.csv`, 8 références toutes validées à l'œil (d3-fen et d3-pe le 30/10, `a89515b` ; cmr-pe le 01/11), 5 cellules dans les A/B (mb, zen, ut, d3 en fenêtre, cmr plein écran **en course** depuis `6054367`) ; M4 : `references.csv` (jamais touché par le PC), 17/17 vertes le 28/10 ; le 01/11, mb et d3 fen/pe vertes avec le nouveau bundle, cmr-pe reprise (faux reflet, `docs/re/cmr-rendu-vers-texture.md` §7), nouvelle référence à valider à l'œil |
-| Tests natifs | PC 240 OK / 0 échec (07/10), M4 287 OK / 0 échec (27/10) |
+| Tests natifs | PC 245 OK / 0 échec (14/10, `docs/binaire-rapide-x86.md`), M4 287 OK / 0 échec (27/10) |
 
 ## Matrice de jeux
 

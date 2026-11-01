@@ -99,7 +99,7 @@ own**. No Apple ROM is needed: OpenBIOS boots Tiger. Nothing of Apple's is distr
    `GL_RENDERER = "POMPPC qgpu (OpenGL host GPU)"`. `install.sh --remove` uninstalls. No Xcode
    is needed in the guest: the CD holds binaries built with Tiger's gcc 4.0.
 
-Each launcher documents its variables in its header (`head -130 run_tiger.sh`): `GPU=0`,
+Each launcher documents its variables in its header (`head -160 run_tiger.sh`): `GPU=0`,
 `FASTFP=0`, `NET=0`, `SNAPSHOT=1` (throw-away disk), `QFB=1` (second monitor), and more.
 Mac OS 9.2.2 runs with `./run_os9.sh` (single core, no 3D).
 Experimental CPU profiles from Tiger are available with

@@ -11,7 +11,8 @@ déclencheur de vidage).
 
 Fenêtre non automatisée : pas de réglage connu (préférences vides,
 LaunchCFMApp ne passe pas d'arguments au jeu).
-Le 26/09, le texte des menus paraît juste (TODO §6 le disait défectueux).
+Le 26/09, le texte des menus paraît juste (TODO §6 le disait défectueux ;
+docs/archive/todo-par-domaines-2026-09-27.md).
 """
 from jeu import Jeu
 

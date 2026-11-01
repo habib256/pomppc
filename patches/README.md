@@ -305,7 +305,7 @@ fichiers ; l'arbre ainsi patché redonne l'ELF à l'octet près (sha1 `f11083a8�
 
 Détail du protocole de mesure et des conclusions : `docs/metrologie-boot.md` (01, 02) et
 `docs/tcg-g4.md` (essais/0002, essais/0005). Aucun de ces patches n'est appliqué par le
-build. Les patches de performance appliqués (`fastfp/`, `tcg/0001` à `0059`) ajoutent chacun
+build. Les patches de performance appliqués (`fastfp/`, `tcg/0001` à `0059`, `tcg/0064`) ajoutent chacun
 une propriété éteinte par défaut dans QEMU (sauf les corrections sans condition de `0010` et les
 pendants d'hôte sans propriété) : sans elle, le binaire se comporte comme avant. `run_tiger.sh`
 en allume la plupart (`docs/tcg-g4.md`, « État au 01/11/2026 »).

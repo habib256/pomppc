@@ -3,7 +3,8 @@
 Historique de la couche baseline (Linux x86-64, 2026-08). Le protocole de mesure A/B reste la référence pour toute optimisation de QEMU.
 
 > **01/11/2026 : l'état décrit ici est dépassé.** La campagne TCG a repris en octobre : la série
-> `patches/tcg/` (jusqu'à 0063) est appliquée par `scripts/build_qemu_qfb.sh` et une partie de ses
+> `patches/tcg/` (jusqu'à 0059, plus 0064 ; 0060-0063 sont hors série, non nommés) est appliquée
+> par `scripts/build_qemu_qfb.sh` et une partie de ses
 > leviers est allumée par défaut (PPC32MT, lfs-known, tlb-base, zone froide… :
 > `docs/vitesse-doom3-x86.md`, `CHANGELOG.md`). Les leviers se jugent sur la matrice de jeux
 > (`tools/matrice/`, ms/image) ; pour le boot, `CPU_qemu` reste la métrique, et la baseline de

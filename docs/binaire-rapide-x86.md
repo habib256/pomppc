@@ -5,8 +5,11 @@ PC Linux x86-64 seulement. macOS (le M4) n'est pas concerné : rien n'y change.
 **État au 01/11/2026** (§7) : `build-fast/` en production est construit le 31/10 à 16 h 04 avec
 le profil PGO du 31/10 (`--cible ppc32mt`, mb zen ut d3 en fenêtre), `-O3 -march=native`
 (`skylake`), LTO. Le profil réentraîné avec cmr le 01/11 n'est **pas** en production (binaire
-gardé dans `~/src/qemu/build-fast-pgo0111cmr/`), mais c'est lui qui occupe `pgo-fast/` : voir le
-piège du §7 avant toute reconstruction.
+gardé dans `~/src/qemu/build-fast-pgo0111cmr/`) ; `pgo-fast/` contient de nouveau le profil du
+31/10 depuis la permutation de 12 h 50 (piège du §7). **Depuis la fusion de `tcg/0064`
+(`a0e028e`, 01/11), l'empreinte de la série n'est plus celle de `build-fast/`
+(`5ad32b79ece3943b`) : le lanceur l'écarte (§5) tant que `build/` et `build-fast/` ne sont pas
+reconstruits** (`etat-des-hotes.md` §2).
 
 ## 1. Pourquoi
 

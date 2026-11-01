@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 VERHILLE Arnaud
 """hote.py — gestes de l'hôte sur la VM quotidienne pour la matrice de jeux :
-ssh dans l'invité (tools/guest/tssh.sh), moniteur HMP (.run/mon.sock),
+ssh dans l'invité (tools/guest/tssh.sh), moniteur HMP (celui de .run/tiger.mon,
+.run/mon.sock à défaut),
 capture d'écran figée, redémarrage de l'invité, rapatriement de dossiers.
 """
 import fcntl

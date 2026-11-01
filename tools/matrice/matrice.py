@@ -4,7 +4,8 @@
 """matrice.py — matrice de jeux automatisée (chantier A3, docs/matrice-jeux.md).
 
 Joue chaque jeu dans chaque mode (fenêtre, plein écran) sur la VM quotidienne
-et range, pour chaque cellule, les trois preuves du TODO §1 :
+et range, pour chaque cellule, les trois preuves du TODO §1 (archivé :
+docs/archive/todo-par-domaines-2026-09-27.md) :
 
   1. image juste : le vidage déclenché (POMPPC_GL_DUMP_TRIGGER) est rejoué en
      natif (tests/qgpu_replay.c, backend gl) ; l'une des images rejouées doit
