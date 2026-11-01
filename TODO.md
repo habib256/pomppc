@@ -257,6 +257,10 @@ Le travail est fait ; il ne manque que l'essai ou la décision de l'utilisateur.
 
 ### Vitesse
 
+- [ ] **[TCG] `tcg/0064` x-tb-head : A/B en jeu** (fusionné le 01/11, éteint par défaut,
+  `TBHEAD=3 ./run_tiger.sh` ; `docs/anatomie-ppc32.md`). Mesuré sur banc seulement (−5,0 / −3,1 %
+  d'instructions, −2 % de cycles). Binaires à reconstruire d'abord (empreinte de série changée).
+  **Fermeture :** A/B des cinq jeux au repos sur les deux hôtes, allumé ou archivé avec le chiffre.
 - [ ] **[Plugin] Suites A4** : GLEngine déroule les tableaux clients en Begin/End (Nexuiz ARB
   14-16 %, Warcraft III 4,5 %) — RE du canal `gldCreateVertexArray`
   (`docs/protocole-v23-geometrie.md`) ; clés chaudes par une table « objet GLEngine → qtex »

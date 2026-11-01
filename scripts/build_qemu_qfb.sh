@@ -43,6 +43,7 @@
 #   • fils des vCPU en QoS « user-interactive » sur macOS (x-vcpu-qos) — patches/tcg/0057
 #   • attente de la boucle principale à la microseconde sur macOS (POMPPC_POLL_NS) — patches/tcg/0058
 #   • vperm en ligne, PSHUFB sur x86 (x-vperm-inline, x-vperm-verify) — patches/tcg/0059
+#   • tête de bloc allégée : can_do_io déduit, goto_tb avant après la vérification (x-tb-head) — patches/tcg/0064
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
 #   • slirp (réseau user-mode) et PulseAudio, exigés explicitement
 #
@@ -1161,6 +1162,25 @@ TCG52_MARKERS
     echo "▶ patch TCG : vperm en ligne (x-vperm-inline, tcg/0059)"
     patch_strict "$ROOT/patches/tcg/0059-ppc-vperm-inline.patch"
   fi
+  # --- tcg/0064 : tête de bloc allégée (x-tb-head, propriété de l'accélérateur, éteinte
+  # par défaut), docs/anatomie-ppc32.md : plus de stores de can_do_io (déduit de l'adresse
+  # de retour dans io_prepare), goto_tb vers un pc plus haut chaîné après la vérification
+  # d'interruption. Code commun (accel/tcg, tcg/tcg.c), aucun émetteur touché.
+  if ! grep -q "POMPPC tcg/0064" accel/tcg/translator.c; then
+    echo "▶ patch TCG : tête de bloc allégée (x-tb-head)"
+    patch_strict "$ROOT/patches/tcg/0064-tcg-tb-head.patch"
+  fi
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0064 incomplet : '$m' absent de $f (voir patches/tcg/)" >&2; exit 1; }
+  done <<'TCG64_MARKERS'
+accel/tcg/tcg-all.c x-tb-head
+accel/tcg/translate-all.c cpu_io_last_insn
+accel/tcg/cputlb.c TB_HEAD_VERIFY
+accel/tcg/cpu-exec.c tbh_report
+tcg/tcg.c tb_head_off
+include/exec/translation-block.h head_skip
+TCG64_MARKERS
   grep -q 'cpu->t2_vinsns' accel/tcg/translator.c &&
     grep -q 'uint32_t t2_vinsns' include/hw/core/cpu.h || {
       echo "⚠ patch tcg 0055 incomplet (compteur des instructions absent)" >&2; exit 1; }
@@ -1446,6 +1466,8 @@ check_opt x-pmu-real    qemu_cpu_has_prop  "${BIN}64"    "mac99,via=pmu" g4 x-pm
 check_opt x-lfs-known   qemu_cpu_has_prop  "$BIN"        "mac99,via=pmu" g4 x-lfs-known=on
 # tcg/0052 : sur la cible 32 bits seulement (adresses invitées de 32 bits)
 check_opt x-tlb-base    qemu_cpu_has_prop  "$BIN"        "mac99,via=pmu" g4 x-tlb-base=on
+# tcg/0064 : x-tb-head, propriété de l'accélérateur (éteinte par défaut, TBHEAD=N)
+check_opt x-tb-head     qemu_tcg_has_prop  "$BIN"        "mac99,via=pmu" x-tb-head=3
 # MTTCG sur la cible 32 bits (tcg/0050) : sondé sur qemu-system-ppc lui-même
 check_opt mttcg-ppc32   qemu_ppc32_mttcg_ok "$BIN"       "mac99,via=pmu" 2
 echo

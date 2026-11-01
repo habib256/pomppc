@@ -76,9 +76,15 @@ cette liste ; la séance suivante se fait sur le M4)
   `./run_tiger.sh`.
 - **Dérive de documentation nettoyée en deux passes** (huit agents Opus, `633c444`, `634797b`) :
   voir les messages de commit ; questions laissées ouvertes dans le TODO et les notes datées.
-- **Branche `worktree-agent-a15011a76631abd6f` (x-tb-head) non fusionnée** : elle ajoute un
-  second patch numéroté 0051 (`0051-tcg-tb-head.patch`, à côté de `0051-ppc-lfs-known`) et
-  modifie `build_qemu_qfb.sh` ; à renuméroter et à mesurer en jeu avant toute fusion.
+- **x-tb-head fusionné sous `tcg/0064`** (14 h 30, demande de l'utilisateur ; branche
+  `worktree-agent-a15011…` renumérotée de 0051 à 0064, worktree et branche supprimés ;
+  `docs/anatomie-ppc32.md`, `tools/tcg/codeanat32.py`, `tbhproof.*`). Patch nommé dans
+  `build_qemu_qfb.sh`, propriété de l'accélérateur **éteinte par défaut** (`TBHEAD=N`) ; il
+  s'applique au bout de la série (essai à blanc sur `~/src/qemu`, 0 rejet). **Conséquence : l'empreinte
+  de la série change ; `build/` et `build-fast/` du PC sont à reconstruire avant toute mesure**
+  (`./scripts/build_qemu_qfb.sh` puis `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh`, profil
+  `pgo-fast/` = 31/10), et le M4 reconstruit de toute façon. A/B en jeu de `TBHEAD=3` à faire
+  (TODO, « Plus tard », Vitesse).
 
 **Fait dans la nuit du 31/10 au 01/11** (objectif de l'utilisateur : vitesse x86 jusqu'à 7 h)
 - **Fenêtre de cmr** : depuis le 28/10, le PC mesurait une transition d'avant la course, pas la

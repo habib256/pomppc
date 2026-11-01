@@ -9,6 +9,13 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **`tcg/0064` x-tb-head fusionné, 01/11 (PC).** Tête de bloc allégée (`can_do_io` déduit de
+  l'adresse de retour, `goto_tb` vers l'avant chaîné après la vérification d'interruption ;
+  `docs/anatomie-ppc32.md`, outils `tools/tcg/codeanat32.py`, `tbhproof.*`), écrit le 23-24/10
+  sur une branche sous le numéro 0051, renuméroté 0064 à la fusion. Propriété de l'accélérateur,
+  **éteinte par défaut** (`TBHEAD=1|2|3`, `7` = preuve) ; l'empreinte de la série change : binaires
+  à reconstruire sur les deux hôtes. Mesuré sur banc (−5,0 / −3,1 % d'instructions, −2 % de
+  cycles), pas encore en jeu.
 - **Quartz Extreme : plus d'image ancienne du jeu sous l'ombre d'une fenêtre posée sur un jeu
   en fenêtre, 01/11 (PC).** Sur le chemin direct, le jeu présentait par le noyau sans aviser le
   WindowServer, qui ne recomposait la zone d'ombre qu'à ses propres dommages. Kext : méthode 6
