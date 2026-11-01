@@ -1320,7 +1320,7 @@ réseau=$([ -n "${NET:-}" ] && echo on || echo off) \
 disque=$([ -n "${SNAPSHOT:-}" ] && echo jetable || echo persistant)"
 echo "  binaire : $BIN"
 echo "  moniteur QEMU : $MON"
-[ -n "$WEBPROXY_ON" ] && echo "  🌐 relais web : 10.0.2.2:$WEBPROXY_PORT (proxy HTTP de Tiger ; journal .run/web-proxy.log)"
+[ -n "$WEBPROXY_ON" ] && echo "  🌐 relais web : 10.0.2.2:$WEBPROXY_PORT (proxy HTTP de Tiger ; journal ${POMPPC_SCRATCH:-.run}/web-proxy.log)"
 [ -n "$NET" ] && [ "${SSH_PORT:-0}" != 0 ] && echo "  🔑 SSH : ssh -p ${SSH_PORT} tiger@127.0.0.1  (invité 10.0.2.15:22)"
 [ "$SMP_N" -ge 2 ] && echo "  (1er boot en persistant = fsck possible ~1min ; ensuite rapide)"
 
@@ -1363,7 +1363,7 @@ if [ "${TABLET:-$TABLET_DEFAULT}" = 1 ]; then
     fi
   fi
   TABLET_ARGS=(-device "$TABLET_DEV")
-  echo "  Souris absolue : tablette USB (sélectionnée par ImGuiDock, marge $TABLET_MARGIN %)"
+  echo "  Souris absolue : tablette USB ($([ -n "${TABLET:-}" ] && echo "TABLET=$TABLET" || echo "sélectionnée par ImGuiDock"), marge $TABLET_MARGIN %)"
 fi
 
 exec "$BIN" -M "$MACHINE" -cpu "$CPU_SPEC" -m "$RAM" -smp "$SMP_N" \

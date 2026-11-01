@@ -4,7 +4,7 @@ PC Linux x86-64 (i7-10700F), QEMU 11.1.2. Objectif de fond : DOOM 3 à 50 ms/ima
 aujourd'hui), où le code généré fait 84 % du temps vCPU (`docs/vitesse-doom3-x86.md` §14). Ce
 levier ne touche à aucun émetteur : il fait exécuter au G4 le code que QEMU génère pour un
 processeur **32 bits**, au lieu de celui du 64 bits, et il retire au binaire 64 bits un compteur
-de PMU qui n'existe pas sur un 7447.
+de PMU qui n'existe pas sur un 7400 (`cpu=g4` = `7400_v2.9` dans QEMU).
 
 **Tout est éteint par défaut.** `PPC32MT=1` et `PMUREAL=1` dans `run_tiger.sh` ; rien ne change
 tant qu'on ne les pose pas. Rien n'est fusionné : branche du worktree `agent-af8215e75c4376073`.
@@ -30,7 +30,7 @@ Mesure statique de la session principale (OpenBIOS seul, 2 811 blocs communs) : 
 - `movslq` et comparaisons 64 bits pour `cmpi` (64 octets contre 52) ;
 - à **chaque sortie de bloc**, `PMC5 += num_insns` en mémoire (`env+0x3bd8`,
   `pmu_count_insns`, `target/ppc/translate.c`) : `pmu_update_summaries`
-  (`target/ppc/power8-pmu.c`) lit `SPR_POWER_MMCR0`, qu'un 7447 n'a pas (il vaut donc 0 et
+  (`target/ppc/power8-pmu.c`) lit `SPR_POWER_MMCR0`, qu'un 7400 n'a pas (il vaut donc 0 et
   non sa valeur de reset `MMCR0[FC]`), conclut « FC56 = 0, PMC5 compte » et pose
   `HFLAGS_INSN_CNT`. `bc` passe de 84 à 125 octets.
 
@@ -91,7 +91,7 @@ Book3S : test `env->spr_cb[SPR_POWER_MMCR0].name` dans `pmu_update_summaries` (m
 le 970, le POWER5+ et le POWER7 ont eux aussi `MMCR0`/`PMC5` (registrés par
 `init_proc_book3s_common`, reset `MMCR0[FC]`) ; ISA207S leur aurait retiré un comptage visible.
 Le test retenu ne change **rien de visible** pour aucun CPU : sans `MMCR0` Book3S, le `PMC5`
-compté (SPR 0x317) n'est pas lisible par l'invité (le 7447 a ses propres `MMCR0`/`PMC1-6`, SPR
+compté (SPR 0x317) n'est pas lisible par l'invité (le 7400 a ses propres `MMCR0`/`PMC1-6`, SPR
 952-959, simples registres sous QEMU). `HFLAGS_INSN_CNT` n'est plus posé, `pmu_count_insns`
 n'émet plus rien.
 
@@ -121,7 +121,7 @@ qui supposait ppc64 :
 - **Ordre mémoire** : `TCG_GUEST_DEFAULT_MO` est devenu `guest_default_memory_order`, **0 pour
   les deux cibles** (tout ordre est une barrière explicite : `sync`, `lwsync`, `eieio`, `isync`
   → `tcg_gen_mb`). Rien à changer.
-- **MMU et TLB** : le 7447 prend `mmu-hash32.c` et le cas `POWERPC_MMU_32B` de
+- **MMU et TLB** : le 7400 prend `mmu-hash32.c` et le cas `POWERPC_MMU_32B` de
   `ppc_tlb_invalidate_one`/`check_tlb_flush` dans les deux binaires (les `#ifdef TARGET_PPC64`
   n'y entourent que les MMU 64 bits) ; diffusion du `tlbie` (`TLB_NEED_GLOBAL_FLUSH`,
   `x-sr-tlb`, classes de `x-tlb-precise`) sans condition de cible.
