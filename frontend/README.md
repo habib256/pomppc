@@ -220,8 +220,7 @@ The headless probe defaults to the *other* guest, and always runs `-snapshot`:
     the bus. Silently falls back to inline `Scanout`/`Update` for
     non-shareable surfaces. Verified: mac99 surfaces are shareable.
   - ✅ **Son / Manette** (Périphériques menu): both **on by default** (Screamer output
-    through PulseAudio on Linux, CoreAudio on macOS — the menu item still says « Son (PulseAudio) »
-    — + `usb-host` gamepad passthrough); toggling relaunches QEMU.
+    through PulseAudio on Linux, CoreAudio on macOS, menu item « Son (Screamer) » since 01/11 + `usb-host` gamepad passthrough); toggling relaunches QEMU.
     The run scripts self-guard (no device → skipped).
   - ✅ **Clipboard peer** (`org.qemu.Display1.Clipboard`): we export our
     skeleton + a proxy on the main connection, `Register()`, and bridge the

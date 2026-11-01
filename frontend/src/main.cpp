@@ -875,7 +875,7 @@ int main(int argc, char** argv) {
                 }
                 ImGui::Separator();
                 ImGui::TextDisabled("(bascule = redémarrage immédiat de la VM)");
-                if (ImGui::MenuItem("Son (PulseAudio)", nullptr, &sound))
+                if (ImGui::MenuItem("Son (Screamer)", nullptr, &sound))
                     relaunch(curLauncher);
                 if (ImGui::MenuItem("Manette USB", nullptr, &pad))
                     relaunch(curLauncher);

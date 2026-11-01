@@ -96,7 +96,7 @@ own**. No Apple ROM is needed: OpenBIOS boots Tiger. Nothing of Apple's is distr
    Two cores (MTTCG), Screamer sound, fast FPU, paravirtual GPU, user-mode network; the
    window is the ImGui front end (starts windowed; Alt+Enter, F11 or Ctrl+Cmd+F toggles full
    screen; absolute mouse in a window, captured relative mouse in full screen).
-   `POMPPC_FRONTEND=native ./run_tiger.sh` uses QEMU's own Cocoa window instead. With sound
+   `POMPPC_FRONTEND=native ./run_tiger.sh` uses QEMU's own window instead (Cocoa on macOS, GTK on Linux). With sound
    on, guest RAM is capped at 768 MB (the Screamer needs less than 1 GB); on macOS sound uses
    a [steadier audio profile](docs/audio-stabilite.md) (`POMPPC_AUDIO_PROFILE=default` restores
    QEMU's settings).
