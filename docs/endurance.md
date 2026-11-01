@@ -98,6 +98,7 @@ dans `bench/endurance/invite-10.4.11/mach_kernel`, `invite-syms.sh` dans
     python3 tools/endurance/endurance.py jeu --jeu mb,zen,ut,d3 --instances 2 -n 999 --jusqua 07:00 \
         --invite bench/endurance/invite-10.4.11 --nom pc-jeux        # le PC, toute une nuit
     python3 tools/endurance/endurance.py rapport bench/endurance/ma-campagne
+    python3 tools/endurance/endurance.py compare bench/endurance/A bench/endurance/B --depart reboot   # bras, Wilson et Fisher
     python3 tools/endurance/endurance.py collecte <socket moniteur> <dossier>   # à la main
 
 - `--jusqua HH:MM` : aucun cycle ne commence après cette heure ; `touch
@@ -137,6 +138,8 @@ VM arrêtée (`stop`) pendant la collecte :
 
 - `ecran.png` : screendump.
 - `registres.txt` : `info registers -a`, tous les vCPU.
+- `ram.bin`, `mtree.txt`, `memoire.json` : vidage de la RAM physique par `pmemsave`
+  (`tools/endurance/memoire.py`), juste après les registres et avant tout `cont` (§8.7).
 - `registres-2.txt` : même relevé 3 s après `cont`, pour voir si les vCPU avancent.
 - `echantillons.json` : 20 relevés de NIP, LR, SRR0/1, DAR, DSISR et MSR, à 0,1 s
   d'intervalle.

@@ -3,6 +3,8 @@
 # Copyright (c) 2026 VERHILLE Arnaud
 """web-proxy.py — relais web pour les vieux navigateurs de l'invité (Tiger, OS 9).
 
+(01/11 : seul run_tiger.sh le lance ; run_os9.sh démarre OS 9 sans réseau, -nic none.)
+
 Tiger n'a qu'OpenSSL 0.9.7, des certificats racines de 2006, Safari 2 et son
 moteur JavaScript d'avant ES5 : le web actuel lui est fermé trois fois — TLS,
 JavaScript, formats. Ce relais tourne sur l'hôte, parle HTTP simple à

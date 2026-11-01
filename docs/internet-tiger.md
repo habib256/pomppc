@@ -14,10 +14,12 @@ D'où le relais `scripts/web-proxy.py`, lancé et arrêté avec QEMU : il n'éco
 avec les certificats de l'hôte et les rend en HTTP, liens réécrits. Dans Tiger, une fois :
 
 ```sh
-sudo sh /Volumes/POMPPCSRC/guest/net/proxy.sh on    # CD présent par défaut avec le GPU (GLISO=1 le force)
+sudo sh /Volumes/POMPPCSRC/guest/net/proxy.sh on    # CD POMPPCSRC, présent par défaut avec le GPU (GLISO=1 le force)
 ```
 
-(ou Préférences Système → Réseau → Proxys → Proxy web (HTTP) : `10.0.2.2`, port `8080`),
+(`proxy.sh` n'est que sur le CD des sources `POMPPCSRC`, inséré avec le GPU quand
+`pomppc-guest.iso` est absent ; le paquet publié `POMPPC_GUEST` ne le contient pas, 01/11.
+Sinon : Préférences Système → Réseau → Proxys → Proxy web (HTTP) : `10.0.2.2`, port `8080`),
 puis taper les adresses en `http://` dans Safari. **Page d'accueil : `http://pomppc/`**
 (recherche Google, sites légers, réglages). `WEBPROXY=0` ne lance pas le relais, `NET=0`
 coupe le réseau.

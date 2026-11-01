@@ -71,12 +71,12 @@ obscure (`start()` jamais appelé, ou panic au premier appel virtuel).
 
 ```sh
 # 1. côté hôte : graver les sources sur un CD et démarrer avec l'écran QFB
-./scripts/make_kext_iso.sh
+./scripts/make_kext_iso.sh          # → disks/pomppc-src.iso, volume POMPPCSRC
 QFB=1 SNAPSHOT=1 \
-EXTRA_ARGS="-drive file=disks/pomppcqfb-src.iso,if=ide,media=cdrom" ./run_tiger.sh
+EXTRA_ARGS="-drive file=disks/pomppc-src.iso,if=ide,media=cdrom" ./run_tiger.sh
 
 # 2. dans l'invité (Terminal)
-cp -R /Volumes/POMPPCQFB ~/POMPPCQFB && cd ~/POMPPCQFB
+cp -R /Volumes/POMPPCSRC/kext/POMPPCQFB ~/POMPPCQFB && cd ~/POMPPCQFB
 make                      # → POMPPCQFB.kext
 sudo make load            # kextload -t : vérifie dépendances et ABI
 ```
@@ -86,8 +86,13 @@ Variante sans Finder ni Terminal, quand l'invité ne démarre plus qu'en single-
 journal dans `/var/log/pomppcqfb-build.log`.
 
 ```sh
-mkdir /c ; mount_cd9660 /dev/disk1 /c ; sh /c/go.sh
+mkdir /c ; mount_cd9660 /dev/disk1 /c ; sh /c/kext/POMPPCQFB/go.sh
 ```
+
+(01/11 : le CD de `make_kext_iso.sh` porte le kext sous `kext/POMPPCQFB/` ; il s'appelait
+`disks/pomppcqfb-src.iso`, volume `POMPPCQFB`, quand il ne contenait que ce kext. Un CD sur un
+lecteur IDE de `mac99` se monte parfois par sa tranche de session, `/dev/diskNs0` :
+`docs/gpu-3d-tiger.md` §5.1.)
 
 **Toujours travailler avec `SNAPSHOT=1`** pendant la mise au point : un kext
 graphique fautif provoque une boucle de panic. Pour récupérer un disque

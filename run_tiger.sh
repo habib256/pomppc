@@ -1350,7 +1350,8 @@ TABLET_DEFAULT=0
 if [ "${TABLET:-$TABLET_DEFAULT}" = 1 ]; then
   TABLET_DEV="usb-tablet,id=pointer0"
   # Par disque : <disque>.tablet-margin (une ligne, 0 pour un invité ≤ 10.4.10 ;
-  # le tiger.qcow2 du PC est en 10.4.6 au 02/10/2026), sinon 15 (10.4.11).
+  # le tiger.qcow2 du PC est en 10.4.6 au 02/10/2026 ; 01/11 : 10.4.11 sur les
+  # deux hôtes), sinon 15 (10.4.11).
   if [ -z "${TABLET_MARGIN:-}" ] && [ -r "$DISK.tablet-margin" ]; then
     TABLET_MARGIN="$(tr -dc 0-9 < "$DISK.tablet-margin")"
   fi
