@@ -35,6 +35,53 @@ Cible du PC : DOOM 3 à 50 ms/image (`docs/vitesse-doom3-x86.md`, départ 111,5 
   sur d3 (≈ 20 ms par image). Sur le PC, l'invité ne l'attend pas (0,1-3 ms/image) ; sur le M4,
   où d3 est à 29 ms, il peut devenir le chemin critique : à mesurer.
 
+## Cinq pistes proposées le 01/11 (à arbitrer par l'utilisateur)
+
+Cinq améliorations qui ne sont pas encore des chantiers : chacune avec le gain attendu, le coût,
+et la preuve qui la fermerait. L'ordre est celui que je recommande ; rien n'est lancé sans
+décision. Une piste retenue monte dans « Maintenant » (au plus trois chantiers).
+
+1. **Mesurer ce que l'utilisateur voit : ImGuiDock contre GTK.** Tous les A/B passent sous le
+   frontal GTK (`matab.sh`) ; l'utilisateur joue sous ImGuiDock (`-display dbus,p2p=on`, images
+   poussées par D-Bus puis texture, `frontend/README.md`). Ce coût n'a jamais été mesuré et il
+   croît avec la résolution (3 Mo par image en 1024×768×32, 8 Mo en 1920×1080) : c'est un
+   suspect des « gros ralentissements en 1920×1080 » de cmr. Travail : A/B des cinq cellules
+   sous les deux frontaux à scène égale ; si écart, scanout en mémoire partagée (memfd ou
+   dmabuf, prévus par `org.qemu.Display1`) et rectangles sales seulement. **Fermeture :** écart
+   ImGuiDock − GTK < 2 % sur la matrice, cmr 1920×1080 remesuré. Coût : une journée. Gain :
+   tout l'écart mesuré, sur les deux hôtes, dans l'usage réel.
+2. **Régime de compilation du plugin de l'invité.** Le plugin fait 11-28 % du vCPU selon le jeu :
+   10 % de mieux sur lui vaut 1-3 % sur chaque jeu, sur les deux hôtes, sans portage. Leviers :
+   PGO et LTO du plugin lui-même (le gcc 4.0 de Tiger a `-fprofile-generate/-fprofile-use` ;
+   profil pris en jouant la matrice dans la VM de dev), appels internes directs (`static`,
+   visibilité cachée : fin des stubs PIC, `___stub_getrealaddr` 1 % du vCPU de cmr),
+   configuration lue une fois (A5 : plus de `getenv` dans le chemin chaud). **Fermeture :**
+   plugmd5 0 écart, A/B des cinq jeux, tous en gain. Coût : deux à trois jours (agent Opus).
+   Risque : la maturité du PGO de gcc 4.0 sur PowerPC.
+3. **Fil de rendu de l'hôte : convertir les attributs une fois.** `nat_conv_attr` fait 27 % de
+   `qgpu-render` (attributs reconvertis à chaque dessin natif ; à convertir au `BUF_SUBDATA`).
+   Sur le PC le fil prend 20 ms par image de d3 sans bloquer l'invité ; sur le M4, où d3 est à
+   29 ms, il peut être le chemin critique, et sur mb et zen (55 % et 41 % d'un cœur) il dispute
+   les cœurs rapides aux vCPU. **Ordre :** le profil croisé du M4 d'abord (chantier M4, point 2),
+   puis le levier si le fil est critique. **Fermeture :** A/B des cinq jeux sur les deux hôtes.
+   Gain : M4 d3 jusqu'à −20 % si le fil est critique, sinon moins de CPU hôte. Coût : deux jours.
+4. **Boîte noire des paniques.** Les plantages en jeu (délai de verrou, `exit 138`/`139`) restent
+   « sans cause » faute de relevé au moment même. Levier : QEMU arme un point d'arrêt sur
+   `_panic` du `mach_kernel` (adresse connue de `tools/re/kpanic.py`) et, à l'entrée, écrit
+   registres, pile, RAM et console dans `.run/panique-<date>/` puis laisse l'invité continuer ;
+   côté invité, le rapport CrashReporter d'un `exit 138` est rapatrié par ssh. **Fermeture :**
+   une vraie occurrence dépouillée de bout en bout. Coût : une journée. Gain : la condition de
+   fermeture du chantier « Plantages en jeu sans cause » existe enfin.
+5. **Temps de chargement des jeux.** cmr met ~70 s à charger sa course, DOOM 3 autant pour un
+   niveau, le binaire PGO instrumenté n'atteint pas la course en 900 s : jamais mesuré ni
+   optimisé, et c'est ce que l'utilisateur subit à chaque partie. Mesurer d'abord (secondes du
+   lancement à la scène de mesure, par jeu ; la matrice a déjà l'horloge), puis les pistes :
+   mémoire de l'invité 768 Mo → 1,5 Go (le mac99 va à 2 Go ; moins de pagination, les
+   `copypv` des `read()` à 1 000-2 800/s), cache disque des shaders traduits sur l'hôte (« Plus
+   tard »), disque IDE (DMA, taille des requêtes). **Fermeture :** temps de chargement dans
+   `frames.csv` ou le tableau de la matrice, et un levier prouvé. Coût de la mesure : une
+   demi-journée.
+
 Les chantiers sont rangés par priorité ; leur domaine figure entre crochets.
 **Maintenant** contient au plus trois chantiers, **Ensuite** donne l'ordre de prise,
 **À confirmer par l'utilisateur** réunit ce qui n'attend qu'un essai ou une décision de sa part,
@@ -50,6 +97,28 @@ L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
 
 ## Maintenant
 
+Ordre du 01/11 : la prochaine séance est sur le M4, son chantier passe en tête ; le plugin est
+commun ; les leviers du JIT x86 attendent le retour sur le PC.
+
+- [ ] **[TCG — M4] Mesurer le M4 avant de l'optimiser, puis rattraper le PC.** Le M4 n'a pas
+  de profil croisé depuis la parité du 25/10. Dans l'ordre :
+  1. **Rattrapage** : reconstruire `~/src/qemu` (`qgpu-core.c` du 31/10), reconstruire **kext,
+     plugin et GA** dans la VM de dev (kext du 01/11 : méthode 6 ; plugin `20261101-ombre` :
+     PACKBITS + avis d'ombre), les installer puis **redémarrer l'invité**, vérifier la bande sous
+     l'ombre (même code que le PC, même défaut), rejouer cmr-pe avec la fenêtre en course
+     (`6054367`, le M4 mesurait peut-être déjà la course : à vérifier sur ses `frames.csv`),
+     référence cmr à reprendre (faux reflet). Liste détaillée : `docs/etat-des-hotes.md` §4,
+     « Venu du PC le 01/11 ».
+  2. **Profil croisé des 5 jeux** (`sample` du processus QEMU, fils vCPU et `qgpu-render`,
+     comme `tools/re/perfpart.py` sur le PC) : part du JIT, recherche de blocs, `mftb`,
+     helpers, et **part du fil de rendu hôte** ; sur d3, si `qgpu-render` approche les 29 ms
+     de l'image, la piste 3 (`nat_conv_attr`) passe en tête.
+  3. **`tcg/0058` délais courts** : l'attente à la microseconde fait zen −18 % mais ut +6,6 % ;
+     variante `select` pour les seuls délais sous la milliseconde, profil d'UT (verrou).
+  4. Parité de la zone froide (`tcg/0056`, saut long aarch64) en dernier : gain PC de 1-2 %
+     sur un goulot L1i propre au PC.
+  **Fermeture :** doc de profil M4, PACKBITS mesuré, A/B de chaque levier, `etat-des-hotes.md`.
+
 - [ ] **[Plugin — les deux hôtes] Alléger le plugin de l'invité, suite de PACKBITS**
   (`docs/plugin-allegement.md` §8, profil `bench/tcg/ab/xprof-0111-cmr-pb`). Le coût est
   maintenant étalé : `geom_draw_client` 3,7 % du vCPU de cmr, `geom_draw_native` 1,5,
@@ -60,8 +129,13 @@ L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
   cmr et 0,7 % sur d3/mb (à identifier : `memcpy`, verrou ?). Méthode du §2 : un levier par
   variable `POMPPC_GL_*`, mode `=2` de contrôle, `plugmd5` 0 écart, A/B des cinq jeux sur le
   PC ; le M4 reçoit le bundle (à reconstruire dans sa VM de dev, puis A/B PACKBITS là-bas,
-  gain attendu 1-4 %). **Fermeture :** plugin sous 20 % du vCPU sur cmr et d3, aucun jeu en
-  perte, matrice verte.
+  gain attendu 1-4 %). S'y rattache l'**avis borné** des surfaces non simples (QE, 01/11) : le
+  coût de l'avis d'ombre (mb-fen +6 % quand une fenêtre est posée sur le jeu, la matrice y pose
+  toujours son Terminal) vient d'un avis sur toute la surface ; le kext connaît le rectangle
+  englobant de la partie non visible : le renvoyer par la méthode 6 et n'aviser que lui, puis
+  remonter la cadence (fermeture : mb-fen sous fenêtre posée au niveau de
+  `POMPPC_GL_QE_NONSIMPLE=0`, bande toujours juste). **Fermeture :** plugin sous 20 % du vCPU
+  sur cmr et d3, aucun jeu en perte, matrice verte.
 
 - [ ] **[TCG — PC] Les leviers génériques restants du JIT x86** (`docs/tcg-g4.md` §44-§47) :
   1. **PGO entraîné avec cmr** : `pgo-train.sh --plein-ecran cmr` (01/11), réentraînement
@@ -87,49 +161,23 @@ L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
      rejouer l'A/B en fenêtre à 3 parties (2 parties : d3 −3 %, mb −2,2 %, ut +3,7 %).
   **Fermeture de chaque levier :** preuve, A/B des cinq jeux, allumé ou archivé avec le chiffre.
 
-- [ ] **[TCG — M4] Mesurer le M4 avant de l'optimiser, puis rattraper le PC.** Le M4 n'a pas
-  de profil croisé depuis la parité du 25/10. Dans l'ordre :
-  1. **Rattrapage** : reconstruire `~/src/qemu` (`qgpu-core.c` du 31/10), reconstruire **kext,
-     plugin et GA** dans la VM de dev (kext du 01/11 : méthode 6 ; plugin `20261101-ombre` :
-     PACKBITS + avis d'ombre), les installer puis **redémarrer l'invité**, rejouer cmr-pe avec la
-     fenêtre en course (`6054367`, le M4 mesurait peut-être déjà la course : à vérifier sur ses
-     `frames.csv`), référence cmr à reprendre (faux reflet). Liste détaillée :
-     `docs/etat-des-hotes.md` §4, « Venu du PC le 01/11 ».
-  2. **Profil croisé des 5 jeux** (`sample` du processus QEMU, fils vCPU et `qgpu-render`,
-     comme `tools/re/perfpart.py` sur le PC) : part du JIT, recherche de blocs, `mftb`,
-     helpers, et **part du fil de rendu hôte** ; sur d3, si `qgpu-render` approche les 29 ms
-     de l'image, le levier `nat_conv_attr` (27 % du fil de rendu : attributs reconvertis à
-     chaque dessin natif, à convertir une fois au `BUF_SUBDATA`) passe en tête.
-  3. **`tcg/0058` délais courts** : l'attente à la microseconde fait zen −18 % mais ut +6,6 % ;
-     variante `select` pour les seuls délais sous la milliseconde, profil d'UT (verrou).
-  4. Parité de la zone froide (`tcg/0056`, saut long aarch64) en dernier : gain PC de 1-2 %
-     sur un goulot L1i propre au PC.
-  **Fermeture :** doc de profil M4, PACKBITS mesuré, A/B de chaque levier, `etat-des-hotes.md`.
-
 ## Ensuite
 
 Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête.
 
-- [x] **[Système — QE] Bande d'ancien jeu sous l'ombre du Terminal (PC, 01/11) : corrigé.**
-  Cause : sur le chemin direct le jeu présente par le noyau sans aviser le WindowServer, qui ne
-  recompose la zone d'ombre qu'à ses propres dommages (pas le défaut du 30/10). Kext méthode 6
-  + plugin `20261101-ombre` (avis cadencé 20 Hz), prouvé avant/après sur mb et DOOM 3 au
-  chargement, `docs/quartz-extreme.md` journal du 01/11. **Reste :**
-  - [ ] **M4** : réinstaller kext et bundle, redémarrer, vérifier la bande (même code, même
-    défaut, visible quand l'image change beaucoup après le dernier dommage du WindowServer).
-  - [ ] **Avis borné** : le coût (mb-fen +6 % quand une fenêtre est posée sur le jeu, la
-    matrice y pose toujours son Terminal) vient d'un avis sur toute la surface ; le kext
-    connaît le rectangle englobant de la partie non visible : le renvoyer par la méthode 6 et
-    n'aviser que lui, puis remonter la cadence. Fermeture : mb-fen sous fenêtre posée au niveau
-    de `POMPPC_GL_QE_NONSIMPLE=0`, bande toujours juste.
-  - [ ] Une cellule de preuve verte de la matrice en fenêtre avec le nouveau kext (les tours du
-    01/11 étaient `--sans-vidage`).
+- [ ] **[Matrice — PC] Un tour complet avec le kext et le plugin du 01/11** : les tours du 01/11
+  étaient `--sans-vidage` (cellules rouges par construction) ; il faut des cellules de preuve
+  vertes en fenêtre et en plein écran avec le cœur corrigé du 31/10 (dernier tour complet du PC :
+  07/10). Le bug de l'ombre est clos (`docs/quartz-extreme.md` journal du 01/11, CHANGELOG) ; sa
+  suite, l'avis borné, est dans le chantier plugin.
 
 - [ ] **[Jeux] Performances selon la résolution** — gros ralentissements signalés par
   l'utilisateur dans **Colin McRae en 1920 × 1080** (27/10 ; sur le M4 la cellule y est à +11 %
   contre 1024×768). Étendre les essais aux autres résolutions, jeux et modes ; relever les temps
   d'image et les replis sur une même scène. Les cellules vertes aux résolutions de la matrice ne
-  valent pas pour toutes. Lié au point précédent (relecture et présentation par bandes).
+  valent pas pour toutes. Premier suspect : le frontal ImGuiDock (piste 1 ci-dessus), dont le
+  coût par image croît avec la résolution ; les captures du 31/10 (`bench/tcg/ab/cmr-res-3110/`)
+  sont justes à toutes les résolutions.
 
 - [ ] **[Outils] Endurance sur la configuration par défaut** — banc `tools/endurance/`,
   `docs/endurance.md`. Fait : PC 683 démarrages sans incident (§10), M4 342 démarrages et 40
@@ -188,11 +236,12 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
 
 Le travail est fait ; il ne manque que l'essai ou la décision de l'utilisateur.
 
-- [ ] **[Matrice — PC] Valider à l'œil les références `d3-fen` et `cmr-pe` du PC**
-  (`tools/matrice/matrice.py --valider d3-fen`, `--valider cmr-pe` ; cmr-pe reprise le 31/10
-  après le correctif des reflets, l'ancienne dans
-  `bench/matrice/ref-linux/cmr-pe.faux-reflet-2810/`) ; regarder les captures de
-  `bench/tcg/ab/cmr-res-3110/`.
+- [ ] **[Matrice — PC] Valider à l'œil la référence `d3-fen` du PC**
+  (`tools/matrice/matrice.py --valider d3-fen`). `cmr-pe` a été validée le 01/11 (image de
+  course propre ; l'ancienne, au faux reflet, dans `bench/matrice/ref-linux/cmr-pe.faux-reflet-2810/`).
+- [ ] **[Frontend] Curseur unique sous ImGuiDock** (`50a9801`, 01/11) : à voir à l'œil au prochain
+  `run_tiger.sh` en fenêtre (un seul curseur sur l'image, flèche de l'hôte de retour sur les
+  menus et bandeaux, rien de collé après un aller-retour en plein écran).
 - [ ] **[Plugin] Replis à retirer** : `POMPPC_GL_VERDICT=0`, `POMPPC_GL_WHITELIST=0`,
   `POMPPC_GL_TEXMEMO=0`, `POMPPC_GL_STSKIP=0`. **Reprise :** mesure en jeu par l'utilisateur ;
   ensuite retirer les options devenues inutiles et vérifier la matrice.
@@ -249,7 +298,7 @@ Le travail est fait ; il ne manque que l'essai ou la décision de l'utilisateur.
 ### Divers
 
 - [ ] **[Système] Quartz Extreme** : allumé sur les deux hôtes (`docs/quartz-extreme.md`).
-  Restes : bug de l'ombre (Ensuite), `install.sh QE=1` et personnalités, Core Image.
+  Restes : avis borné (chantier plugin), `install.sh QE=1` et personnalités, Core Image.
 - [ ] **[Frontend] Frontend F1, restes non joués** : la vraie touche Ctrl+Cmd+F, écran Retina,
   plusieurs moniteurs.
 - [ ] **[Son] Arrêt de la boucle principale de 186 ms** en fin de cinématique de DOOM 3
@@ -297,7 +346,7 @@ L'état exact de chaque hôte (binaires, défauts allumés, plugin installé, VM
 | Élément | État |
 |---|---|
 | Protocole / ABI | GL **v22**, transport kext **v19** ; capacités ajoutées sans changer de version (`TEX_PRESENT`, `TEX_READBACK_ROWS`, …) |
-| QEMU | 11.1.2 + série `patches/` ; PC : `~/src/qemu/build-fast` (PGO, -O3, -march=native, réentraîné le 01/11 avec cmr, A/B en cours) et `build/` (référence) ; M4 : `~/src/qemu/build` (à reconstruire avec `qgpu-core.c` du 31/10) |
+| QEMU | 11.1.2 + série `patches/` ; PC : `~/src/qemu/build-fast` (PGO du 31/10, -O3, -march=native ; le profil avec cmr du 01/11 attend son recontrôle dans `build-fast-pgo0111cmr/`) et `build/` (référence) ; M4 : `~/src/qemu/build` (à reconstruire avec `qgpu-core.c` du 31/10) |
 | Défauts TCG | PC : série jusqu'à `0056` (zone froide) ; M4 : série du PC jusqu'à `0052` + `0054` ; `0057`-`0063` éteints, non nommés |
 | Invité | Tiger 10.4.11 ; PC : kext du 01/11 (méthode 6, surface non simple) et plugin `20261101-ombre` (`disks/prebuilt`) ; M4 : kext du 30/10, plugin `20261023-uvwon` + QE (`f01d2d7`), à mettre à niveau (kext → redémarrage) |
 | Matrice | PC : `references-linux.csv`, 5 cellules automatisées (mb, zen, ut, d3 en fenêtre, cmr plein écran **en course** depuis `6054367`) ; M4 : `references.csv` (jamais touché par le PC), 17/17 vertes le 28/10 |
