@@ -1056,3 +1056,16 @@ neutre : éteint. 0061 est neutre partout, ut compris : abandonné.
 
 **Levier plugin `POMPPC_GL_PACKBITS`** (`plugin-allegement.md` §8) : allumé, gain sur les cinq
 jeux (d3 −3,9 %, ut −4,5 %, zen −4,2 %, mb −1,2 %, cmr −3,5 %).
+
+**PGO réentraîné avec cmr en plein écran** (01/11, 7 h-8 h 20, `pgo-train.sh --plein-ecran cmr`,
+1 255 `.gcda`, `bench/tcg/ab/pgo-train-20261101-0701*`). A/B neuf contre le profil du 31/10
+(`pgo-0111-ab`, `-cmr`, 3 parties par bras, médianes) : d3-fen 79,2 → 78,6 (−0,8 %), mb-fen
+8,1 → 7,7 (−5 %, dispersion 6 %), ut-fen 39,3 → 39,1, zen-fen 4,5 → 4,6 ; **cmr-pe en course
+82,2 → 87,5 (+6 %)** sur deux parties seulement : `neuf-1` a quitté avant la course (`exit 138`,
+SIGBUS dans le jeu) et `neuf-3` (92,9) a tourné pendant que l'hôte dépouillait des profils
+(`perf script`, charge 3,1 : **mesure polluée, faute de méthode**). Neutre en fenêtre, non prouvé
+sur cmr : **l'ancien binaire est remis en production** (`~/src/qemu/build-fast`, profil du 31/10),
+le nouveau est gardé dans `~/src/qemu/build-fast-pgo0111cmr/` pour un recontrôle cmr au repos
+(3 parties par bras, rien d'autre sur l'hôte) avant de le juger. Le `.gcda` de cmr n'a pas
+produit de mesure (`scène non atteinte en 901 s` : le binaire instrumenté est trop lent pour la
+course), mais le profil contient bien ses chemins (menus, chargement, début de transition).

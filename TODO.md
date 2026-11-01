@@ -65,10 +65,11 @@ L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
 
 - [ ] **[TCG — PC] Les leviers génériques restants du JIT x86** (`docs/tcg-g4.md` §44-§47) :
   1. **PGO entraîné avec cmr** : `pgo-train.sh --plein-ecran cmr` (01/11), réentraînement
-     fait, A/B neuf contre ancien (`bench/tcg/ab/pgo-0111-*`) **en cours le 01/11 au matin** ;
-     la partie `neuf-1` de cmr a quitté avant la course (`exit 138`, SIGBUS dans le jeu) : à
-     surveiller, un second plantage avec le nouveau binaire le refuse (ancien binaire gardé
-     dans `~/src/qemu/build-fast-pgo3110/`).
+     fait, A/B neuf contre ancien (`bench/tcg/ab/pgo-0111-*`) : neutre en fenêtre, cmr non
+     prouvé (+6 % sur 2 parties, l'une polluée par une charge de l'hôte, `neuf-1` quittée
+     `exit 138`). **Ancien binaire remis**, nouveau gardé dans `~/src/qemu/build-fast-pgo0111cmr/` :
+     recontrôle cmr 3 parties au repos strict, et entraînement de cmr sur un binaire qui
+     atteint la course (l'instrumenté n'y arrive pas en 901 s).
   2. **Recherche de blocs** (mb 10 %, zen 14 %, cmr 7 %) : `tcg/0060` x8 (effacement exact, 256
      cases) gagne mb −8,7 % et ut −1,9 % mais **cmr +4,2 %** en course, seule perte propre à
      cmr qui reste inexpliquée. À instruire : compter ce que coûte le parcours exact sous les

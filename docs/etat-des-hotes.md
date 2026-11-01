@@ -34,7 +34,7 @@ Au début d'une séance :
 - Les commits vont sur `main` puis sont poussés. Un essai non retenu est rangé sous une
   étiquette `archive/*`.
 
-## 2. PC x86-64 : état au 01/11/2026, 6 h 50 (VM quotidienne relancée sur le binaire rapide)
+## 2. PC x86-64 : état au 01/11/2026, 10 h 10 (VM quotidienne relancée sur le binaire rapide ; bug de l'ombre QE en diagnostic par un agent)
 
 **Fait dans la nuit du 31/10 au 01/11** (objectif de l'utilisateur : vitesse x86 jusqu'à 7 h)
 - **Fenêtre de cmr** : depuis le 28/10, le PC mesurait une transition d'avant la course, pas la
@@ -65,9 +65,12 @@ Au début d'une séance :
 **À faire sur le PC, dans l'ordre**
 0. Valider la référence cmr-pe (`matrice.py --valider cmr-pe`), regarder les captures de
    `bench/tcg/ab/cmr-res-3110/`.
-1. PGO avec cmr : `tools/tcg/pgo-train.sh` joue désormais cmr en plein écran après les jeux en
-   fenêtre (`--plein-ecran`, défaut `cmr`, 01/11 6 h 55, vu en `--dry-run` seulement) ;
-   réentraîner `build-fast/` (~1 h 15), puis A/B neuf contre ancien sur la matrice et cmr.
+1. PGO avec cmr : réentraîné le 01/11 (7 h-8 h 20) ; A/B neuf contre ancien neutre en fenêtre,
+   cmr +6 % sur 2 parties (une polluée par mes dépouillements de profils, charge 3,1 ; une
+   quittée `exit 138`) : **ancien binaire remis** (`build-fast`), nouveau dans
+   `~/src/qemu/build-fast-pgo0111cmr/`. À refaire : A/B cmr 3 parties au repos strict avant de
+   trancher (`vitesse-doom3-x86.md` §25). Le binaire instrumenté n'atteint pas la course en
+   901 s : allonger `delai_scene` pour l'entraînement, ou entraîner cmr sur le binaire -O2.
 2. Plugin sur cmr, suite de PACKBITS : profil de la course refait avec packbits
    (`xprof-0111-cmr-pb`, plugin-allegement §8) : plugin 28,2 % du vCPU, coût étalé
    (`geom_draw_client` 3,7 %, `geom_draw_native`, `send_state`, `prog_sync`, `__stub_getrealaddr`
