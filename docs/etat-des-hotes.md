@@ -189,7 +189,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 01/11/2026, 17 h 45 (séance en cours ; A/B `m4-bundle-0111` en attente)
+## 3. Mac M4 : état au 01/11/2026, 21 h (A/B `m4-bundle-0111` relancé, en attente de Time Machine)
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
 - **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`
@@ -210,6 +210,21 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   (`POMPPC_GL_PACKBITS=0 POMPPC_GL_QE_NONSIMPLE=0`) contre défaut, mb/d3 fen et mb/cmr pe,
   3 parties par bras ; barrière : fin de Time Machine puis hôte au repos ; finit par
   `matab.sh --restore`. Bilans : `bench/tcg/ab/m4-bundle-0111-{fen,pe}/bilan.txt`.
+
+- **Passes de cohérence doc/code (soir)** : six passes de documentation, puis dix passes
+  « code ↔ doc » en worktrees fusionnées dans `main` (le code fait foi). Elles ont touché des
+  **commentaires** de `patches/` (qgpu-pci/core/gl, `qgpu_proto.h`, `qgpu_abi.h` et sa copie du
+  kext, `screamer.c`, en-têtes de `tcg/0037` et `0038`) : l'empreinte de la série change. Le M4
+  a reconstruit `~/src/qemu/build` sur `d086f03` (`.run/build-0111b.log`) ; **le PC reconstruit
+  `build/` et `build-fast/`** (de toute façon dû à `tcg/0064`). Le kext, le plugin et le GA de la
+  VM quotidienne restent valables (seuls des commentaires ont changé ; code du plugin vérifié
+  identique hors commentaires). Bugs corrigés dans le code : paquet invité publié et CD des
+  sources sans plugin GA (QE), CD des sources non regravé sur les en-têtes du contrat, test
+  §5 bis de `run-all.sh` en échec depuis le 29/10 (copies QE du kext, maintenant vérifiées par
+  valeur), deux libellés du frontal, deux messages de `run_tiger.sh`. `tests/run-all.sh` :
+  397 OK ; les 49 échecs sont des avertissements de shellcheck 0.11, tous présents avant.
+- **A/B relancé** à 21 h après la reconstruction (la chaîne avait été arrêtée pendant les
+  passes, aucune partie jouée ; dossiers vides rangés en `*.interrompu`).
 
 Ci-dessous, l'état du 30/10 (fusionné le 01/11 avec l'ancienne « 3 bis » du 29/10).
 
