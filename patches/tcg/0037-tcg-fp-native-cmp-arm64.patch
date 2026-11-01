@@ -1,8 +1,10 @@
 POMPPC tcg/0037 — x-fp-native-cmp sur hôte arm64 (pendant aarch64 de tcg/0033)
 
-ATTENTION : Écrit sur le PC, NON compilé pour le M4 (ni construit ni exécuté sur arm64),
-ATTENTION : NON prouvé : à construire et prouver sur le M4 avant tout usage
-ATTENTION : (docs/parite-arm64-0031-0035.md, tools/tcg/m4-serie-0031-0035-proofs.sh).
+(01/11 : l'avertissement qui suit date du 06/10 ; construit et prouvé sur le M4 les
+25-26/10, docs/parite-m4-2510.md §5.3, allumé par run_tiger.sh sur macOS arm64 depuis le 26/10.)
+Au 06/10/2026 : écrit sur le PC, NON compilé pour le M4 (ni construit ni exécuté sur arm64),
+NON prouvé : à construire et prouver sur le M4 avant tout usage
+(docs/parite-arm64-0031-0035.md, tools/tcg/m4-serie-0031-0035-proofs.sh).
 Seules vérifications faites sur le PC (06/10/2026) : le fichier compile avec le
 clang aarch64 du NDK Android (tools/tcg/a64syntax.sh, sans édition de liens), et
 chaque encodage A64 brut ajouté est égal au mot que produit l'assembleur de ce
@@ -23,8 +25,8 @@ tcg/aarch64, mêmes décisions que l'émetteur x86_64 de 0033 et que le modèle 
 
 et TCG_TARGET_HAS_ppc_fp_cmp = 1 (fsel, en ops TCG depuis 0033, suit). Le bloc
 FPRF de l'op est sorti tel quel dans pfp_fprf() (frsp s'en sert aussi).
-Propriété x-fp-native-cmp éteinte par défaut ; run_tiger.sh ne l'allume pas sur
-macOS arm64.
+Propriété x-fp-native-cmp éteinte par défaut dans QEMU ; run_tiger.sh l'allume sur
+macOS arm64 depuis le 26/10 (FPNATIVECMP, docs/parite-m4-2510.md §5).
 
 Reposé sur le M4 le 25/10/2026 (docs/parite-m4-2510.md) : écrit le 06/10 contre
 l'arbre à 0035, il ne s'appliquait plus après 0045-0052. Il se pose désormais

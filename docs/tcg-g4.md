@@ -28,7 +28,7 @@ exacts mais sans gain, `patches/tcg/essais/0002-ppc-lmw-inline.patch` (`x-lmw-in
 
 | patches | propriétés (lanceur) | PC x86-64 | M4 arm64 |
 |---|---|---|---|
-| 0001-0004, 0006-0008, 0010-0012, 0014-0016, 0021 (+ pendants x86 0017-0020 ; 0023 sous `x-tb-fast` ; 0027-0028 correctifs arm64 sans propriété) | `x-sr-tlb`, `x-lfs-inline`, `x-vfp-fast`, `x-vperm-fast`, `x-jit-near`, `x-fp-inline`, `x-ret-inline`, `x-jc-idx`, `x-icbi-sync`, `x-jc-bits=14`, `x-msr-nobql`, `x-fp-native`, `x-tb-fast`, `x-fp-native64`, `x-vmx-inline` ; `x-fast-fp` (`patches/fastfp/`) | allumés | allumés |
+| 0001-0004, 0006-0008, 0010-0012, 0014-0016, 0021 (+ pendants x86 0017-0020 ; 0023 sous `x-tb-fast` ; 0027-0028 correctifs arm64 sans propriété) | `x-sr-tlb`, `x-lfs-inline`, `x-vfp-fast`, `x-vperm-fast`, `x-jit-near`, `x-fp-inline`, `x-ret-inline`, `x-jc-idx`, `x-icbi-sync`, `x-jc-bits=14`, `x-msr-nobql`, `x-fp-native`, `x-tb-fast`, `x-fp-native64`, `x-vmx-inline` ; `x-fast-fp` (`patches/fastfp/`) | allumés (`x-jit-near` n'y trouve pas sa fenêtre : `x-jit-rel32` prend le relais) | allumés |
 | 0022, 0025/0029, 0026 | `x-vfp-native`, `x-lmw-vector`, `x-jc-word` | allumés | allumés |
 | 0024 | `x-jit-rel32` | allumé (06/10, §31) | sans objet |
 | 0031-0035 (+ 0037-0039 sur arm64), 0040, 0041, 0043, 0045-0047, 0050-0052 | `x-tlb-precise`, `x-lmw-inline`, `x-dcbz-inline`, `x-fp-native-cmp`, `x-vfp-native-cmp`, `x-dirty-skip`, `x-pteg-map`, `x-jc-2way`, `x-fp-known`, `x-fprf-lazy`, `x-stfs-known`, MTTCG 32 bits (`PPC32MT`), `x-lfs-known`, `x-tlb-base` | allumés (06/10 au 25/10) | allumés depuis le 26/10 (`docs/parite-m4-2510.md`) |
@@ -3569,7 +3569,7 @@ ne change rien** (ni `fsel`) : l'émetteur aarch64 ne connaît pas ces sélecteu
 chaîne aarch64 n'est disponible sur le PC pour en écrire un prouvé. Pendant NEON à faire sur le
 M4 (`fcvt s,d`/`fcvt d,s`, `fcvtzs`/`fcvtns` vers x, `fdiv`, même test de plage int32),
 prouvé là-bas par `fptest c` dans Tiger (empreinte de référence ci-dessous) et
-`x-fp-native-cmp-verify` — `fpnatcmp-user.sh` demande linux-user, absent de macOS.
+`x-fp-native-cmp-verify` — `fpnatcmp-user.sh` demande linux-user, absent de macOS. (01/11 : pendant écrit, `tcg/0037`, prouvé sur le M4 les 25-26/10, `docs/parite-m4-2510.md` §5.3 ; allumé par `run_tiger.sh` sur macOS arm64 depuis le 26/10.)
 
 Vérificateur : `helper_fpn_verify` (§22.5) connaît les nouveaux sélecteurs (`fpi_short()`,
 `fpi_gate_op()`, `do_fcmpo`, pas de FPRF pour `fctiw(z)`) ; `fsel` a le sien
@@ -3810,7 +3810,7 @@ produit par 2^uim est exact comme en simple (un dénormal tronque à 0 avec ou s
 **Porte de l'hôte** : `TCG_TARGET_HAS_ppc_vfp_cmp` (0 par défaut, x86_64 = celle de 0022) ;
 **sur arm64 la propriété ne change rien**, pendant NEON (`fcmeq`/`fcmge`/`fcmgt`, `scvtf`/`ucvtf`
 à virgule fixe, `fcvtzs`/`fcvtzu` à virgule fixe, qui saturent déjà) à écrire et prouver sur le
-M4 (`vfptest c` donne l'empreinte de référence ci-dessous).
+M4 (`vfptest c` donne l'empreinte de référence ci-dessous). (01/11 : pendant écrit, `tcg/0038`, prouvé sur le M4 les 25-26/10, `docs/parite-m4-2510.md` §5.3 ; allumé par `run_tiger.sh` sur macOS arm64 depuis le 26/10.)
 
 **Vérificateur** `x-vfp-native-cmp-verify` : `helper_vfn_save` (de 0022) sauve aussi VSCR[SAT] ;
 après l'op (et après CR6), `helper_vfnc_verify` — helper qui lit les globales, CR6 est donc en
@@ -4641,7 +4641,7 @@ patches TCG).
 - **Pendant arm64** : émetteur aarch64 écrit et compilé par le clang du NDK, **jamais
   exécuté** : sur le M4, construire, `fptest k`/`s`/`d`/`c` contre la référence, mutants de
   l'émetteur (porte sautée, opérande non testé, somme minuscule acceptée, `fprf_src` rangé avant
-  le `cbnz`…), puis l'A/B.
+  le `cbnz`…), puis l'A/B. (01/11 : fait sur le M4 les 25-26/10, `docs/parite-m4-2510.md` §5.3-§5.5 ; allumé par `run_tiger.sh` sur macOS arm64 depuis le 26/10.)
 - **Soupape** pour un bloc dont un producteur sortirait à chaque passage (~130 ns par sortie) :
   compter les sorties par bloc et le retraduire sans `x-fp-known`. Non fait (0,39 % des
   opérations de Marble Blast sortent).
@@ -4699,7 +4699,7 @@ double de l'hôte, exacte (`vcvtss2sd`, `fcvt d, s` : pas d'arrondi, pas de dén
   l'op est remplacé par un `b.cond`, que `reloc_pc19()` corrige pareil). **Écrit sur le PC,
   compilé par le clang 18 du NDK (`tools/tcg/a64syntax.sh`), ses neuf mots relus contre
   l'assembleur de clang (`tools/tcg/a64enc-check.py`, cas tcg/0051 ajoutés : 9 OK),
-  jamais exécuté.**
+  jamais exécuté.** (01/11 : fait sur le M4 les 25-26/10, `docs/parite-m4-2510.md` §5.3-§5.5 ; allumé par `run_tiger.sh` sur macOS arm64 depuis le 26/10.)
 - **Talon** (`lfsk_slow_path()`, appelé par `ppc_fp32_native_slow()` avant le vidage FPRF de
   0046, qui n'a rien à voir ici) : r = `helper_todouble(w)` (le sNaN reste signalant, ce que
   la conversion de l'hôte ne ferait pas) ; avec `FPK_R` (un consommateur s'est servi de frT),
@@ -5005,7 +5005,7 @@ rapide de l'agent (PGO de la VM de dev), `x-lfs-known` des deux côtés : DOOM 3
   `cmp` avec un `qemu-ppc` linux-user du M4, `lfsk-mut.py` (mutants à porter sur l'émetteur
   aarch64 : `b.ne` → `b`, `ccmp` sans condition, `cmp #254` → `#255`…), puis l'A/B. `fcvt d, s`
   sous FPCR par défaut (FZ = 0) est exacte sur les nuls et les normaux, et le talon garde les
-  dénormaux même si FIZ (FEAT_AFP du M4) était posé.
+  dénormaux même si FIZ (FEAT_AFP du M4) était posé. (01/11 : fait sur le M4 les 25-26/10, `docs/parite-m4-2510.md` §5.3-§5.5 ; allumé par `run_tiger.sh` sur macOS arm64 depuis le 26/10.)
 - **Mots anormaux sans consommateur** : ils paient l'appel du talon (au lieu des ~22
   instructions en ligne) ; 87 sur 5,3 milliards de `lfs` dans Zenerchi et Marble Blast. Un jeu
   qui copierait des données non flottantes par `lfs`/`stfs` le paierait à chaque mot : le
@@ -5162,7 +5162,7 @@ registres, l'accès qui se répète sur la même paire est rare), `lmw`/`stmw`, 
 mots nouveaux relus contre l'assembleur de clang (`tools/tcg/a64enc-check.py`, sept cas
 tcg/0052 : `neg`, `add … uxtw`, trois `cmp`, `b.hi`, le `mov w, #0x1000` du poison : **7 OK** ;
 les 14 « écarts » restants sont les constantes de 0037/0038, absentes des arbres du PC, comme
-dans `~/src/qemu-lfsk`), **jamais exécuté**.
+dans `~/src/qemu-lfsk`), **jamais exécuté**. (01/11 : fait sur le M4 les 25-26/10, `docs/parite-m4-2510.md` §5.3-§5.5 ; allumé par `run_tiger.sh` sur macOS arm64 depuis le 26/10.)
 
 **Vérificateur** (`x-tlb-base-verify`) : après chaque chargement passé par `qemu_ld_tlbb1`, un
 helper (`helper_tlbb_verify`, exempté du `tlbb_scan`) refait le test ; quand il passe (l'accès a
@@ -5502,7 +5502,7 @@ ont donné 87,5 puis 85,4 avec ce même binaire. Cause non établie ; ne pas mes
   (`a64enc-check.py`, 7 OK), **jamais exécuté** : sur le M4, construire, `tlbbproof` (le modèle
   aarch64 y est déjà prouvé), `tlbbtest` et `tlbbnu.sh` (il lui faut un assembleur PowerPC —
   `powerpc-linux-gnu-as` sur le PC — ou le `.bin` assemblé ici), les mutants à porter (`b.hi` →
-  `b.ls`, `cmp #(0x1000 − taille) + 1`, poison retiré, `neg` retiré…), puis l'A/B.
+  `b.ls`, `cmp #(0x1000 − taille) + 1`, poison retiré, `neg` retiré…), puis l'A/B. (01/11 : fait sur le M4 les 25-26/10, `docs/parite-m4-2510.md` §5.3-§5.5 ; allumé par `run_tiger.sh` sur macOS arm64 depuis le 26/10.)
 - **Les rangements** (19,1 % des accès couverts, l'autre moitié de l'estimation du §16) : il
   faudrait que la remise en « notdirty » par un autre fil se voie en cours de bloc. Piste : un
   compteur de génération par vCPU, incrémenté par `tlb_reset_dirty*()` (et tout ce qui repose

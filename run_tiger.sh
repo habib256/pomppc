@@ -71,10 +71,12 @@
 #                             # sur le M4 depuis le 26/10, §39)
 #   LFSKNOWN=0 ./run_tiger.sh # coupe : lfs converti par l'hôte quand le mot est un simple nul ou normal, et
 #                             # producteur de x-fp-known (x-lfs-known, patches/tcg/0051, docs/tcg-g4.md §40 ;
-#                             # allumé par défaut depuis le 24/10, d3 −9,5 % ; n'agit qu'avec FPKNOWN=1)
+#                             # allumé par défaut sur Linux x86-64 depuis le 24/10, d3 −9,5 %, sur le M4
+#                             # depuis le 26/10 ; n'agit qu'avec FPKNOWN=1)
 #   TLBBASE=0 ./run_tiger.sh  # coupe : chargements en forme D sur une base déjà vérifiée dans le bloc sans refaire
 #                             # le chemin court du TLB logiciel (x-tlb-base, patches/tcg/0052, docs/tcg-g4.md §41 ;
-#                             # allumé par défaut depuis le 25/10 ; cible 32 bits seulement, PPC32MT=1)
+#                             # allumé par défaut sur Linux x86-64 depuis le 25/10, sur le M4 depuis le 26/10 ;
+#                             # cible 32 bits seulement, PPC32MT=1)
 #   PPC32MT=0 ./run_tiger.sh  # coupe : SMP >= 2 sur qemu-system-ppc (cible 32 bits, celle du G4) en MTTCG au
 #                             # lieu de qemu-system-ppc64 (patches/tcg/0050, docs/ppc32-mttcg.md ; allumé par
 #                             # défaut depuis le 23/10 (PC) et le 26/10 (M4), sondé : sans le patch, repli ppc64)
@@ -708,7 +710,8 @@ fi
 # --- lfs producteur (x-lfs-known, patches/tcg/0051, docs/tcg-g4.md §40) --- lfs, lfsx, lfsu,
 # lfsux : un simple nul ou normal converti par l'hôte, le reste au talon (DOUBLE() de l'ISA, sortie
 # de bloc si une instruction suivante s'en est servie) ; frT entre dans les opérandes connus de
-# x-fp-known. Mêmes résultats au bit près. N'agit qu'avec x-fp-known. Éteint par défaut.
+# x-fp-known. Mêmes résultats au bit près. N'agit qu'avec x-fp-known. Éteint par défaut dans QEMU ;
+# LFSKNOWN allumé par le lanceur sur Linux x86-64 (24/10) et macOS arm64 (26/10).
 if [ "${LFSKNOWN:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-lfs-known=on"; then
     case "$CPU_SPEC" in
@@ -725,7 +728,8 @@ fi
 # lha lwz lfs lfd (et formes u) : sur une base dont un chargement antérieur du bloc a vérifié la page,
 # un test (l'adresse tient dans cette page) puis l'accès par l'addend gardé ; sinon le chemin complet.
 # Chargements seulement. N'agit que sur qemu-system-ppc (adresses 32 bits : PPC32MT=1 en SMP). Éteint
-# par défaut. Preuve : CPU_OPTS=x-tlb-base-verify=on (bilan « tlb-base-verify » à la sortie de QEMU).
+# par défaut dans QEMU ; TLBBASE allumé par le lanceur sur Linux x86-64 (25/10) et macOS arm64 (26/10).
+# Preuve : CPU_OPTS=x-tlb-base-verify=on (bilan « tlb-base-verify » à la sortie de QEMU).
 if [ "${TLBBASE:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-tlb-base=on"; then
     CPU_SPEC="$CPU_SPEC,x-tlb-base=on"; MODE="$MODE + TLB-PAR-BASE"
