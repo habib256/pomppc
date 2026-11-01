@@ -1,8 +1,10 @@
 POMPPC tcg/0038 — x-vfp-native-cmp sur hôte arm64 (pendant NEON de tcg/0034)
 
-ATTENTION : Écrit sur le PC, NON compilé pour le M4 (ni construit ni exécuté sur arm64),
-ATTENTION : NON prouvé : à construire et prouver sur le M4 avant tout usage
-ATTENTION : (docs/parite-arm64-0031-0035.md, tools/tcg/m4-serie-0031-0035-proofs.sh).
+(01/11 : l'avertissement qui suit date du 06/10 ; construit et prouvé sur le M4 les
+25-26/10, docs/parite-m4-2510.md §5.3, allumé par run_tiger.sh sur macOS arm64 depuis le 26/10.)
+Au 06/10/2026 : écrit sur le PC, NON compilé pour le M4 (ni construit ni exécuté sur arm64),
+NON prouvé : à construire et prouver sur le M4 avant tout usage
+(docs/parite-arm64-0031-0035.md, tools/tcg/m4-serie-0031-0035-proofs.sh).
 Seules vérifications faites sur le PC (06/10/2026) : compilé par le clang
 aarch64 du NDK Android (tools/tcg/a64syntax.sh : tcg/tcg.c et int_helper.c,
 sans édition de liens) ; encodages A64 bruts égaux à ceux de l'assembleur de
@@ -10,7 +12,7 @@ ce clang (tools/tcg/a64enc-check.py) ; le MODÈLE NEON (vfnc_x86, branche
 aarch64) compilé par ce clang et exécuté sous qemu-aarch64 (émulation, pas le
 silicium du M4) donne exactement la sortie du modèle x86 prouvé, sur 2 653 392
 vecteurs (tools/tcg/vfncxcheck.sh), et 9 mutants NEON sur 9 y sont vus.
-L'émetteur réel n'a jamais tourné.
+L'émetteur réel n'avait jamais tourné (au 06/10).
 
 Les sortes PVF_CMPEQ..PVF_CTSXS (4-11) de l'op ppc_vfp dans l'émetteur
 tcg/aarch64 (tcg_out_ppc_vfp_cmp), mêmes décisions que l'émetteur x86_64 :
@@ -30,7 +32,8 @@ Plus le modèle NEON dans le bloc « vfp-native-cmp » de int_helper.c (lu par
 x-vfp-native-cmp-verify et tools/tcg/vfpcmpproof.sh), et
 TCG_TARGET_HAS_ppc_vfp_cmp = 1. FPCR supposé à son défaut (au plus proche,
 FZ = 0, AH = 0), comme pour 0022. Propriété x-vfp-native-cmp éteinte par
-défaut ; run_tiger.sh ne l'allume pas sur macOS arm64.
+défaut dans QEMU ; run_tiger.sh l'allume sur macOS arm64 depuis le 26/10
+(VFPNATIVECMP, docs/parite-m4-2510.md §5).
 
 diff --git a/tcg/aarch64/tcg-target-has.h b/tcg/aarch64/tcg-target-has.h
 --- a/tcg/aarch64/tcg-target-has.h

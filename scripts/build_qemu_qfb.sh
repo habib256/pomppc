@@ -395,7 +395,8 @@ fi
 
 # --- 4 quinquies. TCG : TLB gardé d'un jeu de segments à l'autre (x-sr-tlb) ---
 # patches/tcg/, docs/tcg-g4.md. Comme le flottant rapide : une propriété de CPU,
-# éteinte par défaut (SRTLB=1 ./run_tiger.sh l'allume), et sans elle le binaire
+# éteinte par défaut dans QEMU (run_tiger.sh l'allume sur les deux hôtes, SRTLB=0
+# pour couper), et sans elle le binaire
 # se comporte comme avant — hors un branchement par écriture de registre de
 # segment, par remplissage du TLB et par recalcul des hflags. NO_TCG=1 saute
 # l'étape sur un arbre propre. Le garde teste le marqueur du DERNIER fichier du
@@ -429,7 +430,7 @@ TCG_MARKERS
   # patches/tcg/0002, docs/tcg-g4.md §8 : les conversions simple ↔ double de
   # lfs/stfs en ops TCG entières, sans branchement, prouvées au bit près
   # (tools/tcg/lfsproof.sh, tools/guest/jobs/lfstest). Propriété éteinte par
-  # défaut (LFSINLINE=1 ./run_tiger.sh). Le garde teste le marqueur du DERNIER
+  # défaut dans QEMU (allumée par run_tiger.sh, LFSINLINE=0 pour couper). Le garde teste le marqueur du DERNIER
   # fichier (fp-impl.c.inc) : sans lui la propriété existerait sans rien changer.
   if ! grep -q "gen_todouble_inline" target/ppc/translate/fp-impl.c.inc; then
     echo "▶ patch TCG : lfs/stfs sans helper (x-lfs-inline)"
@@ -454,7 +455,8 @@ target/ppc/translate/fp-impl.c.inc gen_tosingle_inline
 TCG2_MARKERS
   # --- 4 septies. AltiVec : flottant à 4 voies d'un coup (x-vfp-fast), vperm
   # par table (x-vperm-fast) — patches/tcg/0003 et 0004, docs/tcg-g4.md §9-10.
-  # Propriétés éteintes par défaut (VFPFAST=1, VPERMFAST=1 ./run_tiger.sh).
+  # Propriétés éteintes par défaut dans QEMU (allumées par run_tiger.sh, VFPFAST=0,
+  # VPERMFAST=0 pour couper).
   # Gardes : le marqueur du dernier fichier de chaque patch.
   if ! grep -q "vfp_fma4" target/ppc/int_helper.c; then
     echo "▶ patch TCG : flottant AltiVec à 4 voies (x-vfp-fast)"
@@ -491,7 +493,9 @@ target/ppc/translate/vmx-impl.c.inc gen_helper_VPERM_FAST
 TCG34_MARKERS
   # --- 4 octies. Placement du tampon du JIT (x-jit-near, x-jit-addr) ---
   # patches/tcg/0006, docs/tcg-g4.md §14 : propriétés de l'ACCÉLÉRATEUR (-accel
-  # tcg,x-jit-near=on), éteintes par défaut (JITNEAR=1 ./run_tiger.sh). Sur Apple
+  # tcg,x-jit-near=on), éteintes par défaut dans QEMU (x-jit-near allumée par
+  # run_tiger.sh, JITNEAR=0 pour couper ; sous Linux elle ne trouve pas sa
+  # fenêtre, voir 0024). Sur Apple
   # M4, un tampon posé hors de la fenêtre de 4 Gio du texte de QEMU (un
   # lancement sur deux environ) ralentit tout le processus de ~10 % : c'étaient
   # « les deux régimes ». Le patch imprime aussi, toujours, où le tampon est posé.
@@ -536,7 +540,8 @@ TCG6_MARKERS
   # en ligne) quand le FPSCR est amorcé sans trappe et les opérandes des simples
   # normaux, les helpers d'origine sinon ; prouvé au bit près (tools/tcg/fpproof.sh,
   # x-fp-verify, tools/guest/jobs/fptest). Par-dessus 0001-0004 (et le 0002 de
-  # patches/fastfp). Propriété éteinte par défaut (FPINLINE=1 ./run_tiger.sh).
+  # patches/fastfp). Propriété éteinte par défaut dans QEMU (allumée par
+  # run_tiger.sh, FPINLINE=0 pour couper).
   # Garde : le marqueur du traducteur (dernier fichier), sans lequel la propriété
   # existerait sans rien changer.
   if ! grep -q "do_fp_inline" target/ppc/translate/fp-impl.c.inc; then
@@ -570,7 +575,8 @@ TCG7_MARKERS
   # blr, bctr… sondent le cache de sauts dans le code généré (helper sur un
   # raté), et un vidage du TLB ne jette que les entrées des mmu_idx vidés.
   # Mêmes blocs choisis que helper_lookup_tb_ptr (x-ret-verify, smctest).
-  # Propriétés éteintes par défaut (RETINLINE=1 JCIDX=1 ./run_tiger.sh).
+  # Propriétés éteintes par défaut dans QEMU (allumées par run_tiger.sh,
+  # RETINLINE=0 JCIDX=0 pour couper).
   # Garde : le marqueur du traducteur ppc (dernier fichier du patch).
   if ! grep -q "gen_goto_ptr_exit" target/ppc/translate.c; then
     echo "▶ patch TCG : sorties indirectes en ligne, cache de sauts par mmu_idx (x-ret-inline, x-jc-idx)"
@@ -893,8 +899,8 @@ TCG21_MARKERS
     patch_strict "$ROOT/patches/tcg/0028-tcg-vfp-neon-slow.patch"
   fi
   # 0029 : le pendant SSE2 de la copie de 0025 sur hôte x86-64 (même propriété
-  # x-lmw-vector) ; ailleurs, la propriété est refusée par un avertissement
-  # au realize au lieu d'être acceptée sans effet. docs/tcg-g4.md §30.
+  # x-lmw-vector) ; ailleurs, la propriété est éteinte au realize avec un
+  # avertissement (boucle d'origine) au lieu d'être acceptée sans effet. docs/tcg-g4.md §30.
   if ! grep -q 'PPC_LMW_VECTOR_HOST' target/ppc/lmw-vector.h; then
     echo "▶ patch TCG : copie lmw/stmw par SSE2 sur hôte x86-64 (x-lmw-vector)"
     patch_strict "$ROOT/patches/tcg/0029-ppc-lmw-vector-x86.patch"
@@ -917,9 +923,10 @@ target/ppc/mem_helper.c if PPC_LMW_VECTOR_HOST
 target/ppc/cpu_init.c POMPPC tcg/0029
 TCG_M4_MARKERS
   # --- tcg/0033 : comparaisons et conversions natives (x-fp-native-cmp) ---
-  # frsp fctiw fctiwz fcmpo fdivs fdiv par l'op ppc_fp32 (émetteur x86_64
-  # seulement, sans effet ailleurs), fsel en ops TCG ; propriété éteinte par
-  # défaut (FPNATIVECMP=1). docs/tcg-g4.md §33.
+  # frsp fctiw fctiwz fcmpo fdivs fdiv par l'op ppc_fp32 (émetteur x86_64 ;
+  # aarch64 par tcg/0037, posé plus bas ; sans effet ailleurs), fsel en ops TCG ;
+  # propriété éteinte par défaut dans QEMU (FPNATIVECMP, allumée par run_tiger.sh
+  # sur les deux hôtes). docs/tcg-g4.md §33.
   if ! grep -q 'x-fp-native-cmp' target/ppc/cpu_init.c; then
     echo "▶ patch TCG : comparaisons et conversions flottantes natives (x-fp-native-cmp)"
     patch_strict "$ROOT/patches/tcg/0033-ppc-fp-native-cmp.patch"
@@ -936,8 +943,9 @@ tcg/tcg-op.c tcg_ppc_fp_cmp_supported
 TCG33_MARKERS
   # --- tcg/0034 : comparaisons et conversions AltiVec natives (x-vfp-native-cmp) ---
   # vcmpeqfp vcmpgefp vcmpgtfp vcmpbfp (et formes Rc), vcfsx vcfux vctsxs vctuxs
-  # par l'op ppc_vfp (émetteur x86_64 seulement, sans effet ailleurs) ; propriété
-  # éteinte par défaut (VFPNATIVECMP=1). docs/tcg-g4.md §34.
+  # par l'op ppc_vfp (émetteur x86_64 ; aarch64 par tcg/0038, posé plus bas ; sans
+  # effet ailleurs) ; propriété éteinte par défaut dans QEMU (VFPNATIVECMP, allumée
+  # par run_tiger.sh sur les deux hôtes). docs/tcg-g4.md §34.
   if ! grep -q 'x-vfp-native-cmp' target/ppc/cpu_init.c; then
     echo "▶ patch TCG : comparaisons et conversions AltiVec natives (x-vfp-native-cmp)"
     patch_strict "$ROOT/patches/tcg/0034-ppc-vfp-native-cmp.patch"
@@ -1035,7 +1043,8 @@ TCG40_MARKERS
   # 0045 : opérandes connus valides et porte du FPSCR connue ouverte dans un bloc
   # (x-fp-known) ; 0046 : FPRF et FI calculés à la lecture du FPSCR (x-fprf-lazy) ;
   # 0047 : stfs court d'une valeur connue (x-stfs-known). Émetteurs x86_64 et aarch64
-  # (ce dernier écrit sur le PC, jamais construit). Propriétés éteintes par défaut.
+  # (ce dernier écrit sur le PC ; construit et exécuté sur le M4 depuis le 26/10).
+  # Propriétés éteintes par défaut dans QEMU.
   if ! grep -q "x-fp-known" target/ppc/cpu_init.c; then
     echo "▶ patch TCG : opérandes flottants connus valides (x-fp-known)"
     patch_strict "$ROOT/patches/tcg/0045-ppc-fp-known.patch"
@@ -1108,7 +1117,7 @@ target/ppc/cpu_init.c .mttcg_supported = true
 TCG49_MARKERS
   # --- tcg/0051 : lfs producteur de x-fp-known (x-lfs-known), docs/tcg-g4.md §40 ---
   # lfs lfsx lfsu lfsux : le mot chargé, s'il est un simple nul ou normal, converti par
-  # l'hôte (vcvtss2sd ; fcvt d, s sur aarch64, jamais exécuté), sinon talon (DOUBLE() de
+  # l'hôte (vcvtss2sd ; fcvt d, s sur aarch64, exécuté sur le M4 depuis le 26/10), sinon talon (DOUBLE() de
   # l'ISA, sortie de bloc si un consommateur s'en est servi) ; frT entre dans les
   # opérandes connus. Propriété éteinte par défaut, n'agit qu'avec x-fp-known.
   if ! grep -q "x-lfs-known" target/ppc/cpu_init.c; then
@@ -1128,7 +1137,8 @@ TCG51_MARKERS
   # lbz lhz lha lwz lfs lfd (et formes u) sur une base dont un chargement antérieur du bloc a
   # vérifié la page : ea − page ≤ 0x1000 − taille (non signé) puis l'accès par l'addend gardé,
   # sinon le chemin complet hors ligne (ops qemu_ld_tlbb0/1, émetteurs x86_64 et aarch64,
-  # ce dernier jamais exécuté). Chargements seulement. Propriété éteinte par défaut.
+  # ce dernier exécuté sur le M4 depuis le 26/10). Chargements seulement, cible 32 bits
+  # seulement (tcg_tlbb_supported : adresses I32). Propriété éteinte par défaut dans QEMU.
   if ! grep -q "x-tlb-base" target/ppc/cpu_init.c; then
     echo "▶ patch TCG : le TLB logiciel une fois par base (x-tlb-base)"
     patch_strict "$ROOT/patches/tcg/0052-tcg-tlb-base.patch"
@@ -1147,7 +1157,8 @@ TCG52_MARKERS
   # 0037 : émetteur aarch64 des sélecteurs de 0033 (frsp fctiw fctiwz fcmpo fdivs fdiv) ;
   # 0038 : émetteur aarch64 de 0034 (vcmp*fp, vcf*, vct*s) ; 0039 : x-lmw-inline-max.
   # Écrits le 06/10 contre l'arbre à 0035 ; 0037 reposé APRÈS 0052 et prouvé sur le M4 le 25/10
-  # (dont la correction du diviseur nul sous PFP_K_B). Sans effet sur un hôte x86-64.
+  # (dont la correction du diviseur nul sous PFP_K_B). 0037-0038 sans effet sur un hôte
+  # x86-64 ; 0039 est du code commun (défaut 32 = comportement de 0032).
   if ! grep -q "TCG_TARGET_HAS_ppc_fp_cmp       1" tcg/aarch64/tcg-target-has.h; then
     echo "▶ patch TCG : émetteurs arm64 de x-fp-native-cmp et x-vfp-native-cmp (tcg/0037, 0038)"
     patch_strict "$ROOT/patches/tcg/0037-tcg-fp-native-cmp-arm64.patch"

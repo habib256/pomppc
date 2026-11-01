@@ -722,8 +722,8 @@ fi
 # --- lfs producteur (x-lfs-known, patches/tcg/0051, docs/tcg-g4.md §40) --- lfs, lfsx, lfsu,
 # lfsux : un simple nul ou normal converti par l'hôte, le reste au talon (DOUBLE() de l'ISA, sortie
 # de bloc si une instruction suivante s'en est servie) ; frT entre dans les opérandes connus de
-# x-fp-known. Mêmes résultats au bit près. N'agit qu'avec x-fp-known. Allumé par défaut sur Linux
-# x86-64 depuis le 24/10 et sur macOS arm64 depuis le 26/10 (bloc des défauts en tête) ; LFSKNOWN=0.
+# x-fp-known. Mêmes résultats au bit près. N'agit qu'avec x-fp-known. Éteint par défaut dans QEMU ;
+# LFSKNOWN allumé par le lanceur sur Linux x86-64 (24/10) et macOS arm64 (26/10).
 if [ "${LFSKNOWN:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-lfs-known=on"; then
     case "$CPU_SPEC" in
@@ -739,8 +739,9 @@ fi
 # --- TLB logiciel une fois par base (x-tlb-base, patches/tcg/0052, docs/tcg-g4.md §41) --- lbz lhz
 # lha lwz lfs lfd (et formes u) : sur une base dont un chargement antérieur du bloc a vérifié la page,
 # un test (l'adresse tient dans cette page) puis l'accès par l'addend gardé ; sinon le chemin complet.
-# Chargements seulement. N'agit que sur qemu-system-ppc (adresses 32 bits : PPC32MT=1 en SMP). Allumé
-# par défaut sur Linux x86-64 depuis le 25/10 et sur macOS arm64 depuis le 26/10 ; TLBBASE=0. Preuve : CPU_OPTS=x-tlb-base-verify=on (bilan « tlb-base-verify » à la sortie de QEMU).
+# Chargements seulement. N'agit que sur qemu-system-ppc (adresses 32 bits : PPC32MT=1 en SMP). Éteint
+# par défaut dans QEMU ; TLBBASE allumé par le lanceur sur Linux x86-64 (25/10) et macOS arm64 (26/10).
+# Preuve : CPU_OPTS=x-tlb-base-verify=on (bilan « tlb-base-verify » à la sortie de QEMU).
 if [ "${TLBBASE:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-tlb-base=on"; then
     CPU_SPEC="$CPU_SPEC,x-tlb-base=on"; MODE="$MODE + TLB-PAR-BASE"
