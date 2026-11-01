@@ -811,6 +811,11 @@ cp -R /Volumes/POMPPCSRC /tmp/src
 sudo sh /tmp/src/guest/gldriver/install.sh        # --remove pour désinstaller
 ```
 
+(01/11 : sans gcc 4.0, `install.sh` installe les binaires déjà compilés de `prebuilt/`, gravés sur
+le même CD quand `disks/prebuilt` existe ; `PREBUILT=1` les impose. Le paquet publié a son propre
+CD, `POMPPC_GUEST` de `scripts/make_guest_iso.sh` : `sudo sh /Volumes/POMPPC_GUEST/install.sh`,
+sans Xcode, kext, plugin et `POMPPCFsqrt`, mais pas encore le plugin GA de Quartz Extreme.)
+
 Puis lancer Tiger : `./run_tiger.sh` (le device est allumé par défaut ; `GPU=0` l'omet). Sans le
 device, le kext ne se charge pas et le plugin se comporte exactement comme le rendu logiciel d'Apple.
 

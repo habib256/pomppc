@@ -10,6 +10,10 @@
 #
 # Le dossier des binaires vient de l'invité (gcc-4.0, SDK 10.4u) : job tools/guest/jobs/prebuilt
 # (+ make dans kext/POMPPCFsqrt). Refusé s'il est plus vieux que les sources qu'il compile.
+# Exigés : POMPPCGPU.kext, GLDriver-POMPPC.bundle, POMPPCFsqrt.kext, VERSION ; gltest, glwin
+# et accelprobe pris s'ils y sont. (01/11 : le plugin GA POMPPCGA.plugin de Quartz Extreme,
+# que le job prebuilt produit depuis le 30/10, n'est ni gravé ici ni installé par
+# guest/package/install.sh : le paquet de l'invité n'apporte pas encore Quartz Extreme.)
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/pomppc-guest.iso}"

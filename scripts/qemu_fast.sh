@@ -4,8 +4,10 @@
 # qemu_fast.sh — choix du binaire QEMU RAPIDE du PC (docs/binaire-rapide-x86.md).
 #
 # Sourcé par run_tiger.sh APRÈS config.env et scripts/caps.sh (il emploie leurs
-# sondes : qemu_machine_has, qemu_has_device, qemu_machine_smp_ok, mémoïsées, donc
-# réutilisées telles quelles par le lanceur ensuite).
+# sondes : qemu_machine_has, qemu_has_device, qemu_machine_smp_ok,
+# qemu_ppc32_mttcg_ok, mémoïsées, donc réutilisées telles quelles par le lanceur
+# ensuite). Aussi par scripts/build_qemu_qfb.sh et tools/tcg/pgo-train.sh, pour la
+# seule empreinte pomppc_serie_hash, et par tests/run-all.sh.
 #
 #   pomppc_pick_qemu <smp>   pose QEMU_BIN et QEMU_BIN_LABEL ; code 1 seulement si
 #                            QEMU_FAST=1 a été demandé et que le binaire rapide
@@ -14,10 +16,12 @@
 # Règles (dans l'ordre) :
 #   • QEMU_BIN explicite (USER_QEMU_BIN) prime toujours : « binaire imposé » ;
 #   • QEMU_FAST=0 : binaire de référence (build/), sans rien sonder ;
-#   • hors Linux x86-64, ou depuis un paquet publié (bin/ à la racine) : rien ne change ;
+#   • hors Linux x86-64 (POMPPC_FAST_HOST simule un autre hôte, pour les tests), ou
+#     depuis un paquet publié (bin/ à la racine) : rien ne change ;
 #   • sinon $QEMU_FAST_BIN (config.env : ~/src/qemu/build-fast/qemu-system-ppc) est pris
 #     s'il existe ET passe pomppc_fast_ok ; écarté avec un avertissement sinon
-#     (QEMU_FAST=1 : refus au lieu du repli).
+#     (QEMU_FAST=1 : refus au lieu du repli). Le binaire sondé est celui qui sera
+#     lancé : …64 en SMP ≥ 2, sauf avec PPC32MT=1 (qemu-system-ppc, MTTCG sondé).
 #
 # Le relevé de construction <dossier>/pomppc-build.txt (écrit par
 # scripts/build_qemu_qfb.sh) dit la variante, le processeur de construction et si
@@ -28,8 +32,12 @@
 
 # Empreinte de la série de patches : les fichiers de patches/ que
 # scripts/build_qemu_qfb.sh applique ou copie réellement (ceux qu'il nomme par
-# "$ROOT"/patches/…), écrite dans le relevé de construction et dans celui du
-# profil PGO, comparée au lancement. Jusqu'au 07/10 elle couvrait tout patches/
+# "$ROOT"/patches/… ou "$ROOT/patches/…"), contenu entier, commentaires compris,
+# écrite dans le relevé de construction et dans celui du profil PGO, comparée au
+# lancement. N'entrent PAS dans l'empreinte : build_qemu_qfb.sh lui-même (ses
+# commentaires, mais aussi les constantes GPIO qu'il insère et ses options de
+# configure), scripts/caps.sh, config.env, l'OpenBIOS (.elf, chargé au lancement)
+# et les fichiers de patches/ qu'il ne nomme pas. Jusqu'au 07/10 elle couvrait tout patches/
 # (sauf essais/ et l'OpenBIOS) : un patch posé pour un autre hôte (tcg/0037-0039,
 # arm64) ou une ligne de README écartait le binaire rapide sans qu'il ait changé.
 pomppc_serie_hash() { # pomppc_serie_hash <dossier patches>

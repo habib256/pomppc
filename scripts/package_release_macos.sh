@@ -5,13 +5,16 @@
 # courant (git archive) + QEMU patché, qemu-img et le frontend, avec leurs dylibs Homebrew
 # embarquées (bin/, lib/, share/qemu/), le CD invité (pomppc-guest.iso) et les licences tierces.
 #
-#   QEMU_SRC=~/src/qemu-release scripts/package_release_macos.sh v0.1.0
+#   QEMU_SRC=~/src/qemu-release scripts/package_release_macos.sh 0.3
+#   (la version nomme le paquet : « v0.1.0 » pour la première publication, « 0.3 »
+#   pour la suivante ; le tag se pose à part)
 #
 # Prérequis :
 #   - QEMU construit par scripts/build_qemu_qfb.sh dans $QEMU_SRC au commit courant, de
 #     préférence avec CONFIGURE_EXTRA=--disable-sdl (sdl2-compat charge SDL3 à l'exécution) ;
 #   - frontend/build/pomppc construit (frontend/README.md) ;
-#   - binaires invités dans $PREBUILT (défaut disks/prebuilt), voir scripts/make_guest_iso.sh.
+#   - binaires invités dans $PREBUILT (défaut disks/prebuilt), voir scripts/make_guest_iso.sh
+#     (CD toujours regravé ici : pas de GUEST_ISO, contrairement au paquet Linux).
 # Sortie : dist/pomppc-<version>-macos-arm64.tar.xz et son .sha256.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

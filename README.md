@@ -137,15 +137,21 @@ cd frontend && ./setup.sh && cmake -S . -B build && cmake --build build -j   # f
 ./tests/run-all.sh                 # test harness (add --slow for boot tests)
 ```
 
-QEMU's `configure` needs Python ≥ 3.9 with `tomli` and `distlib`; on macOS a venv is enough
+QEMU's `configure` needs Python ≥ 3.9 with `tomli` (built in as `tomllib` from 3.11) and
+`distlib`; on macOS a venv is enough
 (`PYTHON=venv/bin/python3 ./scripts/build_qemu_qfb.sh`). The guest kext and plugin are compiled
 **inside Tiger** with the Xcode 2.5 tools (gcc 4.0, SDK 10.4u): `./run_tiger.sh` burns a
-`POMPPCSRC` CD with their sources, and `guest/gldriver/install.sh` builds and installs them.
-`scripts/package_release_macos.sh` produces the release archive (`scripts/package_release_linux.sh`
-for Linux x86-64).
+`POMPPCSRC` CD with their sources, and `guest/gldriver/install.sh` builds and installs them
+(or installs the prebuilt binaries of `disks/prebuilt`, burnt on the same CD, when gcc 4.0 is
+missing). `scripts/package_release_macos.sh` produces the release archive
+(`scripts/package_release_linux.sh` for Linux x86-64, not published): it packages a committed
+tree, the QEMU of `$QEMU_SRC/build` (default `~/src/qemu-release`; on macOS preferably built with
+`CONFIGURE_EXTRA=--disable-sdl`), `frontend/build/pomppc` and the guest CD burnt by
+`scripts/make_guest_iso.sh` from `disks/prebuilt`.
 
 On a Linux x86-64 PC, `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh` also builds `~/src/qemu/build-fast/`
-(`-O3 -march=native`, LTO, PGO; ~20 % faster in games), which `run_tiger.sh` then prefers
+(`-O3 -march=native`, LTO, PGO; about 10 % faster in DOOM 3 than the reference build at equal
+settings), which `run_tiger.sh` then prefers
 (`QEMU_FAST=0` for the reference build): see [docs/binaire-rapide-x86.md](docs/binaire-rapide-x86.md).
 
 ## How it works
