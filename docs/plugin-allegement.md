@@ -752,3 +752,10 @@ bundle, 3 parties par bras, ordre entrelacé, `chargehote.py attendre` ; médian
 
 **Décision** : allumé par défaut (`PACKBITS_DEFAULT 1`), gain sur les cinq jeux. C'est du code de
 l'invité, le même sur les deux hôtes : rien à porter côté arm64, le M4 le reçoit avec le bundle.
+
+**Profil de la course avec PACKBITS** (`bench/tcg/ab/xprof-0111-cmr-pb`, `build-fast`, 01/11 6 h 50,
+79,9 ms/image) : le plugin passe de 31,1 à **28,2 %** du vCPU. En tête : `geom_draw_client` 3,7 %
+(4,8 % avant), `geom_draw_native` 1,5 %, `send_state` 1,3 %, `prog_sync` 1,1 %,
+`geom_dispatch_locked` 1,1 %, `__stub_getrealaddr` 1,0 % (appels par pointeur de fonction),
+`texture_unit_ok` 0,9 %, `geom_format` 0,8 %, `geom_send_all`, `us_fill`, `prog_state`,
+`prog_params_arena` 0,6-0,7 % chacun. Le coût est désormais étalé : plus de point unique dominant.

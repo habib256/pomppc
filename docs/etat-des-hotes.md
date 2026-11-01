@@ -68,8 +68,10 @@ Au début d'une séance :
 1. PGO avec cmr : `tools/tcg/pgo-train.sh` joue désormais cmr en plein écran après les jeux en
    fenêtre (`--plein-ecran`, défaut `cmr`, 01/11 6 h 55, vu en `--dry-run` seulement) ;
    réentraîner `build-fast/` (~1 h 15), puis A/B neuf contre ancien sur la matrice et cmr.
-2. Plugin sur cmr, suite de PACKBITS : `prog_params_arena`, `prog_sync`, `prog_state`, `fbits` non
-   mis en ligne (profil `xprof-0111-cmr`) ; nouveau profil de la course avec le plugin packbits.
+2. Plugin sur cmr, suite de PACKBITS : profil de la course refait avec packbits
+   (`xprof-0111-cmr-pb`, plugin-allegement §8) : plugin 28,2 % du vCPU, coût étalé
+   (`geom_draw_client` 3,7 %, `geom_draw_native`, `send_state`, `prog_sync`, `__stub_getrealaddr`
+   1-1,5 % chacun). Piste : appels par pointeur (`__stub_getrealaddr`) et `texture_unit_ok`.
 3. `tcg/0063` : témoin sous `TLBPVERIFY=16 RETVERIFY=1` **sans** 0063 sur cmr. La panique de
    délai de verrou vient-elle des vérificateurs ? A/B en fenêtre mitigé (d3 −3,0 %, mb −2,2 %,
    ut +3,7 %, 2 parties) : à rejouer à 3 parties si le témoin innocente 0063.
