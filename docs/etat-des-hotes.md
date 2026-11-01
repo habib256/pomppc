@@ -63,13 +63,13 @@ cette liste ; la séance suivante se fait sur le M4)
 - **`POMPPC_GL_PRESENTQ` rouvert** (demande de l'utilisateur) : A/B au repos en plein écran
   lancé à 13 h 28 (`bench/tcg/ab/presentq-0111-{cmr,mb,ut}`, 3 parties par bras), **en cours** ;
   verdict et suite dans `TODO.md` (« Ensuite », PRESENTQ). Code de l'invité : s'il est allumé,
-  le M4 le reçoit avec le bundle. **La chaîne continue sans surveillance après le départ de
-  l'utilisateur (14 h 20)** : `bench/tcg/ab/presentq-0111-chaine.sh` enchaîne cmr, mb puis ut
-  en plein écran et finit par `matab.sh --restore` (VM quotidienne relancée) et la ligne
-  `CHAINE-FINIE` dans `presentq-0111-chaine.log`. **Au retour sur le PC** : lire les trois
-  `bilan.txt`, trancher PRESENTQ (règle dans le TODO), noter ici et dans `plugin-allegement.md`.
-  Si le PC a été éteint avant la fin, les parties jouées sont dans les dossiers ; rejouer le
-  reste au repos.
+  le M4 le reçoit avec le bundle. **Chaîne coupée à 14 h 05** (le PC est éteint à 14 h 20) :
+  seul le volet cmr (`presentq-0111-cmr`, 3 parties par bras) va au bout ; mb et ut en plein
+  écran n'ont pas été joués, et le `--restore` final n'a pas tourné (aucune VM ne doit tourner
+  à l'arrêt). **Au retour sur le PC** : lire `presentq-0111-cmr/bilan.txt`, rejouer mb pe et ut
+  pe au repos (`bench/tcg/ab/presentq-0111-chaine.sh`, sans la ligne cmr), trancher PRESENTQ
+  (règle dans le TODO), noter ici et dans `plugin-allegement.md` ; relancer la VM quotidienne
+  avec `./run_tiger.sh`.
 - **Dérive de documentation nettoyée en deux passes** (huit agents Opus, `633c444`, `634797b`) :
   voir les messages de commit ; questions laissées ouvertes dans le TODO et les notes datées.
 - **Branche `worktree-agent-a15011a76631abd6f` (x-tb-head) non fusionnée** : elle ajoute un
