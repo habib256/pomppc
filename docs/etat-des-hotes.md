@@ -191,7 +191,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 01/11/2026, 23 h 37 (A/B en cours ; arrêt prévu le 02/11 à 6 h 40)
+## 3. Mac M4 : état au 02/11/2026, 1 h 38 (profils en cours ; arrêt prévu à 6 h 40)
 
 **Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
 6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
@@ -271,6 +271,12 @@ des anciennes références**.
   dans `bench/tcg/ab/pilotage-m4-0111n/`. Le frontal compilé à 18 h est à jour (aucun fichier
   suivi plus récent) ; validation visuelle du curseur encore à faire.
 - **Tests après corrections : 405 OK, mêmes 49 signalements ShellCheck, 5 ignorés.**
+- **A/B neuf clos à 1 h 36**, 54 mesures, 18 parties au repos strict, aucun incident ni
+  repli : PACKBITS **UT −3,19 %, cmr en course −7,08 %** ; autres cellules sous 3 %,
+  inconclusives sur trois parties. Aucun réglage changé. `actuel/bits` sous 1 % partout :
+  ne prouve pas le coût des avis d'ombre effectivement actifs, non comptés par ces relevés.
+  Détail et valeurs sans arrondi : `docs/profil-m4-0211.md` §1. Profils hôte/invité des cinq
+  jeux démarrés dans `m4-profils-0111n-{fen,pe}`.
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
 - **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`

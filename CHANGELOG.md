@@ -9,6 +9,11 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **M4 : PACKBITS mesuré au repos sur les cinq jeux, 02/11.** A/B neuf à trois bras,
+  trois parties par bras, mb aussi en plein écran : UT −3,19 %, Colin en course −7,08 % ;
+  autres écarts sous 3 %, inconclusifs. Aucun incident ni repli, aucun réglage changé.
+  Le bras non-simple ne compte pas les avis actifs ; ne pas l'assimiler à une mesure de
+  leur coût sous une fenêtre posée sur le jeu (`docs/profil-m4-0211.md` §1).
 - **M4 : contrat du chemin d'attente expérimental corrigé, 01/11 nuit.** `tcg/fixes/0058`
   garde le compte de `select` et préserve `revents` au retour nul/erreur, comme `g_poll`
   de l'hôte. Reproduction de quatre écarts avant, 42 cas sans écart après, deux mutants

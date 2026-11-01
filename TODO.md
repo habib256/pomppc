@@ -112,8 +112,10 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
      nuit du 01 au 02/11 : artefacts locaux absents, six preuves reconstituées et vertes
      (mb/zen/d3/ut fen, mb/cmr pe), références regardées et validées, cmr en course sans le
      faux reflet. Ombre de DOOM 3 confirmée par l'utilisateur à 22 h 39. Restent : curseur net
-     en plein écran à l'œil, A/B neuf `m4-bundle-0111n` (trois bras séparant PACKBITS et avis
-     d'ombre, attend la fin d'un autre agent sur l'hôte). Détail : `docs/etat-des-hotes.md` §3-§4.
+     en plein écran à l'œil. A/B neuf `m4-bundle-0111n` terminé le 02/11 à 1 h 36 :
+     PACKBITS UT −3,19 %, cmr en course −7,08 %, autres cellules sous 3 % et inconclusives
+     sur trois parties ; bras non-simple sous 1 %, avis actifs non comptés.
+     Détail : `docs/profil-m4-0211.md` §1, `docs/etat-des-hotes.md` §3-§4.
   2. **Profil croisé des 5 jeux** (`sample` du processus QEMU, fils vCPU et `qgpu-render`,
      comme `tools/re/perfpart.py` sur le PC) : part du JIT, recherche de blocs, `mftb`,
      helpers, et **part du fil de rendu hôte** ; sur d3, si `qgpu-render` approche les 29 ms
@@ -139,8 +141,9 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
   cmr et 0,7 % sur d3/mb (identifié sur le M4 dans `memcmp`/`bcmp`, libSystem MD5
   `80719800…` ; appelants et empreinte du PC à vérifier). Méthode du §2 : un levier par
   variable `POMPPC_GL_*`, mode `=2` de contrôle, `plugmd5` 0 écart, A/B des cinq jeux sur le
-  PC ; le M4 a le bundle depuis le 01/11 (VM quotidienne), A/B PACKBITS `m4-bundle-0111` lancé,
-  en attente de la fin de Time Machine (gain attendu 1-4 %). S'y rattache l'**avis borné** des
+  PC ; le M4 a le bundle depuis le 01/11 (VM quotidienne), A/B PACKBITS neuf terminé le
+  02/11 : UT −3,19 %, cmr −7,08 %, autres écarts inconclusifs (`profil-m4-0211.md` §1).
+  S'y rattache l'**avis borné** des
   surfaces non simples (QE, 01/11) : le
   coût de l'avis d'ombre (mb-fen +6 % quand une fenêtre est posée sur le jeu, la matrice y pose
   toujours son Terminal) vient d'un avis sur toute la surface ; le kext connaît le rectangle
