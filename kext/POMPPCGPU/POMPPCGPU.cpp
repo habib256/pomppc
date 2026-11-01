@@ -18,8 +18,8 @@
 /* 29/10 (QE, P2) : la seule commande que le kext écrit lui-même. Copies de
    qgpu_proto.h (v13, figées), pour garder la règle : le kext ne dépend que de
    qgpu_abi.h. (01/11 : le contrôle « le kext ne nomme aucun symbole de
-   qgpu_proto.h » de tests/run-all.sh §5 bis relève ces copies, QGPU_OP_*,
-   QGPU_LEN_* et QGPU_CMD_HDR : il n'a pas été adapté à cette exception.) */
+   qgpu_proto.h » de tests/run-all.sh §5 bis les admet par leur nom et vérifie
+   que chaque valeur copiée reste égale à celle de qgpu_proto.h.) */
 #define QGPU_OP_SURF_PRESENT    0x0019
 #define QGPU_LEN_SURF_PRESENT   9
 #define QGPU_PF_XRGB8888        0

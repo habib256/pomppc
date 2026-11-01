@@ -348,19 +348,29 @@ else
   ok "le kext n'a pas de copie de qgpu_proto.h"
 fi
 # (Les commentaires ont le droit d'en parler : on les retire avant de chercher.)
+# Exception nommée (29/10, Quartz Extreme P2-P3) : le kext écrit lui-même
+# SURF_PRESENT et TEX_PRESENT, avec ses copies figées de ces opcodes, de leur
+# longueur et de QGPU_CMD_HDR (POMPPCGPU.cpp, en tête). Elles sont admises,
+# mais chaque valeur copiée doit rester égale à celle de qgpu_proto.h.
 LEAK=$(python3 - <<'PY'
 import re, sys
 strip = lambda t: re.sub(r'/\*.*?\*/', '', t, flags=re.S)
-sym = re.compile(r'QGPU_(OP|SK|MAX|CLIENT|CLASS|PROTO|LEN|FMT|VF)_|QGPU_CMD_HDR|qgpu_proto\.h')
+sym = re.compile(r'QGPU_(OP|SK|MAX|CLIENT|CLASS|PROTO|LEN|FMT|VF)_\w*|QGPU_CMD_HDR|qgpu_proto\.h')
+QE = {'QGPU_OP_SURF_PRESENT', 'QGPU_OP_TEX_PRESENT', 'QGPU_LEN_SURF_PRESENT', 'QGPU_CMD_HDR'}
+proto = dict(re.findall(r'^#define\s+(QGPU_\w+)\s+(\S+)', strip(open('patches/qgpu/qgpu_proto.h').read()), re.M))
 for f in ('kext/POMPPCGPU/POMPPCGPU.cpp', 'kext/POMPPCGPU/POMPPCGPU.h', 'kext/POMPPCGPU/qgpu_abi.h'):
     for line in strip(open(f).read()).splitlines():
         line = line.split('//')[0]
-        if sym.search(line):
+        bad = [m.group(0) for m in sym.finditer(line) if m.group(0) not in QE]
+        if bad:
             print("%s : %s" % (f, line.strip()[:70])); sys.exit(0)
+        d = re.match(r'\s*#define\s+(QGPU_\w+)\s+(\S+)', line)
+        if d and d.group(1) in QE and d.group(1) != 'QGPU_CMD_HDR' and proto.get(d.group(1)) != d.group(2):
+            print("%s : copie %s = %s, qgpu_proto.h dit %s" % (f, d.group(1), d.group(2), proto.get(d.group(1)))); sys.exit(0)
 PY
 )
 if [ -z "$LEAK" ]; then
-  ok "le kext ne nomme aucun symbole de qgpu_proto.h (hors commentaires)"
+  ok "le kext ne nomme aucun symbole de qgpu_proto.h (hors commentaires et copies QE vérifiées)"
 else
   ko "le kext nomme la sémantique : $LEAK"
 fi

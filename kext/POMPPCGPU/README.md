@@ -9,7 +9,8 @@ ne nomme aucun symbole de `qgpu_proto.h`). Depuis la v19 (`docs/protocole-v19-tr
 depuis le 29/10, Quartz Extreme : `POMPPCGPU.cpp` porte des copies figées de `SURF_PRESENT`,
 `TEX_PRESENT`, `QGPU_CMD_HDR`, de deux formats de pixels et de deux bits de capacité, qu'il
 écrit ou lit lui-même. Ces valeurs ne doivent donc pas changer dans `qgpu_proto.h` ; le
-contrôle de `run-all.sh` §5 bis les relève et n'a pas été adapté.)
+contrôle de `run-all.sh` §5 bis admet les opcodes, la longueur et `QGPU_CMD_HDR` par leur nom
+et vérifie que leurs valeurs restent égales à celles de `qgpu_proto.h` (01/11).)
 
 ## Ce que fait le kext (et rien d'autre)
 
