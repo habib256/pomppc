@@ -51,8 +51,8 @@ Au début d'une séance :
 - Référence cmr-pe du PC validée à l'œil (image de course propre, `references-linux.csv`).
 - PGO réentraîné avec cmr : neutre en fenêtre, cmr non prouvé (mesure polluée) ; ancien profil
   en production, nouveau dans `~/src/qemu/build-fast-pgo0111cmr/` (`e1eebc2`).
-- `~/src/qemu-jcp/` et `~/src/qemu-bat/` : **à effacer à la main** (1,4 Gio ; la suppression
-  a été refusée à l'agent) : `rm -rf ~/src/qemu-jcp ~/src/qemu-bat`. `qemu-nuit` contient 0060-0063.
+- `~/src/qemu-jcp/` et `~/src/qemu-bat/` effacés par l'utilisateur à 12 h 10 ; `qemu-nuit`
+  contient 0060-0063.
 
 **Fait dans la nuit du 31/10 au 01/11** (objectif de l'utilisateur : vitesse x86 jusqu'à 7 h)
 - **Fenêtre de cmr** : depuis le 28/10, le PC mesurait une transition d'avant la course, pas la
