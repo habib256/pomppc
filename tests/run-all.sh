@@ -4,7 +4,18 @@
 # run-all.sh — harnais de non-régression de POMPPC.
 #
 #   ./tests/run-all.sh          # tout ce qui ne demande ni disque invité ni X
-#   ./tests/run-all.sh --slow   # + les tests qui bootent réellement un invité
+#   ./tests/run-all.sh --slow   # + les tests qui lancent réellement QEMU :
+#                               #   qfb_smoke.py et qgpu_smoke.py (Open Firmware,
+#                               #   sans invité), bridge_probe (run_tiger.sh)
+#
+# Ce qu'il saute selon l'hôte : le binaire rapide et pgo-train.sh --dry-run hors
+# PC Linux x86-64 ; le backend audio sondé est coreaudio sur macOS, pa ailleurs.
+# Ce qui manque (shellcheck, QEMU, arbre QEMU patché, frontend non construit,
+# compilateur C, sources de DarkPlaces) est « ignoré », jamais un échec.
+#
+# Hors harnais, à la main : tests/fastfp-ppc.sh (qemu-ppc linux-user et
+# powerpc-linux-gnu-gcc), tests/tcg_jitblocks_test.py (capstone), et l'outil
+# tests/qgpu_replay.c (rejeu natif d'un vidage, construit par la matrice).
 #
 # Le dépôt est majoritairement du Bash, et les scripts SONT l'interface
 # utilisateur : une faute de frappe dans un lanceur est un bug produit. Jusqu'ici
@@ -397,9 +408,9 @@ if command -v cc >/dev/null 2>&1; then
     ko "glsl_pp_test ne compile pas"
   fi
   rm -f "$PP_BIN"
-  # Banc d'essai des BACKENDS (soft vs gl sur le même flux), s'il existe :
-  # mêmes drapeaux que qgpu_core_test, et rien à signaler tant qu'il n'est pas
-  # écrit — un test absent ne doit ni rougir ni faire croire qu'il est passé.
+  # Règles de rastérisation des deux BACKENDS (tests/qgpu_backend_test.c, écrit
+  # le 22/09) : mêmes drapeaux que qgpu_core_test. La garde -f reste : un test
+  # absent ne doit ni rougir ni faire croire qu'il est passé.
   if [ -f tests/qgpu_backend_test.c ]; then
     QGPU_BE_BIN="${TMPDIR:-/tmp}/qgpu_backend_test.$$"
     if cc -std=gnu11 -O1 -pthread -I patches/qgpu tests/qgpu_backend_test.c \

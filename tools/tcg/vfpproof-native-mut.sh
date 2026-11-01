@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
+# vfpproof-native-mut.sh <arbre-QEMU> [vecteurs] — contre-épreuve du modèle de
+# x-vfp-native (tcg/0022) : vfpproof.sh avec VFPPROOF_NATIVE=1 et chacun des
+# mutants VFPPROOF_MUT=1..8 doit finir en divergences.
 # Mutate the native model. A compilation failure is not a detected mutant.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
