@@ -22,6 +22,13 @@ Journaux : `bench/reg/res/{a,b,c}{1,2,3,4}-*` du worktree (non versionné, comme
 (CPU par fil depuis `ps -M`). Patch d'essai : `patches/smp-mac99/essais/qemu-mac99-4cpus.patch`
 (**non appliqué** par le build).
 
+Depuis le 01/11, `threadbusy.py --fonctions 15 sample-hote.txt` donne aussi les coûts propres
+des fonctions de chaque fil actif et sa part d'attente noyau. Les pourcentages utilisent le
+même dénominateur que l'occupation du fil ; ils permettent de comparer `qgpu-render` aux vCPU.
+C'est une estimation par échantillonnage : une attente du pilote graphique ne mesure pas le
+temps du GPU. Les blocs d'un même fil sont fusionnés avant de calculer le dénominateur ; la
+dernière pile est comptée même si le fichier se termine sans pied de page.
+
 ---
 
 ## 1. Pourquoi deux aujourd'hui

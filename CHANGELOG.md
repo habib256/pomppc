@@ -9,6 +9,10 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Profils M4 : coûts propres par fil, 01/11.** `threadbusy.py --fonctions N` sépare les
+  fonctions actives des attentes noyau, notamment sur `qgpu-render`. Corrige aussi le
+  dénominateur lorsqu'un fil apparaît dans plusieurs blocs et la dernière pile sans pied de
+  page. Quatre tests hors VM ; les profils ne sont pas assimilés à un relevé de temps GPU.
 - **`tcg/0064` x-tb-head fusionné, 01/11 (PC).** Tête de bloc allégée (`can_do_io` déduit de
   l'adresse de retour, `goto_tb` vers l'avant chaîné après la vérification d'interruption ;
   `docs/anatomie-ppc32.md`, outils `tools/tcg/codeanat32.py`, `tbhproof.*`), écrit le 23-24/10

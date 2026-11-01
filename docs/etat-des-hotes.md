@@ -189,7 +189,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 01/11/2026, 22 h 38 (campagne nocturne en cours ; arrêt prévu le 02/11 à 6 h 40)
+## 3. Mac M4 : état au 01/11/2026, 22 h 45 (preuves en cours, A/B en attente de repos ; arrêt prévu le 02/11 à 6 h 40)
 
 **Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
 6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
@@ -205,12 +205,21 @@ des anciennes références**.
 - Preuve mb-fen `bench/matrice/preuve-nuit-0111-mb` : 6,2 ms/image, zéro repli, rejeu/VM
   0,03 / 0,02 %. Nouvelle référence regardée (bille au départ de gems.mis) et validée ;
   ancien enregistrement conservé dans l'historique Git.
-- Campagnes **neuves** `m4-bundle-0111n-{fen,pe}`, puis `m4-profils-0111n-{fen,pe}` par
+- Campagnes **neuves prévues** `m4-bundle-0111n-{fen,pe}`, puis `m4-profils-0111n-{fen,pe}` par
   `.run/chaine-nuit-0111.sh` (journal `.run/chaine-nuit-0111.log`). Trois bras entrelacés :
   `avant` (PACKBITS=0, QE_NONSIMPLE=0), `bits` (1,0), `actuel` (1,1) ; trois parties par bras,
   mb/zen/ut/d3 en fenêtre, mb/cmr en plein écran. PACKBITS est ainsi séparé du coût de l'avis
   d'ombre. Barrière `chargehote.py attendre` et relevé continu de charge ; Time Machine arrêté.
   Ensuite profils hôte 30 s et invité 10 s avec les défauts, sur les cinq jeux.
+- À 22 h 39, l'utilisateur confirme l'ombre correcte sur DOOM 3 avec la correction active ;
+  le défaut qu'il venait de voir appartenait au bras `avant` (QE_NONSIMPLE=0). Campagne
+  interrompue pour lever le doute, début conservé dans `m4-bundle-0111n-fen.interrompu-ombre` ; captures de la
+  vérification dans `bench/ombre-m4-0111n/`. Rien à rouvrir dans le correctif.
+- Un autre agent compile Swift sur l'hôte : pas d'A/B pendant ce travail. Barrière locale
+  `.run/repos-strict-0111.py` avant les parties. En attendant, preuves d'image neuves
+  `preuve-nuit-0111-{fen,pe}` (temps non retenus comme preuve de vitesse) ; Zenerchi regardé
+  et validé aussi. `threadbusy.py --fonctions N` préparé pour le dépouillement des profils,
+  coûts propres par fil et attentes séparées, quatre tests hors VM réussis.
 - Tests de départ : 397 OK, 49 signalements ShellCheck préexistants, 5 ignorés. Les campagnes
   de vitesse sans vidage restent rouges par construction ; elles ne prouvent pas les images.
 
