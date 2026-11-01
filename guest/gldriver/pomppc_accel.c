@@ -36,9 +36,12 @@
  *   POMPPC_GL_STATS=1     bilan sur stderr à la fin du processus
  *   POMPPC_GL_DIRECT=0    pas de présentation directe (voir present_direct) ;
  *                         =f en plein écran seulement, =c même sous un curseur
- *                         en mouvement
+ *                         en mouvement. Sous Quartz Extreme, plein écran
+ *                         seulement quoi qu'on pose ; sans effet dans le
+ *                         WindowServer (direct_init)
  *   POMPPC_GL_PRESENT=0   pas de SURF_PRESENT (relecture + copie G4, pour A/B)
- *   POMPPC_GL_STATS=fichier  bilan ajouté au fichier toutes les 5 s (images/s,
+ *   POMPPC_GL_STATS=/chemin  (absolu) bilan ajouté au fichier toutes les 5 s, en
+ *                         plus de celui de stderr (images/s,
  *                         relectures, replis, temps passé à soumettre et à copier)
  *   POMPPC_GL_GEOM=0/1/2  chemin brut : 0 coupé, 1 activé (défaut), 2 activé
  *                         avec un format de sommet fixe et large (mesure)
@@ -73,7 +76,9 @@
  *   POMPPC_GL_NOTE=chemin journal d'appoint (gl_note). SANS elle, rien n'est
  *                         écrit : le plugin tourne aussi dans le WindowServer,
  *                         en root. Ouvert une fois, O_EXCL|O_NOFOLLOW.
- *   POMPPC_GLTRACE=dir    trace (voir pomppc_gld.c)
+ *   POMPPC_GLTRACE=dir    trace (voir pomppc_gld.c) ; POMPPC_GLTRACE_STATE (état
+ *                         GL vidé à chaque effacement, pas seulement au premier)
+ *                         et POMPPC_GLTRACE_VERTS (sommets vidés en binaire)
  *
  * Index des autres variables, préfixe POMPPC_GL_ omis (01/11 ; détail au point
  * de lecture, getenv, et près des *_DEFAULT). Lues une fois pour la plupart ;
@@ -1330,14 +1335,17 @@ static struct {
     /* ── v18 : DRAW_NATIVE, miroirs bruts des VBO ── */
     int             native;             /* QGPU_CAP_NATIVE ; POMPPC_GL_NATIVE=0 le coupe */
     int             rawsane;            /* A4 : DRAW_RAW_SANE (QGPU_CAP_GEOM_HOST,
-                                           POMPPC_GL_RAWSANE=1) */
+                                           allumé par défaut, POMPPC_GL_RAWSANE=0
+                                           l'éteint) */
     unsigned long   n_rawsane;          /* séries Begin/End vérifiées par l'hôte */
     int             natshm;             /* A4 : tableaux clients en DRAW_NATIVE
-                                           (QGPU_CAP_GEOM_HOST, POMPPC_GL_NATSHM=1) */
+                                           (QGPU_CAP_GEOM_HOST ; allumé par défaut,
+                                           POMPPC_GL_NATSHM=0 l'éteint) */
     unsigned long   n_natshm_draws, n_natshm_bytes, n_natshm_fall;
     /* ── 03/10, étape 3 de DOOM 3 sur le PC (docs/d3-plugin-x86.md) ──
-       Trois leviers, éteints par défaut (*_DEFAULT), chacun avec ses
-       compteurs (ligne D3X de la note, toutes les CNT_PERIOD images). */
+       Trois leviers (*_DEFAULT ; éteints à la construction, allumés depuis
+       le 04/10), chacun avec ses compteurs (ligne D3X de la note, toutes les
+       CNT_PERIOD images). */
     int             idxlazy;            /* POMPPC_GL_IDXLAZY : 1 = indices d'un dessin
                                            natif non balayés quand tous les miroirs
                                            lus sont propres ; 2 = de même, mais balayés
@@ -2809,7 +2817,8 @@ static void async_switch(void)
         return;
     }
     /* Une moitié doit porter le flux, les sommets, les indices et une arène
-       digne de ce nom (deux transferts plein écran). Sinon, une seule moitié. */
+       d'au moins 1 Mio (ARENA_OFF + 0x100000 ; ~6 Mio sur une tranche de 16).
+       Sinon, une seule moitié. */
     if (half < ARENA_OFF + 0x100000) {
         G.async_why = "slot too small for two halves";
         return;
@@ -3731,7 +3740,9 @@ static void broken_all(const char *why, long st, unsigned long pc, unsigned long
  * QGPU_REG_ERRORS qui fait foi, et le kext le rend à chaque soumission
  * asynchrone (à la place de status_pc, qui n'a pas de sens à la soumission).
  * Voir check_errors : on ne peut pas nommer la fautive après coup, on repasse
- * en synchrone pour que la prochaine se nomme elle-même.
+ * en synchrone pour que la prochaine se nomme elle-même. (Depuis le 07/10,
+ * sous QGPU_CAP_CLIENT_ERRORS, le global n'est qu'un déclencheur : le compte
+ * de NOTRE tranche dit si l'erreur est la nôtre.)
  */
 #define WAIT_MS   5000                  /* délai maximal d'une barrière */
 
@@ -16700,12 +16711,17 @@ static long a_clear(void *ctx, long mask, long c, long d, long e, long f, long g
  *
  * En FENÊTRE (Marble Blast : un tiers de chaque image dans cette attente), la
  * même écriture directe vise le rectangle de la surface à l'écran, tant que
- * rien ne la recouvre et que le curseur n'y est pas ; la mémoire de la fenêtre
- * est rafraîchie par un échange normal toutes les DIRECT_REFRESH images.
+ * rien ne la recouvre et que le curseur n'y bouge pas (cursor_moving : un
+ * curseur immobile n'empêche rien) ; la mémoire de la fenêtre est rafraîchie
+ * par un échange normal toutes les DIRECT_REFRESH images. Sous Quartz Extreme
+ * (29/10, D.qe), plein écran seulement : en fenêtre, l'image passe par
+ * l'échange (voie QE). Dans le WindowServer, l'écran est celui du client 2D du
+ * nub (ws_open) et POMPPC_GL_DIRECT n'est pas lue.
  *
  * Les symboles sont cherchés dans le processus (dlsym) : sans HIToolbox ou
  * CoreGraphics chargés, pas de présentation directe. POMPPC_GL_DIRECT=0 la
- * coupe, =f la limite au plein écran. Les conditions sont réévaluées toutes
+ * coupe, =f la limite au plein écran, =c l'admet sous un curseur qui bouge.
+ * Les conditions sont réévaluées toutes
  * les DIRECT_RECHECK images. */
 typedef struct { unsigned long hi, lo; } Psn;
 typedef struct { float x, y, w, h; } CgRect;     /* CGRect de Tiger (32 bits) */

@@ -90,8 +90,8 @@ viser des postes visibles dans ces profils.
 
 ## 3. Levier A : le chemin Begin/End (22/10, révision `20261022-beg`)
 
-Branche `worktree-agent-ad42beca86c281438`. Deux variables, éteintes par défaut
-(`BEGINVD_DEFAULT 0`, `LIGHTDIRTY_DEFAULT 0`), un mode `=2` de contrôle chacune, compteurs
+Branche `worktree-agent-ad42beca86c281438`. Deux variables, éteintes par défaut à la
+construction (`BEGINVD_DEFAULT 0`, `LIGHTDIRTY_DEFAULT 0` ; **allumées le 22/10 : §6**), un mode `=2` de contrôle chacune, compteurs
 sur la ligne `BEG` de la note (toutes les 500 images et à la destruction du contexte).
 Aucun changement de `qgpu_proto.h` ni de `qgpu_abi.h` : ni QEMU ni kext à reconstruire.
 
@@ -215,7 +215,8 @@ et `"l:QEMU_FAST=1 POMPPC_GL_LIGHTDIRTY=1"` dans la même campagne.
 ## 4. Levier B — l'échange de chaque image (22/10/2026)
 
 Plugin `20261022-swb`, branche `worktree-agent-a8afc67924706083b`. Cinq variables, toutes
-**éteintes par défaut** (`*_DEFAULT 0`). Ni `qgpu_proto.h` ni `qgpu_abi.h` ne changent :
+**éteintes par défaut** à la construction (`*_DEFAULT 0` ; **quatre allumées le 22/10, §6 —
+PRESENTQ reste à 0**). Ni `qgpu_proto.h` ni `qgpu_abi.h` ne changent :
 QEMU et le kext restent tels quels.
 
 ### 4.1 Où part le temps de l'échange
