@@ -189,7 +189,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 01/11/2026, 21 h (A/B `m4-bundle-0111` relancé, en attente de Time Machine)
+## 3. Mac M4 : état au 01/11/2026, fin de séance (A/B `m4-bundle-0111` interrompu par un redémarrage de l'hôte)
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
 - **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`
@@ -223,8 +223,15 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   §5 bis de `run-all.sh` en échec depuis le 29/10 (copies QE du kext, maintenant vérifiées par
   valeur), deux libellés du frontal, deux messages de `run_tiger.sh`. `tests/run-all.sh` :
   397 OK ; les 49 échecs sont des avertissements de shellcheck 0.11, tous présents avant.
-- **A/B relancé** à 21 h après la reconstruction (la chaîne avait été arrêtée pendant les
-  passes, aucune partie jouée ; dossiers vides rangés en `*.interrompu`).
+- **A/B relancé** après la reconstruction, puis **arrêté** à la demande de l'utilisateur
+  (redémarrage de l'hôte) ; VM éteinte proprement, verrou non touché. Joué en fenêtre seulement,
+  2 parties par bras (avant-3 interrompue, rangée en `.interrompu`) : **d3-fen 29,1 → 29,0
+  (−0,0 %)**, **mb-fen 6,0 → 6,2 (+2,5 %)** (`matabsum.py bench/tcg/ab/m4-bundle-0111-fen`).
+  PACKBITS ne se voit pas sur d3 au M4 ; mb-fen paie l'avis d'ombre (Terminal posé par la
+  matrice), moins que le +6 % du PC. **À reprendre** : 3ᵉ partie par bras en fenêtre, puis le
+  plein écran (mb-pe, cmr-pe) : `bench/tcg/ab/m4-bundle-0111-chaine.sh` (ranger d'abord
+  `m4-bundle-0111-fen` en `.partiel`). Puis `matab.sh --restore` si la chaîne ne finit pas.
+  Référence cmr-pe du M4 toujours à valider à l'œil.
 
 Ci-dessous, l'état du 30/10 (fusionné le 01/11 avec l'ancienne « 3 bis » du 29/10).
 
