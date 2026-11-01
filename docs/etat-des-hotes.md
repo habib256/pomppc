@@ -191,7 +191,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 01/11/2026, 23 h 13 (endurance en cours ; A/B ensuite, arrêt prévu le 02/11 à 6 h 40)
+## 3. Mac M4 : état au 01/11/2026, 23 h 37 (A/B en cours ; arrêt prévu le 02/11 à 6 h 40)
 
 **Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
 6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
@@ -258,9 +258,18 @@ des anciennes références**.
   suivante : Ctrl-C pendant l'écart initial, hors du `try`, laissait sa VM tourner. Instance
   isolée fermée proprement par ssh ; nettoyage du banc corrigé, quatre tests réussis et
   contrôle réel à deux instances prévues (seule la première démarre), aucun QEMU résiduel.
-  `docs/endurance.md` §16. **Jeux en cours** : `m4-ombre-0111n-jeux-corr`, mb/zen/ut/d3,
-  binaire reconstruit, `POLLNS` toujours éteint. Le premier essai `m4-ombre-0111n-jeux`
+  `docs/endurance.md` §16. **Jeux terminés** : `m4-ombre-0111n-jeux-corr`, 5 démarrages et 4 cycles mb/zen/ut/d3
+  sans incident, binaire `b8921ddf205e6b22`, `POLLNS` toujours éteint. Le premier essai `m4-ombre-0111n-jeux`
   interrompu n'est pas compté comme un cycle de jeu réussi.
+- **Tranche d'endurance close à 23 h 36** : 15 démarrages de contrôle et 4 cycles de jeu
+  sains (contrôle d'interruption séparé), base sans erreur à `qemu-img check`. Sources du
+  banc corrigé précisées dans les dossiers de campagnes (lancées avant le commit, HEAD du
+  rapport `aca7459`, code du banc ensuite committé `04574f7`). `endurance.md` §16.
+- **A/B neuf démarré à 23 h 36**, journal `.run/nuit-suite-0111.log` ; première barrière
+  calme, zéro QEMU, 0,48 cœur étranger. Barrière explicite sur agents externes, compilations,
+  autres campagnes d'endurance, Time Machine, puis `chargehote.py attendre`. Pilotage conservé
+  dans `bench/tcg/ab/pilotage-m4-0111n/`. Le frontal compilé à 18 h est à jour (aucun fichier
+  suivi plus récent) ; validation visuelle du curseur encore à faire.
 - **Tests après corrections : 405 OK, mêmes 49 signalements ShellCheck, 5 ignorés.**
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)

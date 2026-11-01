@@ -877,5 +877,25 @@ Contrôle réel `m4-ombre-0111n-interruption` : deux instances prévues, Ctrl-C 
 5 s pendant l'échelonnement ; seule la première démarre, finit son cycle et rend la main,
 code 0, **aucun QEMU résiduel**. Journal `bench/endurance/interruption-0111n-validation.log`.
 
-Suite en cours : `m4-ombre-0111n-jeux-corr`, quatre cycles (mb, zen, ut, d3), avec le banc
-corrigé et le QEMU reconstruit après le correctif de contrat de `POLLNS` (toujours éteint).
+[A] `m4-ombre-0111n-jeux-corr`, 23 h 11–23 h 36 : **5 démarrages (1 froid, 4 reboots)
+et 4 cycles de jeu, aucun incident**, binaire de 23 h 07 (`b8921ddf205e6b22`), correctif de
+contrat de `POLLNS` compilé et toujours éteint. SSH médian 20 s (15–20), charge max 4,6.
+Borne haute d'incident Wilson à 95 % : 43,4 % pour les démarrages, 49,0 % pour les jeux.
+
+| jeu | cycles sains | images du cycle |
+|---|---:|---:|
+| mb | 1/1 | 25 557 |
+| zen | 1/1 | 43 401 |
+| ut | 1/1 | 10 405 |
+| d3 | 1/1 | 22 723 |
+
+Le cinquième démarrage est celui effectué après le dernier jeu avant la clôture du banc.
+Avec les dix froids précédents : **15 démarrages de contrôle et 4 cycles de jeu sains** ;
+les contrôles d'interruption restent séparés de ces totaux. Le disque de base reste sans
+erreur à `qemu-img check` (`bench/endurance/base-ombre-0111n-check.txt`).
+
+Les campagnes de contrôle d'interruption et de jeux ont démarré sur les corrections du banc
+encore non committées : leur rapport garde donc le HEAD de lancement `aca7459`. Le code
+exécuté du banc est celui ensuite committé sous `04574f7` ; copie et empreinte dans
+`source-precision.json` et `endurance-source-04574f7.py` de leurs dossiers. Ne pas attribuer
+ces corrections au seul HEAD indiqué par le rapport.

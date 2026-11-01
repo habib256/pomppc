@@ -124,7 +124,8 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
      les chiffres du 30/10 précèdent cette correction. Le levier reste éteint.
   4. Parité de la zone froide (`tcg/0056`, saut long aarch64) en dernier : gain PC de 1-2 %
      sur un goulot L1i propre au PC.
-  5. Une tranche d'endurance avec le kext du 01/11, puis `etat-des-hotes.md`.
+  5. Tranche d'endurance du kext du 01/11 **faite dans la nuit** : 15 démarrages de contrôle
+     et 4 cycles mb/zen/ut/d3 sans incident (`endurance.md` §16), `etat-des-hotes.md` à jour.
   **Fermeture :** doc de profil M4, PACKBITS mesuré, A/B de chaque levier, `etat-des-hotes.md`.
 
 - [ ] **[Plugin — les deux hôtes] Alléger le plugin de l'invité, suite de PACKBITS**
