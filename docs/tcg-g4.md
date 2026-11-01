@@ -5759,3 +5759,67 @@ transition (+4,2 % contre +2,8 %), les trois parties x8 sont au-dessus des trois
 gagne plus. 0061 est **neutre** partout, ut compris : le −6,9 % de §45 ne se retrouve pas. Il
 garde aussi sa rafale non expliquée : abandonné. 0060, 0061 et 0062 restent hors de
 `build_qemu_qfb.sh`.
+
+## 47. Pourquoi cmr ralentit quand les autres accélèrent ; `tcg/0063` (`x-dbat-lite`), PC x86-64, 01/11 matin
+
+Question de l'utilisateur : cmr est le seul jeu que plusieurs leviers ralentissent (0060 x8 :
++4,2 % quand mb gagne 8,7 %), comme si son code était mauvais ou que le PGO ne le voyait pas.
+
+**1. Le PGO ne voit pas cmr.** `tools/tcg/pgo-train.sh` s'entraîne par défaut sur
+`JEUX="mb,zen,ut,d3"` en fenêtre ; le profil de `build-fast/` du 31/10 aussi
+(`bench/tcg/ab/pgo-train-20261031-0154`). cmr ne tourne qu'en plein écran, et le script ne prend
+qu'un mode. Les chemins chauds de cmr (vidages de BAT, recherche de blocs) sont donc rangés
+selon les autres jeux. Cela n'explique pas x8 : l'A/B du §46 opposait deux bras -O2 sans PGO.
+
+**2. cmr est le jeu le plus lié au plugin GL de l'invité.** Part du plugin dans le temps vCPU
+(profils `xprof-3110-mbzenutd3` et `xprof-0111-cmr`, répartis par l'adresse de chargement du plugin
+relevée dans `note.txt`) : ut 11 %, zen 12 %, mb 16 %, d3 22 %, **cmr 31 %**. Un levier du JIT
+n'agit que sur le reste. Le levier qui porte sur cmr est le plugin : `POMPPC_GL_PACKBITS`
+(`plugin-allegement.md` §8, cmr −3,5 %).
+
+**3. Les écritures de BAT : communes à tous les jeux, sans effet mesurable.** Relevé direct
+(diagnostic `POMPPC_BATSTAT`, hors série, `bench/tcg/ab/batstat-0111-*`) : débit par tranche de
+10 s et chaînes d'appel. Elles viennent toutes de `bcopy_physvir_32` (`hw_copypv_32`, `copypv`) :
+- `uiomove64` ← `memory_object_control_uiomove` ou `cluster_copy_upl_data` : les `read()` de
+  fichiers, une page à la fois ;
+- `IOMemoryDescriptor::writeBytes`.
+Chaque page pose DBAT0 ou DBAT1 sur son adresse physique puis l'efface. Débits : cmr 1 000-2 800/s
+en course, mb 600-1 850/s, zen 870-1 700/s, ut 1 300-1 750/s au jeu (20 000-27 000/s en
+chargement). Le débit de cmr n'a rien de singulier.
+
+QEMU d'origine vide à chaque écriture 32 pages du TLB dans tous les mmu_idx, et leurs groupes du
+cache de sauts. Or ces adresses (physiques prises comme virtuelles) tombent sur le code et les
+données du jeu. **`tcg/0063` `x-dbat-lite`** (`patches/tcg/0063-ppc-dbat-lite.patch`, posé sur
+0060-0062 comme `~/src/qemu-nuit`, éteint, non nommé) réduit ce vidage au strict nécessaire :
+- seuls les mmu_idx traduits où le BAT était valide sont vidés (1 si Vs, 0 si Vp) ;
+- l'ancien BAT est vidé avec son propre masque (corrige le défaut d'origine du §45) ;
+- le cache de sauts n'est pas vidé. C'est exact parce qu'en `x-dbat-lite`, une entrée remplie par
+  un DBAT perd `PAGE_EXEC` (`ppc_hash32_bat_lookup`) : aucun bloc n'est traduit à travers un DBAT.
+  Une instruction lue à cette adresse prend sa propre traduction (IBAT ou table des pages), ce
+  qui est plus juste que QEMU d'origine.
+
+Preuves :
+- **mb et zen** sous `TLBPVERIFY=16` et `RETVERIFY=1` (`dbat-0111-verif`) : 0 divergence (3,5 G
+  accès retraduits ; 2,7 G blocs vérifiés, 0 sans traduction).
+- **cmr sous les mêmes vérificateurs** (`dbat-0111-verif-cmr`) : 0 divergence (8,3 G accès), mais
+  **panique du noyau** sur le CPU 1. Pile : `port_name_to_semaphore` → `ipc_object_translate` →
+  `ipc_right_lookup_write` → verrou, puis `panic` : délai de verrou dépassé
+  (`panique-pile-cpu1.txt`, `panique-ecran.png`). Les vérificateurs ralentissent beaucoup les
+  vCPU, et le délai du noyau se compte sur la base de temps. Cause non tranchée : témoin sous
+  vérificateurs sans 0063 à jouer.
+- **A/B au repos sans vérificateur** : 3 sessions cmr lite, **aucune panique**, course atteinte.
+
+**A/B** (`bench/tcg/ab/dbat-0111-chaine.sh`, binaire -O2 unique, 3 parties sur cmr, 2 sur les
+autres) : cmr-pe en course ref 87,7 (87,7 / 83,9 / 88,1), lite 87,6 (85,1 / 87,6 / 88,7) :
+**neutre**. Les vidages de BAT ne freinent pas cmr, comme 0061 au §46. En fenêtre, 2 parties
+par bras (médianes, ms/image) : d3 87,3 → 84,7 (−3,0 %), mb 8,9 → 8,7 (−2,2 %), zen 5,1 → 5,1,
+**ut 41,0 → 42,5 (+3,7 %)**. Mitigé : **éteint**, non nommé.
+
+**Conclusion.** cmr n'est pas « codé avec les pieds ». C'est le jeu le plus lié au plugin GL de
+l'invité (31 % du vCPU), là où les leviers du JIT ont le moins de prise. Le profil PGO ne le voit
+pas, et la recherche de blocs coûte chez lui comme ailleurs. La perte sous x8 (+4,2 %) reste la
+seule singularité propre à cmr. Suites :
+- entraîner le PGO avec cmr (`pgo-train.sh` à étendre au plein écran par jeu) ;
+- continuer d'alléger le plugin sur cmr (`prog_params_arena`, `prog_sync`, `fbits` non mis en
+  ligne) ;
+- témoin sous vérificateurs sans 0063 avant de rejuger 0063.

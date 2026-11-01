@@ -1,0 +1,135 @@
+diff -ru a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+--- a/accel/tcg/cputlb.c	2026-11-01 04:44:12.483859065 +0400
++++ b/accel/tcg/cputlb.c	2026-11-01 04:46:33.377414782 +0400
+@@ -709,6 +709,24 @@
+     return -1;
+ }
+ 
++/*
++ * POMPPC tcg/0063: drop the pages [base, end) of @idxmap from the TLB under a
++ * single lock, leaving the jump cache alone (the caller knows the translation
++ * of no instruction changed).
++ */
++void pomppc_tlb_flush_range_nojc(CPUState *cpu, vaddr base, vaddr end,
++                                 MMUIdxMap idxmap)
++{
++    assert_cpu_is_self(cpu);
++    qemu_spin_lock(&cpu->neg.tlb.c.lock);
++    for (MMUIdxMap work = idxmap & cpu->neg.tlb.c.dirty; work; work &= work - 1) {
++        for (vaddr page = base; page != end; page += TARGET_PAGE_SIZE) {
++            tlb_flush_page_locked(cpu, ctz32(work), page);
++        }
++    }
++    qemu_spin_unlock(&cpu->neg.tlb.c.lock);
++}
++
+ void pomppc_jc_clear_page(CPUState *cpu, vaddr page)
+ {
+     tb_jmp_cache_clear_tb_page(cpu, page);      /* POMPPC tcg/0060 */
+diff -ru a/include/exec/cputlb.h b/include/exec/cputlb.h
+--- a/include/exec/cputlb.h	2026-11-01 04:44:12.487893409 +0400
++++ b/include/exec/cputlb.h	2026-11-01 04:46:33.382355617 +0400
+@@ -158,6 +158,9 @@
+ size_t pomppc_tlb_flush_match(CPUState *cpu, MMUIdxMap idxmap,
+                               PomppcTlbMatch match, uint64_t arg, uint16_t cls,
+                               bool jc);
++/* POMPPC tcg/0063: the pages [base, end) of @idxmap, jump cache untouched */
++void pomppc_tlb_flush_range_nojc(CPUState *cpu, vaddr base, vaddr end,
++                                 MMUIdxMap idxmap);
+ /* POMPPC tcg/0031: the jump cache entries of @page, as tlb_flush_page drops */
+ void pomppc_jc_clear_page(CPUState *cpu, vaddr page);
+ 
+diff -ru a/target/ppc/cpu.h b/target/ppc/cpu.h
+--- a/target/ppc/cpu.h	2026-11-01 04:44:12.492038824 +0400
++++ b/target/ppc/cpu.h	2026-11-01 04:46:33.386343472 +0400
+@@ -1725,6 +1725,7 @@
+      * new value's: clearing a 256 MiB BAT to 0 flushed its first 128 KiB).
+      */
+     bool bat_old_mask;
++    bool dbat_lite;                 /* POMPPC tcg/0063, x-dbat-lite */
+     uint32_t bat_trunc_log;
+     uint32_t irq_seq;
+     /*
+diff -ru a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+--- a/target/ppc/cpu_init.c	2026-11-01 04:44:12.496377854 +0400
++++ b/target/ppc/cpu_init.c	2026-11-01 04:46:33.390689229 +0400
+@@ -211,6 +211,7 @@
+      * default.
+      */
+     DEFINE_PROP_BOOL("x-bat-old-mask", PowerPCCPU, env.bat_old_mask, false),
++    DEFINE_PROP_BOOL("x-dbat-lite", PowerPCCPU, env.dbat_lite, false),
+     /*
+      * AltiVec vaddfp/vsubfp/vmaddfp/vnmsubfp: the four lanes at once on the
+      * host FPU when softfloat's hardfloat path would take each of them
+diff -ru a/target/ppc/mmu-hash32.c b/target/ppc/mmu-hash32.c
+--- a/target/ppc/mmu-hash32.c	2026-11-01 04:46:22.050332716 +0400
++++ b/target/ppc/mmu-hash32.c	2026-11-01 04:46:33.398957610 +0400
+@@ -80,6 +80,16 @@
+             hwaddr raddr = (batl & mask) | (ea & ~mask);
+ 
+             *prot = ppc_hash32_bat_prot(batu, batl);
++            /*
++             * POMPPC tcg/0063 x-dbat-lite: an entry filled through a data
++             * BAT is not executable, so no block is ever translated through
++             * one, and a data BAT write need not clear the jump cache (an
++             * instruction fetch there takes its own, IBAT or page table,
++             * translation instead of the data BAT's, as on the G4).
++             */
++            if (!ifetch && env->dbat_lite) {
++                *prot &= ~PAGE_EXEC;
++            }
+ 
+             return raddr & TARGET_PAGE_MASK;
+         }
+diff -ru a/target/ppc/mmu_helper.c b/target/ppc/mmu_helper.c
+--- a/target/ppc/mmu_helper.c	2026-11-01 04:44:12.500480525 +0400
++++ b/target/ppc/mmu_helper.c	2026-11-01 04:46:33.394894429 +0400
+@@ -262,12 +262,47 @@
+     env->IBAT[1][nr] = value;
+ }
+ 
++/*
++ * POMPPC tcg/0063 x-dbat-lite: the pages a data BAT translated, flushed from
++ * the translated mmu_idx it was valid in only (1: supervisor, Vs; 0: user,
++ * Vp; a real-mode mmu_idx never goes through a BAT), at that BAT's own size,
++ * and without the jump cache: a data BAT translates no instruction fetch.
++ * bcopy_physvir_32 of the Tiger kernel (copypv, each page of a read()) sets
++ * DBAT0/1 then clears them, ~2 000 times/s in Colin McRae: the stock flush
++ * dropped the user pages and jump cache groups at those addresses.
++ */
++static void do_invalidate_dbat_lite(CPUPPCState *env, target_ulong BATu)
++{
++    MMUIdxMap idxmap = ((BATu & 2) ? 2 : 0) | ((BATu & 1) ? 1 : 0);
++    target_ulong mask = (BATu << 15) & 0x0FFE0000UL;
++    target_ulong base = BATu & ~0x0001FFFFUL & ~mask;
++
++    if (!idxmap) {
++        return;
++    }
++    if ((mask + 0x00020000) >> TARGET_PAGE_BITS > 64) {
++        tlb_flush_by_mmuidx(env_cpu(env), idxmap);
++        return;
++    }
++    env->ms[PPC_MS_BAT_PAGES] += env->mem_stats;
++    pomppc_tlb_flush_range_nojc(env_cpu(env), base, base + mask + 0x00020000,
++                                idxmap);
++}
++
+ void helper_store_dbatu(CPUPPCState *env, uint32_t nr, target_ulong value)
+ {
+     target_ulong mask;
+ 
+     dump_store_bat(env, 'D', 0, nr, value);
+-    if (env->DBAT[0][nr] != value) {
++    if (env->DBAT[0][nr] != value && env->dbat_lite) {
++        do_invalidate_dbat_lite(env, env->DBAT[0][nr]);
++        mask = (value << 15) & 0x0FFE0000UL;
++        env->DBAT[0][nr] = (value & 0x00001FFFUL) |
++            (value & ~0x0001FFFFUL & ~mask);
++        env->DBAT[1][nr] = (env->DBAT[1][nr] & 0x0000007B) |
++            (env->DBAT[1][nr] & ~0x0001FFFF & ~mask);
++        do_invalidate_dbat_lite(env, env->DBAT[0][nr]);
++    } else if (env->DBAT[0][nr] != value) {
+         /*
+          * When storing valid upper BAT, mask BEPI and BRPN and
+          * invalidate all TLBs covered by this BAT

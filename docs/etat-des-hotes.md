@@ -34,7 +34,50 @@ Au début d'une séance :
 - Les commits vont sur `main` puis sont poussés. Un essai non retenu est rangé sous une
   étiquette `archive/*`.
 
-## 2. PC x86-64 : état au 31/10/2026, 23 h
+## 2. PC x86-64 : état au 01/11/2026, 6 h 50 (VM quotidienne relancée sur le binaire rapide)
+
+**Fait dans la nuit du 31/10 au 01/11** (objectif de l'utilisateur : vitesse x86 jusqu'à 7 h)
+- **Fenêtre de cmr** : depuis le 28/10, le PC mesurait une transition d'avant la course, pas la
+  course (`6054367`, `vitesse-doom3-x86.md` §25). En course, la production fait ~82 ms/image.
+  Le « 16 bits ×2 » du 31/10 n'était que cette différence de phase : **point clos**.
+- **0060 et 0061 rejoués en course** (`tcg-g4.md` §46) : x8 cmr +4,2 % (éteint), 0061 neutre
+  partout (abandonné). `tcg/0062` `x-bat-old-mask` (diagnostic du masque d'origine) écrit,
+  éteint, non nommé.
+- **Plugin `POMPPC_GL_PACKBITS` allumé** (révision `20261101-packbits`, `plugin-allegement.md`
+  §8) : bornage des flottants sur leurs bits, octets par table ; plugmd5 69 scènes 0 écart ; A/B
+  d3 −3,9 %, ut −4,5 %, zen −4,2 %, mb −1,2 %, cmr −3,5 %. Installé dans la VM quotidienne ;
+  `disks/prebuilt` mis à jour (l'ancien bundle dans `bench/packbits-0111/`). **Le M4 le reçoit
+  avec le bundle** (code de l'invité, rien à porter).
+- **Pourquoi cmr ralentit** (question de l'utilisateur, `tcg-g4.md` §47) :
+  - le plugin GL fait 31 % de son vCPU, contre 11-22 % ailleurs ;
+  - le PGO n'est entraîné que sur mb, zen, ut, d3 ;
+  - les écritures de BAT (`copypv` des `read()`) sont communes à tous les jeux.
+  `tcg/0063` `x-dbat-lite` (vidage d'un DBAT réduit à son mmu_idx, sans cache de sauts) est
+  écrit et prouvé sans divergence. Il est **neutre sur cmr**, mitigé ailleurs (d3 −3 %, ut +3,7 %), et une session cmr sous
+  vérificateurs a fini en **panique noyau** (délai de verrou) : éteint, non nommé.
+- Arbre de mesure `~/src/qemu-nuit/build-x` : série + 0060-0063, tout éteint, -O2. La source de
+  `target/ppc/mmu_helper.c` y est sans le diagnostic `POMPPC_BATSTAT` ; son diff est dans le
+  scratchpad de la séance, à remettre au besoin.
+
+**Vitesse** (binaire rapide, plugin packbits) : DOOM 3 ~78-80 ms/image en fenêtre, Colin McRae
+~82 ms/image **en course** (plein écran).
+
+**À faire sur le PC, dans l'ordre**
+0. Valider la référence cmr-pe (`matrice.py --valider cmr-pe`), regarder les captures de
+   `bench/tcg/ab/cmr-res-3110/`.
+1. PGO avec cmr : étendre `tools/tcg/pgo-train.sh` à un mode par jeu (cmr en plein écran),
+   réentraîner `build-fast/`, A/B sur la matrice.
+2. Plugin sur cmr, suite de PACKBITS : `prog_params_arena`, `prog_sync`, `prog_state`, `fbits` non
+   mis en ligne (profil `xprof-0111-cmr`) ; nouveau profil de la course avec le plugin packbits.
+3. `tcg/0063` : témoin sous `TLBPVERIFY=16 RETVERIFY=1` **sans** 0063 sur cmr. La panique de
+   délai de verrou vient-elle des vérificateurs ? A/B en fenêtre mitigé (d3 −3,0 %, mb −2,2 %,
+   ut +3,7 %, 2 parties) : à rejouer à 3 parties si le témoin innocente 0063.
+4. x8 (0060) : la seule perte propre à cmr qui reste ; à instruire après le point 1.
+5. Base de temps en ligne (`mftb` sans helper), gain modeste attendu.
+6. Effacer `~/src/qemu-jcp/` et `~/src/qemu-bat/` (0060-0062 tranchés, `qemu-nuit` les contient).
+
+
+## 2 bis. PC x86-64 : état au 31/10/2026, 23 h
 
 **Fait le 31/10, soir** (`docs/tcg-g4.md` §45)
 - `tcg/0061` (`x-bat-skip`) construit dans `~/src/qemu-bat/build-x` (série + 0061, -O2) et mesuré
