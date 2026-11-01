@@ -298,8 +298,7 @@
 #define QGPU_CAP_TEX_PRESENT    0x00200000
 /* 29/10 (Quartz Extreme P3) : l'HÔTE recommande Quartz Extreme (propriété
    `qe` du device, posée par run_tiger.sh là où QE est prouvé : Darwin:arm64
-   au 29/10, Linux x86-64 au 30/10). Le kext en personnalité « auto » (le
-   défaut d'install.sh) publie
+   au 29/10). Le kext en personnalité « auto » (le défaut d'install.sh) publie
    alors AccelCaps ; QE=1 / QE=0 à l'installation forcent. Bit du DEVICE, pas
    du cœur ; ajouté sans changer QGPU_PROTO_VERSION. */
 #define QGPU_CAP_QE_DEFAULT     0x00400000

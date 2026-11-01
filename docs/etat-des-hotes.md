@@ -63,13 +63,17 @@ cette liste ; la séance suivante se fait sur le M4)
 - **`POMPPC_GL_PRESENTQ` rouvert** (demande de l'utilisateur) : A/B au repos en plein écran
   lancé à 13 h 28 (`bench/tcg/ab/presentq-0111-{cmr,mb,ut}`, 3 parties par bras), **en cours** ;
   verdict et suite dans `TODO.md` (« Ensuite », PRESENTQ). Code de l'invité : s'il est allumé,
-  le M4 le reçoit avec le bundle. **Chaîne coupée à 14 h 05** (le PC est éteint à 14 h 20) :
-  seul le volet cmr (`presentq-0111-cmr`, 3 parties par bras) va au bout ; mb et ut en plein
-  écran n'ont pas été joués, et le `--restore` final n'a pas tourné (aucune VM ne doit tourner
-  à l'arrêt). **Au retour sur le PC** : lire `presentq-0111-cmr/bilan.txt`, rejouer mb pe et ut
-  pe au repos (`bench/tcg/ab/presentq-0111-chaine.sh`, sans la ligne cmr), trancher PRESENTQ
-  (règle dans le TODO), noter ici et dans `plugin-allegement.md` ; relancer la VM quotidienne
-  avec `./run_tiger.sh`.
+  le M4 le reçoit avec le bundle. **A/B RATÉ, à rejouer entièrement au retour sur le PC** :
+  les 5 parties jouées (13 h 28-14 h 17) ont toutes fini « pas de ssh » parce que le binaire
+  rapide a été **refusé** : « construit sur une autre série de patches » (`run_tiger.log` des
+  parties). Cause : à 12 h 55 j'avais retouché un **commentaire** de `patches/qgpu/qgpu_proto.h`,
+  et l'empreinte de la série (`scripts/qemu_fast.sh`) hache le contenu de chaque fichier de
+  `patches/` nommé par `build_qemu_qfb.sh`, commentaires compris. Remis à l'identique à 14 h 20
+  (empreinte `5ad32b79ece3943b` retrouvée = `build-fast/pomppc-build.txt`). **Règle apprise : ne
+  pas toucher un fichier de `patches/`, même un commentaire, tant que le binaire rapide n'est
+  pas reconstruit.** Chaîne arrêtée, aucune VM ne tourne. Au retour : `bench/tcg/ab/presentq-0111-chaine.sh`
+  au repos (cmr, mb, ut pe), trancher PRESENTQ (règle dans le TODO), relancer la VM avec
+  `./run_tiger.sh`.
 - **Dérive de documentation nettoyée en deux passes** (huit agents Opus, `633c444`, `634797b`) :
   voir les messages de commit ; questions laissées ouvertes dans le TODO et les notes datées.
 - **Branche `worktree-agent-a15011a76631abd6f` (x-tb-head) non fusionnée** : elle ajoute un
