@@ -849,3 +849,33 @@ la fenêtre de mesure de ces parties tombait sur la transition d'avant la course
 zone froide, il compte 20 parties pilotées, dont 6 cold de la chasse et 8 de l'A/B du profil PGO,
 zone froide dans les deux bras. Bilan : **1 gel en 20 parties, aucun dans les 17 qui ont suivi
 le gel**.
+
+## 16. M4, nuit du 01 au 02/11 : bundle `20261101-ombre` et arrêt du banc
+
+Base fraîche `disks/tiger-endurance-m4-ombre-0111n.qcow2`, clone APFS de la quotidienne
+arrêtée, sous verrou, ensuite mise en lecture seule. Kext du 01/11, plugin `20261101-ombre`
+et GA ; noyau 10.4.11 copié dans `bench/endurance/invite-10.4.11-nuit/`.
+Provenance : `bench/endurance/base-ombre-0111n.json`.
+
+[A] `m4-ombre-0111n-dem`, 22 h 57–23 h 05 : **10 démarrages à froid, 0 incident**,
+une instance, défauts du lanceur, QEMU de 22 h 31 (`977c844cd5d8b18b`). SSH à 15 s dans
+chaque cycle ; charge max 4,7. Borne haute d'incident Wilson à 95 % : **27,8 %**.
+Le début tourne avec un autre agent actif sur l'hôte ; aucun A/B de vitesse n'en est tiré.
+
+**Défaut du banc reproduit à l'arrêt de la phase de jeu suivante.** `lance_instances` attendait
+l'écart entre départs avant d'entrer dans son `try`, même avec une seule instance. Un Ctrl-C
+pendant ces 60 s terminait le processus principal (`KeyboardInterrupt`), sans laisser le
+`finally` du travailleur fermer sa VM. Instance résiduelle fermée par ssh (`shutdown -h now`),
+sans toucher au disque quotidien ni supprimer de verrou. Journaux de ce premier essai :
+`.run/endurance-nuit-0111.log`, `bench/endurance/m4-ombre-0111n-jeux/` ; aucun cycle de jeu
+achevé n'est revendiqué pour cet essai.
+
+**Corrigé** : protéger aussi les lancements et leur échelonnement, attendre seulement entre
+deux départs, signaler l'arrêt aux travailleurs actifs et joindre tous ceux qui ont réellement
+démarré, y compris en cas d'échec de lancement. Quatre tests hors VM passent.
+Contrôle réel `m4-ombre-0111n-interruption` : deux instances prévues, Ctrl-C envoyé après
+5 s pendant l'échelonnement ; seule la première démarre, finit son cycle et rend la main,
+code 0, **aucun QEMU résiduel**. Journal `bench/endurance/interruption-0111n-validation.log`.
+
+Suite en cours : `m4-ombre-0111n-jeux-corr`, quatre cycles (mb, zen, ut, d3), avec le banc
+corrigé et le QEMU reconstruit après le correctif de contrat de `POLLNS` (toujours éteint).

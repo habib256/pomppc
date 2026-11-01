@@ -5583,6 +5583,27 @@ réveille plus souvent et prend le verrou global plus souvent, en concurrence av
 `select` que pour les délais courts, ou seulement le reste sous la milliseconde ; profiler UT
 (`sample`) pour vérifier la piste du verrou.
 
+### 42.1 Contrat de `g_poll` corrigé le 01/11 au soir
+
+[A] M4, glib 2.90.1, `tools/tcg/pollnsproof.py` : le chemin `select` de 0058 présentait
+quatre écarts avec le `g_poll` réellement lié sur cet hôte. Un socket prêt en lecture et en
+écriture rend 2 pour `g_poll`, contre 1 pour 0058 ; deux entrées du même pipe prêt rendent 1,
+contre 2. `revents` était aussi effacé avant un délai expiré ou le repli pour un fd trop
+grand, alors que `g_poll` le laisse intact dans ces cas.
+
+`tcg/fixes/0058-poll-ns-contract.patch`, nommé par le constructeur, conserve le compte de
+`select` et ne modifie `revents` qu'après son retour positif. Le défaut reste **éteint**.
+Preuve compilée depuis les fonctions réelles de `qemu-timer.c`, sur de vrais pipes et sockets :
+14 cas en environnement absent, 14 avec `=0`, 14 avec `=1`, zéro écart après correction.
+Deux mutants réintroduisent séparément le recomptage et l'effacement anticipé : chacun
+détecté par les deux cas attendus. Les sondes vérifient aussi les délais nul/infini,
+les frontières de la milliseconde, les fd ignorés, le repli et les erreurs.
+
+Reproduction : `python3 tools/tcg/pollnsproof.py [QEMU_SRC]` (macOS, glib de développement).
+Journaux : `bench/tcg/pollns-contract-0111/`. QEMU reconstruit à 23 h 08, contrôle de capacités
+complet. Ces contrôles ne mesurent pas la vitesse et n'expliquent pas la perte d'UT du 30/10 ;
+son A/B porte le code d'avant et reste à rejouer avant toute décision d'allumage.
+
 ## 43. vperm en une opération vectorielle : `tcg/0059` (`x-vperm-inline`), PC x86-64, 30/10
 
 **Idée.** `vperm` passe aujourd'hui par un helper (`x-vperm-fast`, table, allumé depuis le

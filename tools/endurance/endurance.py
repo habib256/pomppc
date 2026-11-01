@@ -1485,17 +1485,23 @@ def instance_jeu(camp, slot, jeux):
 
 def lance_instances(camp, cible, slots, ecart, *extra):
     fils = [threading.Thread(target=cible, args=(camp, s) + extra, daemon=True) for s in slots]
-    for f in fils:
-        f.start()
-        time.sleep(ecart)          # décale les démarrages
     try:
+        for i, f in enumerate(fils):
+            f.start()
+            if i + 1 < len(fils):
+                time.sleep(ecart)  # entre deux départs, jamais après le dernier
         while any(f.is_alive() for f in fils):
             time.sleep(2)
     except KeyboardInterrupt:
         camp.arret = True
         journal("arrêt demandé : les instances finissent leur cycle")
+    except BaseException:
+        camp.arret = True
+        raise
+    finally:
         for f in fils:
-            f.join()
+            if f.ident is not None:  # Ctrl-C peut précéder le départ des suivants
+                f.join()            # laisse le finally de l'instance fermer sa VM
     print(rapport(camp.dir))
 
 

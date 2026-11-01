@@ -9,6 +9,15 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **M4 : contrat du chemin d'attente expérimental corrigé, 01/11 nuit.** `tcg/fixes/0058`
+  garde le compte de `select` et préserve `revents` au retour nul/erreur, comme `g_poll`
+  de l'hôte. Reproduction de quatre écarts avant, 42 cas sans écart après, deux mutants
+  détectés (`tools/tcg/pollnsproof.*`, `docs/tcg-g4.md` §42.1). Aucun allumage.
+- **Endurance : Ctrl-C pendant les lancements ferme les VM, 01/11 nuit.** L'attente
+  d'échelonnement était hors du gestionnaire d'interruption ; une VM restait vivante.
+  Lancements et nettoyage protégés, attente seulement entre deux départs, travailleurs
+  démarrés joints. Quatre tests et une interruption réelle à deux instances prévues,
+  zéro QEMU résiduel (`docs/endurance.md` §16).
 - **M4 : six preuves d'image renouvelées, 01/11 nuit.** Après constat de l'absence des
   artefacts locaux, références neuves regardées et validées : mb/zen/d3/ut en fenêtre,
   mb/cmr en plein écran. Six cellules vertes, zéro repli ; cmr en course en 1920×1080 sans

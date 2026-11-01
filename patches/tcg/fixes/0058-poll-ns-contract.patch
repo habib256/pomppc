@@ -1,0 +1,42 @@
+POMPPC tcg/0058 : garder le contrat de g_poll dans le chemin select macOS
+
+[A] Mac M4, glib 2.90.1, tools/tcg/pollnsproof.py, 01/11/2026 : g_poll
+rend le compte de select (un socket IN+OUT vaut 2 ; deux entrées du même
+pipe valent 1), et laisse revents intact quand select rend zéro ou une
+erreur. Le chemin expérimental recomptait les entrées et effaçait revents
+avant le select ou le repli g_poll : quatre écarts sur quatorze cas.
+Ne rien modifier avant le retour positif, conserver le compte de select.
+Pas d'allumage : POMPPC_POLL_NS reste éteint par défaut.
+
+--- a/util/qemu-timer.c
++++ b/util/qemu-timer.c
+@@ -356,7 +356,6 @@
+     for (guint i = 0; i < nfds; i++) {
+         int fd = fds[i].fd;
+ 
+-        fds[i].revents = 0;
+         if (fd < 0) {
+             continue;
+         }
+@@ -381,10 +380,12 @@
+     if (r <= 0) {
+         return r;
+     }
+-    r = 0;
++    /* g_poll rend le compte de select (bits prêts, pas entrées de fds),
++     * et ne touche revents qu'après un retour positif. */
+     for (guint i = 0; i < nfds; i++) {
+         int fd = fds[i].fd;
+ 
++        fds[i].revents = 0;
+         if (fd < 0) {
+             continue;
+         }
+@@ -397,7 +398,6 @@
+         if (FD_ISSET(fd, &ex)) {
+             fds[i].revents |= G_IO_PRI;
+         }
+-        r += fds[i].revents != 0;
+     }
+     return r;
+ }

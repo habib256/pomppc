@@ -1194,6 +1194,11 @@ TCG52_MARKERS
     echo "▶ patch : attente à la microseconde sur macOS (POMPPC_POLL_NS, tcg/0058)"
     patch_strict "$ROOT/patches/tcg/0058-poll-ns-macos.patch"
   fi
+  # Contrat de g_poll : compte de select et revents inchangé au retour nul/erreur.
+  if grep -Fq 'r += fds[i].revents != 0;' util/qemu-timer.c; then
+    echo "▶ correctif : contrat de g_poll (tcg/fixes/0058)"
+    patch_strict "$ROOT/patches/tcg/fixes/0058-poll-ns-contract.patch"
+  fi
   # tcg/0059 : x-vperm-inline, vperm en une opération vectorielle (PSHUFB sur x86).
   if ! grep -q "x-vperm-inline" target/ppc/cpu_init.c; then
     echo "▶ patch TCG : vperm en ligne (x-vperm-inline, tcg/0059)"

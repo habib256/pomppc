@@ -67,11 +67,21 @@ if python3 tests/frame_report_test.py; then ok "frame-time report"; else ko "fra
 if python3 tests/flyby_report_test.py; then ok "fixed-step flyby report"; else ko "fixed-step flyby report"; fi
 if python3 tests/matrice_test.py >/dev/null; then ok "matrice de jeux : règles de scène, ppmcmp"; else ko "matrice de jeux (python3 tests/matrice_test.py)"; fi
 if python3 tests/endurance_memory_test.py; then ok "endurance : collecte RAM"; else ko "endurance : collecte RAM"; fi
+if python3 tests/endurance_launch_test.py; then ok "endurance : arrêt pendant le lancement"; else ko "endurance : arrêt pendant le lancement"; fi
 if python3 tests/threadbusy_test.py; then ok "sample hôte : coûts et attentes par fil"; else ko "sample hôte : coûts et attentes par fil"; fi
 if python3 tests/machonm_stubs_test.py; then ok "Mach-O ppc : symboles indirects"; else ko "Mach-O ppc : symboles indirects"; fi
 if python3 tests/tiger_launcher_test.py; then ok "lanceur Tiger ImGuiDock"; else ko "lanceur Tiger ImGuiDock"; fi
 if python3 tests/os9_cpu_test.py; then ok "profils CPU OS 9"; else ko "profils CPU OS 9"; fi
 if python3 tests/chime_extract_test.py; then ok "extraction carillon G4"; else ko "extraction carillon G4"; fi
+POLLNS_SRC="${QEMU_SRC:-${HOME:-}/src/qemu}"
+if [ "$(uname -s)" = Darwin ] && command -v cc >/dev/null 2>&1 &&
+   command -v pkg-config >/dev/null 2>&1 && pkg-config --exists glib-2.0 &&
+   [ -f "$POLLNS_SRC/util/qemu-timer.c" ] &&
+   grep -q POMPPC_POLL_NS "$POLLNS_SRC/util/qemu-timer.c"; then
+  if python3 tools/tcg/pollnsproof.py "$POLLNS_SRC"; then ok "POLLNS : contrat de g_poll"; else ko "POLLNS : contrat de g_poll"; fi
+else
+  noop "POLLNS : macOS, glib de développement et arbre QEMU tcg/0058 requis"
+fi
 if python3 tests/screamer_audio_test.py; then ok "Screamer et profil audio stable"; else ko "Screamer et profil audio stable"; fi
 if [ -x frontend/build/pointer_test ]; then
   if frontend/build/pointer_test; then ok "souris fenêtre/plein écran"; else ko "souris fenêtre/plein écran"; fi

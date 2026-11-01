@@ -191,7 +191,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 01/11/2026, 22 h 54 (six preuves vertes, A/B en attente de repos ; arrêt prévu le 02/11 à 6 h 40)
+## 3. Mac M4 : état au 01/11/2026, 23 h 13 (endurance en cours ; A/B ensuite, arrêt prévu le 02/11 à 6 h 40)
 
 **Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
 6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
@@ -208,7 +208,8 @@ des anciennes références**.
   0,03 / 0,02 %. Nouvelle référence regardée (bille au départ de gems.mis) et validée ;
   ancien enregistrement conservé dans l'historique Git.
 - Campagnes **neuves prévues** `m4-bundle-0111n-{fen,pe}`, puis `m4-profils-0111n-{fen,pe}` par
-  `.run/chaine-nuit-0111.sh` (journal `.run/chaine-nuit-0111.log`). Trois bras entrelacés :
+  `.run/chaine-nuit-0111.sh`, après les jeux du banc (`.run/nuit-suite-0111.sh`, journal
+  `.run/nuit-suite-0111.log`). Trois bras entrelacés :
   `avant` (PACKBITS=0, QE_NONSIMPLE=0), `bits` (1,0), `actuel` (1,1) ; trois parties par bras,
   mb/zen/ut/d3 en fenêtre, mb/cmr en plein écran. PACKBITS est ainsi séparé du coût de l'avis
   d'ombre. Barrière `chargehote.py attendre` et relevé continu de charge ; Time Machine arrêté.
@@ -245,6 +246,22 @@ des anciennes références**.
 - Contrôle général après les outils : 400 OK, mêmes 49 signalements ShellCheck qu'au départ,
   5 ignorés ; nouveau test Mach-O exécuté et compilé séparément (non encore indexé lors du
   parcours `git ls-files` du harnais).
+
+- **Contrat de 0058 corrigé**, sans allumage : `tcg/fixes/0058-poll-ns-contract.patch`,
+  nommé par le constructeur. Quatre écarts reproduits contre `g_poll` de glib 2.90.1 sur
+  ce M4 ; 42 cas sans écart après, deux mutants détectés (`pollnsproof.*`, `tcg-g4.md` §42.1).
+  QEMU reconstruit, capacités complètes (`.run/build-pollns-contract-0111.log`), fonctions
+  réellement construites recontrôlées. L'empreinte de la série change : le PC reconstruit
+  toujours `build/` et `build-fast/` à son retour, même si ce chemin n'y est pas compilé.
+- **Endurance : 10 démarrages froids sans incident** (22 h 57–23 h 05, binaire de 22 h 31,
+  `977c844cd5d8b18b`, bundle ombre). Défaut du banc découvert à l'interruption de la phase
+  suivante : Ctrl-C pendant l'écart initial, hors du `try`, laissait sa VM tourner. Instance
+  isolée fermée proprement par ssh ; nettoyage du banc corrigé, quatre tests réussis et
+  contrôle réel à deux instances prévues (seule la première démarre), aucun QEMU résiduel.
+  `docs/endurance.md` §16. **Jeux en cours** : `m4-ombre-0111n-jeux-corr`, mb/zen/ut/d3,
+  binaire reconstruit, `POLLNS` toujours éteint. Le premier essai `m4-ombre-0111n-jeux`
+  interrompu n'est pas compté comme un cycle de jeu réussi.
+- **Tests après corrections : 405 OK, mêmes 49 signalements ShellCheck, 5 ignorés.**
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
 - **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`
@@ -298,8 +315,9 @@ allumé depuis le 29/10 (`c792464` : `run_tiger.sh` pose `qe=on`, `QE=0` l'étei
 personnalité « auto » le suit). `tcg/0057`, `0058` compilés, éteints ; `x-tcg-cold` (`0056`)
 compilé, sans effet sur arm64.
 
-**Binaire et VM quotidienne** : depuis le 01/11, `~/src/qemu/build` sur `a0e028e` (série
-jusqu'à `0059` et `0064`), kext du 01/11 et plugin `20261101-ombre` (voir ci-dessus).
+**Binaire et VM quotidienne** : `~/src/qemu/build` reconstruit dans la nuit du 01 au 02/11
+(série jusqu'à `0059` et `0064`, plus le correctif de contrat de 0058, éteint) ; kext du 01/11
+et plugin `20261101-ombre` (voir ci-dessus).
 
 **Fait le 30/10**
 - **Émulateurs voisins, A/B au repos** (`docs/tcg-g4.md` §42, 4 parties par bras, mb zen ut
