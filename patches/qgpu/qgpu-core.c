@@ -6,7 +6,10 @@
  * Règle : TOUTE validation se fait ici, une fois, avant d'appeler le backend.
  * Un flux invalide s'arrête à la première commande fautive ; les commandes
  * précédentes restent appliquées (pas de transaction), et status_pc désigne
- * la fautive pour que l'invité puisse la retrouver.
+ * la fautive pour que l'invité puisse la retrouver. Exceptions, qui ne
+ * coûtent que la commande (qgpu_core_execute) : un BAD_ARG d'un opcode de
+ * dessin, de PROG_STRING ou de GLSL_LINK (draw_op, H4), et tout NO_MEM
+ * (plafond mémoire, 29/09) ; la première de ces fautes est rendue.
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  */
@@ -4969,7 +4972,7 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         p->local_dirty = true;             /* un nouvel objet hôte repart de zéro */
         if (!c->be->prog_string(c, p)) {
             /* Refus du compilateur de l'hôte : BAD_ARG NON FATAL (cf.
-               soft_fail_op) et programme cassé jusqu'au prochain texte. */
+               draw_op) et programme cassé jusqu'au prochain texte. */
             p->broken = true;
             TRACE(c, "  programme %u refusé par l'hôte", a[0]);
             return QGPU_ST_BAD_ARG;
@@ -5486,10 +5489,11 @@ static bool known_op(uint32_t op)
     }
 }
 
-/* Les opcodes de DESSIN : 0x0030–0x0036 sont contigus, plus les trois chemins
-   bruts (v18 : DRAW_NATIVE, dont TOUS les refus sont des BAD_ARG). Seuls ceux-là — et, v16, PROG_STRING, dont le refus par le
-   compilateur de l'hôte ne met pas la suite du flux en doute — ont droit à un
-   BAD_ARG non fatal (cf. ci-dessous). */
+/* Les opcodes de DESSIN : 0x0030–0x0036 sont contigus, plus les quatre chemins
+   bruts (DRAW_RAW, DRAW_RAW_BUF, DRAW_RAW_SANE, et v18 DRAW_NATIVE, dont TOUS
+   les refus sont des BAD_ARG). Seuls ceux-là — et PROG_STRING (v16) et
+   GLSL_LINK (v21), dont le refus par le compilateur de l'hôte ne met pas la
+   suite du flux en doute — ont droit à un BAD_ARG non fatal (cf. ci-dessous). */
 static bool draw_op(uint32_t op)
 {
     return (op >= QGPU_OP_DRAW_TRIANGLES && op <= QGPU_OP_DRAW_TRIANGLES_SEC) ||

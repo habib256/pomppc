@@ -132,8 +132,8 @@ qemu_machine_has() {
 }
 
 # Le GPU paravirtuel a-t-il une CIBLE DE PRÉSENTATION ? Le device ne tient
-# SURF_PRESENT (v13) que s'il a trouvé un écran où écrire : qfb-pci, sinon le
-# framebuffer VGA de la machine. Sans cible, QGPU_CAP_SCANOUT manque et l'invité
+# SURF_PRESENT (v13) que s'il a trouvé un écran où écrire : en `scanout=auto`,
+# le framebuffer VGA de la machine d'abord, qfb-pci sinon (qgpu_probe_scanout). Sans cible, QGPU_CAP_SCANOUT manque et l'invité
 # relit chaque image pour la recopier lui-même — soit 10 % de débit en moins sur
 # un jeu. Le device était présent, la version bonne, les tests natifs verts, et
 # ça n'a été découvert qu'en lisant QGPUCaps dans l'invité : d'où ce sondage.

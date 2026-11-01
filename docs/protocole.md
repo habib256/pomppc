@@ -91,7 +91,7 @@ Sans changer `QGPU_PROTO_VERSION` :
   (niveaux de texture, surfaces, tampons, textes et tables de programmes), par
   tranche et en tout ; `QGPU_MEM_MB` fixe le total (défaut : moitié de la RAM,
   trois quarts de ce total par tranche). Au-delà, la commande d'allocation
-  (`SURF_CREATE`, `TEX_IMAGE3`, `SURF_TEX`, génération de mipmaps, `BUF_CREATE`,
+  (`SURF_CREATE`, `TEX_IMAGE`/`TEX_IMAGE3`, `SURF_TEX`, génération de mipmaps, `BUF_CREATE`,
   `PROG_CREATE`, `PROG_STRING`, `GLSL_SOURCE`) n'alloue rien et rend `NO_MEM`,
   **non fatal** : le lot continue. Les mises à jour d'un niveau ou d'un tampon
   refusé (`TEX_SUBIMAGE`, `COPY_TEX`, `BUF_SUBDATA`) rendent aussi `NO_MEM`,
@@ -127,8 +127,9 @@ Les registres, commandes, flottants IEEE simple précision et indices sont
 traduit l'offset de soumission relatif à sa tranche. Les adresses de données
 du flux sont des offsets BAR0, jamais des pointeurs du processus hôte.
 
-Le device publie quatre tranches par défaut. Les plages globales sont :
-32 contextes, 32 surfaces, 1024 textures, 16 requêtes et 64 tampons **par client**.
+Le device publie quatre tranches par défaut. Les plages sont de
+32 contextes, 32 surfaces, 1024 textures, 16 requêtes et 64 tampons **par client**
+(espaces globaux de 128, 128, 4096, 64 et 256 identifiants).
 Les 256 programmes sont **par contexte**, dans un espace commun ARB/GLSL.
 Le kext lit `CLIENTS` et `LAYOUT` et ne doit pas redéfinir ces nombres.
 La table comporte 16 entrées possibles, dont 5 classes actuellement définies.
@@ -145,7 +146,8 @@ Les objets de rendu hôte ne sont pas persistés comme un état GL migrable.
 Une commande commence par `opcode << 16 | longueur`, longueur en **mots de
 32 bits, en-tête compris**. Les `QGPU_LEN_*` et les opcodes sont recensés
 dans l'annexe générée. Le flux est aligné sur 4 octets ; au plus 1 048 576 mots
-par soumission et 32 arguments par commande. Chaque soumission sélectionne
+par soumission et 32 arguments par commande (seul `STATE_BLOCK` en porte davantage :
+108, ou 270 avec le vecteur de contrôle, sous la borne `QGPU_MAX_CMD_ARGS_LONG` = 320). Chaque soumission sélectionne
 son contexte par `CTX_BIND` : ne pas dépendre du contexte d'un autre client.
 
 L'invité écrit le flux et ses données, applique les barrières mémoire du transport,
@@ -185,7 +187,7 @@ relire FENCE.
 | Surfaces | `SURF_CREATE/DESTROY/BIND`, couleur et profondeur/stencil optionnels |
 | Transferts | `SURF/DEPTH/STENCIL_UPLOAD/READBACK`, rectangles, pas en octets |
 | État | `SET_STATE`, matrices, lumières, matériaux, texgen, plans de coupe, valeurs courantes |
-| Géométrie | `DRAW_*` hérités, `DRAW_RAW`, `DRAW_RAW_BUF`, `DRAW_NATIVE` |
+| Géométrie | `DRAW_*` hérités, `DRAW_RAW`, `DRAW_RAW_BUF`, `DRAW_RAW_SANE`, `DRAW_NATIVE` |
 | Textures | `TEX_CREATE/CREATE3/DESTROY/IMAGE/IMAGE3/SUBIMAGE/PARAM` |
 | Tampons | `BUF_CREATE/DESTROY/SUBDATA` ; données conservées côté hôte |
 | Requêtes | `QUERY_BEGIN/END/RESULT`, résultat relu dans BAR0 |
@@ -196,8 +198,11 @@ Les signatures ordonnées sont les commentaires `QGPU_OP_*` de l'en-tête ; les
 longueurs exactes et valeurs de toutes les clés figurent ci-dessous.
 Les dimensions, tailles, débordements et plages mémoire sont validés avant accès.
 Un mauvais en-tête ou un opcode inconnu interrompt la soumission. Les commandes
-déjà exécutées ne sont pas annulées. Certains refus sont délibérément non fatals :
-dessin natif invalide, programme refusé par le compilateur, dessin GLSL cassé.
+déjà exécutées ne sont pas annulées. Certains refus sont délibérément non fatals
+(`draw_op` du cœur) : tout `BAD_ARG` d'un opcode de dessin (`DRAW_*` hérités, `DRAW_RAW`,
+`DRAW_RAW_BUF`, `DRAW_RAW_SANE`, `DRAW_NATIVE` — dont dessin sous programme cassé),
+le refus d'un texte par le compilateur de l'hôte (`PROG_STRING`, `GLSL_LINK`), et tout
+`NO_MEM`. La première de ces fautes est rendue dans `STATUS`.
 Il faut donc consulter les contrôles de chaque commande plutôt que considérer
 tout `BAD_ARG` comme une annulation du flux.
 
@@ -223,7 +228,8 @@ Une texture rectangle n'a que le niveau 0. L'état du pipeline fixe comprend
 8 unités d'image, sans nouvelles coordonnées conventionnelles.
 
 `SURF_PRESENT [surf, off, stride, x, y, w, h, format]` copie le rectangle vers
-la fenêtre visible du scanout QFB. L'offset est relatif à **la base du mode
+la fenêtre visible de l'écran lié par le device (propriété `scanout` : VGA d'abord,
+qfb-pci sinon ; `none` refuse l'opcode). L'offset est relatif à **la base du mode
 courant**, pas à BAR0 qgpu ni nécessairement à l'origine de la VRAM.
 Pas et profondeur doivent correspondre à l'écran ; tout débordement est refusé.
 La conversion RGB1555 est faite par l'hôte.
@@ -267,7 +273,8 @@ désigne BAR0 pour les emplacements où cette sentinelle est admise.
 `DRAW_NATIVE [mode,n,ibuf,ioff,itype,premier,nattr,aoff]` lit dans BAR0 une
 table de descripteurs de six mots :
 `[code,buf,offset,pas,type,taille|drapeaux]`. Le pas est cette fois en **octets**,
-0 signifie serré. Attributs dans des tampons hôte, jamais dans BAR0 ; indices
+0 signifie serré. Attributs dans des tampons hôte ; avec `QGPU_CAP_GEOM_HOST`, un
+descripteur peut aussi désigner BAR0 (`buf = QGPU_BUF_SHMEM`, offset absolu) ; indices
 dans un tampon hôte ou BAR0. Types entiers ou flottants big-endian, normalisation
 explicite des entiers, position obligatoire (ou générique 0), codes uniques.
 Le cœur vérifie toute la plage des sommets cités et convertit vers RAW.

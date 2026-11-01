@@ -29,7 +29,8 @@
  *   démasquée. Les surfaces vivent côté hôte ; l'invité les lit avec
  *   SURF_READBACK (hôte → BAR0) et les remplit avec SURF_UPLOAD (BAR0 → hôte).
  *   Depuis la v13, SURF_PRESENT écrit la surface liée dans la VRAM de l'écran
- *   (qfb-pci), sans que le pixel traverse l'invité (QGPU_CAP_SCANOUT).
+ *   (propriété `scanout` du device : VGA d'abord, qfb-pci sinon), sans que le
+ *   pixel traverse l'invité (QGPU_CAP_SCANOUT).
  *
  *   Depuis la v9 le doorbell a DEUX modes : synchrone (valeur 1, celui de
  *   v1–v8, inchangé au bit près) et asynchrone (valeur 3, la soumission est
@@ -152,7 +153,8 @@
  * format, la décompression S3TC, TEX_SUBIMAGE et la génération des mipmaps
  * sont faites par le CŒUR : elles ne dépendent pas de ce bit. */
 #define QGPU_CAP_GL14           0x00000010
-/* v13 : le device a une cible de scanout (VRAM qfb) et tient SURF_PRESENT.
+/* v13 : le device a une cible de scanout (VRAM de l'écran lié : VGA ou qfb-pci,
+   cf. qgpu-pci.c) et tient SURF_PRESENT. Bit du DEVICE, posé au lien de l'écran.
    Sans ce bit, l'opcode répond QGPU_ST_BAD_ARG : l'invité se replie sur
    SURF_READBACK + copie, il ne plante pas. */
 #define QGPU_CAP_SCANOUT        0x00000020
@@ -298,7 +300,7 @@
 #define QGPU_CAP_TEX_PRESENT    0x00200000
 /* 29/10 (Quartz Extreme P3) : l'HÔTE recommande Quartz Extreme (propriété
    `qe` du device, posée par run_tiger.sh là où QE est prouvé : Darwin:arm64
-   au 29/10). Le kext en personnalité « auto » (le défaut d'install.sh) publie
+   au 29/10, Linux:x86_64 au 30/10). Le kext en personnalité « auto » (le défaut d'install.sh) publie
    alors AccelCaps ; QE=1 / QE=0 à l'installation forcent. Bit du DEVICE, pas
    du cœur ; ajouté sans changer QGPU_PROTO_VERSION. */
 #define QGPU_CAP_QE_DEFAULT     0x00400000
@@ -1358,14 +1360,17 @@
  *
  *   RESET. Écrire QGPU_REG_MAGIC vide la file (les soumissions en attente sont
  *   JETÉES, elles n'avanceront jamais FENCE) et attend la fin de celle qui est
- *   en cours, puis remet tous les compteurs à zéro. Une soumission jetée ne
+ *   en cours, puis remet tous les compteurs à zéro. (29/09, GL3 : attente
+ *   bornée à 5 s ; au-delà le device passe « cassé », CAPS = CLIENTS = 0,
+ *   jusqu'au prochain reset qui aboutit — qgpu-pci.c, qgpu_soft_reset.) Une soumission jetée ne
  *   touche plus BAR0 après le retour de l'écriture : c'est ce qui rend le reset
  *   sûr avant de rendre la mémoire d'un client.
  *
  *   HORS PÉRIMÈTRE. La migration et le retrait à chaud du device ne sont pas
  *   tenus en v9 (ils ne l'étaient pas davantage avant : les objets hôte ne
  *   migrent pas). Le device draine sa file avant de sauver son état, et
- *   l'invité repart d'un device vide au chargement.
+ *   l'invité repart d'un device vide au chargement. (Depuis D3, un blocage de
+ *   migration refuse savevm, loadvm et migrate tant que qgpu-pci est là.)
  */
 
 /* ── v10 : les textures d'OpenGL 1.2 à 1.5 ───────────────────────────────────
