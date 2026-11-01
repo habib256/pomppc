@@ -3,369 +3,294 @@
 > **Deux hôtes (PC x86-64 et Mac M4) en alternance** : l'état de chacun et ce qui y reste à faire
 > sont dans [docs/etat-des-hotes.md](docs/etat-des-hotes.md), à lire en premier.
 
-État au 01/10/2026. Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
+État au 01/11/2026. Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
 sur le GPU de l'hôte, avec une matrice de jeux verte comme preuve.
 
-**Où on en est.** L'orientation « vitesse » (29/09) a livré ses lots : cache de sauts,
-`mtmsr`/`rfi` sans verrou, `x-icbi-sync`, A4 (état et géométrie par l'hôte), flottant
-scalaire natif, attente des requêtes d'occlusion — tout est **allumé par défaut** et la
-matrice `20261001-tout` est verte (15/15, images justes ; DOOM 3 61 → 57, Colin McRae
-71 → 48, Nexuiz ARB 110 → 80 ms/image depuis le 30/09). **Orientation suivante : revenir à
-la fiabilité** — des plantages en jeu restent sans cause (paniques `LockTimeOut`, DOOM 3 plein
-écran `exit 139`), et beaucoup de leviers viennent d'être allumés d'un coup : le banc
-d'endurance doit tourner sur la configuration par défaut avant de reprendre la vitesse.
-Ensuite : jeux, maintenabilité du plugin, puis 1.0.
+**Où on en est.** La fiabilité a été tenue (endurance PC 683 démarrages sans incident le 28/10,
+M4 342 démarrages et 40 cycles de jeu sans incident le 29/10 ; Quartz Extreme allumé sur les
+deux hôtes). **L'orientation est de nouveau la vitesse, sur les deux hôtes**, car la version x86
+reste trop lente pour être publiée (règle du 20/10). Vitesse au 01/11, ms/image, hôte au repos :
+
+| jeu | PC x86-64 (binaire rapide, plugin `packbits`) | M4 (30/10, QE) | rapport |
+|---|---:|---:|---:|
+| DOOM 3, fenêtre | 78-80 | 29 | ×2,7 |
+| UT2004, fenêtre | 40 | 19,6 | ×2,0 |
+| Marble Blast, fenêtre | 8,3 | 6,1 | ×1,4 |
+| Zenerchi, fenêtre | 4,6 | 2,8 | ×1,6 |
+| Colin McRae, plein écran, **en course** | 82 | à remesurer (`6054367`) | — |
+
+Cible du PC : DOOM 3 à 50 ms/image (`docs/vitesse-doom3-x86.md`, départ 111,5 le 02/10).
+
+**Ce que les profils ont établi** (`docs/vitesse-doom3-x86.md` §18-§25, `docs/tcg-g4.md` §44-§47) :
+- Sur le PC, le goulot du code généré est le **chargement des instructions** (frontend bound
+  40 %, 100 octets de x86 par instruction PowerPC) et la latence mémoire, pas le nombre
+  d'instructions : retirer des tests hors du chemin critique ne rapporte plus rien (plafond
+  mesuré 3,5 %). Les leviers restants du JIT x86 sont petits et génériques : recherche de
+  blocs (mb 10 %, zen 14 %, cmr 7 % du vCPU), base de temps (ut 14 %), PGO.
+- **Le plugin GL de l'invité est le levier commun aux deux hôtes** : 28 % du vCPU de cmr,
+  22 % de d3, 16 % de mb, 12 % de zen, 11 % d'ut sur le PC. Chaque pourcent gagné là vaut sur
+  x86 et sur arm64 sans portage, et c'est le seul levier qui agit sur cmr (PACKBITS −3,5 %
+  quand les leviers TCG le laissent neutre ou le ralentissent).
+- Le fil de rendu de l'hôte (`qgpu-render`) occupe 55 % d'un cœur sur mb, 41 % sur zen, 25 %
+  sur d3 (≈ 20 ms par image). Sur le PC, l'invité ne l'attend pas (0,1-3 ms/image) ; sur le M4,
+  où d3 est à 29 ms, il peut devenir le chemin critique : à mesurer.
 
 Les chantiers sont rangés par priorité ; leur domaine figure entre crochets.
 **Maintenant** contient au plus trois chantiers, **Ensuite** donne l'ordre de prise,
 **À confirmer par l'utilisateur** réunit ce qui n'attend qu'un essai ou une décision de sa part,
-**Plus tard** garde les pistes différées, **Bloqué** indique ce qui manque pour reprendre.
-Une entrée décrit le travail restant et la preuve qui la fermera. Pour les défauts de
-session : reproduction avant correction et contrôle après correction ; un incident qui
-ne se reproduit plus n'est pas une correction. Pour les défauts de rendu : scène
-reproduisant le défaut, image corrigée et matrice verte. Pour les optimisations :
-preuve d'équivalence et mesure A/B à scène égale. Les travaux clos sont dans
-[CHANGELOG.md](CHANGELOG.md), les études détaillées dans `docs/`.
-
-L'ancien tableau par domaine est conservé dans
-[docs/archive/todo-par-domaines-2026-09-27.md](docs/archive/todo-par-domaines-2026-09-27.md) :
-les anciens renvois « TODO §0…§10 » se lisent dans cette archive.
+**Plus tard** garde les pistes différées, **Écarté sur chiffres** ce qu'il ne faut pas rouvrir sans
+fait nouveau, **Bloqué** indique ce qui manque pour reprendre.
+Une entrée décrit le travail restant et la preuve qui la fermera. Pour les optimisations :
+preuve d'équivalence (`plugmd5` à l'octet, `x-*-verify`, mutants) et A/B entrelacé à scène
+égale, hôte au repos, sur **toute la matrice** (mb, zen, ut, d3, cmr) : un levier n'est allumé
+que s'il ne perd sur aucun jeu ; un écart sous 3 % sur trois parties ne prouve rien (six parties
+ou un bras témoin). Pour les défauts : reproduction avant correction et contrôle après. Les
+travaux clos sont dans [CHANGELOG.md](CHANGELOG.md), les études détaillées dans `docs/`.
+L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
 
 ## Maintenant
 
-- [ ] **[Outils] Endurance sur la configuration par défaut** — banc livré le 29/09
-  (`tools/endurance/`, `docs/endurance.md`), porté sur Linux et joué une nuit sur le PC le 07/10
-  (`docs/endurance.md` §7 : défauts du 06/10 + binaire rapide, **0 panique sur 305 démarrages,
-  0 incident sur 62 parties** (15 par jeu, borne ~20 % par jeu), 5 « pas de ssh » après
-  `shutdown -r` ; témoin anciens défauts 1 panique « 0x400 Inst access » dans l'appariement
-  ATAPI sur 238). **Reste pour fermer :** (1) une nuit sur le **M4** avec les nouveaux défauts
-  (build de référence du 26/10 ; première tranche terminée le 27/10 : **78 démarrages sains**,
-  dont 24 froids et 54 reboots, **16 cycles de jeux sains**, quatre par jeu ; Tiger 10.4.11
-  isolé, gardien SSH absent, `docs/endurance.md` §9 ; reste une série plus longue) ;
-  (2) sur le PC, les « pas de ssh » : **cause trouvée le 07/10**
-  par la console série du banc (`--serie`, `docs/endurance.md` §8) — course dans l'invité :
-  l'IPv6 de lo0 ne s'attache pas (`in6_ifattach_loopback … errno=17/55`), `launchctl` échoue au
-  `bind()` IPv6 de `ssh.plist` et abandonne aussi l'IPv4 ; rien de QEMU. **Correction faite le 13/10**
-  (`docs/endurance.md` §8.5) : gardien `POMPPCSshGarde` du paquet invité (recharge `ssh.plist`
-  une fois une IPv6 présente) ; défaut reproduit à la demande dans la VM et réparé par le
-  gardien. Série `pc-reboot-garde` (14/10, §8.6) : 450 démarrages, 0 « pas de ssh », mais la course
-  ne s'est pas produite (gardien jamais sollicité) : **reste** à voir le gardien agir sur un vrai
-  cas (série plus longue, ou hôte chargé comme le 07/10) ; la panique `CheckSubTree` de #160
-  revient sur la configuration par défaut (#98, 1 sur 450) ; (2 bis) la panique #76 : relue le 13/10 (§8.4) — tombée **pendant un
-  relevé par la console**, liste libre de kalloc.16 corrompue (probable), CPU 1 en 0x700 ;
-  suite : savearea (décodage restant) ; **`pmemsave` ajouté à la collecte le 20/10**
-  (`docs/endurance.md` §8.7, transfert éprouvé sur QEMU sans invité), reproduction par stress de la console, puis A/B
-  `-accel tcg,thread=single` ; (3) ~~une tranche de démarrages à froid sur le PC~~ **faite la nuit
-  du 27-28/10** (`docs/endurance.md` §10 : binaire rapide du 27/10, 400 froids + 283 reboots,
-  **0 incident sur 683**, borne 0,6 %).
+- [ ] **[Plugin — les deux hôtes] Alléger le plugin de l'invité, suite de PACKBITS**
+  (`docs/plugin-allegement.md` §8, profil `bench/tcg/ab/xprof-0111-cmr-pb`). Le coût est
+  maintenant étalé : `geom_draw_client` 3,7 % du vCPU de cmr, `geom_draw_native` 1,5,
+  `send_state` 1,3, `prog_sync` 1,1, `geom_dispatch_locked` 1,1, **`___stub_getrealaddr` 1,0**
+  (stub PIC de libgcc : appels indirects à travers les stubs, à ramener en appels directs ou
+  en ligne), `texture_unit_ok` 0,9, `geom_format` 0,8, `us_fill`/`us_get` 1,3,
+  `prog_params_arena`/`prog_state` 1,4 ; dans libSystem, le bloc `0x90131200` fait 1,8 % sur
+  cmr et 0,7 % sur d3/mb (à identifier : `memcpy`, verrou ?). Méthode du §2 : un levier par
+  variable `POMPPC_GL_*`, mode `=2` de contrôle, `plugmd5` 0 écart, A/B des cinq jeux sur le
+  PC ; le M4 reçoit le bundle (à reconstruire dans sa VM de dev, puis A/B PACKBITS là-bas,
+  gain attendu 1-4 %). **Fermeture :** plugin sous 20 % du vCPU sur cmr et d3, aucun jeu en
+  perte, matrice verte.
 
-- [ ] **[Système] Plantages en jeu sans cause** — trois défauts, peut-être un seul mécanisme ;
-  le banc ci-dessus doit les faire sortir (nuit du 07/10 sur le PC : aucun `LockTimeOut`, aucun
-  `exit 139` en 15 parties de DOOM 3 et 543 démarrages).
-  - **Paniques par délai de verrou (`LockTimeOut` = 250 ms).** Le « gel au chargement de
-    DOOM 3 » (26/09, 1 lancement sur ~12) est une panique : `0x268b4` = `_panic+0x254`, vCPU 1
-    au repos ; sans kdp, Tiger n'en garde ni écran ni `panic.log`. Mécanisme probable : un arrêt
-    de vCPU côté QEMU (BQL, doorbell synchrone, hôte chargé) compté par `mftb` dans un délai de
-    verrou tournant. Arrêts mesurés : 95 ms au plus (`stallmeter`). Non reproduit le 29/09
-    (0 sur 39 chargements). `docs/gel-doom3-baddisplay.md` §2.
-  - **Panique pendant le diagnostic UT2004 (27/09, 15:50)** : CPU 1, `Lock timeout` dans
-    `_fpu_switch`, PC `0x000AA010`, LR `0x00003820`, pile désalignée. Ne pas l'attribuer sans
-    preuve à AppleUSBOHCI (corrigé le 29/09). `bench/utweapon-priorites/panic.png`,
-    `docs/matrice-jeux.md`.
-  - **DOOM 3 plein écran mort au chargement** (`exit 139`, tas du jeu corrompu) : 3 fois de
-    suite dans une même session de la VM pendant le volet état d'A4, dont une fois leviers
-    éteints ; 0 sur les ~20 parties suivantes. `bench/a4/etat/rouges`.
-  **Au prochain gel :** `python3 tools/re/kpanic.py mach_kernel` AVANT tout reset (texte,
-  appelant, pile). **Fermeture :** texte d'une vraie occurrence lu, cause établie, correction
-  (relever `LockTimeOut` par le kext, ou borner les arrêts de vCPU) et série sans incident ;
-  des lancements réussis ne suffisent pas.
+- [ ] **[TCG — PC] Les leviers génériques restants du JIT x86** (`docs/tcg-g4.md` §44-§47) :
+  1. **PGO entraîné avec cmr** : `pgo-train.sh --plein-ecran cmr` (01/11), réentraînement
+     fait, A/B neuf contre ancien (`bench/tcg/ab/pgo-0111-*`) **en cours le 01/11 au matin** ;
+     la partie `neuf-1` de cmr a quitté avant la course (`exit 138`, SIGBUS dans le jeu) : à
+     surveiller, un second plantage avec le nouveau binaire le refuse (ancien binaire gardé
+     dans `~/src/qemu/build-fast-pgo3110/`).
+  2. **Recherche de blocs** (mb 10 %, zen 14 %, cmr 7 %) : `tcg/0060` x8 (effacement exact, 256
+     cases) gagne mb −8,7 % et ut −1,9 % mais **cmr +4,2 %** en course, seule perte propre à
+     cmr qui reste inexpliquée. À instruire : compter ce que coûte le parcours exact sous les
+     ~2 000 écritures de BAT par seconde de cmr (32 pages chacune), puis essayer **x8 +
+     `tcg/0063`** (plus de vidage du cache de sauts sur un DBAT) ; l'un sans l'autre a été
+     mesuré, pas les deux.
+  3. **Base de temps** : `helper_load_tbu/tbl` 14 % du vCPU sur ut, 3 % sur zen. D'abord
+     identifier la boucle chaude du noyau `0x33f3c-0x33fec` (11,7 % du vCPU d'ut, près de
+     `_idle_thread` : `mach_absolute_time`, `timer_event`) : si c'est une attente active du
+     noyau, le levier est d'endormir le fil hôte (ut occupe 1,9 cœur) plutôt que d'accélérer
+     `mftb` ; sinon `mftb` en ligne (sans helper), gain modeste (−2,4 % mesuré pour helper
+     lent → rapide).
+  4. **`tcg/0063` `x-dbat-lite`** : témoin cmr sous `TLBPVERIFY=16 RETVERIFY=1` **sans** 0063,
+     pour savoir si la panique de délai de verrou du 01/11 vient des vérificateurs ; puis
+     rejouer l'A/B en fenêtre à 3 parties (2 parties : d3 −3 %, mb −2,2 %, ut +3,7 %).
+  **Fermeture de chaque levier :** preuve, A/B des cinq jeux, allumé ou archivé avec le chiffre.
 
-- [ ] **[Jeux] Performances selon la résolution** — les jeux fonctionnent très bien dans
-  l'ensemble, mais pas dans toutes les résolutions : gros ralentissements signalés par
-  l'utilisateur dans **Colin McRae en 1980 × 1024** (27/10). Étendre les essais aux autres
-  résolutions, jeux et modes fenêtre/plein écran ; ne pas limiter le diagnostic à Colin
-  McRae. Relever les temps d'image et les éventuels replis de rendu sur une même scène pour
-  comprendre les chutes de vitesse. Les cellules déjà vertes aux résolutions de la matrice
-  ne valent pas validation de toutes les résolutions.
-
-- [ ] **[Validation] Restes des épreuves en VM des bug hunts** (tout le reste est tenu le
-  07/10 sur le PC : `docs/bug-hunt-2026-09-29-passe4.md`, dernière section).
-  (1) ~~**R5 sous refus réel**~~ **tenu le 14/10** : pagination des textures dans le plugin
-  (`20261014-r5`, `docs/pagination-textures.md`) — plus aucun dessin rendu à Apple pour la
-  mémoire ; à 128 Mio DOOM 3 essuie 833 refus, apprend un budget de 78,5 Mio et joue jusqu'au
-  bout de la cellule, image juste (rejeu/VM 0,00 %) ; témoin `POMPPC_GL_TEXPAGE=0` : `exit` de
-  `gleBuildInterpolateFunc` à l'image 288 ; à 512 Mio rien ne bouge (0 `NOMEM`, image juste).
-  Ligne de preuve : `docs/bug-hunt-2026-09-29-passe4.md`, dernière section. Mis au jour en
-  route (à traiter à part) : QEMU mourait par `double free` (Mesa, `DeleteProgramsARB` sous
-  `qgpu_core_client_reset`) à la fin de toute cellule DOOM 3 avec vidage, ancien plugin
-  compris — sur llvmpipe seulement : 0 sur 2 sur la RTX le 14/10 (`docs/pagination-textures.md` §4) ; le backend GL tournait sur llvmpipe (corrigé le 14/10 : `EGL_PLATFORM=device`, `run_tiger.sh`) et QEMU ne se reconstruit plus (`glib-2.0`
-  absent) depuis Ubuntu 26.04 (`docs/pagination-textures.md` §4). (2) **GPU hôte bloqué : tenu le 14/10 sur le PC**
-  (`docs/epreuve-gpu-bloque.md`, propriétés `x-test-stall-ms` et `x-test-refuse-reset` du
-  device, preuves dans `bench/stall-20261014/`) :
-  - **GL3** : GPU bloqué, job en vol, kext rechargé → « reset non terminé après 5000 ms »,
-    le kext lit CAPS = 0 et refuse de démarrer, moniteur servi (pire 5,01 s) ; débloqué,
-    `kextload` répare (`QGPUClients = 4`, `qgpu_test` vert) ; même chose par `system_reset`
-    (rendu en 7,0 s, CAPS = CLIENTS = 0 après le redémarrage jusqu'au reset suivant).
-  - **KT4** : mode de l'écran POMPPCQFB changé pendant la panne en 0,001 s, aucune réponse du
-    moniteur au-delà de 0,25 s, CAPS et CLIENTS relus à 0.
-  - **K6** : lien 1024x768 au pas 128 avant la panne, aucun lien pendant, « écran relié de
-    nouveau (qfb-pci, 640x480, pas 1280) » à la réparation ; et, après un correctif trouvé par
-    l'épreuve (géométrie qfb perdue quand le drainage échoue sur un device encore sain,
-    `system_reset` avec job bloqué), relié aussi à 1024x768 au pas 128 sans autre changement.
-  - **L2** : voir A6 (`CHANGELOG.md`) — avec le kext d'avant, 4 `QGPU_ST_LIMIT` sur 5
-    scénarios ; avec celui du dépôt, 0 sur 5, autre tranche ou attente, journal du kext qui
-    nomme la tranche sale puis sa libération. KT5 en prime : `quit` bloqué sort en 5,06 s.
-  **Reste du point (2) :** reconstruire `build/` et `build-fast/` (PC) puis le M4 avec ce
-  device, et installer le kext A6 dans les VM (paquet invité ; ABI inchangée, plugin intact).
+- [ ] **[TCG — M4] Mesurer le M4 avant de l'optimiser, puis rattraper le PC.** Le M4 n'a pas
+  de profil croisé depuis la parité du 25/10. Dans l'ordre :
+  1. **Rattrapage** : reconstruire `~/src/qemu` (`qgpu-core.c` du 31/10), reconstruire le plugin
+     dans la VM de dev (PACKBITS, bundle de HEAD) et l'installer, rejouer cmr-pe avec la fenêtre
+     en course (`6054367`, le M4 mesurait peut-être déjà la course : à vérifier sur ses
+     `frames.csv`), référence cmr à reprendre (faux reflet).
+  2. **Profil croisé des 5 jeux** (`sample` du processus QEMU, fils vCPU et `qgpu-render`,
+     comme `tools/re/perfpart.py` sur le PC) : part du JIT, recherche de blocs, `mftb`,
+     helpers, et **part du fil de rendu hôte** ; sur d3, si `qgpu-render` approche les 29 ms
+     de l'image, le levier `nat_conv_attr` (27 % du fil de rendu : attributs reconvertis à
+     chaque dessin natif, à convertir une fois au `BUF_SUBDATA`) passe en tête.
+  3. **`tcg/0058` délais courts** : l'attente à la microseconde fait zen −18 % mais ut +6,6 % ;
+     variante `select` pour les seuls délais sous la milliseconde, profil d'UT (verrou).
+  4. Parité de la zone froide (`tcg/0056`, saut long aarch64) en dernier : gain PC de 1-2 %
+     sur un goulot L1i propre au PC.
+  **Fermeture :** doc de profil M4, PACKBITS mesuré, A/B de chaque levier, `etat-des-hotes.md`.
 
 ## Ensuite
 
-- [ ] **[OS 9] Mesurer les gains CPU et élargir les essais** — profils expérimentaux livrés
-  le 27/10, défaut `g4` conservé. Sept passages DOOM II avec image fixe exacte et PCM présent,
-  plus Barrack en partie sur témoin et complet ; vérificateurs sans divergence
-  (`docs/os9-optimisations-cpu.md`). Reste : A/B de vitesse sur une charge reproductible,
-  autres jeux et application AltiVec (très peu exercé par cette première tranche).
-
 Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête.
 
-- [x] **[TCG — M4] Séance de parité du 25-26/10** (`docs/parite-m4-2510.md` §5) : 0049-0050, série
-  0031-0039, 0045-0047, 0051, 0052, 0040-0043 prouvés sur le M4 au niveau du PC (disque de dev
-  10.4.11), **tous allumés sur `Darwin:arm64`** après A/B, hôte au repos : DOOM 3 −23,9 %
-  (42,3 → 32,2 ms/image), UT2004 −18,6 %, Marble Blast −22,7 %. **0037 corrigé** en route (diviseur
-  nul sous `PFP_K_B`) ; 0037-0039 posés par `build_qemu_qfb.sh` après 0052. Talon de `vcf*`
-  couvert le 26/10 par `tcg/0054` (`x-vfp-native-cmp-slow`, les deux hôtes ; mutants 21/21, §5.9).
-  Reste : le mutant n° 14 de 0052, équivalent sur arm64 (§5.5), rien à faire.
-- [x] **[TCG — PC] 0052 TLB par base, 0053 AltiVec flottant connu** (25/10) : 0052 fusionné et
-  allumé (DOOM 3 −2,2 %) ; 0053 juste mais neutre en jeu, non fusionné (`archive/0053-vfp-known`).
-  Rangements de 0052 (piste par compteur de génération, §41.7) : ouvert.
+- [ ] **[Système — QE] Bande d'ancien jeu sous l'ombre du Terminal (PC, 01/11)** : DOOM 3 en
+  fenêtre au chargement (fenêtre noire), Terminal posé dessus, une bande d'une ancienne image
+  du jeu sous le bord droit de l'ombre. Variante « ancien jeu » du bug corrigé le 30/10 sur le
+  M4 (`9b5431a`, `tex_bind_id`). Pistes : texture d'export périmée sous QE direct, chemin
+  `FIXED4` du PC, `qgpu-core.c` du 31/10. **En diagnostic (agent) ; fermeture :** cause
+  prouvée, reproduction avant/après, matrice en fenêtre verte, journal `docs/quartz-extreme.md`.
 
-- [x] **[TCG — M4] Parité arm64 de 0031-0035** : faite le 25/10 (`docs/parite-m4-2510.md` §5.3) ;
-  `m4-serie-0031-0035-proofs.sh` `host`, `guest`, `mut` sur une copie de l'arbre (`prep` est caduc :
-  `build_qemu_qfb.sh` pose désormais 0037-0039 lui-même).
+- [ ] **[Jeux] Performances selon la résolution** — gros ralentissements signalés par
+  l'utilisateur dans **Colin McRae en 1920 × 1080** (27/10 ; sur le M4 la cellule y est à +11 %
+  contre 1024×768). Étendre les essais aux autres résolutions, jeux et modes ; relever les temps
+  d'image et les replis sur une même scène. Les cellules vertes aux résolutions de la matrice ne
+  valent pas pour toutes. Lié au point précédent (relecture et présentation par bandes).
 
-- [x] **[TCG — M4] Finir la matrice du 06/10** : 17/17 cellules automatisées couvertes
-  sous les nouveaux défauts (`docs/parite-m4-2510.md` §5.10–5.11 : tour à 16/17 puis
-  rejeu Warcraft III vert, images justes). Le dernier rouge venait du montage du CD,
-  corrigé avec `-noautofsck` et un contrôle explicite du volume.
+- [ ] **[Outils] Endurance sur la configuration par défaut** — banc `tools/endurance/`,
+  `docs/endurance.md`. Fait : PC 683 démarrages sans incident (§10), M4 342 démarrages et 40
+  cycles de jeu sans incident (§11), QE PC 48 démarrages et 16 cycles (§14), zone froide
+  (§15). **Reste pour fermer :** (1) voir le gardien `POMPPCSshGarde` agir sur un vrai « pas
+  de ssh » (série longue ou hôte chargé, §8.6) ; (2) la panique #76 (`kalloc.16` corrompue,
+  §8.4) : `pmemsave` à la collecte, reproduction par stress de la console, A/B
+  `-accel tcg,thread=single` ; (3) une tranche après chaque allumage (PACKBITS compris).
 
-- [x] **[TCG — M4] Traces `0048`, pendant arm64** : séance du 26/10
-  (`docs/plan-traducteur-rapide.md` §9.8). Condition de lancement trouvée : `split-wx=on`
-  pour les compteurs dans les pages JIT ; choix automatique par le lanceur quand
-  `x-tier2` est demandé. Banc nu et mutants portés. `0055` corrige le rejeu de TB dont
-  la longueur change sous journalisation : compte exact des instructions, référence
-  rejouée une instruction par TB ; comparaison des stores à leur largeur réelle.
-  Banc nu et mutants verts, OpenBIOS SMP 438,1 M traces vérifiées sans divergence,
-  Tiger + Marble Blast 32,6 M sans divergence, image exacte. DOOM 3 vérifié à son tour
-  (§9.9 : 293,5 M contrôles, zéro divergence, image synchronisée exacte).
-  A/B entrelacé 3×3 DOOM 3 (§9.9), hôte au repos : 32,086 ms/image au défaut,
-  32,184 split-wx seul, 33,929 avec traces (**+5,74 %**, les trois parties avec traces
-  au-dessus de tous les témoins). **Éteint par défaut**, comme sur le PC ; mode mémoire
-  par défaut conservé, VM rendue dans ImGuiDock.
+- [ ] **[Système] Plantages en jeu sans cause** — paniques par délai de verrou
+  (`LockTimeOut` 250 ms, `_panic+0x254`), `exit 139`/`138` de DOOM 3 et cmr au chargement.
+  Nouveaux cas du 01/11 : panique cmr sous vérificateurs avec `tcg/0063` (`tcg-g4.md` §47,
+  `bench/tcg/ab/dbat-0111-verif-cmr/v-1/panique-*`), cmr `exit 138` sous le nouveau PGO.
+  **Au prochain gel :** `python3 tools/re/kpanic.py mach_kernel` AVANT tout reset.
+  **Fermeture :** texte d'une vraie occurrence lu, cause établie, correction et série sans
+  incident ; des lancements réussis ne suffisent pas.
 
-- [x] **[TCG — PC] Preuves de `0055`** (27/10, `docs/plan-traducteur-rapide.md` §9.10) :
-  `t2proof.sh` conforme avec et sans les leviers FP natifs (0 divergence, mutants vus) ;
-  Tiger + Marble Blast vérifiés, 26,5 M traces, 0 divergence, image juste. `x-tier2` éteint.
+- [ ] **[Validation] Restes des épreuves en VM des bug hunts** : reconstruire `build/` et
+  `build-fast/` (PC) puis le M4 avec le device de l'épreuve « GPU hôte bloqué »
+  (`docs/epreuve-gpu-bloque.md`), installer le kext A6 dans les VM (paquet invité ; ABI
+  inchangée). Le reste est tenu (`docs/bug-hunt-2026-09-29-passe4.md`, dernière section).
 
-- [ ] **[Métrologie] A/B de l'attente** : `QGPU_GL_FLUSH` et `POMPPC_GL_QFLUSH` ont été allumés
-  le 01/10 à la demande de l'utilisateur sans l'A/B prévu (un seul tour : Nexuiz GLSL 36,1 → 35,3,
-  ARB 81,2 → 80,2). `tools/matrice/ab-attente.sh 6 qflush` sur hôte au repos ; éteindre si
-  une cellule régresse.
+- [ ] **[OS 9] Mesurer les gains CPU et élargir les essais** — profils expérimentaux livrés
+  le 27/10 (`docs/os9-optimisations-cpu.md`), défaut `g4` conservé. Reste : A/B de vitesse sur
+  une charge reproductible, autres jeux et application AltiVec.
 
-- [ ] **[TCG] Marble Blast sous `x-msr-nobql`** : A/B non concluant (cellule trop bruitée), à
-  refaire par `tools/tcg/mbab.sh`.
-
+- [ ] **[Métrologie] A/B de l'attente** : `QGPU_GL_FLUSH` et `POMPPC_GL_QFLUSH` allumés le 01/10
+  sans l'A/B prévu. `tools/matrice/ab-attente.sh 6 qflush` sur hôte au repos ; éteindre si une
+  cellule régresse.
 - [ ] **[Métrologie] Troisième facteur de lenteur** (`docs/tcg-g4.md` §14.7) : une partie DOOM 3
-  sur huit lente de bout en bout ; cause inconnue (cœurs P/E, autre processus, thermique ?).
-  La matrice relève désormais la charge avant et après la fenêtre de mesure.
+  sur huit lente de bout en bout ; la matrice relève la charge avant et après la fenêtre.
+- [ ] **[TCG] Les « sans traduction » de `x-ret-verify` en fin de session** (`tcg-g4.md` §44) :
+  peut-être parents de la rafale « sans PTE » de `tcg/0061` (§45, non reproduite).
 
 ### Jeux
 
 - [ ] **[Jeux] DOOM 3 et Prey en plein écran** : changement de mode par le jeu (`r_mode 3`,
   `CGDisplaySwitchToMode`, `SURF_PRESENT` sur l'écran redimensionné) et mesure en combat.
-- [ ] **[Jeux — session] Marble Blast en fenêtre, bureau 800×600×16** : la cellule de la matrice
-  est verte, mais en session la fenêtre échoue sur un bureau trop petit (surface rognée, replis,
-  pas de présentation capturable). Identifier le choix du mode vidéo et garantir un bureau assez
-  grand, puis refaire Nexuiz fenêtre/plein écran. **Fermeture :** cellules vertes après
-  démarrage frais, réglages utilisateur préservés.
-- [ ] **[Jeux] Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur
-  reste blanc) ; menu principal juste au 26/09, à revoir en partie.
-- [ ] **[Jeux] UT2004 : armes noires dans la démo de test — reste le M4** (constaté par
-  l'utilisateur le 01/10 sur le M4). PC corrigé le 07/10 (backend GL sans l'extension ATI
-  → `NV_texture_env_combine4`, `docs/re/ut2004-arme-noire.md`) : image juste dans la démo
-  sur un QEMU reconstruit ; reconstruire `~/src/qemu` (référence) avec ce `qgpu-gl.c`. Le M4
-  a l'extension ATI, le correctif n'y change rien : y revider toute la démo (`@1`, 450
-  images), rejouer les images ~166-195 et lire les présentoirs avec `QGPU_REPLAY_UNUSED` /
-  `QGPU_REPLAY_STATE`. Fermeture : image juste dans la démo sur le M4.
-- [ ] **[Outils] A3, suites** : Zenerchi en plein écran et Warcraft III en fenêtre (réglage à
-  trouver, sinon clic par System Events) ; Colin McRae fenêtre non applicable.
+- [ ] **[Jeux — session] Marble Blast en fenêtre, bureau 800×600×16** : en session la fenêtre
+  échoue sur un bureau trop petit. **Fermeture :** cellules vertes après démarrage frais,
+  réglages utilisateur préservés.
+- [ ] **[Jeux] Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur reste
+  blanc) ; menu principal juste au 26/09, à revoir en partie.
+- [ ] **[Jeux] UT2004 : armes noires dans la démo de test — reste le M4** (PC corrigé le
+  07/10, `docs/re/ut2004-arme-noire.md`). Revider la démo sur le M4 (`@1`, 450 images), rejouer
+  les images ~166-195. Fermeture : image juste dans la démo sur le M4.
+- [ ] **[Outils] A3, suites** : Zenerchi en plein écran et Warcraft III en fenêtre.
 - [ ] **[Outils] Rejeu : `SURF_READBACK` d'une surface jamais liée** — corrigé le 07/10 sur le
-  PC (`docs/matrice-jeux.md` §5 : reproduit sur le vidage DOOM 3 fenêtre du PC privé de son
-  `surfaces.txt`, 2 `NO_SURF` → 0) ; à confirmer sur le tour `20260926-2156` du M4 (rejeu sans
-  `NO_SURF`, image inchangée).
-- [ ] **[Plugin] Mode immédiat sous programme de sommets : revue des jeux** : tous les
-  attributs tenus entre `glBegin`/`glEnd` sous programme ARB (`gltest vpimm` 44/44, identique
-  au rendu d'Apple ; `docs/protocole-v16-programmes.md` §7 et §7 bis : coordonnées, couleur le
-  07/10 à l'aube, normale, couleur secondaire, brouillard, génériques `vertex.attrib[k]`
-  l'après-midi). Le texte du programme décide désormais seul de ce qui est porté : reste à
-  revoir en jeu Colin McRae (M4), `POMPPC_GL_VPIMM=0` pour l'A/B. **DOOM 3 revu sur le PC
-  (07/10, paquet `20261007c`, `bench/matrice/20261007-vpimm2`)** : `d3-fen` image juste (rejeu =
-  VM 0,04, référence 0,00, à valider à l'œil comme avant), 15 replis, pas de plantage ; `ut-fen`
-  juste et validée. Vitesse non jugée (trois VM d'endurance sur l'hôte : 232,7 et 167,0 ms/image ;
-  A/B UT2004 sans vidage, même charge : défaut 60,2 puis 101,5, `VPIMM=0 TCLLOST=0` 56,4 — la
-  dispersion suit la charge). Fermeture : Colin McRae au M4, vitesse hôte au repos.
-- [ ] **[Backend GL] `gltest tex14` « λ=2 sans biais »** : défaut du GL de l'hôte macOS (le
-  biais d'unité du dessin précédent reste appliqué ; un `glFlush` le corrige mais coûte).
+  PC ; à confirmer sur le tour `20260926-2156` du M4.
+- [ ] **[Plugin] Mode immédiat sous programme de sommets** : revu sur DOOM 3 (PC, 07/10) ;
+  reste Colin McRae au M4 (`POMPPC_GL_VPIMM=0` pour l'A/B).
+- [ ] **[Backend GL] `gltest tex14` « λ=2 sans biais »** : défaut du GL de l'hôte macOS.
   Décision : ne réappliquer que sur changement, ou passer le biais dans l'échantillonneur.
 
 ## À confirmer par l'utilisateur
 
 Le travail est fait ; il ne manque que l'essai ou la décision de l'utilisateur.
 
+- [ ] **[Matrice — PC] Valider à l'œil les références `d3-fen` et `cmr-pe` du PC**
+  (`tools/matrice/matrice.py --valider d3-fen`, `--valider cmr-pe` ; cmr-pe reprise le 31/10
+  après le correctif des reflets, l'ancienne dans
+  `bench/matrice/ref-linux/cmr-pe.faux-reflet-2810/`) ; regarder les captures de
+  `bench/tcg/ab/cmr-res-3110/`.
 - [ ] **[Plugin] Replis à retirer** : `POMPPC_GL_VERDICT=0`, `POMPPC_GL_WHITELIST=0`,
   `POMPPC_GL_TEXMEMO=0`, `POMPPC_GL_STSKIP=0`. **Reprise :** mesure en jeu par l'utilisateur ;
   ensuite retirer les options devenues inutiles et vérifier la matrice.
-- [ ] **[Matrice — PC] Valider à l'œil la référence `d3-fen` du PC** (`validee=non` depuis le
-  04/10 ; DOOM 3 sort rouge pour ce seul motif une fois sous son plancher). Images :
-  `bench/matrice/ref-linux/d3-fen/image.png` (référence, image 5013) contre
-  `bench/tcg/ab/x86-final/final-1/d3-fen/capture.png` (binaire rapide, image 5079) et
-  `…/ref-1/d3-fen/capture.png` (anciens défauts, image 5074) : même scène, écart moyen 3,2 et
-  3,9 dû aux ~60 images d'écart (`docs/vitesse-doom3-x86.md` §13.6). **Reprise :**
-  `tools/matrice/matrice.py --valider d3-fen`.
-- [ ] **[Outils] Captures, dix tours consécutifs verts** : le rendez-vous `POMPPC_GL_CAPTURE`
-  remplace `dump_attente` ; premier contrôle DOOM 3/Prey fenêtre vert. Reporté le 27/09, à jouer
-  sur le banc d'endurance quand l'utilisateur le demande.
+- [ ] **[Outils] Captures, dix tours consécutifs verts** : à jouer sur le banc d'endurance quand
+  l'utilisateur le demande.
+- [ ] **[TCG — PC] Gouverneur `performance`** (`docs/vitesse-doom3-x86.md` §5.4) : un A/B à
+  faire, il demande la racine.
 
 ## Plus tard
 
-### Vitesse — reprise après la fiabilité
-
-Une mesure A/B exige un hôte au repos (aucune autre VM, charge relevée avant et après).
-Dans l'ordre des gains estimés. Profil du 01/10 et lecture : `docs/vitesse-profil-2026-10-01.md`
-(moteur multifil d'Apple absent : `docs/re/moteur-multifil.md`).
-
-- [ ] **[Émulateurs voisins] À reprendre de PowerEmu / ppcosxkvm / ppc-osx-vgpu** (étude du
-  29/10 : dépôts lus, rien exécuté ; leurs chiffres sont annoncés, non vérifiés ; code QEMU en
-  GPL v2 ou ultérieure, en-tête à vérifier fichier par fichier ; scripts en GPL-2.0 seule, à
-  ne pas reprendre tels quels). Par intérêt décroissant :
-  0. **Fait le 30/10 (`docs/tcg-g4.md` §42)** : la QoS des vCPU (`tcg/0057`, `VCPUQOS=1`) est
-     **neutre** au repos ; l'attente à la microseconde (`tcg/0058`, `POLLNS=1`) fait zen −18 %
-     mais ut +6,6 %. Les deux restent éteintes. Suite possible de 0058 : `select` pour les
-     délais courts seulement, profil d'UT.
-  1. **[M4] Fil du vCPU en QoS « interactive »** (`pthread_set_qos_class_self_np`
-     `QOS_CLASS_USER_INTERACTIVE`) : une ligne ; facteur 3 annoncé sur une boucle de mesure
-     (macOS ne relègue plus QEMU sur les cœurs lents). A/B sur le M4 au repos.
-  2. **[M4] Attente en nanosecondes** : `g_poll` arrondit à la milliseconde (une attente de
-     50 µs dure 1,26 ms) ; minuterie kqueue à la place. Son, minuteries, frontal.
-  3. **[TCG] `vperm` traduit en ligne** : NEON TBL/TBX sur arm64, PSHUFB sur le PC (~6× moins
-     cher annoncé) ; `x-vperm-fast` reste un appel de helper. Futur tcg/0057, preuve par
-     `x-*-verify`.
-  4. **[Preuve] Banc nu flottant et AltiVec** (211 200 cas comparés à softfloat, sans démarrer
-     Tiger), en complément des modes `x-*-verify`.
-  5. **[qgpu] Cache disque des shaders traduits** sur l'hôte (68 ms à froid contre 40 µs à
-     chaud chez eux).
-  6. **[Leopard, plus tard] Correctif de la fenêtre PCI d'OpenBIOS** (BAR au-delà de
-     `0x90000000`), utile à la VRAM de qgpu.
-
-- [ ] **[TCG] `x-fp-native64` (tcg/0016) et `x-tb-fast` (tcg/0015) allumés par défaut le 01/10**
-  sans tour de matrice, à la demande de l'utilisateur (prouvés exacts, A/B Prey −1,7 %, DOOM 3
-  −0,6 %, Nexuiz −0,8 % ; `docs/tcg-g4.md` §23-§24). **Reste :** l'essai de l'utilisateur, puis
-  un tour de matrice complet sur le binaire de référence reconstruit.
+### Vitesse
 
 - [ ] **[Plugin] Suites A4** : GLEngine déroule les tableaux clients en Begin/End (Nexuiz ARB
   14-16 %, Warcraft III 4,5 %) — RE du canal `gldCreateVertexArray`
-  (`docs/protocole-v23-geometrie.md`) ; clés chaudes (unités) par une table « objet GLEngine →
-  qtex » côté device (0,3-0,6 ms/image estimés sur DOOM 3) ; `geom_send_all` (1,5-3,9 %).
-  Contribution de chaque levier A4 séparément non mesurée (la campagne les allumait ensemble).
+  (`docs/protocole-v23-geometrie.md`) ; clés chaudes par une table « objet GLEngine → qtex »
+  côté device ; `geom_send_all`.
 - [ ] **[Protocole] Nexuiz : les ~2 ms restantes d'attente des requêtes d'occlusion** :
-  soumettre par tranches pendant les dessins, ou résultats de requête écrits par l'hôte.
-- [ ] **[Plugin] DOOM 3 sur le PC, étape 3** (`docs/d3-plugin-x86.md`) : trois leviers écrits,
-  éteints, **pas encore compilés dans l'invité** — indices sans balayage quand les miroirs
-  sont propres et balayage AltiVec (`POMPPC_GL_IDXLAZY`, `POMPPC_GL_IDXVEC`), verdict refait
-  par unité (`POMPPC_GL_UNITVD`), dispatch en une passe (`POMPPC_GL_DISPONE`). Reste : gltest
-  51 scènes et DOOM 3 sous contrôle, matrice avec vidage, A/B sur le PC (§6-§7), puis défauts.
+  soumettre par tranches pendant les dessins, ou résultats écrits par l'hôte.
 - [ ] **[Plugin] Transmission paresseuse** : mesure honnête et décision du défaut.
-- [ ] **[Plugin] Verdict GLSL : mémoire par texture et par époque** (suite de `WLUNIF`, dont le
-  gain était dans le bruit : ce sont les liaisons de texture qui font recalculer).
+- [ ] **[Plugin] Verdict GLSL : mémoire par texture et par époque** (suite de `WLUNIF`).
+- [ ] **[Plugin] Indices en VBO** (`docs/vitesse-doom3-x86.md` §10.4) : `r_useIndexBuffers 1`
+  retombe sur l'empaquetage ; comprendre le refus de `raw_ensure` pour le tampon d'éléments.
 - [ ] **[TCG] Flottant natif, angles non vérifiés** : exception FP levée depuis le chemin
-  natif, formes Rc=1, cible 32 bits en VM, hôtes non arm64 (`docs/tcg-g4.md` §22).
-- [ ] **[Cœur] DOOM 3 : `nat_conv_attr`** = 27 % du fil de rendu hôte (attributs reconvertis
-  à chaque dessin natif) ; convertir une fois au `BUF_SUBDATA`. Utile seulement si l'hôte
-  devient la limite (attente ≤ 1,3 %).
+  natif, formes Rc=1, cible 32 bits en VM (`docs/tcg-g4.md` §22).
+- [ ] **[TCG] `vperm` en ligne sur arm64** (TBL/TBX, pendant de `tcg/0059`) : gain plafonné
+  vers 0,3 % ; seulement si un profil M4 montre `helper_VPERM_FAST` haut.
+- [ ] **[TCG] `tcg/0052`, rangements** (piste par compteur de génération, `tcg-g4.md` §41.7).
+- [ ] **[qgpu] Cache disque des shaders traduits** sur l'hôte (démarrage des jeux, pas la
+  vitesse en jeu).
+- [ ] **[Leopard, plus tard] Correctif de la fenêtre PCI d'OpenBIOS** (BAR au-delà de
+  `0x90000000`), utile à la VRAM de qgpu.
 
 ### Maintenabilité du plugin
 
 - [ ] **[Plugin] A2 — Découper `pomppc_accel.c` en modules à frontières écrites** : lecteur
-  d'état (table d'offsets `gctx+…` vérifiée par une empreinte de GLEngine), textures,
-  géométrie, programmes, transport, diagnostic. Plan : `docs/architecture.md` §10. Épreuve :
-  mêmes scènes `gltest` à l'octet, mêmes `frames.csv`. Motif : la plupart des bugs des
-  passes 3 et 4 venaient de correctifs de la passe précédente dans ce fichier.
+  d'état, textures, géométrie, programmes, transport, diagnostic (`docs/architecture.md` §10).
+  Épreuve : mêmes scènes `gltest` à l'octet, mêmes `frames.csv`.
 - [ ] **[Plugin] A5 (plugin) — Configuration lue une fois** (plus de `getenv` dans le chemin
   chaud) et purge des drapeaux `POMPPC_GL_*` dont le repli est mort.
 - [ ] **[Plugin] Gardes de faute ramenées à la cause** : chaque `faute de lecture` et niveau
   envoyé noir devient un compteur observé à zéro sur la matrice.
-- [ ] **[Outils] A5 (scripts) — reste** : `.run/cmr/` n'a plus que des données (sa copie
-  locale de `tssh.sh` lit le port publié depuis le 29/09).
 
 ### Distribution 1.0 et hôtes
 
 - [ ] **[Distribution] 1.0 = installation reproductible** : CD ou paquet, `install.sh` qui
-  reconstruit kext et plugin, disque quotidien recréable depuis l'ISO, matrice verte à chaque commit.
+  reconstruit kext et plugin, disque quotidien recréable depuis l'ISO, matrice verte à chaque
+  commit. **Pas de publication x86 avant la vitesse** (règle du 20/10).
 - [ ] **[Distribution] Firmware reproductible** : `openbios-smp-screamer.elf` est livré en binaire.
 - [ ] **[Hôtes] Un seul disque, deux hôtes** : `tiger.raw` partagé par USB entre le Mac et le PC.
-- [ ] **[TCG] `tlbie` en SMP stock** : défaut de QEMU 9.2, corrigé par `x-sr-tlb` ; à signaler en amont.
+- [ ] **[TCG] `tlbie` en SMP stock** : défaut de QEMU 9.2, corrigé par `x-sr-tlb` ; à signaler
+  en amont. Aussi : `helper_store_[id]batu` vide l'ancien BAT avec le masque de la nouvelle
+  valeur (`tcg-g4.md` §45, `tcg/0062` le relève).
 
 ### Divers
 
-- [ ] **[Système] Quartz Extreme et Core Image** : **engagé le 29/10** dans une VM jetable
-  (`docs/quartz-extreme.md`). « QE / CI : géré », composition par notre plugin, mais image
-  fausse (textures 1555 REV, projection). Éteint par défaut (`install.sh QE=1`). Reste : P1
-  (bureau juste), P2 (fenêtres GL sous QE), P3 (vitesse, endurance, allumage).
+- [ ] **[Système] Quartz Extreme** : allumé sur les deux hôtes (`docs/quartz-extreme.md`).
+  Restes : bug de l'ombre (Ensuite), `install.sh QE=1` et personnalités, Core Image.
 - [ ] **[Frontend] Frontend F1, restes non joués** : la vraie touche Ctrl+Cmd+F, écran Retina,
   plusieurs moniteurs.
 - [ ] **[Son] Arrêt de la boucle principale de 186 ms** en fin de cinématique de DOOM 3
-  (1 fois en 13 parties, 93 ms de silence hôte ; doorbell synchrone exclu,
-  `docs/audio-stabilite.md`).
+  (`docs/audio-stabilite.md`).
 - [ ] **[Métrologie] Métrologie boot** (`docs/metrologie-boot.md`) : baseline de 23,32 s à
-  refaire avec le harnais durci ; A/B du coût du Screamer jamais lancé.
-- [ ] **[Système] « Panique cpu 1 » du 24/09** : jamais reproduite depuis le correctif OpenPIC
-  (hypothèse : verrou tenu par le CPU 0 pris dans la tempête d'IRQ) ; à revoir si le banc la
-  fait réapparaître.
+  refaire ; A/B du coût du Screamer jamais lancé.
+- [ ] **[Système] « Panique cpu 1 » du 24/09** : jamais reproduite depuis le correctif OpenPIC.
+
+## Écarté sur chiffres
+
+Ne pas rouvrir sans fait nouveau ; la mesure est dans la doc citée.
+
+| piste | mesure | doc |
+|---|---|---|
+| Traducteur de second niveau par traces (`x-tier2`, `0048`, `0055`) | DOOM 3 +2,7 % (PC), +5,7 % (M4) | `plan-traducteur-rapide.md` §9 |
+| Régions chaudes recompilées par LLVM | +17,6 % sur DOOM 3 | idem §9 ; 6-10 mois de travail, mis de côté le 25/09 |
+| Mémoire directe (« fastmem ») | net ≤ 5 % pour un chantier entier | `vitesse-doom3-x86.md` §21 |
+| Vérification TLB compacte | extrapolé de la zone froide : 0-4 % | §21 |
+| « Opérande flottant connu partout » | plafond 3,5 %, même sans aucun test | §18.1 |
+| TLB logiciel en pages énormes | les deux bras exécutaient le même code | §18.3 |
+| `tcg/0053` AltiVec flottant connu | neutre en jeu | `tcg-g4.md` §41, `archive/0053-vfp-known` |
+| `tcg/0057` QoS des vCPU (M4) | neutre au repos | §42 |
+| `tcg/0059` `vperm` en PSHUFB | exact, neutre | §43 |
+| `tcg/0060` x8 tel quel | cmr +4,2 % en course | §46 (voir « Maintenant » pour x8 + 0063) |
+| `tcg/0061` `x-bat-skip` | neutre partout en course, rafale non expliquée | §46 |
+| `tcg/0063` `x-dbat-lite` tel quel | cmr neutre, ut +3,7 % | §47 (témoin à jouer) |
+| Appel MMIO synchrone « plugin vers l'hôte » | natif ×0,6-1,5 sur le travail réel | `pomppc-plugin-hote` (branche non fusionnée) |
+| 3-4 vCPU | 0 gain sur les jeux | Bloqué |
 
 ## Bloqué
 
-Chaque entrée indique la condition de reprise ; une cause encore inconnue reste
-un travail de diagnostic dans « Ensuite », pas un blocage.
-
-- [ ] **[Jeux] RTCW** quitte après 8 s (`~/rtcw.command`, LaunchCFMApp) sans rien dessiner ;
-      stdout dans `~/rtcw-dump`. Absent du disque quotidien (`~/Desktop/Wolfenstein` manque).
+- [ ] **[Jeux] RTCW** quitte après 8 s sans rien dessiner ; absent du disque quotidien.
       **Reprise :** jeu réinstallé sur le disque quotidien, puis diagnostic du lancement.
-
-- [ ] **[TCG] 3-4 vCPU** : Tiger démarre sur 3 et 4 (`hw.ncpu 4`) avec
-      `patches/smp-mac99/essais/qemu-mac99-4cpus.patch` (GPIO 15/16 de KeyLargo) ; 0 gain sur
-      les jeux, ~linéaire sur du travail parallèle dans l'invité jusqu'aux 4 cœurs P de l'hôte.
-      Pas de chantier sans demande (1-2 jours pour en faire un mode ; au-delà de 4 : AppleMPIC).
+- [ ] **[TCG] 3-4 vCPU** : Tiger démarre sur 3 et 4 avec
+      `patches/smp-mac99/essais/qemu-mac99-4cpus.patch` ; 0 gain sur les jeux.
       **Reprise :** demande explicite d'un mode 3–4 vCPU.
-
-- [ ] **[TCG] Traducteur de second niveau** (`docs/plan-traducteur-rapide.md`, **mis de côté par
-      l'utilisateur, 25/09**) : régions chaudes recompilées par LLVM depuis les ops TCG.
-      6-10 mois de travail effectif. Première étape si repris : phase 0 (2-4 jours), go si
-      ≥ 70 % du temps vCPU tient dans ≤ 1 000 régions et le plafond dépasse ×1,3 sur l'image.
-      **Reprise :** décision explicite de rouvrir ce chantier.
+- [ ] **[TCG] Traducteur de second niveau** (`docs/plan-traducteur-rapide.md`, mis de côté par
+      l'utilisateur le 25/09). **Reprise :** décision explicite de rouvrir ce chantier.
 
 ## Référence validée
 
-État au 01/10/2026 (A4, flottant natif et attente allumés ; tout par défaut).
+L'état exact de chaque hôte (binaires, défauts allumés, plugin installé, VM) est tenu dans
+`docs/etat-des-hotes.md`, section 2 (PC) et 3 (M4). Repères au 01/11 :
 
 | Élément | État |
 |---|---|
-| Protocole / ABI | GL **v22**, transport kext **v19** (`QGPU_ST_NO_MEM`, `QGPU_REG_NOMEM`, `QGPU_CAP_GLSL_PATHS`, `QGPU_CAP_STATE_BLOCK`, `QGPU_CAP_GEOM_HOST` ajoutés sans changer d'ABI) |
-| QEMU de référence | `~/src/qemu/build/qemu-system-ppc64`, reconstruit le 01/10 au soir (device A4, TCG 0010-0016, Screamer corrigé) ; précédents en `*.avant-tbfp`, `*.avant-a4`. **PC Linux** : `build/` et `build-fast/` (binaire rapide, que prend le lanceur) reconstruits le 07/10 à 07:00 avec le device de la nuit (erreurs par client, combineurs ATI par NV combine4, `vpimm`), série `3d7534b0f2217d54` ; précédents en `*.avant-0707` |
-| Invité quotidien | `tiger.qcow2`, kext v19, plugin `20261001-tout` (gcc-4.0 dans l'invité), SMP=2 (M4) ; **PC** : Tiger 10.4.11, paquet `disks/pomppc-guest-20261007c.iso` (plugin de main 97fad0a : nuit du 06-07/10, `glPixelStore` lu sur le contexte de GLEngine, suites de `vpimm`, « T&L perdu » rendu à GLEngine ; chaîne `20261004-d3x` ; précédents dans `~/pomppc-sauvegarde-20261007`, `-20261007b`, `-20261007c`), kext `caps 0xefffe` ; `POMPPCFsqrt.kext` chargé au démarrage par `/Library/StartupItems/POMPPCFsqrt` (`kHasFsqrt` : la libm prend `fsqrt` ; `sudo sh install.sh --retirer` l'enlève) |
-| TCG | `0001–0004`, `0006–0008`, `0010–0012`, `0014–0016` activés par défaut (`JCBITS=14`) ; `SRTLB=0`, `LFSINLINE=0`, `VFPFAST=0`, `VPERMFAST=0`, `JITNEAR=0`, `FPINLINE=0`, `RETINLINE=0`, `JCIDX=0`, `ICBISYNC=0`, `MSRNOBQL=0`, `FPNATIVE=0`, `FPNATIVE64=0`, `TBFAST=0` les désactivent ; `0013` (`FPFLAT=1`) éteint |
-| Plugin et device | `POMPPC_GL_STATEBLK`, `POMPPC_GL_RAWSANE`, `POMPPC_GL_NATSHM`, `POMPPC_GL_WLUNIF`, `POMPPC_GL_QFLUSH`, `QGPU_GL_FLUSH`, `POMPPC_GL_VPIMM` (07/10) allumés (`=0` éteint chacun) ; `disks/prebuilt` du 07/10 09:05 (précédents : `bench/devloop/prebuilt-20261004`, `prebuilt-20261007-0709`, `prebuilt-20261007b`) |
-| Tests natifs et scripts | M4 (01/10) : **190 OK, 0 échec, 4 ignorés** ; frontend ctest 3/3. PC Linux (07/10 au matin, RTX 4060 Ti, backend GL `FIXED4`, binaires reconstruits) : **240 OK, 0 échec, 5 ignorés** ; job `gpu` : **56 OK, 0 échec** (07/10 09:05, `vpimm` 44 témoins, `pixstore`, `matbegin`, `matsonde`) ; ces quatre scènes vertes dans la VM quotidienne |
-| Travaux clos | Voir `CHANGELOG.md` et `docs/bug-hunt-2026-09-29*.md` |
-| Profils | Plugin : `bench/plugin/ab2-B*/{d3,prey}-fen/mesure/sample.txt`, `bench/a4/depart/LISEZMOI.md` ; TCG : `bench/tcg/` (hors git) |
+| Protocole / ABI | GL **v22**, transport kext **v19** ; capacités ajoutées sans changer de version (`TEX_PRESENT`, `TEX_READBACK_ROWS`, …) |
+| QEMU | 11.1.2 + série `patches/` ; PC : `~/src/qemu/build-fast` (PGO, -O3, -march=native, réentraîné le 01/11 avec cmr, A/B en cours) et `build/` (référence) ; M4 : `~/src/qemu/build` (à reconstruire avec `qgpu-core.c` du 31/10) |
+| Défauts TCG | PC : série jusqu'à `0056` (zone froide) ; M4 : série du PC jusqu'à `0052` + `0054` ; `0057`-`0063` éteints, non nommés |
+| Invité | Tiger 10.4.11, kext du 30/10 (curseur QE), plugin `20261101-packbits` sur le PC (`disks/prebuilt`), `20261023-uvwon` + QE (`f01d2d7`) sur le M4 |
+| Matrice | PC : `references-linux.csv`, 5 cellules automatisées (mb, zen, ut, d3 en fenêtre, cmr plein écran **en course** depuis `6054367`) ; M4 : `references.csv` (jamais touché par le PC), 17/17 vertes le 28/10 |
+| Tests natifs | PC 240 OK / 0 échec (07/10), M4 287 OK / 0 échec (27/10) |
 
 ## Matrice de jeux
 
@@ -374,59 +299,58 @@ hors rafraîchissements admis (2 par 90 images en fenêtre), et une mesure à sc
 sous le seuil du jeu. Une scène `gltest` comparée au rendu d'Apple éprouve chaque notion
 nouvelle. Les modes fenêtre et plein écran sont requis quand le jeu les propose.
 
-**PC Linux, dernier tour complet : `bench/matrice/20261007-0709/tableau.md`** (binaires et paquet
-du 07/10 au matin, avec vidage) : Marble Blast 15,5 / 15,2, Zenerchi 7,4, UT2004 48,8 / 48,5
-**vertes**, images justes ; DOOM 3 123,4 / 121,5 rouge tant que `d3-fen` et `d3-pe` (créée ce
-tour) ne sont pas validées à l'œil (`matrice.py --valider`). Détail : `docs/matrice-jeux.md`
-§6 quater.
+**M4, dernier tour complet : `bench/matrice/20261028-1854`** (28/10, QE, série du PC) : **17
+vertes sur 17 automatisées**. **PC, dernier tour complet : `bench/matrice/20261007-0709`** (07/10) ;
+depuis, les cellules sont rejouées par les A/B (`bench/tcg/ab/*`), un tour complet avec le cœur
+corrigé du 31/10 reste à faire.
 
-**Dernier tour complet : `bench/matrice/20261001-fsqrt/<jeu>/tableau.md`** (configuration du
-01/10 plus `POMPPCFsqrt` chargé ; Nexuiz dans `nx-bis`/`nxg-bis`) : **15 vertes sur 15
-automatisées**, images toutes justes. Tours précédents : `20261001-tout` (15/15, sans `fsqrt`),
-`20260930-wlunif` (16/16), `20260930-0128` (16/16, tour de référence au repos d'avant A4).
-
-| Jeu / chemin | Fenêtre | Plein écran | ms/image fenêtre / plein écran (01/10, `fsqrt`) | 30/09 (`0128`) | Travail restant |
-|---|---|---|---|---|---|
-| Marble Blast Gold | vert | vert | 9,0 / 9,6 | 9,9 / 9,7 | fenêtre sur bureau 800×600 en session |
-| Zenerchi | vert | non automatisé | 4,0 / — | 4,4 / — | automatiser plein écran |
-| DOOM 3 | vert | vert | 56,1 / 56,2 | 61,7 / 61,6 | plantages au chargement, changements de mode, combat |
-| Prey | vert | vert | 50,5 / 49,5 | 70,9 / 70,3 | changements de mode, combat |
-| UT2004 | vert | vert | 25,0 / 25,4 | 27,2 / 27,5 | — |
-| Warcraft III | non automatisé | vert | — / 15,4 | — / 17,8 | fenêtre, texte des menus |
-| Colin McRae | non applicable | vert | — / 48,1 | — / 71,5 | — |
-| Nexuiz ARB (`+r_glsl 0`) | vert | vert | 72,4 / 72,8 | 110,7 / 109,4 | tableaux clients déroulés (suites A4) |
-| Nexuiz GLSL (`+r_glsl 1`) | vert | vert | 33,4 / 33,5 | 41,7 / 41,1 | attente des requêtes d'occlusion |
-| RTCW | non automatisé | non automatisé | — / — | — / — | réinstallation puis diagnostic |
+| Jeu / chemin | Fenêtre | Plein écran | M4 01/10 (ms/image fen. / pe) | Travail restant |
+|---|---|---|---|---|
+| Marble Blast Gold | vert | vert | 9,0 / 9,6 | fenêtre sur bureau 800×600 en session |
+| Zenerchi | vert | non automatisé | 4,0 / — | automatiser plein écran |
+| DOOM 3 | vert | vert | 56,1 / 56,2 | changements de mode, combat ; PC : référence à valider |
+| Prey | vert | vert | 50,5 / 49,5 | changements de mode, combat |
+| UT2004 | vert | vert | 25,0 / 25,4 | armes noires (M4) |
+| Warcraft III | non automatisé | vert | — / 15,4 | fenêtre, texte des menus |
+| Colin McRae | non applicable | vert | — / 48,1 | mesure **en course** sur les deux hôtes ; 1920×1080 |
+| Nexuiz ARB (`+r_glsl 0`) | vert | vert | 72,4 / 72,8 | tableaux clients déroulés (suites A4) |
+| Nexuiz GLSL (`+r_glsl 1`) | vert | vert | 33,4 / 33,5 | attente des requêtes d'occlusion |
+| RTCW | non automatisé | non automatisé | — / — | réinstallation puis diagnostic |
 
 Ces scènes ne prouvent pas le jeu entier. Sources et critères : `docs/matrice-jeux.md`.
-Nexuiz est installé dans `~/Nexuiz` ; sources hôte : `.run/jeux/Nexuiz/sources/`.
-Son lanceur précharge `premierplan.dylib` pour éviter les replis de premier plan.
 
 ## Règles de travail
 
 Avant et après un lot touchant le plugin, le device ou le cœur : `tools/matrice/matrice.py`
 (ou `-j … -m …`), résultats dans `bench/matrice/dernier/tableau.md`.
-À la reprise : `pgrep -fl qemu-system`, `tools/guest/tssh.sh uptime`. Mesurer au premier
+À la reprise : `pgrep -x qemu-system-ppc`, `tools/guest/tssh.sh uptime`. Mesurer au premier
 plan ; DOOM 3 se mesure en parties réelles (`timedemo` refusé par la démo).
-Les redémarrages de la VM sont autorisés ; un seul intervenant dessus à la fois.
 
+- **Vitesse générique** : un levier se juge sur toute la matrice (mb, zen, ut, d3, cmr), jamais
+  sur DOOM 3 seul ; il n'est allumé que s'il ne perd sur aucun jeu.
+- **A/B au repos** : aucune construction, aucun autre QEMU, aucun agent parallèle pendant une
+  mesure ; `MATAB_AVANT="python3 tools/tcg/chargehote.py attendre JOURNAL 1800"`. Trois parties
+  par bras ne prouvent pas un écart sous 3 % (bruit mesuré, `vitesse-doom3-x86.md` §18.3).
+- **Parité** : une accélération x86 a son pendant arm64 au même niveau de preuve avant
+  d'être allumée là-bas, et inversement. Le plugin de l'invité est commun : rien à porter.
+- **Patch TCG** : une propriété de CPU ou d'accélérateur, éteinte par défaut, une preuve
+  d'équivalence, un A/B entrelacé ; **jamais nommé dans `build_qemu_qfb.sh` pendant une
+  campagne** (l'empreinte de la série change, `build-fast` est refusé). Les essais écartés
+  restent sous `archive/*`.
 - **Pas de repli : étendre le protocole.** Sous programme ARB, tout repli vers le rendu d'Apple
-  finit dans `gleBuildInterpolateFunc` → `exit(1)` (`docs/re/glengine-exit-interpolateur.md`).
-- **`qgpu_proto.h` ⇒ QEMU + plugin** (`cycle.sh NORUN=1`, sans redémarrer) ; **`qgpu_abi.h` ⇒
-  QEMU + kext (`install.sh` dans l'invité, redémarrage) + plugin**, et c'est rare. Le plugin
-  refuse un kext d'avant la v19 et un QEMU d'un autre `qgpu_proto.h` ; le kext refuse un device
-  sans `QGPU_CAP_CLIENTS`.
-- **Patch TCG** : une propriété de CPU, éteinte par défaut, une preuve d'équivalence, un A/B
-  entrelacé ; allumée par défaut seulement après DOOM 3 (six parties par mode).
-- **Mesurer avant d'optimiser** : `sample <pid> 10` dans Tiger, `frames.csv` à scène égale ; le
-  self % localise, il ne valide pas (`docs/metrologie-boot.md`).
+  finit dans `gleBuildInterpolateFunc` → `exit(1)`.
+- **`qgpu_proto.h` ⇒ QEMU + plugin** ; **`qgpu_abi.h` ⇒ QEMU + kext (redémarrage) + plugin**,
+  et c'est rare.
+- **Mesurer avant d'optimiser** : `perf` + `-perfmap` + `tools/re/perfpart.py` sur le PC,
+  `sample` dans l'invité et sur le M4 ; `frames.csv` à scène égale. Le self % localise, il ne
+  valide pas.
 - **Un lot = un changement + une épreuve + un commit**, une ligne ici tant qu'il est ouvert, une
   entrée dans `CHANGELOG.md` quand il est fini.
-- **Un seul agent sur la VM à la fois** ; les autres travaillent en copie isolée, sur le cœur et
-  les tests natifs.
-- **Après un `killall` de DOOM 3, redémarrer l'invité.** Ne jamais supprimer `.run/tiger.lock`
-  (le flock meurt avec QEMU ; « Tiger tourne déjà » = un QEMU vit encore). Après `install.sh` en
-  root : `sudo chown -R tiger ~/pomppc-build`.
+- **Un seul agent sur la VM à la fois** ; les autres travaillent en copie isolée. L'implémentation
+  non triviale passe par des sous-agents Opus ; la session principale orchestre, mesure et
+  committe (demande de l'utilisateur, 01/11).
+- **Après un `killall` de DOOM 3, redémarrer l'invité.** Ne jamais supprimer `.run/tiger.lock`.
+  Jamais `pgrep -f`/`pkill -f` avec un motif présent dans sa propre ligne de commande.
 
 ---
 
@@ -435,16 +359,18 @@ Les redémarrages de la VM sont autorisés ; un seul intervenant dessus à la fo
 | Sujet | Fichier |
 |---|---|
 | Ce qui est fini (lots, versions du protocole, mesures) | `CHANGELOG.md` |
+| Vitesse sur le PC x86-64 (profils, leviers, chiffres) | `docs/vitesse-doom3-x86.md` |
+| Parité et vitesse sur le M4 | `docs/parite-m4-2510.md`, `docs/etat-des-hotes.md` §3 |
+| Allègement du plugin de l'invité | `docs/plugin-allegement.md`, `docs/d3-plugin-x86.md` |
+| Processeur émulé : relevés, patches, A/B | `docs/tcg-g4.md`, `docs/flottant-rapide.md` |
 | Matrice de jeux (A3) : lancer, preuves, références, pièges | `docs/matrice-jeux.md` |
-| Banc d'endurance, cause du gel OHCI | `docs/endurance.md` |
+| Banc d'endurance | `docs/endurance.md` |
+| Quartz Extreme | `docs/quartz-extreme.md` |
 | Architecture, rétro-ingénierie, offsets, boucle de dev | `docs/architecture.md`, `docs/gpu-3d-tiger.md`, `docs/re/README.md` |
 | Protocole (v7 → v23) | `docs/protocole-v*.md` |
-| Processeur émulé : relevés, patches, A/B | `docs/tcg-g4.md`, `docs/flottant-rapide.md` |
 | Backend GL et attente de l'invité | `docs/backend-gl-attente.md` |
 | Son | `docs/audio-stabilite.md` |
 | Traducteur de second niveau (plan mis de côté) | `docs/plan-traducteur-rapide.md` |
-| Bilan raisonné du 23/09 (jeu par jeu) | `docs/bilan-2026-09-23-jeux-tiger.md` |
-| Étude « court-circuiter GLEngine ? » | `docs/re/etude-court-circuit-glengine.md` |
 | Bug hunts (22/09, 29/09 passes 1-4) | `docs/bug-hunt-2026-09-*.md` |
 | Feuille de route de fond (OpenGL 1.5, QE, Core Image) | `docs/roadmap-opengl15.md` |
 | Références externes (kext Tiger, IOGraphics, virtio-gpu) | `docs/references-ingenierie.md` |
