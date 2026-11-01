@@ -1,0 +1,91 @@
+diff -ru a/target/ppc/cpu.h b/target/ppc/cpu.h
+--- a/target/ppc/cpu.h	2026-10-31 23:36:37.376848279 +0400
++++ b/target/ppc/cpu.h	2026-10-31 23:36:37.362806025 +0400
+@@ -1719,6 +1719,13 @@
+      * that leaves or enters it flushes only the range of the valid value.
+      */
+     bool bat_skip;
++    /*
++     * POMPPC tcg/0062, x-bat-old-mask: the write of an upper BAT flushes the
++     * range of the OLD value with the OLD block length (stock QEMU used the
++     * new value's: clearing a 256 MiB BAT to 0 flushed its first 128 KiB).
++     */
++    bool bat_old_mask;
++    uint32_t bat_trunc_log;
+     uint32_t irq_seq;
+     /*
+      * x-pmu-real (POMPPC tcg/0049): the POWER8 PMU model (power8-pmu.c)
+diff -ru a/target/ppc/cpu_init.c b/target/ppc/cpu_init.c
+--- a/target/ppc/cpu_init.c	2026-10-31 23:36:37.377642710 +0400
++++ b/target/ppc/cpu_init.c	2026-10-31 23:36:37.363659620 +0400
+@@ -205,6 +205,13 @@
+      */
+     DEFINE_PROP_BOOL("x-bat-skip", PowerPCCPU, env.bat_skip, false),
+     /*
++     * POMPPC tcg/0062.  x-bat-old-mask: writing an upper BAT flushes the old
++     * BAT's range with the old block length, not the new one (a cleared
++     * 256 MiB BAT left stale TLB entries past its first 128 KiB).  Off by
++     * default.
++     */
++    DEFINE_PROP_BOOL("x-bat-old-mask", PowerPCCPU, env.bat_old_mask, false),
++    /*
+      * AltiVec vaddfp/vsubfp/vmaddfp/vnmsubfp: the four lanes at once on the
+      * host FPU when softfloat's hardfloat path would take each of them
+      * (needs x-fast-fp to ever apply).  Off by default.
+diff -ru a/target/ppc/mmu_helper.c b/target/ppc/mmu_helper.c
+--- a/target/ppc/mmu_helper.c	2026-10-31 23:36:37.377902841 +0400
++++ b/target/ppc/mmu_helper.c	2026-10-31 23:36:37.364443763 +0400
+@@ -194,6 +194,31 @@
+ }
+ #endif
+ 
++/*
++ * POMPPC tcg/0062: the mask that flushes the old BAT.  Stock QEMU takes the
++ * new value's; x-bat-old-mask takes the old one's.  The first 64 writes that
++ * leave a valid BAT larger than the new mask are reported on stderr either way
++ * (the flush stock QEMU truncates).
++ */
++static target_ulong bat_old_flush_mask(CPUPPCState *env, char id, int nr,
++                                       target_ulong old, target_ulong value,
++                                       target_ulong mask)
++{
++    target_ulong omask = (old << 15) & 0x0FFE0000UL;
++
++    if ((old & 3) && omask > mask && env->bat_trunc_log < 64) {
++        env->bat_trunc_log++;
++        fprintf(stderr, "bat-old-mask: cpu %d %cBAT%du " TARGET_FMT_lx
++                " -> " TARGET_FMT_lx " nip " TARGET_FMT_lx
++                " : ancien bloc %u Kio, vidage %s %u Kio\n",
++                env_cpu(env)->cpu_index, id, nr, old, value, env->nip,
++                (unsigned)((omask + 0x20000) >> 10),
++                env->bat_old_mask ? "complet," : "tronqué à",
++                (unsigned)(((env->bat_old_mask ? omask : mask) + 0x20000) >> 10));
++    }
++    return env->bat_old_mask ? omask : mask;
++}
++
+ static inline void dump_store_bat(CPUPPCState *env, char ID, int ul, int nr,
+                                   target_ulong value)
+ {
+@@ -210,7 +235,9 @@
+     if (env->IBAT[0][nr] != value) {
+         mask = (value << 15) & 0x0FFE0000UL;
+ #if !defined(FLUSH_ALL_TLBS)
+-        do_invalidate_BAT(env, env->IBAT[0][nr], mask);
++        do_invalidate_BAT(env, env->IBAT[0][nr],
++                          bat_old_flush_mask(env, 'I', nr, env->IBAT[0][nr],
++                                             value, mask));
+ #endif
+         /*
+          * When storing valid upper BAT, mask BEPI and BRPN and
+@@ -247,7 +274,9 @@
+          */
+         mask = (value << 15) & 0x0FFE0000UL;
+ #if !defined(FLUSH_ALL_TLBS)
+-        do_invalidate_BAT(env, env->DBAT[0][nr], mask);
++        do_invalidate_BAT(env, env->DBAT[0][nr],
++                          bat_old_flush_mask(env, 'D', nr, env->DBAT[0][nr],
++                                             value, mask));
+ #endif
+         mask = (value << 15) & 0x0FFE0000UL;
+         env->DBAT[0][nr] = (value & 0x00001FFFUL) |

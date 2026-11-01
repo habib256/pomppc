@@ -131,7 +131,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261023-uvwon"
+#define POMPPC_PLUGIN_REV "20261101-packbits"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -205,6 +205,10 @@
 #ifndef UVWIDE_DEFAULT
 /* allumé le 23/10 après l'A/B de bench/tcg/ab/uvw-* (docs/plugin-allegement.md §7.7) */
 #define UVWIDE_DEFAULT 1
+#endif
+#ifndef PACKBITS_DEFAULT
+/* 01/11 : empaquetage sans flottants (va_pack_planned, put_f) */
+#define PACKBITS_DEFAULT 1
 #endif
 /* +0x0c du bloc de changements, lumière i : bit 2 + 2i pour ses paramètres
    (glLightfv, glLightf), bit 3 + 2i pour son allumage (relevé R4,
@@ -1317,6 +1321,9 @@ static struct {
     unsigned long   n_uv_take, n_uv_units, n_uv_full;   /* UNITVD : repris, unités
                                            refaites, renvois au verdict complet */
     unsigned long   n_uv_chk_same, n_uv_chk_diff;       /* UNITVD + VERDICTCHECK */
+    int             packbits;           /* 01/11 : POMPPC_GL_PACKBITS, octets non
+                                           signés par table, bornage sur les bits
+                                           (0 : va_comp et comparaisons flottantes) */
     int             uvwide;             /* 23/10 : POMPPC_GL_UVWIDE (verdict par unité
                                            élargi) ; 2 = contrôle */
     unsigned long   n_uvw_take, n_uvw_units, n_uvw_off, n_uvw_nounit;  /* UVWIDE :
@@ -3049,6 +3056,9 @@ void pomppc_backend_init(void)
                 G.uvwide = G.unitvd ? (e && e[0] ? (int)(e[0] - '0') : UVWIDE_DEFAULT) : 0;
                 if (G.uvwide < 0 || G.uvwide > 2)
                     G.uvwide = 0;
+                /* 01/11 (docs/plugin-allegement.md §8) */
+                e = getenv("POMPPC_GL_PACKBITS");
+                G.packbits = e && e[0] ? e[0] != '0' : PACKBITS_DEFAULT;
                 /* 21/10 (docs/d3-plugin-x86.md §10) */
                 e = getenv("POMPPC_GL_DISPFAST");
                 G.dispfast = G.verdict ? (e && e[0] ? (int)(e[0] - '0') : DISPFAST_DEFAULT) : 0;
@@ -3102,13 +3112,13 @@ void pomppc_backend_init(void)
                     "texmemo=%d stskip=%d statecheck=%d wlunif=%d stateblk=%d "
                     "rawsane=%d natshm=%d idxlazy=%d idxvec=%d dispone=%d unitvd=%d texpage=%d "
                     "zones=%d (flux %lu Kio) dispfast=%d progmemo=%d mtxdirty=%d stunit=%d "
-                    "displock=%d hotinline=%d uvwide=%d\n",
+                    "displock=%d hotinline=%d uvwide=%d packbits=%d\n",
                     G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range,
                     G.count, G.verdict, G.vcheck, G.wl, G.texmemo, G.stskip, G.stcheck,
                     G.wlunif, G.stblk + G.stblk_check, G.rawsane, G.natshm,
                     G.idxlazy, G.idxvec, G.dispone, G.unitvd, G.texpage,
                     G.zones, G.zl_cmd_bytes >> 10, G.dispfast, G.progmemo, G.mtxdirty,
-                    G.stunit, G.displock, HOTINLINE_DEFAULT, G.uvwide);
+                    G.stunit, G.displock, HOTINLINE_DEFAULT, G.uvwide, G.packbits);
             /* 21/10 : adresse d'un symbole exporté, pour nommer les blocs d'un
                profil d'instructions (greffon TCG hotblocks, tools/re/hotplug.py) */
             gl_note("plugin : pomppc_geom_dispatch à 0x%08lx\n",
@@ -9323,12 +9333,36 @@ static unsigned long fbits(float f)
     return v.u;
 }
 
+/* 01/11 (POMPPC_GL_PACKBITS) : le bornage ci-dessous fait sur les bits, sans
+ * charger le flottant (sous l'émulateur, lfs, fcmpu et stfs coûtent bien plus
+ * que lwz, cmplw et stw). Même résultat au bit près : les flottants positifs se
+ * rangent comme leurs bits, donc |v| < 1e9 <=> (b & 0x7fffffff) < bits(1e9f) ;
+ * -0.0 reste -0.0, NaN donne 0, le reste (infinis compris) ±1e9. */
+#define F1E9_BITS 0x4e6e6b28UL
+typedef unsigned long __attribute__((__may_alias__)) ulong_alias;
+
+HOT unsigned long clamp_bits(unsigned long b)
+{
+    unsigned long a = b & 0x7fffffffUL;
+    if (a < F1E9_BITS)
+        return b;
+    if (a > 0x7f800000UL)
+        return 0;
+    return (b & 0x80000000UL) | F1E9_BITS;
+}
+
 /* Recopie n flottants dans des mots de commande, en bornant ce que le cœur
  * refuse (NaN, infini, |v| > 1e9) : un seul mot fautif ferait rejeter toute la
  * soumission, donc on préfère une valeur nulle à un flux perdu. */
 HOT void put_f(unsigned long *dst, const float *src, int n)
 {
     int i;
+    if (G.packbits) {
+        const ulong_alias *b = (const ulong_alias *)src;
+        for (i = 0; i < n; i++)
+            dst[i] = clamp_bits(b[i]);
+        return;
+    }
     for (i = 0; i < n; i++) {
         float v = src[i];
         if (!(v > -1e9f && v < 1e9f))
@@ -13118,6 +13152,28 @@ static void va_plan_build(VaPlan *pl, PCtx *p, const unsigned char *V, unsigned 
             va_plan_attr(&pl->a[pl->n++], p, V, 16 + u, QGPU_GS_COUNT(gs, u), 1.0f);
 }
 
+/* 01/11 (POMPPC_GL_PACKBITS, docs/plugin-allegement.md §8) : un octet non signé
+ * (couleurs de Colin McRae, d'UT2004…) passait par va_comp, sa conversion par le
+ * double magique, une fdivs par 255 et le bornage à ±1e9, par composante et par
+ * sommet. Les deux tables sont remplies par la MÊME expression que va_comp : le
+ * résultat est le même au bit près, et un octet n'a pas besoin du bornage. */
+static float va_ub_tab[2][256];
+static int va_ub_ready;
+
+static const float *va_ub_table(int norm)
+{
+    if (!va_ub_ready) {
+        unsigned v;
+        for (v = 0; v < 256; v++) {
+            unsigned char b = (unsigned char)v;
+            va_ub_tab[0][v] = va_comp(&b, VA_GL_UBYTE, 0);
+            va_ub_tab[1][v] = va_comp(&b, VA_GL_UBYTE, 1);
+        }
+        va_ub_ready = 1;
+    }
+    return va_ub_tab[norm != 0];
+}
+
 static void va_pack_planned(float *dst, const VaPlan *pl, unsigned long i)
 {
     int j, k;
@@ -13132,7 +13188,12 @@ static void va_pack_planned(float *dst, const VaPlan *pl, unsigned long i)
         }
         {
             const unsigned char *src = at->src + (long)i * at->stride;
-            if (at->type == VA_GL_FLOAT) {
+            if (at->type == VA_GL_FLOAT && G.packbits) {
+                const ulong_alias *b = (const ulong_alias *)src;
+                ulong_alias *d = (ulong_alias *)dst;
+                for (k = 0; k < at->src_n; k++)
+                    d[k] = clamp_bits(b[k]);
+            } else if (at->type == VA_GL_FLOAT) {
                 const float *f = (const float *)src;
                 for (k = 0; k < at->src_n; k++) {
                     float v = f[k];
@@ -13140,6 +13201,10 @@ static void va_pack_planned(float *dst, const VaPlan *pl, unsigned long i)
                         v = (v > 0.0f) ? 1e9f : (v < 0.0f) ? -1e9f : 0.0f;
                     dst[k] = v;
                 }
+            } else if (at->type == VA_GL_UBYTE && G.packbits) {
+                const float *t = va_ub_table(at->norm);
+                for (k = 0; k < at->src_n; k++)
+                    dst[k] = t[src[k * at->bpc]];
             } else {
                 for (k = 0; k < at->src_n; k++) {
                     float v = va_comp(src + k * at->bpc, at->type, at->norm);

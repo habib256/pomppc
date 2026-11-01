@@ -1020,3 +1020,39 @@ au repos du noyau, juste avant `_idle_thread` (0x33f3c-0x33fd0 : `ml_set_interru
 ms/image : le `mftb` rapide vaut **−2,4 %** sur ut. Sa vitesse compte donc un peu. Un `mftb` en
 ligne (sans helper) peut encore gagner, mais pas les 13,8 % du profil, dont une grande part est
 une attente active.
+
+## 25. Colin McRae mesuré en course, profil de la course (nuit du 31/10 au 01/11)
+
+**La fenêtre de cmr-pe ne mesurait pas la course.** Après le premier chargement, le jeu passe par
+une transition (environ 1 281 sommets bruts par échange, puis 2) avant un second chargement et
+la course (2 109-2 173 sommets). Sur le M4, la transition tourne sous le seuil de 10 ms/échange
+de `cmr.fenetre` : elle est sautée et la course est mesurée. Sur le PC, elle tourne à 12-16
+ms/échange : depuis le 28/10, **toutes** les mesures cmr du PC (matrice, A/B, profil croisé du
+§23) portaient sur elle, à 44-48 ms/image. La course coûte en réalité **82,1 ms/image** sur le
+binaire de production (`bench/tcg/ab/cmr-course-0111`, 79,9 et 84,3). Le « 16 bits ×2 plus lent
+sous ImGuiDock » du 31/10 n'était que cela : le jeu rend toujours en 32 bits (`ctx-bits 32`),
+et les deux parties « 16 bits » avaient mesuré la course par hasard (pas de second chargement
+avant elle). Correctif `6054367` : la fenêtre exige au moins 1 700 sommets bruts par échange
+(`raw_vertices` de `frames.csv`, compté dans l'invité, donc le même sur les deux hôtes) ;
+`plancher_ms_linux` 105. Rejoué hors ligne sur les 27 `frames.csv` gardés : seules les trois
+parties qui avaient mesuré la course (deux en « 16 bits », `cmr-trace2-3110`) gardent une fenêtre.
+
+Conséquence : le refus de `tcg/0060` (cmr +2,8 %, §24) et le gain de `tcg/0061` sur cmr (−3,3 %,
+`tcg-g4.md` §45) portaient sur la transition. Ils sont rejoués ci-dessous.
+
+**Profil de la course** (`bench/tcg/ab/xprof-0111-cmr`, `build-fast/`, `perf` 30 s, `-perfmap`) :
+1,13 cœur de vCPU, 92,6 ms de vCPU par image. Code généré 80,4 %, recherche de blocs 6,2 %
+(`qht_lookup_custom` 2,9 %, `helper_lookup_tb_ptr` 2,5 %), `do_invalidate_BAT` **2,1 %**, boucle
+d'exécution 2,6 %, softmmu 2,7 %, base de temps 1,0 %. Le code généré, réparti par adresse de
+l'invité : le **plugin GL de l'invité** (chargé à 0x1d6c000, `disks/prebuilt` du 30/10, décalage
+tiré de `pomppc_geom_dispatch`) fait 17,9 % de tous les échantillons, environ 20 ms de vCPU par
+image. En tête : `geom_draw_client` 4,8 % (surtout `va_pack_planned` mis en ligne : conversion des
+octets de couleur par le double magique et `fdivs` par 255, bornage ±1e9 en flottant),
+`prog_params_arena` 1,2 % (`put_f`, même bornage), `prog_sync`, `prog_state`, `send_state`,
+`fbits` (non mis en ligne, 0,4 %). Levier : `POMPPC_GL_PACKBITS`, `plugin-allegement.md` §8.
+
+**Rejoués en course** (`tcg-g4.md` §46) : 0060 (x8) coûte **+4,2 %** sur cmr (89,7 → 93,5), d3
+neutre : éteint. 0061 est neutre partout, ut compris : abandonné.
+
+**Levier plugin `POMPPC_GL_PACKBITS`** (`plugin-allegement.md` §8) : allumé, gain sur les cinq
+jeux (d3 −3,9 %, ut −4,5 %, zen −4,2 %, mb −1,2 %, cmr −3,5 %).

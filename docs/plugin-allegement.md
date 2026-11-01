@@ -712,3 +712,43 @@ Preuves aux nouveaux défauts (VM de dev `tiger-dev-plugin.raw`, aucune variable
   - fichier : `bench/uvwide-2310/GLDriver-POMPPC-20261023-uvwon.bundle.tar` du worktree ;
   - md5 du tar : `653d846c2eafe43a13401ddd31d6947d` ;
   - md5 du binaire : `6ec91119da790f95f4acecace80cd40f`.
+
+## 8. Empaquetage sans flottants : `POMPPC_GL_PACKBITS` (01/11, révision `20261101-packbits`)
+
+**Point de départ.** Profil de la course de Colin McRae (`vitesse-doom3-x86.md` §25,
+`bench/tcg/ab/xprof-0111-cmr`). Le plugin y fait **31 % du temps vCPU**, la plus forte part de la
+matrice : mb 16 %, zen 12 %, ut 11 %, d3 22 % (profils `xprof-3110-mbzenutd3`, répartis par
+l'adresse de chargement du plugin dans `note.txt`). En tête, `geom_draw_client` (`va_pack_planned`
+mis en ligne) et `prog_params_arena` (`put_f`). Par composante et par sommet, deux coûts :
+- un octet non signé (les couleurs de cmr, d'UT2004…) passe par `va_comp` : conversion par le
+  double magique, `fdivs` par 255, puis le bornage à ±1e9 ;
+- le bornage d'un flottant charge et compare en flottant (`lfs`, `fcmpu`, `stfs`), bien plus
+  cher sous l'émulateur que `lwz`, `cmplw`, `stw`.
+
+**Le levier** (`pomppc_accel.c`, `PACKBITS_DEFAULT 1`, `POMPPC_GL_PACKBITS=0` l'éteint ; l'en-tête
+de la note dit `packbits=`) :
+- `clamp_bits` borne sur les bits. Les flottants positifs se rangent comme leurs bits, donc
+  |v| < 1e9 ⇔ `(b & 0x7fffffff) < bits(1e9f)` (`0x4e6e6b28`). −0,0 reste −0,0, un NaN donne 0, le
+  reste (infinis compris) ±1e9 : le résultat est celui du bornage flottant, au bit près ;
+- `put_f` et la branche flottante de `va_pack_planned` copient les mots par `clamp_bits` ;
+- les octets non signés passent par deux tables de 256 flottants (normalisé ou non), remplies
+  au premier usage par la **même** expression `va_comp`. Un octet n'a pas besoin du bornage.
+
+**Preuve** (VM de dev, single-user, job `plugmd5`, `ref:POMPPC_GL_PACKBITS=0` contre
+`pb:POMPPC_GL_PACKBITS=1`) : 69 scènes, **0 écart** (`arbvp`…`glsldp` sortent rc=1 dans les deux
+modes, comme au §7.7). Bundle : `bench/packbits-0111/GLDriver-POMPPC-20261101-packbits.bundle.tar`,
+md5 du tar `6a119afaeb18cf9ec7f0fe5e986d0724`. Installé dans la VM quotidienne le 01/11 vers 3 h.
+
+**A/B au repos** (`bench/tcg/ab/packbits-0111-chaine.sh`, binaire de production `build-fast`, même
+bundle, 3 parties par bras, ordre entrelacé, `chargehote.py attendre` ; médianes, ms/image) :
+
+| cellule | `PACKBITS=0` | `PACKBITS=1` | écart |
+|---|---:|---:|---:|
+| mb-fen | 8,4 | 8,3 | −1,2 % |
+| zen-fen | 4,8 | 4,6 | −4,2 % (les 3 pb ≤ les 3 ref) |
+| ut-fen | 41,8 | 39,9 | −4,5 % (dispersion 7-9 %) |
+| d3-fen | 81,6 | 78,4 | −3,9 % |
+| cmr-pe, en course | 84,8 | 81,8 | −3,5 % (parties 83,8 / 88,4 / 84,8 contre 81,8 / 83,9 / 76,9) |
+
+**Décision** : allumé par défaut (`PACKBITS_DEFAULT 1`), gain sur les cinq jeux. C'est du code de
+l'invité, le même sur les deux hôtes : rien à porter côté arm64, le M4 le reçoit avec le bundle.

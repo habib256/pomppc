@@ -5725,3 +5725,37 @@ une écriture de 0 ne vide que ses premiers 128 Kio. Les BAT de `bcopy_physvir_3
 **Décision** : `tcg/0061` reste **éteint** et non nommé (empreinte inchangée). Suite : reproduire
 la rafale (cmr sous vérificateur avec `x-bat-skip`, plusieurs sessions), journaliser les écritures
 de BAT autour d'elle, et trancher le défaut du masque d'origine.
+
+## 46. 0060 et 0061 rejoués en course, `tcg/0062` (`x-bat-old-mask`), PC x86-64, nuit du 31/10 au 01/11
+
+La fenêtre de cmr-pe mesurait une transition d'avant la course (`vitesse-doom3-x86.md` §25,
+`6054367`). Le refus de 0060 (§44) et le gain de 0061 sur cmr (§45) sont rejoués, fenêtre en course.
+
+**`tcg/0062` `x-bat-old-mask`** (`patches/tcg/0062-ppc-bat-old-mask.patch`, éteint, non nommé) :
+`helper_store_[id]batu` vide l'ancien BAT avec le masque de son **ancienne** valeur (défaut
+d'origine de QEMU, §45). Que la propriété soit allumée ou non, les 64 premiers vidages tronqués sont
+relevés sur stderr (`bat-old-mask: cpu … ancien bloc …`). Session cmr sous vérificateur, bras
+`skip` (`x-bat-skip`) seul (`bench/tcg/ab/batmask-0111-verif-cmr`) : **0 divergence, 0 vidage
+tronqué**, mais la course n'est pas atteinte (le vérificateur ralentit tout). Le bras `mask` n'a
+pas été joué. La rafale de §45 reste non reproduite, sa cause non tranchée ; le défaut du masque
+ne s'est pas montré.
+
+**A/B au repos** (`bench/tcg/ab/nuit-0111-chaine.sh`, un seul binaire -O2 `~/src/qemu-nuit/build-x` :
+série de production + 0060 + 0061 + 0062, tout éteint ; 3 parties par bras, médianes, ms/image) :
+
+| cellule | ref | x8 (0060, 2^8 cases) | bat (0061) |
+|---|---:|---:|---:|
+| mb-fen | 9,2 | 8,4 (−8,7 %) | 9,1 |
+| zen-fen | 5,0 | 4,9 | 4,9 |
+| ut-fen | 41,1 | 40,3 (−1,9 %) | 40,6 |
+| d3-fen | 85,0 | 85,8 (bruit) | 84,9 |
+| cmr-pe, en course | 89,7 | **93,5 (+4,2 %)** | 90,3 (bruit) |
+
+Parties de cmr : ref 89,7 / 90,1 / 89,2 ; x8 93,7 / 93,5 / 91,8 ; bat 90,3 / 89,6 / 91,5. Toutes en
+course : la fenêtre exige ≥ 1 700 sommets bruts par échange.
+
+**Décision** : 0060 reste **éteint**. En course, cmr le refuse plus nettement que dans la
+transition (+4,2 % contre +2,8 %), les trois parties x8 sont au-dessus des trois de ref, et d3 ne
+gagne plus. 0061 est **neutre** partout, ut compris : le −6,9 % de §45 ne se retrouve pas. Il
+garde aussi sa rafale non expliquée : abandonné. 0060, 0061 et 0062 restent hors de
+`build_qemu_qfb.sh`.
