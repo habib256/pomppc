@@ -124,7 +124,9 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
   3. **`tcg/0058` délais courts** : l'attente à la microseconde fait zen −18 % mais ut +6,6 % ;
      variante `select` pour les seuls délais sous la milliseconde, profil d'UT (verrou).
      Contrat de `g_poll` corrigé le 01/11 nuit (`tcg/fixes/0058`, 42 cas et deux mutants) ;
-     les chiffres du 30/10 précèdent cette correction. Le levier reste éteint.
+     les chiffres du 30/10 précèdent cette correction. Variante `tcg/0065` préparée le
+     02/11 (`POLLNS=2`, strictement sous 1 ms), 56 cas et deux mutants de routage : A/B
+     à faire contre le défaut et le mode 1 corrigé. Le levier reste éteint.
   4. Parité de la zone froide (`tcg/0056`, saut long aarch64) en dernier : gain PC de 1-2 %
      sur un goulot L1i propre au PC.
   5. Tranche d'endurance du kext du 01/11 **faite dans la nuit** : 15 démarrages de contrôle

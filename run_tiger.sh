@@ -993,9 +993,14 @@ fi
 # et les minuteries de l'invité partent jusqu'à 1 ms en retard. POLLNS=1 passe
 # POMPPC_POLL_NS=1 à QEMU (select à la microseconde). Éteint par défaut tant
 # que l'A/B n'est pas fait ; un QEMU sans 0058 ignore la variable.
+# POLLNS=2 : tcg/0065, seulement 0 < délai < 1 ms ; sinon g_poll.
 if [ "${POLLNS:-0}" != 0 ]; then
-  export POMPPC_POLL_NS=1
-  MODE="$MODE + ATTENTE À LA MICROSECONDE"
+  export POMPPC_POLL_NS="$POLLNS"
+  if [ "$POLLNS" = 2 ]; then
+    MODE="$MODE + ATTENTE µs SOUS 1 ms"
+  else
+    MODE="$MODE + ATTENTE À LA MICROSECONDE"
+  fi
 fi
 # --- Taille du cache de sauts (x-jc-bits, patches/tcg/0011, docs/tcg-g4.md §18)
 # --- propriété de l'ACCÉLÉRATEUR (les blocs sont partagés entre vCPU et la

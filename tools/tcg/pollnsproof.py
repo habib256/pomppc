@@ -44,7 +44,7 @@ def main():
                        ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-I", tmp,
                         str(Path(__file__).with_suffix(".c")), "-o", str(binary)] + flags,
                        check=True)
-        for mode in (None, "0", "1"):
+        for mode in (None, "0", "1", "2"):
             env = dict(os.environ)
             env.pop("POMPPC_POLL_NS", None)
             if mode is not None:

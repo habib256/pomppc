@@ -49,7 +49,7 @@ allumées sur les deux hôtes, `FASTFP` et `SRTLB` compris ; sur le M4, la séri
 0037-0039 dans le binaire, sondé) : en cas de doute, le bloc des défauts du lanceur fait foi,
 résumé dans `docs/tcg-g4.md` (« État au 01/11/2026 », en tête). Les patches TCG nommés par le
 constructeur vont de `tcg/0001` à `tcg/0059` (sans 0005, 0009, 0030, 0036, 0044, 0053), plus
-`tcg/0064` (fusionné le 01/11) ; `tcg/0060` à `0063` sont dans `patches/tcg/` mais **non
+`tcg/0064` (fusionné le 01/11) et `tcg/0065` (variante macOS éteinte, 02/11) ; `tcg/0060` à `0063` sont dans `patches/tcg/` mais **non
 nommés**, donc non appliqués (tableau « Présents, non appliqués » plus bas).
 
 | Fichier | Rôle |
@@ -130,6 +130,7 @@ et l'en-tête de `scripts/build_qemu_qfb.sh`) :
 | `tcg/0056-tcg-cold-slow-paths.patch` | chemins lents en zone froide de la région, `x-tcg-cold` (accélérateur ; allumé sur Linux x86-64 depuis le 31/10, sans effet sur arm64). `docs/vitesse-doom3-x86.md` §20, §23. |
 | `tcg/0057-tcg-vcpu-qos.patch`, `0058-poll-ns-macos.patch` | QoS des fils vCPU (`x-vcpu-qos`) et attente de la boucle principale à la µs (`POMPPC_POLL_NS`), macOS seul, éteints. `docs/tcg-g4.md` §42. |
 | `tcg/fixes/0058-poll-ns-contract.patch` | Après 0058 : garder le compte de `select` et laisser `revents` intact au retour nul/erreur, comme `g_poll` de l'hôte macOS. `tools/tcg/pollnsproof.py` (42 cas, deux mutants). Aucun allumage. |
+| `tcg/0065-macos-poll-short.patch` | Après 0058 et son correctif : `POLLNS=2`, `select` seulement sous 1 ms (strictement). Mode 1 inchangé, défaut éteint. 56 cas et mutants de routage ; A/B à faire. `docs/tcg-g4.md` §42.2. |
 | `tcg/0059-ppc-vperm-inline.patch` | `vperm` en opcodes vectoriels de l'hôte (PSHUFB), `x-vperm-inline`, `x-vperm-verify` (éteint, neutre ; émetteur x86_64 seul, le helper ailleurs). §43. |
 | `tcg/0064-tcg-tb-head.patch` | tête de bloc allégée : `can_do_io` déduit de l'adresse de retour, `goto_tb` vers l'avant chaîné après la vérification d'interruption (`x-tb-head`, propriété de l'accélérateur, `TBHEAD=1|2|3`, `7` = preuve ; **éteint par défaut**, mesuré sur banc seulement). `docs/anatomie-ppc32.md`. Écrit sous le numéro 0051 sur une branche, renuméroté à la fusion du 01/11. |
 
@@ -308,7 +309,7 @@ fichiers ; l'arbre ainsi patché redonne l'ELF à l'octet près (sha1 `f11083a8�
 
 Détail du protocole de mesure et des conclusions : `docs/metrologie-boot.md` (01, 02) et
 `docs/tcg-g4.md` (essais/0002, essais/0005). Aucun de ces patches n'est appliqué par le
-build. Les patches de performance appliqués (`fastfp/`, `tcg/0001` à `0059`, `tcg/0064`) ajoutent chacun
+build. Les patches de performance appliqués (`fastfp/`, `tcg/0001` à `0059`, `tcg/0064` et `0065`) ajoutent chacun
 une propriété éteinte par défaut dans QEMU (sauf les corrections sans condition de `0010` et les
 pendants d'hôte sans propriété) : sans elle, le binaire se comporte comme avant. `run_tiger.sh`
 en allume la plupart (`docs/tcg-g4.md`, « État au 01/11/2026 »).

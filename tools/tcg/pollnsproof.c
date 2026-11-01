@@ -67,9 +67,14 @@ static void compare(const char *name, const GPollFD *input, unsigned n,
 int main(void)
 {
     const int64_t delays[] = {-1, 0, 1, 999999, 1000000, 1000001, 1000000000000LL};
+    /* Routes spécifiées : infini, zéro, sous 1 ms, frontière exacte et au-delà. */
+    const unsigned routes[2][7] = {{0, 0, 1, 1, 1, 1, 1},
+                                    {0, 0, 1, 1, 0, 0, 0}};
     int p[2], s[2], closed;
     const char *mode = getenv("POMPPC_POLL_NS");
-    unsigned i, on = mode && !strcmp(mode, "1");
+    unsigned i, full = mode && !strcmp(mode, "1");
+    unsigned short_only = mode && !strcmp(mode, "2");
+    unsigned on = full || short_only;
     GPollFD f[3];
     alarm(10);
     g_assert(pipe(p) == 0);
@@ -79,7 +84,7 @@ int main(void)
     for (i = 0; i < G_N_ELEMENTS(delays); i++) {
         f[0] = (GPollFD){p[0], G_IO_IN, 0xffff};
         compare("pipe prêt / frontières de délai", f, 1, delays[i],
-                on && delays[i] > 0);
+                full ? routes[0][i] : short_only ? routes[1][i] : 0);
     }
     f[0] = (GPollFD){s[0], G_IO_IN | G_IO_OUT | G_IO_PRI, 0xffff};
     compare("socket IN+OUT", f, 1, 1000, on);

@@ -9,6 +9,10 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **M4 : variante d'attente sous la milliseconde préparée, 02/11.** `tcg/0065`,
+  `POLLNS=2` : `select` uniquement pour 0 < délai < 1 ms ; le mode 1 reste entier,
+  aucun allumage. 56 contrôles du contrat/routage, deux mutants de frontière détectés ;
+  A/B sur les cinq jeux avant décision (`tcg-g4.md` §42.2).
 - **Matrice : rapports A/B sans arrondi prématuré, 02/11.** Le CSV garde le temps précis
   en plus de l'affichage à 0,1 ms ; le bilan utilise cette précision, anciennes archives
   acceptées. Évite de prendre zen 2,7→2,6 pour −3,7 % quand le gain réel est −1,78 %.

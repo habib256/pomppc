@@ -5604,6 +5604,26 @@ Journaux : `bench/tcg/pollns-contract-0111/`. QEMU reconstruit à 23 h 08, contr
 complet. Ces contrôles ne mesurent pas la vitesse et n'expliquent pas la perte d'UT du 30/10 ;
 son A/B porte le code d'avant et reste à rejouer avant toute décision d'allumage.
 
+### 42.2 Variante sous la milliseconde : `tcg/0065`, 02/11
+
+`POLLNS=2` (`POMPPC_POLL_NS=2`) garde le chemin `select` de 0058 uniquement pour
+**0 < délai < 1 000 000 ns**. Le délai d'exactement 1 ms, les délais plus longs,
+zéro et l'infini passent par `g_poll`. Le mode 1 conserve son comportement corrigé
+au §42.1 ; aucun mode n'est allumé par défaut. Hypothèse [F] : conserver l'arrondi
+pour les délais longs pourrait éviter la perte d'UT ; seul l'A/B peut la trancher.
+Ce changement est propre au chemin macOS sans `ppoll`, aucun pendant Linux requis.
+
+[A] `pollnsproof.py`, M4, glib 2.90.1 : **56 cas, zéro écart**, 14 dans chacun des
+environnements absent, 0, 1, 2. Le test compte les appels au `select` du code réel,
+notamment de part et d'autre de 1 ms et à sa frontière exacte. Mutant `<=` : un
+échec de routage à 1 ms ; mutant mode 2 sur tous les délais positifs : trois échecs.
+Journaux et sources mutées : `bench/tcg/pollns-court-0211/`. La preuve valide le
+contrat des descripteurs et les routes, pas le gain de vitesse ni le temps de réveil.
+
+A/B prévu au repos strict sur mb, zen, ut, d3 en fenêtre et cmr en course : défaut,
+mode 1 corrigé, mode 2. Profils hôte après chaque fenêtre pour comparer les attentes
+et verrous d'UT. Les chiffres du 30/10 ne sont pas mélangés à cette campagne.
+
 ## 43. vperm en une opération vectorielle : `tcg/0059` (`x-vperm-inline`), PC x86-64, 30/10
 
 **Idée.** `vperm` passe aujourd'hui par un helper (`x-vperm-fast`, table, allumé depuis le

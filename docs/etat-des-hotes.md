@@ -191,7 +191,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 02/11/2026, 1 h 59 (profils terminés ; arrêt prévu à 6 h 40)
+## 3. Mac M4 : état au 02/11/2026, 2 h 00 (variante 0058 préparée ; arrêt prévu à 6 h 40)
 
 **Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
 6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
@@ -286,6 +286,14 @@ des anciennes références**.
   rapports dessus, avec compatibilité des anciennes archives. Cas reproduit : zen 2,7→2,6
   arrondi suggérait −3,7 %, contre −1,78 % en réalité ; test hors VM du rapport réussi,
   facteur de trois échanges par image conservé.
+- **Variante 0058 préparée**, `tcg/0065` : `POLLNS=2`, `select` seulement pour un délai
+  positif strictement sous 1 ms, mode 1 inchangé, défaut éteint. QEMU reconstruit à
+  1 h 59, capacités complètes (`.run/build-pollns-court-0211.log`). 56 cas réussis,
+  mutants à 1 ms et « tout positif » détectés, patch appliqué à une copie avant et
+  résultat identique aux sources construites. A/B des cinq jeux avant toute décision.
+  Binaire SHA-256 `8568ff593add448f6fbedf719213ab54aa58795291b09bec6cb9c0c9c6997da6`.
+  Contrôle général : 405 OK, mêmes 49 signalements ShellCheck préexistants, 5 ignorés
+  (`.run/tests-pollns-court-0211.log`).
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
 - **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`

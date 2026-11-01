@@ -1,0 +1,42 @@
+POMPPC tcg/0065 : variante macOS de 0058 pour les delais sous 1 ms
+
+Apres tcg/0058 et son correctif de contrat. POMPPC_POLL_NS=2 ne prend
+select qu'avec 0 < timeout < 1000000 ns ; les autres delais gardent g_poll.
+Le mode 1 garde son comportement. Aucun allumage par defaut.
+Hypothese et preuve de routage : docs/tcg-g4.md section 42.2.
+
+diff --git a/util/qemu-timer.c b/util/qemu-timer.c
+--- a/util/qemu-timer.c
++++ b/util/qemu-timer.c
+@@ -334,11 +334,18 @@
+  */
+-static bool qemu_poll_ns_select_on(void)
+-{
+-    static int on = -1;
+-
+-    if (on < 0) {
++static bool qemu_poll_ns_select_on(int64_t timeout)
++{
++    static int mode = -1;
++
++    if (mode < 0) {
+         const char *e = getenv("POMPPC_POLL_NS");
+-        on = e && *e && strcmp(e, "0");
+-    }
+-    return on;
++        mode = e && *e && strcmp(e, "0") ? 1 : 0;
++        if (e && !strcmp(e, "2")) {
++            mode = 2;
++        }
++    }
++    /* POMPPC tcg/0065 : mode 2, seulement les delais sous 1 ms.
++     * [F] Hypothese a mesurer sur les cinq jeux : garder l'arrondi de
++     * g_poll pour les delais longs eviterait la perte d'UT du mode 1.
++     * Aucun mode n'est actif sans POMPPC_POLL_NS. */
++    return mode == 1 || (mode == 2 && timeout < SCALE_MS);
+ }
+@@ -428,3 +435,3 @@
+ #ifdef __APPLE__
+-    if (timeout > 0 && qemu_poll_ns_select_on()) {
++    if (timeout > 0 && qemu_poll_ns_select_on(timeout)) {
+         int r = qemu_poll_ns_select(fds, nfds, timeout);
