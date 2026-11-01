@@ -1,5 +1,8 @@
 # A4, volet géométrie : le travail par sommet passe à l'hôte (30/09/2026)
 
+> (01/11/2026 : la v23 n'a jamais été posée. Les volets A4 sont entrés comme capacités annoncées
+> par le device, `QGPU_PROTO_VERSION` restant 22 : ici `QGPU_CAP_GEOM_HOST` (`patches/qgpu/qgpu_proto.h`).)
+
 Chantier A4 (TODO « Plus tard > Vitesse ») : « empaquetage minimal ». Principe :
 chaque mot que le plugin (G4 émulé par TCG) relit, convertit ou recopie par
 sommet coûte ~10 fois ce qu'il coûte au device natif ; l'invité envoie les

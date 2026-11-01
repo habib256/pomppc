@@ -437,7 +437,7 @@ plan ; DOOM 3 se mesure en parties réelles (`timedemo` refusé par la démo).
 | Banc d'endurance | `docs/endurance.md` |
 | Quartz Extreme | `docs/quartz-extreme.md` |
 | Architecture, rétro-ingénierie, offsets, boucle de dev | `docs/architecture.md`, `docs/gpu-3d-tiger.md`, `docs/re/README.md` |
-| Protocole (v7 → v23) | `docs/protocole-v*.md` |
+| Protocole (v7 → v22 ; les volets A4 `protocole-v23-*` sont entrés en capacités, sans v23) | `docs/protocole-v*.md` |
 | Backend GL et attente de l'invité | `docs/backend-gl-attente.md` |
 | Son | `docs/audio-stabilite.md` |
 | Traducteur de second niveau (plan mis de côté) | `docs/plan-traducteur-rapide.md` |

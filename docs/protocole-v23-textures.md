@@ -1,5 +1,9 @@
 # A4, volet textures : textures par DMA sur plages sales — mesuré, rien à construire (30/09/2026)
 
+> (01/11/2026 : la v23 n'a jamais été posée ; `QGPU_PROTO_VERSION` reste 22. Ce volet n'a rien
+> construit ; les volets état et géométrie sont entrés comme capacités (`QGPU_CAP_STATE_BLOCK`,
+> `QGPU_CAP_GEOM_HOST`).)
+
 Chantier A4 (`TODO.md`, « Plus tard > Vitesse ») : « déplacer le travail vers l'hôte […]
 textures par DMA sur plages sales ». Volet voisin du backend : G7 (`glTexSubImage*` par
 rectangle sale) et G8 (PBO en rotation pour `SURF_PRESENT`), bug hunt du 22/09. Règle du
