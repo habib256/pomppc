@@ -71,10 +71,12 @@
 #                             # sur le M4 depuis le 26/10, §39)
 #   LFSKNOWN=0 ./run_tiger.sh # coupe : lfs converti par l'hôte quand le mot est un simple nul ou normal, et
 #                             # producteur de x-fp-known (x-lfs-known, patches/tcg/0051, docs/tcg-g4.md §40 ;
-#                             # allumé par défaut depuis le 24/10, d3 −9,5 % ; n'agit qu'avec FPKNOWN=1)
+#                             # allumé par défaut sur Linux x86-64 depuis le 24/10, d3 −9,5 %, et sur le M4
+#                             # depuis le 26/10 ; n'agit qu'avec FPKNOWN=1)
 #   TLBBASE=0 ./run_tiger.sh  # coupe : chargements en forme D sur une base déjà vérifiée dans le bloc sans refaire
 #                             # le chemin court du TLB logiciel (x-tlb-base, patches/tcg/0052, docs/tcg-g4.md §41 ;
-#                             # allumé par défaut depuis le 25/10 ; cible 32 bits seulement, PPC32MT=1)
+#                             # allumé par défaut sur Linux x86-64 depuis le 25/10 et sur le M4 depuis le 26/10 ;
+#                             # cible 32 bits seulement, PPC32MT=1)
 #   PPC32MT=0 ./run_tiger.sh  # coupe : SMP >= 2 sur qemu-system-ppc (cible 32 bits, celle du G4) en MTTCG au
 #                             # lieu de qemu-system-ppc64 (patches/tcg/0050, docs/ppc32-mttcg.md ; allumé par
 #                             # défaut depuis le 23/10 (PC) et le 26/10 (M4), sondé : sans le patch, repli ppc64)
@@ -90,9 +92,11 @@
 #   MEMSTATS=1 ./run_tiger.sh # compteurs mémoire toutes les 10 s sur stderr (x-mem-stats, tcg/0031, 0042)
 #   PMUREAL=1 ./run_tiger.sh  # ppc64 : le PMU POWER8 ne compte plus sur un G4 (PMC5 fantôme à chaque
 #                             # sortie de bloc, x-pmu-real, patches/tcg/0049 ; éteint par défaut)
-#   TIER2=4096 ./run_tiger.sh # DOOM 3 +3,3 % PC, +5,7 % M4 (docs/plan-traducteur-rapide.md §9.6, §9.9) — traces d'une page (x-tier2, patches/tcg/0048,
-#                             # éteint par défaut ; TIER2TBS=K : au plus K TB par trace, défaut 16 ;
-#                             # TIER2VERIFY=64 rejoue une trace sur 64 contre ses TB)
+#   TIER2=4096 ./run_tiger.sh # traces d'une page (x-tier2, patches/tcg/0048, éteint par défaut : DOOM 3
+#                             # PLUS LENT, +3,3 % ms/image sur le PC, +5,7 % sur le M4, docs/plan-traducteur-rapide.md
+#                             # §9.6, §9.9) ; TIER2TBS=K : au plus K TB après le premier, défaut 16 ;
+#                             # TIER2VERIFY=64 rejoue une trace sur 64 contre ses TB ; macOS arm64 :
+#                             # ajoute split-wx=on (refus si TCG_OPTS=split-wx=off)
 #   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
 #                             # tcg/0016, allumé par défaut, docs/tcg-g4.md §24) ; FPVERIFY=1 : preuve
 #   TBFAST=0 ./run_tiger.sh   # coupe mftb/mftbu calculés depuis le compteur de l'hôte (cntvct, 1 GHz ;
@@ -140,9 +144,19 @@
 #                             # paquet publié s'il est là, sinon l'ISO des sources du plugin
 #                             # GL (disks/pomppc-src.iso) ; implicite avec le GPU (GLISO=1 pour forcer)
 #   EXTRA_ARGS="-device ..."  # arguments QEMU supplémentaires
+#   SMP=N RES=WxHxD           # nombre de cœurs (défaut 2) ; définition de l'écran (défaut de config.env)
+#   QEMU_BIN=… / POMPPC_QEMU_ANY=1  # binaire imposé ; lancer malgré une version de QEMU autre que
+#                             # POMPPC_QEMU_VERSION (config.env), refusée sinon
+#   POMPPC_AUDIO_PROFILE=stable|default|muet  # tampons audio (scripts/tiger_audio.sh, défaut stable)
+#   QGPU_GPU_COPY=0 QGPU_GLSL=0 QGPU_GL_FLUSH=0  # réglages du backend gl de qgpu (allumés par défaut,
+#                             # passés à QEMU par l'environnement)
+#   EGL_PLATFORM=…            # Linux : plateforme EGL du backend gl (défaut device ; vide = choix de glvnd)
 #   PIN=1 ./run_tiger.sh      # Linux : fils vCPU épinglés sur des cœurs physiques distincts
 #                             # (PIN_VCPUS=2,4), le reste de QEMU ailleurs (PIN_REST) ; éteint
 #                             # par défaut (docs/vitesse-doom3-x86.md)
+#
+# NOSOUND, SNAPSHOT, HEADLESS, QFB, NOCD, NOPAD, WIDE, GPU_TRACE : toute valeur NON VIDE agit,
+# 0 compris (NOSOUND=0 coupe aussi le son). Les réglages allumés par défaut se coupent par =0.
 #
 # Piloté par le frontend ImGui : DBUS_DISPLAY=1 (sortie -display dbus,p2p=on) et
 # QMP_SOCK=<chemin> (socket QMP). POMPPC_SCRATCH déplace .run/ (socket moniteur).
@@ -708,7 +722,8 @@ fi
 # --- lfs producteur (x-lfs-known, patches/tcg/0051, docs/tcg-g4.md §40) --- lfs, lfsx, lfsu,
 # lfsux : un simple nul ou normal converti par l'hôte, le reste au talon (DOUBLE() de l'ISA, sortie
 # de bloc si une instruction suivante s'en est servie) ; frT entre dans les opérandes connus de
-# x-fp-known. Mêmes résultats au bit près. N'agit qu'avec x-fp-known. Éteint par défaut.
+# x-fp-known. Mêmes résultats au bit près. N'agit qu'avec x-fp-known. Allumé par défaut sur Linux
+# x86-64 depuis le 24/10 et sur macOS arm64 depuis le 26/10 (bloc des défauts en tête) ; LFSKNOWN=0.
 if [ "${LFSKNOWN:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-lfs-known=on"; then
     case "$CPU_SPEC" in
@@ -724,8 +739,8 @@ fi
 # --- TLB logiciel une fois par base (x-tlb-base, patches/tcg/0052, docs/tcg-g4.md §41) --- lbz lhz
 # lha lwz lfs lfd (et formes u) : sur une base dont un chargement antérieur du bloc a vérifié la page,
 # un test (l'adresse tient dans cette page) puis l'accès par l'addend gardé ; sinon le chemin complet.
-# Chargements seulement. N'agit que sur qemu-system-ppc (adresses 32 bits : PPC32MT=1 en SMP). Éteint
-# par défaut. Preuve : CPU_OPTS=x-tlb-base-verify=on (bilan « tlb-base-verify » à la sortie de QEMU).
+# Chargements seulement. N'agit que sur qemu-system-ppc (adresses 32 bits : PPC32MT=1 en SMP). Allumé
+# par défaut sur Linux x86-64 depuis le 25/10 et sur macOS arm64 depuis le 26/10 ; TLBBASE=0. Preuve : CPU_OPTS=x-tlb-base-verify=on (bilan « tlb-base-verify » à la sortie de QEMU).
 if [ "${TLBBASE:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-tlb-base=on"; then
     CPU_SPEC="$CPU_SPEC,x-tlb-base=on"; MODE="$MODE + TLB-PAR-BASE"
@@ -995,7 +1010,7 @@ if [ -n "${JCBITS:-}" ] && [ "${JCBITS}" != 12 ]; then
     MODE="$MODE + cache de sauts 2^$JCBITS DEMANDÉ MAIS INDISPONIBLE"
   fi
 fi
-# M4 : hachage alternatif dans le même groupe de page.
+# x-jc-word (tcg/0026, accélérateur) : hachage du cache de sauts par mots, dans le même groupe de page.
 # macOS arm64 : allumé à la demande le 05/10 ; Linux x86-64 depuis le 06/10 ; JCWORD=0 pour l’A/B.
 if [ "${JCWORD:-0}" != 0 ]; then
   if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-jc-word=on"; then
