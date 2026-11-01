@@ -7,7 +7,8 @@
  * Transport uniquement : BAR0 = fenêtre partagée (RAM), BAR1 = registres
  * big-endian, doorbell, compteur de fences, IRQ INTx. Le contenu du flux est
  * exécuté par qgpu-core.c sur un backend (qgpu-soft.c ou qgpu-gl.c) — le
- * device ne connaît pas les opcodes. Contrat complet : qgpu_proto.h.
+ * device ne connaît pas les opcodes. Contrat complet : qgpu_abi.h (transport,
+ * registres) et qgpu_proto.h (sémantique du flux, capacités).
  *
  * v9 — THREAD DE RENDU. Un seul thread possède le backend (donc le contexte
  * GL) pour toute la vie du device, et une file bornée le nourrit :
@@ -68,7 +69,12 @@
  * figée, statut OK, aucun message (rapport du 22/09/2026, §8.3, Q1).
  *
  *   -device qgpu-pci[,shmem_mb=64][,backend=auto|soft|gl][,trace=on]
- *                   [,scanout=auto|qfb|vga|none]
+ *                   [,scanout=auto|qfb|vga|none][,qe=on]
+ *
+ * `qe` (29/10, éteint par défaut) publie QGPU_CAP_QE_DEFAULT : l'hôte
+ * recommande Quartz Extreme au kext ; run_tiger.sh le pose sur Darwin:arm64 et
+ * Linux:x86_64. Propriétés de TEST, réglables à chaud : x-test-stall-ms,
+ * x-test-refuse-reset (qgpu_pci_instance_init).
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  */
@@ -99,8 +105,9 @@
 /* ── Ce que qfb-pci.c publie (v16) ───────────────────────────────────────────
  *
  * ATTENTION : cette déclaration est DUPLIQUÉE à l'identique dans qfb-pci.c.
- * scripts/build_qemu_qfb.sh ne recopie que des .c dans hw/display/ — il n'y a
- * pas d'en-tête partagé où la mettre. Toute modification se fait des deux
+ * scripts/build_qemu_qfb.sh recopie qfb-pci.c seul dans hw/display/ (les
+ * en-têtes qu'il recopie sont ceux de qgpu) — il n'y a pas d'en-tête partagé
+ * entre les deux devices où la mettre. Toute modification se fait des deux
  * côtés, dans le même commit.
  */
 typedef struct QfbScanoutInfo {
@@ -301,7 +308,8 @@ struct QgpuPCIState {
  * ISOLATION ENTRE CLIENTS — état des lieux, assumé.
  *
  * Le kext donne à chaque processus invité une tranche de BAR0 et une plage
- * d'identifiants (qgpu_proto.h, « Interface du kext »), mais rien ici ni dans
+ * d'identifiants (qgpu_abi.h, « Interface du kext POMPPCGPU », et la table
+ * QGPU_REG_LAYOUT), mais rien ici ni dans
  * le cœur ne l'y CONTRAINT : les offsets écrits dans le flux sont absolus dans
  * la fenêtre partagée, et les identifiants sont bornés sur tout l'espace, pas
  * sur la tranche du client. Un processus invité peut donc lire la surface d'un
@@ -310,7 +318,7 @@ struct QgpuPCIState {
  * Ce n'est pas corrigé, et c'est un choix : il n'existe aucun registre
  * QGPU_REG_SUBMIT_BASE / QGPU_REG_ID_BASE que le kext pourrait poser avant
  * chaque doorbell pour que le device recopie ces bornes dans le job — les
- * ajouter change qgpu_proto.h, donc le kext, le plugin et le harnais en même
+ * ajouter change qgpu_abi.h, donc le kext, le plugin et le harnais en même
  * temps. Tant qu'ils n'existent pas, LES CLIENTS SE FONT CONFIANCE : la
  * frontière de sécurité est celle de l'invité tout entier (une VM de jeu), pas
  * celle d'un processus. Rien de ce qu'un client peut faire ne sort de BAR0 ni
@@ -667,7 +675,8 @@ static void qgpu_doorbell(QgpuPCIState *s, bool async)
          * D2 — LE BQL EST CONSERVÉ PENDANT CETTE ATTENTE, ET C'EST VOULU.
          *
          * Le relâcher (bql_unlock/bql_lock autour du wait) semble évident et
-         * serait faux sur QEMU 9.2 : ce chemin part d'un accès MMIO, donc
+         * serait faux sur QEMU 9.2 (et toujours dans 11.1.2, même garde dans
+         * system/memory.c) : ce chemin part d'un accès MMIO, donc
          * s'exécute avec `mem_reentrancy_guard.engaged_in_io` armé sur ce
          * device. Dès que le BQL est rendu, un second vCPU peut entrer dans le
          * même device ; memory_region_dispatch_write le refuse alors
@@ -1220,9 +1229,9 @@ static bool qgpu_bind_scanout(QgpuPCIState *s, bool complain)
        l'écran (le symptôme de Q1 : une image écrite au pas d'un autre écran,
        donc en diagonale ou figée, sans erreur). `stride` à 0 veut dire « pas
        inconnu, ne compare rien » : c'est le cas du repli VGA quand la surface
-       de la console est une copie. Activé par qgpu-core.h le jour où le cœur
-       expose cette fonction ; sans elle, le bornage sur la fenêtre visible
-       ci-dessus reste acquis. */
+       de la console est une copie. Le garde vient de qgpu-core.h, qui le
+       définit depuis que le cœur expose cette fonction (v16) ; sans elle, le
+       bornage sur la fenêtre visible ci-dessus resterait acquis. */
     qgpu_core_set_scanout_geom(&s->core, s->scanout.stride, s->scanout.width,
                                s->scanout.height, s->scanout.depth);
 #endif
@@ -1438,8 +1447,8 @@ static void qgpu_pci_realize(PCIDevice *dev, Error **errp)
     qemu_cond_init(&s->cond_work);
     qemu_cond_init(&s->cond_done);
     /* Gardé : ce BH lève une interruption depuis un bottom half, donc en
-       dehors de tout accès MMIO. La variante gardée est celle que QEMU 9.2
-       attend d'un device (elle porte la garde de réentrance du device au lieu
+       dehors de tout accès MMIO. La variante gardée est celle que QEMU (9.2
+       comme 11.1.2) attend d'un device (elle porte la garde de réentrance du device au lieu
        de la laisser à zéro), et elle ne coûte rien ici. */
     s->irq_bh = qemu_bh_new_guarded(qgpu_irq_bh, s,
                                     &DEVICE(dev)->mem_reentrancy_guard);

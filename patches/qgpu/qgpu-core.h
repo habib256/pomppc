@@ -271,7 +271,7 @@ typedef struct QgpuContext {
 /* v16 : le programme qui AGIT sur la cible `which` (QGPU_PROG_VP / _FP) : lié,
    clé d'activation à 1, texte accepté. NULL sinon. Un programme lié, actif et
    CASSÉ rend aussi NULL : c'est le cœur qui jette le dessin avant d'appeler le
-   backend (qgpu_prog_blocked). */
+   backend (garde « programme cassé » du dessin brut, BAD_ARG non fatal). */
 static inline QgpuProgram *qgpu_prog_active(const QgpuState *st, QgpuProgSet *pg,
                                             int which)
 {
@@ -512,8 +512,9 @@ struct QgpuCore {
     uint64_t sb_blocks, sb_sets, sb_checked, sb_diff;
     uint32_t sb_told;
 
-    /* v13 : cible de SURF_PRESENT (VRAM qfb côté QEMU, tampon de test en
-       natif). N'appartient pas au cœur : reset ne la touche pas. */
+    /* v13 : cible de SURF_PRESENT et TEX_PRESENT (VRAM de l'écran choisi par
+       la propriété `scanout` côté QEMU — VGA d'abord, qfb-pci sinon —, tampon
+       de test en natif). N'appartient pas au cœur : reset ne la touche pas. */
     uint8_t *scanout;
     uint32_t scanout_size;
     void   (*scanout_dirty)(void *opaque, uint32_t off, uint32_t len);

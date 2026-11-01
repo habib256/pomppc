@@ -211,7 +211,7 @@ typedef struct GlProgram {
     bool   pos_invariant;          /* OPTION ARB_position_invariant : la position
                                       suit le pipeline fixe (et son retournement) */
     bool   uses_fpos;              /* fragments : lit fragment.position, réécrit en
-                                      qgpu_fpos_ = (x, H − y) ; H dans program.env[fpos_env] */
+                                      qgpu_fpos_ = (x, H − y) ; H dans program.env[max_env − 1] */
 } GlProgram;
 
 typedef struct GlSurface {

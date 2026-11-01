@@ -366,7 +366,7 @@ Sources : `qgpu_soft_reset`, `qgpu_stop_thread`, `qgpu_bind_scanout` et
 Une erreur de flux n'est **pas transactionnelle**. `qgpu_core_execute`
 s'arrête sur une faute fatale. Il continue toutefois après `BAD_ARG` pour
 les opcodes de dessin et pour `PROG_STRING` / `GLSL_LINK` identifiés par
-`draw_op`. Il retient le premier de ces refus, même si une faute fatale
+`draw_op`, et après tout `NO_MEM` (plafond mémoire hôte, 29/09). Il retient le premier de ces refus, même si une faute fatale
 survient ensuite. `STATUS_PC` est un index en mots dans la soumission,
 pas une adresse mémoire ni nécessairement l'emplacement où elle s'est arrêtée.
 
