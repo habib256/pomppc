@@ -715,8 +715,10 @@ static const unsigned long rk_words[RK_COUNT] = {
  * par paramètre, 256 sommets / 128 fragments) ; gldModifyPipelineProgram dit
  * seulement « texte remplacé » (masque 1) ou « locaux modifiés » (2). Les
  * program.env sont du CONTEXTE : *(gctx+0x4668) (sommets) et *(gctx+0x4670)
- * (fragments). Activation : gctx+0x5434 / +0x5438 (_updateShaderState) ; objet
- * courant de chaque cible : gctx+0x5420 / +0x5424.
+ * (fragments). Activation : u8 gctx+0x4664 / +0x466c (GC_VP_ENABLE /
+ * GC_FP_ENABLE, glEnable des programmes ARB) ; gctx+0x5434 / +0x5438
+ * (_updateShaderState) sont les étages GLSL (GC_GLSL_VS_ON / GC_GLSL_FS_ON,
+ * v21) ; objet courant de chaque cible : gctx+0x5420 / +0x5424.
  * Nos poignées sont les nôtres (PPROG_HANDLE) ; celle d'Apple est gardée pour
  * lui transmettre les appels, puisque le rendu d'Apple reste le repli. */
 #define PPROG_MAX      256

@@ -136,8 +136,9 @@
 #                             # x-abs-margin, patches/usbhid/0001) — pour un invité ≤ 10.4.10 ;
 #                             # ou une fois pour toutes : echo 0 > disks/tiger.qcow2.tablet-margin
 #   NOCD=1 ./run_tiger.sh     # omet le lecteur CD amovible vide 'gamecd'
-#   GLISO=0 ./run_tiger.sh    # omet l'ISO des sources du plugin GL (disks/pomppc-src.iso)
-#                             # dans 'gamecd' ; implicite avec le GPU (GLISO=1 pour forcer)
+#   GLISO=0 ./run_tiger.sh    # omet le CD de l'invité dans 'gamecd' : pomppc-guest.iso du
+#                             # paquet publié s'il est là, sinon l'ISO des sources du plugin
+#                             # GL (disks/pomppc-src.iso) ; implicite avec le GPU (GLISO=1 pour forcer)
 #   EXTRA_ARGS="-device ..."  # arguments QEMU supplémentaires
 #   PIN=1 ./run_tiger.sh      # Linux : fils vCPU épinglés sur des cœurs physiques distincts
 #                             # (PIN_VCPUS=2,4), le reste de QEMU ailleurs (PIN_REST) ; éteint

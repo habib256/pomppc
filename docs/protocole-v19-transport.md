@@ -111,7 +111,9 @@ d'objets laissés vivants en silence.
 - ~~`QGPU_REG_ERRORS` global au device~~ : un compteur par tranche depuis le 07/10/2026,
   ci-dessous.
 - Le nombre de tranches reste 4 et fixé par le device ; le WindowServer comme cinquième client
-  est le chantier A6.
+  est le chantier A6. (01/11 : toujours 4 tranches, `QGPU_MAX_CLIENTS` ; avec Quartz Extreme,
+  allumé par défaut, le WindowServer prend l'une des quatre, `docs/quartz-extreme.md` ; « A6 »
+  désigne depuis les invariants de `docs/architecture.md`.)
 
 ## Erreurs par client (07/10/2026)
 

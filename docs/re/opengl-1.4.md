@@ -173,7 +173,9 @@ points hérités lui-même (`pt_size`, règle de `qgpu_point_size`).
 * Paramètres de point : l'hôte dérive la taille au chemin brut ; au chemin hérité, `pt_size`.
 * Annonce : `cfg+0xb0 = 16`, bits 1 (`ARB_point_parameters`), 2 (`ARB_texture_env_crossbar`),
   12 (`ARB_shadow`), 13 (`ARB_depth_texture`), 33 (`EXT_stencil_wrap`), 38
-  (`EXT_secondary_color`) ; `GL_VERSION = « 1.4 POMPPC-1.0 »`.
+  (`EXT_secondary_color`) ; `GL_VERSION = « 1.4 POMPPC-1.0 »` (01/11 : « 1.5 POMPPC-1.0 »
+  quand le device est au moins v8, `G.v8`, donc avec tout device accepté aujourd'hui,
+  `QGPU_PROTO_MIN` = 12).
 
 ## 7. Preuve
 

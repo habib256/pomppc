@@ -66,5 +66,8 @@ DEVDISK=disks/tiger-dev.raw CPU_OPTS=x-fast-fp=on POMPPC_DISPLAY=cocoa \
 
 Prochaines étapes : A/B exact/FASTFP sur une scène réellement identique, puis
 prise en charge directe des tableaux de sommets et buffers persistants hôte.
+(01/11 : faits depuis : tampons hôte (v14, `DRAW_RAW_BUF`), VBO lus tels quels par l'hôte
+(v18, `DRAW_NATIVE`) ; et le device tient 8 unités de texture depuis la v17 (4 au pipeline
+fixe sous `QGPU_CAP_FIXED4`, hôte NVIDIA).)
 La validation finale reste une partie reproductible de DM-Rankin en 800×600,
 avec suivi des images lentes et pauses, puis augmentation des réglages.

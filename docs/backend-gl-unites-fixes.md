@@ -103,7 +103,7 @@ sur la VM de contrôle d'A4. **Corrigé le 07/10** : le plugin honore le « T&L 
 toujours son tampon de stencil. Rejeu de la passe de nuit (sans taille ni `GLTEST_STENCIL`) après
 correction : les dix vertes, écart à Apple ≤ 1 hors arêtes, `matbegin` seule rouge. Le `gltest`
 précompilé de `disks/prebuilt` est à régénérer (job `prebuilt`) pour que la passe de nuit en
-profite.
+profite (01/11 : régénéré le 07/10, `9120993`).
 
 ### Plantage de `try_draw_pixels` dans la session de l'utilisateur
 

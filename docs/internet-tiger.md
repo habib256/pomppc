@@ -14,7 +14,7 @@ D'où le relais `scripts/web-proxy.py`, lancé et arrêté avec QEMU : il n'éco
 avec les certificats de l'hôte et les rend en HTTP, liens réécrits. Dans Tiger, une fois :
 
 ```sh
-sudo sh /Volumes/POMPPCSRC/guest/net/proxy.sh on    # CD présent avec GPU=1 ou GLISO=1
+sudo sh /Volumes/POMPPCSRC/guest/net/proxy.sh on    # CD présent par défaut avec le GPU (GLISO=1 le force)
 ```
 
 (ou Préférences Système → Réseau → Proxys → Proxy web (HTTP) : `10.0.2.2`, port `8080`),

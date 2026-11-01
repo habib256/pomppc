@@ -45,6 +45,9 @@ DRAW_NATIVE [mode, n, ibuf, ioff, itype, premier, nattr, aoff]
 - `itype` : `QGPU_IDX_NONE` / `_U16` / `_U32`. Indices **grand-boutistes**.
 - `premier` : non indexé, premier sommet (`glDrawArrays`) ; indexé, doit
   valoir 0 (réservé — un futur `basevertex`).
+  (01/11 : sous `QGPU_CAP_GEOM_HOST`, A4, `premier` indexé est la base des indices, et `buf`
+  peut valoir `QGPU_BUF_SHMEM`, `offset` absolu dans BAR0 ; contrat dans `qgpu_proto.h`,
+  section « v18 : DRAW_NATIVE ».)
 - `nattr` (1..24), `aoff` : table de `nattr` descripteurs de 6 mots dans BAR0
   (`aoff` multiple de 4).
 

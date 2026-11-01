@@ -178,7 +178,9 @@ géométrie éclatée de la course, que `gltest` ne reproduisait pas (ses
 pointeurs conventionnels n'avaient jamais été posés) — **levé le 07/10** quand le
 texte du programme dit ce qu'il lit : la crainte ne tient pas, et le filtre
 perdait tout attribut du mode immédiat (§7). Le chemin **tableaux** (`RenderVertexArray`) refuse
-encore les génériques (il packe lui-même) ; Colin McRae ne le prend pas.
+encore les génériques (il packe lui-même) ; Colin McRae ne le prend pas. (01/11 : plus vrai
+depuis le 24/09 : le chemin des tableaux empaquette les génériques du format, `va_plan_build`,
+`va_gen_sizes` ; c'est celui de DOOM 3 et Prey, `docs/protocole-v17-generiques-tailles.md`.)
 `POMPPC_GL_PROG=0` revient à l'émulation par GLEngine.
 
 **Seize génériques (nuit du 23/09).** DOOM 3 Demo (chemin ARB2, choisi

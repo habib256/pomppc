@@ -60,7 +60,10 @@ pour poser `gctx+0x316b` (color material) et rejoue `_gleSetColorMaterialEnable`
 Le plugin lit donc, au dispatch et au lot : `gctx+0x5434` / `+0x5438` (actif),
 `gctx+0x5420` / `+0x5424` (quel objet), le texte et les locaux dans l'objet, les
 env dans les deux tables — et refuse le domaine si `gctx+0x5430` (GLSL) est
-non nul. `gctx = GS − 0x360` (constante `GS_LOW` du plugin).
+non nul. `gctx = GS − 0x360` (constante `GS_LOW` du plugin). (01/11 : le plugin lit
+l'activation ARB en `gctx+0x4664` / `+0x466c` (`GC_VP_ENABLE` / `GC_FP_ENABLE`), comme le dit le
+tableau ; `+0x5434` / `+0x5438` sont les étages GLSL (`GC_GLSL_VS_ON` / `_FS_ON`), et un objet
+GLSL courant n'est plus refusé quand l'hôte tient GLSL (v21, `G.glsl`, `docs/re/glsl-glengine.md`).)
 
 ## 3. Les limites de programmes du bloc de configuration (`cfg+0xec..+0x11b`)
 

@@ -59,7 +59,8 @@ n'annonce pas le bit : l'invité, qui teste le bit, ne l'émet jamais chez lui.
 `QGPU_CAP_GL14`, `QGPU_CAP_PROGRAMS`. Le kext transmet `QGPU_REG_CAPS` sans le
 filtrer (seul `QGPU_CAP_ASYNC` est masqué) : il n'a pas à être reconstruit pour
 que le plugin voie le bit (sa copie de `qgpu_proto.h` est tout de même tenue
-identique).
+identique ; 01/11 : depuis la v19, le kext n'a plus que `qgpu_abi.h`,
+`docs/protocole-v19-transport.md`).
 
 ### Pourquoi une clé et pas un opcode ou des bits du format
 

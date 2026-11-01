@@ -77,7 +77,9 @@ vidage de l'objet texture). `glGetCompressedTexImage` fonctionne (le bloc exact,
 * **Non annoncée : `GL_EXT_texture_compression_s3tc` (43).** Le relais est exact, mais le moindre
   repli sur le rendu d'Apple avec une texture à mipmaps de `glCompressedTexImage2D` fait planter
   l'application. Il faudrait d'abord que ce repli soit impossible ou rendu sûr (décodage dans
-  l'invité, ou refus du dessin).
+  l'invité, ou refus du dessin). (01/11 : **annoncée depuis la nuit du 23/09** avec `G.tex13`,
+  pour Prey et ses `.dds` ; un lot illisible avec une texture DXT est jeté plutôt que rendu à
+  Apple ; `POMPPC_GL_S3TC=0` revient à l'ancienne annonce, commentaire de `caps_extensions`.)
 
 ## 4. Preuve
 

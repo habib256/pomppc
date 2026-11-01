@@ -5,6 +5,11 @@ Commits relus : `68a2d6c` (v16/v17), `cc1b0df` (chemin tableaux, crochet de plan
 Les numéros de ligne renvoient à `git show 6bf2563:guest/gldriver/pomppc_accel.c`, sauf mention
 contraire. Chaque défaut a été vérifié dans le code. Les hypothèses écartées sont listées à la fin.
 
+(01/11 : relecture datée. Chaque défaut a été traité dans le plugin ; la plupart des correctifs
+portent le repère « Xn (relecture du 24/09) » dans `guest/gldriver/pomppc_accel.c` ; I2 (refus
+d'une face de cube ou d'une tranche 3D dans `COPY_TEX`) et S2 (`bpc == 4` pour `VA_GL_FLOAT`)
+y sont sans repère. Les numéros de ligne ci-dessous ne valent que pour `6bf2563`.)
+
 Classement : **P** = plantage ou corruption, **I** = image fausse, **R** = performance,
 **S** = style ou comportement indéfini sans effet observé.
 

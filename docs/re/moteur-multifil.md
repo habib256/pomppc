@@ -36,7 +36,10 @@ l'architecture ; ce serait une autre migration (GLEngine LLVM, plugin à refaire
 ## Conclusion
 
 Pas de moteur multifil dans Tiger 10.4.6. Le mettre à jour n'est pas une option : les offsets de
-GLEngine dont dépend le plugin valent pour 10.4.6 (`docs/gpu-3d-tiger.md` §4). Occuper le second
+GLEngine dont dépend le plugin valent pour 10.4.6 (`docs/gpu-3d-tiger.md` §4). (01/11 : dépassé
+sur ce point : les deux hôtes tournent en 10.4.11, dont le GLEngine est le même fichier,
+`docs/re/pixelstore.md` §3 ; le moteur multifil reste exclu sur PowerPC par la section
+précédente, l'essai `CGLEnable(313)` n'a pas été refait ici en 10.4.11.) Occuper le second
 vCPU demanderait un fil de travail **dans notre plugin** (encodage, verdict et envoi décalés d'un
 dessin ou d'une image, état copié), chantier à chiffrer d'après le profil du 01/10
 (`bench/vitesse/profil-20261001`).

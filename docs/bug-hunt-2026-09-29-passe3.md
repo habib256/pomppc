@@ -20,7 +20,7 @@ d'une passe de relecture après chaque vague de correctifs.
 | T7 | mineur | cache `pixtex` survivant à une soumission perdue |
 
 Diagnostics ajoutés : `gl_note` « SURFTEX taille » quand la taille GLEngine diffère de
-la surface source ; `POMPPC_GL_VRAM_MB` (16–2048, défaut 64) pour la VRAM annoncée.
+la surface source ; `POMPPC_GL_VRAM_MB` (16–2048, défaut 64 ; borné à 2047 par la passe 4, P-B5) pour la VRAM annoncée.
 Hypothèses « arène pleine à 1024×768 » et « COPY_TEX hors bornes » réfutées par lecture.
 
 ## Plugin — concurrence et plafond mémoire

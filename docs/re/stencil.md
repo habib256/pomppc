@@ -48,6 +48,10 @@ Conséquences pour le plugin :
 
 ## À vérifier encore
 
+(01/11 : la scène de rendu du premier point existe depuis le 18/09, `gltest stencil` — masque,
+comptage, zfail, masque d'écriture ; elle passe sous le rendu d'Apple seul comme sous le plugin,
+`docs/backend-gl-unites-fixes.md`, « Scènes gltest sur le PC ».)
+
 - Que le GLDriver d'Apple écrit bien le stencil dans ces 8 bits pendant un dessin (scène de rendu
   `stencil` à écrire : masque puis test EQUAL, comparer l'image au rendu accéléré).
 - Le comportement avec une profondeur demandée à 32 bits et un stencil de 8 (le pixel format

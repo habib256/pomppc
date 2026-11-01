@@ -4990,7 +4990,8 @@ par `pgo-train.sh --cible ppc32mt` sur les jeux avant d'en faire le binaire quot
 
 Le gain en temps rejoint presque celui en instructions (~−20 % du code des blocs chauds, §40.4) :
 le code retiré (conversion entière et tests d'opérande) était sur le chemin critique.
-**Allumé par défaut sur Linux x86-64** (`LFSKNOWN=1`, 24/10) ; la référence `~/src/qemu` et
+**Allumé par défaut sur Linux x86-64** (`LFSKNOWN=1`, 24/10 ; 01/11 : sur le M4 aussi depuis le
+26/10, `docs/parite-m4-2510.md`) ; la référence `~/src/qemu` et
 `build-fast` sont reconstruits avec 0051 (`bench/lfsk-2410/chaine-defaut.sh`).
 Binaire final (`build-fast`, PGO pris sur les 4 jeux en ppc32mt avec `x-lfs-known`), contre le
 rapide de l'agent (PGO de la VM de dev), `x-lfs-known` des deux côtés : DOOM 3 82,0 → **79,3**
@@ -5484,7 +5485,8 @@ chemin complet (adresse hors de la page), soit 1,3 % (Marble Blast : 4,8 %).
 | UT2004, binaire -O2 | 40,4 | 41,3 | +2,2 % (dispersion 1,5 / 6,8 % : minimums 40,0 / 39,8, bruit) |
 
 Gain modeste et répété sur DOOM 3, en accord avec −3,4 % d'instructions (§41.4) ; UT2004 dans le
-bruit. **Allumé par défaut sur Linux x86-64** (`TLBBASE=1`, 25/10).
+bruit. **Allumé par défaut sur Linux x86-64** (`TLBBASE=1`, 25/10 ; 01/11 : sur le M4 aussi depuis
+le 26/10, `docs/parite-m4-2510.md`).
 
 **Binaire quotidien reconstruit avec 0052** (`build-fast`, PGO pris sur les 4 jeux ; le premier
 entraînement avait perdu DOOM 3, replis à chaque image après la scène, il a été refait). Même séance,

@@ -1,6 +1,7 @@
 # R5 : pagination des textures sous le plafond mémoire de l'hôte (14/10/2026, PC)
 
-Reste (1) de « [Validation] Restes des épreuves en VM des bug hunts » (`TODO.md`) :
+Reste (1) de « [Validation] Restes des épreuves en VM des bug hunts » (`TODO.md` du 14/10 ;
+entrée retirée du TODO le 01/11, `633c444`) :
 avec `QGPU_MEM_MB=128`, DOOM 3 essuyait 201 `NO_MEM` proprement puis mourait par l'`exit()`
 de GLEngine (`docs/bug-hunt-2026-09-29-passe4.md`, dernière section ;
 `docs/re/glengine-exit-interpolateur.md`). Plugin `20261014-r5`.
@@ -82,6 +83,10 @@ présentation directe tombait (un Swap60 chez Apple par image) — elle repart d
 (`copy_dst`), la copie suivante la remplit.
 
 ## 4. Ce que l'épreuve a mis au jour (hors R5)
+
+(01/11 : les deux derniers constats sont dépassés : `run_tiger.sh` pose `EGL_PLATFORM=device`
+par défaut sur Linux, ce qui rend le backend GL à la RTX, et le PC reconstruit de nouveau
+QEMU, `build/` et `build-fast/`, `docs/etat-des-hotes.md` §2.)
 
 - **QEMU meurt à la fin de toute cellule DOOM 3 avec vidage** : `double free or corruption`
   dans `gl_prog_destroy` → `DeleteProgramsARB` (Mesa `libgallium` 26.0.8), appelé par
