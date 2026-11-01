@@ -5620,9 +5620,35 @@ notamment de part et d'autre de 1 ms et à sa frontière exacte. Mutant `<=` : u
 Journaux et sources mutées : `bench/tcg/pollns-court-0211/`. La preuve valide le
 contrat des descripteurs et les routes, pas le gain de vitesse ni le temps de réveil.
 
-A/B prévu au repos strict sur mb, zen, ut, d3 en fenêtre et cmr en course : défaut,
+A/B au repos strict sur mb, zen, ut, d3 en fenêtre et cmr en course : défaut,
 mode 1 corrigé, mode 2. Profils hôte après chaque fenêtre pour comparer les attentes
 et verrous d'UT. Les chiffres du 30/10 ne sont pas mélangés à cette campagne.
+
+**Fenêtre terminée à 3 h 04**, trois parties par bras, 36 mesures, aucun incident
+ni repli (`bench/tcg/ab/m4-pollns-0211-fen`). Médianes précises du CSV, ms/image :
+
+| Jeu | Défaut | Mode 1, tout | Écart | Mode 2, court | Écart |
+|---|---:|---:|---:|---:|---:|
+| mb | 6,1813 | 6,1269 | −0,88 % | 6,2106 | +0,47 % |
+| zen | 2,6258 | 2,3738 | **−9,60 %** | 2,4106 | **−8,20 %** |
+| ut | 19,3340 | 21,3808 | **+10,59 %** | 21,2784 | **+10,06 %** |
+| d3 | 28,8606 | 29,1447 | +0,98 % | 29,2792 | +1,45 % |
+
+Le mode court ne supprime pas la perte d'UT : toutes ses parties sont au-dessus
+de toutes les parties témoins. Les écarts sous 3 % restent inconclusifs sur trois
+parties. Les neuf parties passent le contrôle de charge ; un pic étranger de
+2,43 cœurs dure cinq secondes à 2 h 47 min 20 (mds, backupd-helper, mobileassetd),
+pendant le chargement de d3, hors de sa fenêtre (fin à 2 h 48 min 24).
+Colin en plein écran reste en cours à 3 h 39. Aucun allumage.
+
+[A] Profils d'UT, dix secondes après chaque fenêtre, trois relevés par bras :
+les vCPU occupent environ **1,07 cœur au défaut, 1,63 dans les deux modes**.
+Le fil `qemu_main` passe d'environ 0,03 à 0,12–0,15 cœur. Les attentes de mutex des
+vCPU montent de 0,007 à 0,03–0,04 cœur, mais davantage de travail apparaît aussi
+dans le code généré et les lectures de base de temps (`tbf_load`,
+`cpu_ppc_load_tbu/tbl`, `cpu_get_clock_offset`). Ne pas attribuer toute la perte
+au verrou global sur cette seule observation : l'appelant invité des horloges
+reste à identifier. Données : `ut-profils-somme.json` et profils bruts à côté.
 
 ## 43. vperm en une opération vectorielle : `tcg/0059` (`x-vperm-inline`), PC x86-64, 30/10
 
