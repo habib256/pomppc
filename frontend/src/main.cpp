@@ -557,6 +557,17 @@ int main(int argc, char** argv) {
             (!fullscreen || !bridge->mouseIsAbsolute());
         bool hovered = pointerReady && (pointerCaptured || ImGui::IsItemHovered());
         float sx = (float)guestW / sz.x, sy = (float)guestH / sz.y;
+        // Un seul curseur sur l'image (01/11) : en absolu, celui de Tiger suit
+        // déjà la souris. ImGuiMouseCursor_None fait passer le backend GLFW en
+        // GLFW_CURSOR_HIDDEN à la frame suivante ; hors de l'image (menus,
+        // bandeaux), en pause ou VM arrêtée, ImGui remet la flèche et le
+        // backend GLFW_CURSOR_NORMAL. Le glfwSetInputMode direct couvre le cas
+        // où le backend a oublié son dernier curseur (démarrage souris déjà
+        // sur l'image, sortie de capture) et ne masquerait rien.
+        if (wantsHiddenHostCursor(hovered, bridge->mouseIsAbsolute(), pointerCaptured)) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_None);
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+        }
         if (hovered) {
             if (bridge->mouseIsAbsolute()) {
                 int gx = (int)std::floor((io.MousePos.x - origin.x) * sx);

@@ -9,6 +9,10 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Frontal ImGuiDock : fin du double curseur, 01/11 (PC).** Le curseur de l'hôte est masqué
+  au-dessus de l'image de l'invité en souris absolue (Tiger dessine le sien dans le framebuffer) ;
+  il revient hors de l'image, en pause et VM arrêtée (`wantsHiddenHostCursor`, `PointerPolicy.h`,
+  testé dans `pointer_test`). Signalé par l'utilisateur ; à voir à l'œil au prochain `run_tiger.sh`.
 - **vperm en PSHUFB, 30/10 (PC).** `tcg/0059` (`VPERMINLINE=1`, `VPERMVERIFY=1`) traduit
   `vperm` en deux `PSHUFB`. Exact : 2,56 milliards vérifiés, 0 divergence. Neutre en vitesse
   (d3 −0,1 %, mb +2,4 %, ut +0,3 %) : éteint par défaut. `docs/tcg-g4.md` §43.

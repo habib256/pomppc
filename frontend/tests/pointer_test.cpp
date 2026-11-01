@@ -13,4 +13,8 @@ int main() {
     assert(!wantsPointerCapture(true, true, false, false, false));
     assert(!wantsPointerCapture(true, true, true, true, false));
     assert(!wantsPointerCapture(true, true, true, false, true));
+    assert(wantsHiddenHostCursor(true, true, false));
+    assert(!wantsHiddenHostCursor(false, true, false));
+    assert(!wantsHiddenHostCursor(true, false, false));
+    assert(!wantsHiddenHostCursor(true, true, true));
 }
