@@ -35,7 +35,10 @@ méthodes 5 et 6 du kext, plugin GA du WindowServer) n'est pas relu ici :
 | Cible de présentation VGA/QFB | Device d'écran | qgpu emprunte la VRAM et retient sa `MemoryRegion` ; le cœur ne la libère pas. Rebinding après drainage. |
 
 Le kext ne compile que [qgpu_abi.h](../patches/qgpu/qgpu_abi.h), jamais les
-opcodes ni les limites sémantiques de [qgpu_proto.h](../patches/qgpu/qgpu_proto.h).
+opcodes ni les limites sémantiques de [qgpu_proto.h](../patches/qgpu/qgpu_proto.h)
+(01/11 : sauf, depuis le 29/10, `SURF_PRESENT` et `TEX_PRESENT`, copiés et figés dans
+`POMPPCGPU.cpp`, que le kext écrit lui-même en mode Quartz Extreme dans la zone de commandes
+de la tranche d'un jeu ; voir [le README du kext](../kext/POMPPCGPU/README.md)).
 Il attribue les tranches selon les registres du device ; le plugin vérifie la
 compatibilité de leur disposition à l'ouverture. Ajouter une classe d'objet
 ne doit pas introduire son nettoyage dans le kext.

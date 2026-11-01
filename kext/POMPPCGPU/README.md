@@ -5,7 +5,11 @@ Pilote IOKit (Mac OS X 10.4, PowerPC, gcc 4.0) du device QEMU `qgpu-pci`
 `docs/gpu-3d-tiger.md`. Contrat : `qgpu_abi.h`, **l'ABI de transport seule** (copie identique
 de `patches/qgpu/qgpu_abi.h`, vérifiée par `tests/run-all.sh`, qui vérifie aussi que le kext
 ne nomme aucun symbole de `qgpu_proto.h`). Depuis la v19 (`docs/protocole-v19-transport.md`),
-**modifier `qgpu_proto.h` ne demande pas de reconstruire le kext**.
+**modifier `qgpu_proto.h` ne demande pas de reconstruire le kext**. (01/11 : une exception
+depuis le 29/10, Quartz Extreme : `POMPPCGPU.cpp` porte des copies figées de `SURF_PRESENT`,
+`TEX_PRESENT`, `QGPU_CMD_HDR`, de deux formats de pixels et de deux bits de capacité, qu'il
+écrit ou lit lui-même. Ces valeurs ne doivent donc pas changer dans `qgpu_proto.h` ; le
+contrôle de `run-all.sh` §5 bis les relève et n'a pas été adapté.)
 
 ## Ce que fait le kext (et rien d'autre)
 
@@ -13,7 +17,9 @@ ne nomme aucun symbole de `qgpu_proto.h`). Depuis la v19 (`docs/protocole-v19-tr
   d'Apple ne le revendique) ;
 - vérifie la signature `'qgp1'` et exige `QGPU_CAP_CLIENTS` (device v19 : il
   publie ses tranches et détruit lui-même) ; publie dans `ioreg` `QGPUVersion`,
-  `QGPUCaps`, `QGPUShmemSize`, `QGPUBackend`, `QGPUClients` ;
+  `QGPUCaps` (ce que le device annonce), `QGPUCapsClient` (ce que `QGPU_UC_GET_INFO`
+  rend : sans `QGPU_CAP_ASYNC` si le kext n'a pas de chien de garde), `QGPUShmemSize`,
+  `QGPUQueueDepth`, `QGPUSlotSize`, `QGPUClients`, `QGPUAsync`, `QGPUBackend` ;
 - lit le nombre de tranches dans `QGPU_REG_CLIENTS` (4 ; capacité compilée du
   kext : 8) et expose un `IOUserClient` par client (une application OpenGL = un
   client), chacun avec sa tranche de fenêtre ; les plages d'identifiants sont
@@ -77,7 +83,16 @@ pose sur `Darwin:arm64` et `Linux:x86_64`). En mode QE, le kext :
   1 `SURF_BOUNDS`, 2 `EXPORT`, 3 `LOOKUP` (texture d'export d'une fenêtre GL), 4 `SURF_POS`,
   5 `PRESENT` (présentation par le noyau dans la région visible du dernier `SetShape`),
   **6 `PRESENT2`** (01/11 : la 5, plus « non simple » quand la région visible ne couvre pas
-  toute la surface à l'écran ; le plugin avise alors le WindowServer) ;
+  toute la surface à l'écran ; le plugin avise alors le WindowServer). Qui appelle quoi : le
+  plugin GA, la méthode 0 et la VRAM (mémoire 0) ; le plugin GL dans le WindowServer, 0, 1
+  et 3 ; le plugin GL dans un jeu, 2 (à l'échange), 5 ou 6 (présentation directe ;
+  `kIOReturnBusy` tant que la région est inconnue : avis au WindowServer) et 4 (vidage de
+  preuve seulement) ;
+- au `Flush` d'une surface exportée (client de surface, méthode 10) comme à la méthode 5 ou 6,
+  écrit un `TEX_PRESENT` (`SURF_PRESENT` si l'hôte n'a pas `QGPU_CAP_TEX_PRESENT`) par
+  rectangle visible dans la **zone de commandes** de 4 Kio que le jeu réserve en fin de sa
+  tranche, et le soumet lui-même (`kernelSubmit`) : depuis le 29/10, c'est la seule chose que
+  le kext écrive dans BAR0 ;
 - présente en asynchrone la région moins un curseur immobile (30/10) ; `POMPPCQESync` ou
   `POMPPCQECursorSync` dans la personnalité rendent le synchrone d'avant.
 
@@ -136,7 +151,8 @@ plus). Sans chien de garde, il scrute `FENCE`, borné à 2 s. Jusqu'à la v18 le
 kext fabriquait lui-même un flux de destruction dans une page de service de
 BAR0, un doorbell par identifiant (1 108 par client) avec des tailles de plages
 **compilées** — la cause des objets laissés vivants du 23/09/2026. Il n'écrit
-plus rien dans BAR0.
+plus rien dans BAR0 pour cela (01/11 : sa seule écriture dans BAR0 est la présentation
+Quartz Extreme, plus haut).
 
 Une tranche n'est rendue que **par son propriétaire** (`fClients[slot] ==
 client`, vérifié dans la gate), et `stop()` du user client se contente d'une
@@ -145,7 +161,8 @@ c'est une panic (la gate a pu être retirée du work loop, et `runAction` la
 ferme avant tout test).
 
 Le kext ne connaît **aucun** opcode : le flux est produit en userland (`guest/gldriver`,
-le plugin OpenGL ; `guest/qgpu-test`) et exécuté par l'hôte.
+le plugin OpenGL ; `guest/qgpu-test`) et exécuté par l'hôte. (01/11 : sauf `SURF_PRESENT` et
+`TEX_PRESENT`, en mode Quartz Extreme.)
 
 ## Compiler et charger (dans l'invité)
 

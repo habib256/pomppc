@@ -143,6 +143,37 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
 - WindowServer : `gldSetInteger(997)` marque la texture rectangle liée ; au dessin,
   c'est la texture d'export du jeu qui est liée sur l'hôte.
 
+## 1 quater. Le mécanisme au 01/11 : qui appelle quoi
+
+(Résumé du code au 01/11, `kext/POMPPCGPU/POMPPCGPU.h` et `guest/gldriver/pomppc_accel.c` ;
+§1 ter et le journal gardent les étapes.) Le nub `POMPPCAccelerator` n'ouvre rien hors mode QE.
+En mode QE il sert deux clients : le **client de surface** (type 0, méthodes
+d'`IOAccelSurfaceConnect.h`) au WindowServer, et le **client 2D** (type `'POGA'`) :
+
+| méthode du client 2D | appelant | rôle |
+|---|---|---|
+| 0 `GET_INFO` (+ mémoire 0 : VRAM) | plugin GA ; plugin GL dans le WindowServer | géométrie de l'écran, relue à chaque vérification |
+| 1 `SURF_BOUNDS` | plugin GL dans le WindowServer | rectangle de la surface d'écran (`SetShape`) |
+| 2 `EXPORT` | plugin GL dans le jeu, à l'échange | `sid` → texture d'export, taille, surface hôte, zone de commandes |
+| 3 `LOOKUP` | plugin GL dans le WindowServer (`ws_lookup`) | `sid` → texture d'export à lier pour composer |
+| 4 `SURF_POS` | plugin GL dans le jeu, vidage de preuve seulement | position de la fenêtre au dernier Flush |
+| 5 `PRESENT` / 6 `PRESENT2` | plugin GL dans le jeu, à chaque échange (6, puis 5 si le kext est ancien) | présentation par le noyau dans la région du dernier `SetShape` ; la 6 rend en plus « non simple » |
+
+Présentation : le noyau écrit un `TEX_PRESENT` (ou `SURF_PRESENT`) par rectangle visible dans
+la zone de 4 Kio réservée en fin de tranche du jeu, et le soumet : asynchrone (deux moitiés),
+ou synchrone avec retrait et remise du curseur logiciel quand celui-ci est sur la région et
+ne peut pas être contourné (curseur déplacé, Flush du WindowServer, une image sur 9 pour
+rafraîchir son fond). Il le fait au `Flush` du client
+de surface (méthode 10, appelée par le WindowServer après un avis) comme aux méthodes 5 et 6.
+
+Avis au WindowServer : c'est **le jeu** qui avise (`glcDoNonSimpleFlush` → `CGSFlushSurface`),
+par son fil d'avis (`qn_post`, un avis en attente au plus, cadencé). Il avise seulement si la
+méthode 6 rend « non simple » (cadence `POMPPC_GL_QE_NONSIMPLE_HZ`, 20 par défaut), ou si la
+présentation directe n'a pas eu lieu : `kIOReturnBusy` (région inconnue, pas encore de
+`SetShape`), vidage de preuve, `POMPPC_GL_QE_DIRECT=0`, kext sans méthode 5 (cadence
+`POMPPC_GL_QE_HZ`, 60 par défaut). Le WindowServer répond par `IOAccelFlushSurfaceOnFramebuffers`
+(méthode 10) et recompose les zones qu'il s'est réservées depuis la texture d'export.
+
 ## 2. Plan
 
 | Étape | Contenu | Preuve |

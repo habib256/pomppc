@@ -14,6 +14,10 @@
  * (QGPU_REG_CLIENT_RESET). Le nombre de tranches et la disposition des
  * identifiants sont LUS DANS LES REGISTRES au démarrage, jamais compilés :
  * ce kext n'inclut que qgpu_abi.h (l'ABI de transport), pas qgpu_proto.h.
+ * (01/11 : une exception depuis le 29/10, Quartz Extreme. Le kext écrit
+ * lui-même SURF_PRESENT ou TEX_PRESENT, opcodes copiés et figés en tête de
+ * POMPPCGPU.cpp, dans la zone de commandes réservée en fin de tranche du
+ * client qui a exporté sa fenêtre : kernelSubmit, plus bas.)
  *
  * Note ABI Darwin 8 : les méthodes du IOUserClient passent par la table
  * IOExternalMethod / getTargetAndMethodForIndex (l'externalMethod() moderne
@@ -57,9 +61,10 @@
  *   le plugin et qgpu_test ouvrent POMPPCGPU avec le type 0, qui est aussi
  *   kIOAccelSurfaceClientType — le type qu'ouvrent CGL (pbuffers) et le
  *   WindowServer (Quartz Extreme) sur un accélérateur. Le transport garde donc
- *   son ABI, et le nub refuse toute ouverture tant qu'il n'y a pas de surfaces
- *   (tâche 4.4) — hors mode Quartz Extreme : depuis le 29/10, POMPPCAccelerator
- *   ouvre ses propres clients (surfaces, GA 2D, méthodes 0-6, voir plus bas).
+ *   son ABI. Hors mode Quartz Extreme, le nub refuse toute ouverture
+ *   (kIOReturnUnsupported, comme avant la tâche 4.4) ; en mode QE (depuis le
+ *   29/10), POMPPCAccelerator ouvre ses propres clients : client de surface
+ *   (type 0) et client 2D (type 'POGA', méthodes 0-6, voir plus bas).
  *
  *   AccelCaps n'est publié que si la personnalité porte POMPPCQuartzExtreme à
  *   vrai (install.sh QE=1), ou à « auto » (le défaut depuis le 29/10) quand
@@ -78,7 +83,9 @@
  *   mode QE, le kext pose cette propriété ; le plugin ouvre alors le nub avec
  *   le type ci-dessous pour mapper la VRAM du framebuffer (mémoire 0) et en
  *   lire la géométrie (méthode 0 : largeur, hauteur, octets par ligne, bits
- *   par pixel). Les copies et remplissages sont faits par le plugin. */
+ *   par pixel). Les copies et remplissages sont faits par le plugin. Le
+ *   plugin GL (guest/gldriver/pomppc_accel.c) ouvre le même client 2D : dans
+ *   le WindowServer, méthodes 0, 1 et 3 ; dans un jeu, méthodes 2, 4, 5 et 6. */
 #define POMPPC_GA_CLIENT_TYPE   0x504F4741UL    /* 'POGA' */
 #define POMPPC_GA_MEM_VRAM      0
 #define POMPPC_GA_GET_INFO      0
@@ -89,7 +96,9 @@
 #define POMPPC_GA_SURF_BOUNDS   1
 #define POMPPC_MAX_SURF_IDS     16
 /* Méthodes 2 et 3 (29/10, P2) : export d'une fenêtre GL d'application. Le jeu
-   publie [sid, texture hôte, largeur, hauteur] (texture 0xffffffff : retrait) ;
+   publie [sid, texture hôte, largeur, hauteur, surface hôte, zone de commandes]
+   (texture 0xffffffff : retrait ; zone : offset absolu dans BAR0, fin de sa
+   tranche, où le kext écrit la présentation) ;
    le WindowServer cherche [sid] → [texture, largeur, hauteur, numéro]. Les
    identifiants hôte sont communs à toutes les tranches (un seul cœur). Une
    entrée meurt avec le client 2D qui l'a publiée. */
@@ -440,7 +449,7 @@ public:
     virtual IOReturn clientMemoryForType(UInt32 type, IOOptionBits * options,
                                          IOMemoryDescriptor ** memory);
 
-    /* méthodes exposées (sélecteurs QGPU_UC_* de qgpu_proto.h) */
+    /* méthodes exposées (sélecteurs QGPU_UC_* de qgpu_abi.h) */
     IOReturn ucGetInfo(UInt32 * version, UInt32 * caps, UInt32 * shmem,
                        UInt32 * fence, void *, void *);
     IOReturn ucSubmit(UInt32 off, UInt32 len, UInt32 * fence,
