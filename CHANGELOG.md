@@ -9,6 +9,11 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **M4 : six preuves d'image renouvelées, 01/11 nuit.** Après constat de l'absence des
+  artefacts locaux, références neuves regardées et validées : mb/zen/d3/ut en fenêtre,
+  mb/cmr en plein écran. Six cellules vertes, zéro repli ; cmr en course en 1920×1080 sans
+  le faux reflet. Ombre de DOOM 3 avec la correction active confirmée par l'utilisateur.
+  Temps sous activité externe, non retenus comme A/B (`docs/etat-des-hotes.md`).
 - **Profils du plugin : symboles indirects Mach-O, 01/11.** `machonm.py --stubs` lit les
   importations du bundle ppc (82 correspondances avec `otool -Iv`, trois tests hors VM).
   Relevé du M4 : `___stub_getrealaddr` est un résolveur du stub de `fprintf`, suivi des stubs

@@ -109,10 +109,11 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
   de profil croisé depuis la parité du 25/10. Dans l'ordre :
   1. **Rattrapage** (01/11, en partie fait) : `~/src/qemu` reconstruit ; kext, plugin et GA
      compilés et installés dans la VM quotidienne, invité redémarré ; mb et d3 fen/pe vertes ;
-     cmr-pe : le M4 mesurait déjà la course, référence reprise (faux reflet), **à valider à
-     l'œil**. Restent : la bande sous l'ombre et le curseur net en plein écran à
-     l'œil, l'A/B `m4-bundle-0111` (PACKBITS et avis
-     d'ombre, en attente de la fin de Time Machine). Détail : `docs/etat-des-hotes.md` §3-§4.
+     nuit du 01 au 02/11 : artefacts locaux absents, six preuves reconstituées et vertes
+     (mb/zen/d3/ut fen, mb/cmr pe), références regardées et validées, cmr en course sans le
+     faux reflet. Ombre de DOOM 3 confirmée par l'utilisateur à 22 h 39. Restent : curseur net
+     en plein écran à l'œil, A/B neuf `m4-bundle-0111n` (trois bras séparant PACKBITS et avis
+     d'ombre, attend la fin d'un autre agent sur l'hôte). Détail : `docs/etat-des-hotes.md` §3-§4.
   2. **Profil croisé des 5 jeux** (`sample` du processus QEMU, fils vCPU et `qgpu-render`,
      comme `tools/re/perfpart.py` sur le PC) : part du JIT, recherche de blocs, `mftb`,
      helpers, et **part du fil de rendu hôte** ; sur d3, si `qgpu-render` approche les 29 ms

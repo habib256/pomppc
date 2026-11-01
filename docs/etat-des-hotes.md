@@ -191,7 +191,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 01/11/2026, 22 h 50 (preuves en cours, A/B en attente de repos ; arrêt prévu le 02/11 à 6 h 40)
+## 3. Mac M4 : état au 01/11/2026, 22 h 54 (six preuves vertes, A/B en attente de repos ; arrêt prévu le 02/11 à 6 h 40)
 
 **Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
 6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
@@ -231,6 +231,20 @@ des anciennes références**.
   `memcmp`/`bcmp` ; appelants et identité de la bibliothèque sur le PC restent à vérifier.
   `machonm.py --stubs` donne les 82 importations, identiques à `otool -Iv` ; trois tests
   hors VM passent. Aucun code de rendu changé.
+- **Preuves neuves terminées à 22 h 54 : six cellules vertes sur six**, après validation à
+  l'œil des références et réanalyse : `preuve-nuit-0111-fen` (mb, zen, d3, ut),
+  `preuve-nuit-0111-pe` (mb, cmr). Zéro repli partout ; rejeu/VM 0,00/0,00 %, sauf mb-fen
+  0,03/0,02 % et mb-pe 0,02/0,01 %. cmr-pe en course, 1920×1080, image sans le faux reflet.
+  Les temps (6,6 / 3,1 / 30,3 / 19,9 ms en fenêtre, mb-pe 6,7, cmr-pe 44,6) passent les
+  planchers mais **ne servent pas d'A/B** : autre agent actif, contrôles et analyses sur
+  l'hôte. Les références des autres jeux/modes restent à reconstituer si leur tour est repris.
+- VM éteinte proprement par le banc à 22 h 53 ; première barrière de l'A/B neuf en attente
+  de la fin de l'agent externe. Avant la reprise, base d'endurance fraîche créée depuis la
+  quotidienne arrêtée : `disks/tiger-endurance-m4-ombre-0111n.qcow2`, clone APFS autonome
+  sous verrou, sources et tailles dans `bench/endurance/base-ombre-0111n.json`.
+- Contrôle général après les outils : 400 OK, mêmes 49 signalements ShellCheck qu'au départ,
+  5 ignorés ; nouveau test Mach-O exécuté et compilé séparément (non encore indexé lors du
+  parcours `git ls-files` du harnais).
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
 - **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`
