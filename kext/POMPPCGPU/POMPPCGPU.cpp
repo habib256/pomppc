@@ -17,7 +17,9 @@
 
 /* 29/10 (QE, P2) : la seule commande que le kext écrit lui-même. Copies de
    qgpu_proto.h (v13, figées), pour garder la règle : le kext ne dépend que de
-   qgpu_abi.h. */
+   qgpu_abi.h. (01/11 : le contrôle « le kext ne nomme aucun symbole de
+   qgpu_proto.h » de tests/run-all.sh §5 bis relève ces copies, QGPU_OP_*,
+   QGPU_LEN_* et QGPU_CMD_HDR : il n'a pas été adapté à cette exception.) */
 #define QGPU_OP_SURF_PRESENT    0x0019
 #define QGPU_LEN_SURF_PRESENT   9
 #define QGPU_PF_XRGB8888        0
@@ -174,7 +176,9 @@ bool POMPPCGPU::start(IOService * provider)
        ne connaît pas les tranches de BAR0 (il ne borne que sur la fenêtre) :
        ce découpage-là est celui du kext seul ; le découpage des IDENTIFIANTS,
        lui, est celui du device (QGPU_REG_LAYOUT), et le kext n'en sait rien.
-       Plus de page de service (K8) : le kext n'écrit plus rien dans BAR0. */
+       Plus de page de service (K8) : le kext n'écrit plus rien dans BAR0
+       (01/11 : sauf, en mode Quartz Extreme, la présentation qu'il écrit dans
+       la zone de commandes d'un client, kernelSubmit). */
     fSlotSize   = (fShmemSize / fClientCount) & ~(UInt32) 0xFFF;
     if (fSlotSize == 0) {
         GPULog("shared window too small (%lu bytes)\n", (unsigned long) fShmemSize);
@@ -1712,10 +1716,12 @@ IOReturn POMPPCGPUUserClient::ucReadReg(UInt32 offset, UInt32 * value,
 #define super IOAccelerator
 OSDefineMetaClassAndStructors(POMPPCAccelerator, IOAccelerator)
 
-/* Aucune surface tant que Quartz Extreme n'est pas fait (4.4) : CGL (pbuffers,
-   CGLSetPBuffer) et le WindowServer reçoivent l'échec d'IOServiceOpen, et
-   prennent le même chemin que sans accélérateur (IOAccelCreateSurface échoue
-   aussi sur un accélérateur nul). Le transport, lui, s'ouvre sur POMPPCGPU. */
+/* Hors mode Quartz Extreme, aucune surface (comme avant la tâche 4.4) : CGL
+   (pbuffers, CGLSetPBuffer) et le WindowServer reçoivent l'échec
+   d'IOServiceOpen, et prennent le même chemin que sans accélérateur
+   (IOAccelCreateSurface échoue aussi sur un accélérateur nul). En mode QE :
+   client de surface (type 0) et client 2D (type 'POGA'). Le transport, lui,
+   s'ouvre sur POMPPCGPU. */
 IOReturn POMPPCAccelerator::newUserClient(task_t owningTask, void * securityID,
                                           UInt32 type, IOUserClient ** handler)
 {
