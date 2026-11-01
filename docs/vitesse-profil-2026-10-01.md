@@ -109,3 +109,9 @@ Blast inchangés, Nexuiz GLSL 35,3 → 33,4.
    `gldCreateVertexArray`.
 4. **TCG** : flottant double natif (Nexuiz ~7 %, Prey ~4 %), sur le modèle de 0014 ; AltiVec
    natif (DOOM 3 ~6,6 %) ; `mftb` en ligne (2-3 %) ; sauts indirects de Colin McRae (8,3 %).
+
+(01/11/2026 : liste du 01/10, dépassée. Faits : le kext `POMPPCFsqrt` (installé), le flottant
+double natif (`tcg/0016`, `x-fp-native64`) et l'AltiVec natif (`tcg/0022`, `x-vfp-native`), tous
+allumés par défaut. Reste ouvert le `mftb` en ligne (`docs/etat-des-hotes.md` §2). Le profil
+ci-dessus est celui du M4 au 01/10 ; l'état de la vitesse est dans `docs/vitesse-doom3-x86.md`
+(PC) et `docs/etat-des-hotes.md`.)

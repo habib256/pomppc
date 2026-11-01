@@ -3,6 +3,16 @@
 État : rédigé le 25/09/2026, mis de côté, **relancé le 21/10/2026** : phase 0 (mesures, §8) et phase 1 (traces sans compilateur, §9). Point de départ :
 `docs/tcg-g4.md` (relevés, profils, patches `x-sr-tlb` et flottants).
 
+**État au 01/11/2026 : arrêté.** La phase 2 (régions compilées par LLVM) a été écrite puis
+arrêtée le 22/10 sur DOOM 3 (traces +2,7 %, régions LLVM +17,6 %) ; sa section, « §10 » et
+« §10.8 » dans les renvois d'autres documents, n'est pas dans `main` : elle vit sur l'étiquette
+`archive/tier3-llvm` (`git show archive/tier3-llvm:docs/plan-traducteur-rapide.md`, commit
+`045ee4e`), avec son patch `0049-tcg-tier3-llvm`, sans rapport avec l'actuel
+`patches/tcg/0049-ppc-pmu-real.patch`. Dans `main` restent `tcg/0048` (`x-tier2`) et `0055`
+(rejeu instruction par instruction), compilés, **éteints par défaut** sur les deux hôtes
+(`TIER2=4096` pour les essayer) ; les « ce qui reste » des §9.4 et suivants ne sont plus une
+liste de travail (`docs/etat-des-hotes.md`, `TODO.md`).
+
 ---
 
 ## 1. Contexte : ce que fait TCG et ce qu'on peut y gagner

@@ -58,7 +58,8 @@
  *   kIOAccelSurfaceClientType — le type qu'ouvrent CGL (pbuffers) et le
  *   WindowServer (Quartz Extreme) sur un accélérateur. Le transport garde donc
  *   son ABI, et le nub refuse toute ouverture tant qu'il n'y a pas de surfaces
- *   (tâche 4.4).
+ *   (tâche 4.4) — hors mode Quartz Extreme : depuis le 29/10, POMPPCAccelerator
+ *   ouvre ses propres clients (surfaces, GA 2D, méthodes 0-6, voir plus bas).
  *
  *   AccelCaps n'est publié que si la personnalité porte POMPPCQuartzExtreme à
  *   vrai (install.sh QE=1), ou à « auto » (le défaut depuis le 29/10) quand

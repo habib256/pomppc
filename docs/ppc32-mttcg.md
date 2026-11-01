@@ -9,6 +9,14 @@ de PMU qui n'existe pas sur un 7447.
 **Tout est éteint par défaut.** `PPC32MT=1` et `PMUREAL=1` dans `run_tiger.sh` ; rien ne change
 tant qu'on ne les pose pas. Rien n'est fusionné : branche du worktree `agent-af8215e75c4376073`.
 
+**État au 01/11/2026** (le paragraphe précédent est celui du 23/10 au matin) : 0049 et 0050 sont
+fusionnés et nommés dans `scripts/build_qemu_qfb.sh`. `PPC32MT` est **allumé par défaut** sur
+Linux x86-64 depuis le 23/10 (§13, `623893c`) et sur le M4 depuis le 26/10
+(`docs/parite-m4-2510.md`) ; le binaire rapide du PC est entraîné en `--cible ppc32mt`
+(`docs/binaire-rapide-x86.md` §7). `PMUREAL` (`x-pmu-real`, utile au seul ppc64) reste éteint.
+Les listes « ce qui reste » des §9 et §13 sont donc closes ; DOOM 3 est à ~78-80 ms/image en
+fenêtre au 01/11 (`docs/vitesse-doom3-x86.md`, en tête).
+
 ## 1. Constat
 
 Avec SMP ≥ 2, `run_tiger.sh` lance `qemu-system-ppc64`, **seulement** parce que QEMU ne déclare
@@ -346,6 +354,10 @@ contention y compte plus encore), puis l'A/B en jeu sur la VM du M4. Le défaut,
 change sur les deux hôtes en même temps.
 
 ## 9. Ce qui reste
+
+(01/11 : liste du 23/10, close — A/B en jeu fait aux §13-§14, `PPC32MT=1` par défaut sur les deux
+hôtes, parité arm64 faite le 26/10. Le traducteur de second niveau du point 6 est arrêté depuis le
+22/10, `docs/plan-traducteur-rapide.md`.)
 
 1. **L'A/B en jeu** sur la VM quotidienne (§7), les 4 jeux, fenêtre et plein écran, et une
    partie DOOM 3 vérifiée. Marble Blast n'a pas été joué sur la VM de dev (jobs `games`/

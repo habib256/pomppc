@@ -35,7 +35,8 @@ le nommer (`IOGLBundleName`).
 | `docs/re/accelerateur-iokit.md` | comment CGL trouve le plugin, et pourquoi Quartz Extreme ne part pas sans `AccelCaps` |
 
 `IOAccelerator` dans le SDK 10.4 est un `IOService` sans méthode. Le nub
-`POMPPCAccelerator` est déjà dans cette forme.
+`POMPPCAccelerator` est parti de cette forme ; depuis Quartz Extreme (octobre), il ouvre aussi
+ses propres user clients (`newUserClient`, `docs/quartz-extreme.md`).
 
 ## 3. Plugin OpenGL
 
@@ -66,5 +67,6 @@ de commandes, scanout, mémoire partagée. La 3D n'est pas une relecture de
 - Réécrire le user client en API Léopard.
 - Annoncer Quartz Extreme (`AccelCaps`, VRAM, client de surface) tant que
   `mac99` n'a pas d'`IOAGPDevice` et que les jeux quittent encore le chemin
-  brut. Porte relevée : `docs/re/accelerateur-iokit.md` §6 et §9.
+  brut. Porte relevée : `docs/re/accelerateur-iokit.md` §6 et §9. (01/11 : dépassé, Quartz
+  Extreme est fait et allumé par défaut sur les deux hôtes, `docs/quartz-extreme.md`.)
 - Chercher dans la doc Apple les offsets de `GLEngine`. Ils n'y sont pas.

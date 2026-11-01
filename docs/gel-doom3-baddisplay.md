@@ -146,7 +146,8 @@ l'invité par le kext au chargement. C'est une variable du noyau (`0x360ac0`),
 relue à chaque attente, et la valeur 250 ms suppose un matériau qui ne s'arrête
 jamais. Ou borner les arrêts de vCPU côté QEMU : doorbell synchrone sans BQL,
 ou destruction des objets d'un client mort hors du fil principal. Le prochain
-gel lu par `kpanic.py` dira si c'est bien un « Lock timeout ».
+gel lu par `kpanic.py` dira si c'est bien un « Lock timeout ». (01/11 : toujours ouvert, rien
+de fait ; suivi dans l'entrée « Plantages en jeu sans cause » de `TODO.md`.)
 
 ## 3. `system_reset` bloqué après la panique : l'OpenPIC
 
@@ -195,7 +196,8 @@ detection » au démarrage (~1 sur 10). Un `shutdown -r` remet la machine à zé
 par le même chemin : si l'OHCI tenait sa ligne à ce moment, le démarrage
 suivant part avec une interruption perpétuelle sur un CPU. Pendant ce temps,
 l'autre CPU attend un verrou tenu par le premier, puis panique au bout de
-250 ms. Le banc d'endurance départagera (taux avant et après 17:35:50).
+250 ms. Le banc d'endurance départagera (taux avant et après 17:35:50). (Départagé le 29/09 :
+3 gels OHCI sur 185 `shutdown -r` avant le correctif, 0 sur 253 après ; `docs/endurance.md` §6.)
 
 ## 4. En passant
 

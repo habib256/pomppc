@@ -7,6 +7,13 @@ afficher « Quartz Extreme : géré ».
 
 Préalables déjà relevés : `docs/re/accelerateur-iokit.md` §1, §6 et §9.
 
+**État au 01/11** : Quartz Extreme est allumé par défaut sur les deux hôtes (M4 le 29/10, PC
+x86-64 le 30/10 ; `QE=0` l'éteint). Les défauts d'ombre sur une fenêtre GL sont corrigés : la
+liaison le 30/10 (`tex_bind_id`, plugin), l'image figée sous l'ombre le 01/11 (kext méthode 6
+`POMPPC_GA_PRESENT2`, plugin `20261101-ombre`). Le PC a ce kext et ce plugin ; le M4 a encore le
+kext du 30/10 et doit réinstaller kext et bundle, puis redémarrer. Reste : un avis borné au
+rectangle non visible, pour rendre l'avis des surfaces non simples moins cher (TODO).
+
 ## 1. Ce que fait le WindowServer (CoreGraphics 10.4.11, relevé statique du 28/10)
 
 Binaire : `ApplicationServices.framework/.../CoreGraphics.framework/Versions/A/CoreGraphics`
@@ -293,6 +300,7 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
   partagent ce code ; UT2004, Marble Blast et Zenerchi ont des coins justes.
 
 - **30/10, 6 h 05** : **BUG OUVERT : bande blanche à la place d'une ombre sur une fenêtre GL**
+  (01/11 : corrigé le 30/10 à 8 h, entrée ci-dessus ; l'image figée qui restait, le 01/11.)
   (signalé par l'utilisateur, capture : Terminal au-dessus de Zenerchi en fenêtre, VM de la
   matrice, QE allumé par défaut). Sous l'ombre portée du Terminal (une bande d'environ 15 px à
   droite et en dessous), la fenêtre du jeu est blanche au lieu de montrer le jeu assombri.

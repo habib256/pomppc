@@ -25,7 +25,8 @@ Retour réversible aux paramètres audio QEMU précédents :
 POMPPC_AUDIO_PROFILE=default ./run_tiger.sh
 ```
 
-`POMPPC_AUDIO_PROFILE=stable` est le défaut ; toute autre valeur est refusée.
+`POMPPC_AUDIO_PROFILE=stable` est le défaut ; `muet` (`-audiodev none`, Screamer gardé, pour
+les bancs sans surveillance de `tools/endurance/`) s'y ajoute ; toute autre valeur est refusée.
 Linux conserve son backend PulseAudio et ses réglages précédents. `NOSOUND=1`
 reste disponible. Mac OS 9 n'est pas modifié par ce profil spécifique à Tiger.
 
@@ -47,7 +48,8 @@ et règle le volume par `audio_be_set_volume_out_lr` ; les bouchons du test ont 
 07/10 (ils ne compilaient plus) et vérifient en plus que le PCM et le volume vont au backend
 du device.
 Cela prouve la correction de ces cas, pas que tous les craquements rapportés
-étaient causés par eux. Le QEMU quotidien doit être reconstruit puis la VM relancée.
+étaient causés par eux. Le QEMU quotidien doit être reconstruit puis la VM relancée (fait le
+27/09, ci-dessous ; le correctif est dans tous les binaires construits depuis).
 
 Pour diagnostiquer une récidive, `trace-event audio_timer_delayed on` dans HMP
 relève les ticks dépassant 1,5 fois la période demandée ; remettre `off` après

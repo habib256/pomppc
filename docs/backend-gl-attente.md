@@ -7,6 +7,12 @@ propre fil (`qgpu-render`), en parallèle du vCPU : un gain côté hôte ne comp
 de ~2 % du temps d'image d'au moins un jeu.
 
 **Verdict.**
+
+(01/11 : les deux « éteints par défaut » ci-dessous sont dépassés. `QGPU_GL_FLUSH=1` est posé par
+`run_tiger.sh` et `POMPPC_GL_QFLUSH` est allumé dans le plugin depuis le 01/10 (`ccebdda`), sans
+l'A/B du §6 ; `QGPU_GL_FLUSH=0` et `POMPPC_GL_QFLUSH=0` les éteignent. L'A/B reste à jouer :
+`TODO.md`, « [Métrologie] A/B de l'attente ».)
+
 - **Colin McRae n'attend pas l'hôte** : 0,12 ms par image affichée (0,2 %). Les « 10 %, ~7 ms
   par image » venaient d'une fenêtre de mesure tombée dans un menu (§1).
 - **Seul Nexuiz dépasse 2 %** : GLSL 2,5 ms/image (6,2 %), ARB 3,6 ms/image (3,3 %). L'invité y
@@ -189,7 +195,8 @@ l'attente du GPU, pas la relecture.
   `glFlush`.
 - Le device l'appelle à la fin de `qgpu_run_job`, **après** la barrière, le marquage de BAR0 et
   l'IRQ : l'invité n'attend pas ce `glFlush`. Le rejeu l'appelle après chaque soumission.
-- **Éteint par défaut** (`QGPU_GL_FLUSH=1` pour l'allumer). Chaque `glFlush` coupe la passe de
+- **Éteint par défaut** (`QGPU_GL_FLUSH=1` pour l'allumer ; 01/11 : allumé par `run_tiger.sh`
+  depuis le 01/10, `ccebdda`). Chaque `glFlush` coupe la passe de
   rendu de Metal, et l'arrondi d'un pixel mélangé de part et d'autre de la coupure peut varier
   d'une unité (voir la preuve d'images plus bas).
 
@@ -432,7 +439,8 @@ Nexuiz ARB, `QGPU_GL_FLUSH=1`, lectures : images 0..500, 1,16 → 0,87 ms/image 
 
 **Verdict.** La coupe est **construite, exacte et sans risque mesuré**, avec un gain **faible**
 (≈ 1 % sur Nexuiz GLSL avec `QGPU_GL_FLUSH=1`, dans le bruit sans lui). Elle reste **éteinte
-par défaut**. L'A/B entrelacé sur la VM quotidienne (`ab-attente.sh … qflush`, §6 et
+par défaut** (01/11 : allumée depuis le 01/10, `ccebdda`, sans cet A/B).
+L'A/B entrelacé sur la VM quotidienne (`ab-attente.sh … qflush`, §6 et
 ci-dessous) doit trancher : elle ne mérite d'être allumée que s'il confirme ≥ 1 ms/image, ce que
 ces chiffres ne laissent pas prévoir.
 

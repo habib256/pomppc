@@ -176,8 +176,9 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   contre 1024×768). Étendre les essais aux autres résolutions, jeux et modes ; relever les temps
   d'image et les replis sur une même scène. Les cellules vertes aux résolutions de la matrice ne
   valent pas pour toutes. Premier suspect : le frontal ImGuiDock (piste 1 ci-dessus), dont le
-  coût par image croît avec la résolution ; les captures du 31/10 (`bench/tcg/ab/cmr-res-3110/`)
-  sont justes à toutes les résolutions.
+  coût par image croît avec la résolution ; dans les captures du 31/10
+  (`bench/tcg/ab/cmr-res-3110/`), la 1920×1080×16 regardée le 01/11 est juste ; les autres
+  restent à regarder.
 
 - [ ] **[Outils] Endurance sur la configuration par défaut** — banc `tools/endurance/`,
   `docs/endurance.md`. Fait : PC 683 démarrages sans incident (§10), M4 342 démarrages et 40
@@ -194,11 +195,6 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   **Au prochain gel :** `python3 tools/re/kpanic.py mach_kernel` AVANT tout reset.
   **Fermeture :** texte d'une vraie occurrence lu, cause établie, correction et série sans
   incident ; des lancements réussis ne suffisent pas.
-
-- [ ] **[Validation] Restes des épreuves en VM des bug hunts** : reconstruire `build/` et
-  `build-fast/` (PC) puis le M4 avec le device de l'épreuve « GPU hôte bloqué »
-  (`docs/epreuve-gpu-bloque.md`), installer le kext A6 dans les VM (paquet invité ; ABI
-  inchangée). Le reste est tenu (`docs/bug-hunt-2026-09-29-passe4.md`, dernière section).
 
 - [ ] **[OS 9] Mesurer les gains CPU et élargir les essais** — profils expérimentaux livrés
   le 27/10 (`docs/os9-optimisations-cpu.md`), défaut `g4` conservé. Reste : A/B de vitesse sur
@@ -236,9 +232,6 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
 
 Le travail est fait ; il ne manque que l'essai ou la décision de l'utilisateur.
 
-- [ ] **[Matrice — PC] Valider à l'œil la référence `d3-fen` du PC**
-  (`tools/matrice/matrice.py --valider d3-fen`). `cmr-pe` a été validée le 01/11 (image de
-  course propre ; l'ancienne, au faux reflet, dans `bench/matrice/ref-linux/cmr-pe.faux-reflet-2810/`).
 - [ ] **[Frontend] Curseur unique sous ImGuiDock** (`50a9801`, 01/11) : à voir à l'œil au prochain
   `run_tiger.sh` en fenêtre (un seul curseur sur l'image, flèche de l'hôte de retour sur les
   menus et bandeaux, rien de collé après un aller-retour en plein écran).
@@ -346,10 +339,10 @@ L'état exact de chaque hôte (binaires, défauts allumés, plugin installé, VM
 | Élément | État |
 |---|---|
 | Protocole / ABI | GL **v22**, transport kext **v19** ; capacités ajoutées sans changer de version (`TEX_PRESENT`, `TEX_READBACK_ROWS`, …) |
-| QEMU | 11.1.2 + série `patches/` ; PC : `~/src/qemu/build-fast` (PGO du 31/10, -O3, -march=native ; le profil avec cmr du 01/11 attend son recontrôle dans `build-fast-pgo0111cmr/`) et `build/` (référence) ; M4 : `~/src/qemu/build` (à reconstruire avec `qgpu-core.c` du 31/10) |
-| Défauts TCG | PC : série jusqu'à `0056` (zone froide) ; M4 : série du PC jusqu'à `0052` + `0054` ; `0057`-`0063` éteints, non nommés |
-| Invité | Tiger 10.4.11 ; PC : kext du 01/11 (méthode 6, surface non simple) et plugin `20261101-ombre` (`disks/prebuilt`) ; M4 : kext du 30/10, plugin `20261023-uvwon` + QE (`f01d2d7`), à mettre à niveau (kext → redémarrage) |
-| Matrice | PC : `references-linux.csv`, 5 cellules automatisées (mb, zen, ut, d3 en fenêtre, cmr plein écran **en course** depuis `6054367`) ; M4 : `references.csv` (jamais touché par le PC), 17/17 vertes le 28/10 |
+| QEMU | 11.1.2 + série `patches/` ; PC : `~/src/qemu/build-fast` (PGO du 31/10, -O3, -march=native ; le profil avec cmr du 01/11 attend son recontrôle dans `build-fast-pgo0111cmr/`) et `build/` (référence) ; M4 : `~/src/qemu/build` (à reconstruire avec `qgpu-core.c` du 31/10 et `tcg/0059`) |
+| Défauts TCG | PC : série jusqu'à `0056` (zone froide) ; M4 : série du PC jusqu'à `0052` (avec `0037`-`0039`) ; `0057`-`0059` compilés, éteints ; `0060`-`0063` éteints, non nommés |
+| Invité | Tiger 10.4.11 ; PC : kext du 01/11 (méthode 6, surface non simple) et plugin `20261101-ombre` (`disks/prebuilt`) ; M4 : kext du 29/10 (`71f9f76`), plugin `20261023-uvwon` avec `tex_bind_id` (`9b5431a`, 30/10), à mettre à niveau (kext → redémarrage) |
+| Matrice | PC : `references-linux.csv`, 8 références toutes validées à l'œil (d3-fen et d3-pe le 30/10, `a89515b` ; cmr-pe le 01/11), 5 cellules dans les A/B (mb, zen, ut, d3 en fenêtre, cmr plein écran **en course** depuis `6054367`) ; M4 : `references.csv` (jamais touché par le PC), 17/17 vertes le 28/10 |
 | Tests natifs | PC 240 OK / 0 échec (07/10), M4 287 OK / 0 échec (27/10) |
 
 ## Matrice de jeux
@@ -368,7 +361,7 @@ corrigé du 31/10 reste à faire.
 |---|---|---|---|---|
 | Marble Blast Gold | vert | vert | 9,0 / 9,6 | fenêtre sur bureau 800×600 en session |
 | Zenerchi | vert | non automatisé | 4,0 / — | automatiser plein écran |
-| DOOM 3 | vert | vert | 56,1 / 56,2 | changements de mode, combat ; PC : référence à valider |
+| DOOM 3 | vert | vert | 56,1 / 56,2 | changements de mode, combat |
 | Prey | vert | vert | 50,5 / 49,5 | changements de mode, combat |
 | UT2004 | vert | vert | 25,0 / 25,4 | armes noires (M4) |
 | Warcraft III | non automatisé | vert | — / 15,4 | fenêtre, texte des menus |

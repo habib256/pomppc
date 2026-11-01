@@ -21,6 +21,22 @@ de commit et dans `docs/`.
   au-dessus de l'image de l'invité en souris absolue (Tiger dessine le sien dans le framebuffer) ;
   il revient hors de l'image, en pause et VM arrêtée (`wantsHiddenHostCursor`, `PointerPolicy.h`,
   testé dans `pointer_test`). Signalé par l'utilisateur ; à voir à l'œil au prochain `run_tiger.sh`.
+- **Plugin `20261101-packbits` : `POMPPC_GL_PACKBITS` allumé, 01/11 (PC ; ajouté au journal le
+  01/11 d'après `fd5990d`).** Bornage des flottants sur leurs bits, octets non signés par table ;
+  plugmd5 69 scènes 0 écart ; A/B au repos d3 −3,9 %, ut −4,5 %, zen −4,2 %, mb −1,2 %, cmr en
+  course −3,5 %. Code de l'invité : le M4 le reçoit avec le bundle. `docs/plugin-allegement.md` §8.
+- **Matrice : Colin McRae mesuré en course, 31/10 (PC, `6054367`).** Fenêtre de mesure à
+  ≥ 1 700 sommets bruts par échange, comptés dans l'invité : depuis le 28/10 le PC mesurait la
+  transition d'avant la course (44-48 ms/image) au lieu de la course (82,1 ms/image) ;
+  `plancher_ms_linux` 105. `docs/vitesse-doom3-x86.md` §25.
+- **qgpu : plus de faux reflet sur la carrosserie de Colin McRae, 31/10 (PC, `928a5f0`).** Sous
+  programme de fragments, une unité éteinte par le plugin n'a plus de texture
+  (`unit_texture_bound`, `qgpu-core.c`) : QEMU change sur les deux hôtes, pas le protocole.
+  Nouvelle référence cmr-pe du PC, validée le 01/11. `docs/re/cmr-rendu-vers-texture.md` §7.
+- **Zone froide (`tcg/0056`, `x-tcg-cold`) allumée sur le PC x86-64, 31/10 (`80aae4e`).** 6
+  parties par bras sans gel de cmr ; A/B d3 −1,8 %, mb −1,2 %, zen −2,2 %, cmr −2,2 %, ut neutre ;
+  endurance §15 : 10 démarrages et 8 cycles de jeu, 0 incident. Sans effet sur arm64 (saut long
+  à écrire). `docs/vitesse-doom3-x86.md` §23.
 - **vperm en PSHUFB, 30/10 (PC).** `tcg/0059` (`VPERMINLINE=1`, `VPERMVERIFY=1`) traduit
   `vperm` en deux `PSHUFB`. Exact : 2,56 milliards vérifiés, 0 divergence. Neutre en vitesse
   (d3 −0,1 %, mb +2,4 %, ut +0,3 %) : éteint par défaut. `docs/tcg-g4.md` §43.
@@ -47,6 +63,18 @@ de commit et dans `docs/`.
   interactive) neutre au repos ; `tcg/0058` (`POLLNS=1`, attente à la microseconde) :
   Zenerchi −18 %, UT2004 +6,6 %. Les deux restent éteints. `docs/tcg-g4.md` §42.
 
+- **Quartz Extreme allumé par défaut sur le M4, 29/10 (`c792464`).** `QGPU_CAP_QE_DEFAULT`
+  (propriété `qe` du device, posée par `run_tiger.sh` ; `QE=0` l'éteint), kext en personnalité
+  « auto » (`install.sh` sans `QE`). Le jeu présente son échange par le noyau (méthode 5).
+  Endurance §12-§13 sans incident. `docs/quartz-extreme.md`.
+- **M4, 28-29/10 : vidage par bandes, matrice 17/17, endurance de nuit.** `TEX_READBACK` à fenêtre
+  de lignes (`QGPU_CAP_TEX_READBACK_ROWS`, `403593e`, sans changer `QGPU_PROTO_VERSION`) : cmr-pe en
+  1920×1080 vert ; matrice entière `20261028-1854` 17/17 vertes (`17903f5`) ; nuit d'endurance :
+  342 démarrages et 40 cycles de jeu, aucun incident (`docs/endurance.md` §11).
+- **PC, 28/10 : endurance et Colin McRae.** Nuit du 27-28/10 : 683 démarrages (400 à froid, 283
+  reboots), 0 incident (`9d1c921`, `docs/endurance.md` §10). Colin McRae ne quitte plus en entrant
+  en course : qgpu réécrit les `ALIAS` des programmes ARB, refusés par NVIDIA (`5c2ea82`).
+
 - **Profils CPU OS 9 expérimentaux, 27/10.** `OS9_PROFILE=memoire|flottant|complet|verifie`
   reprend les optimisations CPU de Tiger, un seul cœur, périphériques classiques.
   Sept passages DOOM II : écran fixe exact et PCM présent ; profil vérifié : 1,06 milliard
@@ -70,6 +98,22 @@ de commit et dans `docs/`.
   restent éteintes. Split-wx seul neutre, défaut mémoire conservé. Preuves natives PC
   de 0055 encore à rejouer. `docs/plan-traducteur-rapide.md` §9.8–9.9 ; suite du dépôt :
   283 OK, 0 échec.
+
+- **Parité M4 : la série du PC allumée sur Darwin:arm64, 26/10 (`550b2a8`).** `PPC32MT TLBPRECISE
+  LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIRTYSKIP PTEGMAP JC2WAY FPKNOWN FPRFLAZY STFSKNOWN
+  LFSKNOWN TLBBASE` ; A/B 6 parties par bras : DOOM 3 −23,9 %, UT2004 −18,6 %, Marble Blast
+  −22,7 % ; laissés éteints sur un binaire sans `tcg/0037`-`0039`. `docs/parite-m4-2510.md`.
+- **PC x86-64, 20-25/10 : leviers TCG allumés par défaut** (`run_tiger.sh`, `docs/tcg-g4.md`
+  §36-§41, `docs/ppc32-mttcg.md`). 20/10 (`b8484d5`) : `tcg/0040`, `0041`, `0043` (DOOM 3
+  −4,4 %) et `0045`-`0047` (−6,3 %). 23/10 (`623893c`) : `PPC32MT` (`tcg/0049`-`0050`, G4 en
+  MTTCG sur la cible 32 bits : d3 −7,7 %, ut −5,1 %, mb −7 %, zen −6 %). 24/10 (`4b5e3e8`) :
+  `LFSKNOWN` (`tcg/0051`, d3 −9,5 %, ut −2 %). 25/10 (`c3d0c1a`) : `TLBBASE` (`tcg/0052`, d3
+  −2,2 %) ; `tcg/0053` neutre, `archive/0053-vfp-known`.
+- **Plugin de l'invité, 20-23/10 : leviers d'allègement allumés** (`docs/plugin-allegement.md`,
+  `docs/d3-plugin-x86.md` §10). 20/10 : `ZONES` (d3 −6,1 %). 21/10 (`3ae61df`) : `DISPFAST`,
+  `PROGMEMO`, `MTXDIRTY`, `STUNIT`, `DISPLOCK` (d3 −3,8 %, mb −5,6 %). 22/10 (`48f6fa4`,
+  `20261022-abon`) : `BEGINVD`, `LIGHTDIRTY`, `WINSEED`, `TEXDEFER`, `DISPSEED`, `SWAPLITE`
+  (`PRESENTQ` éteint). 23/10 (`94f89ef`, `20261023-uvwon`) : `UVWIDE` (ut −1,6 %, d3 −1,4 %).
 
 - **Collecte d'endurance : RAM physique conservée, 20/10.** `ram.bin` est écrit dès l'arrêt
   de la VM, avant les diagnostics et tout redémarrage, pour permettre l'analyse du savearea
@@ -122,7 +166,8 @@ de commit et dans `docs/`.
   ou attente, journal qui nomme la tranche sale puis sa libération). Outils : `slotpeer`,
   `qfbmode` (guest/qgpu-test), job `stall`, `tools/guest/epreuve_gpu_bloque.py`.
   `tests/qgpu_smoke.py` vert sur le nouveau binaire. **À faire :** reconstruire les binaires de
-  référence (PC et M4) et installer le kext dans les VM.
+  référence (PC et M4) et installer le kext dans les VM. (01/11 : fait, QEMU et kext reconstruits
+  depuis sur les deux hôtes : M4 le 29/10, PC le 31/10 et le 01/11.)
 
 - **Paquet invité `20261007c` (main 97fad0a) et revue de DOOM 3 sous programme ARB, PC, 07/10
   09:05** : job `gpu` **56 OK, 0 échec** (`vpimm` 44/44, `pixstore`, `matbegin`, `matsonde`) ;

@@ -27,8 +27,9 @@ le 15 y est en dur. Un kext sans code qui écarte IOHIDEventDriver de la tablett
 `patches/usbhid/0001` : propriété `x-abs-margin` (en %) de `usb-tablet`. Les coordonnées 0..0x7fff
 de QEMU sont rendues dans `[m, 0x7fff − m]`, `m = 0x7fff · pct / 200` (le même calcul entier que
 l'invité), le descripteur HID ne change pas : l'invité retranche m et retombe sur l'écran entier.
-`run_tiger.sh` (`TABLET_MARGIN`, défaut 15) et `devloop.py` la passent si le binaire l'a ;
-`TABLET_MARGIN=0` pour un invité 10.4.10 ou plus ancien, qui n'a pas ce retrait.
+`run_tiger.sh` (`TABLET_MARGIN`, sinon le fichier `<disque>.tablet-margin` s'il existe, sinon 15)
+et `devloop.py` la passent si le binaire l'a ; `TABLET_MARGIN=0` (ou `0` dans ce fichier) pour un
+invité 10.4.10 ou plus ancien, qui n'a pas ce retrait.
 
 Vérifié sous 10.4.11 : clics en (200, 600), (800, 150), (8, 760) et (1016, 8) sous la pointe du
 pointeur, double-clic sur l'icône de Marble Blast qui lance le jeu.

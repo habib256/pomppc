@@ -1,6 +1,12 @@
 # GPU sous Tiger PPC — kext, paravirtualisation et le cas de la GeForce 4060 Ti
 
 Document d'implémentation — POMPPC, août 2026.
+
+> **01/11/2026 : étude d'août, dépassée sur plusieurs points ; ne pas la lire comme l'état actuel.**
+> QEMU est en 11.1.2 (plus 9.2.0). Le kext `POMPPCQFB` a été chargé et éprouvé (`QFB=1` avec
+> Marble Blast le 07/10, `bug-hunt-2026-09-29-passe4.md`). La 3D passe par le GPU paravirtuel
+> qgpu (`docs/gpu-3d-tiger.md`) et Quartz Extreme, déclaré « hors périmètre » au §4.6, est fait et
+> allumé par défaut sur les deux hôtes (`docs/quartz-extreme.md`, `run_tiger.sh`).
 Cible : Mac OS X 10.4.11 PPC invité sur QEMU `mac99` (voir `run_tiger.sh`), hôte Linux x86-64 équipé d'une **GeForce RTX 4060 Ti (AD106, Ada Lovelace)**.
 
 ---

@@ -215,6 +215,10 @@ Résultat : **0 échec** sur les deux backends, et `tests/qgpu_smoke.py` vert à
 
 ## 7. Ce que le plugin invité devra faire
 
+(01/11 : fait le 19/09 ; le plugin tient textures 3D, cubes, compression, profondeur et
+LOD, couleur secondaire (v11) et paramètres de point, et annonce « 1.5 POMPPC-1.0 » sur un
+device qui tient le tout : `docs/gpu-3d-tiger.md` §5, `docs/protocole.md`.)
+
 Rien de ceci n'est visible par une application tant que le plugin n'a pas suivi. Il faut une VM
 de développement ; rien n'a donc été touché côté invité. Dans l'ordre :
 

@@ -21,6 +21,25 @@ double par la même op, §24) ; trois essais exacts mais sans gain,
 `essais/0005-ppc-vfp-nrwg.patch` (`x-vfp-nrwg`, §11) et `essais/0009-ppc-isync-chain.patch`
 (`x-isync-chain`, §16.8), ne sont pas appliqués.
 
+**État au 01/11/2026** (la liste ci-dessus s'arrête au 01/10 ; la série a continué jusqu'à
+`tcg/0063`, journal daté en §25-§47). Vérité : `scripts/build_qemu_qfb.sh` (patches nommés),
+`run_tiger.sh` (défauts par hôte), `docs/etat-des-hotes.md` (état des binaires).
+
+| patches | propriétés (lanceur) | PC x86-64 | M4 arm64 |
+|---|---|---|---|
+| 0001-0004, 0006-0008, 0010-0012, 0014-0016, 0021 (+ pendants x86 0017-0020 ; 0023 sous `x-tb-fast` ; 0027-0028 correctifs arm64 sans propriété) | `x-sr-tlb`, `x-lfs-inline`, `x-vfp-fast`, `x-vperm-fast`, `x-jit-near`, `x-fp-inline`, `x-ret-inline`, `x-jc-idx`, `x-icbi-sync`, `x-jc-bits=14`, `x-msr-nobql`, `x-fp-native`, `x-tb-fast`, `x-fp-native64`, `x-vmx-inline` ; `x-fast-fp` (`patches/fastfp/`) | allumés | allumés |
+| 0022, 0025/0029, 0026 | `x-vfp-native`, `x-lmw-vector`, `x-jc-word` | allumés | allumés |
+| 0024 | `x-jit-rel32` | allumé (06/10, §31) | sans objet |
+| 0031-0035 (+ 0037-0039 sur arm64), 0040, 0041, 0043, 0045-0047, 0050-0052 | `x-tlb-precise`, `x-lmw-inline`, `x-dcbz-inline`, `x-fp-native-cmp`, `x-vfp-native-cmp`, `x-dirty-skip`, `x-pteg-map`, `x-jc-2way`, `x-fp-known`, `x-fprf-lazy`, `x-stfs-known`, MTTCG 32 bits (`PPC32MT`), `x-lfs-known`, `x-tlb-base` | allumés (06/10 au 25/10) | allumés depuis le 26/10 (`docs/parite-m4-2510.md`) |
+| 0056 | `x-tcg-cold` | allumé depuis le 31/10 (`docs/vitesse-doom3-x86.md` §23) | sans effet tant que le saut long n'est pas écrit : parité à faire |
+| 0013, 0048 + 0055, 0049, 0054, 0057-0058 (macOS), 0059 | `x-fp-flat`, `x-tier2`, `x-pmu-real`, `x-vfp-native-cmp-slow`, `x-vcpu-qos`, `POMPPC_POLL_NS`, `x-vperm-inline` | éteints | éteints |
+| 0042 | compteurs sous `x-mem-stats` / `x-ret-verify` | mesure | mesure |
+| **0060-0063** | `x-jc-clear-exact`/`x-jc-page-bits`, `x-bat-skip`, `x-bat-old-mask`, `x-dbat-lite` | **non nommés** dans `build_qemu_qfb.sh`, absents des binaires (§44-§47) ; arbre de mesure `~/src/qemu-nuit/build-x` | non nommés |
+
+Les modes preuve (`*-verify`) sont éteints partout. Essais hors série : `patches/tcg/essais/`
+(`patches/README.md`). Les arbres `~/src/qemu-jcp` et `~/src/qemu-bat` cités aux §44-§45 sont
+effacés depuis le 01/11.
+
 **En une phrase** : sur Marble Blast, ni AltiVec ni le flottant ne dominent ; ce qui coûte,
 c'est que QEMU **vide tout son TLB ~23 000 fois par seconde**, à chaque changement de
 registre de segment de Tiger — le patch 0001 en retire 93 % et donne **+9,8 % d'images/s**
@@ -5588,6 +5607,9 @@ un profil.
 
 ## 44. Le cache de sauts vidé page par page : `tcg/0060` (`x-jc-clear-exact`, `x-jc-page-bits`), PC x86-64, 31/10
 
+(01/11 : les chiffres cmr de cette section portent sur la transition d'avant la course, pas sur
+la course ; rejoués en course au §46. L'arbre `~/src/qemu-jcp` est effacé.)
+
 **Point de départ.** Le profil croisé du 31/10 (`vitesse-doom3-x86.md` §23) met la recherche de
 blocs (`qht_lookup_custom`, `lookup_tb_ptr`) dans les 5 jeux, jusqu'à 13,7 % du vCPU sur zen. La
 piste du §36.7 était la taille du groupe de page : 64 cases par page virtuelle, quelle que soit
@@ -5680,6 +5702,9 @@ toutes après le dernier rapport périodique : pendant l'arrêt de l'invité qui
 (`shutdown -h` de `matab.sh`). Hors de la classe OpenBIOS/BootX du §35.
 
 ## 45. Vidages de BAT sautés pour un BAT invalide : `tcg/0061` (`x-bat-skip`), PC x86-64, 31/10 soir
+
+(01/11 : comme au §44, cmr est mesuré ici sur la transition ; rejoué en course au §46, où 0061
+est neutre et abandonné. L'arbre `~/src/qemu-bat` est effacé.)
 
 **Le patch.** `do_invalidate_BAT` revient tout de suite quand la valeur haute passée n'a ni Vs ni
 Vp : un tel BAT ne traduit rien, donc aucune entrée du TLB n'en vient. `bcopy_physvir_32` du noyau
@@ -5819,7 +5844,9 @@ par bras (médianes, ms/image) : d3 87,3 → 84,7 (−3,0 %), mb 8,9 → 8,7 (�
 l'invité (31 % du vCPU), là où les leviers du JIT ont le moins de prise. Le profil PGO ne le voit
 pas, et la recherche de blocs coûte chez lui comme ailleurs. La perte sous x8 (+4,2 %) reste la
 seule singularité propre à cmr. Suites :
-- entraîner le PGO avec cmr (`pgo-train.sh` à étendre au plein écran par jeu) ;
+- entraîner le PGO avec cmr (`pgo-train.sh` à étendre au plein écran par jeu) ; (01/11 : fait,
+  `--plein-ecran cmr` par défaut ; profil neutre en fenêtre, cmr non prouvé, non mis en
+  production : `vitesse-doom3-x86.md` §25, `binaire-rapide-x86.md` §7)
 - continuer d'alléger le plugin sur cmr (`prog_params_arena`, `prog_sync`, `fbits` non mis en
   ligne) ;
 - témoin sous vérificateurs sans 0063 avant de rejuger 0063.

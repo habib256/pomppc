@@ -8,7 +8,10 @@ le GPU de l'hôte. Rien d'Apple n'est modifié dans l'invité : un plugin, un ke
 Tableau de bord : **`TODO.md`**. Historique : **`CHANGELOG.md`**. Conception et relevés :
 `docs/`.
 
-## Où en est le projet (24/09/2026)
+## Où en est le projet (couches au 01/11/2026 ; jeux au 24/09/2026)
+
+L'état courant détaillé (vitesse, matrice, défauts allumés, binaires de chaque hôte) est dans
+`TODO.md` et `docs/etat-des-hotes.md`.
 
 | Couche | État |
 |---|---|
@@ -18,9 +21,13 @@ Tableau de bord : **`TODO.md`**. Historique : **`CHANGELOG.md`**. Conception et 
 | Son (Screamer), réseau, relais web | faits (`patches/screamer/`, `docs/internet-tiger.md`) |
 | Écran paravirtuel QFB | fait (`kext/POMPPCQFB/`, `patches/qfb/`) |
 | **GPU 3D paravirtuel qgpu** | protocole **v22** : pipeline fixe et combineurs ATI, OpenGL 1.5 annoncé, programmes ARB et GLSL, VBO lus par l'hôte, copies GPU et présentation directe |
-| Bureau accéléré (Quartz Extreme) | pas commencé |
+| Vitesse du G4 émulé | série `patches/tcg/` (allumée par hôte dans `run_tiger.sh`) ; binaire rapide PGO sur le PC (`docs/binaire-rapide-x86.md`) |
+| Bureau accéléré (Quartz Extreme) | allumé par défaut sur les deux hôtes (M4 depuis le 29/10, PC depuis le 30/10 ; `QE=0` l'éteint), `docs/quartz-extreme.md` ; Core Image non fait |
 
-Jeux, sur le disque quotidien (trois preuves visées : image juste, zéro repli, mesure) :
+Jeux, sur le disque quotidien, **au 24/09/2026** (dépassé : depuis, la matrice est verte sur
+les deux hôtes, la géométrie de Colin McRae est corrigée, l'arme d'UT2004 sur le PC ; tableau
+courant dans `TODO.md`, « Matrice de jeux ») — trois preuves visées : image juste, zéro repli,
+mesure :
 
 | Jeu | Chemin GL | État |
 |---|---|---|
@@ -108,7 +115,7 @@ cp -R /Volumes/POMPPCSRC /tmp/src && sudo sh /tmp/src/guest/gldriver/install.sh
 ```
 
 puis redémarrer. **Une modification de `qgpu_proto.h` ne demande que QEMU et le plugin**
-(`.run/cmr/cycle.sh NORUN=1`, sans redémarrer) ; seule une modification de `qgpu_abi.h` demande
+(`NORUN=1 tools/guest/cycle.sh`, sans redémarrer) ; seule une modification de `qgpu_abi.h` demande
 aussi le kext (`install.sh` + redémarrage). Le plugin refuse un kext d'avant la v19 et un QEMU
 d'un autre `qgpu_proto.h` (`docs/protocole-v19-transport.md`).
 
@@ -132,13 +139,16 @@ POMPPC_FRONTEND=native ./run_tiger.sh  # fenêtre QEMU native, sans ImGuiDock
 
 `./run_tiger.sh` ouvre maintenant Tiger dans **ImGuiDock**. Le profil maximal
 active FASTFP, SRTLB, LFSINLINE, VFPFAST, VPERMFAST, FPINLINE, RETINLINE,
-JCIDX, ICBISYNC, JITNEAR, copies GPU et GLSL, sous réserve des capacités sondées.
+JCIDX, ICBISYNC, MSRNOBQL, JITNEAR, FPNATIVE, TBFAST, FPNATIVE64, VMXINLINE, copies GPU et
+GLSL, puis la série propre à l'hôte (branches `Linux:x86_64` et `Darwin:arm64` de
+`run_tiger.sh` : PPC32MT, LFSKNOWN, TLBBASE…, zone froide sur le PC) et Quartz Extreme, sous
+réserve des capacités sondées.
 Les surcharges `…=0` restent respectées ; les vérificateurs coûteux ne sont
 pas activés. SMP reste à deux cœurs (profil Tiger), pas au nombre de cœurs hôte.
 `HEADLESS=1`, `DBUS_DISPLAY=1` et un `POMPPC_DISPLAY` explicite contournent
 l'ouverture du frontend ; le banc de jeux conserve son lancement natif.
 
-Chaque lanceur documente ses variables dans son en-tête (`head -30 run_tiger.sh`). Les lanceurs
+Chaque lanceur documente ses variables dans son en-tête (`head -130 run_tiger.sh`). Les lanceurs
 **sondent le binaire** (`scripts/caps.sh`) et n'annoncent jamais une capacité absente. Verrou
 `flock` sur le disque : il meurt avec QEMU, **ne jamais supprimer `.run/tiger.lock`** (le fichier
 resté après un arrêt brutal ne verrouille rien ; le supprimer quand QEMU tourne encore laisse un
@@ -151,9 +161,10 @@ réellement actif (le Screamer exige moins de 1 Go), réseau actif si slirp.
 
 ## Développer le GPU 3D
 
-- **Boucle courte, disque quotidien** : `.run/cmr/tssh.sh "cmd"` (ssh vers l'invité, port 2222)
-  et `.run/cmr/cycle.sh NORUN=1` (transfert, compilation gcc 4.0 dans l'invité, installation du
-  plugin, ~2 min). Ces scripts sont à verser dans `tools/guest/` (`TODO.md` A5).
+- **Boucle courte, disque quotidien** : `tools/guest/tssh.sh "cmd"` (ssh vers l'invité, port
+  publié dans `.run/tiger.sshport`, 2222 par défaut) et `NORUN=1 tools/guest/cycle.sh`
+  (transfert, compilation gcc 4.0 dans l'invité, installation du plugin, ~2 min). Déplacés de
+  `.run/cmr/` le 26/09 (`tools/README.md`).
 - **Boucle instrumentée, disque de dev** : `tools/guest/devloop.py` (jobs par boîte aux lettres
   sur `tiger-dev.raw`, `tools/README.md`).
 - **Profil** : `sample <pid> 10` dans Tiger ; `tools/re/sym.py` traduit un `CRASH pc` de
@@ -215,7 +226,8 @@ conservée : le self % du profil localise, il ne valide pas. En jeu, la mesure e
 | `docs/architecture.md` | propriété des ressources, threads, barrières, clients morts, resets et limites connues |
 | `docs/gpu-3d-tiger.md` | GPU 3D : architecture, rétro-ingénierie d'OpenGL.framework, protocole, mesures, boucle de dev |
 | `docs/re/README.md` | index des relevés (GLEngine, accélérateur IOKit, UT2004, programmes ARB, étude GLEngine) |
-| `docs/protocole-v7…v18` | le protocole qgpu, version par version (fusion prévue en un seul `protocole.md`) |
+| `docs/protocole.md` | le contrat courant du protocole qgpu (v22, ABI de transport v19) |
+| `docs/protocole-v7…v23-*.md` | le protocole qgpu, version par version (historique) |
 | `docs/bilan-2026-09-23-jeux-tiger.md` | bilan raisonné jeu par jeu |
 | `docs/bug-hunt-2026-09-22.md` | relecture statique de la chaîne 3D, 90 findings et leurs verdicts |
 | `docs/roadmap-opengl15.md` | feuille de route de fond (OpenGL 1.5, Quartz Extreme, Core Image) |

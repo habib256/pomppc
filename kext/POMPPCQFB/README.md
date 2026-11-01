@@ -17,6 +17,13 @@ Mac OS 9 pourra donc réutiliser le même device.
 
 ## État
 
+(01/11/2026 : tableau d'août. QEMU est en 11.1.2, plus 9.2.0. Le kext a été compilé dans
+l'invité et éprouvé : `QFB=1` avec Marble Blast le 07/10 (bureau étendu au second écran 1280×800,
+`docs/bug-hunt-2026-09-29-passe4.md`), mode changé pendant une panne du GPU
+(`docs/epreuve-gpu-bloque.md`, KT4). L'écran QFB reste **facultatif** (`QFB=1`, second moniteur) :
+il n'est pas dans la configuration de tous les jours, où `SURF_PRESENT` présente sur le
+framebuffer VGA de `mac99` (`scanout=auto` de `qgpu-pci`).)
+
 | Élément | État | Preuve |
 |---|---|---|
 | Device `qfb-pci` (QEMU 9.2.0) | **fait, testé** | `tests/qfb_smoke.py` : mode 640×480×32 programmé depuis Open Firmware, `rowbytes` relu = 0xa00, bandes rouge/verte/fond gris vérifiées pixel à pixel sur un `screendump` |

@@ -27,7 +27,7 @@ trois cellules vertes, capture/rejeu 0,00 %, respectivement 9,9, 34,1 et 70,6 ms
 La série de dix tours consécutifs DOOM 3/Prey est **reportée à la demande de
 l'utilisateur** ; ce premier tour ne la remplace pas.
 
-`tools/matrice/` joue chaque jeu de la matrice (TODO §1) dans chaque mode — **fenêtre** et
+`tools/matrice/` joue chaque jeu de la matrice (`TODO.md`, « Matrice de jeux ») dans chaque mode — **fenêtre** et
 **plein écran** — sur la VM quotidienne, et produit un tableau vert/rouge avec, pour chaque
 cellule, ses preuves rangées. C'est le harnais qui doit autoriser A2 (découpage du plugin) et
 A4 (travail déplacé vers l'hôte) sans peur : on le rejoue avant et après.
@@ -58,7 +58,7 @@ verrou en 60 s, elle s'arrête sans rien relancer. Sorties dans
 
 ## 1. Les trois preuves d'une cellule
 
-Un jeu est **vert** dans un mode quand les trois preuves y sont (TODO §1) :
+Un jeu est **vert** dans un mode quand les trois preuves y sont (`TODO.md`, « Matrice de jeux ») :
 
 1. **Image juste.** Le plugin vide les soumissions à partir du déclencheur
    (`POMPPC_GL_DUMP_TRIGGER`, vidage autonome : tout l'état et toutes les textures réémis). Le
@@ -132,7 +132,8 @@ Un tour interrompu laisse au pire des `*.matrice-sauve` : le tour suivant les re
 
 ## 3. Références d'image : où et comment
 
-- **Fichiers hors dépôt** : `bench/matrice/ref/<jeu>-<mode>/` (vidage jusqu'à l'image retenue
+- **Fichiers hors dépôt** (M4 ; le PC a les siens, `bench/matrice/ref-linux/` et
+  `references-linux.csv`, §6 quater) : `bench/matrice/ref/<jeu>-<mode>/` (vidage jusqu'à l'image retenue
   + `image.ppm` / `image.png`), 10 à 60 Mio par cellule. Ils ne vont pas dans git (bench/ est
   ignoré) : ce sont des données de jeux commerciaux et ils pèsent.
 - **Empreinte versionnée** : `tools/matrice/references.csv` (cellule, numéro d'image, sha256
@@ -157,9 +158,9 @@ UT2004 est déterministe (pas de simulation fixé), les autres non.
 | Prey Demo | `r_mode 3` | `r_mode 5` | `+loadGame Auto___Fuite_____toute_vitesse` : L+300..L+600 après le chargement |
 | UT2004 Demo | `StartupFullscreen=False` | `-fullscreen`, 1024×768 | caméra d'intro d'AS-Convoy, pas fixé à 0,2 s (`seed.c`), images 13..73 |
 | Warcraft III | **non automatisé** | défaut (800×600, changement de mode) | menu principal, images 1200..1700 ; CD monté depuis `Warcraft III.toast` |
-| Colin McRae 2005 | **non automatisé** (pas de mode fenêtre) | défaut (800×600, changement de mode) | départ d'ESP 1 Selardu en contre la montre, voiture arrêtée : 600 échanges réguliers après la touche COURSE (3 échanges par image du jeu) |
+| Colin McRae 2005 | **non automatisé** (pas de mode fenêtre) | défaut (800×600, changement de mode) | départ d'ESP 1 Selardu en contre la montre, voiture arrêtée : 600 échanges réguliers après la touche COURSE (3 échanges par image du jeu) ; depuis le 31/10 (`6054367`), seulement des tranches **en course** (≥ 1 700 sommets bruts par échange, `SOMMETS_COURSE` de `jeux/cmr.py`) |
 | Nexuiz 2.5.2 (DarkPlaces) | `+vid_fullscreen 0`, 800×600 | `+vid_fullscreen 1`, 1024×768 | `-benchmark demos/demo1` (timedemo, déterministe) : images 120..600, vidage à l'image fixe 870 |
-| Nexuiz 2.5.2 (GLSL, `nxg`) | **non automatisé** | **non automatisé** | profil `+r_glsl 1` prévu : GLSL coupé par le jeu faute de `GL_ARB_fragment_shader` |
+| Nexuiz 2.5.2 (GLSL, `nxg`) | `+r_glsl 1`, comme `nx` | `+r_glsl 1`, comme `nx` | même démo et mêmes fenêtres que `nx` ; automatisé depuis le protocole v21 (27/09, `jeux/nx.py`) — avant, GLSL coupé par le jeu faute de `GL_ARB_fragment_shader` |
 | RTCW | **non automatisé** | **non automatisé** | — |
 
 Détails par jeu dans l'en-tête de chaque module. Points durs :
@@ -325,6 +326,8 @@ du 02/10 (plugin `FIXED4`, kexts POMPPCGPU et POMPPCFsqrt). Hôte au repos (0 au
 
 **Ce que ce PC a** : Marble Blast, Zenerchi, UT2004. Les autres jeux (DOOM 3, Prey, Colin
 McRae, Warcraft III, Nexuiz, RTCW) ne sont que sur le M4 : cinq cellules sur seize.
+(01/11 : dépassé — le PC a depuis DOOM 3 (04/10) et Colin McRae (28/10) : huit références
+dans `references-linux.csv`, toutes validées à l'œil, la dernière, cmr-pe, le 01/11.)
 
 **Portage** : rejoueur compilé contre EGL (`GL_LIBS`), PNG par ImageMagick, charge par
 `/proc/loadavg` ; `tools/tcg/matab.sh` tire le dépôt de git (il avait le chemin du M4 en dur).
@@ -348,7 +351,8 @@ premier jeu de 3 + 3 parties la même nuit (`x86-ut-plancher`, `-pe` : 51,1 et 5
 sur **llvmpipe** — sous la session Wayland d'Ubuntu 26.04, `eglGetDisplay(EGL_DEFAULT_DISPLAY)`
 donne Mesa ; corrigé par `EGL_PLATFORM=device` (`run_tiger.sh`). Écart faible (UT2004 est
 limité par l'émulation), mais toute mesure du 13-14/10 avant 9479434 est sur llvmpipe. DOOM 3 reste rouge tant que sa référence
-n'est pas validée à l'œil (`matrice.py --valider d3-fen`). Le premier passage sur
+n'est pas validée à l'œil (`matrice.py --valider d3-fen`) (01/11 : validée le 30/10 avec d3-pe,
+`a89515b`). Le premier passage sur
 la VM a demandé : la clé de la matrice (`.run/cmr/id_rsa`, déposée par mot de passe ; `expect`
 manque ici), `~/matrice/ut-seed.dylib` compilé dans la VM de dev (pas de gcc dans la VM
 quotidienne).
@@ -454,6 +458,9 @@ automatisées. Les planchers sont ~1,3 × ces mesures : ils gardent contre une r
 ne jugent pas la vitesse absolue.
 
 ## 7. Défauts trouvés en route
+
+(01/11 : les « TODO §n » de cette section renvoient au tableau de bord de la fin septembre,
+conservé dans `docs/archive/` ; le `TODO.md` d'aujourd'hui n'a plus de sections numérotées.)
 
 - **Le déclencheur de vidage ralentit les jeux** (plugin) : un `access()` par dessin texturé
   tant que le fichier n'existe pas ; DOOM 3 77 → 139 ms/image, Marble Blast 12 → 36,

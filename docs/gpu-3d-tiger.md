@@ -81,7 +81,7 @@ Principes fixés une fois pour toutes :
 | `patches/qgpu/qgpu-core.[ch]` | analyse et validation du flux, contextes, surfaces, textures ; indépendant de QEMU |
 | `patches/qgpu/qgpu-soft.c` | backend logiciel de référence : pipeline OpenGL 1.x par fragment |
 | `patches/qgpu/qgpu-gl.c` | **backend OpenGL** : CGL (macOS) / EGL (Linux), FBO + profondeur par surface |
-| `patches/qgpu/qgpu-pci.c` | device QEMU ; `backend=auto\|soft\|gl`, `shmem_mb`, `trace=on` ; propriétés de test `x-test-stall-ms`, `x-test-refuse-reset` (`docs/epreuve-gpu-bloque.md`) |
+| `patches/qgpu/qgpu-pci.c` | device QEMU ; `backend=auto\|soft\|gl`, `shmem_mb`, `scanout=auto\|qfb\|vga\|none`, `qe=on` (Quartz Extreme recommandé, `QGPU_CAP_QE_DEFAULT`), `trace=on` ; propriétés de test `x-test-stall-ms`, `x-test-refuse-reset` (`docs/epreuve-gpu-bloque.md`) |
 | `kext/POMPPCGPU/` | le kext : autant de clients que le device en publie (4), une tranche de 16 Mio chacun ; les plages d'identifiants sont celles du device, qui détruit lui-même les objets d'un client mort |
 | `guest/gldriver/` | **le plugin OpenGL** (`pomppc_gld.c` points d'entrée, `pomppc_accel.c` accélération, `pomppc_qgpu.c` client du kext, `gld_tramp.s` trampolines générés), `install.sh` |
 | `guest/gltest/` | `gltest` (hors écran, 12 scènes avec pixels témoins) et `glwin` (fenêtre GLUT) |
@@ -95,6 +95,10 @@ Principes fixés une fois pour toutes :
 ---
 
 ## 3. Le protocole qgpu (v6)
+
+(01/11 : section de septembre, restée à la v6. Le protocole courant est la **v22**
+(`QGPU_PROTO_VERSION` de `patches/qgpu/qgpu_proto.h`), plus les capacités ajoutées sans changer
+de version ; tableau des versions et opcodes : `docs/protocole.md`.)
 
 Flux de mots big-endian ; en-tête `opcode << 16 | longueur en mots`. Détail : `qgpu_proto.h`.
 
@@ -112,7 +116,10 @@ divisées par w (projectives : l'hôte interpole puis divise par q).
 
 **Plusieurs processus.** Le kext découpe BAR0 en 4 tranches de 16 Mio et donne à chaque client
 une plage d'identifiants (4 contextes, 16 surfaces, 128 textures). Un 5e client est refusé et son
-plugin rend en logiciel ; à la fermeture d'un client, le kext détruit ses objets.
+plugin rend en logiciel ; à la fermeture d'un client, le kext détruit ses objets. (01/11 : aujourd'hui
+32 contextes, 32 surfaces (26/09) et 1 024 textures (v17) par client (`QGPU_MAX_CTX`,
+`QGPU_MAX_SURF`, `QGPU_MAX_TEX`) ; depuis la v19, le device publie le nombre de tranches
+(`QGPU_REG_CLIENTS`, 4) et détruit lui-même les objets d'un client mort.)
 
 ---
 
@@ -801,15 +808,21 @@ cp -R /Volumes/POMPPCSRC /tmp/src
 sudo sh /tmp/src/guest/gldriver/install.sh        # --remove pour désinstaller
 ```
 
-Puis lancer Tiger avec le device : `GPU=1 ./run_tiger.sh`. Sans le device, le kext ne se charge
-pas et le plugin se comporte exactement comme le rendu logiciel d'Apple.
+Puis lancer Tiger : `./run_tiger.sh` (le device est allumé par défaut ; `GPU=0` l'omet). Sans le
+device, le kext ne se charge pas et le plugin se comporte exactement comme le rendu logiciel d'Apple.
 
 ---
 
 ## 7. Pistes
 
-Le plan à court terme est dans **`docs/todo-gpu-3d.md`**, la feuille de route (OpenGL 1.5,
-Quartz Extreme, Core Image) dans **`docs/roadmap-opengl15.md`**. En résumé :
+Le plan à court terme est dans **`TODO.md`** (`docs/todo-gpu-3d.md` n'est plus qu'un renvoi),
+la feuille de route (OpenGL 1.5, Quartz Extreme, Core Image) dans **`docs/roadmap-opengl15.md`**.
+En résumé :
+
+(01/11 : liste de septembre. Faits depuis : 1 (géométrie brute v7, tableaux natifs v18,
+programmes v16), 2 (stencil v6, fin du pipeline fixe v8), 4 (doorbell asynchrone v9) ; Quartz
+Extreme est allumé par défaut sur les deux hôtes (`docs/quartz-extreme.md`). Les priorités
+courantes sont dans `TODO.md`.)
 
 1. **Monter d'un étage** : se brancher au niveau du tableau de sommets et du programme de
    pipeline pour envoyer les sommets non transformés — transformation et éclairage sur le GPU

@@ -1,6 +1,14 @@
 # Métrologie du boot et optimisations TCG (extrait du README, archivé le 24/09/2026)
 
-Historique de la couche baseline (Linux x86-64, 2026-08). Rien ici n'a changé depuis ; le protocole de mesure A/B reste la référence pour toute optimisation de QEMU.
+Historique de la couche baseline (Linux x86-64, 2026-08). Le protocole de mesure A/B reste la référence pour toute optimisation de QEMU.
+
+> **01/11/2026 : l'état décrit ici est dépassé.** La campagne TCG a repris en octobre : la série
+> `patches/tcg/` (jusqu'à 0063) est appliquée par `scripts/build_qemu_qfb.sh` et une partie de ses
+> leviers est allumée par défaut (PPC32MT, lfs-known, tlb-base, zone froide… :
+> `docs/vitesse-doom3-x86.md`, `CHANGELOG.md`). Les leviers se jugent sur la matrice de jeux
+> (`tools/matrice/`, ms/image) ; pour le boot, `CPU_qemu` reste la métrique, et la baseline de
+> 23,32 s n'a pas été refaite (`TODO.md`, « Métrologie boot »). Les §1 et §2 restent l'histoire
+> d'août.
 
 ## 1. Optimisations (guidées par le profiling)
 
@@ -12,7 +20,7 @@ hôte au repos** tranche.
 
 Validation par **A/B interleave, hôte au repos, garde-fou charge** (médiane sur n=8) :
 
-**État actuel : aucun patch d'optimisation TCG actif.** Après validation, aucune des optimisations
+**État d'août 2026 : aucun patch d'optimisation TCG actif** (dépassé, voir la note en tête). Après validation, aucune des optimisations
 tentées ne survit ; les patches restent dans `patches/01-*.patch` et `patches/02-*.patch` pour
 référence. À ne pas confondre avec le binaire utilisé : le build source **est** patché, mais
 seulement pour des **fonctionnalités** (SMP mac99, device Screamer, `qfb-pci` — voir
@@ -93,7 +101,7 @@ si coût il y a, il ne vient pas du flux audio.
 (la battre = rdtsc maison, risqué). Prochain gros poste : dispatch TCG
 (`tb_lookup`+`qht_lookup`+`helper_lookup_tb_ptr` ~20%).
 
-## 2. Prochaine étape TCG (non reprise depuis 2026-08)
+## 2. Prochaine étape TCG (vue d'août 2026 ; reprise en octobre, voir la note en tête)
 
 Le build source et le profiling sont en place (`scripts/build_qemu_qfb.sh`,
 `scripts/profile-boot.sh`) et les deux premières tentatives d'optimisation ont été mesurées puis

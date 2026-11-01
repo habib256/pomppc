@@ -23,3 +23,15 @@ hors dépôt (disque USB : `pomppc/re/`).
 | `moteur-multifil.md` | `kCGLCEMPEngine` (313) absent de Tiger 10.4.6 : GLEngine ne crée aucun fil, `CGLEnable(313)` → `kCGLBadEnumeration` (01/10) |
 | `version-extensions.md` | ce que la chaîne **tient** vraiment, fonction par fonction — d'où la version et les extensions annoncées ; table bit → extension corrigée par l'expérience |
 | `pixelstore.md` | l'état de `glPixelStorei` (`GC_PACK_*`, `GC_UNPACK_*`) dans le contexte de GLEngine, et le défaut de base (contexte du GLDriver) qui faisait planter `try_draw_pixels` (07/10) ; GLEngine identique en 10.4.6 et 10.4.11 |
+| `glengine-exit-interpolateur.md` | `exit(1)` dans `_gleBuildInterpolateFunc` : pourquoi un repli vers le rendu d'Apple tue un jeu sous programme ARB (22/09) |
+| `glengine-tampon-coupe.md` | GLEngine coupe ses lots `GL_TRIANGLES` à cheval sur deux `BeginPrimitiveBuffer` (22-23/09) |
+| `bloc-changements-r4.md` | le bloc de changements de GLEngine, bit par bit (relevé R4, 24/09) |
+| `etude-court-circuit-glengine.md` | court-circuiter GLEngine pour les dessins VBO ? étude du 24/09 |
+| `relecture-2026-09-24.md` | relecture adversariale des commits du 24/09 |
+| `verdict-lots-4-5.md` | verdict unique : mémoire des unités et des textures, lots 4 et 5 (26/09) |
+| `dispatch-paresseux.md` | transmission paresseuse des `gldUpdateDispatch` au GLDriver d'Apple |
+| `textures-3d.md`, `cartes-de-cube.md`, `bordure-et-compression.md`, `opengl-1.4.md` | ce que GLEngine donne au pilote : textures 3D et LOD, cartes de cube, bordure/miroir/S3TC, OpenGL 1.4 |
+| `glsl-glengine.md` | GLSL dans GLEngine 10.4.6, relevé pour le protocole v21 (27/09) |
+| `cmr-rendu-vers-texture.md` | Colin McRae : le rendu vers texture d'IndirectX tenu par l'hôte (27/09) ; §7 : les reflets de la carrosserie (31/10) |
+| `ut2004-flyby.md`, `ut2004-fullscreen.md`, `ut2004-m4-profile.md`, `ut2004-texture-cache.md`, `ut2004-arme-noire.md` | UT2004 : banc caméra AS-Convoy, plein écran, profil M4 du 20/09, réutilisation des identifiants de texture, arme noire (texture diffuse perdue) |
+| `apple-headers/` | en-têtes publics d'Apple `gliContext.h` et `gliDispatch.h` (interface GLI du pilote) |

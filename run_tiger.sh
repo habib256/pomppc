@@ -59,15 +59,15 @@
 #                             # (x-fprf-lazy, patches/tcg/0046, allumé sur Linux x86-64 depuis le 20/10, §38)
 #   STFSKNOWN=0 ./run_tiger.sh # coupe : stfs d'une valeur connue (x-fp-known) sans la conversion complète
 #                             # (x-stfs-known, patches/tcg/0047, allumé sur Linux x86-64 depuis le 20/10, §39)
-#   LFSKNOWN=1 ./run_tiger.sh # lfs converti par l'hôte quand le mot est un simple nul ou normal, et producteur
-#                             # de x-fp-known (x-lfs-known, patches/tcg/0051, docs/tcg-g4.md §40 ; éteint
-#                             # par défaut, A/B en jeu à faire ; n'agit qu'avec FPKNOWN=1)
-#   TLBBASE=1 ./run_tiger.sh  # chargements en forme D sur une base déjà vérifiée dans le bloc sans refaire le
-#                             # chemin court du TLB logiciel (x-tlb-base, patches/tcg/0052, docs/tcg-g4.md §41 ;
-#                             # éteint par défaut, A/B en jeu à faire ; cible 32 bits seulement, PPC32MT=1)
-#   PPC32MT=1 ./run_tiger.sh  # SMP >= 2 sur qemu-system-ppc (cible 32 bits, celle du G4) en MTTCG au lieu
-#                             # de qemu-system-ppc64 (patches/tcg/0050, docs/ppc32-mttcg.md ; éteint par
-#                             # défaut, sondé : sans le patch, repli sur ppc64 avec un avertissement)
+#   LFSKNOWN=0 ./run_tiger.sh # coupe : lfs converti par l'hôte quand le mot est un simple nul ou normal, et
+#                             # producteur de x-fp-known (x-lfs-known, patches/tcg/0051, docs/tcg-g4.md §40 ;
+#                             # allumé par défaut depuis le 24/10, d3 −9,5 % ; n'agit qu'avec FPKNOWN=1)
+#   TLBBASE=0 ./run_tiger.sh  # coupe : chargements en forme D sur une base déjà vérifiée dans le bloc sans refaire
+#                             # le chemin court du TLB logiciel (x-tlb-base, patches/tcg/0052, docs/tcg-g4.md §41 ;
+#                             # allumé par défaut depuis le 25/10 ; cible 32 bits seulement, PPC32MT=1)
+#   PPC32MT=0 ./run_tiger.sh  # coupe : SMP >= 2 sur qemu-system-ppc (cible 32 bits, celle du G4) en MTTCG au
+#                             # lieu de qemu-system-ppc64 (patches/tcg/0050, docs/ppc32-mttcg.md ; allumé par
+#                             # défaut depuis le 23/10 (PC) et le 26/10 (M4), sondé : sans le patch, repli ppc64)
 #   PMUREAL=1 ./run_tiger.sh  # ppc64 : le PMU POWER8 ne compte plus sur un G4 (PMC5 fantôme à chaque
 #                             # sortie de bloc, x-pmu-real, patches/tcg/0049 ; éteint par défaut)
 #   TIER2=4096 ./run_tiger.sh # DOOM 3 +3,3 % PC, +5,7 % M4 (docs/plan-traducteur-rapide.md §9.6, §9.9) — traces d'une page (x-tier2, patches/tcg/0048,
@@ -184,7 +184,8 @@ case "$(uname -s):$(uname -m)" in
     export TLBBASE="${TLBBASE:-1}"
     # Depuis le 31/10/2026 (docs/vitesse-doom3-x86.md §23) : TCGCOLD (tcg/0056, chemins lents
     # en zone froide, hôte x86-64 seul) — binaire rapide, A/B au repos : cmr-pe −2,2 % sur 6
-    # parties par bras sans gel, d3 −1,8 %, mb −1,2 %, zen −2,2 %, ut neutre. Sur le M4 : sans
+    # parties par bras sans gel (mesure d'avant 6054367 : transition d'avant la course, pas la
+    # course), d3 −1,8 %, mb −1,2 %, zen −2,2 %, ut neutre. Sur le M4 : sans
     # effet (b.cond imm19), parité par un saut long à faire. _COLD_AUTO : allumé faute de
     # réglage explicite, éteint sans un mot si le binaire n'a pas la propriété.
     [ -n "${TCGCOLD:-}" ] || { export TCGCOLD=1; _COLD_AUTO=1; }

@@ -3,6 +3,12 @@
 **Statut (23/10) : phase 0 faite, porte NON passée — appel vide 0,16 µs, mais lecture d'état
 native ×0,6 à ×1,5 sur le travail réel (§5). Projet arrêté sous cette forme.**
 
+(01/11 : rien de ce projet n'est sur `main`. La branche du worktree a été effacée ; le code est
+sous l'étiquette `archive/plugin-hote-phase0` (`d9d4876`). Les fichiers cités au §5 (`x-hostcall`
+de `qgpu-pci.c`, `QGPU_CAP_HOSTCALL`, `QGPU_HC_*`, `QGPU_UC_MEM_CALL`, `POMPPC_GL_HOSTCALL`,
+`hcbench.c`, job `hostcall`, `tcg/0050-tcg-mmio-lockless`) n'existent que là. Sur `main`, le
+numéro `tcg/0050` est pris par un autre patch, `0050-ppc-mttcg-32`.)
+
 Choix de l'utilisateur après le levier E (`docs/plugin-allegement.md` §7) : les petits leviers
 du plugin sont épuisés (d3q neutre en jeu, `d3-plugin-x86.md` §10.6 ; UVWIDE −1,5 %), alors que
 le plugin fait encore **17 à 31 % du fil du jeu** (profil `bench/tcg/ab/gprof-2210b-*`, six
@@ -72,7 +78,8 @@ Trois questions, chiffrées sur le PC (binaire rapide, VM de dev) :
 
 **Porte** : un appel vide sous ~1 µs, et la lecture d'état native au moins 10× plus rapide que
 le code invité. Sinon, le projet s'arrête là (comme le second niveau du traducteur,
-`plan-traducteur-rapide.md` §10.8).
+`plan-traducteur-rapide.md` §9 ; le §10.8 cité à l'origine n'est pas sur `main`, il vit sur
+l'étiquette `archive/tier3-llvm`).
 
 Coûts d'entrée connus : un type de mémoire de plus dans le user client (projection de la page
 d'appel) — c'est `qgpu_abi.h`, donc **kext reconstruit et redémarrage** (`pomppc-proto-kext-rebuild`) ;
@@ -93,6 +100,8 @@ là sous cette forme ; ce qui est construit reste éteint par défaut (branche
 `worktree-agent-a7bf31d231ad94544`, étiquette `archive/plugin-hote-phase0`, non fusionnée).
 
 ### 5.1 Ce qui a été construit (tout éteint par défaut)
+
+(Sous `archive/plugin-hote-phase0` seulement, voir l'en-tête.)
 
 - **Device** (`patches/qgpu/qgpu-pci.c`) : propriété `x-hostcall=on` → BAR2, 4 Kio de MMIO,
   `QGPU_CAP_HOSTCALL`. Une écriture 32 bits de l'offset absolu (dans BAR0) d'un bloc d'appel

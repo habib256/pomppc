@@ -40,7 +40,9 @@ x86), so the whole project is about taking work *away* from the emulated CPU: ge
 textures, presentation and vertex-buffer conversion run on the host. Expect demo-grade frame
 rates in the heavy titles, not native speed.
 
-What is **not** done: Quartz Extreme / accelerated desktop compositing, Core Image.
+Quartz Extreme (the desktop composited through the host GPU) is on by default in the
+repository since 29/10/2026 (Apple Silicon) and 30/10/2026 (Linux x86-64), after release 0.3;
+`QE=0 ./run_tiger.sh` turns it off. What is **not** done: Core Image.
 
 ## Quick start (prebuilt release, macOS on Apple Silicon)
 
@@ -97,7 +99,7 @@ own**. No Apple ROM is needed: OpenBIOS boots Tiger. Nothing of Apple's is distr
    `GL_RENDERER = "POMPPC qgpu (OpenGL host GPU)"`. `install.sh --remove` uninstalls. No Xcode
    is needed in the guest: the CD holds binaries built with Tiger's gcc 4.0.
 
-Each launcher documents its variables in its header (`head -70 run_tiger.sh`): `GPU=0`,
+Each launcher documents its variables in its header (`head -130 run_tiger.sh`): `GPU=0`,
 `FASTFP=0`, `NET=0`, `SNAPSHOT=1` (throw-away disk), `QFB=1` (second monitor), and more.
 Mac OS 9.2.2 runs with `./run_os9.sh` (single core, no 3D).
 Experimental CPU profiles from Tiger are available with
@@ -105,8 +107,9 @@ Experimental CPU profiles from Tiger are available with
 standard `g4` profile. Scope and evidence: [OS 9 CPU profiles](docs/os9-optimisations-cpu.md).
 
 **Compatibility.** Tested with Tiger **10.4.6**, the build whose `OpenGL.framework` was
-reverse-engineered (`docs/re/`). Other 10.4.x updates are untested; the plugin reads
-GLEngine's internal structures, so a different GLEngine may not work.
+reverse-engineered (`docs/re/`), and **10.4.11**, which the daily VMs of both development hosts
+have run since October 2026. Other 10.4.x updates are untested; the plugin reads GLEngine's
+internal structures, so a different GLEngine may not work.
 
 ## Building from source
 

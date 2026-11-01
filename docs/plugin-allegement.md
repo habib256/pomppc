@@ -1,6 +1,7 @@
 # Alléger le plugin pour tous les jeux (22/10/2026)
 
-Après l'arrêt du second niveau du traducteur (`docs/plan-traducteur-rapide.md` §10.8), le
+Après l'arrêt du second niveau du traducteur (`docs/plan-traducteur-rapide.md` §9 ; le §10.8
+cité à l'origine vit sur l'étiquette `archive/tier3-llvm`), le
 levier suivant est le travail que le plugin GL (`guest/gldriver/pomppc_accel.c`) fait sur le
 fil du jeu, dans le G4 émulé. Consigne de l'utilisateur : **ce qui est fait doit servir à toute
 l'émulation, pas seulement à DOOM 3**. Le plugin est du code invité PowerPC : un gain y vaut
@@ -12,6 +13,11 @@ allumés par défaut dans le plugin `20261022-abon` (PRESENTQ reste éteint) : �
 **23/10 : levier E (verdict par unité élargi, `POMPPC_GL_UVWIDE`) construit, prouvé sur la
 VM de dev, A/B des quatre jeux joué (UT2004 −1,6 %, DOOM 3 −1,4 %, mb et zen neutres) et
 allumé par défaut dans le plugin `20261023-uvwon` : §7.**
+
+**01/11 : `POMPPC_GL_PACKBITS` (bornage des flottants sur leurs bits) prouvé, A/B des cinq jeux
+gagnant, allumé par défaut (`20261101-packbits`) : §8.** Le plugin courant est `20261101-ombre`
+(`POMPPC_PLUGIN_REV`), qui garde ces défauts et ajoute l'avis des surfaces non simples de
+Quartz Extreme (`docs/quartz-extreme.md`, journal du 01/11).
 
 ## 1. Profil des quatre jeux de la matrice du PC
 
@@ -184,6 +190,8 @@ leur profil : neutres attendus (`d3inter` +4 instructions par dessin).
 
 ### 3.5 A/B sur la VM quotidienne (à jouer)
 
+(01/11 : joué le 22/10, et levier allumé, voir §6.)
+
 Installer le bundle `20261022-beg`, puis une partie sous contrôle (ligne `BEG image N` de la
 note : écarts à 0 ; `D3P` : `stunit 2` à 0) :
 
@@ -323,6 +331,9 @@ de `DIRECT_REFRESH` (1,8 % de Marble Blast), `crash_hook_check` (deux `sigaction
 0,3 %), la latence de l'hôte à l'échange (levier C).
 
 ### 4.5 A/B à jouer sur la VM quotidienne
+
+(01/11 : joué le 22/10, et leviers allumés, voir §6. Le tar `bench/plugB-2210/` est resté dans
+le worktree de l'agent, il n'est pas dans le dépôt.)
 
 Installer le bundle construit dans la VM de dev (`bench/plugB-2210/GLDriver-POMPPC-20261022-swb.bundle.tar`
 du worktree, md5 `a8787c29f51c307c5a6bc4e0b88dac2c`), VM quotidienne démarrée :
@@ -635,6 +646,9 @@ noté `UVWIDE écart`.
   - md5 du tar : `4b3b72507063e6c164acf159c525a767`.
 
 ### 7.6 A/B à jouer sur la VM quotidienne
+
+(01/11 : joué le 23/10, et levier allumé, voir §7.7. Le worktree cité ci-dessous n'existe plus :
+le bundle est dans `bench/uvwide-2310/`.)
 
 Installer le bundle (VM quotidienne démarrée) :
 

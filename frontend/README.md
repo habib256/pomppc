@@ -27,7 +27,8 @@ framebuffer under a mutex.
 cmake -S . -B build && cmake --build build -j
 ```
 
-Requires `gio-unix-2.0`, `glfw3`, OpenGL, and `gdbus-codegen` (glib dev tools).
+Requires `gio-unix-2.0`, `glfw3`, OpenGL, and `gdbus-codegen` (glib dev tools); on Linux,
+`libpulse-simple` (optional) for the startup chime.
 Dear ImGui must be the **docking** branch (`IMGUI_HAS_DOCK`; the build stops
 otherwise): `setup.sh` clones the pinned tag **`v1.92.9b-docking`** (override with
 `IMGUI_TAG=…`), replaces an older non-docking `./imgui`, and offline falls back to
@@ -54,7 +55,8 @@ another tree is visible at a glance.
 **Réglages gardés** : à l'arrêt (menu Quitter, fermeture de la fenêtre, Ctrl+C ou `SIGTERM`),
 ImGuiDock écrit `.run/imguidock.conf` — OS, son, manette, clavier et souris, vue et zoom,
 fenêtres affichées, plein écran, géométrie de la fenêtre — et le relit au lancement suivant
-(un lanceur passé en argument prime sur l'OS retenu). Texte « clé = valeur », modifiable à la
+(un lanceur passé en argument prime sur l'OS retenu ; le plein écran est écrit pour
+information seulement, ImGuiDock démarre toujours en fenêtre depuis le 26/10). Texte « clé = valeur », modifiable à la
 main ; la disposition des fenêtres reste dans `.run/imgui.ini`, le carillon dans
 `.run/chime.conf`. Une épreuve `POMPPC_FE_SCRIPT` ne le lit ni ne l'écrit.
 
@@ -72,12 +74,14 @@ explicit native-display paths remain available for automation.
 The keyboard is routed to the guest from the start — toggle it with
 **Machine ▸ Clavier → invité** when you need to type into an ImGui field.
 
-### Carillon de démarrage (hôte macOS)
+### Carillon de démarrage (hôte macOS et Linux)
 
 **Périphériques ▸ Carillon de démarrage (hôte)** règle l'activation, le volume
 (0–100 %) et le chemin d'un WAV/AIFF (Entrée pour valider). Ces préférences
 restent dans `.run/chime.conf`, indépendamment du son Screamer de Tiger.
-Le lecteur NSSound est asynchrone : un lancement QEMU réussi puis son premier
+Le lecteur (NSSound sur macOS ; PulseAudio `pa_simple` sur Linux, serveur pulse de PipeWire
+compris, WAV et AIFF, `src/StartupChimeLinux.cpp`) est asynchrone : un lancement QEMU réussi
+puis son premier
 affichage valide déclenchent une seule lecture. Une pause, une nouvelle image,
 un redimensionnement ou une réactivation du son ne la rejouent pas. Une relance
 de QEMU ou **Machine ▸ Redémarrer** réarme le carillon. Un redémarrage demandé
@@ -85,8 +89,8 @@ depuis l'invité seul n'est pas détecté. Une erreur audio est journalisée san
 empêcher le démarrage de la VM. Aucun son dans les sondes headless.
 
 Surcharges au lancement : `POMPPC_CHIME=0`, `POMPPC_CHIME_VOLUME=0.5` (0–1),
-`POMPPC_CHIME_FILE=/chemin/son.aiff`. Sur un hôte autre que macOS, le lecteur
-signale explicitement que cette fonction n'est pas disponible.
+`POMPPC_CHIME_FILE=/chemin/son.aiff`. Sous Linux sans `libpulse-simple` à la construction, ou
+sur un autre hôte, le lecteur signale explicitement que cette fonction n'est pas disponible.
 
 **Identification :** `sysctl hw.model` dans notre Tiger retourne `PowerMac3,1`,
 le Power Mac G4 AGP (Sawtooth), et non un Macintosh LC II. Le profil attend
@@ -112,8 +116,10 @@ chaque modèle de Mac possède nécessairement un enregistrement différent.
 
 Vérification : `ctest --test-dir frontend/build --output-on-failure`
 teste le déclenchement unique, la coupure, les valeurs invalides et la
-persistance des préférences ; cela ne prouve pas l'écoute sur les haut-parleurs.
-Sur le démarrage réel du 27/09 (`bench/tiger-chime-final.log`), NSSound accepte
+persistance des préférences du carillon (`startup_chime`), ainsi que la politique du pointeur
+(`pointer_policy`) et `.run/imguidock.conf` (`frontend_settings`) ; cela ne prouve pas l'écoute sur les haut-parleurs.
+Sur le démarrage réel du 27/09 (`bench/tiger-chime-final.log`, copie du PC sous
+`bench/mac-20261009/`), NSSound accepte
 une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
 640×480 → 1024×768 ne la rejoue pas. L'utilisateur a confirmé à l'écoute :
 « Le chime est bon ».
@@ -150,13 +156,19 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   Verified in Tiger at 1024×768: four positions through ImGui's real mapping,
   measured with `CGSGetCurrentCursorLocation` in the guest; error ≤1 guest pixel
   in the docked view and zero at both tested full-screen points. Logs:
-  `bench/tiger-chime-pointer.log`, `bench/tiger-pointer-positions.log`.
+  `bench/tiger-chime-pointer.log`, `bench/tiger-pointer-positions.log` (Mac host; on the PC,
+  copies under `bench/mac-20261009/`).
   **Updated policy:** host full screen always selects the relative USB mouse,
   captures/hides the host cursor and uses unbounded motion (raw motion when
   supported), suitable for Doom 3. Returning to windowed mode restores the
   tablet preference. F11 or Ctrl+Cmd+F exits host full screen and releases capture;
   loss of focus also releases capture. Escape stays in the game. The earlier absolute full-screen measurements above are
   historical; absolute input is no longer used in full screen.
+- **Single cursor (01/11/2026):** while the pointer is sent in absolute mode, the host cursor
+  is hidden over the guest image (Tiger draws its own cursor there, which gave a double
+  cursor); it comes back over menus and bands, in pause and when the VM is stopped. In
+  relative mode without capture it stays visible (`wantsHiddenHostCursor`,
+  `src/PointerPolicy.h`, tested by `pointer_policy`).
 - **Bilan** shows the guest size, the drawn rectangle and scale, the window size and the
   pointer mode; **Journal** logs launches, CDs, scanout changes, switches and left clicks
   (host point → guest pixel).

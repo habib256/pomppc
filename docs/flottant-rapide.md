@@ -384,6 +384,8 @@ est donc la seule qui compte.
 * **Le comportement sous MTTCG (SMP).** `env->fast_fp` et les deux
   `no_hardfloat` sont posés au reset de chaque CPU et ne changent jamais
   ensuite : il n'y a pas d'état partagé. Mais ça n'a pas été exercé.
+  (01/11/2026 : il l'est depuis au quotidien, `run_tiger.sh` lançant par défaut
+  `x-fast-fp` en SMP=2 sous MTTCG, sur `qemu-system-ppc` depuis le 23/10.)
 * **AltiVec en conditions réelles.** L'analyse (§ 2.4) dit que c'est
   invisible ; aucun test n'a exécuté de vraies instructions AltiVec dans les
   deux modes.

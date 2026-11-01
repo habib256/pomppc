@@ -54,7 +54,7 @@ un en-tête à trois champs, lu comme rc = 0 (et signalé).
 Rejouer un banc avec un autre binaire et un autre mode de CPU :
 
     export DEVDISK=disks/tiger-dev.raw
-    QEMU_BIN=~/src/qemu-fastfp/build/qemu-system-ppc CPU_OPTS=x-fast-fp=on \\
+    QEMU_BIN=~/src/qemu/build-fast/qemu-system-ppc CPU_OPTS=x-fast-fp=off \\
         python3 tools/guest/devloop.py start
     tools/guest/jobs/stage.sh fpbench /tmp/j
     python3 tools/guest/devloop.py run /tmp/j --timeout 900

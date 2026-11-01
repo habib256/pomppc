@@ -19,8 +19,8 @@ Dossier Système. C'est ce que fait `./run_os9.sh` sans option.
 
 **Voie extension (`TABLET=1`), seulement si tu veux `usb-tablet`.** Elle exige `via=cuda`
 (l'extension plante en `via=pmu`) et l'installation manuelle de `USBTabletINIT` dans le
-Dossier Système. Le dépôt fournit l'archive `.sit`, **pas** un CD prêt à monter : les
-en-têtes de `run_os9.sh` parlent de `USB_Tablet.iso`, à fabriquer d'abord.
+Dossier Système. Le dépôt fournit l'archive `.sit`, **pas** un CD prêt à monter : le CD
+`USB_Tablet.iso` est à fabriquer d'abord (les en-têtes de `run_os9.sh` renvoient ici).
 
 ```sh
 # 1. graver l'archive sur un CD que OS 9 saura monter

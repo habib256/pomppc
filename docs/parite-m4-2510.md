@@ -6,7 +6,19 @@ document fixe l'ordre de la séance, du plus grand gain attendu au plus petit, e
 chaque patch aux preuves déjà écrites.
 
 Défauts actuels de `run_tiger.sh` sur `Darwin:arm64` : `VFPNATIVE LMWVEC JCWORD` seulement.
-Tout le reste ci-dessous est éteint sur le M4.
+Tout le reste ci-dessous est éteint sur le M4. (01/11 : c'était le 25/10 ; dépassé, voir l'état
+ci-dessous et §5.8.)
+
+**État au 01/11/2026.** La séance a eu lieu (25-27/10, §5) : la série 0031-0052 (avec
+0037-0039) est prouvée sur le M4 et **allumée par défaut** sur `Darwin:arm64` depuis le 26/10
+(§5.8), 0054 et 0055 (outils de preuve, §5.9, §5.12) construits et éteints. Les deux hôtes ont
+les mêmes défauts, sauf `JITREL32` (propre à x86-64) et la zone froide `TCGCOLD` (`tcg/0056`,
+allumée sur le PC le 31/10, sans effet sur arm64 tant que le chemin lent n'a pas de saut long :
+parité à écrire). `tcg/0057`-`0058` (macOS) et `0059` sont éteints ;
+`0060`-`0063` ne sont pas nommés dans `build_qemu_qfb.sh`. Le M4 tourne toujours sur le binaire
+de référence (pas de `build-fast`). Ce qui reste à faire sur le M4 : `docs/etat-des-hotes.md` §3
+et §4 (reconstruire QEMU pour `qgpu-core.c` du 31/10, kext et plugin du 01/11, profil croisé),
+non le plan des §1-§2.
 
 ## 1. Le retard, patch par patch
 
@@ -364,7 +376,7 @@ bruit observé. Défauts conservés, VM rendue dans ImGuiDock.
 
 Le pendant M4 de 0048 est clos, `x-tier2` reste **éteint par défaut**. La réexécution
 native des preuves de `0055` sur le PC reste à faire ; détails et données au §9.9 du
-plan du traducteur.
+plan du traducteur. (01/11 : faite sur le PC le 27/10, `c92dacc`, plan du traducteur §9.10.)
 
 ### 5.13 Endurance des nouveaux défauts (27/10)
 

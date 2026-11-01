@@ -11,6 +11,10 @@ dans l'invité : ni gain ni exactitude ne sont prouvés.** Les trois leviers son
 défaut (`*_DEFAULT 0`) ; éteints, le plugin se comporte comme `20261001-tout` (révision
 `20261003-d3x`). Aucun ne change le protocole qgpu ni le kext.
 
+(01/11 : dépassé. Les trois leviers A-C sont allumés par défaut depuis le 04/10 (`2363682`,
+révision `20261004-d3x`), le levier D `ZONES=1` depuis le 20/10 (`b8484d5`), les cinq du §10
+depuis le 21/10 ; `*_DEFAULT 1` dans `pomppc_accel.c`. Plugin courant : `20261101-ombre`.)
+
 ## 1. Où vont les ~45 ms
 
 Pas de profil `sample` de l'invité sur le PC à ce jour (celui de l'autre agent est attendu).
@@ -82,7 +86,8 @@ fil du jeu.
 
 ## 2. Levier A — indices : ne balayer que si nécessaire, et par AltiVec
 
-`POMPPC_GL_IDXLAZY` (0/1/2) et `POMPPC_GL_IDXVEC` (0/1/2), éteints par défaut.
+`POMPPC_GL_IDXLAZY` (0/1/2) et `POMPPC_GL_IDXVEC` (0/1/2), éteints par défaut (01/11 : allumés
+depuis le 04/10, `2363682`).
 
 **Constat.** Pour un dessin indexé, `geom_draw_client_unsafe` calcule [vmin, vmax] par
 `va_scan_idx` (une boucle de 7 à 9 instructions par indice) **avant** de savoir si la plage
@@ -126,7 +131,8 @@ statique propre.
 
 ## 3. Levier B — verdict refait pour les seules unités désignées
 
-`POMPPC_GL_UNITVD` (0/1), éteint par défaut ; exige `VERDICT`, `WHITELIST`, `TEXMEMO` (défauts).
+`POMPPC_GL_UNITVD` (0/1), éteint par défaut (01/11 : allumé depuis le 04/10, `2363682`) ; exige
+`VERDICT`, `WHITELIST`, `TEXMEMO` (défauts).
 
 **Constat.** ~46 % des dispatches de DOOM 3 ne sont pas neutres pour la liste blanche du
 lot 3 (`docs/re/bloc-changements-r4.md` §4), presque tous pour une seule raison : le bloc
@@ -167,7 +173,7 @@ incertain : le profil x86 dira la part de `geom_ok` + `texture_ok` dans le verdi
 
 ## 4. Levier C — `gldUpdateDispatch` en une passe
 
-`POMPPC_GL_DISPONE` (0/1), éteint par défaut.
+`POMPPC_GL_DISPONE` (0/1), éteint par défaut (01/11 : allumé depuis le 04/10, `2363682`).
 
 **Constat.** À chaque dispatch (~1 300/image), trois sections sous `G.mu` : transmission
 paresseuse, crochetage (`pomppc_hook_procs` : 36 cases, `install_for` et comparaison), verdict.
@@ -308,6 +314,9 @@ vidage (rejeu = VM, `dumpvidages.py` doit dire ~1 soumission par image), ligne `
 A/B entrelacé contre `ZONES=0` ; UT2004 et Marble Blast (aucune régression). Défaut à passer
 à 2 (`ZONES_DEFAULT`) si l'A/B gagne.
 
+(01/11 : joué le 20/10, `b8484d5` : `ZONES=1` gagne mieux que `ZONES=2` sur DOOM 3 (−6,1 %),
+UT2004 et Marble Blast neutres ; `ZONES_DEFAULT 1`.)
+
 ## 10. Le fil de DOOM 3 dans le plugin, compté à l'instruction (21/10/2026)
 
 Révision `20261021-d3p`. Point de départ : 101,3 ms/image (d3-fen, binaire rapide, `ZONES=1`).
@@ -410,6 +419,8 @@ sur l'image — à mesurer, la répartition des dispatches de DOOM 3 n'est pas c
 
 ### 10.4 A/B sur la VM quotidienne (à jouer)
 
+(01/11 : joué le 21/10, voir le second §10.5, « Résultats » ; les cinq variables sont à 1.)
+
 Installer le plugin `20261021-d3p` (bundle construit dans la VM de dev :
 `bench/d3plug-2110/GLDriver-POMPPC-20261021.bundle.tar` du worktree), d'abord une partie
 sous contrôle :
@@ -464,6 +475,9 @@ médianes en ms/image :
 Les cinq variables passent à 1 par défaut (révision suivante du plugin).
 
 ### 10.6 Second lot (`20261021-d3q`, branche `worktree-agent-aa31ed80daea05ba3`, étiquette `archive/plugin-d3q`, 4a6d7a9) : non fusionné
+
+(01/11 : la branche du worktree n'existe plus ; le code reste sous l'étiquette
+`archive/plugin-d3q`.)
 
 VD2 (verdicts mémorisés), ATTRBITS (boucles d'attributs), DISPCMP (DISPONE sans boucle) et
 RPEVICT (tranches de miroir rendues, pour `r_useIndexBuffers 1`) sont exacts (plugmd5 67 scènes,

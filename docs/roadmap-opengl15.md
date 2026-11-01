@@ -7,7 +7,20 @@ Mac PPC** ; Marble Blast et Zenerchi restent les témoins.
 
 Ce document donne l'ordre de travail, ce qu'il faut relever dans `OpenGL.framework` avant chaque
 étape, et comment chaque étape se prouve. L'état courant et la liste courte sont dans
-`docs/todo-gpu-3d.md` ; la conception et les offsets déjà établis dans `docs/gpu-3d-tiger.md`.
+`TODO.md` (`docs/todo-gpu-3d.md` n'est plus qu'un renvoi depuis le 24/09) ; la conception et
+les offsets déjà établis dans `docs/gpu-3d-tiger.md`.
+
+**État au 01/11/2026** (ce document date de septembre ; seules les étapes ci-dessous ont
+changé, le détail est dans les documents cités) :
+
+| Étape | État |
+|---|---|
+| A. Accélérateur IOKit | fait le 19/09 (`docs/re/accelerateur-iokit.md`) |
+| B. Géométrie sur l'hôte | faite : géométrie brute v7 (`protocole-v7-geometrie.md`), attributs natifs de VBO v18 (`protocole-v18-natif.md`), tri des sommets par l'hôte (`QGPU_CAP_GEOM_HOST`) |
+| C. OpenGL 1.4 / 1.5 | fait : fin du pipeline fixe et requêtes d'occlusion v8, textures 1.2-1.4 v10, tampons hôte v14 ; le plugin annonce « 1.5 POMPPC-1.0 » (`docs/protocole.md`) |
+| D. Programmes ARB | faits en v16 (`protocole-v16-programmes.md`) ; GLSL en v21 |
+| E. Quartz Extreme, Core Image | Quartz Extreme allumé par défaut sur les deux hôtes (`docs/quartz-extreme.md`) ; Informations Système dit « Core Image : géré », mais Core Image reste à prouver (`TODO.md`) |
+| F. Performance système | doorbell asynchrone v9, présentation par l'hôte v13 ; toujours 4 clients au plus (`QGPU_MAX_CLIENTS`) |
 
 ## 0. Le terrain
 
@@ -169,4 +182,5 @@ barrières ; version et extensions annoncées honnêtement ; programmes ARB ; QE
 - **Quatre clients GL accélérés** au plus (tranches du kext) : à lever avant que la composition du
   système devienne elle-même un client.
 - **Fidélité** : chaque étape élargit la surface où notre rendu peut différer de celui d'Apple.
-  Les écarts connus et tolérés sont listés dans `docs/todo-gpu-3d.md` §5.
+  Les écarts connus et tolérés sont listés dans `docs/todo-gpu-3d.md` §5 (01/11 : ce fichier n'est
+  plus qu'un renvoi ; voir `docs/gpu-3d-tiger.md` §4.7, « Écarts d'image avec le rendu d'Apple »).

@@ -1,6 +1,7 @@
 # `fpbench` — le flottant PowerPC sous QEMU : preuve d'équivalence et vitesse
 
-Deux outils qui tournent **dans l'invité** Tiger 10.4.6 (PowerPC, G4 7400) :
+Deux outils qui tournent **dans l'invité** Tiger (PowerPC, G4 7400 ; mesures de septembre sur
+10.4.6, la VM de dev est en 10.4.11 depuis le 02/10) :
 
 | outil | rôle |
 |---|---|
@@ -34,12 +35,13 @@ python3 tools/guest/devloop.py run /tmp/j --timeout 900
 python3 tools/guest/devloop.py shutdown               # arrêt SÛR
 ```
 
-Pour rejouer avec un autre binaire QEMU et le mode rapide, seul le démarrage
-change :
+Pour rejouer en mode rapide, seul le démarrage change. `x-fast-fp` est dans le binaire de
+référence (`patches/fastfp/`, construit par `scripts/build_qemu_qfb.sh` ; l'ancien arbre
+`~/src/qemu-fastfp` n'existe plus) et `run_tiger.sh` l'allume par défaut (`FASTFP=0` pour le
+flottant exact) ; `devloop.py` laisse `-cpu g4` inchangé sans `CPU_OPTS` :
 
 ```sh
-QEMU_BIN=~/src/qemu-fastfp/build/qemu-system-ppc CPU_OPTS=x-fast-fp=on \
-    python3 tools/guest/devloop.py start
+CPU_OPTS=x-fast-fp=on python3 tools/guest/devloop.py start   # QEMU_BIN=… pour un autre binaire
 ```
 
 ## `fpcheck` — lire la sortie

@@ -57,6 +57,9 @@ tests screamer rouges sur `4fafc58`, verts après. VM : voir la validation du
 Vitesse : le tour de matrice sur `4fafc58` (images toutes justes) est inexploitable
 pour les ms/image — charge hôte 40 à 53 (autre projet et Spotlight en parallèle).
 Un A/B DOOM 3 sur hôte au repos reste à faire contre `~/src/qemu/build/*.avant-bughunt`.
+(01/11 : dépassé. L'A/B avant/après des bug hunts a été fait le 30/09 sur Zenerchi et Marble
+Blast, aucune couche ne coûte (`docs/matrice-jeux.md`) ; la vitesse de DOOM 3 a depuis ses
+propres campagnes, et le binaire `*.avant-bughunt` n'existe plus sur le PC.)
 
 ## Épreuves en VM des correctifs des trois bug hunts (07/10/2026, PC)
 

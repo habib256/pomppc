@@ -8,6 +8,10 @@ octets tels qu'il les a, l'hôte fait le reste.
 Rien ici ne change `QGPU_PROTO_VERSION` (l'intégrateur passera à v23 avec les
 autres volets) : une capacité, un opcode, deux extensions de `DRAW_NATIVE`.
 
+(01/11 : la v23 n'a jamais été posée ; ce volet vit en capacité sur la v22,
+`QGPU_CAP_GEOM_HOST`. `POMPPC_GL_RAWSANE` et `POMPPC_GL_NATSHM` sont allumés par défaut depuis
+le 01/10 (`69244b1`, plugin `20261001-a4on`) quand le device annonce ce bit ; `=0` les éteint.)
+
 ## 1. Chiffrer d'abord : où l'invité travaille par sommet
 
 Sources : profils `sample` de 10 s du fil principal (fil le plus actif pour
@@ -99,7 +103,8 @@ gardés recopiés bout à bout ; autre mode → dessin jeté (statut OK). Les mo
 fous d'un sommet fou converti mais non cité valent 0. C'est **à la lettre**
 `raw_scan_nan` + `raw_fix_nan` du plugin.
 
-Plugin : `POMPPC_GL_RAWSANE=1` (éteint par défaut) — `close_raw` n'appelle plus
+Plugin : `POMPPC_GL_RAWSANE=1` (éteint par défaut ; 01/11 : allumé depuis le 01/10) —
+`close_raw` n'appelle plus
 `raw_fix_nan` et émet `DRAW_RAW_SANE`. Le chemin tableaux (qui jette ou filtre
 autrement) n'est pas touché.
 
@@ -115,6 +120,8 @@ Sous `QGPU_CAP_GEOM_HOST` :
   partir de son plus petit sommet cité sans réécrire les indices.
 
 ### 3.1 Plugin : `POMPPC_GL_NATSHM=1` (éteint par défaut)
+
+(01/11 : allumé par défaut depuis le 01/10, `69244b1`.)
 
 Dans `geom_draw_native`, un attribut sans VBO est un tableau client : ses octets
 `[src + vmin·pas, src + vmax·pas + taille)` sont recopiés tels quels (`memcpy`,

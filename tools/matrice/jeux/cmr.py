@@ -17,9 +17,13 @@ chargement 40 s après la dernière, une autre est envoyée (au plus 4).
 Le plugin compte des ÉCHANGES : en course, trois par image du jeu (plein
 écran + deux aglSwapBuffers de la cible 800×600 cachée) ; echanges_par_image
 ramène ms/image à l'image du jeu (70 ms au 27/09, plugin 20260927-rtt).
-Fenêtre de mesure : après la touche COURSE, la première tranche de 600
-échanges régulière (deux moitiés à 10 % près, > 10 ms/échange : le survol
-d'avant le départ tourne plus vite) et sans pause de chargement (> 500 ms).
+Fenêtre de mesure : après la touche COURSE et la première pause de
+chargement, la première tranche de 600 échanges régulière (deux moitiés à
+10 % près, > 10 ms/échange : le survol d'avant le départ tourne plus vite),
+sans pause de chargement (> 500 ms) et EN COURSE : au moins SOMMETS_COURSE
+(1 700) sommets bruts par échange dans chaque moitié (01/11, 6054367 : la
+transition d'avant la course en fait au plus 1 281 et passait les autres
+critères sur le PC).
 Seuil abaissé de 18 à 15 le 01/10 : avec POMPPC_GL_NATSHM la course tourne à
 ~17 ms/échange (~22 sans), et la cellule restait rouge, course non reconnue.
 Puis à 10 le 26/10 (M4, série du PC allumée, docs/parite-m4-2510.md) : la course

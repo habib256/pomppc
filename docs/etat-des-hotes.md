@@ -50,7 +50,10 @@ Au début d'une séance :
   prochain `run_tiger.sh`** (un seul curseur sur l'image, flèche de retour sur les menus).
 - Référence cmr-pe du PC validée à l'œil (image de course propre, `references-linux.csv`).
 - PGO réentraîné avec cmr : neutre en fenêtre, cmr non prouvé (mesure polluée) ; ancien profil
-  en production, nouveau dans `~/src/qemu/build-fast-pgo0111cmr/` (`e1eebc2`).
+  en production, nouveau dans `~/src/qemu/build-fast-pgo0111cmr/` (`e1eebc2`). **Piège évité à
+  12 h 50** : `pgo-train.sh` avait laissé le profil cmr dans `~/src/qemu/pgo-fast/` (une
+  reconstruction l'aurait pris) ; dossiers permutés, `pgo-fast/` = profil du 31/10, le profil cmr
+  dans `pgo-fast-pgo0111cmr/` (`docs/binaire-rapide-x86.md` §7).
 - `~/src/qemu-jcp/` et `~/src/qemu-bat/` effacés par l'utilisateur à 12 h 10 ; `qemu-nuit`
   contient 0060-0063.
 
@@ -100,116 +103,78 @@ Au début d'une séance :
 5. Base de temps en ligne (`mftb` sans helper), gain modeste attendu.
 6. Avis borné pour les surfaces non simples (TODO, chantier plugin) : ramener mb-fen sous
    fenêtre posée au niveau d'avant.
+7. Les « sans traduction » de `x-ret-verify` en fin de session (`tcg-g4.md` §44) : peut-être
+   parents de la rafale « sans PTE » de `tcg/0061` (§45, non reproduite).
 
-
-## 2 bis. PC x86-64 : état au 31/10/2026, 23 h
-
-**Fait le 31/10, soir** (`docs/tcg-g4.md` §45)
-- `tcg/0061` (`x-bat-skip`) construit dans `~/src/qemu-bat/build-x` (série + 0061, -O2) et mesuré
-  à l'A/B au repos (3 parties par bras) : ut −6,9 %, cmr −3,3 %, d3 −0,8 %, mb +1 %, zen 0. Sous
-  le vérificateur du TLB précis : 0 divergence sur mb/zen/ut/d3, mais **une rafale de 1 356
-  divergences « sans PTE »** sur cmr (pages d'identité du noyau `0x2c0000`-`0x2e9000`) ; témoin
-  sans 0061 propre mais course non atteinte. **Éteint, non nommé**, cause à comprendre.
-  Défaut d'origine de QEMU relevé : l'ancien BAT est vidé avec le masque de la nouvelle valeur.
-- cmr à plusieurs résolutions (`bench/tcg/ab/cmr-res-3110/`, sous ImGuiDock, avec vidage) :
-  rejeux identiques partout (0,00 %), captures propres (`<mode>/capture.png`, **à regarder**).
-  640×480×32 44,3 ; 800×600×16 (réglage du jeu) **84,1** ; 1024×768×32 45,4 ; 1280×1024×32 48,3
-  (le jeu retombe en 640×480) ; 1920×1080×16 **94,2** ms/image. **Le 16 bits coûte ×2 sous
-  ImGuiDock** ; le même 800×600×16 fait 47,5 sous le frontal natif de l'A/B : piste à instruire
-  (chemin 16 bits du frontal ?).
-- Fin de séance : VM quotidienne relancée par `matab.sh --restore` (binaire rapide).
-
-
-**Fait le 31/10, après-midi** (`docs/re/cmr-rendu-vers-texture.md` §7)
-- cmr, « reflets trop blancs » sur la voiture (remarque de l'utilisateur) : **défaut du cœur qgpu
-  de l'hôte**, corrigé (`patches/qgpu/qgpu-core.c`, `unit_texture_bound` respecte l'unité éteinte
-  par le plugin sous programme de fragments). La carrosserie lisait le masque d'ombres de la
-  piste à la place d'une carte de reflet que le jeu ne remplit jamais (texture 105, vide aussi
-  pour GLEngine) : **plus de reflet sur la carrosserie**, comme sur un vrai Tiger/PowerPC qui
-  se juge lent (consigne de l'utilisateur : se comporter comme le vrai matériel). `build/` et
-  `build-fast/` reconstruits. Références du PC rejouées : toutes à 0,00 % sauf cmr-pe.
-  **Nouvelle référence cmr-pe prise (tour `cmr-nouvref-3110`), À VALIDER à l'œil** ; l'ancienne
-  dans `bench/matrice/ref-linux/cmr-pe.faux-reflet-2810/`.
-- `gltrap` : `POMPPC_GLTRAP_BINDS=1` (unité active et liaisons depuis le lancement ; le jeu
-  appelle `glActiveTextureARB`). Compilé dans la VM de dev, déposé dans
-  `/Users/tiger/gltrap/` de la VM quotidienne.
-- BAT (point 1) : relevé fait, les écritures viennent de `bcopy_physvir_32` du noyau (DBAT0/1
-  posés puis effacés, ~150 fois/s). `patches/tcg/0061-ppc-bat-skip.patch` (`x-bat-skip` : pas
-  de vidage pour la plage d'un BAT invalide, la moitié des vidages dont ceux de EA 0-0x1ffff)
-  **écrit, ni construit ni mesuré**, non nommé dans `build_qemu_qfb.sh`.
-- `~/src/qemu/build-fast-pgo2810/` effacé.
-- La VM quotidienne a été arrêtée à 16 h 42 par la fenêtre ImGuiDock (fermée ?) pendant le
-  redémarrage de fin de cellule ; campagne multi-résolutions de cmr
-  (`bench/tcg/ab/cmr-resolutions.sh`, demande de l'utilisateur) **pas encore jouée**.
-
-
-**Fait le 31/10, matin** (`docs/tcg-g4.md` §44, `docs/vitesse-doom3-x86.md` §24)
-- Point 1, recherche de blocs : `tcg/0060` (`x-jc-clear-exact`, `x-jc-page-bits`), patch écrit,
-  **non nommé** dans `build_qemu_qfb.sh` (empreinte inchangée), construit à part dans
-  `~/src/qemu-jcp/build-x` (-O2). Les ratés viennent des vidages de page de `x-tlb-precise`
-  (~110 000/s, 93 % des cases effacées sont d'autres pages). Effacement exact + 256 cases :
-  ratés jusqu'au `qht` ÷ 2 ; A/B d3 −4,6 %, mb −3,3 %, zen −2 %, ut −1,7 %, **cmr +2,8 %**, et
-  deux tours cmr avec vidage sans course (Entrées perdues dans les menus). **Éteint.**
-- Point 2, base de temps : sur ut, `mftb` vient surtout de la boucle au repos du noyau ;
-  `TBFAST=0` coûte +2,4 % sur ut-fen. Le `mftb` en ligne reste possible, avec un gain modeste.
-- cmr, « couleurs, flous, reflets bizarres » signalés par l'utilisateur pendant la campagne :
-  tour avec preuve d'image du binaire de production **vert, identique à la référence validée**
-  (0,00 %) ; non reproduit. Un premier essai a gelé au lancement (aucune image GL).
-- Anomalie à instruire : `x-ret-verify` relève des « sans traduction » sur du noyau en bas de
-  mémoire, à l'arrêt de l'invité, aussi sur le binaire de production (`tcg-g4.md` §44).
-
-
-**Défauts du PC** : Quartz Extreme (depuis le 30/10 au soir, `QE=0` l'éteint) et **zone froide
-`x-tcg-cold`** (tcg/0056, depuis le 31/10, `TCGCOLD=0` l'éteint).
-
-**Fait dans la nuit du 30 au 31/10** (`docs/vitesse-doom3-x86.md` §23, `docs/endurance.md` §15)
-- Point 1, `matab.sh --restore` sur `build/` le 28/10 : `chaine4.sh` avait été tué pendant la
-  partie `ref-3`, lancée avec `QEMU_BIN=~/src/qemu-ceil/build`. Cette VM est restée allumée, et
-  le `--restore` final n'a jamais tourné. Le choix du binaire est juste. `--restore` retire
-  maintenant les variables de binaire héritées et affiche le binaire lancé (`6510319`).
-- Point 2, chasse au gel de cmr : 6 parties par bras sur `build-fast/`, aucun gel (cold 43,4
-  contre ref 44,3 ms/image). A/B de la matrice : d3 −1,8 %, mb −1,2 %, zen −2,2 %, cmr −2,2 %,
-  ut neutre. **Allumé par défaut.** Avec la zone froide, cmr compte 20 parties pilotées et 1 gel
-  (le 28/10), aucun dans les 17 suivantes. Endurance : 10 démarrages et 8 cycles de jeu, 0
-  incident.
-- Point 3, profil croisé des 5 jeux (§23). Postes communs : la **recherche de blocs** (`qht`,
-  `lookup_tb_ptr` : 10 % mb, 13,7 % zen, 6,1 % cmr, 3-4 % d3/ut) et la **base de temps** (`mftb`
-  13,8 % sur ut, 1-3 % ailleurs).
-- Point 4 : `plancher_ms_linux` de cmr fixé à 60 (binaire rapide 44,5-47,5 ×1,25).
-- Point 7 : profil PGO de `build-fast/` réentraîné le 31/10 (cible ppc32mt, zone froide, 1 255
-  `.gcda`, construction à 2 h 43). Ancien binaire gardé dans `~/src/qemu/build-fast-pgo2810/`
-  (à effacer une fois l'A/B jugé). A/B neuf contre ancien, au repos : mb, zen, ut à −0,6 à
-  −1,4 % ; cmr neutre (+0,3 %) ; d3 +1,0 % (80,4 contre 79,6, 4
-  parties par bras, dans la dispersion). Neutre en tout : le nouveau profil est gardé (il suit la
-  série et les défauts du jour).
-- Fin de séance : VM quotidienne relancée par `matab.sh --restore` sur le binaire rapide (QE et
-  zone froide).
-
-**Vitesse** : DOOM 3 environ 77-80 ms/image sur le binaire rapide, Colin McRae environ 43,5
-ms/image en plein écran. Journal : `docs/vitesse-doom3-x86.md`.
-
-**À faire sur le PC, dans l'ordre**
-0. Faire valider la nouvelle référence cmr-pe (`matrice.py --valider cmr-pe`) et regarder les
-   captures de `bench/tcg/ab/cmr-res-3110/` ; un tour complet de la matrice avec le cœur corrigé.
-1. cmr en 16 bits ×2 plus lent sous ImGuiDock (84-94 contre 44-48 ms/image en 32 bits) : le
-   mesurer sous le frontal natif à la même résolution, puis trouver le poste (frontal, cœur qgpu).
-2. `tcg/0061` : reproduire la rafale de divergences de cmr sous vérificateur (plusieurs sessions,
-   avec et sans `x-bat-skip`), journaliser les écritures de BAT autour d'elle ; trancher le
-   masque d'origine de `helper_store_[id]batu`. Pas d'allumage avant.
-3. Recherche de blocs, suite de 0060 : un effacement exact moins cher (journal des pages par
-   groupe), et comprendre la perte d'Entrées de cmr sous x8 avant tout nouvel essai.
-4. Base de temps en ligne (`mftb` sans helper) : gain attendu modeste (−2,4 % mesuré pour le
-   passage helper lent → rapide).
-5. Les « sans traduction » de fin de session (`tcg-g4.md` §44) : peut-être parents de la rafale
-   du §45.
-6. Effacer `~/src/qemu-jcp/` et `~/src/qemu-bat/` quand 0060 et 0061 seront tranchés.
+**Défauts du PC** (`run_tiger.sh`, branche `Linux:x86_64`) : Quartz Extreme (depuis le 30/10 au
+soir, `QE=0` l'éteint) et la série TCG jusqu'à `tcg/0056`, dont la **zone froide `x-tcg-cold`**
+(depuis le 31/10, `TCGCOLD=0` l'éteint). Plugin `20261101-ombre` (PACKBITS, UVWIDE et leviers
+A+B allumés, avis d'ombre à 20 Hz), kext du 01/11. `tcg/0057`-`0059` sont compilés et
+éteints ; `tcg/0060`-`0063` sont éteints et **non nommés** dans `build_qemu_qfb.sh` (arbre de
+mesure `~/src/qemu-nuit`). Binaire rapide : profil PGO du 31/10 (2 bis).
 
 **Propres au PC** : `patches/diag/` (auto-profileur, plafonds), `tools/tcg/perfhw.sh` (compteurs
 Intel), et l'arbre de mesure `~/src/qemu-ceil` (série et diag, -O2, sans PGO). `perf` exige
 `perf_event_paranoid` ≤ 1, que l'utilisateur règle à la main ; la valeur revient à 4 à chaque
 redémarrage.
 
-## 3. Mac M4 : état au 30/10/2026, 11 h 30
+## 2 bis. PC x86-64 : ce qui reste utile des séances du 30 et du 31/10
+
+Réduit le 01/11 : ce qui est repris ou dépassé par la section 2 est retiré ; ses « À faire »
+sont fondus dans la liste de la section 2. Le détail est dans les journaux cités.
+
+- **Binaire rapide en production** : profil PGO réentraîné dans la nuit du 30 au 31/10 (cible
+  ppc32mt, zone froide, 1 255 `.gcda`, construction à 2 h 43). A/B neuf contre ancien neutre en
+  tout (mb, zen, ut −0,6 à −1,4 % ; cmr +0,3 % ; d3 +1,0 %, dans la dispersion) : c'est le
+  `build-fast/` d'aujourd'hui (`vitesse-doom3-x86.md` §23). `~/src/qemu/build-fast-pgo2810/` est
+  effacé.
+- **Zone froide allumée** (31/10, `80aae4e`, `vitesse-doom3-x86.md` §23, `endurance.md` §15) :
+  6 parties par bras sans gel de cmr ; A/B d3 −1,8 %, mb −1,2 %, zen −2,2 %, cmr −2,2 %, ut
+  neutre. Avec la zone froide, cmr compte 20 parties pilotées et 1 gel (le 28/10), aucun dans
+  les 17 suivantes. Endurance : 10 démarrages et 8 cycles de jeu, 0 incident.
+- **Profil croisé des 5 jeux** (§23) : postes communs, la recherche de blocs (`qht`,
+  `lookup_tb_ptr` : 10 % mb, 13,7 % zen, 6,1 % cmr, 3-4 % d3/ut) et la base de temps (`mftb`
+  13,8 % sur ut, 1-3 % ailleurs ; sur ut, surtout la boucle au repos du noyau, `tcg-g4.md` §44).
+- **`matab.sh --restore`** retire les variables de binaire héritées et affiche le binaire lancé
+  (`6510319`, cause de la VM restée sur `~/src/qemu-ceil/build` le 28/10).
+- **Reflets de la carrosserie de cmr** (31/10, `928a5f0`, `docs/re/cmr-rendu-vers-texture.md`
+  §7) : défaut du cœur qgpu de l'hôte (`unit_texture_bound` respectait mal l'unité éteinte par
+  le plugin sous programme de fragments) ; plus de reflet, comme sur un vrai Tiger/PowerPC qui
+  se juge lent. `build/` et `build-fast/` reconstruits ; nouvelle référence cmr-pe (tour
+  `cmr-nouvref-3110`) **validée le 01/11**, l'ancienne dans
+  `bench/matrice/ref-linux/cmr-pe.faux-reflet-2810/`. Plancher de cmr : `plancher_ms_linux`
+  105 depuis la mesure en course (`6054367`).
+- `gltrap` : `POMPPC_GLTRAP_BINDS=1` (unité active et liaisons depuis le lancement), déposé
+  dans `/Users/tiger/gltrap/` de la VM quotidienne.
+- **Premiers essais de `tcg/0060` et `tcg/0061`** (`tcg-g4.md` §44-§45) : repris en course le
+  01/11 (§46, section 2). De `0061` reste un défaut d'origine de QEMU : l'ancien BAT est vidé
+  avec le masque de la nouvelle valeur (`tcg/0062` le relève ; TODO, « Plus tard »).
+- **cmr à plusieurs résolutions** (`bench/tcg/ab/cmr-res-3110/`, sous ImGuiDock) : rejeux
+  identiques partout (0,00 %), captures `<mode>/capture.png`. Les temps de ce tour sont pris
+  **avant la course** (fenêtre de mesure d'avant `6054367`) : le « 16 bits ×2 » qui en sortait
+  est clos (section 2).
+- cmr, « couleurs, flous, reflets bizarres » signalés pendant la campagne du 31/10 au matin :
+  tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
+  premier essai avait gelé au lancement (aucune image GL).
+
+## 3. Mac M4 : état au 30/10/2026, 11 h 30 (dernière séance M4)
+
+Fusionné le 01/11 avec l'ancienne « 3 bis » (29/10, 21 h 30). Le M4 a du retard sur le PC :
+voir §4, « Venu du PC le 01/11 ».
+
+**Défauts sur Darwin:arm64** : depuis le 26/10 (`550b2a8`), la série du PC est allumée et
+prouvée : `PPC32MT TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIRTYSKIP PTEGMAP
+JC2WAY FPKNOWN FPRFLAZY STFSKNOWN LFSKNOWN TLBBASE`. A/B : DOOM 3 −23,9 %, UT2004 −18,6 %,
+Marble Blast −22,7 %. Garde : un binaire sans tcg/0037-0039 les laisse éteints. Quartz Extreme
+allumé depuis le 29/10 (`c792464` : `run_tiger.sh` pose `qe=on`, `QE=0` l'éteint ; le kext en
+personnalité « auto » le suit). `tcg/0057`, `0058` compilés, éteints ; `x-tcg-cold` (`0056`)
+compilé, sans effet sur arm64.
+
+**Binaire et VM quotidienne** : `~/src/qemu` reconstruit le 29/10 (19 h), puis le 30/10 avec
+`0057`-`0058` ; il n'a ni `tcg/0059` ni le `qgpu-core.c` du 31/10. Dans la VM quotidienne :
+kext et plugin de `71f9f76` (29/10, curseur, personnalité « auto », installés à 21 h 25), puis
+le plugin avec `tex_bind_id` (`9b5431a`, 30/10 ; révision `20261023-uvwon`). Ni le kext du
+30/10 (`805f504`) ni celui du 01/11, ni les plugins `f01d2d7`, PACKBITS ou `20261101-ombre`.
 
 **Fait le 30/10**
 - **Émulateurs voisins, A/B au repos** (`docs/tcg-g4.md` §42, 4 parties par bras, mb zen ut
@@ -225,96 +190,47 @@ redémarrage.
   kext. Vérifié en VM jetable sur Zenerchi, Marble Blast et DOOM 3 ; matrice mb/zen/d3 en
   fenêtre dans `bench/matrice/qe-ombre-3010`. Coins noirs de DOOM 3 et Prey : la fenêtre
   est `NSBackingStoreRetained` (relevé sous gdb), comme sur un vrai Mac ; pas un bug.
-  **Le plugin corrigé est installé dans la VM quotidienne** (voir plus bas).
+  (01/11 : la bande « ancien jeu » sous DOOM 3 avait une seconde cause, corrigée sur le PC par
+  le kext du 01/11 et le plugin `20261101-ombre`, section 2.)
 - **Fin de séance, 11 h 30** : la VM jetable est arrêtée et `git` est propre. La VM
   quotidienne a été relancée par `matab.sh --restore`, puis s'est fermée ; aucune VM ne tourne.
-  Elle repart avec `./run_tiger.sh`. La suite est préparée pour le PC (section 2, « En arrivant
-  sur le PC »).
+  Elle repart avec `./run_tiger.sh`.
 
-## 3 bis. Mac M4 : état au 29/10/2026, 21 h 30
+**Fait du 28 au 29/10** (détail : CHANGELOG, `docs/quartz-extreme.md`, `docs/endurance.md`)
+- Vidage autonome par bandes (`403593e`, `QGPU_CAP_TEX_READBACK_ROWS`, sans changer
+  `QGPU_PROTO_VERSION`) : cmr-pe en 1920×1080 vert. Une texture hôte sans image est comptée à
+  part (« 2/2 (1 sans image) ») ; un refus du device se distingue par l'en-tête prérempli à
+  0xFF (`917ae47`).
+- **Matrice entière `20261028-1854` : 17 cellules vertes sur 17**, dont Warcraft III. Gain sur
+  le 26/10 non attribué (frontal et état changés, aucun A/B) ; cmr +11 % mais passé de 1024×768
+  à 1920×1080.
+- **Endurance du 28 au 29/10** (`endurance.md` §11) : 342 démarrages et 40 cycles de jeu, aucun
+  incident ; QE : §12 (ancien chemin) et §13 (chemin direct), 156 démarrages et 32 cycles de
+  jeu en fenêtre, aucun incident.
+- **Quartz Extreme P1 à P3** (`quartz-extreme.md` §1 ter et journal) : bureau juste, fenêtres
+  GL par l'hôte, puis le jeu présente lui-même son échange par le noyau (méthode 5). A/B au
+  repos en fenêtre : QE au niveau de QE éteint ou mieux (mb 6,1-6,3 contre 6,4, zen 2,9-3,1
+  contre 3,5, d3 28,8-29,7 contre 29,8, ut 19,6-19,7 contre 19,9 ms/image).
+- Outil : `/var/tmp/pomppc-env` passe les variables `POMPPC_*` au WindowServer.
 
-**Défauts sur Darwin:arm64** : depuis le 26/10 (`550b2a8`), la série du PC est allumée et
-prouvée : `PPC32MT TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIRTYSKIP PTEGMAP
-JC2WAY FPKNOWN FPRFLAZY STFSKNOWN LFSKNOWN TLBBASE`. A/B : DOOM 3 −23,9 %, UT2004 −18,6 %,
-Marble Blast −22,7 %. Garde : un binaire sans tcg/0037-0039 les laisse éteints.
+**Pièges du M4**
+- `matab.sh --restore` lance la VM sous ImGuiDock, les parties de `matab.sh` sous le frontal
+  natif : la résolution des jeux en plein écran en dépend (1920×1080 contre 1024×768).
+- Un frontal ImGuiDock resté ouvert après l'arrêt de sa VM tourne à 60 % d'un cœur et double
+  les temps en fenêtre ; la fenêtre de mesure d'UT (60 images) demande 3 passes.
+- Les traces du plugin (`POMPPC_GLTRACE`, vidages de tampons) ont **rempli le disque de
+  l'invité** (16 Go) le 29/10 : les effacer après usage.
 
-**Fait le 28/10**
-- `~/src/qemu` reconstruit (ALIAS de cmr, tcg/0056 compilé, `x-tcg-cold` sans effet sur
-  arm64).
-- **Cellule cmr-pe rejouée** : le pilotage du PC marche sur le M4 (course mesurée,
-  43,7 ms/image pour un plancher de 88). Elle était d'abord **rouge** : sous ImGuiDock, le jeu
-  prend 1920×1080, et le vidage autonome ne relisait pas une cible de 7,9 Mio, plus grande que
-  l'arène de transfert de l'invité. La relecture était sautée sans un mot, et le reflet de la
-  carrosserie manquait au rejeu.
-  **Corrigé** : relecture par bandes de lignes. Côté protocole, `QGPU_CAP_TEX_READBACK_ROWS`
-  (0x00100000) donne à TEX_READBACK une longueur 8 avec la fenêtre `y0, lignes`, sans changer
-  `QGPU_PROTO_VERSION`. Côté plugin, les surfaces passent par SURF_READBACK/UPLOAD en bandes,
-  les textures par TEX_IMAGE3 sans données puis des bandes de TEX_SUBIMAGE. Tour
-  `20261028-1848` : **vert**, image 0,00/0,00 %.
-- « 2/3 textures relues » expliqué : la texture 120 n'a **aucune image sur l'hôte** (en-tête
-  0×0, jamais liée ni copiée dans le vidage). La note la compte maintenant à part : « 2/2 (1
-  sans image) ». Un refus du device se distingue d'un niveau vide par un en-tête prérempli à
-  0xFF. L'avertissement du rejeu sur la texture 54 vise la 1ʳᵉ image du vidage : elle commence
-  au milieu d'une image et précède le renvoi de la texture (limite connue depuis le 27/09). La
-  matrice compare une image plus loin. Tour `20261028-2113` : vert, 43,6 ms/image.
-- **Matrice entière `20261028-1854` (commit `403593e`) : 17 cellules vertes sur 17**, dont
-  Warcraft III, rouge le 26/10. Les 4 autres cellules ne sont pas automatisées. Toutes vont plus
-  vite que le 26/10 : mb −14 à −16 %, d3 −10 %, prey −6 à −20 %, ut −2 à −5 %, nx −9 %. Seul
-  cmr va moins vite (+11 %), mais il est passé de 1024×768 à 1920×1080 et la comparaison ne
-  vaut pas. Ce gain n'est **pas attribué** : le frontal et l'état ont changé depuis le 26/10,
-  et aucun A/B n'a été fait.
-- Note : `matab.sh --restore` lance la VM sous ImGuiDock, et les parties de `matab.sh` sous le
-  frontal natif. La résolution des jeux en plein écran en dépend (1920×1080 contre 1024×768 le
-  26/10).
-
-**Nuit d'endurance du 28 au 29/10 (`docs/endurance.md` §11)** : 342 démarrages (104
-froids, 238 reboots) et 40 cycles de jeu (mb, zen, ut, d3), **aucun incident**. Borne haute
-de Wilson à 95 % : 1,1 % pour les démarrages, 8,8 % pour les jeux. La VM quotidienne a été
-relancée à la fin, puis arrêtée le 29/10 à 5 h 33 pour les essais de Quartz Extreme.
-
-**Quartz Extreme, 29/10 (`docs/quartz-extreme.md` §1 ter et journal)** : dans une VM jetable
-(`SNAPSHOT=1`, `QE=1`). **Éteint par défaut**, le disque quotidien n'est pas touché.
-- **P1 fait** : bureau juste sous QE (menus, icônes, Dock, ombres, Génie). Trois causes :
-  profondeur relue (la session repasse en milliers de couleurs), zone de la surface d'écran
-  (forme `SetShape`) appliquée au viewport, aux ciseaux et à la présentation, présentation
-  synchrone (curseur logiciel). Outil : `/var/tmp/pomppc-env` passe les variables `POMPPC_*`
-  au WindowServer (vidage, notes).
-- **P2 fait** : les fenêtres GL des jeux passent par l'hôte. Le plugin lie la fenêtre en
-  surface accélérée (`glcBindSurface`). Au `Flush` du WindowServer, le kext présente la
-  surface hôte du jeu dans sa région visible. Le compositeur lie la texture d'export pour ses
-  transformations. Matrice en fenêtre sous QE : **mb vert 8,5 ms/image, zen vert 5,6**
-  (6,2 et 3,5 hors QE).
-- Côté matrice, les clients du kext sont comptés au-delà de ceux d'avant le jeu, car le
-  WindowServer garde sa tranche sous QE.
-- **P3 fait, QE allumé par défaut sur le M4** (`c792464`). Le jeu présente lui-même son
-  échange par le noyau (méthode 5 du client 2D, région visible gardée à `SetShape`,
-  TEX_PRESENT asynchrone), sans avis au WindowServer : pour une fenêtre qui n'est pas au
-  premier plan, `CGSFlushSurface` lui faisait peindre le fond blanc (DOOM 3 clignotait au
-  chargement, Marble Blast restait blanc). A/B au repos, même VM, 3 passes, en fenêtre :
-  QE au niveau de QE éteint ou mieux (mb 6,1-6,3 contre 6,4, zen 2,9-3,1 contre 3,5, d3
-  28,8-29,7 contre 29,8, ut 19,6-19,7 contre 19,9 ms/image). Matrice entière verte
-  (cmr-pe rejouée seule). Endurance : §12 (ancien chemin) et §13 (chemin direct) de
-  `docs/endurance.md`, aucun incident (156 démarrages, 32 cycles de jeu en fenêtre). **La VM
-  quotidienne a QE depuis le 29/10, 21 h** (kext et plugin `71f9f76`, curseur compris, personnalité
-  « auto », installés à 21 h 25).
-- Défaut : `run_tiger.sh` pose `qe=on` sur Darwin:arm64 (`QE=0 ./run_tiger.sh` l'éteint) ;
-  le kext en personnalité « auto » le suit. **QEMU reconstruit le 29/10 (19 h)**.
-- Pièges de mesure : un frontal ImGuiDock resté ouvert après l'arrêt de sa VM tourne à
-  60 % d'un cœur et double les temps en fenêtre ; la fenêtre de mesure d'UT (60 images)
-  demande 3 passes.
-- Piège : les traces du plugin (`POMPPC_GLTRACE`, vidages de tampons) ont **rempli le disque
-  de l'invité** (16 Go). Les effacer après usage.
-
-**À faire sur le M4, dans l'ordre**
-1. Émulateurs voisins : QoS et attente à la microseconde mesurées le 30/10 (éteintes).
-   Reste `vperm` en ligne (TBL/TBX), gain plafonné vers 0,3 % : en dernier. Suite possible
-   de 0058 : `select` pour les délais courts seulement, profil d'UT.
-2. Parité de **tcg/0055** (rejeu des traces, outil de preuve prouvé sur le PC le 27/10 :
-   `c92dacc`). À faire seulement si les traces de second niveau reprennent ; elles sont
-   arrêtées depuis le 22/10.
-3. Parité de **tcg/0056** : **le PC l'a allumé le 31/10** (§4). Il faudra alors un saut long vers le
-   chemin lent sur aarch64 : le `b.cond` imm19 n'a qu'1 Mio de portée, pour une région de
-   64 Mio.
+**À faire sur le M4, dans l'ordre** (même ordre que le chantier M4 de `TODO.md`)
+1. Le rattrapage du §4, « Venu du PC le 01/11 ».
+2. Profil croisé des cinq jeux avec `sample` (JIT, recherche de blocs, `mftb`, helpers, fil
+   `qgpu-render`) : il ordonne les leviers suivants.
+3. `tcg/0058` limité aux délais courts (`select` sous la milliseconde), profil d'UT.
+4. Parité de **tcg/0056** (zone froide, allumée sur le PC le 31/10) : un saut long vers le
+   chemin lent sur aarch64 (le `b.cond` imm19 n'a qu'1 Mio de portée, pour une région de
+   64 Mio).
+5. Seulement si besoin : parité de **tcg/0055** (si les traces de second niveau reprennent,
+   arrêtées depuis le 22/10) ; `vperm` en ligne (TBL/TBX, gain plafonné vers 0,3 %).
 
 **Propres au M4** : pas de `qemu-ppc` linux-user (les preuves passent par l'invité), outils
 `ppc32mt-bench.sh` et `chargehote.py` portés sur macOS, et `references.csv`, le fichier de
@@ -323,14 +239,16 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
 
 ## 4. À faire en passant d'un hôte à l'autre
 
-- **Venu du PC le 01/11 (pour le M4), dans l'ordre** — remplace les deux entrées suivantes,
-  qu'il englobe :
-  1. `git pull` ; **reconstruire QEMU** (`qgpu-core.c` du 31/10 : reflets de cmr) ; ni le
-     protocole ni l'ABI n'ont changé.
+- **Venu du PC le 01/11 (pour le M4), dans l'ordre** — reprend les entrées du 30/10 et du
+  31/10, réduites le 01/11 à ce qui n'y figure pas :
+  1. `git pull` ; **reconstruire QEMU** (`qgpu-core.c` du 31/10 : reflets de cmr ; `tcg/0059`
+     nommé depuis le 30/10) ; ni le protocole ni l'ABI n'ont changé. Vérifier que la série se
+     compile sur arm64 avec `tcg/0059` (l'opcode générique n'y est jamais émis ; rien ne change
+     sans `VPERMINLINE=1`).
   2. Dans la VM de dev du M4 : **reconstruire kext, plugin et GA** depuis HEAD (kext du 01/11
      avec la méthode 6 ; plugin `20261101-ombre` qui contient aussi PACKBITS et UVWIDE),
-     `install.sh` sans `QE`, puis **redémarrer l'invité**. Les kext du 30/10 (curseur immobile)
-     et plugins du 30/10 (`pomppc_qe_same`, `tex_bind_id`) y sont inclus.
+     `install.sh` sans `QE`, puis **redémarrer l'invité**. Les kext du 30/10 (`805f504`, curseur
+     immobile) et plugins du 30/10 (`f01d2d7`, `pomppc_qe_same` ; `tex_bind_id`) y sont inclus.
   3. À l'œil : bande sous l'ombre du Terminal sur un jeu en fenêtre pendant qu'il change
      (DOOM 3 au chargement, Marble Blast), curseur net en plein écran, reflets de carrosserie
      de cmr.
@@ -343,31 +261,6 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
      part du fil `qgpu-render` sur d3) : c'est lui qui ordonne les leviers du M4 (TODO,
      chantier M4). Puis `tcg/0058` limité aux délais courts, zone froide en dernier.
   6. Une tranche d'endurance avec le nouveau kext, puis cette page.
-
-- **Venu du PC le 31/10 (pour le M4)** : `patches/qgpu/qgpu-core.c` a changé (reflets de la
-  carrosserie de cmr, `docs/re/cmr-rendu-vers-texture.md` §7) : **reconstruire QEMU**, puis
-  rejouer cmr-pe ; la référence du M4 contient sans doute le faux reflet (à reprendre et faire
-  valider). Ni le protocole ni le plugin ne changent.
-
-- **Venu du PC le 30/10 (pour le M4)**. Deux correctifs QE de l'invité sont à installer,
-  sans changer le protocole ni QEMU :
-  - kext : `805f504`, présentation asynchrone autour d'un curseur immobile ;
-  - plugin : `f01d2d7`, `pomppc_qe_same`.
-
-  Réinstaller kext et plugin (`install.sh` sans `QE`), puis redémarrer l'invité. Ensuite :
-  - A/B au repos sur mb-pe, mb-fen et cmr-pe, avec l'ancien kext et plugin contre les
-    nouveaux ;
-  - vérifier que le curseur reste net sur un jeu en plein écran ;
-  - une petite tranche d'endurance.
-
-  **Zone froide** (`tcg/0056`, `x-tcg-cold`) : allumée sur le PC le 31/10 (−1 à −2 % sur 4 jeux
-  sur 5). Sur arm64, elle est sans effet tant que le chemin lent n'a pas de saut long : le
-  `b.cond` imm19 ne porte qu'à 1 Mio. C'est la parité à écrire avant de l'allumer sur le M4
-  (rang 3 de la liste du M4).
-
-  `tcg/0059` (vperm en ligne) est neutre sur le PC : sa version arm64 (TBL) n'est pas
-  prioritaire. Sur le M4, vérifier que la série se compile toujours (l'opcode générique
-  n'y est jamais émis) ; rien ne change sans `VPERMINLINE=1`.
 
 - **Avant de quitter un hôte** : arrêter les campagnes en cours, remettre la VM quotidienne
   (`tools/tcg/matab.sh --restore`), mettre à jour cette page, puis commit et push.

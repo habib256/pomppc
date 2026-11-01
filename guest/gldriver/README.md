@@ -5,6 +5,11 @@ Il fait rendre la géométrie des applications OpenGL de Tiger par le GPU de
 l'hôte, à travers le kext `POMPPCGPU` et le device QEMU `qgpu-pci`.
 Conception, rétro-ingénierie et mesures : `docs/gpu-3d-tiger.md`.
 
+**Au 01/11/2026** : révision `20261101-ombre` (`POMPPC_PLUGIN_REV` de `pomppc_accel.c`),
+protocole qgpu v22 (`docs/protocole.md`). Plusieurs paragraphes ci-dessous datent de septembre
+(v7 à v9) et sont marqués là où ils ne valent plus. Les défauts font foi dans le code : macros
+`*_DEFAULT` et lectures `getenv("POMPPC_GL_…")` de `pomppc_accel.c`.
+
 ## Principe
 
 - **Mandataire du rendu logiciel d'Apple.** Le plugin charge en module privé
@@ -20,7 +25,8 @@ Conception, rétro-ingénierie et mesures : `docs/gpu-3d-tiger.md`.
   groupées et soumises au kext. Les textures sont suivies (création, niveaux,
   modifications) et recopiées sur l'hôte à la première utilisation après
   changement.
-- **Cache de textures.** Les 128 identifiants hôte sont réutilisés par éviction
+- **Cache de textures.** Les 128 identifiants hôte (01/11 : 1 024 par client depuis la v17,
+  `QGPU_CLIENT_TEX_IDS`) sont réutilisés par éviction
   de la texture la moins récemment utilisée. Les textures actives du dessin
   courant sont protégées ; les commandes précédentes sont terminées avant
   réutilisation. Les niveaux et paramètres restent chez GLEngine et sont
@@ -83,7 +89,10 @@ Conception, rétro-ingénierie et mesures : `docs/gpu-3d-tiger.md`.
   de polygone, pointillés, largeur de ligne et taille de point, et **quatre** unités de texture
   2D/1D (six formats de base, texels en octets ou compacts 8888/1555/565/4444, filtres avec
   mipmaps, modes de répétition, environnements MODULATE/REPLACE/DECAL/BLEND/ADD et `GL_COMBINE`).
-  Hors de ce domaine (liste complète : `docs/gpu-3d-tiger.md` §4.5), le plugin
+  (01/11 : depuis, textures 1D/3D/cube/rectangle, profondeur et S3TC en v10, 8 unités en v17
+  — 4 au pipeline fixe sur un hôte NVIDIA, `QGPU_CAP_FIXED4` —, programmes ARB en v16, GLSL en
+  v21, combineurs ATI en v22.) Hors de ce domaine (liste complète : `docs/gpu-3d-tiger.md` §4.5),
+  le plugin
   synchronise puis laisse faire le code d'Apple.
 - **Présentation directe.** Une application au premier plan reçoit son image
   directement dans la mémoire vidéo, sans passer par le WindowServer : en plein
@@ -118,7 +127,10 @@ Conception, rétro-ingénierie et mesures : `docs/gpu-3d-tiger.md`.
   `Resources`) est rejeté par GLEngine après son `gldInitializeLibrary` : il
   reste inactif (marque `POMPPC_GLD_OWNER`), et `gldTerminateLibrary` rend la
   tranche du kext (`docs/re/accelerateur-iokit.md` §4).
-- **Ce qui est annoncé est tenu.** `GL_VERSION = "1.1 POMPPC-1.0"` — la plus haute version dont
+- **Ce qui est annoncé est tenu.** (01/11 : paragraphe d'avant la v10. Sur un device v12 ou
+  plus qui tient textures 3D, cubes, 1.3 et 1.4, et v8, le plugin annonce désormais
+  **« 1.5 POMPPC-1.0 »** ; voir `docs/protocole.md` et `docs/re/version-extensions.md`.)
+  `GL_VERSION = "1.1 POMPPC-1.0"` — la plus haute version dont
   *toutes* les fonctions sont tenues par la chaîne (plugin + hôte + repli exact sur le rendu
   d'Apple). Pas 1.2, parce que les **textures 3D** manquent partout dans la chaîne. Le plugin
   ajoute au tableau de bits d'extensions d'Apple exactement trois noms, chacun vérifié au rendu :
@@ -161,10 +173,13 @@ dans `Resources` d'OpenGL.framework : `install.sh` l'en retire.
 | `POMPPC_GL_MERGE=0` | coupe la **fusion** des `DRAW_RAW` consécutifs en triangles indexés (repli et comparaison). `=1` (défaut) l'active. Sans elle, seuls les lots `TRIANGLES`, `QUADS`, `LINES` et `POINTS` de même mode se recollent bout à bout, comme avant |
 | `POMPPC_GL_GENSIZES=0` | envoie les **attributs génériques** du chemin tableaux à 4 flottants, comme avant. `=1` (défaut) les envoie à la taille de leur tableau (clé `QGPU_SK_GEN_SIZES` : DOOM 3 / Prey, 11 mots de génériques par sommet au lieu de 16), si le device annonce `QGPU_CAP_GEN_SIZES` et que les programmes ARB sont actifs (`docs/protocole-v17-generiques-tailles.md`) |
 | `POMPPC_GL_ASYNC=0` | coupe le **doorbell asynchrone** : chaque soumission attend la fin du rendu hôte, comme avant la v9 (repli et comparaison). `=1` (défaut) l'active, à condition que le device soit v9, qu'il annonce `QGPU_CAP_ASYNC`, que le kext installé connaisse le drapeau et que la tranche tienne deux moitiés — sinon le mode synchrone est gardé et la raison est dite dans le journal |
-| `POMPPC_GL_IDXLAZY=1` | **éteint par défaut** (03/10, `docs/d3-plugin-x86.md` §2) : un dessin `DRAW_NATIVE` indexé dont tous les VBO lus ont un miroir propre part sans balayage de ses indices (commande identique) ; `=2` balaie quand même et compte ce que l'ancienne voie aurait refusé |
-| `POMPPC_GL_IDXVEC=1` | **éteint par défaut** : balayage min/max des indices 16 et 32 bits par AltiVec (`pomppc_vec.c`) ; `=2` le compare au scalaire |
-| `POMPPC_GL_UNITVD=1` | **éteint par défaut** (§3) : un dispatch qui ne relie que des textures refait le verdict des seules unités désignées ; contrôlé par `POMPPC_GL_VERDICTCHECK=1` |
-| `POMPPC_GL_DISPONE=1` | **éteint par défaut** (§4) : fin de `gldUpdateDispatch` sous un seul verrou, crochetage sauté quand la table n'a pas bougé |
+| `POMPPC_GL_IDXLAZY=1` | ~~éteint par défaut~~ **allumé par défaut depuis le 04/10** (`=0` l'éteint ; 03/10, `docs/d3-plugin-x86.md` §2) : un dessin `DRAW_NATIVE` indexé dont tous les VBO lus ont un miroir propre part sans balayage de ses indices (commande identique) ; `=2` balaie quand même et compte ce que l'ancienne voie aurait refusé |
+| `POMPPC_GL_IDXVEC=1` | ~~éteint par défaut~~ **allumé par défaut depuis le 04/10** : balayage min/max des indices 16 et 32 bits par AltiVec (`pomppc_vec.c`) ; `=2` le compare au scalaire |
+| `POMPPC_GL_UNITVD=1` | ~~éteint par défaut~~ **allumé par défaut depuis le 04/10** (§3) : un dispatch qui ne relie que des textures refait le verdict des seules unités désignées ; contrôlé par `POMPPC_GL_VERDICTCHECK=1` |
+| `POMPPC_GL_DISPONE=1` | ~~éteint par défaut~~ **allumé par défaut depuis le 04/10** (§4) : fin de `gldUpdateDispatch` sous un seul verrou, crochetage sauté quand la table n'a pas bougé |
+| `POMPPC_GL_ZONES=0`, `POMPPC_GL_STATEBLK=0`, `POMPPC_GL_RAWSANE=0`, `POMPPC_GL_NATSHM=0`, `POMPPC_GL_QFLUSH=0` | coupent des leviers **allumés par défaut** : indices clients dans l'arène (`docs/d3-plugin-x86.md` §9), bloc d'état, tri des sommets et tableaux clients par l'hôte (`docs/protocole-v23-etat.md`, `-geometrie.md`), coupe au premier `QUERY_BEGIN` (`docs/backend-gl-attente.md` §9) |
+| `POMPPC_GL_DISPFAST`, `PROGMEMO`, `MTXDIRTY`, `STUNIT`, `DISPLOCK`, `BEGINVD`, `LIGHTDIRTY`, `SWAPLITE`, `DISPSEED`, `WINSEED`, `UVWIDE`, `PACKBITS` (`=0`) | leviers d'allègement du plugin, **tous allumés par défaut** (`docs/d3-plugin-x86.md` §10, `docs/plugin-allegement.md` §6 à §8) ; `=2` contrôle pour ceux qui l'ont. `POMPPC_GL_PRESENTQ` reste éteint |
+| `POMPPC_GL_QE_DIRECT=0`, `POMPPC_GL_QE_ASYNC=0`, `POMPPC_GL_QE_NONSIMPLE=0`, `POMPPC_GL_QE_HZ=n`, `POMPPC_GL_QE_NONSIMPLE_HZ=n` | Quartz Extreme (`docs/quartz-extreme.md`) : présentation directe par le noyau, Flush asynchrone, avis des surfaces non simples (défaut 20 Hz ; 0 = la cadence de `QE_HZ`), cadence des avis au WindowServer (défaut 60 Hz) |
 | `POMPPC_GL_GEOM_SLOTS=n` | plafonne le nombre de sommets offerts à un `BeginPrimitiveBuffer` (mesure : c'est ainsi qu'on a établi comment GLEngine coupe une longue primitive) |
 | `POMPPC_GL_NOTE=/chemin` | journal d'appoint (chargement du plugin, attachements de drawable). **Sans cette variable, rien n'est écrit** : le plugin tourne aussi dans le WindowServer et `loginwindow`, donc en root, et le fichier d'avant (`/tmp/pomppc-gl.log`, sans interrupteur) était une cible de lien symbolique. Le fichier est ouvert une seule fois, en `O_EXCL | O_NOFOLLOW` : un chemin **déjà pris** est un refus, jamais une écriture ailleurs — choisir un nom neuf à chaque essai |
 | `POMPPC_GLTRACE=dossier` | trace de chaque appel `gld*` et de chaque procédure, avec vidages binaires |
@@ -176,7 +191,8 @@ dans `Resources` d'OpenGL.framework : `install.sh` l'en retire.
 ## Limites connues
 
 - Textures 3D/cube/rectangle, plus de 4 unités, modes de répétition ou
-  filtres hors du domaine du protocole. `glCopyTexSubImage2D`,
+  filtres hors du domaine du protocole (01/11 : liste de septembre ; textures 3D, cube et
+  rectangle en v10, 8 unités en v17). `glCopyTexSubImage2D`,
   `glReadPixels` (RGBA/RGB octet, profondeur FLOAT, stencil octet),
   `glDrawPixels` / `glCopyPixels` COLOR/DEPTH/STENCIL et `glBitmap`
   passent par l'hôte dès la v13 (`POMPPC_GL_PIXEL=0` les rend à Apple).
@@ -188,7 +204,8 @@ dans `Resources` d'OpenGL.framework : `install.sh` l'en retire.
 - **Hors du domaine du chemin brut** (le rendu d'Apple reprend tout le pipeline
   de sommets, image exacte) : lissage (`GL_*_SMOOTH`), atténuation de la taille des points par la
   distance, programmes ARB de sommets ou de fragments, et tout ce qui sort déjà du domaine
-  de la rastérisation.
+  de la rastérisation. (01/11 : les programmes ARB sont tenus par l'hôte depuis la v16, par le
+  chemin des tableaux natifs.)
 - **Canal tableaux** : un `glBegin` pendant que `GL_VERTEX_ARRAY` est actif est jeté (sans
   quitter le domaine). Le chemin `AllocVertexBuffer` ignore le tampon packé par GLEngine et
   relit les tableaux clients — les indices sont conservés, la recopie vers le tampon de 2048
@@ -205,7 +222,7 @@ dans `Resources` d'OpenGL.framework : `install.sh` l'en retire.
   l'une ou l'autre des deux lignes voisines : GLEngine et l'hôte ne choisissent pas la même. C'est
   dans la latitude d'OpenGL, et cela ne se voit que sur les tracés en fil de fer.
 - 4 processus GL accélérés à la fois au plus (tranches du kext) ; le 5e est rendu
-  en logiciel.
+  en logiciel. Sous Quartz Extreme, le WindowServer en prend une.
 - Chaque échange (`glFinish`, `CGLFlushDrawable`) relit l'image hôte dans la
   mémoire invitée : c'est le coût dominant sur les petites scènes, **sauf**
   avec un device v13 (`SURF_PRESENT`) : l'hôte écrit alors lui-même dans la
@@ -236,7 +253,8 @@ dans `Resources` d'OpenGL.framework : `install.sh` l'en retire.
   vise plus que ses propres erreurs. Sans le bit, ou si sa tranche n'est pas
   celle que le device calcule (autre kext), règle globale d'avant.
 - Tampons de dessin 32 bits. Une demande 16 bits (Warcraft III / Colin McRae
-  « milliers de couleurs ») est élevée en 32 côté hôte ; `aglSetFullScreen`
+  « milliers de couleurs ») est élevée en 32 côté hôte (01/11 : depuis la v15, un drawable
+  RGB1555 + Z16 est dans le domaine, voir `POMPPC_GL_XFER16`) ; `aglSetFullScreen`
   peut commuter l'écran QFB en 1555, et le swap convertit xRGB → 1555.
 - Les pixels exactement sur une arête peuvent différer du rendu d'Apple (règle
   de remplissage du GPU hôte).

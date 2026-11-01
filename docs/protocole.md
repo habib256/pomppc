@@ -1,7 +1,8 @@
 # Protocole qgpu — contrat courant v22
 
 Référence consolidée au 27/09/2026 pour le plugin invité, le device QEMU et les
-tests natifs. Les notes `protocole-v7…v21-*.md` conservent l'historique et les
+tests natifs (capacités ajoutées depuis sans changer de version : relevées au 01/11/2026).
+Les notes `protocole-v7…v21-*.md` conservent l'historique et les
 preuves des changements ; ce document décrit le contrat courant.
 
 ## Sources et compatibilité
@@ -41,6 +42,13 @@ Le plancher historique `QGPU_PROTO_MIN=12` ne dispense pas du transport v19.
 | Combineurs ATI et sources ZERO/ONE | v22, `QGPU_CAP_COMBINE3` |
 | Noms d'uniforms GLSL composés (`s.m`, `l[2].pos`) | v22, `QGPU_CAP_GLSL_PATHS` |
 | Plafond mémoire hôte non fatal (`QGPU_ST_NO_MEM`, `QGPU_REG_NOMEM`) | v22 (statut 11 ; registre à 0 sur un device plus ancien) |
+| Bloc d'état brut de GLEngine (`STATE_BLOCK`, clés tirées par le cœur) | v22, `QGPU_CAP_STATE_BLOCK` |
+| Sommets triés par l'hôte (`DRAW_RAW_SANE`), tableaux clients dans BAR0 pour `DRAW_NATIVE` | v22, `QGPU_CAP_GEOM_HOST` ([protocole-v23-geometrie.md](protocole-v23-geometrie.md)) |
+| Quatre unités seulement au pipeline fixe (hôte NVIDIA) | v22, `QGPU_CAP_FIXED4` |
+| Compteur d'erreurs par client (`QGPU_REG_CLIENT_ERRORS(i)`) | v22, `QGPU_CAP_CLIENT_ERRORS` (07/10) |
+| `TEX_READBACK` par bandes de lignes (longueur 8 : `y0, lignes`) | v22, `QGPU_CAP_TEX_READBACK_ROWS` (28/10) |
+| Texture vers le scanout (`TEX_PRESENT`, Quartz Extreme) | v22, `QGPU_CAP_TEX_PRESENT` (29/10) |
+| Quartz Extreme recommandé par l'hôte (propriété `qe` du device) | v22, `QGPU_CAP_QE_DEFAULT` (29/10, bit du device) |
 
 Le backend logiciel ne promet ni programmes ARB ni GLSL. L'annonce GLSL du backend
 GL dépend des points d'entrée 2.0, d'au moins 16 unités d'image et d'un programme
@@ -182,7 +190,7 @@ relire FENCE.
 | Tampons | `BUF_CREATE/DESTROY/SUBDATA` ; données conservées côté hôte |
 | Requêtes | `QUERY_BEGIN/END/RESULT`, résultat relu dans BAR0 |
 | Programmes | `PROG_*` ARB, puis `GLSL_*` sur le même espace d'identifiants |
-| Présentation / copie | `SURF_PRESENT`, `COPY_TEX`, `SURF_TEX`, `TEX_READBACK` |
+| Présentation / copie | `SURF_PRESENT`, `TEX_PRESENT`, `COPY_TEX`, `SURF_TEX`, `TEX_READBACK` |
 
 Les signatures ordonnées sont les commentaires `QGPU_OP_*` de l'en-tête ; les
 longueurs exactes et valeurs de toutes les clés figurent ci-dessous.
@@ -230,7 +238,15 @@ Les copies GPU et le chemin de relecture doivent produire les mêmes texels.
 
 `TEX_READBACK [tex, cible, niveau, off, max]` écrit quatre mots w,h,d,format,
 puis les texels ARGB big-endian. Niveau non défini : dimensions nulles.
-Ce transfert sert notamment à rendre les vidages autonomes.
+Ce transfert sert notamment à rendre les vidages autonomes. Avec
+`QGPU_CAP_TEX_READBACK_ROWS`, la longueur 8 ajoute `y0, lignes` : seule cette fenêtre de lignes
+du niveau est relue, pour relire par bandes une texture plus grande que l'arène de l'invité.
+
+`TEX_PRESENT [tex, off, stride, x, y, w, h, format]` (`QGPU_CAP_TEX_PRESENT`) : mêmes arguments
+et mêmes contrôles que `SURF_PRESENT`, avec le niveau 0 d'une texture 2D ou rectangle (ligne 0
+en haut, l'orientation de `SURF_TEX`) à la place de la surface. Le kext présente ainsi, au Flush
+du WindowServer, l'instantané qu'un jeu en fenêtre a copié à son échange (Quartz Extreme,
+`docs/quartz-extreme.md`).
 
 ## État et géométrie
 
@@ -400,6 +416,9 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_CAP_GEOM_HOST` | `0x00020000` |
 | `QGPU_CAP_FIXED4` | `0x00040000` |
 | `QGPU_CAP_CLIENT_ERRORS` | `0x00080000` |
+| `QGPU_CAP_TEX_READBACK_ROWS` | `0x00100000` |
+| `QGPU_CAP_TEX_PRESENT` | `0x00200000` |
+| `QGPU_CAP_QE_DEFAULT` | `0x00400000` |
 | `QGPU_REG_CLIENT_ERRORS_BASE` | `0xC8` |
 | `QGPU_REG_CLIENT_ERRORS(i)` | `(QGPU_REG_CLIENT_ERRORS_BASE + 4 * (i))` |
 | `QGPU_CLIENT_SLOT_BYTES(shmem, n)` | `(((shmem) / (n)) & ~0xFFFUL)` |
@@ -450,6 +469,7 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_OP_DEPTH_UPLOAD` | `0x0016` |
 | `QGPU_OP_STENCIL_READBACK` | `0x0017` |
 | `QGPU_OP_STENCIL_UPLOAD` | `0x0018` |
+| `QGPU_OP_TEX_PRESENT` | `0x0023` |
 | `QGPU_OP_SURF_PRESENT` | `0x0019` |
 | `QGPU_OP_COPY_TEX` | `0x001A` |
 | `QGPU_OP_BUF_CREATE` | `0x001B` |
@@ -510,9 +530,11 @@ l'en-tête. Les commentaires et contrats détaillés restent dans les sources.
 | `QGPU_LEN_SURF_XFER` | `8` |
 | `QGPU_LEN_SURF_XFER_PF` | `9` |
 | `QGPU_LEN_SURF_PRESENT` | `9` |
+| `QGPU_LEN_TEX_PRESENT` | `9` |
 | `QGPU_LEN_COPY_TEX` | `11` |
 | `QGPU_LEN_SURF_TEX` | `5` |
 | `QGPU_LEN_TEX_READBACK` | `6` |
+| `QGPU_LEN_TEX_READBACK_ROWS` | `8` |
 | `QGPU_LEN_BUF_CREATE` | `3` |
 | `QGPU_LEN_BUF` | `2` |
 | `QGPU_LEN_BUF_SUBDATA` | `5` |

@@ -222,6 +222,14 @@ Classés par gain attendu :
 | L7 | **Plus de vCPU** (3-4, §1) | essai fait, patch d'essai | 0 sur les jeux (et −12 à −17 % sur un fil seul) ; ×1,7 à ×2,6 sur du travail parallèle dans l'invité | 1-2 jours |
 | L8 | **BQL moins pris** (`ppc_maybe_interrupt` sans verrou si l'état ne change pas) | ouvert (`TODO.md` §4) | BQL : 6,8 % du vCPU en SMP=1, 3 % par vCPU en SMP=2 (profils du §2.2) ; `tcg-g4.md` §2.4 donnait 9-10 % avant les patches flottants | 1-2 jours |
 
+(01/11/2026 : colonne « état » du 25/09, dépassée. L8 est fait depuis le 30/09 : `tcg/0012`
+`x-msr-nobql`, `mtmsr`/`rfi` sans verrou global quand la ligne d'interruption ne change pas,
+allumé par défaut, `docs/tcg-g4.md` §19. L5 est arrêté le 22/10 (régions LLVM +17,6 % sur
+DOOM 3, `docs/plan-traducteur-rapide.md`, en tête). L1 a donné la série `patches/tcg/`
+(`docs/tcg-g4.md`, en tête). Les renvois à « `TODO.md` §3/§4 » visent l'ancien plan du TODO,
+réorganisé depuis. Le SMP=2 tourne depuis le 23/10 sur `qemu-system-ppc` en MTTCG et non plus
+sur `ppc64`, `docs/ppc32-mttcg.md`.)
+
 Ce qui **ne sert à rien** : plus de cœurs hôte au-delà de ~2 pour la VM telle qu'elle est —
 6, 8 ou plus de cœurs de M4 ne changent pas le temps d'image, puisque ~1,3 cœur est tout ce
 que le processus consomme.

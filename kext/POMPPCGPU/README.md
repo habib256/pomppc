@@ -49,15 +49,41 @@ Le kext fait de même :
   `com.apple.iokit.IOGraphicsFamily`) portant `IOGLBundleName = GLDriver-POMPPC`. Pas
   `POMPPCGPU` lui-même : ses clients l'ouvrent en type 0, qui est aussi
   `kIOAccelSurfaceClientType`, le type qu'ouvriraient CGL (pbuffers) et le WindowServer. Le nub
-  **refuse toute ouverture** tant qu'il n'y a pas de surfaces (Quartz Extreme, tâche 4.4) ;
+  **refuse toute ouverture** tant qu'il n'y a pas de surfaces (Quartz Extreme, tâche 4.4 ;
+  01/11 : c'est encore vrai hors mode QE ; en mode QE, le nub sert le client 2D et le client
+  de surface, voir « Quartz Extreme » plus bas) ;
 - il pose `IOAccelTypes`/`IOAccelIndex` sur chaque `IOFramebuffer` publié (notification, donc
   aussi en chargement à chaud), sauf sur un framebuffer qui désigne déjà un autre accélérateur,
   et les retire au déchargement ;
-- il ne publie **pas** `AccelCaps` : le WindowServer tenterait alors Quartz Extreme.
+- il ne publie **pas** `AccelCaps` : le WindowServer tenterait alors Quartz Extreme. (01/11 :
+  dépassé, voir « Quartz Extreme » : `AccelCaps = 1` est publié en mode QE, le défaut sur les
+  deux hôtes.)
 
 `ioreg -c POMPPCAccelerator` montre le nub ; `guest/gltest/accelprobe` montre ce qu'en voit CGL.
 En single-user il n'y a aucun framebuffer (IONDRVSupport n'est chargé que par `kextd`) : rien à
 lier, c'est normal.
+
+## Quartz Extreme (28/10-01/11)
+
+Détail et journal : `docs/quartz-extreme.md`. La personnalité porte `POMPPCQuartzExtreme` :
+« auto » par défaut (`install.sh` sans `QE`), vrai avec `QE=1`, faux avec `QE=0`. En « auto », le
+kext suit l'hôte (`QGPU_CAP_QE_DEFAULT`, posé par la propriété `qe` du device, que `run_tiger.sh`
+pose sur `Darwin:arm64` et `Linux:x86_64`). En mode QE, le kext :
+
+- publie `AccelCaps = 1` sur l'accélérateur, pose `IOAccelRevision = 2` et `IOCFPlugInTypes`
+  (plugin GA `POMPPCGA.plugin`, `guest/ga/`) sur le framebuffer ;
+- sert le client de surface (`IOAccelSurface`) du WindowServer, et un client 2D (type `'POGA'`)
+  au plugin GA et au plugin GL. Méthodes du client 2D (`POMPPCGPU.h`) : 0 `GET_INFO`,
+  1 `SURF_BOUNDS`, 2 `EXPORT`, 3 `LOOKUP` (texture d'export d'une fenêtre GL), 4 `SURF_POS`,
+  5 `PRESENT` (présentation par le noyau dans la région visible du dernier `SetShape`),
+  **6 `PRESENT2`** (01/11 : la 5, plus « non simple » quand la région visible ne couvre pas
+  toute la surface à l'écran ; le plugin avise alors le WindowServer) ;
+- présente en asynchrone la région moins un curseur immobile (30/10) ; `POMPPCQESync` ou
+  `POMPPCQECursorSync` dans la personnalité rendent le synchrone d'avant.
+
+Ces ajouts ne touchent pas `qgpu_abi.h`, mais changent le kext : réinstaller **et redémarrer**
+l'invité. Au 01/11, le PC a le kext du 01/11 (méthode 6) ; le M4 a encore celui du 30/10, que
+le plugin `20261101-ombre` sait remplacer par la méthode 5.
 
 ## v9 : le doorbell asynchrone
 
@@ -151,6 +177,10 @@ tout avec un verdict dans `/pomppc/result.txt` (piloté depuis l'hôte par
   kernel extension code ») ; **`-mlong-branch`** (sinon « relocation overflow »).
 
 ## État
+
+**01/11/2026** : kext du 01/11 (Quartz Extreme, méthode 6 du client 2D) installé sur le PC ;
+le M4 garde celui du 30/10 jusqu'à sa prochaine séance. L'ABI de transport est toujours celle de
+la v19.
 
 **v19 (24/09/2026)** : kext reconstruit contre `qgpu_abi.h` seul, chargé au démarrage
 (« protocol v19, 4 clients x 16384 KiB »), `qgpu_test` 44/44 (dont `READ_REG`, bit de `len`

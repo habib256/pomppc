@@ -86,6 +86,10 @@ Non-régression : `tests/qgpu_smoke.py` sur le nouveau binaire (61 OK, code 0), 
 
 ## 5. Rejouer
 
+(01/11 : `~/src/qemu-stall`, `~/src/qemu-stall-deps` et `disks/tiger-dev-stall.raw` n'existent
+plus sur le PC ; recréer l'arbre et la copie de `disks/tiger-dev.raw` avant de rejouer. Les
+propriétés `x-test-*` sont dans `patches/qgpu/qgpu-pci.c`, donc dans les binaires de référence.)
+
 ```
 # QEMU dans un arbre à soi (jamais ~/src/qemu : d'autres bancs en dépendent)
 rsync -a --exclude=/build --exclude=/build-fast --exclude=/pgo-fast ~/src/qemu/ ~/src/qemu-stall/
@@ -118,7 +122,8 @@ POMPPCQFB en connexion « serveur » et change son mode, sans WindowServer).
   `~/src/qemu-stall-deps/prep.sh`), puis `configure --disable-gtk --disable-sdl
   --audio-drv-list=alsa` : binaire de test sans affichage ni son (lancer avec `SND=none`).
   Le binaire de référence, lui, demandera un `sudo apt install` des `-dev` avant sa prochaine
-  reconstruction. Le `configure` sous Python 3.14 (venv de meson) passe sans retouche.
+  reconstruction (01/11 : fait depuis, glib et GTK `-dev` sont installés sur le PC et ~/src/qemu
+  se reconstruit normalement). Le `configure` sous Python 3.14 (venv de meson) passe sans retouche.
 - **`IOFramebufferOpen` d'IOGraphicsLib en single-user** programme le mode puis ne rend jamais
   la main ; le clavier de la console est perdu avec lui (VM coupée, `fsck` deux fois).
   `qfbmode` passe donc par `IOServiceOpen(…, kIOFBServerConnectType)` et le sélecteur 4.

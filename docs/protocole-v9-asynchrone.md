@@ -196,6 +196,9 @@ synchrone. Le thread de rendu, lui, n'a jamais besoin du BQL pour avancer.
 
 ## 5. Ce que le KEXT devra changer
 
+(01/11 : fait ; drapeaux dans `len` et attente sur la command gate, voir
+`kext/POMPPCGPU/README.md`, « v9 ». Depuis la v19, le kext n'inclut plus que `qgpu_abi.h`.)
+
 *(Rien n'a été touché dans `kext/` hors la copie identique de `qgpu_proto.h`.)*
 
 L'ABI du user client ne change pas ; sa **sémantique** change quand le kext
@@ -229,6 +232,9 @@ posera `QGPU_DOORBELL_ASYNC` :
   objets, y compris ceux des autres clients — inchangé, et toujours à surveiller.
 
 ## 6. Ce que le PLUGIN devra changer
+
+(01/11 : fait ; soumission asynchrone en deux moitiés, allumée par défaut, `POMPPC_GL_ASYNC=0`
+la coupe : `guest/gldriver/README.md`.)
 
 *(Rien n'a été touché dans `guest/`.)*
 

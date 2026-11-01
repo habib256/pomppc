@@ -2,6 +2,12 @@
 
 PC Linux x86-64 seulement. macOS (le M4) n'est pas concerné : rien n'y change.
 
+**État au 01/11/2026** (§7) : `build-fast/` en production est construit le 31/10 à 16 h 04 avec
+le profil PGO du 31/10 (`--cible ppc32mt`, mb zen ut d3 en fenêtre), `-O3 -march=native`
+(`skylake`), LTO. Le profil réentraîné avec cmr le 01/11 n'est **pas** en production (binaire
+gardé dans `~/src/qemu/build-fast-pgo0111cmr/`), mais c'est lui qui occupe `pgo-fast/` : voir le
+piège du §7 avant toute reconstruction.
+
 ## 1. Pourquoi
 
 La compilation de QEMU est le plus gros levier mesuré sur le PC, sans une ligne de code de
@@ -201,3 +207,27 @@ ms/image (rouge seulement pour la référence non validée). **Vitesse non concl
 sous une charge de 3 à 4 (constructions emscripten/`node` d'autres projets en continu) ; l'A/B
 DOOM 3 `x86-gcc15-ab` a été arrêté par la barrière après 2 h sans repos. À refaire hôte au
 repos avant de comparer aux 111,9 ms/image du 06/10.
+
+## 7. État au 01/11/2026 : profils successifs, ce qui est en production
+
+Le binaire quotidien lance `qemu-system-ppc` en SMP 2 (MTTCG sur la cible 32 bits,
+`docs/ppc32-mttcg.md`), d'où `--cible ppc32mt` à l'entraînement depuis le 23/10. Relevés lus
+le 01/11 (`pomppc-build.txt`, `pomppc-profil.txt`) :
+
+| dossier | profil | rôle |
+|---|---|---|
+| `~/src/qemu/build-fast/` | profil du 31/10 02 h 35 (mb, zen, ut, d3 en fenêtre), construit le 31/10 16 h 04, `serie=5ad32b79ece3943b` | **production** |
+| `~/src/qemu/pgo-fast/` | **ce même profil du 31/10** (remis à sa place le 01/11 à 12 h 50) | celui qu'une reconstruction prend |
+| `~/src/qemu/build-fast-pgo0111cmr/` | profil du 01/11 08 h 09 (`--plein-ecran cmr` en plus) | gardé pour un A/B cmr au repos (`docs/vitesse-doom3-x86.md` §25) |
+| `~/src/qemu/pgo-fast-pgo0111cmr/` | le profil du 01/11 avec cmr | `PGO_DIR=~/src/qemu/pgo-fast-pgo0111cmr` pour le reconstruire |
+
+**Piège évité le 01/11** : `pgo-train.sh` archive le profil précédent en `pgo-fast.<date>` et
+laisse le nouveau dans `pgo-fast/` ; après le réentraînement avec cmr, non retenu, une
+reconstruction (`QEMU_FAST=1 ./scripts/build_qemu_qfb.sh`, `pgo-train.sh --etapes use`) aurait
+pris le profil cmr. Les deux dossiers ont été permutés : `pgo-fast/` = production. Règle : quand
+un réentraînement n'est pas retenu, permuter les dossiers aussitôt. Le binaire du 28/10
+(`build-fast-pgo2810/`, cité au §23 de `vitesse-doom3-x86.md`) n'existe plus.
+
+`tools/tcg/pgo-train.sh` joue depuis le 01/11 cmr en plein écran après les quatre jeux en
+fenêtre (`--plein-ecran ""` pour s'en passer) ; le binaire instrumenté n'atteint pas la course
+en 901 s (`vitesse-doom3-x86.md` §25).

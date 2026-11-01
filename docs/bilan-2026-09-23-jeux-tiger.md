@@ -6,6 +6,12 @@ tous les jeux Tiger »). Le tableau de bord courant reste `docs/todo-gpu-3d.md` 
 route de fond `docs/roadmap-opengl15.md`. Ce document est une photographie et un raisonnement,
 pas une liste de cases à cocher.
 
+> 01/11/2026 : photographie du 23/09, dépassée. Le tableau de bord est `TODO.md` à la racine
+> (`docs/todo-gpu-3d.md` n'est plus qu'un renvoi ; l'ordre « C » du 24/09 est dans
+> `docs/archive/todo-gpu-3d-2026-09-24.md`) ; les travaux clos depuis sont dans `CHANGELOG.md`,
+> dont Quartz Extreme (P6), fait et allumé par défaut sur les deux hôtes
+> (`docs/quartz-extreme.md`).
+
 ## 1. Où l'on en est
 
 ### 1.1 L'architecture tient
@@ -147,7 +153,7 @@ tableaux et VBO (UT2004, WC3), programmes ARB (Colin McRae, DOOM 3, Prey). Quand
 est verte sur son représentant, les autres jeux de la même famille tombent pour peu de frais ;
 c'est pour cela que P1 et P2 passent avant tout ajout de fonction.
 
-## 4. Ordre proposé pour la prochaine session (remplacé le 24/09 par l'ordre « C », voir docs/todo-gpu-3d.md)
+## 4. Ordre proposé pour la prochaine session (remplacé le 24/09 par l'ordre « C », voir docs/archive/todo-gpu-3d-2026-09-24.md)
 
 1. P5 (vérification kext ↔ plugin, commit des lots de ce soir) — une heure, évite de reperdre
    la soirée.

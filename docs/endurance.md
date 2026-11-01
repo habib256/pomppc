@@ -114,6 +114,10 @@ dans `bench/endurance/invite-10.4.11/mach_kernel`, `invite-syms.sh` dans
   `jeu.txt`), `pas-lance`, qemu-mort. Après panique, gel ou jeu figé : QEMU neuf.
 - La charge de l'hôte (1 min) et le nombre de QEMU mac99 sont relevés toutes les 10 s
   (`charge.csv`) et rangés avec chaque cycle (début, max, fin).
+- Autres options : `--jeu-mode pe` (plein écran ; défaut `fen`), `--slot N` (première instance,
+  port 2240 + 10·N ; défaut 0 pour `demarrages`, 5 pour `jeu`), `--extra` (`EXTRA_ARGS` de
+  `run_tiger.sh`), `--gpu-quelconque` (accepte un backend qgpu autre que `gl`), `--garde`
+  (`demarrages` : garde les dossiers des cycles réussis).
 
 - `--mode froid` lance un QEMU neuf sur un disque neuf à chaque démarrage. `--mode reboot`
   fait `shutdown -r now` dans l'invité, dans le même QEMU, comme la matrice après DOOM 3.
@@ -364,7 +368,8 @@ symbolisée avec les kexts).
   alors sur `build/`, qui date de 15:58, plus vieux encore et sans relevé de construction. Toute
   session lancée depuis `main` après 22:07 tourne donc sur la référence, malgré « build-fast par
   défaut ». Cette nuit, le bras défaut a imposé `build-fast` par `--qemu`. À faire :
-  reconstruire `build-fast` (ou `build/`) sur la série courante.
+  reconstruire `build-fast` (ou `build/`) sur la série courante. (01/11 : fait depuis ; §10, §14
+  et §15 tournent sur des `build-fast` reconstruits les 27, 30 et 31/10.)
 - **Thermique.** Le paquet du processeur est resté à **97-100 °C** toute la nuit, avec une
   fréquence moyenne vers 3,9 GHz (relevé minute par minute). Les images par partie baissent au
   fil de la nuit (d3 : 7 517 images en 600 s à l'essai court, charge 3,5, puis une médiane de
@@ -676,7 +681,8 @@ aucun incident.** Borne supérieure de Wilson à 95 % : 4,7 % pour les démarrag
 cycles par jeu, les verdicts, le backend GL et l'identité du binaire, inchangée.
 Base toujours en lecture seule, nouveau `qemu-img check` sans erreur. Toutes les
 instances d'endurance sont arrêtées ; Tiger quotidien restauré dans ImGuiDock,
-SSH de nouveau disponible. Une nuit plus longue reste à jouer sur le M4.
+SSH de nouveau disponible. Une nuit plus longue reste à jouer sur le M4 (jouée les 28-29/10,
+§11).
 
 ## 10. PC Linux, nuit du 27 au 28/10/2026 : nouveaux défauts, base 2810
 

@@ -12,8 +12,13 @@ Les mécanismes cités décrivent le code actuel. Les écarts identifiés par
 **L1…L6** sont des limites relevées le 27/09, pas des garanties ni des
 corrections ; chacune dit son état daté (au 07/10 : L2 et L5 tiennent, L1,
 L3, L4 et L6 sont fermées dans le code ; L4 est éprouvée en VM le 07/10, les
-autres épreuves en VM restent dues).
+autres épreuves en VM restent dues). Depuis (relu le 01/11) : L2 est fermée dans
+le kext et éprouvée en VM le 14/10 (§5), comme GL3/KT4/KT5 (§6) ; le compteur
+d'erreurs par tranche de L5 existe depuis le 07/10 (§7), le verdict global reste.
 La relecture statique ne remplace pas une épreuve de concurrence en VM.
+Quartz Extreme (depuis le 29-30/10 : client 2D du nub, présentation par le noyau,
+méthodes 5 et 6 du kext, plugin GA du WindowServer) n'est pas relu ici :
+[quartz-extreme.md](quartz-extreme.md).
 
 ## 1. Frontières et propriétaires
 
@@ -398,7 +403,10 @@ du job fautif, et un `PEEK` du kext qui rend ceux de la tranche du client.
 Épreuve de fermeture : deux processus en VM, l'un qui soumet des flux
 fautifs, l'autre qui doit rester en asynchrone (`n_syncfall` à 0) sans
 qu'aucune de ses relectures soit invalidée ; c'est l'entrée « [Protocole]
-`QGPU_REG_ERRORS` par client » de [TODO.md](../TODO.md).
+`QGPU_REG_ERRORS` par client » de [TODO.md](../TODO.md). (01/11 : faite le 07/10
+sans changer l'ABI — `QGPU_CAP_CLIENT_ERRORS`, `QGPU_REG_CLIENT_ERRORS(i)` dans
+`qgpu_proto.h`, lu par `QGPU_UC_READ_REG` ; épreuve à deux clients `regerr`, voir
+CHANGELOG ; l'entrée a quitté le TODO. Le triplet STATUS reste global.)
 
 Ne pas déduire une cause précise d'un simple rapprochement entre une
 barrière et le dernier STATUS lu.

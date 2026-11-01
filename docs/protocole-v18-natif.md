@@ -111,6 +111,9 @@ dans BAR0 à chaque dessin.
 
 ## Ce que le plugin doit faire (`guest/gldriver/pomppc_accel.c`, à faire)
 
+(01/11 : fait ; `G.native`, allumé quand le device annonce `QGPU_CAP_NATIVE`, `POMPPC_GL_NATIVE=0`
+le coupe. DOOM 3 et UT2004 dessinent par ce chemin : `docs/d3-plugin-x86.md`.)
+
 1. **Négociation** : `G.native` = `version >= 18` et `QGPU_CAP_NATIVE`
    (et `POMPPC_GL_NATIVE` ≠ `0` pour pouvoir revenir en arrière).
 2. **Miroir des VBO** : pour chaque objet tampon de GLEngine lié à un tableau

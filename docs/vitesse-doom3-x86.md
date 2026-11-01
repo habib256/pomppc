@@ -8,6 +8,24 @@ fenêtre T+50..T+280), sans vidage. But : comprendre pourquoi DOOM 3 est 2,5 à 
 que sur le Mac M4 (56-61 ms/image) quand les autres jeux ne le sont que 2 à 2,3 fois, et chiffrer
 les leviers de l'hôte. Preuves : `bench/vitesse/d3-x86/` et `bench/tcg/ab/x86-*` (hors git).
 
+**État au 01/11/2026** (les sections qui suivent sont un journal daté, à lire comme tel) :
+- **Vitesse** : DOOM 3 `d3-fen` ~78-80 ms/image sur le binaire rapide (§25 : 79,2 et 78,6 dans
+  `pgo-0111-ab`), Colin McRae ~82 ms/image **en course** (`cmr-pe`, §25). Cible : 50 ms/image.
+  Les chiffres cmr du PC pris entre le 28/10 et le 01/11 (44-48 ms/image, §20, §23) portaient sur
+  une transition d'avant la course, pas sur la course (§25, `6054367`).
+- **Binaire** : `~/src/qemu/build-fast/`, PGO du 31/10, `-O3 -march=native`, LTO ; le profil
+  réentraîné avec cmr le 01/11 est gardé à part (`build-fast-pgo0111cmr/`), non en production
+  (§25, `docs/binaire-rapide-x86.md` §7).
+- **Allumé par défaut sur Linux x86-64** (`run_tiger.sh`) : la série du 04/10 au 25/10
+  (`x-jit-rel32` compris depuis le 06/10, §13.4), MTTCG sur `qemu-system-ppc` (`PPC32MT`,
+  tcg/0050), `x-lfs-known` (0051), `x-tlb-base` (0052), la zone froide `x-tcg-cold` (0056, depuis
+  le 31/10, §23) ; plugin `POMPPC_GL_PACKBITS` (§25).
+- **Éteints** : `x-tier2` (0048), `x-vperm-inline` (0059, §22), tcg/0057-0058 (macOS seul),
+  tcg/0060 (x8, §24-§25), 0061 (abandonné), 0062 (diagnostic), 0063 (`tcg-g4.md` §47) ; ni
+  0060-0063 ni rien d'autre au-delà de 0059 n'est nommé dans `scripts/build_qemu_qfb.sh`.
+- **Suite** : `docs/etat-des-hotes.md` §2 (« À faire sur le PC »), pas les listes « pour la
+  suite » des sections datées.
+
 ## 1. État de la VM
 
 | contrôle | résultat |
@@ -371,6 +389,9 @@ durcissements, LTO, PGO) ~13 %, `x-jit-rel32` ~2 %, `x-vmx-inline` + `x-vfp-nati
    de blocs 5 %, logique du jeu à 60 Hz (§3.1 : chaque gain est amplifié).
 6. **Parité arm64** de 0022 sur le M4 (§7).
 
+(01/11 : liste du 04/10, dépassée. Les points 1, 2 et 6 sont faits — parité de 0022 sur le M4 le
+05/10, `docs/jit-m4-2026-10-05.md` ; la suite courante est dans `docs/etat-des-hotes.md` §2.)
+
 ## 11. Non-régression : la matrice du PC, tout allumé (`bench/tcg/ab/x86-mat`)
 
 Un tour de matrice **avec vidage** (preuve d'image : rejeu natif du vidage contre la capture de
@@ -422,6 +443,8 @@ place du tampon changeant avec l'ASLR) ; sur DOOM 3 il gagnait 2-3 % dans les de
 allure que les « deux régimes » de `x-jit-near` sur le M4 (`docs/tcg-g4.md` §14) : sans doute un
 conflit d'adresses entre le code généré et le texte de QEMU (alias de cache ou de prédicteur), à
 étudier (`perf stat` des deux régimes). **Il reste éteint par défaut** (`JITREL32=1` pour l'avoir).
+(01/11 : dépassé, allumé par défaut sur Linux x86-64 depuis le 06/10, les deux régimes étant un
+artefact de mesure, §13.4 et `tcg-g4.md` §31.)
 Le gain total de DOOM 3 par défaut perd donc ses ~2 % ; le reste est inchangé.
 
 **Tours de vérification avec les défauts définitifs** (sans `JITREL32`, binaire de référence) :
@@ -888,7 +911,8 @@ passent son adresse de retour (`l->raddr`) : `tb->tc.size` ne couvre plus que le
 seuil, `tcg_tb_alloc` passe à la région suivante (ou au vidage). Propriété d'accélérateur
 `x-tcg-cold` (hôte x86-64 ; sur arm64 le `b.cond` imm19 vers le chemin lent n'a qu'1 Mio de
 portée : sans effet, parité à faire par un saut long), `TCGCOLD=1` dans `run_tiger.sh`.
-**Éteint par défaut.**
+**Éteint par défaut.** (01/11 : allumé sur Linux x86-64 depuis le 31/10, §23 ; les chiffres
+cmr ci-dessous portent sur la transition d'avant la course, §25.)
 
 A/B entrelacé, arbre de mesure `~/src/qemu-ceil` (-O2, sans PGO), hôte au repos
 (« cold → ref » positif = la zone froide est plus rapide) :
@@ -969,7 +993,9 @@ repos), écart cold contre ref :
 | d3-fen | 77,9 | 76,5 | −1,8 % |
 | cmr-pe | 44,3 | 43,4 | −2,2 % |
 
-Gain petit mais de même signe sur 4 jeux sur 5, ut neutre. **`TCGCOLD` est allumé par défaut sur
+Gain petit mais de même signe sur 4 jeux sur 5, ut neutre. (01/11 : la ligne cmr-pe, comme la
+chasse au gel ci-dessus et la colonne cmr du profil croisé, mesure la transition d'avant la
+course, pas la course, §25.) **`TCGCOLD` est allumé par défaut sur
 Linux x86-64 depuis le 31/10** (`run_tiger.sh`, `TCGCOLD=0` l'éteint ; un binaire sans tcg/0056
 le laisse éteint sans avertissement). Sans effet sur arm64 (`b.cond` imm19) : la parité demande
 un saut long vers le chemin lent, notée pour le M4.
@@ -1003,6 +1029,8 @@ dont la zone froide, 1 255 `.gcda`). A/B contre le profil du 28/10 (`pgo-3110-ab
 au repos), écart neuf contre ancien : mb −0,6 %, zen −1,1 %, ut −1,4 % (2 parties par bras),
 cmr-pe +0,3 % (4), d3-fen +1,0 % (4 ; une partie à 93,8 dans `pgo-3110-ab`, non revenue).
 **Neutre** : le nouveau profil est gardé. L'ancien binaire est dans `~/src/qemu/build-fast-pgo2810/`.
+(01/11 : ce dossier n'existe plus ; le profil du 31/10 est celui de la production,
+`docs/binaire-rapide-x86.md` §7.)
 
 ## 24. Cache de sauts et base de temps (31/10, matin)
 

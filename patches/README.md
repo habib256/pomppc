@@ -42,13 +42,22 @@ entre-temps, et que les patches suivent :
 
 ## Appliqué par `scripts/build_qemu_qfb.sh`
 
+**À lire au 01/11/2026.** « Défaut *off* » dans les lignes ci-dessous est le défaut de la
+**propriété dans QEMU** : sans elle, le binaire se comporte comme l'amont. Ce que
+`run_tiger.sh` allume par défaut, hôte par hôte, a changé depuis (la plupart des propriétés
+sont allumées sur les deux hôtes, `FASTFP` et `SRTLB` compris) : le lanceur fait foi, résumé
+dans `docs/tcg-g4.md` (« État au 01/11/2026 », en tête). Les patches TCG nommés par le
+constructeur vont de `tcg/0001` à `tcg/0059` (sans 0005, 0009, 0030, 0036, 0044, 0053) ;
+`tcg/0060` à `0063` sont dans `patches/tcg/` mais **non nommés**, donc non appliqués
+(tableau « Présents, non appliqués » plus bas).
+
 | Fichier | Rôle |
 | --- | --- |
 | `smp-mac99/qemu-mac99-cpus-v2.patch` | SMP mac99. Remplace le garde-fou `« Only UP supported today »` d'`hw/intc/openpic.c` par la vraie limite du modèle (`nb_cpus > KEYLARGO_MAX_CPU`), ajoute le GPIO 4 de KeyLargo (0x5C, `KL_GPIO_RESET_CPU1`, active basse) dans `hw/misc/macio/gpio.c`, et dans `hw/ppc/mac_newworld.c` le `PIR = cpu_index` plus `cpu_reset_line()` : ligne tenue basse = CPU 1 remis à zéro et arrêté, relâchement = démarrage, par `async_run_on_cpu()`. S'applique **sans fuzz ni décalage** sur QEMU 11.1.2 pristine (le build l'exige : `--fuzz=0`). |
 | `openpic/0001-openpic-reset-niveau.patch` | **Reset de l'OpenPIC** (29/09/2026) : `openpic_reset` remettait les sources en front sans oublier `pending` ; une ligne de niveau haute au reset (OHCI pendant une panique de l'invité) restait en attente pour toujours, et le démarrage suivant se bloquait dans une interruption perpétuelle (« using 1966 buffer headers »). Chaque source retient le niveau brut de sa ligne (`input`), le reset remet `pending` à 0, l'écriture de l'IVPR d'une source de niveau reprend l'état réel de la ligne. Touche `hw/intc/openpic.c`, `include/hw/ppc/openpic.h`. Posé après la série SMP (même fichier). `docs/gel-doom3-baddisplay.md` §3. |
 | `qfb/qfb-pci.c` | Le device paravirtuel `qfb-pci`, copié dans `hw/display/`. Protocole « qfb1 » de Solra Bizna porté du NuBus vers PCI. |
 | `qfb/0002-wire-qfb-pci-build.patch` | Câblage meson/Kconfig du device ci-dessus. |
-| `qgpu/qgpu-pci.c`, `qgpu-core.[ch]`, `qgpu-soft.c`, `qgpu-gl.c`, `qgpu_proto.h` | Le GPU paravirtuel `qgpu-pci` (protocole v16 : géométrie brute, tampons hôte, programmes ARB) : device (transport), cœur d'exécution du flux de commandes (contextes, surfaces, textures, programmes, état GL), backend logiciel de référence, **backend OpenGL** (CGL/EGL, rendu sur le GPU hôte), et le contrat hôte/invité. Copiés dans `hw/display/`. |
+| `qgpu/qgpu-pci.c`, `qgpu-core.[ch]`, `qgpu-soft.c`, `qgpu-gl.c`, `qgpu_proto.h`, `qgpu_abi.h`, `qgpu-light.h` | Le GPU paravirtuel `qgpu-pci` (protocole v22 au 01/11, `QGPU_PROTO_VERSION` de `qgpu_proto.h` ; géométrie brute, tampons hôte, programmes ARB…) : device (transport), cœur d'exécution du flux de commandes (contextes, surfaces, textures, programmes, état GL), backend logiciel de référence, **backend OpenGL** (CGL/EGL, rendu sur le GPU hôte), et le contrat hôte/invité. Copiés dans `hw/display/`. |
 | `qgpu/0003-wire-qgpu-pci-build.patch` | Câblage meson/Kconfig de `qgpu-pci` ; lie `OpenGL.framework` (macOS) ou EGL+GL (Linux) si présents, sinon le backend GL est un stub. |
 | `screamer/screamer.c` + `screamer/screamer.h` | Le device audio **Screamer** (AWACS PowerMac), copiés dans `hw/audio/` et `include/hw/audio/`. |
 | `screamer/0001-wire-screamer-build.patch` | Câblage du Screamer : `hw/audio/Kconfig`, `hw/audio/meson.build`, `hw/ppc/Kconfig`, et surtout l'instanciation + les IRQ/DBDMA dans `hw/misc/macio/macio.c`. |
@@ -96,9 +105,41 @@ comparaison des stores à leur largeur réelle. Code commun, aucun émetteur tou
 après `0054` par le constructeur. M4 : banc nu et mutants verts, OpenBIOS SMP 438,1 M traces
 vérifiées et Tiger + Marble Blast 32,6 M sans divergence, image exacte. DOOM 3 : 293,5 M
 contrôles sans divergence, image exacte ; A/B M4 3×3 **+5,74 %** avec traces, elles restent
-éteintes. Rejeu natif PC de 0055 à faire. Sur macOS arm64, son compteur de chaleur
+éteintes. Preuves sur le PC faites le 27/10 (`c92dacc`, `docs/plan-traducteur-rapide.md` §9.10) :
+banc nu conforme, Tiger + Marble Blast vérifiés sans divergence ; traces éteintes là aussi. Sur macOS arm64, son compteur de chaleur
 exige `split-wx=on`, choisi par `run_tiger.sh` quand les traces sont demandées.
 Voir `docs/plan-traducteur-rapide.md` §9.8.
+
+**Les autres patches TCG appliqués** (sans ligne détaillée ici ; détail dans `docs/tcg-g4.md`
+et l'en-tête de `scripts/build_qemu_qfb.sh`) :
+
+| Fichier | Rôle |
+| --- | --- |
+| `tcg/0011-tcg-jc-bits.patch` | taille du cache de sauts, `x-jc-bits` (14 par `run_tiger.sh`). `docs/tcg-g4.md` §18. |
+| `tcg/0012-ppc-msr-nobql.patch` | `mtmsr`/`rfi` sans verrou global, `x-msr-nobql`. §19. |
+| `tcg/0013-ppc-fp-flat.patch`, `0014-tcg-fp-native.patch` | flottant scalaire sans branchement (`x-fp-flat`, éteint) et par l'op TCG `ppc_fp32` (`x-fp-native`). §22. |
+| `tcg/0015-ppc-tb-fast.patch` | base de temps par le compteur de l'hôte, `x-tb-fast`. §23. |
+| `tcg/0016-tcg-fp-native64.patch` | flottant double par la même op, `x-fp-native64`. §24. |
+| `tcg/0037-tcg-fp-native-cmp-arm64.patch`, `0038-tcg-vfp-native-cmp-arm64.patch`, `0039-ppc-lmw-inline-max.patch` | émetteurs aarch64 de 0033-0034, plafond de `lmw`/`stmw` en ligne (`x-lmw-inline-max`, témoin de la parité M4 dans `run_tiger.sh`). `docs/parite-m4-2510.md`. |
+| `tcg/0049-ppc-pmu-real.patch` | PMU POWER8 seulement sur les CPU qui l'ont, `x-pmu-real` (ppc64, éteint). `docs/ppc32-mttcg.md`. |
+| `tcg/0050-ppc-mttcg-32.patch` | MTTCG sur la cible 32 bits `qemu-system-ppc` (`PPC32MT`). `docs/ppc32-mttcg.md`. |
+| `tcg/0051-ppc-lfs-known.patch` | `lfs` producteur de `x-fp-known`, `x-lfs-known`. `docs/tcg-g4.md` §40. |
+| `tcg/0052-tcg-tlb-base.patch` | TLB logiciel une fois par base des chargements en forme D, `x-tlb-base`. §41. |
+| `tcg/0054-ppc-vfnc-slow.patch` | talon de `vcf*` forcé pour les preuves, `x-vfp-native-cmp-slow` (éteint). |
+| `tcg/0056-tcg-cold-slow-paths.patch` | chemins lents en zone froide de la région, `x-tcg-cold` (accélérateur ; allumé sur Linux x86-64 depuis le 31/10, sans effet sur arm64). `docs/vitesse-doom3-x86.md` §20, §23. |
+| `tcg/0057-tcg-vcpu-qos.patch`, `0058-poll-ns-macos.patch` | QoS des fils vCPU (`x-vcpu-qos`) et attente de la boucle principale à la µs (`POMPPC_POLL_NS`), macOS seul, éteints. `docs/tcg-g4.md` §42. |
+| `tcg/0059-ppc-vperm-inline.patch` | `vperm` en opcodes vectoriels de l'hôte (PSHUFB), `x-vperm-inline`, `x-vperm-verify` (éteint, neutre). §43. |
+
+**Présents, non appliqués** (non nommés par le constructeur, donc hors de l'empreinte de série ;
+les essayer demande un arbre à part, p. ex. `~/src/qemu-nuit/build-x` qui porte 0060-0063,
+tout éteint) :
+
+| Fichier | Verdict |
+| --- | --- |
+| `tcg/0060-tcg-jc-page-bits.patch` | cache de sauts vidé page par page (`x-jc-clear-exact`, `x-jc-page-bits`) : x8 cmr +4,2 % en course, éteint. `docs/tcg-g4.md` §44, §46. |
+| `tcg/0061-ppc-bat-skip.patch` | vidages de BAT sautés pour un BAT invalide (`x-bat-skip`) : neutre en course, abandonné. §45-§46. |
+| `tcg/0062-ppc-bat-old-mask.patch` | diagnostic du masque d'origine (`x-bat-old-mask`). §46. |
+| `tcg/0063-ppc-dbat-lite.patch` | vidage d'un DBAT réduit à son `mmu_idx` (`x-dbat-lite`) : neutre sur cmr, mitigé ailleurs, une panique sous vérificateurs à instruire. §47. |
 
 Les constantes `OUT_DATA` / `IN_DATA` / `OUT_ENABLE` étaient absentes de `gpio.c` en 9.2.0 ;
 11.1 les a dans `enum MacioGPIORegisterBits`, et le garde de l'étape 2 reconnaît cette forme
@@ -198,7 +239,9 @@ fonctionnalités, jamais pour la performance du JIT.* Le flottant rapide ne la
 viole pas — il n'accélère rien tant qu'on ne le demande pas — mais il mérite la
 même exigence de preuve, d'où le volume de vérification documenté. Même règle
 pour `tcg/0001` (`x-sr-tlb`, `docs/tcg-g4.md`) : éteint par défaut, prouvé par un
-mode vérificateur intégré.
+mode vérificateur intégré. (01/11 : la règle a été dépassée depuis, la série `tcg/` accélère
+le JIT ; elle garde l'exigence de preuve, et chaque propriété reste éteinte dans QEMU tant que
+le lanceur ne l'allume pas. `run_tiger.sh` allume aussi `FASTFP` par défaut.)
 
 Ce qu'il fait, en deux lignes : QEMU sait utiliser le FPU de la machine hôte
 (mécanisme *hardfloat* de `fpu/softfloat.c`), mais l'interdit à PowerPC, parce
@@ -252,14 +295,18 @@ fichiers ; l'arbre ainsi patché redonne l'ELF à l'octet près (sha1 `f11083a8�
 | `tcg/essais/0009-ppc-isync-chain.patch` | **Exact mais sans gain mesuré** (26/09/2026) : `isync` cherche le bloc suivant (`DISAS_CHAIN_UPDATE`) au lieu de revenir à `cpu_exec`, propriété `x-isync-chain`. Les recherches de la boucle principale tombent de ~110 M à ~30 M par tour de preuve, 0 divergence (`x-ret-verify`, SMP=2 et SMP=1), `smctest` identique ; Marble Blast pas meilleur que `tcg/0008` seul (A/B bruité, −4 % contre `x-ret-inline`+`x-jc-idx`). **Non appliqué.** S'applique par-dessus `tcg/0008`. `docs/tcg-g4.md` §16. |
 | `tcg/essais/0005-ppc-vfp-nrwg.patch` | **Exact mais sans gain** (25/09/2026) : les quatre helpers flottants AltiVec appelés en `TCG_CALL_NO_RWG` (jumeaux `*_nrwg`, propriété `x-vfp-nrwg`) ; licite (ni globale TCG ni exception), même empreinte `vfptest` ; banc 1 313 → 1 346 ms. **Non appliqué.** S'applique par-dessus `tcg/0004`. |
 | `tcg/essais/0002-ppc-lmw-inline.patch` | **Exact mais sans gain** (25/09/2026) : `lmw`/`stmw` en accès en ligne quand l'accès tient dans une page (helper sinon), propriété `x-lmw-inline`. Test invité `tools/guest/jobs/lmwtest` : sortie identique octet pour octet (608 cas, 14 fautes à cheval sur deux pages) ; banc de 20 M paires de 19 registres : 1 564/1 582 → 1 544/1 548 ms (−1,3 %) — le chemin rapide du helper (`probe_contiguous` + copie) coûte autant que 19 accès TCG. **Non appliqué.** S'applique par-dessus `tcg/0001`. |
+| `tcg/essais/0011-tcg-jc-mix.patch` | **Moins bien** : hachage du cache de sauts qui replie tout le numéro de page (`x-jc-mix`). **Non appliqué.** `docs/tcg-g4.md` §18. |
+| `tcg/essais/0013-ppc-fpx-borne.patch` | **Outil de mesure** : `x-fpx-mode`, la borne de ce que coûte chaque morceau du flottant en ligne (modes inexacts). **Non appliqué.** `docs/tcg-g4.md` §22.3. |
+| `tcg/essais/0052-tbreplay-sys.patch` | **Outil de mesure** (`tbreplay-sys`) : blocs d'un journal retraduits en mode système, pour la taille du code de `x-tlb-base`. **Non appliqué.** `docs/tcg-g4.md` §41. |
 | `01-timebase-and-vclock.patch` | **Neutre** (23,32 s = stock). Reverté : zéro gain, et l'approximation par réciproque touche le timing. |
 | `02-jmpcache-generation.patch` | **Régression de ~23 %** (28,63 s). Reverté. |
 
 Détail du protocole de mesure et des conclusions : `docs/metrologie-boot.md` (01, 02) et
 `docs/tcg-g4.md` (essais/0002, essais/0005). Aucun de ces patches n'est appliqué par le
-build. Les patches de performance appliqués (`fastfp/`, `tcg/0001` à `0004`, `0007`, `0008`) ajoutent chacun
-une propriété de CPU éteinte par défaut (`x-sr-tlb` est depuis allumée par `run_tiger.sh`) :
-sans elle, le binaire se comporte comme avant.
+build. Les patches de performance appliqués (`fastfp/`, `tcg/0001` à `0059`) ajoutent chacun
+une propriété éteinte par défaut dans QEMU (sauf les corrections sans condition de `0010` et les
+pendants d'hôte sans propriété) : sans elle, le binaire se comporte comme avant. `run_tiger.sh`
+en allume la plupart (`docs/tcg-g4.md`, « État au 01/11/2026 »).
 
 ## Licences
 

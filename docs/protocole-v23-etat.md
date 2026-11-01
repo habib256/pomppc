@@ -6,6 +6,10 @@ l'hôte*. Trois volets en parallèle (état, textures, géométrie) ; celui-ci e
 L'intégrateur passera l'ensemble en v23 ; ce volet n'incrémente pas
 `QGPU_PROTO_VERSION` et s'annonce par un bit de capacité.
 
+(01/11 : la v23 n'a jamais été posée ; `QGPU_PROTO_VERSION` est resté à 22 et ce volet vit en
+capacité, `QGPU_CAP_STATE_BLOCK`. `POMPPC_GL_STATEBLK` est allumé par défaut depuis le 01/10
+(`69244b1`, plugin `20261001-a4on`) ; `=0` rend l'ancienne voie.)
+
 ## 1. Profil de départ et plafond
 
 Profil de départ de tout A4 : `bench/a4/depart/LISEZMOI.md` (QEMU de référence,
@@ -80,7 +84,8 @@ comme sur le G4 ; `to_u8` (couleurs de mélange et de brouillard) est un
 les sondes `POMPPC_GL_NOCULL`, `FLIPFACE`, `GLYPHTEST`, qui retouchent le
 vecteur, gardent l'ancienne voie.
 
-**Plugin** (`20260930-stblk3`) : `POMPPC_GL_STATEBLK` (défaut **0**) et la
+**Plugin** (`20260930-stblk3`) : `POMPPC_GL_STATEBLK` (défaut **0** ; 01/11 : **1** depuis le
+01/10) et la
 capacité du device ; sur le QEMU de référence, ancienne voie (vérifié :
 `stateblk=0` dans la note, `gltest` inchangé). `send_state_blk` :
 
@@ -187,7 +192,8 @@ Les deux rouges, rejouées (`bench/a4/etat/rouges/`) :
 
 ## 5. Ce qui reste
 
-- **Allumer par défaut** : l'équivalence est prouvée et le gain mesuré
+- **Allumer par défaut** (01/11 : fait le 01/10, `69244b1`, sans v23) : l'équivalence est
+  prouvée et le gain mesuré
   (DOOM 3 −1,4 ms/image, UT2004 −0,6) ; reste, avant `STATEBLK_DEFAULT 1`, à
   comprendre le plantage de DOOM 3 plein écran vu dans une session de la copie A4
   (ci-dessus). Décision de l'intégrateur, avec la v23. Il faut le QEMU qui annonce
