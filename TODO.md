@@ -301,8 +301,9 @@ Le travail est fait ; il ne manque que l'essai ou la décision de l'utilisateur.
   commit. **Pas de publication x86 avant la vitesse** (règle du 20/10).
 - [ ] **[Distribution] Firmware reproductible** : `openbios-smp-screamer.elf` est livré en binaire.
 - [ ] **[Hôtes] Un seul disque, deux hôtes** : `tiger.raw` partagé par USB entre le Mac et le PC.
-- [ ] **[TCG] `tlbie` en SMP stock** : défaut de QEMU 9.2, corrigé par `x-sr-tlb` ; à signaler
-  en amont. Aussi : `helper_store_[id]batu` vide l'ancien BAT avec le masque de la nouvelle
+- [ ] **[TCG] `tlbie` en SMP stock** : défaut de QEMU 9.2, **toujours présent dans 11.1.2**
+  (vérifié le 01/11 : `ppc_tlb_invalidate_one`, cas `POWERPC_MMU_32B`, ne pose que
+  `TLB_NEED_LOCAL_FLUSH`), corrigé chez nous par `x-sr-tlb` ; à signaler en amont. Aussi : `helper_store_[id]batu` vide l'ancien BAT avec le masque de la nouvelle
   valeur (`tcg-g4.md` §45, `tcg/0062` le relève).
 
 ### Divers

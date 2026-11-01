@@ -63,7 +63,8 @@ maintenant les tampons de sommets sont lus et convertis par l'hôte.
   3. **device `qgpu-pci`** (`patches/qgpu/`) : cœur qui valide et décode tout (`qgpu-core.c`),
      backend OpenGL hôte (CGL sur macOS, EGL sur Linux) et rastériseur logiciel de référence
      (`qgpu-soft.c`) qui rend le protocole testable sans VM.
-- **Vérification** : 883 épreuves natives (`tests/qgpu_core_test.c`, soft et gl), rejeu natif
+- **Vérification** : 1 440 épreuves natives (`tests/qgpu_core_test.c` : soft 660, gl 780 avec les
+  permutations GLSL de DarkPlaces ; M4, 01/11, 0 échec), rejeu natif
   des vidages pris dans la VM (`tests/qgpu_replay.c`), scènes `guest/gltest` comparées au rendu
   d'Apple dans l'invité, harnais `tests/run-all.sh`.
 

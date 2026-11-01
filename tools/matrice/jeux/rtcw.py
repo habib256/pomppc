@@ -10,7 +10,7 @@ docs/archive/todo-par-domaines-2026-09-27.md).
 from jeu import Jeu
 
 RAISON = ("absent du disque quotidien (~/Desktop/Wolfenstein manque, ~/rtcw.command le vise) ; "
-          "quittait après 8 s sans dessiner (TODO §6)")
+          "quittait après 8 s sans dessiner (docs/archive/todo-par-domaines-2026-09-27.md)")
 
 
 class RTCW(Jeu):

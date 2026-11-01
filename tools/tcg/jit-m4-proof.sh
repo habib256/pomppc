@@ -7,7 +7,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 : "${DEVDISK:?copie raw dédiée requise}"
-: "${QEMU_BIN:?QEMU construit requis (qemu-system-ppc ; SMP>1 prend le voisin ppc64)}"
+: "${QEMU_BIN:?QEMU construit requis (qemu-system-ppc ; SMP>1 prend le voisin ppc64, sauf PPC32MT=1 : devloop.py)}"
 export DEVDISK QEMU_BIN
 export SMP="${SMP:-1}"
 OUT="${JIT_OUT:-$ROOT/bench/jit-m4/$(date +%Y%m%d-%H%M%S)}"

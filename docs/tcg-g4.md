@@ -314,7 +314,8 @@ le défaut est **masqué** : l'autre vCPU vide tout son TLB plusieurs milliers d
 seconde à son prochain changement de segment. Avec `x-sr-tlb`, ces vidages disparaissent :
 le patch pose donc aussi `TLB_NEED_GLOBAL_FLUSH` sur `tlbie`, que la `sync` suivante
 (`check_tlb_flush(env, true)`) transforme en `tlb_flush_all_cpus_synced`. Hors `x-sr-tlb`,
-rien ne change (et le défaut latent reste — voir §7).
+rien ne change (et le défaut latent reste — voir §7). (01/11 : toujours là dans QEMU 11.1.2,
+`ppc_tlb_invalidate_one`, cas `POWERPC_MMU_32B`.)
 
 ### 3.4 Ce qui n'a pas été fait
 
