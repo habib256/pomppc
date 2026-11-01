@@ -682,10 +682,14 @@ class Cellule:
     def mesures(self, rows, a, b):
         r = self.res
         if a is None or a not in rows or b not in rows:
-            r["replis"] = r["ms_image"] = ""
+            r["replis"] = r["ms_image"] = r["ms_image_precis"] = ""
             return
         # ms par image DU JEU : frames.csv compte les échanges (Colin McRae : 3 par image)
-        r["ms_image"] = "%.1f" % ((rows[b][0] - rows[a][0]) / (b - a) * self.j.echanges_par_image)
+        ms = (rows[b][0] - rows[a][0]) / (b - a) * self.j.echanges_par_image
+        r["ms_image"] = "%.1f" % ms
+        # Garder la précision pour les rapports : 2,7 → 2,6 arrondi peut faire
+        # passer à tort un écart sous le seuil de décision de 3 %.
+        r["ms_image_precis"] = "%.9f" % ms
         fin = max(rows)
         r["replis"] = str(rows[fin][1] - rows[a][1])
         # en fenêtre, le plugin rend volontairement un échange sur
@@ -726,7 +730,7 @@ def verdict(res, jeu):
 
 
 # ------------------------------------------------------------ tableau
-COLONNES = ["jeu", "mode", "verdict", "image", "replis", "replis_admis", "replis_detail", "ms_image",
+COLONNES = ["jeu", "mode", "verdict", "image", "replis", "replis_admis", "replis_detail", "ms_image", "ms_image_precis",
             "ms_image_preuve", "plancher", "rejeu_erreurs",
             "capture_ecart", "ref", "fenetre", "duree_s", "charge_hote", "dossier", "motifs", "motifs_execution"]
 
@@ -815,6 +819,7 @@ def joue_cellule(h, j, mode, tour, a):
     r["preuve"] = bool(p.get("fenetre"))
     r["motifs"] = ["mesure : " + x for x in m.get("motifs", [])] + p.get("motifs", [])
     r["ms_image"] = m.get("ms_image", "")
+    r["ms_image_precis"] = m.get("ms_image_precis", "")
     r["ms_image_preuve"] = p.get("ms_image", "")
     r["fenetre"] = "%s (preuve %s)" % (m.get("fenetre", ""), p.get("fenetre", ""))
     r["duree_s"] = (m.get("duree_s") or 0) + (p.get("duree_s") or 0)

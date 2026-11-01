@@ -9,6 +9,13 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Matrice : rapports A/B sans arrondi prématuré, 02/11.** Le CSV garde le temps précis
+  en plus de l'affichage à 0,1 ms ; le bilan utilise cette précision, anciennes archives
+  acceptées. Évite de prendre zen 2,7→2,6 pour −3,7 % quand le gain réel est −1,78 %.
+  Tests hors VM : rapport, ancien format, facteur échanges/image et fenêtre absente.
+- **M4 : profils croisés des cinq jeux renouvelés, 02/11.** d3 : rendu hôte 0,178 cœur,
+  82,2 % d'attente de condition ; la piste de conversion d'attributs n'est pas prioritaire
+  sur cette mesure. Recherche de blocs 4,8–8,1 % des vCPU actifs (`profil-m4-0211.md` §2).
 - **M4 : PACKBITS mesuré au repos sur les cinq jeux, 02/11.** A/B neuf à trois bras,
   trois parties par bras, mb aussi en plein écran : UT −3,19 %, Colin en course −7,08 % ;
   autres écarts sous 3 %, inconclusifs. Aucun incident ni repli, aucun réglage changé.

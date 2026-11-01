@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 from unittest import mock
 
 R = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -61,6 +62,37 @@ else:
 # frames.csv : lignes incomplètes ignorées, compteurs lus
 rows = matrice.lit_frames(serie([10, 20]) + "3,0x1,4")
 verifie(sorted(rows) == [1, 2] and rows[2][0] == 30.0 and rows[2][3] == 20, "lit_frames")
+
+# Le rapport d'A/B doit conserver l'écart sous 3 % que l'arrondi 2,7 → 2,6 masque.
+cellule = matrice.Cellule.__new__(matrice.Cellule)
+cellule.res, cellule.mode = {}, "pe"
+cellule.j = SimpleNamespace(echanges_par_image=3)
+cellule.mesures({10: (100.0, 0, 0, 0, 0), 610: (100.0 + 600 * 2.6534 / 3, 0, 0, 0, 0)}, 10, 610)
+verifie(cellule.res["ms_image"] == "2.7" and
+        abs(float(cellule.res["ms_image_precis"]) - 2.6534) < 1e-8,
+        "précision du temps, facteur échanges/image conservé")
+cellule.mesures({}, None, None)
+verifie(cellule.res["ms_image_precis"] == "", "pas de temps précis si fenêtre absente")
+
+with tempfile.TemporaryDirectory() as d:
+    import csv
+    from pathlib import Path
+    fields = ["dossier", "ms_image", "ms_image_precis", "verdict"]
+    for name, rounded, precise in [("a-1", "2.7", "2.6534"), ("b-1", "2.6", "2.6062")]:
+        p = Path(d) / name
+        p.mkdir()
+        with (p / "resultats.csv").open("w") as f:
+            w = csv.DictWriter(f, fieldnames=fields); w.writeheader()
+            w.writerow(dict(dossier="zen-fen", ms_image=rounded, ms_image_precis=precise, verdict="vert"))
+    cmd = [sys.executable, os.path.join(R, "tools/tcg/matabsum.py"), d]
+    p = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    verifie("-1.78 %" in p.stdout and "2.653" in p.stdout,
+            "A/B calculé sans arrondi prématuré")
+    # Les archives sans la nouvelle colonne restent lisibles.
+    old = Path(d) / "b-1/resultats.csv"
+    old.write_text("dossier,ms_image,verdict\nzen-fen,2.6,vert\n")
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    verifie(p.returncode == 0 and "2.600" in p.stdout, "A/B ancien format accepté")
 
 # Le rendez-vous ne vaut que pour une image complète consignée par le plugin.
 verifie(matrice.capture_frame("2\n@@FRAMES\n" + serie([10, 20])) == 2,

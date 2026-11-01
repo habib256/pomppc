@@ -105,8 +105,8 @@ Ordre du 01/11 : la séance de l'après-midi est sur le M4, son chantier passe e
 que `docs/etat-des-hotes.md` §4) ; le plugin est
 commun ; les leviers du JIT x86 attendent le retour sur le PC.
 
-- [ ] **[TCG — M4] Mesurer le M4 avant de l'optimiser, puis rattraper le PC.** Le M4 n'a pas
-  de profil croisé depuis la parité du 25/10. Dans l'ordre :
+- [ ] **[TCG — M4] Mesurer le M4 avant de l'optimiser, puis rattraper le PC.** Profils croisés
+  renouvelés le 02/11 (`docs/profil-m4-0211.md`). Dans l'ordre :
   1. **Rattrapage** (01/11, en partie fait) : `~/src/qemu` reconstruit ; kext, plugin et GA
      compilés et installés dans la VM quotidienne, invité redémarré ; mb et d3 fen/pe vertes ;
      nuit du 01 au 02/11 : artefacts locaux absents, six preuves reconstituées et vertes
@@ -118,8 +118,9 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
      Détail : `docs/profil-m4-0211.md` §1, `docs/etat-des-hotes.md` §3-§4.
   2. **Profil croisé des 5 jeux** (`sample` du processus QEMU, fils vCPU et `qgpu-render`,
      comme `tools/re/perfpart.py` sur le PC) : part du JIT, recherche de blocs, `mftb`,
-     helpers, et **part du fil de rendu hôte** ; sur d3, si `qgpu-render` approche les 29 ms
-     de l'image, la piste 3 (`nat_conv_attr`) passe en tête.
+     helpers, et **part du fil de rendu hôte** : fait le 02/11, §2 du profil. Sur d3,
+     `qgpu-render` travaille environ 0,178 cœur, attend en condition 82,2 % du relevé :
+     pas de justification pour faire passer la piste 3 (`nat_conv_attr`) en tête.
   3. **`tcg/0058` délais courts** : l'attente à la microseconde fait zen −18 % mais ut +6,6 % ;
      variante `select` pour les seuls délais sous la milliseconde, profil d'UT (verrou).
      Contrat de `g_poll` corrigé le 01/11 nuit (`tcg/fixes/0058`, 42 cas et deux mutants) ;

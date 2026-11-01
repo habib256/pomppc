@@ -64,7 +64,53 @@ seuil de 3 % depuis ces valeurs arrondies.
 
 ## 2. Profils croisés
 
-En cours : `m4-profils-0111n-fen` (mb, zen, ut, d3), puis
+Terminés à 1 h 55 : `m4-profils-0111n-fen` (mb, zen, ut, d3), puis
 `m4-profils-0111n-pe` (cmr), avec les défauts. Après la fenêtre de vitesse :
 `sample` hôte 30 secondes, puis `sample` du jeu invité 10 secondes. Ces relevés
 instrumentés restent séparés de l'A/B ci-dessus.
+
+[A] Dépouillement par `threadbusy.py` : occupation estimée, attentes noyau
+exclues ; coûts propres des fonctions, rapportés à la somme des vCPU actifs.
+Les `???` des fils TCG sont l'heuristique du code généré de `samplesum.py`, sans
+carte des adresses invitées. « Recherche » additionne les coûts propres de
+`tb_lookup`, `qht_lookup_custom`, `tb_htable_lookup`, `helper_lookup_tb_ptr`,
+`tb_jmp_cache_fill`, `tb_lookup_cmp`, `ppc_get_tb_cpu_state` ; les colonnes sont
+indépendantes, pas des coûts inclusifs à additionner entre eux.
+
+| Cellule | vCPU, cœurs | qgpu-render, cœur | code généré estimé | recherche | base de temps | protection JIT |
+|---|---:|---:|---:|---:|---:|---:|
+| mb-fen | 1,025 | 0,255 | 69,7 % | 8,05 % | 0,75 % | 3,25 % |
+| zen-fen | 0,588 | 0,477 | 67,8 % | 5,08 % | 1,61 % | 3,76 % |
+| ut-fen | 1,055 | 0,248 | 81,1 % | 4,84 % | 0,74 % | 1,99 % |
+| d3-fen | 1,506 | 0,178 | 78,2 % | 6,87 % | 0,13 % | 3,10 % |
+| cmr-pe | 1,059 | 0,186 | 74,3 % | 6,52 % | 0,31 % | 3,68 % |
+
+Base de temps : `tbf_load` et `helper_load_tbu/tbl`. Protection JIT :
+`pthread_jit_write_protect_np`. Les helpers nommés `helper_*` font 1,4–2,1 %
+des vCPU actifs, dont une partie déjà dans la recherche ; les flottants nommés
+font 10,2 % sur zen, au plus 1,2 % ailleurs. La génération de code nommée
+(`tb_gen_code`, `translator_*`, `tcg_gen_*`, `tcg_out_*`) fait moins de 0,1 %
+dans ces scènes déjà chaudes. Données détaillées locales :
+`bench/tcg/ab/profils-m4-0211-somme.json`.
+
+Sur d3, `qgpu-render` attend dans `__psynch_cvwait` pendant **82,2 %** des
+échantillons ; son travail estimé vaut environ 5,2 ms de CPU par image à
+29 ms/image, loin des 20 ms supposées d'après le PC. Le relevé ne mesure pas le
+temps GPU, ni le chemin critique complet ; il ne justifie pas de faire passer
+`nat_conv_attr` en tête sur le M4. La recherche de blocs reste visible, mais son
+optimisation doit garder cmr sain sur les deux hôtes. Le profil d'UT ne retrouve
+pas les 14 % de base de temps du PC : cette attribution n'est pas transférable.
+
+Le `sample` invité montre `qn_main` entièrement en attente de condition sur
+mb (860/860), zen (876/876) et d3 (837/837). Cela conforte la réserve du §1 :
+ces scènes ne caractérisent pas un avis d'ombre actif à 20 Hz.
+
+Colin a atteint la course après **410 s**, contre environ 237 s pendant l'A/B.
+Capture `diagnostic-attente.png` et 2 131 sommets par échange dans sa fenêtre
+confirment la course. Lectures SSH et capture de diagnostic ont accompagné la
+fin du chargement ; ce premier profil sera recoupé avec les témoins de la
+campagne 0058. Aucun chiffre de cette partie n'est substitué à l'A/B de vitesse.
+
+**Suite retenue selon le TODO :** tester 0058 seulement sous la milliseconde,
+contre le défaut et le mode complet corrigé, sur les cinq jeux. La zone froide
+arm64 reste après cette étude ; aucune nouvelle piste proposée n'est lancée.

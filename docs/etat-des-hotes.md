@@ -191,7 +191,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 02/11/2026, 1 h 38 (profils en cours ; arrêt prévu à 6 h 40)
+## 3. Mac M4 : état au 02/11/2026, 1 h 59 (profils terminés ; arrêt prévu à 6 h 40)
 
 **Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
 6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
@@ -277,6 +277,15 @@ des anciennes références**.
   ne prouve pas le coût des avis d'ombre effectivement actifs, non comptés par ces relevés.
   Détail et valeurs sans arrondi : `docs/profil-m4-0211.md` §1. Profils hôte/invité des cinq
   jeux démarrés dans `m4-profils-0111n-{fen,pe}`.
+- **Profils clos à 1 h 55**, cinq relevés hôte 30 s et invité 10 s. `profil-m4-0211.md`
+  §2 : recherche de blocs 4,8–8,1 % des vCPU actifs ; base de temps d'UT 0,74 % (ne pas
+  lui appliquer les 14 % du PC). d3 : rendu 0,178 cœur, attente de condition 82,2 %,
+  conversion d'attributs non prioritaire sur ces données. Chargement de cmr long (410 s),
+  course confirmée par capture et sommets ; premier profil à recouper avec les témoins 0058.
+- La matrice garde maintenant `ms_image_precis` dans ses CSV ; `matabsum.py` calcule ses
+  rapports dessus, avec compatibilité des anciennes archives. Cas reproduit : zen 2,7→2,6
+  arrondi suggérait −3,7 %, contre −1,78 % en réalité ; test hors VM du rapport réussi,
+  facteur de trois échanges par image conservé.
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
 - **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`
