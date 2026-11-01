@@ -104,6 +104,12 @@
    kIOReturnBusy : région inconnue (pas encore de SetShape) — le jeu avise
    alors le WindowServer, qui fera le Flush comme avant. */
 #define POMPPC_GA_PRESENT       5
+/* Méthode 6 (01/11) : la méthode 5, plus [non simple] : 1 si la région
+   visible ne couvre pas toute la surface à l'écran (ombre ou fenêtre posée
+   dessus). Le jeu avise alors le WindowServer (CGSFlushSurface), qui
+   recompose ces zones depuis la texture d'export — comme le
+   glcDoNonSimpleFlush d'un GLDriver de carte. */
+#define POMPPC_GA_PRESENT2      6
 #define POMPPC_MAX_EXPORTS      32
 #define POMPPC_MAX_RECTS        16
 /* Zone de commandes du client (fin de sa tranche), écrite par le kext au
@@ -151,14 +157,14 @@ public:
                                      const IOAccelBounds * bounds,
                                      const IOAccelBounds * rects, UInt32 nrects);
     void             dropSurfaceShape(void * client);
-    IOReturn         presentSurface(UInt32 sid);
+    IOReturn         presentSurface(UInt32 sid, UInt32 * nonsimple);
     virtual void     free(void);
 
 private:
     IOReturn         flushSurfaceLocked(UInt32 sid, IOFramebuffer * fb,
                                         const IOAccelBounds * bounds,
                                         const IOAccelBounds * rects, UInt32 nrects,
-                                        bool direct);
+                                        bool direct, UInt32 * nonsimple);
     IOLock *         lock(void);
     struct Shape {
         void *          client;         /* client de surface qui l'a posée (0 : libre) */
@@ -241,6 +247,7 @@ public:
     IOReturn gaLookup(UInt32 sid, UInt32 * tex, UInt32 * w, UInt32 * h, UInt32 * seq, void *);
     IOReturn gaSurfPos(UInt32 sid, UInt32 * x, UInt32 * y, void *, void *, void *);
     IOReturn gaPresent(UInt32 sid, void *, void *, void *, void *, void *);
+    IOReturn gaPresent2(UInt32 sid, UInt32 * nonsimple, void *, void *, void *, void *);
 
 private:
     IOFramebuffer * fFB;            /* retenu */

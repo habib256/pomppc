@@ -147,6 +147,64 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
 
 ## 3. Journal
 
+- **01/11, 10 h-11 h 45 (PC x86-64)** : **CORRIGÉ : image ancienne du jeu sous l'ombre d'une
+  fenêtre posée sur une fenêtre GL** (signalée à 9 h 13 : DOOM 3 en fenêtre pendant son
+  chargement, image noire, et sous le bord droit de l'ombre du Terminal une bande de l'écran
+  de chargement d'avant). Ce n'est **pas** le défaut du 30/10 (liaison) : la bande montre une
+  image cohérente, avec le dégradé de l'ombre, donc le compositeur lie bien la texture
+  d'export du jeu (`tex_bind_id`). Elle est simplement **composée une fois et jamais
+  refaite**.
+  1. **Cause.** Sur le chemin direct (29/10, `0ba5221`), le jeu présente par le noyau
+     (méthode 5) dans la région visible du dernier `SetShape`, et n'avise plus le
+     WindowServer. Cette région exclut la zone de l'ombre, que le WindowServer compose
+     lui-même : ombre mélangée à la texture d'export. Faute d'avis, il ne la recompose qu'à
+     ses propres dommages (Terminal déplacé, ouvert ou activé). La bande garde alors l'image
+     du jeu au moment de ce dommage : écran de chargement ou menu pour DOOM 3, et le noir
+     d'avant la première image pour Marble Blast. Un GLDriver de carte fait l'inverse : il
+     présente lui-même la partie visible et appelle `glcDoNonSimpleFlush` quand la surface
+     n'est pas simple.
+  2. **Preuve** (VM quotidienne, `matrice.py -j mb -m fen --sans-vidage`, Terminal de
+     `lance.command` posé sur le jeu, captures au moniteur toutes les 5-10 s) : plugin
+     `packbits`, la bande sous l'ombre reste **noire** pendant que le jeu tourne. Avec le même
+     plugin et `--env POMPPC_GL_QE_DIRECT=0` (un avis à chaque échange), la bande montre le
+     jeu courant, assombri, sans blanc ni clignotement : l'avis suffit, et le blanc du 29/10
+     (fenêtre qui n'est pas au premier plan) était bien le défaut de liaison corrigé le 30/10.
+  3. **Correctif (kext et plugin, sans changer le protocole qgpu).** Le kext gagne une
+     **méthode 6** du client 2D (`POMPPC_GA_PRESENT2`) : c'est la méthode 5, qui rend en plus
+     « non simple » quand les rectangles visibles ne couvrent pas toute la partie à l'écran
+     de la surface. Le plugin l'appelle (méthode 5 si le kext est ancien) et, si la surface
+     n'est pas simple, confie un avis au fil des avis (`qn_post`). Ce fil garde **le dernier
+     avis en attente** : l'image finale d'une rafale est toujours composée. Cadence propre
+     `POMPPC_GL_QE_NONSIMPLE_HZ` (défaut 20, 0 = celle de `POMPPC_GL_QE_HZ`) ;
+     `POMPPC_GL_QE_NONSIMPLE=0` rend le comportement d'avant. Plugin `20261101-ombre`.
+     Binaires (kext, plugin, GA) dans `bench/ombre-0111/prebuilt-20261101-ombre.tar`.
+  4. **Vitesse.** La matrice pose le Terminal de `lance.command` sur la fenêtre du jeu :
+     toutes les cases en fenêtre sont « non simples ». Avec un avis à chaque échange (60 Hz),
+     mb-fen prenait **+12,5 %** (`bench/tcg/ab/ombre-mb`, 8,0 → 9,0 ms/image) : d'où la
+     cadence de 20 Hz. A/B au repos à 20 Hz, 3 parties par bras, `POMPPC_GL_QE_NONSIMPLE=0`
+     contre défaut : **mb-fen +6,2 %** (8,1 → 8,6 ; `bench/tcg/ab/ombre20-mb`), **d3-fen
+     +0,9 %** (79,9 → 80,6, dans le bruit ; `ombre20-d3`). Ce coût n'existe que si une fenêtre
+     est posée sur le jeu : c'est le cas du Terminal de la matrice, pas d'un jeu seul. À
+     instruire : un avis borné au rectangle englobant de la partie non visible (le kext le
+     connaît), ou 10 Hz. **Décision (11 h 45)** : 20 Hz gardé et installé (`disks/prebuilt`
+     mis à jour, les binaires d'avant dans `bench/ombre-0111/prebuilt-avant-ombre-3010.tar`) ;
+     l'avis borné est le prochain pas du chantier plugin (TODO), car il rendrait l'avis assez
+     bon marché pour suivre chaque échange. Les mesures mb-fen du PC prises à partir du 01/11
+     portent ce +6 % (Terminal posé par la matrice) ; les A/B restent valables, les deux bras
+     le payant. Non instruit : un tour d3-fen de vérification visuelle à 11 h 33 a donné
+     29,1 ms/image au lieu de ~80 (fenêtre de mesure tombée hors scène, sans vidage).
+     Captures après correctif (20 Hz) : Marble Blast, bande d'ombre = jeu courant assombri
+     sur toutes les captures ; DOOM 3 au chargement, bande noire traversée par « LOADING » et
+     sa barre, en continuité avec la partie visible ; plus d'image ancienne.
+  5. **Le M4** a le même code (chemin direct, kext, plugin) : il montre la même bande figée,
+     mais seulement quand l'image change beaucoup après le dernier dommage du WindowServer.
+     La vérification du 30/10 était faite sur une image stable. Il reçoit le correctif avec
+     le kext et le bundle (installation, puis **redémarrage** pour le kext).
+  Éliminés par la lecture du code : `QGPU_CAP_FIXED4` (`state_unit_one` couvre toutes les
+  unités ; le compositeur n'utilise que 0 et 1) ; `928a5f0` (ne touche que les programmes de
+  fragments, que le compositeur n'emploie pas) ; `packbits` (géométrie seulement, et la
+  bande garde son dégradé juste).
+
 - **30/10, PC x86-64 (13 h-19 h) : parité de Quartz Extreme.**
   1. **Construction et installation.** `build/` et `build-fast/` reconstruits (profil PGO
      pris sur une autre série : les fichiers de `tcg/0057`-`0058` sont compilés sans profil,

@@ -131,7 +131,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261101-packbits"
+#define POMPPC_PLUGIN_REV "20261101-ombre"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -17835,6 +17835,7 @@ static struct {
     int             pending;
     unsigned long   cid, wid, sid, n_post, n_merged;
     long            rect[4], h;
+    double          min_gap;            /* 01/11 : écart minimal demandé par l'avis en attente */
 } QN = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER };
 
 static void *qn_main(void *arg)
@@ -17851,13 +17852,20 @@ static void *qn_main(void *arg)
     for (;;) {
         unsigned long cid, wid, sid;
         long rect[4], h;
-        double t = now_s();
-        if (gap > 0.0 && t - last < gap)
-            usleep((useconds_t)((gap - (t - last)) * 1e6));
-        last = now_s();
+        double t, g;
+        /* attendre un avis, puis l'écart (le plus long des deux) depuis le
+           précédent ; c'est l'avis en attente au réveil, le plus récent,
+           qui part */
         pthread_mutex_lock(&QN.m);
         while (!QN.pending)
             pthread_cond_wait(&QN.cv, &QN.m);
+        g = QN.min_gap > gap ? QN.min_gap : gap;
+        pthread_mutex_unlock(&QN.m);
+        t = now_s();
+        if (g > 0.0 && t - last < g)
+            usleep((useconds_t)((g - (t - last)) * 1e6));
+        last = now_s();
+        pthread_mutex_lock(&QN.m);
         cid = QN.cid; wid = QN.wid; sid = QN.sid; h = QN.h;
         memcpy(rect, QN.rect, sizeof(rect));
         QN.pending = 0;
@@ -17869,7 +17877,7 @@ static void *qn_main(void *arg)
 
 /* 1 si l'avis est confié au fil (sinon : avis synchrone, comme avant). */
 static int qn_post(unsigned long cid, unsigned long wid, unsigned long sid,
-                   unsigned long w, unsigned long h)
+                   unsigned long w, unsigned long h, double min_gap)
 {
     static int off = -1;
     if (off < 0) {
@@ -17896,6 +17904,7 @@ static int qn_post(unsigned long cid, unsigned long wid, unsigned long sid,
     QN.n_merged += QN.pending;
     QN.n_post++;
     QN.cid = cid; QN.wid = wid; QN.sid = sid; QN.h = (long)h;
+    QN.min_gap = min_gap;
     QN.rect[0] = 0; QN.rect[1] = 0; QN.rect[2] = (long)w; QN.rect[3] = (long)h;
     QN.pending = 1;
     pthread_cond_signal(&QN.cv);
@@ -17909,22 +17918,57 @@ static int qn_post(unsigned long cid, unsigned long wid, unsigned long sid,
    retire et le remet). 1 si fait ; 0 : avis comme avant (région inconnue,
    vidage de preuve, kext ancien, POMPPC_GL_QE_DIRECT=0). Appelé hors de
    G.mu. */
+/* 01/11 : 2 si la surface est « non simple » (méthode 6 du kext) — sa
+   région visible ne la couvre pas toute : une ombre ou une fenêtre est posée
+   dessus. Le WindowServer compose lui-même ces zones depuis la texture
+   d'export, mais seulement quand on l'avise (glcDoNonSimpleFlush, comme le
+   GLDriver d'une carte) ; sans avis, la bande sous l'ombre du Terminal
+   gardait une image ancienne de DOOM 3 (01/11, 9 h 13).
+   POMPPC_GL_QE_NONSIMPLE=0 : jamais d'avis (comportement du 29/10). */
 static int qa_present(unsigned long sid)
 {
-    static int off = -1;
+    static int off = -1, m6 = -1;
     kern_return_t kr;
+    UInt32 ns = 0;
     if (off < 0) {
         const char *e = getenv("POMPPC_GL_QE_DIRECT");
         off = e && e[0] == '0';
+        e = getenv("POMPPC_GL_QE_NONSIMPLE");
+        m6 = !(e && e[0] == '0');
     }
     if (off || dump_first_frame != ~0UL || !qa_open())
         return 0;
+    if (m6) {
+        kr = IOConnectMethodScalarIScalarO(QA.conn, 6, 1, 1, (UInt32)sid, &ns);
+        if (kr == KERN_SUCCESS)
+            return ns ? 2 : 1;
+        if (kr == kIOReturnBusy)
+            return 0;
+        m6 = 0;                         /* kext sans méthode 6 : la 5 */
+    }
     kr = IOConnectMethodScalarIScalarO(QA.conn, 5, 1, 0, (UInt32)sid);
     if (kr == KERN_SUCCESS)
         return 1;
     if (kr != kIOReturnBusy)
         off = 1;                        /* kext sans méthode 5 : plus d'essai */
     return 0;
+}
+
+/* 01/11 : cadence des avis d'une surface non simple (POMPPC_GL_QE_NONSIMPLE_HZ,
+   défaut 20 ; 0 = celle de POMPPC_GL_QE_HZ). La zone que le WindowServer
+   compose (bande d'ombre) suit l'image à 50 ms près : à chaque échange
+   (60 Hz), Marble Blast en fenêtre sous le Terminal de la matrice prenait
+   +12,5 % (bench/tcg/ab/ombre-mb). Le fil des avis garde le DERNIER avis
+   en attente : la dernière image d'une rafale est toujours composée. */
+static double qa_nonsimple_gap(void)
+{
+    static double gap = -1.0;
+    if (gap < 0.0) {
+        const char *e = getenv("POMPPC_GL_QE_NONSIMPLE_HZ");
+        int hz = e && *e ? atoi(e) : 20;
+        gap = hz > 0 ? 1.0 / hz : 0.0;
+    }
+    return gap;
 }
 
 /* Fenêtre QE absente de la liste des fenêtres à l'écran (revue toutes les
@@ -19951,10 +19995,22 @@ void *pomppc_proc_pre(int slot, unsigned long *a)
            premier plan, CGSFlushSurface lui fait peindre le fond de la
            fenêtre (blanc) au lieu du Flush noyau — DOOM 3 clignotait au
            chargement derrière le Terminal avec un avis par seconde, et
-           restait blanc avec l'ancien chemin (relevé du 29/10). */
-        if (qa_present(sid))
-            return direct_noop;
-        if (qn_post(cid, wid, sid, sw, sh))
+           restait blanc avec l'ancien chemin (relevé du 29/10).
+           01/11 : ce blanc était la texture vide liée par le compositeur
+           (corrigé le 30/10, tex_bind_id) ; l'avis ne part plus que pour une
+           surface non simple, voir ci-dessous. */
+        {
+            int qp = qa_present(sid);
+            /* 01/11 : surface non simple (ombre, fenêtre posée dessus) — le
+               noyau a présenté la région visible ; l'avis fait recomposer au
+               WindowServer le reste (zone d'ombre) depuis la texture d'export.
+               Par le fil des avis seulement (cadencé, jamais d'attente ici). */
+            if (qp == 2)
+                qn_post(cid, wid, sid, sw, sh, qa_nonsimple_gap());
+            if (qp)
+                return direct_noop;
+        }
+        if (qn_post(cid, wid, sid, sw, sh, 0.0))
             return direct_noop;
         /* toute la surface, en repère GL : glcDoNonSimpleFlush en fait une
            région (sans rectangle, le serveur ne recompose pas une surface

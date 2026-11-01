@@ -89,10 +89,12 @@ L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
 
 - [ ] **[TCG — M4] Mesurer le M4 avant de l'optimiser, puis rattraper le PC.** Le M4 n'a pas
   de profil croisé depuis la parité du 25/10. Dans l'ordre :
-  1. **Rattrapage** : reconstruire `~/src/qemu` (`qgpu-core.c` du 31/10), reconstruire le plugin
-     dans la VM de dev (PACKBITS, bundle de HEAD) et l'installer, rejouer cmr-pe avec la fenêtre
-     en course (`6054367`, le M4 mesurait peut-être déjà la course : à vérifier sur ses
-     `frames.csv`), référence cmr à reprendre (faux reflet).
+  1. **Rattrapage** : reconstruire `~/src/qemu` (`qgpu-core.c` du 31/10), reconstruire **kext,
+     plugin et GA** dans la VM de dev (kext du 01/11 : méthode 6 ; plugin `20261101-ombre` :
+     PACKBITS + avis d'ombre), les installer puis **redémarrer l'invité**, rejouer cmr-pe avec la
+     fenêtre en course (`6054367`, le M4 mesurait peut-être déjà la course : à vérifier sur ses
+     `frames.csv`), référence cmr à reprendre (faux reflet). Liste détaillée :
+     `docs/etat-des-hotes.md` §4, « Venu du PC le 01/11 ».
   2. **Profil croisé des 5 jeux** (`sample` du processus QEMU, fils vCPU et `qgpu-render`,
      comme `tools/re/perfpart.py` sur le PC) : part du JIT, recherche de blocs, `mftb`,
      helpers, et **part du fil de rendu hôte** ; sur d3, si `qgpu-render` approche les 29 ms
@@ -108,12 +110,20 @@ L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
 
 Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête.
 
-- [ ] **[Système — QE] Bande d'ancien jeu sous l'ombre du Terminal (PC, 01/11)** : DOOM 3 en
-  fenêtre au chargement (fenêtre noire), Terminal posé dessus, une bande d'une ancienne image
-  du jeu sous le bord droit de l'ombre. Variante « ancien jeu » du bug corrigé le 30/10 sur le
-  M4 (`9b5431a`, `tex_bind_id`). Pistes : texture d'export périmée sous QE direct, chemin
-  `FIXED4` du PC, `qgpu-core.c` du 31/10. **En diagnostic (agent) ; fermeture :** cause
-  prouvée, reproduction avant/après, matrice en fenêtre verte, journal `docs/quartz-extreme.md`.
+- [x] **[Système — QE] Bande d'ancien jeu sous l'ombre du Terminal (PC, 01/11) : corrigé.**
+  Cause : sur le chemin direct le jeu présente par le noyau sans aviser le WindowServer, qui ne
+  recompose la zone d'ombre qu'à ses propres dommages (pas le défaut du 30/10). Kext méthode 6
+  + plugin `20261101-ombre` (avis cadencé 20 Hz), prouvé avant/après sur mb et DOOM 3 au
+  chargement, `docs/quartz-extreme.md` journal du 01/11. **Reste :**
+  - [ ] **M4** : réinstaller kext et bundle, redémarrer, vérifier la bande (même code, même
+    défaut, visible quand l'image change beaucoup après le dernier dommage du WindowServer).
+  - [ ] **Avis borné** : le coût (mb-fen +6 % quand une fenêtre est posée sur le jeu, la
+    matrice y pose toujours son Terminal) vient d'un avis sur toute la surface ; le kext
+    connaît le rectangle englobant de la partie non visible : le renvoyer par la méthode 6 et
+    n'aviser que lui, puis remonter la cadence. Fermeture : mb-fen sous fenêtre posée au niveau
+    de `POMPPC_GL_QE_NONSIMPLE=0`, bande toujours juste.
+  - [ ] Une cellule de preuve verte de la matrice en fenêtre avec le nouveau kext (les tours du
+    01/11 étaient `--sans-vidage`).
 
 - [ ] **[Jeux] Performances selon la résolution** — gros ralentissements signalés par
   l'utilisateur dans **Colin McRae en 1920 × 1080** (27/10 ; sur le M4 la cellule y est à +11 %
@@ -289,7 +299,7 @@ L'état exact de chaque hôte (binaires, défauts allumés, plugin installé, VM
 | Protocole / ABI | GL **v22**, transport kext **v19** ; capacités ajoutées sans changer de version (`TEX_PRESENT`, `TEX_READBACK_ROWS`, …) |
 | QEMU | 11.1.2 + série `patches/` ; PC : `~/src/qemu/build-fast` (PGO, -O3, -march=native, réentraîné le 01/11 avec cmr, A/B en cours) et `build/` (référence) ; M4 : `~/src/qemu/build` (à reconstruire avec `qgpu-core.c` du 31/10) |
 | Défauts TCG | PC : série jusqu'à `0056` (zone froide) ; M4 : série du PC jusqu'à `0052` + `0054` ; `0057`-`0063` éteints, non nommés |
-| Invité | Tiger 10.4.11, kext du 30/10 (curseur QE), plugin `20261101-packbits` sur le PC (`disks/prebuilt`), `20261023-uvwon` + QE (`f01d2d7`) sur le M4 |
+| Invité | Tiger 10.4.11 ; PC : kext du 01/11 (méthode 6, surface non simple) et plugin `20261101-ombre` (`disks/prebuilt`) ; M4 : kext du 30/10, plugin `20261023-uvwon` + QE (`f01d2d7`), à mettre à niveau (kext → redémarrage) |
 | Matrice | PC : `references-linux.csv`, 5 cellules automatisées (mb, zen, ut, d3 en fenêtre, cmr plein écran **en course** depuis `6054367`) ; M4 : `references.csv` (jamais touché par le PC), 17/17 vertes le 28/10 |
 | Tests natifs | PC 240 OK / 0 échec (07/10), M4 287 OK / 0 échec (27/10) |
 

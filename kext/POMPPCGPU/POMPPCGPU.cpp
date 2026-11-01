@@ -1915,7 +1915,7 @@ IOReturn POMPPCAccelerator::flushSurface(UInt32 sid, IOFramebuffer * fb,
         return kIOReturnNoMemory;
     }
     IOLockLock(l);
-    r = flushSurfaceLocked(sid, fb, bounds, rects, nrects, false);
+    r = flushSurfaceLocked(sid, fb, bounds, rects, nrects, false, 0);
     IOLockUnlock(l);
     return r;
 }
@@ -1976,13 +1976,18 @@ void POMPPCAccelerator::dropSurfaceShape(void * client)
 }
 
 /* Méthode 5 : le jeu présente son échange lui-même (P3) — un appel noyau au
-   lieu de jeu → WindowServer → noyau à chaque image. */
-IOReturn POMPPCAccelerator::presentSurface(UInt32 sid)
+   lieu de jeu → WindowServer → noyau à chaque image. Méthode 6 (01/11) : la
+   même, qui dit en plus si la région visible laisse une partie de la surface
+   au compositeur (`nonsimple`, voir POMPPC_GA_PRESENT2). */
+IOReturn POMPPCAccelerator::presentSurface(UInt32 sid, UInt32 * nonsimple)
 {
     IOLock * l = lock();
     IOReturn r = kIOReturnBusy;
     int      i;
 
+    if (nonsimple) {
+        *nonsimple = 0;
+    }
     if (!l) {
         return kIOReturnNoMemory;
     }
@@ -1990,7 +1995,8 @@ IOReturn POMPPCAccelerator::presentSurface(UInt32 sid)
     for (i = 0; i < POMPPC_MAX_EXPORTS; i++) {
         Shape * sh = &fShapes[i];
         if (sh->client && sh->sid == sid && sh->fb && sh->nrects) {
-            r = flushSurfaceLocked(sid, sh->fb, &sh->bounds, sh->rects, sh->nrects, true);
+            r = flushSurfaceLocked(sid, sh->fb, &sh->bounds, sh->rects, sh->nrects, true,
+                                   nonsimple);
             break;
         }
     }
@@ -2045,7 +2051,7 @@ static int carveRect(const POMPPCQERect * r, const IOGBounds * c, POMPPCQERect *
 IOReturn POMPPCAccelerator::flushSurfaceLocked(UInt32 sid, IOFramebuffer * fb,
                                                const IOAccelBounds * bounds,
                                                const IOAccelBounds * rects, UInt32 nrects,
-                                               bool direct)
+                                               bool direct, UInt32 * nonsimple)
 {
     POMPPCGPU *        gpu = OSDynamicCast(POMPPCGPU, getProvider());
     POMPPCExport *     e = 0;
@@ -2101,6 +2107,29 @@ IOReturn POMPPCAccelerator::flushSurfaceLocked(UInt32 sid, IOFramebuffer * fb,
         }
         vis[nvis].x0 = x0; vis[nvis].y0 = y0; vis[nvis].x1 = x1; vis[nvis].y1 = y1;
         nvis++;
+    }
+    /* 01/11 : surface « non simple » — la région visible (rectangles disjoints
+       du SetShape) ne couvre pas toute la partie à l'écran de la surface. Le
+       WindowServer s'y est réservé des zones (ombre d'une fenêtre posée
+       dessus, fenêtre translucide) qu'il compose lui-même, texture d'export
+       du jeu sous l'ombre. Sans avis, il ne les recompose qu'à ses propres
+       dommages : la bande sous l'ombre gardait une image ancienne du jeu
+       (DOOM 3 au chargement, 01/11). Le jeu l'avise alors (méthode 6). */
+    if (nonsimple) {
+        SInt32 bx0 = bounds->x, by0 = bounds->y;
+        SInt32 bx1 = bx0 + (SInt32) e->w, by1 = by0 + (SInt32) e->h;
+        UInt32 area = 0, cover = 0;
+        if (bx0 < 0) bx0 = 0;
+        if (by0 < 0) by0 = 0;
+        if (bx1 > (SInt32) pix.activeWidth) bx1 = (SInt32) pix.activeWidth;
+        if (by1 > (SInt32) pix.activeHeight) by1 = (SInt32) pix.activeHeight;
+        if (bx1 > bx0 && by1 > by0) {
+            area = (UInt32) (bx1 - bx0) * (UInt32) (by1 - by0);
+        }
+        for (i = 0; i < nvis; i++) {
+            cover += (UInt32) (vis[i].x1 - vis[i].x0) * (UInt32) (vis[i].y1 - vis[i].y0);
+        }
+        *nonsimple = cover < area;
     }
     if (!nvis) {
         return kIOReturnSuccess;
@@ -2529,16 +2558,17 @@ IOReturn POMPPCGAClient::clientMemoryForType(UInt32 type, IOOptionBits * options
 IOExternalMethod * POMPPCGAClient::getTargetAndMethodForIndex(IOService ** target,
                                                               UInt32 index)
 {
-    static const IOExternalMethod methods[6] = {
+    static const IOExternalMethod methods[7] = {
         { 0, (IOMethod) &POMPPCGAClient::gaGetInfo, kIOUCScalarIScalarO, 0, 4 },
         { 0, (IOMethod) &POMPPCGAClient::gaSurfBounds, kIOUCScalarIScalarO, 1, 4 },
         { 0, (IOMethod) &POMPPCGAClient::gaExport, kIOUCScalarIScalarO, 6, 0 },
         { 0, (IOMethod) &POMPPCGAClient::gaLookup, kIOUCScalarIScalarO, 1, 4 },
         { 0, (IOMethod) &POMPPCGAClient::gaSurfPos, kIOUCScalarIScalarO, 1, 2 },
         { 0, (IOMethod) &POMPPCGAClient::gaPresent, kIOUCScalarIScalarO, 1, 0 },
+        { 0, (IOMethod) &POMPPCGAClient::gaPresent2, kIOUCScalarIScalarO, 1, 1 },
     };
 
-    if (index > POMPPC_GA_PRESENT) {
+    if (index > POMPPC_GA_PRESENT2) {
         return 0;
     }
     *target = this;
@@ -2568,7 +2598,14 @@ IOReturn POMPPCGAClient::gaSurfPos(UInt32 sid, UInt32 * x, UInt32 * y, void *, v
 IOReturn POMPPCGAClient::gaPresent(UInt32 sid, void *, void *, void *, void *, void *)
 {
     POMPPCAccelerator * accel = OSDynamicCast(POMPPCAccelerator, getProvider());
-    return accel ? accel->presentSurface(sid) : kIOReturnNotAttached;
+    return accel ? accel->presentSurface(sid, 0) : kIOReturnNotAttached;
+}
+
+IOReturn POMPPCGAClient::gaPresent2(UInt32 sid, UInt32 * nonsimple, void *, void *, void *,
+                                    void *)
+{
+    POMPPCAccelerator * accel = OSDynamicCast(POMPPCAccelerator, getProvider());
+    return accel ? accel->presentSurface(sid, nonsimple) : kIOReturnNotAttached;
 }
 
 IOReturn POMPPCGAClient::gaSurfBounds(UInt32 id, UInt32 * x, UInt32 * y, UInt32 * w,

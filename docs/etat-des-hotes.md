@@ -34,7 +34,25 @@ Au début d'une séance :
 - Les commits vont sur `main` puis sont poussés. Un essai non retenu est rangé sous une
   étiquette `archive/*`.
 
-## 2. PC x86-64 : état au 01/11/2026, 10 h 10 (VM quotidienne relancée sur le binaire rapide ; bug de l'ombre QE en diagnostic par un agent)
+## 2. PC x86-64 : état au 01/11/2026, 12 h (fin de séance PC ; VM quotidienne relancée sur le binaire rapide avec le kext et le plugin du 01/11)
+
+**Fait le 01/11 en matinée** (séance close vers 12 h, la suite se fait sur le M4)
+- **Bug de l'ombre QE corrigé** (agent Opus, `docs/quartz-extreme.md` journal du 01/11,
+  CHANGELOG) : la bande d'ancien jeu sous l'ombre du Terminal venait du chemin direct, qui
+  n'avisait plus le WindowServer ; kext **méthode 6** (`POMPPC_GA_PRESENT2`) + plugin
+  `20261101-ombre` (avis cadencé 20 Hz). Prouvé avant/après sur mb et DOOM 3 au chargement ;
+  plugmd5 69 scènes 0 écart. Coût seulement sous une fenêtre posée : mb-fen +6,2 %, d3 +0,9 %.
+  Installés dans la VM quotidienne (anciens dans `/var/tmp/avant-ombre/` de l'invité) et dans
+  `disks/prebuilt` (anciens dans `bench/ombre-0111/prebuilt-avant-ombre-3010.tar`). **Le M4 doit
+  réinstaller kext et bundle puis redémarrer.** Suite : avis borné au rectangle non visible (TODO).
+- **Frontal ImGuiDock : double curseur corrigé** (`50a9801`, agent Opus) : curseur de l'hôte
+  masqué au-dessus de l'image en souris absolue. Reconstruit, tests OK ; **à voir à l'œil au
+  prochain `run_tiger.sh`** (un seul curseur sur l'image, flèche de retour sur les menus).
+- Référence cmr-pe du PC validée à l'œil (image de course propre, `references-linux.csv`).
+- PGO réentraîné avec cmr : neutre en fenêtre, cmr non prouvé (mesure polluée) ; ancien profil
+  en production, nouveau dans `~/src/qemu/build-fast-pgo0111cmr/` (`e1eebc2`).
+- `~/src/qemu-jcp/` et `~/src/qemu-bat/` : **à effacer à la main** (1,4 Gio ; la suppression
+  a été refusée à l'agent) : `rm -rf ~/src/qemu-jcp ~/src/qemu-bat`. `qemu-nuit` contient 0060-0063.
 
 **Fait dans la nuit du 31/10 au 01/11** (objectif de l'utilisateur : vitesse x86 jusqu'à 7 h)
 - **Fenêtre de cmr** : depuis le 28/10, le PC mesurait une transition d'avant la course, pas la
@@ -62,9 +80,9 @@ Au début d'une séance :
 **Vitesse** (binaire rapide, plugin packbits) : DOOM 3 ~78-80 ms/image en fenêtre, Colin McRae
 ~82 ms/image **en course** (plein écran).
 
-**À faire sur le PC, dans l'ordre**
-0. Valider la référence cmr-pe (`matrice.py --valider cmr-pe`), regarder les captures de
-   `bench/tcg/ab/cmr-res-3110/`.
+**À faire sur le PC, dans l'ordre** (au retour du M4)
+0. Vérifier à l'œil le curseur unique du frontal et la bande d'ombre avec le kext du 01/11 ;
+   une cellule de preuve verte de la matrice en fenêtre (les tours du 01/11 étaient sans vidage).
 1. PGO avec cmr : réentraîné le 01/11 (7 h-8 h 20) ; A/B neuf contre ancien neutre en fenêtre,
    cmr +6 % sur 2 parties (une polluée par mes dépouillements de profils, charge 3,1 ; une
    quittée `exit 138`) : **ancien binaire remis** (`build-fast`), nouveau dans
@@ -80,7 +98,8 @@ Au début d'une séance :
    ut +3,7 %, 2 parties) : à rejouer à 3 parties si le témoin innocente 0063.
 4. x8 (0060) : la seule perte propre à cmr qui reste ; à instruire après le point 1.
 5. Base de temps en ligne (`mftb` sans helper), gain modeste attendu.
-6. Effacer `~/src/qemu-jcp/` et `~/src/qemu-bat/` (0060-0062 tranchés, `qemu-nuit` les contient).
+6. Avis borné pour les surfaces non simples (TODO, chantier plugin) : ramener mb-fen sous
+   fenêtre posée au niveau d'avant.
 
 
 ## 2 bis. PC x86-64 : état au 31/10/2026, 23 h
@@ -303,6 +322,27 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
 `references.csv`).
 
 ## 4. À faire en passant d'un hôte à l'autre
+
+- **Venu du PC le 01/11 (pour le M4), dans l'ordre** — remplace les deux entrées suivantes,
+  qu'il englobe :
+  1. `git pull` ; **reconstruire QEMU** (`qgpu-core.c` du 31/10 : reflets de cmr) ; ni le
+     protocole ni l'ABI n'ont changé.
+  2. Dans la VM de dev du M4 : **reconstruire kext, plugin et GA** depuis HEAD (kext du 01/11
+     avec la méthode 6 ; plugin `20261101-ombre` qui contient aussi PACKBITS et UVWIDE),
+     `install.sh` sans `QE`, puis **redémarrer l'invité**. Les kext du 30/10 (curseur immobile)
+     et plugins du 30/10 (`pomppc_qe_same`, `tex_bind_id`) y sont inclus.
+  3. À l'œil : bande sous l'ombre du Terminal sur un jeu en fenêtre pendant qu'il change
+     (DOOM 3 au chargement, Marble Blast), curseur net en plein écran, reflets de carrosserie
+     de cmr.
+  4. A/B au repos, ancien bundle contre nouveau : mb-fen, mb-pe, cmr-pe et d3-fen au moins
+     (PACKBITS attendu −1 à −4 % ; l'avis d'ombre coûte sur mb-fen seulement quand une fenêtre
+     est posée sur le jeu, +6 % sur le PC) ; cmr-pe rejoué avec la fenêtre de mesure **en
+     course** (`6054367`) et sa référence reprise si elle porte le faux reflet. `references.csv`
+     du M4 ne se touche que là-bas.
+  5. Profil croisé des cinq jeux avec `sample` (part du JIT, recherche de blocs, helpers, et
+     part du fil `qgpu-render` sur d3) : c'est lui qui ordonne les leviers du M4 (TODO,
+     chantier M4). Puis `tcg/0058` limité aux délais courts, zone froide en dernier.
+  6. Une tranche d'endurance avec le nouveau kext, puis cette page.
 
 - **Venu du PC le 31/10 (pour le M4)** : `patches/qgpu/qgpu-core.c` a changé (reflets de la
   carrosserie de cmr, `docs/re/cmr-rendu-vers-texture.md` §7) : **reconstruire QEMU**, puis
