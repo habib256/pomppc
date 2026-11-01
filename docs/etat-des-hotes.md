@@ -63,7 +63,18 @@ cette liste ; la séance suivante se fait sur le M4)
 - **`POMPPC_GL_PRESENTQ` rouvert** (demande de l'utilisateur) : A/B au repos en plein écran
   lancé à 13 h 28 (`bench/tcg/ab/presentq-0111-{cmr,mb,ut}`, 3 parties par bras), **en cours** ;
   verdict et suite dans `TODO.md` (« Ensuite », PRESENTQ). Code de l'invité : s'il est allumé,
-  le M4 le reçoit avec le bundle.
+  le M4 le reçoit avec le bundle. **La chaîne continue sans surveillance après le départ de
+  l'utilisateur (14 h 20)** : `bench/tcg/ab/presentq-0111-chaine.sh` enchaîne cmr, mb puis ut
+  en plein écran et finit par `matab.sh --restore` (VM quotidienne relancée) et la ligne
+  `CHAINE-FINIE` dans `presentq-0111-chaine.log`. **Au retour sur le PC** : lire les trois
+  `bilan.txt`, trancher PRESENTQ (règle dans le TODO), noter ici et dans `plugin-allegement.md`.
+  Si le PC a été éteint avant la fin, les parties jouées sont dans les dossiers ; rejouer le
+  reste au repos.
+- **Dérive de documentation nettoyée en deux passes** (huit agents Opus, `633c444`, `634797b`) :
+  voir les messages de commit ; questions laissées ouvertes dans le TODO et les notes datées.
+- **Branche `worktree-agent-a15011a76631abd6f` (x-tb-head) non fusionnée** : elle ajoute un
+  second patch numéroté 0051 (`0051-tcg-tb-head.patch`, à côté de `0051-ppc-lfs-known`) et
+  modifie `build_qemu_qfb.sh` ; à renuméroter et à mesurer en jeu avant toute fusion.
 
 **Fait dans la nuit du 31/10 au 01/11** (objectif de l'utilisateur : vitesse x86 jusqu'à 7 h)
 - **Fenêtre de cmr** : depuis le 28/10, le PC mesurait une transition d'avant la course, pas la
