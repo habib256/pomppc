@@ -158,7 +158,8 @@ static std::vector<std::string> listCdImages(const std::string& root) {
 }
 
 // Build a config for a given launcher (shared env). `sound`/`pad` enable the
-// engine layer's existing PulseAudio Screamer + usb-host gamepad passthrough.
+// engine layer's existing Screamer sound (PulseAudio on Linux, CoreAudio on
+// macOS) + usb-host gamepad passthrough.
 static QemuBridge::Config makeConfig(const std::string& launcher,
                                      const std::string& runtimeDir, bool sound,
                                      bool pad) {
@@ -177,9 +178,10 @@ static QemuBridge::Config makeConfig(const std::string& launcher,
 // souris et le vrai clavier : raccourcis, rectangle dessiné, pont D-Bus) et
 // prend des captures au bon moment, sans les droits d'Accessibilité qu'un
 // clic synthétique macOS exige. Étapes séparées par ';' :
-//   wait <s> | move <x> <y> | click <x> <y> (points fenêtre) | fs (Ctrl+Cmd+F)
-//   | f11 | esc | type <texte: a-z 0-9 espace .> | enter
-//   | shot <fichier.png> (screencapture -x) | quit
+//   wait <s> | move <x> <y> | click <x> <y> (points fenêtre)
+//   | guestmove <x> <y> (fractions 0-1 de la vue dessinée, sans clic)
+//   | fs (Ctrl+Cmd+F) | altenter | f11 | esc | type <texte: a-z 0-9 espace .>
+//   | enter | shot <fichier.png> (screencapture -x, hôte macOS) | quit
 struct ProbeStep { std::string op; std::string arg; float x = 0, y = 0; };
 static std::vector<ProbeStep> parseProbe(const char* s) {
     std::vector<ProbeStep> out;
@@ -374,7 +376,7 @@ int main(int argc, char** argv) {
     // l'OS retenu à l'arrêt précédent.
     std::string curLauncher = defLauncher;   // boots Mac OS 9 by default
     if (argc <= 1 && fe.os == "tiger" && fs::exists(tigerSh)) curLauncher = tigerSh;
-    bool sound = fe.sound;  // on by default (PulseAudio Screamer); RAM capped ≤768
+    bool sound = fe.sound;  // on by default (Screamer; pa or coreaudio); RAM capped ≤768
     bool pad = fe.pad;      // usb-host passthrough; the run script self-guards
     auto bridge = std::make_unique<QemuBridge>();
     std::string err;

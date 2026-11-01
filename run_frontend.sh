@@ -29,5 +29,6 @@ if [ ! -x "$BIN" ]; then
 fi
 
 # sans argument, le frontend cherche run_os9.sh deux niveaux au-dessus de lui : faux depuis bin/
+# (conséquence : l'OS retenu dans .run/imguidock.conf ne vaut que pour pomppc lancé sans argument)
 [ $# -eq 0 ] && set -- "$ROOT/run_os9.sh"
 exec "$BIN" "$@"

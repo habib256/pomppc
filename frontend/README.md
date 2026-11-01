@@ -42,11 +42,17 @@ preprocessed `dbus/dbus-display1.xml` (copied from our QEMU 9.2 tree; the 11.1 i
 ```sh
 ../run_tiger.sh                    # Tiger in ImGuiDock, maximum tested optimizations
 POMPPC_FRONTEND=native ../run_tiger.sh  # native QEMU window for diagnostics
-../run_frontend.sh                 # from anywhere in the repo (same binary, resolved path)
-./build/pomppc                     # boots Mac OS 9 (../run_os9.sh) by default
+../run_frontend.sh                 # from anywhere in the repo; no argument = ../run_os9.sh
+./build/pomppc                     # Mac OS 9 (../run_os9.sh), or the OS kept in .run/imguidock.conf
 ./build/pomppc ../run_tiger.sh     # boot Mac OS X 10.4 instead
 RES=1024x768x32 ./build/pomppc     # pick the guest resolution (SMP=N works too)
 ```
+
+`run_frontend.sh` takes `frontend/build/pomppc` (or `bin/pomppc` in the published package),
+rebuilds it first (`setup.sh` + cmake) when a file of `src/`, `CMakeLists.txt` or `setup.sh` is
+newer than the binary (on failure it warns and launches the old one), and always passes a
+launcher — `run_os9.sh` when given none — so the OS kept in `.run/imguidock.conf` only applies
+to `./build/pomppc` started without an argument.
 
 The window title shows the version of the QEMU actually launched, read from its QMP
 greeting (`POMPPC — PowerPC Macintosh (QEMU 11.1.2)`), so a `QEMU_BIN` pointing at
@@ -65,8 +71,11 @@ works from any working directory; an explicit argument is taken relative to your
 `SMP` are forwarded to whichever run script is launched, and the **OS** menu switches guests at
 runtime (each switch relaunches QEMU).
 
-Tiger's launcher delegates to this frontend before taking its disk lock.
-The bridge's `DBUS_DISPLAY=1` then selects QEMU directly, without recursion.
+Tiger's launcher delegates to this frontend (`exec run_frontend.sh run_tiger.sh`) before
+taking its disk lock, after checking the QEMU version, unless `POMPPC_FRONTEND=native`,
+`HEADLESS`, `POMPPC_DISPLAY` or `DBUS_DISPLAY` is set (any other `POMPPC_FRONTEND` value
+than `imgui`/`native` stops it). The bridge's `DBUS_DISPLAY=1` (plus `QMP_SOCK`) then
+selects QEMU directly, without recursion.
 Tiger enables the tested CPU/TCG optimizations, GPU copies and GLSL by default;
 explicit environment overrides (including `0`) are preserved. The headless and
 explicit native-display paths remain available for automation.
@@ -137,8 +146,9 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   native size (`glfwSetWindowMonitor`), menus and panels hidden, guest only, 4:3 guest on a
   16:9 screen = 1440×1080 between two 240-px bands on 1920×1080. **Same shortcut (Alt+Enter, F11 or Ctrl+Cmd+F)**
   goes back to the window at its previous size and position. ImGuiDock always starts in a
-  window (since 26/10/2026, the full screen of the previous session is not restored). These keys are not sent to the
-  guest. **Escape is always forwarded to the guest**, including in full screen,
+  window (since 26/10/2026, the full screen of the previous session is not restored). These keys
+  (Enter, F, F11) are not sent to the guest; the modifiers held with them (Alt, Ctrl, Cmd) are,
+  as ordinary keys. **Escape is always forwarded to the guest**, including in full screen,
   so games can open their menus without releasing capture. On macOS, GLFW's own *Window ▸ Enter Full Screen*
   (which owns Ctrl+Cmd+F and opens a Spaces full screen) is unbound, and the window's native
   full-screen behaviour is disabled — the green button zooms instead.
@@ -161,7 +171,7 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   **Updated policy:** host full screen always selects the relative USB mouse,
   captures/hides the host cursor and uses unbounded motion (raw motion when
   supported), suitable for Doom 3. Returning to windowed mode restores the
-  tablet preference. F11 or Ctrl+Cmd+F exits host full screen and releases capture;
+  tablet preference. Alt+Enter, F11 or Ctrl+Cmd+F exits host full screen and releases capture;
   loss of focus also releases capture. Escape stays in the game. The earlier absolute full-screen measurements above are
   historical; absolute input is no longer used in full screen.
 - **Single cursor (01/11/2026):** while the pointer is sent in absolute mode, the host cursor
@@ -184,7 +194,7 @@ f11; wait 2; shot /tmp/win.png; quit" ./build/pomppc ../run_os9.sh
 Steps: `wait <s>`, `move|click <x> <y>` (window points),
 `guestmove <x> <y>` (fractions 0–1 of the drawn guest view, without clicks),
 `fs` (Ctrl+Cmd+F), `altenter`, `f11`, `esc`,
-`type <a-z 0-9 space .>`, `enter`, `shot <png>`, `quit`.
+`type <a-z 0-9 space .>`, `enter`, `shot <png>` (`screencapture -x`, so macOS host only), `quit`.
 
 The headless probe defaults to the *other* guest, and always runs `-snapshot`:
 
@@ -209,8 +219,9 @@ The headless probe defaults to the *other* guest, and always runs `-snapshot`:
     (`ScanoutMap`) and only reports dirty rects (`UpdateMap`) — no pixels on
     the bus. Silently falls back to inline `Scanout`/`Update` for
     non-shareable surfaces. Verified: mac99 surfaces are shareable.
-  - ✅ **Son / Manette** (Périphériques menu): both **on by default** (PulseAudio
-    Screamer output + `usb-host` gamepad passthrough); toggling relaunches QEMU.
+  - ✅ **Son / Manette** (Périphériques menu): both **on by default** (Screamer output
+    through PulseAudio on Linux, CoreAudio on macOS — the menu item still says « Son (PulseAudio) »
+    — + `usb-host` gamepad passthrough); toggling relaunches QEMU.
     The run scripts self-guard (no device → skipped).
   - ✅ **Clipboard peer** (`org.qemu.Display1.Clipboard`): we export our
     skeleton + a proxy on the main connection, `Register()`, and bridge the

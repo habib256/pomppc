@@ -1,6 +1,7 @@
 # Audio Tiger : profil stable
 
-Le carillon ImGuiDock est lu directement par macOS. Il ne mesure pas la stabilité
+Le carillon ImGuiDock est lu directement par l'hôte (NSSound sur macOS, PulseAudio sur
+Linux depuis `StartupChimeLinux.cpp`). Il ne mesure pas la stabilité
 du son de Tiger, qui passe par le périphérique Screamer, les DMA/IRQ PowerPC,
 le mélangeur QEMU puis CoreAudio.
 
