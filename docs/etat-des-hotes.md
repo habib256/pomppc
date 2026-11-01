@@ -191,7 +191,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 02/11/2026, 2 h 00 (variante 0058 préparée ; arrêt prévu à 6 h 40)
+## 3. Mac M4 : état au 02/11/2026, 2 h 00 (A/B 0058 en cours ; arrêt prévu à 6 h 40)
 
 **Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
 6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
@@ -294,6 +294,11 @@ des anciennes références**.
   Binaire SHA-256 `8568ff593add448f6fbedf719213ab54aa58795291b09bec6cb9c0c9c6997da6`.
   Contrôle général : 405 OK, mêmes 49 signalements ShellCheck préexistants, 5 ignorés
   (`.run/tests-pollns-court-0211.log`).
+- **A/B 0058 lancé à 2 h 00**, `m4-pollns-0211-{fen,pe}` : trois bras ref=0,
+  tout=1, court=2, trois parties par bras, mb/zen/ut/d3 fen puis cmr pe. Profil hôte
+  10 s après chaque fenêtre, pour comparer notamment UT sans peser sur sa mesure.
+  Même barrière stricte et relevé de charge que le rattrapage ; provenance et pilotage
+  conservés dans `bench/tcg/ab/pilotage-pollns-0211/`, journal `.run/pollns-0211.log`.
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
 - **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`
